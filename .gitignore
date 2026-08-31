@@ -12,3 +12,6 @@
 sdk/fixtures/out/
 .DS_Store
 *.exe.manifest
+qemu-*.log
+logo*.ppm
+logo*.png
