@@ -6,6 +6,8 @@
 /kernel/src/user_test.bin
 /sdk/build/
 /sdk/user/user_test.elf
+/sdk/win/kernel32.lib
+/sdk/win/hello_win.exe
 *.run
 sdk/fixtures/out/
 .DS_Store
