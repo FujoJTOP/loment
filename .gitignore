@@ -1,0 +1,9 @@
+/target
+/kernel/target
+/kernel/fujo-kernel.bin
+/kernel/boot_blob.bin
+/sdk/build/
+*.run
+sdk/fixtures/out/
+.DS_Store
+*.exe.manifest
