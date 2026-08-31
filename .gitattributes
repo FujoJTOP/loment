@@ -1,0 +1,35 @@
+# Force LF for all text files: the kernel feeds raw source strings to the
+# LLVM integrated assembler, and CRLF line endings inside global_asm! blocks
+# make LLVM reject ELF directives (.type/.size) with "expected absolute
+# expression" / "unknown directive" (M9 DEV 记录).
+* text=auto
+*.rs   text eol=lf
+*.md   text eol=lf
+*.py   text eol=lf
+*.ps1  text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.toml text eol=lf
+*.ld   text eol=lf
+*.s    text eol=lf
+*.S    text eol=lf
+*.asm  text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+# binary artifacts — never convert, never diff as text
+*.bin   binary
+*.exe   binary
+*.dll   binary
+*.elf   binary
+*.o     binary
+*.a     binary
+*.run   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.bmp   binary
