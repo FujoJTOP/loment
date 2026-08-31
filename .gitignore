@@ -2,7 +2,10 @@
 /kernel/target
 /kernel/fujo-kernel.bin
 /kernel/boot_blob.bin
+/kernel/qemu*.log
+/kernel/src/user_test.bin
 /sdk/build/
+/sdk/user/user_test.elf
 *.run
 sdk/fixtures/out/
 .DS_Store
