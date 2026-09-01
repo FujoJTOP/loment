@@ -20,3 +20,5 @@ logo*.png
 .m7*.log
 
 .m78-ci.json
+
+.one-*.log
