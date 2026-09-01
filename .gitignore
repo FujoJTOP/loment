@@ -15,3 +15,6 @@ sdk/fixtures/out/
 qemu-*.log
 logo*.ppm
 logo*.png
+
+.m6*.log
+.m7*.log
