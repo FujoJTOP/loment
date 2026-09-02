@@ -47,3 +47,5 @@ sdk/busybox-musl
 # python 运行时产物
 __pycache__/
 *.pyc
+
+*.log
