@@ -42,3 +42,6 @@ sdk/busybox-musl
 # W10 蒸馏生成物 (tools/distill_rules.py 重建; 训练数据/保真度曲线入库)
 /sdk/rulebook/fjru.bin
 /sdk/rulebook/rulebook.h
+# python 运行时产物
+__pycache__/
+*.pyc
