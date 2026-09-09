@@ -1,0 +1,104 @@
+{
+  "potato": "v1",
+  "unit": "toolchain",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "fib",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "gcd",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "popcount",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "test_fib",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_gcd",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_popcount",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_fail_case",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "bench_fib",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "bench_popcount",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "cov_main",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

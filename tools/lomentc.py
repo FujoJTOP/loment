@@ -2752,7 +2752,10 @@ class _Ir:
     """结构化发射: alloca/load/store + 基本块; 优化交给 clang (docs/144 §3)。"""
 
     def __init__(self, funcs: dict, consts: dict, f: Func,
-                 structs: dict | None = None, enums: dict | None = None):
+                 structs: dict | None = None, enums: dict | None = None,
+                 coverage: bool = False, cov_counter: list | None = None,
+                 dbg_scope: int | None = None, dbg_lines: dict | None = None,
+                 dbg_meta: list | None = None):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -2762,6 +2765,39 @@ class _Ir:
         self.vars: dict[str, tuple[str, str]] = {}  # 名 -> (loment 类型, alloca)
         self.globals: list[str] = []                # 字符串常量等模块级声明
         self.terminated = False
+        self.coverage = coverage                    # M63: IR 级块覆盖
+        self.cov_counter = cov_counter if cov_counter is not None else [0]
+        self.cov_ids: list[int] = []
+        self.dbg_scope = dbg_scope                  # M59: 本函数的 DISubprogram
+        self.dbg_lines = dbg_lines if dbg_lines is not None else {}
+        self.dbg_meta = dbg_meta                    # M59: 共享元数据行
+        self.dbg_loc: int | None = None             # 当前语句的 DILocation
+
+    def dbg_for(self, line: int) -> int | None:
+        """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
+        if self.dbg_scope is None or self.dbg_meta is None:
+            return None
+        if line not in self.dbg_lines:
+            i = len(self.dbg_meta)
+            self.dbg_meta.append(
+                f"!{i} = !DILocation(line: {line}, column: 1, scope: !{self.dbg_scope})")
+            self.dbg_lines[line] = i
+        return self.dbg_lines[line]
+
+    def cov_hit(self) -> None:
+        """M63: 在每个基本块开头对 @__loment_cov[块号] 加一。"""
+        if not self.coverage:
+            return
+        idx = self.cov_counter[0]
+        self.cov_counter[0] += 1
+        self.cov_ids.append(idx)
+        if idx >= 256:
+            raise LomError(self.f.line, 1, "覆盖计数块数超过 256 (M63 上限)")
+        g, v, n = self.t(), self.t(), self.t()
+        self.w(f"{g} = getelementptr inbounds [256 x i64], ptr @__loment_cov, i32 0, i32 {idx}")
+        self.w(f"{v} = load i64, ptr {g}")
+        self.w(f"{n} = add i64 {v}, 1")
+        self.w(f"store i64 {n}, ptr {g}")
 
     def ll(self, t: str) -> str:
         return _ll_type(t, self.structs, self.enums)
@@ -2775,11 +2811,14 @@ class _Ir:
         return f"L{self.lbl}_{tag}"
 
     def w(self, s: str) -> None:
+        if self.dbg_loc is not None:
+            s += f", !dbg !{self.dbg_loc}"
         self.out.append("  " + s)
 
     def label(self, name: str) -> None:
         self.out.append(f"{name}:")
         self.terminated = False
+        self.cov_hit()
 
     def jump(self, name: str) -> None:
         if not self.terminated:
@@ -3182,6 +3221,11 @@ class _Ir:
             self.stmt(s)
 
     def stmt(self, s) -> None:
+        line = getattr(s, "line", None)
+        if line:
+            loc = self.dbg_for(line)
+            if loc is not None:
+                self.dbg_loc = loc
         if isinstance(s, Let) and isinstance(s.expr, StructLit):
             st = self.structs.get(s.type)
             if st is None:
@@ -3375,11 +3419,17 @@ class _Ir:
 
 
 def _emit_ir_func(f: Func, funcs: dict, consts: dict,
-                  structs: dict | None = None, enums: dict | None = None) -> tuple[list[str], str]:
-    ir = _Ir(funcs, consts, f, structs, enums)
+                  structs: dict | None = None, enums: dict | None = None,
+                  coverage: bool = False, cov_counter: list | None = None,
+                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
+                  dbg_meta: list | None = None) -> tuple[list[str], str]:
+    ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
+             dbg_scope, dbg_lines, dbg_meta)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
-        ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame) {{")
+        ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
+                      f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
+        ir.cov_hit()
         for name, ty in _collect_locals(f, enums):
             ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
             ir.vars[name] = (ty, f"%{name}.addr")
@@ -3390,7 +3440,9 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         return ir.globals, "\n".join(ir.out)
     args = ", ".join(f"{ir.ll(p.type)} %{p.name}" for p in f.params)
     ir.out.append(f"; {f.name} -> {f.ret}")
-    ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args}) {{")
+    ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
+                  f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
+    ir.cov_hit()
     for p in f.params:  # 参数与局部统一提升到入口块, 避免循环内反复分配
         ir.w(f"%{p.name}.addr = alloca {ir.ll(p.type)}")
         ir.vars[p.name] = (p.type, f"%{p.name}.addr")
@@ -3409,7 +3461,8 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     return ir.globals, "\n".join(ir.out)
 
 
-def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
+def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
+              coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
     mod, deps = prepare(mod, deps)  # M6
     mods = list(deps or []) + [mod]
@@ -3441,12 +3494,43 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> 
     ]
     globals_: list[str] = []
     body: list[str] = []
+    cov_counter = [0] if coverage else None
+    meta: list[str] = []
+    if debug:  # M59: DWARF 最小元数据 (编译单元 + 文件 + 签名类型)
+        meta += [
+            '!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, '
+            'producer: "lomentc", isOptimized: false, runtimeVersion: 0, '
+            'emissionKind: FullDebug)',
+            f'!1 = !DIFile(filename: "{mod.name}.lomt", '
+            f'directory: "{lom_root.as_posix()}")',
+            "!2 = !DISubroutineType(types: !3)",
+            "!3 = !{}",
+        ]
     for m in mods:
         for f in m.funcs:
-            g, text = _emit_ir_func(f, funcs, consts, structs, enums)
+            scope, lines = None, {}
+            if debug:
+                scope = len(meta)
+                meta.append(
+                    f'!{scope} = distinct !DISubprogram(name: "{f.name}", scope: !1, '
+                    f'file: !1, line: {f.line}, type: !2, unit: !0, '
+                    f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
+            g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
+                                    cov_counter, scope, lines, meta if debug else None)
             globals_ += g
             body.append(text)
     text_all = "\n".join(body)
+    if debug:  # M59: 具名元数据 + 编号元数据
+        out.append("!llvm.dbg.cu = !{!0}")
+        base = len(meta)
+        meta.append(f'!{base} = !{{i32 2, !"Dwarf Version", i32 4}}')
+        meta.append(f'!{base + 1} = !{{i32 2, !"Debug Info Version", i32 3}}')
+        out.append(f"!llvm.module.flags = !{{!{base}, !{base + 1}}}")
+        out.append("")
+    if coverage:  # M63: 块覆盖计数数组 + 块总数
+        out.append("@__loment_cov = global [256 x i64] zeroinitializer")
+        out.append(f"@__loment_cov_n = constant i64 {cov_counter[0]}")
+        out.append("")
     if "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
         out.append(_IR_RUNTIME)
     if "@__loment_audit" in text_all:  # P4/M38
@@ -3470,6 +3554,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> 
     if globals_:
         out.append("")
     out.append(text_all)
+    if debug:
+        out.append("")
+        out += meta
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -3500,6 +3587,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emit-rust", metavar="PATH")
     ap.add_argument("--emit-potato", metavar="PATH")
     ap.add_argument("--emit-llvm", metavar="PATH", help="LLVM IR (native M0: 标量子集, docs/144)")
+    ap.add_argument("--coverage", action="store_true", help="M63: IR 块覆盖计数 (配合 --emit-llvm)")
+    ap.add_argument("--debug", action="store_true", help="M59: DWARF 行表元数据 (配合 --emit-llvm)")
     ap.add_argument("--print", dest="print_target", choices=("rust", "potato", "llvm"))
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
@@ -3535,7 +3624,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rust = emit_rust(mod, root, deps)
         potato = emit_potato(mod, root, deps)
-        llvm = emit_llvm(mod, root, deps) if (args.emit_llvm or args.print_target == "llvm") else ""
+        llvm = emit_llvm(mod, root, deps, coverage=args.coverage, debug=args.debug) \
+            if (args.emit_llvm or args.print_target == "llvm") else ""
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         return 1

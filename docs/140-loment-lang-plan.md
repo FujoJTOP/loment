@@ -289,3 +289,16 @@ docs/110 定 Potato 入场于波 C（兼容层 + Agent 运行之后）。本方�
 | **门禁** | `ci.py --static-only` 6 项（+`potato_test` +`potato_cross`） | **6/6** |
 
 里程碑进度 **46/100**（P5 中 M48 的 LLM 臂、M50 的内核侧接入待后续阶段）。
+
+### 11.2 进度（2026-09-09，P6 完成）
+
+| 里程碑 | 交付 | 证据 |
+|---|---|---|
+| M55–M58 | `lomfmt` / `loment_lsp` / `lompkg` / `lomdoc` | `loment_tools_test` 11/11 |
+| M59 | DWARF 语句级行表（`--debug`） | `llvm-objdump -d -l` 出 `toolchain.lomt:7` |
+| M60–M63 | `loment ir` / `test` / `bench` / `cov` | `RESULT: 4/4 PASS`；`COV 6/31`；对照表 |
+| M64 | 诊断分类 E001–E013 + 修复建议 | 13 条反例全部命中 |
+| M65/M66 | 增量构建 + 内容哈希缓存 | 冷 82.6ms → 热 9.0ms |
+| **门禁** | `ci.py --static-only` 7 项（+`loment_tools_test`） | **7/7** |
+
+里程碑进度 **58/100**（M56 无编辑器宿主、M59 无变量信息为部分；M48/M50 部分待后续）。

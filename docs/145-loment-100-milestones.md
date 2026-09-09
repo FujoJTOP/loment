@@ -9,7 +9,7 @@
 ## 0. 全局门禁（每个里程碑结束都要跑）
 
 ```
-python tools/ci.py --static-only                 # 6/6
+python tools/ci.py --static-only                 # 7/7
 python tools/fuic.py --check                     # .fuc 逐字节
 python tools/lom_spec_emit.py --check            # spec.json 双副本
 cd kernel && cargo build --release
@@ -184,6 +184,44 @@ python tools/potato_cross.py       # 50/50 判定一致
 门禁：`lomentc_test` **89/89** · `ci.py --static-only` **6/6** · `lom_audit` 0 差异 ·
 `potato_test` 7/7 · `potato_cross` 50/50。
 
+### P6 证据（2026-09-09，M55–M66）
+
+```
+python tools/loment.py fmt  loment/examples/*.lomt          # M55 幂等 + 语义保持
+python tools/loment.py doc  loment/examples/toolchain.lomt  # M58
+python tools/loment.py diag loment/examples/toolchain.lomt  # M64 13 类错误码 + 建议
+python tools/loment.py ir   loment/examples/toolchain.lomt --objdump   # M60
+python tools/loment.py test loment/examples/toolchain.lomt  # M61 RESULT: 4/4 PASS
+python tools/loment.py bench loment/examples/toolchain.lomt --n 2000000  # M62 对照表
+python tools/loment.py cov  loment/examples/toolchain.lomt --call cov_main  # M63 COV 6/31
+python tools/loment.py build loment/examples --out /tmp/o    # M65/M66 冷 82.6ms → 热 9.0ms
+python tools/loment.py pkg  resolve|verify                   # M57 拓扑序 + 校验和
+python tools/loment.py lsp  --demo loment/examples/toolchain.lomt  # M56 三能力自测
+
+# M59: DWARF 行表
+python tools/lomentc.py loment/examples/toolchain.lomt --emit-llvm x.ll \
+       --emit-potato x.json --debug
+clang --target=x86_64-unknown-none -ffreestanding -g -c x.ll -o x.o
+llvm-objdump -d -l x.o | grep toolchain.lomt      # ; .\toolchain.lomt:7 ... :14
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M55 格式化 | 16 示例幂等 + 形式对象逐字节不变 | ✅ |
+| M56 LSP | `handle()` 驱动：诊断/补全/跳转三项 | ✅ 部分（无编辑器宿主） |
+| M57 包管理 | 三级依赖拓扑序 + 锁文件 + 篡改检出 + 环检测 | ✅ |
+| M58 文档 | 签名/能力域/`///` 注释入文档 | ✅ |
+| M59 DWARF | `define` 挂 scope + 语句级 `!dbg`；`objdump -l` 出源行 | ✅ 部分（无变量信息） |
+| M60 IR 查看 | IR + `llvm-objdump -d` 一条命令 | ✅ |
+| M61 测试 | `RESULT: 4/4 PASS`，失败退出码 1 | ✅ |
+| M62 基准 | Rust vs IR 对照表（`bench_fib` 2.46x） | ✅ |
+| M63 覆盖率 | `COV 6/31 19.4%` 可复现 | ✅ |
+| M64 诊断 | 13 类错误各有码 + 建议（无 E999） | ✅ |
+| M65/M66 增量与缓存 | 冷 82.6ms → 热 9.0ms（9.2x），16/16 命中 | ✅ |
+
+门禁：`loment_tools_test` **11/11** · `ci.py --static-only` **7/7** · `potato_cross` 51/51
+（新增示例后总数 +1）。
+
 ## P2 · 内存与运行时语义（M13–M22）
 
 | # | 里程碑 | 判据 | 状态 |
@@ -261,20 +299,20 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 
 ## P6 · 工具链（M55–M66）
 
-| # | 里程碑 | 判据 |
-|---|---|---|
-| M55 | 格式化器 `lomfmt` | 幂等：格式化两次结果相同 |
-| M56 | LSP（补全/跳转/诊断） | 三个能力在编辑器实测 |
-| M57 | 包管理器 `lompkg` | 依赖解析 + 校验和 |
-| M58 | 文档生成器 `lomdoc` | 从 `.lomt` 生成 API 文档 |
-| M59 | 调试信息（DWARF） | 调试器能按源码行断点 |
-| M60 | IR 查看器 / 反汇编 | 一条命令看 IR 与机器码 |
-| M61 | 内建测试框架 | `loment test` 跑通 |
-| M62 | 基准框架 | 与 Rust 路径对比表 |
-| M63 | IR 级覆盖率 | 覆盖率报告可复现 |
-| M64 | 错误信息质量（含修复建议） | 10 类错误各有建议 |
-| M65 | 增量编译 | 改动单文件重编译时间下降 |
-| M66 | 构建缓存 | 冷/热构建时间对照 |
+| # | 里程碑 | 判据 | 状态 |
+|---|---|---|---|
+| M55 | 格式化器 `lomfmt` | 幂等：格式化两次结果相同 | ✅ |
+| M56 | LSP（补全/跳转/诊断） | 三个能力在编辑器实测 | ✅ 部分（无编辑器宿主，用 `handle()` 自测） |
+| M57 | 包管理器 `lompkg` | 依赖解析 + 校验和 | ✅ |
+| M58 | 文档生成器 `lomdoc` | 从 `.lomt` 生成 API 文档 | ✅ |
+| M59 | 调试信息（DWARF） | 调试器能按源码行断点 | ✅ 部分（语句级行表，无变量信息） |
+| M60 | IR 查看器 / 反汇编 | 一条命令看 IR 与机器码 | ✅ |
+| M61 | 内建测试框架 | `loment test` 跑通 | ✅ |
+| M62 | 基准框架 | 与 Rust 路径对比表 | ✅ |
+| M63 | IR 级覆盖率 | 覆盖率报告可复现 | ✅ |
+| M64 | 错误信息质量（含修复建议） | 10 类错误各有建议 | ✅（13 类） |
+| M65 | 增量编译 | 改动单文件重编译时间下降 | ✅ |
+| M66 | 构建缓存 | 冷/热构建时间对照 | ✅（82.6ms → 9.0ms） |
 
 ## P7 · 内核集成（M67–M78）
 
