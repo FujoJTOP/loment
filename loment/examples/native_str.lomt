@@ -1,0 +1,41 @@
+// loment/examples/native_str.lomt — M1/M2 验证集: str 类型与内建 (docs/145)
+//
+// str = UTF-8 字节视图; 内建 str_len / str_eq / str_byte。
+// 双路径验证: --emit-rust (rustc) 与 --emit-llvm (clang) 输出须逐值一致。
+
+module native_str
+
+fn hello_len() -> u32 {
+    return str_len("hello");
+}
+
+fn same_lit() -> bool {
+    return str_eq("abc", "abc");
+}
+
+fn same_var() -> bool {
+    let a: str = "abc";
+    let b: str = "abd";
+    return str_eq(a, b);
+}
+
+fn eq_var() -> bool {
+    let a: str = "fujo";
+    let b: str = "fujo";
+    return str_eq(a, b);
+}
+
+fn diff_len() -> bool {
+    let a: str = "abc";
+    let b: str = "abcd";
+    return str_eq(a, b);
+}
+
+fn first_byte() -> u32 {
+    return str_byte("Z", 0);
+}
+
+fn third_byte() -> u32 {
+    let s: str = "abc";
+    return str_byte(s, 2);
+}

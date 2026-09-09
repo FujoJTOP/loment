@@ -1,0 +1,395 @@
+// lom/fuai.lom — FUAI 监督运行时契约 (L0 单一真源)
+//
+// 迁移自 sdk/fuai-spec/spec.json (2026-09-07.1); 此后本文件为权威,
+// spec.json / syscall.rs dispatch / LinuxFUAI/include/fuai.h 均由 lomc 派生或被校验。
+// 校验: python tools/lom_audit.py   (docs/141)
+
+module fuai
+
+// 文档级元数据 (生成 spec.json 的非契约段)
+meta {
+  schema = "fujo-fuai-spec/v1"
+  title = "FUAI supervisory runtime contract spec v1"
+  version = "2026-09-07.1"
+  authority = "docs/137-fuai-os-charter.md 判据A: 唯一权威, 实现从它派生或被校验"
+  layers {
+    core = "host-agnostic supervisory primitives: 信任历史/权限域/质量信号/隔离调度/模型通道. 差分区只对 core 断言"
+    "host-ext" = "host-specific extensions (x86 调试探针, Windows 盒桥). 不参与双实现差分"
+  }
+  formats {
+    shm_frame_v2 = "payload@0x30 ctx@0x800 req.fifo/rsp.fifo FJAI:REQ line protocol — layout identical across implementations; verified by pointer check in v1.1"
+    fjru_v1 = "FJRU v1 rule bytecode 778B, sdk/rulebook/fjru.bin — load semantics identical across implementations; verified by loader diff in v1.1"
+  }
+  gates {
+    dom_admit_qual_feed = "core primitives 0x8313/0x8314 carry a trust-adaptive authority gate (FujoOS: qual_test flag -> -12; LinuxFUAI: gate semantics for deployment)"
+    tau_invariant = "cfg7>cfg8, cfg7>=35, cfg8<=45 (W46 policy envelope, both implementations)"
+  }
+}
+
+param tau_high_default {
+  fujo = 45
+  linux = 46
+  note = "非接口差异: τ 默认值来自测量推导, 属部署参数。FujoOS 侧 W46 重标定 45 (v2 语义金标 T*=[0.429,0.454) 内); LinuxFUAI 冻结于 W40/W32 时代 46。P2 差分器必须用显式 cfg 声明的策略, 使两后端行为可比较。"
+}
+
+param tau_low_default {
+  fujo = 35
+  linux = 35
+  note = "一致"
+}
+
+enum Opcode : u16 {
+  // intent classify -> 0..4
+  classify = 20737 {
+    layer = "core"
+    sig = "a0=ptr a1=len"
+    fujo = "fujo_ai_classify"
+    linux = "fuai_classify"
+    semantics = "intent classify -> 0..4"
+  }
+  // context injection window (fujoctx)
+  fetch = 20738 {
+    layer = "core"
+    sig = "a0=ptr a1=len"
+    fujo = "fujo_ai_fetch"
+    semantics = "context injection window (fujoctx)"
+  }
+  // model/link info
+  info = 20740 {
+    layer = "core"
+    sig = "a0=ptr a1=len"
+    fujo = "fujo_ai_info"
+    semantics = "model/link info"
+  }
+  // context compression
+  ctx_compress = 32769 {
+    layer = "core"
+    sig = "a0..a4"
+    fujo = "fujo_ctx_compress"
+    semantics = "context compression"
+  }
+  // event ring subscribe (eyes)
+  ctx_subscribe = 32770 {
+    layer = "core"
+    sig = "a0=mask"
+    fujo = "fujo_ctx_subscribe"
+    linux = "fuai_ctx_subscribe"
+    semantics = "event ring subscribe (eyes)"
+  }
+  // drain event ring
+  ctx_events = 32771 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_ctx_events"
+    linux = "fuai_ctx_events"
+    semantics = "drain event ring"
+  }
+  // inject event
+  ctx_inject = 32772 {
+    layer = "core"
+    sig = "a0=kind a1=a a2=b"
+    fujo = "fujo_ctx_inject"
+    linux = "fuai_ctx_inject"
+    semantics = "inject event"
+  }
+  // structural context text
+  ctx_struct = 32773 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_ctx_struct"
+    linux = "fuai_ctx_struct"
+    semantics = "structural context text"
+  }
+  // grant capability slot 0..7
+  cap_grant = 33025 {
+    layer = "core"
+    sig = "a0=idx a1=perm"
+    fujo = "fujo_cap_grant"
+    linux = "fuai_cap_grant"
+    semantics = "grant capability slot 0..7"
+  }
+  // check slot; deny -> audit + DENIES++
+  cap_check = 33026 {
+    layer = "core"
+    sig = "a0=idx a1=perm"
+    fujo = "fujo_cap_check"
+    linux = "fuai_cap_check"
+    semantics = "check slot; deny -> audit + DENIES++"
+  }
+  // append audit entry
+  aud_log = 33027 {
+    layer = "core"
+    sig = "a0=action a1=subject"
+    fujo = "fujo_aud_log"
+    linux = "fuai_aud_log"
+    semantics = "append audit entry"
+  }
+  // read audit ring
+  aud_read = 33028 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_aud_read"
+    linux = "fuai_aud_read"
+    semantics = "read audit ring"
+  }
+  // A1 unauthorized act -> -1 no side effect DENIES++; A2 exactly one audit entry
+  cap_exec = 33029 {
+    layer = "core"
+    sig = "a0=act a1=a0 a2=a1"
+    fujo = "cap_exec"
+    linux = "fuai_cap_exec"
+    semantics = "A1 unauthorized act -> -1 no side effect DENIES++; A2 exactly one audit entry"
+  }
+  // config read (defaults 1->50 2->0 7->45 8->35)
+  cfg_get = 33030 {
+    layer = "core"
+    sig = "a0=key"
+    fujo = "fujo_cfg_get"
+    linux = "fuai_cfg_get"
+    semantics = "config read (defaults 1->50 2->0 7->45 8->35)"
+  }
+  // create domain id 1..=4 (-17 full)
+  dom_create = 33031 {
+    layer = "core"
+    sig = "a0=perm a1=as_mask a2=irq"
+    fujo = "fujo_dom_create"
+    linux = "fuai_dom_create"
+    semantics = "create domain id 1..=4 (-17 full)"
+  }
+  // bind current context (0=system)
+  dom_bind = 33032 {
+    layer = "core"
+    sig = "a0=id"
+    fujo = "set_current_domain"
+    linux = "fuai_dom_bind"
+    semantics = "bind current context (0=system)"
+  }
+  // revoke; granted=false audited; all exec denied
+  dom_revoke = 33033 {
+    layer = "core"
+    sig = "a0=id"
+    fujo = "fujo_dom_revoke"
+    linux = "fuai_dom_revoke"
+    semantics = "revoke; granted=false audited; all exec denied"
+  }
+  // read domain table 5x5 u64
+  dom_info = 33034 {
+    layer = "core"
+    sig = "a0=out"
+    fujo = "fujo_dom_info"
+    linux = "fuai_dom_info"
+    semantics = "read domain table 5x5 u64"
+  }
+  // route table set (M92)
+  route_set = 33281 {
+    layer = "core"
+    sig = "a0=route"
+    fujo = "fujo_route_set"
+    semantics = "route table set (M92)"
+  }
+  // route classify
+  route_classify = 33282 {
+    layer = "core"
+    sig = "a0=ptr a1=len"
+    fujo = "fujo_route_classify"
+    semantics = "route classify"
+  }
+  // route table readback
+  route_table = 33283 {
+    layer = "core"
+    sig = "a0=out"
+    fujo = "fujo_route_table"
+    semantics = "route table readback"
+  }
+  // inference executor slot run (M93)
+  infer_run = 33537 {
+    layer = "core"
+    sig = "a0..a3"
+    fujo = "fujo_infer_run"
+    semantics = "inference executor slot run (M93)"
+  }
+  // inference slot query
+  infer_slot = 33538 {
+    layer = "core"
+    sig = "a0=slot"
+    fujo = "fujo_infer_slot"
+    semantics = "inference slot query"
+  }
+  // inference slot set
+  infer_set = 33539 {
+    layer = "core"
+    sig = "a0=slot"
+    fujo = "fujo_infer_set"
+    semantics = "inference slot set"
+  }
+  // anomaly sentinel; out[0..2]=anom conf engine
+  anom_run = 33540 {
+    layer = "core"
+    sig = "a0=digest a1=len a2=out"
+    fujo = "fujo_anom_run"
+    linux = "fuai_anom_run"
+    semantics = "anomaly sentinel; out[0..2]=anom conf engine"
+  }
+  // planner -> action vector -> cap_exec each
+  plan_run = 33541 {
+    layer = "core"
+    sig = "a0=goal a1=len a2=out"
+    fujo = "fujo_plan_run"
+    linux = "fuai_plan_run"
+    semantics = "planner -> action vector -> cap_exec each"
+  }
+  // IO predictor; out[0]=next block
+  io_predict = 33542 {
+    layer = "core"
+    sig = "a0=seq a1=len a2=out"
+    fujo = "fujo_io_predict"
+    linux = "fuai_io_predict"
+    semantics = "IO predictor; out[0]=next block"
+  }
+  // NLC -> POL=k:v -> cfg_set; value-domain + tau-invariant rejections
+  nlc_set = 33543 {
+    layer = "core"
+    sig = "a0=text a1=len a2=out"
+    fujo = "fujo_nlc_set"
+    linux = "fuai_nlc_set"
+    semantics = "NLC -> POL=k:v -> cfg_set; value-domain + tau-invariant rejections"
+  }
+  // environment scan -> profile/scene/cfg6
+  env_scan = 33544 {
+    layer = "core"
+    sig = "a0=out a1=out2"
+    fujo = "fujo_env_scan"
+    linux = "fuai_env_scan"
+    semantics = "environment scan -> profile/scene/cfg6"
+  }
+  // R3 staleness probe
+  r3_probe = 33545 {
+    layer = "core"
+    sig = "a0=mode a1=out"
+    fujo = "fujo_r3_probe"
+    linux = "fuai_r3_probe"
+    semantics = "R3 staleness probe"
+  }
+  // A1-A4 axiom self-check offline; expects 0xF
+  inv_run = 33546 {
+    layer = "core"
+    sig = "a0=out a1=out2"
+    fujo = "fujo_inv_run"
+    linux = "fuai_inv_run"
+    semantics = "A1-A4 axiom self-check offline; expects 0xF"
+  }
+  // load FJRU v1 bytecode -> entry count
+  rules_load = 33547 {
+    layer = "core"
+    sig = "a0=ptr a1=len"
+    fujo = "fujo_rules_load"
+    linux = "fuai_rules_load"
+    semantics = "load FJRU v1 bytecode -> entry count"
+  }
+  // model calls / rules / rule hits / ai audit entries
+  ai_stats = 33548 {
+    layer = "core"
+    sig = "a0=out"
+    fujo = "fujo_ai_stats"
+    linux = "fuai_ai_stats"
+    semantics = "model calls / rules / rule hits / ai audit entries"
+  }
+  // export AI audit entries (88B each)
+  ai_audit = 33549 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_ai_audit"
+    linux = "fuai_ai_audit"
+    semantics = "export AI audit entries (88B each)"
+  }
+  // x86 CR3 debug probe (host-specific)
+  cr3_probe = 33550 {
+    layer = "host-ext"
+    sig = "a0=out"
+    fujo = "fujo_cr3_probe"
+    semantics = "x86 CR3 debug probe (host-specific)"
+  }
+  // 0=auto 1=model 2=rules engine force
+  evl_mode = 33551 {
+    layer = "core"
+    sig = "a0=mode"
+    fujo = "fujo_evl_mode"
+    linux = "fuai_evl_mode"
+    semantics = "0=auto 1=model 2=rules engine force"
+  }
+  // event stream digest (sentinel perceives itself)
+  ev_digest = 33554 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_ev_digest"
+    linux = "fuai_ev_digest"
+    semantics = "event stream digest (sentinel perceives itself)"
+  }
+  // quality->domain width; WIDEN_CONFIRM windows; shrink immediate. FujoOS: qual_test gate
+  dom_admit = 33555 {
+    layer = "core"
+    sig = "a0=duty a1=out"
+    fujo = "fujo_dom_admit"
+    linux = "fuai_dom_admit"
+    semantics = "quality->domain width; WIDEN_CONFIRM windows; shrink immediate. FujoOS: qual_test gate"
+  }
+  // quality ledger feed (per-duty rolling 64). FujoOS: qual_test gate
+  qual_feed = 33556 {
+    layer = "core"
+    sig = "a0=duty a1=hit"
+    fujo = "fujo_qual_feed"
+    linux = "fuai_qual_feed"
+    semantics = "quality ledger feed (per-duty rolling 64). FujoOS: qual_test gate"
+  }
+  // quality ledger export
+  qual_seq = 33557 {
+    layer = "core"
+    sig = "a0=out a1=n"
+    fujo = "fujo_qual_seq"
+    linux = "fuai_qual_seq"
+    semantics = "quality ledger export"
+  }
+  // Windows box supplier command gate
+  box_run = 33558 {
+    layer = "host-ext"
+    sig = "a0..a2"
+    fujo = "fujo_box_run"
+    semantics = "Windows box supplier command gate"
+  }
+  // box state
+  box_stat = 33559 {
+    layer = "host-ext"
+    sig = "a0=out a1=out2"
+    fujo = "fujo_box_stat"
+    semantics = "box state"
+  }
+  // box artifact readback
+  box_result = 33560 {
+    layer = "host-ext"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_box_result"
+    semantics = "box artifact readback"
+  }
+  // box feedback info
+  box_fb_info = 33561 {
+    layer = "host-ext"
+    sig = "a0=out"
+    fujo = "fujo_box_fb_info"
+    semantics = "box feedback info"
+  }
+  // contract register/verify (pred max ttl mode)
+  box_contract = 33568 {
+    layer = "host-ext"
+    sig = "a0..a3"
+    fujo = "fujo_box_contract"
+    semantics = "contract register/verify (pred max ttl mode)"
+  }
+  // cap ring + ai ring unified export (32B entries)
+  unified_aud = 35841 {
+    layer = "core"
+    sig = "a0=out a1=cap"
+    fujo = "fujo_unified_aud"
+    linux = "fuai_unified_aud"
+    semantics = "cap ring + ai ring unified export (32B entries)"
+  }
+}

@@ -1,0 +1,65 @@
+// loment/examples/native.lomt — 原生后端 M0 验证集 (标量子集, docs/144)
+//
+// 只使用标量类型/控制流/调用/常量 —— M0 的 IR 后端能完整吃下。
+// 生成: python tools/lomentc.py loment/examples/native.lomt --emit-llvm loment/build/native.ll
+// 编译: clang -O1 -o native_exe.exe loment/build/native_driver.c loment/build/native.ll
+
+module native
+
+const SCALE: u32 = 3;
+
+fn fib(n: u32) -> u32 {
+    let a: u32 = 0;
+    let b: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        let t: u32 = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    return a;
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    let x: u32 = a;
+    let y: u32 = b;
+    while y != 0 {
+        let t: u32 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn popcount(x: u32) -> u32 {
+    let v: u32 = x;
+    let c: u32 = 0;
+    while v != 0 {
+        if v % 2 == 1 {
+            c = c + 1;
+        }
+        v = v / 2;
+    }
+    return c;
+}
+
+fn sum_range(n: u32) -> u32 {
+    let s: u32 = 0;
+    for i in 0..n {
+        s = s + i;
+    }
+    return s;
+}
+
+fn mask_low(x: u32, n: u32) -> u32 {
+    return x & ((1 << n) - 1);
+}
+
+fn in_domain(off: u32) -> bool {
+    return off >= 0 && off <= 4;
+}
+
+fn scaled(x: u32) -> u32 {
+    return x * SCALE;
+}

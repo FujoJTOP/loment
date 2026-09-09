@@ -1,0 +1,21 @@
+// loment/examples/mathutil.lomt — 被 demo.lomt 导入的 L1 模块 (多文件程序)
+//
+// 验证: python tools/lomentc.py loment/examples/demo.lomt --emit-rust out.rs
+// 依赖模块的 Rust 产物会先于本模块输出, 每个只出一次。
+
+module mathutil
+
+const TWO: u32 = 2;
+
+struct Pair {
+    a: u32,
+    b: u32,
+}
+
+fn double(x: u32) -> u32 {
+    return x * TWO;
+}
+
+fn pair_sum(p: Pair) -> u32 {
+    return p.a + p.b;
+}

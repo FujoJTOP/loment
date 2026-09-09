@@ -1,0 +1,58 @@
+// loment/examples/native_agg.lomt — 原生后端 M23–M26 验证集 (聚合类型, docs/145)
+//
+// struct / 定长数组 / 枚举(带载荷) / match —— 全部在函数内部使用
+// (聚合参数与返回值暂不支持, 见 tools/lomentc.py 的 emit_llvm 检查)。
+// 生成: python tools/lomentc.py loment/examples/native_agg.lomt --emit-llvm loment/build/native_agg.ll
+
+module native_agg
+
+struct Blk {
+    off: u32,
+    len: u32,
+}
+
+enum Shape {
+    Circle(u32),
+    Square(u32),
+    Empty,
+}
+
+fn blk_end() -> u32 {
+    let b: Blk = Blk { off: 3, len: 5 };
+    return b.off + b.len;
+}
+
+fn array_sum() -> u32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    for i in 0..4 {
+        s = s + a[i];
+    }
+    a[0] = 100;
+    return s + a[0];
+}
+
+fn shape_area(tag: u32, v: u32) -> u32 {
+    let s: Shape = Shape::Empty;
+    if tag == 0 {
+        s = Shape::Circle(v);
+    } else {
+        s = Shape::Square(v);
+    }
+    match s {
+        Shape::Circle(r) => { return r * r * 3; }
+        Shape::Square(a) => { return a * a; }
+        _ => { return 0; }
+    }
+}
+
+fn short_circuit(x: u32) -> u32 {
+    let n: u32 = 0;
+    if x > 0 && x < 10 {
+        n = n + 1;
+    }
+    if x == 0 || x == 5 {
+        n = n + 10;
+    }
+    return n;
+}

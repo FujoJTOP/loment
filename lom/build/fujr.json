@@ -1,0 +1,99 @@
+{
+  "lom": "v0",
+  "module": "fujr",
+  "meta": {},
+  "consts": [
+    {
+      "name": "MAGIC",
+      "type": "u32",
+      "value": 1380603206
+    },
+    {
+      "name": "VERSION",
+      "type": "u32",
+      "value": 1
+    },
+    {
+      "name": "SECTION_ALIGN",
+      "type": "u32",
+      "value": 4096
+    }
+  ],
+  "params": [],
+  "enums": [
+    {
+      "name": "Tag",
+      "base": "u32",
+      "variants": [
+        {
+          "name": "manifest",
+          "value": 1,
+          "meta": {}
+        },
+        {
+          "name": "embed",
+          "value": 4,
+          "meta": {}
+        },
+        {
+          "name": "data",
+          "value": 5,
+          "meta": {}
+        }
+      ]
+    }
+  ],
+  "records": [
+    {
+      "name": "Header",
+      "size": 64,
+      "endian": "little",
+      "packed": true,
+      "fields": [
+        {
+          "name": "magic",
+          "type": "u32",
+          "offset": 0
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "offset": 4
+        },
+        {
+          "name": "count",
+          "type": "u32",
+          "offset": 8
+        }
+      ]
+    },
+    {
+      "name": "Section",
+      "size": 32,
+      "endian": "little",
+      "packed": true,
+      "fields": [
+        {
+          "name": "tag",
+          "type": "u32",
+          "offset": 0
+        },
+        {
+          "name": "off",
+          "type": "u64",
+          "offset": 8
+        },
+        {
+          "name": "size",
+          "type": "u64",
+          "offset": 16
+        },
+        {
+          "name": "fnv1a",
+          "type": "u32",
+          "offset": 24
+        }
+      ]
+    }
+  ]
+}

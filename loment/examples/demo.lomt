@@ -1,0 +1,144 @@
+// loment/examples/demo.lomt — L1 Loment v0 示例
+//
+// 语法是 Rust 的严格子集 (docs/140 §4): 不发明语法, 只加"能力声明"这一层语义。
+// 转译: python tools/lomentc.py loment/examples/demo.lomt --emit-rust out.rs
+// 形式对象: --emit-potato out.json  →  python tools/potato.py validate out.json
+
+module demo
+
+// 复用 L0 布局单源 (Loment 是 .lom 的超集: 声明来自 L0, 行为来自本文件)
+use "lom/fujr.lom"
+
+// 导入另一个 L1 模块 (多文件程序)
+use "loment/examples/mathutil.lomt"
+
+capability blk_write : disk[0..4] revocable
+
+// 出界声明: 明确排除的能力 (进入 Potato 形式对象的 excluded 字段)
+excluded "network: 本单元不申请任何 net 能力"
+excluded "usb: 不触碰 USB 子系统"
+
+// L1 原生类型 (与 .lom 的二进制布局不同: 这是语言级数据类型的声明)
+struct Blk {
+    off: u32,
+    len: u32,
+}
+
+const MAX_BLKS: u32 = 8;
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+// 带载荷枚举: 变体可携带一个值, match 时绑定
+enum Shape {
+    Circle(u32),
+    Square(u32),
+    Empty,
+}
+
+fn fib(n: u32) -> u32 {
+    let a: u32 = 0;
+    let b: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        let t: u32 = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    return a;
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    let x: u32 = a;
+    let y: u32 = b;
+    while y != 0 {
+        let t: u32 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn popcount(x: u32) -> u32 {
+    let v: u32 = x;
+    let c: u32 = 0;
+    while v != 0 {
+        if v % 2 == 1 {
+            c = c + 1;
+        }
+        v = v / 2;
+    }
+    return c;
+}
+
+fn in_domain(off: u32) -> bool {
+    return off >= 0 && off <= 4;
+}
+
+fn blk_end(b: Blk) -> u32 {
+    return b.off + b.len;
+}
+
+fn mask_low(x: u32, n: u32) -> u32 {
+    return x & ((1 << n) - 1);
+}
+
+fn has_flag(flags: u32, bit: u32) -> bool {
+    return (flags & (1 << bit)) != 0;
+}
+
+fn sum_array(xs: [u32; 4]) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + xs[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fill_incr() -> [u32; 4] {
+    let a: [u32; 4] = [0, 0, 0, 0];
+    let i: u32 = 0;
+    while i < 4 {
+        a[i] = i * 2;
+        i = i + 1;
+    }
+    return a;
+}
+
+fn color_code(c: Color) -> u32 {
+    match c {
+        Color::Red => { return 1; }
+        Color::Green => { return 2; }
+        _ => { return 0; }
+    }
+}
+
+fn sum_range(n: u32) -> u32 {
+    let s: u32 = 0;
+    for i in 0..n {
+        s = s + i;
+    }
+    return s;
+}
+
+fn quadruple(x: u32) -> u32 {
+    return double(double(x));
+}
+
+fn max_blocks() -> u32 {
+    return MAX_BLKS;
+}
+
+fn shape_area(s: Shape) -> u32 {
+    match s {
+        Shape::Circle(r) => { return r * r * 3; }
+        Shape::Square(a) => { return a * a; }
+        _ => { return 0; }
+    }
+}

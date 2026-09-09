@@ -1,0 +1,35 @@
+// lom/fujr.lom — FUJR `.run` 容器格式 (L0 单一真源)
+//
+// 取代五处平行实现 (docs/140 §2-4):
+//   kernel/src/fujr.rs · tools/fujopack.py · tools/fujorun.py
+//   fujopack/src/main.rs · fujorun/src/main.rs
+// 布局: 64B 头 | 32B×count 节表 | payload (每节 4096 对齐) ; FNV-1a 校验。
+// 校验: python tools/lom_audit.py
+
+module fujr
+
+const MAGIC         : u32 = 0x524A5546   // "FUJR" 小端
+const VERSION       : u32 = 1
+const SECTION_ALIGN : u32 = 4096
+
+enum Tag : u32 {
+  manifest = 1   // JSON 清单 (权限/资源名)
+  embed    = 4   // 可执行体
+  data     = 5   // 资源
+}
+
+record Header layout(packed, size=64, endian=little) {
+  magic   : u32 @0
+  version : u32 @4
+  count   : u32 @8
+  // @12..64 保留: 节表紧随其后
+}
+
+record Section layout(packed, size=32, endian=little) {
+  tag   : u32 @0
+  // @4..8 保留
+  off   : u64 @8
+  size  : u64 @16
+  fnv1a : u32 @24
+  // @28..32 保留
+}

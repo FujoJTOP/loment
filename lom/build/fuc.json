@@ -1,0 +1,247 @@
+{
+  "lom": "v0",
+  "module": "fuc",
+  "meta": {},
+  "consts": [
+    {
+      "name": "MAGIC",
+      "type": "u32",
+      "value": 1128879430
+    },
+    {
+      "name": "VERSION",
+      "type": "u16",
+      "value": 1
+    }
+  ],
+  "params": [],
+  "enums": [],
+  "records": [
+    {
+      "name": "Header",
+      "size": 48,
+      "endian": "little",
+      "packed": true,
+      "fields": [
+        {
+          "name": "magic",
+          "type": "u32",
+          "offset": 0
+        },
+        {
+          "name": "version",
+          "type": "u16",
+          "offset": 4
+        },
+        {
+          "name": "flags",
+          "type": "u16",
+          "offset": 6
+        },
+        {
+          "name": "node_count",
+          "type": "u32",
+          "offset": 8
+        },
+        {
+          "name": "node_off",
+          "type": "u32",
+          "offset": 12
+        },
+        {
+          "name": "str_off",
+          "type": "u32",
+          "offset": 16
+        },
+        {
+          "name": "str_len",
+          "type": "u32",
+          "offset": 20
+        },
+        {
+          "name": "tok_off",
+          "type": "u32",
+          "offset": 24
+        },
+        {
+          "name": "tok_count",
+          "type": "u32",
+          "offset": 28
+        },
+        {
+          "name": "anim_off",
+          "type": "u32",
+          "offset": 32
+        },
+        {
+          "name": "anim_count",
+          "type": "u32",
+          "offset": 36
+        },
+        {
+          "name": "doc_w",
+          "type": "u16",
+          "offset": 40
+        },
+        {
+          "name": "doc_h",
+          "type": "u16",
+          "offset": 42
+        },
+        {
+          "name": "root",
+          "type": "u16",
+          "offset": 44
+        },
+        {
+          "name": "reserved",
+          "type": "u16",
+          "offset": 46
+        }
+      ]
+    },
+    {
+      "name": "Node",
+      "size": 64,
+      "endian": "little",
+      "packed": true,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "u16",
+          "offset": 0
+        },
+        {
+          "name": "id",
+          "type": "u16",
+          "offset": 2
+        },
+        {
+          "name": "flags",
+          "type": "u16",
+          "offset": 4
+        },
+        {
+          "name": "children",
+          "type": "u16",
+          "offset": 6
+        },
+        {
+          "name": "x",
+          "type": "i16",
+          "offset": 8
+        },
+        {
+          "name": "y",
+          "type": "i16",
+          "offset": 10
+        },
+        {
+          "name": "w_mode",
+          "type": "u16",
+          "offset": 12
+        },
+        {
+          "name": "w_val",
+          "type": "u16",
+          "offset": 14
+        },
+        {
+          "name": "h_mode",
+          "type": "u16",
+          "offset": 16
+        },
+        {
+          "name": "h_val",
+          "type": "u16",
+          "offset": 18
+        },
+        {
+          "name": "pad_l",
+          "type": "u16",
+          "offset": 20
+        },
+        {
+          "name": "pad_t",
+          "type": "u16",
+          "offset": 22
+        },
+        {
+          "name": "pad_r",
+          "type": "u16",
+          "offset": 24
+        },
+        {
+          "name": "pad_b",
+          "type": "u16",
+          "offset": 26
+        },
+        {
+          "name": "gap",
+          "type": "u16",
+          "offset": 28
+        },
+        {
+          "name": "radius",
+          "type": "u16",
+          "offset": 30
+        },
+        {
+          "name": "elev",
+          "type": "u16",
+          "offset": 32
+        },
+        {
+          "name": "align",
+          "type": "u16",
+          "offset": 34
+        },
+        {
+          "name": "justify",
+          "type": "u16",
+          "offset": 36
+        },
+        {
+          "name": "size",
+          "type": "u16",
+          "offset": 38
+        },
+        {
+          "name": "bg",
+          "type": "u32",
+          "offset": 40
+        },
+        {
+          "name": "fg",
+          "type": "u32",
+          "offset": 44
+        },
+        {
+          "name": "text_id",
+          "type": "u32",
+          "offset": 48
+        },
+        {
+          "name": "tone",
+          "type": "u16",
+          "offset": 52
+        },
+        {
+          "name": "opacity",
+          "type": "u16",
+          "offset": 54
+        },
+        {
+          "name": "first_child",
+          "type": "u32",
+          "offset": 56
+        },
+        {
+          "name": "extra",
+          "type": "u32",
+          "offset": 60
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+// loment/examples/native_slice.lomt — M3 验证集: 只读切片 (docs/145)
+//
+// `[T]` = 只读切片 (ptr + len); `&array` 取切片; 内建 slice_len; 下标读。
+
+module native_slice
+
+fn sum(xs: [u32]) -> u32 {
+    let s: u32 = 0;
+    for i in 0..slice_len(xs) {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn call_sum() -> u32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    return sum(&a);
+}
+
+fn first_of(xs: [u32]) -> u32 {
+    return xs[0];
+}
+
+fn call_first() -> u32 {
+    let a: [u32; 3] = [7, 8, 9];
+    return first_of(&a);
+}

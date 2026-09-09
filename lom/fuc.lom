@@ -1,0 +1,62 @@
+// lom/fuc.lom — FUI 编译文档 (.fuc) 二进制布局 (L0 单一真源)
+//
+// 本文件取代三处重复声明 (docs/140 §2-3):
+//   tools/fuic.py:415-437  (struct.pack 打包器)
+//   kernel/src/fui/fuc.rs:13,177-262  (NODE_SIZE + 偏移解码)
+//   docs/138 §1.3  (文档描述)
+// 校验: python tools/lom_audit.py
+
+module fuc
+
+const MAGIC   : u32 = 0x43495546  // "FUIC" 小端
+const VERSION : u16 = 1
+
+// 文件头 48B: header | nodes | strings | tokens | body_fnv(u32)
+record Header layout(packed, size=48, endian=little) {
+  magic      : u32 @0
+  version    : u16 @4
+  flags      : u16 @6
+  node_count : u32 @8
+  node_off   : u32 @12
+  str_off    : u32 @16
+  str_len    : u32 @20
+  tok_off    : u32 @24
+  tok_count  : u32 @28
+  anim_off   : u32 @32   // v1 保留
+  anim_count : u32 @36   // v1 保留
+  doc_w      : u16 @40
+  doc_h      : u16 @42
+  root       : u16 @44
+  reserved   : u16 @46
+}
+
+// 节点记录 64B (BFS 展平, first_child 指向连续子块首节点)
+record Node layout(packed, size=64, endian=little) {
+  kind        : u16 @0
+  id          : u16 @2
+  flags       : u16 @4
+  children    : u16 @6
+  x           : i16 @8
+  y           : i16 @10
+  w_mode      : u16 @12
+  w_val       : u16 @14
+  h_mode      : u16 @16
+  h_val       : u16 @18
+  pad_l       : u16 @20
+  pad_t       : u16 @22
+  pad_r       : u16 @24
+  pad_b       : u16 @26
+  gap         : u16 @28
+  radius      : u16 @30
+  elev        : u16 @32
+  align       : u16 @34
+  justify     : u16 @36
+  size        : u16 @38
+  bg          : u32 @40
+  fg          : u32 @44
+  text_id     : u32 @48
+  tone        : u16 @52
+  opacity     : u16 @54
+  first_child : u32 @56
+  extra       : u32 @60
+}
