@@ -1,0 +1,20 @@
+module fuc_node
+
+// M69: FUI 控件 —— 按 lom/fuc.lom 的 Node 布局 (64B, 小端) 打包。
+// 与 tools/fuic.py 的 NODE_FMT 对账 (loment_p7_test)。
+use "loment/examples/bytes.lomt"
+
+/// 打包一个最小节点; 返回 64。
+pub fn pack_node(p: ptr, kind: u32, id: u32, x: u32, y: u32, bg: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 64 {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+    store16(p, 0, kind);
+    store16(p, 2, id);
+    store16(p, 8, x);
+    store16(p, 10, y);
+    store32(p, 40, bg);
+    return 64;
+}

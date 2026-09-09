@@ -315,6 +315,15 @@ def audit_l1(diffs: list[str]) -> None:
     elif cap.read_text(encoding="utf-8") != want_cap:
         diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 与形式对象不一致 (M50)")
 
+    # M72: 系统调用层必须由 lom/fuai.lom 单源生成
+    import loment_syscalls
+    syscalls = ROOT / "loment" / "build" / "fuai_syscalls.lomt"
+    want_sys = loment_syscalls.emit()
+    if not syscalls.exists():
+        diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 缺失 (M72)")
+    elif syscalls.read_text(encoding="utf-8") != want_sys:
+        diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 与 lom/fuai.lom 不一致 (M72)")
+
 
 def main() -> int:
     diffs: list[str] = []

@@ -1,0 +1,37 @@
+module selfcheck
+
+// M77: 内核自检 —— Loment 程序在用户态验证内核 ABI 的基本不变量。
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn fail(what: str) {
+    write_str(1, "M77 RESULT: FAIL ");
+    write_str(1, what);
+    write_str(1, "\n");
+    syscall4(60, 1, 0, 0);
+}
+
+fn _start() {
+    let pid: i64 = syscall4(39, 0, 0, 0);
+    if pid <= 0 {
+        fail("getpid");
+    }
+    let t: i64 = syscall4(201, 0, 0, 0);
+    if t <= 0 {
+        fail("time");
+    }
+    let buf: ptr = alloc(8);
+    let r: i64 = syscall4(317, buf as u64, 8, 0);
+    if r != 8 {
+        fail("getrandom");
+    }
+    let a: u32 = 6;
+    let b: u32 = 7;
+    if a * b != 42 {
+        fail("arith");
+    }
+    write_str(1, "M77 RESULT: PASS selfcheck\n");
+    syscall4(60, 0, 0, 0);
+}

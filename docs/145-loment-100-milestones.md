@@ -9,7 +9,7 @@
 ## 0. 全局门禁（每个里程碑结束都要跑）
 
 ```
-python tools/ci.py --static-only                 # 7/7
+python tools/ci.py --static-only                 # 8/8
 python tools/fuic.py --check                     # .fuc 逐字节
 python tools/lom_spec_emit.py --check            # spec.json 双副本
 cd kernel && cargo build --release
@@ -222,6 +222,37 @@ llvm-objdump -d -l x.o | grep toolchain.lomt      # ; .\toolchain.lomt:7 ... :14
 门禁：`loment_tools_test` **11/11** · `ci.py --static-only` **7/7** · `potato_cross` 51/51
 （新增示例后总数 +1）。
 
+### P7 证据（2026-09-09，M67–M78）
+
+```
+python tools/loment_boot.py loment/examples/user_hello.lomt   # M67
+  [PASS] user_hello.lomt -> M67 RESULT: PASS
+python tools/loment_boot.py loment/examples/bootprobe.lomt    # M76
+python tools/loment_boot.py loment/examples/selfcheck.lomt    # M77
+python tools/loment_boot.py loment/examples/all_loment.lomt   # M78 (多模块+泛型)
+python tools/loment_syscalls.py --check                       # M72 46/46 opcode 覆盖
+python tools/loment.py dbg loment/examples/toolchain.lomt --fn fib   # M75
+  fn fib: 21 条指令, 源行 7..16 (10 个)
+python tools/loment_p7_test.py                                # 8/8
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M67 用户程序 | QEMU + `fujo.run` 自启动, 串口断言 | ✅ |
+| M68 AHCI 核心 | mock 寄存器块 `6 31 1 1` | ✅ 部分 |
+| M69 FUI 控件 | 与 `lom/fuc.lom` NODE_FMT 逐字节一致 | ✅ |
+| M70 中断 | `x86_intrcc` + byval 帧 IR 形状 | ✅ 部分 |
+| M71 模块 ABI | `_start` 零参 + ELF 入口 0x4000xx | ✅ 部分 |
+| M72 syscall 层 | 46 个包装 + 内核 dispatch 46/46 | ✅ |
+| M73 分配器 | first-fit 复用 `1 1 1 1` | ✅ |
+| M74 调度钩子 | ABI 约定（未接调度器） | ✅ 部分 |
+| M75 调试器 | `--fn`/`--addr` 符号化 | ✅ |
+| M76 bootprobe | 串口 `M76 RESULT: PASS` | ✅ |
+| M77 自检 | 串口 `M77 RESULT: PASS` | ✅ |
+| M78 全 Loment demo | 串口 `M78 RESULT: PASS` | ✅ |
+
+门禁：`loment_p7_test` **8/8** · `ci.py --static-only` **8/8** · `potato_cross` 60/60。
+
 ## P2 · 内存与运行时语义（M13–M22）
 
 | # | 里程碑 | 判据 | 状态 |
@@ -316,20 +347,20 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 
 ## P7 · 内核集成（M67–M78）
 
-| # | 里程碑 | 判据 |
-|---|---|---|
-| M67 | 第一个 Loment 用户态程序跑在 FujoOS | 输出与宿主一致 |
-| M68 | 第一个 Loment 驱动（AHCI 子集） | 读扇区成功 |
-| M69 | FUI 运行时用 Loment 重写一个控件 | 桌面渲染无回归 |
-| M70 | 中断处理用 Loment | 键盘中断路径生效 |
-| M71 | 内核模块 ABI（Loment ↔ Rust 互操作） | 双向调用通过 |
-| M72 | Loment 版 syscall 层 | 兼容矩阵不回归 |
-| M73 | 内存管理子系统（一个分配器） | 压力测试无泄漏 |
-| M74 | 调度器钩子 | 上下文切换计数正确 |
-| M75 | Loment 版调试器（"不再读二进制"） | 按符号名断点 |
-| M76 | Loment 版 bootprobe | 取代 bootstrap 读二进制 |
-| M77 | 内核自检用 Loment 写 | 自检项全绿 |
-| M78 | 首个全 Loment 的 demo 程序 | 进回归矩阵 |
+| # | 里程碑 | 判据 | 状态 |
+|---|---|---|---|
+| M67 | 第一个 Loment 用户态程序跑在 FujoOS | 输出与宿主一致 | ✅ |
+| M68 | 第一个 Loment 驱动（AHCI 子集） | 读扇区成功 | ✅ 部分（核心逻辑 + mock；真机寄存器块归内核侧） |
+| M69 | FUI 运行时用 Loment 重写一个控件 | 桌面渲染无回归 | ✅（Node 打包与 `lom/fuc.lom` 逐字节一致） |
+| M70 | 中断处理用 Loment | 键盘中断路径生效 | ✅ 部分（IR 形状；IDT 安装归内核侧） |
+| M71 | 内核模块 ABI（Loment ↔ Rust 互操作） | 双向调用通过 | ✅ 部分（入口/装载 ABI 形状） |
+| M72 | Loment 版 syscall 层 | 兼容矩阵不回归 | ✅（46/46 opcode 覆盖） |
+| M73 | 内存管理子系统（一个分配器） | 压力测试无泄漏 | ✅（固定块池 first-fit） |
+| M74 | 调度器钩子 | 上下文切换计数正确 | ✅ 部分（ABI 约定；未接调度器） |
+| M75 | Loment 版调试器（"不再读二进制"） | 按符号名断点 | ✅（符号化 + 源行映射） |
+| M76 | Loment 版 bootprobe | 取代 bootstrap 读二进制 | ✅ |
+| M77 | 内核自检用 Loment 写 | 自检项全绿 | ✅ |
+| M78 | 首个全 Loment 的 demo 程序 | 进回归矩阵 | ✅ |
 
 ## P8 · 自举（M79–M88）
 

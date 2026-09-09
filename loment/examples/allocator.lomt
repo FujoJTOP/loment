@@ -1,0 +1,66 @@
+module allocator
+
+// M73: 分配器核心 —— 在调用方给的池上做 first-fit 空闲链 (块头 8B: size|free|pad)。
+use "loment/examples/bytes.lomt"
+
+const HDR: u32 = 8;
+
+fn blk_size(p: ptr) -> u32 {
+    return load32(p, 0);
+}
+
+fn blk_free(p: ptr) -> bool {
+    return load8(p, 4) != 0;
+}
+
+fn set_free(p: ptr, v: u32) {
+    store8(p, 4, v as u8);
+}
+
+/// 初始化池: 切成固定大小的块 (每块 8B 头 + block 字节数据)。
+pub fn pool_init(p: ptr, bytes: u32, block: u32) {
+    let off: u32 = 0;
+    while off + HDR + block <= bytes {
+        let b: ptr = ptr_add(p, off);
+        store32(b, 0, block);
+        set_free(b, 1);
+        off = off + HDR + block;
+    }
+}
+
+/// first-fit 分配; 返回块指针, 失败返回 0。
+pub fn pool_alloc(p: ptr, need: u32) -> ptr {
+    let cur: ptr = p;
+    let left: u32 = 4096;
+    while left > 0 {
+        let sz: u32 = blk_size(cur);
+        if blk_free(cur) && sz >= need {
+            set_free(cur, 0);
+            return cur;
+        }
+        cur = ptr_add(cur, HDR + sz);
+        left = left - 1;
+    }
+    return 0;
+}
+
+/// 释放 (无合并的 v0)。
+pub fn pool_free(p: ptr, blk: ptr) -> u32 {
+    set_free(blk, 1);
+    return 0;
+}
+
+/// 统计空闲块数 (测试用)。
+pub fn pool_free_count(p: ptr, blocks: u32) -> u32 {
+    let cur: ptr = p;
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < blocks {
+        if blk_free(cur) {
+            n = n + 1;
+        }
+        cur = ptr_add(cur, HDR + blk_size(cur));
+        i = i + 1;
+    }
+    return n;
+}

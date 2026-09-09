@@ -1,0 +1,21 @@
+module bytes
+
+// 多字节内存访问助手 (M68/M73 共用): 小端。
+
+pub fn load16(p: ptr, off: u32) -> u32 {
+    return load8(p, off) + load8(p, off + 1) * 256;
+}
+
+pub fn load32(p: ptr, off: u32) -> u32 {
+    return load16(p, off) + load16(p, off + 2) * 65536;
+}
+
+pub fn store16(p: ptr, off: u32, v: u32) {
+    store8(p, off, v as u8);
+    store8(p, off + 1, (v / 256) as u8);
+}
+
+pub fn store32(p: ptr, off: u32, v: u32) {
+    store16(p, off, v % 65536);
+    store16(p, off + 2, v / 65536);
+}

@@ -1,0 +1,110 @@
+{
+  "potato": "v1",
+  "unit": "all_loment",
+  "language": "loment",
+  "imports": [
+    "mathutil"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "write_str",
+      "params": [
+        {
+          "name": "fd",
+          "type": "u64"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "write_dec",
+      "params": [
+        {
+          "name": "fd",
+          "type": "u64"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "fib",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "_start",
+      "params": [],
+      "ret": "()"
+    },
+    {
+      "name": "max_of_u32",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "fn",
+      "name": "max_of",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "kind": "fn",
+      "name": "max_of_u32",
+      "of": "max_of",
+      "args": [
+        "u32"
+      ]
+    }
+  ],
+  "guards": 0,
+  "excluded": []
+}

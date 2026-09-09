@@ -1,0 +1,67 @@
+{
+  "potato": "v1",
+  "unit": "fuc_node",
+  "language": "loment",
+  "imports": [
+    "bytes"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "pack_node",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        },
+        {
+          "name": "x",
+          "type": "u32"
+        },
+        {
+          "name": "y",
+          "type": "u32"
+        },
+        {
+          "name": "bg",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

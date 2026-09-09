@@ -44,6 +44,11 @@ BUILTINS = {
     "outb": (("u16", "u8"), "u32"),
     "get_bits": (("u8", "u32", "u32"), "u8"),        # M22: 位域读
     "set_bits": (("u8", "u32", "u32", "u8"), "u8"),  # M22: 位域写
+    "str_ptr": (("str",), "ptr"),                    # M67: str 数据指针 (syscall 用)
+    "ptr_add": (("ptr", "u32"), "ptr"),              # M73: 指针字节偏移
+    "ptr_sub": (("ptr", "u32"), "ptr"),
+    "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
+    "syscall6": (("u64", "u64", "u64", "u64", "u64", "u64"), "i64"),  # M72: nr, a0..a4
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 
@@ -1069,9 +1074,9 @@ class Parser:
     def parse_primary(self):
         t = self.peek()
         if t.kind == "number":
-            return IntLit(self.int_lit(), t.line)
+            return self.parse_postfix(IntLit(self.int_lit(), t.line))
         if t.kind == "string":
-            return StrLit(self.next().val, t.line)
+            return self.parse_postfix(StrLit(self.next().val, t.line))
         if t.kind == "punct" and t.val == "(":
             self.next()
             e = self.parse_expr()
@@ -1089,10 +1094,10 @@ class Parser:
         if t.kind == "ident":
             if t.val == "true":
                 self.next()
-                return BoolLit(True, t.line)
+                return self.parse_postfix(BoolLit(True, t.line))
             if t.val == "false":
                 self.next()
-                return BoolLit(False, t.line)
+                return self.parse_postfix(BoolLit(False, t.line))
             name = self.next().val
             if self.at("punct", ":") and self.peek(1).kind == "punct" and self.peek(1).val == ":":
                 self.next()
@@ -1639,6 +1644,10 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return funcs[e.name].ret if e.name in funcs else None
     if isinstance(e, Cast):
         st = expr_type(e.expr, scope, funcs, structs)
+        if st == "ptr" and e.type in ("u64", "i64"):  # M67
+            return e.type
+        if st is None and isinstance(e.expr, IntLit) and e.type in INT_TYPES:
+            return e.type
         if st is not None and (st in INT_TYPES or st == "bool") \
                 and (e.type in INT_TYPES or e.type == "bool"):
             return e.type
@@ -1771,6 +1780,12 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Cast):
         _walk_expr(e.expr, scope, funcs, structs, errs, enums)
         st = expr_type(e.expr, scope, funcs, structs)
+        if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
+            return
+        if st is None and isinstance(e.expr, IntLit):  # 整型字面量按目标定宽
+            if e.type not in INT_TYPES:
+                errs.append(f"{e.line}: as 目标类型非法 {e.type}")
+            return
         if st is None or not (st in INT_TYPES or st == "bool"):
             errs.append(f"{e.line}: as 只能作用于整型/布尔 (得到 {st})")
         elif e.type not in INT_TYPES and e.type != "bool":
@@ -2359,6 +2374,28 @@ def _expr_rs(e) -> str:
         if e.name == "outb":
             return ('{ unsafe { core::arch::asm!("out dx, al", '
                     'in("dx") (' + a[0] + ') as u16, in("al") (' + a[1] + ') as u8); } 0u32 }')
+        if e.name == "str_ptr":  # M67
+            return f"(({a[0]}).as_ptr() as *mut u8)"
+        if e.name == "ptr_add":  # M73
+            return f"(({a[0]}) as *mut u8).add(({a[1]}) as usize)"
+        if e.name == "ptr_sub":
+            return f"(({a[0]}) as *mut u8).sub(({a[1]}) as usize)"
+        if e.name == "syscall4":  # M67: Linux 系统调用 (rax/rdi/rsi/rdx)
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
+        if e.name == "syscall6":  # M72: nr + a0..a4
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "in(\"r10\") (" + a[4] + ") as i64, "
+                    "in(\"r8\") (" + a[5] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
         if e.name == "str_len":
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
@@ -2831,6 +2868,8 @@ class _Ir:
     # -- 表达式 -> (loment 类型, 值)
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
         if isinstance(e, IntLit):
+            if want == "ptr":  # M73: 空指针字面量
+                return "ptr", "null"
             return (want or "i32"), str(e.value)
         if isinstance(e, BoolLit):
             return "i1", ("1" if e.value else "0")
@@ -2890,6 +2929,10 @@ class _Ir:
             _, v = self.expr(e.expr, None)
             if st == e.type:
                 return e.type, v
+            if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
+                r = self.t()
+                self.w(f"{r} = ptrtoint ptr {v} to {self.ll(e.type)}")
+                return e.type, r
             si, di = self.ll(st or "u32"), self.ll(e.type)
             sw, dw = _bit_width(st or "u32"), _bit_width(e.type)
             op = "trunc" if dw < sw else ("sext" if (st in _SIGNED) else "zext")
@@ -2905,6 +2948,9 @@ class _Ir:
             for a, p in zip(e.args, fn.params[1:]):
                 _, av = self.expr(a, p.type)
                 args.append(f"{self.ll(p.type)} {av}")
+            if fn.ret == "()":
+                self.w(f"call void @{fn.name}({', '.join(args)})")
+                return "()", ""
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
@@ -2920,6 +2966,9 @@ class _Ir:
             for a, p in zip(e.args, fn.params):
                 _, av = self.expr(a, p.type)
                 args.append(f"{self.ll(p.type)} {av}")
+            if fn.ret == "()":  # void 调用不能带名字
+                self.w(f"call void @{fn.name}({', '.join(args)})")
+                return "()", ""
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
@@ -2999,8 +3048,25 @@ class _Ir:
 
     def binop(self, e: Bin, want: str | None) -> tuple[str, str]:
         scope = self.type_scope()
-        ty = (expr_type(e.left, scope, self.funcs, {})
-              or expr_type(e.right, scope, self.funcs, {}) or want or "u32")
+        lt = expr_type(e.left, scope, self.funcs, {})
+        rt = expr_type(e.right, scope, self.funcs, {})
+        if e.op in ("==", "!=") and (lt == "ptr" or rt == "ptr"):  # M73: 指针比较
+            _, a = self.expr(e.left, "ptr")
+            _, b = self.expr(e.right, "ptr")
+            r = self.t()
+            self.w(f"{r} = icmp {e.op} ptr {a}, {b}")
+            return "bool", r
+        if lt == "ptr" and e.op in ("+", "-") and rt != "ptr":  # M73: 指针算术 (字节)
+            _, a = self.expr(e.left, "ptr")
+            _, n = self.expr(e.right, "u64")
+            if e.op == "-":
+                nn = self.t()
+                self.w(f"{nn} = sub i64 0, {n}")
+                n = nn
+            r = self.t()
+            self.w(f"{r} = getelementptr inbounds i8, ptr {a}, i64 {n}")
+            return "ptr", r
+        ty = (lt or rt or want or "u32")
         it = _ir_t(ty)
         signed = ty in _SIGNED
         op = e.op
@@ -3151,6 +3217,39 @@ class _Ir:
             return "u8", r
         if e.name in ("inb", "outb"):  # M20: 仅 Rust 路径
             raise LomError(e.line, 1, f"native: {e.name} 暂未在 IR 后端实现 (M20 仅 Rust 路径)")
+        if e.name == "str_ptr":  # M67
+            _, sv = self.expr(e.args[0], "str")
+            p = self.t()
+            self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+            return "ptr", p
+        if e.name in ("ptr_add", "ptr_sub"):  # M73
+            _, pv = self.expr(e.args[0], "ptr")
+            _, nv = self.expr(e.args[1], "u32")
+            n64 = self.t()
+            self.w(f"{n64} = zext i32 {nv} to i64")
+            if e.name == "ptr_sub":
+                nn = self.t()
+                self.w(f"{nn} = sub i64 0, {n64}")
+                n64 = nn
+            r = self.t()
+            self.w(f"{r} = getelementptr inbounds i8, ptr {pv}, i64 {n64}")
+            return "ptr", r
+        if e.name == "syscall4":  # M67: Linux 系统调用
+            vals = [self.expr(a, "u64")[1] for a in e.args]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
+                   f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]})")
+            return "i64", r
+        if e.name == "syscall6":  # M72: nr + a0..a4 (r10/r8)
+            vals = [self.expr(a, "u64")[1] for a in e.args]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},{{r10}},{{r8}},~{{cx}},~{{r11}},'
+                   f'~{{memory}}"'
+                   f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
+                   f"i64 {vals[4]}, i64 {vals[5]})")
+            return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")
             self.w("call void @__loment_abort()")

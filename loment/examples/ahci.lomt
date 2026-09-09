@@ -1,0 +1,35 @@
+module ahci
+
+// M68: AHCI 驱动核心 (纯逻辑, 寄存器块由调用方提供 -> 可在宿主/内核两侧复用)。
+use "loment/examples/bytes.lomt"
+
+pub fn popcount32(x: u32) -> u32 {
+    let v: u32 = x;
+    let c: u32 = 0;
+    while v != 0 {
+        c = c + v % 2;
+        v = v / 2;
+    }
+    return c;
+}
+
+/// PI (0x0C) 的置位数 = 已实现端口数。
+pub fn ahci_port_count(base: ptr) -> u32 {
+    return popcount32(load32(base, 12));
+}
+
+/// CAP.NCS (bits 0..4) = 每条命令列表的最大槽位数。
+pub fn ahci_ncs(base: ptr) -> u32 {
+    return load32(base, 0) & 31;
+}
+
+/// CAP (0x00) 的 bit31 = 64 位寻址支持。
+pub fn ahci_supports_64bit(base: ptr) -> bool {
+    return load32(base, 0) / 2147483648 != 0;
+}
+
+/// GHC.AE (0x04 bit31) 置位 -> AHCI 使能。
+pub fn ahci_enable(base: ptr) -> u32 {
+    store32(base, 4, load32(base, 4) | 2147483648);
+    return load32(base, 4) / 2147483648;
+}

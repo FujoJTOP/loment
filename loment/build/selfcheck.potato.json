@@ -1,0 +1,64 @@
+{
+  "potato": "v1",
+  "unit": "selfcheck",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "write_str",
+      "params": [
+        {
+          "name": "fd",
+          "type": "u64"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fail",
+      "params": [
+        {
+          "name": "what",
+          "type": "str"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "_start",
+      "params": [],
+      "ret": "()"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

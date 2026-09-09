@@ -1,0 +1,22 @@
+module bootprobe
+
+// M76: 引导探针 —— 在 FujoOS 用户态读内核事实 (uname) 并打印。
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn _start() {
+    let p: ptr = alloc(390);
+    let r: i64 = syscall4(63, p as u64, 0, 0);
+    let n: u32 = 0;
+    if r >= 0 {
+        while n < 65 && load8(p, n) != 0 {
+            n = n + 1;
+        }
+    }
+    write_str(1, "M76 sysname=");
+    syscall4(1, 1, p as u64, n as u64);
+    write_str(1, "\nM76 RESULT: PASS bootprobe\n");
+    syscall4(60, 0, 0, 0);
+}

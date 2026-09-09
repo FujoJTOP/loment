@@ -1,0 +1,137 @@
+{
+  "potato": "v1",
+  "unit": "allocator",
+  "language": "loment",
+  "imports": [
+    "bytes"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "blk_size",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "blk_free",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "set_free",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "pool_init",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "bytes",
+          "type": "u32"
+        },
+        {
+          "name": "block",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "pool_alloc",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "need",
+          "type": "u32"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "pool_free",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "blk",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "pool_free_count",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "blocks",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [
+    {
+      "name": "HDR",
+      "type": "u32",
+      "value": 8
+    }
+  ],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

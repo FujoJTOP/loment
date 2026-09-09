@@ -302,3 +302,17 @@ docs/110 定 Potato 入场于波 C（兼容层 + Agent 运行之后）。本方�
 | **门禁** | `ci.py --static-only` 7 项（+`loment_tools_test`） | **7/7** |
 
 里程碑进度 **58/100**（M56 无编辑器宿主、M59 无变量信息为部分；M48/M50 部分待后续）。
+
+### 11.3 进度（2026-09-09，P7 完成）
+
+| 里程碑 | 交付 | 证据 |
+|---|---|---|
+| M67/M76/M77/M78 | Loment 程序在 FujoOS 用户态运行（`_start` + Linux ABI） | 串口 4 条 `RESULT: PASS` |
+| M68/M70/M71/M74 | AHCI 核心 / 中断 IR 形状 / 模块 ABI / 调度钩子约定 | mock 与形状断言（内核侧接入待做） |
+| M69 | FUI Node 打包与 `lom/fuc.lom` 逐字节一致 | `NODE_FMT` 对照 |
+| M72 | syscall 层由 `lom/fuai.lom` 生成 | 46/46 opcode 覆盖 |
+| M73 | 固定块池 first-fit 分配器 | 复用测试 `1 1 1 1` |
+| M75 | `loment dbg` 符号化（源行映射） | `fn fib: 源行 7..16` |
+| **门禁** | `ci.py --static-only` 8 项（+`loment_p7_test`） | **8/8** |
+
+里程碑进度 **70/100**（P7 中 M68/M70/M71/M74 为部分：内核侧接入与并发开发线冲突，留待后续）。

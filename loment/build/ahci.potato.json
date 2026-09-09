@@ -1,0 +1,87 @@
+{
+  "potato": "v1",
+  "unit": "ahci",
+  "language": "loment",
+  "imports": [
+    "bytes"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "popcount32",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "ahci_port_count",
+      "params": [
+        {
+          "name": "base",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "ahci_ncs",
+      "params": [
+        {
+          "name": "base",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "ahci_supports_64bit",
+      "params": [
+        {
+          "name": "base",
+          "type": "ptr"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "ahci_enable",
+      "params": [
+        {
+          "name": "base",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

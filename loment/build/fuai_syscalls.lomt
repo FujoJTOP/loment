@@ -1,0 +1,188 @@
+// 由 tools/loment_syscalls.py 从 lom/fuai.lom 生成 —— 请勿手改。
+// 46 个 FUAI 原语的 Loment 包装: syscall6(opcode, a0, a1, a2, a3, a4)。
+
+module fuai_syscalls
+
+pub fn fuai_classify(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(20737, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_fetch(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(20738, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(20740, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ctx_compress(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(32769, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ctx_subscribe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(32770, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ctx_events(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(32771, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ctx_inject(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(32772, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ctx_struct(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(32773, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_cap_grant(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33025, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_cap_check(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33026, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_aud_log(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33027, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_aud_read(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33028, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_cap_exec(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33029, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_cfg_get(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33030, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_dom_create(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33031, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_dom_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33032, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_dom_revoke(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33033, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_dom_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33034, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_route_set(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33281, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_route_classify(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33282, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_route_table(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33283, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_infer_run(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33537, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_infer_slot(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33538, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_infer_set(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33539, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_anom_run(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33540, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_plan_run(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33541, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_io_predict(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33542, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_nlc_set(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33543, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_env_scan(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33544, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_r3_probe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33545, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_inv_run(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33546, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_rules_load(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33547, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ai_stats(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33548, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ai_audit(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33549, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_cr3_probe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33550, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_evl_mode(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33551, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_ev_digest(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33554, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_dom_admit(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33555, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_qual_feed(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33556, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_qual_seq(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33557, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_box_run(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33558, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_box_stat(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33559, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_box_result(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33560, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_box_fb_info(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33561, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_box_contract(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(33568, a0, a1, a2, a3, a4);
+}
+
+pub fn fuai_unified_aud(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    return syscall6(35841, a0, a1, a2, a3, a4);
+}

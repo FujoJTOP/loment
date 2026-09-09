@@ -237,6 +237,65 @@ int main(void) {{
     return 0
 
 
+def cmd_dbg(a) -> int:
+    """M75: 源码级符号化 —— 地址 <-> 源行 (基于 DWARF 行表)。"""
+    import re
+    p, mod, deps = _load(a.file)
+    ir = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
+    with tempfile.TemporaryDirectory() as td:
+        ll = Path(td) / "m.ll"
+        ll.write_text(ir, encoding="utf-8")
+        obj = Path(td) / "m.o"
+        r = subprocess.run(
+            [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+             "--target=x86_64-unknown-none", "-ffreestanding", "-g", "-c",
+             str(ll), "-o", str(obj)], capture_output=True, text=True, shell=False)
+        if r.returncode:
+            print(r.stderr, file=sys.stderr)
+            return 1
+        dump = subprocess.run(
+            [shutil.which("llvm-objdump") or r"C:\Program Files\LLVM\bin\llvm-objdump.exe",
+             "-d", "-l", str(obj)], capture_output=True, text=True, shell=False).stdout
+    rows: list[tuple[int, str, str]] = []   # (addr, src, fn)
+    cur_fn, cur_src = "?", ""
+    for ln in dump.splitlines():
+        s = ln.strip()
+        m = re.match(r"^([0-9a-f]+) <([^>]+)>:", s)
+        if m:
+            cur_fn = m.group(2)
+            continue
+        if s.startswith(";"):
+            cur_src = s.lstrip("; ").strip()
+            continue
+        m = re.match(r"^([0-9a-f]+):", s)
+        if m and cur_src:
+            rows.append((int(m.group(1), 16), cur_src, cur_fn))
+    if a.addr is not None:
+        addr = int(a.addr, 0)
+        hit = [r for r in rows if r[0] <= addr]
+        if not hit:
+            print(f"[ERR] 地址 {addr:#x} 无行表条目", file=sys.stderr)
+            return 1
+        best = max(hit, key=lambda r: r[0])
+        print(f"{addr:#x} -> {best[1]} ({best[2]}+{addr - best[0]:#x})")
+        return 0
+    fn = a.func
+    sel = [r for r in rows if r[2] == fn]
+    if not sel:
+        fns = sorted({r[2] for r in rows if r[2] != "?"})
+        print(f"[ERR] 无函数 {fn}; 可用: {', '.join(fns[:8])}", file=sys.stderr)
+        return 1
+    srcs = []
+    for _, s, _ in sel:
+        if s not in srcs:
+            srcs.append(s)
+    lines = [int(x.rsplit(":", 1)[1]) for x in srcs if x.rsplit(":", 1)[-1].isdigit()]
+    print(f"fn {fn}: {len(sel)} 条指令, 源行 {min(lines)}..{max(lines)} ({len(srcs)} 个)")
+    for s in srcs[:12]:
+        print(f"  {s}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment", description="Loment 工具链")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -252,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:
     b.set_defaults(fn=cmd_bench)
     c = sub.add_parser("cov"); c.add_argument("file"); c.add_argument("--call", default="cov_main")
     c.set_defaults(fn=cmd_cov)
+    g = sub.add_parser("dbg"); g.add_argument("file")
+    g.add_argument("--fn", dest="func", default=None, help="按函数列出源行")
+    g.add_argument("--addr", default=None, help="地址 -> 源行")
+    g.set_defaults(fn=cmd_dbg)
     for name in ("build", "pkg", "lsp"):
         s = sub.add_parser(name)
         s.add_argument("rest", nargs=argparse.REMAINDER)

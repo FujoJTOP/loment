@@ -1,0 +1,1231 @@
+{
+  "potato": "v1",
+  "unit": "fuai_syscalls",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "fuai_classify",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_fetch",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_info",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ctx_compress",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ctx_subscribe",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ctx_events",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ctx_inject",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ctx_struct",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_cap_grant",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_cap_check",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_aud_log",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_aud_read",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_cap_exec",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_cfg_get",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_dom_create",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_dom_bind",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_dom_revoke",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_dom_info",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_route_set",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_route_classify",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_route_table",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_infer_run",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_infer_slot",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_infer_set",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_anom_run",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_plan_run",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_io_predict",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_nlc_set",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_env_scan",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_r3_probe",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_inv_run",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_rules_load",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ai_stats",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ai_audit",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_cr3_probe",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_evl_mode",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_ev_digest",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_dom_admit",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_qual_feed",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_qual_seq",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_box_run",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_box_stat",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_box_result",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_box_fb_info",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_box_contract",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "fuai_unified_aud",
+      "params": [
+        {
+          "name": "a0",
+          "type": "u64"
+        },
+        {
+          "name": "a1",
+          "type": "u64"
+        },
+        {
+          "name": "a2",
+          "type": "u64"
+        },
+        {
+          "name": "a3",
+          "type": "u64"
+        },
+        {
+          "name": "a4",
+          "type": "u64"
+        }
+      ],
+      "ret": "i64"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

@@ -1,0 +1,24 @@
+module user_hello
+
+// M67: 第一个 Loment 用户程序 —— 在 FujoOS 用户态跑起来, 经 Linux ABI 打印。
+// 编译 (docs/149):
+//   python tools/lomentc.py loment/examples/user_hello.lomt \
+//          --emit-llvm loment/build/user_hello.ll \
+//          --emit-potato loment/build/user_hello.potato.json
+//   clang --target=x86_64-unknown-linux-gnu -nostdlib -static -fno-pie -no-pie \
+//         -fuse-ld=lld -Wl,-e,_start loment/build/user_hello.ll \
+//         -o loment/build/user_hello.elf
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn exit(code: u64) -> i64 {
+    return syscall4(60, code, 0, 0);
+}
+
+fn _start() {
+    let msg: str = "M67 RESULT: PASS loment-user\n";
+    write_str(1, msg);
+    exit(0);
+}
