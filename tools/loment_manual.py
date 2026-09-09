@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+# loment_manual.py — 语言手册站点生成 (M93, docs/151)
+#
+# 判据: 手册与编译器同版本 —— 站点里写入编译器版本戳, --check 逐字节对账。
+#   python tools/loment_manual.py --emit docs/manual
+#   python tools/loment_manual.py --check
+# 退出码: 0 = 一致 / 1 = 有差异 / 2 = 用法错误。
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomdoc  # noqa: E402
+import lomentc  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+EX = ROOT / "loment" / "examples"
+SPECS = ["docs/141-l0-lom-spec.md", "docs/142-potato-v0.md", "docs/143-l1-loment-v0.md",
+         "docs/144-loment-native-backend.md", "docs/146-loment-capability-semantics.md",
+         "docs/147-potato-v1-spec.md", "docs/148-loment-toolchain.md",
+         "docs/149-loment-kernel-integration.md", "docs/150-loment-selfhost.md"]
+
+
+def compiler_version() -> str:
+    h = hashlib.sha256((ROOT / "tools" / "lomentc.py").read_bytes()).hexdigest()[:12]
+    return f"lomentc-{h}"
+
+
+def build() -> dict[str, str]:
+    ver = compiler_version()
+    out: dict[str, str] = {}
+    idx = ["# Loment 语言手册", "",
+           f"> 编译器版本戳: `{ver}`（由 tools/loment_manual.py 生成）", "",
+           "## 规范", ""]
+    for s in SPECS:
+        p = ROOT / s
+        if p.exists():
+            idx.append(f"- [{p.name}](../{p.name})")
+    idx += ["", "## 示例 API", ""]
+    for src in sorted(EX.glob("*.lomt")):
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        if lomentc.check(mod, deps=deps):
+            continue
+        text = lomdoc.render(mod, src.read_text(encoding="utf-8"), str(src))
+        out[f"api/{src.stem}.md"] = text
+        idx.append(f"- [{src.stem}](api/{src.stem}.md)")
+    out["index.md"] = "\n".join(idx).rstrip() + "\n"
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="loment_manual")
+    ap.add_argument("--emit", metavar="DIR")
+    ap.add_argument("--check", action="store_true")
+    a = ap.parse_args(argv)
+    files = build()
+    if a.check:
+        base = ROOT / "docs" / "manual"
+        bad = 0
+        for rel, text in files.items():
+            p = base / rel
+            if not p.exists() or p.read_text(encoding="utf-8") != text:
+                bad += 1
+                print(f"[DIFF] docs/manual/{rel}")
+        print(f"loment_manual: {len(files) - bad}/{len(files)} 与编译器版本一致")
+        return 1 if bad else 0
+    if a.emit:
+        base = Path(a.emit)
+        for rel, text in files.items():
+            p = base / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        print(f"[OK] {len(files)} 个文件 -> {base}")
+        return 0
+    print("[ERR] 需要 --emit 或 --check", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

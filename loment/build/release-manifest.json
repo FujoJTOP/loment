@@ -1,0 +1,405 @@
+{
+ "release": "loment-1.0-pre",
+ "files": [
+  {
+   "path": "tools/lomc.py",
+   "sha256": "db62cb3db186967ccf914d293230258805429cde8f73ceaa0afd12b3d9506df8"
+  },
+  {
+   "path": "tools/lom_audit.py",
+   "sha256": "5f463622789f4593388d81ab2be041f397a7f1b592c554321a34da51f4b3f39c"
+  },
+  {
+   "path": "tools/lomc_test.py",
+   "sha256": "b5593cb723d7989e782c3289ba5a861e45439ccc37433a68d861b3a22bbb8bc9"
+  },
+  {
+   "path": "tools/lomentc.py",
+   "sha256": "3a3332518b2489f17e68feb7f3704645442b168c174d4f019e2d1cca2a812d11"
+  },
+  {
+   "path": "tools/lomentc_test.py",
+   "sha256": "00368f3a151444aaafa3fcf5d9d780ccc2958819447cc7dae347750a22128625"
+  },
+  {
+   "path": "tools/potato.py",
+   "sha256": "7e962cd5d71f06df2fbce00c479037ecdca2e01413692ff03e9ddcd1bcb67a5d"
+  },
+  {
+   "path": "tools/potato_test.py",
+   "sha256": "e313fa0cffe2dc3aa89bb456f2c1721eb04ea78863ba115d758dd84c3da95f1c"
+  },
+  {
+   "path": "tools/potato_cross.py",
+   "sha256": "b8ad9d66b8539041f7fd3360108fa5a44997bd61185363b20bc586ea703a680b"
+  },
+  {
+   "path": "tools/potato_from.py",
+   "sha256": "cc428d40df5675647b81ae166dffa0db5b1e8007d5bd6cca7f500c487b3a1c94"
+  },
+  {
+   "path": "tools/potato_measure.py",
+   "sha256": "b91091d0ccb67f6d0aba29d457ed4ab49537f461d749197eb5dd27d46c407804"
+  },
+  {
+   "path": "tools/potato_assert.py",
+   "sha256": "7ee1e957d0441bb9b803dbdf4d68423afd45186672a15452de97215b813709cb"
+  },
+  {
+   "path": "tools/loment.py",
+   "sha256": "eac33fa7b07e486a60ee751736513dd32c09ae1bcb4fa71c41da4fc0d3fae617"
+  },
+  {
+   "path": "tools/lomfmt.py",
+   "sha256": "304bb77c0591567ceefdb5000f02626ce994eda1ca6d59eeb4f99495512eb695"
+  },
+  {
+   "path": "tools/lomdoc.py",
+   "sha256": "96e9aaf3192b53a9a575adac6ab0a4798345936dee0737bbaa91f0a221676f6d"
+  },
+  {
+   "path": "tools/lompkg.py",
+   "sha256": "f2c8e1f1e2147e3f17668ced99615ea27f23e6886dc80347d2ca9a2c1246f0ec"
+  },
+  {
+   "path": "tools/loment_diag.py",
+   "sha256": "e635321be552dd255b1d28136a4b64a856756f8de2d6ca3ca135c3145b43a9a4"
+  },
+  {
+   "path": "tools/loment_build.py",
+   "sha256": "e15f058bb7bc30e70294a50b32c3c86c1890a9506b14e47f43826c383489f221"
+  },
+  {
+   "path": "tools/loment_lsp.py",
+   "sha256": "8d21d31487f1523e3d50de4d329e6800a99e93f864fd722e51c5fea06d532f34"
+  },
+  {
+   "path": "tools/loment_tools_test.py",
+   "sha256": "c25ea38923121a4373287847dbdf72aa6fcaf27b866282d10463960d799c7712"
+  },
+  {
+   "path": "tools/loment_boot.py",
+   "sha256": "4a3a116017954c0c761fc07a691bcd5a65d9e091e07648d68c97db6d68150266"
+  },
+  {
+   "path": "tools/loment_p7_test.py",
+   "sha256": "7d04f6d3db6bc93afb09c5241c057c0c548371eee6ce5f7f3845e0e12eabc453"
+  },
+  {
+   "path": "tools/loment_p8_test.py",
+   "sha256": "b3ee9a12baf8e4b9802dd56252e283d4d9b02e049c0651f5bbeef8dc095abacf"
+  },
+  {
+   "path": "tools/loment_p9_test.py",
+   "sha256": "421b1bd3dc02665f17f905dcb45d2f68ffa7bab8600dcc0127445f5e5f30e299"
+  },
+  {
+   "path": "tools/loment_syscalls.py",
+   "sha256": "2747e0e96554ccd01ad90beb7549623052998f5fe7a614d45f2192f8ed7d43e3"
+  },
+  {
+   "path": "tools/loment_manual.py",
+   "sha256": "e58ec500ff090e473df656fcd8107563f1ed8c6114be3045b9cc7f37245fd0d6"
+  },
+  {
+   "path": "tools/ci.py",
+   "sha256": "52357a0ed02d387a8000c38dc5a6964bf589e0421b59d8937b424e33cc2a4910"
+  },
+  {
+   "path": "loment/examples/ahci.lomt",
+   "sha256": "840a3529c03c5c10aa3c356c3e9dd9ae36d11317b3da471b56d85f436f448b94"
+  },
+  {
+   "path": "loment/examples/all_loment.lomt",
+   "sha256": "6c475ea2957aaa170380f7cb3544729926555c3b89e565c5caf5ab8965d8e933"
+  },
+  {
+   "path": "loment/examples/allocator.lomt",
+   "sha256": "1079cdee4498b7da5af16157c8d9611b7feff98ddc2edc4f9967df8440ebfe29"
+  },
+  {
+   "path": "loment/examples/bootprobe.lomt",
+   "sha256": "bb99c51e2c5831f4d1021e237005aa54157ae371dd88de71356b94ad893a3d95"
+  },
+  {
+   "path": "loment/examples/bytes.lomt",
+   "sha256": "bbc0ab7c492f6280f20f63929b0c6a18f8ba63b55e023dbbf0b2dde1dece41ef"
+  },
+  {
+   "path": "loment/examples/demo.lomt",
+   "sha256": "7e5c0e4ba54a81c539920ffd21ec8e7176bc19563f0f63397ae582e05a12b4c0"
+  },
+  {
+   "path": "loment/examples/fuc_node.lomt",
+   "sha256": "56de2a043d166f2cf6592f54603185b21277012ddf955b7f797fc0f2dcfbc251"
+  },
+  {
+   "path": "loment/examples/mathutil.lomt",
+   "sha256": "cebc91cb3a1fff80f954d73e8d4803a76d918cfcad4cbceccfb6d1fffa26f209"
+  },
+  {
+   "path": "loment/examples/native.lomt",
+   "sha256": "8c5ba2bc7c2f4f3df376af29de29b45a3861cab09f2cd92daac89724f650022d"
+  },
+  {
+   "path": "loment/examples/native_agg.lomt",
+   "sha256": "93af8fb9b5e998d58e99581427f3debb6b19094a425a28dcd0748c10f0b943c8"
+  },
+  {
+   "path": "loment/examples/native_bits.lomt",
+   "sha256": "bc9d5840c0ab4ba5c7269f32662f0e6a497a11e8aaf6dd94e93902836fb4adb7"
+  },
+  {
+   "path": "loment/examples/native_cap.lomt",
+   "sha256": "0ccbcdbde7a73b2aac381f32430d1be6f4c0ab8400423967d082c67bd349a94d"
+  },
+  {
+   "path": "loment/examples/native_entry.lomt",
+   "sha256": "de3a97c0355038cfd3d0e57be53e4e0a52d36e2ed6fc3b6f6e9873c791a54587"
+  },
+  {
+   "path": "loment/examples/native_gen.lomt",
+   "sha256": "47891a6cb1957df00729a356f3898446fa34bb034cc27e0bcfe36af3cc87009c"
+  },
+  {
+   "path": "loment/examples/native_mem.lomt",
+   "sha256": "c4288233469d31f255404393c23842ce60acece9adb9b0c6bfc5e0fd2b46f5a1"
+  },
+  {
+   "path": "loment/examples/native_mut.lomt",
+   "sha256": "ea18e928efb45183c084998a558a73ab47ffca32a6f128c2be59e945a1b9372f"
+  },
+  {
+   "path": "loment/examples/native_raii.lomt",
+   "sha256": "9f2da4d2e984b602fb604f1f4249d75ee0a1066b41d1d2e17ca743dfee7d7c56"
+  },
+  {
+   "path": "loment/examples/native_res.lomt",
+   "sha256": "819a36c95ab60a8ba76164048bd696d8571fab936aa731e219b16dc2fe77f080"
+  },
+  {
+   "path": "loment/examples/native_slice.lomt",
+   "sha256": "ff185c9a675e56ac556d1c0c46e571c797b31a1e207a06a5e16951ecab7c3a87"
+  },
+  {
+   "path": "loment/examples/native_str.lomt",
+   "sha256": "f6925cafcd1ba77682b47ffa0e30c0abdab5aaef1a856964b51b0eedd9c9d8f1"
+  },
+  {
+   "path": "loment/examples/native_trait.lomt",
+   "sha256": "2ab5995aad584afd899d66c9a27d2b9d7d3de8bced61a0c432f4075a3616c17e"
+  },
+  {
+   "path": "loment/examples/selfcheck.lomt",
+   "sha256": "8ce117302b1721efb39e1159f2f56c8f28b0ba958b7316ee591ebf471de117bb"
+  },
+  {
+   "path": "loment/examples/toolchain.lomt",
+   "sha256": "ee5de562c2db4fd0e6369bb85ad94d082301134f54236d4f7d604d24ca579a29"
+  },
+  {
+   "path": "loment/examples/user_hello.lomt",
+   "sha256": "a363faf14e16e8ce979eb41d1def3ed791ecbe22fbfbe771fd47fc113b03832d"
+  },
+  {
+   "path": "loment/selfhost/lexer.lomt",
+   "sha256": "28b9a5a828d35710088cc02538b575a9e38540b00baec56b9b21d55ea5c0dbf0"
+  },
+  {
+   "path": "loment/corpus.json",
+   "sha256": "12304c958a2b3edbfb980a7d3a8eaa3a0885d293d885b0c2fb1d49d3a7f7cfca"
+  },
+  {
+   "path": "lom/fuai.lom",
+   "sha256": "d6f24aa0de2941d8b5bb713c3c72225f9755eb53ae06acb50cd11e68b26b3aad"
+  },
+  {
+   "path": "lom/fuc.lom",
+   "sha256": "d923be5102b9c5ced548473a849522abb2bd0569144f033a00c088769b247781"
+  },
+  {
+   "path": "lom/fujr.lom",
+   "sha256": "93d58b9949a17cb7720640fbdec9a08a99ba85d0118b93c049315364beba7606"
+  },
+  {
+   "path": "docs/14-tss-irq.md",
+   "sha256": "8d5dd6bc9f5e71c01d5eea14a531b0242dc141babdb85e042186a1ee4c106dde"
+  },
+  {
+   "path": "docs/140-loment-lang-plan.md",
+   "sha256": "8e5941dc87990762bd34bef35b86c330ecd83a1d74a34b93e6006977718958e3"
+  },
+  {
+   "path": "docs/141-l0-lom-spec.md",
+   "sha256": "ad2840bd697eff21c182db7dc9ee9c7e635054c1735095df569f572d0c60bff6"
+  },
+  {
+   "path": "docs/142-potato-v0.md",
+   "sha256": "575484f498610d2c42d4370b2f59e84c64126af267565968da132a31fd37cf85"
+  },
+  {
+   "path": "docs/143-l1-loment-v0.md",
+   "sha256": "fe50e4ffe053d1978c2b4f5c24a281117496be460f38499bb8efad73669656fc"
+  },
+  {
+   "path": "docs/144-kernel-boundaries-and-risks.md",
+   "sha256": "d7ea7e94ef68fefda6f9fbe30ea06439f55f967bd0b1f09bf6f89bcfc6a999cb"
+  },
+  {
+   "path": "docs/144-loment-native-backend.md",
+   "sha256": "6397a2932ed4e5eef1949d46c8c866ea3a389cac1d215b3c549df4e8665b97dd"
+  },
+  {
+   "path": "docs/145-loment-100-milestones.md",
+   "sha256": "a2417a36896a5541f5a3dfaa3d6761b42956f2642a8291806f2b2fa47687cc7f"
+  },
+  {
+   "path": "docs/145-parallel-development-foundation.md",
+   "sha256": "a7583e2b1b27b361776e13736aaf77a8ba120c66f90264e3840a256e3248e056"
+  },
+  {
+   "path": "docs/146-kernel-stack-arena.md",
+   "sha256": "fa74c8d70f681bf2ad430df378a36e8fc84aa8fe0a66e9099ebb9e7dbc355323"
+  },
+  {
+   "path": "docs/146-loment-capability-semantics.md",
+   "sha256": "b9d99f358b50c64a5c0459bb70e96e9a50bfad41e7b48c76ec30741e054aee28"
+  },
+  {
+   "path": "docs/147-potato-v1-spec.md",
+   "sha256": "5ce2087be36a975dc2e77b423f078ca23ddbb66294c7c1664ada2b7252fd7370"
+  },
+  {
+   "path": "docs/148-loment-toolchain.md",
+   "sha256": "5718c33fb4a8b586a262d1b8ec46a8cb6eb6fc0f6091f36fc7905ff05b94f021"
+  },
+  {
+   "path": "docs/149-loment-kernel-integration.md",
+   "sha256": "87047f7f974f191118f8d0dc8260c20b0f0583c9ad387ffdbd451a45872d2ded"
+  },
+  {
+   "path": "docs/149-uisport-first-attempt.md",
+   "sha256": "f39fe0d914f0a298277b9842d8951fd681de18be8243e2accca52ef7515d9821"
+  },
+  {
+   "path": "docs/15-pcache.md",
+   "sha256": "a83eed36e0022f3a9b0dea0a6c3dc025d38e8042179aee3c5594a375a478bf2f"
+  },
+  {
+   "path": "docs/150-loment-selfhost.md",
+   "sha256": "248f47b28c4f0ea10a67ab60d8dac3d8af738f830f2a981bf8c1474d24801992"
+  },
+  {
+   "path": "docs/151-loment-ecosystem.md",
+   "sha256": "ef9c4e2d88f46f476efc91a8f9fa79140e628bdfe14ebc306206bde930be6d0b"
+  },
+  {
+   "path": "docs/152-loment-papers.md",
+   "sha256": "9a6938ace6c873421d25ec2362117893ffc3963cfae22c78ac5b92e4d186f898"
+  },
+  {
+   "path": "docs/153-l1-linux-personality.md",
+   "sha256": "a429e713577f94c76fb1da6861864e9d423544862a271f763221ef105f7d4746"
+  },
+  {
+   "path": "docs/manual/index.md",
+   "sha256": "091a1835a0de51274dbbe35624d88ba56c0bd44eefb2eccc39d606ddf1d5e119"
+  },
+  {
+   "path": "docs/manual/api/ahci.md",
+   "sha256": "a86e1cca0831116d0c77e3d244f0b3c21bcce4c068885860aa401af307124f25"
+  },
+  {
+   "path": "docs/manual/api/all_loment.md",
+   "sha256": "6f9890292d074b05934c8a80fde4026e63eb25723e0c94b6dc4f9db0e5ddfff0"
+  },
+  {
+   "path": "docs/manual/api/allocator.md",
+   "sha256": "5f41b9a0ce706ba0bcc44bbb3af918253c37f732bd56a11ef8eb40f6f4629d5a"
+  },
+  {
+   "path": "docs/manual/api/bootprobe.md",
+   "sha256": "9b532db2772a5e9e5a89b686e3bea3da441ef1004dc3d9e75a381e8ccd12a99f"
+  },
+  {
+   "path": "docs/manual/api/bytes.md",
+   "sha256": "8fefcdcd7662d1150fd43bcc8c94cffe8708e18c9e5d362e5c92bd3a25b3c4a6"
+  },
+  {
+   "path": "docs/manual/api/demo.md",
+   "sha256": "88884ba3663632aa9a9fc4fdd70e504232d96c27ae868e6244acdf22483fbd95"
+  },
+  {
+   "path": "docs/manual/api/fuc_node.md",
+   "sha256": "1b3486a46e7409f695fa7e5df23ecc18e0c086e321c43c77b9774f26e04ddb02"
+  },
+  {
+   "path": "docs/manual/api/mathutil.md",
+   "sha256": "b134b061d4d1f6772c72d462ee90ae1b0172e419f61415d42b8b38fc7efea0fe"
+  },
+  {
+   "path": "docs/manual/api/native.md",
+   "sha256": "902657ec0f798bd7eff263149f95fa83136689705385a6d3a3ae30993a573e3b"
+  },
+  {
+   "path": "docs/manual/api/native_agg.md",
+   "sha256": "a7999ab3d6f037eff917d6fd6a5dc4ac7999e89d509b96d59d2cff03eb3e26c9"
+  },
+  {
+   "path": "docs/manual/api/native_bits.md",
+   "sha256": "5fa7dc9a458305f31c84cf06a295afb259f16a8b84527f08c58d6a1664d3f308"
+  },
+  {
+   "path": "docs/manual/api/native_cap.md",
+   "sha256": "d1f6b39d965ddce15ec06c5278a10054e918645f2411d649da487ae0bc9e02db"
+  },
+  {
+   "path": "docs/manual/api/native_entry.md",
+   "sha256": "c063bc4624fd7fbde46da36f68656a097a41153180c62c478894da06b3b4eb95"
+  },
+  {
+   "path": "docs/manual/api/native_gen.md",
+   "sha256": "b871408e716919d30e4a0ada8610d37a43096acff205e53b50a8d4c237d4cb4a"
+  },
+  {
+   "path": "docs/manual/api/native_mem.md",
+   "sha256": "6f102d7629b7451e899040796343d0666cffd804865c89f9a58836a05b80281b"
+  },
+  {
+   "path": "docs/manual/api/native_mut.md",
+   "sha256": "8328532bc42408f3ede235bc31119642eef9298e39b87fb8a7cf091f010c364b"
+  },
+  {
+   "path": "docs/manual/api/native_raii.md",
+   "sha256": "a8eddae09148d57bfaeb85332f2042a903e74c993b3d554b5a7e51231a934fe8"
+  },
+  {
+   "path": "docs/manual/api/native_res.md",
+   "sha256": "66fa9e3e499c0ebcece47f148da8c4d773fd84219bc16640b911ea8bfbfebaac"
+  },
+  {
+   "path": "docs/manual/api/native_slice.md",
+   "sha256": "d90ae87d67f54a94a8ae46e92f037533008cb72a2c6501979710a7145bc3811b"
+  },
+  {
+   "path": "docs/manual/api/native_str.md",
+   "sha256": "97112bbe2b2e75e06eb69c492098c9b293bf657d6a7dab7e01dac63fc99f48e9"
+  },
+  {
+   "path": "docs/manual/api/native_trait.md",
+   "sha256": "ee48a362592674f4054f2479bfb09baeef6ddaec59198288b30dbcda9def1b62"
+  },
+  {
+   "path": "docs/manual/api/selfcheck.md",
+   "sha256": "23cf8f8439883e5f2952b58c0f87e09ef3ce89503d28489ef0d0bed1592d747a"
+  },
+  {
+   "path": "docs/manual/api/toolchain.md",
+   "sha256": "63327a5c55e7f4936b9f9d6e09e9f3cf7de44d5f6a2127de229b3125b6999952"
+  },
+  {
+   "path": "docs/manual/api/user_hello.md",
+   "sha256": "638f39c1ef18fd4c1e52f6b7316846c32427a1971adbe46513171bcedaab43a0"
+  }
+ ]
+}

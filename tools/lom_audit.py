@@ -335,6 +335,25 @@ def audit_l1(diffs: list[str]) -> None:
         elif sh_obj.read_text(encoding="utf-8") != want_sh:
             diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost/lexer.lomt 不一致")
 
+    # M93/M95/M99: 手册站点与发布清单必须与当前工件一致
+    import loment_manual
+    import loment_release
+    for rel, text in loment_manual.build().items():
+        p = ROOT / "docs" / "manual" / rel
+        if not p.exists() or p.read_text(encoding="utf-8") != text:
+            diffs.append(f"[l1         ] docs/manual/{rel} 与编译器版本不一致 (M93)")
+            break
+    man = ROOT / "loment" / "build" / "release-manifest.json"
+    want_rel = {x["path"]: x["sha256"] for x in loment_release.build()["files"]}
+    if not man.exists():
+        diffs.append(f"[l1         ] {man.relative_to(ROOT)} 缺失 (M95)")
+    else:
+        got_rel = {x["path"]: x["sha256"]
+                   for x in json.loads(man.read_text(encoding="utf-8")).get("files", [])}
+        bad = [k for k in want_rel if got_rel.get(k) != want_rel[k]]
+        if bad or set(got_rel) != set(want_rel):
+            diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): {bad[:2]}")
+
 
 def main() -> int:
     diffs: list[str] = []

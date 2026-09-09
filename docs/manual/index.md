@@ -1,0 +1,42 @@
+# Loment 语言手册
+
+> 编译器版本戳: `lomentc-3a3332518b24`（由 tools/loment_manual.py 生成）
+
+## 规范
+
+- [141-l0-lom-spec.md](../141-l0-lom-spec.md)
+- [142-potato-v0.md](../142-potato-v0.md)
+- [143-l1-loment-v0.md](../143-l1-loment-v0.md)
+- [144-loment-native-backend.md](../144-loment-native-backend.md)
+- [146-loment-capability-semantics.md](../146-loment-capability-semantics.md)
+- [147-potato-v1-spec.md](../147-potato-v1-spec.md)
+- [148-loment-toolchain.md](../148-loment-toolchain.md)
+- [149-loment-kernel-integration.md](../149-loment-kernel-integration.md)
+- [150-loment-selfhost.md](../150-loment-selfhost.md)
+
+## 示例 API
+
+- [ahci](api/ahci.md)
+- [all_loment](api/all_loment.md)
+- [allocator](api/allocator.md)
+- [bootprobe](api/bootprobe.md)
+- [bytes](api/bytes.md)
+- [demo](api/demo.md)
+- [fuc_node](api/fuc_node.md)
+- [mathutil](api/mathutil.md)
+- [native](api/native.md)
+- [native_agg](api/native_agg.md)
+- [native_bits](api/native_bits.md)
+- [native_cap](api/native_cap.md)
+- [native_entry](api/native_entry.md)
+- [native_gen](api/native_gen.md)
+- [native_mem](api/native_mem.md)
+- [native_mut](api/native_mut.md)
+- [native_raii](api/native_raii.md)
+- [native_res](api/native_res.md)
+- [native_slice](api/native_slice.md)
+- [native_str](api/native_str.md)
+- [native_trait](api/native_trait.md)
+- [selfcheck](api/selfcheck.md)
+- [toolchain](api/toolchain.md)
+- [user_hello](api/user_hello.md)
