@@ -57,6 +57,7 @@ declare void @llvm.trap()
 
 ; _start -> ()
 define void @_start() {
+entry:
   %x.addr = alloca i32
   store i32 0, ptr %x.addr
   br label %L1_wcond
@@ -72,6 +73,7 @@ L3_wend:
 }
 ; timer_isr -> interrupt (x86_intrcc)
 define x86_intrcc void @timer_isr(ptr byval([8 x i8]) %__frame) {
+entry:
   %t.addr = alloca i32
   store i32 1, ptr %t.addr
   %t1 = load i32, ptr @__loment_off

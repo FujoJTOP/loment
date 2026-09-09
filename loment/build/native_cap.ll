@@ -58,6 +58,7 @@ declare void @llvm.trap()
 
 ; write -> u32
 define i32 @write(i32 %slot) {
+entry:
   %slot.addr = alloca i32
   store i32 %slot, ptr %slot.addr
   %t1 = load i32, ptr %slot.addr
@@ -79,11 +80,13 @@ L1_gok:
 }
 ; ok -> u32
 define i32 @ok() {
+entry:
   %t1 = call i32 @write(i32 3)
   ret i32 %t1
 }
 ; literal_ok -> u32
 define i32 @literal_ok() {
+entry:
   %t1 = zext i32 2 to i64
   %t2 = icmp uge i64 %t1, 0
   %t3 = icmp ule i64 %t1, 4

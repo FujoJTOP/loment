@@ -3,6 +3,7 @@
 
 ; parse_small -> Result_u32_u32
 define { i32, i64 } @parse_small(i32 %v) {
+entry:
   %v.addr = alloca i32
   store i32 %v, ptr %v.addr
   %t1 = load i32, ptr %v.addr
@@ -24,6 +25,7 @@ L3_end:
 }
 ; twice -> Result_u32_u32
 define { i32, i64 } @twice(i32 %v) {
+entry:
   %v.addr = alloca i32
   %__t15.addr = alloca { i32, i64 }
   %x.addr = alloca i32
@@ -65,6 +67,7 @@ L1_mend:
 }
 ; call_ok -> u32
 define i32 @call_ok() {
+entry:
   %r.addr = alloca { i32, i64 }
   %v.addr = alloca i32
   %t1 = call { i32, i64 } @twice(i32 3)
@@ -87,6 +90,7 @@ L1_mend:
 }
 ; call_err -> u32
 define i32 @call_err() {
+entry:
   %r.addr = alloca { i32, i64 }
   %v.addr = alloca i32
   %t1 = call { i32, i64 } @twice(i32 50)

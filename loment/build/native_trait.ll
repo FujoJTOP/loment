@@ -3,6 +3,7 @@
 
 ; Small_measure -> u32
 define i32 @Small_measure({ i32 } %__self) {
+entry:
   %__self.addr = alloca { i32 }
   store { i32 } %__self, ptr %__self.addr
   %t1 = getelementptr inbounds { i32 }, ptr %__self.addr, i32 0, i32 0
@@ -11,6 +12,7 @@ define i32 @Small_measure({ i32 } %__self) {
 }
 ; Big_measure -> u32
 define i32 @Big_measure({ i32 } %__self) {
+entry:
   %__self.addr = alloca { i32 }
   store { i32 } %__self, ptr %__self.addr
   %t1 = getelementptr inbounds { i32 }, ptr %__self.addr, i32 0, i32 0
@@ -20,6 +22,7 @@ define i32 @Big_measure({ i32 } %__self) {
 }
 ; call_small -> u32
 define i32 @call_small() {
+entry:
   %s.addr = alloca { i32 }
   %t1 = getelementptr inbounds { i32 }, ptr %s.addr, i32 0, i32 0
   store i32 7, ptr %t1
@@ -29,6 +32,7 @@ define i32 @call_small() {
 }
 ; call_big -> u32
 define i32 @call_big() {
+entry:
   %b.addr = alloca { i32 }
   %t1 = getelementptr inbounds { i32 }, ptr %b.addr, i32 0, i32 0
   store i32 7, ptr %t1

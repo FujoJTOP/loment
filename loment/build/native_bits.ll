@@ -3,6 +3,7 @@
 
 ; pack -> u8
 define i8 @pack(i8 %v) {
+entry:
   %v.addr = alloca i8
   %b.addr = alloca i8
   store i8 %v, ptr %v.addr
@@ -41,6 +42,7 @@ define i8 @pack(i8 %v) {
 }
 ; unpack -> u32
 define i32 @unpack(i8 %b) {
+entry:
   %b.addr = alloca i8
   store i8 %b, ptr %b.addr
   %t1 = load i8, ptr %b.addr
@@ -57,6 +59,7 @@ define i32 @unpack(i8 %b) {
 }
 ; roundtrip -> u32
 define i32 @roundtrip(i8 %v) {
+entry:
   %v.addr = alloca i8
   store i8 %v, ptr %v.addr
   %t1 = load i8, ptr %v.addr
@@ -66,6 +69,7 @@ define i32 @roundtrip(i8 %v) {
 }
 ; top_bits -> u32
 define i32 @top_bits(i8 %b) {
+entry:
   %b.addr = alloca i8
   store i8 %b, ptr %b.addr
   %t1 = load i8, ptr %b.addr

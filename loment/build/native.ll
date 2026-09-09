@@ -54,6 +54,7 @@ declare void @llvm.trap()
 
 ; fib -> u32
 define i32 @fib(i32 %n) {
+entry:
   %n.addr = alloca i32
   %a.addr = alloca i32
   %b.addr = alloca i32
@@ -88,6 +89,7 @@ L3_wend:
 }
 ; gcd -> u32
 define i32 @gcd(i32 %a, i32 %b) {
+entry:
   %a.addr = alloca i32
   %b.addr = alloca i32
   %x.addr = alloca i32
@@ -128,6 +130,7 @@ L3_wend:
 }
 ; popcount -> u32
 define i32 @popcount(i32 %x) {
+entry:
   %x.addr = alloca i32
   %v.addr = alloca i32
   %c.addr = alloca i32
@@ -179,6 +182,7 @@ L3_wend:
 }
 ; sum_range -> u32
 define i32 @sum_range(i32 %n) {
+entry:
   %n.addr = alloca i32
   %s.addr = alloca i32
   %i.addr = alloca i32
@@ -206,6 +210,7 @@ L3_fend:
 }
 ; mask_low -> u32
 define i32 @mask_low(i32 %x, i32 %n) {
+entry:
   %x.addr = alloca i32
   %n.addr = alloca i32
   store i32 %x, ptr %x.addr
@@ -219,6 +224,7 @@ define i32 @mask_low(i32 %x, i32 %n) {
 }
 ; in_domain -> bool
 define i1 @in_domain(i32 %off) {
+entry:
   %off.addr = alloca i32
   store i32 %off, ptr %off.addr
   %t1 = load i32, ptr %off.addr
@@ -236,6 +242,7 @@ L3_sc_end:
 }
 ; scaled -> u32
 define i32 @scaled(i32 %x) {
+entry:
   %x.addr = alloca i32
   store i32 %x, ptr %x.addr
   %t1 = load i32, ptr %x.addr

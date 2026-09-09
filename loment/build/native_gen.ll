@@ -3,6 +3,7 @@
 
 ; call_pair_max -> u32
 define i32 @call_pair_max() {
+entry:
   %p.addr = alloca { i32, i32 }
   %t1 = getelementptr inbounds { i32, i32 }, ptr %p.addr, i32 0, i32 0
   store i32 7, ptr %t1
@@ -17,6 +18,7 @@ define i32 @call_pair_max() {
 }
 ; call_max_i32 -> i32
 define i32 @call_max_i32() {
+entry:
   %x.addr = alloca i32
   %y.addr = alloca i32
   %t1 = sub i32 0, 5
@@ -29,6 +31,7 @@ define i32 @call_max_i32() {
 }
 ; call_opt -> u32
 define i32 @call_opt() {
+entry:
   %a.addr = alloca { i32, i64 }
   %b.addr = alloca { i32, i64 }
   %s.addr = alloca i32
@@ -81,6 +84,7 @@ L4_mend:
 }
 ; max_u32 -> u32
 define i32 @max_u32(i32 %a, i32 %b) {
+entry:
   %a.addr = alloca i32
   %b.addr = alloca i32
   store i32 %a, ptr %a.addr
@@ -100,6 +104,7 @@ L3_end:
 }
 ; max_i32 -> i32
 define i32 @max_i32(i32 %a, i32 %b) {
+entry:
   %a.addr = alloca i32
   %b.addr = alloca i32
   store i32 %a, ptr %a.addr

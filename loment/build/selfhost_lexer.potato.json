@@ -1,0 +1,129 @@
+{
+  "potato": "v1",
+  "unit": "lexer",
+  "language": "loment",
+  "imports": [
+    "bytes"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "is_digit",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "is_alpha",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "is_punct",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "emit",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "start",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        },
+        {
+          "name": "line",
+          "type": "u32"
+        },
+        {
+          "name": "col",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "lex",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "is_hex",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

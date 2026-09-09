@@ -3,6 +3,7 @@
 
 ; blk_end -> u32
 define i32 @blk_end() {
+entry:
   %b.addr = alloca { i32, i32 }
   %t1 = getelementptr inbounds { i32, i32 }, ptr %b.addr, i32 0, i32 0
   store i32 3, ptr %t1
@@ -17,6 +18,7 @@ define i32 @blk_end() {
 }
 ; array_sum -> u32
 define i32 @array_sum() {
+entry:
   %a.addr = alloca [4 x i32]
   %s.addr = alloca i32
   %i.addr = alloca i32
@@ -57,6 +59,7 @@ L3_fend:
 }
 ; shape_area -> u32
 define i32 @shape_area(i32 %tag, i32 %v) {
+entry:
   %tag.addr = alloca i32
   %v.addr = alloca i32
   %s.addr = alloca { i32, i64 }
@@ -114,6 +117,7 @@ L4_mend:
 }
 ; short_circuit -> u32
 define i32 @short_circuit(i32 %x) {
+entry:
   %x.addr = alloca i32
   %n.addr = alloca i32
   store i32 %x, ptr %x.addr

@@ -57,6 +57,7 @@ declare void @llvm.trap()
 
 ; heap_roundtrip -> u32
 define i32 @heap_roundtrip() {
+entry:
   %p.addr = alloca ptr
   %s.addr = alloca i32
   %i.addr = alloca i32
@@ -104,6 +105,7 @@ L5_wend:
 }
 ; wrap_add -> u32
 define i32 @wrap_add(i32 %a, i32 %b) {
+entry:
   %a.addr = alloca i32
   %b.addr = alloca i32
   store i32 %a, ptr %a.addr
@@ -115,6 +117,7 @@ define i32 @wrap_add(i32 %a, i32 %b) {
 }
 ; safe_div -> u32
 define i32 @safe_div(i32 %a, i32 %b) {
+entry:
   %a.addr = alloca i32
   %b.addr = alloca i32
   store i32 %a, ptr %a.addr
@@ -142,6 +145,7 @@ L6_dend:
 }
 ; atomic_roundtrip -> u32
 define i32 @atomic_roundtrip() {
+entry:
   %p.addr = alloca ptr
   %a.addr = alloca i32
   %b.addr = alloca i32

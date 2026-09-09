@@ -9,7 +9,7 @@
 ## 0. 全局门禁（每个里程碑结束都要跑）
 
 ```
-python tools/ci.py --static-only                 # 8/8
+python tools/ci.py --static-only                 # 9/9
 python tools/fuic.py --check                     # .fuc 逐字节
 python tools/lom_spec_emit.py --check            # spec.json 双副本
 cd kernel && cargo build --release
@@ -253,6 +253,21 @@ python tools/loment_p7_test.py                                # 8/8
 
 门禁：`loment_p7_test` **8/8** · `ci.py --static-only` **8/8** · `potato_cross` 60/60。
 
+### P8 证据（2026-09-09，M79）
+
+```
+python tools/loment_p8_test.py     # 1/1: Loment 版 lexer token 流 == Python 版
+# 4 个真实文件逐 token 比较 (kind,start,len,line,col), 含中文注释与 lexer 自身源码
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M79 自举 lexer | `loment/selfhost/lexer.lomt` 经 IR 路径编译 + C 驱动, 与 `lomc.lex` 逐 token 一致 | ✅ |
+
+顺带修掉两个后端真 bug（`else if` 语法、嵌套 `&&` 的 phi 前驱），见 docs/150 §M79。
+
+门禁：`loment_p8_test` **1/1** · `ci.py --static-only` **9/9**。
+
 ## P2 · 内存与运行时语义（M13–M22）
 
 | # | 里程碑 | 判据 | 状态 |
@@ -366,8 +381,8 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 
 | # | 里程碑 | 判据 |
 |---|---|---|
-| M79 | Loment 版 lexer | 与 Python 版 token 流一致 |
-| M80 | Loment 版 parser | AST 与 Python 版结构一致 |
+| M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
+| M80 | Loment 版 parser | AST 与 Python 版结构一致 | 待做 |
 | M81 | Loment 版类型检查 | 负例集判定一致 |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |

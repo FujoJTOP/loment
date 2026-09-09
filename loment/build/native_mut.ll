@@ -3,6 +3,7 @@
 
 ; fill -> u32
 define i32 @fill({ ptr, i64 } %xs, i32 %v) {
+entry:
   %xs.addr = alloca { ptr, i64 }
   %v.addr = alloca i32
   %n.addr = alloca i32
@@ -39,6 +40,7 @@ L3_wend:
 }
 ; call_fill -> u32
 define i32 @call_fill() {
+entry:
   %a.addr = alloca [4 x i32]
   %n.addr = alloca i32
   %t1 = getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 0
@@ -65,6 +67,7 @@ define i32 @call_fill() {
 }
 ; read_only -> u32
 define i32 @read_only({ ptr, i64 } %xs) {
+entry:
   %xs.addr = alloca { ptr, i64 }
   store { ptr, i64 } %xs, ptr %xs.addr
   %t1 = load { ptr, i64 }, ptr %xs.addr
@@ -75,6 +78,7 @@ define i32 @read_only({ ptr, i64 } %xs) {
 }
 ; call_read_only -> u32
 define i32 @call_read_only() {
+entry:
   %a.addr = alloca [2 x i32]
   %t1 = getelementptr inbounds [2 x i32], ptr %a.addr, i32 0, i32 0
   store i32 5, ptr %t1

@@ -3,6 +3,7 @@
 
 ; sum -> u32
 define i32 @sum({ ptr, i64 } %xs) {
+entry:
   %xs.addr = alloca { ptr, i64 }
   %s.addr = alloca i32
   %i.addr = alloca i32
@@ -36,6 +37,7 @@ L3_fend:
 }
 ; call_sum -> u32
 define i32 @call_sum() {
+entry:
   %a.addr = alloca [4 x i32]
   %t1 = getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 0
   store i32 1, ptr %t1
@@ -53,6 +55,7 @@ define i32 @call_sum() {
 }
 ; first_of -> u32
 define i32 @first_of({ ptr, i64 } %xs) {
+entry:
   %xs.addr = alloca { ptr, i64 }
   store { ptr, i64 } %xs, ptr %xs.addr
   %t1 = load { ptr, i64 }, ptr %xs.addr
@@ -63,6 +66,7 @@ define i32 @first_of({ ptr, i64 } %xs) {
 }
 ; call_first -> u32
 define i32 @call_first() {
+entry:
   %a.addr = alloca [3 x i32]
   %t1 = getelementptr inbounds [3 x i32], ptr %a.addr, i32 0, i32 0
   store i32 7, ptr %t1

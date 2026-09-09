@@ -66,6 +66,7 @@ declare void @llvm.trap()
 
 ; hello_len -> u32
 define i32 @hello_len() {
+entry:
   %t1 = getelementptr inbounds [5 x i8], ptr @.str.hello_len.0, i64 0, i64 0
   %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0
   %t3 = insertvalue { ptr, i64 } %t2, i64 5, 1
@@ -75,6 +76,7 @@ define i32 @hello_len() {
 }
 ; same_lit -> bool
 define i1 @same_lit() {
+entry:
   %t1 = getelementptr inbounds [3 x i8], ptr @.str.same_lit.0, i64 0, i64 0
   %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0
   %t3 = insertvalue { ptr, i64 } %t2, i64 3, 1
@@ -99,6 +101,7 @@ L3_send:
 }
 ; same_var -> bool
 define i1 @same_var() {
+entry:
   %a.addr = alloca { ptr, i64 }
   %b.addr = alloca { ptr, i64 }
   %t1 = getelementptr inbounds [3 x i8], ptr @.str.same_var.0, i64 0, i64 0
@@ -129,6 +132,7 @@ L3_send:
 }
 ; eq_var -> bool
 define i1 @eq_var() {
+entry:
   %a.addr = alloca { ptr, i64 }
   %b.addr = alloca { ptr, i64 }
   %t1 = getelementptr inbounds [4 x i8], ptr @.str.eq_var.0, i64 0, i64 0
@@ -159,6 +163,7 @@ L3_send:
 }
 ; diff_len -> bool
 define i1 @diff_len() {
+entry:
   %a.addr = alloca { ptr, i64 }
   %b.addr = alloca { ptr, i64 }
   %t1 = getelementptr inbounds [3 x i8], ptr @.str.diff_len.0, i64 0, i64 0
@@ -189,6 +194,7 @@ L3_send:
 }
 ; first_byte -> u32
 define i32 @first_byte() {
+entry:
   %t1 = getelementptr inbounds [1 x i8], ptr @.str.first_byte.0, i64 0, i64 0
   %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0
   %t3 = insertvalue { ptr, i64 } %t2, i64 1, 1
@@ -200,6 +206,7 @@ define i32 @first_byte() {
 }
 ; third_byte -> u32
 define i32 @third_byte() {
+entry:
   %s.addr = alloca { ptr, i64 }
   %t1 = getelementptr inbounds [3 x i8], ptr @.str.third_byte.0, i64 0, i64 0
   %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0

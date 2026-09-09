@@ -977,7 +977,10 @@ class Parser:
             otherwise = []
             if self.at("ident", "else"):
                 self.next()
-                otherwise = self.parse_block()
+                if self.at("ident", "if"):  # else if 链
+                    otherwise = [self.parse_stmt()]
+                else:
+                    otherwise = self.parse_block()
             return If(cond, then, otherwise, t.line)
         if t.val == "while":
             self.next()
@@ -2809,6 +2812,7 @@ class _Ir:
         self.dbg_lines = dbg_lines if dbg_lines is not None else {}
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
+        self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -2855,6 +2859,7 @@ class _Ir:
     def label(self, name: str) -> None:
         self.out.append(f"{name}:")
         self.terminated = False
+        self.cur_label = name
         self.cov_hit()
 
     def jump(self, name: str) -> None:
@@ -3081,13 +3086,14 @@ class _Ir:
             self.terminated = True
             self.label(rhs_l)
             _, b = self.expr(e.right, "bool")
+            rhs_pred = self.cur_label or "entry"
             self.jump(end_l)
             self.label(short_l)
             self.jump(end_l)
             self.label(end_l)
             short_v = "false" if op == "&&" else "true"
             r = self.t()
-            self.w(f"{r} = phi i1 [ {b}, %{rhs_l} ], [ {short_v}, %{short_l} ]")
+            self.w(f"{r} = phi i1 [ {b}, %{rhs_pred} ], [ {short_v}, %{short_l} ]")
             return "bool", r
         _, a = self.expr(e.left, ty)
         _, b = self.expr(e.right, ty)
@@ -3528,6 +3534,8 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
                       f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
+        ir.out.append("entry:")
+        ir.cur_label = "entry"
         ir.cov_hit()
         for name, ty in _collect_locals(f, enums):
             ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
@@ -3541,6 +3549,8 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     ir.out.append(f"; {f.name} -> {f.ret}")
     ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
                   f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
+    ir.out.append("entry:")
+    ir.cur_label = "entry"
     ir.cov_hit()
     for p in f.params:  # 参数与局部统一提升到入口块, 避免循环内反复分配
         ir.w(f"%{p.name}.addr = alloca {ir.ll(p.type)}")
