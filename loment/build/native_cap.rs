@@ -1,5 +1,5 @@
 // 由 tools/lomentc.py 从 .lomt 转译 —— 请勿手改。
-// module native (loment v0 -> rust)
+// module native_cap (loment v0 -> rust)
 
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -39,61 +39,29 @@ fn __loment_guard(cap: usize, idx: u64, lo: u64, hi: u64) {
 }
 
 
-// ==== 本模块 native ====
-pub const SCALE: u32 = 3;
+// ==== 本模块 native_cap ====
+// capability blk_write: disk[0..4] revocable
+pub const CAP_BLK_WRITE_SPACE: &str = "disk";
+pub const CAP_BLK_WRITE_LO: u64 = 0;
+pub const CAP_BLK_WRITE_HI: u64 = 4;
+pub const CAP_BLK_WRITE_REVOCABLE: bool = true;
 
-pub fn fib(n: u32) -> u32 {
-    let mut a: u32 = 0;
-    let mut b: u32 = 1;
-    let mut i: u32 = 0;
-    while (i < n) {
-        let mut t: u32 = (a + b);
-        a = b;
-        b = t;
-        i = (i + 1);
-    }
-    return a;
+#[derive(Clone, Copy)]
+pub struct CapDomain { pub space: &'static str, pub lo: u64, pub hi: u64, pub revocable: bool }
+pub static CAP_DOMAINS: &[CapDomain] = &[
+    CapDomain { space: "disk", lo: 0, hi: 4, revocable: true },
+];
+
+pub fn write(slot: u32) -> u32 {
+    { let __i: u64 = (slot) as u64; __loment_guard(0, __i, 0, 4); }
+    return slot;
 }
 
-pub fn gcd(a: u32, b: u32) -> u32 {
-    let mut x: u32 = a;
-    let mut y: u32 = b;
-    while (y != 0) {
-        let mut t: u32 = (x % y);
-        x = y;
-        y = t;
-    }
-    return x;
+pub fn ok() -> u32 {
+    return write(3);
 }
 
-pub fn popcount(x: u32) -> u32 {
-    let mut v: u32 = x;
-    let mut c: u32 = 0;
-    while (v != 0) {
-        if ((v % 2) == 1) {
-            c = (c + 1);
-        }
-        v = (v / 2);
-    }
-    return c;
-}
-
-pub fn sum_range(n: u32) -> u32 {
-    let mut s: u32 = 0;
-    for i in 0..n {
-        s = (s + i);
-    }
-    return s;
-}
-
-pub fn mask_low(x: u32, n: u32) -> u32 {
-    return (x & ((1 << n) - 1));
-}
-
-pub fn in_domain(off: u32) -> bool {
-    return ((off >= 0) && (off <= 4));
-}
-
-pub fn scaled(x: u32) -> u32 {
-    return (x * SCALE);
+pub fn literal_ok() -> u32 {
+    { let __i: u64 = (2) as u64; __loment_guard(0, __i, 0, 4); }
+    return 2;
 }

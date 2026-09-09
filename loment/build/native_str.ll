@@ -1,7 +1,56 @@
 ; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)
 ; clang -O1 driver.c this.ll -o exe
 
-declare i32 @memcmp(ptr, ptr, i64)
+
+; ---- Loment freestanding 运行时 (M31: 无 libc) ----
+define internal i32 @__loment_memcmp(ptr %a, ptr %b, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %eq, label %body
+body:
+  %pa = getelementptr i8, ptr %a, i64 %i
+  %pb = getelementptr i8, ptr %b, i64 %i
+  %ca = load i8, ptr %pa
+  %cb = load i8, ptr %pb
+  %ne = icmp ne i8 %ca, %cb
+  br i1 %ne, label %diff, label %cont
+cont:
+  %i1 = add i64 %i, 1
+  br label %loop
+diff:
+  %da = zext i8 %ca to i32
+  %db = zext i8 %cb to i32
+  %r = sub i32 %da, %db
+  ret i32 %r
+eq:
+  ret i32 0
+}
+
+define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %q = getelementptr i8, ptr %p, i64 %i
+  store i8 %v, ptr %q
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret void
+}
+
+define internal void @__loment_abort() {
+  call void @llvm.trap()
+  unreachable
+}
+
+declare void @llvm.trap()
 
 @.str.hello_len.0 = private unnamed_addr constant [5 x i8] c"\68\65\6C\6C\6F"
 @.str.same_lit.0 = private unnamed_addr constant [3 x i8] c"\61\62\63"
@@ -39,7 +88,7 @@ define i1 @same_lit() {
   %t11 = icmp eq i64 %t8, %t10
   br i1 %t11, label %L1_seq, label %L2_sneq
 L1_seq:
-  %t12 = call i32 @memcmp(ptr %t7, ptr %t9, i64 %t8)
+  %t12 = call i32 @__loment_memcmp(ptr %t7, ptr %t9, i64 %t8)
   %t13 = icmp eq i32 %t12, 0
   br label %L3_send
 L2_sneq:
@@ -69,7 +118,7 @@ define i1 @same_var() {
   %t13 = icmp eq i64 %t10, %t12
   br i1 %t13, label %L1_seq, label %L2_sneq
 L1_seq:
-  %t14 = call i32 @memcmp(ptr %t9, ptr %t11, i64 %t10)
+  %t14 = call i32 @__loment_memcmp(ptr %t9, ptr %t11, i64 %t10)
   %t15 = icmp eq i32 %t14, 0
   br label %L3_send
 L2_sneq:
@@ -99,7 +148,7 @@ define i1 @eq_var() {
   %t13 = icmp eq i64 %t10, %t12
   br i1 %t13, label %L1_seq, label %L2_sneq
 L1_seq:
-  %t14 = call i32 @memcmp(ptr %t9, ptr %t11, i64 %t10)
+  %t14 = call i32 @__loment_memcmp(ptr %t9, ptr %t11, i64 %t10)
   %t15 = icmp eq i32 %t14, 0
   br label %L3_send
 L2_sneq:
@@ -129,7 +178,7 @@ define i1 @diff_len() {
   %t13 = icmp eq i64 %t10, %t12
   br i1 %t13, label %L1_seq, label %L2_sneq
 L1_seq:
-  %t14 = call i32 @memcmp(ptr %t9, ptr %t11, i64 %t10)
+  %t14 = call i32 @__loment_memcmp(ptr %t9, ptr %t11, i64 %t10)
   %t15 = icmp eq i32 %t14, 0
   br label %L3_send
 L2_sneq:

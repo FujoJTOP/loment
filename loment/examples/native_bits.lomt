@@ -1,0 +1,24 @@
+// loment/examples/native_bits.lomt — M22 验证集: 位域操作 (docs/145)
+//
+// 位域用内建 get_bits/set_bits 表达; 打包布局由 L0 .lom 记录单源负责 (L1 可 use)。
+
+module native_bits
+
+fn pack(v: u8) -> u8 {
+    let b: u8 = 0;
+    b = set_bits(b, 0, 3, v);   // 低 3 位
+    b = set_bits(b, 3, 2, 1);   // 接着 2 位
+    return b;
+}
+
+fn unpack(b: u8) -> u32 {
+    return get_bits(b, 0, 3) as u32;
+}
+
+fn roundtrip(v: u8) -> u32 {
+    return unpack(pack(v));
+}
+
+fn top_bits(b: u8) -> u32 {
+    return get_bits(b, 3, 2) as u32;
+}

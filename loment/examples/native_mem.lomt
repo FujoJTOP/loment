@@ -1,0 +1,38 @@
+// loment/examples/native_mem.lomt — M15/M18/M19 验证集 (docs/145)
+//
+// 堆分配接口 (bump) + 回绕语义 + 除零 trap + panic。
+
+module native_mem
+
+fn heap_roundtrip() -> u32 {
+    let p: ptr = alloc(16);
+    store8(p, 0, 7);
+    store8(p, 1, 35);
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 2 {
+        s = s + load8(p, i);
+        i = i + 1;
+    }
+    free(p);
+    return s;
+}
+
+fn wrap_add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn safe_div(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        return 0;
+    }
+    return a / b;
+}
+
+fn atomic_roundtrip() -> u32 {
+    let p: ptr = alloc(4);
+    store8(p, 0, 0);
+    let a: u32 = atomic_add(p, 5);
+    let b: u32 = atomic_add(p, 3);
+    return a + b + load8(p, 0);
+}

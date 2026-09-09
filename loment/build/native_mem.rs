@@ -1,5 +1,5 @@
 // 由 tools/lomentc.py 从 .lomt 转译 —— 请勿手改。
-// module native (loment v0 -> rust)
+// module native_mem (loment v0 -> rust)
 
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -39,61 +39,36 @@ fn __loment_guard(cap: usize, idx: u64, lo: u64, hi: u64) {
 }
 
 
-// ==== 本模块 native ====
-pub const SCALE: u32 = 3;
-
-pub fn fib(n: u32) -> u32 {
-    let mut a: u32 = 0;
-    let mut b: u32 = 1;
+// ==== 本模块 native_mem ====
+pub fn heap_roundtrip() -> u32 {
+    let mut p: *mut u8 = __loment_alloc(16);
+    { __loment_store8(p, 0, 7); 0u32 };
+    { __loment_store8(p, 1, 35); 0u32 };
+    let mut s: u32 = 0;
     let mut i: u32 = 0;
-    while (i < n) {
-        let mut t: u32 = (a + b);
-        a = b;
-        b = t;
+    while (i < 2) {
+        s = (s + (__loment_load8(p, i) as u32));
         i = (i + 1);
     }
-    return a;
-}
-
-pub fn gcd(a: u32, b: u32) -> u32 {
-    let mut x: u32 = a;
-    let mut y: u32 = b;
-    while (y != 0) {
-        let mut t: u32 = (x % y);
-        x = y;
-        y = t;
-    }
-    return x;
-}
-
-pub fn popcount(x: u32) -> u32 {
-    let mut v: u32 = x;
-    let mut c: u32 = 0;
-    while (v != 0) {
-        if ((v % 2) == 1) {
-            c = (c + 1);
-        }
-        v = (v / 2);
-    }
-    return c;
-}
-
-pub fn sum_range(n: u32) -> u32 {
-    let mut s: u32 = 0;
-    for i in 0..n {
-        s = (s + i);
-    }
+    { let _ = p; 0u32 };
     return s;
 }
 
-pub fn mask_low(x: u32, n: u32) -> u32 {
-    return (x & ((1 << n) - 1));
+pub fn wrap_add(a: u32, b: u32) -> u32 {
+    return (a + b);
 }
 
-pub fn in_domain(off: u32) -> bool {
-    return ((off >= 0) && (off <= 4));
+pub fn safe_div(a: u32, b: u32) -> u32 {
+    if (b == 0) {
+        return 0;
+    }
+    return (a / b);
 }
 
-pub fn scaled(x: u32) -> u32 {
-    return (x * SCALE);
+pub fn atomic_roundtrip() -> u32 {
+    let mut p: *mut u8 = __loment_alloc(4);
+    { __loment_store8(p, 0, 0); 0u32 };
+    let mut a: u32 = unsafe { (*((p) as *const core::sync::atomic::AtomicU32)).fetch_add(5, core::sync::atomic::Ordering::SeqCst) };
+    let mut b: u32 = unsafe { (*((p) as *const core::sync::atomic::AtomicU32)).fetch_add(3, core::sync::atomic::Ordering::SeqCst) };
+    return ((a + b) + (__loment_load8(p, 0) as u32));
 }

@@ -1,0 +1,39 @@
+// loment/examples/native_trait.lomt — M8 验证集: trait 静态派发 (docs/145)
+//
+// trait 声明 + 两个 impl; 方法调用 obj.m() 在编译期按接收者类型解析为 Type_m(obj)。
+
+module native_trait
+
+trait Measurable {
+    fn measure(self) -> u32;
+}
+
+struct Small {
+    v: u32,
+}
+
+struct Big {
+    v: u32,
+}
+
+impl Measurable for Small {
+    fn measure(self) -> u32 {
+        return self.v;
+    }
+}
+
+impl Measurable for Big {
+    fn measure(self) -> u32 {
+        return self.v * 10;
+    }
+}
+
+fn call_small() -> u32 {
+    let s: Small = Small { v: 7 };
+    return s.measure();
+}
+
+fn call_big() -> u32 {
+    let b: Big = Big { v: 7 };
+    return b.measure();
+}

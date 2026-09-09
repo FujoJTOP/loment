@@ -1,0 +1,30 @@
+// loment/examples/native_mut.lomt — M4 验证集: 可变切片 (docs/145)
+//
+// `mut [T]` = 可变切片; `&mut array` 取可变切片; 经切片写回调用方内存。
+
+module native_mut
+
+fn fill(xs: mut [u32], v: u32) -> u32 {
+    let n: u32 = slice_len(xs);
+    let i: u32 = 0;
+    while i < n {
+        xs[i] = v + i;
+        i = i + 1;
+    }
+    return n;
+}
+
+fn call_fill() -> u32 {
+    let a: [u32; 4] = [0, 0, 0, 0];
+    let n: u32 = fill(&mut a, 10);
+    return n + a[0] + a[3];
+}
+
+fn read_only(xs: [u32]) -> u32 {
+    return xs[0];
+}
+
+fn call_read_only() -> u32 {
+    let a: [u32; 2] = [5, 6];
+    return read_only(&a) + read_only(&mut a);
+}

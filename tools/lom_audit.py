@@ -270,6 +270,20 @@ def audit_l1(diffs: list[str]) -> None:
          lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_str.lomt"), ROOT)),
         (ROOT / "loment" / "build" / "native_slice.ll",
          lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_slice.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_mut.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_mut.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_gen.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_gen.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_trait.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_trait.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_res.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_res.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_mem.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_mem.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_bits.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_bits.lomt"), ROOT)),
+        (ROOT / "loment" / "build" / "native_entry.ll",
+         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_entry.lomt"), ROOT)),
     ):
         if not path.exists():
             diffs.append(f"[l1         ] {path.relative_to(ROOT)} 缺失")

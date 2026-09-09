@@ -1,6 +1,57 @@
 ; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)
 ; clang -O1 driver.c this.ll -o exe
 
+
+; ---- Loment freestanding 运行时 (M31: 无 libc) ----
+define internal i32 @__loment_memcmp(ptr %a, ptr %b, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %eq, label %body
+body:
+  %pa = getelementptr i8, ptr %a, i64 %i
+  %pb = getelementptr i8, ptr %b, i64 %i
+  %ca = load i8, ptr %pa
+  %cb = load i8, ptr %pb
+  %ne = icmp ne i8 %ca, %cb
+  br i1 %ne, label %diff, label %cont
+cont:
+  %i1 = add i64 %i, 1
+  br label %loop
+diff:
+  %da = zext i8 %ca to i32
+  %db = zext i8 %cb to i32
+  %r = sub i32 %da, %db
+  ret i32 %r
+eq:
+  ret i32 0
+}
+
+define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %q = getelementptr i8, ptr %p, i64 %i
+  store i8 %v, ptr %q
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret void
+}
+
+define internal void @__loment_abort() {
+  call void @llvm.trap()
+  unreachable
+}
+
+declare void @llvm.trap()
+
 ; fib -> u32
 define i32 @fib(i32 %n) {
   %n.addr = alloca i32
@@ -56,16 +107,24 @@ L1_wcond:
 L2_wbody:
   %t5 = load i32, ptr %x.addr
   %t6 = load i32, ptr %y.addr
+  %t8 = icmp eq i32 %t6, 0
+  br i1 %t8, label %L5_dtrap, label %L4_dok
+L5_dtrap:
+  call void @__loment_abort()
+  unreachable
+L4_dok:
   %t7 = urem i32 %t5, %t6
+  br label %L6_dend
+L6_dend:
   store i32 %t7, ptr %t.addr
-  %t8 = load i32, ptr %y.addr
-  store i32 %t8, ptr %x.addr
-  %t9 = load i32, ptr %t.addr
-  store i32 %t9, ptr %y.addr
+  %t9 = load i32, ptr %y.addr
+  store i32 %t9, ptr %x.addr
+  %t10 = load i32, ptr %t.addr
+  store i32 %t10, ptr %y.addr
   br label %L1_wcond
 L3_wend:
-  %t10 = load i32, ptr %x.addr
-  ret i32 %t10
+  %t11 = load i32, ptr %x.addr
+  ret i32 %t11
 }
 ; popcount -> u32
 define i32 @popcount(i32 %x) {
@@ -83,24 +142,40 @@ L1_wcond:
   br i1 %t3, label %L2_wbody, label %L3_wend
 L2_wbody:
   %t4 = load i32, ptr %v.addr
+  %t6 = icmp eq i32 2, 0
+  br i1 %t6, label %L5_dtrap, label %L4_dok
+L5_dtrap:
+  call void @__loment_abort()
+  unreachable
+L4_dok:
   %t5 = urem i32 %t4, 2
-  %t6 = icmp eq i32 %t5, 1
-  br i1 %t6, label %L4_then, label %L5_else
-L4_then:
-  %t7 = load i32, ptr %c.addr
-  %t8 = add i32 %t7, 1
-  store i32 %t8, ptr %c.addr
-  br label %L6_end
-L5_else:
-  br label %L6_end
-L6_end:
-  %t9 = load i32, ptr %v.addr
-  %t10 = udiv i32 %t9, 2
-  store i32 %t10, ptr %v.addr
+  br label %L6_dend
+L6_dend:
+  %t7 = icmp eq i32 %t5, 1
+  br i1 %t7, label %L7_then, label %L8_else
+L7_then:
+  %t8 = load i32, ptr %c.addr
+  %t9 = add i32 %t8, 1
+  store i32 %t9, ptr %c.addr
+  br label %L9_end
+L8_else:
+  br label %L9_end
+L9_end:
+  %t10 = load i32, ptr %v.addr
+  %t12 = icmp eq i32 2, 0
+  br i1 %t12, label %L11_dtrap, label %L10_dok
+L11_dtrap:
+  call void @__loment_abort()
+  unreachable
+L10_dok:
+  %t11 = udiv i32 %t10, 2
+  br label %L12_dend
+L12_dend:
+  store i32 %t11, ptr %v.addr
   br label %L1_wcond
 L3_wend:
-  %t11 = load i32, ptr %c.addr
-  ret i32 %t11
+  %t13 = load i32, ptr %c.addr
+  ret i32 %t13
 }
 ; sum_range -> u32
 define i32 @sum_range(i32 %n) {

@@ -1,5 +1,5 @@
 // 由 tools/lomentc.py 从 .lomt 转译 —— 请勿手改。
-// module native (loment v0 -> rust)
+// module native_trait (loment v0 -> rust)
 
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -39,61 +39,31 @@ fn __loment_guard(cap: usize, idx: u64, lo: u64, hi: u64) {
 }
 
 
-// ==== 本模块 native ====
-pub const SCALE: u32 = 3;
-
-pub fn fib(n: u32) -> u32 {
-    let mut a: u32 = 0;
-    let mut b: u32 = 1;
-    let mut i: u32 = 0;
-    while (i < n) {
-        let mut t: u32 = (a + b);
-        a = b;
-        b = t;
-        i = (i + 1);
-    }
-    return a;
+// ==== 本模块 native_trait ====
+#[derive(Clone, Copy)]
+pub struct Small {
+    pub v: u32,
 }
 
-pub fn gcd(a: u32, b: u32) -> u32 {
-    let mut x: u32 = a;
-    let mut y: u32 = b;
-    while (y != 0) {
-        let mut t: u32 = (x % y);
-        x = y;
-        y = t;
-    }
-    return x;
+#[derive(Clone, Copy)]
+pub struct Big {
+    pub v: u32,
 }
 
-pub fn popcount(x: u32) -> u32 {
-    let mut v: u32 = x;
-    let mut c: u32 = 0;
-    while (v != 0) {
-        if ((v % 2) == 1) {
-            c = (c + 1);
-        }
-        v = (v / 2);
-    }
-    return c;
+pub fn Small_measure(__self: Small) -> u32 {
+    return __self.v;
 }
 
-pub fn sum_range(n: u32) -> u32 {
-    let mut s: u32 = 0;
-    for i in 0..n {
-        s = (s + i);
-    }
-    return s;
+pub fn Big_measure(__self: Big) -> u32 {
+    return (__self.v * 10);
 }
 
-pub fn mask_low(x: u32, n: u32) -> u32 {
-    return (x & ((1 << n) - 1));
+pub fn call_small() -> u32 {
+    let mut s: Small = Small { v: 7 };
+    return Small_measure(s);
 }
 
-pub fn in_domain(off: u32) -> bool {
-    return ((off >= 0) && (off <= 4));
-}
-
-pub fn scaled(x: u32) -> u32 {
-    return (x * SCALE);
+pub fn call_big() -> u32 {
+    let mut b: Big = Big { v: 7 };
+    return Big_measure(b);
 }

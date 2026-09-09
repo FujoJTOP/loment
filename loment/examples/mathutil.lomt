@@ -5,17 +5,17 @@
 
 module mathutil
 
-const TWO: u32 = 2;
+pub const TWO: u32 = 2;
 
-struct Pair {
+pub struct Pair {
     a: u32,
     b: u32,
 }
 
-fn double(x: u32) -> u32 {
+pub fn double(x: u32) -> u32 {
     return x * TWO;
 }
 
-fn pair_sum(p: Pair) -> u32 {
+pub fn pair_sum(p: Pair) -> u32 {
     return p.a + p.b;
 }

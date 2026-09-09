@@ -1,0 +1,50 @@
+// loment/examples/native_gen.lomt — M6/M7 验证集: 泛型 (docs/145)
+//
+// 泛型函数 max<T> + 泛型 struct Pair<T> + 泛型 enum Opt<T>。
+// 单态化: 每个具体类型组合生成一份副本 (max_u32 / max_i32 / Pair_u32 / Opt_u32)。
+// 聚合类型仅在函数内使用 (原生后端暂不支持聚合参数/返回值)。
+
+module native_gen
+
+struct Pair<T> {
+    a: T,
+    b: T,
+}
+
+enum Opt<T> {
+    Some(T),
+    None,
+}
+
+fn max<T>(a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn call_pair_max() -> u32 {
+    let p: Pair<u32> = Pair { a: 7, b: 3 };
+    return max(p.a, p.b);
+}
+
+fn call_max_i32() -> i32 {
+    let x: i32 = -5;
+    let y: i32 = 3;
+    return max(x, y);
+}
+
+fn call_opt() -> u32 {
+    let a: Opt<u32> = Opt::Some(42);
+    let b: Opt<u32> = Opt::None;
+    let s: u32 = 0;
+    match a {
+        Opt::Some(v) => { s = v; }
+        _ => { s = 1; }
+    }
+    match b {
+        Opt::Some(v) => { s = s + v; }
+        _ => { s = s + 2; }
+    }
+    return s;
+}

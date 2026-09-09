@@ -1,0 +1,30 @@
+// loment/examples/native_raii.lomt — M16/M20 验证集 (docs/145)
+//
+// M16: impl Drop for T -> Rust 原生 impl Drop (IR 后端暂不支持析构)。
+// M20: inb/outb -> core::arch::asm! (x86 端口 I/O; 仅 Rust 路径, 运行需特权级)。
+
+module native_raii
+
+struct Guard {
+    id: u32,
+}
+
+impl Drop for Guard {
+    fn drop(self) {
+        let p: ptr = alloc(4);
+        store8(p, 0, self.id as u8);
+    }
+}
+
+fn port_read(port: u16) -> u32 {
+    return inb(port);
+}
+
+fn port_write(port: u16, v: u8) -> u32 {
+    return outb(port, v);
+}
+
+fn make_guard(v: u32) -> u32 {
+    let g: Guard = Guard { id: v };
+    return g.id;
+}

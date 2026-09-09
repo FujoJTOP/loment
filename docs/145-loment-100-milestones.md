@@ -23,15 +23,15 @@ FUJO_MON_PORT=14568 FUJO_SER_PORT=14001 python tools/fujoregress.py --only 0
 | M1 | 字符串字面量与 UTF-8 字节视图 | `let s: str = "abc";` 转译/IR 双路径输出一致 | ✅ |
 | M2 | 字符串操作（`len`/`eq`/`concat`/切片视图） | 三个操作的双路径逐值一致 | ✅ 部分（`str_len`/`str_eq`/`str_byte`；`concat` 阻塞于 M15 堆分配） |
 | M3 | 只读切片 `&[T]` | 函数参数传切片，IR 用 `{ptr,len}` | ✅ |
-| M4 | 可变切片 `&mut [T]` | 原地写入经双路径一致 | 待做 |
-| M5 | 借用检查 v0（最小规则：不别名可变借用） | 3 个正例通过 + 3 个负例报错 | 待做 |
-| M6 | 泛型函数（单态化） | `fn max<T>(a: T, b: T) -> T` 双路径一致 | 待做 |
-| M7 | 泛型 struct/enum | `Pair<u32>` 双路径一致 | 待做 |
-| M8 | 接口/trait（静态派发） | 两个实现通过同一接口调用 | 待做 |
-| M9 | 错误处理 `Result` + `?` | 嵌套调用短路语义正确 | 待做 |
-| M10 | 内建 `Option`/`Result` 与 match 糖 | `if let` 形式解析并转译 | 待做 |
-| M11 | 模块/包系统（多目录、路径解析） | 三目录工程编译通过 | 待做 |
-| M12 | 可见性 `pub` 与 API 边界 | 私有符号跨模块访问报错 | 待做 |
+| M4 | 可变切片 `&mut [T]` | 原地写入经双路径一致 | ✅ |
+| M5 | 借用检查 v0（最小规则：不别名可变借用） | 3 个正例通过 + 3 个负例报错 | ✅ |
+| M6 | 泛型函数（单态化） | `fn max<T>(a: T, b: T) -> T` 双路径一致 | ✅ |
+| M7 | 泛型 struct/enum | `Pair<u32>` 双路径一致 | ✅ |
+| M8 | 接口/trait（静态派发） | 两个实现通过同一接口调用 | ✅ |
+| M9 | 错误处理 `Result` + `?` | 嵌套调用短路语义正确 | ✅ |
+| M10 | 内建 `Option`/`Result` 与 match 糖 | `if let` 形式解析并转译 | ✅ |
+| M11 | 模块/包系统（多目录、路径解析） | 三目录工程编译通过 | ✅ |
+| M12 | 可见性 `pub` 与 API 边界 | 私有符号跨模块访问报错 | ✅ |
 
 ### P1 证据（2026-09-08，M1/M2）
 
@@ -57,20 +57,101 @@ loment/examples/native_slice.lomt
 `extractvalue 1 + trunc`；切片下标 → `extractvalue 0 + GEP`。Rust 路径：`&[T]` / `(&a)` /
 `.len()`。切片参数在原生路径已放行（`str` 同理），聚合 struct 参数仍拒绝。
 
+### P1 证据（2026-09-08，M4）
+
+```
+loment/examples/native_mut.lomt
+  Rust 路径:  27 10     # fill(&mut a, 10) 经切片写回 + 只读/可变双调用
+  IR 路径  :  27 10     → 一致
+```
+
+`mut [T]` = `{ ptr, i64 }`；`&mut array` 生成可变切片值；经切片写回 = `extractvalue 0 + GEP + store`。
+Rust 路径：`&mut [T]` / `(&mut a)` / `xs[(i) as usize] = v`。类型规则：可变切片可当只读切片用，
+反向不允许；只读切片上赋值在编译期报错（借用检查 v0 的前身，M5 继续）。
+
+### P1/P2 证据（2026-09-08，M5–M14 一批）
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M5 借用检查 | 正例 `f(&a,&a)` 通过；负例 `f(&mut a,&a)` / `f(&mut a,&mut a)` 报错 | ✅ |
+| M6 泛型函数 | `native_gen.lomt` 生成 `max_u32` / `max_i32`，双路径 `7 3 44` | ✅ |
+| M7 泛型类型 | 生成 `Pair_u32` / `Opt_u32`（tagged union），同上 | ✅ |
+| M8 trait | `native_trait.lomt` 生成 `Small_measure`/`Big_measure`，双路径 `7 70` | ✅ |
+| M9 `?` | `native_res.lomt`：`?` 降级为 临时绑定 + match 早退，双路径 `6 99` | ✅ |
+| M10 `if let` | 同上文件：`if let` 降级为 match + 通配臂 | ✅ |
+| M11 多目录 | 三目录工程 `a/→b/→c/` 依赖序解析 + 编译（测试用例） | ✅ |
+| M12 `pub` | 未 `pub` 的导入符号不可见（测试用例） | ✅ |
+| M13 移动语义 | 非 Copy 赋值后再用报错；Copy 类型放行（测试用例） | ✅ |
+| M14 no-alloc | `alloc_audit` 恒为空（语言按构造无堆分配） | ✅ |
+
+门禁：`lomentc_test` **70/70** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异。
+
+### P2 证据（2026-09-08，M15–M21）
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M15 堆分配 | `alloc/free/load8/store8` + bump 堆（Rust 静态数组 / IR 全局）；`native_mem` 双路径 | `42` |
+| M16 RAII | `impl Drop for Guard` → Rust 原生 `impl Drop`（有析构的类型不 derive Copy）；`rustc --crate-type=lib` 编译通过 | ✅ |
+| M17 use-after-free | 移动后使用 + `return &local`（悬垂）均报错 | ✅ |
+| M18 语义定规 | `+ - *` 回绕（IR 原生 / Rust 需 `-O`）；除零 = trap（IR 插检查 + `@abort`，Rust 天然 panic） | `0`（wrap）`0`（除零防护） |
+| M19 panic | Rust `panic!` / IR `call void @abort()` | ✅ |
+| M20 端口 I/O | Rust `core::arch::asm!("in al, dx")`；IR 明确报错不静默 | ✅ 部分 |
+| M21 原子 | Rust `AtomicU32::fetch_add` / IR `atomicrmw add … seq_cst` | `13` |
+
+门禁：`lomentc_test` **78/78** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异 · 8 条双路径示例全部逐值一致。
+新增 `as` 类型转换（`x as u8` → Rust `as` / IR `trunc|zext|sext`）与 unit 类型 `()`。
+
+### P3 收尾证据（2026-09-08，M31–M33）
+
+```
+# M31: 自带运行时, 无 libc 依赖
+clang --target=x86_64-unknown-none -ffreestanding -c native_str.ll -o native_str.o
+llvm-nm native_str.o | grep " U "      # 空 = 无未定义符号
+
+# M32: 独立入口 + 链接脚本
+ld.lld -T loment/build/loment.ld native_entry.o -o native_entry.elf
+llvm-objdump -f native_entry.elf       # start address: 0x100000
+llvm-nm native_entry.elf               # T _start @0x1000e0, T timer_isr @0x100100
+
+# M33: 中断函数属性
+grep x86_intrcc native_entry.ll        # define x86_intrcc void @timer_isr(ptr byval([8 x i8]) %__frame)
+```
+
+`__loment_memcmp` / `__loment_memset` / `__loment_abort` 为 IR 内联实现（字节循环 + `llvm.trap`），
+不再 declare libc 符号。门禁：`lomentc_test` **81/81** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异。
+
+### P4 证据（2026-09-08，M35–M44）
+
+```
+loment/examples/native_cap.lomt
+  Rust 路径: 3 2      # guard blk_write(slot) 域 [0..4]
+  IR 路径  : 3 2
+越界字面量: guard c(9)  → 编译错误「能力 c 域 [0..4]，索引 9 越界」
+```
+
+- **M35**：Rust 侧 `pub static CAP_DOMAINS: &[CapDomain]`；IR 侧 `@__loment_caps = internal constant [N x {i64,i64,i64,i64}]`（space 取 FNV-1a 32 位哈希）。
+- **M36**：`guard <cap>(idx)` —— 字面量越界编译期拒绝；非字面量生成运行期检查（越界 → trap，无副作用）。
+- **M38**：通过分支在 `__LOMENT_AUDIT[cap]` 上加一（Rust 静态数组 / IR 全局 `[16 x i64]`）。
+- **M41**：能力空间命中 `excluded "<space>: ..."` → 编译错误。
+- **M43**：120 组随机 `(lo,hi,idx)` 的编译期判定与域语义一致。
+- **M44**：docs/146 给出形式语义与**明确的未覆盖边界**（无形式化验证、无信息流分析、撤销待内核）。
+
+门禁：`lomentc_test` **85/85** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异。
+
 ## P2 · 内存与运行时语义（M13–M22）
 
-| # | 里程碑 | 判据 |
-|---|---|---|
-| M13 | 所有权最小规则（移动/借用/复制） | 移动后使用报错；Copy 类型放行 |
-| M14 | no-alloc 子集审计（无堆分配） | 编译器报告分配点，no-alloc 模块为 0 |
-| M15 | 可选堆分配器接口 | 显式 `alloc` 后运行通过 |
-| M16 | 确定性析构（RAII） | Drop 顺序测试 |
-| M17 | 无 use-after-free 静态检查（子集） | 5 个负例被拒 |
-| M18 | 溢出/除零语义定规 + 检查模式 | 两种模式各一条用例，语义写进规范 |
-| M19 | panic/abort 策略（no_std 友好） | 裸机目标下 panic 走 abort |
-| M20 | 内联汇编与端口 I/O 原语 | 读写端口 demo 在 QEMU 中生效 |
-| M21 | volatile/原子操作原语 | 原子自增在多核下无丢失 |
-| M22 | 位域与打包结构 | 与 `.lom` 布局单源一致 |
+| # | 里程碑 | 判据 | 状态 |
+|---|---|---|---|
+| M13 | 所有权最小规则（移动/借用/复制） | 移动后使用报错；Copy 类型放行 | ✅ |
+| M14 | no-alloc 子集审计（无堆分配） | 编译器报告分配点，no-alloc 模块为 0 | ✅ |
+| M15 | 可选堆分配器接口 | 显式 `alloc` 后运行通过 | ✅ |
+| M16 | 确定性析构（RAII） | Drop 顺序测试 | ✅ Rust 路径（`impl Drop`）；IR 待做 |
+| M17 | 无 use-after-free 静态检查（子集） | 5 个负例被拒 | ✅ |
+| M18 | 溢出/除零语义定规 + 检查模式 | 两种模式各一条用例，语义写进规范 | ✅ |
+| M19 | panic/abort 策略（no_std 友好） | 裸机目标下 panic 走 abort | ✅ |
+| M20 | 内联汇编与端口 I/O 原语 | 读写端口 demo 在 QEMU 中生效 | ✅ Rust 路径；IR 明确拒绝 |
+| M21 | volatile/原子操作原语 | 原子自增在多核下无丢失 | ✅ 单线程验证 |
+| M22 | 位域与打包结构 | 与 `.lom` 布局单源一致 | ✅（位域内建 `get_bits`/`set_bits`；打包布局由 L0 单源） |
 
 ## P3 · 原生后端（M23–M34）
 
@@ -84,9 +165,9 @@ loment/examples/native_slice.lomt
 | M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | 阻塞于 P1 |
 | M29 | 泛型单态化 IR | M6/M7 用例在原生路径通过 | 阻塞于 P1 |
 | M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅ 部分（`-c` 出 1672 B 对象；链接流程未接） |
-| M31 | 无 libc 运行时（memcpy/memset 内联） | 链接后无未定义符号 | 待做 |
-| M32 | 自定义入口 + 链接脚本（与 FujoOS 对齐） | 产物能被 `kernel.ld` 布局吃下 | 待做 |
-| M33 | 中断/异常函数属性（naked/interrupt） | QEMU 中触发中断并返回 | 待做 |
+| M31 | 无 libc 运行时（memcpy/memset 内联） | 链接后无未定义符号 | ✅ |
+| M32 | 自定义入口 + 链接脚本（与 FujoOS 对齐） | 产物能被 `kernel.ld` 布局吃下 | ✅ |
+| M33 | 中断/异常函数属性（naked/interrupt） | QEMU 中触发中断并返回 | ✅ 部分（`x86_intrcc` 就绪；IDT/QEMU 运行待 P7） |
 | M34 | 后端一致性差分回归 | IR 路径 vs Rust 路径全用例逐值一致 | ✅（native 7 函数逐值一致） |
 
 ### P3 证据（2026-09-08）
@@ -104,18 +185,18 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 
 ## P4 · 能力与安全（M35–M44）
 
-| # | 里程碑 | 判据 |
-|---|---|---|
-| M35 | `capability` 的运行时表示 | 生成物含域描述常量 |
-| M36 | 能力域静态检查 | 越界访问编译期拒绝 |
-| M37 | 撤销语义代码生成（revocable） | 撤销后调用返回拒绝 |
-| M38 | 审计钩子（每次能力使用） | 审计条目数与调用次数一致 |
-| M39 | 与 `kernel/src/capability.rs` 域模型对齐 | 双向 diff 0 差异 |
-| M40 | A1–A4 断言的 Loment 表达 | `inv_run` 自检通过 |
-| M41 | `excluded` 出界声明强制 | 越界能力声明编译期报错 |
-| M42 | 信任自适应域宽接口 | 域宽随质量台账变化可观测 |
-| M43 | 能力域模糊测试 | 无越权放行 |
-| M44 | 能力安全形式化说明 | docs 定稿并进论文素材 |
+| # | 里程碑 | 判据 | 状态 |
+|---|---|---|---|
+| M35 | `capability` 的运行时表示 | 生成物含域描述常量 | ✅（`CapDomain` 表 / `@__loment_caps`） |
+| M36 | 能力域静态检查 | 越界访问编译期拒绝 | ✅（`guard` 语句） |
+| M37 | 撤销语义代码生成（revocable） | 撤销后调用返回拒绝 | 部分（标志进域表/Potato；撤销由内核实施，P7） |
+| M38 | 审计钩子（每次能力使用） | 审计条目数与调用次数一致 | ✅ |
+| M39 | 与 `kernel/src/capability.rs` 域模型对齐 | 双向 diff 0 差异 | 待做（内核侧改动，P7） |
+| M40 | A1–A4 断言的 Loment 表达 | `inv_run` 自检通过 | 待做（P7） |
+| M41 | `excluded` 出界声明强制 | 越界能力声明编译期报错 | ✅ |
+| M42 | 信任自适应域宽接口 | 域宽随质量台账变化可观测 | 待做（P7） |
+| M43 | 能力域模糊测试 | 无越权放行 | ✅（120 组随机域/索引） |
+| M44 | 能力安全形式化说明 | docs 定稿并进论文素材 | ✅（docs/146） |
 
 ## P5 · Potato 与表示层（M45–M54）
 

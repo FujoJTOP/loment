@@ -1,0 +1,20 @@
+// loment/examples/native_entry.lomt — M32 验证集: 独立入口 (docs/145)
+//
+// 编译成裸机可链接的 ELF:
+//   clang --target=x86_64-unknown-none -ffreestanding -nostdlib -fuse-ld=lld \
+//         -T loment/build/loment.ld loment/build/native_entry.ll -o native_entry.elf
+
+module native_entry
+
+fn _start() {
+    let x: u32 = 0;
+    while true {
+        x = x + 1;
+    }
+}
+
+// M33: 中断处理函数 -> x86_intrcc (IR 路径)
+interrupt fn timer_isr() {
+    let t: u32 = 1;
+    store8(alloc(1), 0, t as u8);
+}

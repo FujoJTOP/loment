@@ -50,7 +50,8 @@ def test_demo_parses_and_checks():
     assert mod.imports == ["loment/examples/mathutil.lomt"]
     assert [c.name for c in mod.caps] == ["blk_write"]
     assert [s.name for s in mod.structs] == ["Blk"]
-    assert [e.name for e in mod.enums] == ["Color", "Shape"]
+    names = [e.name for e in mod.enums]
+    assert "Color" in names and "Shape" in names, names  # 另有预置 Option/Result
     assert [c.name for c in mod.consts] == ["MAX_BLKS"]
     assert mod.excluded == ["network: 本单元不申请任何 net 能力", "usb: 不触碰 USB 子系统"]
 
@@ -517,16 +518,12 @@ def test_llvm_aggregates_m23_m26():
 
 
 @test
-def test_llvm_rejects_aggregate_signature():
-    """聚合参数/返回值暂不支持 (ABI 未定), 必须明确报错而非静默错编。"""
-    try:
-        lomentc.emit_llvm(
-            parse("module m\nstruct S { a: u32 }\nfn f(s: S) -> u32 { return s.a; }\n"), ROOT
-        )
-    except lomc.LomError as ex:
-        assert "聚合参数" in ex.msg, ex.msg
-    else:
-        raise AssertionError("聚合参数应被拒绝")
+def test_llvm_accepts_aggregate_signature():
+    """聚合参数在原生路径可用 (LLVM 结构体按值); C ABI 不保证, 故勿从 C 直接调用。"""
+    ir = lomentc.emit_llvm(
+        parse("module m\nstruct S { a: u32 }\nfn f(s: S) -> u32 { return s.a; }\n"), ROOT
+    )
+    assert "define i32 @f({ i32 } %s)" in ir, ir
 
 
 @test
@@ -554,7 +551,7 @@ def test_str_builtins_m1_m2():
     ir = lomentc.emit_llvm(mod, ROOT)
     assert "constant [3 x i8]" in ir, "字符串常量"
     assert "insertvalue { ptr, i64 }" in ir, "str 值构造"
-    assert "call i32 @memcmp" in ir, "str_eq 降级"
+    assert "call i32 @__loment_memcmp" in ir, "str_eq 降级 (自带运行时)"
     assert "zext i8" in ir, "str_byte 降级"
 
 
@@ -587,6 +584,269 @@ def test_slice_type_errors():
     assert any("& 只能作用于数组" in x for x in e), e
     e = errs("module m\nfn f() -> u32 { let x: u32 = 1; return slice_len(x); }\n")
     assert any("不是数组或切片" in x for x in e), e
+
+
+@test
+def test_mut_slice_m4():
+    """M4: 可变切片 mut [T] + &mut array + 经切片写回。"""
+    mod = lomentc.load(ROOT / "loment" / "examples" / "native_mut.lomt")
+    rs = lomentc.emit_rust(mod, ROOT)
+    assert "xs: &mut [u32]" in rs, "可变切片参数"
+    assert "(&mut a)" in rs, "&mut 取切片"
+    assert "xs[(i) as usize] = " in rs, "经切片写回"
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "store i32" in ir and "getelementptr inbounds i32" in ir
+
+
+@test
+def test_mut_slice_errors():
+    e = errs(
+        "module m\nfn w(xs: mut [u32]) -> u32 { xs[0] = 1; return xs[0]; }\n"
+        "fn f() -> u32 { let a: [u32; 2] = [0, 0]; return w(&a); }\n"
+    )
+    assert any("要求可变切片" in x for x in e), e
+    e = errs(
+        "module m\nfn r(xs: [u32]) -> u32 { xs[0] = 1; return xs[0]; }\n"
+    )
+    assert any("只读切片不能写" in x for x in e), e
+
+
+@test
+def test_m11_three_directory_project():
+    """M11: 三目录工程 —— c 导入 b 导入 a, 跨目录路径解析。"""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "a").mkdir()
+        (d / "b").mkdir()
+        (d / "c").mkdir()
+        (d / "a" / "base.lomt").write_text(
+            "module base\npub const K: u32 = 3;\npub fn triple(x: u32) -> u32 { return x * K; }\n",
+            encoding="utf-8")
+        (d / "b" / "mid.lomt").write_text(
+            'module mid\nuse "a/base.lomt"\npub fn six(x: u32) -> u32 { return triple(x) * 2; }\n',
+            encoding="utf-8")
+        (d / "c" / "top.lomt").write_text(
+            'module top\nuse "b/mid.lomt"\nfn run(x: u32) -> u32 { return six(x); }\n',
+            encoding="utf-8")
+        top = lomentc.load(d / "c" / "top.lomt")
+        deps = lomentc.resolve_deps(top, d, top_dir := d / "c", entry=d / "c" / "top.lomt")
+        assert [x.name for x in deps] == ["base", "mid"], [x.name for x in deps]
+        assert lomentc.check(top, deps=deps) == [], lomentc.check(top, deps=deps)
+        rs = lomentc.emit_rust(top, d, deps)
+        assert "pub fn triple(x: u32) -> u32" in rs and "pub fn six(x: u32) -> u32" in rs
+
+
+@test
+def test_m5_borrow_check():
+    """M5: 同一次调用里不得既借又可变借 / 可变借两次。"""
+    ok = 'module m\nfn f(a: [u32], b: [u32]) -> u32 { return 0; }\n' \
+         'fn g() -> u32 { let a: [u32; 2] = [1, 2]; return f(&a, &a); }\n'
+    assert errs(ok) == [], errs(ok)
+    bad = 'module m\nfn f(a: mut [u32], b: [u32]) -> u32 { return 0; }\n' \
+          'fn g() -> u32 { let a: [u32; 2] = [1, 2]; return f(&mut a, &a); }\n'
+    assert any("既被可变借用又被借用" in x for x in errs(bad)), errs(bad)
+    bad2 = 'module m\nfn f(a: mut [u32], b: mut [u32]) -> u32 { return 0; }\n' \
+           'fn g() -> u32 { let a: [u32; 2] = [1, 2]; return f(&mut a, &mut a); }\n'
+    assert any("可变借用两次" in x for x in errs(bad2)), errs(bad2)
+
+
+@test
+def test_m12_private_symbol_invisible():
+    """M12: 导入模块未 pub 的符号不可见。"""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "lib.lomt").write_text(
+            "module lib\nfn hidden() -> u32 { return 1; }\npub fn shown() -> u32 { return 2; }\n",
+            encoding="utf-8")
+        (d / "app.lomt").write_text(
+            'module app\nuse "lib.lomt"\nfn f() -> u32 { return hidden(); }\n', encoding="utf-8")
+        app = lomentc.load(d / "app.lomt")
+        deps = lomentc.resolve_deps(app, d, d, entry=d / "app.lomt")
+        e = lomentc.check(app, deps=deps)
+        assert any("未定义的函数 hidden" in x for x in e), e
+        (d / "app2.lomt").write_text(
+            'module app2\nuse "lib.lomt"\nfn f() -> u32 { return shown(); }\n', encoding="utf-8")
+        app2 = lomentc.load(d / "app2.lomt")
+        deps2 = lomentc.resolve_deps(app2, d, d, entry=d / "app2.lomt")
+        assert lomentc.check(app2, deps=deps2) == [], lomentc.check(app2, deps=deps2)
+
+
+@test
+def test_m13_move_semantics():
+    """M13: 非 Copy 类型赋值/传参 = 移动; 移动后再用报错; Copy 类型放行。"""
+    e = errs('module m\nfn f() -> u32 { let a: [u32; 2] = [1, 2]; let b: [u32; 2] = a; return a[0]; }\n')
+    assert any("已被移动" in x for x in e), e
+    e = errs("module m\nfn f() -> u32 { let a: [u32; 2] = [1, 2]; let b: [u32; 2] = a; return b[0]; }\n")
+    assert e == [], e
+    e = errs("module m\nfn f() -> u32 { let x: u32 = 1; let y: u32 = x; return x + y; }\n")
+    assert e == [], e
+
+
+@test
+def test_m14_no_alloc_audit():
+    """M14: 当前语言按构造即 no-alloc, 分配点恒为空。"""
+    assert lomentc.alloc_audit(lomentc.load(ROOT / "loment" / "examples" / "native.lomt")) == []
+    assert lomentc.alloc_audit(lomentc.load(DEMO)) == []
+
+
+MEM = ROOT / "loment" / "examples" / "native_mem.lomt"
+RAII = ROOT / "loment" / "examples" / "native_raii.lomt"
+
+
+@test
+def test_m15_alloc_both_backends():
+    mod = lomentc.load(MEM)
+    rs = lomentc.emit_rust(mod, ROOT)
+    assert "__loment_alloc" in rs and "__loment_store8" in rs
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "@__loment_heap = internal global [65536 x i8]" in ir
+    assert "getelementptr [65536 x i8]" in ir
+
+
+@test
+def test_m18_wrap_and_divzero():
+    """M18: 算术回绕 (Rust 路径需 -O / -C overflow-checks=off); 除零 trap。"""
+    ir = lomentc.emit_llvm(lomentc.load(MEM), ROOT)
+    assert "add i32" in ir, "IR 原生回绕"
+    assert "icmp eq i32" in ir and "call void @__loment_abort()" in ir, "除零 trap"
+    rs = lomentc.emit_rust(lomentc.load(MEM), ROOT)
+    assert "a + b" in rs
+
+
+@test
+def test_m19_panic():
+    rs = lomentc.emit_rust(parse("module m\nfn f(x: u32) -> u32 { return panic(x); }\n"), ROOT)
+    assert "panic!(" in rs
+    ir = lomentc.emit_llvm(parse("module m\nfn f(x: u32) -> u32 { return panic(x); }\n"), ROOT)
+    assert "call void @__loment_abort()" in ir
+
+
+@test
+def test_m20_ports_rust_only():
+    rs = lomentc.emit_rust(lomentc.load(RAII), ROOT)
+    assert 'asm!("in al, dx"' in rs and 'asm!("out dx, al"' in rs
+    try:
+        lomentc.emit_llvm(lomentc.load(RAII), ROOT)
+    except lomc.LomError as ex:
+        assert "inb" in ex.msg or "outb" in ex.msg, ex.msg
+    else:
+        raise AssertionError("IR 后端应明确拒绝 inb/outb")
+
+
+@test
+def test_m21_atomics():
+    rs = lomentc.emit_rust(lomentc.load(MEM), ROOT)
+    assert "fetch_add(" in rs and "Ordering::SeqCst" in rs
+    ir = lomentc.emit_llvm(lomentc.load(MEM), ROOT)
+    assert "atomicrmw add ptr" in ir and "seq_cst" in ir
+
+
+@test
+def test_m16_drop_impl():
+    rs = lomentc.emit_rust(lomentc.load(RAII), ROOT)
+    assert "impl Drop for Guard {" in rs and "fn drop(&mut self) {" in rs
+    assert "#[derive(Clone, Copy)]\npub struct Guard" not in rs, "有析构的类型不得 derive Copy"
+
+
+@test
+def test_m17_dangling_borrow_rejected():
+    e = errs("module m\nfn f() -> [u32] { let a: [u32; 2] = [1, 2]; return &a; }\n")
+    assert any("悬垂" in x for x in e), e
+
+
+@test
+def test_cast_operator():
+    rs = lomentc.emit_rust(parse("module m\nfn f(x: u32) -> u8 { return x as u8; }\n"), ROOT)
+    assert "(x) as u8" in rs
+    ir = lomentc.emit_llvm(parse("module m\nfn f(x: u32) -> u8 { return x as u8; }\n"), ROOT)
+    assert "trunc i32" in ir
+    e = errs("module m\nfn f(x: str) -> u8 { return x as u8; }\n")
+    assert any("as 只能作用于整型" in x for x in e), e
+
+
+@test
+def test_m22_bitfields():
+    """M22: 位域操作内建 (get_bits/set_bits) 双后端。"""
+    mod = lomentc.load(ROOT / "loment" / "examples" / "native_bits.lomt")
+    rs = lomentc.emit_rust(mod, ROOT)
+    assert "1u16 << (" in rs, "掩码构造"
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "lshr i8" in ir and "shl i8" in ir and "xor i8" in ir
+    e = errs('module m\nfn f() -> u8 { return get_bits(1, 0); }\n')
+    assert any("实参" in x for x in e), e
+
+
+@test
+def test_m31_freestanding_runtime():
+    """M31: 自带运行时, 不依赖 libc。"""
+    ir = lomentc.emit_llvm(lomentc.load(MEM), ROOT)
+    assert "define internal void @__loment_abort()" in ir
+    assert "declare void @abort()" not in ir, "不得再依赖 libc abort"
+    ir2 = lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_str.lomt"), ROOT)
+    assert "define internal i32 @__loment_memcmp" in ir2
+    assert "declare i32 @memcmp" not in ir2, "不得再依赖 libc memcmp"
+
+
+@test
+def test_m33_interrupt_calling_convention():
+    """M33: interrupt fn -> x86_intrcc。"""
+    ir = lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_entry.lomt"), ROOT)
+    assert "define x86_intrcc void @timer_isr" in ir
+    assert "byval" in ir, "x86_intrcc 帧指针需 byval"
+
+
+CAP = ROOT / "loment" / "examples" / "native_cap.lomt"
+
+
+@test
+def test_p4_domain_table_and_audit():
+    """M35/M38: 域描述表 + 审计钩子。"""
+    mod = lomentc.load(CAP)
+    rs = lomentc.emit_rust(mod, ROOT)
+    assert "pub static CAP_DOMAINS: &[CapDomain]" in rs
+    assert 'space: "disk", lo: 0, hi: 4, revocable: true' in rs
+    assert "__LOMENT_AUDIT" in rs and "fn __loment_guard(" in rs
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "@__loment_caps = internal constant [1 x { i64, i64, i64, i64 }]" in ir
+    assert "@__loment_audit = internal global [16 x i64]" in ir
+
+
+@test
+def test_p4_guard_bounds():
+    """M36: 字面量越界编译期拒绝; 域内放行。"""
+    ok = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(2); return 0; }\n"
+    assert errs(ok) == [], errs(ok)
+    bad = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(9); return 0; }\n"
+    assert any("越界" in x for x in errs(bad)), errs(bad)
+    e = errs("module m\nfn f() -> u32 { guard nope(0); return 0; }\n")
+    assert any("未声明的能力" in x for x in e), e
+
+
+@test
+def test_m41_excluded_space_enforced():
+    src = ('module m\nexcluded "network: 不申请网络"\n'
+           'capability net : network[0..1]\nfn f() -> u32 { return 0; }\n')
+    assert any("excluded 的空间" in x for x in errs(src)), errs(src)
+    ok = ('module m\nexcluded "network: 不申请网络"\n'
+          'capability disk : disk[0..1]\nfn f() -> u32 { return 0; }\n')
+    assert errs(ok) == [], errs(ok)
+
+
+@test
+def test_m43_capability_fuzz():
+    """M43: 随机 (lo, hi, idx) —— 编译期判定必须与域语义一致。"""
+    import random
+
+    rnd = random.Random(20260908)  # 固定种子: 可复现的模糊测试 (非加密用途, 故意确定)
+    for _ in range(120):
+        lo = rnd.randint(0, 8)
+        hi = lo + rnd.randint(0, 8)
+        idx = rnd.randint(0, 20)
+        src = (f"module m\ncapability c : disk[{lo}..{hi}]\n"
+               f"fn f() -> u32 {{ guard c({idx}); return 0; }}\n")
+        got = errs(src)
+        should_reject = not (lo <= idx <= hi)
+        assert (len(got) > 0) == should_reject, (lo, hi, idx, got)
 
 
 def main() -> int:

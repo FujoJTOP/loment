@@ -1,0 +1,21 @@
+// loment/examples/native_cap.lomt — P4 验证集: 能力域 (docs/145)
+//
+// M35 域描述表 / M36 guard (字面量越界编译期拒绝, 运行期检查) / M38 审计计数。
+
+module native_cap
+
+capability blk_write : disk[0..4] revocable
+
+fn write(slot: u32) -> u32 {
+    guard blk_write(slot);
+    return slot;
+}
+
+fn ok() -> u32 {
+    return write(3);
+}
+
+fn literal_ok() -> u32 {
+    guard blk_write(2);
+    return 2;
+}
