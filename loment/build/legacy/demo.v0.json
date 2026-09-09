@@ -1,0 +1,46 @@
+{
+  "potato": "v0",
+  "unit": "demo",
+  "language": "loment",
+  "imports": ["mathutil"],
+  "capabilities": [
+    {"name": "blk_write", "domain": {"space": "disk", "lo": 0, "hi": 4}, "revocable": true}
+  ],
+  "functions": [
+    {"name": "fib", "params": [{"name": "n", "type": "u32"}], "ret": "u32"},
+    {"name": "gcd", "params": [{"name": "a", "type": "u32"}, {"name": "b", "type": "u32"}], "ret": "u32"},
+    {"name": "popcount", "params": [{"name": "x", "type": "u32"}], "ret": "u32"},
+    {"name": "in_domain", "params": [{"name": "off", "type": "u32"}], "ret": "bool"},
+    {"name": "blk_end", "params": [{"name": "b", "type": "Blk"}], "ret": "u32"},
+    {"name": "mask_low", "params": [{"name": "x", "type": "u32"}, {"name": "n", "type": "u32"}], "ret": "u32"},
+    {"name": "has_flag", "params": [{"name": "flags", "type": "u32"}, {"name": "bit", "type": "u32"}], "ret": "bool"},
+    {"name": "sum_array", "params": [{"name": "xs", "type": "[u32; 4]"}], "ret": "u32"},
+    {"name": "fill_incr", "params": [], "ret": "[u32; 4]"},
+    {"name": "color_code", "params": [{"name": "c", "type": "Color"}], "ret": "u32"},
+    {"name": "sum_range", "params": [{"name": "n", "type": "u32"}], "ret": "u32"},
+    {"name": "quadruple", "params": [{"name": "x", "type": "u32"}], "ret": "u32"},
+    {"name": "max_blocks", "params": [], "ret": "u32"},
+    {"name": "shape_area", "params": [{"name": "s", "type": "Shape"}], "ret": "u32"}
+  ],
+  "layouts": [
+    {"name": "Header", "size": 64, "endian": "little", "packed": true,
+     "fields": [{"name": "magic", "type": "u32", "offset": 0},
+                {"name": "version", "type": "u32", "offset": 4},
+                {"name": "count", "type": "u32", "offset": 8}]},
+    {"name": "Section", "size": 32, "endian": "little", "packed": true,
+     "fields": [{"name": "tag", "type": "u32", "offset": 0},
+                {"name": "off", "type": "u64", "offset": 8},
+                {"name": "size", "type": "u64", "offset": 16},
+                {"name": "fnv1a", "type": "u32", "offset": 24}]}
+  ],
+  "consts": [{"name": "MAX_BLKS", "type": "u32", "value": 8}],
+  "enums": [
+    {"name": "Color", "variants": ["Red", "Green", "Blue"]},
+    {"name": "Shape", "variants": ["Circle", "Square", "Empty"],
+     "payloads": {"Circle": "u32", "Square": "u32"}}
+  ],
+  "types": [
+    {"name": "Blk", "fields": [{"name": "off", "type": "u32"}, {"name": "len", "type": "u32"}]}
+  ],
+  "excluded": ["network: 本单元不申请任何 net 能力", "usb: 不触碰 USB 子系统"]
+}

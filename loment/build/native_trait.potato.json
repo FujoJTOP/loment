@@ -1,0 +1,106 @@
+{
+  "potato": "v1",
+  "unit": "native_trait",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "Small_measure",
+      "params": [
+        {
+          "name": "__self",
+          "type": "Small"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "Big_measure",
+      "params": [
+        {
+          "name": "__self",
+          "type": "Big"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "call_small",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "call_big",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [
+    {
+      "name": "Small",
+      "fields": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "Big",
+      "fields": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "traits": [
+    {
+      "name": "Measurable",
+      "methods": [
+        "measure"
+      ]
+    }
+  ],
+  "impls": [
+    {
+      "trait": "Measurable",
+      "for": "Small",
+      "methods": [
+        "measure"
+      ]
+    },
+    {
+      "trait": "Measurable",
+      "for": "Big",
+      "methods": [
+        "measure"
+      ]
+    }
+  ],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

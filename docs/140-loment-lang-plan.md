@@ -277,3 +277,15 @@ docs/110 定 Potato 入场于波 C（兼容层 + Agent 运行之后）。本方�
 **仍未做**（诚实记账）：`ui/fui_spec.json`、`sdk/contracts`、`sdk/rulebook` 的 `.lom` 统一
 （三者本就已是单源 + 生成，收益低于前三项）；L1 的原生后端与自举；Potato 的波 C 测量。
 语言本身已能**写 → 转译 → 编译 → 运行 → 导出形式对象**，端到端闭环。
+
+### 11.1 进度（2026-09-09，P2–P5 完成）
+
+| 阶段 | 交付 | 证据 |
+|---|---|---|
+| **P2** | 内存与运行时语义（移动/借用、no-alloc、RAII、panic→abort、端口 I/O、原子、位域） | `lomentc_test` 89/89 |
+| **P3** | 原生后端 LLVM IR（切片/字符串/泛型/trait/Result/内存/位域/裸入口 + 独立链接脚本） | 双路径差分 10/10 逐值一致；差分抓出 `set_bits` 掩码 bug |
+| **P4** | 能力域：`guard` + 编译期边界 + 运行期 trap + 审计计数 + 域表 | docs/146；`lomentc_test` 85/85（当时） |
+| **P5** | Potato v1（泛型/切片/字符串/审计站点）+ 强制导出 + 双实现校验 + 波 C 测量 | docs/147；`potato_test` 7/7（33 反例）；`potato_cross` 50/50 |
+| **门禁** | `ci.py --static-only` 6 项（+`potato_test` +`potato_cross`） | **6/6** |
+
+里程碑进度 **46/100**（P5 中 M48 的 LLM 臂、M50 的内核侧接入待后续阶段）。

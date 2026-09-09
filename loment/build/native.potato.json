@@ -1,0 +1,119 @@
+{
+  "potato": "v1",
+  "unit": "native",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "fib",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "gcd",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "popcount",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "sum_range",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "mask_low",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "in_domain",
+      "params": [
+        {
+          "name": "off",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "scaled",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [
+    {
+      "name": "SCALE",
+      "type": "u32",
+      "value": 3
+    }
+  ],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

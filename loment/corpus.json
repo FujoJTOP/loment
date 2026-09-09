@@ -1,0 +1,14 @@
+[
+  {"path": "tools/potato.py", "lang": "python"},
+  {"path": "tools/lomc.py", "lang": "python"},
+  {"path": "tools/potato_from.py", "lang": "python"},
+  {"path": "tools/lom_audit.py", "lang": "python"},
+  {"path": "sdk/linux/m142_feedback.c", "lang": "c"},
+  {"path": "sdk/linux/m149_trust.c", "lang": "c"},
+  {"path": "sdk/linux/m141_eval.c", "lang": "c"},
+  {"path": "sdk/linux/m120_distill.c", "lang": "c"},
+  {"path": "kernel/src/capability.rs", "lang": "rust"},
+  {"path": "kernel/src/smp.rs", "lang": "rust"},
+  {"path": "kernel/src/desk.rs", "lang": "rust"},
+  {"path": "kernel/src/graphics.rs", "lang": "rust"}
+]

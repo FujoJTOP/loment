@@ -1,0 +1,69 @@
+{
+  "potato": "v1",
+  "unit": "native_mut",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "fill",
+      "params": [
+        {
+          "name": "xs",
+          "type": "mut [u32]"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "call_fill",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "read_only",
+      "params": [
+        {
+          "name": "xs",
+          "type": "[u32]"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "call_read_only",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

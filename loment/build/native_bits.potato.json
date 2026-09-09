@@ -1,0 +1,75 @@
+{
+  "potato": "v1",
+  "unit": "native_bits",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "pack",
+      "params": [
+        {
+          "name": "v",
+          "type": "u8"
+        }
+      ],
+      "ret": "u8"
+    },
+    {
+      "name": "unpack",
+      "params": [
+        {
+          "name": "b",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "roundtrip",
+      "params": [
+        {
+          "name": "v",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "top_bits",
+      "params": [
+        {
+          "name": "b",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

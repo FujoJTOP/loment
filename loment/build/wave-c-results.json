@@ -1,0 +1,777 @@
+{
+  "corpus": "loment\\corpus.json",
+  "arms": {
+    "strict": {
+      "name": "工具链-严格",
+      "per_language": {
+        "python": {
+          "files": 4,
+          "entities_est": 48,
+          "entities_seen": 48,
+          "recognition_rate": 1.0,
+          "entities_ok": 13,
+          "conversion_rate": 0.2708,
+          "ci95": [
+            0.1657,
+            0.41
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        },
+        "c": {
+          "files": 4,
+          "entities_est": 37,
+          "entities_seen": 33,
+          "recognition_rate": 0.8919,
+          "entities_ok": 33,
+          "conversion_rate": 1.0,
+          "ci95": [
+            0.8957,
+            1.0
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        },
+        "rust": {
+          "files": 4,
+          "entities_est": 116,
+          "entities_seen": 114,
+          "recognition_rate": 0.9828,
+          "entities_ok": 104,
+          "conversion_rate": 0.9123,
+          "ci95": [
+            0.846,
+            0.9517
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        }
+      },
+      "files": [
+        {
+          "path": "tools/potato.py",
+          "language": "python",
+          "mode": "strict",
+          "entities_seen": 7,
+          "entities_ok": 1,
+          "conversion_rate": 0.1429,
+          "skipped": [
+            {
+              "kind": "fn",
+              "name": "_is_array_type",
+              "why": "参数 t 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_is_slice_type",
+              "why": "参数 t 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_type_ok",
+              "why": "参数 t 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_req",
+              "why": "参数 obj 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "validate",
+              "why": "参数 doc 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "main",
+              "why": "参数 argv 无类型映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "dd2a1b75be243c94",
+          "entities_est": 7
+        },
+        {
+          "path": "tools/lomc.py",
+          "language": "python",
+          "mode": "strict",
+          "entities_seen": 22,
+          "entities_ok": 10,
+          "conversion_rate": 0.4545,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "LomError",
+              "why": "无注解字段"
+            },
+            {
+              "kind": "fn",
+              "name": "lex",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "type",
+              "name": "Parser",
+              "why": "无注解字段"
+            },
+            {
+              "kind": "fn",
+              "name": "type_range",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "check",
+              "why": "参数 mod 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "emit_rust",
+              "why": "参数 mod 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "emit_c",
+              "why": "参数 mod 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_py_struct_format",
+              "why": "参数 r 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "emit_python",
+              "why": "参数 mod 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "emit_json",
+              "why": "参数 mod 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "load",
+              "why": "参数 path 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "main",
+              "why": "参数 argv 无类型映射"
+            }
+          ],
+          "fields_skipped": 10,
+          "field_notes": [
+            {
+              "owner": "Record",
+              "field": "fields",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Variant",
+              "field": "meta",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Enum",
+              "field": "variants",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Param",
+              "field": "values",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Meta",
+              "field": "entries",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Module",
+              "field": "enums",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Module",
+              "field": "records",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Module",
+              "field": "consts",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Module",
+              "field": "params",
+              "why": "无可用类型映射"
+            },
+            {
+              "owner": "Module",
+              "field": "meta",
+              "why": "无可用类型映射"
+            }
+          ],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "db62cb3db186967c",
+          "entities_est": 22
+        },
+        {
+          "path": "tools/potato_from.py",
+          "language": "python",
+          "mode": "strict",
+          "entities_seen": 12,
+          "entities_ok": 1,
+          "conversion_rate": 0.0833,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Report",
+              "why": "无注解字段"
+            },
+            {
+              "kind": "fn",
+              "name": "_finish",
+              "why": "参数 doc 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_blank",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_py_type",
+              "why": "参数 node 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "from_python",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_c_type",
+              "why": "参数 known 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "from_c",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "_rs_type",
+              "why": "参数 known 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "from_rust",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "transcribe",
+              "why": "参数 path 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "main",
+              "why": "参数 argv 无类型映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "6e76b43d6273a4a7",
+          "entities_est": 12
+        },
+        {
+          "path": "tools/lom_audit.py",
+          "language": "python",
+          "mode": "strict",
+          "entities_seen": 7,
+          "entities_ok": 1,
+          "conversion_rate": 0.1429,
+          "skipped": [
+            {
+              "kind": "fn",
+              "name": "parse_dispatch",
+              "why": "返回类型无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "audit_fuai",
+              "why": "参数 diffs 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "audit_fuc",
+              "why": "参数 diffs 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "audit_generated",
+              "why": "参数 diffs 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "audit_fujr",
+              "why": "参数 diffs 无类型映射"
+            },
+            {
+              "kind": "fn",
+              "name": "audit_l1",
+              "why": "参数 diffs 无类型映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "d4241ba697b4ef89",
+          "entities_est": 7
+        },
+        {
+          "path": "sdk/linux/m142_feedback.c",
+          "language": "c",
+          "mode": "strict",
+          "entities_seen": 9,
+          "entities_ok": 9,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "7adf4f50b46272c6",
+          "entities_est": 10
+        },
+        {
+          "path": "sdk/linux/m149_trust.c",
+          "language": "c",
+          "mode": "strict",
+          "entities_seen": 6,
+          "entities_ok": 6,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "667a8170e17ec028",
+          "entities_est": 7
+        },
+        {
+          "path": "sdk/linux/m141_eval.c",
+          "language": "c",
+          "mode": "strict",
+          "entities_seen": 11,
+          "entities_ok": 11,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "1a148807eda7ee3b",
+          "entities_est": 12
+        },
+        {
+          "path": "sdk/linux/m120_distill.c",
+          "language": "c",
+          "mode": "strict",
+          "entities_seen": 7,
+          "entities_ok": 7,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "986fadd4ada959ce",
+          "entities_est": 8
+        },
+        {
+          "path": "kernel/src/capability.rs",
+          "language": "rust",
+          "mode": "strict",
+          "entities_seen": 24,
+          "entities_ok": 21,
+          "conversion_rate": 0.875,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Domain",
+              "why": "无可用字段"
+            },
+            {
+              "kind": "fn",
+              "name": "aud_tail",
+              "why": "返回类型 '(u64, u64, u64, u64)' 无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "domain_perm",
+              "why": "返回类型 '(bool, u64)' 无映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "583d21a9647bff72",
+          "entities_est": 24
+        },
+        {
+          "path": "kernel/src/smp.rs",
+          "language": "rust",
+          "mode": "strict",
+          "entities_seen": 27,
+          "entities_ok": 26,
+          "conversion_rate": 0.963,
+          "skipped": [
+            {
+              "kind": "fn",
+              "name": "stats",
+              "why": "返回类型 '(u32, u64)' 无映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "cdab691f0d0a5edc",
+          "entities_est": 29
+        },
+        {
+          "path": "kernel/src/desk.rs",
+          "language": "rust",
+          "mode": "strict",
+          "entities_seen": 34,
+          "entities_ok": 32,
+          "conversion_rate": 0.9412,
+          "skipped": [
+            {
+              "kind": "fn",
+              "name": "tty_line",
+              "why": "返回类型 \"&'static [u8; TTY_COL]\" 无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "desktop_main",
+              "why": "返回类型 '!' 无映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "de90616f11a3bc2f",
+          "entities_est": 34
+        },
+        {
+          "path": "kernel/src/graphics.rs",
+          "language": "rust",
+          "mode": "strict",
+          "entities_seen": 29,
+          "entities_ok": 25,
+          "conversion_rate": 0.8621,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Fb",
+              "why": "无可用字段"
+            },
+            {
+              "kind": "fn",
+              "name": "mbi_fb",
+              "why": "返回类型 'Option<(u64, u32, u32, u32, u8, u8)>' 无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "fb",
+              "why": "返回类型 'Fb' 无映射"
+            },
+            {
+              "kind": "fn",
+              "name": "hex_vertex",
+              "why": "返回类型 '(u32, u32)' 无映射"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "58ae55613b491882",
+          "entities_est": 29
+        }
+      ]
+    },
+    "lenient": {
+      "name": "工具链-宽松",
+      "per_language": {
+        "python": {
+          "files": 4,
+          "entities_est": 48,
+          "entities_seen": 48,
+          "recognition_rate": 1.0,
+          "entities_ok": 45,
+          "conversion_rate": 0.9375,
+          "ci95": [
+            0.8316,
+            0.9785
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        },
+        "c": {
+          "files": 4,
+          "entities_est": 37,
+          "entities_seen": 33,
+          "recognition_rate": 0.8919,
+          "entities_ok": 33,
+          "conversion_rate": 1.0,
+          "ci95": [
+            0.8957,
+            1.0
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        },
+        "rust": {
+          "files": 4,
+          "entities_est": 116,
+          "entities_seen": 114,
+          "recognition_rate": 0.9828,
+          "entities_ok": 112,
+          "conversion_rate": 0.9825,
+          "ci95": [
+            0.9383,
+            0.9952
+          ],
+          "objects_valid": 4,
+          "object_valid_rate": 1.0
+        }
+      },
+      "files": [
+        {
+          "path": "tools/potato.py",
+          "language": "python",
+          "mode": "lenient",
+          "entities_seen": 7,
+          "entities_ok": 7,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "dd2a1b75be243c94",
+          "entities_est": 7
+        },
+        {
+          "path": "tools/lomc.py",
+          "language": "python",
+          "mode": "lenient",
+          "entities_seen": 22,
+          "entities_ok": 20,
+          "conversion_rate": 0.9091,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "LomError",
+              "why": "无注解字段"
+            },
+            {
+              "kind": "type",
+              "name": "Parser",
+              "why": "无注解字段"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "db62cb3db186967c",
+          "entities_est": 22
+        },
+        {
+          "path": "tools/potato_from.py",
+          "language": "python",
+          "mode": "lenient",
+          "entities_seen": 12,
+          "entities_ok": 11,
+          "conversion_rate": 0.9167,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Report",
+              "why": "无注解字段"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "6e76b43d6273a4a7",
+          "entities_est": 12
+        },
+        {
+          "path": "tools/lom_audit.py",
+          "language": "python",
+          "mode": "lenient",
+          "entities_seen": 7,
+          "entities_ok": 7,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "d4241ba697b4ef89",
+          "entities_est": 7
+        },
+        {
+          "path": "sdk/linux/m142_feedback.c",
+          "language": "c",
+          "mode": "lenient",
+          "entities_seen": 9,
+          "entities_ok": 9,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "7adf4f50b46272c6",
+          "entities_est": 10
+        },
+        {
+          "path": "sdk/linux/m149_trust.c",
+          "language": "c",
+          "mode": "lenient",
+          "entities_seen": 6,
+          "entities_ok": 6,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "667a8170e17ec028",
+          "entities_est": 7
+        },
+        {
+          "path": "sdk/linux/m141_eval.c",
+          "language": "c",
+          "mode": "lenient",
+          "entities_seen": 11,
+          "entities_ok": 11,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "1a148807eda7ee3b",
+          "entities_est": 12
+        },
+        {
+          "path": "sdk/linux/m120_distill.c",
+          "language": "c",
+          "mode": "lenient",
+          "entities_seen": 7,
+          "entities_ok": 7,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "986fadd4ada959ce",
+          "entities_est": 8
+        },
+        {
+          "path": "kernel/src/capability.rs",
+          "language": "rust",
+          "mode": "lenient",
+          "entities_seen": 24,
+          "entities_ok": 23,
+          "conversion_rate": 0.9583,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Domain",
+              "why": "无可用字段"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "583d21a9647bff72",
+          "entities_est": 24
+        },
+        {
+          "path": "kernel/src/smp.rs",
+          "language": "rust",
+          "mode": "lenient",
+          "entities_seen": 27,
+          "entities_ok": 27,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "cdab691f0d0a5edc",
+          "entities_est": 29
+        },
+        {
+          "path": "kernel/src/desk.rs",
+          "language": "rust",
+          "mode": "lenient",
+          "entities_seen": 34,
+          "entities_ok": 34,
+          "conversion_rate": 1.0,
+          "skipped": [],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "de90616f11a3bc2f",
+          "entities_est": 34
+        },
+        {
+          "path": "kernel/src/graphics.rs",
+          "language": "rust",
+          "mode": "lenient",
+          "entities_seen": 29,
+          "entities_ok": 28,
+          "conversion_rate": 0.9655,
+          "skipped": [
+            {
+              "kind": "type",
+              "name": "Fb",
+              "why": "无可用字段"
+            }
+          ],
+          "fields_skipped": 0,
+          "field_notes": [],
+          "object_valid": true,
+          "validate_errors": [],
+          "sha256": "58ae55613b491882",
+          "entities_est": 29
+        }
+      ]
+    }
+  },
+  "table_md": "| 语言 | 臂 | 文件 | 估计实体 | 识别 | 识别率 | 已转写 | 转换率 | 95% CI (Wilson) | 对象合法率 |\n|---|---|---|---|---|---|---|---|---|---|\n| python | 工具链-严格 | 4 | 48 | 48 | 100.0% | 13 | 27.1% | [16.6%, 41.0%] | 4/4 (100.0%) |\n| python | 工具链-宽松 | 4 | 48 | 48 | 100.0% | 45 | 93.8% | [83.2%, 97.9%] | 4/4 (100.0%) |\n| c | 工具链-严格 | 4 | 37 | 33 | 89.2% | 33 | 100.0% | [89.6%, 100.0%] | 4/4 (100.0%) |\n| c | 工具链-宽松 | 4 | 37 | 33 | 89.2% | 33 | 100.0% | [89.6%, 100.0%] | 4/4 (100.0%) |\n| rust | 工具链-严格 | 4 | 116 | 114 | 98.3% | 104 | 91.2% | [84.6%, 95.2%] | 4/4 (100.0%) |\n| rust | 工具链-宽松 | 4 | 116 | 114 | 98.3% | 112 | 98.2% | [93.8%, 99.5%] | 4/4 (100.0%) |\n\n| 语言 | 臂 | 跳过原因分布 (top) |\n|---|---|---|\n| python | 工具链-严格 | 返回类型无映射×7; 参数 diffs 无类型映射×5; 参数 mod 无类型映射×5; 参数 argv 无类型映射×3 |\n| python | 工具链-宽松 | 无注解字段×3 |\n| c | 工具链-严格 |  |\n| c | 工具链-宽松 |  |\n| rust | 工具链-严格 | 无可用字段×2; 返回类型 \"&'static [u8; TTY_COL]\" 无映射×1; 返回类型 '!' 无映射×1; 返回类型 '(bool, u64)' 无映射×1 |\n| rust | 工具链-宽松 | 无可用字段×2 |"
+}

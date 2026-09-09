@@ -9,7 +9,7 @@
 ## 0. 全局门禁（每个里程碑结束都要跑）
 
 ```
-python tools/ci.py --static-only                 # 4/4
+python tools/ci.py --static-only                 # 6/6
 python tools/fuic.py --check                     # .fuc 逐字节
 python tools/lom_spec_emit.py --check            # spec.json 双副本
 cd kernel && cargo build --release
@@ -138,6 +138,52 @@ loment/examples/native_cap.lomt
 
 门禁：`lomentc_test` **85/85** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异。
 
+### P5 证据（2026-09-09，M45–M54）
+
+```
+# M45/M46: 15 个示例各有一份 v1 形式对象, 全部通过独立校验器
+python tools/lomentc.py loment/examples/native_slice.lomt --emit-potato ...
+python tools/potato.py validate loment/build/*.potato.json     # 15/15 OK
+python tools/lomentc.py demo.lomt --emit-rust out.rs           # 退出码 2: 强制 --emit-potato
+
+# M47: 校验器完备性 (不 import 编译器 + 33 条反例)
+python tools/potato_test.py        # 7/7 通过 (反例 33 条)
+
+# M48/M54: 波 C 主表 (3 语言 x 2 臂, Wilson 95% CI)
+python tools/potato_measure.py     # -> loment/build/wave-c-table.md
+  python 严格 27.1% [16.6,41.0] / 宽松 93.8% [83.2,97.9]
+  c      严格/宽松 100.0% [89.6,100.0] (识别率 89.2%)
+  rust   严格 91.2% [84.6,95.2] / 宽松 98.2% [93.8,99.5]
+
+# M49: 转写工具
+python tools/potato_from.py tools/potato.py --mode strict --report r.json
+
+# M50: 形式对象 -> 内核断言表 (A1-A4)
+python tools/potato_assert.py --check   # cap_asserts.rs 一致 (2 条, 失败 0)
+
+# M51: 旧版本回放
+python tools/potato.py replay loment/build/legacy/demo.v0.json   # v0 回放通过 (legacy)
+
+# M53: 跨实现一致性 (FujoOS potato.py <-> LinuxFUAI potato_verify.py)
+python tools/potato_cross.py       # 50/50 判定一致
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M45 形式对象 v1 | 泛型/实例/trait/impl/切片/`str`/`()`/`guards` 全部导出并通过校验 | ✅ |
+| M46 强制导出 | 编译器自检 + CLI 硬要求 + `lom_audit` 逐字节对账，三层不可关闭 | ✅ |
+| M47 校验器完备性 | 不 import 编译器 + 33 条反例覆盖每条规则 | ✅ |
+| M48 波 C 主表 | 3 语言 × 2 臂（严格/宽松），**LLM 臂未运行**（无外部模型凭据） | ✅ 部分 |
+| M49 转写工具 | Python/C/Rust → 形式对象，报告可复现（无随机数） | ✅ |
+| M50 断言绑定 | `cap_asserts.rs` 由形式对象生成并逐字节对账；内核侧接入归 P7 | ✅ 部分 |
+| M51 版本化回放 | v0/v1 双版本接受 + `replay` 子命令 + 冻结 v0 样本持续回放 | ✅ |
+| M52 规范文本 | docs/147（schema + 规则 + 协议 + 未覆盖边界） | ✅ |
+| M53 跨实现一致 | 两份独立实现 50/50 判定一致（含 33 反例 + 跨表探针） | ✅ |
+| M54 测量协议 | Wilson CI、样本量定义、sha256 绑定、实体粒度定义 | ✅ |
+
+门禁：`lomentc_test` **89/89** · `ci.py --static-only` **6/6** · `lom_audit` 0 差异 ·
+`potato_test` 7/7 · `potato_cross` 50/50。
+
 ## P2 · 内存与运行时语义（M13–M22）
 
 | # | 里程碑 | 判据 | 状态 |
@@ -200,18 +246,18 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 
 ## P5 · Potato 与表示层（M45–M54）
 
-| # | 里程碑 | 判据 |
-|---|---|---|
-| M45 | 形式对象 v1（泛型/切片/字符串） | 新类型全部导出且校验通过 |
-| M46 | 编译器强制导出（不可关闭） | 缺形式对象则编译失败 |
-| M47 | 独立校验器完备性 | 校验器不 import 编译器代码 |
-| M48 | 结构识别转换率测量（波 C 主表） | 三语言 × 两模型对照表 |
-| M49 | Python/C/Rust → Potato 转写工具 | 转写率与错误率可复现 |
-| M50 | 形式对象 → 内核断言绑定 | A1–A4 由形式对象驱动 |
-| M51 | 形式对象版本化与回放 | 旧版本可回放校验 |
-| M52 | Potato 规范文本（论文三素材） | 规范 + 测量协议成稿 |
-| M53 | 跨实现一致性（FujoOS/LinuxFUAI） | 同一形式对象双实现同判定 |
-| M54 | 测量协议与统计 | 置信区间与样本量定义 |
+| # | 里程碑 | 判据 | 状态 |
+|---|---|---|---|
+| M45 | 形式对象 v1（泛型/切片/字符串） | 新类型全部导出且校验通过 | ✅ |
+| M46 | 编译器强制导出（不可关闭） | 缺形式对象则编译失败 | ✅ |
+| M47 | 独立校验器完备性 | 校验器不 import 编译器代码 | ✅ |
+| M48 | 结构识别转换率测量（波 C 主表） | 三语言 × 两模型对照表 | ✅ 部分（LLM 臂未运行） |
+| M49 | Python/C/Rust → Potato 转写工具 | 转写率与错误率可复现 | ✅ |
+| M50 | 形式对象 → 内核断言绑定 | A1–A4 由形式对象驱动 | ✅ 部分（内核接入归 P7） |
+| M51 | 形式对象版本化与回放 | 旧版本可回放校验 | ✅ |
+| M52 | Potato 规范文本（论文三素材） | 规范 + 测量协议成稿 | ✅ |
+| M53 | 跨实现一致性（FujoOS/LinuxFUAI） | 同一形式对象双实现同判定 | ✅ |
+| M54 | 测量协议与统计 | 置信区间与样本量定义 | ✅ |
 
 ## P6 · 工具链（M55–M66）
 

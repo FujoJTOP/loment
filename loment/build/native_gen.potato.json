@@ -1,0 +1,157 @@
+{
+  "potato": "v1",
+  "unit": "native_gen",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "call_pair_max",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "call_max_i32",
+      "params": [],
+      "ret": "i32"
+    },
+    {
+      "name": "call_opt",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "max_u32",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "max_i32",
+      "params": [
+        {
+          "name": "a",
+          "type": "i32"
+        },
+        {
+          "name": "b",
+          "type": "i32"
+        }
+      ],
+      "ret": "i32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [
+    {
+      "name": "Opt_u32",
+      "variants": [
+        "Some",
+        "None"
+      ],
+      "payloads": {
+        "Some": "u32"
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "Pair_u32",
+      "fields": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "fn",
+      "name": "max",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Pair",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Opt",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "kind": "fn",
+      "name": "max_u32",
+      "of": "max",
+      "args": [
+        "u32"
+      ]
+    },
+    {
+      "kind": "fn",
+      "name": "max_i32",
+      "of": "max",
+      "args": [
+        "i32"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Pair_u32",
+      "of": "Pair",
+      "args": [
+        "u32"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Opt_u32",
+      "of": "Opt",
+      "args": [
+        "u32"
+      ]
+    }
+  ],
+  "guards": 0,
+  "excluded": []
+}

@@ -1,0 +1,97 @@
+{
+  "potato": "v1",
+  "unit": "native_raii",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "Guard_drop",
+      "params": [
+        {
+          "name": "__self",
+          "type": "Guard"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "port_read",
+      "params": [
+        {
+          "name": "port",
+          "type": "u16"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "port_write",
+      "params": [
+        {
+          "name": "port",
+          "type": "u16"
+        },
+        {
+          "name": "v",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "make_guard",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [
+    {
+      "name": "Guard",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "traits": [],
+  "impls": [
+    {
+      "trait": "Drop",
+      "for": "Guard",
+      "methods": [
+        "drop"
+      ]
+    }
+  ],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

@@ -1,5 +1,5 @@
 {
-  "potato": "v0",
+  "potato": "v1",
   "unit": "demo",
   "language": "loment",
   "imports": [
@@ -257,6 +257,27 @@
       ]
     }
   ],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
   "excluded": [
     "network: 本单元不申请任何 net 能力",
     "usb: 不触碰 USB 子系统"

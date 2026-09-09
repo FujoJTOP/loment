@@ -1,0 +1,73 @@
+{
+  "potato": "v1",
+  "unit": "native_mem",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "heap_roundtrip",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "wrap_add",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "safe_div",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "atomic_roundtrip",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

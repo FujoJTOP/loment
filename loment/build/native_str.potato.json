@@ -1,0 +1,70 @@
+{
+  "potato": "v1",
+  "unit": "native_str",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "hello_len",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "same_lit",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "same_var",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "eq_var",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "diff_len",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "first_byte",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "third_byte",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

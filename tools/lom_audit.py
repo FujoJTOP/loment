@@ -261,7 +261,6 @@ def audit_l1(diffs: list[str]) -> None:
         diffs.append(f"[l1         ] {e}")
     for path, want in (
         (ROOT / "loment" / "build" / "demo.rs", lomentc.emit_rust(mod, ROOT, deps)),
-        (ROOT / "loment" / "build" / "demo.potato.json", lomentc.emit_potato(mod, ROOT, deps)),
         (ROOT / "loment" / "build" / "native.ll",
          lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native.lomt"), ROOT)),
         (ROOT / "loment" / "build" / "native_agg.ll",
@@ -289,6 +288,32 @@ def audit_l1(diffs: list[str]) -> None:
             diffs.append(f"[l1         ] {path.relative_to(ROOT)} 缺失")
         elif path.read_text(encoding="utf-8") != want:
             diffs.append(f"[l1         ] {path.relative_to(ROOT)} 与 .lomt 转译结果不一致")
+
+    # M45/M46: 每个示例必须有一份通过独立校验器的形式对象 (缺失/过期 = 门禁失败)
+    import potato
+    for src2 in sorted((ROOT / "loment" / "examples").glob("*.lomt")):
+        obj = ROOT / "loment" / "build" / f"{src2.stem}.potato.json"
+        m2 = lomentc.load(src2)
+        want = lomentc.emit_potato(m2, ROOT, lomentc.resolve_deps(m2, ROOT, src2.parent, entry=src2))
+        if not obj.exists():
+            diffs.append(f"[l1         ] {obj.relative_to(ROOT)} 缺失 (M46 强制导出)")
+            continue
+        got = obj.read_text(encoding="utf-8")
+        if got != want:
+            diffs.append(f"[l1         ] {obj.relative_to(ROOT)} 与 .lomt 形式对象不一致")
+            continue
+        errs = potato.validate(json.loads(got))
+        if errs:
+            diffs.append(f"[l1         ] {obj.relative_to(ROOT)} 形式对象非法: {errs[0]}")
+
+    # M50: A1–A4 断言表必须与形式对象一致
+    import potato_assert
+    cap = ROOT / "loment" / "build" / "cap_asserts.rs"
+    want_cap = potato_assert.emit_rust(potato_assert.load_objects())
+    if not cap.exists():
+        diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 缺失 (M50 断言绑定)")
+    elif cap.read_text(encoding="utf-8") != want_cap:
+        diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 与形式对象不一致 (M50)")
 
 
 def main() -> int:

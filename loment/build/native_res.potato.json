@@ -1,0 +1,87 @@
+{
+  "potato": "v1",
+  "unit": "native_res",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "parse_small",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "Result_u32_u32"
+    },
+    {
+      "name": "twice",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "Result_u32_u32"
+    },
+    {
+      "name": "call_ok",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "call_err",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [
+    {
+      "name": "Result_u32_u32",
+      "variants": [
+        "Ok",
+        "Err"
+      ],
+      "payloads": {
+        "Ok": "u32",
+        "Err": "u32"
+      }
+    }
+  ],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "kind": "type",
+      "name": "Result_u32_u32",
+      "of": "Result",
+      "args": [
+        "u32",
+        "u32"
+      ]
+    }
+  ],
+  "guards": 0,
+  "excluded": []
+}

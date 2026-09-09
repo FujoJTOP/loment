@@ -79,7 +79,7 @@ def test_rust_output_shape():
 @test
 def test_potato_emits_used_layouts():
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v0" and doc["unit"] == "demo" and doc["language"] == "loment"
+    assert doc["potato"] == "v1" and doc["unit"] == "demo" and doc["language"] == "loment"
     assert [r["name"] for r in doc["layouts"]] == ["Header", "Section"]
     cap = doc["capabilities"][0]
     assert cap == {"name": "blk_write", "domain": {"space": "disk", "lo": 0, "hi": 4}, "revocable": True}
@@ -182,15 +182,19 @@ def test_potato_rejects_bad_signature():
 def test_check_mode_detects_drift():
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "demo.rs"
+        obj = Path(td) / "demo.json"
         import contextlib
         import io
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            assert lomentc.main([str(DEMO), "--emit-rust", str(out)]) == 0
-            assert lomentc.main([str(DEMO), "--emit-rust", str(out), "--check"]) == 0
+            assert lomentc.main([str(DEMO), "--emit-rust", str(out),
+                                 "--emit-potato", str(obj)]) == 0
+            assert lomentc.main([str(DEMO), "--emit-rust", str(out),
+                                 "--emit-potato", str(obj), "--check"]) == 0
             out.write_text("// drifted\n", encoding="utf-8")
-            assert lomentc.main([str(DEMO), "--emit-rust", str(out), "--check"]) == 1
+            assert lomentc.main([str(DEMO), "--emit-rust", str(out),
+                                 "--emit-potato", str(obj), "--check"]) == 1
 
 
 @test
@@ -530,15 +534,19 @@ def test_llvm_accepts_aggregate_signature():
 def test_llvm_check_mode():
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "n.ll"
+        obj = Path(td) / "n.json"
         import contextlib
         import io
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out)]) == 0
-            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out), "--check"]) == 0
+            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out),
+                                 "--emit-potato", str(obj)]) == 0
+            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out),
+                                 "--emit-potato", str(obj), "--check"]) == 0
             out.write_text("; drift\n", encoding="utf-8")
-            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out), "--check"]) == 1
+            assert lomentc.main([str(NATIVE), "--emit-llvm", str(out),
+                                 "--emit-potato", str(obj), "--check"]) == 1
 
 
 @test
@@ -847,6 +855,80 @@ def test_m43_capability_fuzz():
         got = errs(src)
         should_reject = not (lo <= idx <= hi)
         assert (len(got) > 0) == should_reject, (lo, hi, idx, got)
+
+
+def _potato(name: str) -> dict:
+    p = ROOT / "loment" / "examples" / f"{name}.lomt"
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    return json.loads(lomentc.emit_potato(mod, ROOT, deps))
+
+
+@test
+def test_m45_form_object_v1_covers_slices_strings_generics():
+    """M45: v1 必须导出切片/字符串/泛型/实例/trait/impl, 且全部通过独立校验。"""
+    sl = _potato("native_slice")
+    assert any(p["type"] == "[u32]" for f in sl["functions"] for p in f["params"]), sl["functions"]
+    assert potato.validate(sl) == []
+    st = json.loads(lomentc.emit_potato(
+        parse('module s\nfn len_of(s: str) -> u32 { return str_len(s); }\n'), ROOT))
+    assert any(p["type"] == "str" for f in st["functions"] for p in f["params"])
+    assert potato.validate(st) == []
+    gen = _potato("native_gen")
+    assert {"kind": "fn", "name": "max", "params": ["T"]} in gen["generics"], gen["generics"]
+    assert any(i["name"] == "max_u32" and i["of"] == "max" and i["args"] == ["u32"]
+               for i in gen["instances"]), gen["instances"]
+    assert potato.validate(gen) == []
+    tr = _potato("native_trait")
+    assert tr["traits"] == [{"name": "Measurable", "methods": ["measure"]}], tr["traits"]
+    assert {i["for"] for i in tr["impls"]} == {"Small", "Big"}
+    assert all(i["methods"] == ["measure"] for i in tr["impls"]), tr["impls"]
+    assert potato.validate(tr) == []
+    raii = _potato("native_raii")
+    assert raii["impls"] and raii["impls"][0]["trait"] == "Drop"
+    assert potato.validate(raii) == []
+    entry = _potato("native_entry")
+    assert any(f["ret"] == "()" for f in entry["functions"]), entry["functions"]
+    assert potato.validate(entry) == []
+
+
+@test
+def test_m45_every_example_exports_valid_v1():
+    ex = ROOT / "loment" / "examples"
+    names = sorted(p.stem for p in ex.glob("*.lomt"))
+    assert len(names) >= 15, names
+    for n in names:
+        doc = _potato(n)
+        assert doc["potato"] == "v1", n
+        assert potato.validate(doc) == [], (n, potato.validate(doc))
+
+
+@test
+def test_m46_compiler_self_check_is_mandatory():
+    """M46: 形式对象校验失败 => 编译失败 (不可绕过)。"""
+    orig = potato.validate
+    potato.validate = lambda doc: ["注入错误"]  # noqa: ARG005
+    try:
+        try:
+            lomentc.emit_potato(lomentc.load(DEMO), ROOT)
+            assert False, "应当抛 LomError"
+        except lomc.LomError as e:
+            assert "形式对象自检失败" in str(e), e
+    finally:
+        potato.validate = orig
+
+
+@test
+def test_m46_cli_requires_potato_with_codegen():
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "x.rs"
+        assert lomentc.main([str(DEMO), "--emit-rust", str(out)]) == 2
+        assert not out.exists()
+        obj = Path(d) / "x.json"
+        assert lomentc.main([str(DEMO), "--emit-rust", str(out),
+                             "--emit-potato", str(obj)]) == 0
+        assert out.exists() and obj.exists()
+        assert potato.validate(json.loads(obj.read_text(encoding="utf-8"))) == []
 
 
 def main() -> int:

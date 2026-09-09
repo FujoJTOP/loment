@@ -1,0 +1,75 @@
+{
+  "potato": "v1",
+  "unit": "mathutil",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "double",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "pair_sum",
+      "params": [
+        {
+          "name": "p",
+          "type": "Pair"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [
+    {
+      "name": "TWO",
+      "type": "u32",
+      "value": 2
+    }
+  ],
+  "enums": [],
+  "types": [
+    {
+      "name": "Pair",
+      "fields": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

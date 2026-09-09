@@ -1,0 +1,65 @@
+{
+  "potato": "v1",
+  "unit": "native_slice",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "sum",
+      "params": [
+        {
+          "name": "xs",
+          "type": "[u32]"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "call_sum",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "first_of",
+      "params": [
+        {
+          "name": "xs",
+          "type": "[u32]"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "call_first",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

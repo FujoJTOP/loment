@@ -1,0 +1,65 @@
+{
+  "potato": "v1",
+  "unit": "native_cap",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [
+    {
+      "name": "blk_write",
+      "domain": {
+        "space": "disk",
+        "lo": 0,
+        "hi": 4
+      },
+      "revocable": true
+    }
+  ],
+  "functions": [
+    {
+      "name": "write",
+      "params": [
+        {
+          "name": "slot",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "ok",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "literal_ok",
+      "params": [],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 2,
+  "excluded": []
+}

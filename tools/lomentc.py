@@ -225,6 +225,8 @@ class Struct:
     line: int
     pub: bool = False
     tparams: list = field(default_factory=list)  # M7
+    from_generic: str = ""                       # M45: 由哪个泛型声明单态化而来
+    generic_args: list = field(default_factory=list)  # M45: 单态化实参
 
 
 @dataclass
@@ -301,6 +303,8 @@ class EnumDecl:
     payloads: dict = field(default_factory=dict)  # variant -> 载荷类型 (无载荷者不出现)
     pub: bool = False
     tparams: list = field(default_factory=list)  # M7
+    from_generic: str = ""                       # M45
+    generic_args: list = field(default_factory=list)  # M45
 
 
 @dataclass
@@ -432,6 +436,8 @@ class Func:
     pub: bool = False            # M12: 跨模块可见
     tparams: list = field(default_factory=list)  # M6: 泛型参数
     interrupt: bool = False      # M33: x86 中断处理函数
+    from_generic: str = ""       # M45: 由哪个泛型声明单态化而来
+    generic_args: list = field(default_factory=list)  # M45: 单态化实参
 
 
 def _rename_self(stmts: list) -> None:
@@ -1276,7 +1282,10 @@ def _mono_expr(e, scope, generics, insts, structs, enums) -> None:
             if m is not None:
                 key = (gf.name,) + tuple(m[t] for t in gf.tparams)
                 if key not in insts:
-                    insts[key] = _instantiate(gf, m, gf.name + "_" + "_".join(m[t] for t in gf.tparams))
+                    inst = _instantiate(gf, m, gf.name + "_" + "_".join(m[t] for t in gf.tparams))
+                    inst.from_generic = gf.name
+                    inst.generic_args = [m[t] for t in gf.tparams]
+                    insts[key] = inst
                 e.name = insts[key].name
         return
     if isinstance(e, Bin):
@@ -1560,13 +1569,17 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                 mp[ref] = name
                 if base in gs:
                     g = gs[base]
-                    mod.structs.append(Struct(
-                        name, [(fn, _replace_type(ft, mp)) for fn, ft in g.fields], g.line, True, []))
+                    s = Struct(
+                        name, [(fn, _replace_type(ft, mp)) for fn, ft in g.fields], g.line, True, [])
+                    s.from_generic, s.generic_args = base, list(args)
+                    mod.structs.append(s)
                 else:
                     g = ge[base]
-                    mod.enums.append(EnumDecl(
+                    e = EnumDecl(
                         name, list(g.variants), g.line,
-                        {v: _replace_type(pt, mp) for v, pt in g.payloads.items()}, True, []))
+                        {v: _replace_type(pt, mp) for v, pt in g.payloads.items()}, True, [])
+                    e.from_generic, e.generic_args = base, list(args)
+                    mod.enums.append(e)
         _rewrite_types(allmods, made)
         _fix_generic_literals(allmods, set(gs) | set(ge))
         mod.structs = [s for s in mod.structs if not s.tparams]
@@ -2528,7 +2541,29 @@ def emit_rust(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> 
     return "\n".join(out).rstrip() + "\n"
 
 
+def _count_guards(mod: Module) -> int:
+    """M50: 审计站点数 —— 形式对象必须自描述 guard 数量 (不读源码即可断言 A2)。"""
+    def walk(stmts: list) -> int:
+        n = 0
+        for s in stmts:
+            if isinstance(s, Guard):
+                n += 1
+            elif isinstance(s, If):
+                n += walk(s.then) + walk(s.otherwise)
+            elif isinstance(s, (While, For)):
+                n += walk(s.body)
+            elif isinstance(s, Match):
+                n += sum(walk(b) for _, b in s.arms)
+        return n
+
+    return sum(walk(f.body) for f in mod.funcs)
+
+
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
+    """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
+    import copy as _c
+
+    raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
     mod, deps = prepare(mod, deps)  # M6
     layouts = []
     for u in mod.uses:
@@ -2549,8 +2584,21 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                     ],
                 }
             )
+    # M45: 泛型声明 (单态化前的本单元视图) + 单态化实例 (prepare 标记)
+    generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
+                for f in raw_mod.funcs if f.tparams]
+    generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
+                 for s in raw_mod.structs if s.tparams]
+    generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
+                 for e in raw_mod.enums if e.tparams]
+    instances = [{"kind": "fn", "name": f.name, "of": f.from_generic,
+                  "args": list(f.generic_args)} for f in mod.funcs if f.from_generic]
+    instances += [{"kind": "type", "name": s.name, "of": s.from_generic,
+                   "args": list(s.generic_args)} for s in mod.structs if s.from_generic]
+    instances += [{"kind": "type", "name": e.name, "of": e.from_generic,
+                   "args": list(e.generic_args)} for e in mod.enums if e.from_generic]
     doc = {
-        "potato": "v0",
+        "potato": "v1",
         "unit": mod.name,
         "language": "loment",
         "imports": [d.name for d in (deps or [])],
@@ -2584,9 +2632,25 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             {"name": s.name, "fields": [{"name": fn, "type": ft} for fn, ft in s.fields]}
             for s in mod.structs
         ],
+        "traits": [{"name": t.name, "methods": [m[0] for m in t.methods]}
+                   for t in raw_mod.traits],
+        "impls": [{"trait": i.trait, "for": i.type,
+                   "methods": [f.name[len(i.type) + 1:]
+                               if f.name.startswith(i.type + "_") else f.name
+                               for f in i.funcs]}
+                  for i in raw_mod.impls],
+        "generics": generics,
+        "instances": instances,
+        "guards": _count_guards(mod),
         "excluded": list(mod.excluded),
     }
-    return json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+    text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+    # M46: 编译器强制导出 —— 形式对象必须通过独立校验器, 否则编译失败。
+    import potato as _potato
+    errs = _potato.validate(doc)
+    if errs:
+        raise LomError(1, 1, "形式对象自检失败 (Potato v1): " + "; ".join(errs[:5]))
+    return text
 
 
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
@@ -3440,6 +3504,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
     args = ap.parse_args(argv)
+
+    # M46: 形式对象不可关闭 —— 产出任何后端工件必须同时导出 Potato 形式对象。
+    if (args.emit_rust or args.emit_llvm) and not args.emit_potato:
+        print("[ERR] M46: 编译器强制导出形式对象 —— 需同时给出 --emit-potato PATH",
+              file=sys.stderr)
+        return 2
 
     root = Path(args.lom_root) if args.lom_root else Path(__file__).resolve().parent.parent
     path = Path(args.file)
