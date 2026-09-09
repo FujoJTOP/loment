@@ -324,16 +324,19 @@ def audit_l1(diffs: list[str]) -> None:
     elif syscalls.read_text(encoding="utf-8") != want_sys:
         diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 与 lom/fuai.lom 不一致 (M72)")
 
-    # M79: 自举 lexer 的形式对象必须与源码一致
-    sh = ROOT / "loment" / "selfhost" / "lexer.lomt"
-    sh_obj = ROOT / "loment" / "build" / "selfhost_lexer.potato.json"
-    if sh.exists():
+    # M79/M80: 自举 lexer/parser 的形式对象必须与源码一致
+    for stem in ("lexer", "parser"):
+        sh = ROOT / "loment" / "selfhost" / f"{stem}.lomt"
+        sh_obj = ROOT / "loment" / "build" / f"selfhost_{stem}.potato.json"
+        if not sh.exists():
+            continue
         m3 = lomentc.load(sh)
-        want_sh = lomentc.emit_potato(m3, ROOT, lomentc.resolve_deps(m3, ROOT, sh.parent, entry=sh))
+        want_sh = lomentc.emit_potato(m3, ROOT,
+                                      lomentc.resolve_deps(m3, ROOT, sh.parent, entry=sh))
         if not sh_obj.exists():
-            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 缺失 (M79)")
+            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 缺失 (自举 {stem})")
         elif sh_obj.read_text(encoding="utf-8") != want_sh:
-            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost/lexer.lomt 不一致")
+            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost/{stem}.lomt 不一致")
 
     # M93/M95/M99: 手册站点与发布清单必须与当前工件一致
     import loment_manual

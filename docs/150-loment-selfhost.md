@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
-> 状态: **进行中**（2026-09-09）· 已完成: M79 · 自检: `tools/loment_p8_test.py` 1/1
-> 门禁: `ci.py --static-only` 9/9
+> 状态: **进行中**（2026-09-09）· 已完成: M79 · 部分: M80 · 自检: `tools/loment_p8_test.py` 2/2
+> 门禁: `ci.py --static-only` 10/10
 
 ## M79 · Loment 版 lexer ✅
 
@@ -29,11 +29,24 @@
 第 2 个 bug 是自举逼出来的：手写示例里的 `&&` 都很简单，只有把真实程序（lexer 的
 多重条件）交给后端才暴露。修完后 11 条双路径示例输出与修改前逐值一致（见 docs/145 P8 证据）。
 
-## 待做（M80–M88）
+## M80 · Loment 版 parser（部分）✅
+
+`loment/selfhost/parser.lomt`：消费 M79 的 token 记录，产出规范 AST dump。
+本阶段覆盖 **module 与 fn 签名**（参数 `名:类型`、可选 `-> 返回类型`），
+dump 形如 `(module m (fn f (p x u32) -> u32) (fn g) )`。
+
+**判据（部分）**：与 Python 版 AST 结构一致 —— `loment_p8_test` 对 5 个真实文件
+（mathutil / bytes / ahci / allocator / parser 自身）逐字符比较 dump，**全部一致**。
+函数体（语句/表达式）解析待做，故为部分。
+
+实现要点：Loment 无元组返回，用 `(i << 32) | o` 打包"token 游标 + 输出游标"；
+token 文本比较用 `tok_is(src, t, i, s)` 逐字节比。
+
+## 待做（M81–M88）
 
 | # | 里程碑 | 现状 |
 |---|---|---|
-| M80 | Loment 版 parser | 未开始 |
+| M80 | Loment 版 parser（函数体） | 部分（签名已一致） |
 | M81 | Loment 版类型检查 | 未开始 |
 | M82 | Loment 版 IR 生成 | 未开始 |
 | M83 | 自编译 | 未开始 |

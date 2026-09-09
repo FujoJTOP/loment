@@ -1,0 +1,111 @@
+module parser
+
+// M80 (部分): Loment 版 parser —— 消费 M79 的 token 记录, 产出规范 AST dump。
+// 本阶段覆盖: module / fn 签名 (参数 名:类型, 可选 -> 返回类型)。
+// dump: (module m (fn f (p x u32) (p y u32) -> u32) (fn g (p z u8)))
+// 与 Python 版 (lomentc AST) 对照见 tools/loment_p8_test.py。
+use "loment/examples/bytes.lomt"
+use "loment/selfhost/lexer.lomt"
+
+pub fn tok_kind(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20);
+}
+
+pub fn tok_start(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 4);
+}
+
+pub fn tok_len(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 8);
+}
+
+/// token 原文是否等于 s。
+fn tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tok_len(t, i) != str_len(s) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(s) {
+        if load8(src, tok_start(t, i) + k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn puts(out: ptr, o: u32, s: str) -> u32 {
+    let i: u32 = 0;
+    while i < str_len(s) {
+        store8(out, o, str_byte(s, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+fn put_tok(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
+    let s: u32 = tok_start(t, i);
+    let n: u32 = tok_len(t, i);
+    let k: u32 = 0;
+    while k < n {
+        store8(out, o, load8(src, s + k) as u8);
+        o = o + 1;
+        k = k + 1;
+    }
+    return o;
+}
+
+/// 解析 fn 签名 (t[i] == "fn"); 返回 (新 i, 新 o) 打包为 u64。
+fn parse_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    o = puts(out, o, "(fn ");
+    i = i + 1;
+    o = put_tok(out, o, src, t, i);
+    i = i + 1;
+    i = i + 1;  // '('
+    while !tok_is(src, t, i, ")") {
+        o = puts(out, o, " (p ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 2;  // ':'
+        o = puts(out, o, " ");
+        o = put_tok(out, o, src, t, i);
+        o = puts(out, o, ")");
+        i = i + 1;
+        if tok_is(src, t, i, ",") {
+            i = i + 1;
+        }
+    }
+    i = i + 1;  // ')'
+    if tok_is(src, t, i, "-") {
+        i = i + 2;  // '->' (词法器逐字符)
+        o = puts(out, o, " -> ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 1;
+    }
+    o = puts(out, o, ")");
+    return (i as u64) * 4294967296 + (o as u64);
+}
+
+/// 解析整个单元; 返回输出长度。
+pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    o = puts(out, o, "(module ");
+    i = i + 1;
+    o = put_tok(out, o, src, t, i);
+    i = i + 1;
+    o = puts(out, o, " ");
+    while tok_kind(t, i) != 4 {
+        if tok_is(src, t, i, "fn") {
+            let r: u64 = parse_fn(src, t, i, out, o);
+            i = (r / 4294967296) as u32;
+            o = (r % 4294967296) as u32;
+            o = puts(out, o, " ");
+        } else {
+            i = i + 1;
+        }
+    }
+    o = puts(out, o, ")");
+    store8(out, o, 0 as u8);
+    return o;
+}

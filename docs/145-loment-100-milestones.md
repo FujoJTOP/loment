@@ -266,7 +266,18 @@ python tools/loment_p8_test.py     # 1/1: Loment 版 lexer token 流 == Python �
 
 顺带修掉两个后端真 bug（`else if` 语法、嵌套 `&&` 的 phi 前驱），见 docs/150 §M79。
 
-门禁：`loment_p8_test` **1/1** · `ci.py --static-only` **9/9**。
+门禁：`loment_p8_test` **2/2** · `ci.py --static-only` **10/10**。
+
+### P8 证据补充（2026-09-09，M80 部分）
+
+```
+python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
+# M80: (module m (fn f (p x u32) -> u32) ...) 与 Python 版逐字符一致 (5 文件)
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M80 自举 parser（签名层） | `loment/selfhost/parser.lomt` 的 AST dump == Python 版 | ✅ 部分 |
 
 ### P9/P10 证据（2026-09-09，M89–M99）
 
@@ -402,7 +413,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | # | 里程碑 | 判据 |
 |---|---|---|
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
-| M80 | Loment 版 parser | AST 与 Python 版结构一致 | 待做 |
+| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（签名层；函数体待做） |
 | M81 | Loment 版类型检查 | 负例集判定一致 |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |

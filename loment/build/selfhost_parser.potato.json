@@ -1,0 +1,190 @@
+{
+  "potato": "v1",
+  "unit": "parser",
+  "language": "loment",
+  "imports": [
+    "bytes",
+    "lexer"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "tok_kind",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_start",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_len",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "puts",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "put_tok",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "parse_fn",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}
