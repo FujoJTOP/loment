@@ -1,6 +1,6 @@
 # API: `native_slice`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native_slice.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_slice.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

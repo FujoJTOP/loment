@@ -1,6 +1,6 @@
 # API: `native`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native.lomt` · 由 tools/lomdoc.py 生成
 
 ## 常量
 

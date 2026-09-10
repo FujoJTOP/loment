@@ -1,6 +1,6 @@
 # API: `selfcheck`
 
-> 源: `D:\Dev\FujoOS\loment\examples\selfcheck.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/selfcheck.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

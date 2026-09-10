@@ -1,6 +1,6 @@
 # API: `ahci`
 
-> 源: `D:\Dev\FujoOS\loment\examples\ahci.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/ahci.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

@@ -1,6 +1,6 @@
 # API: `allocator`
 
-> 源: `D:\Dev\FujoOS\loment\examples\allocator.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/allocator.lomt` · 由 tools/lomdoc.py 生成
 
 ## 常量
 

@@ -1,6 +1,6 @@
 # API: `native_mut`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native_mut.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_mut.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

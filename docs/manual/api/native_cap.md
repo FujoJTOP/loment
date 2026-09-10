@@ -1,6 +1,6 @@
 # API: `native_cap`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native_cap.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_cap.lomt` · 由 tools/lomdoc.py 生成
 
 ## 能力域
 

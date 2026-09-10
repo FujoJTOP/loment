@@ -1,6 +1,6 @@
 # API: `native_trait`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native_trait.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_trait.lomt` · 由 tools/lomdoc.py 生成
 
 ## 类型
 

@@ -1,6 +1,6 @@
 # API: `native_mem`
 
-> 源: `D:\Dev\FujoOS\loment\examples\native_mem.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_mem.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

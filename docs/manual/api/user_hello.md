@@ -1,6 +1,6 @@
 # API: `user_hello`
 
-> 源: `D:\Dev\FujoOS\loment\examples\user_hello.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/user_hello.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

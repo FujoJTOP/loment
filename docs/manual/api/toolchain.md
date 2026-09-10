@@ -1,6 +1,6 @@
 # API: `toolchain`
 
-> 源: `D:\Dev\FujoOS\loment\examples\toolchain.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/toolchain.lomt` · 由 tools/lomdoc.py 生成
 
 ## 枚举
 

@@ -46,7 +46,8 @@ def build() -> dict[str, str]:
         deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
         if lomentc.check(mod, deps=deps):
             continue
-        text = lomdoc.render(mod, src.read_text(encoding="utf-8"), str(src))
+        text = lomdoc.render(mod, src.read_text(encoding="utf-8"),
+                             src.relative_to(ROOT).as_posix())
         out[f"api/{src.stem}.md"] = text
         idx.append(f"- [{src.stem}](api/{src.stem}.md)")
     out["index.md"] = "\n".join(idx).rstrip() + "\n"
