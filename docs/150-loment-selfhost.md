@@ -72,7 +72,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **子集边界**：不解析 `use` 导入（因此只对照单编译单元文件）；不做表达式类型推导、
 不做借用/移动检查、不做穷尽性检查（那些仍由 Python 版负责）。
 
-## M82 · Loment 版 IR 生成（表达式 + 控制流 + 短路 + 转换，含实参强制）✅
+## M82 · Loment 版 IR 生成（表达式/控制流/短路/转换/内建）✅
 
 `loment/selfhost/codegen.lomt`：读取 M79 token 流，直接生成 LLVM IR 文本。判据是
 **逐字节**：`loment_p8_test::test_m82_*` 把 Loment 版输出与 `lomentc --emit-llvm` 的结果
@@ -97,8 +97,8 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、内建（`load8`/`store8`/`alloc`
-等要降级为 GEP+load/store 或运行时调用）、`for`、`match`、str/聚合类型、能力域与 DWARF 元数据。
+**未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、其余内建（`alloc`/`free`/`atomic_add`/
+`str_*`/`syscall*`/位域等）、`for`、`match`、str/聚合类型、能力域表与 DWARF 元数据。
 
 **核心设计（两阶段值栈）**：`expr_*` 先把指令写进输出，再把"值文本"落到值栈的第 `lvl` 层；
 调用方随后把该值内联到自己的行里。这正是 Python 版用字符串拼接达到的效果——

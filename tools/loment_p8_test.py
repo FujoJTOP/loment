@@ -448,7 +448,8 @@ def test_m82_loment_codegen_byte_identical():
         for target in (IR_TARGET, ROOT / "loment" / "selfhost" / "ir_expr.lomt",
                        ROOT / "loment" / "selfhost" / "ir_stmt.lomt",
                        ROOT / "loment" / "selfhost" / "ir_logic.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_cast.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_cast.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_mem.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)

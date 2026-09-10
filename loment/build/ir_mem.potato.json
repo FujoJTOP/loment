@@ -1,0 +1,103 @@
+{
+  "potato": "v1",
+  "unit": "ir_mem",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "poke",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "v",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "peek",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "poke_narrow",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "copy8",
+      "params": [
+        {
+          "name": "dst",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

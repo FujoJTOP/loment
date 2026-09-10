@@ -514,6 +514,51 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         return e1;
     }
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
+        // 内建降级: load8 / store8 (与 lomentc 的 _Ir.builtin 同形)
+        if tok_is(src, toks, j, "load8") {
+            let ap: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl);
+            let ao: u32 = expr_bin(s, out, src, toks, ap + 1, 1, lvl + 1);
+            emit_str(s, out, "  ");
+            let g: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i8, ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, "\n  ");
+            let b8: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i8, ptr %t");
+            emit_dec(s, out, g);
+            emit_str(s, out, "\n  ");
+            let z: u32 = new_temp(s, out);
+            emit_str(s, out, " = zext i8 %t");
+            emit_dec(s, out, b8);
+            emit_str(s, out, " to i32\n");
+            set_temp_val(s, lvl, z);
+            if tok_is(src, toks, ao + 1, "as") {   // load8(...) as T
+                apply_cast(s, out, src, toks, 0, ao + 2, lvl);
+                return ao + 2;
+            }
+            return ao;
+        }
+        if tok_is(src, toks, j, "store8") {
+            let ap2: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl);
+            let ao2: u32 = expr_bin(s, out, src, toks, ap2 + 1, 1, lvl + 1);
+            let av: u32 = expr_bin(s, out, src, toks, ao2 + 1, 1, lvl + 2);
+            emit_str(s, out, "  ");
+            let g2: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i8, ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, "\n  store i8 ");
+            emit_val(s, out, lvl + 2);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, g2);
+            emit_str(s, out, "\n");
+            store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
+            store32(s, blen(s, lvl), 1);
+            return av;
+        }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
         let ret: u32 = 0;
@@ -557,7 +602,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         emit_str(s, out, ")\n");
         set_temp_val(s, lvl, n);
-        return k + 1;
+        let ec: u32 = k + 1;
+        if tok_is(src, toks, ec, "as") {   // 调用结果上的 as
+            apply_cast(s, out, src, toks, ret, ec + 1, lvl);
+            return ec + 2;
+        }
+        return ec;
     }
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
@@ -1013,6 +1063,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
         return m + 1;
+    }
+    // 表达式语句 (调用/内建): NAME ( ... ) ;
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
+        let e6: u32 = expr_bin(s, out, src, toks, j, 1, 0);
+        return e6 + 1;
     }
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {

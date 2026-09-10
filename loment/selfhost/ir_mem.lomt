@@ -1,0 +1,24 @@
+module ir_mem
+
+// M82 目标文件 (内建子集): load8 / store8 降级为 GEP + load/store, 必须与 lomentc 逐字节一致。
+
+fn poke(p: ptr, off: u32, v: u8) -> u32 {
+    return store8(p, off, v);
+}
+
+fn peek(p: ptr, off: u32) -> u32 {
+    return load8(p, off);
+}
+
+fn poke_narrow(p: ptr, off: u32, v: u32) -> u32 {
+    return store8(p, off, v as u8);
+}
+
+fn copy8(dst: ptr, src: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(src, i) as u8);
+        i = i + 1;
+    }
+    return i;
+}
