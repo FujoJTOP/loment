@@ -72,7 +72,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **子集边界**：不解析 `use` 导入（因此只对照单编译单元文件）；不做表达式类型推导、
 不做借用/移动检查、不做穷尽性检查（那些仍由 Python 版负责）。
 
-## M82 · Loment 版 IR 生成（标量表达式子集）✅
+## M82 · Loment 版 IR 生成（标量表达式 + 控制流子集）✅
 
 `loment/selfhost/codegen.lomt`：读取 M79 token 流，直接生成 LLVM IR 文本。判据是
 **逐字节**：`loment_p8_test::test_m82_*` 把 Loment 版输出与 `lomentc --emit-llvm` 的结果
@@ -82,13 +82,17 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 - `loment/selfhost/ir_expr.lomt`：二元运算符（按 `lomentc.PRECEDENCE` 爬升、含
   `a * b + c`、`(a + b) * 2`）、比较（无符号 `ult/ule/ugt/uge` 与有符号 `slt/...` 由类型决定）、
   位运算与移位（`and/shl`）、一元（`sub ty 0, v` / `xor i1 v, true`）、调用
-  （直接调用、嵌套调用 `add(a, mul_add(a, b, 1))`、字面量实参）。
+  （直接调用、嵌套调用 `add(a, mul_add(a, b, 1))`、字面量实参）；
+- `loment/selfhost/ir_stmt.lomt`：**语句与控制流** —— `let`（含局部 alloca，
+  按 `lomentc._collect_locals` 的顺序）、赋值、`if/else`（含 else 里再嵌 `if`）、`while`，
+  以及 `terminated` 语义（块已 `ret` 就不再补 `br`）、标签编号 `L1_then/L2_else/L3_end`
+  与 `L1_wcond/L2_wbody/L3_wend`（从 1 起、每函数重置）。
 
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
 **未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、`&&`/`||`（phi 短路）、
-`as` 转换、`let`/赋值/`if`/`while`、str/ptr/聚合类型、能力域与 DWARF 元数据。
+`as` 转换、`for`、`match`、str/ptr/聚合类型、能力域与 DWARF 元数据。
 
 **核心设计（两阶段值栈）**：`expr_*` 先把指令写进输出，再把"值文本"落到值栈的第 `lvl` 层；
 调用方随后把该值内联到自己的行里。这正是 Python 版用字符串拼接达到的效果——
@@ -103,7 +107,10 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | 2 | 输出在 `ret i32 ` 处截断 | 值缓冲误用 `emit_mem`（它会更新**输出游标**）→ 改用不碰游标的 `copy_mem` |
 | 3 | 返回值打印成 `\x03` | 值长度写到缓冲开头（应为缓冲**之前** 4 字节） |
 | 4 | `ret i32   %t0 = load ...` 乱序 | 单阶段发射无法把指令放行首 → 两阶段（先指令+值缓冲，再写行） |
-| 5 | 状态块字段互相踩 | 值栈/实参类型/函数表/参数表偏移重叠 → 重新排布（值栈 16..592、实参类型 608、函数计数 640、函数表 704、参数表 1536） |
+| 5 | 状态块字段互相踩 | 值栈/实参类型/函数表/参数表偏移重叠 → 重新排布（值栈 16..592、实参类型 608、函数计数 640、函数表 704、参数表 1536、局部表 3072） |
+| 6 | 局部 alloca 混进了别的函数 | `collect_locals` 扫到了整个文件 → 传入函数体的匹配 `}` 作为上界（`skip_block`） |
+| 7 | 标签从 `L0_` 起编号 | `lomentc` 的标签从 1 起 → 基准取 `+1`、计数 `+2` |
+| 8 | `if`/`while` 体里第一条语句被跳过 | 体起点算成 `'{' + 2` → 应为 `'{' + 1` |
 
 另有一处 token 层 off-by-one：`->` 是两个 token，所以返回类型在 `)` 之后第 3 个位置。
 

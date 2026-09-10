@@ -1,0 +1,55 @@
+module ir_stmt
+
+// M82 目标文件 (语句子集): 标量函数 + let/赋值/if/while, 生成的 .ll 必须与 lomentc 逐字节一致。
+
+fn count(n: u32) -> u32 {
+    let i: u32 = 0;
+    let acc: u32 = 0;
+    while i < n {
+        acc = acc + i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn pick(c: bool) -> u32 {
+    if c {
+        return 1;
+    }
+    return 2;
+}
+
+fn max2(a: u32, b: u32) -> u32 {
+    let m: u32 = a;
+    if b > a {
+        m = b;
+    }
+    return m;
+}
+
+fn classify(x: i32) -> i32 {
+    let r: i32 = 0;
+    if x < 0 {
+        r = 0;
+    } else {
+        if x == 0 {
+            r = 1;
+        } else {
+            r = 2;
+        }
+    }
+    return r;
+}
+
+fn sum_until(n: u32, limit: u32) -> u32 {
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < n {
+        if s > limit {
+            return s;
+        }
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}

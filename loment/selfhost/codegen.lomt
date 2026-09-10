@@ -498,8 +498,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         set_temp_val(s, lvl, n);
         return k + 1;
     }
-    // 参数: load
-    let ty: u32 = param_type(s, src, toks, j);
+    // 变量 (参数或局部): load
+    let ty: u32 = var_type(s, src, toks, j);
     emit_str(s, out, "  ");
     let n2: u32 = new_temp(s, out);
     emit_str(s, out, " = load ");
@@ -625,6 +625,8 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         }
     }
     store32(s, 12, k);
+    let body_at: u32 = find_body(src, toks, lp);
+    let nl: u32 = collect_locals(s, src, toks, body_at, skip_block(src, toks, body_at - 1));
     emit_str(s, out, "; ");
     emit_tok(s, out, src, toks, base + 1);
     emit_str(s, out, " -> ");
@@ -655,6 +657,15 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "\n");
         b = b + 1;
     }
+    let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
+    while bl < nl {
+        emit_str(s, out, "  %");
+        emit_tok(s, out, src, toks, load32(s, 3072 + bl * 8));
+        emit_str(s, out, ".addr = alloca ");
+        emit_ty(s, out, src, toks, load32(s, 3072 + bl * 8 + 4));
+        emit_str(s, out, "\n");
+        bl = bl + 1;
+    }
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
@@ -668,22 +679,228 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     }
     let j: u32 = find_body(src, toks, lp);
     while tok_kind(toks, j) != 4 {
-        if tok_is(src, toks, j, "return") {
-            let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
-            emit_str(s, out, "  ret ");
-            emit_ty(s, out, src, toks, ret);
-            emit_str(s, out, " ");
-            emit_val(s, out, 0);
-            emit_str(s, out, "\n");
-            j = e;
-        } else if tok_is(src, toks, j, "}") {
+        if tok_is(src, toks, j, "}") {
             emit_str(s, out, "}\n");
             return j + 1;
-        } else {
-            j = j + 1;
         }
+        j = stmt(s, out, src, toks, j, ret);
     }
     return j;
+}
+
+// ---------------------------------------------------------------- 语句
+
+fn lab_def(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
+    store32(s, 476, 0);           // terminated = false
+    emit_str(s, out, "L");
+    emit_dec(s, out, n);
+    emit_str(s, out, "_");
+    emit_str(s, out, tag);
+    return emit_str(s, out, ":\n");
+}
+
+fn lab_ref(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
+    emit_str(s, out, "%L");
+    emit_dec(s, out, n);
+    emit_str(s, out, "_");
+    return emit_str(s, out, tag);
+}
+
+/// 未终止才写 br; 随后置 terminated。
+fn jump(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
+    let r: u32 = 0;
+    if load32(s, 476) == 0 {
+        emit_str(s, out, "  br label ");
+        r = lab_ref(s, out, n, tag);
+        emit_str(s, out, "\n");
+    }
+    store32(s, 476, 1);
+    return r;
+}
+
+/// 变量类型: 参数 -> 局部; 0 = 未知。
+fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let t: u32 = param_type(s, src, toks, name_tok);
+    if t != 0 {
+        return t;
+    }
+    let i: u32 = 0;
+    while i < load32(s, 484) {
+        let nt: u32 = load32(s, 3072 + i * 8);
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
+                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return load32(s, 3072 + i * 8 + 4);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 一条语句; 返回下一个待处理 token 下标。
+fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    if tok_is(src, toks, j, "return") {
+        let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
+        emit_str(s, out, "  ret ");
+        emit_ty(s, out, src, toks, ret);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        return e + 1;
+    }
+    if tok_is(src, toks, j, "let") {
+        let name: u32 = j + 1;
+        let ty: u32 = j + 3;
+        let e2: u32 = expr_bin(s, out, src, toks, j + 5, 1, 0);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, name);
+        emit_str(s, out, ".addr\n");
+        return e2 + 1;
+    }
+    if tok_is(src, toks, j, "if") {
+        let base_l: u32 = load32(s, 480) + 1;   // lomentc 从 L1 起编号
+        store32(s, 480, base_l + 2);
+        let e3: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
+        emit_str(s, out, "  br i1 ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, base_l, "then");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, base_l + 1, "else");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, base_l, "then");
+        let k: u32 = e3 + 1;   // '{' 之后的第一条语句
+        while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+            k = stmt(s, out, src, toks, k, ret);
+        }
+        k = k + 1;
+        jump(s, out, base_l + 2, "end");
+        lab_def(s, out, base_l + 1, "else");
+        if tok_is(src, toks, k, "else") {
+            k = k + 1;
+            if tok_is(src, toks, k, "if") {
+                k = stmt(s, out, src, toks, k, ret);
+            } else {
+                k = k + 1;   // '{'
+                while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+                    k = stmt(s, out, src, toks, k, ret);
+                }
+                k = k + 1;
+            }
+        }
+        jump(s, out, base_l + 2, "end");
+        lab_def(s, out, base_l + 2, "end");
+        return k;
+    }
+    if tok_is(src, toks, j, "while") {
+        let w: u32 = load32(s, 480) + 1;
+        store32(s, 480, w + 2);
+        jump(s, out, w, "wcond");
+        lab_def(s, out, w, "wcond");
+        let e4: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
+        emit_str(s, out, "  br i1 ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 1, "wbody");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 2, "wend");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, w + 1, "wbody");
+        let m: u32 = e4 + 1;   // '{' 之后的第一条语句
+        while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
+            m = stmt(s, out, src, toks, m, ret);
+        }
+        jump(s, out, w, "wcond");
+        lab_def(s, out, w + 2, "wend");
+        return m + 1;
+    }
+    // 赋值: NAME = EXPR ;
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
+        let ty2: u32 = var_type(s, src, toks, j);
+        let e5: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, ty2);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, j);
+        emit_str(s, out, ".addr\n");
+        return e5 + 1;
+    }
+    return j + 1;
+}
+
+/// 匹配的 '}' 之后的下标 (i 指向 '{')。
+fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 {
+        if tok_is(src, toks, j, "{") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, "}") {
+            d = d - 1;
+            if d == 0 {
+                return j + 1;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 按序收集局部变量 (let), 去重 —— 镜像 lomentc._collect_locals 的子集 (限于本函数体)。
+fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
+    let n: u32 = 0;
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 && j < end {
+        if tok_is(src, toks, j, "let") {
+            let name: u32 = j + 1;
+            let dup: u32 = 0;
+            let k: u32 = 0;
+            while k < n {
+                if load32(toks, load32(s, 3072 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
+                    let q: u32 = 0;
+                    let ok: u32 = 1;
+                    while q < load32(toks, name * 20 + 8) {
+                        if load8(src, load32(toks, load32(s, 3072 + k * 8) * 20 + 4) + q)
+                                != load8(src, load32(toks, name * 20 + 4) + q) {
+                            ok = 0;
+                        }
+                        q = q + 1;
+                    }
+                    if ok == 1 {
+                        dup = 1;
+                    }
+                }
+                k = k + 1;
+            }
+            if dup == 0 {
+                store32(s, 3072 + n * 8, name);
+                store32(s, 3072 + n * 8 + 4, j + 3);
+                n = n + 1;
+            }
+        }
+        j = j + 1;
+    }
+    store32(s, 484, n);
+    return n;
 }
 
 fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
@@ -717,6 +934,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     store32(s, 4, 0);
     store32(s, 12, 0);
     store32(s, 640, 0);   // 函数个数
+    store32(s, 476, 0);   // terminated
+    store32(s, 480, 0);   // label 计数
+    store32(s, 484, 0);   // 局部数
     // 符号表: 登记函数
     let i: u32 = 0;
     let n: u32 = 0;
@@ -737,7 +957,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     i = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
-            store32(s, 4, 0);   // temp 计数随函数重置
+            store32(s, 4, 0);    // temp 计数随函数重置
+            store32(s, 480, 0);  // label 计数随函数重置
+            store32(s, 476, 0);  // terminated = false
             i = emit_fn(s, out, src, toks, i);
         } else {
             i = i + 1;

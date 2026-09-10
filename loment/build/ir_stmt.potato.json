@@ -1,0 +1,93 @@
+{
+  "potato": "v1",
+  "unit": "ir_stmt",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "count",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "pick",
+      "params": [
+        {
+          "name": "c",
+          "type": "bool"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "max2",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "classify",
+      "params": [
+        {
+          "name": "x",
+          "type": "i32"
+        }
+      ],
+      "ret": "i32"
+    },
+    {
+      "name": "sum_until",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

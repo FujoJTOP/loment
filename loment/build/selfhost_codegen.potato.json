@@ -661,6 +661,168 @@
       "ret": "u32"
     },
     {
+      "name": "lab_def",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tag",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "lab_ref",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tag",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "jump",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tag",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "var_type",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "stmt",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        },
+        {
+          "name": "ret",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "skip_block",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "collect_locals",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "end",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "count_args",
       "params": [
         {
