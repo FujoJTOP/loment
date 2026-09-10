@@ -1,0 +1,46 @@
+module ok
+
+// M81 正例: 单编译单元里各规则都走"合法"分支 (无 use 导入)。
+
+const LIMIT: u32 = 8;
+
+struct Pair {
+    a: u32,
+    b: u32,
+}
+
+enum Color {
+    Red,
+    Green,
+}
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn sum(xs: [u32]) -> u32 {
+    let i: u32 = 0;
+    let acc: u32 = 0;
+    while i < slice_len(xs) {
+        acc = add(acc, xs[i]);
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn pick(c: Color) -> u32 {
+    if c == Color::Red {
+        return 1;
+    }
+    return 2;
+}
+
+fn pair_sum(p: Pair) -> u32 {
+    let table: [u32; 4] = [1, 2, 3, 4];
+    return add(p.a, p.b) + table[0] + LIMIT;
+}
+
+fn test_ok() -> bool {
+    let p: Pair = Pair { a: 1, b: 2 };
+    return pair_sum(p) == 12 && pick(Color::Green) == 2;
+}

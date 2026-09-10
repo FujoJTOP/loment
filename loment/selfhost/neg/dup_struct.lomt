@@ -1,0 +1,9 @@
+module dup_struct
+
+struct S {
+    a: u32,
+}
+
+struct S {
+    b: u32,
+}

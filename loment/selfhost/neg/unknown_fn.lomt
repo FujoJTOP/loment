@@ -1,0 +1,5 @@
+module unknown_fn
+
+fn f() -> u32 {
+    return g(1);
+}

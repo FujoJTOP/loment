@@ -48,12 +48,22 @@ def build() -> dict:
     return {"release": "loment-1.0-pre", "files": files}
 
 
+def checksums_text(doc: dict) -> str:
+    """SHA256SUMS 风格的校验和清单 (M88)。"""
+    return "".join(f"{x['sha256']}  {x['path']}\n" for x in doc["files"])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_release")
     ap.add_argument("--emit", action="store_true")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
     want = build()
+    if a.checksums:
+        Path(a.checksums).write_text(checksums_text(want), encoding="utf-8")
+        print(f"[OK] {a.checksums} ({len(want['files'])} 行)")
+        return 0
     if a.emit:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         OUT.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",

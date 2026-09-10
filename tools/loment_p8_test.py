@@ -288,6 +288,115 @@ def test_m80_loment_parser_ast_dump():
             assert got == want, f"{f.name}:\n Loment {got[:200]}\n Python {want[:200]}"
 
 
+CHECKER = ROOT / "loment" / "selfhost" / "checker.lomt"
+NEG = ROOT / "loment" / "selfhost" / "neg"
+CHECKER_DRIVER = """#include <stdio.h>
+#include <stdlib.h>
+extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
+extern unsigned int check(char *src, unsigned char *toks, unsigned char *errs);
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 2;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)n + 8);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) return 2;
+    buf[n] = 0;
+    unsigned char *toks = malloc(20 * ((size_t)n + 16));
+    unsigned char *errs = malloc(1024);
+    lex(buf, (unsigned int)n, toks);
+    unsigned int m = check(buf, toks, errs);
+    printf("%u", m);
+    for (unsigned int i = 0; i < m; i++) {
+        unsigned int code = *(unsigned int *)(errs + 8 * i);
+        unsigned int tk = *(unsigned int *)(errs + 8 * i + 4);
+        unsigned int st = *(unsigned int *)(toks + 20 * tk + 4);
+        unsigned int ln = *(unsigned int *)(toks + 20 * tk + 8);
+        printf(" %u@%u:%.*s", code, tk, (int)(ln > 24 ? 24 : ln), buf + st);
+    }
+    printf("\\n");
+    return 0;
+}
+"""
+
+# 错误码口径: 与 checker.lomt 的 E_* 常量一致
+E_DUP, E_TYPE, E_FN, E_ARITY = 1, 2, 3, 4
+PY_RULES = [
+    (E_DUP, r"重复定义|重名"),
+    (E_TYPE, r"未声明"),
+    (E_FN, r"未定义的函数"),
+    (E_ARITY, r"需要 \d+ 个实参"),
+]
+
+
+def _py_codes(src: Path) -> list[int]:
+    """Python 侧把错误消息归类成同一套错误码 (与 checker.lomt 对照)。"""
+    import re
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    out: list[int] = []
+    for e in errs:
+        for code, pat in PY_RULES:
+            if re.search(pat, e):
+                out.append(code)
+                break
+    return sorted(set(out))
+
+
+def _build_checker(td: str) -> Path:
+    mod = lomentc.load(CHECKER)
+    deps = lomentc.resolve_deps(mod, ROOT, CHECKER.parent, entry=CHECKER)
+    assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)[:2]
+    ll = Path(td) / "checker.ll"
+    ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+    c = Path(td) / "cdrv.c"
+    c.write_text(CHECKER_DRIVER, encoding="utf-8")
+    exe = Path(td) / "checker.exe"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "-O1", "-o", str(exe), str(c), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return exe
+
+
+def _loment_codes(exe: Path, src: Path) -> list[int]:
+    """返回 (错误码列表, 明细字符串) —— 明细用于失败时定位。"""
+    out = subprocess.run([shutil.which(str(exe)) or str(exe), str(src)],
+                         capture_output=True, text=True, shell=False)
+    assert out.returncode == 0, out.stderr
+    parts = out.stdout.split()
+    n = int(parts[0])
+    detail = parts[1:1 + n]
+    codes = sorted({int(x.split("@")[0]) for x in detail})
+    return codes, " ".join(detail)
+
+
+@test
+def test_m81_loment_checker_matches_python():
+    """M81: Loment 版检查器与 Python 版的判定一致 (负例拒绝 + 正例接受, 错误码对照)。"""
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    neg = sorted(NEG.glob("*.lomt"))
+    assert len(neg) >= 6, len(neg)
+    # 正例只取"单编译单元"文件: Loment 版检查器不解析 use 导入 (见 docs/150 边界)
+    pos = [ROOT / "loment" / "selfhost" / "pos" / "ok.lomt",
+           ROOT / "loment" / "examples" / "mathutil.lomt",
+           ROOT / "loment" / "examples" / "bytes.lomt",
+           ROOT / "loment" / "examples" / "native.lomt"]
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_checker(td)
+        for f in neg:
+            want, (got, det) = _py_codes(f), _loment_codes(exe, f)
+            assert want, f"{f.name}: Python 未报错"
+            assert got, f"{f.name}: Loment 未报错"
+            assert set(got) <= set(want), f"{f.name}: Loment {got} ⊄ Python {want} [{det}]"
+        for f in pos:
+            want, (got, det) = _py_codes(f), _loment_codes(exe, f)
+            assert want == [] and got == [], f"{f.name}: 正例被拒 (py={want} loment={got}) [{det}]"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

@@ -1,0 +1,6 @@
+module unknown_let
+
+fn f() -> u32 {
+    let x: Foo = 1;
+    return x;
+}

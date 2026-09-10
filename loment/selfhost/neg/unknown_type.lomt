@@ -1,0 +1,5 @@
+module unknown_type
+
+fn f(x: Foo) -> u32 {
+    return 1;
+}

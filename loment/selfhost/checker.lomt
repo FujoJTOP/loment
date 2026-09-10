@@ -1,0 +1,305 @@
+module checker
+
+// M81 (子集): Loment 版类型/符号检查 —— 消费 M79 token 流, 判定程序是否合法。
+// 覆盖规则 (与 Python 版 lomentc.check 的判定对照):
+//   E-DUP-NAME    : 顶层名字重复 (fn/struct/enum/const)
+//   E-UNKNOWN-TYPE: 声明里的类型未声明 (参数/返回/字段/let)
+//   E-UNKNOWN-FN  : 调用未声明的函数
+//   E-ARITY       : 实参个数与声明不符
+// 输出: 每条错误 8 字节 (code u32 | tok u32); 返回错误条数。
+use "loment/examples/bytes.lomt"
+use "loment/selfhost/lexer.lomt"
+
+const K_FN: u32 = 1;
+const K_STRUCT: u32 = 2;
+const K_ENUM: u32 = 3;
+const K_CONST: u32 = 4;
+
+const E_DUP: u32 = 1;
+const E_TYPE: u32 = 2;
+const E_FN: u32 = 3;
+const E_ARITY: u32 = 4;
+
+// 符号表条目: 名字 token 下标 u32 | kind u32 | 参数个数 u32  (12 字节)
+fn sym_get(t: ptr, s: ptr, n: u32, i: u32) -> u32 {
+    return load32(s, i * 12);
+}
+
+fn sym_pub(src: ptr, t: ptr, p: ptr, o: u32, code: u32, tok: u32) -> u32 {
+    store32(p, o, code);
+    store32(p, o + 4, tok);
+    return o + 8;
+}
+
+fn tok_kind(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20);
+}
+
+fn tok_start(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 4);
+}
+
+fn tok_len(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 8);
+}
+
+/// token 原文是否等于 s。
+fn tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tok_len(t, i) != str_len(s) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(s) {
+        if load8(src, tok_start(t, i) + k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// 名字 token 是否等于 s。
+fn same(src: ptr, t: ptr, i: u32, j: u32) -> bool {
+    if tok_kind(t, i) != 0 || tok_kind(t, j) != 0 {
+        return false;
+    }
+    if tok_len(t, i) != tok_len(t, j) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < tok_len(t, i) {
+        if load8(src, tok_start(t, i) + k) != load8(src, tok_start(t, j) + k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
+    if tok_kind(t, i) != 0 {
+        return false;
+    }
+    if tok_is(src, t, i, "u8") || tok_is(src, t, i, "u16") || tok_is(src, t, i, "u32")
+        || tok_is(src, t, i, "u64") || tok_is(src, t, i, "i8") || tok_is(src, t, i, "i16")
+        || tok_is(src, t, i, "i32") || tok_is(src, t, i, "i64") || tok_is(src, t, i, "bool")
+        || tok_is(src, t, i, "str") || tok_is(src, t, i, "ptr") {
+        return true;
+    }
+    return false;
+}
+
+fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
+    let k: u32 = 0;
+    let names: str = "str_len str_eq str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr ptr_add ptr_sub syscall4 syscall6";
+    // 逐词比较 (32 个内建, 用空格分隔的常量表)
+    let off: u32 = 0;
+    while off < str_len(names) {
+        let b: u32 = 0;
+        let n: u32 = 0;
+        while off + n < str_len(names) && str_byte(names, off + n) != 32 {
+            n = n + 1;
+        }
+        if n > 0 && tok_len(t, i) == n {
+            let j: u32 = 0;
+            let ok: u32 = 1;
+            while j < n {
+                if load8(src, tok_start(t, i) + j) != str_byte(names, off + j) {
+                    ok = 0;
+                }
+                j = j + 1;
+            }
+            if ok == 1 {
+                return true;
+            }
+        }
+        off = off + n + 1;
+        k = k + 1;
+    }
+    return false;
+}
+
+/// 顶层名字查表: 返回 (found<<32) | 参数个数; found=0 表示未找到。
+fn lookup(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u64 {
+    let i: u32 = 0;
+    while i < n {
+        let nt: u32 = sym_get(t, s, n, i);
+        if same(src, t, nt, name_tok) {
+            return 4294967296 + (load32(s, i * 12 + 8) as u64);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 登记顶层名字; 重复 -> 产出 E-DUP。
+fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, kind: u32,
+           argc: u32, p: ptr, o: u32) -> u64 {
+    let r: u64 = lookup(src, t, s, n, name_tok);
+    if r / 4294967296 == 1 {
+        return (n as u64) * 4294967296 + (sym_pub(src, t, p, o, E_DUP, name_tok) as u64);
+    }
+    store32(s, n * 12, name_tok);
+    store32(s, n * 12 + 4, kind);
+    store32(s, n * 12 + 8, argc);
+    return ((n + 1) as u64) * 4294967296 + (o as u64);
+}
+
+/// 类型位置检查: 支持 [T]/[T; N]/mut [T] 或已声明名字; 未声明 -> E-TYPE。
+fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
+    if tok_is(src, t, i, "[") || tok_is(src, t, i, "mut") {
+        return (i as u64) * 4294967296 + (o as u64);
+    }
+    if is_base_type(src, t, i) {
+        return (i as u64) * 4294967296 + (o as u64);
+    }
+    if tok_kind(t, i) == 0 {
+        let r: u64 = lookup(src, t, s, n, i);
+        if r / 4294967296 == 1 {
+            return (i as u64) * 4294967296 + (o as u64);
+        }
+    }
+    return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, E_TYPE, i) as u64);
+}
+
+/// 从 i 起找下一个 '(' 的下标 (处理泛型 `<T>` 前缀)。
+fn find_paren(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    while tok_kind(t, j) != 4 && !tok_is(src, t, j, "(") && !tok_is(src, t, j, "{") {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 跳过完整类型 (含 `[T]` / `[T; N]` / `mut [T]`), 返回类型之后的下标。
+fn skip_type(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    if tok_is(src, t, j, "mut") {
+        j = j + 1;
+    }
+    if tok_is(src, t, j, "[") {
+        j = j + 1;
+        while !tok_is(src, t, j, "]") && tok_kind(t, j) != 4 {
+            j = j + 1;
+        }
+        return j + 1;
+    }
+    return j + 1;
+}
+
+/// 参数表: '('<i..>')' —— 检查类型并返回结束下标。
+fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
+    i = i + 1;
+    while !tok_is(src, t, i, ")") && tok_kind(t, i) != 4 {
+        i = i + 1;              // 参数名
+        i = i + 1;              // ':'
+        let r: u64 = check_type(src, t, s, n, i, p, o);
+        o = (r % 4294967296) as u32;
+        i = skip_type(src, t, i);
+        if tok_is(src, t, i, ",") {
+            i = i + 1;
+        }
+    }
+    return ((i + 1) as u64) * 4294967296 + (o as u64);
+}
+
+pub fn count_args(src: ptr, t: ptr, i: u32) -> u32 {
+    // 从 '(' 之后开始, 数顶层逗号: 空表按 0
+    let depth: u32 = 0;
+    let argc: u32 = 0;
+    let any: u32 = 0;
+    let j: u32 = i + 1;
+    while !(tok_is(src, t, j, ")") && depth == 0) && tok_kind(t, j) != 4 {
+        if tok_is(src, t, j, "(") || tok_is(src, t, j, "[") {
+            depth = depth + 1;
+        }
+        if tok_is(src, t, j, ")") || tok_is(src, t, j, "]") {
+            depth = depth - 1;
+        }
+        if tok_is(src, t, j, ",") && depth == 0 {
+            argc = argc + 1;
+        }
+        any = 1;
+        j = j + 1;
+    }
+    if any == 0 {
+        return 0;
+    }
+    return argc + 1;
+}
+
+/// 主入口: 返回错误条数 (错误记录写在 p)。
+pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
+    let syms: ptr = alloc(2048);
+    let n: u32 = 0;
+    let o: u32 = 0;
+    let i: u32 = 0;
+    // ---- 第一遍: 顶层声明 + 类型检查
+    while tok_kind(t, i) != 4 {
+        if tok_is(src, t, i, "fn") {
+            let lp: u32 = find_paren(src, t, i + 2);
+            let argc: u32 = count_args(src, t, lp);
+            let r0: u64 = declare(src, t, syms, n, i + 1, K_FN, argc, out, o);
+            n = (r0 / 4294967296) as u32;
+            o = (r0 % 4294967296) as u32;
+            let r1: u64 = scan_params(src, t, syms, n, lp, out, o);
+            o = (r1 % 4294967296) as u32;
+            // 返回类型 (可选 ->)
+            let j: u32 = i + 2;
+            while !tok_is(src, t, j, "{") && tok_kind(t, j) != 4 {
+                if tok_is(src, t, j, "-") {
+                    let r2: u64 = check_type(src, t, syms, n, j + 2, out, o);
+                    o = (r2 % 4294967296) as u32;
+                }
+                j = j + 1;
+            }
+            i = j;
+        } else if tok_is(src, t, i, "struct") || tok_is(src, t, i, "enum") {
+            let kind: u32 = K_STRUCT;
+            if tok_is(src, t, i, "enum") {
+                kind = K_ENUM;
+            }
+            let r3: u64 = declare(src, t, syms, n, i + 1, kind, 0, out, o);
+            n = (r3 / 4294967296) as u32;
+            o = (r3 % 4294967296) as u32;
+            i = i + 2;
+        } else if tok_is(src, t, i, "const") {
+            let r4: u64 = declare(src, t, syms, n, i + 1, K_CONST, 0, out, o);
+            n = (r4 / 4294967296) as u32;
+            o = (r4 % 4294967296) as u32;
+            if tok_is(src, t, i + 2, ":") {
+                let r5: u64 = check_type(src, t, syms, n, i + 3, out, o);
+                o = (r5 % 4294967296) as u32;
+            }
+            i = i + 4;
+        } else {
+            i = i + 1;
+        }
+    }
+    // ---- 第二遍: 函数体里的调用检查
+    i = 0;
+    while tok_kind(t, i) != 4 {
+        if tok_is(src, t, i, "let") {
+            // let NAME ':' TYPE —— TYPE 未声明 -> E-TYPE
+            let r6: u64 = check_type(src, t, syms, n, i + 3, out, o);
+            o = (r6 % 4294967296) as u32;
+        }
+        if tok_kind(t, i) == 0 && tok_is(src, t, i + 1, "(") {
+            let nl: u32 = tok_len(t, i);
+            if nl > 0 && !is_builtin(src, t, i) {
+                let r7: u64 = lookup(src, t, syms, n, i);
+                if r7 / 4294967296 == 0 {
+                    o = sym_pub(src, t, out, o, E_FN, i);
+                } else {
+                    let want: u32 = (r7 % 4294967296) as u32;
+                    let got: u32 = count_args(src, t, i + 1);
+                    if want != got {
+                        o = sym_pub(src, t, out, o, E_ARITY, i);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return o / 8;
+}

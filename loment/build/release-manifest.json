@@ -87,7 +87,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "28d12ae5baa0b1b7865ec2138b68f051125c30b3dc2a51caaeca140c72eb6175"
+   "sha256": "1c3224eb8e184e3f704f287f7d3d6f1e374bd9a10831f1d3cd98bc08305f07db"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -202,6 +202,10 @@
    "sha256": "a363faf14e16e8ce979eb41d1def3ed791ecbe22fbfbe771fd47fc113b03832d"
   },
   {
+   "path": "loment/selfhost/checker.lomt",
+   "sha256": "b66d86d4855b84a8fc5170c733c3ee1ec5f0adbcbd81e063626849bf74c4e828"
+  },
+  {
    "path": "loment/selfhost/lexer.lomt",
    "sha256": "28b9a5a828d35710088cc02538b575a9e38540b00baec56b9b21d55ea5c0dbf0"
   },
@@ -255,7 +259,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "f9db769e4d9323040583a1ae887b308d10a8659683a9c6c5ac04ef5e4f968c1a"
+   "sha256": "1c1f3b9d257c6197b1770b75404e40f0428e221a2329ff4c417aa0928a822460"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -287,7 +291,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "2496b4f97f1eded6d8afe317bb832d6393a3c262452abb831bf97b0bd9091b23"
+   "sha256": "2adbdb498126ca7678aa5eab259f8e62b12610410450ebfafb9e2d7e5b1948e8"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -299,7 +303,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "1d334cbe29f3b27663d6990d484d7a6f620584fa00a7af39bea9c4f0601f8beb"
+   "sha256": "37d0f463dd3c4aad681340130821f26d36aaf030026514ef39a0f942856c3b3b"
   },
   {
    "path": "docs/manual/index.md",

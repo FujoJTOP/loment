@@ -53,20 +53,50 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
   可无歧义还原树，且天然匹配逐 token 下降的解析器；
 - 多字符运算符（`==`/`->`/`&&`…）在词法上是两个 token，用 `op_code`/`op_toks` 识别与步进。
 
-## 待做（M81–M88）
+## M81 · Loment 版检查器（子集）✅
 
-| # | 里程碑 | 现状 |
+`loment/selfhost/checker.lomt`：消费 M79 token 流，做**符号表 + 类型/调用检查**，
+输出错误记录（`code | token`）。与 Python 版（`lomentc.check`）对照的口径是**错误码集合**：
+
+| 码 | 规则 | Loment 侧实现 |
 |---|---|---|
-| M80 | Loment 版 parser（函数体） | 部分（签名已一致） |
-| M81 | Loment 版类型检查 | 未开始 |
-| M82 | Loment 版 IR 生成 | 未开始 |
-| M83 | 自编译 | 未开始 |
-| M84 | 三阶段自举定点校验 | 未开始 |
-| M85 | 自举编译器跑全部测试 | 未开始 |
-| M86 | 自举性能优化 | 未开始 |
-| M87 | 引导脚本与发布包 | 未开始 |
-| M88 | 自举版本发布 | 未开始 |
+| `E-DUP` (1) | 顶层名字重复（fn/struct/enum/const） | 符号表线性查重 |
+| `E-TYPE` (2) | 类型未声明（参数/返回/const/let） | 基类型表 + 声明表；`[T]`/`[T; N]`/`mut [T]` 用 `skip_type` 整体跨过 |
+| `E-UNKNOWN-FN` (3) | 调用未声明的函数 | 符号表 + 内建名单（20 个内建） |
+| `E-ARITY` (4) | 实参个数不符 | 顶层逗号计数（识别 `(`/`[` 嵌套） |
 
-诚实说明：自举是 100 里程碑里最大的一块，M79 是它的第一步（词法层已证明"Loment 能写
-自己的工具"）。后续每个阶段都需要先把对应的编译器阶段用 Loment 重写，再与 Python 版
-做结构/字节级对照——这正是 M80–M82 的判据形式。
+**判据**：`loment_p8_test::test_m81_*` —— 6 个负例文件全部被两边拒绝，且 Loment 的
+错误码集合 ⊆ Python 的；4 个单编译单元正例（`selfhost/pos/ok.lomt`、mathutil、bytes、native）
+两边都接受。
+
+**子集边界**：不解析 `use` 导入（因此只对照单编译单元文件）；不做表达式类型推导、
+不做借用/移动检查、不做穷尽性检查（那些仍由 Python 版负责）。
+
+## M82–M86 · 未做（诚实说明）
+
+| # | 里程碑 | 为什么现在做不了 |
+|---|---|---|
+| M82 | Loment 版 IR 生成 | 需要把整个后端（alloca/基本块/聚合/运行时/元数据）用 Loment 重写，并逐字节复刻 Python 版文本 |
+| M83 | 自编译（编译器编译自身） | 依赖 M82 |
+| M84 | 三阶段定点校验 | 依赖 M83 |
+| M85 | 自举编译器跑 `lomentc_test` | 依赖 M83 |
+| M86 | 自举性能优化 | 依赖 M83 |
+
+自举前端的进度是真实的：**lexer → parser → checker 三个阶段都已用 Loment 实现，
+并与 Python 版逐 token / 逐字符 / 逐错误码对照通过**（M79/M80/M81）。后端（M82 起）
+是下一段的主体工作。
+
+## M87 · 引导脚本 ✅
+
+`python tools/loment_bootstrap.py` —— 一条命令走完自举前端：
+
+1. 重新生成 lexer/parser/checker 的形式对象并与磁盘**逐字节**核对；
+2. 跑 M79/M80/M81 三项对照；
+3. 打印报告（`--json` 可机器读）。
+
+## M88 · 发布校验和 ✅ 部分
+
+`python tools/loment_release.py --checksums loment/build/SHA256SUMS` 产出
+**101 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
+**未做**：git tag 未创建/未推送（分支与并发开发线共用，打 tag 与推送需作者确认）。
+

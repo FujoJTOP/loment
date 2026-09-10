@@ -1,0 +1,9 @@
+module arity
+
+fn g(a: u32) -> u32 {
+    return a;
+}
+
+fn f() -> u32 {
+    return g(1, 2);
+}

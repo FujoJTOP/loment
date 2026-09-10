@@ -1,0 +1,461 @@
+{
+  "potato": "v1",
+  "unit": "checker",
+  "language": "loment",
+  "imports": [
+    "bytes",
+    "lexer"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "sym_get",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "sym_pub",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "code",
+          "type": "u32"
+        },
+        {
+          "name": "tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_kind",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_start",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_len",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "same",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "is_base_type",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "is_builtin",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "lookup",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "declare",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "argc",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "check_type",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "find_paren",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "skip_type",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "scan_params",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "count_args",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "check",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [
+    {
+      "name": "K_FN",
+      "type": "u32",
+      "value": 1
+    },
+    {
+      "name": "K_STRUCT",
+      "type": "u32",
+      "value": 2
+    },
+    {
+      "name": "K_ENUM",
+      "type": "u32",
+      "value": 3
+    },
+    {
+      "name": "K_CONST",
+      "type": "u32",
+      "value": 4
+    },
+    {
+      "name": "E_DUP",
+      "type": "u32",
+      "value": 1
+    },
+    {
+      "name": "E_TYPE",
+      "type": "u32",
+      "value": 2
+    },
+    {
+      "name": "E_FN",
+      "type": "u32",
+      "value": 3
+    },
+    {
+      "name": "E_ARITY",
+      "type": "u32",
+      "value": 4
+    }
+  ],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

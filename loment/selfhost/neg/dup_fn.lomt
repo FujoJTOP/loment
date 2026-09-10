@@ -1,0 +1,9 @@
+module dup_fn
+
+fn f() -> u32 {
+    return 1;
+}
+
+fn f() -> u32 {
+    return 2;
+}
