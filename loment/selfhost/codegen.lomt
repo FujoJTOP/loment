@@ -1,20 +1,33 @@
 module codegen
 
-// M82 (子集): Loment 版 IR 生成 —— 只覆盖"函数体只有 return <字面量|参数>;"的标量函数,
-// 生成的 .ll 与 tools/lomentc.py 的 --emit-llvm 逐字节一致 (对照见 loment_p8_test)。
+// M82: Loment 版 IR 生成 —— 生成的 .ll 与 tools/lomentc.py 的 --emit-llvm 逐字节一致。
 //
-// 覆盖: u8..u64/i8..i64/bool 参数与返回; 表达式 = 整型字面量 | 参数名。
-// 不含(需字符串重排/跳转块): 二元/一元表达式、调用、as、除法、let/if/while、聚合类型、运行时。
+// 覆盖: 标量类型 (u8..u64/i8..i64/bool); 函数体只有 `return <expr>;`;
+//       表达式 = 字面量 | 参数 | 括号 | 一元(- !) | 二元(+ - * & | ^ << >> 比较) | 调用。
+// 不含: 除法/取模(需跳转块+trap)、&&/||(phi)、as、let/赋值/if/while、聚合类型、能力域、运行时。
 //
-// 状态块: 0=输出游标 4=temp 计数 8=符号数 12=当前参数个数
-//         64..=值缓冲(48B) 60=值长度 128..=符号表 (name_tok|ret_tok), 每项 8B
-//         192..=当前函数参数表 (name_tok|type_tok), 每项 8B
+// 关键设计(两阶段): expr_* 先把指令写进输出, 再把"值文本"落到值栈的第 lvl 层;
+// 调用方随后把该值内联到自己的行里 —— 这样嵌套表达式也能保持与 Python 版相同的指令顺序。
+//
+// 状态块: 0=输出游标 4=temp 计数 12=参数个数
+//         值栈: 第 k 层 长度@16+72k, 文本@20+72k (容量 68), k=0..5
+//         参数表: 512.. (name_tok|type_tok), 每项 8B
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
 
 fn st_o(s: ptr) -> u32 {
     return load32(s, 0);
 }
+
+fn blen(s: ptr, lvl: u32) -> u32 {
+    return 16 + 72 * lvl;
+}
+
+fn btxt(s: ptr, lvl: u32) -> u32 {
+    return 20 + 72 * lvl;
+}
+
+// ---------------------------------------------------------------- 输出
 
 fn emit_str(s: ptr, out: ptr, text: str) -> u32 {
     let o: u32 = st_o(s);
@@ -94,12 +107,63 @@ fn new_temp(s: ptr, out: ptr) -> u32 {
     return v;
 }
 
-/// 写类型 token (0 = 缺省 i32) 对应的 LLVM 类型。
+// ---------------------------------------------------------------- 值栈
+
+fn copy_mem(buf: ptr, off: u32, src: ptr, soff: u32, len: u32) {
+    let i: u32 = 0;
+    while i < len {
+        store8(buf, off + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 把第 src 层的值复制到第 dst 层。
+fn move_val(s: ptr, dst: u32, src: u32) {
+    let len: u32 = load32(s, blen(s, src));
+    let i: u32 = 0;
+    while i < len {
+        store8(s, btxt(s, dst) + i, load8(s, btxt(s, src) + i) as u8);
+        i = i + 1;
+    }
+    store32(s, blen(s, dst), len);
+}
+
+/// 把"%tN"写进第 lvl 层。
+fn set_temp_val(s: ptr, lvl: u32, n: u32) {
+    store8(s, btxt(s, lvl), 37 as u8);
+    store8(s, btxt(s, lvl) + 1, 116 as u8);
+    let tmp: ptr = alloc(16);
+    let d: u32 = 0;
+    let x: u32 = n;
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        d = 1;
+    }
+    while x > 0 {
+        store8(tmp, d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(s, btxt(s, lvl) + 2 + q, load8(tmp, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    store32(s, blen(s, lvl), 2 + d);
+}
+
+fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
+    return emit_mem(s, out, s, btxt(s, lvl), load32(s, blen(s, lvl)));
+}
+
+// ---------------------------------------------------------------- 类型
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 0 {
         return emit_str(s, out, "i32");
     }
-    if tok_is(src, toks, tt, "bool") {
+    if tok_is(src, toks, tt, "bool") || tok_is(src, toks, tt, "true")
+        || tok_is(src, toks, tt, "false") {
         return emit_str(s, out, "i1");
     }
     if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") {
@@ -114,11 +178,197 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     return emit_str(s, out, "i64");
 }
 
-/// 当前函数的参数类型 (按名字长度+逐字节比较); 未找到返回 0。
-fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_is(src, toks, tt, "i8") || tok_is(src, toks, tt, "i16")
+        || tok_is(src, toks, tt, "i32") || tok_is(src, toks, tt, "i64") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 类型 token 名 (供注释行用): tt==0 时缺省 "u32"。
+fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == 0 {
+        return emit_str(s, out, "u32");
+    }
+    return emit_tok(s, out, src, toks, tt);
+}
+
+// ---------------------------------------------------------------- 运算符
+
+/// 运算符编码 (0 = 不是运算符)。
+fn op_code(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i, "|") {
+        if tok_is(src, toks, i + 1, "|") {
+            return 1;
+        }
+        return 17;
+    }
+    if tok_is(src, toks, i, "&") {
+        if tok_is(src, toks, i + 1, "&") {
+            return 2;
+        }
+        return 16;
+    }
+    if tok_is(src, toks, i, "=") {
+        if tok_is(src, toks, i + 1, "=") {
+            return 3;
+        }
+        return 0;
+    }
+    if tok_is(src, toks, i, "!") {
+        if tok_is(src, toks, i + 1, "=") {
+            return 4;
+        }
+        return 0;
+    }
+    if tok_is(src, toks, i, "<") {
+        if tok_is(src, toks, i + 1, "=") {
+            return 6;
+        }
+        if tok_is(src, toks, i + 1, "<") {
+            return 9;
+        }
+        return 5;
+    }
+    if tok_is(src, toks, i, ">") {
+        if tok_is(src, toks, i + 1, "=") {
+            return 8;
+        }
+        if tok_is(src, toks, i + 1, ">") {
+            return 10;
+        }
+        return 7;
+    }
+    if tok_is(src, toks, i, "+") {
+        return 11;
+    }
+    if tok_is(src, toks, i, "-") {
+        return 12;
+    }
+    if tok_is(src, toks, i, "*") {
+        return 13;
+    }
+    if tok_is(src, toks, i, "/") {
+        return 14;
+    }
+    if tok_is(src, toks, i, "%") {
+        return 15;
+    }
+    if tok_is(src, toks, i, "^") {
+        return 18;
+    }
+    return 0;
+}
+
+fn op_prec(c: u32) -> u32 {
+    if c == 1 {
+        return 1;
+    }
+    if c == 2 {
+        return 2;
+    }
+    if c == 3 || c == 4 {
+        return 3;
+    }
+    if c >= 5 && c <= 8 {
+        return 4;
+    }
+    if c == 17 {
+        return 5;
+    }
+    if c == 18 {
+        return 6;
+    }
+    if c == 16 {
+        return 7;
+    }
+    if c == 9 || c == 10 {
+        return 8;
+    }
+    if c == 11 || c == 12 {
+        return 9;
+    }
+    if c >= 13 && c <= 15 {
+        return 10;
+    }
+    return 0;
+}
+
+fn op_toks(c: u32) -> u32 {
+    if c <= 2 || (c >= 3 && c <= 4) || c == 6 || c == 8 || c == 9 || c == 10 {
+        return 2;
+    }
+    return 1;
+}
+
+/// 写指令助记符 (比较类带有无符号)。
+fn emit_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> u32 {
+    let sg: u32 = is_signed(src, toks, tt);
+    if c == 3 {
+        return emit_str(s, out, "icmp eq");
+    }
+    if c == 4 {
+        return emit_str(s, out, "icmp ne");
+    }
+    if c == 5 {
+        if sg == 1 {
+            return emit_str(s, out, "icmp slt");
+        }
+        return emit_str(s, out, "icmp ult");
+    }
+    if c == 6 {
+        if sg == 1 {
+            return emit_str(s, out, "icmp sle");
+        }
+        return emit_str(s, out, "icmp ule");
+    }
+    if c == 7 {
+        if sg == 1 {
+            return emit_str(s, out, "icmp sgt");
+        }
+        return emit_str(s, out, "icmp ugt");
+    }
+    if c == 8 {
+        if sg == 1 {
+            return emit_str(s, out, "icmp sge");
+        }
+        return emit_str(s, out, "icmp uge");
+    }
+    if c == 9 {
+        return emit_str(s, out, "shl");
+    }
+    if c == 10 {
+        if sg == 1 {
+            return emit_str(s, out, "ashr");
+        }
+        return emit_str(s, out, "lshr");
+    }
+    if c == 11 {
+        return emit_str(s, out, "add");
+    }
+    if c == 12 {
+        return emit_str(s, out, "sub");
+    }
+    if c == 13 {
+        return emit_str(s, out, "mul");
+    }
+    if c == 16 {
+        return emit_str(s, out, "and");
+    }
+    if c == 17 {
+        return emit_str(s, out, "or");
+    }
+    return emit_str(s, out, "xor");
+}
+
+// ---------------------------------------------------------------- 符号表
+
+fn find_fn(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
-    while i < load32(s, 12) {
-        let nt: u32 = load32(s, 192 + i * 8);
+    while i < load32(s, 640) {
+        let base: u32 = 704 + i * 12;
+        let nt: u32 = load32(s, base);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -130,7 +380,35 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 192 + i * 8 + 4);
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+fn fn_ret(s: ptr, fi: u32) -> u32 {
+    return load32(s, 704 + fi * 12 + 4);
+}
+
+/// 参数类型 (name_tok -> type_tok; 0 = 未找到)。
+fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 12) {
+        let nt: u32 = load32(s, 1536 + i * 8);
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
+                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return load32(s, 1536 + i * 8 + 4);
             }
         }
         i = i + 1;
@@ -138,54 +416,163 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     return 0;
 }
 
-/// 纯内存复制 (不碰输出游标) —— 值缓冲专用。
-fn copy_mem(buf: ptr, off: u32, src: ptr, soff: u32, len: u32) {
-    let i: u32 = 0;
-    while i < len {
-        store8(buf, off + i, load8(src, soff + i) as u8);
-        i = i + 1;
+/// 表达式类型推断 (镜像 lomentc.expr_type 的标量子集); 0 = 未知。
+fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    if tok_kind(toks, j) == 1 {
+        return 0;
     }
+    if tok_kind(toks, j) == 0 {
+        if tok_is(src, toks, j, "true") || tok_is(src, toks, j, "false") {
+            return j;
+        }
+        if tok_is(src, toks, j + 1, "(") {
+            let fi: u32 = find_fn(s, src, toks, j);
+            if fi != 4294967295 {
+                return fn_ret(s, fi);
+            }
+            return 0;
+        }
+        return param_type(s, src, toks, j);
+    }
+    if tok_is(src, toks, j, "(") {
+        return expr_type(s, src, toks, j + 1);
+    }
+    if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
+        return expr_type(s, src, toks, j + 1);
+    }
+    return 0;
 }
 
-/// 表达式 (子集: 字面量 | 参数): 写指令, 值文本写到缓冲 off, 长度写到 off-4; 返回结束下标。
-fn expr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, dst: u32) -> u32 {
+// ---------------------------------------------------------------- 表达式
+
+/// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用。
+fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_kind(toks, j) == 1 {
-        let off: u32 = load32(toks, j * 20 + 4);
-        let len: u32 = load32(toks, j * 20 + 8);
-        copy_mem(s, dst, src, off, len);   // 值文本 -> 状态块缓冲
-        store32(s, dst - 4, len);
+        copy_mem(s, btxt(s, lvl), src, load32(toks, j * 20 + 4), load32(toks, j * 20 + 8));
+        store32(s, blen(s, lvl), load32(toks, j * 20 + 8));
         return j + 1;
     }
+    if tok_is(src, toks, j, "(") {
+        let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, lvl);
+        return e + 1;
+    }
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
+        // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
+        let fi: u32 = find_fn(s, src, toks, j);
+        let ret: u32 = 0;
+        if fi != 4294967295 {
+            ret = fn_ret(s, fi);
+        }
+        let k: u32 = j + 2;
+        let a: u32 = 0;
+        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 4 {
+            let at: u32 = expr_type(s, src, toks, k);
+            let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
+            // 实参类型未知时按形参类型 (缺省 u32)
+            store32(s, 608 + a * 4, at);
+            k = ae;
+            if tok_is(src, toks, k, ",") {
+                k = k + 1;
+            }
+            a = a + 1;
+        }
+        emit_str(s, out, "  ");
+        let n: u32 = new_temp(s, out);
+        emit_str(s, out, " = call ");
+        emit_ty(s, out, src, toks, ret);
+        emit_str(s, out, " @");
+        emit_tok(s, out, src, toks, j);
+        emit_str(s, out, "(");
+        let b: u32 = 0;
+        while b < a {
+            if b > 0 {
+                emit_str(s, out, ", ");
+            }
+            let at2: u32 = load32(s, 608 + b * 4);
+            emit_ty(s, out, src, toks, at2);
+            emit_str(s, out, " ");
+            emit_val(s, out, lvl + 1 + b);
+            b = b + 1;
+        }
+        emit_str(s, out, ")\n");
+        set_temp_val(s, lvl, n);
+        return k + 1;
+    }
+    // 参数: load
     let ty: u32 = param_type(s, src, toks, j);
     emit_str(s, out, "  ");
-    new_temp(s, out);
+    let n2: u32 = new_temp(s, out);
     emit_str(s, out, " = load ");
     emit_ty(s, out, src, toks, ty);
     emit_str(s, out, ", ptr %");
     emit_tok(s, out, src, toks, j);
     emit_str(s, out, ".addr\n");
-    store8(s, dst, 37 as u8);        // '%'
-    store8(s, dst + 1, 116 as u8);   // 't'
-    let tmp: ptr = alloc(16);
-    let n: u32 = 0;
-    let x: u32 = load32(s, 4);       // new_temp 刚用的编号
-    if x == 0 {
-        store8(tmp, 0, 48 as u8);
-        n = 1;
-    }
-    while x > 0 {
-        store8(tmp, n, (48 + x % 10) as u8);
-        x = x / 10;
-        n = n + 1;
-    }
-    let q: u32 = 0;
-    while q < n {
-        store8(s, dst + 2 + q, load8(tmp, n - 1 - q) as u8);
-        q = q + 1;
-    }
-    store32(s, dst - 4, 2 + n);      // 长度在值缓冲之前
+    set_temp_val(s, lvl, n2);
     return j + 1;
 }
+
+/// 一元: -x (sub ty 0, v) / !b (xor i1 v, true)
+fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
+    if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
+        let neg: u32 = tok_is(src, toks, j, "-") as u32;
+        let inner: u32 = expr_unary(s, out, src, toks, j + 1, lvl, want);
+        let tt: u32 = expr_type(s, src, toks, j + 1);
+        emit_str(s, out, "  ");
+        let n: u32 = new_temp(s, out);
+        if neg == 1 {
+            emit_str(s, out, " = sub ");
+            emit_ty(s, out, src, toks, tt);
+            emit_str(s, out, " 0, ");
+            emit_val(s, out, lvl);
+        } else {
+            emit_str(s, out, " = xor i1 ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", true");
+        }
+        emit_str(s, out, "\n");
+        set_temp_val(s, lvl, n);
+        return inner;
+    }
+    return expr_atom(s, out, src, toks, j, lvl);
+}
+
+/// 二元 (优先级爬升): 结果落到第 lvl 层。
+fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32) -> u32 {
+    let e: u32 = expr_unary(s, out, src, toks, j, lvl, 0);
+    let i: u32 = e;
+    let go: u32 = 1;
+    while go == 1 {
+        let c: u32 = op_code(src, toks, i);
+        if c == 0 || op_prec(c) < minp || c == 1 || c == 2 || c == 14 || c == 15 {
+            go = 0;
+        } else {
+            let np: u32 = op_prec(c) + 1;
+            let r: u32 = expr_bin(s, out, src, toks, i + op_toks(c), np, lvl + 1);
+            let lt: u32 = expr_type(s, src, toks, j);
+            let rt: u32 = expr_type(s, src, toks, i + op_toks(c));
+            let tt: u32 = lt;
+            if tt == 0 {
+                tt = rt;
+            }
+            emit_str(s, out, "  ");
+            let n: u32 = new_temp(s, out);
+            emit_str(s, out, " = ");
+            emit_mnemonic(s, out, src, toks, c, tt);
+            emit_str(s, out, " ");
+            emit_ty(s, out, src, toks, tt);
+            emit_str(s, out, " ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, "\n");
+            set_temp_val(s, lvl, n);
+            i = r;
+        }
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------- 函数与模块
 
 fn find_body(src: ptr, toks: ptr, i: u32) -> u32 {
     let j: u32 = i;
@@ -221,18 +608,16 @@ fn skip_parens(src: ptr, toks: ptr, i: u32) -> u32 {
     return j;
 }
 
-/// 发射一个函数 (子集: 函数体可含多个 `return <字面量|参数>;`)。
 fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let lp: u32 = find_paren(src, toks, base + 2);
     let rp: u32 = skip_parens(src, toks, lp);
-    // 子集要求函数显式写返回类型: ')'(rp) '-' '>'(rp+2) T(rp+3)
+    // 子集要求显式返回类型: ')' '-' '>' T
     let ret: u32 = rp + 3;
-    // 参数表
     let k: u32 = 0;
     let i: u32 = lp + 1;
     while i < rp && k < 16 {
-        store32(s, 192 + k * 8, i);
-        store32(s, 192 + k * 8 + 4, i + 2);
+        store32(s, 1536 + k * 8, i);
+        store32(s, 1536 + k * 8 + 4, i + 2);
         k = k + 1;
         i = i + 3;
         if tok_is(src, toks, i, ",") {
@@ -243,11 +628,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     emit_str(s, out, "; ");
     emit_tok(s, out, src, toks, base + 1);
     emit_str(s, out, " -> ");
-    if ret == 0 {                        // 无 -> T: Python 侧写的是 Loment 类型名 "()"
-        emit_str(s, out, "()");
-    } else {
-        emit_tok(s, out, src, toks, ret);  // 注释用 Loment 类型名 (不是 LLVM 类型)
-    }
+    emitted_name(s, out, src, toks, ret);   // 注释用 Loment 类型名
     emit_str(s, out, "\n");
     emit_str(s, out, "define ");
     emit_ty(s, out, src, toks, ret);
@@ -259,45 +640,44 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if a > 0 {
             emit_str(s, out, ", ");
         }
-        emit_ty(s, out, src, toks, load32(s, 192 + a * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 1536 + a * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 192 + a * 8));
+        emit_tok(s, out, src, toks, load32(s, 1536 + a * 8));
         a = a + 1;
     }
     emit_str(s, out, ") {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 192 + b * 8));
+        emit_tok(s, out, src, toks, load32(s, 1536 + b * 8));
         emit_str(s, out, ".addr = alloca ");
-        emit_ty(s, out, src, toks, load32(s, 192 + b * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 1536 + b * 8 + 4));
         emit_str(s, out, "\n");
         b = b + 1;
     }
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
-        emit_ty(s, out, src, toks, load32(s, 192 + c * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 1536 + c * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 192 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 1536 + c * 8));
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, load32(s, 192 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 1536 + c * 8));
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
     let j: u32 = find_body(src, toks, lp);
     while tok_kind(toks, j) != 4 {
         if tok_is(src, toks, j, "return") {
-            // 两阶段: 先让 expr 写指令并把值放进缓冲, 再写 ret 行 (与 lomentc 同序)
-            let e: u32 = expr(s, out, src, toks, j + 1, 64);
+            let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
             emit_str(s, out, "  ret ");
             emit_ty(s, out, src, toks, ret);
             emit_str(s, out, " ");
-            emit_mem(s, out, s, 64, load32(s, 60));
+            emit_val(s, out, 0);
             emit_str(s, out, "\n");
             j = e;
         } else if tok_is(src, toks, j, "}") {
-            emit_str(s, out, "}\n");   // 子集里函数体总以 ret 结束, 无需 unreachable
+            emit_str(s, out, "}\n");
             return j + 1;
         } else {
             j = j + 1;
@@ -306,18 +686,58 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     return j;
 }
 
+fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
+    let d: u32 = 0;
+    let argc: u32 = 0;
+    let any: u32 = 0;
+    let j: u32 = lp + 1;
+    while !(tok_is(src, toks, j, ")") && d == 0) && tok_kind(toks, j) != 4 {
+        if tok_is(src, toks, j, "(") || tok_is(src, toks, j, "[") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, ")") || tok_is(src, toks, j, "]") {
+            d = d - 1;
+        }
+        if tok_is(src, toks, j, ",") && d == 0 {
+            argc = argc + 1;
+        }
+        any = 1;
+        j = j + 1;
+    }
+    if any == 0 {
+        return 0;
+    }
+    return argc + 1;
+}
+
 /// 主入口: 写完整 IR (子集), 返回长度。
 pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
-    let s: ptr = alloc(4096);
+    let s: ptr = alloc(8192);
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
-    emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
-    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
+    store32(s, 640, 0);   // 函数个数
+    // 符号表: 登记函数
     let i: u32 = 0;
+    let n: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
-            store32(s, 4, 0);
+            let lp: u32 = find_paren(src, toks, i + 2);
+            let rp: u32 = skip_parens(src, toks, lp);
+            store32(s, 704 + n * 12, i + 1);
+            store32(s, 704 + n * 12 + 4, rp + 3);
+            store32(s, 704 + n * 12 + 8, count_args(src, toks, lp));
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    store32(s, 640, n);
+    emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
+    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
+    i = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "fn") {
+            store32(s, 4, 0);   // temp 计数随函数重置
             i = emit_fn(s, out, src, toks, i);
         } else {
             i = i + 1;

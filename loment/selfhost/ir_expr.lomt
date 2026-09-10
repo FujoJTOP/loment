@@ -1,0 +1,55 @@
+module ir_expr
+
+// M82 目标文件 (表达式子集): codegen.lomt 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致。
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn mul_add(a: u32, b: u32, c: u32) -> u32 {
+    return a * b + c;
+}
+
+fn chain(a: u32, b: u32) -> u32 {
+    return (a + b) * 2;
+}
+
+fn lt(x: u32, y: u32) -> bool {
+    return x < y;
+}
+
+fn ge_signed(x: i32, y: i32) -> bool {
+    return x >= y;
+}
+
+fn eq(x: u16, y: u16) -> bool {
+    return x == y;
+}
+
+fn band(x: u32, y: u32) -> u32 {
+    return x & y;
+}
+
+fn shift(x: u8, n: u8) -> u8 {
+    return x << n;
+}
+
+fn nota(c: bool) -> bool {
+    return !c;
+}
+
+fn neg(x: i64) -> i64 {
+    return -x;
+}
+
+fn call_direct(a: u32, b: u32) -> u32 {
+    return add(a, b);
+}
+
+fn call_nested(a: u32, b: u32) -> u32 {
+    return add(a, mul_add(a, b, 1));
+}
+
+fn call_lit(a: u32) -> u32 {
+    return add(a, 7);
+}

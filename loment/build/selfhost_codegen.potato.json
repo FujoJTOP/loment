@@ -19,6 +19,34 @@
       "ret": "u32"
     },
     {
+      "name": "blen",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "btxt",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "emit_str",
       "params": [
         {
@@ -157,6 +185,86 @@
       "ret": "u32"
     },
     {
+      "name": "copy_mem",
+      "params": [
+        {
+          "name": "buf",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "soff",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "move_val",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "dst",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "set_temp_val",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "emit_val",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "emit_ty",
       "params": [
         {
@@ -177,6 +285,154 @@
         },
         {
           "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "is_signed",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emitted_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_code",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_prec",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_toks",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_mnemonic",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "c",
+          "type": "u32"
+        },
+        {
+          "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "find_fn",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "fn_ret",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "fi",
           "type": "u32"
         }
       ],
@@ -205,33 +461,29 @@
       "ret": "u32"
     },
     {
-      "name": "copy_mem",
+      "name": "expr_type",
       "params": [
         {
-          "name": "buf",
+          "name": "s",
           "type": "ptr"
-        },
-        {
-          "name": "off",
-          "type": "u32"
         },
         {
           "name": "src",
           "type": "ptr"
         },
         {
-          "name": "soff",
-          "type": "u32"
+          "name": "toks",
+          "type": "ptr"
         },
         {
-          "name": "len",
+          "name": "j",
           "type": "u32"
         }
       ],
-      "ret": "()"
+      "ret": "u32"
     },
     {
-      "name": "expr",
+      "name": "expr_atom",
       "params": [
         {
           "name": "s",
@@ -254,7 +506,75 @@
           "type": "u32"
         },
         {
-          "name": "dst",
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "expr_unary",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        },
+        {
+          "name": "want",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "expr_bin",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        },
+        {
+          "name": "minp",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
           "type": "u32"
         }
       ],
@@ -335,6 +655,24 @@
         },
         {
           "name": "base",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "count_args",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "lp",
           "type": "u32"
         }
       ],

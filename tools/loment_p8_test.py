@@ -439,22 +439,24 @@ def _build_codegen(td: str) -> Path:
 
 @test
 def test_m82_loment_codegen_byte_identical():
-    """M82(子集): Loment 版 codegen 的 .ll 与 Python 版逐字节一致 (常量/参数返回)。"""
+    """M82(子集): Loment 版 codegen 的 .ll 与 Python 版逐字节一致 (常量/参数返回 + 表达式)。"""
     if not _clang():
         print("      SKIP: 无 clang")
         return
-    mod = lomentc.load(IR_TARGET)
-    deps = lomentc.resolve_deps(mod, ROOT, IR_TARGET.parent, entry=IR_TARGET)
-    want = lomentc.emit_llvm(mod, ROOT, deps)
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
-        got = subprocess.run([shutil.which(str(exe)) or str(exe), str(IR_TARGET)],
-                             capture_output=True, text=True, shell=False).stdout
-    if got != want:
-        i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
-        raise AssertionError(
-            f"首个差异 @{i}:\n loment {got[max(0,(i or 0)-40):(i or 0)+60]!r}\n"
-            f" python {want[max(0,(i or 0)-40):(i or 0)+60]!r}")
+        for target in (IR_TARGET, ROOT / "loment" / "selfhost" / "ir_expr.lomt"):
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = subprocess.run([shutil.which(str(exe)) or str(exe), str(target)],
+                                 capture_output=True, text=True, shell=False).stdout
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"{target.name} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
 
 
 def main() -> int:
