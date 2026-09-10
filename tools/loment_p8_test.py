@@ -87,7 +87,8 @@ def _loment_tokens(exe: Path, src: Path) -> list[tuple[int, int, int, int, int]]
 
 
 def _python_tokens(src: Path) -> list[tuple[int, int, int, int, int]]:
-    text = src.read_text(encoding="utf-8")
+    # 按原始字节解码 (不经换行归一化), 否则 CRLF 检出会让字节偏移整体偏移
+    text = src.read_bytes().decode("utf-8")
     line_starts = [0]
     for i, ch in enumerate(text):
         if ch == "\n":
