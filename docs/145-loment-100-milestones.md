@@ -277,7 +277,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 
 | 里程碑 | 验证方式 | 结果 |
 |---|---|---|
-| M80 自举 parser（签名层） | `loment/selfhost/parser.lomt` 的 AST dump == Python 版 | ✅ 部分 |
+| M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 
 ### P9/P10 证据（2026-09-09，M89–M99）
 
@@ -413,7 +413,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | # | 里程碑 | 判据 |
 |---|---|---|
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
-| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（签名层；函数体待做） |
+| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |

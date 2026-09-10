@@ -1,9 +1,9 @@
 module parser
 
-// M80 (部分): Loment 版 parser —— 消费 M79 的 token 记录, 产出规范 AST dump。
-// 本阶段覆盖: module / fn 签名 (参数 名:类型, 可选 -> 返回类型)。
-// dump: (module m (fn f (p x u32) (p y u32) -> u32) (fn g (p z u8)))
-// 与 Python 版 (lomentc AST) 对照见 tools/loment_p8_test.py。
+// M80: Loment 版 parser —— 消费 M79 的 token 记录, 产出规范 AST dump。
+// 覆盖: module / fn 签名 + 函数体 (let/set/ret/if/while/guard/表达式语句)
+//       + 表达式 (int/bool/id/call/bin/un/cast/field/idx, 优先级同 lomentc)。
+// dump 由 tools/loment_p8_test.py 与 Python 版逐字符对照。
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
 
@@ -56,7 +56,377 @@ fn put_tok(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
     return o;
 }
 
-/// 解析 fn 签名 (t[i] == "fn"); 返回 (新 i, 新 o) 打包为 u64。
+fn pack(i: u32, o: u32) -> u64 {
+    return (i as u64) * 4294967296 + (o as u64);
+}
+
+fn unpk_i(r: u64) -> u32 {
+    return (r / 4294967296) as u32;
+}
+
+fn unpk_o(r: u64) -> u32 {
+    return (r % 4294967296) as u32;
+}
+
+// ---------------------------------------------------------------- 运算符
+
+/// 运算符编码: 0=不是; 其它见 op_name。多字符算符在词法上是两个 token。
+fn op_code(src: ptr, t: ptr, i: u32) -> u32 {
+    if tok_is(src, t, i, "|") {
+        if tok_is(src, t, i + 1, "|") {
+            return 1;
+        }
+        return 17;
+    }
+    if tok_is(src, t, i, "&") {
+        if tok_is(src, t, i + 1, "&") {
+            return 2;
+        }
+        return 16;
+    }
+    if tok_is(src, t, i, "=") {
+        if tok_is(src, t, i + 1, "=") {
+            return 3;
+        }
+        return 0;
+    }
+    if tok_is(src, t, i, "!") {
+        if tok_is(src, t, i + 1, "=") {
+            return 4;
+        }
+        return 0;
+    }
+    if tok_is(src, t, i, "<") {
+        if tok_is(src, t, i + 1, "=") {
+            return 6;
+        }
+        if tok_is(src, t, i + 1, "<") {
+            return 9;
+        }
+        return 5;
+    }
+    if tok_is(src, t, i, ">") {
+        if tok_is(src, t, i + 1, "=") {
+            return 8;
+        }
+        if tok_is(src, t, i + 1, ">") {
+            return 10;
+        }
+        return 7;
+    }
+    if tok_is(src, t, i, "+") {
+        return 11;
+    }
+    if tok_is(src, t, i, "-") {
+        return 12;
+    }
+    if tok_is(src, t, i, "*") {
+        return 13;
+    }
+    if tok_is(src, t, i, "/") {
+        return 14;
+    }
+    if tok_is(src, t, i, "%") {
+        return 15;
+    }
+    if tok_is(src, t, i, "^") {
+        return 18;
+    }
+    return 0;
+}
+
+fn op_prec(c: u32) -> u32 {
+    if c == 1 {
+        return 1;
+    }
+    if c == 2 {
+        return 2;
+    }
+    if c == 3 || c == 4 {
+        return 3;
+    }
+    if c >= 5 && c <= 8 {
+        return 4;
+    }
+    if c == 17 {
+        return 5;
+    }
+    if c == 18 {
+        return 6;
+    }
+    if c == 16 {
+        return 7;
+    }
+    if c == 9 || c == 10 {
+        return 8;
+    }
+    if c == 11 || c == 12 {
+        return 9;
+    }
+    if c >= 13 && c <= 15 {
+        return 10;
+    }
+    return 0;
+}
+
+fn op_toks(c: u32) -> u32 {
+    if c <= 2 || (c >= 3 && c <= 4) || c == 6 || c == 8 || c == 9 || c == 10 {
+        return 2;
+    }
+    return 1;
+}
+
+fn op_name(c: u32) -> str {
+    if c == 1 {
+        return "||";
+    }
+    if c == 2 {
+        return "&&";
+    }
+    if c == 3 {
+        return "==";
+    }
+    if c == 4 {
+        return "!=";
+    }
+    if c == 5 {
+        return "<";
+    }
+    if c == 6 {
+        return "<=";
+    }
+    if c == 7 {
+        return ">";
+    }
+    if c == 8 {
+        return ">=";
+    }
+    if c == 9 {
+        return "<<";
+    }
+    if c == 10 {
+        return ">>";
+    }
+    if c == 11 {
+        return "+";
+    }
+    if c == 12 {
+        return "-";
+    }
+    if c == 13 {
+        return "*";
+    }
+    if c == 14 {
+        return "/";
+    }
+    if c == 15 {
+        return "%";
+    }
+    if c == 16 {
+        return "&";
+    }
+    if c == 17 {
+        return "|";
+    }
+    return "^";
+}
+
+// ---------------------------------------------------------------- 表达式
+
+fn parse_expr(src: ptr, t: ptr, i: u32, out: ptr, o: u32, minp: u32) -> u64 {
+    let r: u64 = parse_unary(src, t, i, out, o);
+    i = unpk_i(r);
+    o = unpk_o(r);
+    let go: u32 = 1;
+    while go == 1 {
+        let c: u32 = op_code(src, t, i);
+        if c == 0 || op_prec(c) < minp {
+            go = 0;
+        } else {
+            let np: u32 = op_prec(c) + 1;
+            o = puts(out, o, "(bin ");
+            o = puts(out, o, op_name(c));
+            i = i + op_toks(c);
+            o = puts(out, o, " ");
+            r = parse_expr(src, t, i, out, o, np);
+            i = unpk_i(r);
+            o = puts(out, unpk_o(r), ")");
+        }
+    }
+    return pack(i, o);
+}
+
+fn parse_unary(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    if tok_is(src, t, i, "!") {
+        o = puts(out, o, "(un ! ");
+        let r: u64 = parse_unary(src, t, i + 1, out, o);
+        return pack(unpk_i(r), puts(out, unpk_o(r), ")"));
+    }
+    if tok_is(src, t, i, "-") {
+        o = puts(out, o, "(un - ");
+        let r2: u64 = parse_unary(src, t, i + 1, out, o);
+        return pack(unpk_i(r2), puts(out, unpk_o(r2), ")"));
+    }
+    if tok_is(src, t, i, "&") {
+        return parse_atom(src, t, i, out, o);
+    }
+    return parse_atom(src, t, i, out, o);
+}
+
+/// 原子 + 后缀 (调用/字段/下标/as)
+fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    let k: u32 = tok_kind(t, i);
+    if k == 3 && tok_is(src, t, i, "(") {
+        let rp: u64 = parse_expr(src, t, i + 1, out, o, 1);
+        i = unpk_i(rp) + 1;
+        o = unpk_o(rp);
+    } else if k == 1 {
+        o = puts(out, o, "(int ");
+        o = put_tok(out, o, src, t, i);
+        o = puts(out, o, ")");
+        i = i + 1;
+    } else if k == 2 {
+        o = puts(out, o, "(str ");
+        o = put_tok(out, o, src, t, i);
+        o = puts(out, o, ")");
+        i = i + 1;
+    } else if k == 0 && (tok_is(src, t, i, "true") || tok_is(src, t, i, "false")) {
+        o = puts(out, o, "(bool ");
+        o = put_tok(out, o, src, t, i);
+        o = puts(out, o, ")");
+        i = i + 1;
+    } else if k == 0 && tok_is(src, t, i + 1, "(") {
+        o = puts(out, o, "(call ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 2;
+        while !tok_is(src, t, i, ")") {
+            o = puts(out, o, " ");
+            let ra: u64 = parse_expr(src, t, i, out, o, 1);
+            i = unpk_i(ra);
+            o = unpk_o(ra);
+            if tok_is(src, t, i, ",") {
+                i = i + 1;
+            }
+        }
+        i = i + 1;
+        o = puts(out, o, ")");
+    } else if k == 0 {
+        o = puts(out, o, "(id ");
+        o = put_tok(out, o, src, t, i);
+        o = puts(out, o, ")");
+        i = i + 1;
+    }
+    // 后缀: .field / [idx] / as T  —— 以独立分组追加在基表达式之后
+    let go: u32 = 1;
+    while go == 1 {
+        if tok_is(src, t, i, ".") {
+            o = puts(out, o, "(field ");
+            i = i + 1;
+            o = put_tok(out, o, src, t, i);
+            i = i + 1;
+            o = puts(out, o, ")");
+        } else if tok_is(src, t, i, "[") {
+            o = puts(out, o, "(idx ");
+            let ri: u64 = parse_expr(src, t, i + 1, out, o, 1);
+            i = unpk_i(ri) + 1;
+            o = puts(out, unpk_o(ri), ")");
+        } else if tok_is(src, t, i, "as") {
+            o = puts(out, o, "(cast ");
+            i = i + 1;
+            o = put_tok(out, o, src, t, i);
+            i = i + 1;
+            o = puts(out, o, ")");
+        } else {
+            go = 0;
+        }
+    }
+    return pack(i, o);
+}
+
+// ---------------------------------------------------------------- 语句
+
+fn parse_stmts(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    while !tok_is(src, t, i, "}") && tok_kind(t, i) != 4 {
+        o = puts(out, o, " ");
+        let r: u64 = parse_stmt(src, t, i, out, o);
+        i = unpk_i(r);
+        o = unpk_o(r);
+    }
+    return pack(i, o);
+}
+
+fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    if tok_is(src, t, i, "let") {
+        o = puts(out, o, "(let ");
+        i = i + 1;
+        o = put_tok(out, o, src, t, i);   // 名
+        i = i + 2;                        // ':' 类型
+        o = puts(out, o, " ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 1;
+        if tok_is(src, t, i, "=") {
+            i = i + 1;
+            o = puts(out, o, " ");
+            let r: u64 = parse_expr(src, t, i, out, o, 1);
+            i = unpk_i(r);
+            o = unpk_o(r);
+        }
+        return pack(i + 1, puts(out, o, ")"));
+    }
+    if tok_is(src, t, i, "return") {
+        o = puts(out, o, "(ret ");
+        let r2: u64 = parse_expr(src, t, i + 1, out, o, 1);
+        return pack(unpk_i(r2) + 1, puts(out, unpk_o(r2), ")"));
+    }
+    if tok_is(src, t, i, "if") {
+        o = puts(out, o, "(if ");
+        let rc: u64 = parse_expr(src, t, i + 1, out, o, 1);
+        i = unpk_i(rc);
+        o = puts(out, unpk_o(rc), " (");
+        i = i + 1;  // '{'
+        let rt: u64 = parse_stmts(src, t, i, out, o);
+        i = unpk_i(rt) + 1;
+        o = puts(out, unpk_o(rt), ") (");
+        if tok_is(src, t, i, "else") {
+            i = i + 1;
+            if tok_is(src, t, i, "if") {
+                let re: u64 = parse_stmt(src, t, i, out, o);
+                i = unpk_i(re);
+                o = unpk_o(re);
+            } else {
+                i = i + 1;  // '{'
+                let rb: u64 = parse_stmts(src, t, i, out, o);
+                i = unpk_i(rb) + 1;
+                o = unpk_o(rb);
+            }
+        }
+        return pack(i, puts(out, o, "))"));
+    }
+    if tok_is(src, t, i, "while") {
+        o = puts(out, o, "(while ");
+        let rc2: u64 = parse_expr(src, t, i + 1, out, o, 1);
+        i = unpk_i(rc2) + 1;
+        o = puts(out, unpk_o(rc2), " (");
+        let rt2: u64 = parse_stmts(src, t, i, out, o);
+        i = unpk_i(rt2) + 1;
+        return pack(i, puts(out, unpk_o(rt2), "))"));
+    }
+    // 表达式语句 / 赋值
+    let r3: u64 = parse_expr(src, t, i, out, o, 1);
+    i = unpk_i(r3);
+    o = unpk_o(r3);
+    if tok_is(src, t, i, "=") {
+        i = i + 1;
+        o = puts(out, o, " (set ");
+        let r4: u64 = parse_expr(src, t, i, out, o, 1);
+        i = unpk_i(r4);
+        o = puts(out, unpk_o(r4), ")");
+    }
+    return pack(i + 1, o);
+}
+
+// ---------------------------------------------------------------- 顶层
+
 fn parse_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     o = puts(out, o, "(fn ");
     i = i + 1;
@@ -77,16 +447,21 @@ fn parse_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     }
     i = i + 1;  // ')'
     if tok_is(src, t, i, "-") {
-        i = i + 2;  // '->' (词法器逐字符)
+        i = i + 2;  // '->'
         o = puts(out, o, " -> ");
         o = put_tok(out, o, src, t, i);
         i = i + 1;
     }
-    o = puts(out, o, ")");
-    return (i as u64) * 4294967296 + (o as u64);
+    if tok_is(src, t, i, "{") {
+        i = i + 1;
+        o = puts(out, o, " (");
+        let rb: u64 = parse_stmts(src, t, i, out, o);
+        i = unpk_i(rb) + 1;
+        o = puts(out, unpk_o(rb), ")");
+    }
+    return pack(i, puts(out, o, ")"));
 }
 
-/// 解析整个单元; 返回输出长度。
 pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
     let i: u32 = 0;
     let o: u32 = 0;
@@ -94,13 +469,12 @@ pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
     i = i + 1;
     o = put_tok(out, o, src, t, i);
     i = i + 1;
-    o = puts(out, o, " ");
     while tok_kind(t, i) != 4 {
         if tok_is(src, t, i, "fn") {
-            let r: u64 = parse_fn(src, t, i, out, o);
-            i = (r / 4294967296) as u32;
-            o = (r % 4294967296) as u32;
             o = puts(out, o, " ");
+            let r: u64 = parse_fn(src, t, i, out, o);
+            i = unpk_i(r);
+            o = unpk_o(r);
         } else {
             i = i + 1;
         }

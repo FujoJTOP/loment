@@ -117,6 +117,222 @@
       "ret": "u32"
     },
     {
+      "name": "pack",
+      "params": [
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "unpk_i",
+      "params": [
+        {
+          "name": "r",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "unpk_o",
+      "params": [
+        {
+          "name": "r",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_code",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_prec",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_toks",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "op_name",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "str"
+    },
+    {
+      "name": "parse_expr",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "minp",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse_unary",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse_atom",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse_stmts",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse_stmt",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
       "name": "parse_fn",
       "params": [
         {

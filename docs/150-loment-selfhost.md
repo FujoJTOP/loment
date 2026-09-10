@@ -1,6 +1,6 @@
 # 150 · Loment 自举（P8，M79–M88）
 
-> 状态: **进行中**（2026-09-09）· 已完成: M79 · 部分: M80 · 自检: `tools/loment_p8_test.py` 2/2
+> 状态: **进行中**（2026-09-09）· 已完成: M79 · 部分: M80（子集）· 自检: `tools/loment_p8_test.py` 2/2
 > 门禁: `ci.py --static-only` 10/10
 
 ## M79 · Loment 版 lexer ✅
@@ -29,18 +29,29 @@
 第 2 个 bug 是自举逼出来的：手写示例里的 `&&` 都很简单，只有把真实程序（lexer 的
 多重条件）交给后端才暴露。修完后 11 条双路径示例输出与修改前逐值一致（见 docs/145 P8 证据）。
 
-## M80 · Loment 版 parser（部分）✅
+## M80 · Loment 版 parser（子集）✅
 
-`loment/selfhost/parser.lomt`：消费 M79 的 token 记录，产出规范 AST dump。
-本阶段覆盖 **module 与 fn 签名**（参数 `名:类型`、可选 `-> 返回类型`），
-dump 形如 `(module m (fn f (p x u32) -> u32) (fn g) )`。
+`loment/selfhost/parser.lomt`：消费 M79 的 token 记录，产出规范 AST dump，
+由 `loment_p8_test` 与 Python 版（`lomentc` 的 AST）**逐字符**比较。
 
-**判据（部分）**：与 Python 版 AST 结构一致 —— `loment_p8_test` 对 5 个真实文件
-（mathutil / bytes / ahci / allocator / parser 自身）逐字符比较 dump，**全部一致**。
-函数体（语句/表达式）解析待做，故为部分。
+**覆盖**：`module` / `fn` 签名（参数类型、返回类型）/ 函数体
+（`let`（含初始化）、`x = e` 赋值、`return`、`if/else`（含 `else if` 链）、`while`、表达式语句）
+/ 表达式（整型、`true`/`false`、标识符、调用、一元 `!`/`-`、二元全部运算符并**按
+`lomentc.PRECEDENCE` 结合**、括号、`a.b`、`a[i]`、`x as T`）。
 
-实现要点：Loment 无元组返回，用 `(i << 32) | o` 打包"token 游标 + 输出游标"；
-token 文本比较用 `tok_is(src, t, i, s)` 逐字节比。
+**判据**：`(module m (fn f (p x u32) -> u32 ( (ret (id x)(bin * (id TWO))))))` 这样的
+dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node）与 Python 版
+**逐字符一致**。
+
+**未覆盖**（子集边界，测试会 SKIP 并打印原因）：字符串字面量、十六进制字面量、
+`match`/`for`、结构体字面量、枚举路径与构造、方法调用、`guard`、切片、`?`。
+
+实现要点：
+
+- Loment 无元组返回 → `(i << 32) | o` 打包「token 游标 + 输出游标」，函数式传递；
+- 表达式 dump 采用「左操作数先输出」的线性形式（`(id a)(bin + (id b))`），
+  可无歧义还原树，且天然匹配逐 token 下降的解析器；
+- 多字符运算符（`==`/`->`/`&&`…）在词法上是两个 token，用 `op_code`/`op_toks` 识别与步进。
 
 ## 待做（M81–M88）
 
