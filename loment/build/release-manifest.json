@@ -7,7 +7,7 @@
   },
   {
    "path": "tools/lom_audit.py",
-   "sha256": "f1d25ad16b803bd0bcd2bf28fcc0a967675dcad73d1443dfd1be5ddac568e4ec"
+   "sha256": "c2a697df0fc7fc955f93d81c261513b255a6da4062d2b8b4b54ff7c4485c1736"
   },
   {
    "path": "tools/lomc_test.py",
@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "cc428d40df5675647b81ae166dffa0db5b1e8007d5bd6cca7f500c487b3a1c94"
+   "sha256": "6e76b43d6273a4a7b84d1ee5859128c939251d029a3dd3127477eafc8ab8f296"
   },
   {
    "path": "tools/potato_measure.py",
@@ -231,7 +231,7 @@
   },
   {
    "path": "docs/140-loment-lang-plan.md",
-   "sha256": "b94228704962d8ded7f1cf8ede6d02786985cbec9ffa7c5a4f0b64ff2d82cabd"
+   "sha256": "8510d8bd35d93784467f6e513f699ad88ec52d0abac83912bf8cfb90bbf6a850"
   },
   {
    "path": "docs/141-l0-lom-spec.md",
@@ -255,7 +255,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "b16336a2b0136b5121c1b00b32796adc0c52e4e2e308634f808dc15828fc7cd2"
+   "sha256": "f9db769e4d9323040583a1ae887b308d10a8659683a9c6c5ac04ef5e4f968c1a"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -291,7 +291,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "78306891037e0fa0b4e7215dc886ded5468ccadc29773eb8895b29fc56c91bd6"
+   "sha256": "2496b4f97f1eded6d8afe317bb832d6393a3c262452abb831bf97b0bd9091b23"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -307,107 +307,107 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "0413d18368a2eb86b3c5fd326335e1efe6d2e1c8d84d96249fdd65acda42e483"
+   "sha256": "1d334cbe29f3b27663d6990d484d7a6f620584fa00a7af39bea9c4f0601f8beb"
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "091a1835a0de51274dbbe35624d88ba56c0bd44eefb2eccc39d606ddf1d5e119"
+   "sha256": "276b227aa2fb1297fc7e306546cd526265d23b097e749651afd174ff63294949"
   },
   {
    "path": "docs/manual/api/ahci.md",
-   "sha256": "a86e1cca0831116d0c77e3d244f0b3c21bcce4c068885860aa401af307124f25"
+   "sha256": "1aff82597f2e826d9089b844d3f15612a7f5bcbc8157c0c69debe11f0925c63a"
   },
   {
    "path": "docs/manual/api/all_loment.md",
-   "sha256": "6f9890292d074b05934c8a80fde4026e63eb25723e0c94b6dc4f9db0e5ddfff0"
+   "sha256": "b02405de267701363afa7f1261110ccb1e2d1bd17cd3fd9ef6d978d96e3d33fe"
   },
   {
    "path": "docs/manual/api/allocator.md",
-   "sha256": "5f41b9a0ce706ba0bcc44bbb3af918253c37f732bd56a11ef8eb40f6f4629d5a"
+   "sha256": "6cf0b7858eca1186e85e8c042d98b1726991dbaf5d6e2e4439e6cdb36a6c1837"
   },
   {
    "path": "docs/manual/api/bootprobe.md",
-   "sha256": "9b532db2772a5e9e5a89b686e3bea3da441ef1004dc3d9e75a381e8ccd12a99f"
+   "sha256": "a71eb12a6a7a16dd0c2d7d2dcd3833d7155be719395b45914bb3f300ba4855fc"
   },
   {
    "path": "docs/manual/api/bytes.md",
-   "sha256": "8fefcdcd7662d1150fd43bcc8c94cffe8708e18c9e5d362e5c92bd3a25b3c4a6"
+   "sha256": "7b696dfc0f99845f699f443dd6d220dedae4dff5e253c6382c1fc51060a3df30"
   },
   {
    "path": "docs/manual/api/demo.md",
-   "sha256": "88884ba3663632aa9a9fc4fdd70e504232d96c27ae868e6244acdf22483fbd95"
+   "sha256": "b7e598dacb96355892a9d9c4c69fb0750bb56fc5b992f5b6de1c172a0a207579"
   },
   {
    "path": "docs/manual/api/fuc_node.md",
-   "sha256": "1b3486a46e7409f695fa7e5df23ecc18e0c086e321c43c77b9774f26e04ddb02"
+   "sha256": "58e35bd20319c2207356c5bf474040db69e7435be611a1e072308009028cd310"
   },
   {
    "path": "docs/manual/api/mathutil.md",
-   "sha256": "b134b061d4d1f6772c72d462ee90ae1b0172e419f61415d42b8b38fc7efea0fe"
+   "sha256": "cc0e5cb6c51c498f00b5bf353886173f2dd018004346fa34b6ef0cdfa999f9ab"
   },
   {
    "path": "docs/manual/api/native.md",
-   "sha256": "902657ec0f798bd7eff263149f95fa83136689705385a6d3a3ae30993a573e3b"
+   "sha256": "50e25241549a19652b1dd8b8d2074ca760becf6ecbe59549223a31da130f0b89"
   },
   {
    "path": "docs/manual/api/native_agg.md",
-   "sha256": "a7999ab3d6f037eff917d6fd6a5dc4ac7999e89d509b96d59d2cff03eb3e26c9"
+   "sha256": "2ab6cb63f82550f6c9c438c8e51ae15b85e80af5a8ba67c75fe27ee710c0816e"
   },
   {
    "path": "docs/manual/api/native_bits.md",
-   "sha256": "5fa7dc9a458305f31c84cf06a295afb259f16a8b84527f08c58d6a1664d3f308"
+   "sha256": "8b0d57e25791788d9c7efbba893051dd600942c8658b4d094d8257c7eb850d69"
   },
   {
    "path": "docs/manual/api/native_cap.md",
-   "sha256": "d1f6b39d965ddce15ec06c5278a10054e918645f2411d649da487ae0bc9e02db"
+   "sha256": "d8cfb87efcd1e57a9f691bcc50b4c62b96b6d39f363ab49b516e492c4dd29abc"
   },
   {
    "path": "docs/manual/api/native_entry.md",
-   "sha256": "c063bc4624fd7fbde46da36f68656a097a41153180c62c478894da06b3b4eb95"
+   "sha256": "7688753dcb140af8324c3a73e349cccbc4a793d15614626bcb42f0f9420d8b26"
   },
   {
    "path": "docs/manual/api/native_gen.md",
-   "sha256": "b871408e716919d30e4a0ada8610d37a43096acff205e53b50a8d4c237d4cb4a"
+   "sha256": "3a90f180f3025745ccc7ab418d536433714f81bd7caa7c89f0324c216cbd6636"
   },
   {
    "path": "docs/manual/api/native_mem.md",
-   "sha256": "6f102d7629b7451e899040796343d0666cffd804865c89f9a58836a05b80281b"
+   "sha256": "a844c981573cf71a0344e096b01644d3037c68fc3db1e11c201a589e285af002"
   },
   {
    "path": "docs/manual/api/native_mut.md",
-   "sha256": "8328532bc42408f3ede235bc31119642eef9298e39b87fb8a7cf091f010c364b"
+   "sha256": "d337431e9a2d6586b2b289a3d4fa9a7284efda9578e3ce97359199c49aa5d460"
   },
   {
    "path": "docs/manual/api/native_raii.md",
-   "sha256": "a8eddae09148d57bfaeb85332f2042a903e74c993b3d554b5a7e51231a934fe8"
+   "sha256": "bac13bf5533999d1ba878c45be1c1b34cc1138310584873519ec678f9c2c29e6"
   },
   {
    "path": "docs/manual/api/native_res.md",
-   "sha256": "66fa9e3e499c0ebcece47f148da8c4d773fd84219bc16640b911ea8bfbfebaac"
+   "sha256": "74b64be062f2c94d8bf1225006f7a2fd183c533a2fbd0df1466d21d1875c8294"
   },
   {
    "path": "docs/manual/api/native_slice.md",
-   "sha256": "d90ae87d67f54a94a8ae46e92f037533008cb72a2c6501979710a7145bc3811b"
+   "sha256": "551cefbfd0fc003e0e24b7afba356ab0ee7a7674a5cce12fe551de7fa7fd9961"
   },
   {
    "path": "docs/manual/api/native_str.md",
-   "sha256": "97112bbe2b2e75e06eb69c492098c9b293bf657d6a7dab7e01dac63fc99f48e9"
+   "sha256": "2bc7cbe5c4b492b07796c8d66f13b215941798c550bfed43db7190a8bca4a374"
   },
   {
    "path": "docs/manual/api/native_trait.md",
-   "sha256": "ee48a362592674f4054f2479bfb09baeef6ddaec59198288b30dbcda9def1b62"
+   "sha256": "dfba948b10f81226ed1bf57436f391bd253a8f11630510cf045f583c84bc25ea"
   },
   {
    "path": "docs/manual/api/selfcheck.md",
-   "sha256": "23cf8f8439883e5f2952b58c0f87e09ef3ce89503d28489ef0d0bed1592d747a"
+   "sha256": "716ded76da7122cef5f94b7d4bc1026679ad4d3f32c4db31f228b01bcec1c1fc"
   },
   {
    "path": "docs/manual/api/toolchain.md",
-   "sha256": "63327a5c55e7f4936b9f9d6e09e9f3cf7de44d5f6a2127de229b3125b6999952"
+   "sha256": "ec19ca7b0da33360a96b6567a13851828950069f859f629ef32a764dcdf539fc"
   },
   {
    "path": "docs/manual/api/user_hello.md",
-   "sha256": "638f39c1ef18fd4c1e52f6b7316846c32427a1971adbe46513171bcedaab43a0"
+   "sha256": "a04968b9f5206cff4082e9160f70af11d534befca43cb6088285ae1d4e824aac"
   }
  ]
 }

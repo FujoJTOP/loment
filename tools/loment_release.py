@@ -34,7 +34,9 @@ GLOBS = [
 
 
 def sha(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    """内容哈希 (通用换行: 同一文件在 LF/CRLF 检出下哈希相同)。"""
+    text = p.read_text(encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def build() -> dict:
