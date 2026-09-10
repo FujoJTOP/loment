@@ -499,6 +499,39 @@ def test_m82_coverage_report():
     total = len(ok) + len(diff)
     print(f"      示例覆盖 {len(ok)}/{total} 字节一致; 待补: {', '.join(diff[:6])}"
           f"{' …' if len(diff) > 6 else ''}")
+    print("      缺口分类 (按文件计):")
+    for feature, hits in _gap_breakdown(diff).items():
+        print(f"        {feature}: {len(hits)}")
+    return
+
+
+def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:
+    """按"该文件需要哪些尚未实现的后端特性"给待补文件分类 (M82 工作list)。"""
+    import re
+    feats = {
+        "除法/取模 (trap+运行时)": r"[^\w\s]/[^\w\s=]|%",
+        "内建 alloc/free/str_*/atomic/位域": r"\b(alloc|free|str_len|str_eq|str_byte|slice_len|str_ptr|ptr_add|ptr_sub|atomic_add|get_bits|set_bits)\b",
+        "syscall 内联汇编": r"\bsyscall[46]\b",
+        "for 循环": r"\bfor\b",
+        "match/枚举": r"\bmatch\b|\benum\b",
+        "聚合/切片/字符串类型": r"\bstruct\b|\[[^\]]*\]|\bstr\b",
+        "能力域/guard": r"\bguard\b|\bcapability\b|\bexcluded\b",
+    }
+    dirs = [ROOT / "loment" / "examples", ROOT / "loment" / "selfhost"]
+    src_of = {}
+    for d in dirs:
+        for p in d.glob("*.lomt"):
+            src_of[p.name] = p
+    out: dict[str, list[str]] = {}
+    for name in diff:
+        p = src_of.get(name)
+        if p is None:
+            continue
+        text = re.sub(r"//[^\n]*", "", p.read_text(encoding="utf-8"))
+        for feat, pat in feats.items():
+            if re.search(pat, text):
+                out.setdefault(feat, []).append(name)
+    return dict(sorted(out.items(), key=lambda kv: -len(kv[1])))
 
 
 def main() -> int:
