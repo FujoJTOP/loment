@@ -1,7 +1,11 @@
 module ir_cast
 
 // M82 目标文件 (转换子集): `as` 生成 trunc/sext/zext, 必须与 lomentc 逐字节一致。
-// 注: 实参位置的 as 转换不在子集内 (需要调用方按形参类型强制, 见 docs/150)。
+// 实参位置的 as 也覆盖: 调用点按被调方形参类型强制 (与 lomentc 的 expr(a, p.type) 同义)。
+
+fn take8(x: u8) -> u8 {
+    return x;
+}
 
 fn narrow(x: u32) -> u8 {
     return x as u8;
@@ -21,4 +25,8 @@ fn lit_cast() -> u8 {
 
 fn bool_cast(c: bool) -> u32 {
     return c as u32;
+}
+
+fn use_in_call(v: u32) -> u8 {
+    return take8(v as u8);
 }

@@ -6,6 +6,16 @@
   "capabilities": [],
   "functions": [
     {
+      "name": "take8",
+      "params": [
+        {
+          "name": "x",
+          "type": "u8"
+        }
+      ],
+      "ret": "u8"
+    },
+    {
       "name": "narrow",
       "params": [
         {
@@ -49,6 +59,16 @@
         }
       ],
       "ret": "u32"
+    },
+    {
+      "name": "use_in_call",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u8"
     }
   ],
   "layouts": [],
