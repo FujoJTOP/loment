@@ -483,6 +483,58 @@
       "ret": "u32"
     },
     {
+      "name": "bit_width",
+      "params": [
+        {
+          "name": "tt",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "apply_cast",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "from_t",
+          "type": "u32"
+        },
+        {
+          "name": "to_t",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "expr_atom",
       "params": [
         {

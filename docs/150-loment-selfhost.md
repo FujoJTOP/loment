@@ -72,7 +72,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **子集边界**：不解析 `use` 导入（因此只对照单编译单元文件）；不做表达式类型推导、
 不做借用/移动检查、不做穷尽性检查（那些仍由 Python 版负责）。
 
-## M82 · Loment 版 IR 生成（标量表达式 + 控制流 + 短路子集）✅
+## M82 · Loment 版 IR 生成（标量表达式 + 控制流 + 短路 + 转换）✅
 
 `loment/selfhost/codegen.lomt`：读取 M79 token 流，直接生成 LLVM IR 文本。判据是
 **逐字节**：`loment_p8_test::test_m82_*` 把 Loment 版输出与 `lomentc --emit-llvm` 的结果
@@ -89,13 +89,16 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
   与 `L1_wcond/L2_wbody/L3_wend`（从 1 起、每函数重置）；
 - `loment/selfhost/ir_logic.lomt`：**`&&`/`||` 短路**（`br i1` + `%L1_sc_rhs / %L2_sc_short / %L3_sc_end`
   三块 + `phi i1`），phi 的右前驱取"右操作数结束时的真实块"（嵌套短路时是内层的 `sc_end`，
-  与 `lomentc` 的 `cur_label` 同义）。
+  与 `lomentc` 的 `cur_label` 同义）；
+- `loment/selfhost/ir_cast.lomt`：**`as` 转换**（按位宽与符号性选 `trunc` / `sext` / `zext`，
+  字面量与 `bool` 转换按 `st or "u32"` 缺省规则处理）。
 
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、`as` 转换、`for`、`match`、
-str/ptr/聚合类型、能力域与 DWARF 元数据。
+**未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、实参位置的 `as`（需要按
+被调方形参类型强制，当前只覆盖返回位置）、内建（`load8`/`store8`/`alloc` 等要降级为
+GEP+load/store 或运行时调用）、`for`、`match`、str/聚合类型、能力域与 DWARF 元数据。
 
 **核心设计（两阶段值栈）**：`expr_*` 先把指令写进输出，再把"值文本"落到值栈的第 `lvl` 层；
 调用方随后把该值内联到自己的行里。这正是 Python 版用字符串拼接达到的效果——

@@ -169,6 +169,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") {
         return emit_str(s, out, "i8");
     }
+    if tok_is(src, toks, tt, "ptr") {
+        return emit_str(s, out, "ptr");
+    }
     if tok_is(src, toks, tt, "u16") || tok_is(src, toks, tt, "i16") {
         return emit_str(s, out, "i16");
     }
@@ -445,16 +448,70 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
 
 // ---------------------------------------------------------------- 表达式
 
-/// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用。
+fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
+    if tok_is(src, toks, tt, "bool") || tok_is(src, toks, tt, "true")
+        || tok_is(src, toks, tt, "false") {
+        return 1;
+    }
+    if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") {
+        return 8;
+    }
+    if tok_is(src, toks, tt, "u16") || tok_is(src, toks, tt, "i16") {
+        return 16;
+    }
+    if tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "i32") {
+        return 32;
+    }
+    return 64;
+}
+
+/// `as T` 后缀: 按位宽与符号性选 trunc/sext/zext (与 lomentc 同规则)。
+fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl: u32) -> u32 {
+    let sw: u32 = bit_width(from_t, src, toks);
+    let dw: u32 = bit_width(to_t, src, toks);
+    if sw == dw && from_t == to_t {
+        return 0;   // 同类型: 不加指令
+    }
+    emit_str(s, out, "  ");
+    let n: u32 = new_temp(s, out);
+    emit_str(s, out, " = ");
+    if dw < sw {
+        emit_str(s, out, "trunc ");
+    } else if is_signed(src, toks, from_t) == 1 {
+        emit_str(s, out, "sext ");
+    } else {
+        emit_str(s, out, "zext ");
+    }
+    emit_ty(s, out, src, toks, from_t);
+    emit_str(s, out, " ");
+    emit_val(s, out, lvl);
+    emit_str(s, out, " to ");
+    emit_ty(s, out, src, toks, to_t);
+    emit_str(s, out, "\n");
+    set_temp_val(s, lvl, n);
+    return 1;
+}
+
+/// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用 / `as T`。
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_kind(toks, j) == 1 {
         copy_mem(s, btxt(s, lvl), src, load32(toks, j * 20 + 4), load32(toks, j * 20 + 8));
         store32(s, blen(s, lvl), load32(toks, j * 20 + 8));
-        return j + 1;
+        let e0: u32 = j + 1;
+        if tok_is(src, toks, e0, "as") {
+            apply_cast(s, out, src, toks, 0, e0 + 1, lvl);
+            return e0 + 2;
+        }
+        return e0;
     }
     if tok_is(src, toks, j, "(") {
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, lvl);
-        return e + 1;
+        let e1: u32 = e + 1;
+        if tok_is(src, toks, e1, "as") {
+            apply_cast(s, out, src, toks, 0, e1 + 1, lvl);
+            return e1 + 2;
+        }
+        return e1;
     }
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
@@ -508,7 +565,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     emit_tok(s, out, src, toks, j);
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n2);
-    return j + 1;
+    let e9: u32 = j + 1;
+    if tok_is(src, toks, e9, "as") {
+        apply_cast(s, out, src, toks, ty, e9 + 1, lvl);
+        return e9 + 2;
+    }
+    return e9;
 }
 
 /// 一元: -x (sub ty 0, v) / !b (xor i1 v, true)

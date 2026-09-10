@@ -1,0 +1,80 @@
+{
+  "potato": "v1",
+  "unit": "ir_cast",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "narrow",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u8"
+    },
+    {
+      "name": "widen",
+      "params": [
+        {
+          "name": "x",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "widen_signed",
+      "params": [
+        {
+          "name": "x",
+          "type": "i32"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "lit_cast",
+      "params": [],
+      "ret": "u8"
+    },
+    {
+      "name": "bool_cast",
+      "params": [
+        {
+          "name": "c",
+          "type": "bool"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}
