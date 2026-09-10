@@ -446,7 +446,8 @@ def test_m82_loment_codegen_byte_identical():
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         for target in (IR_TARGET, ROOT / "loment" / "selfhost" / "ir_expr.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_stmt.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_stmt.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_logic.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)

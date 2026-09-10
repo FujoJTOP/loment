@@ -543,8 +543,51 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32) 
     let go: u32 = 1;
     while go == 1 {
         let c: u32 = op_code(src, toks, i);
-        if c == 0 || op_prec(c) < minp || c == 1 || c == 2 || c == 14 || c == 15 {
+        if c == 0 || op_prec(c) < minp || c == 14 || c == 15 {
             go = 0;
+        } else if c == 1 || c == 2 {
+            // 短路 (phi): 左值已在第 lvl 层; 右操作数只在需要时求值
+            let b2: u32 = load32(s, 480) + 1;
+            store32(s, 480, b2 + 2);
+            emit_str(s, out, "  br i1 ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", label ");
+            if c == 2 {                    // &&
+                lab_ref(s, out, b2, "sc_rhs");
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, b2 + 1, "sc_short");
+            } else {                       // ||
+                lab_ref(s, out, b2 + 1, "sc_short");
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, b2, "sc_rhs");
+            }
+            emit_str(s, out, "\n");
+            store32(s, 476, 1);
+            lab_def(s, out, b2, "sc_rhs");
+            let r2: u32 = expr_bin(s, out, src, toks, i + 2, op_prec(c) + 1, lvl + 1);
+            store32(s, 500, load32(s, 488));   // 右操作数结束时的块 = phi 前驱
+            store32(s, 504, load32(s, 496));
+            jump(s, out, b2 + 2, "sc_end");
+            lab_def(s, out, b2 + 1, "sc_short");
+            jump(s, out, b2 + 2, "sc_end");
+            lab_def(s, out, b2 + 2, "sc_end");
+            emit_str(s, out, "  ");
+            let n2: u32 = new_temp(s, out);
+            emit_str(s, out, " = phi i1 [ ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, ", ");
+            ref_from(s, out, load32(s, 500), load32(s, 504));
+            emit_str(s, out, " ], [ ");
+            if c == 2 {
+                emit_str(s, out, "false");
+            } else {
+                emit_str(s, out, "true");
+            }
+            emit_str(s, out, ", ");
+            lab_ref(s, out, b2 + 1, "sc_short");
+            emit_str(s, out, " ]\n");
+            set_temp_val(s, lvl, n2);
+            i = r2;
         } else {
             let np: u32 = op_prec(c) + 1;
             let r: u32 = expr_bin(s, out, src, toks, i + op_toks(c), np, lvl + 1);
@@ -692,11 +735,86 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
 
 fn lab_def(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
     store32(s, 476, 0);           // terminated = false
+    store32(s, 488, n);           // 当前标签 (phi 前驱用)
+    store32(s, 496, tag_id(tag));
     emit_str(s, out, "L");
     emit_dec(s, out, n);
     emit_str(s, out, "_");
     emit_str(s, out, tag);
     return emit_str(s, out, ":\n");
+}
+
+fn tag_id(tag: str) -> u32 {
+    if str_eq(tag, "then") {
+        return 1;
+    }
+    if str_eq(tag, "else") {
+        return 2;
+    }
+    if str_eq(tag, "end") {
+        return 3;
+    }
+    if str_eq(tag, "wcond") {
+        return 4;
+    }
+    if str_eq(tag, "wbody") {
+        return 5;
+    }
+    if str_eq(tag, "wend") {
+        return 6;
+    }
+    if str_eq(tag, "sc_rhs") {
+        return 7;
+    }
+    if str_eq(tag, "sc_short") {
+        return 8;
+    }
+    return 9;   // sc_end
+}
+
+fn tag_name(id: u32) -> str {
+    if id == 1 {
+        return "then";
+    }
+    if id == 2 {
+        return "else";
+    }
+    if id == 3 {
+        return "end";
+    }
+    if id == 4 {
+        return "wcond";
+    }
+    if id == 5 {
+        return "wbody";
+    }
+    if id == 6 {
+        return "wend";
+    }
+    if id == 7 {
+        return "sc_rhs";
+    }
+    if id == 8 {
+        return "sc_short";
+    }
+    return "sc_end";
+}
+
+/// 保存/还原当前标签 (phi 前驱)。
+fn ref_from(s: ptr, out: ptr, n: u32, id: u32) -> u32 {
+    if n == 0 {
+        return emit_str(s, out, "entry");
+    }
+    return lab_ref(s, out, n, tag_name(id));
+}
+
+/// 当前标签引用: 0 = entry (隐式首块), 否则 %L{n}_{当前 tag 由调用方传入}
+fn cur_ref(s: ptr, out: ptr, tag: str) -> u32 {
+    let n: u32 = load32(s, 488);
+    if n == 0 {
+        return emit_str(s, out, "entry");
+    }
+    return lab_ref(s, out, n, tag);
 }
 
 fn lab_ref(s: ptr, out: ptr, n: u32, tag: str) -> u32 {

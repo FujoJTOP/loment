@@ -683,6 +683,66 @@
       "ret": "u32"
     },
     {
+      "name": "tag_id",
+      "params": [
+        {
+          "name": "tag",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tag_name",
+      "params": [
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "ret": "str"
+    },
+    {
+      "name": "ref_from",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "cur_ref",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "tag",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "lab_ref",
       "params": [
         {
