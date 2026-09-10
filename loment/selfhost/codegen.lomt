@@ -980,6 +980,20 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     return 0;
 }
 
+/// 变量值加载到第 lvl 层 (load <ty>, ptr %name.addr)。
+fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u32 {
+    let ty: u32 = var_type(s, src, toks, name_tok);
+    emit_str(s, out, "  ");
+    let n: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, ", ptr %");
+    emit_tok(s, out, src, toks, name_tok);
+    emit_str(s, out, ".addr\n");
+    set_temp_val(s, lvl, n);
+    return n;
+}
+
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "return") {
@@ -1040,6 +1054,69 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         jump(s, out, base_l + 2, "end");
         lab_def(s, out, base_l + 2, "end");
         return k;
+    }
+    if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
+        let var_tok: u32 = j + 1;
+        let le: u32 = j + 3;                       // lo 起始 (跳过 'for' 变量 'in')
+        let loe: u32 = expr_bin(s, out, src, toks, le, 1, 0);
+        let ty: u32 = var_type(s, src, toks, var_tok);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, var_tok);
+        emit_str(s, out, ".addr\n");
+        let hi_start: u32 = loe + 2;               // 跳过 '..'
+        let w: u32 = load32(s, 480) + 1;
+        store32(s, 480, w + 2);
+        jump(s, out, w, "fcond");
+        lab_def(s, out, w, "fcond");
+        load_var(s, out, src, toks, var_tok, 0);
+        let he: u32 = expr_bin(s, out, src, toks, hi_start, 1, 1);
+        emit_str(s, out, "  ");
+        let cn: u32 = new_temp(s, out);
+        emit_str(s, out, " = icmp ");
+        if is_signed(src, toks, ty) == 1 {
+            emit_str(s, out, "slt ");
+        } else {
+            emit_str(s, out, "ult ");
+        }
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ");
+        emit_val(s, out, 1);
+        emit_str(s, out, "\n  br i1 %t");
+        emit_dec(s, out, cn);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 1, "fbody");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 2, "fend");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, w + 1, "fbody");
+        let k: u32 = he + 1;                       // '{' 之后
+        while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+            k = stmt(s, out, src, toks, k, ret);
+        }
+        load_var(s, out, src, toks, var_tok, 0);
+        emit_str(s, out, "  ");
+        let nx: u32 = new_temp(s, out);
+        emit_str(s, out, " = add ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", 1\n  store ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, nx);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, var_tok);
+        emit_str(s, out, ".addr\n");
+        jump(s, out, w, "fcond");
+        lab_def(s, out, w + 2, "fend");
+        return k + 1;
     }
     if tok_is(src, toks, j, "while") {
         let w: u32 = load32(s, 480) + 1;
@@ -1109,6 +1186,33 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
     let n: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 && j < end {
+        if tok_is(src, toks, j, "for") {   // for 变量也需 alloca
+            let name: u32 = j + 1;
+            // 与 lomentc 同规则: 类型 = expr_type(lo) or expr_type(hi) or u32(0)
+            let vt: u32 = expr_type(s, src, toks, j + 3);
+            if vt == 0 {
+                let d: u32 = j + 3;
+                while tok_kind(toks, d) != 4 && !tok_is(src, toks, d, "{") {
+                    if tok_is(src, toks, d, ".") && tok_is(src, toks, d + 1, ".") {
+                        vt = expr_type(s, src, toks, d + 2);
+                    }
+                    d = d + 1;
+                }
+            }
+            let dup0: u32 = 0;
+            let kk: u32 = 0;
+            while kk < n {
+                if load32(s, 3072 + kk * 8) == name {
+                    dup0 = 1;
+                }
+                kk = kk + 1;
+            }
+            if dup0 == 0 {
+                store32(s, 3072 + n * 8, name);
+                store32(s, 3072 + n * 8 + 4, vt);
+                n = n + 1;
+            }
+        }
         if tok_is(src, toks, j, "let") {
             let name: u32 = j + 1;
             let dup: u32 = 0;

@@ -449,7 +449,8 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_stmt.lomt",
                        ROOT / "loment" / "selfhost" / "ir_logic.lomt",
                        ROOT / "loment" / "selfhost" / "ir_cast.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_mem.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_mem.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_for.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)
@@ -474,7 +475,7 @@ def test_m82_coverage_report():
         print("      SKIP: 无 clang")
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
-             "ir_cast.lomt", "ir_mem.lomt"]
+             "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff = [], []

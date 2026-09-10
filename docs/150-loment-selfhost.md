@@ -97,8 +97,9 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**：除法/取模（需要跳转块 + `__loment_abort` 运行时）、其余内建（`alloc`/`free`/`atomic_add`/
-`str_*`/`syscall*`/位域等）、`for`、`match`、str/聚合类型、能力域表与 DWARF 元数据。
+**未覆盖**（相对 35 个示例文件）：除法/取模（需要跳转块 + `__loment_abort` 运行时）、
+其余内建（`alloc`/`free`/`atomic_add`/`str_*`/`syscall*`/位域等）、`match`、str/聚合类型、
+能力域表与 DWARF 元数据。每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`）。
 
 **核心设计（两阶段值栈）**：`expr_*` 先把指令写进输出，再把"值文本"落到值栈的第 `lvl` 层；
 调用方随后把该值内联到自己的行里。这正是 Python 版用字符串拼接达到的效果——

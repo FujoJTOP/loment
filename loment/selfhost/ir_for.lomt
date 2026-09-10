@@ -1,0 +1,17 @@
+module ir_for
+
+fn sum(n: u32) -> u32 {
+    let acc: u32 = 0;
+    for i in 0..n {
+        acc = acc + i;
+    }
+    return acc;
+}
+
+fn signed_sum(n: i32) -> i32 {
+    let acc: i32 = 0;
+    for i in 0..n {
+        acc = acc + i;
+    }
+    return acc;
+}

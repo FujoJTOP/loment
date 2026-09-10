@@ -279,7 +279,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 | ✅ 部分（4 规则、单编译单元） |
-| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（6 个目标文件：表达式/控制流/短路/转换/实参强制/内建 load8+store8） |
+| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（7 个目标文件；示例级覆盖 7/35，门禁打印缺口分类） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
 | M88 校验和 | `loment_release --checksums` 101 行 sha256 | ✅ 部分（tag 未推送） |
 
