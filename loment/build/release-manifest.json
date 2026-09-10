@@ -214,10 +214,6 @@
    "sha256": "6e04c27fd945ab5ae469cf35cc6eff1ddcfe505393eefeba2d89a0c3d8edfe22"
   },
   {
-   "path": "loment/selfhost/ir_subset.lomt",
-   "sha256": "2f915446e9b46528f1bfd04362dffb3079efefda6afefaf692b95f7e76b92936"
-  },
-  {
    "path": "loment/selfhost/lexer.lomt",
    "sha256": "28b9a5a828d35710088cc02538b575a9e38540b00baec56b9b21d55ea5c0dbf0"
   },
