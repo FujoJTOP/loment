@@ -286,10 +286,6 @@
    "sha256": "f39fe0d914f0a298277b9842d8951fd681de18be8243e2accca52ef7515d9821"
   },
   {
-   "path": "docs/15-pcache.md",
-   "sha256": "a83eed36e0022f3a9b0dea0a6c3dc025d38e8042179aee3c5594a375a478bf2f"
-  },
-  {
    "path": "docs/150-loment-selfhost.md",
    "sha256": "2496b4f97f1eded6d8afe317bb832d6393a3c262452abb831bf97b0bd9091b23"
   },
@@ -300,10 +296,6 @@
   {
    "path": "docs/152-loment-papers.md",
    "sha256": "7ec4ab882ddc928137fd3f0687eafe0b9f5c6ffffb7c1472f510074a861f7175"
-  },
-  {
-   "path": "docs/153-l1-linux-personality.md",
-   "sha256": "a429e713577f94c76fb1da6861864e9d423544862a271f763221ef105f7d4746"
   },
   {
    "path": "docs/154-loment-status.md",

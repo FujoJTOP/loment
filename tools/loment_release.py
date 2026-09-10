@@ -28,7 +28,7 @@ GLOBS = [
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
-    "lom/*.lom", "docs/14*.md", "docs/15*.md", "docs/manual/*.md",
+    "lom/*.lom", "docs/14*.md", "docs/15*-loment-*.md", "docs/manual/*.md",
     "docs/manual/api/*.md",
 ]
 
