@@ -9,7 +9,7 @@
 ## 0. 全局门禁（每个里程碑结束都要跑）
 
 ```
-python tools/ci.py --static-only                 # 10/10
+python tools/ci.py --static-only                 # 11/11
 python tools/fuic.py --check                     # .fuc 逐字节
 python tools/lom_spec_emit.py --check            # spec.json 双副本
 cd kernel && cargo build --release
