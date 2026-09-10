@@ -397,6 +397,66 @@ def test_m81_loment_checker_matches_python():
             assert want == [] and got == [], f"{f.name}: 正例被拒 (py={want} loment={got}) [{det}]"
 
 
+CODEGEN = ROOT / "loment" / "selfhost" / "codegen.lomt"
+IR_TARGET = ROOT / "loment" / "selfhost" / "ir_const.lomt"
+CODEGEN_DRIVER = """#include <stdio.h>
+#include <stdlib.h>
+extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
+extern unsigned int emit_module(char *src, unsigned char *toks, char *out);
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 2;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)n + 8);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) return 2;
+    buf[n] = 0;
+    unsigned char *toks = malloc(20 * ((size_t)n + 16));
+    char *out = malloc((size_t)n * 8 + 8192);
+    lex(buf, (unsigned int)n, toks);
+    unsigned int m = emit_module(buf, toks, out);
+    printf("%.*s", (int)m, out);
+    return 0;
+}
+"""
+
+
+def _build_codegen(td: str) -> Path:
+    mod = lomentc.load(CODEGEN)
+    deps = lomentc.resolve_deps(mod, ROOT, CODEGEN.parent, entry=CODEGEN)
+    assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)[:2]
+    ll = Path(td) / "codegen.ll"
+    ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+    c = Path(td) / "gdrv.c"
+    c.write_text(CODEGEN_DRIVER, encoding="utf-8")
+    exe = Path(td) / "codegen.exe"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "-O1", "-o", str(exe), str(c), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return exe
+
+
+@test
+def test_m82_loment_codegen_byte_identical():
+    """M82(子集): Loment 版 codegen 的 .ll 与 Python 版逐字节一致 (常量/参数返回)。"""
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    mod = lomentc.load(IR_TARGET)
+    deps = lomentc.resolve_deps(mod, ROOT, IR_TARGET.parent, entry=IR_TARGET)
+    want = lomentc.emit_llvm(mod, ROOT, deps)
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        got = subprocess.run([shutil.which(str(exe)) or str(exe), str(IR_TARGET)],
+                             capture_output=True, text=True, shell=False).stdout
+    if got != want:
+        i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+        raise AssertionError(
+            f"首个差异 @{i}:\n loment {got[max(0,(i or 0)-40):(i or 0)+60]!r}\n"
+            f" python {want[max(0,(i or 0)-40):(i or 0)+60]!r}")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

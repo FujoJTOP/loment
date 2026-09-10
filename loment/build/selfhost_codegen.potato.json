@@ -1,0 +1,388 @@
+{
+  "potato": "v1",
+  "unit": "codegen",
+  "language": "loment",
+  "imports": [
+    "bytes",
+    "lexer"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "st_o",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_str",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "text",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_mem",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "buf",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_dec",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_tok",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "tok_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "text",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "tok_kind",
+      "params": [
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "new_temp",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_ty",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "param_type",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "copy_mem",
+      "params": [
+        {
+          "name": "buf",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "soff",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "expr",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        },
+        {
+          "name": "dst",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "find_body",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "find_paren",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "skip_parens",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_fn",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "base",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_module",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}

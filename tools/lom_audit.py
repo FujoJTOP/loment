@@ -324,8 +324,8 @@ def audit_l1(diffs: list[str]) -> None:
     elif syscalls.read_text(encoding="utf-8") != want_sys:
         diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 与 lom/fuai.lom 不一致 (M72)")
 
-    # M79/M80: 自举 lexer/parser 的形式对象必须与源码一致
-    for stem in ("lexer", "parser"):
+    # M79/M80/M81/M82: 自举 lexer/parser/checker/codegen 的形式对象必须与源码一致
+    for stem in ("lexer", "parser", "checker", "codegen"):
         sh = ROOT / "loment" / "selfhost" / f"{stem}.lomt"
         sh_obj = ROOT / "loment" / "build" / f"selfhost_{stem}.potato.json"
         if not sh.exists():

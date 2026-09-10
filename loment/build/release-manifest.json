@@ -7,7 +7,7 @@
   },
   {
    "path": "tools/lom_audit.py",
-   "sha256": "c2a697df0fc7fc955f93d81c261513b255a6da4062d2b8b4b54ff7c4485c1736"
+   "sha256": "297aaa7c9f8ba6bcdfc87e6b9575dfddfa647f92ba50febe7b1ffa0b09710b93"
   },
   {
    "path": "tools/lomc_test.py",
@@ -87,7 +87,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "1c3224eb8e184e3f704f287f7d3d6f1e374bd9a10831f1d3cd98bc08305f07db"
+   "sha256": "3ba3791f3a37ec1b2e8571239364438c0e6ea2a984d8e80ad056f8357f76ab6c"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -206,6 +206,18 @@
    "sha256": "b66d86d4855b84a8fc5170c733c3ee1ec5f0adbcbd81e063626849bf74c4e828"
   },
   {
+   "path": "loment/selfhost/codegen.lomt",
+   "sha256": "f3c8f208fe0e6e6daf9b47eb88ec9990cf1ff93de05b47df17822bf31ac8ae79"
+  },
+  {
+   "path": "loment/selfhost/ir_const.lomt",
+   "sha256": "6e04c27fd945ab5ae469cf35cc6eff1ddcfe505393eefeba2d89a0c3d8edfe22"
+  },
+  {
+   "path": "loment/selfhost/ir_subset.lomt",
+   "sha256": "2f915446e9b46528f1bfd04362dffb3079efefda6afefaf692b95f7e76b92936"
+  },
+  {
    "path": "loment/selfhost/lexer.lomt",
    "sha256": "28b9a5a828d35710088cc02538b575a9e38540b00baec56b9b21d55ea5c0dbf0"
   },
@@ -259,7 +271,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "1c1f3b9d257c6197b1770b75404e40f0428e221a2329ff4c417aa0928a822460"
+   "sha256": "8d98e40e77bb29ea9949e275105eca630bb6296f5cb1cc2d68685a053ed0a15d"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -291,7 +303,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "2adbdb498126ca7678aa5eab259f8e62b12610410450ebfafb9e2d7e5b1948e8"
+   "sha256": "3f88e11f9e97d126a46fbf8227c6f10ce02c2c90b3e3394513692de38319c2e9"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -303,7 +315,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "37d0f463dd3c4aad681340130821f26d36aaf030026514ef39a0f942856c3b3b"
+   "sha256": "dfca30f8ead7e58ac86c0e4dafb2b4df81d81894f0a49316cdd6859008d6ff95"
   },
   {
    "path": "docs/manual/index.md",

@@ -1,0 +1,23 @@
+module ir_const
+
+// M82 目标文件 (常量/参数返回子集): codegen.lomt 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致。
+
+fn answer() -> u32 {
+    return 42;
+}
+
+fn zero() -> u64 {
+    return 0;
+}
+
+fn id(x: u32) -> u32 {
+    return x;
+}
+
+fn pick(a: i16, b: i16) -> i16 {
+    return b;
+}
+
+fn flag(c: bool) -> bool {
+    return c;
+}

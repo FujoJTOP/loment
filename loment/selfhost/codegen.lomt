@@ -1,0 +1,327 @@
+module codegen
+
+// M82 (子集): Loment 版 IR 生成 —— 只覆盖"函数体只有 return <字面量|参数>;"的标量函数,
+// 生成的 .ll 与 tools/lomentc.py 的 --emit-llvm 逐字节一致 (对照见 loment_p8_test)。
+//
+// 覆盖: u8..u64/i8..i64/bool 参数与返回; 表达式 = 整型字面量 | 参数名。
+// 不含(需字符串重排/跳转块): 二元/一元表达式、调用、as、除法、let/if/while、聚合类型、运行时。
+//
+// 状态块: 0=输出游标 4=temp 计数 8=符号数 12=当前参数个数
+//         64..=值缓冲(48B) 60=值长度 128..=符号表 (name_tok|ret_tok), 每项 8B
+//         192..=当前函数参数表 (name_tok|type_tok), 每项 8B
+use "loment/examples/bytes.lomt"
+use "loment/selfhost/lexer.lomt"
+
+fn st_o(s: ptr) -> u32 {
+    return load32(s, 0);
+}
+
+fn emit_str(s: ptr, out: ptr, text: str) -> u32 {
+    let o: u32 = st_o(s);
+    let i: u32 = 0;
+    while i < str_len(text) {
+        store8(out, o, str_byte(text, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    store32(s, 0, o);
+    return o;
+}
+
+fn emit_mem(s: ptr, out: ptr, buf: ptr, off: u32, len: u32) -> u32 {
+    let o: u32 = st_o(s);
+    let i: u32 = 0;
+    while i < len {
+        store8(out, o, load8(buf, off + i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    store32(s, 0, o);
+    return o;
+}
+
+fn emit_dec(s: ptr, out: ptr, v: u32) -> u32 {
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(tmp, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let o: u32 = st_o(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o, load8(tmp, n - 1 - i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    store32(s, 0, o);
+    return o;
+}
+
+fn emit_tok(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
+    return emit_mem(s, out, src, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8));
+}
+
+fn tok_is(src: ptr, toks: ptr, i: u32, text: str) -> bool {
+    if load32(toks, i * 20 + 8) != str_len(text) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(text) {
+        if load8(src, load32(toks, i * 20 + 4) + k) != str_byte(text, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn tok_kind(toks: ptr, i: u32) -> u32 {
+    return load32(toks, i * 20);
+}
+
+fn new_temp(s: ptr, out: ptr) -> u32 {
+    let v: u32 = load32(s, 4) + 1;   // lomentc 从 %t1 起编号
+    store32(s, 4, v);
+    emit_str(s, out, "%t");
+    emit_dec(s, out, v);
+    return v;
+}
+
+/// 写类型 token (0 = 缺省 i32) 对应的 LLVM 类型。
+fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == 0 {
+        return emit_str(s, out, "i32");
+    }
+    if tok_is(src, toks, tt, "bool") {
+        return emit_str(s, out, "i1");
+    }
+    if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") {
+        return emit_str(s, out, "i8");
+    }
+    if tok_is(src, toks, tt, "u16") || tok_is(src, toks, tt, "i16") {
+        return emit_str(s, out, "i16");
+    }
+    if tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "i32") {
+        return emit_str(s, out, "i32");
+    }
+    return emit_str(s, out, "i64");
+}
+
+/// 当前函数的参数类型 (按名字长度+逐字节比较); 未找到返回 0。
+fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 12) {
+        let nt: u32 = load32(s, 192 + i * 8);
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
+                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return load32(s, 192 + i * 8 + 4);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 纯内存复制 (不碰输出游标) —— 值缓冲专用。
+fn copy_mem(buf: ptr, off: u32, src: ptr, soff: u32, len: u32) {
+    let i: u32 = 0;
+    while i < len {
+        store8(buf, off + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 表达式 (子集: 字面量 | 参数): 写指令, 值文本写到缓冲 off, 长度写到 off-4; 返回结束下标。
+fn expr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, dst: u32) -> u32 {
+    if tok_kind(toks, j) == 1 {
+        let off: u32 = load32(toks, j * 20 + 4);
+        let len: u32 = load32(toks, j * 20 + 8);
+        copy_mem(s, dst, src, off, len);   // 值文本 -> 状态块缓冲
+        store32(s, dst - 4, len);
+        return j + 1;
+    }
+    let ty: u32 = param_type(s, src, toks, j);
+    emit_str(s, out, "  ");
+    new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, ", ptr %");
+    emit_tok(s, out, src, toks, j);
+    emit_str(s, out, ".addr\n");
+    store8(s, dst, 37 as u8);        // '%'
+    store8(s, dst + 1, 116 as u8);   // 't'
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = load32(s, 4);       // new_temp 刚用的编号
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(tmp, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let q: u32 = 0;
+    while q < n {
+        store8(s, dst + 2 + q, load8(tmp, n - 1 - q) as u8);
+        q = q + 1;
+    }
+    store32(s, dst - 4, 2 + n);      // 长度在值缓冲之前
+    return j + 1;
+}
+
+fn find_body(src: ptr, toks: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") {
+        j = j + 1;
+    }
+    return j + 1;
+}
+
+fn find_paren(src: ptr, toks: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "(") && !tok_is(src, toks, j, "{") {
+        j = j + 1;
+    }
+    return j;
+}
+
+fn skip_parens(src: ptr, toks: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 {
+        if tok_is(src, toks, j, "(") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, ")") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 发射一个函数 (子集: 函数体可含多个 `return <字面量|参数>;`)。
+fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
+    let lp: u32 = find_paren(src, toks, base + 2);
+    let rp: u32 = skip_parens(src, toks, lp);
+    // 子集要求函数显式写返回类型: ')'(rp) '-' '>'(rp+2) T(rp+3)
+    let ret: u32 = rp + 3;
+    // 参数表
+    let k: u32 = 0;
+    let i: u32 = lp + 1;
+    while i < rp && k < 16 {
+        store32(s, 192 + k * 8, i);
+        store32(s, 192 + k * 8 + 4, i + 2);
+        k = k + 1;
+        i = i + 3;
+        if tok_is(src, toks, i, ",") {
+            i = i + 1;
+        }
+    }
+    store32(s, 12, k);
+    emit_str(s, out, "; ");
+    emit_tok(s, out, src, toks, base + 1);
+    emit_str(s, out, " -> ");
+    if ret == 0 {                        // 无 -> T: Python 侧写的是 Loment 类型名 "()"
+        emit_str(s, out, "()");
+    } else {
+        emit_tok(s, out, src, toks, ret);  // 注释用 Loment 类型名 (不是 LLVM 类型)
+    }
+    emit_str(s, out, "\n");
+    emit_str(s, out, "define ");
+    emit_ty(s, out, src, toks, ret);
+    emit_str(s, out, " @");
+    emit_tok(s, out, src, toks, base + 1);
+    emit_str(s, out, "(");
+    let a: u32 = 0;
+    while a < k {
+        if a > 0 {
+            emit_str(s, out, ", ");
+        }
+        emit_ty(s, out, src, toks, load32(s, 192 + a * 8 + 4));
+        emit_str(s, out, " %");
+        emit_tok(s, out, src, toks, load32(s, 192 + a * 8));
+        a = a + 1;
+    }
+    emit_str(s, out, ") {\nentry:\n");
+    let b: u32 = 0;
+    while b < k {
+        emit_str(s, out, "  %");
+        emit_tok(s, out, src, toks, load32(s, 192 + b * 8));
+        emit_str(s, out, ".addr = alloca ");
+        emit_ty(s, out, src, toks, load32(s, 192 + b * 8 + 4));
+        emit_str(s, out, "\n");
+        b = b + 1;
+    }
+    let c: u32 = 0;
+    while c < k {
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, load32(s, 192 + c * 8 + 4));
+        emit_str(s, out, " %");
+        emit_tok(s, out, src, toks, load32(s, 192 + c * 8));
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, load32(s, 192 + c * 8));
+        emit_str(s, out, ".addr\n");
+        c = c + 1;
+    }
+    let j: u32 = find_body(src, toks, lp);
+    while tok_kind(toks, j) != 4 {
+        if tok_is(src, toks, j, "return") {
+            // 两阶段: 先让 expr 写指令并把值放进缓冲, 再写 ret 行 (与 lomentc 同序)
+            let e: u32 = expr(s, out, src, toks, j + 1, 64);
+            emit_str(s, out, "  ret ");
+            emit_ty(s, out, src, toks, ret);
+            emit_str(s, out, " ");
+            emit_mem(s, out, s, 64, load32(s, 60));
+            emit_str(s, out, "\n");
+            j = e;
+        } else if tok_is(src, toks, j, "}") {
+            emit_str(s, out, "}\n");   // 子集里函数体总以 ret 结束, 无需 unreachable
+            return j + 1;
+        } else {
+            j = j + 1;
+        }
+    }
+    return j;
+}
+
+/// 主入口: 写完整 IR (子集), 返回长度。
+pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
+    let s: ptr = alloc(4096);
+    store32(s, 0, 0);
+    store32(s, 4, 0);
+    store32(s, 12, 0);
+    emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
+    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "fn") {
+            store32(s, 4, 0);
+            i = emit_fn(s, out, src, toks, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    return st_o(s);
+}

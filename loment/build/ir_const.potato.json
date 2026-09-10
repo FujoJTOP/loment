@@ -1,0 +1,79 @@
+{
+  "potato": "v1",
+  "unit": "ir_const",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "answer",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "zero",
+      "params": [],
+      "ret": "u64"
+    },
+    {
+      "name": "id",
+      "params": [
+        {
+          "name": "x",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "pick",
+      "params": [
+        {
+          "name": "a",
+          "type": "i16"
+        },
+        {
+          "name": "b",
+          "type": "i16"
+        }
+      ],
+      "ret": "i16"
+    },
+    {
+      "name": "flag",
+      "params": [
+        {
+          "name": "c",
+          "type": "bool"
+        }
+      ],
+      "ret": "bool"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}
