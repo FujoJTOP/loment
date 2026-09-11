@@ -24,7 +24,9 @@ def parse() -> list[tuple[str, str, str, str]]:
     for ln in DOC.read_text(encoding="utf-8").splitlines():
         if not ln.startswith("|"):
             continue
-        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        # 尊重 Markdown 表格转义: `\|` 是字面竖线, 不能当分隔符
+        cells = [c.strip().replace("\\|", "|")
+                 for c in re.split(r"(?<!\\)\|", ln.strip().strip("|"))]
         if not cells or not re.fullmatch(r"M\d+", cells[0]):
             continue
         mid = cells[0]
