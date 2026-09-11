@@ -584,15 +584,22 @@ def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
     return elf
 
 
-def _run_driver(elf: Path, relpath: str, td: str, name: str) -> str:
-    """在 WSL 里跑自举驱动: cd 到仓库根, 把**入口文件路径**交给它 —— 它自己去解析 use。"""
+def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, str, str]:
+    """跑自举驱动, 返回 (退出码, stdout 文本, stderr 文本)。"""
     got = Path(td) / f"{name}.out.ll"
     script = (f"cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
               f"cd {_wsl_path(ROOT)} && /tmp/{name} {relpath} > {_wsl_path(got)}")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
-    assert r.returncode == 0, f"驱动退出 {r.returncode}: {r.stderr[-400:]}"
-    return got.read_text(encoding="utf-8")
+    text = got.read_text(encoding="utf-8") if got.exists() else ""
+    return r.returncode, text, r.stderr
+
+
+def _run_driver(elf: Path, relpath: str, td: str, name: str) -> str:
+    """跑自举驱动并要求成功 (cd 到仓库根, 把入口路径交给它 —— 它自己解析 use)。"""
+    rc, text, err = _run_driver_raw(elf, relpath, td, name)
+    assert rc == 0, f"驱动退出 {rc}: {err[-400:]}"
+    return text
 
 
 #: 语料里"参考实现的 IR 后端发不出来"的文件 (非目标), 按名字跳过。

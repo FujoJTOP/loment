@@ -86,13 +86,6 @@ fn fail(msg: str) -> u32 {
     return die(1);
 }
 
-fn fail_path(msg: str, p: ptr, n: u32) -> u32 {
-    write_all(2, str_ptr(msg), str_len(msg) as u64);
-    write_all(2, p, n as u64);
-    write_all(2, str_ptr("\n"), 1);
-    return die(1);
-}
-
 /// 只读打开: 先把路径复制成 NUL 结尾 (内核要 C 串), 再 openat(AT_FDCWD, p, O_RDONLY)。
 fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
     let i: u32 = 0;
@@ -312,7 +305,7 @@ fn _start() -> u32 {
     let toks: ptr = tokv as ptr;
     let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks);
     if len == 0 {
-        return fail_path("fujoc-s: 打不开入口 ", ap, an);
+        return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");
     }
     // 预置枚举注入: 先粗判一次 (单文件大小的词法缓冲足够 —— 只看有没有 `enum X`)
     lex(unit, len as u32, toks);
