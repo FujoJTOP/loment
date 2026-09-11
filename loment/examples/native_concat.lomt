@@ -1,0 +1,63 @@
+// loment/examples/native_concat.lomt — M2/M28 验证集: str_concat (docs/145)
+//
+// str = UTF-8 字节视图; 内建 str_len / str_eq / str_byte / **str_concat**。
+// 拼接结果落在堆上: IR 路径走自带 bump 堆, Rust 路径是 `&'static str` 所以只能漏内存
+// —— 两条路径的**值**必须一致 (测试会真的跑两边对比)。
+//
+// v0 不做回收 (没有 free 语义的字符串), 所以拼接是"只增不减"的。
+
+module native_concat
+
+fn concat_lit() -> u32 {
+    let s: str = str_concat("fujo", "os");
+    return str_len(s);
+}
+
+fn concat_run() -> bool {
+    let s: str = str_concat("fujo", "os");
+    return str_eq(s, "fujooos") == false && str_eq(s, "fujoos");
+}
+
+fn concat_three() -> u32 {
+    let a: str = str_concat("a", "b");
+    let b: str = str_concat(a, "c");
+    return str_len(b);
+}
+
+fn concat_empty() -> u32 {
+    let a: str = str_concat("", "");
+    let b: str = str_concat(a, "x");
+    return str_len(b);
+}
+
+fn concat_bytes() -> u32 {
+    let s: str = str_concat("ab", "cd");
+    return str_byte(s, 0) + str_byte(s, 1) + str_byte(s, 2) + str_byte(s, 3);
+}
+
+fn concat_var() -> bool {
+    let tail: str = "end";
+    let head: str = "the-";
+    let s: str = str_concat(head, tail);
+    return str_eq(s, "the-end") && str_len(s) == 7;
+}
+
+fn test_concat_len() -> bool {
+    return concat_lit() == 6;
+}
+
+fn test_concat_value() -> bool {
+    return concat_run();
+}
+
+fn test_concat_chain() -> bool {
+    return concat_three() == 3 && concat_empty() == 1;
+}
+
+fn test_concat_bytes() -> bool {
+    return concat_bytes() == 97 + 98 + 99 + 100;
+}
+
+fn test_concat_vars() -> bool {
+    return concat_var();
+}

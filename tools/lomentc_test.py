@@ -564,6 +564,63 @@ def test_str_builtins_m1_m2():
 
 
 @test
+def test_m2_concat_dual_path_runs_equal():
+    """M2/M28: `str_concat` 的两条路径**真的都跑一遍**, 输出逐行相同。
+
+    在这之前"双路径逐值一致"只有文档里的手工命令 (docs/143 §5), 没有自动化判据。
+    这条把它钉住: Rust 侧用 rustc 编 `test_*() -> bool` 探针, IR 侧用 clang 编 C 驱动
+    调同名函数, 两边打印的 `名字 0/1` 清单必须一字不差, 且全是 1。
+    """
+    import shutil
+    import subprocess
+    rustc = shutil.which("rustc")
+    clang = shutil.which("clang") or (
+        r"C:\Program Files\LLVM\bin\clang.exe"
+        if Path(r"C:\Program Files\LLVM\bin\clang.exe").exists() else None)
+    if not rustc or not clang:
+        print("      SKIP: 无 rustc/clang")
+        return
+    p = ROOT / "loment" / "examples" / "native_concat.lomt"
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)[:2]
+    probes = [f for f in mod.funcs
+              if f.name.startswith("test_") and not f.params and f.ret == "bool"]
+    assert len(probes) >= 5, f"native_concat 的探针太少: {[f.name for f in probes]}"
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "m.rs").write_text(lomentc.emit_rust(mod, ROOT, deps), encoding="utf-8")
+        h = ['include!("m.rs");', "fn main() {"]
+        for f in probes:
+            h.append(f'    println!("{f.name} {{}}", if {f.name}() {{ 1 }} else {{ 0 }});')
+        h.append("}")
+        (Path(td) / "main.rs").write_text("\n".join(h) + "\n", encoding="utf-8")
+        exe = Path(td) / "r.exe"
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(Path(td) / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-600:]
+        rust_out = subprocess.run([str(exe)], capture_output=True, text=True,
+                                  shell=False).stdout
+        (Path(td) / "m.ll").write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+        c = ["#include <stdio.h>"]
+        for f in probes:
+            c.append(f"extern _Bool {f.name}(void);")
+        c.append("int main(void) {")
+        for f in probes:
+            c.append(f'    printf("{f.name} %d\\n", (int){f.name}());')
+        c += ["    return 0;", "}"]
+        (Path(td) / "drv.c").write_text("\n".join(c) + "\n", encoding="utf-8")
+        exe2 = Path(td) / "i.exe"
+        r = subprocess.run([clang, "-O1", "-o", str(exe2), str(Path(td) / "drv.c"),
+                            str(Path(td) / "m.ll")], capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-600:]
+        ir_out = subprocess.run([str(exe2)], capture_output=True, text=True,
+                                shell=False).stdout
+    assert rust_out == ir_out, f"双路径输出不同:\nRUST\n{rust_out}\nIR\n{ir_out}"
+    assert rust_out.count(" 1") == len(probes), f"有探针不通过:\n{rust_out}"
+    print(f"      双路径一致: {len(probes)} 个探针全 1 (rustc 与 clang 输出逐行相同)")
+
+
+@test
 def test_str_type_errors():
     e = errs('module m\nfn f() -> u32 { return str_len(1); }\n')
     assert any("内建 str_len" in x for x in e), e

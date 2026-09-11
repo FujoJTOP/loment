@@ -3,12 +3,12 @@
 > 由 `tools/loment_status.py` 从 docs/145 生成 —— 请勿手改。
 > 计数口径：`完成` = ✅；`部分` = ✅ 部分；`未达` = ⚠️；其余按未开始。
 
-- 完成 **77/100** · 部分 **15** · 未达 **2** · 未开始 **6**
+- 完成 **79/100** · 部分 **13** · 未达 **2** · 未开始 **6**
 
 | 里程碑 | 名称 | 判据 | 状态 | 归类 |
 |---|---|---|---|---|
 | M1 | 字符串字面量与 UTF-8 字节视图 | `let s: str = "abc";` 转译/IR 双路径输出一致 | ✅ | 完成 |
-| M2 | 字符串操作（`len`/`eq`/`concat`/切片视图） | 三个操作的双路径逐值一致 | ✅ 部分（`str_len`/`str_eq`/`str_byte`；`concat` 阻塞于 M15 堆分配） | 部分 |
+| M2 | 字符串操作（`len`/`eq`/`concat`/切片视图） | 三个操作的双路径逐值一致 | ✅（`str_len`/`str_eq`/`str_concat`/`str_byte`；`test_m2_concat_dual_path_runs_equal` 真的跑 rustc 与 clang 两边比输出） | 完成 |
 | M3 | 只读切片 `&[T]` | 函数参数传切片，IR 用 `{ptr,len}` | ✅ | 完成 |
 | M4 | 可变切片 `&mut [T]` | 原地写入经双路径一致 | ✅ | 完成 |
 | M5 | 借用检查 v0（最小规则：不别名可变借用） | 3 个正例通过 + 3 个负例报错 | ✅ | 完成 |
@@ -34,9 +34,9 @@
 | M25 | 枚举 IR（tagged union） | 无载荷/带载荷枚举双路径一致 | ✅ | 完成 |
 | M26 | `match` 降级（switch + phi） | 穷尽性用例双路径一致 | ✅ | 完成 |
 | M27 | 短路 `&&`/`||`（phi 修正） | 副作用调用只执行一次 | ✅ | 完成 |
-| M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | ✅ 部分（字符串/切片 IR 已双路径一致；`concat`（M2 尾项）待做） | 部分 |
+| M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | ✅（字符串/切片 IR 与 Rust 路径逐值一致，含 `str_concat`：`__loment_memcpy` 进自带运行时 + bump 堆拼接；见 docs/145 M2 证据） | 完成 |
 | M29 | 泛型单态化 IR | M6/M7 用例在原生路径通过 | ✅ | 完成 |
-| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅（对象 0 未定义符号；`ld.lld -T loment/build/loment.ld` 链成 5448B 映像，`ENTRY(_start)` 生效、`_start @0x1000e0`；`test_m30_bare_metal_object_and_link` 钉住） | 完成 |
+| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅（对象 0 未定义符号；`ld.lld -T loment/build/loment.ld` 链成独立映像，最低 text 符号 == 1 MiB、入口 == `_start`；`test_m30_bare_metal_object_and_link` 钉住） | 完成 |
 | M31 | 无 libc 运行时（memcpy/memset 内联） | 链接后无未定义符号 | ✅ | 完成 |
 | M32 | 自定义入口 + 链接脚本（与 FujoOS 对齐） | 产物能被 `kernel.ld` 布局吃下 | ✅ | 完成 |
 | M33 | 中断/异常函数属性（naked/interrupt） | QEMU 中触发中断并返回 | ✅ 部分（`x86_intrcc` 就绪；IDT/QEMU 运行待 P7） | 部分 |
@@ -110,8 +110,6 @@
 
 ## 剩余工作（按依赖）
 
-- **M2** 字符串操作（`len`/`eq`/`concat`/切片视图） —— ✅ 部分（`str_len`/`str_eq`/`str_byte`；`concat` 阻塞于 M15 堆分配）
-- **M28** 字符串/切片 IR —— ✅ 部分（字符串/切片 IR 已双路径一致；`concat`（M2 尾项）待做）
 - **M33** 中断/异常函数属性（naked/interrupt） —— ✅ 部分（`x86_intrcc` 就绪；IDT/QEMU 运行待 P7）
 - **M37** 撤销语义代码生成（revocable） —— 部分（标志进域表/Potato；撤销由内核实施，P7）
 - **M39** 与 `kernel/src/capability.rs` 域模型对齐 —— 待做（内核侧改动，P7）

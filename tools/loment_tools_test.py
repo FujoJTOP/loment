@@ -224,10 +224,13 @@ def test_m30_bare_metal_object_and_link():
         syms = subprocess.run([nm, str(elf)], capture_output=True, text=True,
                               shell=False).stdout
         assert "_start" in syms and "timer_isr" in syms, syms[:200]
-        # 入口地址必须等于 _start 的地址 (脚本 ENTRY(_start) 生效), 布局落在 1 MiB
+        # 脚本布局: 最低的 text 符号必须正好落在 1 MiB (ENTRY(_start) 生效则入口 == _start)
+        text_addrs = [int(l.split()[0], 16) for l in syms.splitlines()
+                      if len(l.split()) == 3 and l.split()[1] in ("t", "T")]
+        assert min(text_addrs) == 0x100000, f"text 没落在脚本的 1 MiB: {min(text_addrs):#x}"
         addr = int(next(l.split()[0] for l in syms.splitlines()
                         if l.split()[-1] == "_start"), 16)
-        assert addr == 0x1000E0, f"_start 不在脚本布局上: {addr:#x}"
+        assert 0x100000 <= addr < 0x101000, f"_start 不在第一页 text 里: {addr:#x}"
         head = subprocess.run([objdump, "-f", str(elf)], capture_output=True,
                               text=True, shell=False).stdout
         assert f"start address: 0x{addr:016x}" in head, head[:300]

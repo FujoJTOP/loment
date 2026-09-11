@@ -1,6 +1,6 @@
 # Loment 语言手册
 
-> 编译器版本戳: `lomentc-6cd11063e8e5`（由 tools/loment_manual.py 生成）
+> 编译器版本戳: `lomentc-5494fc349e52`（由 tools/loment_manual.py 生成）
 
 ## 规范
 
@@ -29,6 +29,7 @@
 - [native_bits](api/native_bits.md)
 - [native_brk](api/native_brk.md)
 - [native_cap](api/native_cap.md)
+- [native_concat](api/native_concat.md)
 - [native_entry](api/native_entry.md)
 - [native_gen](api/native_gen.md)
 - [native_mem](api/native_mem.md)

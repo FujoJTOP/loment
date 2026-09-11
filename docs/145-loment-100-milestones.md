@@ -24,7 +24,7 @@ FUJO_MON_PORT=14568 FUJO_SER_PORT=14001 python tools/fujoregress.py --only 0
 | # | 里程碑 | 判据 | 状态 |
 |---|---|---|---|
 | M1 | 字符串字面量与 UTF-8 字节视图 | `let s: str = "abc";` 转译/IR 双路径输出一致 | ✅ |
-| M2 | 字符串操作（`len`/`eq`/`concat`/切片视图） | 三个操作的双路径逐值一致 | ✅ 部分（`str_len`/`str_eq`/`str_byte`；`concat` 阻塞于 M15 堆分配） |
+| M2 | 字符串操作（`len`/`eq`/`concat`/切片视图） | 三个操作的双路径逐值一致 | ✅（`str_len`/`str_eq`/`str_concat`/`str_byte`；`test_m2_concat_dual_path_runs_equal` 真的跑 rustc 与 clang 两边比输出） |
 | M3 | 只读切片 `&[T]` | 函数参数传切片，IR 用 `{ptr,len}` | ✅ |
 | M4 | 可变切片 `&mut [T]` | 原地写入经双路径一致 | ✅ |
 | M5 | 借用检查 v0（最小规则：不别名可变借用） | 3 个正例通过 + 3 个负例报错 | ✅ |
@@ -47,6 +47,31 @@ loment/examples/native_str.lomt
 `str` = `{ ptr, i64 }`（UTF-8 字节视图）；字面量 → 模块级 `private constant [N x i8]`；
 `str_len` → `extractvalue 1 + trunc`；`str_eq` → 长度比较 + `memcmp`（长度不等直接 false，
 避免越界读）；`str_byte` → GEP + `zext i8`。Rust 路径分别降级为 `.len()` / `==` / `.as_bytes()[i]`。
+
+### P1 证据补充（2026-09-11，M2 尾项 `str_concat`）
+
+```
+python tools/lomentc_test.py       # 90/90
+# 双路径一致: 5 个探针全 1 (rustc 与 clang 输出逐行相同)
+```
+
+`concat` 当初记为"阻塞于 M15 堆分配"，M15 早就完成了 —— 缺的其实是语言没实现这个内建。
+现在三条路径都有：
+
+| 路径 | 降级 |
+|---|---|
+| Rust | `Box::leak(format!("{}{}", a, b).into_boxed_str()) as &'static str`（v0 的 `str` 是 `&'static str`，只能漏内存） |
+| IR | 长度相加 → `trunc` → bump 堆分配 → 两次 `@__loment_memcpy` → 拼 `{ ptr, i64 }`（新运行时常量，无 libc） |
+| 自举 codegen | 同一份文本逐字节一致（`native_concat.lomt` 进 40/40 目标） |
+
+**顺带把"双路径逐值一致"从文档命令变成判据**：`test_m2_concat_dual_path_runs_equal`
+用 rustc 编 `test_*() -> bool` 探针、用 clang 编 C 驱动调同名函数，两边打印的
+`名字 0/1` 清单必须逐行相同且全为 1 —— 之前这条只有 docs/143 §5 的手抄命令看着。
+
+`str_concat` 还抓到一个标签表的洞：`&&` 的 phi 前驱要记"右操作数结束时的块"，而那个块
+可能是 `str_eq` 的 `L?_send`；`tag_id`/`tag_name` 表里没有 `seq`/`sneq`/`send`，
+未知标签一律退化成 `sc_end` → 生成了不存在的 `%L11_sc_end`（LLVM 报前驱不匹配）。
+表补齐了这三个（另加 match 的 `mend`/`mwild`，它们同样可能当 `&&` 右操作数的前驱）。
 
 ### P1 证据（2026-09-08，M3）
 
@@ -108,7 +133,7 @@ Rust 路径：`&mut [T]` / `(&mut a)` / `xs[(i) as usize] = v`。类型规则：
 
 ```
 python tools/loment_tools_test.py   # 13/13
-# 裸机链: 2192B 对象 (0 未定义) -> 5448B 映像, _start @0x1000e0
+# 裸机链: 2352B 对象 (0 未定义) -> 5568B 映像, _start @0x100130
 ```
 
 M30 之前的判据只到"`-c` 出 `.o`"；链接那一步只写在文档里（下面的 P3 手抄命令），
@@ -117,10 +142,15 @@ M30 之前的判据只到"`-c` 出 `.o`"；链接那一步只写在文档里（�
 | 判据 | 结果 |
 |---|---|
 | `native_entry.lomt` → IR → `x86_64-unknown-none` 对象，未定义符号为 0（M31：运行时不依赖 libc） | ✅ |
-| `ld.lld -T loment/build/loment.ld` 链成映像 | ✅ 5448B |
-| `ENTRY(_start)` 生效：`llvm-objdump -f` 的入口地址 == `_start` 的地址 `0x1000e0`（脚本布局 1 MiB 起） | ✅ |
+| `ld.lld -T loment/build/loment.ld` 链成映像 | ✅ 5568B |
+| 脚本布局生效：最低的 text 符号正好是 `0x100000`（= 脚本的 `. = 0x00100000`） | ✅ |
+| `ENTRY(_start)` 生效：`llvm-objdump -f` 的入口地址 == `_start` 的符号地址 | ✅ 当前是 `0x100130` |
 | `_start` / `timer_isr` 都在符号表里（M33 的 `x86_intrcc` 函数也被链进去） | ✅ |
 | 链接产物本身未定义符号也为 0（整套 = 一个能独立跑的映像） | ✅ |
+
+> 判据里**不写死** `_start` 的绝对地址：它随自带运行时的大小漂移（加 `__loment_memcpy`
+> 后就从 `0x1000e0` 挪到了 `0x100130`）。能钉的是"最低 text 符号 == 1 MiB"和
+> "入口 == `_start`"这两条结构性质。
 
 ### P3 收尾证据（2026-09-08，M31–M33）
 
@@ -131,8 +161,8 @@ llvm-nm native_str.o | grep " U "      # 空 = 无未定义符号
 
 # M32: 独立入口 + 链接脚本
 ld.lld -T loment/build/loment.ld native_entry.o -o native_entry.elf
-llvm-objdump -f native_entry.elf       # start address: 0x1000e0 (= _start 的地址)
-llvm-nm native_entry.elf               # T _start @0x1000e0, T timer_isr @0x100100
+llvm-objdump -f native_entry.elf       # start address == _start 的地址 (随运行时大小漂移)
+llvm-nm native_entry.elf               # T _start, T timer_isr
 
 # M33: 中断函数属性
 grep x86_intrcc native_entry.ll        # define x86_intrcc void @timer_isr(ptr byval([8 x i8]) %__frame)
@@ -439,9 +469,9 @@ python tools/loment_release.py --check   # 110/110 工件 sha256 一致 (M95/M99
 | M25 | 枚举 IR（tagged union） | 无载荷/带载荷枚举双路径一致 | ✅ |
 | M26 | `match` 降级（switch + phi） | 穷尽性用例双路径一致 | ✅ |
 | M27 | 短路 `&&`/`\|\|`（phi 修正） | 副作用调用只执行一次 | ✅ |
-| M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | ✅ 部分（字符串/切片 IR 已双路径一致；`concat`（M2 尾项）待做） |
+| M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | ✅（字符串/切片 IR 与 Rust 路径逐值一致，含 `str_concat`：`__loment_memcpy` 进自带运行时 + bump 堆拼接；见 docs/145 M2 证据） |
 | M29 | 泛型单态化 IR | M6/M7 用例在原生路径通过 | ✅ |
-| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅（对象 0 未定义符号；`ld.lld -T loment/build/loment.ld` 链成 5448B 映像，`ENTRY(_start)` 生效、`_start @0x1000e0`；`test_m30_bare_metal_object_and_link` 钉住） |
+| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅（对象 0 未定义符号；`ld.lld -T loment/build/loment.ld` 链成独立映像，最低 text 符号 == 1 MiB、入口 == `_start`；`test_m30_bare_metal_object_and_link` 钉住） |
 | M31 | 无 libc 运行时（memcpy/memset 内联） | 链接后无未定义符号 | ✅ |
 | M32 | 自定义入口 + 链接脚本（与 FujoOS 对齐） | 产物能被 `kernel.ld` 布局吃下 | ✅ |
 | M33 | 中断/异常函数属性（naked/interrupt） | QEMU 中触发中断并返回 | ✅ 部分（`x86_intrcc` 就绪；IDT/QEMU 运行待 P7） |

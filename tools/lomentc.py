@@ -33,6 +33,7 @@ TYPES = INT_TYPES + ("bool", "str", "ptr", "()")
 BUILTINS = {
     "str_len": (("str",), "u32"),
     "str_eq": (("str", "str"), "bool"),
+    "str_concat": (("str", "str"), "str"),   # M2
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -90,6 +91,24 @@ loop:
 body:
   %q = getelementptr i8, ptr %p, i64 %i
   store i8 %v, ptr %q
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret void
+}
+
+define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %sp = getelementptr i8, ptr %s, i64 %i
+  %b = load i8, ptr %sp
+  %dp = getelementptr i8, ptr %d, i64 %i
+  store i8 %b, ptr %dp
   %i1 = add i64 %i, 1
   br label %loop
 end:
@@ -2407,6 +2426,9 @@ def _expr_rs(e) -> str:
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
             return f"({a[0]} == {a[1]})"
+        if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
+            return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
+                    f"as &'static str)")
         return f"({a[0]}.as_bytes()[({a[1]}) as usize] as u32)"
     if isinstance(e, Cast):
         return f"(({_expr_rs(e.expr)}) as {_rust_t(e.type)})"
@@ -3144,28 +3166,32 @@ class _Ir:
         raise LomError(e.line, 1, f"native M0 不支持的运算符 {op}")
 
     # -- 内建 (M1/M2)
+    def alloc_ir(self, size_var: str) -> str:
+        """bump 堆分配 `size_var` 字节, 返回指针 (alloc 与 str_concat 共用, M15/M2)。"""
+        off = self.t()
+        self.w(f"{off} = load i32, ptr @__loment_off")
+        nxt = self.t()
+        self.w(f"{nxt} = add i32 {off}, {size_var}")
+        ok = self.t()
+        self.w(f"{ok} = icmp ule i32 {nxt}, 65536")
+        aok, aovf = self.l("aok"), self.l("aovf")
+        self.w(f"br i1 {ok}, label %{aok}, label %{aovf}")
+        self.terminated = True
+        self.label(aovf)
+        self.w("call void @__loment_abort()")
+        self.w("unreachable")
+        self.terminated = True
+        self.label(aok)
+        self.w(f"store i32 {nxt}, ptr @__loment_off")
+        p = self.t()
+        self.w(f"{p} = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 {off}")
+        return p
+
     def builtin(self, e: Call) -> tuple[str, str]:
-        """str_len / str_eq / str_byte / slice_len 的 IR 降级。"""
+        """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            off = self.t()
-            self.w(f"{off} = load i32, ptr @__loment_off")
-            nxt = self.t()
-            self.w(f"{nxt} = add i32 {off}, {sz}")
-            ok = self.t()
-            self.w(f"{ok} = icmp ule i32 {nxt}, 65536")
-            aok, aovf = self.l("aok"), self.l("aovf")
-            self.w(f"br i1 {ok}, label %{aok}, label %{aovf}")
-            self.terminated = True
-            self.label(aovf)
-            self.w("call void @__loment_abort()")
-            self.w("unreachable")
-            self.terminated = True
-            self.label(aok)
-            self.w(f"store i32 {nxt}, ptr @__loment_off")
-            p = self.t()
-            self.w(f"{p} = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 {off}")
-            return "ptr", p
+            return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             self.expr(e.args[0], "ptr")
             return "u32", "0"
@@ -3317,6 +3343,30 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = phi i1 [ {z}, %{chk} ], [ false, %{neq} ]")
             return "bool", r
+        # M2: str_concat —— 拼到 bump 堆上 (v0 不做回收, 与 Rust 路径的 leak 同语义)
+        if e.name == "str_concat":
+            _, a = self.expr(e.args[0], "str")
+            _, b = self.expr(e.args[1], "str")
+            ap, al = self.t(), self.t()
+            self.w(f"{ap} = extractvalue {{ ptr, i64 }} {a}, 0")
+            self.w(f"{al} = extractvalue {{ ptr, i64 }} {a}, 1")
+            bp, bl = self.t(), self.t()
+            self.w(f"{bp} = extractvalue {{ ptr, i64 }} {b}, 0")
+            self.w(f"{bl} = extractvalue {{ ptr, i64 }} {b}, 1")
+            n = self.t()
+            self.w(f"{n} = add i64 {al}, {bl}")
+            nu = self.t()
+            self.w(f"{nu} = trunc i64 {n} to i32")   # 堆计数是 u32
+            p = self.alloc_ir(nu)
+            self.w(f"call void @__loment_memcpy(ptr {p}, ptr {ap}, i64 {al})")
+            g = self.t()
+            self.w(f"{g} = getelementptr i8, ptr {p}, i64 {al}")
+            self.w(f"call void @__loment_memcpy(ptr {g}, ptr {bp}, i64 {bl})")
+            v1 = self.t()
+            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {n}, 1")
+            return "str", v2
         # str_byte
         _, sv = self.expr(e.args[0], "str")
         p = self.t()

@@ -694,7 +694,9 @@ def test_m82_coverage_report():
              # 预置枚举 + `?` 早退 + `if let` 三条路径的回归闸 (不放进列表就会静默退化)
              "native_res.lomt",
              # 整数->指针 (M83 给托管驱动补的那一步) 与自举驱动自身
-             "native_brk.lomt", "driver.lomt"]
+             "native_brk.lomt", "driver.lomt",
+             # M2 的 str_concat (堆拼接 + 新运行时常量 + 标签表)
+             "native_concat.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff, unsupported = [], [], []

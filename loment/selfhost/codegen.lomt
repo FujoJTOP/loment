@@ -1575,6 +1575,47 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 }
 
 /// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用 / `as T`。
+/// bump 堆分配: 大小从第 szlvl 层取 (u32), 结果 (ptr) 写到第 lvl 层;
+/// 返回分配到的指针的 temp 号。alloc 与 str_concat 共用 (文本与 lomentc.alloc_ir 同序)。
+fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+    emit_str(s, out, "  ");
+    let off: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr @__loment_off\n  ");
+    let nxt: u32 = new_temp(s, out);
+    emit_str(s, out, " = add i32 %t");
+    emit_dec(s, out, off);
+    emit_str(s, out, ", ");
+    emit_val(s, out, szlvl);
+    emit_str(s, out, "\n  ");
+    let ok: u32 = new_temp(s, out);
+    emit_str(s, out, " = icmp ule i32 %t");
+    emit_dec(s, out, nxt);
+    emit_str(s, out, ", 65536\n");
+    let w: u32 = load32(s, 480) + 1;
+    store32(s, 480, w + 1);
+    emit_str(s, out, "  br i1 %t");
+    emit_dec(s, out, ok);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, w, "aok");
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, w + 1, "aovf");
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    lab_def(s, out, w + 1, "aovf");
+    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+    store32(s, 476, 1);
+    lab_def(s, out, w, "aok");
+    emit_str(s, out, "  store i32 %t");
+    emit_dec(s, out, nxt);
+    emit_str(s, out, ", ptr @__loment_off\n  ");
+    let p: u32 = new_temp(s, out);
+    emit_str(s, out, " = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t");
+    emit_dec(s, out, off);
+    emit_str(s, out, "\n");
+    set_temp_val(s, lvl, p);
+    return p;
+}
+
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_kind(toks, j) == 2 {   // 字符串字面量 -> { ptr, i64 }
         let idx: u32 = s_gc(s, 0);
@@ -1667,41 +1708,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            emit_str(s, out, "  ");
-            let off: u32 = new_temp(s, out);
-            emit_str(s, out, " = load i32, ptr @__loment_off\n  ");
-            let nxt: u32 = new_temp(s, out);
-            emit_str(s, out, " = add i32 %t");
-            emit_dec(s, out, off);
-            emit_str(s, out, ", ");
-            emit_val(s, out, lvl);
-            emit_str(s, out, "\n  ");
-            let ok: u32 = new_temp(s, out);
-            emit_str(s, out, " = icmp ule i32 %t");
-            emit_dec(s, out, nxt);
-            emit_str(s, out, ", 65536\n");
-            let w: u32 = load32(s, 480) + 1;
-            store32(s, 480, w + 1);
-            emit_str(s, out, "  br i1 %t");
-            emit_dec(s, out, ok);
-            emit_str(s, out, ", label ");
-            lab_ref(s, out, w, "aok");
-            emit_str(s, out, ", label ");
-            lab_ref(s, out, w + 1, "aovf");
-            emit_str(s, out, "\n");
-            store32(s, 476, 1);
-            lab_def(s, out, w + 1, "aovf");
-            emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
-            store32(s, 476, 1);
-            lab_def(s, out, w, "aok");
-            emit_str(s, out, "  store i32 %t");
-            emit_dec(s, out, nxt);
-            emit_str(s, out, ", ptr @__loment_off\n  ");
-            let p: u32 = new_temp(s, out);
-            emit_str(s, out, " = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t");
-            emit_dec(s, out, off);
-            emit_str(s, out, "\n");
-            set_temp_val(s, lvl, p);
+            emit_alloc_seq(s, out, lvl, lvl);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
                 return k1 + 3;
@@ -1931,6 +1938,74 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
                 return k14 + 3;
             }
             return k14 + 1;
+        }
+        if tok_is(src, toks, j, "str_concat") {   // M2: 两个实参先求值, 再拼到 bump 堆
+            let c1: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let c2: u32 = arg1(s, out, src, toks, c1, lvl + 1);
+            emit_str(s, out, "  ");
+            let ap: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 0\n  ");
+            let al: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 1\n  ");
+            let bp: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, ", 0\n  ");
+            let bl: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, ", 1\n  ");
+            let nn: u32 = new_temp(s, out);
+            emit_str(s, out, " = add i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, bl);
+            emit_str(s, out, "\n  ");
+            let nu: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i64 %t");
+            emit_dec(s, out, nn);
+            emit_str(s, out, " to i32\n");
+            set_temp_val(s, lvl + 2, nu);          // 堆计数是 u32
+            let cp: u32 = emit_alloc_seq(s, out, lvl + 2, lvl);
+            emit_str(s, out, "  call void @__loment_memcpy(ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, ap);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ")\n  ");
+            let cg: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i8, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, "\n  call void @__loment_memcpy(ptr %t");
+            emit_dec(s, out, cg);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, bp);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, bl);
+            emit_str(s, out, ")\n  ");
+            let cv1: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", 0\n  ");
+            let cv2: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+            emit_dec(s, out, cv1);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, nn);
+            emit_str(s, out, ", 1\n");
+            set_temp_val(s, lvl, cv2);
+            if tok_is(src, toks, c2 + 1, "as") {
+                apply_cast(s, out, src, toks, 0, c2 + 2, lvl);
+                return c2 + 3;
+            }
+            return c2 + 1;
         }
         if tok_is(src, toks, j, "str_eq") {   // 先比长度再 memcmp (bool + phi)
             let k15: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -2845,6 +2920,21 @@ fn tag_id(tag: str) -> u32 {
     if str_eq(tag, "gtrap") {
         return 23;
     }
+    if str_eq(tag, "seq") {      // str_eq 的三块 (M2 才发现: 它们也会当 phi 前驱)
+        return 19;
+    }
+    if str_eq(tag, "sneq") {
+        return 20;
+    }
+    if str_eq(tag, "send") {
+        return 21;
+    }
+    if str_eq(tag, "mend") {     // match 的两块 (同理: `&&` 的右操作数里可以是 match)
+        return 24;
+    }
+    if str_eq(tag, "mwild") {
+        return 25;
+    }
     return 9;   // sc_end
 }
 
@@ -2905,6 +2995,21 @@ fn tag_name(id: u32) -> str {
     }
     if id == 23 {
         return "gtrap";
+    }
+    if id == 19 {
+        return "seq";
+    }
+    if id == 20 {
+        return "sneq";
+    }
+    if id == 21 {
+        return "send";
+    }
+    if id == 24 {
+        return "mend";
+    }
+    if id == 25 {
+        return "mwild";
     }
     return "sc_end";
 }
@@ -4048,6 +4153,7 @@ fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
 fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "\n; ---- Loment freestanding 运行时 (M31: 无 libc) ----\ndefine internal i32 @__loment_memcmp(ptr %a, ptr %b, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %eq, label %body\nbody:\n  %pa = getelementptr i8, ptr %a, i64 %i\n  %pb = getelementptr i8, ptr %b, i64 %i\n  %ca = load i8, ptr %pa\n  %cb = load i8, ptr %pb\n  %ne = icmp ne i8 %ca, %cb\n  br i1 %ne, label %diff, label %cont\ncont:\n  %i1 = add i64 %i, 1\n  br label %loop\ndiff:\n  %da = zext i8 %ca to i32\n  %db = zext i8 %cb to i32\n  %r = sub i32 %da, %db\n  ret i32 %r\neq:\n  ret i32 0\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
+    emit_str(s, out, "define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %sp = getelementptr i8, ptr %s, i64 %i\n  %b = load i8, ptr %sp\n  %dp = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %dp\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     return emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
 }
 
@@ -4074,7 +4180,8 @@ fn runtime_needed(src: ptr, toks: ptr) -> u32 {
             return 1;
         }
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")
-                || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "guard")) {
+                || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "str_concat")
+                || tok_is(src, toks, i, "guard")) {
             return 1;
         }
         i = i + 1;
@@ -4086,7 +4193,8 @@ fn runtime_needed(src: ptr, toks: ptr) -> u32 {
 fn heap_needed(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
-        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "alloc") {
+        if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc")
+                || tok_is(src, toks, i, "str_concat")) {   // str_concat 也拼到堆上
             return 1;
         }
         i = i + 1;
