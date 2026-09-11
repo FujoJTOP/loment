@@ -13,10 +13,16 @@ module codegen
 //
 // 状态块: 0=输出游标 4=temp 计数 12=参数个数 512=需运行时文本块
 //         值栈: 第 k 层 长度@16+72k, 文本@20+72k (容量 68), k=0..5
-//         实参类型 608.. 函数计数 640 函数表 704.. 当前函数参数表 1536..
-//         局部表 3072.. 每函数形参类型 4096+i*128
+//         实参类型 608.. 函数计数 640
+//         函数表 8192.. 当前函数参数表 12288.. 局部表 16384.. 每函数形参类型 20480+i*64
+//         scratch 48000.. (状态块 49152)
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
+
+/// 状态块内的 16B 共享 scratch (只在下一次调用前存活, 不跨调用保留)。
+fn scratch_buf(s: ptr) -> ptr {
+    return ptr_add(s, 48000);
+}
 
 fn st_o(s: ptr) -> u32 {
     return load32(s, 0);
@@ -57,7 +63,7 @@ fn emit_mem(s: ptr, out: ptr, buf: ptr, off: u32, len: u32) -> u32 {
 }
 
 fn emit_dec(s: ptr, out: ptr, v: u32) -> u32 {
-    let tmp: ptr = alloc(16);
+    let tmp: ptr = scratch_buf(s);
     let n: u32 = 0;
     let x: u32 = v;
     if x == 0 {
@@ -145,7 +151,7 @@ fn move_val(s: ptr, dst: u32, src: u32) {
 fn set_temp_val(s: ptr, lvl: u32, n: u32) {
     store8(s, btxt(s, lvl), 37 as u8);
     store8(s, btxt(s, lvl) + 1, 116 as u8);
-    let tmp: ptr = alloc(16);
+    let tmp: ptr = scratch_buf(s);
     let d: u32 = 0;
     let x: u32 = n;
     if x == 0 {
@@ -196,6 +202,15 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "i32") {
         return emit_str(s, out, "i32");
+    }
+    if tok_is(src, toks, tt, "str") {   // M1: 字节指针 + 长度
+        return emit_str(s, out, "{ ptr, i64 }");
+    }
+    if tok_kind(toks, tt) == 0 {   // struct 名
+        let si: u32 = find_struct(s, src, toks, tt);
+        if si != 4294967295 {
+            return emit_struct_ty(s, out, src, toks, si);
+        }
     }
     return emit_str(s, out, "i64");
 }
@@ -410,7 +425,7 @@ fn emit_div_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> 
 fn find_fn(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 640) {
-        let base: u32 = 704 + i * 12;
+        let base: u32 = 8192 + i * 12;
         let nt: u32 = load32(s, base);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
@@ -432,14 +447,14 @@ fn find_fn(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
 }
 
 fn fn_ret(s: ptr, fi: u32) -> u32 {
-    return load32(s, 704 + fi * 12 + 4);
+    return load32(s, 8192 + fi * 12 + 4);
 }
 
 /// 参数类型 (name_tok -> type_tok; 0 = 未找到)。
 fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 12) {
-        let nt: u32 = load32(s, 1536 + i * 8);
+        let nt: u32 = load32(s, 12288 + i * 8);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -451,7 +466,7 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 1536 + i * 8 + 4);
+                return load32(s, 12288 + i * 8 + 4);
             }
         }
         i = i + 1;
@@ -467,6 +482,17 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     if tok_kind(toks, j) == 0 {
         if tok_is(src, toks, j, "true") || tok_is(src, toks, j, "false") {
             return j;
+        }
+        if tok_is(src, toks, j + 1, ".") {   // M23: 字段类型
+            let vt: u32 = var_type(s, src, toks, j);
+            let si: u32 = find_struct(s, src, toks, vt);
+            if si != 4294967295 {
+                let fi: u32 = field_index(s, src, toks, si, j + 2);
+                if fi != 4294967295 {
+                    return field_type(s, si, fi);
+                }
+            }
+            return 0;
         }
         if tok_is(src, toks, j + 1, "(") {
             let fi: u32 = find_fn(s, src, toks, j);
@@ -484,6 +510,80 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         return expr_type(s, src, toks, j + 1);
     }
     return 0;
+}
+
+// ---------------------------------------------------------------- struct 表
+
+fn struct_base(i: u32) -> u32 {
+    return 1024 + i * 80;
+}
+
+/// 按名字找 struct: 返回下标, 未找到返回 4294967295。
+fn find_struct(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 520) {
+        let nt: u32 = load32(s, struct_base(i));
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
+                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 字段下标 (按声明序), 未找到返回 4294967295。
+fn field_index(s: ptr, src: ptr, toks: ptr, si: u32, fname: u32) -> u32 {
+    let n: u32 = load32(s, struct_base(si) + 4);
+    let k: u32 = 0;
+    while k < n {
+        let nt: u32 = load32(s, struct_base(si) + 8 + k * 8);
+        if load32(toks, nt * 20 + 8) == load32(toks, fname * 20 + 8) {
+            let q: u32 = 0;
+            let ok: u32 = 1;
+            while q < load32(toks, fname * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + q)
+                        != load8(src, load32(toks, fname * 20 + 4) + q) {
+                    ok = 0;
+                }
+                q = q + 1;
+            }
+            if ok == 1 {
+                return k;
+            }
+        }
+        k = k + 1;
+    }
+    return 4294967295;
+}
+
+fn field_type(s: ptr, si: u32, k: u32) -> u32 {
+    return load32(s, struct_base(si) + 8 + k * 8 + 4);
+}
+
+/// struct 的 LLVM 类型串 (镜像 `_ll_type`: `{ i32, i32 }`)。
+fn emit_struct_ty(s: ptr, out: ptr, src: ptr, toks: ptr, si: u32) -> u32 {
+    emit_str(s, out, "{ ");
+    let n: u32 = load32(s, struct_base(si) + 4);
+    let k: u32 = 0;
+    while k < n {
+        if k > 0 {
+            emit_str(s, out, ", ");
+        }
+        emit_ty(s, out, src, toks, field_type(s, si, k));
+        k = k + 1;
+    }
+    return emit_str(s, out, " }");
 }
 
 // ---------------------------------------------------------------- 表达式
@@ -675,7 +775,7 @@ fn tok_int(src: ptr, toks: ptr, i: u32) -> u32 {
 
 /// 把十进制值写进第 lvl 层 (字面量与常量内联共用), 返回位数。
 fn set_dec_val(s: ptr, lvl: u32, v: u32) -> u32 {
-    let tmp: ptr = alloc(16);
+    let tmp: ptr = scratch_buf(s);
     let d: u32 = 0;
     let x: u32 = v;
     if x == 0 {
@@ -1009,7 +1109,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             // 实参按"形参类型"强制 (与 lomentc 的 expr(a, p.type) 同序同型)
             let ft: u32 = 0;
             if fi != 4294967295 {
-                ft = load32(s, 4096 + fi * 128 + a * 8 + 4);
+                ft = load32(s, 20480 + fi * 64 + a * 8 + 4);
             }
             let at: u32 = ft;
             let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
@@ -1079,6 +1179,34 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     }
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
+    let dot: u32 = j + 1;
+    if tok_is(src, toks, dot, ".") {   // M23: 字段访问 p.a -> GEP + load
+        let si: u32 = find_struct(s, src, toks, ty);
+        let fi: u32 = field_index(s, src, toks, si, dot + 1);
+        let ft: u32 = field_type(s, si, fi);
+        emit_str(s, out, "  ");
+        let gp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, j);
+        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_dec(s, out, fi);
+        emit_str(s, out, "\n  ");
+        let rv: u32 = new_temp(s, out);
+        emit_str(s, out, " = load ");
+        emit_ty(s, out, src, toks, ft);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, gp);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lvl, rv);
+        let fe: u32 = dot + 2;
+        if tok_is(src, toks, fe, "as") {
+            apply_cast(s, out, src, toks, ft, fe + 1, lvl);
+            return fe + 2;
+        }
+        return fe;
+    }
     emit_str(s, out, "  ");
     let n2: u32 = new_temp(s, out);
     emit_str(s, out, " = load ");
@@ -1304,8 +1432,8 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let k: u32 = 0;
     let i: u32 = lp + 1;
     while i < rp && k < 16 {
-        store32(s, 1536 + k * 8, i);
-        store32(s, 1536 + k * 8 + 4, i + 2);
+        store32(s, 12288 + k * 8, i);
+        store32(s, 12288 + k * 8 + 4, i + 2);
         k = k + 1;
         i = i + 3;
         if tok_is(src, toks, i, ",") {
@@ -1330,38 +1458,38 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if a > 0 {
             emit_str(s, out, ", ");
         }
-        emit_ty(s, out, src, toks, load32(s, 1536 + a * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 12288 + a * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 1536 + a * 8));
+        emit_tok(s, out, src, toks, load32(s, 12288 + a * 8));
         a = a + 1;
     }
     emit_str(s, out, ") {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 1536 + b * 8));
+        emit_tok(s, out, src, toks, load32(s, 12288 + b * 8));
         emit_str(s, out, ".addr = alloca ");
-        emit_ty(s, out, src, toks, load32(s, 1536 + b * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 12288 + b * 8 + 4));
         emit_str(s, out, "\n");
         b = b + 1;
     }
     let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
     while bl < nl {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 3072 + bl * 8));
+        emit_tok(s, out, src, toks, load32(s, 16384 + bl * 8));
         emit_str(s, out, ".addr = alloca ");
-        emit_ty(s, out, src, toks, load32(s, 3072 + bl * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 16384 + bl * 8 + 4));
         emit_str(s, out, "\n");
         bl = bl + 1;
     }
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
-        emit_ty(s, out, src, toks, load32(s, 1536 + c * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 12288 + c * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 1536 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 12288 + c * 8));
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, load32(s, 1536 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 12288 + c * 8));
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
@@ -1550,7 +1678,7 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     }
     let i: u32 = 0;
     while i < load32(s, 484) {
-        let nt: u32 = load32(s, 3072 + i * 8);
+        let nt: u32 = load32(s, 16384 + i * 8);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -1562,7 +1690,7 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 3072 + i * 8 + 4);
+                return load32(s, 16384 + i * 8 + 4);
             }
         }
         i = i + 1;
@@ -1799,14 +1927,14 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let dup0: u32 = 0;
             let kk: u32 = 0;
             while kk < n {
-                if load32(s, 3072 + kk * 8) == name {
+                if load32(s, 16384 + kk * 8) == name {
                     dup0 = 1;
                 }
                 kk = kk + 1;
             }
             if dup0 == 0 {
-                store32(s, 3072 + n * 8, name);
-                store32(s, 3072 + n * 8 + 4, vt);
+                store32(s, 16384 + n * 8, name);
+                store32(s, 16384 + n * 8 + 4, vt);
                 n = n + 1;
             }
         }
@@ -1815,11 +1943,11 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let dup: u32 = 0;
             let k: u32 = 0;
             while k < n {
-                if load32(toks, load32(s, 3072 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
+                if load32(toks, load32(s, 16384 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
                     let q: u32 = 0;
                     let ok: u32 = 1;
                     while q < load32(toks, name * 20 + 8) {
-                        if load8(src, load32(toks, load32(s, 3072 + k * 8) * 20 + 4) + q)
+                        if load8(src, load32(toks, load32(s, 16384 + k * 8) * 20 + 4) + q)
                                 != load8(src, load32(toks, name * 20 + 4) + q) {
                             ok = 0;
                         }
@@ -1832,8 +1960,8 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 k = k + 1;
             }
             if dup == 0 {
-                store32(s, 3072 + n * 8, name);
-                store32(s, 3072 + n * 8 + 4, j + 3);
+                store32(s, 16384 + n * 8, name);
+                store32(s, 16384 + n * 8 + 4, j + 3);
                 n = n + 1;
             }
         }
@@ -1908,7 +2036,7 @@ fn heap_needed(src: ptr, toks: ptr) -> u32 {
 
 /// 主入口: 写完整 IR (子集), 返回长度。
 pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
-    let s: ptr = alloc(8192);
+    let s: ptr = alloc(49152);
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
@@ -1925,15 +2053,15 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         if tok_is(src, toks, i, "fn") {
             let lp: u32 = find_paren(src, toks, i + 2);
             let rp: u32 = skip_parens(src, toks, lp);
-            store32(s, 704 + n * 12, i + 1);
-            store32(s, 704 + n * 12 + 4, fn_ret_tok(src, toks, rp));
-            store32(s, 704 + n * 12 + 8, count_args(src, toks, lp));
+            store32(s, 8192 + n * 12, i + 1);
+            store32(s, 8192 + n * 12 + 4, fn_ret_tok(src, toks, rp));
+            store32(s, 8192 + n * 12 + 8, count_args(src, toks, lp));
             // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)
             let pi: u32 = lp + 1;
             let pk: u32 = 0;
             while pi < rp && pk < 8 {
-                store32(s, 4096 + n * 128 + pk * 8, pi);
-                store32(s, 4096 + n * 128 + pk * 8 + 4, pi + 2);
+                store32(s, 20480 + n * 64 + pk * 8, pi);
+                store32(s, 20480 + n * 64 + pk * 8 + 4, pi + 2);
                 pk = pk + 1;
                 pi = pi + 3;
                 if tok_is(src, toks, pi, ",") {
@@ -1945,6 +2073,26 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         i = i + 1;
     }
     store32(s, 640, n);
+    // struct 表: name_tok | nfields | 8 × (field_tok, type_tok) —— 字段仅标量类型
+    let sn: u32 = 0;
+    i = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "struct") && sn < 64 {
+            store32(s, struct_base(sn), i + 1);
+            let fld: u32 = i + 3;   // 跳过 '{'
+            let nf: u32 = 0;
+            while !tok_is(src, toks, fld, "}") && tok_kind(toks, fld) != 4 && nf < 8 {
+                store32(s, struct_base(sn) + 8 + nf * 8, fld);
+                store32(s, struct_base(sn) + 8 + nf * 8 + 4, fld + 2);
+                nf = nf + 1;
+                fld = fld + 4;   // name ':' type ','
+            }
+            store32(s, struct_base(sn) + 4, nf);
+            sn = sn + 1;
+        }
+        i = i + 1;
+    }
+    store32(s, 520, sn);
     emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
     emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
     if load32(s, 512) == 1 {

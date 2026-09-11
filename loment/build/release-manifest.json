@@ -207,7 +207,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "b9851037b40795bc95d1ecf408790003f1dd3139eb65df6797220cfc9ad1e5fa"
+   "sha256": "1ff48db1cf03b17bf18380d4eda7774637fc1dea1746f3aeefcbeaa049aff305"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -299,7 +299,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "2be39a19712b1d491d8147da7af7fdb068af9c589c3f540ca53106cfd3d48b3f"
+   "sha256": "71ad708b12b70e50c742f5a7d63bb3d974d6f491828c8614afb066ead50a74a0"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -331,7 +331,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "019801ff48ff14b295d01732b4434a9318764456f45393fcf1cf395d728c8002"
+   "sha256": "524bedfba1ec561e1758efe72d50adafa292e50ec2dd3e79b063bd8abf4441b0"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -343,7 +343,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "fc2321f08753fa6e4b27335341f3b8d5f7e99d7464a86fa3a135d5bcaf267595"
+   "sha256": "635bbd0a2858de29e85e4917949aa32bae0139b726a0a111ee348627d2ca82d0"
   },
   {
    "path": "docs/manual/index.md",

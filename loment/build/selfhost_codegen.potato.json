@@ -9,6 +9,16 @@
   "capabilities": [],
   "functions": [
     {
+      "name": "scratch_buf",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
       "name": "st_o",
       "params": [
         {
@@ -535,6 +545,108 @@
         },
         {
           "name": "j",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "struct_base",
+      "params": [
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "find_struct",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "field_index",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "si",
+          "type": "u32"
+        },
+        {
+          "name": "fname",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "field_type",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "si",
+          "type": "u32"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_struct_ty",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "si",
           "type": "u32"
         }
       ],
