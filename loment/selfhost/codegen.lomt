@@ -541,6 +541,44 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- trait/impl 表 (M8)
+
+/// 每个函数槽的附加信息 (与函数表同序): kind | recv_tok
+/// kind: 0 = 普通函数, 1 = trait 声明里的方法 (不发射), 2 = impl 方法 (名字 = <recv>_<方法>)
+fn fk_base(i: u32) -> u32 {
+    return 14848 + i * 8;
+}
+
+/// 按 (接收者类型, 方法名) 找 impl 方法的函数表下标; 未找到返回 4294967295。
+fn find_method(s: ptr, src: ptr, toks: ptr, recv_tok: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 640) {
+        if load32(s, fk_base(i)) == 2 && tok_eq(src, toks, load32(s, fk_base(i) + 4), recv_tok) == 1 {
+            let nt: u32 = load32(s, 12288 + i * 12);
+            if tok_eq(src, toks, nt, name_tok) == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 发射 impl 方法的 LLVM 名 (不含 `@`): <接收者类型名>_<方法名>。
+fn emit_method_name(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32) -> u32 {
+    emit_tok(s, out, src, toks, load32(s, fk_base(fi) + 4));
+    emit_str(s, out, "_");
+    return emit_tok(s, out, src, toks, load32(s, 12288 + fi * 12));
+}
+
+/// 发射变量名 (self -> __self; 其余原样)。所有"名字"位置的输出都要过这里。
+fn emit_name_tok(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i, "self") {
+        return emit_str(s, out, "__self");
+    }
+    return emit_tok(s, out, src, toks, i);
+}
+
 // ---------------------------------------------------------------- 枚举表 (M25/M26)
 
 /// 枚举表项基址: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
@@ -1974,7 +2012,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, j);
+        emit_name_tok(s, out, src, toks, j);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_val(s, out, lvl);
         emit_str(s, out, "\n  ");
@@ -1992,6 +2030,49 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         return ie2;
     }
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, dot, ".") && tok_is(src, toks, dot + 2, "(") {
+        // M8: 方法调用 x.m(args) -> 编译期解析为 <接收者类型>_m(x, args)
+        let mfi: u32 = find_method(s, src, toks, ty, dot + 1);
+        load_var(s, out, src, toks, j, lvl);   // 接收者按第一形参类型求值
+        let km: u32 = dot + 3;
+        let am: u32 = 0;
+        while !tok_is(src, toks, km, ")") && tok_kind(toks, km) != 4 && am < 15 {
+            let ft2: u32 = load32(s, 24576 + mfi * 128 + (am + 1) * 8 + 4);
+            let ae2: u32 = expr_bin(s, out, src, toks, km, 1, lvl + 1 + am);
+            store32(s, 720 + (lvl + 1 + am) * 4, ft2);
+            km = ae2;
+            if tok_is(src, toks, km, ",") {
+                km = km + 1;
+            }
+            am = am + 1;
+        }
+        emit_str(s, out, "  ");
+        let rm: u32 = new_temp(s, out);
+        emit_str(s, out, " = call ");
+        emit_ty(s, out, src, toks, fn_ret(s, mfi));
+        emit_str(s, out, " @");
+        emit_method_name(s, out, src, toks, mfi);
+        emit_str(s, out, "(");
+        emit_ty(s, out, src, toks, load32(s, 24576 + mfi * 128 + 4));
+        emit_str(s, out, " ");
+        emit_val(s, out, lvl);
+        let bm: u32 = 0;
+        while bm < am {
+            emit_str(s, out, ", ");
+            emit_ty(s, out, src, toks, load32(s, 720 + (lvl + 1 + bm) * 4));
+            emit_str(s, out, " ");
+            emit_val(s, out, lvl + 1 + bm);
+            bm = bm + 1;
+        }
+        emit_str(s, out, ")\n");
+        set_temp_val(s, lvl, rm);
+        let me: u32 = km + 1;
+        if tok_is(src, toks, me, "as") {
+            apply_cast(s, out, src, toks, fn_ret(s, mfi), me + 1, lvl);
+            return me + 2;
+        }
+        return me;
+    }
     if tok_is(src, toks, dot, ".") {   // M23: 字段访问 p.a -> GEP + load
         let si: u32 = find_struct(s, src, toks, ty);
         let fi: u32 = field_index(s, src, toks, si, dot + 1);
@@ -2001,7 +2082,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, j);
+        emit_name_tok(s, out, src, toks, j);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_dec(s, out, fi);
         emit_str(s, out, "\n  ");
@@ -2024,7 +2105,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     emit_str(s, out, " = load ");
     emit_ty(s, out, src, toks, ty);
     emit_str(s, out, ", ptr %");
-    emit_tok(s, out, src, toks, j);
+    emit_name_tok(s, out, src, toks, j);
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n2);
     let e9: u32 = j + 1;
@@ -2048,7 +2129,7 @@ fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, nm);
+        emit_name_tok(s, out, src, toks, nm);
         emit_str(s, out, ".addr, i32 0, i32 0\n  ");
         let v1: u32 = new_temp(s, out);
         emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
@@ -2267,11 +2348,15 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let lp: u32 = find_paren(src, toks, base + 2);
     let rp: u32 = skip_parens(src, toks, lp);
     let ret: u32 = fn_ret_tok(src, toks, rp);
+    let fkind: u32 = load32(s, fk_base(load32(s, 472)));   // 0=普通 1=trait 声明 2=impl 方法
     let k: u32 = 0;
     let i: u32 = lp + 1;
     while i < rp && k < 16 {
         store32(s, 16384 + k * 8, i);
         store32(s, 16384 + k * 8 + 4, i + 2);
+        if fkind == 2 && k == 0 {   // impl 的 self: 类型 = 接收者类型
+            store32(s, 16384 + k * 8 + 4, load32(s, fk_base(load32(s, 472)) + 4));
+        }
         k = k + 1;
         i = skip_type(src, toks, i + 2);   // 类型可能是 [T] / [T; N]
         if tok_is(src, toks, i, ",") {
@@ -2314,14 +2399,22 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         return jj;
     }
     emit_str(s, out, "; ");
-    emit_tok(s, out, src, toks, base + 1);
+    if fkind == 2 {                          // impl 方法: 注释也用 mangled 名
+        emit_method_name(s, out, src, toks, load32(s, 472));
+    } else {
+        emit_tok(s, out, src, toks, base + 1);
+    }
     emit_str(s, out, " -> ");
     emitted_name(s, out, src, toks, ret);   // 注释用 Loment 类型名
     emit_str(s, out, "\n");
     emit_str(s, out, "define ");
     emit_ty(s, out, src, toks, ret);
     emit_str(s, out, " @");
-    emit_tok(s, out, src, toks, base + 1);
+    if fkind == 2 {                          // impl 方法: 名字 = <接收者类型>_<方法>
+        emit_method_name(s, out, src, toks, load32(s, 472));
+    } else {
+        emit_tok(s, out, src, toks, base + 1);
+    }
     emit_str(s, out, "(");
     let a: u32 = 0;
     while a < k {
@@ -2330,14 +2423,14 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         }
         emit_ty(s, out, src, toks, load32(s, 16384 + a * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 16384 + a * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 16384 + a * 8));
         a = a + 1;
     }
     emit_str(s, out, ") {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 16384 + b * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 16384 + b * 8));
         emit_str(s, out, ".addr = alloca ");
         emit_ty(s, out, src, toks, load32(s, 16384 + b * 8 + 4));
         emit_str(s, out, "\n");
@@ -2346,7 +2439,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
     while bl < nl {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 20480 + bl * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 20480 + bl * 8));
         emit_str(s, out, ".addr = alloca ");
         emit_ty(s, out, src, toks, load32(s, 20480 + bl * 8 + 4));
         emit_str(s, out, "\n");
@@ -2357,9 +2450,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "  store ");
         emit_ty(s, out, src, toks, load32(s, 16384 + c * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 16384 + c * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 16384 + c * 8));
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, load32(s, 16384 + c * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 16384 + c * 8));
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
@@ -2588,7 +2681,7 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     emit_str(s, out, " = load ");
     emit_ty(s, out, src, toks, ty);
     emit_str(s, out, ", ptr %");
-    emit_tok(s, out, src, toks, name_tok);
+    emit_name_tok(s, out, src, toks, name_tok);
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n);
     return n;
@@ -2628,7 +2721,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " ");
         emit_val(s, out, 0);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, name);
+        emit_name_tok(s, out, src, toks, name);
         emit_str(s, out, ".addr\n");
         return e2 + 1;
     }
@@ -2679,7 +2772,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " ");
         emit_val(s, out, 0);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, var_tok);
+        emit_name_tok(s, out, src, toks, var_tok);
         emit_str(s, out, ".addr\n");
         let hi_start: u32 = loe + 2;               // 跳过 '..'
         let w: u32 = load32(s, 480) + 1;
@@ -2726,7 +2819,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " %t");
         emit_dec(s, out, nx);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, var_tok);
+        emit_name_tok(s, out, src, toks, var_tok);
         emit_str(s, out, ".addr\n");
         jump(s, out, w, "fcond");
         lab_def(s, out, w + 2, "fend");
@@ -2882,7 +2975,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                         emit_str(s, out, "  store i64 %t");
                         emit_dec(s, out, raw);
                         emit_str(s, out, ", ptr %");
-                        emit_tok(s, out, src, toks, k3 + 5);
+                        emit_name_tok(s, out, src, toks, k3 + 5);
                         emit_str(s, out, ".addr\n");
                     } else {
                         let cv: u32 = alloc_temp(s);
@@ -2897,7 +2990,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                         emit_str(s, out, " %t");
                         emit_dec(s, out, cv);
                         emit_str(s, out, ", ptr %");
-                        emit_tok(s, out, src, toks, k3 + 5);
+                        emit_name_tok(s, out, src, toks, k3 + 5);
                         emit_str(s, out, ".addr\n");
                     }
                 }
@@ -3024,7 +3117,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, " = getelementptr inbounds ");
             emit_ty(s, out, src, toks, sty);
             emit_str(s, out, ", ptr %");
-            emit_tok(s, out, src, toks, j);
+            emit_name_tok(s, out, src, toks, j);
             emit_str(s, out, ".addr, i32 0, i32 ");
             emit_val(s, out, 0);
             emit_str(s, out, "\n");
@@ -3049,7 +3142,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " ");
         emit_val(s, out, 0);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, j);
+        emit_name_tok(s, out, src, toks, j);
         emit_str(s, out, ".addr\n");
         return e5 + 1;
     }
@@ -3068,7 +3161,7 @@ fn let_array_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, name);
+        emit_name_tok(s, out, src, toks, name);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_dec(s, out, idx);
         emit_str(s, out, "\n");
@@ -3127,7 +3220,7 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, name);
+        emit_name_tok(s, out, src, toks, name);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_dec(s, out, k);
         emit_str(s, out, "\n");
@@ -3348,22 +3441,77 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     store32(s, 512, runtime_needed(src, toks));
     store32(s, 516, heap_needed(src, toks));
     store32(s, 532, strings_needed(src, toks));
-    // 符号表: 登记函数
+    // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;
     let n: u32 = 0;
+    let depth: u32 = 0;
+    let impl_depth: u32 = 0;
+    let impl_recv: u32 = 0;
+    let trait_depth: u32 = 0;
+    let pend_impl: u32 = 0;
+    store32(s, 456, 0);
+    store32(s, 460, 0);
+    store32(s, 464, 0);
+    store32(s, 468, 0);
     while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "impl") {   // 接收者 = `for` 之后那个 token
+            let fp: u32 = i + 1;
+            while tok_kind(toks, fp) != 4 && !tok_is(src, toks, fp, "for") && !tok_is(src, toks, fp, "{") {
+                fp = fp + 1;
+            }
+            pend_impl = fp + 1;
+        }
+        if tok_is(src, toks, i, "{") {
+            depth = depth + 1;
+            if pend_impl != 0 && impl_depth == 0 {
+                impl_depth = depth;
+                impl_recv = pend_impl;
+                pend_impl = 0;
+            }
+        }
+        if tok_is(src, toks, i, "}") {
+            if impl_depth != 0 && depth == impl_depth {
+                impl_depth = 0;
+                impl_recv = 0;
+            }
+            if trait_depth != 0 && depth == trait_depth {
+                trait_depth = 0;
+            }
+            if depth > 0 {
+                depth = depth - 1;
+            }
+        }
+        if tok_is(src, toks, i, "trait") {   // trait 声明块: 里面的 fn 只有签名
+            let tb: u32 = i + 1;
+            while tok_kind(toks, tb) != 4 && !tok_is(src, toks, tb, "{") {
+                tb = tb + 1;
+            }
+            trait_depth = depth + 1;
+        }
         if tok_is(src, toks, i, "fn") {
             let lp: u32 = find_paren(src, toks, i + 2);
             let rp: u32 = skip_parens(src, toks, lp);
             store32(s, 12288 + n * 12, i + 1);
             store32(s, 12288 + n * 12 + 4, fn_ret_tok(src, toks, rp));
             store32(s, 12288 + n * 12 + 8, count_args(src, toks, lp));
+            // 附加信息: 0=普通 1=trait 声明里的方法 2=impl 方法 (名字 <recv>_<方法>)
+            store32(s, fk_base(n), 0);
+            store32(s, fk_base(n) + 4, 0);
+            if trait_depth != 0 && depth == trait_depth {
+                store32(s, fk_base(n), 1);
+            } else if impl_depth != 0 && depth == impl_depth {
+                store32(s, fk_base(n), 2);
+                store32(s, fk_base(n) + 4, impl_recv);
+            }
             // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)
             let pi: u32 = lp + 1;
             let pk: u32 = 0;
             while pi < rp && pk < 16 {
                 store32(s, 24576 + n * 128 + pk * 8, pi);
                 store32(s, 24576 + n * 128 + pk * 8 + 4, pi + 2);
+                if load32(s, fk_base(n)) == 2 && pk == 0 {   // impl 的 self: 类型 = 接收者类型
+                    store32(s, 24576 + n * 128 + pk * 8 + 4, load32(s, fk_base(n) + 4));
+                }
                 pk = pk + 1;
                 pi = skip_type(src, toks, pi + 2);
                 if tok_is(src, toks, pi, ",") {
@@ -3464,12 +3612,24 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         emit_str(s, out, "\n");
     }
     i = 0;
+    let fnix: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
-            store32(s, 4, 0);    // temp 计数随函数重置
-            store32(s, 480, 0);  // label 计数随函数重置
-            store32(s, 476, 0);  // terminated = false
-            i = emit_fn(s, out, src, toks, i);
+            if load32(s, fk_base(fnix)) == 1 {   // trait 声明里的方法: 只有签名, 整条跳过
+                let trp: u32 = skip_parens(src, toks, find_paren(src, toks, i + 2));
+                let tq: u32 = trp + 1;
+                while tok_kind(toks, tq) != 4 && !tok_is(src, toks, tq, ";") {
+                    tq = tq + 1;
+                }
+                i = tq + 1;
+            } else {
+                store32(s, 4, 0);    // temp 计数随函数重置
+                store32(s, 480, 0);  // label 计数随函数重置
+                store32(s, 476, 0);  // terminated = false
+                store32(s, 472, fnix);   // 当前函数表下标 (impl 方法取名用)
+                i = emit_fn(s, out, src, toks, i);
+            }
+            fnix = fnix + 1;
         } else {
             i = i + 1;
         }

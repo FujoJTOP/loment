@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
 > 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 38 个示例中 32 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
+> M82 逐字节一致: 38 个示例中 33 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
 > **自举四阶段全部能编译自身**：`lexer` / `parser` / `checker` / `codegen` 四个 `.lomt` 的 `.ll` 与
 > `lomentc --emit-llvm` **逐字节一致**（26028B / 115464B / 83148B / 557828B，差异行均为 0）
 > 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
@@ -116,7 +116,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64/ptr）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 38 个示例文件，逐字节一致 32 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
+**未覆盖**（相对 38 个示例文件，逐字节一致 33 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
 `slice_len`/`str_ptr`/`syscall*`）、`match`、str/切片/数组/struct/枚举等聚合类型、能力域表与 DWARF 元数据。
 每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
 `ir_*.lomt` 目标文件是对应的防回归锚点。
@@ -204,6 +204,14 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **形参扫描也必须用 `skip_type`** —— 原来按"3 个 token 一个参数"步进，遇到 `xs: [u32]` 会多出一个幻影参数
 （`i64 %u32`），函数表的形参类型扫描同样中招。
 
+**trait 静态派发（M8）**：注册期识别 `impl`/`trait` 块 —— `trait` 声明里的 `fn` 只有签名（整条跳过，
+不然会被当成空函数发射），`impl X for Y` 的方法登记为 kind=2 并记住接收者类型；发射时名字变成
+`<接收者类型>_<方法>`（注释行与 `define` 都要改），**第 0 个形参 `self` 的类型取接收者类型**
+（`self` 没有类型注解，原来会解析成 `)` 变成 i64）。方法调用 `x.m(args)` 在 `expr_atom` 里优先于
+字段访问处理：接收者按第一形参类型求值，其余实参按被调方形参类型强制，最后
+`call <ret> @<接收者类型>_m(<接收者> x, …)`。变量名的输出统一走 `emit_name_tok`（`self` → `__self`），
+覆盖形参表/alloca/store/load/字段与下标访问等全部名字位置。解锁 `native_trait.lomt`。
+
 **枚举与 `match`（M25/M26）+ struct/数组字面量（M23/M24）**：枚举表（name | nvariants | has_payload |
 8×(variant, payload)，状态块 40960 起 80B/项）；`E::V` → 无载荷枚举写字面量下标、带载荷枚举只写
 tag（`insertvalue {i32,i64} undef, i32 idx, 0`）；`E::V(x)` → 求值 → tag → `sext/zext` 到 i64 →
@@ -283,7 +291,7 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
 且**四段都能被 Loment 版 codegen 编译出与参考逐字节相同的 IR**（见上文各节），
 后端进而达到三阶段定点（M84）。
-M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 32 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
+M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 33 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
 缺口集中在聚合类型（5：泛型单态化 / trait / RAII / Result+`?`）、`for`（3）、除法（2）、内建（2）、`match`/枚举（2）、`syscall`（1）、能力域（1）。
 ## M87 · 引导脚本 ✅
 

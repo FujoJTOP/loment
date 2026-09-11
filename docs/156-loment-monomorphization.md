@@ -88,7 +88,7 @@ define { i32, i64 } @parse_small(...)    <- LLVM 类型是结构化的, 与名�
 |---|---|---|
 | `native_gen.lomt` | 142 行 | 泛型函数实例化 + 泛型 struct/enum 的类型替换（**建议第一个做**，金标最短） |
 | `native_res.lomt` | 112 行 | §3 的类型名改写（`Result_u32_u32`）+ `?` 的早退降级 |
-| `native_trait.lomt` | 35 行 | §4 的 impl 改名与 `self` → `__self`（**行数最少**） |
+| ~~`native_trait.lomt`~~ | **已达成**（2026-09-10） | §4 全部落地：impl 改名 + `self`→`__self` + 方法调用解析 |
 | `all_loment.lomt` | 131 行 | 多模块 + 泛型（依赖上面两项） |
 | `demo.lomt` | 141 行 | 泛型 + 能力域（能力域已在 2026-09-10 落地） |
 | `native_raii.lomt` | — | **不是目标**：连 Python 版都报错（Drop 只在 Rust 路径支持） |

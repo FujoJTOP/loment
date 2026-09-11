@@ -551,6 +551,94 @@
       "ret": "u32"
     },
     {
+      "name": "fk_base",
+      "params": [
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "find_method",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "recv_tok",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_method_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "fi",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_name_tok",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "enum_base",
       "params": [
         {
