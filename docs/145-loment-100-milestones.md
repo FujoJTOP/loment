@@ -396,10 +396,10 @@ python tools/loment_p8_test.py     # 6/6
 ### P8 证据补充（2026-09-11，M83：自举驱动 = 一个能独立跑的编译器）
 
 ```
-python tools/loment_p8_test.py     # 7/7
-# 自举驱动: 973238B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致
-# 定点: stage1 == stage2 == stage3 (965680B)
-# 目标覆盖 39/39 字节一致
+python tools/loment_p8_test.py     # 8/8
+# 自举驱动: 1043790B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致
+# 自举驱动按路径编译语料: 40/40 逐字节一致
+# 定点: stage1 == stage2 == stage3 (1002385B); 目标覆盖 40/40
 ```
 
 在这之前自举链的每一环都是"被 C 驱动调用的函数"：能编译自己，但没有**能独立跑的编译器**。
@@ -413,17 +413,36 @@ clang --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static -fuse-l
 
 | 里程碑 | 验证方式 | 结果 |
 |---|---|---|
-| M83 独立驱动 | `driver.lomt` + `lexer.lomt` 编译成 x86_64 Linux ELF（WSL 里执行），吃 stdin 吐 stdout | ✅ |
-| M83 驱动编译自己 | 驱动跑自己的单元 → 产物与参考逐字节相同（973238B）；再用**它的产物**链一个 ELF，产物不变 | ✅ 定点 |
+| M83 独立驱动 | `driver.lomt` + `lexer.lomt` 编译成 x86_64 Linux ELF（WSL 里执行），吃入口路径吐 stdout | ✅ |
+| M83 驱动编译自己 | 驱动跑自己的入口 → 产物与参考逐字节相同（1043790B）；再用**它的产物**链一个 ELF，产物不变 | ✅ 定点 |
 | M83 驱动不是"只会编译自己" | 同一个二进制对 `native_res.lomt` / `demo.lomt` 也与参考逐字节相同 | ✅ |
 | M83 整数 → 指针 | M67 只做了 `ptr as u64`；托管驱动要向内核要内存（`brk` 返回整数）就缺反方向。补进 `as` 规则（Rust 路径 `as *mut u8`，IR 路径 `inttoptr`），示例 `native_brk.lomt` 双路径一致 | ✅ |
 | 为什么不用自带堆 | bump 堆 64 KiB（`alloc(49152)` 只是生成器自己的状态块）装不下 4 MiB token 表；而把静态堆调大等于给每个 `alloc` 用户——**内核模块尤其**——的 `.bss` 塞几 MB。所以走内核 `brk` | 设计取舍 |
 | M83 自举抓到的真 bug ① | 每函数形参类型表 `24576+i*128` 撞枚举表 `40960`：第 128 个函数正好压上去。`codegen.lomt` 自己的单元只有 118 个函数所以一直没露；驱动把 `bytes`/`lexer` 一起装进来（134 个函数）才暴露 | ✅ 步长改 80 |
 | M83 自举抓到的真 bug ② | 同宽异名转型（`i64 as u64`）被写成 `sext i64 %v to i64` —— clang 直接报 `invalid cast opcode`。同宽时 LLVM 里本来就是同一个类型，不再写指令 | ✅ 参考与自举两侧同步修 |
+| M83 自举抓到的真 bug ③ | clang 报 `unable to create block named 'entry'`：形参叫 `entry`，而 LLVM 的块标签与局部值**共用名字空间**，每个函数的第一块都叫 `entry` | ✅ 驱动改名绕开；**语言侧仍是缺口**（`let entry: u32` 会踩到），留给 M85 后半 |
+| M83 自举抓到的真 bug ④ | `(v / 256) as u8` 的 `trunc` 整个丢了：`as` 左操作数类型原先取的是**整个转型表达式**的类型（u8），于是被判成"同宽转型"。新增 `operand_type()` 按"第一个操作数，或某个顶层二元运算符右侧的操作数"取型（镜像 `expr_type(Bin) = lt or rt`），不看括号内的实参 | ✅ |
+| M85 自举抓到的真 bug ⑤ | 两个模块 import 同一个依赖时它被装了**两遍**（checker → bytes, lexer；lexer → bytes）：去重表的长度按值传递，兄弟递归之间不共享 | ✅ 表长放进一格内存（Loment 无 out 参数/可变全局） |
+| M85 自举抓到的真 bug ⑥ | IR 里的字符串常量写成 `c"\0D\0A"`（CRLF）：驱动按**原始字节**读源码，而参考用 `read_text`（通用换行），源码里到处是**跨行字符串字面量** | ✅ 读入后 `strip_cr()`（docs/150 那条 CRLF 老坑的同源变体） |
 
-**M83 之后剩下的自举缺口**（M85 的前置）：驱动只吃**单个编译单元**，`use` 装载与
-`Option`/`Result` 预置注入仍在夹具侧；把装载也做进驱动 + 把 checker 接进同一驱动，
-才是"自举编译器跑全部测试"（M85）。
+### M85 前半证据（2026-09-11，驱动自己做装载）
+
+```
+./fujoc-s loment/examples/demo.lomt > demo.ll     # 单二进制、单入口路径
+python tools/loment_p8_test.py                     # 8/8
+# 自举驱动按路径编译语料: 40/40 逐字节一致
+```
+
+| 判据 | 结果 |
+|---|---|
+| 入口路径来自 `/proc/self/cmdline`（`_start` 的 argc/argv 在栈上，不写内联汇编拿不到；`/proc` 给同样的信息） | ✅ |
+| `use "..."` 递归解析，依赖**先写**（父文件先读进单元缓冲顶部自己的槽，递归完再补上自己），同一路径只装一次 | ✅ |
+| 只有 **`.lomt`** 算依赖（`use "...lom"` 进 `mod.uses`，由 lomc 处理）——与 parser 同规则，否则 `demo.lomt` 会多装一个 `fujr.lom` | ✅ |
+| 缺 `Option`/`Result` 时注入预置枚举，注入点 = 单元末尾（与 `lomentc.load` 的 append 同位）；判据是词法扫 `enum X`，字符串字面量里的 `enum Option<T>` 不会误判 | ✅ |
+| `test_m85_selfhosted_driver_compiles_corpus`：同一个二进制按入口路径把 `loment/selfhost/*.lomt` 与 `loment/examples/*.lomt` 全部编译一遍，逐个与参考**逐字节**比对 | ✅ 40/40 |
+
+`use` 装载与预置注入原本在夹具（`_unit_text`）里 —— 这一步把它们搬进编译器本身，
+M83 的"单编译单元"边界就此消失。**剩下的 M85 缺口 = 把 checker 接进同一驱动**（诊断判定一致）。
 
 ### P9/P10 证据（2026-09-09，M89–M99）
 

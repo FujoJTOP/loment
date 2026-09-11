@@ -1,25 +1,37 @@
-// loment/selfhost/driver.lomt — M83: 独立的自举编译器 (docs/145/150)
+// loment/selfhost/driver.lomt — M83/M85: 独立的自举编译器 (docs/145/150)
 //
-// 吃"已装载的编译单元"(stdin), 吐 LLVM IR (stdout):
+//   ./fujoc-s loment/examples/demo.lomt > demo.ll
 //
-//   clang --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -fuse-ld=lld \
-//         -o fujoc-s loment/build/driver.ll
-//   ./fujoc-s < unit.lomt > unit.ll        # 与 lomentc --emit-llvm 逐字节相同
+// 它自己做**全部装载** —— 这是它不再是"被夹具喂单元的函数"的关键:
 //
-// 它把 lexer.lomt 与 codegen.lomt 接成**一个可执行文件** —— 在这之前, 自举链的每
-// 一环都是"一个被 C 驱动调用的函数", 没有能独立跑的编译器。
+// 1. 入口路径从 `/proc/self/cmdline` 取。`_start` 的 argc/argv 在栈上, 不写内联汇编
+//    拿不到; `/proc` 给了同样的信息, 代价是一次 openat+read。
+// 2. `use "..."` 递归解析, 依赖按**先序**拼进单元 (与 `lomentc.resolve_deps` 同规则),
+//    同一路径只装一次 (循环导入自然被去重表挡住)。
+// 3. 单元里缺 `Option`/`Result` 时注入预置枚举 (与 `lomentc.load` 同规则) ——
+//    注入点必须在**单元末尾**, 因为参考实现是把预置枚举 append 到模块枚举之后的。
 //
 // 内存来自内核 (`brk`), 不用语言自带的 64 KiB bump 堆: 一个 190 KiB 的单元要 ~4 MiB
 // token 表加 ~1.5 MiB 输出。把那个静态堆调大是**错的方向** —— 每个 `alloc` 用户
 // (内核模块尤其) 的 `.bss` 都要跟着涨。这也是 M83 顺手补上 `整数 as ptr` 的原因
 // (M67 只做了反方向的 `ptr as u64`)。
 //
-// 边界 (与 M80/M81 的自举阶段一致): `use` 装载与 `Option`/`Result` 预置注入由夹具
-// 负责, 驱动只吃装载好的单元。
+// 每层源文件在单元缓冲**顶部**占一个固定槽 (SLOT), 因为输出是顺序写的而依赖必须先写:
+// 父文件读进自己的槽 → 递归处理它的 `use` → 再把槽里的字节补到自己后面。
+// 写成"先写自己再回头看依赖"会让依赖落在后面, 与参考实现的顺序不符。
 
 module driver
 
-const SRC_CAP: u64 = 4194304;   // 源缓冲上限 4 MiB
+// 尺寸都用 u32 字面量: 常量在表达式里**没有类型** (参考实现的 expr_type(Ident) 只看
+// 局部/参数), 所以 `(SLOT + 64) * 20` 会被算成 i32。要么显式 `as u64`, 要么把乘积
+// 预先算成常量 —— 后者更省事也更好读。
+const SLOT: u32 = 262144;        // 每层源文件槽 (够装最大的 codegen.lomt)
+const MAXDEPTH: u32 = 8;         // 依赖深度上限
+const UNIT_CAP: u32 = 8388608;   // 单元缓冲 (含顶部 MAXDEPTH*SLOT 的槽区)
+const IR_CAP: u32 = 16777216;    // IR 输出缓冲 (上界 8*单元 + 8192, 留足余量)
+const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
+const SCR_CAP: u32 = 8192;       // 小暂存: 前 4096 是 NUL 路径, 之后是 use 清单
+const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
 
 use "loment/selfhost/lexer.lomt"
 use "loment/selfhost/codegen.lomt"
@@ -43,11 +55,11 @@ fn sys_alloc(n: u64) -> u64 {
     return cur as u64;
 }
 
-/// 读到 EOF 或读满; 返回实际字节数。
-fn read_all(buf: ptr, cap: u64) -> u64 {
+/// 从 fd 读到 EOF 或读满; 返回实际字节数。
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
     let off: u64 = 0;
     while off < cap {
-        let n: i64 = syscall4(0, 0, (buf as u64) + off, cap - off);
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
         if n <= 0 {
             return off;
         }
@@ -74,25 +86,247 @@ fn fail(msg: str) -> u32 {
     return die(1);
 }
 
+fn fail_path(msg: str, p: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, p, n as u64);
+    write_all(2, str_ptr("\n"), 1);
+    return die(1);
+}
+
+/// 只读打开: 先把路径复制成 NUL 结尾 (内核要 C 串), 再 openat(AT_FDCWD, p, O_RDONLY)。
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+/// 从 /proc/self/cmdline 取 argv[1]: 返回 (start << 32) | len, 0 = 没有。
+fn argv1(buf: ptr, cap: u64, scr: ptr) -> u64 {
+    // 长度交给 str_len: 手数字符会连字符串常量的 NUL 一起复制进去 (openat 要的是 C 串)
+    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"),
+                          str_len("/proc/self/cmdline"), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let i: u64 = 0;
+    while i < n as u64 && load8(buf, i as u32) != 0 {
+        i = i + 1;   // 跳过 argv[0]
+    }
+    i = i + 1;
+    let s: u64 = i;
+    while i < n as u64 && load8(buf, i as u32) != 0 {
+        i = i + 1;
+    }
+    return (s << 32) | (i - s);
+}
+
+fn copy_bytes(dst: ptr, doff: u64, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, (doff + i as u64) as u32, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 去重表: 每项 = len(u32) + 路径字节, 顺次排布。
+/// 表长放在**一格内存**里 (snc), 因为它必须在兄弟递归之间共享: Loment 没有
+/// out 参数也没有可变全局, 按值传会在"两个模块都 import 同一个依赖"时漏判
+/// (checker 先装 bytes 再装 lexer, lexer 又 import bytes —— 按值传会把 bytes 装两遍)。
+fn seen_has(seen: ptr, snc: ptr, p: ptr, n: u32) -> u32 {
+    let sn: u32 = load32(snc, 0);
+    let o: u32 = 0;
+    while o < sn {
+        let l: u32 = load32(seen, o);
+        if l == n {
+            let ok: u32 = 1;
+            let i: u32 = 0;
+            while i < n {
+                if load8(seen, o + 4 + i) != load8(p, i) {
+                    ok = 0;
+                }
+                i = i + 1;
+            }
+            if ok == 1 {
+                return 1;
+            }
+        }
+        o = o + 4 + l;
+    }
+    return 0;
+}
+
+fn seen_add(seen: ptr, snc: ptr, p: ptr, n: u32) {
+    let sn: u32 = load32(snc, 0);
+    store32(seen, sn, n);
+    copy_bytes(seen, sn as u64 + 4, p, 0, n);
+    store32(snc, 0, sn + 4 + n);
+}
+
+/// 文本模式读入: 去掉 CRLF 里的 CR。
+/// 参考实现用 `read_text` (通用换行) 载入源码, 而驱动器读的是**原始字节** ——
+/// 源码里有跨行的字符串字面量 (生成器里到处都是), CR 会原样进到字面量字节里,
+/// 于是 IR 里的常量写成 `c"\0D\0A"` 而不是 `c"\0A"` (docs/150 记过一次同类事故)。
+fn strip_cr(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(buf, i);
+        if c == 13 && i + 1 < n && load8(buf, i + 1) == 10 {
+            i = i + 1;   // 丢掉 CR, 保留 LF
+        } else {
+            store8(buf, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+/// 这个 `use` 的路径是不是 `.lomt`。
+/// `lomentc` 的 parser 只把 `.lomt` 记进 `mod.imports`, `use "...lom"` 进 `mod.uses`
+/// (L0 声明由 lomc 处理, 不参与 L1 单元装载) —— 驱动必须同规则, 否则会把 fujr.lom
+/// 也拼进单元 (demo.lomt 上多出整整一个模块)。
+fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
+    if sl < 7 {
+        return 0;
+    }
+    let e: u32 = sp + sl - 1;   // 结尾的引号
+    if load8(src, e - 5) == 46 && load8(src, e - 4) == 108
+            && load8(src, e - 3) == 111 && load8(src, e - 2) == 109
+            && load8(src, e - 1) == 116 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 装载一个文件 (连同它的 `use`), 追加到 out 的第 off 字节起; 返回新的长度。
+/// 父文件先读进自己的槽, 递归处理依赖, 最后才把自己补上去 —— 顺序=依赖在前。
+///
+/// 形参不能叫 `entry`: LLVM 的块标签与局部值共用名字空间, 每个函数的第一块都叫
+/// `entry`, 于是 `%entry` 参数会让 clang 报 "unable to create block named 'entry'"。
+fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
+             depth: u32, scr: ptr, toks: ptr) -> u64 {
+    if depth >= MAXDEPTH {
+        return off;
+    }
+    if seen_has(seen, snc, path, n) == 1 {
+        return off;
+    }
+    seen_add(seen, snc, path, n);
+    let slot: ptr = ptr_add(out, UNIT_CAP - (depth + 1) * SLOT);
+    let fd: i64 = open_ro(path, n, scr);
+    if fd < 0 {
+        // 就地报路径: 再晚一点 slot 的读就会把这块内存盖掉
+        write_all(2, str_ptr("fujoc-s: 打不开 "), 20);
+        write_all(2, path, n as u64);
+        write_all(2, str_ptr("\n"), 1);
+        return off;
+    }
+    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    syscall4(3, fd as u64, 0, 0);
+    let nb: u32 = strip_cr(slot, raw_n as u32);
+    // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
+    lex(slot, nb, toks);
+    let uses: ptr = ptr_add(scr, 4096);
+    let nu: u32 = 0;
+    let i: u32 = 0;
+    while load32(toks, i * 20) != 4 && nu < 8 {
+        if tok_is(slot, toks, i, "use") && load32(toks, (i + 1) * 20) == 2 {
+            let up: u32 = load32(toks, (i + 1) * 20 + 4);
+            let ul: u32 = load32(toks, (i + 1) * 20 + 8);
+            if is_lomt(slot, up, ul) == 1 && nu < 8 {
+                store32(uses, nu * 8, up);
+                store32(uses, nu * 8 + 4, ul);
+                nu = nu + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let u: u32 = 0;
+    while u < nu {
+        let sp: u32 = load32(uses, u * 8);
+        let sl: u32 = load32(uses, u * 8 + 4);
+        off = load_file(ptr_add(slot, sp + 1), sl - 2, out, off, seen, snc,
+                        depth + 1, scr, toks);
+        u = u + 1;
+    }
+    copy_bytes(out, off, slot, 0, nb);
+    return off + nb as u64;
+}
+
+/// 单元里有没有这个枚举声明 (预置注入的判据, 镜像 lomentc.load)。
+fn has_enum(src: ptr, toks: ptr, name: str) -> u32 {
+    let i: u32 = 0;
+    while load32(toks, i * 20) != 4 {
+        if tok_is(src, toks, i, "enum") && tok_is(src, toks, i + 1, name) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 把预置枚举追加到单元末尾 (位置与 lomentc.load 的 append 一致: 模块枚举之后)。
+fn append_prelude(dst: ptr, off: u64) -> u64 {
+    let s: str = "\nmodule __prelude\npub enum Option<T> { Some(T), None }\npub enum Result<T, E> { Ok(T), Err(E) }\n";
+    copy_bytes(dst, off, str_ptr(s), 0, str_len(s));
+    return off + str_len(s) as u64;
+}
+
 fn _start() -> u32 {
-    let srcv: u64 = sys_alloc(SRC_CAP);
-    if srcv == 0 {
+    let unitv: u64 = sys_alloc(UNIT_CAP as u64);
+    let irv: u64 = sys_alloc(IR_CAP as u64);
+    let seenv: u64 = sys_alloc(SEEN_CAP as u64);
+    let scrv: u64 = sys_alloc(SCR_CAP as u64);
+    let argv_buf: u64 = sys_alloc(65536);   // 入口路径单独一块 (不能压在槽区里)
+    let sncv: u64 = sys_alloc(16);          // 去重表长度 (一格内存, 递归共享)
+    if unitv == 0 || irv == 0 || seenv == 0 || scrv == 0 || argv_buf == 0 || sncv == 0 {
         return fail("fujoc-s: brk failed\n");
     }
-    let src: ptr = srcv as ptr;
-    let n: u64 = read_all(src, SRC_CAP);
-    if n == 0 {
-        return fail("fujoc-s: no input\n");
+    let unit: ptr = unitv as ptr;
+    let ir: ptr = irv as ptr;
+    let seen: ptr = seenv as ptr;
+    let scr: ptr = scrv as ptr;
+    let snc: ptr = sncv as ptr;
+    store32(snc, 0, 0);
+    let av: u64 = argv1(argv_buf as ptr, 65536, scr);
+    if av == 0 {
+        return fail("fujoc-s: 用法: fujoc-s <入口.lomt>\n");
     }
-    let toksv: u64 = sys_alloc((n + 16) * 20);
-    let outv: u64 = sys_alloc(n * 8 + 8192);
-    if toksv == 0 || outv == 0 {
-        return fail("fujoc-s: out of memory\n");
+    let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
+    let an: u32 = (av % 4294967296) as u32;
+    // 词法缓冲按"单个文件"的大小开 (单元只 lex 一次, 见下)
+    let tokv: u64 = sys_alloc(TOKS_CAP as u64);
+    if tokv == 0 {
+        return fail("fujoc-s: brk failed\n");
     }
-    let toks: ptr = toksv as ptr;
-    let out: ptr = outv as ptr;
-    lex(src, n as u32, toks);
-    let m: u32 = emit_module(src, toks, out);
-    write_all(1, out, m as u64);
+    let toks: ptr = tokv as ptr;
+    let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks);
+    if len == 0 {
+        return fail_path("fujoc-s: 打不开入口 ", ap, an);
+    }
+    // 预置枚举注入: 先粗判一次 (单文件大小的词法缓冲足够 —— 只看有没有 `enum X`)
+    lex(unit, len as u32, toks);
+    if has_enum(unit, toks, "Option") == 0 || has_enum(unit, toks, "Result") == 0 {
+        len = append_prelude(unit, len);
+    }
+    // 正式词法 + 发射 (单元可能比单文件大, 按实际长度再要一块)
+    let tok2v: u64 = sys_alloc((len + 64) * 20);
+    if tok2v == 0 {
+        return fail("fujoc-s: 单元太大\n");
+    }
+    let toks2: ptr = tok2v as ptr;
+    lex(unit, len as u32, toks2);
+    let m: u32 = emit_module(unit, toks2, ir);
+    write_all(1, ir, m as u64);
     return die(0);
 }

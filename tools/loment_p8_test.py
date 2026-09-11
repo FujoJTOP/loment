@@ -584,15 +584,26 @@ def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
     return elf
 
 
-def _run_driver(elf: Path, unit: Path, td: str, name: str) -> str:
-    """在 WSL 里跑自举驱动: < unit > out, 返回它产出的文本。"""
+def _run_driver(elf: Path, relpath: str, td: str, name: str) -> str:
+    """在 WSL 里跑自举驱动: cd 到仓库根, 把**入口文件路径**交给它 —— 它自己去解析 use。"""
     got = Path(td) / f"{name}.out.ll"
     script = (f"cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
-              f"/tmp/{name} < {_wsl_path(unit)} > {_wsl_path(got)}")
+              f"cd {_wsl_path(ROOT)} && /tmp/{name} {relpath} > {_wsl_path(got)}")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     assert r.returncode == 0, f"驱动退出 {r.returncode}: {r.stderr[-400:]}"
     return got.read_text(encoding="utf-8")
+
+
+#: 语料里"参考实现的 IR 后端发不出来"的文件 (非目标), 按名字跳过。
+def _unsupported(target: Path) -> str | None:
+    mod = lomentc.load(target)
+    deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+    try:
+        lomentc.emit_llvm(mod, ROOT, deps)
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+    return None
 
 
 @test
@@ -600,12 +611,13 @@ def test_m83_selfhosted_driver_compiles_itself():
     """M83: 自举驱动是**一个能独立跑的可执行文件**, 且它能编译自己。
 
     在这之前, 自举链的每一环都是"被 C 驱动调用的函数" —— 没有能独立跑的编译器。
-    `driver.lomt` 用 brk 向内核要内存、从 stdin 吃装载好的单元、往 stdout 吐 IR。
+    `driver.lomt` 用 brk 向内核要内存、从 `/proc/self/cmdline` 拿入口路径、
+    自己递归解析 `use`、往 stdout 吐 IR。
 
     判据 (全部在 WSL 里执行):
       1. 参考实现发射 driver.lomt 的单元 -> 链成 ELF -> 跑它 -> 产物与参考逐字节相同;
-      2. 用它自己的产物再链一个 ELF (ELF2) -> ELF2 跑同一单元, 产物与 ELF1 相同 (定点);
-      3. 同一驱动对语料里的真实示例产物也与参考逐字节相同。
+      2. 用它自己的产物再链一个 ELF (ELF2) -> ELF2 跑同一入口, 产物与 ELF1 相同 (定点);
+      3. 同一驱动对别的入口也与参考逐字节相同 (驱动不是"只会编译自己")。
     """
     if not _clang():
         print("      SKIP: 无 clang")
@@ -613,32 +625,65 @@ def test_m83_selfhosted_driver_compiles_itself():
     if not _wsl():
         print("      SKIP: 无 WSL, 交叉产物未执行 (M83 部分)")
         return
+    self_rel = DRIVER_LOMT.relative_to(ROOT).as_posix()
     with tempfile.TemporaryDirectory() as td:
         # 1. 参考发射 -> ELF1
         mod = lomentc.load(DRIVER_LOMT)
         deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
         want = lomentc.emit_llvm(mod, ROOT, deps)
         elf1 = _build_linux_elf(want, td, "fujocs1")
-        unit = Path(td) / "driver_unit.lomt"
-        unit.write_text(_unit_text(DRIVER_LOMT), encoding="utf-8", newline="\n")
-        got1 = _run_driver(elf1, unit, td, "fujocs1")
+        got1 = _run_driver(elf1, self_rel, td, "fujocs1")
         bad = next((k for k in range(min(len(got1), len(want))) if got1[k] != want[k]), None)
         assert got1 == want, (
             f"驱动产物与参考不一致: want {len(want)}B got {len(got1)}B @{bad}")
         # 2. 用驱动自己的产物再链一个 -> 定点
         elf2 = _build_linux_elf(got1, td, "fujocs2")
-        got2 = _run_driver(elf2, unit, td, "fujocs2")
+        got2 = _run_driver(elf2, self_rel, td, "fujocs2")
         assert got2 == got1, "M84: 自举驱动的第 2 阶段产物与第 1 阶段不一致"
-        # 3. 同一个二进制对别的单元也与参考一致 (驱动不是"只会编译自己")
-        for name in ("native_res.lomt", "demo.lomt"):
-            target = ROOT / "loment" / "examples" / name
+        # 3. 同一个二进制对别的入口也与参考一致
+        for rel in ("loment/examples/native_res.lomt", "loment/examples/demo.lomt"):
+            target = ROOT / rel
             m2 = lomentc.load(target)
             d2 = lomentc.resolve_deps(m2, ROOT, target.parent, entry=target)
-            u2 = Path(td) / f"unit_{target.stem}.lomt"
-            u2.write_text(_unit_text(target), encoding="utf-8", newline="\n")
-            assert _run_driver(elf1, u2, td, f"u_{target.stem}") == lomentc.emit_llvm(m2, ROOT, d2), \
-                f"驱动在 {name} 上与参考不一致"
+            assert _run_driver(elf1, rel, td, f"u_{target.stem}") == lomentc.emit_llvm(m2, ROOT, d2), \
+                f"驱动在 {rel} 上与参考不一致"
         print(f"      自举驱动: {len(want)}B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致")
+
+
+@test
+def test_m85_selfhosted_driver_compiles_corpus():
+    """M85(核心): 自举驱动**自己做全部装载**, 按路径把整个语料编译一遍。
+
+    入口路径来自 `/proc/self/cmdline`, `use` 递归解析 (依赖先写), 缺 Option/Result
+    时注入预置枚举 —— 这些原本都在夹具里 (`_unit_text`)。判据 = 每个可发射的
+    `.lomt` 都产出与参考**逐字节相同**的 IR, 一个二进制、一个入口路径。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs85")
+        ok, skip = [], []
+        for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+            why = _unsupported(target)
+            if why:
+                skip.append((target.name, why))
+                continue
+            m = lomentc.load(target)
+            d = lomentc.resolve_deps(m, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(m, ROOT, d)
+            rel = target.relative_to(ROOT).as_posix()
+            got = _run_driver(elf, rel, td, f"m85_{target.stem}")
+            bad = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+            assert got == want, (
+                f"{rel}: 驱动产物与参考不一致 (want {len(want)}B got {len(got)}B @{bad})")
+            ok.append(target.name)
+        for name, why in skip:
+            print(f"      非目标: {name} ({why})")
+        print(f"      自举驱动按路径编译语料: {len(ok)}/{len(ok)} 逐字节一致")
 
 
 @test
