@@ -20,7 +20,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
@@ -82,8 +81,9 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
         return [{"jsonrpc": "2.0", "id": rid, "result": {
             "capabilities": {"textDocumentSync": 1,
                              "definitionProvider": True,
+                             "documentFormattingProvider": True,
                              "completionProvider": {"triggerCharacters": [".", ":"]}},
-            "serverInfo": {"name": "loment-lsp", "version": "0.1"}}}]
+            "serverInfo": {"name": "loment-lsp", "version": "0.2"}}}]
     if method in ("textDocument/didOpen", "textDocument/didChange"):
         td = params.get("textDocument") or {}
         uri = td.get("uri", "")
@@ -103,7 +103,13 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
         word = ""
         if 0 <= ln < len(lines):
             import re
-            m = re.search(r"[A-Za-z_]\w*", lines[ln][pos.get("character", 0):])
+            # 光标可能落在词中间 (编辑器就是这样报的): 先向左扩到词首, 再取整词
+            line = lines[ln]
+            ch = pos.get("character", 0)
+            start = min(max(ch, 0), len(line))
+            while start > 0 and (line[start - 1].isalnum() or line[start - 1] == "_"):
+                start -= 1
+            m = re.match(r"[A-Za-z_]\w*", line[start:])
             if m:
                 word = m.group(0)
         sym = _decls(text).get(word)
@@ -126,6 +132,23 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             pass
         return [{"jsonrpc": "2.0", "id": rid, "result": {"isIncomplete": False,
                                                          "items": items}}]
+    if method == "textDocument/formatting":
+        # M55/M56: 格式化由语言服务提供 (编辑器侧因此不需要自己起进程)
+        uri = (params.get("textDocument") or {}).get("uri", "")
+        src = docs.get(uri, "")
+        try:
+            import lomfmt  # noqa: PLC0415
+            new = lomfmt.format_source(src)
+        except Exception as e:  # noqa: BLE001  语法错误时不动文档
+            return [{"jsonrpc": "2.0", "id": rid,
+                     "error": {"code": -32603, "message": f"格式化失败: {e}"}}]
+        if new == src:
+            return [{"jsonrpc": "2.0", "id": rid, "result": []}]
+        lines = src.split("\n")
+        return [{"jsonrpc": "2.0", "id": rid, "result": [{
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": len(lines), "character": 0}},
+            "newText": new}]}]
     if method == "shutdown":
         return [{"jsonrpc": "2.0", "id": rid, "result": None}]
     if rid is not None:

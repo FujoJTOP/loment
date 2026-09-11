@@ -1,0 +1,132 @@
+{
+  "name": "loment",
+  "displayName": "Loment",
+  "description": "Loment 语言支持：语法高亮 + LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155）",
+  "version": "0.1.0",
+  "publisher": "FujoJTOP",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "loment",
+    "fujoos",
+    "fujolang"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:loment",
+    "onLanguage:lom"
+  ],
+  "dependencies": {
+    "vscode-languageclient": "^10.1.1"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "loment",
+        "aliases": [
+          "Loment",
+          "loment"
+        ],
+        "extensions": [
+          ".lomt"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "lom",
+        "aliases": [
+          "L0 (.lom)",
+          "lom"
+        ],
+        "extensions": [
+          ".lom"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "loment",
+        "scopeName": "source.loment",
+        "path": "./syntaxes/loment.tmLanguage.json"
+      },
+      {
+        "language": "lom",
+        "scopeName": "source.lom",
+        "path": "./syntaxes/lom.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Loment",
+      "properties": {
+        "loment.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "tools/loment_lsp.py 的绝对路径。留空则从工作区逐级向上自动查找。"
+        },
+        "loment.enableLsp": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用语言服务（补全 / 跳转 / 诊断 / 格式化）。关掉后只保留语法高亮与命令。"
+        },
+        "loment.buildDir": {
+          "type": "string",
+          "default": "loment/build",
+          "description": "构建产物（.ll / .potato.json）输出目录，相对工作区根。"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "loment.restartServer",
+        "title": "Loment: 重启语言服务"
+      },
+      {
+        "command": "loment.showIr",
+        "title": "Loment: 生成 LLVM IR（当前文件）"
+      },
+      {
+        "command": "loment.checkFile",
+        "title": "Loment: 静态检查（当前文件）"
+      },
+      {
+        "command": "loment.runTests",
+        "title": "Loment: 运行文件内 test_* 函数"
+      },
+      {
+        "command": "loment.runInFujoOS",
+        "title": "Loment: 在 FujoOS 里运行（QEMU）"
+      },
+      {
+        "command": "loment.formatDocument",
+        "title": "Loment: 格式化文档（lomfmt）"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "loment.showIr",
+          "when": "editorLangId == loment"
+        },
+        {
+          "command": "loment.checkFile",
+          "when": "editorLangId == loment"
+        },
+        {
+          "command": "loment.runTests",
+          "when": "editorLangId == loment"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "python ../../tools/vscode_ext.py --emit ../../loment/build/loment-vscode.vsix"
+  }
+}

@@ -126,7 +126,41 @@
 Loment 线收到后会：改 `lom/*.lom` 单源 → 重新生成包装与 spec → 跑 `lom_audit` 逐字节对账 →
 更新 `docs/149`（内核集成）与 `docs/154`（状态矩阵）。
 
-## 8. 诚实边界（别把话说满）
+## 8. 编辑器集成（VS Code 扩展，M56）
+
+Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，已在本机装为 `fujojtop.loment@0.1.0`）。
+
+| 能力 | 谁提供 |
+|---|---|
+| 语法高亮（`.lomt` / `.lom`） | `syntaxes/loment.tmLanguage.json` + `syntaxes/lom.tmLanguage.json` |
+| 补全 / 跳转定义 / 诊断 / 格式化 | `tools/loment_lsp.py`（LSP over stdio）；**格式化在服务端做**，扩展不自己起进程 |
+| 生成 LLVM IR / 静态检查 / 跑 `test_*` / 在 FujoOS 里跑 | VS Code 任务 → `lomentc.py` / `loment.py` / `loment_boot.py`（argv 数组，不经 shell） |
+
+重建与验收（在仓库根）：
+
+```
+cd editors/vscode && npm install --omit=dev     # 装 vscode-languageclient（离线打包会打进 VSIX）
+python tools/vscode_ext.py --check              # 清单/语法结构校验
+python tools/vscode_ext.py --emit loment/build/loment-vscode.vsix
+code --install-extension loment/build/loment-vscode.vsix --force
+python tools/vscode_ext_test.py                 # 无头验收 5/5（已进门禁 vscode_ext_test）
+```
+
+要点（对内核线也有用）：
+
+- 扩展**不需要预装 npm 包**（`vscode-languageclient` 打进 VSIX）；`.vsix` 是**确定性字节**
+  （固定时间戳），一条命令可重建，因此它不进校验和清单，清单只收源码。
+- 语言服务是**纯 Python**、只吃文档文本：只要工作区里有 `tools/loment_lsp.py` 就能跑；
+  扩展从工作区逐级向上查找，也可用设置 `loment.serverPath` 指定。
+- **安全纪律**：扩展源码里没有 `child_process`（spawn 在 `vscode-languageclient` 内部），
+  可执行位置只写字面量 `python`，一切路径走 argv 数组 —— 配置字符串不参与命令构造。
+- 无头验收覆盖：清单/语法结构 + **每个语法正则都能编译**（防止语法文件静默失效）+
+  `server-path.js` 真能找到服务 + 对真实服务做完整 LSP 往返（initialize → didOpen 诊断 →
+  补全 → 跳转 → 格式化 → shutdown）+ 错误路径（未声明变量必须成为诊断）+ VSIX 结构。
+- 「在编辑器里人工点验三个能力」**还没做**（需要打开一个 `.lomt` 看一眼），所以 `docs/154`
+  里 M56 仍记为「部分」。
+
+## 9. 诚实边界（别把话说满）
 
 - 上面 10 项是**内核侧的具体动作**，但内核怎么实现（IDT 怎么建、调度器钩子挂哪、加载器放哪个目录）
   是**内核线的设计自由**，这份单子只钉"跨线 ABI 形状"与"判据"。

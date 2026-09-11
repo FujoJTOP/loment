@@ -1,0 +1,110 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "L0 (.lom)",
+  "scopeName": "source.lom",
+  "comment": "L0 接口层单源 (.lom) 的语法高亮：module / record / enum / const / param / meta (docs/141)。",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#layout" },
+    { "include": "#types" },
+    { "include": "#declaration" },
+    { "include": "#fields" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.lom",
+          "match": "//.*"
+        },
+        {
+          "name": "comment.block.lom",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.lom",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.lom",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.lom",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.lom",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "layout": {
+      "patterns": [
+        {
+          "name": "keyword.other.layout.lom",
+          "match": "\\b(layout|packed|size|endian|little|big)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.lom",
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|f32|f64|str|bytes|ptr|void)\\b"
+        }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "name": "storage.type.declaration.lom",
+          "match": "\\b(module|record|enum|const|param|meta|use)\\b"
+        }
+      ]
+    },
+    "fields": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.lom",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*[:=])"
+        },
+        {
+          "name": "entity.name.type.lom",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.lom",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.lom",
+          "match": "[+\\-*/%&|^<>]"
+        },
+        {
+          "name": "punctuation.lom",
+          "match": "[{}()\\[\\];,.:@]"
+        }
+      ]
+    }
+  }
+}

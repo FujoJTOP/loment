@@ -4,6 +4,10 @@
 > 自检: `tools/loment_tools_test.py` 11/11 · 门禁: `ci.py --static-only` 7/7
 > 一句话: **从"能编译"到"能干活"——格式化、语言服务、包管理、文档、调试信息、
 > 测试/基准/覆盖、增量与缓存全部落地，且每一项都有可复现判据。**
+>
+> 编辑器宿主（M56）：`editors/vscode/` —— 语法高亮 + LSP 客户端（补全/跳转/诊断/格式化，
+> 服务端就是本文件的 `loment_lsp.py`）+ 构建/检查/运行命令；打包 `tools/vscode_ext.py`，
+> 无头验收 `tools/vscode_ext_test.py`（含完整 LSP 往返）；细节见 `docs/155` §8。
 
 ## 0. 统一入口
 
