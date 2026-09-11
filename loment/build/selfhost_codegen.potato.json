@@ -593,6 +593,120 @@
       "ret": "u32"
     },
     {
+      "name": "ty_width_id",
+      "params": [
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_ty_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "ty_name_id",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "apply_cast_b",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "fid",
+          "type": "u32"
+        },
+        {
+          "name": "fsg",
+          "type": "u32"
+        },
+        {
+          "name": "to_tok",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "arg1",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "expr_atom",
       "params": [
         {
@@ -1056,6 +1170,20 @@
     },
     {
       "name": "runtime_needed",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "heap_needed",
       "params": [
         {
           "name": "src",

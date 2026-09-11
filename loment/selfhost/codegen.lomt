@@ -520,6 +520,116 @@ fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl
     return 1;
 }
 
+// ---------------------------------------------------------------- 类型名 (内建结果用)
+
+/// 类型 id: 1=u8 2=u16 3=u32 4=u64 5=ptr 6=bool (镜像 _ll_type 的标量+ptr 子集)。
+fn ty_width_id(id: u32) -> u32 {
+    if id == 1 {
+        return 8;
+    }
+    if id == 2 {
+        return 16;
+    }
+    if id == 3 {
+        return 32;
+    }
+    if id == 4 {
+        return 64;
+    }
+    if id == 6 {
+        return 1;
+    }
+    return 64;   // ptr 与未知
+}
+
+fn emit_ty_name(s: ptr, out: ptr, id: u32) -> u32 {
+    if id == 1 {
+        return emit_str(s, out, "i8");
+    }
+    if id == 2 {
+        return emit_str(s, out, "i16");
+    }
+    if id == 3 {
+        return emit_str(s, out, "i32");
+    }
+    if id == 4 {
+        return emit_str(s, out, "i64");
+    }
+    if id == 5 {
+        return emit_str(s, out, "ptr");
+    }
+    return emit_str(s, out, "i1");
+}
+
+/// 类型 token -> 类型 id (0 = 缺省 u32, 与 lomentc 的 `st or "u32"` 同义)。
+fn ty_name_id(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == 0 {
+        return 3;
+    }
+    if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") {
+        return 1;
+    }
+    if tok_is(src, toks, tt, "u16") || tok_is(src, toks, tt, "i16") {
+        return 2;
+    }
+    if tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "i32") {
+        return 3;
+    }
+    if tok_is(src, toks, tt, "u64") || tok_is(src, toks, tt, "i64") {
+        return 4;
+    }
+    if tok_is(src, toks, tt, "ptr") {
+        return 5;
+    }
+    if tok_is(src, toks, tt, "bool") {
+        return 6;
+    }
+    return 3;
+}
+
+/// 内建结果上的 `as` 后缀: from 侧是内建固定的类型 (fid/fsg), to 侧是类型 token。
+fn apply_cast_b(s: ptr, out: ptr, src: ptr, toks: ptr, fid: u32, fsg: u32, to_tok: u32, lvl: u32) -> u32 {
+    let tid: u32 = ty_name_id(src, toks, to_tok);
+    if tid == fid {
+        return 0;
+    }
+    emit_str(s, out, "  ");
+    let n: u32 = new_temp(s, out);
+    emit_str(s, out, " = ");
+    if fid == 5 && tid == 4 {              // M67: 指针转整数
+        emit_str(s, out, "ptrtoint ptr ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, " to i64\n");
+        set_temp_val(s, lvl, n);
+        return 1;
+    }
+    if ty_width_id(tid) < ty_width_id(fid) {
+        emit_str(s, out, "trunc ");
+    } else if fsg == 1 {
+        emit_str(s, out, "sext ");
+    } else {
+        emit_str(s, out, "zext ");
+    }
+    emit_ty_name(s, out, fid);
+    emit_str(s, out, " ");
+    emit_val(s, out, lvl);
+    emit_str(s, out, " to ");
+    emit_ty_name(s, out, tid);
+    emit_str(s, out, "\n");
+    set_temp_val(s, lvl, n);
+    return 1;
+}
+
+/// 求值一个实参 (落到第 lvl 层), 返回其后 token 下标 (跳过尾随逗号)。
+fn arg1(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, lvl: u32) -> u32 {
+    let e: u32 = expr_bin(s, out, src, toks, k, 1, lvl);
+    let r: u32 = e;
+    if tok_is(src, toks, r, ",") {
+        r = r + 1;
+    }
+    return r;
+}
+
 /// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用 / `as T`。
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_kind(toks, j) == 1 {
@@ -586,6 +696,214 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
             return av;
+        }
+        if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
+            let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            emit_str(s, out, "  ");
+            let off: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i32, ptr @__loment_off\n  ");
+            let nxt: u32 = new_temp(s, out);
+            emit_str(s, out, " = add i32 %t");
+            emit_dec(s, out, off);
+            emit_str(s, out, ", ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, "\n  ");
+            let ok: u32 = new_temp(s, out);
+            emit_str(s, out, " = icmp ule i32 %t");
+            emit_dec(s, out, nxt);
+            emit_str(s, out, ", 65536\n");
+            let w: u32 = load32(s, 480) + 1;
+            store32(s, 480, w + 1);
+            emit_str(s, out, "  br i1 %t");
+            emit_dec(s, out, ok);
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, w, "aok");
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, w + 1, "aovf");
+            emit_str(s, out, "\n");
+            store32(s, 476, 1);
+            lab_def(s, out, w + 1, "aovf");
+            emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+            store32(s, 476, 1);
+            lab_def(s, out, w, "aok");
+            emit_str(s, out, "  store i32 %t");
+            emit_dec(s, out, nxt);
+            emit_str(s, out, ", ptr @__loment_off\n  ");
+            let p: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t");
+            emit_dec(s, out, off);
+            emit_str(s, out, "\n");
+            set_temp_val(s, lvl, p);
+            if tok_is(src, toks, k1 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
+                return k1 + 2;
+            }
+            return k1;
+        }
+        if tok_is(src, toks, j, "free") {
+            let k2: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
+            store32(s, blen(s, lvl), 1);
+            return k2;
+        }
+        if tok_is(src, toks, j, "atomic_add") {   // M21
+            let k3: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k4: u32 = arg1(s, out, src, toks, k3, lvl + 1);
+            emit_str(s, out, "  ");
+            let at: u32 = new_temp(s, out);
+            emit_str(s, out, " = atomicrmw add ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, " seq_cst\n");
+            set_temp_val(s, lvl, at);
+            if tok_is(src, toks, k4 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 3, 0, k4 + 2, lvl);
+                return k4 + 2;
+            }
+            return k4;
+        }
+        if tok_is(src, toks, j, "ptr_add") || tok_is(src, toks, j, "ptr_sub") {   // M73
+            let sub: u32 = tok_is(src, toks, j, "ptr_sub") as u32;
+            let k5: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k6: u32 = arg1(s, out, src, toks, k5, lvl + 1);
+            emit_str(s, out, "  ");
+            let n64: u32 = new_temp(s, out);
+            emit_str(s, out, " = zext i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, " to i64\n");
+            let use: u32 = n64;
+            if sub == 1 {
+                emit_str(s, out, "  ");
+                let nn: u32 = new_temp(s, out);
+                emit_str(s, out, " = sub i64 0, %t");
+                emit_dec(s, out, n64);
+                emit_str(s, out, "\n");
+                use = nn;
+            }
+            emit_str(s, out, "  ");
+            let pe: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds i8, ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, use);
+            emit_str(s, out, "\n");
+            set_temp_val(s, lvl, pe);
+            if tok_is(src, toks, k6 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 5, 0, k6 + 2, lvl);
+                return k6 + 2;
+            }
+            return k6;
+        }
+        if tok_is(src, toks, j, "get_bits") || tok_is(src, toks, j, "set_bits") {   // M22
+            let setb: u32 = tok_is(src, toks, j, "set_bits") as u32;
+            let k7: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k8: u32 = arg1(s, out, src, toks, k7, lvl + 1);
+            let k9: u32 = arg1(s, out, src, toks, k8, lvl + 2);
+            emit_str(s, out, "  ");
+            let one: u32 = new_temp(s, out);
+            emit_str(s, out, " = zext i8 1 to i16\n  ");
+            let w16: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i32 ");
+            emit_val(s, out, lvl + 2);
+            emit_str(s, out, " to i16\n  ");
+            let shl: u32 = new_temp(s, out);
+            emit_str(s, out, " = shl i16 %t");
+            emit_dec(s, out, one);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, w16);
+            emit_str(s, out, "\n  ");
+            let sb2: u32 = new_temp(s, out);
+            emit_str(s, out, " = sub i16 %t");
+            emit_dec(s, out, shl);
+            emit_str(s, out, ", 1\n  ");
+            let mask: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i16 %t");
+            emit_dec(s, out, sb2);
+            emit_str(s, out, " to i8\n");
+            // set_bits 的第 4 个实参在掩码之后求值 (与 lomentc 同序)
+            let k10: u32 = k9;
+            if setb == 1 {
+                k10 = arg1(s, out, src, toks, k9, lvl + 3);
+            }
+            emit_str(s, out, "  ");
+            let nsh: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, " to i8\n");
+            if setb == 0 {
+                emit_str(s, out, "  ");
+                let shr: u32 = new_temp(s, out);
+                emit_str(s, out, " = lshr i8 ");
+                emit_val(s, out, lvl);
+                emit_str(s, out, ", %t");
+                emit_dec(s, out, nsh);
+                emit_str(s, out, "\n  ");
+                let gr: u32 = new_temp(s, out);
+                emit_str(s, out, " = and i8 %t");
+                emit_dec(s, out, shr);
+                emit_str(s, out, ", %t");
+                emit_dec(s, out, mask);
+                emit_str(s, out, "\n");
+                set_temp_val(s, lvl, gr);
+                if tok_is(src, toks, k10 + 1, "as") {
+                    apply_cast_b(s, out, src, toks, 1, 0, k10 + 2, lvl);
+                    return k10 + 2;
+                }
+                return k10;
+            }
+            emit_str(s, out, "  ");
+            let shm: u32 = new_temp(s, out);
+            emit_str(s, out, " = shl i8 %t");
+            emit_dec(s, out, mask);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, nsh);
+            emit_str(s, out, "\n  ");
+            let nm: u32 = new_temp(s, out);
+            emit_str(s, out, " = xor i8 %t");
+            emit_dec(s, out, shm);
+            emit_str(s, out, ", -1\n  ");
+            let cl: u32 = new_temp(s, out);
+            emit_str(s, out, " = and i8 ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, nm);
+            emit_str(s, out, "\n  ");
+            let msk: u32 = new_temp(s, out);
+            emit_str(s, out, " = and i8 ");
+            emit_val(s, out, lvl + 3);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, mask);
+            emit_str(s, out, "\n  ");
+            let sh: u32 = new_temp(s, out);
+            emit_str(s, out, " = shl i8 %t");
+            emit_dec(s, out, msk);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, nsh);
+            emit_str(s, out, "\n  ");
+            let sr: u32 = new_temp(s, out);
+            emit_str(s, out, " = or i8 %t");
+            emit_dec(s, out, cl);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, sh);
+            emit_str(s, out, "\n");
+            set_temp_val(s, lvl, sr);
+            if tok_is(src, toks, k10 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 1, 0, k10 + 2, lvl);
+                return k10 + 2;
+            }
+            return k10;
+        }
+        if tok_is(src, toks, j, "panic") {   // M19: 求值后不可继续
+            let k11: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+            store32(s, 476, 1);
+            let dl: u32 = load32(s, 480) + 1;
+            store32(s, 480, dl);
+            lab_def(s, out, dl, "dead");
+            store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
+            store32(s, blen(s, lvl), 1);
+            return k11;
         }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
@@ -977,6 +1295,15 @@ fn tag_id(tag: str) -> u32 {
     if str_eq(tag, "dend") {
         return 15;
     }
+    if str_eq(tag, "aok") {
+        return 16;
+    }
+    if str_eq(tag, "aovf") {
+        return 17;
+    }
+    if str_eq(tag, "dead") {
+        return 18;
+    }
     return 9;   // sc_end
 }
 
@@ -1022,6 +1349,15 @@ fn tag_name(id: u32) -> str {
     }
     if id == 15 {
         return "dend";
+    }
+    if id == 16 {
+        return "aok";
+    }
+    if id == 17 {
+        return "aovf";
+    }
+    if id == 18 {
+        return "dead";
     }
     return "sc_end";
 }
@@ -1388,13 +1724,29 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
 }
 
-/// 预扫描: 源码里出现过 `/` `%` 运算符 (kind=3 且文本为单字符) 时需运行时文本块。
+/// 预扫描: 源码里出现过 `/` `%` 运算符 (kind=3 且文本为单字符), 或 `alloc` / `panic`
+/// (它们引用 `@__loment_*`) 时需运行时文本块。
 /// 输出是顺序写的, 而运行时块要落在横幅之后、函数之前, 所以必须先判定再写横幅。
-/// 语义等价于 lomentc 的 `"@__loment_" in text_all` —— 本 codegen 目前只有除法会产生该引用。
+/// 语义等价于 lomentc 的 `"@__loment_" in text_all` —— 本 codegen 目前只有这三个来源会引用它。
 fn runtime_needed(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_kind(toks, i) == 3 && (tok_is(src, toks, i, "/") || tok_is(src, toks, i, "%")) {
+            return 1;
+        }
+        if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 预扫描: `alloc` 用到 bump 堆全局 (`@__loment_heap`/`@__loment_off`)。
+fn heap_needed(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "alloc") {
             return 1;
         }
         i = i + 1;
@@ -1413,6 +1765,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     store32(s, 480, 0);   // label 计数
     store32(s, 484, 0);   // 局部数
     store32(s, 512, runtime_needed(src, toks));
+    store32(s, 516, heap_needed(src, toks));
     // 符号表: 登记函数
     let i: u32 = 0;
     let n: u32 = 0;
@@ -1444,6 +1797,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
+    }
+    if load32(s, 516) == 1 {
+        emit_str(s, out, "@__loment_heap = internal global [65536 x i8] zeroinitializer\n@__loment_off = internal global i32 0\n\n");
     }
     i = 0;
     while tok_kind(toks, i) != 4 {

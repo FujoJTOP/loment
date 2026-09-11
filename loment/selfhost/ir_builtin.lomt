@@ -1,0 +1,45 @@
+module ir_builtin
+
+// M82 目标文件 (指针/位域内建子集): alloc/free/atomic_add/ptr_add/ptr_sub/get_bits/set_bits/panic;
+// 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致 (含堆全局与运行时的位置)。
+
+fn heap_alloc(n: u32) -> ptr {
+    return alloc(n);
+}
+
+fn heap_scaled(n: u32) -> ptr {
+    return alloc(n * 4);
+}
+
+fn reclaim(p: ptr) -> u32 {
+    return free(p);
+}
+
+fn bump(p: ptr, off: u32) -> ptr {
+    return ptr_add(p, off);
+}
+
+fn rewind(p: ptr, off: u32) -> ptr {
+    return ptr_sub(p, off);
+}
+
+fn add5(p: ptr) -> u32 {
+    return atomic_add(p, 5);
+}
+
+fn low3(b: u8, v: u8) -> u8 {
+    return set_bits(b, 0, 3, v);
+}
+
+fn get_low3(b: u8) -> u32 {
+    return get_bits(b, 0, 3) as u32;
+}
+
+fn wide(b: u8) -> u64 {
+    return get_bits(b, 2, 4) as u64;
+}
+
+fn boom(n: u32) -> u32 {
+    panic(n);
+    return n;
+}

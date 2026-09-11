@@ -1,0 +1,147 @@
+{
+  "potato": "v1",
+  "unit": "ir_builtin",
+  "language": "loment",
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "heap_alloc",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "heap_scaled",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "reclaim",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "bump",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "rewind",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "add5",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "low3",
+      "params": [
+        {
+          "name": "b",
+          "type": "u8"
+        },
+        {
+          "name": "v",
+          "type": "u8"
+        }
+      ],
+      "ret": "u8"
+    },
+    {
+      "name": "get_low3",
+      "params": [
+        {
+          "name": "b",
+          "type": "u8"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "wide",
+      "params": [
+        {
+          "name": "b",
+          "type": "u8"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "boom",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "excluded": []
+}
