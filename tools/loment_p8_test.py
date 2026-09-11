@@ -438,6 +438,42 @@ def _build_codegen(td: str) -> Path:
 
 
 @test
+def test_m85_checker_accepts_corpus_units():
+    """M85 后半: 自举 checker 在**拼接单元**上的覆盖面 (driver 视角, docs/150)。
+
+    M81 的判据是"负例集判定一致", 那是在单文件上跑; 要当"闸门"还得能**放行合法程序**。
+    这一条把覆盖面钉住: 41 个单元的拼接体 (依赖 + 本文件 + 预置枚举, 与驱动器装载的同一份)
+    里, 除两个已登记缺口外必须**一条诊断都没有**。
+
+    两个缺口都是登记过的, 且方向相反 —— 缺口清单和覆盖面一起钉: 缺口被修好时这条会
+    提醒更新清单 (而不是让它悄悄过期)。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    gaps = {
+        # impl/trait 块: checker 不建模, `impl T for Y { fn m(&self) }` 会误读签名
+        "native_trait.lomt",
+        # 非目标: 参考实现的 IR 后端自己也发不出来 (native: inb 未实现), 它不是单元的合法形状
+        "native_raii.lomt",
+    }
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_checker(td)
+        ok = []
+        for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+            unit = Path(td) / f"u_{target.stem}.lomt"
+            unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
+            codes, det = _loment_codes(exe, unit)
+            if target.name in gaps:
+                assert codes, f"{target.name}: 缺口已消失 —— 请从 gaps 里删掉它"
+                continue
+            assert not codes, f"{target.name}: 单元上有假报 {codes} {det[:100]}"
+            ok.append(target.name)
+        print(f"      checker 放行单元: {len(ok)}/{len(ok)} 无诊断 (已登记缺口 {len(gaps)} 个)")
+
+
+@test
 def test_m82_loment_codegen_byte_identical():
     """M82(子集): Loment 版 codegen 的 .ll 与 Python 版逐字节一致 (常量/参数返回 + 表达式)。"""
     if not _clang():
