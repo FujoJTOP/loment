@@ -38,6 +38,16 @@ def _rustc() -> str | None:
     return shutil.which("rustc")
 
 
+# ---------------------------------------------------------------- 单态化金标 (docs/156)
+
+@test
+def test_mono_trace_naming_rule():
+    """单态化的命名规则不漂: base + "_" + "_".join(实参), 且全语料零违规。"""
+    import mono_trace
+    r = mono_trace.main(["--check"])
+    assert r == 0, "mono_trace --check 失败 (命名规则漂了, 见 docs/156 §1)"
+
+
 # ---------------------------------------------------------------- M55 格式化
 
 @test

@@ -75,7 +75,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "c25ea38923121a4373287847dbdf72aa6fcaf27b866282d10463960d799c7712"
+   "sha256": "168b9859df2aeda194152c8246f97e7a1e175a6143a41f4a644bb82087f59ef9"
   },
   {
    "path": "tools/loment_boot.py",
@@ -112,6 +112,10 @@
   {
    "path": "tools/vscode_ext_test.py",
    "sha256": "2e89133c55938171e69ef5544bb2c83c9606e6bd96b6c0b804ff9db54fb8eadd"
+  },
+  {
+   "path": "tools/mono_trace.py",
+   "sha256": "f0d499d49c60d142edf5a88c7d3ca4d9a8022791aeac3cbfc636ea4d31de2b8d"
   },
   {
    "path": "editors/vscode/package.json",
@@ -388,6 +392,10 @@
   {
    "path": "docs/155-loment-kernel-handoff.md",
    "sha256": "c01d2eff04ecabdf0442d5bef8200aab2bab3eaf55858aa89ad7ad6c34263cb7"
+  },
+  {
+   "path": "docs/156-loment-monomorphization.md",
+   "sha256": "940dd7c75a498904888cd497585557f207606baa35184efe1c13b9c94450806a"
   },
   {
    "path": "docs/manual/index.md",
