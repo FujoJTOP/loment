@@ -175,6 +175,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 0 {
         return emit_str(s, out, "i32");
     }
+    if tok_is(src, toks, tt, "(") {   // unit 类型 `()`
+        return emit_str(s, out, "void");
+    }
     if tok_is(src, toks, tt, "bool") || tok_is(src, toks, tt, "true")
         || tok_is(src, toks, tt, "false") {
         return emit_str(s, out, "i1");
@@ -206,6 +209,9 @@ fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
 fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 0 {
         return emit_str(s, out, "u32");
+    }
+    if tok_is(src, toks, tt, "(") {   // 注释里 unit 写作 `()`
+        return emit_str(s, out, "()");
     }
     return emit_tok(s, out, src, toks, tt);
 }
@@ -674,9 +680,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, z);
             if tok_is(src, toks, ao + 1, "as") {   // load8(...) as T
                 apply_cast(s, out, src, toks, 0, ao + 2, lvl);
-                return ao + 2;
+                return ao + 3;
             }
-            return ao;
+            return ao + 1;
         }
         if tok_is(src, toks, j, "store8") {
             let ap2: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl);
@@ -695,7 +701,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             emit_str(s, out, "\n");
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
-            return av;
+            return av + 1;
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -736,15 +742,15 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, p);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
-                return k1 + 2;
+                return k1 + 3;
             }
-            return k1;
+            return k1 + 1;
         }
         if tok_is(src, toks, j, "free") {
             let k2: u32 = arg1(s, out, src, toks, j + 2, lvl);
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
-            return k2;
+            return k2 + 1;
         }
         if tok_is(src, toks, j, "atomic_add") {   // M21
             let k3: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -759,9 +765,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, at);
             if tok_is(src, toks, k4 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 3, 0, k4 + 2, lvl);
-                return k4 + 2;
+                return k4 + 3;
             }
-            return k4;
+            return k4 + 1;
         }
         if tok_is(src, toks, j, "ptr_add") || tok_is(src, toks, j, "ptr_sub") {   // M73
             let sub: u32 = tok_is(src, toks, j, "ptr_sub") as u32;
@@ -791,9 +797,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, pe);
             if tok_is(src, toks, k6 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k6 + 2, lvl);
-                return k6 + 2;
+                return k6 + 3;
             }
-            return k6;
+            return k6 + 1;
         }
         if tok_is(src, toks, j, "get_bits") || tok_is(src, toks, j, "set_bits") {   // M22
             let setb: u32 = tok_is(src, toks, j, "set_bits") as u32;
@@ -848,9 +854,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
                 set_temp_val(s, lvl, gr);
                 if tok_is(src, toks, k10 + 1, "as") {
                     apply_cast_b(s, out, src, toks, 1, 0, k10 + 2, lvl);
-                    return k10 + 2;
+                    return k10 + 3;
                 }
-                return k10;
+                return k10 + 1;
             }
             emit_str(s, out, "  ");
             let shm: u32 = new_temp(s, out);
@@ -890,9 +896,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, sr);
             if tok_is(src, toks, k10 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 1, 0, k10 + 2, lvl);
-                return k10 + 2;
+                return k10 + 3;
             }
-            return k10;
+            return k10 + 1;
         }
         if tok_is(src, toks, j, "panic") {   // M19: 求值后不可继续
             let k11: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -903,7 +909,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             lab_def(s, out, dl, "dead");
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
-            return k11;
+            return k11 + 1;
         }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
@@ -929,8 +935,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             a = a + 1;
         }
         emit_str(s, out, "  ");
-        let n: u32 = new_temp(s, out);
-        emit_str(s, out, " = call ");
+        let unit: u32 = tok_is(src, toks, ret, "(") as u32;   // unit 返回: 不占寄存器
+        let n: u32 = 0;
+        if unit == 0 {
+            n = new_temp(s, out);
+            emit_str(s, out, " = ");
+        }
+        emit_str(s, out, "call ");
         emit_ty(s, out, src, toks, ret);
         emit_str(s, out, " @");
         emit_tok(s, out, src, toks, j);
@@ -947,13 +958,27 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             b = b + 1;
         }
         emit_str(s, out, ")\n");
-        set_temp_val(s, lvl, n);
+        if unit == 1 {
+            store32(s, blen(s, lvl), 0);   // () 类型的值为空串
+        } else {
+            set_temp_val(s, lvl, n);
+        }
         let ec: u32 = k + 1;
         if tok_is(src, toks, ec, "as") {   // 调用结果上的 as
             apply_cast(s, out, src, toks, ret, ec + 1, lvl);
             return ec + 2;
         }
         return ec;
+    }
+    // 布尔字面量: 值就是字面量 1 / 0 (不是变量 load)
+    if tok_kind(toks, j) == 0 && (tok_is(src, toks, j, "true") || tok_is(src, toks, j, "false")) {
+        if tok_is(src, toks, j, "true") {
+            store8(s, btxt(s, lvl), 49 as u8);
+        } else {
+            store8(s, btxt(s, lvl), 48 as u8);
+        }
+        store32(s, blen(s, lvl), 1);
+        return j + 1;
     }
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
@@ -1231,6 +1256,13 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let j: u32 = find_body(src, toks, lp);
     while tok_kind(toks, j) != 4 {
         if tok_is(src, toks, j, "}") {
+            if load32(s, 476) == 0 {   // 块未终止: unit 函数补 ret void, 其余补 unreachable
+                if tok_is(src, toks, ret, "(") {
+                    emit_str(s, out, "  ret void\n");
+                } else {
+                    emit_str(s, out, "  unreachable\n");
+                }
+            }
             emit_str(s, out, "}\n");
             return j + 1;
         }
@@ -1734,7 +1766,8 @@ fn runtime_needed(src: ptr, toks: ptr) -> u32 {
         if tok_kind(toks, i) == 3 && (tok_is(src, toks, i, "/") || tok_is(src, toks, i, "%")) {
             return 1;
         }
-        if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")) {
+        if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")
+                || tok_is(src, toks, i, "str_eq")) {
             return 1;
         }
         i = i + 1;
