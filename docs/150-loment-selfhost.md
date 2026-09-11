@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
 > 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 38 个示例中 30 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
+> M82 逐字节一致: 38 个示例中 31 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
 > **自举四阶段全部能编译自身**：`lexer` / `parser` / `checker` / `codegen` 四个 `.lomt` 的 `.ll` 与
 > `lomentc --emit-llvm` **逐字节一致**（26028B / 115464B / 83148B / 557828B，差异行均为 0）
 > 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
@@ -116,7 +116,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64/ptr）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 38 个示例文件，逐字节一致 30 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
+**未覆盖**（相对 38 个示例文件，逐字节一致 31 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
 `slice_len`/`str_ptr`/`syscall*`）、`match`、str/切片/数组/struct/枚举等聚合类型、能力域表与 DWARF 元数据。
 每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
 `ir_*.lomt` 目标文件是对应的防回归锚点。
@@ -204,6 +204,14 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **形参扫描也必须用 `skip_type`** —— 原来按"3 个 token 一个参数"步进，遇到 `xs: [u32]` 会多出一个幻影参数
 （`i64 %u32`），函数表的形参类型扫描同样中招。
 
+**能力域（P4：M35/M36/M38）**：`capability blk_write : disk[0..4] revocable` 扫成域表
+（name_tok | space_tok | lo | hi | revocable，状态块 6144 起 24B/项）；`guard NAME(expr);` 降级为
+`zext i32→i64` → `icmp uge/ule`（lo/hi 是编译期常量）→ `and i1` → `br` 到 `%L_gok`/`%L_gtrap`
+（trap 走 `__loment_abort`）→ 通过分支在 `@__loment_audit[cap_id]` 上加一。模块级还要插两个块：
+`@__loment_audit`（有 `guard` 时）与 `@__loment_caps`（有 `capability` 时，space 名取
+**FNV-1a 32 位**），顺序是 **运行时 → audit → caps → 堆全局 → 字符串全局 → 函数**。
+解锁 `native_cap.lomt`（2408B 零差异）。
+
 **中断处理函数（M33）**：`interrupt fn f() { … }` → 注释写 `; f -> interrupt (x86_intrcc)`，
 签名是 `define x86_intrcc void @f(ptr byval([8 x i8]) %__frame)`（**无参数**，只列局部 alloca）。
 注意 `fn` 的前一个 token 是 `interrupt`，用 `base - 1` 判定。
@@ -261,8 +269,8 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
 且**四段都能被 Loment 版 codegen 编译出与参考逐字节相同的 IR**（见上文各节），
 后端进而达到三阶段定点（M84）。
-M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 30 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
-缺口集中在聚合类型（7：枚举+match / 泛型 / trait / RAII）、`for`（4）、`match`/枚举（3）、能力域（2）、除法（2）、`syscall`（1）。
+M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 31 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
+缺口集中在聚合类型（6：枚举+match / 泛型 / trait / RAII）、`for`（4）、`match`/枚举（3）、除法（2）、`syscall`（1）、能力域（1：`demo` 还缺 struct 字面量）。
 ## M87 · 引导脚本 ✅
 
 `python tools/loment_bootstrap.py` —— 一条命令走完自举前端：

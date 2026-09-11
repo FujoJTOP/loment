@@ -812,6 +812,78 @@ fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
     return i + 1;
 }
 
+// ---------------------------------------------------------------- 能力域 (P4)
+
+/// 域表项基址: name_tok | space_tok | lo | hi | revocable (24B/项, 64 项)
+fn cap_base(i: u32) -> u32 {
+    return 6144 + i * 24;
+}
+
+/// FNV-1a 32 位 (对 space 名 token 的字节) —— 与 lomentc._fnv1a32 同算法。
+fn fnv1a_tok(src: ptr, toks: ptr, i: u32) -> u32 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    let h: u32 = 2166136261;
+    let k: u32 = 0;
+    while k < n {
+        h = h ^ load8(src, st + k);
+        h = h * 16777619;
+        k = k + 1;
+    }
+    return h;
+}
+
+/// 按名字找能力域: 返回下标, 未找到返回 4294967295。
+fn find_cap(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 536) {
+        let nt: u32 = load32(s, cap_base(i));
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
+                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// `@__loment_caps` 域描述表 (镜像 lomentc 的 P4/M35 行格式)。
+fn emit_caps_table(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
+    let n: u32 = load32(s, 536);
+    emit_str(s, out, "@__loment_caps = internal constant [");
+    emit_dec(s, out, n);
+    emit_str(s, out, " x { i64, i64, i64, i64 }] [");
+    let i: u32 = 0;
+    while i < n {
+        if i > 0 {
+            emit_str(s, out, ", ");
+        }
+        emit_str(s, out, "{ i64, i64, i64, i64 } { i64 ");
+        emit_dec(s, out, fnv1a_tok(src, toks, load32(s, cap_base(i) + 4)));
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, load32(s, cap_base(i) + 8));
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, load32(s, cap_base(i) + 12));
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, load32(s, cap_base(i) + 16));
+        emit_str(s, out, " }");
+        i = i + 1;
+    }
+    emit_str(s, out, "]");
+    return emit_str(s, out, "
+");
+}
+
 // ---------------------------------------------------------------- 表达式
 
 fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
@@ -2223,6 +2295,12 @@ fn tag_id(tag: str) -> u32 {
     if str_eq(tag, "dead") {
         return 18;
     }
+    if str_eq(tag, "gok") {
+        return 22;
+    }
+    if str_eq(tag, "gtrap") {
+        return 23;
+    }
     return 9;   // sc_end
 }
 
@@ -2277,6 +2355,12 @@ fn tag_name(id: u32) -> str {
     }
     if id == 18 {
         return "dead";
+    }
+    if id == 22 {
+        return "gok";
+    }
+    if id == 23 {
+        return "gtrap";
     }
     return "sc_end";
 }
@@ -2517,6 +2601,71 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         lab_def(s, out, w + 2, "wend");
         return m + 1;
     }
+    if tok_is(src, toks, j, "guard") {   // P4/M36+M38: 域检查 + 审计计数
+        let ci: u32 = find_cap(s, src, toks, j + 1);
+        let ce: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0);
+        let clo: u32 = 0;
+        let chi: u32 = 0;
+        if ci != 4294967295 {
+            clo = load32(s, cap_base(ci) + 8);
+            chi = load32(s, cap_base(ci) + 12);
+        }
+        emit_str(s, out, "  ");
+        let v64: u32 = new_temp(s, out);
+        emit_str(s, out, " = zext i32 ");
+        emit_val(s, out, 0);
+        emit_str(s, out, " to i64\n  ");
+        let ge: u32 = new_temp(s, out);
+        emit_str(s, out, " = icmp uge i64 %t");
+        emit_dec(s, out, v64);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, clo);
+        emit_str(s, out, "\n  ");
+        let le: u32 = new_temp(s, out);
+        emit_str(s, out, " = icmp ule i64 %t");
+        emit_dec(s, out, v64);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, chi);
+        emit_str(s, out, "\n  ");
+        let gokv: u32 = new_temp(s, out);
+        emit_str(s, out, " = and i1 %t");
+        emit_dec(s, out, ge);
+        emit_str(s, out, ", %t");
+        emit_dec(s, out, le);
+        emit_str(s, out, "\n");
+        let gw: u32 = load32(s, 480) + 1;
+        store32(s, 480, gw + 1);
+        emit_str(s, out, "  br i1 %t");
+        emit_dec(s, out, gokv);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, gw, "gok");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, gw + 1, "gtrap");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, gw + 1, "gtrap");
+        emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+        store32(s, 476, 1);
+        lab_def(s, out, gw, "gok");
+        emit_str(s, out, "  ");
+        let ap: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr [16 x i64], ptr @__loment_audit, i32 0, i32 ");
+        emit_dec(s, out, ci);
+        emit_str(s, out, "\n  ");
+        let aold: u32 = new_temp(s, out);
+        emit_str(s, out, " = load i64, ptr %t");
+        emit_dec(s, out, ap);
+        emit_str(s, out, "\n  ");
+        let anw: u32 = new_temp(s, out);
+        emit_str(s, out, " = add i64 %t");
+        emit_dec(s, out, aold);
+        emit_str(s, out, ", 1\n  store i64 %t");
+        emit_dec(s, out, anw);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, ap);
+        emit_str(s, out, "\n");
+        return ce + 1;
+    }
     // 表达式语句 (调用/内建): NAME ( ... ) ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
         let e6: u32 = expr_bin(s, out, src, toks, j, 1, 0);
@@ -2745,6 +2894,18 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
 /// (它们引用 `@__loment_*`) 时需运行时文本块。
 /// 输出是顺序写的, 而运行时块要落在横幅之后、函数之前, 所以必须先判定再写横幅。
 /// 语义等价于 lomentc 的 `"@__loment_" in text_all` —— 本 codegen 目前只有这三个来源会引用它。
+/// 全文 (含 import 拼接进来的依赖) 是否出现过某个标识符。
+fn contains_ident(src: ptr, toks: ptr, text: str) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, text) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn runtime_needed(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
@@ -2752,7 +2913,7 @@ fn runtime_needed(src: ptr, toks: ptr) -> u32 {
             return 1;
         }
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")
-                || tok_is(src, toks, i, "str_eq")) {
+                || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "guard")) {
             return 1;
         }
         i = i + 1;
@@ -2832,10 +2993,35 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         i = i + 1;
     }
     store32(s, 520, sn);
+    // 能力域表: name_tok | space_tok | lo | hi | revocable
+    let cn: u32 = 0;
+    i = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "capability") && cn < 64 {
+            store32(s, cap_base(cn), i + 1);
+            store32(s, cap_base(cn) + 4, i + 3);
+            store32(s, cap_base(cn) + 8, tok_int(src, toks, i + 5));
+            store32(s, cap_base(cn) + 12, tok_int(src, toks, i + 8));
+            store32(s, cap_base(cn) + 16, 0);
+            if tok_is(src, toks, i + 10, "revocable") {
+                store32(s, cap_base(cn) + 16, 1);
+            }
+            cn = cn + 1;
+        }
+        i = i + 1;
+    }
+    store32(s, 536, cn);
     emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
     emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
+    }
+    if contains_ident(src, toks, "guard") == 1 {   // P4/M38: 审计计数全局
+        emit_str(s, out, "@__loment_audit = internal global [16 x i64] zeroinitializer\n\n");
+    }
+    if load32(s, 536) != 0 {   // P4/M35: 域描述表 (space 取 FNV-1a 32 位)
+        emit_caps_table(s, out, src, toks);
+        emit_str(s, out, "\n");
     }
     if load32(s, 516) == 1 {
         emit_str(s, out, "@__loment_heap = internal global [65536 x i8] zeroinitializer\n@__loment_off = internal global i32 0\n\n");
