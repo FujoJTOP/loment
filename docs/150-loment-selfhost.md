@@ -230,22 +230,39 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 
 另有一处 token 层 off-by-one：`->` 是两个 token，所以返回类型在 `)` 之后第 3 个位置。
 
-## M83–M86 · 未做（诚实说明）
+## M83 · 自编译（编译器编译自身）✅ 部分 · M84 · 三阶段定点 ✅
+
+**判据与证据**（`loment_p8_test::test_m83_m84_self_compile_and_fixed_point`，
+也可由 `python tools/loment_bootstrap.py` 一条命令复现）：
+
+| 阶段 | 怎么来的 | 结果 |
+|---|---|---|
+| stage1 | **Python 版** `lomentc` 编译 `loment/selfhost/codegen.lomt`（连同 Loment 版 lexer）→ `.ll` → clang 链出可执行文件 | 可运行 |
+| stage2 | **stage1 自己产出的 `.ll`** → clang 链出（M83：编译器编译自己的产出可运行） | 可运行 |
+| stage3 | stage2 的产出 → clang 链出 | 可运行 |
+| **M84 定点** | stage1 / stage2 / stage3 各自生成 `codegen.lomt` 的 IR，三者**逐字节相同** | **637115 B，全等** |
+
+定点不是巧合：stage2 对 `checker.lomt`、`ir_div.lomt` 的产出也与参考实现逐字节一致。
+
+**诚实边界（M83 记为"部分"的原因）**：自编译覆盖的是 **Loment 版 lexer + IR 后端**。
+- 前端 `parser`/`checker` 虽已自举（M80/M81），但**没有接进同一个驱动可执行文件**（当前由 C 驱动
+  提供 `main` 与文件读取，Loment 侧提供 `lex` 与 `emit_module`）；
+- 后端还**不支持泛型单态化 / trait 静态派发 / `match`+枚举 / 能力域**，所以它还不能编译任意程序
+  —— 这正是 M85（自举版跑 `lomentc_test`）还到不了的原因。
+
+## M85–M86 · 未做（诚实说明）
 
 | # | 里程碑 | 为什么现在做不了 |
 |---|---|---|
-| M83 | 自编译（编译器编译自身） | 依赖 M82 覆盖全语言（当前只有常量/参数返回子集） |
-| M84 | 三阶段定点校验 | 依赖 M83 |
-| M85 | 自举编译器跑 `lomentc_test` | 依赖 M83 |
-| M86 | 自举性能优化 | 依赖 M83 |
+| M85 | 自举编译器跑 `lomentc_test` | 需要自举后端覆盖**全语言**：泛型单态化（参考实现靠 `prepare()` 在 AST 上改名，自举版只吃 token 流，要在 token 层重建实例化命名）、trait 派发、`match`+枚举、能力域；并要把 lexer/parser/checker/codegen 接进同一驱动 |
+| M86 | 自举性能优化 | 依赖 M85 |
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
-并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82）。
+并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
+且**四段都能被 Loment 版 codegen 编译出与参考逐字节相同的 IR**（见上文各节），
+后端进而达到三阶段定点（M84）。
 M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 30 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
-缺口集中在聚合类型（7：枚举+match / 泛型 / trait / RAII）、`for`（4）、`match`/枚举（3）、能力域（2）、除法（2）、`syscall`（1）；
-也就是说 M82 目前覆盖的是"标量 + 控制流 + 除法 + 指针/位域内建 + 常量 + 依赖拼接单元"这一层，
-M83 自编译还需要聚合类型与字符串/切片内建。
-
+缺口集中在聚合类型（7：枚举+match / 泛型 / trait / RAII）、`for`（4）、`match`/枚举（3）、能力域（2）、除法（2）、`syscall`（1）。
 ## M87 · 引导脚本 ✅
 
 `python tools/loment_bootstrap.py` —— 一条命令走完自举前端：

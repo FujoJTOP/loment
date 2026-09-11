@@ -527,6 +527,56 @@ def _run_codegen(exe: Path, target: Path, td: str) -> str:
         return ""
 
 
+def _build_from_ll(ll: Path, td: str, name: str) -> Path:
+    """用给定的 .ll + 同一个 C 驱动链出可执行文件 —— 自举多阶段复用 (M83/M84)。"""
+    c = Path(td) / f"{name}_drv.c"
+    c.write_text(CODEGEN_DRIVER, encoding="utf-8")
+    exe = Path(td) / f"{name}.exe"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "-O1", "-o", str(exe), str(c), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return exe
+
+
+@test
+def test_m83_m84_self_compile_and_fixed_point():
+    """M83/M84: 自举编译器编译自身 -> 可运行二进制; 三阶段产物逐字节相同 (定点)。
+
+    stage1 = 由 **Python 版** lomentc 编译 Loment 版 codegen 得到的可执行文件;
+    stage2 = 由 **stage1 自己产出的 IR** 链出的可执行文件 (M83: 编译器编译自己的产出可运行);
+    stage3 = 由 stage2 的产出链出。M84 判据 = 第 2/3 阶段产物逐字节相同。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe1 = _build_codegen(td)                      # stage1
+        s1 = _run_codegen(exe1, CODEGEN, td)           # stage1 产出的 codegen.lomt 的 IR
+        mod = lomentc.load(CODEGEN)
+        deps = lomentc.resolve_deps(mod, ROOT, CODEGEN.parent, entry=CODEGEN)
+        assert s1 == lomentc.emit_llvm(mod, ROOT, deps), "stage1 产物与参考不一致 (M82 回归)"
+        ll1 = Path(td) / "s1.ll"
+        ll1.write_text(s1, encoding="utf-8")
+        exe2 = _build_from_ll(ll1, td, "stage2")       # M83
+        s2 = _run_codegen(exe2, CODEGEN, td)
+        assert s2 == s1, "M84: 第 2 阶段产物与第 1 阶段不一致 (未定点)"
+        ll2 = Path(td) / "s2.ll"
+        ll2.write_text(s2, encoding="utf-8")
+        exe3 = _build_from_ll(ll2, td, "stage3")       # 三阶段
+        s3 = _run_codegen(exe3, CODEGEN, td)
+        assert s3 == s2, "M84: 第 3 阶段产物与第 2 阶段不一致 (未定点)"
+        # 定点不能是巧合: 第 2 阶段对别的单元也要与参考一致
+        for target in (ROOT / "loment" / "selfhost" / "checker.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_div.lomt"):
+            m2 = lomentc.load(target)
+            d2 = lomentc.resolve_deps(m2, ROOT, target.parent, entry=target)
+            assert _run_codegen(exe2, target, td) == lomentc.emit_llvm(m2, ROOT, d2), \
+                f"stage2 在 {target.name} 上与参考不一致"
+        print(f"      定点: stage1 == stage2 == stage3 ({len(s1)}B); stage2 对 checker/ir_div 亦一致")
+
+
 @test
 def test_m82_coverage_report():
     """M82 进度表: 对全部示例跑 Loment 版 codegen 并与 Python 版逐字节比对。

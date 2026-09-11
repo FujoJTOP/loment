@@ -40,12 +40,14 @@ def step_artifacts() -> list[str]:
 
 
 def step_checks() -> list[str]:
-    """跑三项自举对照 (M79/M80/M81)。"""
+    """跑自举对照 (M79/M80/M81 前端 + M82/M83/M84 后端与定点)。"""
     import loment_p8_test as T
     failed = []
     for fn in (T.test_m79_loment_lexer_matches_python,
                T.test_m80_loment_parser_ast_dump,
-               T.test_m81_loment_checker_matches_python):
+               T.test_m81_loment_checker_matches_python,
+               T.test_m82_loment_codegen_byte_identical,
+               T.test_m83_m84_self_compile_and_fixed_point):
         try:
             fn()
         except AssertionError as e:
