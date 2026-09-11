@@ -14,7 +14,7 @@ module codegen
 // 状态块: 0=输出游标 4=temp 计数 12=参数个数 512=需运行时文本块
 //         值栈: 第 k 层 长度@8192+72k, 文本@8196+72k (容量 68), k=0..40
 //         scratch 656.. (16B)
-//         实参类型 608.. 函数计数 640  struct 表 1024..6144
+//         实参类型 720+(层)*4 (16 层) 十进制数字缓冲 672..704 函数计数 640  struct 表 1024..6144
 //         函数表 12288.. 当前函数参数表 16384.. 局部表 20480.. 每函数形参类型 24576+i*64
 //         scratch 48000.. (状态块 49152)
 use "loment/examples/bytes.lomt"
@@ -478,11 +478,17 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// 表达式类型推断 (镜像 lomentc.expr_type 的标量子集); 0 = 未知。
 fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     if tok_kind(toks, j) == 1 {
+        if tok_is(src, toks, j + 1, "as") {   // 字面量的 `as T`
+            return j + 2;
+        }
         return 0;
     }
     if tok_kind(toks, j) == 0 {
         if tok_is(src, toks, j, "true") || tok_is(src, toks, j, "false") {
             return j;
+        }
+        if tok_is(src, toks, j + 1, "as") {   // `x as T`
+            return j + 2;
         }
         if tok_is(src, toks, j + 1, ".") {   // M23: 字段类型
             let vt: u32 = var_type(s, src, toks, j);
@@ -495,7 +501,11 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             }
             return 0;
         }
-        if tok_is(src, toks, j + 1, "(") {
+        if tok_is(src, toks, j + 1, "(") {   // 调用 (可能带 `as T` 后缀)
+            let cp: u32 = skip_parens(src, toks, j + 1);
+            if tok_is(src, toks, cp + 1, "as") {
+                return cp + 2;
+            }
             let fi: u32 = find_fn(s, src, toks, j);
             if fi != 4294967295 {
                 return fn_ret(s, fi);
@@ -505,6 +515,10 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
     if tok_is(src, toks, j, "(") {
+        let rp2: u32 = skip_parens(src, toks, j);
+        if tok_is(src, toks, rp2 + 1, "as") {
+            return rp2 + 2;
+        }
         return expr_type(s, src, toks, j + 1);
     }
     if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
@@ -750,7 +764,11 @@ fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
 
 /// `as T` 后缀: 按位宽与符号性选 trunc/sext/zext (与 lomentc 同规则)。
 fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl: u32) -> u32 {
-    let sw: u32 = bit_width(from_t, src, toks);
+    // from_t == 0 时按 u32 处理 (镜像 lomentc 的 `st or "u32"`: 打印与位宽都用 i32)
+    let sw: u32 = 32;
+    if from_t != 0 {
+        sw = bit_width(from_t, src, toks);
+    }
     let dw: u32 = bit_width(to_t, src, toks);
     if sw == dw && from_t == to_t {
         return 0;   // 同类型: 不加指令
@@ -896,6 +914,62 @@ fn arg1(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, lvl: u32) -> u32 {
     return r;
 }
 
+/// 整数字面量的十进制文本写进第 lvl 层, 返回位数。
+/// 十进制原样 (去前导 0); 十六进制走**长乘 16 加**转十进制 —— 支持 > u32 的字面量
+/// (`0x100000000` 这类; lomentc 用 Python 大整数, 这里用十进制数字缓冲 672..704)。
+fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32) -> u32 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    if !(n >= 2 && load8(src, st) == 48 && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88)) {
+        let k: u32 = 0;
+        while k + 1 < n && load8(src, st + k) == 48 {
+            k = k + 1;
+        }
+        let c0: u32 = 0;
+        while k + c0 < n {
+            store8(s, btxt(s, lvl) + c0, load8(src, st + k + c0) as u8);
+            c0 = c0 + 1;
+        }
+        store32(s, blen(s, lvl), c0);
+        return c0;
+    }
+    store8(s, 672, 0 as u8);
+    let nd: u32 = 1;
+    let k2: u32 = 2;
+    while k2 < n {
+        let c: u32 = load8(src, st + k2);
+        let dv: u32 = 0;
+        if c >= 48 && c <= 57 {
+            dv = c - 48;
+        } else if c >= 97 && c <= 102 {
+            dv = c - 87;
+        } else if c >= 65 && c <= 70 {
+            dv = c - 55;
+        }
+        let carry: u32 = dv;
+        let j: u32 = 0;
+        while j < nd {
+            let v: u32 = load8(s, 672 + j) * 16 + carry;
+            store8(s, 672 + j, (v % 10) as u8);
+            carry = v / 10;
+            j = j + 1;
+        }
+        while carry > 0 {
+            store8(s, 672 + nd, (carry % 10) as u8);
+            carry = carry / 10;
+            nd = nd + 1;
+        }
+        k2 = k2 + 1;
+    }
+    let q: u32 = 0;
+    while q < nd {
+        store8(s, btxt(s, lvl) + q, (48 + load8(s, 672 + nd - 1 - q)) as u8);
+        q = q + 1;
+    }
+    store32(s, blen(s, lvl), nd);
+    return nd;
+}
+
 /// 整数字面量的值 (十进制或 0x 十六进制) —— lomentc 内联的是**十进制**文本。
 fn tok_int(src: ptr, toks: ptr, i: u32) -> u32 {
     let st: u32 = load32(toks, i * 20 + 4);
@@ -1005,7 +1079,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         return j + 1;
     }
     if tok_kind(toks, j) == 1 {
-        set_dec_val(s, lvl, tok_int(src, toks, j));   // 十六进制也按十进制内联
+        set_int_lit(s, lvl, src, toks, j);   // 十进制/十六进制都按十进制内联 (支持 > u32)
         let e0: u32 = j + 1;
         if tok_is(src, toks, e0, "as") {
             apply_cast(s, out, src, toks, 0, e0 + 1, lvl);
@@ -1017,7 +1091,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, lvl);
         let e1: u32 = e + 1;
         if tok_is(src, toks, e1, "as") {
-            apply_cast(s, out, src, toks, 0, e1 + 1, lvl);
+            apply_cast(s, out, src, toks, expr_type(s, src, toks, j + 1), e1 + 1, lvl);
             return e1 + 2;
         }
         return e1;
@@ -1305,13 +1379,15 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             return k12 + 1;
         }
         if tok_is(src, toks, j, "str_byte") {   // 字节指针 + 下标
+            // 顺序同 lomentc: 取指针 (extractvalue 0) 落在**第 2 个实参之前**
             let k13: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            let k14: u32 = arg1(s, out, src, toks, k13, lvl + 1);
             emit_str(s, out, "  ");
             let bp: u32 = new_temp(s, out);
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
             emit_val(s, out, lvl);
-            emit_str(s, out, ", 0\n  ");
+            emit_str(s, out, ", 0\n");
+            let k14: u32 = arg1(s, out, src, toks, k13, lvl + 1);
+            emit_str(s, out, "  ");
             let bg: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds i8, ptr %t");
             emit_dec(s, out, bp);
@@ -1462,7 +1538,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         let k: u32 = j + 2;
         let a: u32 = 0;
-        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 4 {
+        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 8 {
             // 实参按"形参类型"强制 (与 lomentc 的 expr(a, p.type) 同序同型)
             let ft: u32 = 0;
             if fi != 4294967295 {
@@ -1470,7 +1546,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             }
             let at: u32 = ft;
             let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
-            store32(s, 608 + a * 4, at);
+            // 实参类型槽按**值栈层**索引: 嵌套调用的实参不能覆盖外层已记好的槽
+            store32(s, 720 + (lvl + 1 + a) * 4, at);
             k = ae;
             if tok_is(src, toks, k, ",") {
                 k = k + 1;
@@ -1494,7 +1571,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             if b > 0 {
                 emit_str(s, out, ", ");
             }
-            let at2: u32 = load32(s, 608 + b * 4);
+            let at2: u32 = load32(s, 720 + (lvl + 1 + b) * 4);
             emit_ty(s, out, src, toks, at2);
             emit_str(s, out, " ");
             emit_val(s, out, lvl + 1 + b);
@@ -1526,7 +1603,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     // 模块级常量: 生成期内联成十进制字面量 (优先于变量查找, 与 lomentc 同序)
     let cvt: u32 = find_const(src, toks, j);
     if cvt != 0 {
-        set_dec_val(s, lvl, tok_int(src, toks, cvt));
+        set_int_lit(s, lvl, src, toks, cvt);
         let ce: u32 = j + 1;
         if tok_is(src, toks, ce, "as") {
             apply_cast(s, out, src, toks, 0, ce + 1, lvl);

@@ -1,0 +1,28 @@
+module ir_call5
+
+// M82 目标文件 (多参数调用子集): 形参类型多样 + 5 个实参, 用于钉住调用点按**形参类型**强制实参。
+// 生成: python tools/lomentc.py loment/selfhost/ir_call5.lomt --emit-llvm out.ll
+
+fn take5(a: ptr, b: ptr, c: ptr, d: u32, e: u32) -> u32 {
+    return d + e;
+}
+
+fn use5(p: ptr, q: ptr, r: ptr, x: u32) -> u32 {
+    return take5(p, q, r, x, 1);
+}
+
+fn take_mixed(a: u32, b: ptr) -> u32 {
+    return a;
+}
+
+fn use_mixed(p: ptr, n: u32) -> u32 {
+    return take_mixed(n, p);
+}
+
+fn use_nested(p: ptr, q: ptr, r: ptr, n: u32) -> u32 {
+    return take5(p, q, r, load32(p, n), n);
+}
+
+fn load32(p: ptr, off: u32) -> u32 {
+    return off;
+}

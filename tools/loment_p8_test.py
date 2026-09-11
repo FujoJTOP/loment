@@ -452,7 +452,8 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_mem.lomt",
                        ROOT / "loment" / "selfhost" / "ir_for.lomt",
                        ROOT / "loment" / "selfhost" / "ir_div.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_builtin.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_call5.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)
@@ -516,7 +517,9 @@ def _run_codegen(exe: Path, target: Path, td: str) -> str:
     except Exception:  # noqa: BLE001
         text = target.read_text(encoding="utf-8")
     unit = Path(td) / f"unit_{target.stem}.lomt"
-    unit.write_text(text, encoding="utf-8")
+    # 必须写 LF: 驱动按原始字节读文件, 而 lomentc.load 用 read_text (通用换行) ——
+    # CRLF 会让字符串字面量里多出 \0D (自举 codegen 就是这么抓到的)
+    unit.write_text(text, encoding="utf-8", newline="\n")
     try:
         return subprocess.run([shutil.which(str(exe)) or str(exe), str(unit)],
                               capture_output=True, text=True, timeout=30, shell=False).stdout
@@ -535,7 +538,8 @@ def test_m82_coverage_report():
         print("      SKIP: 无 clang")
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
-             "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt"]
+             "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt",
+             "ir_call5.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff = [], []
