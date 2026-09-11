@@ -1538,11 +1538,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         let k: u32 = j + 2;
         let a: u32 = 0;
-        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 8 {
+        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 16 {
             // 实参按"形参类型"强制 (与 lomentc 的 expr(a, p.type) 同序同型)
             let ft: u32 = 0;
             if fi != 4294967295 {
-                ft = load32(s, 24576 + fi * 64 + a * 8 + 4);
+                ft = load32(s, 24576 + fi * 128 + a * 8 + 4);
             }
             let at: u32 = ft;
             let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
@@ -2496,9 +2496,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
             // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)
             let pi: u32 = lp + 1;
             let pk: u32 = 0;
-            while pi < rp && pk < 8 {
-                store32(s, 24576 + n * 64 + pk * 8, pi);
-                store32(s, 24576 + n * 64 + pk * 8 + 4, pi + 2);
+            while pi < rp && pk < 16 {
+                store32(s, 24576 + n * 128 + pk * 8, pi);
+                store32(s, 24576 + n * 128 + pk * 8 + 4, pi + 2);
                 pk = pk + 1;
                 pi = pi + 3;
                 if tok_is(src, toks, pi, ",") {
