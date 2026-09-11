@@ -1,0 +1,39 @@
+module ir_div
+
+// M82 目标文件 (除法/取模子集): 除零走 trap 跳转块, 并触发 freestanding 运行时文本块;
+// 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致。
+
+fn udiv32(a: u32, b: u32) -> u32 {
+    return a / b;
+}
+
+fn sdiv32(a: i32, b: i32) -> i32 {
+    return a / b;
+}
+
+fn urem32(a: u32, b: u32) -> u32 {
+    return a % b;
+}
+
+fn srem32(a: i32, b: i32) -> i32 {
+    return a % b;
+}
+
+fn quot_rem(a: u32, b: u32) -> u32 {
+    return a / b % b;
+}
+
+fn deep(x: u32, d: u32) -> u32 {
+    return x * 2 + 10 / d;
+}
+
+fn guarded(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        return 0;
+    }
+    return a / b;
+}
+
+fn both(a: u32, b: u32) -> bool {
+    return a != 0 && a / b != 0;
+}

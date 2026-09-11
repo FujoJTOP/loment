@@ -279,16 +279,32 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 | ✅ 部分（4 规则、单编译单元） |
-| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（7 个目标文件；示例级覆盖 7/35，门禁打印缺口分类） |
+| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（8 个目标文件；示例级覆盖 9/36，门禁打印缺口分类） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
-| M88 校验和 | `loment_release --checksums` 101 行 sha256 | ✅ 部分（tag 未推送） |
+| M88 校验和 | `loment_release --checksums` 110 行 sha256 | ✅ 部分（tag 未推送） |
+
+### P8 证据补充（2026-09-10，M82 除法/取模）
+
+```
+python tools/loment_p8_test.py     # 5/5
+# 示例覆盖 9/36 字节一致 (8 个 ir_*.lomt 锚点 + toolchain.lomt)
+# 缺口分类: 聚合/切片/字符串 18 · 内建 16 · 除法 9 · for 7 · syscall 5 · match/枚举 4 · 能力域 2
+python tools/lomentc_test.py       # 89/89
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M82 除法/取模 | `ir_div.lomt`（`/` `%` 的 8 个函数，含 `10 / d`、`if` 后再除、`&&` 里的除法）逐字节一致 | ✅ |
+| M82 运行时文本块 | 出现过 `/` `%` 时插入整段 `_IR_RUNTIME`（横幅后、函数前） | ✅ |
+| M82 phi 前驱 | 除法落在 `&&` 右操作数时前驱必须是 `%L_dend`（标签 tag_id 表补 `dok/dtrap/dend`） | ✅ 实测（去掉后第 5210 字节起不一致） |
+| M82 `for` 循环 | `ir_for.lomt`（`for i in 0..n`，u32/i32 两种符号性）逐字节一致 | ✅ |
 
 ### P9/P10 证据（2026-09-09，M89–M99）
 
 ```
 python tools/loment_p9_test.py           # 2/2 (M89 25 示例 / M92 aarch64 交叉)
 python tools/loment_manual.py --check    # 25/25 与编译器版本一致 (M93)
-python tools/loment_release.py --check   # 98/98 工件 sha256 一致 (M95/M99)
+python tools/loment_release.py --check   # 110/110 工件 sha256 一致 (M95/M99)
 ```
 
 | 里程碑 | 验证方式 | 结果 |
@@ -300,7 +316,7 @@ python tools/loment_release.py --check   # 98/98 工件 sha256 一致 (M95/M99)
 | M93 手册站点 | `docs/manual/` 带编译器版本戳 | ✅ |
 | M96 冻结 | — | ⚠️ 未冻结 |
 | M97/M98 | 设计决策表 + 四语言对比矩阵 | ✅ |
-| M99 复现包 | 98 工件 sha256 可复现 | ✅ |
+| M99 复现包 | 110 工件 sha256 可复现 | ✅ |
 | M100 发布审计 | — | ⚠️ 1.0-pre |
 
 ## P2 · 内存与运行时语义（M13–M22）
@@ -419,7 +435,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
-| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（表达式/控制流/短路/转换/内建；见 docs/150） |
+| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/内建/`for`/除法；示例级 9/36；见 docs/150） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |
 | M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 |
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 |

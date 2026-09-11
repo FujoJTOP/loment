@@ -1,7 +1,8 @@
 # 150 · Loment 自举（P8，M79–M88）
 
-> 状态: **进行中**（2026-09-09）· 已完成: M79 · 部分: M80（子集）· 自检: `tools/loment_p8_test.py` 2/2
-> 门禁: `ci.py --static-only` 10/10
+> 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法子集）· 自检: `tools/loment_p8_test.py` 5/5
+> M82 逐字节一致: 36 个示例中 9 个（8 个 `ir_*.lomt` 锚点 + `toolchain.lomt`）
+> 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
 
 ## M79 · Loment 版 lexer ✅
 
@@ -76,7 +77,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 
 `loment/selfhost/codegen.lomt`：读取 M79 token 流，直接生成 LLVM IR 文本。判据是
 **逐字节**：`loment_p8_test::test_m82_*` 把 Loment 版输出与 `lomentc --emit-llvm` 的结果
-做字符串相等比较，两个目标文件共 17 个函数：
+做字符串相等比较，8 个目标文件共 48 个函数：
 
 - `loment/selfhost/ir_const.lomt`：字面量/参数返回（u32/u64/i16/bool）；
 - `loment/selfhost/ir_expr.lomt`：二元运算符（按 `lomentc.PRECEDENCE` 爬升、含
@@ -92,21 +93,30 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
   与 `lomentc` 的 `cur_label` 同义）；
 - `loment/selfhost/ir_cast.lomt`：**`as` 转换**（按位宽与符号性选 `trunc` / `sext` / `zext`，
   字面量与 `bool` 转换按 `st or "u32"` 缺省规则处理），**含实参位置**——调用点按被调方的
-  **形参类型**强制实参（符号表为每个函数存 8 个形参类型槽，与 `lomentc` 的 `expr(a, p.type)` 同义）。
+  **形参类型**强制实参（符号表为每个函数存 8 个形参类型槽，与 `lomentc` 的 `expr(a, p.type)` 同义）；
+- `loment/selfhost/ir_mem.lomt`：内建 `load8` / `store8`（`getelementptr i8` + `load i8` +
+  `zext i8 ... to i32`；`store8` 的结果值按 `lomentc` 取字面量 `0`），以及 `load8(...) as T` 后缀；
+- `loment/selfhost/ir_for.lomt`：**`for i in lo..hi`**（`store lo` → `L_fcond/L_fbody/L_fend` 三块，
+  条件块里**重新取**循环变量与上界，自增写回 `%i.addr`；比较的符号性按
+  `expr_type(lo) or expr_type(hi) or u32` 决定 `slt`/`ult`，与 `lomentc._collect_locals` 同规则）；
+- `loment/selfhost/ir_div.lomt`：**除法与取模**（`udiv/sdiv/urem/srem` 由结果类型的符号性选），
+  除零走 `%L_dtrap` 块（`call void @__loment_abort()` + `unreachable`），且一旦出现过 `/` `%` 就
+  在横幅之后、函数之前插入**整段 freestanding 运行时文本块**（与 `lomentc._IR_RUNTIME` 逐字节相同）。
 
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 35 个示例文件）：除法/取模（需要跳转块 + `__loment_abort` 运行时）、
-其余内建（`alloc`/`free`/`atomic_add`/`str_*`/`syscall*`/位域等）、`match`、str/聚合类型、
-能力域表与 DWARF 元数据。每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`）。
+**未覆盖**（相对 36 个示例文件，逐字节一致 9 个）：其余内建（`alloc`/`free`/`atomic_add`/
+`str_*`/`syscall*`/位域等）、`match`、str/聚合类型、能力域表与 DWARF 元数据。
+每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
+`ir_*.lomt` 目标文件是对应的防回归锚点。
 
 **核心设计（两阶段值栈）**：`expr_*` 先把指令写进输出，再把"值文本"落到值栈的第 `lvl` 层；
 调用方随后把该值内联到自己的行里。这正是 Python 版用字符串拼接达到的效果——
 嵌套表达式因此能与 Python 版保持**完全相同的指令顺序**。值栈 8 层 × 72B，
 实参类型槽与函数/参数符号表各自的偏移都在状态块里（`docs` 记于代码注释）。
 
-调试过程中踩到并修掉的五个真问题（都是"读代码看不出来、跑起来才现形"的）：
+调试过程中踩到并修掉的真问题（现象 → 根因）：
 
 | # | 现象 | 根因 |
 |---|---|---|
@@ -118,6 +128,13 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | 6 | 局部 alloca 混进了别的函数 | `collect_locals` 扫到了整个文件 → 传入函数体的匹配 `}` 作为上界（`skip_block`） |
 | 7 | 标签从 `L0_` 起编号 | `lomentc` 的标签从 1 起 → 基准取 `+1`、计数 `+2` |
 | 8 | `if`/`while` 体里第一条语句被跳过 | 体起点算成 `'{' + 2` → 应为 `'{' + 1` |
+| 9 | 调用语句整条消失 | `stmt` 缺"表达式语句"分支（`NAME ( ... ) ;`） |
+| 10 | `take8(v as u8)` 少一次 `trunc` | `as` 后缀没接在**调用/内建**分支上 |
+| 11 | `for` 变量没有 alloca | `collect_locals` 只认 `let` → 把 `for` 变量也登记（类型同 `lomentc` 的回退链） |
+| 12 | `for i in 0..n`（`n: i32`）生成 `ult` | 符号性只看了 `lo`（字面量 → 无类型 → 落到 u32）→ 改为 `expr_type(lo) or expr_type(hi)` |
+| 13 | 除法结果号比 `icmp eq` 的号小 | `lomentc` 先占 `r` 再占 `z` → 拆出只占号不写输出的 `alloc_temp` |
+| 14 | 除法出现在 `&&` 右操作数时 phi 前驱写成 `%L6_sc_end` | 标签 tag_id 表没有 `dok/dtrap/dend`（默认落在 `sc_end`）→ 补 tag_id/tag_name（**实测**：去掉后第 5210 字节起不一致，且是指向不存在块的非法 IR） |
+| 15 | 除法目标文件缺整段运行时 | 输出是顺序写的，而运行时块要落在横幅之后、函数之前 → 预扫描 `/` `%` punct token（语义等价于 `lomentc` 的 `"@__loment_" in text_all`） |
 
 另有一处 token 层 off-by-one：`->` 是两个 token，所以返回类型在 `)` 之后第 3 个位置。
 
@@ -132,8 +149,9 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82）。
-M82 的子集边界清楚：把"值先算指令再内联"的两阶段设计推广到二元表达式与调用，
-是把它推到全语言的第一步。
+M82 的剩余清单还没有走完：**36 个示例文件里逐字节一致 9 个**（8 个 `ir_*.lomt` 锚点 + `toolchain.lomt`），
+缺口集中在聚合/切片/字符串类型（18 个文件）、其余内建（16）、`syscall`（5）、`match`/枚举（4）；
+也就是说 M82 目前覆盖的是"标量 + 控制流 + 除法"这一层，M83 自编译还需要聚合类型与全部内建。
 
 ## M87 · 引导脚本 ✅
 

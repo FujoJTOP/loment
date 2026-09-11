@@ -450,7 +450,8 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_logic.lomt",
                        ROOT / "loment" / "selfhost" / "ir_cast.lomt",
                        ROOT / "loment" / "selfhost" / "ir_mem.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_for.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_for.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_div.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)
@@ -468,14 +469,14 @@ def test_m82_loment_codegen_byte_identical():
 def test_m82_coverage_report():
     """M82 进度表: 对全部示例跑 Loment 版 codegen 并与 Python 版逐字节比对。
 
-    已知可通过的 6 个目标文件必须继续通过(防回归); 其余示例的差异数作为"M82 彻底完成"
+    已知可通过的目标文件必须继续通过(防回归); 其余示例的差异数作为"M82 彻底完成"
     的进度分母打印出来 —— 覆盖到全部示例 = M82 完成 (见 docs/150 剩余清单)。
     """
     if not _clang():
         print("      SKIP: 无 clang")
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
-             "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt"]
+             "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff = [], []
