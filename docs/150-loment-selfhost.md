@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
 > 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 38 个示例中 33 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
+> M82 逐字节一致: 38 个示例中 35 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
 > **自举四阶段全部能编译自身**：`lexer` / `parser` / `checker` / `codegen` 四个 `.lomt` 的 `.ll` 与
 > `lomentc --emit-llvm` **逐字节一致**（26028B / 115464B / 83148B / 557828B，差异行均为 0）
 > 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
@@ -116,7 +116,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64/ptr）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 38 个示例文件，逐字节一致 33 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
+**未覆盖**（相对 38 个示例文件，逐字节一致 35 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
 `slice_len`/`str_ptr`/`syscall*`）、`match`、str/切片/数组/struct/枚举等聚合类型、能力域表与 DWARF 元数据。
 每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
 `ir_*.lomt` 目标文件是对应的防回归锚点。
@@ -203,6 +203,18 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 数组则用字面量长度。**`let` 的类型位置改成 `skip_type`**（类型可能是 `[T]`/`[T; N]`）；
 **形参扫描也必须用 `skip_type`** —— 原来按"3 个 token 一个参数"步进，遇到 `xs: [u32]` 会多出一个幻影参数
 （`i64 %u32`），函数表的形参类型扫描同样中招。
+
+**泛型单态化（M6/M7）**：状态块低区（值栈搬到 8192 后 `16..475` 全空）放**类型参数替换表**
+（计数 16，表项 `24+i*8` = `param_tok|value_tok`），`subst_tok` 挂在三类"类型来源"上：
+`emit_ty`/`emitted_name` 的入口、`param_type`/`var_type`/`field_type`/`enum_payload_type` 的返回。
+类型实参**不需要额外存**——`let p: Pair<u32>` 的类型 token 后面就是 `<` `u32` `>`，
+所以 `var_targ`/`push_ty_subst` 直接从标注位置读；要区分"声明的形参"与"使用的实参"（同一个 `Pair` token
+两处含义不同），就在 struct/enum 表里各留两个槽（stride 80 的空位 `+72`/`+76`）记下声明处的形参 token。
+实例按"首次被用到"的顺序登记在 `64` 起的表里（`72+i*12` = `fn_tok|t1|t2`），非泛型函数发完后逐个发射，
+每个实例推入自己的实参映射、名字拼成 `基名_实参`；调用点用 `expr_type(第一个实参)` 推断类型实参、
+登记实例、再发 mangled 名与替换后的形参类型。泛型声明本身整条跳过。
+`skip_type` 也要会跳过 `<...>`（`let p: Pair<u32>` 的类型解析）；struct/enum 表扫描要跳过 `<T>` 找 `{`。
+解锁 `native_gen.lomt` 与 `all_loment.lomt`（多模块+泛型）。
 
 **trait 静态派发（M8）**：注册期识别 `impl`/`trait` 块 —— `trait` 声明里的 `fn` 只有签名（整条跳过，
 不然会被当成空函数发射），`impl X for Y` 的方法登记为 kind=2 并记住接收者类型；发射时名字变成
@@ -291,7 +303,7 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
 且**四段都能被 Loment 版 codegen 编译出与参考逐字节相同的 IR**（见上文各节），
 后端进而达到三阶段定点（M84）。
-M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 33 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
+M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 35 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
 缺口集中在聚合类型（5：泛型单态化 / trait / RAII / Result+`?`）、`for`（3）、除法（2）、内建（2）、`match`/枚举（2）、`syscall`（1）、能力域（1）。
 ## M87 · 引导脚本 ✅
 

@@ -179,6 +179,10 @@ fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
 // ---------------------------------------------------------------- 类型
 
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    let stt: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 类型参数 -> 具体类型
+    if stt != tt {
+        return emit_ty(s, out, src, toks, stt);
+    }
     if tt == 4294967295 {   // UNIT: 无 `-> T` 的函数
         return emit_str(s, out, "void");
     }
@@ -240,6 +244,10 @@ fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
 
 /// 类型 token 名 (供注释行用): tt==0 时缺省 "u32"。
 fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    let stn: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 注释里也要用具体类型
+    if stn != tt {
+        return emitted_name(s, out, src, toks, stn);
+    }
     if tt == 4294967295 {
         return emit_str(s, out, "()");
     }
@@ -481,7 +489,7 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 16384 + i * 8 + 4);
+                return subst_tok(s, src, toks, load32(s, 16384 + i * 8 + 4));
             }
         }
         i = i + 1;
@@ -510,7 +518,10 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             if si != 4294967295 {
                 let fi: u32 = field_index(s, src, toks, si, j + 2);
                 if fi != 4294967295 {
-                    return field_type(s, si, fi);
+                    let vsub: u32 = push_ty_subst(s, src, toks, vt);   // 变量自己的实例化
+                    let fr: u32 = field_type(s, src, toks, si, fi);
+                    pop_subst(s, vsub);
+                    return fr;
                 }
             }
             return 0;
@@ -539,6 +550,162 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         return expr_type(s, src, toks, j + 1);
     }
     return 0;
+}
+
+// ---------------------------------------------------------------- 单态化 (M6/M7, docs/156)
+
+/// 类型参数替换表: 计数@16, 表项@24+i*8 (param_tok | value_tok)。
+/// 值栈搬到 8192 之后, 状态块的 16..475 是空的, 这里就放在最前面。
+fn sub_clear(s: ptr) {
+    store32(s, 16, 0);
+}
+
+fn sub_push(s: ptr, ptok: u32, vtok: u32) {
+    let n: u32 = load32(s, 16);
+    store32(s, 24 + n * 8, ptok);
+    store32(s, 24 + n * 8 + 4, vtok);
+    store32(s, 16, n + 1);
+}
+
+/// 若 tt 正好是当前实例的类型参数, 换成具体类型 token (不在表里则原样返回)。
+fn subst_tok(s: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == 0 {
+        return 0;
+    }
+    let n: u32 = load32(s, 16);
+    let i: u32 = 0;
+    while i < n {
+        if tok_eq(src, toks, load32(s, 24 + i * 8), tt) == 1 {
+            return load32(s, 24 + i * 8 + 4);
+        }
+        i = i + 1;
+    }
+    return tt;
+}
+
+/// 声明处的类型参数 (name_tok 后面紧跟 `<`): 返回 tparam 下标 which 的 token, 无则 0。
+/// `fn max<T>` / `struct Pair<T>` / `enum Opt<T>` 都是同一个形状。
+fn decl_tparam(src: ptr, toks: ptr, name_tok: u32, which: u32) -> u32 {
+    if !tok_is(src, toks, name_tok + 1, "<") {
+        return 0;
+    }
+    if which == 0 {
+        return name_tok + 2;
+    }
+    if which == 1 {
+        return name_tok + 4;   // `<T, U>`: `<` T `,` U `>`
+    }
+    return 0;
+}
+
+/// 变量/参数的类型实参 (从其类型 token 后面的 `<...>` 直接读, 无需额外表):
+/// `let p: Pair<u32>` -> 类型 token 是 `Pair`, 实参在 `Pair+2`。
+fn var_targ(s: ptr, src: ptr, toks: ptr, name_tok: u32, which: u32) -> u32 {
+    let ty: u32 = var_type(s, src, toks, name_tok);
+    if ty == 0 || !tok_is(src, toks, ty + 1, "<") {
+        return 0;
+    }
+    if which == 0 {
+        return ty + 2;
+    }
+    if which == 1 {
+        return ty + 4;
+    }
+    return 0;
+}
+
+/// 从"带类型实参的类型标注"推入替换表 (`Pair<u32>` -> Pair 的 tparam <-> u32),
+/// 返回推入条数 (调用方据此 pop)。这样实例体内与字段表里的 `T` 都能解析。
+fn push_ty_subst(s: ptr, src: ptr, toks: ptr, ty_tok: u32) -> u32 {
+    if ty_tok == 0 || !tok_is(src, toks, ty_tok + 1, "<") {
+        return 0;
+    }
+    // 同一个 `Pair` token 在声明处与使用处含义不同: 形参要从**声明**取, 实参从使用处取
+    let p1: u32 = 0;
+    let p2: u32 = 0;
+    let si: u32 = find_struct(s, src, toks, ty_tok);
+    if si != 4294967295 {
+        p1 = load32(s, struct_base(si) + 72);
+        p2 = load32(s, struct_base(si) + 76);
+    } else {
+        let ei: u32 = find_enum(s, src, toks, ty_tok);
+        if ei != 4294967295 {
+            p1 = load32(s, enum_base(ei) + 72);
+            p2 = load32(s, enum_base(ei) + 76);
+        }
+    }
+    let n: u32 = 0;
+    if p1 != 0 {
+        sub_push(s, p1, ty_tok + 2);
+        n = 1;
+    }
+    if p2 != 0 && tok_is(src, toks, ty_tok + 3, ",") {
+        sub_push(s, p2, ty_tok + 4);
+        n = n + 1;
+    }
+    return n;
+}
+
+fn pop_subst(s: ptr, n: u32) {
+    store32(s, 16, load32(s, 16) - n);
+}
+
+/// 函数表下标 fi 是否来自泛型声明 (声明名后面紧跟 `<`)。
+fn is_generic_fn(s: ptr, src: ptr, toks: ptr, fi: u32) -> u32 {
+    if fi == 4294967295 {
+        return 0;
+    }
+    if tok_is(src, toks, load32(s, 12288 + fi * 12) + 1, "<") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 实例表: 计数@64, 表项@72+i*12 (fn_tok | t1 | t2) —— 按"首次被用到"的顺序追加。
+fn inst_count(s: ptr) -> u32 {
+    return load32(s, 64);
+}
+
+fn inst_find(s: ptr, src: ptr, toks: ptr, fn_tok: u32, ta: u32, tb: u32) -> u32 {
+    let n: u32 = load32(s, 64);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = 72 + i * 12;
+        if tok_eq(src, toks, load32(s, b), fn_tok) == 1
+                && tok_eq(src, toks, load32(s, b + 4), ta) == 1
+                && tok_eq(src, toks, load32(s, b + 8), tb) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 登记实例 (已存在则返回既有下标)。
+fn inst_add(s: ptr, src: ptr, toks: ptr, fn_tok: u32, ta: u32, tb: u32) -> u32 {
+    let got: u32 = inst_find(s, src, toks, fn_tok, ta, tb);
+    if got != 4294967295 {
+        return got;
+    }
+    let n: u32 = load32(s, 64);
+    store32(s, 72 + n * 12, fn_tok);
+    store32(s, 72 + n * 12 + 4, ta);
+    store32(s, 72 + n * 12 + 8, tb);
+    store32(s, 64, n + 1);
+    return n;
+}
+
+/// 发射实例的函数名 (不含 `@`): 基名 + "_" + 各类型实参文本。
+fn emit_inst_name(s: ptr, out: ptr, src: ptr, toks: ptr, ent: u32) -> u32 {
+    let b: u32 = 72 + ent * 12;
+    emit_tok(s, out, src, toks, load32(s, b) + 1);   // fn_tok 的下一个 token = 函数名
+    emit_str(s, out, "_");
+    emit_tok(s, out, src, toks, load32(s, b + 4));
+    if load32(s, b + 8) != 0 {
+        emit_str(s, out, "_");
+        emit_tok(s, out, src, toks, load32(s, b + 8));
+    }
+    return st_o(s);
 }
 
 // ---------------------------------------------------------------- trait/impl 表 (M8)
@@ -635,8 +802,8 @@ fn enum_variant_index(s: ptr, src: ptr, toks: ptr, ei: u32, vt: u32) -> u32 {
 }
 
 /// 变体载荷类型 token (0 = 无载荷)。
-fn enum_payload_type(s: ptr, ei: u32, k: u32) -> u32 {
-    return load32(s, enum_base(ei) + 16 + k * 8 + 4);
+fn enum_payload_type(s: ptr, src: ptr, toks: ptr, ei: u32, k: u32) -> u32 {
+    return subst_tok(s, src, toks, load32(s, enum_base(ei) + 16 + k * 8 + 4));
 }
 
 /// 枚举的 LLVM 类型: 有载荷 -> `{ i32, i64 }`, 无载荷 -> `i32` (镜像 _ll_type)。
@@ -702,8 +869,8 @@ fn field_index(s: ptr, src: ptr, toks: ptr, si: u32, fname: u32) -> u32 {
     return 4294967295;
 }
 
-fn field_type(s: ptr, si: u32, k: u32) -> u32 {
-    return load32(s, struct_base(si) + 8 + k * 8 + 4);
+fn field_type(s: ptr, src: ptr, toks: ptr, si: u32, k: u32) -> u32 {
+    return subst_tok(s, src, toks, load32(s, struct_base(si) + 8 + k * 8 + 4));
 }
 
 /// struct 的 LLVM 类型串 (镜像 `_ll_type`: `{ i32, i32 }`)。
@@ -715,7 +882,7 @@ fn emit_struct_ty(s: ptr, out: ptr, src: ptr, toks: ptr, si: u32) -> u32 {
         if k > 0 {
             emit_str(s, out, ", ");
         }
-        emit_ty(s, out, src, toks, field_type(s, si, k));
+        emit_ty(s, out, src, toks, field_type(s, src, toks, si, k));
         k = k + 1;
     }
     return emit_str(s, out, " }");
@@ -919,7 +1086,25 @@ fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
         }
         return j;
     }
-    return i + 1;
+    let nx: u32 = i + 1;
+    if tok_is(src, toks, nx, "<") {   // 泛型实参列表: Pair<u32> / Result<u32, u32>
+        let d: u32 = 0;
+        let j: u32 = nx;
+        while tok_kind(toks, j) != 4 {
+            if tok_is(src, toks, j, "<") {
+                d = d + 1;
+            }
+            if tok_is(src, toks, j, ">") {
+                d = d - 1;
+                if d == 0 {
+                    return j + 1;
+                }
+            }
+            j = j + 1;
+        }
+        return j;
+    }
+    return nx;
 }
 
 // ---------------------------------------------------------------- 能力域 (P4)
@@ -1814,6 +1999,19 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         if fi != 4294967295 {
             ret = fn_ret(s, fi);
         }
+        let gen: u32 = is_generic_fn(s, src, toks, fi);
+        let gent: u32 = 0;
+        let gsub: u32 = 0;
+        if gen == 1 {
+            // 类型实参由第一个实参的类型推出 (与 lomentc 的 scope 推导同义)
+            let it1: u32 = expr_type(s, src, toks, j + 2);
+            gent = inst_add(s, src, toks, load32(s, 12288 + fi * 12) - 1, it1, 0);
+            let gp1: u32 = decl_tparam(src, toks, load32(s, 12288 + fi * 12), 0);
+            if gp1 != 0 {
+                sub_push(s, gp1, load32(s, 72 + gent * 12 + 4));
+                gsub = 1;
+            }
+        }
         let k: u32 = j + 2;
         let a: u32 = 0;
         while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 16 {
@@ -1842,7 +2040,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_str(s, out, "call ");
         emit_ty(s, out, src, toks, ret);
         emit_str(s, out, " @");
-        emit_tok(s, out, src, toks, j);
+        if gen == 1 {
+            emit_inst_name(s, out, src, toks, gent);
+        } else {
+            emit_tok(s, out, src, toks, j);
+        }
         emit_str(s, out, "(");
         let b: u32 = 0;
         while b < a {
@@ -1861,6 +2063,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         } else {
             set_temp_val(s, lvl, n);
         }
+        pop_subst(s, gsub);
         let ec: u32 = k + 1;
         if tok_is(src, toks, ec, "as") {   // 调用结果上的 as
             apply_cast(s, out, src, toks, ret, ec + 1, lvl);
@@ -1887,7 +2090,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         if ei != 4294967295 {
             vi = enum_variant_index(s, src, toks, ei, j + 3);
             if vi != 4294967295 {
-                pt = enum_payload_type(s, ei, vi);
+                pt = enum_payload_type(s, src, toks, ei, vi);
             }
         }
         if pt == 0 || !tok_is(src, toks, j + 4, "(") {
@@ -2076,7 +2279,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_is(src, toks, dot, ".") {   // M23: 字段访问 p.a -> GEP + load
         let si: u32 = find_struct(s, src, toks, ty);
         let fi: u32 = field_index(s, src, toks, si, dot + 1);
-        let ft: u32 = field_type(s, si, fi);
+        let ft: u32 = field_type(s, src, toks, si, fi);
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -2399,7 +2602,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         return jj;
     }
     emit_str(s, out, "; ");
-    if fkind == 2 {                          // impl 方法: 注释也用 mangled 名
+    if load32(s, 60) != 4294967295 {          // 泛型实例: 名字 = 基名_实参
+        emit_inst_name(s, out, src, toks, load32(s, 60));
+    } else if fkind == 2 {                    // impl 方法: 注释也用 mangled 名
         emit_method_name(s, out, src, toks, load32(s, 472));
     } else {
         emit_tok(s, out, src, toks, base + 1);
@@ -2410,7 +2615,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     emit_str(s, out, "define ");
     emit_ty(s, out, src, toks, ret);
     emit_str(s, out, " @");
-    if fkind == 2 {                          // impl 方法: 名字 = <接收者类型>_<方法>
+    if load32(s, 60) != 4294967295 {          // 泛型实例
+        emit_inst_name(s, out, src, toks, load32(s, 60));
+    } else if fkind == 2 {                    // impl 方法: 名字 = <接收者类型>_<方法>
         emit_method_name(s, out, src, toks, load32(s, 472));
     } else {
         emit_tok(s, out, src, toks, base + 1);
@@ -2421,7 +2628,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if a > 0 {
             emit_str(s, out, ", ");
         }
+        let sa: u32 = push_ty_subst(s, src, toks, load32(s, 16384 + a * 8 + 4));
         emit_ty(s, out, src, toks, load32(s, 16384 + a * 8 + 4));
+        pop_subst(s, sa);
         emit_str(s, out, " %");
         emit_name_tok(s, out, src, toks, load32(s, 16384 + a * 8));
         a = a + 1;
@@ -2432,7 +2641,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "  %");
         emit_name_tok(s, out, src, toks, load32(s, 16384 + b * 8));
         emit_str(s, out, ".addr = alloca ");
+        let sb: u32 = push_ty_subst(s, src, toks, load32(s, 16384 + b * 8 + 4));
         emit_ty(s, out, src, toks, load32(s, 16384 + b * 8 + 4));
+        pop_subst(s, sb);
         emit_str(s, out, "\n");
         b = b + 1;
     }
@@ -2441,7 +2652,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "  %");
         emit_name_tok(s, out, src, toks, load32(s, 20480 + bl * 8));
         emit_str(s, out, ".addr = alloca ");
+        let sl: u32 = push_ty_subst(s, src, toks, load32(s, 20480 + bl * 8 + 4));
         emit_ty(s, out, src, toks, load32(s, 20480 + bl * 8 + 4));
+        pop_subst(s, sl);
         emit_str(s, out, "\n");
         bl = bl + 1;
     }
@@ -2665,7 +2878,7 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 20480 + i * 8 + 4);
+                return subst_tok(s, src, toks, load32(s, 20480 + i * 8 + 4));
             }
         }
         i = i + 1;
@@ -2709,13 +2922,20 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let name: u32 = j + 1;
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        // `let p: Pair<u32>` 的类型实参: 先推入替换, 再处理右侧 (字面量分支也要在表内)
+        let lsub: u32 = push_ty_subst(s, src, toks, ty);
         if is_array_tok(src, toks, ty) == 1 && tok_is(src, toks, eq + 1, "[") {
-            return let_array_lit(s, out, src, toks, name, ty, eq + 1);
+            let arr_e: u32 = let_array_lit(s, out, src, toks, name, ty, eq + 1);
+            pop_subst(s, lsub);
+            return arr_e;
         }
         if tok_eq(src, toks, eq + 1, ty) && tok_is(src, toks, eq + 2, "{") {   // struct 字面量
-            return let_struct_lit(s, out, src, toks, name, ty, eq + 2);
+            let st_e: u32 = let_struct_lit(s, out, src, toks, name, ty, eq + 2);
+            pop_subst(s, lsub);
+            return st_e;
         }
         let e2: u32 = expr_bin(s, out, src, toks, eq + 1, 1, 0);
+        pop_subst(s, lsub);
         emit_str(s, out, "  store ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, " ");
@@ -2964,7 +3184,8 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 emit_str(s, out, ":\n");
                 if tok_is(src, toks, k3 + 4, "(") {   // 载荷绑定
                     let vt3: u32 = enum_variant_index(s, src, toks, ei, k3 + 3);
-                    let pt3: u32 = enum_payload_type(s, ei, vt3);
+                    let pstub: u32 = push_ty_subst(s, src, toks, st);   // 主体的实例化
+                    let pt3: u32 = enum_payload_type(s, src, toks, ei, vt3);
                     let raw: u32 = alloc_temp(s);   // new_temp 会自己写 %tN, 这里手写
                     emit_str(s, out, "  %t");
                     emit_dec(s, out, raw);
@@ -2993,6 +3214,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                         emit_name_tok(s, out, src, toks, k3 + 5);
                         emit_str(s, out, ".addr\n");
                     }
+                    pop_subst(s, pstub);
                 }
                 let be: u32 = skip_block(src, toks, p3 + 2);
                 let s3: u32 = p3 + 3;   // '{' 之后
@@ -3271,7 +3493,9 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                     if tok_is(src, toks, mp, ":") && tok_is(src, toks, mp + 1, ":")
                             && tok_is(src, toks, mp + 3, "(") {
                         let mvt: u32 = enum_variant_index(s, src, toks, mei, mp + 2);
-                        let mpt: u32 = enum_payload_type(s, mei, mvt);
+                        let mstub: u32 = push_ty_subst(s, src, toks, st);   // `match a` 的 a: Opt<u32>
+                        let mpt: u32 = enum_payload_type(s, src, toks, mei, mvt);
+                        pop_subst(s, mstub);
                         let mbn: u32 = mp + 4;
                         if mpt != 0 && mbn < mstop {
                             let mdup: u32 = 0;
@@ -3529,7 +3753,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "struct") && sn < 64 {
             store32(s, struct_base(sn), i + 1);
-            let fld: u32 = i + 3;   // 跳过 '{'
+            let sbrace: u32 = i + 2;
+            while tok_kind(toks, sbrace) != 4 && !tok_is(src, toks, sbrace, "{") {
+                sbrace = sbrace + 1;   // 跳过 `struct Pair<T>` 的 `<T>`
+            }
+            let fld: u32 = sbrace + 1;
             let nf: u32 = 0;
             while !tok_is(src, toks, fld, "}") && tok_kind(toks, fld) != 4 && nf < 8 {
                 store32(s, struct_base(sn) + 8 + nf * 8, fld);
@@ -3538,6 +3766,14 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
                 fld = fld + 4;   // name ':' type ','
             }
             store32(s, struct_base(sn) + 4, nf);
+            store32(s, struct_base(sn) + 72, 0);   // 类型形参 (声明处) <T> / <T, U>
+            store32(s, struct_base(sn) + 76, 0);
+            if tok_is(src, toks, i + 2, "<") {
+                store32(s, struct_base(sn) + 72, i + 3);
+                if tok_is(src, toks, i + 4, ",") {
+                    store32(s, struct_base(sn) + 76, i + 5);
+                }
+            }
             sn = sn + 1;
         }
         i = i + 1;
@@ -3567,7 +3803,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "enum") && en < 64 {
             store32(s, enum_base(en), i + 1);
-            let vt: u32 = i + 3;   // 跳过 '{'
+            let ebrace: u32 = i + 2;
+            while tok_kind(toks, ebrace) != 4 && !tok_is(src, toks, ebrace, "{") {
+                ebrace = ebrace + 1;   // 跳过 `enum Opt<T>` 的 `<T>`
+            }
+            let vt: u32 = ebrace + 1;
             let nv: u32 = 0;
             let hasp: u32 = 0;
             while !tok_is(src, toks, vt, "}") && tok_kind(toks, vt) != 4 && nv < 8 {
@@ -3587,6 +3827,14 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
             }
             store32(s, enum_base(en) + 4, nv);
             store32(s, enum_base(en) + 8, hasp);
+            store32(s, enum_base(en) + 72, 0);
+            store32(s, enum_base(en) + 76, 0);
+            if tok_is(src, toks, i + 2, "<") {
+                store32(s, enum_base(en) + 72, i + 3);
+                if tok_is(src, toks, i + 4, ",") {
+                    store32(s, enum_base(en) + 76, i + 5);
+                }
+            }
             en = en + 1;
         }
         i = i + 1;
@@ -3611,11 +3859,16 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         emit_str_globals(s, out, src, toks);
         emit_str(s, out, "\n");
     }
+    store32(s, 64, 0);       // 实例表: 按"首次被用到"的顺序追加
+    store32(s, 60, 4294967295);   // 当前正在发射的实例 (NONE = 不是实例)
     i = 0;
     let fnix: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
-            if load32(s, fk_base(fnix)) == 1 {   // trait 声明里的方法: 只有签名, 整条跳过
+            if is_generic_fn(s, src, toks, fnix) == 1 {   // 泛型声明本身不发射 (只发实例)
+                let gb: u32 = find_body(src, toks, find_paren(src, toks, i + 2));
+                i = skip_block(src, toks, gb - 1);
+            } else if load32(s, fk_base(fnix)) == 1 {   // trait 声明里的方法: 只有签名, 整条跳过
                 let trp: u32 = skip_parens(src, toks, find_paren(src, toks, i + 2));
                 let tq: u32 = trp + 1;
                 while tok_kind(toks, tq) != 4 && !tok_is(src, toks, tq, ";") {
@@ -3633,6 +3886,36 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         } else {
             i = i + 1;
         }
+    }
+    // 实例发射: 按发现序, 每个实例推入自己的类型实参替换, 再当作普通函数发射一遍
+    let ie: u32 = 0;
+    let ic: u32 = load32(s, 64);
+    while ie < ic {
+        let eb: u32 = 72 + ie * 12;
+        let efn: u32 = load32(s, eb);
+        let e1: u32 = load32(s, eb + 4);
+        let e2t: u32 = load32(s, eb + 8);
+        let esub: u32 = 0;
+        let ep1: u32 = decl_tparam(src, toks, efn + 1, 0);
+        if ep1 != 0 && e1 != 0 {
+            sub_push(s, ep1, e1);
+            esub = 1;
+        }
+        let ep2: u32 = decl_tparam(src, toks, efn + 1, 1);
+        if ep2 != 0 && e2t != 0 {
+            sub_push(s, ep2, e2t);
+            esub = esub + 1;
+        }
+        store32(s, 4, 0);
+        store32(s, 480, 0);
+        store32(s, 476, 0);
+        store32(s, 472, 0);
+        store32(s, 60, ie);
+        i = emit_fn(s, out, src, toks, efn);
+        store32(s, 60, 4294967295);
+        pop_subst(s, esub);
+        ic = load32(s, 64);   // 实例体内可能又发现新实例
+        ie = ie + 1;
     }
     return st_o(s);
 }
