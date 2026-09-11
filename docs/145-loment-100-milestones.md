@@ -104,6 +104,24 @@ Rust 路径：`&mut [T]` / `(&mut a)` / `xs[(i) as usize] = v`。类型规则：
 门禁：`lomentc_test` **78/78** · `ci.py --static-only` **4/4** · `lom_audit` 0 差异 · 8 条双路径示例全部逐值一致。
 新增 `as` 类型转换（`x as u8` → Rust `as` / IR `trunc|zext|sext`）与 unit 类型 `()`。
 
+### P3 收尾证据（2026-09-11，M30 裸机链接流程接上）
+
+```
+python tools/loment_tools_test.py   # 13/13
+# 裸机链: 2192B 对象 (0 未定义) -> 5448B 映像, _start @0x1000e0
+```
+
+M30 之前的判据只到"`-c` 出 `.o`"；链接那一步只写在文档里（下面的 P3 手抄命令），
+没有测试看着就会随编译器漂移静默失效。现在钉成 `test_m30_bare_metal_object_and_link`：
+
+| 判据 | 结果 |
+|---|---|
+| `native_entry.lomt` → IR → `x86_64-unknown-none` 对象，未定义符号为 0（M31：运行时不依赖 libc） | ✅ |
+| `ld.lld -T loment/build/loment.ld` 链成映像 | ✅ 5448B |
+| `ENTRY(_start)` 生效：`llvm-objdump -f` 的入口地址 == `_start` 的地址 `0x1000e0`（脚本布局 1 MiB 起） | ✅ |
+| `_start` / `timer_isr` 都在符号表里（M33 的 `x86_intrcc` 函数也被链进去） | ✅ |
+| 链接产物本身未定义符号也为 0（整套 = 一个能独立跑的映像） | ✅ |
+
 ### P3 收尾证据（2026-09-08，M31–M33）
 
 ```
@@ -113,7 +131,7 @@ llvm-nm native_str.o | grep " U "      # 空 = 无未定义符号
 
 # M32: 独立入口 + 链接脚本
 ld.lld -T loment/build/loment.ld native_entry.o -o native_entry.elf
-llvm-objdump -f native_entry.elf       # start address: 0x100000
+llvm-objdump -f native_entry.elf       # start address: 0x1000e0 (= _start 的地址)
 llvm-nm native_entry.elf               # T _start @0x1000e0, T timer_isr @0x100100
 
 # M33: 中断函数属性
@@ -423,7 +441,7 @@ python tools/loment_release.py --check   # 110/110 工件 sha256 一致 (M95/M99
 | M27 | 短路 `&&`/`\|\|`（phi 修正） | 副作用调用只执行一次 | ✅ |
 | M28 | 字符串/切片 IR | M1–M4 用例在原生路径通过 | ✅ 部分（字符串/切片 IR 已双路径一致；`concat`（M2 尾项）待做） |
 | M29 | 泛型单态化 IR | M6/M7 用例在原生路径通过 | ✅ |
-| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅ 部分（`-c` 出 1672 B 对象；链接流程未接） |
+| M30 | 裸机目标 `x86_64-unknown-none` | 产出 `.o` 无 libc 依赖 | ✅（对象 0 未定义符号；`ld.lld -T loment/build/loment.ld` 链成 5448B 映像，`ENTRY(_start)` 生效、`_start @0x1000e0`；`test_m30_bare_metal_object_and_link` 钉住） |
 | M31 | 无 libc 运行时（memcpy/memset 内联） | 链接后无未定义符号 | ✅ |
 | M32 | 自定义入口 + 链接脚本（与 FujoOS 对齐） | 产物能被 `kernel.ld` 布局吃下 | ✅ |
 | M33 | 中断/异常函数属性（naked/interrupt） | QEMU 中触发中断并返回 | ✅ 部分（`x86_intrcc` 就绪；IDT/QEMU 运行待 P7） |

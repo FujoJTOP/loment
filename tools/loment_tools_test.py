@@ -179,6 +179,66 @@ def test_m59_dwarf_line_table():
         assert "toolchain.lomt:" in dump, "行表里没有源文件行号"
 
 
+# ---------------------------------------------------------------- M30/M31/M32 裸机
+
+@test
+def test_m30_bare_metal_object_and_link():
+    """M30/M31/M32: `x86_64-unknown-none` 目标 → 无 libc 依赖的对象 → 按脚本链成映像。
+
+    这条链在此之前只有文档里的手工命令 (docs/145 的 P3 证据), 没有测试看着,
+    会随编译器漂移而静默失效 —— 这里把它钉成判据。
+    """
+    import subprocess
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 无 clang")
+        return
+    lld = r"C:\Program Files\LLVM\bin\ld.lld.exe"
+    if not Path(lld).exists():
+        print("      SKIP: 无 ld.lld")
+        return
+    nm = shutil.which("llvm-nm") or r"C:\Program Files\LLVM\bin\llvm-nm.exe"
+    objdump = shutil.which("llvm-objdump") or r"C:\Program Files\LLVM\bin\llvm-objdump.exe"
+    ld_script = ROOT / "loment" / "build" / "loment.ld"
+    assert ld_script.exists(), "缺链接脚本 loment/build/loment.ld"
+    entry = EX / "native_entry.lomt"
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(entry)
+        deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+        ll = Path(td) / "entry.ll"
+        ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+        obj = Path(td) / "entry.o"
+        r = subprocess.run([clang, "--target=x86_64-unknown-none", "-ffreestanding",
+                            "-nostdlib", "-c", str(ll), "-o", str(obj)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        # M31: 对象里不能有未定义符号 (运行时是内联的 __loment_memcmp/memset/abort)
+        undef = subprocess.run([nm, "-u", str(obj)], capture_output=True,
+                               text=True, shell=False).stdout.strip()
+        assert undef == "", f"裸机对象有未定义符号 (M31 回归): {undef[:200]}"
+        # M32: 按脚本链接
+        elf = Path(td) / "entry.elf"
+        r = subprocess.run([lld, "-T", str(ld_script), str(obj), "-o", str(elf)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        syms = subprocess.run([nm, str(elf)], capture_output=True, text=True,
+                              shell=False).stdout
+        assert "_start" in syms and "timer_isr" in syms, syms[:200]
+        # 入口地址必须等于 _start 的地址 (脚本 ENTRY(_start) 生效), 布局落在 1 MiB
+        addr = int(next(l.split()[0] for l in syms.splitlines()
+                        if l.split()[-1] == "_start"), 16)
+        assert addr == 0x1000E0, f"_start 不在脚本布局上: {addr:#x}"
+        head = subprocess.run([objdump, "-f", str(elf)], capture_output=True,
+                              text=True, shell=False).stdout
+        assert f"start address: 0x{addr:016x}" in head, head[:300]
+        # 链接产物同样不能有未定义符号 (整套 = 一个能独立跑的映像)
+        undef2 = subprocess.run([nm, "-u", str(elf)], capture_output=True,
+                                text=True, shell=False).stdout.strip()
+        assert undef2 == "", f"链接产物有未定义符号: {undef2[:200]}"
+        print(f"      裸机链: {obj.stat().st_size}B 对象 (0 未定义) -> "
+              f"{elf.stat().st_size}B 映像, _start @{addr:#x}")
+
+
 # ---------------------------------------------------------------- M60–M63 CLI
 
 @test

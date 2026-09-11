@@ -75,7 +75,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "168b9859df2aeda194152c8246f97e7a1e175a6143a41f4a644bb82087f59ef9"
+   "sha256": "0d03383b84c32ed061602b19fda322edb5e447d2899ce45a1c2ebd56e62b22c1"
   },
   {
    "path": "tools/loment_boot.py",
@@ -355,7 +355,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "a723f8a325e0e0e493d2094c3703d24ae459669ca13c3e67f1f821637da9fa59"
+   "sha256": "c5041d73c0cc49cca265d5dda85aa4c363bf7be303e62ac3a3befa761ebda7bf"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -399,7 +399,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "70e3ba69ce3e255ed4569bdaa23ba535a17db84f97f134718ed1ae40704b549a"
+   "sha256": "90f244c1969da9bcc01dd81bf9b5bccce4b90339cc7a8c72fb8f2356a9d351a7"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
