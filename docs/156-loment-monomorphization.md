@@ -56,7 +56,60 @@ define { i32, i64 } @parse_small(...)    <- LLVM 类型是结构化的, 与名�
 - **注释行**（`emitted_name`）输出实例名（`Result_u32_u32`）；
 - **LLVM 类型**（`emit_ty`）输出结构化结果（带载荷枚举 → `{ i32, i64 }`），它由*类型实参*决定。
 
-## 4. trait 静态派发（M8）
+同一个 `emitted_name` 还必须覆盖**非泛型的聚合类型名**，否则 `demo.lomt` 的
+`; fill_incr -> [` 就会少一截（这是当时仅剩的 9 行残差）：
+
+| 源码类型 | 注释里的写法 | LLVM 类型 |
+|---|---|---|
+| `[u32; 4]` | `[u32; 4]` | `[4 x i32]` |
+| `[u32]` | `[u32]` | `{ ptr, i64 }` |
+| `mut [u32]` | `mut [u32]` | `{ ptr, i64 }` |
+
+## 4. 泛型实例名要按"上下文"解析（`Result::Ok(v)`）
+
+源码里 `return Result::Ok(v);` 写的是**泛型基名** `Result`，参考实现靠
+`_fix_generic_literals` 把它改写成实例名：
+
+```python
+elif isinstance(s, Return):
+    if isinstance(s.expr, (EnumCtor, EnumPath)) and s.expr.enum in bases:
+        s.expr.enum = f.ret          # 按函数返回类型解析
+elif isinstance(s, Assign):
+    ... s.expr.enum = scope[s.target.name]   # 按赋值目标的类型解析
+```
+
+自举版没有 AST，等价做法是把"替换表"在**语句入口**压入：
+
+- `return <expr>;` → 用当前函数返回类型 `push_ty_subst(s, ret)`；
+- `let x: T = <枚举构造>;` → 用 `let` 的类型标注（`let` 分支本来就压了）；
+- `x = <枚举构造>;` → 用 `x` 的类型。
+
+函数返回类型不是泛型名时 `push_ty_subst` 直接返回 0，所以可以无条件调用。
+不这么做的话 `Result::Ok(v)` 的载荷类型会停在 `T` 上，`zext i32 … to i64` 那一步
+会被写成 `insertvalue … i64 <i32的值>`，IR 直接不合法。
+
+## 5. `?` 与 `if let` 是**反糖**，不是语法
+
+参考实现在发射前就把它们去掉了：
+
+- `if let` 在 **parser** 里变成 `Match(subj, [(EnumPath(..),then), (None,other)])`；
+- `let x: T = e?;` 在 `_desugar_try` 里变成
+  `let __t{line}: <rt> = e;  let x: T;  match __t{line} { Ok(__v{line}) => x = __v{line}; Err(__e{line}) => return Err(__e{line}); }`。
+
+`{line}` 是那句 `let` 的**行号**（`__t15` 的 15 来自源码行）。自举版只在 token 流上工作，
+所以这两条都得在**发射期直发那份 IR**，并且：标签按 `mend` → 命中臂 → `mwild` 的顺序占号，
+临时值按同一顺序 `alloc_temp()`。
+
+**局部表的名字槽是两种编码共用的**：`?` 造出的三个局部没有源码 token，
+所以用位 31 当"合成名"标志（`0x80000000 + k*0x1000000 + line`，k: 0=`t` 1=`v` 2=`e`）。
+按 token 文本比对名字之前必须先挡掉它 —— 否则会拿一个 20 亿量级的值当下标去读 token 缓冲。
+
+**预置枚举也必须可见**：`Option<T>`/`Result<T, E>` 不在任何示例源码里，是
+`lomentc.load()` 注入 `mod.enums` 的。原生后端按声明发聚合类型（`{ i32, i64 }`），
+所以喂给自举版 codegen 的"单元文本"必须同样注入（见 `_unit_text`）。
+判断"要不要注入"必须用**注入前**的模块 —— 拿 `load()` 的返回值判断永远为真。
+
+## 6. trait 静态派发（M8）
 
 金标（`native_trait.lomt`）：
 
@@ -82,18 +135,20 @@ define { i32, i64 } @parse_small(...)    <- LLVM 类型是结构化的, 与名�
   不重复生成。发现顺序即发射顺序（所以先发射完非泛型函数、再按发现序发实例）。
 - **调用点改名**：被调方是泛型时，名字要按 §1 拼出来（基名 token + `_` + 各类型 token 文本）。
 
-## 6. 现状与靶子
+## 8. 现状与靶子
 
 | 示例 | 差多少 | 卡在哪 |
 |---|---|---|
 | ~~`native_gen.lomt`~~ | **已达成**（2026-09-10） | 泛型函数实例化 + 泛型 struct/enum 类型替换全部落地 |
-| `native_res.lomt` | 112 行 | §3 的类型名改写（`Result_u32_u32`）+ `?` 的早退降级 |
-| ~~`native_trait.lomt`~~ | **已达成**（2026-09-10） | §4 全部落地：impl 改名 + `self`→`__self` + 方法调用解析 |
+| ~~`native_res.lomt`~~ | **已达成**（2026-09-11，3022B） | §3 类型名折叠 + §4 上下文解析 + §5 `?`/`if let` + 预置枚举注入 |
+| ~~`native_trait.lomt`~~ | **已达成**（2026-09-10） | §6 全部落地：impl 改名 + `self`→`__self` + 方法调用解析 |
 | ~~`all_loment.lomt`~~ | **已达成**（2026-09-10） | 多模块 + 泛型 |
-| `demo.lomt` | 141 行 | 泛型 + 能力域（能力域已在 2026-09-10 落地） |
-| `native_raii.lomt` | — | **不是目标**：连 Python 版都报错（Drop 只在 Rust 路径支持） |
+| ~~`demo.lomt`~~ | **已达成**（2026-09-11，10141B） | 残差只是 §3 的数组类型名（`[u32; 4]`），能力域/泛型早已落地 |
+| `native_raii.lomt` | — | **不是目标**：参考实现自己就报 `native: inb 暂未在 IR 后端实现 (M20 仅 Rust 路径)` |
 
-## 7. 复现命令
+**结论**：全部 37 个可发射示例逐字节一致 = M82 完成。
+
+## 9. 复现命令
 
 ```
 python tools/mono_trace.py loment/examples/native_gen.lomt     # 单个文件的实例/顺序/命名

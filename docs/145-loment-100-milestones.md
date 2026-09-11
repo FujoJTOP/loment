@@ -282,7 +282,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 | ✅ 部分（4 规则、单编译单元） |
-| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（9 个目标文件；示例级覆盖 35/38，门禁打印缺口分类） |
+| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅（目标覆盖 37/37；唯一非目标 `native_raii.lomt` 参考实现自身报 `inb` 未实现） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
 | M88 校验和 | `loment_release --checksums` 110 行 sha256 | ✅ 部分（tag 未推送） |
 
@@ -323,6 +323,27 @@ python tools/loment_p8_test.py     # 5/5
 | M82 表达式契约修正 | 内建分支返回位置统一为"其后"（`load8(p,off) + load8(p,off+1)*256` 曾只算前半） | ✅ |
 | M82 unit 类型 | `()` → `void`、函数尾补 `ret void`/`unreachable`、unit 调用不占寄存器 | ✅ |
 | M82 布尔字面量 | `while true` 曾生成 `load i32, ptr %true.addr` → 直接写字面量 `1` | ✅ |
+
+### P8 证据补充（2026-09-11，M82 收官：泛型实例名/预置枚举/`?`/`if let`）
+
+```
+python tools/loment_p8_test.py     # 6/6
+# 目标覆盖 37/37 字节一致
+# 非目标: native_raii.lomt (参考实现自己就发不出来 -> LomError 20:1: native: inb 暂未在 IR 后端实现)
+# 定点: stage1 == stage2 == stage3 (958762B); stage2 对 checker/ir_div 亦一致
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M82 类型名折叠 | 注释行的泛型实例名 = `基名_实参...`（`Pair<u32>`→`Pair_u32`、`Result<u32,u32>`→`Result_u32_u32`）。参考实现靠 `_rewrite_types` 改字面串，这里在 `emitted_name` 里等价折叠 | ✅ |
+| M82 数组/切片类型名 | 注释里按源码形态写回：`[u32; 4]` / `[T]` / `mut [T]`（`demo.lomt` 的 `fill_incr -> [u32; 4]` 曾是唯一残差） | ✅ |
+| M82 预置枚举可见性 | `Option`/`Result` 由 `lomentc.load` 注入 `mod.enums`；原生后端按声明发聚合类型，故夹具 `_unit_text` 必须同样注入（判据要用**注入前**的模块，拿 `load` 的返回值判断永远为真） | ✅ |
+| M82 泛型实例名解析 | `return Result::Ok(v)` 里的 `Result` 是**泛型基名**，实例要靠函数返回类型解析（镜像 `_fix_generic_literals` 的 `e.expr.enum = f.ret`）；`let x: T = Enum::V(..)` 由 `let` 的类型标注提供 | ✅ |
+| M82 `?` 早退 | `let x: T = e?;` 直发 `_desugar_try` 的产物（`__t{line}`/`__v{line}`/`__e{line}` + `switch` + Err 臂 `return Err(e)`），标签与临时编号同序占号 | ✅ |
+| M82 `if let` | `if let Enum::V(b) = e { } else { }` 直发 parser 反糖出的 Match（标签序 = `mend` / 命中臂 / `mwild`） | ✅ |
+| M82 合成局部名 | `?` 造出的三个局部没有源码 token；局部表名字槽用位 31 兼作"合成名"标志（编码 `0x80000000 + k*0x1000000 + line`），按 token 文本比对前必须先挡掉它（否则按合成值当下标读 token 缓冲会越界） | ✅ |
+| 真实示例解锁 | `native_res.lomt`（3022B）、`demo.lomt`（10141B）从"有差异"变为**逐字节一致** | ✅ |
+| M82 目标集 | 全部 37 个可发射示例逐字节一致（唯一剩下的 `native_raii.lomt` 参考实现自己就报错，非目标） | ✅ 完成 |
 
 ### P9/P10 证据（2026-09-09，M89–M99）
 
@@ -460,9 +481,9 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
-| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/`for`/除法/内建/常量内联；示例级 35/38；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150） |
-| M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅ 部分（自编译 lexer + IR 后端 → stage2 可运行；前端 parser/checker 未接同一驱动、泛型/trait/match 未支持） |
-| M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 637115B） |
+| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 37/37：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
+| M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅ 部分（IR 后端已能编译自身并产出可运行二进制、37/37 目标逐字节一致；但 lexer/parser/checker/codegen 还没有接成**同一个驱动**，端到端编译一个 .lomt 仍走四个独立阶段） |
+| M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 958762B；stage2 对 checker/ir_div 亦与参考一致） |
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 |
 | M86 | 自举性能优化 | 编译自身时间进入预算 |
 | M87 | 引导脚本与发布包 | 干净环境一键引导 | ✅（`tools/loment_bootstrap.py`） |

@@ -243,6 +243,8 @@ fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
 }
 
 /// 类型 token 名 (供注释行用): tt==0 时缺省 "u32"。
+/// 泛型实例在参考实现里是被 `_rewrite_types` 改名成 `Pair_u32` 的字面串, 这里等价地
+/// 按 `基名_实参1_实参2` 折叠 (docs/156 §3: 结构体名与枚举名同样参与改名)。
 fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     let stn: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 注释里也要用具体类型
     if stn != tt {
@@ -256,6 +258,38 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tok_is(src, toks, tt, "(") {   // 注释里 unit 写作 `()`
         return emit_str(s, out, "()");
+    }
+    if is_slice_tok(src, toks, tt) == 1 {   // 切片的注释形式与源码一致 (`[T]` / `mut [T]`)
+        if tok_is(src, toks, tt, "mut") {
+            emit_str(s, out, "mut [");
+        } else {
+            emit_str(s, out, "[");
+        }
+        emitted_name(s, out, src, toks, elem_tok(src, toks, tt));
+        return emit_str(s, out, "]");
+    }
+    if is_array_tok(src, toks, tt) == 1 {   // M24: 定长数组 -> `[T; N]`
+        emit_str(s, out, "[");
+        emitted_name(s, out, src, toks, elem_tok(src, toks, tt));
+        emit_str(s, out, "; ");
+        emit_dec(s, out, array_len_of(src, toks, tt));
+        return emit_str(s, out, "]");
+    }
+    if tok_kind(toks, tt) == 0 && tok_is(src, toks, tt + 1, "<") {
+        let si: u32 = find_struct(s, src, toks, tt);
+        let ei: u32 = find_enum(s, src, toks, tt);
+        if si != 4294967295 || ei != 4294967295 {
+            emit_tok(s, out, src, toks, tt);
+            emit_str(s, out, "_");
+            let a: u32 = tt + 2;
+            let r: u32 = emitted_name(s, out, src, toks, a);
+            let af: u32 = skip_type(src, toks, a);
+            if tok_is(src, toks, af, ",") {
+                emit_str(s, out, "_");
+                r = emitted_name(s, out, src, toks, af + 1);
+            }
+            return r;
+        }
     }
     return emit_tok(s, out, src, toks, tt);
 }
@@ -744,6 +778,34 @@ fn emit_name_tok(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
         return emit_str(s, out, "__self");
     }
     return emit_tok(s, out, src, toks, i);
+}
+
+/// `?` 的反糖 (lomentc._desugar_try) 会在 IR 里凭空造出 `__t{line}`/`__v{line}`/
+/// `__e{line}` 三个局部, 它们没有对应的源码 token。局部表的名字槽因此是两种编码共用
+/// 的 u32: 位 31 置位 = 合成名 (值 = 0x80000000 + k*0x1000000 + line, k: 0=t 1=v 2=e),
+/// 否则就是普通 token 下标 (真实下标远小于 2^31, 不会撞)。
+fn syn_name(k: u32, line: u32) -> u32 {
+    return 2147483648 + k * 16777216 + line;
+}
+
+fn emit_syn(s: ptr, out: ptr, k: u32, line: u32) -> u32 {
+    emit_str(s, out, "__");
+    if k == 0 {
+        emit_str(s, out, "t");
+    } else if k == 1 {
+        emit_str(s, out, "v");
+    } else {
+        emit_str(s, out, "e");
+    }
+    return emit_dec(s, out, line);
+}
+
+/// 发射局部名: 合成名走 emit_syn, 真实 token 走 emit_name_tok。
+fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if nm >= 2147483648 {
+        return emit_syn(s, out, (nm - 2147483648) / 16777216, nm % 16777216);
+    }
+    return emit_name_tok(s, out, src, toks, nm);
 }
 
 // ---------------------------------------------------------------- 枚举表 (M25/M26)
@@ -2582,7 +2644,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         let bi: u32 = 0;
         while bi < nl {
             emit_str(s, out, "  %");
-            emit_tok(s, out, src, toks, load32(s, 20480 + bi * 8));
+            emit_local_name(s, out, src, toks, load32(s, 20480 + bi * 8));
             emit_str(s, out, ".addr = alloca ");
             emit_ty(s, out, src, toks, load32(s, 20480 + bi * 8 + 4));
             emit_str(s, out, "\n");
@@ -2650,7 +2712,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
     while bl < nl {
         emit_str(s, out, "  %");
-        emit_name_tok(s, out, src, toks, load32(s, 20480 + bl * 8));
+        emit_local_name(s, out, src, toks, load32(s, 20480 + bl * 8));
         emit_str(s, out, ".addr = alloca ");
         let sl: u32 = push_ty_subst(s, src, toks, load32(s, 20480 + bl * 8 + 4));
         emit_ty(s, out, src, toks, load32(s, 20480 + bl * 8 + 4));
@@ -2867,7 +2929,8 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 484) {
         let nt: u32 = load32(s, 20480 + i * 8);
-        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+        // nt 可能是合成名 (位 31 置位), 那种槽位不能当下标去读 token 缓冲
+        if nt < 2147483648 && load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
             while k < load32(toks, name_tok * 20 + 8) {
@@ -2900,10 +2963,191 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     return n;
 }
 
+/// `let x: T = e?;` 的发射 —— 等价于 lomentc._desugar_try 的反糖产物:
+///   let __t{line}: <rt> = e;   let x: T;
+///   match __t{line} { Ok(__v{line}) => { x = __v{line}; }  Err(__e{line}) => { return Err(__e{line}); } }
+/// 标签与临时编号都按同一顺序占号, 所以直发即可 (不重建 AST)。
+fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u32, lt: u32) -> u32 {
+    let ln: u32 = load32(toks, lt * 20 + 12);
+    let rtt: u32 = expr_type(s, src, toks, eq + 1);
+    let rsub: u32 = push_ty_subst(s, src, toks, rtt);
+    let e2: u32 = expr_bin(s, out, src, toks, eq + 1, 1, 0);
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, rtt);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ptr %");
+    emit_syn(s, out, 0, ln);
+    emit_str(s, out, ".addr\n");
+    emit_str(s, out, "  ");
+    let sv: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, rtt);
+    emit_str(s, out, ", ptr %");
+    emit_syn(s, out, 0, ln);
+    emit_str(s, out, ".addr\n");
+    let ei: u32 = find_enum(s, src, toks, rtt);
+    let mend: u32 = load32(s, 480) + 1;
+    store32(s, 480, mend);
+    let lok: u32 = load32(s, 480) + 1;
+    store32(s, 480, lok);
+    let lerr: u32 = load32(s, 480) + 1;
+    store32(s, 480, lerr);
+    emit_str(s, out, "  ");
+    let tag: u32 = new_temp(s, out);
+    emit_str(s, out, " = extractvalue { i32, i64 } %t");
+    emit_dec(s, out, sv);
+    emit_str(s, out, ", 0\n");
+    emit_str(s, out, "  switch i32 %t");
+    emit_dec(s, out, tag);
+    emit_str(s, out, ", label %L");
+    emit_dec(s, out, mend);
+    emit_str(s, out, "_mend [\n      i32 0, label %L");
+    emit_dec(s, out, lok);
+    emit_str(s, out, "_mOk\n      i32 1, label %L");
+    emit_dec(s, out, lerr);
+    emit_str(s, out, "_mErr\n    ]\n");
+    store32(s, 476, 1);
+    // Ok 臂: 绑定载荷到 __v{line}, 臂体是 `x = __v{line}`
+    store32(s, 476, 0);
+    store32(s, 488, lok);
+    store32(s, 496, 0);
+    emit_str(s, out, "L");
+    emit_dec(s, out, lok);
+    emit_str(s, out, "_mOk:\n");
+    let psub: u32 = push_ty_subst(s, src, toks, rtt);
+    let okp: u32 = enum_payload_type(s, src, toks, ei, 0);
+    let raw: u32 = alloc_temp(s);
+    emit_str(s, out, "  %t");
+    emit_dec(s, out, raw);
+    emit_str(s, out, " = extractvalue { i32, i64 } %t");
+    emit_dec(s, out, sv);
+    emit_str(s, out, ", 1\n");
+    if bit_width(okp, src, toks) >= 64 {
+        emit_str(s, out, "  store i64 %t");
+        emit_dec(s, out, raw);
+        emit_str(s, out, ", ptr %");
+        emit_syn(s, out, 1, ln);
+        emit_str(s, out, ".addr\n");
+    } else {
+        let cv: u32 = alloc_temp(s);
+        emit_str(s, out, "  %t");
+        emit_dec(s, out, cv);
+        emit_str(s, out, " = trunc i64 %t");
+        emit_dec(s, out, raw);
+        emit_str(s, out, " to ");
+        emit_ty(s, out, src, toks, okp);
+        emit_str(s, out, "\n  store ");
+        emit_ty(s, out, src, toks, okp);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, cv);
+        emit_str(s, out, ", ptr %");
+        emit_syn(s, out, 1, ln);
+        emit_str(s, out, ".addr\n");
+    }
+    pop_subst(s, psub);
+    emit_str(s, out, "  ");
+    let lv: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, okp);
+    emit_str(s, out, ", ptr %");
+    emit_syn(s, out, 1, ln);
+    emit_str(s, out, ".addr\n  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, lv);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name);
+    emit_str(s, out, ".addr\n");
+    jump(s, out, mend, "mend");
+    // Err 臂: 绑定载荷到 __e{line}, 臂体是 `return Err(__e{line})`
+    store32(s, 476, 0);
+    store32(s, 488, lerr);
+    store32(s, 496, 0);
+    emit_str(s, out, "L");
+    emit_dec(s, out, lerr);
+    emit_str(s, out, "_mErr:\n");
+    let esub: u32 = push_ty_subst(s, src, toks, rtt);
+    let errp: u32 = enum_payload_type(s, src, toks, ei, 1);
+    let eraw: u32 = alloc_temp(s);
+    emit_str(s, out, "  %t");
+    emit_dec(s, out, eraw);
+    emit_str(s, out, " = extractvalue { i32, i64 } %t");
+    emit_dec(s, out, sv);
+    emit_str(s, out, ", 1\n");
+    if bit_width(errp, src, toks) >= 64 {
+        emit_str(s, out, "  store i64 %t");
+        emit_dec(s, out, eraw);
+        emit_str(s, out, ", ptr %");
+        emit_syn(s, out, 2, ln);
+        emit_str(s, out, ".addr\n");
+    } else {
+        let ecv: u32 = alloc_temp(s);
+        emit_str(s, out, "  %t");
+        emit_dec(s, out, ecv);
+        emit_str(s, out, " = trunc i64 %t");
+        emit_dec(s, out, eraw);
+        emit_str(s, out, " to ");
+        emit_ty(s, out, src, toks, errp);
+        emit_str(s, out, "\n  store ");
+        emit_ty(s, out, src, toks, errp);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, ecv);
+        emit_str(s, out, ", ptr %");
+        emit_syn(s, out, 2, ln);
+        emit_str(s, out, ".addr\n");
+    }
+    pop_subst(s, esub);
+    emit_str(s, out, "  ");
+    let elv: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, errp);
+    emit_str(s, out, ", ptr %");
+    emit_syn(s, out, 2, ln);
+    emit_str(s, out, ".addr\n  ");
+    let a1: u32 = new_temp(s, out);
+    emit_str(s, out, " = insertvalue ");
+    emit_ty(s, out, src, toks, rtt);
+    emit_str(s, out, " undef, i32 1, 0\n  ");
+    let c1: u32 = new_temp(s, out);
+    emit_str(s, out, " = ");
+    if is_signed(src, toks, errp) == 1 {
+        emit_str(s, out, "sext ");
+    } else {
+        emit_str(s, out, "zext ");
+    }
+    emit_ty(s, out, src, toks, errp);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, elv);
+    emit_str(s, out, " to i64\n  ");
+    let b1: u32 = new_temp(s, out);
+    emit_str(s, out, " = insertvalue ");
+    emit_ty(s, out, src, toks, rtt);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, a1);
+    emit_str(s, out, ", i64 %t");
+    emit_dec(s, out, c1);
+    emit_str(s, out, ", 1\n  ret ");
+    emit_ty(s, out, src, toks, load32(s, 552));
+    emit_str(s, out, " %t");
+    emit_dec(s, out, b1);
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    jump(s, out, mend, "mend");
+    lab_def(s, out, mend, "mend");
+    pop_subst(s, rsub);
+    return eq;
+}
+
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "return") {
+        // `return Result::Ok(v)` 里的枚举名是**泛型基名**, 实例要靠函数返回类型解析
+        // (镜像 lomentc._fix_generic_literals 对 Return 分支做的 e.expr.enum = f.ret)。
+        // 非泛型返回类型时 push_ty_subst 直接返回 0 —— 无副作用。
+        let rsub: u32 = push_ty_subst(s, src, toks, ret);
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
+        pop_subst(s, rsub);
         emit_str(s, out, "  ret ");
         emit_ty(s, out, src, toks, ret);
         emit_str(s, out, " ");
@@ -2922,6 +3166,12 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let name: u32 = j + 1;
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        // M9: `let x: T = e?;` -> 临时绑定 + match (Err 早退); 替换表由 emit_try_let 自己管
+        let qp: u32 = find_try_q(src, toks, eq + 1);
+        if qp != 0 {
+            emit_try_let(s, out, src, toks, name, ty, eq, j);
+            return qp + 2;
+        }
         // `let p: Pair<u32>` 的类型实参: 先推入替换, 再处理右侧 (字面量分支也要在表内)
         let lsub: u32 = push_ty_subst(s, src, toks, ty);
         if is_array_tok(src, toks, ty) == 1 && tok_is(src, toks, eq + 1, "[") {
@@ -2944,6 +3194,117 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_name_tok(s, out, src, toks, name);
         emit_str(s, out, ".addr\n");
         return e2 + 1;
+    }
+    if tok_is(src, toks, j, "if") && tok_is(src, toks, j + 1, "let") {
+        // M10: `if let Enum::V(bind) = e { then } else { other }`。
+        // lomentc 在 parser 里就把它反糖成 `Match(e, [(V(bind), then), (None, other)])`,
+        // 这里等价地直发那份 Match 的 IR: 标签序 = mend, 命中臂, 通配臂。
+        let iv: u32 = j + 5;
+        let ib: u32 = j + 7;
+        let subj: u32 = j + 10;
+        let st: u32 = expr_type(s, src, toks, subj);
+        let ei: u32 = find_enum(s, src, toks, st);
+        let mend: u32 = load32(s, 480) + 1;
+        store32(s, 480, mend);
+        let md: u32 = load32(s, 548);
+        store32(s, 548, md + 1);
+        let slvl: u32 = 30 + md * 2;
+        expr_bin(s, out, src, toks, subj, 1, 0);
+        move_val(s, slvl, 0);
+        let pay: u32 = load32(s, enum_base(ei) + 8);
+        let tagt: u32 = 0;
+        if pay == 1 {
+            emit_str(s, out, "  ");
+            tagt = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { i32, i64 } ");
+            emit_val(s, out, slvl);
+            emit_str(s, out, ", 0\n");
+        }
+        let lok: u32 = load32(s, 480) + 1;
+        store32(s, 480, lok);
+        let lwd: u32 = load32(s, 480) + 1;
+        store32(s, 480, lwd);
+        let vi: u32 = enum_variant_index(s, src, toks, ei, iv);
+        emit_str(s, out, "  switch i32 ");
+        if pay == 1 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, tagt);
+        } else {
+            emit_val(s, out, slvl);
+        }
+        emit_str(s, out, ", label %L");
+        emit_dec(s, out, lwd);
+        emit_str(s, out, "_mwild [\n      i32 ");
+        emit_dec(s, out, vi);
+        emit_str(s, out, ", label %L");
+        emit_dec(s, out, lok);
+        emit_str(s, out, "_m");
+        emit_tok(s, out, src, toks, iv);
+        emit_str(s, out, "\n    ]\n");
+        store32(s, 476, 1);
+        // 命中臂
+        store32(s, 476, 0);
+        store32(s, 488, lok);
+        store32(s, 496, 0);
+        emit_str(s, out, "L");
+        emit_dec(s, out, lok);
+        emit_str(s, out, "_m");
+        emit_tok(s, out, src, toks, iv);
+        emit_str(s, out, ":\n");
+        if tok_is(src, toks, j + 6, "(") {   // 载荷绑定
+            let pstub: u32 = push_ty_subst(s, src, toks, st);
+            let pt3: u32 = enum_payload_type(s, src, toks, ei, vi);
+            let raw: u32 = alloc_temp(s);   // new_temp 会自己写 %tN, 这里手写
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, raw);
+            emit_str(s, out, " = extractvalue { i32, i64 } ");
+            emit_val(s, out, slvl);
+            emit_str(s, out, ", 1\n");
+            if bit_width(pt3, src, toks) >= 64 {
+                emit_str(s, out, "  store i64 %t");
+                emit_dec(s, out, raw);
+                emit_str(s, out, ", ptr %");
+                emit_name_tok(s, out, src, toks, ib);
+                emit_str(s, out, ".addr\n");
+            } else {
+                let cv: u32 = alloc_temp(s);
+                emit_str(s, out, "  %t");
+                emit_dec(s, out, cv);
+                emit_str(s, out, " = trunc i64 %t");
+                emit_dec(s, out, raw);
+                emit_str(s, out, " to ");
+                emit_ty(s, out, src, toks, pt3);
+                emit_str(s, out, "\n  store ");
+                emit_ty(s, out, src, toks, pt3);
+                emit_str(s, out, " %t");
+                emit_dec(s, out, cv);
+                emit_str(s, out, ", ptr %");
+                emit_name_tok(s, out, src, toks, ib);
+                emit_str(s, out, ".addr\n");
+            }
+            pop_subst(s, pstub);
+        }
+        let tend: u32 = skip_block(src, toks, find_body(src, toks, subj) - 1);
+        let k3: u32 = find_body(src, toks, subj);
+        while k3 < tend - 1 && !tok_is(src, toks, k3, "}") && tok_kind(toks, k3) != 4 {
+            k3 = stmt(s, out, src, toks, k3, load32(s, 552));
+        }
+        jump(s, out, mend, "mend");
+        lab_def(s, out, lwd, "mwild");
+        let nxt: u32 = tend;
+        if tok_is(src, toks, nxt, "else") {
+            let ebody: u32 = find_body(src, toks, nxt + 1);
+            let eend: u32 = skip_block(src, toks, ebody - 1);
+            let k4: u32 = ebody;
+            while k4 < eend - 1 && !tok_is(src, toks, k4, "}") && tok_kind(toks, k4) != 4 {
+                k4 = stmt(s, out, src, toks, k4, load32(s, 552));
+            }
+            nxt = eend;
+        }
+        jump(s, out, mend, "mend");
+        lab_def(s, out, mend, "mend");
+        store32(s, 548, md);
+        return nxt;
     }
     if tok_is(src, toks, j, "if") {
         // 先算条件再占标签: 条件里的 `&&`/除法会自己占标签 (与 lomentc 的 If 同序)
@@ -3478,6 +3839,56 @@ fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
     return j;
 }
 
+/// `let x: T = <expr>?;` 里的 `?` token 下标 (0 = 不是 ? 形式)。
+/// `?` 只以"语句尾"形式出现 (lomentc 的 Try 反糖只认 Let 的右值), 所以判定条件是
+/// `?` 紧跟 `;`; 遇到 `{`/`}` 就说明这一句已经越过, 直接放弃。
+fn find_try_q(src: ptr, toks: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") && !tok_is(src, toks, j, "}") {
+        if tok_is(src, toks, j, "?") && tok_is(src, toks, j + 1, ";") {
+            return j;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 追加一个局部 (按名字去重), 返回新的局部数。
+/// 名字槽是"token 下标 / 合成名"两种编码共用的 (见 syn_name), 文本比对只在两者
+/// 都是真实 token 时才有意义 —— 否则会按合成值当下标去读 token 缓冲 (越界)。
+fn add_local(s: ptr, src: ptr, toks: ptr, n: u32, name: u32, ty: u32) -> u32 {
+    let dup: u32 = 0;
+    let k: u32 = 0;
+    while k < n {
+        let ex: u32 = load32(s, 20480 + k * 8);
+        if ex == name {
+            dup = 1;
+        }
+        if ex < 2147483648 && name < 2147483648
+                && load32(toks, ex * 20 + 8) == load32(toks, name * 20 + 8) {
+            let q: u32 = 0;
+            let ok: u32 = 1;
+            while q < load32(toks, name * 20 + 8) {
+                if load8(src, load32(toks, ex * 20 + 4) + q)
+                        != load8(src, load32(toks, name * 20 + 4) + q) {
+                    ok = 0;
+                }
+                q = q + 1;
+            }
+            if ok == 1 {
+                dup = 1;
+            }
+        }
+        k = k + 1;
+    }
+    if dup == 1 {
+        return n;
+    }
+    store32(s, 20480 + n * 8, name);
+    store32(s, 20480 + n * 8 + 4, ty);
+    return n + 1;
+}
+
 /// 按序收集局部变量 (let), 去重 —— 镜像 lomentc._collect_locals 的子集 (限于本函数体)。
 fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
     let n: u32 = 0;
@@ -3498,19 +3909,7 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                         pop_subst(s, mstub);
                         let mbn: u32 = mp + 4;
                         if mpt != 0 && mbn < mstop {
-                            let mdup: u32 = 0;
-                            let mk: u32 = 0;
-                            while mk < n {
-                                if tok_eq(src, toks, load32(s, 20480 + mk * 8), mbn) {
-                                    mdup = 1;
-                                }
-                                mk = mk + 1;
-                            }
-                            if mdup == 0 {
-                                store32(s, 20480 + n * 8, mbn);
-                                store32(s, 20480 + n * 8 + 4, mpt);
-                                n = n + 1;
-                            }
+                            n = add_local(s, src, toks, n, mbn, mpt);
                         }
                     }
                     mp = mp + 1;
@@ -3544,31 +3943,49 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 n = n + 1;
             }
         }
-        if tok_is(src, toks, j, "let") {
+        if tok_is(src, toks, j, "let") && !tok_is(src, toks, j - 1, "if") {   // `if let` 走下一分支
             let name: u32 = j + 1;
-            let dup: u32 = 0;
-            let k: u32 = 0;
-            while k < n {
-                if load32(toks, load32(s, 20480 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
-                    let q: u32 = 0;
-                    let ok: u32 = 1;
-                    while q < load32(toks, name * 20 + 8) {
-                        if load8(src, load32(toks, load32(s, 20480 + k * 8) * 20 + 4) + q)
-                                != load8(src, load32(toks, name * 20 + 4) + q) {
-                            ok = 0;
-                        }
-                        q = q + 1;
-                    }
-                    if ok == 1 {
-                        dup = 1;
+            let ty: u32 = j + 3;
+            let eq2: u32 = skip_type(src, toks, ty);
+            let qs: u32 = find_try_q(src, toks, eq2 + 1);
+            if qs != 0 {
+                // M9: `let x: T = e?;` 反糖成 `let __t{line} / let x / match { Ok=>x=v; Err=>return Err(e) }`
+                // —— 局部表按反糖后的顺序收 (镜像 _collect_locals 走的那棵 AST)
+                let ln2: u32 = load32(toks, j * 20 + 12);
+                let rt2: u32 = expr_type(s, src, toks, eq2 + 1);
+                n = add_local(s, src, toks, n, syn_name(0, ln2), rt2);
+                n = add_local(s, src, toks, n, name, ty);
+                let ei2: u32 = find_enum(s, src, toks, rt2);
+                if ei2 != 4294967295 {
+                    // 变体序写死 0/1: Result 是预置的 `{ Ok(T), Err(E) }`, _desugar_try 也写死这两个名字
+                    let sb2: u32 = push_ty_subst(s, src, toks, rt2);
+                    let okp: u32 = enum_payload_type(s, src, toks, ei2, 0);
+                    let errp: u32 = enum_payload_type(s, src, toks, ei2, 1);
+                    pop_subst(s, sb2);
+                    n = add_local(s, src, toks, n, syn_name(1, ln2), okp);
+                    n = add_local(s, src, toks, n, syn_name(2, ln2), errp);
+                }
+            } else {
+                n = add_local(s, src, toks, n, name, ty);
+            }
+        }
+        if tok_is(src, toks, j, "if") && tok_is(src, toks, j + 1, "let") {
+            // M10: `if let Enum::V(bind) = e` 在 parser 里就反糖成 Match —— 绑定也要 alloca。
+            // 形状: `if` `let` Enum `:` `:` V `(` bind `)` `=` <主体>
+            let iv2: u32 = j + 5;
+            let ib2: u32 = j + 7;
+            if tok_is(src, toks, j + 6, "(") {
+                let ist: u32 = expr_type(s, src, toks, j + 10);
+                let mei2: u32 = find_enum(s, src, toks, ist);
+                if mei2 != 4294967295 {
+                    let isub: u32 = push_ty_subst(s, src, toks, ist);
+                    let mvt2: u32 = enum_variant_index(s, src, toks, mei2, iv2);
+                    let mpt2: u32 = enum_payload_type(s, src, toks, mei2, mvt2);
+                    pop_subst(s, isub);
+                    if mpt2 != 0 {
+                        n = add_local(s, src, toks, n, ib2, mpt2);
                     }
                 }
-                k = k + 1;
-            }
-            if dup == 0 {
-                store32(s, 20480 + n * 8, name);
-                store32(s, 20480 + n * 8 + 4, j + 3);
-                n = n + 1;
             }
         }
         j = j + 1;

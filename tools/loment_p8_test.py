@@ -505,9 +505,20 @@ def _dep_paths(target: Path) -> list[Path]:
 
 
 def _unit_text(target: Path) -> str:
-    """依赖按序拼接 + 本单元 (与 lomentc.emit_llvm 的 `mods = deps + [mod]` 同序)。"""
-    return ("".join(p.read_text(encoding="utf-8") + "\n" for p in _dep_paths(target))
+    """依赖按序拼接 + 本单元 (与 lomentc.emit_llvm 的 `mods = deps + [mod]` 同序)。
+
+    还要镜像 lomentc.load 的**预置枚举注入**: `Option`/`Result` 缺失时由加载器补进
+    `mod.enums`。原生后端按声明发射聚合类型 (`Result<u32,u32>` -> `{ i32, i64 }`),
+    所以这份声明对被编译单元必须是可见的 —— 否则枚举查不到, 只能退化成 i64。
+    """
+    text = ("".join(p.read_text(encoding="utf-8") + "\n" for p in _dep_paths(target))
             + target.read_text(encoding="utf-8"))
+    # 判据要用**注入前**的模块 (lomentc.load 返回值里已经有它们了, 拿它判断永远为真)
+    raw = target.read_text(encoding="utf-8")
+    have = {e.name for e in lomentc.Parser(lomc.lex(raw), raw).parse().enums}
+    if "Option" not in have or "Result" not in have:
+        text += "\n" + lomentc._PRELUDE
+    return text
 
 
 def _run_codegen(exe: Path, target: Path, td: str) -> str:
@@ -589,18 +600,20 @@ def test_m82_coverage_report():
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
              "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt",
-             "ir_call5.lomt"]
+             "ir_call5.lomt",
+             # 预置枚举 + `?` 早退 + `if let` 三条路径的回归闸 (不放进列表就会静默退化)
+             "native_res.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
-        ok, diff = [], []
+        ok, diff, unsupported = [], [], []
         for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
                              + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
             try:
                 mod = lomentc.load(target)
                 deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
                 want = lomentc.emit_llvm(mod, ROOT, deps)
-            except Exception:  # noqa: BLE001  原生后端本身不支持该示例 (如 inb/outb)
-                diff.append(target.name)
+            except Exception as e:  # noqa: BLE001  参考实现的 IR 后端本身就不发这个示例
+                unsupported.append((target.name, f"{type(e).__name__}: {e}"))
                 continue
             try:
                 got = _run_codegen(exe, target, td)
@@ -610,11 +623,13 @@ def test_m82_coverage_report():
     missing = [k for k in known if k not in ok]
     assert not missing, f"已知可通过的目标文件回归失败: {missing}"
     total = len(ok) + len(diff)
-    print(f"      示例覆盖 {len(ok)}/{total} 字节一致; 待补: {', '.join(diff[:6])}"
-          f"{' …' if len(diff) > 6 else ''}")
-    print("      缺口分类 (按文件计):")
-    for feature, hits in _gap_breakdown(diff).items():
-        print(f"        {feature}: {len(hits)}")
+    print(f"      目标覆盖 {len(ok)}/{total} 字节一致" + (f"; 待补: {', '.join(diff)}" if diff else ""))
+    for name, why in unsupported:
+        print(f"      非目标: {name} (参考实现自己就发不出来 -> {why})")
+    if diff:
+        print("      缺口分类 (按文件计):")
+        for feature, hits in _gap_breakdown(diff).items():
+            print(f"        {feature}: {len(hits)}")
     return
 
 
