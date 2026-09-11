@@ -350,6 +350,10 @@
    "sha256": "8ff2dbee43f11a701081dc4a5b36e0b00dc1adfcdc56a279fbd1b6ce2f8da917"
   },
   {
+   "path": "docs/155-loment-kernel-handoff.md",
+   "sha256": "488770d83a3d09025cedddb6c540d904f1720632fd3df2cf599f07f647008692"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "276b227aa2fb1297fc7e306546cd526265d23b097e749651afd174ff63294949"
   },
