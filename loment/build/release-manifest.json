@@ -27,7 +27,7 @@
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "e313fa0cffe2dc3aa89bb456f2c1721eb04ea78863ba115d758dd84c3da95f1c"
+   "sha256": "4b54dd4b510247ca613d296152b232b904b908e6bf265824739b8d502da3d9d0"
   },
   {
    "path": "tools/potato_cross.py",
@@ -40,6 +40,10 @@
   {
    "path": "tools/potato_measure.py",
    "sha256": "b91091d0ccb67f6d0aba29d457ed4ab49537f461d749197eb5dd27d46c407804"
+  },
+  {
+   "path": "tools/potato_llm_arm.py",
+   "sha256": "067607709ade67514e75ccdf531466639b0511fc49c9a3c90a66b7e758f03035"
   },
   {
    "path": "tools/potato_assert.py",
@@ -359,7 +363,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "246ee4984c206e644d64a926f874b4414a1bb4fa6d341ed79d9172267fe2def3"
+   "sha256": "24fc3a72e60d05c495fce3b7dd91187cc9a37485f63ad51109fd82454f620f7c"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -375,7 +379,7 @@
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "5ce2087be36a975dc2e77b423f078ca23ddbb66294c7c1664ada2b7252fd7370"
+   "sha256": "bc6af0cc68e23e432266c0cd0bd7affa270aa31ed1277fab53402930bb716608"
   },
   {
    "path": "docs/148-loment-toolchain.md",
@@ -403,7 +407,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "ca90b143e04af5d6b49c4da1697ed2c663e0d3aa93f0812e37135716138b08db"
+   "sha256": "4208bf00bfb7474ec885ac1d1f3444b40cfa8de2d01174b7dad673021bfe1579"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
