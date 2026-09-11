@@ -456,14 +456,72 @@ def test_m82_loment_codegen_byte_identical():
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
             want = lomentc.emit_llvm(mod, ROOT, deps)
-            got = subprocess.run([shutil.which(str(exe)) or str(exe), str(target)],
-                                 capture_output=True, text=True, shell=False).stdout
+            got = _run_codegen(exe, target, td)
             if got != want:
                 i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
                 a = max(0, (i or 0) - 60)
                 raise AssertionError(
                     f"{target.name} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+
+
+def _dep_paths(target: Path) -> list[Path]:
+    """按 lomentc.resolve_deps 的规则取依赖文件 (被依赖者在前), 并与参考实现的模块名序列核对。
+
+    Loment 版 codegen 只吃**单个编译单元**(不解析 `use`) —— 依赖装载由驱动/夹具负责,
+    与 M80/M81 自举阶段的边界一致。这里把"参考实现解析出的模块序"当判据钉死:
+    路径规则一旦与 lomentc 漂移, 名字序列就对不上, 测试会直接失败。
+    """
+    mod = lomentc.load(target)
+    deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+    paths: list[Path] = []
+    seen: set[Path] = set()
+
+    def visit(m, cur_base: Path) -> None:
+        for imp in m.imports:
+            p = Path(imp)
+            cand = p if p.is_absolute() else None
+            if cand is None or not cand.exists():
+                for base_try in (ROOT, cur_base):
+                    q = base_try / imp
+                    if q.exists():
+                        cand = q
+                        break
+            if cand is None or not cand.exists():
+                raise FileNotFoundError(imp)
+            rp = cand.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            sub = lomentc.load(rp)
+            visit(sub, rp.parent)
+            paths.append(rp)
+
+    visit(mod, target.parent)
+    names = [lomentc.load(p).name for p in paths]
+    assert names == [m.name for m in deps], f"依赖序与 lomentc 不一致: {names} vs {[m.name for m in deps]}"
+    return paths
+
+
+def _unit_text(target: Path) -> str:
+    """依赖按序拼接 + 本单元 (与 lomentc.emit_llvm 的 `mods = deps + [mod]` 同序)。"""
+    return ("".join(p.read_text(encoding="utf-8") + "\n" for p in _dep_paths(target))
+            + target.read_text(encoding="utf-8"))
+
+
+def _run_codegen(exe: Path, target: Path, td: str) -> str:
+    """在"装载好的单元"上跑 Loment 版 codegen (无依赖时就是原文件)。"""
+    try:
+        text = _unit_text(target)
+    except Exception:  # noqa: BLE001
+        text = target.read_text(encoding="utf-8")
+    unit = Path(td) / f"unit_{target.stem}.lomt"
+    unit.write_text(text, encoding="utf-8")
+    try:
+        return subprocess.run([shutil.which(str(exe)) or str(exe), str(unit)],
+                              capture_output=True, text=True, timeout=30, shell=False).stdout
+    except subprocess.TimeoutExpired:
+        return ""
 
 
 @test
@@ -491,10 +549,8 @@ def test_m82_coverage_report():
                 diff.append(target.name)
                 continue
             try:
-                got = subprocess.run([shutil.which(str(exe)) or str(exe), str(target)],
-                                     capture_output=True, text=True, timeout=30,
-                                     shell=False).stdout
-            except subprocess.TimeoutExpired:
+                got = _run_codegen(exe, target, td)
+            except Exception:  # noqa: BLE001
                 got = ""
             (ok if got == want else diff).append(target.name)
     missing = [k for k in known if k not in ok]

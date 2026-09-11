@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
 > 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 37 个示例中 13 个（9 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`bytes`）
+> M82 逐字节一致: 37 个示例中 17 个（9 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`）
 > 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
 
 ## M79 · Loment 版 lexer ✅
@@ -114,7 +114,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64/ptr）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 37 个示例文件，逐字节一致 13 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
+**未覆盖**（相对 37 个示例文件，逐字节一致 17 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
 `slice_len`/`str_ptr`/`syscall*`）、`match`、str/切片/数组/struct/枚举等聚合类型、能力域表与 DWARF 元数据。
 每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
 `ir_*.lomt` 目标文件是对应的防回归锚点。
@@ -147,6 +147,16 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | 17 | unit 函数体尾缺 `ret void` / `store16` 的返回类型写成 `i64` | `emit_ty`/`emitted_name` 不认识 `()`；`emit_fn` 也没有"块未终止则补 `ret void`/`unreachable`"这一条 |
 | 18 | `while true` 生成 `%t1 = load i32, ptr %true.addr` | `expr_atom` 缺 `true`/`false` 字面量分支（落到"变量 load"兜底）→ 直接写字面量 `1`/`0` |
 | 19 | unit 返回的调用写成 `%t6 = call void @f(...)` | Python 对 `()` 返回不占寄存器（`call void @f(...)` 无赋值）→ 补 unit 分支 |
+| 20 | `if blk_free(cur) && sz >= need` 的标签号整体错位（`L7_sc_rhs` vs `L4_sc_rhs`） | `if` 分支**先占**标签再算条件，而条件里的 `&&`/除法自己也要占标签 → 改为先算条件再占（`lomentc` 的 If 同序；同类的 `while` 本来就是先占） |
+| 21 | `const HDR` 被当成变量 load（`%t2 = load i32, ptr %HDR.addr`） | 没做**常量内联**：补 `find_const` + `tok_int`（十六进制按**十进制**内联，与 `lomentc` 一致）+ `set_dec_val` |
+| 22 | `-> ` 省略返回类型的函数被当成有返回类型 | `pub fn pool_init(...)` 无 `-> T` → 返回类型必须缺省为 `()`；用哨兵 `UNIT=0xFFFFFFFF` 表示，`emit_ty`/`emitted_name`/`is_unit_tok` 一起处理 |
+| 23 | `return 0;`（返回 `ptr`）写成 `ret ptr 0` | `lomentc` 的 `expr(IntLit, want="ptr")` 写 `null` → 返回位单独判断 |
+
+**依赖装载的边界（已落实为可核对的夹具）**：`lomentc.emit_llvm` 吃的是 `prepare()` 之后的
+**依赖拼接单元**（`mods = deps + [mod]`）。测试夹具 `_unit_text()` 按 `resolve_deps` 的路径规则
+取依赖、被依赖者在前拼接，并**断言模块名序列与 `lomentc.resolve_deps` 完全一致**
+（规则一漂移就失败）。因此 Loment 版 codegen 的输入是"已装载的单元"，与 M80/M81 自举阶段的
+边界一致；把 `resolve_deps` 搬进 Loment（需要文件 I/O）仍是 M83 之前的待办。
 
 **已知的结构性边界（M82 之后要补）**：`lomentc.emit_llvm` 走的是 `prepare()` 之后的
 **依赖拼接单元**（`mods = deps + [mod]`），所以像 `allocator.lomt` 这种自身不含 `/` 但
@@ -168,9 +178,10 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82）。
-M82 的剩余清单还没有走完：**37 个示例文件里逐字节一致 13 个**（9 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`bytes`），
-缺口集中在聚合/切片/字符串类型（18 个文件）、其余内建（14）、`syscall`（5）、`match`/枚举（4）；
-也就是说 M82 目前覆盖的是"标量 + 控制流 + 除法 + 指针/位域内建"这一层，M83 自编译还需要聚合类型与字符串/切片内建。
+M82 的剩余清单还没有走完：**37 个示例文件里逐字节一致 17 个**（9 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`），
+缺口集中在聚合/切片/字符串类型（18 个文件）、其余内建（13）、`syscall`（5）、`match`/枚举（4）、能力域（2）；
+也就是说 M82 目前覆盖的是"标量 + 控制流 + 除法 + 指针/位域内建 + 常量 + 依赖拼接单元"这一层，
+M83 自编译还需要聚合类型与字符串/切片内建。
 
 ## M87 · 引导脚本 ✅
 

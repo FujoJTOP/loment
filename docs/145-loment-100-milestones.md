@@ -279,7 +279,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 | ✅ 部分（4 规则、单编译单元） |
-| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（9 个目标文件；示例级覆盖 13/37，门禁打印缺口分类） |
+| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（9 个目标文件；示例级覆盖 17/37，门禁打印缺口分类） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
 | M88 校验和 | `loment_release --checksums` 110 行 sha256 | ✅ 部分（tag 未推送） |
 
@@ -303,8 +303,8 @@ python tools/lomentc_test.py       # 89/89
 
 ```
 python tools/loment_p8_test.py     # 5/5
-# 示例覆盖 13/37 字节一致 (9 个 ir_*.lomt 锚点 + toolchain/native_bits/native_mem/bytes)
-# 缺口分类: 聚合/切片/字符串 18 · 内建 14 · 除法 8 · for 7 · syscall 5 · match/枚举 4 · 能力域 2
+# 示例覆盖 17/37 字节一致 (9 个 ir_*.lomt 锚点 + toolchain/native_bits/native_mem/native/ahci/fuc_node/bytes/allocator)
+# 缺口分类: 聚合/切片/字符串 18 · 内建 13 · 除法 6 · for 6 · syscall 5 · match/枚举 4 · 能力域 2
 ```
 
 | 里程碑 | 验证方式 | 结果 |
@@ -312,7 +312,10 @@ python tools/loment_p8_test.py     # 5/5
 | M82 `alloc`/`free` | `ir_builtin.lomt`：bump 堆 + `%L_aok`/`%L_aovf` 溢出分支 + 堆全局位置 | ✅ |
 | M82 `atomic_add`/`ptr_add`/`ptr_sub` | `atomicrmw add seq_cst` / `zext`+`getelementptr inbounds i8`（减法先 `sub i64 0`） | ✅ |
 | M82 `get_bits`/`set_bits`/`panic` | i16 掩码链 + `%L_dead` 死块；结果上的 `as` 走名字型 `apply_cast_b` | ✅ |
-| 真实示例解锁 | `native_bits.lomt`、`native_mem.lomt`、`bytes.lomt` 从"有差异"变为**逐字节一致** | ✅ |
+| 真实示例解锁 | `native_bits`/`native_mem`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator` 从"有差异"变为**逐字节一致** | ✅ |
+| M82 常量内联 | `const HDR: u32 = 8;` 生成期内联为十进制字面量（含十六进制字面量归一） | ✅ |
+| M82 unit 返回类型 | 无 `-> T` 的函数按 `()` 处理（`UNIT=0xFFFFFFFF` 哨兵）；`return 0` 返回 `ptr` 写 `null` | ✅ |
+| M82 依赖拼接单元 | 夹具按 `resolve_deps` 规则拼接并把"模块名序列与 lomentc 一致"作为断言（规则漂移即失败） | ✅ |
 | M82 表达式契约修正 | 内建分支返回位置统一为"其后"（`load8(p,off) + load8(p,off+1)*256` 曾只算前半） | ✅ |
 | M82 unit 类型 | `()` → `void`、函数尾补 `ret void`/`unreachable`、unit 调用不占寄存器 | ✅ |
 | M82 布尔字面量 | `while true` 曾生成 `load i32, ptr %true.addr` → 直接写字面量 `1` | ✅ |
@@ -453,7 +456,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
-| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/`for`/除法/指针与位域内建；示例级 13/37；见 docs/150） |
+| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/`for`/除法/内建/常量内联；示例级 17/37；见 docs/150） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |
 | M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 |
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 |
