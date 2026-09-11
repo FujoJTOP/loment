@@ -265,13 +265,19 @@ fn chk_skip_body(src: ptr, t: ptr, i: u32) -> u32 {
 fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
     i = i + 1;
     while !chk_tok_is(src, t, i, ")") && chk_tok_kind(t, i) != 4 {
-        // 方法接收者 `&self` / `&mut self`: 没有类型注解, 也不是实参名字里的一对
+        // 方法接收者: `&self` / `&mut self` / 裸 `self` (trait 块里写作 `fn m(self) -> u32;`)。
+        // 它没有类型注解 —— 不排掉就会把后面的 `)` 或 `-` 当成类型, 报一串假 E-TYPE。
         if chk_tok_is(src, t, i, "&") {
             i = i + 1;
             if chk_tok_is(src, t, i, "mut") {
                 i = i + 1;
             }
             i = i + 1;              // self
+            if chk_tok_is(src, t, i, ",") {
+                i = i + 1;
+            }
+        } else if chk_tok_is(src, t, i, "self") {
+            i = i + 1;
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
             }
@@ -336,8 +342,12 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             n = (r0a / 4294967296) as u32;
             o = (r0a % 4294967296) as u32;
             n = decl_tparams(src, t, syms, n, i + 1);
+            i = i + 1;
+        } else if chk_tok_is(src, t, i, "impl") {
+            i = chk_skip_body(src, t, i);   // impl 块不在子集内 (理由见第一遍)
+        } else {
+            i = i + 1;
         }
-        i = i + 1;
     }
     // ---- 第一遍: 其余顶层声明 + 类型检查
     i = 0;
@@ -351,9 +361,12 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             n = decl_tparams(src, t, syms, n, i + 1);   // `fn f<T>`: T 是类型名
             let r1: u64 = scan_params(src, t, syms, n, lp, out, o);
             o = (r1 % 4294967296) as u32;
-            // 返回类型 (可选 ->)
+            // 返回类型 (可选 ->)。签名式方法 (`trait` 里 `fn m(self) -> u32;`) 没有函数体,
+            // 所以 `;` 也要当作终止 —— 否则会一路走到下一个 `{` (那是 impl 块的), 把游标
+            // 拽进别人的块里, 后面全错位。
             let j: u32 = i + 2;
-            while !chk_tok_is(src, t, j, "{") && chk_tok_kind(t, j) != 4 {
+            while !chk_tok_is(src, t, j, "{") && !chk_tok_is(src, t, j, ";")
+                    && chk_tok_kind(t, j) != 4 {
                 if chk_tok_is(src, t, j, "-") {
                     let r2: u64 = check_type(src, t, syms, n, j + 2, out, o);
                     o = (r2 % 4294967296) as u32;
@@ -365,6 +378,12 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             // 名字已在第零遍登记过 (这里不能再 declare, 否则自己跟自己报 E-DUP);
             // 字段类型不在子集内检查, 跳过 `<...>` 与名字即可。
             i = chk_skip_type(src, t, i + 1);
+        } else if chk_tok_is(src, t, i, "impl") {
+            // impl 块**不在本检查器的子集内**: 方法在平坦符号表里会互相撞名
+            // (`impl T for Small { fn m }` 与 `impl T for Big { fn m }` 都叫 m, 会报假 E-DUP),
+            // 而方法调用一律走 `x.m()` —— 已经被 `.` 那条规则排除掉了。
+            // 整块跳过; 方法体内的调用检查在第二遍照做 (那里不跳 impl)。
+            i = chk_skip_body(src, t, i);
         } else if chk_tok_is(src, t, i, "const") {
             let r4: u64 = declare(src, t, syms, n, i + 1, K_CONST, 0, out, o);
             n = (r4 / 4294967296) as u32;

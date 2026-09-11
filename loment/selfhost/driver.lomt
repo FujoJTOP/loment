@@ -35,6 +35,7 @@ const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
 
 use "loment/selfhost/lexer.lomt"
 use "loment/selfhost/codegen.lomt"
+use "loment/selfhost/checker.lomt"
 
 /// 退出; 返回值只为类型完整 (syscall 之后不会回来)。
 fn die(code: u64) -> u32 {
@@ -84,6 +85,34 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
 fn fail(msg: str) -> u32 {
     write_all(2, str_ptr(msg), str_len(msg) as u64);
     return die(1);
+}
+
+/// 写一个 str 到 fd (长度交给 str_len —— 手数字节数会连字符串常量的 NUL 一起写出去)。
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// u32 十进制写到 fd (诊断里要报错误码与行号; 驱动器里没有 printf)。
+/// 数字缓冲借 scr 的尾部 64 字节 (前 4096 是 NUL 路径, 之后是 use 清单)。
+fn wdec(fd: u64, scr: ptr, v: u32) -> u64 {
+    let t: ptr = ptr_add(scr, 8000);
+    let d: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(t, 0, 48 as u8);
+        d = 1;
+    }
+    while x > 0 {
+        store8(t, d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(t, 32 + q, load8(t, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return write_all(fd, ptr_add(t, 32), d as u64);
 }
 
 /// 只读打开: 先把路径复制成 NUL 结尾 (内核要 C 串), 再 openat(AT_FDCWD, p, O_RDONLY)。
@@ -319,6 +348,39 @@ fn _start() -> u32 {
     }
     let toks2: ptr = tok2v as ptr;
     lex(unit, len as u32, toks2);
+    // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
+    // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
+    let errsv: u64 = sys_alloc(8192);
+    if errsv == 0 {
+        return fail("fujoc-s: brk failed\n");
+    }
+    let errs: ptr = errsv as ptr;
+    let ne: u32 = check(unit, toks2, errs);
+    if ne != 0 {
+        wstr(2, "fujoc-s: 静态检查未通过\n");
+        let e: u32 = 0;
+        while e < ne && e < 64 {
+            let code: u32 = load32(errs, e * 8);
+            let tk: u32 = load32(errs, e * 8 + 4);
+            wstr(2, "  E");
+            wdec(2, scr, code);
+            wstr(2, " @");
+            wdec(2, scr, tk);
+            wstr(2, " line ");
+            wdec(2, scr, load32(toks2, tk * 20 + 12));
+            wstr(2, ": ");
+            let st: u32 = load32(toks2, tk * 20 + 4);
+            let ln: u32 = load32(toks2, tk * 20 + 8);
+            let take: u32 = 24;
+            if ln < 24 {
+                take = ln;
+            }
+            write_all(2, ptr_add(unit, st), take as u64);
+            wstr(2, "\n");
+            e = e + 1;
+        }
+        return die(1);
+    }
     let m: u32 = emit_module(unit, toks2, ir);
     write_all(1, ir, m as u64);
     return die(0);

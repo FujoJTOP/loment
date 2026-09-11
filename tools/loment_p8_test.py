@@ -452,9 +452,8 @@ def test_m85_checker_accepts_corpus_units():
         print("      SKIP: 无 clang")
         return
     gaps = {
-        # impl/trait 块: checker 不建模, `impl T for Y { fn m(&self) }` 会误读签名
-        "native_trait.lomt",
-        # 非目标: 参考实现的 IR 后端自己也发不出来 (native: inb 未实现), 它不是单元的合法形状
+        # 非目标: 参考实现的 IR 后端自己也发不出来 (native: inb 未实现), 它本就不是单元的
+        # 合法形状 —— 所以这条不是"checker 的缺口", 而是"这份文件不进单元语料"。
         "native_raii.lomt",
     }
     with tempfile.TemporaryDirectory() as td:
@@ -647,6 +646,49 @@ def _unsupported(target: Path) -> str | None:
     except Exception as e:  # noqa: BLE001
         return f"{type(e).__name__}: {e}"
     return None
+
+
+@test
+def test_m85_driver_checks_before_emitting():
+    """M85: 同一个自举二进制**先检查再发射** —— 负例被拒、正例放行。
+
+    checker 的覆盖面到 40/40 单元之后才敢打开这道闸门 (在这之前它会把合法程序判错)。
+    判据:
+      * `selfhost/neg/*.lomt` 必须非零退出、带诊断、且**不产出 IR**;
+      * `selfhost/pos/*.lomt` 必须零退出且产物与参考逐字节相同。
+
+    这条把 M81 的"错误码集合一致"从"夹具驱动 checker"升级成"**编译器自己**判"。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    neg = sorted((ROOT / "loment" / "selfhost" / "neg").glob("*.lomt"))
+    pos = sorted((ROOT / "loment" / "selfhost" / "pos").glob("*.lomt"))
+    assert neg and pos, "缺负例/正例语料"
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_gate")
+        for f in neg:
+            rel = f.relative_to(ROOT).as_posix()
+            rc, out, err = _run_driver_raw(elf, rel, td, f"neg_{f.stem}")
+            assert rc != 0, f"{f.name}: 负例没被拒 (exit {rc})"
+            assert "静态检查未通过" in err, f"{f.name}: 没报诊断: {err[:200]}"
+            assert "@" in err and "line" in err, f"{f.name}: 诊断格式不对: {err[:200]}"
+            assert out.strip() == "", f"{f.name}: 被拒时不该产出 IR"
+        for f in pos:
+            rel = f.relative_to(ROOT).as_posix()
+            unsupported = _unsupported(f)     # 参考实现的 IR 后端能不能发这个文件
+            rc, out, err = _run_driver_raw(elf, rel, td, f"pos_{f.stem}")
+            # 正例的判据是"**检查阶段**放行"; 能不能发 IR 取决于它是不是 IR 后端的合法目标
+            # (pos/ok.lomt 是给 checker 写的正例, 含 IR 后端不支持的类型, 这不是闸门的事)
+            assert "静态检查未通过" not in err, f"{f.name}: 正例被 check 拒了: {err[:200]}"
+            if unsupported is None:
+                m = lomentc.load(f)
+                d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
+                assert rc == 0, f"{f.name}: 正例退出码 {rc}: {err[:200]}"
+                assert out == lomentc.emit_llvm(m, ROOT, d), f"{f.name}: 正例产物与参考不一致"
+        print(f"      驱动闸门: 负例 {len(neg)}/{len(neg)} 被拒, 正例 {len(pos)}/{len(pos)} 过检")
 
 
 @test

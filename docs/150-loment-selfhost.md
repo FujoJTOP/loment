@@ -375,17 +375,18 @@ error: invalid redefinition of function 'tok_kind'
 给符号加模块作用域（M11 的"模块/包系统"在**自举版的名字解析**上还没落地）。这条是自举第一次
 把"两个模块装进同一个单元"逼出来的，也解释了为什么"checker 接进驱动"这件事本身还有前置。
 
-### M85 后半 · 缺口②：checker 覆盖面 0/41 → 39/41（2026-09-11 本轮）
+### M85 后半 · 缺口②：checker 覆盖面 0/41 → 40/40，闸门已开（2026-09-11 本轮）
 
 上一轮把 `checker.lomt` 接进驱动时它**拒绝一切合法程序**（0/41 单元无诊断）。那一轮只是
-把缺口列了出来；这一轮按清单逐个补，现在**39/41 个拼接单元一条诊断都没有**，只剩两个
-登记缺口（见下）。
+把缺口列了出来；这一轮按清单逐个补，现在**40/40 个拼接单元一条诊断都没有** ——
+唯一剩下的 `native_raii.lomt` 是**非目标**（参考实现的 IR 后端自己也发不出来，它本就不是
+单元的合法形状），不进语料，所以不算 checker 的缺口。**驱动那道闸门因此打开了。**
 
 判据：`loment_p8_test::test_m85_checker_accepts_corpus_units` —— 41 个单元（依赖 + 本文件 +
 预置枚举，与驱动器装载的同一份）跑自举 checker，除登记缺口外必须零诊断；缺口一旦被修好，
 测试会提醒更新清单（不让它悄悄过期）。
 
-补的六处（都是"token 层线性扫描"这个实现的固有盲区）：
+补的九处（都是"token 层线性扫描"这个实现的固有盲区）：
 
 | # | 假报 | 根因 | 修法 |
 |---|---|---|---|
@@ -396,6 +397,8 @@ error: invalid redefinition of function 'tok_kind'
 | 5 | `2@n:Result`（`native_res`） | 预置枚举在**单元末尾**（`lomentc.load` 是 append），而 `-> Result<u32,u32>` 在文件开头 | 加"第零遍"先把类型名收齐再查签名 |
 | 6 | `2@n::`（`native_res`） | `if let Result::Ok(v) = r` 里的 `let` 是**模式**不是带类型的绑定 | 前一个 token 是 `if` 就跳过（与 codegen 同一条守卫） |
 | 7 | `native_concat` 全篇 `str_concat` | 内建表没跟上（M2 新加的内建只在 `lomentc` 里） | 补进 `is_builtin` 的名字表 |
+| 8 | `native_trait` 全篇错位（`2@10:-`） | `fn measure(self) -> u32;` 是**裸 `self`**（不带 `&`），被读成"参数名 self、类型 ;"；而且签名式方法没有函数体，返回类型扫描会一路走到 impl 块的 `{` | `scan_params` 认裸 `self`；返回类型扫描在 `;` 也终止 |
+| 9 | `native_trait` 报 E-DUP | 两个 impl 都声明 `measure` —— 平坦符号表里必然撞名（编译器真实的派发名是 `Small_measure`/`Big_measure`） | impl 块**不在检查器子集内**（方法调用一律走 `x.m()`，已被 `.` 那条规则排除；方法体内的调用检查照做） |
 
 **过程中抓到的两个真 bug（都是"崩溃而不是报错"，值得单独记）**：
 
@@ -409,12 +412,18 @@ error: invalid redefinition of function 'tok_kind'
    `C` 的变体就会被当成调用）。修法是"跳过了就不再加一"（用 `skipped` 标志，Loment 没有
    `continue`）。
 
-**两个登记缺口**（都写进了测试的 `gaps`）：`native_trait.lomt`（`impl`/`trait` 块不在 checker
-的模型里，`fn m(&self) -> u32;` 会把签名读错位）与 `native_raii.lomt`（**非目标**：参考实现
-的 IR 后端自己也发不出来，它本就不是单元的合法形状）。
+### 闸门打开：驱动先 check 再发射 ✅
 
-**注意驱动的闸门仍然没开**：39/41 还不够 —— 用会误报的检查器当闸门只会挡住正确程序。
-剩下的活是把 `impl`/`trait` 也建模，那时才谈得上"驱动先 check 再发射"。
+覆盖面到 40/40 之后，`driver.lomt` 把 checker 接上并**先检查后发射**：
+
+```
+./fujoc-s loment/selfhost/neg/unknown_fn.lomt    # 退出 1, stderr 报诊断, stdout 无 IR
+./fujoc-s loment/examples/demo.lomt > demo.ll    # 退出 0, 产物与参考逐字节相同
+```
+
+诊断格式与 p8 的 C 夹具同源（`E<码> @<token> line <行>: <片段>`）。判据
+`test_m85_driver_checks_before_emitting`：6 个负例全部非零退出 + 带诊断 + **不产出 IR**；
+正例零退出。**语料那 40 个单元的装载测试同时也在守着这件事**——闸门要是误报，那个测试会先红。
 
 **原来的假报清单（2026-09-11 早，13 文件版，已按下表逐条销掉）**：
 
@@ -442,8 +451,8 @@ error: invalid redefinition of function 'tok_kind'
 
 | # | 缺口 | 说明 |
 |---|---|---|
-| checker 闸门未开 | 覆盖面已到 **39/41 单元**（见上文缺口②），但"驱动先 check 再发射"还差最后一步：把 `impl`/`trait` 也建模，再打开闸门 |
-| 符号表全单元扁平 | 见上文缺口①：现在靠 `chk_` 前缀绕开，真正的修法是给符号加模块作用域 |
+| 符号表全单元扁平 | 见上文缺口①：checker 侧已靠 `chk_` 前缀绕开，真正的修法是给符号加模块作用域 |
+| `lomentc_test` 的判据还没搬到自举版 | 驱动现在能装载 + 检查 + 发射（40/40 语料、6/6 负例、二阶段定点），但 `lomentc_test` 那 90 条判据有不少是 *Python API 特有*的（Rust 输出形状、错误消息措辞）；要把能映射的那些逐条搬到驱动器上跑，M85 的字面判据才算满足 |
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
