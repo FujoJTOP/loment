@@ -207,6 +207,16 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tok_is(src, toks, tt, "str") {   // M1: 字节指针 + 长度
         return emit_str(s, out, "{ ptr, i64 }");
     }
+    if is_slice_tok(src, toks, tt) == 1 {   // M3: 切片 = 元素指针 + 个数
+        return emit_str(s, out, "{ ptr, i64 }");
+    }
+    if is_array_tok(src, toks, tt) == 1 {   // M24: 定长数组
+        emit_str(s, out, "[");
+        emit_dec(s, out, array_len_of(src, toks, tt));
+        emit_str(s, out, " x ");
+        emit_ty(s, out, src, toks, elem_tok(src, toks, tt));
+        return emit_str(s, out, "]");
+    }
     if tok_kind(toks, tt) == 0 {   // struct 名
         let si: u32 = find_struct(s, src, toks, tt);
         if si != 4294967295 {
@@ -741,6 +751,65 @@ fn strings_needed(src: ptr, toks: ptr) -> u32 {
         }
     }
     return 0;
+}
+
+// ---------------------------------------------------------------- 切片/数组类型
+
+/// 类型 token 是否为切片 `[T]` / `mut [T]`。
+fn is_slice_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_is(src, toks, tt, "[") && !tok_is(src, toks, tt + 2, ";") {   // [T] 不是 [T; N]
+        return 1;
+    }
+    if tok_is(src, toks, tt, "mut") && tok_is(src, toks, tt + 1, "[") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 类型 token 是否为定长数组 `[T; N]`。
+fn is_array_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_is(src, toks, tt, "[") && tok_is(src, toks, tt + 2, ";") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 切片/数组的元素类型 token。
+fn elem_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_is(src, toks, tt, "mut") {
+        return tt + 2;
+    }
+    return tt + 1;
+}
+
+/// 定长数组长度 (字面量); 非数组返回 0。
+fn array_len_of(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if is_array_tok(src, toks, tt) == 1 {
+        return tok_int(src, toks, tt + 3);
+    }
+    return 0;
+}
+
+/// 跳过一个类型 (`T` / `[T]` / `[T; N]` / `mut [T]` / `()`), 返回其后的位置。
+fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i, "mut") {
+        return skip_type(src, toks, i + 1);
+    }
+    if tok_is(src, toks, i, "[") || tok_is(src, toks, i, "(") {
+        let j: u32 = i + 1;
+        let d: u32 = 1;
+        while tok_kind(toks, j) != 4 && d > 0 {
+            if tok_is(src, toks, j, "[") || tok_is(src, toks, j, "(") {
+                d = d + 1;
+            }
+            if tok_is(src, toks, j, "]") || tok_is(src, toks, j, ")") {
+                d = d - 1;
+            }
+            j = j + 1;
+        }
+        return j;
+    }
+    return i + 1;
 }
 
 // ---------------------------------------------------------------- 表达式
@@ -1530,6 +1599,33 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             set_temp_val(s, lvl, sc);
             return ka;
         }
+        if tok_is(src, toks, j, "slice_len") {   // M3: 切片取长度 (数组用字面量长度)
+            let k18: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let at: u32 = expr_type(s, src, toks, j + 2);
+            emit_str(s, out, "  ");
+            if is_slice_tok(src, toks, at) == 1 {
+                let exs: u32 = new_temp(s, out);
+                emit_str(s, out, " = extractvalue { ptr, i64 } ");
+                emit_val(s, out, lvl);
+                emit_str(s, out, ", 1\n  ");
+                let trs: u32 = new_temp(s, out);
+                emit_str(s, out, " = trunc i64 %t");
+                emit_dec(s, out, exs);
+                emit_str(s, out, " to i32\n");
+                set_temp_val(s, lvl, trs);
+            } else {
+                let tra: u32 = new_temp(s, out);
+                emit_str(s, out, " = trunc i64 ");
+                emit_dec(s, out, array_len_of(src, toks, at));
+                emit_str(s, out, " to i32\n");
+                set_temp_val(s, lvl, tra);
+            }
+            if tok_is(src, toks, k18 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 3, 0, k18 + 2, lvl);
+                return k18 + 3;
+            }
+            return k18 + 1;
+        }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
         let ret: u32 = 0;
@@ -1614,6 +1710,66 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
     let dot: u32 = j + 1;
+    if tok_is(src, toks, dot, "[") && is_slice_tok(src, toks, ty) == 1 {
+        // M3: 切片下标 xs[i] -> extractvalue 0 + GEP(元素) + load
+        let et: u32 = elem_tok(src, toks, ty);
+        load_var(s, out, src, toks, j, lvl);
+        emit_str(s, out, "  ");
+        let sp: u32 = new_temp(s, out);
+        emit_str(s, out, " = extractvalue { ptr, i64 } ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, ", 0\n");
+        let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1);
+        emit_str(s, out, "  ");
+        let g: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, et);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, sp);
+        emit_str(s, out, ", i32 ");
+        emit_val(s, out, lvl + 1);
+        emit_str(s, out, "\n  ");
+        let rl: u32 = new_temp(s, out);
+        emit_str(s, out, " = load ");
+        emit_ty(s, out, src, toks, et);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, g);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lvl, rl);
+        let ie: u32 = iv + 1;   // ']' 之后
+        if tok_is(src, toks, ie, "as") {
+            apply_cast(s, out, src, toks, et, ie + 1, lvl);
+            return ie + 2;
+        }
+        return ie;
+    }
+    if tok_is(src, toks, dot, "[") && is_array_tok(src, toks, ty) == 1 {
+        // M24: 数组下标 a[i] -> GEP(数组, 0, i) + load
+        let et2: u32 = elem_tok(src, toks, ty);
+        let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl);
+        emit_str(s, out, "  ");
+        let gp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, j);
+        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, "\n  ");
+        let rl2: u32 = new_temp(s, out);
+        emit_str(s, out, " = load ");
+        emit_ty(s, out, src, toks, et2);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, gp);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lvl, rl2);
+        let ie2: u32 = iv2 + 1;
+        if tok_is(src, toks, ie2, "as") {
+            apply_cast(s, out, src, toks, et2, ie2 + 1, lvl);
+            return ie2 + 2;
+        }
+        return ie2;
+    }
     if tok_is(src, toks, dot, ".") {   // M23: 字段访问 p.a -> GEP + load
         let si: u32 = find_struct(s, src, toks, ty);
         let fi: u32 = field_index(s, src, toks, si, dot + 1);
@@ -1657,8 +1813,34 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     return e9;
 }
 
-/// 一元: -x (sub ty 0, v) / !b (xor i1 v, true)
+/// 一元: -x (sub ty 0, v) / !b (xor i1 v, true) / &a / &mut a (数组 -> 切片)
 fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
+    if tok_is(src, toks, j, "&") {   // M3/M4: 数组 -> 切片 (元素指针 + 个数)
+        let nm: u32 = j + 1;
+        if tok_is(src, toks, nm, "mut") {
+            nm = nm + 1;
+        }
+        let ty: u32 = var_type(s, src, toks, nm);
+        emit_str(s, out, "  ");
+        let p0: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, nm);
+        emit_str(s, out, ".addr, i32 0, i32 0\n  ");
+        let v1: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+        emit_dec(s, out, p0);
+        emit_str(s, out, ", 0\n  ");
+        let v2: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+        emit_dec(s, out, v1);
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, array_len_of(src, toks, ty));
+        emit_str(s, out, ", 1\n");
+        set_temp_val(s, lvl, v2);
+        return nm + 1;
+    }
     if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
         let neg: u32 = tok_is(src, toks, j, "-") as u32;
         let inner: u32 = expr_unary(s, out, src, toks, j + 1, lvl, want);
@@ -1869,7 +2051,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         store32(s, 16384 + k * 8, i);
         store32(s, 16384 + k * 8 + 4, i + 2);
         k = k + 1;
-        i = i + 3;
+        i = skip_type(src, toks, i + 2);   // 类型可能是 [T] / [T; N]
         if tok_is(src, toks, i, ",") {
             i = i + 1;
         }
@@ -2198,7 +2380,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "let") {
         let name: u32 = j + 1;
         let ty: u32 = j + 3;
-        let e2: u32 = expr_bin(s, out, src, toks, j + 5, 1, 0);
+        let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        if is_array_tok(src, toks, ty) == 1 && tok_is(src, toks, eq + 1, "[") {
+            return let_array_lit(s, out, src, toks, name, ty, eq + 1);
+        }
+        let e2: u32 = expr_bin(s, out, src, toks, eq + 1, 1, 0);
         emit_str(s, out, "  store ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, " ");
@@ -2336,6 +2522,60 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let e6: u32 = expr_bin(s, out, src, toks, j, 1, 0);
         return e6 + 1;
     }
+    // 下标赋值: NAME[IDX] = EXPR ;  (M4 可变切片 / M24 数组)
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "[") {
+        let sty: u32 = var_type(s, src, toks, j);
+        let set: u32 = elem_tok(src, toks, sty);
+        if is_slice_tok(src, toks, sty) == 1 {
+            load_var(s, out, src, toks, j, 0);
+            emit_str(s, out, "  ");
+            let sp: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, 0);
+            emit_str(s, out, ", 0\n");
+            let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1);
+            emit_str(s, out, "  ");
+            let sgp: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds ");
+            emit_ty(s, out, src, toks, set);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, sp);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, 1);
+            emit_str(s, out, "\n");
+            let sve: u32 = expr_bin(s, out, src, toks, siv + 2, 1, 2);
+            emit_str(s, out, "  store ");
+            emit_ty(s, out, src, toks, set);
+            emit_str(s, out, " ");
+            emit_val(s, out, 2);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, sgp);
+            emit_str(s, out, "\n");
+            return sve + 1;
+        }
+        if is_array_tok(src, toks, sty) == 1 {
+            let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0);
+            emit_str(s, out, "  ");
+            let agp: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds ");
+            emit_ty(s, out, src, toks, sty);
+            emit_str(s, out, ", ptr %");
+            emit_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr, i32 0, i32 ");
+            emit_val(s, out, 0);
+            emit_str(s, out, "\n");
+            let ave: u32 = expr_bin(s, out, src, toks, aiv + 2, 1, 1);
+            emit_str(s, out, "  store ");
+            emit_ty(s, out, src, toks, set);
+            emit_str(s, out, " ");
+            emit_val(s, out, 1);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, agp);
+            emit_str(s, out, "\n");
+            return ave + 1;
+        }
+        return j + 1;
+    }
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
         let ty2: u32 = var_type(s, src, toks, j);
@@ -2350,6 +2590,39 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         return e5 + 1;
     }
     return j + 1;
+}
+
+/// 数组字面量绑定: `let a: [T; N] = [e0, e1, …];` —— 逐元素 GEP + 求值 + store。
+/// `i` 指向 `[`; 返回其后的 token 下标。
+fn let_array_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u32) -> u32 {
+    let et: u32 = elem_tok(src, toks, ty);
+    let k: u32 = i + 1;
+    let idx: u32 = 0;
+    while !tok_is(src, toks, k, "]") && tok_kind(toks, k) != 4 {
+        emit_str(s, out, "  ");
+        let gp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, ", ptr %");
+        emit_tok(s, out, src, toks, name);
+        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_dec(s, out, idx);
+        emit_str(s, out, "\n");
+        let ev: u32 = expr_bin(s, out, src, toks, k, 1, 0);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, et);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, gp);
+        emit_str(s, out, "\n");
+        k = ev;
+        if tok_is(src, toks, k, ",") {
+            k = k + 1;
+        }
+        idx = idx + 1;
+    }
+    return k + 1;
 }
 
 /// 匹配的 '}' 之后的下标 (i 指向 '{')。
@@ -2529,7 +2802,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
                 store32(s, 24576 + n * 128 + pk * 8, pi);
                 store32(s, 24576 + n * 128 + pk * 8 + 4, pi + 2);
                 pk = pk + 1;
-                pi = pi + 3;
+                pi = skip_type(src, toks, pi + 2);
                 if tok_is(src, toks, pi, ",") {
                     pi = pi + 1;
                 }
