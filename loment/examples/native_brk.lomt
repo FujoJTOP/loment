@@ -1,0 +1,40 @@
+// loment/examples/native_brk.lomt — M83 验证集: 整数 -> 指针 (docs/145)
+//
+// M67 加了 `ptr as u64` (指针转整数, syscall 传参用); 反过来的一步缺了 —— 于是
+// **托管程序没法把自己的内存请求交给内核** (brk/mmap 返回的是整数)。
+// 自举驱动需要向内核要几 MB 缓冲, 而语言自带的 bump 堆只有 64 KiB (而且它长得
+// 太大就会把每个 alloc 用户的 .bss 撑爆, 内核模块尤其不能要), 所以缺的这一步必须补上。
+//
+//   brk(0)         -> 当前 program break (整数)
+//   brk(cur + n)   -> 抬到新位置, 返回新 break
+//
+// 这里只验证**双路径一致**: Rust 路径把整数转型写成 `(v as *mut u8)`, IR 路径写
+// `inttoptr`。带 syscall 的完整驱动在 loment/selfhost/driver.lomt。
+
+module native_brk
+
+/// 指针 -> 整数 (M67)。
+fn ptr_to_int(p: ptr) -> u64 {
+    return p as u64;
+}
+
+/// 整数 -> 指针 (M83)。往返一次必须回到原值。
+fn int_to_ptr(v: u64) -> ptr {
+    return v as ptr;
+}
+
+fn roundtrip(p: ptr) -> bool {
+    let i: u64 = p as u64;
+    let q: ptr = i as ptr;
+    return (q as u64) == i;
+}
+
+fn first_byte(p: ptr, v: u8) -> u32 {
+    store8(p, 0, v);
+    return load8(p, 0);
+}
+
+fn scratch_probe() -> u32 {
+    let p: ptr = int_to_ptr(ptr_to_int(alloc(8)));
+    return first_byte(p, 42);
+}

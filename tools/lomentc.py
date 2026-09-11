@@ -1649,6 +1649,8 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         st = expr_type(e.expr, scope, funcs, structs)
         if st == "ptr" and e.type in ("u64", "i64"):  # M67
             return e.type
+        if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
+            return "ptr"
         if st is None and isinstance(e.expr, IntLit) and e.type in INT_TYPES:
             return e.type
         if st is not None and (st in INT_TYPES or st == "bool") \
@@ -1784,6 +1786,8 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         _walk_expr(e.expr, scope, funcs, structs, errs, enums)
         st = expr_type(e.expr, scope, funcs, structs)
         if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
+            return
+        if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
             return
         if st is None and isinstance(e.expr, IntLit):  # 整型字面量按目标定宽
             if e.type not in INT_TYPES:
@@ -2938,7 +2942,13 @@ class _Ir:
                 r = self.t()
                 self.w(f"{r} = ptrtoint ptr {v} to {self.ll(e.type)}")
                 return e.type, r
+            if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
+                r = self.t()
+                self.w(f"{r} = inttoptr {self.ll(st)} {v} to ptr")
+                return "ptr", r
             si, di = self.ll(st or "u32"), self.ll(e.type)
+            if si == di:  # 同宽异名 (u64 <-> i64): LLVM 里是同一个类型, 再 cast 是非法 IR
+                return e.type, v
             sw, dw = _bit_width(st or "u32"), _bit_width(e.type)
             op = "trunc" if dw < sw else ("sext" if (st in _SIGNED) else "zext")
             r = self.t()

@@ -15,7 +15,7 @@ module codegen
 //         值栈: 第 k 层 长度@8192+72k, 文本@8196+72k (容量 68), k=0..40
 //         scratch 656.. (16B)
 //         实参类型 720+(层)*4 (16 层) 十进制数字缓冲 672..704 函数计数 640  struct 表 1024..6144
-//         函数表 12288.. 当前函数参数表 16384.. 局部表 20480.. 每函数形参类型 24576+i*64
+//         函数表 12288.. 当前函数参数表 16384.. 局部表 20480.. 每函数形参类型 24576+i*80
 //         scratch 48000.. (状态块 49152)
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
@@ -1271,6 +1271,11 @@ fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl
     if sw == dw && from_t == to_t {
         return 0;   // 同类型: 不加指令
     }
+    if sw == dw && !tok_is(src, toks, from_t, "ptr") && !tok_is(src, toks, to_t, "ptr") {
+        // 同宽异名 (u64 <-> i64): LLVM 里本来就是同一个类型, 再写 sext/zext 是非法 IR
+        // (自举驱动里的 `i64 as u64` 第一次踩到 —— clang 直接报 invalid cast opcode)
+        return 0;
+    }
     if tok_is(src, toks, from_t, "ptr") {   // M67: 指针转整数
         if tok_is(src, toks, to_t, "u64") || tok_is(src, toks, to_t, "i64") {
             emit_str(s, out, "  ");
@@ -1281,6 +1286,17 @@ fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl
             set_temp_val(s, lvl, np);
             return 1;
         }
+    }
+    if tok_is(src, toks, to_t, "ptr") {   // M83: 整数 -> 指针 (brk/mmap 取内存)
+        emit_str(s, out, "  ");
+        let npi: u32 = new_temp(s, out);
+        emit_str(s, out, " = inttoptr ");
+        emit_ty(s, out, src, toks, from_t);
+        emit_str(s, out, " ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, " to ptr\n");
+        set_temp_val(s, lvl, npi);
+        return 1;
     }
     emit_str(s, out, "  ");
     let n: u32 = new_temp(s, out);
@@ -1382,6 +1398,15 @@ fn apply_cast_b(s: ptr, out: ptr, src: ptr, toks: ptr, fid: u32, fsg: u32, to_to
         emit_str(s, out, "ptrtoint ptr ");
         emit_val(s, out, lvl);
         emit_str(s, out, " to i64\n");
+        set_temp_val(s, lvl, n);
+        return 1;
+    }
+    if tid == 5 && fid >= 1 && fid <= 4 {   // M83: 整数 -> 指针 (brk/mmap 取内存)
+        emit_str(s, out, "inttoptr ");
+        emit_ty_name(s, out, fid);
+        emit_str(s, out, " ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, " to ptr\n");
         set_temp_val(s, lvl, n);
         return 1;
     }
@@ -2076,11 +2101,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         let k: u32 = j + 2;
         let a: u32 = 0;
-        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 16 {
+        while !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 && a < 10 {
             // 实参按"形参类型"强制 (与 lomentc 的 expr(a, p.type) 同序同型)
             let ft: u32 = 0;
             if fi != 4294967295 {
-                ft = load32(s, 24576 + fi * 128 + a * 8 + 4);
+                ft = load32(s, 24576 + fi * 80 + a * 8 + 4);
             }
             let at: u32 = ft;
             let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
@@ -2301,8 +2326,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         load_var(s, out, src, toks, j, lvl);   // 接收者按第一形参类型求值
         let km: u32 = dot + 3;
         let am: u32 = 0;
-        while !tok_is(src, toks, km, ")") && tok_kind(toks, km) != 4 && am < 15 {
-            let ft2: u32 = load32(s, 24576 + mfi * 128 + (am + 1) * 8 + 4);
+        while !tok_is(src, toks, km, ")") && tok_kind(toks, km) != 4 && am < 9 {
+            let ft2: u32 = load32(s, 24576 + mfi * 80 + (am + 1) * 8 + 4);
             let ae2: u32 = expr_bin(s, out, src, toks, km, 1, lvl + 1 + am);
             store32(s, 720 + (lvl + 1 + am) * 4, ft2);
             km = ae2;
@@ -2318,7 +2343,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_str(s, out, " @");
         emit_method_name(s, out, src, toks, mfi);
         emit_str(s, out, "(");
-        emit_ty(s, out, src, toks, load32(s, 24576 + mfi * 128 + 4));
+        emit_ty(s, out, src, toks, load32(s, 24576 + mfi * 80 + 4));
         emit_str(s, out, " ");
         emit_val(s, out, lvl);
         let bm: u32 = 0;
@@ -4144,14 +4169,17 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
                 store32(s, fk_base(n), 2);
                 store32(s, fk_base(n) + 4, impl_recv);
             }
-            // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)
+            // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)。
+            // 步长 80 (= 10 个槽) 而不是 128: 表从 24576 起, 步长 128 时第 128 个函数
+            // 正好压到枚举表 (40960) —— codegen.lomt 自己的单元只有 118 个函数, 侥幸没撞,
+            // 自举驱动把 lexer/bytes 一起装进来 (134 个函数) 才暴露 (M83 抓到的真 bug)。
             let pi: u32 = lp + 1;
             let pk: u32 = 0;
-            while pi < rp && pk < 16 {
-                store32(s, 24576 + n * 128 + pk * 8, pi);
-                store32(s, 24576 + n * 128 + pk * 8 + 4, pi + 2);
+            while pi < rp && pk < 10 {
+                store32(s, 24576 + n * 80 + pk * 8, pi);
+                store32(s, 24576 + n * 80 + pk * 8 + 4, pi + 2);
                 if load32(s, fk_base(n)) == 2 && pk == 0 {   // impl 的 self: 类型 = 接收者类型
-                    store32(s, 24576 + n * 128 + pk * 8 + 4, load32(s, fk_base(n) + 4));
+                    store32(s, 24576 + n * 80 + pk * 8 + 4, load32(s, fk_base(n) + 4));
                 }
                 pk = pk + 1;
                 pi = skip_type(src, toks, pi + 2);

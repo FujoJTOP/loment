@@ -1,10 +1,14 @@
 # 150 · Loment 自举（P8，M79–M88）
 
-> 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 38 个示例中 35 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
-> **自举四阶段全部能编译自身**：`lexer` / `parser` / `checker` / `codegen` 四个 `.lomt` 的 `.ll` 与
-> `lomentc --emit-llvm` **逐字节一致**（26028B / 115464B / 83148B / 557828B，差异行均为 0）
-> 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
+> 状态: **M79–M84 已完成**（2026-09-11）· 自检: `tools/loment_p8_test.py` **7/7**
+> M82 逐字节一致: **目标 39/39**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/
+> `native_str`/`native_gen`/`native_trait`/`native_res`/`native_brk`/`bytes`/`native`/`ahci`/
+> `fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`/`demo`/`all_loment`/`selfcheck`/
+> `lexer`/`parser`/`checker`/`codegen`/`driver` …）。
+> 唯一非目标 `native_raii.lomt`：参考实现自己就报 `native: inb 暂未在 IR 后端实现`。
+> **自举四阶段全部能编译自身**，且有一个**能独立跑的驱动**（`loment/selfhost/driver.lomt`）：
+> 它编译自己的单元与 `lomentc --emit-llvm` 逐字节相同（973238B），用自己的产物再链一次仍相同。
+> 门禁: `ci.py` 静态项 8 PASS（另 4 项因 `LinuxFUAI/` 私有库缺位而失败，非 Loment 回归）
 
 ## M79 · Loment 版 lexer ✅
 
@@ -188,7 +192,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | 29 | 嵌套调用的实参类型错位（`take5(p, q, r, load32(p,n), n)` 里 `q` 变成 `i32`） | 实参类型槽是**一张共享数组**，内层调用把外层已记好的槽覆盖了 → 改为按**值栈层**索引（`720+(lvl+1+a)*4`）。这个 bug 只在"实参里有调用"时现形 |
 | 30 | `str_byte(s, i)` 的指令顺序反了 | Python 是"取 arg0 → `extractvalue` → 取 arg1"，我先算完两个实参才 `extractvalue` |
 | 31 | 调用实参上限只有 4 | `while … && a < 4` → 自举 lexer 的 `emit(7 参)` 被截断；改为 8（形参类型槽本来就是 8） |
-| 32 | 字符串字面量里出现 ` D A` | 驱动按**原始字节**读文件，而夹具写临时单元用了文本模式（CRLF）→ 写 `newline="
+| 32 | 字符串字面量里出现 `DA` | 驱动按**原始字节**读文件，而夹具写临时单元用了文本模式（CRLF）→ 写 `newline="
 "`；`lomentc.load` 用 `read_text`（通用换行），两边必须一致 |
 | 33 | `0x100000000` 被截成 0 | 字面量走 u32 算术；改为**长乘 16 加**转十进制（数字缓冲 672..704），十进制原样去前导 0 —— 镜像 Python 大整数 |
 | 34 | `(r / 4294967296) as u32` 打成 `trunc i32 → i32` | `apply_cast` 的 from 侧传 0（未知）时打印用 `i32` 但位宽按 64 算；现在传真实 `expr_type`，且 0 一律按 u32（= `st or "u32"`） |
@@ -272,7 +276,7 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 
 另有一处 token 层 off-by-one：`->` 是两个 token，所以返回类型在 `)` 之后第 3 个位置。
 
-## M83 · 自编译（编译器编译自身）✅ 部分 · M84 · 三阶段定点 ✅
+## M83 · 自编译（编译器编译自身）✅ · M84 · 三阶段定点 ✅
 
 **判据与证据**（`loment_p8_test::test_m83_m84_self_compile_and_fixed_point`，
 也可由 `python tools/loment_bootstrap.py` 一条命令复现）：
@@ -282,21 +286,48 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 | stage1 | **Python 版** `lomentc` 编译 `loment/selfhost/codegen.lomt`（连同 Loment 版 lexer）→ `.ll` → clang 链出可执行文件 | 可运行 |
 | stage2 | **stage1 自己产出的 `.ll`** → clang 链出（M83：编译器编译自己的产出可运行） | 可运行 |
 | stage3 | stage2 的产出 → clang 链出 | 可运行 |
-| **M84 定点** | stage1 / stage2 / stage3 各自生成 `codegen.lomt` 的 IR，三者**逐字节相同** | **637115 B，全等** |
+| **M84 定点** | stage1 / stage2 / stage3 各自生成 `codegen.lomt` 的 IR，三者**逐字节相同** | **965680 B，全等** |
 
 定点不是巧合：stage2 对 `checker.lomt`、`ir_div.lomt` 的产出也与参考实现逐字节一致。
 
-**诚实边界（M83 记为"部分"的原因）**：自编译覆盖的是 **Loment 版 lexer + IR 后端**。
-- 前端 `parser`/`checker` 虽已自举（M80/M81），但**没有接进同一个驱动可执行文件**（当前由 C 驱动
-  提供 `main` 与文件读取，Loment 侧提供 `lex` 与 `emit_module`）；
-- 后端还**不支持泛型单态化 / trait 静态派发 / `match`+枚举 / 能力域**，所以它还不能编译任意程序
-  —— 这正是 M85（自举版跑 `lomentc_test`）还到不了的原因。
+### 独立驱动（2026-09-11 补上的一步）
+
+上面三个 stage 都还是"**被 C 驱动调用的函数**"：能编译自己，但没有能独立跑的编译器。
+`loment/selfhost/driver.lomt` 把它补齐 —— lexer + codegen 接成**一个 ELF**：
+
+```
+clang --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static -fuse-ld=lld \
+      -o fujoc-s loment/build/driver.ll
+./fujoc-s < unit.lomt > unit.ll        # 与 lomentc --emit-llvm 逐字节相同
+```
+
+内存向内核要（`brk`），**不用**语言自带的 64 KiB bump 堆：一个 190 KiB 的单元要约 4 MiB
+token 表。把那个静态堆调大是错的方向 —— 每个 `alloc` 用户（内核模块尤其）的 `.bss`
+都要跟着涨。这也是 M83 顺手补上 `整数 as ptr` 的原因（M67 只做了反方向的 `ptr as u64`）。
+
+判据（`test_m83_selfhosted_driver_compiles_itself`，在 WSL 里执行）：
+
+| 判据 | 结果 |
+|---|---|
+| 驱动跑自己的单元 → 与参考逐字节相同 | ✅ 973238B |
+| 用**驱动自己的产物**再链一个 ELF → 产物不变 | ✅ 二阶段定点 |
+| 同一个二进制对 `native_res.lomt` / `demo.lomt` 也与参考逐字节相同 | ✅ 不是"只会编译自己" |
+
+**自举抓到的两个真 bug**（都是"只有真实程序才暴露"的那类）：
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 驱动的单元里 `die(1)` 的实参类型变成了 `ptr` | 每函数形参类型表 `24576+i*128` 撞枚举表 `40960`：第 128 个函数正好压上去。`codegen.lomt` 自己的单元只有 118 个函数所以一直没露，驱动把 `bytes`/`lexer` 一起装进来（134 个函数）才暴露 | 步长改 80 |
+| 2 | clang 报 `invalid cast opcode for cast from 'i64' to 'i64'` | 同宽异名转型（`i64 as u64`）被写成 `sext i64 %v to i64` —— 同宽时 LLVM 里本来就是同一个类型 | 同宽不再写指令 |
+
+**诚实边界**：驱动吃**单个编译单元**，`use` 装载与 `Option`/`Result` 预置注入仍在夹具侧
+（与 M80/M81 同边界）。
 
 ## M85–M86 · 未做（诚实说明）
 
 | # | 里程碑 | 为什么现在做不了 |
 |---|---|---|
-| M85 | 自举编译器跑 `lomentc_test` | 需要自举后端覆盖**全语言**：泛型单态化（参考实现靠 `prepare()` 在 AST 上改名，自举版只吃 token 流，要在 token 层重建实例化命名）、trait 派发、`match`+枚举、能力域；并要把 lexer/parser/checker/codegen 接进同一驱动 |
+| M85 | 自举编译器跑 `lomentc_test` | 后端已覆盖全语言（M82 目标 39/39），缺的是：把 `use` 装载做进驱动、把 checker 接进同一驱动，才能端到端跑测试集 |
 | M86 | 自举性能优化 | 依赖 M85 |
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
@@ -316,6 +347,6 @@ M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 35 �
 ## M88 · 发布校验和 ✅ 部分
 
 `python tools/loment_release.py --checksums loment/build/SHA256SUMS` 产出
-**101 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
+**125 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
 **未做**：git tag 未创建/未推送（分支与并发开发线共用，打 tag 与推送需作者确认）。
 

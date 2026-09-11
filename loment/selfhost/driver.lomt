@@ -1,0 +1,98 @@
+// loment/selfhost/driver.lomt — M83: 独立的自举编译器 (docs/145/150)
+//
+// 吃"已装载的编译单元"(stdin), 吐 LLVM IR (stdout):
+//
+//   clang --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -fuse-ld=lld \
+//         -o fujoc-s loment/build/driver.ll
+//   ./fujoc-s < unit.lomt > unit.ll        # 与 lomentc --emit-llvm 逐字节相同
+//
+// 它把 lexer.lomt 与 codegen.lomt 接成**一个可执行文件** —— 在这之前, 自举链的每
+// 一环都是"一个被 C 驱动调用的函数", 没有能独立跑的编译器。
+//
+// 内存来自内核 (`brk`), 不用语言自带的 64 KiB bump 堆: 一个 190 KiB 的单元要 ~4 MiB
+// token 表加 ~1.5 MiB 输出。把那个静态堆调大是**错的方向** —— 每个 `alloc` 用户
+// (内核模块尤其) 的 `.bss` 都要跟着涨。这也是 M83 顺手补上 `整数 as ptr` 的原因
+// (M67 只做了反方向的 `ptr as u64`)。
+//
+// 边界 (与 M80/M81 的自举阶段一致): `use` 装载与 `Option`/`Result` 预置注入由夹具
+// 负责, 驱动只吃装载好的单元。
+
+module driver
+
+const SRC_CAP: u64 = 4194304;   // 源缓冲上限 4 MiB
+
+use "loment/selfhost/lexer.lomt"
+use "loment/selfhost/codegen.lomt"
+
+/// 退出; 返回值只为类型完整 (syscall 之后不会回来)。
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+/// 向内核抬 program break 拿 n 字节; 返回块首 (0 = 失败)。
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+/// 读到 EOF 或读满; 返回实际字节数。
+fn read_all(buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, 0, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// write 可以短写, 循环写干净。
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn _start() -> u32 {
+    let srcv: u64 = sys_alloc(SRC_CAP);
+    if srcv == 0 {
+        return fail("fujoc-s: brk failed\n");
+    }
+    let src: ptr = srcv as ptr;
+    let n: u64 = read_all(src, SRC_CAP);
+    if n == 0 {
+        return fail("fujoc-s: no input\n");
+    }
+    let toksv: u64 = sys_alloc((n + 16) * 20);
+    let outv: u64 = sys_alloc(n * 8 + 8192);
+    if toksv == 0 || outv == 0 {
+        return fail("fujoc-s: out of memory\n");
+    }
+    let toks: ptr = toksv as ptr;
+    let out: ptr = outv as ptr;
+    lex(src, n as u32, toks);
+    let m: u32 = emit_module(src, toks, out);
+    write_all(1, out, m as u64);
+    return die(0);
+}

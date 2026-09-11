@@ -551,6 +551,96 @@ def _build_from_ll(ll: Path, td: str, name: str) -> Path:
     return exe
 
 
+DRIVER_LOMT = ROOT / "loment" / "selfhost" / "driver.lomt"
+
+
+def _wsl() -> bool:
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    """Windows 路径 -> WSL 里的 /mnt/<drive>/..."""
+    s = str(p.resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
+    """IR -> x86_64 Linux ELF (无 libc, `_start` 即入口) —— 从 Windows 交叉编译。"""
+    ll = Path(td) / f"{name}.ll"
+    ll.write_text(ll_text, encoding="utf-8")
+    elf = Path(td) / f"{name}.elf"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-500:]
+    return elf
+
+
+def _run_driver(elf: Path, unit: Path, td: str, name: str) -> str:
+    """在 WSL 里跑自举驱动: < unit > out, 返回它产出的文本。"""
+    got = Path(td) / f"{name}.out.ll"
+    script = (f"cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
+              f"/tmp/{name} < {_wsl_path(unit)} > {_wsl_path(got)}")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                       capture_output=True, text=True, timeout=300, shell=False)
+    assert r.returncode == 0, f"驱动退出 {r.returncode}: {r.stderr[-400:]}"
+    return got.read_text(encoding="utf-8")
+
+
+@test
+def test_m83_selfhosted_driver_compiles_itself():
+    """M83: 自举驱动是**一个能独立跑的可执行文件**, 且它能编译自己。
+
+    在这之前, 自举链的每一环都是"被 C 驱动调用的函数" —— 没有能独立跑的编译器。
+    `driver.lomt` 用 brk 向内核要内存、从 stdin 吃装载好的单元、往 stdout 吐 IR。
+
+    判据 (全部在 WSL 里执行):
+      1. 参考实现发射 driver.lomt 的单元 -> 链成 ELF -> 跑它 -> 产物与参考逐字节相同;
+      2. 用它自己的产物再链一个 ELF (ELF2) -> ELF2 跑同一单元, 产物与 ELF1 相同 (定点);
+      3. 同一驱动对语料里的真实示例产物也与参考逐字节相同。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    if not _wsl():
+        print("      SKIP: 无 WSL, 交叉产物未执行 (M83 部分)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        # 1. 参考发射 -> ELF1
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+        elf1 = _build_linux_elf(want, td, "fujocs1")
+        unit = Path(td) / "driver_unit.lomt"
+        unit.write_text(_unit_text(DRIVER_LOMT), encoding="utf-8", newline="\n")
+        got1 = _run_driver(elf1, unit, td, "fujocs1")
+        bad = next((k for k in range(min(len(got1), len(want))) if got1[k] != want[k]), None)
+        assert got1 == want, (
+            f"驱动产物与参考不一致: want {len(want)}B got {len(got1)}B @{bad}")
+        # 2. 用驱动自己的产物再链一个 -> 定点
+        elf2 = _build_linux_elf(got1, td, "fujocs2")
+        got2 = _run_driver(elf2, unit, td, "fujocs2")
+        assert got2 == got1, "M84: 自举驱动的第 2 阶段产物与第 1 阶段不一致"
+        # 3. 同一个二进制对别的单元也与参考一致 (驱动不是"只会编译自己")
+        for name in ("native_res.lomt", "demo.lomt"):
+            target = ROOT / "loment" / "examples" / name
+            m2 = lomentc.load(target)
+            d2 = lomentc.resolve_deps(m2, ROOT, target.parent, entry=target)
+            u2 = Path(td) / f"unit_{target.stem}.lomt"
+            u2.write_text(_unit_text(target), encoding="utf-8", newline="\n")
+            assert _run_driver(elf1, u2, td, f"u_{target.stem}") == lomentc.emit_llvm(m2, ROOT, d2), \
+                f"驱动在 {name} 上与参考不一致"
+        print(f"      自举驱动: {len(want)}B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致")
+
+
 @test
 def test_m83_m84_self_compile_and_fixed_point():
     """M83/M84: 自举编译器编译自身 -> 可运行二进制; 三阶段产物逐字节相同 (定点)。
@@ -602,7 +692,9 @@ def test_m82_coverage_report():
              "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt",
              "ir_call5.lomt",
              # 预置枚举 + `?` 早退 + `if let` 三条路径的回归闸 (不放进列表就会静默退化)
-             "native_res.lomt"]
+             "native_res.lomt",
+             # 整数->指针 (M83 给托管驱动补的那一步) 与自举驱动自身
+             "native_brk.lomt", "driver.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff, unsupported = [], [], []

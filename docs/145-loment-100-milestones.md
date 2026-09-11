@@ -345,6 +345,38 @@ python tools/loment_p8_test.py     # 6/6
 | 真实示例解锁 | `native_res.lomt`（3022B）、`demo.lomt`（10141B）从"有差异"变为**逐字节一致** | ✅ |
 | M82 目标集 | 全部 37 个可发射示例逐字节一致（唯一剩下的 `native_raii.lomt` 参考实现自己就报错，非目标） | ✅ 完成 |
 
+### P8 证据补充（2026-09-11，M83：自举驱动 = 一个能独立跑的编译器）
+
+```
+python tools/loment_p8_test.py     # 7/7
+# 自举驱动: 973238B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致
+# 定点: stage1 == stage2 == stage3 (965680B)
+# 目标覆盖 39/39 字节一致
+```
+
+在这之前自举链的每一环都是"被 C 驱动调用的函数"：能编译自己，但没有**能独立跑的编译器**。
+`loment/selfhost/driver.lomt` 把 lexer 与 codegen 接成一个 ELF：
+
+```
+clang --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static -fuse-ld=lld \
+      -o fujoc-s driver.ll
+./fujoc-s < unit.lomt > unit.ll        # 与 lomentc --emit-llvm 逐字节相同
+```
+
+| 里程碑 | 验证方式 | 结果 |
+|---|---|---|
+| M83 独立驱动 | `driver.lomt` + `lexer.lomt` 编译成 x86_64 Linux ELF（WSL 里执行），吃 stdin 吐 stdout | ✅ |
+| M83 驱动编译自己 | 驱动跑自己的单元 → 产物与参考逐字节相同（973238B）；再用**它的产物**链一个 ELF，产物不变 | ✅ 定点 |
+| M83 驱动不是"只会编译自己" | 同一个二进制对 `native_res.lomt` / `demo.lomt` 也与参考逐字节相同 | ✅ |
+| M83 整数 → 指针 | M67 只做了 `ptr as u64`；托管驱动要向内核要内存（`brk` 返回整数）就缺反方向。补进 `as` 规则（Rust 路径 `as *mut u8`，IR 路径 `inttoptr`），示例 `native_brk.lomt` 双路径一致 | ✅ |
+| 为什么不用自带堆 | bump 堆 64 KiB（`alloc(49152)` 只是生成器自己的状态块）装不下 4 MiB token 表；而把静态堆调大等于给每个 `alloc` 用户——**内核模块尤其**——的 `.bss` 塞几 MB。所以走内核 `brk` | 设计取舍 |
+| M83 自举抓到的真 bug ① | 每函数形参类型表 `24576+i*128` 撞枚举表 `40960`：第 128 个函数正好压上去。`codegen.lomt` 自己的单元只有 118 个函数所以一直没露；驱动把 `bytes`/`lexer` 一起装进来（134 个函数）才暴露 | ✅ 步长改 80 |
+| M83 自举抓到的真 bug ② | 同宽异名转型（`i64 as u64`）被写成 `sext i64 %v to i64` —— clang 直接报 `invalid cast opcode`。同宽时 LLVM 里本来就是同一个类型，不再写指令 | ✅ 参考与自举两侧同步修 |
+
+**M83 之后剩下的自举缺口**（M85 的前置）：驱动只吃**单个编译单元**，`use` 装载与
+`Option`/`Result` 预置注入仍在夹具侧；把装载也做进驱动 + 把 checker 接进同一驱动，
+才是"自举编译器跑全部测试"（M85）。
+
 ### P9/P10 证据（2026-09-09，M89–M99）
 
 ```
@@ -481,13 +513,13 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
-| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 37/37：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
-| M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅ 部分（IR 后端已能编译自身并产出可运行二进制、37/37 目标逐字节一致；但 lexer/parser/checker/codegen 还没有接成**同一个驱动**，端到端编译一个 .lomt 仍走四个独立阶段） |
-| M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 958762B；stage2 对 checker/ir_div 亦与参考一致） |
+| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 39/39：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`/整数↔指针；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
+| M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅（`loment/selfhost/driver.lomt` 把 lexer + codegen 接成**一个能独立跑的 ELF**：brk 取内存、stdin 吃单元、stdout 吐 IR；它编译自己的单元与参考逐字节相同，且用它自己的产物再链一次仍逐字节相同。边界：单编译单元，`use` 装载仍在夹具侧——与 M80/M81 同边界） |
+| M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 965680B；自举驱动也做了二阶段定点；stage2 对 checker/ir_div 亦与参考一致） |
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 |
 | M86 | 自举性能优化 | 编译自身时间进入预算 |
 | M87 | 引导脚本与发布包 | 干净环境一键引导 | ✅（`tools/loment_bootstrap.py`） |
-| M88 | 自举版本发布 | 打 tag + 校验和 | ✅ 部分（`SHA256SUMS` 101 行；tag 未推送） |
+| M88 | 自举版本发布 | 打 tag + 校验和 | ✅ 部分（`SHA256SUMS` 125 行；tag 未推送） |
 
 ## P9 · 生态与平台（M89–M96）
 
