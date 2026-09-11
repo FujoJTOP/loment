@@ -303,7 +303,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "08d7fdf0d44d4de046908832e79ecb94d4d09b715734c4bc723dcfd9445ff69a"
+   "sha256": "6e87e3cb0debf84f051c132ceedcd24f957a1bb02c533f92a226ad1831802ecb"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -327,7 +327,7 @@
   },
   {
    "path": "docs/149-loment-kernel-integration.md",
-   "sha256": "87047f7f974f191118f8d0dc8260c20b0f0583c9ad387ffdbd451a45872d2ded"
+   "sha256": "96a09bce945c2a8c72bd8b4e27590ff406459f29fe08010e8df0bcbfbd3e1bd6"
   },
   {
    "path": "docs/149-uisport-first-attempt.md",

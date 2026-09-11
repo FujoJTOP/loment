@@ -2,6 +2,9 @@
 
 > 状态: **已实现并通过门禁**（2026-09-09）· 自检: `tools/loment_p7_test.py` 8/8
 > 门禁: `ci.py --static-only` 8/8 · 一句话: **Loment 程序在 FujoOS 用户态跑起来了。**
+>
+> **交接给内核线**：内核侧还需要做什么（10 项）、跨线 ABI 约定、可直接消费的产物清单、
+> 两条线的分工纪律 —— 见 **`docs/155-loment-kernel-handoff.md`**（面向没跟过 Loment 线的内核 agent）。
 
 ## 0. 运行链（M67 的核心）
 
