@@ -1,7 +1,7 @@
 # 150 · Loment 自举（P8，M79–M88）
 
 > 状态: **进行中**（2026-09-10）· 已完成: M79/M82（标量+控制流+除法+指针/位域内建子集）· 自检: `tools/loment_p8_test.py` 5/5
-> M82 逐字节一致: 38 个示例中 27 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
+> M82 逐字节一致: 38 个示例中 28 个（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`bytes`/`native`/`ahci`/`fuc_node`/`allocator`/`mathutil`/`user_hello`/`bootprobe`）
 > **自举四阶段全部能编译自身**：`lexer` / `parser` / `checker` / `codegen` 四个 `.lomt` 的 `.ll` 与
 > `lomentc --emit-llvm` **逐字节一致**（26028B / 115464B / 83148B / 557828B，差异行均为 0）
 > 门禁: `ci.py --static-only` 10/10（Loment 侧；`LinuxFUAI/` 为空时另 4 项失败）
@@ -116,7 +116,7 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 **覆盖**：函数签名与类型映射（i1/i8/i16/i32/i64/ptr）、入口块、参数 alloca + store、
 `%tN` 编号（从 1 起、每函数重置）、头部注释（注释里写的是 **Loment 类型名**而非 LLVM 类型）。
 
-**未覆盖**（相对 38 个示例文件，逐字节一致 27 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
+**未覆盖**（相对 38 个示例文件，逐字节一致 28 个）：其余内建（`str_len`/`str_eq`/`str_byte`/
 `slice_len`/`str_ptr`/`syscall*`）、`match`、str/切片/数组/struct/枚举等聚合类型、能力域表与 DWARF 元数据。
 每次门禁会打印按文件计的缺口分类表（`test_m82_coverage_report`），
 `ir_*.lomt` 目标文件是对应的防回归锚点。
@@ -194,6 +194,10 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | 34 | `(r / 4294967296) as u32` 打成 `trunc i32 → i32` | `apply_cast` 的 from 侧传 0（未知）时打印用 `i32` 但位宽按 64 算；现在传真实 `expr_type`，且 0 一律按 u32（= `st or "u32"`） |
 | 35 | `x as i64` 参与运算时类型退化成 i32 | `expr_type` 不认识 `as` 后缀 → 补"字面量/标识符/调用/括号 + `as T`"四种后缀识别 |
 
+**中断处理函数（M33）**：`interrupt fn f() { … }` → 注释写 `; f -> interrupt (x86_intrcc)`，
+签名是 `define x86_intrcc void @f(ptr byval([8 x i8]) %__frame)`（**无参数**，只列局部 alloca）。
+注意 `fn` 的前一个 token 是 `interrupt`，用 `base - 1` 判定。
+
 **自举阶段的现状（本轮最大成果）**：`lexer.lomt`、`parser.lomt`、`codegen.lomt` 三个自举阶段都能被
 Loment 版 codegen 编译出与 `lomentc --emit-llvm` **逐字节相同**的 IR（lexer 26028B / parser 115464B /
 codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生成自己的 IR 与参考实现完全一致"。
@@ -227,8 +231,8 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82）。
-M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 27 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
-缺口集中在聚合类型（9）、其余内建（5）、`for`（5）、`match`/枚举（3）、除法（2）、能力域（2）、`syscall`（1）；
+M82 的剩余清单还没有走完：**38 个示例文件里逐字节一致 28 个**（10 个 `ir_*.lomt` 锚点 + `toolchain`/`native_bits`/`native_mem`/`native_str`/`native`/`ahci`/`fuc_node`/`bytes`/`allocator`/`mathutil`/`user_hello`/`bootprobe`），
+缺口集中在聚合类型（9：切片/数组/枚举+match/泛型/trait）、`for`（5）、其余内建（4）、能力域（2）、除法（2）、`syscall`（1）；
 也就是说 M82 目前覆盖的是"标量 + 控制流 + 除法 + 指针/位域内建 + 常量 + 依赖拼接单元"这一层，
 M83 自编译还需要聚合类型与字符串/切片内建。
 

@@ -1879,6 +1879,35 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     store32(s, 524, 0);          // 字符串全局序号随函数复位
     let body_at: u32 = find_body(src, toks, lp);
     let nl: u32 = collect_locals(s, src, toks, body_at, skip_block(src, toks, body_at - 1));
+    if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
+        emit_str(s, out, "; ");
+        emit_tok(s, out, src, toks, base + 1);
+        emit_str(s, out, " -> interrupt (x86_intrcc)\n");
+        emit_str(s, out, "define x86_intrcc void @");
+        emit_tok(s, out, src, toks, base + 1);
+        emit_str(s, out, "(ptr byval([8 x i8]) %__frame) {\nentry:\n");
+        let bi: u32 = 0;
+        while bi < nl {
+            emit_str(s, out, "  %");
+            emit_tok(s, out, src, toks, load32(s, 20480 + bi * 8));
+            emit_str(s, out, ".addr = alloca ");
+            emit_ty(s, out, src, toks, load32(s, 20480 + bi * 8 + 4));
+            emit_str(s, out, "\n");
+            bi = bi + 1;
+        }
+        let jj: u32 = find_body(src, toks, lp);
+        while tok_kind(toks, jj) != 4 {
+            if tok_is(src, toks, jj, "}") {
+                if load32(s, 476) == 0 {
+                    emit_str(s, out, "  ret void\n");
+                }
+                emit_str(s, out, "}\n");
+                return jj + 1;
+            }
+            jj = stmt(s, out, src, toks, jj, ret);
+        }
+        return jj;
+    }
     emit_str(s, out, "; ");
     emit_tok(s, out, src, toks, base + 1);
     emit_str(s, out, " -> ");

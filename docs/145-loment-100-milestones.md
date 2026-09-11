@@ -279,7 +279,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 | ✅ 部分（4 规则、单编译单元） |
-| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（9 个目标文件；示例级覆盖 27/38，门禁打印缺口分类） |
+| M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅ 部分（9 个目标文件；示例级覆盖 28/38，门禁打印缺口分类） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
 | M88 校验和 | `loment_release --checksums` 110 行 sha256 | ✅ 部分（tag 未推送） |
 
@@ -303,7 +303,7 @@ python tools/lomentc_test.py       # 89/89
 
 ```
 python tools/loment_p8_test.py     # 5/5
-# 示例覆盖 26/38 字节一致 (10 个 ir_*.lomt 锚点 + toolchain/native_bits/native_mem/native_str/native/ahci/fuc_node/bytes/allocator/mathutil/user_hello/bootprobe)
+# 示例覆盖 28/38 字节一致 (10 个 ir_*.lomt 锚点 + toolchain/native_bits/native_mem/native_str/native/ahci/fuc_node/bytes/allocator/mathutil/user_hello/bootprobe)
 # 自举四阶段自编译: lexer / parser / checker / codegen 的 .ll 与 lomentc --emit-llvm 逐字节一致
 # 缺口分类: 聚合 9 · 内建 5 · for 5 · match/枚举 3 · 除法 2 · 能力域 2 · syscall 1
 ```
@@ -457,7 +457,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
-| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/`for`/除法/内建/常量内联；示例级 27/38；**自举四阶段全部能编译自身**；见 docs/150） |
+| M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅ 部分（标量/控制流/短路/转换/`for`/除法/内建/常量内联；示例级 28/38；**自举四阶段全部能编译自身**；见 docs/150） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 |
 | M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 |
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 |
