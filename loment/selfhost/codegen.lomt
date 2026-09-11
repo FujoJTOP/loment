@@ -12,16 +12,17 @@ module codegen
 // 调用方随后把该值内联到自己的行里 —— 这样嵌套表达式也能保持与 Python 版相同的指令顺序。
 //
 // 状态块: 0=输出游标 4=temp 计数 12=参数个数 512=需运行时文本块
-//         值栈: 第 k 层 长度@16+72k, 文本@20+72k (容量 68), k=0..5
-//         实参类型 608.. 函数计数 640
-//         函数表 8192.. 当前函数参数表 12288.. 局部表 16384.. 每函数形参类型 20480+i*64
+//         值栈: 第 k 层 长度@8192+72k, 文本@8196+72k (容量 68), k=0..40
+//         scratch 656.. (16B)
+//         实参类型 608.. 函数计数 640  struct 表 1024..6144
+//         函数表 12288.. 当前函数参数表 16384.. 局部表 20480.. 每函数形参类型 24576+i*64
 //         scratch 48000.. (状态块 49152)
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
 
 /// 状态块内的 16B 共享 scratch (只在下一次调用前存活, 不跨调用保留)。
 fn scratch_buf(s: ptr) -> ptr {
-    return ptr_add(s, 48000);
+    return ptr_add(s, 656);
 }
 
 fn st_o(s: ptr) -> u32 {
@@ -29,11 +30,11 @@ fn st_o(s: ptr) -> u32 {
 }
 
 fn blen(s: ptr, lvl: u32) -> u32 {
-    return 16 + 72 * lvl;
+    return 8192 + 72 * lvl;
 }
 
 fn btxt(s: ptr, lvl: u32) -> u32 {
-    return 20 + 72 * lvl;
+    return 8196 + 72 * lvl;
 }
 
 // ---------------------------------------------------------------- 输出
@@ -425,7 +426,7 @@ fn emit_div_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> 
 fn find_fn(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 640) {
-        let base: u32 = 8192 + i * 12;
+        let base: u32 = 12288 + i * 12;
         let nt: u32 = load32(s, base);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
@@ -447,14 +448,14 @@ fn find_fn(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
 }
 
 fn fn_ret(s: ptr, fi: u32) -> u32 {
-    return load32(s, 8192 + fi * 12 + 4);
+    return load32(s, 12288 + fi * 12 + 4);
 }
 
 /// 参数类型 (name_tok -> type_tok; 0 = 未找到)。
 fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 12) {
-        let nt: u32 = load32(s, 12288 + i * 8);
+        let nt: u32 = load32(s, 16384 + i * 8);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -466,7 +467,7 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 12288 + i * 8 + 4);
+                return load32(s, 16384 + i * 8 + 4);
             }
         }
         i = i + 1;
@@ -501,7 +502,7 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             }
             return 0;
         }
-        return param_type(s, src, toks, j);
+        return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
     if tok_is(src, toks, j, "(") {
         return expr_type(s, src, toks, j + 1);
@@ -586,6 +587,148 @@ fn emit_struct_ty(s: ptr, out: ptr, src: ptr, toks: ptr, si: u32) -> u32 {
     return emit_str(s, out, " }");
 }
 
+// ---------------------------------------------------------------- 字符串字面量
+
+fn s_gc(s: ptr, inc: u32) -> u32 {
+    if inc == 1 {
+        store32(s, 524, load32(s, 524) + 1);
+    }
+    return load32(s, 524);
+}
+
+fn emit_hex2(s: ptr, out: ptr, d: u32) -> u32 {
+    let o: u32 = st_o(s);
+    let c: u32 = 48 + d;
+    if d >= 10 {
+        c = 55 + d;   // 'A' + (d - 10)
+    }
+    store8(out, o, c as u8);
+    store32(s, 0, o + 1);
+    return o + 1;
+}
+
+fn emit_hex_byte(s: ptr, out: ptr, b: u32) -> u32 {
+    emit_str(s, out, "\\");
+    emit_hex2(s, out, b / 16);
+    return emit_hex2(s, out, b % 16);
+}
+
+/// 字符串字面量的解码后字节数 (span 含引号; 转义表同 lomc._ESCAPES)。
+fn str_lit_len(src: ptr, toks: ptr, i: u32) -> u32 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    let k: u32 = 1;
+    let c: u32 = 0;
+    while k + 1 < n {
+        if load8(src, st + k) == 92 {
+            k = k + 2;
+        } else {
+            k = k + 1;
+        }
+        c = c + 1;
+    }
+    return c;
+}
+
+/// 按 `\XX` 大写十六进制写出解码后的字节 (与 lomentc 的转义一致)。
+fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    let k: u32 = 1;
+    while k + 1 < n {
+        let b: u32 = load8(src, st + k);
+        if b == 92 {
+            let e: u32 = load8(src, st + k + 1);
+            let d: u32 = e;
+            if e == 110 {
+                d = 10;
+            } else if e == 116 {
+                d = 9;
+            }
+            emit_hex_byte(s, out, d);
+            k = k + 2;
+        } else {
+            emit_hex_byte(s, out, b);
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+/// 模块级字符串常量 (位于横幅/运行时/堆全局之后、函数之前)。
+/// 顺序 = 逐函数、逐出现 —— 与表达式求值顺序一致 (都是同一 token 流的线性扫描)。
+fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "fn") {
+            store32(s, 524, 0);
+            let j: u32 = i;
+            while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") {
+                j = j + 1;
+            }
+            j = j + 1;
+            let d: u32 = 1;
+            while tok_kind(toks, j) != 4 && d > 0 {
+                if tok_is(src, toks, j, "{") {
+                    d = d + 1;
+                }
+                if tok_is(src, toks, j, "}") {
+                    d = d - 1;
+                }
+                if d > 0 && tok_kind(toks, j) == 2 {
+                    emit_str(s, out, "@.str.");
+                    emit_tok(s, out, src, toks, i + 1);
+                    emit_str(s, out, ".");
+                    emit_dec(s, out, s_gc(s, 0));
+                    emit_str(s, out, " = private unnamed_addr constant [");
+                    emit_dec(s, out, str_lit_len(src, toks, j));
+                    emit_str(s, out, " x i8] c\"");
+                    emit_str_lit_bytes(s, out, src, toks, j);
+                    emit_str(s, out, "\"\n");
+                    s_gc(s, 1);
+                }
+                j = j + 1;
+            }
+            i = j;
+        } else {
+            i = i + 1;
+        }
+    }
+    return st_o(s);
+}
+
+/// 函数体内是否存在字符串字面量 (决定要不要写全局段)。
+/// 注意只看**函数体内** —— `use "..."` 也是 kind=2, 但它不是字面量。
+fn strings_needed(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "fn") {
+            let j: u32 = i;
+            while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") {
+                j = j + 1;
+            }
+            j = j + 1;
+            let d: u32 = 1;
+            while tok_kind(toks, j) != 4 && d > 0 {
+                if tok_is(src, toks, j, "{") {
+                    d = d + 1;
+                }
+                if tok_is(src, toks, j, "}") {
+                    d = d - 1;
+                }
+                if d > 0 && tok_kind(toks, j) == 2 {
+                    return 1;
+                }
+                j = j + 1;
+            }
+            i = j;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 表达式
 
 fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
@@ -611,6 +754,17 @@ fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl
     let dw: u32 = bit_width(to_t, src, toks);
     if sw == dw && from_t == to_t {
         return 0;   // 同类型: 不加指令
+    }
+    if tok_is(src, toks, from_t, "ptr") {   // M67: 指针转整数
+        if tok_is(src, toks, to_t, "u64") || tok_is(src, toks, to_t, "i64") {
+            emit_str(s, out, "  ");
+            let np: u32 = new_temp(s, out);
+            emit_str(s, out, " = ptrtoint ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, " to i64\n");
+            set_temp_val(s, lvl, np);
+            return 1;
+        }
     }
     emit_str(s, out, "  ");
     let n: u32 = new_temp(s, out);
@@ -825,6 +979,31 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 
 /// 原子 + 后缀: 字面量 / 参数 / 括号 / 调用 / `as T`。
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
+    if tok_kind(toks, j) == 2 {   // 字符串字面量 -> { ptr, i64 }
+        let idx: u32 = s_gc(s, 0);
+        s_gc(s, 1);
+        emit_str(s, out, "  ");
+        let sp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds [");
+        emit_dec(s, out, str_lit_len(src, toks, j));
+        emit_str(s, out, " x i8], ptr @.str.");
+        emit_tok(s, out, src, toks, load32(s, 528));
+        emit_str(s, out, ".");
+        emit_dec(s, out, idx);
+        emit_str(s, out, ", i64 0, i64 0\n  ");
+        let sv1: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+        emit_dec(s, out, sp);
+        emit_str(s, out, ", 0\n  ");
+        let sv2: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+        emit_dec(s, out, sv1);
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, str_lit_len(src, toks, j));
+        emit_str(s, out, ", 1\n");
+        set_temp_val(s, lvl, sv2);
+        return j + 1;
+    }
     if tok_kind(toks, j) == 1 {
         set_dec_val(s, lvl, tok_int(src, toks, j));   // 十六进制也按十进制内联
         let e0: u32 = j + 1;
@@ -1097,6 +1276,184 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             store32(s, blen(s, lvl), 1);
             return k11 + 1;
         }
+        if tok_is(src, toks, j, "str_len") || tok_is(src, toks, j, "str_ptr") {   // M1/M67
+            let k12: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let want_ptr: u32 = tok_is(src, toks, j, "str_ptr") as u32;
+            let fid12: u32 = 3;                    // str_len -> u32
+            if want_ptr == 1 {
+                fid12 = 5;                         // str_ptr -> ptr
+            }
+            emit_str(s, out, "  ");
+            let ex: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            if want_ptr == 1 {
+                emit_str(s, out, ", 0\n");
+                set_temp_val(s, lvl, ex);
+            } else {
+                emit_str(s, out, ", 1\n  ");
+                let tr: u32 = new_temp(s, out);
+                emit_str(s, out, " = trunc i64 %t");
+                emit_dec(s, out, ex);
+                emit_str(s, out, " to i32\n");
+                set_temp_val(s, lvl, tr);
+            }
+            if tok_is(src, toks, k12 + 1, "as") {   // 只在真写了 `as` 时转换
+                apply_cast_b(s, out, src, toks, fid12, 0, k12 + 2, lvl);
+                return k12 + 3;
+            }
+            return k12 + 1;
+        }
+        if tok_is(src, toks, j, "str_byte") {   // 字节指针 + 下标
+            let k13: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k14: u32 = arg1(s, out, src, toks, k13, lvl + 1);
+            emit_str(s, out, "  ");
+            let bp: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 0\n  ");
+            let bg: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds i8, ptr %t");
+            emit_dec(s, out, bp);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, "\n  ");
+            let bb: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i8, ptr %t");
+            emit_dec(s, out, bg);
+            emit_str(s, out, "\n  ");
+            let bz: u32 = new_temp(s, out);
+            emit_str(s, out, " = zext i8 %t");
+            emit_dec(s, out, bb);
+            emit_str(s, out, " to i32\n");
+            set_temp_val(s, lvl, bz);
+            if tok_is(src, toks, k14 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 3, 0, k14 + 2, lvl);
+                return k14 + 3;
+            }
+            return k14 + 1;
+        }
+        if tok_is(src, toks, j, "str_eq") {   // 先比长度再 memcmp (bool + phi)
+            let k15: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k16: u32 = arg1(s, out, src, toks, k15, lvl + 1);
+            let ap: u32 = alloc_temp(s);
+            let al: u32 = alloc_temp(s);
+            let bp: u32 = alloc_temp(s);
+            let bl: u32 = alloc_temp(s);
+            let le: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, ap);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 0
+  %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 1
+  %t");
+            emit_dec(s, out, bp);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, ", 0
+  %t");
+            emit_dec(s, out, bl);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, ", 1
+  %t");
+            emit_dec(s, out, le);
+            emit_str(s, out, " = icmp eq i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, bl);
+            emit_str(s, out, "
+");
+            let wq: u32 = load32(s, 480) + 1;
+            store32(s, 480, wq + 2);
+            emit_str(s, out, "  br i1 %t");
+            emit_dec(s, out, le);
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, wq, "seq");
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, wq + 1, "sneq");
+            emit_str(s, out, "
+");
+            store32(s, 476, 1);
+            lab_def(s, out, wq, "seq");
+            let mc: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, mc);
+            emit_str(s, out, " = call i32 @__loment_memcmp(ptr %t");
+            emit_dec(s, out, ap);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, bp);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ")
+");
+            let zq: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, zq);
+            emit_str(s, out, " = icmp eq i32 %t");
+            emit_dec(s, out, mc);
+            emit_str(s, out, ", 0
+");
+            jump(s, out, wq + 2, "send");
+            lab_def(s, out, wq + 1, "sneq");
+            jump(s, out, wq + 2, "send");
+            lab_def(s, out, wq + 2, "send");
+            let rq: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, rq);
+            emit_str(s, out, " = phi i1 [ %t");
+            emit_dec(s, out, zq);
+            emit_str(s, out, ", ");
+            lab_ref(s, out, wq, "seq");
+            emit_str(s, out, " ], [ false, ");
+            lab_ref(s, out, wq + 1, "sneq");
+            emit_str(s, out, " ]
+");
+            set_temp_val(s, lvl, rq);
+            if tok_is(src, toks, k16 + 1, "as") {
+                apply_cast_b(s, out, src, toks, 6, 0, k16 + 2, lvl);
+                return k16 + 3;
+            }
+            return k16 + 1;
+        }
+        if tok_is(src, toks, j, "syscall4") || tok_is(src, toks, j, "syscall6") {   // M67/M72
+            let n6: u32 = tok_is(src, toks, j, "syscall6") as u32;
+            let na: u32 = 4;
+            if n6 == 1 {
+                na = 6;
+            }
+            let ka: u32 = j + 2;
+            let a0: u32 = 0;
+            while a0 < na {
+                ka = arg1(s, out, src, toks, ka, lvl + 1 + a0);
+                a0 = a0 + 1;
+            }
+            emit_str(s, out, "  ");
+            let sc: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx}");
+            if n6 == 1 {
+                emit_str(s, out, ",{r10},{r8}");
+            }
+            emit_str(s, out, ",~{cx},~{r11},~{memory}\"(");
+            let b0: u32 = 0;
+            while b0 < na {
+                if b0 > 0 {
+                    emit_str(s, out, ", ");
+                }
+                emit_str(s, out, "i64 ");
+                emit_val(s, out, lvl + 1 + b0);
+                b0 = b0 + 1;
+            }
+            emit_str(s, out, ")
+");
+            set_temp_val(s, lvl, sc);
+            return ka;
+        }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
         let ret: u32 = 0;
@@ -1109,7 +1466,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
             // 实参按"形参类型"强制 (与 lomentc 的 expr(a, p.type) 同序同型)
             let ft: u32 = 0;
             if fi != 4294967295 {
-                ft = load32(s, 20480 + fi * 64 + a * 8 + 4);
+                ft = load32(s, 24576 + fi * 64 + a * 8 + 4);
             }
             let at: u32 = ft;
             let ae: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a);
@@ -1432,8 +1789,8 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let k: u32 = 0;
     let i: u32 = lp + 1;
     while i < rp && k < 16 {
-        store32(s, 12288 + k * 8, i);
-        store32(s, 12288 + k * 8 + 4, i + 2);
+        store32(s, 16384 + k * 8, i);
+        store32(s, 16384 + k * 8 + 4, i + 2);
         k = k + 1;
         i = i + 3;
         if tok_is(src, toks, i, ",") {
@@ -1441,6 +1798,8 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         }
     }
     store32(s, 12, k);
+    store32(s, 528, base + 1);   // 当前函数名 token (字符串全局命名用)
+    store32(s, 524, 0);          // 字符串全局序号随函数复位
     let body_at: u32 = find_body(src, toks, lp);
     let nl: u32 = collect_locals(s, src, toks, body_at, skip_block(src, toks, body_at - 1));
     emit_str(s, out, "; ");
@@ -1458,38 +1817,38 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if a > 0 {
             emit_str(s, out, ", ");
         }
-        emit_ty(s, out, src, toks, load32(s, 12288 + a * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 16384 + a * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 12288 + a * 8));
+        emit_tok(s, out, src, toks, load32(s, 16384 + a * 8));
         a = a + 1;
     }
     emit_str(s, out, ") {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 12288 + b * 8));
+        emit_tok(s, out, src, toks, load32(s, 16384 + b * 8));
         emit_str(s, out, ".addr = alloca ");
-        emit_ty(s, out, src, toks, load32(s, 12288 + b * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 16384 + b * 8 + 4));
         emit_str(s, out, "\n");
         b = b + 1;
     }
     let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
     while bl < nl {
         emit_str(s, out, "  %");
-        emit_tok(s, out, src, toks, load32(s, 16384 + bl * 8));
+        emit_tok(s, out, src, toks, load32(s, 20480 + bl * 8));
         emit_str(s, out, ".addr = alloca ");
-        emit_ty(s, out, src, toks, load32(s, 16384 + bl * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 20480 + bl * 8 + 4));
         emit_str(s, out, "\n");
         bl = bl + 1;
     }
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
-        emit_ty(s, out, src, toks, load32(s, 12288 + c * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 16384 + c * 8 + 4));
         emit_str(s, out, " %");
-        emit_tok(s, out, src, toks, load32(s, 12288 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 16384 + c * 8));
         emit_str(s, out, ", ptr %");
-        emit_tok(s, out, src, toks, load32(s, 12288 + c * 8));
+        emit_tok(s, out, src, toks, load32(s, 16384 + c * 8));
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
@@ -1678,7 +2037,7 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     }
     let i: u32 = 0;
     while i < load32(s, 484) {
-        let nt: u32 = load32(s, 16384 + i * 8);
+        let nt: u32 = load32(s, 20480 + i * 8);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -1690,7 +2049,7 @@ fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return load32(s, 16384 + i * 8 + 4);
+                return load32(s, 20480 + i * 8 + 4);
             }
         }
         i = i + 1;
@@ -1927,14 +2286,14 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let dup0: u32 = 0;
             let kk: u32 = 0;
             while kk < n {
-                if load32(s, 16384 + kk * 8) == name {
+                if load32(s, 20480 + kk * 8) == name {
                     dup0 = 1;
                 }
                 kk = kk + 1;
             }
             if dup0 == 0 {
-                store32(s, 16384 + n * 8, name);
-                store32(s, 16384 + n * 8 + 4, vt);
+                store32(s, 20480 + n * 8, name);
+                store32(s, 20480 + n * 8 + 4, vt);
                 n = n + 1;
             }
         }
@@ -1943,11 +2302,11 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let dup: u32 = 0;
             let k: u32 = 0;
             while k < n {
-                if load32(toks, load32(s, 16384 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
+                if load32(toks, load32(s, 20480 + k * 8) * 20 + 8) == load32(toks, name * 20 + 8) {
                     let q: u32 = 0;
                     let ok: u32 = 1;
                     while q < load32(toks, name * 20 + 8) {
-                        if load8(src, load32(toks, load32(s, 16384 + k * 8) * 20 + 4) + q)
+                        if load8(src, load32(toks, load32(s, 20480 + k * 8) * 20 + 4) + q)
                                 != load8(src, load32(toks, name * 20 + 4) + q) {
                             ok = 0;
                         }
@@ -1960,8 +2319,8 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 k = k + 1;
             }
             if dup == 0 {
-                store32(s, 16384 + n * 8, name);
-                store32(s, 16384 + n * 8 + 4, j + 3);
+                store32(s, 20480 + n * 8, name);
+                store32(s, 20480 + n * 8 + 4, j + 3);
                 n = n + 1;
             }
         }
@@ -2046,6 +2405,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     store32(s, 484, 0);   // 局部数
     store32(s, 512, runtime_needed(src, toks));
     store32(s, 516, heap_needed(src, toks));
+    store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数
     let i: u32 = 0;
     let n: u32 = 0;
@@ -2053,15 +2413,15 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
         if tok_is(src, toks, i, "fn") {
             let lp: u32 = find_paren(src, toks, i + 2);
             let rp: u32 = skip_parens(src, toks, lp);
-            store32(s, 8192 + n * 12, i + 1);
-            store32(s, 8192 + n * 12 + 4, fn_ret_tok(src, toks, rp));
-            store32(s, 8192 + n * 12 + 8, count_args(src, toks, lp));
+            store32(s, 12288 + n * 12, i + 1);
+            store32(s, 12288 + n * 12 + 4, fn_ret_tok(src, toks, rp));
+            store32(s, 12288 + n * 12 + 8, count_args(src, toks, lp));
             // 形参类型表: 调用点按形参类型强制实参 (与 lomentc 的 expr(a, p.type) 同义)
             let pi: u32 = lp + 1;
             let pk: u32 = 0;
             while pi < rp && pk < 8 {
-                store32(s, 20480 + n * 64 + pk * 8, pi);
-                store32(s, 20480 + n * 64 + pk * 8 + 4, pi + 2);
+                store32(s, 24576 + n * 64 + pk * 8, pi);
+                store32(s, 24576 + n * 64 + pk * 8 + 4, pi + 2);
                 pk = pk + 1;
                 pi = pi + 3;
                 if tok_is(src, toks, pi, ",") {
@@ -2100,6 +2460,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr) -> u32 {
     }
     if load32(s, 516) == 1 {
         emit_str(s, out, "@__loment_heap = internal global [65536 x i8] zeroinitializer\n@__loment_off = internal global i32 0\n\n");
+    }
+    if load32(s, 532) == 1 {
+        emit_str_globals(s, out, src, toks);
+        emit_str(s, out, "\n");
     }
     i = 0;
     while tok_kind(toks, i) != 4 {
