@@ -337,7 +337,7 @@ docs/110 定 Potato 入场于波 C（兼容层 + Agent 运行之后）。本方�
 | M93 | `docs/manual/` 手册站点（带编译器版本戳） | `loment_manual --check` 25/25 |
 | M97/M98 | 设计决策表 + Rust/C/Zig/Loment 对比矩阵 | docs/152 |
 | M99 | 98→100 工件 sha256 复现清单 | `loment_release --check` 100/100 |
-| M96/M100 | 1.0 冻结与发布审计 | ⚠️ 未达（0.1.3.4 Alpha） |
+| M96/M100 | 0.1.3.4 Alpha 冻结与发布审计 | ⚠️ 未达（0.1.3.4 Alpha） |
 | **门禁** | `ci.py --static-only` 10 项（+`loment_p9_test`） | **10/10** |
 
 里程碑进度 **80/100**（9 项部分：M48/M50/M56/M59/M68/M70/M71/M74/M92；
