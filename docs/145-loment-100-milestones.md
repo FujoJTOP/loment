@@ -490,6 +490,7 @@ python tools/loment_p9_test.py           # 2/2 (M89 25 示例 / M92 aarch64 交�
 python tools/loment_manual.py --check    # 25/25 与编译器版本一致 (M93)
 python tools/loment_release.py --check   # 工件 sha256 全部一致 (M95/M99)
 python tools/loment_seed_test.py         # 3/3 无 Python 自举: 种子自复现 + 三阶段定点 (docs/159)
+python tools/loment_eol.py               # 检出行尾 (LF 契约): CRLF 检出不该伪装成逻辑红 (docs/161)
 ```
 
 | 里程碑 | 验证方式 | 结果 |

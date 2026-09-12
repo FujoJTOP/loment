@@ -243,3 +243,5 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
 - DWARF 无变量信息；覆盖率是**块覆盖**，不是行/分支覆盖；
 - 测试框架只跑 Rust 路径（IR 路径由 `bench`/`cov` 覆盖）；
 - 增量构建以文件为粒度，不做函数级增量。
+- 行尾（CRLF/LF）由 `tools/loment_eol.py` 单独把关：git 对换行是"盲"的，
+  一条 CRLF 检出会在逐字节判据上伪装成逻辑红（docs/161）。

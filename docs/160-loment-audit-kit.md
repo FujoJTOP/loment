@@ -74,7 +74,9 @@ python tools/loment_audit.py --json # 期望 14/14
    - 把 `tools/loment_rule_parity.py` 的 `BUDGET` 调低 → 门禁**必须**红（棘轮）；
    - 改种子 `loment/build/selfhost_driver.ll` 一个字节 → `loment_seed --check` **必须**红；
    - 删/改一个发布工件 → `loment_release --check` **必须**红；
-   - 在 `loment/bootstrap.sh` 里加一句 Python 便利检查 → `loment_seed --script-ok` **必须**红。
+   - 在 `loment/bootstrap.sh` 里加一句 Python 便利检查 → `loment_seed --script-ok` **必须**红；
+   - 把任一 pinned 文件改成 CRLF（内容不动）→ `loment_eol` **必须**红，而 `git status`
+     **仍然报干净**（docs/161：这就是"两个工作树为什么不一样"的现场证据）。
 4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、10 条结果）一起存证；
    有红项时报告里会直接列出主张编号与工具的输出尾行。
 
@@ -89,6 +91,7 @@ python tools/loment_audit.py --json # 期望 14/14
 ## 5. 关联材料
 
 - `docs/158-loment-1.0-freeze.md` —— 冻结面（改什么要付什么代价）+ 7 条开放项；
+- `docs/161-loment-checkout-eol.md` —— 检出行尾契约：CRLF 为什么能伪装成逻辑红；
 - `docs/150-loment-selfhost.md` —— 自举链（lexer/parser/checker/codegen/定点）与 M80 收口；
 - `docs/159-loment-seed-bootstrap.md` —— 无 Python 自举与工具链去 Python 的进度排序；
 - `docs/145` / `docs/154` —— 100 里程碑账本（当前：完成 86 · 部分 9 · 未达 1 · 未开始 4）。

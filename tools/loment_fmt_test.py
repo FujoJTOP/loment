@@ -82,7 +82,8 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
     """在 WSL 里跑格式化器 (ELF 是 Linux 目标, 拷进 /tmp 才能执行)。"""
     got = td / f"{name}.out"
     err = td / f"{name}.err"
-    script = (f"cp {_wsl_path(elf)} /tmp/{name}.bin && chmod +x /tmp/{name}.bin && "
+    script = (f"rm -f /tmp/{name}.bin && cp {_wsl_path(elf)} /tmp/{name}.bin && "
+              f"chmod +x /tmp/{name}.bin && "
               f"cd {_wsl_path(ROOT)} && /tmp/{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],

@@ -192,7 +192,8 @@ def _compile(probe: Path, td: Path, name: str) -> Path:
 
 def _run(elf: Path, td: Path) -> str:
     got = td / "probe.out"
-    script = (f"cp {_wsl_path(elf)} /tmp/json_probe.bin && chmod +x /tmp/json_probe.bin && "
+    script = (f"rm -f /tmp/json_probe.bin && cp {_wsl_path(elf)} /tmp/json_probe.bin && "
+              f"chmod +x /tmp/json_probe.bin && "
               f"/tmp/json_probe.bin > {_wsl_path(got)}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)

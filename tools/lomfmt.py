@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[OK] {f}")
         else:
             if src != want:
-                p.write_text(want, encoding="utf-8")
+                p.write_text(want, encoding="utf-8", newline="\n")
                 print(f"[FMT] {f}")
             else:
                 print(f"[OK] {f}")

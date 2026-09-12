@@ -37,6 +37,8 @@ GLOBS = [
     "editors/vim/*.md", "editors/vim/syntax/*.vim", "editors/vim/ftdetect/*.vim",
     "editors/vim/ftplugin/*.vim",
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
+    # 行尾门禁 (docs/161): 本清单的 sha 对 CRLF 免疫, 但自举判据按原始字节读源码 —— 两者配对
+    "tools/loment_eol.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
@@ -84,13 +86,15 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     want = build()
     if a.checksums:
-        Path(a.checksums).write_text(checksums_text(want), encoding="utf-8")
+        # 显式 LF: 校验清单会被 sha256sum -c 之类逐行解析, CRLF 会让文件名带上 \r
+        Path(a.checksums).write_text(checksums_text(want), encoding="utf-8", newline="\n")
         print(f"[OK] {a.checksums} ({len(want['files'])} 行)")
         return 0
     if a.emit:
         OUT.parent.mkdir(parents=True, exist_ok=True)
+        # 显式 LF: 清单是机器读的工件 (行尾不该随宿主变), 见 loment_manual 同处注释
         OUT.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8")
+                       encoding="utf-8", newline="\n")
         print(f"[OK] {OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
         return 0
     if a.check or not (a.emit or a.checksums):

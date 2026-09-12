@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [NOTE] {n} (0x{c:04x}) 未在 kernel/src/syscall.rs 找到 (host-ext?)")
         return 0
     if a.emit:
-        Path(a.emit).write_text(want, encoding="utf-8")
+        Path(a.emit).write_text(want, encoding="utf-8", newline="\n")
         print(f"[OK] {a.emit} ({len(ops)} 个包装函数)")
         return 0
     print("[ERR] 需要 --emit 或 --check", file=sys.stderr)

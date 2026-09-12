@@ -760,7 +760,9 @@ def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
 def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, str, str]:
     """跑自举驱动, 返回 (退出码, stdout 文本, stderr 文本)。"""
     got = Path(td) / f"{name}.out.ll"
-    script = (f"cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
+    # rm -f 先删: 目标名固定, 上一次刚退出的进程可能还占着 inode
+    # (cp 会报 "Text file busy"); unlink 总能成功, cp 于是写新 inode
+    script = (f"rm -f /tmp/{name} && cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
               f"cd {_wsl_path(ROOT)} && /tmp/{name} {relpath} > {_wsl_path(got)}")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
@@ -1153,6 +1155,7 @@ def test_m86_selfhost_perf_budget():
         ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
         elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "perf_drv")
         subprocess.run(["wsl", "-e", "bash", "-lc",
+                        "rm -f /tmp/perf_drv && "
                         f"cp {_wsl_path(elf)} /tmp/perf_drv && chmod +x /tmp/perf_drv"],
                        capture_output=True, text=True, timeout=120, shell=False)
 

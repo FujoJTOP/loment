@@ -118,6 +118,7 @@ class Batch:
         for a in (["rm", "-f", "/tmp/loment_lsp.bin"],
                   ["cp", _wsl_path(self.elf), "/tmp/loment_lsp.bin"],
                   ["chmod", "+x", "/tmp/loment_lsp.bin"],
+                  ["rm", "-f", "/tmp/loment_lsp_in.bin"],
                   ["cp", _wsl_path(inp), "/tmp/loment_lsp_in.bin"]):
             r = subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
             assert r.returncode == 0, (a, r)

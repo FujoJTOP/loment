@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     # 路径一律用 POSIX 分隔符: 文档要跨平台可比, Loment 版不可能知道宿主是 Windows 还是 WSL
     text = render(mod, p.read_text(encoding="utf-8"), p.as_posix())
     if a.out:
-        Path(a.out).write_text(text, encoding="utf-8")
+        Path(a.out).write_text(text, encoding="utf-8", newline="\n")
         print(f"[OK] {p} -> {a.out}")
     else:
         sys.stdout.write(text)
