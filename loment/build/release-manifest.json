@@ -143,7 +143,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "983b9686952672c3a6f878bb18202e470d92716dac226db87552dcbed2778d5f"
+   "sha256": "e4326dce20bacce056475c4bc83fb06b247303bb858d6ca5b02015b5090a31d4"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -507,7 +507,7 @@
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "861ad742d76813ff867fac75878e94d014f20aa67a92667bf94262829ff58b48"
+   "sha256": "b0a3b10ea9fcb8d62e75a55c47744320eb7c0442ec3ab8ae17ea5a4a0f20efcc"
   },
   {
    "path": "docs/manual/index.md",

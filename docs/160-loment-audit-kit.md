@@ -3,7 +3,7 @@
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
 > —— 它会打印/落盘 `loment/build/audit-report.json`（含提交、tag、clang 版本、
-> 10 条主张的逐条结果，以及**不主张清单**）。
+> 14 条主张的逐条结果，以及**不主张清单**）。
 
 ## 0. 审计包的设计原则
 
@@ -12,7 +12,7 @@
 一致性门禁（`test_audit_claims_match_ci`）专门盯这件事：审计工具列的每个工具都必须
 出现在 `tools/ci.py` 的静态门禁表里。
 
-## 1. 主张清单（10 条，各自有可执行判据）
+## 1. 主张清单（14 条，各自有可执行判据）
 
 | # | 主张 | 判据（`python tools/…`） | 通过标准 |
 |---|---|---|---|
@@ -24,13 +24,17 @@
 | C6 | Loment 版格式化器与 Python 版**逐字节相同** | `loment_fmt_test.py` | 3/3（42 语料 + 4 边界 + 幂等） |
 | C7 | 示例集与交叉编译目标 | `loment_p9_test.py` | 2/2（25 示例编译；aarch64 目标发射并可反汇编） |
 | C8 | 编辑器宿主与 LSP 往返（无头） | `vscode_ext_test.py` | 6/6 |
-| C9 | 发布工件 **sha256 可复现** | `loment_release.py --check` | 工件数 N/N 一致（现 141 件） |
+| C9 | 发布工件 **sha256 可复现** | `loment_release.py --check` | 工件数 N/N 一致（件数由它打印） |
 | C10 | 账本不是手改的 | `loment_status.py --check` | 状态矩阵与 `docs/145` 一致 |
+| C11 | **LSP 去 Python**（Loment 版语言服务：补全/跳转/诊断/`--check`） | `loment_lsp_test.py` | 3/3（真二进制 7 帧往返 + 码/行号 + `--check`） |
+| C12 | 工具链等价（格式化器/文档生成器与 Python 版逐字节相同） | `loment_doc_test.py` | 2/2（43 语料 + 边界） |
+| C13 | JSON 库与 Python `json` 逐字节一致 | `loment_json_test.py` | 2/2 |
+| C14 | Windows 文件类型注册 + 启动脚本无解释器 | `loment_filetype_test.py` | 4/4 |
 
-一键跑（约 3 分钟，含 clang 编译与 WSL 执行）：
+一键跑（约 4 分钟，含 clang 编译与 WSL 执行）：
 
 ```bash
-python tools/loment_audit.py --json     # 10/10 通过 + loment/build/audit-report.json
+python tools/loment_audit.py --json     # 14/14 通过 + loment/build/audit-report.json
 python tools/loment_audit.py --list     # 只列主张与命令
 ```
 
@@ -55,7 +59,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 ```bash
 git clone <repo> && cd FujoOS
 git checkout loment-1.0-pre        # 或用审计报告里的 commit
-python tools/loment_audit.py --json # 期望 10/10
+python tools/loment_audit.py --json # 期望 14/14
 ```
 
 1. **工件哈希**：把审计报告里的 `provenance.commit` 与本地 `git rev-parse HEAD` 对齐；

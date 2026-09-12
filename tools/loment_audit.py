@@ -52,6 +52,14 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_release", []),
     ("C10", "状态矩阵与 docs/145 一致 (账本不是手改的)",
      "loment_status", []),
+    ("C11", "LSP 去 Python: Loment 版语言服务 (补全/跳转/诊断/--check) 与工具等价性",
+     "loment_lsp_test", []),
+    ("C12", "工具链等价性: 格式化器与文档生成器与 Python 版逐字节相同",
+     "loment_doc_test", []),
+    ("C13", "JSON 库与 Python json 逐字节一致 (LSP 的 JSON-RPC 靠它)",
+     "loment_json_test", []),
+    ("C14", "Windows 文件类型注册 (.lomt/.lom 常驻打开方式) 与启动脚本无解释器",
+     "loment_filetype_test", []),
 ]
 
 
