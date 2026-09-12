@@ -418,6 +418,10 @@
    "sha256": "4f582246b2ba6df8a02b030c01690c91768f8c01a88e474e1e9957961d92ed62"
   },
   {
+   "path": "docs/157-loment-editor-hosts.md",
+   "sha256": "d2b8accb47e5e1777b32a90d2dc54aa27ee3c3916e89e45022a996fd9051ede5"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "210458fcb2322fe4604dbcd85227447749f5a78b2696e8c1193ede151276b4f2"
   },
