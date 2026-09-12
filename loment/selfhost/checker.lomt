@@ -40,6 +40,8 @@ const E_SLICE: u32 = 11;   // E011 只读切片不能写 / 形参要求可变切
 const E_PATTERN: u32 = 8;  // E008 match/变体用法非法
 const E_BORROW: u32 = 7;   // E007 借用冲突 (同一变量既借又可变借 / 可变借两次)
 const E_Q: u32 = 10;       // E010 `?` 误用
+const E_MOVE: u32 = 6;     // E006 移动后使用
+const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 
 // 类型编码 (批次 2): 一个 u32 —— 0 = 未知, 其它按 (kind << TY_KIND_SHIFT) + payload。
 //   kind 1 = 基类型 (payload = 1..11 的内码)
@@ -2091,7 +2093,221 @@ fn chk_find_assign(src: ptr, t: ptr, i: u32, hi: u32) -> u32 {
     return 0;
 }
 
-/// `expr?` 的合法性判据 (1 = 确定合法, 0 = 不是 Result / 判不了):
+/// 名字在不在"已移动"表里 (表在 tyt 块尾: [3576] 条数, [3584..) 每个名字 token 8 字节)。
+/// 按**名字文本**比, 不是 token 下标 —— 同一个变量在每条语句里都是不同的 token。
+fn chk_mv_has(src: ptr, t: ptr, tyt: ptr, name_tok: u32) -> u32 {
+    let n: u32 = load32(tyt, 3576);
+    let i: u32 = 0;
+    while i < n {
+        if same(src, t, load32(tyt, 3584 + i * 8), name_tok) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chk_mv_add(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
+    // 不用 `return;` 提前退出 —— Loment 的 return 必须带表达式
+    if chk_mv_has(src, t, tyt, name_tok) == 0 {
+        let n: u32 = load32(tyt, 3576);
+        if n < 63 {
+            store32(tyt, 3584 + n * 8, name_tok);
+            store32(tyt, 3576, n + 1);
+        }
+    }
+}
+
+/// 局部环境里第 idx 个名字 (0 = 不在; 否则 下标+1)。
+fn chk_env_idx(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < envc {
+        if same(src, t, load32(env, i * 8), name_tok) {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 类型是不是**非 Copy** (struct / 数组) —— 参考实现的 `_is_copy_type` 取反。
+fn chk_ty_noncopy(s: ptr, tyt: ptr, v: u32) -> u32 {
+    if v == 0 {
+        return 0;
+    }
+    if chk_ty_is_arr(tyt, v) == 1 {
+        return 1;
+    }
+    if chk_ty_kind(v) == TY_K_NAMED {
+        let s0: u32 = v % (1 << TY_KIND_SHIFT);
+        if load32(s, s0 * 20 + 4) == K_STRUCT {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// 表达式区间里的**使用**检查: 已经移动过的变量不能再用 (E006)。
+/// 借用的位置 (`&x` / `&mut x`) 不算使用 —— 参考实现的 `use(Un)` 对 `&`/`&mut` 不递归。
+fn chk_use(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+           lh: u64, tyt: ptr, p: ptr, oc: ptr) {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    let j: u32 = lo;
+    while j < hi && chk_tok_kind(t, j) != 4 {
+        if chk_tok_kind(t, j) == 0 {
+            let borrowed: u32 = 0;
+            if j > lo && chk_tok_is(src, t, j - 1, "&") {
+                borrowed = 1;
+            }
+            if j > lo + 1 && chk_tok_is(src, t, j - 1, "mut")
+                    && chk_tok_is(src, t, j - 2, "&") {
+                borrowed = 1;
+            }
+            if borrowed == 0 && chk_mv_has(src, t, tyt, j) == 1 {
+                chk_pub(src, t, oc, p, E_MOVE, j);      // 变量 X 已被移动, 不能再用
+            }
+        }
+        j = j + 1;
+    }
+}
+
+/// 移动检查 (M13/M17, 对照参考实现的 `_move_check`):
+///   - 非 Copy 类型的变量"传出去"后就已移动, 再用 -> E006
+///   - `return &局部` -> E012 (悬垂; 形参不算局部)
+/// 逐语句顺序走; 分支体里的移动会**泄漏**出来 —— 与参考实现一致 (保守方向)。
+fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+             b: u32, e: u32, p: ptr, oc: ptr) {
+    let tyt: ptr = chk_tyt_of(oc);
+    let mv: u32 = 0;
+    let j: u32 = b + 1;
+    while j < e && chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "{") || chk_tok_is(src, t, j, "}")
+                || chk_tok_is(src, t, j, ";") || chk_tok_is(src, t, j, "else")
+                || chk_tok_is(src, t, j, "=>") {
+            j = j + 1;
+        } else if chk_tok_is(src, t, j, "let") {
+            let k: u32 = j + 2;
+            let dty: u32 = 0;
+            if chk_tok_is(src, t, k, ":") {
+                let tl: u32 = k + 1;
+                let te: u32 = chk_skip_type(src, t, tl);
+                dty = chk_ty_range(src, t, syms, n, tyt, tl, te);
+                k = te;
+            }
+            let eq: u32 = chk_find_at(src, t, k, e, "=");
+            let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
+            if eq < e && semi <= e {
+                chk_use(src, t, syms, n, env, envc, chk_lh(eq + 1, semi), tyt, p, oc);
+                // `let t: T = s;` 且 s 是非 Copy -> s 被移动
+                if semi == eq + 2 {
+                    let rt: u32 = chk_name_ty(src, t, syms, n, env, envc, eq + 1);
+                    if chk_ty_noncopy(syms, tyt, rt) == 1 {
+                        chk_mv_add(src, t, tyt, eq + 1);
+                    }
+                } else {
+                    chk_mark_call_moves(src, t, syms, n, env, envc, tyt, eq + 1, semi);
+                }
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "return") {
+            let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
+            chk_use(src, t, syms, n, env, envc, chk_lh(j + 1, semi), tyt, p, oc);
+            chk_mark_call_moves(src, t, syms, n, env, envc, tyt, j + 1, semi);
+            // 悬垂: `return &x` / `return &mut x`, 且 x 是**局部** (不是形参)。
+            // 形参占环境的前 envc 个槽位, 所以"下标+1 > envc"就是局部。
+            if chk_tok_is(src, t, j + 1, "&") {
+                let o1: u32 = j + 2;
+                if chk_tok_is(src, t, o1, "mut") {
+                    o1 = o1 + 1;
+                }
+                if chk_tok_kind(t, o1) == 0 && o1 + 1 == semi {
+                    let ei: u32 = chk_env_idx(src, t, env, envc, o1);
+                    // 形参占环境前 npar 个槽位: `下标+1 > npar` 才是**局部**变量
+                    if ei > load32(tyt, 3528) {
+                        chk_pub(src, t, oc, p, E_DANGLE, o1);
+                    }
+                }
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "if") || chk_tok_is(src, t, j, "while") {
+            let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
+            chk_use(src, t, syms, n, env, envc, chk_lh(j + 1, lb), tyt, p, oc);
+            j = lb;
+        } else if chk_tok_is(src, t, j, "for") {
+            let lb2: u32 = chk_find_at(src, t, j + 2, e, "{");
+            chk_use(src, t, syms, n, env, envc, chk_lh(j + 3, lb2), tyt, p, oc);
+            j = lb2;
+        } else if chk_tok_is(src, t, j, "match") {
+            let lb3: u32 = chk_find_at(src, t, j + 1, e, "{");
+            chk_use(src, t, syms, n, env, envc, chk_lh(j + 1, lb3), tyt, p, oc);
+            j = lb3;
+        } else {
+            let eq2: u32 = chk_find_assign(src, t, j, e);
+            let semi2: u32 = chk_find_at(src, t, j, e, ";");
+            if eq2 != 0 && eq2 < semi2 {
+                chk_use(src, t, syms, n, env, envc, chk_lh(eq2 + 1, semi2), tyt, p, oc);
+                // 给已移动的变量赋值 -> E006
+                if eq2 == j + 1 && chk_mv_has(src, t, tyt, j) == 1 {
+                    chk_pub(src, t, oc, p, E_MOVE, j);
+                }
+                if semi2 == eq2 + 2 {
+                    let rt2: u32 = chk_name_ty(src, t, syms, n, env, envc, eq2 + 1);
+                    if chk_ty_noncopy(syms, tyt, rt2) == 1 {
+                        chk_mv_add(src, t, tyt, eq2 + 1);
+                    }
+                } else {
+                    chk_mark_call_moves(src, t, syms, n, env, envc, tyt, eq2 + 1, semi2);
+                }
+            } else {
+                chk_use(src, t, syms, n, env, envc, chk_lh(j, semi2), tyt, p, oc);
+                chk_mark_call_moves(src, t, syms, n, env, envc, tyt, j, semi2);
+            }
+            if semi2 <= e {
+                j = semi2 + 1;
+            } else {
+                j = e;
+            }
+        }
+    }
+}
+
+/// 调用实参里的**移动**: 非 Copy 的单个标识符实参, 且形参不是切片 -> 该变量被移动。
+fn chk_mark_call_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                       tyt: ptr, lo: u32, hi: u32) {
+    let slot: u32 = 0;
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
+            && chk_match_paren(src, t, lo + 1) == hi - 1 {
+        slot = chk_lookup_slot(src, t, syms, n, lo);
+    }
+    let got: u32 = chk_count_args(src, t, lo + 1);
+    let k: u32 = 0;
+    while k < got && slot != 0 {
+        let er: u64 = chk_arr_elem(src, t, lo + 1, k);
+        let a1: u32 = chk_lhlo(er);
+        let a2: u32 = chk_lhhi(er);
+        if a1 + 1 == a2 && chk_tok_kind(t, a1) == 0 {
+            let pt: u32 = chk_param_ty(src, t, syms, n, tyt, slot - 1, k);
+            if chk_ty_is_slc(tyt, pt) == 0 {
+                let at: u32 = chk_name_ty(src, t, syms, n, env, envc, a1);
+                if chk_ty_noncopy(syms, tyt, at) == 1 {
+                    chk_mv_add(src, t, tyt, a1);
+                }
+            }
+        }
+        k = k + 1;
+    }
+}
+
+
 /// 参考实现在 `_ds_stmts` 里按"内层表达式的类型是 `Result_*` 单态实例"解糖, 所以
 /// 判据就是"内层的类型是 Result"。我这边类型算不到实例 (泛型实例一律记未知), 于是
 /// 反着来: 只在**能确定不是** Result 时返回 0 —— 整型字面量, 或者一个被调函数的返回
@@ -2317,6 +2533,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
             c = chk_env_add(t, env, c, nm, dty);
+            store32(tyt, 3520, c);   // 最新环境条数 (chk_moves 在 chk_body 之后跑, 读这个)
             if semi <= e {
                 j = semi + 1;
             } else {
@@ -2713,8 +2930,17 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra, oc);
                 store32(oc, 0, o);
                 store32(tyt, 0, 0);          // 类型表按**函数**清零 (见 chk_arena_tyt)
+                store32(tyt, 3528, envc);    // 形参数 (E012 判"局部 vs 形参")
+                store32(tyt, 3520, envc);
                 chk_body(src, t, syms, n, env, envc,
                          (fbra as u64) * 4294967296 + (fend as u64), retc, out, oc);
+                o = load32(oc, 0);
+                // 移动/悬垂检查放在 chk_body **之后**: 那时环境里已经有全部 let 的类型
+                // (chk_body 边扫边登记), chk_moves 只读环境, 不必再维护一份。
+                // 走完必须**再读一次偏移格** —— 本地 o 是 chk_body 之前/之后拍的快照,
+                // 不回读的话 chk_moves 写的诊断在 `return o / 8` 时会被整条丢掉。
+                store32(tyt, 3576, 0);
+                chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
                 o = load32(oc, 0);
                 i = fend;
             } else {

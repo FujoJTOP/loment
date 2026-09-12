@@ -127,7 +127,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "f7c8e26387e730b3998faaac62e9c2a5b72f064cff8ba9d557e470ceed7e4b09"
+   "sha256": "7eb3310bafbece4ccd23fbd542f63f3798e26fae0c5584eff35eafab9e2a232a"
   },
   {
    "path": "editors/vscode/package.json",
@@ -263,7 +263,7 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "6c2eca93e5750b1e73e207e936b6371a1565df338d965b4e78168826c342c30a"
+   "sha256": "d66c681df9457fe91e4fd9ef8dbbb1e4acdfc45ed9bb1c0adff09125b1e7a8e4"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
@@ -367,7 +367,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "18bf3e44ca834ea4e6a6a2b2cb2496f43ecb2a8f5170fa15a006fd10a9b13ae5"
+   "sha256": "c60782e649ce7ee0b3cd05ec01e5f578f5f5c95519be03520e9509b537988f51"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -387,7 +387,7 @@
   },
   {
    "path": "docs/148-loment-toolchain.md",
-   "sha256": "d53d75c6c28e82fbf0a7aae3bab86ccbb69e831000b558110d362ad99584994f"
+   "sha256": "8512d4172148c48868e76d05fcd7633b5fba6b802e417fae02c97e707e09df68"
   },
   {
    "path": "docs/149-loment-kernel-integration.md",
@@ -399,7 +399,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "e691af192621cbee62f7816e998a66332988a389e7b4ab4fd47e1f94b7a22da3"
+   "sha256": "9edf8de2c5e1a288feeda5032a7d38057d8e7de028da94c67e71df0aa0848c20"
   },
   {
    "path": "docs/151-loment-ecosystem.md",

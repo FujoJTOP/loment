@@ -38,9 +38,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 
 # 门禁预算: 批次 1 (声明级规则) 24/60; 批次 2 第一段 (语句级类型比对) 32/60;
 # 批次 2 第二段 (复合类型表 + 表达式遍历器 + 字段/下标/数组/`as`/实参/方法/match/`?`/
-# 移动借用) 后 **60/60** —— 自举 checker 与参考实现在这 60 条规则上完全等价。
+# 移动借用) 后 **63/63** —— 自举 checker 与参考实现在这 63 条规则上完全等价
+# (含 M13 移动 E006 与 M17 悬垂 E012)。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 60
+BUDGET = 63
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -147,6 +148,15 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn g(a: mut [u32], b: mut [u32]) -> u32 {\n    return 0;\n}\n\nfn f(xs: mut [u32]) -> u32 {\n    return g(&mut xs, &mut xs);\n}\n"),
     ("borrow-mut-and-share",
      "module m\n\nfn g(a: mut [u32], b: [u32]) -> u32 {\n    return 0;\n}\n\nfn f(xs: mut [u32]) -> u32 {\n    return g(&mut xs, &xs);\n}\n"),
+    # ---- 移动 / 悬垂 (E006 / E012) ----------------------------------------
+    # 非 Copy 类型 (struct / 数组) 的变量"传出去"就算移动: `let t: S = s;` 之后 s 不能再用。
+    ("move-use-after",
+     "module m\n\nstruct S {\n    a: u32,\n}\n\nfn f() -> u32 {\n    let s: S = S { a: 1 };\n    let t: S = s;\n    return s.a;\n}\n"),
+    ("move-by-arg",
+     "module m\n\nstruct S {\n    a: u32,\n}\n\nfn take(p: S) -> u32 {\n    return p.a;\n}\n\nfn f() -> u32 {\n    let s: S = S { a: 1 };\n    let n: u32 = take(s);\n    return s.a;\n}\n"),
+    # 返回局部变量的借用 = 悬垂 (`&arr` 借用局部数组)
+    ("dangling-return",
+     "module m\n\nfn f() -> [u32] {\n    let a: [u32; 2] = [1, 2];\n    return &a;\n}\n"),
 ]
 
 
