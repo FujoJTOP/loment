@@ -90,8 +90,19 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 - Python 版**丢注释**这一行为被照搬（两者都丢），不单方面改。
 
 这一格同时把"写 Loment 工具"的模板钉下来了：同一份源码喂两个实现、比 stdout 字节。
-`lomdoc`/`loment_lsp` 需要完整 parser（自举 parser 目前是子集），`lompkg` 不吃 AST ——
-下一个该动哪一格由这条依赖决定。
+
+**下一格该动哪一块，由依赖决定**（2026-09-12 摸底）：
+
+| 工具 | 现状 | 缺什么 |
+|---|---|---|
+| `lomfmt` | ✅ 已重写 | —（只吃词法层） |
+| `lompkg`（包管理） | 未动 | 三块能力都缺：**JSON 解析**（`pkg.json`）、**目录遍历**（`rglob`，Loment 运行时要补 `getdents`）、**SHA-256**（校验和） |
+| `lomdoc` / `loment_lsp` | 未动 | 需要**完整 parser**（自举 parser 目前是语句/表达式子集）；补 parser 是它们的前置 |
+| `tools/lomc.py`（L0 生成器） | 未动 | 跨线接口面（13 个生成物被内核线消费），须与内核线协同排期（docs/141 冻结阈值） |
+
+也就是说：**下一步最省的是"补自举 parser"**（它同时解锁 `lomdoc` 与 `loment_lsp` 两块），
+其次是给运行时补 `getdents` 与写一个 JSON 子集（解锁 `lompkg`）；SHA-256 可以放在
+"先只做解析、校验和留给 Python"的妥协版本里。
 
 ## 5. 这套东西怎么进 CI
 
