@@ -916,7 +916,7 @@ def test_m82_coverage_report():
 
 @test
 def test_m85_heap_budget():
-    """静态预算: 自举 checker 与 codegen 的 `alloc` 之和必须留在 64 KiB 语言堆里。
+    """静态预算: 语言堆里同时活着的 `alloc` 之和必须留在 64 KiB 以内。
 
     这是**批次 2 期间被抓到的一次真实停机**: checker 加的 `alloc(2048)` 让它和 codegen
     的 `alloc(49152)` 一起越过 64 KiB, `alloc` 的边界检查走 `@__loment_abort`, 在自举
@@ -924,23 +924,26 @@ def test_m85_heap_budget():
     "堆不够"。两者的分配都是**固定字面量** (与输入无关), 所以这条约束可以在静态检查里
     精确钉住: 改大任何一边的 `alloc` 会在这里立刻变红, 不必等到驱动 SIGILL。
 
-    余量要求 >= 4 KiB: 给 65536 边界检查本身的误差与将来小的临时缓冲留空间。
+    现在 checker 的缓冲走 `check_arena` (驱动从 `brk` 拿), 所以**驱动路径**的语言堆里
+    只剩 codegen 自己; `check()` 那个薄包装仍然从语言堆开 12048B —— 那是 C 夹具路径。
+    两个数字都报出来, 判据按**较大的那个**卡 (保守方向)。
     """
     import re as _re
     heap = 65536          # 镜像 lomentc 的 __LOMENT_HEAP (Rust 侧) / @__loment_heap (IR 侧)
     need = 4096           # 要求的余量
-    total = 0
     per: list[tuple[str, int]] = []
     for rel in ("loment/selfhost/checker.lomt", "loment/selfhost/codegen.lomt"):
         src = (ROOT / rel).read_text(encoding="utf-8")
-        s = sum(int(m) for m in _re.findall(r"alloc\((\d+)\)", src))
-        per.append((rel, s))
-        total += s
+        per.append((rel, sum(int(m) for m in _re.findall(r"alloc\((\d+)\)", src))))
+    total = sum(v for _n, v in per)
+    # 驱动路径: 只有 codegen 用语言堆 (checker 走 brk arena)
+    driver_path = dict(per)["loment/selfhost/codegen.lomt"]
     assert total + need <= heap, (
-        f"自举堆预算超了: {' + '.join(f'{n} {v}' for n, v in per)} = {total}B, "
-        f"堆 {heap}B (要求留 {need}B) —— 调小某个 alloc 或让驱动把缓冲改走 brk")
-    print(f"      堆预算: {' + '.join(f'{v}B' for _n, v in per)} = {total}B / {heap}B "
-          f"(余量 {heap - total}B)")
+        f"语言堆预算超了 (C 夹具路径): {' + '.join(f'{n} {v}' for n, v in per)} = {total}B, "
+        f"堆 {heap}B (要求留 {need}B) —— 调小 alloc 或让缓冲改走 brk")
+    assert driver_path + need <= heap, f"驱动路径也超了: {driver_path}B"
+    print(f"      堆预算: 夹具路径 {total}B / 驱动路径 {driver_path}B, 堆 {heap}B "
+          f"(余量 {heap - total}B; checker 的 arena 已走 brk)")
 
 
 @test

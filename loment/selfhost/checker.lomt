@@ -1132,19 +1132,19 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 
 
 /// 主入口: 返回错误条数 (错误记录写在 p)。
-pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
-    // 内存来自语言自带的 64 KiB bump 堆, **与 codegen 共用**: codegen 的
-    // `emit_module` 一次要 49152 字节 (48 KiB), 所以这里的总量必须压在 ~12 KiB 以内,
-    // 否则 `alloc` 的 OOM 边界检查会走 `@__loment_abort` —— 在自举驱动里就是一条
-    // 非法指令 (SIGILL), 而不是一条诊断。这个耦合由 `test_m85_heap_budget` 静态钉住:
-    // 两边的 alloc 字面量之和必须留出余量。尺寸都按**语料实测**定 (字段≤2, 变体≤3,
-    // 形参≤11, 每函数 let≤152, 能力≤1, excluded≤2)。
-    let syms: ptr = alloc(8192);   // 全单元符号表 (16 字节/条): 512 条 —— 最大的单元也够
-    let scr: ptr = alloc(1024);    // 名表暂存 (字段/变体/形参), 逐声明复用
-    let ctab: ptr = alloc(512);    // 能力表 (16 字节一项)
-    let nc: ptr = alloc(16);       // 能力条数 (一格内存)
-    let exs: ptr = alloc(256);     // excluded 的字符串 token 下标
-    let env: ptr = alloc(2048);    // 局部环境 (形参 + let), 每函数重建
+/// 检查器的工作缓冲**由调用方提供** (arena): 这样自举驱动可以把它们放在 `brk` 内存里,
+/// 不必和 codegen 抢语言自带的 64 KiB bump 堆。
+///
+/// 为什么值得单开一个入口: `alloc` 的 OOM 边界检查走 `@__loment_abort`, 在**无 libc 的
+/// 自举驱动**里就是一条非法指令 (SIGILL) —— 输出上看起来像"编译器崩了"。批次 2 期间
+/// checker 与 codegen 的分配之和越过 64 KiB 就是这么炸的 (codegen 的 `emit_module`
+/// 一次就要 49152B)。驱动现在按 `check_arena` 的约定把这一整块从 `brk` 拿, 语言堆里
+/// 只剩 codegen 自己的需求; `check` 保留为"从语言堆开 arena"的薄包装, 给 C 夹具用。
+///
+/// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
+/// excluded≤2), 总 12048B; 驱动侧按 `CHK_ARENA` 一块要。
+pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
+                   nc: ptr, exs: ptr, env: ptr) -> u32 {
     store32(nc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
@@ -1349,4 +1349,22 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
         }
     }
     return o / 8;
+}
+
+/// arena 一块里的分段布局 (驱动按这几个常量切片; 单位: 字节)。
+/// 顺序与 `check_arena` 的形参顺序一致, 驱动侧一个 `sys_alloc(CHK_ARENA)` 就够。
+pub fn chk_arena_syms() -> u32 { return 0; }
+pub fn chk_arena_scr() -> u32 { return 8192; }
+pub fn chk_arena_ctab() -> u32 { return 9216; }
+pub fn chk_arena_nc() -> u32 { return 9728; }
+pub fn chk_arena_exs() -> u32 { return 9744; }
+pub fn chk_arena_env() -> u32 { return 10000; }
+pub fn chk_arena_bytes() -> u32 { return 12048; }
+
+/// 从语言自带的 64 KiB bump 堆开 arena 再查 (C 夹具与测试用; 无 libc 的驱动请走
+/// `check_arena` 并从 `brk` 拿那 12048B —— 见 `check_arena` 的说明)。
+pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
+    let a: ptr = alloc(12048);
+    return check_arena(src, t, out, a, ptr_add(a, 8192), ptr_add(a, 9216),
+                       ptr_add(a, 9728), ptr_add(a, 9744), ptr_add(a, 10000));
 }

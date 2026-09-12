@@ -499,9 +499,12 @@ error: invalid redefinition of function 'tok_kind'
 | ⑩ | checker 与 codegen **共用 64 KiB 语言堆**，批次 2 的 `alloc(2048)` 越界 | `alloc` 的边界检查走 `@__loment_abort`，在自举驱动里就是一条**非法指令 (SIGILL)** —— 从输出看像"编译器崩了"。codegen 的 `emit_module` 一次要 49152B，checker 原来 14672B，加到 16720B 就越过 65536。 | 按语料实测收缩各表（字段<=2/变体<=3/形参<=11/每函数 let<=152），降到 12048B；`test_m85_heap_budget` 静态钉住"两边 alloc 之和 + 4 KiB 余量 <= 64 KiB" |
 
 ⑩ 值得单独记一句：**这类"资源耦合"缺陷只会在两边都变大时出现**，而它的表现形式
-（SIGILL）与"代码生成错了"极像。真正的结构解是让驱动把 checker 的缓冲改从 `brk` 拿
+（SIGILL）与"代码生成错了"极像。结构解已经落地：`checker.lomt` 拆出 `check_arena`
+（缓冲由调用方提供），**驱动按 `chk_arena_*` 的分段约定从 `brk` 拿那 12048B**
 （driver 的注释里本来就写着"内存来自内核，不用语言自带的 64 KiB bump 堆"），
-那一步留给 M86（自举性能/资源收口）。
+语言堆里只剩 codegen 自己的 49152B —— 驱动路径余量从 4.3 KiB 变成 16.4 KiB。
+`check()` 保留为"从语言堆开 arena"的薄包装（C 夹具与测试用），
+`test_m85_heap_budget` 把两条路径的数字都报出来。
 
 ### 闸门打开：驱动先 check 再发射 ✅
 
