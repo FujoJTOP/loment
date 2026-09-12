@@ -95,6 +95,38 @@ python tools/loment.py lsp                  # M56
 
 > 诚实边界：**未在真实编辑器里实测**（无 VS Code 扩展宿主），自测驱动的是同一 `handle()`。
 
+### 2b. Loment 版语言服务 `loment/tools/lsp.lomt`（**不需要 Python**）
+
+编辑器的"写 Loment"这条路原先必须装 Python（扩展 spawn `tools/loment_lsp.py`）。现在同一个
+扩展可以 spawn **Loment 版**服务：
+
+```powershell
+powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译并装进 WSL, 全程无 Python
+# 它会把这两行打出来 (VS Code 设置):
+#   "loment.serverCommand": "wsl",
+#   "loment.serverArgs": ["-e", "/home/<you>/.local/share/loment/lsp"]
+```
+
+实现（`loment/tools/lsp.lomt`，JSON 收发走 `loment/lib/json.lomt`）：
+
+- `initialize` / `initialized` / `shutdown` / `exit`；
+- `textDocument/didOpen|didChange|didSave` → 跑**自举 checker** → `publishDiagnostics`；
+- `textDocument/completion`：23 个关键字 + 14 个类型词 + 本文件声明的符号（kind 与 Python 版一致）；
+- `textDocument/definition`：光标处取词 → 声明行（未声明返回 null）；
+- 命令行模式 `lsp --check FILE`：诊断按 `路径:行:列: E0NN 标题` 打到 stdout，退出码 0/1 ——
+  编辑器任务（problem matcher 见扩展的 `contributes.problemMatchers`）与 CI 都能用。
+
+判据 `tools/loment_lsp_test.py` 3/3（已进 `ci.py`）：真二进制 + 真 `Content-Length` 分帧，
+7 帧往返核对（干净 0 诊断 / didChange 后 E002 行号 / 补全含声明符号 / 跳转引用→声明 /
+未声明→null / shutdown null）、3 个码与行号用例（E013/E002/干净）、`--check` 的格式与退出码。
+另外"用**自举编译器**造这些工具"也进了语料门禁：`loment_p8_test` 的驱动语料含
+`loment/tools/*.lomt` 与 `loment/lib/*.lomt`（44/44 逐字节一致）。
+
+**边界（诚实说明）**：本版**不提供 formatting**（不声明 `documentFormattingProvider`，
+格式化仍走 `loment/tools/lomfmt.lomt` 或 Python 版）；诊断文案是 `loment_diag` 的**分类标题**
+（码按修法分，码即 E0NN），不是参考实现的完整消息措辞。`runTests`/`runInFujoOS` 两个命令
+仍走 Python 工具（属于"写并跑"之外的额外功能）。
+
 ## 3. M57 包管理 `lompkg`
 
 - 包 = 目录 + `pkg.json`（name/version/deps）；依赖解析为**拓扑序**并检测环；

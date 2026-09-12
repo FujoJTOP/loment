@@ -80,3 +80,6 @@ ahci_events.txt
 /loment/build/user_hello.elf
 /loment/build/all_loment.ll
 /loment/build/all_loment.elf
+/loment/build/lsp.ll
+/loment/build/lsp.elf
+/loment/build/lsp_check_case.lomt

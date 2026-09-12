@@ -289,6 +289,15 @@ pub fn json_nkind(arena: ptr, n: u32) -> u32 {
     return j_nk(arena, n);
 }
 
+/// 字符串/数字节点的**原文**区间 (str 的区间不含引号) —— 原样回显 (如 JSON-RPC 的 id) 用。
+pub fn json_raw_off(arena: ptr, n: u32) -> u32 {
+    return j_na(arena, n);
+}
+
+pub fn json_raw_len(arena: ptr, n: u32) -> u32 {
+    return j_nb(arena, n);
+}
+
 pub fn json_first_child(arena: ptr, n: u32) -> u32 {
     return j_nc(arena, n);
 }

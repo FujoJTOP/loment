@@ -895,8 +895,12 @@ def test_m85_selfhosted_driver_compiles_corpus():
         deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
         elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs85")
         ok, skip = [], []
+        # 语料 = 示例 + 自举前端 + **工具与库** (loment/tools, loment/lib)。
+        # 后者是"用**自举编译器**就能造出这些工具"的判据 —— 装 LSP/格式化器不需要 Python。
         for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
-                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
+                             + list((ROOT / "loment" / "tools").glob("*.lomt"))
+                             + list((ROOT / "loment" / "lib").glob("*.lomt"))):
             why = _unsupported(target)
             if why:
                 skip.append((target.name, why))
@@ -970,12 +974,17 @@ def test_m82_coverage_report():
              # 整数->指针 (M83 给托管驱动补的那一步) 与自举驱动自身
              "native_brk.lomt", "driver.lomt",
              # M2 的 str_concat (堆拼接 + 新运行时常量 + 标签表)
-             "native_concat.lomt"]
+             "native_concat.lomt",
+             # 用**自举编译器**造工具: 格式化器/文档生成器/LSP 与 JSON 库都必须在列表里,
+             # 否则"装工具不需要 Python"这条会静默退化 (装法见 scripts/lomc.ps1)
+             "lomfmt.lomt", "lomdoc.lomt", "lsp.lomt", "json.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff, unsupported = [], [], []
         for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
-                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
+                             + list((ROOT / "loment" / "tools").glob("*.lomt"))
+                             + list((ROOT / "loment" / "lib").glob("*.lomt"))):
             try:
                 mod = lomentc.load(target)
                 deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)

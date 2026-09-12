@@ -137,6 +137,41 @@ python/perl/ruby/node/cargo/rustc/gcc，且必须是 LF。注释里的提法不�
 **踩过的坑**：`.ps1` 里写中文在 Windows PowerShell 5.1 下会因"无 BOM 的 UTF-8 按 ANSI 读"
 变成乱码并导致**解析错误** —— 所以 `scripts/lomc.ps1` 是纯 ASCII 的，中文说明留在这里。
 
+## 3.5 在编辑器里**不装 Python**写 Loment（2026-09-12）
+
+**3.5 之前**：打开文件不需要 Python（高亮是扩展自带的），但补全/跳转/诊断由
+`tools/loment_lsp.py` 提供 ⇒ 装了 VS Code 还得装 Python。现在可以换成 **Loment 版语言服务**：
+
+```powershell
+powershell -File scripts/install-lsp.ps1    # 种子 + clang + WSL：编译并装好服务 (无 Python)
+```
+
+它把服务装到 WSL 的 `$HOME/.local/share/loment/lsp`，并在结尾打印要写进 VS Code 设置的两行：
+
+```json
+"loment.serverCommand": "wsl",
+"loment.serverArgs": ["-e", "/home/<you>/.local/share/loment/lsp"]
+```
+
+写完**重载窗口**（`Developer: Reload Window`）即生效。此后：
+
+| 能力 | 谁提供 | 需要 Python 吗 |
+|---|---|---|
+| 语法高亮 | 扩展自带 TextMate 语法 | 否 |
+| 补全 / 跳转 / **诊断**（保存即报） | Loment 版语言服务（`loment/tools/lsp.lomt`） | 否 |
+| `Loment: 静态检查` 命令 | 同一个二进制的 `--check` + problem matcher（进 Problems 面板） | 否 |
+| `Loment: 生成 LLVM IR` | `scripts/lomc.ps1`（种子 + clang + WSL） | 否 |
+| `Loment: 运行 test_*` / `在 FujoOS 里运行` | `tools/loment.py` / `loment_boot.py` | **是**（"写并跑"之外的额外功能） |
+| 格式化 | `loment/tools/lomfmt.lomt`（CLI）或 Python 版 | 否（CLI）/ 是（编辑器内格式化尚未接 Loment 版） |
+
+**装法与判据**：服务本身用**自举编译器**编译（`scripts/install-lsp.ps1`：clang(种子) →
+stage1 → stage1 编译 `lsp.lomt` → clang 链 ELF → 装进 WSL → `--check` 冒烟），
+"自举编译器逐字节等价地编译这些工具"由 `loment_p8_test` 的语料门禁钉住（44/44）。
+协议与诊断判据见 `tools/loment_lsp_test.py`（3/3）与 docs/148 §2b。
+
+**已知缺口**：编辑器内格式化还没走 Loment 版（服务未声明 `documentFormattingProvider`）；
+诊断文案是分类标题（`E013 重名`），不是参考实现的完整措辞。
+
 ## 4. 给宿主方的请求（可直接转交）
 
 **要什么**：把下面两份 TextMate 语法加进内置高亮器的语言表（ZCode 是 Shiki 的
