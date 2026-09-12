@@ -82,17 +82,30 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 - `setup.exe` 的字节**不确定**（不能当"可复现工件"）；
 - 没有 MSI 那套企业分发/静默安装（`install.ps1 -DryRun` 可以当"先看计划"）。
 
-## 5. 判据（29 条，`tools/loment_dist_test.py`，进门禁）
+## 5. 判据（33 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
 
 | 组 | 判的是 |
 |---|---|
 | 布局 | 该有的文件都在；`.sh`/`.ps1`/`.cmd` 纯 ASCII；`.ps1`/`.cmd` 是 CRLF；`bin/loment` 是 LF；ELF 权限 755 |
 | 归档 | 归档内容与 payload **逐文件 sha256 相同**；zip/tar.gz 两次写出**字节相同** |
 | 产物 | `--check` 与 `SHA256SUMS` 一致；归档里的 driver == 构建产物 |
-| **端到端** | tar → 装进临时前缀 → `loment version` 出版本行 → **`loment ir` 的产物与参考实现逐字节相同** → `loment check` 正例 0 且不吐 IR → `loment run` 真跑出输出 → 缺组件时报错**指名**（`this package does not include loment-fmt`）→ `--uninstall` 摘干净 → 再装一次仍成功 |
-| Windows | `install.ps1 -DryRun` 与 `-DryRun -PayloadZip`（自解压那条路）在**真 PowerShell 5.1** 下都能跑；`setup.exe` 是 PE 且非空 |
+| **端到端 · Linux** | tar → 装进临时前缀 → `loment version` 出版本行 → **`loment ir` 的产物与参考实现逐字节相同** → `loment check` 正例 0 且不吐 IR → `loment run` 真跑出输出 → 缺组件时报错**指名**（`this package does not include loment-fmt`）→ `--uninstall` 摘干净 → 再装一次仍成功 |
+| **端到端 · Windows** | 解包 → `install.ps1` **真装**（`-Prefix <临时>` + `-WslDir /tmp/...` + `-NoPath -NoFileType`，不动用户 PATH 与注册表）→ 写出 `loment.cmd` 且指向 WSL 目录 → WSL 侧的 `loment version` 能跑 → Windows 风格的 `WslDir` 被**明确拒绝** |
+| Windows 解析 | `install.ps1 -DryRun` 与 `-DryRun -PayloadZip`（自解压那条路）在**真 PowerShell 5.1** 下都能跑；`setup.exe` 是 PE 且非空 |
 
-最强的一条是第三行那个**逐字节相同**：它同时证明了"包里的编译器是自举产物"和"装出来的东西能用"。
+最强的一条是 Linux 那行的**逐字节相同**：它同时证明了"包里的编译器是自举产物"和"装出来的东西能用"。
+
+### 为什么 Windows 那条要"真装"而不是只跑 `-DryRun`
+
+只校验"脚本能解析 + 计划打印得出来"会漏掉真实的拷贝/路径 bug。本文档第一版就是这么漏的，
+**真装一遍立刻抓到两个**：
+
+1. **`Split-Path -Parent` 会把 `/` 改写成 `\`**（Windows 的 provider 语义），于是
+   `wsl -e mkdir -p \tmp\a\b` 在 WSL 里建的是一个**名字带反斜杠的目录**（rc=0！），
+   随后 `cp` 报 `No such file or directory` 指向错的地方。修法：WSL 路径的父目录用
+   **纯字符串**算（`Wsl-Parent`），不碰 `Split-Path`。
+2. **`WslDir` 传成 Windows 风格路径**（`C:/...`）时静默建出垃圾目录树。修法：显式校验
+   必须是绝对 WSL 路径，否则直接报错 —— 这条现在也是判据之一。
 
 ## 6. 复现与边界
 

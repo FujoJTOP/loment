@@ -261,6 +261,40 @@ def test_windows_installer(zipf: Path) -> None:
     else:
         print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
 
+    # ★ 真装一遍 (但装在临时位置, 且 -NoPath -NoFileType: 不动用户 PATH 与注册表)。
+    #   这条是"Windows 侧真能用"的判据 —— 只跑 -DryRun 会漏掉真实的拷贝/路径 bug
+    #   (2026-09-12 就是这么漏了一个: WslDir 传成 Windows 路径时静默建出垃圾目录)。
+    pfx = loment_dist.STAGE / "it-win-pfx"
+    wdir = "/tmp/loment_dist_test_win"
+    if pfx.exists():
+        shutil.rmtree(pfx)
+    wsl("rm", "-rf", wdir)
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-Prefix", str(pfx), "-WslDir", wdir,
+                        "-NoPath", "-NoFileType"], capture_output=True, text=True,
+                       shell=False, encoding="utf-8", errors="replace", timeout=300)
+    ok = r.returncode == 0
+    check("install.ps1 真装 (临时前缀 + 临时 WSL 目录) 退出 0", ok,
+          ((r.stdout or "") + (r.stderr or ""))[-260:])
+    cmd = pfx / "bin/loment.cmd"
+    check("Windows 侧写出 loment.cmd 且指向 WSL 安装目录",
+          cmd.exists() and wdir in cmd.read_text(encoding="utf-8", errors="replace"),
+          "" if cmd.exists() else "缺 loment.cmd")
+    r2 = wsl(f"{wdir}/bin/loment", "version")
+    check("Windows 安装后 WSL 侧的 loment 能跑",
+          r2.returncode == 0 and loment_dist.DISPLAY in r2.stdout, r2.stdout[:120])
+
+    # 路径校验: Windows 风格的 WslDir 必须被拒 (ELF 装不到 Windows 路径上)
+    r3 = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                         "-Prefix", str(pfx), "-WslDir", "C:/tmp/loment_bad",
+                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
+                        shell=False, encoding="utf-8", errors="replace", timeout=180)
+    check("Windows 风格的 WslDir 被明确拒绝",
+          r3.returncode != 0 and "absolute WSL path" in ((r3.stdout or "") + (r3.stderr or "")),
+          f"rc={r3.returncode}")
+    wsl("rm", "-rf", wdir)
+    shutil.rmtree(pfx, ignore_errors=True)
+
 
 # ------------------------------------------------------------------ main
 

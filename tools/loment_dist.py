@@ -257,6 +257,15 @@ function Get-WslHome {
     return $h
 }
 
+function Wsl-Parent([string]$p) {
+    # NOTE: do NOT use Split-Path here -- on Windows it rewrites '/' as '\', and then
+    # "wsl -e mkdir -p \tmp\x" happily creates a *relative* junk directory instead of
+    # the intended one (rc=0, silently wrong). Pure string math keeps WSL paths intact.
+    $i = $p.LastIndexOf('/')
+    if ($i -le 0) { return '/' }
+    return $p.Substring(0, $i)
+}
+
 function Resolve-Payload {
     if ($PayloadDir -ne '') { return $PayloadDir }
     if ($PayloadZip -ne '') {
@@ -391,6 +400,9 @@ if ($DryRun) {
 Need-Wsl
 if ($WslDir -eq '') { $WslDir = (Get-WslHome) + '/.local/share/loment' }
 elseif ($WslDir.StartsWith('~')) { throw "WslDir must be absolute (~ is not expanded): '$WslDir'" }
+if (-not $WslDir.StartsWith('/')) {
+    throw "WslDir must be an absolute WSL path (got '$WslDir'). A Windows-style path cannot hold an ELF."
+}
 
 Verify-Sums $Payload
 
@@ -409,8 +421,12 @@ foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/user_hello.lomt')) {
     $f = Join-Path $Payload $rel
     if (-not (Test-Path -LiteralPath $f)) { continue }
-    & wsl -e mkdir -p (Split-Path -Parent "$WslDir/$rel")
-    & wsl -e cp (To-WslPath $f) "$WslDir/$rel"
+    $dest = "$WslDir/$rel"
+    # create the target dir first: without it cp fails as "No such file or directory",
+    # which points at the wrong place (the directory, not the file)
+    & wsl -e mkdir -p (Wsl-Parent $dest)
+    if ($LASTEXITCODE -ne 0) { throw "mkdir for $rel in WSL failed" }
+    & wsl -e cp (To-WslPath $f) $dest
     if ($LASTEXITCODE -ne 0) { throw "copying $rel into WSL failed" }
 }
 Say "[2/6] toolchain -> WSL: $wslBin"
