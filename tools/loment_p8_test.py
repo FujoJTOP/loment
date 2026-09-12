@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -938,10 +939,13 @@ def test_m85_codegen_table_capacity():
     m = _re.search(r"24576 \+ n \* (\d+)", src)
     assert m, "形参表步长没找到"
     param_stride = int(m.group(1))
-    # 容量 = 每张表在"下一张表开始时"之前能放多少个
-    cap_fn = (fk_base - fn_base) // fn_stride
-    cap_fk = (17408 - fk_base) // fk_stride           # 17408 = 参数替换表基址
-    cap_param = (enum_base - param_base) // param_stride
+    # 容量 = 每张表在"下一张表开始时"之前能放多少个。
+    # 注意枚举表现在挪在低地址空档里 (18944..20480), 所以形参表的上界是 scratch 末尾
+    # (49152) 而不是枚举表基址 —— 早先的公式在这条上会算出负数。
+    cap_fn = (fk_base - fn_base) // fn_stride          # fk 表紧跟函数表
+    cap_fk = (18688 - fk_base) // fk_stride            # 18688 = 参数替换表基址
+    cap_param = (49152 - param_base) // param_stride
+    cap_enum = (20480 - enum_base) // enum_stride      # 枚举表上界 = 局部表基址
     cap = min(cap_fn, cap_fk, cap_param)
     # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。
     # 用**真实词法器**数 `fn` 标识符 token —— 这正是 codegen 看到的数量 (字符串里的
@@ -951,8 +955,10 @@ def test_m85_codegen_table_capacity():
     nfns = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "fn")
     assert nfns <= cap, (f"最大单元有 {nfns} 个函数, 超过 codegen 表容量 {cap} "
                          f"(fn {cap_fn} / fk {cap_fk} / 形参 {cap_param}) —— 请重排布局")
+    nenum = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "enum")
+    assert nenum <= cap_enum, f"最大单元有 {nenum} 个枚举, 超过枚举表容量 {cap_enum}"
     print(f"      codegen 表容量: {cap} 个函数 (fn {cap_fn}/fk {cap_fk}/形参 {cap_param}), "
-          f"最大单元 {nfns} 个")
+          f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个")
 
 
 @test
@@ -1023,6 +1029,100 @@ def test_m85_codegen_arg_arity_is_loud():
                 worst, worst_fn = len(f.params), f"{target.name}:{f.name}"
     assert worst <= 10, f"语料里有 {worst} 个形参的函数 ({worst_fn}), 超过 self-hosted codegen 的 10 槽上限"
     print(f"      实参上限: 闸门存在; 语料最大形参数 {worst} ({worst_fn}) <= 10")
+
+
+@test
+def test_m86_selfhost_perf_budget():
+    """M86: 自举驱动编译自身的时间进护栏 (回归判据, 不是紧预算)。
+
+    实测基线 (本机; WSL 内跑 ELF, 减掉 ~0.12s 的 WSL 启动开销):
+
+    | 单元 | 函数数 | 自举驱动 | 参考实现 (Python) |
+    |---|---|---|---|
+    | mathutil | 2 | <0.1s | ~0.1s |
+    | lexer | 10 | <0.1s | ~0.1s |
+    | codegen | 130 | 4.6s | ~0.7s |
+    | driver (自编译) | 253 | **12.8s** | 1.2s |
+
+    自举版比参考实现慢约 10 倍, 而且略超线性 (130 -> 253 个函数, 4.6s -> 12.8s):
+    符号查找是**线性扫** (`chk_lookup_slot` / codegen 的 `find_fn`), 单元越大越贵。
+    这里判"<= 30s"是**护栏** (机器相关, 给足余量), 数字打印出来便于看趋势。
+    """
+    if not (_wsl() and _clang()):
+        print("      SKIP: 需要 WSL + clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        ll = Path(td) / "perf.ll"
+        ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+        elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "perf_drv")
+        subprocess.run(["wsl", "-e", "bash", "-lc",
+                        f"cp {_wsl_path(elf)} /tmp/perf_drv && chmod +x /tmp/perf_drv"],
+                       capture_output=True, text=True, timeout=120, shell=False)
+
+        def timed(cmd: str) -> float:
+            t0 = time.time()
+            subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+                           capture_output=True, text=True, timeout=300, shell=False)
+            return time.time() - t0
+
+        base = min(timed("true") for _ in range(3))
+        runs = [timed(f"cd {_wsl_path(ROOT)} && /tmp/perf_drv loment/selfhost/driver.lomt "
+                      f"> /dev/null") for _ in range(2)]
+        best = min(runs) - base
+        budget = 30.0
+        assert best <= budget, f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s (基线 12.8s)"
+        print(f"      自举自编译: {best:.2f}s (护栏 {budget:.0f}s; 参考实现 Python 1.2s, "
+              f"WSL 基线 {base:.2f}s)")
+
+
+#: 参考实现在**解析期**就拒、而驱动器看不见的用例 (驱动器只有 lex -> check -> emit,
+#: 没有 parser)。这些用例只要求"驱动器不崩", 不要求它拒。
+PARSE_LEVEL: set[str] = set()
+
+
+@test
+def test_m85_driver_gate_on_probe_cases():
+    """M85 字面判据 (可映射部分): 把 `loment_rule_parity` 的规则负例**直接喂给自举驱动**。
+
+    `lomentc_test` 那 91 条里可映射到驱动器的是"规则判定 / 确定性 / 抗崩"三类, 这里把
+    规则判定与抗崩合起来做: 每条规则负例都让驱动器跑一遍, 要求
+      ① 退出码只能是 0 或 1 —— **绝不能因信号而死** (检查器开发期崩过两次: 游标越过 eof、
+         递归死循环, 都是"进程直接没了"而不是"报了个错");
+      ② 参考实现判错的用例, 驱动器也要拒 (除 `PARSE_LEVEL` 登记的解析期用例 —— 驱动器
+         没有 parser, 解析期错误它看不见, 这类只能靠参考实现兜)。
+
+    不可映射的三类 (运行时/双后端、Python API 形状断言、夹具侧 3 目录加载) 列在 docs/150;
+    3 目录加载其实已被"驱动自编译"覆盖 (driver -> codegen -> lexer/bytes 四级 use)。
+    """
+    if not (_wsl() and _clang()):
+        print("      SKIP: 需要 WSL + clang")
+        return
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_rule_parity as P  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        ll = Path(td) / "drv.ll"
+        ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
+        elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "gate_drv")
+        cases = list(P._CASES)
+        bad_signal: list[str] = []
+        leaked: list[str] = []
+        for rid, src in cases:
+            f = Path(td) / f"g_{rid}.lomt"
+            f.write_text(src, encoding="utf-8", newline="\n")
+            rc, _out, _err = _run_driver_raw(elf, _wsl_path(f), td, f"g_{rid}")
+            if rc not in (0, 1):
+                bad_signal.append(f"{rid}(rc={rc})")
+            elif rc == 0 and rid not in PARSE_LEVEL:
+                leaked.append(rid)
+        assert not bad_signal, f"驱动器被信号打死: {bad_signal}"
+        assert not leaked, (f"这些规则负例驱动器放行了: {leaked} —— 要么检查器漏了这条规则, "
+                            f"要么它其实是解析期错误 (请登记进 PARSE_LEVEL)")
+        print(f"      规则负例经驱动器: {len(cases)} 条全部非零退出且无信号 "
+              f"(解析期豁免 {len(PARSE_LEVEL)} 条)")
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:

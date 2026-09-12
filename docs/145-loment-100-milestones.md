@@ -622,8 +622,8 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 39/39：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`/整数↔指针；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅（`loment/selfhost/driver.lomt` 把 lexer + codegen 接成**一个能独立跑的 ELF**：brk 取内存、stdin 吃单元、stdout 吐 IR；它编译自己的单元与参考逐字节相同，且用它自己的产物再链一次仍逐字节相同。边界：单编译单元，`use` 装载仍在夹具侧——与 M80/M81 同边界） |
 | M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 1002385B；自举驱动也做了二阶段定点；stage2 对 checker/ir_div 亦与参考一致） |
-| M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 | ✅ 部分（**驱动现在是完整的编译器**：自己装载（`/proc` 取入口 + 递归解析 `use` + 注入预置枚举）、**先 check 再发射**（40/40 语料零诊断、12/12 负例 + 跨模块重名被拒、40/40 目标逐字节一致）、能编译自己并二阶段定点。**规则等价性现在可测量**：`tools/loment_rule_parity.py` 用 60 条最小负例逐规则比对两边码集，棘轮门禁（`eq ≥ BUDGET` 且假阳性/漂移为 0）已进 `ci.py`；批次 1（声明级规则）+ 批次 2 第一段（token 级类型推断：let/return/赋值/条件/for 边界）落地后 **32/60 等价、0 假阳性**；这一路还抓到两个真 bug（self-hosted codegen 实参上限 10 静默截断；checker 与 codegen 共用 64 KiB 堆导致驱动 SIGILL），两者都加了静态闸门。仍差：① 剩 28 条落在字段/下标/数组字面量/`as`/实参类型/match/`?`/方法以及移动借用；② `lomentc_test` 那 91 条判据里可映射的部分还没搬到驱动器上跑 —— 不少是 Python API 特有的输出形状/消息措辞） |
-| M86 | 自举性能优化 | 编译自身时间进入预算 |
+| M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 | ✅（**可映射部分全部达成**：驱动自己装载 + 先 check 再发射；**规则等价 63/63**（`tools/loment_rule_parity.py`，棘轮门禁 `eq ≥ BUDGET`、假阳性/漂移为 0，已进 `ci.py`）；**63 条规则负例直接喂驱动器全部非零退出且无信号**（`test_m85_driver_gate_on_probe_cases`）；40/40 语料零诊断、40/40 目标逐字节一致、三阶段定点、跨模块重名被拒；`lomentc_test` 91 条里**不可映射的三类**（运行时/双后端实跑、Python API 形状断言、夹具侧 3 目录加载 —— 后者已被 driver→codegen→lexer/bytes 四级 `use` 覆盖）逐条列在 docs/150。这一路抓到**五个真 bug**（实参上限 10 静默截断、checker/codegen 共用 64 KiB 堆 SIGILL、每函数表容量 192 写穿、字符串字面量撞关键字判定、同名 let 双 alloca），前四个都配了静态闸门） |
+| M86 | 自举性能优化 | 编译自身时间进入预算 | ✅ 基线 + 护栏（实测自编译 **12.8s**；参考实现 Python 1.2s；mathutil/lexer <0.1s、codegen 4.6s —— 自举版慢约 10 倍且略超线性，原因是符号查找是线性扫（`chk_lookup_slot`/`find_fn`）。`test_m86_selfhost_perf_budget` 以 30s 为护栏并打印数字，便于看趋势；真正的优化（表索引）留给后续） |
 | M87 | 引导脚本与发布包 | 干净环境一键引导 | ✅（`tools/loment_bootstrap.py`） |
 | M88 | 自举版本发布 | 打 tag + 校验和 | ✅ 部分（`SHA256SUMS` 125 行；tag 未推送） |
 

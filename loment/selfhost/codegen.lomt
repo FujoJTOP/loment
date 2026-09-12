@@ -15,15 +15,17 @@ module codegen
 //         值栈: 第 k 层 长度@8192+72k, 文本@8196+72k (容量 68), k=0..40
 //         scratch 656.. (16B)
 //         实参类型 720+(层)*4 (16 层) 十进制数字缓冲 672..704 函数计数 640  struct 表 1024..6144
-//         函数表 12288+i*12 (256 个) fk 表 15360+i*8 (256 个) 当前函数参数表 17408..
-//         局部表 20480.. (4 KiB) 每函数形参类型 24576+i*80 (256 个) 枚举表 45056+i*80
+//         函数表 12288+i*12 (320 个) fk 表 16128+i*8 (320 个) 当前函数参数表 18688..
+//         枚举表 18944+i*80 (19 个) 局部表 20480.. (4 KiB) 每函数形参类型 24576+i*80 (307 个)
 //         scratch 48000.. (状态块 49152)
 //
-// **容量**: 每函数 100 字节 (12+8+80), 三张表的长度都按 256 个函数定。曾经是 192
-// (fk 表 14848..16384 只有 192 格), 而自举驱动的单元长到 246 个函数后就会写穿到
-// 参数替换表/枚举表上 —— 症状是"少数函数被改名成 `<接收者>_<方法>`"(fk 格被覆盖后
-// fkind 变成 2), 逐字节判据报"两个编译器不一致"。容量现在由
-// `test_m85_codegen_table_capacity` 静态钉住: 单元函数数超过 256 会红, 而不是悄悄写穿。
+// **容量**: 每函数 100 字节 (12+8+80), 三张表按 **307 个函数**定 (形参表是瓶颈:
+// (49152-24576)/80 = 307)。曾经是 192 (fk 表 14848..16384 只有 192 格), 而自举驱动的
+// 单元长到 246 个函数后就会写穿到参数替换表/枚举表上 —— 症状是"少数函数被改名成
+// `<接收者>_<方法>`"(fk 格被覆盖后 fkind 变成 2), 逐字节判据只报"两个编译器不一致"。
+// 现在单元已经 253 个函数, 所以又抬了一次 (枚举表挪到 18944 的空档里, 参数替换表跟在
+// fk 后面), 留出 ~20% 余量。容量由 `test_m85_codegen_table_capacity` 静态钉住:
+// 单元函数数超过 307 会红, 而不是悄悄写穿。
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
 
@@ -566,7 +568,7 @@ fn fn_ret(s: ptr, fi: u32) -> u32 {
 fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 12) {
-        let nt: u32 = load32(s, 17408 + i * 8);
+        let nt: u32 = load32(s, 18688 + i * 8);
         if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
             let k: u32 = 0;
             let ok: u32 = 1;
@@ -578,7 +580,7 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
                 k = k + 1;
             }
             if ok == 1 {
-                return subst_tok(s, src, toks, load32(s, 17408 + i * 8 + 4));
+                return subst_tok(s, src, toks, load32(s, 18688 + i * 8 + 4));
             }
         }
         i = i + 1;
@@ -802,7 +804,7 @@ fn emit_inst_name(s: ptr, out: ptr, src: ptr, toks: ptr, ent: u32) -> u32 {
 /// 每个函数槽的附加信息 (与函数表同序): kind | recv_tok
 /// kind: 0 = 普通函数, 1 = trait 声明里的方法 (不发射), 2 = impl 方法 (名字 = <recv>_<方法>)
 fn fk_base(i: u32) -> u32 {
-    return 15360 + i * 8;
+    return 16128 + i * 8;
 }
 
 /// 按 (接收者类型, 方法名) 找 impl 方法的函数表下标; 未找到返回 4294967295。
@@ -867,7 +869,7 @@ fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
 
 /// 枚举表项基址: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
 fn enum_base(i: u32) -> u32 {
-    return 45056 + i * 80;
+    return 18944 + i * 80;
 }
 
 fn find_enum(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
@@ -2782,10 +2784,10 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let k: u32 = 0;
     let i: u32 = lp + 1;
     while i < rp && k < 16 {
-        store32(s, 17408 + k * 8, i);
-        store32(s, 17408 + k * 8 + 4, i + 2);
+        store32(s, 18688 + k * 8, i);
+        store32(s, 18688 + k * 8 + 4, i + 2);
         if fkind == 2 && k == 0 {   // impl 的 self: 类型 = 接收者类型
-            store32(s, 17408 + k * 8 + 4, load32(s, fk_base(load32(s, 472)) + 4));
+            store32(s, 18688 + k * 8 + 4, load32(s, fk_base(load32(s, 472)) + 4));
         }
         k = k + 1;
         i = skip_type(src, toks, i + 2);   // 类型可能是 [T] / [T; N]
@@ -2855,21 +2857,21 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if a > 0 {
             emit_str(s, out, ", ");
         }
-        let sa: u32 = push_ty_subst(s, src, toks, load32(s, 17408 + a * 8 + 4));
-        emit_ty(s, out, src, toks, load32(s, 17408 + a * 8 + 4));
+        let sa: u32 = push_ty_subst(s, src, toks, load32(s, 18688 + a * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 18688 + a * 8 + 4));
         pop_subst(s, sa);
         emit_str(s, out, " %");
-        emit_name_tok(s, out, src, toks, load32(s, 17408 + a * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 18688 + a * 8));
         a = a + 1;
     }
     emit_str(s, out, ") {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
-        emit_name_tok(s, out, src, toks, load32(s, 17408 + b * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 18688 + b * 8));
         emit_str(s, out, ".addr = alloca ");
-        let sb: u32 = push_ty_subst(s, src, toks, load32(s, 17408 + b * 8 + 4));
-        emit_ty(s, out, src, toks, load32(s, 17408 + b * 8 + 4));
+        let sb: u32 = push_ty_subst(s, src, toks, load32(s, 18688 + b * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 18688 + b * 8 + 4));
         pop_subst(s, sb);
         emit_str(s, out, "\n");
         b = b + 1;
@@ -2888,11 +2890,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
-        emit_ty(s, out, src, toks, load32(s, 17408 + c * 8 + 4));
+        emit_ty(s, out, src, toks, load32(s, 18688 + c * 8 + 4));
         emit_str(s, out, " %");
-        emit_name_tok(s, out, src, toks, load32(s, 17408 + c * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 18688 + c * 8));
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, load32(s, 17408 + c * 8));
+        emit_name_tok(s, out, src, toks, load32(s, 18688 + c * 8));
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
