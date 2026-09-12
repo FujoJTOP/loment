@@ -3,7 +3,15 @@
 > 工具 `tools/loment_sign.py` · 判据 `tools/loment_sign_test.py`（15 条，进门禁；审计里是 C16）
 > · 产物在 `loment/dist/`（docs/162）· 私钥永不进仓库
 
-## 0. 一句话
+## 0. 状态（2026-09-12）
+
+**流程就绪、当前发行件未签**：用户指示先暂停签名这条线，所以这一轮重建出来的 `loment/dist/`
+是未签名的，目录里失效的 `.sig/.asc/.pem/FINGERPRINT` 已清掉（重建后旧签名一定对不上，
+留着就是自相矛盾的下载件）。要签回来一条命令：
+`python tools/loment_sign.py --dist --sign --sign-sums --sign-gpg`（15 条判据照跑，
+工具与本文档都在）。
+
+## 0b. 一句话
 
 给发行包做**两种**签名：Windows 可执行文件做 **Authenticode**（让系统/浏览器/杀软看到"发布者"），
 整个包做 **SHA256SUMS 分离签名**（Linux/macOS 也能验）。**先说清楚**：用自签名证书签，

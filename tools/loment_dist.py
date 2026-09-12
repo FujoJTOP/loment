@@ -468,15 +468,26 @@ Say "installed. Try:  loment version"
 '''
 
 INSTALL_CMD = r'''@echo off
-rem Loment @DISPLAY@ setup: unpack payload.zip next to this script, then run install.ps1.
-rem Unsigned build -- SmartScreen may warn; see README.md.
+rem Loment @DISPLAY@ installer entry point. Works in BOTH layouts:
+rem   * self-extracting setup.exe  -> payload.zip sits next to this file: unpack it first
+rem   * plain .zip                 -> this directory IS the payload
+rem Double-clicking this file installs with defaults; see README.md for the switches
+rem (-Prefix, -WslDir, -NoPath, -NoFileType, -DryRun, -Uninstall).
 setlocal
 set HERE=%~dp0
-powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" -PayloadZip "%HERE%payload.zip" %*
+set PSARGS=
+if exist "%HERE%payload.zip" set PSARGS=-PayloadZip "%HERE%payload.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS% %*
 if errorlevel 1 (
   echo.
   echo install failed. See README.md, or run it manually:
-  echo   powershell -ExecutionPolicy Bypass -File "%HERE%install.ps1" -PayloadZip "%HERE%payload.zip"
+  echo   powershell -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS%
+  pause
+  exit /b 1
+)
+rem A double-click passes no arguments -- keep the window open so the result stays visible.
+if "%~1"=="" (
+  echo.
   pause
 )
 '''
@@ -519,6 +530,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 # 可选: -Prefix D:\\Loment  -WslDir /home/me/.local/share/loment
 #       -NoPath  -NoFileType  -DryRun  -Uninstall
 ```
+
+也可以直接**双击 `install.cmd`**（按默认参数装；`install.cmd` 在 zip 布局与自解压布局里都能用）。
+遇到"被策略阻止"时用上面那条 `-ExecutionPolicy Bypass` 的命令。
 
 **③ 安装包安装 · Windows 双击**
 

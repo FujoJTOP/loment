@@ -263,6 +263,16 @@ def test_windows_installer(zipf: Path) -> None:
     else:
         print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
 
+    # ★ 用户最可能走的那一步: 解压 zip -> 双击 / 运行 install.cmd。
+    #   它曾只认自解压布局 (去找 payload.zip), 在 zip 布局里必然失败 —— 2026-09-12 用户报障。
+    cmd_file = root / "install.cmd"
+    r = subprocess.run(["cmd", "/c", str(cmd_file), "-DryRun"], capture_output=True,
+                       text=True, shell=False, encoding="utf-8", errors="replace",
+                       timeout=180, cwd=str(root), stdin=subprocess.DEVNULL)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("zip 布局下 install.cmd -DryRun 通过 (用户路径)",
+          r.returncode == 0 and "dry-run" in out, out[-220:])
+
     # ★ 真装一遍 (但装在临时位置, 且 -NoPath -NoFileType: 不动用户 PATH 与注册表)。
     #   这条是"Windows 侧真能用"的判据 —— 只跑 -DryRun 会漏掉真实的拷贝/路径 bug
     #   (2026-09-12 就是这么漏了一个: WslDir 传成 Windows 路径时静默建出垃圾目录)。

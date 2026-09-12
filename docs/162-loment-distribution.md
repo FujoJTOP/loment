@@ -84,16 +84,32 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 - `setup.exe` 的字节**不确定**（不能当"可复现工件"）；
 - 没有 MSI 那套企业分发/静默安装（`install.ps1 -DryRun` 可以当"先看计划"）。
 
+### 4a. `install.cmd` 为什么在两种布局里都能用
+
+`install.cmd` 是**自解压包**和 **zip 包**共用的入口：
+
+- 自解压包：解出来的目录里有 `payload.zip` → 它先解包再装（`-PayloadZip`）；
+- zip 包：目录本身就是 payload → 它直接调 `install.ps1`，不需要任何额外文件。
+
+**这是踩出来的**：第一版 `install.cmd` 只认自解压布局（写死去找 `payload.zip`），而 zip 包里
+根本没有这个文件 —— 用户解压 zip 后看到 `install.cmd`（最像安装器、也能双击）一跑就是
+"install failed"。现在判据里有一条专门跑这条用户路径（`zip 布局下 install.cmd -DryRun 通过`），
+并且双击时窗口会停住把结果打给你看。
+
 ### 4b. 签名与顺序
 
 `loment/dist/` 里的 `setup.exe` 可以用 `tools/loment_sign.py --dist --sign --sign-sums` 签名
 （Authenticode + SHA256SUMS 分离签名）。**顺序是硬约束**：签名会改 PE 的字节，所以清单必须在
 **签名之后**重算 —— `--dist --sign` 已经内置（签完自动重算 `SHA256SUMS`），别手动先签后改，
-否则 `loment_dist --check` 会对不上。本仓当前用的是**本机自签名**证书（`CN=Loment Self-Signed (dev)`），
-所以下载者仍会看到"未知发布者"；换 CA 证书只需换 `LOMENT_SIGN_PFX`/`LOMENT_SIGN_PFX_PASS`
-环境变量，流程不变（`--print-cmd` 打印等价命令）。
+否则 `loment_dist --check` 会对不上。
 
-## 5. 判据（33 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
+**当前 `loment/dist/` 里的发行件是未签名的**（2026-09-12 用户指示暂停签名这条线；重新打包会
+重算字节、旧签名必然失效，所以已把失效的 `.sig/.asc/.pem/FINGERPRINT` 从该目录清掉，免得出一个
+自相矛盾的下载件）。签名能力没删：一条命令 `python tools/loment_sign.py --dist --sign --sign-sums
+--sign-gpg` 就能签回来；自签名消不掉 SmartScreen 警告，换 CA 证书只需设
+`LOMENT_SIGN_PFX`/`LOMENT_SIGN_PFX_PASS`，流程不变（`--print-cmd` 打印等价命令）。
+
+## 5. 判据（34 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
 
 | 组 | 判的是 |
 |---|---|
@@ -102,7 +118,7 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 | 产物 | `--check` 与 `SHA256SUMS` 一致；归档里的 driver == 构建产物 |
 | **端到端 · Linux** | tar → 装进临时前缀 → `loment version` 出版本行 → **`loment ir` 的产物与参考实现逐字节相同** → `loment check` 正例 0 且不吐 IR → `loment run` 真跑出输出 → 缺组件时报错**指名**（`this package does not include loment-fmt`）→ `--uninstall` 摘干净 → 再装一次仍成功 |
 | **端到端 · Windows** | 解包 → `install.ps1` **真装**（`-Prefix <临时>` + `-WslDir /tmp/...` + `-NoPath -NoFileType`，不动用户 PATH 与注册表）→ 写出 `loment.cmd` 且指向 WSL 目录 → WSL 侧的 `loment version` 能跑 → Windows 风格的 `WslDir` 被**明确拒绝** |
-| Windows 解析 | `install.ps1 -DryRun` 与 `-DryRun -PayloadZip`（自解压那条路）在**真 PowerShell 5.1** 下都能跑；`setup.exe` 是 PE 且非空 |
+| Windows 解析 | `install.ps1 -DryRun`、`-DryRun -PayloadZip`（自解压那条路）、**`install.cmd -DryRun`（zip 布局，用户双击那条路）** 在**真 PowerShell 5.1 / cmd** 下都能跑；`setup.exe` 是 PE 且非空 |
 
 最强的一条是 Linux 那行的**逐字节相同**：它同时证明了"包里的编译器是自举产物"和"装出来的东西能用"。
 

@@ -195,11 +195,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "cb0143f13241483b47ba85f3d891710c19d5874713704c7dbe4072d47fd93850"
+   "sha256": "98b8260c397fa677885ff8d51f9dff29b779d790f747582b05151f5c31322f01"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "52d4b59e525d9da89f7f14dddda4763255c308df6b28195c12eb7065f9398adb"
+   "sha256": "ebd2e5053f274dd1dc926074cba53ada5aef9099d6d1b8fb376108431b8d9eef"
   },
   {
    "path": "tools/loment_sign.py",
@@ -559,11 +559,11 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "cd459eea25e817c08d3f5a3e599630b482e477cfd0e166cc66f1a29d81f92e49"
+   "sha256": "8803a6b7f5706563bd990a824db4a9518dc017ecfb66e34537efd49857d21fa3"
   },
   {
    "path": "docs/163-loment-signing.md",
-   "sha256": "473c4e56d96382382a9e559f6357b7148e576100fa95940b3c36124fd8a4b722"
+   "sha256": "7a97e7d3f709e45d34505a3984930f79178d52d0a2384cb86ee3319ee268c1a4"
   },
   {
    "path": "docs/164-loment-source-kit.md",
