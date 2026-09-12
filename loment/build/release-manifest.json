@@ -115,7 +115,7 @@
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "79fcb5b213d4a881e45a847dad2b24135fc798a8a2d5a36041c56f1ce917c905"
+   "sha256": "4cca38ac49c71c5903cf72d5dd4a20619950026f29311a20cb89bcbe728105db"
   },
   {
    "path": "tools/mono_trace.py",
@@ -143,7 +143,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "e4326dce20bacce056475c4bc83fb06b247303bb858d6ca5b02015b5090a31d4"
+   "sha256": "6b5c05cff4676ffdfcf598e4f19000d75959658d8b58823de695ab88a44f1b05"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -159,7 +159,7 @@
   },
   {
    "path": "tools/loment_lsp_test.py",
-   "sha256": "443557eeed40a7c72162f19a96240c8c0ff5fcf0abfd1314a1c7ea27ec20893c"
+   "sha256": "a6dd611dada38955eef3ec7884ccde9a2238b0b80e1e04460c5a1f09469f0c6f"
   },
   {
    "path": "tools/loment_editors_test.py",
@@ -167,7 +167,7 @@
   },
   {
    "path": "editors/vim/README.md",
-   "sha256": "54a9b39ff52443fe94dae72c35af1ce32ded828dc69469abf85f1c3ba84a262c"
+   "sha256": "f62fff3c0b1a8a81bec8f089ccf886e3c7ee0714751f61a5f00937b385b89a20"
   },
   {
    "path": "editors/vim/syntax/loment.vim",
@@ -179,15 +179,15 @@
   },
   {
    "path": "editors/vim/ftplugin/loment.vim",
-   "sha256": "11a4f3824e1660edd715c9ad809f9f181a87d66604b04f04dfccd8d1bf2c4c2f"
+   "sha256": "e91e5799ebb748244b21b287441fe9197d1acbab9a178e16754ef2b9e52b2384"
   },
   {
    "path": "tools/loment_filetype.py",
-   "sha256": "d19e8bd52d7acd7cddb51957cc610a49a5a935709458a7967e07033bd913a4f1"
+   "sha256": "496b3836bb563031e249b0449cc8649f23f79cc6b1be3ce381127b94df3940d4"
   },
   {
    "path": "tools/loment_filetype_test.py",
-   "sha256": "0551f8f1ef1728998407ef9d68cacdbf07bdfc065373466a39e8fec6f48ee879"
+   "sha256": "75cb622a281d35c0e7f953d4f62ad690431a732f91e9f801386e628b27e3415d"
   },
   {
    "path": "loment/bootstrap.sh",
@@ -199,7 +199,7 @@
   },
   {
    "path": "scripts/install-lsp.ps1",
-   "sha256": "111664e00d186faa5b28d22cdec92ec71994996daecac380ebddb4fbcdd392a3"
+   "sha256": "dd39f6c9b5d04c7b6e7eb3a4b3b620ba41e0c419fe998879a24c118735b09971"
   },
   {
    "path": "loment/build/selfhost_driver.ll",
@@ -515,7 +515,7 @@
   },
   {
    "path": "docs/157-loment-editor-hosts.md",
-   "sha256": "de180dbc12508a55e4925590b561c8c828d450b5bca5934e6d0a2e0153e69f2f"
+   "sha256": "aaee12ba6faff51f1adc4a784a1bf075da6b377651e5e5c0ada97e4e35d18e1c"
   },
   {
    "path": "docs/158-loment-1.0-freeze.md",

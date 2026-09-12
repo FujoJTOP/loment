@@ -33,9 +33,16 @@ vim -N -c 'set rtp+=/d/Dev/FujoOS-FujoLang/editors/vim' -c 'filetype plugin on' 
 要改：
 
 ```vim
-let g:loment_lsp_cmd   = 'wsl -e /home/<you>/.local/share/loment/lsp'
+let g:loment_lsp_cmd   = 'wsl -e /home/<you>/.local/share/loment/lsp'   " 非 MSYS 版 vim / WSL 里的 vim
 let g:loment_build_cmd = 'powershell -NoProfile -File scripts/lomc.ps1'
 ```
+
+> **MSYS/Cygwin 版 vim 的坑（Git Bash 自带的就是这种）**：它 spawn `wsl.exe` 时会把
+> `/home/...` 这个参数当**路径**转换掉（实测变成 `C:/Program Files/Git/home/...`，
+> `execvpe ... No such file or directory`）。所以本插件的默认值在这种 vim 下是
+> `loment/build/loment-lsp.cmd` —— `scripts/install-lsp.ps1` 生成的垫片（经 cmd.exe 调 wsl，
+> cmd 不做 MSYS 转换）。装了服务之后它就在 `loment/build/` 里；在别的项目里用时把
+> `g:loment_lsp_cmd` 设成该垫片的绝对路径。
 
 ## 3. 想要补全/跳转：任意 LSP 客户端都能接
 

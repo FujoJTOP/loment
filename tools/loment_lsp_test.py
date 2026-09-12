@@ -268,28 +268,26 @@ def test_lsp_check_mode_is_python_free():
                       ["cp", _wsl_path(elf), "/tmp/loment_lsp.bin"],
                       ["chmod", "+x", "/tmp/loment_lsp.bin"]):
                 subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
-            rel = probe.relative_to(ROOT).as_posix()
-            r = subprocess.run(
-                ["wsl", "-e", "bash", "-lc",
-                 f"cd /mnt/d/Dev/FujoOS-FujoLang && /tmp/loment_lsp.bin --check {rel}; "
-                 f"echo rc=$?"],
-                capture_output=True, text=True, timeout=180, shell=False)
+            # 把**绝对 WSL 路径**当数据传给 --check (不经 shell, 也不猜仓库在哪) ——
+            # 早先这里写死了 `cd /mnt/d/Dev/FujoOS-FujoLang`, 换个检出位置就 rc=2
+            # (服务打不开文件), 会被误读成"服务没构建"。
+            abs_probe = _wsl_path(probe)
+            r = subprocess.run(["wsl", "-e", "/tmp/loment_lsp.bin", "--check", abs_probe],
+                               capture_output=True, text=True, timeout=180, shell=False)
             out = r.stdout
-            assert "rc=1" in out, out
+            assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
             lines = [ln for ln in out.splitlines() if ": E" in ln]
-            assert any("E013" in ln and ln.startswith(rel) for ln in lines), out
+            assert any("E013" in ln and ln.startswith(abs_probe) for ln in lines), out
             assert any("E002" in ln for ln in lines), out
             for ln in lines:
                 head = ln.split(": E")[0]
-                assert head.startswith(rel + ":"), ln
-                # rel 之后正好是 `:行:列` (两个冒号)
-                assert head[len(rel):].count(":") == 2, ln
-            r2 = subprocess.run(
-                ["wsl", "-e", "bash", "-lc",
-                 "cd /mnt/d/Dev/FujoOS-FujoLang && "
-                 "/tmp/loment_lsp.bin --check loment/examples/mathutil.lomt; echo rc=$?"],
-                capture_output=True, text=True, timeout=180, shell=False)
-            assert r2.stdout.strip() == "rc=0", r2.stdout
+                assert head.startswith(abs_probe + ":"), ln
+                # 路径之后正好是 `:行:列` (两个冒号)
+                assert head[len(abs_probe):].count(":") == 2, ln
+            clean = _wsl_path(ROOT / "loment" / "examples" / "mathutil.lomt")
+            r2 = subprocess.run(["wsl", "-e", "/tmp/loment_lsp.bin", "--check", clean],
+                                capture_output=True, text=True, timeout=180, shell=False)
+            assert r2.returncode == 0 and r2.stdout.strip() == "", (r2.returncode, r2.stdout)
     finally:
         probe.unlink(missing_ok=True)
     print("      --check: 有错 -> rc=1 且逐行 `路径:行:列: E0NN 标题`; 干净 -> rc=0 无输出")

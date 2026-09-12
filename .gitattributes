@@ -19,6 +19,11 @@
 *.yml  text eol=lf
 *.yaml text eol=lf
 *.sh   text eol=lf
+# Loment 源文件: 必须 LF。测试里有一批判据按**原始字节**读这些文件 (自举 lexer/parser/
+# codegen 与参考实现对照), 检出换行不同会让"同一 commit 在两台机器上文件字节不同",
+# 于是出现"只在某个 worktree 才红"的假回归 (2026-09-12 归因 C2/C11/C14 时发现)。
+*.lomt text eol=lf
+*.lom  text eol=lf
 # 自举种子 (参考实现发射的 IR): 文本, 但绝不能被换行转换改字节 —— 驱动按字节比对
 loment/build/selfhost_driver.ll text eol=lf
 .gitattributes text eol=lf

@@ -115,7 +115,10 @@ def run_claim(module_name: str, argv: list[str]) -> tuple[bool, str]:
         rc, tail = 1, f"{type(e).__name__}: {e}"
     lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
     if lines:
-        tail = lines[-1][:160]
+        # 红的时候别只留最后一行: 把失败/差异/错误行挑出来, 报告里才有得归因
+        bad = [ln for ln in lines
+               if "FAIL" in ln or "DIFF" in ln or "STALE" in ln or ln.lstrip().startswith("[ERR]")]
+        tail = (bad[-1] if bad else lines[-1])[:200]
     return rc == 0, tail
 
 

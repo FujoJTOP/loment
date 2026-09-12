@@ -284,10 +284,17 @@ def main(argv: list[str] | None = None) -> int:
 
     editor = find_editor(a.editor)
     if editor is None:
-        print("[ERR] 找不到编辑器。用 --editor \"C:\\path\\to\\Code.exe\" 指定 "
-              "(VS Code 默认在 %LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe)",
-              file=sys.stderr)
-        return 1
+        if a.dry_run:
+            # `--dry-run` 只打印**计划**, 不该要求本机装了编辑器 (干净检出/别的机器上可能没有):
+            # 打开命令用占位符, 并在 stderr 说明 —— 真要注册必须给 --editor。
+            print("[WARN] 没找到编辑器 (VS Code 默认位置) —— 计划里的打开命令用占位符; "
+                  '要真注册请加 --editor "C:\\path\\to\\your-editor.exe"', file=sys.stderr)
+            editor = Path("<在这里填编辑器可执行文件>")
+        else:
+            print("[ERR] 找不到编辑器。用 --editor \"C:\\path\\to\\Code.exe\" 指定 "
+                  "(VS Code 默认在 %LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe)",
+                  file=sys.stderr)
+            return 1
     plan_ops = plan(editor, ICON)
     if a.dry_run:
         if a.json:

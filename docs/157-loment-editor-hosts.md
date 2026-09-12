@@ -203,6 +203,12 @@ python tools/loment_filetype.py --register --editor "C:\path\to\your-editor.exe"
 （防两边脱节，这条当场抓出语法源漏了 `load16/load32/store16/store32`，已补）；(2) 无头 vim 打开
 `.lomt`，断言 `filetype=loment` 且关键字/类型/函数名/注释/文档注释/字符串各落到对的语法组。
 
+**MSYS/Cygwin 版 vim 的坑**（Git Bash 自带的就是这种）：它 spawn `wsl.exe` 时会把 `/home/...`
+参数当**路径**转换掉（实测变成 `C:/Program Files/Git/home/...`），于是服务起不来。
+`scripts/install-lsp.ps1` 因此会生成垫片 `loment/build/loment-lsp.cmd`（经 cmd.exe 调 wsl，
+cmd 不做 MSYS 转换），插件的默认值在 `win32unix` 下就指向它。**已验证**：`:LomentCheck` 后
+`:copen` 里出现 `7: E013 重名` / `8: E002 符号未声明`（行号与码都对）。
+
 **顺带修的两个 Vim 坑**（都写进了语法文件注释）：同一起点"后定义者胜" ⇒ 注释规则必须放最后
 （否则 `//` 被单字符运算符 `/` 抢走）；`\zs` 不能用来"跳过关键字突出后面的名字" ⇒ 改用
 `nextgroup` + `contained`（引擎在关键字匹配后已跳过那段文本）。
