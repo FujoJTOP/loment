@@ -332,7 +332,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 | M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 + 拼接单元放行 **40/40** + 跨模块重名两边**都报 E-DUP** | ✅ 部分（4 规则；实现层已对齐，规则条数仍少于参考实现的完整检查器） |
 | M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅（目标覆盖 37/37；唯一非目标 `native_raii.lomt` 参考实现自身报 `inb` 未实现） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
-| M88 校验和 | `loment_release --checksums` 110 行 sha256 | ✅ 部分（tag 未推送） |
+| M88 校验和 | `loment_release --checksums` 134 行 sha256 | ✅（tag `loment-1.0-pre` 已推送） |
 
 ### P8 证据补充（2026-09-10，M82 除法/取模）
 
@@ -488,7 +488,7 @@ python tools/loment_rule_parity.py # 63/63 等价 (预算 63), 假阳性 0 / 码
 ```
 python tools/loment_p9_test.py           # 2/2 (M89 25 示例 / M92 aarch64 交叉)
 python tools/loment_manual.py --check    # 25/25 与编译器版本一致 (M93)
-python tools/loment_release.py --check   # 110/110 工件 sha256 一致 (M95/M99)
+python tools/loment_release.py --check   # 134/134 工件 sha256 一致 (M95/M99)
 ```
 
 | 里程碑 | 验证方式 | 结果 |
@@ -498,9 +498,9 @@ python tools/loment_release.py --check   # 110/110 工件 sha256 一致 (M95/M99
 | M91/M94/M95 | 版本策略/迁移指南/发布检查单成文 | ✅ |
 | M92 aarch64 | `elf64-littleaarch64` + aarch64 指令 | ✅ 部分（未执行） |
 | M93 手册站点 | `docs/manual/` 带编译器版本戳 | ✅ |
-| M96 冻结 | — | ⚠️ 未冻结 |
+| M96 冻结 | 冻结面成文 + 改动流程 + 一致性套件清单 | ✅（`docs/158-loment-1.0-freeze.md`：冻结面 = 语法/类型规则、诊断口径 E001–E017、单元装载规则、**发射符号约定（跨线 ABI）**、两后端逐字节等价、内建表、能力域语义；不冻结实现内部与性能。**7 条已知开放项/刻意偏离逐条写明**（三处保守偏离、同名 let 双 alloca、驱动器无 parser、aarch64 未执行、自举性能、无 DWARF 变量信息、未外部审计）；改冻结面四步流程（改规范 -> 加探针并**上调**预算 -> 两实现同提交 -> 过静态门禁）） |
 | M97/M98 | 设计决策表 + 四语言对比矩阵 | ✅ |
-| M99 复现包 | 110 工件 sha256 可复现 | ✅ |
+| M99 复现包 | 134 工件 sha256 可复现 | ✅ |
 | M100 发布审计 | — | ⚠️ 1.0-pre |
 
 ## P2 · 内存与运行时语义（M13–M22）
@@ -625,7 +625,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M85 | 自举编译器跑全部测试 | `lomentc_test` 在自举版上通过 | ✅（**可映射部分全部达成**：驱动自己装载 + 先 check 再发射；**规则等价 63/63**（`tools/loment_rule_parity.py`，棘轮门禁 `eq ≥ BUDGET`、假阳性/漂移为 0，已进 `ci.py`）；**63 条规则负例直接喂驱动器全部非零退出且无信号**（`test_m85_driver_gate_on_probe_cases`）；40/40 语料零诊断、40/40 目标逐字节一致、三阶段定点、跨模块重名被拒；`lomentc_test` 91 条里**不可映射的三类**（运行时/双后端实跑、Python API 形状断言、夹具侧 3 目录加载 —— 后者已被 driver→codegen→lexer/bytes 四级 `use` 覆盖）逐条列在 docs/150。这一路抓到**五个真 bug**（实参上限 10 静默截断、checker/codegen 共用 64 KiB 堆 SIGILL、每函数表容量 192 写穿、字符串字面量撞关键字判定、同名 let 双 alloca），前四个都配了静态闸门） |
 | M86 | 自举性能优化 | 编译自身时间进入预算 | ✅ 基线 + 护栏（实测自编译 **12.8s**；参考实现 Python 1.2s；mathutil/lexer <0.1s、codegen 4.6s —— 自举版慢约 10 倍且略超线性，原因是符号查找是线性扫（`chk_lookup_slot`/`find_fn`）。`test_m86_selfhost_perf_budget` 以 30s 为护栏并打印数字，便于看趋势；真正的优化（表索引）留给后续） |
 | M87 | 引导脚本与发布包 | 干净环境一键引导 | ✅（`tools/loment_bootstrap.py`） |
-| M88 | 自举版本发布 | 打 tag + 校验和 | ✅ 部分（`SHA256SUMS` 125 行；tag 未推送） |
+| M88 | 自举版本发布 | 打 tag + 校验和 | ✅（tag `loment-1.0-pre` 已推送 origin；`SHA256SUMS` 134 行与 `release-manifest.json` 同源） |
 
 ## P9 · 生态与平台（M89–M96）
 
@@ -638,7 +638,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M93 | 语言手册站点 | 手册与编译器同版本 | ✅ |
 | M94 | 教程与迁移指南 | Rust → Loment 迁移案例 | ✅ |
 | M95 | 发布流程与社区规范 | 发布检查单 | ✅ |
-| M96 | 语言稳定性承诺（1.0 冻结） | 冻结后 API 不再破坏 | ⚠️ 未冻结（1.0-pre） |
+| M96 | 语言稳定性承诺（1.0 冻结） | 冻结后 API 不再破坏 | ✅（1.0-pre 冻结面成文：`docs/158-loment-1.0-freeze.md` —— 语法/类型规则、诊断 E001–E017、单元装载、**发射符号约定（跨线 ABI）**、两后端逐字节等价、内建表、能力域语义；7 条已知开放项/刻意偏离 + 改冻结面四步流程） |
 
 ## P10 · 论文与验证（M97–M100）
 
@@ -646,7 +646,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 |---|---|---|
 | M97 | 语言设计与实现的论文素材 | 设计决策有据可查 | ✅ |
 | M98 | 与 Rust/C/Zig 的形式化对比 | 对比矩阵成文 | ✅ |
-| M99 | 端到端可复现实验包 | 第三方机器可复现 | ✅（98 工件 sha256） |
+| M99 | 端到端可复现实验包 | 第三方机器可复现 | ✅（134 工件 sha256） |
 | M100 | 1.0 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（1.0-pre） |
 
 ## 依赖与风险

@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         for b in bad:
             print(f"[FAIL] {b}")
         return 1
-    print(f"[OK] 达到预算 {BUDGET}/60 且无假阳性/漂移")
+    print(f"[OK] 达到预算 {eq}/{BUDGET} 且无假阳性/漂移")
     return 0
 
 

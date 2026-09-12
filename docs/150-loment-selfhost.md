@@ -641,8 +641,8 @@ checker 与 codegen 共用 64 KiB 堆导致驱动 SIGILL（⑩）、每函数表
 | # | 缺口 | 说明 |
 |---|---|---|
 | ~~符号表全单元扁平~~ | **已修**（见上文缺口①）：单元级名字唯一成了编译规则，两个实现一致报 E-DUP；不做 mangling 是因为平名字就是跨线 ABI（docs/155 §3） |
-| checker 的**表达式级**规则 | 见上文缺口③：规则等价性已可测量（`loment_rule_parity`，棘轮门禁），批次 1 声明级规则落地后 **24/60 等价、0 假阳性**；剩 36 条几乎全在表达式类型推断（`let`/`return`/赋值/条件/`as`/字段/下标/数组/`match`/`?`）与移动借用（E006/E007/E011/E012）。这一批要写 token 级类型推断器，是"自举 checker 完全替代参考实现"的最后一段长杆 |
-| `lomentc_test` 的判据还没搬到自举版 | 驱动现在能装载 + 检查 + 发射（40/40 语料、12/12 负例、二阶段定点），但 `lomentc_test` 那 90 条判据有不少是 *Python API 特有*的（Rust 输出形状、错误消息措辞）；要把能映射的那些逐条搬到驱动器上跑，M85 的字面判据才算满足 |
+| ~~checker 的**表达式级**规则~~ | **已闭合**（见下文"批次 2 完成"）：token 级类型推断器落地后 **63/63 等价、0 假阳性、0 码漂移**，棘轮预算 24→32→60→63 只升不降（`tools/loment_rule_parity.py`，已进 `ci.py`）。三处**刻意保守偏离**逐条记在下文并写进 `docs/158` 冻结面开放项 |
+| ~~`lomentc_test` 的判据还没搬到自举版~~ | **可映射部分已闭**（M85）：`test_m85_driver_gate_on_probe_cases` 把 63 条规则负例直接喂驱动（非零退出、无信号），40/40 语料零诊断、40/40 目标逐字节一致；**不可映射的三类**（运行时/双后端实跑、Python API 形状断言、夹具侧 3 目录加载）逐条列在 docs/150 末尾，无 `PARSE_LEVEL` 豁免 |
 
 自举进度是真实的：**lexer → parser → checker → codegen 四段都已用 Loment 实现，
 并分别与 Python 版逐 token / 逐字符 / 逐错误码 / 逐字节对照通过**（M79–M82），
@@ -661,9 +661,12 @@ checker 与 codegen 共用 64 KiB 堆导致驱动 SIGILL（⑩）、每函数表
 2. 跑 M79/M80/M81 三项对照；
 3. 打印报告（`--json` 可机器读）。
 
-## M88 · 发布校验和 ✅ 部分
+## M88 · 发布校验和 ✅
 
 `python tools/loment_release.py --checksums loment/build/SHA256SUMS` 产出
-**125 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
-**未做**：git tag 未创建/未推送（分支与并发开发线共用，打 tag 与推送需作者确认）。
+**134 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
+
+tag：**`loment-1.0-pre`**（annotated）打在 `Fujoos-FujoLang-DEV` 的 1.0 冻结提交上并已推送
+origin。它是 **dev 分支快照**，不是发布分支：冻结面见 `docs/158-loment-1.0-freeze.md`，
+发布线要等 M100（外部审计）之后。tag 可随时 `git tag -d` / `git push origin :refs/tags/...` 撤销。
 

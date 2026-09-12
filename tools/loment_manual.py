@@ -75,7 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         for rel, text in files.items():
             p = base / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text, encoding="utf-8")
+            # 显式 LF: 仓库对 *.md 声明了 eol=lf, 用平台默认换行会让 25 个手册文件
+            # 在 Windows 上每次 --emit 都变成"已修改"(docs/158 §改动流程的纸面噪声)。
+            with p.open("w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
         print(f"[OK] {len(files)} 个文件 -> {base}")
         return 0
     print("[ERR] 需要 --emit 或 --check", file=sys.stderr)

@@ -87,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] {e}", file=sys.stderr)
         return 2
     if a.emit:
-        OUT.write_text(want, encoding="utf-8")
+        # 显式 LF (仓库 *.md 声明 eol=lf), 见 loment_manual 同处注释。
+        with OUT.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(want)
         head = next(l for l in want.splitlines() if l.startswith("- 完成"))
         print(f"[OK] {OUT.relative_to(ROOT)}: {head.lstrip('- ')}")
         return 0

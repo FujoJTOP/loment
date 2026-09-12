@@ -60,3 +60,9 @@ fujoregress-*.json
 sdk/ahci*.img
 m125.log
 ahci_events.txt
+
+# Loment 本地构建产物 (可重生成, 不在 release-manifest 的 134 件工件里)
+#   loment-vscode.vsix      <- python tools/vscode_ext.py --emit (docs/155 §安装)
+#   selfhost_codegen.ll     <- 自举 codegen 单跑一次的 IR 落盘
+/loment/build/*.vsix
+/loment/build/selfhost_codegen.ll
