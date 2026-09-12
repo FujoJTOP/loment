@@ -1,6 +1,6 @@
 # API: `fuc_node`
 
-> 源: `loment/examples/fuc_node.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/fuc_node.lomt` · 由 lomdoc 生成
 
 ## 枚举
 

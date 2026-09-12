@@ -3772,6 +3772,10 @@ def load(path: Path) -> Module:
         for e in pre.enums:
             if e.name not in names:
                 e.from_prelude = True
+                # line 归零: 注入项的行号来自 **prelude 文件**, 原样留着的话文档生成器会
+                # 拿它去查**目标文件**的行 —— 实测 Result 会抄到上文某条 capability 的注释。
+                # 注入项在目标文件里没有行, 就该是 0 (Loment 版 lomdoc 也是这么做的)。
+                e.line = 0
                 mod.enums.append(e)
     return mod
 

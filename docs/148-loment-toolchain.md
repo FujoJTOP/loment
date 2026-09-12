@@ -106,6 +106,23 @@ python tools/loment.py lsp                  # M56
 从 `.lomt` 生成 Markdown：能力域表、常量表、struct 字段、enum 变体（含载荷）、trait/impl、
 函数签名；文档注释取声明前的连续 `///` 行。
 
+### 4b. Loment 版文档生成器 `loment/tools/lomdoc.lomt`（去 Python 第二块）
+
+与 `tools/lomdoc.py` **输出逐字节相同**是判据：`python tools/loment_doc_test.py` ——
+43 个语料（examples + selfhost + tools）+ 一个边界用例（excluded / 十六进制常量 / 多行 doc /
+双方法 trait / 泛型形参 / 空 doc）全部一致，已进 `ci.py`。
+
+- 与 Python 版一样只看**声明层**（不看语法树），所以不需要 parser：与 lomfmt 同一条路；
+- 输出按"行"组织（每行 = 文本 + `\n`），与 `"\n".join(out).rstrip() + "\n"` 等价；
+  各段落的空行数是**对着参考实现量出来的** —— 空 doc 时 doc 那一行也要占一行，
+  这是最容易差一个换行的地方；
+- 镜像了参考实现的细节：注入的 `Option`/`Result` 追加在末尾、impl 方法折叠成
+  `<类型>_<方法>` 且首参写 `__self: <类型>`、类型名规范化、十六进制常量打印成十进制、
+  路径按**命令行给的原文**写进文档头；
+- **顺手修了参考实现一个真 bug**：注入的预置枚举原先带着 **prelude 的行号**，而文档生成器
+  拿它去查**目标文件**的行，于是 `Result` 会把上文某条 `capability` 的注释当成自己的文档
+  （`lomentc.load` 现在把注入项的 `line` 归零；Loment 版本来就按 line 0 处理）。
+
 ## 5. M59 调试信息（DWARF）
 
 `lomentc --debug`（配合 `--emit-llvm`）为 IR 附加：

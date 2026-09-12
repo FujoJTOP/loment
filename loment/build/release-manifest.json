@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "de8e7436698531e3c03f0eaef01564b9fbee079ccd4298458e4d8804ff8c3a67"
+   "sha256": "a384ea847cd0498cd9a6d565be068ef67f2942f06fed2b39c76b8cb44da6301f"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -59,7 +59,7 @@
   },
   {
    "path": "tools/lomdoc.py",
-   "sha256": "96e9aaf3192b53a9a575adac6ab0a4798345936dee0737bbaa91f0a221676f6d"
+   "sha256": "51860d290d97ae229d47185b5028720b70af7b6d9fca4a5fb3c77ed700528ea2"
   },
   {
    "path": "tools/lompkg.py",
@@ -107,7 +107,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "2f91cb2c4a27edfd0b0e4b2c4ab001b68d61148399b7d04e56722971c91b811f"
+   "sha256": "05decd7a4f0ed7bf62ef2f45adf5a9c3a79d9615c692a2a77192458b37fe9391"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -146,6 +146,10 @@
    "sha256": "983b9686952672c3a6f878bb18202e470d92716dac226db87552dcbed2778d5f"
   },
   {
+   "path": "tools/loment_doc_test.py",
+   "sha256": "dca684f8749498245821e87b60fb429db10b39bb7f1b1befc6aada5247c3c5da"
+  },
+  {
    "path": "tools/loment_filetype.py",
    "sha256": "d19e8bd52d7acd7cddb51957cc610a49a5a935709458a7967e07033bd913a4f1"
   },
@@ -160,6 +164,10 @@
   {
    "path": "loment/build/selfhost_driver.ll",
    "sha256": "ea6a2013113d0691d7940b1438061772fc8697f0d7eae774ea339fdd04dd8602"
+  },
+  {
+   "path": "loment/tools/lomdoc.lomt",
+   "sha256": "c16891e50bd3c1e1d15e80262bcf15068712e1d09202475687c7b12c0dba59f1"
   },
   {
    "path": "loment/tools/lomfmt.lomt",
@@ -407,7 +415,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "3d07f79d59f3b0ede9a0afc430eeeca38be31382fb9efbd2fe8b505456187b34"
+   "sha256": "d6f493fdc115d531ea916aca2a8cb63b26886f7e3c1e53b56b6c5d199c7d039e"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -427,7 +435,7 @@
   },
   {
    "path": "docs/148-loment-toolchain.md",
-   "sha256": "07bde21848b7d39fbe991503f608b2c2c2023cb08a10aaa87ac1e14bae6cbf3c"
+   "sha256": "0a9b92286319d9cdafd6cd327557e26036eeab1956436c3b6726aa96f2d48d88"
   },
   {
    "path": "docs/149-loment-kernel-integration.md",
@@ -471,7 +479,7 @@
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
-   "sha256": "ca0adcf3ebceca3ceeadd0da42e9d66e45b45e87f9b089a0f5571d238632eb53"
+   "sha256": "60bd4bc628118668626095cdffad08495e87ca5f040701c834b59ce71829cb97"
   },
   {
    "path": "docs/160-loment-audit-kit.md",
@@ -479,111 +487,111 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "e8f6a27c1b602b1270b94bafc38f808f1dcdcaf3f14a1791e34f92b2efc1b045"
+   "sha256": "b6b8cbdaba47603cc703936a0b85bcc0bc8709a325035d0b0d0052227a53f72c"
   },
   {
    "path": "docs/manual/api/ahci.md",
-   "sha256": "d046a40b266b33ef00dde8a7914d084be4985d29e721c3c45c807a939a528901"
+   "sha256": "36cae734cd3e7ee1da5b36538042179b93407566eed9ef03bfd2f0852922ab0f"
   },
   {
    "path": "docs/manual/api/all_loment.md",
-   "sha256": "4afc2fa2a75f42da5895fe38a8ce13c0325e969a277cdde46c61f39626494c98"
+   "sha256": "5f24f76cb511fbc469cc1c7e965da69e643ba4aac7f62e56ab9c082f3663cdf4"
   },
   {
    "path": "docs/manual/api/allocator.md",
-   "sha256": "648bc3ca03154fa7144b0e20f4d2c70e07ce3559350281cb49eb9d9bd629d528"
+   "sha256": "93c855258cc21b5c2a3b001595d14ef99c27e8a18b5f8e42d17d08fbd467128b"
   },
   {
    "path": "docs/manual/api/bootprobe.md",
-   "sha256": "74885266a840d5a234230ddce824d4f3cdd60af5170d43e71c938ff95285e59c"
+   "sha256": "53986224da687d15b7e32ab4212d7da54edf407654d77135a9f3e5418b43ec17"
   },
   {
    "path": "docs/manual/api/bytes.md",
-   "sha256": "8843db0e5702395203770f996f190cc92b573ab0b157281e820d40361a1780cd"
+   "sha256": "f8263dddd40976576013bb0905ebc44e963ef1105be1eda72f7576fed28c5936"
   },
   {
    "path": "docs/manual/api/demo.md",
-   "sha256": "88a108651553e52c3e026d26648d20a2dd8de74c0161190eb56ab2c3a8c036f9"
+   "sha256": "de6ee9052dbc99c8ce4bf0c7d7e8234235023d0c41c4d57a5e18a3b46601db95"
   },
   {
    "path": "docs/manual/api/fuc_node.md",
-   "sha256": "ccc88fff3dd4de0abcbba0ee01b0d46cf76ebcd56a7df2595d7dfc3676d4f745"
+   "sha256": "637c7fd6c9ca249791843d08c8d07ac868a80311dd0ac5f813b49556b5150601"
   },
   {
    "path": "docs/manual/api/mathutil.md",
-   "sha256": "a049379aa6c85ea5f1f470c5e04bdb9b3f866d32d9a462fd1cfcab0e2d01961d"
+   "sha256": "d35ff7d3457e3c6b2c49afc244f57cf9a9ae36c3c3e8c5c8ee6043bc7cda3f51"
   },
   {
    "path": "docs/manual/api/native.md",
-   "sha256": "499cfb6fb8e01735bc39ea4ceabb61fa5f9b44c7a8099c668778190413570400"
+   "sha256": "5e5623bb121e39c783bf33aa9fa1d22f3627ab7d98b8b5e8ae4414b880a71b22"
   },
   {
    "path": "docs/manual/api/native_agg.md",
-   "sha256": "98fc229c66259efe1c1b891bb225fe37f2ebabc12b39a9268338a94aa02251f8"
+   "sha256": "cf6c4d44effcdfd4f1841ac83707f6e11440ab897645511730b3b519e74beef0"
   },
   {
    "path": "docs/manual/api/native_bits.md",
-   "sha256": "88b10c30e703ac1457a73505edec86a8000c7397cd1b394cb85219b0751599df"
+   "sha256": "4433a0f44fd66fbcd558c0797bcde6b99e78a70a05740c32414dd0ee12219f5a"
   },
   {
    "path": "docs/manual/api/native_brk.md",
-   "sha256": "0396c9129b70dd712d54578a50bd014c2db04dd14bad6de29261e360cc77c0e4"
+   "sha256": "65724749d8ce6b2b9dbc667bc6da393e64e28fac8f4fc6cd75aae32fa280e0fb"
   },
   {
    "path": "docs/manual/api/native_cap.md",
-   "sha256": "a7b10b23bfdb8fafaa8a71e7a71433d20bb2996e14cc22ef5e44f24644d2e2a1"
+   "sha256": "a3483d1eebbc8280187757a399151b23834e136249dfbdea94f2c44c804de2b7"
   },
   {
    "path": "docs/manual/api/native_concat.md",
-   "sha256": "b8b7536965dd3a641a9f5cdde7a2d75555f1380abe4bbb11e802575d0a67c0bf"
+   "sha256": "6612db0e20adc68a8d470c32bb316246fe3c0545894f399a8dc5712f532f4ac3"
   },
   {
    "path": "docs/manual/api/native_entry.md",
-   "sha256": "4c6fb07cc7adaefcb894e33a1bcdd364747159f06597d4800aa97b8f5dbc107f"
+   "sha256": "1b66eecf245d7223719f24af196db32cf5425b2da615cc9ff204a23dc15080c4"
   },
   {
    "path": "docs/manual/api/native_gen.md",
-   "sha256": "913fa7cacf0f027504160c0106b782bbe78e336d94e0f62ad0ff6597d8bed7c3"
+   "sha256": "83f281e3d534b234a94781c01e4e178d28c092c19a73876986572cd4aacf9ba5"
   },
   {
    "path": "docs/manual/api/native_mem.md",
-   "sha256": "76abd3811cea8e52bc1aab0b7ecbd7836e04ec6c1bc4490c508e9a87c17d4468"
+   "sha256": "be409a5578775e4e9701d45148a0d9f575b6544b6c43d7fc845b7ea4e43c1aa2"
   },
   {
    "path": "docs/manual/api/native_mut.md",
-   "sha256": "0fc14369a105cdad346d1199b2340a52ee02a88697004f59dc8900488277fc4e"
+   "sha256": "50d58b68a12da2c88945ecf20e9e573eac2d33218aa97f42347eaffe42628d93"
   },
   {
    "path": "docs/manual/api/native_raii.md",
-   "sha256": "0fe16a7e74ef42a5bee6f0fb9427494a3dc15f5a290926ff8b2d00dddc5b361a"
+   "sha256": "ae27670b1f2054e6451555ccb31dddb01317faa1e42daa4bd7c06b04f9bfbd51"
   },
   {
    "path": "docs/manual/api/native_res.md",
-   "sha256": "3e629b8c6a4888c21c9e74ecd779928c3b02edf2d2fc63f77ff0910feb696fe6"
+   "sha256": "a7b9ead09190050bcaedfc71367c301c13ffeac40d57a9a2bc7b5563e1baade1"
   },
   {
    "path": "docs/manual/api/native_slice.md",
-   "sha256": "eb763557d5637317ab475eefe97cfd31cdd0ce4ba6361473cc063750f465c32a"
+   "sha256": "0896fffd1c88e390ed28d491c509f0b0201dbbf0ff730fcc98567715b7c54d9c"
   },
   {
    "path": "docs/manual/api/native_str.md",
-   "sha256": "dfc59a5c307c4c6634b6399e420fc7319155aac809e9ecb0aa7a146777c40e99"
+   "sha256": "bcc8af757daa5bc0e16389f8d933a664036e0319e2bb7ecdd69eda17b76e42be"
   },
   {
    "path": "docs/manual/api/native_trait.md",
-   "sha256": "6b2a6d1193df86d7ea1af15f20beb654a519555e99c2bcd1d7b953f33a7b7bb6"
+   "sha256": "9ff8f3011760abe269bdc47adf6ee62f473a19b8e070034c1b1f8f8f30bc049b"
   },
   {
    "path": "docs/manual/api/selfcheck.md",
-   "sha256": "e2ef8a420e3fc88d0c9004932f40c8ccd17498726b51987c437b52682e8394a5"
+   "sha256": "e683876e51c30609532a955ea4ba60719ea3d0b067ec9dea949301c2c63a2e19"
   },
   {
    "path": "docs/manual/api/toolchain.md",
-   "sha256": "594f0040d3eae213cd42b35f0d2f2f3111ac8f417394b9175f512e5703299b4a"
+   "sha256": "67b49ce313ddc518e90f77507d8d47de4cfd41b55c9df59aae5e000296127412"
   },
   {
    "path": "docs/manual/api/user_hello.md",
-   "sha256": "2c0cf29a63c722b39a618cdf0dd028a4cdfaf6679fe7c93df4baacfc3ad22fc3"
+   "sha256": "ccc708bf3574f3a59964f358ef3ae245180c20d989ce5e80b6ad16b72ef8d406"
   }
  ]
 }

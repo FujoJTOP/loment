@@ -35,7 +35,8 @@ def _sig(f: lomentc.Func) -> str:
 
 def render(mod: lomentc.Module, src: str, name: str) -> str:
     lines = src.splitlines()
-    out = [f"# API: `{mod.name}`", "", f"> 源: `{name}` · 由 tools/lomdoc.py 生成", ""]
+    # 措辞与实现解耦: Loment 版 lomdoc 输出必须逐字节相同, 所以这里不写工具文件名/路径分隔符
+    out = [f"# API: `{mod.name}`", "", f"> 源: `{name}` · 由 lomdoc 生成", ""]
     if mod.caps:
         out += ["## 能力域", "", "| 能力 | 空间 | 区间 | 可撤销 | 说明 |", "|---|---|---|---|---|"]
         for c in mod.caps:
@@ -103,7 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         for e in errs:
             print("  " + e, file=sys.stderr)
         return 1
-    text = render(mod, p.read_text(encoding="utf-8"), str(p))
+    # 路径一律用 POSIX 分隔符: 文档要跨平台可比, Loment 版不可能知道宿主是 Windows 还是 WSL
+    text = render(mod, p.read_text(encoding="utf-8"), p.as_posix())
     if a.out:
         Path(a.out).write_text(text, encoding="utf-8")
         print(f"[OK] {p} -> {a.out}")

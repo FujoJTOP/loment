@@ -69,5 +69,6 @@ ahci_events.txt
 /loment/build/selfhost_codegen.ll
 # 审计报告 (含提交哈希与运行时间, 每次跑都变; 由 loment_audit --json 生成)
 /loment/build/audit-report.json
-# 测试用的临时探针 (loment_fmt_test 会自己删; 崩了也不该进仓库)
+# 测试用的临时探针 (loment_fmt_test / loment_doc_test 会自己删; 崩了也不该进仓库)
 /loment/build/fmt_*_case.lomt
+/loment/build/lomdoc_edge.lomt

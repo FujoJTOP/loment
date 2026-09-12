@@ -68,7 +68,8 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 |---|---|---|---|
 | Python（**测试侧**） | `tools/*_test.py`、`loment_rule_parity`、`ci.py` | 不影响"用户构建/使用 Loment"，只影响开发期判据 | 判据本身也是可移植的：把一致性套件写成 Loment 程序（下一批），或保持 Python 作为"第三方审计工具"——两条路都合理 |
 | ~~`lomfmt`（格式化）~~ | **已重写**：`loment/tools/lomfmt.lomt` | 与 Python 版**逐字节相同**（42 语料 + 4 边界 + 幂等，`tools/loment_fmt_test.py`，已进 `ci.py`） | 工具链去 Python 的第一块；它只吃词法层，所以不受自举 parser 子集限制 |
-| Python（其它工具链） | `lomdoc`/`loment_lsp`/`lompkg` | 用户要文档、补全、依赖管理时还要 Python | 逐个用 Loment 重写；`lomdoc`/`lsp` 需要**完整 parser**（目前是子集），所以先补 parser 或先做 `lompkg` 这类不吃 AST 的 |
+| ~~`lomdoc`（文档）~~ | **已重写**：`loment/tools/lomdoc.lomt` | 与 Python 版**逐字节相同**（43 语料 + 1 边界，`tools/loment_doc_test.py`，已进 `ci.py`）；顺手修了参考实现在注入预置枚举上的行号 bug | 去 Python 第二块；同样只吃声明层，不需要 parser |
+| Python（其它工具链） | `loment_lsp`/`lompkg` | 用户要补全、依赖管理时还要 Python | `loment_lsp` 需要**真正的 AST**（自举 parser 目前只吐规范 dump 文本），`lompkg` 需要 JSON 解析 + 目录遍历（运行时缺 `getdents`）+ SHA-256 |
 | Python（L0 生成器） | `tools/lomc.py`（13 个生成物被内核线消费） | 跨线接口面，单方面改会破坏内核线约定 | 需与内核线协同排期（docs/141 的冻结阈值） |
 | clang / LLVM | 发射 IR → 可执行文件 | **地基语言**，本次目标明确保留 | 不计划去掉 |
 
@@ -96,12 +97,13 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 | 工具 | 现状 | 缺什么 |
 |---|---|---|
 | `lomfmt` | ✅ 已重写 | —（只吃词法层） |
-| `lompkg`（包管理） | 未动 | 三块能力都缺：**JSON 解析**（`pkg.json`）、**目录遍历**（`rglob`，Loment 运行时要补 `getdents`）、**SHA-256**（校验和） |
-| `lomdoc` / `loment_lsp` | 未动 | 需要**完整 parser**（自举 parser 目前是语句/表达式子集）；补 parser 是它们的前置 |
+| `lomdoc` | ✅ 已重写 | —（只吃声明层） |
+| `loment_lsp`（补全/跳转） | 未动 | 需要**真正的 AST**（自举 parser 吐的是规范 dump 文本，不是树）+ 注释保留；把 parser 扩成"建树"是它的前置 |
+| `lompkg`（包管理） | 未动 | 三块能力都缺：**JSON 解析**（`pkg.json`）、**目录遍历**（`rglob`，运行时要补 `getdents`）、**SHA-256**（校验和） |
 | `tools/lomc.py`（L0 生成器） | 未动 | 跨线接口面（13 个生成物被内核线消费），须与内核线协同排期（docs/141 冻结阈值） |
 
-也就是说：**下一步最省的是"补自举 parser"**（它同时解锁 `lomdoc` 与 `loment_lsp` 两块），
-其次是给运行时补 `getdents` 与写一个 JSON 子集（解锁 `lompkg`）；SHA-256 可以放在
+也就是说：**下一步最省的是给自举 parser 加"建树"输出**（解锁 `loment_lsp`，也是"Loment 自解析"的
+正经形态），其次是给运行时补 `getdents` + 写一个 JSON 子集（解锁 `lompkg`）；SHA-256 可以放在
 "先只做解析、校验和留给 Python"的妥协版本里。
 
 ## 5. 这套东西怎么进 CI

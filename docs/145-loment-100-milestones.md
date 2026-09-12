@@ -505,6 +505,7 @@ python tools/loment_seed_test.py         # 3/3 无 Python 自举: 种子自复�
 | M100 发布审计 | 审计包就位（一条命令 10/10 + 证据落盘），缺第三方复核 | ⚠️ 1.0-pre |
 | 无 Python 自举（种子上线） | `sh loment/bootstrap.sh` 只用 clang: 种子自复现 + stage2/stage3 定点 | ✅（种子 `loment/build/selfhost_driver.ll` 1.63MB 已提交并被 sha256 钉住；启动脚本静态判据禁解释器；`loment_seed_test` 进门禁；docs/159） |
 | 工具链去 Python 第一块 | Loment 版格式化器与 Python 版**逐字节相同** | ✅（`loment/tools/lomfmt.lomt`，判据 = 42 语料 + 4 边界 + 幂等，`loment_fmt_test` 3/3 进门禁；镜像 val/转义/合并那些怪癖；docs/159 §4b） |
+| 工具链去 Python 第二块 | Loment 版文档生成器与 Python 版**逐字节相同** | ✅（`loment/tools/lomdoc.lomt`，判据 = 43 语料 + 1 边界（excluded/hex/多行 doc/双方法 trait/泛型/空 doc），`loment_doc_test` 2/2 进门禁；顺手修了参考实现注入预置枚举的行号 bug；docs/148 §4b） |
 
 ## P2 · 内存与运行时语义（M13–M22）
 

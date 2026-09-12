@@ -1,0 +1,1150 @@
+// loment/tools/lomdoc.lomt — Loment 版 API 文档生成器 (无 Python, docs/159 §4b)
+//
+// 判据: 与 tools/lomdoc.py 的输出**逐字节相同** (tools/loment_doc_test.py)。
+//
+// 只看**声明层**: 能力域 / 出界声明 / 常量 / 类型 / 枚举 / trait / impl / 函数,
+// 每个声明的文档注释取它上方连续的 `///` 行 (按行扫源码, 不看语法树)。
+// 因此不需要 parser —— 与 lomfmt 同一条路: 只吃词法层。
+//
+// 输出按"行"组织 (每行 = 文本 + '\n'), 与 Python 版 `"\n".join(out).rstrip() + "\n"` 等价;
+// 各段落的空行数是对着参考实现的输出量出来的 (不是猜的)。
+//
+//   ./lomdoc <文件.lomt> > out.md
+
+module lomdoc
+
+use "loment/selfhost/lexer.lomt"
+
+const SRC_CAP: u32 = 1048576;      // 源文件
+const OUT_CAP: u32 = 2097152;      // 输出
+const SCR_CAP: u32 = 65536;        // 暂存: 路径 NUL 串 + doc 行表 + 数字缓冲
+
+const SCR_PATH: u32 = 0;           // 4096B NUL 结尾路径 (scr 块)
+const DOC_MAX: u32 = 512;
+
+const S_OLEN: u32 = 0;
+const OUT_OFF: u32 = 64;           // 输出区从 64 字节处开始 (0..63 是状态格)
+// mem 块里的暂存: **必须在输出容量之后** (否则 doc 表会覆盖输出)。
+// L1 的 const 只收整数字面量, 所以这三个数是手算的: OUT_CAP(2097152)+64+64 / +2048 / +2048
+const MX_DOC_S: u32 = 2097280;
+const MX_DOC_E: u32 = 2099328;
+const MX_NUM: u32 = 2101376;
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, SCR_PATH + i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, SCR_PATH + i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, ptr_add(scr, SCR_PATH) as u64, 0);
+}
+
+/// 从 /proc/self/cmdline 取 argv[1]: 返回 (start << 32) | len, 0 = 没有。
+fn argv1(buf: ptr, cap: u64, scr: ptr) -> u64 {
+    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"), 18, scr);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let m: u32 = n as u32;
+    let i: u32 = 0;
+    while i < m && load8(buf, i) != 0 {
+        i = i + 1;
+    }
+    i = i + 1;
+    let s: u32 = i;
+    while i < m && load8(buf, i) != 0 {
+        i = i + 1;
+    }
+    let alen: u32 = i - s;
+    if alen == 0 {
+        return 0;
+    }
+    return (s as u64) * 4294967296 + (alen as u64);
+}
+
+fn strip_cr(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(buf, i);
+        if c == 13 && i + 1 < n && load8(buf, i + 1) == 10 {
+            i = i + 1;
+        } else {
+            store8(buf, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- token
+
+fn tk_kind(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20);
+}
+
+fn tk_start(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 4);
+}
+
+fn tk_len(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 8);
+}
+
+fn tk_line(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 12);
+}
+
+/// token 文本等于字面量。字符串 token 直接不算 (原文含引号, 会与关键字撞车)。
+fn tk_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tk_kind(t, i) == 2 {
+        return false;
+    }
+    if tk_len(t, i) != str_len(s) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(s) {
+        if load8(src, tk_start(t, i) + k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 输出
+
+fn olen(mem: ptr) -> u32 {
+    return load32(mem, S_OLEN);
+}
+
+fn em(mem: ptr, s: str) -> u32 {
+    let n: u32 = olen(mem);
+    let k: u32 = 0;
+    while k < str_len(s) {
+        store8(mem, OUT_OFF + n + k, str_byte(s, k) as u8);
+        k = k + 1;
+    }
+    store32(mem, S_OLEN, n + str_len(s));
+    return n + str_len(s);
+}
+
+fn em_byte(mem: ptr, c: u32) -> u32 {
+    let n: u32 = olen(mem);
+    store8(mem, OUT_OFF + n, c as u8);
+    store32(mem, S_OLEN, n + 1);
+    return n + 1;
+}
+
+fn em_tok(mem: ptr, src: ptr, t: ptr, i: u32) -> u32 {
+    let n: u32 = olen(mem);
+    let k: u32 = 0;
+    while k < tk_len(t, i) {
+        store8(mem, OUT_OFF + n + k, load8(src, tk_start(t, i) + k) as u8);
+        k = k + 1;
+    }
+    store32(mem, S_OLEN, n + tk_len(t, i));
+    return n + tk_len(t, i);
+}
+
+/// 一整行: 文本 + '\n' (空串 = 空行)。
+fn el(mem: ptr, s: str) -> u32 {
+    em(mem, s);
+    return em_byte(mem, 10);
+}
+
+fn em_dec(mem: ptr, v: u32) -> u32 {
+    let d: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(mem, MX_NUM, 48 as u8);
+        d = 1;
+    }
+    while x > 0 {
+        store8(mem, MX_NUM + d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        em_byte(mem, load8(mem, MX_NUM + d - 1 - q) as u32);
+        q = q + 1;
+    }
+    return d;
+}
+
+/// 数字 token -> 十进制 (参考实现存 int: `0x10` 打印成 16)。
+fn em_num(mem: ptr, src: ptr, t: ptr, i: u32) -> u32 {
+    let s: u32 = tk_start(t, i);
+    let ishex: u32 = 0;
+    if tk_len(t, i) >= 3 && load8(src, s) == 48 {
+        let c1: u32 = load8(src, s + 1);
+        if c1 == 120 || c1 == 88 {
+            ishex = 1;
+        }
+    }
+    if ishex == 1 {
+        let v: u32 = 0;
+        let k: u32 = 2;
+        while k < tk_len(t, i) {
+            let d: u32 = load8(src, s + k);
+            let dv: u32 = 0;
+            if d >= 48 && d <= 57 {
+                dv = d - 48;
+            } else {
+                if d >= 97 && d <= 102 {
+                    dv = d - 87;
+                } else {
+                    if d >= 65 && d <= 70 {
+                        dv = d - 55;
+                    }
+                }
+            }
+            v = v * 16 + dv;
+            k = k + 1;
+        }
+        return em_dec(mem, v);
+    }
+    return em_tok(mem, src, t, i);
+}
+
+/// 字符串字面量的**内容** (按 _ESCAPES 解码, 不再重转义)。
+fn em_strlit(mem: ptr, src: ptr, t: ptr, i: u32) -> u32 {
+    let s: u32 = tk_start(t, i) + 1;
+    let e: u32 = tk_start(t, i) + tk_len(t, i) - 1;
+    let j: u32 = s;
+    while j < e {
+        let c: u32 = load8(src, j);
+        if c == 92 && j + 1 < e {
+            c = load8(src, j + 1);
+            j = j + 2;
+        } else {
+            j = j + 1;
+        }
+        em_byte(mem, c);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 类型名
+
+fn pack(i: u32, o: u32) -> u64 {
+    return (i as u64) * 4294967296 + (o as u64);
+}
+
+/// 类型名 -> 规范化文本 (`mut [X]` / `[X; N]` / `Name<A, B>`), 与 lomentc.type_name 同口径。
+fn ptype(mem: ptr, src: ptr, t: ptr, i: u32) -> u64 {
+    if tk_is(src, t, i, "mut") && tk_is(src, t, i + 1, "[") {
+        em(mem, "mut [");
+        let r1: u64 = ptype(mem, src, t, i + 2);
+        em(mem, "]");
+        return pack(((r1 / 4294967296) as u32) + 1, 0);
+    }
+    if tk_is(src, t, i, "[") {
+        em(mem, "[");
+        let r2: u64 = ptype(mem, src, t, i + 1);
+        let k2: u32 = (r2 / 4294967296) as u32;
+        if tk_is(src, t, k2, ";") {
+            em(mem, "; ");
+            em_num(mem, src, t, k2 + 1);
+            em(mem, "]");
+            return pack(k2 + 3, 0);
+        }
+        em(mem, "]");
+        return pack(k2 + 1, 0);
+    }
+    em_tok(mem, src, t, i);
+    let j: u32 = i + 1;
+    if tk_is(src, t, j, "<") {
+        em(mem, "<");
+        let first: u32 = 1;
+        let k: u32 = j + 1;
+        while !tk_is(src, t, k, ">") && tk_kind(t, k) != 4 {
+            if first == 0 {
+                em(mem, ", ");
+            }
+            first = 0;
+            let r3: u64 = ptype(mem, src, t, k);
+            k = (r3 / 4294967296) as u32;
+            if tk_is(src, t, k, ",") {
+                k = k + 1;
+            }
+        }
+        em(mem, ">");
+        return pack(k + 1, 0);
+    }
+    return pack(j, 0);
+}
+
+/// 从 '{' 跳到匹配 '}' 之后 (用于跳过 trait 声明体)。
+fn skip_braces(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = i;
+    let go: u32 = 1;
+    while k < n && tk_kind(t, k) != 4 && go == 1 {
+        if tk_is(src, t, k, "{") {
+            d = d + 1;
+        }
+        if tk_is(src, t, k, "}") {
+            d = d - 1;
+        }
+        k = k + 1;
+        if d == 0 {
+            go = 0;
+        }
+    }
+    return k;
+}
+
+/// 从 'fn' 之后跳到形参表 ')' 之后。
+fn skip_params(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = i;
+    let go: u32 = 1;
+    while k < n && tk_kind(t, k) != 4 && go == 1 {
+        if tk_is(src, t, k, "(") {
+            d = d + 1;
+        }
+        if tk_is(src, t, k, ")") {
+            d = d - 1;
+            if d == 0 {
+                go = 0;
+            }
+        }
+        k = k + 1;
+    }
+    return k;
+}
+
+// ---------------------------------------------------------------- 行与 doc 注释
+
+/// 空白判定: **必须含 '\n'** —— Python 的 str.strip() 会去掉行尾换行, 少了这个
+/// doc 行尾的换行就会被当成内容 (多出一行)。
+fn is_ws(c: u32) -> bool {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return true;
+    }
+    return false;
+}
+
+fn trim_lead(src: ptr, s: u32, e: u32) -> u32 {
+    let a: u32 = s;
+    while a < e && is_ws(load8(src, a)) {
+        a = a + 1;
+    }
+    return a;
+}
+
+fn trim_tail(src: ptr, s: u32, e: u32) -> u32 {
+    let b: u32 = e;
+    while b > s && is_ws(load8(src, b - 1)) {
+        b = b - 1;
+    }
+    return b;
+}
+
+/// 0-based 第 k 行的起点偏移; 没有这一行 -> 0xFFFFFFFF。
+fn off_of_line(src: ptr, len: u32, k: u32) -> u32 {
+    let line: u32 = 0;
+    let i: u32 = 0;
+    let res: u32 = 4294967295;
+    let go: u32 = 1;
+    while i <= len && go == 1 {
+        if line == k {
+            res = i;
+            go = 0;
+        } else {
+            if i < len && load8(src, i) == 10 {
+                line = line + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return res;
+}
+
+/// 收集声明行上方连续的 `///` 行 (镜像 lomdoc.doc_of), 结果存 SCR_DOC_*, 返回行数。
+fn collect_doc(mem: ptr, src: ptr, len: u32, line: u32) -> u32 {
+    let n: u32 = 0;
+    let go: u32 = 0;
+    if line >= 2 {
+        go = 1;
+    }
+    let k: u32 = 0;
+    if line >= 2 {
+        k = line - 2;
+    }
+    while go == 1 {
+        let s0: u32 = off_of_line(src, len, k);
+        let e0: u32 = off_of_line(src, len, k + 1);
+        let ts: u32 = trim_lead(src, s0, e0);
+        let te: u32 = trim_tail(src, ts, e0);
+        let is_doc: u32 = 0;
+        if te - ts >= 3 && load8(src, ts) == 47 && load8(src, ts + 1) == 47
+                && load8(src, ts + 2) == 47 {
+            is_doc = 1;
+        }
+        if is_doc == 1 && n < DOC_MAX {
+            store32(mem, MX_DOC_S + n * 4, ts + 3);
+            store32(mem, MX_DOC_E + n * 4, te);
+            n = n + 1;
+            if k == 0 {
+                go = 0;
+            } else {
+                k = k - 1;
+            }
+        } else {
+            go = 0;
+        }
+    }
+    return n;
+}
+
+/// 写出收集到的 doc 行 (自上而下、一个空格连接), 不换行。
+fn em_doc(mem: ptr, src: ptr, n: u32) -> u32 {
+    let k: u32 = n;
+    let first: u32 = 1;
+    while k > 0 {
+        k = k - 1;
+        if first == 0 {
+            em(mem, " ");
+        }
+        first = 0;
+        let ts: u32 = load32(mem, MX_DOC_S + k * 4);
+        let te: u32 = load32(mem, MX_DOC_E + k * 4);
+        let a: u32 = trim_lead(src, ts, te);
+        let b: u32 = trim_tail(src, a, te);
+        let q: u32 = a;
+        while q < b {
+            em_byte(mem, load8(src, q) as u32);
+            q = q + 1;
+        }
+    }
+    return 0;
+}
+
+/// 声明的 doc 部分: 空行 + doc 行 + 空行 (= Python 列表里的 ["", doc, ""])。
+/// 注意 doc **本身也是一行** —— 空 doc 时那行也得有个换行, 否则整篇少一行。
+fn em_doc_part(mem: ptr, src: ptr, len: u32, line: u32) -> u32 {
+    el(mem, "");
+    let n: u32 = collect_doc(mem, src, len, line);
+    em_doc(mem, src, n);
+    em_byte(mem, 10);
+    return el(mem, "");
+}
+
+// ---------------------------------------------------------------- 段落
+
+fn mod_name_tok(t: ptr, src: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let res: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if res == 0 && tk_is(src, t, i, "module") {
+            res = i + 1;
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+fn sec_header(mem: ptr, src: ptr, t: ptr, n: u32, path: ptr, pn: u32) -> u32 {
+    em(mem, "# API: `");
+    em_tok(mem, src, t, mod_name_tok(t, src, n));
+    el(mem, "`");
+    el(mem, "");
+    em(mem, "> 源: `");
+    let q: u32 = 0;
+    while q < pn {
+        em_byte(mem, load8(path, q) as u32);
+        q = q + 1;
+    }
+    el(mem, "` · 由 lomdoc 生成");
+    return el(mem, "");
+}
+
+/// 能力域: `capability 名: 空间 [lo..hi] [revocable];` (token: i 名 : 空间 [ lo . . hi ] rev?)
+fn sec_caps(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "capability") {
+                    if cnt == 0 {
+                        el(mem, "## 能力域");
+                        el(mem, "");
+                        el(mem, "| 能力 | 空间 | 区间 | 可撤销 | 说明 |");
+                        el(mem, "|---|---|---|---|---|");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "| `");
+                    em_tok(mem, src, t, i + 1);
+                    em(mem, "` | `");
+                    em_tok(mem, src, t, i + 3);
+                    em(mem, "` | [");
+                    em_num(mem, src, t, i + 5);      // lo
+                    em(mem, "..");
+                    em_num(mem, src, t, i + 8);      // hi ('[' lo '.' '.' hi)
+                    em(mem, "] | ");
+                    if tk_is(src, t, i + 10, "revocable") {
+                        em(mem, "是");
+                    } else {
+                        em(mem, "否");
+                    }
+                    em(mem, " | ");
+                    let dn: u32 = collect_doc(mem, src, len, tk_line(t, i));
+                    em_doc(mem, src, dn);
+                    el(mem, " |");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if cnt > 0 {
+        el(mem, "");
+    }
+    return cnt;
+}
+
+/// 出界声明: `excluded "名字";`
+fn sec_excluded(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "excluded") {
+                    if cnt == 0 {
+                        el(mem, "## 出界声明");
+                        el(mem, "");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "- ");
+                    em_strlit(mem, src, t, i + 1);
+                    el(mem, "");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if cnt > 0 {
+        el(mem, "");
+    }
+    return cnt;
+}
+
+/// 常量: `const 名: 类型 = 值;`
+fn sec_consts(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "const") {
+                    if cnt == 0 {
+                        el(mem, "## 常量");
+                        el(mem, "");
+                        el(mem, "| 常量 | 类型 | 值 | 说明 |");
+                        el(mem, "|---|---|---|---|");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "| `");
+                    em_tok(mem, src, t, i + 1);
+                    em(mem, "` | `");
+                    let rty: u64 = ptype(mem, src, t, i + 3);
+                    let after: u32 = (rty / 4294967296) as u32;   // '=' 处
+                    em(mem, "` | ");
+                    em_num(mem, src, t, after + 1);
+                    em(mem, " | ");
+                    let dn: u32 = collect_doc(mem, src, len, tk_line(t, i));
+                    em_doc(mem, src, dn);
+                    el(mem, " |");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if cnt > 0 {
+        el(mem, "");
+    }
+    return cnt;
+}
+
+/// 类型: `struct 名<T> { 字段: 类型, ... }`
+fn sec_structs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "struct") {
+                    if cnt == 0 {
+                        el(mem, "## 类型");
+                        el(mem, "");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "### `struct ");
+                    em_tok(mem, src, t, i + 1);
+                    el(mem, "`");
+                    em_doc_part(mem, src, len, tk_line(t, i));
+                    el(mem, "| 字段 | 类型 |");
+                    el(mem, "|---|---|");
+                    let h: u32 = i + 2;
+                    let g: u32 = h;
+                    let go: u32 = 1;
+                    while g < n && go == 1 {
+                        if tk_is(src, t, g, "{") {
+                            go = 0;
+                        } else {
+                            if tk_kind(t, g) == 4 {
+                                go = 0;
+                            } else {
+                                g = g + 1;
+                            }
+                        }
+                    }
+                    let f: u32 = g + 1;
+                    while f < n && !tk_is(src, t, f, "}") && tk_kind(t, f) != 4 {
+                        em(mem, "| `");
+                        em_tok(mem, src, t, f);
+                        em(mem, "` | `");
+                        let fr: u64 = ptype(mem, src, t, f + 2);
+                        em(mem, "` |");
+                        el(mem, "");
+                        f = (fr / 4294967296) as u32;
+                        if tk_is(src, t, f, ",") {
+                            f = f + 1;
+                        } else {
+                            if tk_is(src, t, f, ";") {
+                                f = f + 1;
+                            }
+                        }
+                    }
+                    el(mem, "");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+/// 枚举; 单元里缺 Option/Result 时按参考实现注入 (追加在末尾)。
+fn sec_enums(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    let has_opt: u32 = 0;
+    let has_res: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "enum") {
+                    if tk_is(src, t, i + 1, "Option") {
+                        has_opt = 1;
+                    }
+                    if tk_is(src, t, i + 1, "Result") {
+                        has_res = 1;
+                    }
+                    if cnt == 0 {
+                        el(mem, "## 枚举");
+                        el(mem, "");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "### `enum ");
+                    em_tok(mem, src, t, i + 1);
+                    el(mem, "`");
+                    em_doc_part(mem, src, len, tk_line(t, i));
+                    let g: u32 = i + 2;
+                    let h: u32 = g;
+                    let go: u32 = 1;
+                    while h < n && go == 1 {
+                        if tk_is(src, t, h, "{") {
+                            go = 0;
+                        } else {
+                            if tk_kind(t, h) == 4 {
+                                go = 0;
+                            } else {
+                                h = h + 1;
+                            }
+                        }
+                    }
+                    let v: u32 = h + 1;
+                    while v < n && !tk_is(src, t, v, "}") && tk_kind(t, v) != 4 {
+                        em(mem, "- `");
+                        em_tok(mem, src, t, i + 1);
+                        em(mem, "::");
+                        em_tok(mem, src, t, v);
+                        em(mem, "`");
+                        if tk_is(src, t, v + 1, "(") {
+                            em(mem, " (");
+                            let pr: u64 = ptype(mem, src, t, v + 2);
+                            em(mem, ")");
+                            v = ((pr / 4294967296) as u32) + 1;
+                        } else {
+                            v = v + 1;
+                        }
+                        el(mem, "");
+                        if tk_is(src, t, v, ",") {
+                            v = v + 1;
+                        } else {
+                            if tk_is(src, t, v, ";") {
+                                v = v + 1;
+                            }
+                        }
+                    }
+                    el(mem, "");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if has_opt == 0 || has_res == 0 {
+        if cnt == 0 {
+            el(mem, "## 枚举");
+            el(mem, "");
+        }
+    }
+    if has_opt == 0 {
+        el(mem, "### `enum Option`");
+        em_doc_part(mem, src, 0, 0);
+        el(mem, "- `Option::Some` (T)");
+        el(mem, "- `Option::None`");
+        el(mem, "");
+        cnt = cnt + 1;
+    }
+    if has_res == 0 {
+        el(mem, "### `enum Result`");
+        em_doc_part(mem, src, 0, 0);
+        el(mem, "- `Result::Ok` (T)");
+        el(mem, "- `Result::Err` (E)");
+        el(mem, "");
+        cnt = cnt + 1;
+    }
+    return cnt;
+}
+
+/// trait: `trait 名 { fn m(self, ...) -> R; ... }`
+fn sec_traits(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "trait") {
+                    if cnt == 0 {
+                        el(mem, "## trait");
+                        el(mem, "");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "### `trait ");
+                    em_tok(mem, src, t, i + 1);
+                    el(mem, "`");
+                    em_doc_part(mem, src, len, tk_line(t, i));
+                    em(mem, "方法: ");
+                    let g: u32 = i + 2;
+                    let h: u32 = g;
+                    let go: u32 = 1;
+                    while h < n && go == 1 {
+                        if tk_is(src, t, h, "{") {
+                            go = 0;
+                        } else {
+                            if tk_kind(t, h) == 4 {
+                                go = 0;
+                            } else {
+                                h = h + 1;
+                            }
+                        }
+                    }
+                    let m: u32 = h + 1;
+                    let first: u32 = 1;
+                    while m < n && !tk_is(src, t, m, "}") && tk_kind(t, m) != 4 {
+                        if tk_is(src, t, m, "fn") {
+                            if first == 0 {
+                                em(mem, ", ");
+                            }
+                            first = 0;
+                            em(mem, "`");
+                            em_tok(mem, src, t, m + 1);
+                            em(mem, "() -> ");
+                            let after_p: u32 = skip_params(src, t, m + 2, n);
+                            let rt: u64 = ptype(mem, src, t, after_p + 2);   // '->' 之后
+                            em(mem, "`");
+                            m = (rt / 4294967296) as u32;
+                        } else {
+                            m = m + 1;
+                        }
+                    }
+                    el(mem, "");            // 结束 "方法: ..." 行
+                    el(mem, "");            // 该 trait 条目末尾的空行
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+/// impl: `impl Trait for Type { ... }`
+fn sec_impls(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+            } else {
+                if depth == 0 && tk_is(src, t, i, "impl") {
+                    if cnt == 0 {
+                        el(mem, "## impl");
+                        el(mem, "");
+                    }
+                    cnt = cnt + 1;
+                    em(mem, "- `impl ");
+                    em_tok(mem, src, t, i + 1);
+                    em(mem, " for ");
+                    ptype(mem, src, t, i + 3);
+                    em(mem, "`");
+                    el(mem, "");
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if cnt > 0 {
+        el(mem, "");
+    }
+    return cnt;
+}
+
+/// token 是否可用 (不是 eof)。
+fn tok_ok(t: ptr, i: u32) -> u32 {
+    if tk_kind(t, i) == 4 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 从 '<' 跳到匹配 '>' 之后 (没有泛型形参就原样返回)。
+fn skip_generics(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
+    if !tk_is(src, t, i, "<") {
+        return i;
+    }
+    let d: u32 = 0;
+    let k: u32 = i;
+    let go: u32 = 1;
+    while k < n && tk_kind(t, k) != 4 && go == 1 {
+        if tk_is(src, t, k, "<") {
+            d = d + 1;
+        }
+        if tk_is(src, t, k, ">") {
+            d = d - 1;
+            if d == 0 {
+                go = 0;
+            }
+        }
+        k = k + 1;
+    }
+    return k;
+}
+
+/// 函数: 顶层 fn + impl 方法 (折叠名 `<类型>_<方法>`, 首参 `__self: <类型>`)。
+fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let cnt: u32 = 0;
+    let impl_ty: u32 = 0;
+    let impl_depth: u32 = 0;
+    while i < n && tk_kind(t, i) != 4 {
+        if tk_is(src, t, i, "{") {
+            depth = depth + 1;
+            if impl_ty != 0 && impl_depth == 0 {
+                impl_depth = depth;
+            }
+            i = i + 1;
+        } else {
+            if tk_is(src, t, i, "}") {
+                if depth > 0 {
+                    depth = depth - 1;
+                }
+                if impl_ty != 0 && depth < impl_depth {
+                    impl_ty = 0;
+                    impl_depth = 0;
+                }
+                i = i + 1;
+            } else {
+                if depth == 0 && tk_is(src, t, i, "impl") {
+                    if tk_is(src, t, i + 2, "for") {
+                        impl_ty = i + 3;
+                    } else {
+                        impl_ty = i + 1;
+                    }
+                    i = i + 1;
+                } else {
+                    if depth == 0 && tk_is(src, t, i, "trait") {
+                        let g: u32 = i + 1;
+                        let h: u32 = g;
+                        let go: u32 = 1;
+                        while h < n && go == 1 {
+                            if tk_is(src, t, h, "{") {
+                                go = 0;
+                            } else {
+                                if tk_kind(t, h) == 4 {
+                                    go = 0;
+                                } else {
+                                    h = h + 1;
+                                }
+                            }
+                        }
+                        i = skip_braces(src, t, h, n);
+                    } else {
+                        let is_method: u32 = 0;
+                        if impl_ty != 0 && depth == impl_depth && tk_is(src, t, i, "fn") {
+                            is_method = 1;
+                        }
+                        let is_free: u32 = 0;
+                        if depth == 0 && tk_is(src, t, i, "fn") {
+                            is_free = 1;
+                        }
+                        if is_method == 1 || is_free == 1 {
+                            let dline: u32 = tk_line(t, i);
+                            if cnt == 0 {
+                                el(mem, "## 函数");
+                                el(mem, "");
+                            }
+                            cnt = cnt + 1;
+                            em(mem, "### `fn ");
+                            if is_method == 1 {
+                                ptype(mem, src, t, impl_ty);
+                                em(mem, "_");
+                                em_tok(mem, src, t, i + 1);
+                                em(mem, "(__self: ");
+                                ptype(mem, src, t, impl_ty);
+                                // 'self' 之后的形参照常 (token: fn 名 '(' self [, 形参...])
+                                let p: u32 = i + 4;
+                                if tk_is(src, t, p, ",") {
+                                    p = p + 1;
+                                }
+                                while !tk_is(src, t, p, ")") && tok_ok(t, p) == 1 {
+                                    em(mem, ", ");
+                                    em_tok(mem, src, t, p);
+                                    em(mem, ": ");
+                                    let rp: u64 = ptype(mem, src, t, p + 2);
+                                    p = (rp / 4294967296) as u32;
+                                    if tk_is(src, t, p, ",") {
+                                        p = p + 1;
+                                    }
+                                }
+                                em(mem, ")");
+                                i = p;
+                            } else {
+                                em_tok(mem, src, t, i + 1);
+                                em(mem, "(");
+                                let lp: u32 = skip_generics(src, t, i + 2, n);   // '(' 的位置
+                                let px: u32 = lp + 1;
+                                let pf: u32 = 1;
+                                while !tk_is(src, t, px, ")") && tok_ok(t, px) == 1 {
+                                    if pf == 0 {
+                                        em(mem, ", ");
+                                    }
+                                    pf = 0;
+                                    em_tok(mem, src, t, px);
+                                    em(mem, ": ");
+                                    let rp2: u64 = ptype(mem, src, t, px + 2);
+                                    px = (rp2 / 4294967296) as u32;
+                                    if tk_is(src, t, px, ",") {
+                                        px = px + 1;
+                                    }
+                                }
+                                em(mem, ")");
+                                i = px;
+                            }
+                            if tok_ok(t, i + 1) == 1 && tk_is(src, t, i + 1, "-") {
+                                em(mem, " -> ");
+                                let rr: u64 = ptype(mem, src, t, i + 3);
+                                i = (rr / 4294967296) as u32;
+                            } else {
+                                em(mem, " -> ()");
+                            }
+                            el(mem, "`");                    // 标题行结束 (含换行)
+                            em_doc_part(mem, src, len, dline);
+                            // 注意: **不要**在这里多走 token —— i 停在形参表 ')' 上, 让主循环
+                            // 自己继续走 (它要看见后面的 '{'/'}' 才能维持深度, 否则 impl 上下文
+                            // 会错位, 第二个方法就被当成了形参)。
+                        } else {
+                            i = i + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 渲染
+
+fn render(mem: ptr, src: ptr, len: u32, t: ptr, n: u32, path: ptr, pn: u32) -> u32 {
+    store32(mem, S_OLEN, 0);
+    sec_header(mem, src, t, n, path, pn);
+    sec_caps(mem, src, len, t, n);
+    sec_excluded(mem, src, len, t, n);
+    sec_consts(mem, src, len, t, n);
+    sec_structs(mem, src, len, t, n);
+    sec_enums(mem, src, len, t, n);
+    sec_traits(mem, src, len, t, n);
+    sec_impls(mem, src, len, t, n);
+    sec_funcs(mem, src, len, t, n);
+    // Python: "\n".join(out).rstrip() + "\n"
+    let m: u32 = olen(mem);
+    let cut: u32 = m;
+    let go: u32 = 1;
+    while cut > 0 && go == 1 {
+        let c: u32 = load8(mem, OUT_OFF + cut - 1);
+        if c == 10 || c == 32 || c == 9 || c == 13 {
+            cut = cut - 1;
+        } else {
+            go = 0;
+        }
+    }
+    store32(mem, S_OLEN, cut);
+    em_byte(mem, 10);
+    return olen(mem);
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let memv: u64 = sys_alloc((OUT_CAP + 16384) as u64);
+    let srcv: u64 = sys_alloc(SRC_CAP as u64);
+    let tokv: u64 = sys_alloc((SRC_CAP as u64) * 20 + 4096);
+    let argv_buf: u64 = sys_alloc(65536);
+    let scrv: u64 = sys_alloc(SCR_CAP as u64);
+    if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 {
+        return fail("lomdoc: brk failed\n");
+    }
+    let mem: ptr = memv as ptr;
+    let src: ptr = srcv as ptr;
+    let toks: ptr = tokv as ptr;
+    let scr: ptr = scrv as ptr;
+    let av: u64 = argv1(argv_buf as ptr, 65536, scr);
+    if av == 0 {
+        return fail("lomdoc: 用法: lomdoc <文件.lomt>\n");
+    }
+    let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
+    let an: u32 = (av % 4294967296) as u32;
+    let fd: i64 = open_ro(ap, an, scr);
+    if fd < 0 {
+        return fail("lomdoc: 打不开输入文件\n");
+    }
+    let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
+    syscall4(3, fd as u64, 0, 0);
+    let len: u32 = strip_cr(src, raw as u32);
+    store8(src, len, 0 as u8);
+    let ntok: u32 = lex(src, len, toks);
+    let m: u32 = render(mem, src, len, toks, ntok, ap, an);
+    write_all(1, ptr_add(mem, OUT_OFF), m as u64);
+    return die(0);
+}

@@ -1,6 +1,6 @@
 # API: `native_concat`
 
-> 源: `loment/examples/native_concat.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_concat.lomt` · 由 lomdoc 生成
 
 ## 枚举
 

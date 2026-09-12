@@ -1,6 +1,6 @@
 # API: `native_brk`
 
-> 源: `loment/examples/native_brk.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/native_brk.lomt` · 由 lomdoc 生成
 
 ## 枚举
 

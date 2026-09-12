@@ -32,6 +32,7 @@ GLOBS = [
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
+    "tools/loment_doc_test.py",
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",

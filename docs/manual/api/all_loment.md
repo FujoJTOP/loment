@@ -1,6 +1,6 @@
 # API: `all_loment`
 
-> 源: `loment/examples/all_loment.lomt` · 由 tools/lomdoc.py 生成
+> 源: `loment/examples/all_loment.lomt` · 由 lomdoc 生成
 
 ## 枚举
 
