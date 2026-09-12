@@ -31,14 +31,15 @@ GLOBS = [
     "tools/vscode_ext.py", "tools/vscode_ext_test.py", "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
-    "tools/loment_fmt_test.py",
+    "tools/loment_fmt_test.py", "tools/loment_audit.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
-    "lom/*.lom", "docs/14*.md", "docs/15*-loment-*.md", "docs/manual/*.md",
+    "lom/*.lom", "docs/14*.md", "docs/15*-loment-*.md", "docs/16*-loment-*.md",
+    "docs/manual/*.md",
     "docs/manual/api/*.md",
 ]
 
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
                        encoding="utf-8")
         print(f"[OK] {OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
         return 0
-    if a.check:
+    if a.check or not (a.emit or a.checksums):
+        # 无参数 = 门禁模式 (与仓库其它工具同一约定: ci.py 的静态门禁按 main() 调用)
         if not OUT.exists():
             print(f"[ERR] {OUT.relative_to(ROOT)} 缺失 (运行 --emit)")
             return 1
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"loment_release: {len(wmap) - len(bad)}/{len(wmap)} 一致"
               f"{f' (+{len(extra)} 陈旧)' if extra else ''}")
         return 1 if bad or extra else 0
-    print("[ERR] 需要 --emit 或 --check", file=sys.stderr)
+    print("[ERR] 需要 --emit 或 --checksums", file=sys.stderr)
     return 2
 
 

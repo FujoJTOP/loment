@@ -49,6 +49,27 @@ def test_mono_trace_naming_rule():
     assert r == 0, "mono_trace --check 失败 (命名规则漂了, 见 docs/156 §1)"
 
 
+@test
+def test_audit_claims_match_ci():
+    """审计包 (docs/160) 不许长出"第二套判据": 它列的每个工具都必须在 ci.py 的静态门禁里。
+
+    这条盯的是 M100 的审计工具本身 —— 审计工具自己跑一套没人核的命令, 是审计里
+    最典型的失效方式。
+    """
+    import ci
+    import loment_audit
+    static = set(ci.STATIC_CHECKS)
+    claimed = {tool for _, _, tool, _ in loment_audit.CLAIMS}
+    missing = sorted(claimed - static)
+    assert not missing, f"审计包引用了不在 ci.py 静态门禁里的工具: {missing}"
+    ids = [c[0] for c in loment_audit.CLAIMS]
+    assert len(ids) == len(set(ids)), "主张编号重复"
+    assert len(loment_audit.CLAIMS) >= 10, "主张条数回退 (少于 10 条)"
+    # 每条的 argv 必须显式写出模式 (默认无参的判据要写 [], 需要模式的两条写 --check)
+    for cid, _, tool, args in loment_audit.CLAIMS:
+        assert isinstance(args, list), f"{cid} 的 argv 必须是 list"
+
+
 # ---------------------------------------------------------------- M55 格式化
 
 @test

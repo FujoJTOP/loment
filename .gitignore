@@ -65,6 +65,9 @@ ahci_events.txt
 #   loment-vscode.vsix      <- python tools/vscode_ext.py --emit (docs/155 §安装)
 #   selfhost_codegen.ll     <- 自举 codegen 单跑一次的 IR 落盘
 /loment/build/*.vsix
+/loment/build/loment-vscode-*.zip
 /loment/build/selfhost_codegen.ll
+# 审计报告 (含提交哈希与运行时间, 每次跑都变; 由 loment_audit --json 生成)
+/loment/build/audit-report.json
 # 测试用的临时探针 (loment_fmt_test 会自己删; 崩了也不该进仓库)
 /loment/build/fmt_*_case.lomt
