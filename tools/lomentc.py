@@ -329,6 +329,8 @@ class EnumDecl:
     tparams: list = field(default_factory=list)  # M7
     from_generic: str = ""                       # M45
     generic_args: list = field(default_factory=list)  # M45
+    from_prelude: bool = False   # M10 预置 Option/Result: 由 load() 注入**每个**模块,
+                                 # 单元级唯一性检查必须排除它 (否则多模块单元必报假重名)
 
 
 @dataclass
@@ -2011,6 +2013,29 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             (dep_names if c.pub else dep_private).add(c.name)
             if c.pub:
                 const_scope.setdefault(c.name, c.type)
+
+    # ---- 单元级唯一性 (2026-09-11 补): 发射出来的符号名是**平的**。
+    # 内核线按名字找入口 (`_start` / `timer_isr` / syscall 包装, 见 docs/155 §3), 所以
+    # 私有符号不能靠 mangling 变成模块限定名 —— 平的名字就是 ABI。代价: 同一单元里两个
+    # 模块声明同名顶层符号时, 后端会发出**两条 `define @helper`** (非法 IR), 调用点还会
+    # 解析到同一个函数 (静默错编)。以前只有"入口模块 vs 依赖的 pub"会报, 依赖之间的私有
+    # 重名一路静默 —— 这里补齐。预置枚举 (Option/Result) 由 load() 注入每个模块, 排除。
+    # 同一模块内部的重名由下面各自的规则报, 这里只管跨模块。
+    seen_decl: dict[str, str] = {}          # name -> 先声明它的模块名
+    for m0 in [*deps, mod]:
+        decls = [(f.name, f.line, "函数") for f in m0.funcs]
+        decls += [(s.name, s.line, "结构体") for s in m0.structs]
+        decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
+        decls += [(c.name, c.line, "常量") for c in m0.consts]
+        for nm, ln, kind in decls:
+            prev = seen_decl.get(nm)
+            if prev is None:
+                seen_decl[nm] = m0.name
+            elif prev != m0.name:
+                # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
+                errs.append(f"{ln}: {kind} {nm} 与模块 {prev} 重名 —— "
+                            f"单元的发射符号是平的 (ABI), 请改名")
+
 
     # 结构体: 名字/字段唯一, 类型已声明
     for s in mod.structs:
@@ -3746,6 +3771,7 @@ def load(path: Path) -> Module:
         pre = Parser(lomc.lex(_PRELUDE), _PRELUDE).parse()
         for e in pre.enums:
             if e.name not in names:
+                e.from_prelude = True
                 mod.enums.append(e)
     return mod
 

@@ -343,6 +343,39 @@ def _py_codes(src: Path) -> list[int]:
     return sorted(set(out))
 
 
+@test
+def test_m81_cross_module_dup_is_rejected():
+    """M81/单元级唯一性: **跨模块**同名顶层符号必须被两边一致地拒。
+
+    单元的发射符号是**平的** —— 内核线按名字找入口 (`_start` / `timer_isr`, docs/155 §3),
+    所以私有符号不能靠 mangling 变成模块限定名; 代价是"一个单元里顶层名字必须唯一":
+    否则后端发出两条 `define @helper` (非法 IR), 调用点还会解析到同一个函数 (静默错编)。
+    以前参考实现只查"入口 vs 依赖的 pub", 依赖之间的**私有**重名一路静默; 自举 checker
+    因为不分模块反而早就报了 —— 这条钉住两边一致 (口径 E-DUP)。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import re
+    entry = ROOT / "loment" / "selfhost" / "neg_across" / "entry.lomt"
+    mod = lomentc.load(entry)
+    deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+    py: list[int] = []
+    for e in lomentc.check(mod, deps=deps):
+        for code, pat in PY_RULES:
+            if re.search(pat, e):
+                py.append(code)
+                break
+    assert sorted(set(py)) == [E_DUP], f"参考实现没按 E-DUP 报跨模块重名: {py}"
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_checker(td)
+        unit = Path(td) / "u.lomt"
+        unit.write_text(_unit_text(entry), encoding="utf-8", newline="\n")
+        got, det = _loment_codes(exe, unit)
+        assert sorted(set(got)) == [E_DUP], f"自举 checker 的码不对: {got} {det}"
+        print(f"      跨模块重名: 两边都报 E-DUP (参考消息 + 自举码 {sorted(set(got))})")
+
+
 def _build_checker(td: str) -> Path:
     mod = lomentc.load(CHECKER)
     deps = lomentc.resolve_deps(mod, ROOT, CHECKER.parent, entry=CHECKER)
@@ -676,6 +709,12 @@ def test_m85_driver_checks_before_emitting():
             assert "静态检查未通过" in err, f"{f.name}: 没报诊断: {err[:200]}"
             assert "@" in err and "line" in err, f"{f.name}: 诊断格式不对: {err[:200]}"
             assert out.strip() == "", f"{f.name}: 被拒时不该产出 IR"
+        # 单元级负例: 跨模块同名 —— 驱动要自己装载完这两个文件才发现, 也必须拒
+        rel = "loment/selfhost/neg_across/entry.lomt"
+        rc, out, err = _run_driver_raw(elf, rel, td, "neg_across")
+        assert rc != 0, f"跨模块重名没被拒 (exit {rc})"
+        assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
+        assert out.strip() == "", "被拒时不该产出 IR"
         for f in pos:
             rel = f.relative_to(ROOT).as_posix()
             unsupported = _unsupported(f)     # 参考实现的 IR 后端能不能发这个文件

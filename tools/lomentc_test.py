@@ -564,6 +564,23 @@ def test_str_builtins_m1_m2():
 
 
 @test
+def test_unit_wide_unique_names():
+    """跨模块同名顶层符号 -> 编译错误 (发射符号是平的, 见 docs/150 缺口①)。
+
+    单元里两个模块各声明一个私有 `helper` 时, 后端会发出两条 `define @helper` (非法 IR),
+    调用点还会解析到同一个函数 (静默错编) —— 必须编译期拒。同一模块**内部**的重名照旧
+    由原规则报 (别被这条取代)。
+    """
+    entry = ROOT / "loment" / "selfhost" / "neg_across" / "entry.lomt"
+    mod = lomentc.load(entry)
+    deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+    unit_errs = lomentc.check(mod, deps=deps)
+    assert any("重名" in e for e in unit_errs), unit_errs
+    e2 = errs('module m\nfn f() -> u32 { return 1; }\nfn f() -> u32 { return 2; }\n')
+    assert any("重复定义" in x for x in e2), e2
+
+
+@test
 def test_m2_concat_dual_path_runs_equal():
     """M2/M28: `str_concat` 的两条路径**真的都跑一遍**, 输出逐行相同。
 

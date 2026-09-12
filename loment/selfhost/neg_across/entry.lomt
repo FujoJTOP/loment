@@ -1,0 +1,14 @@
+module entry
+
+// 跨模块同名负例 (入口侧): 见同目录 has_helper.lomt 的说明 —— 两份私有 `helper`
+// 在平名字空间里必然撞车, 编译器必须拒。
+
+use "loment/selfhost/neg_across/has_helper.lomt"
+
+fn helper(x: u32) -> u32 {
+    return x + 2;
+}
+
+pub fn entry_pub(x: u32) -> u32 {
+    return helper(x);
+}
