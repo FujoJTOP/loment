@@ -91,7 +91,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "ca5333bc6da5f650c76420eeb41569736028eb50c058e8dbc49522be595effd9"
+   "sha256": "bbefa8f46de6d09a11af8d2431fa8a6e6d761f99c95b8761df1660a4c1712abc"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -127,7 +127,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "751cdf34d72127a91357d7693b55ce5073d7f15b4055cddf6a9efa0374156a5e"
+   "sha256": "08d7f4dc827710f59e7f704b6e8995ef54f81dd166a39d2faa24da6ab37488d7"
   },
   {
    "path": "editors/vscode/package.json",
@@ -263,11 +263,11 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "7cda644a70301fe649bb28920cd256e190b4bf9ba600cf1ea530bb0e7bddc6f8"
+   "sha256": "a5d7b183ba16c449e1e17a5787b8ffea9dd8b73c7964ca83e7957c88b1485ca7"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "0bc674a9b94083d91eb4130f44828324b4aa089a1a422428a44d18d0223b0946"
+   "sha256": "5fb5c63208906187554f485c0dcad143703fc7baea34fb3b74c03f6bcf360e93"
   },
   {
    "path": "loment/selfhost/driver.lomt",
@@ -367,7 +367,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "cf3c3831ef619c6215ea545f5f91448e8d6e3a577207e242640c3286b592de05"
+   "sha256": "f72b04fe40f5af049fec3b13682896fd9a8fb21e19d787b466f189489c1f8a1e"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -387,7 +387,7 @@
   },
   {
    "path": "docs/148-loment-toolchain.md",
-   "sha256": "89782e55c08f8b6bcbc45a03daccdd12ef22ea82381280b1c958846f7f3797a2"
+   "sha256": "ec72c46dced941b9e4d819fd80eea476279a9531ce57d0f628c7edc7f8154f4c"
   },
   {
    "path": "docs/149-loment-kernel-integration.md",
@@ -399,7 +399,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "94cab0117af9c332dc77dde2e50e599d2c66db5fa8cc31957378137e0d5bb164"
+   "sha256": "5dee07dd9059d7db87e18ab76e069191ca87d89a422b6462f372df1a8741f87b"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -411,7 +411,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "e3323484d8d531b7088618761f132593b825cfc60444f851a785f589f9607693"
+   "sha256": "ac14e8dbbe20ec8bb0af2c6c803d8257f0c8a72d36a6a8a7b124e87fd6b62e8e"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",

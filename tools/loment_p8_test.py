@@ -328,13 +328,11 @@ E_DUP, E_TYPE, E_FN, E_ARITY = 13, 2, 2, 3
 # 还没搬到自举 checker 的规则: 文件名 -> 缺口说明。这些负例只要求 `⊆` (自举版可以少报),
 # 其余负例要求码集**完全相等**。每在 checker.lomt 里补一条, 就删掉这里对应的一行 ——
 # 这张表的价值就是"允许少报"的范围**有界、可数、只减不增**。
-# 现在整张表的规模由 `tools/loment_rule_parity.py` 测出: 24/60 规则等价 (批次 1 = 声明级
-# 规则已落地, 见 docs/150 缺口表)。
-RULE_GAPS: dict[str, str] = {
-    # `let x: Foo = 1;`: 参考实现报两条 —— "类型 Foo 未声明"(E002) 与 "let x: Foo = 表达式类型 u32"(E001)。
-    # 自举版只报 E002: E001 那一半要求表达式类型推断, 属于批次 2。
-    "unknown_let.lomt": "let 初始化类型比对 (表达式类型批次)",
-}
+# 现在整张表的规模由 `tools/loment_rule_parity.py` 测出: 32/60 规则等价 (批次 1 = 声明级
+# 规则, 批次 2 第一批 = let/return/赋值/if/while/for 的类型比对)。
+# 曾经登记过 `unknown_let.lomt` (let 初始化的类型比对) —— 批次 2 的 return 比对落地后
+# 两边码集相等, 于是这一行按表的约定删掉了。
+RULE_GAPS: dict[str, str] = {}
 
 
 def _classify_codes(errs: list[str]) -> list[int]:
@@ -914,6 +912,63 @@ def test_m82_coverage_report():
         for feature, hits in _gap_breakdown(diff).items():
             print(f"        {feature}: {len(hits)}")
     return
+
+
+@test
+def test_m85_heap_budget():
+    """静态预算: 自举 checker 与 codegen 的 `alloc` 之和必须留在 64 KiB 语言堆里。
+
+    这是**批次 2 期间被抓到的一次真实停机**: checker 加的 `alloc(2048)` 让它和 codegen
+    的 `alloc(49152)` 一起越过 64 KiB, `alloc` 的边界检查走 `@__loment_abort`, 在自举
+    驱动里表现为一条**非法指令 (SIGILL)** —— 从测试输出上看像"编译器崩了", 而不是
+    "堆不够"。两者的分配都是**固定字面量** (与输入无关), 所以这条约束可以在静态检查里
+    精确钉住: 改大任何一边的 `alloc` 会在这里立刻变红, 不必等到驱动 SIGILL。
+
+    余量要求 >= 4 KiB: 给 65536 边界检查本身的误差与将来小的临时缓冲留空间。
+    """
+    import re as _re
+    heap = 65536          # 镜像 lomentc 的 __LOMENT_HEAP (Rust 侧) / @__loment_heap (IR 侧)
+    need = 4096           # 要求的余量
+    total = 0
+    per: list[tuple[str, int]] = []
+    for rel in ("loment/selfhost/checker.lomt", "loment/selfhost/codegen.lomt"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        s = sum(int(m) for m in _re.findall(r"alloc\((\d+)\)", src))
+        per.append((rel, s))
+        total += s
+    assert total + need <= heap, (
+        f"自举堆预算超了: {' + '.join(f'{n} {v}' for n, v in per)} = {total}B, "
+        f"堆 {heap}B (要求留 {need}B) —— 调小某个 alloc 或让驱动把缓冲改走 brk")
+    print(f"      堆预算: {' + '.join(f'{v}B' for _n, v in per)} = {total}B / {heap}B "
+          f"(余量 {heap - total}B)")
+
+
+@test
+def test_m85_codegen_arg_arity_is_loud():
+    """实参上限 (10) 必须**响亮地失败**, 不能静默截断。
+
+    自举 codegen 的形参类型表步长 80 = 10 槽 x 8 字节 (加宽会撞 40960 的枚举表), 所以
+    实参/形参上限是 10。批次 2 里第一次出现 11 个实参的调用时它**静默丢了最后一个**
+    (IR 少一个实参), 参考实现照发 -> 逐字节判据报"两个编译器不一致", 但定位成本很高。
+    现在超限会 `panic(10)`; 这条测试同时钉住两边: ① 驱动源码里仍有那道闸门;
+    ② 语料里没有任何函数超过 10 个形参 (否则把闸门"修好"就等于让它再次静默)。
+    """
+    src = (ROOT / "loment" / "selfhost" / "codegen.lomt").read_text(encoding="utf-8")
+    assert "panic(10);" in src, "自举 codegen 的实参超限闸门不见了"
+    assert "a < 10" in src, "实参上限常量变了: 请同步形参表步长与这条测试"
+    worst = 0
+    worst_fn = ""
+    for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                         + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+        try:
+            mod = lomentc.load(target)
+        except Exception:  # noqa: BLE001
+            continue
+        for f in mod.funcs:
+            if len(f.params) > worst:
+                worst, worst_fn = len(f.params), f"{target.name}:{f.name}"
+    assert worst <= 10, f"语料里有 {worst} 个形参的函数 ({worst_fn}), 超过 self-hosted codegen 的 10 槽上限"
+    print(f"      实参上限: 闸门存在; 语料最大形参数 {worst} ({worst_fn}) <= 10")
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:
