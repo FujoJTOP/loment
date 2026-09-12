@@ -710,7 +710,7 @@ python tools/loment_seed_test.py  # 3/3: 种子不许过期 + 脚本禁解释器
 `python tools/loment_release.py --checksums loment/build/SHA256SUMS` 产出
 一份 sha256 清单（**行数 = 工件数**，与 `release-manifest.json` 同源、换行无关）。
 
-tag：**`loment-1.0-pre`**（annotated）打在 `Fujoos-FujoLang-DEV` 的 1.0 冻结提交上并已推送
-origin。它是 **dev 分支快照**，不是发布分支：冻结面见 `docs/158-loment-1.0-freeze.md`，
+tag：**`v0.1.3.4-alpha`**（annotated）打在 `Fujoos-FujoLang-DEV` 的冻结提交上并已推送
+origin。它是 **dev 分支快照**，不是发布分支：冻结面见 `docs/158-loment-freeze.md`，
 发布线要等 M100（外部审计）之后。tag 可随时 `git tag -d` / `git push origin :refs/tags/...` 撤销。
 

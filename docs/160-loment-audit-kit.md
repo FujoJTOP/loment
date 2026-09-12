@@ -1,4 +1,4 @@
-# 160 · Loment 1.0-pre 审计包（M100）
+# 160 · Loment 0.1.3.4 Alpha 审计包（M100）
 
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
@@ -58,7 +58,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 
 ```bash
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
-git checkout loment-1.0-pre        # 或用审计报告里的 commit
+git checkout v0.1.3.4-alpha        # 或用审计报告里的 commit
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
 python tools/loment_audit.py --json # 期望 14/14
 ```
@@ -95,7 +95,7 @@ python tools/loment_audit.py --json # 期望 14/14
 
 ## 5. 关联材料
 
-- `docs/158-loment-1.0-freeze.md` —— 冻结面（改什么要付什么代价）+ 7 条开放项；
+- `docs/158-loment-freeze.md` —— 冻结面（改什么要付什么代价）+ 7 条开放项；
 - `docs/161-loment-checkout-eol.md` —— 检出行尾契约：CRLF 为什么能伪装成逻辑红；
 - `docs/150-loment-selfhost.md` —— 自举链（lexer/parser/checker/codegen/定点）与 M80 收口；
 - `docs/159-loment-seed-bootstrap.md` —— 无 Python 自举与工具链去 Python 的进度排序；

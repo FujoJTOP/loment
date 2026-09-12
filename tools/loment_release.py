@@ -18,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "loment" / "build" / "release-manifest.json"
+# 版本名的**唯一真源** (2026-09-12 由 `loment-1.0-pre` 改名): 机器可读的标识符用连字符形式,
+# 人读的显示名是 `0.1.3.4 Alpha`; 对外 tag = `v0.1.3.4-alpha` (git ref 不许带空格)。
+RELEASE = "0.1.3.4-alpha"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
@@ -70,7 +73,7 @@ def build() -> dict:
         for p in sorted(ROOT.glob(g)):
             if p.is_file():
                 files.append({"path": p.relative_to(ROOT).as_posix(), "sha256": sha(p)})
-    return {"release": "loment-1.0-pre", "files": files}
+    return {"release": RELEASE, "files": files}
 
 
 def checksums_text(doc: dict) -> str:

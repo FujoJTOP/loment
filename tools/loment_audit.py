@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # loment_audit.py — 审计包 (M100, docs/160)
 #
-# 给**第三方**复核对 Loment 1.0-pre 的主张: 一条命令跑完全部判据, 打印/落盘一份
+# 给**第三方**复核对 Loment 0.1.3.4 Alpha 的主张: 一条命令跑完全部判据, 打印/落盘一份
 # 可附在审计报告后的证据 (含版本、提交、工件哈希、每条主张的结果)。
 #
 #   python tools/loment_audit.py            # 跑全部, 人类可读
@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import loment_release  # noqa: E402  (版本名取它的 RELEASE: 单一真源)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "loment" / "build" / "audit-report.json"
@@ -167,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bad = [r for r in results if not r["ok"]]
     report = {
-        "release": "loment-1.0-pre",
+        "release": loment_release.RELEASE,  # 单一真源: 别再抄一遍字面量
         "provenance": prov,
         "claims": results,
         "passed": len(results) - len(bad),

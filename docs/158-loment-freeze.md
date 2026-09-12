@@ -1,6 +1,7 @@
 # 158 · Loment L1 冻结面（M96）
 
-> 版本：`L1 1.0-pre`（`loment/build/release-manifest.json` 的编译期版本戳）
+> 版本：`L1 0.1.3.4-alpha`（显示名 `Loment 0.1.3.4 Alpha`；`loment/build/release-manifest.json`
+> 的 `release` 字段由 `tools/loment_release.py:RELEASE` 单一真源给出）；对外 tag `v0.1.3.4-alpha`
 > 判据（docs/145 M96）：**冻结意味着"改动要付代价"** —— 任何触及冻结面的改动都必须
 > 同时改规范、改一致性套件、两个实现同一次提交改完，并走 §5 的流程。
 > 本文只写"冻结了什么"和"怎么改"，不重复语法细节（那在 `docs/manual/` 与
@@ -70,7 +71,7 @@
 4. **过静态门禁**：`python tools/ci.py --static-only` 里的 L0/L1 门禁全绿；
    若触及内核线按名解析的符号（§2 那一条），必须先走 docs/155 的交接约定。
 
-## 6. 一致性套件（"1.0"指的就是这套东西全绿）
+## 6. 一致性套件（"0.1.3.4 Alpha"指的就是这套东西全绿）
 
 ```bash
 python tools/loment_rule_parity.py    # 63/63 等价 + 假阳性/漂移 0 (棘轮预算 63)
@@ -82,8 +83,9 @@ python tools/loment_status.py --check # 状态矩阵与 docs/145 一致
 python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由它打印)
 ```
 
-发布快照：`git tag loment-1.0-pre`（annotated，打在 `Fujoos-FujoLang-DEV` 上并已推送 origin），
-校验和清单 `loment/build/SHA256SUMS`（行数 = 工件数，与 `release-manifest.json` 同源；哈希按通用换行
-计算，**LF/CRLF 检出结果相同**）。它是 dev 分支快照而非发布分支 —— 发布线要等 M100。
+发布快照：`git tag v0.1.3.4-alpha`（annotated，打在 `Fujoos-FujoLang-DEV` 上并已推送 origin；
+旧名 `loment-1.0-pre` 指向同一个冻结提交）。校验和清单 `loment/build/SHA256SUMS`
+（行数 = 工件数，与 `release-manifest.json` 同源；哈希按通用换行计算，**LF/CRLF 检出结果相同**）。
+它是 dev 分支快照而非发布分支 —— 发布线要等 M100。
 
 **判据优先于实现**：任何一处红灯都不许"改判据让它变绿"，只许改实现或按 §5 走流程。

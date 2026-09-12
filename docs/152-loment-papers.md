@@ -49,7 +49,7 @@ python tools/loment_p7_test.py          # 8/8（需 QEMU + 已构建内核）
 
 ## M100 · 1.0 发布与审计 ⚠️
 
-**未达 1.0**。当前 `1.0-pre`。**审计口径**见 `docs/154-loment-status.md`（由
+**未达 1.0**。当前 `0.1.3.4-alpha`。**审计口径**见 `docs/154-loment-status.md`（由
 `tools/loment_status.py` 从 docs/145 生成，禁止手改）：完成 **70** / 部分 **13** /
 未达 **2** / 未开始 **15**。
 
