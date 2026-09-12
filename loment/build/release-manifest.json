@@ -107,7 +107,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "2e872df44b40b3c59d200b4e948c11e858fc69b2e5bc580efe99bbf29dd4861e"
+   "sha256": "e62c64f20ee222c784fbae6f42459f223de224b71ff6e880149a2a41b1bae201"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -160,6 +160,26 @@
   {
    "path": "tools/loment_lsp_test.py",
    "sha256": "443557eeed40a7c72162f19a96240c8c0ff5fcf0abfd1314a1c7ea27ec20893c"
+  },
+  {
+   "path": "tools/loment_editors_test.py",
+   "sha256": "51792b1c5f40850b8a829410662fd1a877fa3556b443f4775fa94e7bb9a032ba"
+  },
+  {
+   "path": "editors/vim/README.md",
+   "sha256": "54a9b39ff52443fe94dae72c35af1ce32ded828dc69469abf85f1c3ba84a262c"
+  },
+  {
+   "path": "editors/vim/syntax/loment.vim",
+   "sha256": "b8be185f31d7fae2b02dc878cea59dc9e307d41c57962bab95fdb029c16a66d5"
+  },
+  {
+   "path": "editors/vim/ftdetect/loment.vim",
+   "sha256": "79a122b913d536089f732c1ddbf34a852daca46915765ba8f38a373442638b7b"
+  },
+  {
+   "path": "editors/vim/ftplugin/loment.vim",
+   "sha256": "11a4f3824e1660edd715c9ad809f9f181a87d66604b04f04dfccd8d1bf2c4c2f"
   },
   {
    "path": "tools/loment_filetype.py",
@@ -227,7 +247,7 @@
   },
   {
    "path": "editors/vscode/syntaxes/loment.tmLanguage.json",
-   "sha256": "740d3c5db23592d7db293f07cd86ace2dee3d0e725886ac470336d6bb7a8d7c2"
+   "sha256": "1949c9380f76e0ff76300a80516bc7f749bc86b15997ef11c9ea5bfa67035dd4"
   },
   {
    "path": "loment/examples/ahci.lomt",
@@ -495,7 +515,7 @@
   },
   {
    "path": "docs/157-loment-editor-hosts.md",
-   "sha256": "4b1dc005f2267e997d4b2c88f15e939549d05e2e0929b877fac3fffac99e8de6"
+   "sha256": "de180dbc12508a55e4925590b561c8c828d450b5bca5934e6d0a2e0153e69f2f"
   },
   {
    "path": "docs/158-loment-1.0-freeze.md",

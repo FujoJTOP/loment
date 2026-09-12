@@ -172,6 +172,41 @@ stage1 → stage1 编译 `lsp.lomt` → clang 链 ELF → 装进 WSL → `--chec
 **已知缺口**：编辑器内格式化还没走 Loment 版（服务未声明 `documentFormattingProvider`）；
 诊断文案是分类标题（`E013 重名`），不是参考实现的完整措辞。
 
+## 3.6 不用 VS Code（Vim / 任意 LSP 客户端，2026-09-12）
+
+高亮与语言服务都**不绑定 VS Code**：
+
+**Vim（本机 Git Bash 自带 vim 就够，零插件、零 Python）**
+
+```vim
+set runtimepath+=<仓库>/editors/vim
+filetype plugin on
+```
+
+- `editors/vim/syntax/loment.vim` 高亮（关键字/类型/内建/声明名/数字/字符串/注释/`///` 文档注释）；
+- `editors/vim/ftplugin/loment.vim` 把诊断接进 quickfix：`:LomentCheck`（= 语言服务的 `--check`，
+  `errorformat` 认 `路径:行:列: E0NN 标题`）→ `:copen` / `:cnext`；`:LomentBuild` 出 `.ll/.elf`；
+- 一般编辑体验下这套就够（写 → 检查 → 跳错误 → 编译），装法与坑写在 `editors/vim/README.md`。
+
+**任何支持 LSP 的编辑器**（Neovim ≥0.11 内置、nvim-lspconfig、`vim-lsp`/`coc.nvim`、Emacs、
+Sublime、Zed、Kate、Helix…）：把语言服务当成一个普通的 stdio LSP 起起来即可 ——
+服务文件就是 `scripts/install-lsp.ps1` 装的那个（Windows 上经 WSL 调，参数 `-e <路径>`），
+命令行与 VS Code 的设置值完全一样。逐编辑器的写法见 `editors/vim/README.md` §3。
+
+**文件关联**：想让双击 `.lomt` 进你选的编辑器（而不是 VS Code）：
+
+```bash
+python tools/loment_filetype.py --register --editor "C:\path\to\your-editor.exe"
+```
+
+**判据**：`tools/loment_editors_test.py` 2/2 —— (1) `editors/vim` 的词表必须都在 TextMate 语法里
+（防两边脱节，这条当场抓出语法源漏了 `load16/load32/store16/store32`，已补）；(2) 无头 vim 打开
+`.lomt`，断言 `filetype=loment` 且关键字/类型/函数名/注释/文档注释/字符串各落到对的语法组。
+
+**顺带修的两个 Vim 坑**（都写进了语法文件注释）：同一起点"后定义者胜" ⇒ 注释规则必须放最后
+（否则 `//` 被单字符运算符 `/` 抢走）；`\zs` 不能用来"跳过关键字突出后面的名字" ⇒ 改用
+`nextgroup` + `contained`（引擎在关键字匹配后已跳过那段文本）。
+
 ## 4. 给宿主方的请求（可直接转交）
 
 **要什么**：把下面两份 TextMate 语法加进内置高亮器的语言表（ZCode 是 Shiki 的
