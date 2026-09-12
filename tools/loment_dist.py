@@ -741,41 +741,43 @@ def emit_exe(zip_bytes: bytes, target: Path) -> bool:
 
 # ------------------------------------------------------------------ 入口
 
-def emit(only: set[str] | None, want_exe: bool) -> int:
+def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> int:
+    out = out_dir or OUT
     bins = build_tools(only)
     lin = payload("linux", bins)
     win = payload("windows", bins)
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     made: list[Path] = []
 
-    tar = OUT / f"loment-{VER}-linux-x64.tar.gz"
+    tar = out / f"loment-{VER}-linux-x64.tar.gz"
     tar.write_bytes(_tar_gz(f"loment-{VER}-linux-x64", lin))
     made.append(tar)
     print(f"  [{tar.name}] {tar.stat().st_size} 字节, {len(lin)} 个文件")
 
     zbytes = _zip(f"loment-{VER}-windows-x64", win)
-    zipf = OUT / f"loment-{VER}-windows-x64.zip"
+    zipf = out / f"loment-{VER}-windows-x64.zip"
     zipf.write_bytes(zbytes)
     made.append(zipf)
     print(f"  [{zipf.name}] {len(zbytes)} 字节, {len(win)} 个文件")
 
     if want_exe:
-        exe = OUT / f"loment-{VER}-windows-x64-setup.exe"
+        exe = out / f"loment-{VER}-windows-x64-setup.exe"
         if exe.exists():
             exe.unlink()
         if emit_exe(_zip("", win), exe):
             made.append(exe)
             print(f"  [{exe.name}] {exe.stat().st_size} 字节 (自解压, 未签名)")
 
-    sums = OUT / "SHA256SUMS"
+    sums = out / "SHA256SUMS"
     sums.write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
                             for p in made), encoding="utf-8", newline="\n")
     print(f"  [{sums.name}] {len(made)} 行")
     return 0
 
 
-def check() -> int:
-    sums = OUT / "SHA256SUMS"
+def check(out_dir: Path | None = None) -> int:
+    out = out_dir or OUT
+    sums = out / "SHA256SUMS"
     if not sums.exists():
         print(f"[ERR] {sums.relative_to(ROOT)} 缺失 (先跑 --emit)")
         return 1
@@ -785,7 +787,7 @@ def check() -> int:
         if not line.strip():
             continue
         want, rel = line.split("  ", 1)
-        p = OUT / rel
+        p = out / rel
         n += 1
         got = hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "(缺失)"
         if got != want:
@@ -804,14 +806,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--list", action="store_true", help="只列会打进去的文件")
     ap.add_argument("--only", metavar="NAME[,NAME]", help="只构建这些工具 (driver,lsp,fmt,doc)")
     ap.add_argument("--no-exe", action="store_true", help="跳过 Windows 自解压安装包")
+    ap.add_argument("--out", metavar="DIR", help="产物目录 (默认 loment/dist)")
     a = ap.parse_args(argv)
 
     if a.list:
         for rel in sorted(payload("linux", {})):
             print(f"  {rel}")
         return 0
+    out_dir = Path(a.out) if a.out else None
     if a.check:
-        return check()
+        return check(out_dir)
     if a.emit:
         # --only 允许短名 (driver/lsp/fmt/doc) —— 名字对齐工具名 loment-<x>
         only = None
@@ -822,7 +826,7 @@ def main(argv: list[str] | None = None) -> int:
             if only - known:
                 print(f"[ERR] 未知工具: {sorted(only - known)}", file=sys.stderr)
                 return 2
-        return emit(only, not a.no_exe)
+        return emit(only, not a.no_exe, out_dir)
     ap.print_help()
     return 2
 

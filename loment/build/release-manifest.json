@@ -195,11 +195,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "25be5479a169de934e92dd2bf6aef7467ecb746fde9bccfbb6e041d87ad85049"
+   "sha256": "ab1edc044d51d01d9e62964760a724e2dfa4b435410c974f315a30ab55384c05"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "ecf5c30b3617b3883c037d9763e2266df9eca02583f90c546e227cb35e601001"
+   "sha256": "52d4b59e525d9da89f7f14dddda4763255c308df6b28195c12eb7065f9398adb"
   },
   {
    "path": "loment/bootstrap.sh",

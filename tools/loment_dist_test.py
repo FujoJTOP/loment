@@ -32,6 +32,7 @@ import lomentc  # noqa: E402
 
 ROOT = loment_dist.ROOT
 OUT = loment_dist.OUT
+IT_OUT = loment_dist.STAGE / "it-out"   # 测试专用产物目录 (不碰 loment/dist)
 VER = loment_dist.VER
 PREFIX_IT = "/tmp/loment_dist_it"          # WSL 侧的安装前缀
 RESULTS: list[tuple[str, bool, str]] = []
@@ -144,12 +145,13 @@ def read_tar_bytes(blob: bytes) -> dict[str, bytes]:
 # ------------------------------------------------------------------ 4. 构建 + check
 
 def build() -> tuple[Path, Path]:
-    rc = loment_dist.main(["--emit", "--only", "driver", "--no-exe"])
+    rc = loment_dist.main(["--emit", "--only", "driver", "--no-exe", "--out", str(IT_OUT)])
     assert rc == 0, f"loment_dist --emit rc={rc}"
-    tar = OUT / f"loment-{VER}-linux-x64.tar.gz"
-    zipf = OUT / f"loment-{VER}-windows-x64.zip"
+    tar = IT_OUT / f"loment-{VER}-linux-x64.tar.gz"
+    zipf = IT_OUT / f"loment-{VER}-windows-x64.zip"
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
-    check("--check 与 SHA256SUMS 一致", loment_dist.main(["--check"]) == 0)
+    check("--check 与 SHA256SUMS 一致",
+          loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
     # 归档里的 driver 与构建目录里的 driver 是同一份 (没被中间步骤动过)
     driver = (loment_dist.STAGE / "loment-driver.elf").read_bytes()
     check("归档里的 loment-driver == 构建产物",
@@ -253,7 +255,7 @@ def test_windows_installer(zipf: Path) -> None:
     check("install.ps1 -PayloadZip (自解压包路径) 也能跑",
           r.returncode == 0 and "payload" in out, out[-220:])
 
-    exe = OUT / f"loment-{VER}-windows-x64-setup.exe"
+    exe = OUT / f"loment-{VER}-windows-x64-setup.exe"  # 正式产物目录里的 (测试不重建 exe)
     if exe.exists():
         head = exe.read_bytes()[:2]
         check("setup.exe 是 PE 且非空", head == b"MZ" and exe.stat().st_size > 100000,
