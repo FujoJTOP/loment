@@ -67,29 +67,41 @@ def emit() -> int:
     return 0
 
 
-#: 启动脚本里**不许**出现在命令位置的解释器 (只允许 clang + POSIX sh)。
+#: 启动脚本: **只允许 clang + 宿主 shell**, 不许出现任何解释器。这两个文件是"没有 Python
+#: 也能构建/使用 Loment"的全部入口, 所以它们自己不能偷偷调解释器。
+LAUNCH_SCRIPTS = ("loment/bootstrap.sh", "scripts/lomc.ps1")
+
+#: 命令位置不许出现的解释器。
 FORBIDDEN = ("python", "python3", "perl", "ruby", "node", "cargo", "rustc", "gcc")
 
 
 def script_ok() -> int:
-    """静态判据: 启动脚本不调用任何第三方语言解释器, 且是 LF 换行 (WSL 里能直接 sh)。"""
-    if not SCRIPT.exists():
-        print(f"[ERR] 缺 {SCRIPT.relative_to(ROOT)}")
-        return 1
-    raw = SCRIPT.read_bytes()
+    """静态判据: 启动脚本只用 clang (无第三方语言调用), 且是 LF 换行。
+
+    注释里的提法不算 (`# python ...` 只是说明); 只看**命令位置** —— 行首或 `| & ; (` 之后。
+    """
     bad: list[str] = []
-    if b"\r\n" in raw:
-        bad.append("含 CRLF (WSL/Linux 的 sh 会把 \\r 当命令字符; 见 .gitattributes *.sh eol=lf)")
-    text = raw.decode("utf-8")
-    for name in FORBIDDEN:
-        # 只看命令位置 (行首或 | & ; ( 之后): 注释里提到某个解释器不算
-        for m in re.finditer(rf"(?:^|[|&;(]\s*)({re.escape(name)})\b", text, re.M):
-            bad.append(f"调用 {m.group(1)}: {text[m.start():m.end() + 40].strip()}")
+    for rel in LAUNCH_SCRIPTS:
+        p = ROOT / rel
+        if not p.exists():
+            bad.append(f"缺 {rel}")
+            continue
+        raw = p.read_bytes()
+        if b"\r\n" in raw:
+            bad.append(f"{rel} 含 CRLF (WSL/Linux 的 sh 会把 \\r 当命令字符; "
+                       f"见 .gitattributes 的 *.sh/*.ps1 eol=lf)")
+        text = raw.decode("utf-8", errors="replace")
+        for ln, line in enumerate(text.splitlines(), 1):
+            code = line.split("#", 1)[0]
+            for name in FORBIDDEN:
+                if re.search(rf"(?:^|[|&;(])\s*{re.escape(name)}\b", code):
+                    bad.append(f"{rel}:{ln} 调用了 {name}: {line.strip()[:70]}")
     if bad:
         for b in bad:
             print(f"[FAIL] {b}")
         return 1
-    print(f"loment_seed: 启动脚本 {SCRIPT.name} 只用 clang (无第三方语言调用, LF 换行)")
+    print(f"loment_seed: 启动脚本 {len(LAUNCH_SCRIPTS)} 个只用 clang "
+          f"(无第三方语言调用, LF 换行)")
     return 0
 
 

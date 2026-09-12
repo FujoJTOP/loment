@@ -100,6 +100,43 @@ python tools/loment_filetype.py --emit-icon             # 重新生成 editors/l
 
 撤销干净：`--unregister` 删掉本工具建的键与值（不动别人的），之后"打开方式"回到注册前的样子。
 
+## 3.4 在 Windows 上编译/运行一个 `.lomt`（**不用 Python**，2026-09-12）
+
+编辑器解决了"看"，这一步解决"跑"：
+
+```powershell
+powershell -File scripts/lomc.ps1 loment/examples/user_hello.lomt          # 只编译
+powershell -File scripts/lomc.ps1 loment/examples/user_hello.lomt -Run     # 编译并运行
+powershell -File scripts/lomc.ps1 <file.lomt> -OutDir loment/build
+```
+
+只用三样东西：**种子**（`loment/build/selfhost_driver.ll`，参考实现发射的驱动 IR，已提交）
++ **clang**（地基语言）+ **WSL**（执行 Linux ELF）。stage1 缓存在 `loment/build/stage1.elf`，
+种子变了才重建。产物 = `<名字>.ll` + `<名字>.elf`（x86_64 Linux 静态可执行）。
+
+**实测**（2026-09-12 本机，全程无 Python）：
+
+```
+[1/4] clang(seed) -> stage1        [2/4] stage1 compiles ... -> user_hello.ll
+[3/4] clang link -> user_hello.elf [4/4] running (WSL): M67 RESULT: PASS loment-user
+[lomc] exit code 0 · IR 1.6KB -> ELF 1.5KB
+```
+
+多单元（`use` 由驱动自己解析）同样通过：`all_loment.lomt` → `M78 sum=42 double=84 max=84
+fib=55 / M78 RESULT: PASS all-loment`。
+
+**边界**：目标平台是 **Linux ELF**（Loment 程序走 Linux 系统调用），所以 `-Run` 用 WSL；
+不做 Windows 原生目标（那需要另一套运行时 ABI）。种子重建才需要 Python
+（`tools/loment_seed.py --emit`）—— 平时不需要。
+
+**门禁**：`loment_seed --script-ok` 现在检查**两个启动脚本**
+（`loment/bootstrap.sh` 与 `scripts/lomc.ps1`）：命令位置不许出现
+python/perl/ruby/node/cargo/rustc/gcc，且必须是 LF。注释里的提法不算（脚本自己会用
+`python tools/loment_seed.py --emit` 这句提示重建种子）。
+
+**踩过的坑**：`.ps1` 里写中文在 Windows PowerShell 5.1 下会因"无 BOM 的 UTF-8 按 ANSI 读"
+变成乱码并导致**解析错误** —— 所以 `scripts/lomc.ps1` 是纯 ASCII 的，中文说明留在这里。
+
 ## 4. 给宿主方的请求（可直接转交）
 
 **要什么**：把下面两份 TextMate 语法加进内置高亮器的语言表（ZCode 是 Shiki 的

@@ -131,7 +131,7 @@
   },
   {
    "path": "tools/loment_seed.py",
-   "sha256": "c96dc7169b049e7ace37370c50b9d50741f4dbcca089cdad1c937db824dafcb0"
+   "sha256": "dee404610784177735aab4fea340d6f7e87bd5cd45362c6b05f001fd73c2873a"
   },
   {
    "path": "tools/loment_seed_test.py",
@@ -160,6 +160,10 @@
   {
    "path": "loment/bootstrap.sh",
    "sha256": "2eb3562c38aa228d76ddaea694dd92413dc03f532c4ff46c993f3256b0cec76a"
+  },
+  {
+   "path": "scripts/lomc.ps1",
+   "sha256": "7226f0d2ffeb716208ca10c21c4b880afe4f1d99a7e179618135a171fc3d4c25"
   },
   {
    "path": "loment/build/selfhost_driver.ll",
@@ -471,7 +475,7 @@
   },
   {
    "path": "docs/157-loment-editor-hosts.md",
-   "sha256": "a3b869be19c84b281a8bc95c51352108be30cfc0440bbfc052eee933b26eaa87"
+   "sha256": "e8fcfaf89c4079c98ea8014e12e1a021a170ca94571ae243ca694eb36c386e62"
   },
   {
    "path": "docs/158-loment-1.0-freeze.md",

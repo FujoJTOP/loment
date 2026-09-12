@@ -35,7 +35,8 @@ GLOBS = [
     "tools/loment_doc_test.py",
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
-    "loment/bootstrap.sh", "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
+    "loment/bootstrap.sh", "scripts/lomc.ps1",
+    "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
