@@ -58,10 +58,15 @@ python tools/loment_audit.py --list     # 只列主张与命令
 
 ```bash
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
-git checkout v0.1.3.4-alpha        # 或用审计报告里的 commit
+git checkout <审计报告里的 commit>   # 报告 provenance.commit —— 判据要对的**就是它**
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
 python tools/loment_audit.py --json # 期望 14/14
 ```
+
+> tag `v0.1.3.4-alpha`（annotated）是 **M96 冻结面快照**，早于当前审计状态：
+> 在那个提交上 `tools/loment_eol.py` 还不存在、主张也只有 10 条。要复核**冻结面**就 checkout
+> 这个 tag（那里看 docs/158 与 `--emit-llvm` 的逐字节判据）；要复核**当前主张**就用报告里的
+> commit。两者别混。
 
 > 第 0 步不是可选的礼貌：Windows 上（`core.autocrlf=true`）检出的换行取决于**怎么检出的**
 > —— 先 checkout 默认分支再切分支，会留下十几个 CRLF 文件，而按原始字节读源码的判据会把
