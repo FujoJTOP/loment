@@ -329,7 +329,7 @@ python tools/loment_p8_test.py     # 2/2: M79 token 流 + M80 签名 AST dump
 | 里程碑 | 验证方式 | 结果 |
 |---|---|---|
 | M80 自举 parser | `loment/selfhost/parser.lomt` 的 AST dump == Python 版（5 文件逐字符） | ✅ 部分（子集） |
-| M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 + 拼接单元放行 **40/40** + 跨模块重名两边**都报 E-DUP** | ✅ 部分（4 规则；实现层已对齐，规则条数仍少于参考实现的完整检查器） |
+| M81 自举 checker | 6 负例两边都拒（码集 ⊆）+ 4 正例两边都收 + 拼接单元放行 **40/40** + 跨模块重名两边**都报 E-DUP** | ✅（收口：**63/63 规则等价**、负例直接喂驱动全被拒、40/40 零诊断、0 假阳性；见 docs/150 M81 节） |
 | M82 自举 codegen | `codegen.lomt` 的 `.ll` 与 `lomentc --emit-llvm` 逐字节一致 | ✅（目标覆盖 37/37；唯一非目标 `native_raii.lomt` 参考实现自身报 `inb` 未实现） |
 | M87 一键引导 | `python tools/loment_bootstrap.py` 全绿 | ✅ |
 | M88 校验和 | `loment_release --checksums` 清单 sha256（行数 = 工件数） | ✅（tag `loment-1.0-pre` 已推送） |
@@ -621,7 +621,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 |---|---|---|
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
 | M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
-| M81 | Loment 版类型检查 | 负例集判定一致 | ✅ 部分（4 条规则 + 单编译单元；见 docs/150） |
+| M81 | Loment 版类型检查 | 负例集判定一致 | ✅（**规则等价 63/63**（`loment_rule_parity` 棘轮门禁，假阳性/漂移 0，已进 `ci.py`）+ 63 条负例直接喂自举驱动全部非零退出且无信号 + 40/40 语料零诊断 + 跨模块重名两边都报 E-DUP；三处刻意保守偏离见 docs/158 §4） |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 39/39：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`/整数↔指针；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅（`loment/selfhost/driver.lomt` 把 lexer + codegen 接成**一个能独立跑的 ELF**：brk 取内存、stdin 吃单元、stdout 吐 IR；它编译自己的单元与参考逐字节相同，且用它自己的产物再链一次仍逐字节相同。边界：单编译单元，`use` 装载仍在夹具侧——与 M80/M81 同边界） |
 | M84 | 三阶段自举定点校验 | 第 2/3 阶段产物逐字节相同 | ✅（stage1/2/3 的 IR 逐字节全等 1002385B；自举驱动也做了二阶段定点；stage2 对 checker/ir_div 亦与参考一致） |

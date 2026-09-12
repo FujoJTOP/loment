@@ -60,10 +60,12 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
   可无歧义还原树，且天然匹配逐 token 下降的解析器；
 - 多字符运算符（`==`/`->`/`&&`…）在词法上是两个 token，用 `op_code`/`op_toks` 识别与步进。
 
-## M81 · Loment 版检查器（子集）✅
+## M81 · Loment 版检查器（收口：规则等价 63/63）✅
 
-`loment/selfhost/checker.lomt`：消费 M79 token 流，做**符号表 + 类型/调用检查**，
-输出错误记录（`code | token`）。与 Python 版（`lomentc.check`）对照的口径是**错误码集合**：
+`loment/selfhost/checker.lomt`：消费 M79 token 流，做**符号表 + 类型/调用/移动/借用检查**，
+输出错误记录（`code | token`）。与 Python 版（`lomentc.check`）对照的口径是**错误码集合**。
+
+历史起点（批次 1 只有 4 条声明级规则）：
 
 | 码 | 规则 | Loment 侧实现 |
 |---|---|---|
@@ -72,12 +74,14 @@ dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node�
 | `E-UNKNOWN-FN` (3) | 调用未声明的函数 | 符号表 + 内建名单（20 个内建） |
 | `E-ARITY` (4) | 实参个数不符 | 顶层逗号计数（识别 `(`/`[` 嵌套） |
 
-**判据**：`loment_p8_test::test_m81_*` —— 6 个负例文件全部被两边拒绝，且 Loment 的
-错误码集合 ⊆ Python 的；4 个单编译单元正例（`selfhost/pos/ok.lomt`、mathutil、bytes、native）
-两边都接受。
+**收口判据（2026-09-12）**：token 级类型推断器补齐后，`tools/loment_rule_parity.py`
+实测 **63/63 条规则判定等价**（棘轮门禁 `eq ≥ BUDGET=63`，假阳性/口径漂移/探针失效必须为 0，
+已进 `tools/ci.py`）；63 条负例**直接喂自举驱动**全部非零退出且无一因信号而死；40/40 语料单元
+零诊断；跨模块重名两边都报 E-DUP。三处**刻意保守偏离**（类型未知时少报，方向保守）逐条写在
+docs/158 §4 的冻结面开放项里。
 
-**子集边界**：不解析 `use` 导入（因此只对照单编译单元文件）；不做表达式类型推导、
-不做借用/移动检查、不做穷尽性检查（那些仍由 Python 版负责）。
+**已知边界**：不解析 `use` 导入由**驱动器**负责（装载层），检查器本身按"已装载的单元"工作；
+驱动器整条链没有 parser，所以解析期错误（如 `const C: bool = true;`）它报不出来（docs/158 §4 #3）。
 
 ## M82 · Loment 版 IR 生成（表达式/控制流/短路/转换/内建）✅
 
