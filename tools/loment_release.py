@@ -29,7 +29,7 @@ GLOBS = [
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py", "tools/mono_trace.py",
-    "tools/loment_ir_diff.py",
+    "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",

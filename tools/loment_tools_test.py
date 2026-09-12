@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -309,6 +310,70 @@ def test_m64_diagnostics_have_codes_and_hints():
             assert d["hint"], f"{name}: 缺建议"
             codes.add(d["code"])
     assert len(codes) >= 10, sorted(codes)
+
+
+@test
+def test_m64_all_reference_messages_are_classified():
+    """分类表**完整覆盖**参考实现能发出的每一条消息模板。
+
+    为什么要这条: 自举 checker 与参考实现的对照判据是"码集相等", 而码是从消息**分类**
+    来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E999 被丢掉),
+    缺口会**静默消失**。这里用 ast 把 lomentc.py 里所有 `errs.append(f"...")` 抽出来,
+    逐个渲染成样例消息再分类, 任何一条落到 E999 就算回归。
+    """
+    import ast
+    import loment_diag
+    tree = ast.parse((ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8"))
+    numeric = ("line", "col", "len", "lo", "hi", "value")
+    tpls: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "errs"):
+            continue
+        if not node.args:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            tpls.append(arg.value)
+            continue
+        if isinstance(arg, ast.JoinedStr):
+            parts: list[str] = []
+            for v in arg.values:
+                if isinstance(v, ast.Constant):
+                    parts.append(str(v.value))
+                else:
+                    src = ast.unparse(v.value)
+                    parts.append("1" if any(w in src for w in numeric) else "Foo")
+            tpls.append("".join(parts))
+    assert len(tpls) >= 60, f"抽取到的模板太少, 抽取逻辑可能坏了: {len(tpls)}"
+    bad = []
+    for t in tpls:
+        for line in t.split("\n"):                     # 多行 f-string: 逐行判
+            s = line.strip()
+            if not s:
+                continue
+            if loment_diag.classify(s)[0] == "E999":
+                bad.append(s)
+    assert not bad, "未分类的参考消息模板:\n  " + "\n  ".join(sorted(set(bad)))
+    print(f"      参考消息模板 {len(tpls)} 条全部有错误码")
+
+
+@test
+def test_m81_builtin_tables_match():
+    """自举 checker 的内建名清单必须与参考实现 `lomentc.BUILTINS` 同集合。
+
+    checker.lomt 里的 `is_builtin` 是一张**手写的空格分隔字符串**, 参考实现是一张 dict ——
+    两边漂移的后果很具体: 新加一个内建而没同步, 调用点会被自举 checker 报成
+    "未定义的函数"(假阳性), 而字节一致判据看不出来 (那是编译器后端的事)。
+    """
+    src = (ROOT / "loment" / "selfhost" / "checker.lomt").read_text(encoding="utf-8")
+    m = re.search(r'let names: str = "([^"]+)"', src)
+    assert m, "checker.lomt 里没有内建名表"
+    mine = set(m.group(1).split())
+    want = set(lomentc.BUILTINS) | {"slice_len"}
+    assert mine == want, f"只在 checker: {sorted(mine - want)}; 只在参考: {sorted(want - mine)}"
+    print(f"      内建名表 {len(mine)} 个一致 (含单列的 slice_len)")
 
 
 # ---------------------------------------------------------------- M65/M66 构建

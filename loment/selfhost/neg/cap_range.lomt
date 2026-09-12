@@ -1,0 +1,10 @@
+module cap_range
+
+// 能力域下界 > 上界 -> E-CAP (E004)。区间空集, `guard` 永远不成立 (或恒成立),
+// 是配置写反了 —— 参考实现口径: "能力 c 域下界 5 > 上界 2"。
+capability c : space[5..2]
+
+fn f() -> u32 {
+    guard c(0);
+    return 0;
+}

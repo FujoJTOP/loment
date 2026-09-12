@@ -1,0 +1,9 @@
+module builtin_arity
+
+// 内建函数实参个数不符 -> E-ARITY (E003)。内建没有声明可查, 所以这条必须靠
+// 一张**内建签名表**兜住 (checker.lomt 的 chk_builtin_arity), 否则会掉到符号表
+// 查找上、报成"未定义的函数" (码会从 E003 漂成 E002)。
+// 参考实现口径: "内建 str_len 需要 1 个实参，得到 0"。
+fn f() -> u32 {
+    return str_len();
+}

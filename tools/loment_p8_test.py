@@ -318,29 +318,40 @@ int main(int argc, char **argv) {
 }
 """
 
-# 错误码口径: 与 checker.lomt 的 E_* 常量一致
-E_DUP, E_TYPE, E_FN, E_ARITY = 1, 2, 3, 4
-PY_RULES = [
-    (E_DUP, r"重复定义|重名"),
-    (E_TYPE, r"未声明"),
-    (E_FN, r"未定义的函数"),
-    (E_ARITY, r"需要 \d+ 个实参"),
-]
+# 错误码口径: **单一真源**在 loment_diag.RULES (E001–E013); checker.lomt 的 E_* 常量
+# 用的是同一张表的数字部分, 所以这里直接借 loment_diag.classify 分类参考实现的消息,
+# 两边不会各自维护一份模式表而悄悄漂移。
+import loment_diag  # noqa: E402
+
+E_DUP, E_TYPE, E_FN, E_ARITY = 13, 2, 2, 3
+
+# 还没搬到自举 checker 的规则: 文件名 -> 缺口说明。这些负例只要求 `⊆` (自举版可以少报),
+# 其余负例要求码集**完全相等**。每在 checker.lomt 里补一条, 就删掉这里对应的一行 ——
+# 这张表的价值就是"允许少报"的范围**有界、可数、只减不增**。
+# 现在整张表的规模由 `tools/loment_rule_parity.py` 测出: 24/60 规则等价 (批次 1 = 声明级
+# 规则已落地, 见 docs/150 缺口表)。
+RULE_GAPS: dict[str, str] = {
+    # `let x: Foo = 1;`: 参考实现报两条 —— "类型 Foo 未声明"(E002) 与 "let x: Foo = 表达式类型 u32"(E001)。
+    # 自举版只报 E002: E001 那一半要求表达式类型推断, 属于批次 2。
+    "unknown_let.lomt": "let 初始化类型比对 (表达式类型批次)",
+}
+
+
+def _classify_codes(errs: list[str]) -> list[int]:
+    """把参考实现的错误消息按 loment_diag 的口径归类成数字码集。"""
+    out: list[int] = []
+    for e in errs:
+        code, _title, _hint = loment_diag.classify(e)
+        if code != "E999":
+            out.append(int(code[1:]))
+    return sorted(set(out))
 
 
 def _py_codes(src: Path) -> list[int]:
     """Python 侧把错误消息归类成同一套错误码 (与 checker.lomt 对照)。"""
-    import re
     mod = lomentc.load(src)
     deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
-    errs = lomentc.check(mod, deps=deps)
-    out: list[int] = []
-    for e in errs:
-        for code, pat in PY_RULES:
-            if re.search(pat, e):
-                out.append(code)
-                break
-    return sorted(set(out))
+    return _classify_codes(lomentc.check(mod, deps=deps))
 
 
 @test
@@ -356,17 +367,11 @@ def test_m81_cross_module_dup_is_rejected():
     if not _clang():
         print("      SKIP: 无 clang")
         return
-    import re
     entry = ROOT / "loment" / "selfhost" / "neg_across" / "entry.lomt"
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
-    py: list[int] = []
-    for e in lomentc.check(mod, deps=deps):
-        for code, pat in PY_RULES:
-            if re.search(pat, e):
-                py.append(code)
-                break
-    assert sorted(set(py)) == [E_DUP], f"参考实现没按 E-DUP 报跨模块重名: {py}"
+    py = _classify_codes(lomentc.check(mod, deps=deps))
+    assert py == [E_DUP], f"参考实现没按 E-DUP (E013) 报跨模块重名: {py}"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         unit = Path(td) / "u.lomt"
@@ -407,7 +412,14 @@ def _loment_codes(exe: Path, src: Path) -> list[int]:
 
 @test
 def test_m81_loment_checker_matches_python():
-    """M81: Loment 版检查器与 Python 版的判定一致 (负例拒绝 + 正例接受, 错误码对照)。"""
+    """M81: Loment 版检查器与 Python 版的判定一致 (负例拒绝 + 正例接受, **码集相等**)。
+
+    码值取自项目的统一口径 `loment_diag.RULES` (E001–E013)。以前只断言 `⊆` ——
+    那允许自举版"少报"(更宽松就等于放过真正该拒的程序): 实测 `let x: u32 = true;`
+    参考实现拒、自举版放行。现在要求**相等** —— "自举 checker 与参考等价"是
+    "脱离 Python"的第一道门 (谁在当规范的执行者)。还没补到位的规则在 `RULE_GAPS`
+    里如实登记, 每补一条删一行。
+    """
     if not _clang():
         print("      SKIP: 无 clang")
         return
@@ -420,14 +432,22 @@ def test_m81_loment_checker_matches_python():
            ROOT / "loment" / "examples" / "native.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
+        exact = 0
         for f in neg:
             want, (got, det) = _py_codes(f), _loment_codes(exe, f)
             assert want, f"{f.name}: Python 未报错"
             assert got, f"{f.name}: Loment 未报错"
-            assert set(got) <= set(want), f"{f.name}: Loment {got} ⊄ Python {want} [{det}]"
+            if f.name in RULE_GAPS:
+                assert set(got) <= set(want), f"{f.name}: Loment {got} ⊄ Python {want} [{det}]"
+                continue
+            assert sorted(set(got)) == want, \
+                f"{f.name}: 码集不等 Loment {sorted(set(got))} vs Python {want} [{det}]"
+            exact += 1
         for f in pos:
             want, (got, det) = _py_codes(f), _loment_codes(exe, f)
             assert want == [] and got == [], f"{f.name}: 正例被拒 (py={want} loment={got}) [{det}]"
+        print(f"      负例码集: {exact}/{len(neg)} 完全相等" + (
+            f"; 登记缺口 {len(RULE_GAPS)} 个: {sorted(RULE_GAPS)}" if RULE_GAPS else ""))
 
 
 CODEGEN = ROOT / "loment" / "selfhost" / "codegen.lomt"

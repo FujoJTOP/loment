@@ -2,10 +2,15 @@ module checker
 
 // M81 (子集): Loment 版类型/符号检查 —— 消费 M79 token 流, 判定程序是否合法。
 // 覆盖规则 (与 Python 版 lomentc.check 的判定对照):
-//   E-DUP-NAME    : 顶层名字重复 (fn/struct/enum/const)
-//   E-UNKNOWN-TYPE: 声明里的类型未声明 (参数/返回/字段/let)
+//   E-DUP-NAME    : 顶层名字重复 (fn/struct/enum/const) + 字段/变体/形参重名
+//   E-UNKNOWN-TYPE: 声明里的类型未声明 (参数/返回/字段/变体载荷/let)
 //   E-UNKNOWN-FN  : 调用未声明的函数
-//   E-ARITY       : 实参个数与声明不符
+//   E-ARITY       : 实参个数与声明/内建签名不符
+//   E-DEF         : 类型名为基类型 / 结构体或枚举为空
+//   E-CAP         : 能力重复声明 / 域 lo>hi / 占用 excluded 空间 / guard 未声明或越界
+//   E-CONST-TYPE  : 常量类型不是整型
+// 批次 1 = **声明级**规则 (只吃 token 流, 不需要表达式类型推断);
+// 表达式类型那一批 (E001 的各种"两侧类型对不上") 还没搬过来 —— 见 docs/150 缺口表。
 // 输出: 每条错误 8 字节 (code u32 | tok u32); 返回错误条数。
 use "loment/examples/bytes.lomt"
 use "loment/selfhost/lexer.lomt"
@@ -16,10 +21,16 @@ const K_ENUM: u32 = 3;
 const K_CONST: u32 = 4;
 const K_TPARAM: u32 = 5;   // 泛型形参 (`fn f<T>` 里的 T): 只当类型名用
 
-const E_DUP: u32 = 1;
-const E_TYPE: u32 = 2;
-const E_FN: u32 = 3;
-const E_ARITY: u32 = 4;
+// 错误码 = 项目统一口径 `loment_diag.RULES` (E001–E017) 的**数字部分**。
+// 自举 checker 与参考实现的对照判据 = 两边**码集相等**, 所以码值必须取自同一张表 ——
+// 以前这里自定义 1..4, 与 loment_diag 的分类对不上 (E_DUP=1 vs E013=13 之类)。
+const E_DUP: u32 = 13;     // E013 重名
+const E_TYPE: u32 = 2;     // E002 符号未声明 (含"类型未声明"/"未定义的函数")
+const E_FN: u32 = 2;
+const E_ARITY: u32 = 3;    // E003 实参数量不符
+const E_CAP: u32 = 4;      // E004 能力域非法
+const E_DEF: u32 = 9;      // E009 类型名非法 (与基类型同名 / 类型为空)
+const E_TMISMATCH: u32 = 1;  // E001 类型不匹配 (常量"类型必须是整型"也归这一码)
 
 // 符号表条目: 名字 token 下标 u32 | kind u32 | 参数个数 u32  (12 字节)
 fn sym_get(t: ptr, s: ptr, n: u32, i: u32) -> u32 {
@@ -261,9 +272,243 @@ fn chk_skip_body(src: ptr, t: ptr, i: u32) -> u32 {
     return j;
 }
 
-/// 参数表: '('<i..>')' —— 检查类型并返回结束下标。
-fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
+/// 整型基类型 (镜像 lomentc.INT_TYPES; **bool 不算** —— 常量的类型必须是整型)。
+fn chk_is_int(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_is(src, t, i, "u8") || chk_tok_is(src, t, i, "u16") || chk_tok_is(src, t, i, "u32")
+        || chk_tok_is(src, t, i, "u64") || chk_tok_is(src, t, i, "i8") || chk_tok_is(src, t, i, "i16")
+        || chk_tok_is(src, t, i, "i32") || chk_tok_is(src, t, i, "i64") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 十进制字面量 token -> 数值 (能力域上下界用; 参考实现的 int_lit 只吃 number,
+/// 所以这里不必处理负号/进制前缀)。
+fn chk_dec(src: ptr, t: ptr, i: u32) -> u32 {
+    let n: u32 = tok_len(t, i);
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < n {
+        let c: u32 = load8(src, tok_start(t, i) + k) as u32;
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        k = k + 1;
+    }
+    return v;
+}
+
+/// name_tab 里有没有跟 i 同文的 token (表项 = token 下标, 4 字节一项)。
+/// 字段/变体/形参的重名判定都用它 —— 参考实现是 set[str], 这里等价于 set[token 文本]。
+fn chk_tab_has(src: ptr, t: ptr, tab: ptr, n: u32, i: u32) -> u32 {
+    let k: u32 = 0;
+    while k < n {
+        if same(src, t, load32(tab, k * 4), i) {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 从 i 起找 `{` 的下标。
+fn chk_find_brace(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "{") {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `struct S { ... }` 的字段: 重名 -> E-DUP; 类型未声明 -> E-TYPE; 没有字段 -> E-DEF。
+/// lb = `{` 的下标; 返回 (后一项下标 << 32) | o。
+fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
+                   tab: ptr, p: ptr, o: u32) -> u64 {
+    let j: u32 = lb + 1;
+    let c: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if chk_tab_has(src, t, tab, c, j) == 1 {
+            o = sym_pub(src, t, p, o, E_DUP, j);
+        }
+        store32(tab, c * 4, j);
+        c = c + 1;
+        j = j + 1;
+        if chk_tok_is(src, t, j, ":") {
+            j = j + 1;
+            let r: u64 = check_type(src, t, s, n, j, p, o);
+            o = (r % 4294967296) as u32;
+            j = chk_skip_type(src, t, j);
+        }
+        if chk_tok_is(src, t, j, ",") {
+            j = j + 1;
+        }
+    }
+    if c == 0 {
+        o = sym_pub(src, t, p, o, E_DEF, name_tok);
+    }
+    return ((j + 1) as u64) * 4294967296 + (o as u64);
+}
+
+/// `enum E { ... }` 的变体: 重名 -> E-DUP; 载荷类型未声明 -> E-TYPE; 没有变体 -> E-DEF。
+fn chk_enum_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
+                 tab: ptr, p: ptr, o: u32) -> u64 {
+    let j: u32 = lb + 1;
+    let c: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if chk_tok_kind(t, j) == 0 {
+            if chk_tab_has(src, t, tab, c, j) == 1 {
+                o = sym_pub(src, t, p, o, E_DUP, j);
+            }
+            store32(tab, c * 4, j);
+            c = c + 1;
+            j = j + 1;
+            if chk_tok_is(src, t, j, "(") {
+                let r: u64 = check_type(src, t, s, n, j + 1, p, o);
+                o = (r % 4294967296) as u32;
+                j = chk_skip_type(src, t, j + 1);
+                if chk_tok_is(src, t, j, ")") {
+                    j = j + 1;
+                }
+            }
+        } else {
+            j = j + 1;
+        }
+        if chk_tok_is(src, t, j, ",") {
+            j = j + 1;
+        }
+    }
+    if c == 0 {
+        o = sym_pub(src, t, p, o, E_DEF, name_tok);
+    }
+    return ((j + 1) as u64) * 4294967296 + (o as u64);
+}
+
+/// `capability NAME : SPACE [ LO .. HI ] (revocable)?` —— **只登记不判错**。
+/// 判错必须等整个单元扫完: 参考实现是在 parse 完成后拿 mod.caps / mod.excluded
+/// 一起比的, 所以"先写能力再用 excluded 声明同一空间"也必须报 (顺序无关)。
+/// token 布局是**定长**的 (parser 的形状固定): NAME=i+1, ':'=i+2, SPACE=i+3,
+/// '['=i+4, LO=i+5, '.'=i+6, '.'=i+7, HI=i+8, ']'=i+9。返回后一项下标。
+fn chk_cap_collect(src: ptr, t: ptr, ctab: ptr, nc: ptr, i: u32) -> u32 {
+    let n0: u32 = load32(nc, 0);
+    store32(ctab, n0 * 16, i + 1);                    // 名字 token
+    store32(ctab, n0 * 16 + 4, chk_dec(src, t, i + 5));   // lo
+    store32(ctab, n0 * 16 + 8, chk_dec(src, t, i + 8));   // hi
+    store32(ctab, n0 * 16 + 12, i + 3);               // 空间 token
+    store32(nc, 0, n0 + 1);
+    i = i + 10;
+    if chk_tok_is(src, t, i, "revocable") {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 能力表判错 (参考实现 2094-2107): 重复声明 / LO>HI / 占用 excluded 空间 -> E-CAP。
+fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p: ptr, o: u32) -> u32 {
+    let k: u32 = 0;
+    while k < n0 {
+        let nt: u32 = load32(ctab, k * 16);
+        if load32(ctab, k * 16 + 4) > load32(ctab, k * 16 + 8) {
+            o = sym_pub(src, t, p, o, E_CAP, nt);
+        }
+        // 与**之前**的每个能力比名字: 每个重复项各报一次 (与 set 的"每项都报"同口径)
+        let k2: u32 = 0;
+        while k2 < k {
+            if same(src, t, load32(ctab, k2 * 16), nt) {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
+            k2 = k2 + 1;
+        }
+        // excluded "<space>: ..." —— 取 ':' 之前的部分跟能力空间比
+        let e: u32 = 0;
+        while e < nexs {
+            let es: u32 = load32(exs, e * 4);
+            let el: u32 = tok_len(t, es);
+            let ep: u32 = tok_start(t, es) + 1;      // 跳过开引号
+            let k3: u32 = 0;
+            let colon: u32 = 0;
+            while k3 < el && colon == 0 {
+                if load8(src, ep + k3) == 58 {
+                    colon = k3;
+                }
+                k3 = k3 + 1;
+            }
+            if colon > 0 && colon == tok_len(t, load32(ctab, k * 16 + 12)) {
+                let ok: u32 = 1;
+                let k4: u32 = 0;
+                while k4 < colon {
+                    if load8(src, ep + k4) != load8(src, tok_start(t, load32(ctab, k * 16 + 12)) + k4) {
+                        ok = 0;
+                    }
+                    k4 = k4 + 1;
+                }
+                if ok == 1 {
+                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                }
+            }
+            e = e + 1;
+        }
+        k = k + 1;
+    }
+    return o;
+}
+
+/// guard 的能力与索引: 未声明 -> E-CAP; 字面量索引越界 -> E-CAP。
+/// i 指向 `guard`, i+1 = 能力名, i+2 = '(' , i+3 = 索引 (可选)。
+fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u32 {
+    let nt: u32 = i + 1;
+    let k: u32 = 0;
+    let found: u32 = 0;
+    while k < nc {
+        if same(src, t, load32(ctab, k * 16), nt) {
+            found = 1;
+            if chk_tok_kind(t, i + 3) == 1 {
+                let v: u32 = chk_dec(src, t, i + 3);
+                if v < load32(ctab, k * 16 + 4) || v > load32(ctab, k * 16 + 8) {
+                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if found == 0 {
+        o = sym_pub(src, t, p, o, E_CAP, nt);
+    }
+    return o;
+}
+
+/// 内建函数的形参个数 (镜像 lomentc.BUILTINS 的 arity); 不是内建 -> 999999。
+/// 这张表必须与 `is_builtin` 的名字清单**同增同减** —— `test_m81_builtin_table_matches`
+/// 会逐名比对两边, 漏改一边就红。
+fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
+    // slice_len 也是内建 (参考实现里它单列一条, 不在 BUILTINS 表里), 但 arity 同口径
+    if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "panic")
+            || chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
+            || chk_tok_is(src, t, i, "inb") || chk_tok_is(src, t, i, "str_ptr")
+            || chk_tok_is(src, t, i, "slice_len") {
+        return 1;
+    }
+    if chk_tok_is(src, t, i, "str_eq") || chk_tok_is(src, t, i, "str_concat")
+            || chk_tok_is(src, t, i, "str_byte") || chk_tok_is(src, t, i, "load8")
+            || chk_tok_is(src, t, i, "atomic_add") || chk_tok_is(src, t, i, "outb")
+            || chk_tok_is(src, t, i, "ptr_add") || chk_tok_is(src, t, i, "ptr_sub") {
+        return 2;
+    }
+    if chk_tok_is(src, t, i, "store8") || chk_tok_is(src, t, i, "get_bits") {
+        return 3;
+    }
+    if chk_tok_is(src, t, i, "set_bits") || chk_tok_is(src, t, i, "syscall4") {
+        return 4;
+    }
+    if chk_tok_is(src, t, i, "syscall6") {
+        return 6;
+    }
+    return 999999;
+}
+
+/// 参数表: '('<i..>')' —— 检查类型与形参重名, 返回结束下标。
+fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32, tab: ptr) -> u64 {
     i = i + 1;
+    let c: u32 = 0;
     while !chk_tok_is(src, t, i, ")") && chk_tok_kind(t, i) != 4 {
         // 方法接收者: `&self` / `&mut self` / 裸 `self` (trait 块里写作 `fn m(self) -> u32;`)。
         // 它没有类型注解 —— 不排掉就会把后面的 `)` 或 `-` 当成类型, 报一串假 E-TYPE。
@@ -282,6 +527,12 @@ fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 
                 i = i + 1;
             }
         } else {
+            // 形参重名 -> E-DUP (`fn f(a: u32, a: u32)`; 参考实现的口径是 E013)
+            if chk_tab_has(src, t, tab, c, i) == 1 {
+                o = sym_pub(src, t, p, o, E_DUP, i);
+            }
+            store32(tab, c * 4, i);
+            c = c + 1;
             i = i + 1;              // 参数名
             i = i + 1;              // ':'
             let r: u64 = check_type(src, t, s, n, i, p, o);
@@ -325,9 +576,17 @@ pub fn chk_count_args(src: ptr, t: ptr, i: u32) -> u32 {
 /// 主入口: 返回错误条数 (错误记录写在 p)。
 pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
     let syms: ptr = alloc(8192);   // 全单元符号表: 一个 130+ 函数的单元要 160 条以上
+    let scr: ptr = alloc(4096);    // 名表暂存: 前半给字段, 后半给变体/形参 (逐声明复用)
+    let ctab: ptr = alloc(2048);   // 能力表 (16 字节一项)
+    let nc: ptr = alloc(16);       // 能力条数 (一格内存)
+    let exs: ptr = alloc(512);     // excluded 的字符串 token 下标
+    store32(nc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
+    let nexs: u32 = 0;
     let i: u32 = 0;
+    // 名表清理: 逐声明复用同一块暂存, 每次用都要"清零条数" —— 但 chk_* 系列用
+    // 显式计数 (c) 而不是查找长度, 所以只需不读旧值即可, 无需 memclr。
     // ---- 第零遍: 先把**类型名**收齐再查签名。
     // 单元里的引用可能出现在声明之前 —— 最典型的是预置枚举: `lomentc.load` 把
     // `Option`/`Result` append 到单元**末尾**, 而 `-> Result<u32, u32>` 在文件开头,
@@ -359,7 +618,7 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             n = (r0 / 4294967296) as u32;
             o = (r0 % 4294967296) as u32;
             n = decl_tparams(src, t, syms, n, i + 1);   // `fn f<T>`: T 是类型名
-            let r1: u64 = scan_params(src, t, syms, n, lp, out, o);
+            let r1: u64 = scan_params(src, t, syms, n, lp, out, o, scr);
             o = (r1 % 4294967296) as u32;
             // 返回类型 (可选 ->)。签名式方法 (`trait` 里 `fn m(self) -> u32;`) 没有函数体,
             // 所以 `;` 也要当作终止 —— 否则会一路走到下一个 `{` (那是 impl 块的), 把游标
@@ -375,28 +634,55 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             }
             i = j;
         } else if chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum") {
-            // 名字已在第零遍登记过 (这里不能再 declare, 否则自己跟自己报 E-DUP);
-            // 字段类型不在子集内检查, 跳过 `<...>` 与名字即可。
-            i = chk_skip_type(src, t, i + 1);
+            // 名字已在第零遍登记过 (这里不能再 declare, 否则自己跟自己报 E-DUP)。
+            // 声明体这一遍**真正解析** (字段/变体重名与类型、空类型), 不再整块跳过。
+            let is_enum: bool = chk_tok_is(src, t, i, "enum");
+            if is_base_type(src, t, i + 1) == 1 {
+                o = sym_pub(src, t, out, o, E_DEF, i + 1);   // 与基类型同名 (参考实现 E009)
+            }
+            let lb: u32 = chk_find_brace(src, t, i + 1);
+            if is_enum {
+                let rb: u64 = chk_enum_body(src, t, syms, n, lb, i + 1, scr, out, o);
+                o = (rb % 4294967296) as u32;
+                i = (rb / 4294967296) as u32;
+            } else {
+                let rb2: u64 = chk_struct_body(src, t, syms, n, lb, i + 1, scr, out, o);
+                o = (rb2 % 4294967296) as u32;
+                i = (rb2 / 4294967296) as u32;
+            }
         } else if chk_tok_is(src, t, i, "impl") {
             // impl 块**不在本检查器的子集内**: 方法在平坦符号表里会互相撞名
             // (`impl T for Small { fn m }` 与 `impl T for Big { fn m }` 都叫 m, 会报假 E-DUP),
             // 而方法调用一律走 `x.m()` —— 已经被 `.` 那条规则排除掉了。
             // 整块跳过; 方法体内的调用检查在第二遍照做 (那里不跳 impl)。
             i = chk_skip_body(src, t, i);
+        } else if chk_tok_is(src, t, i, "capability") {
+            i = chk_cap_collect(src, t, ctab, nc, i);
+        } else if chk_tok_is(src, t, i, "excluded") {
+            // excluded "space: ..." —— 只记字符串 token, 等能力表齐了再比 (顺序无关)
+            if chk_tok_kind(t, i + 1) == 2 {
+                store32(exs, nexs * 4, i + 1);
+                nexs = nexs + 1;
+            }
+            i = i + 2;
         } else if chk_tok_is(src, t, i, "const") {
             let r4: u64 = declare(src, t, syms, n, i + 1, K_CONST, 0, out, o);
             n = (r4 / 4294967296) as u32;
             o = (r4 % 4294967296) as u32;
             if chk_tok_is(src, t, i + 2, ":") {
-                let r5: u64 = check_type(src, t, syms, n, i + 3, out, o);
-                o = (r5 % 4294967296) as u32;
+                // 常量**不做** check_type: 参考实现的常量只查"类型必须是整型"
+                // (`const C: Foo = 1;` 只报 E001, 不报"类型未声明") —— 多报就是假阳性。
+                if chk_is_int(src, t, i + 3) == 0 {
+                    o = sym_pub(src, t, out, o, E_TMISMATCH, i + 3);
+                }
             }
             i = i + 4;
         } else {
             i = i + 1;
         }
     }
+    // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
+    o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);
     // ---- 第二遍: 函数体里的调用检查
     i = 0;
     while chk_tok_kind(t, i) != 4 {
@@ -411,6 +697,11 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
             skipped = 1;
         }
         if skipped == 0 {
+            // guard NAME(idx) —— 能力未声明或字面量索引越界 -> E-CAP。
+            // 排在调用检查之前, 并靠 `i-1 != "guard"` 把随后的 `NAME(` 排除掉。
+            if chk_tok_is(src, t, i, "guard") {
+                o = chk_guard(src, t, ctab, load32(nc, 0), i, out, o);
+            }
             // `if let E::V(x) = e` 里的 `let` 是**模式**不是带类型的绑定 (它的 `Result`
             // 后面跟的是 `::` 而不是 `:`) —— 不排掉就会把 `::` 里的第二个 `:` 当类型报 E-TYPE。
             if chk_tok_is(src, t, i, "let") && !(i > 0 && chk_tok_is(src, t, i - 1, "if")) {
@@ -428,15 +719,23 @@ pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard") {
                 let nl: u32 = tok_len(t, i);
-                if nl > 0 && !is_builtin(src, t, i) {
-                    let r7: u64 = lookup(src, t, syms, n, i);
-                    if r7 / 4294967296 == 0 {
-                        o = sym_pub(src, t, out, o, E_FN, i);
-                    } else {
-                        let want: u32 = (r7 % 4294967296) as u32;
-                        let got: u32 = chk_count_args(src, t, i + 1);
-                        if want != got {
+                if nl > 0 {
+                    let want_b: u32 = chk_builtin_arity(src, t, i);
+                    if want_b != 999999 {
+                        // 内建: 只查实参个数 (形参类型那一半属于表达式类型批次)
+                        if want_b != chk_count_args(src, t, i + 1) {
                             o = sym_pub(src, t, out, o, E_ARITY, i);
+                        }
+                    } else {
+                        let r7: u64 = lookup(src, t, syms, n, i);
+                        if r7 / 4294967296 == 0 {
+                            o = sym_pub(src, t, out, o, E_FN, i);
+                        } else {
+                            let want: u32 = (r7 % 4294967296) as u32;
+                            let got: u32 = chk_count_args(src, t, i + 1);
+                            if want != got {
+                                o = sym_pub(src, t, out, o, E_ARITY, i);
+                            }
                         }
                     }
                 }
