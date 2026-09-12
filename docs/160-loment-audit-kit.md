@@ -57,10 +57,15 @@ python tools/loment_audit.py --list     # 只列主张与命令
 ## 3. 第三方复核步骤（30–60 分钟）
 
 ```bash
-git clone <repo> && cd FujoOS
+git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
 git checkout loment-1.0-pre        # 或用审计报告里的 commit
+python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
 python tools/loment_audit.py --json # 期望 14/14
 ```
+
+> 第 0 步不是可选的礼貌：Windows 上（`core.autocrlf=true`）检出的换行取决于**怎么检出的**
+> —— 先 checkout 默认分支再切分支，会留下十几个 CRLF 文件，而按原始字节读源码的判据会把
+> 它们报成"逻辑红"。一条命令就能归零，`--fix` 不会吞内容改动。
 
 1. **工件哈希**：把审计报告里的 `provenance.commit` 与本地 `git rev-parse HEAD` 对齐；
    `python tools/loment_release.py --check` 应报 N/N 一致。

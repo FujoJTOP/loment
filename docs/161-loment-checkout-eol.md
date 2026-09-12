@@ -44,15 +44,32 @@
 
 ## 2. 本机实测（2026-09-12，可直接复跑）
 
-| 观察 | 命令 | 结果 |
-|---|---|---|
-| 属性与工作区字节并列 | `git ls-files --eol` | 开发树 @`12625a8`: 793 件 `i/lf w/lf`，**50 件 `i/lf w/crlf`** |
-| pin 也没被遵守 | 同上 | `docs/155…md`、`docs/156…md`、`sdk/linux/l1/build.sh`、`tools/loment_status.py`、`lom/fuai.lom` 等 attr 列就是 `text eol=lf`，工作区仍是 CRLF |
-| 生成器是 CRLF 源 | `loment/build/fuai_syscalls.lomt` | hub @`7938893`（`.lomt` 无 pin）里它是 `w/crlf`，attr 列 `text=auto` —— 由 Windows 上的 Python 写法写出 |
-| 新检出守 pin | 干净克隆 @`12625a8` | 61/61 `.lomt` = `w/lf` |
-| 显式 checkout 也守属性 | 干净克隆 @`7938893` | 46 件里 43 件 `w/lf`（`text=auto` 下 git 并不主动转 CRLF） |
+判据一律用 `git ls-files --eol` 的 `i/`、`w/` 两列（`i/` = 仓库里存的形态，`w/` = 工作区字节）。
+**别用 shell 循环 grep 数 CR** —— Git Bash 里 `$'\r'` 在 `$()`/`while` 组合里会退化，
+数出来的是行数不是 CR 数（本次就先被它骗了一轮）。
 
-结论：**差异全部来自"这些字节是谁写的"，与 commit 无关。**
+| 观察 | 结果 |
+|---|---|
+| 开发树 @`12625a8` | 793 件 `i/lf w/lf`，**50 件 `i/lf w/crlf`** |
+| pin 也没被遵守 | `docs/155…md`、`docs/156…md`、`sdk/linux/l1/build.sh`、`tools/loment_status.py`、`lom/fuai.lom` 等 attr 列就是 `text eol=lf`，工作区仍是 CRLF |
+| 存储形态是干净的 | 抽查 `LICENSE`、`loment/selfhost/checker.lomt`、`loment/build/selfhost_driver.ll`、`docs/index.html`：`HEAD` blob 里 CR 计数 = **0** |
+| 生成器是 CRLF 源 | hub @`7938893`（`.lomt` 无 pin）里 `loment/build/fuai_syscalls.lomt` 等 4 件是 `w/crlf`，attr 列 `text=auto` —— 由 Windows 上的 Python 写法写出 |
+| 新检出守 pin | 干净克隆 @`12625a8`：61/61 `.lomt` = `w/lf` |
+| 显式 checkout 也守属性 | 干净克隆 @`7938893`：46 件里 43 件 `w/lf` |
+
+**最干净的一次对照（同一个远端、同一台机器）**：
+
+| 克隆方式 | 结果 |
+|---|---|
+| `git clone -b Fujoos-FujoLang-DEV <url>` | **845 `w/lf` + 39 二进制 + `w/crlf` = 0**，门禁绿 |
+| `git clone <url>`（默认分支是 `main`）再 `git checkout Fujoos-FujoLang-DEV` | 17 件 `w/crlf`，门禁红 |
+
+差异只有一步：先检出 `main` 时那 17 个扩展名还没有 pin，于是 checkout 按
+`core.autocrlf` 写了 CRLF；随后切到开发分支，git 按"内容没变"跳过了这些文件的重写，
+CRLF 就跟着留下来了。**注意 blob 侧始终是 LF** —— 也就是说 GH 上看到的、`git archive`
+导出的都是 LF，只有这台机器上这份工作区的字节是 CRLF。这就是"同一个 commit，两个工作树"。
+
+结论：**差异来自"这些字节是谁写的"（检出时的属性、生成器写法），与 commit 无关。**
 
 ## 3. 代价：CRLF 会伪装成逻辑红
 
