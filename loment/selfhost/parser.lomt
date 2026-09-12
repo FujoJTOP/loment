@@ -60,6 +60,48 @@ fn pack(i: u32, o: u32) -> u64 {
     return (i as u64) * 4294967296 + (o as u64);
 }
 
+/// 字符串字面量 -> `"原文重编码"`。与 tools/lomfmt.py 的 `_render` 同一口径:
+/// 词法 token 给的是**原文**(含引号), 先按 _ESCAPES 解码, 再按 (反斜杠 -> 引号 ->
+/// 换行) 的顺序重转义 —— 这样未知转义 (`\q` -> `q`) 与制表符的归一行为都与参考一致。
+fn put_str(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
+    o = puts(out, o, "\"");
+    let s: u32 = tok_start(t, i) + 1;
+    let e: u32 = tok_start(t, i) + tok_len(t, i) - 1;   // 不含右引号
+    let j: u32 = s;
+    while j < e {
+        let c: u32 = load8(src, j);
+        if c == 92 && j + 1 < e {
+            let x: u32 = load8(src, j + 1);
+            c = x;
+            if x == 110 {
+                c = 10;
+            } else {
+                if x == 116 {
+                    c = 9;
+                }
+            }
+            j = j + 2;
+        } else {
+            j = j + 1;
+        }
+        if c == 92 {
+            o = puts(out, o, "\\\\");
+        } else {
+            if c == 34 {
+                o = puts(out, o, "\\\"");
+            } else {
+                if c == 10 {
+                    o = puts(out, o, "\\n");
+                } else {
+                    store8(out, o, c as u8);
+                    o = o + 1;
+                }
+            }
+        }
+    }
+    return puts(out, o, "\"");
+}
+
 /// 在 [start, o) 的内容前插一个空格 (整体右移一格)。else 分支的 dump 形态判定要用:
 /// Python 先决定"是不是恰好一条 if", 再决定要不要在内容前写空格 —— 我们先写内容,
 /// 判定后按需右移 (输出是顺序缓冲, 这样不必做前瞻扫描)。
@@ -281,7 +323,15 @@ fn parse_unary(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         return pack(unpk_i(r2), puts(out, unpk_o(r2), ")"));
     }
     if tok_is(src, t, i, "&") {
-        return parse_atom(src, t, i, out, o);
+        // `&mut x` / `&x` —— 参考实现把它当一元运算符 (op = "&mut" / "&")
+        if tok_is(src, t, i + 1, "mut") {
+            o = puts(out, o, "(un &mut ");
+            let r3: u64 = parse_unary(src, t, i + 2, out, o);
+            return pack(unpk_i(r3), puts(out, unpk_o(r3), ")"));
+        }
+        o = puts(out, o, "(un & ");
+        let r4: u64 = parse_unary(src, t, i + 1, out, o);
+        return pack(unpk_i(r4), puts(out, unpk_o(r4), ")"));
     }
     return parse_atom(src, t, i, out, o);
 }
@@ -289,10 +339,26 @@ fn parse_unary(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 /// 原子 + 后缀 (调用/字段/下标/as)
 fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     let k: u32 = tok_kind(t, i);
+    let go: u32 = 1;   // 后缀 (.f / [i] / ? / as T) 开关: 枚举构造/路径后参考实现不接后缀
     if k == 3 && tok_is(src, t, i, "(") {
         let rp: u64 = parse_expr(src, t, i + 1, out, o, 1);
         i = unpk_i(rp) + 1;
         o = unpk_o(rp);
+    } else if k == 3 && tok_is(src, t, i, "[") {
+        // 数组字面量 `[e, e, ...]`
+        o = puts(out, o, "(arr");
+        i = i + 1;
+        while !tok_is(src, t, i, "]") && tok_kind(t, i) != 4 {
+            o = puts(out, o, " ");
+            let ra: u64 = parse_expr(src, t, i, out, o, 1);
+            i = unpk_i(ra);
+            o = unpk_o(ra);
+            if tok_is(src, t, i, ",") {
+                i = i + 1;
+            }
+        }
+        i = i + 1;  // ']'
+        o = puts(out, o, ")");
     } else if k == 1 {
         o = puts(out, o, "(int ");
         o = put_tok(out, o, src, t, i);
@@ -300,7 +366,7 @@ fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         i = i + 1;
     } else if k == 2 {
         o = puts(out, o, "(str ");
-        o = put_tok(out, o, src, t, i);
+        o = put_str(out, o, src, t, i);
         o = puts(out, o, ")");
         i = i + 1;
     } else if k == 0 && (tok_is(src, t, i, "true") || tok_is(src, t, i, "false")) {
@@ -308,6 +374,29 @@ fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         o = put_tok(out, o, src, t, i);
         o = puts(out, o, ")");
         i = i + 1;
+    } else if k == 0 && tok_is(src, t, i + 1, "{") && tok_kind(t, i + 2) == 0
+            && tok_is(src, t, i + 3, ":") && !tok_is(src, t, i + 4, ":") {
+        // 结构体字面量 `Name { f: e, ... }`。
+        // 参考实现用 `no_struct` 计数器区分"条件里的 `{`"与"结构体字面量"; 这里用
+        // "`{` 后面是 标识符 + `:`" 判 (对合法程序等价; 残留: 空字段列表 `Pair {}`,
+        // 见 docs/150 M80 节的说明)。
+        o = puts(out, o, "(struct ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 2;                            // '{'
+        while !tok_is(src, t, i, "}") && tok_kind(t, i) != 4 {
+            o = puts(out, o, " (f ");
+            o = put_tok(out, o, src, t, i);   // 字段名
+            i = i + 2;                        // ':'
+            o = puts(out, o, " ");
+            let rfs: u64 = parse_expr(src, t, i, out, o, 1);
+            i = unpk_i(rfs);
+            o = puts(out, unpk_o(rfs), ")");
+            if tok_is(src, t, i, ",") {
+                i = i + 1;
+            }
+        }
+        i = i + 1;  // '}'
+        o = puts(out, o, ")");
     } else if k == 0 && tok_is(src, t, i + 1, "(") {
         o = puts(out, o, "(call ");
         o = put_tok(out, o, src, t, i);
@@ -323,32 +412,76 @@ fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         }
         i = i + 1;
         o = puts(out, o, ")");
+    } else if k == 0 && tok_is(src, t, i + 1, ":") && tok_is(src, t, i + 2, ":") {
+        // `Enum::Variant` / `Enum::Variant(arg)` —— 参考实现在这两个分支上**不接后缀**
+        if tok_is(src, t, i + 4, "(") {
+            o = puts(out, o, "(enum ");
+            o = put_tok(out, o, src, t, i);
+            o = puts(out, o, " ");
+            o = put_tok(out, o, src, t, i + 3);
+            o = puts(out, o, " ");
+            let rea: u64 = parse_expr(src, t, i + 5, out, o, 1);
+            i = unpk_i(rea) + 1;              // ')'
+            o = puts(out, unpk_o(rea), ")");
+        } else {
+            o = puts(out, o, "(enumpath ");
+            o = put_tok(out, o, src, t, i);
+            o = puts(out, o, " ");
+            o = put_tok(out, o, src, t, i + 3);
+            o = puts(out, o, ")");
+            i = i + 4;
+        }
+        go = 0;
     } else if k == 0 {
         o = puts(out, o, "(id ");
-        o = put_tok(out, o, src, t, i);
+        if tok_is(src, t, i, "self") {
+            o = puts(out, o, "__self");       // 镜像 lomentc._rename_self (impl 方法体里的 self)
+        } else {
+            o = put_tok(out, o, src, t, i);
+        }
         o = puts(out, o, ")");
         i = i + 1;
     }
-    // 后缀: .field / [idx] / as T  —— 以独立分组追加在基表达式之后
-    let go: u32 = 1;
+    // 后缀: .field / [idx] / ? / as T  —— 以独立分组追加在基表达式之后
     while go == 1 {
-        if tok_is(src, t, i, ".") {
-            o = puts(out, o, "(field ");
-            i = i + 1;
-            o = put_tok(out, o, src, t, i);
-            i = i + 1;
-            o = puts(out, o, ")");
+        if tok_is(src, t, i, ".") && tok_kind(t, i + 1) == 0 && !tok_is(src, t, i + 1, ".") {
+            // 字段访问 `x.f` / 方法调用 `x.m(args)`
+            if tok_is(src, t, i + 2, "(") {
+                // 方法调用 `x.m(args)` —— 后缀风格: 接收者已在前面输出
+                o = puts(out, o, "(mcall ");
+                o = put_tok(out, o, src, t, i + 1);
+                i = i + 3;                    // 跳过 '.' 名 '('
+                while !tok_is(src, t, i, ")") && tok_kind(t, i) != 4 {
+                    o = puts(out, o, " ");
+                    let rma: u64 = parse_expr(src, t, i, out, o, 1);
+                    i = unpk_i(rma);
+                    o = unpk_o(rma);
+                    if tok_is(src, t, i, ",") {
+                        i = i + 1;
+                    }
+                }
+                i = i + 1;                    // ')'
+                o = puts(out, o, ")");
+            } else {
+                o = puts(out, o, "(field ");
+                i = i + 1;
+                o = put_tok(out, o, src, t, i);
+                i = i + 1;
+                o = puts(out, o, ")");
+            }
         } else if tok_is(src, t, i, "[") {
             o = puts(out, o, "(idx ");
             let ri: u64 = parse_expr(src, t, i + 1, out, o, 1);
             i = unpk_i(ri) + 1;
             o = puts(out, unpk_o(ri), ")");
+        } else if tok_is(src, t, i, "?") {
+            o = puts(out, o, "(try)");
+            i = i + 1;
         } else if tok_is(src, t, i, "as") {
             o = puts(out, o, "(cast ");
-            i = i + 1;
-            o = put_tok(out, o, src, t, i);
-            i = i + 1;
-            o = puts(out, o, ")");
+            let rct: u64 = put_type(src, t, i + 1, out, o);
+            i = unpk_i(rct);
+            o = puts(out, unpk_o(rct), ")");
         } else {
             go = 0;
         }
@@ -375,8 +508,9 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         o = put_tok(out, o, src, t, i);   // 名
         i = i + 2;                        // ':' 类型
         o = puts(out, o, " ");
-        o = put_tok(out, o, src, t, i);
-        i = i + 1;
+        let rlt: u64 = put_type(src, t, i, out, o);
+        i = unpk_i(rlt);
+        o = unpk_o(rlt);
         if tok_is(src, t, i, "=") {
             i = i + 1;
             o = puts(out, o, " ");
@@ -392,6 +526,47 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         return pack(unpk_i(r2) + 1, puts(out, unpk_o(r2), ")"));
     }
     if tok_is(src, t, i, "if") {
+        if tok_is(src, t, i + 1, "let") {
+            // `if let Enum::Variant(bind) = e { then } else { other }`
+            // 参考实现把它反糖成两臂 Match: 命中臂 + 通配臂 (无 else 就是空通配臂)。
+            o = puts(out, o, "(match ");
+            let en: u32 = i + 2;              // 枚举名 (i='if' i+1='let')
+            let vn: u32 = i + 5;              // 变体名 (跳过 ':' ':')
+            i = i + 6;
+            let has_bind: u32 = 0;
+            let bn: u32 = 0;
+            if tok_is(src, t, i, "(") {
+                has_bind = 1;
+                bn = i + 1;
+                i = i + 3;                    // '(' 绑定名 ')'
+            }
+            i = i + 1;                        // '='
+            let rs: u64 = parse_expr(src, t, i, out, o, 1);
+            i = unpk_i(rs) + 1;               // '{'
+            o = puts(out, unpk_o(rs), " (arm (enumpath ");
+            o = put_tok(out, o, src, t, en);
+            o = puts(out, o, " ");
+            o = put_tok(out, o, src, t, vn);
+            if has_bind == 1 {
+                o = puts(out, o, " bind ");
+                o = put_tok(out, o, src, t, bn);
+            }
+            o = puts(out, o, ") (");
+            let rt: u64 = parse_stmts(src, t, i, out, o);
+            i = unpk_i(rt) + 1;               // '}'
+            o = puts(out, unpk_o(rt), "))");
+            o = puts(out, o, " (arm _ (");
+            if tok_is(src, t, i, "else") {
+                i = i + 1;
+                if tok_is(src, t, i, "{") {
+                    i = i + 1;
+                    let re: u64 = parse_stmts(src, t, i, out, o);
+                    i = unpk_i(re) + 1;       // '}'
+                    o = unpk_o(re);
+                }
+            }
+            return pack(i, puts(out, o, ")))"));
+        }
         o = puts(out, o, "(if ");
         let rc: u64 = parse_expr(src, t, i + 1, out, o, 1);
         i = unpk_i(rc);
@@ -445,6 +620,66 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         i = unpk_i(rt2) + 1;
         return pack(i, puts(out, unpk_o(rt2), "))"));
     }
+    if tok_is(src, t, i, "match") {
+        o = puts(out, o, "(match ");
+        let rms: u64 = parse_expr(src, t, i + 1, out, o, 1);
+        i = unpk_i(rms) + 1;                  // '{'
+        o = unpk_o(rms);
+        while !tok_is(src, t, i, "}") && tok_kind(t, i) != 4 {
+            o = puts(out, o, " (arm ");
+            if tok_is(src, t, i, "_") {
+                o = puts(out, o, "_");
+                i = i + 1;
+            } else {
+                // `Enum::Variant` 或 `Enum::Variant(bind)`
+                o = puts(out, o, "(enumpath ");
+                o = put_tok(out, o, src, t, i);
+                o = puts(out, o, " ");
+                o = put_tok(out, o, src, t, i + 3);   // 枚举名 ':' ':' 变体名
+                i = i + 4;
+                if tok_is(src, t, i, "(") {
+                    o = puts(out, o, " bind ");
+                    o = put_tok(out, o, src, t, i + 1);
+                    i = i + 3;                // '(' 绑定名 ')'
+                }
+                o = puts(out, o, ")");
+            }
+            i = i + 2;                        // '=>' (词法上是 '=' '>')
+            i = i + 1;                        // '{'
+            o = puts(out, o, " (");
+            let rmb: u64 = parse_stmts(src, t, i, out, o);
+            i = unpk_i(rmb) + 1;              // '}'
+            o = puts(out, unpk_o(rmb), "))");
+        }
+        return pack(i + 1, puts(out, o, ")"));
+    }
+    if tok_is(src, t, i, "for") {
+        o = puts(out, o, "(for ");
+        i = i + 1;
+        o = put_tok(out, o, src, t, i);       // 循环变量
+        i = i + 2;                            // 'in'
+        o = puts(out, o, " ");
+        let rf1: u64 = parse_expr(src, t, i, out, o, 1);
+        i = unpk_i(rf1) + 2;                  // '..' (词法上是两个 '.')
+        o = puts(out, unpk_o(rf1), " ");
+        let rf2: u64 = parse_expr(src, t, i, out, o, 1);
+        i = unpk_i(rf2) + 1;                  // '{'
+        o = puts(out, unpk_o(rf2), " (");
+        let rf3: u64 = parse_stmts(src, t, i, out, o);
+        i = unpk_i(rf3) + 1;                  // '}'
+        return pack(i, puts(out, unpk_o(rf3), "))"));
+    }
+    if tok_is(src, t, i, "guard") {
+        // `guard CAP(expr);` —— 能力域守卫 (参考实现里 cap 是名字、expr 是索引表达式)
+        o = puts(out, o, "(guard ");
+        i = i + 1;
+        o = put_tok(out, o, src, t, i);
+        i = i + 2;                            // '('
+        o = puts(out, o, " ");
+        let rg: u64 = parse_expr(src, t, i, out, o, 1);
+        i = unpk_i(rg) + 2;                   // ')' + ';'
+        return pack(i, puts(out, unpk_o(rg), ")"));
+    }
     // 表达式语句 / 赋值
     let r3: u64 = parse_expr(src, t, i, out, o, 1);
     i = unpk_i(r3);
@@ -461,20 +696,84 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 
 // ---------------------------------------------------------------- 顶层
 
+/// 类型名 -> 规范化文本, 与 `lomentc.type_name` 同口径:
+/// `mut [X]` / `[X; N]` / `[X]` / `Name<A, B>`。原先只吃单个 token, 于是
+/// `mut [u32]`、`[u32; 4]` 被拆成"多个形参"、`Pair<u32>` 被截断 (实测 native_mut/native_slice)。
+fn put_type(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    if tok_is(src, t, i, "mut") && tok_is(src, t, i + 1, "[") {
+        o = puts(out, o, "mut [");
+        let r: u64 = put_type(src, t, i + 2, out, o);
+        i = unpk_i(r);
+        o = puts(out, unpk_o(r), "]");
+        return pack(i + 1, o);
+    }
+    if tok_is(src, t, i, "[") {
+        o = puts(out, o, "[");
+        let r2: u64 = put_type(src, t, i + 1, out, o);
+        i = unpk_i(r2);
+        o = unpk_o(r2);
+        if tok_is(src, t, i, ";") {
+            o = puts(out, o, "; ");
+            o = put_tok(out, o, src, t, i + 1);   // 数组长度
+            i = i + 3;                            // ';' + 长度 + ']'
+        } else {
+            i = i + 1;                            // ']'
+        }
+        o = puts(out, o, "]");
+        return pack(i, o);
+    }
+    o = put_tok(out, o, src, t, i);               // 基类型 / struct 名
+    i = i + 1;
+    if tok_is(src, t, i, "<") {
+        o = puts(out, o, "<");
+        i = i + 1;
+        let first: u32 = 1;
+        while !tok_is(src, t, i, ">") && tok_kind(t, i) != 4 {
+            if first == 0 {
+                o = puts(out, o, ", ");
+            }
+            first = 0;
+            let r3: u64 = put_type(src, t, i, out, o);
+            i = unpk_i(r3);
+            o = unpk_o(r3);
+            if tok_is(src, t, i, ",") {
+                i = i + 1;
+            }
+        }
+        o = puts(out, o, ">");
+        i = i + 1;
+    }
+    return pack(i, o);
+}
+
 fn parse_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     o = puts(out, o, "(fn ");
     i = i + 1;
     o = put_tok(out, o, src, t, i);
     i = i + 1;
+    if tok_is(src, t, i, "<") {
+        // 泛型形参不进 dump (与 helper 的 _fn_mod 一致: 它只写名字 + 形参/返回), 但要跳过整段
+        let gd: u32 = 1;
+        i = i + 1;
+        while gd > 0 && tok_kind(t, i) != 4 {
+            if tok_is(src, t, i, "<") {
+                gd = gd + 1;
+            }
+            if tok_is(src, t, i, ">") {
+                gd = gd - 1;
+            }
+            i = i + 1;
+        }
+    }
     i = i + 1;  // '('
     while !tok_is(src, t, i, ")") {
         o = puts(out, o, " (p ");
         o = put_tok(out, o, src, t, i);
         i = i + 2;  // ':'
         o = puts(out, o, " ");
-        o = put_tok(out, o, src, t, i);
-        o = puts(out, o, ")");
-        i = i + 1;
+        let rt: u64 = put_type(src, t, i, out, o);   // 多 token 类型 (mut [T] / [T; N] / Name<A>)
+        i = unpk_i(rt);
+        o = puts(out, unpk_o(rt), ")");
         if tok_is(src, t, i, ",") {
             i = i + 1;
         }
@@ -483,14 +782,56 @@ fn parse_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     if tok_is(src, t, i, "-") {
         i = i + 2;  // '->'
         o = puts(out, o, " -> ");
-        o = put_tok(out, o, src, t, i);
-        i = i + 1;
+        let rr: u64 = put_type(src, t, i, out, o);
+        i = unpk_i(rr);
+        o = unpk_o(rr);
     }
     if tok_is(src, t, i, "{") {
         i = i + 1;
         o = puts(out, o, " (");
         let rb: u64 = parse_stmts(src, t, i, out, o);
         i = unpk_i(rb) + 1;
+        o = puts(out, unpk_o(rb), ")");
+    }
+    return pack(i, puts(out, o, ")"));
+}
+
+/// impl 里的方法: 参考实现把名字折叠成 `<类型>_<方法>`、第一个形参改成
+/// `__self: <类型>`、方法体里的 `self` 重写成 `__self` (lomentc.parse_impl)。
+fn parse_impl_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32, ty: u32) -> u64 {
+    o = puts(out, o, "(fn ");
+    o = put_tok(out, o, src, t, ty);              // 类型名
+    o = puts(out, o, "_");
+    i = i + 1;                                   // 'fn'
+    o = put_tok(out, o, src, t, i);              // 方法名
+    i = i + 2;                                   // '('
+    o = puts(out, o, " (p __self ");
+    o = put_tok(out, o, src, t, ty);              // 接收者类型
+    o = puts(out, o, ")");
+    i = i + 1;                                   // 'self'
+    while !tok_is(src, t, i, ")") && tok_kind(t, i) != 4 {
+        i = i + 1;                               // ','
+        o = puts(out, o, " (p ");
+        o = put_tok(out, o, src, t, i);
+        i = i + 2;                               // ':'
+        o = puts(out, o, " ");
+        let rp: u64 = put_type(src, t, i, out, o);
+        i = unpk_i(rp);
+        o = puts(out, unpk_o(rp), ")");
+    }
+    i = i + 1;                                   // ')'
+    if tok_is(src, t, i, "-") {
+        i = i + 2;                               // '->'
+        o = puts(out, o, " -> ");
+        let rr: u64 = put_type(src, t, i, out, o);
+        i = unpk_i(rr);
+        o = unpk_o(rr);
+    }
+    if tok_is(src, t, i, "{") {
+        i = i + 1;
+        o = puts(out, o, " (");
+        let rb: u64 = parse_stmts(src, t, i, out, o);
+        i = unpk_i(rb) + 1;                      // '}'
         o = puts(out, unpk_o(rb), ")");
     }
     return pack(i, puts(out, o, ")"));
@@ -509,6 +850,40 @@ pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
             let r: u64 = parse_fn(src, t, i, out, o);
             i = unpk_i(r);
             o = unpk_o(r);
+        } else if tok_is(src, t, i, "impl") {
+            // `impl Trait for Type { ... }` / `impl Type { ... }`
+            let tyi: u32 = i + 1;
+            if tok_kind(t, tyi) == 0 && tok_is(src, t, tyi + 1, "for") {
+                tyi = tyi + 2;                   // 跳过 'Trait' 'for'
+            }
+            i = tyi + 2;                         // 跳过 类型名 '{'
+            while !tok_is(src, t, i, "}") && tok_kind(t, i) != 4 {
+                if tok_is(src, t, i, "fn") {
+                    o = puts(out, o, " ");
+                    let rm: u64 = parse_impl_fn(src, t, i, out, o, tyi);
+                    i = unpk_i(rm);
+                    o = unpk_o(rm);
+                } else {
+                    i = i + 1;
+                }
+            }
+            i = i + 1;                           // '}'
+        } else if tok_is(src, t, i, "trait") {
+            // trait 声明不进 dump (参考实现只把 impl 的方法放进 funcs)
+            while tok_kind(t, i) != 4 && !tok_is(src, t, i, "{") {
+                i = i + 1;
+            }
+            i = i + 1;
+            let d: u32 = 1;
+            while tok_kind(t, i) != 4 && d > 0 {
+                if tok_is(src, t, i, "{") {
+                    d = d + 1;
+                }
+                if tok_is(src, t, i, "}") {
+                    d = d - 1;
+                }
+                i = i + 1;
+            }
         } else {
             i = i + 1;
         }

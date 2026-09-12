@@ -181,8 +181,26 @@ def _ex(e) -> str:
         return f"(int {e.value})"
     if n == "BoolLit":
         return f"(bool {'true' if e.value else 'false'})"
+    if n == "StrLit":
+        # 与 tools/lomfmt.py 的 _render 同一口径: 解码后的内容按 (反斜杠 -> 引号 ->
+        # 换行) 顺序重转义。Loment 版词法给的是原文(含引号), parser 侧负责同样的解码。
+        esc = e.value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        return f'(str "{esc}")'
     if n == "Ident":
         return f"(id {e.name})"
+    if n == "ArrayLit":
+        return "(arr" + "".join(" " + _ex(x) for x in e.items) + ")"
+    if n == "StructLit":
+        return (f"(struct {e.name}"
+                + "".join(f" (f {fn} {_ex(fv)})" for fn, fv in e.inits) + ")")
+    if n == "EnumCtor":
+        return f"(enum {e.enum} {e.variant} {_ex(e.arg)})"
+    if n == "EnumPath":
+        return f"(enumpath {e.enum} {e.variant})"
+    if n == "MethodCall":
+        # 后缀风格 (与 (idx …)/(cast …)/(field …) 一致): 接收者先输出, 再跟 (mcall 名 实参…)
+        return (f"{_ex(e.obj)}(mcall {e.name}"
+                + "".join(" " + _ex(x) for x in e.args) + ")")
     if n == "Call":
         return "(call " + e.name + "".join(" " + _ex(a) for a in e.args) + ")"
     if n == "Bin":
@@ -196,7 +214,19 @@ def _ex(e) -> str:
         return f"{_ex(e.obj)}(field {e.name})"
     if n == "Index":
         return f"{_ex(e.obj)}(idx {_ex(e.idx)})"
+    if n == "Try":
+        return f"{_ex(e.expr)}(try)"
     raise Unsupported(n)
+
+
+def _arm_ex(pat, body) -> str:
+    """match 臂: pat 为 None 表示通配 `_`; 否则是 EnumPath(可能带绑定名)。"""
+    head = "_" if pat is None else f"(enumpath {pat.enum} {pat.variant}"
+    if pat is not None and getattr(pat, "bind", None):
+        head += f" bind {pat.bind}"
+    if pat is not None:
+        head += ")"
+    return f" (arm {head} (" + "".join(" " + _st(x) for x in body) + "))"
 
 
 def _st(s) -> str:
@@ -212,8 +242,7 @@ def _st(s) -> str:
     if n == "ExprStmt":
         return _ex(s.expr)
     if n == "Assign":
-        if type(s.target).__name__ != "Ident":
-            raise Unsupported("Assign/" + type(s.target).__name__)
+        # 目标可以是 Ident 或 Index (`xs[0] = 1`); 两者 _ex 都能表达
         return f"{_ex(s.target)} (set {_ex(s.expr)})"
     if n == "If":
         then = "".join(" " + _st(x) for x in s.then)
@@ -225,6 +254,15 @@ def _st(s) -> str:
     if n == "While":
         body = "".join(" " + _st(x) for x in s.body)
         return f"(while {_ex(s.cond)} ({body}))"
+    if n == "For":
+        body = "".join(" " + _st(x) for x in s.body)
+        return f"(for {s.var} {_ex(s.lo)} {_ex(s.hi)} ({body}))"
+    if n == "Guard":
+        return f"(guard {s.cap} {_ex(s.expr)})"
+    if n == "Match":
+        # `if let` 也走这里 (参考实现把它反糖成两臂 Match: 命中臂 + 通配臂)
+        return (f"(match {_ex(s.subject)}"
+                + "".join(_arm_ex(p, b) for p, b in s.arms) + ")")
     raise Unsupported(n)
 
 
@@ -256,11 +294,20 @@ def _scan(obj, bad: tuple[str, ...]) -> None:
 
 def _py_dump(src: Path) -> str:
     mod = lomentc.load(src)
-    _scan(mod, ("StrLit",))  # 字符串字面量本阶段不覆盖
     if any(t.kind == "number" and t.val.lower().startswith("0x")
            for t in lomc.lex(src.read_text(encoding="utf-8"))):
         raise Unsupported("十六进制字面量 (本阶段不覆盖)")
     return _fn_mod(mod)
+
+
+#: M80 已知缺口 (棘轮: **只许变短**, 现在是空的 —— 全语料逐字符一致)。
+#: 机制保留: 将来出现新的缺口时先在这里登记 (带一句原因), 修好后删掉; 门禁会拒绝
+#: "清单里已经一致"的条目, 所以这份清单不可能过期变松。
+PARSE_KNOWN_GAPS: dict[str, str] = {}
+
+#: dump 助手还没口径的结点 (第二道棘轮, 现在也是空的: 助手覆盖全部 42 个语料)。
+#: 加新语料时如果助手缺结点, 这里会先红, 逼着先写 dump 口径 (再补 parser 分支)。
+PARSE_HELPER_GAPS: dict[str, str] = {}
 
 
 def _parser_corpus() -> tuple[list[Path], list[str]]:
@@ -300,22 +347,32 @@ def test_m80_loment_parser_ast_dump():
         print("      SKIP: 无 clang")
         return
     files, skip = _parser_corpus()
-    assert len(files) >= 19, f"可对照语料只剩 {len(files)} 个 (低于 19 是覆盖面回退)"
+    assert len(files) >= 42, f"可对照语料只剩 {len(files)} 个 (低于 42 是覆盖面回退)"
+    helper_gap = {s.split(":", 1)[0] for s in skip}
+    assert helper_gap == set(PARSE_HELPER_GAPS), (
+        f"助手侧缺口变了: 现在 {sorted(helper_gap)} (登记 {sorted(PARSE_HELPER_GAPS)}) —— "
+        f"少了的要删清单, 多了的先给 dump 助手写口径")
     with tempfile.TemporaryDirectory() as td:
         exe = _build_parser(td)
-        bad = []
+        bad, fixed = [], []
         for f in files:
             got = subprocess.run([shutil.which(str(exe)) or str(exe), str(f)],
                                  capture_output=True, text=True, shell=False).stdout.strip()
             want = _py_dump(f)
-            if got != want:
+            if got == want:
+                if f.name in PARSE_KNOWN_GAPS:
+                    fixed.append(f.name)
+                continue
+            if f.name not in PARSE_KNOWN_GAPS:
                 k = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]),
                          min(len(got), len(want)))
                 bad.append(f"{f.name} @{k}: Loment {got[max(0,k-40):k+30]!r} "
                            f"!= Python {want[max(0,k-40):k+30]!r}")
+        assert not fixed, (f"这些文件已经一致, 请从 PARSE_KNOWN_GAPS 删掉: {fixed}")
         assert not bad, "\n".join(bad[:4])
-        print(f"      {len(files)}/{len(files)} 语料逐字符一致; 待补结点: "
-              f"{len(skip)} 个文件 ({', '.join(sorted({s.split(':', 1)[1] for s in skip}))})")
+        okn = len(files) - len(PARSE_KNOWN_GAPS)
+        print(f"      {okn}/{len(files)} 语料逐字符一致; parser 侧缺口 {len(PARSE_KNOWN_GAPS)} 个, "
+              f"助手侧缺口 {len(PARSE_HELPER_GAPS)} 个 (两道棘轮都只许变短)")
 
 
 CHECKER = ROOT / "loment" / "selfhost" / "checker.lomt"
