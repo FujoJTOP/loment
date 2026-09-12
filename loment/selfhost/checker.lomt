@@ -109,7 +109,7 @@ fn chk_ty_of_tok(src: ptr, t: ptr, s: ptr, n: u32, i: u32) -> u32 {
     if slot == 0 {
         return (TY_K_NAMED << TY_KIND_SHIFT) + i;   // 未声明名字: 用 token 本身当身份
     }
-    if load32(s, (slot - 1) * 16 + 4) == K_TPARAM {
+    if load32(s, (slot - 1) * 20 + 4) == K_TPARAM {
         return 0;
     }
     return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
@@ -153,12 +153,16 @@ fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
     return 0;
 }
 
-// 符号表条目: 名字 token 下标 u32 | kind u32 | 参数个数 u32 | 返回类型编码 u32 (16 字节)
-// 返回类型是批次 2 加的: `return` 的类型比对要查被调函数的返回类型, 单靠 (名字, 元数)
-// 查不出来。stride 从 12 改成 16 时**所有字段偏移都要一起改** —— 漏一处就会读到
-// 相邻条目的字节, 症状是"码偶尔对偶尔错"(地址相关)。
+// 符号表条目 (20 字节): 名字 tok | kind | 参数个数 | 返回类型编码 | aux
+//   aux 的语义按 kind: 函数 -> 形参表的 '(' ; struct/enum -> 声明体的 '{' ; 其余 0。
+// 为什么要 aux: 字段类型、形参类型这些**都不建表**, 改成"按需重扫" —— 一张
+// "每函数 10 个形参类型"的二维表要 40B x 函数数 (语料 200+ 个函数 = 8 KiB 以上),
+// 而 checker 的 arena 只有 ~14 KiB。存一个下标再扫一遍, 空间是 O(1), 时间只在
+// 调用点/字段访问点付。这也是本文件里 `chk_enum_body`/`chk_struct_body` 一贯的做法。
+// stride 从 16 改成 20 时**所有字段偏移都要一起改** —— 漏一处就会读到相邻条目的字节,
+// 症状是"码偶尔对偶尔错"(地址相关)。
 fn sym_get(t: ptr, s: ptr, n: u32, i: u32) -> u32 {
-    return load32(s, i * 16);
+    return load32(s, i * 20);
 }
 
 fn sym_pub(src: ptr, t: ptr, p: ptr, o: u32, code: u32, tok: u32) -> u32 {
@@ -267,16 +271,21 @@ fn chk_lookup_slot(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
     return 0;
 }
 
-/// 登记顶层名字; 重复 -> 产出 E-DUP。
-fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, kind: u32,
-           argc: u32, ret: u32, p: ptr, o: u32) -> u64 {
+/// 登记顶层名字; 重复 -> 产出 E-DUP。aux 见 sym_get 的说明 (声明体的起止 token)。
+///
+/// `ka` = kind * 256 + 参数个数: 两个小字段**打包**进一个 u32, 因为自举 codegen 的形参
+/// 上限是 10 (形参类型表步长 80 = 10 槽) —— 这里原来有 11 个形参, 一加 `aux` 就撞上限,
+/// 自举驱动直接 `panic(10)` (测试 `test_m85_codegen_arg_arity_is_loud` 抓到的)。
+fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, ka: u32,
+           ret: u32, aux: u32, p: ptr, o: u32) -> u64 {
     if chk_lookup_slot(src, t, s, n, name_tok) != 0 {
         return (n as u64) * 4294967296 + (sym_pub(src, t, p, o, E_DUP, name_tok) as u64);
     }
-    store32(s, n * 16, name_tok);
-    store32(s, n * 16 + 4, kind);
-    store32(s, n * 16 + 8, argc);
-    store32(s, n * 16 + 12, ret);
+    store32(s, n * 20, name_tok);
+    store32(s, n * 20 + 4, ka / 256);
+    store32(s, n * 20 + 8, ka % 256);
+    store32(s, n * 20 + 12, ret);
+    store32(s, n * 20 + 16, aux);
     return ((n + 1) as u64) * 4294967296 + (o as u64);
 }
 
@@ -344,10 +353,11 @@ fn decl_tparams(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
     let c: u32 = n;
     while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, ">") {
         if chk_tok_kind(t, k) == 0 {
-            store32(s, c * 16, k);
-            store32(s, c * 16 + 4, K_TPARAM);
-            store32(s, c * 16 + 8, 0);
-            store32(s, c * 16 + 12, 0);
+            store32(s, c * 20, k);
+            store32(s, c * 20 + 4, K_TPARAM);
+            store32(s, c * 20 + 8, 0);
+            store32(s, c * 20 + 12, 0);
+            store32(s, c * 20 + 16, 0);
             c = c + 1;
         }
         k = k + 1;
@@ -722,9 +732,9 @@ fn chk_name_ty(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32, name_to
         return v;
     }
     let slot: u32 = chk_lookup_slot(src, t, syms, n, name_tok);
-    if slot != 0 && load32(syms, (slot - 1) * 16 + 4) == K_CONST {
+    if slot != 0 && load32(syms, (slot - 1) * 20 + 4) == K_CONST {
         // 常量的类型编码存在**返回类型那一格** (常量没有返回类型, 那格空着)
-        return load32(syms, (slot - 1) * 16 + 12);
+        return load32(syms, (slot - 1) * 20 + 12);
     }
     return 0;
 }
@@ -883,7 +893,7 @@ fn chk_ty_expr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
         if slot != 0 {
-            return load32(syms, (slot - 1) * 16 + 12);
+            return load32(syms, (slot - 1) * 20 + 12);
         }
         return 0;
     }
@@ -1162,7 +1172,8 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if chk_tok_is(src, t, i, "enum") {
                 k0 = K_ENUM;
             }
-            let r0a: u64 = declare(src, t, syms, n, i + 1, k0, 0, 0, out, o);
+            let r0a: u64 = declare(src, t, syms, n, i + 1, k0 * 256, 0,
+                                   chk_find_brace(src, t, i + 1), out, o);
             n = (r0a / 4294967296) as u32;
             o = (r0a % 4294967296) as u32;
             n = decl_tparams(src, t, syms, n, i + 1);
@@ -1196,7 +1207,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if rtok != 0 {
                 rcode = chk_ty_of_tok(src, t, syms, n, rtok);
             }
-            let r0: u64 = declare(src, t, syms, n, i + 1, K_FN, argc, rcode, out, o);
+            let r0: u64 = declare(src, t, syms, n, i + 1, K_FN * 256 + argc, rcode, lp, out, o);
             n = (r0 / 4294967296) as u32;
             o = (r0 % 4294967296) as u32;
             n = decl_tparams(src, t, syms, n, i + 1);   // `fn f<T>`: T 是类型名
@@ -1245,7 +1256,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if chk_tok_is(src, t, i + 2, ":") {
                 cty = chk_ty_of_tok(src, t, syms, n, i + 3);
             }
-            let r4: u64 = declare(src, t, syms, n, i + 1, K_CONST, 0, cty, out, o);
+            let r4: u64 = declare(src, t, syms, n, i + 1, K_CONST * 256, cty, 0, out, o);
             n = (r4 / 4294967296) as u32;
             o = (r4 % 4294967296) as u32;
             if chk_tok_is(src, t, i + 2, ":") {
@@ -1310,7 +1321,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                         if slot == 0 {
                             o = sym_pub(src, t, out, o, E_FN, i);
                         } else {
-                            let want: u32 = load32(syms, (slot - 1) * 16 + 8);
+                            let want: u32 = load32(syms, (slot - 1) * 20 + 8);
                             let got: u32 = chk_count_args(src, t, i + 1);
                             if want != got {
                                 o = sym_pub(src, t, out, o, E_ARITY, i);
@@ -1335,7 +1346,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             let fbra: u32 = chk_find_brace(src, t, i + 2);
             // 签名式方法 (`fn m(self) -> u32;`) 没有函数体: 不能把后面的 impl 块当自己的
             if chk_tok_is(src, t, fbra, "{") && slot2 != 0 {
-                let retc: u32 = load32(syms, (slot2 - 1) * 16 + 12);
+                let retc: u32 = load32(syms, (slot2 - 1) * 20 + 12);
                 let fend: u32 = chk_skip_body(src, t, fbra);
                 let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra);
                 o = chk_body(src, t, syms, n, env, envc,
@@ -1353,18 +1364,19 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
 
 /// arena 一块里的分段布局 (驱动按这几个常量切片; 单位: 字节)。
 /// 顺序与 `check_arena` 的形参顺序一致, 驱动侧一个 `sys_alloc(CHK_ARENA)` 就够。
+/// syms 从 8192 涨到 10240 是批次 2 第二段: 符号表条目加了一格 aux (stride 20)。
 pub fn chk_arena_syms() -> u32 { return 0; }
-pub fn chk_arena_scr() -> u32 { return 8192; }
-pub fn chk_arena_ctab() -> u32 { return 9216; }
-pub fn chk_arena_nc() -> u32 { return 9728; }
-pub fn chk_arena_exs() -> u32 { return 9744; }
-pub fn chk_arena_env() -> u32 { return 10000; }
-pub fn chk_arena_bytes() -> u32 { return 12048; }
+pub fn chk_arena_scr() -> u32 { return 10240; }
+pub fn chk_arena_ctab() -> u32 { return 11264; }
+pub fn chk_arena_nc() -> u32 { return 11776; }
+pub fn chk_arena_exs() -> u32 { return 11792; }
+pub fn chk_arena_env() -> u32 { return 12048; }
+pub fn chk_arena_bytes() -> u32 { return 14096; }
 
 /// 从语言自带的 64 KiB bump 堆开 arena 再查 (C 夹具与测试用; 无 libc 的驱动请走
-/// `check_arena` 并从 `brk` 拿那 12048B —— 见 `check_arena` 的说明)。
+/// `check_arena` 并从 `brk` 拿那 14096B —— 见 `check_arena` 的说明)。
 pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
-    let a: ptr = alloc(12048);
-    return check_arena(src, t, out, a, ptr_add(a, 8192), ptr_add(a, 9216),
-                       ptr_add(a, 9728), ptr_add(a, 9744), ptr_add(a, 10000));
+    let a: ptr = alloc(14096);
+    return check_arena(src, t, out, a, ptr_add(a, 10240), ptr_add(a, 11264),
+                       ptr_add(a, 11776), ptr_add(a, 11792), ptr_add(a, 12048));
 }

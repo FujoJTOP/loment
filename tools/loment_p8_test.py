@@ -925,8 +925,9 @@ def test_m85_heap_budget():
     精确钉住: 改大任何一边的 `alloc` 会在这里立刻变红, 不必等到驱动 SIGILL。
 
     现在 checker 的缓冲走 `check_arena` (驱动从 `brk` 拿), 所以**驱动路径**的语言堆里
-    只剩 codegen 自己; `check()` 那个薄包装仍然从语言堆开 12048B —— 那是 C 夹具路径。
-    两个数字都报出来, 判据按**较大的那个**卡 (保守方向)。
+    只剩 codegen 自己; `check()` 那个薄包装仍然从语言堆开一个 arena —— 那是 C 夹具路径。
+    两条路径**不再同时存在**, 所以判据是"各自都不越界" (而不是把两者相加), 另加一条:
+    驱动 `sys_alloc` 的那块必须装得下 `chk_arena_bytes()`。
     """
     import re as _re
     heap = 65536          # 镜像 lomentc 的 __LOMENT_HEAP (Rust 侧) / @__loment_heap (IR 侧)
@@ -935,15 +936,24 @@ def test_m85_heap_budget():
     for rel in ("loment/selfhost/checker.lomt", "loment/selfhost/codegen.lomt"):
         src = (ROOT / rel).read_text(encoding="utf-8")
         per.append((rel, sum(int(m) for m in _re.findall(r"alloc\((\d+)\)", src))))
-    total = sum(v for _n, v in per)
-    # 驱动路径: 只有 codegen 用语言堆 (checker 走 brk arena)
-    driver_path = dict(per)["loment/selfhost/codegen.lomt"]
-    assert total + need <= heap, (
-        f"语言堆预算超了 (C 夹具路径): {' + '.join(f'{n} {v}' for n, v in per)} = {total}B, "
-        f"堆 {heap}B (要求留 {need}B) —— 调小 alloc 或让缓冲改走 brk")
-    assert driver_path + need <= heap, f"驱动路径也超了: {driver_path}B"
-    print(f"      堆预算: 夹具路径 {total}B / 驱动路径 {driver_path}B, 堆 {heap}B "
-          f"(余量 {heap - total}B; checker 的 arena 已走 brk)")
+    codegen_path = dict(per)["loment/selfhost/codegen.lomt"]
+    checker_path = dict(per)["loment/selfhost/checker.lomt"]
+    for name, v in per:
+        assert v + need <= heap, (
+            f"{name} 的语言堆分配 {v}B 越过预算 (堆 {heap}B, 要求留 {need}B) —— "
+            f"调小 alloc 或让缓冲改走 brk")
+    # 驱动侧: arena 一块从 brk 拿, 必须装得下 checker 声明的 arena 尺寸
+    drv = (ROOT / "loment" / "selfhost" / "driver.lomt").read_text(encoding="utf-8")
+    m = _re.search(r"chk_arena_bytes\(\)\s*->\s*u32\s*\{\s*return\s+(\d+)", 
+                   (ROOT / "loment" / "selfhost" / "checker.lomt").read_text(encoding="utf-8"))
+    assert m, "找不到 chk_arena_bytes() 的实现"
+    arena = int(m.group(1))
+    allocs = [int(x) for x in _re.findall(r"sys_alloc\((\d+)\)", drv)]
+    assert allocs, "驱动里没有 sys_alloc"
+    assert max(allocs) >= arena, f"驱动的 arena 块 ({max(allocs)}B) 装不下 checker 的 {arena}B"
+    print(f"      堆预算: 夹具/checker {checker_path}B · 驱动/codegen {codegen_path}B, "
+          f"堆 {heap}B (余量 {heap - max(checker_path, codegen_path)}B); "
+          f"driver 的 brk arena {max(allocs)}B >= checker {arena}B")
 
 
 @test
