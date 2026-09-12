@@ -60,6 +60,19 @@ fn pack(i: u32, o: u32) -> u64 {
     return (i as u64) * 4294967296 + (o as u64);
 }
 
+/// 在 [start, o) 的内容前插一个空格 (整体右移一格)。else 分支的 dump 形态判定要用:
+/// Python 先决定"是不是恰好一条 if", 再决定要不要在内容前写空格 —— 我们先写内容,
+/// 判定后按需右移 (输出是顺序缓冲, 这样不必做前瞻扫描)。
+fn insert_space(out: ptr, start: u32, o: u32) -> u32 {
+    let k: u32 = o;
+    while k > start {
+        store8(out, k, load8(out, k - 1) as u8);
+        k = k - 1;
+    }
+    store8(out, start, 32 as u8);
+    return o + 1;
+}
+
 fn unpk_i(r: u64) -> u32 {
     return (r / 4294967296) as u32;
 }
@@ -387,17 +400,38 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         let rt: u64 = parse_stmts(src, t, i, out, o);
         i = unpk_i(rt) + 1;
         o = puts(out, unpk_o(rt), ") (");
+        // else 分支: Python 的口径是
+        //   otherwise 恰好一条 If  ->  "(" + st + ")"          (无前导空格)
+        //   其它                    ->  "(" + (" " + st)* + ")"
+        // 空格在内容**之前**, 所以先把内容写下来, 判定后再整体右移一格插空格。
+        let els_start: u32 = o;
         if tok_is(src, t, i, "else") {
             i = i + 1;
             if tok_is(src, t, i, "if") {
-                let re: u64 = parse_stmt(src, t, i, out, o);
+                let re: u64 = parse_stmt(src, t, i, out, o);   // 单条 if, 无空格
                 i = unpk_i(re);
                 o = unpk_o(re);
             } else {
                 i = i + 1;  // '{'
-                let rb: u64 = parse_stmts(src, t, i, out, o);
-                i = unpk_i(rb) + 1;
-                o = unpk_o(rb);
+                if !tok_is(src, t, i, "}") {
+                    let first_if: u32 = 0;
+                    if tok_is(src, t, i, "if") {
+                        first_if = 1;
+                    }
+                    let r1: u64 = parse_stmt(src, t, i, out, o);   // 第一条先不带空格
+                    i = unpk_i(r1);
+                    o = unpk_o(r1);
+                    if first_if == 0 || !tok_is(src, t, i, "}") {
+                        o = insert_space(out, els_start, o);       // 变空格形态
+                        while !tok_is(src, t, i, "}") && tok_kind(t, i) != 4 {
+                            o = puts(out, o, " ");
+                            let r2: u64 = parse_stmt(src, t, i, out, o);
+                            i = unpk_i(r2);
+                            o = unpk_o(r2);
+                        }
+                    }
+                }
+                i = i + 1;  // '}'
             }
         }
         return pack(i, puts(out, o, "))"));

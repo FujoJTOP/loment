@@ -46,12 +46,21 @@
 / 表达式（整型、`true`/`false`、标识符、调用、一元 `!`/`-`、二元全部运算符并**按
 `lomentc.PRECEDENCE` 结合**、括号、`a.b`、`a[i]`、`x as T`）。
 
-**判据**：`(module m (fn f (p x u32) -> u32 ( (ret (id x)(bin * (id TWO))))))` 这样的
-dump 在 5 个真实文件上（mathutil / bytes / ahci / allocator / fuc_node）与 Python 版
-**逐字符一致**。
+**判据（2026-09-12 扩到整个可对照语料）**：`_parser_corpus()` 把所有语料里 dump 助手
+能表达的结点都拉进来 —— 当前 **19/19 逐字符一致**（含 `else if` 链），门禁要求
+`len(files) >= 19`（覆盖不许回退），跳过的 **23 个文件按缺的结点逐条打印**。
 
-**未覆盖**（子集边界，测试会 SKIP 并打印原因）：字符串字面量、十六进制字面量、
-`match`/`for`、结构体字面量、枚举路径与构造、方法调用、`guard`、切片、`?`。
+**抓到的真 bug（就是这次修掉的）**：`else if` 的 else 分支在 Python 侧是
+`"(" + st + ")"`（**无**前导空格），Loment 版原先统一写 `" ("`；`ir_stmt.lomt` 因此
+@513 差一个空格。修法：先把 else 内容写进输出缓冲，判定"是不是恰好一条 If"之后
+再整体右移一格插空格（`insert_space`）—— 等价于 Python 的"先判定后书写"，但不需要前瞻扫描。
+块形态 `else { if … }`（块内恰好一条 if）也按同一规则处理。
+
+**未覆盖（M80 剩余工作单，分母 23 个文件）**：dump 助手缺 7 类结点口径 ——
+`StrLit`（8 个文件）、`StructLit`（5）、`For`（3）、`ArrayLit`、`EnumCtor`、
+`Guard`、`Assign/Index`（各 1）。下一格的做法是**先补助手的 dump 口径、再补 Loment 版
+parser 的对应分支**，每补一类这条分母就变大一次（`loment_fmt` 那样"两个实现同判据"的模板）。
+另有 `0x` 十六进制字面量被助手显式排除（Loment 版 lexer 支持，dump 口径未定）。
 
 实现要点：
 

@@ -263,30 +263,59 @@ def _py_dump(src: Path) -> str:
     return _fn_mod(mod)
 
 
+def _parser_corpus() -> tuple[list[Path], list[str]]:
+    """可对照的语料 + 因**dump 助手**缺结点而跳过的清单 (后者是 M80 的下一步工作单)。
+
+    助手只覆盖 (module/fn/let/ret/assign/if/while + int/bool/id/call/bin/un/cast/
+    field/index) 这批结点; 其它结点 (字符串字面量、数组字面量、for、struct 字面量、
+    guard、枚举构造、下标赋值) 还没有 dump 口径 —— 它们是 M80 剩余覆盖面的分母。
+    """
+    files = sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                   + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
+                   + list((ROOT / "loment" / "tools").glob("*.lomt")))
+    ok, skip = [], []
+    for f in files:
+        try:
+            _py_dump(f)
+            ok.append(f)
+        except Unsupported as e:
+            skip.append(f"{f.name}:{e}")
+        except Exception as e:  # noqa: BLE001
+            skip.append(f"{f.name}:{type(e).__name__}")
+    return ok, skip
+
+
 @test
 def test_m80_loment_parser_ast_dump():
-    """M80: module/fn/语句/表达式的 AST dump 与 Python 版逐字符一致。"""
+    """M80: 全部**可对照**语料的 AST dump 与 Python 版逐字符一致。
+
+    判据从"5 个候选文件"扩到"助手足迹能覆盖的整个语料"(当前 19 个), 并要求覆盖面
+    不许回退 (`len(files) >= 19`)。跳过的清单逐条打印 —— 它就是 M80 下一步的工作单:
+    每补齐一个 dump 结点口径, 这个分母就变大 (先补助手, 再补 Loment 版 parser)。
+
+    这条曾经抓到一个真 bug: `else if` 的 else 分支在 Python 侧是 `"(" + st + ")"`
+    (无前导空格), 而 Loment 版统一写成 `" ("` —— 修好后 ir_stmt.lomt 才逐字符一致。
+    """
     if not _clang():
         print("      SKIP: 无 clang")
         return
-    candidates = [ROOT / "loment" / "examples" / n
-                  for n in ("mathutil.lomt", "bytes.lomt", "ahci.lomt", "allocator.lomt",
-                            "fuc_node.lomt")]
-    files = []
-    for f in candidates:
-        try:
-            _py_dump(f)
-            files.append(f)
-        except Unsupported as e:
-            print(f"      SKIP {f.name}: {e}")
-    assert len(files) >= 4, "可用对照文件太少"
+    files, skip = _parser_corpus()
+    assert len(files) >= 19, f"可对照语料只剩 {len(files)} 个 (低于 19 是覆盖面回退)"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_parser(td)
+        bad = []
         for f in files:
             got = subprocess.run([shutil.which(str(exe)) or str(exe), str(f)],
                                  capture_output=True, text=True, shell=False).stdout.strip()
             want = _py_dump(f)
-            assert got == want, f"{f.name}:\n Loment {got[:200]}\n Python {want[:200]}"
+            if got != want:
+                k = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]),
+                         min(len(got), len(want)))
+                bad.append(f"{f.name} @{k}: Loment {got[max(0,k-40):k+30]!r} "
+                           f"!= Python {want[max(0,k-40):k+30]!r}")
+        assert not bad, "\n".join(bad[:4])
+        print(f"      {len(files)}/{len(files)} 语料逐字符一致; 待补结点: "
+              f"{len(skip)} 个文件 ({', '.join(sorted({s.split(':', 1)[1] for s in skip}))})")
 
 
 CHECKER = ROOT / "loment" / "selfhost" / "checker.lomt"

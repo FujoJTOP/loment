@@ -620,7 +620,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | # | 里程碑 | 判据 |
 |---|---|---|
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ |
-| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（语句/表达式子集；见 docs/150） |
+| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅ 部分（**可对照语料 19/19 逐字符一致**，门禁要求覆盖不许回退；剩 23 个文件缺 7 类 dump 结点口径（StrLit/StructLit/For/ArrayLit/EnumCtor/Guard/Assign-Index），工作单在 docs/150 M80 节） |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅（**规则等价 63/63**（`loment_rule_parity` 棘轮门禁，假阳性/漂移 0，已进 `ci.py`）+ 63 条负例直接喂自举驱动全部非零退出且无信号 + 40/40 语料零诊断 + 跨模块重名两边都报 E-DUP；三处刻意保守偏离见 docs/158 §4） |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 39/39：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`/整数↔指针；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅（`loment/selfhost/driver.lomt` 把 lexer + codegen 接成**一个能独立跑的 ELF**：brk 取内存、stdin 吃单元、stdout 吐 IR；它编译自己的单元与参考逐字节相同，且用它自己的产物再链一次仍逐字节相同。边界：单编译单元，`use` 装载仍在夹具侧——与 M80/M81 同边界） |
