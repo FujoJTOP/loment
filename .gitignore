@@ -72,6 +72,8 @@ ahci_events.txt
 # 测试用的临时探针 (loment_fmt_test / loment_doc_test 会自己删; 崩了也不该进仓库)
 /loment/build/fmt_*_case.lomt
 /loment/build/lomdoc_edge.lomt
+/loment/build/json_*.lomt
+/loment/build/probe_*.lomt
 # lomc.ps1 的产物 (IR/ELF: 每次编译都会变, 按需重建)
 /loment/build/stage1.elf
 /loment/build/user_hello.ll

@@ -1,0 +1,610 @@
+// loment/lib/json.lomt — 最小 JSON (解析 + 生成), 给 LSP 用 (无 Python)
+//
+// 为什么要它: 编辑器这条路要脱离 Python, 语言服务就得自己收/发 JSON-RPC。
+// 只做 LSP 会出现的东西: object / array / string(含转义与 \uXXXX) / 整数 /
+// true / false / null —— 够用, 且**字符串按需解码**(不额外占内存)。
+//
+// 命名: `use` 是**平名字空间**(顶层名字在单元内唯一, docs/158 §2), 所以本库的每个顶层
+// 名字都带前缀 —— 公开 API 用 `json_*`, 内部用 `j_*`。忘了加前缀会被检查器按 E-DUP 拦下,
+// 但那时已经晚了: 撞名的两个库都不能用。
+//
+// 内存: DOM 放在调用方给的 arena 里, 每个节点 6 格 u32:
+//   [0]=kind  [1]=a  [2]=b  [3]=c  [4]=d  [5]=next(兄弟)
+//   kind: 1=obj    2=arr   3=str        4=num   5=true  6=false  7=null
+//         8=member (a=键节点, c=值节点)
+//   obj/arr: c = 第一个子节点 (member/元素), 子节点用 next 串成链
+//   str/num: a = 原文起点, b = 原文长度 (str 的区间**不含引号**)
+// arena 头三格: [0]=节点数 [1]=根节点 [2]=解析游标
+//
+// 生成的格式与 Python `json.dumps(..., ensure_ascii=False)` 一致 (", " / ": " 分隔,
+// 只转义 " \ 与控制字符) —— 这样 Loment 版 LSP 的帧能和 Python 版逐字节对齐。
+
+module json
+
+use "loment/examples/bytes.lomt"
+
+const J_K_OBJ: u32 = 1;
+const J_K_ARR: u32 = 2;
+const J_K_STR: u32 = 3;
+const J_K_NUM: u32 = 4;
+const J_K_TRUE: u32 = 5;
+const J_K_FALSE: u32 = 6;
+const J_K_NULL: u32 = 7;
+const J_K_MEM: u32 = 8;
+
+const J_NODE_STRIDE: u32 = 24;       // 6 格 u32
+// 头部格子 (都是 4 字节, 别把两个格子叠在一起): 0=节点数 4=根节点 8=解析游标;
+// 节点表从 J_HDR 开始。早先我把'游标'写在偏移 2, 与'节点数'叠了 2 字节 —— 写游标
+// 就把节点数的高 16 位改了, 于是 base = 8 + 65536*24, 直接写越界 SIGSEGV。
+const J_HDR: u32 = 16;
+const J_NUMTMP: u32 = 6144;          // emit_u32 的数字缓冲 (调用方保证余量)
+
+
+fn j_nk(arena: ptr, n: u32) -> u32 {
+    return load32(arena, J_HDR + n * J_NODE_STRIDE);
+}
+
+fn j_na(arena: ptr, n: u32) -> u32 {
+    return load32(arena, J_HDR + n * J_NODE_STRIDE + 4);
+}
+
+fn j_nb(arena: ptr, n: u32) -> u32 {
+    return load32(arena, J_HDR + n * J_NODE_STRIDE + 8);
+}
+
+fn j_nc(arena: ptr, n: u32) -> u32 {
+    return load32(arena, J_HDR + n * J_NODE_STRIDE + 12);
+}
+
+fn j_nnext(arena: ptr, n: u32) -> u32 {
+    return load32(arena, J_HDR + n * J_NODE_STRIDE + 20);
+}
+
+fn j_node_new(arena: ptr, kind: u32, a: u32, b: u32, c: u32) -> u32 {
+    let n: u32 = load32(arena, 0);
+    let base: u32 = J_HDR + n * J_NODE_STRIDE;
+    store32(arena, base, kind);
+    store32(arena, base + 4, a);
+    store32(arena, base + 8, b);
+    store32(arena, base + 12, c);
+    store32(arena, base + 16, 0);
+    store32(arena, base + 20, 0);
+    store32(arena, 0, n + 1);
+    return n;
+}
+
+fn j_set_next(arena: ptr, n: u32, v: u32) {
+    store32(arena, J_HDR + n * J_NODE_STRIDE + 20, v);
+}
+
+// ---------------------------------------------------------------- 解析
+
+fn j_cur(arena: ptr) -> u32 {
+    return load32(arena, 8);
+}
+
+fn j_set_cur(arena: ptr, v: u32) {
+    store32(arena, 8, v);
+}
+
+fn j_skip_ws(js: ptr, len: u32, arena: ptr) {
+    let i: u32 = j_cur(arena);
+    let go: u32 = 1;
+    while go == 1 {
+        if i >= len {
+            go = 0;
+        } else {
+            let c: u32 = load8(js, i);
+            if c == 32 || c == 9 || c == 10 || c == 13 {
+                i = i + 1;
+            } else {
+                go = 0;
+            }
+        }
+    }
+    j_set_cur(arena, i);
+}
+
+fn j_parse_lit(js: ptr, len: u32, arena: ptr, lit: str, kind: u32) -> u32 {
+    let i: u32 = j_cur(arena);
+    let k: u32 = 0;
+    while k < str_len(lit) {
+        if i + k >= len || load8(js, i + k) != str_byte(lit, k) {
+            return 4294967295;
+        }
+        k = k + 1;
+    }
+    j_set_cur(arena, i + str_len(lit));
+    return j_node_new(arena, kind, 0, 0, 0);
+}
+
+fn j_parse_num(js: ptr, len: u32, arena: ptr) -> u32 {
+    let i: u32 = j_cur(arena);
+    let s: u32 = i;
+    let go: u32 = 1;
+    while i < len && go == 1 {
+        let c: u32 = load8(js, i);
+        if (c >= 48 && c <= 57) || c == 45 || c == 43 || c == 46 || c == 101 || c == 69 {
+            i = i + 1;
+        } else {
+            go = 0;
+        }
+    }
+    if i == s {
+        return 4294967295;
+    }
+    j_set_cur(arena, i);
+    let rr: u32 = j_node_new(arena, J_K_NUM, s, i - s, 0);
+    return rr;
+}
+
+fn j_parse_str(js: ptr, len: u32, arena: ptr) -> u32 {
+    let i: u32 = j_cur(arena) + 1;      // 跳过开引号
+    let s: u32 = i;
+    let go: u32 = 1;
+    while go == 1 {
+        if i >= len {
+            return 4294967295;
+        }
+        let c: u32 = load8(js, i);
+        if c == 92 {
+            i = i + 2;
+        } else {
+            if c == 34 {
+                go = 0;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    j_set_cur(arena, i + 1);
+    return j_node_new(arena, J_K_STR, s, i - s, 0);
+}
+
+fn j_parse_arr(js: ptr, len: u32, arena: ptr) -> u32 {
+    j_set_cur(arena, j_cur(arena) + 1);
+    let n: u32 = j_node_new(arena, J_K_ARR, 0, 0, 0);
+    let first: u32 = 0;
+    let last: u32 = 0;
+    j_skip_ws(js, len, arena);
+    if j_cur(arena) < len && load8(js, j_cur(arena)) == 93 {
+        j_set_cur(arena, j_cur(arena) + 1);
+        return n;
+    }
+    let go: u32 = 1;
+    while go == 1 {
+        let v: u32 = json_parse_val(js, len, arena);
+        if v == 4294967295 {
+            return 4294967295;
+        }
+        if first == 0 {
+            first = v;
+        } else {
+            j_set_next(arena, last, v);
+        }
+        last = v;
+        j_skip_ws(js, len, arena);
+        if j_cur(arena) < len && load8(js, j_cur(arena)) == 44 {
+            j_set_cur(arena, j_cur(arena) + 1);
+        } else {
+            go = 0;
+        }
+    }
+    store32(arena, J_HDR + n * J_NODE_STRIDE + 12, first);
+    j_skip_ws(js, len, arena);
+    if j_cur(arena) < len && load8(js, j_cur(arena)) == 93 {
+        j_set_cur(arena, j_cur(arena) + 1);
+    }
+    return n;
+}
+
+fn j_parse_obj(js: ptr, len: u32, arena: ptr) -> u32 {
+    j_set_cur(arena, j_cur(arena) + 1);
+    let n: u32 = j_node_new(arena, J_K_OBJ, 0, 0, 0);
+    let first: u32 = 0;
+    let last: u32 = 0;
+    j_skip_ws(js, len, arena);
+    if j_cur(arena) < len && load8(js, j_cur(arena)) == 125 {
+        j_set_cur(arena, j_cur(arena) + 1);
+        return n;
+    }
+    let go: u32 = 1;
+    while go == 1 {
+        j_skip_ws(js, len, arena);
+        let k: u32 = j_parse_str(js, len, arena);
+        if k == 4294967295 {
+            return 4294967295;
+        }
+        j_skip_ws(js, len, arena);
+        if j_cur(arena) >= len || load8(js, j_cur(arena)) != 58 {
+            return 4294967295;
+        }
+        j_set_cur(arena, j_cur(arena) + 1);
+        let v: u32 = json_parse_val(js, len, arena);
+        if v == 4294967295 {
+            return 4294967295;
+        }
+        let m: u32 = j_node_new(arena, J_K_MEM, k, 0, v);
+        if first == 0 {
+            first = m;
+        } else {
+            j_set_next(arena, last, m);
+        }
+        last = m;
+        j_skip_ws(js, len, arena);
+        if j_cur(arena) < len && load8(js, j_cur(arena)) == 44 {
+            j_set_cur(arena, j_cur(arena) + 1);
+        } else {
+            go = 0;
+        }
+    }
+    store32(arena, J_HDR + n * J_NODE_STRIDE + 12, first);
+    j_skip_ws(js, len, arena);
+    if j_cur(arena) < len && load8(js, j_cur(arena)) == 125 {
+        j_set_cur(arena, j_cur(arena) + 1);
+    }
+    return n;
+}
+
+pub fn json_parse_val(js: ptr, len: u32, arena: ptr) -> u32 {
+    j_skip_ws(js, len, arena);
+    let i: u32 = j_cur(arena);
+    if i >= len {
+        return 4294967295;
+    }
+    let c: u32 = load8(js, i);
+    if c == 123 {
+        return j_parse_obj(js, len, arena);
+    }
+    if c == 91 {
+        return j_parse_arr(js, len, arena);
+    }
+    if c == 34 {
+        return j_parse_str(js, len, arena);
+    }
+    if c == 116 {
+        return j_parse_lit(js, len, arena, "true", J_K_TRUE);
+    }
+    if c == 102 {
+        return j_parse_lit(js, len, arena, "false", J_K_FALSE);
+    }
+    if c == 110 {
+        return j_parse_lit(js, len, arena, "null", J_K_NULL);
+    }
+    return j_parse_num(js, len, arena);
+}
+
+/// 解析: 返回根节点 (0xFFFFFFFF = 失败)。arena 头三格由本函数初始化。
+pub fn json_parse(js: ptr, len: u32, arena: ptr) -> u32 {
+    store32(arena, 0, 0);
+    store32(arena, 8, 0);
+    let r: u32 = json_parse_val(js, len, arena);
+    store32(arena, 1, r);
+    return r;
+}
+
+// ---------------------------------------------------------------- 取值
+
+pub fn json_nkind(arena: ptr, n: u32) -> u32 {
+    return j_nk(arena, n);
+}
+
+pub fn json_first_child(arena: ptr, n: u32) -> u32 {
+    return j_nc(arena, n);
+}
+
+pub fn json_sibling(arena: ptr, n: u32) -> u32 {
+    return j_nnext(arena, n);
+}
+
+pub fn json_member_key(arena: ptr, m: u32) -> u32 {
+    return j_na(arena, m);
+}
+
+pub fn json_member_val(arena: ptr, m: u32) -> u32 {
+    return j_nc(arena, m);
+}
+
+/// 字符串节点 -> 解码后的字节 (含 \uXXXX, 含代理对)。返回写入长度。
+pub fn json_str_into(js: ptr, arena: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = j_na(arena, n);
+    let e: u32 = i + j_nb(arena, n);
+    let o: u32 = 0;
+    while i < e {
+        if o >= cap {
+            return o;
+        }
+        let c: u32 = load8(js, i);
+        if c != 92 {
+            store8(out, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        } else {
+            let x: u32 = load8(js, i + 1);
+            if x == 117 {
+                let cp: u32 = j_hex4(js, i + 2);
+                let extra: u32 = 6;
+                if cp >= 55296 && cp <= 56319 {
+                    // 代理对: 高代理 + \u低代理
+                    if i + 11 < e && load8(js, i + 6) == 92 && load8(js, i + 7) == 117 {
+                        let lo: u32 = j_hex4(js, i + 8);
+                        if lo >= 56320 && lo <= 57343 {
+                            cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+                            extra = 12;
+                        }
+                    }
+                }
+                o = j_utf8_put(out, o, cap, cp);
+                i = i + extra;
+            } else {
+                let d: u32 = x;
+                if x == 110 {
+                    d = 10;
+                } else {
+                    if x == 116 {
+                        d = 9;
+                    } else {
+                        if x == 114 {
+                            d = 13;
+                        } else {
+                            if x == 98 {
+                                d = 8;
+                            } else {
+                                if x == 102 {
+                                    d = 12;
+                                }
+                            }
+                        }
+                    }
+                }
+                store8(out, o, d as u8);
+                o = o + 1;
+                i = i + 2;
+            }
+        }
+    }
+    return o;
+}
+
+fn j_hex4(js: ptr, i: u32) -> u32 {
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < 4 {
+        let c: u32 = load8(js, i + k);
+        let d: u32 = 0;
+        if c >= 48 && c <= 57 {
+            d = c - 48;
+        } else {
+            if c >= 97 && c <= 102 {
+                d = c - 87;
+            } else {
+                if c >= 65 && c <= 70 {
+                    d = c - 55;
+                }
+            }
+        }
+        v = v * 16 + d;
+        k = k + 1;
+    }
+    return v;
+}
+
+fn j_utf8_put(out: ptr, o: u32, cap: u32, cp: u32) -> u32 {
+    if cp < 128 {
+        if o < cap {
+            store8(out, o, cp as u8);
+        }
+        return o + 1;
+    }
+    if cp < 2048 {
+        if o + 1 < cap {
+            store8(out, o, (192 + cp / 64) as u8);
+            store8(out, o + 1, (128 + cp % 64) as u8);
+        }
+        return o + 2;
+    }
+    if cp < 65536 {
+        if o + 2 < cap {
+            store8(out, o, (224 + cp / 4096) as u8);
+            store8(out, o + 1, (128 + (cp / 64) % 64) as u8);
+            store8(out, o + 2, (128 + cp % 64) as u8);
+        }
+        return o + 3;
+    }
+    if o + 3 < cap {
+        store8(out, o, (240 + cp / 262144) as u8);
+        store8(out, o + 1, (128 + (cp / 4096) % 64) as u8);
+        store8(out, o + 2, (128 + (cp / 64) % 64) as u8);
+        store8(out, o + 3, (128 + cp % 64) as u8);
+    }
+    return o + 4;
+}
+
+/// 键里带转义时的慢路径: 逐字符解码后与字面量比较。
+fn j_slow_key_eq(js: ptr, arena: ptr, m: u32, lit: str) -> bool {
+    let k: u32 = j_na(arena, m);
+    let i: u32 = j_nb(arena, k);          // 键节点的原文长度 (注意: 键节点在 a, 长度在 b)
+    let ln: u32 = j_nb(arena, k);
+    let start: u32 = j_na(arena, k);
+    let e: u32 = start + ln;
+    let q: u32 = 0;
+    let p: u32 = start;
+    let ok: u32 = 1;
+    while p < e && ok == 1 {
+        let c: u32 = load8(js, p);
+        if c == 92 {
+            c = load8(js, p + 1);
+            p = p + 2;
+        } else {
+            p = p + 1;
+        }
+        if q >= str_len(lit) {
+            ok = 0;
+        } else {
+            if c != str_byte(lit, q) {
+                ok = 0;
+            }
+        }
+        q = q + 1;
+    }
+    if q != str_len(lit) {
+        ok = 0;
+    }
+    if i == 0 && ln == 0 {
+        return false;
+    }
+    return ok == 1;
+}
+
+/// member 的键是否等于字面量 (解码后比较; 键都是 ASCII 关键字)。
+pub fn json_key_eq(js: ptr, arena: ptr, m: u32, lit: str) -> bool {
+    let k: u32 = j_na(arena, m);
+    let n: u32 = j_nb(arena, k);
+    if n != str_len(lit) {
+        return false;
+    }
+    let i: u32 = j_na(arena, k);
+    let q: u32 = 0;
+    while q < n {
+        let c: u32 = load8(js, i + q);
+        if c == 92 {
+            return j_slow_key_eq(js, arena, m, lit);
+        }
+        if c != str_byte(lit, q) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// object 里按键取值 (0xFFFFFFFF = 没有)。
+pub fn json_get(js: ptr, arena: ptr, obj: u32, key: str) -> u32 {
+    let m: u32 = j_nc(arena, obj);
+    while m != 0 {
+        if json_key_eq(js, arena, m, key) {
+            return j_nc(arena, m);
+        }
+        m = j_nnext(arena, m);
+    }
+    return 4294967295;
+}
+
+/// 数字节点 -> u32 (整数; LSP 里都是非负)。
+pub fn json_as_u32(js: ptr, arena: ptr, n: u32) -> u32 {
+    let i: u32 = j_na(arena, n);
+    let e: u32 = i + j_nb(arena, n);
+    let v: u32 = 0;
+    let neg: u32 = 0;
+    if i < e && load8(js, i) == 45 {
+        neg = 1;
+        i = i + 1;
+    }
+    while i < e {
+        let c: u32 = load8(js, i);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        i = i + 1;
+    }
+    if neg == 1 {
+        return 0;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 生成
+
+/// 写 json.dumps 风格的字符串 (含引号; 转义 " \ 与控制字符, 非 ASCII 原样写 UTF-8)。
+pub fn json_emit_str(out: ptr, o: u32, s: ptr, n: u32) -> u32 {
+    store8(out, o, 34 as u8);
+    o = o + 1;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(s, i);
+        if c == 34 {
+            store8(out, o, 92 as u8);
+            store8(out, o + 1, 34 as u8);
+            o = o + 2;
+        } else {
+            if c == 92 {
+                store8(out, o, 92 as u8);
+                store8(out, o + 1, 92 as u8);
+                o = o + 2;
+            } else {
+                if c == 10 {
+                    store8(out, o, 92 as u8);
+                    store8(out, o + 1, 110 as u8);
+                    o = o + 2;
+                } else {
+                    if c == 13 {
+                        store8(out, o, 92 as u8);
+                        store8(out, o + 1, 114 as u8);
+                        o = o + 2;
+                    } else {
+                        if c == 9 {
+                            store8(out, o, 92 as u8);
+                            store8(out, o + 1, 116 as u8);
+                            o = o + 2;
+                        } else {
+                            if c < 32 {
+                                store8(out, o, 92 as u8);
+                                store8(out, o + 1, 117 as u8);
+                                store8(out, o + 2, 48 as u8);
+                                store8(out, o + 3, 48 as u8);
+                                store8(out, o + 4, j_hexdig(c / 16));
+                                store8(out, o + 5, j_hexdig(c % 16));
+                                o = o + 6;
+                            } else {
+                                store8(out, o, c as u8);
+                                o = o + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store8(out, o, 34 as u8);
+    return o + 1;
+}
+
+fn j_hexdig(v: u32) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8;
+    }
+    return (97 + v - 10) as u8;
+}
+
+/// 写字面量 (编译期常量, 无需转义)。
+pub fn json_emit_lit(out: ptr, o: u32, s: str) -> u32 {
+    let i: u32 = 0;
+    while i < str_len(s) {
+        store8(out, o, str_byte(s, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 写 u32 十进制 (借 out 的 J_NUMTMP 之后做数字缓冲; 调用方给足余量)。
+pub fn json_emit_u32(out: ptr, o: u32, v: u32) -> u32 {
+    let d: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(out, o, 48 as u8);
+        return o + 1;
+    }
+    while x > 0 {
+        store8(out, J_NUMTMP + d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(out, o + q, load8(out, J_NUMTMP + d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return o + d;
+}
