@@ -32,6 +32,7 @@ loment/build/selfhost_driver.ll text eol=lf
 *.a     binary
 *.run   binary
 *.png   binary
+*.ico   binary
 *.jpg   binary
 *.jpeg  binary
 *.gif   binary

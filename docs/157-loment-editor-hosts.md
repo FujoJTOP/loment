@@ -58,6 +58,48 @@ GitHub 的 markdown 渲染同理（Linguist 也没有 loment），所以仓库�
 **它不是把 Loment 说成 Rust**：文件本身永远是 `.lomt`/`.lom`，只是给查看器一个
 它能认的提示 —— 与"给终端设个配色"是同一类事。
 
+## 3.3 让 **Windows 自己**认识 Loment（文件类型注册，2026-09-12）
+
+用户侧的抱怨是"打开方式里只有一次性的'仅一次'" —— 那是 Windows 对一个**没注册过的**
+扩展名的默认表现（对话框只给一次性的候选）。修法是把 `.lomt`/`.lom` 注册成真正的
+文件类型（**只写 HKCU，不需要管理员**）：
+
+```bash
+python tools/loment_filetype.py --status                # 看现状 (只读)
+python tools/loment_filetype.py --register --dry-run    # 打印将要写的注册表项
+python tools/loment_filetype.py --register              # 写 (自动找 VS Code; 可用 --editor 指定)
+python tools/loment_filetype.py --unregister            # 撤销 (只删本工具建的键)
+python tools/loment_filetype.py --emit-icon             # 重新生成 editors/loment.ico (需 Pillow)
+```
+
+写了什么（`EXT_MAP` 是单一真源，门禁核对的就是它）：
+
+| 键 | 作用 |
+|---|---|
+| `HKCU\Software\Classes\.lomt` 默认值 = `Loment.Source` | 扩展名 → ProgID（没有 `UserChoice` 时 Windows 就用它） |
+| `…\.lomt\OpenWithProgids` = `Loment.Source` | **"打开方式"里常驻**（这就是"不再只有仅一次"的那一条） |
+| `…\Explorer\FileExts\.lomt\OpenWithProgids` | 双保险：Explorer 的"更多应用"也看这里 |
+| `HKCU\Software\Classes\Loment.Source` | 类型名 `Loment 源文件` + `Content Type` + `PerceivedType` |
+| `…\Loment.Source\DefaultIcon` = `editors/loment.ico,0` | 资源管理器里的 Loment 图标 |
+| `…\Loment.Source\shell\open\command` = `"<Code.exe>" "%1"` | 双击进 VS Code（扩展已装 ⇒ 有高亮/LSP） |
+
+`.lom` 同样一套（ProgID `Loment.L0`，类型名 `Loment L0 声明文件`）。
+
+**实测证据**（2026-09-12，本机）：注册后 `HKCR\.lomt` 合并视图显示 `Loment.Source` +
+`Loment 源文件`；`cmd /c start "" x.lomt` 后 **VS Code 窗口标题 2 秒内变成
+`x.lomt - Visual Studio Code`**（即 Windows 通过本 ProgID 解析并启动了编辑器），
+文件同时进了 `RecentDocs\.lomt`。
+
+**两个坑（写在这里省得再撞）**：
+
+1. `FileExts\.lomt\UserChoice` 在 Win10+ 带**哈希保护**，程序改不了 —— "设成默认"这一步
+   只能由人在"打开方式"里点一次"始终"。好在本工具把扩展名默认值写成了我们的 ProgID，
+   所以**没设 UserChoice 时 Windows 也会用我们**（实测双击即可）。
+2. `assoc`/`ftype` 这两个**老命令不读 `HKCU\Software\Classes`**，会报"没有文件关联"——
+   这是它们的限制，不是注册失败。要核对请用 `reg query "HKCR\.lomt"` 或本工具的 `--status`。
+
+撤销干净：`--unregister` 删掉本工具建的键与值（不动别人的），之后"打开方式"回到注册前的样子。
+
 ## 4. 给宿主方的请求（可直接转交）
 
 **要什么**：把下面两份 TextMate 语法加进内置高亮器的语言表（ZCode 是 Shiki 的

@@ -32,8 +32,10 @@ GLOBS = [
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
+    "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
+    "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
@@ -45,8 +47,13 @@ GLOBS = [
 
 
 def sha(p: Path) -> str:
-    """内容哈希 (通用换行: 同一文件在 LF/CRLF 检出下哈希相同)。"""
-    text = p.read_text(encoding="utf-8")
+    """内容哈希。文本按**通用换行**归一后哈希 (同一文件在 LF/CRLF 检出下哈希相同);
+    二进制 (图标/压缩包) 按原始字节哈希 —— 清单里两类可以混, 消费者只比 sha256。"""
+    raw = p.read_bytes()
+    try:
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        return hashlib.sha256(raw).hexdigest()
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
