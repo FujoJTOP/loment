@@ -463,7 +463,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "40594817c056400cd8cda59960e98d1792f0d32cb66aa89e1a0fa4e04b7ebeda"
+   "sha256": "37ff97e02c94390280d8230a7ca9c6743b972bd884afc49c50693c878b321ecb"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -507,7 +507,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "90d41aa10953b9ccd5b48df1ec2639fb4e47923b60c4158d42fbacd05ad601b0"
+   "sha256": "c3f1ef1b3fa6efdaaf9dabc2b5dd0de0661e2356e1ab1994ac1fa855b63ed6f5"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
