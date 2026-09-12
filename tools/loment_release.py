@@ -47,6 +47,8 @@ GLOBS = [
     "tools/loment_dist.py", "tools/loment_dist_test.py",
     # 签名 (docs/163): Authenticode + SHA256SUMS 分离签名
     "tools/loment_sign.py", "tools/loment_sign_test.py",
+    # 源码包 (docs/164): 语言源码 + 编辑器工具, 只从 git 索引取
+    "tools/loment_src.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",

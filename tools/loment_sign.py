@@ -40,6 +40,11 @@ CER = SIGN / "loment-selfsigned.cer"
 KEY = SIGN / "loment-signing.key.pem"              # openssl 私钥 (本机)
 PUB = SIGN / "loment-signing.pem"                  # 公钥证书 (会拷进 dist 供第三方验证)
 PUBKEY = SIGN / "loment-signing.pub.pem"           # 从证书里抽出的公钥 (openssl -verify 只吃这个)
+GPG_FPR = SIGN / "gpg-fingerprint.txt"             # 本机签名密钥的指纹 (公开信息, 可进文档)
+GPG_UID = "Loment Release Signing (dev)"
+ASC_NAME = "loment-signing.asc"                    # 导出的**公钥** (随发布)
+SUMS_ASC = "SHA256SUMS.asc"                        # SHA256SUMS 的 GPG 分离签名
+PUBKEY_NAME = "loment-signing.pub.pem"            # 随发布的自定义公钥 (openssl 那条路)
 SUBJECT = "CN=Loment Self-Signed (dev)"
 SUMS_NAME = "SHA256SUMS"
 
@@ -158,6 +163,12 @@ def remove(purge: bool) -> int:
                 f"-ErrorAction SilentlyContinue; Write-Output done")
         print(f"[OK] 已从证书存储删除 {thumb}" if r.returncode == 0 else f"[WARN] 删除失败: {r.stderr[-160:]}")
         THUMB.unlink()
+    if GPG_FPR.exists():
+        fpr = GPG_FPR.read_text(encoding="utf-8").strip()
+        r = _sh("gpg", "--batch", "--yes", "--delete-secret-and-public-key", fpr)
+        print(f"[OK] 已删除 GPG 密钥 {fpr[-16:]}" if r.returncode == 0
+              else f"[WARN] GPG 密钥删除失败: {(r.stderr or '')[-160:]}")
+        GPG_FPR.unlink()
     if purge and SIGN.exists():
         import shutil
         shutil.rmtree(SIGN)
@@ -192,23 +203,46 @@ def sign_pe(files: list[str], a) -> int:
                     argv += ["/tr", a.ts, "/td", "sha256"]
                 argv += [str(p)]
                 r = _sh(*argv)
+                status = "signtool rc=0" if r.returncode == 0 else ""
             else:
                 ts = (f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
                       f"-HashAlgorithm SHA256 -TimestampServer '{a.ts}'" if a.ts else
                       f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
                       f"-HashAlgorithm SHA256")
                 r = _ps(f"$c = New-Object System.Security.Cryptography.X509Certificates."
-                        f"X509Certificate2('{pfx}','{pw}')" + ts + "; Write-Output $s.Status")
+                        f"X509Certificate2('{pfx}','{pw}')" + ts +
+                        "; Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+                status = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
         else:
             r = _ps(f"$c = Get-Item Cert:\\CurrentUser\\My\\{thumb}; "
                     f"$s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
-                    f"-HashAlgorithm SHA256; Write-Output $s.Status")
-        if r.returncode != 0:
-            print(f"[ERR] 签 {p.name} 失败: {(r.stderr or r.stdout)[-240:]}", file=sys.stderr)
+                    f"-HashAlgorithm SHA256; "
+                    f"Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+            status = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+        # **必须看返回的状态**: Set-AuthenticodeSignature 签名失败时既不抛异常也不改退出码,
+        # 只看 rc 会报"已签名"而文件其实没签 (2026-09-12 真踩到: verify 立刻说 NotSigned)
+        st_name = status.split("|")[0].strip()
+        ok = r.returncode == 0 and (st_name in ("UnknownError", "Valid", "signtool rc=0"))
+        if not ok:
+            # 刚 --keygen 出来的证书偶尔第一次签不上 (私钥容器还没就绪): 隔 1 秒重试一次
+            import time
+            time.sleep(1.0)
+            r2 = _ps(f"$c = Get-Item Cert:\\CurrentUser\\My\\{thumb}; "
+                     f"$s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
+                     f"-HashAlgorithm SHA256; "
+                     f"Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+            status2 = (r2.stdout or "").strip().splitlines()[-1] if r2.stdout.strip() else ""
+            st2 = status2.split("|")[0].strip()
+            if status2 and st2 in ("UnknownError", "Valid"):
+                ok, status, st_name = True, status2, st2
+        if not ok:
+            print(f"[ERR] 签 {p.name} 失败: {status or (r.stderr or r.stdout)[-200:]}",
+                  file=sys.stderr)
             rc = 1
             continue
         print(f"[OK] 已签名 {p.name} ({p.stat().st_size} 字节)  via "
-              f"{'signtool' if (pfx and st) else 'Set-AuthenticodeSignature'}")
+              f"{'signtool' if (pfx and st) else 'Set-AuthenticodeSignature'}"
+              f"{'' if st_name == 'signtool rc=0' else ' / 状态 ' + st_name}")
     return rc
 
 
@@ -243,6 +277,85 @@ def _export_pubkey() -> None:
     r = _sh("openssl", "x509", "-in", str(PUB), "-pubkey", "-noout")
     if r.returncode == 0 and r.stdout.strip():
         PUBKEY.write_text(r.stdout, encoding="utf-8", newline="\n")
+
+
+# ---------------------------------------------------------------- GPG (分离签名 + 哈希校验)
+
+def keygen_gpg(uid: str = GPG_UID) -> int:
+    """生成一把**本机**签名密钥 (GnuPG 钥匙串, 私钥永不导出)。
+
+    密钥在 ~/.gnupg, 仓库里只出现①公钥②指纹 —— 指纹是公开信息, 写进文档才好让第三方
+    确认"验签用的确实是这把钥匙"。开发密钥不给口令 (无人值守 CI 要能跑), 换真密钥时
+    该怎么给口令由用的人决定。
+    """
+    SIGN.mkdir(parents=True, exist_ok=True)
+    r = _sh("gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase", "",
+            "--quick-generate-key", uid, "ed25519", "sign", "2y")
+    if r.returncode != 0:
+        print(f"[ERR] GPG 生成密钥失败: {(r.stderr or r.stdout)[-300:]}", file=sys.stderr)
+        return 1
+    fpr = _gpg_fingerprint(uid)
+    if not fpr:
+        print("[ERR] 生成了密钥但读不到指纹", file=sys.stderr)
+        return 1
+    GPG_FPR.write_text(fpr + "\n", encoding="utf-8", newline="\n")
+    pub = OUT / ASC_NAME
+    OUT.mkdir(parents=True, exist_ok=True)
+    r = _sh("gpg", "--batch", "--yes", "--armor", "--export", "--output", str(pub), fpr)
+    if r.returncode != 0:
+        print(f"[WARN] 公钥导出失败: {(r.stderr or '')[-200:]}")
+    print(f"[OK] GPG 密钥: {uid}")
+    print(f"     指纹 {fpr}")
+    print(f"     公钥 {_shown(pub)} (随发布; 指纹请另找渠道核对)")
+    return 0
+
+
+def _gpg_fingerprint(uid: str) -> str:
+    r = _sh("gpg", "--batch", "--with-colons", "--list-keys", uid)
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("fpr:"):
+            return line.split(":")[9]
+    return ""
+
+
+def sign_gpg(sums: Path, uid: str = GPG_UID) -> int:
+    if not sums.exists():
+        print(f"[ERR] 缺 {sums}", file=sys.stderr)
+        return 1
+    fpr = GPG_FPR.read_text(encoding="utf-8").strip() if GPG_FPR.exists() else _gpg_fingerprint(uid)
+    if not fpr:
+        print(f"[ERR] 没有 GPG 密钥 (先跑 --keygen-gpg)", file=sys.stderr)
+        return 1
+    asc = sums.with_name(SUMS_ASC)
+    r = _sh("gpg", "--batch", "--yes", "--armor", "--detach-sign",
+            "--local-user", fpr, "--output", str(asc), str(sums))
+    if r.returncode != 0:
+        print(f"[ERR] GPG 分离签名失败: {(r.stderr or '')[-240:]}", file=sys.stderr)
+        return 1
+    print(f"[OK] {SUMS_ASC} ({asc.stat().st_size} 字节) —— 密钥 {fpr[-16:]}")
+    return 0
+
+
+def verify_gpg(sums: Path, want_fpr: str | None = None) -> int:
+    """验 GPG 分离签名。**不仅要 gpg 说 Good signature, 还要核对指纹** ——
+    任何密钥签出来的都叫 Good signature, 不核对指纹等于没验身份。"""
+    asc = sums.with_name(SUMS_ASC)
+    if not asc.exists():
+        print(f"[ERR] 缺 {asc.name} (先跑 --sign-gpg)", file=sys.stderr)
+        return 1
+    r = _sh("gpg", "--batch", "--status-fd", "1", "--verify", str(asc), str(sums))
+    out = (r.stdout or "") + (r.stderr or "")
+    good = "GOODSIG" in out and r.returncode == 0
+    used = ""
+    for line in out.splitlines():
+        if line.startswith("[GNUPG:] VALIDSIG"):
+            used = line.split()[2]
+    want = want_fpr or (GPG_FPR.read_text(encoding="utf-8").strip() if GPG_FPR.exists() else "")
+    match = (not want) or (used == want)
+    ok = good and match
+    print(f"{'[OK]' if ok else '[ERR]'} {asc.name}: 签名={'Good' if good else 'BAD'} "
+          f"指纹={used or '-'}{'' if match else ' (与记录不符: ' + want + ')'}")
+    return 0 if ok else 1
 
 
 def sign_sums(sums: Path) -> int:
@@ -290,7 +403,65 @@ def print_cmd(files: list[str], a) -> int:
     print("# 分离签名 (跨平台验证)")
     print(f"  openssl dgst -sha256 -sign <私钥> -out {SUMS_NAME}.sig {SUMS_NAME}")
     print(f"  openssl dgst -sha256 -verify <公钥证书> -signature {SUMS_NAME}.sig {SUMS_NAME}")
+    print("# GPG 分离签名 (第三方只需公钥 + 核对指纹)")
+    print(f"  gpg --armor --detach-sign --local-user <FPR> -o {SUMS_ASC} {SUMS_NAME}")
+    print(f"  gpg --verify {SUMS_ASC} {SUMS_NAME} && sha256sum -c {SUMS_NAME}")
     return 0
+
+
+def write_verify_scripts() -> None:
+    """往 loment/dist 里放两个**给下载者用**的校验脚本 (哈希 + 有签名就一起验)。"""
+    OUT.mkdir(parents=True, exist_ok=True)
+    sh = f"""#!/bin/sh
+# Loment 发行包校验 (由 tools/loment_sign.py 生成)
+# 用法: sh verify.sh            # 在解包/下载目录里跑
+set -eu
+cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+echo "== 1/3 哈希 =="
+sha256sum -c {SUMS_NAME}
+if [ -f {ASC_NAME} ]; then
+    echo "== 2/3 GPG 分离签名 =="
+    gpg --verify {SUMS_ASC} {SUMS_NAME}
+    echo "   指纹应是: $(cat FINGERPRINT 2>/dev/null || echo '(见 docs/163)')"
+elif [ -f {SUMS_NAME}.sig ]; then
+    echo "== 2/3 openssl 分离签名 =="
+    openssl dgst -sha256 -verify {PUBKEY_NAME} -signature {SUMS_NAME}.sig {SUMS_NAME}
+else
+    echo "== 2/3 跳过 (没有分离签名) =="
+fi
+echo "== 3/3 Windows 可执行文件的 Authenticode =="
+echo "   在 Windows 上跑 verify.ps1 看发布者 (自签名会显示'未知发布者')"
+"""
+    ps1 = f"""# Loment 发行包校验 (由 tools/loment_sign.py 生成; ASCII only)
+# 用法: powershell -ExecutionPolicy Bypass -File verify.ps1
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath (Split-Path -Parent $MyInvocation.MyCommand.Path)
+Write-Host '== 1/3 SHA256 =='
+$bad = 0
+foreach ($line in Get-Content -LiteralPath '{SUMS_NAME}') {{
+    if ($line -notmatch '^([0-9a-f]{{64}})\\s+(.+)$') {{ continue }}
+    $want = $Matches[1]; $rel = $Matches[2]
+    if (-not (Test-Path -LiteralPath $rel)) {{ Write-Host "[MISS] $rel"; $bad++; continue }}
+    $got = (Get-FileHash -LiteralPath $rel -Algorithm SHA256).Hash.ToLower()
+    if ($got -ne $want) {{ Write-Host "[BAD ] $rel"; $bad++ }} else {{ Write-Host "[OK  ] $rel" }}
+}}
+if ($bad -gt 0) {{ throw "$bad file(s) failed the hash check" }}
+Write-Host '== 2/3 GPG signature (if present) =='
+if (Test-Path -LiteralPath '{SUMS_ASC}') {{
+    gpg --verify '{SUMS_ASC}' '{SUMS_NAME}'
+    if ($LASTEXITCODE -ne 0) {{ throw 'gpg --verify failed' }}
+    if (Test-Path -LiteralPath 'FINGERPRINT') {{ Write-Host ('expected fingerprint: ' + (Get-Content FINGERPRINT)) }}
+}} else {{ Write-Host '(no detached signature in this drop)' }}
+Write-Host '== 3/3 Authenticode =='
+Get-ChildItem -Filter '*-setup.exe' | ForEach-Object {{
+    $s = Get-AuthenticodeSignature -FilePath $_.FullName
+    Write-Host ("{{0}}: {{1}} / {{2}}" -f $_.Name, $s.Status, $s.SignerCertificate.Subject)
+}}
+Write-Host 'verify: done'
+"""
+    (OUT / "verify.sh").write_text(sh, encoding="utf-8", newline="\n")
+    (OUT / "verify.ps1").write_text(ps1.replace("\n", "\r\n"), encoding="utf-8", newline="")
+    print(f"[OK] {_shown(OUT / 'verify.sh')} / verify.ps1 (给下载者的校验脚本)")
 
 
 # ---------------------------------------------------------------- dist 一键
@@ -314,6 +485,14 @@ def do_dist(a) -> int:
         rc |= verify_pe([str(p) for p in setups], a.strict)
     if a.verify_sums or a.sign_sums:
         rc |= verify_sums(OUT / SUMS_NAME)
+    if a.sign_gpg:
+        rc |= sign_gpg(OUT / SUMS_NAME, a.gpg_user or GPG_UID)
+    if a.verify_gpg or a.sign_gpg:
+        rc |= verify_gpg(OUT / SUMS_NAME, a.gpg_user)
+    write_verify_scripts()
+    (OUT / "FINGERPRINT").write_text(
+        (GPG_FPR.read_text(encoding="utf-8") if GPG_FPR.exists() else "(no gpg key)\n"),
+        encoding="utf-8", newline="\n")
     return rc
 
 
@@ -321,6 +500,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_sign")
     ap.add_argument("--keygen", action="store_true", help="生成本机自签名代码签名证书")
     ap.add_argument("--subject", metavar="DN", help=f"自签证书主题 (默认 {SUBJECT})")
+    ap.add_argument("--keygen-gpg", action="store_true", help="生成 GPG 签名密钥 (本机钥匙串)")
+    ap.add_argument("--sign-gpg", action="store_true", help="对 SHA256SUMS 做 GPG 分离签名")
+    ap.add_argument("--verify-gpg", action="store_true", help="验 GPG 分离签名 (并核对指纹)")
+    ap.add_argument("--gpg-user", metavar="UID", help=f"GPG 身份 (默认 {GPG_UID})")
     ap.add_argument("--trust", action="store_true", help="把自签证书放进本机受信存储 (改本机信任模型)")
     ap.add_argument("--untrust", action="store_true", help="撤销上面的信任")
     ap.add_argument("--remove", action="store_true", help="从证书存储删除自签证书")
@@ -340,14 +523,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.keygen:
         return keygen(a.subject or SUBJECT)
+    if a.keygen_gpg:
+        return keygen_gpg(a.gpg_user or GPG_UID)
     if a.trust or a.untrust:
         return trust(a.trust)
     if a.remove:
         return remove(a.purge)
     if a.print_cmd:
         return print_cmd(a.files or ["<file>.exe"], a)
+    # --dist 必须排在所有单动作之前: 它是"把给的动作都做一遍", 被单动作抢先返回会把
+    # 其余动作静默丢掉 (2026-09-12 就是这么丢了一次 --sign-sums: .sig 是旧的, 清单是新的,
+    # 隔了一个小时才由 verify 报出来)
     if a.dist:
         return do_dist(a)
+    if a.sign_gpg:
+        return sign_gpg(OUT / SUMS_NAME, a.gpg_user or GPG_UID)
+    if a.verify_gpg:
+        return verify_gpg(OUT / SUMS_NAME, a.gpg_user)
     if a.sign:
         return sign_pe(a.files, a)
     if a.verify:

@@ -763,7 +763,7 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> 
     if want_exe:
         exe = out / f"loment-{VER}-windows-x64-setup.exe"
         if exe.exists():
-            exe.unlink()
+            _unlink_retry(exe)
         if emit_exe(_zip("", win), exe):
             made.append(exe)
             print(f"  [{exe.name}] {exe.stat().st_size} 字节 (自解压, 未签名)")
@@ -773,15 +773,30 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> 
     return 0
 
 
+def _unlink_retry(p: Path, tries: int = 5) -> None:
+    """删文件带重试: 刚签过名的 exe 常被 Defender 扫一下, 那几百毫秒里删会 WinError 5
+    (2026-09-12 撞到过一次, 症状是"重建失败"但手工再删就没了)。"""
+    import time
+    for i in range(tries):
+        try:
+            p.unlink()
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(1.0)
+
+
 def write_sums(out_dir: Path | None = None) -> Path:
     """重算产物目录的 SHA256SUMS (排除清单自身、分离签名 .sig 与公钥证书 .pem)。
 
     单独抽出来是因为**签名会改 PE 的字节**: 签名之后必须重算清单, 否则清单对不上产物。
     """
     out = out_dir or OUT
+    keep_out = ("SHA256SUMS", "verify.sh", "verify.ps1", "FINGERPRINT")
     arts = [p for p in sorted(out.iterdir())
-            if p.is_file() and p.name != "SHA256SUMS"
-            and not p.name.endswith((".sig", ".pem"))]
+            if p.is_file() and p.name not in keep_out
+            and not p.name.endswith((".sig", ".pem", ".asc"))]
     sums = out / "SHA256SUMS"
     sums.write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
                             for p in arts), encoding="utf-8", newline="\n")

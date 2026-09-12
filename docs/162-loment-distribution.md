@@ -1,6 +1,7 @@
 # 162 · Loment 发行包：命令安装与安装包安装
 
 > 版本 `0.1.3.4-alpha`（显示名 **Loment 0.1.3.4 Alpha**）· 构建器 `tools/loment_dist.py`
+> · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
 ## 0. 一句话

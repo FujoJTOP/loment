@@ -493,6 +493,7 @@ python tools/loment_seed_test.py         # 3/3 无 Python 自举: 种子自复�
 python tools/loment_eol.py               # 检出行尾 (LF 契约): CRLF 检出不该伪装成逻辑红 (docs/161)
 python tools/loment_dist_test.py         # 发行包: 命令安装 + 自解压安装包, 装出来的产物与参考逐字节相同 (docs/162)
 python tools/loment_sign_test.py         # 签名: Authenticode + 分离签名; 篡改/无签名必须被验出来 (docs/163)
+python tools/loment_src.py               # 源码包: 语言源码 + 编辑器工具, 只从 git 索引取且两次构建字节相同 (docs/164)
 ```
 
 | 里程碑 | 验证方式 | 结果 |
