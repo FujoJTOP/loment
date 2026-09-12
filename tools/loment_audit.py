@@ -64,6 +64,8 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_filetype_test", []),
     ("C15", "发行包: 命令安装 (sh/ps1) 与自解压安装包, 装出来的编译器产物与参考逐字节相同",
      "loment_dist_test", []),
+    ("C16", "发行包签名: Authenticode (发布者可读/篡改可验) + SHA256SUMS 分离签名",
+     "loment_sign_test", []),
 ]
 
 

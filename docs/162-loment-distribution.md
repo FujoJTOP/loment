@@ -78,9 +78,19 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 **为什么不用 MSI / Inno / NSIS**：本机没有 WiX/Inno/NSIS，装它们要联网 + 管理员；而
 `iexpress` 是系统自带的，能做"双击安装"这件事。代价要如实说：
 
-- **未签名** → SmartScreen 会提示"未知发布者"（README 里写了怎么继续）；
+- **未签名/自签名** → SmartScreen 会提示"未知发布者"（README 里写了怎么继续；
+  签名怎么做、为什么自签名消不掉警告，见 `docs/163-loment-signing.md`）；
 - `setup.exe` 的字节**不确定**（不能当"可复现工件"）；
 - 没有 MSI 那套企业分发/静默安装（`install.ps1 -DryRun` 可以当"先看计划"）。
+
+### 4b. 签名与顺序
+
+`loment/dist/` 里的 `setup.exe` 可以用 `tools/loment_sign.py --dist --sign --sign-sums` 签名
+（Authenticode + SHA256SUMS 分离签名）。**顺序是硬约束**：签名会改 PE 的字节，所以清单必须在
+**签名之后**重算 —— `--dist --sign` 已经内置（签完自动重算 `SHA256SUMS`），别手动先签后改，
+否则 `loment_dist --check` 会对不上。本仓当前用的是**本机自签名**证书（`CN=Loment Self-Signed (dev)`），
+所以下载者仍会看到"未知发布者"；换 CA 证书只需换 `LOMENT_SIGN_PFX`/`LOMENT_SIGN_PFX_PASS`
+环境变量，流程不变（`--print-cmd` 打印等价命令）。
 
 ## 5. 判据（33 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
 

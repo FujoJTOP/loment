@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+# loment_sign.py — 发行包签名 (docs/163)
+#
+# 两种签名, 管两件事:
+#   1) **Authenticode** 签 Windows 可执行文件 (setup.exe; .cmd 不是 PE 所以不签) —— 让
+#      Windows 能显示"发布者"、让 SmartScreen 有依据; 用 signtool (有 SDK 时) 或回退到
+#      PowerShell 自带的 Set-AuthenticodeSignature。
+#   2) **分离签名** SHA256SUMS (openssl) —— Linux/macOS 侧也能验证整包 (Authenticode 在
+#      那边不好验), 第三方只需要公钥证书。
+#
+# 诚实边界 (docs/163 §1): **自签名 ≠ SmartScreen 不报警**。自签名让"签名可被密码学验证",
+# 用户会看到"已签名/发布者未知"; 要消掉警告必须买 CA 的代码签名证书 (OV/EV)。
+#
+# 凭据纪律: 私钥/口令**只从环境变量或命令行参数读**, 源码里没有任何凭据字面量, 也不写进仓库。
+#   自签名那条路走 Windows 证书存储 (CurrentUser\My) + 指纹, 全程不出现口令。
+#
+#   python tools/loment_sign.py --keygen                 # 生成**本机自签名**证书 (指纹 + 公钥证书)
+#   python tools/loment_sign.py --sign FILE...           # 签 PE
+#   python tools/loment_sign.py --verify FILE...         # 验 PE (打印状态与发布者)
+#   python tools/loment_sign.py --sign-sums --verify-sums # 签/验 SHA256SUMS (openssl)
+#   python tools/loment_sign.py --dist                   # 对 loment/dist 里该签的全做一遍
+#   python tools/loment_sign.py --print-cmd FILE         # 只打印等价命令 (真证书/CI 用)
+#   python tools/loment_sign.py --remove [--purge]       # 从证书存储删掉自签证书
+#
+# 退出码: 0 = 成功 / 1 = 失败 / 2 = 用法错误。
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "loment" / "dist"
+SIGN = ROOT / "loment" / "build" / "sign"          # gitignored: 私钥只落在这里
+THUMB = SIGN / "thumbprint.txt"
+CER = SIGN / "loment-selfsigned.cer"
+KEY = SIGN / "loment-signing.key.pem"              # openssl 私钥 (本机)
+PUB = SIGN / "loment-signing.pem"                  # 公钥证书 (会拷进 dist 供第三方验证)
+PUBKEY = SIGN / "loment-signing.pub.pem"           # 从证书里抽出的公钥 (openssl -verify 只吃这个)
+SUBJECT = "CN=Loment Self-Signed (dev)"
+SUMS_NAME = "SHA256SUMS"
+
+# 环境变量名 (凭据只从这里/参数来)
+ENV_PFX = "LOMENT_SIGN_PFX"
+ENV_PASS = "LOMENT_SIGN_PFX_PASS"
+
+
+def _shown(p: Path) -> str:
+    """给日志用的路径 —— SIGN 被指到仓库外 (测试) 时不能 relative_to。"""
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def _sh(*argv: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(list(argv), capture_output=True, text=True, shell=False,
+                          encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=timeout)
+
+
+def _ps(script: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    """跑一段 PowerShell (Windows 自带; 没有它就没法做 Authenticode)。"""
+    ps = "powershell" if os.name == "nt" else "pwsh"
+    return subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                          capture_output=True, text=True, shell=False,
+                          encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=timeout)
+
+
+def find_signtool() -> str | None:
+    """PATH 上没有就找 Windows SDK 里的 (signtool 不装 SDK 就没有)。"""
+    import glob
+    p = _sh("where", "signtool") if os.name == "nt" else None
+    if p and p.returncode == 0 and p.stdout.strip():
+        return p.stdout.strip().splitlines()[0]
+    for pat in (r"C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe",
+                r"C:\Program Files (x86)\Windows Kits\10\bin\*\x86\signtool.exe"):
+        hits = sorted(glob.glob(pat))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def cert_spec(a) -> tuple[str | None, str | None, str | None]:
+    """返回 (pfx, 口令, 指纹)。优先级: 参数 > 环境变量 > 本机自签。"""
+    pfx = a.cert or os.environ.get(ENV_PFX) or None
+    pw = a.passwd or os.environ.get(ENV_PASS) or None
+    thumb = THUMB.read_text(encoding="utf-8").strip() if THUMB.exists() else None
+    return pfx, pw, thumb
+
+
+# ---------------------------------------------------------------- keygen / remove
+
+def keygen(subject: str = SUBJECT) -> int:
+    SIGN.mkdir(parents=True, exist_ok=True)
+    # 先清掉同主题的旧证书: 反复 --keygen 不该在存储里堆一串同名证书
+    # (否则"这份文件是谁签的"要看指纹才知道, 而且旧证书仍能签名)
+    _ps(f"Get-ChildItem Cert:\\CurrentUser\\My | "
+        f"Where-Object {{ $_.Subject -eq '{subject}' }} | "
+        f"Remove-Item -Force -ErrorAction SilentlyContinue")
+    r = _ps(
+        f"$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' "
+        f"-KeyUsage DigitalSignature -CertStoreLocation Cert:\\CurrentUser\\My "
+        f"-NotAfter (Get-Date).AddYears(2) -FriendlyName 'Loment dev signing'; "
+        f"Export-Certificate -Cert $c -FilePath '{CER}' | Out-Null; "
+        f"Write-Output $c.Thumbprint")
+    if r.returncode != 0 or not r.stdout.strip():
+        print(f"[ERR] 生成自签证书失败: {(r.stderr or r.stdout)[-300:]}", file=sys.stderr)
+        return 1
+    thumb = r.stdout.strip().splitlines()[-1].strip()
+    THUMB.write_text(thumb + "\n", encoding="utf-8", newline="\n")
+    print(f"[OK] 自签代码签名证书 (CurrentUser\\My): {subject}")
+    print(f"     指纹 {thumb}")
+    print(f"     公钥证书 {_shown(CER)}")
+    # 分离签名用一对 openssl 密钥 (跨平台可验); 私钥只在本机
+    r = _sh("openssl", "req", "-x509", "-newkey", "rsa:3072", "-nodes",
+            "-keyout", str(KEY), "-out", str(PUB), "-days", "730", "-subj", f"/{subject}")
+    if r.returncode != 0:
+        print(f"[WARN] openssl 密钥生成失败 (分离签名不可用): {(r.stderr or '')[-200:]}")
+    else:
+        _export_pubkey()
+        print(f"[OK] openssl 密钥对: {_shown(PUBKEY)} (验签用) / 私钥只在本机")
+    print("     注意: 自签名**不会**让 SmartScreen 不报警 —— 换 CA 证书见 docs/163")
+    return 0
+
+
+def trust(add: bool) -> int:
+    """把自签证书放进**本机**受信存储 (CurrentUser), 让本机的签名状态变成 Valid。
+
+    这是本机的信任模型改动 (任何用这把钥匙签的东西在本机都会被信任), 所以默认不做,
+    要显式 `--trust`。只影响当前用户, `--untrust` 可撤。
+    """
+    if not THUMB.exists():
+        print("[ERR] 没有本机自签证书 (先跑 --keygen)", file=sys.stderr)
+        return 1
+    thumb = THUMB.read_text(encoding="utf-8").strip()
+    verb = "Add" if add else "Remove"
+    stores = ["Cert:\\CurrentUser\\TrustedPublisher", "Cert:\\CurrentUser\\Root"]
+    script = "; ".join(f"{verb}-Item -Path Cert:\\CurrentUser\\My\\{thumb} "
+                       f"-CertStoreLocation '{s}'" if add else
+                       f"Remove-Item -Path '{s}\\{thumb}' -Force -ErrorAction SilentlyContinue"
+                       for s in stores)
+    r = _ps(script)
+    if r.returncode != 0:
+        print(f"[ERR] 信任操作失败: {(r.stderr or '')[-200:]}", file=sys.stderr)
+        return 1
+    print(f"[OK] 已{'信任' if add else '取消信任'}本机自签证书 {thumb} "
+          f"(CurrentUser\\TrustedPublisher + Root)")
+    return 0
+
+
+def remove(purge: bool) -> int:
+    if THUMB.exists():
+        thumb = THUMB.read_text(encoding="utf-8").strip()
+        r = _ps(f"Remove-Item -Path Cert:\\CurrentUser\\My\\{thumb} -Force "
+                f"-ErrorAction SilentlyContinue; Write-Output done")
+        print(f"[OK] 已从证书存储删除 {thumb}" if r.returncode == 0 else f"[WARN] 删除失败: {r.stderr[-160:]}")
+        THUMB.unlink()
+    if purge and SIGN.exists():
+        import shutil
+        shutil.rmtree(SIGN)
+        print(f"[OK] 已删除 {_shown(SIGN)} (含私钥)")
+    return 0
+
+
+# ---------------------------------------------------------------- Authenticode
+
+def sign_pe(files: list[str], a) -> int:
+    pfx, pw, thumb = cert_spec(a)
+    if not pfx and not thumb:
+        print("[ERR] 没有可用证书: 要么设 LOMENT_SIGN_PFX(+/LOMENT_SIGN_PFX_PASS), "
+              "要么先跑 --keygen (docs/163)", file=sys.stderr)
+        return 1
+    st = find_signtool()
+    rc = 0
+    for f in files:
+        p = Path(f)
+        if not p.exists():
+            print(f"[ERR] 文件不存在: {f}", file=sys.stderr)
+            rc = 1
+            continue
+        if pfx:
+            if not pw:
+                print(f"[ERR] 给了证书 {ENV_PFX}/--cert 但没给口令 "
+                      f"({ENV_PASS}/--pass)", file=sys.stderr)
+                return 1
+            if st:
+                argv = [st, "sign", "/f", pfx, "/p", pw, "/fd", "sha256"]
+                if a.ts:
+                    argv += ["/tr", a.ts, "/td", "sha256"]
+                argv += [str(p)]
+                r = _sh(*argv)
+            else:
+                ts = (f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
+                      f"-HashAlgorithm SHA256 -TimestampServer '{a.ts}'" if a.ts else
+                      f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
+                      f"-HashAlgorithm SHA256")
+                r = _ps(f"$c = New-Object System.Security.Cryptography.X509Certificates."
+                        f"X509Certificate2('{pfx}','{pw}')" + ts + "; Write-Output $s.Status")
+        else:
+            r = _ps(f"$c = Get-Item Cert:\\CurrentUser\\My\\{thumb}; "
+                    f"$s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
+                    f"-HashAlgorithm SHA256; Write-Output $s.Status")
+        if r.returncode != 0:
+            print(f"[ERR] 签 {p.name} 失败: {(r.stderr or r.stdout)[-240:]}", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"[OK] 已签名 {p.name} ({p.stat().st_size} 字节)  via "
+              f"{'signtool' if (pfx and st) else 'Set-AuthenticodeSignature'}")
+    return rc
+
+
+def verify_pe(files: list[str], strict: bool) -> int:
+    rc = 0
+    for f in files:
+        p = Path(f)
+        if not p.exists():
+            print(f"[ERR] 文件不存在: {f}", file=sys.stderr)
+            rc = 1
+            continue
+        r = _ps(f"$s = Get-AuthenticodeSignature -FilePath '{p}'; "
+                f"$sub = if ($s.SignerCertificate) {{ $s.SignerCertificate.Subject }} else {{ '-' }}; "
+                f"Write-Output ($s.Status.ToString() + '|' + $sub)")
+        line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else "|"
+        status, _, sub = line.partition("|")
+        signed = sub not in ("", "-")
+        # 自签名链不受信: Status = UnknownError 但**签名本身存在** —— 这是正常的, 分开报
+        ok = signed and (not strict or status == "Valid")
+        print(f"{'[OK]' if ok else '[ERR]'} {p.name}: 签名={'有' if signed else '无'} "
+              f"状态={status} 发布者={sub}")
+        if not ok:
+            rc = 1
+    return rc
+
+
+# ---------------------------------------------------------------- 分离签名 (SHA256SUMS)
+
+def _export_pubkey() -> None:
+    """从证书里抽出**公钥** —— `openssl dgst -verify` 只吃公钥 PEM, 给证书会报
+    "Could not find private key of public key" (OpenSSL 3 的行为)。"""
+    r = _sh("openssl", "x509", "-in", str(PUB), "-pubkey", "-noout")
+    if r.returncode == 0 and r.stdout.strip():
+        PUBKEY.write_text(r.stdout, encoding="utf-8", newline="\n")
+
+
+def sign_sums(sums: Path) -> int:
+    if not KEY.exists():
+        print(f"[ERR] 缺私钥 {_shown(KEY)} (先跑 --keygen)", file=sys.stderr)
+        return 1
+    if not sums.exists():
+        print(f"[ERR] 缺 {sums}", file=sys.stderr)
+        return 1
+    sig = sums.with_name(sums.name + ".sig")
+    r = _sh("openssl", "dgst", "-sha256", "-sign", str(KEY), "-out", str(sig), str(sums))
+    if r.returncode != 0:
+        print(f"[ERR] 分离签名失败: {(r.stderr or '')[-240:]}", file=sys.stderr)
+        return 1
+    import shutil
+    if not PUBKEY.exists():
+        _export_pubkey()
+    shutil.copyfile(PUB, OUT / PUB.name)          # 证书: 让第三方看身份
+    shutil.copyfile(PUBKEY, OUT / PUBKEY.name)    # 公钥: 让第三方验签
+    print(f"[OK] {sums.name}.sig ({sig.stat().st_size} 字节); 证书与公钥已拷到 "
+          f"{_shown(OUT / PUBKEY.name)}")
+    return 0
+
+
+def verify_sums(sums: Path, cert: Path | None = None) -> int:
+    sig = sums.with_name(sums.name + ".sig")
+    pub = cert or ((OUT / PUBKEY.name) if (OUT / PUBKEY.name).exists() else PUBKEY)
+    if not sig.exists() or not pub.exists():
+        print(f"[ERR] 缺 {sig.name} 或公钥 {pub}", file=sys.stderr)
+        return 1
+    r = _sh("openssl", "dgst", "-sha256", "-verify", str(pub), "-signature", str(sig), str(sums))
+    ok = r.returncode == 0 and "Verified OK" in (r.stdout or "")
+    print(f"{'[OK]' if ok else '[ERR]'} {sums.name} 分离签名: {(r.stdout or r.stderr).strip()[:80]}")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------- 打印命令 (真证书/CI)
+
+def print_cmd(files: list[str], a) -> int:
+    st = find_signtool() or "signtool.exe"
+    ts = ["/tr", a.ts or "<RFC3161 时间戳 URL>", "/td", "sha256"]
+    print("# 真 CA 证书 (OV/EV) 的签名命令 —— 证书路径与口令从环境/密钥服务取, 别写进仓库")
+    print(f'  "{st}" sign /f "%{ENV_PFX}%" /p "%{ENV_PASS}%" /fd sha256 '
+          + " ".join(ts) + " " + " ".join(files))
+    print("# 分离签名 (跨平台验证)")
+    print(f"  openssl dgst -sha256 -sign <私钥> -out {SUMS_NAME}.sig {SUMS_NAME}")
+    print(f"  openssl dgst -sha256 -verify <公钥证书> -signature {SUMS_NAME}.sig {SUMS_NAME}")
+    return 0
+
+
+# ---------------------------------------------------------------- dist 一键
+
+def do_dist(a) -> int:
+    setups = sorted(OUT.glob("*-setup.exe"))
+    if not setups:
+        print(f"[ERR] {_shown(OUT)} 里没有 *-setup.exe (先跑 loment_dist --emit)",
+              file=sys.stderr)
+        return 1
+    rc = 0
+    if a.sign:
+        rc |= sign_pe([str(p) for p in setups], a)
+        # 签名改了 PE 的字节 -> 校验和清单必须在签名**之后**重算, 否则清单对不上
+        import loment_dist
+        sums = loment_dist.write_sums(OUT)
+        print(f"[OK] 签名后重算 {_shown(sums)}")
+    if a.sign_sums:
+        rc |= sign_sums(OUT / SUMS_NAME)
+    if a.verify or a.sign:
+        rc |= verify_pe([str(p) for p in setups], a.strict)
+    if a.verify_sums or a.sign_sums:
+        rc |= verify_sums(OUT / SUMS_NAME)
+    return rc
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="loment_sign")
+    ap.add_argument("--keygen", action="store_true", help="生成本机自签名代码签名证书")
+    ap.add_argument("--subject", metavar="DN", help=f"自签证书主题 (默认 {SUBJECT})")
+    ap.add_argument("--trust", action="store_true", help="把自签证书放进本机受信存储 (改本机信任模型)")
+    ap.add_argument("--untrust", action="store_true", help="撤销上面的信任")
+    ap.add_argument("--remove", action="store_true", help="从证书存储删除自签证书")
+    ap.add_argument("--purge", action="store_true", help="连本机私钥目录一起删")
+    ap.add_argument("--sign", action="store_true", help="签 PE")
+    ap.add_argument("--verify", action="store_true", help="验 PE")
+    ap.add_argument("--sign-sums", action="store_true", help="分离签名 SHA256SUMS")
+    ap.add_argument("--verify-sums", action="store_true", help="验 SHA256SUMS 的分离签名")
+    ap.add_argument("--dist", action="store_true", help="对 loment/dist 全做一遍")
+    ap.add_argument("--print-cmd", action="store_true", help="只打印等价命令")
+    ap.add_argument("--strict", action="store_true", help="验证时要求状态 Valid (自签名不满足)")
+    ap.add_argument("--cert", metavar="PFX", help=f"证书文件 (默认读环境变量 {ENV_PFX})")
+    ap.add_argument("--pass", dest="passwd", metavar="PW", help=f"证书口令 (默认读环境变量 {ENV_PASS})")
+    ap.add_argument("--ts", metavar="URL", help="RFC3161 时间戳服务 (自签名/离线时不要给)")
+    ap.add_argument("files", nargs="*", help="要处理的 PE 文件")
+    a = ap.parse_args(argv)
+
+    if a.keygen:
+        return keygen(a.subject or SUBJECT)
+    if a.trust or a.untrust:
+        return trust(a.trust)
+    if a.remove:
+        return remove(a.purge)
+    if a.print_cmd:
+        return print_cmd(a.files or ["<file>.exe"], a)
+    if a.dist:
+        return do_dist(a)
+    if a.sign:
+        return sign_pe(a.files, a)
+    if a.verify:
+        return verify_pe(a.files, a.strict)
+    if a.sign_sums:
+        return sign_sums(OUT / SUMS_NAME)
+    if a.verify_sums:
+        return verify_sums(OUT / SUMS_NAME)
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

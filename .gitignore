@@ -89,3 +89,6 @@ ahci_events.txt
 # Loment 发行包 (构建产物: 每次打包重建; setup.exe 非确定性 -> 不进校验和清单, 见 docs/162)
 /loment/dist/
 /loment/build/dist/
+
+# 签名私钥/自签证书 (本机, 绝不进仓库 —— 判据 loment_sign_test 会核这条忽略规则)
+/loment/build/sign/

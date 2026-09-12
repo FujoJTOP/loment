@@ -768,11 +768,24 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> 
             made.append(exe)
             print(f"  [{exe.name}] {exe.stat().st_size} 字节 (自解压, 未签名)")
 
-    sums = out / "SHA256SUMS"
-    sums.write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
-                            for p in made), encoding="utf-8", newline="\n")
+    sums = write_sums(out)
     print(f"  [{sums.name}] {len(made)} 行")
     return 0
+
+
+def write_sums(out_dir: Path | None = None) -> Path:
+    """重算产物目录的 SHA256SUMS (排除清单自身、分离签名 .sig 与公钥证书 .pem)。
+
+    单独抽出来是因为**签名会改 PE 的字节**: 签名之后必须重算清单, 否则清单对不上产物。
+    """
+    out = out_dir or OUT
+    arts = [p for p in sorted(out.iterdir())
+            if p.is_file() and p.name != "SHA256SUMS"
+            and not p.name.endswith((".sig", ".pem"))]
+    sums = out / "SHA256SUMS"
+    sums.write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
+                            for p in arts), encoding="utf-8", newline="\n")
+    return sums
 
 
 def check(out_dir: Path | None = None) -> int:
