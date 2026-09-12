@@ -18,6 +18,9 @@
 *.json text eol=lf
 *.yml  text eol=lf
 *.yaml text eol=lf
+*.sh   text eol=lf
+# 自举种子 (参考实现发射的 IR): 文本, 但绝不能被换行转换改字节 —— 驱动按字节比对
+loment/build/selfhost_driver.ll text eol=lf
 .gitattributes text eol=lf
 .gitignore     text eol=lf
 # binary artifacts — never convert, never diff as text

@@ -661,10 +661,26 @@ checker 与 codegen 共用 64 KiB 堆导致驱动 SIGILL（⑩）、每函数表
 2. 跑 M79/M80/M81 三项对照；
 3. 打印报告（`--json` 可机器读）。
 
+## M87 延伸 · 无 Python 自举（种子）✅
+
+自举链原先只能从 **Python 版编译器**起步（M83 的 stage1 由 `lomentc` 现编）。现在起点固化
+成工件 `loment/build/selfhost_driver.ll`（1.63 MB，参考实现为 `selfhost/driver.lomt`
+发射的完整单元 IR），于是重建编译器只需要 **clang + POSIX sh**：
+
+```sh
+sh loment/bootstrap.sh          # 1) clang(种子)->stage1 2) stage1 产出==种子
+                                # 3) stage2/stage3 定点 4) 跨阶段对 native_res 一致
+python tools/loment_seed_test.py  # 3/3: 种子不许过期 + 脚本禁解释器 + 定点证明
+```
+
+三条判据：种子与参考逐字符一致（**过期即红**）、启动脚本命令位置不许出现任何解释器
+（静态扫描 + 强制 LF）、自举定点在"只有 clang"的条件下成立。详见
+`docs/159-loment-seed-bootstrap.md`（含剩余第三方语言的诚实清单）。门禁已进 `ci.py`。
+
 ## M88 · 发布校验和 ✅
 
 `python tools/loment_release.py --checksums loment/build/SHA256SUMS` 产出
-**134 行** sha256 清单（与 `release-manifest.json` 同源、换行无关）。
+一份 sha256 清单（**行数 = 工件数**，与 `release-manifest.json` 同源、换行无关）。
 
 tag：**`loment-1.0-pre`**（annotated）打在 `Fujoos-FujoLang-DEV` 的 1.0 冻结提交上并已推送
 origin。它是 **dev 分支快照**，不是发布分支：冻结面见 `docs/158-loment-1.0-freeze.md`，

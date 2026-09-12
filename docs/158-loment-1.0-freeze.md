@@ -79,11 +79,11 @@ python tools/lomentc_test.py          # 参考实现 91/91 (含其 API 形状断
 python tools/loment_tools_test.py     # 15/15: 诊断分类/内建表/增量缓存…
 python tools/loment_ir_diff.py --all  # 40 个目标逐字节一致 (定位工具)
 python tools/loment_status.py --check # 状态矩阵与 docs/145 一致
-python tools/loment_release.py --check # 134 个工件 sha256 一致
+python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由它打印)
 ```
 
 发布快照：`git tag loment-1.0-pre`（annotated，打在 `Fujoos-FujoLang-DEV` 上并已推送 origin），
-校验和清单 `loment/build/SHA256SUMS`（134 行，与 `release-manifest.json` 同源；哈希按通用换行
+校验和清单 `loment/build/SHA256SUMS`（行数 = 工件数，与 `release-manifest.json` 同源；哈希按通用换行
 计算，**LF/CRLF 检出结果相同**）。它是 dev 分支快照而非发布分支 —— 发布线要等 M100。
 
 **判据优先于实现**：任何一处红灯都不许"改判据让它变绿"，只许改实现或按 §5 走流程。
