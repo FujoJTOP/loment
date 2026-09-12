@@ -67,12 +67,31 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 | 剩余 | 位置 | 影响 | 去路 |
 |---|---|---|---|
 | Python（**测试侧**） | `tools/*_test.py`、`loment_rule_parity`、`ci.py` | 不影响"用户构建/使用 Loment"，只影响开发期判据 | 判据本身也是可移植的：把一致性套件写成 Loment 程序（下一批），或保持 Python 作为"第三方审计工具"——两条路都合理 |
-| Python（工具链） | `lomfmt`（格式化）/`lomdoc`/`loment_lsp`/`lompkg` | 用户要格式化、文档、补全、依赖管理时还要 Python | 逐个用 Loment 重写（词法层已经就位），判据风格照抄本文件：**与 Python 版逐字节/逐字符相同** |
+| ~~`lomfmt`（格式化）~~ | **已重写**：`loment/tools/lomfmt.lomt` | 与 Python 版**逐字节相同**（42 语料 + 4 边界 + 幂等，`tools/loment_fmt_test.py`，已进 `ci.py`） | 工具链去 Python 的第一块；它只吃词法层，所以不受自举 parser 子集限制 |
+| Python（其它工具链） | `lomdoc`/`loment_lsp`/`lompkg` | 用户要文档、补全、依赖管理时还要 Python | 逐个用 Loment 重写；`lomdoc`/`lsp` 需要**完整 parser**（目前是子集），所以先补 parser 或先做 `lompkg` 这类不吃 AST 的 |
 | Python（L0 生成器） | `tools/lomc.py`（13 个生成物被内核线消费） | 跨线接口面，单方面改会破坏内核线约定 | 需与内核线协同排期（docs/141 的冻结阈值） |
 | clang / LLVM | 发射 IR → 可执行文件 | **地基语言**，本次目标明确保留 | 不计划去掉 |
 
 换句话说：**从"想重建/使用 Loment"出发的路径已经不含解释器**；剩下的 Python 都在
 开发期判据与尚未重写的工具链上，且每一项都有可测量的迁移判据可写。
+
+### 4b. 第一块工具链已经重写（`lomfmt`）
+
+`loment/tools/lomfmt.lomt` 是用户侧工具链里第一个 Loment 实现，判据 = **与 `tools/lomfmt.py`
+逐字节相同**（42 个语料 + 4 个边界 + 幂等，`python tools/loment_fmt_test.py` 3/3 通过，
+已进 `ci.py`）。它只吃词法层，所以不需要完整的自举 parser。
+
+语义是**逐条镜像** Python 版，包括那些"怪癖"：
+
+- 集合成员判断用 **val**：字符串字面量的 val 是转义解码后的内容，所以源码里的 `"("`
+  会被当成真的左括号（语料里到处是 `tok_is(src,t,i,"(")`，不镜像就逐字节不一致）；
+- `_render` 对字符串**解转义再重转义**（`\q` → `q`、`\"` → `\"`、`\n` 写成两字符 `\n`）；
+- 多字符运算符按**相邻 token** 合并（不看源码里是否连着，`merge_ops` 的原文语义）；
+- Python 版**丢注释**这一行为被照搬（两者都丢），不单方面改。
+
+这一格同时把"写 Loment 工具"的模板钉下来了：同一份源码喂两个实现、比 stdout 字节。
+`lomdoc`/`loment_lsp` 需要完整 parser（自举 parser 目前是子集），`lompkg` 不吃 AST ——
+下一个该动哪一格由这条依赖决定。
 
 ## 5. 这套东西怎么进 CI
 
@@ -91,6 +110,12 @@ python tools/loment_seed_test.py
   PASS  test_bootstrap_script_is_python_free   # 无解释器调用 + LF
   PASS  test_seed_bootstrap_fixed_point        # 种子自复现 + stage2/stage3 定点
 SEED BOOTSTRAP OK: 只用 clang + sh (无 Python); 种子自复现 + 三阶段定点
+
+python tools/loment_fmt_test.py
+  PASS  test_loment_fmt_matches_python         # 42 个语料逐字节相同
+  PASS  test_loment_fmt_edge_cases             # 空/只有注释/含转义引号/CRLF
+  PASS  test_loment_fmt_is_idempotent          # 格式化两次结果相同
 ```
 
-测量：`driver.lomt` 的种子 1 630 342 B；`native_res.lomt` 两阶段产物 3 028 B 相同。
+测量：`driver.lomt` 的种子 1 630 342 B；`native_res.lomt` 两阶段产物 3 028 B 相同；
+格式化器对最大的语料 `selfhost/codegen.lomt` 输出 161 813 B 逐字节一致。

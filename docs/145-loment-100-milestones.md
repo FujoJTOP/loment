@@ -504,6 +504,7 @@ python tools/loment_seed_test.py         # 3/3 无 Python 自举: 种子自复�
 | M99 复现包 | 工件 sha256 可复现（件数见 release-manifest.json） | ✅ |
 | M100 发布审计 | — | ⚠️ 1.0-pre |
 | 无 Python 自举（种子上线） | `sh loment/bootstrap.sh` 只用 clang: 种子自复现 + stage2/stage3 定点 | ✅（种子 `loment/build/selfhost_driver.ll` 1.63MB 已提交并被 sha256 钉住；启动脚本静态判据禁解释器；`loment_seed_test` 进门禁；docs/159） |
+| 工具链去 Python 第一块 | Loment 版格式化器与 Python 版**逐字节相同** | ✅（`loment/tools/lomfmt.lomt`，判据 = 42 语料 + 4 边界 + 幂等，`loment_fmt_test` 3/3 进门禁；镜像 val/转义/合并那些怪癖；docs/159 §4b） |
 
 ## P2 · 内存与运行时语义（M13–M22）
 

@@ -66,3 +66,5 @@ ahci_events.txt
 #   selfhost_codegen.ll     <- 自举 codegen 单跑一次的 IR 落盘
 /loment/build/*.vsix
 /loment/build/selfhost_codegen.ll
+# 测试用的临时探针 (loment_fmt_test 会自己删; 崩了也不该进仓库)
+/loment/build/fmt_*_case.lomt

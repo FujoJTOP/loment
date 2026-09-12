@@ -75,6 +75,19 @@ python tools/loment.py lsp                  # M56
 - 判据：**幂等**（格式化两次结果逐字节相同）+ **语义保持**（格式化前后 Potato 形式对象相同）。
 - 覆盖全部 16 个示例（`loment_tools_test.py::test_m55_*`）。
 
+### 1b. Loment 版格式化器 `loment/tools/lomfmt.lomt`（无 Python 第一块）
+
+用户侧工具链里第一个**用 Loment 重写、且与 Python 版逐字节等价**的程序：同一个 ELF
+（参考实现 + clang 链出，或用种子链）吃一个 `.lomt`，stdout 与 `tools/lomfmt.py` 完全一致。
+
+- 只吃词法层（与 Python 版一样复用词法器），所以不受自举 parser 子集限制；
+- 判据：**42 个语料逐字节相同**（examples + selfhost + 它自己）+ 4 个边界（空文件/只有注释/
+  含转义引号的字符串/CRLF）+ 幂等；见 `tools/loment_fmt_test.py`（已进 `ci.py`）；
+- 语义**逐条镜像** Python 版，包括把字符串字面量的 `val` 当关键字/标点比较（语料里到处是
+  `tok_is(src,t,i,"(")`，不镜像就逐字节不一致）与"解转义再重转义"的 `_render` 规则；
+- 代价与已知差异：Python 版丢注释这一行为被**照搬**（两者都丢），没有单方面改；
+  这属于 docs/158 §4 的开放项级别问题，要改必须两个实现同时改。
+
 ## 2. M56 语言服务 `loment_lsp`
 
 最小 LSP（JSON-RPC over stdio）：`initialize` / `didOpen` / `didChange` / `definition` /
