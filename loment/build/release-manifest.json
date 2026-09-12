@@ -111,11 +111,11 @@
   },
   {
    "path": "tools/vscode_ext.py",
-   "sha256": "a3da7df911decb672f2b205eb2a5237e74e34ca78278968322efbaa0e9b47074"
+   "sha256": "f08ecceb7a68966429008b758fb1933f68212c69700fec7e56a571a97e284d12"
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "2e89133c55938171e69ef5544bb2c83c9606e6bd96b6c0b804ff9db54fb8eadd"
+   "sha256": "79fcb5b213d4a881e45a847dad2b24135fc798a8a2d5a36041c56f1ce917c905"
   },
   {
    "path": "tools/mono_trace.py",
@@ -147,11 +147,11 @@
   },
   {
    "path": "editors/vscode/syntaxes/lom.tmLanguage.json",
-   "sha256": "ef60080d80d10c59cd62c975fede16e5d41503f3d27cf496527e67ac819e35c8"
+   "sha256": "ef4179b1df7100eab7514fcce779996a76fb949eceefe42fd74bebe5a5064663"
   },
   {
    "path": "editors/vscode/syntaxes/loment.tmLanguage.json",
-   "sha256": "e45f97d58ccabbb6556a7837690038e4298841f7ff690834a161b8827003625d"
+   "sha256": "740d3c5db23592d7db293f07cd86ace2dee3d0e725886ac470336d6bb7a8d7c2"
   },
   {
    "path": "loment/examples/ahci.lomt",
@@ -383,7 +383,7 @@
   },
   {
    "path": "docs/148-loment-toolchain.md",
-   "sha256": "da5137cf783a3850f35dd70aa6a4ba4b2e3c056e02e87325883e4fd61168e9f8"
+   "sha256": "e20db22c679d5dfb36cfa5b36a0b8c8bb988e2c9d500a3c02b7c673535e82ce8"
   },
   {
    "path": "docs/149-loment-kernel-integration.md",

@@ -2,33 +2,36 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Loment",
   "scopeName": "source.loment",
-  "comment": "Loment L1 语法高亮 (语法是 Rust 严格子集, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译。",
+  "comment": "Loment L1 语法高亮 (语法是 Rust 严格子集, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译 (vscode_ext_test 会逐个编译一遍)。scope 名一律用标准 TextMate 前缀 —— 自造的根名主题不会着色。",
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#capability" },
-    { "include": "#types" },
+    { "include": "#struct-block" },
+    { "include": "#enum-block" },
+    { "include": "#fn-signature" },
+    { "include": "#let-name" },
+    { "include": "#decl-name" },
+    { "include": "#impl" },
     { "include": "#builtins" },
+    { "include": "#enum-path" },
+    { "include": "#types" },
     { "include": "#control" },
+    { "include": "#self" },
     { "include": "#storage" },
     { "include": "#constants" },
-    { "include": "#declaration" },
+    { "include": "#declarations" },
     { "include": "#functions" },
-    { "include": "#operators" }
+    { "include": "#screaming-case" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
   ],
   "repository": {
     "comments": {
       "patterns": [
-        {
-          "name": "comment.line.double-slash.loment",
-          "match": "//.*"
-        },
-        {
-          "name": "comment.block.loment",
-          "begin": "/\\*",
-          "end": "\\*/"
-        }
+        { "name": "comment.line.double-slash.loment", "match": "//.*" },
+        { "name": "comment.block.loment", "begin": "/\\*", "end": "\\*/" }
       ]
     },
     "strings": {
@@ -38,35 +41,174 @@
           "begin": "\"",
           "end": "\"",
           "patterns": [
-            {
-              "name": "constant.character.escape.loment",
-              "match": "\\\\."
-            }
+            { "name": "constant.character.escape.loment", "match": "\\\\." }
           ]
         }
       ]
     },
     "numbers": {
       "patterns": [
-        {
-          "name": "constant.numeric.hex.loment",
-          "match": "\\b0[xX][0-9a-fA-F]+\\b"
-        },
-        {
-          "name": "constant.numeric.decimal.loment",
-          "match": "\\b[0-9]+\\b"
-        }
+        { "name": "constant.numeric.hex.loment", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
+        { "name": "constant.numeric.decimal.loment", "match": "\\b[0-9]+\\b" }
       ]
     },
     "capability": {
       "patterns": [
         {
-          "name": "keyword.other.capability.loment",
-          "match": "\\b(capability|guard|revocable|excluded)\\b"
+          "match": "\\b(capability)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(:)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[)",
+          "captures": {
+            "1": { "name": "keyword.other.capability.loment" },
+            "2": { "name": "entity.name.constant.capability.loment" },
+            "3": { "name": "punctuation.separator.type.loment" },
+            "4": { "name": "support.type.capability-space.loment" },
+            "5": { "name": "punctuation.definition.brackets.loment" }
+          }
+        },
+        { "name": "keyword.other.capability.loment", "match": "\\b(capability|revocable|excluded)\\b" },
+        {
+          "match": "\\b(guard)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.guard.loment" },
+            "2": { "name": "support.constant.capability.loment" }
+          }
+        },
+        { "name": "keyword.other.capability.loment", "match": "\\b(excluded|revocable)\\b" },
+        { "name": "constant.language.audit.loment", "match": "\\b__(loment_caps|loment_audit|loment_off|frame)\\b" }
+      ]
+    },
+    "fn-signature": {
+      "patterns": [
+        {
+          "name": "meta.function.signature.loment",
+          "begin": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]*>)?\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "storage.type.function.loment" },
+            "2": { "name": "entity.name.function.loment" },
+            "3": { "name": "storage.type.generic.loment" },
+            "4": { "name": "punctuation.definition.parameters.begin.loment" }
+          },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.definition.parameters.end.loment" } },
+          "patterns": [
+            { "include": "#comments" },
+            { "name": "variable.parameter.loment", "match": "\\b(self|&|&mut)\\b" },
+            { "name": "variable.parameter.loment", "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)" },
+            { "include": "#types" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
+    "let-name": {
+      "patterns": [
+        {
+          "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)(?!\\s*::)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.let.loment" },
+            "2": { "name": "variable.other.loment" }
+          }
+        }
+      ]
+    },
+    "struct-block": {
+      "patterns": [
+        {
+          "name": "meta.block.struct.loment",
+          "begin": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{",
+          "beginCaptures": {
+            "1": { "name": "storage.type.declaration.struct.loment" },
+            "2": { "name": "entity.name.type.loment" }
+          },
+          "end": "\\}",
+          "endCaptures": { "0": { "name": "punctuation.definition.block.loment" } },
+          "patterns": [
+            { "include": "#comments" },
+            { "name": "variable.other.member.loment", "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)" },
+            { "include": "#types" },
+            { "include": "#numbers" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
+    "enum-block": {
+      "patterns": [
+        {
+          "name": "meta.block.enum.loment",
+          "begin": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*<[^>]*>)?\\s*\\{",
+          "beginCaptures": {
+            "1": { "name": "storage.type.declaration.enum.loment" },
+            "2": { "name": "entity.name.type.loment" },
+            "3": { "name": "storage.type.generic.loment" }
+          },
+          "end": "\\}",
+          "endCaptures": { "0": { "name": "punctuation.definition.block.loment" } },
+          "patterns": [
+            { "include": "#comments" },
+            { "name": "constant.other.enummember.loment", "match": "[A-Za-z_][A-Za-z0-9_]*" },
+            { "include": "#types" },
+            { "include": "#numbers" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
+    "decl-name": {
+      "patterns": [
+        {
+          "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.module.loment" },
+            "2": { "name": "entity.name.namespace.loment" }
+          }
         },
         {
-          "name": "constant.language.audit.loment",
-          "match": "\\b__(loment_caps|loment_audit|frame)\\b"
+          "match": "\\b(trait|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.loment" },
+            "2": { "name": "entity.name.type.loment" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.loment" },
+            "2": { "name": "entity.name.type.loment" }
+          }
+        }
+      ]
+    },
+    "impl": {
+      "patterns": [
+        {
+          "match": "\\b(impl)\\s+([A-Z][A-Za-z0-9_]*)\\s+(for)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.impl.loment" },
+            "2": { "name": "entity.name.type.trait.loment" },
+            "3": { "name": "keyword.other.for.loment" },
+            "4": { "name": "entity.name.type.loment" }
+          }
+        },
+        { "name": "storage.type.declaration.impl.loment", "match": "\\bimpl\\b" }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.loment",
+          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|inb|outb)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "enum-path": {
+      "patterns": [
+        {
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.enum.loment" },
+            "2": { "name": "keyword.operator.path.loment" },
+            "3": { "name": "constant.other.enummember.loment" }
+          }
         }
       ]
     },
@@ -74,100 +216,78 @@
       "patterns": [
         {
           "name": "storage.type.primitive.loment",
-          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|str|ptr)\\b"
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|str|ptr|usize|isize)\\b"
         },
-        {
-          "name": "storage.type.unit.loment",
-          "match": "\\(\\)"
-        }
-      ]
-    },
-    "builtins": {
-      "patterns": [
-        {
-          "name": "support.function.builtin.loment",
-          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_byte|str_ptr|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6)\\b(?=\\s*\\()"
-        }
+        { "name": "storage.type.unit.loment", "match": "\\(\\)" }
       ]
     },
     "control": {
       "patterns": [
         {
           "name": "keyword.control.loment",
-          "match": "\\b(if|else|while|for|in|match|return|as|self)\\b"
+          "match": "\\b(if|else|while|for|in|match|return|as|break|continue)\\b"
         }
+      ]
+    },
+    "self": {
+      "patterns": [
+        { "name": "variable.language.self.loment", "match": "\\bself\\b" }
       ]
     },
     "storage": {
       "patterns": [
-        {
-          "name": "storage.modifier.loment",
-          "match": "\\b(pub|mut|interrupt)\\b"
-        }
+        { "name": "storage.modifier.loment", "match": "\\b(pub|mut|interrupt|unsafe|extern|inline)\\b" }
       ]
     },
     "constants": {
       "patterns": [
-        {
-          "name": "constant.language.loment",
-          "match": "\\b(true|false)\\b"
-        }
+        { "name": "constant.language.loment", "match": "\\b(true|false)\\b" }
       ]
     },
-    "declaration": {
+    "declarations": {
       "patterns": [
         {
           "name": "storage.type.declaration.loment",
-          "match": "\\b(module|use|fn|let|const|struct|enum|impl|trait|type|where)\\b"
+          "match": "\\b(use|let|const|where)\\b"
         }
       ]
     },
     "functions": {
       "patterns": [
         {
-          "name": "entity.name.function.loment",
+          "name": "entity.name.function.call.loment",
           "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
-        },
-        {
-          "name": "entity.name.type.loment",
-          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
         }
+      ]
+    },
+    "screaming-case": {
+      "patterns": [
+        { "name": "constant.other.loment", "match": "\\b[A-Z][A-Z0-9_]{1,}\\b" }
       ]
     },
     "operators": {
       "patterns": [
-        {
-          "name": "keyword.operator.arrow.loment",
-          "match": "->"
-        },
-        {
-          "name": "keyword.operator.path.loment",
-          "match": "::"
-        },
-        {
-          "name": "keyword.operator.range.loment",
-          "match": "\\.\\."
-        },
-        {
-          "name": "keyword.operator.logical.loment",
-          "match": "&&|\\|\\||!"
-        },
-        {
-          "name": "keyword.operator.comparison.loment",
-          "match": "==|!=|<=|>=|<|>"
-        },
-        {
-          "name": "keyword.operator.assignment.loment",
-          "match": "="
-        },
-        {
-          "name": "keyword.operator.arithmetic.loment",
-          "match": "[+\\-*/%&|^]"
-        },
-        {
-          "name": "punctuation.loment",
-          "match": "[{}()\\[\\];,.:?@]"
-        }
+        { "name": "keyword.operator.match-arrow.loment", "match": "=>" },
+        { "name": "keyword.operator.arrow.loment", "match": "->" },
+        { "name": "keyword.operator.path.loment", "match": "::" },
+        { "name": "keyword.operator.range.loment", "match": "\\.\\." },
+        { "name": "keyword.operator.try.loment", "match": "\\?" },
+        { "name": "keyword.operator.logical.loment", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.comparison.loment", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.assignment.loment", "match": "=" },
+        { "name": "keyword.operator.arithmetic.loment", "match": "[+\\-*/%]" },
+        { "name": "keyword.operator.bitwise.loment", "match": "[&|^]" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.definition.block.loment", "match": "[{}]" },
+        { "name": "punctuation.definition.parameters.loment", "match": "[()]" },
+        { "name": "punctuation.definition.brackets.loment", "match": "\\[|\\]" },
+        { "name": "punctuation.separator.loment", "match": "[,;]" },
+        { "name": "punctuation.separator.member.loment", "match": "\\." },
+        { "name": "punctuation.separator.type.loment", "match": ":" },
+        { "name": "punctuation.loment", "match": "@" }
       ]
     }
   }

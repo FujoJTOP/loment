@@ -9,6 +9,51 @@
 > 服务端就是本文件的 `loment_lsp.py`）+ 构建/检查/运行命令；打包 `tools/vscode_ext.py`，
 > 无头验收 `tools/vscode_ext_test.py`（含完整 LSP 往返）；细节见 `docs/155` §8。
 
+## 0.1 语法高亮（`editors/vscode/syntaxes/`）
+
+两套 TextMate 语法：`loment.tmLanguage.json`（`.lomt`）与 `lom.tmLanguage.json`（`.lom`）。
+2026-09-11 做了一次"彻底"扫：**用 VS Code 同款引擎**（TextMate + Oniguruma）把语法跑成
+scope 流逐 token 核对，补掉了这些盲区：
+
+| 构造 | 之前 | 现在 |
+|---|---|---|
+| `=>`（match 臂） | 拆成 `=` + `>` 两个色 | `keyword.operator.match-arrow` 一个 |
+| `?`（try） | `punctuation` | `keyword.operator.try` |
+| `self` | `keyword.control` | `variable.language.self` |
+| `Color::Red` | `Red` 被当成类型名 | `entity.name.type.enum` + `constant.other.enummember` |
+| `fn f(a: u32)` 形参 | 无 | `variable.parameter`（签名整段进 `meta.function.signature`） |
+| `let x` | 无 | `variable.other`（`if let` 的模式不误判） |
+| `struct S { a: u32 }` 字段 | 无 | `variable.other.member`（整段 `meta.block.struct`） |
+| `MAX_BLKS` | 被当成类型名 | `constant.other` |
+| `capability blk : disk[0..4]` | 只认 `capability` | 域名 `entity.name.constant.capability` + 空间名 `support.type.capability-space` |
+| 模块名 / 记录名 / 常量名 | 无 | `entity.name.namespace` / `entity.name.type` / `variable.other.constant` |
+
+效果（同一套引擎实测的"无 scope 占比"）：`.lom` 两份语料 **0.0% / 0.1%**；`.lomt` 四份
+3.4% / 7.9% / 9.6% / 20.9%（剩下的全是表达式里的裸标识符 —— TextMate 层面没有类型信息，
+它们继承默认前景色是正常的）。
+
+**两类静默失效已进门禁**（`test_vscode_grammar_lints`）—— 它们不报错，只是颜色不对：
+
+1. **scope 名用了自造根名** ⇒ 主题不认那段，显示成默认前景色（看起来就是"没高亮"）；
+2. **`match` 里吃掉引号** ⇒ 截胡字符串的**开引号**，于是整份文件剩下的部分被当成一个
+   未闭合字符串染色。我加 `excluded "` 这条时就踩了：`demo.lomt` 从第 21 行起整片变字符串色。
+   只有 `begin`/`end` 允许碰引号。
+
+### 怎么亲自看高亮对不对
+
+```
+python tools/vscode_ext.py --doctor     # 装没装 / 语法是不是旧版 / 有没有人抢 .lomt
+```
+
+无头核对语法本身要用 VS Code 同款引擎：`npm i --prefix <dir> vscode-textmate vscode-oniguruma`，
+加载语法后逐行 `tokenizeLine` 打印 `scopes` —— 这是唯一能"看到" VS Code 会怎么染色的办法
+（`vscode_ext_test.py` 只做正则/结构层的检查，看不出配色对不对）。
+
+**高亮没出来时的排查顺序**（按概率）：① 装完/更新完**没重载窗口**（语法在窗口启动时加载）；
+② 该文件的**语言模式**还是 Plain Text —— 在扩展装上之前打开过的文件会记住旧的关联，
+`Ctrl+K M` 改成 Loment 即可；③ 跑一次 `--doctor` 看上面三项。
+（想直接看某个位置被染成什么：`Developer: Inspect Editor Tokens and Scopes`。）
+
 ## 0. 统一入口
 
 ```
