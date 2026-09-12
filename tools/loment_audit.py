@@ -62,6 +62,8 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_json_test", []),
     ("C14", "Windows 文件类型注册 (.lomt/.lom 常驻打开方式) 与启动脚本无解释器",
      "loment_filetype_test", []),
+    ("C15", "发行包: 命令安装 (sh/ps1) 与自解压安装包, 装出来的编译器产物与参考逐字节相同",
+     "loment_dist_test", []),
 ]
 
 

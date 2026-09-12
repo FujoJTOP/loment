@@ -85,3 +85,7 @@ ahci_events.txt
 /loment/build/lsp_check_case.lomt
 # MSYS 版 vim 的语言服务垫片: scripts/install-lsp.ps1 生成, 里面是**那台机器的** WSL 家目录路径
 /loment/build/loment-lsp.cmd
+
+# Loment 发行包 (构建产物: 每次打包重建; setup.exe 非确定性 -> 不进校验和清单, 见 docs/162)
+/loment/dist/
+/loment/build/dist/

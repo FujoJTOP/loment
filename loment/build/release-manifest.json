@@ -107,7 +107,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "774433506ec309a19cee4dd8a046ac00f6d03b8c4aa3379f4ee29b29590805db"
+   "sha256": "03e220660f331ea6c8d81cbceb9a7454177fa99c0ee97d4f017b7e3da539c8e8"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -143,7 +143,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "9aaf23a51d4636e25d5f84ede3e16180a8a80c1a0564c48d2e83c9d7b2c8e639"
+   "sha256": "8c81d14ab85e69cf80c662de6e8b8c39092300b77542902d1800ce8930e9105d"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -192,6 +192,14 @@
   {
    "path": "tools/loment_eol.py",
    "sha256": "0f08dc3da93d27ad48217f018c1cbecf0869cf33aba1d9a217d7440ac59bf0c8"
+  },
+  {
+   "path": "tools/loment_dist.py",
+   "sha256": "b6c8b5bf943ab74bebbc018b3b12951fd499842be81f6d2e331695d82c111159"
+  },
+  {
+   "path": "tools/loment_dist_test.py",
+   "sha256": "dcdba679bde47734405e56d3b1124fee6587de145d42050fb667e36e999d8eae"
   },
   {
    "path": "loment/bootstrap.sh",
@@ -463,7 +471,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "37ff97e02c94390280d8230a7ca9c6743b972bd884afc49c50693c878b321ecb"
+   "sha256": "7263a2267bb90b1e91af12b882160aabe6e5d8a368fbb3018fd052ab91d2486a"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -507,7 +515,7 @@
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "c3f1ef1b3fa6efdaaf9dabc2b5dd0de0661e2356e1ab1994ac1fa855b63ed6f5"
+   "sha256": "ffd68f724f7e904dd4c4d0b578961e9044946d23844a8c1568b791629912fcde"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
@@ -531,11 +539,15 @@
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "d7a40e27073cebdb5a916f76fead14c911798b9de1c8a4449a5233b2e11f311b"
+   "sha256": "02adb73ad3931286fd7f176d5c5827c8613ff0ff5ccc99cc2be928c9ae7de59e"
   },
   {
    "path": "docs/161-loment-checkout-eol.md",
    "sha256": "477805a00386ec49b9b888c82bdedbba33671ab7d9251aa0e2ab5c15a3c0f127"
+  },
+  {
+   "path": "docs/162-loment-distribution.md",
+   "sha256": "483b99074ee3bd3b4d3ea1f157ddc2237a4b5d67a95f25839412c8050ac03263"
   },
   {
    "path": "docs/manual/index.md",

@@ -491,6 +491,7 @@ python tools/loment_manual.py --check    # 25/25 与编译器版本一致 (M93)
 python tools/loment_release.py --check   # 工件 sha256 全部一致 (M95/M99)
 python tools/loment_seed_test.py         # 3/3 无 Python 自举: 种子自复现 + 三阶段定点 (docs/159)
 python tools/loment_eol.py               # 检出行尾 (LF 契约): CRLF 检出不该伪装成逻辑红 (docs/161)
+python tools/loment_dist_test.py         # 发行包: 命令安装 + 自解压安装包, 装出来的产物与参考逐字节相同 (docs/162)
 ```
 
 | 里程碑 | 验证方式 | 结果 |
@@ -503,7 +504,7 @@ python tools/loment_eol.py               # 检出行尾 (LF 契约): CRLF 检出
 | M96 冻结 | 冻结面成文 + 改动流程 + 一致性套件清单 | ✅（`docs/158-loment-freeze.md`：冻结面 = 语法/类型规则、诊断口径 E001–E017、单元装载规则、**发射符号约定（跨线 ABI）**、两后端逐字节等价、内建表、能力域语义；不冻结实现内部与性能。**7 条已知开放项/刻意偏离逐条写明**（三处保守偏离、同名 let 双 alloca、驱动器无 parser、aarch64 未执行、自举性能、无 DWARF 变量信息、未外部审计）；改冻结面四步流程（改规范 -> 加探针并**上调**预算 -> 两实现同提交 -> 过静态门禁）） |
 | M97/M98 | 设计决策表 + 四语言对比矩阵 | ✅ |
 | M99 复现包 | 工件 sha256 可复现（件数见 release-manifest.json） | ✅ |
-| M100 发布审计 | 审计包就位（一条命令 14/14 + 证据落盘），缺第三方复核 | ⚠️ 0.1.3.4 Alpha |
+| M100 发布审计 | 审计包就位（一条命令 15/15 + 证据落盘），缺第三方复核 | ⚠️ 0.1.3.4 Alpha |
 | 无 Python 自举（种子上线） | `sh loment/bootstrap.sh` 只用 clang: 种子自复现 + stage2/stage3 定点 | ✅（种子 `loment/build/selfhost_driver.ll` 1.63MB 已提交并被 sha256 钉住；启动脚本静态判据禁解释器；`loment_seed_test` 进门禁；docs/159） |
 | 工具链去 Python 第一块 | Loment 版格式化器与 Python 版**逐字节相同** | ✅（`loment/tools/lomfmt.lomt`，判据 = 42 语料 + 4 边界 + 幂等，`loment_fmt_test` 3/3 进门禁；镜像 val/转义/合并那些怪癖；docs/159 §4b） |
 | 工具链去 Python 第二块 | Loment 版文档生成器与 Python 版**逐字节相同** | ✅（`loment/tools/lomdoc.lomt`，判据 = 43 语料 + 1 边界（excluded/hex/多行 doc/双方法 trait/泛型/空 doc），`loment_doc_test` 2/2 进门禁；顺手修了参考实现注入预置枚举的行号 bug；docs/148 §4b） |
@@ -652,7 +653,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M97 | 语言设计与实现的论文素材 | 设计决策有据可查 | ✅ |
 | M98 | 与 Rust/C/Zig 的形式化对比 | 对比矩阵成文 | ✅ |
 | M99 | 端到端可复现实验包 | 第三方机器可复现 | ✅（工件 sha256；件数见 release-manifest.json） |
-| M100 | 0.1.3.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧已齐**: `python tools/loment_audit.py --json` 14/14 条主张通过并落盘证据; 审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试; **缺第三方复核本身**, 无法由作者自证 —— 这也是本行不能翻 ✅ 的原因） |
+| M100 | 0.1.3.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧已齐**: `python tools/loment_audit.py --json` 15/15 条主张通过并落盘证据; 审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试; **缺第三方复核本身**, 无法由作者自证 —— 这也是本行不能翻 ✅ 的原因） |
 
 ## 依赖与风险
 

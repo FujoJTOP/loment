@@ -21,6 +21,7 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 版本名的**唯一真源** (2026-09-12 由 `loment-1.0-pre` 改名): 机器可读的标识符用连字符形式,
 # 人读的显示名是 `0.1.3.4 Alpha`; 对外 tag = `v0.1.3.4-alpha` (git ref 不许带空格)。
 RELEASE = "0.1.3.4-alpha"
+RELEASE_NAME = "0.1.3.4 Alpha"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
@@ -42,6 +43,8 @@ GLOBS = [
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 行尾门禁 (docs/161): 本清单的 sha 对 CRLF 免疫, 但自举判据按原始字节读源码 —— 两者配对
     "tools/loment_eol.py",
+    # 发行包 (docs/162): 命令安装 + 自解压安装包
+    "tools/loment_dist.py", "tools/loment_dist_test.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",

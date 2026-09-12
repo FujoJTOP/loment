@@ -3,7 +3,7 @@
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
 > —— 它会打印/落盘 `loment/build/audit-report.json`（含提交、tag、clang 版本、
-> 14 条主张的逐条结果，以及**不主张清单**）。
+> 15 条主张的逐条结果，以及**不主张清单**）。
 
 ## 0. 审计包的设计原则
 
@@ -12,7 +12,7 @@
 一致性门禁（`test_audit_claims_match_ci`）专门盯这件事：审计工具列的每个工具都必须
 出现在 `tools/ci.py` 的静态门禁表里。
 
-## 1. 主张清单（14 条，各自有可执行判据）
+## 1. 主张清单（15 条，各自有可执行判据）
 
 | # | 主张 | 判据（`python tools/…`） | 通过标准 |
 |---|---|---|---|
@@ -34,7 +34,7 @@
 一键跑（约 4 分钟，含 clang 编译与 WSL 执行）：
 
 ```bash
-python tools/loment_audit.py --json     # 14/14 通过 + loment/build/audit-report.json
+python tools/loment_audit.py --json     # 15/15 通过 + loment/build/audit-report.json
 python tools/loment_audit.py --list     # 只列主张与命令
 ```
 
@@ -60,7 +60,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
 git checkout <审计报告里的 commit>   # 报告 provenance.commit —— 判据要对的**就是它**
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
-python tools/loment_audit.py --json # 期望 14/14
+python tools/loment_audit.py --json # 期望 15/15
 ```
 
 > tag `v0.1.3.4-alpha`（annotated）是 **M96 冻结面快照**，早于当前审计状态：
@@ -101,6 +101,7 @@ python tools/loment_audit.py --json # 期望 14/14
 ## 5. 关联材料
 
 - `docs/158-loment-freeze.md` —— 冻结面（改什么要付什么代价）+ 7 条开放项；
+- `docs/162-loment-distribution.md` —— 发行包（命令安装 + 自解压安装包）；
 - `docs/161-loment-checkout-eol.md` —— 检出行尾契约：CRLF 为什么能伪装成逻辑红；
 - `docs/150-loment-selfhost.md` —— 自举链（lexer/parser/checker/codegen/定点）与 M80 收口；
 - `docs/159-loment-seed-bootstrap.md` —— 无 Python 自举与工具链去 Python 的进度排序；
