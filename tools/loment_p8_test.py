@@ -915,6 +915,47 @@ def test_m82_coverage_report():
 
 
 @test
+def test_m85_codegen_table_capacity():
+    """自举 codegen 的**每函数表容量**必须装得下最大的编译单元。
+
+    这是批次 2 抓到的一次静默错编: 单元长到 246 个函数后, 越过了布局里
+    `fk 表`的 192 格 (14848..16384), 于是表尾被后面的参数替换表写穿 —— `fkind`
+    读出来是 2, 少数函数被改名成 `<接收者>_<方法>` (`is_lomt_emit_div_mnemonic`),
+    逐字节判据只报"两个编译器不一致"。布局现在按 256 个函数重排
+    (函数表 12288+i*12, fk 表 15360+i*8, 形参表 24576+i*80, 枚举表 45056+i*80),
+    这里把"容量 >= 最大单元的函数数"钉成静态判据: 再长下去会红, 不再悄悄写穿。
+    """
+    import re as _re
+    src = (ROOT / "loment" / "selfhost" / "codegen.lomt").read_text(encoding="utf-8")
+    def base(name: str) -> tuple[int, int]:
+        m = _re.search(rf"fn {name}\(i: u32\) -> u32 \{{\s*return (\d+) \+ i \* (\d+);", src)
+        assert m, f"{name} 的基址表达式没找到"
+        return int(m.group(1)), int(m.group(2))
+    fn_base, fn_stride = 12288, 12                    # 函数表 (字面量)
+    fk_base, fk_stride = base("fk_base")
+    enum_base, enum_stride = base("enum_base")
+    param_base = 24576
+    m = _re.search(r"24576 \+ n \* (\d+)", src)
+    assert m, "形参表步长没找到"
+    param_stride = int(m.group(1))
+    # 容量 = 每张表在"下一张表开始时"之前能放多少个
+    cap_fn = (fk_base - fn_base) // fn_stride
+    cap_fk = (17408 - fk_base) // fk_stride           # 17408 = 参数替换表基址
+    cap_param = (enum_base - param_base) // param_stride
+    cap = min(cap_fn, cap_fk, cap_param)
+    # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。
+    # 用**真实词法器**数 `fn` 标识符 token —— 这正是 codegen 看到的数量 (字符串里的
+    # "fn" 是 string token, 不算; 这也是 codegen.lomt 的 tok_is 刚补上的守卫)。
+    entry = ROOT / "loment" / "selfhost" / "driver.lomt"
+    unit_toks = lomc.lex(_unit_text(entry))
+    nfns = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "fn")
+    assert nfns <= cap, (f"最大单元有 {nfns} 个函数, 超过 codegen 表容量 {cap} "
+                         f"(fn {cap_fn} / fk {cap_fk} / 形参 {cap_param}) —— 请重排布局")
+    print(f"      codegen 表容量: {cap} 个函数 (fn {cap_fn}/fk {cap_fk}/形参 {cap_param}), "
+          f"最大单元 {nfns} 个")
+
+
+@test
 def test_m85_heap_budget():
     """静态预算: 语言堆里同时活着的 `alloc` 之和必须留在 64 KiB 以内。
 

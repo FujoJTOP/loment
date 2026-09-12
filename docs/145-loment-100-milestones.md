@@ -451,10 +451,10 @@ M83 的"单编译单元"边界就此消失。
 非目标文件），**驱动因此可以"先 check 再发射"了**：
 
 ```
-python tools/loment_p8_test.py     # 13/13
+python tools/loment_p8_test.py     # 14/14
 # checker 放行单元: 40/40 无诊断 (已登记缺口 1 个 = 非目标文件)
 # 驱动闸门: 负例 12/12 被拒, 正例 1/1 过检
-python tools/loment_rule_parity.py # 32/60 等价 (预算 32), 假阳性 0 / 码漂移 0
+python tools/loment_rule_parity.py # 60/60 等价 (预算 60), 假阳性 0 / 码漂移 0
 ```
 
 | 判据 | 结果 |
@@ -469,7 +469,7 @@ python tools/loment_rule_parity.py # 32/60 等价 (预算 32), 假阳性 0 / 码
 | `impl`/方法：裸 `self` 接收者、签名式方法没有函数体（`;` 也要终止返回类型扫描）、两个 impl 重名 | ✅ |
 | `test_m85_checker_accepts_corpus_units` 钉住覆盖面 + 登记缺口（修好会让测试提醒更新清单） | ✅ 40/40 + 缺口 1 |
 | `test_m85_driver_checks_before_emitting`：12 个负例全部非零退出 + 带诊断 + **不产出 IR**；正例零退出且产物与参考逐字节一致 | ✅ 闸门打开 |
-| `loment_rule_parity`：60 条最小负例逐规则比对两边**码集**，棘轮门禁（等价数不低于预算 + 假阳性/漂移必须为 0）已进 `ci.py` | ✅ 32/60 等价、0 假阳性 |
+| `loment_rule_parity`：60 条最小负例逐规则比对两边**码集**，棘轮门禁（等价数不低于预算 + 假阳性/漂移必须为 0）已进 `ci.py` | ✅ **60/60 等价**、0 假阳性 |
 | `test_m64_all_reference_messages_are_classified`：参考实现 81 条消息模板逐条可分类（分类表漏一条 = 那条规则在对照里静默消失） | ✅ 81/81 有码 |
 | `test_m81_builtin_tables_match`：自举 `is_builtin` 名字集合 == `lomentc.BUILTINS` ∪ `{slice_len}` | ✅ 20 个一致 |
 | `test_m85_heap_budget`：checker 与 codegen 的 `alloc` 之和 + 4 KiB 余量 <= 64 KiB 语言堆（批次 2 里这里超了，表现为驱动 **SIGILL**） | ✅ 61200/65536 |

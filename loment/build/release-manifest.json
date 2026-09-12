@@ -91,7 +91,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "17234a8d00fe8cab84f1a8b768ff6a92885b4cbb3725ac632b42f9b66ef8242d"
+   "sha256": "ba40246454a15660fc603a764a468b609adc4f6f2b99b1ddf71e969a584600bd"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -127,7 +127,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "08d7f4dc827710f59e7f704b6e8995ef54f81dd166a39d2faa24da6ab37488d7"
+   "sha256": "f7c8e26387e730b3998faaac62e9c2a5b72f064cff8ba9d557e470ceed7e4b09"
   },
   {
    "path": "editors/vscode/package.json",
@@ -263,15 +263,15 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "8169ed6e4354832848237608003b7e6d135560313972904a876ad573e98f548d"
+   "sha256": "6c2eca93e5750b1e73e207e936b6371a1565df338d965b4e78168826c342c30a"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "5fb5c63208906187554f485c0dcad143703fc7baea34fb3b74c03f6bcf360e93"
+   "sha256": "ac2eb8a0c784b7ca8b7c7eb2fee90afab2507f0344100808c37faf4157cd6b61"
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "45f37b0d666618b0249a1b04a1736fa2597ab4513067cd96a031c80503442ba7"
+   "sha256": "e8cdfca8cb64dabc03ff06e3104a52919e62d75c791897d2c8ff389b02eed2cf"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -367,7 +367,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "f72b04fe40f5af049fec3b13682896fd9a8fb21e19d787b466f189489c1f8a1e"
+   "sha256": "18bf3e44ca834ea4e6a6a2b2cb2496f43ecb2a8f5170fa15a006fd10a9b13ae5"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -387,7 +387,7 @@
   },
   {
    "path": "docs/148-loment-toolchain.md",
-   "sha256": "ec72c46dced941b9e4d819fd80eea476279a9531ce57d0f628c7edc7f8154f4c"
+   "sha256": "d53d75c6c28e82fbf0a7aae3bab86ccbb69e831000b558110d362ad99584994f"
   },
   {
    "path": "docs/149-loment-kernel-integration.md",
@@ -399,7 +399,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "b74ad24aae6b56ed9ffc7957f6d7577ba2fd8df7172313b8b0ec49777cc82a8e"
+   "sha256": "e691af192621cbee62f7816e998a66332988a389e7b4ab4fd47e1f94b7a22da3"
   },
   {
    "path": "docs/151-loment-ecosystem.md",

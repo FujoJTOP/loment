@@ -20,6 +20,7 @@ const K_STRUCT: u32 = 2;
 const K_ENUM: u32 = 3;
 const K_CONST: u32 = 4;
 const K_TPARAM: u32 = 5;   // 泛型形参 (`fn f<T>` 里的 T): 只当类型名用
+const K_METHOD: u32 = 6;   // impl 方法: 名字与接收者类型一起构成身份 (静态派发)
 
 // 错误码 = 项目统一口径 `loment_diag.RULES` (E001–E017) 的**数字部分**。
 // 自举 checker 与参考实现的对照判据 = 两边**码集相等**, 所以码值必须取自同一张表 ——
@@ -32,7 +33,13 @@ const E_CAP: u32 = 4;      // E004 能力域非法
 const E_DEF: u32 = 9;      // E009 类型名非法 (与基类型同名 / 类型为空)
 const E_TMISMATCH: u32 = 1;  // E001 类型不匹配 (常量"类型必须是整型"也归这一码)
 const E_LVAL: u32 = 14;    // E014 赋值目标不是左值
-const E_ARR: u32 = 16;     // E016 数组字面量非法 (长度不符)
+const E_ACCESS: u32 = 15;  // E015 字段/下标/取址目标非法
+const E_ARR: u32 = 16;     // E016 数组字面量非法 (长度/元素类型)
+const E_AS: u32 = 17;      // E017 `as` 转换非法
+const E_SLICE: u32 = 11;   // E011 只读切片不能写 / 形参要求可变切片
+const E_PATTERN: u32 = 8;  // E008 match/变体用法非法
+const E_BORROW: u32 = 7;   // E007 借用冲突 (同一变量既借又可变借 / 可变借两次)
+const E_Q: u32 = 10;       // E010 `?` 误用
 
 // 类型编码 (批次 2): 一个 u32 —— 0 = 未知, 其它按 (kind << TY_KIND_SHIFT) + payload。
 //   kind 1 = 基类型 (payload = 1..11 的内码)
@@ -126,6 +133,125 @@ fn chk_ty_is_int(v: u32) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- 复合类型表 (TY_ARRAY/TY_SLICE)
+//
+// 数组/切片没法内联进 u32 (要带元素类型与长度/可变性两个分量), 所以指向一张小表:
+// 表头 4 字节是条数, 之后 8 字节一条 (分量 a, 分量 b)。表放在 arena 里 (见 chk_arena_tyt),
+// 容量 128 条 —— 一轮表达式只造个位数的新类型, 够用。
+//
+// 为什么必须真建复合类型 (而不是继续用 0 = 未知): 参考实现在 `下标` 与 `&` 这两条上的
+// 判定方向是"类型未知/不是数组也要报", 所以"未知 -> 跳过"的策略**必然少报**, 而照搬
+// "未知就报"又会让任何我算不出类型的数组变成假阳性。见 docs/150 下一段那节。
+const TY_ARRAY: u32 = 3;
+const TY_SLICE: u32 = 4;
+
+fn chk_ty_new(t: ptr, kind: u32, a: u32, b: u32) -> u32 {
+    let n: u32 = load32(t, 0);
+    store32(t, 4 + n * 8, a);
+    store32(t, 4 + n * 8 + 4, b);
+    store32(t, 0, n + 1);
+    return (kind << TY_KIND_SHIFT) + n;
+}
+
+fn chk_ty_arr(t: ptr, elem: u32, len: u32) -> u32 {
+    return chk_ty_new(t, TY_ARRAY, elem, len);
+}
+
+fn chk_ty_slc(t: ptr, elem: u32, mut: u32) -> u32 {
+    return chk_ty_new(t, TY_SLICE, elem, mut);
+}
+
+fn chk_ty_kind(v: u32) -> u32 {
+    return v >> TY_KIND_SHIFT;
+}
+
+fn chk_ty_a(t: ptr, v: u32) -> u32 {
+    return load32(t, 4 + (v % (1 << TY_KIND_SHIFT)) * 8);
+}
+
+fn chk_ty_b(t: ptr, v: u32) -> u32 {
+    return load32(t, 4 + (v % (1 << TY_KIND_SHIFT)) * 8 + 4);
+}
+
+fn chk_ty_is_arr(t: ptr, v: u32) -> u32 {
+    if v != 0 && chk_ty_kind(v) == TY_ARRAY {
+        return 1;
+    }
+    return 0;
+}
+
+fn chk_ty_is_slc(t: ptr, v: u32) -> u32 {
+    if v != 0 && chk_ty_kind(v) == TY_SLICE {
+        return 1;
+    }
+    return 0;
+}
+
+/// 结构相等 (两个都是非 0 时才有意义; 参考实现比的是类型串, 这里是结构)。
+fn chk_ty_eq(t: ptr, a: u32, b: u32) -> u32 {
+    if a == b {
+        return 1;
+    }
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    if chk_ty_kind(a) != chk_ty_kind(b) {
+        return 0;
+    }
+    let k: u32 = chk_ty_kind(a);
+    if k == TY_ARRAY || k == TY_SLICE {
+        // bool 不能参与算术 (`x * (a == b)` 会被 clang 拒: i32 * i1), 所以拆成 if
+        if chk_ty_b(t, a) != chk_ty_b(t, b) {
+            return 0;
+        }
+        return chk_ty_eq(t, chk_ty_a(t, a), chk_ty_a(t, b));
+    }
+    return 0;   // 基类型/具名类型的编码本身就是身份, 到不了这里
+}
+
+/// 从**类型 token 区间**建类型 (声明处/`as` 目标/字段/形参都用它)。
+///   `[T; N]` -> 数组(T, N)   `[T]` -> 切片(T, 只读)   `mut [T]` -> 切片(T, 可变)
+///   `Name<...>` -> 0 (泛型实例, 见 chk_ty_of_tok 的说明)   单 token -> 基类型/具名
+fn chk_ty_range(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: u32) -> u32 {
+    if lo >= hi {
+        return 0;
+    }
+    let mut: u32 = 0;
+    let i: u32 = lo;
+    if chk_tok_is(src, t, i, "mut") {
+        mut = 1;
+        i = i + 1;
+    }
+    if chk_tok_is(src, t, i, "[") {
+        let close: u32 = chk_match_bracket(src, t, i);
+        if close >= hi {
+            return 0;
+        }
+        let sep: u32 = chk_find_at(src, t, i + 1, close, ";");
+        if sep < close {
+            let e: u32 = chk_ty_range(src, t, s, n, tyt, i + 1, sep);
+            if e == 0 {
+                return 0;
+            }
+            return chk_ty_arr(tyt, e, chk_dec(src, t, sep + 1));
+        }
+        let e2: u32 = chk_ty_range(src, t, s, n, tyt, i + 1, close);
+        if e2 == 0 {
+            return 0;
+        }
+        return chk_ty_slc(tyt, e2, mut);
+    }
+    if mut == 1 {
+        return 0;   // `mut X` 且 X 不是切片: 形状非法, 记未知
+    }
+    return chk_ty_of_tok(src, t, s, n, i);
+}
+
+/// 类型区间 -> 该类型是不是"整型" (for 边界/`as` 用)。
+fn chk_ty_range_is_int(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: u32) -> u32 {
+    return chk_ty_is_int(chk_ty_range(src, t, s, n, tyt, lo, hi));
+}
+
 /// 内建函数的返回类型编码 (镜像 lomentc.BUILTINS 的第二项); 非内建 -> 0。
 /// 表写错 = 语料上立刻出假阳性 (这是拿语料测试当护栏的地方之一)。
 fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
@@ -184,7 +310,15 @@ fn tok_len(t: ptr, i: u32) -> u32 {
 }
 
 /// token 原文是否等于 s。
+///
+/// **字符串字面量不算** (kind 2 -> false): 字符串 token 的原文就是它**里面的内容**, 所以
+/// `chk_tok_is(i, "fn")` 会匹配源码里的字符串 `"fn"`。本文件里到处都是这种字符串
+/// (关键字表/内建名表), 因此不加这一条时, 检查自己或任何编译器的源码都会误触发关键字
+/// 判断。codegen.lomt 的同名判断也补了同一守卫 (见那边 `tok_is` 的说明)。
 fn chk_tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if chk_tok_kind(t, i) == 2 {
+        return false;
+    }
     if tok_len(t, i) != str_len(s) {
         return false;
     }
@@ -259,11 +393,25 @@ fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     return false;
 }
 
-/// 顶层名字查表: 返回槽位+1 (0 = 未找到)。调用方按 stride 16 读各字段。
+/// 登记 impl 方法 (身份 = 接收者类型编码 + 名字); **不查重** —— 参考实现按
+/// `Type_method` 命名, 不同接收者上的同名方法本来就该共存。
+fn chk_decl_method(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32,
+                   argc: u32, ret: u32, recv: u32) -> u32 {
+    store32(s, n * 20, name_tok);
+    store32(s, n * 20 + 4, K_METHOD);
+    store32(s, n * 20 + 8, argc);
+    store32(s, n * 20 + 12, ret);
+    store32(s, n * 20 + 16, recv);
+    return n + 1;
+}
+
+/// 顶层名字查表: 返回槽位+1 (0 = 未找到)。调用方按 stride 20 读各字段。
 fn chk_lookup_slot(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < n {
-        if same(src, t, sym_get(t, s, n, i), name_tok) {
+        // 方法不参与普通名字查找: 参考实现把 impl 方法改名成 `Type_method` 放进函数表,
+        // 所以裸 `measure(...)` 在那边也是"未定义的函数"。
+        if load32(s, i * 20 + 4) != K_METHOD && same(src, t, sym_get(t, s, n, i), name_tok) {
             return i + 1;
         }
         i = i + 1;
@@ -706,6 +854,19 @@ pub fn chk_count_args(src: ptr, t: ptr, i: u32) -> u32 {
     return argc + 1;
 }
 
+/// 名字是否**声明过** (类型未知也算)。与 `chk_env_get` 分开是因为类型编码 0 既表示
+/// "未知"也表示"这里的类型是泛型形参 T" —— 判"未声明"必须看"在不在表里", 不是"类型是不是 0"。
+fn chk_env_has(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < envc {
+        if same(src, t, load32(env, i * 8), name_tok) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 局部环境 (形参 + let) 查类型: 条目 = 名字 token | 类型编码 (8 字节)。
 fn chk_env_get(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
     let i: u32 = 0;
@@ -795,24 +956,69 @@ fn chk_is_binop(src: ptr, t: ptr, j: u32) -> u32 {
     return 0;
 }
 
-/// 表达式 [lo, hi) 的类型编码; 0 = 未知。
+/// 把 (lo, hi) 打包成一个 u64 传参 —— 自举 codegen 的**形参上限是 10**, 而
+/// 遍历器的形参是 (src,t,syms,n,env,envc,lo,hi,tyt,p,oc) 11 个。拆掉一个只能打包。
+fn chk_lh(a: u32, b: u32) -> u64 {
+    return (a as u64) * 4294967296 + (b as u64);
+}
+fn chk_lhlo(v: u64) -> u32 {
+    return (v / 4294967296) as u32;
+}
+fn chk_lhhi(v: u64) -> u32 {
+    return (v % 4294967296) as u32;
+}
+/// 三字段版 (多一个 token 下标, 如字段访问的 '.'): base 2^21。
+fn chk_lh3(a: u32, b: u32, c: u32) -> u64 {
+    return ((a as u64) * 2097152 + (b as u64)) * 2097152 + (c as u64);
+}
+fn chk_lh3a(v: u64) -> u32 {
+    return (v / 4398046511104) as u32;
+}
+fn chk_lh3b(v: u64) -> u32 {
+    return ((v / 2097152) % 2097152) as u32;
+}
+fn chk_lh3c(v: u64) -> u32 {
+    return (v % 2097152) as u32;
+}
+
+/// 表达式遍历 + 类型推断 (对照 lomentc 的 `_walk_expr` + `expr_type`, token 版)。
 ///
-/// 语义对照 lomentc.expr_type (AST 版), 这里是**token 版**:
-///   - 整型字面量 / 未知形状 -> 0 (参考实现里 IntLit 也是 None, 让上下文定宽)
+/// 返回类型编码 (0 = 未知); 同时把子表达式里的错误写进 p/o。`lh` = (lo << 32) | hi ——
+/// 两个下标打包进一个 u64 是为了守住自举 codegen 的 **10 形参上限**
+/// (src,t,syms,n,env,envc,lh,tyt,p,o 正好 10 个)。
+///
+/// 类型语义 (与参考实现的 `expr_type` 对齐):
+///   - 整型字面量 -> 0 (参考实现里 IntLit 也是 None, 让上下文定宽)
 ///   - `true`/`false` -> bool, 字符串字面量 -> str
-///   - 深度 0 有比较/逻辑运算符 -> bool
-///   - 否则取**最左操作数**的类型 (参考实现的 `Bin` 返回 `lt or rt`, 左结合链的最左
-///     操作数就是它)
-///   - `as T` -> T (只认基类型/具名单 token; 复合类型 -> 0)
-///   - `&x` / `&mut x` -> 0 (切片是复合类型, 见 TY_* 说明)
-///   - `f(...)` -> 内建/函数的返回类型; `x.m(...)` -> 0 (方法派发不建模)
-///   - 复合类型 (数组字面量、结构体字面量、下标、字段) -> 0
-fn chk_ty_expr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
-               lo: u32, hi: u32) -> u32 {
+///   - 深度 0 有比较/逻辑运算符 -> bool (比较**优先于**算术: `v % 2 == 0` 是 bool)
+///   - 算术/位运算 -> **最左**操作数的类型 (参考实现的 `Bin` 返回 `lt or rt`)
+///   - `as T` -> T; `&arr` -> 切片(元素, 只读); `&mut arr` -> 切片(元素, 可变)
+///   - 数组字面量 -> 数组(首元素类型, 个数); 下标 -> 元素类型; 字段 -> 字段类型
+///   - `f(...)` -> 返回类型; `x.m(...)` -> 方法返回类型; `E::V`/`E::V(x)` -> 枚举类型
+///   - 复合类型/泛型实例/形参 T -> 0 (见 chk_ty_of_tok 与 TY_* 的说明)
+fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+           lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    // 诊断偏移格是**形参** oc (调用方从 tyt 块尾拿到) —— 这里再 `let oc = ...` 会把它
+    // 遮住, 而且**同一个函数里声明两次同名局部**会让自举 codegen 发出两条
+    // `%oc.addr = alloca`, 与参考实现 (按名字复用槽位, 只发一条) 逐字节不一致。
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
     if lo >= hi {
         return 0;
     }
-    // 单 token: 字面量 / 标识符
+    // ---- `expr ?` (M9 错误传播): 参考实现只在 `let x: T = <Result 实例>?;` 里解糖,
+    // 其余位置一律 E010。这里**只在能确定"不是 Result"时**报, 免得假阳性:
+    //   - 内层是整型字面量 (`1?`) -> 一定不是 Result
+    //   - 内层是调用且被调函数的返回类型 token 不是 `Result` -> 一定不是
+    // 其它形状 (变量/字段/…的类型我算不准) 保守放过。
+    if hi > lo + 1 && chk_tok_is(src, t, hi - 1, "?") {
+        let ok: u32 = chk_q_ok(src, t, syms, n, lo, hi - 1);
+        if ok == 0 {
+            chk_pub(src, t, oc, p, E_Q, hi - 1);
+        }
+        return chk_tex(src, t, syms, n, env, envc, chk_lh(lo, hi - 1), tyt, p, oc);
+    }
+    // ---- 单 token 快路径
     if hi == lo + 1 {
         if chk_tok_kind(t, lo) == 1 {
             return 0;
@@ -824,92 +1030,634 @@ fn chk_ty_expr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             return (1 << TY_KIND_SHIFT) + 9;
         }
         if chk_tok_kind(t, lo) == 0 {
-            return chk_name_ty(src, t, syms, n, env, envc, lo);
+            let v1: u32 = chk_name_ty(src, t, syms, n, env, envc, lo);
+            // 使用未声明的变量 -> E002。三个排除:
+            //   - 关键字与 `_`/`self` (`self` 是方法接收者, 参考实现改名 __self 入作用域)
+            //   - **在环境里声明过但类型未知**的变量: `fn f<T>(a: T)` 的 `a`, 它的类型
+            //     编码就是 0 (形参 T), 只看 v1 == 0 会把每个泛型形参都当成未声明
+            if v1 == 0 && chk_env_has(src, t, env, envc, lo) == 0
+                    && chk_lookup_slot(src, t, syms, n, lo) == 0
+                    && chk_is_kw(src, t, lo) == 0
+                    && !chk_tok_is(src, t, lo, "_") && !chk_tok_is(src, t, lo, "self") {
+                chk_pub(src, t, oc, p, E_TYPE, lo);
+            }
+            return v1;
         }
         return 0;
     }
-    // 深度 0 扫描: 比较运算符**优先于**算术运算符 —— `v % 2 == 0` 的顶节点是 `==`
-    // (参考实现里比较一律返回 bool)。所以这里不能一见到算术运算符就收工: 必须把
-    // 整段扫完, 见到比较就立刻返回 bool。
+    // ---- 深度 0 扫描 (用**更新前**的深度判 j 是不是顶层运算符/分隔符)
     let d: u32 = 0;
     let j: u32 = lo;
     let bin_at: u32 = 0;
     let as_at: u32 = 0;
     let dot_at: u32 = 0;
     let idx_at: u32 = 0;
+    let iscmp: u32 = 0;
     while j < hi {
+        if d == 0 {
+            if chk_is_cmp(src, t, j) == 1 {
+                iscmp = 1;
+            }
+            if chk_tok_is(src, t, j, "as") {
+                as_at = j;
+            }
+            if chk_is_binop(src, t, j) == 1 && j > lo && bin_at == 0 {
+                bin_at = j;
+            }
+            // `<<` / `>>` 是两个 token: 第二个字符不能再被当成运算符 (`1 << n` 里的
+            // 第二个 `<` 会被读成"小于", 整段被算成 bool —— 踩过)
+            if (chk_tok_is(src, t, j, "<") && chk_tok_is(src, t, j + 1, "<"))
+                    || (chk_tok_is(src, t, j, ">") && chk_tok_is(src, t, j + 1, ">")) {
+                j = j + 1;
+            } else {
+                if chk_tok_is(src, t, j, ".") {
+                    dot_at = j;
+                }
+                if chk_tok_is(src, t, j, "[") && j > lo {
+                    idx_at = j;
+                }
+            }
+        }
         if chk_tok_is(src, t, j, "(") || chk_tok_is(src, t, j, "[") {
             d = d + 1;
         }
         if chk_tok_is(src, t, j, ")") || chk_tok_is(src, t, j, "]") {
             d = d - 1;
         }
-        if d == 0 {
-            if chk_is_cmp(src, t, j) == 1 {
-                return (1 << TY_KIND_SHIFT) + 9;
+        j = j + 1;
+    }
+    // ---- 比较/逻辑 -> bool。**必须排在 `as` 前面**: `as` 的结合力比比较/逻辑紧
+    // (参考实现里 `as` 在 parse_unary 一层, 而 `&&`/`==` 在更低层), 所以
+    // `i < n as u64 && ...` 的顶节点是 `&&` 而不是那个 `as`。顺序反了的话整段会被当成
+    // 转换表达式, 返回目标类型 (u64), 于是每个"带 as 的条件"都被报成非 bool
+    // (driver.lomt 的 1@61206:while 假报)。
+    if iscmp != 0 {
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
+        return (1 << TY_KIND_SHIFT) + 9;
+    }
+    // ---- 算术/位运算 -> 最左操作数 (`as` 若排在后面就属于右操作数)
+    if bin_at != 0 && (as_at == 0 || bin_at < as_at) {
+        let roff: u32 = 1;
+        if (chk_tok_is(src, t, bin_at, "<") && chk_tok_is(src, t, bin_at + 1, "<"))
+                || (chk_tok_is(src, t, bin_at, ">") && chk_tok_is(src, t, bin_at + 1, ">")) {
+            roff = 2;
+        }
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo, bin_at), tyt, p, oc);
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(bin_at + roff, hi), tyt, p, oc);
+        return chk_tex(src, t, syms, n, env, envc,
+                       chk_lh(lo, bin_at), tyt, p, oc);
+    }
+    // ---- `as T`: 目标合法性 + 左操作数类型 (参考实现 1810-1821)
+    if as_at != 0 && as_at > lo {
+        let tgt: u32 = chk_ty_range(src, t, syms, n, tyt, as_at + 1, hi);
+        let lt: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(lo, as_at), tyt, p, oc);
+        if chk_base_code(src, t, as_at + 1) == 0 {
+            chk_pub(src, t, oc, p, E_AS, as_at + 1);         // as 目标类型非法
+            return 0;
+        }
+        // 两条**合法**的整数-指针互转 (参考实现 1810-1814, M67/M83): 少了这两条,
+        // `p as u64` / `(n as u64) as ptr` 会被报成"as 只能作用于整型/布尔" —— 这也是
+        // 自举驱动自己编译不过的原因 (driver/checker 里到处是 `x as u64`)。
+        let tgtc: u32 = chk_base_code(src, t, as_at + 1);
+        let lt_ptr: u32 = 0;
+        if chk_ty_kind(lt) == 1 && lt % (1 << TY_KIND_SHIFT) == 11 {
+            lt_ptr = 1;
+        }
+        let tg_ptr: u32 = 0;
+        if tgtc == 11 {
+            tg_ptr = 1;
+        }
+        let tg_u64: u32 = 0;
+        if tgtc == 4 || tgtc == 8 {
+            tg_u64 = 1;
+        }
+        if lt_ptr == 1 && tg_u64 == 1 {
+            return tgt;
+        }
+        if tg_ptr == 1 && chk_ty_is_int(lt) == 1 {
+            return tgt;
+        }
+        if lt != 0 && chk_ty_is_int(lt) == 0 && lt != TY_BOOL {
+            chk_pub(src, t, oc, p, E_AS, as_at);             // as 只能作用于整型/布尔
+        }
+        return tgt;
+    }
+    // ---- 整体外层括号
+    if chk_tok_is(src, t, lo, "(") && chk_match_paren(src, t, lo) == hi - 1 {
+        return chk_tex(src, t, syms, n, env, envc,
+                       chk_lh(lo + 1, hi - 1), tyt, p, oc);
+    }
+    // ---- 一元 & / &mut -> 切片 (参考实现: 只作用于数组)
+    // 源码顺序是 `&` 然后 `mut` (`&mut a`), 解析器据此把 op 记成 "&mut"。原来写成
+    // `mut &`, 于是 inner 落在 `mut a` 上、类型推不出来, 每个 `&mut 数组` 都被误报成
+    // "只能作用于数组" (native_mut 的 15@96 假报)。
+    if chk_tok_is(src, t, lo, "&") {
+        let mutf: u32 = 0;
+        let a0: u32 = lo + 1;
+        if chk_tok_is(src, t, lo + 1, "mut") {
+            mutf = 1;
+            a0 = lo + 2;
+        }
+        let inner: u32 = chk_tex(src, t, syms, n, env, envc,
+                                 chk_lh(a0, hi), tyt, p, oc);
+        if chk_ty_is_arr(tyt, inner) == 0 {
+            chk_pub(src, t, oc, p, E_ACCESS, lo);         // 只能作用于数组
+            return 0;
+        }
+        return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
+    }
+    if chk_tok_is(src, t, lo, "!") {
+        return chk_tex(src, t, syms, n, env, envc,
+                       chk_lh(lo + 1, hi), tyt, p, oc);
+    }
+    // ---- 数组字面量
+    if chk_tok_is(src, t, lo, "[") && chk_match_bracket(src, t, lo) == hi - 1 {
+        return chk_tex_atom_arr(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
+    }
+    // ---- 枚举构造/路径 `E::V` / `E::V(x)`
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, ":")
+            && chk_tok_is(src, t, lo + 2, ":") {
+        return chk_tex_atom_enum(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
+    }
+    // ---- 方法调用 `x.m(...)` / 字段访问 `x.f`
+    if dot_at != 0 && dot_at > lo {
+        return chk_tex_atom_dot(src, t, syms, n, env, envc, chk_lh3(lo, hi, dot_at), tyt, p, oc);
+    }
+    // ---- 下标 `x[i]`
+    if idx_at != 0 {
+        let br: u32 = chk_match_bracket(src, t, idx_at);
+        let ot: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(lo, idx_at), tyt, p, oc);
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(idx_at + 1, br), tyt, p, oc);
+        if ot != 0 && chk_ty_is_arr(tyt, ot) == 0 && chk_ty_is_slc(tyt, ot) == 0 {
+            // 参考实现在"类型未知"时也报这条; 这里**只在类型已知且确定不是数组/切片时**报
+            // —— 否则任何算不出类型的数组都会变成假阳性 (docs/150 记过这条偏离)。
+            chk_pub(src, t, oc, p, E_ACCESS, idx_at);
+        }
+        let it: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(idx_at + 1, br), tyt, p, oc);
+        if it != 0 && chk_ty_is_int(it) == 0 {
+            chk_pub(src, t, oc, p, E_TMISMATCH, idx_at);   // 下标类型，应为整型
+        }
+        if chk_ty_is_arr(tyt, ot) == 1 || chk_ty_is_slc(tyt, ot) == 1 {
+            return chk_ty_a(tyt, ot);
+        }
+        return 0;
+    }
+    // ---- 调用 `f(...)` / 结构体字面量 `S { ... }`
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
+            && chk_match_paren(src, t, lo + 1) == hi - 1 {
+        return chk_tex_atom_call(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
+    }
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "{")
+            && chk_match_brace(src, t, lo + 1) == hi - 1 {
+        return chk_tex_atom_struct(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
+    }
+    // ---- 其余形状 (未建模) -> 只看**内部**的括号组, 免得漏掉里面的错误。
+    // 注意必须收窄一格: 对同一区间再走一遍会让 chk_tex <-> chk_tex_sub 互相递归,
+    // 直接栈溢出 (探针 `cap-unknown-guard` 的 `guard nope(0)` 就踩到了)。
+    chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 1, hi), tyt, p, oc);
+    return 0;
+}
+
+/// 把 [lo,hi) 按"深度 0 运算符"切成若干**操作数段**逐个遍历 (只为发现错误, 不看类型)。
+/// 段的类型由调用方自己算 —— 这样"比较返回 bool / 二元取最左"这些规则不必在每个
+/// 分支里重复一遍。
+fn chk_tex_sub(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+               lh: u64, tyt: ptr, p: ptr, oc: ptr) {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    if lo < hi {
+    let d: u32 = 0;
+    let j: u32 = lo;
+    let seg: u32 = lo;
+    let cuts: u32 = 0;
+    while j < hi {
+        let cut: u32 = 0;
+        if d == 0 && j > lo {
+            if chk_is_cmp(src, t, j) == 1 || chk_is_binop(src, t, j) == 1
+                    || chk_tok_is(src, t, j, "as") {
+                cut = 1;
             }
+        }
+        if cut == 1 {
+            cuts = cuts + 1;
+            chk_tex(src, t, syms, n, env, envc,
+                        (seg as u64) * 4294967296 + (j as u64), tyt, p, oc);
             if chk_tok_is(src, t, j, "as") {
-                as_at = j;
+                // `as T` 右边的 T 是**类型**不是表达式: 整段跳过。当成操作数段递归进去
+                // 会把 `u32` 这样的类型名当标识符查 (报"使用未声明的变量 u32")。
+                seg = chk_skip_type(src, t, j + 1);
+                j = seg - 1;
+            } else {
+                seg = j + 1;
+                // 两字符运算符 (`<<` `>>`) 的第二个字符不属于任何操作数段
+                if (chk_tok_is(src, t, j, "<") && chk_tok_is(src, t, j + 1, "<"))
+                        || (chk_tok_is(src, t, j, ">") && chk_tok_is(src, t, j + 1, ">")) {
+                    j = j + 1;
+                    seg = j + 1;
+                }
             }
-            if chk_is_binop(src, t, j) == 1 && j > lo && bin_at == 0 {
-                bin_at = j;         // 只记**最左**那个 (左结合链的类型 = 最左操作数的类型)
-            }
-            // `<<` / `>>` 是**两个** `<` / `>` token: 第二个字符不能再被当成新的运算符
-            // (否则 `1 << n` 里的第二个 `<` 会被读成"小于", 整段被算成 bool)。
-            if (chk_tok_is(src, t, j, "<") && chk_tok_is(src, t, j + 1, "<"))
-                    || (chk_tok_is(src, t, j, ">") && chk_tok_is(src, t, j + 1, ">")) {
-                j = j + 1;
-            }
-            if chk_tok_is(src, t, j, ".") {
-                dot_at = j;
-            }
-            if chk_tok_is(src, t, j, "[") {
-                idx_at = j;
-            }
+        }
+        if chk_tok_is(src, t, j, "(") || chk_tok_is(src, t, j, "[") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, ")") || chk_tok_is(src, t, j, "]") {
+            d = d - 1;
         }
         j = j + 1;
     }
-    if as_at != 0 {
-        // 目标必须是基类型 (参考实现: `as 目标类型非法`)。非法时返回 0 —— **不能**把
-        // `1 as Foo` 当成"类型 Foo", 否则会多报一条 E001 掩盖真正的 E017 (码漂移)。
-        if chk_base_code(src, t, as_at + 1) == 0 {
+    if cuts > 0 && seg < hi {
+        chk_tex(src, t, syms, n, env, envc,
+                    (seg as u64) * 4294967296 + (hi as u64), tyt, p, oc);
+    }
+    }
+}
+
+/// 数组字面量: 空 -> E016; 元素类型不一致 -> E016; 返回 数组(首元素类型, 个数)。
+fn chk_tex_atom_arr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                    lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    let cnt: u32 = chk_arr_count(src, t, lo);
+    if cnt == 0 {
+        chk_pub(src, t, oc, p, E_ARR, lo);                // 数组字面量不能为空
+        return 0;
+    }
+    // 逐元素遍历 + 收集: 首元素类型(非未知)、是否出现过未知元素、是否出现过非整型的实类型
+    let i1: u32 = 0;
+    let first: u32 = 0;
+    let has_unk: u32 = 0;
+    let all_int: u32 = 1;
+    while i1 < cnt {
+        let er: u64 = chk_arr_elem(src, t, lo, i1);
+        let elo: u32 = (er / 4294967296) as u32;
+        let ehi: u32 = (er % 4294967296) as u32;
+        let et: u32 = chk_tex(src, t, syms, n, env, envc, er, tyt, p, oc);
+        if et == 0 {
+            has_unk = 1;
+        } else {
+            if first == 0 {
+                first = et;
+            }
+            if chk_ty_is_int(et) == 0 && et != TY_BOOL {
+                all_int = 0;
+            }
+        }
+        i1 = i1 + 1;
+        if elo >= ehi {
+            i1 = cnt;                                        // 形状异常: 收工 (别死循环)
+        }
+    }
+    // 一致性 (参考实现 1919-1923): 去重后的实类型多于 1 种 -> 报; 只有 1 种且混了未知
+    // 元素而那种类型又不是整型 -> 报。
+    let i2: u32 = 1;
+    let nd: u32 = 0;
+    if first != 0 {
+        nd = 1;
+    }
+    while i2 < cnt {
+        let er2: u64 = chk_arr_elem(src, t, lo, i2);
+        let et2: u32 = chk_tex(src, t, syms, n, env, envc, er2, tyt, p, oc);
+        if et2 != 0 {
+            let dup: u32 = 0;
+            let i3: u32 = 0;
+            while i3 < i2 {
+                let er3: u64 = chk_arr_elem(src, t, lo, i3);
+                let et3: u32 = chk_tex(src, t, syms, n, env, envc, er3, tyt, p, oc);
+                if chk_ty_eq(tyt, et3, et2) == 1 {
+                    dup = 1;
+                }
+                i3 = i3 + 1;
+            }
+            if dup == 0 {
+                nd = nd + 1;
+            }
+        }
+        i2 = i2 + 1;
+    }
+    if nd > 1 {
+        chk_pub(src, t, oc, p, E_ARR, lo);                // 元素类型不一致
+    } else if nd == 1 && has_unk == 1 && all_int == 0 {
+        chk_pub(src, t, oc, p, E_ARR, lo);                // 整型字面量混入非整型
+    }
+    if first == 0 {
+        return 0;
+    }
+    return chk_ty_arr(tyt, first, cnt);
+}
+
+/// 枚举构造/路径 `E::V` / `E::V(x)`: 存在性/载荷 -> E002/E008/E001; 返回枚举类型。
+fn chk_tex_atom_enum(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                     lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    let etok: u32 = lo;
+    let vtok: u32 = lo + 3;
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, etok);
+    if slot == 0 || load32(syms, (slot - 1) * 20 + 4) != K_ENUM {
+        chk_pub(src, t, oc, p, E_TYPE, etok);             // 未知枚举
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 4, hi), tyt, p, oc);
+        return 0;
+    }
+    let brc: u32 = load32(syms, (slot - 1) * 20 + 16);
+    let vi: u32 = chk_evariant_idx(src, t, brc, vtok);
+    if vi == 0 {
+        chk_pub(src, t, oc, p, E_PATTERN, vtok);          // 枚举 E 无变体 V
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 4, hi), tyt, p, oc);
+        return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
+    }
+    let pr: u64 = chk_epayload_range(src, t, brc, vtok);
+    let ctor: u32 = 0;
+    if chk_tok_is(src, t, lo + 4, "(") {
+        ctor = 1;
+    }
+    if ctor == 1 {
+        if pr == 0 {
+            chk_pub(src, t, oc, p, E_PATTERN, vtok);      // 无载荷，不能带参数
+            chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 5, hi), tyt, p, oc);
+            return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
+        }
+        let plo: u32 = (pr / 4294967296) as u32;
+        let phi: u32 = (pr % 4294967296) as u32;
+        let br: u32 = chk_match_paren(src, t, lo + 4);
+        let at: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(lo + 5, br), tyt, p, oc);
+        if at != 0 {
+            let pt: u32 = chk_ty_range(src, t, syms, n, tyt, plo, phi);
+            if pt != 0 && chk_ty_eq(tyt, at, pt) == 0 {
+                chk_pub(src, t, oc, p, E_TMISMATCH, vtok);   // 载荷类型，声明为
+            }
+        }
+    } else {
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 4, hi), tyt, p, oc);
+    }
+    return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
+}
+
+/// `x.m(...)` 方法调用 或 `x.f` 字段访问。
+fn chk_tex_atom_dot(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                    lh3: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let lo: u32 = chk_lh3a(lh3);
+    let hi: u32 = chk_lh3b(lh3);
+    let dot_at: u32 = chk_lh3c(lh3);
+    let ot: u32 = chk_tex(src, t, syms, n, env, envc,
+                          chk_lh(lo, dot_at), tyt, p, oc);
+    let ftok: u32 = dot_at + 1;
+    // 方法调用: `name ( ... )` 且右括号正好收到区间末尾
+    if chk_tok_kind(t, ftok) == 0 && chk_tok_is(src, t, ftok + 1, "(")
+            && chk_match_paren(src, t, ftok + 1) == hi - 1 {
+        let mslot: u32 = chk_lookup_method(src, t, syms, n, ot, ftok);
+        if mslot == 0 {
+            chk_pub(src, t, oc, p, E_TYPE, ftok);         // 类型 X 没有方法 m
+            chk_tex_sub(src, t, syms, n, env, envc, chk_lh(ftok + 2, hi - 1), tyt, p, oc);
             return 0;
         }
-        return chk_ty_of_tok(src, t, syms, n, as_at + 1);
-    }
-    if bin_at != 0 {
-        return chk_ty_expr(src, t, syms, n, env, envc, lo, bin_at);
-    }
-    // 整体外层括号 -> 剥掉
-    if chk_tok_is(src, t, lo, "(") && chk_match_paren(src, t, lo) == hi - 1 {
-        return chk_ty_expr(src, t, syms, n, env, envc, lo + 1, hi - 1);
-    }
-    // `f(...)` 调用形: 名字紧跟 '(' 且右括号正好收到区间末尾
-    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
-            && chk_match_paren(src, t, lo + 1) == hi - 1 {
-        let b: u32 = chk_builtin_ret(src, t, lo);
-        if b != 0 {
-            return b;
+        let want: u32 = load32(syms, (mslot - 1) * 20 + 8);
+        let got: u32 = chk_count_args(src, t, ftok + 1);
+        if want != got {
+            chk_pub(src, t, oc, p, E_ARITY, ftok);
         }
-        let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
-        if slot != 0 {
-            return load32(syms, (slot - 1) * 20 + 12);
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(ftok + 2, hi - 1), tyt, p, oc);
+        return load32(syms, (mslot - 1) * 20 + 12);
+    }
+    // 字段访问: 对象类型已知时判"是不是结构体/有没有这个字段"
+    if ot != 0 {
+        if chk_ty_kind(ot) != TY_K_NAMED {
+            chk_pub(src, t, oc, p, E_ACCESS, dot_at);     // 对非结构体类型取字段
+            return 0;
         }
-        return 0;
-    }
-    if chk_tok_is(src, t, lo, "&") || chk_tok_is(src, t, lo, "!") {
-        if chk_tok_is(src, t, lo, "!") {
-            return chk_ty_expr(src, t, syms, n, env, envc, lo + 1, hi);
+        let s0: u32 = ot % (1 << TY_KIND_SHIFT);
+        if load32(syms, s0 * 20 + 4) != K_STRUCT {
+            chk_pub(src, t, oc, p, E_ACCESS, dot_at);     // 具名但不是结构体
+            return 0;
         }
-        return 0;   // `&x` / `&mut x` -> 切片 (复合类型)
-    }
-    if chk_tok_is(src, t, lo, "mut") && chk_tok_is(src, t, lo + 1, "&") {
-        return 0;
-    }
-    if dot_at != 0 || idx_at != 0 {
-        return 0;       // 字段访问 / 下标: 需要结构体表与元素类型, 本批不建模
+        let brc: u32 = load32(syms, s0 * 20 + 16);
+        if chk_sfield_exists(src, t, brc, ftok) == 0 {
+            chk_pub(src, t, oc, p, E_ACCESS, ftok);       // 结构体 X 无字段 f
+            return 0;
+        }
+        // 字段在, 但类型可能未知 (泛型形参字段) -> 返回 0 而不是报错
+        return chk_sfield_ty(src, t, syms, n, tyt, brc, ftok);
     }
     return 0;
+}
+
+/// 实参区间是不是 `& ident` / `&mut ident` 形状; 是的话返回
+/// ((名字 token 下标 + 1) << 32) | kind (1 = `&`, 2 = `&mut`), 否则 0。
+fn chk_arg_borrow(src: ptr, t: ptr, lh: u64) -> u64 {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    if !chk_tok_is(src, t, lo, "&") {
+        return 0;
+    }
+    let off: u32 = 1;
+    let mf: u32 = 0;
+    if chk_tok_is(src, t, lo + 1, "mut") {
+        off = 2;
+        mf = 1;
+    }
+    if lo + off + 1 != hi {
+        return 0;
+    }
+    if chk_tok_kind(t, lo + off) != 0 {
+        return 0;
+    }
+    return ((lo + off + 1) as u64) * 4294967296 + ((mf + 1) as u64);
+}
+
+/// 调用 `f(args)` —— 元数与实参类型 (内建走内建签名表); 返回返回类型。
+fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                     lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    let got: u32 = chk_count_args(src, t, lo + 1);
+    let bin: u32 = chk_builtin_arity(src, t, lo);
+    if bin != 999999 {
+        // 内建: 元数 (参考实现另有一条 slice_len 的实参类型规则)
+        if bin != got {
+            chk_pub(src, t, oc, p, E_ARITY, lo);
+        }
+        let k: u32 = 0;
+        while k < got {
+            let er: u64 = chk_arr_elem(src, t, lo + 1, k);
+            let elo: u32 = (er / 4294967296) as u32;
+            let ehi: u32 = (er % 4294967296) as u32;
+            let at: u32 = chk_tex(src, t, syms, n, env, envc, er, tyt, p, oc);
+            let wt: u32 = chk_builtin_arg(src, t, lo, k);
+            if chk_tok_is(src, t, lo, "slice_len") {
+                if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是数组或切片
+                }
+            } else if wt != 0 {
+                if at == 0 {
+                    if chk_ty_is_int(wt) == 0 {
+                        chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 期望 X, 得到整型字面量
+                    }
+                } else if chk_ty_eq(tyt, at, wt) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);       // 实参类型 X, 期望 W
+                }
+            }
+            k = k + 1;
+            if elo >= ehi {
+                k = got;
+            }
+        }
+        return chk_builtin_ret(src, t, lo);
+    }
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
+    if slot == 0 {
+        chk_pub(src, t, oc, p, E_FN, lo);                 // 未定义的函数
+        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 2, hi - 1), tyt, p, oc);
+        return 0;
+    }
+    let s0: u32 = slot - 1;
+    let want: u32 = load32(syms, s0 * 20 + 8);
+    // M5 借用检查: 同一次调用里同一变量不得既 `&mut` 又 `&`, 也不得 `&mut` 两次
+    // (参考实现 `_check_borrows`; 每个名字只报一次, 所以按"首次出现"判)。
+    let i1: u32 = 0;
+    while i1 < got {
+        let b1: u64 = chk_arg_borrow(src, t, chk_arr_elem(src, t, lo + 1, i1));
+        if b1 != 0 {
+            let n1: u32 = ((b1 / 4294967296) as u32) - 1;
+            let k1: u32 = (b1 % 4294967296) as u32;
+            let first: u32 = 1;
+            let j1: u32 = 0;
+            while j1 < i1 {
+                let b2: u64 = chk_arg_borrow(src, t, chk_arr_elem(src, t, lo + 1, j1));
+                if b2 != 0 && same(src, t, ((b2 / 4294967296) as u32) - 1, n1) {
+                    first = 0;
+                }
+                j1 = j1 + 1;
+            }
+            if first == 1 {
+                let nmut: u32 = 0;
+                let nsha: u32 = 0;
+                let j2: u32 = 0;
+                while j2 < got {
+                    let b3: u64 = chk_arg_borrow(src, t, chk_arr_elem(src, t, lo + 1, j2));
+                    if b3 != 0 && same(src, t, ((b3 / 4294967296) as u32) - 1, n1) {
+                        if (b3 % 4294967296) as u32 == 2 {
+                            nmut = nmut + 1;
+                        } else {
+                            nsha = nsha + 1;
+                        }
+                    }
+                    j2 = j2 + 1;
+                }
+                if k1 == 2 && nmut >= 1 && nsha >= 1 {
+                    chk_pub(src, t, oc, p, E_BORROW, lo);      // 既被可变借用又被借用
+                } else if nmut > 1 {
+                    chk_pub(src, t, oc, p, E_BORROW, lo);      // 被可变借用两次
+                }
+            }
+        }
+        i1 = i1 + 1;
+    }
+    if want != got {
+        chk_pub(src, t, oc, p, E_ARITY, lo);
+    } else {
+        let k2: u32 = 0;
+        while k2 < got {
+            let er2: u64 = chk_arr_elem(src, t, lo + 1, k2);
+            let at2: u32 = chk_tex(src, t, syms, n, env, envc, er2, tyt, p, oc);
+            let pt: u32 = chk_param_ty(src, t, syms, n, tyt, s0, k2);
+            if pt != 0 {
+                if at2 == 0 {
+                    if chk_ty_is_int(pt) == 0 && chk_ty_is_slc(tyt, pt) == 0 {
+                        chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 期望 X, 得到整型字面量
+                    }
+                } else if chk_ty_eq(tyt, at2, pt) == 1 {
+                    // 相等
+                } else if chk_ty_is_slc(tyt, pt) == 1 && chk_ty_is_arr(tyt, at2) == 1
+                        && chk_ty_eq(tyt, chk_ty_a(tyt, pt), chk_ty_a(tyt, at2)) == 1 {
+                    // 数组 -> 切片 协变 (M3)
+                } else if chk_ty_is_slc(tyt, pt) == 1 && chk_ty_is_slc(tyt, at2) == 1
+                        && chk_ty_eq(tyt, chk_ty_a(tyt, pt), chk_ty_a(tyt, at2)) == 1 {
+                    if chk_ty_b(tyt, pt) == 1 && chk_ty_b(tyt, at2) == 0 {
+                        chk_pub(src, t, oc, p, E_SLICE, lo);      // 形参要求可变切片
+                    }
+                } else {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);      // 实参类型 X, 期望 P
+                }
+            }
+            k2 = k2 + 1;
+        }
+    }
+    return load32(syms, s0 * 20 + 12);
+}
+
+/// 结构体字面量 `S { f: e, ... }`: 未知结构体 -> E002; 字段 -> E015。
+fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                       lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let lo: u32 = chk_lhlo(lh);
+    let hi: u32 = chk_lhhi(lh);
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
+    if slot == 0 || load32(syms, (slot - 1) * 20 + 4) != K_STRUCT {
+        chk_pub(src, t, oc, p, E_TYPE, lo);               // 未知结构体
+        return 0;
+    }
+    let s0: u32 = slot - 1;
+    let brc: u32 = load32(syms, s0 * 20 + 16);
+    // 初始化项: 名字 ':' 表达式 (逗号分隔)
+    let j: u32 = lo + 2;
+    while j < hi && chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        // "字段名位置" = 紧跟 '{' 或前一个 token 是 ','。以前用一个 fstart 标志位记录,
+        // 但它在每轮末尾按当前 token 重算 —— 轮到逗号那轮会把标志置 1、再下一轮(真正的
+        // 字段名)又被置 0, 于是第二个字段永远查不到 (structlit-dup-field 少报就是这么来的)。
+        if chk_tok_kind(t, j) == 0 && chk_tok_is(src, t, j + 1, ":")
+                && (j == lo + 2 || chk_tok_is(src, t, j - 1, ",")) {
+            if chk_sfield_exists(src, t, brc, j) == 0 {
+                chk_pub(src, t, oc, p, E_ACCESS, j);      // 结构体 X 无字段 f
+            } else {
+                // 重复初始化: 前面出现过同名字段
+                let k: u32 = lo + 2;
+                let dup: u32 = 0;
+                while k < j && chk_tok_kind(t, k) != 4 {
+                    if chk_tok_kind(t, k) == 0 && same(src, t, k, j)
+                            && chk_tok_is(src, t, k + 1, ":") {
+                        dup = 1;
+                    }
+                    k = k + 1;
+                }
+                if dup == 1 {
+                    chk_pub(src, t, oc, p, E_ACCESS, j);  // 字段 f 重复初始化
+                }
+            }
+            // 走一遍初始化表达式, 直到下一个顶层的 ',' 或 '}'
+            let ve: u32 = chk_find_at(src, t, j + 2, hi, ",");
+            chk_tex_sub(src, t, syms, n, env, envc, chk_lh(j + 2, ve), tyt, p, oc);
+            j = ve;
+        } else {
+            j = j + 1;
+        }
+    }
+    // 缺字段: 结构体每个字段都要在初始化项里出现
+    let fj: u32 = brc + 1;
+    let fnames: u32 = 1;
+    while chk_tok_kind(t, fj) != 4 && !chk_tok_is(src, t, fj, "}") {
+        if fnames == 1 && chk_tok_kind(t, fj) == 0 {
+            let hit: u32 = 0;
+            let kj: u32 = lo + 2;
+            while kj < hi && chk_tok_kind(t, kj) != 4 {
+                if chk_tok_kind(t, kj) == 0 && same(src, t, kj, fj)
+                        && chk_tok_is(src, t, kj + 1, ":") {
+                    hit = 1;
+                }
+                kj = kj + 1;
+            }
+            if hit == 0 {
+                chk_pub(src, t, oc, p, E_ACCESS, fj);     // 缺字段 f
+            }
+            fnames = 0;
+        }
+        if chk_tok_is(src, t, fj, ",") {
+            fnames = 1;
+        }
+        fj = fj + 1;
+    }
+    return (TY_K_NAMED << TY_KIND_SHIFT) + s0;
 }
 
 /// 从 '(' 出发找匹配的 ')' (只按圆括号计数)。
@@ -929,6 +1677,303 @@ fn chk_match_paren(src: ptr, t: ptr, i: u32) -> u32 {
         j = j + 1;
     }
     return j;
+}
+
+/// 从 '[' 出发找匹配的 ']'。
+fn chk_match_bracket(src: ptr, t: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "[") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, "]") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 从 '{' 出发找匹配的 '}'; 返回 '}' 的下标。
+fn chk_match_brace(src: ptr, t: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "{") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, "}") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 结构体有没有这个字段 (只看名字位置)。**必须与类型分开**: 字段类型可能是泛型形参
+/// `T`, 那时 `chk_ty_range` 返回 0 (未知) —— 把"类型未知"当成"没有这个字段"就是假阳性
+/// (native_gen 的 `Pair { a: 7 }` 与 `p.a` 正是这么被误报的)。
+fn chk_sfield_exists(src: ptr, t: ptr, brc: u32, fname: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if at_name == 1 && chk_tok_kind(t, j) == 0 {
+            if same(src, t, j, fname) {
+                return 1;
+            }
+            at_name = 0;
+        }
+        if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
+                || chk_tok_is(src, t, j, "(") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
+                || chk_tok_is(src, t, j, ")") {
+            d = d - 1;
+        }
+        if d == 0 && chk_tok_is(src, t, j, ",") {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 结构体字段类型 (0 = 未知或没有这个字段); brc = 声明体的 '{'。
+/// 「有没有」用 `chk_sfield_exists` 判, 这个函数只管类型。
+/// 只在"字段名位置"上比 (紧跟 '{' 或字段分隔的 ','), 否则字段**类型**里出现的同名 token
+/// 会被误判成字段。`<...>` / `[...]` / `(...)` 里的逗号不是字段分隔。
+fn chk_sfield_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, brc: u32, fname: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if at_name == 1 && chk_tok_kind(t, j) == 0 {
+            if same(src, t, j, fname) {
+                if chk_tok_is(src, t, j + 1, ":") {
+                    let tl: u32 = j + 2;
+                    let te: u32 = chk_skip_type(src, t, tl);
+                    return chk_ty_range(src, t, s, n, tyt, tl, te);
+                }
+            }
+            at_name = 0;
+        }
+        if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
+                || chk_tok_is(src, t, j, "(") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
+                || chk_tok_is(src, t, j, ")") {
+            d = d - 1;
+        }
+        if d == 0 && chk_tok_is(src, t, j, ",") {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 枚举变体序号+1 (0 = 无此变体); brc = 声明体的 '{'。
+fn chk_evariant_idx(src: ptr, t: ptr, brc: u32, vname: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let idx: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if at_name == 1 && chk_tok_kind(t, j) == 0 {
+            idx = idx + 1;
+            if same(src, t, j, vname) {
+                return idx;
+            }
+            at_name = 0;
+        }
+        if chk_tok_is(src, t, j, ",") {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 枚举变体的载荷类型区间 ((plo<<32)|phi); 0 = 无载荷或无此变体。
+fn chk_epayload_range(src: ptr, t: ptr, brc: u32, vname: u32) -> u64 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if at_name == 1 && chk_tok_kind(t, j) == 0 {
+            if same(src, t, j, vname) {
+                if chk_tok_is(src, t, j + 1, "(") {
+                    let plo: u32 = j + 2;
+                    let phi: u32 = chk_skip_type(src, t, plo);
+                    return (plo as u64) * 4294967296 + (phi as u64);
+                }
+                return 0;
+            }
+            at_name = 0;
+        }
+        if chk_tok_is(src, t, j, ",") {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 函数第 k 个形参的类型编码 (从 aux 记的 '(' 重扫); 越界 -> 0。
+/// **不建二维表**的理由见 sym_get 的注释 (每函数 10 个形参类型要 40B x 函数数)。
+fn chk_param_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, slot0: u32, k: u32) -> u32 {
+    let lp: u32 = load32(s, slot0 * 20 + 16);
+    let i: u32 = lp + 1;
+    let idx: u32 = 0;
+    while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, ")") {
+        let tl: u32 = i + 2;
+        let te: u32 = chk_skip_type(src, t, tl);
+        if idx == k {
+            return chk_ty_range(src, t, s, n, tyt, tl, te);
+        }
+        idx = idx + 1;
+        i = te;
+        if chk_tok_is(src, t, i, ",") {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+/// 方法表查表: 接收者类型编码 + 方法名 -> 槽位+1 (0 = 没有)。
+/// 参考实现把 impl 方法改名成 `Type_method` 放进同一张函数表; 这里用
+/// (接收者编码, 名字) 两元组当身份, 不造合成名字 (符号表没有合成 token 的位置)。
+fn chk_lookup_method(src: ptr, t: ptr, s: ptr, n: u32, recv: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load32(s, i * 20 + 4) == K_METHOD && load32(s, i * 20 + 16) == recv
+                && same(src, t, load32(s, i * 20), name_tok) {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 按名字找方法 (不看接收者) —— 第三遍给方法体找返回类型用
+/// (方法体里也要查 `return` 的类型, 而 `chk_lookup_slot` 刻意跳过方法)。
+fn chk_lookup_method_any(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load32(s, i * 20 + 4) == K_METHOD && same(src, t, load32(s, i * 20), name_tok) {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 内建函数第 k 个形参的期望类型 (镜像 lomentc.BUILTINS 的第一项); 未知 -> 0。
+fn chk_builtin_arg(src: ptr, t: ptr, i: u32, k: u32) -> u32 {
+    if k == 0 {
+        if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "str_eq")
+                || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_byte")
+                || chk_tok_is(src, t, i, "str_ptr") {
+            return (1 << TY_KIND_SHIFT) + 10;          // str
+        }
+        if chk_tok_is(src, t, i, "free") || chk_tok_is(src, t, i, "load8")
+                || chk_tok_is(src, t, i, "store8") || chk_tok_is(src, t, i, "atomic_add")
+                || chk_tok_is(src, t, i, "ptr_add") || chk_tok_is(src, t, i, "ptr_sub") {
+            return (1 << TY_KIND_SHIFT) + 11;          // ptr
+        }
+        if chk_tok_is(src, t, i, "inb") || chk_tok_is(src, t, i, "outb") {
+            return (1 << TY_KIND_SHIFT) + 2;           // u16
+        }
+        if chk_tok_is(src, t, i, "get_bits") || chk_tok_is(src, t, i, "set_bits") {
+            return (1 << TY_KIND_SHIFT) + 1;           // u8
+        }
+        if chk_tok_is(src, t, i, "syscall4") || chk_tok_is(src, t, i, "syscall6") {
+            return (1 << TY_KIND_SHIFT) + 4;           // u64
+        }
+        return (1 << TY_KIND_SHIFT) + 3;               // 其余 (panic/alloc) = u32
+    }
+    if chk_tok_is(src, t, i, "str_eq") || chk_tok_is(src, t, i, "str_concat") {
+        if k == 1 {
+            return (1 << TY_KIND_SHIFT) + 10;
+        }
+    }
+    if chk_tok_is(src, t, i, "str_byte") && k == 1 {
+        return (1 << TY_KIND_SHIFT) + 3;               // u32
+    }
+    if (chk_tok_is(src, t, i, "load8") || chk_tok_is(src, t, i, "atomic_add")
+            || chk_tok_is(src, t, i, "ptr_add") || chk_tok_is(src, t, i, "ptr_sub"))
+            && k == 1 {
+        return (1 << TY_KIND_SHIFT) + 3;
+    }
+    if chk_tok_is(src, t, i, "store8") {
+        if k == 1 {
+            return (1 << TY_KIND_SHIFT) + 3;
+        }
+        if k == 2 {
+            return (1 << TY_KIND_SHIFT) + 1;           // u8
+        }
+    }
+    if chk_tok_is(src, t, i, "outb") && k == 1 {
+        return (1 << TY_KIND_SHIFT) + 1;               // u8
+    }
+    if chk_tok_is(src, t, i, "get_bits") {
+        if k == 1 || k == 2 {
+            return (1 << TY_KIND_SHIFT) + 3;
+        }
+    }
+    if chk_tok_is(src, t, i, "set_bits") {
+        if k == 1 || k == 2 {
+            return (1 << TY_KIND_SHIFT) + 3;
+        }
+        if k == 3 {
+            return (1 << TY_KIND_SHIFT) + 1;
+        }
+    }
+    if chk_tok_is(src, t, i, "syscall4") || chk_tok_is(src, t, i, "syscall6") {
+        return (1 << TY_KIND_SHIFT) + 4;
+    }
+    return 0;
+}
+
+/// 数组字面量第 k 个元素的 [lo,hi) 区间 (ni = '[' 下标); 越界 -> 0。
+fn chk_arr_elem(src: ptr, t: ptr, ni: u32, k: u32) -> u64 {
+    let d: u32 = 0;
+    let j: u32 = ni;
+    let idx: u32 = 0;
+    let lo: u32 = 0;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "[") || chk_tok_is(src, t, j, "(") {
+            d = d + 1;
+            if d == 1 {
+                lo = j + 1;
+            }
+        } else if (chk_tok_is(src, t, j, "]") || chk_tok_is(src, t, j, ")")) && d == 1 {
+            // 最后一个元素: 数组字面量以 ']' 收尾, 调用实参以 ')' 收尾 —— 只认 ']' 的话
+            // 实参区间永远取不到 (call-arg-type / slice-len-arg-type 都因此少报)
+            if idx == k {
+                return (lo as u64) * 4294967296 + (j as u64);
+            }
+            return 0;
+        } else if chk_tok_is(src, t, j, ")") || chk_tok_is(src, t, j, "]") {
+            d = d - 1;
+        } else if d == 1 && chk_tok_is(src, t, j, ",") {
+            if idx == k {
+                return (lo as u64) * 4294967296 + (j as u64);
+            }
+            idx = idx + 1;
+            lo = j + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
 }
 
 /// 从 i 起找深度 0 的目标 token (用于切语句边界); eof/越界返回 hi。
@@ -952,7 +1997,7 @@ fn chk_find_at(src: ptr, t: ptr, i: u32, hi: u32, what: str) -> u32 {
 
 /// 形参表 -> 局部环境 (只记类型, 不报错: 类型检查已在第一遍做过)。
 fn chk_env_params(src: ptr, t: ptr, s: ptr, n: u32, env: ptr, envc: u32,
-                  lp: u32, hi: u32) -> u32 {
+                  lp: u32, hi: u32, oc2: ptr) -> u32 {
     let i: u32 = lp + 1;
     let c: u32 = envc;
     while i < hi && chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, ")") {
@@ -973,8 +2018,10 @@ fn chk_env_params(src: ptr, t: ptr, s: ptr, n: u32, env: ptr, envc: u32,
         } else {
             let nm: u32 = i;
             i = i + 2;              // 名字 ':'
-            c = chk_env_add(t, env, c, nm, chk_ty_of_tok(src, t, s, n, i));
-            i = chk_skip_type(src, t, i);
+            let te: u32 = chk_skip_type(src, t, i);
+            c = chk_env_add(t, env, c, nm,
+                            chk_ty_range(src, t, s, n, chk_tyt_of(oc2), i, te));
+            i = te;
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
             }
@@ -1011,47 +2058,262 @@ fn chk_arr_count(src: ptr, t: ptr, ni: u32) -> u32 {
     return 0;
 }
 
-/// 语句级检查 (批次 2): let / return / 赋值 / if / while / for。
+/// 追加一条诊断 (错误缓冲 + **偏移格**)。偏移用一格内存回传, 而不是让每一层递归都
+/// 多回传一个 u32 —— Loment 没有 out 参数, 返回值只有一个。
+fn chk_pub(src: ptr, t: ptr, oc: ptr, p: ptr, code: u32, tok: u32) {
+    store32(oc, 0, sym_pub(src, t, p, load32(oc, 0), code, tok));
+}
+
+/// 偏移格 -> 类型表块基址 (两者在同一个块里, 见 chk_arena_tyt)。
+fn chk_tyt_of(oc: ptr) -> ptr {
+    return ptr_sub(oc, 4096);
+}
+
+/// 找语句里第一个"赋值号": 深度 0 的 `=` 且不是 `==` 的第二个字符、也不是 `=>`。
+/// 找不到 -> 0 (语句起点不会是 token 0, 所以 0 可以当"没有")。
+fn chk_find_assign(src: ptr, t: ptr, i: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while j < hi && chk_tok_kind(t, j) != 4 {
+        if d == 0 && chk_tok_is(src, t, j, "=") {
+            if !chk_tok_is(src, t, j + 1, "=") && !chk_tok_is(src, t, j + 1, ">") {
+                return j;
+            }
+        }
+        if chk_tok_is(src, t, j, "(") || chk_tok_is(src, t, j, "[") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, ")") || chk_tok_is(src, t, j, "]") {
+            d = d - 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// `expr?` 的合法性判据 (1 = 确定合法, 0 = 不是 Result / 判不了):
+/// 参考实现在 `_ds_stmts` 里按"内层表达式的类型是 `Result_*` 单态实例"解糖, 所以
+/// 判据就是"内层的类型是 Result"。我这边类型算不到实例 (泛型实例一律记未知), 于是
+/// 反着来: 只在**能确定不是** Result 时返回 0 —— 整型字面量, 或者一个被调函数的返回
+/// 类型 token 不是 `Result`。
+fn chk_q_ok(src: ptr, t: ptr, s: ptr, n: u32, lo: u32, hi: u32) -> u32 {
+    if hi == lo + 1 && chk_tok_kind(t, lo) == 1 {
+        return 0;                                  // 整型字面量 `1?`
+    }
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
+            && chk_match_paren(src, t, lo + 1) == hi - 1 {
+        let slot: u32 = chk_lookup_slot(src, t, s, n, lo);
+        if slot != 0 {
+            if chk_fn_ret_is_result(src, t, s, slot - 1) == 1 {
+                return 1;
+            }
+            return 0;                              // 调用但返回类型不是 Result
+        }
+        return 0;
+    }
+    return 1;                                      // 判不了 -> 保守放过
+}
+
+/// 被调函数的返回类型 token 是不是 `Result` (从形参表的 ')' 往后找 `->`)。
+fn chk_fn_ret_is_result(src: ptr, t: ptr, s: ptr, slot0: u32) -> u32 {
+    let lp: u32 = load32(s, slot0 * 20 + 16);
+    let rp: u32 = chk_match_paren(src, t, lp);
+    let j: u32 = rp + 1;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "{")
+            && !chk_tok_is(src, t, j, ";") {
+        if chk_tok_is(src, t, j, "-") {
+            if chk_tok_is(src, t, j + 2, "Result") {
+                return 1;
+            }
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+
+/// 绑定正确; 不给通配就必须穷尽。所有情形都归 E008。
+/// `lh` = (j << 32) | e —— j = `match` 下标, e = 函数体结束 (找边界用)。
+fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+             lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
+    let j: u32 = chk_lhlo(lh);
+    let e: u32 = chk_lhhi(lh);
+    let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
+    if lb >= e {
+        return e;
+    }
+    let eb: u32 = chk_match_brace(src, t, lb);
+    let st: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(j + 1, lb), tyt, p, oc);
+    // 主体枚举: 具名类型且 kind == K_ENUM 才算
+    let eslot: u32 = 0;
+    if chk_ty_kind(st) == TY_K_NAMED {
+        let s0: u32 = st % (1 << TY_KIND_SHIFT);
+        if load32(syms, s0 * 20 + 4) == K_ENUM {
+            eslot = s0 + 1;
+        }
+    }
+    // "不是枚举"：已知的非枚举类型要报; 字面量主体 (整型/字符串/bool) 也知道不是枚举。
+    // 其余 (类型未知) 保守跳过 —— 参考实现在未知时也报, 但我们会假阳性 (docs/150)。
+    let lit: u32 = 0;
+    if chk_tok_kind(t, j + 1) == 1 || chk_tok_kind(t, j + 1) == 2 {
+        lit = 1;
+    }
+    if chk_tok_is(src, t, j + 1, "true") || chk_tok_is(src, t, j + 1, "false") {
+        lit = 1;
+    }
+    if eslot == 0 && (lit == 1 || (st != 0 && chk_ty_kind(st) != TY_K_NAMED)) {
+        chk_pub(src, t, oc, p, E_PATTERN, j);
+    }
+    let brc: u32 = 0;
+    if eslot != 0 {
+        brc = load32(syms, (eslot - 1) * 20 + 16);
+    }
+    let has_wild: u32 = 0;
+    let k: u32 = lb + 1;
+    while k < eb && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "_") {
+            has_wild = 1;
+            k = k + 1;
+        } else if chk_tok_kind(t, k) == 0 && chk_tok_is(src, t, k + 1, ":")
+                && chk_tok_is(src, t, k + 2, ":") {
+            let ptok: u32 = k;
+            let vtok: u32 = k + 3;
+            let bnd: u32 = 0;
+            if chk_tok_is(src, t, k + 4, "(") {
+                bnd = k + 5;
+            }
+            if eslot != 0 {
+                let pslot: u32 = chk_lookup_slot(src, t, syms, n, ptok);
+                if pslot != eslot {
+                    chk_pub(src, t, oc, p, E_PATTERN, ptok);      // 模式与主体枚举不符
+                } else if chk_evariant_idx(src, t, brc, vtok) == 0 {
+                    chk_pub(src, t, oc, p, E_PATTERN, vtok);      // 无此变体
+                } else {
+                    let pr: u64 = chk_epayload_range(src, t, brc, vtok);
+                    if pr != 0 && bnd == 0 {
+                        chk_pub(src, t, oc, p, E_PATTERN, vtok);  // 有载荷需绑定变量
+                    }
+                    if pr == 0 && bnd != 0 {
+                        chk_pub(src, t, oc, p, E_PATTERN, vtok);  // 无载荷不能绑定
+                    }
+                    let cbind: u32 = envc;
+                    if pr != 0 && bnd != 0 {
+                        // 绑定的变量按载荷类型进环境 (臂体里要用)
+                        let plo: u32 = chk_lhlo(pr);
+                        let phi: u32 = chk_lhhi(pr);
+                        let pty: u32 = chk_ty_range(src, t, syms, n, tyt, plo, phi);
+                        cbind = chk_env_add(t, env, envc, bnd, pty);
+                    }
+                    // 臂体: '=>' 之后的块。**无论有没有载荷都要走** —— 少了这一步,
+                    // `E::A(x) => { return x; }` (A 无载荷, x 其实没绑定) 里的 `x`
+                    // 就不会被查, 参考实现那条"使用未声明的变量"(E002) 会漏报。
+                    let ar: u32 = chk_find_at(src, t, vtok + 1, eb, "{");
+                    if ar < eb {
+                        let ae: u32 = chk_match_brace(src, t, ar);
+                        chk_body(src, t, syms, n, env, cbind, chk_lh(ar, ae), 0, p, oc);
+                        k = ae;
+                    }
+                    // 重复模式: 前面某个臂用过同样的 (枚举, 变体)
+                    let k3: u32 = lb + 1;
+                    while k3 < ptok {
+                        if chk_tok_kind(t, k3) == 0 && chk_tok_is(src, t, k3 + 1, ":")
+                                && chk_tok_is(src, t, k3 + 2, ":")
+                                && same(src, t, k3, ptok) && same(src, t, k3 + 3, vtok) {
+                            chk_pub(src, t, oc, p, E_PATTERN, vtok);
+                        }
+                        k3 = k3 + 1;
+                    }
+                }
+            }
+            if k < eb {
+                k = k + 1;
+            }
+        } else {
+            k = k + 1;
+        }
+    }
+    // 穷尽性: 没有通配时, 枚举的每个变体都要在某个臂里出现过
+    if eslot != 0 && has_wild == 0 {
+        let vj: u32 = brc + 1;
+        let at_name: u32 = 1;
+        while chk_tok_kind(t, vj) != 4 && !chk_tok_is(src, t, vj, "}") {
+            if at_name == 1 && chk_tok_kind(t, vj) == 0 {
+                let hit: u32 = 0;
+                let k4: u32 = lb + 1;
+                while k4 < eb && chk_tok_kind(t, k4) != 4 {
+                    if chk_tok_is(src, t, k4, ":") && chk_tok_is(src, t, k4 + 1, ":") {
+                        if same(src, t, k4 + 2, vj) {
+                            hit = 1;
+                        }
+                    }
+                    k4 = k4 + 1;
+                }
+                if hit == 0 {
+                    chk_pub(src, t, oc, p, E_PATTERN, vj);        // match 不穷尽
+                }
+                at_name = 0;
+            }
+            if chk_tok_is(src, t, vj, ",") {
+                at_name = 1;
+            }
+            vj = vj + 1;
+        }
+    }
+    return eb;
+}
+
+/// 语句级检查 (批次 2/3): let / return / 赋值 / if / while / for / match。
 ///
 /// 形参压到 10 个: 自举 codegen 的实参上限是 10 (形参类型表步长 80 = 10 槽), 超限会
-/// `panic`。所以函数体的区间用 u64 **打包**传 (b << 32 | e), 而不是两个 u32。
+/// `panic`。所以函数体的区间用 u64 **打包**传 (b << 32 | e), 诊断偏移走**一格内存**
+/// (`oc`, 由 tyt 块 +1024 得到) 而不是返回值 —— 否则每一层递归都要多回传一个 u32。
 /// ret = 函数的返回类型编码。
 fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
-            be: u64, ret: u32, p: ptr, o: u32) -> u32 {
+            be: u64, ret: u32, p: ptr, oc: ptr) {
     let b: u32 = (be / 4294967296) as u32;
     let e: u32 = (be % 4294967296) as u32;
+    let tyt: ptr = chk_tyt_of(oc);
     let j: u32 = b + 1;
     let c: u32 = envc;
     while j < e && chk_tok_kind(t, j) != 4 {
-        if chk_tok_is(src, t, j, "let") && !(j > 0 && chk_tok_is(src, t, j - 1, "if")) {
+        // 结构 token 直接跳过: `while x {` 的 `{` 若落到"赋值"分支, 会一路扫到体内第一个
+        // `=` 并把它当成赋值语句, 报出"赋值目标不是左值"(ok.lomt 的 `14@84:{` 假报)。
+        if chk_tok_is(src, t, j, "{") || chk_tok_is(src, t, j, "}")
+                || chk_tok_is(src, t, j, ";") || chk_tok_is(src, t, j, "else")
+                || chk_tok_is(src, t, j, "=>") {
+            j = j + 1;
+        } else if chk_tok_is(src, t, j, "match") {
+            j = chk_match(src, t, syms, n, env, c, chk_lh(j, e), tyt, p, oc);
+            if j < e {
+                j = j + 1;
+            }
+        } else if chk_tok_is(src, t, j, "let") && !(j > 0 && chk_tok_is(src, t, j - 1, "if")) {
             let nm: u32 = j + 1;
             let dty: u32 = 0;
-            let dlo: u32 = 0;       // 声明类型 token 区间 (取数组长度用)
+            let dlo: u32 = 0;
             let dhi: u32 = 0;
             let k: u32 = j + 2;
             if chk_tok_is(src, t, k, ":") {
                 k = k + 1;
                 dlo = k;
-                dty = chk_ty_of_tok(src, t, syms, n, k);
                 k = chk_skip_type(src, t, k);
                 dhi = k;
+                dty = chk_ty_range(src, t, syms, n, tyt, dlo, dhi);
             }
             let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
-                // 数组长度 (参考实现只在"声明是数组 且 字面量是数组"时比)
-                if chk_tok_is(src, t, dlo, "[") && chk_tok_is(src, t, eq + 1, "[") {
-                    let sep: u32 = chk_find_at(src, t, dlo, dhi, ";");
-                    if sep < dhi {
-                        let want: u32 = chk_dec(src, t, sep + 1);
-                        if want != chk_arr_count(src, t, eq + 1) {
-                            o = sym_pub(src, t, p, o, E_ARR, nm);
-                        }
-                    }
+                let t2: u32 = chk_tex(src, t, syms, n, env, c,
+                                      ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+                if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, nm);
                 }
-                let t2: u32 = chk_ty_expr(src, t, syms, n, env, c, eq + 1, semi);
-                if t2 != 0 && dty != 0 && t2 != dty {
-                    o = sym_pub(src, t, p, o, E_TMISMATCH, nm);
+                // 数组长度 (参考实现只在"声明是数组 且 字面量是数组"时比)
+                if chk_ty_is_arr(tyt, dty) == 1 && chk_tok_is(src, t, eq + 1, "[") {
+                    if chk_ty_b(tyt, dty) != chk_arr_count(src, t, eq + 1) {
+                        chk_pub(src, t, oc, p, E_ARR, nm);
+                    }
                 }
             }
             c = chk_env_add(t, env, c, nm, dty);
@@ -1062,12 +2324,38 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
         } else if chk_tok_is(src, t, j, "return") {
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
-            let t3: u32 = chk_ty_expr(src, t, syms, n, env, c, j + 1, semi);
-            if t3 != 0 && ret != 0 && t3 != ret {
-                o = sym_pub(src, t, p, o, E_TMISMATCH, j);
+            let t3: u32 = chk_tex(src, t, syms, n, env, c,
+                                  ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+            if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
+                chk_pub(src, t, oc, p, E_TMISMATCH, j);
             }
             if semi <= e {
                 j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "if") && chk_tok_is(src, t, j + 1, "let") {
+            // `if let E::V(x) = e { ... }` —— 参考实现把 `let` 换成 `=` 再按已解糖的
+            // 形式检查。这里: 走一遍被匹配的表达式, 并把绑定的载荷变量放进环境
+            // (不绑的话块里用到 `x` 会变成"未知"; 将来加"未声明变量"规则时还会假报)。
+            let eq3: u32 = chk_find_at(src, t, j + 2, e, "=");
+            let lb3: u32 = chk_find_at(src, t, eq3 + 1, e, "{");
+            chk_tex(src, t, syms, n, env, c, chk_lh(eq3 + 1, lb3), tyt, p, oc);
+            if chk_tok_kind(t, j + 2) == 0 && chk_tok_is(src, t, j + 3, ":")
+                    && chk_tok_is(src, t, j + 4, ":") {
+                let vslot: u32 = chk_lookup_slot(src, t, syms, n, j + 2);
+                if vslot != 0 && load32(syms, (vslot - 1) * 20 + 4) == K_ENUM {
+                    let vbrc: u32 = load32(syms, (vslot - 1) * 20 + 16);
+                    let pr2: u64 = chk_epayload_range(src, t, vbrc, j + 5);
+                    if pr2 != 0 && chk_tok_is(src, t, j + 6, "(") {
+                        let pty2: u32 = chk_ty_range(src, t, syms, n, tyt,
+                                                     chk_lhlo(pr2), chk_lhhi(pr2));
+                        c = chk_env_add(t, env, c, j + 7, pty2);
+                    }
+                }
+            }
+            if lb3 < e {
+                j = lb3;
             } else {
                 j = e;
             }
@@ -1075,9 +2363,10 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             // `if let ...` 是模式, 不是条件表达式
             if !(chk_tok_is(src, t, j, "if") && chk_tok_is(src, t, j + 1, "let")) {
                 let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
-                let ct: u32 = chk_ty_expr(src, t, syms, n, env, c, j + 1, lb);
+                let ct: u32 = chk_tex(src, t, syms, n, env, c,
+                                      ((j + 1) as u64) * 4294967296 + (lb as u64), tyt, p, oc);
                 if ct != 0 && ct != TY_BOOL {
-                    o = sym_pub(src, t, p, o, E_TMISMATCH, j);
+                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
                 }
                 j = lb;
             } else {
@@ -1090,14 +2379,16 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let d1: u32 = chk_find_at(src, t, j + 2, e, ".");
             let lb2: u32 = chk_find_at(src, t, d1 + 1, e, "{");
             if d1 < e {
-                lo_t = chk_ty_expr(src, t, syms, n, env, c, j + 3, d1);
-                hi_t = chk_ty_expr(src, t, syms, n, env, c, d1 + 2, lb2);
+                lo_t = chk_tex(src, t, syms, n, env, c,
+                               ((j + 3) as u64) * 4294967296 + (d1 as u64), tyt, p, oc);
+                hi_t = chk_tex(src, t, syms, n, env, c,
+                               ((d1 + 2) as u64) * 4294967296 + (lb2 as u64), tyt, p, oc);
             }
             if lo_t != 0 && chk_ty_is_int(lo_t) == 0 {
-                o = sym_pub(src, t, p, o, E_TMISMATCH, j);
+                chk_pub(src, t, oc, p, E_TMISMATCH, j);
             }
             if hi_t != 0 && chk_ty_is_int(hi_t) == 0 {
-                o = sym_pub(src, t, p, o, E_TMISMATCH, j);
+                chk_pub(src, t, oc, p, E_TMISMATCH, j);
             }
             let vt: u32 = lo_t;
             if vt == 0 {
@@ -1112,32 +2403,59 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
-        } else if chk_tok_kind(t, j) == 0 && chk_tok_is(src, t, j + 1, "=")
-                && chk_is_kw(src, t, j) == 0
-                // `E::A => { ... }` 的 `=>` 里也有 `=` —— 少了这两个守卫, 枚举变体
-                // 会被当成"给未声明变量 A 赋值"(假 E002)。`A` 前面是 `:` 同理。
-                && !chk_tok_is(src, t, j + 2, ">")
-                && !(j > 0 && chk_tok_is(src, t, j - 1, ":")) {
-            let semi: u32 = chk_find_at(src, t, j + 2, e, ";");
-            let tt: u32 = chk_name_ty(src, t, syms, n, env, c, j);
-            if tt == 0 {
-                o = sym_pub(src, t, p, o, E_TYPE, j);   // 赋值未声明的变量
-            } else {
-                let et: u32 = chk_ty_expr(src, t, syms, n, env, c, j + 2, semi);
-                if et != 0 && et != tt {
-                    o = sym_pub(src, t, p, o, E_TMISMATCH, j);
+        } else {
+            // 赋值或表达式语句: 找深度 0 的 `=` (排除 `==` 的第二个字符与 `=>`)
+            let eq2: u32 = chk_find_assign(src, t, j, e);
+            let semi2: u32 = chk_find_at(src, t, j, e, ";");
+            if eq2 != 0 && eq2 < semi2 {
+                // 参考实现: 先走 target/expr, 再判左值/只读切片/未声明/类型
+                let tt: u32 = chk_tex(src, t, syms, n, env, c,
+                                      (j as u64) * 4294967296 + (eq2 as u64), tyt, p, oc);
+                let et: u32 = chk_tex(src, t, syms, n, env, c,
+                                      ((eq2 + 1) as u64) * 4294967296 + (semi2 as u64),
+                                      tyt, p, oc);
+                let is_ident: u32 = 0;
+                let is_index: u32 = 0;
+                if eq2 == j + 1 && chk_tok_kind(t, j) == 0 {
+                    is_ident = 1;
                 }
+                if chk_tok_kind(t, j) == 0 && chk_tok_is(src, t, j + 1, "[") {
+                    if chk_match_bracket(src, t, j + 1) == eq2 - 1 {
+                        is_index = 1;
+                    }
+                }
+                if is_index == 1 {
+                    // 只读切片不能写 (形参需声明 mut [T]): 判的是**对象**类型
+                    // (`xs[0]` 里 xs 的类型), 不是下标表达式的类型。
+                    let ot: u32 = chk_tex(src, t, syms, n, env, c,
+                                          (j as u64) * 4294967296 + ((j + 1) as u64),
+                                          tyt, p, oc);
+                    if chk_ty_is_slc(tyt, ot) == 1 && chk_ty_b(tyt, ot) == 0 {
+                        chk_pub(src, t, oc, p, E_SLICE, j);
+                    }
+                }
+                if is_ident == 1 {
+                    if chk_env_get(src, t, env, c, j) == 0 {
+                        chk_pub(src, t, oc, p, E_TYPE, j);        // 赋值未声明的变量
+                    }
+                } else if is_index == 0 {
+                    chk_pub(src, t, oc, p, E_LVAL, j);            // 赋值目标不是左值
+                }
+                if tt != 0 && et != 0 && chk_ty_eq(tyt, tt, et) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                }
+            } else {
+                // 表达式语句: 遍历它 (调用里的实参/字段/下标错误都在里面)
+                chk_tex(src, t, syms, n, env, c,
+                        (j as u64) * 4294967296 + (semi2 as u64), tyt, p, oc);
             }
-            if semi <= e {
-                j = semi + 1;
+            if semi2 <= e {
+                j = semi2 + 1;
             } else {
                 j = e;
             }
-        } else {
-            j = j + 1;
         }
     }
-    return o;
 }
 
 
@@ -1152,10 +2470,14 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 只剩 codegen 自己的需求; `check` 保留为"从语言堆开 arena"的薄包装, 给 C 夹具用。
 ///
 /// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
-/// excluded≤2), 总 12048B; 驱动侧按 `CHK_ARENA` 一块要。
+/// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
+/// excluded≤2); 整块 `chk_arena_bytes()` 字节 —— 驱动按这几个 `chk_arena_*()` 切片。
 pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
-                   nc: ptr, exs: ptr, env: ptr) -> u32 {
+                   nc: ptr, exs: ptr, env: ptr, tyt: ptr) -> u32 {
+    let oc: ptr = ptr_add(tyt, 4096);   // 诊断偏移格 (见 chk_arena_tyt)
     store32(nc, 0, 0);
+    store32(tyt, 0, 0);                 // 复合类型表: 条数清零
+    store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
     let nexs: u32 = 0;
@@ -1236,11 +2558,45 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 i = (rb2 / 4294967296) as u32;
             }
         } else if chk_tok_is(src, t, i, "impl") {
-            // impl 块**不在本检查器的子集内**: 方法在平坦符号表里会互相撞名
-            // (`impl T for Small { fn m }` 与 `impl T for Big { fn m }` 都叫 m, 会报假 E-DUP),
-            // 而方法调用一律走 `x.m()` —— 已经被 `.` 那条规则排除掉了。
-            // 整块跳过; 方法体内的调用检查在第二遍照做 (那里不跳 impl)。
-            i = chk_skip_body(src, t, i);
+            // impl Trait for Type { fn m(self, ...) -> R { ... } ... }
+            // 参考实现 (parser 791 行) 把方法改名成 `Type_m` 做静态派发, 于是
+            // `funcs["Small_measure"]` 存在而裸 `measure` 不存在。这里用
+            // (接收者类型编码, 方法名) 当身份登记成 K_METHOD —— 不造合成名字 (符号表
+            // 没有合成 token 的位置), 但查表口径与那边一致: 普通调用查不到方法名。
+            // 方法体内的语句检查在第三遍照做。
+            let rty: u32 = chk_ty_of_tok(src, t, syms, n, i + 3);
+            let mbody: u32 = chk_find_brace(src, t, i + 3);
+            let mbodye: u32 = chk_skip_body(src, t, mbody);
+            let mk: u32 = mbody + 1;
+            while mk < mbodye && chk_tok_kind(t, mk) != 4 {
+                if chk_tok_is(src, t, mk, "fn") {
+                    let mlp: u32 = chk_find_paren(src, t, mk + 2);
+                    let margc: u32 = chk_count_args(src, t, mlp);
+                    let mbrace: u32 = chk_find_brace(src, t, mk + 2);
+                    let mj: u32 = mk + 2;
+                    let mrt: u32 = 0;
+                    while mj < mbrace && chk_tok_kind(t, mj) != 4 {
+                        if chk_tok_is(src, t, mj, "-") {
+                            mrt = mj + 2;
+                        }
+                        mj = mj + 1;
+                    }
+                    let mrc: u32 = 0;
+                    if mrt != 0 {
+                        mrc = chk_ty_range(src, t, syms, n, tyt, mrt,
+                                           chk_skip_type(src, t, mrt));
+                    }
+                    let mac: u32 = margc;
+                    if margc > 0 {
+                        mac = margc - 1;         // 接收者 self 不计入实参
+                    }
+                    n = chk_decl_method(src, t, syms, n, mk + 1, mac, mrc, rty);
+                    mk = chk_skip_body(src, t, mbrace);
+                } else {
+                    mk = mk + 1;
+                }
+            }
+            i = mbodye;
         } else if chk_tok_is(src, t, i, "capability") {
             i = chk_cap_collect(src, t, ctab, nc, i);
         } else if chk_tok_is(src, t, i, "excluded") {
@@ -1344,13 +2700,22 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 局部表按名字存类型, 重名会让新 let 的 i32 值按 i64 读回来 (clang 报
             // "%t defined with type i64 but expected i32")。批次 3 的局部名统一 f 前缀。
             let fbra: u32 = chk_find_brace(src, t, i + 2);
+            // impl 方法的返回类型不在 `chk_lookup_slot` 里 (它刻意跳过方法), 用
+            // `chk_lookup_method_any` 补一次 —— 否则方法体里的一句不查。
+            let fslot: u32 = slot2;
+            if slot2 == 0 {
+                fslot = chk_lookup_method_any(src, t, syms, n, i + 1);
+            }
             // 签名式方法 (`fn m(self) -> u32;`) 没有函数体: 不能把后面的 impl 块当自己的
-            if chk_tok_is(src, t, fbra, "{") && slot2 != 0 {
-                let retc: u32 = load32(syms, (slot2 - 1) * 20 + 12);
+            if chk_tok_is(src, t, fbra, "{") && fslot != 0 {
+                let retc: u32 = load32(syms, (fslot - 1) * 20 + 12);
                 let fend: u32 = chk_skip_body(src, t, fbra);
-                let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra);
-                o = chk_body(src, t, syms, n, env, envc,
-                             (fbra as u64) * 4294967296 + (fend as u64), retc, out, o);
+                let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra, oc);
+                store32(oc, 0, o);
+                store32(tyt, 0, 0);          // 类型表按**函数**清零 (见 chk_arena_tyt)
+                chk_body(src, t, syms, n, env, envc,
+                         (fbra as u64) * 4294967296 + (fend as u64), retc, out, oc);
+                o = load32(oc, 0);
                 i = fend;
             } else {
                 i = i + 1;
@@ -1371,12 +2736,22 @@ pub fn chk_arena_ctab() -> u32 { return 11264; }
 pub fn chk_arena_nc() -> u32 { return 11776; }
 pub fn chk_arena_exs() -> u32 { return 11792; }
 pub fn chk_arena_env() -> u32 { return 12048; }
-pub fn chk_arena_bytes() -> u32 { return 14096; }
+/// 类型表块: [0..3584) = 复合类型表 (表头 4 字节条数 + 8 字节/条, **每函数开头清零**),
+/// [3584..4096) = 借用检查的名字表, [4096..4112) = 诊断偏移格 (chk_pub 写进这里,
+/// 免得每层递归都回传偏移)。
+///
+/// 为什么表要每函数清零: 它是**单调 bump**, 而 `chk_ty_range`/`chk_tex` 每次调用都会
+/// 登记元素/切片类型 —— 一个 150 条 let 的函数能开出几百条。不清零就会写穿到后面的
+/// 区 (静默改坏别人), 所以条数是"每函数上限"而不是"整单元上限"。
+/// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
+pub fn chk_arena_tyt() -> u32 { return 14096; }
+pub fn chk_arena_bytes() -> u32 { return 18208; }
 
 /// 从语言自带的 64 KiB bump 堆开 arena 再查 (C 夹具与测试用; 无 libc 的驱动请走
 /// `check_arena` 并从 `brk` 拿那 14096B —— 见 `check_arena` 的说明)。
 pub fn check(src: ptr, t: ptr, out: ptr) -> u32 {
-    let a: ptr = alloc(14096);
+    let a: ptr = alloc(18208);
     return check_arena(src, t, out, a, ptr_add(a, 10240), ptr_add(a, 11264),
-                       ptr_add(a, 11776), ptr_add(a, 11792), ptr_add(a, 12048));
+                       ptr_add(a, 11776), ptr_add(a, 11792), ptr_add(a, 12048),
+                       ptr_add(a, 14096));
 }

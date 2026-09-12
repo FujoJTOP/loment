@@ -355,11 +355,11 @@ fn _start() -> u32 {
         return fail("fujoc-s: brk failed\n");
     }
     let errs: ptr = errsv as ptr;
-    // 检查器的工作缓冲也从 brk 拿 (一块 12048B, 内部分段见 checker.lomt 的
+    // 检查器的工作缓冲也从 brk 拿 (一块 >= chk_arena_bytes(), 内部分段见 checker.lomt 的
     // `chk_arena_*`)。**不**用语言自带的 64 KiB bump 堆: `emit_module` 一次就要
     // 49152B, 两者相加会越过 65536, 而 OOM 的边界检查在无 libc 环境下是
     // `@__loment_abort` —— 一条非法指令 (SIGILL), 看起来像"编译器崩了"。
-    let arenav: u64 = sys_alloc(16384);
+    let arenav: u64 = sys_alloc(20480);
     if arenav == 0 {
         return fail("fujoc-s: brk failed\n");
     }
@@ -369,7 +369,8 @@ fn _start() -> u32 {
                               ptr_add(arena, chk_arena_ctab()),
                               ptr_add(arena, chk_arena_nc()),
                               ptr_add(arena, chk_arena_exs()),
-                              ptr_add(arena, chk_arena_env()));
+                              ptr_add(arena, chk_arena_env()),
+                              ptr_add(arena, chk_arena_tyt()));
     if ne != 0 {
         wstr(2, "fujoc-s: 静态检查未通过\n");
         let e: u32 = 0;
