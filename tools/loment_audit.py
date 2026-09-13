@@ -66,6 +66,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_dist_test", []),
     ("C16", "发行包签名: Authenticode (发布者可读/篡改可验) + SHA256SUMS 分离签名",
      "loment_sign_test", []),
+    ("C17", "包管理器去 Python: Loment 版 lompkg 与 Python 版 stdout 逐字节相同 "
+            "(拓扑序 + sha256 + 环检测 + 锁往返)",
+     "loment_pkg_test", []),
 ]
 
 

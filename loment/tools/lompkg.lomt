@@ -1,0 +1,1484 @@
+// loment/tools/lompkg.lomt — Loment 版包管理器 (无 Python, docs/159 §4b)
+//
+// 判据 (tools/loment_pkg_test.py): 同一棵包树喂本程序 (链成 ELF 后跑) 与
+// tools/lompkg.py, **stdout 逐字节相同 + 退出码相同**。
+//
+// CLI 与 Python 版一一对应:
+//   lompkg resolve <pkg.json> [--lock L] [--write]
+//   lompkg verify  <pkg.json> --lock L
+//   退出码 0 = OK / 1 = 解析或校验失败 / 2 = 用法错误
+//
+// 与前三格 (lomfmt/lomdoc/lsp) 同一路数: 只吃词法层以外的东西 —— 这里连词法层都不吃
+// (`*.lomt` 只当**字节流**哈希), 所以不需要自举 parser; `pkg.json` 用 loment/lib/json.lomt。
+//
+// 刻意偏离 (镜像 Python 的语义, 但两处做不到逐字面等价, 见 docs/159 §4b 的记法):
+//   1. Python 的 `Path.resolve()` 会**解析符号链接**并绝对化; 本版只做**词法规范化**
+//      (`//` `.` `..`)。无符号链接的目录树上等价 —— 判据的场景即如此。
+//   2. `pkg_hash` 读的是**原始字节** (`read_bytes`), 绝不 strip CR: 测试里 write_text 造的
+//      临时文件在 Windows 上是 CRLF, 两边都读原始字节才可能相等。而 `pkg.json` 参考实现用
+//      `read_text` (通用换行, CRLF->LF), 所以**清单文本才** strip_cr —— 两者别搞反。
+//   3. `--write` 的锁文件里 `dir` 字段与 Python 版不同 (它是绝对路径)。Python 的 `verify`
+//      只读 `name->hash` 不看 `dir`, 所以**跨实现锁文件往返**仍然通过, 判据用往返而不是
+//      逐字节比锁文件。
+//
+// 无 Python 自举: 参考实现 + clang 链出 ELF, 或走种子 (`sh loment/bootstrap.sh`)。
+
+module lompkg
+
+use "loment/lib/json.lomt"
+use "loment/examples/bytes.lomt"
+
+// ---------------------------------------------------------------- 尺寸与布局
+// 单块 brk 内存 + 命名偏移 (与 lomfmt.lomt 同法): 每层依赖递归要用的持久缓冲按 depth 切片,
+// 其余是全局暂存。Loment 没有 out 参数也没有可变全局, 所以"跨递归共享的东西"一律靠指针。
+
+const MAXD: u32 = 64;          // 依赖深度上限 (Python 无上限, 这里给护栏)
+const PATHW: u32 = 2048;       // 一个 NUL 结尾路径缓冲
+const DIRQ: u32 = 128;         // 目录队列长度 (rglob 用迭代队列, 不用递归)
+const JBUF: u32 = 65536;       // 清单/锁文件文本
+const RBUF: u32 = 16384;       // 哈希分块读
+const DIRBUF: u32 = 32768;     // getdents64 缓冲
+
+const M_SEG: u32 = 0;            // 段栈 (path_norm 用), 1024
+const M_STB: u32 = 1024;         // struct stat, 256
+const M_SHA: u32 = 1280;         // sha256 状态, 1024
+const M_DIG: u32 = 2304;         // 32 字节摘要
+const M_ZB: u32 = 2368;         // 一个零字节
+const M_CELL: u32 = 2376;         // 全局计数格, 128
+const M_DCELL: u32 = 2504;         // MAXD*32: 每深度 (名字/版本偏移 + 边区间)
+const M_DHEX: u32 = 4552;         // MAXD*64: 每深度 hex
+const M_DDIR: u32 = 8648;         // MAXD*PATHW: 每深度包目录
+const M_STACK: u32 = 139720;       // MAXD*PATHW: 环检测栈 (规范化后的清单路径)
+const M_NKEY: u32 = 270792;       // 当前规范化键
+const M_P1: u32 = 272840;       // 清单路径
+const M_P2: u32 = 274888;       // 目录路径
+const M_P3: u32 = 276936;       // 子路径
+const M_P4: u32 = 278984;       // 临时全路径
+const M_SCR: u32 = 281032;       // 暂存 (数字/短字符串), 8192
+const M_TMP: u32 = 289224;       // wdec 数字缓冲, 4096
+const M_TP2: u32 = 293320;       // 字符串解码暂存, 4096
+const M_ERR: u32 = 297416;       // 错误消息, 4096
+const M_JBUF: u32 = 301512;       // 清单/锁 文本
+const M_ARENA: u32 = 367048;       // JSON DOM
+const M_RBUF: u32 = 629192;       // 哈希读缓冲
+const M_DIRBUF: u32 = 645576;       // 目录项缓冲
+const M_POOL: u32 = 678344;       // 相对路径池
+const M_IDX: u32 = 940488;       // 排序索引 (off u32, len u32)
+const M_STRS: u32 = 1006024;      // 名字/版本/目录 池
+const M_PKGS: u32 = 1137096;      // 包记录 (stride 64)
+const M_QP: u32 = 1202632;      // 目录队列: 路径
+const M_QR: u32 = 1464776;      // 目录队列: 相对前缀
+const M_EDGES: u32 = 1726920;      // 依赖边表 (stride 16)
+const M_ESTR: u32 = 1759688;      // 依赖 名字/路径 池
+const M_SEEN: u32 = 2021832;      // 已完成集合
+const M_OUT: u32 = 2283976;      // 锁文件输出缓冲
+const M_LOCK: u32 = 2546120;      // 锁文件路径
+const M_ARGV: u32 = 2548168;      // /proc/self/cmdline
+const M_HASHES: u32 = 2613712;    // 每包 64 字节 hex (1024 个)
+const M_CAP: u32 = 2679256;
+
+// 全局计数格
+const C_ERR: u32 = 0;             // 未用 (错误种类由返回值携带)
+const C_FILES: u32 = 4;             // walk 收集到的 *.lomt 数
+const C_POOL: u32 = 8;             // 相对路径池长度
+const C_QH: u32 = 12;            // 目录队列头
+const C_QT: u32 = 16;            // 目录队列尾
+const C_STRL: u32 = 20;            // strs 池长度
+const C_NPKG: u32 = 24;            // 包记录数
+const C_SP: u32 = 28;            // 环栈深度
+const C_SN: u32 = 32;            // seen 池长度
+const C_EDGES: u32 = 36;            // 边表条数
+const C_ESTR: u32 = 40;            // 依赖 名字/路径 池长度
+const C_EL: u32 = 44;            // 错误消息长度
+
+// 每深度格 (stride 32)
+const DC_NMO: u32 = 0;              // 名字在 strs 的偏移
+const DC_NML: u32 = 4;
+const DC_VRO: u32 = 8;              // 版本在 strs 的偏移
+const DC_VRL: u32 = 12;
+const DC_E0: u32 = 16;             // 本节点边区间起点
+const DC_EC: u32 = 20;             // 本节点边数
+
+// 包记录 (stride 64)
+const P_NOFF: u32 = 0;
+const P_NLEN: u32 = 4;
+const P_VOFF: u32 = 8;
+const P_VLEN: u32 = 12;
+const P_DOFF: u32 = 16;            // 记录 stride 64; 64 字节的 hex 放独立的 M_HASHES
+const P_DLEN: u32 = 20;
+
+// sha256 状态内布局
+const SH_CNT: u32 = 32;             // 缓冲里的字节数
+const SH_TOT: u32 = 36;             // 总字节数 (u32 够: 单包不会到 512 MiB)
+const SH_BLK: u32 = 48;             // 64 字节块
+const SH_W: u32 = 112;            // 消息表 w[64]
+const SH_K: u32 = 368;            // 常量表 K[64]
+
+// S_IFMT 的类型位
+const S_IFDIR: u32 = 16384;         // 0x4000
+const NOTFOUND: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn wbytes(fd: u64, p: ptr, n: u32) -> u64 {
+    return write_all(fd, p, n as u64);
+}
+
+/// u32 十进制写到 fd (临时缓冲借 M_TMP)。
+fn wdec(fd: u64, tmp: ptr, v: u32) -> u64 {
+    let d: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        return write_all(fd, tmp, 1);
+    }
+    while x > 0 {
+        store8(tmp, d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let buf: ptr = ptr_add(tmp, 32);
+    let q: u32 = 0;
+    while q < d {
+        store8(buf, q, load8(tmp, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return write_all(fd, buf, d as u64);
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn strlen_n(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn copy_bytes(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+fn copy_cstr(dst: ptr, src: ptr) -> u32 {
+    let i: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = load8(src, i);
+        store8(dst, i, c as u8);
+        if c == 0 {
+            going = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+/// 把 str 字面量写进 dst 并补 NUL, 返回长度。
+fn put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+fn bytes_eq(a: ptr, ao: u32, al: u32, b: ptr, bo: u32, bl: u32) -> u32 {
+    if al != bl {
+        return 0;
+    }
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < al {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+/// 逐字节字典序 a < b? (排序键 —— Python 的 sorted(Path) 同一棵树内等价于比相对 posix 路径)
+fn bytes_lt(a: ptr, ao: u32, al: u32, b: ptr, bo: u32, bl: u32) -> u32 {
+    let m: u32 = al;
+    if bl < m {
+        m = bl;
+    }
+    let i: u32 = 0;
+    let r: u32 = 2;              // 2 = 公共前缀相同
+    while i < m && r == 2 {
+        let x: u32 = load8(a, ao + i);
+        let y: u32 = load8(b, bo + i);
+        if x < y {
+            r = 1;
+        } else {
+            if x > y {
+                r = 0;
+            }
+        }
+        i = i + 1;
+    }
+    if r == 2 {
+        if al < bl {
+            return 1;
+        }
+        return 0;
+    }
+    return r;
+}
+
+/// 读文本时的 CRLF->LF (参考实现用 read_text 的通用换行)。**不要**用在哈希路径上。
+fn strip_cr(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(buf, i);
+        if c == 13 && i + 1 < n && load8(buf, i + 1) == 10 {
+            i = i + 1;
+        } else {
+            store8(buf, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+fn is_lomt(p: ptr, n: u32) -> u32 {
+    if n < 5 {
+        return 0;
+    }
+    if load8(p, n - 5) == 46 && load8(p, n - 4) == 108 && load8(p, n - 3) == 111
+            && load8(p, n - 2) == 109 && load8(p, n - 1) == 116 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 文件系统
+
+/// 只读打开 (路径必须已 NUL 结尾)。
+fn open_ro(p: ptr) -> i64 {
+    return syscall4(257, (0 as u64) - 100, p as u64, 0);
+}
+
+/// 写打开: O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644。
+/// openat 要 4 个参数 (fd/path/flags/mode) → 必须 syscall6 (syscall4 只给 3 个)。
+fn open_wo(p: ptr) -> i64 {
+    return syscall6(257, (0 as u64) - 100, p as u64, 577, 420, 0);
+}
+
+fn close_fd(fd: i64) -> i64 {
+    return syscall4(3, fd as u64, 0, 0);
+}
+
+/// 文件类型位 (S_IFMT)。NOTFOUND = 不存在。
+fn stat_mode(p: ptr, stb: ptr) -> u32 {
+    let r: i64 = syscall4(262, (0 as u64) - 100, p as u64, stb as u64);
+    if r < 0 {
+        return NOTFOUND;
+    }
+    return load32(stb, 24) & 61440;
+}
+
+fn is_dir(p: ptr, stb: ptr) -> u32 {
+    if stat_mode(p, stb) == S_IFDIR {
+        return 1;
+    }
+    return 0;
+}
+
+fn exists(p: ptr, stb: ptr) -> u32 {
+    if stat_mode(p, stb) == NOTFOUND {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 路径
+
+/// 词法规范化: 折叠 `//`、去掉 `.`、就地解 `..`。写入 dst (NUL 结尾), 返回长度。
+/// 段栈 seg 记每段的起点, 弹栈时按"段起点 - 1"回退 (左边是分隔符就一起吃掉)。
+fn path_norm(src: ptr, n: u32, dst: ptr, seg: ptr) -> u32 {
+    let abs: u32 = 0;
+    if n > 0 && load8(src, 0) == 47 {
+        abs = 1;
+    }
+    let o: u32 = 0;
+    if abs == 1 {
+        store8(dst, 0, 47 as u8);
+        o = 1;
+    }
+    let ns: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        while i < n && load8(src, i) == 47 {
+            i = i + 1;
+        }
+        if i < n {
+            let s: u32 = i;
+            while i < n && load8(src, i) != 47 {
+                i = i + 1;
+            }
+            let l: u32 = i - s;
+            let dot: u32 = 0;
+            if l == 1 && load8(src, s) == 46 {
+                dot = 1;
+            } else {
+                if l == 2 && load8(src, s) == 46 && load8(src, s + 1) == 46 {
+                    dot = 2;
+                }
+            }
+            if dot == 1 {
+                o = o;
+            } else {
+                if dot == 2 {
+                    let top: u32 = 0;
+                    if ns > 0 {
+                        let st: u32 = load32(seg, (ns - 1) * 4);
+                        if o - st == 2 && load8(dst, st) == 46 && load8(dst, st + 1) == 46 {
+                            top = 1;
+                        }
+                    }
+                    if ns > 0 && top == 0 {
+                        o = load32(seg, (ns - 1) * 4);
+                        if o > abs {
+                            o = o - 1;
+                        }
+                        ns = ns - 1;
+                    } else {
+                        if abs == 0 {
+                            if o > 0 {
+                                store8(dst, o, 47 as u8);
+                                o = o + 1;
+                            }
+                            let st2: u32 = o;
+                            store32(seg, ns * 4, st2);
+                            ns = ns + 1;
+                            store8(dst, o, 46 as u8);
+                            store8(dst, o + 1, 46 as u8);
+                            o = o + 2;
+                        }
+                    }
+                } else {
+                    let start: u32 = o;
+                    if o > 0 && load8(dst, o - 1) != 47 {
+                        store8(dst, o, 47 as u8);
+                        o = o + 1;
+                        start = o;
+                    }
+                    store32(seg, ns * 4, start);
+                    ns = ns + 1;
+                    let j: u32 = 0;
+                    while j < l {
+                        store8(dst, o, load8(src, s + j) as u8);
+                        o = o + 1;
+                        j = j + 1;
+                    }
+                }
+            }
+        }
+    }
+    if o == 0 {
+        store8(dst, 0, 46 as u8);
+        o = 1;
+    }
+    store8(dst, o, 0 as u8);
+    return o;
+}
+
+/// 最后一个 `/` 之前的目录部分 (NUL 结尾); 没有 `/` 时是 "."。
+fn dirname_of(p: ptr, n: u32, dst: ptr) -> u32 {
+    let k: u32 = NOTFOUND;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 47 {
+            k = i;
+        }
+        i = i + 1;
+    }
+    if k == NOTFOUND {
+        store8(dst, 0, 46 as u8);
+        store8(dst, 1, 0 as u8);
+        return 1;
+    }
+    if k == 0 {
+        store8(dst, 0, 47 as u8);
+        store8(dst, 1, 0 as u8);
+        return 1;
+    }
+    copy_bytes(dst, 0, p, 0, k);
+    store8(dst, k, 0 as u8);
+    return k;
+}
+
+/// 路径最后一段 (目录名)。环报错只打印目录名 (与 Python 的 p.parent.name 同)。
+fn base_name(p: ptr, n: u32, dst: ptr) -> u32 {
+    let k: u32 = NOTFOUND;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 47 {
+            k = i;
+        }
+        i = i + 1;
+    }
+    let s: u32 = 0;
+    if k != NOTFOUND {
+        s = k + 1;
+    }
+    let l: u32 = n - s;
+    copy_bytes(dst, 0, p, s, l);
+    store8(dst, l, 0 as u8);
+    return l;
+}
+
+// ---------------------------------------------------------------- 命令行
+
+fn read_cmdline(mem: ptr, buf: ptr, cap: u32) -> u32 {
+    let sp: ptr = ptr_add(mem, M_SCR);
+    put_lit(sp, "/proc/self/cmdline");
+    let fd: i64 = open_ro(sp);
+    if fd < 0 {
+        return 0;
+    }
+    let r: i64 = syscall4(0, fd as u64, buf as u64, cap as u64);
+    close_fd(fd);
+    if r <= 0 {
+        return 0;
+    }
+    return r as u32;
+}
+
+fn argc_of(buf: ptr, m: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 第 k 个命令行字段 (0 = 程序名)。返回 (start << 32) | len, 0 = 没有。
+fn arg_k(buf: ptr, m: u32, k: u32) -> u64 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == k {
+                hit = (s as u64) * 4294967296 + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if f == k {
+        hit = (s as u64) * 4294967296 + ((m - s) as u64);
+    }
+    return hit;
+}
+
+fn arg_eq(buf: ptr, av: u64, lit: str) -> u32 {
+    let s: u32 = (av >> 32) as u32;
+    let n: u32 = (av % 4294967296) as u32;
+    if n != str_len(lit) {
+        return 0;
+    }
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < n {
+        if load8(buf, s + i) != str_byte(lit, i) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+fn copy_arg(buf: ptr, dst: ptr, av: u64) -> u32 {
+    let s: u32 = (av >> 32) as u32;
+    let n: u32 = (av % 4294967296) as u32;
+    copy_bytes(dst, 0, buf, s, n);
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+// ---------------------------------------------------------------- 错误消息
+
+fn errc(mem: ptr) {
+    store32(mem, M_CELL + C_EL, 0);
+}
+
+fn errmb(mem: ptr, p: ptr, n: u32) {
+    let o: u32 = load32(mem, M_CELL + C_EL);
+    let e: ptr = ptr_add(mem, M_ERR);
+    let i: u32 = 0;
+    while i < n && o + i < 4000 {
+        store8(e, o + i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store32(mem, M_CELL + C_EL, o + i);
+}
+
+fn errml(mem: ptr, lit: str) {
+    let n: u32 = str_len(lit);
+    let o: u32 = load32(mem, M_CELL + C_EL);
+    let e: ptr = ptr_add(mem, M_ERR);
+    let i: u32 = 0;
+    while i < n && o + i < 4000 {
+        store8(e, o + i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store32(mem, M_CELL + C_EL, o + i);
+}
+
+// ---------------------------------------------------------------- 已完成集合
+
+fn seen_has(mem: ptr, key: ptr, kn: u32) -> u32 {
+    let seen: ptr = ptr_add(mem, M_SEEN);
+    let sn: u32 = load32(mem, M_CELL + C_SN);
+    let o: u32 = 0;
+    while o < sn {
+        let l: u32 = load32(seen, o);
+        if l == kn {
+            if bytes_eq(seen, o + 4, l, key, 0, kn) == 1 {
+                return 1;
+            }
+        }
+        o = o + 4 + l;
+    }
+    return 0;
+}
+
+fn seen_add(mem: ptr, key: ptr, kn: u32) {
+    let seen: ptr = ptr_add(mem, M_SEEN);
+    let sn: u32 = load32(mem, M_CELL + C_SN);
+    store32(seen, sn, kn);
+    copy_bytes(seen, sn + 4, key, 0, kn);
+    store32(mem, M_CELL + C_SN, sn + 4 + kn);
+}
+
+// ---------------------------------------------------------------- SHA-256
+
+fn sha_init(s: ptr) {
+    store32(s, 0, 1779033703);
+    store32(s, 4, 3144134277);
+    store32(s, 8, 1013904242);
+    store32(s, 12, 2773480762);
+    store32(s, 16, 1359893119);
+    store32(s, 20, 2600822924);
+    store32(s, 24, 528734635);
+    store32(s, 28, 1541459225);
+    store32(s, SH_CNT, 0);
+    store32(s, SH_TOT, 0);
+    store32(s, SH_K + 0*4, 1116352408); store32(s, SH_K + 1*4, 1899447441); store32(s, SH_K + 2*4, 3049323471); store32(s, SH_K + 3*4, 3921009573);
+    store32(s, SH_K + 4*4, 961987163); store32(s, SH_K + 5*4, 1508970993); store32(s, SH_K + 6*4, 2453635748); store32(s, SH_K + 7*4, 2870763221);
+    store32(s, SH_K + 8*4, 3624381080); store32(s, SH_K + 9*4, 310598401); store32(s, SH_K + 10*4, 607225278); store32(s, SH_K + 11*4, 1426881987);
+    store32(s, SH_K + 12*4, 1925078388); store32(s, SH_K + 13*4, 2162078206); store32(s, SH_K + 14*4, 2614888103); store32(s, SH_K + 15*4, 3248222580);
+    store32(s, SH_K + 16*4, 3835390401); store32(s, SH_K + 17*4, 4022224774); store32(s, SH_K + 18*4, 264347078); store32(s, SH_K + 19*4, 604807628);
+    store32(s, SH_K + 20*4, 770255983); store32(s, SH_K + 21*4, 1249150122); store32(s, SH_K + 22*4, 1555081692); store32(s, SH_K + 23*4, 1996064986);
+    store32(s, SH_K + 24*4, 2554220882); store32(s, SH_K + 25*4, 2821834349); store32(s, SH_K + 26*4, 2952996808); store32(s, SH_K + 27*4, 3210313671);
+    store32(s, SH_K + 28*4, 3336571891); store32(s, SH_K + 29*4, 3584528711); store32(s, SH_K + 30*4, 113926993); store32(s, SH_K + 31*4, 338241895);
+    store32(s, SH_K + 32*4, 666307205); store32(s, SH_K + 33*4, 773529912); store32(s, SH_K + 34*4, 1294757372); store32(s, SH_K + 35*4, 1396182291);
+    store32(s, SH_K + 36*4, 1695183700); store32(s, SH_K + 37*4, 1986661051); store32(s, SH_K + 38*4, 2177026350); store32(s, SH_K + 39*4, 2456956037);
+    store32(s, SH_K + 40*4, 2730485921); store32(s, SH_K + 41*4, 2820302411); store32(s, SH_K + 42*4, 3259730800); store32(s, SH_K + 43*4, 3345764771);
+    store32(s, SH_K + 44*4, 3516065817); store32(s, SH_K + 45*4, 3600352804); store32(s, SH_K + 46*4, 4094571909); store32(s, SH_K + 47*4, 275423344);
+    store32(s, SH_K + 48*4, 430227734); store32(s, SH_K + 49*4, 506948616); store32(s, SH_K + 50*4, 659060556); store32(s, SH_K + 51*4, 883997877);
+    store32(s, SH_K + 52*4, 958139571); store32(s, SH_K + 53*4, 1322822218); store32(s, SH_K + 54*4, 1537002063); store32(s, SH_K + 55*4, 1747873779);
+    store32(s, SH_K + 56*4, 1955562222); store32(s, SH_K + 57*4, 2024104815); store32(s, SH_K + 58*4, 2227730452); store32(s, SH_K + 59*4, 2361852424);
+    store32(s, SH_K + 60*4, 2428436474); store32(s, SH_K + 61*4, 2756734187); store32(s, SH_K + 62*4, 3204031479); store32(s, SH_K + 63*4, 3329325298);
+}
+
+fn rotr(x: u32, n: u32) -> u32 {
+    let w: u32 = 32;
+    return (x >> n) | (x << (w - n));
+}
+
+fn sha_block(s: ptr) {
+    let blk: ptr = ptr_add(s, SH_BLK);
+    let w: ptr = ptr_add(s, SH_W);
+    let kt: ptr = ptr_add(s, SH_K);
+    let i: u32 = 0;
+    while i < 16 {
+        let v: u32 = load8(blk, i * 4) * 16777216 + load8(blk, i * 4 + 1) * 65536
+                   + load8(blk, i * 4 + 2) * 256 + load8(blk, i * 4 + 3);
+        store32(w, i * 4, v);
+        i = i + 1;
+    }
+    i = 16;
+    while i < 64 {
+        let x: u32 = load32(w, (i - 15) * 4);
+        let y: u32 = load32(w, (i - 2) * 4);
+        let s0: u32 = rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
+        let s1: u32 = rotr(y, 17) ^ rotr(y, 19) ^ (y >> 10);
+        store32(w, i * 4, load32(w, (i - 16) * 4) + s0 + load32(w, (i - 7) * 4) + s1);
+        i = i + 1;
+    }
+    let a: u32 = load32(s, 0);
+    let b: u32 = load32(s, 4);
+    let c: u32 = load32(s, 8);
+    let d: u32 = load32(s, 12);
+    let e: u32 = load32(s, 16);
+    let f: u32 = load32(s, 20);
+    let g: u32 = load32(s, 24);
+    let h: u32 = load32(s, 28);
+    i = 0;
+    while i < 64 {
+        let bs1: u32 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        let ch: u32 = (e & f) ^ ((e ^ 4294967295) & g);
+        let t1: u32 = h + bs1 + ch + load32(kt, i * 4) + load32(w, i * 4);
+        let bs0: u32 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        let maj: u32 = (a & b) ^ (a & c) ^ (b & c);
+        let t2: u32 = bs0 + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        i = i + 1;
+    }
+    store32(s, 0, load32(s, 0) + a);
+    store32(s, 4, load32(s, 4) + b);
+    store32(s, 8, load32(s, 8) + c);
+    store32(s, 12, load32(s, 12) + d);
+    store32(s, 16, load32(s, 16) + e);
+    store32(s, 20, load32(s, 20) + f);
+    store32(s, 24, load32(s, 24) + g);
+    store32(s, 28, load32(s, 28) + h);
+}
+
+fn sha_update(s: ptr, p: ptr, n: u32) {
+    let c: u32 = load32(s, SH_CNT);
+    store32(s, SH_TOT, load32(s, SH_TOT) + n);
+    let i: u32 = 0;
+    while i < n {
+        store8(s, SH_BLK + c, load8(p, i) as u8);
+        c = c + 1;
+        i = i + 1;
+        if c == 64 {
+            sha_block(s);
+            c = 0;
+        }
+    }
+    store32(s, SH_CNT, c);
+}
+
+fn sha_final(s: ptr, outd: ptr) {
+    let n: u32 = load32(s, SH_CNT);
+    store8(s, SH_BLK + n, 128 as u8);
+    n = n + 1;
+    if n > 56 {
+        while n < 64 {
+            store8(s, SH_BLK + n, 0 as u8);
+            n = n + 1;
+        }
+        sha_block(s);
+        n = 0;
+    }
+    while n < 56 {
+        store8(s, SH_BLK + n, 0 as u8);
+        n = n + 1;
+    }
+    let bit: u32 = load32(s, SH_TOT) * 8;
+    store8(s, SH_BLK + 56, 0 as u8);
+    store8(s, SH_BLK + 57, 0 as u8);
+    store8(s, SH_BLK + 58, 0 as u8);
+    store8(s, SH_BLK + 59, 0 as u8);
+    store8(s, SH_BLK + 60, ((bit >> 24) % 256) as u8);
+    store8(s, SH_BLK + 61, ((bit >> 16) % 256) as u8);
+    store8(s, SH_BLK + 62, ((bit >> 8) % 256) as u8);
+    store8(s, SH_BLK + 63, (bit % 256) as u8);
+    sha_block(s);
+    let i: u32 = 0;
+    while i < 8 {
+        let v: u32 = load32(s, i * 4);
+        store8(outd, i * 4, ((v >> 24) % 256) as u8);
+        store8(outd, i * 4 + 1, ((v >> 16) % 256) as u8);
+        store8(outd, i * 4 + 2, ((v >> 8) % 256) as u8);
+        store8(outd, i * 4 + 3, (v % 256) as u8);
+        i = i + 1;
+    }
+}
+
+/// 把一个文件按块喂进哈希 (Python 的 read_bytes 是整读, 但喂进去的字节流一样)。
+fn sha_file(s: ptr, path: ptr, rbuf: ptr) -> u32 {
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        return 1;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let n: i64 = syscall4(0, fd as u64, rbuf as u64, RBUF as u64);
+        if n <= 0 {
+            going = 0;
+        } else {
+            sha_update(s, rbuf, n as u32);
+        }
+    }
+    close_fd(fd);
+    return 0;
+}
+
+fn hex_dig(dig: ptr, out: ptr) {
+    let hexs: str = "0123456789abcdef";
+    let i: u32 = 0;
+    while i < 32 {
+        let b: u32 = load8(dig, i);
+        store8(out, i * 2, str_byte(hexs, b / 16) as u8);
+        store8(out, i * 2 + 1, str_byte(hexs, b % 16) as u8);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 目录遍历 + 哈希
+
+/// 把一个目录项按类型处理: 目录入队, `*.lomt` 记进 (pool, idx)。
+fn handle_entry(mem: ptr, dpath: ptr, drel: ptr, drl: u32, namep: ptr, nl: u32, dtype: u32) {
+    let cf: ptr = ptr_add(mem, M_P4);
+    let a: u32 = copy_cstr(cf, dpath);
+    if a > 0 && load8(cf, a - 1) != 47 {
+        store8(cf, a, 47 as u8);
+        a = a + 1;
+    }
+    copy_bytes(cf, a, namep, 0, nl);
+    store8(cf, a + nl, 0 as u8);
+    let isd: u32 = 0;
+    if dtype == 4 {
+        isd = 1;
+    }
+    if dtype == 8 {
+        isd = 0;
+    }
+    if dtype != 4 && dtype != 8 {
+        // DrvFs 的 d_type 可能是 DT_UNKNOWN(0) —— 不假设它可信, 回退到 stat
+        if stat_mode(cf, ptr_add(mem, M_STB)) == S_IFDIR {
+            isd = 1;
+        }
+    }
+    if isd == 1 {
+        let t: u32 = load32(mem, M_CELL + C_QT);
+        if t < DIRQ {
+            copy_cstr(ptr_add(ptr_add(mem, M_QP), t * PATHW), cf);
+            let cr: ptr = ptr_add(ptr_add(mem, M_QR), t * PATHW);
+            copy_bytes(cr, 0, drel, 0, drl);
+            let c: u32 = drl;
+            if drl > 0 {
+                store8(cr, drl, 47 as u8);
+                c = drl + 1;
+            }
+            copy_bytes(cr, c, namep, 0, nl);
+            store8(cr, c + nl, 0 as u8);
+            store32(mem, M_CELL + C_QT, t + 1);
+        }
+    } else {
+        if is_lomt(namep, nl) == 1 {
+            let cr2: ptr = ptr_add(mem, M_P3);
+            let c2: u32 = 0;
+            if drl > 0 {
+                copy_bytes(cr2, 0, drel, 0, drl);
+                store8(cr2, drl, 47 as u8);
+                c2 = drl + 1;
+            }
+            copy_bytes(cr2, c2, namep, 0, nl);
+            let rl: u32 = c2 + nl;
+            let po: u32 = load32(mem, M_CELL + C_POOL);
+            copy_bytes(ptr_add(mem, M_POOL), po, cr2, 0, rl);
+            store32(mem, M_CELL + C_POOL, po + rl);
+            let fi: u32 = load32(mem, M_CELL + C_FILES);
+            let idx: ptr = ptr_add(mem, M_IDX);
+            store32(idx, fi * 8, po);
+            store32(idx, fi * 8 + 4, rl);
+            store32(mem, M_CELL + C_FILES, fi + 1);
+        }
+    }
+}
+
+/// 收集 root 下所有 `*.lomt` 的**相对路径** (BFS 队列; 反正最后要排序, 遍历顺序无所谓)。
+fn walk_lomt(mem: ptr, root: ptr) {
+    store32(mem, M_CELL + C_FILES, 0);
+    store32(mem, M_CELL + C_POOL, 0);
+    store32(mem, M_CELL + C_QH, 0);
+    copy_cstr(ptr_add(mem, M_QP), root);
+    store8(mem, M_QR, 0 as u8);
+    store32(mem, M_CELL + C_QT, 1);
+    let head: u32 = 0;
+    while head < load32(mem, M_CELL + C_QT) {
+        let dpath: ptr = ptr_add(ptr_add(mem, M_QP), head * PATHW);
+        let drel: ptr = ptr_add(ptr_add(mem, M_QR), head * PATHW);
+        let drl: u32 = strlen_n(drel);
+        let fd: i64 = open_ro(dpath);
+        if fd >= 0 {
+            let going: u32 = 1;
+            while going == 1 {
+                let rn: i64 = syscall4(217, fd as u64, ptr_add(mem, M_DIRBUF) as u64, DIRBUF as u64);
+                if rn <= 0 {
+                    going = 0;
+                } else {
+                    let total: u32 = rn as u32;
+                    let off: u32 = 0;
+                    while off < total {
+                        let reclen: u32 = load16(ptr_add(mem, M_DIRBUF), off + 16);
+                        if reclen == 0 {
+                            off = total;
+                        } else {
+                            let dtype: u32 = load8(ptr_add(mem, M_DIRBUF), off + 18);
+                            let namep: ptr = ptr_add(ptr_add(mem, M_DIRBUF), off + 19);
+                            let nl: u32 = strlen_n(namep);
+                            let skip: u32 = 0;
+                            if nl == 1 && load8(namep, 0) == 46 {
+                                skip = 1;
+                            }
+                            if nl == 2 && load8(namep, 0) == 46 && load8(namep, 1) == 46 {
+                                skip = 1;
+                            }
+                            if skip == 0 {
+                                handle_entry(mem, dpath, drel, drl, namep, nl, dtype);
+                            }
+                            off = off + reclen;
+                        }
+                    }
+                }
+            }
+            close_fd(fd);
+        }
+        head = head + 1;
+    }
+}
+
+/// 插入排序: Python 的 sorted(Path) 在同一棵树内等价于按相对 posix 路径逐字节排。
+fn sort_idx(mem: ptr) {
+    let n: u32 = load32(mem, M_CELL + C_FILES);
+    let idx: ptr = ptr_add(mem, M_IDX);
+    let pool: ptr = ptr_add(mem, M_POOL);
+    let i: u32 = 1;
+    while i < n {
+        let oi: u32 = load32(idx, i * 8);
+        let li: u32 = load32(idx, i * 8 + 4);
+        let j: u32 = i;
+        let going: u32 = 1;
+        while j > 0 && going == 1 {
+            let oj: u32 = load32(idx, (j - 1) * 8);
+            let lj: u32 = load32(idx, (j - 1) * 8 + 4);
+            if bytes_lt(pool, oj, lj, pool, oi, li) == 1 {
+                store32(idx, j * 8, oj);
+                store32(idx, j * 8 + 4, lj);
+                j = j - 1;
+            } else {
+                going = 0;
+            }
+        }
+        store32(idx, j * 8, oi);
+        store32(idx, j * 8 + 4, li);
+        i = i + 1;
+    }
+}
+
+/// pkg_hash(dir): 每个文件按 (相对路径, NUL, 原始字节, NUL) 依次喂; 无文件时喂 "<empty>"。
+fn hash_pkg(mem: ptr, dirp: ptr) {
+    walk_lomt(mem, dirp);
+    sort_idx(mem);
+    let s: ptr = ptr_add(mem, M_SHA);
+    sha_init(s);
+    let n: u32 = load32(mem, M_CELL + C_FILES);
+    if n == 0 {
+        sha_update(s, str_ptr("<empty>"), 7);
+    } else {
+        let i: u32 = 0;
+        while i < n {
+            let idx: ptr = ptr_add(mem, M_IDX);
+            let pool: ptr = ptr_add(mem, M_POOL);
+            let po: u32 = load32(idx, i * 8);
+            let rl: u32 = load32(idx, i * 8 + 4);
+            sha_update(s, ptr_add(pool, po), rl);
+            sha_update(s, ptr_add(mem, M_ZB), 1);
+            let fp: ptr = ptr_add(mem, M_P4);
+            let a: u32 = copy_cstr(fp, dirp);
+            if a > 0 && load8(fp, a - 1) != 47 {
+                store8(fp, a, 47 as u8);
+                a = a + 1;
+            }
+            copy_bytes(fp, a, pool, po, rl);
+            store8(fp, a + rl, 0 as u8);
+            sha_file(s, fp, ptr_add(mem, M_RBUF));
+            sha_update(s, ptr_add(mem, M_ZB), 1);
+            i = i + 1;
+        }
+    }
+    sha_final(s, ptr_add(mem, M_DIG));
+}
+
+// ---------------------------------------------------------------- 清单
+
+/// 读一个 pkg.json: 名字/版本落进 strs, 依赖边落进全局边表 (区间存进 dcell[depth])。
+/// 边必须在**递归之前**一次性抽完 —— 子节点的 visit 会复用 JSON 缓冲与 arena。
+fn load_manifest(mem: ptr, mp: ptr, mn: u32, depth: u32) -> u32 {
+    let fd: i64 = open_ro(mp);
+    if fd < 0 {
+        errmp(mem, mp, mn);
+        errml(mem, ": 打不开");
+        return 1;
+    }
+    let raw: u64 = read_all(fd as u64, ptr_add(mem, M_JBUF), JBUF as u64);
+    close_fd(fd);
+    let n: u32 = strip_cr(ptr_add(mem, M_JBUF), raw as u32);
+    let js: ptr = ptr_add(mem, M_JBUF);
+    let ar: ptr = ptr_add(mem, M_ARENA);
+    let root: u32 = json_parse(js, n, ar);
+    if root == NOTFOUND || json_nkind(ar, root) != 1 {
+        errmp(mem, mp, mn);
+        errml(mem, ": 不是 JSON 对象");
+        return 2;
+    }
+    let nm: u32 = json_get(js, ar, root, "name");
+    if nm == NOTFOUND || json_nkind(ar, nm) != 3 {
+        errmp(mem, mp, mn);
+        errml(mem, ": 缺 name");
+        return 3;
+    }
+    let vr: u32 = json_get(js, ar, root, "version");
+    if vr == NOTFOUND || json_nkind(ar, vr) != 3 {
+        errmp(mem, mp, mn);
+        errml(mem, ": 缺 version");
+        return 4;
+    }
+    let dp: u32 = json_get(js, ar, root, "deps");
+    let dnd: u32 = 0;
+    if dp != NOTFOUND {
+        if json_nkind(ar, dp) != 1 {
+            errmp(mem, mp, mn);
+            errml(mem, ": deps 必须是对象");
+            return 5;
+        }
+        dnd = dp;
+    }
+    let dcell: ptr = ptr_add(mem, M_DCELL);
+    let strs: ptr = ptr_add(mem, M_STRS);
+    let so: u32 = load32(mem, M_CELL + C_STRL);
+    let nl: u32 = json_str_into(js, ar, nm, ptr_add(strs, so), 255);
+    store32(dcell, depth * 32 + DC_NMO, so);
+    store32(dcell, depth * 32 + DC_NML, nl);
+    so = so + nl;
+    let vl: u32 = json_str_into(js, ar, vr, ptr_add(strs, so), 255);
+    store32(dcell, depth * 32 + DC_VRO, so);
+    store32(dcell, depth * 32 + DC_VRL, vl);
+    so = so + vl;
+    store32(mem, M_CELL + C_STRL, so);
+    let e0: u32 = load32(mem, M_CELL + C_EDGES);
+    let ec: u32 = 0;
+    if dnd != 0 {
+        let m: u32 = json_first_child(ar, dnd);
+        let going: u32 = 1;
+        while m != 0 && going == 1 && ec < 400 {
+            let knd: u32 = json_member_key(ar, m);
+            let vnd: u32 = json_member_val(ar, m);
+            let pn: u32 = NOTFOUND;
+            if json_nkind(ar, vnd) == 1 {
+                pn = json_get(js, ar, vnd, "path");
+            }
+            if pn == NOTFOUND || json_nkind(ar, pn) != 3 {
+                errmp(mem, mp, mn);
+                errml(mem, ": 依赖 ");
+                let no: u32 = load32(mem, M_CELL + C_ESTR);
+                let nn: u32 = json_str_into(js, ar, knd, ptr_add(ptr_add(mem, M_ESTR), no), 255);
+                errmb(mem, ptr_add(ptr_add(mem, M_ESTR), no), nn);
+                errml(mem, " 缺 path");
+                return 6;
+            }
+            let es: ptr = ptr_add(mem, M_ESTR);
+            let eo1: u32 = load32(mem, M_CELL + C_ESTR);
+            let nl2: u32 = json_str_into(js, ar, knd, ptr_add(es, eo1), 255);
+            let eo2: u32 = eo1 + nl2;
+            let pl2: u32 = json_str_into(js, ar, pn, ptr_add(es, eo2), 1024);
+            store32(mem, M_CELL + C_ESTR, eo2 + pl2);
+            let ei: u32 = load32(mem, M_CELL + C_EDGES);
+            let eb: ptr = ptr_add(mem, M_EDGES);
+            store32(eb, ei * 16, eo1);
+            store32(eb, ei * 16 + 4, nl2);
+            store32(eb, ei * 16 + 8, eo2);
+            store32(eb, ei * 16 + 12, pl2);
+            store32(mem, M_CELL + C_EDGES, ei + 1);
+            ec = ec + 1;
+            m = json_sibling(ar, m);
+        }
+    }
+    store32(dcell, depth * 32 + DC_E0, e0);
+    store32(dcell, depth * 32 + DC_EC, ec);
+    return 0;
+}
+
+fn errmp(mem: ptr, p: ptr, n: u32) {
+    errmb(mem, p, n);
+}
+
+// ---------------------------------------------------------------- 拓扑解析
+
+/// 环报错的链: "a -> b -> a" —— 每项是**目录名** (Python 的 p.parent.name)。
+fn cycle_msg(mem: ptr, sp: u32, key: ptr, kn: u32) {
+    errml(mem, "依赖环: ");
+    let tmp: ptr = ptr_add(mem, M_TMP);
+    let i: u32 = 0;
+    while i < sp {
+        let ent: ptr = ptr_add(ptr_add(mem, M_STACK), i * PATHW);
+        let sn: u32 = strlen_n(ent);
+        let dl: u32 = dirname_of(ent, sn, tmp);
+        let nl: u32 = base_name(tmp, dl, ptr_add(tmp, 1024));
+        errmb(mem, ptr_add(tmp, 1024), nl);
+        errml(mem, " -> ");
+        i = i + 1;
+    }
+    let dl2: u32 = dirname_of(key, kn, tmp);
+    let nl2: u32 = base_name(tmp, dl2, ptr_add(tmp, 1024));
+    errmb(mem, ptr_add(tmp, 1024), nl2);
+}
+
+/// 深度优先后序 (依赖在前), 与 lompkg.py 的 visit 同规则。
+fn visit(mem: ptr, mp: ptr, mn: u32, depth: u32) -> u32 {
+    if depth >= MAXD {
+        errml(mem, "依赖太深");
+        return 1;
+    }
+    let key: ptr = ptr_add(mem, M_NKEY);
+    let kn: u32 = path_norm(mp, mn, key, ptr_add(mem, M_SEG));
+    let sp: u32 = load32(mem, M_CELL + C_SP);
+    let found: u32 = 0;
+    let i: u32 = 0;
+    while i < sp {
+        let ent: ptr = ptr_add(ptr_add(mem, M_STACK), i * PATHW);
+        if bytes_eq(ent, 0, strlen_n(ent), key, 0, kn) == 1 {
+            found = 1;
+        }
+        i = i + 1;
+    }
+    if found == 1 {
+        cycle_msg(mem, sp, key, kn);
+        return 1;
+    }
+    if seen_has(mem, key, kn) == 1 {
+        return 0;
+    }
+    copy_bytes(ptr_add(ptr_add(mem, M_STACK), sp * PATHW), 0, key, 0, kn);
+    store8(ptr_add(ptr_add(mem, M_STACK), sp * PATHW), kn, 0 as u8);
+    store32(mem, M_CELL + C_SP, sp + 1);
+    let dir: ptr = ptr_add(ptr_add(mem, M_DDIR), depth * PATHW);
+    let dn: u32 = dirname_of(key, kn, dir);
+    // dir + "/pkg.json"
+    let mp2: ptr = ptr_add(mem, M_P1);
+    copy_bytes(mp2, 0, dir, 0, dn);
+    let dn2: u32 = dn;
+    if dn2 > 0 && load8(mp2, dn2 - 1) != 47 {
+        store8(mp2, dn2, 47 as u8);
+        dn2 = dn2 + 1;
+    }
+    put_lit(ptr_add(mp2, dn2), "pkg.json");
+    let mn2: u32 = dn2 + 8;
+    let rc: u32 = load_manifest(mem, mp2, mn2, depth);
+    if rc != 0 {
+        store32(mem, M_CELL + C_SP, sp);
+        return 1;
+    }
+    let dcell: ptr = ptr_add(mem, M_DCELL);
+    let e0: u32 = load32(dcell, depth * 32 + DC_E0);
+    let ec: u32 = load32(dcell, depth * 32 + DC_EC);
+    let k: u32 = 0;
+    while k < ec {
+        let ei: u32 = e0 + k;
+        let eb: ptr = ptr_add(mem, M_EDGES);
+        let no: u32 = load32(eb, ei * 16);
+        let nl: u32 = load32(eb, ei * 16 + 4);
+        let po: u32 = load32(eb, ei * 16 + 8);
+        let pl: u32 = load32(eb, ei * 16 + 12);
+        let es: ptr = ptr_add(mem, M_ESTR);
+        let cb: ptr = ptr_add(mem, M_P3);
+        let c: u32 = 0;
+        if load8(es, po) == 47 {
+            copy_bytes(cb, 0, es, po, pl);
+            c = pl;
+        } else {
+            copy_bytes(cb, 0, dir, 0, dn);
+            c = dn;
+            if c > 0 && load8(cb, c - 1) != 47 {
+                store8(cb, c, 47 as u8);
+                c = c + 1;
+            }
+            copy_bytes(cb, c, es, po, pl);
+            c = c + pl;
+        }
+        let cn: u32 = path_norm(cb, c, ptr_add(mem, M_P4), ptr_add(mem, M_SEG));
+        let cm: u32 = cn;
+        if is_dir(ptr_add(mem, M_P4), ptr_add(mem, M_STB)) == 1 {
+            store8(ptr_add(mem, M_P4), cn, 47 as u8);
+            put_lit(ptr_add(ptr_add(mem, M_P4), cn + 1), "pkg.json");
+            cm = cn + 9;
+        }
+        if exists(ptr_add(mem, M_P4), ptr_add(mem, M_STB)) == 0 {
+            errmp(mem, mp2, mn2);
+            errml(mem, ": 依赖 ");
+            errmb(mem, ptr_add(es, no), nl);
+            errml(mem, " 不存在: ");
+            errmp(mem, cb, c);
+            store32(mem, M_CELL + C_SP, sp);
+            return 1;
+        }
+        let r2: u32 = visit(mem, ptr_add(mem, M_P4), cm, depth + 1);
+        if r2 != 0 {
+            store32(mem, M_CELL + C_SP, sp);
+            return 1;
+        }
+        k = k + 1;
+    }
+    hash_pkg(mem, dir);
+    hex_dig(ptr_add(mem, M_DIG), ptr_add(ptr_add(mem, M_DHEX), depth * 64));
+    add_pkg(mem, depth, dir, dn);
+    seen_add(mem, key, kn);
+    store32(mem, M_CELL + C_SP, sp);
+    return 0;
+}
+
+fn add_pkg(mem: ptr, depth: u32, dirp: ptr, dirn: u32) {
+    let strs: ptr = ptr_add(mem, M_STRS);
+    let so: u32 = load32(mem, M_CELL + C_STRL);
+    copy_bytes(strs, so, dirp, 0, dirn);
+    store32(mem, M_CELL + C_STRL, so + dirn);
+    let dcell: ptr = ptr_add(mem, M_DCELL);
+    let pi: u32 = load32(mem, M_CELL + C_NPKG);
+    let b: u32 = pi * 64;
+    let pkgs: ptr = ptr_add(mem, M_PKGS);
+    store32(pkgs, b + P_NOFF, load32(dcell, depth * 32 + DC_NMO));
+    store32(pkgs, b + P_NLEN, load32(dcell, depth * 32 + DC_NML));
+    store32(pkgs, b + P_VOFF, load32(dcell, depth * 32 + DC_VRO));
+    store32(pkgs, b + P_VLEN, load32(dcell, depth * 32 + DC_VRL));
+    store32(pkgs, b + P_DOFF, so);
+    store32(pkgs, b + P_DLEN, dirn);
+    copy_bytes(ptr_add(mem, M_HASHES), b, ptr_add(ptr_add(mem, M_DHEX), depth * 64), 0, 64);
+    store32(mem, M_CELL + C_NPKG, pi + 1);
+}
+
+// ---------------------------------------------------------------- 输出
+
+fn print_list(mem: ptr) {
+    let np: u32 = load32(mem, M_CELL + C_NPKG);
+    let pkgs: ptr = ptr_add(mem, M_PKGS);
+    let strs: ptr = ptr_add(mem, M_STRS);
+    let tmp: ptr = ptr_add(mem, M_TMP);
+    let i: u32 = 0;
+    while i < np {
+        let b: u32 = i * 64;
+        wstr(1, "  ");
+        wdec(1, tmp, i);
+        wstr(1, ". ");
+        wbytes(1, ptr_add(strs, load32(pkgs, b + P_NOFF)), load32(pkgs, b + P_NLEN));
+        wstr(1, " ");
+        wbytes(1, ptr_add(strs, load32(pkgs, b + P_VOFF)), load32(pkgs, b + P_VLEN));
+        wstr(1, " sha256:");
+        wbytes(1, ptr_add(ptr_add(mem, M_HASHES), b), 16);
+        wstr(1, "\n");
+        i = i + 1;
+    }
+    wstr(1, "[OK] ");
+    wdec(1, tmp, np);
+    wstr(1, " 个包 (拓扑序)\n");
+}
+
+fn emit_lit(out: ptr, o: u32, s: str) -> u32 {
+    return json_emit_lit(out, o, s);
+}
+
+/// 写锁文件 (json.dumps(indent=2) 的形状; `dir` 是本版的词法路径, 见文件头偏离 3)。
+fn emit_lock(mem: ptr, lockp: ptr) -> u32 {
+    let out: ptr = ptr_add(mem, M_OUT);
+    let pkgs: ptr = ptr_add(mem, M_PKGS);
+    let strs: ptr = ptr_add(mem, M_STRS);
+    let o: u32 = emit_lit(out, 0, "{\n  \"lockfile\": 1,\n  \"packages\": [\n");
+    let np: u32 = load32(mem, M_CELL + C_NPKG);
+    let i: u32 = 0;
+    while i < np {
+        let b: u32 = i * 64;
+        o = emit_lit(out, o, "    {\n      \"name\": ");
+        o = json_emit_str(out, o, ptr_add(strs, load32(pkgs, b + P_NOFF)), load32(pkgs, b + P_NLEN));
+        o = emit_lit(out, o, ",\n      \"version\": ");
+        o = json_emit_str(out, o, ptr_add(strs, load32(pkgs, b + P_VOFF)), load32(pkgs, b + P_VLEN));
+        o = emit_lit(out, o, ",\n      \"dir\": ");
+        o = json_emit_str(out, o, ptr_add(strs, load32(pkgs, b + P_DOFF)), load32(pkgs, b + P_DLEN));
+        o = emit_lit(out, o, ",\n      \"hash\": ");
+        o = json_emit_str(out, o, ptr_add(ptr_add(mem, M_HASHES), b), 64);
+        if i + 1 == np {
+            o = emit_lit(out, o, "\n    }\n");
+        } else {
+            o = emit_lit(out, o, "\n    },\n");
+        }
+        i = i + 1;
+    }
+    o = emit_lit(out, o, "  ]\n}\n");
+    let fd: i64 = open_wo(lockp);
+    if fd < 0 {
+        return 1;
+    }
+    write_all(fd as u64, out, o as u64);
+    close_fd(fd);
+    return 0;
+}
+
+/// 锁文件里的字符串节点 vs 原始字节 (解码后比)。
+fn jstr_eq(js: ptr, ar: ptr, node: u32, lit: ptr, litlen: u32, mem: ptr) -> u32 {
+    let t: ptr = ptr_add(mem, M_TP2);
+    let n: u32 = json_str_into(js, ar, node, t, 1024);
+    return bytes_eq(t, 0, n, lit, 0, litlen);
+}
+
+fn wjprefix(fd: u64, js: ptr, ar: ptr, node: u32, k: u32, mem: ptr) {
+    let t: ptr = ptr_add(mem, M_TP2);
+    let n: u32 = json_str_into(js, ar, node, t, 1024);
+    let m: u32 = n;
+    if k < m {
+        m = k;
+    }
+    wbytes(fd, t, m);
+}
+
+fn run_verify(mem: ptr, lockp: ptr) -> u32 {
+    let fd: i64 = open_ro(lockp);
+    if fd < 0 {
+        errml(mem, "锁文件打不开");
+        return 1;
+    }
+    let raw: u64 = read_all(fd as u64, ptr_add(mem, M_JBUF), JBUF as u64);
+    close_fd(fd);
+    let n: u32 = strip_cr(ptr_add(mem, M_JBUF), raw as u32);
+    let js: ptr = ptr_add(mem, M_JBUF);
+    let ar: ptr = ptr_add(mem, M_ARENA);
+    let root: u32 = json_parse(js, n, ar);
+    let pk: u32 = NOTFOUND;
+    if root != NOTFOUND && json_nkind(ar, root) == 1 {
+        pk = json_get(js, ar, root, "packages");
+    }
+    if pk == NOTFOUND || json_nkind(ar, pk) != 2 {
+        errml(mem, "锁文件格式不对");
+        return 1;
+    }
+    let pkgs: ptr = ptr_add(mem, M_PKGS);
+    let strs: ptr = ptr_add(mem, M_STRS);
+    let tmp: ptr = ptr_add(mem, M_TMP);
+    let np: u32 = load32(mem, M_CELL + C_NPKG);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < np {
+        let b: u32 = i * 64;
+        let nmo: u32 = load32(pkgs, b + P_NOFF);
+        let nml: u32 = load32(pkgs, b + P_NLEN);
+        let w: u32 = NOTFOUND;
+        let e: u32 = json_first_child(ar, pk);   // packages 是数组 -> 子节点就是元素本身
+        while e != 0 {
+            if json_nkind(ar, e) == 1 {
+                let kn: u32 = json_get(js, ar, e, "name");
+                if kn != NOTFOUND && json_nkind(ar, kn) == 3
+                        && jstr_eq(js, ar, kn, ptr_add(strs, nmo), nml, mem) == 1 {
+                    w = json_get(js, ar, e, "hash");
+                }
+            }
+            e = json_sibling(ar, e);
+        }
+        if w == NOTFOUND || json_nkind(ar, w) != 3 {
+            bad = bad + 1;
+            wstr(1, "[MISS] ");
+            wbytes(1, ptr_add(strs, nmo), nml);
+            wstr(1, ": 不在锁文件\n");
+        } else {
+            if jstr_eq(js, ar, w, ptr_add(ptr_add(mem, M_HASHES), b), 64, mem) == 1 {
+                wstr(1, "[OK] ");
+                wbytes(1, ptr_add(strs, nmo), nml);
+                wstr(1, " ");
+                wbytes(1, ptr_add(strs, load32(pkgs, b + P_VOFF)), load32(pkgs, b + P_VLEN));
+                wstr(1, "\n");
+            } else {
+                bad = bad + 1;
+                wstr(1, "[DIFF] ");
+                wbytes(1, ptr_add(strs, nmo), nml);
+                wstr(1, ": 校验和不符 (锁 ");
+                wjprefix(1, js, ar, w, 16, mem);
+                wstr(1, " vs 实际 ");
+                wbytes(1, ptr_add(ptr_add(mem, M_HASHES), b), 16);
+                wstr(1, ")\n");
+            }
+        }
+        i = i + 1;
+    }
+    wstr(1, "lompkg: ");
+    wdec(1, tmp, np - bad);
+    wstr(1, "/");
+    wdec(1, tmp, np);
+    wstr(1, " 校验通过\n");
+    if bad == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn usage() -> u32 {
+    wstr(2, "usage: lompkg resolve <pkg.json> [--lock L] [--write]\n");
+    wstr(2, "       lompkg verify  <pkg.json> --lock L\n");
+    return die(2);
+}
+
+fn _start() -> u32 {
+    let memv: u64 = sys_alloc(M_CAP as u64);
+    if memv == 0 {
+        return fail("lompkg: brk failed\n");
+    }
+    let mem: ptr = memv as ptr;
+    store32(mem, M_CELL + C_SP, 0);
+    store32(mem, M_CELL + C_NPKG, 0);
+    store32(mem, M_CELL + C_STRL, 0);
+    store32(mem, M_CELL + C_EDGES, 0);
+    store32(mem, M_CELL + C_ESTR, 0);
+    store32(mem, M_CELL + C_SN, 0);
+    store32(mem, M_CELL + C_EL, 0);
+    store32(mem, M_ZB, 0);
+    errc(mem);
+    let ab: ptr = ptr_add(mem, M_ARGV);
+    let m: u32 = read_cmdline(mem, ab, 65536);
+    let ac: u32 = argc_of(ab, m);
+    if ac < 3 {
+        return usage();
+    }
+    let a1: u64 = arg_k(ab, m, 1);
+    let a2: u64 = arg_k(ab, m, 2);
+    if a2 == 0 {
+        return usage();
+    }
+    let isres: u32 = arg_eq(ab, a1, "resolve");
+    let isver: u32 = arg_eq(ab, a1, "verify");
+    if isres == 0 && isver == 0 {
+        return usage();
+    }
+    let lockv: u64 = 0;
+    let write: u32 = 0;
+    let bad: u32 = 0;
+    let k: u32 = 3;
+    while k < ac {
+        let av: u64 = arg_k(ab, m, k);
+        if arg_eq(ab, av, "--write") == 1 {
+            write = 1;
+            k = k + 1;
+        } else {
+            if arg_eq(ab, av, "--lock") == 1 {
+                if k + 1 >= ac {
+                    bad = 1;
+                    k = ac;
+                } else {
+                    lockv = arg_k(ab, m, k + 1);
+                    k = k + 2;
+                }
+            } else {
+                bad = 1;
+                k = ac;
+            }
+        }
+    }
+    if bad == 1 {
+        return usage();
+    }
+    if isver == 1 {
+        if lockv == 0 || write == 1 {
+            return usage();
+        }
+        copy_arg(ab, ptr_add(mem, M_LOCK), lockv);
+    } else {
+        if write == 1 {
+            if lockv == 0 {
+                put_lit(ptr_add(mem, M_LOCK), "pkg.lock");
+            } else {
+                copy_arg(ab, ptr_add(mem, M_LOCK), lockv);
+            }
+        }
+    }
+    copy_arg(ab, ptr_add(mem, M_P1), a2);
+    let rc: u32 = visit(mem, ptr_add(mem, M_P1), strlen_n(ptr_add(mem, M_P1)), 0);
+    if rc != 0 {
+        wstr(2, "[ERR] ");
+        wbytes(2, ptr_add(mem, M_ERR), load32(mem, M_CELL + C_EL));
+        wstr(2, "\n");
+        return die(1);
+    }
+    if isres == 1 {
+        print_list(mem);
+        if write == 1 {
+            if emit_lock(mem, ptr_add(mem, M_LOCK)) != 0 {
+                wstr(2, "[ERR] 锁文件写不了\n");
+                return die(1);
+            }
+            wstr(1, "[OK] 锁文件 -> ");
+            wbytes(1, ptr_add(mem, M_LOCK), strlen_n(ptr_add(mem, M_LOCK)));
+            wstr(1, "\n");
+        }
+        return die(0);
+    }
+    return die(run_verify(mem, ptr_add(mem, M_LOCK)) as u64);
+}

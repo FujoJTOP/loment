@@ -69,7 +69,8 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 | Python（**测试侧**） | `tools/*_test.py`、`loment_rule_parity`、`ci.py` | 不影响"用户构建/使用 Loment"，只影响开发期判据 | 判据本身也是可移植的：把一致性套件写成 Loment 程序（下一批），或保持 Python 作为"第三方审计工具"——两条路都合理 |
 | ~~`lomfmt`（格式化）~~ | **已重写**：`loment/tools/lomfmt.lomt` | 与 Python 版**逐字节相同**（42 语料 + 4 边界 + 幂等，`tools/loment_fmt_test.py`，已进 `ci.py`） | 工具链去 Python 的第一块；它只吃词法层，所以不受自举 parser 子集限制 |
 | ~~`lomdoc`（文档）~~ | **已重写**：`loment/tools/lomdoc.lomt` | 与 Python 版**逐字节相同**（43 语料 + 1 边界，`tools/loment_doc_test.py`，已进 `ci.py`）；顺手修了参考实现在注入预置枚举上的行号 bug | 去 Python 第二块；同样只吃声明层，不需要 parser |
-| Python（其它工具链） | `loment_lsp`/`lompkg` | 用户要补全、依赖管理时还要 Python | `loment_lsp` 需要**真正的 AST**（自举 parser 目前只吐规范 dump 文本），`lompkg` 需要 JSON 解析 + 目录遍历（运行时缺 `getdents`）+ SHA-256 |
+| ~~`loment_lsp`（语言服务）~~ | **已重写**：`loment/tools/lsp.lomt` | 判据 `tools/loment_lsp_test.py`（真二进制 7 帧往返 + 码/行号 + `--check`，已进 `ci.py`）；走 checker 的符号表，没等自举 parser 建树 —— `docs/154` 的 M56 仍标"部分"= 编辑器内人工点验 | 去 Python 第三块 |
+| ~~`lompkg`（包管理）~~ | **已重写**：`loment/tools/lompkg.lomt` | stdout 与 Python 版**逐字节相同** + 退出码相同（拓扑序 + sha256 + 环检测 + 锁往返，`tools/loment_pkg_test.py`，已进 `ci.py`） | 去 Python 第四块。`getdents64`(217) / `newfstatat`(262) / SHA-256 都用 `syscall4/6` 内建自己发，**没动运行时** |
 | Python（L0 生成器） | `tools/lomc.py`（13 个生成物被内核线消费） | 跨线接口面，单方面改会破坏内核线约定 | 需与内核线协同排期（docs/141 的冻结阈值） |
 | clang / LLVM | 发射 IR → 可执行文件 | **地基语言**，本次目标明确保留 | 不计划去掉 |
 
@@ -98,13 +99,14 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 |---|---|---|
 | `lomfmt` | ✅ 已重写 | —（只吃词法层） |
 | `lomdoc` | ✅ 已重写 | —（只吃声明层） |
-| `loment_lsp`（补全/跳转） | 未动 | 需要**真正的 AST**（自举 parser 吐的是规范 dump 文本，不是树）+ 注释保留；把 parser 扩成"建树"是它的前置 |
-| `lompkg`（包管理） | 未动 | 三块能力都缺：**JSON 解析**（`pkg.json`）、**目录遍历**（`rglob`，运行时要补 `getdents`）、**SHA-256**（校验和） |
+| `loment_lsp`（补全/跳转） | ✅ 已重写 | —（用 checker 的符号表，没等自举 parser 建树） |
+| `lompkg`（包管理） | ✅ 已重写 | —（目录遍历与 SHA-256 都在源内自备，运行时没补新调用） |
 | `tools/lomc.py`（L0 生成器） | 未动 | 跨线接口面（13 个生成物被内核线消费），须与内核线协同排期（docs/141 冻结阈值） |
 
-也就是说：**下一步最省的是给自举 parser 加"建树"输出**（解锁 `loment_lsp`，也是"Loment 自解析"的
-正经形态），其次是给运行时补 `getdents` + 写一个 JSON 子集（解锁 `lompkg`）；SHA-256 可以放在
-"先只做解析、校验和留给 Python"的妥协版本里。
+也就是说：**用户侧工具链到此全部 Loment 化**（fmt / doc / lsp / pkg），表里只剩 `tools/lomc.py`
+一块 —— 它不是用户侧工具而是 **L0 生成器**，属跨线契约面，须与内核线协同排期。再往前一步的
+"正经形态"是给自举 parser 加**建树**输出（让 LSP 从符号表升级到真 AST），但它不再是"去 Python"
+的前置。
 
 ## 5. 这套东西怎么进 CI
 
@@ -128,7 +130,15 @@ python tools/loment_fmt_test.py
   PASS  test_loment_fmt_matches_python         # 42 个语料逐字节相同
   PASS  test_loment_fmt_edge_cases             # 空/只有注释/含转义引号/CRLF
   PASS  test_loment_fmt_is_idempotent          # 格式化两次结果相同
+
+python tools/loment_pkg_test.py
+  PASS  test_loment_lompkg_matches_python              # 链/嵌套/空包: resolve stdout 逐字节相同
+  PASS  test_loment_lompkg_edge_cases                  # 环/缺依赖/缺 name/用法错误: 退出码与 stdout 一致
+  PASS  test_loment_lompkg_verify_and_lock_roundtrip   # 一致/DIFF/MISS + 双向锁往返
 ```
 
 测量：`driver.lomt` 的种子 1 630 342 B；`native_res.lomt` 两阶段产物 3 028 B 相同；
 格式化器对最大的语料 `selfhost/codegen.lomt` 输出 161 813 B 逐字节一致。
+`lompkg.lomt` 的参考 IR **280 415 B**，与**种子自举链** stage1 发射的 IR 逐字节相同
+（`sh loment/bootstrap.sh loment/tools/lompkg.lomt`，无 Python），种子构建的二进制在
+6 个场景上与 Python 版 stdout / 退出码一致。

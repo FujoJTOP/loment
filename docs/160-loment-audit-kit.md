@@ -3,7 +3,7 @@
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
 > —— 它会打印/落盘 `loment/build/audit-report.json`（含提交、tag、clang 版本、
-> 16 条主张的逐条结果，以及**不主张清单**）。
+> 17 条主张的逐条结果，以及**不主张清单**）。
 
 ## 0. 审计包的设计原则
 
@@ -12,7 +12,7 @@
 一致性门禁（`test_audit_claims_match_ci`）专门盯这件事：审计工具列的每个工具都必须
 出现在 `tools/ci.py` 的静态门禁表里。
 
-## 1. 主张清单（16 条，各自有可执行判据）
+## 1. 主张清单（17 条，各自有可执行判据）
 
 | # | 主张 | 判据（`python tools/…`） | 通过标准 |
 |---|---|---|---|
@@ -30,11 +30,14 @@
 | C12 | 工具链等价（格式化器/文档生成器与 Python 版逐字节相同） | `loment_doc_test.py` | 2/2（43 语料 + 边界） |
 | C13 | JSON 库与 Python `json` 逐字节一致 | `loment_json_test.py` | 2/2 |
 | C14 | Windows 文件类型注册 + 启动脚本无解释器 | `loment_filetype_test.py` | 4/4 |
+| C15 | 发行包：命令安装 (sh/ps1) 与自解压安装包，装出来的编译器产物与参考逐字节相同 | `loment_dist_test.py` | 34 条判据 |
+| C16 | 发行包签名：Authenticode (发布者可读/篡改可验) + SHA256SUMS 分离签名 | `loment_sign_test.py` | 15 条判据 |
+| C17 | **包管理器去 Python**：Loment 版 `lompkg` 与 Python 版 stdout **逐字节相同** | `loment_pkg_test.py` | 3/3（链/嵌套/空包 + 4 错误场景 + 双向锁往返） |
 
 一键跑（约 4 分钟，含 clang 编译与 WSL 执行）：
 
 ```bash
-python tools/loment_audit.py --json     # 16/16 通过 + loment/build/audit-report.json
+python tools/loment_audit.py --json     # 17/17 通过 + loment/build/audit-report.json
 python tools/loment_audit.py --list     # 只列主张与命令
 ```
 
@@ -50,8 +53,9 @@ python tools/loment_audit.py --list     # 只列主张与命令
    能报出来。parser 本身已与参考逐字符一致（42/42 语料），但没有接进 driver 的链路。
 5. **aarch64 只验证到发射**：没有 qemu-user、没有真机执行（`docs/158 §4`）。
 6. 自举性能 12.8s（参考 1.2s）；**无 DWARF 变量信息**（只有语句级行表）。
-7. **工具链仍有 Python 成分**：`lomdoc`/`loment_lsp`/`lompkg` 与 L0 生成器 `lomc.py`
-   尚未 Loment 化（进度与依赖排序见 `docs/159 §4b`）。
+7. **用户侧工具链已无 Python 成分，但 L0 生成器还有**：`lomfmt`/`lomdoc`/`loment_lsp`/`lompkg`
+   都已 Loment 化（进度见 `docs/159 §4b`）；`tools/lomc.py`（L0 `.lom` 生成器，13 个生成物被
+   内核线消费）仍是 Python，属跨线契约面，须与内核线协同排期。
 8. Mimosa 扫描器多次未能给出完整结论（`scanner_enobufs`）—— 因此**不宣称项目安全**。
 
 ## 3. 第三方复核步骤（30–60 分钟）
@@ -60,7 +64,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
 git checkout <审计报告里的 commit>   # 报告 provenance.commit —— 判据要对的**就是它**
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
-python tools/loment_audit.py --json # 期望 16/16
+python tools/loment_audit.py --json # 期望 17/17
 ```
 
 > tag `v0.1.3.4-alpha`（annotated）是 **M96 冻结面快照**，早于当前审计状态：
@@ -87,7 +91,7 @@ python tools/loment_audit.py --json # 期望 16/16
    - 在 `loment/bootstrap.sh` 里加一句 Python 便利检查 → `loment_seed --script-ok` **必须**红；
    - 把任一 pinned 文件改成 CRLF（内容不动）→ `loment_eol` **必须**红，而 `git status`
      **仍然报干净**（docs/161：这就是"两个工作树为什么不一样"的现场证据）。
-4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、10 条结果）一起存证；
+4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、17 条结果）一起存证；
    有红项时报告里会直接列出主张编号与工具的输出尾行。
 
 ## 4. 复核环境
