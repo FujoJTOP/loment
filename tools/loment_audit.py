@@ -85,6 +85,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C22", "构建路径去 Python 第一格: Loment 版里程碑状态矩阵生成器, 与 Python 版 "
             "stdout/stderr/落盘字节/退出码**逐字节相同** (含 --check 漂移检出)",
      "loment_status_test", []),
+    ("C23", "构建路径去 Python 第二格: Loment 版发布清单生成器 (glob 展开 + sha256 + 定形 JSON), "
+            "与 Python 版 stdout / 落盘字节 / 退出码**逐字节相同**",
+     "loment_rel_test", []),
 ]
 
 

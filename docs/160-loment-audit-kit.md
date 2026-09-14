@@ -3,7 +3,7 @@
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
 > —— 它会打印/落盘 `loment/build/audit-report.json`（含提交、tag、clang 版本、
-> 22 条主张的逐条结果，以及**不主张清单**）。
+> 23 条主张的逐条结果，以及**不主张清单**）。
 
 ## 0. 审计包的设计原则
 
@@ -12,7 +12,7 @@
 一致性门禁（`test_audit_claims_match_ci`）专门盯这件事：审计工具列的每个工具都必须
 出现在 `tools/ci.py` 的静态门禁表里。
 
-## 1. 主张清单（22 条，各自有可执行判据）
+## 1. 主张清单（23 条，各自有可执行判据）
 
 | # | 主张 | 判据（`python tools/…`） | 通过标准 |
 |---|---|---|---|
@@ -40,7 +40,7 @@
 一键跑（约 4 分钟，含 clang 编译与 WSL 执行）：
 
 ```bash
-python tools/loment_audit.py --json     # 22/22 通过（本机 C14 是环境红, 见 §2） + loment/build/audit-report.json
+python tools/loment_audit.py --json     # 23/23 通过（本机 C14 是环境红, 见 §2） + loment/build/audit-report.json
 python tools/loment_audit.py --list     # 只列主张与命令
 ```
 
@@ -81,7 +81,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
 git checkout <审计报告里的 commit>   # 报告 provenance.commit —— 判据要对的**就是它**
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
-python tools/loment_audit.py --json # 期望 22/22
+python tools/loment_audit.py --json # 期望 23/23
 ```
 
 > tag `v0.1.3.4-alpha`（annotated）是 **M96 冻结面快照**，早于当前审计状态：
@@ -108,7 +108,7 @@ python tools/loment_audit.py --json # 期望 22/22
    - 在 `loment/bootstrap.sh` 里加一句 Python 便利检查 → `loment_seed --script-ok` **必须**红；
    - 把任一 pinned 文件改成 CRLF（内容不动）→ `loment_eol` **必须**红，而 `git status`
      **仍然报干净**（docs/161：这就是"两个工作树为什么不一样"的现场证据）。
-4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、22 条结果）一起存证；
+4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、23 条结果）一起存证；
    有红项时报告里会直接列出主张编号与工具的输出尾行。
 
 ## 4. 复核环境
