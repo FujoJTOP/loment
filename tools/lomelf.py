@@ -587,6 +587,8 @@ class Emitter:
                 if ins.text.startswith("phi ") and ins.dest:
                     self.phis.setdefault(blk.label, []).append(ins)
         arg = 16
+        if is_agg(f.ret):
+            arg = 24                      # 隐藏结果指针占 [rbp+16]
         for ty, name in f.params:
             self.slots[name] = arg
             arg += (max(8, size_of(ty)) + 7) // 8 * 8
@@ -970,13 +972,14 @@ class Emitter:
         if callee.startswith("%"):
             raise Unsupported("v0 不支持间接调用")
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
-        if ret_ty and is_agg(ret_ty):
-            raise Unsupported("v0 不支持聚合返回值")
-        if len(args) > 6:
-            raise Unsupported("v0 最多 6 个实参")
+        ret_agg = ret_ty is not None and is_agg(ret_ty)
+        if len(args) > 16:
+            raise Unsupported("v0 最多 16 个实参")
         total = 0
         for ty, _ in reversed(args):
             total += (max(8, size_of(ty)) + 7) // 8 * 8
+        if ret_agg:
+            total += 8
         for ty, val in reversed(args):
             if is_agg(ty):
                 sz = (size_of(ty) + 7) // 8 * 8
@@ -987,13 +990,16 @@ class Emitter:
             else:
                 self.get(ty, val, RAX)
                 self.asm.emit(push_r(RAX))
+        if ret_agg:
+            self.asm.emit(lea(RAX, RBP, self.slots[d]))
+            self.asm.emit(push_r(RAX))
         if callee == "@llvm.trap":
             self.asm.emit(b"\x0F\x0B")
         else:
             self.asm.call(callee[1:])
         if total:
             self.asm.emit(alu_ri(ADD, RSP, total))
-        if d is not None:
+        if d is not None and not ret_agg:
             self.put(d, RAX)
 
     def _call_asm(self, m, d):
@@ -1020,9 +1026,15 @@ class Emitter:
         if t.strip() != "ret void":
             m = re.match(r"ret\s+(.+?)\s+(\S+)\s*$", t, re.S)
             ty, i = parse_type(m.group(1))
+            val = t[len("ret ") + i:].strip()
             if is_agg(ty):
-                raise Unsupported("v0 不支持聚合返回值")
-            self.get(ty, t[len("ret ") + i:].strip(), RAX)
+                # 隐藏结果指针在 [rbp+16]: **取它指向的缓冲**, 拷过去, 再把指针回传
+                self.asm.emit(mov_rm(RDI, RBP, 16))
+                self.agg_addr(val, RSI)
+                self.copy(RDI, RSI, size_of(ty))
+                self.asm.emit(mov_rm(RAX, RBP, 16))
+            else:
+                self.get(ty, val, RAX)
         self.asm.emit(b"\xC9\xC3")  # leave; ret
 
     def _atomic(self, t, d):
@@ -1041,8 +1053,6 @@ class Emitter:
         return f"{self.cur.name}${label}"
 
     def emit_func(self, f: Func) -> None:
-        if is_agg(f.ret):
-            raise Unsupported(f"v0 不支持聚合返回值: {f.name} -> {f.ret}")
         self.cur = f
         self.plan_frame(f)
         self.asm.label(f.name)

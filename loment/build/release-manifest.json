@@ -155,11 +155,11 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "ee8e40307a493f59760c2e6115976c9a1990ad50b686b079d6a33d7cf3cf7810"
+   "sha256": "a7299eb1b55abc25ccf84c522a35ebc918f89ac001fc3898da744a6c9f6d5302"
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "ba8900ff2b964a289725c5d89471dfedeee9d291fcdba91c0bd59bc848007398"
+   "sha256": "9f77fe8593e8426690b00b446f4415a2ce99eb1645c910086b8108187d076817"
   },
   {
    "path": "tools/loment_pkg_test.py",
@@ -575,7 +575,7 @@
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
-   "sha256": "c292d7b52c476220db4924f53e1104f720892c6115dff3d88f80358b2aed210e"
+   "sha256": "3de0b83e8ce98ff133b6ef9ad6086e8890bcf2fbe63014928c6a9b32969cb107"
   },
   {
    "path": "docs/160-loment-audit-kit.md",
@@ -603,7 +603,7 @@
   },
   {
    "path": "docs/167-loment-native-elf.md",
-   "sha256": "5b6e5c8bdf6b4170ec214a374e8a8bc177c2361a64ccd6e6b4815a9b99dcdcca"
+   "sha256": "89ac4711f0445726b32bde2027dfd124896817f93cd0fda6e500dc6941eecfd3"
   },
   {
    "path": "docs/manual/index.md",

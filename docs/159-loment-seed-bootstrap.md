@@ -72,7 +72,7 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 | ~~`loment_lsp`（语言服务）~~ | **已重写**：`loment/tools/lsp.lomt` | 判据 `tools/loment_lsp_test.py`（真二进制 7 帧往返 + 码/行号 + `--check`，已进 `ci.py`）；走 checker 的符号表，没等自举 parser 建树 —— `docs/154` 的 M56 仍标"部分"= 编辑器内人工点验 | 去 Python 第三块 |
 | ~~`lompkg`（包管理）~~ | **已重写**：`loment/tools/lompkg.lomt` | stdout 与 Python 版**逐字节相同** + 退出码相同（拓扑序 + sha256 + 环检测 + 锁往返，`tools/loment_pkg_test.py`，已进 `ci.py`） | 去 Python 第四块。`getdents64`(217) / `newfstatat`(262) / SHA-256 都用 `syscall4/6` 内建自己发，**没动运行时** |
 | ~~`lomc`（L0 生成器）~~ | **已重写**：`loment/tools/lomc.lomt` | 四个后端（rust/c/python/json）与 Python 版**逐字节相同**，12 个生成物一个字节都没动（判据 `tools/loment_lomc_test.py`，已进 `ci.py`） | 去 Python 第五块。**跨线契约面的做法**：不改 L0、不改生成物 —— 用"逐字节相同"把契约钉住，下游零改动 |
-| clang / LLVM | 发射 IR → 可执行文件 | **地基语言**，本文写作时（0.1.4）明确保留 | ~~不计划去掉~~ **已改为计划去掉**（0.1.4 Alpha2）：参考实现 `tools/lomelf.py` 已能「IR → x86-64 ELF」且与 clang 产物行为逐值一致（`loment_elf_test` 4/4，主张 C19，见 `docs/167`）。**已落地**：自举侧镜像 `loment/tools/lomelf.lomt`（对四个语料与参考逐字节相同，主张 C20）—— 编译用户程序全程无 clang。**仍待做**：PE64/去 WSL、构建路径去 Python、genesis（连种子→stage1 那一步也去掉 clang） |
+| clang / LLVM | 发射 IR → 可执行文件 | **地基语言**，本文写作时（0.1.4）明确保留 | ~~不计划去掉~~ **已改为计划去掉**（0.1.4 Alpha2）：参考实现 `tools/lomelf.py` 已能「IR → x86-64 ELF」且与 clang 产物行为逐值一致（`loment_elf_test` 4/4，主张 C19，见 `docs/167`）。**已落地**：自举侧镜像 `loment/tools/lomelf.lomt`（对四个语料与参考逐字节相同，主张 C20）—— 编译用户程序全程无 clang。**仍待做**：PE64/去 WSL、构建路径去 Python；以及 genesis —— 参考侧已证「不用 clang 也能造出能用的编译器」（`lomelf(种子)` 自编译产物 == 种子），缺的是让**自举侧**那个工具也做到（镜像还不支持聚合返回值）+ 一个提交进仓库的 seed0 二进制 |
 
 换句话说：**从"想重建/使用 Loment"出发的路径已经不含解释器**；剩下的 Python 都在
 开发期判据与尚未重写的工具链上，且每一项都有可测量的迁移判据可写。

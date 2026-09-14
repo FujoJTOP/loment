@@ -12,7 +12,7 @@
 #
 # 已知边界 (与 lomelf.py 头注同源, 逐条记账):
 #   * 调用约定是我们自己的 (实参走栈), **不是 System V** —— 原生产物 v0 不给 C 调;
-#   * 聚合返回值 / 间接调用 / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
+#   * 结构体动态下标 GEP / 间接调用 / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
 #   * 自举侧的镜像是 loment/tools/lomelf.lomt —— 第五条用例钉它与参考逐字节相同。
 #
 # 运行: python tools/loment_elf_test.py   (无 clang/WSL 时 SKIP, 退出码 0)
@@ -143,9 +143,12 @@ def test_lomelf_matches_clang_behavior():
 def test_lomelf_reports_unsupported_instead_of_miscompiling():
     """不支持的东西必须**报错退出**, 不许静默编出一个错的 ELF。"""
     bad = [
-        ("聚合返回值", "define { i32, i32 } @_start() {\nentry:\n  ret { i32, i32 } zeroinitializer\n}\n"),
-        ("间接调用", "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n  call void %g()\n  ret void\n}\n"),
-        ("没有 _start", "define void @main() {\nentry:\n  ret void\n}\n"),
+        ("结构体动态下标 GEP",
+         "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n  %q = getelementptr { i32, i32 }, ptr %p, i32 %i\n  ret void\n}\n"),
+        ("间接调用",
+         "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n  call void %g()\n  ret void\n}\n"),
+        ("没有 _start",
+         "define void @main() {\nentry:\n  ret void\n}\n"),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -158,7 +161,7 @@ def test_lomelf_reports_unsupported_instead_of_miscompiling():
                 assert str(e), f"{label}: 报了 Unsupported 但没有消息"
                 continue
             raise AssertionError(f"[{label}] 本该报 Unsupported, 却编过去了")
-    print(f"      {len(bad)} 类不支持的输入都报了错 ([{bad[0][0]} / {bad[1][0]} / {bad[2][0]}])")
+    print(f"      {len(bad)} 类不支持的输入都报了错")
 
 
 @test
@@ -286,6 +289,40 @@ def test_lomelf_selfhost_matches_reference():
             assert nat == want, f"[{srcl.stem}] 镜像产物与参考不同 ({len(nat)}B vs {len(want)}B)"
             total += 1
     print(f"      {total} 个程序: 自举镜像与参考逐字节相同")
+
+
+@test
+def test_lomelf_rebuilds_the_compiler_without_clang():
+    """**重建不需要 clang**: lomelf(种子) -> 一个能用的 Loment 编译器, 且它自编译
+    `driver.lomt` 的产物**与种子逐字节相同**（定点成立）。整条链没有 clang 参与。
+
+    这是 0.1.4 Alpha2 那条最严口径（"连发布/重建都不需要 C 编译器"）在**参考侧**的落地；
+    真正消掉"第一个二进制"的是 docs/167 §5 第 4 条的 genesis。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    drv, _info = lomelf.compile_ll(seed.read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = td / "drv.elf"
+        elf.write_bytes(drv)
+        binn = "/tmp/lomelf_drv.bin"
+        outp = td / "drv2.ll"
+        script = (
+            f"cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+            f"cd {_wsl_path(ROOT)} && {binn} loment/selfhost/driver.lomt "
+            f"> {_wsl_path(outp)} 2>/dev/null; echo -n $?"
+        )
+        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                           capture_output=True, timeout=900, shell=False)
+        assert r.stdout.decode().strip() == "0", f"原生编译器退出非零: {r.stdout[:40]!r}"
+        got = outp.read_bytes()
+    want = seed.read_bytes()
+    assert got == want, f"[定点不成立] 自编译产物 {len(got)}B != 种子 {len(want)}B"
+    print(f"      lomelf(种子) -> 编译器 -> 自编译产物 == 种子 ({len(got)}B), 全程无 clang")
 
 
 def main() -> int:
