@@ -59,7 +59,7 @@ const C_CC: u32 = 80;
 const C_CSS: u32 = 84;
 
 // 表起址 (相对 M_TAB); 格区 256 字节
-const TB_G: u32 = 256;             // 全局表 stride 32 × 256
+const TB_G: u32 = 256;             // 全局表 stride 32 × 2048
 const G_NOFF: u32 = 0;
 const G_NLEN: u32 = 4;
 const G_TOFF: u32 = 8;
@@ -69,14 +69,14 @@ const G_DOFF: u32 = 20;
 const G_ADDR: u32 = 24;
 const G_ZERO: u32 = 28;
 
-const TB_LBL: u32 = 8448;          // 标签表 stride 24 × 4096: (函数名, 块名, 地址)
+const TB_LBL: u32 = 65792;          // 标签表 stride 24 × 16384: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
 const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
 const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 106752;        // 回填表 stride 28 × 4096
+const TB_FIX: u32 = 459008;        // 回填表 stride 28 × 16384
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
@@ -84,20 +84,20 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 221440;       // 槽表 stride 16 × 2048 (每函数清)
+const TB_SLOT: u32 = 917760;       // 槽表 stride 16 × 2048 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 254208;      // alloca 表 stride 16 × 1024 (每函数清)
+const TB_ALLOC: u32 = 950528;      // alloca 表 stride 16 × 1024 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 270592;        // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 966912;        // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 271104;        // phi 表 stride 16 × 512 (每函数清)
+const TB_PHI: u32 = 967296;        // phi 表 stride 16 × 512 (每函数清)
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
@@ -330,6 +330,43 @@ fn line_end(t: ptr, i: u32, n: u32) -> u32 {
         j = j + 1;
     }
     return n;
+}
+
+fn balanced(t: ptr, a: u32, b: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = a;
+    while k < b {
+        let c: u32 = load8(t, k);
+        if c == 123 || c == 91 || c == 40 {
+            d = d + 1;
+        }
+        if c == 125 || c == 93 || c == 41 {
+            d = d - 1;
+        }
+        k = k + 1;
+    }
+    if d == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 一条指令的结束位置: 括号不闭合就继续收下一行 (自举 codegen 的 switch 是多行的)。
+fn logical_end(t: ptr, i: u32, n: u32) -> u32 {
+    let e: u32 = line_end(t, i, n);
+    let go: u32 = 1;
+    while go == 1 {
+        if balanced(t, i, e) == 1 {
+            go = 0;
+        } else {
+            if e >= n {
+                go = 0;
+            } else {
+                e = line_end(t, e + 1, n);
+            }
+        }
+    }
+    return e;
 }
 
 fn num_at(t: ptr, i: u32, n: u32) -> u64 {
@@ -1631,11 +1668,15 @@ fn arg_parens(t: ptr, from: u32, le: u32) -> u64 {
 fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
     let j: u32 = skip_sp(t, i, le);
     let has_ret: u32 = 1;
+    let ret_agg: u32 = 0;
     if lit_at(t, j, le, "void") == 1 {
         has_ret = 0;
         j = skip_sp(t, j + 4, le);
     } else {
         let ts: u64 = type_span(t, j, le);
+        if is_agg(t, hi32(ts), lo32(ts)) == 1 {
+            ret_agg = 1;
+        }
         j = skip_sp(t, hi32(ts) + lo32(ts), le);
     }
     if lit_at(t, j, le, "asm ") == 1 {
@@ -1661,6 +1702,9 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
         }
         q = q + 1;
     }
+    if ret_agg == 1 {
+        total = total + 8;                        // 隐藏结果指针那 8 字节
+    }
     let d: u32 = c;
     q = nargs;
     while q > 0 {
@@ -1681,6 +1725,10 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
             d = em_push(out, d, RAX);
         }
     }
+    if ret_agg == 1 {
+        d = em_lea(out, d, RAX, RBP, slot_find(tab, t, doff, dlen));
+        d = em_push(out, d, RAX);
+    }
     if lit_at(t, cs, ce, "@llvm.trap") == 1 {
         d = e1(out, d, 15);
         d = e1(out, d, 11);
@@ -1690,7 +1738,7 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     if total != 0 {
         d = em_alu_ri(out, d, ADD, RSP, total);
     }
-    if has_ret == 1 {
+    if has_ret == 1 && ret_agg == 0 {
         d = emit_put(tab, out, d, t, doff, dlen, RAX);
     }
     return d;
@@ -1893,7 +1941,14 @@ fn do_ret(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
         let tl: u32 = lo32(ts);
         let vs: u32 = skip_sp(t, to + tl, le);
         let ve: u32 = word_end(t, vs, le);
-        d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        if is_agg(t, to, tl) == 1 {
+            d = em_mov_rm(out, d, RDI, RBP, 16);          // 取隐藏结果指针
+            d = emit_agg_addr(tab, out, d, t, vs, ve - vs, RSI);
+            d = em_copy(out, d, RDI, RSI, ty_size(t, to, tl));
+            d = em_mov_rm(out, d, RAX, RBP, 16);
+        } else {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        }
     }
     d = e1(out, d, 201);
     return e1(out, d, 195);
@@ -1909,7 +1964,7 @@ fn plan_frame(tab: ptr, t: ptr, fs: u32, fe: u32) {
     let cbl: u32 = 0;
     while i < fe {
         let ls: u32 = skip_sp(t, i, fe);
-        let le: u32 = line_end(t, i, fe);
+        let le: u32 = logical_end(t, i, fe);
         // 基本块标签?
         let e2: u32 = le;
         let go2: u32 = 1;
@@ -1992,6 +2047,9 @@ fn plan_params(tab: ptr, t: ptr, ls: u32, le: u32) -> u32 {
         k = k + 1;
     }
     let arg: u32 = 16;
+    if is_agg(t, hi32(rts), lo32(rts)) == 1 {
+        arg = 24;                                 // 隐藏结果指针占 [rbp+16]
+    }
     let a: u32 = skip_sp(t, lp + 1, rp);
     while a < rp {
         let ae: u32 = opnd(tab, t, a, rp);
@@ -2543,7 +2601,7 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     let i: u32 = bs;
     while i < be {
         let ls2: u32 = skip_sp(t, i, be);
-        let le2: u32 = line_end(t, i, be);
+        let le2: u32 = logical_end(t, i, be);
         // 基本块标签 -> 登记代码位置
         let e3: u32 = le2;
         let go3: u32 = 1;
