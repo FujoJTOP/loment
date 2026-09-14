@@ -571,11 +571,11 @@
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
-   "sha256": "37e174fca95b8dd0d477e65e4c8e5f3ccf28e77beee3801e49b4d340645a5671"
+   "sha256": "e52ad70657bacd74aeae43572bf3b7d1da4ddec339c4c89545f689739a1c57bb"
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "4135ab2318666c66e8c3f83f5aa5c57ffef34c6e6764b5287bed4e52e3c1771c"
+   "sha256": "b69d29da644fb6809f67f9bc0cea46d213f63483d8ed13e531354491c1fddf36"
   },
   {
    "path": "docs/161-loment-checkout-eol.md",
@@ -596,6 +596,10 @@
   {
    "path": "docs/166-loment-014-release.md",
    "sha256": "cee63ece3cdc893570ad4f8cdfa79d2fb50c3d2ddaf1ade13bead3eb76a3bd9b"
+  },
+  {
+   "path": "docs/167-loment-native-elf.md",
+   "sha256": "e682deb0d20789ff12dd8bddbf775cc4d51aeba8174dff58062b00380dfc837e"
   },
   {
    "path": "docs/manual/index.md",
