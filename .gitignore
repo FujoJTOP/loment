@@ -32,6 +32,9 @@ fujofs.img
 
 # 编译产物 (scripts/build-samples.ps1 从源码重建)
 *.elf
+# 例外: genesis 是**故意**提交进仓库的二进制 —— 链条的起点, 没有它就退回 clang
+# (docs/167 §5 ②)。它有来源 (种子 + 一次 clang)、可复现、有自己的 SHA256SUMS。
+!loment/build/genesis/*.elf
 *.exe
 *.macho
 *.initrd
