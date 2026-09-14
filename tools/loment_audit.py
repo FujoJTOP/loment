@@ -82,6 +82,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C21", "链条的起点 (genesis): 提交进仓库的 lomelf 二进制起头, 在**没有 clang** 的环境里"
             "跑通 bootstrap.sh 四条证明 —— 重建工具链不需要 C 编译器, 也不需要解释器",
      "loment_genesis_test", []),
+    ("C22", "构建路径去 Python 第一格: Loment 版里程碑状态矩阵生成器, 与 Python 版 "
+            "stdout/stderr/落盘字节/退出码**逐字节相同** (含 --check 漂移检出)",
+     "loment_status_test", []),
 ]
 
 

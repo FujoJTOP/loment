@@ -101,7 +101,9 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）**。复用本文的代码生成，换 object 写出与调用约定；
    `loment_dist.py` 的 Windows 装法从"拷进 WSL + `wsl -e` 转发"改成装原生 `loment.exe`。
-3. **构建/发布路径去 Python**（`lom_spec_emit` / `loment_status` / `loment_release` /
+3. **构建/发布路径去 Python**（**第一格已落**：`loment/tools/lomstatus.lomt` 取代
+   `loment_status.py`，判据 `loment_status_test` 4/4 + 主张 **C22** —— 三路输出与落盘字节
+   都与 Python 版逐字节相同。**下一格**：`lom_spec_emit` / `loment_release` /
    `loment_src` / `loment_dist` / `loment_seed` / `loment_manual` / `lom_audit` / `loment` CLI）。
 4. **重建不再需要 clang —— 参考侧已证**：`lomelf(种子) → 编译器 → 自编译产物 == 种子`
    （判据 `test_lomelf_rebuilds_the_compiler_without_clang`，1 630 436 B 逐字节相同）。
@@ -130,7 +132,7 @@ stage1"那一步出现（见 §5）。
 
 - 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test`；审计主张 **C19**。
 - 工件清单：`tools/lomelf.py`、`tools/loment_elf_test.py` 已进 `loment_release.py` 的 `GLOBS`
-  （清单 182 个工件，`--check` 182/182 —— genesis 也在里面）。
+  （清单 184 个工件，`--check` 184/184 —— genesis 也在里面）。
 - **不改** L0（`lom/*.lom`）、不改 `codegen.lomt`/`driver.lomt`、不改两后端既有的逐字节等价
   （docs/158 §2）—— 新增的是**第三个后端**，不是在既有后端上动刀。
 

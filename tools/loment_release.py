@@ -40,6 +40,7 @@ GLOBS = [
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_elf_test.py",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
+    "tools/loment_status_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",
     "tools/loment_lsp_test.py", "tools/loment_editors_test.py",
     "editors/vim/*.md", "editors/vim/syntax/*.vim", "editors/vim/ftdetect/*.vim",

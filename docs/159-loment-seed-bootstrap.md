@@ -102,6 +102,7 @@ Windows 侧有 LLVM）走 `/mnt/c/Program Files/LLVM/bin/clang.exe` 互操作 �
 | `loment_lsp`（补全/跳转） | ✅ 已重写 | —（用 checker 的符号表，没等自举 parser 建树） |
 | `lompkg`（包管理） | ✅ 已重写 | —（目录遍历与 SHA-256 都在源内自备，运行时没补新调用） |
 | `tools/lomc.py`（L0 生成器） | ✅ 已重写 | —（`loment/tools/lomc.lomt`；四个后端与 Python 版**逐字节相同**，下游一行不用动） |
+| **构建路径** `loment_status.py`（状态矩阵） | ✅ 已重写 | —（`loment/tools/lomstatus.lomt`；stdout / stderr / 落盘字节 / 退出码都与 Python 版**逐字节相同**，含 `--check` 漂移检出；判据 `tools/loment_status_test.py` 4/4，主张 **C22**，docs/167 Stage 3 第一格） |
 
 也就是说：**去 Python 到此收口** —— 用户侧工具链（fmt / doc / lsp / pkg）与 **L0 生成器**（lomc）
 全部有了 Loment 实现，表里没有"未动"的项了。再往前一步的"正经形态"是给自举 parser 加**建树**

@@ -1,0 +1,696 @@
+// loment/tools/lomstatus.lomt — Loment 版里程碑状态矩阵生成器 (无 Python, docs/167 Stage 3)
+//
+// 判据 (tools/loment_status_test.py): 对同一份 `docs/145-loment-100-milestones.md`,
+// 本程序 (链成 ELF 后跑) 与 `tools/loment_status.py` 的 stdout / 落盘字节 / 退出码**逐字节相同**。
+//
+// CLI 与 Python 版一一对应:
+//   lomstatus --emit          写 docs/154-loment-status.md
+//   lomstatus --check         只校验 (与 --emit 产出的内容比)
+//   lomstatus                 无参数 = 门禁模式 (只校验, 与其它工具的自检约定一致)
+//   退出码 0 = 一致 / 1 = 有差异 / 2 = 用法错误
+//
+// 镜像语义 (含怪癖, 不单方面改):
+//   * 按 `(?<!\\)|` 切单元格 —— 前面是反斜杠的竖线是字面量; 切完再把 `\|` 还原成 `|`;
+//   * 第一格必须 `M` + 纯数字, 否则整行跳过;
+//   * 归类只看**前缀**: `✅ 部分` → 部分, `✅` → 完成, `⚠️` → 未达, `待做`/`—`/空 → 未开始;
+//   * 行数不是 100 就报错退出 2;
+//   * 输出结尾 `.rstrip() + 换行`。
+
+module lomstatus
+
+use "loment/examples/bytes.lomt"
+
+// ---------------------------------------------------------------- 内存
+const M_ARGV: u32 = 0;             // 8192
+const M_IN: u32 = 8192;            // 1 MiB 输入
+const M_OUT: u32 = 1056768;        // 1 MiB 输出
+const M_CUR: u32 = 2105344;        // 1 MiB 现有 docs/154 (校验用)
+const M_ROW: u32 = 3153920;        // 里程碑行表 (100 行 × 64 字节)
+const M_CELL: u32 = 3160320;       // 本行单元格 (8 格 × 8 字节)
+const ARENA: u64 = 4200000;
+
+const IN_CAP: u32 = 1048576;
+const OUT_CAP: u32 = 1048576;
+const CUR_CAP: u32 = 1048576;
+const MAXROWS: u32 = 200;
+
+// 行表 (每行 32 字节 = 8 个 u32): 里程碑 id / 名称 / 判据 / 状态 各自的 (off, len)
+const R_ID_O: u32 = 0;
+const R_ID_L: u32 = 4;
+const R_NAME_O: u32 = 8;
+const R_NAME_L: u32 = 12;
+const R_CRIT_O: u32 = 16;
+const R_CRIT_L: u32 = 20;
+const R_ST_O: u32 = 24;
+const R_ST_L: u32 = 28;
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let got: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if got <= 0 {
+            return off;
+        }
+        off = off + (got as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn cstr(dst: ptr, s: str) -> ptr {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(str_ptr(s), i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return dst;
+}
+
+fn argv_n(buf: ptr, cap: u64, n: u32) -> u64 {
+    let fd: i64 = syscall4(257, (0 as u64) - 100,
+                           cstr(ptr_add(buf, 8192), "/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let rn: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if rn <= 0 {
+        return 0;
+    }
+    let m: u32 = rn as u32;
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * 4294967296 + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if f == n {
+        hit = (s as u64) * 4294967296 + ((m - s) as u64);
+    }
+    return hit;
+}
+
+fn open_ro(path: ptr) -> i64 {
+    return syscall4(257, (0 as u64) - 100, path as u64, 0);
+}
+
+fn open_wo(path: ptr) -> i64 {
+    return syscall6(257, (0 as u64) - 100, path as u64, 577, 420, 0);
+}
+
+// ---------------------------------------------------------------- 输出缓冲
+
+fn p1(o: u32, out: ptr, b: u32) -> u32 {
+    store8(out, o, b as u8);
+    return o + 1;
+}
+
+/// 追加一段输入文本 (输入与输出是两块不同的缓冲)。
+fn pcopy(o: u32, out: ptr, vin: ptr, off: u32, len: u32) -> u32 {
+    let i: u32 = 0;
+    let k: u32 = o;
+    while i < len {
+        k = p1(k, out, load8(vin, off + i));
+        i = i + 1;
+    }
+    return k;
+}
+
+fn pstr(o: u32, out: ptr, s: str) -> u32 {
+    return pcopy(o, out, str_ptr(s), 0, str_len(s));
+}
+
+/// 十进制 (从最高位起, 不用缓冲)。
+fn pdec(o: u32, out: ptr, v: u32) -> u32 {
+    if v == 0 {
+        return p1(o, out, 48);
+    }
+    let k: u32 = o;
+    let p: u32 = 1000000000;
+    let started: u32 = 0;
+    while p > 0 {
+        let dg: u32 = (v / p) % 10;
+        if dg != 0 || started == 1 {
+            k = p1(k, out, 48 + dg);
+            started = 1;
+        }
+        p = p / 10;
+    }
+    return k;
+}
+
+fn pend(o: u32, out: ptr) -> u32 {
+    return p1(o, out, 10);
+}
+
+// ---------------------------------------------------------------- 解析
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 去掉两端的空白, 并把 `\|` 还原成 `|`… —— 还原在**写出时**做 (见 set_span)。
+fn trim_a(t: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(t, i);
+        if c == 32 || c == 9 || c == 13 {
+            i = i + 1;
+        } else {
+            return i;
+        }
+    }
+    return b;
+}
+
+fn trim_b(t: ptr, a: u32, b: u32) -> u32 {
+    let j: u32 = b;
+    while j > a {
+        let c: u32 = load8(t, j - 1);
+        if c == 32 || c == 9 || c == 13 {
+            j = j - 1;
+        } else {
+            return j;
+        }
+    }
+    return a;
+}
+
+/// 写出一个单元格 (去掉 `\` 转义的竖线)。
+fn pcell(o: u32, out: ptr, t: ptr, a: u32, b: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(t, i);
+        if c == 92 && i + 1 < b && load8(t, i + 1) == 124 {
+            k = p1(k, out, 124);
+            i = i + 2;
+        } else {
+            k = p1(k, out, c);
+            i = i + 1;
+        }
+    }
+    return k;
+}
+
+fn span_has(t: ptr, a: u32, b: u32, s: str) -> u32 {
+    let L: u32 = str_len(s);
+    if b - a < L {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < L {
+        if load8(t, a + i) != load8(str_ptr(s), i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn span_eq2(t: ptr, a: u32, b: u32, s: str) -> u32 {
+    if b - a != str_len(s) {
+        return 0;
+    }
+    return span_has(t, a, b, s);
+}
+
+/// 状态 -> 归类 (只看前缀, 与 Python 版逐条对应)。
+fn classify(t: ptr, a: u32, b: u32) -> u32 {
+    if span_has(t, a, b, "✅ 部分") == 1 {
+        return 1;                                   // 部分
+    }
+    if span_has(t, a, b, "✅") == 1 {
+        return 2;                                   // 完成
+    }
+    if span_has(t, a, b, "⚠️") == 1 {
+        return 3;                                   // 未达
+    }
+    return 4;                                       // 未开始
+}
+
+fn cls_str(k: u32) -> str {
+    if k == 1 {
+        return "部分";
+    }
+    if k == 2 {
+        return "完成";
+    }
+    if k == 3 {
+        return "未达";
+    }
+    return "未开始";
+}
+// ---------------------------------------------------------------- 行与单元
+
+fn pk16(a: u32, b: u32) -> u64 {
+    return (a as u64) * 4294967296 + (b as u64);
+}
+
+fn hi32(v: u64) -> u32 {
+    return (v / 4294967296) as u32;
+}
+
+fn lo32(v: u64) -> u32 {
+    return (v % 4294967296) as u32;
+}
+
+fn line_end(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    while j < n {
+        if load8(t, j) == 10 {
+            return j;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// 行首尾去空白与 '|' —— 对应 Python 的 `ln.strip().strip("|")`。
+fn strip_line(t: ptr, ls: u32, le: u32) -> u64 {
+    let a: u32 = ls;
+    let b: u32 = le;
+    let go: u32 = 1;
+    while b > a && go == 1 {
+        let c: u32 = load8(t, b - 1);
+        if c == 32 || c == 9 || c == 13 {
+            b = b - 1;
+        } else {
+            go = 0;
+        }
+    }
+    go = 1;
+    while a < b && go == 1 {
+        let c: u32 = load8(t, a);
+        if c == 32 || c == 9 || c == 13 {
+            a = a + 1;
+        } else {
+            go = 0;
+        }
+    }
+    go = 1;
+    while a < b && go == 1 {
+        if load8(t, a) == 124 {
+            a = a + 1;
+        } else {
+            go = 0;
+        }
+    }
+    go = 1;
+    while b > a && go == 1 {
+        if load8(t, b - 1) == 124 {
+            b = b - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return pk16(a, b);
+}
+
+/// 在 [a,b) 里按**未转义**的 '|' 切; 每格写 (start,end) 进 cells; 返回格数。
+fn split_cells(t: ptr, a: u32, b: u32, cells: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = a;
+    let cur: u32 = a;
+    while i < b {
+        if load8(t, i) == 124 && (i == a || load8(t, i - 1) != 92) {
+            store32(cells, n * 8, cur);
+            store32(cells, n * 8 + 4, i);
+            n = n + 1;
+            cur = i + 1;
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    store32(cells, n * 8, cur);
+    store32(cells, n * 8 + 4, b);
+    return n + 1;
+}
+
+// ---------------------------------------------------------------- 收集
+
+
+/// 解析里程碑行, 结果写进 rows (每行 32 字节); 返回行数。
+fn parse_rows(t: ptr, n: u32, rows: ptr, cells: ptr) -> u32 {
+    let i: u32 = 0;
+    let cnt: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let sk: u64 = strip_line(t, i, le);
+        let a: u32 = hi32(sk);
+        let b: u32 = lo32(sk);
+        if a < b {
+            let nc: u32 = split_cells(t, a, b, cells);
+            let ia: u32 = trim_a(t, load32(cells, 0), load32(cells, 4));
+            let ib: u32 = trim_b(t, ia, load32(cells, 4));
+            let ok: u32 = 0;
+            if ib - ia >= 2 && load8(t, ia) == 77 {
+                let j: u32 = ia + 1;
+                let alld: u32 = 1;
+                while j < ib {
+                    if is_digit(load8(t, j)) == 0 {
+                        alld = 0;
+                    }
+                    j = j + 1;
+                }
+                ok = alld;
+            }
+            if ok == 1 {
+                let na: u32 = 0;
+                let nb: u32 = 0;
+                let ca: u32 = 0;
+                let cb: u32 = 0;
+                let sa: u32 = 0;
+                let sb: u32 = 0;
+                if nc >= 2 {
+                    na = trim_a(t, load32(cells, 8), load32(cells, 12));
+                    nb = trim_b(t, na, load32(cells, 12));
+                }
+                if nc >= 3 {
+                    ca = trim_a(t, load32(cells, 16), load32(cells, 20));
+                    cb = trim_b(t, ca, load32(cells, 20));
+                }
+                if nc >= 4 {
+                    sa = trim_a(t, load32(cells, 24), load32(cells, 28));
+                    sb = trim_b(t, sa, load32(cells, 28));
+                }
+                let rb: u32 = cnt * 32;
+                store32(rows, rb + R_ID_O, ia);
+                store32(rows, rb + R_ID_L, ib - ia);
+                store32(rows, rb + R_NAME_O, na);
+                store32(rows, rb + R_NAME_L, nb - na);
+                store32(rows, rb + R_CRIT_O, ca);
+                store32(rows, rb + R_CRIT_L, cb - ca);
+                store32(rows, rb + R_ST_O, sa);
+                store32(rows, rb + R_ST_L, sb - sa);
+                cnt = cnt + 1;
+            }
+        }
+        i = le + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 生成
+
+fn seq_end(out: ptr, o: u32) -> u32 {
+    let b: u32 = o;
+    let go: u32 = 1;
+    while b > 0 && go == 1 {
+        let c: u32 = load8(out, b - 1);
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            b = b - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return p1(b, out, 10);
+}
+
+fn row_cls(t: ptr, rows: ptr, i: u32) -> u32 {
+    let rb: u32 = i * 32;
+    let so: u32 = load32(rows, rb + R_ST_O);
+    return classify(t, so, so + load32(rows, rb + R_ST_L));
+}
+
+fn pfield(k: u32, out: ptr, t: ptr, rows: ptr, i: u32, fo: u32, fl: u32) -> u32 {
+    let rb: u32 = i * 32;
+    let a: u32 = load32(rows, rb + fo);
+    return pcell(k, out, t, a, a + load32(rows, rb + fl));
+}
+
+fn build(t: ptr, rows: ptr, nrows: u32, out: ptr) -> u32 {
+    let c1: u32 = 0;
+    let c2: u32 = 0;
+    let c3: u32 = 0;
+    let c4: u32 = 0;
+    let i: u32 = 0;
+    while i < nrows {
+        let k: u32 = row_cls(t, rows, i);
+        if k == 1 {
+            c1 = c1 + 1;
+        }
+        if k == 2 {
+            c2 = c2 + 1;
+        }
+        if k == 3 {
+            c3 = c3 + 1;
+        }
+        if k == 4 {
+            c4 = c4 + 1;
+        }
+        i = i + 1;
+    }
+    let k: u32 = 0;
+    k = pstr(k, out, "# 154 · Loment 100 里程碑状态矩阵");
+    k = pend(k, out);
+    k = pend(k, out);
+    k = pstr(k, out, "> 由 `tools/loment_status.py` 从 docs/145 生成 —— 请勿手改。");
+    k = pend(k, out);
+    k = pstr(k, out, "> 计数口径：`完成` = ✅；`部分` = ✅ 部分；`未达` = ⚠️；其余按未开始。");
+    k = pend(k, out);
+    k = pend(k, out);
+    k = pstr(k, out, "- 完成 **");
+    k = pdec(k, out, c2);
+    k = pstr(k, out, "/100** · 部分 **");
+    k = pdec(k, out, c1);
+    k = pstr(k, out, "** · 未达 **");
+    k = pdec(k, out, c3);
+    k = pstr(k, out, "** · 未开始 **");
+    k = pdec(k, out, c4);
+    k = pstr(k, out, "**");
+    k = pend(k, out);
+    k = pend(k, out);
+    k = pstr(k, out, "| 里程碑 | 名称 | 判据 | 状态 | 归类 |");
+    k = pend(k, out);
+    k = pstr(k, out, "|---|---|---|---|---|");
+    k = pend(k, out);
+    i = 0;
+    while i < nrows {
+        k = pstr(k, out, "| ");
+        k = pfield(k, out, t, rows, i, R_ID_O, R_ID_L);
+        k = pstr(k, out, " | ");
+        k = pfield(k, out, t, rows, i, R_NAME_O, R_NAME_L);
+        k = pstr(k, out, " | ");
+        k = pfield(k, out, t, rows, i, R_CRIT_O, R_CRIT_L);
+        k = pstr(k, out, " | ");
+        k = pfield(k, out, t, rows, i, R_ST_O, R_ST_L);
+        k = pstr(k, out, " | ");
+        k = pstr(k, out, cls_str(row_cls(t, rows, i)));
+        k = pstr(k, out, " |");
+        k = pend(k, out);
+        i = i + 1;
+    }
+    k = pend(k, out);
+    k = pstr(k, out, "## 剩余工作（按依赖）");
+    k = pend(k, out);
+    k = pend(k, out);
+    i = 0;
+    while i < nrows {
+        if row_cls(t, rows, i) != 2 {
+            k = pstr(k, out, "- **");
+            k = pfield(k, out, t, rows, i, R_ID_O, R_ID_L);
+            k = pstr(k, out, "** ");
+            k = pfield(k, out, t, rows, i, R_NAME_O, R_NAME_L);
+            k = pstr(k, out, " —— ");
+            k = pfield(k, out, t, rows, i, R_ST_O, R_ST_L);
+            k = pend(k, out);
+        }
+        i = i + 1;
+    }
+    return seq_end(out, k);
+}
+
+// ---------------------------------------------------------------- 驱动
+
+fn wdec(fd: u64, tmp: ptr, v: u32) -> u64 {
+    if v == 0 {
+        store8(tmp, 0, 48 as u8);
+        return write_all(fd, tmp, 1);
+    }
+    let d: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        let dg: u32 = x % 10;
+        store8(tmp, d, (48 + dg) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let buf: ptr = ptr_add(tmp, 32);
+    let q: u32 = 0;
+    while q < d {
+        store8(buf, q, load8(tmp, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return write_all(fd, buf, d as u64);
+}
+
+/// 在 [0,n) 里找字节串 pat, 返回它**之后**的位置 (找不到返回 0)。
+fn find_after(p: ptr, n: u32, pat: str) -> u32 {
+    let L: u32 = str_len(pat);
+    let i: u32 = 0;
+    let hit: u32 = 0;
+    while i + L <= n && hit == 0 {
+        let k: u32 = 0;
+        let ok: u32 = 1;
+        while k < L {
+            if load8(p, i + k) != load8(str_ptr(pat), k) {
+                ok = 0;
+            }
+            k = k + 1;
+        }
+        if ok == 1 {
+            hit = i + L;
+        }
+        i = i + 1;
+    }
+    return hit;
+}
+
+fn same_bytes(a: ptr, b: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn flag_eq(buf: ptr, o: u32, l: u32, s: str) -> u32 {
+    return span_eq2(buf, o, o + l, s);
+}
+
+fn _start() -> u32 {
+    let mem: ptr = sys_alloc(ARENA) as ptr;
+    if mem as u64 == 0 {
+        wstr(2, "[ERR] brk 失败\n");
+        return 2;
+    }
+    let rc: u32 = run(mem);
+    return die(rc as u64);
+}
+
+fn run(mem: ptr) -> u32 {
+    let ab: ptr = ptr_add(mem, M_ARGV);
+    let inb: ptr = ptr_add(mem, M_IN);
+    let outb: ptr = ptr_add(mem, M_OUT);
+    let curb: ptr = ptr_add(mem, M_CUR);
+    let rows: ptr = ptr_add(mem, M_ROW);
+    let cells: ptr = ptr_add(mem, M_CELL);
+    let tmp: ptr = ptr_add(mem, M_CELL + 128);
+
+    // 参数: --emit / --check
+    let emit_f: u32 = 0;
+    let n: u32 = 1;
+    let ax: u64 = argv_n(ab, 8192, n);
+    while ax != 0 {
+        let oo: u32 = hi32(ax);
+        let ol: u32 = lo32(ax);
+        if flag_eq(ab, oo, ol, "--emit") == 1 {
+            emit_f = 1;
+        }
+        n = n + 1;
+        ax = argv_n(ab, 8192, n);
+    }
+
+    // 读 docs/145
+    let fd: i64 = open_ro(cstr(ptr_add(inb, IN_CAP - 256), "docs/145-loment-100-milestones.md"));
+    if fd < 0 {
+        wstr(2, "[ERR] 读不到 docs/145\n");
+        return 2;
+    }
+    let ln: u64 = read_all(fd as u64, inb, IN_CAP as u64);
+    syscall4(3, fd as u64, 0, 0);
+
+    let nrows: u32 = parse_rows(inb, ln as u32, rows, cells);
+    if nrows != 100 {
+        wstr(2, "[ERR] docs/145 里程碑行数 ");
+        wdec(2, tmp, nrows);
+        wstr(2, " != 100\n");
+        return 2;
+    }
+    let olen: u32 = build(inb, rows, nrows, outb);
+
+    if emit_f == 1 {
+        let ofd: i64 = open_wo(cstr(ptr_add(inb, IN_CAP - 256), "docs/154-loment-status.md"));
+        if ofd < 0 {
+            wstr(2, "[ERR] 写不了 docs/154\n");
+            return 2;
+        }
+        write_all(ofd as u64, outb, olen as u64);
+        syscall4(3, ofd as u64, 0, 0);
+        wstr(1, "[OK] docs/154-loment-status.md: ");
+        let pos: u32 = find_after(outb, olen, "\n- ");
+        let e: u32 = pos;
+        while e < olen && load8(outb, e) != 10 {
+            e = e + 1;
+        }
+        write_all(1, ptr_add(outb, pos), (e - pos) as u64);
+        wstr(1, "\n");
+        return 0;
+    }
+
+    // check (--check 或无参数)
+    let cfd: i64 = open_ro(cstr(ptr_add(inb, IN_CAP - 256), "docs/154-loment-status.md"));
+    let cln: u64 = 0;
+    if cfd >= 0 {
+        cln = read_all(cfd as u64, curb, CUR_CAP as u64);
+        syscall4(3, cfd as u64, 0, 0);
+    }
+    if cln == olen as u64 && cln > 0 && same_bytes(curb, outb, olen) == 1 {
+        wstr(1, "[OK] 状态矩阵与 docs/145 一致\n");
+        return 0;
+    }
+    wstr(1, "[DIFF] docs/154-loment-status.md 与 docs/145 不一致\n");
+    return 1;
+}
