@@ -531,7 +531,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.md",
-   "sha256": "6a48961b3818370af564ad2306aadba02bc6e52afc5c49e6a0b8ca2168d56bc0"
+   "sha256": "5cae4e2ec45687ac6995d359b2144dc55cbeedbe3fbdde81aad6a8edb1d97b2c"
   },
   {
    "path": "docs/151-loment-ecosystem.md",
@@ -567,7 +567,7 @@
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "050346d4985b9c4cd1a807fcd1be4cfcf717a388c762fc400fbff3df2c28a845"
+   "sha256": "4135ab2318666c66e8c3f83f5aa5c57ffef34c6e6764b5287bed4e52e3c1771c"
   },
   {
    "path": "docs/161-loment-checkout-eol.md",
@@ -587,7 +587,7 @@
   },
   {
    "path": "docs/166-loment-014-release.md",
-   "sha256": "1664fef06c6b1f85de5c06af1870b91763f6a92e33b3188790790367b39f70ed"
+   "sha256": "cee63ece3cdc893570ad4f8cdfa79d2fb50c3d2ddaf1ade13bead3eb76a3bd9b"
   },
   {
    "path": "docs/manual/index.md",
