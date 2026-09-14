@@ -40,8 +40,8 @@ OUT = ROOT / "loment" / "dist"
 STAGE = ROOT / "loment" / "build" / "dist"
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 
-DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.3.4 Alpha
-VER = loment_release.RELEASE                # 机器: 0.1.3.4-alpha
+DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Alpha
+VER = loment_release.RELEASE                # 机器: 0.1.4-alpha
 
 #: 包里的工具 -> 入口源文件。名字就是安装后的可执行名。
 TOOLS: list[tuple[str, str]] = [

@@ -1,5 +1,5 @@
 {
- "release": "0.1.3.4-alpha",
+ "release": "0.1.4-alpha",
  "files": [
   {
    "path": "tools/lomc.py",
@@ -103,11 +103,11 @@
   },
   {
    "path": "tools/loment_manual.py",
-   "sha256": "05481c5f72d46345e310ba7a4751385dd6d6bf4ce3e5d4959eac0e566ac8d6b2"
+   "sha256": "e1d7296bee027ed178bcf7e398cf176381a4da67de4e55d134e95458607a76a2"
   },
   {
    "path": "tools/ci.py",
-   "sha256": "61193e1156544e74042de7e6465617b27f81c7068ec3748a8d0989fbc6fe58d9"
+   "sha256": "fabf922758beec3ec21e9b4c0789aa6ae8b78dbb989e45cfff34ad8958dccf36"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -143,7 +143,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "49337b3837c9d003aefcfc8226802ef13bbf043b543b1eea7aab3909b92e72d2"
+   "sha256": "24fe0b48017420fbf7fee418db9df2d307632d08a3bafe06818052560770c6cf"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -203,7 +203,7 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "98b8260c397fa677885ff8d51f9dff29b779d790f747582b05151f5c31322f01"
+   "sha256": "9b564f16cd02b15767f6d834e8a4694c1c2ecb0156bf2a86d037da939c872fac"
   },
   {
    "path": "tools/loment_dist_test.py",
@@ -499,7 +499,7 @@
   },
   {
    "path": "docs/145-loment-100-milestones.md",
-   "sha256": "17a2c61721c35302f5ecedb02193c67c138cbed849b635aca9f816b329ba0f3d"
+   "sha256": "35ab6e127eaf8f4dfefb51edbcffb71d78100c87088a1f3244cdde2faed79ca6"
   },
   {
    "path": "docs/145-parallel-development-foundation.md",
@@ -535,15 +535,15 @@
   },
   {
    "path": "docs/151-loment-ecosystem.md",
-   "sha256": "79516faccc80cc441de5cde78a847f9e0fa6a6e32d762a6e670829b0df4064e7"
+   "sha256": "1086f1eb17a562e9919376e479167029bbee689d755c417519a835d2fd4a0cc5"
   },
   {
    "path": "docs/152-loment-papers.md",
-   "sha256": "7eb605416469e024d58a3732cc10d531f88cb16c02321d9e51e8d4026062fd3a"
+   "sha256": "c501cd079d054d0f79f06343d193e27924c4923f0d029e668de8cf3f17400673"
   },
   {
    "path": "docs/154-loment-status.md",
-   "sha256": "dcdf3a29d64e5e39140ecbf0b318e8fb32aba2a41a7e3a2811163b5c517855fd"
+   "sha256": "2bbd4924db081033633bc426960ab320a52faf557e0b22c3ecbb044a9359e488"
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
@@ -559,7 +559,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "ea49e402d3b4b2ef2fddbdcf75e29878d0d97a016f8a28032de1b5aa041c6290"
+   "sha256": "004babd06a9642c2bdf6c6a0330216aa8c2ce0b1a085d13b6b6bb1960bd68648"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -567,7 +567,7 @@
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "75459d39f62891850e23ff742853818550cf76a7677db5e7add6ce212de789c9"
+   "sha256": "050346d4985b9c4cd1a807fcd1be4cfcf717a388c762fc400fbff3df2c28a845"
   },
   {
    "path": "docs/161-loment-checkout-eol.md",
@@ -575,7 +575,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "8803a6b7f5706563bd990a824db4a9518dc017ecfb66e34537efd49857d21fa3"
+   "sha256": "4e94c9311616050de3eeb543d6f308a9620a0f858abcbd05f7449fee2ff695ca"
   },
   {
    "path": "docs/163-loment-signing.md",
@@ -586,8 +586,12 @@
    "sha256": "1a4ac60146f8a8b6b8f0573edd36269c0800b1a977c59c34132851cfffafbe71"
   },
   {
+   "path": "docs/166-loment-014-release.md",
+   "sha256": "908fce1ca124342fbbec8524894026575f552d9f7eaf49f0dae4cffb2c2db73a"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "b6b8cbdaba47603cc703936a0b85bcc0bc8709a325035d0b0d0052227a53f72c"
+   "sha256": "b2493423aa6ec8d1b7097a468b9c9e027e22fabeed93fbe36d10149479b58b82"
   },
   {
    "path": "docs/manual/api/ahci.md",

@@ -1,6 +1,6 @@
 # 162 · Loment 发行包：命令安装与安装包安装
 
-> 版本 `0.1.3.4-alpha`（显示名 **Loment 0.1.3.4 Alpha**）· 构建器 `tools/loment_dist.py`
+> 版本 `0.1.4-alpha`（显示名 **Loment 0.1.4 Alpha**）· 构建器 `tools/loment_dist.py`
 > · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
@@ -14,9 +14,9 @@
 
 | 文件 | 装法 | 说明 |
 |---|---|---|
-| `loment-0.1.3.4-alpha-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
-| `loment-0.1.3.4-alpha-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
-| `loment-0.1.3.4-alpha-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
+| `loment-0.1.4-alpha-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
+| `loment-0.1.4-alpha-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
+| `loment-0.1.4-alpha-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
 | `SHA256SUMS` | — | 上面三件的 sha256 |
 
 **两个归档是确定性字节**：zip 固定时间戳（`1980-01-01`）+ 目录项排序 + unix 权限位，
@@ -34,7 +34,7 @@ tar.gz 的 `mtime=0` + 稳定 uid/gid/uname、gzip 头不带时间。同输入�
 | `bin/loment-doc` | API 文档生成器 |
 | `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`） |
 | `share/loment/seed.ll` | 自举种子 —— 只用 clang 就能从它重建整套工具链 |
-| `share/loment/version` | `Loment 0.1.3.4 Alpha (0.1.3.4-alpha)` + 提交号与提交日期 |
+| `share/loment/version` | `Loment 0.1.4 Alpha (0.1.4-alpha)` + 提交号与提交日期 |
 | `share/loment/examples/user_hello.lomt` | 示例（用 syscall 打印） |
 | `SHA256SUMS` | **随包**校验和，安装脚本第一步就校它 |
 

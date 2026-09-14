@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # loment_audit.py — 审计包 (M100, docs/160)
 #
-# 给**第三方**复核对 Loment 0.1.3.4 Alpha 的主张: 一条命令跑完全部判据, 打印/落盘一份
+# 给**第三方**复核对 Loment 0.1.4 Alpha 的主张: 一条命令跑完全部判据, 打印/落盘一份
 # 可附在审计报告后的证据 (含版本、提交、工件哈希、每条主张的结果)。
 #
 #   python tools/loment_audit.py            # 跑全部, 人类可读
@@ -40,7 +40,7 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_p8_test", []),
     ("C3", "参考实现自身的 91 条判据 (含 Rust/IR/原生后端形状)",
      "lomentc_test", []),
-    ("C4", "工具侧: 诊断分类完整 / 内建表一致 / 增量缓存等 15 条",
+    ("C4", "工具侧: 诊断分类完整 / 内建表一致 / 增量缓存 / DWARF 变量信息等 18 条",
      "loment_tools_test", []),
     ("C5", "无 Python 自举: 种子与参考逐字符一致 + 启动脚本无解释器 + 定点",
      "loment_seed_test", []),
@@ -187,11 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         "seconds": round(time.time() - t0, 1),
         "non_claims": [
             "冻结面内判据都是**自证**的: 两个实现由同一作者编写, 本报告不等于外部确认",
-            "三处刻意保守偏离: 类型未知时 checker 可能少报 (docs/158 §4)",
-            "同名 let 双 alloca: 两个后端在该写法上语义不同 (docs/158 §4)",
+            "三处刻意保守偏离: 类型未知时 checker 可能少报 (方向保守, 不假阳性) (docs/158 §4)",
+            "同名 let 双 alloca: 同一函数里重复声明同名变量时两个后端语义不同 (docs/158 §4)",
             "自举驱动整条链没有 parser: 解析期错误只有参考实现能报 (docs/158 §4)",
             "aarch64 只验证到发射 (无 qemu-user/无真机执行) (docs/158 §4)",
-            "自举性能 12.8s (参考 1.2s); 无 DWARF 变量信息; 工具链仍有 Python 成分",
+            "自举性能 12.8s (参考 1.2s); DWARF 变量信息的位置求值要完整调试器 (docs/150 M82)",
+            "L0 版 lomc 不替 --emit-* 建父目录; 不复刻词法层非法字符/未闭合注释报错 (docs/160 §2.7)",
+            "自举 checker 对**关键字当标识符**有一处假阳性 (仍开放) (docs/150 M81 后置修订)",
+            "自举 codegen 的 as 取型缺口: `(a + b as T) as U` 发非法 IR (仍开放) (docs/150 M82 后置修订)",
             "Mimosa 扫描器未给出完整结论 (scanner_enobufs) —— 不宣称项目安全",
         ],
     }

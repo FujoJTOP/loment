@@ -60,7 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args(argv)
     files = build()
-    if a.check:
+    # 无参数 = 门禁模式 (与 loment_release / loment_status 同一约定: ci.py 的静态
+    # 门禁按 `main()` 无参调用)。原先无参直接 rc=2, 于是它**从来没进过 CI** ——
+    # 结果手册的编译器版本戳漂了整整一版没人抓到 (2026-09-13)。
+    if a.check or not (a.emit):
         base = ROOT / "docs" / "manual"
         bad = 0
         for rel, text in files.items():
@@ -81,8 +84,6 @@ def main(argv: list[str] | None = None) -> int:
                 f.write(text)
         print(f"[OK] {len(files)} 个文件 -> {base}")
         return 0
-    print("[ERR] 需要 --emit 或 --check", file=sys.stderr)
-    return 2
 
 
 if __name__ == "__main__":

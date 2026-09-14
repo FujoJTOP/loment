@@ -1,7 +1,7 @@
 # 158 · Loment L1 冻结面（M96）
 
-> 版本：`L1 0.1.3.4-alpha`（显示名 `Loment 0.1.3.4 Alpha`；`loment/build/release-manifest.json`
-> 的 `release` 字段由 `tools/loment_release.py:RELEASE` 单一真源给出）；对外 tag `v0.1.3.4-alpha`
+> 版本：`L1 0.1.4-alpha`（显示名 `Loment 0.1.4 Alpha`；`loment/build/release-manifest.json`
+> 的 `release` 字段由 `tools/loment_release.py:RELEASE` 单一真源给出）；对外 tag `v0.1.4-alpha`
 > 判据（docs/145 M96）：**冻结意味着"改动要付代价"** —— 任何触及冻结面的改动都必须
 > 同时改规范、改一致性套件、两个实现同一次提交改完，并走 §5 的流程。
 > 本文只写"冻结了什么"和"怎么改"，不重复语法细节（那在 `docs/manual/` 与
@@ -71,13 +71,13 @@
 4. **过静态门禁**：`python tools/ci.py --static-only` 里的 L0/L1 门禁全绿；
    若触及内核线按名解析的符号（§2 那一条），必须先走 docs/155 的交接约定。
 
-## 6. 一致性套件（"0.1.3.4 Alpha"指的就是这套东西全绿）
+## 6. 一致性套件（"0.1.4 Alpha"指的就是这套东西全绿）
 
 ```bash
 python tools/loment_rule_parity.py    # 63/63 等价 + 假阳性/漂移 0 (棘轮预算 63)
 python tools/loment_p8_test.py        # 16/16: 40/40 零诊断 + 40/40 逐字节 + 定点 + 4 条闸门
 python tools/lomentc_test.py          # 参考实现 91/91 (含其 API 形状断言)
-python tools/loment_tools_test.py     # 15/15: 诊断分类/内建表/增量缓存…
+python tools/loment_tools_test.py     # 18/18: 诊断分类/内建表/增量缓存…
 python tools/loment_ir_diff.py --all  # 40 个目标逐字节一致 (定位工具)
 python tools/loment_status.py --check # 状态矩阵与 docs/145 一致
 python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由它打印)

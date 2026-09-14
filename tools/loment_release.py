@@ -19,9 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 版本名的**唯一真源** (2026-09-12 由 `loment-1.0-pre` 改名): 机器可读的标识符用连字符形式,
-# 人读的显示名是 `0.1.3.4 Alpha`; 对外 tag = `v0.1.3.4-alpha` (git ref 不许带空格)。
-RELEASE = "0.1.3.4-alpha"
-RELEASE_NAME = "0.1.3.4 Alpha"  # 人读显示名 (发行包/文档用同一个真源)
+# 人读的显示名是 `0.1.4 Alpha`; 对外 tag = `v0.1.4-alpha` (git ref 不许带空格)。
+# 2026-09-13 由 0.1.3.4-alpha 升到 0.1.4-alpha: 去 Python 收口 (lompkg + L0 生成器 lomc)。
+RELEASE = "0.1.4-alpha"
+RELEASE_NAME = "0.1.4 Alpha"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
