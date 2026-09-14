@@ -72,6 +72,10 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C18", "L0 生成器去 Python: Loment 版 lomc 的四个后端与 Python 版**逐字节相同** "
             "(12 份发射 + --emit 落盘 + --check 对账/漂移 + 错误码)",
      "loment_lomc_test", []),
+    ("C19", "原生 ELF 后端: tools/lomelf.py 把 IR 直接编成 x86-64 ELF (不经 clang), "
+            "与 clang 链的产物**行为逐值一致** (stdout 字节 + 退出码); 种子 -> stage1 -> IR "
+            "-> 原生产物全程无 clang",
+     "loment_elf_test", []),
 ]
 
 

@@ -107,7 +107,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "fabf922758beec3ec21e9b4c0789aa6ae8b78dbb989e45cfff34ad8958dccf36"
+   "sha256": "cb0251b67f27d6f00835be8c50b0a481e8c5c18eb1a6f855344a7bc8ad8b29f7"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -143,7 +143,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "24fe0b48017420fbf7fee418db9df2d307632d08a3bafe06818052560770c6cf"
+   "sha256": "91916316a997eda3601b72ff8851b877757ee4bdf87e0dd1727eafb7248a50c1"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -152,6 +152,14 @@
   {
    "path": "tools/loment_json_test.py",
    "sha256": "79559218598b916d5785bab08b936ae5518af53479d647c2054717b188e833cf"
+  },
+  {
+   "path": "tools/lomelf.py",
+   "sha256": "ee8e40307a493f59760c2e6115976c9a1990ad50b686b079d6a33d7cf3cf7810"
+  },
+  {
+   "path": "tools/loment_elf_test.py",
+   "sha256": "4ea21fbc7bf997e76ad1533b89182614c7e17b5bf2c960106f11d6dade45b18f"
   },
   {
    "path": "tools/loment_pkg_test.py",
