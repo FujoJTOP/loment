@@ -32,7 +32,8 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 但 `lom/*.lom`（L0 接口层）**不是实现**，它是**别的线要依赖的契约**：
 
 - `FujoOS-compat` 的内核侧已经在依赖它：内容信任台账的原语
-  `ledger = 33562`（`0x831A`）就登记在 `lom/fuai.lom` 里，由
+  `qual_feed = 33556`（`0x8314`）/ `qual_seq = 33557`（`0x8315`）与准入闸
+  `dom_admit = 33555`（`0x8313`）就登记在 `lom/fuai.lom` 里，由
   `lom_spec_emit.py` 生成两份 `spec.json`，并被 `fuai_contract` 门禁逐条核对；
 - 事实依据：**`lom/fuai.lom` 自 2026-09-09 建立后从未改动**，而同期编译器改了 9 次 ——
   这条"接口稳、实现动"的分界是当前跨线协作唯一的支点。
