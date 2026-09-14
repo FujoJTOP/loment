@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（4/4，审计主张 **C19**）
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（5/5，审计主张 **C19 / C20**）
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -49,7 +49,7 @@ python tools/lomelf.py in.ll --check     # 只解析与降级，不落盘
 ## 3. 判据
 
 ```bash
-python tools/loment_elf_test.py     # 4/4
+python tools/loment_elf_test.py     # 5/5
 ```
 
 | 用例 | 判据 | 结果 |
@@ -58,6 +58,7 @@ python tools/loment_elf_test.py     # 4/4
 | `test_lomelf_reports_unsupported_instead_of_miscompiling` | 聚合返回值 / 间接调用 / 没有 `_start` 三类输入**必须报错**，不许静默编出错的 ELF | 3/3 报错 |
 | `test_lomelf_cli_check_and_usage` | `--check` 不落盘且 rc=0；无参数 rc=2 | ✅ |
 | `test_lomelf_compiles_selfhost_ir_without_clang` | **主线**：种子 →(clang 一次)→ stage1 → 发 IR → lomelf 编成 ELF → 跑出 `M67 RESULT: PASS loment-user` | ✅ |
+| `test_lomelf_selfhost_matches_reference` | **自举镜像**：`loment/tools/lomelf.lomt`（走种子自举链）对四个语料产出的 ELF 与参考**逐字节相同** | 4/4 |
 
 语料（只放**会终止**的 `_start` 程序）：
 
@@ -90,10 +91,12 @@ stage1"那一步出现（见 §5）。
 
 ## 5. 还没做的（这一步只吃了一格）
 
-1. **自举侧的镜像尚未落地**。本文件落地的是**参考实现**（Python）。按仓库既有纪律
-   （"同一份源码喂两个实现、比字节"，docs/159 §4b），`loment/tools/lomelf.lomt` 还没写。
-   在它落地之前，"脱离 clang"只对**参考路径**成立 —— 自举链编译出来的工具链仍然依赖 clang
-   生成 ELF。这一条是下一步，不要提前宣称。
+1. ~~自举侧的镜像尚未落地~~ **已落地**。`loment/tools/lomelf.lomt` 走种子自举链编成二进制后，
+   对四个语料程序（user_hello / bootprobe / selfcheck / all_loment）产出的 ELF 与参考实现
+   **逐字节相同**（8240 / 8296 / 12392 B…），且产物跑出来的输出与 clang 路一致
+   （判据 `loment_elf_test` 的 `test_lomelf_selfhost_matches_reference`，审计主张 **C20**）。
+   也就是说：**编译一个 Loment 程序从发 IR 到出 ELF，全程不需要 clang** ——
+   clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）**。复用本文的代码生成，换 object 写出与调用约定；
    `loment_dist.py` 的 Windows 装法从"拷进 WSL + `wsl -e` 转发"改成装原生 `loment.exe`。
 3. **构建/发布路径去 Python**（`lom_spec_emit` / `loment_status` / `loment_release` /
@@ -107,7 +110,7 @@ stage1"那一步出现（见 §5）。
 
 - 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test`；审计主张 **C19**。
 - 工件清单：`tools/lomelf.py`、`tools/loment_elf_test.py` 已进 `loment_release.py` 的 `GLOBS`
-  （清单 176 个工件，`--check` 176/176）。
+  （清单 178 个工件，`--check` 178/178）。
 - **不改** L0（`lom/*.lom`）、不改 `codegen.lomt`/`driver.lomt`、不改两后端既有的逐字节等价
   （docs/158 §2）—— 新增的是**第三个后端**，不是在既有后端上动刀。
 
@@ -119,10 +122,20 @@ python tools/loment_elf_test.py
   PASS  test_lomelf_reports_unsupported_instead_of_miscompiling   # 3 类输入报错
   PASS  test_lomelf_cli_check_and_usage               # --check 不落盘 rc=0 · 无参数 rc=2
   PASS  test_lomelf_compiles_selfhost_ir_without_clang # 种子->stage1->IR->原生产物->M67 PASS
+  PASS  test_lomelf_selfhost_matches_reference        # 4 个程序: 自举镜像与参考逐字节相同
 
 python tools/loment_audit.py --json
-  [PASS] C19 原生 ELF 后端: ... loment_elf_test: 4/4 通过
+  [PASS] C19 原生 ELF 后端: ... loment_elf_test: 5/5 通过
+  [PASS] C20 自举侧镜像: ... 4 个语料逐字节相同
 ```
 
-规模：`tools/lomelf.py` **1177 行**；`tools/loment_elf_test.py` 238 行。
-产物示例：`user_hello` 的 IR 1581 B → 原生 ELF 8221 B（text 714 B / data 32 B / bss 0）。
+规模：`tools/lomelf.py` **1177 行**（参考）；`loment/tools/lomelf.lomt` **约 2700 行**（自举镜像，
+规模：`tools/lomelf.py` **1177 行**（参考）；`loment/tools/lomelf.lomt` **约 2700 行**（自举镜像）；
+`tools/loment_elf_test.py` 约 300 行。
+
+**自举链的容量闸门**（写镜像时撞到的，逐条记）：自举 codegen 的**形参上限是 10**
+（`loment/selfhost/codegen.lomt` 的表按 10 槽定）—— 超过会让 stage1 直接 SIGILL，
+现象是"编译这个文件时编译器自己崩了"，而参考实现编同一份文件完全正常。镜像里
+`do_div`/`do_shift` 因此把 `oplen/signed/is_rem` 打包成一个参数。
+产物示例：`user_hello` 的 IR 1581 B → 原生 ELF 8224 B（text 714 B / data 32 B / bss 0）。
+自举镜像产物与参考逐字节相同：user_hello 8224 B · bootprobe 8240 B · selfcheck 8296 B · all_loment 12392 B。

@@ -50,6 +50,13 @@ const C_VLLEN: u32 = 44;
 const C_DESTO: u32 = 48;
 const C_DESTL: u32 = 52;
 const C_RETL: u32 = 56;
+const C_NPHI: u32 = 60;
+const C_CURBO: u32 = 64;           // 当前基本块名 (phi 前驱匹配用)
+const C_CURBL: u32 = 68;
+const C_FNO: u32 = 72;             // 当前函数名
+const C_FNL: u32 = 76;
+const C_CC: u32 = 80;
+const C_CSS: u32 = 84;
 
 // 表起址 (相对 M_TAB); 格区 256 字节
 const TB_G: u32 = 256;             // 全局表 stride 32 × 256
@@ -62,29 +69,39 @@ const G_DOFF: u32 = 20;
 const G_ADDR: u32 = 24;
 const G_ZERO: u32 = 28;
 
-const TB_LBL: u32 = 8448;          // 标签表 stride 16 × 4096
+const TB_LBL: u32 = 8448;          // 标签表 stride 24 × 4096: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
+const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
+const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 73984;         // 回填表 stride 24 × 4096
+const TB_FIX: u32 = 106752;        // 回填表 stride 28 × 4096
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
 const F_NLEN: u32 = 12;
+const F_BOFF: u32 = 16;
+const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 172288;       // 槽表 stride 16 × 2048 (每函数清)
+const TB_SLOT: u32 = 221440;       // 槽表 stride 16 × 2048 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 205056;      // alloca 表 stride 16 × 1024 (每函数清)
+const TB_ALLOC: u32 = 254208;      // alloca 表 stride 16 × 1024 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 221440;        // 调用实参暂存 (每个 16 字节, 最多 16 个)
+const TB_ARG: u32 = 270592;        // 调用实参暂存 (每个 24 字节)
+
+const TB_PHI: u32 = 271104;        // phi 表 stride 16 × 512 (每函数清)
+const PH_BOFF: u32 = 0;            // 所属基本块名
+const PH_BLEN: u32 = 4;
+const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
+const PH_ILEN: u32 = 12;
 
 // ---------------------------------------------------------------- 常量
 
@@ -540,21 +557,24 @@ fn setcell(tab: ptr, off: u32, v: u32) {
     store32(tab, off, v);
 }
 
-fn lbl_add(tab: ptr, noff: u32, nlen: u32, addr: u32) {
+fn lbl_add(tab: ptr, noff: u32, nlen: u32, boff: u32, blen: u32, addr: u32) {
     let k: u32 = cell(tab, C_NLBL);
-    let base: u32 = TB_LBL + k * 16;
+    let base: u32 = TB_LBL + k * 24;
     store32(tab, base + L_NOFF, noff);
     store32(tab, base + L_NLEN, nlen);
     store32(tab, base + L_ADDR, addr);
+    store32(tab, base + L_BOFF, boff);
+    store32(tab, base + L_BLEN, blen);
     setcell(tab, C_NLBL, k + 1);
 }
 
-fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32 {
     let k: u32 = 0;
     let n: u32 = cell(tab, C_NLBL);
     while k < n {
-        let base: u32 = TB_LBL + k * 16;
-        if span_eq(t, load32(tab, base + L_NOFF), load32(tab, base + L_NLEN), noff, nlen) == 1 {
+        let base: u32 = TB_LBL + k * 24;
+        if span_eq(t, load32(tab, base + L_NOFF), load32(tab, base + L_NLEN), noff, nlen) == 1
+            && span_eq(t, load32(tab, base + L_BOFF), load32(tab, base + L_BLEN), boff, blen) == 1 {
             return load32(tab, base + L_ADDR);
         }
         k = k + 1;
@@ -562,13 +582,15 @@ fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
     return NO;
 }
 
-fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32) {
+fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32, boff: u32, blen: u32) {
     let k: u32 = cell(tab, C_NFIX);
-    let base: u32 = TB_FIX + k * 24;
+    let base: u32 = TB_FIX + k * 28;
     store32(tab, base + F_SITE, site);
     store32(tab, base + F_KIND, kind);
     store32(tab, base + F_NOFF, noff);
     store32(tab, base + F_NLEN, nlen);
+    store32(tab, base + F_BOFF, boff);
+    store32(tab, base + F_BLEN, blen);
     setcell(tab, C_NFIX, k + 1);
 }
 
@@ -734,6 +756,15 @@ fn em_imul_rr(out: ptr, c: u32, dst: u32, src: u32) -> u32 {
     return em_modrm3(out, d, dst, src);
 }
 
+/// 发一条 jcc, 立即数留空; 返回立即数的偏移 (调用方自己回填相对距离)。
+fn em_jcc_raw(out: ptr, c: u32, cond: u32) -> u32 {
+    let d: u32 = e1(out, c, 15);
+    d = e1(out, d, 128 + cond);
+    let at: u32 = d;
+    d = e4(out, d, 0);
+    return at;
+}
+
 fn em_push(out: ptr, c: u32, reg: u32) -> u32 {
     let d: u32 = em_rex(out, c, rex(0, 0, 0, reg));
     return e1(out, d, 80 + reg % 8);
@@ -781,7 +812,7 @@ fn em_zext64(out: ptr, c: u32, reg: u32, size: u32) -> u32 {
     if size == 4 {
         return em_mov_rr(out, c, reg, reg, 0);
     }
-    let d: u32 = em_rex(out, c, rex(1, reg, 0, reg));
+    let d: u32 = em_rex(out, c, rex(0, reg, 0, reg));
     d = e1(out, d, 15);
     if size == 2 {
         d = e1(out, d, 183);
@@ -819,13 +850,28 @@ fn em_copy(out: ptr, c: u32, dst: u32, src: u32, n: u32) -> u32 {
 
 fn em_call_lbl(out: ptr, c: u32, tab: ptr, noff: u32, nlen: u32) -> u32 {
     let d: u32 = e1(out, c, 232);
-    fix_add(tab, d, 0, noff, nlen);
+    fix_add(tab, d, 0, noff, nlen, 0, 0);
+    return e4(out, d, 0);
+}
+
+/// 跳到基本块 (名字 = 函数名 + 块名)。
+fn em_jmp_blk(out: ptr, c: u32, tab: ptr, fo: u32, fl: u32, bo: u32, bl: u32) -> u32 {
+    let d: u32 = e1(out, c, 233);
+    fix_add(tab, d, 0, fo, fl, bo, bl);
+    return e4(out, d, 0);
+}
+
+fn em_jcc_blk(out: ptr, c: u32, cond: u32, tab: ptr, fo: u32, fl: u32,
+              bo: u32, bl: u32) -> u32 {
+    let d: u32 = e1(out, c, 15);
+    d = e1(out, d, 128 + cond);
+    fix_add(tab, d, 0, fo, fl, bo, bl);
     return e4(out, d, 0);
 }
 
 fn em_mov_abs(out: ptr, c: u32, tab: ptr, reg: u32, noff: u32, nlen: u32) -> u32 {
     let d: u32 = em_mov_ri64(out, c, reg, 0);
-    fix_add(tab, d - 8, 1, noff, nlen);
+    fix_add(tab, d - 8, 1, noff, nlen, 0, 0);
     return d;
 }
 
@@ -995,7 +1041,86 @@ fn result_size(t: ptr, i: u32, n: u32) -> u32 {
         || lit_at(t, i, n, "inttoptr ") == 1 {
         return size_after_to(t, i, n);
     }
+    if lit_at(t, i, n, "icmp ") == 1 {
+        return 1;
+    }
+    if lit_at(t, i, n, "phi ") == 1 {
+        let ts: u64 = type_span(t, i + 4, n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
+    if lit_at(t, i, n, "atomicrmw ") == 1 {
+        let j: u32 = skip_sp(t, i + 10, n);
+        let j2: u32 = skip_sp(t, word_end(t, j, n), n);
+        let ts: u64 = type_span(t, j2, n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
+    if binop_ty(t, i, n, "add") == 1 || binop_ty(t, i, n, "sub") == 1
+        || binop_ty(t, i, n, "mul") == 1 || binop_ty(t, i, n, "and") == 1
+        || binop_ty(t, i, n, "or") == 1 || binop_ty(t, i, n, "xor") == 1
+        || binop_ty(t, i, n, "sdiv") == 1 || binop_ty(t, i, n, "udiv") == 1
+        || binop_ty(t, i, n, "srem") == 1 || binop_ty(t, i, n, "urem") == 1
+        || binop_ty(t, i, n, "shl") == 1 || binop_ty(t, i, n, "lshr") == 1
+        || binop_ty(t, i, n, "ashr") == 1 {
+        let ts: u64 = type_span(t, binop_ty_at(t, i, n), n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
     return 0;
+}
+
+/// 二元运算名的长度 (用于跳到类型); 不匹配返回 0。
+fn binop_ty_at(t: ptr, i: u32, n: u32) -> u32 {
+    if binop_ty(t, i, n, "add") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "sub") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "mul") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "and") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "xor") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "sdiv") == 1 {
+        return i + 5;
+    }
+    if binop_ty(t, i, n, "udiv") == 1 {
+        return i + 5;
+    }
+    if binop_ty(t, i, n, "srem") == 1 {
+        return i + 5;
+    }
+    if binop_ty(t, i, n, "urem") == 1 {
+        return i + 5;
+    }
+    if binop_ty(t, i, n, "shl") == 1 {
+        return i + 4;
+    }
+    if binop_ty(t, i, n, "lshr") == 1 {
+        return i + 5;
+    }
+    if binop_ty(t, i, n, "ashr") == 1 {
+        return i + 5;
+    }
+    return i + 3;
+}
+
+/// 匹配 "op " 前缀且后面不是别的单词字符。
+fn binop_ty(t: ptr, i: u32, n: u32, op: str) -> u32 {
+    let L: u32 = str_len(op);
+    if i + L >= n {
+        return 0;
+    }
+    if lit_at(t, i, n, op) == 0 {
+        return 0;
+    }
+    if load8(t, i + L) != 32 {
+        return 0;
+    }
+    return 1;
 }
 
 // ---------------------------------------------------------------- 全局收集
@@ -1148,7 +1273,7 @@ fn place_globals(tab: ptr, t: ptr) {
     i = 0;
     while i < n {
         let gbase: u32 = TB_G + i * 32;
-        lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN),
+        lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN), 0, 0,
                 load32(tab, gbase + G_ADDR));
         i = i + 1;
     }
@@ -1208,6 +1333,60 @@ fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32) -> u32 {
     }
     if lit_at(t, i, le, "insertvalue ") == 1 {
         return do_insert(tab, out, c, t, i + 12, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "icmp ") == 1 {
+        return do_icmp(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "phi ") == 1 {
+        return c;
+    }
+    if lit_at(t, i, le, "br") == 1 {
+        return do_br(tab, out, c, t, i, le);
+    }
+    if lit_at(t, i, le, "switch ") == 1 {
+        return do_switch(tab, out, c, t, i, le);
+    }
+    if lit_at(t, i, le, "atomicrmw ") == 1 {
+        return do_atomic(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if binop_ty(t, i, le, "add") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 4, 1);
+    }
+    if binop_ty(t, i, le, "sub") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 4, 41);
+    }
+    if binop_ty(t, i, le, "mul") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 4, 0);
+    }
+    if binop_ty(t, i, le, "and") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 4, 33);
+    }
+    if binop_ty(t, i, le, "xor") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 4, 49);
+    }
+    if binop_ty(t, i, le, "or") == 1 {
+        return do_alu(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 3, 9);
+    }
+    if binop_ty(t, i, le, "sdiv") == 1 {
+        return do_div(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 13);
+    }
+    if binop_ty(t, i, le, "udiv") == 1 {
+        return do_div(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 5);
+    }
+    if binop_ty(t, i, le, "srem") == 1 {
+        return do_div(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 29);
+    }
+    if binop_ty(t, i, le, "urem") == 1 {
+        return do_div(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 21);
+    }
+    if binop_ty(t, i, le, "shl") == 1 {
+        return do_shift(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 36);
+    }
+    if binop_ty(t, i, le, "lshr") == 1 {
+        return do_shift(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 45);
+    }
+    if binop_ty(t, i, le, "ashr") == 1 {
+        return do_shift(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 121);
     }
     if lit_at(t, i, le, "trunc ") == 1 || lit_at(t, i, le, "zext ") == 1
         || lit_at(t, i, le, "sext ") == 1 {
@@ -1292,23 +1471,38 @@ fn do_gep(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: 
         let vl: u32 = load32(tab, C_VLLEN);
         let to: u32 = load32(tab, C_TYOFF);
         let tl: u32 = load32(tab, C_TYLEN);
-        let step: u32 = 0;
-        if is_agg(t, cur_o, cur_l) == 1 {
-            if load8(t, cur_o) == 91 {
-                let es: u64 = arr_elem(t, cur_o, cur_l);
-                step = ty_size(t, hi32(es), lo32(es));
-                cur_o = hi32(es);
-                cur_l = lo32(es);
-            }
-        } else {
-            step = ty_size(t, cur_o, cur_l);
-        }
+        // 参考实现: 先无条件取下标值 (结构体那条也会发这一句)
         d = emit_get(tab, out, d, t, to, tl, vo, vl, RCX);
-        if step != 1 {
-            d = em_mov_ri32(out, d, RDX, step);
-            d = em_imul_rr(out, d, RCX, RDX);
+        if load8(t, cur_o) == 91 {
+            let es: u64 = arr_elem(t, cur_o, cur_l);
+            let step: u32 = ty_size(t, hi32(es), lo32(es));
+            cur_o = hi32(es);
+            cur_l = lo32(es);
+            if step != 1 {
+                d = em_mov_ri64(out, d, RDX, step as u64);
+                d = em_imul_rr(out, d, RCX, RDX);
+            }
+            d = em_alu_rr(out, d, 1, RAX, RCX);
+        } else {
+            if load8(t, cur_o) == 123 {
+                let nx2: u64 = num_at(t, vo, le);
+                let idx2: u32 = lo32(nx2);
+                let fo2: u32 = field_off(t, cur_o, cur_l, idx2);
+                if fo2 != 0 {
+                    d = em_alu_ri(out, d, ADD, RAX, fo2);
+                }
+                let fts2: u64 = field_ty(t, cur_o, cur_l, idx2);
+                cur_o = hi32(fts2);
+                cur_l = lo32(fts2);
+            } else {
+                let step2: u32 = ty_size(t, cur_o, cur_l);
+                if step2 != 1 {
+                    d = em_mov_ri64(out, d, RDX, step2 as u64);
+                    d = em_imul_rr(out, d, RCX, RDX);
+                }
+                d = em_alu_rr(out, d, 1, RAX, RCX);
+            }
         }
-        d = em_alu_rr(out, d, 1, RAX, RCX);
         k2 = skip_comma(t, ie, le);
     }
     return emit_put(tab, out, d, t, doff, dlen, RAX);
@@ -1709,11 +1903,46 @@ fn do_ret(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
 
 /// 本函数第一个 `{` 与末尾 `}` 之间的行区内, 规划帧 (槽 + alloca)。
 fn plan_frame(tab: ptr, t: ptr, fs: u32, fe: u32) {
+    setcell(tab, C_NPHI, 0);
     let i: u32 = fs;
+    let cbo: u32 = 0;
+    let cbl: u32 = 0;
     while i < fe {
         let ls: u32 = skip_sp(t, i, fe);
         let le: u32 = line_end(t, i, fe);
+        // 基本块标签?
+        let e2: u32 = le;
+        let go2: u32 = 1;
+        while e2 > ls && go2 == 1 {
+            let c2: u32 = load8(t, e2 - 1);
+            if c2 == 32 || c2 == 9 || c2 == 13 {
+                e2 = e2 - 1;
+            } else {
+                go2 = 0;
+            }
+        }
+        let is_blk: u32 = 0;
+        if e2 > ls && load8(t, e2 - 1) == 58 {
+            is_blk = 1;
+        }
+        if is_blk == 1 {
+            cbo = ls;
+            cbl = e2 - 1 - ls;
+        }
         let dst: u64 = line_dest(t, ls, le);
+        if dst != 0 {
+            let dd: u32 = skip_sp(t, hi32(dst) + lo32(dst), le);
+            let dd2: u32 = skip_sp(t, dd + 1, le);
+            if lit_at(t, dd2, le, "phi ") == 1 {
+                let k: u32 = cell(tab, C_NPHI);
+                let pb: u32 = TB_PHI + k * 16;
+                store32(tab, pb + PH_BOFF, cbo);
+                store32(tab, pb + PH_BLEN, cbl);
+                store32(tab, pb + PH_IOFF, hi32(dst));
+                store32(tab, pb + PH_ILEN, le - hi32(dst));
+                setcell(tab, C_NPHI, k + 1);
+            }
+        }
         if dst != 0 {
             let do: u32 = hi32(dst);
             let dl: u32 = lo32(dst);
@@ -1806,12 +2035,13 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
     let n: u32 = cell(tab, C_NFIX);
     let i: u32 = 0;
     while i < n {
-        let base: u32 = TB_FIX + i * 24;
+        let base: u32 = TB_FIX + i * 28;
         let site: u32 = load32(tab, base + F_SITE);
         let kind: u32 = load32(tab, base + F_KIND);
         let no: u32 = load32(tab, base + F_NOFF);
         let nl: u32 = load32(tab, base + F_NLEN);
-        let addr: u32 = lbl_find(tab, t, no, nl);
+        let addr: u32 = lbl_find(tab, t, no, nl, load32(tab, base + F_BOFF),
+                                 load32(tab, base + F_BLEN));
         if addr == NO {
             wstr(2, "lomelf: 未定义的标签: ");
             write_all(2, ptr_add(t, no), nl as u64);
@@ -1931,6 +2161,368 @@ fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
     return e1(out, d, 5);
 }
 
+// ---------------------------------------------------------------- 分支与算术
+
+/// 下一个 `label %X` 的 (名起点 << 32) | 名长度。
+fn next_label(t: ptr, from: u32, le: u32) -> u64 {
+    let k: u32 = from;
+    let found: u32 = 0;
+    while k < le && found == 0 {
+        if lit_at(t, k, le, "label") == 1 {
+            found = 1;
+        } else {
+            k = k + 1;
+        }
+    }
+    if found == 0 {
+        return pk16(0, 0);
+    }
+    let q: u32 = skip_sp(t, k + 5, le);
+    if q < le && load8(t, q) == 37 {
+        q = q + 1;
+    }
+    let e: u32 = word_end(t, q, le);
+    return pk16(q, e - q);
+}
+
+/// 给目标块的每个 phi 写入来自**当前块**的入边值。
+fn emit_phis(tab: ptr, out: ptr, c: u32, t: ptr, le: u32, tbo: u32, tbl: u32) -> u32 {
+    let d: u32 = c;
+    let n: u32 = cell(tab, C_NPHI);
+    let curbo: u32 = cell(tab, C_CURBO);
+    let curbl: u32 = cell(tab, C_CURBL);
+    let i: u32 = 0;
+    while i < n {
+        let base: u32 = TB_PHI + i * 16;
+        if span_eq(t, load32(tab, base + PH_BOFF), load32(tab, base + PH_BLEN), tbo, tbl) == 1 {
+            let io: u32 = load32(tab, base + PH_IOFF);
+            let ie: u32 = io + load32(tab, base + PH_ILEN);
+            let dlen: u32 = word_end(t, io, ie) - io;
+            let q: u32 = skip_sp(t, io + dlen, ie);
+            let q2: u32 = skip_sp(t, q + 1, ie);
+            let ts: u64 = type_span(t, q2 + 4, ie);
+            let ptyo: u32 = hi32(ts);
+            let ptyl: u32 = lo32(ts);
+            let k: u32 = ptyo + ptyl;
+            while k < ie {
+                if load8(t, k) == 91 {
+                    let vs: u32 = skip_sp(t, k + 1, ie);
+                    let ve: u32 = word_end(t, vs, ie);
+                    let lb: u32 = skip_comma(t, ve, ie);
+                    let l2: u32 = lb;
+                    if l2 < ie && load8(t, l2) == 37 {
+                        l2 = l2 + 1;
+                    }
+                    let l2e: u32 = word_end(t, l2, ie);
+                    if span_eq(t, l2, l2e - l2, curbo, curbl) == 1 {
+                        if is_agg(t, ptyo, ptyl) == 1 {
+                            let so: u32 = slot_find(tab, t, io, dlen);
+                            d = em_lea(out, d, RDI, RBP, so);
+                            d = emit_agg_addr(tab, out, d, t, vs, ve - vs, RSI);
+                            d = em_copy(out, d, RDI, RSI, ty_size(t, ptyo, ptyl));
+                        } else {
+                            d = emit_get(tab, out, d, t, ptyo, ptyl, vs, ve - vs, RAX);
+                            d = emit_put(tab, out, d, t, io, dlen, RAX);
+                        }
+                    }
+                    while k < ie && load8(t, k) != 93 {
+                        k = k + 1;
+                    }
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return d;
+}
+
+fn jump_to(tab: ptr, out: ptr, c: u32, t: ptr, le: u32, tbo: u32, tbl: u32) -> u32 {
+    let d: u32 = emit_phis(tab, out, c, t, le, tbo, tbl);
+    return em_jmp_blk(out, d, tab, cell(tab, C_FNO), cell(tab, C_FNL), tbo, tbl);
+}
+
+fn do_br(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
+    let b: u32 = skip_sp(t, i + 2, le);
+    if lit_at(t, b, le, "label") == 1 {
+        let L: u64 = next_label(t, b, le);
+        return jump_to(tab, out, c, t, le, hi32(L), lo32(L));
+    }
+    let ts: u64 = type_span(t, b, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let vs: u32 = skip_sp(t, to + tl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let d: u32 = emit_get(tab, out, c, t, to, tl, vs, ve - vs, RAX);
+    d = e1(out, d, 133);
+    d = e1(out, d, 192);                       // test eax, eax
+    let A: u64 = next_label(t, ve, le);
+    let B: u64 = next_label(t, hi32(A) + lo32(A), le);
+    d = emit_phis(tab, out, d, t, le, hi32(A), lo32(A));
+    d = em_jcc_blk(out, d, 5, tab, cell(tab, C_FNO), cell(tab, C_FNL), hi32(A), lo32(A));
+    return jump_to(tab, out, d, t, le, hi32(B), lo32(B));
+}
+
+fn do_switch(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
+    let ts: u64 = type_span(t, i + 7, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let vs: u32 = skip_sp(t, to + tl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let d: u32 = emit_get(tab, out, c, t, to, tl, vs, ve - vs, RAX);
+    let D: u64 = next_label(t, ve, le);
+    let lb: u32 = 0;
+    let k: u32 = ve;
+    while k < le {
+        if load8(t, k) == 91 && lb == 0 {
+            lb = k;
+        }
+        k = k + 1;
+    }
+    let rb: u32 = lb;
+    let k2: u32 = lb;
+    while k2 < le {
+        if load8(t, k2) == 93 {
+            rb = k2;
+        }
+        k2 = k2 + 1;
+    }
+    let q: u32 = lb + 1;
+    while q < rb {
+        let cts: u64 = type_span(t, q, rb);
+        let co: u32 = hi32(cts);
+        let cl: u32 = lo32(cts);
+        let ns: u32 = skip_sp(t, co + cl, rb);
+        let nx: u64 = num_at(t, ns, rb);
+        let num: u32 = lo32(nx);
+        let L: u64 = next_label(t, hi32(nx), rb);
+        d = em_alu_ri(out, d, CMP, RAX, num);
+        let jsite: u32 = em_jcc_raw(out, d, 5);
+        d = jsite + 4;
+        d = emit_phis(tab, out, d, t, le, hi32(L), lo32(L));
+        d = em_jmp_blk(out, d, tab, cell(tab, C_FNO), cell(tab, C_FNL), hi32(L), lo32(L));
+        w32(out, jsite, d - (jsite + 4));
+        q = skip_comma(t, hi32(L) + lo32(L), rb);
+    }
+    return jump_to(tab, out, d, t, le, hi32(D), lo32(D));
+}
+
+/// `icmp <谓词> <类型> <a>, <b>`。
+fn do_icmp(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let ps: u32 = skip_sp(t, i + 5, le);
+    let pe: u32 = word_end(t, ps, le);
+    let cond: u32 = icmp_cond(t, ps, pe);
+    let signed: u32 = icmp_signed(t, ps, pe);
+    let ts: u64 = type_span(t, pe, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let vs: u32 = skip_sp(t, to + tl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let bs: u32 = skip_comma(t, ve, le);
+    let be: u32 = word_end(t, bs, le);
+    let d: u32 = c;
+    if signed == 1 {
+        d = emit_get_signed(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        d = emit_get_signed(tab, out, d, t, to, tl, bs, be - bs, RCX);
+    } else {
+        d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        d = emit_get(tab, out, d, t, to, tl, bs, be - bs, RCX);
+    }
+    d = em_alu_rr(out, d, 57, RAX, RCX);
+    d = em_setcc(out, d, cond, RAX);
+    d = em_zext64(out, d, RAX, 1);
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn em_setcc(out: ptr, c: u32, cond: u32, reg: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(0, 0, 0, reg));
+    d = e1(out, d, 15);
+    d = e1(out, d, 144 + cond);
+    return em_modrm3(out, d, 0, reg);
+}
+
+fn icmp_cond(t: ptr, s: u32, e: u32) -> u32 {
+    if lit_at(t, s, e, "eq") == 1 {
+        return 4;
+    }
+    if lit_at(t, s, e, "ne") == 1 {
+        return 5;
+    }
+    if lit_at(t, s, e, "ugt") == 1 {
+        return 7;
+    }
+    if lit_at(t, s, e, "uge") == 1 {
+        return 3;
+    }
+    if lit_at(t, s, e, "ult") == 1 {
+        return 2;
+    }
+    if lit_at(t, s, e, "ule") == 1 {
+        return 6;
+    }
+    if lit_at(t, s, e, "sgt") == 1 {
+        return 15;
+    }
+    if lit_at(t, s, e, "sge") == 1 {
+        return 13;
+    }
+    if lit_at(t, s, e, "slt") == 1 {
+        return 12;
+    }
+    if lit_at(t, s, e, "sle") == 1 {
+        return 14;
+    }
+    return 4;
+}
+
+fn icmp_signed(t: ptr, s: u32, e: u32) -> u32 {
+    if e - s >= 2 && load8(t, s) == 115 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 二元运算: a 放 RAX, b 放 RCX; 返回 b 的起点, 类型与 a 的跨度进格。
+fn binops(tab: ptr, t: ptr, i: u32, le: u32, oplen: u32) -> u32 {
+    let ts: u64 = type_span(t, i + oplen, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let vs: u32 = skip_sp(t, to + tl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let bs: u32 = skip_comma(t, ve, le);
+    store32(tab, C_TYOFF, to);
+    store32(tab, C_TYLEN, tl);
+    store32(tab, C_VLOFF, vs);
+    store32(tab, C_VLLEN, ve - vs);
+    return bs;
+}
+
+fn do_alu(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
+          oplen: u32, opcode: u32) -> u32 {
+    let ts: u64 = type_span(t, i + oplen, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let ao: u32 = skip_sp(t, to + tl, le);
+    let al: u32 = word_end(t, ao, le) - ao;
+    let bs: u32 = skip_comma(t, ao + al, le);
+    let be: u32 = word_end(t, bs, le);
+    let d: u32 = emit_get(tab, out, c, t, to, tl, ao, al, RAX);
+    d = emit_get(tab, out, d, t, to, tl, bs, be - bs, RCX);
+    if opcode == 0 {
+        d = em_imul_rr(out, d, RAX, RCX);
+    } else {
+        d = em_alu_rr(out, d, opcode, RAX, RCX);
+    }
+    let sz: u32 = ty_size(t, to, tl);
+    if sz < 8 {
+        d = em_zext64(out, d, RAX, sz);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn em_group3(out: ptr, c: u32, digit: u32, reg: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, 0, 0, reg));
+    d = e1(out, d, 247);
+    return em_modrm3(out, d, digit, reg);
+}
+
+fn do_div(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
+          opts: u32) -> u32 {
+    // 形参上限 10: oplen/signed/is_rem 打包进一个 (checker/codegen 的硬限额)
+    let oplen: u32 = opts % 8;
+    let signed: u32 = (opts / 8) % 2;
+    let is_rem: u32 = opts / 16;
+    let ts: u64 = type_span(t, i + oplen, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let ao: u32 = skip_sp(t, to + tl, le);
+    let al: u32 = word_end(t, ao, le) - ao;
+    let bs: u32 = skip_comma(t, ao + al, le);
+    let be: u32 = word_end(t, bs, le);
+    let d: u32 = c;
+    if signed == 1 {
+        d = emit_get_signed(tab, out, d, t, to, tl, ao, al, RAX);
+        d = emit_get_signed(tab, out, d, t, to, tl, bs, be - bs, RCX);
+        d = e1(out, d, 72);
+        d = e1(out, d, 153);                     // cqo
+    } else {
+        d = emit_get(tab, out, d, t, to, tl, ao, al, RAX);
+        d = emit_get(tab, out, d, t, to, tl, bs, be - bs, RCX);
+        d = em_mov_ri32(out, d, RDX, 0);
+    }
+    let digit: u32 = 6;
+    if signed == 1 {
+        digit = 7;
+    }
+    d = em_group3(out, d, digit, RCX);
+    let sel: u32 = RAX;
+    if is_rem == 1 {
+        sel = RDX;
+    }
+    let sz: u32 = ty_size(t, to, tl);
+    if sz < 8 {
+        d = em_zext64(out, d, sel, sz);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, sel);
+}
+
+fn em_shift_cl(out: ptr, c: u32, digit: u32, reg: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, 0, 0, reg));
+    d = e1(out, d, 211);
+    return em_modrm3(out, d, digit, reg);
+}
+
+fn do_shift(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
+            opts: u32) -> u32 {
+    // 同上: oplen/digit/is_ashr 打包
+    let oplen: u32 = opts % 8;
+    let digit: u32 = (opts / 8) % 8;
+    let is_ashr: u32 = opts / 64;
+    let ts: u64 = type_span(t, i + oplen, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let ao: u32 = skip_sp(t, to + tl, le);
+    let al: u32 = word_end(t, ao, le) - ao;
+    let bs: u32 = skip_comma(t, ao + al, le);
+    let be: u32 = word_end(t, bs, le);
+    let d: u32 = c;
+    if is_ashr == 1 {
+        d = emit_get_signed(tab, out, d, t, to, tl, ao, al, RAX);
+    } else {
+        d = emit_get(tab, out, d, t, to, tl, ao, al, RAX);
+    }
+    d = emit_get(tab, out, d, t, to, tl, bs, be - bs, RCX);
+    d = em_shift_cl(out, d, digit, RAX);
+    let sz: u32 = ty_size(t, to, tl);
+    if sz < 8 {
+        d = em_zext64(out, d, RAX, sz);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_atomic(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let a: u32 = i + 10;
+    let pty: u64 = type_span(t, a, le);
+    let po: u32 = hi32(pty);
+    let pl: u32 = lo32(pty);
+    let ps: u32 = skip_sp(t, po + pl, le);
+    let pe: u32 = word_end(t, ps, le);
+    let b: u32 = skip_comma(t, pe, le);
+    let vty: u64 = type_span(t, b, le);
+    let vo: u32 = hi32(vty);
+    let vl: u32 = lo32(vty);
+    let vs: u32 = skip_sp(t, vo + vl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let d: u32 = emit_get_ptr(tab, out, c, t, ps, pe - ps, RCX);
+    d = emit_get(tab, out, d, t, vo, vl, vs, ve - vs, RAX);
+    d = e1(out, d, 240);                          // lock
+    d = em_rex(out, d, rex(1, RAX, 0, RCX));
+    d = e1(out, d, 15);
+    d = e1(out, d, 193);                          // xadd
+    d = em_mem(out, d, RAX, RCX, 0);
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
 fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: u32) -> u32 {
     setcell(tab, C_NSLOT, 0);
     setcell(tab, C_NALLOC, 0);
@@ -1938,7 +2530,9 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     let ns: u32 = plan_params(tab, t, ls, le);
     let ne: u32 = word_end(t, ns, le);
     plan_frame(tab, t, bs, be);
-    lbl_add(tab, ns, ne - ns, TEXT_VADDR + c);
+    lbl_add(tab, ns, ne - ns, 0, 0, TEXT_VADDR + c);
+    setcell(tab, C_FNO, ns);
+    setcell(tab, C_FNL, ne - ns);
     let d: u32 = e1(out, c, 85);          // push rbp
     d = e1(out, d, 72);                   // REX.W
     d = e1(out, d, 137);                  // mov rbp, rsp
@@ -1950,15 +2544,33 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     while i < be {
         let ls2: u32 = skip_sp(t, i, be);
         let le2: u32 = line_end(t, i, be);
-        let dst: u64 = line_dest(t, ls2, le2);
-        store32(tab, C_DESTO, hi32(dst));
-        store32(tab, C_DESTL, lo32(dst));
-        if dst != 0 {
-            let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), le2);
-            let op2: u32 = skip_sp(t, op + 1, le2);
-            d = lower(tab, out, d, t, op2, le2);
+        // 基本块标签 -> 登记代码位置
+        let e3: u32 = le2;
+        let go3: u32 = 1;
+        while e3 > ls2 && go3 == 1 {
+            let c3: u32 = load8(t, e3 - 1);
+            if c3 == 32 || c3 == 9 || c3 == 13 {
+                e3 = e3 - 1;
+            } else {
+                go3 = 0;
+            }
+        }
+        if e3 > ls2 && load8(t, e3 - 1) == 58 && line_dest(t, ls2, le2) == 0 {
+            setcell(tab, C_CURBO, ls2);
+            setcell(tab, C_CURBL, e3 - 1 - ls2);
+            lbl_add(tab, cell(tab, C_FNO), cell(tab, C_FNL), ls2, e3 - 1 - ls2,
+                    TEXT_VADDR + d);
         } else {
-            d = lower(tab, out, d, t, ls2, le2);
+            let dst: u64 = line_dest(t, ls2, le2);
+            store32(tab, C_DESTO, hi32(dst));
+            store32(tab, C_DESTL, lo32(dst));
+            if dst != 0 {
+                let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), le2);
+                let op2: u32 = skip_sp(t, op + 1, le2);
+                d = lower(tab, out, d, t, op2, le2);
+            } else {
+                d = lower(tab, out, d, t, ls2, le2);
+            }
         }
         i = le2 + 1;
     }

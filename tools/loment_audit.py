@@ -76,6 +76,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
             "与 clang 链的产物**行为逐值一致** (stdout 字节 + 退出码); 种子 -> stage1 -> IR "
             "-> 原生产物全程无 clang",
      "loment_elf_test", []),
+    ("C20", "原生 ELF 后端**自举侧镜像**: loment/tools/lomelf.lomt (走种子自举链编成二进制) "
+            "对语料产出的 ELF 与参考实现**逐字节相同** —— 编译一个 Loment 程序全程不需要 clang",
+     "loment_elf_test", []),
 ]
 
 
