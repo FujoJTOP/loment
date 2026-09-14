@@ -186,6 +186,10 @@
    "sha256": "1928953cb208412dd696291caf7a49da74bb3a9f45df52c012bd76bd2e6ab251"
   },
   {
+   "path": "loment/lib/sha256.lomt",
+   "sha256": "2a68894ad9c72b9212c6126a31d35aa02f1f9539c975743688dbd5c4e7a2c1a0"
+  },
+  {
    "path": "tools/loment_lsp_test.py",
    "sha256": "9a6dcfc181bcf2ec23643cbe73544eafa16a091230ef233ac1f553f4161310ab"
   },
@@ -283,7 +287,7 @@
   },
   {
    "path": "loment/tools/lompkg.lomt",
-   "sha256": "6ad60ffc41701209978cf587e065ae6dbf44128dd6601dd61c188cfd6f5fc7f1"
+   "sha256": "47c3eb4d6af2c57bfcf47415d4a7bdcf7fc84fc13f02c6ed4501236799d2f533"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
