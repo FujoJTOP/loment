@@ -325,6 +325,68 @@ def test_lomelf_rebuilds_the_compiler_without_clang():
     print(f"      lomelf(种子) -> 编译器 -> 自编译产物 == 种子 ({len(got)}B), 全程无 clang")
 
 
+@test
+def test_lomelf_selfhost_rebuilds_the_compiler():
+    """**自举侧也能重建编译器**: 种子 ->(clang 一次)-> stage1 -> 编出镜像 `lomelf.lomt`
+    -> 镜像把**种子**编成一个编译器 -> 那个编译器自编译 `driver.lomt` 的产物 == 种子。
+
+    也就是说"重建这套工具链不需要 C 编译器、也不需要解释器"在**自举侧**成立 ——
+    clang 只在第一步（种子 -> stage1）出现，那一步的终点是 docs/167 §5 记的 genesis。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = "/tmp/lomelf_rb1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=900, shell=False)
+        assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"
+        mir_ll = td / "lomelf.ll"
+        mir_ll.write_bytes(rr.stdout)
+        mir = td / "lomelf.bin"
+        r2 = subprocess.run(
+            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fno-pie", "-fuse-ld=lld", "-Wl,-e,_start", str(mir_ll), "-o", str(mir)],
+            capture_output=True, text=True, shell=False)
+        assert r2.returncode == 0, f"镜像链接失败: {r2.stderr[-300:]}"
+        # 镜像编种子 -> 新的编译器
+        seed_c = td / "seed.elf"
+        r3 = subprocess.run(
+            ["wsl", "-e", "bash", "-lc",
+             f"cp {_wsl_path(mir)} /tmp/lomelf_rb2.bin && chmod +x /tmp/lomelf_rb2.bin && "
+             f"cd {_wsl_path(ROOT)} && /tmp/lomelf_rb2.bin loment/build/selfhost_driver.ll "
+             f"{_wsl_path(seed_c)}"],
+            capture_output=True, text=True, timeout=900, shell=False)
+        assert r3.returncode == 0, f"镜像编种子失败: {r3.stderr[-300:]}"
+        # 用它自编译 driver.lomt, 与种子比
+        outp = td / "again.ll"
+        r4 = subprocess.run(
+            ["wsl", "-e", "bash", "-lc",
+             f"cp {_wsl_path(seed_c)} /tmp/lomelf_rb3.bin && chmod +x /tmp/lomelf_rb3.bin && "
+             f"cd {_wsl_path(ROOT)} && /tmp/lomelf_rb3.bin loment/selfhost/driver.lomt "
+             f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?"],
+            capture_output=True, text=True, timeout=900, shell=False)
+        errf = td / "err.txt"
+        etxt = errf.read_text(encoding="utf-8", errors="replace")[-300:] if errf.exists() else ""
+        assert r4.stdout.strip() == "0", f"重建出的编译器退出非零: {r4.stdout[:40]!r} {etxt!r}"
+        got = outp.read_bytes()
+    want = seed.read_bytes()
+    assert got == want, f"[自举侧定点不成立] {len(got)}B != 种子 {len(want)}B"
+    print(f"      镜像 -> 编译器 -> 自编译产物 == 种子 ({len(got)}B), 自举侧全程无 clang 无解释器")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

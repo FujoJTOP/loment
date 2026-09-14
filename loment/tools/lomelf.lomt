@@ -84,20 +84,20 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 917760;       // 槽表 stride 16 × 2048 (每函数清)
+const TB_SLOT: u32 = 917760;       // 槽表 stride 16 × 32768 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 950528;      // alloca 表 stride 16 × 1024 (每函数清)
+const TB_ALLOC: u32 = 1442048;     // alloca 表 stride 16 × 8192 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 966912;        // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 1573120;       // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 967296;        // phi 表 stride 16 × 512 (每函数清)
+const TB_PHI: u32 = 1573504;       // phi 表 stride 16 × 512 (每函数清)
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
@@ -367,6 +367,31 @@ fn logical_end(t: ptr, i: u32, n: u32) -> u32 {
         }
     }
     return e;
+}
+
+/// 64 位字面量 (IR 里的常量可以是 2^32 这种; u32 版会截断)。
+fn num64_at(t: ptr, i: u32, n: u32) -> u64 {
+    let j: u32 = skip_sp(t, i, n);
+    let neg: u32 = 0;
+    if j < n && load8(t, j) == 45 {
+        neg = 1;
+        j = j + 1;
+    }
+    let v: u64 = 0;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        let c: u32 = load8(t, j);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + ((c - 48) as u64);
+            j = j + 1;
+        } else {
+            go = 0;
+        }
+    }
+    if neg == 1 {
+        v = (0 as u64) - v;
+    }
+    return v;
 }
 
 fn num_at(t: ptr, i: u32, n: u32) -> u64 {
@@ -935,8 +960,8 @@ fn emit_get(tab: ptr, out: ptr, c: u32, t: ptr, tyo: u32, tyl: u32,
                 if c0 == 102 || c0 == 110 || c0 == 117 {
                     d = em_mov_ri32(out, d, reg, 0);
                 } else {
-                    let nv: u64 = num_at(t, vo, vo + vl);
-                    d = em_mov_ri64(out, d, reg, lo32(nv) as u64);
+                    let nv: u64 = num64_at(t, vo, vo + vl);
+                    d = em_mov_ri64(out, d, reg, nv);
                 }
             }
         }
@@ -962,7 +987,17 @@ fn emit_get_ptr(tab: ptr, out: ptr, c: u32, t: ptr, vo: u32, vl: u32, reg: u32) 
     if load8(t, vo) == 64 {
         return em_mov_abs(out, c, tab, reg, vo, vl);
     }
-    return c;
+    wstr(2, "lomelf: 指针值查不到: ");
+    write_all(2, ptr_add(t, vo), vl as u64);
+    wstr(2, " @fn=");
+    write_all(2, ptr_add(t, cell(tab, C_FNO)), cell(tab, C_FNL) as u64);
+    wstr(2, " nalloc=");
+    wdec(2, ptr_add(t, IN_CAP - 64), cell(tab, C_NALLOC));
+    wstr(2, " nslot=");
+    wdec(2, ptr_add(t, IN_CAP - 64), cell(tab, C_NSLOT));
+    wstr(2, "
+");
+    return die(1);
 }
 
 fn emit_agg_addr(tab: ptr, out: ptr, c: u32, t: ptr, vo: u32, vl: u32, reg: u32) -> u32 {

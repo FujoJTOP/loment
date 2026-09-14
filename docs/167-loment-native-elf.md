@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（6/6，审计主张 **C19 / C20**）
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7，审计主张 **C19 / C20**）
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -49,7 +49,7 @@ python tools/lomelf.py in.ll --check     # 只解析与降级，不落盘
 ## 3. 判据
 
 ```bash
-python tools/loment_elf_test.py     # 6/6
+python tools/loment_elf_test.py     # 7/7
 ```
 
 | 用例 | 判据 | 结果 |
@@ -59,7 +59,8 @@ python tools/loment_elf_test.py     # 6/6
 | `test_lomelf_cli_check_and_usage` | `--check` 不落盘且 rc=0；无参数 rc=2 | ✅ |
 | `test_lomelf_compiles_selfhost_ir_without_clang` | **主线**：种子 →(clang 一次)→ stage1 → 发 IR → lomelf 编成 ELF → 跑出 `M67 RESULT: PASS loment-user` | ✅ |
 | `test_lomelf_selfhost_matches_reference` | **自举镜像**：`loment/tools/lomelf.lomt`（走种子自举链）对四个语料产出的 ELF 与参考**逐字节相同** | 4/4 |
-| `test_lomelf_rebuilds_the_compiler_without_clang` | **重建不需要 clang**：`lomelf(种子)` → 一个能用的编译器 → 它自编译 `driver.lomt` 的产物**== 种子**（1 630 436 B） | ✅ |
+| `test_lomelf_rebuilds_the_compiler_without_clang` | **重建不需要 clang（参考侧）**：`lomelf(种子)` → 一个能用的编译器 → 它自编译 `driver.lomt` 的产物**== 种子**（1 630 436 B） | ✅ |
+| `test_lomelf_selfhost_rebuilds_the_compiler` | **重建不需要 clang（自举侧）**：种子 → stage1 → 编出**镜像** → 镜像把种子编成编译器（与参考逐字节相同）→ 它自编译产物 **== 种子** | ✅ |
 
 语料（只放**会终止**的 `_start` 程序）：
 
@@ -105,13 +106,18 @@ stage1"那一步出现（见 §5）。
 4. **重建不再需要 clang —— 参考侧已证**：`lomelf(种子) → 编译器 → 自编译产物 == 种子`
    （判据 `test_lomelf_rebuilds_the_compiler_without_clang`，1 630 436 B 逐字节相同）。
    也就是说今天就能**不用 clang** 造出一个能用的 Loment 编译器。
-   **还差两步才算真的落地**：
-   ① **做这件事的工具得是自举侧的**。镜像 `lomelf.lomt` 这一轮补齐了聚合返回值（隐藏结果指针）、
-   多行 `switch` 的逻辑行拼接、以及按种子规模放大的表（全局 2048 / 标签与回填各 16384），
-   **已经能把 1.63 MB 的种子编出来**（产出 955 440 B 的 ELF）；但那个二进制跑起来 **SIGILL**，
-   而参考实现编同一个种子出的 980 016 B 产物是好的。两份产物的第一条差异出现在第 9328 条指令的
-   一个调用目标上 —— 即**镜像漏了某个构造的约 25 924 B**，还没定位到是哪一条。
-   **这是当前唯一的硬缺口**，也是"自举侧重建"这句话还没有兑现的原因。
+   **还差一步才算真的落地**：
+   ① ~~做这件事的工具得是自举侧的~~ **已成立**。镜像 `lomelf.lomt` 这一轮补齐到能**编出编译器**
+   并成立定点：种子 →(clang 一次)→ stage1 → 编出镜像 → **镜像把种子编成一个编译器**（980 016 B，
+   与参考实现逐字节相同）→ 那个编译器自编译 `driver.lomt` 的产物 **== 种子**（1 630 436 B）。
+   判据 `test_lomelf_selfhost_rebuilds_the_compiler`。也就是说：**重建这套工具链不需要 C 编译器，
+   也不需要解释器**，clang 只剩第一步（种子 → stage1）。
+   路上修掉的三个真 bug 都记在这里，因为它们都只在**大单元**上才暴露、语料照不出来：
+   （a）槽表按 2048 定，而种子里 `expr_atom` 一个函数就要 3823 个槽 —— 溢出**写进了 alloca 表**，
+   表现是"某个 alloca 查不到"（现在 32768）；
+   （b）字面量按 u32 解析，`mul i64 %x, 4294967296` 被截成 0（现在走 64 位解析）；
+   （c）表按语料规模定太小（全局 256 → 2048；标签/回填 4096 → 16384）。
+   另外把"指针值查不到"从**静默发错代码**改成**报错退出** —— 这类静默错编正是最难查的。
    ② 链条总要有**第一个可执行文件**（genesis，可复现、提交进仓库、有哈希，与 Rust 发 stage0
    同一做法）。**残留的诚实点**：genesis 消不掉 —— 它可复现、有来源，但它是个二进制，不装作没有。
 
@@ -134,8 +140,8 @@ python tools/loment_elf_test.py
   PASS  test_lomelf_selfhost_matches_reference        # 4 个程序: 自举镜像与参考逐字节相同
 
 python tools/loment_audit.py --json
-  [PASS] C19 原生 ELF 后端: ... loment_elf_test: 5/5 通过
-  [PASS] C20 自举侧镜像: ... 4 个语料逐字节相同
+  [PASS] C19 原生 ELF 后端: ... loment_elf_test: 7/7 通过
+  [PASS] C20 自举侧镜像: ... 逐字节相同 + 自举侧重建定点
 ```
 
 规模：`tools/lomelf.py` **1177 行**（参考）；`loment/tools/lomelf.lomt` **约 2700 行**（自举镜像，
