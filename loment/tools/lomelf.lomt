@@ -1,0 +1,2094 @@
+// loment/tools/lomelf.lomt — Loment 版原生 ELF 后端 (无 Python, docs/167)
+//
+// 判据 (tools/loment_elf_test.py 的 test_lomelf_selfhost_matches_reference):
+// 同一份 `.ll` 喂本程序 (走种子自举链编成 ELF 后跑) 与 tools/lomelf.py,
+// **产出的 ELF 逐字节相同**。这是"编译一个 Loment 程序不再需要一个 C 编译器"的那一格。
+//
+// CLI:  lomelf IN.ll OUT        (无选项; 参考实现的 -o/--check 是它自己的便利, 不镜像)
+// 退出码 0 = OK / 1 = 输入不支持或解析失败 / 2 = 用法错误
+//
+// 与参考实现 (tools/lomelf.py) 的关系: **逐条镜像**, 包括那些看起来啰嗦的地方 ——
+// 判据是字节相同, 任何"我这版写得更漂亮"的发挥都会让判据红。参考实现就是这格的规格书。
+//
+// 已知边界 (与参考实现头注同源, 逐条记账):
+//   * 调用约定是我们自己的 (实参走栈), 不是 System V;
+//   * 聚合返回值 / 间接调用 / 浮点不支持 (报错退出, 不静默错编)。
+//
+// 自举子集注意 (docs/150 的两条自举链缺口): 不写 `(a + b as T) as U`, 变量不叫 `fn`。
+
+module lomelf
+
+use "loment/examples/bytes.lomt"
+
+// ---------------------------------------------------------------- 内存布局
+
+const M_ARGV: u32 = 0;             // 8192
+const M_IN: u32 = 8192;            // 2 MiB 输入 .ll 文本
+const M_TXT: u32 = 2105344;        // 2 MiB 代码缓冲
+const M_OUT: u32 = 4202496;        // 2 MiB 输出 ELF
+const M_GB: u32 = 6291456;         // 1 MiB 全局数据
+const M_TAB: u32 = 7340032;        // 2 MiB 表区
+const ARENA: u64 = 9437184;
+
+const IN_CAP: u32 = 2097152;
+const OUT_CAP: u32 = 2097152;
+const GB_CAP: u32 = 1048576;
+
+// 表区内的格 (相对 M_TAB)
+const C_NG: u32 = 0;
+const C_GB: u32 = 4;
+const C_BSS: u32 = 8;
+const C_NLBL: u32 = 12;
+const C_NFIX: u32 = 16;
+const C_NSLOT: u32 = 20;
+const C_NALLOC: u32 = 24;
+const C_FRAME: u32 = 28;
+const C_TYLEN: u32 = 32;
+const C_TYOFF: u32 = 36;
+const C_VLOFF: u32 = 40;
+const C_VLLEN: u32 = 44;
+const C_DESTO: u32 = 48;
+const C_DESTL: u32 = 52;
+const C_RETL: u32 = 56;
+
+// 表起址 (相对 M_TAB); 格区 256 字节
+const TB_G: u32 = 256;             // 全局表 stride 32 × 256
+const G_NOFF: u32 = 0;
+const G_NLEN: u32 = 4;
+const G_TOFF: u32 = 8;
+const G_TLEN: u32 = 12;
+const G_SIZE: u32 = 16;
+const G_DOFF: u32 = 20;
+const G_ADDR: u32 = 24;
+const G_ZERO: u32 = 28;
+
+const TB_LBL: u32 = 8448;          // 标签表 stride 16 × 4096
+const L_NOFF: u32 = 0;
+const L_NLEN: u32 = 4;
+const L_ADDR: u32 = 8;
+
+const TB_FIX: u32 = 73984;         // 回填表 stride 24 × 4096
+const F_SITE: u32 = 0;
+const F_KIND: u32 = 4;
+const F_NOFF: u32 = 8;
+const F_NLEN: u32 = 12;
+
+const TB_SLOT: u32 = 172288;       // 槽表 stride 16 × 2048 (每函数清)
+const S_NOFF: u32 = 0;
+const S_NLEN: u32 = 4;
+const S_OFF: u32 = 8;
+
+const TB_ALLOC: u32 = 205056;      // alloca 表 stride 16 × 1024 (每函数清)
+const A_NOFF: u32 = 0;
+const A_NLEN: u32 = 4;
+const A_OFF: u32 = 8;
+const A_SIZE: u32 = 12;
+
+const TB_ARG: u32 = 221440;        // 调用实参暂存 (每个 16 字节, 最多 16 个)
+
+// ---------------------------------------------------------------- 常量
+
+const TEXT_VADDR: u32 = 4194304;   // 0x400000
+const DATA_VADDR: u32 = 6291456;   // 0x600000
+const NO: u32 = 4294967295;
+const PHI: u64 = 4294967296;
+
+const RAX: u32 = 0;
+const RCX: u32 = 1;
+const RDX: u32 = 2;
+const RSP: u32 = 4;
+const RBP: u32 = 5;
+const RSI: u32 = 6;
+const RDI: u32 = 7;
+
+const ADD: u32 = 0;
+const SUB: u32 = 5;
+const CMP: u32 = 7;
+
+fn hi32(v: u64) -> u32 {
+    return (v / PHI) as u32;
+}
+
+fn lo32(v: u64) -> u32 {
+    return (v % PHI) as u32;
+}
+
+fn pk16(a: u32, b: u32) -> u64 {
+    return (a as u64) * PHI + (b as u64);
+}
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let got: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if got <= 0 {
+            return off;
+        }
+        off = off + (got as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn fail(msg: str) -> u32 {
+    wstr(2, "lomelf: ");
+    wstr(2, msg);
+    wstr(2, "\n");
+    return die(1);
+}
+
+fn fail_line(t: ptr, ls: u32, le: u32) -> u32 {
+    wstr(2, "lomelf: 不支持: ");
+    write_all(2, ptr_add(t, ls), (le - ls) as u64);
+    wstr(2, "\n");
+    return die(1);
+}
+
+/// 第 n 个 argv (0 = 程序名) 的 (起点 << 32) | 长度。
+fn cstr(dst: ptr, s: str) -> ptr {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(str_ptr(s), i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return dst;
+}
+
+fn argv_n(buf: ptr, cap: u64, n: u32) -> u64 {
+    let fd: i64 = syscall4(257, (0 as u64) - 100,
+                           cstr(ptr_add(buf, 8192), "/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let rn: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if rn <= 0 {
+        return 0;
+    }
+    let m: u32 = rn as u32;
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * PHI + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if f == n {
+        hit = (s as u64) * PHI + ((m - s) as u64);
+    }
+    return hit;
+}
+
+fn open_ro(path: ptr) -> i64 {
+    return syscall4(257, (0 as u64) - 100, path as u64, 0);
+}
+
+fn open_wo(path: ptr) -> i64 {
+    return syscall6(257, (0 as u64) - 100, path as u64, 577, 420, 0);
+}
+
+// ---------------------------------------------------------------- 文本小工具
+
+fn is_word(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    if c == 95 || c == 46 || c == 64 || c == 37 {
+        return 1;
+    }
+    return 0;
+}
+
+fn skip_sp(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        let c: u32 = load8(t, j);
+        if c == 32 || c == 9 || c == 13 {
+            j = j + 1;
+        } else {
+            go = 0;
+        }
+    }
+    return j;
+}
+
+fn word_end(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        if is_word(load8(t, j)) == 0 {
+            go = 0;
+        } else {
+            j = j + 1;
+        }
+    }
+    return j;
+}
+
+fn lit_at(t: ptr, i: u32, n: u32, lit: str) -> u32 {
+    let L: u32 = str_len(lit);
+    if i + L > n {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < L {
+        if load8(t, i + k) != load8(str_ptr(lit), k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn span_eq(t: ptr, a: u32, alen: u32, b: u32, blen: u32) -> u32 {
+    if alen != blen {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < alen {
+        if load8(t, a + k) != load8(t, b + k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn line_end(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    while j < n {
+        if load8(t, j) == 10 {
+            return j;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+fn num_at(t: ptr, i: u32, n: u32) -> u64 {
+    let j: u32 = skip_sp(t, i, n);
+    let neg: u32 = 0;
+    if j < n && load8(t, j) == 45 {
+        neg = 1;
+        j = j + 1;
+    }
+    let v: u32 = 0;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        let c: u32 = load8(t, j);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            j = j + 1;
+        } else {
+            go = 0;
+        }
+    }
+    if neg == 1 {
+        v = 4294967296 - v;
+    }
+    return pk16(j, v);
+}
+
+// ---------------------------------------------------------------- 类型
+
+fn type_span(t: ptr, i: u32, n: u32) -> u64 {
+    let j: u32 = skip_sp(t, i, n);
+    let c: u32 = load8(t, j);
+    if c == 123 || c == 91 {
+        let open: u32 = c;
+        let close: u32 = 125;
+        if open == 91 {
+            close = 93;
+        }
+        let d: u32 = 0;
+        let k: u32 = j;
+        let done: u32 = 0;
+        while k < n && done == 0 {
+            let ch: u32 = load8(t, k);
+            if ch == open {
+                d = d + 1;
+            }
+            if ch == close {
+                d = d - 1;
+            }
+            k = k + 1;
+            if d == 0 {
+                done = 1;
+            }
+        }
+        return pk16(j, k - j);
+    }
+    let e: u32 = word_end(t, j, n);
+    return pk16(j, e - j);
+}
+
+fn scalar_size(t: ptr, off: u32, len: u32) -> u32 {
+    if len == 2 && load8(t, off) == 105 {
+        let c: u32 = load8(t, off + 1);
+        if c == 49 || c == 56 {
+            return 1;
+        }
+    }
+    if len == 3 && load8(t, off) == 105 {
+        let c2: u32 = load8(t, off + 2);
+        if c2 == 54 {
+            return 2;
+        }
+        if c2 == 50 {
+            return 4;
+        }
+        if c2 == 52 {
+            return 8;
+        }
+    }
+    if len == 3 && load8(t, off) == 112 && load8(t, off + 2) == 114 {
+        return 8;
+    }
+    return 0;
+}
+
+fn arr_n(t: ptr, off: u32, len: u32) -> u32 {
+    let i: u32 = off + 1;
+    let end: u32 = off + len - 1;
+    let v: u32 = 0;
+    let go: u32 = 1;
+    while i < end && go == 1 {
+        let c: u32 = load8(t, i);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            i = i + 1;
+        } else {
+            go = 0;
+        }
+    }
+    return v;
+}
+
+fn arr_elem(t: ptr, off: u32, len: u32) -> u64 {
+    let i: u32 = off + 1;
+    let end: u32 = off + len - 1;
+    let go: u32 = 1;
+    while i < end && go == 1 {
+        if load8(t, i) == 120 {
+            go = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return type_span(t, i + 1, end);
+}
+
+fn align_to(v: u32, a: u32) -> u32 {
+    if a == 0 {
+        return v;
+    }
+    let r: u32 = v % a;
+    if r == 0 {
+        return v;
+    }
+    return v + (a - r);
+}
+
+fn ty_size(t: ptr, off: u32, len: u32) -> u32 {
+    let c: u32 = load8(t, off);
+    if c == 123 {
+        let i: u32 = off + 1;
+        let end: u32 = off + len - 1;
+        let sz: u32 = 0;
+        let go: u32 = 1;
+        while i < end && go == 1 {
+            let j: u32 = skip_sp(t, i, end);
+            if j >= end {
+                go = 0;
+            } else {
+                if load8(t, j) == 44 {
+                    j = j + 1;
+                }
+                let fs: u64 = type_span(t, j, end);
+                let fo: u32 = hi32(fs);
+                let fl: u32 = lo32(fs);
+                sz = align_to(sz, ty_size(t, fo, fl)) + ty_size(t, fo, fl);
+                i = fo + fl;
+            }
+        }
+        return sz;
+    }
+    if c == 91 {
+        let es: u64 = arr_elem(t, off, len);
+        return arr_n(t, off, len) * ty_size(t, hi32(es), lo32(es));
+    }
+    return scalar_size(t, off, len);
+}
+
+fn field_off(t: ptr, off: u32, len: u32, idx: u32) -> u32 {
+    let i: u32 = off + 1;
+    let end: u32 = off + len - 1;
+    let sz: u32 = 0;
+    let k: u32 = 0;
+    let go: u32 = 1;
+    while i < end && go == 1 {
+        let j: u32 = skip_sp(t, i, end);
+        if j >= end {
+            return NO;
+        }
+        if load8(t, j) == 44 {
+            j = j + 1;
+        }
+        let fs: u64 = type_span(t, j, end);
+        let fo: u32 = hi32(fs);
+        let fl: u32 = lo32(fs);
+        let fsz: u32 = ty_size(t, fo, fl);
+        let aoff: u32 = align_to(sz, fsz);
+        if k == idx {
+            return aoff;
+        }
+        sz = aoff + fsz;
+        k = k + 1;
+        i = fo + fl;
+    }
+    return NO;
+}
+
+fn field_ty(t: ptr, off: u32, len: u32, idx: u32) -> u64 {
+    let i: u32 = off + 1;
+    let end: u32 = off + len - 1;
+    let k: u32 = 0;
+    let go: u32 = 1;
+    while i < end && go == 1 {
+        let j: u32 = skip_sp(t, i, end);
+        if j >= end {
+            return pk16(NO, NO);
+        }
+        if load8(t, j) == 44 {
+            j = j + 1;
+        }
+        let fs: u64 = type_span(t, j, end);
+        if k == idx {
+            return fs;
+        }
+        k = k + 1;
+        i = hi32(fs) + lo32(fs);
+    }
+    return pk16(NO, NO);
+}
+
+fn is_agg(t: ptr, off: u32, len: u32) -> u32 {
+    let c: u32 = load8(t, off);
+    if c == 123 || c == 91 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 表
+
+fn cell(tab: ptr, off: u32) -> u32 {
+    return load32(tab, off);
+}
+
+fn setcell(tab: ptr, off: u32, v: u32) {
+    store32(tab, off, v);
+}
+
+fn lbl_add(tab: ptr, noff: u32, nlen: u32, addr: u32) {
+    let k: u32 = cell(tab, C_NLBL);
+    let base: u32 = TB_LBL + k * 16;
+    store32(tab, base + L_NOFF, noff);
+    store32(tab, base + L_NLEN, nlen);
+    store32(tab, base + L_ADDR, addr);
+    setcell(tab, C_NLBL, k + 1);
+}
+
+fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NLBL);
+    while k < n {
+        let base: u32 = TB_LBL + k * 16;
+        if span_eq(t, load32(tab, base + L_NOFF), load32(tab, base + L_NLEN), noff, nlen) == 1 {
+            return load32(tab, base + L_ADDR);
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32) {
+    let k: u32 = cell(tab, C_NFIX);
+    let base: u32 = TB_FIX + k * 24;
+    store32(tab, base + F_SITE, site);
+    store32(tab, base + F_KIND, kind);
+    store32(tab, base + F_NOFF, noff);
+    store32(tab, base + F_NLEN, nlen);
+    setcell(tab, C_NFIX, k + 1);
+}
+
+fn slot_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NSLOT);
+    while k < n {
+        let base: u32 = TB_SLOT + k * 16;
+        if span_eq(t, load32(tab, base + S_NOFF), load32(tab, base + S_NLEN), noff, nlen) == 1 {
+            return load32(tab, base + S_OFF);
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+fn slot_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    if slot_find(tab, t, noff, nlen) == NO {
+        return 0;
+    }
+    return 1;
+}
+
+fn slot_put(tab: ptr, noff: u32, nlen: u32, off: u32) {
+    let k: u32 = cell(tab, C_NSLOT);
+    let base: u32 = TB_SLOT + k * 16;
+    store32(tab, base + S_NOFF, noff);
+    store32(tab, base + S_NLEN, nlen);
+    store32(tab, base + S_OFF, off);
+    setcell(tab, C_NSLOT, k + 1);
+}
+
+fn alloc_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NALLOC);
+    while k < n {
+        let base: u32 = TB_ALLOC + k * 16;
+        if span_eq(t, load32(tab, base + A_NOFF), load32(tab, base + A_NLEN), noff, nlen) == 1 {
+            return load32(tab, base + A_OFF);
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+fn alloc_put(tab: ptr, noff: u32, nlen: u32, off: u32, size: u32) {
+    let k: u32 = cell(tab, C_NALLOC);
+    let base: u32 = TB_ALLOC + k * 16;
+    store32(tab, base + A_NOFF, noff);
+    store32(tab, base + A_NLEN, nlen);
+    store32(tab, base + A_OFF, off);
+    store32(tab, base + A_SIZE, size);
+    setcell(tab, C_NALLOC, k + 1);
+}
+
+// ---------------------------------------------------------------- x86-64 编码
+// 所有发射函数把"代码缓冲游标"作为参数收下并返回新游标 (Loment 没有可变全局)。
+
+fn e1(out: ptr, c: u32, b: u32) -> u32 {
+    store8(out, c, b as u8);
+    return c + 1;
+}
+
+fn e4(out: ptr, c: u32, v: u32) -> u32 {
+    let d: u32 = e1(out, c, v % 256);
+    d = e1(out, d, (v / 256) % 256);
+    d = e1(out, d, (v / 65536) % 256);
+    return e1(out, d, (v / 16777216) % 256);
+}
+
+fn e8(out: ptr, c: u32, v: u64) -> u32 {
+    let d: u32 = c;
+    let x: u64 = v;
+    let i: u32 = 0;
+    while i < 8 {
+        d = e1(out, d, (x % 256) as u32);
+        x = x / 256;
+        i = i + 1;
+    }
+    return d;
+}
+
+fn rex(w: u32, r: u32, x: u32, b: u32) -> u32 {
+    let v: u32 = 64 + w * 8 + (r / 8) * 4 + (x / 8) * 2 + (b / 8);
+    if v == 64 {
+        return 0;
+    }
+    return v;
+}
+
+fn em_rex(out: ptr, c: u32, v: u32) -> u32 {
+    if v == 0 {
+        return c;
+    }
+    return e1(out, c, v);
+}
+
+fn em_mem(out: ptr, c: u32, reg_field: u32, base: u32, disp: u32) -> u32 {
+    let d: u32 = e1(out, c, 128 + (reg_field % 8) * 8 + (base % 8));
+    if base % 8 == 4 {
+        d = e1(out, d, 36);
+    }
+    return e4(out, d, disp);
+}
+
+fn em_modrm3(out: ptr, c: u32, reg: u32, rm: u32) -> u32 {
+    return e1(out, c, 192 + (reg % 8) * 8 + (rm % 8));
+}
+
+fn em_mov_rr(out: ptr, c: u32, dst: u32, src: u32, w: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(w, src, 0, dst));
+    d = e1(out, d, 137);
+    return em_modrm3(out, d, src, dst);
+}
+
+fn em_mov_ri64(out: ptr, c: u32, dst: u32, imm: u64) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, 0, 0, dst));
+    d = e1(out, d, 184 + dst % 8);
+    return e8(out, d, imm);
+}
+
+fn em_mov_ri32(out: ptr, c: u32, dst: u32, imm: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(0, 0, 0, dst));
+    d = e1(out, d, 184 + dst % 8);
+    return e4(out, d, imm);
+}
+
+fn em_mov_rm(out: ptr, c: u32, dst: u32, base: u32, disp: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, dst, 0, base));
+    d = e1(out, d, 139);
+    return em_mem(out, d, dst, base, disp);
+}
+
+fn em_mov_mr(out: ptr, c: u32, base: u32, disp: u32, src: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, src, 0, base));
+    d = e1(out, d, 137);
+    return em_mem(out, d, src, base, disp);
+}
+
+fn em_lea(out: ptr, c: u32, dst: u32, base: u32, disp: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, dst, 0, base));
+    d = e1(out, d, 141);
+    return em_mem(out, d, dst, base, disp);
+}
+
+fn em_alu_rr(out: ptr, c: u32, op: u32, dst: u32, src: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, src, 0, dst));
+    d = e1(out, d, op);
+    return em_modrm3(out, d, src, dst);
+}
+
+fn em_alu_ri(out: ptr, c: u32, digit: u32, dst: u32, imm: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, 0, 0, dst));
+    d = e1(out, d, 129);
+    d = em_modrm3(out, d, digit, dst);
+    return e4(out, d, imm);
+}
+
+fn em_imul_rr(out: ptr, c: u32, dst: u32, src: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(1, dst, 0, src));
+    d = e1(out, d, 15);
+    d = e1(out, d, 175);
+    return em_modrm3(out, d, dst, src);
+}
+
+fn em_push(out: ptr, c: u32, reg: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(0, 0, 0, reg));
+    return e1(out, d, 80 + reg % 8);
+}
+
+fn em_load_sized(out: ptr, c: u32, reg: u32, base: u32, disp: u32, size: u32) -> u32 {
+    if size == 8 {
+        return em_mov_rm(out, c, reg, base, disp);
+    }
+    let d: u32 = em_rex(out, c, rex(0, reg, 0, base));
+    if size == 4 {
+        d = e1(out, d, 139);
+        return em_mem(out, d, reg, base, disp);
+    }
+    d = e1(out, d, 15);
+    if size == 1 {
+        d = e1(out, d, 182);
+    } else {
+        d = e1(out, d, 183);
+    }
+    return em_mem(out, d, reg, base, disp);
+}
+
+fn em_store_sized(out: ptr, c: u32, base: u32, disp: u32, src: u32, size: u32) -> u32 {
+    if size == 8 {
+        return em_mov_mr(out, c, base, disp, src);
+    }
+    let d: u32 = c;
+    if size == 2 {
+        d = e1(out, d, 102);
+    }
+    d = em_rex(out, d, rex(0, src, 0, base));
+    if size == 1 {
+        d = e1(out, d, 136);
+    } else {
+        d = e1(out, d, 137);
+    }
+    return em_mem(out, d, src, base, disp);
+}
+
+fn em_zext64(out: ptr, c: u32, reg: u32, size: u32) -> u32 {
+    if size >= 8 {
+        return c;
+    }
+    if size == 4 {
+        return em_mov_rr(out, c, reg, reg, 0);
+    }
+    let d: u32 = em_rex(out, c, rex(1, reg, 0, reg));
+    d = e1(out, d, 15);
+    if size == 2 {
+        d = e1(out, d, 183);
+    } else {
+        d = e1(out, d, 182);
+    }
+    return em_modrm3(out, d, reg, reg);
+}
+
+fn em_sext64(out: ptr, c: u32, reg: u32, size: u32) -> u32 {
+    if size >= 8 {
+        return c;
+    }
+    let d: u32 = em_rex(out, c, rex(1, reg, 0, reg));
+    if size == 4 {
+        d = e1(out, d, 99);
+        return em_modrm3(out, d, reg, reg);
+    }
+    d = e1(out, d, 15);
+    if size == 2 {
+        d = e1(out, d, 191);
+    } else {
+        d = e1(out, d, 190);
+    }
+    return em_modrm3(out, d, reg, reg);
+}
+
+fn em_copy(out: ptr, c: u32, dst: u32, src: u32, n: u32) -> u32 {
+    let d: u32 = em_mov_rr(out, c, RDI, dst, 1);
+    d = em_mov_rr(out, d, RSI, src, 1);
+    d = em_mov_ri64(out, d, RCX, n as u64);
+    d = e1(out, d, 243);
+    return e1(out, d, 164);
+}
+
+fn em_call_lbl(out: ptr, c: u32, tab: ptr, noff: u32, nlen: u32) -> u32 {
+    let d: u32 = e1(out, c, 232);
+    fix_add(tab, d, 0, noff, nlen);
+    return e4(out, d, 0);
+}
+
+fn em_mov_abs(out: ptr, c: u32, tab: ptr, reg: u32, noff: u32, nlen: u32) -> u32 {
+    let d: u32 = em_mov_ri64(out, c, reg, 0);
+    fix_add(tab, d - 8, 1, noff, nlen);
+    return d;
+}
+
+// ---------------------------------------------------------------- 取值 / 存值
+
+fn emit_get(tab: ptr, out: ptr, c: u32, t: ptr, tyo: u32, tyl: u32,
+            vo: u32, vl: u32, reg: u32) -> u32 {
+    let sz: u32 = ty_size(t, tyo, tyl);
+    let c0: u32 = load8(t, vo);
+    let d: u32 = c;
+    if c0 == 37 {
+        let so: u32 = slot_find(tab, t, vo, vl);
+        d = em_load_sized(out, d, reg, RBP, so, sz);
+    } else {
+        if c0 == 64 {
+            d = em_mov_abs(out, d, tab, reg, vo, vl);
+            if sz != 8 {
+                d = em_load_sized(out, d, reg, reg, 0, sz);
+            }
+        } else {
+            if c0 == 116 {
+                d = em_mov_ri32(out, d, reg, 1);
+            } else {
+                if c0 == 102 || c0 == 110 || c0 == 117 {
+                    d = em_mov_ri32(out, d, reg, 0);
+                } else {
+                    let nv: u64 = num_at(t, vo, vo + vl);
+                    d = em_mov_ri64(out, d, reg, lo32(nv) as u64);
+                }
+            }
+        }
+    }
+    return em_zext64(out, d, reg, sz);
+}
+
+fn emit_get_signed(tab: ptr, out: ptr, c: u32, t: ptr, tyo: u32, tyl: u32,
+                   vo: u32, vl: u32, reg: u32) -> u32 {
+    let d: u32 = emit_get(tab, out, c, t, tyo, tyl, vo, vl, reg);
+    return em_sext64(out, d, reg, ty_size(t, tyo, tyl));
+}
+
+fn emit_get_ptr(tab: ptr, out: ptr, c: u32, t: ptr, vo: u32, vl: u32, reg: u32) -> u32 {
+    let so: u32 = alloc_find(tab, t, vo, vl);
+    if so != NO {
+        return em_lea(out, c, reg, RBP, so);
+    }
+    let s2: u32 = slot_find(tab, t, vo, vl);
+    if s2 != NO {
+        return em_mov_rm(out, c, reg, RBP, s2);
+    }
+    if load8(t, vo) == 64 {
+        return em_mov_abs(out, c, tab, reg, vo, vl);
+    }
+    return c;
+}
+
+fn emit_agg_addr(tab: ptr, out: ptr, c: u32, t: ptr, vo: u32, vl: u32, reg: u32) -> u32 {
+    let so: u32 = alloc_find(tab, t, vo, vl);
+    if so != NO {
+        return em_lea(out, c, reg, RBP, so);
+    }
+    let s2: u32 = slot_find(tab, t, vo, vl);
+    if s2 != NO {
+        return em_lea(out, c, reg, RBP, s2);
+    }
+    if load8(t, vo) == 64 {
+        return em_mov_abs(out, c, tab, reg, vo, vl);
+    }
+    return c;
+}
+
+fn emit_put(tab: ptr, out: ptr, c: u32, t: ptr, doff: u32, dlen: u32, reg: u32) -> u32 {
+    let so: u32 = slot_find(tab, t, doff, dlen);
+    return em_mov_mr(out, c, RBP, so, reg);
+}
+
+/// 解析 `类型 值` 直接写进调用者给的记录 (tyo/tyl/vo/vl); 返回其后游标。
+fn opnd_rec(tab: ptr, t: ptr, i: u32, n: u32, rec: u32) -> u32 {
+    let ts: u64 = type_span(t, i, n);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let j: u32 = skip_sp(t, to + tl, n);
+    store32(tab, rec, to);
+    store32(tab, rec + 4, tl);
+    store32(tab, rec + 8, j);
+    let ve: u32 = word_end(t, j, n);
+    store32(tab, rec + 12, ve - j);
+    return ve;
+}
+
+/// 解析 `类型 值` 进格; 返回其后游标。
+fn opnd(tab: ptr, t: ptr, i: u32, n: u32) -> u32 {
+    let ts: u64 = type_span(t, i, n);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let j: u32 = skip_sp(t, to + tl, n);
+    let ve: u32 = word_end(t, j, n);
+    store32(tab, C_TYOFF, to);
+    store32(tab, C_TYLEN, tl);
+    store32(tab, C_VLOFF, j);
+    store32(tab, C_VLLEN, ve - j);
+    return ve;
+}
+
+fn skip_comma(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = skip_sp(t, i, n);
+    if j < n && load8(t, j) == 44 {
+        j = skip_sp(t, j + 1, n);
+    }
+    return j;
+}
+
+// ---------------------------------------------------------------- 结果尺寸
+
+fn size_after_to(t: ptr, i: u32, n: u32) -> u32 {
+    let le: u32 = line_end(t, i, n);
+    let j: u32 = i;
+    let found: u32 = 0;
+    while j < le && found == 0 {
+        if lit_at(t, j, le, " to ") == 1 {
+            found = 1;
+        } else {
+            j = j + 1;
+        }
+    }
+    if found == 0 {
+        return 0;
+    }
+    let ts: u64 = type_span(t, j + 4, le);
+    return ty_size(t, hi32(ts), lo32(ts));
+}
+
+fn result_size(t: ptr, i: u32, n: u32) -> u32 {
+    if lit_at(t, i, n, "alloca ") == 1 {
+        return 8;
+    }
+    if lit_at(t, i, n, "load ") == 1 {
+        let ts: u64 = type_span(t, i + 5, n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
+    if lit_at(t, i, n, "getelementptr") == 1 {
+        return 8;
+    }
+    if lit_at(t, i, n, "extractvalue ") == 1 {
+        let ts: u64 = type_span(t, i + 13, n);
+        let fo: u32 = hi32(ts);
+        let fl: u32 = lo32(ts);
+        let k: u32 = skip_comma(t, fo + fl, n);
+        let nx: u64 = num_at(t, k, n);
+        let fts: u64 = field_ty(t, fo, fl, lo32(nx));
+        return ty_size(t, hi32(fts), lo32(fts));
+    }
+    if lit_at(t, i, n, "insertvalue ") == 1 {
+        let ts: u64 = type_span(t, i + 12, n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
+    if lit_at(t, i, n, "call ") == 1 {
+        let j: u32 = skip_sp(t, i + 5, n);
+        if lit_at(t, j, n, "void") == 1 {
+            return 0;
+        }
+        let ts: u64 = type_span(t, j, n);
+        return ty_size(t, hi32(ts), lo32(ts));
+    }
+    if lit_at(t, i, n, "trunc ") == 1 || lit_at(t, i, n, "zext ") == 1
+        || lit_at(t, i, n, "sext ") == 1 || lit_at(t, i, n, "ptrtoint ") == 1
+        || lit_at(t, i, n, "inttoptr ") == 1 {
+        return size_after_to(t, i, n);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 全局收集
+
+/// 收集一个全局声明 (行 [ls,le)); 返回其数据字节数, 并把数据写进 gb。
+fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
+    let noff: u32 = ls;                       // 含前导 '@' —— 与参考实现的 g.name 同名
+    let nlen: u32 = word_end(t, noff, le) - noff;
+    let i: u32 = skip_sp(t, word_end(t, noff, le), le);
+    // 跳过 '='
+    let j: u32 = skip_sp(t, i + 1, le);
+    // 跳过限定词
+    let go: u32 = 1;
+    while go == 1 {
+        let we: u32 = word_end(t, j, le);
+        if lit_at(t, j, we, "private") == 1 || lit_at(t, j, we, "internal") == 1
+            || lit_at(t, j, we, "external") == 1 || lit_at(t, j, we, "unnamed_addr") == 1
+            || lit_at(t, j, we, "dso_local") == 1 || lit_at(t, j, we, "constant") == 1
+            || lit_at(t, j, we, "global") == 1 || lit_at(t, j, we, "common") == 1 {
+            j = skip_sp(t, we, le);
+        } else {
+            go = 0;
+        }
+    }
+    let ts: u64 = type_span(t, j, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let sz: u32 = ty_size(t, to, tl);
+    let k: u32 = skip_sp(t, to + tl, le);
+    let kt: u32 = load8(t, k);
+    let doff: u32 = align_to(cell(tab, C_GB), 8);
+    let zero: u32 = 0;
+    if kt == 99 && load8(t, k + 1) == 34 {
+        // c"..."
+        let q: u32 = k + 2;
+        let o: u32 = doff;
+        while q < le && load8(t, q) != 34 {
+            if load8(t, q) == 92 {
+                let h1: u32 = hexv(load8(t, q + 1));
+                let h2: u32 = hexv(load8(t, q + 2));
+                store8(gb, o, (h1 * 16 + h2) as u8);
+                o = o + 1;
+                q = q + 3;
+            } else {
+                store8(gb, o, load8(t, q) as u8);
+                o = o + 1;
+                q = q + 1;
+            }
+        }
+        sz = o - doff;
+    } else {
+        if lit_at(t, k, le, "zeroinitializer") == 1 {
+            sz = ty_size(t, to, tl);
+        } else {
+            let nv: u64 = num_at(t, k, le);
+            let v: u32 = lo32(nv);
+            let o: u32 = doff;
+            let b: u32 = 0;
+            while b < sz {
+                store8(gb, o + b, ((v / pow256(b)) % 256) as u8);
+                b = b + 1;
+            }
+        }
+    }
+    // 全零 -> bss (与参考实现一致: 判据是**内容**, 不是 zeroinitializer 关键字)
+    let nz: u32 = 0;
+    let q: u32 = 0;
+    while q < sz {
+        if load8(gb, doff + q) != 0 {
+            nz = 1;
+        }
+        q = q + 1;
+    }
+    if nz == 0 {
+        zero = 1;
+    } else {
+        setcell(tab, C_GB, doff + sz);
+    }
+    let gi: u32 = cell(tab, C_NG);
+    let gbase: u32 = TB_G + gi * 32;
+    store32(tab, gbase + G_NOFF, noff);
+    store32(tab, gbase + G_NLEN, nlen);
+    store32(tab, gbase + G_TOFF, to);
+    store32(tab, gbase + G_TLEN, tl);
+    store32(tab, gbase + G_SIZE, sz);
+    store32(tab, gbase + G_DOFF, doff);
+    store32(tab, gbase + G_ADDR, 0);
+    store32(tab, gbase + G_ZERO, zero);
+    setcell(tab, C_NG, gi + 1);
+    return sz;
+}
+
+fn hexv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return 0;
+}
+
+fn pow256(b: u32) -> u32 {
+    let v: u32 = 1;
+    let i: u32 = 0;
+    while i < b {
+        v = v * 256;
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 第一遍: 扫全文, 收集全局。lc = 行数。
+fn collect_globals(tab: ptr, t: ptr, n: u32, gb: ptr) {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if ls < le && load8(t, ls) == 64 {
+            one_global(tab, t, gb, ls, le);
+        }
+        i = le + 1;
+    }
+}
+
+/// 第二遍: 定位 (有内容的进 data, 全零的进 bss), 并登记成标签。
+fn place_globals(tab: ptr, t: ptr) {
+    let n: u32 = cell(tab, C_NG);
+    let dlen: u32 = align_to(cell(tab, C_GB), 8);
+    let bss: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let gbase: u32 = TB_G + i * 32;
+        let sz: u32 = load32(tab, gbase + G_SIZE);
+        let z: u32 = load32(tab, gbase + G_ZERO);
+        if z == 1 {
+            bss = align_to(bss, 8);
+            store32(tab, gbase + G_ADDR, DATA_VADDR + dlen + bss);
+            bss = bss + align_to(sz, 8);
+        } else {
+            store32(tab, gbase + G_ADDR, DATA_VADDR + load32(tab, gbase + G_DOFF));
+        }
+        i = i + 1;
+    }
+    setcell(tab, C_BSS, bss);
+    // 登记标签
+    i = 0;
+    while i < n {
+        let gbase: u32 = TB_G + i * 32;
+        lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN),
+                load32(tab, gbase + G_ADDR));
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 指令降级
+
+fn line_dest(t: ptr, ls: u32, le: u32) -> u64 {
+    let i: u32 = skip_sp(t, ls, le);
+    if i >= le {
+        return 0;
+    }
+    if load8(t, i) != 37 {
+        return 0;
+    }
+    let we: u32 = word_end(t, i, le);
+    let j: u32 = skip_sp(t, we, le);
+    if j < le && load8(t, j) == 61 {
+        return pk16(i, we - i);
+    }
+    return 0;
+}
+
+fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32) -> u32 {
+    let i: u32 = skip_sp(t, ls, le);
+    if i >= le {
+        return c;
+    }
+    if load8(t, i) == 59 {
+        return c;
+    }
+    if load8(t, i) == 125 {
+        return c;
+    }
+    // 基本块标签 `name:` —— 本档没有分支, 只跳过 (br/phi 是下一档)
+    let e: u32 = le;
+    while e > i && (load8(t, e - 1) == 32 || load8(t, e - 1) == 9 || load8(t, e - 1) == 13) {
+        e = e - 1;
+    }
+    if e > i && load8(t, e - 1) == 58 {
+        return c;
+    }
+    if lit_at(t, i, le, "alloca ") == 1 {
+        return c;
+    }
+    if lit_at(t, i, le, "store ") == 1 {
+        return do_store(tab, out, c, t, i + 6, le);
+    }
+    if lit_at(t, i, le, "load ") == 1 {
+        return do_load(tab, out, c, t, i + 5, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "getelementptr") == 1 {
+        return do_gep(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "extractvalue ") == 1 {
+        return do_extract(tab, out, c, t, i + 13, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "insertvalue ") == 1 {
+        return do_insert(tab, out, c, t, i + 12, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "trunc ") == 1 || lit_at(t, i, le, "zext ") == 1
+        || lit_at(t, i, le, "sext ") == 1 {
+        return do_cast(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "ptrtoint ") == 1 {
+        return do_ptrcast(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 0);
+    }
+    if lit_at(t, i, le, "inttoptr ") == 1 {
+        return do_ptrcast(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 1);
+    }
+    if lit_at(t, i, le, "call ") == 1 {
+        return do_call(tab, out, c, t, i + 5, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+    }
+    if lit_at(t, i, le, "ret") == 1 {
+        return do_ret(tab, out, c, t, i, le);
+    }
+    if lit_at(t, i, le, "unreachable") == 1 {
+        let d: u32 = e1(out, c, 15);
+        return e1(out, d, 11);
+    }
+    return fail_line(t, ls, le);
+}
+
+fn fetch_ptr_operand(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, reg: u32) -> u32 {
+    let pe: u32 = opnd(tab, t, i, le);
+    return emit_get_ptr(tab, out, c, t, load32(tab, C_VLOFF), load32(tab, C_VLLEN), reg);
+}
+
+fn do_load(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let ts: u64 = type_span(t, i, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let j: u32 = skip_comma(t, to + tl, le);
+    if is_agg(t, to, tl) == 1 {
+        let d: u32 = emit_agg_addr(tab, out, c, t, doff, dlen, RDI);
+        d = fetch_ptr_operand(tab, out, d, t, j, le, RSI);
+        return em_copy(out, d, RDI, RSI, ty_size(t, to, tl));
+    }
+    let sz: u32 = ty_size(t, to, tl);
+    let d: u32 = fetch_ptr_operand(tab, out, c, t, j, le, RAX);
+    d = em_load_sized(out, d, RAX, RAX, 0, sz);
+    d = em_zext64(out, d, RAX, sz);
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_store(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
+    let ts: u64 = type_span(t, i, le);
+    let to: u32 = hi32(ts);
+    let tl: u32 = lo32(ts);
+    let vs: u32 = skip_sp(t, i + tl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let k: u32 = skip_comma(t, ve, le);
+    if is_agg(t, to, tl) == 1 {
+        let d: u32 = fetch_ptr_operand(tab, out, c, t, k, le, RDI);
+        d = emit_agg_addr(tab, out, d, t, vs, ve - vs, RSI);
+        return em_copy(out, d, RDI, RSI, ty_size(t, to, tl));
+    }
+    let sz: u32 = ty_size(t, to, tl);
+    let d: u32 = emit_get(tab, out, c, t, to, tl, vs, ve - vs, RAX);
+    d = fetch_ptr_operand(tab, out, d, t, k, le, RCX);
+    return em_store_sized(out, d, RCX, 0, RAX, sz);
+}
+
+fn do_gep(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let j: u32 = skip_sp(t, i + 13, le);
+    if lit_at(t, j, le, "inbounds") == 1 {
+        j = skip_sp(t, j + 8, le);
+    }
+    let ts: u64 = type_span(t, j, le);
+    let co: u32 = hi32(ts);
+    let cl: u32 = lo32(ts);
+    let k: u32 = skip_comma(t, co + cl, le);
+    let pe: u32 = opnd(tab, t, k, le);
+    let d: u32 = emit_get_ptr(tab, out, c, t, load32(tab, C_VLOFF), load32(tab, C_VLLEN), RAX);
+    let cur_o: u32 = co;
+    let cur_l: u32 = cl;
+    let k2: u32 = skip_comma(t, pe, le);
+    while k2 < le {
+        let ie: u32 = opnd(tab, t, k2, le);
+        let vo: u32 = load32(tab, C_VLOFF);
+        let vl: u32 = load32(tab, C_VLLEN);
+        let to: u32 = load32(tab, C_TYOFF);
+        let tl: u32 = load32(tab, C_TYLEN);
+        let step: u32 = 0;
+        if is_agg(t, cur_o, cur_l) == 1 {
+            if load8(t, cur_o) == 91 {
+                let es: u64 = arr_elem(t, cur_o, cur_l);
+                step = ty_size(t, hi32(es), lo32(es));
+                cur_o = hi32(es);
+                cur_l = lo32(es);
+            }
+        } else {
+            step = ty_size(t, cur_o, cur_l);
+        }
+        d = emit_get(tab, out, d, t, to, tl, vo, vl, RCX);
+        if step != 1 {
+            d = em_mov_ri32(out, d, RDX, step);
+            d = em_imul_rr(out, d, RCX, RDX);
+        }
+        d = em_alu_rr(out, d, 1, RAX, RCX);
+        k2 = skip_comma(t, ie, le);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_extract(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let ts: u64 = type_span(t, i, le);
+    let ao: u32 = hi32(ts);
+    let al: u32 = lo32(ts);
+    let j: u32 = skip_sp(t, ao + al, le);
+    let ve: u32 = word_end(t, j, le);
+    let k: u32 = skip_comma(t, ve, le);
+    let nx: u64 = num_at(t, k, le);
+    let idx: u32 = lo32(nx);
+    let off: u32 = field_off(t, ao, al, idx);
+    let fts: u64 = field_ty(t, ao, al, idx);
+    let fo: u32 = hi32(fts);
+    let fl: u32 = lo32(fts);
+    let d: u32 = c;
+    if is_agg(t, fo, fl) == 1 {
+        d = emit_agg_addr(tab, out, d, t, doff, dlen, RDI);
+        d = emit_agg_addr(tab, out, d, t, j, ve - j, RAX);
+        d = em_lea(out, d, RSI, RAX, off);
+        return em_copy(out, d, RDI, RSI, ty_size(t, fo, fl));
+    }
+    let fs: u32 = ty_size(t, fo, fl);
+    d = emit_agg_addr(tab, out, d, t, j, ve - j, RAX);
+    d = em_load_sized(out, d, RAX, RAX, off, fs);
+    d = em_zext64(out, d, RAX, fs);
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_insert(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let ts: u64 = type_span(t, i, le);
+    let ao: u32 = hi32(ts);
+    let al: u32 = lo32(ts);
+    let sz: u32 = ty_size(t, ao, al);
+    let j: u32 = skip_sp(t, ao + al, le);
+    let ae: u32 = word_end(t, j, le);
+    let k: u32 = skip_comma(t, ae, le);
+    let ety: u64 = type_span(t, k, le);
+    let eo: u32 = hi32(ety);
+    let el: u32 = lo32(ety);
+    let evs: u32 = skip_sp(t, eo + el, le);
+    let eve: u32 = word_end(t, evs, le);
+    let k2: u32 = skip_comma(t, eve, le);
+    let nx: u64 = num_at(t, k2, le);
+    let off: u32 = field_off(t, ao, al, lo32(nx));
+    let so: u32 = slot_find(tab, t, doff, dlen);
+    let d: u32 = c;
+    if lit_at(t, j, ae, "undef") == 1 {
+        d = em_lea(out, d, RDI, RBP, so);
+        d = em_mov_ri64(out, d, RCX, sz as u64);
+        d = em_mov_ri32(out, d, RAX, 0);
+        d = e1(out, d, 243);
+        d = e1(out, d, 170);
+    } else {
+        d = em_lea(out, d, RDI, RBP, so);
+        d = emit_agg_addr(tab, out, d, t, j, ae - j, RSI);
+        d = em_copy(out, d, RDI, RSI, sz);
+    }
+    if is_agg(t, eo, el) == 1 {
+        d = em_lea(out, d, RDI, RBP, so);
+        if off != 0 {
+            d = em_alu_ri(out, d, ADD, RDI, off);
+        }
+        d = emit_agg_addr(tab, out, d, t, evs, eve - evs, RSI);
+        return em_copy(out, d, RDI, RSI, ty_size(t, eo, el));
+    }
+    let es: u32 = ty_size(t, eo, el);
+    d = emit_get(tab, out, d, t, eo, el, evs, eve - evs, RAX);
+    return em_store_sized(out, d, RBP, so + off, RAX, es);
+}
+
+fn nargs_of(t: ptr, lp: u32, rp: u32) -> u32 {
+    let a: u32 = skip_sp(t, lp + 1, rp);
+    let n: u32 = 0;
+    while a < rp {
+        let ts: u64 = type_span(t, a, rp);
+        let j: u32 = skip_sp(t, hi32(ts) + lo32(ts), rp);
+        let ve: u32 = word_end(t, j, rp);
+        a = skip_comma(t, ve, rp);
+        n = n + 1;
+    }
+    return n;
+}
+
+/// 第 k 个实参的起点 (越界返回 rp)。
+fn arg_start(t: ptr, lp: u32, rp: u32, k: u32) -> u32 {
+    let a: u32 = skip_sp(t, lp + 1, rp);
+    let i: u32 = 0;
+    while i < k && a < rp {
+        let ts: u64 = type_span(t, a, rp);
+        let j: u32 = skip_sp(t, hi32(ts) + lo32(ts), rp);
+        let ve: u32 = word_end(t, j, rp);
+        a = skip_comma(t, ve, rp);
+        i = i + 1;
+    }
+    return a;
+}
+
+/// 实参列表的括号区间: 写入 lp/rp 并返回; 找不到返回 0。
+fn arg_parens(t: ptr, from: u32, le: u32) -> u64 {
+    let lp: u32 = 0;
+    let k: u32 = from;
+    while k < le {
+        if load8(t, k) == 40 && lp == 0 {
+            lp = k;
+        }
+        k = k + 1;
+    }
+    if lp == 0 {
+        return 0;
+    }
+    let rp: u32 = lp;
+    let k2: u32 = lp;
+    while k2 < le {
+        if load8(t, k2) == 41 {
+            rp = k2;
+        }
+        k2 = k2 + 1;
+    }
+    return pk16(lp, rp);
+}
+
+fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let j: u32 = skip_sp(t, i, le);
+    let has_ret: u32 = 1;
+    if lit_at(t, j, le, "void") == 1 {
+        has_ret = 0;
+        j = skip_sp(t, j + 4, le);
+    } else {
+        let ts: u64 = type_span(t, j, le);
+        j = skip_sp(t, hi32(ts) + lo32(ts), le);
+    }
+    if lit_at(t, j, le, "asm ") == 1 {
+        return do_call_asm(tab, out, c, t, j, le, doff, dlen);
+    }
+    let cs: u32 = j;
+    let ce: u32 = word_end(t, j, le);
+    let pr: u64 = arg_parens(t, ce, le);
+    let lp: u32 = hi32(pr);
+    let rp: u32 = lo32(pr);
+    let nargs: u32 = nargs_of(t, lp, rp);
+    let total: u32 = 0;
+    let q: u32 = 0;
+    while q < nargs {
+        let a2: u32 = arg_start(t, lp, rp, q);
+        let ts: u64 = type_span(t, a2, rp);
+        let to: u32 = hi32(ts);
+        let tl: u32 = lo32(ts);
+        if is_agg(t, to, tl) == 1 {
+            total = total + align_to(ty_size(t, to, tl), 8);
+        } else {
+            total = total + 8;
+        }
+        q = q + 1;
+    }
+    let d: u32 = c;
+    q = nargs;
+    while q > 0 {
+        q = q - 1;
+        let a2: u32 = arg_start(t, lp, rp, q);
+        let ts: u64 = type_span(t, a2, rp);
+        let to: u32 = hi32(ts);
+        let tl: u32 = lo32(ts);
+        let vs: u32 = skip_sp(t, to + tl, rp);
+        let ve: u32 = word_end(t, vs, rp);
+        if is_agg(t, to, tl) == 1 {
+            d = em_alu_ri(out, d, SUB, RSP, align_to(ty_size(t, to, tl), 8));
+            d = em_mov_rr(out, d, RDI, RSP, 1);
+            d = emit_agg_addr(tab, out, d, t, vs, ve - vs, RSI);
+            d = em_copy(out, d, RDI, RSI, ty_size(t, to, tl));
+        } else {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+            d = em_push(out, d, RAX);
+        }
+    }
+    if lit_at(t, cs, ce, "@llvm.trap") == 1 {
+        d = e1(out, d, 15);
+        d = e1(out, d, 11);
+    } else {
+        d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+    }
+    if total != 0 {
+        d = em_alu_ri(out, d, ADD, RSP, total);
+    }
+    if has_ret == 1 {
+        d = emit_put(tab, out, d, t, doff, dlen, RAX);
+    }
+    return d;
+}
+
+/// 内联汇编 syscall: `asm sideeffect "syscall", "={ax},{ax},{di},...", (args)`。
+fn asm_code(t: ptr, s: u32, e: u32) -> u32 {
+    if e - s == 2 && load8(t, s) == 97 && load8(t, s + 1) == 120 {
+        return 1;                                   // ax
+    }
+    if e - s == 2 && load8(t, s) == 100 && load8(t, s + 1) == 105 {
+        return 2;                                   // di
+    }
+    if e - s == 2 && load8(t, s) == 115 && load8(t, s + 1) == 105 {
+        return 3;                                   // si
+    }
+    if e - s == 2 && load8(t, s) == 100 && load8(t, s + 1) == 120 {
+        return 4;                                   // dx
+    }
+    if e - s == 3 && load8(t, s) == 114 && load8(t, s + 1) == 49 && load8(t, s + 2) == 48 {
+        return 5;                                   // r10
+    }
+    if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 56 {
+        return 6;                                   // r8
+    }
+    return 0;
+}
+
+fn asm_reg(code: u32) -> u32 {
+    if code == 1 {
+        return RAX;
+    }
+    if code == 2 {
+        return RDI;
+    }
+    if code == 3 {
+        return RSI;
+    }
+    if code == 4 {
+        return RDX;
+    }
+    if code == 5 {
+        return 10;
+    }
+    return 8;
+}
+
+/// 第 k 个实参对应的寄存器码 (约束里按顺序数, 跳过 ={..} 与 ~{..})。
+fn arg_code(t: ptr, p3: u32, p4: u32, k: u32) -> u32 {
+    let ci: u32 = p3 + 1;
+    let ai: u32 = 0;
+    let out: u32 = 0;
+    while ci < p4 {
+        if load8(t, ci) == 123 {
+            let re: u32 = ci + 1;
+            let re2: u32 = re;
+            while re2 < p4 && load8(t, re2) != 125 {
+                re2 = re2 + 1;
+            }
+            if ci >= p3 + 2 {
+                let prev: u32 = load8(t, ci - 1);
+                if prev != 61 && prev != 126 {
+                    if ai == k {
+                        out = asm_code(t, re, re2);
+                    }
+                    ai = ai + 1;
+                }
+            }
+            ci = re2 + 1;
+        } else {
+            ci = ci + 1;
+        }
+    }
+    return out;
+}
+
+fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    // 前四个引号: "syscall" 与 "约束"
+    let nq: u32 = 0;
+    let p3: u32 = 0;
+    let p4: u32 = 0;
+    let k: u32 = i;
+    while k < le {
+        if load8(t, k) == 34 {
+            if nq == 2 {
+                p3 = k;
+            }
+            if nq == 3 {
+                p4 = k;
+            }
+            nq = nq + 1;
+        }
+        k = k + 1;
+    }
+    if p3 == 0 || p4 == 0 {
+        return fail("内联汇编的约束串解析不了");
+    }
+    let pr: u64 = arg_parens(t, p4, le);
+    let lp: u32 = hi32(pr);
+    let rp: u32 = lo32(pr);
+    let nargs: u32 = nargs_of(t, lp, rp);
+    let d: u32 = c;
+    // rax 最后写, 其余先写
+    let code: u32 = 2;
+    while code <= 6 {
+        let q: u32 = 0;
+        while q < nargs {
+            if arg_code(t, p3, p4, q) == code {
+                let a2: u32 = arg_start(t, lp, rp, q);
+                let ts: u64 = type_span(t, a2, rp);
+                let to: u32 = hi32(ts);
+                let tl: u32 = lo32(ts);
+                let vs: u32 = skip_sp(t, to + tl, rp);
+                let ve: u32 = word_end(t, vs, rp);
+                d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, asm_reg(code));
+            }
+            q = q + 1;
+        }
+        code = code + 1;
+    }
+    let q2: u32 = 0;
+    while q2 < nargs {
+        if arg_code(t, p3, p4, q2) == 1 {
+            let a2: u32 = arg_start(t, lp, rp, q2);
+            let ts: u64 = type_span(t, a2, rp);
+            let to: u32 = hi32(ts);
+            let tl: u32 = lo32(ts);
+            let vs: u32 = skip_sp(t, to + tl, rp);
+            let ve: u32 = word_end(t, vs, rp);
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        }
+        q2 = q2 + 1;
+    }
+    d = e1(out, d, 15);
+    d = e1(out, d, 5);
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_cast(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+    let kind: u32 = 0;
+    let bs: u32 = i + 6;
+    if lit_at(t, i, le, "zext ") == 1 {
+        kind = 1;
+        bs = i + 5;
+    }
+    if lit_at(t, i, le, "sext ") == 1 {
+        kind = 2;
+        bs = i + 5;
+    }
+    let fts: u64 = type_span(t, bs, le);
+    let fo: u32 = hi32(fts);
+    let fl: u32 = lo32(fts);
+    let vs: u32 = skip_sp(t, fo + fl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let tsz: u32 = size_after_to(t, i, le);
+    let fsz: u32 = ty_size(t, fo, fl);
+    let d: u32 = emit_get(tab, out, c, t, fo, fl, vs, ve - vs, RAX);
+    if kind == 1 {
+        d = em_zext64(out, d, RAX, fsz);
+    }
+    if kind == 2 {
+        d = em_sext64(out, d, RAX, fsz);
+    }
+    if tsz < 8 {
+        d = em_zext64(out, d, RAX, tsz);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_ptrcast(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
+              to_ptr: u32) -> u32 {
+    let bs: u32 = i + 9;
+    if to_ptr == 1 {
+        bs = i + 8;
+    }
+    let fts: u64 = type_span(t, bs, le);
+    let fo: u32 = hi32(fts);
+    let fl: u32 = lo32(fts);
+    let vs: u32 = skip_sp(t, fo + fl, le);
+    let ve: u32 = word_end(t, vs, le);
+    let tsz: u32 = size_after_to(t, i, le);
+    let d: u32 = c;
+    if to_ptr == 1 {
+        d = emit_get(tab, out, d, t, fo, fl, vs, ve - vs, RAX);
+    } else {
+        d = emit_get_ptr(tab, out, d, t, vs, ve - vs, RAX);
+    }
+    if tsz < 8 {
+        d = em_zext64(out, d, RAX, tsz);
+    }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+fn do_ret(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
+    let j: u32 = skip_sp(t, i + 3, le);
+    let d: u32 = c;
+    if lit_at(t, j, le, "void") == 0 {
+        let ts: u64 = type_span(t, j, le);
+        let to: u32 = hi32(ts);
+        let tl: u32 = lo32(ts);
+        let vs: u32 = skip_sp(t, to + tl, le);
+        let ve: u32 = word_end(t, vs, le);
+        d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+    }
+    d = e1(out, d, 201);
+    return e1(out, d, 195);
+}
+
+// ---------------------------------------------------------------- 函数发射
+
+/// 本函数第一个 `{` 与末尾 `}` 之间的行区内, 规划帧 (槽 + alloca)。
+fn plan_frame(tab: ptr, t: ptr, fs: u32, fe: u32) {
+    let i: u32 = fs;
+    while i < fe {
+        let ls: u32 = skip_sp(t, i, fe);
+        let le: u32 = line_end(t, i, fe);
+        let dst: u64 = line_dest(t, ls, le);
+        if dst != 0 {
+            let do: u32 = hi32(dst);
+            let dl: u32 = lo32(dst);
+            let op: u32 = skip_sp(t, do + dl, le);
+            let op2: u32 = skip_sp(t, op + 1, le);
+            if lit_at(t, op2, le, "alloca ") == 1 {
+                let ts: u64 = type_span(t, op2 + 7, le);
+                let sz: u32 = ty_size(t, hi32(ts), lo32(ts));
+                let fr: u32 = align_to(cell(tab, C_FRAME), 8) + align_to(sz, 8);
+                setcell(tab, C_FRAME, fr);
+                alloc_put(tab, do, dl, 0 - fr, sz);
+            } else {
+                if slot_has(tab, t, do, dl) == 0 {
+                    let rs: u32 = result_size(t, op2, le);
+                    if rs != 0 {
+                        let fr: u32 = align_to(cell(tab, C_FRAME), 8) + align_to(rs, 8);
+                        setcell(tab, C_FRAME, fr);
+                        slot_put(tab, do, dl, 0 - fr);
+                    }
+                }
+            }
+        }
+        i = le + 1;
+    }
+}
+
+/// 函数头: `define [internal] RET @name(PARAMS) {`; 记下参数槽。
+fn plan_params(tab: ptr, t: ptr, ls: u32, le: u32) -> u32 {
+    let j: u32 = skip_sp(t, ls + 6, le);
+    if lit_at(t, j, le, "internal") == 1 {
+        j = skip_sp(t, j + 8, le);
+    }
+    if lit_at(t, j, le, "private") == 1 {
+        j = skip_sp(t, j + 7, le);
+    }
+    let rts: u64 = type_span(t, j, le);
+    let j2: u32 = skip_sp(t, hi32(rts) + lo32(rts), le);
+    let ns: u32 = j2 + 1;
+    let ne: u32 = word_end(t, ns, le);
+    let lp: u32 = skip_sp(t, ne, le);
+    let rp: u32 = le;
+    let k: u32 = lp;
+    while k < le {
+        if load8(t, k) == 41 {
+            rp = k;
+        }
+        k = k + 1;
+    }
+    let arg: u32 = 16;
+    let a: u32 = skip_sp(t, lp + 1, rp);
+    while a < rp {
+        let ae: u32 = opnd(tab, t, a, rp);
+        let to: u32 = load32(tab, C_TYOFF);
+        let tl: u32 = load32(tab, C_TYLEN);
+        let vs: u32 = load32(tab, C_VLOFF);
+        let vl: u32 = load32(tab, C_VLLEN);
+        let sz: u32 = ty_size(t, to, tl);
+        let esz: u32 = sz;
+        if esz < 8 {
+            esz = 8;
+        }
+        slot_put(tab, vs, vl, arg);
+        arg = arg + align_to(esz, 8);
+        a = skip_comma(t, ae, rp);
+    }
+    return ns;
+}
+
+// ---------------------------------------------------------------- 落盘与回填
+
+fn w32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+}
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let x: u64 = v;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, (x % 256) as u8);
+        x = x / 256;
+        i = i + 1;
+    }
+}
+
+/// 把回填表里的 rel32/abs64 落到代码缓冲上。
+fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
+    let n: u32 = cell(tab, C_NFIX);
+    let i: u32 = 0;
+    while i < n {
+        let base: u32 = TB_FIX + i * 24;
+        let site: u32 = load32(tab, base + F_SITE);
+        let kind: u32 = load32(tab, base + F_KIND);
+        let no: u32 = load32(tab, base + F_NOFF);
+        let nl: u32 = load32(tab, base + F_NLEN);
+        let addr: u32 = lbl_find(tab, t, no, nl);
+        if addr == NO {
+            wstr(2, "lomelf: 未定义的标签: ");
+            write_all(2, ptr_add(t, no), nl as u64);
+            wstr(2, "\n");
+            return die(1);
+        }
+        if kind == 1 {
+            w64(txt, site, addr as u64);
+        } else {
+            w32(txt, site, addr - (TEXT_VADDR + site + 4));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 组装 ELF: 头 + 两个 PT_LOAD。返回文件总长。
+fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u32) -> u32 {
+    let text_off: u32 = 4096;
+    let data_off: u32 = align_to(text_off + tlen, 4096);
+    let total: u32 = data_off + dlen;
+    // e_ident
+    store8(ob, 0, 127 as u8);
+    store8(ob, 1, 69 as u8);
+    store8(ob, 2, 76 as u8);
+    store8(ob, 3, 70 as u8);
+    store8(ob, 4, 2 as u8);
+    store8(ob, 5, 1 as u8);
+    store8(ob, 6, 1 as u8);
+    store8(ob, 7, 0 as u8);
+    let z: u32 = 8;
+    while z < 16 {
+        store8(ob, z, 0 as u8);
+        z = z + 1;
+    }
+    // e_type=2, e_machine=0x3E, e_version=1
+    store8(ob, 16, 2 as u8);
+    store8(ob, 17, 0 as u8);
+    store8(ob, 18, 62 as u8);
+    store8(ob, 19, 0 as u8);
+    w32(ob, 20, 1);
+    // e_entry = TEXT_VADDR (入口桩在代码缓冲起始处)
+    w64(ob, 24, TEXT_VADDR as u64);
+    // e_phoff = 64
+    w64(ob, 32, 64);
+    // e_shoff = 0
+    w64(ob, 40, 0);
+    // e_flags = 0
+    w32(ob, 48, 0);
+    // e_ehsize = 64
+    store8(ob, 52, 64 as u8);
+    store8(ob, 53, 0 as u8);
+    // e_phentsize = 56
+    store8(ob, 54, 56 as u8);
+    store8(ob, 55, 0 as u8);
+    // e_phnum = 2
+    store8(ob, 56, 2 as u8);
+    store8(ob, 57, 0 as u8);
+    // e_shentsize/e_shnum/e_shstrndx = 0
+    store8(ob, 58, 0 as u8);
+    store8(ob, 59, 0 as u8);
+    store8(ob, 60, 0 as u8);
+    store8(ob, 61, 0 as u8);
+    store8(ob, 62, 0 as u8);
+    store8(ob, 63, 0 as u8);
+    // phdr 0: text (R+X)
+    phdr(ob, 64, 5, text_off, TEXT_VADDR, tlen, tlen);
+    // phdr 1: data (R+W)
+    phdr(ob, 120, 6, data_off, DATA_VADDR, dlen, dlen + bss);
+    // 拷文本与数据
+    copy_n(ob, text_off, txt, 0, tlen);
+    copy_n(ob, data_off, gb, 0, dlen);
+    return total;
+}
+
+fn phdr(ob: ptr, at: u32, flags: u32, off: u32, vaddr: u32, filesz: u32, memsz: u32) {
+    w32(ob, at, 1);
+    w32(ob, at + 4, flags);
+    w64(ob, at + 8, off as u64);
+    w64(ob, at + 16, vaddr as u64);
+    w64(ob, at + 24, vaddr as u64);
+    w64(ob, at + 32, filesz as u64);
+    w64(ob, at + 40, memsz as u64);
+    w64(ob, at + 48, 4096);
+}
+
+fn copy_n(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 函数发射
+
+/// 入口桩: `call _start; mov eax,60; mov edi,0; syscall` —— 用户态入口不能 return。
+fn find_start(t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let r: u32 = NO;
+    while i + 6 < n {
+        if lit_at(t, i, n, "_start") == 1 {
+            if load8(t, i - 1) == 64 {
+                r = i;
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
+    let d: u32 = em_call_lbl(out, c, tab, ss, 6);
+    d = em_mov_ri32(out, d, RAX, 60);
+    d = em_mov_ri32(out, d, RDI, 0);
+    d = e1(out, d, 15);
+    return e1(out, d, 5);
+}
+
+fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: u32) -> u32 {
+    setcell(tab, C_NSLOT, 0);
+    setcell(tab, C_NALLOC, 0);
+    setcell(tab, C_FRAME, 0);
+    let ns: u32 = plan_params(tab, t, ls, le);
+    let ne: u32 = word_end(t, ns, le);
+    plan_frame(tab, t, bs, be);
+    lbl_add(tab, ns, ne - ns, TEXT_VADDR + c);
+    let d: u32 = e1(out, c, 85);          // push rbp
+    d = e1(out, d, 72);                   // REX.W
+    d = e1(out, d, 137);                  // mov rbp, rsp
+    d = e1(out, d, 229);
+    if cell(tab, C_FRAME) != 0 {
+        d = em_alu_ri(out, d, SUB, RSP, cell(tab, C_FRAME));
+    }
+    let i: u32 = bs;
+    while i < be {
+        let ls2: u32 = skip_sp(t, i, be);
+        let le2: u32 = line_end(t, i, be);
+        let dst: u64 = line_dest(t, ls2, le2);
+        store32(tab, C_DESTO, hi32(dst));
+        store32(tab, C_DESTL, lo32(dst));
+        if dst != 0 {
+            let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), le2);
+            let op2: u32 = skip_sp(t, op + 1, le2);
+            d = lower(tab, out, d, t, op2, le2);
+        } else {
+            d = lower(tab, out, d, t, ls2, le2);
+        }
+        i = le2 + 1;
+    }
+    return d;
+}
+
+fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {
+    let ss: u32 = find_start(t, n);
+    if ss == NO {
+        return fail("没有 _start 入口");
+    }
+    let d: u32 = em_entry_stub(out, c, tab, ss);
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if lit_at(t, ls, le, "define ") == 1 {
+            let bs: u32 = le + 1;
+            let bs2: u32 = bs;
+            let j: u32 = bs;
+            let be: u32 = bs;
+            let go: u32 = 1;
+            while j < n && go == 1 {
+                let je: u32 = line_end(t, j, n);
+                let js: u32 = skip_sp(t, j, je);
+                if js < je && load8(t, js) == 125 {
+                    be = je;
+                    go = 0;
+                } else {
+                    j = je + 1;
+                }
+            }
+            d = emit_func(tab, out, d, t, ls, le, bs2, be);
+            i = be + 1;
+        } else {
+            i = le + 1;
+        }
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------- 主程序
+
+fn wdec(fd: u64, tmp: ptr, v: u32) -> u64 {
+    let d: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        return write_all(fd, tmp, 1);
+    }
+    while x > 0 {
+        let dg: u32 = x % 10;
+        store8(tmp, d, (48 + dg) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let buf: ptr = ptr_add(tmp, 32);
+    let q: u32 = 0;
+    while q < d {
+        store8(buf, q, load8(tmp, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return write_all(fd, buf, d as u64);
+}
+
+fn _start() -> u32 {
+    let mem: ptr = sys_alloc(ARENA) as ptr;
+    if mem as u64 == 0 {
+        return fail("oom (brk 失败)");
+    }
+    let rc: u32 = run(mem);
+    return die(rc as u64);
+}
+
+fn run(mem: ptr) -> u32 {
+    let ab: ptr = ptr_add(mem, M_ARGV);
+    let a1: u64 = argv_n(ab, 8192, 1);
+    let o1: u64 = argv_n(ab, 8192, 2);
+    if a1 == 0 || o1 == 0 {
+        wstr(2, "用法: lomelf IN.ll OUT\n");
+        return die(2);
+    }
+    let inb: ptr = ptr_add(mem, M_IN);
+    let ino: u32 = hi32(a1);
+    let inn: u32 = lo32(a1);
+    let oo: u32 = hi32(o1);
+    let ol: u32 = lo32(o1);
+    // 先把两个路径拷到稳定缓冲 (argv 的 cmdline 缓冲在后面会被读入覆盖)
+    let pbuf: ptr = ptr_add(mem, M_TXT);
+    let pin: u32 = 0;
+    let i: u32 = 0;
+    while i < inn {
+        store8(pbuf, pin + i, load8(ab, ino + i) as u8);
+        i = i + 1;
+    }
+    store8(pbuf, pin + inn, 0 as u8);
+    let pout: u32 = inn + 8;
+    i = 0;
+    while i < ol {
+        store8(pbuf, pout + i, load8(ab, oo + i) as u8);
+        i = i + 1;
+    }
+    store8(pbuf, pout + ol, 0 as u8);
+    let fd: i64 = open_ro(ptr_add(pbuf, pin));
+    if fd < 0 {
+        return fail("打不开输入");
+    }
+    let n: u64 = read_all(fd as u64, inb, IN_CAP as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if n == 0 {
+        return fail("输入为空");
+    }
+    let tab: ptr = ptr_add(mem, M_TAB);
+    let gb: ptr = ptr_add(mem, M_GB);
+    let txt: ptr = ptr_add(mem, M_TXT + 65536);
+    let ob: ptr = ptr_add(mem, M_OUT);
+    collect_globals(tab, inb, n as u32, gb);
+    place_globals(tab, inb);
+    let tlen: u32 = emit_all(tab, txt, 0, inb, n as u32);
+    let r: u32 = resolve_fixups(tab, inb, txt);
+    if r != 0 {
+        return r;
+    }
+    let dlen: u32 = align_to(cell(tab, C_GB), 8);
+    let total: u32 = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+    let ofd: i64 = open_wo(ptr_add(pbuf, pout));
+    if ofd < 0 {
+        return fail("写不了输出");
+    }
+    write_all(ofd as u64, ob, total as u64);
+    syscall4(3, ofd as u64, 0, 0);
+    return 0;
+}

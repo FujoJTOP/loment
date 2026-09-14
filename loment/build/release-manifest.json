@@ -254,6 +254,10 @@
    "sha256": "c16891e50bd3c1e1d15e80262bcf15068712e1d09202475687c7b12c0dba59f1"
   },
   {
+   "path": "loment/tools/lomelf.lomt",
+   "sha256": "e0e5080427473c5637f0caa746f5119d7aba9932b2d82b02398e9b47a10839db"
+  },
+  {
    "path": "loment/tools/lomfmt.lomt",
    "sha256": "66ab492b88bcaa2aeaa0c55dbbce714551bab55ec99d8ac52cab0fed39ef593b"
   },
