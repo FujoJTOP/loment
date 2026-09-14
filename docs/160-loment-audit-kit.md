@@ -3,7 +3,7 @@
 > 这份文件的读者是**第三方复核者**（以及几个月后忘掉细节的我自己）。
 > 一条命令跑完全部判据：`python tools/loment_audit.py --json`
 > —— 它会打印/落盘 `loment/build/audit-report.json`（含提交、tag、clang 版本、
-> 17 条主张的逐条结果，以及**不主张清单**）。
+> 18 条主张的逐条结果，以及**不主张清单**）。
 
 ## 0. 审计包的设计原则
 
@@ -12,7 +12,7 @@
 一致性门禁（`test_audit_claims_match_ci`）专门盯这件事：审计工具列的每个工具都必须
 出现在 `tools/ci.py` 的静态门禁表里。
 
-## 1. 主张清单（17 条，各自有可执行判据）
+## 1. 主张清单（18 条，各自有可执行判据）
 
 | # | 主张 | 判据（`python tools/…`） | 通过标准 |
 |---|---|---|---|
@@ -33,11 +33,12 @@
 | C15 | 发行包：命令安装 (sh/ps1) 与自解压安装包，装出来的编译器产物与参考逐字节相同 | `loment_dist_test.py` | 34 条判据 |
 | C16 | 发行包签名：Authenticode (发布者可读/篡改可验) + SHA256SUMS 分离签名 | `loment_sign_test.py` | 15 条判据 |
 | C17 | **包管理器去 Python**：Loment 版 `lompkg` 与 Python 版 stdout **逐字节相同** | `loment_pkg_test.py` | 3/3（链/嵌套/空包 + 4 错误场景 + 双向锁往返） |
+| C18 | **L0 生成器去 Python**：Loment 版 `lomc` 的四个后端与 Python 版**逐字节相同** | `loment_lomc_test.py` | 3/3（12 份发射 + 落盘字节 + `--check` 对账/漂移 + 错误码） |
 
 一键跑（约 4 分钟，含 clang 编译与 WSL 执行）：
 
 ```bash
-python tools/loment_audit.py --json     # 17/17 通过 + loment/build/audit-report.json
+python tools/loment_audit.py --json     # 18/18 通过 + loment/build/audit-report.json
 python tools/loment_audit.py --list     # 只列主张与命令
 ```
 
@@ -55,10 +56,21 @@ python tools/loment_audit.py --list     # 只列主张与命令
 6. 自举性能 12.8s（参考 1.2s）；DWARF 有**行表 + 变量名/声明行**，但**位置求值**要完整调试器：
    `llvm-objdump --debug-vars` 在 freestanding 目标上只显示 `<unknown op DW_OP_fbreg>`，
    clang 自身产物同样如此（对照见 `docs/145` P6 的 M59 后置修订）。
-7. **用户侧工具链已无 Python 成分，但 L0 生成器还有**：`lomfmt`/`lomdoc`/`loment_lsp`/`lompkg`
-   都已 Loment 化（进度见 `docs/159 §4b`）；`tools/lomc.py`（L0 `.lom` 生成器，13 个生成物被
-   内核线消费）仍是 Python，属跨线契约面，须与内核线协同排期。
-8. Mimosa 扫描器多次未能给出完整结论（`scanner_enobufs`）—— 因此**不宣称项目安全**。
+7. **工具链与 L0 生成器都已无 Python 成分**：`lomfmt`/`lomdoc`/`loment_lsp`/`lompkg` 与
+   **L0 生成器 `lomc`** 都有 Loment 实现（进度见 `docs/159 §4b`），判据都是"与 Python 版
+   逐字节相同"。L0 这一格的特别之处：它是**跨线契约面**（12 个生成物被内核线消费），所以
+   做法是不改 L0、不改生成物，只把"输出逐字节相同"钉成门禁 —— 下游一行不用动。
+   **不主张**：本版不替 `--emit-*` 建父目录（Python 会 `mkdir -p`），也不复刻词法层的
+   非法字符/未闭合注释报错（沿用自举 lexer 的跳过行为）；语料里没有这类输入。
+8. **自举 checker 有一处假阳性（开放）**：把**关键字当标识符**（`let fn: u64 = ...`）时，
+   参考实现接受，自举 checker 却按 token 字面量把它当函数声明而误报 —— 这是**假阳性**
+   （拒绝合法程序），不属于 `docs/158 §4` 那三条"刻意保守偏离"。移植 `lomc` 时撞到（把变量
+   改名绕开），检查器本身的缺口仍开放，复现与账见 `docs/150` 的 M81 后置修订。
+9. **自举 codegen 的 `as` 取型缺口（开放）**：`(48 + (x % 10) as u32) as u8` 这种
+   "运算符右侧是带 `as` 的括号表达式" 会让自举 codegen 发射**非法 IR**
+   （`trunc i64 -> i8`，clang 拒）。参考实现正确。移植 `lomc` 时撞到，本次在源码侧
+   绕开（显式中间变量），**codegen 侧的缺口仍开放**；最小重现与根因见 `docs/150` 的 M82 后置修订。
+10. Mimosa 扫描器多次未能给出完整结论（`scanner_enobufs`）—— 因此**不宣称项目安全**。
 
 ## 3. 第三方复核步骤（30–60 分钟）
 
@@ -66,7 +78,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 git clone -b Fujoos-FujoLang-DEV <repo> && cd FujoOS
 git checkout <审计报告里的 commit>   # 报告 provenance.commit —— 判据要对的**就是它**
 python tools/loment_eol.py --fix    # 第 0 步: 把检出行尾拉回 LF (见 docs/161)
-python tools/loment_audit.py --json # 期望 17/17
+python tools/loment_audit.py --json # 期望 18/18
 ```
 
 > tag `v0.1.3.4-alpha`（annotated）是 **M96 冻结面快照**，早于当前审计状态：
@@ -93,7 +105,7 @@ python tools/loment_audit.py --json # 期望 17/17
    - 在 `loment/bootstrap.sh` 里加一句 Python 便利检查 → `loment_seed --script-ok` **必须**红；
    - 把任一 pinned 文件改成 CRLF（内容不动）→ `loment_eol` **必须**红，而 `git status`
      **仍然报干净**（docs/161：这就是"两个工作树为什么不一样"的现场证据）。
-4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、17 条结果）一起存证；
+4. **报告**：审计结论请连同 `audit-report.json`（含日期、环境、18 条结果）一起存证；
    有红项时报告里会直接列出主张编号与工具的输出尾行。
 
 ## 4. 复核环境

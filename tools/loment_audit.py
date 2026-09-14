@@ -69,6 +69,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C17", "包管理器去 Python: Loment 版 lompkg 与 Python 版 stdout 逐字节相同 "
             "(拓扑序 + sha256 + 环检测 + 锁往返)",
      "loment_pkg_test", []),
+    ("C18", "L0 生成器去 Python: Loment 版 lomc 的四个后端与 Python 版**逐字节相同** "
+            "(12 份发射 + --emit 落盘 + --check 对账/漂移 + 错误码)",
+     "loment_lomc_test", []),
 ]
 
 

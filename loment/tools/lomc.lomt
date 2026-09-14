@@ -1,0 +1,2282 @@
+// loment/tools/lomc.lomt — Loment 版 L0 接口层编译器 (.lom → Rust/C/Python/JSON)
+//
+// 判据 (tools/loment_lomc_test.py): 同一份 `.lom` 喂本程序 (链成 ELF 后跑) 与 `tools/lomc.py`,
+// 四个发射器的输出**逐字节相同**, 退出码相同; `--print` 的 stdout 逐字节相同。
+//
+// 为什么它排在最后: 它是 L0 生成器, 产物被**内核线**消费 (12 个生成物)。所以判据必须是
+// "逐字节相同" —— 只要输出不变, 下游一行都不用动 (docs/159 §4b 的去路列)。
+//
+// 词法**复用** `loment/selfhost/lexer.lomt` (它本就是 `lomc.lex` 的 Loment 移植, 同一套
+// token 记录: kind/start/len/line/col, 20B)。语义检查逐条镜像 lomc.check。
+//
+// 已知边界 (诚实记账): `--emit-*/--check` 的 stdout 里含**路径**, 而 Python 在 Windows 上把它
+// 渲染成 `lom\fuai.lom`、本程序 (Linux 目标) 是 `lom/fuai.lom` —— 判据对前者的分隔符做归一
+// 后比较, 并另外逐字节比**写出的文件** (门禁的 `_norm`)。语料里没有负值; 负值路径仍按
+// 符号+量值实现 (与 Python 的 int_lit 一致)。
+
+module lomc
+
+use "loment/selfhost/lexer.lomt"
+use "loment/lib/json.lomt"
+
+// ---------------------------------------------------------------- 布局
+const SRC_CAP: u32 = 1048576;
+const POOL_CAP: u32 = 262144;
+const OUT_CAP: u32 = 1048576;
+const NVAL_CAP: u32 = 4096;
+const NVAR_CAP: u32 = 2048;
+const NFIELD_CAP: u32 = 2048;
+const NMETA_CAP: u32 = 4096;
+const NNAME_CAP: u32 = 256;
+
+const M_CELL: u32 = 0;
+const M_SCR: u32 = 256;
+const M_ERR: u32 = 8448;
+const M_TMP: u32 = 12544;
+const M_POOL: u32 = 16640;
+const M_VALGBUF: u32 = 278784;
+const M_CONSTS: u32 = 360704;
+const M_PARAMS: u32 = 362240;
+const M_ENUMS: u32 = 364288;
+const M_VARS: u32 = 365824;
+const M_RECS: u32 = 431360;
+const M_FIELDS: u32 = 433408;
+const M_META: u32 = 482560;
+const M_SORTBUF: u32 = 613632;
+const M_NAMES: u32 = 621824;
+const M_OUT: u32 = 625920;
+const M_CAP: u32 = 1674504;
+
+// 计数格
+const C_NCONST: u32 = 0;
+const C_NPARAM: u32 = 4;
+const C_NVAL: u32 = 8;
+const C_NENUM: u32 = 12;
+const C_NVAR: u32 = 16;
+const C_NREC: u32 = 20;
+const C_NFIELD: u32 = 24;
+const C_NMETA: u32 = 28;
+const C_POOL: u32 = 32;
+const C_PI: u32 = 36;
+const C_SRCN: u32 = 40;
+const C_ERRLEN: u32 = 44;
+const C_NERR: u32 = 48;
+const C_NNAME: u32 = 52;
+const C_MODNAME: u32 = 56;
+const C_MODLEN: u32 = 60;
+const C_OLEN: u32 = 64;
+const C_TOPMETA: u32 = 68;   // 顶层 meta 体占用的入口条数 (枚举成员 meta 在它之后)
+
+// 表 stride
+const S_CONST: u32 = 24;    // name_off name_len type neg lo hi
+const S_PARAM: u32 = 32;    // name_off name_len line note_off note_len vfirst vcount
+const S_VALG: u32 = 20;     // off len neg lo hi
+const S_ENUM: u32 = 24;     // name_off name_len base line vfirst vcount
+const S_VAR: u32 = 32;      // name_off name_len neg lo hi line mfirst mcount
+const S_REC: u32 = 32;      // name_off name_len size packed endian line ffirst fcount
+const S_FIELD: u32 = 24;    // name_off name_len type offset line
+const S_META: u32 = 32;     // kind key_off key_len soff slen ilo ihi (depth 由结构决定)
+const S_NAME: u32 = 16;     // off len (查重表)
+
+const MK_OPEN: u32 = 0;
+const MK_CLOSE: u32 = 1;
+const MK_STR: u32 = 2;
+const MK_INT: u32 = 3;
+
+const NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 系统调用 / 基础
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn wbytes(fd: u64, p: ptr, n: u32) -> u64 {
+    return write_all(fd, p, n as u64);
+}
+
+fn wdec(fd: u64, tmp: ptr, v: u64) -> u64 {
+    let buf: ptr = ptr_add(tmp, 64);
+    let n: u32 = dec_into(buf, v);
+    return write_all(fd, buf, n as u64);
+}
+
+/// u64 -> 十进制 (写进 dst, 返回长度)。
+/// UTF-8 码点数 (= Python 的 len(str))。`[OK] ... (NB)` 里的 N 是**字符数**不是字节数。
+fn utf8_len(p: ptr, n: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if (load8(p, i) & 192) != 128 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn dec_into(dst: ptr, v: u64) -> u32 {
+    if v == 0 {
+        store8(dst, 0, 48 as u8);
+        return 1;
+    }
+    let rev: ptr = ptr_add(dst, 64);
+    let d: u32 = 0;
+    let x: u64 = v;
+    while x > 0 {
+        // 显式中间变量而非 `(48 + (x % 10) as u32) as u8`: 后者的**自举 codegen** 会把
+        // 外层 `as u8` 的源类型取成内层 u64 (发射非法 IR `trunc i64 -> i8`)。既有 bug,
+        // 见 docs/150 的 M82 后置修订; 参考实现不这么写也照样对。
+        let digit: u32 = (x % 10) as u32;
+        store8(rev, d, (48 + digit) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(dst, q, load8(rev, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return d;
+}
+
+fn open_ro(p: ptr) -> i64 {
+    return syscall4(257, (0 as u64) - 100, p as u64, 0);
+}
+
+fn open_wo(p: ptr) -> i64 {
+    return syscall6(257, (0 as u64) - 100, p as u64, 577, 420, 0);
+}
+
+fn close_fd(fd: i64) -> i64 {
+    return syscall4(3, fd as u64, 0, 0);
+}
+
+fn strlen_n(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn copy_bytes(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+fn copy_cstr(dst: ptr, src: ptr) -> u32 {
+    let i: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = load8(src, i);
+        store8(dst, i, c as u8);
+        if c == 0 {
+            going = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+fn put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+fn bytes_eq(a: ptr, ao: u32, al: u32, b: ptr, bo: u32, bl: u32) -> u32 {
+    if al != bl {
+        return 0;
+    }
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < al {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+fn strip_cr(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(buf, i);
+        if c == 13 && i + 1 < n && load8(buf, i + 1) == 10 {
+            i = i + 1;
+        } else {
+            store8(buf, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 值: 符号 + u64 量值
+// 打包 (neg, lo, hi) 成一个 u64 便于返回/传递。
+
+fn v_pack(neg: u32, lo: u32, hi: u32) -> u64 {
+    return ((neg as u64) * 4294967296 + (lo as u64)) * 4294967296 + (hi as u64);
+}
+
+fn v_neg(p: u64) -> u32 {
+    return (p / 4294967296 / 4294967296) as u32;
+}
+
+fn v_lo(p: u64) -> u32 {
+    return ((p / 4294967296) % 4294967296) as u32;
+}
+
+fn v_hi(p: u64) -> u32 {
+    return (p % 4294967296) as u32;
+}
+
+fn v_mag(lo: u32, hi: u32) -> u64 {
+    return (hi as u64) * 4294967296 + (lo as u64);
+}
+
+fn mag_of(p: u64) -> u64 {
+    return v_mag(v_lo(p), v_hi(p));
+}
+
+/// 十进制 (带可选负号)。
+fn v_dec(dst: ptr, neg: u32, mag: u64) -> u32 {
+    if neg == 0 {
+        return dec_into(dst, mag);
+    }
+    store8(dst, 0, 45 as u8);
+    return 1 + dec_into(ptr_add(dst, 1), mag);
+}
+
+fn hex_digits(mag: u64) -> u32 {
+    let d: u32 = 1;
+    let x: u64 = mag;
+    while x >= 16 {
+        x = x / 16;
+        d = d + 1;
+    }
+    return d;
+}
+
+/// Rust/C 的 `_hex`: 非负 -> `0x` + 定宽大写十六进制; 负 -> 十进制。
+fn v_hex(dst: ptr, neg: u32, mag: u64, bits: u32) -> u32 {
+    if neg == 1 {
+        return v_dec(dst, 1, mag);
+    }
+    let hexs: str = "0123456789ABCDEF";
+    let width: u32 = bits / 4;
+    store8(dst, 0, 48 as u8);
+    store8(dst, 1, 120 as u8);
+    let o: u32 = 2;
+    let need: u32 = hex_digits(mag);
+    let pad: u32 = 0;
+    if need < width {
+        pad = width - need;
+    }
+    let i: u32 = 0;
+    while i < pad {
+        store8(dst, o + i, 48 as u8);
+        i = i + 1;
+    }
+    o = o + pad;
+    let rev: ptr = ptr_add(dst, 64);
+    let d: u32 = 0;
+    let x: u64 = mag;
+    while x > 0 {
+        store8(rev, d, str_byte(hexs, (x % 16) as u32) as u8);
+        x = x / 16;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(dst, o + q, load8(rev, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    return o + d;
+}
+
+// ---------------------------------------------------------------- 类型表
+
+fn t_id(p: ptr, n: u32) -> u32 {
+    let names: str = "u8\nu16\nu32\nu64\ni8\ni16\ni32\ni64";
+    let s: u32 = 0;
+    let k: u32 = 0;
+    while s < str_len(names) {
+        let e: u32 = s;
+        while e < str_len(names) && str_byte(names, e) != 10 {
+            e = e + 1;
+        }
+        if e - s == n && bytes_eq(str_ptr(names), s, n, p, 0, n) == 1 {
+            return k;
+        }
+        s = e + 1;
+        k = k + 1;
+    }
+    return NONE;
+}
+
+fn t_bits(id: u32) -> u32 {
+    if id == 0 || id == 4 { return 8; }
+    if id == 1 || id == 5 { return 16; }
+    if id == 2 || id == 6 { return 32; }
+    return 64;
+}
+
+fn t_signed(id: u32) -> u32 {
+    if id >= 4 { return 1; }
+    return 0;
+}
+
+fn t_width(id: u32) -> u32 {
+    return t_bits(id) / 8;
+}
+
+fn t_name(id: u32) -> str {
+    if id == 0 { return "u8"; }
+    if id == 1 { return "u16"; }
+    if id == 2 { return "u32"; }
+    if id == 3 { return "u64"; }
+    if id == 4 { return "i8"; }
+    if id == 5 { return "i16"; }
+    if id == 6 { return "i32"; }
+    return "i64";
+}
+
+fn t_c(id: u32) -> str {
+    if id == 0 { return "uint8_t"; }
+    if id == 1 { return "uint16_t"; }
+    if id == 2 { return "uint32_t"; }
+    if id == 3 { return "uint64_t"; }
+    if id == 4 { return "int8_t"; }
+    if id == 5 { return "int16_t"; }
+    if id == 6 { return "int32_t"; }
+    return "int64_t";
+}
+
+fn t_fmt(id: u32) -> u32 {
+    if id == 0 { return 66; }    // B
+    if id == 1 { return 72; }    // H
+    if id == 2 { return 73; }    // I
+    if id == 3 { return 81; }    // Q
+    if id == 4 { return 98; }    // b
+    if id == 5 { return 104; }   // h
+    if id == 6 { return 105; }   // i
+    return 113;                  // q
+}
+
+fn pow2(b: u32) -> u64 {
+    let v: u64 = 1;
+    let i: u32 = 0;
+    while i < b {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+fn val_in_range(id: u32, p: u64) -> u32 {
+    let neg: u32 = v_neg(p);
+    let mag: u64 = mag_of(p);
+    let bits: u32 = t_bits(id);
+    if t_signed(id) == 0 {
+        if neg == 1 {
+            return 0;
+        }
+        if mag <= pow2(bits) - 1 {
+            return 1;
+        }
+        return 0;
+    }
+    let lim: u64 = pow2(bits - 1);
+    if neg == 0 {
+        if mag + 1 <= lim {
+            return 1;
+        }
+        return 0;
+    }
+    if mag <= lim {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 文本池
+
+fn pool_put(mem: ptr, src: ptr, n: u32) -> u64 {
+    let o: u32 = load32(mem, M_CELL + C_POOL);
+    copy_bytes(ptr_add(mem, M_POOL), o, src, 0, n);
+    store32(mem, M_CELL + C_POOL, o + n);
+    return (o as u64) * 4294967296 + (n as u64);
+}
+
+fn pk_off(v: u64) -> u32 {
+    return (v / 4294967296) as u32;
+}
+
+fn pk_len(v: u64) -> u32 {
+    return (v % 4294967296) as u32;
+}
+
+fn pool_at(mem: ptr, off: u32) -> ptr {
+    return ptr_add(ptr_add(mem, M_POOL), off);
+}
+
+// ---------------------------------------------------------------- 错误
+
+fn errc(mem: ptr) {
+    store32(mem, M_CELL + C_ERRLEN, 0);
+}
+
+fn errmb(mem: ptr, p: ptr, n: u32) {
+    let o: u32 = load32(mem, M_CELL + C_ERRLEN);
+    let e: ptr = ptr_add(mem, M_ERR);
+    let i: u32 = 0;
+    while i < n && o + i < 4000 {
+        store8(e, o + i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store32(mem, M_CELL + C_ERRLEN, o + i);
+}
+
+fn errml(mem: ptr, lit: str) {
+    errmb(mem, str_ptr(lit), str_len(lit));
+}
+
+// ---------------------------------------------------------------- token
+
+fn tk_kind(toks: ptr, i: u32) -> u32 {
+    return load32(toks, i * 20);
+}
+
+fn tk_start(toks: ptr, i: u32) -> u32 {
+    return load32(toks, i * 20 + 4);
+}
+
+fn tk_len(toks: ptr, i: u32) -> u32 {
+    return load32(toks, i * 20 + 8);
+}
+
+fn tk_line(toks: ptr, i: u32) -> u32 {
+    return load32(toks, i * 20 + 12);
+}
+
+fn tk_word(src: ptr, toks: ptr, i: u32, lit: str) -> u32 {
+    if tk_kind(toks, i) != 0 {
+        return 0;
+    }
+    let n: u32 = tk_len(toks, i);
+    if n != str_len(lit) {
+        return 0;
+    }
+    return bytes_eq(src, tk_start(toks, i), n, str_ptr(lit), 0, n);
+}
+
+fn at_punct(src: ptr, toks: ptr, i: u32, c: u32) -> u32 {
+    if tk_kind(toks, i) != 3 {
+        return 0;
+    }
+    if load8(src, tk_start(toks, i)) != c {
+        return 0;
+    }
+    return 1;
+}
+
+fn cur(mem: ptr) -> u32 {
+    return load32(mem, M_CELL + C_PI);
+}
+
+fn adv(mem: ptr) {
+    store32(mem, M_CELL + C_PI, cur(mem) + 1);
+}
+
+// ---------------------------------------------------------------- 解析
+
+fn p_ident(mem: ptr, src: ptr, toks: ptr) -> u64 {
+    let i: u32 = cur(mem);
+    if tk_kind(toks, i) != 0 {
+        errml(mem, "期望标识符");
+        return 0;
+    }
+    let v: u64 = pool_put(mem, ptr_add(src, tk_start(toks, i)), tk_len(toks, i));
+    adv(mem);
+    return v;
+}
+
+fn p_need(mem: ptr, src: ptr, toks: ptr, c: u32) -> u32 {
+    if at_punct(src, toks, cur(mem), c) == 0 {
+        errml(mem, "期望符号 ");
+        return 0;
+    }
+    adv(mem);
+    return 1;
+}
+
+fn p_opt(mem: ptr, src: ptr, toks: ptr, c: u32) -> u32 {
+    if at_punct(src, toks, cur(mem), c) == 1 {
+        adv(mem);
+        return 1;
+    }
+    return 0;
+}
+
+fn is_hexc(c: u32) -> u32 {
+    if c >= 48 && c <= 57 { return 1; }
+    if c >= 97 && c <= 102 { return 1; }
+    if c >= 65 && c <= 70 { return 1; }
+    return 0;
+}
+
+fn hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 { return c - 48; }
+    if c >= 97 && c <= 102 { return c - 87; }
+    return c - 55;
+}
+
+fn p_int(mem: ptr, src: ptr, toks: ptr) -> u64 {
+    let neg: u32 = 0;
+    if p_opt(mem, src, toks, 45) == 1 {
+        neg = 1;
+    }
+    let i: u32 = cur(mem);
+    if tk_kind(toks, i) != 1 {
+        errml(mem, "期望整数");
+        return 0;
+    }
+    let s: u32 = tk_start(toks, i);
+    let n: u32 = tk_len(toks, i);
+    adv(mem);
+    let hexv: u32 = 0;
+    if n >= 2 && load8(src, s) == 48 {
+        let c1: u32 = load8(src, s + 1);
+        if c1 == 120 || c1 == 88 {
+            hexv = 1;
+        }
+    }
+    let mag: u64 = 0;
+    let k: u32 = hexv;
+    while k < n {
+        let c: u32 = load8(src, s + k);
+        if hexv == 1 {
+            if is_hexc(c) == 1 {
+                mag = mag * 16 + (hexval(c) as u64);
+            }
+        } else {
+            if c >= 48 && c <= 57 {
+                mag = mag * 10 + ((c - 48) as u64);
+            }
+        }
+        k = k + 1;
+    }
+    return v_pack(neg, (mag % 4294967296) as u32, (mag / 4294967296) as u32);
+}
+
+/// 字符串字面量 (解码转义) -> 池 (off,len)。_ESCAPES: n/t/"/\ 其余取原字符。
+fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
+    let i: u32 = cur(mem);
+    if tk_kind(toks, i) != 2 {
+        errml(mem, "期望字符串");
+        return 0;
+    }
+    let s: u32 = tk_start(toks, i);
+    let n: u32 = tk_len(toks, i);
+    adv(mem);
+    let tmp: ptr = ptr_add(mem, M_SCR + 4096);
+    let o: u32 = 0;
+    let k: u32 = 1;
+    while k + 1 < n {
+        let c: u32 = load8(src, s + k);
+        if c == 92 && k + 2 < n {
+            let e: u32 = load8(src, s + k + 1);
+            let d: u32 = e;
+            if e == 110 { d = 10; }
+            if e == 116 { d = 9; }
+            store8(tmp, o, d as u8);
+            o = o + 1;
+            k = k + 2;
+        } else {
+            store8(tmp, o, c as u8);
+            o = o + 1;
+            k = k + 1;
+        }
+    }
+    return pool_put(mem, tmp, o);
+}
+
+fn meta_add(mem: ptr, kind: u32, key: u64, sv: u64, iv: u64) {
+    let i: u32 = load32(mem, M_CELL + C_NMETA);
+    let t: ptr = ptr_add(mem, M_META);
+    let b: u32 = i * S_META;
+    store32(t, b + 0, kind);
+    store32(t, b + 4, pk_off(key));
+    store32(t, b + 8, pk_len(key));
+    store32(t, b + 12, pk_off(sv));
+    store32(t, b + 16, pk_len(sv));
+    store32(t, b + 20, v_lo(iv));
+    store32(t, b + 24, v_hi(iv));
+    store32(mem, M_CELL + C_NMETA, i + 1);
+}
+
+fn p_meta_body(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    let going: u32 = 1;
+    while going == 1 {
+        if at_punct(src, toks, cur(mem), 125) == 1 {
+            going = 0;
+        } else {
+            let key: u64 = 0;
+            if tk_kind(toks, cur(mem)) == 2 {
+                key = p_string(mem, src, toks);
+            } else {
+                key = p_ident(mem, src, toks);
+            }
+            if at_punct(src, toks, cur(mem), 123) == 1 {
+                adv(mem);
+                meta_add(mem, MK_OPEN, key, 0, 0);
+                p_meta_body(mem, src, toks);
+                if p_need(mem, src, toks, 125) == 0 {
+                    return 1;
+                }
+                meta_add(mem, MK_CLOSE, 0, 0, 0);
+            } else {
+                if p_need(mem, src, toks, 61) == 0 {
+                    return 1;
+                }
+                if tk_kind(toks, cur(mem)) == 2 {
+                    meta_add(mem, MK_STR, key, p_string(mem, src, toks), 0);
+                } else {
+                    meta_add(mem, MK_INT, key, 0, p_int(mem, src, toks));
+                }
+            }
+            p_opt(mem, src, toks, 44);
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    return 0;
+}
+
+/// 枚举成员的小元数据体 (key = "str" | int), 与顶层 meta 用同一张表。
+fn p_vmeta(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    let c: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        if at_punct(src, toks, cur(mem), 125) == 1 {
+            going = 0;
+        } else {
+            let k: u64 = p_ident(mem, src, toks);
+            if p_need(mem, src, toks, 61) == 0 {
+                return c;
+            }
+            if tk_kind(toks, cur(mem)) == 2 {
+                meta_add(mem, MK_STR, k, p_string(mem, src, toks), 0);
+            } else {
+                meta_add(mem, MK_INT, k, 0, p_int(mem, src, toks));
+            }
+            c = c + 1;
+            p_opt(mem, src, toks, 44);
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    return c;
+}
+
+fn p_enum(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    adv(mem);
+    let name: u64 = p_ident(mem, src, toks);
+    if p_need(mem, src, toks, 58) == 0 {
+        return 1;
+    }
+    let bv: u64 = p_ident(mem, src, toks);
+    let bid: u32 = t_id(pool_at(mem, pk_off(bv)), pk_len(bv));
+    if bid == NONE {
+        errml(mem, "未知类型");
+        return 1;
+    }
+    if p_need(mem, src, toks, 123) == 0 {
+        return 1;
+    }
+    let ei: u32 = load32(mem, M_CELL + C_NENUM);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let eb: u32 = ei * S_ENUM;
+    let vfirst: u32 = load32(mem, M_CELL + C_NVAR);
+    let vc: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        if at_punct(src, toks, cur(mem), 125) == 1 {
+            going = 0;
+        } else {
+            let vn: u64 = p_ident(mem, src, toks);
+            if p_need(mem, src, toks, 61) == 0 {
+                return 1;
+            }
+            let vline: u32 = tk_line(toks, cur(mem));
+            let val: u64 = p_int(mem, src, toks);
+            let vi: u32 = load32(mem, M_CELL + C_NVAR);
+            let vt: ptr = ptr_add(mem, M_VARS);
+            let vb: u32 = vi * S_VAR;
+            let mfirst: u32 = load32(mem, M_CELL + C_NMETA);
+            let mc: u32 = 0;
+            if p_opt(mem, src, toks, 123) == 1 {
+                mc = p_vmeta(mem, src, toks);
+                if p_need(mem, src, toks, 125) == 0 {
+                    return 1;
+                }
+            }
+            store32(vt, vb + 0, pk_off(vn));
+            store32(vt, vb + 4, pk_len(vn));
+            store32(vt, vb + 8, v_neg(val));
+            store32(vt, vb + 12, v_lo(val));
+            store32(vt, vb + 16, v_hi(val));
+            store32(vt, vb + 20, vline);
+            store32(vt, vb + 24, mfirst);
+            store32(vt, vb + 28, mc);
+            store32(mem, M_CELL + C_NVAR, vi + 1);
+            vc = vc + 1;
+            p_opt(mem, src, toks, 44);
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    if p_need(mem, src, toks, 125) == 0 {
+        return 1;
+    }
+    store32(et, eb + 0, pk_off(name));
+    store32(et, eb + 4, pk_len(name));
+    store32(et, eb + 8, bid);
+    store32(et, eb + 12, tk_line(toks, cur(mem)));
+    store32(et, eb + 16, vfirst);
+    store32(et, eb + 20, vc);
+    store32(mem, M_CELL + C_NENUM, ei + 1);
+    return 0;
+}
+
+fn p_record(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    adv(mem);
+    let name: u64 = p_ident(mem, src, toks);
+    if tk_word(src, toks, cur(mem), "layout") == 0 {
+        errml(mem, "record 必须带 layout(...)");
+        return 1;
+    }
+    adv(mem);
+    if p_need(mem, src, toks, 40) == 0 {
+        return 1;
+    }
+    let packed: u32 = 0;
+    let size: u32 = 0;
+    let endian: u32 = 0;
+    let rline: u32 = tk_line(toks, cur(mem));
+    let going: u32 = 1;
+    while going == 1 {
+        if at_punct(src, toks, cur(mem), 41) == 1 {
+            going = 0;
+        } else {
+            let k: u64 = p_ident(mem, src, toks);
+            let kp: ptr = pool_at(mem, pk_off(k));
+            let kl: u32 = pk_len(k);
+            if bytes_eq(kp, 0, kl, str_ptr("packed"), 0, 6) == 1 {
+                packed = 1;
+            } else {
+                if p_need(mem, src, toks, 61) == 0 {
+                    return 1;
+                }
+                if bytes_eq(kp, 0, kl, str_ptr("size"), 0, 4) == 1 {
+                    size = v_lo(p_int(mem, src, toks));
+                } else {
+                    let ev: u64 = p_ident(mem, src, toks);
+                    if bytes_eq(pool_at(mem, pk_off(ev)), 0, pk_len(ev), str_ptr("big"), 0, 3) == 1 {
+                        endian = 1;
+                    }
+                }
+            }
+            p_opt(mem, src, toks, 44);
+        }
+    }
+    if p_need(mem, src, toks, 41) == 0 {
+        return 1;
+    }
+    if p_need(mem, src, toks, 123) == 0 {
+        return 1;
+    }
+    let ri: u32 = load32(mem, M_CELL + C_NREC);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let rb: u32 = ri * S_REC;
+    let ffirst: u32 = load32(mem, M_CELL + C_NFIELD);
+    let fc: u32 = 0;
+    let g2: u32 = 1;
+    while g2 == 1 {
+        if at_punct(src, toks, cur(mem), 125) == 1 {
+            g2 = 0;
+        } else {
+            let fname: u64 = p_ident(mem, src, toks);
+            if p_need(mem, src, toks, 58) == 0 {
+                return 1;
+            }
+            let ftv: u64 = p_ident(mem, src, toks);
+            let ftid: u32 = t_id(pool_at(mem, pk_off(ftv)), pk_len(ftv));
+            if ftid == NONE {
+                errml(mem, "未知字段类型");
+                return 1;
+            }
+            if p_need(mem, src, toks, 64) == 0 {
+                return 1;
+            }
+            let foff: u64 = p_int(mem, src, toks);
+            let fi: u32 = load32(mem, M_CELL + C_NFIELD);
+            let ft: ptr = ptr_add(mem, M_FIELDS);
+            let fb: u32 = fi * S_FIELD;
+            store32(ft, fb + 0, pk_off(fname));
+            store32(ft, fb + 4, pk_len(fname));
+            store32(ft, fb + 8, ftid);
+            store32(ft, fb + 12, v_lo(foff));
+            store32(ft, fb + 16, rline);
+            store32(mem, M_CELL + C_NFIELD, fi + 1);
+            fc = fc + 1;
+            p_opt(mem, src, toks, 44);
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    if p_need(mem, src, toks, 125) == 0 {
+        return 1;
+    }
+    store32(rt, rb + 0, pk_off(name));
+    store32(rt, rb + 4, pk_len(name));
+    store32(rt, rb + 8, size);
+    store32(rt, rb + 12, packed);
+    store32(rt, rb + 16, endian);
+    store32(rt, rb + 20, rline);
+    store32(rt, rb + 24, ffirst);
+    store32(rt, rb + 28, fc);
+    store32(mem, M_CELL + C_NREC, ri + 1);
+    return 0;
+}
+
+fn p_const(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    adv(mem);
+    let name: u64 = p_ident(mem, src, toks);
+    if p_need(mem, src, toks, 58) == 0 {
+        return 1;
+    }
+    let tv: u64 = p_ident(mem, src, toks);
+    let tid: u32 = t_id(pool_at(mem, pk_off(tv)), pk_len(tv));
+    if tid == NONE {
+        errml(mem, "未知类型");
+        return 1;
+    }
+    if p_need(mem, src, toks, 61) == 0 {
+        return 1;
+    }
+    let val: u64 = p_int(mem, src, toks);
+    let ci: u32 = load32(mem, M_CELL + C_NCONST);
+    let t: ptr = ptr_add(mem, M_CONSTS);
+    let b: u32 = ci * S_CONST;
+    store32(t, b + 0, pk_off(name));
+    store32(t, b + 4, pk_len(name));
+    store32(t, b + 8, tid);
+    store32(t, b + 12, v_neg(val));
+    store32(t, b + 16, v_lo(val));
+    store32(t, b + 20, v_hi(val));
+    store32(mem, M_CELL + C_NCONST, ci + 1);
+    return 0;
+}
+
+fn p_param(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    adv(mem);
+    let name: u64 = p_ident(mem, src, toks);
+    if p_need(mem, src, toks, 123) == 0 {
+        return 1;
+    }
+    let pi: u32 = load32(mem, M_CELL + C_NPARAM);
+    let t: ptr = ptr_add(mem, M_PARAMS);
+    let b: u32 = pi * S_PARAM;
+    let vfirst: u32 = load32(mem, M_CELL + C_NVAL);
+    let vc: u32 = 0;
+    let note: u64 = 0;
+    let pline: u32 = tk_line(toks, cur(mem));
+    let going: u32 = 1;
+    while going == 1 {
+        if at_punct(src, toks, cur(mem), 125) == 1 {
+            going = 0;
+        } else {
+            let k: u64 = p_ident(mem, src, toks);
+            let kp: ptr = pool_at(mem, pk_off(k));
+            let kl: u32 = pk_len(k);
+            if p_need(mem, src, toks, 61) == 0 {
+                return 1;
+            }
+            if bytes_eq(kp, 0, kl, str_ptr("note"), 0, 4) == 1 {
+                note = p_string(mem, src, toks);
+            } else {
+                let val: u64 = p_int(mem, src, toks);
+                let vi: u32 = load32(mem, M_CELL + C_NVAL);
+                let vt: ptr = ptr_add(mem, M_VALGBUF);
+                let vb: u32 = vi * S_VALG;
+                store32(vt, vb + 0, pk_off(k));
+                store32(vt, vb + 4, pk_len(k));
+                store32(vt, vb + 8, v_neg(val));
+                store32(vt, vb + 12, v_lo(val));
+                store32(vt, vb + 16, v_hi(val));
+                store32(mem, M_CELL + C_NVAL, vi + 1);
+                vc = vc + 1;
+            }
+            p_opt(mem, src, toks, 44);
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    if p_need(mem, src, toks, 125) == 0 {
+        return 1;
+    }
+    store32(t, b + 0, pk_off(name));
+    store32(t, b + 4, pk_len(name));
+    store32(t, b + 8, pline);
+    store32(t, b + 12, pk_off(note));
+    store32(t, b + 16, pk_len(note));
+    store32(t, b + 20, vfirst);
+    store32(t, b + 24, vc);
+    store32(mem, M_CELL + C_NPARAM, pi + 1);
+    return 0;
+}
+
+fn parse_module(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    if tk_word(src, toks, cur(mem), "module") == 0 {
+        errml(mem, "文件必须以 module 开头");
+        return 1;
+    }
+    adv(mem);
+    let name: u64 = p_ident(mem, src, toks);
+    store32(mem, M_CELL + C_MODNAME, pk_off(name));
+    store32(mem, M_CELL + C_MODLEN, pk_len(name));
+    let seen: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        if tk_kind(toks, cur(mem)) == 4 {
+            going = 0;
+        } else {
+            let r: u32 = 9;
+            if tk_word(src, toks, cur(mem), "enum") == 1 {
+                r = p_enum(mem, src, toks);
+            } else if tk_word(src, toks, cur(mem), "record") == 1 {
+                r = p_record(mem, src, toks);
+            } else if tk_word(src, toks, cur(mem), "const") == 1 {
+                r = p_const(mem, src, toks);
+            } else if tk_word(src, toks, cur(mem), "param") == 1 {
+                r = p_param(mem, src, toks);
+            } else if tk_word(src, toks, cur(mem), "meta") == 1 {
+                adv(mem);
+                if p_need(mem, src, toks, 123) == 0 {
+                    return 1;
+                }
+                if p_meta_body(mem, src, toks) != 0 {
+                    return 1;
+                }
+                if p_need(mem, src, toks, 125) == 0 {
+                    return 1;
+                }
+                store32(mem, M_CELL + C_TOPMETA, load32(mem, M_CELL + C_NMETA));
+                r = 0;
+            } else {
+                errml(mem, "未知顶层关键字");
+                return 1;
+            }
+            if r != 0 {
+                return 1;
+            }
+            seen = 1;
+            p_opt(mem, src, toks, 59);
+        }
+    }
+    if seen == 0 {
+        errml(mem, "模块为空");
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 查重表
+
+fn name_seen(mem: ptr, off: u32, len: u32) -> u32 {
+    let t: ptr = ptr_add(mem, M_NAMES);
+    let n: u32 = load32(mem, M_CELL + C_NNAME);
+    let i: u32 = 0;
+    while i < n {
+        if bytes_eq(pool_at(mem, load32(t, i * S_NAME)), 0, load32(t, i * S_NAME + 4),
+                    pool_at(mem, off), 0, len) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn name_add(mem: ptr, off: u32, len: u32) {
+    let t: ptr = ptr_add(mem, M_NAMES);
+    let n: u32 = load32(mem, M_CELL + C_NNAME);
+    store32(t, n * S_NAME, off);
+    store32(t, n * S_NAME + 4, len);
+    store32(mem, M_CELL + C_NNAME, n + 1);
+}
+
+fn chk_bump(mem: ptr) {
+    store32(mem, M_CELL + C_NERR, load32(mem, M_CELL + C_NERR) + 1);
+}
+
+fn chk_declare(mem: ptr, off: u32, len: u32) {
+    if name_seen(mem, off, len) == 1 {
+        errml(mem, "  名字重复\n");
+        chk_bump(mem);
+    } else {
+        name_add(mem, off, len);
+    }
+}
+
+/// 字段按偏移排序, 下标写进 M_SORTBUF (插入排序; 偏移唯一, 稳定性无碍)。
+fn sort_fields(mem: ptr, first: u32, cnt: u32) {
+    let ft: ptr = ptr_add(mem, M_FIELDS);
+    let s: ptr = ptr_add(mem, M_SORTBUF);
+    let i: u32 = 0;
+    while i < cnt {
+        store32(s, i * 4, first + i);
+        i = i + 1;
+    }
+    i = 1;
+    while i < cnt {
+        let ii: u32 = load32(s, i * 4);
+        let ioff: u32 = load32(ft, ii * S_FIELD + 12);
+        let j: u32 = i;
+        let going: u32 = 1;
+        while j > 0 && going == 1 {
+            let jj: u32 = load32(s, (j - 1) * 4);
+            if load32(ft, jj * S_FIELD + 12) > ioff {
+                store32(s, j * 4, jj);
+                j = j - 1;
+            } else {
+                going = 0;
+            }
+        }
+        store32(s, j * 4, ii);
+        i = i + 1;
+    }
+}
+
+fn v_eq(a: u64, b: u64) -> u32 {
+    if v_neg(a) != v_neg(b) {
+        return 0;
+    }
+    if v_lo(a) == v_lo(b) && v_hi(a) == v_hi(b) {
+        return 1;
+    }
+    return 0;
+}
+
+fn check_mod(mem: ptr) -> u32 {
+    store32(mem, M_CELL + C_NERR, 0);
+    store32(mem, M_CELL + C_NNAME, 0);
+    let ncon: u32 = load32(mem, M_CELL + C_NCONST);
+    let npar: u32 = load32(mem, M_CELL + C_NPARAM);
+    let nen: u32 = load32(mem, M_CELL + C_NENUM);
+    let nrec: u32 = load32(mem, M_CELL + C_NREC);
+    let ct: ptr = ptr_add(mem, M_CONSTS);
+    let pt: ptr = ptr_add(mem, M_PARAMS);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let i: u32 = 0;
+    while i < ncon {
+        let b: u32 = i * S_CONST;
+        chk_declare(mem, load32(ct, b + 0), load32(ct, b + 4));
+        let vp: u64 = v_pack(load32(ct, b + 12), load32(ct, b + 16), load32(ct, b + 20));
+        if val_in_range(load32(ct, b + 8), vp) == 0 {
+            errml(mem, "  const 超出类型范围\n");
+            chk_bump(mem);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < npar {
+        chk_declare(mem, load32(pt, i * S_PARAM + 0), load32(pt, i * S_PARAM + 4));
+        i = i + 1;
+    }
+    i = 0;
+    while i < nen {
+        let b: u32 = i * S_ENUM;
+        chk_declare(mem, load32(et, b + 0), load32(et, b + 4));
+        let bid: u32 = load32(et, b + 8);
+        let vfirst: u32 = load32(et, b + 16);
+        let vc: u32 = load32(et, b + 20);
+        if vc == 0 {
+            errml(mem, "  枚举为空\n");
+            chk_bump(mem);
+        }
+        let vt: ptr = ptr_add(mem, M_VARS);
+        let a: u32 = 0;
+        while a < vc {
+            let vb: u32 = (vfirst + a) * S_VAR;
+            let vp: u64 = v_pack(load32(vt, vb + 8), load32(vt, vb + 12), load32(vt, vb + 16));
+            if val_in_range(bid, vp) == 0 {
+                errml(mem, "  枚举值超出基类型范围\n");
+                chk_bump(mem);
+            }
+            let a2: u32 = a + 1;
+            while a2 < vc {
+                let wb: u32 = (vfirst + a2) * S_VAR;
+                let w: u64 = v_pack(load32(vt, wb + 8), load32(vt, wb + 12), load32(vt, wb + 16));
+                if v_eq(vp, w) == 1 {
+                    errml(mem, "  枚举值重复\n");
+                    chk_bump(mem);
+                }
+                a2 = a2 + 1;
+            }
+            a = a + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < nrec {
+        let b: u32 = i * S_REC;
+        chk_declare(mem, load32(rt, b + 0), load32(rt, b + 4));
+        let size: u32 = load32(rt, b + 8);
+        if size == 0 {
+            errml(mem, "  record size 必须为正\n");
+            chk_bump(mem);
+        }
+        let ffirst: u32 = load32(rt, b + 24);
+        let fc: u32 = load32(rt, b + 28);
+        let ft: ptr = ptr_add(mem, M_FIELDS);
+        let a: u32 = 0;
+        while a < fc {
+            let fb: u32 = (ffirst + a) * S_FIELD;
+            let fid: u32 = load32(ft, fb + 8);
+            if load32(ft, fb + 12) + t_width(fid) > size {
+                errml(mem, "  字段越过 size\n");
+                chk_bump(mem);
+            }
+            a = a + 1;
+        }
+        sort_fields(mem, ffirst, fc);
+        let s: ptr = ptr_add(mem, M_SORTBUF);
+        a = 1;
+        while a < fc {
+            let p1: u32 = load32(s, (a - 1) * 4);
+            let p2: u32 = load32(s, a * 4);
+            let o1: u32 = load32(ft, p1 * S_FIELD + 12);
+            let o2: u32 = load32(ft, p2 * S_FIELD + 12);
+            if o2 < o1 + t_width(load32(ft, p1 * S_FIELD + 8)) {
+                errml(mem, "  字段重叠\n");
+                chk_bump(mem);
+            }
+            a = a + 1;
+        }
+        i = i + 1;
+    }
+    return load32(mem, M_CELL + C_NERR);
+}
+
+// ---------------------------------------------------------------- 发射基元
+
+fn e_lit(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    copy_bytes(out, o, str_ptr(s), 0, n);
+    return o + n;
+}
+
+fn e_mem(out: ptr, o: u32, p: ptr, n: u32) -> u32 {
+    copy_bytes(out, o, p, 0, n);
+    return o + n;
+}
+
+fn e_num(out: ptr, o: u32, v: u32) -> u32 {
+    return o + dec_into(ptr_add(out, o), v as u64);
+}
+
+/// 大写写进 out (只转 a-z)。
+fn e_up(out: ptr, o: u32, p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c >= 97 && c <= 122 {
+            c = c - 32;
+        }
+        store8(out, o + i, c as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn e_name(out: ptr, o: u32, mem: ptr, off: u32, len: u32) -> u32 {
+    return e_mem(out, o, pool_at(mem, off), len);
+}
+
+fn e_endian(out: ptr, o: u32, e: u32) -> u32 {
+    if e == 1 {
+        return e_lit(out, o, "big");
+    }
+    return e_lit(out, o, "little");
+}
+
+fn e_bool(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 1 {
+        return e_lit(out, o, "true");
+    }
+    return e_lit(out, o, "false");
+}
+
+fn e_hexof(out: ptr, o: u32, neg: u32, lo: u32, hi: u32, tid: u32) -> u32 {
+    let tmp: ptr = ptr_add(out, OUT_CAP - 128);
+    let n: u32 = v_hex(tmp, neg, v_mag(lo, hi), t_bits(tid));
+    return e_mem(out, o, tmp, n);
+}
+
+fn e_decof(out: ptr, o: u32, neg: u32, lo: u32, hi: u32) -> u32 {
+    let tmp: ptr = ptr_add(out, OUT_CAP - 128);
+    let n: u32 = v_dec(tmp, neg, v_mag(lo, hi));
+    return e_mem(out, o, tmp, n);
+}
+
+fn banner() -> str {
+    return "由 tools/lomc.py 生成 —— 请勿手改；改 lom/*.lom 后重新生成。";
+}
+
+fn modname_p(mem: ptr) -> ptr {
+    return pool_at(mem, load32(mem, M_CELL + C_MODNAME));
+}
+
+fn modname_n(mem: ptr) -> u32 {
+    return load32(mem, M_CELL + C_MODLEN);
+}
+
+// ---------------------------------------------------------------- emit: rust
+
+fn emit_rust(mem: ptr) -> u32 {
+    let out: ptr = ptr_add(mem, M_OUT);
+    let ct: ptr = ptr_add(mem, M_CONSTS);
+    let pt: ptr = ptr_add(mem, M_PARAMS);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let vt: ptr = ptr_add(mem, M_VARS);
+    let gt: ptr = ptr_add(mem, M_VALGBUF);
+    let o: u32 = 0;
+    o = e_lit(out, o, "// ");
+    o = e_lit(out, o, banner());
+    o = e_lit(out, o, "\n// module ");
+    o = e_name(out, o, mem, load32(mem, M_CELL + C_MODNAME), modname_n(mem));
+    o = e_lit(out, o, "\n\n");
+    let i: u32 = 0;
+    while i < load32(mem, M_CELL + C_NCONST) {
+        let b: u32 = i * S_CONST;
+        o = e_lit(out, o, "pub const ");
+        o = e_name(out, o, mem, load32(ct, b + 0), load32(ct, b + 4));
+        o = e_lit(out, o, ": ");
+        o = e_lit(out, o, t_name(load32(ct, b + 8)));
+        o = e_lit(out, o, " = ");
+        o = e_hexof(out, o, load32(ct, b + 12), load32(ct, b + 16), load32(ct, b + 20),
+                    load32(ct, b + 8));
+        o = e_lit(out, o, ";\n");
+        i = i + 1;
+    }
+    if load32(mem, M_CELL + C_NCONST) > 0 {
+        o = e_lit(out, o, "\n");
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NPARAM) {
+        let b: u32 = i * S_PARAM;
+        let vf: u32 = load32(pt, b + 20);
+        let a: u32 = 0;
+        while a < load32(pt, b + 24) {
+            let gb: u32 = (vf + a) * S_VALG;
+            o = e_lit(out, o, "pub const ");
+            o = e_up(out, o, pool_at(mem, load32(pt, b + 0)), load32(pt, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(gt, gb + 0)), load32(gt, gb + 4));
+            o = e_lit(out, o, ": i64 = ");
+            o = e_decof(out, o, load32(gt, gb + 8), load32(gt, gb + 12), load32(gt, gb + 16));
+            o = e_lit(out, o, ";\n");
+            a = a + 1;
+        }
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NENUM) {
+        let b: u32 = i * S_ENUM;
+        let bid: u32 = load32(et, b + 8);
+        let vf: u32 = load32(et, b + 16);
+        let vc: u32 = load32(et, b + 20);
+        o = e_lit(out, o, "// enum ");
+        o = e_name(out, o, mem, load32(et, b + 0), load32(et, b + 4));
+        o = e_lit(out, o, ": ");
+        o = e_lit(out, o, t_name(bid));
+        o = e_lit(out, o, " (");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, " 项)
+");
+        let a: u32 = 0;
+        while a < vc {
+            let vb: u32 = (vf + a) * S_VAR;
+            o = e_lit(out, o, "pub const ");
+            o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(vt, vb + 0)), load32(vt, vb + 4));
+            o = e_lit(out, o, ": ");
+            o = e_lit(out, o, t_name(bid));
+            o = e_lit(out, o, " = ");
+            o = e_hexof(out, o, load32(vt, vb + 8), load32(vt, vb + 12), load32(vt, vb + 16), bid);
+            o = e_lit(out, o, ";\n");
+            a = a + 1;
+        }
+        o = e_lit(out, o, "pub const ");
+        o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+        o = e_lit(out, o, "_COUNT: usize = ");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, ";\n\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NREC) {
+        let b: u32 = i * S_REC;
+        o = e_lit(out, o, "// record ");
+        o = e_name(out, o, mem, load32(rt, b + 0), load32(rt, b + 4));
+        o = e_lit(out, o, ": size=");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, " endian=");
+        o = e_endian(out, o, load32(rt, b + 16));
+        o = e_lit(out, o, " packed=");
+        o = e_bool(out, o, load32(rt, b + 12));
+        o = e_lit(out, o, "\n");
+        o = e_lit(out, o, "pub const ");
+        o = e_up(out, o, pool_at(mem, load32(rt, b + 0)), load32(rt, b + 4));
+        o = e_lit(out, o, "_SIZE: usize = ");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, ";\n");
+        o = e_fields(mem, out, o, load32(rt, b + 0), load32(rt, b + 4),
+                     load32(rt, b + 24), load32(rt, b + 28), 0);
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    return e_finish(out, o);
+}
+
+/// 字段的 OFF 常量; kind 0 = rust (usize), 1 = c ((Nu)), 2 = python (裸赋值)。
+fn e_fields(mem: ptr, out: ptr, o: u32, rn: u32, rl: u32, ffirst: u32, fc: u32, kind: u32) -> u32 {
+    let ft: ptr = ptr_add(mem, M_FIELDS);
+    sort_fields(mem, ffirst, fc);
+    let s: ptr = ptr_add(mem, M_SORTBUF);
+    let i: u32 = 0;
+    while i < fc {
+        let fb: u32 = load32(s, i * 4) * S_FIELD;
+        if kind == 0 {
+            o = e_lit(out, o, "pub const ");
+        } else if kind == 1 {
+            o = e_lit(out, o, "#define ");
+        }
+        o = e_up(out, o, pool_at(mem, rn), rl);
+        o = e_lit(out, o, "_");
+        o = e_up(out, o, pool_at(mem, load32(ft, fb + 0)), load32(ft, fb + 4));
+        if kind == 0 {
+            o = e_lit(out, o, "_OFF: usize = ");
+            o = e_num(out, o, load32(ft, fb + 12));
+            o = e_lit(out, o, ";\n");
+        } else if kind == 1 {
+            o = e_lit(out, o, "_OFF (");
+            o = e_num(out, o, load32(ft, fb + 12));
+            o = e_lit(out, o, "u)\n");
+        } else {
+            o = e_lit(out, o, "_OFF = ");
+            o = e_num(out, o, load32(ft, fb + 12));
+            o = e_lit(out, o, "\n");
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// Python 的 `"\n".join(out).rstrip() + "\n"`: 去掉尾部空白, 只留一个换行。
+fn e_finish(out: ptr, o: u32) -> u32 {
+    let n: u32 = o;
+    while n > 0 && load8(out, n - 1) <= 32 {
+        n = n - 1;
+    }
+    store8(out, n, 10 as u8);
+    return n + 1;
+}
+
+// ---------------------------------------------------------------- emit: c
+
+fn emit_c(mem: ptr) -> u32 {
+    let out: ptr = ptr_add(mem, M_OUT);
+    let ct: ptr = ptr_add(mem, M_CONSTS);
+    let pt: ptr = ptr_add(mem, M_PARAMS);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let vt: ptr = ptr_add(mem, M_VARS);
+    let gt: ptr = ptr_add(mem, M_VALGBUF);
+    let o: u32 = 0;
+    o = e_lit(out, o, "/* ");
+    o = e_lit(out, o, banner());
+    o = e_lit(out, o, " */\n/* module ");
+    o = e_name(out, o, mem, load32(mem, M_CELL + C_MODNAME), modname_n(mem));
+    o = e_lit(out, o, " */\n#ifndef LOM_GEN_H\n#define LOM_GEN_H\n\n#include <stdint.h>\n\n");
+    let i: u32 = 0;
+    while i < load32(mem, M_CELL + C_NCONST) {
+        let b: u32 = i * S_CONST;
+        o = e_lit(out, o, "#define ");
+        o = e_name(out, o, mem, load32(ct, b + 0), load32(ct, b + 4));
+        o = e_lit(out, o, " ((");
+        o = e_lit(out, o, t_c(load32(ct, b + 8)));
+        o = e_lit(out, o, ")");
+        o = e_hexof(out, o, load32(ct, b + 12), load32(ct, b + 16), load32(ct, b + 20),
+                    load32(ct, b + 8));
+        o = e_lit(out, o, ")\n");
+        i = i + 1;
+    }
+    if load32(mem, M_CELL + C_NCONST) > 0 {
+        o = e_lit(out, o, "\n");
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NPARAM) {
+        let b: u32 = i * S_PARAM;
+        let vf: u32 = load32(pt, b + 20);
+        let a: u32 = 0;
+        while a < load32(pt, b + 24) {
+            let gb: u32 = (vf + a) * S_VALG;
+            o = e_lit(out, o, "#define ");
+            o = e_up(out, o, pool_at(mem, load32(pt, b + 0)), load32(pt, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(gt, gb + 0)), load32(gt, gb + 4));
+            o = e_lit(out, o, " (");
+            o = e_decof(out, o, load32(gt, gb + 8), load32(gt, gb + 12), load32(gt, gb + 16));
+            o = e_lit(out, o, ")\n");
+            a = a + 1;
+        }
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NENUM) {
+        let b: u32 = i * S_ENUM;
+        let bid: u32 = load32(et, b + 8);
+        let vf: u32 = load32(et, b + 16);
+        let vc: u32 = load32(et, b + 20);
+        o = e_lit(out, o, "/* enum ");
+        o = e_name(out, o, mem, load32(et, b + 0), load32(et, b + 4));
+        o = e_lit(out, o, ": ");
+        o = e_lit(out, o, t_name(bid));
+        o = e_lit(out, o, " (");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, " 项) */
+");
+        let a: u32 = 0;
+        while a < vc {
+            let vb: u32 = (vf + a) * S_VAR;
+            o = e_lit(out, o, "#define ");
+            o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(vt, vb + 0)), load32(vt, vb + 4));
+            o = e_lit(out, o, " ((");
+            o = e_lit(out, o, t_c(bid));
+            o = e_lit(out, o, ")");
+            o = e_hexof(out, o, load32(vt, vb + 8), load32(vt, vb + 12), load32(vt, vb + 16), bid);
+            o = e_lit(out, o, ")\n");
+            a = a + 1;
+        }
+        o = e_lit(out, o, "#define ");
+        o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+        o = e_lit(out, o, "_COUNT (");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, "u)\n\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NREC) {
+        let b: u32 = i * S_REC;
+        o = e_lit(out, o, "/* record ");
+        o = e_name(out, o, mem, load32(rt, b + 0), load32(rt, b + 4));
+        o = e_lit(out, o, ": size=");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, " endian=");
+        o = e_endian(out, o, load32(rt, b + 16));
+        o = e_lit(out, o, " packed=");
+        o = e_bool(out, o, load32(rt, b + 12));
+        o = e_lit(out, o, " */\n");
+        o = e_lit(out, o, "#define ");
+        o = e_up(out, o, pool_at(mem, load32(rt, b + 0)), load32(rt, b + 4));
+        o = e_lit(out, o, "_SIZE (");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, "u)\n");
+        o = e_fields(mem, out, o, load32(rt, b + 0), load32(rt, b + 4),
+                     load32(rt, b + 24), load32(rt, b + 28), 1);
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    o = e_lit(out, o, "#endif /* LOM_GEN_H */");
+    return e_finish(out, o);
+}
+
+// ---------------------------------------------------------------- emit: python
+
+fn e_pyfmt(mem: ptr, out: ptr, o: u32, rb: u32, ffirst: u32, fc: u32) -> u32 {
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let ft: ptr = ptr_add(mem, M_FIELDS);
+    sort_fields(mem, ffirst, fc);
+    let s: ptr = ptr_add(mem, M_SORTBUF);
+    if load32(rt, rb + 16) == 1 {
+        o = e_lit(out, o, ">");
+    } else {
+        o = e_lit(out, o, "<");
+    }
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < fc {
+        let fb: u32 = load32(s, i * 4) * S_FIELD;
+        let off: u32 = load32(ft, fb + 12);
+        if off > cur {
+            o = e_num(out, o, off - cur);
+            o = e_lit(out, o, "x");
+        }
+        store8(out, o, t_fmt(load32(ft, fb + 8)) as u8);
+        o = o + 1;
+        cur = off + t_width(load32(ft, fb + 8));
+        i = i + 1;
+    }
+    let size: u32 = load32(rt, rb + 8);
+    if cur < size {
+        o = e_num(out, o, size - cur);
+        o = e_lit(out, o, "x");
+    }
+    return o;
+}
+
+fn emit_python(mem: ptr) -> u32 {
+    let out: ptr = ptr_add(mem, M_OUT);
+    let ct: ptr = ptr_add(mem, M_CONSTS);
+    let pt: ptr = ptr_add(mem, M_PARAMS);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let vt: ptr = ptr_add(mem, M_VARS);
+    let gt: ptr = ptr_add(mem, M_VALGBUF);
+    let o: u32 = 0;
+    o = e_lit(out, o, "#!/usr/bin/env python3\n# ");
+    o = e_lit(out, o, banner());
+    o = e_lit(out, o, "\n# module ");
+    o = e_name(out, o, mem, load32(mem, M_CELL + C_MODNAME), modname_n(mem));
+    o = e_lit(out, o, "\n\nimport struct as _struct\n\n");
+    let i: u32 = 0;
+    while i < load32(mem, M_CELL + C_NCONST) {
+        let b: u32 = i * S_CONST;
+        o = e_name(out, o, mem, load32(ct, b + 0), load32(ct, b + 4));
+        o = e_lit(out, o, " = ");
+        o = e_hexof(out, o, load32(ct, b + 12), load32(ct, b + 16), load32(ct, b + 20),
+                    load32(ct, b + 8));
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    if load32(mem, M_CELL + C_NCONST) > 0 {
+        o = e_lit(out, o, "\n");
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NPARAM) {
+        let b: u32 = i * S_PARAM;
+        let vf: u32 = load32(pt, b + 20);
+        let a: u32 = 0;
+        while a < load32(pt, b + 24) {
+            let gb: u32 = (vf + a) * S_VALG;
+            o = e_up(out, o, pool_at(mem, load32(pt, b + 0)), load32(pt, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(gt, gb + 0)), load32(gt, gb + 4));
+            o = e_lit(out, o, " = ");
+            o = e_decof(out, o, load32(gt, gb + 8), load32(gt, gb + 12), load32(gt, gb + 16));
+            o = e_lit(out, o, "\n");
+            a = a + 1;
+        }
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NENUM) {
+        let b: u32 = i * S_ENUM;
+        let bid: u32 = load32(et, b + 8);
+        let vf: u32 = load32(et, b + 16);
+        let vc: u32 = load32(et, b + 20);
+        o = e_lit(out, o, "# enum ");
+        o = e_name(out, o, mem, load32(et, b + 0), load32(et, b + 4));
+        o = e_lit(out, o, ": ");
+        o = e_lit(out, o, t_name(bid));
+        o = e_lit(out, o, " (");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, " 项)
+");
+        let a: u32 = 0;
+        while a < vc {
+            let vb: u32 = (vf + a) * S_VAR;
+            o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+            o = e_lit(out, o, "_");
+            o = e_up(out, o, pool_at(mem, load32(vt, vb + 0)), load32(vt, vb + 4));
+            o = e_lit(out, o, " = ");
+            o = e_hexof(out, o, load32(vt, vb + 8), load32(vt, vb + 12), load32(vt, vb + 16), bid);
+            o = e_lit(out, o, "\n");
+            a = a + 1;
+        }
+        o = e_up(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+        o = e_lit(out, o, "_COUNT = ");
+        o = e_num(out, o, vc);
+        o = e_lit(out, o, "\n\n");
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(mem, M_CELL + C_NREC) {
+        let b: u32 = i * S_REC;
+        let rn: u32 = load32(rt, b + 0);
+        let rl: u32 = load32(rt, b + 4);
+        o = e_lit(out, o, "# record ");
+        o = e_name(out, o, mem, rn, rl);
+        o = e_lit(out, o, ": size=");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, " endian=");
+        o = e_endian(out, o, load32(rt, b + 16));
+        o = e_lit(out, o, "\n");
+        o = e_up(out, o, pool_at(mem, rn), rl);
+        o = e_lit(out, o, "_SIZE = ");
+        o = e_num(out, o, load32(rt, b + 8));
+        o = e_lit(out, o, "\n");
+        o = e_up(out, o, pool_at(mem, rn), rl);
+        o = e_lit(out, o, "_FMT = '");
+        o = e_pyfmt(mem, out, o, b, load32(rt, b + 24), load32(rt, b + 28));
+        o = e_lit(out, o, "'\n");
+        o = e_up(out, o, pool_at(mem, rn), rl);
+        o = e_lit(out, o, "_STRUCT = _struct.Struct(");
+        o = e_up(out, o, pool_at(mem, rn), rl);
+        o = e_lit(out, o, "_FMT)\n");
+        o = e_fields(mem, out, o, rn, rl, load32(rt, b + 24), load32(rt, b + 28), 2);
+        o = e_lit(out, o, "\n");
+        i = i + 1;
+    }
+    return e_finish(out, o);
+}
+
+// ---------------------------------------------------------------- emit: json
+
+fn e_ind(out: ptr, o: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, 32 as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn e_q(out: ptr, o: u32, p: ptr, n: u32) -> u32 {
+    return json_emit_str(out, o, p, n);
+}
+
+/// 顶层 meta: 前置遍历的 (open/close/key=value) 流 -> 缩进 JSON 对象。
+/// 缩进模型: 键写在 level 的 2*level 处; `{` 之后子项 level+1。
+fn e_meta(out: ptr, o: u32, mem: ptr) -> u32 {
+    let n: u32 = load32(mem, M_CELL + C_TOPMETA);
+    if n == 0 {
+        return e_lit(out, o, "{}");
+    }
+    let t: ptr = ptr_add(mem, M_META);
+    o = e_lit(out, o, "{");
+    let lvl: u32 = 2;
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = i * S_META;
+        let kind: u32 = load32(t, b + 0);
+        if kind == MK_CLOSE {
+            lvl = lvl - 1;
+            o = e_lit(out, o, "\n");
+            o = e_ind(out, o, lvl * 2);
+            o = e_lit(out, o, "}");
+            first = 0;
+        } else {
+            if first == 0 {
+                o = e_lit(out, o, ",");
+            }
+            o = e_lit(out, o, "\n");
+            o = e_ind(out, o, lvl * 2);
+            o = e_q(out, o, pool_at(mem, load32(t, b + 4)), load32(t, b + 8));
+            if kind == MK_OPEN {
+                o = e_lit(out, o, ": {");
+                lvl = lvl + 1;
+                first = 1;
+            } else {
+                o = e_lit(out, o, ": ");
+                if kind == MK_STR {
+                    o = e_q(out, o, pool_at(mem, load32(t, b + 12)), load32(t, b + 16));
+                } else {
+                    o = e_decof(out, o, 0, load32(t, b + 20), load32(t, b + 24));
+                }
+                first = 0;
+            }
+        }
+        i = i + 1;
+    }
+    o = e_lit(out, o, "\n");
+    o = e_ind(out, o, (lvl - 1) * 2);
+    o = e_lit(out, o, "}");
+    return o;
+}
+
+/// 枚举成员的小 meta (无嵌套): 项在 indent 12, 收尾 } 在 10。
+fn e_vmeta(out: ptr, o: u32, mem: ptr, first: u32, cnt: u32) -> u32 {
+    if cnt == 0 {
+        return e_lit(out, o, "{}");
+    }
+    let t: ptr = ptr_add(mem, M_META);
+    o = e_lit(out, o, "{");
+    let i: u32 = 0;
+    while i < cnt {
+        let b: u32 = (first + i) * S_META;
+        if i > 0 {
+            o = e_lit(out, o, ",");
+        }
+        o = e_lit(out, o, "\n");
+        o = e_ind(out, o, 12);
+        o = e_q(out, o, pool_at(mem, load32(t, b + 4)), load32(t, b + 8));
+        o = e_lit(out, o, ": ");
+        if load32(t, b + 0) == MK_STR {
+            o = e_q(out, o, pool_at(mem, load32(t, b + 12)), load32(t, b + 16));
+        } else {
+            o = e_decof(out, o, 0, load32(t, b + 20), load32(t, b + 24));
+        }
+        i = i + 1;
+    }
+    o = e_lit(out, o, "\n");
+    o = e_ind(out, o, 10);
+    o = e_lit(out, o, "}");
+    return o;
+}
+
+fn emit_json(mem: ptr) -> u32 {
+    let out: ptr = ptr_add(mem, M_OUT);
+    let ct: ptr = ptr_add(mem, M_CONSTS);
+    let pt: ptr = ptr_add(mem, M_PARAMS);
+    let et: ptr = ptr_add(mem, M_ENUMS);
+    let rt: ptr = ptr_add(mem, M_RECS);
+    let vt: ptr = ptr_add(mem, M_VARS);
+    let gt: ptr = ptr_add(mem, M_VALGBUF);
+    let o: u32 = 0;
+    o = e_lit(out, o, "{\n  \"lom\": \"v0\",\n  \"module\": ");
+    o = e_q(out, o, modname_p(mem), modname_n(mem));
+    o = e_lit(out, o, ",\n  \"meta\": ");
+    o = e_meta(out, o, mem);
+    // consts
+    o = e_lit(out, o, ",\n  \"consts\": ");
+    if load32(mem, M_CELL + C_NCONST) == 0 {
+        o = e_lit(out, o, "[]");
+    } else {
+        o = e_lit(out, o, "[\n");
+        let i: u32 = 0;
+        while i < load32(mem, M_CELL + C_NCONST) {
+            let b: u32 = i * S_CONST;
+            o = e_lit(out, o, "    {\n      \"name\": ");
+            o = e_q(out, o, pool_at(mem, load32(ct, b + 0)), load32(ct, b + 4));
+            o = e_lit(out, o, ",\n      \"type\": ");
+            o = e_q(out, o, str_ptr(t_name(load32(ct, b + 8))), str_len(t_name(load32(ct, b + 8))));
+            o = e_lit(out, o, ",\n      \"value\": ");
+            o = e_decof(out, o, load32(ct, b + 12), load32(ct, b + 16), load32(ct, b + 20));
+            o = e_lit(out, o, "\n    }");
+            if i + 1 < load32(mem, M_CELL + C_NCONST) {
+                o = e_lit(out, o, ",");
+            }
+            o = e_lit(out, o, "\n");
+            i = i + 1;
+        }
+        o = e_lit(out, o, "  ]");
+    }
+    // params
+    o = e_lit(out, o, ",\n  \"params\": ");
+    if load32(mem, M_CELL + C_NPARAM) == 0 {
+        o = e_lit(out, o, "[]");
+    } else {
+        o = e_lit(out, o, "[\n");
+        let i: u32 = 0;
+        while i < load32(mem, M_CELL + C_NPARAM) {
+            let b: u32 = i * S_PARAM;
+            o = e_lit(out, o, "    {\n      \"name\": ");
+            o = e_q(out, o, pool_at(mem, load32(pt, b + 0)), load32(pt, b + 4));
+            o = e_lit(out, o, ",\n      \"values\": {");
+            let vf: u32 = load32(pt, b + 20);
+            let vc: u32 = load32(pt, b + 24);
+            if vc > 0 {
+                o = e_lit(out, o, "\n");
+            }
+            let a: u32 = 0;
+            while a < vc {
+                let gb: u32 = (vf + a) * S_VALG;
+                o = e_ind(out, o, 8);
+                o = e_q(out, o, pool_at(mem, load32(gt, gb + 0)), load32(gt, gb + 4));
+                o = e_lit(out, o, ": ");
+                o = e_decof(out, o, load32(gt, gb + 8), load32(gt, gb + 12), load32(gt, gb + 16));
+                if a + 1 < vc {
+                    o = e_lit(out, o, ",");
+                }
+                o = e_lit(out, o, "\n");
+                a = a + 1;
+            }
+            o = e_lit(out, o, "      }");
+            if load32(pt, b + 16) > 0 {
+                o = e_lit(out, o, ",\n      \"note\": ");
+                o = e_q(out, o, pool_at(mem, load32(pt, b + 12)), load32(pt, b + 16));
+            }
+            o = e_lit(out, o, "\n    }");
+            if i + 1 < load32(mem, M_CELL + C_NPARAM) {
+                o = e_lit(out, o, ",");
+            }
+            o = e_lit(out, o, "\n");
+            i = i + 1;
+        }
+        o = e_lit(out, o, "  ]");
+    }
+    // enums
+    o = e_lit(out, o, ",\n  \"enums\": ");
+    if load32(mem, M_CELL + C_NENUM) == 0 {
+        o = e_lit(out, o, "[]");
+    } else {
+        o = e_lit(out, o, "[\n");
+        let i: u32 = 0;
+        while i < load32(mem, M_CELL + C_NENUM) {
+            let b: u32 = i * S_ENUM;
+            o = e_lit(out, o, "    {\n      \"name\": ");
+            o = e_q(out, o, pool_at(mem, load32(et, b + 0)), load32(et, b + 4));
+            o = e_lit(out, o, ",\n      \"base\": ");
+            o = e_q(out, o, str_ptr(t_name(load32(et, b + 8))), str_len(t_name(load32(et, b + 8))));
+            o = e_lit(out, o, ",\n      \"variants\": ");
+            let vf: u32 = load32(et, b + 16);
+            let vc: u32 = load32(et, b + 20);
+            if vc == 0 {
+                o = e_lit(out, o, "[]");
+            } else {
+                o = e_lit(out, o, "[\n");
+                let a: u32 = 0;
+                while a < vc {
+                    let vb: u32 = (vf + a) * S_VAR;
+                    o = e_lit(out, o, "        {\n          \"name\": ");
+                    o = e_q(out, o, pool_at(mem, load32(vt, vb + 0)), load32(vt, vb + 4));
+                    o = e_lit(out, o, ",\n          \"value\": ");
+                    o = e_decof(out, o, load32(vt, vb + 8), load32(vt, vb + 12), load32(vt, vb + 16));
+                    o = e_lit(out, o, ",\n          \"meta\": ");
+                    o = e_vmeta(out, o, mem, load32(vt, vb + 24), load32(vt, vb + 28));
+                    o = e_lit(out, o, "\n        }");
+                    if a + 1 < vc {
+                        o = e_lit(out, o, ",");
+                    }
+                    o = e_lit(out, o, "\n");
+                    a = a + 1;
+                }
+                o = e_lit(out, o, "      ]");
+            }
+            o = e_lit(out, o, "\n    }");
+            if i + 1 < load32(mem, M_CELL + C_NENUM) {
+                o = e_lit(out, o, ",");
+            }
+            o = e_lit(out, o, "\n");
+            i = i + 1;
+        }
+        o = e_lit(out, o, "  ]");
+    }
+    // records
+    o = e_lit(out, o, ",\n  \"records\": ");
+    if load32(mem, M_CELL + C_NREC) == 0 {
+        o = e_lit(out, o, "[]");
+    } else {
+        o = e_lit(out, o, "[\n");
+        let i: u32 = 0;
+        while i < load32(mem, M_CELL + C_NREC) {
+            let b: u32 = i * S_REC;
+            o = e_lit(out, o, "    {\n      \"name\": ");
+            o = e_q(out, o, pool_at(mem, load32(rt, b + 0)), load32(rt, b + 4));
+            o = e_lit(out, o, ",\n      \"size\": ");
+            o = e_num(out, o, load32(rt, b + 8));
+            o = e_lit(out, o, ",\n      \"endian\": ");
+            o = e_q(out, o, str_ptr(e_endian_s(load32(rt, b + 16))),
+                    str_len(e_endian_s(load32(rt, b + 16))));
+            o = e_lit(out, o, ",\n      \"packed\": ");
+            o = e_bool(out, o, load32(rt, b + 12));
+            o = e_lit(out, o, ",\n      \"fields\": ");
+            let ffirst: u32 = load32(rt, b + 24);
+            let fc: u32 = load32(rt, b + 28);
+            if fc == 0 {
+                o = e_lit(out, o, "[]");
+            } else {
+                sort_fields(mem, ffirst, fc);
+                let s: ptr = ptr_add(mem, M_SORTBUF);
+                let ft: ptr = ptr_add(mem, M_FIELDS);
+                o = e_lit(out, o, "[\n");
+                let a: u32 = 0;
+                while a < fc {
+                    let fb: u32 = load32(s, a * 4) * S_FIELD;
+                    o = e_lit(out, o, "        {\n          \"name\": ");
+                    o = e_q(out, o, pool_at(mem, load32(ft, fb + 0)), load32(ft, fb + 4));
+                    o = e_lit(out, o, ",\n          \"type\": ");
+                    o = e_q(out, o, str_ptr(t_name(load32(ft, fb + 8))),
+                            str_len(t_name(load32(ft, fb + 8))));
+                    o = e_lit(out, o, ",\n          \"offset\": ");
+                    o = e_num(out, o, load32(ft, fb + 12));
+                    o = e_lit(out, o, "\n        }");
+                    if a + 1 < fc {
+                        o = e_lit(out, o, ",");
+                    }
+                    o = e_lit(out, o, "\n");
+                    a = a + 1;
+                }
+                o = e_lit(out, o, "      ]");
+            }
+            o = e_lit(out, o, "\n    }");
+            if i + 1 < load32(mem, M_CELL + C_NREC) {
+                o = e_lit(out, o, ",");
+            }
+            o = e_lit(out, o, "\n");
+            i = i + 1;
+        }
+        o = e_lit(out, o, "  ]");
+    }
+    o = e_lit(out, o, "\n}\n");
+    return o;
+}
+
+fn e_endian_s(e: u32) -> str {
+    if e == 1 {
+        return "big";
+    }
+    return "little";
+}
+
+// ---------------------------------------------------------------- CLI
+
+fn emit_k(mem: ptr, k: u32) -> u32 {
+    if k == 0 {
+        return emit_rust(mem);
+    }
+    if k == 1 {
+        return emit_c(mem);
+    }
+    if k == 2 {
+        return emit_python(mem);
+    }
+    return emit_json(mem);
+}
+
+fn arg_p(buf: ptr, tab: ptr, i: u32) -> ptr {
+    return ptr_add(buf, load32(tab, i * 8));
+}
+
+fn arg_l(tab: ptr, i: u32) -> u32 {
+    return load32(tab, i * 8 + 4);
+}
+
+fn arg_is(buf: ptr, tab: ptr, i: u32, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    if arg_l(tab, i) != n {
+        return 0;
+    }
+    return bytes_eq(arg_p(buf, tab, i), 0, n, str_ptr(lit), 0, n);
+}
+
+fn arg_has(buf: ptr, tab: ptr, i: u32, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    if arg_l(tab, i) <= n {
+        return 0;
+    }
+    return bytes_eq(arg_p(buf, tab, i), 0, n, str_ptr(lit), 0, n);
+}
+
+/// 取 `--print=<v>` / `--emit-x` 后面的值指针: 空格形式取下一个字段, `=` 形式取等号后。
+/// 返回 (指针) 与长度 (写进 M_TMP 的第 2 格)。这里简化: 只认空格形式 (Python 两种都收,
+/// 门禁统一用空格形式)。
+fn split_argv(buf: ptr, n: u32, tab: ptr) -> u32 {
+    let c: u32 = 0;
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(buf, i) == 0 {
+            store32(tab, c * 8, s);
+            store32(tab, c * 8 + 4, i - s);
+            c = c + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 主流程。ab/tab 是命令行; srcbuf/toks 是源与词法缓冲。
+fn run(mem: ptr, ab: ptr, tab: ptr, argc: u32, srcbuf: ptr, toks: ptr) -> u32 {
+    let path: ptr = arg_p(ab, tab, 1);
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        wstr(2, "[ERR] 读不到文件\n");
+        return 2;
+    }
+    let raw: u64 = read_all(fd as u64, srcbuf, SRC_CAP as u64);
+    close_fd(fd);
+    let sn: u32 = strip_cr(srcbuf, raw as u32);
+    store32(mem, M_CELL + C_SRCN, sn);
+    store32(mem, M_CELL + C_PI, 0);
+    lex(srcbuf, sn, toks);
+    errc(mem);
+    if parse_module(mem, srcbuf, toks) != 0 {
+        wstr(2, "[ERR] ");
+        wbytes(2, ptr_add(mem, M_ERR), load32(mem, M_CELL + C_ERRLEN));
+        wstr(2, "\n");
+        return 1;
+    }
+    let ne: u32 = check_mod(mem);
+    if ne > 0 {
+        wstr(2, "[ERR] ");
+        wdec(2, ptr_add(mem, M_TMP), ne as u64);
+        wstr(2, " 项语义错误\n");
+        wbytes(2, ptr_add(mem, M_ERR), load32(mem, M_CELL + C_ERRLEN));
+        return 1;
+    }
+    // 选项
+    let tg: ptr = ptr_add(mem, M_SCR + 6000);
+    store32(tg, 0, 0);
+    store32(tg, 4, 0);
+    store32(tg, 8, 0);
+    store32(tg, 12, 0);
+    let print_kind: u32 = NONE;
+    let do_check: u32 = 0;
+    let ntarget: u32 = 0;
+    let bad: u32 = 0;
+    let i: u32 = 2;
+    while i < argc {
+        if arg_is(ab, tab, i, "--check") == 1 {
+            do_check = 1;
+        } else if arg_is(ab, tab, i, "--print") == 1 {
+            if i + 1 >= argc {
+                bad = 1;
+                i = argc;
+            } else {
+                print_kind = print_target(ab, tab, i + 1);
+                if print_kind == NONE {
+                    bad = 1;
+                }
+                i = i + 1;
+            }
+        } else if arg_is(ab, tab, i, "--emit-rust") == 1 {
+            if i + 1 >= argc {
+                bad = 1;
+                i = argc;
+            } else {
+                store32(tg, 0, load32(tab, (i + 1) * 8));
+                ntarget = ntarget + 1;
+                i = i + 1;
+            }
+        } else if arg_is(ab, tab, i, "--emit-c") == 1 {
+            if i + 1 >= argc {
+                bad = 1;
+                i = argc;
+            } else {
+                store32(tg, 4, load32(tab, (i + 1) * 8));
+                ntarget = ntarget + 1;
+                i = i + 1;
+            }
+        } else if arg_is(ab, tab, i, "--emit-python") == 1 {
+            if i + 1 >= argc {
+                bad = 1;
+                i = argc;
+            } else {
+                store32(tg, 8, load32(tab, (i + 1) * 8));
+                ntarget = ntarget + 1;
+                i = i + 1;
+            }
+        } else if arg_is(ab, tab, i, "--emit-json") == 1 {
+            if i + 1 >= argc {
+                bad = 1;
+                i = argc;
+            } else {
+                store32(tg, 12, load32(tab, (i + 1) * 8));
+                ntarget = ntarget + 1;
+                i = i + 1;
+            }
+        } else {
+            bad = 1;
+            i = argc;
+        }
+        i = i + 1;
+    }
+    if bad == 1 {
+        wstr(2, "usage: lomc <file> [--emit-* PATH] [--print T] [--check]\n");
+        return 2;
+    }
+    if print_kind != NONE {
+        let n: u32 = emit_k(mem, print_kind);
+        write_all(1, ptr_add(mem, M_OUT), n as u64);
+        return 0;
+    }
+    if ntarget == 0 && do_check == 0 {
+        wstr(2, "[ERR] 未指定输出\n");
+        return 2;
+    }
+    let diffs: u32 = 0;
+    let k: u32 = 0;
+    while k < 4 {
+        if load32(tg, k * 4) != 0 {
+            let dest: ptr = ptr_add(ab, load32(tg, k * 4));
+            let n: u32 = emit_k(mem, k);
+            if do_check == 1 {
+                if file_same(mem, dest, n) == 0 {
+                    diffs = diffs + 1;
+                }
+            } else {
+                let wfd: i64 = open_wo(dest);
+                if wfd < 0 {
+                    wstr(2, "[ERR] 写不了\n");
+                    return 2;
+                }
+                write_all(wfd as u64, ptr_add(mem, M_OUT), n as u64);
+                close_fd(wfd);
+                wstr(1, "[OK] ");
+                wbytes(1, path, strlen_n(path));
+                wstr(1, " -> ");
+                wbytes(1, dest, strlen_n(dest));
+                wstr(1, " (");
+                wdec(1, ptr_add(mem, M_TMP), utf8_len(ptr_add(mem, M_OUT), n) as u64);
+                wstr(1, "B)\n");
+            }
+        }
+        k = k + 1;
+    }
+    if do_check == 1 {
+        if diffs > 0 {
+            wstr(2, "[DIFF] ");
+            wbytes(2, path, strlen_n(path));
+            wstr(2, ": ");
+            wdec(2, ptr_add(mem, M_TMP), diffs as u64);
+            wstr(2, " 项漂移\n");
+            return 1;
+        }
+        wstr(1, "[OK] ");
+        wbytes(1, path, strlen_n(path));
+        wstr(1, ": 生成产物与磁盘一致（");
+        wdec(1, ptr_add(mem, M_TMP), ntarget as u64);
+        wstr(1, " 个目标）\n");
+    }
+    return 0;
+}
+
+fn print_target(ab: ptr, tab: ptr, i: u32) -> u32 {
+    if arg_is(ab, tab, i, "rust") == 1 { return 0; }
+    if arg_is(ab, tab, i, "c") == 1 { return 1; }
+    if arg_is(ab, tab, i, "python") == 1 { return 2; }
+    if arg_is(ab, tab, i, "json") == 1 { return 3; }
+    return NONE;
+}
+
+/// 磁盘上那个文件是否与刚发射的字节一致 (--check 用; 临时缓冲按需 brk 一块)。
+fn file_same(mem: ptr, dest: ptr, n: u32) -> u32 {
+    let fd: i64 = open_ro(dest);
+    if fd < 0 {
+        return 0;
+    }
+    let buf: u64 = sys_alloc(n as u64 + 16);
+    if buf == 0 {
+        close_fd(fd);
+        return 0;
+    }
+    let raw: u64 = read_all(fd as u64, buf as ptr, n as u64 + 1);
+    close_fd(fd);
+    if raw as u32 != n {
+        return 0;
+    }
+    return bytes_eq(buf as ptr, 0, n, ptr_add(mem, M_OUT), 0, n);
+}
+
+fn _start() -> u32 {
+    let memv: u64 = sys_alloc(M_CAP as u64);
+    if memv == 0 {
+        return fail("lomc: brk failed\n");
+    }
+    let mem: ptr = memv as ptr;
+    store32(mem, M_CELL + C_POOL, 0);
+    store32(mem, M_CELL + C_NCONST, 0);
+    store32(mem, M_CELL + C_NPARAM, 0);
+    store32(mem, M_CELL + C_NVAL, 0);
+    store32(mem, M_CELL + C_NENUM, 0);
+    store32(mem, M_CELL + C_NVAR, 0);
+    store32(mem, M_CELL + C_NREC, 0);
+    store32(mem, M_CELL + C_NFIELD, 0);
+    store32(mem, M_CELL + C_NMETA, 0);
+    store32(mem, M_CELL + C_NERR, 0);
+    store32(mem, M_CELL + C_NNAME, 0);
+    store32(mem, M_CELL + C_TOPMETA, 0);
+    errc(mem);
+    let srcv: u64 = sys_alloc(SRC_CAP as u64);
+    let ab: u64 = sys_alloc(65536);
+    let tab: u64 = sys_alloc(8192);
+    let tokv: u64 = sys_alloc((SRC_CAP + 64) as u64 * 20);
+    if srcv == 0 || ab == 0 || tab == 0 || tokv == 0 {
+        return fail("lomc: brk failed\n");
+    }
+    let scr: ptr = ptr_add(mem, M_SCR);
+    put_lit(scr, "/proc/self/cmdline");
+    let fd: i64 = open_ro(scr);
+    if fd < 0 {
+        return fail("lomc: 读不到 cmdline\n");
+    }
+    let rn: i64 = syscall4(0, fd as u64, ab, 65536);
+    close_fd(fd);
+    if rn <= 0 {
+        return fail("lomc: 用法: lomc <file> [选项]\n");
+    }
+    let argc: u32 = split_argv(ab as ptr, rn as u32, tab as ptr);
+    if argc < 2 {
+        return fail("lomc: 用法: lomc <file> [选项]\n");
+    }
+    return die(run(mem, ab as ptr, tab as ptr, argc, srcv as ptr, tokv as ptr) as u64);
+}

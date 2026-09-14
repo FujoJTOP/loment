@@ -2756,6 +2756,11 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 let r2: u64 = check_type(src, t, syms, n, rtok, out, o);
                 o = (r2 % 4294967296) as u32;
             }
+            // 复合类型表按**函数**清零 —— 与 impl 方法那条路 (2932) 同一件事。
+            // 漏了这一步, 表就是**整单元**单调 bump: 大单元 (lomc.lomt 有 357 个 let)
+            // 写穿 448 条上限, 越过 tyt 块踩进借用名表, 而后整条扫描游标错位 ——
+            // 表现是一堆莫名其妙的 E002 (把 `let` 的变量名当成类型)。见 docs/150 的账。
+            store32(tyt, 0, 0);
             i = j;
         } else if chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum") {
             // 名字已在第零遍登记过 (这里不能再 declare, 否则自己跟自己报 E-DUP)。
