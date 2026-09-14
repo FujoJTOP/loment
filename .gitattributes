@@ -38,7 +38,7 @@
 *.vim    text eol=lf
 *.fuc    text eol=lf
 *.sha256 text eol=lf
-loment/build/SHA256SUMS text eol=lf
+SHA256SUMS text eol=lf
 LICENSE text eol=lf
 # 自举种子 (参考实现发射的 IR): 文本, 但绝不能被换行转换改字节 —— 驱动按字节比对
 loment/build/selfhost_driver.ll text eol=lf

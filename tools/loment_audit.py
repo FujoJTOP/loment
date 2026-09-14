@@ -79,6 +79,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C20", "原生 ELF 后端**自举侧镜像**: loment/tools/lomelf.lomt (走种子自举链编成二进制) "
             "对语料产出的 ELF 与参考实现**逐字节相同** —— 编译一个 Loment 程序全程不需要 clang",
      "loment_elf_test", []),
+    ("C21", "链条的起点 (genesis): 提交进仓库的 lomelf 二进制起头, 在**没有 clang** 的环境里"
+            "跑通 bootstrap.sh 四条证明 —— 重建工具链不需要 C 编译器, 也不需要解释器",
+     "loment_genesis_test", []),
 ]
 
 

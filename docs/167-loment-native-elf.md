@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7，审计主张 **C19 / C20**）
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2），审计主张 **C19 / C20 / C21**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -118,14 +118,19 @@ stage1"那一步出现（见 §5）。
    （b）字面量按 u32 解析，`mul i64 %x, 4294967296` 被截成 0（现在走 64 位解析）；
    （c）表按语料规模定太小（全局 256 → 2048；标签/回填 4096 → 16384）。
    另外把"指针值查不到"从**静默发错代码**改成**报错退出** —— 这类静默错编正是最难查的。
-   ② 链条总要有**第一个可执行文件**（genesis，可复现、提交进仓库、有哈希，与 Rust 发 stage0
-   同一做法）。**残留的诚实点**：genesis 消不掉 —— 它可复现、有来源，但它是个二进制，不装作没有。
+   ② ~~链条要有第一个可执行文件~~ **已落地**。`loment/build/genesis/lomelf-linux-x64.elf`（72 136 B，
+   由种子构建出来、**可复现**、提交进仓库、有自己的 `SHA256SUMS`）就是那个起点；`bootstrap.sh`
+   改成**优先用它**（没有才退回 clang，`LOMENT_USE_CLANG=1` 可强制对照）。
+   于是 `sh loment/bootstrap.sh` 在**PATH 里没有 clang** 的环境下四条证明全过 —— 这就是
+   "重建工具链不需要 C 编译器，也不需要解释器"的落地形态（判据 `loment_genesis_test`，主张 **C21**）。
+   它由 `tools/loment_genesis.py --emit/--check` 维护；`loment/build/genesis/*` 进发布清单。
+   **残留的诚实点**：genesis 消不掉 —— 它可复现、有来源、有哈希，但它是个二进制，不装作没有。
 
 ## 6. 落地形态
 
 - 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test`；审计主张 **C19**。
 - 工件清单：`tools/lomelf.py`、`tools/loment_elf_test.py` 已进 `loment_release.py` 的 `GLOBS`
-  （清单 179 个工件，`--check` 179/179）。
+  （清单 182 个工件，`--check` 182/182 —— genesis 也在里面）。
 - **不改** L0（`lom/*.lom`）、不改 `codegen.lomt`/`driver.lomt`、不改两后端既有的逐字节等价
   （docs/158 §2）—— 新增的是**第三个后端**，不是在既有后端上动刀。
 

@@ -39,6 +39,7 @@ GLOBS = [
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_elf_test.py",
+    "tools/loment_genesis.py", "tools/loment_genesis_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",
     "tools/loment_lsp_test.py", "tools/loment_editors_test.py",
     "editors/vim/*.md", "editors/vim/syntax/*.vim", "editors/vim/ftdetect/*.vim",
@@ -54,7 +55,7 @@ GLOBS = [
     "tools/loment_src.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
-    "loment/build/selfhost_driver.ll", "loment/tools/*.lomt",
+    "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
@@ -70,6 +71,8 @@ def sha(p: Path) -> str:
     """内容哈希。文本按**通用换行**归一后哈希 (同一文件在 LF/CRLF 检出下哈希相同);
     二进制 (图标/压缩包) 按原始字节哈希 —— 清单里两类可以混, 消费者只比 sha256。"""
     raw = p.read_bytes()
+    if b"\x00" in raw:                 # 二进制: 按原始字节哈希
+        return hashlib.sha256(raw).hexdigest()
     try:
         text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
