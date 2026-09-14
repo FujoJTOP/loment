@@ -55,6 +55,12 @@ python tools/loment_audit.py --json     # ④ 审计包：主张逐条 + 不主�
 审计结果：**17/18 通过**，唯一红是 **C14**（本机 `...Microsoft VS Code\Code.exe` 是坏挂载点，
 `os.stat` 抛 `WinError 649`）—— 环境项，非回归。
 
+**安装包（本版重做）**：`loment-0.1.4-alpha-{linux-x64.tar.gz, windows-x64.zip, windows-x64-setup.exe, src.zip}`
+（`loment_dist.py --emit` + `loment_src.py --emit`）。判据：`loment_dist_test` **34/34**、
+`loment_src` 全绿、`loment/dist/SHA256SUMS` **4/4**。**未签名**（`docs/163`：签名线暂停）。
+上一版 0.1.3.4 的产物挪到了 `loment/dist/_prev-0.1.3.4/`（本地、gitignored、可逆 —— `--emit`
+按目录里**现存文件**重算 `SHA256SUMS`，不挪走上一版就会把它的哈希也写进本版清单）。
+
 ## 5. 不主张
 
 完整 10 条见 `docs/160 §2`。其中**两条是本次新发现、且仍开放**的自举链缺口：
@@ -73,13 +79,17 @@ python tools/loment_audit.py --json     # ④ 审计包：主张逐条 + 不主�
 - **不是功能版**：没有新语法、没有新内建。
 - **没有第三方复核**（M100）：冻结面内的判据都是**自证**的（见 `docs/160 §2` 第 1 条）。
 
-## 7. 关于 tag
-
-本提交**只落版本号与文档，没有打 tag** —— tag 是"发布"这个动作本身（M88：打 tag + 校验和），
-而上面 §6 的冻结判据还没凑齐，且 `docs/151` M100 仍是"未达"。要发就单独走一次：
+## 7. tag
 
 ```bash
-git tag -a v0.1.4-alpha -m "Loment 0.1.4 Alpha (Early Use Vision)" && git push origin v0.1.4-alpha
+git tag -a v0.1.4-alpha -m "Loment 0.1.4 Alpha —— Early Use Vision"
+git push origin v0.1.4-alpha
 ```
 
-在此之前，审计报告里的 `tag:` 会显示 `(HEAD 上没有 tag)` —— 那是当前状态，不是缺漏。
+**tag 消息就是这一版的变更说明**（相对 `v0.1.3.4-alpha`）：主题、新增/收口、修的 bug、兼容性
+（语言面无破坏性变更、L0 生成物零改动、种子 1 630 342 → 1 630 422 B）、判据、以及仍然开放的
+两条自举链缺口。`git tag -n99 v0.1.4-alpha` 或 `git show v0.1.4-alpha` 可以读全文。
+
+> 一个顺序上的痕迹：本文件 §7 原先写的是"只落版本号、不打 tag"，tag 是**随后**按这个决定
+> 反过来执行时才建的 —— 所以**被 tag 指向的那个提交里，这一节还写着"没有打 tag"**。
+> 那份旧文本保留不改（tag 是不可变的），本节是它的后置更正。
