@@ -249,11 +249,14 @@ python tools/loment.py build loment/examples --out /tmp/o    # M65/M66 冷 82.6m
 python tools/loment.py pkg  resolve|verify                   # M57 拓扑序 + 校验和
 python tools/loment.py lsp  --demo loment/examples/toolchain.lomt  # M56 三能力自测
 
-# M59: DWARF 行表
+# M59: DWARF 行表 + 变量信息
 python tools/lomentc.py loment/examples/toolchain.lomt --emit-llvm x.ll \
        --emit-potato x.json --debug
 clang --target=x86_64-unknown-none -ffreestanding -g -c x.ll -o x.o
 llvm-objdump -d -l x.o | grep toolchain.lomt      # ; .\toolchain.lomt:7 ... :14
+llvm-objdump -d -l --debug-vars=ascii x.o | sed -n '/<fib>:/,/^$/p'
+#   |- n = <unknown op DW_OP_fbreg (145)>
+#   | |- a = ...  | | |- b = ...  | | | |- i = ...  | | | | |- t = ...
 ```
 
 | 里程碑 | 验证方式 | 结果 |
@@ -262,7 +265,7 @@ llvm-objdump -d -l x.o | grep toolchain.lomt      # ; .\toolchain.lomt:7 ... :14
 | M56 LSP | `handle()` 驱动：诊断/补全/跳转三项 | ✅ 部分（无编辑器宿主） |
 | M57 包管理 | 三级依赖拓扑序 + 锁文件 + 篡改检出 + 环检测 | ✅ |
 | M58 文档 | 签名/能力域/`///` 注释入文档 | ✅ |
-| M59 DWARF | `define` 挂 scope + 语句级 `!dbg`；`objdump -l` 出源行 | ✅ 部分（无变量信息） |
+| M59 DWARF | `define` 挂 scope + 语句级 `!dbg` + **变量**（`DILocalVariable` / `#dbg_declare` 记录）；`objdump -l --debug-vars` 出源行与变量名 | ✅ |
 | M60 IR 查看 | IR + `llvm-objdump -d` 一条命令 | ✅ |
 | M61 测试 | `RESULT: 4/4 PASS`，失败退出码 1 | ✅ |
 | M62 基准 | Rust vs IR 对照表（`bench_fib` 2.46x） | ✅ |
@@ -272,6 +275,26 @@ llvm-objdump -d -l x.o | grep toolchain.lomt      # ; .\toolchain.lomt:7 ... :14
 
 门禁：`loment_tools_test` **11/11** · `ci.py --static-only` **7/7** · `potato_cross` 51/51
 （新增示例后总数 +1）。
+
+> 后置修订（2026-09-13，M59 收口）：变量信息补上了。每个形参/局部在发射期拿到
+> `DILocalVariable`（形参带 `arg:`）与一条 `#dbg_declare(ptr %x.addr, !N, !DIExpression(), !LOC)`
+> **调试记录**（clang 22 自己发射的就是记录形态，不是旧内建 `llvm.dbg.declare`；记录附着于
+> 下一条指令，序言里每个 alloca 后面总还有指令，位置安全）。只读 `--debug` 分支，
+> 非 debug 路径不长出任何调试元数据 —— 与"两后端逐字节等价"的判据不冲突。
+>
+> `llvm-objdump --debug-vars` 把位置显示成 `<unknown op DW_OP_fbreg (145)>`：**不是缺陷**。
+> 对照实验：clang 22 自己发射的 C 源码产物在同一条命令下显示完全相同 —— 那是 llvm-objdump
+> 的变量位置求值器在 freestanding 目标上的限制。变量**名字**与它绑定的**源码行**由 DWARF
+> 正确给出（`--debug-vars` 会逐个列出 `n/a/b/i/t`）；要把位置解成具体寄存器/栈偏移，
+> 需要完整调试器。判据 `loment_tools_test::test_m59_dwarf_local_variables`。
+>
+> 顺带抓到一个**既有 bug**（不是本次引入）：`--debug` + `match` 会产出**非法 IR**。
+> `w()` 给所追加的每一行都挂 `, !dbg !N`，而 `switch` 是**多行指令** —— `!dbg` 只能挂在
+> 整条指令末尾（`]` 那一行）。现象是 `switch i32 %t, label %L [, !dbg !7` 被 clang 直接拒。
+> 旧用例只喂了没有 `match` 的 `toolchain.lomt`，所以从未触发。修法：多行指令的续行走
+> `w_raw`（不加后缀），`!dbg` 只挂 `]`。回归判据
+> `test_m59_debug_ir_compiles_across_corpus`（对含 match/枚举/泛型/数组的 5 个语料逐个
+> `clang -g` 编译）—— 调试信息不能把编译搞崩，这条比"发没发元数据"更靠前。
 
 ### P7 证据（2026-09-09，M67–M78）
 
@@ -594,7 +617,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M56 | LSP（补全/跳转/诊断） | 三个能力在编辑器实测 | ✅ 部分（**宿主已就位**：`editors/vscode/` VS Code 扩展已装，`vscode_ext_test` 5/5 无头验收含完整 LSP 往返；编辑器内人工点验待做） |
 | M57 | 包管理器 `lompkg` | 依赖解析 + 校验和 | ✅ |
 | M58 | 文档生成器 `lomdoc` | 从 `.lomt` 生成 API 文档 | ✅ |
-| M59 | 调试信息（DWARF） | 调试器能按源码行断点 | ✅ 部分（语句级行表，无变量信息） |
+| M59 | 调试信息（DWARF） | 调试器能按源码行断点 | ✅（行表 + 变量信息；位置求值要完整调试器，见 P6 证据） |
 | M60 | IR 查看器 / 反汇编 | 一条命令看 IR 与机器码 | ✅ |
 | M61 | 内建测试框架 | `loment test` 跑通 | ✅ |
 | M62 | 基准框架 | 与 Rust 路径对比表 | ✅ |

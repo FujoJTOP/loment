@@ -2796,10 +2796,13 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     raise LomError(1, 1, f"native 后端不支持类型 {t!r}")
 
 
-def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str]]:
-    """按序收集需 alloca 的局部 (不含参数, 去重); For 变量与 match 绑定按上下文推断。"""
+def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str, int]]:
+    """按序收集需 alloca 的局部 (不含参数, 去重) 与它们的**声明行**。
+
+    行号是 M59 的变量信息要的 (`DILocalVariable.line`); For 变量与 match 绑定按上下文推断。
+    """
     enums = enums or {}
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, int]] = []
     seen = {p.name for p in f.params}
     scope: dict[str, str] = {p.name: p.type for p in f.params}
 
@@ -2807,7 +2810,7 @@ def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str]]
         for s in stmts:
             if isinstance(s, Let):
                 if s.name not in seen:
-                    out.append((s.name, s.type))
+                    out.append((s.name, s.type, s.line))
                     seen.add(s.name)
                 scope[s.name] = s.type
             elif isinstance(s, If):
@@ -2818,7 +2821,7 @@ def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str]]
             elif isinstance(s, For):
                 vt = expr_type(s.lo, scope, {}, {}) or expr_type(s.hi, scope, {}, {}) or "u32"
                 if s.var not in seen:
-                    out.append((s.var, vt))
+                    out.append((s.var, vt, s.line))
                     seen.add(s.var)
                 scope[s.var] = vt
                 walk(s.body)
@@ -2829,7 +2832,7 @@ def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str]]
                     if pat is not None and pat.bind and ed is not None:
                         pt = ed.payloads.get(pat.variant)
                         if pt and pat.bind not in seen:
-                            out.append((pat.bind, pt))
+                            out.append((pat.bind, pt, pat.line))
                             seen.add(pat.bind)
                         if pt:
                             scope[pat.bind] = pt
@@ -2846,7 +2849,7 @@ class _Ir:
                  structs: dict | None = None, enums: dict | None = None,
                  coverage: bool = False, cov_counter: list | None = None,
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                 dbg_meta: list | None = None):
+                 dbg_meta: list | None = None, dbg_types: dict | None = None):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -2862,6 +2865,7 @@ class _Ir:
         self.dbg_scope = dbg_scope                  # M59: 本函数的 DISubprogram
         self.dbg_lines = dbg_lines if dbg_lines is not None else {}
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
+        self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
 
@@ -2875,6 +2879,46 @@ class _Ir:
                 f"!{i} = !DILocation(line: {line}, column: 1, scope: !{self.dbg_scope})")
             self.dbg_lines[line] = i
         return self.dbg_lines[line]
+
+    def dbg_ty(self, ty: str) -> int:
+        """M59: 局部变量类型 -> DIBasicType (每类型一份, 跨函数共享)。"""
+        if ty in self.dbg_types:
+            return self.dbg_types[ty]
+        if ty == "bool":
+            size, enc = 8, "DW_ATE_boolean"
+        elif ty == "ptr":
+            size, enc = 64, "DW_ATE_address"
+        elif ty in ("u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"):
+            size = int(ty[1:])
+            enc = "DW_ATE_signed" if ty[0] == "i" else "DW_ATE_unsigned"
+        else:  # str / 切片 / 数组 / 结构体 / 枚举: 只记名字, 尺寸交给 LLVM (size: 0)
+            size, enc = 0, "DW_ATE_unsigned"
+        i = len(self.dbg_meta)
+        self.dbg_meta.append(
+            f'!{i} = !DIBasicType(name: "{ty}", size: {size}, encoding: {enc})')
+        self.dbg_types[ty] = i
+        return i
+
+    def dbg_declare(self, name: str, ty: str, ptr: str, line: int, arg: int = 0) -> None:
+        """M59: 变量声明点 —— DILocalVariable 元数据 + 一条 `#dbg_declare` 记录。
+
+        用**新式调试记录**而不是旧内建 `llvm.dbg.declare`: 本工具链的 clang 22 自己发射的
+        就是记录形态 (探针实测), 记录不需内建声明, 且附着于**下一条指令** —— 序言里每个
+        alloca 后面总还有指令 (至少函数体或收尾的 ret), 所以位置安全。
+        记录**不能**带 `!dbg` 后缀 (`self.w` 会加), 所以直接写进 self.out。
+        """
+        if self.dbg_scope is None or self.dbg_meta is None:
+            return
+        loc = self.dbg_for(line)
+        if loc is None:
+            return
+        vt = self.dbg_ty(ty)
+        i = len(self.dbg_meta)
+        a = f", arg: {arg}" if arg > 0 else ""
+        self.dbg_meta.append(
+            f'!{i} = !DILocalVariable(name: "{name}"{a}, scope: !{self.dbg_scope}, '
+            f'file: !1, line: {line}, type: !{vt})')
+        self.out.append(f"  #dbg_declare(ptr {ptr}, !{i}, !DIExpression(), !{loc})")
 
     def cov_hit(self) -> None:
         """M63: 在每个基本块开头对 @__loment_cov[块号] 加一。"""
@@ -2905,6 +2949,15 @@ class _Ir:
     def w(self, s: str) -> None:
         if self.dbg_loc is not None:
             s += f", !dbg !{self.dbg_loc}"
+        self.out.append("  " + s)
+
+    def w_raw(self, s: str) -> None:
+        """追加一行**不加** `!dbg` 后缀的文本 —— 给**多行指令的续行**用。
+
+        `!dbg` 必须挂在整条指令的末尾 (对 `switch` 就是 `]` 那一行); 逐行都挂会写出
+        `switch i32 %x, label %L [, !dbg !7` 这种非法 IR —— 这是 M59 收口时抓到的既有 bug
+        (旧用例只喂没有 `match` 的语料, 从未触发)。
+        """
         self.out.append("  " + s)
 
     def label(self, name: str) -> None:
@@ -3484,10 +3537,10 @@ class _Ir:
                     wild_l = self.l("mwild")
                 else:
                     cases.append((ed.variants.index(pat.variant), self.l(f"m{pat.variant}")))
-            self.w(f"switch i32 {tag}, label %{wild_l} [")
+            self.w_raw(f"switch i32 {tag}, label %{wild_l} [")
             for idx, lbl in cases:
-                self.w(f"    i32 {idx}, label %{lbl}")
-            self.w("  ]")
+                self.w_raw(f"    i32 {idx}, label %{lbl}")
+            self.w("  ]")   # !dbg 挂整条指令末尾 (多行 switch 的最后一行)
             self.terminated = True
             for (pat, body), (_idx, lbl) in zip([a for a in s.arms if a[0] is not None], cases):
                 self.label(lbl)
@@ -3612,9 +3665,10 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                  dbg_meta: list | None = None) -> tuple[list[str], str]:
+                  dbg_meta: list | None = None, dbg_types: dict | None = None
+                  ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -3622,9 +3676,10 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.out.append("entry:")
         ir.cur_label = "entry"
         ir.cov_hit()
-        for name, ty in _collect_locals(f, enums):
+        for name, ty, ln in _collect_locals(f, enums):
             ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
             ir.vars[name] = (ty, f"%{name}.addr")
+            ir.dbg_declare(name, ty, f"%{name}.addr", ln)
         ir.block(f.body)
         if not ir.terminated:
             ir.w("ret void")
@@ -3640,9 +3695,12 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     for p in f.params:  # 参数与局部统一提升到入口块, 避免循环内反复分配
         ir.w(f"%{p.name}.addr = alloca {ir.ll(p.type)}")
         ir.vars[p.name] = (p.type, f"%{p.name}.addr")
-    for name, ty in _collect_locals(f, enums):
+    for j, p in enumerate(f.params):  # M59: 形参也声明, arg 从 1 起 (DWARF 约定)
+        ir.dbg_declare(p.name, p.type, f"%{p.name}.addr", f.line, j + 1)
+    for name, ty, ln in _collect_locals(f, enums):
         ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
         ir.vars[name] = (ty, f"%{name}.addr")
+        ir.dbg_declare(name, ty, f"%{name}.addr", ln)
     for p in f.params:
         ir.w(f"store {ir.ll(p.type)} %{p.name}, ptr %{p.name}.addr")
     ir.block(f.body)
@@ -3679,7 +3737,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             _ll_type(f.ret, structs, enums)
             for p in f.params:
                 _ll_type(p.type, structs, enums)
-            for _, ty in _collect_locals(f, enums):
+            for _, ty, _ln in _collect_locals(f, enums):
                 _ll_type(ty, structs, enums)
     out = [
         "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)",
@@ -3690,6 +3748,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     body: list[str] = []
     cov_counter = [0] if coverage else None
     meta: list[str] = []
+    dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
     if debug:  # M59: DWARF 最小元数据 (编译单元 + 文件 + 签名类型)
         meta += [
             '!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, '
@@ -3710,7 +3769,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'file: !1, line: {f.line}, type: !2, unit: !0, '
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
-                                    cov_counter, scope, lines, meta if debug else None)
+                                    cov_counter, scope, lines, meta if debug else None,
+                                    dbg_types if debug else None)
             globals_ += g
             body.append(text)
     text_all = "\n".join(body)

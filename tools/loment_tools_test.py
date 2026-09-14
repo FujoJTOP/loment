@@ -201,6 +201,91 @@ def test_m59_dwarf_line_table():
         assert "toolchain.lomt:" in dump, "行表里没有源文件行号"
 
 
+@test
+def test_m59_dwarf_local_variables():
+    """M59 (收口): 行表之外还要有**变量信息**。
+
+    IR 里每个形参/局部都有 `DILocalVariable` 元数据 + 一条 `#dbg_declare` 调试记录;
+    落盘后用 `llvm-objdump -d -l --debug-vars` (LLVM 自己的"调试器变量视图") 能在反汇编旁
+    按源码行列出源码变量名。
+
+    位置表达式在本工具链里显示成 `<unknown op DW_OP_fbreg>` —— **不是缺陷**: clang 22 自己
+    发射的 C 源码产物在同一条命令下显示完全相同, 这是 llvm-objdump 的变量位置求值器在
+    freestanding 目标上的限制 (要解析位置得有完整调试器), 详见 docs/145 的 M59 节。
+
+    本用例同时钉住"非 debug 路径不长出调试元数据" —— 与"两后端逐字节等价"的判据配对。
+    """
+    mod = lomentc.load(TOOLCHAIN)
+    deps = lomentc.resolve_deps(mod, ROOT, EX, entry=TOOLCHAIN)
+    ll = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
+    assert "!DILocalVariable(" in ll, "缺变量元数据"
+    assert "#dbg_declare(" in ll, "缺变量声明记录"
+    assert "!DIBasicType(" in ll, "缺变量类型"
+    assert '!DILocalVariable(name: "n", arg: 1, scope:' in ll, "形参没标 arg"
+    for nm in ("a", "b", "i", "t"):   # 局部不带 arg
+        assert f'!DILocalVariable(name: "{nm}", scope:' in ll, nm
+    plain = lomentc.emit_llvm(mod, ROOT, deps)
+    assert "!DILocalVariable" not in plain and "#dbg_declare" not in plain, \
+        "非 debug 路径不该有调试元数据"
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 无 clang, 跳过 --debug-vars 落盘验证")
+        return
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "m.ll"
+        f.write_text(ll, encoding="utf-8")
+        obj = Path(td) / "m.o"
+        r = subprocess.run([clang, "--target=x86_64-unknown-none", "-ffreestanding",
+                            "-g", "-c", str(f), "-o", str(obj)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr
+        objdump = shutil.which("llvm-objdump") or r"C:\Program Files\LLVM\bin\llvm-objdump.exe"
+        dump = subprocess.run([objdump, "-d", "-l", "--debug-vars=ascii", str(obj)],
+                              capture_output=True, text=True, shell=False).stdout
+        assert "toolchain.lomt:" in dump, "行表里没有源文件行号"
+        fib = dump.split("<fib>:")[1].split("\n000")[0] if "<fib>:" in dump else ""
+        assert fib, "反汇编里没有 fib"
+        for nm in ("n", "a", "b", "i", "t"):   # 变量视图必须逐个列出
+            assert f"- {nm} = " in fib, f"变量视图里没有 {nm}"
+
+
+@test
+def test_m59_debug_ir_compiles_across_corpus():
+    """M59 回归: 带 `--debug` 的 IR 必须**仍是合法 IR** —— 对含 match/枚举/泛型/数组的语料
+    逐个 `clang -g` 编译。
+
+    这条盯的是一个**既有 bug**(M59 收口时抓到): 多行 `switch` 被 `!dbg` 后缀逐行污染
+    (`switch i32 %x, label %L [, !dbg !7`), 只有 `--debug` + `match` 才触发, 旧用例只喂
+    没有 match 的 `toolchain.lomt`, 从未覆盖。修法是让续行走 `w_raw`(不加后缀),
+    `!dbg` 只挂整条指令末尾的 `]`。
+    """
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 无 clang")
+        return
+    import subprocess
+    files = [TOOLCHAIN] + [EX / n for n in
+                           ("native_res.lomt", "demo.lomt", "native_agg.lomt", "native_gen.lomt")]
+    bad = []
+    with tempfile.TemporaryDirectory() as td:
+        for src in files:
+            mod = lomentc.load(src)
+            deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+            ll = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
+            assert "!DILocalVariable(" in ll, f"{src.name}: 没发变量信息"
+            f = Path(td) / (src.stem + ".ll")
+            f.write_text(ll, encoding="utf-8")
+            r = subprocess.run([clang, "--target=x86_64-unknown-none", "-ffreestanding",
+                                "-g", "-c", str(f), "-o", str(Path(td) / (src.stem + ".o"))],
+                               capture_output=True, text=True, shell=False)
+            if r.returncode != 0:
+                tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "?"
+                bad.append(f"{src.name}: {tail}")
+    assert not bad, "带 --debug 的 IR 编译不过: " + "; ".join(bad)
+    print(f"      {len(files)} 个语料的 --debug IR 都能被 clang -g 编译")
+
+
 # ---------------------------------------------------------------- M30/M31/M32 裸机
 
 @test

@@ -19,7 +19,7 @@
 | C1 | 自举 checker 与参考实现**规则等价** | `loment_rule_parity.py` | 63/63 等价；假阳性/口径漂移/探针失效 **必须为 0**；棘轮预算只升不降 |
 | C2 | 两个后端**逐字节等价** + 三阶段自举定点 + 语料零诊断 + 负例被拒 | `loment_p8_test.py` | 16/16 条；40/40 目标 IR 相同；stage1=stage2=stage3；63 条负例全部非零退出且无信号 |
 | C3 | 参考实现自身形状 | `lomentc_test.py` | 91/91 |
-| C4 | 工具侧（诊断分类完整、内建表一致、增量缓存、**审计清单一致**） | `loment_tools_test.py` | 15/15 |
+| C4 | 工具侧（诊断分类完整、内建表一致、增量缓存、**审计清单一致**、DWARF 变量信息与 `--debug` IR 可编译） | `loment_tools_test.py` | 18/18 |
 | C5 | **无 Python 自举**：种子自复现、启动脚本无解释器、定点 | `loment_seed_test.py` | 3/3（含 `sh loment/bootstrap.sh` 只用 clang 跑通） |
 | C6 | Loment 版格式化器与 Python 版**逐字节相同** | `loment_fmt_test.py` | 3/3（42 语料 + 4 边界 + 幂等） |
 | C7 | 示例集与交叉编译目标 | `loment_p9_test.py` | 2/2（25 示例编译；aarch64 目标发射并可反汇编） |
@@ -52,7 +52,9 @@ python tools/loment_audit.py --list     # 只列主张与命令
 4. **自举驱动整条链没有 parser**：解析期错误（如 `const C: bool = true;`）只有参考实现
    能报出来。parser 本身已与参考逐字符一致（42/42 语料），但没有接进 driver 的链路。
 5. **aarch64 只验证到发射**：没有 qemu-user、没有真机执行（`docs/158 §4`）。
-6. 自举性能 12.8s（参考 1.2s）；**无 DWARF 变量信息**（只有语句级行表）。
+6. 自举性能 12.8s（参考 1.2s）；DWARF 有**行表 + 变量名/声明行**，但**位置求值**要完整调试器：
+   `llvm-objdump --debug-vars` 在 freestanding 目标上只显示 `<unknown op DW_OP_fbreg>`，
+   clang 自身产物同样如此（对照见 `docs/145` P6 的 M59 后置修订）。
 7. **用户侧工具链已无 Python 成分，但 L0 生成器还有**：`lomfmt`/`lomdoc`/`loment_lsp`/`lompkg`
    都已 Loment 化（进度见 `docs/159 §4b`）；`tools/lomc.py`（L0 `.lom` 生成器，13 个生成物被
    内核线消费）仍是 Python，属跨线契约面，须与内核线协同排期。
@@ -110,4 +112,4 @@ python tools/loment_audit.py --json # 期望 17/17
 - `docs/161-loment-checkout-eol.md` —— 检出行尾契约：CRLF 为什么能伪装成逻辑红；
 - `docs/150-loment-selfhost.md` —— 自举链（lexer/parser/checker/codegen/定点）与 M80 收口；
 - `docs/159-loment-seed-bootstrap.md` —— 无 Python 自举与工具链去 Python 的进度排序；
-- `docs/145` / `docs/154` —— 100 里程碑账本（当前：完成 86 · 部分 9 · 未达 1 · 未开始 4）。
+- `docs/145` / `docs/154` —— 100 里程碑账本（当前：完成 87 · 部分 8 · 未达 1 · 未开始 4）。
