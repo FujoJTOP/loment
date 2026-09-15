@@ -38,7 +38,7 @@ GLOBS = [
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
-    "tools/lomelf.py", "tools/loment_elf_test.py",
+    "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
     "tools/loment_status_test.py", "tools/loment_rel_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",

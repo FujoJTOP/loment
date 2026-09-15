@@ -88,6 +88,9 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
     ("C23", "构建路径去 Python 第二格: Loment 版发布清单生成器 (glob 展开 + sha256 + 定形 JSON), "
             "与 Python 版 stdout / 落盘字节 / 退出码**逐字节相同**",
      "loment_rel_test", []),
+    ("C24", "原生 PE 后端: 同一份 IR 产出的 Windows PE 控制台程序**在本机原生跑**, "
+            "与 clang/Linux 路的 stdout 字节 + 退出码一致; 编译与运行都不碰 clang/wsl",
+     "loment_pe_test", []),
 ]
 
 

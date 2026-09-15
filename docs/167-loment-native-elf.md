@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2），审计主张 **C19 / C20 / C21**
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（5/5），审计主张 **C19 / C20 / C21 / C24**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -99,8 +99,36 @@ stage1"那一步出现（见 §5）。
    （判据 `loment_elf_test` 的 `test_lomelf_selfhost_matches_reference`，审计主张 **C20**）。
    也就是说：**编译一个 Loment 程序从发 IR 到出 ELF，全程不需要 clang** ——
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
-2. **PE64 / Windows 原生（去 WSL）**。复用本文的代码生成，换 object 写出与调用约定；
-   `loment_dist.py` 的 Windows 装法从"拷进 WSL + `wsl -e` 转发"改成装原生 `loment.exe`。
+2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
+   `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 5/5）。
+
+   与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
+   换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
+   kernel32。**整个 syscall 面收敛在这一处**，取参代码一个字没改。
+
+   判据分两层：平台中性的两个语料（`user_hello` / `all_loment`）的 PE 产物与 clang/Linux 路
+   **stdout 字节 + 退出码一致**；以及把 `PATH` 收成**只剩 python**（没有 clang、没有 wsl）也照样
+   编得出、跑得起来 —— 后者才是"去 WSL"这条判据本身。
+
+   `bootprobe`(M76) 与 `selfcheck`(M77) **不进** PE 判据：一个是 uname 的 sysname，一个是
+   seccomp 沙箱里 getrandom 会失败的断言，在 Windows 上**本就该不同** —— 拿它们当判据只会
+   把平台差异误判成回归。
+
+   **还没做**：shim 只实现了 `write`(1) 与 `exit`(60)，其余 syscall 号返回 -1。所以当前
+   **跑不了需要 argv 或文件 I/O 的程序**：`openat`/`read`（即 `/proc/self/cmdline` 的 argv 合成）、
+   `getdents64`、`newfstatat`、`brk` 都没做，Windows 也没有 procfs 可读。
+   `loment_dist.py` 的 Windows 装法改成装原生 `loment.exe` 也还没动。
+
+   写 PE 写出时撞到三个 bug，都只在"加载器认不认"这一层暴露，记在这里：
+   （a）**PE32+ 的 `SizeOfImage`/`SizeOfHeaders` 在偏移 56/60**；写成 PE32 的 54/58 会把值落进
+   `Win32VersionValue` 槽，加载器读到 `SizeOfHeaders=0` 直接拒收（"不是有效的 Win32 应用程序"）；
+   （b）**导入描述符表必须以一条全零描述符终止** —— 少了它，加载器把紧随其后的 ILT 当成第二条
+   描述符，导入解析中途失败、IAT 保持未填，随后 `call rax` 直接崩；
+   （c）**调用点必须 `sub rsp,0x28`**（32 字节 shadow space + 对齐）—— x64 ABI 要求；少了它崩在
+   callee 里，症状是 SIGSEGV 而不是"格式错"。
+   还有一条不是格式而是布局：`.text` 的 RVA 不能钉死（早先 `.text` 钉 0x1000、`.data` 钉 0x2000，
+   文本一过一页两节 RVA 就重叠），所以改成**两遍发射** —— 先量代码长度，再把 `.data` 排到 `.text` 之后。
 3. **构建/发布路径去 Python**（**第一格已落**：`loment/tools/lomstatus.lomt` 取代
    `loment_status.py`，判据 `loment_status_test` 4/4 + 主张 **C22** —— 三路输出与落盘字节
    都与 Python 版逐字节相同。**下一格**：`lom_spec_emit` / `loment_release` /
@@ -130,9 +158,10 @@ stage1"那一步出现（见 §5）。
 
 ## 6. 落地形态
 
-- 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test`；审计主张 **C19**。
-- 工件清单：`tools/lomelf.py`、`tools/loment_elf_test.py` 已进 `loment_release.py` 的 `GLOBS`
-  （清单 184 个工件，`--check` 184/184 —— genesis 也在里面）。
+- 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test` 与 `loment_pe_test`；审计主张
+  **C19**（ELF）与 **C24**（PE）。
+- 工件清单：`tools/lomelf.py`、`tools/loment_elf_test.py`、`tools/loment_pe_test.py` 已进
+  `loment_release.py` 的 `GLOBS`（清单 184 个工件，`--check` 184/184 —— genesis 也在里面）。
 - **不改** L0（`lom/*.lom`）、不改 `codegen.lomt`/`driver.lomt`、不改两后端既有的逐字节等价
   （docs/158 §2）—— 新增的是**第三个后端**，不是在既有后端上动刀。
 
@@ -151,9 +180,23 @@ python tools/loment_audit.py --json
   [PASS] C20 自举侧镜像: ... 逐字节相同 + 自举侧重建定点
 ```
 
-规模：`tools/lomelf.py` **1177 行**（参考）；`loment/tools/lomelf.lomt` **约 2700 行**（自举镜像，
-规模：`tools/lomelf.py` **1177 行**（参考）；`loment/tools/lomelf.lomt` **约 2700 行**（自举镜像）；
-`tools/loment_elf_test.py` 约 300 行。
+PE 目标（`--target pe`，Windows 原生）：
+
+```
+python tools/loment_pe_test.py
+  PASS  test_pe_image_is_structurally_sane                 # 对齐/不重叠/入口可执行/文件盖得住
+  PASS  test_pe_runs_natively_matches_linux_behavior        # 2 个程序: 与 clang/Linux 逐字节一致
+  PASS  test_pe_builds_and_runs_without_clang_or_wsl        # PATH 里只剩 python 也照跑
+  PASS  test_pe_reports_unsupported_instead_of_miscompiling # 3 类输入报错
+  PASS  test_pe_cli_check_and_usage                         # --check 不落盘 rc=0 · 非法 --target rc=2
+
+user_hello 的 IR 1581 B -> PE 2560 B（text 896 B / data 32 B）；产物原生跑出
+M67 RESULT: PASS loment-user，rc=0，与 clang/Linux 路逐字节一致。
+all_loment 的 PE 产物同样一致（M78 sum=42 double=84 max=84 fib=55）。
+```
+
+规模：`tools/lomelf.py` **1470 行**（参考，含 PE 目标）；`loment/tools/lomelf.lomt` **约 2700 行**
+（自举镜像）；`tools/loment_elf_test.py` 约 300 行；`tools/loment_pe_test.py` 286 行。
 
 **自举链的容量闸门**（写镜像时撞到的，逐条记）：自举 codegen 的**形参上限是 10**
 （`loment/selfhost/codegen.lomt` 的表按 10 槽定）—— 超过会让 stage1 直接 SIGILL，

@@ -32,8 +32,8 @@ import struct
 import sys
 from pathlib import Path
 
-TEXT_VADDR = 0x400000
-DATA_VADDR = 0x600000
+ELF_TEXT_VADDR, ELF_DATA_VADDR = 0x400000, 0x600000
+TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # 当前目标的活动值, PE 目标会改
 SCALAR_SIZE = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "ptr": 8}
 
 RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI = 0, 1, 2, 3, 4, 5, 6, 7
@@ -1018,9 +1018,14 @@ class Emitter:
         for (ty, val), r in zip(args, regs):
             if r == "ax":
                 self.get(ty, val, RAX)
-        self.asm.emit(b"\x0F\x05")
+        self._emit_syscall()
         if d is not None:
             self.put(d, RAX)
+
+    def _emit_syscall(self) -> None:
+        """内联汇编 syscall 落在指令上的那一步。**整个 syscall 面只有这一处** ——
+        PE 目标覆盖它去走 `__win_syscall`，其余取参/存值逻辑两边共用。"""
+        self.asm.emit(b"\x0F\x05")
 
     def _ret(self, t):
         if t.strip() != "ret void":
@@ -1106,10 +1111,272 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
     return bytes(out)
 
 
+# ------------------------------------------------------------------ PE 目标 (Windows, x86-64)
+#
+# 同一份 IR 的第二个目标：PE64 控制台程序。为了**去掉 WSL** —— 原来的 Windows 路径要
+# 把 ELF 丢进 WSL 跑，PE 产物在 Windows 上原生就能跑。
+#
+# 与 ELF 目标的差别（逐条记账，别当成"等价"）：
+#   * x64 Windows 没有 `syscall` 指令，所以每个内联汇编 syscall 都改发 `call __win_syscall`，
+#     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
+#   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
+#     而被调方（Windows API）里的 `movaps` 会直接 #GP。
+#   * 只实现了语料真正用到的 `write`(1) 与 `exit`(60)；其余号返回 -1。
+#     `openat`/`read`(即 /proc/self/cmdline 的 argv 合成)、`getdents64`、`newfstatat`、
+#     `brk` 还没做 —— 所以**还不能跑需要 argv 或文件 I/O 的程序**。
+#   * Windows 没有 procfs，argv 只能靠 shim 合成（未做）。
+
+PE_IMAGE_BASE = 0x140000000
+PE_SEC_ALIGN, PE_FILE_ALIGN = 0x1000, 0x200
+PE_TEXT_RVA = 0x1000
+PE_IMPORTS = ["ExitProcess", "GetStdHandle", "WriteFile"]
+PE_STD_OUTPUT, PE_STD_ERROR = -11, -12
+SYS_EXIT, SYS_WRITE = 60, 1
+
+
+def build_pe_idata(d: int, funcs: list[str]) -> tuple[bytes, dict, int]:
+    """kernel32.dll 的导入表。返回 (blob, {标签: IAT 槽 RVA}, IAT RVA)。
+
+    描述符表**必须**以一条全零描述符终止：少了它，加载器会把紧随其后的 ILT 当成第二条
+    描述符，导入解析中途失败，IAT 保持未填，随后 `call rax` 直接崩（症状是 SIGSEGV）。
+    """
+    n = len(funcs)
+    ilt = d + 40                                   # 一条描述符 + 一条全零终止项
+    iat = ilt + (n + 1) * 8
+    off = iat + (n + 1) * 8
+    hint_rvas, blobs = [], []
+    for nm in funcs:
+        b = struct.pack("<H", 0) + nm.encode() + b"\x00"
+        if len(b) % 2:
+            b += b"\x00"
+        hint_rvas.append(off)
+        blobs.append((off, b))
+        off += len(b)
+    dll_rva = off
+    dll = b"kernel32.dll\x00"
+    off += len(dll)
+
+    out = bytearray(off - d)
+    struct.pack_into("<IIIII", out, 0, ilt, 0, 0, dll_rva, iat)
+    for i, r in enumerate(hint_rvas):
+        struct.pack_into("<Q", out, ilt - d + i * 8, r)
+        struct.pack_into("<Q", out, iat - d + i * 8, r)
+    for at, b in blobs:
+        out[at - d:at - d + len(b)] = b
+    out[dll_rva - d:] = dll
+    return bytes(out), {f"__iat_{nm}": iat + i * 8 for i, nm in enumerate(funcs)}, iat
+
+
+def _call_iat(asm: Asm, slot: str) -> None:
+    """call qword ptr [slot]。镜像不是 ASLR（无 DYNAMIC_BASE、无 .reloc），绝对取址足够。"""
+    at = asm.here()
+    asm.emit(b"\x48\xA1" + b"\x00" * 8)            # mov rax, [abs64]
+    asm.fixups.append((at + 2, slot, 8, "abs"))
+    asm.emit(b"\xFF\xD0")                          # call rax
+
+
+def emit_win_shim(em: "PeEmitter") -> None:
+    """`__win_syscall`: rax = syscall 号，参数按 Linux 习惯在 rdi/rsi/rdx。
+
+    Linux 的 `syscall` 是把号放 rax、参数放 rdi/rsi/rdx/r10/r8；这里保持同一套寄存器约定，
+    所以 `_call_asm` 的取参代码一个字都不用改，只是把 `0F 05` 换成 `call __win_syscall`。
+    """
+    a = em.asm
+    a.label("__win_syscall")
+    a.emit(b"\x55")                                # push rbp
+    a.emit(b"\x48\x89\xE5")                        # mov rbp, rsp
+    a.emit(b"\x48\x83\xE4\xF0")                    # and rsp, -16
+    a.emit(b"\x48\x83\xEC\x40")                    # sub rsp, 0x40 (32 shadow + 第五参 + 溢写槽)
+
+    a.emit(b"\x3D" + struct.pack("<I", SYS_EXIT))  # cmp eax, 60
+    a.emit(b"\x0F\x84")                            # je __ws_exit
+    a.fixups.append((a.here(), "__ws_exit", 4, "rel"))
+    a.emit(b"\x00\x00\x00\x00")
+    a.emit(b"\x3D" + struct.pack("<I", SYS_WRITE))  # cmp eax, 1
+    a.emit(b"\x0F\x84")                             # je __ws_write
+    a.fixups.append((a.here(), "__ws_write", 4, "rel"))
+    a.emit(b"\x00\x00\x00\x00")
+    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")        # mov rax, -1   (未实现的号)
+    a.emit(b"\x48\x89\xEC")                        # mov rsp, rbp
+    a.emit(b"\x5D\xC3")                            # pop rbp; ret
+
+    a.label("__ws_exit")                           # exit(code) -> ExitProcess
+    a.emit(mov_rr(RCX, RDI))                       # mov ecx, edi
+    _call_iat(a, "__iat_ExitProcess")
+    a.emit(b"\x0F\x0B")                            # ud2 (不该回来)
+
+    # write(fd, buf, len) -> GetStdHandle + WriteFile
+    # r10/r11 是易失寄存器，跨调用必须溢写到栈上（[rsp+0x20] 留给第五参）。
+    a.label("__ws_write")
+    a.emit(mov_mr(RSP, 0x30, RSI))                 # mov [rsp+0x30], rsi   ; buf
+    a.emit(mov_mr(RSP, 0x38, RDX))                 # mov [rsp+0x38], rdx   ; len
+    a.emit(b"\xB9" + struct.pack("<I", PE_STD_OUTPUT & 0xFFFFFFFF))    # mov ecx, -11
+    a.emit(b"\x83\xFF\x02")                        # cmp edi, 2
+    a.jcc("ne", "__ws_stdout_ok")
+    a.emit(b"\xB9" + struct.pack("<I", PE_STD_ERROR & 0xFFFFFFFF))     # mov ecx, -12
+    a.label("__ws_stdout_ok")
+    _call_iat(a, "__iat_GetStdHandle")
+    a.emit(mov_rr(RCX, RAX))                       # mov rcx, rax          ; hFile
+    a.emit(mov_rm(RDX, RSP, 0x30))                 # mov rdx, [rsp+0x30]   ; lpBuffer
+    a.emit(mov_rm(R8, RSP, 0x38))                  # mov r8,  [rsp+0x38]   ; nBytes
+    a.emit(b"\x45\x31\xC9")                        # xor r9d, r9d          ; lpWritten = NULL
+    a.emit(b"\x31\xC0")                            # xor eax, eax
+    a.emit(mov_mr(RSP, 0x20, RAX))                 # mov [rsp+0x20], rax   ; 第五参 lpOverlapped = NULL
+    _call_iat(a, "__iat_WriteFile")
+    a.emit(mov_rm(RAX, RSP, 0x38))                 # 返回写入字节数（照 write(2)）
+    a.emit(b"\x48\x89\xEC")                        # mov rsp, rbp
+    a.emit(b"\x5D\xC3")                            # pop rbp; ret
+
+
+class PeEmitter(Emitter):
+    """把 syscall 改成走 shim、把入口桩改成 Windows 形态，其余降级与 ELF 目标共用。"""
+
+    def _emit_syscall(self) -> None:
+        self.asm.call("__win_syscall")
+
+    def emit_entry_stub(self, start_name: str) -> None:
+        a = self.asm
+        a.label("__entry")
+        a.emit(b"\x48\x83\xEC\x28")                # sub rsp, 0x28
+        a.call(start_name)
+        a.emit(mov_ri32(RAX, SYS_EXIT))            # exit(0) 也走 shim，保持单一路径
+        a.emit(mov_ri32(RDI, 0))
+        a.call("__win_syscall")
+        a.emit(b"\x0F\x0B")
+
+
+def build_pe(text: bytes, data: bytes, entry_rva: int, data_rva: int,
+             idata: bytes, idata_rva: int) -> bytes:
+    """静态 PE32+（console, x86-64）。节表按 RVA 升序：.text -> .data -> .idata。"""
+    nsec = 3
+    hdr = 0x40 + 4 + 20 + 240 + 40 * nsec
+    toff = align_up(hdr, PE_FILE_ALIGN)                      # .text 的 raw
+    doff = toff + align_up(len(text), PE_FILE_ALIGN)         # .data 的 raw
+    ioff = doff + align_up(len(data), PE_FILE_ALIGN)         # .idata 的 raw
+    image_size = align_up(idata_rva + len(idata), PE_SEC_ALIGN)
+
+    o = bytearray()
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 0x40)
+    o += dos
+    o += b"PE\x00\x00"
+    o += struct.pack("<HHIIIHH", 0x8664, nsec, 0, 0, 0, 240, 0x22)
+    opt = bytearray(240)
+    struct.pack_into("<H", opt, 0, 0x20B)
+    opt[2] = 14
+    struct.pack_into("<I", opt, 16, entry_rva)
+    struct.pack_into("<I", opt, 20, PE_TEXT_RVA)             # BaseOfCode
+    struct.pack_into("<Q", opt, 24, PE_IMAGE_BASE)
+    struct.pack_into("<I", opt, 32, PE_SEC_ALIGN)
+    struct.pack_into("<I", opt, 36, PE_FILE_ALIGN)
+    struct.pack_into("<HHHHHH", opt, 40, 6, 0, 0, 0, 6, 0)
+    # PE32+ 的 SizeOfImage / SizeOfHeaders 在 56 / 60；写成 PE32 的 54 / 58 会把值落进
+    # Win32VersionValue 槽，加载器读到 SizeOfHeaders=0 直接拒收（"不是有效的 Win32 应用程序"）。
+    struct.pack_into("<I", opt, 56, image_size)
+    struct.pack_into("<I", opt, 60, toff)
+    struct.pack_into("<H", opt, 68, 3)                       # Subsystem: console
+    struct.pack_into("<Q", opt, 72, 0x100000)
+    struct.pack_into("<Q", opt, 80, 0x1000)
+    struct.pack_into("<Q", opt, 88, 0x100000)
+    struct.pack_into("<Q", opt, 96, 0x1000)
+    struct.pack_into("<I", opt, 108, 16)
+    struct.pack_into("<II", opt, 112 + 8, idata_rva, 40)     # Import Directory
+    o += opt
+
+    def sec(name, vs, rva, rs, rp, ch):
+        h = bytearray(40)
+        h[0:len(name)] = name
+        struct.pack_into("<I", h, 8, vs)
+        struct.pack_into("<I", h, 12, rva)
+        struct.pack_into("<I", h, 16, rs)
+        struct.pack_into("<I", h, 20, rp)
+        struct.pack_into("<I", h, 36, ch)
+        return bytes(h)
+
+    o += sec(b".text", len(text), PE_TEXT_RVA,
+             align_up(len(text), PE_FILE_ALIGN), toff, 0x60000020)
+    o += sec(b".data", idata_rva - data_rva, data_rva,
+             align_up(len(data), PE_FILE_ALIGN), doff, 0xC0000040)
+    o += sec(b".idata", len(idata), idata_rva,
+             align_up(len(idata), PE_FILE_ALIGN), ioff, 0xC0000040)
+    o += b"\x00" * (toff - len(o)) + text
+    o += b"\x00" * (doff - len(o)) + bytes(data)
+    # 最后一节也必须补齐到声明的 SizeOfRawData，否则加载器读到 EOF 之外直接拒收
+    o += b"\x00" * (ioff - len(o)) + idata
+    o += b"\x00" * (align_up(len(idata), PE_FILE_ALIGN) - len(idata))
+    return bytes(o)
+
+
+def _pe_layout_globals(globals_: list[Global], data_rva: int) -> tuple[bytearray, int]:
+    """把全局布到 data/bss。内容与 data_rva 无关，只有地址跟着变。"""
+    DATA_VADDR = PE_IMAGE_BASE + data_rva          # noqa: N806 (与 ELF 目标同名同义)
+    data, bss = bytearray(), 0
+    for g in globals_:
+        if g.data != b"\0" * size_of(g.ty):
+            while len(data) % 8:
+                data.append(0)
+            g.addr = DATA_VADDR + len(data)
+            data += g.data
+    while len(data) % 8:
+        data.append(0)
+    for g in globals_:
+        sz = size_of(g.ty)
+        if g.data == b"\0" * sz:
+            bss = align_up(bss, 8)
+            g.addr = DATA_VADDR + len(data) + bss
+            bss += align_up(sz, 8)
+    return data, bss
+
+
+def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
+    em = PeEmitter(globals_)
+    for g in globals_:
+        em.asm.labels[g.name] = g.addr
+    for name, rva in slots.items():
+        em.asm.labels[name] = PE_IMAGE_BASE + rva
+    em.emit_entry_stub("_start")
+    emit_win_shim(em)
+    for f in funcs:
+        em.emit_func(f)
+    return em.asm.finalize(), em.asm.labels["__entry"]
+
+
+def compile_pe(text: str) -> tuple[bytes, dict]:
+    global TEXT_VADDR                              # .text 钉在最低 RVA
+    globals_, funcs = parse_ll(text)
+    if not any(f.name == "_start" for f in funcs):
+        raise Unsupported("没有 _start 入口（PE 产物需要一个用户态入口）")
+
+    TEXT_VADDR = PE_IMAGE_BASE + PE_TEXT_RVA
+    # .text 在最低 RVA，.data 紧随其后 —— 所以 data 的 RVA 取决于代码长度。代码长度与地址
+    # 无关（所有回填都是定长），于是「发射 -> 量长度 -> 重排 -> 再发射」一步收敛。
+    # 早先 .text 固定 0x1000、.data 固定 0x2000，文本一过一页两节 RVA 就重叠，
+    # 加载器报 "不是有效的 Win32 应用程序"。
+    data_rva = PE_TEXT_RVA + PE_SEC_ALIGN
+    for _ in range(4):
+        data, bss = _pe_layout_globals(globals_, data_rva)
+        idata_rva = align_up(data_rva + max(len(data) + bss, 1), PE_SEC_ALIGN)
+        idata, slots, _ = build_pe_idata(idata_rva, PE_IMPORTS)
+        code, entry = _pe_emit(funcs, globals_, slots)
+        want = align_up(PE_TEXT_RVA + len(code), PE_SEC_ALIGN)
+        if want == data_rva:
+            break
+        data_rva = want
+    else:
+        raise ElfError("PE 布局不动点没收敛")
+
+    blob = build_pe(code, bytes(data), entry - PE_IMAGE_BASE, data_rva, idata, idata_rva)
+    return blob, {"text": len(code), "data": len(data), "bss": bss,
+                  "entry": entry - PE_IMAGE_BASE, "funcs": [f.name for f in funcs]}
+
+
 # ------------------------------------------------------------------ 驱动
 
 
 def compile_ll(text: str) -> tuple[bytes, dict]:
+    global TEXT_VADDR, DATA_VADDR
+    TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs = parse_ll(text)
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
@@ -1146,7 +1413,7 @@ def compile_ll(text: str) -> tuple[bytes, dict]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    out, check = None, False
+    out, check, target = None, False, "elf"
     files = []
     i = 0
     while i < len(argv):
@@ -1154,17 +1421,21 @@ def main(argv: list[str] | None = None) -> int:
         if a in ("-o", "--out"):
             i += 1
             out = argv[i]
+        elif a == "--target":
+            i += 1
+            target = argv[i]
         elif a == "--check":
             check = True
         else:
             files.append(a)
         i += 1
-    if len(files) != 1:
-        print("用法: lomelf.py IN.ll [-o OUT] [--check]", file=sys.stderr)
+    if len(files) != 1 or target not in ("elf", "pe"):
+        print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]", file=sys.stderr)
         return 2
     src = Path(files[0])
     try:
-        blob, info = compile_ll(src.read_text(encoding="utf-8"))
+        blob, info = (compile_pe if target == "pe" else compile_ll)(
+            src.read_text(encoding="utf-8"))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1
@@ -1175,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[OK] {src} 可编 (text {info['text']} B, data {info['data']} B, bss {info['bss']} B)")
         return 0
     if out is None:
-        out = str(src.with_suffix(""))
+        out = str(src.with_suffix(".exe" if target == "pe" else ""))
     Path(out).write_bytes(blob)
     import os
     os.chmod(out, 0o755)
