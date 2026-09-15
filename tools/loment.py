@@ -72,22 +72,19 @@ def cmd_ir(a) -> int:
         sys.stdout.write(text)
         return 0
     with tempfile.TemporaryDirectory() as td:
-        ll = Path(td) / "m.ll"
-        ll.write_text(text, encoding="utf-8")
-        obj = Path(td) / "m.o"
-        r = subprocess.run(
-            [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
-             "--target=x86_64-unknown-none", "-ffreestanding", "-c", str(ll),
-             "-o", str(obj)],
-            capture_output=True, text=True, shell=False)
-        if r.returncode:
-            print(r.stderr, file=sys.stderr)
-            return 1
+        binp = Path(td) / "m.bin"
+        # 机器码由仓库自己的原生后端出（不再经 clang），再用 llvm-objdump 反汇编看。
+        # 原生后端要用户态入口，纯函数片段没有 —— 只为这个**调试视图**补一个空 `_start`。
+        src = text
+        if "_start" not in text:
+            src = text + "\ndefine void @_start() {\nentry:\n  ret void\n}\n"
+        import lomelf
+        binp.write_bytes(lomelf.compile_ll(src)[0])
         d = subprocess.run(
             [shutil.which("llvm-objdump") or r"C:\Program Files\LLVM\bin\llvm-objdump.exe",
-             "-d", str(obj)],
+             "-d", str(binp)],
             capture_output=True, text=True, shell=False)
-        sys.stdout.write(text + "\n; ==== 机器码 (llvm-objdump -d) ====\n" + d.stdout)
+        sys.stdout.write(text + "\n; ==== 机器码 (lomelf 出的 ELF, llvm-objdump -d) ====\n" + d.stdout)
     return 0
 
 

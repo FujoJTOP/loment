@@ -43,15 +43,12 @@ def build_elf(src: Path, out: Path) -> Path:
         print(f"[ERR] {src}: {errs[0]}", file=sys.stderr)
         raise SystemExit(2)
     ll = out.with_suffix(".ll")
-    ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-    r = subprocess.run(
-        [_tool("clang", r"C:\Program Files\LLVM\bin\clang.exe"),
-         "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-static", "-fno-pie",
-         "-no-pie", "-fuse-ld=lld", "-Wl,-e,_start", "-Wl,-Ttext=0x400000",
-         str(ll), "-o", str(out)], capture_output=True, text=True, shell=False)
-    if r.returncode:
-        print(r.stderr, file=sys.stderr)
-        raise SystemExit(2)
+    text = lomentc.emit_llvm(mod, ROOT, deps)
+    ll.write_text(text, encoding="utf-8")
+    # 链接交给仓库自己的原生后端（tools/lomelf.py）—— 不再经 clang
+    sys.path.insert(0, str(ROOT / "tools"))
+    import lomelf
+    out.write_bytes(lomelf.compile_ll(text)[0])
     return out
 
 

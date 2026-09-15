@@ -51,7 +51,7 @@
   },
   {
    "path": "tools/loment.py",
-   "sha256": "eac33fa7b07e486a60ee751736513dd32c09ae1bcb4fa71c41da4fc0d3fae617"
+   "sha256": "b798cb7204a71b131a793c9df6b5a19911d10eb2f3361d994dde495f19d11c72"
   },
   {
    "path": "tools/lomfmt.py",
@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_boot.py",
-   "sha256": "4a3a116017954c0c761fc07a691bcd5a65d9e091e07648d68c97db6d68150266"
+   "sha256": "49e36fc643b31ab246aa3206a794ebc2cd04ba787388e94d1ffddebff63c1d9f"
   },
   {
    "path": "tools/loment_p7_test.py",
