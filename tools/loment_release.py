@@ -21,8 +21,10 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 版本名的**唯一真源** (2026-09-12 由 `loment-1.0-pre` 改名): 机器可读的标识符用连字符形式,
 # 人读的显示名是 `0.1.4 Alpha`; 对外 tag = `v0.1.4-alpha` (git ref 不许带空格)。
 # 2026-09-13 由 0.1.3.4-alpha 升到 0.1.4-alpha: 去 Python 收口 (lompkg + L0 生成器 lomc)。
-RELEASE = "0.1.4-alpha"
-RELEASE_NAME = "0.1.4 Alpha"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-15 升到 **0.1.4-alpha2**: 三条腿全部落地 —— 去 WSL + 去 clang(产品/构建路径)
+# + 包内链接器换成自举镜像; 发行包首次自带 agent skill。tag 会另打 `v0.1.4-alpha2`。
+RELEASE = "0.1.4-alpha2"
+RELEASE_NAME = "0.1.4 Alpha2"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

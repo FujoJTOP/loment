@@ -21,8 +21,8 @@ Rust 先验可以直接用。
 loment version
 ```
 
-拿到 `Loment 0.1.4 Alpha (0.1.4-alpha), commit <短号>` 这类输出。**以它的 commit 为准**：
-不同 checkout 能力不同（本文件描述 0.1.4-alpha 这一代）。
+拿到 `Loment 0.1.4 Alpha2 (0.1.4-alpha2), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-alpha2 这一代；更早的包会显示 `0.1.4 Alpha`）。
 
 命令面（安装后就在 PATH 上）：
 
