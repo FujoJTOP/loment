@@ -149,8 +149,15 @@ stage1"那一步出现（见 §5）。
    （e）PE 的默认栈（1 MB）对**编译器自己**太小 —— 递归下降直接把栈打爆成 SIGSEGV，
    换成 16 MB 保留才过。小工具照不出来，只有喂编译器本体才暴露。
 
-   **还没做**：`loment_dist.py` 里"Windows 装法 = 拷进 WSL + `loment.cmd` 转发"还没改成装原生
-   `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang。
+   **发行包也切过来了**（2026-09-14，docs/162 §0bis）：`loment_dist.py` 不再调 clang，
+   改用本机原生后端链 IR（同一份 IR 各链一遍 → Linux 包放 ELF、Windows 包放 PE）；
+   stage1 按本机构建格式出，构建过程**在本机直接跑**，不再经 WSL；包里多了
+   **`loment-lomelf`**（`loment build/run` 的链接器），Windows 侧由包内的 `bin\loment.cmd`
+   直接调那些 `.exe`。判据 `loment_dist_test` **35/35**，其中两条是这次新增的：
+   * 装完后 `loment run` 在本机编出 PE 并跑出 `PASS loment-user`（无 WSL、无 clang）；
+   * `loment.cmd` 里**不再出现 `wsl`**。
+
+   **还没做**：`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处还在调 clang。
 
    **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
    状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是

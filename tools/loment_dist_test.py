@@ -56,8 +56,8 @@ def wsl_path(p: Path) -> str:
 # ------------------------------------------------------------------ 1. 布局
 
 def test_layout() -> None:
-    lin = loment_dist.payload("linux", {"loment-driver": b"\x7fELF-fake"})
-    win = loment_dist.payload("windows", {"loment-driver": b"\x7fELF-fake"})
+    lin = loment_dist.payload("linux", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
+    win = loment_dist.payload("windows", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     want_common = {"bin/loment", "share/loment/version", "share/loment/seed.ll",
                    "share/loment/examples/user_hello.lomt", "README.md", "LICENSE"}
     check("payload 公共布局齐全", want_common <= set(lin))
@@ -115,8 +115,8 @@ def read_tar(p: Path) -> dict[str, bytes]:
 
 
 def test_archives() -> None:
-    lin = loment_dist.payload("linux", {"loment-driver": b"ELF-A"})
-    win = loment_dist.payload("windows", {"loment-driver": b"ELF-A"})
+    lin = loment_dist.payload("linux", {"loment-driver": (b"ELF-A", b"PE-A")})
+    win = loment_dist.payload("windows", {"loment-driver": (b"ELF-A", b"PE-A")})
     z = read_zip_bytes(loment_dist._zip("loment-x", win))
     t = read_tar_bytes(loment_dist._tar_gz("loment-x", lin))
     check("zip 内容与 payload 逐文件相同",
@@ -145,17 +145,21 @@ def read_tar_bytes(blob: bytes) -> dict[str, bytes]:
 # ------------------------------------------------------------------ 4. 构建 + check
 
 def build() -> tuple[Path, Path]:
-    rc = loment_dist.main(["--emit", "--only", "driver", "--no-exe", "--out", str(IT_OUT)])
+    # 要整包（不是 --only driver）：`loment build/run` 靠包内的 loment-lomelf 链接
+    rc = loment_dist.main(["--emit", "--no-exe", "--out", str(IT_OUT)])
     assert rc == 0, f"loment_dist --emit rc={rc}"
     tar = IT_OUT / f"loment-{VER}-linux-x64.tar.gz"
     zipf = IT_OUT / f"loment-{VER}-windows-x64.zip"
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
     check("--check 与 SHA256SUMS 一致",
           loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
-    # 归档里的 driver 与构建目录里的 driver 是同一份 (没被中间步骤动过)
-    driver = (loment_dist.STAGE / "loment-driver.elf").read_bytes()
+    # 归档里的 driver == 同一份 IR 现链出来的（中间没被动过）
+    driver = loment_dist._lomelf_link(
+        (loment_dist.STAGE / "driver.ll").read_text(encoding="utf-8"), "elf")
     check("归档里的 loment-driver == 构建产物",
           read_tar(tar)["bin/loment-driver"] == driver)
+    check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
+          "bin/loment-lomelf" in read_tar(tar))
     return tar, zipf
 
 
@@ -197,16 +201,14 @@ def test_install_sh(tar: Path) -> None:
     check("loment check 正例退出 0 且不打印 IR",
           r.returncode == 0 and r.stdout.strip() == "", r.stdout[:80])
 
-    # run: 需要 clang (地基语言)。没装就明确 SKIP, 不假装通过。
-    if shutil.which("clang") or Path(r"C:\Program Files\LLVM\bin\clang.exe").exists():
-        r = wsl(f"{PREFIX_IT}/bin/loment", "run",
-                f"{PREFIX_IT}/share/loment/examples/user_hello.lomt")
-        check("loment run 编译+链接+运行并打出东西",
-              r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
-    else:
-        print("  SKIP  loment run (没有 clang)")
+    # run: 整链都在包里（驱动 + 自举链接器），不再需要外部 clang
+    r = wsl(f"{PREFIX_IT}/bin/loment", "run",
+            f"{PREFIX_IT}/share/loment/examples/user_hello.lomt")
+    check("loment run 编译+链接+运行并打出东西",
+          r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
 
-    # 缺件时的报错要指名 (本包只装了 driver -> fmt 应该明确说"这个包没包含")
+    # 缺件时的报错要指名：临时把 fmt 拿掉，`loment fmt` 应该明确说"这个包没包含"
+    wsl("rm", "-f", f"{PREFIX_IT}/bin/loment-fmt")
     r = wsl(f"{PREFIX_IT}/bin/loment", "fmt",
             f"{PREFIX_IT}/share/loment/examples/user_hello.lomt")
     check("缺组件时报错指名 (不静默)",
@@ -273,38 +275,41 @@ def test_windows_installer(zipf: Path) -> None:
     check("zip 布局下 install.cmd -DryRun 通过 (用户路径)",
           r.returncode == 0 and "dry-run" in out, out[-220:])
 
-    # ★ 真装一遍 (但装在临时位置, 且 -NoPath -NoFileType: 不动用户 PATH 与注册表)。
-    #   这条是"Windows 侧真能用"的判据 —— 只跑 -DryRun 会漏掉真实的拷贝/路径 bug
-    #   (2026-09-12 就是这么漏了一个: WslDir 传成 Windows 路径时静默建出垃圾目录)。
+    # ★ 真装一遍 (临时前缀, -NoPath -NoFileType: 不动用户 PATH 与注册表)。
+    #   包里就是本机 PE —— 不需要 WSL, 也不需要 clang。
     pfx = loment_dist.STAGE / "it-win-pfx"
-    wdir = "/tmp/loment_dist_test_win"
     if pfx.exists():
         shutil.rmtree(pfx)
-    wsl("rm", "-rf", wdir)
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
-                        "-Prefix", str(pfx), "-WslDir", wdir,
+                        "-Prefix", str(pfx), "-PayloadDir", str(root),
                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
                        shell=False, encoding="utf-8", errors="replace", timeout=300)
-    ok = r.returncode == 0
-    check("install.ps1 真装 (临时前缀 + 临时 WSL 目录) 退出 0", ok,
+    check("install.ps1 真装 (临时前缀, 原生 PE, 无 WSL) 退出 0", r.returncode == 0,
           ((r.stdout or "") + (r.stderr or ""))[-260:])
     cmd = pfx / "bin/loment.cmd"
-    check("Windows 侧写出 loment.cmd 且指向 WSL 安装目录",
-          cmd.exists() and wdir in cmd.read_text(encoding="utf-8", errors="replace"),
+    body = cmd.read_text(encoding="utf-8", errors="replace") if cmd.exists() else ""
+    check("装出 loment.cmd, 它调本机 exe, 且**不再出现 wsl**",
+          cmd.exists() and "loment-driver.exe" in body and "wsl" not in body.lower(),
           "" if cmd.exists() else "缺 loment.cmd")
-    r2 = wsl(f"{wdir}/bin/loment", "version")
-    check("Windows 安装后 WSL 侧的 loment 能跑",
-          r2.returncode == 0 and loment_dist.DISPLAY in r2.stdout, r2.stdout[:120])
-
-    # 路径校验: Windows 风格的 WslDir 必须被拒 (ELF 装不到 Windows 路径上)
-    r3 = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
-                         "-Prefix", str(pfx), "-WslDir", "C:/tmp/loment_bad",
-                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
+    r2 = subprocess.run(["cmd", "/c", str(cmd), "version"], capture_output=True, text=True,
                         shell=False, encoding="utf-8", errors="replace", timeout=180)
-    check("Windows 风格的 WslDir 被明确拒绝",
-          r3.returncode != 0 and "absolute WSL path" in ((r3.stdout or "") + (r3.stderr or "")),
-          f"rc={r3.returncode}")
-    wsl("rm", "-rf", wdir)
+    check("装完后 `loment version` 能跑",
+          r2.returncode == 0 and loment_dist.DISPLAY in (r2.stdout or ""), (r2.stdout or "")[:120])
+
+    # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义
+    ex = pfx / "share/loment/examples/user_hello.lomt"
+    r3 = subprocess.run(["cmd", "/c", str(cmd), "run", str(ex)], capture_output=True, text=True,
+                        shell=False, encoding="utf-8", errors="replace", timeout=300)
+    check("装完后 `loment run` 原生跑通 (无 WSL / 无 clang)",
+          r3.returncode == 0 and "PASS loment-user" in (r3.stdout or ""),
+          ((r3.stdout or "") + (r3.stderr or ""))[-200:])
+
+    r4 = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                         "-Uninstall", "-Prefix", str(pfx), "-NoPath", "-NoFileType"],
+                        capture_output=True, text=True, shell=False, encoding="utf-8",
+                        errors="replace", timeout=180)
+    check("--uninstall 摘掉前缀", r4.returncode == 0 and not pfx.exists(),
+          ((r4.stdout or "") + (r4.stderr or ""))[-200:])
     shutil.rmtree(pfx, ignore_errors=True)
 
 

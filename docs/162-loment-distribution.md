@@ -4,6 +4,22 @@
 > · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
+## 0bis. 2026-09-14 重大变更：包变成本机原生，WSL 与 clang 都出局
+
+**下面几节里"Windows 装进 WSL + `loment.cmd` 转发""`run`/`build` 需要 clang"的说法已经过期。**
+现在：
+
+- 同一份 IR **各链一遍**：Linux 包放 ELF、Windows 包放 **PE**（`.exe`），链接器是包内的
+  **`loment-lomelf`**（`loment/tools/lomelf.lomt` 的自举产物）—— **不再需要 clang**；
+- stage1 按**本机构建格式**出（Windows 上出 PE），所以构建过程在**本机直接跑**，**不再经 WSL**；
+- Windows 安装：解包 → `install.ps1` 拷进 `$Prefix`（默认 `%LOCALAPPDATA%\Loment`）→
+  包里自带的 `bin\loment.cmd` **直接调那些 `.exe`**；
+- 判据新增两条：装完后 `loment run` 在本机编出 PE 并跑出 `PASS loment-user`，
+  以及 `loment.cmd` 里**不再出现 `wsl`**。
+
+也就是说不只是"包里没 Python"，现在是**包里没有任何外部依赖**：`loment build`/`run`
+在一台干净的 Windows 上开箱即用。详见 `docs/167 §5`。
+
 ## 0. 一句话
 
 同一个包**两种装法**：命令安装（`sh install.sh` / `powershell -File install.ps1`）与

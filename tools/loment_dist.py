@@ -11,7 +11,7 @@
 # 包里**没有 Python**: 四个可执行文件都是自举产物 (种子 + clang + stage1 → IR → 链接),
 # 见 docs/159。构建期需要 Python 的只有这个打包工具本身 (仓库工具链, 不进包)。
 #
-#   python tools/loment_dist.py --emit                        # 全部 (需要 WSL + clang)
+#   python tools/loment_dist.py --emit                        # 全部（本机原生后端，无 clang/WSL）
 #   python tools/loment_dist.py --emit --only driver --no-exe # 快速子集 (门禁用)
 #   python tools/loment_dist.py --check                       # 现有产物与 SHA256SUMS 一致?
 #   python tools/loment_dist.py --list                        # 只列会打进去的文件
@@ -49,6 +49,9 @@ TOOLS: list[tuple[str, str]] = [
     ("loment-lsp", "loment/tools/lsp.lomt"),
     ("loment-fmt", "loment/tools/lomfmt.lomt"),
     ("loment-doc", "loment/tools/lomdoc.lomt"),
+    # `loment build/run` 的链接器 —— 自举侧的 lomelf 镜像。有它之后 **包里不再需要 clang**:
+    # 存出来的产物本来就是目标平台自己的格式（Linux 出 ELF / Windows 出 PE）。
+    ("loment-lomelf", "loment/tools/lomelf.lomt"),
 ]
 EXAMPLE = "loment/examples/user_hello.lomt"
 ICON = "editors/loment.ico"
@@ -71,13 +74,13 @@ to_posix() {
     esac
 }
 
-find_clang() {
-    command -v clang >/dev/null 2>&1 && { command -v clang; return 0; }
-    for c in "/mnt/c/Program Files/LLVM/bin/clang.exe" "/usr/bin/clang" "/usr/local/bin/clang"; do
-        [ -x "$c" ] && { printf '%s' "$c"; return 0; }
-    done
+find_lomelf() {
+    [ -x "$here/loment-lomelf" ] && { printf '%s' "$here/loment-lomelf"; return 0; }
     return 1
 }
+
+# NOTE: this launcher is packed as ASCII (PowerShell 5.1 reads BOM-less files as ANSI) -
+# keep every comment here in English.
 
 usage() {
     cat <<EOF
@@ -131,18 +134,16 @@ case "${1:-help}" in
             esac
         done
         need "$here/loment-driver" loment-driver
-        cc=$(find_clang) || {
-            echo "loment: clang not found (build/run need the foundation compiler)" >&2; exit 3; }
-        win() { case "$cc" in /mnt/*) wslpath -w "$1" ;; *) printf '%s' "$1" ;; esac; }
+        need "$here/loment-lomelf" loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         "$here/loment-driver" "$(to_posix "$src")" > "$tmp/a.ll" || exit 1
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
-        "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
-              -fuse-ld=lld -o "$(win "$out")" "$(win "$tmp/a.ll")" || exit 1
+        # link with the self-hosted lomelf - the package no longer needs clang
+        "$here/loment-lomelf" "$tmp/a.ll" "$out" || exit 1
         if [ "$mode" = run ]; then
-            chmod 755 "$tmp/a.bin"
-            "$tmp/a.bin"
+            chmod 755 "$out"
+            "$out"
         else
             echo "loment: $out"
         fi ;;
@@ -151,6 +152,113 @@ case "${1:-help}" in
     *)
         usage >&2; exit 2 ;;
 esac
+'''
+
+#: Windows 的原生启动器。**直接调本机的 .exe，不再往 WSL 转发** —— 包里的工具本来就是 PE。
+#: 必须 ASCII（PowerShell 5.1 按 ANSI 读无 BOM 的脚本），所以注释一律英文。
+LAUNCHER_CMD = r'''@echo off
+rem Loment @DISPLAY@ launcher (Windows, native toolchain).
+setlocal
+set "here=%~dp0"
+set "share=%here%..\share\loment"
+set "cmd=%~1"
+if "%cmd%"=="" goto usage
+if "%cmd%"=="help" goto usage
+if "%cmd%"=="-h" goto usage
+if "%cmd%"=="--help" goto usage
+if "%cmd%"=="version" goto version
+if "%cmd%"=="-v" goto version
+if "%cmd%"=="--version" goto version
+if "%cmd%"=="ir" goto ir
+if "%cmd%"=="check" goto check
+if "%cmd%"=="fmt" goto fmt
+if "%cmd%"=="doc" goto doc
+if "%cmd%"=="lsp" goto lsp
+if "%cmd%"=="build" goto build
+if "%cmd%"=="run" goto run
+goto usage
+
+:version
+type "%share%\version"
+exit /b 0
+
+:ir
+if "%~2"=="" goto usage
+"%here%loment-driver.exe" "%~2"
+exit /b %ERRORLEVEL%
+
+:check
+if "%~2"=="" goto usage
+"%here%loment-driver.exe" "%~2" >nul
+exit /b %ERRORLEVEL%
+
+:fmt
+if "%~2"=="" goto usage
+"%here%loment-fmt.exe" "%~2"
+exit /b %ERRORLEVEL%
+
+:doc
+if "%~2"=="" goto usage
+"%here%loment-doc.exe" "%~2"
+exit /b %ERRORLEVEL%
+
+:lsp
+"%here%loment-lsp.exe" %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %ERRORLEVEL%
+
+:build
+set "src=%~2"
+if "%src%"=="" goto usage
+set "out="
+if /I "%~3"=="-o" set "out=%~4"
+if /I "%~3"=="--out" set "out=%~4"
+if "%out%"=="" set "out=%src:.lomt=%"
+set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
+mkdir "%tmp%" >nul 2>nul
+"%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
+if errorlevel 1 goto fail
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe"
+if errorlevel 1 goto fail
+goto done
+
+:run
+set "src=%~2"
+if "%src%"=="" goto usage
+set "out=%TEMP%\loment-r%RANDOM%%RANDOM%"
+set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
+mkdir "%tmp%" >nul 2>nul
+"%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
+if errorlevel 1 goto fail
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe"
+if errorlevel 1 goto fail
+"%tmp%\a.exe"
+set "rc=%ERRORLEVEL%"
+del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
+rmdir "%tmp%" >nul 2>nul
+exit /b %rc%
+
+:done
+del /q "%tmp%\a.ll" >nul 2>nul
+rmdir "%tmp%" >nul 2>nul
+echo loment: %out%.exe
+exit /b 0
+
+:fail
+del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
+rmdir "%tmp%" >nul 2>nul
+exit /b 1
+
+:usage
+echo Loment @DISPLAY@  (@VERSION@)
+echo   loment version              print version
+echo   loment ir FILE              compile to LLVM IR on stdout
+echo   loment check FILE           check only (diagnostics on stderr, IR discarded)
+echo   loment build FILE [-o OUT]  compile and link to an executable
+echo   loment run FILE             compile, link and run
+echo   loment fmt FILE             format (prints the formatted text)
+echo   loment doc FILE             write API docs to stdout
+echo   loment lsp                  language server over stdio
+exit /b 2
 '''
 
 INSTALL_SH = r'''#!/bin/sh
@@ -177,7 +285,7 @@ src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$uninstall" = 1 ]; then
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
-          "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc"
+          "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf"
     rm -rf "$prefix/share/loment"
     echo "install: removed from $prefix"
     exit 0
@@ -207,21 +315,20 @@ case ":${PATH}:" in
 esac
 '''
 
-INSTALL_PS1 = r'''# install.ps1 - Loment @DISPLAY@ installer for Windows (WSL-backed toolchain).
+INSTALL_PS1 = r'''# install.ps1 - Loment @DISPLAY@ installer for Windows (native toolchain).
 #
 # ASCII only (docs/157 3.4: PS 5.1 reads a BOM-less .ps1 as ANSI).
 #   powershell -ExecutionPolicy Bypass -File install.ps1
-#   powershell -File install.ps1 -Prefix D:\Loment -WslDir /home/me/.local/share/loment
+#   powershell -File install.ps1 -Prefix D:\Loment
 #   powershell -File install.ps1 -DryRun          # print the plan, change nothing
 #   powershell -File install.ps1 -Uninstall
 #
-# The toolchain is a Linux ELF, so it lives in the WSL filesystem; Windows gets only a
-# thin loment.cmd that forwards into WSL.
+# The package ships native PE binaries - no WSL, no clang. Everything lands under
+# $Prefix, and bin/loment.cmd calls those .exe files directly.
 
 [CmdletBinding()]
 param(
     [string]$Prefix = '',
-    [string]$WslDir = '',
     [string]$PayloadDir = '',
     [string]$PayloadZip = '',
     [switch]$NoPath,
@@ -236,35 +343,6 @@ if ($Prefix -eq '') { $Prefix = Join-Path $env:LOCALAPPDATA 'Loment' }
 $BinDir = Join-Path $Prefix 'bin'
 
 function Say([string]$m) { Write-Host $m }
-
-function Need-Wsl {
-    if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-        throw "WSL not found. The Loment toolchain is a Linux ELF; install WSL ('wsl --install')."
-    }
-    & wsl -e true
-    if ($LASTEXITCODE -ne 0) { throw "WSL is present but not usable ('wsl -e true' failed)." }
-}
-
-function To-WslPath([string]$p) {
-    $out = & wsl -e wslpath -a $p
-    if ($LASTEXITCODE -ne 0) { throw "wslpath failed: $p" }
-    return "$out".Trim()
-}
-
-function Get-WslHome {
-    $h = (& wsl -e printenv HOME).Trim()
-    if (-not $h) { throw "cannot resolve HOME inside WSL" }
-    return $h
-}
-
-function Wsl-Parent([string]$p) {
-    # NOTE: do NOT use Split-Path here -- on Windows it rewrites '/' as '\', and then
-    # "wsl -e mkdir -p \tmp\x" happily creates a *relative* junk directory instead of
-    # the intended one (rc=0, silently wrong). Pure string math keeps WSL paths intact.
-    $i = $p.LastIndexOf('/')
-    if ($i -le 0) { return '/' }
-    return $p.Substring(0, $i)
-}
 
 function Resolve-Payload {
     if ($PayloadDir -ne '') { return $PayloadDir }
@@ -366,18 +444,8 @@ function Unregister-FileType {
     Say "[--] .lomt/.lom registration removed"
 }
 
-$CmdBody = @"
-@echo off
-rem Loment launcher (@DISPLAY@) - generated by install.ps1
-wsl -e WSLDIR/bin/loment %*
-exit /b %ERRORLEVEL%
-"@
-
 if ($Uninstall) {
-    Need-Wsl
-    if ($WslDir -eq '') { $WslDir = (Get-WslHome) + '/.local/share/loment' }
-    if ($DryRun) { Say "[dry-run] would remove $WslDir, $Prefix and the file-type keys"; exit 0 }
-    & wsl -e rm -rf $WslDir
+    if ($DryRun) { Say "[dry-run] would remove $Prefix and the file-type keys"; exit 0 }
     Remove-Item -LiteralPath $Prefix -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $NoPath) { Remove-PathEntry $BinDir }
     if (-not $NoFileType) { Unregister-FileType }
@@ -387,71 +455,42 @@ if ($Uninstall) {
 
 $Payload = Resolve-Payload
 Say "Loment @DISPLAY@ (@VERSION@)"
-Say "  windows prefix: $Prefix"
-Say "  wsl dir:        $(if ($WslDir -eq '') { '<home>/.local/share/loment' } else { $WslDir })"
-Say "  payload:        $Payload"
+Say "  prefix:  $Prefix"
+Say "  payload: $Payload"
 
 if ($DryRun) {
-    Say "[dry-run] would: verify SHA256SUMS; copy bin/ + share/ into WSL;"
-    Say "[dry-run]       write $BinDir\loment.cmd; add $BinDir to user PATH; register .lomt/.lom"
+    Say "[dry-run] would: verify SHA256SUMS; copy bin/ + share/ under $Prefix;"
+    Say "[dry-run]       add $BinDir to user PATH; register .lomt/.lom"
     exit 0
-}
-
-Need-Wsl
-if ($WslDir -eq '') { $WslDir = (Get-WslHome) + '/.local/share/loment' }
-elseif ($WslDir.StartsWith('~')) { throw "WslDir must be absolute (~ is not expanded): '$WslDir'" }
-if (-not $WslDir.StartsWith('/')) {
-    throw "WslDir must be an absolute WSL path (got '$WslDir'). A Windows-style path cannot hold an ELF."
 }
 
 Verify-Sums $Payload
 
-$wslBin = "$WslDir/bin"; $wslShare = "$WslDir/share/loment"
-& wsl -e mkdir -p $wslBin $wslShare
-if ($LASTEXITCODE -ne 0) { throw "mkdir in WSL failed" }
-foreach ($n in @('loment', 'loment-driver', 'loment-lsp', 'loment-fmt', 'loment-doc')) {
-    $f = Join-Path (Join-Path $Payload 'bin') $n
-    if (-not (Test-Path -LiteralPath $f)) { continue }
-    & wsl -e rm -f "$wslBin/$n"
-    & wsl -e cp (To-WslPath $f) "$wslBin/$n"
-    if ($LASTEXITCODE -ne 0) { throw "copying $n into WSL failed" }
-    & wsl -e chmod 755 "$wslBin/$n"
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+foreach ($f in Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File) {
+    Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $BinDir $f.Name) -Force
 }
+$shareDir = Join-Path $Prefix 'share\loment'
+New-Item -ItemType Directory -Path (Join-Path $shareDir 'examples') -Force | Out-Null
 foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/user_hello.lomt')) {
-    $f = Join-Path $Payload $rel
-    if (-not (Test-Path -LiteralPath $f)) { continue }
-    $dest = "$WslDir/$rel"
-    # create the target dir first: without it cp fails as "No such file or directory",
-    # which points at the wrong place (the directory, not the file)
-    & wsl -e mkdir -p (Wsl-Parent $dest)
-    if ($LASTEXITCODE -ne 0) { throw "mkdir for $rel in WSL failed" }
-    & wsl -e cp (To-WslPath $f) $dest
-    if ($LASTEXITCODE -ne 0) { throw "copying $rel into WSL failed" }
+    $f = Join-Path $Payload $rel.Replace('/', '\')
+    if (Test-Path -LiteralPath $f) {
+        Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
+    }
 }
-Say "[2/6] toolchain -> WSL: $wslBin"
-
-New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-$cmdFile = Join-Path $BinDir 'loment.cmd'
-[IO.File]::WriteAllText($cmdFile, $CmdBody.Replace('WSLDIR', $WslDir),
-                        (New-Object System.Text.UTF8Encoding($false)))
-$iconSrc = Join-Path $Payload 'bin/loment.ico'
-$icon = Join-Path $BinDir 'loment.ico'
-if (Test-Path -LiteralPath $iconSrc) { Copy-Item -LiteralPath $iconSrc -Destination $icon -Force }
 foreach ($rel in @('README.md', 'LICENSE')) {
     $f = Join-Path $Payload $rel
     if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel) -Force }
 }
-$verSrc = Join-Path $Payload 'share/loment/version'
-if (Test-Path -LiteralPath $verSrc) { Copy-Item -LiteralPath $verSrc -Destination (Join-Path $Prefix 'version') -Force }
-Say "[3/6] windows launcher: $cmdFile"
+Say "[2/6] toolchain -> $BinDir"
 
-if ($NoPath) { Say "[4/6] PATH unchanged (-NoPath)" }
-else { Add-PathEntry $BinDir; Say "[4/6] user PATH += $BinDir" }
+if ($NoPath) { Say "[3/6] PATH unchanged (-NoPath)" }
+else { Add-PathEntry $BinDir; Say "[3/6] user PATH += $BinDir" }
 
-& wsl -e "$wslBin/loment" version
+& (Join-Path $BinDir 'loment.cmd') version
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LASTEXITCODE" }
-& wsl -e "$wslBin/loment" ir "$wslShare/examples/user_hello.lomt" > $null
+& (Join-Path $BinDir 'loment.cmd') ir (Join-Path $shareDir 'examples\user_hello.lomt') > $null
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: compiling user_hello.lomt" }
 Say "[5/6] smoke test ok (version + compile)"
 
@@ -558,11 +597,12 @@ loment doc demo.lomt               # 生成 API 文档
 loment lsp                         # 语言服务（编辑器用）
 ```
 
-**前置条件**：`ir`/`check`/`fmt`/`doc`/`lsp` 只需要本包；`run`/`build` 还需要 **clang**
-（地基语言；`-nostdlib` 直接链成 Linux ELF）。没有 clang 会明确报错，不会静默失败。
+**前置条件**：包里就是目标平台自己的可执行文件，**没有任何外部依赖** —— 不需要 clang，
+Windows 包也不需要 WSL。`run`/`build` 由包内的自举链接器 `loment-lomelf` 出产物：
+Linux 出 ELF、Windows 出 PE。
 
-**Windows 说明**：工具链是 Linux ELF，所以装在 **WSL** 里；Windows 侧只有一个
-`loment.cmd` 转发到 WSL。传进去的 `D:\\...` 路径由启动器自己转成 `/mnt/d/...`。
+**Windows 说明**：装到 `$Prefix`（默认 `%LOCALAPPDATA%\Loment`），`bin\loment.cmd`
+直接调那些 `.exe`。
 
 ## 撤销
 
@@ -575,62 +615,60 @@ powershell -File install.ps1 -Uninstall    # Windows（同时清 PATH 与文件�
 
 # ------------------------------------------------------------------ 自举构建
 
-def _clang() -> str:
-    return shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+def _lomelf_link(ir_text: str, target: str) -> bytes:
+    """IR -> 可执行文件。用仓库自己的原生后端（`tools/lomelf.py`），**不再经 clang**。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lomelf
+    fn = lomelf.compile_pe if target == "pe" else lomelf.compile_ll
+    return fn(ir_text)[0]
 
 
-def _link(ir: Path, out: Path) -> None:
-    """IR -> x86_64 Linux ELF (无 libc, `_start` 即入口) —— 与 p8 判据同一套参数。"""
-    r = subprocess.run([_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib",
-                        "-ffreestanding", "-static", "-fuse-ld=lld",
-                        "-o", str(out), str(ir)],
-                       capture_output=True, text=True, shell=False, cwd=str(ROOT))
-    if r.returncode != 0:
-        raise SystemExit(f"link failed ({out.name}): {r.stderr[-400:]}")
-
-
-def _wsl_path(p: Path) -> str:
-    s = str(p.resolve()).replace("\\", "/")
-    return "/mnt/" + s[0].lower() + s[2:]
+def _host_target() -> str:
+    return "pe" if sys.platform == "win32" else "elf"
 
 
 def build_stage1() -> Path:
-    """clang(种子) -> stage1（种子是 driver 的定点, 所以 stage1 就是驱动自身）。"""
+    """种子 -> stage1（种子是 driver 的定点, 所以 stage1 就是驱动自身）。
+
+    stage1 按**本机**格式出：在 Windows 上出 PE，这样它直接就能跑，不必再去借 WSL。
+    """
     if not SEED.exists():
         raise SystemExit(f"missing seed {SEED.relative_to(ROOT)} (docs/159)")
     STAGE.mkdir(parents=True, exist_ok=True)
-    stage1 = STAGE / "stage1.elf"
-    _link(SEED, stage1)
+    tgt = _host_target()
+    stage1 = STAGE / ("stage1.exe" if tgt == "pe" else "stage1.elf")
+    stage1.write_bytes(_lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
     return stage1
 
 
 def emit_ir(stage1: Path, entry: str) -> Path:
-    """用 stage1 编译 entry → IR 落盘（走文件不走管道, 免得编码/换行被中间层动过）。"""
+    """用 stage1 编译 entry → IR 落盘（**在本机直接跑**，不经 WSL）。"""
     STAGE.mkdir(parents=True, exist_ok=True)
     out = STAGE / (Path(entry).stem + ".ll")
-    tmp = "/tmp/loment_dist_stage1"
-    # rm -f 先删: 目标名固定, 上一次刚退出的进程可能还占着 inode (Text file busy)
-    script = (f"rm -f {tmp} && cp {_wsl_path(stage1)} {tmp} && chmod 755 {tmp} && "
-              f"cd {_wsl_path(ROOT)} && {tmp} {entry} > {_wsl_path(out)}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True,
-                       text=True, shell=False, encoding="utf-8", errors="replace")
-    if r.returncode != 0 or not out.exists():
-        raise SystemExit(f"stage1 failed on {entry}: {r.stderr[-400:]}")
+    r = subprocess.run([str(stage1), entry], capture_output=True,
+                       cwd=str(ROOT), shell=False)
+    if r.returncode != 0 or not r.stdout:
+        raise SystemExit(f"stage1 failed on {entry}: {r.stderr[-400:]!r}")
+    out.write_bytes(r.stdout)
     return out
 
 
-def build_tools(only: set[str] | None) -> dict[str, bytes]:
-    """名字 -> ELF 字节。only 给名字就只构建那几个。"""
+def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
+    """名字 -> (Linux ELF 字节, Windows PE 字节)。
+
+    IR 是**目标无关**的，所以只跑一次 stage1，然后同一份 IR 各链一遍 —— 两个平台的包
+    都能从本机构建出来，不需要另一个平台、也不需要 WSL。
+    """
     stage1 = build_stage1()
-    out: dict[str, bytes] = {}
+    out: dict[str, tuple[bytes, bytes]] = {}
     for name, entry in TOOLS:
         if only and name not in only:
             continue
         ir = emit_ir(stage1, entry)
-        elf = STAGE / f"{name}.elf"
-        _link(ir, elf)
-        out[name] = elf.read_bytes()
-        print(f"  [{name}] {len(out[name])} 字节")
+        text = ir.read_text(encoding="utf-8")
+        elf, pe = _lomelf_link(text, "elf"), _lomelf_link(text, "pe")
+        out[name] = (elf, pe)
+        print(f"  [{name}] elf {len(elf)} 字节 / pe {len(pe)} 字节")
     return out
 
 
@@ -652,12 +690,20 @@ def version_text() -> str:
     return f"Loment {DISPLAY} ({VER})\ncommit {sha} ({date})\n"
 
 
-def payload(kind: str, bins: dict[str, bytes]) -> dict[str, tuple[bytes, int]]:
-    """kind = linux | windows。归档内相对路径 -> (字节, 权限)。"""
+def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[bytes, int]]:
+    """kind = linux | windows。归档内相对路径 -> (字节, 权限)。
+
+    同一批工具按平台取**各自的产物**：Linux 包放 ELF，Windows 包放 PE（带 `.exe` 后缀）。
+    Windows 包因此不再需要 WSL —— 里面全是本机可执行文件。
+    """
     files: dict[str, tuple[bytes, int]] = {}
-    for name, blob in bins.items():
-        files[f"bin/{name}"] = (blob, 0o755)
+    idx = 1 if kind == "windows" else 0
+    for name, pair in bins.items():
+        files[f"bin/{name}{'.exe' if kind == 'windows' else ''}"] = (pair[idx], 0o755)
     files["bin/loment"] = (_subst(LAUNCHER_SH).encode("ascii"), 0o755)
+    if kind == "windows":
+        # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
+        files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD)).encode("ascii"), 0o755)
     files["share/loment/version"] = (version_text().encode(), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     files[f"share/loment/examples/{Path(EXAMPLE).name}"] = (_read(EXAMPLE), 0o644)

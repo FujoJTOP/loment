@@ -1643,30 +1643,51 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     movi(R10, PE_STATE_VA + WS_CMD_BUF)
     a.emit(mov_rr(R8, R10))
     movi32(R9, WS_CMD_CAP - 2)
+    a.emit(b"\x31\xC0")                         # xor eax, eax
+    st(RSP, 0x40, RAX)                          # 「上一个输出的是分隔符」标志
     a.label("__ws_fc_loop")
     test_rr(R9, R9)
     jcc_l("e", "__ws_fc_end")
     load_al(R11)
     test_al()
     jcc_l("e", "__ws_fc_end")
-    cmp_al(0x22)                                # '"'
-    jcc_l("ne", "__ws_fc_keep")
-    add_ri(R11, 1)
-    jmp_l("__ws_fc_loop")
-    a.label("__ws_fc_keep")
     cmp_al(0x20)                                # ' '
-    jcc_l("ne", "__ws_fc_store")
-    a.emit(b"\x30\xC0")                         # xor al, al（空格 -> NUL）——**只能清 al**，
-    a.label("__ws_fc_store")                    # 清 eax 会把源指针也清掉（曾经这么错过）
+    jcc_l("e", "__ws_fc_sep")
+    cmp_al(0x22)                                # '"'
+    jcc_l("e", "__ws_fc_sep")
+    # 普通字符（注意：只能清 ecx，**不能动 al** —— 它就是待存的字符）
+    a.emit(b"\x31\xC9")                         # xor ecx, ecx
+    st(RSP, 0x40, RCX)                          # 清标志
+    a.label("__ws_fc_put")
     store_al(R8)
     add_ri(R8, 1)
     sub_ri(R9, 1)
     add_ri(R11, 1)
     jmp_l("__ws_fc_loop")
+    # 分隔符（空格或引号）：收拢**一整段**，至多产出一个 NUL。
+    # cmd 给子进程的命令行与 PowerShell/bash 的形态不同（实测会多一个空参数），
+    # 所以这里按"分隔符串"处理而不是"一个字符一个分隔符"。
+    a.label("__ws_fc_sep")
+    ld(RAX, RSP, 0x40)
+    test_rax()
+    jcc_l("ne", "__ws_fc_skip1")                # 已经出过分隔符：只吞掉这个字符
+    a.emit(b"\x4D\x39\xD0")                     # cmp r8, r10：还没写过任何字符就别写 NUL
+    jcc_l("e", "__ws_fc_skip1")
+    movi(RCX, 1)
+    st(RSP, 0x40, RCX)
+    a.emit(b"\x30\xC0")                         # xor al, al（**只能清 al**）
+    jmp_l("__ws_fc_put")                        # put 负责存 + 推进源指针
+    a.label("__ws_fc_skip1")
+    add_ri(R11, 1)
+    jmp_l("__ws_fc_loop")
     a.label("__ws_fc_end")
+    ld(RAX, RSP, 0x40)
+    test_rax()
+    jcc_l("ne", "__ws_fc_term")                 # 已经以分隔符收尾了，别再补一个
     a.emit(b"\x30\xC0")                         # xor al, al
-    store_al(R8)                                # 末尾再补一个 NUL
+    store_al(R8)
     add_ri(R8, 1)
+    a.label("__ws_fc_term")
     a.emit(mov_rr(RAX, R8))
     a.emit(b"\x4C\x29\xD0")                     # sub rax, r10
     st(RBX, WS_CMD_LEN, RAX)
