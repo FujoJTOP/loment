@@ -39,6 +39,8 @@ GLOBS = [
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
+    "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
     "tools/loment_status_test.py", "tools/loment_rel_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",

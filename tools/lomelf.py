@@ -1128,7 +1128,17 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 
 PE_IMAGE_BASE = 0x140000000
 PE_SEC_ALIGN, PE_FILE_ALIGN = 0x1000, 0x200
-PE_TEXT_RVA = 0x1000
+# **四个节都钉在固定 RVA**（不是算出来的）。这样 shim 里对 IAT 与静态状态的取址全是编译期
+# 常量 —— 整段 shim 与布局**完全无关**，可以原样冻结成一段 blob 交给自举镜像，那边一个回填
+# 都不用做。顺带也干掉了"按代码长度重排 .data"的不动点循环。
+PE_TEXT_RVA = 0x1000             # 代码（可增长，别超 16 MiB）
+PE_IDATA_RVA = 0x1000000         # 导入表 + "/proc/self/cmdline" 字面量（有文件内容）
+PE_DATA_RVA = 0x2000000          # 全局变量（可增长，别超 16 MiB）
+PE_STATE_RVA = 0x3000000         # shim 的静态状态（纯 bss，不占文件）
+PE_STATE_VA = PE_IMAGE_BASE + PE_STATE_RVA
+PE_LIT_OFF = 0x1000              # 字面量在 .idata 内的偏移
+PE_LIT_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_LIT_OFF
+PE_CMDLINE = b"/proc/self/cmdline\x00"
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
               "FindFirstFileA", "FindNextFileA"]
@@ -1160,12 +1170,14 @@ WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
 
-def build_pe_idata(d: int, funcs: list[str]) -> tuple[bytes, dict, int]:
-    """kernel32.dll 的导入表。返回 (blob, {标签: IAT 槽 RVA}, IAT RVA)。
+def build_pe_idata() -> tuple[bytes, dict]:
+    """kernel32.dll 的导入表 + cmdline 字面量。返回 (blob, {函数名: IAT 槽 VA})。
 
     描述符表**必须**以一条全零描述符终止：少了它，加载器会把紧随其后的 ILT 当成第二条
-    描述符，导入解析中途失败，IAT 保持未填，随后 `call rax` 直接崩（症状是 SIGSEGV）。
+    描述符，导入解析中途失败、IAT 保持未填，随后 `call rax` 直接崩（症状是 SIGSEGV）。
     """
+    funcs = PE_IMPORTS
+    d = PE_IDATA_RVA
     n = len(funcs)
     ilt = d + 40                                   # 一条描述符 + 一条全零终止项
     iat = ilt + (n + 1) * 8
@@ -1182,26 +1194,26 @@ def build_pe_idata(d: int, funcs: list[str]) -> tuple[bytes, dict, int]:
     dll = b"kernel32.dll\x00"
     off += len(dll)
 
-    out = bytearray(off - d)
+    out = bytearray(max(off - d, PE_LIT_OFF + len(PE_CMDLINE)))
     struct.pack_into("<IIIII", out, 0, ilt, 0, 0, dll_rva, iat)
     for i, r in enumerate(hint_rvas):
         struct.pack_into("<Q", out, ilt - d + i * 8, r)
         struct.pack_into("<Q", out, iat - d + i * 8, r)
     for at, b in blobs:
         out[at - d:at - d + len(b)] = b
-    out[dll_rva - d:] = dll
-    return bytes(out), {f"__iat_{nm}": iat + i * 8 for i, nm in enumerate(funcs)}, iat
+    out[dll_rva - d:dll_rva - d + len(dll)] = dll   # 有界切片：开放切片会把缓冲区截断
+    out[PE_LIT_OFF:PE_LIT_OFF + len(PE_CMDLINE)] = PE_CMDLINE   # shim 用常量取址，无需回填
+    slots = {nm: PE_IMAGE_BASE + iat + i * 8 for i, nm in enumerate(funcs)}
+    return bytes(out), slots
 
 
-def _call_iat(asm: Asm, slot: str) -> None:
-    """call qword ptr [slot]。镜像不是 ASLR（无 DYNAMIC_BASE、无 .reloc），绝对取址足够。"""
-    at = asm.here()
-    asm.emit(b"\x48\xA1" + b"\x00" * 8)            # mov rax, [abs64]
-    asm.fixups.append((at + 2, slot, 8, "abs"))
-    asm.emit(b"\xFF\xD0")                          # call rax
+def _call_iat(asm: Asm, addr: int) -> None:
+    """call qword ptr [addr]。地址是**编译期常量**（IAT 在固定 RVA），所以不需要回填。"""
+    asm.emit(b"\x48\xA1" + struct.pack("<Q", addr))   # mov rax, [abs64]
+    asm.emit(b"\xFF\xD0")                             # call rax
 
 
-def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
+def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     """`__win_syscall`: rax = syscall 号，参数按 Linux 习惯在 rdi/rsi/rdx/r10/r8。
 
     Linux 的 `syscall` 把号放 rax、参数放 rdi/rsi/rdx/r10/r8；这里保持同一套寄存器约定，
@@ -1238,8 +1250,8 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
         a.fixups.append((a.here(), lbl, 4, "rel"))
         a.emit(b"\x00\x00\x00\x00")
 
-    def api(slot):
-        _call_iat(a, slot)
+    def api(name):
+        _call_iat(a, slots[name])
 
     def movi(reg, v):
         a.emit(mov_ri(reg, v))
@@ -1329,7 +1341,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.emit(b"\x48\x89\xE5")                     # mov rbp, rsp
     a.emit(b"\x48\x83\xE4\xF0")                 # and rsp, -16
     sub_rsp(0x60)                               # 32 shadow + 第五~七参 + 暂存
-    movi(RBX, state_va)
+    movi(RBX, PE_STATE_VA)
 
     cmp_eax(SYS_EXIT)
     jcc_l("e", "__ws_exit")
@@ -1361,7 +1373,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     # ---- exit(code) ------------------------------------------------------
     a.label("__ws_exit")
     a.emit(mov_rr(RCX, RDI))
-    api("__iat_ExitProcess")
+    api("ExitProcess")
     a.emit(b"\x0F\x0B")                         # ud2（不该回来）
 
     # ---- fd -> HANDLE（子程序：in edi, out rax；0 = 无效）------------------
@@ -1391,7 +1403,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.label("__wsh_err")
     movi32(RCX, PE_STD_ERROR & 0xFFFFFFFF)
     a.label("__wsh_go")
-    api("__iat_GetStdHandle")
+    api("GetStdHandle")
     a.emit(b"\x48\x83\xC4\x28\xC3")
     a.label("__wsh_bad")
     a.emit(b"\x31\xC0\x48\x83\xC4\x28\xC3")     # xor eax,eax; add rsp,0x28; ret
@@ -1409,7 +1421,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.emit(b"\x45\x31\xC9")                     # xor r9d, r9d
     movi32(RAX, 0)
     st(RSP, 0x20, RAX)                          # 第五参 lpOverlapped = NULL
-    api("__iat_WriteFile")
+    api("WriteFile")
     ld(RAX, RSP, 0x38)                          # 返回写入字节数（照 write(2)）
     jmp_l("__ws_ret")
 
@@ -1428,7 +1440,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     jcc_l("e", "__ws_close_zap")                # CMD 没有句柄可关
     st(RSP, 0x28, RAX)                          # 保存表项指针（CloseHandle 会踩寄存器）
     ld(RCX, RAX, WS_FD_HANDLE)
-    api("__iat_CloseHandle")
+    api("CloseHandle")
     ld(RAX, RSP, 0x28)
     a.label("__ws_close_zap")
     a.emit(b"\x31\xC9")                         # xor ecx, ecx
@@ -1449,7 +1461,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     movi(RDX, WS_HEAP)
     movi32(R8, 0x3000)                          # MEM_COMMIT|MEM_RESERVE
     movi32(R9, 4)                               # PAGE_READWRITE
-    api("__iat_VirtualAlloc")
+    api("VirtualAlloc")
     a.emit(b"\x48\x83\xC4\x28")
     test_rax()
     jcc_l("e", "__ws_fail")
@@ -1479,7 +1491,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.label("__ws_openat")
     st(RSP, 0x28, RSI)                          # path
     st(RSP, 0x30, RDX)                          # flags
-    imm_label(R8, "__ws_lit_cmdline")
+    movi(R8, PE_LIT_VA)
     a.emit(mov_rr(R9, RSI))
     a.label("__ws_cmp")
     load_al(R9)
@@ -1498,14 +1510,14 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     jcc_l("s", "__ws_fail")
     movi(RCX, WS_FD_CMD)
     st32(RDX, WS_FD_KIND, RCX)
-    movi(RCX, state_va + WS_CMD_BUF)
+    movi(RCX, PE_STATE_VA + WS_CMD_BUF)
     st(RDX, WS_FD_HANDLE, RCX)
     a.emit(b"\x31\xC9")                         # xor ecx, ecx
     st(RDX, WS_FD_POS, RCX)
     jmp_l("__ws_ret")
 
     a.label("__ws_open_file")
-    movi(R10, state_va + WS_TMP)                # 翻译路径到暂存（不动调用方缓冲）
+    movi(R10, PE_STATE_VA + WS_TMP)                # 翻译路径到暂存（不动调用方缓冲）
     ld(R9, RSP, 0x28)
     a.label("__ws_tr")
     load_al(R9)
@@ -1520,15 +1532,15 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     add_ri(R10, 1)
     jmp_l("__ws_tr")
     a.label("__ws_tr_done")
-    movi(RCX, state_va + WS_TMP)
-    api("__iat_GetFileAttributesA")             # 目录要单独处理（CreateFileA 打不开目录）
+    movi(RCX, PE_STATE_VA + WS_TMP)
+    api("GetFileAttributesA")             # 目录要单独处理（CreateFileA 打不开目录）
     a.emit(b"\x83\xF8\xFF")                     # cmp eax, -1（不存在）
     jcc_l("e", "__ws_open_create")
     a.emit(b"\xA8\x10")                         # test al, FILE_ATTRIBUTE_DIRECTORY
     jcc_l("e", "__ws_open_create")
     # ---- 目录：拼 "path\*" 开一次枚举，fd 记住 find 句柄 ----
-    movi(R8, state_va + WS_TMP2)
-    movi(R9, state_va + WS_TMP)
+    movi(R8, PE_STATE_VA + WS_TMP2)
+    movi(R9, PE_STATE_VA + WS_TMP)
     a.label("__ws_dc")
     load_al(R9)
     store_al(R8)
@@ -1546,9 +1558,9 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     add_ri(R8, 1)
     a.emit(b"\x31\xC0")
     store_al(R8)
-    movi(RCX, state_va + WS_TMP2)
-    movi(RDX, state_va + WS_FIND)
-    api("__iat_FindFirstFileA")
+    movi(RCX, PE_STATE_VA + WS_TMP2)
+    movi(RDX, PE_STATE_VA + WS_FIND)
+    api("FindFirstFileA")
     a.emit(b"\x48\x83\xF8\xFF")                 # cmp rax, -1
     jcc_l("e", "__ws_fail")
     st(RSP, 0x38, RAX)
@@ -1564,7 +1576,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     jmp_l("__ws_ret")
 
     a.label("__ws_open_create")
-    movi(RCX, state_va + WS_TMP)                # lpFileName
+    movi(RCX, PE_STATE_VA + WS_TMP)                # lpFileName
     movi32(RDX, 0x80000000)                     # GENERIC_READ
     ld(R11, RSP, 0x30)                          # flags
     a.emit(b"\x41\xF6\xC3\x01")                 # test r11b, O_WRONLY
@@ -1583,7 +1595,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     st(RSP, 0x28, RAX)
     movi32(RAX, 0)
     st(RSP, 0x30, RAX)
-    api("__iat_CreateFileA")
+    api("CreateFileA")
     a.emit(b"\x48\x83\xF8\xFF")                 # cmp rax, -1
     jcc_l("e", "__ws_fail")
     st(RSP, 0x38, RAX)                          # 先存句柄
@@ -1624,11 +1636,11 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     ld(RAX, RBX, WS_CMD_LEN)
     test_rax()
     jcc_l("ne", "__ws_fc_done")
-    api("__iat_GetCommandLineA")
+    api("GetCommandLineA")
     # 源指针挪进 r11：**不能拿 rax 当指针又用 al 装字节** —— `movb (%rax), %al`
     # 会把指针自己的低字节写掉，指针每走一步就跳飞（症状是 argv 只剩一个字符）。
     a.emit(mov_rr(R11, RAX))
-    movi(R10, state_va + WS_CMD_BUF)
+    movi(R10, PE_STATE_VA + WS_CMD_BUF)
     a.emit(mov_rr(R8, R10))
     movi32(R9, WS_CMD_CAP - 2)
     a.label("__ws_fc_loop")
@@ -1682,7 +1694,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.emit(b"\x4C\x8D\x4C\x24\x28")             # lea r9, [rsp+0x28]
     movi32(RAX, 0)
     st(RSP, 0x20, RAX)
-    api("__iat_ReadFile")
+    api("ReadFile")
     ld32(RAX, RSP, 0x28)
     jmp_l("__ws_ret")
 
@@ -1726,7 +1738,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     # 消费方只读 st_mode（`load32(stb, 24) & S_IFMT`），所以只填这一个字段。
     a.label("__ws_fstatat")
     st(RSP, 0x28, RDX)                          # stb
-    movi(R8, state_va + WS_TMP)
+    movi(R8, PE_STATE_VA + WS_TMP)
     a.emit(mov_rr(R9, RSI))
     a.label("__ws_fs_tr")
     load_al(R9)
@@ -1741,8 +1753,8 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     add_ri(R8, 1)
     jmp_l("__ws_fs_tr")
     a.label("__ws_fs_done")
-    movi(RCX, state_va + WS_TMP)
-    api("__iat_GetFileAttributesA")
+    movi(RCX, PE_STATE_VA + WS_TMP)
+    api("GetFileAttributesA")
     a.emit(b"\x83\xF8\xFF")
     jcc_l("e", "__ws_fail")
     ld(RDX, RSP, 0x28)
@@ -1771,20 +1783,20 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     test_rr(RCX, RCX)
     jcc_l("e", "__ws_gd_emit")                  # pos=0：FindFirstFileA 那条还没发
     ld(RCX, RAX, WS_FD_HANDLE)
-    movi(RDX, state_va + WS_FIND)
-    api("__iat_FindNextFileA")
+    movi(RDX, PE_STATE_VA + WS_FIND)
+    api("FindNextFileA")
     a.emit(b"\x85\xC0")
     jcc_l("e", "__ws_gd_end")
     a.label("__ws_gd_emit")
     ld(RAX, RSP, 0x40)
     movi(RCX, 1)
     st(RAX, WS_FD_POS, RCX)
-    movi(R8, state_va + WS_TMP2)                # 记录缓冲
+    movi(R8, PE_STATE_VA + WS_TMP2)                # 记录缓冲
     movi(R9, 1)
     st(R8, 0, R9)                               # d_ino
     a.emit(b"\x31\xC9")
     st(R8, 8, RCX)                              # d_off
-    movi(R10, state_va + WS_FIND + WS_FIND_NAME)
+    movi(R10, PE_STATE_VA + WS_FIND + WS_FIND_NAME)
     a.emit(mov_rr(R11, R10))
     a.label("__ws_gd_nl")
     load_al(R11)
@@ -1801,7 +1813,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     and_ri(RAX, -8)                             # d_reclen = align(19+namelen+1, 8)
     st16(R8, 16, RAX)
     st(RSP, 0x50, RAX)
-    movi(RDX, state_va + WS_FIND)
+    movi(RDX, PE_STATE_VA + WS_FIND)
     ld32(RDX, RDX, 0)                           # dwFileAttributes
     test_edx(0x10)
     movi32(RCX, 8)                              # DT_REG
@@ -1809,7 +1821,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     movi32(RCX, 4)                              # DT_DIR
     a.label("__ws_gd_dt")
     a.emit(b"\x41\x88\x48\x12")                 # mov [r8+18], cl
-    movi(R9, state_va + WS_TMP2 + 19)
+    movi(R9, PE_STATE_VA + WS_TMP2 + 19)
     a.label("__ws_gd_cp")
     load_al(R10)
     store_al(R9)
@@ -1820,7 +1832,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     jmp_l("__ws_gd_cp")
     a.label("__ws_gd_cpd")
     ld(R8, RSP, 0x50)                           # reclen
-    movi(R9, state_va + WS_TMP2)
+    movi(R9, PE_STATE_VA + WS_TMP2)
     ld(R10, RSP, 0x48)
     st(RSP, 0x58, R8)
     a.label("__ws_gd_out")
@@ -1839,11 +1851,7 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     a.emit(b"\x31\xC0")
     jmp_l("__ws_ret")
 
-    # 内嵌字面量：跳过它再继续发射（PE 是绝对取址，不需要 RIP 相对）
-    jmp_l("__ws_lit_end")
-    a.label("__ws_lit_cmdline")
-    a.emit(b"/proc/self/cmdline\x00")
-    a.label("__ws_lit_end")
+    # （cmdline 字面量在 .idata 的固定偏移 PE_LIT_OFF 上，shim 用常量取址，不必内嵌）
 
 
 class PeEmitter(Emitter):
@@ -1863,15 +1871,14 @@ class PeEmitter(Emitter):
         a.emit(b"\x0F\x0B")
 
 
-def build_pe(text: bytes, data: bytes, entry_rva: int, data_rva: int,
-             idata: bytes, idata_rva: int) -> bytes:
-    """静态 PE32+（console, x86-64）。节表按 RVA 升序：.text -> .data -> .idata。"""
+def build_pe(text: bytes, data: bytes, entry_rva: int, idata: bytes) -> bytes:
+    """静态 PE32+（console, x86-64）。四个节都钉在固定 RVA：.text / .idata / .data / .state。"""
     nsec = 3
     hdr = 0x40 + 4 + 20 + 240 + 40 * nsec
     toff = align_up(hdr, PE_FILE_ALIGN)                      # .text 的 raw
-    doff = toff + align_up(len(text), PE_FILE_ALIGN)         # .data 的 raw
-    ioff = doff + align_up(len(data), PE_FILE_ALIGN)         # .idata 的 raw
-    image_size = align_up(idata_rva + len(idata), PE_SEC_ALIGN)
+    ioff = toff + align_up(len(text), PE_FILE_ALIGN)         # .idata 的 raw
+    doff = ioff + align_up(len(idata), PE_FILE_ALIGN)        # .data 的 raw
+    image_size = align_up(PE_STATE_RVA + WS_SIZE, PE_SEC_ALIGN)
 
     o = bytearray()
     dos = bytearray(64)
@@ -1900,7 +1907,7 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, data_rva: int,
     struct.pack_into("<Q", opt, 88, 0x100000)
     struct.pack_into("<Q", opt, 96, 0x1000)
     struct.pack_into("<I", opt, 108, 16)
-    struct.pack_into("<II", opt, 112 + 8, idata_rva, 40)     # Import Directory
+    struct.pack_into("<II", opt, 112 + 8, PE_IDATA_RVA, 40)  # Import Directory
     o += opt
 
     def sec(name, vs, rva, rs, rp, ch):
@@ -1913,17 +1920,20 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, data_rva: int,
         struct.pack_into("<I", h, 36, ch)
         return bytes(h)
 
-    o += sec(b".text", len(text), PE_TEXT_RVA,
+    # 每节的 VirtualSize 一直铺到下一节的起点：加载器**不接受节间有空洞**（实测：只要
+    # .text 与 .idata 之间留 0x1000 的空隙就直接 "不是有效的 Win32 应用程序"）。
+    # 铺满既消掉空洞，又保住了各节的固定 RVA。
+    o += sec(b".text", PE_IDATA_RVA - PE_TEXT_RVA, PE_TEXT_RVA,
              align_up(len(text), PE_FILE_ALIGN), toff, 0x60000020)
-    o += sec(b".data", idata_rva - data_rva, data_rva,
-             align_up(len(data), PE_FILE_ALIGN), doff, 0xC0000040)
-    o += sec(b".idata", len(idata), idata_rva,
+    o += sec(b".idata", PE_DATA_RVA - PE_IDATA_RVA, PE_IDATA_RVA,
              align_up(len(idata), PE_FILE_ALIGN), ioff, 0xC0000040)
+    o += sec(b".data", PE_STATE_RVA - PE_DATA_RVA + WS_SIZE, PE_DATA_RVA,
+             align_up(len(data), PE_FILE_ALIGN), doff, 0xC0000040)
     o += b"\x00" * (toff - len(o)) + text
-    o += b"\x00" * (doff - len(o)) + bytes(data)
-    # 最后一节也必须补齐到声明的 SizeOfRawData，否则加载器读到 EOF 之外直接拒收
     o += b"\x00" * (ioff - len(o)) + idata
-    o += b"\x00" * (align_up(len(idata), PE_FILE_ALIGN) - len(idata))
+    # 最后一节也必须补齐到声明的 SizeOfRawData，否则加载器读到 EOF 之外直接拒收
+    o += b"\x00" * (doff - len(o)) + bytes(data)
+    o += b"\x00" * (align_up(len(data), PE_FILE_ALIGN) - len(data))
     return bytes(o)
 
 
@@ -1948,46 +1958,48 @@ def _pe_layout_globals(globals_: list[Global], data_rva: int) -> tuple[bytearray
     return data, bss
 
 
-def _pe_emit(funcs, globals_, slots, state_va) -> tuple[bytes, int]:
+def dump_win_shim(path) -> int:
+    """把 `__win_syscall` 的机器码**冻结**成一段 blob（自举镜像照抄这一份）。
+
+    四个节的 RVA 与 IAT 槽都是编译期常量，所以这段 blob 与布局**完全无关** ——
+    里面一个待回填的地址都没有，镜像把它原样摆在 .text 里即可。
+    判据：镜像产出的 PE 与参考实现产出的 PE 行为一致（`tools/loment_pe_test.py`）。
+    """
+    a = Asm(0)
+    em = PeEmitter([])
+    em.asm = a
+    _idata, slots = build_pe_idata()
+    emit_win_shim(em, slots)
+    Path(path).write_bytes(a.finalize())
+    return 0
+
+
+def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
     for g in globals_:
         em.asm.labels[g.name] = g.addr
-    for name, rva in slots.items():
-        em.asm.labels[name] = PE_IMAGE_BASE + rva
     em.emit_entry_stub("_start")
-    emit_win_shim(em, state_va)
+    emit_win_shim(em, slots)
     for f in funcs:
         em.emit_func(f)
     return em.asm.finalize(), em.asm.labels["__entry"]
 
 
 def compile_pe(text: str) -> tuple[bytes, dict]:
-    global TEXT_VADDR                              # .text 钉在最低 RVA
+    global TEXT_VADDR
     globals_, funcs = parse_ll(text)
     if not any(f.name == "_start" for f in funcs):
         raise Unsupported("没有 _start 入口（PE 产物需要一个用户态入口）")
 
+    # 四个节的 RVA 全是常量，所以**不需要不动点**：发射一遍就完事。
+    # （早先按"代码长度决定 .data 的 RVA"排过一次，那是为了迁就 .text 只能钉在最低 RVA；
+    #   现在每节都钉死了，两遍发射连同它引发的节区重叠问题一起消失。）
     TEXT_VADDR = PE_IMAGE_BASE + PE_TEXT_RVA
-    # .text 在最低 RVA，.data 紧随其后 —— 所以 data 的 RVA 取决于代码长度。代码长度与地址
-    # 无关（所有回填都是定长），于是「发射 -> 量长度 -> 重排 -> 再发射」一步收敛。
-    # 早先 .text 固定 0x1000、.data 固定 0x2000，文本一过一页两节 RVA 就重叠，
-    # 加载器报 "不是有效的 Win32 应用程序"。
-    data_rva = PE_TEXT_RVA + PE_SEC_ALIGN
-    for _ in range(4):
-        data, bss = _pe_layout_globals(globals_, data_rva)
-        # shim 的静态状态排在 bss 之后，落在 .data 的**零填充尾巴**上（不占 raw 字节）
-        state_va = PE_IMAGE_BASE + data_rva + len(data) + bss
-        idata_rva = align_up(data_rva + len(data) + bss + WS_SIZE, PE_SEC_ALIGN)
-        idata, slots, _ = build_pe_idata(idata_rva, PE_IMPORTS)
-        code, entry = _pe_emit(funcs, globals_, slots, state_va)
-        want = align_up(PE_TEXT_RVA + len(code), PE_SEC_ALIGN)
-        if want == data_rva:
-            break
-        data_rva = want
-    else:
-        raise ElfError("PE 布局不动点没收敛")
+    data, bss = _pe_layout_globals(globals_, PE_DATA_RVA)
+    idata, slots = build_pe_idata()
+    code, entry = _pe_emit(funcs, globals_, slots)
 
-    blob = build_pe(code, bytes(data), entry - PE_IMAGE_BASE, data_rva, idata, idata_rva)
+    blob = build_pe(code, bytes(data), entry - PE_IMAGE_BASE, idata)
     return blob, {"text": len(code), "data": len(data), "bss": bss,
                   "entry": entry - PE_IMAGE_BASE, "funcs": [f.name for f in funcs]}
 
@@ -2034,6 +2046,8 @@ def compile_ll(text: str) -> tuple[bytes, dict]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
+        return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
     files = []
     i = 0

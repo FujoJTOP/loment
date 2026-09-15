@@ -155,7 +155,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "7f07c98cfd263324c40aa49201e1dfe19a2e7c93baaa06566dab640927d8f82d"
+   "sha256": "fb934a5b32ecda5f119b2187fbb13aeb2567cf656af63df5b9c803bc30ef0a8b"
   },
   {
    "path": "tools/loment_elf_test.py",
@@ -164,6 +164,10 @@
   {
    "path": "tools/loment_pe_test.py",
    "sha256": "2e30e5ea7c8c5cf3412396adbcf1ee10f67303472861e27ea4b9ae2ab90f956c"
+  },
+  {
+   "path": "loment/build/win_shim.bin",
+   "sha256": "2b46844afc9aa34970dafbee8e7ec97584edba629775f38f53ee80a4d1f0cfb5"
   },
   {
    "path": "tools/loment_genesis.py",
