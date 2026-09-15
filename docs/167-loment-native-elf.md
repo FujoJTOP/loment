@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（8/8），审计主张 **C19 / C20 / C21 / C24**
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（9/9），审计主张 **C19 / C20 / C21 / C24**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -101,7 +101,7 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
    `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
-   （主张 **C24**，判据 `tools/loment_pe_test.py` 8/8）。
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 9/9）。
 
    与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
    换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
@@ -121,13 +121,21 @@ stage1"那一步出现（见 §5）。
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
-   于是判据 `tools/loment_pe_test.py` **8/8**：
+   于是判据 `tools/loment_pe_test.py` **9/9**：
 
    * `test_pe_runs_the_loment_toolchain_natively` —— **`lomstatus` 与 `lomrel` 本身**编成 PE 在
      本机原生跑（argv + 目录遍历 + 文件 I/O），stdout 字节 + 退出码与 Python 版逐字节相同；
    * `test_pe_runs_the_selfhost_compiler_natively` —— **自举种子的 PE 版原生当编译器用**：
      对语料产出的 IR 与参考实现逐字节相同，那份 IR 再经 `lomelf --target pe` 出的产物行为也对；
-   * `test_pe_selfhost_mirror_matches_reference` —— **自举镜像产出的 PE 与参考逐字节相同**。
+   * `test_pe_selfhost_mirror_matches_reference` —— **自举镜像产出的 PE 与参考逐字节相同**；
+   * `test_pe_links_capability_programs` —— **能力域程序能过原生后端**（2026-09-15 补）。
+     `capability` 会发一张 `[N x { i64, i64, i64, i64 }]` 的域描述表，而 `_parse_init`
+     原先只认标量 / 字节串 / 数组，**结构体全局初值直接 `v0 不支持的全局初值`** ——
+     于是**任何带 `capability` 的程序在链接期就死**，连仓库自己的
+     `loment/examples/native_cap.lomt` 都编不出来，而这个洞一直没被语料扫到
+     （PE 判据的语料是 `user_hello` / `all_loment`，两个都不带能力域）。
+     这一条同时钉三件事：域内 guard 放行、**非字面量越界运行期 trap**、
+     字面量越界在检查期就拒（与 docs/146 §3 的静态规则对齐）。
 
    **自举侧的镜像也能出 PE 了**（2026-09-14）：`loment/tools/lomelf.lomt` 加 `--target pe`
    对应的那条路（按输出名 `.exe` 选目标），产出的 PE 与参考实现**逐字节相同**

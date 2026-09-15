@@ -178,6 +178,7 @@ def _ex(e) -> str:
     """表达式 -> 规范 dump (与 Loment 版 parser 的约定一致)。"""
     n = type(e).__name__
     if n == "IntLit":
+        # 数值, 不是原文: `0x1000` 出 `(int 4096)` (Loment 版的 put_num 同口径)
         return f"(int {e.value})"
     if n == "BoolLit":
         return f"(bool {'true' if e.value else 'false'})"
@@ -293,11 +294,9 @@ def _scan(obj, bad: tuple[str, ...]) -> None:
 
 
 def _py_dump(src: Path) -> str:
-    mod = lomentc.load(src)
-    if any(t.kind == "number" and t.val.lower().startswith("0x")
-           for t in lomc.lex(src.read_text(encoding="utf-8"))):
-        raise Unsupported("十六进制字面量 (本阶段不覆盖)")
-    return _fn_mod(mod)
+    # 整数字面量按**数值**出 (`0x1000` -> `(int 4096)`): IntLit.value 本来就是数值,
+    # Loment 版 parser 的 put_num 做同样的规范化 —— 两侧都不照抄原文写法。
+    return _fn_mod(lomentc.load(src))
 
 
 #: M80 已知缺口 (棘轮: **只许变短**, 现在是空的 —— 全语料逐字符一致)。
@@ -305,17 +304,34 @@ def _py_dump(src: Path) -> str:
 #: "清单里已经一致"的条目, 所以这份清单不可能过期变松。
 PARSE_KNOWN_GAPS: dict[str, str] = {}
 
-#: dump 助手还没口径的结点 (第二道棘轮, 现在也是空的: 助手覆盖全部 42 个语料)。
+#: dump 助手还没口径的结点 (第二道棘轮, 现在也是空的: 助手覆盖全部语料)。
 #: 加新语料时如果助手缺结点, 这里会先红, 逼着先写 dump 口径 (再补 parser 分支)。
 PARSE_HELPER_GAPS: dict[str, str] = {}
+
+#: 可对照语料的**下限** (棘轮: 只许往上调)。lomelf.lomt 补上十六进制口径那次 42 -> 43。
+CORPUS_FLOOR = 43
+
+#: 整数字面量口径探针: 语料的**另一处**字面量位置 (类型里的数组长度) 至今没有十六进制样本,
+#: 不能指望语料自己盯住它 —— 两处都走 put_num, 这里钉一个最小样本。
+HEX_PROBE = """module hexprobe
+
+fn f(a: u32) -> u32 {
+    return a + 0x10;
+}
+
+fn g(x: [u8; 0x10]) -> u32 {
+    return 0xFF;
+}
+"""
 
 
 def _parser_corpus() -> tuple[list[Path], list[str]]:
     """可对照的语料 + 因**dump 助手**缺结点而跳过的清单 (后者是 M80 的下一步工作单)。
 
-    助手只覆盖 (module/fn/let/ret/assign/if/while + int/bool/id/call/bin/un/cast/
-    field/index) 这批结点; 其它结点 (字符串字面量、数组字面量、for、struct 字面量、
-    guard、枚举构造、下标赋值) 还没有 dump 口径 —— 它们是 M80 剩余覆盖面的分母。
+    助手覆盖 module/fn/let/set/ret/if/while/for/guard/match + int/bool/str/id/call/
+    mcall/bin/un/cast/field/idx/try/arr/struct/enum 这批结点。遇到没口径的结点
+    (`_ex`/`_st` 抛 Unsupported) 就把整个文件跳过 —— 所以**新语料用到新结点时,
+    两道棘轮先红**, 逼着先补 dump 口径 (再补 parser 分支), 而不是悄悄少对照一个文件。
     """
     files = sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
                    + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
@@ -336,8 +352,8 @@ def _parser_corpus() -> tuple[list[Path], list[str]]:
 def test_m80_loment_parser_ast_dump():
     """M80: 全部**可对照**语料的 AST dump 与 Python 版逐字符一致。
 
-    判据从"5 个候选文件"扩到"助手足迹能覆盖的整个语料"(当前 19 个), 并要求覆盖面
-    不许回退 (`len(files) >= 19`)。跳过的清单逐条打印 —— 它就是 M80 下一步的工作单:
+    判据从"5 个候选文件"扩到"助手足迹能覆盖的整个语料", 并要求覆盖面不许回退
+    (`len(files) >= CORPUS_FLOOR`)。跳过的清单逐条打印 —— 它就是 M80 下一步的工作单:
     每补齐一个 dump 结点口径, 这个分母就变大 (先补助手, 再补 Loment 版 parser)。
 
     这条曾经抓到一个真 bug: `else if` 的 else 分支在 Python 侧是 `"(" + st + ")"`
@@ -347,13 +363,20 @@ def test_m80_loment_parser_ast_dump():
         print("      SKIP: 无 clang")
         return
     files, skip = _parser_corpus()
-    assert len(files) >= 42, f"可对照语料只剩 {len(files)} 个 (低于 42 是覆盖面回退)"
+    assert len(files) >= CORPUS_FLOOR, (
+        f"可对照语料只剩 {len(files)} 个 (低于 {CORPUS_FLOOR} 是覆盖面回退)")
     helper_gap = {s.split(":", 1)[0] for s in skip}
     assert helper_gap == set(PARSE_HELPER_GAPS), (
         f"助手侧缺口变了: 现在 {sorted(helper_gap)} (登记 {sorted(PARSE_HELPER_GAPS)}) —— "
         f"少了的要删清单, 多了的先给 dump 助手写口径")
     with tempfile.TemporaryDirectory() as td:
         exe = _build_parser(td)
+        probe = Path(td) / "hexprobe.lomt"
+        probe.write_text(HEX_PROBE, encoding="utf-8")
+        pg = subprocess.run([shutil.which(str(exe)) or str(exe), str(probe)],
+                            capture_output=True, text=True, shell=False).stdout.strip()
+        pw = _py_dump(probe)
+        assert pg == pw, f"整数字面量口径漂移 (探针):\n  Loment {pg}\n  Python {pw}"
         bad, fixed = [], []
         for f in files:
             got = subprocess.run([shutil.which(str(exe)) or str(exe), str(f)],

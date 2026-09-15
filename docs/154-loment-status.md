@@ -86,7 +86,7 @@
 | M77 | 内核自检用 Loment 写 | 自检项全绿 | ✅ | 完成 |
 | M78 | 首个全 Loment 的 demo 程序 | 进回归矩阵 | ✅ | 完成 |
 | M79 | Loment 版 lexer | 与 Python 版 token 流一致 | ✅ | 完成 |
-| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅（**全语料 42/42 逐字符一致**，dump 助手零跳过；两道棘轮 `PARSE_KNOWN_GAPS`/`PARSE_HELPER_GAPS` 已清空且门禁拒绝过期条目；本轮扫全语料抓到并修掉 `else if` 空格、字符串解转义口径、多 token 类型、`&mut` 一元、`..` vs 字段、方法调用后缀、`no_struct` 歧义等 7 处；3 条已知残留写在 docs/150 M80 节） | 完成 |
+| M80 | Loment 版 parser | AST 与 Python 版结构一致 | ✅（**全语料 43/43 逐字符一致**，dump 助手零跳过；两道棘轮 `PARSE_KNOWN_GAPS`/`PARSE_HELPER_GAPS` 已清空且门禁拒绝过期条目，覆盖面下限钉成 `CORPUS_FLOOR`；扫全语料抓到并修掉 `else if` 空格、字符串解转义口径、多 token 类型、`&mut` 一元、`..` vs 字段、方法调用后缀、`no_struct` 歧义、整数字面量按数值出等 8 处；3 条已知残留写在 docs/150 M80 节） | 完成 |
 | M81 | Loment 版类型检查 | 负例集判定一致 | ✅（**规则等价 63/63**（`loment_rule_parity` 棘轮门禁，假阳性/漂移 0，已进 `ci.py`）+ 63 条负例直接喂自举驱动全部非零退出且无信号 + 40/40 语料零诊断 + 跨模块重名两边都报 E-DUP；三处刻意保守偏离见 docs/158 §4） | 完成 |
 | M82 | Loment 版 IR 生成 | `.ll` 与 Python 版逐字节一致 | ✅（目标覆盖 39/39：标量/控制流/短路/转换/`for`/除法/内建/常量内联/struct/数组切片/字符串/枚举 match/泛型单态化/trait 派发/能力域/`?`/`if let`/整数↔指针；**自举四阶段全部能编译自身**、M83/M84 定点达成；见 docs/150、docs/156） | 完成 |
 | M83 | 自编译：编译器编译自身 | 产出可运行二进制 | ✅（`loment/selfhost/driver.lomt` 把 lexer + codegen 接成**一个能独立跑的 ELF**：brk 取内存、stdin 吃单元、stdout 吐 IR；它编译自己的单元与参考逐字节相同，且用它自己的产物再链一次仍逐字节相同。边界：单编译单元，`use` 装载仍在夹具侧——与 M80/M81 同边界） | 完成 |

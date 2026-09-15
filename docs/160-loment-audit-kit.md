@@ -53,7 +53,7 @@ python tools/loment_audit.py --list     # 只列主张与命令
 3. **同名 `let` 双 alloca**：同一函数里重复声明同名变量时两个后端语义不同
    （参考复用槽位，自举发两条）。这是唯一一处**已知的语义不一致**。
 4. **自举驱动整条链没有 parser**：解析期错误（如 `const C: bool = true;`）只有参考实现
-   能报出来。parser 本身已与参考逐字符一致（42/42 语料），但没有接进 driver 的链路。
+   能报出来。parser 本身已与参考逐字符一致（43/43 语料），但没有接进 driver 的链路。
 5. **aarch64 只验证到发射**：没有 qemu-user、没有真机执行（`docs/158 §4`）。
 6. 自举性能 12.8s（参考 1.2s）；DWARF 有**行表 + 变量名/声明行**，但**位置求值**要完整调试器：
    `llvm-objdump --debug-vars` 在 freestanding 目标上只显示 `<unknown op DW_OP_fbreg>`，

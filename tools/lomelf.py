@@ -275,6 +275,29 @@ def _parse_init(ty: str, init: str) -> bytes:
             raise ElfError(f"标量初值解析失败: {init!r}")
         n = int(init)
         return (n & ((1 << (8 * size_of(ty))) - 1)).to_bytes(size_of(ty), "little")
+    if ty.startswith("{"):
+        # 结构体初值。LLVM 两种写法都要吃:
+        #   `{ i64, i64 } { i64 1, i64 2 }`  (带类型前缀, 数组元素里常见)
+        #   `{ i64 1, i64 2 }`               (无前缀 —— 能力域表 `@__loment_caps` 就是这种)
+        # 字段类型**以 ty 为准**, 不从初值文本里猜: 嵌套聚合的值是 `{ i64 1, i64 2 }`,
+        # 拆出来的"类型"其实是值本身。
+        inner = init[len(ty):].strip() if init.startswith(ty) else init
+        if not inner.startswith("{"):
+            raise ElfError(f"结构体初值解析失败: {init!r}")
+        flds = _fields(ty)
+        vals = split_top(inner[1:-1])
+        if len(vals) != len(flds):
+            raise ElfError(f"结构体初值字段数不符: {init!r}")
+        out = bytearray()
+        for k, v in enumerate(vals):
+            off, fty = field_offset(ty, k)
+            if off > len(out):                    # 字段间的对齐空洞 LLVM 不写, 自己补
+                out += b"\0" * (off - len(out))
+            t2, j = parse_type(v)
+            rest = v[j:].strip()
+            out += _parse_init(t2, rest) if rest else _parse_init(fty, v)
+        out += b"\0" * (size_of(ty) - len(out))    # 尾随填充
+        return bytes(out)
     raise ElfError(f"v0 不支持的全局初值: {ty} {init!r}")
 
 
@@ -1121,10 +1144,11 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 #     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
 #   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
 #     而被调方（Windows API）里的 `movaps` 会直接 #GP。
-#   * 只实现了语料真正用到的 `write`(1) 与 `exit`(60)；其余号返回 -1。
-#     `openat`/`read`(即 /proc/self/cmdline 的 argv 合成)、`getdents64`、`newfstatat`、
-#     `brk` 还没做 —— 所以**还不能跑需要 argv 或文件 I/O 的程序**。
-#   * Windows 没有 procfs，argv 只能靠 shim 合成（未做）。
+#   * 实现了 8 个号: `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257)
+#     `brk`(12) `getdents64`(217) `newfstatat`(262)；**其余号返回 -1**。
+#     写要跨平台跑的程序时按这 8 个来 —— 别处用了别的号, 在 PE 上是静默的 -1。
+#   * Windows 没有 procfs，argv 靠 shim 从 `GetCommandLineA` 合成 `/proc/self/cmdline`
+#     （空格分隔转 NUL 分隔, 并合并连续分隔符）。
 
 PE_IMAGE_BASE = 0x140000000
 PE_SEC_ALIGN, PE_FILE_ALIGN = 0x1000, 0x200

@@ -56,6 +56,50 @@ fn put_tok(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
     return o;
 }
 
+fn hex_val(c: u32) -> u64 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as u64;
+    }
+    if c >= 65 && c <= 70 {
+        return (c - 55) as u64;
+    }
+    return (c - 87) as u64;
+}
+
+fn put_dec(out: ptr, o: u32, v: u64) -> u32 {
+    if v == 0 {
+        store8(out, o, 48 as u8);
+        return o + 1;
+    }
+    let d: u64 = 1;
+    while d <= v / 10 {
+        d = d * 10;
+    }
+    while d > 0 {
+        store8(out, o, (48 + (v / d) % 10) as u8);
+        o = o + 1;
+        d = d / 10;
+    }
+    return o;
+}
+
+/// 整数字面量 -> 规范 dump。`0x…` 也化成十进制 —— 参考实现的 IntLit.value 已是数值,
+/// dump 出的是 `(int 4096)`; 照抄原文会得到 `(int 0x1000)`, 与源文写法挂钩就不叫规范形了。
+fn put_num(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
+    let s: u32 = tok_start(t, i);
+    let n: u32 = tok_len(t, i);
+    if n > 2 && load8(src, s) == 48 && (load8(src, s + 1) == 120 || load8(src, s + 1) == 88) {
+        let v: u64 = 0;
+        let k: u32 = 2;
+        while k < n {
+            v = v * 16 + hex_val(load8(src, s + k));
+            k = k + 1;
+        }
+        return put_dec(out, o, v);
+    }
+    return put_tok(out, o, src, t, i);
+}
+
 fn pack(i: u32, o: u32) -> u64 {
     return (i as u64) * 4294967296 + (o as u64);
 }
@@ -361,7 +405,7 @@ fn parse_atom(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         o = puts(out, o, ")");
     } else if k == 1 {
         o = puts(out, o, "(int ");
-        o = put_tok(out, o, src, t, i);
+        o = put_num(out, o, src, t, i);
         o = puts(out, o, ")");
         i = i + 1;
     } else if k == 2 {
@@ -714,7 +758,7 @@ fn put_type(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         o = unpk_o(r2);
         if tok_is(src, t, i, ";") {
             o = puts(out, o, "; ");
-            o = put_tok(out, o, src, t, i + 1);   // 数组长度
+            o = put_num(out, o, src, t, i + 1);   // 数组长度 (同样是整数字面量, 同口径)
             i = i + 3;                            // ';' + 长度 + ']'
         } else {
             i = i + 1;                            // ']'

@@ -52,6 +52,31 @@ GOLDEN = {
     "user_hello": (0, b"M67 RESULT: PASS loment-user\n"),
     "all_loment": (0, b"M78 sum=42 double=84 max=84 fib=55\nM78 RESULT: PASS all-loment\n"),
 }
+# 能力域探针（见 test_pe_links_capability_programs）: 域内两个槽位相加, 顺带过一次 syscall。
+CAP_DEMO = """module capdemo
+
+capability blk_write : disk[0..4] revocable
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn write_slot(slot: u32) -> u32 {
+    guard blk_write(slot);
+    return slot;
+}
+
+fn _start() {
+    let a: u32 = write_slot(3);
+    let b: u32 = write_slot(1);
+    if a + b == 4 {
+        write_str(1, "CAP OK\\n");
+        syscall4(60, 0, 0, 0);
+    }
+    write_str(1, "CAP BAD\\n");
+    syscall4(60, 1, 0, 0);
+}
+"""
 TESTS: list[tuple[str, object]] = []
 
 
@@ -236,6 +261,48 @@ def test_pe_builds_and_runs_without_clang_or_wsl():
             assert exe.exists(), f"[{name}] 没落盘"
             assert _run_native(exe) == GOLDEN[name], f"[{name}] 输出与定值不符"
     print(f"      PATH 里没有 clang/wsl 也能编出并跑起来 ({len(PORTABLE)} 个程序)")
+
+
+@test
+def test_pe_links_capability_programs():
+    """能力域程序必须能走原生后端 —— 它的域描述表是**结构体全局初值**。
+
+    回归护栏：`capability` 会发一张 `[N x { i64, i64, i64, i64 }]` 的表, 而 `_parse_init`
+    原先只认标量/字节串/数组, 于是**任何带 capability 的程序**在链接期直接
+    `v0 不支持的全局初值` 失败 —— 连仓库自己的 `loment/examples/native_cap.lomt` 都编不出来。
+    这个用例把"能编 + 能跑 + 越界真的 trap"三件事一起钉住。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "capdemo.lomt"
+        src.write_text(CAP_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        assert "[1 x { i64, i64, i64, i64 }]" in ll.read_text(encoding="utf-8"), \
+            "域描述表形态变了 —— 这个用例盯的就是它的初值解析"
+        exe = td / "capdemo.exe"
+        blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
+        exe.write_bytes(blob)
+        assert _run_native(exe) == (0, b"CAP OK\n"), "域内 guard 应当放行"
+        # 非字面量越界 -> 运行期 trap (IR 后端是 ud2, 退出码 132/SIGILL)
+        trap = td / "captrap.lomt"
+        trap.write_text(CAP_DEMO.replace("write_slot(1)", "write_slot(9)"),
+                        encoding="utf-8", newline="\n")
+        tll = _ir(trap, td)
+        texe = td / "captrap.exe"
+        texe.write_bytes(lomelf.compile_pe(tll.read_text(encoding="utf-8"))[0])
+        assert _run_native(texe)[0] != 0, "运行期越界应当 trap, 不该正常退出"
+        # 字面量越界 -> 编译期就拒 (参考实现的 check)
+        lit = td / "caplit.lomt"
+        lit.write_text(CAP_DEMO.replace("guard blk_write(slot);", "guard blk_write(9);"),
+                       encoding="utf-8", newline="\n")
+        mod = lomentc.load(lit)
+        deps = lomentc.resolve_deps(mod, ROOT, lit.parent, entry=lit)
+        assert any("越界" in e for e in lomentc.check(mod, deps=deps)), \
+            "字面量越界必须在检查期报错"
+    print("      能力域程序: 域内放行 / 越界 trap / 字面量越界拒绝, 且走的是原生 PE")
 
 
 @test
