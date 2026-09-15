@@ -1625,31 +1625,34 @@ def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
     test_rax()
     jcc_l("ne", "__ws_fc_done")
     api("__iat_GetCommandLineA")
+    # 源指针挪进 r11：**不能拿 rax 当指针又用 al 装字节** —— `movb (%rax), %al`
+    # 会把指针自己的低字节写掉，指针每走一步就跳飞（症状是 argv 只剩一个字符）。
+    a.emit(mov_rr(R11, RAX))
     movi(R10, state_va + WS_CMD_BUF)
     a.emit(mov_rr(R8, R10))
     movi32(R9, WS_CMD_CAP - 2)
     a.label("__ws_fc_loop")
     test_rr(R9, R9)
     jcc_l("e", "__ws_fc_end")
-    load_al(RAX)
+    load_al(R11)
     test_al()
     jcc_l("e", "__ws_fc_end")
     cmp_al(0x22)                                # '"'
     jcc_l("ne", "__ws_fc_keep")
-    add_ri(RAX, 1)
+    add_ri(R11, 1)
     jmp_l("__ws_fc_loop")
     a.label("__ws_fc_keep")
     cmp_al(0x20)                                # ' '
     jcc_l("ne", "__ws_fc_store")
-    a.emit(b"\x31\xC0")                         # xor eax, eax（空格 -> NUL）
-    a.label("__ws_fc_store")
+    a.emit(b"\x30\xC0")                         # xor al, al（空格 -> NUL）——**只能清 al**，
+    a.label("__ws_fc_store")                    # 清 eax 会把源指针也清掉（曾经这么错过）
     store_al(R8)
     add_ri(R8, 1)
     sub_ri(R9, 1)
-    add_ri(RAX, 1)
+    add_ri(R11, 1)
     jmp_l("__ws_fc_loop")
     a.label("__ws_fc_end")
-    a.emit(b"\x31\xC9")
+    a.emit(b"\x30\xC0")                         # xor al, al
     store_al(R8)                                # 末尾再补一个 NUL
     add_ri(R8, 1)
     a.emit(mov_rr(RAX, R8))
@@ -1891,8 +1894,9 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, data_rva: int,
     struct.pack_into("<I", opt, 56, image_size)
     struct.pack_into("<I", opt, 60, toff)
     struct.pack_into("<H", opt, 68, 3)                       # Subsystem: console
-    struct.pack_into("<Q", opt, 72, 0x100000)
-    struct.pack_into("<Q", opt, 80, 0x1000)
+    # 栈留 16 MB：编译器自己的递归下降比小工具深得多（Linux 那侧默认 8 MB，本来就够宽）。
+    struct.pack_into("<Q", opt, 72, 16 * 1024 * 1024)
+    struct.pack_into("<Q", opt, 80, 0x100000)
     struct.pack_into("<Q", opt, 88, 0x100000)
     struct.pack_into("<Q", opt, 96, 0x1000)
     struct.pack_into("<I", opt, 108, 16)

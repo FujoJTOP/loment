@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（6/6），审计主张 **C19 / C20 / C21 / C24**
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（7/7），审计主张 **C19 / C20 / C21 / C24**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -121,9 +121,19 @@ stage1"那一步出现（见 §5）。
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
-   于是判据 `tools/loment_pe_test.py` **6/6**，其中 `test_pe_runs_the_loment_toolchain_natively`
-   把 **`lomstatus` 与 `lomrel` 本身**编成 PE 在本机原生跑（argv + 目录遍历 + 文件 I/O），
-   stdout 字节 + 退出码与 Python 版逐字节相同 —— **构建路径的工具已经不需要 WSL 了**。
+   于是判据 `tools/loment_pe_test.py` **7/7**：
+
+   * `test_pe_runs_the_loment_toolchain_natively` —— **`lomstatus` 与 `lomrel` 本身**编成 PE 在
+     本机原生跑（argv + 目录遍历 + 文件 I/O），stdout 字节 + 退出码与 Python 版逐字节相同；
+   * `test_pe_runs_the_selfhost_compiler_natively` —— **自举种子的 PE 版原生当编译器用**：
+     对语料产出的 IR 与参考实现逐字节相同，那份 IR 再经 `lomelf --target pe` 出的产物行为也对。
+
+   也就是说这台机器上 **`.lomt → 编译器 → .ll → 可执行文件 → 跑` 整条链已经不需要 clang，
+   也不需要 WSL**。写 shim 时又踩到两个"看起来完全无关"的坑，都记在这里：
+   （d）shim 最初把 argv 源指针放在 `rax` 上又用 `al` 装字节 —— `movb (%rax),%al` 会**把指针
+   自己的低字节写掉**，指针每走一步就跳飞，症状是 argv 只剩一个字符；
+   （e）PE 的默认栈（1 MB）对**编译器自己**太小 —— 递归下降直接把栈打爆成 SIGSEGV，
+   换成 16 MB 保留才过。小工具照不出来，只有喂编译器本体才暴露。
 
    **还没做**：`loment_dist.py` 里"Windows 装法 = 拷进 WSL + `loment.cmd` 转发"还没改成装原生
    `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang；自举侧的镜像
@@ -197,6 +207,7 @@ python tools/loment_pe_test.py
   PASS  test_pe_runs_natively_matches_linux_behavior        # 2 个程序: 与 clang/Linux 逐字节一致
   PASS  test_pe_builds_and_runs_without_clang_or_wsl        # PATH 里只剩 python 也照跑
   PASS  test_pe_runs_the_loment_toolchain_natively          # lomstatus/lomrel 原生跑, 与 Python 逐字节同
+  PASS  test_pe_runs_the_selfhost_compiler_natively          # 种子的 PE 版原生当编译器, IR 逐字节同 + 全链可跑
   PASS  test_pe_reports_unsupported_instead_of_miscompiling # 3 类输入报错
   PASS  test_pe_cli_check_and_usage                         # --check 不落盘 rc=0 · 非法 --target rc=2
 

@@ -274,6 +274,36 @@ def test_pe_runs_the_loment_toolchain_natively():
 
 
 @test
+def test_pe_runs_the_selfhost_compiler_natively():
+    """**去 WSL 的判据（编译器侧）**：自举种子编成 PE 后，在 Windows 上**原生当编译器用** ——
+    对语料产出的 IR 与参考实现逐字节相同；那份 IR 再喂回 `lomelf --target pe`，
+    产物跑出来的行为也对得上。整条链在这台机器上不碰 clang、不碰 WSL。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    seed = ROOT / "loment/build/selfhost_driver.ll"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        drv = td / "driver.exe"
+        blob, _info = lomelf.compile_pe(seed.read_text(encoding="utf-8"))
+        drv.write_bytes(blob)
+        ok = 0
+        for rel in PORTABLE:
+            src = ROOT / rel
+            ref = _ir(src, td)                          # 参考实现发的 IR
+            r = subprocess.run([str(drv), rel], capture_output=True,
+                               cwd=str(ROOT), shell=False)   # 入口按仓库相对路径给
+            assert r.returncode == 0, f"[{src.stem}] 编译器 rc={r.returncode}: {r.stderr[-200:]!r}"
+            assert r.stdout == ref.read_bytes(), f"[{src.stem}] IR 与参考不一致"
+            # 全链：那份 IR -> PE -> 跑，行为与定值一致
+            prog = td / f"{src.stem}.exe"
+            prog.write_bytes(lomelf.compile_pe(r.stdout.decode("utf-8"))[0])
+            assert _run_native(prog) == GOLDEN[src.stem], f"[{src.stem}] 全链产物行为不符"
+            ok += 1
+    print(f"      {ok} 个语料: 自举种子编成的 PE 原生当编译器用, IR 逐字节相同且全链可跑")
+
+
+@test
 def test_pe_reports_unsupported_instead_of_miscompiling():
     """不支持的东西必须**报错退出**, 不许静默编出一个错的 PE。"""
     bad = [
