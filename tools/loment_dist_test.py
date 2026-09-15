@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -280,10 +281,21 @@ def test_windows_installer(zipf: Path) -> None:
     pfx = loment_dist.STAGE / "it-win-pfx"
     if pfx.exists():
         shutil.rmtree(pfx)
+    # 沙箱用户目录: 安装器会把 agent skill 放进 ~/.claude/skills/loment —— 不能碰真机器上的那个
+    home = loment_dist.STAGE / "it-win-home"
+    if home.exists():
+        shutil.rmtree(home)
+    (home / ".claude").mkdir(parents=True)
+    # 别家 agent 的落点: 造一个**已经有内容**的 Codex 全局指令文件, 用来验证
+    # "只加带标记的一段、不碰原有内容、重装不重复、卸载精确摘掉"。
+    (home / ".codex").mkdir(parents=True)
+    codex = home / ".codex" / "AGENTS.md"
+    codex.write_text("MY OWN RULES\nsecond line\n", encoding="utf-8", newline="\n")
+    env = dict(os.environ, USERPROFILE=str(home))
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                         "-Prefix", str(pfx), "-PayloadDir", str(root),
                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
-                       shell=False, encoding="utf-8", errors="replace", timeout=300)
+                       shell=False, encoding="utf-8", errors="replace", timeout=300, env=env)
     check("install.ps1 真装 (临时前缀, 原生 PE, 无 WSL) 退出 0", r.returncode == 0,
           ((r.stdout or "") + (r.stderr or ""))[-260:])
     cmd = pfx / "bin/loment.cmd"
@@ -304,13 +316,56 @@ def test_windows_installer(zipf: Path) -> None:
           r3.returncode == 0 and "PASS loment-user" in (r3.stdout or ""),
           ((r3.stdout or "") + (r3.stderr or ""))[-200:])
 
+    # ★ agent skill: 装完 agent 读得到, 且与仓库里的那份**逐字节相同**
+    #   (这条是补出来的 —— 第一版漏了给 share\loment\skill 建目录, 真装才炸出来)
+    skill = home / ".claude" / "skills" / "loment" / "SKILL.md"
+    want = (loment_dist.ROOT / loment_dist.SKILL).read_bytes()
+    check("装完把 agent skill 放进 ~/.claude/skills/loment (沙箱 HOME)",
+          skill.exists() and skill.read_bytes() == want, f"缺或不符: {skill}")
+    check("随包的 skill 也留在前缀里 (share/loment/skill)",
+          (pfx / "share/loment/skill/SKILL.md").exists(), "缺 share/loment/skill/SKILL.md")
+
+    # ★ 跨 agent 广播: 别家 agent 读不到 .claude/skills/, 所以往它自己认的文件里写**指针**。
+    #   这条同时钉住"不碰原有内容"与"带标记所以可精确摘除"。
+    txt = codex.read_text(encoding="utf-8")
+    check("广播到 Codex 的 ~/.codex/AGENTS.md (带标记的指针, 原有内容保留)",
+          "<!-- loment:begin -->" in txt and "MY OWN RULES" in txt
+          and txt.count("<!-- loment:begin -->") == 1, txt[:140])
+    check("指针指向包里那份指南, 不是拷贝",
+          str(pfx / "share/loment/skill/SKILL.md") in txt, txt[:200])
+
+    # ★ 与任何目录约定无关的兜底: 跑 CLI 就能拿到指南。这条是给"机器上既没有 Claude
+    #   也没有 Codex"的情形准备的 —— agent 上手陌生语言的第一动作就是跑 CLI 看用法。
+    r5 = subprocess.run(["cmd", "/c", str(cmd), "skill"], capture_output=True, text=True,
+                        shell=False, encoding="utf-8", errors="replace", timeout=120)
+    got_path = (r5.stdout or "").strip()
+    check("`loment skill` 打出指南路径且该路径存在",
+          r5.returncode == 0 and got_path.endswith("SKILL.md") and Path(got_path).exists(),
+          got_path[:160])
+    r6 = subprocess.run(["cmd", "/c", str(cmd), "skill", "--print"], capture_output=True,
+                        text=True, shell=False, encoding="utf-8", errors="replace", timeout=120)
+    got = (r6.stdout or "").replace("\r\n", "\n")
+    check("`loment skill --print` 的输出 == 指南全文 (逐字节)",
+          r6.returncode == 0 and got == want.decode("utf-8").replace("\r\n", "\n"),
+          f"rc={r6.returncode} len={len(got)}")
+    r7 = subprocess.run(["cmd", "/c", str(cmd), "help"], capture_output=True, text=True,
+                        shell=False, encoding="utf-8", errors="replace", timeout=120)
+    check("`loment help` 的用法里能看到 skill (agent 的第一动作)",
+          "loment skill" in (r7.stdout or ""), (r7.stdout or "")[:160])
+
     r4 = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                          "-Uninstall", "-Prefix", str(pfx), "-NoPath", "-NoFileType"],
                         capture_output=True, text=True, shell=False, encoding="utf-8",
-                        errors="replace", timeout=180)
+                        errors="replace", timeout=180, env=env)
     check("--uninstall 摘掉前缀", r4.returncode == 0 and not pfx.exists(),
           ((r4.stdout or "") + (r4.stderr or ""))[-200:])
+    check("--uninstall 也摘掉 agent skill (只摘它自己建的那个目录)", not skill.exists(),
+          "skill 还在")
+    check("--uninstall 还原别家 agent 的文件 (只摘标记段, 原有内容不动)",
+          codex.read_text(encoding="utf-8") == "MY OWN RULES\nsecond line\n",
+          codex.read_text(encoding="utf-8")[:80])
     shutil.rmtree(pfx, ignore_errors=True)
+    shutil.rmtree(home, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ main

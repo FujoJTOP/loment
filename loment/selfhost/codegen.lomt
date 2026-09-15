@@ -3678,7 +3678,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         emit_str(s, out, ", label %L");
         emit_dec(s, out, wild);
-        emit_str(s, out, "_mwild [\n");
+        // 默认目标的**名字**必须跟号一致: 没有通配臂时 wild == mend, 该写 `_mend`。
+        // 原先无条件拼 `_mwild`, 于是"覆盖全部变体且不写 `_`"的 match 会发一个
+        // 引用**未定义标签**的 switch —— 到链接期才炸, 两个后端都收不了。
+        if wild == mend {
+            emit_str(s, out, "_mend [\n");
+        } else {
+            emit_str(s, out, "_mwild [\n");
+        }
         let a2: u32 = 0;
         let k2: u32 = j + 3;
         while k2 < stop && !tok_is(src, toks, k2, "}") && a2 < 12 {

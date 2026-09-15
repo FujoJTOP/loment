@@ -51,3 +51,18 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 
 **不做**：不在语言冻结前把 Loment 产物提交成内核依赖、不把 Python 引入内核构建链（见 `docs/165`）。
 
+## 写 Loment 程序之前，先读那份 agent 指南
+
+**装好 Loment 工具链之后**（`loment version` 能跑），写或改 `.lomt` 之前先读指南：
+
+- 有本仓库时：**`.claude/skills/loment/SKILL.md`**
+- 只有安装包时：**`<前缀>/share/loment/skill/SKILL.md`**（同一份）
+
+内建函数表、语法要点、E1–E17 错误码、以及包内命令 `ir/check/build/run/fmt/doc/lsp`
+全在里面，**自足**，不依赖本仓库其它文件。
+
+**正本只有一份**（就是那个文件）—— 别处都只是指针或同字节拷贝。复制出第二份必然漂。
+
+**它不是 Claude 专用的**：`.claude/skills/` 只是 Claude Code 的自动发现路径，
+其它 agent（ZCode / Codex / Cursor …）按各自约定读不到它，所以安装器会把**指针**
+写进它们认的用户级文件（Codex 是 `~/.codex/AGENTS.md`），并设 `LOMENT_SKILL` 环境变量。

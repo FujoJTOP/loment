@@ -308,8 +308,10 @@ PARSE_KNOWN_GAPS: dict[str, str] = {}
 #: 加新语料时如果助手缺结点, 这里会先红, 逼着先写 dump 口径 (再补 parser 分支)。
 PARSE_HELPER_GAPS: dict[str, str] = {}
 
-#: 可对照语料的**下限** (棘轮: 只许往上调)。lomelf.lomt 补上十六进制口径那次 42 -> 43。
-CORPUS_FLOOR = 43
+#: 可对照语料的**下限** (棘轮: 只许往上调)。
+#: 42 -> 43: lomelf.lomt 补上十六进制口径 (2026-09-15)
+#: 43 -> 44: native_match_full.lomt 补上"全覆盖 match 不写 `_`"的码形 (同日, 见该文件的注释)
+CORPUS_FLOOR = 44
 
 #: 整数字面量口径探针: 语料的**另一处**字面量位置 (类型里的数组长度) 至今没有十六进制样本,
 #: 不能指望语料自己盯住它 —— 两处都走 put_num, 这里钉一个最小样本。

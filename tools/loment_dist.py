@@ -8,8 +8,8 @@
 #                                                           (前两件是确定性字节, 这件不是 —— 见 docs/162)
 #   SHA256SUMS                           上面几件的 sha256
 #
-# 包里**没有 Python**: 四个可执行文件都是自举产物 (种子 + clang + stage1 → IR → 链接),
-# 见 docs/159。构建期需要 Python 的只有这个打包工具本身 (仓库工具链, 不进包)。
+# 包里**没有 Python**: 五个可执行文件都是自举产物 (种子 → stage1 → IR → 链接), 构建与链接
+# 都不需要 clang/WSL 才能装。构建期需要 Python 的只有这个打包工具本身 (仓库工具链, 不进包)。
 #
 #   python tools/loment_dist.py --emit                        # 全部（本机原生后端，无 clang/WSL）
 #   python tools/loment_dist.py --emit --only driver --no-exe # 快速子集 (门禁用)
@@ -56,12 +56,16 @@ TOOLS: list[tuple[str, str]] = [
 EXAMPLE = "loment/examples/user_hello.lomt"
 ICON = "editors/loment.ico"
 LICENSE = "LICENSE"
+# 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
+# **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
+# 不做 @VERSION@ 替换 —— 这样"包里的那份 == 仓库里的那份"是可判据的。
+SKILL = ".claude/skills/loment/SKILL.md"
 
 #: 纯文本脚本一律 ASCII: Windows PowerShell 5.1 用 ANSI 读无 BOM 的 .ps1, 非 ASCII 会变乱码
 #: 并连带把后续行解析坏 (docs/157 §3.4 踩过)。中文说明在 README.md 与 docs/162 里。
 LAUNCHER_SH = r'''#!/usr/bin/env bash
 # Loment launcher (@DISPLAY@, @VERSION@). Installed by install.sh / install.ps1.
-# No Python: everything here is the self-hosted toolchain + clang.
+# No Python, no clang: everything here is the self-hosted toolchain.
 set -u
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -93,6 +97,7 @@ Loment @DISPLAY@  (@VERSION@)
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
+  loment skill [--print]      print the AI-agent guide (path, or the whole text)
 EOF
 }
 
@@ -122,6 +127,21 @@ case "${1:-help}" in
     lsp)
         shift; need "$here/loment-lsp" loment-lsp
         exec "$here/loment-lsp" "$@" ;;
+    # The guide for AI agents, reachable WITHOUT any tool-specific directory convention:
+    # an agent that meets a new language runs its CLI first, so this is the universal hook.
+    # `--print` needs no file access at all.
+    skill)
+        shift
+        case "${1:-}" in
+            --print)
+                [ -f "$share/skill/SKILL.md" ] ||
+                    { echo "loment: this package does not include the guide" >&2; exit 3; }
+                cat "$share/skill/SKILL.md" ;;
+            "")
+                echo "$share/skill/SKILL.md" ;;
+            *)
+                echo "loment: skill takes no argument except --print" >&2; exit 2 ;;
+        esac ;;
     build|run)
         mode=$1; shift
         [ $# -ge 1 ] || { usage >&2; exit 2; }
@@ -174,6 +194,7 @@ if "%cmd%"=="check" goto check
 if "%cmd%"=="fmt" goto fmt
 if "%cmd%"=="doc" goto doc
 if "%cmd%"=="lsp" goto lsp
+if "%cmd%"=="skill" goto skill
 if "%cmd%"=="build" goto build
 if "%cmd%"=="run" goto run
 goto usage
@@ -204,6 +225,23 @@ exit /b %ERRORLEVEL%
 
 :lsp
 "%here%loment-lsp.exe" %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %ERRORLEVEL%
+
+rem The guide for AI agents, reachable WITHOUT any tool-specific directory convention: an
+rem agent that meets a new language runs its CLI first, so this is the universal hook.
+rem --print needs no file access at all.
+:skill
+if "%~2"=="--print" goto skill_print
+rem %%~fI expands to the fully-qualified path (drops the .. in %share%)
+for %%I in ("%share%\skill\SKILL.md") do echo %%~fI
+exit /b 0
+
+:skill_print
+if not exist "%share%\skill\SKILL.md" (
+  echo loment: this package does not include the guide 1>&2
+  exit /b 3
+)
+type "%share%\skill\SKILL.md"
 exit /b %ERRORLEVEL%
 
 :build
@@ -258,23 +296,27 @@ echo   loment run FILE             compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio
+echo   loment skill [--print]      print the AI-agent guide (path, or the whole text)
 exit /b 2
 '''
 
 INSTALL_SH = r'''#!/bin/sh
 # Loment @DISPLAY@ installer (Linux / WSL). No Python, no network.
-#   sh install.sh [--prefix DIR] [--no-path]      default prefix: $HOME/.local
+#   sh install.sh [--prefix DIR] [--no-path] [--no-skill]   default prefix: $HOME/.local
 #   sh install.sh --uninstall [--prefix DIR]
+# --no-skill: do not install the agent skill into ~/.claude/skills/loment
 set -eu
 
 prefix=${PREFIX:-$HOME/.local}
 no_path=0
+no_skill=0
 uninstall=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --prefix) prefix=${2:-}; shift 2 ;;
         --prefix=*) prefix=${1#*=}; shift ;;
         --no-path) no_path=1; shift ;;
+        --no-skill) no_skill=1; shift ;;
         --uninstall) uninstall=1; shift ;;
         -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
         *) echo "install: unknown option $1" >&2; exit 2 ;;
@@ -287,6 +329,13 @@ if [ "$uninstall" = 1 ]; then
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
           "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf"
     rm -rf "$prefix/share/loment"
+    # only what this installer created -- never ~/.claude/skills or AGENTS.md at large
+    if [ "$no_skill" != 1 ]; then
+        rm -rf "$HOME/.claude/skills/loment"
+        if [ -f "$HOME/.codex/AGENTS.md" ]; then
+            sed -i '/<!-- loment:begin -->/,/<!-- loment:end -->/d' "$HOME/.codex/AGENTS.md" 2>/dev/null || true
+        fi
+    fi
     echo "install: removed from $prefix"
     exit 0
 fi
@@ -306,6 +355,54 @@ chmod 755 "$prefix/bin/"*
 "$prefix/bin/loment" version || {
     echo "install: installed but 'loment version' failed" >&2; exit 1; }
 echo "install: Loment @DISPLAY@ -> $prefix"
+
+# Ship the self-contained agent skill into the user-level Claude skills dir, so a coding
+# agent in ANY project can read it. Skipped when ~/.claude is absent (then it just stays
+# in the package). --no-skill to skip.
+skill_src="$prefix/share/loment/skill/SKILL.md"
+mark_b='<!-- loment:begin -->'
+mark_e='<!-- loment:end -->'
+if [ "$no_skill" = 1 ]; then
+    echo "install: agent skill not installed (--no-skill); kept at $skill_src"
+else
+    hits=""
+    if [ -d "$HOME/.claude" ]; then
+        mkdir -p "$HOME/.claude/skills/loment"
+        cp -f "$skill_src" "$HOME/.claude/skills/loment/SKILL.md"
+        hits="claude"
+    fi
+    # Codex CLI reads ~/.codex/AGENTS.md as global instructions. Marker-delimited so a
+    # re-install is idempotent and --uninstall takes back exactly this block.
+    if [ -d "$HOME/.codex" ]; then
+        agents="$HOME/.codex/AGENTS.md"
+        [ -f "$agents" ] || : > "$agents"
+        # Drop a previous block (same markers), then append. On uninstall we delete only
+        # the marked range: a leftover blank line is preferable to guessing which blank
+        # lines are the user's -- never touch bytes we did not write.
+        sed -i '/<!-- loment:begin -->/,/<!-- loment:end -->/d' "$agents" 2>/dev/null || true
+        # If the file does not end with a newline, add one so the marker is not glued
+        # onto the user's last line.
+        if [ -s "$agents" ] && [ -n "$(tail -c 1 "$agents")" ]; then printf '\n' >> "$agents"; fi
+        {
+            echo "$mark_b"
+            echo "## Loment"
+            echo "Before writing or changing a Loment program (\`.lomt\`), read the guide:"
+            echo "$skill_src"
+            echo "It is self-contained: builtins, syntax, error codes (E1-E17), and the toolchain commands."
+            echo "$mark_e"
+        } >> "$agents"
+        hits="${hits:+$hits, }codex"
+    fi
+    if [ -n "$hits" ]; then
+        echo "install: agent skill -> $hits (one guide at $skill_src)"
+    else
+        # No tool-specific dir to hook? The CLI is the hook.
+        echo "install: no known agent dir here -- the guide is still reachable:"
+        echo "install:   loment skill --print   (any agent: it runs the CLI)"
+    fi
+    echo "install:   a plain copy lives at $skill_src"
+    echo "install:   for shells: export LOMENT_SKILL=\"$skill_src\""
+fi
 
 case ":${PATH}:" in
     *":$prefix/bin:"*) ;;
@@ -333,6 +430,7 @@ param(
     [string]$PayloadZip = '',
     [switch]$NoPath,
     [switch]$NoFileType,
+    [switch]$NoSkill,
     [switch]$Uninstall,
     [switch]$DryRun
 )
@@ -445,10 +543,23 @@ function Unregister-FileType {
 }
 
 if ($Uninstall) {
-    if ($DryRun) { Say "[dry-run] would remove $Prefix and the file-type keys"; exit 0 }
+    if ($DryRun) { Say "[dry-run] would remove $Prefix, the file-type keys and the agent skill"; exit 0 }
     Remove-Item -LiteralPath $Prefix -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $NoPath) { Remove-PathEntry $BinDir }
     if (-not $NoFileType) { Unregister-FileType }
+    if (-not $NoSkill) {
+        # Only what this installer created -- never a skills dir / AGENTS.md at large.
+        Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\loment') `
+                    -Recurse -Force -ErrorAction SilentlyContinue
+        $agents = Join-Path $env:USERPROFILE '.codex\AGENTS.md'
+        if (Test-Path -LiteralPath $agents) {
+            $t = Get-Content -LiteralPath $agents -Raw
+            if ($null -eq $t) { $t = '' }
+            $t = [regex]::Replace($t, '(?s)\r?\n?<!-- loment:begin -->.*?<!-- loment:end -->\r?\n?', '')
+            [System.IO.File]::WriteAllText($agents, $t, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        [Environment]::SetEnvironmentVariable('LOMENT_SKILL', $null, 'User')
+    }
     Say "uninstalled"
     exit 0
 }
@@ -472,8 +583,10 @@ foreach ($f in Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File) {
 }
 $shareDir = Join-Path $Prefix 'share\loment'
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'examples') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $shareDir 'skill') -Force | Out-Null
 foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
-                   'share/loment/examples/user_hello.lomt')) {
+                   'share/loment/examples/user_hello.lomt',
+                   'share/loment/skill/SKILL.md')) {
     $f = Join-Path $Payload $rel.Replace('/', '\')
     if (Test-Path -LiteralPath $f) {
         Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
@@ -494,6 +607,62 @@ if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LAST
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: compiling user_hello.lomt" }
 Say "[5/6] smoke test ok (version + compile)"
 
+# --- agent skill: hand it to whatever agent is here, NOT just Claude --------------------
+# There is no OS-wide way to push a skill into an arbitrary LLM: every tool reads its own
+# path. So we write a POINTER into the user-level file that each tool already uses, and
+# only when that tool's directory already exists -- we never create another tool's config
+# dir. The guide itself stays in ONE place (the package). -NoSkill skips all of this.
+$skillSrc = Join-Path $shareDir 'skill\SKILL.md'
+$markB = '<!-- loment:begin -->'
+$markE = '<!-- loment:end -->'
+$skillHits = @()
+if ($NoSkill) {
+    Say "[5b/6] agent skill not installed (-NoSkill); kept at $skillSrc"
+} else {
+    # Claude Code: user-level skills dir, auto-discovered.
+    $claudeDir = Join-Path $env:USERPROFILE '.claude'
+    if (Test-Path -LiteralPath $claudeDir) {
+        $skillDir = Join-Path $claudeDir 'skills\loment'
+        New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
+        Copy-Item -LiteralPath $skillSrc -Destination (Join-Path $skillDir 'SKILL.md') -Force
+        $skillHits += "claude"
+    }
+    # Codex CLI: global instructions at ~/.codex/AGENTS.md. Marker-delimited so re-install
+    # is idempotent and uninstall removes exactly this block, leaving the rest untouched.
+    $codexDir = Join-Path $env:USERPROFILE '.codex'
+    if (Test-Path -LiteralPath $codexDir) {
+        $agents = Join-Path $codexDir 'AGENTS.md'
+        $prev = ''
+        if (Test-Path -LiteralPath $agents) { $prev = Get-Content -LiteralPath $agents -Raw }
+        if ($null -eq $prev) { $prev = '' }
+        $prev = [regex]::Replace($prev, '(?s)<!-- loment:begin -->.*?<!-- loment:end -->\r?\n?', '')
+        $block = $markB + "`r`n" +
+                 "## Loment`r`n" +
+                 "Before writing or changing a Loment program (``.lomt``), read the guide:`r`n" +
+                 "$skillSrc`r`n" +
+                 "It is self-contained: builtins, syntax, error codes (E1-E17), and the toolchain commands.`r`n" +
+                 $markE + "`r`n"
+        # Append only: the file's original bytes are left untouched, so removing this
+        # block again restores it byte for byte. (v1 trimmed -- the gate caught it.)
+        $body = $prev
+        if ($body -ne '') { $body += "`r`n" }
+        [System.IO.File]::WriteAllText($agents, $body + $block, (New-Object System.Text.UTF8Encoding($false)))
+        $skillHits += "codex"
+    }
+    # A user-level variable so anything can find the guide without knowing the prefix.
+    # .NET writes HKCU\Environment and broadcasts WM_SETTINGCHANGE (new processes see it).
+    [Environment]::SetEnvironmentVariable('LOMENT_SKILL', $skillSrc, 'User')
+    if ($skillHits.Count -eq 0) {
+        # No tool-specific dir to hook? The CLI is the hook: any agent runs it, so
+        # "loment skill --print" needs no convention and no file access.
+        Say "[5b/6] no known agent dir here -- the guide is still reachable:"
+        Say "      loment skill --print     (any agent: run the CLI)"
+        Say "      or paste into that agent's rules: read $skillSrc before writing Loment"
+    } else {
+        Say "[5b/6] agent skill -> $($skillHits -join ', ') (+ LOMENT_SKILL)"
+    }
+}
+
 if ($NoFileType) { Say "[6/6] file type registration skipped (-NoFileType)"; exit 0 }
 $editor = Find-Editor
 if (-not $editor) {
@@ -511,7 +680,7 @@ rem Loment @DISPLAY@ installer entry point. Works in BOTH layouts:
 rem   * self-extracting setup.exe  -> payload.zip sits next to this file: unpack it first
 rem   * plain .zip                 -> this directory IS the payload
 rem Double-clicking this file installs with defaults; see README.md for the switches
-rem (-Prefix, -WslDir, -NoPath, -NoFileType, -DryRun, -Uninstall).
+rem (-Prefix, -NoPath, -NoFileType, -NoSkill, -DryRun, -Uninstall).
 setlocal
 set HERE=%~dp0
 set PSARGS=
@@ -533,8 +702,9 @@ if "%~1"=="" (
 
 README_MD = """# Loment {DISPLAY}
 
-版本 `{VERSION}`。这是一份**自包含**的 Loment 工具链发行包：包里**没有 Python** ——
-四个可执行文件都是自举产物（种子 + clang），构建与安装的全部细节见仓库 `docs/162`。
+版本 `{VERSION}`。这是一份**自包含**的 Loment 工具链发行包：包里**没有 Python**，也
+**不需要 clang、不需要 WSL** —— 五个可执行文件都是自举产物，`build`/`run` 用包内的
+`loment-lomelf` 在本机直接出 ELF/PE。构建与安装的全部细节见仓库 `docs/162`。
 
 ## 包内容
 
@@ -545,8 +715,10 @@ README_MD = """# Loment {DISPLAY}
 | `bin/loment-fmt` | 格式化器（与 Python 版逐字节相同，docs/159） |
 | `bin/loment-doc` | API 文档生成器 |
 | `bin/loment` | 启动器（下面那些子命令） |
+| `bin/loment-lomelf` | 链接器：把 `.ll` 变成可执行文件（`build`/`run` 用它） |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |
+| `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
 
 ## 安装（三种方式，装出来一样）
 
@@ -566,8 +738,8 @@ sh install.sh --uninstall
 Expand-Archive loment-{VERSION}-windows-x64.zip -DestinationPath .
 cd loment-{VERSION}-windows-x64
 powershell -ExecutionPolicy Bypass -File install.ps1
-# 可选: -Prefix D:\\Loment  -WslDir /home/me/.local/share/loment
-#       -NoPath  -NoFileType  -DryRun  -Uninstall
+# 可选: -Prefix D:\\Loment
+#       -NoPath  -NoFileType  -NoSkill  -DryRun  -Uninstall
 ```
 
 也可以直接**双击 `install.cmd`**（按默认参数装；`install.cmd` 在 zip 布局与自解压布局里都能用）。
@@ -580,9 +752,29 @@ loment-{VERSION}-windows-x64-setup.exe
 ```
 
 自解压安装包（用 Windows 自带的 `iexpress` 做，不引第三方工具）：双击即装 ——
-校验 SHA256SUMS → 把工具链拷进 WSL → 写 `loment.cmd` → 加用户 PATH →
+校验 SHA256SUMS → 把工具链拷进安装前缀 → 写 `loment.cmd` → 加用户 PATH →
 装 `.lomt`/`.lom` 文件类型 → 冒烟测试。**未签名**，SmartScreen 会提示"未知发布者"，
 选"更多信息 → 仍要运行"。
+
+## 让 AI agent 写 Loment
+
+包里带一份**自足**的 skill（`share/loment/skill/SKILL.md`）：内建函数表、语法、
+错误码表、以及这个包自己的命令，都在里面，不依赖源码仓库。
+
+安装时它会同时被写进 **`~/.claude/skills/loment/`**（用户级），于是**任何工程**里的
+Claude Code 都能读到它 —— 你只要说"用 Loment 写个程序"就行。不想装用 `-NoSkill`
+（Linux: `--no-skill`）；没装 Claude 的话它会留在包里，把那个文件拷到
+`<你的工程>/.claude/skills/loment/SKILL.md` 也一样。卸载时一并摘掉。
+
+**既没有 Claude 也没有 Codex？** 那就不靠目录约定 —— **跑 CLI 就行**：
+
+```sh
+loment skill            # 打印指南路径
+loment skill --print    # 直接把指南全文打到 stdout
+```
+
+`loment help` 的用法里也印了这一行，所以任何 agent 上手这门语言的第一条命令
+（`loment --help`）就能看到入口 —— 与它是什么工具无关。
 
 ## 用法
 
@@ -608,7 +800,7 @@ Linux 出 ELF、Windows 出 PE。
 
 ```sh
 sh install.sh --uninstall                  # Linux / WSL
-powershell -File install.ps1 -Uninstall    # Windows（同时清 PATH 与文件类型）
+powershell -File install.ps1 -Uninstall    # Windows（同时清 PATH、文件类型与 agent skill）
 ```
 """
 
@@ -707,6 +899,7 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     files["share/loment/version"] = (version_text().encode(), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     files[f"share/loment/examples/{Path(EXAMPLE).name}"] = (_read(EXAMPLE), 0o644)
+    files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
     files["LICENSE"] = (_read(LICENSE), 0o644)
     if kind == "linux":

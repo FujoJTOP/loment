@@ -1,36 +1,47 @@
 ---
 name: loment
-description: 在本仓库 (FujoOS / FujoLang) 里要写一个新程序、工具、示例、自检或演示时，先考虑用 Loment —— 这个项目自己的语言（Rust 的严格子集 + 能力域），能直接编成原生可执行文件、无运行时依赖。触发场景：写个程序 / 写个工具 / 加个示例 / 加个自检 / 写个 demo / 把某段 C 或 Python 改写成项目自己的语言 / 编一个能跑的小工具 / 查看或修改 .lomt 与 .lom 文件 / 调用 lomentc、lomelf、selfhost。Also use when writing a standalone program inside this repo (Loment is the default target language there, not Python or C).
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E17 错误 / 查 Loment 的内建函数或语法 / 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom) with the Loment toolchain installed.
 ---
 
-# Loment：本项目自己的语言
+# Loment：写程序用的语言
 
-**Loment 是这个仓库的第一方语言。** 在这里要写一个新程序、示例、自检或工具，默认先想它 ——
-不是 Python，也不是 C。它是 Rust 的**严格子集**（语法不新，LLM 的 Rust 先验可直接迁移），
-只多加了"能力域"这一层语义，能经仓库自带后端直接编成 **x86-64 原生可执行文件**
-（Linux ELF / Windows PE），**不需要 clang、不需要 WSL、不需要 Python 运行时**。
+**Loment 是 FujoOS 自研的底层语言。** 表面语法是 **Rust 的严格子集**（`module` / `use` /
+`fn` / `let` / `if` / `while` / `for` / `match` / `enum` / `struct` / `trait` / 类型名 /
+运算符都跟 Rust 一样），只多加了**能力域**（`capability` + `guard`）这一层语义。所以你的
+Rust 先验可以直接用。
 
-后缀：`.lomt` 是 L1（写程序的地方），`.lom` 是 L0（跨线接口契约，见文末"仓库规矩"）。
+它能直接编成 **x86-64 原生可执行文件**（Linux ELF / Windows PE），**不需要 Python 运行时**。
 
-## 什么时候用 / 什么时候别用
+> **本文件是自足的**：内建函数、语法、错误码都在这里面，不要去别处找（除非你手上正好有
+> Loment 的源码仓库 —— 那一节在文末，注明「仓库内才有」的路径才去找）。
 
-**用 Loment**：
+## 0. 先确认你手上的工具链
 
-- 本仓库内**小到中型**的独立程序、示例、自检、演示、命令行小工具；
-- 想要一个**能在本机直接跑起来**的原生可执行文件，不想拖任何依赖；
-- 系统层代码 —— 需要**能力域**（`guard`）那套索引越界语义时（`loment/examples/native_cap.lomt`）；
-- 要进自举语料、或要替换掉构建链里的 Python 工具时。
+```bash
+loment version
+```
 
-**别用 Loment**：
+拿到 `Loment 0.1.4 Alpha (0.1.4-alpha), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-alpha 这一代）。
 
-- 需要生态库的活（HTTP、JSON、正则、图形、包管理）—— Loment **没有标准库**，
-  只有一组内建函数（见 [reference.md](reference.md)）加裸 Linux syscall；
-- 一次性的大脚本、数据科学、需要第三方包的东西 —— 那是 Python 的活。
+命令面（安装后就在 PATH 上）：
 
-拿不准就先问用户，别默认把整个任务翻成 Loment。另外注意这条**方向相反的**规矩：
-内核构建链里**不许**引入 Python（CLAUDE.md 明文）—— 而 Loment 正是替代它的方向。
+| 命令 | 作用 |
+|---|---|
+| `loment check FILE` | 只检查，不产出（诊断打到 stderr） |
+| `loment ir FILE` | 打印 LLVM IR 到 stdout |
+| `loment build FILE [-o OUT]` | 编成可执行文件 |
+| `loment run FILE` | 编译 + 运行 |
+| `loment fmt FILE` | 格式化（打印结果） |
+| `loment doc FILE` | 生成 API 文档 |
+| `loment lsp` | 语言服务（stdio 上的 LSP） |
+| `loment skill [--print]` | 打印**这份指南**的路径 / 全文 —— 不依赖任何目录约定 |
 
-## 一分钟上手
+**`build` / `run` 若报 `clang not found` 退出码 3** —— 你装的是**更早的包**（那时工具链装在
+WSL 里、靠 clang 链接）。升级到本代的包即可：现在链接由包内的 `loment-lomelf` 做，本机直接出
+PE/ELF，不碰 clang 也不碰 WSL。
+
+## 1. 一分钟上手
 
 ```rust
 module hello
@@ -46,47 +57,107 @@ fn _start() {
 }
 ```
 
-**展示 Loment 代码时用 ```` ```rust ```` 作围栏** —— ZCode / Claude TUI / GitHub 三家的
-高亮引擎都不认识 loment，而 Rust 是它的严格超集，着色基本一致。这条是 CLAUDE.md 的约定。
-文件本身永远是 `.lomt` / `.lom`，**不要**改扩展名、不要按 Rust 语法去写。
+```bash
+loment check hello.lomt
+loment run   hello.lomt          # -> hello
+```
 
-> 上面这个例子是**能编译能跑**的：`_start` 是 freestanding 入口，`syscall4(nr, a0, a1, a2)`
-> 是内建（rax/rdi/rsi/rdx）。写完照下面的命令跑一遍再汇报 —— 别只说"应该能行"。
+`_start` 是 freestanding 入口（没有 `main`）。写完**跑一遍再下结论**，别只说"应该能行"。
 
-## 语言要点
+**展示 Loment 代码时用 ```` ```rust ```` 作围栏** —— 各家高亮引擎都不认识 loment，而 Rust 是
+它的严格超集，着色基本一致。文件本身永远是 `.lomt`（写程序）或 `.lom`（接口契约），
+**不要**改扩展名、不要按 Rust 的完整语法去写（见 §6 的限制）。
+
+## 2. 语言要点
 
 | 构造 | 写法 |
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
-| 导入 | `use "loment/examples/mathutil.lomt"`（相对仓库根或本文件所在目录） |
+| 导入 | `use "path/to/other.lomt"`（相对当前文件或工作目录） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`） |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
-| 变量 | `let x: u32 = e;`，赋值 `x = e;`（**类型标注必写**，没有类型推断） |
-| 控制流 | `if/else if/else`、`while`、`for i in lo..hi`、`return` |
-| 结构体 | `struct S { a: u32, b: u32 }`，字面量 `S { a: 1, b: 2 }`，取字段 `s.a` |
-| 枚举 | `enum E { A, B(u32) }`，构造 `E::B(3)`，`match` 必须穷尽（或带 `_`） |
-| `Option`/`Result` | 预置泛型枚举，配 `?` 传播与 `if let E::V(x) = e { }` |
-| 数组 | 类型 `[u8; 16]`，字面量 `[1, 2, 3]`，下标 `xs[0]`（可写 `xs[0] = 1`） |
-| 切片 | `[T]` / `mut [T]` 参数，`slice_len(s)` 取长 |
-| 泛型 | `fn max_of<T>(a: T, b: T) -> T`（单态化） |
+| 变量 | `let x: u32 = e;`，赋值 `x = e;` —— **类型标注必写**，语言没有类型推断 |
+| 控制流 | `if` / `else if` / `else`、`while`、`for i in lo..hi`、`return` |
+| 结构体 | `struct S { a: u32, b: u32 }`；字面量 `S { a: 1, b: 2 }`；取字段 `s.a` |
+| 枚举 | `enum E { A, B(u32) }`；构造 `E::B(3)`；`match` 要穷尽（或带 `_`） |
+| `Option`/`Result` | 预置泛型枚举，配 `?` 传播、`if let E::V(x) = e { }` |
+| 数组 | 类型 `[u8; 16]`；字面量 `[1, 2, 3]`；下标 `xs[0]`（可写 `xs[0] = 1`） |
+| 切片 | 参数类型 `[T]` / `mut [T]`，`slice_len(s)` 取长度 |
+| 泛型 | `fn max_of<T>(a: T, b: T) -> T`（编译期单态化） |
 | trait | `trait M { fn m(self) -> u32; }` + `impl M for S { ... }`，静态派发 `obj.m()` |
-| 类型 | `u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str`、struct 名、`[T; N]`、`[T]` |
-| 转换 | `x as u64`（整型/指针互转都要显式写） |
-| 字符串 | `"..."` 带 `\n \t \" \\` 转义；`str_len` / `str_byte` / `str_eq` / `str_concat` |
+| 类型 | `u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str`、struct 名、`[T; N]`、`[T]`、`mut [T]` |
+| 转换 | `x as u64` —— 整型/指针互转都要显式写 `as` |
+| 字符串 | `"..."`，转义 `\n \t \" \\`；操作见 §3 的 `str_*` |
 | 注释 | `//`、`/* */`；`///` 是文档注释（`loment doc` 会抽出来） |
-| 运算符 | 与 Rust 同优先级：`\|\| && == != < <= > >= \| ^ & << >> + - * / %`，一元 `- !` |
+| 运算符 | 优先级同 Rust：`\|\| && == != < <= > >= \| ^ & << >> + - * / %`，一元 `- !` |
 
-**几处会踩的**：
+## 3. 内建函数（全部，没有别的）
 
-- 每个 `let` 都要写类型，`let x = 1;` 不合法；
-- 函数调用在模块内**先定义后使用**（自举链路尤其严格，别依赖前向引用）；
-- 形参**最多 10 个** —— 超了编译器直接报错（自举版撞过这个上限）；
-- 没有 `String`、没有堆上的可变长字符串：字符串是静态的，动态文本用 `alloc` + `store8` 拼；
-- 条件位置不能写结构体字面量（`if p { }` 按 Rust 规则消解，要加括号）。
+**没有标准库**：没有 `String` / `Vec` / `HashMap`、没有 I/O 封装、没有字符串格式化。
 
-## 能力域 —— Loment 唯一"新的东西"
+| 签名 | 说明 |
+|---|---|
+| `str_len(s: str) -> u32` | 字节长度 |
+| `str_byte(s: str, i: u32) -> u32` | 第 i 个字节 |
+| `str_eq(a: str, b: str) -> bool` | 内容比较 |
+| `str_concat(a: str, b: str) -> str` | 拼接（**走编译期 bump 堆，堆只有 64 KiB**，大串别拼） |
+| `str_ptr(s: str) -> ptr` | 数据指针（喂 syscall 用） |
+| `alloc(n: u32) -> ptr` | bump 堆分配（同样 64 KiB 上限） |
+| `free(p: ptr) -> u32` | 占位（bump 堆不真回收） |
+| `load8(p: ptr, off: u32) -> u32` | 读字节 |
+| `store8(p: ptr, off: u32, v: u8) -> u32` | 写字节 |
+| `ptr_add(p: ptr, n: u32) -> ptr` / `ptr_sub` | 指针偏移 |
+| `slice_len(s: [T]) -> u32` | 切片长度 |
+| `panic(code: u32) -> u32` | 不可返回（类型仅占位） |
+| `atomic_add(p: ptr, n: u32) -> u32` | 原子加 |
+| `get_bits(v: u8, hi: u32, lo: u32) -> u8` / `set_bits(v: u8, hi: u32, lo: u32, x: u8) -> u8` | 位域读写 |
+| `inb(port: u16) -> u32` / `outb(port: u16, v: u8) -> u32` | 端口 I/O（**Rust 转译路径才支持**，原生路径不支持） |
+| `syscall4(nr: u64, a0: u64, a1: u64, a2: u64) -> i64` | 裸 syscall（rax/rdi/rsi/rdx） |
+| `syscall6(nr: u64, a0..a4: u64) -> i64` | 同上，多两个参数 |
 
-这是它区别于"又一个 Rust 子集"的地方，写系统层代码时用得上：
+**要输出数字**：`alloc` 一块再 `store8` 拼十进制（自己写循环取模），没有 `printf`。
+
+**syscall 号**：Linux ELF 目标上就是 Linux 的号（`write`=1、`exit`=60、`openat`=257…）。
+**Windows PE 目标只实现了 8 个**：`read`(0) / `write`(1) / `close`(3) / `brk`(12) / `exit`(60) /
+`getdents64`(217) / `openat`(257) / `newfstatat`(262)，**其余号返回 -1（静默失败）** ——
+要跨平台跑就按这 8 个来。`/proc/self/cmdline` 在 PE 上由运行库合成，argv 读法两边一致。
+
+## 4. 错误码怎么读
+
+编译器打的形如：
+
+```
+E2 @13 line 4: 1
+```
+
+读法：`E2` = 统一口径的 **E002**；`@13` 是**第 13 个 token**（不是列号）；`line 4` 是行号；
+冒号后是该 token 的原文。**码按"你该做什么"分，不按措辞分**：
+
+| 码 | 要你做的事 |
+|---|---|
+| E1 | 类型对不上（含 return / 载荷 / 内建实参） |
+| E2 | **有东西没声明**（未声明变量 / 未定义函数 / 未知类型，含"先用后定义"） |
+| E3 | **实参个数不对** |
+| E4 | 能力域问题（未声明 / 越界 / 重复） |
+| E5 | 用了 `excluded` 声明出界的空间 |
+| E6 | 值已被移动 |
+| E7 | 借用冲突（可变借用与借用并存 / 可变借用两次） |
+| E8 | `match` / 枚举（不穷尽、模式重复、不是枚举、载荷绑定不对） |
+| E9 | 命名与基类型冲突 / 空 struct / 空 enum |
+| E10 | `?` 用在了不是 `Result`/`Option` 的地方 |
+| E11 | 切片可变性（只读切片不能写、形参要 `mut`） |
+| E12 | 悬垂引用 |
+| E13 | 重复定义 / 重名 |
+| E14 | 赋值目标不是左值 |
+| E15 | 字段与下标（无此字段、缺字段、重复初始化、对非结构体取字段…） |
+| E16 | 数组字面量 / 长度与声明不符 |
+| E17 | `as` 转换非法 |
+
+**最常见的两个**：`E2` 十有八九是**漏写类型标注**（`let x = 1;` 不合法，要 `let x: u32 = 1;`）
+或用了未定义的函数名；`E3` 是调用实参个数对不上。诊断信息**只有码和位置，没有中文句子**，
+所以拿不准就看上表 + 对照 §2/§3。
+
+## 5. 能力域（Loment 唯一"新的东西"）
 
 ```rust
 module blk
@@ -94,79 +165,60 @@ module blk
 capability blk_write : disk[0..4] revocable
 
 fn write_slot(slot: u32) -> u32 {
-    guard blk_write(slot);   // 越界 -> trap; 通过 -> 审计计数 +1
+    guard blk_write(slot);   // 越界 -> trap；通过 -> 审计计数 +1
     return slot;
 }
-
-fn ok() -> u32 {
-    guard blk_write(2);      // 字面量在域内 -> 编译期放行
-    return 2;
-}
 ```
 
-语义（docs/146）：`guard cap(e);` 求值 `e` 得索引 → 不在 `[lo, hi]` 就 trap（无其它副作用），
-在域内就给审计表加一。**字面量越界是编译错误**，非字面量是运行期检查。
+语义：`guard cap(e);` 求值 `e` 得索引 → 不在 `[lo, hi]` 就 **trap**（无其它副作用），
+在域内就给审计表加一。**字面量越界是编译期错误**（`E4`），非字面量是运行期检查。
 
-**诚实边界**：`guard` 只约束**索引**落在域内，**不是授权** —— 它不检查"当前主体有没有这个能力"，
-主体-能力的绑定在内核侧；`revocable` 目前只是声明与域描述表里的一个标志，
-真正的撤销语义由内核在运行期实施。
+**诚实边界**：`guard` 只约束**索引**落在域内，**不是授权** —— 它不检查"当前主体有没有这个
+能力"，主体-能力的绑定在内核侧。`revocable` 目前只是声明与域描述表里的一个标志。
 
-## 编译与运行（本机，无需 clang / WSL）
+## 6. 已知限制（照实测写，别猜）
 
-```bash
-python tools/loment.py ir program.lomt > build/program.ll
-python tools/lomelf.py build/program.ll --target pe -o build/program.exe
-./build/program.exe
-```
+0. **⚠️ 包里的 `loment build` / `loment run` 编不了"按值传 struct / enum"的程序**
+   （2026-09-15 实测）。包内的链接器 `loment-lomelf` 还不支持聚合按值：struct 当参数
+   会报一条不像给用户看的错，enum + `match` 按值会**直接崩**。`loment check` 和
+   `loment ir` 不受影响（只有"出可执行文件"这一步）。**参考实现没这个问题**，
+   是发行包这一条路独有的。
+   → 在包环境里先用**标量 + 字符串 + 切片**写程序；真需要 struct/enum 按值，
+   要么等这个修好，要么在有源码仓库时用仓库里的 `tools/lomelf.py` 链接。
+1. **结构体字面量不能直接当实参**：`f(S { a: 1 })` 报 `native 后端不支持该表达式: StructLit`。
+   先 `let x: S = S { a: 1 };` 再 `f(x)` 就行。**聚合参数与返回值本身是支持的**
+   （但见第 0 条：包里那条链接路径还没跟上）。
+2. **没有堆内存管理**：编译期 bump 堆 64 KiB，`alloc`/`str_concat` 超了直接 abort。
+3. **没有标准库**（见 §3）。
+4. **形参最多 10 个**。
+5. **条件位置不能写结构体字面量**（`if p { }` 的歧义按 Rust 规则消解，要加括号）。
+6. **`inb`/`outb` 只在 Rust 转译路径支持**，原生后端会明确报错。
+7. 模块内**先定义后使用**（别依赖前向引用）。
 
-Linux 侧把 `--target pe` 去掉（默认 `elf`）。**Windows 上直接编出原生 PE 再本地跑**，
-不用进 WSL —— 发行包和 dev 链路都已切到这条路（docs/162 §0bis、docs/167 §5）。
+## 7. 拿不到源码仓库时怎么办
 
-只做检查（不落 IR）：
+- **抄现成程序**：包里有 `share/loment/examples/`（通常只有 `user_hello.lomt`）。更多示例
+  在源码仓库的 `loment/examples/`（26 个）—— 没有仓库就用下面的办法。
+- **把编译器当 oracle**：`loment check` → 改 → `loment ir` 看生成的 LLVM IR → `loment run`。
+  这三步闭环足以在没有资料的情况下迭代；卡住时**先看 IR**，它比错误码信息量大得多。
+- **`loment doc FILE`** 能给出手头文件的 API 摘要，可以拿来确认自己写的接口。
+- **`loment skill --print`** 就是这份指南 —— 机器上没有 Claude/Codex 时，这是唯一的入口，
+  而且它与文件系统约定无关（跑 CLI 就有）。
+- **这份指南本身也是给别的 agent 的**：装 Loment 时它会被写进 Claude 的用户级 skill 目录，
+  并往 Codex 的 `~/.codex/AGENTS.md` 写一段**带标记的指针**，同时设 `LOMENT_SKILL`
+  环境变量指向包内那份。正本只有一份 —— 别把它复制到别处去改。
 
-```bash
-python tools/loment.py ir program.lomt > /dev/null
-```
+## 8. 下面这些路径**只在源码仓库里有**（没仓库就别去找）
 
-**跑在 FujoOS 里**（用户态 ELF + QEMU）：
+仓库 = FujoOS 的 Loment 线工作树（`loment/`、`lom/`、`tools/loment*.py`、`docs/14?–16?-loment-*.md`）。
+有仓库时额外能用的：
 
-```bash
-python tools/loment_boot.py loment/examples/user_hello.lomt --needle "M67 RESULT: PASS"
-```
+- `python tools/loment.py diag FILE` —— 把错误码翻译成**中文修复建议**（包内没有这个工具）；
+- `loment/examples/` 26 个可抄的完整程序；`loment/selfhost/` 是"用 Loment 写的 Loment 编译器"；
+- 文档：`docs/143`（语言规范）· `docs/146`（能力域形式语义）· `docs/148`（工具链）·
+  `docs/145`（里程碑）· `docs/154`（状态矩阵）；
+- 开发期的编译路径：`python tools/loment.py ir F.lomt > f.ll` +
+  `python tools/lomelf.py f.ll --target pe -o f.exe`（**包内没有 Python，这条在包里不适用**）。
 
-要先有 `kernel/fujo-kernel.bin`（`scripts/build-kernel.ps1` 或 `onebuild.ps1`），否则这条
-会打 `[SKIP] 缺 kernel/fujo-kernel.bin` 然后**当成功返回** —— 看到 SKIP 别当成跑过了。
-
-## 工具链
-
-统一入口 `python tools/loment.py <子命令>`：
-
-| 命令 | 作用 |
-|---|---|
-| `fmt FILE` | 格式化（幂等，与自举版逐字节一致） |
-| `doc FILE` | 生成 API 文档（`///` 注释、能力域表、struct/enum 摘要） |
-| `diag FILE` | 诊断分类 + 修复建议（稳定错误码 E001–E017） |
-| `ir FILE [--objdump]` | 打印 LLVM IR；`--objdump` 附机器码反汇编 |
-| `test FILE` | 跑 `fn test_*() -> bool`，输出 `PASS/FAIL` |
-| `ir` + `lomelf` | 出原生可执行文件（见上） |
-| `lsp` | 语言服务（补全/跳转/诊断），编辑器侧见 `editors/vscode/` |
-
-自举链路在 `loment/selfhost/`（lexer/parser/checker/codegen/driver），
-`loment/tools/*.lomt` 是用 Loment 写的工具 —— 想看"像样的 Loment 程序"就读这两处。
-
-## 仓库规矩（会咬人的几条）
-
-- **`lom/*.lom` 是跨线契约，不是实现。** 改它 = 对外契约变更：要单独一次提交、写明谁依赖、
-  下游要不要动，并知会 compat 线。别在重构编译器时顺手改它。`.lomt` 随便改。
-- **展示代码用 `rust` 围栏**，但引用语言名字时说 Loment，别说成 Rust。
-- **不把 Python 引进内核构建链**，也不把 Loment 产物提交成内核依赖（语言还没冻结）。
-- 改完跑门禁：`python tools/ci.py --static-only`（本机有几项固有红项，见下）。
-
-## 参考
-
-- 语言规范与转译契约：`docs/143-l1-loment-v0.md`
-- 能力域形式语义：`docs/146-loment-capability-semantics.md`
-- 工具链与编辑器支持：`docs/148-loment-toolchain.md`
-- 里程碑与"哪些是真做完了"：`docs/145-loment-100-milestones.md`、`docs/154-loment-status.md`
-- 可直接抄的完整程序：`loment/examples/`（`all_loment.lomt` 是多模块+泛型+syscall 的组合）
-- 内建函数表、完整语法、错误码：见 [reference.md](reference.md)
+**仓库规矩**（有仓库才适用）：`lom/*.lom` 是**跨线接口契约**，改它要走单独提交并知会
+compat 线；不要为了某次重构顺手改它。`.lomt` 随便改。

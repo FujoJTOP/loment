@@ -1,7 +1,10 @@
 // loment/examples/native_agg.lomt — 原生后端 M23–M26 验证集 (聚合类型, docs/145)
 //
-// struct / 定长数组 / 枚举(带载荷) / match —— 全部在函数内部使用
-// (聚合参数与返回值暂不支持, 见 tools/lomentc.py 的 emit_llvm 检查)。
+// struct / 定长数组 / 枚举(带载荷) / match —— 全部在函数内部使用。
+// 聚合**参数与返回值是支持的**（内部按聚合值传/返）；真正不支持的是把
+// **结构体字面量直接当实参**（`f(S { a: 1 })` → "native 后端不支持该表达式: StructLit"，
+// 见 tools/lomentc.py 的 emit_llvm）—— 先 `let x: S = S { ... };` 再 `f(x)` 就行。
+// 2026-09-15 实测更正：原注释写"聚合参数与返回值暂不支持"，那是错的。
 // 生成: python tools/lomentc.py loment/examples/native_agg.lomt --emit-llvm loment/build/native_agg.ll
 
 module native_agg

@@ -1,0 +1,77 @@
+// loment/examples/native_match_full.lomt — `match` 的**两种默认目标形态** (docs/145)
+//
+// 这个文件是 2026-09-15 补的回归样例。`match` 发出的 `switch` 有一个默认目标：
+//   * 有 `_` 臂        -> 默认指 `mwild`（通配臂那块）
+//   * 覆盖全部变体、没 `_` -> 默认指 `mend`（match 结束块）
+// 自举版 codegen 曾经**无条件**拼 `_mwild` 后缀，于是第二种形态发出一条引用了
+// **未定义标签**的 switch —— 参考实现逐字节对不上，链接期才炸，两个后端都收不了。
+// 语料里当时恰好没有"全覆盖且不写 `_`"的 match，所以两道棘轮都没红。
+
+module native_match_full
+
+enum Kind {
+    Red,
+    Sized(u32),
+}
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn write_dec(fd: u64, v: u32) {
+    let buf: ptr = alloc(12);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+
+/// 全覆盖、**不写** `_` —— 默认目标必须是 `mend`。
+fn full(k: Kind) -> u32 {
+    match k {
+        Kind::Red => { return 1; }
+        Kind::Sized(w) => { return w; }
+    }
+}
+
+/// 带 `_` —— 默认目标必须是 `mwild`。两种形态都要留在语料里。
+fn with_wild(k: Kind) -> u32 {
+    match k {
+        Kind::Red => { return 10; }
+        _ => { return 20; }
+    }
+}
+
+fn _start() {
+    let a: u32 = full(Kind::Red);
+    let b: u32 = full(Kind::Sized(5));
+    let c: u32 = with_wild(Kind::Sized(9));
+    let d: u32 = with_wild(Kind::Red);
+    write_dec(1, a);
+    write_dec(1, b);
+    write_dec(1, c);
+    write_dec(1, d);
+    write_str(1, "\n");
+    if a == 1 && b == 5 && c == 20 && d == 10 {
+        write_str(1, "NATIVE-MATCH-FULL RESULT: PASS\n");
+        syscall4(60, 0, 0, 0);
+    }
+    write_str(1, "NATIVE-MATCH-FULL RESULT: FAIL\n");
+    syscall4(60, 1, 0, 0);
+}

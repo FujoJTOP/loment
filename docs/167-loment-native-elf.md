@@ -212,6 +212,42 @@ stage1"那一步出现（见 §5）。
    它由 `tools/loment_genesis.py --emit/--check` 维护；`loment/build/genesis/*` 进发布清单。
    **残留的诚实点**：genesis 消不掉 —— 它可复现、有来源、有哈希，但它是个二进制，不装作没有。
 
+   **2026-09-15 实测：它会静默漂移。** 这天改了 `codegen.lomt`（match 默认目标标签名，
+   见下第 3 条前面的来历），种子随之更新；重新 `--emit` 出来的 genesis 是 **90 504 B**
+   （哈希 `926c4ebb…`），而仓库里提交的那个是 **72 136 B**（`cdb70351…`）——
+   也就是说它**早就落后于种子了**，只是没人发现：`loment_genesis.py --check`
+   只核对"文件与它自己的 SHA256SUMS 一致"，**没有任何东西把 genesis 和种子绑在一起**。
+   后果是温和的（bootstrap 每一级都会重新编译，起点是个旧汇编器也能收敛），
+   但"可复现"这句话当时只对**同一份种子**成立，对"种子变了"是不设防的。
+   要根治得让 `--check` 也核对**种子哈希**（把它写进 genesis 目录里的元数据）。
+   在这次修正之前，`--check` 全绿**不代表 genesis 是最新的**。
+
+3. **镜像 lomelf 不支持聚合按值 —— 现在这是发行包的主卡点**（2026-09-15 实测）。
+   镜像自己的注释写着"聚合返回值 / 间接调用 / 浮点不支持（报错退出，不静默错编）"
+   （`loment/tools/lomelf.lomt:15`），而 `tools/lomelf.py` 那边聚合返回值**已经支持**了
+   （本节第 2 条的对照表：隐藏结果指针）。**两者已经不同步。**
+
+   为什么这从"已知边界"升级成"卡点"：`f193c61` 把发行包的链接步骤从 clang 换成了
+   **包内的 `loment-lomelf`**（就是镜像）。于是包里 `loment build` / `loment run`
+   **编不出任何按值传 struct / enum 的程序** —— 而 struct/enum 是语言核心特性，
+   `lomelf skill` 还专门教它们。参考实现（`tools/lomentc.py`）与 Python 后端都没问题，
+   只有**包这条路**断。
+
+   两个最小复现（都用参考实现发 IR，再喂包里的 `loment-lomelf.exe`）：
+
+   | 复现 | 现象 |
+   |---|---|
+   | `struct E { a: u32, b: u32 }` + `fn tot(e: E) -> u32` + 调用 | 干净报错，但消息是 `loment: 指针值查不到: % @fn=_start nalloc=1 nslot=23` —— 不像给用户看的 |
+   | `enum K { A, B(u32) }` + `match` | **SIGSEGV（139）** —— 直接崩，不是报错 |
+
+   第二条**违反了镜像自己那条"不静默错编、要报错退出"的约定**（§5 上面记过：`指针值查不到`
+   正是当初为此从静默改成报错的）。所以这里有两件事：**(a) 给镜像补聚合支持**（对齐 Python 侧），
+   **(b) 至少让不支持的分支干净报错、不崩**。
+
+   判据缺口也说清楚：`loment_pe_test` 的 `test_pe_runs_the_loment_toolchain_natively` 用的是
+   `lomstatus`/`lomrel`，那两个程序**恰好不按值传聚合**，所以 9/9 全绿也照不到这个洞 ——
+   与上面"大单元才暴露"是同一类盲区（语料挑得不够刁）。
+
 ## 6. 落地形态
 
 - 门禁登记：`tools/ci.py` 的 `STATIC_CHECKS` 含 `loment_elf_test` 与 `loment_pe_test`；审计主张

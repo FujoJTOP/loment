@@ -72,7 +72,13 @@ def test_bootstrap_needs_no_clang():
     assert r.returncode == 0, f"bootstrap 失败 rc={r.returncode}: {out[-400:]!r}"
     assert "genesis" in out, f"起点不是 genesis: {out[:400]!r}"
     assert "SEED BOOTSTRAP OK" in out, f"没有跑到结论行: {out[-300:]!r}"
-    assert "1630436" in out.replace(" ", "").replace(",", ""), f"种子字节数不符: {out[-200:]!r}"
+    # 与**仓库里那份种子**比, 不写死字节数 —— 原先钉的是 1630436, 种子一改就变成一条
+    # 要人去猜的假红 (2026-09-15 改了 codegen, 种子涨到 1631085 就撞上了)。
+    # 这样仍然是棘轮: bootstrap 复现出来的种子必须**和提交的那份一样大**;
+    # 而"提交的那份对不对"由 loment_seed_test 对着参考实现管。
+    want = loment_genesis.SEED.stat().st_size
+    assert str(want) in out.replace(" ", "").replace(",", ""), (
+        f"bootstrap 复现的种子字节数 != 仓库里那份 ({want}): {out[-200:]!r}")
     print("      PATH 里没有 clang, bootstrap 仍四条全过 (genesis 起头)")
 
 

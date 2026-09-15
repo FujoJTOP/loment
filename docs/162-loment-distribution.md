@@ -20,6 +20,23 @@
 也就是说不只是"包里没 Python"，现在是**包里没有任何外部依赖**：`loment build`/`run`
 在一台干净的 Windows 上开箱即用。详见 `docs/167 §5`。
 
+**包里还带一份 agent skill**（2026-09-15 加）：`share/loment/skill/SKILL.md` ——
+安装时同时写进 `~/.claude/skills/loment/`（用户级，任何工程都读得到；`--no-skill` /
+`-NoSkill` 可关，卸载会摘掉；`~/.claude` 不存在就只留在包里并打印怎么手动放）。
+它**自足**：内建函数表、语法、E1–E17 错误码、包内命令全在里面，不引用源码仓库路径 ——
+目标是"装完 Loment，AI agent 读它就能写 Loment"。随包那份与仓库里的
+`.claude/skills/loment/SKILL.md` **逐字节相同**（判据在 `loment_dist_test`）。
+
+**别的 agent 怎么办（没有 Claude / 没有 Codex）**：不靠目录约定 —— **跑 CLI**。
+`loment skill` 打印指南路径，`loment skill --print` 直接打全文，而 `loment help` 的用法里
+就印着这一行。任何 agent 上手陌生语言的第一条命令都是 `loment --help`，入口因此与它是什么
+工具无关（判据：`--print` 的输出与包里那份指南逐字节相同，在 `loment_dist_test` 里）。
+
+**已知卡点（诚实写在这里）**：包里 `loment build`/`run` 用的链接器是**自举镜像**
+`loment-lomelf`，而它**还不支持聚合按值**（struct / enum 当参数或返回值）——
+那类程序要么报一条不像给用户看的错，要么直接崩。参考实现与 Python 后端都没这个问题。
+详见 `docs/167 §5` 第 3 条。
+
 ## 0. 一句话
 
 同一个包**两种装法**：命令安装（`sh install.sh` / `powershell -File install.ps1`）与
