@@ -139,6 +139,15 @@ stage1"那一步出现（见 §5）。
    `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang；自举侧的镜像
    `loment/tools/lomelf.lomt` 还没有 PE 目标。
 
+   **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
+   状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是
+   编译期常量，`--dump-win-shim` 冻出来的 2312 字节 blob **一个待回填的地址都没有** ——
+   自举镜像照抄即可。又撞到两条加载器脾气，只有实测才看得见：
+   （f）**节间不能留空洞** —— `.text` 与 `.idata` 之间只要空 0x1000，加载器就报"不是有效的
+   Win32 应用程序"。解法是每节的 VirtualSize 一直铺到下一节起点；
+   （g）`out[dll_rva - d:] = dll` 是**开放切片赋值**，会把缓冲区从那里截断 —— 以前缓冲区正好
+   那么长所以无害，缓冲区一撑大它就把后面的数据整段吃掉（症状：shim 里的路径字面量没了）。
+
    写 PE 写出时撞到三个 bug，都只在"加载器认不认"这一层暴露，记在这里：
    （a）**PE32+ 的 `SizeOfImage`/`SizeOfHeaders` 在偏移 56/60**；写成 PE32 的 54/58 会把值落进
    `Win32VersionValue` 槽，加载器读到 `SizeOfHeaders=0` 直接拒收（"不是有效的 Win32 应用程序"）；
