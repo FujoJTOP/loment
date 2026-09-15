@@ -17,9 +17,14 @@
   （`test_m85_driver_gate_on_probe_cases`）；
 - 40/40 语料单元零诊断、40/40 可发射目标**两个后端逐字节一致**、三阶段自举定点成立
   （`tools/loment_p8_test.py`）；
-- 错误码口径是**单一真源** `tools/loment_diag.RULES`（E001–E017），
-  且参考实现能发出的**全部 81 条消息模板**都被它分类
+- 错误码口径是**单一真源** `tools/loment_diag.RULES`（E001–E019），
+  且 **checker 诊断**能发出的全部 81 条消息模板都被它分类
   （`test_m64_all_reference_messages_are_classified`）。
+  **这句话原先说宽了**（2026-09-15 更正）：那 81 条是 ast 从 `errs.append` 抽出来的，
+  覆盖的是 **checker 的语义诊断**；解析期的消息是 `raise LomError`，不在抽取范围里，
+  于是它们原先在 `loment diag` 里一律显示成 **E999「未分类」**。现在解析期归 **E019**
+  （语法错的修法只有一种，按「码按修法分」共用一码），并由
+  `test_m64_diagnostics_have_codes_and_hints` 之外的两条最小负例钉住。
 
 换句话说：从这一刻起，"语言是什么"由**规范 + 一致性套件**定义，参考实现不再是唯一权威
 （它是套件里的一员）。

@@ -23,9 +23,15 @@
 **包里还带一份 agent skill**（2026-09-15 加）：`share/loment/skill/SKILL.md` ——
 安装时同时写进 `~/.claude/skills/loment/`（用户级，任何工程都读得到；`--no-skill` /
 `-NoSkill` 可关，卸载会摘掉；`~/.claude` 不存在就只留在包里并打印怎么手动放）。
-它**自足**：内建函数表、语法、E1–E17 错误码、包内命令全在里面，不引用源码仓库路径 ——
+它**自足**：内建函数表、语法、E1–E19 错误码、包内命令全在里面，不引用源码仓库路径 ——
 目标是"装完 Loment，AI agent 读它就能写 Loment"。随包那份与仓库里的
 `.claude/skills/loment/SKILL.md` **逐字节相同**（判据在 `loment_dist_test`）。
+
+**指南里的代码由判据守着**（2026-09-15 补）：§1 的 `tour` 与仓库
+`loment/examples/tour.lomt` 逐字节相同，且**每个 `rust` 围栏样例都必须过前端**。
+起因是实测出来的 —— 指南里那份 tour 漏了个 `;`、根本编不过，而它正文自称"和仓库里那份
+是同一份"，此前没有任何东西守这句话；照抄它的用户只会得到一个莫名其妙的 E19。
+要展示**故意写错**的片段时，在围栏前一行加 `<!-- no-compile -->` 豁免。
 
 **别的 agent 怎么办（没有 Claude / 没有 Codex）**：不靠目录约定 —— **跑 CLI**。
 `loment skill` 打印指南路径，`loment skill --print` 直接打全文，而 `loment help` 的用法里
@@ -148,9 +154,9 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 |---|---|
 | 布局 | 该有的文件都在；`.sh`/`.ps1`/`.cmd` 纯 ASCII；`.ps1`/`.cmd` 是 CRLF；`bin/loment` 是 LF；ELF 权限 755 |
 | 归档 | 归档内容与 payload **逐文件 sha256 相同**；zip/tar.gz 两次写出**字节相同** |
-| 产物 | `--check` 与 `SHA256SUMS` 一致；归档里的 driver == 构建产物 |
+| 产物 | `--check` 与 `SHA256SUMS` 一致；**且归档里「源码直出」的条目（skill / seed / 示例 / README / 启动器）等于当前仓库里的那份**（2026-09-15 补：原先只拿归档跟它自己的清单比，两边一起过期就永远报「一致」）；归档里的 driver == 构建产物 |
 | **端到端 · Linux** | tar → 装进临时前缀 → `loment version` 出版本行 → **`loment ir` 的产物与参考实现逐字节相同** → `loment check` 正例 0 且不吐 IR → `loment run` 真跑出输出 → 缺组件时报错**指名**（`this package does not include loment-fmt`）→ `--uninstall` 摘干净 → 再装一次仍成功 |
-| **端到端 · Windows** | 解包 → `install.ps1` **真装**（`-Prefix <临时>` + `-WslDir /tmp/...` + `-NoPath -NoFileType`，不动用户 PATH 与注册表）→ 写出 `loment.cmd` 且指向 WSL 目录 → WSL 侧的 `loment version` 能跑 → Windows 风格的 `WslDir` 被**明确拒绝** |
+| **端到端 · Windows** | 解包 → `install.ps1` **真装**（`-Prefix <临时>` + `-NoPath -NoFileType`，不动用户 PATH 与注册表）→ 写出 `loment.cmd` 且指向包内原生 exe → `loment version` 能跑 → **`loment run` 在本机编出 PE 并真跑出输出**（不再经 WSL）→ 装出的 agent skill 与仓库里那份逐字节相同 → `--uninstall` 摘干净（含 agent skill，且别家 agent 的文件按标记精确还原） |
 | Windows 解析 | `install.ps1 -DryRun`、`-DryRun -PayloadZip`（自解压那条路）、**`install.cmd -DryRun`（zip 布局，用户双击那条路）** 在**真 PowerShell 5.1 / cmd** 下都能跑；`setup.exe` 是 PE 且非空 |
 
 最强的一条是 Linux 那行的**逐字节相同**：它同时证明了"包里的编译器是自举产物"和"装出来的东西能用"。
@@ -170,10 +176,11 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 ## 6. 复现与边界
 
 ```bash
-python tools/loment_dist.py --emit                       # 需要 WSL + clang (交叉链接)
+python tools/loment_dist.py --emit                       # 四个产物, 本机链接 (不需要 WSL, 也不需要 clang)
 python tools/loment_dist.py --list                       # 只列会打进去的文件
-python tools/loment_dist.py --check                      # 产物与 SHA256SUMS 一致?
-python tools/loment_dist_test.py                         # 29 条判据
+python tools/loment_dist.py --check                      # 产物与 SHA256SUMS 一致, 且源码直出的条目最新?
+                                                         # (第 4 件 loment-skill.zip = agent 指南, 由 --emit 一并产出)
+python tools/loment_dist_test.py                         # 全量判据 (布局/归档/两条安装路径/skill)
 ```
 
 也支持只打子集（门禁用它省时间）：`--emit --only driver --no-exe`。

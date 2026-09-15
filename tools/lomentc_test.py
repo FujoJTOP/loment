@@ -554,6 +554,62 @@ def test_llvm_backend_m0():
 def test_llvm_signedness_picks_instruction():
     assert "sdiv i32" in lomentc.emit_llvm(parse("module m\nfn f(a: i32, b: i32) -> i32 { return a / b; }\n"), ROOT)
     assert "udiv i32" in lomentc.emit_llvm(parse("module m\nfn f(a: u32, b: u32) -> u32 { return a / b; }\n"), ROOT)
+
+
+@test
+def test_rust_enum_derive_matches_what_we_emit():
+    """枚举的 `PartialEq` 只在**载荷也真的可比较**时才发。
+
+    否则 Rust 为枚举生成的 `impl PartialEq` 会要求载荷类型也可比较, 于是把源码里根本
+    没写过的 `Span == Span` 编出来, 报 E0369(2026-09-15 用户实测: enum 载荷是 struct 时)。
+
+    钉的是**判据与实际发出的 derive 一致**: 第一版拿"struct 的字段递归算能不能派生"
+    当判据, 结论是"Span 可以", 可 struct 那一段根本没发 PartialEq —— 两边对不上, 照旧
+    E0369。所以这里比的是生成出来的文本本身。
+    """
+    src = ("module m\n\nstruct Span {\n    lo: u32,\n    hi: u32,\n}\n\n"
+           "enum WithStruct {\n    Empty,\n    Line(Span),\n}\n\n"
+           "enum WithScalar {\n    A,\n    B(u32),\n}\n")
+    rs = lomentc.emit_rust(parse(src), ROOT)
+    assert "#[derive(Clone, Copy, PartialEq)]\npub enum WithScalar" in rs, rs[:400]
+    assert "#[derive(Clone, Copy)]\npub enum WithStruct" in rs, rs[:400]
+    assert "#[derive(Clone, Copy, PartialEq)]\npub enum WithStruct" not in rs, rs[:400]
+
+
+@test
+def test_native_match_on_call_subject_does_not_crash():
+    """被匹配值是**函数调用**时, 原生发射器不许崩。
+
+    2026-09-15 由用户实测报出来(`KeyError: 'v'` @ lomentc.py 的绑定存取), 7 行复现。
+    根因不在 match 的发射代码, 而在 `_collect_locals`: 它推被匹配值的类型时给 `expr_type`
+    传了**空的 funcs/structs**, 于是"主体是调用"推不出返回类型 -> 枚举查不到 -> 匹配的
+    绑定变量根本不会被收集 -> 发射期 `self.vars[bind]` 直接 KeyError(Python 栈回溯,
+    不是诊断, 所以 `loment diag` 还说没错误)。同一处对 `for` 的上下界也一样 —— 上下界
+    是调用(或字段访问)时, 推断同样落空。
+    """
+    src = ("module m\n"
+           "fn g() -> Result<i64, u32> {\n    return Result::Ok(7);\n}\n"
+           "fn m1() -> bool {\n    match g() {\n"
+           "        Result_i64_u32::Ok(v) => { return v == 7; }\n"
+           "        Result_i64_u32::Err(e) => { return e == 0; }\n    }\n}\n"
+           "fn m2() -> bool {\n    if let Result_i64_u32::Ok(v) = g() {\n"
+           "        return v == 7;\n    }\n    return false;\n}\n"
+           "fn lo() -> u32 {\n    return 1;\n}\n"
+           "fn hi() -> u32 {\n    return 3;\n}\n"
+           "fn s() -> u32 {\n    let acc: u32 = 0;\n    for i in lo()..hi() {\n"
+           "        acc = acc + i;\n    }\n    return acc;\n}\n")
+    # 走**和用户完全相同**的那条路: load -> resolve_deps -> check -> emit_llvm
+    # (单独 parse 少了装载/准备那几步, 结果不能代表真实行为)
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "m.lomt"
+        f.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(f)
+        deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+        assert lomentc.check(mod, deps=deps) == []
+        text = lomentc.emit_llvm(mod, ROOT, deps)
+    # 绑定与循环变量**真的落到了 IR**(收集到了 -> 有 alloca)
+    assert "%v.addr = alloca i64" in text, text[:400]
+    assert "%i.addr = alloca i32" in text, text[:400]
     assert "icmp slt i32" in lomentc.emit_llvm(parse("module m\nfn f(a: i32, b: i32) -> bool { return a < b; }\n"), ROOT)
     assert "lshr i32" in lomentc.emit_llvm(parse("module m\nfn f(a: u32, b: u32) -> u32 { return a >> b; }\n"), ROOT)
 

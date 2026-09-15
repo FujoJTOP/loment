@@ -2568,6 +2568,26 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
     return out
 
 
+def _rust_peq(ty: str) -> bool:
+    """这个类型在**生成的 Rust 里**到底有没有 `PartialEq`。
+
+    用在枚举的 derive 上: Rust 为枚举生成的 `impl PartialEq` 会要求载荷类型也可比较,
+    而我们对 struct 只发 `Clone, Copy`(见下面 struct 那一段) —— 于是载荷是 struct 时,
+    Rust 会把源码里根本没写过的 `Span == Span` 编出来, 报 E0369 (2026-09-15 用户实测)。
+
+    **判据必须和"实际发了什么 derive"一致**, 不能是"理论上能不能派生" —— 我第一版就
+    写成了后者(拿 struct 的字段递归算), 结果说"Span 可以", 于是一边发 PartialEq 一边
+    不发, 照旧 E0369。这里只认我们真的会发 PartialEq 的那些类型。
+    """
+    if ty in ("u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "str"):
+        return True           # str 在 Rust 侧是 &'static str, 有 PartialEq
+    if _is_slice(ty):
+        return _rust_peq(_slice_elem(ty))
+    if ty.startswith("[") and ty.endswith("]"):
+        return _rust_peq(ty[1:ty.rindex(";")].strip())
+    return False              # ptr / struct / 未知 —— 我们都不发 PartialEq
+
+
 def _rust_body(mod: Module, lom_root: Path) -> list[str]:
     out: list[str] = []
     for u in mod.uses:
@@ -2603,7 +2623,12 @@ def _rust_body(mod: Module, lom_root: Path) -> list[str]:
     if mod.consts:
         out.append("")
     for e in mod.enums:
-        out.append("#[derive(Clone, Copy, PartialEq)]")
+        # `PartialEq` 不能无条件发: Rust 为枚举生成的 `impl PartialEq` 会**要求载荷类型也
+        # PartialEq** —— 载荷是 struct 时, 而 struct 只有 `Clone, Copy`(见下), 于是报
+        # E0369 `&Span` 不能比较, 可源码里根本没写过那次比较 (2026-09-15 用户实测)。
+        # 所以先算"载荷全都能派生吗", 能才发 —— 对现有程序零变化。
+        peq = all(_rust_peq(p) for p in e.payloads.values())
+        out.append(f"#[derive(Clone, Copy{', PartialEq' if peq else ''})]")
         out.append(f"pub enum {e.name} {{")
         for v in e.variants:
             p = e.payloads.get(v)
@@ -2825,12 +2850,22 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     raise LomError(1, 1, f"native 后端不支持类型 {t!r}")
 
 
-def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str, int]]:
+def _collect_locals(f: Func, enums: dict | None = None,
+                    funcs: dict | None = None,
+                    structs: dict | None = None) -> list[tuple[str, str, int]]:
     """按序收集需 alloca 的局部 (不含参数, 去重) 与它们的**声明行**。
 
     行号是 M59 的变量信息要的 (`DILocalVariable.line`); For 变量与 match 绑定按上下文推断。
+
+    **funcs / structs 必须传进来**(2026-09-15 修): 这里要推 `match` 主体与 `for` 上下界的
+    类型, 而被匹配值可能是**函数调用**、上下界可能是**字段访问** —— 给 `expr_type` 传空字典
+    会让它推不出类型, 于是枚举查不到、绑定变量根本不会被收集, 后面发射期 `self.vars[bind]`
+    直接 KeyError 崩掉(Python 栈回溯, 不是诊断)。当时只有 `use g()` 这种"主体是内联调用"
+    的写法会踩到, 所以 `let r = g(); if let ... = r` 看着没事。
     """
     enums = enums or {}
+    funcs = funcs or {}
+    structs = structs or {}
     out: list[tuple[str, str, int]] = []
     seen = {p.name for p in f.params}
     scope: dict[str, str] = {p.name: p.type for p in f.params}
@@ -2848,14 +2883,15 @@ def _collect_locals(f: Func, enums: dict | None = None) -> list[tuple[str, str, 
             elif isinstance(s, While):
                 walk(s.body)
             elif isinstance(s, For):
-                vt = expr_type(s.lo, scope, {}, {}) or expr_type(s.hi, scope, {}, {}) or "u32"
+                vt = (expr_type(s.lo, scope, funcs, structs)
+                      or expr_type(s.hi, scope, funcs, structs) or "u32")
                 if s.var not in seen:
                     out.append((s.var, vt, s.line))
                     seen.add(s.var)
                 scope[s.var] = vt
                 walk(s.body)
             elif isinstance(s, Match):
-                sty = expr_type(s.subject, scope, {}, {})
+                sty = expr_type(s.subject, scope, funcs, structs)
                 ed = enums.get(sty) if sty else None
                 for pat, body in s.arms:
                     if pat is not None and pat.bind and ed is not None:
@@ -3705,7 +3741,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.out.append("entry:")
         ir.cur_label = "entry"
         ir.cov_hit()
-        for name, ty, ln in _collect_locals(f, enums):
+        for name, ty, ln in _collect_locals(f, enums, funcs, structs):
             ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
             ir.vars[name] = (ty, f"%{name}.addr")
             ir.dbg_declare(name, ty, f"%{name}.addr", ln)
@@ -3726,7 +3762,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.vars[p.name] = (p.type, f"%{p.name}.addr")
     for j, p in enumerate(f.params):  # M59: 形参也声明, arg 从 1 起 (DWARF 约定)
         ir.dbg_declare(p.name, p.type, f"%{p.name}.addr", f.line, j + 1)
-    for name, ty, ln in _collect_locals(f, enums):
+    for name, ty, ln in _collect_locals(f, enums, funcs, structs):
         ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
         ir.vars[name] = (ty, f"%{name}.addr")
         ir.dbg_declare(name, ty, f"%{name}.addr", ln)
@@ -3766,7 +3802,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             _ll_type(f.ret, structs, enums)
             for p in f.params:
                 _ll_type(p.type, structs, enums)
-            for _, ty, _ln in _collect_locals(f, enums):
+            for _, ty, _ln in _collect_locals(f, enums, funcs, structs):
                 _ll_type(ty, structs, enums)
     out = [
         "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)",

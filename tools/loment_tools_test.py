@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -463,6 +464,43 @@ def test_m64_all_reference_messages_are_classified():
                 bad.append(s)
     assert not bad, "未分类的参考消息模板:\n  " + "\n  ".join(sorted(set(bad)))
     print(f"      参考消息模板 {len(tpls)} 条全部有错误码")
+
+
+@test
+def test_e019_parse_errors_are_classified():
+    """解析期消息有自己的码 (E019), 而且**不抢** E001 的活。
+
+    原先解析期消息一条都不在分类表里 —— `loment diag` 把它们显示成 E999「未分类, 请报告」,
+    可它恰恰是新手最常撞上的一类 (`match` 臂写成表达式、无值 `return`、漏分号)。
+    这条同时钉住**顺序**: E001 的模式里有「期望」二字, E019 若排在它前面就会把类型错也吞掉。
+    """
+    import loment_diag
+    assert loment_diag.classify("5:1: 期望 ;，得到 'capability'")[0] == "E019"
+    assert loment_diag.classify("7:17: 期望 {，得到 '0'")[0] == "E019"
+    assert loment_diag.classify("4:11: 期望表达式，得到 ';'")[0] == "E019"
+    assert loment_diag.classify("实参类型 u32，期望 bool")[0] == "E001"
+    assert loment_diag.classify("调用未定义的函数 pick")[0] == "E002"
+
+
+@test
+def test_cli_reports_parse_errors_without_traceback():
+    """`loment ir <语法错的文件>` 给一行 `[ERR] 行:列: ...`、退出码 1 —— 不是 Python 回溯。
+
+    2026-09-15 用户实测: 指南里最容易踩的两种写法 (漏分号 / 无值 `return`) 当时全都只看到
+    traceback。对"照指南写第一个程序"的人, 这是最坏的第一印象, 而且它看起来像编译器崩了,
+    而不是"你写错了"。
+    """
+    cases = {"漏了分号": "module a\n\nconst X: u32 = 3\n",
+             "无值 return": "module b\n\nfn f() {\n    return;\n}\n"}
+    with tempfile.TemporaryDirectory() as td:
+        for name, src in cases.items():
+            p = Path(td) / "bad.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"), "ir", str(p)],
+                               capture_output=True, text=True, shell=False)
+            assert r.returncode == 1, f"{name}: 期望退出码 1, 得到 {r.returncode}"
+            assert r.stderr.startswith("[ERR] "), f"{name}: stderr={r.stderr[:120]!r}"
+            assert "Traceback" not in r.stderr, f"{name}: 甩了 Python 回溯\n{r.stderr}"
 
 
 @test

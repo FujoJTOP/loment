@@ -191,16 +191,26 @@ def test_m70_interrupt_handler_ir_shape():
 
 @test
 def test_m71_module_abi_entry_shape():
-    """M71: 模块 ABI —— 入口 `_start()` 零参 + 栈上 argv, 与 m30_linux.elf 同形。"""
-    mod = lomentc.load(EX / "user_hello.lomt")
+    """M71: 模块 ABI —— 入口 `_start()` 零参 + 栈上 argv, 与 m30_linux.elf 同形。
+
+    判据**现编现验**。原先它读 `loment/build/user_hello.elf` —— 一个没进 git、也没有任何
+    东西重新生成的残留文件: 干净检出时它不存在, 整条判据**静默跳过**; 机器上留着旧产物时
+    才跑, 验的却是那份旧产物的布局。2026-09-15 实测: 残留那份入口在 `0x201260`, 而工具链
+    现编出的是 `0x400000` —— 也就是说这条判据**从来没有验过当前工具链**。
+    """
+    import lomelf
+    entry = EX / "user_hello.lomt"
+    mod = lomentc.load(entry)
     start = next(f for f in mod.funcs if f.name == "_start")
     assert not start.params and start.ret == "()"
-    elf = ROOT / "loment" / "build" / "user_hello.elf"
-    if elf.exists():
+    ir = lomentc.emit_llvm(mod, ROOT, lomentc.resolve_deps(mod, ROOT, EX, entry=entry))
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "user_hello.elf"
+        p.write_bytes(lomelf.compile_ll(ir)[0])
         out = subprocess.run(
             [shutil.which("llvm-objdump") or r"C:\Program Files\LLVM\bin\llvm-objdump.exe",
-             "-f", str(elf)], capture_output=True, text=True, shell=False).stdout
-        assert "start address: 0x000000000040" in out, out
+             "-f", str(p)], capture_output=True, text=True, shell=False).stdout
+    assert "start address: 0x000000000040" in out, out
 
 
 # ---------------------------------------------------------------- M67/M76/M77/M78

@@ -25,6 +25,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomc  # noqa: E402  (LomError: 把解析/装载期的诊断与内部故障分开)
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -326,7 +327,14 @@ def main(argv: list[str] | None = None) -> int:
             return loment_lsp.main(a.rest)
         import loment_build
         return loment_build.main(a.rest)
-    return a.fn(a)
+    try:
+        return a.fn(a)
+    except lomc.LomError as e:
+        # 解析期/装载期错误是**正常诊断**, 不是内部故障 —— 不该甩 Python 回溯给用户
+        # (2026-09-15 用户实测: match 臂写成表达式、无值 return, 两条都只看到 traceback)。
+        # 这类消息目前**没有错误码** (E001–E018 只覆盖 checker 的语义诊断, 见 docs/158 §1)。
+        print(f"[ERR] {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

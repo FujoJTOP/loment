@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +85,12 @@ def test_layout() -> None:
         check(f"{rel} 是 CRLF", b"\r\n" in blob and b"\n" not in blob.replace(b"\r\n", b""))
     check("bin/loment 是 LF (WSL/Linux 侧)",
           b"\r" not in lin["bin/loment"][0])
+    # Windows 包里工具都带 .exe, 而 `test -x name` 只在 MSYS 下自动补后缀 —— WSL 不会。
+    # 所以启动器必须经 tool() 解析路径; 裸 `$here/loment-` 一旦回归就是「假报缺组件」。
+    launcher = lin["bin/loment"][0].decode("ascii")
+    check("sh 启动器经 tool() 解析工具路径 (Windows 包的工具带 .exe)",
+          "$here/loment-" not in launcher and "tool loment-driver" in launcher,
+          "仍有裸路径" if "$here/loment-" in launcher else "")
     ver = lin["share/loment/version"][0].decode()
     check("version 文件带显示名与标识符",
           loment_dist.DISPLAY in ver and VER in ver, ver.splitlines()[0] if ver else "")
@@ -353,6 +362,29 @@ def test_windows_installer(zipf: Path) -> None:
     check("`loment help` 的用法里能看到 skill (agent 的第一动作)",
           "loment skill" in (r7.stdout or ""), (r7.stdout or "")[:160])
 
+    # ★ 构建失败必须是**非零退出**, 且 "rc=0" 与 "产物真的在磁盘上" 必须同时成立。
+    #   原先 cmd 启动器用 `if errorlevel 1` 判工具失败 —— 可崩溃的工具退出码是**负数**
+    #   (0xC000001D = -1073741795), cmd 按有符号比较判定为**假**, 于是落到成功分支: 打出
+    #   "loment: x.exe"、rc=0, 磁盘上却什么都没有 (2026-09-15 用户实测)。
+    #   这条判据与链接器能力**无关**: 就算以后聚合能编了, 不变式 rc=0 <=> 有产物 仍成立。
+    agg = pfx / "share/loment/examples/tour.lomt"      # 按值聚合, 现链接器编不了
+    probe = pfx / "rc_probe"
+    r8 = subprocess.run(["cmd", "/c", str(cmd), "build", str(agg), "-o", str(probe)],
+                        capture_output=True, text=True, shell=False, encoding="utf-8",
+                        errors="replace", timeout=180)
+    produced = probe.with_suffix(".exe").exists()
+    check("build 的退出码与产物一致 (rc=0 <=> 产物存在)", (r8.returncode == 0) == produced,
+          f"rc={r8.returncode} 产物={produced} out={(r8.stdout or '').strip()[:80]}")
+
+    # 同一类洞的另一半: 编译**本身**失败时, `loment run` 也绝不能回 0 (否则 CI 被静默骗过)。
+    bad = pfx / "bad_probe.lomt"
+    bad.write_text("module bad\n\nfn f() -> u32 {\n    return nope;\n}\n",
+                   encoding="utf-8", newline="\n")
+    r9 = subprocess.run(["cmd", "/c", str(cmd), "run", str(bad)], capture_output=True,
+                        text=True, shell=False, encoding="utf-8", errors="replace", timeout=180)
+    check("编译失败时 `loment run` 非零退出", r9.returncode != 0,
+          f"rc={r9.returncode} out={(r9.stdout or '')[:80]}")
+
     r4 = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                          "-Uninstall", "-Prefix", str(pfx), "-NoPath", "-NoFileType"],
                         capture_output=True, text=True, shell=False, encoding="utf-8",
@@ -370,9 +402,88 @@ def test_windows_installer(zipf: Path) -> None:
 
 # ------------------------------------------------------------------ main
 
+def test_check_detects_staleness() -> None:
+    """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
+
+    它原先只拿归档跟**它自己的** SHA256SUMS 比 —— 两边一起过期就永远报"一致"。
+    2026-09-15 用户问"安装包更新了吗"才发现的: `use` 改动之后 `loment/dist/` 里的
+    skill 与 seed 全是旧的, 而 `--check` 照样绿。这条判据就是钉那个洞。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        lin = loment_dist.payload("linux", {"loment-driver": (b"ELF", b"PE")})
+        lin["share/loment/skill/SKILL.md"] = (b"stale\n", 0o644)   # 冒充「过期的归档」
+        (out / f"loment-{VER}-linux-x64.tar.gz").write_bytes(
+            loment_dist._tar_gz(f"loment-{VER}-linux-x64", lin))
+        loment_dist.write_sums(out)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = loment_dist.check(out)
+        check("--check 能发现归档里的来源文件过期 (原先是个洞)", rc != 0, f"rc={rc}")
+
+
+def test_skill_example_sync() -> None:
+    """skill §1 贴的那份 `tour` 必须**逐字节**等于 `loment/examples/tour.lomt`, 而且能过前端。
+
+    **Why**: 这一块是给"只装了包、没有仓库"的 agent 当**唯一**参考的 —— 它错了, 用户
+    照着敲就得到一个编不过的程序, 且没有任何别的东西能纠正他。
+    2026-09-15 真的发生了: 复制进 SKILL.md 时漏掉 `const` 后的 `;`, 而 skill 正文
+    自称"和仓库里那份是同一份" —— 没有任何判据守着这句话。
+    **How to apply**: 改 `loment/examples/tour.lomt` 之后必须同步改 skill (以及
+    `~/.claude/skills/`), 否则 `loment_dist_test` 红。
+    """
+    sk = (ROOT / loment_dist.SKILL).read_text(encoding="utf-8")
+    blocks = [b for b in re.findall(r"```rust\n(.*?)```", sk, re.S) if "module tour" in b]
+    check("skill 里有且只有一份 tour 全文", len(blocks) == 1, f"命中 {len(blocks)} 块")
+    if len(blocks) != 1:
+        return
+    src_text = blocks[0].strip()
+    ex = (ROOT / "loment/examples/tour.lomt").read_text(encoding="utf-8")
+    body = ex[ex.index("module tour"):].strip()
+    check("skill §1 == loment/examples/tour.lomt (逐字节)", src_text == body)
+
+    src = Path(tempfile.mkdtemp(prefix="lom_skill_")) / "tour.lomt"
+    src.write_text(src_text + "\n", encoding="utf-8")
+    try:
+        mod = lomentc.load(src)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, src.parent, entry=src))
+    except lomentc.LomError as e:
+        errs = [str(e)]
+    check("skill §1 能过 check (不是一段装饰性代码)", not errs, errs[0] if errs else "")
+
+
+def test_skill_samples_compile() -> None:
+    """skill 里**每个** ```rust 样例都必须是能过前端的真代码。
+
+    **Why**: 指南是"只装了包、没有仓库"的 agent 看到的唯一参考。样例错一个字符,
+    他就卡在那里, 而且没有任何东西能告诉他哪边错了 —— 2026-09-15 实测过一次
+    (`tour` 里漏了个 `;`, 指南还自称"和仓库里那份是同一份")。
+    **How to apply**: 要展示**故意写错**的片段, 在围栏前一行加 `<!-- no-compile -->`。
+    """
+    sk = (ROOT / loment_dist.SKILL).read_text(encoding="utf-8")
+    td = Path(tempfile.mkdtemp(prefix="lom_skill_"))
+    n = 0
+    for i, m in enumerate(re.finditer(r"```rust\n(.*?)```", sk, re.S)):
+        before = sk[max(0, m.start() - 80):m.start()]
+        if "no-compile" in before:
+            continue
+        src = td / f"sample{i}.lomt"
+        src.write_text(m.group(1), encoding="utf-8", newline="\n")
+        try:
+            mod = lomentc.load(src)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=src))
+        except lomentc.LomError as e:
+            errs = [str(e)]
+        n += 1
+        check(f"skill 样例 #{i} 过前端", not errs, errs[0] if errs else "")
+    check("skill 里找到了 rust 样例 (判据没空转)", n > 0, "一块都没扫到")
+
+
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
-    for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives)):
+    for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+                     ("--check 的新鲜度", test_check_detects_staleness),
+                     ("skill 与示例同步", test_skill_example_sync),
+                     ("skill 样例都能编", test_skill_samples_compile)):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

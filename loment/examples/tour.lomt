@@ -1,0 +1,122 @@
+// loment/examples/tour.lomt — **一个文件带你过完整门语言**。
+//
+// 它刻意把语言的全部构件串在一个程序里: const / capability+guard / struct(字面量+取字段)
+// / 带载荷 enum / 块臂 match / 泛型函数(传类型化变量) / 切片参数 &xs / 数组字面量与下标
+// / while 与 for / as 转换 / 字符串与十进制输出 / syscall。
+//
+// **刻意不带 `use`** —— 这样纯安装包用户(包里没有本仓库的模块)也能直接编译运行它。
+// agent 指南 `.claude/skills/loment/SKILL.md` 里讲的就是这一份。
+//
+//   python tools/loment.py ir  loment/examples/tour.lomt > t.ll
+//   python tools/lomelf.py t.ll --target pe -o t.exe && ./t.exe
+
+module tour
+
+const LIMIT: u32 = 3;
+
+capability slots : disk[0..4] revocable
+
+struct Entry {
+    cents: u32,
+    tax: u32,
+}
+
+enum Kind {
+    Small,
+    Big(u32),
+}
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn write_dec(fd: u64, v: u32) {
+    let buf: ptr = alloc(12);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+
+fn max_of<T>(a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn total(e: Entry) -> u32 {
+    return e.cents + e.tax;
+}
+
+fn score(k: Kind) -> u32 {
+    match k {
+        Kind::Small => { return 1; }
+        Kind::Big(w) => { return w * 2; }
+    }
+}
+
+fn sum_slice(xs: [u32]) -> u32 {
+    let acc: u32 = 0;
+    let i: u32 = 0;
+    while i < slice_len(xs) {
+        acc = acc + xs[i];
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn guarded(slot: u32) -> u32 {
+    guard slots(slot);
+    return slot;
+}
+
+fn _start() {
+    let e: Entry = Entry { cents: 40, tax: 2 };
+    let t: u32 = total(e);
+    let s: u32 = score(Kind::Big(5));
+    let a: u32 = 7;
+    let b: u32 = 9;
+    let m: u32 = max_of(a, b);
+    let xs: [u32; 3] = [1, 2, 3];
+    let sum: u32 = sum_slice(&xs);
+    let g: u32 = guarded(2);
+    let acc: u32 = 0;
+    for i in 0..LIMIT {
+        acc = acc + i;
+    }
+    write_dec(1, t);
+    write_str(1, " ");
+    write_dec(1, s);
+    write_str(1, " ");
+    write_dec(1, m);
+    write_str(1, " ");
+    write_dec(1, sum);
+    write_str(1, " ");
+    write_dec(1, g);
+    write_str(1, " ");
+    write_dec(1, acc);
+    write_str(1, "\n");
+    if t == 42 && s == 10 && m == 9 && sum == 6 && g == 2 && acc == 3 {
+        write_str(1, "TOUR RESULT: PASS\n");
+        syscall4(60, 0, 0, 0);
+    }
+    write_str(1, "TOUR RESULT: FAIL\n");
+    syscall4(60, 1, 0, 0);
+}

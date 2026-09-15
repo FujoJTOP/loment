@@ -53,7 +53,10 @@ TOOLS: list[tuple[str, str]] = [
     # 存出来的产物本来就是目标平台自己的格式（Linux 出 ELF / Windows 出 PE）。
     ("loment-lomelf", "loment/tools/lomelf.lomt"),
 ]
-EXAMPLE = "loment/examples/user_hello.lomt"
+#: 随包发的示例。`tour.lomt` 是**一个文件过完整门语言**的导览 —— 纯包用户没有仓库里的
+#: 其它示例, 所以它比 hello 更该在包里 (agent 指南 §1 讲的就是这一份, 三者同源)。
+EXAMPLES = ("loment/examples/user_hello.lomt", "loment/examples/tour.lomt")
+EXAMPLE = EXAMPLES[0]        # 冒烟测试与判据用的那一个
 ICON = "editors/loment.ico"
 LICENSE = "LICENSE"
 # 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
@@ -78,9 +81,20 @@ to_posix() {
     esac
 }
 
+# Tool name -> executable path. In the Windows package every tool is `.exe`, and
+# `test -x name` only appends the suffix under MSYS/Git Bash -- under WSL or another bash
+# it does not, so the same `bin/loment` falsely reports a missing component (reported
+# 2026-09-15: "does not include loment-driver" while loment-driver.exe sits in bin/).
+# Resolve once here so both flavours of bash work.
+tool() {
+    if [ -x "$here/$1" ]; then printf '%s' "$here/$1"
+    elif [ -x "$here/$1.exe" ]; then printf '%s' "$here/$1.exe"
+    else return 1
+    fi
+}
+
 find_lomelf() {
-    [ -x "$here/loment-lomelf" ] && { printf '%s' "$here/loment-lomelf"; return 0; }
-    return 1
+    tool loment-lomelf
 }
 
 # NOTE: this launcher is packed as ASCII (PowerShell 5.1 reads BOM-less files as ANSI) -
@@ -102,7 +116,7 @@ EOF
 }
 
 need() {
-    [ -x "$1" ] || { echo "loment: this package does not include $2" >&2; exit 3; }
+    tool "$1" >/dev/null 2>&1 || { echo "loment: this package does not include $2" >&2; exit 3; }
     return 0
 }
 
@@ -111,22 +125,22 @@ case "${1:-help}" in
         cat "$share/version" ;;
     ir|check)
         mode=$1; [ $# -eq 2 ] || { usage >&2; exit 2; }
-        need "$here/loment-driver" loment-driver
+        need loment-driver loment-driver
         if [ "$mode" = ir ]; then
-            exec "$here/loment-driver" "$(to_posix "$2")"
+            exec "$(tool loment-driver)" "$(to_posix "$2")"
         fi
-        "$here/loment-driver" "$(to_posix "$2")" >/dev/null ;;
+        "$(tool loment-driver)" "$(to_posix "$2")" >/dev/null ;;
     fmt)
         [ $# -eq 2 ] || { usage >&2; exit 2; }
-        need "$here/loment-fmt" loment-fmt
-        exec "$here/loment-fmt" "$(to_posix "$2")" ;;
+        need loment-fmt loment-fmt
+        exec "$(tool loment-fmt)" "$(to_posix "$2")" ;;
     doc)
         [ $# -eq 2 ] || { usage >&2; exit 2; }
-        need "$here/loment-doc" loment-doc
-        exec "$here/loment-doc" "$(to_posix "$2")" ;;
+        need loment-doc loment-doc
+        exec "$(tool loment-doc)" "$(to_posix "$2")" ;;
     lsp)
-        shift; need "$here/loment-lsp" loment-lsp
-        exec "$here/loment-lsp" "$@" ;;
+        shift; need loment-lsp loment-lsp
+        exec "$(tool loment-lsp)" "$@" ;;
     # The guide for AI agents, reachable WITHOUT any tool-specific directory convention:
     # an agent that meets a new language runs its CLI first, so this is the universal hook.
     # `--print` needs no file access at all.
@@ -153,14 +167,14 @@ case "${1:-help}" in
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
-        need "$here/loment-driver" loment-driver
-        need "$here/loment-lomelf" loment-lomelf
+        need loment-driver loment-driver
+        need loment-lomelf loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-        "$here/loment-driver" "$(to_posix "$src")" > "$tmp/a.ll" || exit 1
+        "$(tool loment-driver)" "$(to_posix "$src")" > "$tmp/a.ll" || exit 1
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
         # link with the self-hosted lomelf - the package no longer needs clang
-        "$here/loment-lomelf" "$tmp/a.ll" "$out" || exit 1
+        "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
         if [ "$mode" = run ]; then
             chmod 755 "$out"
             "$out"
@@ -254,9 +268,9 @@ if "%out%"=="" set "out=%src:.lomt=%"
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
-if errorlevel 1 goto fail
+if not "%ERRORLEVEL%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe"
-if errorlevel 1 goto fail
+if not "%ERRORLEVEL%"=="0" goto fail
 goto done
 
 :run
@@ -266,9 +280,9 @@ set "out=%TEMP%\loment-r%RANDOM%%RANDOM%"
 set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
-if errorlevel 1 goto fail
+if not "%ERRORLEVEL%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe"
-if errorlevel 1 goto fail
+if not "%ERRORLEVEL%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
 del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
@@ -281,9 +295,15 @@ rmdir "%tmp%" >nul 2>nul
 echo loment: %out%.exe
 exit /b 0
 
+rem NOTE: tool failures are tested with a STRING compare, never `if errorlevel 1`.
+rem A crashed tool exits with a NEGATIVE code (0xC000001D = -1073741795) and cmd compares
+rem that as signed -- so `if errorlevel 1` reads it as success, we fall through to :done
+rem and print "loment: <out>.exe" while nothing was written. Proven 2026-09-15:
+rem `loment build tour.lomt -o tour` exited 0 with no tour.exe on disk.
 :fail
 del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
+echo loment: failed -- nothing was produced 1>&2
 exit /b 1
 
 :usage
@@ -586,6 +606,7 @@ New-Item -ItemType Directory -Path (Join-Path $shareDir 'examples') -Force | Out
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'skill') -Force | Out-Null
 foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/user_hello.lomt',
+                   'share/loment/examples/tour.lomt',
                    'share/loment/skill/SKILL.md')) {
     $f = Join-Path $Payload $rel.Replace('/', '\')
     if (Test-Path -LiteralPath $f) {
@@ -686,7 +707,9 @@ set HERE=%~dp0
 set PSARGS=
 if exist "%HERE%payload.zip" set PSARGS=-PayloadZip "%HERE%payload.zip"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS% %*
-if errorlevel 1 (
+rem String compare, not `if errorlevel 1` -- a crashed interpreter exits NEGATIVE and
+rem cmd compares that as signed, so the batch test would read it as success.
+if not "%ERRORLEVEL%"=="0" (
   echo.
   echo install failed. See README.md, or run it manually:
   echo   powershell -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS%
@@ -898,7 +921,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
         files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD)).encode("ascii"), 0o755)
     files["share/loment/version"] = (version_text().encode(), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
-    files[f"share/loment/examples/{Path(EXAMPLE).name}"] = (_read(EXAMPLE), 0o644)
+    for ex in EXAMPLES:
+        files[f"share/loment/examples/{Path(ex).name}"] = (_read(ex), 0o644)
     files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
     files["LICENSE"] = (_read(LICENSE), 0o644)
@@ -994,6 +1018,27 @@ def emit_exe(zip_bytes: bytes, target: Path) -> bool:
 
 # ------------------------------------------------------------------ 入口
 
+def skill_zip() -> bytes:
+    """把 agent 指南单独打成一个确定性 zip (顶层目录 `loment/`), 供别的工具直接装。
+
+    它是**第 4 个发行件**, 由 --emit 一起产出 —— 既不手工打(手工打的哈希必然与
+    随后的 SHA256SUMS 对不上, 2026-09-15 踩过), 也能被 --check 的新鲜度检查覆盖。
+    结构与 loment_dist_test 里的确定性约定一致: 固定时间戳 1980-01-01 + 权限 0644。
+    """
+    skill_dir = Path(ROOT / SKILL).parent         # 例如 .claude/skills/loment
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(skill_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            zi = zipfile.ZipInfo(f"loment/{p.relative_to(skill_dir).as_posix()}",
+                                 (1980, 1, 1, 0, 0, 0))
+            zi.external_attr = 0o644 << 16
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(zi, p.read_bytes())
+    return buf.getvalue()
+
+
 def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> int:
     out = out_dir or OUT
     bins = build_tools(only)
@@ -1021,14 +1066,30 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> 
             made.append(exe)
             print(f"  [{exe.name}] {exe.stat().st_size} 字节 (自解压, 未签名)")
 
+    # 第 4 件: agent 指南的独立 zip (顶层目录 loment/), 供别的工具直接装。
+    # 由 --emit 产出而不是手工打 —— 手工打的字节会漂, 而 write_sums 是扫目录的,
+    # 于是清单里留下一条对不上的哈希 (2026-09-15 踩过)。
+    szip = out / "loment-skill.zip"
+    szip.write_bytes(skill_zip())
+    made.append(szip)
+    print(f"  [{szip.name}] {szip.stat().st_size} 字节 (agent 指南)")
+
     sums = write_sums(out)
     print(f"  [{sums.name}] {len(made)} 行")
     return 0
 
 
 def _unlink_retry(p: Path, tries: int = 5) -> None:
-    """删文件带重试: 刚签过名的 exe 常被 Defender 扫一下, 那几百毫秒里删会 WinError 5
-    (2026-09-12 撞到过一次, 症状是"重建失败"但手工再删就没了)。"""
+    """删文件带重试, 删不掉就改名挪走 —— **不让整个 --emit 死在中途**。
+
+    第一层是老的: 刚签过名的 exe 常被 Defender 扫一下, 那几百毫秒里删会 WinError 5
+    (2026-09-12 撞到过一次, 手工再删就没了)。
+
+    第二层是 2026-09-15 补的: 又撞到, 而且**重试 5 次仍拒、紧接着手工改名却一次成功**
+    —— 拒绝只落在 delete 这一条路径上(安全软件挂钩的典型样子)。所以退一步改名挪开,
+    调用方照常写新文件。**必须挪出产物目录**: `write_sums` 是扫目录的, 留个 `*.old`
+    会被算进清单。腾不掉才让 --emit 失败 —— 那会留下"归档是新的、清单是旧的"混杂目录。
+    """
     import time
     for i in range(tries):
         try:
@@ -1036,8 +1097,13 @@ def _unlink_retry(p: Path, tries: int = 5) -> None:
             return
         except PermissionError:
             if i == tries - 1:
-                raise
+                break
             time.sleep(1.0)
+    stale = STAGE / "stale"
+    stale.mkdir(parents=True, exist_ok=True)
+    dst = stale / f"{p.name}.{int(time.time())}"
+    p.rename(dst)
+    print(f"  [{p.name}] 删不掉(拒绝访问), 已挪到 {dst.name} —— 有空手工清一下")
 
 
 def write_sums(out_dir: Path | None = None) -> Path:
@@ -1054,6 +1120,38 @@ def write_sums(out_dir: Path | None = None) -> Path:
     sums.write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
                             for p in arts), encoding="utf-8", newline="\n")
     return sums
+
+
+def _read_archive(p: Path) -> dict[str, bytes]:
+    """归档 -> 去掉顶层目录名的 相对路径: 字节。"""
+    if p.suffix == ".zip":
+        with zipfile.ZipFile(p) as z:
+            return {n.split("/", 1)[1]: z.read(n) for n in z.namelist()}
+    with tarfile.open(p) as tf:
+        return {m.name.split("/", 1)[1]: tf.extractfile(m).read()
+                for m in tf.getmembers() if m.isfile()}
+
+
+def _fresh_sources(kind: str) -> dict[str, bytes]:
+    """归档里**直接从仓库文件来**的那些条目 -> 当前应有的字节。
+
+    编译产物 (`bin/loment-*`) 不在此列 —— 它们要重新编译才能比, 由 `--emit` 保证;
+    这里盯的是"改了源码却忘了重打包"这一类: 它们不需要编译就能比, 又是最容易忘的
+    (2026-09-15 踩过: `use` 改动之后 `loment/dist/` 里的 skill/seed 全是旧的, 而
+    那时 `--check` 照样报"一致" —— 它只拿归档跟**它自己的** SHA256SUMS 比)。
+    """
+    out = {
+        "share/loment/skill/SKILL.md": _read(SKILL),
+        "share/loment/seed.ll": _read("loment/build/selfhost_driver.ll"),
+        f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
+        "README.md": _subst(README_MD).encode(),
+        "LICENSE": _read(LICENSE),
+    }
+    if kind == "linux":
+        out["bin/loment"] = _subst(LAUNCHER_SH).encode("ascii")
+    else:
+        out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD)).encode("ascii")
+    return out
 
 
 def check(out_dir: Path | None = None) -> int:
@@ -1075,9 +1173,26 @@ def check(out_dir: Path | None = None) -> int:
             bad.append(f"{rel}: {got} != {want}")
     for b in bad:
         print(f"[DIFF] {b}")
-    print(f"loment_dist: {len(bad)} 处不一致" if bad
-          else f"loment_dist: {n}/{n} 产物与 SHA256SUMS 一致")
-    return 1 if bad else 0
+    # 新鲜度: 归档里那些源码直出的条目, 必须等于**当前**仓库里的那份
+    stale = []
+    for arc, kind in ((f"loment-{VER}-linux-x64.tar.gz", "linux"),
+                      (f"loment-{VER}-windows-x64.zip", "windows")):
+        p = out / arc
+        if not p.exists():
+            continue
+        got = _read_archive(p)
+        for rel, want in _fresh_sources(kind).items():
+            if rel in got and got[rel] != want:
+                stale.append(f"{arc}:{rel}")
+    sz = out / "loment-skill.zip"
+    if sz.exists() and _read_archive(sz).get("SKILL.md") != _read(SKILL):
+        stale.append("loment-skill.zip:SKILL.md")
+    for s in stale:
+        print(f"[STALE] {s} —— 归档里那份不是当前源码, 重跑 --emit")
+    if bad or stale:
+        return 1
+    print(f"loment_dist: {n}/{n} 产物与 SHA256SUMS 一致, 且源码直出的条目都是最新的")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
