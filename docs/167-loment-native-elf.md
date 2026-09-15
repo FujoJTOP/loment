@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（5/5），审计主张 **C19 / C20 / C21 / C24**
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（6/6），审计主张 **C19 / C20 / C21 / C24**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -115,10 +115,19 @@ stage1"那一步出现（见 §5）。
    seccomp 沙箱里 getrandom 会失败的断言，在 Windows 上**本就该不同** —— 拿它们当判据只会
    把平台差异误判成回归。
 
-   **还没做**：shim 只实现了 `write`(1) 与 `exit`(60)，其余 syscall 号返回 -1。所以当前
-   **跑不了需要 argv 或文件 I/O 的程序**：`openat`/`read`（即 `/proc/self/cmdline` 的 argv 合成）、
-   `getdents64`、`newfstatat`、`brk` 都没做，Windows 也没有 procfs 可读。
-   `loment_dist.py` 的 Windows 装法改成装原生 `loment.exe` 也还没动。
+   **syscall 面已经是完整的一组**（2026-09-14 补齐）：`read`(0) / `write`(1) / `close`(3) /
+   `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262) —— 正是
+   仓库里 Loment 工具用到的全部。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
+   合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
+   `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
+   就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
+   于是判据 `tools/loment_pe_test.py` **6/6**，其中 `test_pe_runs_the_loment_toolchain_natively`
+   把 **`lomstatus` 与 `lomrel` 本身**编成 PE 在本机原生跑（argv + 目录遍历 + 文件 I/O），
+   stdout 字节 + 退出码与 Python 版逐字节相同 —— **构建路径的工具已经不需要 WSL 了**。
+
+   **还没做**：`loment_dist.py` 里"Windows 装法 = 拷进 WSL + `loment.cmd` 转发"还没改成装原生
+   `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang；自举侧的镜像
+   `loment/tools/lomelf.lomt` 还没有 PE 目标。
 
    写 PE 写出时撞到三个 bug，都只在"加载器认不认"这一层暴露，记在这里：
    （a）**PE32+ 的 `SizeOfImage`/`SizeOfHeaders` 在偏移 56/60**；写成 PE32 的 54/58 会把值落进
@@ -187,6 +196,7 @@ python tools/loment_pe_test.py
   PASS  test_pe_image_is_structurally_sane                 # 对齐/不重叠/入口可执行/文件盖得住
   PASS  test_pe_runs_natively_matches_linux_behavior        # 2 个程序: 与 clang/Linux 逐字节一致
   PASS  test_pe_builds_and_runs_without_clang_or_wsl        # PATH 里只剩 python 也照跑
+  PASS  test_pe_runs_the_loment_toolchain_natively          # lomstatus/lomrel 原生跑, 与 Python 逐字节同
   PASS  test_pe_reports_unsupported_instead_of_miscompiling # 3 类输入报错
   PASS  test_pe_cli_check_and_usage                         # --check 不落盘 rc=0 · 非法 --target rc=2
 

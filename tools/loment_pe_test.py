@@ -20,6 +20,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import io
 import os
 import shutil
 import struct
@@ -37,6 +40,12 @@ LOMELF = ROOT / "tools" / "lomelf.py"
 PORTABLE = [
     "loment/examples/user_hello.lomt",
     "loment/examples/all_loment.lomt",
+]
+# 构建路径上的 Loment 工具 + 它们对应的 Python 参照物。这些是**真正要去 WSL 的**那一批 ——
+# 它们要 argv、要开文件、要遍历目录，所以这条用例同时钉住 shim 的整个 syscall 面。
+TOOLS = [
+    ("lomstatus", "loment/tools/lomstatus.lomt", ["--check"], "loment_status"),
+    ("lomrel", "loment/tools/lomrel.lomt", ["--check"], "loment_release"),
 ]
 # 程序自己的规格输出（与 clang 路对过；这里是给"不碰 clang/WSL"那条用例用的定值）
 GOLDEN = {
@@ -227,6 +236,41 @@ def test_pe_builds_and_runs_without_clang_or_wsl():
             assert exe.exists(), f"[{name}] 没落盘"
             assert _run_native(exe) == GOLDEN[name], f"[{name}] 输出与定值不符"
     print(f"      PATH 里没有 clang/wsl 也能编出并跑起来 ({len(PORTABLE)} 个程序)")
+
+
+@test
+def test_pe_runs_the_loment_toolchain_natively():
+    """**去 WSL 的判据（构建路径）**：Loment 工具本身编成 PE 后在本机原生跑，
+    stdout 字节 + 退出码与 Python 参照版一致 —— 也就是说这台机器上已经不需要
+    "把 ELF 丢进 WSL" 才能跑构建工具。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    ok = 0
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, rel, argv, pymod in TOOLS:
+            ll = _ir(ROOT / rel, td)
+            exe = td / f"{name}.exe"
+            blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
+            exe.write_bytes(blob)
+            # 工具按相对路径解析输入，必须在仓库根跑
+            got = subprocess.run([str(exe)] + argv, capture_output=True,
+                                 cwd=str(ROOT), shell=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    rc = importlib.import_module(pymod).main(list(argv))
+                except SystemExit as e:
+                    rc = e.code
+            want = buf.getvalue().encode("utf-8")
+            assert (rc, want) == (got.returncode, got.stdout), (
+                f"[{name}] 不一致: rc {rc} vs {got.returncode}\n"
+                f"  python ({len(want)}B): {want[:160]!r}\n"
+                f"  pe     ({len(got.stdout)}B): {got.stdout[:160]!r}")
+            ok += 1
+    print(f"      {ok} 个构建工具（argv + 目录遍历 + 文件 I/O）"
+          f"在 Windows 上原生跑，与 Python 版逐字节相同")
 
 
 @test

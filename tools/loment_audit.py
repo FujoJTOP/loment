@@ -89,7 +89,10 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
             "与 Python 版 stdout / 落盘字节 / 退出码**逐字节相同**",
      "loment_rel_test", []),
     ("C24", "原生 PE 后端: 同一份 IR 产出的 Windows PE 控制台程序**在本机原生跑**, "
-            "与 clang/Linux 路的 stdout 字节 + 退出码一致; 编译与运行都不碰 clang/wsl",
+            "与 clang/Linux 路的 stdout 字节 + 退出码一致; 编译与运行都不碰 clang/wsl。"
+            "syscall 面补齐到 read/write/close/brk/exit/getdents64/openat/newfstatat, "
+            "argv 由 shim 合成 —— **构建工具 lomstatus/lomrel 本身**编成 PE 原生跑, "
+            "输出与 Python 版逐字节相同",
      "loment_pe_test", []),
 ]
 

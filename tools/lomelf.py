@@ -1129,9 +1129,35 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 PE_IMAGE_BASE = 0x140000000
 PE_SEC_ALIGN, PE_FILE_ALIGN = 0x1000, 0x200
 PE_TEXT_RVA = 0x1000
-PE_IMPORTS = ["ExitProcess", "GetStdHandle", "WriteFile"]
-PE_STD_OUTPUT, PE_STD_ERROR = -11, -12
-SYS_EXIT, SYS_WRITE = 60, 1
+PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
+              "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
+              "FindFirstFileA", "FindNextFileA"]
+PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
+SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
+SYS_GETDENTS64, SYS_OPENAT, SYS_NEWFSTATAT = 217, 257, 262
+PE_O_WRONLY, PE_O_CREAT, PE_O_TRUNC = 1, 0x40, 0x200
+
+# shim 的静态状态：排在 .data 的**零填充尾巴**上（不占文件的 raw 字节，靠 VirtualSize>RawDataSize）。
+WS_FD_COUNT = 64
+WS_FD_SIZE = 24                                # kind(u32) / handle(u64) / pos(u64)
+WS_FD_KIND, WS_FD_HANDLE, WS_FD_POS = 0, 8, 16
+WS_FD_FREE, WS_FD_FILE, WS_FD_DIR, WS_FD_CMD = 0, 1, 2, 3
+WS_BRK = WS_FD_COUNT * WS_FD_SIZE              # brk 当前值 / 上界 / cmdline 长度 / cmdline 缓冲
+WS_BRK_END = WS_BRK + 8
+WS_CMD_LEN = WS_BRK_END + 8
+WS_CMD_BUF = WS_CMD_LEN + 8
+WS_CMD_CAP = 8192
+WS_DIR_BUF = WS_CMD_BUF + WS_CMD_CAP           # 每个 fd 一块目录清单缓冲
+WS_DIR_CAP = 16384
+WS_TMP = WS_DIR_BUF + WS_FD_COUNT * WS_DIR_CAP  # 路径翻译的暂存（不动调用方的缓冲）
+WS_TMP_CAP = 4096
+WS_TMP2 = WS_TMP + WS_TMP_CAP                   # 目录枚举 / dirent 记录暂存
+WS_TMP2_CAP = 4096
+WS_FIND = WS_TMP2 + WS_TMP2_CAP                 # WIN32_FIND_DATAA（320 字节）
+WS_FIND_NAME = 44                               # cFileName 在 FIND_DATAA 里的偏移
+WS_SIZE = WS_FIND + 320
+WS_HEAP = 64 * 1024 * 1024
+WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
 
 def build_pe_idata(d: int, funcs: list[str]) -> tuple[bytes, dict, int]:
@@ -1175,57 +1201,646 @@ def _call_iat(asm: Asm, slot: str) -> None:
     asm.emit(b"\xFF\xD0")                          # call rax
 
 
-def emit_win_shim(em: "PeEmitter") -> None:
-    """`__win_syscall`: rax = syscall 号，参数按 Linux 习惯在 rdi/rsi/rdx。
+def emit_win_shim(em: "PeEmitter", state_va: int) -> None:
+    """`__win_syscall`: rax = syscall 号，参数按 Linux 习惯在 rdi/rsi/rdx/r10/r8。
 
-    Linux 的 `syscall` 是把号放 rax、参数放 rdi/rsi/rdx/r10/r8；这里保持同一套寄存器约定，
+    Linux 的 `syscall` 把号放 rax、参数放 rdi/rsi/rdx/r10/r8；这里保持同一套寄存器约定，
     所以 `_call_asm` 的取参代码一个字都不用改，只是把 `0F 05` 换成 `call __win_syscall`。
+
+    状态基址放 `rbx`：Loment 生成的代码不用 rbx/r12-r15，Windows API 调用又会保存它，
+    所以它在整段 shim 里稳定。Loment 侧写的是 **Linux 语义**（brk 给堆、/proc/self/cmdline
+    给 argv、linux_dirent64 给目录项），所以这里是**语义仿真**，不是"差不多能用"。
     """
     a = em.asm
+
+    def i32(v):
+        return struct.pack("<I", v & 0xFFFFFFFF)
+
+    def cmp_eax(v):
+        a.emit(b"\x3D" + i32(v))
+
+    def cmp_ecx(v):
+        a.emit(b"\x81\xF9" + i32(v))
+
+    def cmp_edi(v):
+        if -128 <= v <= 127:
+            a.emit(b"\x83\xFF" + bytes([v & 0xFF]))
+        else:
+            a.emit(b"\x81\xFF" + i32(v))
+
+    def jcc_l(cc, lbl):
+        a.emit(b"\x0F" + bytes([0x80 + CC[cc]]))
+        a.fixups.append((a.here(), lbl, 4, "rel"))
+        a.emit(b"\x00\x00\x00\x00")
+
+    def jmp_l(lbl):
+        a.emit(b"\xE9")
+        a.fixups.append((a.here(), lbl, 4, "rel"))
+        a.emit(b"\x00\x00\x00\x00")
+
+    def api(slot):
+        _call_iat(a, slot)
+
+    def movi(reg, v):
+        a.emit(mov_ri(reg, v))
+
+    def movi32(reg, v):
+        a.emit(mov_ri32(reg, v))
+
+    def imm_label(reg, lbl):
+        a.emit(mov_ri(reg, 0))
+        a.fixups.append((a.here() - 8, lbl, 8, "abs"))
+
+    def ld(dst, base, disp):
+        a.emit(mov_rm(dst, base, disp))
+
+    def ld32(dst, base, disp):
+        a.emit(rex(0, dst, 0, base) + b"\x8B" + _mem(dst, base, disp))
+
+    def st(base, disp, src):
+        a.emit(mov_mr(base, disp, src))
+
+    def st32(base, disp, src):
+        a.emit(rex(0, src, 0, base) + b"\x89" + _mem(src, base, disp))
+
+    def st8(base, disp, src):
+        a.emit(rex(0, src, 0, base) + b"\x88" + _mem(src, base, disp))
+
+    def test_rax():
+        a.emit(b"\x48\x85\xC0")
+
+    def test_rr(d, s):
+        a.emit(rex(1, s, 0, d) + b"\x85" + modrm(3, s, d))
+
+    def test_ecx():
+        a.emit(b"\x85\xC9")
+
+    def test_al():
+        a.emit(b"\x84\xC0")
+
+    def load_al(base):
+        a.emit(rex(0, 0, 0, base) + b"\x8A" + modrm(0, 0, base))
+
+    def store_al(base):
+        a.emit(rex(0, 0, 0, base) + b"\x88" + modrm(0, 0, base))
+
+    def cmp_al(v):
+        a.emit(b"\x3C" + bytes([v]))
+
+    def cmp_al_mem(base):
+        a.emit(rex(0, 0, 0, base) + b"\x3A" + modrm(0, 0, base))
+
+    def add_ri(reg, v):
+        a.emit(rex(1, 0, 0, reg) + b"\x83" + modrm(3, 0, reg) + bytes([v]))
+
+    def sub_ri(reg, v):
+        a.emit(rex(1, 0, 0, reg) + b"\x83" + modrm(3, 5, reg) + bytes([v]))
+
+    def imul_ri(reg, v):
+        a.emit(rex(1, reg, 0, reg) + b"\x6B" + modrm(3, reg, reg) + bytes([v & 0xFF]))
+
+    def add_rr(d, s):
+        # 注意：alu_rr 收的是**真 opcode**（0x01=add / 0x29=sub）；模块常量 ADD/SUB 是给
+        # alu_ri 用的 Group1 /digit —— 传错会让 `add r64,r64` 静默变成 `add r/m8,r8`。
+        a.emit(alu_rr(0x01, d, s))
+
+    def sub_rsp(v):
+        a.emit(alu_ri(SUB, RSP, v))
+
+    def and_ri(reg, imm8):
+        a.emit(rex(1, 0, 0, reg) + b"\x83" + modrm(3, 4, reg) + bytes([imm8 & 0xFF]))
+
+    def st16(base, disp, src):
+        a.emit(b"\x66" + rex(0, src, 0, base) + b"\x89" + _mem(src, base, disp))
+
+    def test_edx(v):
+        a.emit(b"\xF7\xC2" + i32(v))
+
+    def sub_rr(d, s):
+        a.emit(alu_rr(0x29, d, s))
+
+    def entry_of_fd():   # edi -> rax = &fd 表项（edi 必须 < WS_FD_COUNT）
+        a.emit(b"\x89\xF8")                     # mov eax, edi
+        imul_ri(RAX, WS_FD_SIZE)
+        add_rr(RAX, RBX)
+
     a.label("__win_syscall")
-    a.emit(b"\x55")                                # push rbp
-    a.emit(b"\x48\x89\xE5")                        # mov rbp, rsp
-    a.emit(b"\x48\x83\xE4\xF0")                    # and rsp, -16
-    a.emit(b"\x48\x83\xEC\x40")                    # sub rsp, 0x40 (32 shadow + 第五参 + 溢写槽)
+    a.emit(b"\x55")                             # push rbp
+    a.emit(b"\x48\x89\xE5")                     # mov rbp, rsp
+    a.emit(b"\x48\x83\xE4\xF0")                 # and rsp, -16
+    sub_rsp(0x60)                               # 32 shadow + 第五~七参 + 暂存
+    movi(RBX, state_va)
 
-    a.emit(b"\x3D" + struct.pack("<I", SYS_EXIT))  # cmp eax, 60
-    a.emit(b"\x0F\x84")                            # je __ws_exit
-    a.fixups.append((a.here(), "__ws_exit", 4, "rel"))
-    a.emit(b"\x00\x00\x00\x00")
-    a.emit(b"\x3D" + struct.pack("<I", SYS_WRITE))  # cmp eax, 1
-    a.emit(b"\x0F\x84")                             # je __ws_write
-    a.fixups.append((a.here(), "__ws_write", 4, "rel"))
-    a.emit(b"\x00\x00\x00\x00")
-    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")        # mov rax, -1   (未实现的号)
-    a.emit(b"\x48\x89\xEC")                        # mov rsp, rbp
-    a.emit(b"\x5D\xC3")                            # pop rbp; ret
+    cmp_eax(SYS_EXIT)
+    jcc_l("e", "__ws_exit")
+    cmp_eax(SYS_WRITE)
+    jcc_l("e", "__ws_write")
+    cmp_eax(SYS_READ)
+    jcc_l("e", "__ws_read")
+    cmp_eax(SYS_CLOSE)
+    jcc_l("e", "__ws_close")
+    cmp_eax(SYS_OPENAT)
+    jcc_l("e", "__ws_openat")
+    cmp_eax(SYS_BRK)
+    jcc_l("e", "__ws_brk")
+    cmp_eax(SYS_GETDENTS64)
+    jcc_l("e", "__ws_getdents")
+    cmp_eax(SYS_NEWFSTATAT)
+    jcc_l("e", "__ws_fstatat")
+    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")     # mov rax, -1（未实现的号）
+    jmp_l("__ws_ret")
 
-    a.label("__ws_exit")                           # exit(code) -> ExitProcess
-    a.emit(mov_rr(RCX, RDI))                       # mov ecx, edi
-    _call_iat(a, "__iat_ExitProcess")
-    a.emit(b"\x0F\x0B")                            # ud2 (不该回来)
+    a.label("__ws_ret")
+    a.emit(b"\x48\x89\xEC")                     # mov rsp, rbp
+    a.emit(b"\x5D\xC3")                         # pop rbp; ret
 
-    # write(fd, buf, len) -> GetStdHandle + WriteFile
-    # r10/r11 是易失寄存器，跨调用必须溢写到栈上（[rsp+0x20] 留给第五参）。
+    a.label("__ws_fail")                        # 统一的失败出口（rax = -1）
+    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")
+    jmp_l("__ws_ret")
+
+    # ---- exit(code) ------------------------------------------------------
+    a.label("__ws_exit")
+    a.emit(mov_rr(RCX, RDI))
+    api("__iat_ExitProcess")
+    a.emit(b"\x0F\x0B")                         # ud2（不该回来）
+
+    # ---- fd -> HANDLE（子程序：in edi, out rax；0 = 无效）------------------
+    a.label("__ws_handle")
+    sub_rsp(0x28)
+    cmp_edi(1)
+    jcc_l("e", "__wsh_out")
+    cmp_edi(2)
+    jcc_l("e", "__wsh_err")
+    cmp_edi(0)
+    jcc_l("e", "__wsh_in")
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__wsh_bad")
+    entry_of_fd()
+    ld32(RCX, RAX, WS_FD_KIND)
+    test_ecx()
+    jcc_l("e", "__wsh_bad")
+    ld(RAX, RAX, WS_FD_HANDLE)
+    a.emit(b"\x48\x83\xC4\x28\xC3")             # add rsp,0x28; ret
+    a.label("__wsh_in")
+    movi32(RCX, PE_STD_INPUT & 0xFFFFFFFF)
+    jmp_l("__wsh_go")
+    a.label("__wsh_out")
+    movi32(RCX, PE_STD_OUTPUT & 0xFFFFFFFF)
+    jmp_l("__wsh_go")
+    a.label("__wsh_err")
+    movi32(RCX, PE_STD_ERROR & 0xFFFFFFFF)
+    a.label("__wsh_go")
+    api("__iat_GetStdHandle")
+    a.emit(b"\x48\x83\xC4\x28\xC3")
+    a.label("__wsh_bad")
+    a.emit(b"\x31\xC0\x48\x83\xC4\x28\xC3")     # xor eax,eax; add rsp,0x28; ret
+
+    # ---- write(fd, buf, len) --------------------------------------------
     a.label("__ws_write")
-    a.emit(mov_mr(RSP, 0x30, RSI))                 # mov [rsp+0x30], rsi   ; buf
-    a.emit(mov_mr(RSP, 0x38, RDX))                 # mov [rsp+0x38], rdx   ; len
-    a.emit(b"\xB9" + struct.pack("<I", PE_STD_OUTPUT & 0xFFFFFFFF))    # mov ecx, -11
-    a.emit(b"\x83\xFF\x02")                        # cmp edi, 2
-    a.jcc("ne", "__ws_stdout_ok")
-    a.emit(b"\xB9" + struct.pack("<I", PE_STD_ERROR & 0xFFFFFFFF))     # mov ecx, -12
-    a.label("__ws_stdout_ok")
-    _call_iat(a, "__iat_GetStdHandle")
-    a.emit(mov_rr(RCX, RAX))                       # mov rcx, rax          ; hFile
-    a.emit(mov_rm(RDX, RSP, 0x30))                 # mov rdx, [rsp+0x30]   ; lpBuffer
-    a.emit(mov_rm(R8, RSP, 0x38))                  # mov r8,  [rsp+0x38]   ; nBytes
-    a.emit(b"\x45\x31\xC9")                        # xor r9d, r9d          ; lpWritten = NULL
-    a.emit(b"\x31\xC0")                            # xor eax, eax
-    a.emit(mov_mr(RSP, 0x20, RAX))                 # mov [rsp+0x20], rax   ; 第五参 lpOverlapped = NULL
-    _call_iat(a, "__iat_WriteFile")
-    a.emit(mov_rm(RAX, RSP, 0x38))                 # 返回写入字节数（照 write(2)）
-    a.emit(b"\x48\x89\xEC")                        # mov rsp, rbp
-    a.emit(b"\x5D\xC3")                            # pop rbp; ret
+    st(RSP, 0x30, RSI)
+    st(RSP, 0x38, RDX)
+    a.call("__ws_handle")
+    test_rax()
+    jcc_l("e", "__ws_fail")
+    a.emit(mov_rr(RCX, RAX))
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    a.emit(b"\x45\x31\xC9")                     # xor r9d, r9d
+    movi32(RAX, 0)
+    st(RSP, 0x20, RAX)                          # 第五参 lpOverlapped = NULL
+    api("__iat_WriteFile")
+    ld(RAX, RSP, 0x38)                          # 返回写入字节数（照 write(2)）
+    jmp_l("__ws_ret")
+
+    # ---- close(fd) -------------------------------------------------------
+    a.label("__ws_close")
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(3)
+    jcc_l("b", "__ws_close_ok")                 # 0/1/2 是标准流，关掉也当成功
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_close_ok")
+    entry_of_fd()
+    ld32(RCX, RAX, WS_FD_KIND)
+    test_ecx()
+    jcc_l("e", "__ws_close_ok")
+    cmp_ecx(WS_FD_CMD)
+    jcc_l("e", "__ws_close_zap")                # CMD 没有句柄可关
+    st(RSP, 0x28, RAX)                          # 保存表项指针（CloseHandle 会踩寄存器）
+    ld(RCX, RAX, WS_FD_HANDLE)
+    api("__iat_CloseHandle")
+    ld(RAX, RSP, 0x28)
+    a.label("__ws_close_zap")
+    a.emit(b"\x31\xC9")                         # xor ecx, ecx
+    st32(RAX, WS_FD_KIND, RCX)
+    st(RAX, WS_FD_HANDLE, RCX)
+    st(RAX, WS_FD_POS, RCX)
+    a.label("__ws_close_ok")
+    a.emit(b"\x31\xC0")                         # xor eax, eax
+    jmp_l("__ws_ret")
+
+    # ---- brk(addr) -------------------------------------------------------
+    a.label("__ws_brk")
+    ld(RAX, RBX, WS_BRK)
+    test_rax()
+    jcc_l("ne", "__ws_brk_have")
+    sub_rsp(0x28)
+    a.emit(b"\x31\xC9")                         # lpAddress = NULL
+    movi(RDX, WS_HEAP)
+    movi32(R8, 0x3000)                          # MEM_COMMIT|MEM_RESERVE
+    movi32(R9, 4)                               # PAGE_READWRITE
+    api("__iat_VirtualAlloc")
+    a.emit(b"\x48\x83\xC4\x28")
+    test_rax()
+    jcc_l("e", "__ws_fail")
+    st(RBX, WS_BRK, RAX)
+    movi(RDX, WS_HEAP)
+    add_rr(RDX, RAX)
+    st(RBX, WS_BRK_END, RDX)
+    a.label("__ws_brk_have")
+    test_rax()
+    jcc_l("e", "__ws_brk_ret")                  # brk(0) 只查询
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_brk_ret")
+    ld(RCX, RBX, WS_BRK_END)
+    a.emit(b"\x48\x39\xCF")                     # cmp rdi, rcx
+    jcc_l("a", "__ws_fail")                     # 越界 -> -1
+    movi(RAX, 0)
+    ld(RAX, RBX, WS_BRK)
+    st(RBX, WS_BRK, RDI)                        # 新 break
+    movi(RAX, 0)
+    a.emit(mov_rr(RAX, RDI))                    # 返回新 break（Linux 语义）
+    jmp_l("__ws_ret")
+    a.label("__ws_brk_ret")
+    ld(RAX, RBX, WS_BRK)
+    jmp_l("__ws_ret")
+
+    # ---- openat(dirfd, path, flags, mode) --------------------------------
+    a.label("__ws_openat")
+    st(RSP, 0x28, RSI)                          # path
+    st(RSP, 0x30, RDX)                          # flags
+    imm_label(R8, "__ws_lit_cmdline")
+    a.emit(mov_rr(R9, RSI))
+    a.label("__ws_cmp")
+    load_al(R9)
+    cmp_al_mem(R8)
+    jcc_l("ne", "__ws_open_file")
+    test_al()
+    jcc_l("e", "__ws_open_cmd")
+    add_ri(R9, 1)
+    add_ri(R8, 1)
+    jmp_l("__ws_cmp")
+
+    a.label("__ws_open_cmd")                    # /proc/self/cmdline：合成一个 fd
+    a.call("__ws_fill_cmdline")
+    a.call("__ws_alloc_fd")
+    a.emit(b"\x85\xC0")                         # test eax, eax
+    jcc_l("s", "__ws_fail")
+    movi(RCX, WS_FD_CMD)
+    st32(RDX, WS_FD_KIND, RCX)
+    movi(RCX, state_va + WS_CMD_BUF)
+    st(RDX, WS_FD_HANDLE, RCX)
+    a.emit(b"\x31\xC9")                         # xor ecx, ecx
+    st(RDX, WS_FD_POS, RCX)
+    jmp_l("__ws_ret")
+
+    a.label("__ws_open_file")
+    movi(R10, state_va + WS_TMP)                # 翻译路径到暂存（不动调用方缓冲）
+    ld(R9, RSP, 0x28)
+    a.label("__ws_tr")
+    load_al(R9)
+    cmp_al(47)                                  # '/'
+    jcc_l("ne", "__ws_tr_store")
+    a.emit(b"\xB0" + bytes([92]))               # mov al, '\'
+    a.label("__ws_tr_store")
+    store_al(R10)
+    test_al()
+    jcc_l("e", "__ws_tr_done")
+    add_ri(R9, 1)
+    add_ri(R10, 1)
+    jmp_l("__ws_tr")
+    a.label("__ws_tr_done")
+    movi(RCX, state_va + WS_TMP)
+    api("__iat_GetFileAttributesA")             # 目录要单独处理（CreateFileA 打不开目录）
+    a.emit(b"\x83\xF8\xFF")                     # cmp eax, -1（不存在）
+    jcc_l("e", "__ws_open_create")
+    a.emit(b"\xA8\x10")                         # test al, FILE_ATTRIBUTE_DIRECTORY
+    jcc_l("e", "__ws_open_create")
+    # ---- 目录：拼 "path\*" 开一次枚举，fd 记住 find 句柄 ----
+    movi(R8, state_va + WS_TMP2)
+    movi(R9, state_va + WS_TMP)
+    a.label("__ws_dc")
+    load_al(R9)
+    store_al(R8)
+    test_al()
+    jcc_l("e", "__ws_dc_end")
+    add_ri(R9, 1)
+    add_ri(R8, 1)
+    jmp_l("__ws_dc")
+    a.label("__ws_dc_end")
+    a.emit(b"\xB0" + bytes([92]))               # '\'
+    store_al(R8)
+    add_ri(R8, 1)
+    a.emit(b"\xB0" + bytes([42]))               # '*'
+    store_al(R8)
+    add_ri(R8, 1)
+    a.emit(b"\x31\xC0")
+    store_al(R8)
+    movi(RCX, state_va + WS_TMP2)
+    movi(RDX, state_va + WS_FIND)
+    api("__iat_FindFirstFileA")
+    a.emit(b"\x48\x83\xF8\xFF")                 # cmp rax, -1
+    jcc_l("e", "__ws_fail")
+    st(RSP, 0x38, RAX)
+    a.call("__ws_alloc_fd")
+    a.emit(b"\x85\xC0")
+    jcc_l("s", "__ws_fail")
+    movi(RCX, WS_FD_DIR)
+    st32(RDX, WS_FD_KIND, RCX)
+    ld(RCX, RSP, 0x38)
+    st(RDX, WS_FD_HANDLE, RCX)
+    a.emit(b"\x31\xC9")
+    st(RDX, WS_FD_POS, RCX)                     # 0 = FindFirstFileA 那一条还没发出去
+    jmp_l("__ws_ret")
+
+    a.label("__ws_open_create")
+    movi(RCX, state_va + WS_TMP)                # lpFileName
+    movi32(RDX, 0x80000000)                     # GENERIC_READ
+    ld(R11, RSP, 0x30)                          # flags
+    a.emit(b"\x41\xF6\xC3\x01")                 # test r11b, O_WRONLY
+    jcc_l("e", "__ws_o_acc")
+    movi32(RDX, 0x40000000)                     # GENERIC_WRITE
+    a.label("__ws_o_acc")
+    movi32(R8, 3)                               # FILE_SHARE_READ|WRITE
+    a.emit(b"\x45\x31\xC9")                     # xor r9d, r9d
+    movi32(RAX, 3)                              # OPEN_EXISTING
+    a.emit(b"\x41\xF6\xC3\x40")                 # test r11b, O_CREAT
+    jcc_l("e", "__ws_o_disp")
+    movi32(RAX, 2)                              # CREATE_ALWAYS
+    a.label("__ws_o_disp")
+    st(RSP, 0x20, RAX)
+    movi32(RAX, 0x80)                           # FILE_ATTRIBUTE_NORMAL
+    st(RSP, 0x28, RAX)
+    movi32(RAX, 0)
+    st(RSP, 0x30, RAX)
+    api("__iat_CreateFileA")
+    a.emit(b"\x48\x83\xF8\xFF")                 # cmp rax, -1
+    jcc_l("e", "__ws_fail")
+    st(RSP, 0x38, RAX)                          # 先存句柄
+    a.call("__ws_alloc_fd")
+    a.emit(b"\x85\xC0")
+    jcc_l("s", "__ws_fail")
+    movi(RCX, WS_FD_FILE)
+    st32(RDX, WS_FD_KIND, RCX)
+    ld(RCX, RSP, 0x38)
+    st(RDX, WS_FD_HANDLE, RCX)
+    a.emit(b"\x31\xC9")
+    st(RDX, WS_FD_POS, RCX)
+    jmp_l("__ws_ret")
+
+    # ---- 内部：分配一个 fd（out eax = fd，rdx = &表项；满则 eax = -1）-----
+    a.label("__ws_alloc_fd")
+    movi32(RAX, 3)
+    a.label("__ws_af_loop")
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_af_full")
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, WS_FD_SIZE)
+    add_rr(RDX, RBX)
+    ld32(RCX, RDX, WS_FD_KIND)
+    test_ecx()
+    jcc_l("e", "__ws_af_got")
+    add_ri(RAX, 1)
+    jmp_l("__ws_af_loop")
+    a.label("__ws_af_got")
+    a.emit(b"\xC3")                             # ret
+    a.label("__ws_af_full")
+    movi32(RAX, -1)
+    a.emit(b"\xC3")
+
+    # ---- 内部：把 GetCommandLineA 的空格分隔转成 NUL 分隔 ------------------
+    a.label("__ws_fill_cmdline")
+    sub_rsp(0x28)
+    ld(RAX, RBX, WS_CMD_LEN)
+    test_rax()
+    jcc_l("ne", "__ws_fc_done")
+    api("__iat_GetCommandLineA")
+    movi(R10, state_va + WS_CMD_BUF)
+    a.emit(mov_rr(R8, R10))
+    movi32(R9, WS_CMD_CAP - 2)
+    a.label("__ws_fc_loop")
+    test_rr(R9, R9)
+    jcc_l("e", "__ws_fc_end")
+    load_al(RAX)
+    test_al()
+    jcc_l("e", "__ws_fc_end")
+    cmp_al(0x22)                                # '"'
+    jcc_l("ne", "__ws_fc_keep")
+    add_ri(RAX, 1)
+    jmp_l("__ws_fc_loop")
+    a.label("__ws_fc_keep")
+    cmp_al(0x20)                                # ' '
+    jcc_l("ne", "__ws_fc_store")
+    a.emit(b"\x31\xC0")                         # xor eax, eax（空格 -> NUL）
+    a.label("__ws_fc_store")
+    store_al(R8)
+    add_ri(R8, 1)
+    sub_ri(R9, 1)
+    add_ri(RAX, 1)
+    jmp_l("__ws_fc_loop")
+    a.label("__ws_fc_end")
+    a.emit(b"\x31\xC9")
+    store_al(R8)                                # 末尾再补一个 NUL
+    add_ri(R8, 1)
+    a.emit(mov_rr(RAX, R8))
+    a.emit(b"\x4C\x29\xD0")                     # sub rax, r10
+    st(RBX, WS_CMD_LEN, RAX)
+    a.label("__ws_fc_done")
+    a.emit(b"\x48\x83\xC4\x28\xC3")
+
+    # ---- read(fd, buf, len) ---------------------------------------------
+    a.label("__ws_read")
+    st(RSP, 0x30, RSI)
+    st(RSP, 0x38, RDX)
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_read_file")
+    entry_of_fd()
+    ld32(RCX, RAX, WS_FD_KIND)
+    cmp_ecx(WS_FD_CMD)
+    jcc_l("e", "__ws_read_cmd")
+    a.label("__ws_read_file")
+    a.call("__ws_handle")
+    test_rax()
+    jcc_l("e", "__ws_fail")
+    a.emit(mov_rr(RCX, RAX))
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    a.emit(b"\x4C\x8D\x4C\x24\x28")             # lea r9, [rsp+0x28]
+    movi32(RAX, 0)
+    st(RSP, 0x20, RAX)
+    api("__iat_ReadFile")
+    ld32(RAX, RSP, 0x28)
+    jmp_l("__ws_ret")
+
+    a.label("__ws_read_cmd")
+    ld(RDX, RAX, WS_FD_POS)                     # pos
+    ld(RCX, RAX, WS_FD_HANDLE)                  # cmd 缓冲地址
+    add_rr(RCX, RDX)
+    ld(R8, RBX, WS_CMD_LEN)
+    a.emit(alu_rr(0x29, R8, RDX))               # 剩余 = 总长 - pos（0x29 = sub r/m64, r64）
+    test_rr(R8, R8)
+    jcc_l("le", "__ws_rc_zero")
+    ld(R9, RSP, 0x38)                           # 调用方要的字节数
+    a.emit(b"\x4D\x39\xC8")                     # cmp r8, r9
+    jcc_l("be", "__ws_rc_n")
+    a.emit(mov_rr(R8, R9))
+    a.label("__ws_rc_n")
+    st(RSP, 0x40, R8)                           # 本次拷贝字节数
+    ld(R10, RSP, 0x30)                          # dst
+    a.label("__ws_rc_cp")
+    test_rr(R8, R8)
+    jcc_l("e", "__ws_rc_done")
+    load_al(RCX)
+    store_al(R10)
+    add_ri(RCX, 1)
+    add_ri(R10, 1)
+    a.emit(b"\x49\x83\xE8\x01")                 # sub r8, 1
+    jmp_l("__ws_rc_cp")
+    a.label("__ws_rc_done")
+    ld(R8, RSP, 0x40)
+    entry_of_fd()                               # rdi 还是 fd
+    ld(RCX, RAX, WS_FD_POS)
+    add_rr(RCX, R8)
+    st(RAX, WS_FD_POS, RCX)
+    a.emit(mov_rr(RAX, R8))
+    jmp_l("__ws_ret")
+    a.label("__ws_rc_zero")
+    a.emit(b"\x31\xC0")
+    jmp_l("__ws_ret")
+
+    # ---- newfstatat(dirfd, path, stb, flags) -----------------------------
+    # 消费方只读 st_mode（`load32(stb, 24) & S_IFMT`），所以只填这一个字段。
+    a.label("__ws_fstatat")
+    st(RSP, 0x28, RDX)                          # stb
+    movi(R8, state_va + WS_TMP)
+    a.emit(mov_rr(R9, RSI))
+    a.label("__ws_fs_tr")
+    load_al(R9)
+    cmp_al(47)
+    jcc_l("ne", "__ws_fs_st")
+    a.emit(b"\xB0" + bytes([92]))
+    a.label("__ws_fs_st")
+    store_al(R8)
+    test_al()
+    jcc_l("e", "__ws_fs_done")
+    add_ri(R9, 1)
+    add_ri(R8, 1)
+    jmp_l("__ws_fs_tr")
+    a.label("__ws_fs_done")
+    movi(RCX, state_va + WS_TMP)
+    api("__iat_GetFileAttributesA")
+    a.emit(b"\x83\xF8\xFF")
+    jcc_l("e", "__ws_fail")
+    ld(RDX, RSP, 0x28)
+    a.emit(b"\xA8\x10")                         # test al, FILE_ATTRIBUTE_DIRECTORY
+    movi32(RCX, 0x81ED)                         # S_IFREG | 0755
+    jcc_l("e", "__ws_fs_reg")
+    movi32(RCX, 0x41ED)                         # S_IFDIR | 0755
+    a.label("__ws_fs_reg")
+    st32(RDX, 24, RCX)                          # st_mode
+    a.emit(b"\x31\xC0")
+    jmp_l("__ws_ret")
+
+    # ---- getdents64(fd, buf, n) -----------------------------------------
+    # 一次发一条 linux_dirent64（消费方本来就是 while 循环读到 0 为止）。
+    a.label("__ws_getdents")
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_fail")
+    entry_of_fd()
+    ld32(RCX, RAX, WS_FD_KIND)
+    cmp_ecx(WS_FD_DIR)
+    jcc_l("ne", "__ws_fail")
+    st(RSP, 0x40, RAX)                          # &表项
+    st(RSP, 0x48, RSI)                          # 调用方缓冲
+    ld(RCX, RAX, WS_FD_POS)
+    test_rr(RCX, RCX)
+    jcc_l("e", "__ws_gd_emit")                  # pos=0：FindFirstFileA 那条还没发
+    ld(RCX, RAX, WS_FD_HANDLE)
+    movi(RDX, state_va + WS_FIND)
+    api("__iat_FindNextFileA")
+    a.emit(b"\x85\xC0")
+    jcc_l("e", "__ws_gd_end")
+    a.label("__ws_gd_emit")
+    ld(RAX, RSP, 0x40)
+    movi(RCX, 1)
+    st(RAX, WS_FD_POS, RCX)
+    movi(R8, state_va + WS_TMP2)                # 记录缓冲
+    movi(R9, 1)
+    st(R8, 0, R9)                               # d_ino
+    a.emit(b"\x31\xC9")
+    st(R8, 8, RCX)                              # d_off
+    movi(R10, state_va + WS_FIND + WS_FIND_NAME)
+    a.emit(mov_rr(R11, R10))
+    a.label("__ws_gd_nl")
+    load_al(R11)
+    test_al()
+    jcc_l("e", "__ws_gd_len")
+    add_ri(R11, 1)
+    jmp_l("__ws_gd_nl")
+    a.label("__ws_gd_len")
+    sub_rr(R11, R10)                            # namelen
+    movi(RAX, 19)
+    add_rr(RAX, R11)
+    add_ri(RAX, 1)
+    add_ri(RAX, 7)
+    and_ri(RAX, -8)                             # d_reclen = align(19+namelen+1, 8)
+    st16(R8, 16, RAX)
+    st(RSP, 0x50, RAX)
+    movi(RDX, state_va + WS_FIND)
+    ld32(RDX, RDX, 0)                           # dwFileAttributes
+    test_edx(0x10)
+    movi32(RCX, 8)                              # DT_REG
+    jcc_l("e", "__ws_gd_dt")
+    movi32(RCX, 4)                              # DT_DIR
+    a.label("__ws_gd_dt")
+    a.emit(b"\x41\x88\x48\x12")                 # mov [r8+18], cl
+    movi(R9, state_va + WS_TMP2 + 19)
+    a.label("__ws_gd_cp")
+    load_al(R10)
+    store_al(R9)
+    test_al()
+    jcc_l("e", "__ws_gd_cpd")
+    add_ri(R10, 1)
+    add_ri(R9, 1)
+    jmp_l("__ws_gd_cp")
+    a.label("__ws_gd_cpd")
+    ld(R8, RSP, 0x50)                           # reclen
+    movi(R9, state_va + WS_TMP2)
+    ld(R10, RSP, 0x48)
+    st(RSP, 0x58, R8)
+    a.label("__ws_gd_out")
+    test_rr(R8, R8)
+    jcc_l("e", "__ws_gd_outd")
+    load_al(R9)
+    store_al(R10)
+    add_ri(R9, 1)
+    add_ri(R10, 1)
+    a.emit(b"\x49\x83\xE8\x01")                 # sub r8, 1
+    jmp_l("__ws_gd_out")
+    a.label("__ws_gd_outd")
+    ld(RAX, RSP, 0x58)
+    jmp_l("__ws_ret")
+    a.label("__ws_gd_end")
+    a.emit(b"\x31\xC0")
+    jmp_l("__ws_ret")
+
+    # 内嵌字面量：跳过它再继续发射（PE 是绝对取址，不需要 RIP 相对）
+    jmp_l("__ws_lit_end")
+    a.label("__ws_lit_cmdline")
+    a.emit(b"/proc/self/cmdline\x00")
+    a.label("__ws_lit_end")
 
 
 class PeEmitter(Emitter):
@@ -1329,14 +1944,14 @@ def _pe_layout_globals(globals_: list[Global], data_rva: int) -> tuple[bytearray
     return data, bss
 
 
-def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
+def _pe_emit(funcs, globals_, slots, state_va) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
     for g in globals_:
         em.asm.labels[g.name] = g.addr
     for name, rva in slots.items():
         em.asm.labels[name] = PE_IMAGE_BASE + rva
     em.emit_entry_stub("_start")
-    emit_win_shim(em)
+    emit_win_shim(em, state_va)
     for f in funcs:
         em.emit_func(f)
     return em.asm.finalize(), em.asm.labels["__entry"]
@@ -1356,9 +1971,11 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
     data_rva = PE_TEXT_RVA + PE_SEC_ALIGN
     for _ in range(4):
         data, bss = _pe_layout_globals(globals_, data_rva)
-        idata_rva = align_up(data_rva + max(len(data) + bss, 1), PE_SEC_ALIGN)
+        # shim 的静态状态排在 bss 之后，落在 .data 的**零填充尾巴**上（不占 raw 字节）
+        state_va = PE_IMAGE_BASE + data_rva + len(data) + bss
+        idata_rva = align_up(data_rva + len(data) + bss + WS_SIZE, PE_SEC_ALIGN)
         idata, slots, _ = build_pe_idata(idata_rva, PE_IMPORTS)
-        code, entry = _pe_emit(funcs, globals_, slots)
+        code, entry = _pe_emit(funcs, globals_, slots, state_va)
         want = align_up(PE_TEXT_RVA + len(code), PE_SEC_ALIGN)
         if want == data_rva:
             break
