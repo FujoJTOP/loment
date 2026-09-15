@@ -24,6 +24,8 @@
 # 于是出现"只在某个 worktree 才红"的假回归 (2026-09-12 归因 C2/C11/C14 时发现)。
 *.lomt text eol=lf
 *.lom  text eol=lf
+# 包清单 (.lomp, docs/168 §3.2): 也是 Loment 源码, 同样必须 LF
+*.lomp text eol=lf
 # 同类: 被工具/构建/外部校验器逐字节或逐行读的工件与源码。CRLF 在这些地方是真的坏 ——
 # sha256sum -c 会把 \r 当文件名的一部分、IR 逐字节比较会假红、Cargo 每次都重写锁文件。
 *.ll     text eol=lf

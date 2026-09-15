@@ -519,7 +519,8 @@ function Find-Editor {
 function Register-FileType {
     param([string]$Editor, [string]$Icon)
     $map = @{ '.lomt' = @('Loment.Source', 'Loment source file', 'text/x-loment');
-              '.lom'  = @('Loment.L0', 'Loment L0 declaration', 'text/x-lom') }
+              '.lom'  = @('Loment.L0', 'Loment L0 declaration', 'text/x-lom');
+              '.lomp' = @('Loment.Package', 'Loment package manifest', 'text/x-loment') }
     $cmd = '"' + $Editor + '" "%1"'
     foreach ($ext in $map.Keys) {
         $progid = $map[$ext][0]; $friendly = $map[$ext][1]; $mime = $map[$ext][2]
@@ -543,12 +544,16 @@ function Register-FileType {
         New-Item -Path $fk -Force | Out-Null
         New-ItemProperty -Path $fk -Name $progid -Value '' -PropertyType String -Force | Out-Null
     }
-    Say "[6/6] .lomt/.lom registered (open with: $Editor)"
+    Say "[6/6] .lomt/.lom/.lomp registered (open with: $Editor)"
 }
 
 function Unregister-FileType {
-    foreach ($ext in @('.lomt', '.lom')) {
-        $progid = if ($ext -eq '.lomt') { 'Loment.Source' } else { 'Loment.L0' }
+    foreach ($ext in @('.lomt', '.lom', '.lomp')) {
+        $progid = switch ($ext) {
+            '.lomt' { 'Loment.Source' }
+            '.lom'  { 'Loment.L0' }
+            default { 'Loment.Package' }
+        }
         foreach ($k in @("HKCU:\Software\Classes\$progid\shell\open\command",
                          "HKCU:\Software\Classes\$progid\shell\open",
                          "HKCU:\Software\Classes\$progid\shell",

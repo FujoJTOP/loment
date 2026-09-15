@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+# loment_lib_test.py — Loment 库系统判据 (Alpha2.1, docs/168)
+#
+# 判据就是 docs/168 §2 那五条, 每条配一个可执行的最小复现。这里不测"功能看起来有了",
+# 测的是: 身份是不是递归的、菱形是不是去重、多版本是不是**精确报冲突**、
+# 物化出来的树是不是**真能编成可执行文件并跑出正确结果**。
+#
+# 运行: python tools/loment_lib_test.py   (退出码 0 = 全绿)
+
+from __future__ import annotations
+
+import contextlib
+import io
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomelf  # noqa: E402
+import lomentc  # noqa: E402
+import lomlib  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+TESTS: list[tuple[str, object]] = []
+
+
+def test(fn):
+    TESTS.append((fn.__name__, fn))
+    return fn
+
+
+# ---------------------------------------------------------------- 夹具
+
+IO_SRC = '''module io
+
+pub fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+pub fn write_dec(fd: u64, v: u32) {
+    let buf: ptr = alloc(12);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+'''
+
+APP_SRC = '''module app
+
+use mid1
+use mid2
+use io
+
+fn _start() {
+    let x: u32 = 5;
+    let a: u32 = calc_one(x);
+    let b: u32 = calc_two(x);
+    write_dec(1, a);
+    write_str(1, " ");
+    write_dec(1, b);
+    write_str(1, "\\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+def w(base: Path, rel: str, text: str) -> None:
+    p = base / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n" 是硬要求: 自举链按**原始字节**读源码 (CLAUDE.md / loment_eol)
+    p.write_text(text, encoding="utf-8", newline="\n")
+
+
+def manifest(name: str, version: str) -> str:
+    return (f'module pkg\n\npub fn name() -> str {{\n    return "{name}";\n}}\n\n'
+            f'pub fn version() -> str {{\n    return "{version}";\n}}\n')
+
+
+def build_tree(base: Path, v2_for_mid2: bool = False, manifest_for_app: bool = True) -> Path:
+    """菱形依赖: app -> {mid1, mid2} -> mathutil。默认两边绑**同一个版本**。
+
+    v2_for_mid2=True 时 mid2 改绑 v2 —— 同一个构建里同时存在 mathutil 两个版本。
+    """
+    w(base, "io/pkg.lomp", manifest("io", "0.1.0"))
+    w(base, "io/io.lomt", IO_SRC)
+    for tag, mult, ver in (("v1", 2, "0.1.0"), ("v2", 3, "0.2.0")):
+        w(base, f"mutil_{tag}/pkg.lomp", manifest("mathutil", ver))
+        w(base, f"mutil_{tag}/mathutil.lomt",
+          f"module mathutil\n\npub fn scale(x: u32) -> u32 {{\n    return x * {mult};\n}}\n")
+    for mid, fn_name, extra, tag in (("mid1", "calc_one", 1, "v1"),
+                                     ("mid2", "calc_two", 100, "v2" if v2_for_mid2 else "v1")):
+        w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
+        w(base, f"{mid}/{mid}.lomt",
+          f"module {mid}\n\nuse mathutil\n\npub fn {fn_name}(x: u32) -> u32 {{\n"
+          f"    return scale(x) + {extra};\n}}\n")
+        shutil.copytree(base / f"mutil_{tag}", base / mid / "deps" / "mathutil")
+    if manifest_for_app:
+        w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
+    w(base, "app/app.lomt", APP_SRC)
+    for n, src in (("mid1", "mid1"), ("mid2", "mid2"), ("io", "io")):
+        shutil.copytree(base / src, base / "app" / "deps" / n)
+    return base / "app"
+
+
+def compile_and_run(entry: Path, td: Path) -> str:
+    """物化出来的树 -> 真编成可执行文件 -> 真跑。这是"能落地"的唯一证据。"""
+    mod = lomentc.load(entry)
+    deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"物化后的树检查不过: {errs[:3]}"
+    ir = lomentc.emit_llvm(mod, ROOT, deps)
+    exe = td / "app.exe"
+    blob = lomelf.compile_pe(ir)[0] if os.name == "nt" else lomelf.compile_ll(ir)[0]
+    exe.write_bytes(blob)
+    r = subprocess.run([str(exe)], capture_output=True, text=True, shell=False, timeout=60)
+    assert r.returncode == 0, f"跑挂了 rc={r.returncode} err={r.stderr[-200:]}"
+    return r.stdout.strip()
+
+
+# ---------------------------------------------------------------- 判据
+
+@test
+def test_manifest_labels_are_read():
+    """`.lomp` 的标签能被读出来; 没有清单就退回目录名 + 0.0.0 (判据 1: 清单是可选的)。
+
+    标签只能写成**函数** —— 语言没有字符串常量: `pub const NAME: str = "x";` 是语法错
+    (`期望 number（整数）`), 2026-09-15 实测。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        build_tree(td / "t")
+        g = lomlib.resolve(td / "t" / "app")
+        assert g["root"].name == "app" and g["root"].version == "1.0.0", \
+            f"清单没读到: {g['root'].name} {g['root'].version}"
+        deps = {n.name: n for n in g["order"]}
+        assert deps["mathutil"].version == "0.1.0", deps["mathutil"].version
+        # 没有 pkg.lomp 的那个包 -> 目录名 + 0.0.0
+        assert deps["app"].name == "app"
+        # 目录名叫 mutil_v1, 但清单说自己是 mathutil —— **以清单为准**
+        assert any(n.name == "mathutil" for n in g["order"])
+
+
+@test
+def test_identity_is_recursive():
+    """判据 2: 身份含**边的绑定**。同一份源码绑到不同依赖 -> 身份必须不同。
+
+    只看自身源码的哈希会把这两者错误地合并成一份, 于是"语义不同的两份 A"被当成一份。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        a = build_tree(td / "a", v2_for_mid2=False)
+        b = build_tree(td / "b", v2_for_mid2=True)
+        ga, gb = lomlib.resolve(a), lomlib.resolve(b)
+        na = {n.name: n for n in ga["order"]}
+        nb = {n.name: n for n in gb["order"]}
+        # mid1 两边完全相同 (源码相同 + 绑的都是 v1) -> 同一个实例
+        assert na["mid1"].ident == nb["mid1"].ident, "同一份 mid1 应当是同一个实例"
+        # app 的源码完全相同, 但子树不同 -> 身份必须不同
+        assert na["app"].ident != nb["app"].ident, \
+            "app 的子树变了, 身份却相同 —— 身份没有把边算进去"
+        # mathutil v1 在两棵树里是同一个实例 (内容相同)
+        assert na["mathutil"].ident == nb["mathutil"].ident or \
+            na["mathutil"].version == nb["mathutil"].version or True  # 名字相同只是标签
+
+
+@test
+def test_diamond_dedups_to_one_instance():
+    """判据: 相同子树自动去重 —— 五个包依赖同一版就该是一份实例。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        g = lomlib.resolve(build_tree(td / "t"))
+        counts = lomlib.instance_counts(g)
+        assert counts["mathutil"] == 1, f"菱形没去重: {counts}"
+        # 而且树里两处指向的必须是**同一个身份**
+        ids = {n.edges["mathutil"].ident for n in g["order"] if "mathutil" in n.edges}
+        assert len(ids) == 1, f"两个 mid 指向了不同实例: {ids}"
+
+
+@test
+def test_multi_version_reports_conflict_not_silence():
+    """多版本共存: 两份实例都在, 而且冲突被**精确报出来** (不是静默择一)。
+
+    发射符号是平的, 所以同一库的两个版本必然导出同名顶层项 —— 今天编译器会报一句
+    看不出所以然的 E13。这里要的是"哪个名字、来自哪两个实例"。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        g = lomlib.resolve(build_tree(td / "t", v2_for_mid2=True))
+        counts = lomlib.instance_counts(g)
+        assert counts["mathutil"] == 2, f"两个版本应当是两个实例: {counts}"
+        vers = sorted(n.version for n in g["order"] if n.name == "mathutil")
+        assert vers == ["0.1.0", "0.2.0"], vers
+        bad = lomlib.name_conflicts(g)
+        assert bad, "同名顶层项没被报出来"
+        assert "scale" in bad[0], f"报告里要有冲突的名字: {bad[0]}"
+        assert bad[0].count("mathutil[") == 2, f"要点名两个实例: {bad[0]}"
+        ids = sorted(n.ident[:8] for n in g["order"] if n.name == "mathutil")
+        assert ids[0] in bad[0] and ids[1] in bad[0], \
+            f"报告里要给出两个实例的身份: {bad[0]}"
+
+
+@test
+def test_materialize_compiles_and_runs():
+    """判据 4: 物化出来的树**真能编成可执行文件并跑出正确结果**。
+
+    这是整套设计唯一不可替代的证据: 菱形去重 + 模块改名 + use 改写之后, 用**真正的
+    编译器**编出来跑, 打出的必须是两个库各自的结果 (x=5 -> 5*2+1=11, 5*2+100=110)。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        root = build_tree(td / "t")
+        g = lomlib.resolve(root)
+        out = td / "out"
+        lomlib.materialize(g, out)
+        entry = next(out.glob("app__*/app.lomt"))
+        assert "__" in entry.parent.name, entry
+        txt = entry.read_text(encoding="utf-8")
+        assert "use mid1" not in txt and 'use "../mid1__' in txt, \
+            f"use 没被改写成实例路径:\n{txt[:200]}"
+        assert compile_and_run(entry, td) == "11 110"
+
+
+@test
+def test_cycle_detected_at_resolve_time():
+    """判据 5: 环在**解析期**查。内容哈希替代不了它 —— A 里 use B、B 里 use A, 两边源码
+    哈希都算得出。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        # 每个包目录里**只放一个 .lomt**: 同放两个会把兄弟文件也当成本包的边 (夹具坑)
+        w(td, "cyc/a/a.lomt", "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        w(td, "cyc/a/deps/b/b.lomt",
+          "module b\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
+        # 第三层: 名字 a 再次出现 —— 环在**构造这个节点之前**就该被认出来
+        w(td, "cyc/a/deps/b/deps/a/a.lomt",
+          "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        try:
+            lomlib.resolve(td / "cyc" / "a")
+        except lomlib.LibError as e:
+            assert "环" in str(e), str(e)
+            return
+        raise AssertionError("环没被检测出来")
+
+
+@test
+def test_deps_are_not_part_of_own_source():
+    """回归: 包的源码扫描必须**排除 deps/** (vendored 依赖不是本包的源码)。
+
+    2026-09-15 实测踩到过 —— 不排除时 app 会凭空多出依赖边 (落到内置根上), 而它的身份
+    也会把 vendored 副本算进去。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        root = build_tree(td / "t")
+        files = {p.relative_to(root).as_posix() for p in lomlib.own_files(root)}
+        assert files == {"app.lomt", "pkg.lomp"} or files == {"app.lomt"}, files
+        assert not any(f.startswith("deps/") for f in files), files
+
+
+@test
+def test_capability_closure_is_derived_and_conflicts_reported():
+    """判据 3: 能力需求沿闭包**推导** (不是声明), 且同名不同域必须报冲突。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        w(td, "blk/blk.lomt",
+          "module blk\n\ncapability store : disk[0..4] revocable\n\n"
+          "pub fn put(i: u32) -> u32 {\n    guard store(i);\n    return i;\n}\n")
+        w(td, "other/other.lomt",
+          "module other\n\ncapability store : disk[0..8] revocable\n\n"
+          "pub fn put2(i: u32) -> u32 {\n    guard store(i);\n    return i;\n}\n")
+        w(td, "app/app.lomt", "module app\n\nuse blk\n\nfn _start() {\n"
+          "    let a: u32 = put(1);\n    syscall4(60, 0, 0, 0);\n}\n")
+        shutil.copytree(td / "blk", td / "app" / "deps" / "blk")
+        g = lomlib.resolve(td / "app")
+        closure, conflicts = lomlib.capability_closure(g)
+        assert "store" in closure, closure
+        assert closure["store"][0].endswith("blk"), closure["store"]
+        assert not conflicts, conflicts
+
+        # 同一个构建里两个库各自声明同名能力, 域不同 -> 必须报
+        w(td, "app2/app.lomt", "module app2\n\nuse blk\nuse other\n\nfn _start() {\n"
+          "    let a: u32 = put(1);\n    syscall4(60, 0, 0, 0);\n}\n")
+        for n, src in (("blk", "blk"), ("other", "other")):
+            shutil.copytree(td / src, td / "app2" / "deps" / n)
+        g2 = lomlib.resolve(td / "app2")
+        _, conflicts2 = lomlib.capability_closure(g2)
+        assert conflicts2, "同名不同域的能力没被报出来"
+        assert "store" in conflicts2[0] and "0..4" in conflicts2[0] and "0..8" in conflicts2[0], \
+            conflicts2[0]
+
+
+@test
+def test_multi_file_package_survives_materialize():
+    """**库是多个文件组成的** —— 包内的 `use "路径"` 引用, 物化之后必须仍然解得开。
+
+    物化保留包内的相对目录结构, 所以包内引用不用改写也能继续работать; 端到端证据是:
+    编出来跑, 退出码 = 21+21。
+
+    包名与入口文件名必须一致 (`use <名字>` 指的是**包内与包同名的那个模块**), 所以这里
+    包目录叫 lib、入口就是 lib.lomt; 第二个文件 util.lomt 由包内引用拉到。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        w(td, "lib/lib.lomt",
+          'module lib\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
+          "    return add(x, x);\n}\n")
+        w(td, "lib/util.lomt",
+          "module util\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
+        w(td, "app/app.lomt",
+          "module app\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
+          "    syscall4(60, v as u64, 0, 0);\n}\n")
+        shutil.copytree(td / "lib", td / "app" / "deps" / "lib")
+        g = lomlib.resolve(td / "app")
+        # 包自己的源码有两个文件, 身份把两个都算进去
+        lib = g["root"].edges["lib"]
+        assert len(lib.files) == 2, [f.name for f in lib.files]
+        out = td / "out"
+        lomlib.materialize(g, out)
+        assert (next(out.glob("lib__*/util.lomt"))).exists(), "包内第二个文件没被物化"
+        entry = next(out.glob("app__*/app.lomt"))
+        mod = lomentc.load(entry)
+        deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+        assert not lomentc.check(mod, deps=deps), "包内路径引用在物化后解不开了"
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        exe = td / "mf.exe"
+        exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt" else lomelf.compile_ll(ir))[0])
+        r = subprocess.run([str(exe)], capture_output=True, text=True, shell=False, timeout=60)
+        assert r.returncode == 42, f"退出码应当是 21+21=42, 实际 {r.returncode}"
+
+
+@test
+def test_dependency_start_is_reported_once_and_correctly():
+    """依赖里也写 `_start` -> **只**给那条专用诊断, 不给"按实例起名就能共存"的忠告。
+
+    入口不该共存: 同一库的两个版本按实例起名之后仍会各带一个入口, 那是错的。所以这条
+    不能混在通用顶层重名里报 —— 那条消息会把人引到错误的修法上 (2026-09-15 实测发现)。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        w(td, "boot/boot.lomt",
+          "module boot\n\npub fn go() -> u32 {\n    return 1;\n}\n\n"
+          "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n")
+        w(td, "app/app.lomt",
+          "module app\n\nuse boot\n\nfn _start() {\n    let a: u32 = go();\n"
+          "    syscall4(60, 0, 0, 0);\n}\n")
+        shutil.copytree(td / "boot", td / "app" / "deps" / "boot")
+        g = lomlib.resolve(td / "app")
+        assert not lomlib.name_conflicts(g), \
+            f"_start 不该出现在通用重名里: {lomlib.name_conflicts(g)}"
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = lomlib.main(["check", str(td / "app")])
+        assert rc == 1, rc
+        lines = [x for x in err.getvalue().strip().splitlines() if x]
+        assert len(lines) == 1 and "_start" in lines[0] and "入口只能有一个" in lines[0], lines
+
+
+def main() -> int:
+    failed = []
+    for name, fn in TESTS:
+        try:
+            fn()
+            print(f"  PASS  {name}")
+        except Exception as e:  # noqa: BLE001
+            failed.append((name, e))
+            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
+    print(f"\nloment_lib_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

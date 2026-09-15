@@ -36,6 +36,9 @@ ICON = ROOT / "editors" / "loment.ico"
 EXT_MAP: dict[str, tuple[str, str, str]] = {
     ".lomt": ("Loment.Source", "Loment 源文件", "text/x-loment"),
     ".lom": ("Loment.L0", "Loment L0 声明文件", "text/x-lom"),
+    # 包清单 (docs/168 §3.2): 也是 Loment 源码, 但**工具按清单对待它** —— 独立后缀的
+    # 全部理由就是这条 (按种类分, 不是按文件名加例外; Go 用 go.mod 而非 go.go 同理)。
+    ".lomp": ("Loment.Package", "Loment 包清单", "text/x-loment"),
 }
 ICON_SIZE = 256
 #: 图标配色 (FUI 主题的 accent 蓝; 想换橘色改这一行 + 重跑 --emit-icon)
@@ -241,7 +244,8 @@ def emit_icon(path: Path = ICON) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_filetype",
-                                 description="Windows 文件类型注册 (.lomt/.lom)")
+                                 description="Windows 文件类型注册 ("
+                                             + "/".join(EXT_MAP) + ")")
     ap.add_argument("--register", action="store_true", help="写 HKCU\\Software\\Classes")
     ap.add_argument("--unregister", action="store_true", help="撤销本工具的注册")
     ap.add_argument("--status", action="store_true", help="只读: 打印当前关联状态")

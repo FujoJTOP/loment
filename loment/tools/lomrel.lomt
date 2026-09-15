@@ -175,6 +175,8 @@ tools/loment.py
 tools/lomfmt.py
 tools/lomdoc.py
 tools/lompkg.py
+tools/lomlib.py
+tools/loment_lib_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py

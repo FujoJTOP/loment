@@ -385,6 +385,11 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
 仓库 = FujoOS 的 Loment 线工作树（`loment/`、`lom/`、`tools/loment*.py`、`docs/14?–16?-loment-*.md`）。
 有仓库时额外能用的：
 
+- `python tools/loment.py lib ...` —— **库系统**（`docs/168`）：`tree`（依赖树 + 每个库的实例数）、
+  `id`（实例身份）、`cap`（能力需求闭包，带来源链）、`check`（冲突）、`materialize`（把嵌套与
+  多版本摊成编译器能直接吃的树）。**写库没有新东西要学**：库 = 一个目录；依赖就是源码里的
+  `use`（不用另行声明）；导出就是 `pub`；可选的 `pkg.lomp` 里只放两个标签 ——
+  `pub fn name() -> str` 与 `pub fn version() -> str`（语言没有字符串常量，所以是函数不是 `const`）；
 - `python tools/loment.py diag FILE` —— 把错误码翻译成**中文修复建议**（包内没有这个工具）；
 - `loment/examples/` 全部示例（`tour.lomt` 是全语言导览）；`loment/selfhost/` 是
   "用 Loment 写的 Loment 编译器"；

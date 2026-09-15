@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--fn", dest="func", default=None, help="按函数列出源行")
     g.add_argument("--addr", default=None, help="地址 -> 源行")
     g.set_defaults(fn=cmd_dbg)
-    for name in ("build", "pkg", "lsp"):
+    for name in ("build", "pkg", "lsp", "lib"):
         s = sub.add_parser(name)
         s.add_argument("rest", nargs=argparse.REMAINDER)
         s.set_defaults(fn=None, delegate=name)
@@ -322,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
         if a.delegate == "pkg":
             import lompkg
             return lompkg.main(a.rest)
+        if a.delegate == "lib":
+            import lomlib
+            return lomlib.main(a.rest)
         if a.delegate == "lsp":
             import loment_lsp
             return loment_lsp.main(a.rest)
