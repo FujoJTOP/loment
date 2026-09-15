@@ -19,6 +19,25 @@
 module lomelf
 
 use "loment/examples/bytes.lomt"
+use "loment/tools/win_shim_data.lomt"
+
+// ---------------------------------------------------------------- PE 目标
+//
+// 与 tools/lomelf.py 的 --target pe 逐字对齐。四个节**钉在固定 RVA**，所以
+// `__win_syscall` 里对 IAT 与静态状态的取址全是编译期常量 —— 那段机器码与布局完全无关，
+// 直接从 win_shim_data（`tools/lomelf.py --dump-win-shim` 生成）拷进 .text 即可。
+// 节间**不能留空洞**：加载器会报"不是有效的 Win32 应用程序"，所以每节的 VirtualSize
+// 一直铺到下一节起点。
+const PE_TEXT_RVA: u32 = 0x1000;
+const PE_IDATA_RVA: u32 = 0x1000000;
+const PE_DATA_RVA: u32 = 0x2000000;
+const PE_STATE_RVA: u32 = 0x3000000;
+const PE_SEC_ALIGN: u32 = 0x1000;
+const PE_FILE_ALIGN: u32 = 0x200;
+const PE_WS_SIZE: u32 = 1066840;   // 与参考实现的 WS_SIZE 对齐
+const PE_LIT_OFF: u32 = 0x1000;    // "/proc/self/cmdline" 在 .idata 内的偏移
+const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝对地址时才加
+                                       // （表里存的是 RVA：u32 装不下这个基址）
 
 // ---------------------------------------------------------------- 内存布局
 
@@ -57,6 +76,8 @@ const C_FNO: u32 = 72;             // 当前函数名
 const C_FNL: u32 = 76;
 const C_CC: u32 = 80;
 const C_CSS: u32 = 84;
+const C_PE: u32 = 88;              // 1 = 出 PE (Windows)，0 = 出 ELF
+const C_SHIM: u32 = 92;            // PE：`__win_syscall` 在代码缓冲里的偏移
 
 // 表起址 (相对 M_TAB); 格区 256 字节
 const TB_G: u32 = 256;             // 全局表 stride 32 × 2048
@@ -98,6 +119,7 @@ const A_SIZE: u32 = 12;
 const TB_ARG: u32 = 1573120;       // 调用实参暂存 (每个 24 字节)
 
 const TB_PHI: u32 = 1573504;       // phi 表 stride 16 × 512 (每函数清)
+const TB_IDATA: u32 = 1581696;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
@@ -507,6 +529,22 @@ fn arr_elem(t: ptr, off: u32, len: u32) -> u64 {
     return type_span(t, i + 1, end);
 }
 
+/// 代码/数据在**表里**用什么基址：ELF 用绝对 vaddr，PE 用 RVA。
+/// PE 的 0x140000000 装不进 u32，所以只在真要落 8 字节绝对地址的地方才加回去。
+fn txt_base(tab: ptr) -> u32 {
+    if cell(tab, C_PE) == 1 {
+        return PE_TEXT_RVA;
+    }
+    return TEXT_VADDR;
+}
+
+fn data_base(tab: ptr) -> u32 {
+    if cell(tab, C_PE) == 1 {
+        return PE_DATA_RVA;
+    }
+    return DATA_VADDR;
+}
+
 fn align_to(v: u32, a: u32) -> u32 {
     if a == 0 {
         return v;
@@ -516,6 +554,35 @@ fn align_to(v: u32, a: u32) -> u32 {
         return v;
     }
     return v + (a - r);
+}
+
+// ---------------------------------------------------------------- hex blob
+
+fn hexval(ch: u32) -> u32 {
+    if ch >= 48 {
+        if ch <= 57 {
+            return ch - 48;
+        }
+    }
+    return ch - 87;                 // 'a'..'f'
+}
+
+/// 把 hex 串解成字节写进缓冲；返回新的游标。
+/// win_shim_data 里那两段数据（shim 机器码、导入表）都与布局无关，所以在 Loment 源码里
+/// 以 hex 字面量形式带着走 —— 镜像是独立二进制，不该在运行时去读仓库里的文件。
+fn blob_copy(out: ptr, c: u32, hx: str) -> u32 {
+    let n: u32 = str_len(hx) / 2;
+    let d: u32 = c;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = hexval(str_byte(hx, i * 2) as u32);
+        let lo: u32 = hexval(str_byte(hx, i * 2 + 1) as u32);
+        let b: u32 = hi * 16 + lo;
+        store8(out, d, b as u8);
+        d = d + 1;
+        i = i + 1;
+    }
+    return d;
 }
 
 fn ty_size(t: ptr, off: u32, len: u32) -> u32 {
@@ -1333,10 +1400,10 @@ fn place_globals(tab: ptr, t: ptr) {
         let z: u32 = load32(tab, gbase + G_ZERO);
         if z == 1 {
             bss = align_to(bss, 8);
-            store32(tab, gbase + G_ADDR, DATA_VADDR + dlen + bss);
+            store32(tab, gbase + G_ADDR, data_base(tab) + dlen + bss);
             bss = bss + align_to(sz, 8);
         } else {
-            store32(tab, gbase + G_ADDR, DATA_VADDR + load32(tab, gbase + G_DOFF));
+            store32(tab, gbase + G_ADDR, data_base(tab) + load32(tab, gbase + G_DOFF));
         }
         i = i + 1;
     }
@@ -1907,8 +1974,15 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
         }
         q2 = q2 + 1;
     }
-    d = e1(out, d, 15);
-    d = e1(out, d, 5);
+    if cell(tab, C_PE) == 1 {
+        // Windows 没有 syscall 指令：改成 call __win_syscall，由 shim 按号派发
+        let d2: u32 = e1(out, d, 232);          // E8
+        let disp: u32 = cell(tab, C_SHIM) - (d2 + 4);
+        d = e4(out, d2, disp);
+    } else {
+        d = e1(out, d, 15);
+        d = e1(out, d, 5);
+    }
     return emit_put(tab, out, d, t, doff, dlen, RAX);
 }
 
@@ -2142,9 +2216,13 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
             return die(1);
         }
         if kind == 1 {
-            w64(txt, site, addr as u64);
+            if cell(tab, C_PE) == 1 {
+                w64(txt, site, PE_IMG_BASE + (addr as u64));
+            } else {
+                w64(txt, site, addr as u64);
+            }
         } else {
-            w32(txt, site, addr - (TEXT_VADDR + site + 4));
+            w32(txt, site, addr - (txt_base(tab) + site + 4));
         }
         i = i + 1;
     }
@@ -2210,6 +2288,84 @@ fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u3
     return total;
 }
 
+// ---------------------------------------------------------------- PE 写出
+
+fn pe_sec(ob: ptr, at: u32, nm: str, vs: u32, va: u32, rs: u32, rp: u32, ch: u32) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(ob, at + i, 0 as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < str_len(nm) {
+        store8(ob, at + i, str_byte(nm, i) as u8);
+        i = i + 1;
+    }
+    w32(ob, at + 8, vs);
+    w32(ob, at + 12, va);
+    w32(ob, at + 16, rs);
+    w32(ob, at + 20, rp);
+    w32(ob, at + 36, ch);
+}
+
+/// 组装 PE: DOS 头 + PE 头 + 三个有文件的节。返回文件总长。
+/// 节表按 RVA 升序；每节的 VirtualSize 铺到下一节起点 —— 节间有空洞加载器会拒收。
+/// 入口桩在代码缓冲最前，所以 AddressOfEntryPoint 恒为 PE_TEXT_RVA。
+fn build_pe(ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, idata: ptr, ilen: u32) -> u32 {
+    let opt: u32 = 88;                                   // 64 + 4 + 20
+    let st: u32 = 328;                                   // 节表起址
+    let toff: u32 = align_to(st + 120, PE_FILE_ALIGN);
+    let ioff: u32 = toff + align_to(tlen, PE_FILE_ALIGN);
+    let doff: u32 = ioff + align_to(ilen, PE_FILE_ALIGN);
+    let isize: u32 = align_to(PE_STATE_RVA + PE_WS_SIZE, PE_SEC_ALIGN);
+    let i: u32 = 0;
+    while i < st + 120 {
+        store8(ob, i, 0 as u8);
+        i = i + 1;
+    }
+    store8(ob, 0, 77 as u8);                             // 'M'
+    store8(ob, 1, 90 as u8);                             // 'Z'
+    store8(ob, 60, 64 as u8);                            // e_lfanew = 0x40
+    store8(ob, 64, 80 as u8);                            // 'P'
+    store8(ob, 65, 69 as u8);                            // 'E'
+    store8(ob, 68, 100 as u8);                           // Machine 0x8664
+    store8(ob, 69, 134 as u8);
+    store8(ob, 70, 3 as u8);                             // NumberOfSections
+    store8(ob, 84, 240 as u8);                           // SizeOfOptionalHeader
+    store8(ob, 86, 34 as u8);                            // Characteristics 0x22
+    store8(ob, opt + 0, 11 as u8);                       // Magic 0x20B
+    store8(ob, opt + 1, 2 as u8);
+    store8(ob, opt + 2, 14 as u8);                       // MajorLinkerVersion
+    w32(ob, opt + 16, PE_TEXT_RVA);                      // AddressOfEntryPoint
+    w32(ob, opt + 20, PE_TEXT_RVA);                      // BaseOfCode
+    w32(ob, opt + 24, 0x40000000);                       // ImageBase = 0x140000000
+    w32(ob, opt + 28, 1);
+    w32(ob, opt + 32, PE_SEC_ALIGN);
+    w32(ob, opt + 36, PE_FILE_ALIGN);
+    store8(ob, opt + 40, 6 as u8);                       // MajorOperatingSystemVersion
+    store8(ob, opt + 48, 6 as u8);                       // MajorSubsystemVersion
+    w32(ob, opt + 56, isize);                            // SizeOfImage (PE32+: 56)
+    w32(ob, opt + 60, toff);                             // SizeOfHeaders (PE32+: 60)
+    store8(ob, opt + 68, 3 as u8);                       // Subsystem: console
+    w32(ob, opt + 72, 16777216);                         // StackReserve 16 MiB
+    w32(ob, opt + 80, 1048576);                          // StackCommit 1 MiB
+    w32(ob, opt + 88, 1048576);                          // HeapReserve
+    w32(ob, opt + 96, 4096);                             // HeapCommit
+    w32(ob, opt + 108, 16);                              // NumberOfRvaAndSizes
+    w32(ob, opt + 120, PE_IDATA_RVA);                    // DataDirectory[1] = Import
+    w32(ob, opt + 124, 40);
+    pe_sec(ob, st, ".text", PE_IDATA_RVA - PE_TEXT_RVA, PE_TEXT_RVA,
+           align_to(tlen, PE_FILE_ALIGN), toff, 0x60000020);
+    pe_sec(ob, st + 40, ".idata", PE_DATA_RVA - PE_IDATA_RVA, PE_IDATA_RVA,
+           align_to(ilen, PE_FILE_ALIGN), ioff, 0xC0000040);
+    pe_sec(ob, st + 80, ".data", PE_STATE_RVA - PE_DATA_RVA + PE_WS_SIZE, PE_DATA_RVA,
+           align_to(dlen, PE_FILE_ALIGN), doff, 0xC0000040);
+    copy_n(ob, toff, txt, 0, tlen);
+    copy_n(ob, ioff, idata, 0, ilen);
+    copy_n(ob, doff, gb, 0, dlen);
+    return doff + align_to(dlen, PE_FILE_ALIGN);
+}
+
 fn phdr(ob: ptr, at: u32, flags: u32, off: u32, vaddr: u32, filesz: u32, memsz: u32) {
     w32(ob, at, 1);
     w32(ob, at + 4, flags);
@@ -2252,6 +2408,23 @@ fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
     d = em_mov_ri32(out, d, RDI, 0);
     d = e1(out, d, 15);
     return e1(out, d, 5);
+}
+
+/// PE 入口桩: `sub rsp,0x28; call _start; mov eax,60; mov edi,0; call __win_syscall; ud2`。
+/// 长度固定（26 字节）—— 最后那个 `call` 的 rel32 恒为 +2（跳过 ud2 落到 shim 上），
+/// 所以入口桩不需要知道 shim 的绝对位置；返回后 `d` 正好就是 shim 起点。
+fn em_entry_stub_pe(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
+    let d: u32 = e1(out, c, 72);                // 48
+    d = e1(out, d, 131);                        // 83
+    d = e1(out, d, 236);                        // EC
+    d = e1(out, d, 40);                         // 28   sub rsp, 0x28
+    d = em_call_lbl(out, d, tab, ss, 6);        // call _start
+    d = em_mov_ri32(out, d, RAX, 60);           // mov eax, 60
+    d = em_mov_ri32(out, d, RDI, 0);            // mov edi, 0
+    d = e1(out, d, 232);                        // E8   call __win_syscall
+    d = e4(out, d, 2);                          // rel32 = +2
+    d = e1(out, d, 15);                         // 0F
+    return e1(out, d, 11);                      // 0B   ud2
 }
 
 // ---------------------------------------------------------------- 分支与算术
@@ -2623,7 +2796,7 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     let ns: u32 = plan_params(tab, t, ls, le);
     let ne: u32 = word_end(t, ns, le);
     plan_frame(tab, t, bs, be);
-    lbl_add(tab, ns, ne - ns, 0, 0, TEXT_VADDR + c);
+    lbl_add(tab, ns, ne - ns, 0, 0, txt_base(tab) + c);
     setcell(tab, C_FNO, ns);
     setcell(tab, C_FNL, ne - ns);
     let d: u32 = e1(out, c, 85);          // push rbp
@@ -2652,7 +2825,7 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
             setcell(tab, C_CURBO, ls2);
             setcell(tab, C_CURBL, e3 - 1 - ls2);
             lbl_add(tab, cell(tab, C_FNO), cell(tab, C_FNL), ls2, e3 - 1 - ls2,
-                    TEXT_VADDR + d);
+                    txt_base(tab) + d);
         } else {
             let dst: u64 = line_dest(t, ls2, le2);
             store32(tab, C_DESTO, hi32(dst));
@@ -2675,7 +2848,19 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {
     if ss == NO {
         return fail("没有 _start 入口");
     }
-    let d: u32 = em_entry_stub(out, c, tab, ss);
+    let d: u32 = c;
+    if cell(tab, C_PE) == 1 {
+        d = em_entry_stub_pe(out, c, tab, ss);
+        setcell(tab, C_SHIM, d);                // syscall 站点按这个偏移算 rel32
+        let rn: u32 = n_shim();
+        let k: u32 = 0;
+        while k < rn {
+            d = blob_copy(out, d, shim_part(k));
+            k = k + 1;
+        }
+    } else {
+        d = em_entry_stub(out, c, tab, ss);
+    }
     let i: u32 = 0;
     while i < n {
         let le: u32 = line_end(t, i, n);
@@ -2780,6 +2965,21 @@ fn run(mem: ptr) -> u32 {
     let gb: ptr = ptr_add(mem, M_GB);
     let txt: ptr = ptr_add(mem, M_TXT + 65536);
     let ob: ptr = ptr_add(mem, M_OUT);
+    // 输出名以 `.exe` 结尾 = 出 PE（Windows），否则出 ELF。参考实现用 --target，
+    // 镜像这边按后缀走 —— 发行包的启动器本来就按平台给不同的输出名。
+    let pe: u32 = 0;
+    if ol >= 4 {
+        if load8(pbuf, pout + ol - 4) == 46 {
+            if load8(pbuf, pout + ol - 3) == 101 {
+                if load8(pbuf, pout + ol - 2) == 120 {
+                    if load8(pbuf, pout + ol - 1) == 101 {
+                        pe = 1;
+                    }
+                }
+            }
+        }
+    }
+    setcell(tab, C_PE, pe);
     collect_globals(tab, inb, n as u32, gb);
     place_globals(tab, inb);
     let tlen: u32 = emit_all(tab, txt, 0, inb, n as u32);
@@ -2788,7 +2988,20 @@ fn run(mem: ptr) -> u32 {
         return r;
     }
     let dlen: u32 = align_to(cell(tab, C_GB), 8);
-    let total: u32 = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+    let total: u32 = 0;
+    if pe == 1 {
+        let idata: ptr = ptr_add(tab, TB_IDATA);
+        let dd: u32 = 0;
+        let rn: u32 = n_idata();
+        let k: u32 = 0;
+        while k < rn {
+            dd = blob_copy(idata, dd, idata_part(k));
+            k = k + 1;
+        }
+        total = build_pe(ob, txt, tlen, gb, dlen, idata, dd);
+    } else {
+        total = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+    }
     let ofd: i64 = open_wo(ptr_add(pbuf, pout));
     if ofd < 0 {
         return fail("写不了输出");

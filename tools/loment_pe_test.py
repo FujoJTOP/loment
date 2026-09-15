@@ -304,6 +304,56 @@ def test_pe_runs_the_selfhost_compiler_natively():
 
 
 @test
+def test_pe_selfhost_mirror_matches_reference():
+    """**去 WSL 的最后一道坎**：自举侧的镜像 `loment/tools/lomelf.lomt` 也能出 PE，
+    且与参考实现的 PE **逐字节相同**。也就是说 Windows 包里那个"把 .ll 变成 .exe"的
+    链接器可以是自举产物，不必是 Python 也不必是 clang。
+
+    镜像本体是 Linux ELF（走种子自举链编出来），所以它在 WSL 里跑 —— 但它**产出的**是 PE。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        script = (f"cp {_wsl_path(s1)} /tmp/lompe_s1.bin && chmod +x /tmp/lompe_s1.bin && "
+                  f"cd {_wsl_path(ROOT)} && /tmp/lompe_s1.bin loment/tools/lomelf.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=900, shell=False)
+        assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"
+        mir_ll = td / "lomelf.ll"
+        mir_ll.write_bytes(rr.stdout)
+        mir = td / "lomelf.bin"
+        r2 = subprocess.run(
+            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fno-pie", "-fuse-ld=lld", "-Wl,-e,_start", str(mir_ll), "-o", str(mir)],
+            capture_output=True, text=True, shell=False)
+        assert r2.returncode == 0, f"镜像链接失败: {r2.stderr[-300:]}"
+        ok = 0
+        for rel in PORTABLE:
+            src = ROOT / rel
+            ll = _ir(src, td)
+            got = td / f"{src.stem}.mir.exe"
+            script = (f"cd {_wsl_path(ROOT)} && {_wsl_path(mir)} "
+                      f"{_wsl_path(ll)} {_wsl_path(got)}")
+            r3 = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                                capture_output=True, timeout=300, shell=False)
+            assert r3.returncode == 0, f"镜像出 PE 失败: {r3.stderr[-300:]!r}"
+            blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
+            assert got.read_bytes() == blob, f"[{src.stem}] 镜像的 PE 与参考不一致"
+            ok += 1
+    print(f"      {ok} 个语料: 自举镜像产出的 PE 与参考逐字节相同（去 WSL 的最后一道坎）")
+
+
+@test
 def test_pe_reports_unsupported_instead_of_miscompiling():
     """不支持的东西必须**报错退出**, 不许静默编出一个错的 PE。"""
     bad = [

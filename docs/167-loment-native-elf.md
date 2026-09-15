@@ -1,6 +1,6 @@
 # 167 · Loment 原生 ELF 后端 —— 吃掉 clang 的活（第一格）
 
-> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（7/7），审计主张 **C19 / C20 / C21 / C24**
+> 状态：**进行中**（2026-09-14 起）· 判据 `tools/loment_elf_test.py`（7/7）+ `tools/loment_genesis_test.py`（2/2）+ `tools/loment_pe_test.py`（8/8），审计主张 **C19 / C20 / C21 / C24**
 > 上游：`docs/144` §3 写明"写机器码后端是自举之后的事"——自举已完成，这就是那件事。
 > 前情：`docs/159` §4 曾把 clang 列为"地基语言，本次目标明确保留 / 不计划去掉"。
 > **本文是对那一条方向的后置更新**：0.1.4 Alpha2 的目标就是把它去掉。
@@ -101,7 +101,7 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
    `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
-   （主张 **C24**，判据 `tools/loment_pe_test.py` 7/7）。
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 8/8）。
 
    与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
    换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
@@ -121,23 +121,36 @@ stage1"那一步出现（见 §5）。
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
-   于是判据 `tools/loment_pe_test.py` **7/7**：
+   于是判据 `tools/loment_pe_test.py` **8/8**：
 
    * `test_pe_runs_the_loment_toolchain_natively` —— **`lomstatus` 与 `lomrel` 本身**编成 PE 在
      本机原生跑（argv + 目录遍历 + 文件 I/O），stdout 字节 + 退出码与 Python 版逐字节相同；
    * `test_pe_runs_the_selfhost_compiler_natively` —— **自举种子的 PE 版原生当编译器用**：
-     对语料产出的 IR 与参考实现逐字节相同，那份 IR 再经 `lomelf --target pe` 出的产物行为也对。
+     对语料产出的 IR 与参考实现逐字节相同，那份 IR 再经 `lomelf --target pe` 出的产物行为也对；
+   * `test_pe_selfhost_mirror_matches_reference` —— **自举镜像产出的 PE 与参考逐字节相同**。
+
+   **自举侧的镜像也能出 PE 了**（2026-09-14）：`loment/tools/lomelf.lomt` 加 `--target pe`
+   对应的那条路（按输出名 `.exe` 选目标），产出的 PE 与参考实现**逐字节相同**
+   （判据 `test_pe_selfhost_mirror_matches_reference`）。这是去 WSL 的最后一道坎 ——
+   Windows 包里那个"把 `.ll` 变成 `.exe`"的链接器可以是自举产物，不必是 Python，也不必是 clang。
+
+   镜像这边比参考实现多两条约束，都是它的地址模型带来的：
+   * 表里存的是 **RVA 而不是绝对地址** —— `0x140000000` 装不进 u32，所以只在真要落 8 字节
+     绝对地址的地方（`em_mov_abs` 的绝对回填）才把基址加回去；相对跳转与 RVA 差值等价，不受影响。
+   * shim 机器码与导入表以 **hex 分片**形式内嵌在 `loment/tools/win_shim_data.lomt` 里
+     （`tools/lomelf.py --dump-win-shim` 生成），**故意不做 `str_concat`**：运行时的 bump 堆
+     只有 64 KiB（`lomentc.py` 的 `alloc_ir`，超了直接 `abort` = `ud2` = SIGILL），拼一个
+     8 KB 的 hex 串就会撞顶 —— 这个坑正是先在镜像里炸出来的。
 
    也就是说这台机器上 **`.lomt → 编译器 → .ll → 可执行文件 → 跑` 整条链已经不需要 clang，
-   也不需要 WSL**。写 shim 时又踩到两个"看起来完全无关"的坑，都记在这里：
+   也不需要 WSL，连"出 PE 的那把链接器"都可以是自举产物**。写 shim 时又踩到两个"看起来完全无关"的坑，都记在这里：
    （d）shim 最初把 argv 源指针放在 `rax` 上又用 `al` 装字节 —— `movb (%rax),%al` 会**把指针
    自己的低字节写掉**，指针每走一步就跳飞，症状是 argv 只剩一个字符；
    （e）PE 的默认栈（1 MB）对**编译器自己**太小 —— 递归下降直接把栈打爆成 SIGSEGV，
    换成 16 MB 保留才过。小工具照不出来，只有喂编译器本体才暴露。
 
    **还没做**：`loment_dist.py` 里"Windows 装法 = 拷进 WSL + `loment.cmd` 转发"还没改成装原生
-   `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang；自举侧的镜像
-   `loment/tools/lomelf.lomt` 还没有 PE 目标。
+   `loment.exe`；`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处也还在调 clang。
 
    **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
    状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是
@@ -217,6 +230,7 @@ python tools/loment_pe_test.py
   PASS  test_pe_builds_and_runs_without_clang_or_wsl        # PATH 里只剩 python 也照跑
   PASS  test_pe_runs_the_loment_toolchain_natively          # lomstatus/lomrel 原生跑, 与 Python 逐字节同
   PASS  test_pe_runs_the_selfhost_compiler_natively          # 种子的 PE 版原生当编译器, IR 逐字节同 + 全链可跑
+  PASS  test_pe_selfhost_mirror_matches_reference             # 镜像产的 PE 与参考逐字节相同
   PASS  test_pe_reports_unsupported_instead_of_miscompiling # 3 类输入报错
   PASS  test_pe_cli_check_and_usage                         # --check 不落盘 rc=0 · 非法 --target rc=2
 

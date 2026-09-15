@@ -1970,7 +1970,45 @@ def dump_win_shim(path) -> int:
     em.asm = a
     _idata, slots = build_pe_idata()
     emit_win_shim(em, slots)
-    Path(path).write_bytes(a.finalize())
+    blob = a.finalize()
+    Path(path).write_bytes(blob)
+    # 再生成自举镜像用的**自包含**数据模块（hex 内嵌）：镜像是独立二进制，
+    # 不该依赖运行时去读仓库里的文件。
+    idata, _slots = build_pe_idata()
+
+    def hex_parts(data):
+        h = data.hex()
+        return [h[i:i + 400] for i in range(0, len(h), 400)]
+
+    def part_fn(name, parts):
+        out = [f"pub fn {name}(i: u32) -> str {{"]
+        out += [f'    if i == {k} {{ return "{p}"; }}' for k, p in enumerate(parts)]
+        out += ['    return "";', "}", ""]
+        return out
+
+    sparts, iparts = hex_parts(blob), hex_parts(idata)
+    src = [
+        "// win_shim_data.lomt — 由 `tools/lomelf.py --dump-win-shim` 生成，别手改。",
+        "//",
+        f"// 两段**与布局无关**的数据：`__win_syscall` 的机器码（{len(blob)} 字节）与",
+        f"// kernel32 导入表（{len(idata)} 字节，含 /proc/self/cmdline 字面量）。四个节钉在固定",
+        "// RVA、IAT 槽是常量，所以它们里面一个待回填的地址都没有 —— 自举镜像原样搬即可。",
+        "//",
+        "// **故意按片给、不做 str_concat**：运行时的 bump 堆只有 64 KiB（lomentc.py 的",
+        "// alloc_ir，超了直接 abort = ud2 = SIGILL），拼一个 8 KB 的 hex 串就会撞顶。",
+        "// 调用方逐片解、逐片写进输出即可。",
+        "",
+        "module win_shim_data",
+        "",
+        f"pub fn n_shim() -> u32 {{ return {len(sparts)}; }}",
+        "",
+    ]
+    src += part_fn("shim_part", sparts)
+    src += [f"pub fn n_idata() -> u32 {{ return {len(iparts)}; }}", ""]
+    src += part_fn("idata_part", iparts)
+    shim_src = Path(__file__).resolve().parent.parent / "loment" / "tools" / "win_shim_data.lomt"
+    shim_src.write_text("\n".join(src), encoding="utf-8", newline="\n")
+    print(f"[OK] {path} ({len(blob)} B) + {shim_src.name}")
     return 0
 
 
