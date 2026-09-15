@@ -1,7 +1,7 @@
 module ahci
 
 // M68: AHCI 驱动核心 (纯逻辑, 寄存器块由调用方提供 -> 可在宿主/内核两侧复用)。
-use "loment/examples/bytes.lomt"
+use bytes
 
 pub fn popcount32(x: u32) -> u32 {
     let v: u32 = x;

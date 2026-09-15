@@ -677,7 +677,9 @@ def _dep_paths(target: Path) -> list[Path]:
     seen: set[Path] = set()
 
     def visit(m, cur_base: Path) -> None:
-        for imp in m.imports:
+        # 名字形式先落到绝对路径; 规则在 lomentc.resolve_name, 这里只调用不重抄
+        for imp in list(m.imports) + [str(lomentc.resolve_name(n, ROOT))
+                                      for n in m.name_imports]:
             p = Path(imp)
             cand = p if p.is_absolute() else None
             if cand is None or not cand.exists():
@@ -1246,6 +1248,15 @@ def test_m85_driver_gate_on_probe_cases():
                             f"要么它其实是解析期错误 (请登记进 PARSE_LEVEL)")
         print(f"      规则负例经驱动器: {len(cases)} 条全部非零退出且无信号 "
               f"(解析期豁免 {len(PARSE_LEVEL)} 条)")
+        # 名字形式 `use <名字>` 装载失败必须**报出来** (镜像侧), 不许静默少装一个依赖 ——
+        # 静默少装的后果是后面报一条 E002 "未定义的函数", 用户根本看不出是导入出的事。
+        miss = Path(td) / "g_namemiss.lomt"
+        miss.write_text("module g_namemiss\n\nuse nosuchmod\n\nfn f() -> u32 { return 0; }\n",
+                        encoding="utf-8", newline="\n")
+        rc2, _o2, err2 = _run_driver_raw(elf, _wsl_path(miss), td, "g_namemiss")
+        assert rc2 != 0 and "名字导入" in err2, \
+            f"名字导入失败没报出来: rc={rc2} err={err2[-200:]!r}"
+        print("      名字导入失败: 驱动器报错并退出非零")
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:

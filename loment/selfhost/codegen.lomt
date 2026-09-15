@@ -26,8 +26,8 @@ module codegen
 // 现在单元已经 253 个函数, 所以又抬了一次 (枚举表挪到 18944 的空档里, 参数替换表跟在
 // fk 后面), 留出 ~20% 余量。容量由 `test_m85_codegen_table_capacity` 静态钉住:
 // 单元函数数超过 307 会红, 而不是悄悄写穿。
-use "loment/examples/bytes.lomt"
-use "loment/selfhost/lexer.lomt"
+use bytes
+use lexer
 
 /// 状态块内的 16B 共享 scratch (只在下一次调用前存活, 不跨调用保留)。
 fn scratch_buf(s: ptr) -> ptr {

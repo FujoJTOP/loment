@@ -25,9 +25,9 @@
 
 module lompkg
 
-use "loment/lib/json.lomt"
-use "loment/lib/sha256.lomt"
-use "loment/examples/bytes.lomt"
+use json
+use sha256
+use bytes
 
 // ---------------------------------------------------------------- 尺寸与布局
 // 单块 brk 内存 + 命名偏移 (与 lomfmt.lomt 同法): 每层依赖递归要用的持久缓冲按 depth 切片,

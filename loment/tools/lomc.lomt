@@ -16,8 +16,8 @@
 
 module lomc
 
-use "loment/selfhost/lexer.lomt"
-use "loment/lib/json.lomt"
+use lexer
+use json
 
 // ---------------------------------------------------------------- 布局
 const SRC_CAP: u32 = 1048576;

@@ -4,8 +4,8 @@ module parser
 // 覆盖: module / fn 签名 + 函数体 (let/set/ret/if/while/guard/表达式语句)
 //       + 表达式 (int/bool/id/call/bin/un/cast/field/idx, 优先级同 lomentc)。
 // dump 由 tools/loment_p8_test.py 与 Python 版逐字符对照。
-use "loment/examples/bytes.lomt"
-use "loment/selfhost/lexer.lomt"
+use bytes
+use lexer
 
 pub fn tok_kind(t: ptr, i: u32) -> u32 {
     return load32(t, i * 20);

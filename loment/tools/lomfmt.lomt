@@ -19,7 +19,7 @@
 
 module lomfmt
 
-use "loment/selfhost/lexer.lomt"
+use lexer
 
 const SRC_CAP: u32 = 1048576;      // 源文件 (语料最大 ~100 KiB, 留足)
 const LINE_CAP: u32 = 262144;      // 当前行渲染缓冲

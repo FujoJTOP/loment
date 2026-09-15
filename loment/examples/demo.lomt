@@ -10,7 +10,7 @@ module demo
 use "lom/fujr.lom"
 
 // 导入另一个 L1 模块 (多文件程序)
-use "loment/examples/mathutil.lomt"
+use mathutil
 
 capability blk_write : disk[0..4] revocable
 

@@ -1,7 +1,7 @@
 module all_loment
 
 // M78: 全 Loment 演示 —— 多模块 + 泛型 + 能力域 + 用户态 syscall 的组合。
-use "loment/examples/mathutil.lomt"
+use mathutil
 
 fn write_str(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);

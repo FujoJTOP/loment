@@ -3,7 +3,7 @@ module lexer
 // M79: Loment 版 lexer —— 与 tools/lomc.py 的词法规则一致 (token 流对照见 loment_p8_test)。
 // token 记录 20B (小端): kind u32 @0 | start u32 @4 | len u32 @8 | line u32 @12 | col u32 @16
 // kind: 0=ident 1=number 2=string 3=punct 4=eof
-use "loment/examples/bytes.lomt"
+use bytes
 
 fn is_digit(c: u32) -> bool {
     return c >= 48 && c <= 57;

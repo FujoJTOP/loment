@@ -649,8 +649,9 @@ class MethodCall:
 @dataclass
 class Module:
     name: str
-    uses: list[str] = field(default_factory=list)      # use "*.lom"  (L0 布局)
-    imports: list[str] = field(default_factory=list)   # use "*.lomt" (L1 模块)
+    uses: list[str] = field(default_factory=list)      # use "*.lom"  (L0 布局; 只有路径形式)
+    imports: list[str] = field(default_factory=list)   # use "*.lomt" (L1 模块; 路径形式)
+    name_imports: list[str] = field(default_factory=list)   # use <名字>  (L1 模块; 名字形式)
     caps: list[Capability] = field(default_factory=list)
     structs: list[Struct] = field(default_factory=list)
     enums: list[EnumDecl] = field(default_factory=list)
@@ -760,11 +761,18 @@ class Parser:
                     raise LomError(t.line, t.col, "pub 之后需要一项声明")
             if t.val == "use":
                 self.next()
-                p = self.expect("string", None, "（.lom 或 .lomt 路径）").val
-                if p.endswith(".lomt"):
-                    mod.imports.append(p)
+                # 两种写法并存:
+                #   use "loment/examples/bytes.lomt"   路径形式 (L0 布局只能是这一种)
+                #   use bytes                          名字形式 (只解析 .lomt, 见 NAME_ROOTS)
+                nxt = self.peek()
+                if nxt.kind == "ident":
+                    mod.name_imports.append(self.next().val)
                 else:
-                    mod.uses.append(p)
+                    p = self.expect("string", None, "（.lom 或 .lomt 路径）").val
+                    if p.endswith(".lomt"):
+                        mod.imports.append(p)
+                    else:
+                        mod.uses.append(p)
             elif t.val == "capability":
                 mod.caps.append(self.parse_capability())
             elif t.val == "struct":
@@ -1945,6 +1953,25 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         return
 
 
+#: `use <名字>` 的搜索根 (相对仓库根, 按序找 `<名字>.lomt`)。
+#: **只解析 .lomt** —— 名字形式是给 L1 模块用的; L0 布局 (`*.lom`) 继续走路径形式,
+#: 于是不存在"这个名字算 L0 还是 L1"的歧义。顺序: 标准库在前, 后面三个覆盖仓库自身。
+NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools")
+
+
+def resolve_name(name: str, root: Path) -> Path:
+    """`use <名字>` -> 真实文件。命中必须**唯一**: 找不到或有歧义都报错, 不静默取第一个。"""
+    hits = [root / rel / f"{name}.lomt" for rel in NAME_ROOTS
+            if (root / rel / f"{name}.lomt").exists()]
+    if not hits:
+        raise LomError(1, 1, f"名字导入找不到模块 {name}: "
+                             f"在 {', '.join(NAME_ROOTS)} 下都没有 {name}.lomt")
+    if len(hits) > 1:
+        rel = ", ".join(str(h.relative_to(root)).replace("\\", "/") for h in hits)
+        raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
+    return hits[0]
+
+
 def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None) -> list[Module]:
     """按依赖序返回导入的 L1 模块 (被依赖者在前), 去重 + 循环检测。"""
     order: list[Module] = []
@@ -1956,7 +1983,9 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None)
         stack.add(rp)
 
     def visit(m: Module, cur_base: Path) -> None:
-        for imp in m.imports:
+        # 名字形式先落到绝对路径, 之后与路径形式走同一条流水线 (去重/循环/先序)
+        paths = list(m.imports) + [str(resolve_name(n, root)) for n in m.name_imports]
+        for imp in paths:
             p = Path(imp)
             cand = p if p.is_absolute() else None
             if cand is None or not cand.exists():

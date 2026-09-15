@@ -13,7 +13,7 @@
 
 module lomdoc
 
-use "loment/selfhost/lexer.lomt"
+use lexer
 
 const SRC_CAP: u32 = 1048576;      // 源文件
 const OUT_CAP: u32 = 2097152;      // 输出

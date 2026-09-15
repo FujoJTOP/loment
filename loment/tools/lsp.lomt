@@ -14,9 +14,9 @@
 
 module lsp
 
-use "loment/lib/json.lomt"
-use "loment/selfhost/lexer.lomt"
-use "loment/selfhost/checker.lomt"
+use json
+use lexer
+use checker
 
 // ---------------------------------------------------------------- 尺寸与布局
 

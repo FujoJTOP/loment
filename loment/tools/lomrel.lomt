@@ -8,8 +8,8 @@
 
 module lomrel
 
-use "loment/examples/bytes.lomt"
-use "loment/lib/sha256.lomt"
+use bytes
+use sha256
 
 // ---------------------------------------------------------------- 内存
 const M_ARGV: u32 = 0;             // 8192

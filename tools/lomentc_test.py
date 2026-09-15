@@ -47,7 +47,9 @@ def test_demo_parses_and_checks():
         "sum_array", "fill_incr", "color_code", "sum_range", "quadruple", "max_blocks",
         "shape_area",
     ]
-    assert mod.imports == ["loment/examples/mathutil.lomt"]
+    # demo.lomt 用的是**名字形式** (语料 2026-09-15 迁过去了); L0 的 lom/fujr.lom 仍是路径形式
+    assert mod.name_imports == ["mathutil"], mod.name_imports
+    assert mod.uses == ["lom/fujr.lom"]
     assert [c.name for c in mod.caps] == ["blk_write"]
     assert [s.name for s in mod.structs] == ["Blk"]
     names = [e.name for e in mod.enums]
@@ -458,6 +460,54 @@ def test_cycle_import_rejected():
             assert "循环导入" in ex.msg, ex.msg
         else:
             raise AssertionError("循环导入应被拒绝")
+
+
+@test
+def test_name_import_resolves():
+    """名字形式 `use mathutil` 落到 loment/examples/mathutil.lomt (搜索根第一条命中)。"""
+    assert lomentc.resolve_name("mathutil", ROOT) == ROOT / "loment" / "examples" / "mathutil.lomt"
+    mod = parse("module m\nuse mathutil\nfn f() -> u32 { return double(2); }\n")
+    deps = lomentc.resolve_deps(mod, ROOT, ROOT, entry=ROOT / "x.lomt")
+    assert [x.name for x in deps] == ["mathutil"]
+
+
+@test
+def test_name_import_not_found():
+    mod = parse("module m\nuse nosuchmod\nfn f() -> u32 { return 0; }\n")
+    try:
+        lomentc.resolve_deps(mod, ROOT, ROOT, entry=ROOT / "x.lomt")
+    except lomc.LomError as ex:
+        assert "名字导入找不到模块" in ex.msg, ex.msg
+    else:
+        raise AssertionError("找不到的名字导入应报错")
+
+
+@test
+def test_name_import_ambiguous_is_rejected():
+    """命中多处必须报错, **不许静默取第一个** —— 否则搜索顺序会变成隐藏语义。"""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        for rel in ("loment/lib", "loment/examples"):
+            (d / rel).mkdir(parents=True)
+            (d / rel / "dup.lomt").write_text("module dup\n", encoding="utf-8")
+        try:
+            lomentc.resolve_name("dup", d)
+        except lomc.LomError as ex:
+            assert "名字导入有歧义" in ex.msg and "lib" in ex.msg and "examples" in ex.msg, ex.msg
+        else:
+            raise AssertionError("歧义的名字导入应报错")
+
+
+@test
+def test_name_and_path_import_are_equivalent():
+    """两种写法装载出**同一串依赖**(名字形式只是路径形式的一层解析)。"""
+    src = 'module m\nuse mathutil\nfn f() -> u32 { return double(2); }\n'
+    got = [x.name for x in lomentc.resolve_deps(
+        parse(src), ROOT, ROOT, entry=ROOT / "x.lomt")]
+    want = [x.name for x in lomentc.resolve_deps(
+        parse('module m\nuse "loment/examples/mathutil.lomt"\nfn f() -> u32 { return double(2); }\n'),
+        ROOT, ROOT, entry=ROOT / "x.lomt")]
+    assert got == want == ["mathutil"]
 
 
 @test

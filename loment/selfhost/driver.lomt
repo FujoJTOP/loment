@@ -33,9 +33,9 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 const SCR_CAP: u32 = 8192;       // 小暂存: 前 4096 是 NUL 路径, 之后是 use 清单
 const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
 
-use "loment/selfhost/lexer.lomt"
-use "loment/selfhost/codegen.lomt"
-use "loment/selfhost/checker.lomt"
+use lexer
+use codegen
+use checker
 
 /// 退出; 返回值只为类型完整 (syscall 之后不会回来)。
 fn die(code: u64) -> u32 {
@@ -213,6 +213,75 @@ fn strip_cr(buf: ptr, n: u32) -> u32 {
     return o;
 }
 
+/// `use <名字>` 的搜索根 (与参考实现的 `lomentc.NAME_ROOTS` **必须逐条一致**)。
+fn name_root_at(r: u32) -> str {
+    if r == 0 {
+        return "loment/lib";
+    }
+    if r == 1 {
+        return "loment/examples";
+    }
+    if r == 2 {
+        return "loment/selfhost";
+    }
+    return "loment/tools";
+}
+
+/// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
+/// 与 `lomentc.resolve_name` 同规则: 依次在 NAME_ROOTS 下找 `<名字>.lomt`, **命中必须唯一**
+/// (不静默取第一个)。只解析 `.lomt` —— 名字形式是 L1 模块用的, L0 布局走路径形式。
+fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
+    // 候选写进 tmp, **不能写 dst**: 为了判歧义要试完 4 个根, 而后面那些试写会把
+    // 已经命中的那个覆盖掉 (踩过: examples 命中 29 字节, 又被 tools 的 26 字节盖住,
+    // 于是 load_file 拿到 "loment/tools/mathutil.lomt" + 上一轮残尾 "omt")。
+    let tmp: ptr = ptr_add(scr, 4160);
+    let hits: u32 = 0;
+    let hit_len: u32 = 0;
+    let r: u32 = 0;
+    while r < 4 {
+        let rp: str = name_root_at(r);
+        let d: u32 = 0;
+        let j: u32 = 0;
+        while j < str_len(rp) {
+            store8(tmp, d, str_byte(rp, j) as u8);
+            d = d + 1;
+            j = j + 1;
+        }
+        store8(tmp, d, 47 as u8);   // '/'
+        d = d + 1;
+        j = 0;
+        while j < len {
+            store8(tmp, d, load8(src, off + j) as u8);
+            d = d + 1;
+            j = j + 1;
+        }
+        store8(tmp, d, 46 as u8);   // ".lomt"
+        store8(tmp, d + 1, 108 as u8);
+        store8(tmp, d + 2, 111 as u8);
+        store8(tmp, d + 3, 109 as u8);
+        store8(tmp, d + 4, 116 as u8);
+        d = d + 5;
+        let fd: i64 = open_ro(tmp, d, scr);
+        if fd >= 0 {
+            syscall4(3, fd as u64, 0, 0);
+            if hits == 0 {
+                let q: u32 = 0;
+                while q < d {
+                    store8(dst, q, load8(tmp, q) as u8);
+                    q = q + 1;
+                }
+                hit_len = d;
+            }
+            hits = hits + 1;
+        }
+        r = r + 1;
+    }
+    if hits != 1 {
+        return 0;
+    }
+    return hit_len;
+}
+
 /// 这个 `use` 的路径是不是 `.lomt`。
 /// `lomentc` 的 parser 只把 `.lomt` 记进 `mod.imports`, `use "...lom"` 进 `mod.uses`
 /// (L0 声明由 lomc 处理, 不参与 L1 单元装载) —— 驱动必须同规则, 否则会把 fujr.lom
@@ -247,11 +316,15 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     let slot: ptr = ptr_add(out, UNIT_CAP - (depth + 1) * SLOT);
     let fd: i64 = open_ro(path, n, scr);
     if fd < 0 {
-        // 就地报路径: 再晚一点 slot 的读就会把这块内存盖掉
+        // 就地报路径: 再晚一点 slot 的读就会把这块内存盖掉。
+        // **必须硬失败** —— 原来这里是"报一行然后接着编", 于是缺依赖的编译会退出 0,
+        // 只留一行 stderr。那正是这套工具链反复要消灭的东西(见 lomelf 头注与 docs/167:
+        // "把静默错编改成报错退出"), 而且参考实现遇到这种输入是抛错退非零的 —— 两边
+        // 必须一致。用户能不能看出是导入出的事, 就靠这一下。
         write_all(2, str_ptr("fujoc-s: 打不开 "), 20);
         write_all(2, path, n as u64);
         write_all(2, str_ptr("\n"), 1);
-        return off;
+        die(1);
     }
     let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
     syscall4(3, fd as u64, 0, 0);
@@ -261,14 +334,34 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     let uses: ptr = ptr_add(scr, 4096);
     let nu: u32 = 0;
     let i: u32 = 0;
+    // 两种写法都收进来, 统一成"确切的 (起点, 长度)"再递归:
+    //   字符串形式 `use b` -> 剥掉引号
+    //   名字形式   `use name`       -> 解析成真实路径, 写在 slot 的 nb 之后
+    // (每层各有一个槽, 所以递归不会踩到父层写下的这些路径)
+    let rbase: u32 = nb;
     while load32(toks, i * 20) != 4 && nu < 8 {
-        if tok_is(slot, toks, i, "use") && load32(toks, (i + 1) * 20) == 2 {
+        if tok_is(slot, toks, i, "use") {
+            let k: u32 = load32(toks, (i + 1) * 20);
             let up: u32 = load32(toks, (i + 1) * 20 + 4);
             let ul: u32 = load32(toks, (i + 1) * 20 + 8);
-            if is_lomt(slot, up, ul) == 1 && nu < 8 {
-                store32(uses, nu * 8, up);
-                store32(uses, nu * 8 + 4, ul);
+            if k == 2 && is_lomt(slot, up, ul) == 1 {
+                store32(uses, nu * 8, up + 1);
+                store32(uses, nu * 8 + 4, ul - 2);
                 nu = nu + 1;
+            } else if k == 0 {
+                let rl: u32 = resolve_use_name(slot, up, ul, ptr_add(slot, rbase + nu * 64), scr);
+                if rl == 0 {
+                    // 同"打不开": 报出来之后**硬失败**, 不带着缺依赖的单元继续编
+                    let msg: str = "fujoc-s: 名字导入找不到或有歧义: ";
+                    write_all(2, str_ptr(msg), str_len(msg) as u64);
+                    write_all(2, ptr_add(slot, up), ul as u64);
+                    write_all(2, str_ptr("\n"), 1);
+                    die(1);
+                } else {
+                    store32(uses, nu * 8, rbase + nu * 64);
+                    store32(uses, nu * 8 + 4, rl);
+                    nu = nu + 1;
+                }
             }
         }
         i = i + 1;
@@ -277,7 +370,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     while u < nu {
         let sp: u32 = load32(uses, u * 8);
         let sl: u32 = load32(uses, u * 8 + 4);
-        off = load_file(ptr_add(slot, sp + 1), sl - 2, out, off, seen, snc,
+        off = load_file(ptr_add(slot, sp), sl, out, off, seen, snc,
                         depth + 1, scr, toks);
         u = u + 1;
     }

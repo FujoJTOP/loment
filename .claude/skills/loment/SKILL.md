@@ -73,7 +73,7 @@ loment run   hello.lomt          # -> hello
 | 构造 | 写法 |
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
-| 导入 | `use "path/to/other.lomt"`（相对当前文件或工作目录） |
+| 导入 | **两种写法**：`use 名字`（如 `use bytes`，按 `loment/lib` → `examples` → `selfhost` → `tools` 找 `名字.lomt`）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`） |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
 | 变量 | `let x: u32 = e;`，赋值 `x = e;` —— **类型标注必写**，语言没有类型推断 |

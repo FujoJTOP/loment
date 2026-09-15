@@ -24,7 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-USE_RE = re.compile(r'use\s+"([^"]+)"')
+#: 两种写法都要认: `use "path.lomt"` 与 `use 名字` (名字形式的解析规则**只有一份**,
+#: 就是 lomentc.resolve_name —— 这里绝不自己再抄一遍, 抄了就会与编译器的规则漂移)。
+USE_RE = re.compile(r'use\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))')
 
 
 def _rel(p: Path) -> str:
@@ -35,20 +37,24 @@ def _rel(p: Path) -> str:
 
 
 def dep_files(p: Path, root: Path, seen: set[Path]) -> list[Path]:
-    """递归收集 use "*.lomt" 依赖 (只跟 .lomt, 不跟 .lom 布局)。"""
+    """递归收集 L1 依赖 (只跟 .lomt, 不跟 .lom 布局)。两种 `use` 写法都认。"""
     p = p.resolve()
     if p in seen or not p.exists():
         return []
     seen.add(p)
     out = [p]
     for m in USE_RE.finditer(p.read_text(encoding="utf-8")):
-        rel = m.group(1)
-        if not rel.endswith(".lomt"):
-            continue
-        for cand in ((root / rel), (p.parent / rel)):
-            if cand.exists():
-                out += dep_files(cand, root, seen)
-                break
+        rel, name = m.group(1), m.group(2)
+        if name is not None:
+            # 名字形式: 规则只有 lomentc 那一份, 这里只调用
+            cand = lomentc.resolve_name(name, root)
+        else:
+            if not rel.endswith(".lomt"):
+                continue
+            cand = next((c for c in ((root / rel), (p.parent / rel)) if c.exists()), None)
+            if cand is None:
+                continue
+        out += dep_files(cand, root, seen)
     return out
 
 

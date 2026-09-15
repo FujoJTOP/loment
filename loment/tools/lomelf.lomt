@@ -18,8 +18,8 @@
 
 module lomelf
 
-use "loment/examples/bytes.lomt"
-use "loment/tools/win_shim_data.lomt"
+use bytes
+use win_shim_data
 
 // ---------------------------------------------------------------- PE 目标
 //

@@ -21,7 +21,7 @@
 
 module json
 
-use "loment/examples/bytes.lomt"
+use bytes
 
 const J_K_OBJ: u32 = 1;
 const J_K_ARR: u32 = 2;

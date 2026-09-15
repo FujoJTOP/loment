@@ -12,8 +12,8 @@ module checker
 // 批次 1 = **声明级**规则 (只吃 token 流, 不需要表达式类型推断);
 // 表达式类型那一批 (E001 的各种"两侧类型对不上") 还没搬过来 —— 见 docs/150 缺口表。
 // 输出: 每条错误 8 字节 (code u32 | tok u32); 返回错误条数。
-use "loment/examples/bytes.lomt"
-use "loment/selfhost/lexer.lomt"
+use bytes
+use lexer
 
 const K_FN: u32 = 1;
 const K_STRUCT: u32 = 2;
