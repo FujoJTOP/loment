@@ -24,7 +24,7 @@ Windows 只留一个 `loment.cmd` 转发（`loment_dist.py:369-374`）。所以"
 
 ## 2. 这一步做了什么
 
-新增 `tools/lomelf.py`（1177 行，参考实现）：**把 LLVM IR 子集直接编成 x86-64 静态 ELF**。
+新增 `tools/lomelf.py`（参考实现，含 PE 目标后约 2000 行）：**把 LLVM IR 子集直接编成 x86-64 静态 ELF**。
 
 ```bash
 python tools/lomelf.py in.ll -o out
@@ -101,7 +101,7 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
    `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
-   （主张 **C24**，判据 `tools/loment_pe_test.py` 5/5）。
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 7/7）。
 
    与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
    换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
@@ -216,8 +216,8 @@ M67 RESULT: PASS loment-user，rc=0，与 clang/Linux 路逐字节一致。
 all_loment 的 PE 产物同样一致（M78 sum=42 double=84 max=84 fib=55）。
 ```
 
-规模：`tools/lomelf.py` **1470 行**（参考，含 PE 目标）；`loment/tools/lomelf.lomt` **约 2700 行**
-（自举镜像）；`tools/loment_elf_test.py` 约 300 行；`tools/loment_pe_test.py` 286 行。
+规模：`tools/lomelf.py` **约 2000 行**（参考，含 PE 目标）；`loment/tools/lomelf.lomt` **约 2700 行**
+（自举镜像）；`tools/loment_elf_test.py` 约 300 行；`tools/loment_pe_test.py` 约 340 行。
 
 **自举链的容量闸门**（写镜像时撞到的，逐条记）：自举 codegen 的**形参上限是 10**
 （`loment/selfhost/codegen.lomt` 的表按 10 槽定）—— 超过会让 stage1 直接 SIGILL，
