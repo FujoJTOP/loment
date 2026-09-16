@@ -671,7 +671,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "8ff0c410b52b1e4e357e21aaaace4988a788ca43390db77a5d3b03a45c8e10a3"
+   "sha256": "44b8351bd1383e1d7a570423a9cf78312beb1013b24b4cbb6e226baa78e8c697"
   },
   {
    "path": "tools/loment_diag.py",
@@ -1239,7 +1239,7 @@
   },
   {
    "path": "docs/157-loment-editor-hosts.md",
-   "sha256": "aaee12ba6faff51f1adc4a784a1bf075da6b377651e5e5c0ada97e4e35d18e1c"
+   "sha256": "68586fdced561c707d6f5b998d95500c232504be8429b760a443a18e0733bfa9"
   },
   {
    "path": "docs/158-loment-freeze.md",
