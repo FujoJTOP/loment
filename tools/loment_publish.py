@@ -308,7 +308,10 @@ def _edit_meta(spec: dict) -> int:
     cur = json.loads(r.stdout)
     args, notes = [], []
     if cur.get("visibility", "").lower() != spec["visibility"]:
-        args += ["--visibility", spec["visibility"]]
+        # `gh` 在这里有一道刻意的闸: 改可见性必须**同时**给 `--accept-visibility-change-consequences`,
+        # 不然直接拒绝 (实测: "use of --visibility flag requires ...")。别把它当成要绕的障碍 ——
+        # 它就是"这一步有外向后果"的那句话, 我们的 spec 已经把它写明了, 照给。
+        args += ["--visibility", spec["visibility"], "--accept-visibility-change-consequences"]
         notes.append(f"可见性 {cur.get('visibility','?')} -> {spec['visibility']}")
     if (cur.get("description") or "") != spec["description"]:
         args += ["--description", spec["description"]]
