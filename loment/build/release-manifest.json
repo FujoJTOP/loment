@@ -67,11 +67,11 @@
   },
   {
    "path": "tools/lomlib.py",
-   "sha256": "06c9e64927628a415a52274a97e250a7b4ac9c953ff8a2fef3b2205b56f8a475"
+   "sha256": "d61825ffa98d293e362cfa478279bbd9d38bacc0d1680c08f637393a391f7de9"
   },
   {
    "path": "tools/loment_lib_test.py",
-   "sha256": "5de97c41f99bc69412b6ce05ac3ca6181436b641023638d61b8c08389de468da"
+   "sha256": "ee4dc9fac0b95bcaa1304b692f7eb0b6ebc8fd35c50345f94170570f8d1efe25"
   },
   {
    "path": "tools/loment_diag.py",
@@ -671,7 +671,7 @@
   },
   {
    "path": "docs/168-loment-library-system.md",
-   "sha256": "96f4b7755994b3857249bd30f4657ac223e42346e9d456eba3ebdc8b1b107d47"
+   "sha256": "bd8ee6524f350e96861c9c2e7cd56d556c1f2ccd79f94b7a0f776fdce5ec8846"
   },
   {
    "path": "docs/manual/index.md",

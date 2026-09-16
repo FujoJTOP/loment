@@ -198,26 +198,147 @@ def test_diamond_dedups_to_one_instance():
 
 
 @test
-def test_multi_version_reports_conflict_not_silence():
-    """多版本共存: 两份实例都在, 而且冲突被**精确报出来** (不是静默择一)。
+def test_multi_version_coexists_in_one_binary():
+    """**多版本共存**: 同一程序里同时用 mathutil@v1 与 mathutil@v2, 各自算出自己的结果。
 
-    发射符号是平的, 所以同一库的两个版本必然导出同名顶层项 —— 今天编译器会报一句
-    看不出所以然的 E13。这里要的是"哪个名字、来自哪两个实例"。
+    这是 docs/168 里那个"代价"的兑现点。做法不是去改编译器内核, 而是在**物化**这层按实例
+    给顶层名加后缀 —— 编译器于是只看到互不同名的模块, 完全不需要知道"版本"存在
+    (也就不会牵动参考实现与自举镜的发射符号、逐字节 IR 一致与自举定点)。
+
+    x=5: v1 的 scale 是 ×2 (mid1 再 +1 → 11), v2 的 scale 是 ×3 (mid2 再 +100 → 115)。
     """
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        g = lomlib.resolve(build_tree(td / "t", v2_for_mid2=True))
+        root = build_tree(td / "t", v2_for_mid2=True)
+        g = lomlib.resolve(root)
         counts = lomlib.instance_counts(g)
         assert counts["mathutil"] == 2, f"两个版本应当是两个实例: {counts}"
         vers = sorted(n.version for n in g["order"] if n.name == "mathutil")
         assert vers == ["0.1.0", "0.2.0"], vers
-        bad = lomlib.name_conflicts(g)
-        assert bad, "同名顶层项没被报出来"
-        assert "scale" in bad[0], f"报告里要有冲突的名字: {bad[0]}"
-        assert bad[0].count("mathutil[") == 2, f"要点名两个实例: {bad[0]}"
-        ids = sorted(n.ident[:8] for n in g["order"] if n.name == "mathutil")
-        assert ids[0] in bad[0] and ids[1] in bad[0], \
-            f"报告里要给出两个实例的身份: {bad[0]}"
+        assert not lomlib.structural_problems(g), lomlib.structural_problems(g)
+        out = td / "out"
+        lomlib.materialize(g, out)
+        txt = "\n".join(p.read_text(encoding="utf-8")
+                        for p in out.glob("mid*__*/*.lomt"))
+        # 两个 mid 调用的必须是**不同的** scale 实例
+        called = sorted({w for w in txt.split() if w.startswith("scale__")})
+        assert len(called) == 2, f"两个 mid 应当各调各的 scale: {called}"
+        assert compile_and_run(next(out.glob("app__*/app.lomt")), td) == "11 115"
+
+
+@test
+def test_rename_preserves_field_variant_and_local_names():
+    """改名只动**顶层名**: 同名的字段、枚举变体、局部变量必须原样保留且保持一致。
+
+    这是"物化期改名"唯一脆的地方 —— 语言**允许**这三种遮蔽 (实测: 局部变量可以遮蔽顶层
+    函数名, 字段、变体也可以同名)。所以判据要压到不能再压:
+      1. 物化出来的**每一份文件单独编都要过** (不能靠发射期宽容);
+      2. 两个版本跑出各自的结果。
+    """
+    body = '''module shadow
+
+pub fn item() -> u32 {
+    return 2;
+}
+
+pub struct S {
+    item: u32,
+    k: u32,
+}
+
+pub enum K {
+    item,
+    Other(u32),
+}
+
+pub fn f() -> u32 {
+    let item: u32 = 5;
+    return item + %d;
+}
+
+pub fn g() -> u32 {
+    let s: S = S { item: 7, k: 1 };
+    return s.item;
+}
+
+pub fn h() -> u32 {
+    let e: K = K::item;
+    match e {
+        K::item => { return 10; }
+        K::Other(v) => { return v; }
+    }
+}
+'''
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        base = td / "t"
+        w(base, "s1/pkg.lomp", manifest("shadow", "0.1.0"))
+        w(base, "s1/shadow.lomt", body % 1)
+        w(base, "s2/pkg.lomp", manifest("shadow", "0.2.0"))
+        w(base, "s2/shadow.lomt", body % 11)
+        for mid, tag, fn in (("mid1", "s1", "sum1"), ("mid2", "s2", "sum2")):
+            w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
+            w(base, f"{mid}/{mid}.lomt",
+              f"module {mid}\n\nuse shadow\n\npub fn {fn}() -> u32 {{\n"
+              f"    return f() + g() + h();\n}}\n")
+            shutil.copytree(base / tag, base / mid / "deps" / "shadow")
+        w(base, "io/pkg.lomp", manifest("io", "0.1.0"))
+        w(base, "io/io.lomt", IO_SRC)
+        w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
+        w(base, "app/app.lomt",
+          'module app\n\nuse mid1\nuse mid2\nuse io\n\nfn _start() {\n'
+          '    let a: u32 = sum1();\n    let b: u32 = sum2();\n'
+          '    write_dec(1, a);\n    write_str(1, " ");\n    write_dec(1, b);\n'
+          '    write_str(1, "\\n");\n    syscall4(60, 0, 0, 0);\n}\n')
+        for n in ("mid1", "mid2", "io"):
+            shutil.copytree(base / n, base / "app" / "deps" / n)
+        g = lomlib.resolve(base / "app")
+        out = td / "out"
+        lomlib.materialize(g, out)
+        sh = sorted(out.glob("shadow__*/shadow.lomt"))[0].read_text(encoding="utf-8")
+        assert "enum K__" in sh and "\n    item,\n" in sh, f"变体名被改了:\n{sh[:400]}"
+        assert "item: u32,\n    k: u32," in sh, f"字段名被改了:\n{sh[:400]}"
+        assert "s.item" in sh, f"字段访问被改了:\n{sh[:400]}"
+        assert "::item;" in sh or "::item " in sh, f"变体位被改了:\n{sh[:400]}"
+        for f in sorted(out.rglob("*.lomt")):
+            mod = lomentc.load(f)
+            deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+            assert not lomentc.check(mod, deps=deps), \
+                f"{f.name} 物化后单独编不过: {lomentc.check(mod, deps=deps)[:2]}"
+        assert compile_and_run(next(out.glob("app__*/app.lomt")), td) == "23 33"
+
+
+@test
+def test_truly_ambiguous_reference_is_refused():
+    """**真歧义**才拒: 一个文件同时要用两个版本的同名项 —— 语言没有限定名语法可用。
+
+    与多版本共存不矛盾: 共存的前提是**没有一个文件**同时点这两个版本的同名项
+    (app 用 mid1/mid2, 两个 mid 各自用自己那份 mathutil)。这里造的是反面:
+    两个依赖导出**同一个名字**, 而 app 直接点它。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        base = td / "t"
+        for mid in ("mid1", "mid2"):
+            w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
+            w(base, f"{mid}/{mid}.lomt",
+              f"module {mid}\n\npub fn run() -> u32 {{\n    return 1;\n}}\n")
+        w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
+        # app 同时 use mid1/mid2, 而两边都导出 run -> 点 run 就是真歧义
+        w(base, "app/app.lomt",
+          "module app\n\nuse mid1\nuse mid2\n\nfn _start() {\n    let a: u32 = run();\n"
+          "    syscall4(60, 0, 0, 0);\n}\n")
+        for n in ("mid1", "mid2"):
+            shutil.copytree(base / n, base / "app" / "deps" / n)
+        g = lomlib.resolve(base / "app")
+        bad = lomlib.rename_problems(g)
+        assert bad, "真歧义没被报出来"
+        assert "run" in bad[0] and "多个实例" in bad[0], bad[0]
+        try:
+            lomlib.materialize(g, td / "out")
+        except lomlib.LibError:
+            return
+        raise AssertionError("真歧义却物化成功了")
 
 
 @test
@@ -365,14 +486,20 @@ def test_dependency_start_is_reported_once_and_correctly():
           "    syscall4(60, 0, 0, 0);\n}\n")
         shutil.copytree(td / "boot", td / "app" / "deps" / "boot")
         g = lomlib.resolve(td / "app")
-        assert not lomlib.name_conflicts(g), \
-            f"_start 不该出现在通用重名里: {lomlib.name_conflicts(g)}"
+        # 入口冲突**不是**"改个名就能共存"的问题, 所以它不该混进改名的问题清单里
+        assert not lomlib.rename_problems(g), lomlib.rename_problems(g)
+        assert lomlib.entry_conflicts(g), "依赖里的 _start 没被报出来"
         buf, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
             rc = lomlib.main(["check", str(td / "app")])
         assert rc == 1, rc
         lines = [x for x in err.getvalue().strip().splitlines() if x]
         assert len(lines) == 1 and "_start" in lines[0] and "入口只能有一个" in lines[0], lines
+        try:
+            lomlib.materialize(g, td / "out")
+        except lomlib.LibError:
+            return
+        raise AssertionError("依赖带 _start 却物化成功了")
 
 
 def main() -> int:

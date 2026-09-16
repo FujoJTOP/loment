@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomc  # noqa: E402  (词法器: 拿 token 的 line/col, 才能按位置精准改名)
 import lomentc  # noqa: E402  (复用前端读源码: 清单、边、能力声明 —— 不新增解析器)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -316,30 +317,158 @@ def top_level(n: Node) -> dict[str, str]:
     return out
 
 
-def name_conflicts(g: dict) -> list[str]:
-    """跨实例的**顶层重名** —— 编译器的发射符号是平的, 这条今天必然报 E13。
-
-    所以多版本共存**不是物化能绕过的**: 同一库的两个版本必然导出同一批名字。
-    这里把它**精确报出来**(哪个名字、来自哪两个实例), 而不是让它跑到编译器那里
-    变成一句看不出所以然的 E13。真要共存, 得让编译器按实例给符号起名 (docs/168 §5)。
-    """
-    seen: dict[str, Node] = {}
-    out: list[str] = []
+def providers_of(g: dict) -> dict[str, set[str]]:
+    """顶层名 -> 提供它的实例身份集合(全构建)。size > 1 = 这个名字有多个来源。"""
+    out: dict[str, set[str]] = {}
     for n in g["order"]:
-        for nm, kind in sorted(top_level(n).items()):
-            if nm == "_start":
-                # 入口**不该**共存, 所以别给它"按实例起名就能共存"那条忠告 (那是误导)。
-                # 入口冲突由 cmd_check 里那条专用诊断负责。
-                continue
-            prev = seen.get(nm)
-            if prev is None:
-                seen[nm] = n
-            elif prev.ident != n.ident:
-                out.append(
-                    f"顶层名 {kind} {nm} 在 {prev.name}[{prev.ident[:ID8]}] 与 "
-                    f"{n.name}[{n.ident[:ID8]}] 里都有 —— 发射符号是平的, 编译器会报 E13。"
-                    f"同名多实例要共存需按实例起名 (docs/168 §5)")
+        for nm in top_level(n):
+            out.setdefault(nm, set()).add(n.ident)
     return out
+
+
+def direct_map(n: Node) -> tuple[dict[str, str], set[str]]:
+    """直接 `use` 的实例提供的名字 -> 身份; 以及**直接来源就打架**的名字。"""
+    d: dict[str, str] = {}
+    dup: set[str] = set()
+    for child in n.edges.values():
+        for nm in top_level(child):
+            if nm in d and d[nm] != child.ident:
+                dup.add(nm)
+            d.setdefault(nm, child.ident)
+    return d, dup
+
+
+def _ident_edits(txt: str, n: Node, providers: dict[str, set[str]], is_root: bool,
+                 problems: list[str], where: str) -> list[tuple[int, int, str]]:
+    """本文件里要改名的标识符 -> `[(start, end, 新名)]`。
+
+    位置由**词法器给的 `line/col`** 还原成绝对偏移 (`lomc.Tok` 没有偏移量)。
+
+    解析顺序(先命中先用): ① 本实例声明的 -> 本实例 ② 直接 `use` 的实例提供的 ->
+    那个实例 ③ 依赖闭包里**唯一**提供的 -> 那个实例。
+
+    **为什么能这么改**: 同一个文件里一个名字只有一个解析结果(局部变量遮蔽顶层名字时,
+    声明与引用会被**一起**改名, 遮蔽关系原样保留), 所以逐文件统一改名保语义。
+    **失败模式是响亮的**: 万一漏改或多改, 编译器报"未声明/未定义", 不会静默编错。
+
+    跳过: 字段访问 `x.f`、**变体位** `E::V` 的 `V`、**枚举体里的变体声明**、
+    以及字段初始化/形参/绑定的名字位 (`{a:` `(a:` `,a:`)。它们的作用域都在类型内部,
+    两个实例各有一份也不会撞 —— 改了反而会跟使用处对不上 (实测踩过两次:
+    `::` 在词法上是**两个 `:` token**, 用 `prev == "::"` 判永远不成立)。
+    **不动 `_start`** —— 那是链接器要找的入口名。
+    """
+    own = top_level(n)
+    direct, dup_direct = direct_map(n)
+    toks = lomc.lex(txt)
+    starts = [0]
+    for i, ch in enumerate(txt):
+        if ch == "\n":
+            starts.append(i + 1)
+    edits: list[tuple[int, int, str]] = []
+    depth = 0            # 花括号深度
+    paren = 0
+    enum_bodies: list[int] = []
+    pending_enum = False
+    for i, t in enumerate(toks):
+        if t.kind == "punct":
+            if t.val == "{":
+                depth += 1
+                if pending_enum:            # `enum Name {` —— 体在 depth+1 这层
+                    enum_bodies.append(depth)
+                    pending_enum = False
+            elif t.val == "}":
+                depth -= 1
+                enum_bodies = [x for x in enum_bodies if x <= depth]
+            elif t.val == "(":
+                paren += 1
+            elif t.val == ")":
+                paren -= 1
+            continue
+        if t.kind != "ident":
+            continue
+        nm = t.val
+        if nm == "enum":
+            pending_enum = True
+            continue
+        if is_root and nm == "_start":
+            continue
+        if enum_bodies and depth == enum_bodies[-1] and paren == 0:
+            # 枚举体这一层、括号外的裸标识符 = **变体名** (括号里的是载荷类型)。
+            # 变体名作用域在枚举内部, 两个实例各有一个 `K::item` 也不会撞 —— 所以不该改;
+            # 改了反而与 `E::item` 使用处(变体位不改)对不上。2026-09-15 实测踩到过。
+            continue
+        prev = toks[i - 1].val if i else ""
+        prev2 = toks[i - 2].val if i >= 2 else ""
+        nxt = toks[i + 1].val if i + 1 < len(toks) else ""
+        nxt2 = toks[i + 2].val if i + 2 < len(toks) else ""
+        # 注意: `::` 在词法上是**两个 `:` token**, 所以"前导 `::`"要往前看两个。
+        if prev == "." or (prev == ":" and prev2 == ":"):
+            continue                            # 字段访问 / 变体位 —— 都不是顶层名
+        if not (nxt == ":" and nxt2 == ":"):    # 后面是 `::` 的是**枚举名**, 不是注解
+            if nxt == ":" and prev in ("{", ",", "("):
+                continue                        # 字段初始化 / 形参 / 绑定的名字位
+        if nm in own:
+            tgt = n.ident
+        elif nm in direct:
+            if nm in dup_direct:
+                problems.append(
+                    f"{where}: 名字 {nm} 被直接 use 的多个实例同时提供 —— "
+                    f"语言没有限定名语法, 先给其中一个改名")
+                continue
+            tgt = direct[nm]
+        elif nm in providers:
+            ps = providers[nm]
+            if len(ps) != 1:
+                problems.append(
+                    f"{where}: 名字 {nm} 在本构建里有 {len(ps)} 个来源 "
+                    f"({', '.join(sorted(x[:ID8] for x in ps))}) —— "
+                    f"这个文件既没直接 use 到其中唯一的一个, 也没自己声明它")
+                continue
+            tgt = next(iter(ps))
+        else:
+            continue                      # 内建 / 局部 / 字段名 —— 不是顶层名
+        s = starts[t.line - 1] + (t.col - 1)
+        edits.append((s, s + len(nm), f"{nm}__{tgt[:ID8]}"))
+    return edits
+
+
+def _apply_edits(txt: str, edits: list[tuple[int, int, str]]) -> str:
+    """从后往前改, 偏移才不会串。"""
+    for s, e, new in sorted(edits, reverse=True):
+        txt = txt[:s] + new + txt[e:]
+    return txt
+
+
+def entry_conflicts(g: dict) -> list[str]:
+    """入口冲突: 依赖里也定义了 `_start` —— 入口只能有一个。
+
+    这和"改名"是两回事, 改名**不该**把它消掉: 同一库的两个版本各带一个入口, 就算按实例
+    改了名, 那两个入口也都是错的。所以它是独立的一条, 同样拦住物化。
+    """
+    return [f"依赖 {n.name}[{n.ident[:ID8]}] 也定义了 _start —— 入口只能有一个"
+            for n in g["order"]
+            if n is not g["root"]
+            and any(f.name == "_start" for m in n.mods for f in m.funcs)]
+
+
+def rename_problems(g: dict) -> list[str]:
+    """干跑一遍改名, 只收集"改不了"的地方 —— **引用了一个有多个来源的名字**。
+
+    这是多版本真正的边界: 一个文件**同时**要用两个版本的同名顶层项时, 语言没有限定名
+    语法可用, 只能报出来。**除此之外同名多实例是可以共存的** (按实例改名)。
+    """
+    providers = providers_of(g)
+    problems: list[str] = []
+    for n in g["order"]:
+        for f in n.files:
+            txt = f.read_text(encoding="utf-8")
+            _ident_edits(txt, n, providers, n is g["root"], problems, str(f))
+    return problems
+
+
+def structural_problems(g: dict) -> list[str]:
+    """拦住物化的全部理由 —— `check` 与 `materialize` 共用同一份, 免得两边说法不一致。"""
+    return entry_conflicts(g) + rename_problems(g)
 
 
 # ---------------------------------------------------------------- 物化
@@ -350,11 +479,22 @@ _MODULE_LINE = re.compile(r"^([ \t]*module[ \t]+)([A-Za-z_][A-Za-z0-9_]*)([ \t]*
 def materialize(g: dict, out_dir: Path) -> list[dict]:
     """把实例集合摊成一棵**编译器能直接吃**的树 (判据 4)。
 
-    每个实例落到自己的目录, 模块名带身份后缀 (判据 4 要求编译器不知道版本 ——
-    它只看到一堆互不同名的模块); 消费方的 `use <名字>` 被改写成指向**它绑定的那个实例**。
+    三步, 每步都只动它该动的:
+      1. **模块名**带身份后缀 (`mathutil__<id8>`);
+      2. **`use <名字>`** 改写成指向它绑定的那个实例的显式路径;
+      3. **顶层名**带实例后缀 —— 于是同一库的两个版本在编译器眼里各是各的名字, **能共存**。
 
-    只改**整行**的 `module X` / `use X` (正则按行锚定, 所以行内注释与字符串不受影响)。
+    第 3 步是多版本的关键 (docs/168 §4.2): 编译器把模块拍平进一张表, 同名顶层项会撞。
+    在**物化这一层**改名而不是去改编译器内核, 换来的是: 编译器完全不用知道"版本"存在,
+    也不需要动参考实现与自举镜的发射符号 (那会牵动逐字节 IR 一致与自举定点)。
+
+    改不了的地方 (一个文件**同时**要用两个版本的同名项 —— 语言没有限定名语法) 直接
+    抛 `LibError`, 不产出半棵树。
     """
+    problems = structural_problems(g)
+    if problems:
+        raise LibError("物化不了 —— " + "; ".join(problems))
+    providers = providers_of(g)
     out_dir.mkdir(parents=True, exist_ok=True)
     # 每个节点一个落地目录: <name>__<id8>
     home: dict[str, Path] = {}
@@ -372,6 +512,8 @@ def materialize(g: dict, out_dir: Path) -> list[dict]:
             txt = _MODULE_LINE.sub(lambda m: f"{m.group(1)}{m.group(2)}__{n.ident[:ID8]}",
                                    txt)
             txt = _rewrite_uses(txt, n, home)
+            txt = _apply_edits(txt, _ident_edits(txt, n, providers, n is g["root"],
+                                                 [], str(f)))
             dst.write_text(txt, encoding="utf-8", newline="\n")   # 必须 LF: 自举链按原始字节读
             mapping.append({"from": str(f), "to": str(dst)})
     (out_dir / "materialize-map.json").write_text(
@@ -456,18 +598,13 @@ def cmd_cap(a) -> int:
 def cmd_check(a) -> int:
     g = resolve(Path(a.dir))
     _, conflicts = capability_closure(g)
-    conflicts += name_conflicts(g)
-    # 入口冲突: 多个实例都带 _start 时只有入口程序的算数 (docs/168 §5)
-    starts = [n.name for n in g["order"]
-              if n is not g["root"] and any(f.name == "_start" for m in n.mods for f in m.funcs)]
+    conflicts += structural_problems(g)
     for c in conflicts:
         print(f"[CONFLICT] {c}", file=sys.stderr)
-    for s in starts:
-        print(f"[CONFLICT] 依赖 {s} 也定义了 _start —— 入口只能有一个", file=sys.stderr)
     n = len(g["order"])
     counts = instance_counts(g)
     multi = {k: v for k, v in counts.items() if v > 1}
-    if conflicts or starts:
+    if conflicts:
         return 1
     if multi:
         print("[NOTE] 同名多实例: " + ", ".join(f"{k} x{v}" for k, v in sorted(multi.items())))
@@ -477,12 +614,7 @@ def cmd_check(a) -> int:
 
 def cmd_materialize(a) -> int:
     g = resolve(Path(a.dir))
-    # 有冲突就不物化: 物化出来的树编不过, 与其让错误在编译器那里变形, 不如在这里拦住。
-    bad = name_conflicts(g)
-    if bad:
-        for c in bad:
-            print(f"[CONFLICT] {c}", file=sys.stderr)
-        return 1
+    # 改不动的地方由 materialize 抛出来 (main 会把它打成一行 [ERR]), 不产出半棵树。
     mp = materialize(g, Path(a.out))
     print(f"[OK] {len(g['order'])} 个实例 -> {a.out} ({len(mp)} 个文件)")
     return 0
