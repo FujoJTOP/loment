@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "ed29149bf7fb2682a2743ab4df334c9b15c4a41a08f79480046e05f6e722c2b8"
+   "sha256": "b30a071bac63f0337792dd7138f9dc7246d94ef440f7c83cc8dd26a4dda9e18b"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "c2e55ebc202edac9fd40854f257c2b36a1f2f212802729dd6680efbbbf8512b9"
+   "sha256": "fdc832955d5d27efe38fbd356588888845e0b167ef826789e24cd68493c5b932"
   },
   {
    "path": "tools/potato.py",
@@ -667,7 +667,7 @@
   },
   {
    "path": "tools/loment_lompi_test.py",
-   "sha256": "9a2cb40fc1a7b3a2f90a0df3cd3fc753123c482d71bd58d6378971be41bd1997"
+   "sha256": "58b78c424929027fa8ced77b5eb2c14bb12e64b70a2f3669677589be035af880"
   },
   {
    "path": "tools/loment_publish.py",
@@ -675,7 +675,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "ee3c75fbd6e7d6c4fb9557df38117fb7f0c5bd2d1c610f5e72e18ec66e0c988e"
+   "sha256": "31ab3a659a008a3cfa5d0eca1204724666aa9a6609ed61c361021587605dff3c"
   },
   {
    "path": "tools/loment_build.py",
@@ -699,7 +699,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "7af2a8f6eb036b072962d83a6c12ceaa8f0882ccfc79ab213fdb288ab66a8d4b"
+   "sha256": "9e88ebaba99502c0b23093e29ba5aa27102153e6d44497db393f8e19b6bed0f9"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -879,7 +879,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "c39949a0e0182fb3599a19e5c7f8f76b6aac557d3096bd982a815882222b2321"
+   "sha256": "632a859dcbdcd4a635f8a13f10b95e2b602f8662ec2c2ed21cb54dec62b6dad0"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1087,7 +1087,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "c85292a47700fa0a03ab55df70fc1d7b4d8cca9ebec47856b3a5038360e3ba98"
+   "sha256": "96de00fe2067228bc3d4a616c7cc0a23f9f277b27685f6eb01a4e4ed75376f1b"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -1171,7 +1171,7 @@
   },
   {
    "path": "docs/143-l1-loment-v0.md",
-   "sha256": "a438bd4ed81308c94fcb88c0711743253021b5905ab3ef2dabfb1bafa8f85b7d"
+   "sha256": "a8d01267be31f7bdfe30553b7d808e4e7da5b06594c9d58dc947b17643a88e06"
   },
   {
    "path": "docs/144-kernel-boundaries-and-risks.md",
@@ -1243,7 +1243,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "5660c12906f07f8c22c0d4e10f4cf37c921e281c553694dccef65fb0fb7886c7"
+   "sha256": "ebc598d9c7d12c32651e0be8ca9ef5ea623e831b372e84b17424a4b10cf039d8"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -1287,7 +1287,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "73c7d82e1edac3c8a89d0a361582bd603610daffc3ab961d10719a93f5dd2bc8"
+   "sha256": "0ac28bfe97e7de5e943a90c210097a501cc16ba45d392923bde61cbd9da9cfe2"
   },
   {
    "path": "docs/manual/api/ahci.md",

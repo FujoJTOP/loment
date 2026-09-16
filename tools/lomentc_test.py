@@ -1135,6 +1135,120 @@ def test_m46_cli_requires_potato_with_codegen():
         assert potato.validate(json.loads(obj.read_text(encoding="utf-8"))) == []
 
 
+# ---------------------------------------------------------------- 名字形式的搜索层 (2026-09-16)
+#
+# 触发原因: 装在用户机器上 (没有仓库) 时 `use std` 找不到任何东西 —— 名字形式原先只认四个
+# **仓库相对**的根。现在按层搜: 项目本地 deps/ -> 工具链自带的库 -> 内置四根 (只它要求唯一)。
+# 规范在 docs/143, 冻结面记录在 docs/158 §2/§5。
+
+def _pkg(d: Path, name: str) -> None:
+    """写一个最小可编译的包目录 `<d>/{<name>.lomt, area.lomt}` (入口与它的伴生模块)。"""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.lomt").write_bytes(
+        (f"module {name}\n\nuse \"area.lomt\"\n\npub fn g_area(w: u32, h: u32) -> u32 {{\n"
+         f"    return ar(w, h);\n}}\n").encode())
+    (d / "area.lomt").write_bytes(
+        b"module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n")
+
+
+def _entry(p: Path, name: str) -> Path:
+    p.write_bytes((f"module hi\n\nuse {name}\n\nfn main() -> u32 {{\n"
+                   f"    return g_area(3 as u32, 4 as u32);\n}}\n").encode())
+    return p
+
+
+@test
+def test_name_form_searches_project_deps_first():
+    """`<项目根>/deps/<名字>/<名字>.lomt` 命中即用, 包内的路径形式按**被导入文件所在目录**解析。
+
+    后半句才是关键: `deps/geom/geom.lomt` 里的 `use "area.lomt"` 只相对 `deps/geom/` 成立
+    —— 只按 CWD 找会去够 `<CWD>/area.lomt` (一个不存在的路径)。CWD 故意是别的目录。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        _pkg(proj / "deps" / "geom", "geom")
+        hi = _entry(proj / "hi.lomt", "geom")
+        mod = lomentc.load(hi)
+        deps = lomentc.resolve_deps(mod, ROOT, proj, entry=hi)
+        names = [d.name for d in deps]
+        assert names == ["area", "geom"], f"依赖序不对: {names}"
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        assert "define i32 @ar(" in ir and "define i32 @g_area(" in ir, ir[:300]
+
+
+@test
+def test_name_form_falls_through_to_the_toolchain_store():
+    """项目里没有 deps/ 时落到**工具链自带的库**: `<工具目录>/../share/lompi/store/`。
+
+    这就是"装完 Loment 就能 `use std`"那一层 —— 用户 2026-09-16 定: 像 python/java 那样。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tool = Path(td) / "tool"
+        (tool / "bin").mkdir(parents=True)
+        _pkg(tool / "share" / "lompi" / "store" / "geom" / "0.1.0", "geom")
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        got = lomentc.resolve_name("geom", ROOT, proj, tool / "bin")
+        assert got == tool / "share" / "lompi" / "store" / "geom" / "0.1.0" / "geom.lomt", got
+
+
+@test
+def test_store_with_two_versions_is_an_error():
+    """自带的库里同名多版本 = 报错, 不猜 —— 编译器不做版本选择 (docs/168 §4.2)。"""
+    with tempfile.TemporaryDirectory() as td:
+        tool = Path(td) / "tool"
+        (tool / "bin").mkdir(parents=True)
+        for v in ("0.1.0", "0.2.0"):
+            _pkg(tool / "share" / "lompi" / "store" / "geom" / v, "geom")
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        try:
+            lomentc.resolve_name("geom", ROOT, proj, tool / "bin")
+        except lomentc.LomError as e:
+            assert "版本" in str(e), e
+        else:
+            raise AssertionError("多版本应当报错")
+
+
+@test
+def test_project_local_deps_wins_over_a_builtin_root():
+    """`deps/` 里有 `bytes`、仓库内置根里也有 —— 前两层先命中先用, **不报歧义**。
+
+    唯一性只管第③层 (内置四根): 它抓的是"作者把名字写重了"; 使用者选哪一份是**优先级**的
+    事, 像 PYTHONPATH。两件事混进一个错误, 使用者不知道该改什么。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        _pkg(proj / "deps" / "bytes", "bytes")
+        got = lomentc.resolve_name("bytes", ROOT, proj, None)
+        assert got == proj / "deps" / "bytes" / "bytes.lomt", got
+        assert hasattr(lomentc, "NAME_ROOTS") and len(lomentc.NAME_ROOTS) == 4
+
+
+@test
+def test_use_count_over_the_limit_is_an_error():
+    """单文件 use 超过 MAX_USE **报错**, 不静默丢 —— 自举镜原先第 9 条起直接不要, 而参考
+    实现照收, 两个实现于是对同一份源码给出不同的单元。"""
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        d = proj / "deps" / "many"
+        d.mkdir(parents=True)
+        for i in range(lomentc.MAX_USE + 1):
+            (d / f"m{i}.lomt").write_bytes(
+                f"module m{i}\n\npub fn f{i}() -> u32 {{\n    return {i} as u32;\n}}\n".encode())
+        uses = "\n".join(f'use "m{i}.lomt"' for i in range(lomentc.MAX_USE + 1))
+        (d / "many.lomt").write_bytes(f"module many\n\n{uses}\n".encode())
+        hi = Path(td) / "hi.lomt"
+        hi.write_bytes(b"module hi\n\nuse many\n\nfn main() -> u32 {\n    return 0;\n}\n")
+        mod = lomentc.load(hi)
+        try:
+            lomentc.resolve_deps(mod, ROOT, proj, entry=hi)
+        except lomentc.LomError as e:
+            assert str(lomentc.MAX_USE) in str(e), e
+        else:
+            raise AssertionError(f"{lomentc.MAX_USE + 1} 条 use 应当报错")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

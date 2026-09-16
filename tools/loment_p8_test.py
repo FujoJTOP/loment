@@ -1258,6 +1258,45 @@ def test_m85_driver_gate_on_probe_cases():
         assert rc2 != 0 and "名字导入" in err2, \
             f"名字导入失败没报出来: rc={rc2} err={err2[-200:]!r}"
         print("      名字导入失败: 驱动器报错并退出非零")
+        # ---- 名字形式的两层落点与 use 条数上限 (2026-09-16, 见 docs/143 + docs/158 §2)
+        # ① 项目本地 `deps/`: 名字形式命中它, 且包内的**路径形式**相对**被导入文件所在
+        #    目录**解析 (`deps/geom/geom.lomt` 里的 `use "area.lomt"`)。驱动器 CWD 是仓库根,
+        #    所以 CWD 那条路必定落空 —— 走的正是这一层。
+        proj = Path(td) / "proj"
+        (proj / "deps" / "geom").mkdir(parents=True)
+        (proj / "deps" / "geom" / "area.lomt").write_text(
+            "module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n",
+            encoding="utf-8", newline="\n")
+        (proj / "deps" / "geom" / "geom.lomt").write_text(
+            "module geom\n\nuse \"area.lomt\"\n\npub fn g_area(w: u32, h: u32) -> u32 {\n"
+            "    return ar(w, h);\n}\n", encoding="utf-8", newline="\n")
+        dep_hi = proj / "hi.lomt"
+        dep_hi.write_text("module hi\n\nuse geom\n\nfn main() -> u32 {\n"
+                          "    return g_area(3 as u32, 4 as u32);\n}\n",
+                          encoding="utf-8", newline="\n")
+        rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(dep_hi), td, "g_deps")
+        assert rc3 == 0, f"deps/ 那层没解析出来: rc={rc3} err={err3[-300:]!r}"
+        assert "@g_area" in out3, out3[:200]
+        print("      deps/ 层 + 包内路径形式: 驱动器解析成功")
+        # ② 单文件 use 超过上限**报错**, 不静默丢 (丢掉的话单元少几块, 而参考实现照收 ——
+        #    两个实现于是对同一份源码给出不同的产物)。
+        many = proj / "many"
+        many.mkdir(parents=True)
+        nlim = lomentc.MAX_USE + 1
+        for i in range(nlim):
+            (many / f"m{i}.lomt").write_text(
+                f"module m{i}\n\npub fn f{i}() -> u32 {{\n    return {i} as u32;\n}}\n",
+                encoding="utf-8", newline="\n")
+        (many / "many.lomt").write_text(
+            "module many\n\n" + "\n".join(f'use "m{i}.lomt"' for i in range(nlim)) + "\n",
+            encoding="utf-8", newline="\n")
+        lim_hi = proj / "lim.lomt"
+        lim_hi.write_text("module lim\n\nuse many\n\nfn main() -> u32 {\n    return 0;\n}\n",
+                          encoding="utf-8", newline="\n")
+        rc4, _o4, err4 = _run_driver_raw(elf, _wsl_path(lim_hi), td, "g_uselim")
+        assert rc4 != 0 and "超过上限" in err4, \
+            f"{nlim} 条 use 没被拒: rc={rc4} err={err4[-300:]!r}"
+        print(f"      use 超过 {lomentc.MAX_USE} 条: 驱动器报错并退出非零")
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:

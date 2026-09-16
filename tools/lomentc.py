@@ -1960,16 +1960,73 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
 #: `use <名字>` 的搜索根 (相对仓库根, 按序找 `<名字>.lomt`)。
 #: **只解析 .lomt** —— 名字形式是给 L1 模块用的; L0 布局 (`*.lom`) 继续走路径形式,
 #: 于是不存在"这个名字算 L0 还是 L1"的歧义。顺序: 标准库在前, 后面三个覆盖仓库自身。
+#: 这四个根是**仓库自己的纪律** (名字不许重), 见 `resolve_name` 第 3 层。
 NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools")
+#: 项目本地的依赖目录 —— lompi `plan/install --into deps` 的落点:
+#: `<项目根>/deps/<名字>/<名字>.lomt`。项目根 = 入口文件所在目录 (docs/168 §4.1)。
+LOCAL_DEPS = "deps"
+#: 工具链**随包自带**的库, 按 lompi 的 store 布局放: `<工具目录>/../share/lompi/store/`。
+#: 有它, 装在用户机器上 (没有仓库、也没有 `deps/`) 时 `use std` 才命中得了 ——
+#: 用户 2026-09-16 定: "像 python/java 那样, 简单方便"。
+TOOLCHAIN_STORE = ("share", "lompi", "store")
+#: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算)。
+#: **超限报错, 绝不静默丢** —— 自举镜的暂存区原先按 8 条布局, 超出的直接丢掉, 而参考
+#: 实现无上限: 同一份源码两个实现给出**不同的单元** (2026-09-16 发现, 语料里没有超过
+#: 3 条的用例, 所以一直没暴露)。抬到 300 是让 std 那种多模块门面装得下。
+MAX_USE = 300
 
 
-def resolve_name(name: str, root: Path) -> Path:
-    """`use <名字>` -> 真实文件。命中必须**唯一**: 找不到或有歧义都报错, 不静默取第一个。"""
+def _store_pick(store: Path, name: str) -> Path | None:
+    """自带 store 里取 `<store>/<名字>/<版本>/<名字>.lomt`; 没有这个包返回 None。
+
+    版本那一层**只允许一个**: 编译器不做版本选择 (docs/168 §4.2 —— 多版本是"物化"那层
+    解决的, 编译器完全不需要知道版本存在)。有多个就明说并指向 `deps/`, 不猜。
+    """
+    pkg = store / name
+    if not pkg.is_dir():
+        return None
+    vers = sorted(d.name for d in pkg.iterdir() if d.is_dir())
+    if not vers:
+        return None
+    if len(vers) > 1:
+        raise LomError(1, 1, f"自带的库里 {name} 有 {len(vers)} 个版本 ({', '.join(vers)})"
+                             f" —— 编译器不做版本选择, 要指定版本就用 deps/{name}/")
+    return pkg / vers[0] / f"{name}.lomt"
+
+
+def resolve_name(name: str, root: Path, proj: Path | None = None,
+                 tool_dir: Path | None = None) -> Path:
+    """`use <名字>` -> 真实文件。**按层搜, 先命中先用** (像 PYTHONPATH):
+
+      1. `<项目根>/deps/<名字>/<名字>.lomt`  —— 项目本地 (lompi materialize 的落点)
+      2. `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`  —— 随包自带
+      3. 内置四根 `<仓根>/<根>/<名字>.lomt`  —— **这一层命中必须唯一**
+
+    唯一性只管第 3 层, 而且"找不到"要四层全空才报。这样: 项目本地有 `deps/std`、仓库里
+    也有 `lib/std` 时不会假报歧义 (前两层先命中就停), 而仓库自己的四根仍保留"名字不许
+    重"那条纪律 —— 它抓的是**作者写错**, 不是使用者选错。
+    """
+    if proj is not None:
+        d = proj / LOCAL_DEPS / name
+        if d.is_dir():
+            f = d / f"{name}.lomt"
+            if not f.exists():
+                raise LomError(1, 1, f"依赖 {name} 里没有同名模块 {name}.lomt —— "
+                                     f"`use <名字>` 指的是**包内与包同名的那个模块**")
+            return f
+    if tool_dir is not None:
+        f = _store_pick(tool_dir.parent.joinpath(*TOOLCHAIN_STORE), name)
+        if f is not None:
+            if not f.exists():
+                raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}.lomt: {f}")
+            return f
     hits = [root / rel / f"{name}.lomt" for rel in NAME_ROOTS
             if (root / rel / f"{name}.lomt").exists()]
     if not hits:
-        raise LomError(1, 1, f"名字导入找不到模块 {name}: "
-                             f"在 {', '.join(NAME_ROOTS)} 下都没有 {name}.lomt")
+        where = (f"项目本地 {proj / LOCAL_DEPS}、工具链自带的库、以及内置根 "
+                 f"{', '.join(NAME_ROOTS)}" if proj is not None
+                 else f"内置根 {', '.join(NAME_ROOTS)}")
+        raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}.lomt")
     if len(hits) > 1:
         rel = ", ".join(str(h.relative_to(root)).replace("\\", "/") for h in hits)
         raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
@@ -1977,18 +2034,30 @@ def resolve_name(name: str, root: Path) -> Path:
 
 
 def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None) -> list[Module]:
-    """按依赖序返回导入的 L1 模块 (被依赖者在前), 去重 + 循环检测。"""
+    """按依赖序返回导入的 L1 模块 (被依赖者在前), 去重 + 循环检测。
+
+    `proj` 是**项目根** (= 入口文件所在目录), 名字形式的第 1 层 `deps/` 相对**它** ——
+    不是相对每个文件: 依赖包里的 `use std` 也得找到**项目根**的 `deps/std/`, 因为 lompi
+    把整个闭包摊平在项目根的 `deps/` 下 (照每个文件找会变成 `<包>/deps/std`, 永远找不到)。
+    """
     order: list[Module] = []
     seen: set[Path] = set()
     stack: set[Path] = set()
+    proj = Path(entry).resolve().parent if entry is not None else base
+    tool_dir = Path(__file__).resolve().parent
     if entry is not None:
         rp = Path(entry).resolve()
         seen.add(rp)
         stack.add(rp)
 
     def visit(m: Module, cur_base: Path) -> None:
+        n_use = len(m.imports) + len(m.name_imports)
+        if n_use > MAX_USE:
+            raise LomError(1, 1, f"模块 {m.name} 的 use 有 {n_use} 条, 超过上限 "
+                                 f"{MAX_USE} —— 门面拆小, 别把整库塞进一个文件")
         # 名字形式先落到绝对路径, 之后与路径形式走同一条流水线 (去重/循环/先序)
-        paths = list(m.imports) + [str(resolve_name(n, root)) for n in m.name_imports]
+        paths = list(m.imports) + [str(resolve_name(n, root, proj, tool_dir))
+                                   for n in m.name_imports]
         for imp in paths:
             p = Path(imp)
             cand = p if p.is_absolute() else None

@@ -509,6 +509,117 @@ def test_installed_store_is_discoverable_by_lompi():
         shutil.rmtree(td, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 编译器的库解析 (2026-09-16)
+#
+# 用户报"装了之后 `use std` 指向一个不存在的路径"。根因在编译器侧: 名字形式原先只认四个
+# **仓库相对**的根。这三条在本机**原生**跑真 stage1 (发行包编出来的那个驱动), 钉住新的
+# 三层解析 —— p8 那条驱动闸门走 WSL, 覆盖不到 PE 上的路径分隔符与 `deps/` 布局。
+
+#: 一个最小多文件包: 入口 + 它的伴生模块 (包内用**路径形式**互相 import)。
+PKG_ENTRY = ('module {n}\n\nuse "area.lomt"\n\npub fn g_area(w: u32, h: u32) -> u32 {{\n'
+             '    return ar(w, h);\n}}\n')
+PKG_AREA = "module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n"
+USE_HI = ("module hi\n\nuse {n}\n\nfn main() -> u32 {{\n"
+          "    return g_area(3 as u32, 4 as u32);\n}}\n")
+
+
+def _stage1() -> Path | None:
+    """发行包同一条链上的 stage1 (自举驱动)。没有 clang 就是 None。"""
+    if not _clang():
+        return None
+    import loment_dist  # noqa: E402
+    return loment_dist.build_stage1()
+
+
+def _ref_ir(entry: Path) -> bytes:
+    mod = lomentc.load(entry)
+    deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
+    return lomentc.emit_llvm(mod, ROOT, deps).encode()
+
+
+def _write_pkg(d: Path, name: str) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "area.lomt").write_bytes(PKG_AREA.encode())
+    (d / f"{name}.lomt").write_bytes(PKG_ENTRY.format(n=name).encode())
+
+
+@test
+def test_selfhost_resolves_a_package_from_project_deps():
+    """名字形式第 1 层 `<项目根>/deps/<名字>/<名字>.lomt`; 且包内的路径形式相对**被导入
+    文件所在目录**解析 —— `deps/geom/geom.lomt` 里的 `use "area.lomt"` 只相对 `deps/geom/`
+    成立, 只按 CWD 找会去够 `<CWD>/area.lomt` (那个"不存在的路径")。IR 与参考实现逐字节比。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        proj = root / "proj"
+        _write_pkg(proj / "deps" / "geom", "geom")
+        hi = proj / "hi.lomt"
+        hi.write_bytes(USE_HI.format(n="geom").encode())
+        # CWD 故意是**别的目录**: 解析必须靠"项目根 = 入口所在目录", 不是 CWD
+        r = subprocess.run([str(s), str(hi)], cwd=str(root), capture_output=True, timeout=300)
+        assert r.returncode == 0, f"deps/ 那层没解析出来: {r.stderr.decode('utf-8', 'replace')[-300:]}"
+        assert r.stdout == _ref_ir(hi), "自举镜与参考实现的 IR 不一致"
+
+
+@test
+def test_selfhost_resolves_from_the_toolchains_own_store():
+    """名字形式第 2 层: `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`。
+
+    **这就是"装完 Loment 就能 `use std`"那一层** (用户 2026-09-16 定: 像 python/java 那样)。
+    要复刻发行包的布局 (`bin/` + `share/lompi/store/`) 才触发, 所以这里把 stage1 摆成那个形状。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        tool = root / "tool"
+        (tool / "bin").mkdir(parents=True)
+        shutil.copyfile(s, tool / "bin" / s.name)
+        _write_pkg(tool / "share" / "lompi" / "store" / "geom" / "0.1.0", "geom")
+        proj = root / "proj"
+        proj.mkdir()
+        hi = proj / "hi.lomt"
+        hi.write_bytes(USE_HI.format(n="geom").encode())
+        r = subprocess.run([str(tool / "bin" / s.name), str(hi)], cwd=str(proj),
+                           capture_output=True, timeout=300)
+        assert r.returncode == 0, \
+            f"自带 store 那层没解析出来: {r.stderr.decode('utf-8', 'replace')[-300:]}"
+        assert b"@g_area" in r.stdout, r.stdout[:200]
+
+
+@test
+def test_selfhost_refuses_a_file_over_the_use_limit():
+    """超过 `MAX_USE` 条 use **报错退出**。原先进程只装前 8 条、其余**静默丢掉** ——
+    丢掉之后单元少几块, 而参考实现照收, 两个实现于是对同一份源码给出不同的产物。"""
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    import lomentc as _c  # noqa: E402
+    n = _c.MAX_USE + 1
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        d = proj / "deps" / "many"
+        d.mkdir(parents=True)
+        for i in range(n):
+            (d / f"m{i}.lomt").write_bytes(
+                f"module m{i}\n\npub fn f{i}() -> u32 {{\n    return {i} as u32;\n}}\n".encode())
+        (d / "many.lomt").write_bytes(
+            ("module many\n\n" + "\n".join(f'use "m{i}.lomt"' for i in range(n)) + "\n").encode())
+        hi = proj / "hi.lomt"
+        hi.write_bytes(USE_HI.format(n="many").encode())
+        r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
+        err = r.stderr.decode("utf-8", "replace")
+        assert r.returncode != 0, f"{n} 条 use 应当报错, 却过了"
+        assert "超过上限" in err, err[-300:]
+
+
 # ---------------------------------------------------------------- 与正本的一致性
 
 @test
