@@ -715,7 +715,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "cc48f8c96b0f5f995bfe37ac8ca4bf656def87b854800292e018a37d074ca763"
+   "sha256": "6e6fd0892cbf2e64a6c22b7d5b300f9494cec775fca846598e78233ed935bf0a"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -763,7 +763,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "0a0059e11bed9f0e98131da69296575fd2d496107e721b284df6dafb30684ab1"
+   "sha256": "33aff1804021e943225e6d48819a3302ee4265495434760dd736e10eee6a5789"
   },
   {
    "path": "tools/loment_elf_test.py",
