@@ -231,3 +231,57 @@ bundled languages；Claude 侧是 highlight.js 的注册表）。
 注释/字符串/数字/`capability`/`=>`/`?` 有颜色；`.lom`（如 `lom/fuc.lom`）同理。
 等价的无头判据：用 Shiki/TextMate 跑一遍语法，统计"无 scope 占比" ——
 本仓库实测 `.lom` 0.0%/0.1%，`.lomt` 3.4%–20.9%（其余是表达式里的裸标识符，正常）。
+
+## 5. 第四个宿主：GitHub 的语言统计（Linguist，2026-09-16）
+
+GitHub 仓库语言栏由 **Linguist** 算，它**同样是构建期固定的语言集** —— 与 §1 那两个宿主
+同一个形状，只是它有别的宿主都没有的两样东西：**一个用户侧的临时出口**，和**一份公开的
+收录门槛**。
+
+### 5.1 临时出口：`.gitattributes`（已经用了）
+
+```
+*.lomt linguist-language=Rust
+*.lom  linguist-language=Rust
+loment/build/** linguist-generated
+```
+
+两条边界都踩过、都不是想当然：
+
+- **`linguist-language` 只认它认识的名字。** 写 `linguist-language=Loment` 不是"先声明、
+  等它收录"，而是**更糟**：查源码 `lib/linguist/lazy_blob.rb`，这一支走
+  `Language.find_by_alias(lang)`，未知名字返回 `nil` 且结果被 memoize（**不回退到按后缀
+  自动识别**）—— 于是这些文件**彻底没有语言**，一个字节都不进统计。所以现在映射到
+  **Rust**：Loment 是 Rust 的严格子集，关键词/字符串/注释的着色一致（与 §3.2 那条
+  "展示用 `rust` 围栏"同一个理由）。收录之后改成 `Loment`，或直接删掉这两行。
+- **生成物必须自己排掉。** 包里 1.79 MB 的编译器种子（`loment/build/selfhost_driver.ll`）
+  让仓库**整个显示成 "LLVM"** —— 一个生成文件决定了仓库的语言。标 `linguist-generated`
+  之后它归零。**这一条与"收录"无关，任何仓库都该做。**
+
+### 5.2 收录门槛：现在差得远（**已决定先不提**）
+
+Linguist 的 `CONTRIBUTING.md` 写着：
+
+| 要求 | Loment 现状 |
+|---|---|
+| 单个后缀**一年内 ≥2000 个文件**（跨多个 `user/repo` 分布，排除 fork） | 约 235 个 `.lomt`，**全在 1 个仓库** |
+| 样本要"真实使用"的代码（教程/hello world 不收） | 有 `tour.lomt` 等，够 |
+| 要有语法高亮（TextMate 语法 + 许可证） | **有**：`editors/vscode/syntaxes/*.tmLanguage.json`，MIT |
+| —— | **"我们不收很新或爱好性质的语言，这类 PR 会直接关掉"** |
+
+用户 2026-09-16 定：**先不提**。等工具链真发布、外面真有人用 Loment 写了仓库、凑出真实
+使用量再提 —— 那时才是"收录"，现在提只是留个被关的记录。
+
+### 5.3 将来真要提时，材料都是现成的
+
+```bash
+# 1. 语法已经公开且是 MIT（Linguist 要求语法有可识别的许可证），直接指过去：
+script/add-grammar https://github.com/FujoJTOP/loment
+# 2. lib/linguist/languages.yml 加一条（先不写 language_id）：
+#      Loment: {type: programming, extensions: [".lomt", ".lom"], tm_scope: source.loment, ...}
+# 3. samples/Loment/ 放真实代码（不是 hello world）
+# 4. script/update-ids   # 生成 language_id
+# 5. bundle exec rake test
+```
+
+PR 模板必填，且要附**GitHub 搜索链接**证明真实使用量 —— 那一条正是现在的短板。

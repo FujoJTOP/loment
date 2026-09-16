@@ -64,11 +64,15 @@ REPOS: dict[str, dict] = {
         "gitattributes": """# GitHub classifies a repository with Linguist. This repository has two kinds of bytes
 # that Linguist would otherwise get wrong:
 #
-#   * `.lomt` / `.lom` are Loment source. Linguist does not know those extensions yet
-#     (an inclusion PR is open against github-linguist/linguist), so they are attributed
-#     to Rust in the meantime: Loment's syntax is a strict subset of Rust, so keywords,
-#     strings, comments and the resulting highlighting line up.
-#     **Once Linguist includes Loment, change these two lines to `Loment`** — or drop them
+#   * `.lomt` / `.lom` are Loment source. Linguist does not list those extensions yet, and
+#     it refuses to guess: `Language.find_by_alias` returns nil for a name it does not know
+#     and caches that, so `linguist-language=Loment` would not "declare it in advance" — it
+#     would drop these files out of the statistics entirely. They are attributed to Rust
+#     instead: Loment's syntax is a strict subset of Rust, so keywords, strings, comments
+#     and the resulting highlighting line up.
+#     Loment is not yet eligible for inclusion — Linguist asks for roughly 2000 files per
+#     extension per year, spread across repositories, and does not accept very new
+#     languages. **Once it is included, change these two lines to `Loment`** — or drop them
 #     and let the extensions be detected on their own.
 #   * `loment/build/` holds build output — the compiler seed as LLVM IR, per-target Potato
 #     form objects, transpiled Rust and C, the genesis assembler. Excluding it keeps a
