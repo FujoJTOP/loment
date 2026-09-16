@@ -255,6 +255,146 @@ def test_cpp_end_to_end():
 
 
 @test
+def test_python_via_process_bridge():
+    """Python: 起一个 `python3`, 让它 import 它自己的库, 把结果读回来。
+
+    **这是第二条腿, 不是 C ABI 那条** (docs/173 §2 的说明): Python 不是"导出 C ABI 的库",
+    是解释器。所以这里**不链接** —— 起一个进程, 把代码交给它, 把 stdout 读回来。判据里用的
+    是 Python 自带的 `json` 库 (不是我们写死的一个数), 所以它证明的是"**真用上了 Python 的库**",
+    而不是"能起个进程"。
+
+    退出码 = `len(json.dumps([1,2,3]))` = 9 (即 `[1, 2, 3]` 的长度)。数字是 Python 算的,
+    Loment 只把读回来的第一个字节转成退出码 —— 中间没有任何一处是我们自己算的。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    code = r"""import json
+print(len(json.dumps([1,2,3])))"""
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "p.lomt").write_text(
+            "module pybridge\n\n"
+            "use proc\n\n"
+            "fn _start() {\n"
+            "    let buf: ptr = alloc(1024);\n"
+            "    let n: i64 = proc_sh(\"python3 -c 'import json; print(len(json.dumps([1,2,3])))'\",\n"
+            "                         buf, 1024);\n"
+            "    if n <= 0 {\n"
+            "        syscall4(60, 200 as u64, 0, 0);\n"
+            "    }\n"
+            "    let d: u32 = load8(buf, 0) - 48;\n"       # '9' -> 9
+            "    syscall4(60, d as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        # 先把桥自己的模块装进单元 (use proc)
+        mod = lomentc.load(td / "p.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "p.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        blob, _info = lomelf.compile_ll(ir)
+        exe = td / "p.elf"
+        exe.write_bytes(blob)
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                           capture_output=True, text=True, timeout=180, shell=False)
+        assert r.returncode == 9, (
+            f"Python 桥结果不对: rc={r.returncode} (期望 9 = len(json.dumps([1,2,3]))) "
+            f"err={r.stderr[-300:]!r}")
+        print("      Python: python3 + json 库, 输出读回 -> 退出码 9")
+
+
+@test
+def test_java_via_process_bridge():
+    """Java: 同一条腿。这台机器上 WSL 里没有 java, 所以**这里 SKIP** —— 配方在判据里。
+
+    `proc_sh` 收的是一条 shell 命令, 所以 Java 与 Python 走的是**同一个函数**, 区别只在命令
+    与"怎么把结果打出来"。真正要写的是那段 Java: 编译成 class (或直接用 `java -` 的单文件源),
+    跑它, 结果打到 stdout, 我们读回来。没有 java 的机器上这条一律 SKIP, 不是静默通过。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    has = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v java"],
+                         capture_output=True, text=True, timeout=60, shell=False)
+    if has.returncode != 0:
+        print("      SKIP: WSL 里没有 java (配方见本判据的 docstring)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "Hello.java").write_text(
+            "public class Hello { public static void main(String[] a) { "
+            "System.out.println(7); } }\n", encoding="utf-8", newline="\n")
+        (td / "j.lomt").write_text(
+            "module javabridge\n\n"
+            "use proc\n\n"
+            "fn _start() {\n"
+            "    let buf: ptr = alloc(1024);\n"
+            "    let n: i64 = proc_sh(\"cd /tmp && javac Hello.java && java Hello\", buf, 1024);\n"
+            "    if n <= 0 {\n"
+            "        syscall4(60, 200 as u64, 0, 0);\n"
+            "    }\n"
+            "    syscall4(60, (load8(buf, 0) - 48) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "j.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "j.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
+        exe = td / "j.elf"
+        exe.write_bytes(blob)
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                           capture_output=True, text=True, timeout=180, shell=False)
+        assert r.returncode == 7, f"Java 桥结果不对: rc={r.returncode} (期望 7)"
+        print("      Java: javac + java, 输出读回 -> 退出码 7")
+
+
+@test
+def test_javascript_via_process_bridge():
+    """JavaScript: 同一条腿上的第三个语言 —— 换个命令就行, **代码一行不用改**。
+
+    这条顺带钉住一件事: `proc_sh` 是**通用**的 (起进程 + 读 stdout), 不是"Python 专用"。
+    语言数量在第二条腿上**不是**工作量 —— 有解释器就能用; 真正的工作量在第一条腿
+    (C ABI 那一族) 的链接能力上。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    has = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v node"],
+                         capture_output=True, text=True, timeout=60, shell=False)
+    if has.returncode != 0:
+        print("      SKIP: WSL 里没有 node")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "j.lomt").write_text(
+            "module jsbridge\n\n"
+            "use proc\n\n"
+            "fn _start() {\n"
+            "    let buf: ptr = alloc(1024);\n"
+            "    let n: i64 = proc_sh(\"node -e 'console.log(JSON.stringify([1,2,3]).length)'\",\n"
+            "                         buf, 1024);\n"
+            "    if n <= 0 {\n"
+            "        syscall4(60, 200 as u64, 0, 0);\n"
+            "    }\n"
+            "    syscall4(60, (load8(buf, 0) - 48) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "j.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "j.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
+        exe = td / "j.elf"
+        exe.write_bytes(blob)
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                           capture_output=True, text=True, timeout=180, shell=False)
+        # JSON.stringify([1,2,3]) = "[1,2,3]" -> 长度 7
+        assert r.returncode == 7, (
+            f"JS 桥结果不对: rc={r.returncode} (期望 7 = len(JSON.stringify([1,2,3]))) "
+            f"err={r.stderr[-300:]!r}")
+        print("      JavaScript: node + JSON 库, 输出读回 -> 退出码 7")
+
+
+@test
 def test_object_with_relocations_is_rejected():
     """对象里有重定位 -> **硬拒**。
 

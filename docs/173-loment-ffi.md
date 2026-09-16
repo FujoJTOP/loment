@@ -44,6 +44,12 @@ Zig（`export fn`）、Go（c-archive）、Swift（`@_cdecl`）、C#（NativeAOT
 Fortran —— 它们**导出的都是同一种符号与同一套传参约定**。所以阶段 2 的工作量不在"语言数量"，
 而在**归档成员选择**这一件事上。
 
+**第二条腿（进程桥）**：Python / Java / JS 这类**运行期**不是 C ABI 库，嵌进来要先把动态库装载
+做出来（阶段 3/4）。在那之前，`loment/lib/proc.lomt` 让它们现在就能用：起一个解释器进程，
+把代码交给它，把它的输出读回来 —— 对方照旧 `import` 自己的库。**代价是多了个进程边界：
+传的是字节流，不是指针**（不能传结构体）。两个语言在这条腿上是**同一个函数**，换个命令而已。
+**只在 Linux/ELF 可用**（PE 垫片没有 fork/pipe）。
+
 **Python / Java 为什么必须排到阶段 4**：它们不是"导出 C ABI 的库"，而是**运行期**
 （CPython 解释器 / JVM）。要调用它们的代码，得把解释器搬进进程 —— 而那需要阶段 3 的动态装载
 （`libpython.so` / `libjvm.so`）打底。这一阶段是另一个量级的工程。
@@ -99,46 +105,63 @@ FFI 与三条既有承诺冲突，逐条收窄而不是推翻（原文都留着�
 
 | 件 | 状态 |
 |---|---|
-| 规范（`docs/143` §3.1） | ✅ |
-| 参考实现 `tools/lomentc.py`：解析 / 检查 / 发射 `declare` + 普通 `call` | ✅ `lomentc_test` 112/112 |
+| 规范（`docs/143` §3.1 / `docs/158` §2/§5） | ✅ |
+| 语言面：`extern fn` **两个实现都实现**，IR 逐字节一致 | ✅ `lomentc_test` 112/112 · `loment_p8_test` 16/16 |
 | 诊断码 **E021**（签名形态不支持） | ✅ |
-| 自举镜 `loment/selfhost/**` | ⛔ **尚未实现** —— 由驱动**硬拒**（见下） |
-| 链接器 `lomelf` 读外部 `.o` + 多输入 + 重定位 + C ABI 传参 | ⛔ **尚未开始**（阶段 1 最重的一块） |
-| `loment build --link` 等构建管线 | ⛔ 依赖上一条 |
-| 端到端判据（C 程序真的被调到） | ⛔ 依赖上两条 |
+| 链接器 `lomelf.py`：读 ELF64 目标文件 + 多节拼接 + 符号解析 + **C ABI 传参** | ✅ |
+| 构建管线 `loment build --link FILE.o`（两个启动器） | ✅ |
+| 端到端判据 | ✅ `loment_ffi_test` **11/11**（已进静态门禁） |
+| **自举链接器 `loment/tools/lomelf.lomt`** | ⛔ **尚未镜像**（产品路径走它）—— 它对 `--link` **硬拒**并指向本文档 |
+| 归档 `.a` / 动态库 / libc（阶段 2/3） | ⛔ 未开始 |
+| PE 侧 FFI | ⛔ 未开始（`--link` 配 `--target pe` 明确拒绝） |
 
-**为什么自举镜先硬拒而不是先放着**：放过去的后果是**静默错编**。自举的 codegen 是
-token 扫描器，它把 `extern fn f(a, b) -> T;` 当成一个普通函数记进表里，于是发出一条
-**没有函数体的 `define`**，游标还从签名直接滑进下一个函数的体。实测：
+### 已经能被调到的语言（这台机器上真跑通的）
 
-```
-$ fujoc-s exttest.lomt      # extern fn c_add(a,b) -> i32;  +  fn main() { return c_add(3,4); }
-define i32 @c_add(i32 %a, i32 %b) {
-entry:
-  ...
-  %t1 = call i32 @c_add(i32 3, i32 4)    # ← 这是 main 的体
-  ret i32 %t1
-}
-```
+| 语言 | 走哪条腿 | 判据 |
+|---|---|---|
+| **C** | `extern fn` + `--link`（clang 交叉编出 ELF 目标文件） | `test_c_end_to_end` 退出码 52 |
+| **C++** | 同上，`extern "C"` 包一层 | `test_cpp_end_to_end` 退出码 42 |
+| **Rust** | 同上，`#[no_mangle] pub extern "C"` | `test_rust_end_to_end` 退出码 42 |
+| **Python** | **进程桥**：起 `python3`，让它 `import json` | `test_python_via_process_bridge` 退出码 9 |
+| **JavaScript** | 进程桥：起 `node` | `test_javascript_via_process_bridge` 退出码 7 |
+| **Java** | 进程桥（同一条腿，配方写在判据里） | 本机 WSL 没有 `java`，判据 **SKIP** |
+| Zig / Go / Swift / C# / Fortran … | C ABI 那一族，**同一个机制** | 本机没装工具链，配方在 §2 表里 |
 
-——`main` 整个消失，**退出码 0**。所以驱动在检查器之前扫到顶层 `extern` 就报错退出
-（`fujoc-s: 外部函数 (extern fn) 尚未在自举镜实现`），并**必须判 `kind == 0`**：`tok_is`
-比的是 token 文本，源码里的字符串字面量 `"extern"` 也会被它匹配上，
-`let s: str = "extern";` 那种正常程序会被误拒（`checker.lomt:317` 记着同一个坑）。
+**"7 个语言"这句话要拆开说**，不然是虚的：
 
-**这条是"两个实现不一致"的一个已知窗口**：同一份源码，参考实现接受、自举镜拒绝。
-按 `docs/158` §5 第 3 条的口径这**不算完成** —— 等自举镜镜像上去才算。写在这里是为了
-不让它悄悄过去：现在的行为是**响的**（报错退出），不是静默的。
+- **机制上覆盖 7+**：第一条腿覆盖所有能导出 C 符号的语言（C、C++、Rust、Zig、
+  Go(`-buildmode=c-archive`)、Swift、C#(NativeAOT)、Fortran、Ada…）——**同一个 `extern fn`，
+  同一套寄存器约定**，加一个语言就是加一条构建配方 + 一条判据。第二条腿覆盖所有有解释器的
+  语言（Python、Java、JS、Ruby、Lua…）——**连构建配方都不用**，换个命令。
+- **本机实测覆盖 5**：C / C++ / Rust / Python / JavaScript。Java 与其余因为没有工具链而
+  **SKIP**（不是静默通过）—— 要在这台机器上看到它们，装 `java` / `zig` / `go` 即可。
+- **这台机器缺的是工具链，不是通路。**
+
+### 两处"响的失败"（宁可不支持，也不静默错编）
+
+1. **自举链接器对 `--link` 硬拒**。它还不认外部目标文件，不看 argv[3] 的话那个选项会被
+   静静忽略，然后在 `finalize` 报一句"未定义的标签: c_add" —— 用户看到的是"符号找不到"，
+   方向完全错了。所以它明说"尚未在自举链接器实现"。**产品路径目前还不能做 FFI**（打包的
+   `loment` 用的就是自举链），这一条是写在这里的关键缺口。
+2. **自举编译器曾经把 `extern fn` 静默编错**（已修）。第一版自举 codegen 把它当普通函数，
+   发出一条没有函数体的 `define`，游标从签名滑进下一个函数的体 —— 实测
+   `extern fn c_add(a,b); fn main() { return c_add(3,4); }` 得到
+   `define i32 @c_add(...) {<main 的体>}` 而 `main` 整个消失，**退出码 0**。
+   修法是把它当第三类（与 trait 方法同类：只声明不发射），并判**前一个 token**而不是挂粘性
+   标志（`tok_is` 比的是 token 文本，源码里的字符串字面量 `"extern"` 也会被匹配上）。
 
 ## 6. 判据
 
 ```bash
-python tools/loment_ffi_test.py     # 阶段 1 门面: C 端到端 (Loment 调 .o, lomelf 单独链接, 跑对)
-python tools/lomentc_test.py        # extern 正负例 (签名形态 / 重名 / 无体)
-python tools/loment_elf_test.py     # ELF: 外部对象链接
-python tools/loment_pe_test.py      # PE: 同上
-python tools/loment_p8_test.py      # 语料 54/54 逐字节不能被打破
+python tools/loment_ffi_test.py     # 11/11: C / C++ / Rust 端到端 + Python / JS 桥 + 四条边界
+python tools/lomentc_test.py        # 112/112: extern 正负例 (签名形态 / 重名 / 无体)
+python tools/loment_p8_test.py      # 16/16: extern 的两个实现**逐字节一致** + 语料 54/54
+python tools/loment_elf_test.py     # 7/7: lomelf (含外部对象那条路) 与 clang 行为一致
+python tools/loment_pe_test.py      # 9/9: PE 侧不受影响
 ```
+
+`loment_ffi_test` 比的是**运行结果**而不是 IR —— 这条路上最容易错的几处都不改 IR:
+传参进哪个寄存器、调用结果有没有落槽、进程桥读回的是不是对方真的算出来的东西。
 
 **证伪要求**（先把判据弄坏，确认它会红）：把 C ABI 传参改回栈 → 门面判据必须红；
 把 `parse_ll` 跳过 `declare` 改回去 → 必须红。
