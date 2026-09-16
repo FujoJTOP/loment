@@ -847,11 +847,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "d9f684caee8798ca3d447d4b29ba7be2a231e09cfd90ddc415ead0f8e627990c"
+   "sha256": "06eeb54b4bf4a8937a2b5a01a9bb7def505ca12582eab93d2eabefd995b21634"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "c2d9be31e0d2bdbfffdd20ff36f29efd5684221317fd932f5cf6b7134a5ade54"
+   "sha256": "93e06450b92f3fc7417b163334d7f98b16cb03141f0ba27611d0aa86ee29a689"
   },
   {
    "path": "tools/loment_sign.py",
