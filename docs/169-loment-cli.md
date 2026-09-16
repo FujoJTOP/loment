@@ -47,6 +47,14 @@ bash 可用，用户双击 / 从 cmd 里敲走的是这一份）。命令要是�
 而敲下去只会得到"未知命令"，那是骗人。判据
 `test_every_catalog_command_is_actually_dispatchable` 专门守这条（见 §5）。
 
+**`lompi` 也不在这张表里，而且理由不同 —— 这是条硬边界。** `lompi` 是 Loment 库的包管理器，
+**随 Loment 一起安装**（装完 `loment`，`lompi` 就在 PATH 上，不需要单独装），但它
+**不属于 Loment 官方工具**：它不编 Loment、不读源码树、是**另一个命令**。
+
+所以：`loment help` / `loment commands` 里**不出现它**，`loment <任何东西>` 也**不转发**给它 ——
+`loment` 的命令面只描述 `loment` 自己。要用 lompi 就直接敲 `lompi`，它有自己的用法与文档。
+**不要**因为"它随包一起装"就把它挂进这张表：装在一起 ≠ 是同一件工具的部件。
+
 ## 3. 观感（这一节是需求，不是装饰）
 
 - **分区**：六个分区各带标题，不是一坨平铺的列表。
