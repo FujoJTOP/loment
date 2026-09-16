@@ -23,8 +23,8 @@ description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研
 loment version
 ```
 
-拿到 `Loment 0.1.4 Pre1 (0.1.4-pre1), commit <短号>` 这类输出。**以它的 commit 为准**：
-不同 checkout 能力不同（本文件描述 0.1.4-pre1 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2.3`）。
+拿到 `Loment 0.1.4 Pre2 (0.1.4-pre2), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-pre2 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2.3`）。
 
 **命令面一共 38 条，敲 `loment help` 看全部**（分区 + 对齐 + 上色），`loment help <命令>` 看单条。
 最常用的这些：
@@ -476,6 +476,55 @@ loment git status      # -> loment-git status
   的 `loment-version` 顶不掉它。
 - **注册方是软件，不是用户配置**。这是一个**文件名约定**（可执行文件叫 `loment-<名字>`），
   没有注册表、没有配置文件 —— 装了就生效，卸了就没了。
+
+## 7.3 用别的语言写的库（FFI）
+
+**两条腿，按"对方是什么"分** —— 挑错了会白折腾：
+
+| 对方是什么 | 怎么用 | 覆盖 |
+|---|---|---|
+| **C ABI 库**（C / C++ / Rust / Zig / Go(c-archive) / Swift / C#(NativeAOT) / Fortran…） | `extern fn` 声明 + 编的时候 `--link 那个.o` | 所有能导出 C 符号的语言 |
+| **运行期**（Python / Java / JS / Ruby / Lua…） | `use proc` 然后 `proc_sh`／`proc_python` 起一个解释器进程，把它的输出读回来 | 所有有解释器的语言 |
+
+### 7.3.1 C ABI 那一族（真链接）
+
+```rust
+extern fn c_add(a: i32, b: i32) -> i32;    // 只有签名, 末尾分号
+extern fn c_free(p: ptr);                  // 不写 -> T 就是 void
+
+fn _start() {
+    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);
+}
+```
+
+```
+$ cc -c -O1 -ffreestanding -fno-pic lib.c -o lib.o      # 对方的库自己编
+$ loment build app.lomt --link lib.o -o app             # 我们链接
+```
+
+**签名只收标量**（`i8..i64`/`u8..u64`/`bool`）**与 `ptr`**。`str` 是"指针 + 长度"、
+**不是 C 字符串**；结构体按值传要走另一套寄存器分类规则 —— 这两样出现会**报错 E021**，
+不静默错编。要传给 C 的字符串得自己在内存里拼一个 NUL 结尾的字节串。
+
+调用点按**平台 C ABI** 传参（Linux: 前六个整数实参进 `rdi rsi rdx rcx r8 r9`；
+Windows: `rcx rdx r8 r9`），而 Loment 函数之间的调用照旧走 Loment 自己的约定（实参走栈）。
+
+### 7.3.2 Python / Java / JS（进程桥）
+
+```rust
+use proc
+
+fn _start() {
+    let buf: ptr = alloc(1024);
+    let n: i64 = proc_sh("python3 -c 'import json; print(len(json.dumps([1,2,3])))'", buf, 1024);
+    // n = 读到的字节数, 内容在 buf; -1 = 起不来
+}
+```
+
+`proc_python("...")` 是 Python 的糖。**换语言就是换命令**，Loment 这边一行不用改。
+
+三条边界：**传的是字节流不是指针**（不能传结构体过去）；**只在 Linux/ELF 上可用**
+（Windows 的垫片没有 `fork`/`pipe`，那里返回 -1）；它要求机器上有那个解释器。
 
 ## 8. 拿不到源码仓库时怎么办
 

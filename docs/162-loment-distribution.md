@@ -1,6 +1,6 @@
 # 162 · Loment 发行包：命令安装与安装包安装
 
-> 版本 `0.1.4-pre1`（显示名 **Loment 0.1.4 Pre1**）· 构建器 `tools/loment_dist.py`
+> 版本 `0.1.4-pre2`（显示名 **Loment 0.1.4 Pre2**）· 构建器 `tools/loment_dist.py`
 > · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
@@ -63,9 +63,9 @@
 
 | 文件 | 装法 | 说明 |
 |---|---|---|
-| `loment-0.1.4-pre1-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
-| `loment-0.1.4-pre1-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
-| `loment-0.1.4-pre1-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
+| `loment-0.1.4-pre2-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
+| `loment-0.1.4-pre2-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
+| `loment-0.1.4-pre2-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
 | `SHA256SUMS` | — | 上面三件的 sha256 |
 
 **两个归档是确定性字节**：zip 固定时间戳（`1980-01-01`）+ 目录项排序 + unix 权限位，
@@ -85,7 +85,7 @@ tar.gz 的 `mtime=0` + 稳定 uid/gid/uname、gzip 头不带时间。同输入�
 | `bin/loment-cli` | **命令前端**（38 条命令：`help`/`codes`/`explain`/`syntax`/`cheat`/`stat`/`grep`/`ls`/`tree`/`new`/…，见 `docs/169`）。**用 Loment 自己写的** —— 命令面只写一份，两个启动器各转发一行 |
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，源码 `lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi`；详见 `docs/170` |
 | `share/loment/seed.ll` | 自举种子 —— 只用 clang 就能从它重建整套工具链 |
-| `share/loment/version` | `Loment 0.1.4 Pre1 (0.1.4-pre1)` + 提交号与提交日期 |
+| `share/loment/version` | `Loment 0.1.4 Pre2 (0.1.4-pre2)` + 提交号与提交日期 |
 | `share/loment/examples/user_hello.lomt` | 示例（用 syscall 打印） |
 | `SHA256SUMS` | **随包**校验和，安装脚本第一步就校它 |
 
@@ -97,7 +97,7 @@ stage1 <entry.lomt>            -> IR      (与参考实现逐字节相同, 见 d
 clang -nostdlib -static        -> ELF     (无 libc, _start 即入口)
 ```
 
-## 2b. 包不是封闭的：两个扩展点（0.1.4-pre1）
+## 2b. 包不是封闭的：两个扩展点（0.1.4-pre2）
 
 装好的 Loment 是**长东西的底座**，不是一组固定文件 + 一组固定命令。两处开口都在**文件系统**
 上表达，没有注册表、没有新格式：
@@ -193,7 +193,7 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 | 2026-09-15 | `skill` / `seed` | 用户问「安装包更新了吗」 |
 | 2026-09-16 | `store`（新增 137 个文件） | 加 store 时补 `_fresh_sources` |
 | 2026-09-16 | `install.sh` / `install.ps1`（模板直出） | 改完模板重打包才发现归档里还是旧的 |
-| 2026-09-16 | **`share/loment/version`** | 打 0.1.4-pre1 时发现包里印的是**上一个**提交号的 commit 行 |
+| 2026-09-16 | **`share/loment/version`** | 打 0.1.4-pre2 时发现包里印的是**上一个**提交号的 commit 行 |
 
 最后一条比前三条更该被盯：它带 **HEAD 短号**，所以**每一次提交都会让它过期**。配套的两条纪律：
 

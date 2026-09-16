@@ -1,6 +1,6 @@
 # 169 · Loment CLI：命令面与观感
 
-> 版本 `0.1.4-pre1`（显示名 **Loment 0.1.4 Pre1**）
+> 版本 `0.1.4-pre2`（显示名 **Loment 0.1.4 Pre2**）
 > · 实现 `loment/tools/lomcli.lomt`（**Loment 自己写的**）· 判据 `tools/loment_cli_test.py`
 > · 上游：`docs/148`（工具链）、`docs/162`（发行包）、`docs/159`（去 Python 自举）
 

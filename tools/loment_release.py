@@ -34,8 +34,12 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # ②**自定义 `loment` 命令** (`loment foo` -> PATH 上的 `loment-foo`, 像 `git foo`)。
 # 名字形式 `use <名字>` 也从"只认仓库四根"改成按层搜 (deps/ -> 自带 store -> 内置根)。
 # alpha 系列到此为止: 这两条是给**别人**用这个语言的口子, pre 之后不再改语言面。
-RELEASE = "0.1.4-pre1"
-RELEASE_NAME = "0.1.4 Pre1"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-16 升到 **0.1.4-pre2**: **FFI** (docs/173) —— `extern fn` 进语言, 两个编译器都发
+# `declare` 且逐字节一致; `lomelf` 能读外部 ELF 目标文件并**按 C ABI 传参**链接, 于是 Loment
+# 程序真的调到了 C / C++ / Rust 的库; 运行期那一族 (Python / JS / Java) 走新加的进程桥
+# `loment/lib/proc.lomt`。见 docs/174。
+RELEASE = "0.1.4-pre2"
+RELEASE_NAME = "0.1.4 Pre2"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

@@ -95,7 +95,7 @@ Project site: <https://fujojtop.github.io/FujoOSwebsite/loment/>
 
 ## Status
 
-Current version: `0.1.4-pre1`.
+Current version: `0.1.4-pre2`.
 
 The language surface is frozen — syntax, type rules, diagnostics, unit loading and the
 capability semantics are documented in `docs/158-loment-freeze.md`, and any change to

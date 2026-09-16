@@ -66,7 +66,7 @@ def _build() -> Path:
     exe.write_bytes(raw)
     exe.chmod(0o755)
     (pkg / "share" / "loment" / "version").write_text(
-        "Loment 0.1.4 Pre1 (0.1.4-pre1), commit 0123456\nbuild 2026-09-15\n",
+        "Loment 0.1.4 Pre2 (0.1.4-pre2), commit 0123456\nbuild 2026-09-15\n",
         encoding="utf-8", newline="\n")
     (pkg / "share" / "loment" / "examples" / "tour.lomt").write_text(
         "module tour\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
@@ -386,7 +386,7 @@ def test_new_refuses_to_overwrite():
 def test_version_reads_share_version():
     rc, out, _ = _run(["version"])
     assert rc == 0
-    assert out.startswith("Loment 0.1.4 Pre1"), out
+    assert out.startswith("Loment 0.1.4 Pre2"), out
     assert "commit 0123456" in out
 
 

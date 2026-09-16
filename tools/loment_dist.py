@@ -41,8 +41,8 @@ OUT = ROOT / "loment" / "dist"
 STAGE = ROOT / "loment" / "build" / "dist"
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 
-DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Pre1
-VER = loment_release.RELEASE                # 机器: 0.1.4-pre1
+DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Pre2
+VER = loment_release.RELEASE                # 机器: 0.1.4-pre2
 
 #: 包里的工具 -> (入口源文件, 编译时的 CWD)。名字就是安装后的可执行名。
 #: CWD 那一格是给 **路径形式的 `use "..."`** 用的 —— 它按「仓根 → 导入文件所在目录」解析,
