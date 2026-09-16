@@ -1,0 +1,475 @@
+// lompi/lpi_idn.lomt — 实例身份 (Merkle 递归哈希) 与依赖闭包
+//
+// docs/168 §2 判据 2 定的是:
+//
+//     id(P) = H( 自身源码 ⊕ {边名 → id(子)} )
+//
+// **只看自身源码是错的** —— 同一份源码在两个构建里绑到不同的依赖上, 语义不同,
+// 却会被算出同一个身份、被错误地合并成一个实例。所以边名与子身份必须进哈希。
+//
+// 为什么是**不动点迭代**而不是递归: 递归每一层都要留住自己的边表, 而这个程序的
+// 内存是一块固定工作区 (语言没有动态分配)。递归就得给每一层切一块缓冲, 于是
+// 深度上限被写死进布局。换成"反复扫到没有新的包可以定身份为止"就没有这个问题 —
+// 代价是 O(n²) 最坏, 而一个仓库包数很少 (上限 512), 这个代价换得起。
+// 环也因此自然暴露: A→B→A 两边都永远"还没准备好", 循环结束后它们就是剩下来的。
+//
+// 身份算不出来要**响亮**: 环与缺依赖各自有独立的状态位与消息, 不混成一个"失败"。
+//
+// 命名: 公开 idn_*, 自检 test_idn_*。
+
+module lpi_idn
+
+use "lpi_pkg.lomt"
+
+// PKG_F_MISSING / PKG_F_INCLOSURE 住在 lpi_pkg —— 它们是**包记录**的标志位, 而记录
+// 布局本来就在那边; 平名字空间要求先定义后使用, 定义放在更前面的那一层才对。
+
+/// idn_pass2 的结果。
+pub const IDN_OK: u32 = 0;
+pub const IDN_CYCLE: u32 = 1;
+pub const IDN_MISSING: u32 = 2;
+
+/// 第 idx 个包的边表暂存位置 (WS_EPOOL / WS_EENTS) —— 由 pkg_edges 填。
+fn idn_edges(ws: ptr, idx: u32) -> u32 {
+    let d: ptr = pkg_dir(ws, idx);
+    let n: u32 = pkg_list_sources(ws, d);
+    if n == DIR_ERR {
+        return 0;
+    }
+    return pkg_edges(ws, d, n);
+}
+
+/// 边按名字排序 (再按种类) —— 让身份与"边出现顺序"无关。
+/// 不排的话, 同样两条边换个文件顺序就会得到不同的身份。
+fn idn_edge_less(pool: ptr, eents: ptr, i: u32, j: u32) -> bool {
+    let oi: u32 = lex_ent_off(eents, i);
+    let oj: u32 = lex_ent_off(eents, j);
+    let li: u32 = lex_ent_len(eents, i);
+    let lj: u32 = lex_ent_len(eents, j);
+    let k: u32 = 0;
+    while k < li && k < lj {
+        let a: u32 = load8(pool, oi + k);
+        let b: u32 = load8(pool, oj + k);
+        if a < b { return true; }
+        if a > b { return false; }
+        k = k + 1;
+    }
+    if li != lj {
+        return li < lj;
+    }
+    return lex_ent_kind(eents, i) < lex_ent_kind(eents, j);
+}
+
+fn idn_swap_edge(eents: ptr, i: u32, j: u32) {
+    let a: u32 = 0;
+    while a < LEX_ENT_STRIDE {
+        let t: u32 = load8(eents, i * LEX_ENT_STRIDE + a);
+        let u: u32 = load8(eents, j * LEX_ENT_STRIDE + a);
+        store8(eents, i * LEX_ENT_STRIDE + a, u as u8);
+        store8(eents, j * LEX_ENT_STRIDE + a, t as u8);
+        a = a + 1;
+    }
+}
+
+pub fn idn_sort_edges(pool: ptr, eents: ptr, n: u32) {
+    let i: u32 = 1;
+    while i < n {
+        let j: u32 = i;
+        while j > 0 && idn_edge_less(pool, eents, j, j - 1) {
+            idn_swap_edge(eents, j, j - 1);
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+}
+
+/// 第一遍: 每个包的**自身源码哈希**写进它的 hex 槽 (WS_IDS)。
+/// 返回算成功的包数。这一步不需要任何依赖信息。
+pub fn idn_pass1(ws: ptr, n: u32) -> u32 {
+    let ok: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let d: ptr = pkg_dir(ws, i);
+        let nf: u32 = pkg_list_sources(ws, d);
+        if nf != DIR_ERR {
+            let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
+            if pkg_own_hash(ws, d, nf, dig) == nf {
+                sha_hex(dig, pkg_id_hex(ws, i));
+                ok = ok + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+/// 第二遍: 反复扫, 把"依赖都已有身份"的包定下身份, 直到没有新的可以定为止。
+/// 返回 IDN_OK / IDN_CYCLE / IDN_MISSING; MISSING 时缺的那个依赖名在 msg 里。
+pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
+    let pool: ptr = ((ws as u64) + WS_EPOOL as u64) as ptr;
+    let eents: ptr = ((ws as u64) + WS_EENTS as u64) as ptr;
+    let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
+    let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
+    let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
+    let zero: ptr = ((ws as u64) + WS_TMP as u64) as ptr;
+    store8(zero, 0, 0 as u8);
+    let missing: u32 = 0;
+    let progress: u32 = 1;
+    while progress == 1 {
+        progress = 0;
+        let i: u32 = 0;
+        while i < n {
+            if (pkg_flags(ws, i) & PKG_F_IDENT) == 0 && (pkg_flags(ws, i) & PKG_F_MISSING) == 0 {
+                let c: u32 = idn_edges(ws, i);
+                idn_sort_edges(pool, eents, c);
+                // 依赖齐了吗
+                let ready: u32 = 1;
+                let k: u32 = 0;
+                while k < c {
+                    if lex_ent_kind(eents, k) == LEX_NAME {
+                        let nm: ptr = ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr;
+                        let nl: u32 = lex_ent_len(eents, k);
+                        let ch: u32 = idn_find_name(ws, n, nm, nl);
+                        if ch == PKG_NONE {
+                            ready = 0;
+                            pkg_set_flag(ws, i, PKG_F_MISSING);
+                            missing = idn_copy_msg(msg, msgcap, nm, nl);
+                        } else if (pkg_flags(ws, ch) & PKG_F_IDENT) == 0 {
+                            ready = 0;
+                        }
+                    }
+                    k = k + 1;
+                }
+                if ready == 1 {
+                    // id = H( 自身 hex ⊕ 每条 (边名 0x00 子身份 0x00) )
+                    sha_init(st);
+                    let h: ptr = pkg_id_hex(ws, i);
+                    sha_update(st, h, 64);
+                    sha_update(st, zero, 1);
+                    let m: u32 = 0;
+                    while m < c {
+                        if lex_ent_kind(eents, m) == LEX_NAME {
+                            let nm: ptr = ((pool as u64) + (lex_ent_off(eents, m) as u64)) as ptr;
+                            let nl: u32 = lex_ent_len(eents, m);
+                            let ch: u32 = idn_find_name(ws, n, nm, nl);
+                            sha_update(st, nm, nl);
+                            sha_update(st, zero, 1);
+                            sha_update(st, pkg_id_hex(ws, ch), 64);
+                            sha_update(st, zero, 1);
+                        }
+                        m = m + 1;
+                    }
+                    sha_final(st, dig);
+                    sha_hex(dig, hex);
+                    idn_copy_hex(ws, i, hex);
+                    pkg_set_flag(ws, i, PKG_F_IDENT);
+                    progress = 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    if missing == 1 {
+        return IDN_MISSING;
+    }
+    // 还有没定身份的就是环 (依赖都在, 但互相等)。
+    let i: u32 = 0;
+    while i < n {
+        if (pkg_flags(ws, i) & PKG_F_IDENT) == 0 && (pkg_flags(ws, i) & PKG_F_MISSING) == 0 {
+            return IDN_CYCLE;
+        }
+        i = i + 1;
+    }
+    return IDN_OK;
+}
+
+/// 边 `use 名字` 绑到哪个包 —— **与 sto_find(name, "") 同一条规则** (取版本最大)。
+/// 两边不一致的话, 同一个依赖会在"查询"和"解析"里绑到不同版本。
+fn idn_find_name(ws: ptr, n: u32, nm: ptr, nl: u32) -> u32 {
+    return sto_find_bytes(ws, n, nm, nl);
+}
+
+fn idn_copy_msg(msg: ptr, msgcap: u32, p: ptr, n: u32) -> u32 {
+    let k: u32 = n;
+    if k > msgcap {
+        k = msgcap;
+    }
+    txt_put_bytes(msg, 0, p, 0, k);
+    return 1;
+}
+
+/// 把算出来的 hex 抄进第 i 个包的槽位 (sha_hex 写的是暂存, 不是终址)。
+fn idn_copy_hex(ws: ptr, i: u32, hex: ptr) {
+    let dst: ptr = pkg_id_hex(ws, i);
+    let k: u32 = 0;
+    while k < 64 {
+        store8(dst, k, load8(hex, k) as u8);
+        k = k + 1;
+    }
+}
+
+/// 从 root 出发标出闭包 (PKG_F_INCLOSURE), 返回闭包里的包数 (含 root)。
+/// 同一个包的不同版本是**不同的记录**, 各自会被标上 —— 这正是多版本共存的样子。
+pub fn idn_closure(ws: ptr, n: u32, root: u32, stack: ptr, sc: u32, msg: ptr, msgcap: u32) -> u32 {
+    let pool: ptr = ((ws as u64) + WS_EPOOL as u64) as ptr;
+    let eents: ptr = ((ws as u64) + WS_EENTS as u64) as ptr;
+    if root == PKG_NONE {
+        return 0;
+    }
+    let sp: u32 = 0;
+    mem_store32(stack, 0, root);
+    sp = 1;
+    let cnt: u32 = 0;
+    while sp > 0 {
+        sp = sp - 1;
+        let idx: u32 = mem_load32(stack, sp);
+        if (pkg_flags(ws, idx) & PKG_F_INCLOSURE) == 0 {
+            pkg_set_flag(ws, idx, PKG_F_INCLOSURE);
+            cnt = cnt + 1;
+            let c: u32 = idn_edges(ws, idx);
+            let k: u32 = 0;
+            while k < c {
+                if lex_ent_kind(eents, k) == LEX_NAME {
+                    let nm: ptr = ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr;
+                    let nl: u32 = lex_ent_len(eents, k);
+                    let ch: u32 = idn_find_name(ws, n, nm, nl);
+                    if ch == PKG_NONE {
+                        idn_copy_msg(msg, msgcap, nm, nl);
+                        return 4294967295;
+                    }
+                    if (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && sp < sc {
+                        mem_store32(stack, sp, ch);
+                        sp = sp + 1;
+                    }
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return cnt;
+}
+
+// 小端 u32 读写 (只在这一层用两处, 不为它单开一层)。
+fn mem_store32(p: ptr, off: u32, v: u32) {
+    txt_store32(p, off, v);
+}
+
+fn mem_load32(p: ptr, off: u32) -> u32 {
+    return txt_load32(p, off);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_idn_identity_depends_on_child() -> bool {
+    // 同一份自身源码, 绑到两个不同的子身份 -> 必须得到两个不同的 id。
+    // 这就是"只看自身源码是错的"那条判据的最小复现。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
+    let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
+    let h1: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
+    let h2: ptr = ((ws as u64) + WS_TMP + 2048 as u64) as ptr;
+    let zero: ptr = ((ws as u64) + WS_TMP as u64) as ptr;
+    store8(zero, 0, 0 as u8);
+    let own: ptr = alloc(64);
+    let ch: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 64 {
+        store8(own, i, 97 as u8);
+        store8(ch, i, 98 as u8);
+        i = i + 1;
+    }
+    // 混合一: own + 子身份 A
+    sha_init(st);
+    sha_update(st, own, 64);
+    sha_update(st, zero, 1);
+    sha_update(st, ch, 64);
+    sha_final(st, dig);
+    sha_hex(dig, h1);
+    // 混合二: own 不变, 子身份换一个
+    store8(ch, 0, 99 as u8);
+    sha_init(st);
+    sha_update(st, own, 64);
+    sha_update(st, zero, 1);
+    sha_update(st, ch, 64);
+    sha_final(st, dig);
+    sha_hex(dig, h2);
+    return !txt_eq(h1, 0, 64, h2, 0, 64);
+}
+
+fn test_idn_pass1_hashes_each_package_differently() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    if n != 5 {
+        return false;
+    }
+    let ok: u32 = idn_pass1(ws, n);
+    if ok != 5 {
+        return false;
+    }
+    // mathutil 0.1.0 与 0.2.0 内容不同 -> 自身哈希必须不同
+    let a: u32 = sto_find(ws, n, "mathutil", "0.1.0");
+    let b: u32 = sto_find(ws, n, "mathutil", "0.2.0");
+    if a == PKG_NONE || b == PKG_NONE {
+        return false;
+    }
+    return !txt_eq(pkg_id_hex(ws, a), 0, 64, pkg_id_hex(ws, b), 0, 64);
+}
+
+fn test_idn_pass2_resolves_whole_store() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP + 4096 as u64) as ptr;
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    if idn_pass1(ws, n) != n {
+        return false;
+    }
+    let r: u32 = idn_pass2(ws, n, msg, 128);
+    if r != IDN_OK {
+        return false;
+    }
+    // 定完身份之后, 所有包的 id 必须互不相同 (内容/依赖都不同)。
+    let i: u32 = 0;
+    while i < n {
+        let j: u32 = i + 1;
+        while j < n {
+            if txt_eq(pkg_id_hex(ws, i), 0, 64, pkg_id_hex(ws, j), 0, 64) {
+                return false;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_idn_identity_is_stable_across_runs() -> bool {
+    // 同一棵仓库扫两遍, **同一个包**的身份必须逐字节一样 —— 这是"可复现"的全部内容。
+    // 快照按 (名字, 版本) 记录, 不按下标: 目录返回顺序不保证, 下标不是包的身份。
+    // 记录 stride 160 = 名字(64, NUL 结尾) + 版本(16, NUL 结尾) + 身份(64)。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
+    let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
+    let snap: ptr = sys_alloc(8192);   // 不走内建 alloc: 它的 64 KiB 静态堆被前面
+                                       // 几十条自检耗光后会**静默**返回坏指针
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    if n == 0 {
+        return false;
+    }
+    idn_pass1(ws, n);
+    idn_pass2(ws, n, msg, 128);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = i * 160;
+        txt_put_bytes(snap, b + 0, names, pkg_name_off(ws, i), pkg_name_len(ws, i));
+        store8(snap, b + pkg_name_len(ws, i), 0 as u8);
+        txt_put_bytes(snap, b + 64, names, pkg_ver_off(ws, i), pkg_ver_len(ws, i));
+        store8(snap, b + 64 + pkg_ver_len(ws, i), 0 as u8);
+        sys_copy(snap, b + 80, pkg_id_hex(ws, i), 0, 64);
+        i = i + 1;
+    }
+    // 第二遍: 同一块工作区重扫
+    let n2: u32 = sto_scan(ws, scr);
+    idn_pass1(ws, n2);
+    idn_pass2(ws, n2, msg, 128);
+    if n2 != n {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < n2 {
+        // 在快照里按 名字+版本 找回同一个包
+        let j: u32 = 0;
+        let hit: u32 = 4294967295;
+        while j < n {
+            let b: u32 = j * 160;
+            let nl: u32 = txt_len_cstr(((snap as u64) + (b as u64)) as ptr);
+            let vl: u32 = txt_len_cstr(((snap as u64) + (b as u64 + 64)) as ptr);
+            if nl == pkg_name_len(ws, k) && vl == pkg_ver_len(ws, k)
+                && txt_eq(snap, b, nl, names, pkg_name_off(ws, k), nl)
+                && txt_eq(snap, b + 64, vl, names, pkg_ver_off(ws, k), vl) {
+                hit = j;
+            }
+            j = j + 1;
+        }
+        if hit == 4294967295 {
+            return false;
+        }
+        if !txt_eq(snap, hit * 160 + 80, 64, pkg_id_hex(ws, k), 0, 64) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn test_idn_closure_from_geom_pulls_mathutil() -> bool {
+    // geom 依赖 mathutil: 闭包必须是 2 个包, 且另一个是 mathutil。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP + 4096 as u64) as ptr;
+    let stack: ptr = ((ws as u64) + WS_TMP + 5000 as u64) as ptr;
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    idn_pass1(ws, n);
+    if idn_pass2(ws, n, msg, 128) != IDN_OK {
+        return false;
+    }
+    let root: u32 = sto_find(ws, n, "geom", "");
+    let c: u32 = idn_closure(ws, n, root, stack, 256, msg, 128);
+    if c != 2 {
+        return false;
+    }
+    let m: u32 = sto_find(ws, n, "mathutil", "");
+    return (pkg_flags(ws, m) & PKG_F_INCLOSURE) != 0;
+}
+
+fn test_idn_missing_dependency_is_reported() -> bool {
+    // fixture/store_broken 里 orphan 依赖一个仓库里没有的包。
+    // 判据: 必须返回 IDN_MISSING (不是 IDN_OK, 也不是 IDN_CYCLE), 且报出缺的名字。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP + 4096 as u64) as ptr;
+    sys_put_lit(scr, "fixture/store_broken");
+    let n: u32 = sto_scan(ws, scr);
+    if n != 1 {
+        return false;
+    }
+    idn_pass1(ws, n);
+    let r: u32 = idn_pass2(ws, n, msg, 128);
+    if r != IDN_MISSING {
+        return false;
+    }
+    return txt_eq_lit(msg, 0, 9, "nosuchpkg");
+}
+
+fn test_idn_cycle_is_detected_not_hung() -> bool {
+    // fixture/store_cycle: cyca 依赖 cycb, cycb 又依赖 cyca。
+    // 判据有两条: 返回 IDN_CYCLE (不是 OK), 而且**能返回** (不动点迭代不会死循环)。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP + 4096 as u64) as ptr;
+    sys_put_lit(scr, "fixture/store_cycle");
+    let n: u32 = sto_scan(ws, scr);
+    if n != 2 {
+        return false;
+    }
+    idn_pass1(ws, n);
+    let r: u32 = idn_pass2(ws, n, msg, 128);
+    return r == IDN_CYCLE;
+}
+
+pub fn selftest_idn() -> u32 {
+    let f: u32 = 0;
+    if !test_idn_identity_depends_on_child() { f = f + 1; sys_write_str(1, "  FAIL idn_child\n"); }
+    if !test_idn_pass1_hashes_each_package_differently() { f = f + 1; sys_write_str(1, "  FAIL idn_pass1\n"); }
+    if !test_idn_pass2_resolves_whole_store() { f = f + 1; sys_write_str(1, "  FAIL idn_pass2\n"); }
+    if !test_idn_identity_is_stable_across_runs() { f = f + 1; sys_write_str(1, "  FAIL idn_stable\n"); }
+    if !test_idn_closure_from_geom_pulls_mathutil() { f = f + 1; sys_write_str(1, "  FAIL idn_closure\n"); }
+    if !test_idn_missing_dependency_is_reported() { f = f + 1; sys_write_str(1, "  FAIL idn_missing\n"); }
+    if !test_idn_cycle_is_detected_not_hung() { f = f + 1; sys_write_str(1, "  FAIL idn_cycle\n"); }
+    return f;
+}

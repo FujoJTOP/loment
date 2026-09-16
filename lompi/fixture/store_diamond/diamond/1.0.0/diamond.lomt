@@ -1,0 +1,8 @@
+module diamond
+
+use geom
+use mathutil
+
+pub fn diamond_fn() -> u32 {
+    return 1;
+}

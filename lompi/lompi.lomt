@@ -1,0 +1,30 @@
+// lompi/lompi.lomt — 程序入口
+//
+// 编译 (必须在 lompi/ 下调用 —— 本工具链的路径导入按 **CWD** 解析):
+//
+//     loment.cmd build lompi.lomt -o lompi
+//     ./lompi.exe index fixture/store
+//
+// 这块工作区 (ws) 是整个程序的唯一大块内存: lompi 不动态分配, 所有层都在这块上
+// 按命名偏移干活 (布局见 lpi_pkg 开头)。argv 缓冲另开一块小的一一它要装整个命令行,
+// 但不能挤掉工作区里已经算好的东西。
+//
+// 为什么入口这么薄: 分派与输出都在 lpi_cli, 这里只管"把内存备好、把参数交出去"。
+// 入口薄还有一个硬理由 —— **链长**: 打包版编译器的传递导入深度上限是 8, 而 lompi
+// 这条链正好 8 层 (lompi → cli → idn → pkg → sha → dir → txt → sys)。再加一层就
+// 整链失效 (底层 sys_* 会被报成"未声明", 而且报错指向的层与真正的原因无关)。
+
+module lompi
+
+use "lpi_cli.lomt"
+
+fn _start() {
+    let argv_buf: ptr = sys_alloc(65536);
+    let scr: ptr = sys_alloc(512);
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    if argv_buf == (0 as ptr) || ws == (0 as ptr) {
+        sys_fail("lompi: out of memory\n");
+    }
+    let m: u32 = sys_argv(argv_buf, 65536, scr);
+    sys_exit(cli_main(ws, argv_buf, m) as u64);
+}

@@ -1,0 +1,5 @@
+module a
+
+pub fn a_fn() -> u32 {
+    return 1;
+}

@@ -8,7 +8,7 @@
 #                                                           (前两件是确定性字节, 这件不是 —— 见 docs/162)
 #   SHA256SUMS                           上面几件的 sha256
 #
-# 包里**没有 Python**: 五个可执行文件都是自举产物 (种子 → stage1 → IR → 链接), 构建与链接
+# 包里**没有 Python**: 七个可执行文件都是自举产物 (种子 → stage1 → IR → 链接), 构建与链接
 # 都不需要 clang/WSL 才能装。构建期需要 Python 的只有这个打包工具本身 (仓库工具链, 不进包)。
 #
 #   python tools/loment_dist.py --emit                        # 全部（本机原生后端，无 clang/WSL）
@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import gzip
 import hashlib
 import io
@@ -43,18 +44,26 @@ SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Alpha
 VER = loment_release.RELEASE                # 机器: 0.1.4-alpha
 
-#: 包里的工具 -> 入口源文件。名字就是安装后的可执行名。
-TOOLS: list[tuple[str, str]] = [
-    ("loment-driver", "loment/selfhost/driver.lomt"),
-    ("loment-lsp", "loment/tools/lsp.lomt"),
-    ("loment-fmt", "loment/tools/lomfmt.lomt"),
-    ("loment-doc", "loment/tools/lomdoc.lomt"),
+#: 包里的工具 -> (入口源文件, 编译时的 CWD)。名字就是安装后的可执行名。
+#: CWD 那一格是给 **路径形式的 `use "..."`** 用的 —— 自举镜按 **CWD** 解析相对路径
+#: (参考实现按入口文件所在目录)。仓库其它工具全用名字形式 (`use bytes`), 那一套本来就是
+#: 相对 CWD 的搜索根, 所以它们一律写 "."。lompi 是唯一一个用路径形式 import 的。
+TOOLS: list[tuple[str, str, str]] = [
+    ("loment-driver", "loment/selfhost/driver.lomt", "."),
+    ("loment-lsp", "loment/tools/lsp.lomt", "."),
+    ("loment-fmt", "loment/tools/lomfmt.lomt", "."),
+    ("loment-doc", "loment/tools/lomdoc.lomt", "."),
     # `loment build/run` 的链接器 —— 自举侧的 lomelf 镜像。有它之后 **包里不再需要 clang**:
     # 存出来的产物本来就是目标平台自己的格式（Linux 出 ELF / Windows 出 PE）。
-    ("loment-lomelf", "loment/tools/lomelf.lomt"),
+    ("loment-lomelf", "loment/tools/lomelf.lomt", "."),
     # 命令面（help/codes/stat/grep/ls/tree/...）—— 用 Loment 自己写的 CLI 前端。
     # 为什么不在启动器里写: 启动器有两份 (bash + batch), 命令写在那边就得写两遍并保持同步。
-    ("loment-cli", "loment/tools/lomcli.lomt"),
+    ("loment-cli", "loment/tools/lomcli.lomt", "."),
+    # lompi —— Loment 库的包管理器, **不是 Loment 官方工具**(它不编 Loment、不读源码树,
+    # 是另一个命令; `loment help` 里不出现它, 见 docs/169 §2)。随包一起装, 因为它是用
+    # Loment 写的、由同一条自举链编出来的。源码的**正本在开发者的工作区** (`lompi/` 这份
+    # 是随包发布的快照), 两边靠 tools/lompi_sync.py 校验, 见 docs/170。
+    ("lompi", "lompi/lompi.lomt", "lompi"),
 ]
 #: 随包发的示例。`tour.lomt` 是**一个文件过完整门语言**的导览 —— 纯包用户没有仓库里的
 #: 其它示例, 所以它比 hello 更该在包里 (agent 指南 §1 讲的就是这一份, 三者同源)。
@@ -66,6 +75,10 @@ LICENSE = "LICENSE"
 # **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
 # 不做 @VERSION@ 替换 —— 这样"包里的那份 == 仓库里的那份"是可判据的。
 SKILL = ".claude/skills/loment/SKILL.md"
+#: lompi 的 agent 指南。**与 loment 那份同一套装法**（用户 2026-09-15 要求）：随包发、
+#: 装进 ~/.claude/skills/lompi/、往 Codex 的 AGENTS.md 写一段**独立标记**的指针、卸载摘掉。
+#: 标记用 `lompi:` 前缀而**不复用** loment 的 —— 两份指南是两件事，卸载一份不该动另一份。
+SKILL_LOMPI = ".claude/skills/lompi/SKILL.md"
 
 #: 纯文本脚本一律 ASCII: Windows PowerShell 5.1 用 ANSI 读无 BOM 的 .ps1, 非 ASCII 会变乱码
 #: 并连带把后续行解析坏 (docs/157 §3.4 踩过)。中文说明在 README.md 与 docs/162 里。
@@ -371,13 +384,15 @@ src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "$uninstall" = 1 ]; then
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
           "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf" \
-          "$prefix/bin/loment-cli"
-    rm -rf "$prefix/share/loment"
+          "$prefix/bin/loment-cli" \
+          "$prefix/bin/lompi"
+    rm -rf "$prefix/share/loment" "$prefix/share/lompi"
     # only what this installer created -- never ~/.claude/skills or AGENTS.md at large
     if [ "$no_skill" != 1 ]; then
-        rm -rf "$HOME/.claude/skills/loment"
+        rm -rf "$HOME/.claude/skills/loment" "$HOME/.claude/skills/lompi"
         if [ -f "$HOME/.codex/AGENTS.md" ]; then
             sed -i '/<!-- loment:begin -->/,/<!-- loment:end -->/d' "$HOME/.codex/AGENTS.md" 2>/dev/null || true
+            sed -i '/<!-- lompi:begin -->/,/<!-- lompi:end -->/d' "$HOME/.codex/AGENTS.md" 2>/dev/null || true
         fi
     fi
     echo "install: removed from $prefix"
@@ -391,13 +406,20 @@ else
     echo "install: (no sha256sum available; skipping package verification)" >&2
 fi
 
-mkdir -p "$prefix/bin" "$prefix/share/loment"
+mkdir -p "$prefix/bin" "$prefix/share/loment" "$prefix/share/lompi"
 cp -f "$src/bin/"* "$prefix/bin/"
 cp -R "$src/share/loment/." "$prefix/share/loment/"
+# lompi's guide lives under its OWN share tree (it is a standalone command)
+cp -R "$src/share/lompi/." "$prefix/share/lompi/"
 chmod 755 "$prefix/bin/"*
 
 "$prefix/bin/loment" version || {
     echo "install: installed but 'loment version' failed" >&2; exit 1; }
+# lompi (Loment's package manager) ships in the same package, but it is a STANDALONE
+# command -- NOT a subcommand of loment. So it gets its own smoke test: with no args it
+# prints its usage and exits 2, which proves the binary is alive.
+"$prefix/bin/lompi" 2>&1 | grep -q "package manager for Loment" || {
+    echo "install: installed but 'lompi' did not run" >&2; exit 1; }
 echo "install: Loment @DISPLAY@ -> $prefix"
 
 # Ship the self-contained agent skill into the user-level Claude skills dir, so a coding
@@ -436,6 +458,32 @@ else
             echo "$mark_e"
         } >> "$agents"
         hits="${hits:+$hits, }codex"
+    fi
+
+    # lompi's guide gets the SAME treatment (user 2026-09-15), with its OWN markers so
+    # uninstalling one never touches the other.
+    lompi_skill="$prefix/share/lompi/skill/SKILL.md"
+    if [ -f "$lompi_skill" ]; then
+        if [ -d "$HOME/.claude" ]; then
+            mkdir -p "$HOME/.claude/skills/lompi"
+            cp -f "$lompi_skill" "$HOME/.claude/skills/lompi/SKILL.md"
+            hits="${hits:+$hits, }claude:lompi"
+        fi
+        if [ -d "$HOME/.codex" ]; then
+            agents="$HOME/.codex/AGENTS.md"
+            [ -f "$agents" ] || : > "$agents"
+            sed -i '/<!-- lompi:begin -->/,/<!-- lompi:end -->/d' "$agents" 2>/dev/null || true
+            if [ -s "$agents" ] && [ -n "$(tail -c 1 "$agents")" ]; then printf '\n' >> "$agents"; fi
+            {
+                echo '<!-- lompi:begin -->'
+                echo "## lompi"
+                echo "To manage Loment libraries (a store, a lockfile, \`deps/\`), read:"
+                echo "$lompi_skill"
+                echo "lompi is a standalone command. It is NOT a subcommand of loment."
+                echo '<!-- lompi:end -->'
+            } >> "$agents"
+            hits="${hits:+$hits, }codex:lompi"
+        fi
     fi
     if [ -n "$hits" ]; then
         echo "install: agent skill -> $hits (one guide at $skill_src)"
@@ -600,11 +648,14 @@ if ($Uninstall) {
         # Only what this installer created -- never a skills dir / AGENTS.md at large.
         Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\loment') `
                     -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\lompi') `
+                    -Recurse -Force -ErrorAction SilentlyContinue
         $agents = Join-Path $env:USERPROFILE '.codex\AGENTS.md'
         if (Test-Path -LiteralPath $agents) {
             $t = Get-Content -LiteralPath $agents -Raw
             if ($null -eq $t) { $t = '' }
             $t = [regex]::Replace($t, '(?s)\r?\n?<!-- loment:begin -->.*?<!-- loment:end -->\r?\n?', '')
+            $t = [regex]::Replace($t, '(?s)\r?\n?<!-- lompi:begin -->.*?<!-- lompi:end -->\r?\n?', '')
             [System.IO.File]::WriteAllText($agents, $t, (New-Object System.Text.UTF8Encoding($false)))
         }
         [Environment]::SetEnvironmentVariable('LOMENT_SKILL', $null, 'User')
@@ -633,10 +684,15 @@ foreach ($f in Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File) {
 $shareDir = Join-Path $Prefix 'share\loment'
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'examples') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'skill') -Force | Out-Null
+# lompi's guide lives under its OWN share tree -- and the destination directory must
+# EXIST before Copy-Item writes into it (the same bug bit share\loment\skill in v1).
+$lompiShareDir = Join-Path $Prefix 'share\lompi'
+New-Item -ItemType Directory -Path (Join-Path $lompiShareDir 'skill') -Force | Out-Null
 foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/user_hello.lomt',
                    'share/loment/examples/tour.lomt',
-                   'share/loment/skill/SKILL.md')) {
+                   'share/loment/skill/SKILL.md',
+                   'share/lompi/skill/SKILL.md')) {
     $f = Join-Path $Payload $rel.Replace('/', '\')
     if (Test-Path -LiteralPath $f) {
         Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
@@ -699,6 +755,35 @@ if ($NoSkill) {
         [System.IO.File]::WriteAllText($agents, $body + $block, (New-Object System.Text.UTF8Encoding($false)))
         $skillHits += "codex"
     }
+    # lompi's guide gets the SAME treatment (user 2026-09-15), with its OWN markers so
+    # uninstalling one never touches the other. lompi is a standalone command.
+    $lompiSkillSrc = Join-Path $Prefix 'share\lompi\skill\SKILL.md'
+    if (Test-Path -LiteralPath $lompiSkillSrc) {
+        if (Test-Path -LiteralPath $claudeDir) {
+            $lompiSkillDir = Join-Path $claudeDir 'skills\lompi'
+            New-Item -ItemType Directory -Path $lompiSkillDir -Force | Out-Null
+            Copy-Item -LiteralPath $lompiSkillSrc -Destination (Join-Path $lompiSkillDir 'SKILL.md') -Force
+            $skillHits += "claude:lompi"
+        }
+        if (Test-Path -LiteralPath $codexDir) {
+            $agents2 = Join-Path $codexDir 'AGENTS.md'
+            $prev2 = ''
+            if (Test-Path -LiteralPath $agents2) { $prev2 = Get-Content -LiteralPath $agents2 -Raw }
+            if ($null -eq $prev2) { $prev2 = '' }
+            $prev2 = [regex]::Replace($prev2, '(?s)<!-- lompi:begin -->.*?<!-- lompi:end -->\r?\n?', '')
+            $block2 = '<!-- lompi:begin -->' + "`r`n" +
+                      "## lompi`r`n" +
+                      "To manage Loment libraries (a store, a lockfile, ``deps/``), read:`r`n" +
+                      "$lompiSkillSrc`r`n" +
+                      "lompi is a standalone command. It is NOT a subcommand of loment.`r`n" +
+                      '<!-- lompi:end -->' + "`r`n"
+            $body2 = $prev2
+            if ($body2 -ne '') { $body2 += "`r`n" }
+            [System.IO.File]::WriteAllText($agents2, $body2 + $block2, (New-Object System.Text.UTF8Encoding($false)))
+            $skillHits += "codex:lompi"
+        }
+    }
+
     # A user-level variable so anything can find the guide without knowing the prefix.
     # .NET writes HKCU\Environment and broadcasts WM_SETTINGCHANGE (new processes see it).
     [Environment]::SetEnvironmentVariable('LOMENT_SKILL', $skillSrc, 'User')
@@ -755,7 +840,7 @@ if "%~1"=="" (
 README_MD = """# Loment {DISPLAY}
 
 版本 `{VERSION}`。这是一份**自包含**的 Loment 工具链发行包：包里**没有 Python**，也
-**不需要 clang、不需要 WSL** —— 六个可执行文件都是自举产物，`build`/`run` 用包内的
+**不需要 clang、不需要 WSL** —— 七个可执行文件都是自举产物，`build`/`run` 用包内的
 `loment-lomelf` 在本机直接出 ELF/PE。构建与安装的全部细节见仓库 `docs/162`。
 
 ## 包内容
@@ -769,9 +854,11 @@ README_MD = """# Loment {DISPLAY}
 | `bin/loment` | 启动器（下面那些子命令） |
 | `bin/loment-lomelf` | 链接器：把 `.ll` 变成可执行文件（`build`/`run` 用它） |
 | `bin/loment-cli` | 命令前端：`help` / `codes` / `stat` / `grep` / `ls` / `tree` / …（Loment 自己写的，`loment/tools/lomcli.lomt`） |
+| `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，`lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi` |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |
 | `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
+| `share/lompi/skill/SKILL.md` | **lompi 的说明书**（同一种装法：进 `~/.claude/skills/lompi/`，并往 Codex 的 AGENTS.md 写指针） |
 
 ## 安装（三种方式，装出来一样）
 
@@ -886,12 +973,21 @@ def build_stage1() -> Path:
     return stage1
 
 
-def emit_ir(stage1: Path, entry: str) -> Path:
-    """用 stage1 编译 entry → IR 落盘（**在本机直接跑**，不经 WSL）。"""
+def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
+    """用 stage1 编译 entry → IR 落盘（**在本机直接跑**，不经 WSL）。
+
+    cwd 是**编译时的工作目录**，也是传给 stage1 的入口路径的基准 —— 自举镜按 CWD 解析
+    路径形式的 `use "..."`，所以入口要用相对 cwd 的名字（见 TOOLS 的注解）。
+    """
     STAGE.mkdir(parents=True, exist_ok=True)
     out = STAGE / (Path(entry).stem + ".ll")
-    r = subprocess.run([str(stage1), entry], capture_output=True,
-                       cwd=str(ROOT), shell=False)
+    base = (ROOT / cwd).resolve()
+    # 入口路径要**相对 cwd** 给 stage1 —— 只取 basename 只对"入口就在 cwd 下"成立,
+    # 而 `.` 那组的入口在 `loment/selfhost/`、`loment/tools/` 下 (2026-09-15 踩过:
+    # `--only lompi` 没走到 `.` 那组所以没暴露, 全量 --emit 才炸)。
+    rel = os.path.relpath((ROOT / entry).resolve(), base)
+    r = subprocess.run([str(stage1), rel], capture_output=True,
+                       cwd=str(base), shell=False)
     if r.returncode != 0 or not r.stdout:
         raise SystemExit(f"stage1 failed on {entry}: {r.stderr[-400:]!r}")
     out.write_bytes(r.stdout)
@@ -906,10 +1002,10 @@ def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
     """
     stage1 = build_stage1()
     out: dict[str, tuple[bytes, bytes]] = {}
-    for name, entry in TOOLS:
+    for name, entry, cwd in TOOLS:
         if only and name not in only:
             continue
-        ir = emit_ir(stage1, entry)
+        ir = emit_ir(stage1, entry, cwd)
         text = ir.read_text(encoding="utf-8")
         elf, pe = _lomelf_link(text, "elf"), _lomelf_link(text, "pe")
         out[name] = (elf, pe)
@@ -954,6 +1050,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     for ex in EXAMPLES:
         files[f"share/loment/examples/{Path(ex).name}"] = (_read(ex), 0o644)
     files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
+    # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
+    files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
     files["LICENSE"] = (_read(LICENSE), 0o644)
     if kind == "linux":
@@ -1185,6 +1283,7 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
     """
     out = {
         "share/loment/skill/SKILL.md": _read(SKILL),
+        "share/lompi/skill/SKILL.md": _read(SKILL_LOMPI),
         "share/loment/seed.ll": _read("loment/build/selfhost_driver.ll"),
         f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
         "README.md": _subst(README_MD).encode(),
@@ -1244,7 +1343,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="校验现有产物与 SHA256SUMS")
     ap.add_argument("--list", action="store_true", help="只列会打进去的文件")
     ap.add_argument("--only", metavar="NAME[,NAME]",
-                    help="只构建这些工具 (driver,lsp,fmt,doc,lomelf,cli)")
+                    help="只构建这些工具 (driver,lsp,fmt,doc,lomelf,cli,lompi)")
     ap.add_argument("--no-exe", action="store_true", help="跳过 Windows 自解压安装包")
     ap.add_argument("--out", metavar="DIR", help="产物目录 (默认 loment/dist)")
     a = ap.parse_args(argv)
@@ -1260,11 +1359,20 @@ def main(argv: list[str] | None = None) -> int:
         # --only 允许短名 (driver/lsp/fmt/doc) —— 名字对齐工具名 loment-<x>
         only = None
         if a.only:
-            only = {(t if t.startswith("loment-") else f"loment-{t}")
-                    for t in a.only.split(",") if t}
-            known = {n for n, _e in TOOLS}
-            if only - known:
-                print(f"[ERR] 未知工具: {sorted(only - known)}", file=sys.stderr)
+            # 两种写法都收: 工具名 (loment-fmt) 与短名 (fmt)。**lompi 没有 `loment-`
+            # 前缀**, 只按短名规则拼会得到 `loment-lompi` 而永远匹配不上, 所以逐个试。
+            known = {n for n, _e, _c in TOOLS}
+            only: set[str] = set()
+            unknown: set[str] = set()
+            for t in (x for x in a.only.split(",") if x):
+                if t in known:
+                    only.add(t)
+                elif f"loment-{t}" in known:
+                    only.add(f"loment-{t}")
+                else:
+                    unknown.add(t)
+            if unknown:
+                print(f"[ERR] 未知工具: {sorted(unknown)}", file=sys.stderr)
                 return 2
         return emit(only, not a.no_exe, out_dir)
     ap.print_help()

@@ -39,6 +39,9 @@ GLOBS = [
     "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py", "tools/lomdoc.py",
     "tools/lompkg.py", "tools/lomlib.py", "tools/loment_lib_test.py",
     "tools/loment_cli_test.py",
+    # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
+    "lompi/*.lomt",
+    "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",

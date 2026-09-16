@@ -1,0 +1,362 @@
+// lompi/lpi_dir.lomt — 目录遍历与文件元信息 (getdents64 / newfstatat)
+//
+// linux_dirent64 的布局 (x86-64 Linux, PE 垫片照这个合成):
+//   @0 d_ino(8) @8 d_off(8) @16 d_reclen(2) @18 d_type(1) @19 d_name[…NUL]
+//
+// 两条**实测**的边界, 都会直接改变调用方的写法:
+//   1. PE 垫片**每次只返回一条**记录 (Linux 一次返回一批) —— 所以循环必须写成
+//      "读一批 → 走完 → 再读一批", 不能假设一次读完。dir_list 就是这个循环。
+//   2. PE 垫片只填 st_mode, **st_size 是垃圾**。所以 lompi 从不问"这个文件多大",
+//      一律读要 EOF —— sys_read_file 返回的字节数才是两边都成立的那个数。
+//
+// 语言没有闭包/函数指针, 所以这一层不提供"walk(dir, callback)"。给的是游标原语
+// (dir_open / dir_read / dir_next_at) 加一个**收进池子**的现成版本 dir_list。
+//
+// 命名: 公开 dir_*, 自检 test_dir_*。
+
+module lpi_dir
+
+use "lpi_txt.lomt"
+
+/// 失败哨兵。
+pub const DIR_ERR: u32 = 4294967295;
+pub const DIR_O_DIRECTORY: u64 = 65536;
+pub const DIR_TYPE_DIR: u32 = 4;
+pub const DIR_TYPE_REG: u32 = 8;
+pub const DIR_NAME_OFF: u32 = 19;
+pub const DIR_MIN_RECLEN: u32 = 20;
+
+/// dir_list 里一条记录 3 个字: 名字在 names 池的偏移 / 长度 / 类型。
+pub const DIR_ENT_STRIDE: u32 = 12;
+
+/// S_IFMT 掩码与两个最常见的类型。
+pub const DIR_IFMT: u32 = 61440;
+pub const DIR_IFDIR: u32 = 16384;
+pub const DIR_IFREG: u32 = 32768;
+
+// ---------------------------------------------------------------- 打开/读
+
+/// 打开目录。负数 = 失败 (不是目录也会失败)。
+pub fn dir_open(path: ptr) -> i64 {
+    return syscall4(257, SYS_AT_FDCWD, path as u64, DIR_O_DIRECTORY);
+}
+
+pub fn dir_open_lit(scr: ptr, lit: str) -> i64 {
+    sys_put_lit(scr, lit);
+    return dir_open(scr);
+}
+
+/// 读一批目录项到 buf。返回字节数 (<= 0 表示读完或出错)。
+pub fn dir_read(fd: i64, buf: ptr, cap: u64) -> i64 {
+    return syscall4(217, fd as u64, buf as u64, cap);
+}
+
+pub fn dir_close(fd: i64) -> i64 {
+    return sys_close(fd);
+}
+
+// ---------------------------------------------------------------- 记录字段
+
+/// d_reclen (小端 u16)。
+pub fn dir_reclen_at(buf: ptr, off: u32) -> u32 {
+    let lo: u32 = load8(buf, off + 16);
+    let hi: u32 = load8(buf, off + 17);
+    return lo | (hi << 8);
+}
+
+pub fn dir_type_at(buf: ptr, off: u32) -> u32 {
+    return load8(buf, off + 18);
+}
+
+/// 名字长度 (到 NUL 或记录末尾)。
+pub fn dir_name_len_at(buf: ptr, off: u32) -> u32 {
+    let r: u32 = dir_reclen_at(buf, off);
+    let i: u32 = DIR_NAME_OFF;
+    while i < r && load8(buf, off + i) != 0 {
+        i = i + 1;
+    }
+    return i - DIR_NAME_OFF;
+}
+
+pub fn dir_name_ptr_at(buf: ptr, off: u32) -> ptr {
+    return ((buf as u64) + ((off + DIR_NAME_OFF) as u64)) as ptr;
+}
+
+/// 下一条记录的偏移; 返回 n 表示这批走完。
+/// reclen 小于最小值时**停下** —— 畸形数据里硬走会变成死循环。
+pub fn dir_next_at(buf: ptr, off: u32, n: u32) -> u32 {
+    let r: u32 = dir_reclen_at(buf, off);
+    if r < DIR_MIN_RECLEN {
+        return n;
+    }
+    let k: u32 = off + r;
+    if k >= n {
+        return n;
+    }
+    return k;
+}
+
+/// 名字是 "." 或 ".." 吗。
+pub fn dir_is_dot_at(buf: ptr, off: u32) -> bool {
+    let l: u32 = dir_name_len_at(buf, off);
+    if l == 1 && load8(buf, off + DIR_NAME_OFF) == 46 {
+        return true;
+    }
+    if l == 2 && load8(buf, off + DIR_NAME_OFF) == 46
+        && load8(buf, off + DIR_NAME_OFF + 1) == 46 {
+        return true;
+    }
+    return false;
+}
+
+/// 记录里的名字是否以字面量后缀结尾 (筛 `*.lomt` 用)。
+pub fn dir_name_ends_with(buf: ptr, off: u32, lit: str) -> bool {
+    let l: u32 = dir_name_len_at(buf, off);
+    let ln: u32 = str_len(lit);
+    if ln > l {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if load8(buf, off + DIR_NAME_OFF + (l - ln) + i) != (str_byte(lit, i) as u32) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 收进池子
+
+/// 把 path 下的条目 (跳过 "." / "..") 收进池子。
+///   ents : 每条 DIR_ENT_STRIDE 字节 —— 名字在 names 的偏移(4) / 长度(4) / 类型(4)
+///   names: 名字字节池
+/// 返回收下的条数 (池子满了就停, 返回已收数); 打不开返回 DIR_ERR。
+///
+/// 这是"读一批 → 走完 → 再读一批"那个循环的现成版本 —— PE 上每次只来一条记录,
+/// 写成"读一次就当成全部"会在 PE 上静默丢条目。
+pub fn dir_list(path: ptr, dbuf: ptr, dcap: u64,
+                names: ptr, ncap: u32, ents: ptr, ecap: u32) -> u32 {
+    let fd: i64 = dir_open(path);
+    if fd < 0 {
+        return DIR_ERR;
+    }
+    let cnt: u32 = 0;
+    let noff: u32 = 0;
+    let n: u32 = 0;
+    let off: u32 = 0;
+    let more: u32 = 1;
+    while more == 1 {
+        if off >= n {
+            let r: i64 = dir_read(fd, dbuf, dcap);
+            if r <= 0 {
+                more = 0;
+            } else {
+                n = r as u32;
+                off = 0;
+            }
+        }
+        if more == 1 && off < n {
+            if !dir_is_dot_at(dbuf, off) {
+                let l: u32 = dir_name_len_at(dbuf, off);
+                if cnt < ecap && noff + l <= ncap {
+                    let eo: u32 = cnt * DIR_ENT_STRIDE;
+                    txt_store32(ents, eo + 0, noff);
+                    txt_store32(ents, eo + 4, l);
+                    txt_store32(ents, eo + 8, dir_type_at(dbuf, off));
+                    sys_copy(names, noff, dir_name_ptr_at(dbuf, off), 0, l);
+                    noff = noff + l;
+                    cnt = cnt + 1;
+                }
+            }
+            let nx: u32 = dir_next_at(dbuf, off, n);
+            if nx == off {
+                more = 0;
+            } else {
+                off = nx;
+            }
+        }
+    }
+    dir_close(fd);
+    return cnt;
+}
+
+pub fn dir_list_lit(scr: ptr, lit: str, dbuf: ptr, dcap: u64,
+                    names: ptr, ncap: u32, ents: ptr, ecap: u32) -> u32 {
+    sys_put_lit(scr, lit);
+    return dir_list(scr, dbuf, dcap, names, ncap, ents, ecap);
+}
+
+/// 一条记录在池子里的三个字段 (stride = 名字偏移/长度/类型)。
+pub fn dir_ent_name_off(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * DIR_ENT_STRIDE);
+}
+
+pub fn dir_ent_name_len(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * DIR_ENT_STRIDE + 4);
+}
+
+pub fn dir_ent_type(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * DIR_ENT_STRIDE + 8);
+}
+
+/// 池子里第 i 条的名字是否以 lit 结尾。
+pub fn dir_ent_ends_with(names: ptr, ents: ptr, i: u32, lit: str) -> bool {
+    let o: u32 = dir_ent_name_off(ents, i);
+    let l: u32 = dir_ent_name_len(ents, i);
+    let ln: u32 = str_len(lit);
+    if ln > l {
+        return false;
+    }
+    return txt_eq_lit(names, o + (l - ln), ln, lit);
+}
+
+// ---------------------------------------------------------------- stat
+
+/// stat 一个 NUL 结尾的路径。返回 0 = 成功, 负数 = 失败。
+pub fn dir_stat(path: ptr, buf: ptr) -> i64 {
+    return syscall4(262, SYS_AT_FDCWD, path as u64, buf as u64);
+}
+
+/// 失败返回 0 (0 不是合法 mode —— 权限位总有一位是 1)。
+pub fn dir_stat_mode(path: ptr, buf: ptr) -> u32 {
+    if dir_stat(path, buf) < 0 {
+        return 0;
+    }
+    return txt_load32(buf, 24);
+}
+
+pub fn dir_stat_exists(path: ptr, buf: ptr) -> bool {
+    return dir_stat(path, buf) >= 0;
+}
+
+pub fn dir_stat_mode_lit(scr: ptr, lit: str, buf: ptr) -> u32 {
+    sys_put_lit(scr, lit);
+    return dir_stat_mode(scr, buf);
+}
+
+pub fn dir_is_dir_mode(mode: u32) -> bool {
+    return (mode & DIR_IFMT) == DIR_IFDIR;
+}
+
+pub fn dir_is_reg_mode(mode: u32) -> bool {
+    return (mode & DIR_IFMT) == DIR_IFREG;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 造一条合成 dirent 记录: name 必须以 NUL 结尾, reclen 按 8 对齐。
+fn test_dir_make_rec(buf: ptr, off: u32, name: str, ty: u32) -> u32 {
+    let l: u32 = str_len(name);
+    let i: u32 = 0;
+    while i < l {
+        store8(buf, off + DIR_NAME_OFF + i, str_byte(name, i) as u8);
+        i = i + 1;
+    }
+    store8(buf, off + DIR_NAME_OFF + l, 0 as u8);
+    // reclen = 19 + l + 1, 8 对齐
+    let r: u32 = ((DIR_NAME_OFF + l + 1 + 7) / 8) * 8;
+    store8(buf, off + 16, (r & 255) as u8);
+    store8(buf, off + 17, ((r >> 8) & 255) as u8);
+    store8(buf, off + 18, ty as u8);
+    return r;
+}
+
+fn test_dir_reclen_and_name() -> bool {
+    let b: ptr = alloc(256);
+    let r: u32 = test_dir_make_rec(b, 0, "abc", DIR_TYPE_REG);
+    let l: u32 = dir_name_len_at(b, 0);
+    return r == 24 && l == 3
+        && load8(b, DIR_NAME_OFF) == 97
+        && dir_type_at(b, 0) == DIR_TYPE_REG;
+}
+
+fn test_dir_next_walks_two_records() -> bool {
+    let b: ptr = alloc(256);
+    let r1: u32 = test_dir_make_rec(b, 0, "aa", DIR_TYPE_REG);
+    let r2: u32 = test_dir_make_rec(b, r1, "bb", DIR_TYPE_DIR);
+    let n: u32 = r1 + r2;
+    let off1: u32 = dir_next_at(b, 0, n);
+    let off2: u32 = dir_next_at(b, off1, n);
+    return off1 == r1 && off2 == n && dir_name_len_at(b, r1) == 2
+        && dir_type_at(b, r1) == DIR_TYPE_DIR;
+}
+
+fn test_dir_min_reclen_guard_stops() -> bool {
+    // reclen = 0 的畸形记录必须让游标**停下** (返回 n), 不能原地死循环。
+    let b: ptr = alloc(64);
+    store8(b, 16, 0 as u8);
+    store8(b, 17, 0 as u8);
+    return dir_next_at(b, 0, 24) == 24;
+}
+
+fn test_dir_is_dot() -> bool {
+    let b: ptr = alloc(256);
+    let r1: u32 = test_dir_make_rec(b, 0, ".", DIR_TYPE_DIR);
+    let r2: u32 = test_dir_make_rec(b, r1, "..", DIR_TYPE_DIR);
+    let r3: u32 = test_dir_make_rec(b, r1 + r2, ".hidden", DIR_TYPE_REG);
+    return dir_is_dot_at(b, 0) && dir_is_dot_at(b, r1)
+        && !dir_is_dot_at(b, r1 + r2);
+}
+
+fn test_dir_name_ends_with() -> bool {
+    let b: ptr = alloc(256);
+    test_dir_make_rec(b, 0, "mathutil.lomt", DIR_TYPE_REG);
+    test_dir_make_rec(b, 32, "README", DIR_TYPE_REG);
+    return dir_name_ends_with(b, 0, ".lomt")
+        && !dir_name_ends_with(b, 0, ".lomtx")
+        && !dir_name_ends_with(b, 32, ".lomt");
+}
+
+fn test_dir_mode_bits() -> bool {
+    let d: u32 = DIR_IFDIR | 493;
+    let r: u32 = DIR_IFREG | 420;
+    return dir_is_dir_mode(d) && !dir_is_reg_mode(d)
+        && dir_is_reg_mode(r) && !dir_is_dir_mode(r)
+        && !dir_is_dir_mode(0);
+}
+
+fn test_dir_list_real_cwd_finds_this_file() -> bool {
+    // 端到端: 列 "." 必须能找到本文件自己。这条同时覆盖
+    // dir_open / dir_read 循环 / 池子写入 / 名字拷贝 整条链。
+    let dbuf: ptr = sys_alloc(65536);
+    let names: ptr = sys_alloc(65536);
+    let ents: ptr = sys_alloc(65536);
+    let scr: ptr = sys_alloc(256);
+    let n: u32 = dir_list_lit(scr, ".", dbuf, 65536, names, 65536, ents, 1024);
+    if n == DIR_ERR {
+        return false;
+    }
+    let i: u32 = 0;
+    let found: bool = false;
+    while i < n {
+        if dir_ent_ends_with(names, ents, i, "lpi_dir.lomt") {
+            found = true;
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+fn test_dir_stat_real_missing_path_fails() -> bool {
+    let scr: ptr = sys_alloc(256);
+    let st: ptr = sys_alloc(256);
+    sys_put_lit(scr, "no/such/__lpi_absent__");
+    if dir_stat_mode(scr, st) != 0 {
+        return false;
+    }
+    return !dir_stat_exists(scr, st);
+}
+
+pub fn selftest_dir() -> u32 {
+    let f: u32 = 0;
+    if !test_dir_reclen_and_name() { f = f + 1; }
+    if !test_dir_next_walks_two_records() { f = f + 1; }
+    if !test_dir_min_reclen_guard_stops() { f = f + 1; }
+    if !test_dir_is_dot() { f = f + 1; }
+    if !test_dir_name_ends_with() { f = f + 1; }
+    if !test_dir_mode_bits() { f = f + 1; }
+    if !test_dir_list_real_cwd_finds_this_file() { f = f + 1; sys_write_str(1, "  FAIL dir_list_cwd\n"); }
+    if !test_dir_stat_real_missing_path_fails() { f = f + 1; }
+    return f;
+}

@@ -1,0 +1,1541 @@
+// lompi/lpi_pkg.lomt — 包与仓库 (store) 的模型
+//
+// 模型 (docs/168 §3): **一个库 = 一个目录**。仓库就是一堆这样的目录:
+//
+//   <store>/<名字>/<版本>/        包本体: *.lomt + 可选 pkg.lomp
+//
+// 三条从这里出来的规矩, 都有出处:
+//   * 入口文件名要与包名相同 (`<名字>.lomt`) —— docs/168 的
+//     test_multi_file_package_survives_materialize 钉的就是这一条。
+//   * `deps/` 里的东西**不算本包的源码** (docs/168 §4.1 实测踩过的坑) —— 否则会
+//     凭空多出依赖边, 并把 vendored 副本算进身份。
+//   * 自身源码的哈希是**排序后**逐文件喂的 —— 目录返回顺序不保证, 不排序就没有
+//     稳定身份。这是"同一份源码必须得到同一个 id"的前提。
+//
+// 为什么要一块工作区 (ws) 而不是让函数返回结构: 语言没有出参也没有可变全局, 而
+// 这些函数的结果是多块的 (名字池 + 记录表 + 内容缓冲)。照仓库工具的成法 —— 调用方
+// 给一块 brk 内存, 本层按**命名偏移**使用。签名因此保持标量, 也就不必把聚合按值
+// 传来传去 (包内链接器不支持按值传聚合)。
+//
+// 本文件含两节: **源码扫描** (lex_*, 从 .lomt 里读 use 边与清单标签) 与
+// **包/仓库模型** (pkg_* / sto_*)。两节合成一个文件是**被工具链逼的**: 实测
+// 打包版 fujoc-s 的传递导入深度上限是 8 —— 9 个文件的线性链会让最底层
+// (sys_*) 整片"未声明", 而且报错指向的层与真正的原因无关。分层不变, 只是
+// 两层住在一个文件里。
+//
+// 命名: 公开 lex_* / pkg_* / sto_*, 自检 test_lex_* 与 test_pkg_*。
+
+module lpi_pkg
+
+use "lpi_sha.lomt"
+
+// ================================================================ 第一节: 源码扫描
+// (原 lpi_lex.lomt) 从 Loment 源码里读依赖边与清单标签
+//
+// 为什么要有它: docs/168 §3.1 —— **依赖从源码来, 不从清单来**。所以包管理器必须
+// 自己读 `use`, 不能信一份另写的依赖列表 (那才会出现"声明与实际不符")。
+// 参考实现是借 lomentc 的前端 AST 字段 name_imports; lompi 是独立程序, 借不到,
+// 所以这里是一个**够用的词法扫描** —— 只认顶层 `use`, 不建 AST。
+//
+// 扫描要处理三种"假 use", 否则会凭空多出依赖边 (那是静默的错):
+//   * 行注释里的 `// use foo`
+//   * 块注释里的 `/* use foo */`
+//   * 字符串里的 `"use foo"` (含 \ 转义)
+//
+// 认识的形状 (语言的两种写法, 后面都不带分号):
+//   use <标识符>          -> 名字边
+//   use "路径.lomt"       -> 路径边
+//
+// 一个**明确的边界**: 只认**行首**的 use (前面只允许空白)。语言里 use 只在顶层,
+// 而顶层语句在本项目里一行一条 —— 这条规则够用, 且不会把 `x.use` 之类的误认成边。
+// 真有跨行写的 use, 这里会漏, 所以 lpi_pkg 会把"扫到的边"和"包目录里存在的模块"
+// 对一遍, 不匹配就报出来, 而不是默默少一条边。
+//
+// 命名: 公开 lex_*, 自检 test_lex_*。
+
+
+
+/// 边种类: 名字形式 `use foo`。
+pub const LEX_NAME: u32 = 0;
+/// 边种类: 路径形式 `use "a/b.lomt"`。
+pub const LEX_PATH: u32 = 1;
+/// 边记录 3 个字: 池内偏移 / 长度 / 种类。
+pub const LEX_ENT_STRIDE: u32 = 12;
+
+// ---------------------------------------------------------------- 扫描
+
+/// 扫一段 Loment 源码, 把顶层 `use` 的参数收进池子。
+///   pool / poolcap : 参数字节池
+///   ents / ecap    : 边记录 (stride = LEX_ENT_STRIDE)
+/// 返回边数。
+pub fn lex_scan(p: ptr, n: u32, pool: ptr, poolcap: u32, ents: ptr, ecap: u32) -> u32 {
+    let i: u32 = 0;
+    let st: u32 = 0;          // 0 普通 / 1 行注释 / 2 块注释 / 3 字符串
+    let at_ls: u32 = 1;       // 本行到目前只有空白
+    let cnt: u32 = 0;
+    let poff: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if st == 1 {
+            if c == 10 {
+                st = 0;
+                at_ls = 1;
+            }
+            i = i + 1;
+        } else if st == 2 {
+            if c == 42 && i + 1 < n && load8(p, i + 1) == 47 {
+                st = 0;
+                i = i + 2;
+            } else {
+                i = i + 1;
+            }
+        } else if st == 3 {
+            if c == 92 {
+                i = i + 2;
+            } else if c == 34 {
+                st = 0;
+                i = i + 1;
+            } else {
+                i = i + 1;
+            }
+        } else {
+            if c == 47 && i + 1 < n && load8(p, i + 1) == 47 {
+                st = 1;
+                i = i + 2;
+            } else if c == 47 && i + 1 < n && load8(p, i + 1) == 42 {
+                st = 2;
+                i = i + 2;
+            } else if c == 34 {
+                st = 3;
+                i = i + 1;
+            } else if c == 10 {
+                at_ls = 1;
+                i = i + 1;
+            } else if c == 32 || c == 9 || c == 13 {
+                i = i + 1;
+            } else {
+                if at_ls == 1 && txt_is_ident_start(c) {
+                    at_ls = 0;
+                    let k: u32 = i;
+                    while k < n && txt_is_ident(load8(p, k)) {
+                        k = k + 1;
+                    }
+                    if txt_eq_lit(p, i, k - i, "use") {
+                        let j: u32 = txt_skip_ws(p, k, n);
+                        if j < n && load8(p, j) == 34 {
+                            let e: u32 = j + 1;
+                            while e < n && load8(p, e) != 34 {
+                                e = e + 1;
+                            }
+                            let len: u32 = e - j - 1;
+                            if cnt < ecap && poff + len <= poolcap {
+                                sys_copy(pool, poff, p, j + 1, len);
+                                let eo: u32 = cnt * LEX_ENT_STRIDE;
+                                txt_store32(ents, eo + 0, poff);
+                                txt_store32(ents, eo + 4, len);
+                                txt_store32(ents, eo + 8, LEX_PATH);
+                                poff = poff + len;
+                                cnt = cnt + 1;
+                            }
+                            i = e + 1;
+                        } else {
+                            let e: u32 = j;
+                            while e < n && txt_is_ident(load8(p, e)) {
+                                e = e + 1;
+                            }
+                            let len: u32 = e - j;
+                            if len > 0 && cnt < ecap && poff + len <= poolcap {
+                                sys_copy(pool, poff, p, j, len);
+                                let eo: u32 = cnt * LEX_ENT_STRIDE;
+                                txt_store32(ents, eo + 0, poff);
+                                txt_store32(ents, eo + 4, len);
+                                txt_store32(ents, eo + 8, LEX_NAME);
+                                poff = poff + len;
+                                cnt = cnt + 1;
+                            }
+                            i = e;
+                        }
+                    } else {
+                        i = k;
+                    }
+                } else {
+                    at_ls = 0;
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return cnt;
+}
+
+/// 边记录访问器。
+pub fn lex_ent_off(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * LEX_ENT_STRIDE);
+}
+
+pub fn lex_ent_len(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * LEX_ENT_STRIDE + 4);
+}
+
+pub fn lex_ent_kind(ents: ptr, i: u32) -> u32 {
+    return txt_load32(ents, i * LEX_ENT_STRIDE + 8);
+}
+
+/// 第 i 条边是不是名字形式的某个字面量。
+pub fn lex_ent_is_name(pool: ptr, ents: ptr, i: u32, lit: str) -> bool {
+    if lex_ent_kind(ents, i) != LEX_NAME {
+        return false;
+    }
+    return txt_eq_lit(pool, lex_ent_off(ents, i), lex_ent_len(ents, i), lit);
+}
+
+// ---------------------------------------------------------------- 清单标签
+
+/// 在一个标识符 token 之后找 `return "..."`, 把字符串内容拷进 out。
+/// 找到返回长度, 找不到返回 0。
+///
+/// 清单 (.lomp) 只认**字面量返回** (docs/168 §3.2), 所以这里只认 return 后紧跟
+/// 一个字符串字面量的形状 —— 不解析表达式, 也就不会假装能算。
+fn lex_label_after(p: ptr, n: u32, from: u32, out: ptr, outcap: u32) -> u32 {
+    let i: u32 = from;
+    // 找 "return"
+    while i < n {
+        if txt_is_ident_start(load8(p, i)) {
+            let k: u32 = i;
+            while k < n && txt_is_ident(load8(p, k)) {
+                k = k + 1;
+            }
+            if txt_eq_lit(p, i, k - i, "return") {
+                let j: u32 = txt_skip_ws(p, k, n);
+                if j < n && load8(p, j) == 34 {
+                    let e: u32 = j + 1;
+                    while e < n && load8(p, e) != 34 {
+                        e = e + 1;
+                    }
+                    let len: u32 = e - j - 1;
+                    if len > outcap {
+                        return 0;
+                    }
+                    sys_copy(out, 0, p, j + 1, len);
+                    return len;
+                }
+                return 0;
+            }
+            i = k;
+        } else {
+            // 跳过注释 —— 注释里写 "return \"x\"" 不该被当成标签。
+            if load8(p, i) == 47 && i + 1 < n && load8(p, i + 1) == 47 {
+                i = txt_next_line(p, i, n);
+            } else if load8(p, i) == 47 && i + 1 < n && load8(p, i + 1) == 42 {
+                i = i + 2;
+                while i + 1 < n && !(load8(p, i) == 42 && load8(p, i + 1) == 47) {
+                    i = i + 1;
+                }
+                i = i + 2;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// 从清单源码里读 `fn <fnname>() -> str { return "…"; }` 的那个字面量。
+/// 找不到返回 0。outcap 至少要放得下标签。
+pub fn lex_find_label(p: ptr, n: u32, fnname: str, out: ptr, outcap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if txt_is_ident_start(load8(p, i)) {
+            let k: u32 = i;
+            while k < n && txt_is_ident(load8(p, k)) {
+                k = k + 1;
+            }
+            if txt_eq_lit(p, i, k - i, "fn") {
+                let j: u32 = txt_skip_ws(p, k, n);
+                let e: u32 = j;
+                while e < n && txt_is_ident(load8(p, e)) {
+                    e = e + 1;
+                }
+                if txt_eq_lit(p, j, e - j, fnname) {
+                    return lex_label_after(p, n, e, out, outcap);
+                }
+                i = e;
+            } else {
+                i = k;
+            }
+        } else if load8(p, i) == 47 && i + 1 < n && load8(p, i + 1) == 47 {
+            i = txt_next_line(p, i, n);
+        } else if load8(p, i) == 47 && i + 1 < n && load8(p, i + 1) == 42 {
+            i = i + 2;
+            while i + 1 < n && !(load8(p, i) == 42 && load8(p, i + 1) == 47) {
+                i = i + 1;
+            }
+            i = i + 2;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn lex_fixture() -> ptr {
+    let b: ptr = alloc(1024);
+    let o: u32 = 0;
+    o = txt_put(b, o, "module demo\n");
+    o = txt_put(b, o, "// use commented_out\n");
+    o = txt_put(b, o, "use mathutil\n");
+    o = txt_put(b, o, "/* use also_blocked */\n");
+    o = txt_put(b, o, "use \"deps/lib.io.lomt\"\n");
+    o = txt_put(b, o, "fn f() { let s: str = \"use not_an_edge\"; }\n");
+    o = txt_put(b, o, "   use indented\n");
+    return b;
+}
+
+fn lex_fixture_len() -> u32 {
+    let b: ptr = lex_fixture();
+    return txt_len_cstr(b) - 1;
+}
+
+fn test_lex_finds_only_real_edges() -> bool {
+    let b: ptr = lex_fixture();
+    let n: u32 = lex_fixture_len();
+    let pool: ptr = alloc(512);
+    let ents: ptr = alloc(512);
+    let c: u32 = lex_scan(b, n, pool, 512, ents, 32);
+    if c != 3 {
+        return false;
+    }
+    // 0: mathutil (名字)
+    // 1: deps/lib.io.lomt (路径)
+    // 2: indented (名字, 前面有空白也算行首)
+    let ok0: bool = lex_ent_is_name(pool, ents, 0, "mathutil");
+    let ok1: bool = lex_ent_kind(ents, 1) == LEX_PATH
+        && txt_eq_lit(pool, lex_ent_off(ents, 1), lex_ent_len(ents, 1), "deps/lib.io.lomt");
+    let ok2: bool = lex_ent_is_name(pool, ents, 2, "indented");
+    return ok0 && ok1 && ok2;
+}
+
+fn test_lex_skips_comments_and_strings() -> bool {
+    // 单独钉住那三个"假 use" —— 多一条边就是凭空多一个依赖, 是静默的错。
+    let b: ptr = lex_fixture();
+    let n: u32 = lex_fixture_len();
+    let pool: ptr = alloc(512);
+    let ents: ptr = alloc(512);
+    let c: u32 = lex_scan(b, n, pool, 512, ents, 32);
+    let i: u32 = 0;
+    while i < c {
+        if lex_ent_is_name(pool, ents, i, "commented_out")
+            || lex_ent_is_name(pool, ents, i, "also_blocked")
+            || lex_ent_is_name(pool, ents, i, "not_an_edge") {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_lex_handles_string_escapes() -> bool {
+    // `"a\"use x"` —— 转义引号不能让后面的 use 变成边。
+    let b: ptr = alloc(256);
+    let o: u32 = 0;
+    o = txt_put(b, o, "let s: str = \"a\\\"use x\";\n");
+    o = txt_put(b, o, "use real\n");
+    let pool: ptr = alloc(256);
+    let ents: ptr = alloc(256);
+    let c: u32 = lex_scan(b, o, pool, 256, ents, 16);
+    return c == 1 && lex_ent_is_name(pool, ents, 0, "real");
+}
+
+fn test_lex_stops_at_capacity_without_writing_past() -> bool {
+    let b: ptr = lex_fixture();
+    let n: u32 = lex_fixture_len();
+    let pool: ptr = alloc(512);
+    let ents: ptr = alloc(512);
+    // 只放得下 1 条
+    let c: u32 = lex_scan(b, n, pool, 512, ents, 1);
+    return c == 1;
+}
+
+fn test_lex_manifest_labels() -> bool {
+    let b: ptr = alloc(512);
+    let o: u32 = 0;
+    o = txt_put(b, o, "// comment with return \"nope\"\n");
+    o = txt_put(b, o, "module pkg
+\n");
+    o = txt_put(b, o, "pub fn name() -> str {
+    return \"mathutil\";
+}
+\n");
+    o = txt_put(b, o, "pub fn version() -> str {
+    return \"0.1.0\";
+}\n");
+    let out: ptr = alloc(64);
+    let ln: u32 = lex_find_label(b, o, "name", out, 64);
+    if ln != 8 || !txt_eq_lit(out, 0, 8, "mathutil") {
+        return false;
+    }
+    let lv: u32 = lex_find_label(b, o, "version", out, 64);
+    return lv == 5 && txt_eq_lit(out, 0, 5, "0.1.0");
+}
+
+fn test_lex_label_missing_returns_zero() -> bool {
+    let b: ptr = alloc(256);
+    let o: u32 = txt_put(b, 0, "module pkg
+
+pub fn name() -> str {
+    return \"x\";
+}\n");
+    let out: ptr = alloc(64);
+    return lex_find_label(b, o, "version", out, 64) == 0;
+}
+
+pub fn selftest_lex() -> u32 {
+    let f: u32 = 0;
+    if !test_lex_finds_only_real_edges() { f = f + 1; sys_write_str(1, "  FAIL lex_edges\n"); }
+    if !test_lex_skips_comments_and_strings() { f = f + 1; sys_write_str(1, "  FAIL lex_fake\n"); }
+    if !test_lex_handles_string_escapes() { f = f + 1; sys_write_str(1, "  FAIL lex_escape\n"); }
+    if !test_lex_stops_at_capacity_without_writing_past() { f = f + 1; sys_write_str(1, "  FAIL lex_cap\n"); }
+    if !test_lex_manifest_labels() { f = f + 1; sys_write_str(1, "  FAIL lex_label\n"); }
+    if !test_lex_label_missing_returns_zero() { f = f + 1; sys_write_str(1, "  FAIL lex_noLabel\n"); }
+    return f;
+}
+
+
+// ================================================================ 第二节: 包与仓库
+
+
+// ---------------------------------------------------------------- 工作区布局
+// 每一段都不重叠 —— 手写偏移重叠一次就是难查的踩内存, test_pkg_ws_* 把每条
+// 相邻边界都断言一遍。改任何数字都要让那条测试继续过。
+
+pub fn ws_size() -> u32 { return 1441792; }
+
+pub const WS_NAMES: u32 = 0;            // 名字池 (包名 + 版本名)
+pub const WS_ENTS: u32 = 65536;         // 外层目录项
+pub const WS_ENTS2: u32 = 131072;       // 内层目录项
+pub const WS_DBUF: u32 = 196608;        // 外层目录读缓冲
+pub const WS_DBUF2: u32 = 262144;       // 内层目录读缓冲
+pub const WS_FILE: u32 = 327680;        // 单个源码文件内容
+pub const WS_SHA: u32 = 589824;         // sha 状态
+pub const WS_DIG: u32 = 590848;         // 32 字节摘要
+pub const WS_HEX: u32 = 590880;         // 64 字符 hex
+/// **给调用方用的**路径暂存 —— lompi 自己的内部一律不碰它。
+/// 这条契约是有代价才换来的: 内部函数若拿调用方传进来的路径缓冲当自己的暂存,
+/// 第一次调用就会把那条路径改写成 ".../名字/版本", 第二次调用读到的就是坏路径。
+/// (踩过两次: pkg_label 一次, sto_scan 一次。)
+pub const WS_SCR: u32 = 590944;
+pub const WS_SCR2: u32 = 595040;        // 路径暂存 2 / 内层名字池
+pub const WS_EPOOL: u32 = 599136;       // 累积的边名池
+pub const WS_EENTS: u32 = 730208;       // 累积的边记录
+pub const WS_LEXPOOL: u32 = 762976;     // 单文件扫描暂存池
+pub const WS_LEXENTS: u32 = 828512;     // 单文件扫描暂存记录
+pub const WS_OUT: u32 = 844896;         // 路径池 / 报告输出
+pub const WS_PKG: u32 = 1110400;        // 包记录表
+pub const WS_IDS: u32 = 1126784;        // 每包 64 字符 hex
+pub const WS_TMP: u32 = 1159552;        // 暂存
+/// 外层目录的**名字池** —— 必须与 WS_NAMES 分开: 外层循环边遍历边读它, 而被
+/// 收集的包名/版本名要写进 WS_NAMES, 共用一块就会把自己正在读的表覆盖掉。
+pub const WS_ONAMES: u32 = 1167744;
+/// 内层 (版本) 目录的名字池。
+pub const WS_INAMES: u32 = 1175936;
+/// 仓库收下来的**包名与版本名** —— 必须与 WS_NAMES 分开: WS_NAMES 是
+/// pkg_list_sources 的暂存, 每列一次目录就被覆盖, 而包名要在整个程序里一直有效。
+/// (第一版共用了 WS_NAMES, 结果 sto_scan 之后任何一次 pkg_list_sources 都会把
+///  仓库里所有包的名字清掉 —— 症状是身份算不出来、闭包找不到依赖。)
+pub const WS_SNAMES: u32 = 1180032;
+pub const WS_SNAMES_CAP: u32 = 65536;
+/// sto_scan **自己的一份**仓库路径副本。不能让调用方传进来的路径缓冲兼任暂存:
+/// 那样第一次调用就会把路径改写成 "store/名字/版本", 第二次调用拿到的就是坏路径。
+pub const WS_STORE: u32 = 1245568;
+pub const WS_STORE_CAP: u32 = 4096;
+/// 给调用方 (lpi_cli) 用的**报告输出**区 —— 内部不碰它, 所以可以边查边往里拼。
+pub const WS_REPORT: u32 = 1253760;
+pub const WS_REPORT_CAP: u32 = 131072;
+pub const WS_ONAMES_CAP: u32 = 8192;
+pub const WS_INAMES_CAP: u32 = 4096;
+
+pub const WS_NAMES_CAP: u32 = 65536;
+pub const WS_ENTS_CAP: u32 = 4096;
+pub const WS_ENTS2_CAP: u32 = 4096;
+pub const WS_DBUF_CAP: u32 = 65536;
+pub const WS_DBUF2_CAP: u32 = 65536;
+pub const WS_FILE_CAP: u32 = 262144;
+pub const WS_SCR_CAP: u32 = 4096;
+pub const WS_SCR2_CAP: u32 = 4096;
+pub const WS_EPOOL_CAP: u32 = 131072;
+pub const WS_EENTS_CAP: u32 = 2048;
+pub const WS_LEXPOOL_CAP: u32 = 65536;
+pub const WS_LEXENTS_CAP: u32 = 1024;
+pub const WS_OUT_CAP: u32 = 262144;
+pub const WS_PKG_CAP: u32 = 512;
+pub const WS_TMP_CAP: u32 = 8192;
+
+/// 包记录 (stride 32)。
+pub const PKG_STRIDE: u32 = 32;
+pub const P_NAME_OFF: u32 = 0;
+pub const P_NAME_LEN: u32 = 4;
+pub const P_VER_OFF: u32 = 8;
+pub const P_VER_LEN: u32 = 12;
+pub const P_DIR_OFF: u32 = 16;
+pub const P_DIR_LEN: u32 = 20;
+pub const P_ID_IDX: u32 = 24;
+pub const P_FLAGS: u32 = 28;
+
+/// 标志位: 这个包的身份已经算过。
+pub const PKG_F_IDENT: u32 = 1;
+/// 标志位: 正在算 (环检测的着色)。
+pub const PKG_F_ACTIVE: u32 = 2;
+/// 标志位: 依赖缺在仓库里 (响亮地区分于"环")。
+pub const PKG_F_MISSING: u32 = 4;
+/// 标志位: 在闭包内 —— resolve/tree/install 都靠它标记"这次要处理哪些实例"。
+pub const PKG_F_INCLOSURE: u32 = 8;
+
+/// 单个源码文件的字节上限 —— 超了报错而不是静默截断 (截断会算出一个错的身份)。
+pub const PKG_FILE_MAX: u32 = 262144;
+
+/// 找不到。
+pub const PKG_NONE: u32 = 4294967295;
+/// u32 域的失败哨兵 —— 与 SYS_ERR 同值, 但这些接口的返回值是 u32。
+pub const PKG_ERR: u32 = 4294967295;
+
+// 工作区内的指针助手 (每处写一遍 (ws + OFF) as ptr 太吵)。
+fn W(ws: ptr, off: u32) -> ptr { return ((ws as u64) + (off as u64)) as ptr; }
+
+// ---------------------------------------------------------------- 名字排序
+
+fn pkg_name_less(names: ptr, ents: ptr, i: u32, j: u32) -> bool {
+    let oi: u32 = dir_ent_name_off(ents, i);
+    let oj: u32 = dir_ent_name_off(ents, j);
+    let li: u32 = dir_ent_name_len(ents, i);
+    let lj: u32 = dir_ent_name_len(ents, j);
+    let k: u32 = 0;
+    while k < li && k < lj {
+        let a: u32 = load8(names, oi + k);
+        let b: u32 = load8(names, oj + k);
+        if a < b { return true; }
+        if a > b { return false; }
+        k = k + 1;
+    }
+    return li < lj;
+}
+
+fn pkg_swap_ent(ents: ptr, i: u32, j: u32) {
+    let a: u32 = 0;
+    while a < DIR_ENT_STRIDE {
+        let t: u32 = load8(ents, i * DIR_ENT_STRIDE + a);
+        let u: u32 = load8(ents, j * DIR_ENT_STRIDE + a);
+        store8(ents, i * DIR_ENT_STRIDE + a, u as u8);
+        store8(ents, j * DIR_ENT_STRIDE + a, t as u8);
+        a = a + 1;
+    }
+}
+
+/// 插入排序 (一个包几十个文件, 够用)。
+/// 为什么要排: 目录返回顺序不保证, 不排就没有稳定的内容哈希。
+pub fn pkg_sort_ents(names: ptr, ents: ptr, n: u32) {
+    let i: u32 = 1;
+    while i < n {
+        let j: u32 = i;
+        while j > 0 && pkg_name_less(names, ents, j, j - 1) {
+            pkg_swap_ent(ents, j, j - 1);
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 包内容
+
+/// 列出包里参与身份的源码文件: `*.lomt`, 排除 `pkg.lomp` 与 `deps/`, 已排序。
+/// 返回文件数; 打不开返回 DIR_ERR。
+pub fn pkg_list_sources(ws: ptr, path: ptr) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let dbuf: ptr = W(ws, WS_DBUF);
+    let n: u32 = dir_list(path, dbuf, WS_DBUF_CAP as u64, names, WS_NAMES_CAP, ents, WS_ENTS_CAP);
+    if n == DIR_ERR { return DIR_ERR; }
+    let out: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let o: u32 = dir_ent_name_off(ents, i);
+        let l: u32 = dir_ent_name_len(ents, i);
+        let keep: bool = dir_ent_type(ents, i) == DIR_TYPE_REG
+            && l > 5
+            && txt_eq_lit(names, o + l - 5, 5, ".lomt");
+        if keep {
+            if out != i {
+                let a: u32 = 0;
+                while a < DIR_ENT_STRIDE {
+                    store8(ents, out * DIR_ENT_STRIDE + a,
+                           load8(ents, i * DIR_ENT_STRIDE + a) as u8);
+                    a = a + 1;
+                }
+            }
+            out = out + 1;
+        }
+        i = i + 1;
+    }
+    pkg_sort_ents(names, ents, out);
+    return out;
+}
+
+/// 自身源码哈希: 对每个文件按名字序喂 `名字 0x00 内容 0x00` 进 sha。
+/// 喂名字与 NUL 是为了让 "ab"+"c" 和 "a"+"bc" 分得开 —— 不加分隔符就能被构造出
+/// 两个不同包拿到同一个身份。
+///
+/// 返回参与的文件数; **有文件读不出来或超过 PKG_FILE_MAX 时返回 0**
+/// (宁可报"这个包读不了", 也不要用截断内容算出一个错的身份)。
+pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let file: ptr = W(ws, WS_FILE);
+    let st: ptr = W(ws, WS_SHA);
+    let scr: ptr = W(ws, WS_SCR2);      // 自己的暂存 —— 不许写调用方给的 path
+    let zero: ptr = W(ws, WS_TMP);
+    let pathn: u32 = txt_len_cstr(path);
+    store8(zero, 0, 0 as u8);
+    sha_init(st);
+    let i: u32 = 0;
+    while i < nfiles {
+        let o: u32 = dir_ent_name_off(ents, i);
+        let l: u32 = dir_ent_name_len(ents, i);
+        sys_join(scr, path, pathn, ((names as u64) + (o as u64)) as ptr, l);
+        let got: u64 = sys_read_file(scr, file, PKG_FILE_MAX as u64);
+        if got == SYS_ERR || got > (PKG_FILE_MAX as u64) {
+            return 0;
+        }
+        sha_update(st, ((names as u64) + (o as u64)) as ptr, l);
+        sha_update(st, zero, 1);
+        sha_update(st, file, got as u32);
+        sha_update(st, zero, 1);
+        i = i + 1;
+    }
+    sha_final(st, dig);
+    return nfiles;
+}
+
+/// 扫包内全部 .lomt 的 use 边, 去重, 写进 WS_EPOOL / WS_EENTS。返回边数。
+///
+/// 每个文件用**独立的**扫描暂存 (WS_LEXPOOL/WS_LEXENTS), 再搬进累积池 ——
+/// 共用一块会让后一个文件把前一个的边覆盖掉。
+pub fn pkg_edges(ws: ptr, path: ptr, nfiles: u32) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let file: ptr = W(ws, WS_FILE);
+    let scr: ptr = W(ws, WS_SCR2);      // 自己的暂存
+    let pool: ptr = W(ws, WS_EPOOL);
+    let eents: ptr = W(ws, WS_EENTS);
+    let lpool: ptr = W(ws, WS_LEXPOOL);
+    let lents: ptr = W(ws, WS_LEXENTS);
+    let tmp: ptr = W(ws, WS_TMP);
+    let pathn: u32 = txt_len_cstr(path);
+    let poff: u32 = 0;
+    let found: u32 = 0;
+    let i: u32 = 0;
+    while i < nfiles {
+        let o: u32 = dir_ent_name_off(ents, i);
+        let l: u32 = dir_ent_name_len(ents, i);
+        sys_join(scr, path, pathn, ((names as u64) + (o as u64)) as ptr, l);
+        let got: u64 = sys_read_file(scr, file, PKG_FILE_MAX as u64);
+        if got != SYS_ERR && got <= (PKG_FILE_MAX as u64) {
+            let c: u32 = lex_scan(file, got as u32, lpool, WS_LEXPOOL_CAP, lents, WS_LEXENTS_CAP);
+            let k: u32 = 0;
+            while k < c {
+                let eo: u32 = lex_ent_off(lents, k);
+                let el: u32 = lex_ent_len(lents, k);
+                let kind: u32 = lex_ent_kind(lents, k);
+                if !pkg_edge_seen(pool, eents, found, lpool, eo, el, kind)
+                    && found < WS_EENTS_CAP
+                    && poff + el <= WS_EPOOL_CAP {
+                    sys_copy(tmp, 0, lpool, eo, el);
+                    sys_copy(pool, poff, tmp, 0, el);
+                    let no: u32 = found * LEX_ENT_STRIDE;
+                    txt_store32(eents, no + 0, poff);
+                    txt_store32(eents, no + 4, el);
+                    txt_store32(eents, no + 8, kind);
+                    poff = poff + el;
+                    found = found + 1;
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+fn pkg_edge_seen(pool: ptr, eents: ptr, n: u32, src: ptr, off: u32, len: u32, kind: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if lex_ent_kind(eents, i) == kind && lex_ent_len(eents, i) == len {
+            let o: u32 = lex_ent_off(eents, i);
+            if txt_eq(pool, o, len, src, off, len) {
+                return true;
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 读清单标签。which: 0 = name, 1 = version。返回长度 (0 = 没有清单 / 没有该标签)。
+/// out 至少要 64 字节。
+pub fn pkg_label(ws: ptr, path: ptr, which: u32, out: ptr, outcap: u32) -> u32 {
+    let file: ptr = W(ws, WS_FILE);
+    let scr: ptr = W(ws, WS_SCR2);      // 自己的暂存 —— 不许写调用方给的 path
+    let leaf: ptr = W(ws, WS_TMP + 2048);
+    let pathn: u32 = txt_len_cstr(path);
+    txt_put(leaf, 0, "pkg.lomp");
+    sys_join(scr, path, pathn, leaf, 8);
+    let got: u64 = sys_read_file(scr, file, PKG_FILE_MAX as u64);
+    if got == SYS_ERR {
+        return 0;
+    }
+    if which == 0 {
+        return lex_find_label(file, got as u32, "name", out, outcap);
+    }
+    return lex_find_label(file, got as u32, "version", out, outcap);
+}
+
+// ---------------------------------------------------------------- 库结构校验
+
+/// 取路径的最后一段 (which = 0) 或倒数第二段 (which = 1), 拷进 out 并补 NUL。
+/// 返回该段长度; 找不到返回 0。分隔符同时认 '/' 与 '\' —— Windows 上两种都会出现。
+pub fn pkg_base(path: ptr, which: u32, out: ptr, outcap: u32) -> u32 {
+    let n: u32 = txt_len_cstr(path);
+    let e0: u32 = n;
+    while e0 > 0 && (load8(path, e0 - 1) == 47 || load8(path, e0 - 1) == 92) {
+        e0 = e0 - 1;                       // 去掉结尾的分隔符, "a/b/" 与 "a/b" 同义
+    }
+    let e: u32 = e0;
+    let k: u32 = 0;
+    let i: u32 = e0;
+    let done: u32 = 0;
+    let rs: u32 = 0;
+    let re: u32 = 0;
+    while i > 0 {
+        i = i - 1;
+        let c: u32 = load8(path, i);
+        if c == 47 || c == 92 {
+            if k == which {
+                rs = i + 1;
+                re = e;
+                done = 1;
+                i = 0;
+            } else {
+                k = k + 1;
+                e = i;
+            }
+        }
+    }
+    if done == 0 && k == which {
+        rs = 0;
+        re = e;
+        done = 1;
+    }
+    if done == 0 {
+        return 0;
+    }
+    let len: u32 = re - rs;
+    if len > outcap {
+        return 0;
+    }
+    sys_copy(out, 0, path, rs, len);
+    store8(out, len, 0 as u8);
+    return len;
+}
+
+/// 读源码里第一处顶层 `module <名字>` 的名字。返回长度 (0 = 没找到)。
+/// 跳过注释与字符串 —— 注释里写一句 "module foo" 不该被当成模块声明。
+pub fn pkg_module_of(p: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if txt_is_ident_start(c) {
+            let k: u32 = i;
+            while k < n && txt_is_ident(load8(p, k)) {
+                k = k + 1;
+            }
+            if txt_eq_lit(p, i, k - i, "module") {
+                let j: u32 = txt_skip_ws(p, k, n);
+                let e: u32 = j;
+                while e < n && txt_is_ident(load8(p, e)) {
+                    e = e + 1;
+                }
+                let len: u32 = e - j;
+                if len == 0 || len > outcap {
+                    return 0;
+                }
+                sys_copy(out, 0, p, j, len);
+                store8(out, len, 0 as u8);
+                return len;
+            }
+            i = k;
+        } else if c == 47 && i + 1 < n && load8(p, i + 1) == 47 {
+            i = txt_next_line(p, i, n);
+        } else if c == 47 && i + 1 < n && load8(p, i + 1) == 42 {
+            i = i + 2;
+            while i + 1 < n && !(load8(p, i) == 42 && load8(p, i + 1) == 47) {
+                i = i + 1;
+            }
+            i = i + 2;
+        } else if c == 34 {
+            i = i + 1;
+            while i < n && load8(p, i) != 34 {
+                if load8(p, i) == 92 {
+                    i = i + 1;
+                }
+                i = i + 1;
+            }
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+/// 追加一行报告。返回新偏移。
+fn pkg_rep(rep: ptr, o: u32, s: str) -> u32 {
+    let t: u32 = txt_put(rep, o, s);
+    return txt_put_nl(rep, t);
+}
+
+/// 校验 `dir` 是不是**正确的 Loment 库**。逐条报告写进 rep, 返回**失败条数**。
+///
+/// 每一条都是"装上之后编译器能不能 `use` 到"的必要条件, 不是风格检查:
+///   * 入口文件名 = 包名 —— 编译器按 `deps/<名字>/<名字>.lomt` 找入口;
+///   * 文件里的 `module` 名 = 文件名 —— 平名字空间下那就是模块的身份;
+///   * 单文件不超上限 —— 超了身份只能截断算, 那是错的不是次的。
+///
+/// 包名是**推**出来的: 目录名 (若 `<目录名>.lomt` 在) 否则父目录名 (若在), 两者都不在
+/// 就报"没有入口文件"。所以 `check <store>/<名字>/<版本>` 与 `check <名字>` 都认。
+///
+/// 注意: 本函数会用掉列目录那套暂存 (WS_NAMES / WS_ENTS / WS_FILE), 调用方别指望它们。
+pub fn pkg_check(ws: ptr, dir: ptr, rep: ptr, repcap: u32) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let file: ptr = W(ws, WS_FILE);
+    let scr: ptr = W(ws, WS_SCR2);
+    let buf1: ptr = W(ws, WS_TMP + 6144);
+    let buf2: ptr = W(ws, WS_TMP + 6400);
+    let o: u32 = 0;
+    let bad: u32 = 0;
+    let dirn: u32 = txt_len_cstr(dir);
+
+    let nf: u32 = pkg_list_sources(ws, dir);
+    if nf == DIR_ERR {
+        o = pkg_rep(rep, o, "[BAD] not a readable directory");
+        return 1;
+    }
+    o = txt_put(rep, o, "[ok] source files: ");
+    o = txt_put_dec(rep, o, nf as u64);
+    o = txt_put_nl(rep, o);
+    if nf == 0 {
+        o = pkg_rep(rep, o, "[BAD] no *.lomt in this directory");
+        return bad + 1;
+    }
+
+    // ---- 推断包名
+    let own: u32 = pkg_base(dir, 0, buf1, 256);
+    let par: u32 = pkg_base(dir, 1, buf2, 256);
+    let have_own: u32 = 0;
+    let k: u32 = 0;
+    while k < nf {
+        let ao: u32 = dir_ent_name_off(ents, k);
+        let al: u32 = dir_ent_name_len(ents, k);
+        if al == own + 5 && txt_eq(names, ao, own, buf1, 0, own)
+            && txt_eq_lit(names, ao + own, 5, ".lomt") {
+            have_own = 1;
+        }
+        k = k + 1;
+    }
+    let have_par: u32 = 0;
+    if have_own == 0 && par > 0 {
+        k = 0;
+        while k < nf {
+            let ao: u32 = dir_ent_name_off(ents, k);
+            let al: u32 = dir_ent_name_len(ents, k);
+            if al == par + 5 && txt_eq(names, ao, par, buf2, 0, par)
+                && txt_eq_lit(names, ao + par, 5, ".lomt") {
+                have_par = 1;
+            }
+            k = k + 1;
+        }
+    }
+    // 包名落在 buf2 (have_own=1) 或 buf1 (have_par=1)
+    let nlen: u32 = 0;
+    if have_own == 1 {
+        nlen = own;
+    } else if have_par == 1 {
+        nlen = par;
+        sys_copy(buf1, 0, buf2, 0, par);
+        store8(buf1, par, 0 as u8);
+    } else {
+        o = pkg_rep(rep, o, "[BAD] no entry file: expected <name>.lomt");
+        return bad + 1;
+    }
+    o = txt_put(rep, o, "[ok] package name: ");
+    o = txt_put_bytes(rep, o, buf1, 0, nlen);
+    o = txt_put_nl(rep, o);
+
+    // ---- 逐文件: 读得出 + module 名等于文件名
+    k = 0;
+    while k < nf {
+        let ao: u32 = dir_ent_name_off(ents, k);
+        let al: u32 = dir_ent_name_len(ents, k);
+        let stem: u32 = al - 5;               // 去掉 ".lomt"
+        sys_join(scr, dir, dirn, ((names as u64) + (ao as u64)) as ptr, al);
+        let got: u64 = sys_read_file(scr, file, PKG_FILE_MAX as u64);
+        if got == SYS_ERR || got > (PKG_FILE_MAX as u64) {
+            o = txt_put(rep, o, "[BAD] unreadable or over size cap: ");
+            o = txt_put_bytes(rep, o, names, ao, al);
+            o = txt_put_nl(rep, o);
+            bad = bad + 1;
+        } else {
+            let mn: u32 = pkg_module_of(file, got as u32, scr, 256);
+            if mn == 0 {
+                o = txt_put(rep, o, "[BAD] no `module` declaration: ");
+                o = txt_put_bytes(rep, o, names, ao, al);
+                o = txt_put_nl(rep, o);
+                bad = bad + 1;
+            } else if mn != stem || !txt_eq(scr, 0, mn, names, ao, stem) {
+                o = txt_put(rep, o, "[BAD] module name does not match file name: ");
+                o = txt_put_bytes(rep, o, names, ao, al);
+                o = txt_put(rep, o, " declares `");
+                o = txt_put_bytes(rep, o, scr, 0, mn);
+                o = txt_put(rep, o, "`");
+                o = txt_put_nl(rep, o);
+                bad = bad + 1;
+            }
+        }
+        k = k + 1;
+    }
+    if bad == 0 {
+        o = pkg_rep(rep, o, "[ok] every module name matches its file name");
+    }
+
+    // ---- 清单标签 (若有) 要与目录一致
+    let ln: u32 = pkg_label(ws, dir, 0, scr, 256);
+    if ln > 0 {
+        if ln != nlen || !txt_eq(scr, 0, ln, buf1, 0, nlen) {
+            o = pkg_rep(rep, o, "[BAD] pkg.lomp name() disagrees with the directory name");
+            bad = bad + 1;
+        } else {
+            o = pkg_rep(rep, o, "[ok] pkg.lomp name() matches");
+        }
+        let lv: u32 = pkg_label(ws, dir, 1, scr, 256);
+        if lv == 0 {
+            o = pkg_rep(rep, o, "[warn] pkg.lomp has no version()");
+        } else {
+            let vd: u32 = pkg_base(dir, 0, buf2, 256);
+            if have_par == 1 && (lv != vd || !txt_eq(scr, 0, lv, buf2, 0, vd)) {
+                o = pkg_rep(rep, o, "[warn] pkg.lomp version() differs from the version directory");
+            } else {
+                o = pkg_rep(rep, o, "[ok] pkg.lomp version() matches");
+            }
+        }
+    } else {
+        o = pkg_rep(rep, o, "[ok] no pkg.lomp (optional)");
+    }
+    // repcap 由调用方按报告缓冲的实际大小给; 本函数自己算偏移, 不读它 —— 留着是为了
+    // 签名自说明, 也方便以后加长度保护。
+    return bad;
+}
+
+// ---------------------------------------------------------------- 落盘与锁
+
+fn pkg_is_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+/// 读锁文件, 把它描述的每个实例在仓库里**对出来**并标上 PKG_F_INCLOSURE。
+/// 每行是 `名字 版本 身份`; `#` 开头的行是注释。返回标记的条数。
+///
+/// **对不上就拒**: 某个 (名字, 版本) 在仓库里没有, 或找到了但 64 位身份不一样,
+/// 都返回 SYS_ERR 并把那条的名字写进 msg。这就是"按锁复现"与"随便装个最新版"的
+/// 分界 —— 没有这一步, 锁就只是装饰品。
+///
+/// 与 `verify` 互补: verify 比的是**文本** (重算出来逐字节相同), 这里比的是
+/// **实例本身** (名字+版本+身份三者都落在仓库里)。
+pub fn pkg_lock_read(ws: ptr, buf: ptr, len: u32, np: u32, msg: ptr, msgcap: u32) -> u32 {
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        let c: u32 = load8(buf, i);
+        if pkg_is_space(c) {
+            i = i + 1;
+        } else if c == 35 {
+            i = txt_next_line(buf, i, len);
+        } else {
+            let ns: u32 = i;
+            while i < len && !pkg_is_space(load8(buf, i)) {
+                i = i + 1;
+            }
+            let nl: u32 = i - ns;
+            while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
+                i = i + 1;
+            }
+            let vs: u32 = i;
+            while i < len && !pkg_is_space(load8(buf, i)) {
+                i = i + 1;
+            }
+            let vl: u32 = i - vs;
+            while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
+                i = i + 1;
+            }
+            let ds: u32 = i;
+            while i < len && !pkg_is_space(load8(buf, i)) {
+                i = i + 1;
+            }
+            let dl: u32 = i - ds;
+            if nl == 0 || vl == 0 || dl != 64 {
+                let m: u32 = txt_put(msg, 0, "malformed lock line");
+                store8(msg, m, 0 as u8);
+                return PKG_ERR;
+            }
+            let idx: u32 = sto_find_bytes2(ws, np, ((buf as u64) + (ns as u64)) as ptr, nl,
+                                           ((buf as u64) + (vs as u64)) as ptr, vl);
+            let k: u32 = nl;
+            if k > msgcap {
+                k = msgcap;
+            }
+            if idx == PKG_NONE {
+                txt_put_bytes(msg, 0, buf, ns, k);
+                store8(msg, k, 0 as u8);
+                return PKG_ERR;
+            }
+            if !txt_eq(buf, ds, 64, pkg_id_hex(ws, idx), 0, 64) {
+                txt_put_bytes(msg, 0, buf, ns, k);
+                store8(msg, k, 0 as u8);
+                return PKG_ERR;
+            }
+            pkg_set_flag(ws, idx, PKG_F_INCLOSURE);
+            cnt = cnt + 1;
+        }
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 仓库索引
+
+/// 扫仓库 `<store>/<名字>/<版本>/`。
+/// 包记录进 WS_PKG, 名字与版本标签进 WS_NAMES, 包目录路径(NUL 结尾)进 WS_OUT。
+/// 返回包数; 仓库打不开返回 0。
+pub fn sto_scan(ws: ptr, store: ptr) -> u32 {
+    let names: ptr = W(ws, WS_SNAMES);
+    let onames: ptr = W(ws, WS_ONAMES);
+    let inames: ptr = W(ws, WS_INAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let ents2: ptr = W(ws, WS_ENTS2);
+    let dbuf: ptr = W(ws, WS_DBUF);
+    let dbuf2: ptr = W(ws, WS_DBUF2);
+    let scr: ptr = W(ws, WS_SCR2);   // 内部暂存 —— 见 WS_SCR 的注释
+    let out: ptr = W(ws, WS_OUT);
+    let pkgs: ptr = W(ws, WS_PKG);
+    let tmp: ptr = W(ws, WS_TMP + 4096);
+    // 先把仓库路径抄进自己的缓冲 —— 见 WS_STORE 的注释。
+    let stbuf: ptr = W(ws, WS_STORE);
+    let storen: u32 = txt_len_cstr(store);
+    if storen == 0 || storen >= WS_STORE_CAP {
+        return 0;
+    }
+    sys_copy(stbuf, 0, store, 0, storen);
+    store8(stbuf, storen, 0 as u8);
+    let np: u32 = 0;
+    let stn: u32 = 0;
+    let oun: u32 = 0;
+    let nn: u32 = dir_list(stbuf, dbuf, WS_DBUF_CAP as u64, onames, WS_ONAMES_CAP, ents, WS_ENTS_CAP);
+    if nn == DIR_ERR {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < nn {
+        if dir_ent_type(ents, i) == DIR_TYPE_DIR {
+            let no: u32 = dir_ent_name_off(ents, i);
+            let nl: u32 = dir_ent_name_len(ents, i);
+            // 包名先落到 tmp —— 内层 dir_list 会重写 inames/ents2, 但不动 onames
+            sys_copy(tmp, 0, onames, no, nl);
+            // scr = store/名字
+            let p1: u32 = sys_join(scr, stbuf, storen, tmp, nl);
+            let vn: u32 = dir_list(scr, dbuf2, WS_DBUF2_CAP as u64, inames, WS_INAMES_CAP, ents2, WS_ENTS2_CAP);
+            if vn != DIR_ERR {
+                let j: u32 = 0;
+                while j < vn {
+                    if dir_ent_type(ents2, j) == DIR_TYPE_DIR && np < WS_PKG_CAP {
+                        let vo: u32 = dir_ent_name_off(ents2, j);
+                        let vl: u32 = dir_ent_name_len(ents2, j);
+                        // scr = store/名字/版本
+                        let p2: u32 = sys_join(scr, scr, p1, ((inames as u64) + (vo as u64)) as ptr, vl);
+                        let po: u32 = np * PKG_STRIDE;
+                        txt_store32(pkgs, po + P_NAME_OFF, stn);
+                        txt_store32(pkgs, po + P_NAME_LEN, nl);
+                        txt_store32(pkgs, po + P_VER_OFF, stn + nl);
+                        txt_store32(pkgs, po + P_VER_LEN, vl);
+                        txt_store32(pkgs, po + P_DIR_OFF, oun);
+                        txt_store32(pkgs, po + P_DIR_LEN, p2);
+                        txt_store32(pkgs, po + P_ID_IDX, np);
+                        txt_store32(pkgs, po + P_FLAGS, 0);
+                        sys_copy(names, stn, tmp, 0, nl);
+                        sys_copy(names, stn + nl, inames, vo, vl);
+                        // +1: 结尾那个 NUL 也要抄 —— 少抄一个字节, txt_len_cstr
+                        // 就会一路读到下一个包的路径上 (第一版就是这么挂的:
+                        // 5 个包里只有最后一个侥幸能对)。
+                        sys_copy(out, oun, scr, 0, p2 + 1);
+                        stn = stn + nl + vl;
+                        oun = oun + p2 + 1;
+                        np = np + 1;
+                    }
+                    j = j + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return np;
+}
+
+// ---------------------------------------------------------------- 记录访问器
+
+fn pkgs_p(ws: ptr) -> ptr { return W(ws, WS_PKG); }
+
+pub fn pkg_name_off(ws: ptr, i: u32) -> u32 {
+    return txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_NAME_OFF);
+}
+
+pub fn pkg_name_len(ws: ptr, i: u32) -> u32 {
+    return txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_NAME_LEN);
+}
+
+pub fn pkg_ver_off(ws: ptr, i: u32) -> u32 {
+    return txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_VER_OFF);
+}
+
+pub fn pkg_ver_len(ws: ptr, i: u32) -> u32 {
+    return txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_VER_LEN);
+}
+
+/// 包目录路径 (NUL 结尾, 在 WS_OUT 里)。
+pub fn pkg_dir(ws: ptr, i: u32) -> ptr {
+    return W(ws, WS_OUT + txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_DIR_OFF));
+}
+
+pub fn pkg_flags(ws: ptr, i: u32) -> u32 {
+    return txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_FLAGS);
+}
+
+pub fn pkg_set_flag(ws: ptr, i: u32, bit: u32) {
+    txt_store32(pkgs_p(ws), i * PKG_STRIDE + P_FLAGS, pkg_flags(ws, i) | bit);
+}
+
+pub fn pkg_clr_flag(ws: ptr, i: u32, bit: u32) {
+    txt_store32(pkgs_p(ws), i * PKG_STRIDE + P_FLAGS, pkg_flags(ws, i) & (4294967295 ^ bit));
+}
+
+/// 第 i 个包的 hex 身份 (64 字符, 在 WS_IDS 里)。
+pub fn pkg_id_hex(ws: ptr, i: u32) -> ptr {
+    return W(ws, WS_IDS + txt_load32(pkgs_p(ws), i * PKG_STRIDE + P_ID_IDX) * 64);
+}
+
+pub fn pkg_is_name(ws: ptr, i: u32, lit: str) -> bool {
+    return txt_eq_lit(W(ws, WS_SNAMES), pkg_name_off(ws, i), pkg_name_len(ws, i), lit);
+}
+
+pub fn pkg_is_ver(ws: ptr, i: u32, lit: str) -> bool {
+    return txt_eq_lit(W(ws, WS_SNAMES), pkg_ver_off(ws, i), pkg_ver_len(ws, i), lit);
+}
+
+/// 版本号大小: 按 `.` 分段做**数值**比较 (0.10.0 > 0.9.0)。
+/// 版本对机器只是标签, 但"取最大"这条选版策略需要一个确定的序, 这就是它。
+pub fn pkg_ver_greater(ws: ptr, a: u32, b: u32) -> bool {
+    let names: ptr = W(ws, WS_SNAMES);
+    let ao: u32 = pkg_ver_off(ws, a);
+    let al: u32 = pkg_ver_len(ws, a);
+    let bo: u32 = pkg_ver_off(ws, b);
+    let bl: u32 = pkg_ver_len(ws, b);
+    let i: u32 = 0;
+    let j: u32 = 0;
+    while i < al && j < bl {
+        let pa: u64 = txt_parse_dec(names, ao + i, al - i);
+        let pb: u64 = txt_parse_dec(names, bo + j, bl - j);
+        let va: u64 = txt_parse_dec_v(pa);
+        let vb: u64 = txt_parse_dec_v(pb);
+        if va != vb {
+            return va > vb;
+        }
+        i = i + txt_parse_dec_k(pa) + 1;
+        j = j + txt_parse_dec_k(pb) + 1;
+    }
+    return al > bl;
+}
+
+/// 按**字节名字**找包 (不限定版本), 取版本最大的那条 —— 这就是"取最大"这条选版
+/// 策略的实现。闭包解析 (lpi_idn) 必须走同一条规则, 否则"仓库里能找到的版本"与
+/// "依赖边绑到的版本"会不一致 (第一版就是这样: 闭包绑到 0.1.0, 而查询报 0.2.0)。
+pub fn sto_find_bytes(ws: ptr, n: u32, nm: ptr, nl: u32) -> u32 {
+    let names: ptr = W(ws, WS_SNAMES);
+    let best: u32 = PKG_NONE;
+    let i: u32 = 0;
+    while i < n {
+        if pkg_name_len(ws, i) == nl {
+            if txt_eq(names, pkg_name_off(ws, i), nl, nm, 0, nl) {
+                if best == PKG_NONE {
+                    best = i;
+                } else if pkg_ver_greater(ws, i, best) {
+                    best = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// 按**字节**名字 + 可选版本找包 (给命令行用: 参数是运行期的字节, 不是字面量)。
+/// vl == 0 表示不限定版本, 取版本最大的那条。
+pub fn sto_find_bytes2(ws: ptr, n: u32, nm: ptr, nl: u32, vm: ptr, vl: u32) -> u32 {
+    let names: ptr = W(ws, WS_SNAMES);
+    let best: u32 = PKG_NONE;
+    let i: u32 = 0;
+    while i < n {
+        if pkg_name_len(ws, i) == nl {
+            if txt_eq(names, pkg_name_off(ws, i), nl, nm, 0, nl) {
+                if vl > 0 {
+                    if pkg_ver_len(ws, i) == vl
+                        && txt_eq(names, pkg_ver_off(ws, i), vl, vm, 0, vl) {
+                        return i;
+                    }
+                } else {
+                    if best == PKG_NONE {
+                        best = i;
+                    } else if pkg_ver_greater(ws, i, best) {
+                        best = i;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// 在 n 个包里找 (名字, 版本)。版本传空串 = 不限定, 取**版本最大**的那条。
+/// 找不到返回 PKG_NONE。
+pub fn sto_find(ws: ptr, n: u32, name: str, ver: str) -> u32 {
+    let vl: u32 = str_len(ver);
+    let best: u32 = PKG_NONE;
+    let i: u32 = 0;
+    while i < n {
+        if pkg_is_name(ws, i, name) {
+            if vl > 0 {
+                if pkg_is_ver(ws, i, ver) {
+                    return i;
+                }
+            } else {
+                if best == PKG_NONE {
+                    best = i;
+                } else if pkg_ver_greater(ws, i, best) {
+                    best = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pkg_sort_is_deterministic() -> bool {
+    // 排序是身份稳定的前提: 目录返回顺序不保证, 同一份源码必须得到同一个 id。
+    let names: ptr = alloc(256);
+    let ents: ptr = alloc(256);
+    let o1: u32 = txt_put(names, 0, "zeta.lomt");
+    let o2: u32 = txt_put(names, o1, "alpha.lomt");
+    let o3: u32 = txt_put(names, o2, "mid.lomt");
+    txt_store32(ents, 0 * DIR_ENT_STRIDE + 0, 0);
+    txt_store32(ents, 0 * DIR_ENT_STRIDE + 4, 9);
+    txt_store32(ents, 0 * DIR_ENT_STRIDE + 8, DIR_TYPE_REG);
+    txt_store32(ents, 1 * DIR_ENT_STRIDE + 0, o1);
+    txt_store32(ents, 1 * DIR_ENT_STRIDE + 4, 10);
+    txt_store32(ents, 1 * DIR_ENT_STRIDE + 8, DIR_TYPE_REG);
+    txt_store32(ents, 2 * DIR_ENT_STRIDE + 0, o2);
+    txt_store32(ents, 2 * DIR_ENT_STRIDE + 4, 9);
+    txt_store32(ents, 2 * DIR_ENT_STRIDE + 8, DIR_TYPE_REG);
+    pkg_sort_ents(names, ents, 3);
+    let a: u32 = load8(names, dir_ent_name_off(ents, 0));
+    let b: u32 = load8(names, dir_ent_name_off(ents, 1));
+    let c: u32 = load8(names, dir_ent_name_off(ents, 2));
+    // alpha(97) < mid(109) < zeta(122)
+    return a == 97 && b == 109 && c == 122;
+}
+
+fn test_pkg_ver_numeric_compare() -> bool {
+    // 按段数值比较: 0.10.0 必须大于 0.9.0 (纯字典序会判反)。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let names: ptr = W(ws, WS_NAMES);
+    let x: u32 = txt_put(names, 0, "0.9.0");
+    let y: u32 = txt_put(names, x, "0.10.0");
+    txt_store32(pkgs_p(ws), 0 * PKG_STRIDE + P_VER_OFF, 0);
+    txt_store32(pkgs_p(ws), 0 * PKG_STRIDE + P_VER_LEN, 5);
+    txt_store32(pkgs_p(ws), 1 * PKG_STRIDE + P_VER_OFF, x);
+    txt_store32(pkgs_p(ws), 1 * PKG_STRIDE + P_VER_LEN, 6);
+    return pkg_ver_greater(ws, 1, 0) && !pkg_ver_greater(ws, 0, 1);
+}
+
+fn test_pkg_label_end_to_end() -> bool {
+    // 真读一个真清单 (夹具由 lpi_test 事先备好 —— lompi 建不了目录)。
+    // 这条曾经挂过: pkg_label 拿调用方给的 path 缓冲当自己的暂存, 第一次调用就把
+    // 路径改写成 ".../pkg.lomp", 于是第二次读的是 ".../pkg.lomp/pkg.lomp"。
+    // 现在 pkg_* 一律用 WS_SCR2, 调用方的路径缓冲不会被碰。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let out: ptr = W(ws, WS_OUT);
+    let scr: ptr = W(ws, WS_SCR);
+    sys_put_lit(scr, "fixture/store/geom/1.0.0");
+    let ln: u32 = pkg_label(ws, scr, 0, out, 256);
+    if ln != 4 || !txt_eq_lit(out, 0, 4, "geom") {
+        return false;
+    }
+    // 同一个 path 缓冲连着用两次 —— 这正是上面那个 bug 的复现场景, 留着当回归。
+    let lv: u32 = pkg_label(ws, scr, 1, out, 256);
+    return lv == 5 && txt_eq_lit(out, 0, 5, "1.0.0");
+}
+
+fn test_pkg_missing_manifest_is_zero_not_error() -> bool {
+    // 清单是**可选**的 (docs/168 §3.2)。没有它必须安静地返回 0, 不是失败。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let out: ptr = W(ws, WS_OUT);
+    let scr: ptr = W(ws, WS_SCR);
+    sys_put_lit(scr, "fixture/store/mathutil/0.1.0");
+    return pkg_label(ws, scr, 0, out, 256) == 0;
+}
+
+fn test_pkg_list_sources_excludes_manifest_and_sorts() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    sys_put_lit(scr, "fixture/store/multi/2.0.0");
+    let n: u32 = pkg_list_sources(ws, scr);
+    if n != 4 {
+        return false;
+    }
+    // 排序后 a.lomt < b.lomt < multi.lomt < z.lomt; pkg.lomp 必须被排除
+    let a: u32 = load8(names, dir_ent_name_off(ents, 0));
+    let b: u32 = load8(names, dir_ent_name_off(ents, 1));
+    let c: u32 = load8(names, dir_ent_name_off(ents, 2));
+    let d: u32 = load8(names, dir_ent_name_off(ents, 3));
+    return a == 97 && b == 98 && c == 109 && d == 122;
+}
+
+fn test_pkg_own_hash_is_content_sensitive_and_stable() -> bool {
+    // 同一目录两次必须一样; 换一个目录 (内容不同) 必须不一样。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    // 摘要与 hex 各要独立的 32/64 字节 —— 别拿 WS_DIG+32 当第二个摘要缓冲,
+    // 那正好是 WS_HEX 的起点, 两个结果会互相盖掉 (第一版就是这么挂的)。
+    let d1: ptr = W(ws, WS_DIG);
+    let d2: ptr = W(ws, WS_TMP + 1024);
+    let h1: ptr = W(ws, WS_HEX);
+    let h2: ptr = W(ws, WS_TMP + 2048);
+    sys_put_lit(scr, "fixture/store/geom/1.0.0");
+    let n1: u32 = pkg_list_sources(ws, scr);
+    if pkg_own_hash(ws, scr, n1, d1) == 0 {
+        return false;
+    }
+    sha_hex(d1, h1);
+    let n2: u32 = pkg_list_sources(ws, scr);
+    if pkg_own_hash(ws, scr, n2, d2) == 0 {
+        return false;
+    }
+    let same: bool = txt_eq(d1, 0, 32, d2, 0, 32);
+    // 不同内容的包必须得到不同的身份 —— 内容哈希的整个意义就在这一条。
+    sys_put_lit(scr, "fixture/store/mathutil/0.1.0");
+    let n3: u32 = pkg_list_sources(ws, scr);
+    if pkg_own_hash(ws, scr, n3, d2) == 0 {
+        return false;
+    }
+    sha_hex(d2, h2);
+    return same && !txt_eq(h1, 0, 64, h2, 0, 64);
+}
+
+fn test_pkg_edges_reads_use_lines() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let pool: ptr = W(ws, WS_EPOOL);
+    let eents: ptr = W(ws, WS_EENTS);
+    sys_put_lit(scr, "fixture/store/geom/1.0.0");
+    let n: u32 = pkg_list_sources(ws, scr);
+    let c: u32 = pkg_edges(ws, scr, n);
+    // geom.lomt 里有 `use mathutil`, 且注释里那些"假 use"不算
+    if c != 1 {
+        return false;
+    }
+    return lex_ent_is_name(pool, eents, 0, "mathutil");
+}
+
+fn test_sto_scan_finds_all_versions() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    if n != 5 {
+        return false;
+    }
+    // mathutil 有两版: 0.1.0 与 0.2.0
+    let a: u32 = sto_find(ws, n, "mathutil", "0.1.0");
+    let b: u32 = sto_find(ws, n, "mathutil", "0.2.0");
+    let any: u32 = sto_find(ws, n, "mathutil", "");
+    return a != PKG_NONE && b != PKG_NONE
+        && pkg_is_ver(ws, a, "0.1.0") && pkg_is_ver(ws, b, "0.2.0")
+        && pkg_is_ver(ws, any, "0.2.0")
+        && sto_find(ws, n, "nosuchpkg", "") == PKG_NONE;
+}
+
+fn test_pkg_ws_layout_does_not_overlap() -> bool {
+    // 工作区是一堆手写偏移, 重叠一次就是难查的踩内存。每条相邻边界都断一遍。
+    return WS_NAMES + WS_NAMES_CAP <= WS_ENTS
+        && WS_ENTS + (WS_ENTS_CAP * DIR_ENT_STRIDE) <= WS_ENTS2
+        && WS_ENTS2 + (WS_ENTS2_CAP * DIR_ENT_STRIDE) <= WS_DBUF
+        && WS_DBUF + WS_DBUF_CAP <= WS_DBUF2
+        && WS_DBUF2 + WS_DBUF2_CAP <= WS_FILE
+        && WS_FILE + WS_FILE_CAP <= WS_SHA
+        && WS_SHA + 1024 <= WS_DIG
+        && WS_DIG + 32 <= WS_HEX
+        && WS_HEX + 64 <= WS_SCR
+        && WS_SCR + WS_SCR_CAP <= WS_SCR2
+        && WS_SCR2 + WS_SCR2_CAP <= WS_EPOOL
+        && WS_EPOOL + WS_EPOOL_CAP <= WS_EENTS
+        && WS_EENTS + (WS_EENTS_CAP * LEX_ENT_STRIDE) <= WS_LEXPOOL
+        && WS_LEXPOOL + WS_LEXPOOL_CAP <= WS_LEXENTS
+        && WS_LEXENTS + (WS_LEXENTS_CAP * LEX_ENT_STRIDE) <= WS_OUT
+        && WS_OUT + WS_OUT_CAP <= WS_PKG
+        && WS_PKG + (WS_PKG_CAP * PKG_STRIDE) <= WS_IDS
+        && WS_IDS + (WS_PKG_CAP * 64) <= WS_TMP
+        && WS_TMP + WS_TMP_CAP <= WS_ONAMES
+        && WS_ONAMES + WS_ONAMES_CAP <= WS_INAMES
+        && WS_INAMES + WS_INAMES_CAP <= WS_SNAMES
+        && WS_SNAMES + WS_SNAMES_CAP <= WS_STORE
+        && WS_STORE + WS_STORE_CAP <= WS_REPORT
+        && WS_REPORT + WS_REPORT_CAP <= ws_size();
+    // 暂存内部的三处固定用法 (zero 在 TMP+0, leaf 在 TMP+2048, sto_scan 的包名在
+    // TMP+4096) 必须都落在 TMP 里 —— 也就是上面那条 WS_TMP + WS_TMP_CAP <= WS_ONAMES。
+}
+
+/// 把字面量写进缓冲并补 NUL, 返回同一个指针 (自检里少写一行)。
+fn pkg_put_lit(b: ptr, s: str) -> ptr {
+    txt_put(b, 0, s);
+    store8(b, str_len(s), 0 as u8);
+    return b;
+}
+
+fn test_pkg_base_segments() -> bool {
+    let p: ptr = alloc(256);
+    let out: ptr = alloc(64);
+    pkg_put_lit(p, "fixture/store/geom/1.0.0");
+    let l0: u32 = pkg_base(p, 0, out, 64);
+    let ok0: bool = l0 == 5 && txt_eq_lit(out, 0, 5, "1.0.0");
+    let l1: u32 = pkg_base(p, 1, out, 64);
+    let ok1: bool = l1 == 4 && txt_eq_lit(out, 0, 4, "geom");
+    // 结尾有分隔符要当没有
+    let p2: ptr = alloc(256);
+    pkg_put_lit(p2, "a/b/");
+    let l2: u32 = pkg_base(p2, 0, out, 64);
+    let ok2: bool = l2 == 1 && txt_eq_lit(out, 0, 1, "b");
+    // 段数不够
+    let p3: ptr = alloc(256);
+    pkg_put_lit(p3, "solo");
+    let l3: u32 = pkg_base(p3, 0, out, 64);
+    let ok3: bool = l3 == 4 && txt_eq_lit(out, 0, 4, "solo");
+    let l4: u32 = pkg_base(p3, 1, out, 64);
+    return ok0 && ok1 && ok2 && ok3 && l4 == 0;
+}
+
+fn test_pkg_module_of_skips_comments_and_strings() -> bool {
+    let b: ptr = alloc(512);
+    let out: ptr = alloc(64);
+    let o: u32 = 0;
+    o = txt_put(b, o, "// module fake_one\n");
+    o = txt_put(b, o, "let s: str = \"module fake_two\";\n");
+    o = txt_put(b, o, "/* module fake_three */\n");
+    o = txt_put(b, o, "module real_one\n");
+    let n: u32 = pkg_module_of(b, o, out, 64);
+    return n == 8 && txt_eq_lit(out, 0, 8, "real_one");
+}
+
+fn test_pkg_check_accepts_a_valid_library() -> bool {
+    // fixture/store/geom/1.0.0: 入口名对、module 名对、清单对 —— 必须 0 失败。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let rep: ptr = W(ws, WS_REPORT);
+    pkg_put_lit(scr, "fixture/store/geom/1.0.0");
+    let bad: u32 = pkg_check(ws, scr, rep, WS_REPORT_CAP);
+    if bad != 0 {
+        sys_write_str(1, "  [dbg] check geom said:\n");
+        sys_write(1, rep, txt_len_cstr(rep) as u64);
+    }
+    return bad == 0;
+}
+
+fn test_pkg_check_rejects_module_name_mismatch() -> bool {
+    // mismatch.lomt 里声明的是 `module wrongname` —— 平名字空间下那是另一个模块。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let rep: ptr = W(ws, WS_REPORT);
+    pkg_put_lit(scr, "fixture/bad/mismatch/1.0.0");
+    return pkg_check(ws, scr, rep, WS_REPORT_CAP) == 1;
+}
+
+fn test_pkg_check_rejects_missing_entry_file() -> bool {
+    // noentry/1.0.0 里只有 x.lomt, 没有 noentry.lomt —— 编译器 `use noentry` 找不到入口。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let rep: ptr = W(ws, WS_REPORT);
+    pkg_put_lit(scr, "fixture/bad/noentry/1.0.0");
+    return pkg_check(ws, scr, rep, WS_REPORT_CAP) == 1;
+}
+
+fn test_pkg_check_rejects_a_non_directory() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let rep: ptr = W(ws, WS_REPORT);
+    pkg_put_lit(scr, "no/such/__lpi_absent__");
+    return pkg_check(ws, scr, rep, WS_REPORT_CAP) == 1;
+}
+
+fn test_pkg_check_accepts_multi_file_package() -> bool {
+    // multi 是**多文件包**: 入口 multi.lomt + 三个兄弟模块, 全部 module 名对得上。
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = W(ws, WS_SCR);
+    let rep: ptr = W(ws, WS_REPORT);
+    pkg_put_lit(scr, "fixture/store/multi/2.0.0");
+    let bad: u32 = pkg_check(ws, scr, rep, WS_REPORT_CAP);
+    if bad != 0 {
+        sys_write_str(1, "  [dbg] check multi said:\n");
+        sys_write(1, rep, txt_len_cstr(rep) as u64);
+    }
+    return bad == 0;
+}
+
+pub fn selftest_pkg() -> u32 {
+    let f: u32 = selftest_lex();
+    if !test_pkg_base_segments() { f = f + 1; sys_write_str(1, "  FAIL pkg_base\n"); }
+    if !test_pkg_module_of_skips_comments_and_strings() { f = f + 1; sys_write_str(1, "  FAIL pkg_module\n"); }
+    if !test_pkg_check_accepts_a_valid_library() { f = f + 1; sys_write_str(1, "  FAIL chk_ok\n"); }
+    if !test_pkg_check_rejects_module_name_mismatch() { f = f + 1; sys_write_str(1, "  FAIL chk_module\n"); }
+    if !test_pkg_check_rejects_missing_entry_file() { f = f + 1; sys_write_str(1, "  FAIL chk_entry\n"); }
+    if !test_pkg_check_rejects_a_non_directory() { f = f + 1; sys_write_str(1, "  FAIL chk_nodir\n"); }
+    if !test_pkg_check_accepts_multi_file_package() { f = f + 1; sys_write_str(1, "  FAIL chk_multi\n"); }
+    if !test_pkg_sort_is_deterministic() { f = f + 1; sys_write_str(1, "  FAIL pkg_sort\n"); }
+    if !test_pkg_ver_numeric_compare() { f = f + 1; sys_write_str(1, "  FAIL pkg_ver\n"); }
+    if !test_pkg_label_end_to_end() { f = f + 1; sys_write_str(1, "  FAIL pkg_label\n"); }
+    if !test_pkg_missing_manifest_is_zero_not_error() { f = f + 1; sys_write_str(1, "  FAIL pkg_nomanifest\n"); }
+    if !test_pkg_list_sources_excludes_manifest_and_sorts() { f = f + 1; sys_write_str(1, "  FAIL pkg_sources\n"); }
+    if !test_pkg_own_hash_is_content_sensitive_and_stable() { f = f + 1; sys_write_str(1, "  FAIL pkg_hash\n"); }
+    if !test_pkg_edges_reads_use_lines() { f = f + 1; sys_write_str(1, "  FAIL pkg_edges\n"); }
+    if !test_sto_scan_finds_all_versions() { f = f + 1; sys_write_str(1, "  FAIL sto_scan\n"); }
+    if !test_pkg_ws_layout_does_not_overlap() { f = f + 1; sys_write_str(1, "  FAIL pkg_ws\n"); }
+    return f;
+}

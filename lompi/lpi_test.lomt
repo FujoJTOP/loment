@@ -1,0 +1,47 @@
+// lompi/lpi_test.lomt — 自检驱动 (不是 lompi 的一部分, 是它的判据)
+//
+// 每个模块自己带 selftest_<模块>() -> u32 (失败条数)。这里把它们加总, 打一行结论。
+// 判据是**退出码**: 全绿 0, 有失败 1。这样 CI 或脚本能直接判。
+//
+// 为什么不用仓库的 `loment test`: 那个约定是 test_*() -> bool 且由工具链发现;
+// lompi 的分层是线性链, 汇总入口在这里, 两条路不冲突 (test_* 函数照样在)。
+
+module lpi_test
+
+use "lpi_cli.lomt"
+
+fn _start() {
+    let scr: ptr = alloc(64);
+    let fs: u32 = selftest_sys();
+    let ft: u32 = selftest_txt();
+    let fd: u32 = selftest_dir();
+    let fh: u32 = selftest_sha();
+    let fp: u32 = selftest_pkg();
+    let fi: u32 = selftest_idn();
+    let fc: u32 = selftest_cli();
+    sys_write_str(1, "  sys failures: ");
+    txt_write_dec(1, scr, fs as u64);
+    sys_write_str(1, "\n  txt failures: ");
+    txt_write_dec(1, scr, ft as u64);
+    sys_write_str(1, "\n  dir failures: ");
+    txt_write_dec(1, scr, fd as u64);
+    sys_write_str(1, "\n  sha failures: ");
+    txt_write_dec(1, scr, fh as u64);
+    sys_write_str(1, "\n  pkg failures: ");
+    txt_write_dec(1, scr, fp as u64);
+    sys_write_str(1, "\n  idn failures: ");
+    txt_write_dec(1, scr, fi as u64);
+    sys_write_str(1, "\n  cli failures: ");
+    txt_write_dec(1, scr, fc as u64);
+    sys_write_str(1, "\n");
+    let f: u32 = fs + ft + fd + fh + fp + fi + fc;
+    sys_write_str(1, "lpi selftest failures: ");
+    txt_write_dec(1, scr, f as u64);
+    sys_write_str(1, "\n");
+    if f == 0 {
+        sys_write_str(1, "LPI SELFTEST: PASS\n");
+        sys_exit(0);
+    }
+    sys_write_str(1, "LPI SELFTEST: FAIL\n");
+    sys_exit(1);
+}

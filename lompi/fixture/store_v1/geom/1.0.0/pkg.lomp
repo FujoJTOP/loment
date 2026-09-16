@@ -1,0 +1,9 @@
+module pkg
+
+pub fn name() -> str {
+    return "geom";
+}
+
+pub fn version() -> str {
+    return "1.0.0";
+}

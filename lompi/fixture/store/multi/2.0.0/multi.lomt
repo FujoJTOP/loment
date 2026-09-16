@@ -1,0 +1,5 @@
+module multi
+
+use "a.lomt"
+use "b.lomt"
+use "z.lomt"

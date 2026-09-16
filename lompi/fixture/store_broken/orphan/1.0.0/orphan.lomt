@@ -1,0 +1,7 @@
+module orphan
+
+use nosuchpkg
+
+pub fn orphan_fn() -> u32 {
+    return 1;
+}

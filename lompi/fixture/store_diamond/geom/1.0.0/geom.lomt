@@ -1,0 +1,10 @@
+module geom
+
+// use commented_out_edge
+/* use blocked_edge */
+
+use mathutil
+
+pub fn geom_area(w: u32, h: u32) -> u32 {
+    return mu_mul(w, h);
+}

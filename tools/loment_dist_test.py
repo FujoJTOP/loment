@@ -343,6 +343,35 @@ def test_windows_installer(zipf: Path) -> None:
     check("指针指向包里那份指南, 不是拷贝",
           str(pfx / "share/loment/skill/SKILL.md") in txt, txt[:200])
 
+    # ★ lompi 的指南走**同一套装法**（用户 2026-09-15），但用**它自己的标记**。
+    #   这一条只有在**真装**里才验得到 —— 源码级判据（loment_lompi_test）只能说脚本里
+    #   提到了它，不能说明装完真的落到了该落的地方。
+    lompi_skill = home / ".claude" / "skills" / "lompi" / "SKILL.md"
+    lompi_want = (loment_dist.ROOT / loment_dist.SKILL_LOMPI).read_bytes()
+    check("装完把 lompi 的指南放进 ~/.claude/skills/lompi (沙箱 HOME)",
+          lompi_skill.exists() and lompi_skill.read_bytes() == lompi_want,
+          f"缺或不符: {lompi_skill}")
+    check("随包的 lompi 指南也留在前缀里 (share/lompi/skill)",
+          (pfx / "share/lompi/skill/SKILL.md").exists(), "缺 share/lompi/skill/SKILL.md")
+    txt2 = codex.read_text(encoding="utf-8")
+    check("lompi 的 Codex 指针带**自己**的标记 (与 loment 那段分得开)",
+          "<!-- lompi:begin -->" in txt2 and "<!-- lompi:end -->" in txt2
+          and txt2.count("<!-- lompi:begin -->") == 1
+          and txt2.count("<!-- loment:begin -->") == 1, txt2[:220])
+    check("lompi 二进制装进了 bin/",
+          (pfx / "bin" / "lompi.exe").exists() or (pfx / "bin" / "lompi").exists(),
+          "bin/ 里没有 lompi")
+
+    # ★ 通用兜底：payload 里 `share/` 下的**每一个**文件都要真落到前缀里。
+    #   写 lompi 时踩过 —— 拷贝清单加了 `share/lompi/skill/SKILL.md`，却忘了先建
+    #   `share\lompi\skill` 这个目录，`Copy-Item` 直接抛，**整个安装在第 2 步就死了**
+    #   （后面的 agent skill 段根本没跑到）。逐个文件点名只能守住点过名的那些；
+    #   这条按 payload 自己列，以后往包里加什么都会自动被守到。
+    want_share = [k for k in loment_dist.payload("windows", {}) if k.startswith("share/")]
+    missing_share = [k for k in want_share if not (pfx / k.replace("/", "\\")).exists()]
+    check(f"payload 里 share/ 的 {len(want_share)} 个文件全落到了前缀",
+          not missing_share, f"缺: {missing_share}")
+
     # ★ 与任何目录约定无关的兜底: 跑 CLI 就能拿到指南。这条是给"机器上既没有 Claude
     #   也没有 Codex"的情形准备的 —— agent 上手陌生语言的第一动作就是跑 CLI 看用法。
     r5 = subprocess.run(["cmd", "/c", str(cmd), "skill"], capture_output=True, text=True,
@@ -393,6 +422,7 @@ def test_windows_installer(zipf: Path) -> None:
           ((r4.stdout or "") + (r4.stderr or ""))[-200:])
     check("--uninstall 也摘掉 agent skill (只摘它自己建的那个目录)", not skill.exists(),
           "skill 还在")
+    check("--uninstall 也摘掉 lompi 的指南", not lompi_skill.exists(), "lompi skill 还在")
     check("--uninstall 还原别家 agent 的文件 (只摘标记段, 原有内容不动)",
           codex.read_text(encoding="utf-8") == "MY OWN RULES\nsecond line\n",
           codex.read_text(encoding="utf-8")[:80])

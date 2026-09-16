@@ -1,0 +1,9 @@
+module pkg
+
+pub fn name() -> str {
+    return "multi";
+}
+
+pub fn version() -> str {
+    return "2.0.0";
+}

@@ -1,0 +1,7 @@
+module b
+
+use util
+
+pub fn b_fn() -> u32 {
+    return util_fn();
+}

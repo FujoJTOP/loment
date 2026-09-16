@@ -1,0 +1,5 @@
+module z
+
+pub fn z_fn() -> u32 {
+    return 26;
+}

@@ -1,0 +1,382 @@
+// lompi/lpi_sha.lomt — SHA-256
+//
+// 为什么要它: lompi 的实例身份是**内容哈希** (docs/168 判据 2), 所以哈希不是装饰,
+// 是正确性本身 —— 弱的哈希会把两个不同的实例合并成一个, 那是静默的错。
+// 这一层是纯整数运算, 没有 syscall, 所以自检能拿标准测试向量钉死。
+//
+// 用法 (调用方自己管缓冲, 本层不分配):
+//   let st: ptr = sys_alloc(sha_state_size());
+//   sha_init(st); sha_update(st, p, n); sha_final(st, dig); sha_hex(dig, hex);
+//   st 至少 1024 字节 (布局到 @624 为止, 留余量), dig 32 字节, hex 64 字节。
+//
+// 状态块布局 (与仓库 loment/lib/sha256.lomt 一致, 便于两边对拍):
+//   @0   H[8]     32 字节
+//   @32  CNT      u32  (当前块里已有多少字节)
+//   @36  TOT      u32  (总共吃了多少字节)
+//   @48  BLK      64 字节
+//   @112 W[64]    256 字节
+//   @368 K[64]    256 字节
+//
+// 命名: 公开 sha_*, 自检 test_sha_*。
+//
+// 一条**写法纪律** (不是风格): 所有算术都让变量在左。实测 fujoc-s 对以整数字面量
+// 开头的表达式按 32 位算 (见 lpi_sys 的 test_sys_wide_arithmetic_needs_variable_first),
+// 而 SHA 到处都是宽算术。
+
+module lpi_sha
+
+use "lpi_dir.lomt"
+
+pub const SHA_H: u32 = 0;
+pub const SHA_CNT: u32 = 32;
+pub const SHA_TOT: u32 = 36;
+pub const SHA_BLK: u32 = 48;
+pub const SHA_W: u32 = 112;
+pub const SHA_K: u32 = 368;
+
+pub fn sha_state_size() -> u32 {
+    return 1024;
+}
+
+pub fn sha_dig_size() -> u32 {
+    return 32;
+}
+
+pub fn sha_hex_size() -> u32 {
+    return 64;
+}
+
+// ---------------------------------------------------------------- 字节序
+
+/// 大端读 u32。
+pub fn sha_be32(p: ptr, off: u32) -> u32 {
+    let a: u32 = load8(p, off + 0);
+    let b: u32 = load8(p, off + 1);
+    let c: u32 = load8(p, off + 2);
+    let d: u32 = load8(p, off + 3);
+    return (a << 24) | (b << 16) | (c << 8) | d;
+}
+
+pub fn sha_put_be32(p: ptr, off: u32, v: u32) {
+    store8(p, off + 0, ((v >> 24) & 255) as u8);
+    store8(p, off + 1, ((v >> 16) & 255) as u8);
+    store8(p, off + 2, ((v >> 8) & 255) as u8);
+    store8(p, off + 3, (v & 255) as u8);
+}
+
+pub fn sha_put_be64(p: ptr, off: u32, v: u64) {
+    let sc: u64 = 4294967296;
+    let hi: u32 = (v / sc) as u32;
+    let lo: u32 = (v % sc) as u32;
+    sha_put_be32(p, off + 0, hi);
+    sha_put_be32(p, off + 4, lo);
+}
+
+// ---------------------------------------------------------------- 初始化
+
+pub fn sha_init(s: ptr) {
+    store32_at(s, SHA_H + 0, 1779033703);
+    store32_at(s, SHA_H + 4, 3144134277);
+    store32_at(s, SHA_H + 8, 1013904242);
+    store32_at(s, SHA_H + 12, 2773480762);
+    store32_at(s, SHA_H + 16, 1359893119);
+    store32_at(s, SHA_H + 20, 2600822924);
+    store32_at(s, SHA_H + 24, 528734635);
+    store32_at(s, SHA_H + 28, 1541459225);
+    txt_store32(s, SHA_CNT, 0);
+    txt_store32(s, SHA_TOT, 0);
+    store32_at(s, SHA_K + 0, 1116352408);
+    store32_at(s, SHA_K + 4, 1899447441);
+    store32_at(s, SHA_K + 8, 3049323471);
+    store32_at(s, SHA_K + 12, 3921009573);
+    store32_at(s, SHA_K + 16, 961987163);
+    store32_at(s, SHA_K + 20, 1508970993);
+    store32_at(s, SHA_K + 24, 2453635748);
+    store32_at(s, SHA_K + 28, 2870763221);
+    store32_at(s, SHA_K + 32, 3624381080);
+    store32_at(s, SHA_K + 36, 310598401);
+    store32_at(s, SHA_K + 40, 607225278);
+    store32_at(s, SHA_K + 44, 1426881987);
+    store32_at(s, SHA_K + 48, 1925078388);
+    store32_at(s, SHA_K + 52, 2162078206);
+    store32_at(s, SHA_K + 56, 2614888103);
+    store32_at(s, SHA_K + 60, 3248222580);
+    store32_at(s, SHA_K + 64, 3835390401);
+    store32_at(s, SHA_K + 68, 4022224774);
+    store32_at(s, SHA_K + 72, 264347078);
+    store32_at(s, SHA_K + 76, 604807628);
+    store32_at(s, SHA_K + 80, 770255983);
+    store32_at(s, SHA_K + 84, 1249150122);
+    store32_at(s, SHA_K + 88, 1555081692);
+    store32_at(s, SHA_K + 92, 1996064986);
+    store32_at(s, SHA_K + 96, 2554220882);
+    store32_at(s, SHA_K + 100, 2821834349);
+    store32_at(s, SHA_K + 104, 2952996808);
+    store32_at(s, SHA_K + 108, 3210313671);
+    store32_at(s, SHA_K + 112, 3336571891);
+    store32_at(s, SHA_K + 116, 3584528711);
+    store32_at(s, SHA_K + 120, 113926993);
+    store32_at(s, SHA_K + 124, 338241895);
+    store32_at(s, SHA_K + 128, 666307205);
+    store32_at(s, SHA_K + 132, 773529912);
+    store32_at(s, SHA_K + 136, 1294757372);
+    store32_at(s, SHA_K + 140, 1396182291);
+    store32_at(s, SHA_K + 144, 1695183700);
+    store32_at(s, SHA_K + 148, 1986661051);
+    store32_at(s, SHA_K + 152, 2177026350);
+    store32_at(s, SHA_K + 156, 2456956037);
+    store32_at(s, SHA_K + 160, 2730485921);
+    store32_at(s, SHA_K + 164, 2820302411);
+    store32_at(s, SHA_K + 168, 3259730800);
+    store32_at(s, SHA_K + 172, 3345764771);
+    store32_at(s, SHA_K + 176, 3516065817);
+    store32_at(s, SHA_K + 180, 3600352804);
+    store32_at(s, SHA_K + 184, 4094571909);
+    store32_at(s, SHA_K + 188, 275423344);
+    store32_at(s, SHA_K + 192, 430227734);
+    store32_at(s, SHA_K + 196, 506948616);
+    store32_at(s, SHA_K + 200, 659060556);
+    store32_at(s, SHA_K + 204, 883997877);
+    store32_at(s, SHA_K + 208, 958139571);
+    store32_at(s, SHA_K + 212, 1322822218);
+    store32_at(s, SHA_K + 216, 1537002063);
+    store32_at(s, SHA_K + 220, 1747873779);
+    store32_at(s, SHA_K + 224, 1955562222);
+    store32_at(s, SHA_K + 228, 2024104815);
+    store32_at(s, SHA_K + 232, 2227730452);
+    store32_at(s, SHA_K + 236, 2361852424);
+    store32_at(s, SHA_K + 240, 2428436474);
+    store32_at(s, SHA_K + 244, 2756734187);
+    store32_at(s, SHA_K + 248, 3204031479);
+    store32_at(s, SHA_K + 252, 3329325298);
+}
+
+/// 状态块内的 u32 存 (与 txt_store32 同义, 这里只为让 init 那段读起来短)。
+fn store32_at(p: ptr, off: u32, v: u32) {
+    txt_store32(p, off, v);
+}
+
+// ---------------------------------------------------------------- 压缩
+
+fn sha_block(s: ptr) {
+    let blk: ptr = ((s as u64) + (SHA_BLK as u64)) as ptr;
+    let i: u32 = 0;
+    while i < 16 {
+        txt_store32(s, SHA_W + i * 4, sha_be32(blk, i * 4));
+        i = i + 1;
+    }
+    while i < 64 {
+        let w15: u32 = txt_load32(s, SHA_W + (i - 15) * 4);
+        let w2: u32 = txt_load32(s, SHA_W + (i - 2) * 4);
+        let w16: u32 = txt_load32(s, SHA_W + (i - 16) * 4);
+        let w7: u32 = txt_load32(s, SHA_W + (i - 7) * 4);
+        let s0: u32 = txt_rotr32(w15, 7) ^ txt_rotr32(w15, 18) ^ (w15 >> 3);
+        let s1: u32 = txt_rotr32(w2, 17) ^ txt_rotr32(w2, 19) ^ (w2 >> 10);
+        let acc: u32 = w16 + s0;
+        let acc2: u32 = acc + w7;
+        let acc3: u32 = acc2 + s1;
+        txt_store32(s, SHA_W + i * 4, acc3);
+        i = i + 1;
+    }
+    let a: u32 = txt_load32(s, SHA_H + 0);
+    let b: u32 = txt_load32(s, SHA_H + 4);
+    let c: u32 = txt_load32(s, SHA_H + 8);
+    let d: u32 = txt_load32(s, SHA_H + 12);
+    let e: u32 = txt_load32(s, SHA_H + 16);
+    let f: u32 = txt_load32(s, SHA_H + 20);
+    let g: u32 = txt_load32(s, SHA_H + 24);
+    let h: u32 = txt_load32(s, SHA_H + 28);
+    i = 0;
+    while i < 64 {
+        let S1: u32 = txt_rotr32(e, 6) ^ txt_rotr32(e, 11) ^ txt_rotr32(e, 25);
+        let ch: u32 = (e & f) ^ ((e ^ 4294967295) & g);
+        let kw: u32 = txt_load32(s, SHA_K + i * 4);
+        let wv: u32 = txt_load32(s, SHA_W + i * 4);
+        let t1a: u32 = h + S1;
+        let t1b: u32 = t1a + ch;
+        let t1c: u32 = t1b + kw;
+        let t1: u32 = t1c + wv;
+        let S0: u32 = txt_rotr32(a, 2) ^ txt_rotr32(a, 13) ^ txt_rotr32(a, 22);
+        let maj: u32 = (a & b) ^ (a & c) ^ (b & c);
+        let t2: u32 = S0 + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        i = i + 1;
+    }
+    store32_at(s, SHA_H + 0, txt_load32(s, SHA_H + 0) + a);
+    store32_at(s, SHA_H + 4, txt_load32(s, SHA_H + 4) + b);
+    store32_at(s, SHA_H + 8, txt_load32(s, SHA_H + 8) + c);
+    store32_at(s, SHA_H + 12, txt_load32(s, SHA_H + 12) + d);
+    store32_at(s, SHA_H + 16, txt_load32(s, SHA_H + 16) + e);
+    store32_at(s, SHA_H + 20, txt_load32(s, SHA_H + 20) + f);
+    store32_at(s, SHA_H + 24, txt_load32(s, SHA_H + 24) + g);
+    store32_at(s, SHA_H + 28, txt_load32(s, SHA_H + 28) + h);
+}
+
+// ---------------------------------------------------------------- 吃 / 出
+
+/// 把 n 字节喂进去。可以多次调用 (流式)。
+pub fn sha_update(s: ptr, p: ptr, n: u32) {
+    let cnt: u32 = txt_load32(s, SHA_CNT);
+    let tot: u32 = txt_load32(s, SHA_TOT);
+    txt_store32(s, SHA_TOT, tot + n);
+    let off: u32 = 0;
+    while off < n {
+        let take: u32 = 64 - cnt;
+        let left: u32 = n - off;
+        if take > left {
+            take = left;
+        }
+        sys_copy(s, SHA_BLK + cnt, p, off, take);
+        cnt = cnt + take;
+        off = off + take;
+        if cnt == 64 {
+            sha_block(s);
+            cnt = 0;
+        }
+    }
+    txt_store32(s, SHA_CNT, cnt);
+}
+
+/// 收尾, 把 32 字节摘要写进 outd。
+pub fn sha_final(s: ptr, outd: ptr) {
+    let cnt: u32 = txt_load32(s, SHA_CNT);
+    let tot: u32 = txt_load32(s, SHA_TOT);
+    store8(s, SHA_BLK + cnt, 128 as u8);
+    cnt = cnt + 1;
+    if cnt > 56 {
+        while cnt < 64 {
+            store8(s, SHA_BLK + cnt, 0 as u8);
+            cnt = cnt + 1;
+        }
+        sha_block(s);
+        cnt = 0;
+    }
+    while cnt < 56 {
+        store8(s, SHA_BLK + cnt, 0 as u8);
+        cnt = cnt + 1;
+    }
+    let bits: u64 = (tot as u64) * 8;
+    sha_put_be64(s, SHA_BLK + 56, bits);
+    sha_block(s);
+    let i: u32 = 0;
+    while i < 8 {
+        sha_put_be32(outd, i * 4, txt_load32(s, SHA_H + i * 4));
+        i = i + 1;
+    }
+}
+
+/// 32 字节摘要 -> 64 个小写十六进制字符。
+pub fn sha_hex(dig: ptr, hex: ptr) {
+    let i: u32 = 0;
+    while i < 32 {
+        txt_hex_into(((hex as u64) + (i as u64) * 2) as ptr, load8(dig, i) as u64, 2);
+        i = i + 1;
+    }
+}
+
+/// 一把梭: 对 (p, n) 求 hex 摘要。st/dig/hex 由调用方给。
+pub fn sha_hex_of(p: ptr, n: u32, st: ptr, dig: ptr, hex: ptr) {
+    sha_init(st);
+    sha_update(st, p, n);
+    sha_final(st, dig);
+    sha_hex(dig, hex);
+}
+
+// ---------------------------------------------------------------- 自检
+// 向量取自 FIPS 180-4 的公开测试集 —— 是**外部**的 oracle, 不是我自己算的。
+
+fn test_sha_empty() -> bool {
+    let st: ptr = alloc(1024);
+    let dig: ptr = alloc(32);
+    let hex: ptr = alloc(64);
+    sha_init(st);
+    sha_final(st, dig);
+    sha_hex(dig, hex);
+    return txt_eq_lit(hex, 0, 64,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+fn test_sha_abc() -> bool {
+    let st: ptr = alloc(1024);
+    let dig: ptr = alloc(32);
+    let hex: ptr = alloc(64);
+    let msg: ptr = alloc(16);
+    sys_put_lit(msg, "abc");
+    sha_hex_of(msg, 3, st, dig, hex);
+    return txt_eq_lit(hex, 0, 64,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+fn test_sha_two_block_padding() -> bool {
+    // 56 字节: 恰好逼出"cnt > 56 要多压一块"那条分支。
+    let st: ptr = alloc(1024);
+    let dig: ptr = alloc(32);
+    let hex: ptr = alloc(64);
+    let msg: ptr = alloc(128);
+    sys_put_lit(msg, "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+    sha_hex_of(msg, 56, st, dig, hex);
+    return txt_eq_lit(hex, 0, 64,
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+}
+
+fn test_sha_streaming_matches_oneshot() -> bool {
+    // 分三次喂和一次喂必须同摘要 —— 流式路径写错的典型症状就是这里不一致。
+    let st1: ptr = alloc(1024);
+    let st2: ptr = alloc(1024);
+    let d1: ptr = alloc(32);
+    let d2: ptr = alloc(32);
+    let h1: ptr = alloc(64);
+    let h2: ptr = alloc(64);
+    let m: ptr = alloc(256);
+    sys_put_lit(m, "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+    sha_hex_of(m, 56, st1, d1, h1);
+    sha_init(st2);
+    sha_update(st2, m, 20);
+    sha_update(st2, ((m as u64) + 20) as ptr, 30);
+    sha_update(st2, ((m as u64) + 50) as ptr, 6);
+    sha_final(st2, d2);
+    sha_hex(d2, h2);
+    let i: u32 = 0;
+    while i < 64 {
+        if load8(h1, i) != load8(h2, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_sha_long_input_4_blocks() -> bool {
+    // 200 个 'a' —— 期望值来自**独立的** oracle:
+    //   python -c "import hashlib;print(hashlib.sha256(b'a'*200).hexdigest())"
+    // 跨 4 个块, 覆盖 W 表的 64 轮扩展。
+    let st: ptr = alloc(1024);
+    let dig: ptr = alloc(32);
+    let hex: ptr = alloc(64);
+    let m: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < 200 {
+        store8(m, i, 97 as u8);
+        i = i + 1;
+    }
+    sha_hex_of(m, 200, st, dig, hex);
+    return txt_eq_lit(hex, 0, 64,
+        "c2a908d98f5df987ade41b5fce213067efbcc21ef2240212a41e54b5e7c28ae5");
+}
+
+pub fn selftest_sha() -> u32 {
+    let f: u32 = 0;
+    if !test_sha_empty() { f = f + 1; sys_write_str(1, "  FAIL sha_empty\n"); }
+    if !test_sha_abc() { f = f + 1; sys_write_str(1, "  FAIL sha_abc\n"); }
+    if !test_sha_two_block_padding() { f = f + 1; sys_write_str(1, "  FAIL sha_56\n"); }
+    if !test_sha_streaming_matches_oneshot() { f = f + 1; sys_write_str(1, "  FAIL sha_stream\n"); }
+    if !test_sha_long_input_4_blocks() { f = f + 1; sys_write_str(1, "  FAIL sha_200\n"); }
+    return f;
+}

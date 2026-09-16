@@ -20,6 +20,12 @@
 也就是说不只是"包里没 Python"，现在是**包里没有任何外部依赖**：`loment build`/`run`
 在一台干净的 Windows 上开箱即用。详见 `docs/167 §5`。
 
+**包里还带 lompi**（2026-09-15 加）：`bin/lompi` + `share/lompi/skill/SKILL.md`。
+它是 **Loment 库的包管理器**，用 Loment 自己写的，但**不是 Loment 官方工具** —— 是**另一个
+命令**：`loment help` 里没有它，`loment <任何东西>` 也不转发给它。它的指南与 loment 那份
+**同一套装法**（进 `~/.claude/skills/lompi/`、往 Codex 写**独立标记**的指针、卸载摘掉）。
+正本在开发区、仓内 `lompi/` 是快照，两边由 `tools/lompi_sync.py` 校验 —— 全部细节见 `docs/170`。
+
 **包里还带一份 agent skill**（2026-09-15 加）：`share/loment/skill/SKILL.md` ——
 安装时同时写进 `~/.claude/skills/loment/`（用户级，任何工程都读得到；`--no-skill` /
 `-NoSkill` 可关，卸载会摘掉；`~/.claude` 不存在就只留在包里并打印怎么手动放）。
@@ -74,6 +80,7 @@ tar.gz 的 `mtime=0` + 稳定 uid/gid/uname、gzip 头不带时间。同输入�
 | `bin/loment-doc` | API 文档生成器 |
 | `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`/`skill`；**其余命令转发给 `loment-cli`**） |
 | `bin/loment-cli` | **命令前端**（38 条命令：`help`/`codes`/`explain`/`syntax`/`cheat`/`stat`/`grep`/`ls`/`tree`/`new`/…，见 `docs/169`）。**用 Loment 自己写的** —— 命令面只写一份，两个启动器各转发一行 |
+| `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，源码 `lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi`；详见 `docs/170` |
 | `share/loment/seed.ll` | 自举种子 —— 只用 clang 就能从它重建整套工具链 |
 | `share/loment/version` | `Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3)` + 提交号与提交日期 |
 | `share/loment/examples/user_hello.lomt` | 示例（用 syscall 打印） |

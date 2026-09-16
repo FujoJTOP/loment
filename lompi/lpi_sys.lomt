@@ -1,0 +1,409 @@
+// lompi/lpi_sys.lomt — lompi 的运行时底座: syscall / 内存 / fd / 文件 / argv
+//
+// 为什么这一层是**自包含**的 (不 use std/host): 打包版编译器 fujoc-s (Alpha2.2)
+// 有三条实测限制, 使它吃不下库系统的 deps/ 布局 ——
+//   1. 路径导入按 **CWD** 解析, 不是导入文件所在目录;
+//   2. 同一个文件不能被到达两次 (菱形导入 -> `打不开 <乱码>`);
+//   3. 一个文件最多 8 条 use, 且模块一多路径缓冲就溢出 (24 模块的树直接炸)。
+// 所以 lompi 用**线性链**组织 (每个文件只 use 前一个), 而"跟宿主打交道"的东西
+// 收在本文件里。换参考工具链 (python tools/loment.py) 时这一层可以整体换成 std/host。
+//
+// PE 边界 (实测, 见 dev/ 的探针): 只有 8 个 syscall 有实现, 其中 **没有 mkdir (83)
+// 也没有 unlink (87)** —— 能写进已存在的目录, 但建不了目录、删不了文件。这一层的
+// sys_mkdir 就是把那个事实显式写出来, 让上层能据它分支。
+//
+// 命名: 平名字空间, 本层公开一律 sys_*, 自检 test_sys_*。
+// 内存: 超过 64 KiB 的缓冲必须走 sys_alloc (brk) —— 内建 alloc 只有 64 KiB 静态堆,
+// 超了直接 abort (SIGILL), 而 lompi 要装整棵源码树。
+
+module lpi_sys
+
+const SYS_READ: u64 = 0;
+const SYS_WRITE: u64 = 1;
+const SYS_CLOSE: u64 = 3;
+const SYS_BRK: u64 = 12;
+const SYS_EXIT: u64 = 60;
+const SYS_GETDENTS64: u64 = 217;
+const SYS_OPENAT: u64 = 257;
+const SYS_NEWFSTATAT: u64 = 262;
+
+/// openat 的 dirfd: AT_FDCWD (-100 的 u64 补码)。
+pub const SYS_AT_FDCWD: u64 = 18446744073709551516;
+pub const SYS_O_RDONLY: u64 = 0;
+/// O_WRONLY | O_CREAT | O_TRUNC = 577。
+pub const SYS_O_WRITE: u64 = 577;
+/// O_DIRECTORY = 65536。
+pub const SYS_O_DIRECTORY: u64 = 65536;
+pub const SYS_MODE: u64 = 420;
+
+pub const SYS_STDOUT: i64 = 1;
+pub const SYS_STDERR: i64 = 2;
+
+/// 失败哨兵。读长度不可能是它, 所以取得到就说明失败。
+pub const SYS_ERR: u64 = 18446744073709551615;
+
+/// 2^32: argv 打包时长度占低 32 位。
+const SYS_SCALE: u64 = 4294967296;
+
+// ---------------------------------------------------------------- 输出
+
+/// 写满 n 字节 (处理短写)。返回实际写出量。
+pub fn sys_write(fd: i64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(SYS_WRITE, fd as u64, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+pub fn sys_write_str(fd: i64, s: str) -> u64 {
+    return sys_write(fd, str_ptr(s), str_len(s) as u64);
+}
+
+pub fn sys_exit(code: u64) -> u32 {
+    syscall4(SYS_EXIT, code, 0, 0);
+    return 0;
+}
+
+/// 失败路径的出口: 写 stderr 再 exit(1)。返回类型只为占位。
+pub fn sys_fail(msg: str) -> u32 {
+    sys_write_str(SYS_STDERR, msg);
+    return sys_exit(1);
+}
+
+// ---------------------------------------------------------------- 内存
+
+/// brk 分配: 往前推 n 字节 (16 对齐), 返回块首。失败返回 0 —— 调用方必须判 0。
+pub fn sys_alloc(n: u64) -> ptr {
+    let cur: i64 = syscall4(SYS_BRK, 0, 0, 0);
+    if cur <= 0 {
+        return 0 as ptr;
+    }
+    let want: u64 = (((cur as u64) + n + 15) / 16) * 16;
+    let got: i64 = syscall4(SYS_BRK, want, 0, 0);
+    if got < 0 {
+        return 0 as ptr;
+    }
+    return cur as ptr;
+}
+
+pub fn sys_zero(dst: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+pub fn sys_copy(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- fd / 文件
+
+/// 打开只读。path 必须是 NUL 结尾的字节串。
+pub fn sys_open_ro(path: ptr) -> i64 {
+    return syscall4(SYS_OPENAT, SYS_AT_FDCWD, path as u64, SYS_O_RDONLY);
+}
+
+pub fn sys_open_wo(path: ptr) -> i64 {
+    return syscall6(SYS_OPENAT, SYS_AT_FDCWD, path as u64, SYS_O_WRITE, SYS_MODE, 0);
+}
+
+pub fn sys_close(fd: i64) -> i64 {
+    return syscall4(SYS_CLOSE, fd as u64, 0, 0);
+}
+
+/// 读到 buf 满或 EOF。返回读到的字节数。
+pub fn sys_read_all(fd: i64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(SYS_READ, fd as u64, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 读整个文件。打不开返回 SYS_ERR。
+pub fn sys_read_file(path: ptr, buf: ptr, cap: u64) -> u64 {
+    let fd: i64 = sys_open_ro(path);
+    if fd < 0 {
+        return SYS_ERR;
+    }
+    let n: u64 = sys_read_all(fd, buf, cap);
+    sys_close(fd);
+    return n;
+}
+
+/// 写整个文件 (截断创建, 0644)。打不开返回 SYS_ERR。
+pub fn sys_write_file(path: ptr, buf: ptr, n: u64) -> u64 {
+    let fd: i64 = sys_open_wo(path);
+    if fd < 0 {
+        return SYS_ERR;
+    }
+    let w: u64 = sys_write(fd, buf, n);
+    sys_close(fd);
+    return w;
+}
+
+pub fn sys_ok(n: u64) -> bool {
+    return n != SYS_ERR;
+}
+
+// ---------------------------------------------------------------- 路径
+
+/// 把静态字面量拷进缓冲并补 NUL (做路径用)。返回不含 NUL 的长度。
+pub fn sys_put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+/// 把 (p, n) 拷进缓冲并补 NUL —— 运行期路径 (比如 argv 给的) 用这个。
+pub fn sys_put_bytes(dst: ptr, p: ptr, off: u32, n: u32) -> u32 {
+    sys_copy(dst, 0, p, off, n);
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+/// a + "/" + b, 补 NUL。返回总长。a 为空时不加分隔符。
+pub fn sys_join(scr: ptr, a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
+    sys_copy(scr, 0, a, 0, an);
+    let o: u32 = an;
+    if an > 0 {
+        store8(scr, o, 47 as u8);
+        o = o + 1;
+    }
+    sys_copy(scr, o, b, 0, bn);
+    o = o + bn;
+    store8(scr, o, 0 as u8);
+    return o;
+}
+
+pub fn sys_read_file_lit(scr: ptr, lit: str, buf: ptr, cap: u64) -> u64 {
+    sys_put_lit(scr, lit);
+    return sys_read_file(scr, buf, cap);
+}
+
+pub fn sys_exists(path: ptr) -> bool {
+    let fd: i64 = sys_open_ro(path);
+    if fd < 0 {
+        return false;
+    }
+    sys_close(fd);
+    return true;
+}
+
+// ---------------------------------------------------------------- 目录 (PE 边界)
+
+/// mkdir 在 PE 上没有实现 —— 这就是那个事实本身, 不假装成功。
+/// 上层靠它的返回值决定"就地写"还是"输出计划"。
+pub fn sys_mkdir(path: ptr) -> i64 {
+    return syscall4(83, path as u64, 511, 0);
+}
+
+pub fn sys_can_mkdir() -> bool {
+    return false;
+}
+
+// ---------------------------------------------------------------- argv
+
+/// 读 /proc/self/cmdline 进 buf, 返回字节数 (0 = 读不到)。scr 只用来放路径。
+pub fn sys_argv(buf: ptr, cap: u64, scr: ptr) -> u32 {
+    sys_put_lit(scr, "/proc/self/cmdline");
+    let n: u64 = sys_read_file(scr, buf, cap);
+    if n == SYS_ERR {
+        return 0;
+    }
+    return n as u32;
+}
+
+/// 在 m 字节的 cmdline 里定位第 n 个字段。返回 (起点 << 32) | 长度; 0 = 没有。
+pub fn sys_arg_at(buf: ptr, m: u32, n: u32) -> u64 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * SYS_SCALE + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    // 末字段可能没有结尾 NUL。s == m 说明那个 NUL 只是终结了前一个字段。
+    if f == n && s < m {
+        hit = (s as u64) * SYS_SCALE + ((m - s) as u64);
+    }
+    return hit;
+}
+
+pub fn sys_arg_off(av: u64) -> u32 {
+    return (av >> 32) as u32;
+}
+
+pub fn sys_arg_len(av: u64) -> u32 {
+    return (av % SYS_SCALE) as u32;
+}
+
+/// 参数个数 (含 argv[0])。
+pub fn sys_arg_count(buf: ptr, m: u32) -> u32 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if s < m {
+        f = f + 1;
+    }
+    return f;
+}
+
+/// 第 n 个参数是否等于字面量。
+pub fn sys_arg_eq(buf: ptr, av: u64, lit: str) -> bool {
+    if av == 0 {
+        return false;
+    }
+    let n: u32 = sys_arg_len(av);
+    if n != str_len(lit) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(buf, sys_arg_off(av) + i) != (str_byte(lit, i) as u32) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+// 只测纯逻辑 (打包/解包/路径拼接) —— 真 fd 的路径由端到端夹具覆盖。
+
+fn test_sys_arg_pack_roundtrip() -> bool {
+    // 变量在左 —— 见 test_sys_wide_arithmetic_needs_variable_first 里那条实测坑。
+    let sc: u64 = 4294967296;
+    let av: u64 = sc * 3 + 5;
+    return sys_arg_off(av) == 3 && sys_arg_len(av) == 5;
+}
+
+fn test_sys_arg_len_high_bits() -> bool {
+    // 长度不能污染起点, 反之亦然 —— 移位写错时这条会挂。
+    let sc: u64 = 4294967296;
+    let av: u64 = sc * 7 + 4294967295;
+    return sys_arg_off(av) == 7 && sys_arg_len(av) == 4294967295;
+}
+
+fn test_sys_wide_arithmetic_needs_variable_first() -> bool {
+    // 实测坑 (fujoc-s Alpha2.2): `let x: u64 = 3 * sc + 5;` —— 初始化式**以整数字面量
+    // 开头**时, 整个式子按 32 位算, 结果 5 (3*2^32 回绕成 0)。变量放左边就正确。
+    // lompi 里所有宽算术都因此写成「变量在左」, 这条把它钉住, 免得被"整理"回去。
+    let a: u64 = 4294967296;
+    let good: u64 = a * 3 + 5;
+    let b: u64 = 4294967296;
+    let cast: u64 = (3 as u64) * b + 5;
+    return good == 12884901893 && cast == 12884901893;
+}
+
+fn test_sys_arg_at_synthetic() -> bool {
+    // "ab\0cd\0" —— 第 0 个是 ab, 第 1 个是 cd。
+    let b: ptr = alloc(64);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    store8(b, 2, 0 as u8);
+    store8(b, 3, 99 as u8);
+    store8(b, 4, 100 as u8);
+    store8(b, 5, 0 as u8);
+    let a0: u64 = sys_arg_at(b, 6, 0);
+    let a1: u64 = sys_arg_at(b, 6, 1);
+    let a2: u64 = sys_arg_at(b, 6, 2);
+    return sys_arg_off(a0) == 0 && sys_arg_len(a0) == 2
+        && sys_arg_off(a1) == 3 && sys_arg_len(a1) == 2
+        && a2 == 0;
+}
+
+fn test_sys_arg_count() -> bool {
+    let b: ptr = alloc(64);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 0 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 0 as u8);
+    // 两个 NUL 结尾字段, 末尾还有残留 (m=4 正好结束)。
+    if sys_arg_count(b, 4) != 2 {
+        return false;
+    }
+    // 没有结尾 NUL 的第 3 个字段也要数上。
+    store8(b, 4, 99 as u8);
+    return sys_arg_count(b, 5) == 3;
+}
+
+fn test_sys_put_lit_and_arg_eq() -> bool {
+    let b: ptr = alloc(64);
+    sys_put_lit(b, "--plan");
+    let av: u64 = 0 * SYS_SCALE + 6;
+    return sys_arg_eq(b, av, "--plan") && !sys_arg_eq(b, av, "--pla") && !sys_arg_eq(b, 0, "--plan");
+}
+
+fn test_sys_join() -> bool {
+    let s: ptr = alloc(128);
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    sys_put_lit(a, "store");
+    sys_put_lit(b, "mathutil");
+    let n: u32 = sys_join(s, a, 5, b, 8);
+    let ok1: bool = n == 14 && load8(s, 5) == 47 && load8(s, 6) == 109;
+    // 空前缀: 不该多出一个斜杠。
+    let n2: u32 = sys_join(s, a, 0, b, 8);
+    return ok1 && n2 == 8 && load8(s, 0) == 109;
+}
+
+fn test_sys_ok_sentinel() -> bool {
+    return sys_ok(0) && sys_ok(1) && !sys_ok(SYS_ERR);
+}
+
+fn test_sys_mkdir_is_known_impossible_on_pe() -> bool {
+    // 这条不是在测内核, 是在钉住"这层有没有假装有 mkdir"。
+    return !sys_can_mkdir();
+}
+
+/// 跑本模块全部自检, 返回失败条数 (0 = 全绿)。
+/// 名字不叫 test_ 开头: 那是仓库工具链自动发现的约定 (test_*() -> bool),
+/// 这个是**本程序自己的**汇总入口。
+pub fn selftest_sys() -> u32 {
+    let f: u32 = 0;
+    if !test_sys_arg_pack_roundtrip() { f = f + 1; sys_write_str(1, "  FAIL sys_arg_pack_roundtrip\n"); }
+    if !test_sys_arg_len_high_bits() { f = f + 1; sys_write_str(1, "  FAIL sys_arg_len_high_bits\n"); }
+    if !test_sys_wide_arithmetic_needs_variable_first() { f = f + 1; sys_write_str(1, "  FAIL sys_wide_arith\n"); }
+    if !test_sys_arg_at_synthetic() { f = f + 1; sys_write_str(1, "  FAIL sys_arg_at_synthetic\n"); }
+    if !test_sys_arg_count() { f = f + 1; sys_write_str(1, "  FAIL sys_arg_count\n"); }
+    if !test_sys_put_lit_and_arg_eq() { f = f + 1; sys_write_str(1, "  FAIL sys_put_lit_and_arg_eq\n"); }
+    if !test_sys_join() { f = f + 1; sys_write_str(1, "  FAIL sys_join\n"); }
+    if !test_sys_ok_sentinel() { f = f + 1; sys_write_str(1, "  FAIL sys_ok_sentinel\n"); }
+    if !test_sys_mkdir_is_known_impossible_on_pe() { f = f + 1; sys_write_str(1, "  FAIL sys_mkdir\n"); }
+    return f;
+}

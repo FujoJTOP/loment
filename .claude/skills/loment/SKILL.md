@@ -56,6 +56,11 @@ loment version
 
 `--no-color`（或 `loment color off`）关掉 ANSI —— 管道里要干净输出时用它。
 
+> **PATH 上可能还有一个 `lompi`** —— 那是 **Loment 库的包管理器**（管 store、锁文件、
+> `deps/`）。它是**独立命令，不是 `loment` 的子命令**：`loment help` 里没有它，
+> 也别试 `loment lompi`，直接敲 `lompi`。它自带一份指南，装法与这份同一套
+> （`~/.claude/skills/lompi/SKILL.md`）。
+
 **`build` / `run` 若报 `clang not found` 退出码 3** —— 你装的是**更早的包**（那时工具链装在
 WSL 里、靠 clang 链接）。升级到本代的包即可：现在链接由包内的 `loment-lomelf` 做，本机直接出
 PE/ELF，不碰 clang 也不碰 WSL。

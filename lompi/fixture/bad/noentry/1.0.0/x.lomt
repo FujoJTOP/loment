@@ -1,0 +1,5 @@
+module x
+
+pub fn f() -> u32 {
+    return 1;
+}

@@ -178,6 +178,9 @@ tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_cli_test.py
+lompi/*.lomt
+tools/lompi_sync.py
+tools/loment_lompi_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py

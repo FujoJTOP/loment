@@ -1,0 +1,424 @@
+// lompi/lpi_txt.lomt — 文本与数字: 十进制/十六进制输出, 字节比较与查找
+//
+// 为什么要有它: 语言没有 printf, 也没有字符串库 (str 只有 5 个内建)。工具里
+// "把一个数打成十进制""把一段字节和字面量比一比"这两件事会被抄几十遍, 收在这里。
+//
+// 形态约定: 一律 (ptr, off, len) 进 —— 语言没有出参, 全部结果靠返回值或写进调用方
+// 给的缓冲。要输出的函数都让调用方给 scr (暂存), 本层**不分配** —— 分配策略是上层的事。
+//
+// 命名: 公开 txt_*, 自检 test_txt_*。
+
+module lpi_txt
+
+use "lpi_sys.lomt"
+
+/// 十进制最长 20 位 (u64 上限)。
+pub const TXT_DEC_MAX: u32 = 20;
+/// 64 位十六进制。
+pub const TXT_HEX_MAX: u32 = 16;
+/// 找不到的哨兵。
+pub const TXT_NFIND: u32 = 4294967295;
+
+fn txt_hexd(d: u32) -> u8 {
+    if d < 10 {
+        return (48 + d) as u8;
+    }
+    return (87 + d) as u8;
+}
+
+/// 十进制写进 buf, 返回位数。**不分配** (倒着写再原地反转)。
+pub fn txt_dec_into(buf: ptr, v: u64) -> u32 {
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return 1;
+    }
+    let n: u32 = 0;
+    let x: u64 = v;
+    while x > 0 {
+        store8(buf, n, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 固定宽度小写十六进制写进 buf, 返回宽度。
+pub fn txt_hex_into(buf: ptr, v: u64, width: u32) -> u32 {
+    let i: u32 = 0;
+    while i < width {
+        let sh: u64 = ((width - 1 - i) * 4) as u64;
+        store8(buf, i, txt_hexd(((v >> sh) & 15) as u32));
+        i = i + 1;
+    }
+    return width;
+}
+
+/// 把字面量拷进 buf 的 off 处 (不补 NUL)。返回新偏移。
+pub fn txt_put(buf: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(buf, off + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return off + n;
+}
+
+pub fn txt_put_byte(buf: ptr, off: u32, c: u32) -> u32 {
+    store8(buf, off, c as u8);
+    return off + 1;
+}
+
+/// 把 (src, off, len) 拷进 dst 的 doff 处。返回新偏移。
+pub fn txt_put_bytes(dst: ptr, doff: u32, src: ptr, soff: u32, len: u32) -> u32 {
+    sys_copy(dst, doff, src, soff, len);
+    return doff + len;
+}
+
+/// 追加十进制。返回新偏移。
+pub fn txt_put_dec(buf: ptr, off: u32, v: u64) -> u32 {
+    let n: u32 = txt_dec_into((buf as u64 + off as u64) as ptr, v);
+    return off + n;
+}
+
+/// 追加固定宽度十六进制。返回新偏移。
+pub fn txt_put_hex(buf: ptr, off: u32, v: u64, width: u32) -> u32 {
+    let n: u32 = txt_hex_into((buf as u64 + off as u64) as ptr, v, width);
+    return off + n;
+}
+
+pub fn txt_put_nl(buf: ptr, off: u32) -> u32 {
+    store8(buf, off, 10 as u8);
+    return off + 1;
+}
+
+/// NUL 结尾串的长度。
+pub fn txt_len_cstr(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 两个字节区间是否相同。
+pub fn txt_eq(a: ptr, ao: u32, an: u32, b: ptr, bo: u32, bn: u32) -> bool {
+    if an != bn {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < an {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 这个区间是否等于字面量。
+pub fn txt_eq_lit(p: ptr, off: u32, n: u32, lit: str) -> bool {
+    if n != str_len(lit) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, off + i) != (str_byte(lit, i) as u32) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 在 [from, from+n) 里找字节 v, 返回下标; 找不到返回 TXT_NFIND。
+pub fn txt_find(p: ptr, from: u32, n: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, from + i) == v {
+            return i;
+        }
+        i = i + 1;
+    }
+    return TXT_NFIND;
+}
+
+/// 在字节区间里找子串 (字面量)。返回相对下标; 找不到返回 TXT_NFIND。
+pub fn txt_find_lit(p: ptr, from: u32, n: u32, lit: str) -> u32 {
+    let ln: u32 = str_len(lit);
+    if ln == 0 || ln > n {
+        return TXT_NFIND;
+    }
+    let i: u32 = 0;
+    while i + ln <= n {
+        if txt_eq_lit(p, from + i, ln, lit) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return TXT_NFIND;
+}
+
+/// 到行尾或 buf 尾的下一行 (返回下一行起点)。
+pub fn txt_next_line(p: ptr, from: u32, n: u32) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if load8(p, i) == 10 {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 当前行的长度 (不含换行)。
+pub fn txt_line_len(p: ptr, from: u32, n: u32) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if load8(p, i) == 10 {
+            return i - from;
+        }
+        i = i + 1;
+    }
+    return n - from;
+}
+
+/// 跳过空格与制表符。
+pub fn txt_skip_ws(p: ptr, from: u32, n: u32) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c != 32 && c != 9 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 这个字节是不是标识符字符 (字母/数字/下划线)。
+pub fn txt_is_ident(c: u32) -> bool {
+    if c >= 97 && c <= 122 {
+        return true;
+    }
+    if c >= 65 && c <= 90 {
+        return true;
+    }
+    if c >= 48 && c <= 57 {
+        return true;
+    }
+    return c == 95;
+}
+
+/// 这个字节能不能起一个标识符 (字母/下划线)。
+pub fn txt_is_ident_start(c: u32) -> bool {
+    if c >= 97 && c <= 122 {
+        return true;
+    }
+    if c >= 65 && c <= 90 {
+        return true;
+    }
+    return c == 95;
+}
+
+// ---------------------------------------------------------------- 小端整数
+// 语言只有 load8/store8, 多字节读写一律拆字节。放公共层是因为 lpi_dir 与 lpi_sha
+// 都要用 —— 各自定义一份会按 E13 在平名字空间里撞车。
+
+pub fn txt_load32(p: ptr, off: u32) -> u32 {
+    let a: u32 = load8(p, off + 0);
+    let b: u32 = load8(p, off + 1);
+    let c: u32 = load8(p, off + 2);
+    let d: u32 = load8(p, off + 3);
+    return a | (b << 8) | (c << 16) | (d << 24);
+}
+
+pub fn txt_store32(p: ptr, off: u32, v: u32) {
+    store8(p, off + 0, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+pub fn txt_load64(p: ptr, off: u32) -> u64 {
+    let lo: u64 = txt_load32(p, off) as u64;
+    let hi: u64 = txt_load32(p, off + 4) as u64;
+    let sc: u64 = 4294967296;
+    return lo + hi * sc;
+}
+
+pub fn txt_store64(p: ptr, off: u32, v: u64) {
+    let sc: u64 = 4294967296;
+    txt_store32(p, off + 0, (v % sc) as u32);
+    txt_store32(p, off + 4, (v / sc) as u32);
+}
+
+/// 32 位循环右移 (SHA-256 用)。
+pub fn txt_rotr32(v: u32, n: u32) -> u32 {
+    return (v >> n) | (v << (32 - n));
+}
+
+// ---------------------------------------------------------------- 输出封装
+
+pub fn txt_write_dec(fd: i64, scr: ptr, v: u64) -> u64 {
+    let n: u32 = txt_dec_into(scr, v);
+    return sys_write(fd, scr, n as u64);
+}
+
+pub fn txt_write_hex(fd: i64, scr: ptr, v: u64, width: u32) -> u64 {
+    let n: u32 = txt_hex_into(scr, v, width);
+    return sys_write(fd, scr, n as u64);
+}
+
+/// 打一行: `prefix + 数字 + "\n"` (诊断输出的房子风格)。
+pub fn txt_write_dec_line(fd: i64, scr: ptr, prefix: str, v: u64) {
+    sys_write_str(fd, prefix);
+    txt_write_dec(fd, scr, v);
+    sys_write_str(fd, "\n");
+}
+
+pub fn txt_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 把十进制串转成数 (不校验, 遇到非数字停)。返回 (值, 消费的字节数) 打包 ——
+/// 高位值、低位长度。不用出参是语言没出参。
+pub fn txt_parse_dec(p: ptr, off: u32, n: u32) -> u64 {
+    let v: u64 = 0;
+    let k: u32 = 0;
+    while k < n && txt_is_digit(load8(p, off + k)) {
+        v = v * 10 + ((load8(p, off + k) - 48) as u64);
+        k = k + 1;
+    }
+    return v * 4294967296 + (k as u64);
+}
+
+pub fn txt_parse_dec_v(packed: u64) -> u64 {
+    return packed / 4294967296;
+}
+
+pub fn txt_parse_dec_k(packed: u64) -> u32 {
+    return (packed % 4294967296) as u32;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_txt_dec_into_zero_and_small() -> bool {
+    let b: ptr = alloc(32);
+    let n0: u32 = txt_dec_into(b, 0);
+    let ok0: bool = n0 == 1 && load8(b, 0) == 48;
+    let n1: u32 = txt_dec_into(b, 7);
+    let ok1: bool = n1 == 1 && load8(b, 0) == 55;
+    return ok0 && ok1;
+}
+
+fn test_txt_dec_into_reverses() -> bool {
+    // 倒着写却忘了反转时, 这条会挂 —— 它是这个函数唯一的坑。
+    let b: ptr = alloc(32);
+    let n: u32 = txt_dec_into(b, 1234);
+    return n == 4 && load8(b, 0) == 49 && load8(b, 1) == 50
+        && load8(b, 2) == 51 && load8(b, 3) == 52;
+}
+
+fn test_txt_dec_into_max_u64() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = txt_dec_into(b, 18446744073709551615);
+    return n == 20 && load8(b, 0) == 49 && load8(b, 19) == 53;
+}
+
+fn test_txt_hex_into_width_and_case() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = txt_hex_into(b, 48879, 4);      // 0xBEEF
+    return n == 4 && load8(b, 0) == 98 && load8(b, 1) == 101
+        && load8(b, 2) == 101 && load8(b, 3) == 102;
+}
+
+fn test_txt_hex_into_pads_leading_zero() -> bool {
+    let b: ptr = alloc(32);
+    txt_hex_into(b, 255, 8);
+    return load8(b, 0) == 48 && load8(b, 5) == 48
+        && load8(b, 6) == 102 && load8(b, 7) == 102;
+}
+
+fn test_txt_put_and_offsets() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = txt_put(b, 0, "ab");
+    let o2: u32 = txt_put_dec(b, o, 42);
+    let o3: u32 = txt_put_nl(b, o2);
+    return o3 == 5 && load8(b, 0) == 97 && load8(b, 2) == 52 && load8(b, 4) == 10;
+}
+
+fn test_txt_eq_and_lit() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    sys_put_lit(a, "host");
+    sys_put_lit(b, "host");
+    let same: bool = txt_eq(a, 0, 4, b, 0, 4);
+    let diff: bool = txt_eq(a, 0, 4, b, 0, 3);
+    return same && !diff && txt_eq_lit(a, 0, 4, "host") && !txt_eq_lit(a, 0, 4, "hos");
+}
+
+fn test_txt_find_and_lit() -> bool {
+    let a: ptr = alloc(64);
+    sys_put_lit(a, "use mathutil");
+    let i: u32 = txt_find(a, 0, 12, 32);          // 空格在 3
+    let j: u32 = txt_find_lit(a, 4, 8, "math");
+    let k: u32 = txt_find(a, 0, 12, 122);         // 'z' 没有
+    return i == 3 && j == 0 && k == TXT_NFIND;
+}
+
+fn test_txt_line_tools() -> bool {
+    let a: ptr = alloc(64);
+    sys_put_lit(a, "one\ntwo");
+    let l0: u32 = txt_line_len(a, 0, 7);
+    let n1: u32 = txt_next_line(a, 0, 7);
+    let l1: u32 = txt_line_len(a, n1, 7);
+    return l0 == 3 && l1 == 3 && n1 == 4;
+}
+
+fn test_txt_ident_chars() -> bool {
+    return txt_is_ident(95) && txt_is_ident(97) && txt_is_ident(90)
+        && txt_is_ident(48) && !txt_is_ident(45) && !txt_is_ident(32)
+        && txt_is_ident_start(95) && txt_is_ident_start(97)
+        && !txt_is_ident_start(48);
+}
+
+fn test_txt_parse_dec_pack() -> bool {
+    let a: ptr = alloc(32);
+    sys_put_lit(a, "1234x");
+    let p: u64 = txt_parse_dec(a, 0, 5);
+    return txt_parse_dec_v(p) == 1234 && txt_parse_dec_k(p) == 4;
+}
+
+fn test_txt_skip_ws() -> bool {
+    let a: ptr = alloc(32);
+    store8(a, 0, 32 as u8);
+    store8(a, 1, 9 as u8);
+    store8(a, 2, 120 as u8);
+    return txt_skip_ws(a, 0, 3) == 2;
+}
+
+pub fn selftest_txt() -> u32 {
+    let f: u32 = 0;
+    if !test_txt_dec_into_zero_and_small() { f = f + 1; }
+    if !test_txt_dec_into_reverses() { f = f + 1; }
+    if !test_txt_dec_into_max_u64() { f = f + 1; }
+    if !test_txt_hex_into_width_and_case() { f = f + 1; }
+    if !test_txt_hex_into_pads_leading_zero() { f = f + 1; }
+    if !test_txt_put_and_offsets() { f = f + 1; }
+    if !test_txt_eq_and_lit() { f = f + 1; }
+    if !test_txt_find_and_lit() { f = f + 1; }
+    if !test_txt_line_tools() { f = f + 1; }
+    if !test_txt_ident_chars() { f = f + 1; }
+    if !test_txt_parse_dec_pack() { f = f + 1; }
+    if !test_txt_skip_ws() { f = f + 1; }
+    return f;
+}

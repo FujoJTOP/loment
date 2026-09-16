@@ -1,0 +1,7 @@
+module cyca
+
+use cycb
+
+pub fn cyca_fn() -> u32 {
+    return 1;
+}
