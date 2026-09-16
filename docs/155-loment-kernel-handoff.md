@@ -71,6 +71,9 @@
    用户态要更大堆请用 M73 的固定块池分配器（`loment/examples/allocator.lomt`），不要指望内核扩堆。
 7. **内核不需要提供 libc**：`__loment_memcmp` / `__loment_memset` / `__loment_abort` 由编译器在
    `.ll` 里内联（M31），已用 `llvm-nm` 验证无未定义符号。
+   （2026-09-16 收窄：这条只说**纯 Loment 单元**。带 `extern fn` 的单元**必然**有未定义符号 ——
+   那正是链接器要去解开的东西，见 `docs/173-loment-ffi.md`。内核线手上的产物全是纯 Loment，
+   所以这条对内核线的承诺一字未变。）
 
 ## 4. 现成产物清单（可直接消费，不需要你重新生成）
 

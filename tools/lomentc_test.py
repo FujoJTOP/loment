@@ -1336,6 +1336,101 @@ def test_custom_suffix_still_reaches_the_toolchain_lomt():
         assert got == ROOT / "loment" / "examples" / "mathutil.lomt", got
 
 
+# ---------------------------------------------------------------- 外部函数 (2026-09-16)
+# `extern fn` 是 docs/173（FFI）第 1 阶段的语言面。形状：只有签名、末尾分号、由链接进来的
+# 目标文件提供实现。第 1 阶段**只收标量与 ptr** —— 聚合按值与 `str` 都会改变调用点形状，
+# 报错退出而不是静默错编。
+
+@test
+def test_extern_declares_and_calls():
+    """`extern fn` 发 `declare`，调用点是普通 `call` —— C ABI 由 LLVM 自己按平台给。"""
+    src = ("module m\n\nextern fn c_add(a: i32, b: i32) -> i32;\n\n"
+           "fn f() -> i32 { return c_add(3 as i32, 4 as i32); }\n")
+    mod = parse(src)
+    assert [x.name for x in mod.externs] == ["c_add"], [x.name for x in mod.externs]
+    assert mod.funcs[0].name == "f" and not mod.funcs[0].extern
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "declare i32 @c_add(i32, i32)" in ir, ir[:400]
+    # 调用点必须是**普通 call**（没有额外包装）—— 包装一层就等于我们自己在做 ABI 转换，
+    # 而原生 LLVM 路径上那件事是白拿的。
+    assert "call i32 @c_add(i32 3, i32 4)" in ir, ir[:400]
+
+
+@test
+def test_extern_without_a_return_type_is_void():
+    """不写 `-> T` 就是 void —— `extern fn c_free(p: ptr);` 必须收。
+
+    这一条是**实测踩出来的**：parse_fn 原先靠"后面是 `{`"判断无返回类型，而外部函数没有
+    函数体（后面是 `;`），于是最普通的释放函数写法直接被判成"缺了 `->`"。
+    """
+    src = ("module m\n\nextern fn c_free(p: ptr);\n\n"
+           "fn f() -> u32 { let q: ptr = alloc(8); c_free(q); return 0; }\n")
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT)
+    assert "declare void @c_free(ptr)" in ir, ir[:400]
+    assert "call void @c_free(ptr " in ir, ir[:400]
+
+
+@test
+def test_extern_rejects_unsupported_signature():
+    """`str` / 结构体 / 数组**按值**都不进签名 —— 出现就报错，不静默错编。"""
+    for src, why in (
+        ("module m\n\nextern fn f(s: str) -> i32;\nfn g() -> i32 { return 0; }\n", "str"),
+        ("module m\n\nstruct P { x: u32 }\n\nextern fn f(p: P) -> i32;\nfn g() -> i32 { return 0; }\n", "结构体按值"),
+        ("module m\n\nextern fn f(a: [u32; 4]) -> i32;\nfn g() -> i32 { return 0; }\n", "数组按值"),
+    ):
+        got = errs(src)
+        assert any("不支持" in e for e in got), f"{why}: {got}"
+
+
+@test
+def test_extern_conflicts_with_a_real_function():
+    """外部函数与普通函数同名 = 两个不同的实现绑到同一个名字上，报重名。"""
+    src = ("module m\n\nfn f() -> i32 { return 1; }\n\nextern fn f() -> i32;\n\n"
+           "fn g() -> i32 { return 0; }\n")
+    got = errs(src)
+    assert any("重名" in e for e in got), got
+
+
+@test
+def test_two_modules_may_declare_the_same_extern():
+    """两个模块各自 `extern fn c_add` 指的是**同一个外部符号**（等于 C 里重复包头文件）：
+    不报重名，且 `declare` **只出一条**。"""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "a.lomt").write_bytes(
+            b"module a\n\nextern fn c_add(x: i32, y: i32) -> i32;\n\n"
+            b"pub fn use_it() -> i32 { return c_add(1 as i32, 2 as i32); }\n")
+        (d / "b.lomt").write_bytes(
+            b'module b\n\nuse "a.lomt"\n\nextern fn c_add(x: i32, y: i32) -> i32;\n\n'
+            b"fn g() -> i32 { return 0; }\n")
+        m = lomentc.load(d / "b.lomt")
+        deps = lomentc.resolve_deps(m, ROOT, d, entry=d / "b.lomt")
+        assert lomentc.check(m, deps=deps) == [], lomentc.check(m, deps=deps)
+        ir = lomentc.emit_llvm(m, ROOT, deps)
+        assert sum(1 for l in ir.splitlines() if l.startswith("declare i32 @c_add")) == 1, ir[:400]
+
+
+@test
+def test_extern_takes_no_body_and_no_type_parameters():
+    """两种写错的形态要在**解析期**挡住：给了函数体、带了类型参数。"""
+    body = "module m\n\nextern fn f() -> i32 { return 1; }\n"
+    try:
+        parse(body)
+    except lomc.LomError as e:
+        assert "分号" in e.msg, e.msg
+    else:
+        raise AssertionError("外部函数带函数体应当被拒")
+    gen = "module m\n\nextern fn f<T>(a: T) -> i32;\n"
+    try:
+        parse(gen)
+    except lomc.LomError as e:
+        assert "类型参数" in e.msg, e.msg
+    else:
+        raise AssertionError("外部函数带类型参数应当被拒（单态化要看得到源码）")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

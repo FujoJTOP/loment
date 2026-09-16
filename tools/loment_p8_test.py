@@ -1369,6 +1369,32 @@ def test_m85_driver_gate_on_probe_cases():
             f"不以 `.` 开头的后缀没被忽略: rc={rc6} err={err6[-300:]!r}"
         assert lomentc.source_ext_of(cust, None) == ".lomt", "参考实现没忽略配坏的后缀"
         print("      配坏的后缀 (缺前导 `.`): 驱动与参考都当没配")
+        # ---- 外部函数 (docs/173): 自举镜**尚未实现**, 必须**硬拒**而不是静默错编。
+        # 放过去的后果实测过: codegen 把 `extern fn c_add(a,b) -> T;` 当普通函数记进表,
+        # 发出一条没有函数体的 define, 游标从签名滑进下一个函数的体 —— main 整个消失,
+        # 退出码 0。所以这条判据钉的是"**响**"。
+        ext_dir = Path(td) / "ffi"
+        ext_dir.mkdir()
+        (ext_dir / "e.lomt").write_text(
+            "module e\n\nextern fn c_add(a: i32, b: i32) -> i32;\n\n"
+            "fn main() -> i32 {\n    return c_add(3 as i32, 4 as i32);\n}\n",
+            encoding="utf-8", newline="\n")
+        rc7, out7, err7 = _run_driver_raw(elf, _wsl_path(ext_dir / "e.lomt"), td, "g_ext")
+        assert rc7 != 0 and "外部函数" in err7, \
+            f"自举镜没有硬拒 extern: rc={rc7} out={out7[:200]!r} err={err7[-300:]!r}"
+        print("      extern fn: 自举镜尚未实现 -> 硬拒 (不是静默错编)")
+        # 反向的一条: `tok_is` 比的是 token 文本, 源码里的**字符串字面量** `"extern"` 也会
+        # 被它匹配上 —— 只判文本不判 kind 的话, `let s: str = "extern";` 这种完全正常的
+        # 程序会被误拒。这条钉住"必须判 kind == 0"。
+        lit_dir = Path(td) / "ffi_lit"
+        lit_dir.mkdir()
+        (lit_dir / "l.lomt").write_text(
+            "module l\n\nfn main() -> i32 {\n"
+            '    let s: str = "extern";\n    return str_len(s) as i32;\n}\n',
+            encoding="utf-8", newline="\n")
+        rc8, _o8, err8 = _run_driver_raw(elf, _wsl_path(lit_dir / "l.lomt"), td, "g_extlit")
+        assert rc8 == 0, f'字符串字面量 "extern" 被误拒了: rc={rc8} err={err8[-300:]!r}'
+        print('      字符串字面量 "extern": 正常通过 (守卫判的是 kind, 不是文本)')
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:

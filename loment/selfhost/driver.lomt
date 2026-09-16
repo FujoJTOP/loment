@@ -884,6 +884,18 @@ fn _start() -> u32 {
     let nsym: u32 = 0;
     let sk: u32 = 0;
     while load32(toks2, sk * 20) != 4 {
+        // 外部函数 (docs/173) **尚未在自举镜实现** —— 这里必须**硬报错**, 不能放它过去。
+        // 放过去的后果是**静默错编**: codegen 的收集循环把 `extern fn f(a,b) -> T;` 当成一个
+        // 普通函数记进表里, 于是发出一条**没有函数体的 define**, 游标还从签名直接滑进下一个
+        // 函数的体。实测编译 `extern fn c_add(a,b); fn main() {...}` 得到的是
+        // `define i32 @c_add(...) { <main 的体> }` 而 main **整个消失**, 退出码 0。
+        //
+        // **必须判 kind == 0 (标识符)**: `tok_is` 比的是 token 文本, 源码里的字符串字面量
+        // `"extern"` 会被它匹配上 —— 那样 `let s: str = "extern";` 这种完全正常的程序会被
+        // 误拒。(checker.lomt:317 记着同一个坑。)
+        if load32(toks2, sk * 20) == 0 && tok_is(unit, toks2, sk, "extern") {
+            return fail("fujoc-s: 外部函数 (extern fn) 尚未在自举镜实现 (docs/173-loment-ffi.md)\n");
+        }
         if tok_is(unit, toks2, sk, "fn") || tok_is(unit, toks2, sk, "const")
                 || tok_is(unit, toks2, sk, "struct") || tok_is(unit, toks2, sk, "enum") {
             nsym = nsym + 1;

@@ -232,6 +232,21 @@ def _type_ok(t: str, known: set[str]) -> bool:
     return False
 
 
+def _extern_ty_ok(t: str) -> bool:
+    """`extern fn` 签名里允许的类型 (docs/173 §3)。
+
+    第 1 阶段只收**标量与 ptr**。三条被挡在外面, 每条都有理由, 而且都会**改变调用点的
+    代码形状** —— 那正是"报错退出、不静默错编"要挡的东西:
+
+    * `str` —— 它是"指针 + 长度", **不是 C 字符串**。谁补 NUL、谁负责释放, 是一层独立的
+      约定, 得先有 `cstr` 之类的转换 (阶段 2)。
+    * 聚合按值 (struct/enum/数组/切片) —— System V 要按字段分类拆进寄存器, 大于 16 字节
+      走内存。这是独立一块规则, 不是"顺手支持一下"。
+    * 变参 —— 第 1 阶段的签名是定长的。
+    """
+    return t in INT_TYPES or t in ("ptr", "bool")
+
+
 @dataclass
 class Capability:
     name: str
@@ -464,6 +479,7 @@ class Func:
     interrupt: bool = False      # M33: x86 中断处理函数
     from_generic: str = ""       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
+    extern: bool = False         # docs/173: 外部函数声明 (只有签名, 由链接进来的目标文件提供)
 
 
 def _rename_self(stmts: list) -> None:
@@ -659,6 +675,10 @@ class Module:
     traits: list[Trait] = field(default_factory=list)
     impls: list[Impl] = field(default_factory=list)
     funcs: list[Func] = field(default_factory=list)
+    #: 外部函数声明 (`extern fn`, docs/173)。**与 funcs 分开存** —— 它们没有函数体、不参与
+    #: 单态化、发射时出 `declare` 而不是 `define`。混进 funcs 会让"发 define"那条路
+    #: 发出一条没有函数体的 define (非法 IR), 所以要分开。
+    externs: list[Func] = field(default_factory=list)
     excluded: list[str] = field(default_factory=list)
 
 
@@ -802,6 +822,11 @@ class Parser:
                 for f in im.funcs:
                     f.name = f"{im.type}_{f.name}"  # 静态派发: 名字按接收者类型混淆
                     mod.funcs.append(f)
+            elif t.val == "extern":  # docs/173: 外部函数声明
+                self.next()
+                f = self.parse_fn(extern=True)
+                f.pub = is_pub
+                mod.externs.append(f)
             elif t.val == "interrupt":  # M33: 中断处理函数
                 self.next()
                 f = self.parse_fn()
@@ -920,7 +945,7 @@ class Parser:
         revocable = bool(self.accept("ident", "revocable"))
         return Capability(name, space, lo, hi, revocable, kw.line)
 
-    def parse_fn(self) -> Func:
+    def parse_fn(self, extern: bool = False) -> Func:
         kw = self.expect("ident", "fn")
         name = self.ident("函数名")
         tparams: list[str] = []
@@ -943,12 +968,23 @@ class Parser:
             if not self.accept("punct", ","):
                 break
         self.expect("punct", ")")
-        if self.at("punct", "{"):  # M16: 无返回类型 = ()
+        # M16: 无返回类型 = ()。**外部函数没有函数体**, 所以"后面是 `;`"同样表示无返回 ——
+        # 只认 `{` 的话 `extern fn f(p: ptr);` 会被当成"缺了 `->`"而报错。
+        if self.at("punct", "{") or (extern and self.at("punct", ";")):
             ret = "()"
         else:
             self.expect("punct", "-")
             self.expect("punct", ">")
             ret = self.type_name()
+        if extern:
+            # 外部函数**没有函数体**, 末尾是分号 (docs/143 §3.1)。泛型参数对它也说不通 ——
+            # 单态化要靠看得到源码, 而 extern 的定义根本不在手上。
+            if tparams:
+                raise LomError(kw.line, kw.col, f"外部函数 {name} 不能带类型参数")
+            self.expect("punct", ";", "（外部函数声明末尾要分号）")
+            f = Func(name, params, ret, [], kw.line, False, tparams)
+            f.extern = True
+            return f
         body = self.parse_block()
         return Func(name, params, ret, body, kw.line, False, tparams)
 
@@ -2250,6 +2286,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             errs.append(f"{e.line}: 枚举 {e.name} 为空")
         enums[e.name] = e
     known = set(TYPES) | set(structs) | set(enums)
+
     for s in mod.structs:
         for fn, ft in s.fields:
             if not _type_ok(ft, known):
@@ -2261,7 +2298,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
     # 常量 (仅整型)
     seen_const: set[str] = set()
-    fnames = {f.name for f in mod.funcs}
+    fnames = {f.name for f in mod.funcs} | {x.name for x in mod.externs}
     for c in mod.consts:
         if c.name in seen_const or c.name in structs or c.name in enums or c.name in fnames \
                 or c.name in dep_names:
@@ -2275,6 +2312,29 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         if f.name in funcs:
             errs.append(f"{f.line}: 函数 {f.name} 重复定义")
         funcs[f.name] = f
+    # ---- 外部函数声明 (docs/173)。三条与普通函数不同的口径:
+    #   ① **彼此可以重名**: 两个模块各自 `extern fn malloc` 指的是**同一个外部符号**
+    #      (等于 C 里重复包一个头文件), 不该报重名。所以用 setdefault, 不覆盖。
+    #   ② 与**普通函数**（含依赖的 pub）撞名则报错: 那是两条不同的实现绑到同一个名字上。
+    #   ③ 签名只收标量与 ptr —— 聚合/str/变参都会改变调用点形状, 出现就报 E021, 不静默错编。
+    for m0 in [*deps, mod]:
+        for x in m0.externs:
+            if m0 is not mod and not x.pub:
+                continue
+            prev = funcs.get(x.name)
+            if prev is not None and not prev.extern:
+                errs.append(f"{x.line}: 外部函数 {x.name} 与既有函数重名 —— "
+                            f"两个不同的实现不能绑到同一个名字上")
+                continue
+            funcs.setdefault(x.name, x)
+    for x in mod.externs:
+        if x.ret not in ("()",) and not _extern_ty_ok(x.ret):
+            errs.append(f"{x.line}: 外部函数 {x.name} 的返回类型 {x.ret} 不支持 —— "
+                        f"第 1 阶段只收标量与 ptr (docs/173 §3)")
+        for p in x.params:
+            if not _extern_ty_ok(p.type):
+                errs.append(f"{x.line}: 外部函数 {x.name} 的参数 {p.name} 类型 {p.type} "
+                            f"不支持 —— 第 1 阶段只收标量与 ptr (docs/173 §3)")
     seen_caps: set[str] = set()
     for c in mod.caps:
         if c.name in seen_caps:
@@ -3955,8 +4015,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             consts[c.name] = (c.type, c.value)
         for f in m.funcs:
             funcs[f.name] = f
+        # 外部函数进**解析表**(调用点要能找到它), 但不进"发 define"那条路 —— 它们发 declare。
+        # setdefault: 两个模块声明同一个外部符号是同一件事, 先来的那份留着。
+        for x in m.externs:
+            funcs.setdefault(x.name, x)
     for m in mods:
-        for f in m.funcs:
+        for f in m.funcs + m.externs:
             # 聚合参数/返回值在原生路径可用 (LLVM 结构体按值), 但不保证 C ABI — 勿从 C 直接调用
             _ll_type(f.ret, structs, enums)
             for p in f.params:
@@ -3970,6 +4034,18 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     ]
     globals_: list[str] = []
     body: list[str] = []
+    # 外部函数声明: 每个外部符号**一条 `declare`**, 按名字去重 (两个模块声明同一个外部
+    # 符号是同一件事)。LLVM 自己会按平台 C ABI 给 `declare` 的函数传参 —— 所以调用点
+    # **一个字符都不用改**, C ABI 这件事在原生 LLVM 路径上是白拿的 (docs/173 §2)。
+    # 真正要自己实现 C ABI 的是**自举那条路**(codegen.lomt / lomelf), 见 docs/173 §4。
+    seen_ext: set[str] = set()
+    for m in mods:
+        for x in m.externs:
+            if x.name in seen_ext:
+                continue
+            seen_ext.add(x.name)
+            ps = ", ".join(_ll_type(p.type, structs, enums) for p in x.params)
+            globals_.append(f"declare {_ll_type(x.ret, structs, enums)} @{x.name}({ps})")
     cov_counter = [0] if coverage else None
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
