@@ -406,7 +406,13 @@ NEG = ROOT / "loment" / "selfhost" / "neg"
 CHECKER_DRIVER = """#include <stdio.h>
 #include <stdlib.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
-extern unsigned int check(char *src, unsigned char *toks, unsigned char *errs);
+extern unsigned int chk_arena_bytes(void);
+extern unsigned int chk_arena_scr(void), chk_arena_ctab(void), chk_arena_nc(void);
+extern unsigned int chk_arena_exs(void), chk_arena_env(void), chk_arena_tyt(void);
+extern unsigned int check_arena(char *src, unsigned char *toks, unsigned char *errs,
+                                unsigned char *syms, unsigned char *scr, unsigned char *ctab,
+                                unsigned char *nc, unsigned char *exs, unsigned char *env,
+                                unsigned char *tyt);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -416,8 +422,13 @@ int main(int argc, char **argv) {
     buf[n] = 0;
     unsigned char *toks = malloc(20 * ((size_t)n + 16));
     unsigned char *errs = malloc(1024);
+    /* arena 按单元规模定 (~100 KB), 由调用方自己开并按 chk_arena_*() 切片 ——
+       与驱动器同一个口径 (不能在调用方进程里动 brk: 与 CRT 的 malloc 踩) */
+    unsigned char *a = malloc(chk_arena_bytes());
     lex(buf, (unsigned int)n, toks);
-    unsigned int m = check(buf, toks, errs);
+    unsigned int m = check_arena(buf, toks, errs, a,
+                                 a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
+                                 a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt());
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
         unsigned int code = *(unsigned int *)(errs + 8 * i);
@@ -566,7 +577,8 @@ IR_TARGET = ROOT / "loment" / "selfhost" / "ir_const.lomt"
 CODEGEN_DRIVER = """#include <stdio.h>
 #include <stdlib.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
-extern unsigned int emit_module(char *src, unsigned char *toks, char *out);
+extern unsigned int cg_arena_bytes(void);
+extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -576,8 +588,10 @@ int main(int argc, char **argv) {
     buf[n] = 0;
     unsigned char *toks = malloc(20 * ((size_t)n + 16));
     char *out = malloc((size_t)n * 8 + 8192);
+    /* 状态块按单元规模定 (~500 KB), 不能压在语言堆上 —— 与驱动同一个口径 */
+    unsigned char *st = malloc(cg_arena_bytes());
     lex(buf, (unsigned int)n, toks);
-    unsigned int m = emit_module(buf, toks, out);
+    unsigned int m = emit_module(buf, toks, out, st);
     printf("%.*s", (int)m, out);
     return 0;
 }
@@ -1045,32 +1059,37 @@ def test_m85_codegen_table_capacity():
     """自举 codegen 的**每函数表容量**必须装得下最大的编译单元。
 
     这是批次 2 抓到的一次静默错编: 单元长到 246 个函数后, 越过了布局里
-    `fk 表`的 192 格 (14848..16384), 于是表尾被后面的参数替换表写穿 —— `fkind`
-    读出来是 2, 少数函数被改名成 `<接收者>_<方法>` (`is_lomt_emit_div_mnemonic`),
-    逐字节判据只报"两个编译器不一致"。布局现在按 256 个函数重排
-    (函数表 12288+i*12, fk 表 15360+i*8, 形参表 24576+i*80, 枚举表 45056+i*80),
-    这里把"容量 >= 最大单元的函数数"钉成静态判据: 再长下去会红, 不再悄悄写穿。
+    `fk 表`的 192 格, 于是表尾被后面的参数替换表写穿 —— `fkind` 读出来是 2, 少数函数被
+    改名成 `<接收者>_<方法>`, 逐字节判据只报"两个编译器不一致"。
+
+    2026-09-16: `use std` 那种 128 个模块的门面单元有 **4048 个顶层函数**, 旧容量 (307)
+    下自举镜直接段错误。布局改成按 `CG_*` 常量定 (函数表 `CG_FN+i*12`, 容量 `CG_MAXFN`),
+    整块也从语言自带的 64 KiB 堆改由驱动器从 `brk` 开 (`cg_arena_bytes()`)。这里把
+    "容量 >= 最大单元的函数数"钉成静态判据, 并且**要求守卫与容量常量同源** ——
+    表放大了而守卫还卡在旧数, 同样是写穿。
     """
     import re as _re
     src = (ROOT / "loment" / "selfhost" / "codegen.lomt").read_text(encoding="utf-8")
-    def base(name: str) -> tuple[int, int]:
-        m = _re.search(rf"fn {name}\(i: u32\) -> u32 \{{\s*return (\d+) \+ i \* (\d+);", src)
-        assert m, f"{name} 的基址表达式没找到"
-        return int(m.group(1)), int(m.group(2))
-    fn_base, fn_stride = 12288, 12                    # 函数表 (字面量)
-    fk_base, fk_stride = base("fk_base")
-    enum_base, enum_stride = base("enum_base")
-    param_base = 24576
-    m = _re.search(r"24576 \+ n \* (\d+)", src)
-    assert m, "形参表步长没找到"
-    param_stride = int(m.group(1))
+
+    def cst(name: str) -> int:
+        m = _re.search(rf"const {name}: u32 = (\d+);", src)
+        assert m, f"{name} 没找到"
+        return int(m.group(1))
+    fn_base, fn_stride = cst("CG_FN"), 12
+    fk_base, fk_stride = cst("CG_FK"), 8
+    cur_base = cst("CG_CUR")                          # 当前函数参数替换表
+    enum_base, enum_stride = cst("CG_ENUM"), 80
+    local_base = cst("CG_LOCAL")                      # 枚举表的上界 = 局部表基址
+    param_base, param_stride = cst("CG_PARAM"), 80
+    bytes_total = cst("CG_BYTES")
+    # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
+    assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
+    assert f"en >= CG_MAXENUM" in src, "枚举表的守卫没和容量常量同源"
     # 容量 = 每张表在"下一张表开始时"之前能放多少个。
-    # 注意枚举表现在挪在低地址空档里 (18944..20480), 所以形参表的上界是 scratch 末尾
-    # (49152) 而不是枚举表基址 —— 早先的公式在这条上会算出负数。
     cap_fn = (fk_base - fn_base) // fn_stride          # fk 表紧跟函数表
-    cap_fk = (18688 - fk_base) // fk_stride            # 18688 = 参数替换表基址
-    cap_param = (49152 - param_base) // param_stride
-    cap_enum = (20480 - enum_base) // enum_stride      # 枚举表上界 = 局部表基址
+    cap_fk = (cur_base - fk_base) // fk_stride         # 参数替换表紧跟 fk 表
+    cap_param = (bytes_total - param_base) // param_stride
+    cap_enum = (local_base - enum_base) // enum_stride  # 枚举表上界 = 局部表基址
     cap = min(cap_fn, cap_fk, cap_param)
     # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。
     # 用**真实词法器**数 `fn` 标识符 token —— 这正是 codegen 看到的数量 (字符串里的
@@ -1088,44 +1107,54 @@ def test_m85_codegen_table_capacity():
 
 @test
 def test_m85_heap_budget():
-    """静态预算: 语言堆里同时活着的 `alloc` 之和必须留在 64 KiB 以内。
+    """静态预算: 驱动从 `brk` 拿的**固定**块之和必须留在 PE 垫片的堆上限以内。
 
     这是**批次 2 期间被抓到的一次真实停机**: checker 加的 `alloc(2048)` 让它和 codegen
-    的 `alloc(49152)` 一起越过 64 KiB, `alloc` 的边界检查走 `@__loment_abort`, 在自举
-    驱动里表现为一条**非法指令 (SIGILL)** —— 从测试输出上看像"编译器崩了", 而不是
-    "堆不够"。两者的分配都是**固定字面量** (与输入无关), 所以这条约束可以在静态检查里
-    精确钉住: 改大任何一边的 `alloc` 会在这里立刻变红, 不必等到驱动 SIGILL。
+    的 `alloc(49152)` 一起越过语言自带的 64 KiB 堆, 边界检查走 `@__loment_abort`,
+    在自举驱动里表现为一条**非法指令 (SIGILL)** —— 从输出上看像"编译器崩了"。
 
-    现在 checker 的缓冲走 `check_arena` (驱动从 `brk` 拿), 所以**驱动路径**的语言堆里
-    只剩 codegen 自己; `check()` 那个薄包装仍然从语言堆开一个 arena —— 那是 C 夹具路径。
-    两条路径**不再同时存在**, 所以判据是"各自都不越界" (而不是把两者相加), 另加一条:
-    驱动 `sys_alloc` 的那块必须装得下 `chk_arena_bytes()`。
+    2026-09-16 起**两条路径都不再用语言堆**: checker 的 arena 与 codegen 的状态块都由
+    驱动器从 `brk` 开 (两块加起来 ~600 KB, 放不进 64 KiB)。于是预算的边界换成了 PE 垫片
+    的 `WS_HEAP` —— 这正是 `use std` 撞到的那道墙: 1.86 MB 的单元按旧的
+    `(len+64)*20` 要 37 MB 词法缓冲, 加上原有的 ~30 MB 就越过了 64 MB (`fujoc-s: 单元太大`)。
+    所以这里钉两件事:
+      ① 语言堆里不再有固定分配 (否则一旦放大又回去撞 SIGILL);
+      ② 驱动的**固定** brk 块之和 <= `WS_HEAP` (Linux 侧 brk 走内核, 无此上限)。
     """
     import re as _re
-    heap = 65536          # 镜像 lomentc 的 __LOMENT_HEAP (Rust 侧) / @__loment_heap (IR 侧)
-    need = 4096           # 要求的余量
-    per: list[tuple[str, int]] = []
+    heap = 65536          # 语言自带的 bump 堆 (镜像 lomentc 的 @__loment_heap)
+    # ① 语言堆: 两个模块里都不该再有固定 alloc
     for rel in ("loment/selfhost/checker.lomt", "loment/selfhost/codegen.lomt"):
         src = (ROOT / rel).read_text(encoding="utf-8")
-        per.append((rel, sum(int(m) for m in _re.findall(r"alloc\((\d+)\)", src))))
-    codegen_path = dict(per)["loment/selfhost/codegen.lomt"]
-    checker_path = dict(per)["loment/selfhost/checker.lomt"]
-    for name, v in per:
-        assert v + need <= heap, (
-            f"{name} 的语言堆分配 {v}B 越过预算 (堆 {heap}B, 要求留 {need}B) —— "
-            f"调小 alloc 或让缓冲改走 brk")
-    # 驱动侧: arena 一块从 brk 拿, 必须装得下 checker 声明的 arena 尺寸
+        fixed = [int(m) for m in _re.findall(r"\balloc\((\d+)\)", src)]
+        assert not fixed, (
+            f"{rel} 里还有语言堆的固定分配 {fixed} —— 状态块现在按单元规模定 "
+            f"(放大就撞 64 KiB 的 SIGILL), 请改由驱动器从 brk 开")
     drv = (ROOT / "loment" / "selfhost" / "driver.lomt").read_text(encoding="utf-8")
-    m = _re.search(r"chk_arena_bytes\(\)\s*->\s*u32\s*\{\s*return\s+(\d+)", 
-                   (ROOT / "loment" / "selfhost" / "checker.lomt").read_text(encoding="utf-8"))
-    assert m, "找不到 chk_arena_bytes() 的实现"
-    arena = int(m.group(1))
-    allocs = [int(x) for x in _re.findall(r"sys_alloc\((\d+)\)", drv)]
-    assert allocs, "驱动里没有 sys_alloc"
-    assert max(allocs) >= arena, f"驱动的 arena 块 ({max(allocs)}B) 装不下 checker 的 {arena}B"
-    print(f"      堆预算: 夹具/checker {checker_path}B · 驱动/codegen {codegen_path}B, "
-          f"堆 {heap}B (余量 {heap - max(checker_path, codegen_path)}B); "
-          f"driver 的 brk arena {max(allocs)}B >= checker {arena}B")
+    # ② 固定 brk 块 (常量实参) 之和 <= WS_HEAP
+    lom = (ROOT / "tools" / "lomelf.py").read_text(encoding="utf-8")
+    m = _re.search(r"WS_HEAP = (\d+)\s*\*\s*(\d+)\s*\*\s*(\d+)", lom)
+    assert m, "找不到 WS_HEAP"
+    ws_heap = int(m.group(1)) * int(m.group(2)) * int(m.group(3))
+    fixed = _re.findall(r"sys_alloc\(([A-Z_]+) as u64\)", drv)
+    consts = {}
+    for rel in ("loment/selfhost/driver.lomt", "loment/selfhost/codegen.lomt"):
+        consts.update({n: int(c) for n, c in
+                       _re.findall(r"const ([A-Z_]+): u32 = (\d+);",
+                                   (ROOT / rel).read_text(encoding="utf-8"))})
+    total = sum(consts.get(n, 0) for n in fixed) + 65536 + 16        # argv_buf + snc
+    for fn in ("chk_arena_bytes", "cg_arena_bytes"):
+        rel = "checker.lomt" if fn.startswith("chk") else "codegen.lomt"
+        src = (ROOT / "loment" / "selfhost" / rel).read_text(encoding="utf-8")
+        mm = _re.search(rf"{fn}\(\) -> u32 \{{\s*return\s+(\w+);", src)
+        assert mm, f"找不到 {fn}()"
+        v = mm.group(1)
+        total += int(v) if v.isdigit() else consts[v]
+    assert total < ws_heap, (
+        f"驱动的固定 brk 块合计 {total}B 超过 PE 垫片的堆上限 {ws_heap}B —— "
+        f"调小 UNIT_CAP/IR_CAP/TOKS_CAP 或抬高 lomelf.py 的 WS_HEAP")
+    print(f"      预算: 语言堆不用 (checker/codegen 都走 brk); 固定 brk 块 {total}B "
+          f"< PE 垫片堆 {ws_heap}B (余 {ws_heap - total}B, 还要放单元的词法缓冲)")
 
 
 @test
@@ -1280,7 +1309,7 @@ def test_m85_driver_gate_on_probe_cases():
         print("      deps/ 层 + 包内路径形式: 驱动器解析成功")
         # ② 单文件 use 超过上限**报错**, 不静默丢 (丢掉的话单元少几块, 而参考实现照收 ——
         #    两个实现于是对同一份源码给出不同的产物)。
-        many = proj / "many"
+        many = proj / "deps" / "many"      # 名字形式第 1 层: <项目根>/deps/<名字>/
         many.mkdir(parents=True)
         nlim = lomentc.MAX_USE + 1
         for i in range(nlim):

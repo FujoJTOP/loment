@@ -741,18 +741,31 @@ fn _start() -> u32 {
     if len == 0 {
         return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");
     }
-    // 预置枚举注入: 先粗判一次 (单文件大小的词法缓冲足够 —— 只看有没有 `enum X`)
-    lex(unit, len as u32, toks);
-    if has_enum(unit, toks, "Option") == 0 || has_enum(unit, toks, "Result") == 0 {
-        len = append_prelude(unit, len);
-    }
-    // 正式词法 + 发射 (单元可能比单文件大, 按实际长度再要一块)
-    let tok2v: u64 = sys_alloc((len + 64) * 20);
+    // 单元的词法缓冲: 按**实测密度**估 —— 仓库 184 个文件合计 4.81 字节/token, 最密的
+    // 3.02; 取 **10 字节/源码字节**, 一倍余量。原先按 20 字节/源码字节开 (那是"1 字节
+    // 1 个 token"的理论上界), 编 std 那种 1.86 MB 的单元要 37 MB, 而 PE 垫片的堆一共
+    // 只有 64 MB (`WS_HEAP`) —— 于是"单元太大"。**估小了由 lex_cap 报出来**, 不静默少
+    // token (少 token = 后面的语句凭空消失, 而判据只会报"两个编译器不一致")。
+    let tcap: u64 = (len + 512) * 10;
+    let tok2v: u64 = sys_alloc(tcap);
     if tok2v == 0 {
-        return fail("fujoc-s: 单元太大\n");
+        return fail("fujoc-s: 单元太大: 词法缓冲要不到\n");
     }
     let toks2: ptr = tok2v as ptr;
-    lex(unit, len as u32, toks2);
+    let ntk: u32 = (tcap / 20) as u32;
+    // 预置枚举注入: 先粗判一次 (同一个缓冲; +512 的余量够放下小段 prelude)
+    let nt0: u32 = lex_cap(unit, len as u32, toks2, ntk);
+    if nt0 > ntk {
+        return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
+    }
+    if has_enum(unit, toks2, "Option") == 0 || has_enum(unit, toks2, "Result") == 0 {
+        len = append_prelude(unit, len);
+    }
+    // 正式词法 + 发射
+    let nt: u32 = lex_cap(unit, len as u32, toks2, ntk);
+    if nt > ntk {
+        return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
+    }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);
@@ -764,11 +777,25 @@ fn _start() -> u32 {
     // `chk_arena_*`)。**不**用语言自带的 64 KiB bump 堆: `emit_module` 一次就要
     // 49152B, 两者相加会越过 65536, 而 OOM 的边界检查在无 libc 环境下是
     // `@__loment_abort` —— 一条非法指令 (SIGILL), 看起来像"编译器崩了"。
-    let arenav: u64 = sys_alloc(20480);
+    let arenav: u64 = sys_alloc(chk_arena_bytes() as u64);
     if arenav == 0 {
         return fail("fujoc-s: brk failed\n");
     }
     let arena: ptr = arenav as ptr;
+    // 检查器的符号表按**单元规模**定 (syms 段 / 每条 20 字节)。先数一遍声明关键字 ——
+    // 这是个**保守上界** (trait 里只声明不发射的方法也算进去), 超了就报错, 不写穿。
+    let nsym: u32 = 0;
+    let sk: u32 = 0;
+    while load32(toks2, sk * 20) != 4 {
+        if tok_is(unit, toks2, sk, "fn") || tok_is(unit, toks2, sk, "const")
+                || tok_is(unit, toks2, sk, "struct") || tok_is(unit, toks2, sk, "enum") {
+            nsym = nsym + 1;
+        }
+        sk = sk + 1;
+    }
+    if nsym > (chk_arena_scr() - chk_arena_syms()) / 20 {
+        return fail("fujoc-s: 单元声明数超过 checker 符号表容量 (把门面拆小)\n");
+    }
     let ne: u32 = check_arena(unit, toks2, errs, arena,
                               ptr_add(arena, chk_arena_scr()),
                               ptr_add(arena, chk_arena_ctab()),
@@ -801,7 +828,17 @@ fn _start() -> u32 {
         }
         return die(1);
     }
-    let m: u32 = emit_module(unit, toks2, ir);
+    // codegen 的状态块也从 brk 拿: 那几张表按**单元规模**定 (函数表 4600 格), 整块
+    // 500 KB 上下, 放不进语言自带的 64 KiB bump 堆 (checker 的 arena 早就是这条路)。
+    let cgv: u64 = sys_alloc(cg_arena_bytes() as u64);
+    if cgv == 0 {
+        return fail("fujoc-s: brk failed (codegen 状态块)\n");
+    }
+    let cg: ptr = cgv as ptr;
+    let m: u32 = emit_module(unit, toks2, ir, cg);
+    if m == 0 {
+        return fail("fujoc-s: 单元的函数数超过 codegen 表容量 (拆小门面)\n");
+    }
     write_all(1, ir, m as u64);
     return die(0);
 }
