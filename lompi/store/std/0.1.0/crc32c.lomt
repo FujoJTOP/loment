@@ -1,0 +1,180 @@
+// std/crc32c.lomt — CRC-32 的几种参数
+//
+// 为什么除了已有的 crc32 (那是 ISO-HDLC, 以太网/zip 用的那个) 还要它: 存储与网络里
+// 更常见的是 **CRC-32C (Castagnoli)** —— iSCSI、SCTP、ext4、SSE4.2 的 crc32 指令
+// 算的都是它, 因为它对硬件更友好。两个 CRC-32 的多项式不同, 结果**完全不通用**:
+// 拿 HDLC 去校验一个 C 校验过的块, 一定失败, 而且失败得很"合理"。所以两个都得有。
+//
+// 校验向量 ("123456789"):
+//   CRC-32C (Castagnoli)      = 0xE3069283
+//   CRC-32/BZIP2              = 0xFC891918
+//   CRC-32/POSIX (cksum 那个) = 0x765E7680
+//
+// 命名: 公开 crc32c_*, 内部 cr_*。自检 test_crc32c_*。
+
+module crc32c
+
+use "mem.lomt"
+
+/// 0x1EDC6F41 的位反转 (反射式要用的形式)。
+pub const CRC32C_POLY_REF: u32 = 2197175160; // 0x82F63B78
+/// CRC-32C 的非反射多项式。
+pub const CRC32C_POLY: u32 = 517762881; // 0x1EDC6F41
+/// CRC-32 (ISO-HDLC / BZIP2 / POSIX 共用) 的多项式。
+pub const CRC32_POLY: u32 = 79764919; // 0x04C11DB7
+/// 0x04C11DB7 的位反转。
+pub const CRC32_POLY_REF: u32 = 3988292384; // 0xEDB88320
+
+/// **反射式** CRC-32 (每个字节从低位处理)。
+pub fn crc32c_reflected(d: ptr, o: u32, n: u32, poly_ref: u32, init: u32, xorout: u32) -> u32 {
+    let crc: u32 = init;
+    let i: u32 = 0;
+    while i < n {
+        crc = crc ^ load8(d, o + i);
+        let j: u32 = 0;
+        while j < 8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ poly_ref;
+            } else {
+                crc = crc >> 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc ^ xorout;
+}
+
+/// **非反射式** CRC-32。
+pub fn crc32c_normal(d: ptr, o: u32, n: u32, poly: u32, init: u32, xorout: u32) -> u32 {
+    let crc: u32 = init;
+    let i: u32 = 0;
+    while i < n {
+        crc = crc ^ ((load8(d, o + i) & 255) << 24);
+        let j: u32 = 0;
+        while j < 8 {
+            if (crc & 2147483648) != 0 {
+                crc = (crc << 1) ^ poly;
+            } else {
+                crc = crc << 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc ^ xorout;
+}
+
+/// CRC-32C (Castagnoli): 反射, 初值全 1, 结果异或全 1。
+pub fn crc32c(d: ptr, o: u32, n: u32) -> u32 {
+    return crc32c_reflected(d, o, n, CRC32C_POLY_REF, 4294967295, 4294967295);
+}
+
+/// CRC-32/BZIP2: 与 ISO-HDLC 同多项式但**不反射** —— 结果和以太网那个完全不同。
+pub fn crc32_bzip2(d: ptr, o: u32, n: u32) -> u32 {
+    return crc32c_normal(d, o, n, CRC32_POLY, 4294967295, 4294967295);
+}
+
+/// CRC-32/POSIX (cksum 工具用的): 非反射, 初值 0。
+pub fn crc32_posix(d: ptr, o: u32, n: u32) -> u32 {
+    return crc32c_normal(d, o, n, CRC32_POLY, 0, 4294967295);
+}
+
+pub fn crc32c_str(s: str) -> u32 {
+    return crc32c(str_ptr(s), 0, str_len(s));
+}
+
+pub fn crc32_bzip2_str(s: str) -> u32 {
+    return crc32_bzip2(str_ptr(s), 0, str_len(s));
+}
+
+pub fn crc32_posix_str(s: str) -> u32 {
+    return crc32_posix(str_ptr(s), 0, str_len(s));
+}
+
+/// 32 位位反转 (用于在两种形式之间换算)。
+pub fn crc32c_rev32(v: u32) -> u32 {
+    let x: u32 = v;
+    let r: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        r = (r << 1) | (x & 1);
+        x = x >> 1;
+        i = i + 1;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_crc32c_vector() -> bool {
+    let s: str = "123456789";
+    return crc32c(str_ptr(s), 0, 9) == 0xE3069283;
+}
+
+fn test_crc32_bzip2_vector() -> bool {
+    let s: str = "123456789";
+    return crc32_bzip2(str_ptr(s), 0, 9) == 0xFC891918;
+}
+
+fn test_crc32_posix_vector() -> bool {
+    let s: str = "123456789";
+    return crc32_posix(str_ptr(s), 0, 9) == 0x765E7680;
+}
+
+fn test_crc32c_differs_from_hdlc_poly() -> bool {
+    // 同一段数据, C 与 HDLC 的多项式必须给出不同结果 —— 相等就说明多项式没接上。
+    let s: str = "123456789";
+    let a: u32 = crc32c(str_ptr(s), 0, 9);
+    let c: u32 = crc32_bzip2(str_ptr(s), 0, 9);
+    return a != c && a == 0xE3069283 && c == 0xFC891918;
+
+}
+fn test_crc32c_polynomial_is_its_own_reflection() -> bool {
+    // 0x1EDC6F41 的位反转是 0x82F63B78 —— 这两个常量必须对得上,
+    // 否则"反射式/非反射式"两条路会悄悄给出不同结果。
+    return crc32c_rev32(CRC32C_POLY) == CRC32C_POLY_REF
+        && crc32c_rev32(CRC32_POLY) == CRC32_POLY_REF;
+
+}
+fn test_crc32c_empty_is_init_xor() -> bool {
+    let b: ptr = alloc(4);
+    return crc32c(b, 0, 0) == 0 && crc32_bzip2(b, 0, 0) == 0
+        && crc32_posix(b, 0, 0) == 4294967295;
+
+}
+fn test_crc32c_str_matches_buffer() -> bool {
+    let s: str = "123456789";
+    return crc32c_str(s) == crc32c(str_ptr(s), 0, 9)
+        && crc32_bzip2_str(s) == crc32_bzip2(str_ptr(s), 0, 9)
+        && crc32_posix_str(s) == crc32_posix(str_ptr(s), 0, 9);
+
+}
+fn test_crc32c_offset_is_respected() -> bool {
+    let b: ptr = alloc(32);
+    let s: str = "123456789";
+    mem_fill(b, 0, 4, 170);
+    mem_copy(b, 4, str_ptr(s), 0, 9);
+    return crc32c(b, 4, 9) == crc32c_str(s);
+
+}
+fn test_crc32c_single_bit_flip_changes_result() -> bool {
+    // 校验和的基本承诺: 改一位就要变。
+    let b: ptr = alloc(16);
+    mem_fill(b, 0, 8, 0);
+    let a: u32 = crc32c(b, 0, 8);
+    store8(b, 3, 1 as u8);
+    let c: u32 = crc32c(b, 0, 8);
+    return a != c;
+
+}
+fn test_crc32c_rev32() -> bool {
+    return crc32c_rev32(2147483648) == 1 && crc32c_rev32(1) == 2147483648
+        && crc32c_rev32(4294967295) == 4294967295;
+
+}
+fn test_crc32c_longer_changes() -> bool {
+    let s: str = "123456789";
+    let t: str = "1234567890";
+    return crc32c_str(s) != crc32c_str(t);
+}

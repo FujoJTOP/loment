@@ -1,0 +1,379 @@
+// std/ini.lomt — INI / 键值配置文件
+//
+// 为什么单独一层而不是用 TOML: INI 简单到**没有嵌套、没有类型** —— 全是"节 + 键 = 值"。
+// 正因为简单, 它才是 .desktop、systemd unit、git config、各类老工具的实际格式。
+// 而它没有规范 (只有惯例), 所以这里把惯例写清楚:
+//
+//   - 一行一个 `键=值`; 键值两端的空白裁掉, **值内部的空白保留**
+//   - 行首的 `;` 或 `#` 是注释; 空行忽略
+//   - `[节名]` 开一节; 节名两端空白裁掉
+//   - 第一个节之前的内容属于**全局区** (用空节名去取)
+//   - 同一个键出现多次取**第一次** (这是最保守的选择: 后出现的可能有别的意图)
+//   - **没有转义**: INI 惯例里没有, 硬造一个会让别的工具读不懂这份文件
+//
+// 不做的: 不处理 `[节名]` 后面跟注释、不处理续行、不做类型推断 (值永远是字符串)。
+// 这三条各有各的方言, 接受了反而会与"别的 INI 工具"不一致。
+//
+// 命名: 公开 ini_*, 内部 i_*。自检 test_ini_*。
+
+module ini
+
+use "mem.lomt"
+
+/// 取不到值。
+pub const INI_NO: u32 = 4294967295;
+
+fn i_is_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 13;
+}
+
+fn i_is_comment(c: u32) -> bool {
+    return c == 59 || c == 35; // ';' '#'
+}
+
+/// 从 i 处跳到行尾 (不含行尾符本身), 返回行尾位置。
+fn i_line_end(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n && load8(d, so + i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 裁掉 [b, e) 两端的空白, 把结果写进 out_buf, 返回长度。
+fn i_trim(d: ptr, so: u32, b: u32, e: u32, outb: ptr) -> u32 {
+    let s: u32 = b;
+    let t: u32 = e;
+    while s < t && i_is_space(load8(d, so + s)) {
+        s = s + 1;
+    }
+    while t > s && i_is_space(load8(d, so + t - 1)) {
+        t = t - 1;
+    }
+    let k: u32 = 0;
+    while s + k < t {
+        store8(outb, k, load8(d, so + s + k) as u8);
+        k = k + 1;
+    }
+    return k;
+}
+
+/// `[节名]` 的那一行 -> 节名写进 outb, 返回长度; 不是节行返回 INI_NO。
+fn i_section_name(d: ptr, so: u32, b: u32, e: u32, outb: ptr) -> u32 {
+    // 跳过前导空白
+    let s: u32 = b;
+    while s < e && i_is_space(load8(d, so + s)) {
+        s = s + 1;
+    }
+    if s >= e || load8(d, so + s) != 91 {
+        return INI_NO; // '['
+    }
+    let t: u32 = e;
+    while t > s && i_is_space(load8(d, so + t - 1)) {
+        t = t - 1;
+    }
+    if t <= s + 1 || load8(d, so + t - 1) != 93 {
+        return INI_NO; // ']'
+    }
+    return i_trim(d, so, s + 1, t - 1, outb);
+}
+
+/// 在 [b, e) 里找第一个 '=', 把键与值都裁好写进 kbuf / vbuf, 返回值的长度; 没有 '=' 给 INI_NO。
+fn i_split(d: ptr, so: u32, b: u32, e: u32, kbuf: ptr, vbuf: ptr, kl_out: ptr) -> u32 {
+    let eq: u32 = INI_NO;
+    let i: u32 = b;
+    while i < e {
+        if load8(d, so + i) == 61 {
+            eq = i;
+            i = e;
+        } else {
+            i = i + 1;
+        }
+    }
+    if eq == INI_NO {
+        return INI_NO;
+    }
+    let kl: u32 = i_trim(d, so, b, eq, kbuf);
+    mem_store32(kl_out, 0, kl);
+    return i_trim(d, so, eq + 1, e, vbuf);
+}
+
+/// 取 [section] 下 key 的值。section 给空串表示全局区。值写进 out, 返回长度。
+///
+/// 临时区: kbuf / vbuf / sbuf 各需足够装下最长键/值/节名 (调用方按行长上界给)。
+pub fn ini_get(d: ptr, so: u32, n: u32, sp: ptr, sn: u32, kp: ptr, kn: u32, out: ptr, kbuf: ptr, vbuf: ptr, sbuf: ptr, kl_out: ptr) -> u32 {
+    let i: u32 = 0;
+    let in_target: u32 = 0;
+    let found: u32 = INI_NO;
+    // 全局区: 节名为空时, 一开始就算"在目标里"
+    if sn == 0 {
+        in_target = 1;
+    }
+    while i < n && found == INI_NO {
+        let e: u32 = i_line_end(d, so, n, i);
+        // 空行 / 注释行
+        let s: u32 = i;
+        while s < e && i_is_space(load8(d, so + s)) {
+            s = s + 1;
+        }
+        if s < e && i_is_comment(load8(d, so + s)) == false {
+            let sl: u32 = i_section_name(d, so, i, e, sbuf);
+            if sl != INI_NO {
+                // 换节了: 重新判定"在不在目标里"
+                if sl == sn && mem_eq(sbuf, 0, sp, 0, sn) {
+                    in_target = 1;
+                } else {
+                    in_target = 0;
+                }
+            } else if in_target == 1 {
+                let vl: u32 = i_split(d, so, s, e, kbuf, vbuf, kl_out);
+                if vl != INI_NO {
+                    let kl: u32 = mem_load32(kl_out, 0);
+                    if kl == kn && mem_eq(kbuf, 0, kp, 0, kn) {
+                        mem_copy(out, 0, vbuf, 0, vl);
+                        found = vl;
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return found;
+}
+
+pub fn ini_get_str(d: ptr, so: u32, n: u32, section: str, key: str, out: ptr, kbuf: ptr, vbuf: ptr, sbuf: ptr, kl_out: ptr) -> u32 {
+    return ini_get(d, so, n, str_ptr(section), str_len(section), str_ptr(key), str_len(key), out, kbuf, vbuf, sbuf, kl_out);
+}
+
+/// 有没有这个节 (全局区用空串问)。
+pub fn ini_has_section(d: ptr, so: u32, n: u32, sp: ptr, sn: u32, sbuf: ptr) -> bool {
+    if sn == 0 {
+        return true;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let e: u32 = i_line_end(d, so, n, i);
+        let sl: u32 = i_section_name(d, so, i, e, sbuf);
+        if sl != INI_NO && sl == sn && mem_eq(sbuf, 0, sp, 0, sn) {
+            return true;
+        }
+        i = e + 1;
+    }
+    return false;
+}
+
+pub fn ini_has_section_str(d: ptr, so: u32, n: u32, section: str, sbuf: ptr) -> bool {
+    return ini_has_section(d, so, n, str_ptr(section), str_len(section), sbuf);
+}
+
+/// 节个数。
+pub fn ini_count_sections(d: ptr, so: u32, n: u32, sbuf: ptr) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let e: u32 = i_line_end(d, so, n, i);
+        if i_section_name(d, so, i, e, sbuf) != INI_NO {
+            c = c + 1;
+        }
+        i = e + 1;
+    }
+    return c;
+}
+
+/// `键=值` 行个数 (不含节行与注释)。
+pub fn ini_count_keys(d: ptr, so: u32, n: u32, kbuf: ptr, vbuf: ptr, kl: ptr) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let e: u32 = i_line_end(d, so, n, i);
+        let s: u32 = i;
+        while s < e && i_is_space(load8(d, so + s)) {
+            s = s + 1;
+        }
+        if s < e && i_is_comment(load8(d, so + s)) == false {
+            if i_split(d, so, s, e, kbuf, vbuf, kl) != INI_NO {
+                c = c + 1;
+            }
+        }
+        i = e + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 自检用的配置文本 (含注释/空行/全局区/两个节/值内含空白)。
+fn cfg() -> str {
+    return "; 顶部注释\nname = demo\n\n[server]\nhost = 127.0.0.1\nport = 8080\n\n[dB]\nurl = postgres://x?y=1\n; 行内注释行\n";
+}
+
+fn test_ini_global_section() -> bool {
+    let s: str = cfg();
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let n: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "name", out, kb, vb, sb, kl);
+    let want: str = "demo";
+    return n == 4 && mem_eq(out, 0, str_ptr(want), 0, 4);
+}
+
+fn test_ini_section_value() -> bool {
+    let s: str = cfg();
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let n: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "server", "host", out, kb, vb, sb, kl);
+    let want: str = "127.0.0.1";
+    return n == 9 && mem_eq(out, 0, str_ptr(want), 0, 9);
+}
+
+fn test_ini_section_names_are_case_sensitive() -> bool {
+    // 节名 `dB` 与 `db` 是两回事 —— INI 惯例里键与节都区分大小写。
+    let s: str = cfg();
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let a: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "dB", "url", out, kb, vb, sb, kl);
+    let b: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "db", "url", out, kb, vb, sb, kl);
+    return a != INI_NO && b == INI_NO;
+}
+
+fn test_ini_value_keeps_inner_spaces() -> bool {
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = "[a]\nk =  x y  \n";
+    let n: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "a", "k", out, kb, vb, sb, kl);
+    let want: str = "x y";
+    return n == 3 && mem_eq(out, 0, str_ptr(want), 0, 3);
+}
+
+fn test_ini_same_key_in_two_sections() -> bool {
+    // 同一个键名在两个节里各有值 —— 取节必须真的按节走。
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = "[a]\nk = 1\n[b]\nk = 2\n";
+    let a: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "a", "k", out, kb, vb, sb, kl);
+    let ok1: bool = a == 1 && load8(out, 0) == 49;
+    let b: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "b", "k", out, kb, vb, sb, kl);
+    return ok1 && b == 1 && load8(out, 0) == 50;
+}
+
+fn test_ini_missing_key_and_section() -> bool {
+    let s: str = cfg();
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let a: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "server", "nope", out, kb, vb, sb, kl);
+    let b: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "nope", "host", out, kb, vb, sb, kl);
+    return a == INI_NO && b == INI_NO;
+}
+
+fn test_ini_comments_ignored() -> bool {
+    // ';' 与 '#' 两种注释都要认; 注释行里的 `x = y` 不能当成键。
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = ";x = 1\n#y = 2\nz = 3\n";
+    let a: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "x", out, kb, vb, sb, kl);
+    let b: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "y", out, kb, vb, sb, kl);
+    let c: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "z", out, kb, vb, sb, kl);
+    return a == INI_NO && b == INI_NO && c == 1 && load8(out, 0) == 51;
+}
+
+fn test_ini_first_occurrence_wins() -> bool {
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = "k = first\nk = second\n";
+    let n: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "k", out, kb, vb, sb, kl);
+    let want: str = "first";
+    return n == 5 && mem_eq(out, 0, str_ptr(want), 0, 5);
+}
+
+fn test_ini_crlf_line_endings() -> bool {
+    // Windows 写的文件行尾是 CR LF —— 值末尾的 CR 必须被裁掉, 否则取出来的字符串会带着它。
+    //
+    // **这里逐字节拼而不是写字面量**: 语言的转义只有 \n \t \" \\ 四个, 写 `\r` 会
+    // **静默退化成字母 'r'** (不报错) —— 那样这个测试就永远测不到 CR 了。
+    let d: ptr = alloc(16);
+    store8(d, 0, 91 as u8);  // '['
+    store8(d, 1, 97 as u8);  // 'a'
+    store8(d, 2, 93 as u8);  // ']'
+    store8(d, 3, 13 as u8);  // CR
+    store8(d, 4, 10 as u8);  // LF
+    store8(d, 5, 107 as u8); // 'k'
+    store8(d, 6, 61 as u8);  // '='
+    store8(d, 7, 118 as u8); // 'v'
+    store8(d, 8, 13 as u8);  // CR
+    store8(d, 9, 10 as u8);  // LF
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let sec: str = "a";
+    let key: str = "k";
+    let n: u32 = ini_get(d, 0, 10, str_ptr(sec), 1, str_ptr(key), 1, out, kb, vb, sb, kl);
+    return n == 1 && load8(out, 0) == 118;
+}
+
+fn test_ini_counters() -> bool {
+    let s: str = cfg();
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let secs: u32 = ini_count_sections(str_ptr(s), 0, str_len(s), sb);
+    let keys: u32 = ini_count_keys(str_ptr(s), 0, str_len(s), kb, vb, kl);
+    return secs == 2 && keys == 4;
+}
+
+fn test_ini_has_section() -> bool {
+    let s: str = cfg();
+    let sb: ptr = alloc(64);
+    return ini_has_section_str(str_ptr(s), 0, str_len(s), "server", sb)
+        && ini_has_section_str(str_ptr(s), 0, str_len(s), "nope", sb) == false
+        && ini_has_section_str(str_ptr(s), 0, str_len(s), "", sb);
+}
+
+fn test_ini_last_line_without_newline() -> bool {
+    // 最后一行没有换行符也要能取到。
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = "k = v";
+    let n: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "k", out, kb, vb, sb, kl);
+    return n == 1 && load8(out, 0) == 118;
+}
+
+fn test_ini_line_without_equals_ignored() -> bool {
+    let out: ptr = alloc(64);
+    let kb: ptr = alloc(64);
+    let vb: ptr = alloc(64);
+    let sb: ptr = alloc(64);
+    let kl: ptr = alloc(8);
+    let s: str = "just a line\nk = v\n";
+    let a: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "just", out, kb, vb, sb, kl);
+    let b: u32 = ini_get_str(str_ptr(s), 0, str_len(s), "", "k", out, kb, vb, sb, kl);
+    return a == INI_NO && b == 1;
+}

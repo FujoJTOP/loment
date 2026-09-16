@@ -1,0 +1,470 @@
+// std/intern.lomt — 字符串驻留 (string interning)
+//
+// 为什么需要它: 如果同一批名字被反复比较 (符号表、字段名、标签), 每次 mem_eq 一遍字节是
+// 浪费。驻留把"同内容的串"收敛成一个**稳定的小整数 id**, 之后按名字查表就退化成按整数查表
+// —— mapstr.lomt 是"字节串 -> 值", 本模块是"字节串 -> 稳定 id", 两者互补:
+// 先用 intern 把名字压成 id, 再拿 id 当键进 map, 便得到 O(1) 的名字索引。
+//
+// 一块 ws 缓冲装下全部, 布局 (偏移从 0 起, 全 u32 除哈希外; 串池是字节):
+//   [0]  cap        槽数 (2 的幂, 由 in_init 定)
+//   [4]  count      已驻留的不同串数 (也是下一个 id)
+//   [8]  pool_used  串池已用字节
+//   [12] pool_cap   串池总容量
+//   [16 .. ] 槽区, cap 个槽, 每个 24 字节:
+//              +0  hash u64 | +8 keyoff u32 | +12 keylen u32 | +16 id u32 | +20 state u32
+//   [16+24*cap .. ] 入口区, cap 项, 每项 8 字节: keyoff u32, keylen u32 (按 id 索引)
+//   [16+32*cap .. ] 串池: 字节, 每条串的字节**追加**进来, 不再移动 (所以 ptr 稳定)
+//
+//   state: 0 = 空, 1 = 占用。**不删除, 所以没有墓碑** —— 探测遇到"空"就停, 逻辑简单。
+//   keyoff 存的是**相对 ws 的绝对偏移**, 于是 in_ptr_of 直接把偏移交给调用方用 load8 读。
+//
+// 冲突用线性探测; 表满 (count == cap) 或串池满都返回 IN_FULL, **绝不静默丢**。
+//
+// 复杂度: 每次操作期望 O(len) (哈希一遍字节 + 期望 O(1) 探测)。
+//
+// 诚实清单:
+//   * **不删除**: 没有 in_remove。驻留表通常一次建好长期用; 要删就重建 (in_init 一遍)。
+//     省掉墓碑换来的是"探测遇空即止"这条简单不变量。
+//   * 表满前不自动扩容: 容量由调用方按 in_bytes 算。满了返回 IN_FULL, 由调用方决定重建。
+//   * 哈希是 FNV-1a 64, 与 std/hash.lomt 同族。这里为不跨模块依赖再写一遍 (mapstr 也是)。
+//   * 不拥有字符串内存的所有权语义: 它只**拷贝**字节。调用方给的原串可以随时释放。
+//
+// 命名: 公开 in_*, 内部 in_* 里的私有辅助用同前缀 (本模块没有第二个概念要区分)。自检 test_intern_*。
+
+module intern
+
+use "mem.lomt"
+
+pub const IN_OK: u32 = 0;
+pub const IN_FULL: u32 = 1;
+/// 查不到 (正常结果)。
+pub const IN_NO: u32 = 4294967294;
+/// 无效 id。
+pub const IN_NONE: u32 = 4294967295;
+
+const IN_HDR: u32 = 16;
+const IN_SLOT: u32 = 24;
+const IN_EMPTY: u32 = 0;
+const IN_USED: u32 = 1;
+
+fn in_slot(ws: ptr, i: u32) -> u32 {
+    return IN_HDR + IN_SLOT * i;
+}
+
+fn in_cap(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+fn in_ents(ws: ptr) -> u32 {
+    return IN_HDR + IN_SLOT * in_cap(ws);
+}
+
+fn in_pool_base(ws: ptr) -> u32 {
+    return IN_HDR + (IN_SLOT + 8) * in_cap(ws);
+}
+
+fn in_state(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, in_slot(ws, i) + 20);
+}
+
+fn in_hash_at(ws: ptr, i: u32) -> u64 {
+    return mem_load64(ws, in_slot(ws, i));
+}
+
+fn in_koff(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, in_slot(ws, i) + 8);
+}
+
+fn in_klen(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, in_slot(ws, i) + 12);
+}
+
+fn in_id_at(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, in_slot(ws, i) + 16);
+}
+
+/// ws 要多少字节。max_strings 是能驻留的最大**不同**串数 (必须 2 的幂),
+/// pool_bytes 是串的字节总预算。
+pub fn in_bytes(max_strings: u32, pool_bytes: u32) -> u32 {
+    return IN_HDR + (IN_SLOT + 8) * max_strings + pool_bytes;
+}
+
+pub fn in_count(ws: ptr) -> u32 {
+    return mem_load32(ws, 4);
+}
+
+pub fn in_capacity(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+pub fn in_pool_used(ws: ptr) -> u32 {
+    return mem_load32(ws, 8);
+}
+
+/// FNV-1a 64。为不跨模块依赖, 与 std/hash.lomt / std/mapstr.lomt 再写一遍。
+fn in_hash(p: ptr, o: u32, n: u32) -> u64 {
+    let h: u64 = 14695981039346656037;
+    let i: u32 = 0;
+    while i < n {
+        h = h ^ (load8(p, o + i) as u64);
+        h = h * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// 建表。max_strings 必须是 2 的幂且 > 0, 否则返回 false (拒绝而不是凑合)。
+pub fn in_init(ws: ptr, max_strings: u32, pool_bytes: u32) -> bool {
+    if max_strings == 0 || (max_strings & (max_strings - 1)) != 0 {
+        return false;
+    }
+    mem_store32(ws, 0, max_strings);
+    mem_store32(ws, 4, 0);
+    mem_store32(ws, 8, 0);
+    mem_store32(ws, 12, pool_bytes);
+    let i: u32 = 0;
+    while i < max_strings {
+        mem_store32(ws, in_slot(ws, i) + 20, IN_EMPTY);
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 驻留: 已有同内容的串就返回它的 id; 没有就分配一个新 id 并拷字节进来。
+/// 返回 IN_OK (id 写到 out_id 偏移 0) 或 IN_FULL (表满 / 池满)。
+pub fn in_intern(ws: ptr, p: ptr, o: u32, len: u32, out_id: ptr) -> u32 {
+    let cap: u32 = in_cap(ws);
+    if cap == 0 {
+        return IN_FULL;
+    }
+    let mask: u32 = cap - 1;
+    let h: u64 = in_hash(p, o, len);
+    let h0: u32 = (h & (mask as u64)) as u32;
+    let es: u32 = IN_NO;      // 第一个空槽 (插入点)
+    let found: u32 = IN_NO;   // 命中的已用槽
+    let i: u32 = 0;
+    let stop: u32 = 0;
+    while i < cap && stop == 0 {
+        let s: u32 = (h0 + i) & mask;
+        if in_state(ws, s) == IN_EMPTY {
+            es = s;
+            stop = 1;
+        } else {
+            if in_hash_at(ws, s) == h && in_klen(ws, s) == len
+                && mem_eq(ws, in_koff(ws, s), p, o, len) {
+                found = s;
+                stop = 1;
+            }
+        }
+        i = i + 1;
+    }
+    if found != IN_NO {
+        mem_store32(out_id, 0, in_id_at(ws, found));
+        return IN_OK;
+    }
+    if es == IN_NO {
+        return IN_FULL;   // 表满: 整表没有一个空槽
+    }
+    let used: u32 = mem_load32(ws, 8);
+    let pcap: u32 = mem_load32(ws, 12);
+    if used + len > pcap {
+        return IN_FULL;   // 池满
+    }
+    let base: u32 = in_pool_base(ws);
+    let id: u32 = mem_load32(ws, 4);
+    let s2: u32 = in_slot(ws, es);
+    mem_store64(ws, s2, h);
+    mem_store32(ws, s2 + 8, base + used);
+    mem_store32(ws, s2 + 12, len);
+    mem_store32(ws, s2 + 16, id);
+    mem_store32(ws, s2 + 20, IN_USED);
+    mem_copy(ws, base + used, p, o, len);
+    mem_store32(ws, 8, used + len);
+    mem_store32(ws, 4, id + 1);
+    let e: u32 = in_ents(ws) + 8 * id;
+    mem_store32(ws, e, base + used);
+    mem_store32(ws, e + 4, len);
+    mem_store32(out_id, 0, id);
+    return IN_OK;
+}
+
+/// 查 id。找不到返回 IN_NO (与 in_intern 的 IN_FULL 区分开)。
+pub fn in_lookup(ws: ptr, p: ptr, o: u32, len: u32) -> u32 {
+    let cap: u32 = in_cap(ws);
+    if cap == 0 {
+        return IN_NO;
+    }
+    let mask: u32 = cap - 1;
+    let h: u64 = in_hash(p, o, len);
+    let h0: u32 = (h & (mask as u64)) as u32;
+    let i: u32 = 0;
+    while i < cap {
+        let s: u32 = (h0 + i) & mask;
+        if in_state(ws, s) == IN_EMPTY {
+            return IN_NO;
+        }
+        if in_hash_at(ws, s) == h && in_klen(ws, s) == len
+            && mem_eq(ws, in_koff(ws, s), p, o, len) {
+            return in_id_at(ws, s);
+        }
+        i = i + 1;
+    }
+    return IN_NO;
+}
+
+/// 由 id 取回串的字节: 返回**相对 ws 的绝对偏移**, 长度写到 out_len 偏移 0。
+/// 无效 id 返回 IN_NONE (并把 out_len 写 0)。
+pub fn in_ptr_of(ws: ptr, id: u32, out_len: ptr) -> u32 {
+    if id >= mem_load32(ws, 4) {
+        mem_store32(out_len, 0, 0);
+        return IN_NONE;
+    }
+    let e: u32 = in_ents(ws) + 8 * id;
+    mem_store32(out_len, 0, mem_load32(ws, e + 4));
+    return mem_load32(ws, e);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn ts_s_hello() -> str {
+    return "hello";
+}
+
+fn ts_s_hellp() -> str {
+    return "hellp";
+}
+
+fn ts_s_abc() -> str {
+    return "abc";
+}
+
+fn ts_s_ABC() -> str {
+    return "ABC";
+}
+
+/// 把 i 写成 "k<十进制>" 放进 buf, 返回长度。
+fn ts_mkname(buf: ptr, i: u32) -> u32 {
+    store8(buf, 0, 107 as u8);
+    if i == 0 {
+        store8(buf, 1, 48 as u8);
+        return 2;
+    }
+    let n: u32 = 0;
+    let t: u32 = i;
+    while t > 0 {
+        n = n + 1;
+        t = t / 10;
+    }
+    let j: u32 = 0;
+    let v: u32 = i;
+    while j < n {
+        let d: u32 = v % 10;
+        store8(buf, 1 + (n - 1 - j), (48 + d) as u8);
+        v = v / 10;
+        j = j + 1;
+    }
+    return 1 + n;
+}
+
+fn test_intern_same_string_same_id() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 128));
+    in_init(ws, 16, 128);
+    let out: ptr = alloc(8);
+    let a: u32 = in_intern(ws, str_ptr(ts_s_hello()), 0, str_len(ts_s_hello()), out);
+    let id1: u32 = mem_load32(out, 0);
+    let b: u32 = in_intern(ws, str_ptr(ts_s_hello()), 0, str_len(ts_s_hello()), out);
+    let id2: u32 = mem_load32(out, 0);
+    return a == IN_OK && b == IN_OK && id1 == id2 && in_count(ws) == 1;
+}
+
+fn test_intern_different_strings_different_ids() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 128));
+    in_init(ws, 16, 128);
+    let out: ptr = alloc(8);
+    in_intern(ws, str_ptr(ts_s_hello()), 0, 5, out);
+    let a: u32 = mem_load32(out, 0);
+    in_intern(ws, str_ptr(ts_s_hellp()), 0, 5, out);
+    let b: u32 = mem_load32(out, 0);
+    in_intern(ws, str_ptr(ts_s_abc()), 0, 3, out);
+    let c: u32 = mem_load32(out, 0);
+    return a != b && b != c && a != c && in_count(ws) == 3;
+}
+
+fn test_intern_case_sensitive() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 128));
+    in_init(ws, 16, 128);
+    let out: ptr = alloc(8);
+    in_intern(ws, str_ptr(ts_s_abc()), 0, 3, out);
+    let a: u32 = mem_load32(out, 0);
+    in_intern(ws, str_ptr(ts_s_ABC()), 0, 3, out);
+    let b: u32 = mem_load32(out, 0);
+    return a != b && in_count(ws) == 2;
+}
+
+fn test_intern_empty_string() -> bool {
+    let ws: ptr = alloc(in_bytes(8, 16));
+    in_init(ws, 8, 16);
+    let out: ptr = alloc(8);
+    let a: u32 = in_intern(ws, ws, 0, 0, out);
+    let id1: u32 = mem_load32(out, 0);
+    let b: u32 = in_intern(ws, ws, 0, 0, out);
+    let id2: u32 = mem_load32(out, 0);
+    let lenp: ptr = alloc(8);
+    let off: u32 = in_ptr_of(ws, id1, lenp);
+    return a == IN_OK && b == IN_OK && id1 == id2 && id2 == 0 && in_count(ws) == 1
+        && off != IN_NONE && mem_load32(lenp, 0) == 0;
+}
+
+fn test_intern_lookup_hit_and_miss() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 128));
+    in_init(ws, 16, 128);
+    let out: ptr = alloc(8);
+    in_intern(ws, str_ptr(ts_s_hello()), 0, 5, out);
+    let id: u32 = mem_load32(out, 0);
+    let hit: u32 = in_lookup(ws, str_ptr(ts_s_hello()), 0, 5);
+    let miss: u32 = in_lookup(ws, str_ptr(ts_s_hellp()), 0, 5);
+    return hit == id && miss == IN_NO;
+}
+
+fn test_intern_ptr_of_returns_content() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 128));
+    in_init(ws, 16, 128);
+    let out: ptr = alloc(8);
+    in_intern(ws, str_ptr(ts_s_hello()), 0, 5, out);
+    let id: u32 = mem_load32(out, 0);
+    let lenp: ptr = alloc(8);
+    let off: u32 = in_ptr_of(ws, id, lenp);
+    let len: u32 = mem_load32(lenp, 0);
+    // 逐字节与 "hello" 比
+    let same: u32 = 1;
+    let sp: ptr = str_ptr(ts_s_hello());
+    let i: u32 = 0;
+    while i < len {
+        if load8(ws, off + i) != load8(sp, i) {
+            same = 0;
+        }
+        i = i + 1;
+    }
+    return len == 5 && same == 1 && in_ptr_of(ws, 999, lenp) == IN_NONE;
+}
+
+fn test_intern_full_reports_err() -> bool {
+    // 只有 2 个槽: 塞 2 个不同的串后就该拒绝第 3 个。
+    let ws: ptr = alloc(in_bytes(2, 64));
+    in_init(ws, 2, 64);
+    let out: ptr = alloc(8);
+    let a: u32 = in_intern(ws, str_ptr(ts_s_abc()), 0, 3, out);
+    let b: u32 = in_intern(ws, str_ptr(ts_s_ABC()), 0, 3, out);
+    let c: u32 = in_intern(ws, str_ptr(ts_s_hello()), 0, 5, out);
+    return a == IN_OK && b == IN_OK && c == IN_FULL && in_count(ws) == 2;
+}
+
+fn test_intern_pool_full_reports_err() -> bool {
+    // 池只有 4 字节: "abcd" 占满, 再进一个就 IN_FULL。
+    let ws: ptr = alloc(in_bytes(16, 4));
+    in_init(ws, 16, 4);
+    let out: ptr = alloc(8);
+    let a: u32 = in_intern(ws, str_ptr(ts_s_abc()), 0, 3, out);
+    let b: u32 = in_intern(ws, str_ptr(ts_s_hello()), 0, 5, out);
+    // 3 字节后只剩 1 字节, 再进 3 字节的串必失败
+    return a == IN_OK && b == IN_FULL && in_count(ws) == 1;
+}
+
+fn test_intern_init_rejects_bad_cap() -> bool {
+    let ws: ptr = alloc(in_bytes(16, 64));
+    return in_init(ws, 0, 64) == false && in_init(ws, 3, 64) == false
+        && in_init(ws, 8, 64) == true;
+}
+
+fn test_intern_200_distinct() -> bool {
+    // 压力: 200 个不同串 -> 200 个 id; 全部 lookup 得到, 且互不相同。
+    let ws: ptr = alloc(in_bytes(256, 2048));
+    in_init(ws, 256, 2048);
+    let buf: ptr = alloc(32);
+    let out: ptr = alloc(8);
+    let seen: ptr = alloc(1024);   // 256 位图放在 32 字节内即可, 这里给宽裕点
+    mem_fill(seen, 0, 1024, 0);
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 200 {
+        let n: u32 = ts_mkname(buf, i);
+        if in_intern(ws, buf, 0, n, out) != IN_OK {
+            ok = 0;
+        } else {
+            let id: u32 = mem_load32(out, 0);
+            if id >= 256 {
+                ok = 0;
+            } else {
+                // 位图判重: 同一个 id 出现两次就是"假同一"
+                let w: u32 = id / 8;
+                let bit: u32 = 1 << (id % 8);
+                if (load8(seen, w) & bit) != 0 {
+                    ok = 0;
+                }
+                store8(seen, w, (load8(seen, w) | bit) as u8);
+            }
+            // lookup 必须找回同一个 id
+            if in_lookup(ws, buf, 0, n) != id {
+                ok = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return ok == 1 && in_count(ws) == 200;
+}
+
+fn test_intern_200_ids_stable() -> bool {
+    // 再驻留一遍同样的 200 个串: id 必须不变, count 不能涨。
+    let ws: ptr = alloc(in_bytes(256, 2048));
+    in_init(ws, 256, 2048);
+    let buf: ptr = alloc(32);
+    let out: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < 200 {
+        let n: u32 = ts_mkname(buf, i);
+        in_intern(ws, buf, 0, n, out);
+        i = i + 1;
+    }
+    let ok: u32 = 1;
+    let j: u32 = 0;
+    while j < 200 {
+        let n2: u32 = ts_mkname(buf, j);
+        let before: u32 = in_lookup(ws, buf, 0, n2);
+        in_intern(ws, buf, 0, n2, out);
+        let after: u32 = mem_load32(out, 0);
+        if before != after || before != j {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && in_count(ws) == 200;
+}
+
+fn test_intern_collision_handling_small_table() -> bool {
+    // 64 个串挤进 64 槽的表: 线性探测必须仍然一一对应 (槽满了再进才报错)。
+    // 56 个 (留点余量避免正好填满时的边界歧义, 但逻辑上填满也正确)。
+    let ws: ptr = alloc(in_bytes(64, 1024));
+    in_init(ws, 64, 1024);
+    let buf: ptr = alloc(32);
+    let out: ptr = alloc(8);
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 56 {
+        let n: u32 = ts_mkname(buf, i);
+        if in_intern(ws, buf, 0, n, out) != IN_OK {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    // 逐个回查
+    let j: u32 = 0;
+    while j < 56 {
+        let n2: u32 = ts_mkname(buf, j);
+        let id2: u32 = in_lookup(ws, buf, 0, n2);
+        if id2 == IN_NO {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && in_count(ws) == 56;
+}

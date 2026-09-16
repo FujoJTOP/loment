@@ -111,7 +111,7 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
     let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
     let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
     let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
-    let zero: ptr = ((ws as u64) + WS_TMP as u64) as ptr;
+    let zero: ptr = ((ws as u64) + WS_ZERO as u64) as ptr;
     store8(zero, 0, 0 as u8);
     let missing: u32 = 0;
     let progress: u32 = 1;
@@ -268,7 +268,7 @@ fn test_idn_identity_depends_on_child() -> bool {
     let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
     let h1: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
     let h2: ptr = ((ws as u64) + WS_TMP + 2048 as u64) as ptr;
-    let zero: ptr = ((ws as u64) + WS_TMP as u64) as ptr;
+    let zero: ptr = ((ws as u64) + WS_ZERO as u64) as ptr;
     store8(zero, 0, 0 as u8);
     let own: ptr = alloc(64);
     let ch: ptr = alloc(64);
@@ -462,12 +462,133 @@ fn test_idn_cycle_is_detected_not_hung() -> bool {
     return r == IDN_CYCLE;
 }
 
+/// **地基判据**: 每一个**没有名字边**的包, id 都必须正好是 H(自身 hex ⊕ 0x00) ——
+/// 拿公式独立算一遍, 逐个比。
+///
+/// 为什么必须逐个比、而且要手算期望值: 那个"分隔符 0"一度和 `pkg_edges` 的暂存共用
+/// 地址, 于是 id 会随**这棵仓库里还有哪些包**而变 —— 而"同一份源码 ⇒ 同一个身份"
+/// 是整套设计的地基。库内自洽的测试抓不到它 (同一个仓库扫两遍, 污染一模一样, 照样
+/// 相等)。
+///
+/// 这条测试是**第二版**: 第一版只挑了一个包 (mathutil@0.1.0) 来比, 而它恰好是没被
+/// 污染的那个 —— 把修复退回去它照样全绿, 等于没有。所以这里改成**遍历所有叶子**,
+/// 并要求全部成立。写判据时踩到的原话: 挑一个样本要能证伪, 不是挑一个能过的。
+fn test_idn_every_leafless_identity_follows_the_formula() -> bool {
+    sys_write_str(1, "  [dbg] idn_pure ran
+");
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
+    let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
+    let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
+    let zero: ptr = ((ws as u64) + WS_ZERO as u64) as ptr;
+    let pool: ptr = ((ws as u64) + WS_EPOOL as u64) as ptr;
+    let eents: ptr = ((ws as u64) + WS_EENTS as u64) as ptr;
+    let snap: ptr = alloc(8192);
+    let want: ptr = alloc(64);
+    sys_put_lit(scr, "fixture/store");
+    let n: u32 = sto_scan(ws, scr);
+    if n == 0 {
+        return false;
+    }
+    if idn_pass1(ws, n) != n {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let k: u32 = 0;
+        while k < 64 {
+            store8(snap, i * 64 + k, load8(pkg_id_hex(ws, i), k) as u8);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    if idn_pass2(ws, n, msg, 128) != IDN_OK {
+        return false;
+    }
+    store8(zero, 0, 0 as u8);
+    let bad: u32 = 0;
+    let seen: u32 = 0;
+    i = 0;
+    while i < n {
+        let c: u32 = idn_edges(ws, i);
+        let named: u32 = 0;
+        let k: u32 = 0;
+        while k < c {
+            if lex_ent_kind(eents, k) == LEX_NAME {
+                named = named + 1;
+            }
+            k = k + 1;
+        }
+        if named == 0 {
+            seen = seen + 1;
+            sha_init(st);
+            sha_update(st, ((snap as u64) + (i as u64) * 64) as ptr, 64);
+            sha_update(st, zero, 1);
+            sha_final(st, dig);
+            sha_hex(dig, want);
+            if !txt_eq(want, 0, 64, pkg_id_hex(ws, i), 0, 64) {
+                bad = bad + 1;
+            }
+        }
+        i = i + 1;
+    }
+    pool = pool;
+    return bad == 0 && seen >= 2;
+}
+
+/// 同一个叶子包, 在一棵**只有叶子**的仓库里和一棵**有带边包**的仓库里, id 必须相同。
+///
+/// 这是抓"分隔符 0 被当成暂存"那类错**唯一**有效的形状。为什么前面两条都不行:
+///   * 逐包对公式: 库内自洽 —— 测试自己算期望值时读的是同一个被污染的字节, 于是
+///     两边一起错、照样相等 (`bad=0`);
+///   * 两棵"组成不同"的仓库: `fixture/store` 与 `fixture/store_v1` **都含 geom**
+///     (带边), 两边污染出来的字节一样, 于是 id 也相同 —— 分辨不出来。
+/// 只有"一边有带边的包、一边没有"才把污染显出来。当初就是靠 `lompi index` 对着
+/// 一个只放 mathutil 的临时仓库比出来的。
+fn test_idn_leaf_id_is_same_with_and_without_an_edged_package() -> bool {
+    let a: ptr = sys_alloc(ws_size() as u64);
+    let b: ptr = sys_alloc(ws_size() as u64);
+    let sa: ptr = ((a as u64) + WS_SCR as u64) as ptr;
+    let sb: ptr = ((b as u64) + WS_SCR as u64) as ptr;
+    let ma: ptr = ((a as u64) + WS_TMP as u64 + 4096) as ptr;
+    let mb: ptr = ((b as u64) + WS_TMP as u64 + 4096) as ptr;
+    let ia: ptr = alloc(64);
+    let ib: ptr = alloc(64);
+    sys_put_lit(sa, "fixture/store");
+    let na: u32 = sto_scan(a, sa);
+    idn_pass1(a, na);
+    if idn_pass2(a, na, ma, 128) != IDN_OK {
+        return false;
+    }
+    let x: u32 = sto_find(a, na, "mathutil", "0.1.0");
+    sys_put_lit(sb, "fixture/iso_solo");
+    let nb: u32 = sto_scan(b, sb);
+    idn_pass1(b, nb);
+    if idn_pass2(b, nb, mb, 128) != IDN_OK {
+        return false;
+    }
+    let y: u32 = sto_find(b, nb, "mathutil", "0.1.0");
+    if x == PKG_NONE || y == PKG_NONE {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < 64 {
+        store8(ia, k, load8(pkg_id_hex(a, x), k) as u8);
+        store8(ib, k, load8(pkg_id_hex(b, y), k) as u8);
+        k = k + 1;
+    }
+    return txt_eq(ia, 0, 64, ib, 0, 64);
+}
+
 pub fn selftest_idn() -> u32 {
     let f: u32 = 0;
     if !test_idn_identity_depends_on_child() { f = f + 1; sys_write_str(1, "  FAIL idn_child\n"); }
     if !test_idn_pass1_hashes_each_package_differently() { f = f + 1; sys_write_str(1, "  FAIL idn_pass1\n"); }
     if !test_idn_pass2_resolves_whole_store() { f = f + 1; sys_write_str(1, "  FAIL idn_pass2\n"); }
     if !test_idn_identity_is_stable_across_runs() { f = f + 1; sys_write_str(1, "  FAIL idn_stable\n"); }
+    if !test_idn_every_leafless_identity_follows_the_formula() { f = f + 1; sys_write_str(1, "  FAIL idn_pure\n"); }
+    if !test_idn_leaf_id_is_same_with_and_without_an_edged_package() { f = f + 1; sys_write_str(1, "  FAIL idn_scratch\n"); }
     if !test_idn_closure_from_geom_pulls_mathutil() { f = f + 1; sys_write_str(1, "  FAIL idn_closure\n"); }
     if !test_idn_missing_dependency_is_reported() { f = f + 1; sys_write_str(1, "  FAIL idn_missing\n"); }
     if !test_idn_cycle_is_detected_not_hung() { f = f + 1; sys_write_str(1, "  FAIL idn_cycle\n"); }

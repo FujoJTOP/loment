@@ -1,0 +1,364 @@
+// std/unionfind.lomt — 并查集 (不相交集合; 按秩合并 + 路径压缩)
+//
+// 为什么需要它: "这两样东西是不是一伙的" 是 Kruskal 最小生成树、图像连通块、
+// 类型等价类、网络连通性判断的共同形状。朴素做法是每次把整组重新标记 (O(n)),
+// 并查集把两条操作都压到**反阿克曼**级 (对任何能写下来的 n 都 < 5, 实际上等于常数)。
+//
+// 布局 (状态在调用方的缓冲里, 头部 16 字节):
+//   [0..4]   n      元素个数
+//   [4..8]   count  当前连通分量数 (初始 = n, 每成功合并一次 -1)
+//   [8..16]  保留
+//   parent 数组: 偏移 16 起, n 个 u32 —— parent[i] == i 表示 i 是根
+//   rank   数组: 偏移 16 + 4n 起, n 个 u32 —— 只有根有意义, 是树高的**上界**
+// 装 n 个元素要 16 + 8n 字节 —— 用 uf_bytes。
+//
+// 复杂度: 单次 find / union 均摊 O(alpha(n))。**两个优化必须一起用才有这个界** ——
+// 只做路径压缩是 O(log n), 只做按秩合并也是 O(log n) (而且是在最坏输入下)。
+//
+// 路径压缩为什么**不递归**: 链可以长到 n (按 0-1, 1-2, 2-3 ... 喂进去就是), n 一大
+// 递归就把栈撑爆, 而这一层没有栈溢出的保护。所以 find 走两趟: 第一趟找根, 第二趟
+// 把路径上每个点直接挂到根上 —— 代价一样是 O(路径长)。
+//
+// 命名: 公开 uf_*, 内部 fu_* (find-union 的倒序, 避开与 uf_ 前缀混在一起)。自检 test_uf_*。
+
+module unionfind
+
+use "mem.lomt"
+
+/// 头部字节数。
+pub const UF_HDR: u32 = 16;
+/// 越界的下标 / 不存在的元素。
+pub const UF_NIL: u32 = 4294967295;
+
+/// 装 n 个元素要多少字节。
+pub fn uf_bytes(n: u32) -> u32 {
+    return UF_HDR + 8 * n;
+}
+
+fn fu_n(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+fn fu_count(ws: ptr) -> u32 {
+    return mem_load32(ws, 4);
+}
+
+fn fu_set_count(ws: ptr, v: u32) {
+    mem_store32(ws, 4, v);
+}
+
+fn fu_par_off(i: u32) -> u32 {
+    return UF_HDR + 4 * i;
+}
+
+fn fu_rank_off(ws: ptr, i: u32) -> u32 {
+    return UF_HDR + 4 * fu_n(ws) + 4 * i;
+}
+
+fn fu_parent(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, fu_par_off(i));
+}
+
+fn fu_set_parent(ws: ptr, i: u32, p: u32) {
+    mem_store32(ws, fu_par_off(i), p);
+}
+
+fn fu_rank(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, fu_rank_off(ws, i));
+}
+
+fn fu_set_rank(ws: ptr, i: u32, r: u32) {
+    mem_store32(ws, fu_rank_off(ws, i), r);
+}
+
+/// 建图: 每个元素各成一组, 分量数 = n。
+pub fn uf_init(ws: ptr, n: u32) {
+    mem_store32(ws, 0, n);
+    mem_store32(ws, 4, n);
+    mem_store32(ws, 8, 0);
+    mem_store32(ws, 12, 0);
+    let i: u32 = 0;
+    while i < n {
+        fu_set_parent(ws, i, i);
+        fu_set_rank(ws, i, 0);
+        i = i + 1;
+    }
+}
+
+pub fn uf_size(ws: ptr) -> u32 {
+    return fu_n(ws);
+}
+
+/// 当前连通分量数。
+pub fn uf_count(ws: ptr) -> u32 {
+    return fu_count(ws);
+}
+
+/// 找 x 所在组的根, **顺带把整条路径压平**。越界给 UF_NIL。
+pub fn uf_find(ws: ptr, x: u32) -> u32 {
+    if x >= fu_n(ws) {
+        return UF_NIL;
+    }
+    // 第一趟: 一路向上找根
+    let r: u32 = x;
+    let go: u32 = 1;
+    while go == 1 {
+        let p: u32 = fu_parent(ws, r);
+        if p == r {
+            go = 0;
+        } else {
+            r = p;
+        }
+    }
+    // 第二趟: 从 x 再走一遍, 把每个点的父亲直接改成根。
+    // 走到"父亲已经是根"就停 —— 上面整条链都已经挂好了。
+    let c: u32 = x;
+    let go2: u32 = 1;
+    while go2 == 1 {
+        let p: u32 = fu_parent(ws, c);
+        if p == r {
+            go2 = 0;
+        } else {
+            fu_set_parent(ws, c, r);
+            c = p;
+        }
+    }
+    return r;
+}
+
+/// 合并 x 与 y 所在的两组。**真的合并了返回 true, 本来就在一组返回 false**。
+pub fn uf_union(ws: ptr, x: u32, y: u32) -> bool {
+    let rx: u32 = uf_find(ws, x);
+    let ry: u32 = uf_find(ws, y);
+    if rx == UF_NIL || ry == UF_NIL {
+        return false;
+    }
+    if rx == ry {
+        return false;
+    }
+    let kx: u32 = fu_rank(ws, rx);
+    let ky: u32 = fu_rank(ws, ry);
+    if kx < ky {
+        fu_set_parent(ws, rx, ry);
+    } else if kx > ky {
+        fu_set_parent(ws, ry, rx);
+    } else {
+        // 同秩: 谁挂谁都不影响复杂度, 固定让 ry 挂到 rx, 并把 rx 的秩 +1。
+        fu_set_parent(ws, ry, rx);
+        fu_set_rank(ws, rx, kx + 1);
+    }
+    fu_set_count(ws, fu_count(ws) - 1);
+    return true;
+}
+
+/// 是否同一组。
+pub fn uf_same(ws: ptr, x: u32, y: u32) -> bool {
+    let rx: u32 = uf_find(ws, x);
+    if rx == UF_NIL {
+        return false;
+    }
+    return rx == uf_find(ws, y);
+}
+
+/// 从 x 到根的边数 (0 = x 自己就是根)。**不做压缩** —— 它的用途正是"看见"树有多深。
+pub fn uf_depth(ws: ptr, x: u32) -> u32 {
+    if x >= fu_n(ws) {
+        return UF_NIL;
+    }
+    let d: u32 = 0;
+    let c: u32 = x;
+    let go: u32 = 1;
+    while go == 1 {
+        let p: u32 = fu_parent(ws, c);
+        if p == c {
+            go = 0;
+        } else {
+            d = d + 1;
+            c = p;
+        }
+    }
+    return d;
+}
+
+/// 全森林里最深的链长 (没有按秩合并时它会退化到 n-1)。
+pub fn uf_max_depth(ws: ptr) -> u32 {
+    let n: u32 = fu_n(ws);
+    let m: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let d: u32 = uf_depth(ws, i);
+        if d > m {
+            m = d;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_uf_init_singletons() -> bool {
+    let ws: ptr = alloc(uf_bytes(5));
+    uf_init(ws, 5);
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 5 {
+        // 每个元素自成一类: 根是自己, 深度 0
+        if uf_find(ws, i) != i || uf_depth(ws, i) != 0 {
+            ok = 0;
+        }
+        if uf_same(ws, i, (i + 1) % 5) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1 && uf_count(ws) == 5 && uf_size(ws) == 5;
+}
+
+fn test_uf_union_and_same_basic() -> bool {
+    let ws: ptr = alloc(uf_bytes(4));
+    uf_init(ws, 4);
+    let merged: bool = uf_union(ws, 0, 1);
+    return merged && uf_same(ws, 0, 1) && uf_same(ws, 1, 0)
+        && uf_same(ws, 0, 2) == false && uf_count(ws) == 3;
+}
+
+fn test_uf_transitivity() -> bool {
+    // a~b, b~c => a~c (等价关系的传递性, 并查集的全部意义)
+    let ws: ptr = alloc(uf_bytes(6));
+    uf_init(ws, 6);
+    uf_union(ws, 0, 1);
+    uf_union(ws, 1, 2);
+    uf_union(ws, 3, 4);
+    return uf_same(ws, 0, 2) && uf_same(ws, 2, 0) && uf_same(ws, 0, 3) == false
+        && uf_same(ws, 5, 0) == false && uf_count(ws) == 3;
+}
+
+fn test_uf_union_repeat_returns_false() -> bool {
+    // 重复 union 不涨也不减分量数 —— 这是最容易写成"永远减一"的一处。
+    let ws: ptr = alloc(uf_bytes(3));
+    uf_init(ws, 3);
+    let a: bool = uf_union(ws, 1, 2);
+    let b: bool = uf_union(ws, 2, 1);
+    let c: bool = uf_union(ws, 1, 1);
+    return a && b == false && c == false && uf_count(ws) == 2;
+}
+
+fn test_uf_count_one_after_connecting_all() -> bool {
+    // 散列检查: 把 12 个点连成一条链, 分量数必须恰好落到 1。
+    let ws: ptr = alloc(uf_bytes(12));
+    uf_init(ws, 12);
+    let i: u32 = 0;
+    while i + 1 < 12 {
+        uf_union(ws, i, i + 1);
+        i = i + 1;
+    }
+    return uf_count(ws) == 1 && uf_same(ws, 0, 11) && uf_same(ws, 5, 7);
+}
+
+fn test_uf_path_compression_shrinks_manual_chain() -> bool {
+    // **真的验路径压缩改变了结构**: 手工搭一条 0<-1<-2<-3<-4<-5<-6<-7 的链
+    // (这正是"没有按秩合并、输入有序 union"会得到的退化形态), 记下终点的深度,
+    // find 一次之后再记 —— 深度必须从 7 掉到 1。
+    // 直接写 parent 是因为 union 自己会压平, 造不出这条深链。
+    let ws: ptr = alloc(uf_bytes(8));
+    uf_init(ws, 8);
+    let i: u32 = 1;
+    while i < 8 {
+        fu_set_parent(ws, i, i - 1);
+        i = i + 1;
+    }
+    fu_set_count(ws, 1);
+    let before: u32 = uf_depth(ws, 7);
+    let root: u32 = uf_find(ws, 7);
+    let after: u32 = uf_depth(ws, 7);
+    // 整条链上的点都该直接挂到根 (不止终点)
+    let mid: u32 = uf_depth(ws, 4);
+    let first: u32 = uf_depth(ws, 1);
+    return root == 0 && before == 7 && after == 1 && mid == 1 && first == 1;
+}
+
+fn test_uf_adversarial_chain_union() -> bool {
+    // 对抗性输入: 按 0-1, 1-2, 2-3 ... 依次 union。朴素实现 (不做按秩合并/压缩)
+    // 会退化成一条 O(n) 的链。这里要求结果正确**且**森林保持浅。
+    let ws: ptr = alloc(uf_bytes(16));
+    uf_init(ws, 16);
+    let i: u32 = 0;
+    while i + 1 < 16 {
+        uf_union(ws, i, i + 1);
+        i = i + 1;
+    }
+    let all_same: u32 = 1;
+    let j: u32 = 1;
+    while j < 16 {
+        if uf_same(ws, 0, j) == false {
+            all_same = 0;
+        }
+        j = j + 1;
+    }
+    // 退化链是 15 层; 两个优化一起用时它必须远小于这个数。
+    return all_same == 1 && uf_count(ws) == 1 && uf_max_depth(ws) <= 4;
+}
+
+fn test_uf_rank_grows_on_equal_merge() -> bool {
+    // 两个秩 1 的树合并 -> 新根秩 2。秩是"树高上界", 它不涨说明按秩合并没生效。
+    let ws: ptr = alloc(uf_bytes(4));
+    uf_init(ws, 4);
+    uf_union(ws, 0, 1);
+    uf_union(ws, 2, 3);
+    let r0: u32 = fu_rank(ws, uf_find(ws, 0));
+    let r2: u32 = fu_rank(ws, uf_find(ws, 2));
+    uf_union(ws, 0, 2);
+    let rroot: u32 = fu_rank(ws, uf_find(ws, 0));
+    return r0 == 1 && r2 == 1 && rroot == 2 && uf_count(ws) == 1;
+}
+
+fn test_uf_find_is_idempotent() -> bool {
+    // 反复 find 不能让根或深度漂移 (第二趟压缩写错时会在这里露出来)。
+    let ws: ptr = alloc(uf_bytes(6));
+    uf_init(ws, 6);
+    uf_union(ws, 0, 1);
+    uf_union(ws, 2, 3);
+    uf_union(ws, 1, 3);
+    let a: u32 = uf_find(ws, 0);
+    let b: u32 = uf_find(ws, 0);
+    // 合并后 3 的父亲是 2, 2 的父亲是 0, 所以 find(3) 之前深度是 2
+    let d_before: u32 = uf_depth(ws, 3);
+    let c: u32 = uf_find(ws, 3);
+    let d_after: u32 = uf_depth(ws, 3);
+    let d_two: u32 = uf_depth(ws, 2);
+    return a == 0 && b == 0 && c == 0 && d_before == 2 && d_after == 1 && d_two == 1;
+}
+
+fn test_uf_find_out_of_range_is_nil() -> bool {
+    let ws: ptr = alloc(uf_bytes(3));
+    uf_init(ws, 3);
+    return uf_find(ws, 3) == UF_NIL && uf_find(ws, 999) == UF_NIL
+        && uf_depth(ws, 3) == UF_NIL && uf_union(ws, 0, 3) == false;
+}
+
+fn test_uf_zero_size_is_inert() -> bool {
+    // n == 0 不能崩 (分配 0 字节缓冲 + init)。
+    let ws: ptr = alloc(uf_bytes(0));
+    uf_init(ws, 0);
+    return uf_size(ws) == 0 && uf_count(ws) == 0 && uf_find(ws, 0) == UF_NIL
+        && uf_max_depth(ws) == 0;
+}
+
+fn test_uf_bytes_layout() -> bool {
+    // 布局常量钉死: 头部 16, 每元素 parent+rank 共 8 字节。
+    return uf_bytes(0) == 16 && uf_bytes(1) == 24 && uf_bytes(10) == 96;
+}
+
+fn test_uf_partial_groups_count() -> bool {
+    // 8 个点分成 {0,1,2} {3,4} {5} {6,7} 四组 —— 分量数与组内/组间判断都要对。
+    let ws: ptr = alloc(uf_bytes(8));
+    uf_init(ws, 8);
+    uf_union(ws, 0, 1);
+    uf_union(ws, 1, 2);
+    uf_union(ws, 3, 4);
+    uf_union(ws, 6, 7);
+    return uf_count(ws) == 4 && uf_same(ws, 0, 2) && uf_same(ws, 3, 4)
+        && uf_same(ws, 6, 7) && uf_same(ws, 2, 3) == false
+        && uf_same(ws, 5, 7) == false && uf_same(ws, 5, 5);
+}

@@ -1,0 +1,306 @@
+// std/fwalk.lomt — linux_dirent64 记录的解析与路径拼接
+//
+// 为什么需要它: `getdents64` 回来的不是"名字数组", 而是**一条条自描述的可变长记录**,
+// 名字挤在固定的 19 字节头后面、长度藏在记录头里。没有这一层, 每个调用方都要自己
+// 数偏移、自己判 `d_reclen` 对齐、自己跳过 `.`/`..` —— 而这几件事每件都能写错一格。
+//
+// **结构 (`struct linux_dirent64`, 布局钉死在这)**:
+//   off  0 : u64 d_ino     (inode 号)
+//   off  8 : i64 d_off     (下一条记录的偏移, 某些文件系统给 0)
+//   off 16 : u16 d_reclen  (**本条**记录的总字节数, 含头与名字的 NUL 与填充)
+//   off 18 : u8  d_type    (DT_REG=8, DT_DIR=4, DT_UNKNOWN=0 ...)
+//   off 19 : char d_name[] (NUL 结尾, **名字在偏移 19** —— 记住这个数)
+// 关键: `d_reclen` 是 **8 字节对齐**的。名字短时后面跟着填充字节, 所以
+// "记录长度 - 19" **不等于**名字长度 —— 名字长度必须扫到 NUL 为止 (见 fw_name_len)。
+//
+// 实测 (PE 垫片): `getdents64` 在这个目标的垫片上**一次只返回一条记录**。所以遍历
+// 循环可以按"处理一条 -> 再要下一条"写, 但**不要**假设缓冲区里一定有多条。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不解析 d_type 到"是不是目录"的语义判断**: 只给原始字节 (fw_d_type)。有些文件
+//     系统一律给 DT_UNKNOWN, 那时要靠 stat, 而 stat 不在本模块职责里。
+//   - **不排序、不去重**: 目录顺序是文件系统给的, 排序是上层策略。
+//   - `fw_join` 补分隔符时**补 `/`** (即使 dir 用的是 `\\`)。要平台原生分隔符请调用方
+//     自己拼 —— 这一层只保证"两段之间恰好一个分隔符"。
+//   - 不校验名字里的 NUL / 超长: 那是调用方对 getName 结果的责任。
+//
+// 命名: 公开 fw_*, 内部 fw_*。自检 test_fwalk_*。
+
+module fwalk
+
+use "mem.lomt"
+
+pub const FW_OK: u32 = 0;
+/// 参数不合法 (缓冲不够 / 非法参数)。
+pub const FW_ERR: u32 = 4294967295;
+/// "没有" (记录里没有名字等)。
+pub const FW_NO: u32 = 4294967294;
+
+/// d_name 相对记录起点的偏移。**这个常量值 19 是 struct 布局算出来的, 不是拍的**。
+pub const FW_NAME_OFF: u32 = 19;
+
+fn fw_is_sep(c: u32) -> bool {
+    return c == 47 || c == 92;
+}
+
+/// 名字相对记录起点的偏移 (就是 FW_NAME_OFF)。带 `rec` 形参纯粹为了与 `fw_name_len`
+/// 对称调用; 偏移是布局常量, 与具体记录无关。
+pub fn fw_name_off(rec: ptr) -> u32 {
+    return FW_NAME_OFF;
+}
+
+/// 本条记录的总长度 (`d_reclen`, 小端 u16)。
+pub fn fw_rec_len(rec: ptr) -> u32 {
+    return mem_load16(rec, 16);
+}
+
+/// `d_type` 原始字节。
+pub fn fw_d_type(rec: ptr) -> u32 {
+    return load8(rec, 18);
+}
+
+/// `d_ino` (小端 u64)。
+pub fn fw_ino(rec: ptr) -> u64 {
+    return mem_load64(rec, 0);
+}
+
+/// 名字长度: **从偏移 19 扫到 NUL**, 上限是 `d_reclen`。
+///
+/// 为什么不能拿 `d_reclen - 19` 当长度: 记录 8 字节对齐, 名字短时尾部有填充 ——
+/// `"abc"` 的记录长 24, `24-19 = 5`, 但真正的名字只有 3 个字节。差的那 2 个字节是
+/// NUL 与填充。写错这一处, 遍历"看起来对", 但拿到的名字会多出乱七八糟的尾巴。
+pub fn fw_name_len(rec: ptr) -> u32 {
+    let lim: u32 = fw_rec_len(rec);
+    let j: u32 = FW_NAME_OFF;
+    while j < lim && load8(rec, j) != 0 {
+        j = j + 1;
+    }
+    return j - FW_NAME_OFF;
+}
+
+/// 名字是不是 `.` 或 `..` (遍历时要跳过的那两个)。
+pub fn fw_skip(np: ptr, o: u32, n: u32) -> bool {
+    if n == 1 {
+        return load8(np, o) == 46;
+    }
+    if n == 2 {
+        return load8(np, o) == 46 && load8(np, o + 1) == 46;
+    }
+    return false;
+}
+
+/// 直接把一条记录判掉 (".", ".." 给 true)。省得调用方每次自己取名字窗口。
+pub fn fw_skip_rec(rec: ptr) -> bool {
+    return fw_skip(rec, FW_NAME_OFF, fw_name_len(rec));
+}
+
+/// 把 `dir` 与 `name` 拼成路径, 写进 `out`, 返回长度。
+///
+/// 规则 (每条都自检过):
+///   - `dl == 0` (空目录) -> 结果就是 name 本身, **不加分隔符**;
+///   - dir 末尾已有 `/` 或 `\\` -> 不再补;
+///   - 否则补一个 `/`。
+/// `out` 至少 `dl + nl + 1` 字节。
+pub fn fw_join(dir: ptr, dl: u32, name: ptr, nl: u32, out: ptr) -> u32 {
+    if dl == 0 {
+        mem_copy(out, 0, name, 0, nl);
+        return nl;
+    }
+    mem_copy(out, 0, dir, 0, dl);
+    let w: u32 = dl;
+    let last: u32 = load8(dir, dl - 1);
+    let has_sep: u32 = 0;
+    if fw_is_sep(last) {
+        has_sep = 1;
+    }
+    if has_sep == 0 {
+        store8(out, w, 47 as u8);
+        w = w + 1;
+    }
+    mem_copy(out, w, name, 0, nl);
+    return w + nl;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn fw_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// hex 文本 -> 字节 (自检夹具用: 记录里有 NUL, 不能写字面量)。
+fn fw_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = fw_hv(str_byte(s, k * 2));
+        let lo: u32 = fw_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 一条 "abc" 记录 (Python struct.pack 出来的真布局, 24 字节, 尾部 1 个填充字节)。
+fn fw_rec_abc() -> str {
+    return "393000000000000000000000000000001800046162630000";
+}
+
+/// 一条 26 字母长名的记录 (48 字节, reclen 正好齐, 无填充)。
+fn fw_rec_long() -> str {
+    return "630000000000000000000000000000003000086162636465666768696a6b6c6d6e6f707172737475767778797a000000";
+}
+
+/// 一条 "abcdefgh" 记录 (d_type=2, 32 字节 —— 名字 8 + NUL 正好到 28, 填充 4 字节)。
+fn fw_rec_eight() -> str {
+    return "0700000000000000000000000000000020000261626364656667680000000000";
+}
+
+fn test_fwalk_name_off() -> bool {
+    return fw_name_off(str_ptr(fw_rec_abc())) == 19 && FW_NAME_OFF == 19;
+}
+
+fn test_fwalk_extract_short_name() -> bool {
+    let rec: ptr = alloc(64);
+    fw_hx(rec, fw_rec_abc());
+    let want: str = "abc";
+    let l: u32 = fw_name_len(rec);
+    return l == 3 && mem_eq(rec, FW_NAME_OFF, str_ptr(want), 0, 3);
+}
+
+fn test_fwalk_name_len_excludes_padding() -> bool {
+    // **错法的照妖镜**: "abc" 记录长 24, 24-19=5, 但名字长度必须是 3。
+    // 若实现拿 reclen-19 当长度, 这条立刻红。
+    let rec: ptr = alloc(64);
+    let n: u32 = fw_hx(rec, fw_rec_abc());
+    let raw: u32 = fw_rec_len(rec) - FW_NAME_OFF;
+    return n == 24 && fw_rec_len(rec) == 24 && raw == 5 && fw_name_len(rec) == 3;
+}
+
+fn test_fwalk_extract_long_name() -> bool {
+    let rec: ptr = alloc(64);
+    let n: u32 = fw_hx(rec, fw_rec_long());
+    let want: str = "abcdefghijklmnopqrstuvwxyz";
+    return n == 48 && fw_rec_len(rec) == 48 && fw_name_len(rec) == 26
+        && mem_eq(rec, FW_NAME_OFF, str_ptr(want), 0, 26);
+}
+
+fn test_fwalk_reclen_is_8_aligned() -> bool {
+    // 三条记录的 reclen 都必须是 8 的倍数 (结构约定; 不是就直接说明夹具或解析错了)。
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    fw_hx(a, fw_rec_abc());
+    fw_hx(b, fw_rec_long());
+    fw_hx(c, fw_rec_eight());
+    return fw_rec_len(a) % 8 == 0 && fw_rec_len(b) % 8 == 0 && fw_rec_len(c) % 8 == 0
+        && fw_rec_len(a) == 24 && fw_rec_len(c) == 32;
+}
+
+fn test_fwalk_ino_and_dtype() -> bool {
+    let rec: ptr = alloc(64);
+    fw_hx(rec, fw_rec_abc());
+    return fw_ino(rec) == 12345 && fw_d_type(rec) == 4;
+}
+
+fn test_fwalk_eight_name_with_padding() -> bool {
+    // 名字 8 个字节后接 NUL, 再 4 个填充 —— 长度必须是 8, 不是 12。
+    let rec: ptr = alloc(64);
+    fw_hx(rec, fw_rec_eight());
+    let want: str = "abcdefgh";
+    return fw_rec_len(rec) == 32 && fw_d_type(rec) == 2 && fw_name_len(rec) == 8
+        && mem_eq(rec, FW_NAME_OFF, str_ptr(want), 0, 8);
+}
+
+fn test_fwalk_skip_dot_entries() -> bool {
+    let dot: ptr = alloc(8);
+    let dotdot: ptr = alloc(8);
+    store8(dot, 0, 46 as u8);
+    store8(dotdot, 0, 46 as u8);
+    store8(dotdot, 1, 46 as u8);
+    return fw_skip(dot, 0, 1) && fw_skip(dotdot, 0, 2);
+}
+
+fn test_fwalk_skip_normal_entries() -> bool {
+    let s1: str = "abc";
+    let s2: str = "a.";
+    let s3: str = "...";
+    let s4: str = "";
+    return fw_skip(str_ptr(s1), 0, 3) == false && fw_skip(str_ptr(s2), 0, 2) == false
+        && fw_skip(str_ptr(s3), 0, 3) == false && fw_skip(str_ptr(s4), 0, 0) == false;
+}
+
+fn test_fwalk_skip_rec() -> bool {
+    // 端到端: 直接从记录上判 —— "." 与 ".." 真记录的 d_type 是 DT_DIR(4)。
+    let d1: ptr = alloc(64);
+    let d2: ptr = alloc(64);
+    let d3: ptr = alloc(64);
+    fw_hx(d1, "010000000000000000000000000000001800042e00000000");
+    fw_hx(d2, "020000000000000000000000000000001800042e2e000000");
+    fw_hx(d3, fw_rec_abc());
+    return fw_skip_rec(d1) && fw_skip_rec(d2) && fw_skip_rec(d3) == false;
+}
+
+fn test_fwalk_join_simple() -> bool {
+    let d: str = "/usr";
+    let nm: str = "bin";
+    let out: ptr = alloc(64);
+    let n: u32 = fw_join(str_ptr(d), 4, str_ptr(nm), 3, out);
+    let want: str = "/usr/bin";
+    return n == 8 && mem_eq(out, 0, str_ptr(want), 0, 8);
+}
+
+fn test_fwalk_join_dir_with_trailing_sep() -> bool {
+    let d: str = "/usr/";
+    let nm: str = "bin";
+    let out: ptr = alloc(64);
+    let n: u32 = fw_join(str_ptr(d), 5, str_ptr(nm), 3, out);
+    let want: str = "/usr/bin";
+    return n == 8 && mem_eq(out, 0, str_ptr(want), 0, 8);
+}
+
+fn test_fwalk_join_empty_dir() -> bool {
+    let nm: str = "bin";
+    let out: ptr = alloc(64);
+    let n: u32 = fw_join(str_ptr(nm), 0, str_ptr(nm), 3, out);
+    let want: str = "bin";
+    return n == 3 && mem_eq(out, 0, str_ptr(want), 0, 3);
+}
+
+fn test_fwalk_join_backslash_variants() -> bool {
+    let out: ptr = alloc(64);
+    // 尾部已有反斜杠 -> 不补
+    let a: str = "a\\";
+    let nm: str = "c";
+    let n1: u32 = fw_join(str_ptr(a), 2, str_ptr(nm), 1, out);
+    let w1: str = "a\\c";
+    let ok1: bool = n1 == 3 && mem_eq(out, 0, str_ptr(w1), 0, 3);
+    // 中间有反斜杠但结尾没有 -> 补 `/`
+    let b: str = "a\\b";
+    let n2: u32 = fw_join(str_ptr(b), 3, str_ptr(nm), 1, out);
+    let w2: str = "a\\b/c";
+    let ok2: bool = n2 == 5 && mem_eq(out, 0, str_ptr(w2), 0, 5);
+    // 根目录 "/" + name -> "/c" (只补一个, 不重复)
+    let r: str = "/";
+    let n3: u32 = fw_join(str_ptr(r), 1, str_ptr(nm), 1, out);
+    let w3: str = "/c";
+    return ok1 && ok2 && n3 == 2 && mem_eq(out, 0, str_ptr(w3), 0, 2);
+}
+
+fn test_fwalk_join_from_record() -> bool {
+    // 端到端: 从一条真记录里取名字窗口, 再与目录拼成完整路径。
+    // 名字指针是 `rec + FW_NAME_OFF` (fw_name_off 给的就是这个偏移)。
+    let rec: ptr = alloc(64);
+    fw_hx(rec, fw_rec_abc());
+    let out: ptr = alloc(64);
+    let d: str = "/tmp";
+    let np: ptr = ((rec as u64) + (fw_name_off(rec) as u64)) as ptr;
+    let n: u32 = fw_join(str_ptr(d), 4, np, fw_name_len(rec), out);
+    let want: str = "/tmp/abc";
+    return n == 8 && mem_eq(out, 0, str_ptr(want), 0, 8);
+}

@@ -1,0 +1,502 @@
+// std/bufio.lomt — 缓冲读: 行切分 + 环形缓冲
+//
+// 为什么要它: 读一个大文件时, 工具真正要的是"一行一行地拿"和"先把读到的搁着、用到
+// 再取"。仓库里这两件事都被各写各的: 行切分散在 lomstatus/lomdoc 里, 环形缓冲散在
+// 流式解析里。这一层把两块收成一处。
+//
+// 两块是**分开的**, 因为它们的错法完全不同:
+//   1. 行切分是**纯逻辑** —— 给定一段字节, 行边界在哪。它是本模块自检的主体。
+//   2. 环形缓冲是**一块工作区 + 游标算术** —— 绕回时的下标取模是唯一会静默错的地方。
+//   3. 真去读 fd 只占一个包装 (`bi_fill_fd`), 且**本机没法验** (见下)。
+//
+// 行游标口径: **逐字抄自 std/line.lomt** —— 行尾 LF(10) 是分隔符; 紧挨 LF 之前的
+// CR(13) 算行尾的一部分而**不算内容** (CRLF 与 LF 得到同样的行); 单独一个 CR 保留为
+// 内容; 末行没有 LF 也算一行; 以 LF 结尾时末尾那个 LF **不多算一行** (与 `wc -l` 同口径)。
+// 为什么不 `use "line.lomt"` 直接调: 它自己 `use "num.lomt"`, 我这边也要 num (打包用),
+// 于是 num 会被两条路径拉进来 —— 菱形导入, 打包版编译器会崩 (std.lomt 头部写明了这个
+// 限制)。所以这里只 `use "num.lomt"`, 口径照抄、代码自持。
+//
+// `bi_line_next` 的输出用调用方给的**两个 u32 出参** (不是打包): 因为行可能长到超过
+// 32 位里塞得下的余量, 而且起点/长度这一对要能和 bi_line_at 的用法对上。返回值则借用
+// line.lomt 的"新游标"语义 (下一次调用的 pos)。两套约定各司其职、都在注释里写死。
+//
+// 本机未验证 (诚实清单):
+//   - `bi_fill_fd` 只发一个 read(0) 系统调用。它的**参数装配**是直白的, 但**调用本身
+//     在本机没跑过** —— 本机是 Windows/PE 垫片, 只实现了 8 个 syscall, 且 fd 语义与
+//     Linux 不同。真读 fd 由消费方的端到端测试覆盖。
+//   - 环形缓冲**不做**超容量覆盖写: 满了就只写进能放下的部分, 返回实际写进去的字节数。
+//     覆盖写会让"丢的到底是最旧还是最新"变成隐式约定, 而这一层宁可让调用方自己看见
+//     丢弃 (返回值 < n 就是丢了)。
+//
+// 命名: 公开 bufio_* 的缩写 `bi_*`, 内部 `rg_*` / `bi_scan`。自检 test_bufio_*。
+
+module bufio
+
+use "mem.lomt"
+use "num.lomt"
+
+/// 失败哨兵。
+pub const BI_ERR: u32 = 4294967295;
+
+/// "没有这一行/这一段" 哨兵 (与 BI_ERR 分开: 一个错, 一个正常到头)。
+pub const BI_NO: u32 = 4294967294;
+
+// ---------------------------------------------------------------- 行切分
+
+/// 从 pos 起扫一行。返回 (下一行起点 << 32) | 本行长度。纯内部, 不分配。
+/// **前条件是 pos < n 且有这么一行** (调用方保证)。
+fn bi_scan(buf: ptr, n: u32, pos: u32) -> u64 {
+    let i: u32 = pos;
+    while i < n {
+        if load8(buf, i) == 10 {
+            let e: u32 = i;
+            if e > pos && load8(buf, e - 1) == 13 {
+                return num_pack2(i + 1, e - 1 - pos); // CRLF: CR 不算内容
+            }
+            return num_pack2(i + 1, e - pos);
+        }
+        i = i + 1;
+    }
+    return num_pack2(n, n - pos); // 末行无换行
+}
+
+/// 取从 `pos` 起的一行。把**起点**写进 `out_off[0]`、**长度**(不含换行与行尾 CR)写进
+/// `out_len[0]`。返回下一行的起点; `pos >= n` (没有这一行) 时返回 `BI_NO` 并把长度
+/// 写成 0。空行是**合法**的 (长度 0), 与"没有这一行"靠返回值区分。
+pub fn bi_line_next(buf: ptr, n: u32, pos: u32, out_off: ptr, out_len: ptr) -> u32 {
+    if pos >= n {
+        mem_store32(out_off, 0, pos);
+        mem_store32(out_len, 0, 0);
+        return BI_NO;
+    }
+    let t: u64 = bi_scan(buf, n, pos);
+    mem_store32(out_off, 0, pos);
+    mem_store32(out_len, 0, num_lo(t));
+    return num_hi(t);
+}
+
+/// 行数。空输入 0 行; 末尾 LF 不多算一行; 中间的空行照算。与 `line_count` 同口径。
+pub fn bi_line_count(buf: ptr, n: u32) -> u32 {
+    let c: u32 = 0;
+    let pos: u32 = 0;
+    while pos < n {
+        let t: u64 = bi_scan(buf, n, pos);
+        let nx: u32 = num_hi(t);
+        c = c + 1;
+        if nx <= pos {
+            pos = n; // 防御: 正常不可能发生 (每步至少前进 1)
+        } else {
+            pos = nx;
+        }
+    }
+    return c;
+}
+
+/// 第 `i` 行 (0 基)。起点/长度同上写进出参; 返回该行之后的位置 (即下一行起点),
+/// 越界返回 `BI_NO`。要"遍历所有行"就直接循环 `bi_line_next`, 这个便利函数是给
+/// "只要第几行"用的。
+pub fn bi_line_at(buf: ptr, n: u32, i: u32, out_off: ptr, out_len: ptr) -> u32 {
+    let pos: u32 = 0;
+    let k: u32 = 0;
+    while k < i && pos < n {
+        let t: u64 = bi_scan(buf, n, pos);
+        let nx: u32 = num_hi(t);
+        if nx <= pos {
+            pos = n;
+        } else {
+            pos = nx;
+        }
+        k = k + 1;
+    }
+    if pos >= n {
+        mem_store32(out_off, 0, pos);
+        mem_store32(out_len, 0, 0);
+        return BI_NO;
+    }
+    return bi_line_next(buf, n, pos, out_off, out_len);
+}
+
+// ---------------------------------------------------------------- 环形缓冲
+//
+// 工作区布局 (调用方给缓冲, 本层一个字节都不 alloc):
+//   @0  cap  u32   容量 (字节, > 0)
+//   @4  len  u32   当前存了多少
+//   @8  head u32   读游标 (下一个要读的下标; 恒 < cap)
+//   @12 数据区 cap 字节 —— 写入位置是 (head+len)%cap, 读位置是 head。
+//
+// 数据区是**环**: 写满一遍后会绕回开头覆盖**已经读走**的位置 (len 已经把它们排除了),
+// 所以"覆盖"只发生在已消费的字节上, 不会踩到没读的。
+
+/// 头部字节数 (`bi_ring_scratch_bytes` 里那个 16)。
+pub const BI_RING_HDR: u32 = 16;
+
+/// 开一个容量 cap 的环形缓冲要多少工作区。
+pub fn bi_ring_scratch_bytes(cap: u32) -> u32 {
+    if cap == 0 {
+        return BI_ERR;
+    }
+    return BI_RING_HDR + cap;
+}
+
+fn rg_cap(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+fn rg_len(ws: ptr) -> u32 {
+    return mem_load32(ws, 4);
+}
+
+fn rg_head(ws: ptr) -> u32 {
+    return mem_load32(ws, 8);
+}
+
+/// 初始化。返回工作区用掉的字节数; cap == 0 报 `BI_ERR`。
+pub fn bi_ring_init(ws: ptr, cap: u32) -> u32 {
+    if cap == 0 {
+        return BI_ERR;
+    }
+    mem_store32(ws, 0, cap);
+    mem_store32(ws, 4, 0);
+    mem_store32(ws, 8, 0);
+    return BI_RING_HDR + cap;
+}
+
+pub fn bi_ring_cap(ws: ptr) -> u32 {
+    return rg_cap(ws);
+}
+
+/// 当前存了几个字节。
+pub fn bi_ring_len(ws: ptr) -> u32 {
+    return rg_len(ws);
+}
+
+/// 还能再写几个字节。
+pub fn bi_ring_free(ws: ptr) -> u32 {
+    return rg_cap(ws) - rg_len(ws);
+}
+
+/// 写入: 最多写进 `bi_ring_free` 个字节, 返回**实际写进去的个数**。
+/// 返回值 < n 就是没全放下 (调用方自己决定是丢还是先读走)。
+pub fn bi_ring_write(ws: ptr, src: ptr, n: u32) -> u32 {
+    let cap: u32 = rg_cap(ws);
+    let len: u32 = rg_len(ws);
+    let f: u32 = cap - len;
+    let k: u32 = n;
+    if k > f {
+        k = f;
+    }
+    let tail: u32 = (rg_head(ws) + len) % cap;
+    let i: u32 = 0;
+    while i < k {
+        let p: u32 = tail + i;
+        let q: u32 = p;
+        if q >= cap {
+            p = q - cap; // 一次减法就够: tail + i < cap + cap
+        } else {
+            p = q;
+        }
+        store8(ws, BI_RING_HDR + p, load8(src, i) as u8);
+        i = i + 1;
+    }
+    mem_store32(ws, 4, len + k);
+    return k;
+}
+
+/// 读出: 最多读 `bi_ring_len` 个字节, 返回**实际读出的个数** (0 = 空)。
+pub fn bi_ring_read(ws: ptr, out: ptr, n: u32) -> u32 {
+    let cap: u32 = rg_cap(ws);
+    let len: u32 = rg_len(ws);
+    let k: u32 = n;
+    if k > len {
+        k = len;
+    }
+    let head: u32 = rg_head(ws);
+    let i: u32 = 0;
+    while i < k {
+        let p: u32 = head + i;
+        let q: u32 = p;
+        if q >= cap {
+            p = q - cap;
+        } else {
+            p = q;
+        }
+        store8(out, i, load8(ws, BI_RING_HDR + p) as u8);
+        i = i + 1;
+    }
+    mem_store32(ws, 8, (head + k) % cap);
+    mem_store32(ws, 4, len - k);
+    return k;
+}
+
+// ---------------------------------------------------------------- fd 填充
+
+/// read(2) 的系统调用号。
+pub const BI_SYS_READ: u64 = 0;
+
+/// 从 fd 读一批到 buf。返回读到的字节数 (0 = EOF), 负数 = 出错。
+///
+/// **本机未验证**: 这是唯一碰 syscall 的函数。本机是 Windows/PE 垫片, read 的 fd 语义
+/// 与 Linux 不同, 所以这里只保证"参数装配正确" (fd 走 u64, buf 走地址, cap 走长度),
+/// 真调用由消费方的端到端测试覆盖。
+pub fn bi_fill_fd(fd: i64, buf: ptr, cap: u64) -> i64 {
+    return syscall4(BI_SYS_READ, fd as u64, buf as u64, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn sc(d: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(d, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_bufio_line_lf() -> bool {
+    // "ab\ncd": 第 0 行 [0,2), 游标到 3; 第 1 行 [3,5) 无换行, 游标 5 (== n)。
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = sc(b, "ab\ncd");
+    let p1: u32 = bi_line_next(b, n, 0, oo, ol);
+    let ok1: bool = p1 == 3 && mem_load32(oo, 0) == 0 && mem_load32(ol, 0) == 2;
+    let p2: u32 = bi_line_next(b, n, p1, oo, ol);
+    let ok2: bool = p2 == 5 && mem_load32(oo, 0) == 3 && mem_load32(ol, 0) == 2;
+    let p3: u32 = bi_line_next(b, n, p2, oo, ol);
+    return ok1 && ok2 && p3 == BI_NO && mem_load32(ol, 0) == 0;
+}
+
+fn test_bufio_line_crlf_excludes_cr() -> bool {
+    // "ab\r\ncd": CR 必须**逐字节构造** —— 转义表没有 \r, 写 "\r" 会退化成字母 r。
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    store8(b, 2, 13 as u8); // CR
+    store8(b, 3, 10 as u8); // LF
+    store8(b, 4, 99 as u8);
+    let p1: u32 = bi_line_next(b, 5, 0, oo, ol);
+    return p1 == 4 && mem_load32(ol, 0) == 2
+        && mem_load32(oo, 0) == 0
+        && bi_line_next(b, 5, p1, oo, ol) == 5 && mem_load32(ol, 0) == 1;
+}
+
+fn test_bufio_line_solo_cr_is_content() -> bool {
+    // 单独一个 CR (不是 CRLF) 保留在内容里 —— 与 io_strip_cr 同口径。
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 13 as u8);
+    store8(b, 2, 98 as u8);
+    let p1: u32 = bi_line_next(b, 3, 0, oo, ol);
+    return p1 == 3 && mem_load32(ol, 0) == 3;
+}
+
+fn test_bufio_line_last_without_newline() -> bool {
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = sc(b, "abc");
+    return bi_line_next(b, n, 0, oo, ol) == 3 && mem_load32(ol, 0) == 3;
+}
+
+fn test_bufio_line_empty_lines_are_lines() -> bool {
+    // "\n\n"  = 两行空的; "a\n\nb" = 三行, 中间一行长度 0。
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = sc(b, "\n\n");
+    let p1: u32 = bi_line_next(b, n, 0, oo, ol);
+    let ok1: bool = mem_load32(ol, 0) == 0 && p1 == 1;
+    let p2: u32 = bi_line_next(b, n, p1, oo, ol);
+    let ok2: bool = mem_load32(ol, 0) == 0 && p2 == 2;
+    let c: ptr = alloc(16);
+    let m: u32 = sc(c, "a\n\nb");
+    let l1: u32 = bi_line_count(c, m);
+    let l2: u32 = bi_line_at(c, m, 1, oo, ol);
+    // 第 1 行是空行 "": 起点 2 长度 0, 它**之后**的位置是 3。
+    return ok1 && ok2 && bi_line_next(b, n, p2, oo, ol) == BI_NO
+        && l1 == 3 && l2 == 3 && mem_load32(oo, 0) == 2 && mem_load32(ol, 0) == 0;
+}
+
+fn test_bufio_line_empty_input() -> bool {
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    return bi_line_count(b, 0) == 0 && bi_line_next(b, 0, 0, oo, ol) == BI_NO
+        && mem_load32(ol, 0) == 0 && bi_line_at(b, 0, 0, oo, ol) == BI_NO;
+}
+
+fn test_bufio_line_count_wc_l_style() -> bool {
+    // 末尾 LF 不多算一行; 中间空行照算。这几条也顺手把 bi_line_count 与逐次 next 对齐。
+    let b: ptr = alloc(16);
+    let n: u32 = sc(b, "a\nb\nc\n");
+    let m: u32 = sc(b, "a\nb\nc");
+    let e: u32 = sc(b, "x");
+    return bi_line_count(b, n) == 3 && bi_line_count(b, m) == 3 && bi_line_count(b, e) == 1;
+}
+
+fn test_bufio_line_count_crlf() -> bool {
+    // CRLF 文本: 3 行, 每行内容不含 CR。
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 13 as u8);
+    store8(b, 2, 10 as u8);
+    store8(b, 3, 98 as u8);
+    store8(b, 4, 13 as u8);
+    store8(b, 5, 10 as u8);
+    let n: u32 = 6;
+    let p1: u32 = bi_line_next(b, n, 0, oo, ol);
+    let ln: u32 = bi_line_count(b, n);
+    return ln == 2 && p1 == 3 && mem_load32(ol, 0) == 1;
+}
+
+fn test_bufio_line_at_nth() -> bool {
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = sc(b, "aa\nbbb\nc");
+    let p: u32 = bi_line_at(b, n, 1, oo, ol);
+    let ok1: bool = mem_load32(oo, 0) == 3 && mem_load32(ol, 0) == 3 && p == 7;
+    let p2: u32 = bi_line_at(b, n, 2, oo, ol);
+    let ok2: bool = mem_load32(oo, 0) == 7 && mem_load32(ol, 0) == 1 && p2 == n;
+    return ok1 && ok2;
+}
+
+fn test_bufio_line_at_out_of_range_is_no() -> bool {
+    let b: ptr = alloc(16);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = sc(b, "aa\nbb");
+    return bi_line_at(b, n, 2, oo, ol) == BI_NO && mem_load32(ol, 0) == 0
+        && bi_line_at(b, n, 99, oo, ol) == BI_NO;
+}
+
+fn test_bufio_line_iter_covers_exactly() -> bool {
+    // 不变量: 每步 (长度 + 行尾占的字节) 加起来正好是 n。行尾 LF 占 1, CRLF 占 2, 末行占 0。
+    let b: ptr = alloc(32);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 13 as u8);
+    store8(b, 2, 10 as u8);
+    store8(b, 3, 10 as u8);
+    store8(b, 4, 98 as u8);
+    let n: u32 = 5;
+    let pos: u32 = 0;
+    let sum: u32 = 0;
+    let rows: u32 = 0;
+    while pos < n {
+        let nxt: u32 = bi_line_next(b, n, pos, oo, ol);
+        sum = sum + mem_load32(ol, 0) + (nxt - pos - mem_load32(ol, 0));
+        rows = rows + 1;
+        if nxt <= pos {
+            pos = n;
+        } else {
+            pos = nxt;
+        }
+    }
+    return rows == 3 && sum == n && bi_line_count(b, n) == rows;
+}
+
+fn test_bufio_ring_init_and_accounting() -> bool {
+    let ws: ptr = alloc(64);
+    let r: u32 = bi_ring_init(ws, 32);
+    return r == 48 && bi_ring_cap(ws) == 32 && bi_ring_len(ws) == 0
+        && bi_ring_free(ws) == 32 && bi_ring_scratch_bytes(32) == 48
+        && bi_ring_init(ws, 0) == BI_ERR && bi_ring_scratch_bytes(0) == BI_ERR;
+}
+
+fn test_bufio_ring_write_read_roundtrip() -> bool {
+    let ws: ptr = alloc(64);
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    bi_ring_init(ws, 32);
+    let n: u32 = sc(src, "hello");
+    let w: u32 = bi_ring_write(ws, src, n);
+    let ok1: bool = w == 5 && bi_ring_len(ws) == 5 && bi_ring_free(ws) == 27;
+    let r: u32 = bi_ring_read(ws, out, 5);
+    let ok2: bool = r == 5 && mem_eq(out, 0, src, 0, 5) && bi_ring_len(ws) == 0;
+    let r2: u32 = bi_ring_read(ws, out, 5);
+    return ok1 && ok2 && r2 == 0;
+}
+
+fn test_bufio_ring_wraparound_order() -> bool {
+    // 关键一条: 写 -> 读一部分 -> 再写, 让写入绕回数据区开头, 读出必须仍是**先进先出**。
+    // cap=8; 写 "abcdefgh"(满) -> 读 5 (剩 "fgh", head=5) -> 写 "XY" 落在下标 13%8=5,14%8=6
+    // (即覆盖已读走的 'a','b' 位置) -> 顺序应读出 "fghXY"。
+    let ws: ptr = alloc(64);
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    bi_ring_init(ws, 8);
+    sc(src, "abcdefgh");
+    let w1: u32 = bi_ring_write(ws, src, 8);
+    let r1: u32 = bi_ring_read(ws, out, 5);
+    let ok1: bool = w1 == 8 && r1 == 5 && mem_eq(out, 0, src, 0, 5)
+        && bi_ring_len(ws) == 3 && bi_ring_free(ws) == 5;
+    let src2: ptr = alloc(8);
+    sc(src2, "XY");
+    let w2: u32 = bi_ring_write(ws, src2, 2);
+    let r2: u32 = bi_ring_read(ws, out, 8);
+    let ok2: bool = w2 == 2 && r2 == 5 && load8(out, 0) == 102 && load8(out, 1) == 103
+        && load8(out, 2) == 104 && load8(out, 3) == 88 && load8(out, 4) == 89;
+    return ok1 && ok2 && bi_ring_len(ws) == 0;
+}
+
+fn test_bufio_ring_write_beyond_capacity_truncates() -> bool {
+    // 满了就只写进能放下的: 返回实际写入数, 剩下的**留在源里** (返回值 < n 就是信号)。
+    let ws: ptr = alloc(64);
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    bi_ring_init(ws, 4);
+    let n: u32 = sc(src, "abcdefg");
+    let w: u32 = bi_ring_write(ws, src, n);
+    let ok1: bool = w == 4 && bi_ring_len(ws) == 4 && bi_ring_free(ws) == 0;
+    let w2: u32 = bi_ring_write(ws, src, n);
+    let ok2: bool = w2 == 0; // 一点都放不下
+    let r: u32 = bi_ring_read(ws, out, 4);
+    return ok1 && ok2 && r == 4 && mem_eq(out, 0, src, 0, 4);
+}
+
+fn test_bufio_ring_capacity_one() -> bool {
+    // cap=1 是最容易出取模错的边界: head 恒为 0, 写完读走再写。
+    let ws: ptr = alloc(32);
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    bi_ring_init(ws, 1);
+    store8(src, 0, 65 as u8);
+    let w1: u32 = bi_ring_write(ws, src, 1);
+    let w2: u32 = bi_ring_write(ws, src, 1);
+    let r1: u32 = bi_ring_read(ws, out, 1);
+    let v1: u32 = load8(out, 0); // 必须在 r2 覆盖 out 之前取出来
+    store8(src, 0, 66 as u8);
+    let w3: u32 = bi_ring_write(ws, src, 1);
+    let r2: u32 = bi_ring_read(ws, out, 1);
+    return w1 == 1 && w2 == 0 && r1 == 1 && v1 == 65 && w3 == 1
+        && r2 == 1 && load8(out, 0) == 66;
+}
+
+fn test_bufio_ring_read_partial() -> bool {
+    // 要 10 个但只有 3 个: 读出 3 个, 游标只前进 3。
+    let ws: ptr = alloc(64);
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    bi_ring_init(ws, 16);
+    sc(src, "abc");
+    bi_ring_write(ws, src, 3);
+    let r: u32 = bi_ring_read(ws, out, 10);
+    return r == 3 && load8(out, 2) == 99 && bi_ring_len(ws) == 0 && bi_ring_free(ws) == 16;
+}
+
+fn test_bufio_fill_fd_param_assembly() -> bool {
+    // bi_fill_fd 本身没法在本机验 (见文件头诚实清单)。这里只钉住**要传给 syscall 的
+    // 那个系统调用号**和包装的签名形状 —— 号错了端到端会读到别的 fd 语义。
+    return BI_SYS_READ == 0 && BI_ERR == 4294967295 && BI_NO == 4294967294
+        && BI_RING_HDR == 16;
+}

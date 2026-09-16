@@ -1,0 +1,708 @@
+// std/f64fmt.lomt — 浮点的十进制文本 (dtoa)
+//
+// 为什么这一层最容易写错: `0.1` 在二进制里是无限循环小数, 打印成十进制要**精确**
+// 决定第几位该进位。拿 log10 估个指数再乘的做法会在某些数值上差一位, 而那种错
+// 只在特定输入上出现, 极难查。这里走完全精确的路:
+//
+//   x = M x 2^E
+//     E >= 0 -> 值 = M x 2^E, 一个精确的整数
+//     E <  0 -> 值 = M x 5^(-E) / 10^(-E) —— 分子是精确整数, 分母只是**小数点位置**
+//   所以 x 的完整十进制展开是**有限位**, 可以用大整数全算出来, 不用任何近似。
+//
+// 三种输出:
+//   f64fmt_fixed    固定小数位数 (就近到偶数)
+//   f64fmt_sci      科学计数法, 指定位有效数字
+//   f64fmt_shortest 能往返的最短表示 —— 判据是"读回来还是不是原来那个 double",
+//                   而判定本身也是精确的 (交叉相乘比大整数, 不做除法)
+//
+// 已知缺口 (诚实写明): **反向** (十进制 -> double) 没做。它需要大整数**除法**,
+// 而这一层刻意只用乘法。等 T7 的 JSON/TOML 真正需要时再补, 到时叫 f64fmt_parse。
+//
+// 临时区: 由调用方给 `f64fmt_scratch_bytes()` 字节。语言里拿不到"局部数组的地址",
+// 所以任何缓冲都只能从外面来 —— 这一层的分区偏移都写死在下面。
+//
+// 命名: 公开 f64fmt_*, 内部 ff_*。自检 test_f64fmt_*。
+
+module f64fmt
+
+use "f64.lomt"
+use "f64bits.lomt"
+use "bigint.lomt"
+use "mem.lomt"
+
+/// 大整数肢体重数。
+///
+/// 最大的一块是 `M x 5^1074` (次正规数, k 最大 1074): 约 2547 位 -> 80 个肢体。
+/// 比较时的交叉相乘两侧都到不了这个量级 (右边最多 ~2^1130)。
+/// **不是** 160 —— 临时区越小, 一个文件里能跑的测试越多, 而 bump 堆一共只有 64 KiB。
+pub const F64FMT_LIMBS: u32 = 96;
+/// 一个槽的字节数 (4 字节长度 + 96 个 u32)。
+pub const F64FMT_SLOT: u32 = 388;
+
+pub const F64FMT_OFF_N: u32 = 0;      // 精确整数 (M 或 M x 5^k)
+pub const F64FMT_OFF_A: u32 = 388;    // 中间结果 / 比较左
+pub const F64FMT_OFF_B: u32 = 776;    // 比较右
+pub const F64FMT_OFF_C: u32 = 1164;   // 小格子: [0]=k [4]=exp10 [8]=exp0
+pub const F64FMT_OFF_DIG: u32 = 1180; // 完整十进制展开 (次正规时 ~767 位) / 舍入结果
+pub const F64FMT_OFF_TMP: u32 = 2268; // bigint_to_dec 的临时区
+
+/// 调用方要给的临时区字节数。
+pub fn f64fmt_scratch_bytes() -> u32 {
+    return 4352;
+}
+
+/// 临时区内的偏移 -> ptr。
+///
+/// 不能写 `sc + OFF`: 指针加整数在 Rust 路径上是
+/// `E0369 cannot add {integer} to *mut u8` (实测)。转成整数再加、再转回来, 两条路径都过。
+fn ff_at(sc: ptr, off: u32) -> ptr {
+    return ((sc as u64) + (off as u64)) as ptr;
+}
+
+fn ff_k_cell(sc: ptr) -> ptr {
+    return ff_at(sc, F64FMT_OFF_C);
+}
+
+// ------------------------------------------------------------------ 精确展开
+
+/// 把 x (**必须是有限非零, 且已取绝对值**) 的完整十进制展开写进 OFF_DIG, 返回位数。
+/// 值 = digits[0..nd) x 10^(-k); k 与 exp10 分别写进 OFF_C 的 [0] 与 [4], [8] 存一份原始 exp10。
+fn ff_exact_digits(x: u64, sc: ptr) -> u32 {
+    let m: u64 = f64_mant53(x);
+    let e: i64 = f64_exp_lsb(x);
+    let n: ptr = ff_at(sc, F64FMT_OFF_N);
+    let t: ptr = ff_at(sc, F64FMT_OFF_A);
+    bigint_from_u64(n, F64FMT_LIMBS, m);
+    let k: u32 = 0;
+    if e < 0 {
+        k = (0 as i64 - e) as u32;
+        bigint_mul_pow5(t, F64FMT_LIMBS, n, k);
+    } else {
+        k = 0;
+        bigint_shl_bits(t, F64FMT_LIMBS, n, e as u32);
+    }
+    let nd: u32 = bigint_to_dec(ff_at(sc, F64FMT_OFF_DIG), 0, t, ff_at(sc, F64FMT_OFF_TMP), F64FMT_LIMBS);
+    let exp10: i64 = (nd as i64 - 1) - (k as i64);
+    let c: ptr = ff_k_cell(sc);
+    mem_store32(c, 0, k);
+    mem_store32(c, 4, exp10 as u32);
+    mem_store32(c, 8, exp10 as u32);
+    return nd;
+}
+
+fn ff_digit_byte(d: ptr, nd: u32, i: i64) -> u32 {
+    if i < 0 {
+        return 48;
+    }
+    let u: u32 = i as u32;
+    if u < nd {
+        return load8(d, u);
+    }
+    return 48;
+}
+
+/// 从 i 起到 nd 有没有非零数字。
+fn ff_any_nonzero(d: ptr, i: u32, nd: u32) -> bool {
+    let j: u32 = i;
+    while j < nd {
+        if load8(d, j) != 48 {
+            return true;
+        }
+        j = j + 1;
+    }
+    return false;
+}
+
+/// 把 digits[0..nd) 就地舍到 sig 位有效数字, 返回新的位数。
+/// 新的 exp10 写回 OFF_C 的 [4]。
+///
+/// 舍入是**就近到偶数**: 正好落在中点上时看保留的最后一位的奇偶 ——
+/// 这条正是 f64 自己的默认舍入, 两边一致才不会出现"打印再读回来差一个 ULP"。
+fn ff_round_to(d: ptr, nd: u32, sig: u32, sc: ptr) -> u32 {
+    let c: ptr = ff_k_cell(sc);
+    let exp10: i64 = mem_load32(c, 8) as i32 as i64;
+    if nd <= sig {
+        mem_store32(c, 4, exp10 as u32);
+        return nd;
+    }
+    let up: bool = ff_should_round_up(d, nd, sig);
+    if up == false {
+        mem_store32(c, 4, exp10 as u32);
+        return sig;
+    }
+    let i: u32 = sig;
+    let stopped: u32 = 0;
+    while i > 0 && stopped == 0 {
+        i = i - 1;
+        let v: u32 = load8(d, i) - 48;
+        if v == 9 {
+            store8(d, i, 48 as u8);
+        } else {
+            store8(d, i, (48 + v + 1) as u8);
+            mem_store32(c, 4, exp10 as u32);
+            return sig;
+        }
+    }
+    // 连最高位都进位了: 变成 10^sig, 指数 +1, 数字是 "1" 后跟 sig-1 个 0。
+    store8(d, 0, 49 as u8);
+    let j: u32 = 1;
+    while j < sig {
+        store8(d, j, 48 as u8);
+        j = j + 1;
+    }
+    mem_store32(c, 4, (exp10 + 1) as u32);
+    return sig;
+}
+
+fn ff_should_round_up(d: ptr, nd: u32, sig: u32) -> bool {
+    let c: u32 = load8(d, sig);
+    if c > 53 {
+        return true;
+    }
+    if c < 53 {
+        return false;
+    }
+    if ff_any_nonzero(d, sig + 1, nd) {
+        return true;
+    }
+    let last: u32 = load8(d, sig - 1) - 48;
+    return (last % 2) == 1;
+}
+
+// ------------------------------------------------------------------ 往返判定
+
+/// 比较 (digits x 10^e10) 与 (m x 2^ex)。1 = 左大, 0 = 相等, 2 = 左小。
+///
+/// 两边同时乘 10^max(0,-e10) 与 2^max(0,-ex), 于是都成了整数, 再比大整数。
+/// **只用乘法** —— 大整数除法是这一层刻意避开的东西。
+fn ff_cmp_dec_vs_bin(d: ptr, nd: u32, e10: i64, m: u64, ex: i64, sc: ptr) -> u32 {
+    let d10: u32 = 0;
+    if e10 < 0 {
+        d10 = (0 as i64 - e10) as u32;
+    }
+    let s2: u32 = 0;
+    if ex < 0 {
+        s2 = (0 as i64 - ex) as u32;
+    }
+    let l: ptr = ff_at(sc, F64FMT_OFF_A);
+    let r: ptr = ff_at(sc, F64FMT_OFF_B);
+    let tmp: ptr = ff_at(sc, F64FMT_OFF_N);
+    let e10p: i64 = e10 + (d10 as i64);
+    let exp2: i64 = ex + (s2 as i64);
+    bigint_from_dec(l, F64FMT_LIMBS, d, 0, nd);
+    if e10p > 0 {
+        bigint_mul_pow10(l, F64FMT_LIMBS, l, e10p as u32);
+    }
+    if s2 > 0 {
+        bigint_shl_bits(tmp, F64FMT_LIMBS, l, s2);
+        bigint_copy(l, F64FMT_LIMBS, tmp);
+    }
+    bigint_from_u64(r, F64FMT_LIMBS, m);
+    if d10 > 0 {
+        bigint_mul_pow10(r, F64FMT_LIMBS, r, d10);
+    }
+    if exp2 > 0 {
+        bigint_shl_bits(tmp, F64FMT_LIMBS, r, exp2 as u32);
+        bigint_copy(r, F64FMT_LIMBS, tmp);
+    }
+    return bigint_cmp(l, r);
+}
+
+/// 十进制 (digits, exp10) 读回 double 之后还是不是 x ?
+///
+/// 夹逼判据: x 到相邻可表示值的距离是 2^(ex-1) (ex 是尾数最低位的权重)。
+/// 落在 (x-半, x+半) 内就回到 x; 正好落在边界上时, **到偶数**那一侧才赢。
+fn ff_reparses(x: u64, d: ptr, nd: u32, exp10: i64, sc: ptr) -> bool {
+    let e10: i64 = exp10 - (nd as i64) + 1;
+    let m: u64 = f64_mant53(x);
+    let ex: i64 = f64_exp_lsb(x);
+    let half_m: u64 = m * 2;
+    let half_ex: i64 = ex - 1;
+    let even: bool = (m % 2) == 0;
+    let c0: u32 = ff_cmp_dec_vs_bin(d, nd, e10, m, ex, sc);
+    if c0 == 0 {
+        return true;
+    }
+    if c0 == 1 {
+        let cu: u32 = ff_cmp_dec_vs_bin(d, nd, e10, half_m + 1, half_ex, sc);
+        if cu == 2 {
+            return true;
+        }
+        if cu == 0 {
+            return even;
+        }
+        return false;
+    }
+    let cd: u32 = ff_cmp_dec_vs_bin(d, nd, e10, half_m - 1, half_ex, sc);
+    if cd == 1 {
+        return true;
+    }
+    if cd == 0 {
+        return even;
+    }
+    return false;
+}
+
+// ------------------------------------------------------------------ 输出小工具
+
+fn ff_put(out: ptr, o: u32, c: u32) -> u32 {
+    store8(out, o, c as u8);
+    return o + 1;
+}
+
+fn ff_put_str(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+/// 无符号十进制 (指数位用), 不补前导零。
+fn ff_put_uint(out: ptr, o: u32, v: u32) -> u32 {
+    let d: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        d = d + 1;
+    }
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < d {
+        let cur: u32 = v;
+        let j: u32 = d - 1 - i;
+        let k: u32 = 0;
+        while k < j {
+            cur = cur / 10;
+            k = k + 1;
+        }
+        p = ff_put(out, p, 48 + (cur % 10));
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 特殊值 (nan / inf) 的输出, 返回**结束偏移**; 不是特殊值时返回 0。
+fn ff_specials(out: ptr, o: u32, x: u64) -> u32 {
+    if f64bits_is_nan(x) {
+        let s: str = "nan";
+        return ff_put_str(out, o, s);
+    }
+    if f64bits_is_inf(x) {
+        if f64bits_is_negative(x) {
+            let s2: str = "-inf";
+            return ff_put_str(out, o, s2);
+        }
+        let s3: str = "inf";
+        return ff_put_str(out, o, s3);
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------ 三种输出
+
+/// 固定小数位数 (after 位), 就近到偶数。
+pub fn f64fmt_fixed(out: ptr, o: u32, x: u64, after: u32, sc: ptr) -> u32 {
+    let sp: u32 = ff_specials(out, o, x);
+    if sp != 0 {
+        return sp - o;
+    }
+    let p: u32 = o;
+    let s: u32 = 0;
+    if f64bits_sign(x) == 1 {
+        s = ff_put(out, p, 45);
+    } else {
+        s = p;
+    }
+    if f64bits_is_zero(x) {
+        return ff_zero_fixed(out, s, after) - o;
+    }
+    let nd: u32 = ff_exact_digits(f64bits_abs(x), sc);
+    let c: ptr = ff_k_cell(sc);
+    let exp10: i64 = mem_load32(c, 8) as i32 as i64;
+    let sig: i64 = exp10 + 1 + (after as i64);
+    if sig <= 0 {
+        // 整个值都小于半个 10^-after -> 舍成 0
+        return ff_zero_fixed(out, s, after) - o;
+    }
+    let d: ptr = ff_at(sc, F64FMT_OFF_DIG);
+    let nd2: u32 = ff_round_to(d, nd, sig as u32, sc);
+    let e2: i64 = mem_load32(c, 4) as i32 as i64;
+    return ff_emit_fixed(out, s, d, nd2, e2, after) - o;
+}
+
+fn ff_zero_fixed(out: ptr, o: u32, after: u32) -> u32 {
+    let p: u32 = ff_put(out, o, 48);
+    if after == 0 {
+        return p;
+    }
+    let p2: u32 = ff_put(out, p, 46);
+    let q: u32 = p2;
+    let i: u32 = 0;
+    while i < after {
+        q = ff_put(out, q, 48);
+        i = i + 1;
+    }
+    return q;
+}
+
+/// 定点排布: 整数部分 + '.' + after 位。
+/// 输出位置 j 对应的十进制指数是 exp10 - j, 于是它在数字串里的下标就是 j ——
+/// 越界一律补 '0' (整数部分缺高位、小数部分缺低位都走这一条)。
+fn ff_emit_fixed(out: ptr, o: u32, d: ptr, nd: u32, exp10: i64, after: u32) -> u32 {
+    let p: u32 = o;
+    if exp10 < 0 {
+        p = ff_put(out, p, 48);
+    } else {
+        let j: i64 = 0;
+        while j <= exp10 {
+            p = ff_put(out, p, ff_digit_byte(d, nd, j));
+            j = j + 1;
+        }
+    }
+    if after == 0 {
+        return p;
+    }
+    p = ff_put(out, p, 46);
+    let m: u32 = 0;
+    let base: i64 = exp10 + 1;
+    while m < after {
+        p = ff_put(out, p, ff_digit_byte(d, nd, base + (m as i64)));
+        m = m + 1;
+    }
+    return p;
+}
+
+/// 科学计数法, sig 位有效数字。
+pub fn f64fmt_sci(out: ptr, o: u32, x: u64, sig: u32, sc: ptr) -> u32 {
+    let sp: u32 = ff_specials(out, o, x);
+    if sp != 0 {
+        return sp - o;
+    }
+    let p: u32 = o;
+    let s: u32 = 0;
+    if f64bits_sign(x) == 1 {
+        s = ff_put(out, p, 45);
+    } else {
+        s = p;
+    }
+    if f64bits_is_zero(x) {
+        return ff_sci_zero(out, s, sig) - o;
+    }
+    let nd: u32 = ff_exact_digits(f64bits_abs(x), sc);
+    let c: ptr = ff_k_cell(sc);
+    let d: ptr = ff_at(sc, F64FMT_OFF_DIG);
+    let nd2: u32 = ff_round_to(d, nd, sig, sc);
+    let exp10: i64 = mem_load32(c, 4) as i32 as i64;
+    let q: u32 = ff_put(out, s, ff_digit_byte(d, nd2, 0));
+    let q2: u32 = 0;
+    if sig > 1 {
+        let q3: u32 = ff_put(out, q, 46);
+        let i: u32 = 1;
+        let r: u32 = q3;
+        while i < sig {
+            r = ff_put(out, r, ff_digit_byte(d, nd2, i as i64));
+            i = i + 1;
+        }
+        q2 = r;
+    } else {
+        q2 = q;
+    }
+    let e: u32 = ff_put(out, q2, 101); // 'e'
+    let e2: u32 = 0;
+    let mag: i64 = exp10;
+    if exp10 < 0 {
+        e2 = ff_put(out, e, 45);
+        mag = 0 as i64 - exp10;
+    } else {
+        e2 = ff_put(out, e, 43);
+    }
+    return ff_put_uint(out, e2, mag as u32) - o;
+}
+
+fn ff_sci_zero(out: ptr, o: u32, sig: u32) -> u32 {
+    let p: u32 = ff_put(out, o, 48);
+    let q: u32 = 0;
+    if sig > 1 {
+        let p2: u32 = ff_put(out, p, 46);
+        let i: u32 = 1;
+        let r: u32 = p2;
+        while i < sig {
+            r = ff_put(out, r, 48);
+            i = i + 1;
+        }
+        q = r;
+    } else {
+        q = p;
+    }
+    let a: u32 = ff_put(out, q, 101);
+    let b: u32 = ff_put(out, a, 43);
+    return ff_put(out, b, 48);
+}
+
+/// 最短的能往返的表示。
+pub fn f64fmt_shortest(out: ptr, o: u32, x: u64, sc: ptr) -> u32 {
+    let sp: u32 = ff_specials(out, o, x);
+    if sp != 0 {
+        return sp - o;
+    }
+    let p: u32 = o;
+    let s: u32 = 0;
+    if f64bits_sign(x) == 1 {
+        s = ff_put(out, p, 45);
+    } else {
+        s = p;
+    }
+    if f64bits_is_zero(x) {
+        return ff_put(out, s, 48) - o;
+    }
+    let ax: u64 = f64bits_abs(x);
+    let c: ptr = ff_k_cell(sc);
+    let d: ptr = ff_at(sc, F64FMT_OFF_DIG);
+    let sig: u32 = 1;
+    let done: u32 = 0;
+    let used: u32 = 0;
+    while sig <= 17 && done == 0 {
+        // 每轮都从**原始展开**重新来: 上一轮的舍入已经改过数字了, 所以这里重算一遍
+        // 而不是拷一份留着 —— 临时区越小越能多跑几条测试。
+        let nd: u32 = ff_exact_digits(ax, sc);
+        let nd2: u32 = ff_round_to(d, nd, sig, sc);
+        let e10: i64 = mem_load32(c, 4) as i32 as i64;
+        if ff_reparses(ax, d, nd2, e10, sc) {
+            done = 1;
+            used = nd2;
+            mem_store32(c, 8, e10 as u32);
+        } else {
+            sig = sig + 1;
+        }
+    }
+    if done == 0 {
+        // 17 位一定够 (double 的有效位数上限), 走到这里说明前面哪步错了。
+        return 0;
+    }
+    let exp10: i64 = mem_load32(c, 8) as i32 as i64;
+    if exp10 >= -5 && exp10 <= 16 {
+        return ff_emit_plain(out, s, d, used, exp10) - o;
+    }
+    return ff_emit_sci_from(out, s, d, used, exp10) - o;
+}
+
+/// 直排: 按 exp10 决定小数点的位置, 不补无意义的零。
+fn ff_emit_plain(out: ptr, o: u32, d: ptr, nd: u32, exp10: i64) -> u32 {
+    let p: u32 = o;
+    if exp10 < 0 {
+        p = ff_put(out, p, 48);
+        p = ff_put(out, p, 46);
+        let i: i64 = 0;
+        while i < (0 as i64 - exp10) - 1 {
+            p = ff_put(out, p, 48);
+            i = i + 1;
+        }
+        let j: u32 = 0;
+        while j < nd {
+            p = ff_put(out, p, load8(d, j));
+            j = j + 1;
+        }
+        return p;
+    }
+    let ip: i64 = exp10 + 1;
+    let k: i64 = 0;
+    while k < ip {
+        p = ff_put(out, p, ff_digit_byte(d, nd, k));
+        k = k + 1;
+    }
+    if ip < (nd as i64) {
+        p = ff_put(out, p, 46);
+        let j: u32 = ip as u32;
+        while j < nd {
+            p = ff_put(out, p, load8(d, j));
+            j = j + 1;
+        }
+    }
+    return p;
+}
+
+/// 给 shortest 用的科学计数法 (已经定好了位数)。
+fn ff_emit_sci_from(out: ptr, o: u32, d: ptr, nd: u32, exp10: i64) -> u32 {
+    let p: u32 = ff_put(out, o, load8(d, 0));
+    let p2: u32 = 0;
+    if nd > 1 {
+        let q: u32 = ff_put(out, p, 46);
+        let j: u32 = 1;
+        let r: u32 = q;
+        while j < nd {
+            r = ff_put(out, r, load8(d, j));
+            j = j + 1;
+        }
+        p2 = r;
+    } else {
+        p2 = p;
+    }
+    let e: u32 = ff_put(out, p2, 101);
+    let e2: u32 = 0;
+    let mag: i64 = exp10;
+    if exp10 < 0 {
+        e2 = ff_put(out, e, 45);
+        mag = 0 as i64 - exp10;
+    } else {
+        e2 = ff_put(out, e, 43);
+    }
+    return ff_put_uint(out, e2, mag as u32);
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// **注意自检的粒度**: bump 堆一共只有 64 KiB, 而这里每条自检都要一块
+// `f64fmt_scratch_bytes()` 的临时区 (4.3 KB)。所以自检按**主题**合并成十条左右,
+// 每条里跑多项断言 —— 分成三十条会在跑到一半时把堆耗尽, 而那时的症状是
+// "测试没跑完也没有报错", 极难归因。同一个理由也写进了 scratch_bytes 的定义上方。
+
+fn ff_eq(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(s), 0, n);
+}
+
+fn ff_case(o: ptr, sc: ptr, x: u64, want: str) -> bool {
+    let n: u32 = f64fmt_shortest(o, 0, x, sc);
+    return ff_eq(o, n, want);
+}
+
+/// 固定位数的一步 (先定义后使用 —— 语言不做前向引用)。
+fn ff_fixed(o: ptr, sc: ptr, x: u64, after: u32, want: str) -> bool {
+    let n: u32 = f64fmt_fixed(o, 0, x, after, sc);
+    return ff_eq(o, n, want);
+}
+
+/// 科学计数法的一步。
+fn ff_sci(o: ptr, sc: ptr, x: u64, sig: u32, want: str) -> bool {
+    let n: u32 = f64fmt_sci(o, 0, x, sig, sc);
+    return ff_eq(o, n, want);
+}
+
+fn test_f64fmt_shortest_exact_values() -> bool {
+    // 二进制能精确表示的那些: 最短表示必须**短**, 不能补一堆零。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, F64_ONE, "1");
+    let ok2: bool = ff_case(o, sc, F64_TWO, "2");
+    let ok3: bool = ff_case(o, sc, 0x4024000000000000, "10");
+    let ok4: bool = ff_case(o, sc, F64_HALF, "0.5");
+    let ok5: bool = ff_case(o, sc, 0x3FD0000000000000, "0.25");
+    let ok6: bool = ff_case(o, sc, 0x4340000000000000, "9007199254740992");
+    let ok7: bool = ff_case(o, sc, 0xBFF0000000000000, "-1");
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
+}
+
+fn test_f64fmt_shortest_binary_repeating_decimals() -> bool {
+    // 0.1 的二进制展开有 55 位小数, 但最短往返表示只有三位 ——
+    // "精确展开"和"最短表示"必须分开, 这就是那条分界线。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, 0x3FB999999999999A, "0.1");
+    let ok2: bool = ff_case(o, sc, 0x3FC999999999999A, "0.2");
+    let ok3: bool = ff_case(o, sc, 0x3FD3333333333333, "0.3");
+    let ok4: bool = ff_case(o, sc, 0x3FD5555555555555, "0.3333333333333333");
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_f64fmt_shortest_needs_17_digits() -> bool {
+    // 0.1 + 0.2 必须打到 17 位才回得来 —— "最短不等于总是很短"那一边的判据。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, 0x3FD3333333333334, "0.30000000000000004");
+    let ok2: bool = ff_case(o, sc, 0x3FF0000000000001, "1.0000000000000002");
+    return ok1 && ok2;
+}
+
+fn test_f64fmt_shortest_specials_and_zero() -> bool {
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, F64_POS_INF, "inf");
+    let ok2: bool = ff_case(o, sc, F64_NEG_INF, "-inf");
+    let ok3: bool = ff_case(o, sc, F64_QNAN, "nan");
+    let ok4: bool = ff_case(o, sc, F64_POS_ZERO, "0");
+    let ok5: bool = ff_case(o, sc, F64_NEG_ZERO, "-0");
+    return ok1 && ok2 && ok3 && ok4 && ok5;
+}
+
+fn test_f64fmt_shortest_extreme_exponents() -> bool {
+    // 落在直排范围之外的值必须走科学计数法, 而次正规的最短表示只有一两有效数字。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, F64_MAX, "1.7976931348623157e+308");
+    let ok2: bool = ff_case(o, sc, F64_MIN_SUB, "5e-324");
+    let ok3: bool = ff_case(o, sc, 0x8000000000000001, "-5e-324");
+    let ok4: bool = ff_case(o, sc, 0x0010000000000000, "2.2250738585072014e-308");
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_f64fmt_shortest_positional_boundaries() -> bool {
+    // 直排与科学计数法的分界两侧各取一个: 1e16 直排 / 1e18 科学; 1e-5 直排 / 1e-6 科学。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_case(o, sc, 0x4341C37937E08000, "10000000000000000");
+    let ok2: bool = ff_case(o, sc, 0x43ABC16D674EC800, "1e+18");
+    let ok3: bool = ff_case(o, sc, 0x3EE4F8B588E368F1, "0.00001");
+    let ok4: bool = ff_case(o, sc, 0x3EB0C6F7A0B5ED8D, "1e-6");
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_f64fmt_fixed_basic_and_padding() -> bool {
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_fixed(o, sc, F64_ONE, 2, "1.00");
+    let ok2: bool = ff_fixed(o, sc, 0x3FB999999999999A, 3, "0.100");
+    let ok3: bool = ff_fixed(o, sc, F64_THREE, 0, "3");
+    let ok4: bool = ff_fixed(o, sc, F64_HALF, 3, "0.500");
+    let ok5: bool = ff_fixed(o, sc, 0x4340000000000000, 1, "9007199254740992.0");
+    return ok1 && ok2 && ok3 && ok4 && ok5;
+}
+
+fn test_f64fmt_fixed_rounding_and_carry() -> bool {
+    // 就近到偶数 (2.5->2, 3.5->4); 进位穿过小数点 (9.99->10.0, 0.99->1.0);
+    // 精度之外舍成零 (1e-6 保留三位 -> 0.000)。
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_fixed(o, sc, 0x4004000000000000, 0, "2");
+    let ok2: bool = ff_fixed(o, sc, 0x400C000000000000, 0, "4");
+    let ok3: bool = ff_fixed(o, sc, 0x4023FD70A3D70A3D, 1, "10.0");
+    let ok4: bool = ff_fixed(o, sc, 0x3FEFAE147AE147AE, 1, "1.0");
+    let ok5: bool = ff_fixed(o, sc, 0x3EB0C6F7A0B5ED8D, 3, "0.000");
+    return ok1 && ok2 && ok3 && ok4 && ok5;
+}
+
+fn test_f64fmt_fixed_zero_and_signs() -> bool {
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_fixed(o, sc, F64_POS_ZERO, 2, "0.00");
+    let ok2: bool = ff_fixed(o, sc, F64_NEG_ZERO, 1, "-0.0");
+    let ok3: bool = ff_fixed(o, sc, 0xBFF0000000000000, 2, "-1.00");
+    let ok4: bool = ff_fixed(o, sc, F64_POS_INF, 2, "inf");
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_f64fmt_sci_basic_and_rounding() -> bool {
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_sci(o, sc, F64_ONE, 1, "1e+0");
+    let ok2: bool = ff_sci(o, sc, F64_THREE, 2, "3.0e+0");
+    let ok3: bool = ff_sci(o, sc, 0x3FB999999999999A, 3, "1.00e-1");
+    let ok4: bool = ff_sci(o, sc, 0x3FD5555555555555, 4, "3.333e-1");
+    let ok5: bool = ff_sci(o, sc, F64_MAX, 17, "1.7976931348623157e+308");
+    let ok6: bool = ff_sci(o, sc, F64_MIN_SUB, 1, "5e-324");
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+}
+
+fn test_f64fmt_sci_zero_and_specials() -> bool {
+    let o: ptr = alloc(384);
+    let sc: ptr = alloc(f64fmt_scratch_bytes());
+    let ok1: bool = ff_sci(o, sc, F64_POS_ZERO, 1, "0e+0");
+    let ok2: bool = ff_sci(o, sc, F64_POS_ZERO, 3, "0.00e+0");
+    let ok3: bool = ff_sci(o, sc, F64_NEG_INF, 3, "-inf");
+    let ok4: bool = ff_sci(o, sc, F64_QNAN, 3, "nan");
+    return ok1 && ok2 && ok3 && ok4;
+}

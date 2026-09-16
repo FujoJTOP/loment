@@ -1,0 +1,299 @@
+// std/pool.lomt — 定长对象池 (slab)
+//
+// 为什么除了 mall 还要它: mall 是通用分配器, 代价是**每次分配都线性扫描块表**。而实际
+// 最常见的一种形状是"尺寸全都一样" —— 链表节点、哈希桶、AST 节点、缓冲区。这种形状下
+// 分配应当是 O(1): 从一条空闲链上摘一个下来。
+//
+// 做法: 把**空闲槽本身**当链节点用 (前 4 字节存下一个空闲槽的下标)。于是池没有任何额外
+// 内存开销, 也不需要在头部维护一张表。整块缓冲的第一个槽 (偏移 0..8) 是池头
+// [esize][free_head], 槽从偏移 8 开始。
+//
+// 槽尺寸按 8 对齐、最小 8 (否则存不下链指针)。索引 0 是合法槽, 所以用 POOL_NIL 表示链尾 ——
+// 这正是 mall 里用 0 表示"没有"会踩的坑。
+//
+// 命名: 公开 pool_*, 内部 pl_*。自检 test_pool_*。
+
+module pool
+
+use "mem.lomt"
+
+pub const POOL_NIL: u32 = 4294967295;
+/// 池头字节数 (esize + free_head)。
+pub const POOL_HDR: u32 = 8;
+pub const POOL_ALIGN: u32 = 8;
+
+fn pl_align(n: u32) -> u32 {
+    let r: u32 = n % POOL_ALIGN;
+    if r == 0 {
+        return n;
+    }
+    return n + (POOL_ALIGN - r);
+}
+
+/// 有效槽尺寸 (对齐后, 且不小于 8)。
+pub fn pool_esize(esize: u32) -> u32 {
+    let e: u32 = pl_align(esize);
+    if e < POOL_ALIGN {
+        return POOL_ALIGN;
+    }
+    return e;
+}
+
+/// 容量足够时能放多少个槽。
+pub fn pool_capacity(buf: ptr, cap: u32, esize: u32) -> u32 {
+    let e: u32 = pool_esize(esize);
+    if cap <= POOL_HDR {
+        return 0;
+    }
+    return (cap - POOL_HDR) / e;
+}
+
+/// 建池: 把所有槽串成空闲链。返回槽数。
+pub fn pool_init(buf: ptr, cap: u32, esize: u32) -> u32 {
+    let e: u32 = pool_esize(esize);
+    let n: u32 = pool_capacity(buf, cap, esize);
+    mem_store32(buf, 0, e);
+    if n == 0 {
+        mem_store32(buf, 4, POOL_NIL);
+        return 0;
+    }
+    // 槽 i 的偏移 = POOL_HDR + i*e; 链是 0 -> 1 -> ... -> n-1 -> NIL。
+    let i: u32 = 0;
+    while i < n {
+        let off: u32 = POOL_HDR + i * e;
+        if i + 1 < n {
+            mem_store32(buf, off, i + 1);
+        } else {
+            mem_store32(buf, off, POOL_NIL);
+        }
+        i = i + 1;
+    }
+    mem_store32(buf, 4, 0);
+    return n;
+}
+
+/// 摘一个槽, 返回它的偏移; 池满返回 POOL_NIL。
+pub fn pool_alloc(buf: ptr, cap: u32, esize: u32) -> u32 {
+    let e: u32 = pool_esize(esize);
+    let head: u32 = mem_load32(buf, 4);
+    if head == POOL_NIL {
+        return POOL_NIL;
+    }
+    let off: u32 = POOL_HDR + head * e;
+    mem_store32(buf, 4, mem_load32(buf, off));
+    return off;
+}
+
+/// 还一个槽 (参数是 `pool_alloc` 返回的偏移)。返回是否合法。
+pub fn pool_free(buf: ptr, cap: u32, esize: u32, at: u32) -> bool {
+    let e: u32 = pool_esize(esize);
+    let n: u32 = pool_capacity(buf, cap, esize);
+    if at < POOL_HDR || at >= POOL_HDR + n * e {
+        return false;
+    }
+    let rel: u32 = at - POOL_HDR;
+    if rel % e != 0 {
+        return false;
+    }
+    let idx: u32 = rel / e;
+    if idx >= n {
+        return false;
+    }
+    let head: u32 = mem_load32(buf, 4);
+    if head == idx {
+        return false;
+    }
+    mem_store32(buf, at, head);
+    mem_store32(buf, 4, idx);
+    return true;
+}
+
+/// 池里还剩几个空闲槽 (走一遍链 —— 链坏了会看出来, 不会死循环)。
+pub fn pool_free_count(buf: ptr, cap: u32, esize: u32) -> u32 {
+    let e: u32 = pool_esize(esize);
+    let n: u32 = pool_capacity(buf, cap, esize);
+    let c: u32 = 0;
+    let cur: u32 = mem_load32(buf, 4);
+    while cur != POOL_NIL && c <= n {
+        if cur >= n {
+            return c;
+        }
+        c = c + 1;
+        cur = mem_load32(buf, POOL_HDR + cur * e);
+    }
+    return c;
+}
+
+/// 在用槽数。
+pub fn pool_in_use(buf: ptr, cap: u32, esize: u32) -> u32 {
+    return pool_capacity(buf, cap, esize) - pool_free_count(buf, cap, esize);
+}
+
+/// 槽偏移 -> 槽下标。
+pub fn pool_index(buf: ptr, cap: u32, esize: u32, at: u32) -> u32 {
+    let e: u32 = pool_esize(esize);
+    if at < POOL_HDR {
+        return POOL_NIL;
+    }
+    return (at - POOL_HDR) / e;
+}
+
+/// 池自洽: 链上每个下标都合法、不重复、长度等于空闲数。
+pub fn pool_check(buf: ptr, cap: u32, esize: u32) -> bool {
+    let e: u32 = pool_esize(esize);
+    let n: u32 = pool_capacity(buf, cap, esize);
+    if n == 0 {
+        return mem_load32(buf, 4) == POOL_NIL;
+    }
+    let seen: u32 = 0;
+    let cur: u32 = mem_load32(buf, 4);
+    let steps: u32 = 0;
+    while cur != POOL_NIL {
+        if cur >= n || steps > n {
+            return false;
+        }
+        // 用位图判重: 最多 32 槽的场景足够; 更长的链只靠 steps 上限兜底。
+        if cur < 32 {
+            let bit: u32 = 1 << cur;
+            if (seen & bit) != 0 {
+                return false;
+            }
+            seen = seen | bit;
+        }
+        steps = steps + 1;
+        cur = mem_load32(buf, POOL_HDR + cur * e);
+    }
+    return steps <= n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pool_esize_aligns_and_floors() -> bool {
+    return pool_esize(1) == 8 && pool_esize(8) == 8 && pool_esize(9) == 16 && pool_esize(33) == 40;
+}
+
+fn test_pool_capacity() -> bool {
+    let b: ptr = alloc(256);
+    // (256-8)/16 = 15
+    return pool_capacity(b, 256, 16) == 15 && pool_capacity(b, 8, 16) == 0
+        && pool_capacity(b, 4, 16) == 0;
+}
+
+fn test_pool_init_reports_slots() -> bool {
+    let b: ptr = alloc(256);
+    return pool_init(b, 256, 16) == 15 && pool_free_count(b, 256, 16) == 15
+        && pool_in_use(b, 256, 16) == 0;
+}
+
+fn test_pool_alloc_returns_first_slot() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    return pool_alloc(b, 256, 16) == POOL_HDR;
+}
+
+fn test_pool_alloc_walks_forward() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    let c: u32 = pool_alloc(b, 256, 16);
+    return a == 8 && c == 24;
+}
+
+fn test_pool_exhaustion_then_nil() -> bool {
+    let b: ptr = alloc(128);
+    pool_init(b, 128, 16);
+    let n: u32 = 0;
+    let o: u32 = pool_alloc(b, 128, 16);
+    while o != POOL_NIL {
+        n = n + 1;
+        o = pool_alloc(b, 128, 16);
+    }
+    return n == 7 && pool_alloc(b, 128, 16) == POOL_NIL && pool_in_use(b, 128, 16) == 7;
+}
+
+fn test_pool_free_reuses_lifo() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    let c: u32 = pool_alloc(b, 256, 16);
+    pool_free(b, 256, 16, a);
+    let d: u32 = pool_alloc(b, 256, 16);
+    return d == a && c != a;
+}
+
+fn test_pool_payload_survives_alloc_free() -> bool {
+    // 槽里的数据在别人 alloc/free 时不能被踩 —— 空闲链只写前 4 字节。
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    mem_store64(b, a, 424242 as u64);
+    let c: u32 = pool_alloc(b, 256, 16);
+    mem_store64(b, c, 1 as u64);
+    pool_free(b, 256, 16, c);
+    return mem_load64(b, a) == 424242 as u64;
+}
+
+fn test_pool_free_bad_offset_refused() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    return pool_free(b, 256, 16, 0) == false && pool_free(b, 256, 16, 9) == false
+        && pool_free(b, 256, 16, 99999) == false;
+}
+
+fn test_pool_free_twice_refused() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    let first: bool = pool_free(b, 256, 16, a);
+    let second: bool = pool_free(b, 256, 16, a);
+    return first && second == false;
+}
+
+fn test_pool_check_after_lifecycle() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    let c: u32 = pool_alloc(b, 256, 16);
+    let d: u32 = pool_alloc(b, 256, 16);
+    pool_free(b, 256, 16, c);
+    pool_free(b, 256, 16, a);
+    let ok: bool = pool_check(b, 256, 16);
+    let free_ok: bool = pool_free_count(b, 256, 16) == 14 && pool_in_use(b, 256, 16) == 1;
+    return ok && free_ok && d != a && d != c;
+}
+
+fn test_pool_index() -> bool {
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let a: u32 = pool_alloc(b, 256, 16);
+    let c: u32 = pool_alloc(b, 256, 16);
+    return pool_index(b, 256, 16, a) == 0 && pool_index(b, 256, 16, c) == 1
+        && pool_index(b, 256, 16, 0) == POOL_NIL;
+}
+
+fn test_pool_all_slots_distinct_and_usable() -> bool {
+    // 分配满, 每槽写自己的下标, 再验回来 —— 重叠或漏槽都会挂。
+    let b: ptr = alloc(256);
+    pool_init(b, 256, 16);
+    let o: u32 = pool_alloc(b, 256, 16);
+    while o != POOL_NIL {
+        mem_store32(b, o, pool_index(b, 256, 16, o));
+        o = pool_alloc(b, 256, 16);
+    }
+    let i: u32 = 0;
+    let good: u32 = 0;
+    while i < 15 {
+        if mem_load32(b, POOL_HDR + i * 16) == i {
+            good = good + 1;
+        }
+        i = i + 1;
+    }
+    return good == 15;
+}
+
+fn test_pool_zero_slots_is_nil_head() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = pool_init(b, 16, 16);
+    return n == 0 && mem_load32(b, 4) == POOL_NIL && pool_alloc(b, 16, 16) == POOL_NIL
+        && pool_check(b, 16, 16);
+}

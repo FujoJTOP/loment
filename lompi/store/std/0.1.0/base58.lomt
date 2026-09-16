@@ -1,0 +1,249 @@
+// std/base58.lomt — Base58 (Bitcoin 字母表)
+//
+// 为什么不是 base64 换个表: base58 是**为人工转录**设计的 —— 它去掉了
+// `0`(零) `O`(欧) `I`(伊) `l`(艾尔) 这四个在人眼里会混的字符, 也不含 `+` `/` `=`
+// (它们在 URL 与文件名里要转义)。代价是它不是按位切分的, 而是**整体做大数进制转换** ——
+// 所以它比 base64 慢, 而且必须处理"前导零字节 -> 前导 '1'"这条特例。
+//
+// 用途: 比特币地址、IPFS 的 CID、Short URL。凡是"这串东西会被人念出来/抄下来"的场合。
+//
+// 校验向量:
+//   ""      -> ""
+//   0x00    -> "1"
+//   0x0000  -> "11"
+//   "Hello World!" -> "2NEpo7TZRRrLZSi2U"
+//
+// 命名: 公开 base58_*, 内部 b58_*。自检 test_base58_*。
+
+module base58
+
+use "mem.lomt"
+
+/// 字母表 (58 个字符, 没有 0 O I l)。
+fn b58_alpha() -> str {
+    return "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+}
+
+/// 字符 -> 值; 非法给 0xFF。
+fn b58_val(c: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 58 {
+        if str_byte(b58_alpha(), i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 255;
+}
+
+/// 编码。out 至少 base58_encoded_max(n) 字节; sc 至少 base58_scratch(n), 会被改写。
+pub fn base58_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32, sc: ptr) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    // 前导零字节 -> 前导 '1'
+    let zeros: u32 = 0;
+    while zeros < n && load8(d, so + zeros) == 0 {
+        zeros = zeros + 1;
+    }
+    mem_copy(sc, 0, d, so, n);
+    // 数字符存进 sc 的 [n..2n]
+    let digits: u32 = 0;
+    let start: u32 = zeros;
+    let size: u32 = n;
+    while start < size {
+        let rem: u32 = 0;
+        let i: u32 = start;
+        while i < size {
+            let cur: u32 = (rem << 8) | load8(sc, i);
+            store8(sc, i, (cur / 58) as u8);
+            rem = cur % 58;
+            i = i + 1;
+        }
+        // 最低位先出来 -> 存在 [n..] 里, 最后倒着读
+        store8(sc, n + digits, str_byte(b58_alpha(), rem) as u8);
+        digits = digits + 1;
+        while start < size && load8(sc, start) == 0 {
+            start = start + 1;
+        }
+    }
+    // 前导 '1' + 倒序的数字
+    let p: u32 = o;
+    let z: u32 = 0;
+    while z < zeros {
+        store8(out, p, 49 as u8); // '1'
+        p = p + 1;
+        z = z + 1;
+    }
+    let k: u32 = digits;
+    while k > 0 {
+        k = k - 1;
+        store8(out, p, load8(sc, n + k) as u8);
+        p = p + 1;
+    }
+    return p - o;
+}
+
+/// 编码长度上界: n * 138 / 100 + 1 (以 2 为底的对数与 58 的比值)。
+pub fn base58_encoded_max(n: u32) -> u32 {
+    return n * 138 / 100 + 1;
+}
+
+/// 解码需要多少字节上界。
+pub fn base58_decoded_max(n: u32) -> u32 {
+    return n * 733 / 1000 + 1;
+}
+
+/// 编码需要多少临时区 (输入副本 + 数字符区)。
+pub fn base58_scratch(n: u32) -> u32 {
+    return 2 * n + 16;
+}
+
+pub fn base58_encode_str(out: ptr, o: u32, s: str, sc: ptr) -> u32 {
+    return base58_encode(out, o, str_ptr(s), 0, str_len(s), sc);
+}
+
+/// 解码。失败 (非法字符) 返回 0xFFFFFFFF。
+pub fn base58_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32, sc: ptr) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    // 前导 '1' -> 前导零字节
+    let zeros: u32 = 0;
+    while zeros < n && load8(d, so + zeros) == 49 {
+        zeros = zeros + 1;
+    }
+    mem_fill(sc, 0, n + 1, 0);
+    let size: u32 = 0;
+    let i: u32 = zeros;
+    while i < n {
+        let v: u32 = b58_val(load8(d, so + i));
+        if v > 57 {
+            return 4294967295;
+        }
+        // sc = sc * 58 + v (小端累加)
+        let carry: u32 = v;
+        let j: u32 = 0;
+        while j < size {
+            let cur: u32 = (load8(sc, j) * 58) + carry;
+            store8(sc, j, (cur & 255) as u8);
+            carry = cur >> 8;
+            j = j + 1;
+        }
+        while carry != 0 {
+            store8(sc, j, (carry & 255) as u8);
+            carry = carry >> 8;
+            j = j + 1;
+            size = j;
+        }
+        i = i + 1;
+    }
+    // 输出: 前导零 + 大端结果
+    let p: u32 = o;
+    let z: u32 = 0;
+    while z < zeros {
+        store8(out, p, 0 as u8);
+        p = p + 1;
+        z = z + 1;
+    }
+    let k: u32 = size;
+    while k > 0 {
+        k = k - 1;
+        store8(out, p, load8(sc, k) as u8);
+        p = p + 1;
+    }
+    return p - o;
+}
+
+pub fn base58_decode_str(out: ptr, o: u32, s: str, sc: ptr) -> u32 {
+    return base58_decode(out, o, str_ptr(s), 0, str_len(s), sc);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_base58_empty() -> bool {
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let e: str = "";
+    return base58_encode_str(out, 0, e, sc) == 0;
+}
+
+fn test_base58_leading_zeros_become_ones() -> bool {
+    // 0x00 -> "1"; 0x00 0x00 -> "11" —— 这条特例是 base58 最容易漏的地方
+    // (整数 0 的表示是空串, 但字节 0x00 必须留下一个 '1')。
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    store8(d, 0, 0 as u8);
+    let a: u32 = base58_encode(out, 0, d, 0, 1, sc);
+    let ok1: bool = a == 1 && load8(out, 0) == 49;
+    store8(d, 1, 0 as u8);
+    let b: u32 = base58_encode(out, 0, d, 0, 2, sc);
+    return ok1 && b == 2 && load8(out, 0) == 49 && load8(out, 1) == 49;
+}
+
+fn test_base58_hello_world() -> bool {
+    // "Hello World!" -> "2NEpo7TZRRrLZSi2U"
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(128);
+    let s: str = "Hello World!";
+    let n: u32 = base58_encode_str(out, 0, s, sc);
+    let want: str = "2NEpo7TZRRrLZSi2U";
+    return n == 17 && mem_eq(out, 0, str_ptr(want), 0, 17);
+}
+
+fn test_base58_roundtrip() -> bool {
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(128);
+    let r: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let bad: u32 = 0;
+    let n: u32 = 1;
+    while n <= 20 {
+        let i: u32 = 0;
+        while i < n {
+            store8(d, i, ((i * 37 + n * 11) % 256) as u8);
+            i = i + 1;
+        }
+        let el: u32 = base58_encode(e, 0, d, 0, n, sc);
+        let dl: u32 = base58_decode(r, 0, e, 0, el, sc);
+        if dl != n || mem_eq(d, 0, r, 0, n) == false {
+            bad = 1;
+        }
+        n = n + 1;
+    }
+    return bad == 0;
+
+}
+fn test_base58_roundtrip_with_leading_zeros() -> bool {
+    // 前导零在往返里必须原样回来 (1 个零 -> '1' -> 1 个零)。
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(128);
+    let r: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    store8(d, 0, 0 as u8);
+    store8(d, 1, 0 as u8);
+    store8(d, 2, 7 as u8);
+    store8(d, 3, 200 as u8);
+    let el: u32 = base58_encode(e, 0, d, 0, 4, sc);
+    let dl: u32 = base58_decode(r, 0, e, 0, el, sc);
+    return dl == 4 && mem_eq(d, 0, r, 0, 4);
+
+}
+fn test_base58_rejects_bad_char() -> bool {
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    // '0' 与 'O' 都不在字母表里 —— 这正是 base58 存在的理由。
+    let s: str = "0O";
+    return base58_decode(out, 0, str_ptr(s), 0, 2, sc) == 4294967295;
+
+}
+fn test_base58_alphabet_has_no_confusing_chars() -> bool {
+    return b58_val(48) == 255 && b58_val(79) == 255 && b58_val(73) == 255
+        && b58_val(108) == 255 && b58_val(49) == 0;
+
+}
+fn test_base58_len_helpers() -> bool {
+    return base58_encoded_max(0) == 1 && base58_encoded_max(10) == 14
+        && base58_decoded_max(10) == 8;
+}

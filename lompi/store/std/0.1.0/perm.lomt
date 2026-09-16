@@ -1,0 +1,382 @@
+// std/perm.lomt — 权限位 <-> `rwxr-xr-x` 文本
+//
+// 为什么需要它: `ls -l` 的那一列、`stat -c %A` 的输出、以及"这个文件我能不能写"
+// 的判断, 背后都是同一个 12 位整数 (0o7777)。把它变成人能看的 9 个字符, 或反过来
+// 解析 —— 这件事每个工具都要做, 而**最常写错的是 setuid/setgid/sticky 的覆盖规则**:
+//
+//   用户位有执行 -> `s` (setuid 且可执行)   无执行 -> `S` (setuid 但不可执行)
+//   组  位有执行 -> `s` (setgid 且可执行)   无执行 -> `S` (setgid 但不可执行)
+//   其他位有执行 -> `t` (sticky 且可执行)   无执行 -> `T` (sticky 但不可执行)
+//
+// 注意第三行**是 `t` 而不是 `s`** —— sticky 位用的是另一对字母, 这是最常见的一处错。
+// 大小写方向也反直觉: **大写表示"特殊位亮着、但少了它守护的那个 x"**, 而不是
+// "特殊位灭了"。`4644` 是 `rwSr--r--` (不是 `rwxr--r--`), `1644` 是 `rw-r--r-T`。
+//
+// 位布局 (Unix mode, 12 位; 这里只处理低 12 位):
+//     bit 11 10 9 | 8 7 6 | 5 4 3 | 2 1 0
+//         setuid     user    group   other
+//         setgid   (rwx)    (rwx)   (rwx)
+//         sticky
+//   即 0o4000 = setuid, 0o2000 = setgid, 0o1000 = sticky, 0o0700 = 属主 rwx, 等等。
+//   与 Python 的 `os.chmod` / `stat.filemode` / `chmod(1)` 完全一致 —— 真值自检就是
+//   拿 Python 的 `stat.filemode()` 对出来的 (它输出的第一个字符是文件类型, 本层不要)。
+//
+// 边界 (诚实清单):
+//   - **只看低 12 位**。文件类型位 (0o170000, 目录/符号链接/... ) 一律被掩掉 ——
+//     本层做的是"权限", 不是"文件种类"。要类型字符得自己看 stat 的 mode 高位。
+//   - `pm_to_text` **不会失败**, 恒写 9 个字节、恒返回 9。任何 u32 都能印 (超出 12 位的
+//     位被忽略) —— 比"印一半再报错"有用。
+//   - `pm_from_text` **只认 9 个字符**且**不做宽容解析**: 长度不是 9 直接 PM_ERR;
+//     第三个字符只接受 `- x s S` (用户/组) 或 `- x t T` (其他), 别的一律 PM_ERR。
+//     `s`/`t` 出现在错误的位置 (比如 `t` 出现在用户位) 也报错, 不静默当 `x`。
+//   - 没有 ACL、没有 umask、没有"从 mode 推文件类型"。这一层就是那 9 个字符。
+//
+// 命名: 公开 pm_*, 内部 pmf_*。自检 test_perm_*。
+
+module perm
+
+use "mem.lomt"
+
+/// 失败哨兵 (0xFFFFFFFF)。
+pub const PM_ERR: u32 = 4294967295;
+
+/// 权限位的有效范围掩码 (0o7777)。
+pub const PM_MODE_MASK: u32 = 4095;
+
+/// 属主位里的三个原语 (0o400 / 0o200 / 0o100)。
+/// 它们是"单位" —— 组、其他的同类位就是把它们右移 3 位、6 位。
+pub const PM_R: u32 = 256;
+pub const PM_W: u32 = 128;
+pub const PM_X: u32 = 64;
+
+/// 三类都复位的"任意读/写/执行"掩码 (0o444 / 0o222 / 0o111)。
+/// `pm_has(m, PM_ANY_R)` = "谁都别想读"的反面 —— 至少有一类能读。
+pub const PM_ANY_R: u32 = 292;
+pub const PM_ANY_W: u32 = 146;
+pub const PM_ANY_X: u32 = 73;
+
+/// 三个特殊位 (0o4000 / 0o2000 / 0o1000)。
+pub const PM_SETUID: u32 = 2048;
+pub const PM_SETGID: u32 = 1024;
+pub const PM_STICKY: u32 = 512;
+
+/// 三个特殊位合起来 (0o7000) —— 要"看有没有特殊位"就 `pm_has(m, PM_SPECIALS)`。
+pub const PM_SPECIALS: u32 = 3584;
+
+// 字符码 (本语言没有字符串常量, 逐个写死; 注释标出是哪个字符, 别靠记忆认数字)。
+//   '-' 45   'r' 114  'w' 119  'x' 120  's' 115  'S' 83   't' 116  'T' 84
+
+// ---------------------------------------------------------------- 位 -> 文本
+
+/// 写一组 rwx (3 字节), 带特殊位覆盖。
+///
+/// g 是 0..7 的权限三位; special 表示本组的特殊位 (setuid/setgid/sticky) 亮没亮。
+/// `se` / `sn` 是"特殊位亮着"时要用的两个字母: 有 x 用 se, 无 x 用 sn。
+/// 用户组传 ('s', 'S') = (115, 83), 其他传 ('t', 'T') = (116, 84)。
+fn pmf_triplet(g: u32, special: bool, se: u32, sn: u32, out: ptr, o: u32) {
+    if (g & 4) != 0 {
+        store8(out, o, 114 as u8);
+    } else {
+        store8(out, o, 45 as u8);
+    }
+    if (g & 2) != 0 {
+        store8(out, o + 1, 119 as u8);
+    } else {
+        store8(out, o + 1, 45 as u8);
+    }
+    let x: u32 = g & 1;
+    if x != 0 {
+        if special {
+            store8(out, o + 2, se as u8);
+        } else {
+            store8(out, o + 2, 120 as u8);
+        }
+    } else {
+        if special {
+            store8(out, o + 2, sn as u8);
+        } else {
+            store8(out, o + 2, 45 as u8);
+        }
+    }
+}
+
+/// mode -> 9 个字符的权限串, 写进 out[oo .. oo+9)。**恒返回 9, 不失败。**
+///
+/// 例: 0o754 -> "rwxr-xr-x";  0o4755 -> "rwsr-xr-x";  0o1644 -> "rw-r--r-T"。
+pub fn pm_to_text(mode: u32, out: ptr, oo: u32) -> u32 {
+    let m: u32 = mode & PM_MODE_MASK;
+    pmf_triplet((m >> 6) & 7, (m & PM_SETUID) != 0, 115, 83, out, oo);
+    pmf_triplet((m >> 3) & 7, (m & PM_SETGID) != 0, 115, 83, out, oo + 3);
+    pmf_triplet(m & 7, (m & PM_STICKY) != 0, 116, 84, out, oo + 6);
+    return 9;
+}
+
+// ---------------------------------------------------------------- 文本 -> 位
+
+/// 解一组 rwx (3 字节) -> 低 3 位的权限值 + (可选) 特殊位。
+///
+/// 返回 **0..7 或 0..7|spbit**; 任何非法字符返回 PM_ERR。
+/// `is_other` = 0 时接受 `s`/`S` (setuid/setgid), = 1 时接受 `t`/`T` (sticky) ——
+/// 位置错了就是错, 不宽容 (见文件头"诚实清单")。
+fn pmf_parse_triplet(p: ptr, o: u32, is_other: u32, spbit: u32) -> u32 {
+    let c0: u32 = load8(p, o);
+    let c1: u32 = load8(p, o + 1);
+    let c2: u32 = load8(p, o + 2);
+    let g: u32 = 0;
+    if c0 == 114 {
+        g = 4;
+    } else if c0 != 45 {
+        return PM_ERR;
+    }
+    if c1 == 119 {
+        g = g | 2;
+    } else if c1 != 45 {
+        return PM_ERR;
+    }
+    if c2 == 120 {
+        return g | 1; // 'x'
+    }
+    if is_other == 0 {
+        if c2 == 115 {
+            return g | 1 | spbit; // 's' —— 特殊位 + 可执行
+        }
+        if c2 == 83 {
+            return g | spbit; // 'S' —— 特殊位, 但**没有**可执行
+        }
+    } else {
+        if c2 == 116 {
+            return g | 1 | spbit; // 't'
+        }
+        if c2 == 84 {
+            return g | spbit; // 'T'
+        }
+    }
+    if c2 == 45 {
+        return g; // '-'
+    }
+    return PM_ERR;
+}
+
+/// 9 个字符的权限串 -> mode。长度不是 9、或有非法字符 -> PM_ERR。
+///
+/// 只读 p[off .. off+9); 不要求后面是 NUL —— 调用方常常直接指向一行中间的某一列。
+pub fn pm_from_text(p: ptr, off: u32, len: u32) -> u32 {
+    if len != 9 {
+        return PM_ERR;
+    }
+    let a: u32 = pmf_parse_triplet(p, off, 0, PM_SETUID);
+    if a == PM_ERR {
+        return PM_ERR;
+    }
+    let b: u32 = pmf_parse_triplet(p, off + 3, 0, PM_SETGID);
+    if b == PM_ERR {
+        return PM_ERR;
+    }
+    let c: u32 = pmf_parse_triplet(p, off + 6, 1, PM_STICKY);
+    if c == PM_ERR {
+        return PM_ERR;
+    }
+    // 三组 rwx 各自移位归位; 特殊位散在 a/b/c 里 (分别是 2048/1024/512),
+    // 它们的位不与低 3 位重叠, 所以可以先合起来再一次性掩出 —— 第一版只取了 a 的
+    // 特殊位 (写成 `a & PM_SPECIALS`), 于是 setgid/sticky 全被丢掉, 是穷举自检
+    // (test_perm_roundtrip_all_4096_modes) 把它揪出来的。
+    return ((a & 7) << 6) | ((b & 7) << 3) | (c & 7) | ((a | b | c) & PM_SPECIALS);
+}
+
+// ---------------------------------------------------------------- 取用
+
+/// 属主的三位 (0..7)。
+pub fn pm_user(mode: u32) -> u32 {
+    return (mode >> 6) & 7;
+}
+
+/// 属组的三位 (0..7)。
+pub fn pm_group(mode: u32) -> u32 {
+    return (mode >> 3) & 7;
+}
+
+/// 其他的三位 (0..7)。
+pub fn pm_other(mode: u32) -> u32 {
+    return mode & 7;
+}
+
+/// mode 与掩码 bits 有**任意一位**相交。
+/// 要问"谁都读不了吗"就用 `pm_has(m, PM_ANY_R)` 取反; 要问"属主能执行吗"就用
+/// `pm_user(m) & PM_X`。
+pub fn pm_has(mode: u32, bits: u32) -> bool {
+    return (mode & bits) != 0;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 真值来源: Python 的 `stat.filemode(mode)` (取它 [1:] —— 第一个字符是文件类型,
+// 本层不产生) 与 `oct(mode)`。全部先算好再抄进来。
+
+fn test_perm_to_text_plain() -> bool {
+    // stat.filemode(0o755)[1:] == "rwxr-xr-x" 等
+    let b: ptr = alloc(16);
+    pm_to_text(493, b, 0); // 0o755
+    let ok1: bool = mem_eq(b, 0, str_ptr("rwxr-xr-x"), 0, 9);
+    pm_to_text(420, b, 0); // 0o644
+    let ok2: bool = mem_eq(b, 0, str_ptr("rw-r--r--"), 0, 9);
+    pm_to_text(384, b, 0); // 0o600
+    let ok3: bool = mem_eq(b, 0, str_ptr("rw-------"), 0, 9);
+    pm_to_text(0, b, 0);
+    let ok4: bool = mem_eq(b, 0, str_ptr("---------"), 0, 9);
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_perm_to_text_full_and_octal() -> bool {
+    let b: ptr = alloc(16);
+    pm_to_text(511, b, 0); // 0o777
+    let ok1: bool = mem_eq(b, 0, str_ptr("rwxrwxrwx"), 0, 9);
+    pm_to_text(492, b, 0); // 0o754
+    let ok2: bool = mem_eq(b, 0, str_ptr("rwxr-xr--"), 0, 9);
+    return ok1 && ok2;
+}
+
+fn test_perm_to_text_setuid() -> bool {
+    // 0o4755 -> "rwsr-xr-x"  (属主有 x, 所以是小写 s)
+    let b: ptr = alloc(16);
+    let n: u32 = pm_to_text(2541, b, 0);
+    return n == 9 && mem_eq(b, 0, str_ptr("rwsr-xr-x"), 0, 9);
+}
+
+fn test_perm_to_text_setgid() -> bool {
+    // 0o2755 -> "rwxr-sr-x"  (组位有 x)
+    let b: ptr = alloc(16);
+    pm_to_text(1517, b, 0);
+    return mem_eq(b, 0, str_ptr("rwxr-sr-x"), 0, 9);
+}
+
+fn test_perm_to_text_sticky() -> bool {
+    // 0o1777 -> "rwxrwxrwt"  (其他位有 x -> 小写 t)
+    let b: ptr = alloc(16);
+    pm_to_text(1023, b, 0);
+    return mem_eq(b, 0, str_ptr("rwxrwxrwt"), 0, 9);
+}
+
+fn test_perm_to_text_setuid_without_x() -> bool {
+    // **最常写错的一条**: 0o4644 是 "rwSr--r--" —— 用户位没有 x, 大写 S。
+    // 写成 "rwxr--r--" 就是把一个不可执行的 setuid 程序说成可执行的。
+    let b: ptr = alloc(16);
+    pm_to_text(2468, b, 0);
+    return mem_eq(b, 0, str_ptr("rwSr--r--"), 0, 9);
+}
+
+fn test_perm_to_text_sticky_without_x() -> bool {
+    // 0o1644 -> "rw-r--r-T" —— 其他位没有 x, 大写 T (sticky 也用的是 T 不是 S)。
+    let b: ptr = alloc(16);
+    pm_to_text(932, b, 0);
+    return mem_eq(b, 0, str_ptr("rw-r--r-T"), 0, 9);
+}
+
+fn test_perm_to_text_all_specials() -> bool {
+    // 0o7777 -> "rwsrwsrwt" —— 三个特殊位都亮、三组都有 x。
+    let b: ptr = alloc(16);
+    pm_to_text(4095, b, 0);
+    return mem_eq(b, 0, str_ptr("rwsrwsrwt"), 0, 9);
+}
+
+fn test_perm_to_text_ignores_high_bits() -> bool {
+    // 高 20 位是文件类型 —— 本层掩掉, 只看低 12 位。
+    // 0o100755 (常规文件 + 0755) 应该印成 "rwxr-xr-x"。
+    let b: ptr = alloc(16);
+    pm_to_text(33261, b, 0); // 0o100755
+    return mem_eq(b, 0, str_ptr("rwxr-xr-x"), 0, 9);
+}
+
+fn test_perm_from_text_basic() -> bool {
+    return pm_from_text(str_ptr("rwxr-xr-x"), 0, 9) == 493   // 0o755
+        && pm_from_text(str_ptr("rw-r--r--"), 0, 9) == 420   // 0o644
+        && pm_from_text(str_ptr("rw-------"), 0, 9) == 384   // 0o600
+        && pm_from_text(str_ptr("---------"), 0, 9) == 0
+        && pm_from_text(str_ptr("rwxrwxrwx"), 0, 9) == 511;
+}
+
+fn test_perm_from_text_specials() -> bool {
+    return pm_from_text(str_ptr("rwsr-xr-x"), 0, 9) == 2541   // 0o4755
+        && pm_from_text(str_ptr("rwxr-sr-x"), 0, 9) == 1517   // 0o2755
+        && pm_from_text(str_ptr("rwxrwxrwt"), 0, 9) == 1023   // 0o1777
+        && pm_from_text(str_ptr("rwSr--r--"), 0, 9) == 2468   // 0o4644
+        && pm_from_text(str_ptr("rw-r--r-T"), 0, 9) == 932    // 0o1644
+        && pm_from_text(str_ptr("rwsrwsrwt"), 0, 9) == 4095;  // 0o7777
+}
+
+fn test_perm_from_text_at_offset() -> bool {
+    // 直接指到一行中间的某一列 —— 不要求前面是行首、后面是 NUL。
+    let s: str = "xx rw-r--r-- yy";
+    return pm_from_text(str_ptr(s), 3, 9) == 420
+        && mem_eq(str_ptr(s), 3, str_ptr("rw-r--r--"), 0, 9);
+}
+
+fn test_perm_from_text_rejects_bad_length() -> bool {
+    return pm_from_text(str_ptr("rwxr-xr-x"), 0, 8) == PM_ERR
+        && pm_from_text(str_ptr("rwxr-xr-x"), 0, 10) == PM_ERR
+        && pm_from_text(str_ptr("rwxr-xr-x"), 0, 0) == PM_ERR;
+}
+
+fn test_perm_from_text_rejects_bad_chars() -> bool {
+    // 位置互换 / 字母不对: 't' 在属主位、's' 在其他的位、以及纯粹的野字符。
+    return pm_from_text(str_ptr("twxr-xr-x"), 0, 9) == PM_ERR
+        && pm_from_text(str_ptr("rwsr-xr-s"), 0, 9) == PM_ERR
+        && pm_from_text(str_ptr("rwxr-xr-x"), 0, 9) != PM_ERR
+        && pm_from_text(str_ptr("rqxr-xr-x"), 0, 9) == PM_ERR
+        && pm_from_text(str_ptr("rwxr-xr-S"), 0, 9) == PM_ERR;
+}
+
+fn test_perm_roundtrip_all_4096_modes() -> bool {
+    // **穷举**: 低 12 位一共只有 4096 种。对每一种, text -> mode 必须回到原值。
+    // 这条一过, 两个方向就是真的互逆 (而不是"我挑的那几个例子互逆")。
+    let b: ptr = alloc(16);
+    let m: u32 = 0;
+    let ok: bool = true;
+    while m < 4096 {
+        pm_to_text(m, b, 0);
+        let back: u32 = pm_from_text(b, 0, 9);
+        if back != m {
+            ok = false;
+        }
+        m = m + 1;
+    }
+    return ok;
+}
+
+fn test_perm_roundtrip_text_through_mode() -> bool {
+    // 反方向: 8 个真值文本 -> mode -> 文本, 两次文本必须逐字节相同。
+    let b: ptr = alloc(16);
+    let s: str = "rwSr--r--";
+    let m: u32 = pm_from_text(str_ptr(s), 0, 9);
+    pm_to_text(m, b, 0);
+    return mem_eq(b, 0, str_ptr(s), 0, 9);
+}
+
+fn test_perm_user_group_other() -> bool {
+    // 0o754: user 7 / group 5 / other 4;  0o644: 6 / 4 / 4;  0o007: 0 / 0 / 7
+    return pm_user(492) == 7 && pm_group(492) == 5 && pm_other(492) == 4
+        && pm_user(420) == 6 && pm_group(420) == 4 && pm_other(420) == 4
+        && pm_user(7) == 0 && pm_group(7) == 0 && pm_other(7) == 7;
+}
+
+fn test_perm_has() -> bool {
+    // 0o644: 属主可读写不可执行 -> PM_R|PM_W 命中, PM_X 不命中
+    return pm_has(420, PM_R) && pm_has(420, PM_W) && pm_has(420, PM_X) == false
+        && pm_has(420, PM_R | PM_X)
+        && pm_has(0, PM_R) == false;
+}
+
+fn test_perm_any_masks() -> bool {
+    // PM_ANY_* 是"至少一类有这一位": 0o400 有读, 0o044 也有读, 0o222 没有读。
+    return pm_has(256, PM_ANY_R) && pm_has(36, PM_ANY_R) && pm_has(146, PM_ANY_R) == false
+        && pm_has(146, PM_ANY_W) && pm_has(73, PM_ANY_X) && pm_has(292, PM_ANY_X) == false;
+}
+
+fn test_perm_constants_are_what_they_say() -> bool {
+    // 常量写错一位 (比如把 0o400 写成 400 进制之外的数) 这里先炸。
+    return PM_R == 256 && PM_W == 128 && PM_X == 64
+        && PM_ANY_R == 292 && PM_ANY_W == 146 && PM_ANY_X == 73
+        && PM_SETUID == 2048 && PM_SETGID == 1024 && PM_STICKY == 512
+        && PM_SPECIALS == 3584 && PM_MODE_MASK == 4095
+        && pm_has(PM_SETUID | 493, PM_SETUID)
+        && pm_has(PM_STICKY | 493, PM_SPECIALS);
+}

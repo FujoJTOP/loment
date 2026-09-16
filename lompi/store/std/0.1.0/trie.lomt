@@ -1,0 +1,520 @@
+// std/trie.lomt — 前缀树 (字节串键)
+//
+// 为什么除了 mapstr 还要它: 哈希表能回答"这个键在不在", 回答不了"有没有以这个前缀
+// 开头的键"。补全、路由表、词典、IP 前缀匹配要的都是后者 —— 而那正是树形结构天生
+// 就有的性质。
+//
+// 两个池, 都由调用方给:
+//   t —— 节点池: 头 16 字节 [已用 u32][自由链 u32][终端数 u32][保留],
+//        节点从 16 起每个 16 字节 [首边 u32][值 u64][终端标记 u32][补 4]
+//   e —— 边池:   头 16 字节 [已用 u32][自由链 u32][保留][保留],
+//        边从 16 起每个 12 字节 [字节 u32][下一条边 u32][子节点 u32]
+//
+// 每个节点的孩子是一条**单链表** (头插)。查找要顺着链扫 —— 平均分支数很小 (典型
+// 是十几个字母), 这个代价换来了"一个节点只占 16 字节"。要 O(1) 找孩子就得给每个
+// 节点开 256 个槽, 那是 4 KB/节点, 在这里不可接受。
+//
+// 不自动扩容; 池满时插入**返回 false** 而不是丢键。
+//
+// 命名: 公开 trie_*, 内部 tr_*。自检 test_trie_*。
+
+module trie
+
+use "mem.lomt"
+
+pub const TR_NIL: u32 = 4294967295;
+pub const TR_NOVAL: u64 = 18446744073709551615;
+/// 节点池头部 / 每节点字节数。
+pub const TR_NHDR: u32 = 16;
+pub const TR_NODE: u32 = 16;
+/// 边池头部 / 每边字节数。
+pub const TR_EHDR: u32 = 16;
+pub const TR_EDGE: u32 = 12;
+
+pub fn trie_nodes_bytes(n: u32) -> u32 {
+    return TR_NHDR + TR_NODE * n;
+}
+
+pub fn trie_edges_bytes(m: u32) -> u32 {
+    return TR_EHDR + TR_EDGE * m;
+}
+
+fn tr_nat(t: ptr, i: u32) -> u32 {
+    return TR_NHDR + TR_NODE * i;
+}
+
+fn tr_eat(e: ptr, i: u32) -> u32 {
+    return TR_EHDR + TR_EDGE * i;
+}
+
+fn tr_first_edge(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, tr_nat(t, i));
+}
+
+fn tr_set_first_edge(t: ptr, i: u32, v: u32) {
+    mem_store32(t, tr_nat(t, i), v);
+}
+
+fn tr_val(t: ptr, i: u32) -> u64 {
+    return mem_load64(t, tr_nat(t, i) + 4);
+}
+
+fn tr_set_val(t: ptr, i: u32, v: u64) {
+    mem_store64(t, tr_nat(t, i) + 4, v);
+}
+
+fn tr_term(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, tr_nat(t, i) + 12);
+}
+
+fn tr_set_term(t: ptr, i: u32, v: u32) {
+    mem_store32(t, tr_nat(t, i) + 12, v);
+}
+
+fn tr_ech(e: ptr, i: u32) -> u32 {
+    return mem_load32(e, tr_eat(e, i));
+}
+
+fn tr_echild(e: ptr, i: u32) -> u32 {
+    return mem_load32(e, tr_eat(e, i) + 8);
+}
+
+fn tr_enext(e: ptr, i: u32) -> u32 {
+    return mem_load32(e, tr_eat(e, i) + 4);
+}
+
+fn tr_eset(e: ptr, i: u32, ch: u32, nx: u32, child: u32) {
+    mem_store32(e, tr_eat(e, i), ch);
+    mem_store32(e, tr_eat(e, i) + 4, nx);
+    mem_store32(e, tr_eat(e, i) + 8, child);
+}
+
+fn tr_set_enext(e: ptr, i: u32, nx: u32) {
+    mem_store32(e, tr_eat(e, i) + 4, nx);
+}
+
+/// 建树。节点 0 是根。返回是否成功。
+pub fn trie_init(t: ptr, ncap: u32, e: ptr, ecap: u32) -> bool {
+    if ncap == 0 {
+        return false;
+    }
+    mem_store32(t, 0, 1); // 根已用
+    mem_store32(t, 4, TR_NIL);
+    mem_store32(t, 8, 0);
+    mem_store32(t, 12, 0);
+    // 根
+    tr_set_first_edge(t, 0, TR_NIL);
+    tr_set_val(t, 0, 0);
+    tr_set_term(t, 0, 0);
+    // 其余节点串成自由链 (借用首边字段)
+    if ncap > 1 {
+        mem_store32(t, 4, 1);
+        let i: u32 = 1;
+        while i < ncap {
+            let nx: u32 = i + 1;
+            if nx >= ncap {
+                nx = TR_NIL;
+            }
+            tr_set_first_edge(t, i, nx);
+            tr_set_term(t, i, 0);
+            i = i + 1;
+        }
+    }
+    // 边池自由链
+    mem_store32(e, 0, 0);
+    if ecap == 0 {
+        mem_store32(e, 4, TR_NIL);
+    } else {
+        mem_store32(e, 4, 0);
+        let j: u32 = 0;
+        while j < ecap {
+            let nx: u32 = j + 1;
+            if nx >= ecap {
+                nx = TR_NIL;
+            }
+            tr_eset(e, j, 0, nx, TR_NIL);
+            j = j + 1;
+        }
+    }
+    return true;
+}
+
+pub fn trie_node_count(t: ptr) -> u32 {
+    return mem_load32(t, 0);
+}
+
+/// 终端节点个数 = 键的个数 (含空前缀这个键)。
+pub fn trie_key_count(t: ptr) -> u32 {
+    return mem_load32(t, 8);
+}
+
+fn tr_node_alloc(t: ptr) -> u32 {
+    let f: u32 = mem_load32(t, 4);
+    if f == TR_NIL {
+        return TR_NIL;
+    }
+    mem_store32(t, 4, tr_first_edge(t, f));
+    tr_set_first_edge(t, f, TR_NIL);
+    tr_set_val(t, f, 0);
+    tr_set_term(t, f, 0);
+    mem_store32(t, 0, mem_load32(t, 0) + 1);
+    return f;
+}
+
+fn tr_edge_alloc(e: ptr) -> u32 {
+    let f: u32 = mem_load32(e, 4);
+    if f == TR_NIL {
+        return TR_NIL;
+    }
+    mem_store32(e, 4, tr_enext(e, f));
+    tr_eset(e, f, 0, TR_NIL, TR_NIL);
+    mem_store32(e, 0, mem_load32(e, 0) + 1);
+    return f;
+}
+
+/// 在节点 i 的孩子里找字节 ch 的边; 没有给 TR_NIL。
+fn tr_find_edge(t: ptr, e: ptr, i: u32, ch: u32) -> u32 {
+    let x: u32 = tr_first_edge(t, i);
+    while x != TR_NIL {
+        if tr_ech(e, x) == ch {
+            return x;
+        }
+        x = tr_enext(e, x);
+    }
+    return TR_NIL;
+}
+
+/// 插入或覆盖 (**字节切片版** —— 真正干活的那个)。
+/// 返回 1 新增 / 0 覆盖 / 2 失败 (池满)。
+///
+/// 核心接口按字节切片写, `str` 版本只是薄包装: 语言里没法"从缓冲造一个 str",
+/// 所以只提供 str 版的话, 调用方拿着一块字节缓冲就无路可走。
+pub fn trie_put_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32, v: u64) -> u32 {
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let ch: u32 = load8(p, o + i);
+        let ed: u32 = tr_find_edge(t, e, cur, ch);
+        if ed != TR_NIL {
+            cur = tr_echild(e, ed);
+        } else {
+            let nn: u32 = tr_node_alloc(t);
+            if nn == TR_NIL {
+                return 2;
+            }
+            let ne: u32 = tr_edge_alloc(e);
+            if ne == TR_NIL {
+                return 2;
+            }
+            tr_eset(e, ne, ch, tr_first_edge(t, cur), nn);
+            tr_set_first_edge(t, cur, ne);
+            cur = nn;
+        }
+        i = i + 1;
+    }
+    if tr_term(t, cur) == 1 {
+        tr_set_val(t, cur, v);
+        return 0;
+    }
+    tr_set_term(t, cur, 1);
+    tr_set_val(t, cur, v);
+    mem_store32(t, 8, mem_load32(t, 8) + 1);
+    return 1;
+}
+
+pub fn trie_put(t: ptr, e: ptr, s: str, v: u64) -> u32 {
+    return trie_put_b(t, e, str_ptr(s), 0, str_len(s), v);
+}
+
+/// 走一遍键, 返回终点节点; 不存在给 TR_NIL。
+fn tr_walk(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> u32 {
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let ed: u32 = tr_find_edge(t, e, cur, load8(p, o + i));
+        if ed == TR_NIL {
+            return TR_NIL;
+        }
+        cur = tr_echild(e, ed);
+        i = i + 1;
+    }
+    return cur;
+}
+
+pub fn trie_has_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> bool {
+    let nd: u32 = tr_walk(t, e, p, o, n);
+    if nd == TR_NIL {
+        return false;
+    }
+    return tr_term(t, nd) == 1;
+}
+
+pub fn trie_has(t: ptr, e: ptr, s: str) -> bool {
+    return trie_has_b(t, e, str_ptr(s), 0, str_len(s));
+}
+
+pub fn trie_get_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> u64 {
+    let nd: u32 = tr_walk(t, e, p, o, n);
+    if nd == TR_NIL || tr_term(t, nd) == 0 {
+        return TR_NOVAL;
+    }
+    return tr_val(t, nd);
+}
+
+pub fn trie_get(t: ptr, e: ptr, s: str) -> u64 {
+    return trie_get_b(t, e, str_ptr(s), 0, str_len(s));
+}
+
+/// 有没有以这段字节为**前缀**的键 (它本身算前缀)。
+pub fn trie_has_prefix_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> bool {
+    return tr_walk(t, e, p, o, n) != TR_NIL;
+}
+
+pub fn trie_has_prefix(t: ptr, e: ptr, s: str) -> bool {
+    return trie_has_prefix_b(t, e, str_ptr(s), 0, str_len(s));
+}
+
+/// 只把终端标记清掉 (节点留着 —— 别的键可能穿过它)。返回是否清掉了。
+pub fn trie_del_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> bool {
+    let nd: u32 = tr_walk(t, e, p, o, n);
+    if nd == TR_NIL || tr_term(t, nd) == 0 {
+        return false;
+    }
+    tr_set_term(t, nd, 0);
+    mem_store32(t, 8, mem_load32(t, 8) - 1);
+    return true;
+}
+
+pub fn trie_del(t: ptr, e: ptr, s: str) -> bool {
+    return trie_del_b(t, e, str_ptr(s), 0, str_len(s));
+}
+
+/// 最长的那段是"某个键"的前缀, 返回它的长度; 一个都匹配不上给 0。
+pub fn trie_longest_prefix_b(t: ptr, e: ptr, p: ptr, o: u32, n: u32) -> u32 {
+    let cur: u32 = 0;
+    let best: u32 = 0;
+    if tr_term(t, 0) == 1 {
+        best = 0; // 空串是键: 长度 0 也算命中
+    }
+    let i: u32 = 0;
+    while i < n {
+        let ed: u32 = tr_find_edge(t, e, cur, load8(p, o + i));
+        if ed == TR_NIL {
+            return best;
+        }
+        cur = tr_echild(e, ed);
+        i = i + 1;
+        if tr_term(t, cur) == 1 {
+            best = i;
+        }
+    }
+    return best;
+}
+
+pub fn trie_longest_prefix(t: ptr, e: ptr, s: str) -> u32 {
+    return trie_longest_prefix_b(t, e, str_ptr(s), 0, str_len(s));
+}
+
+/// 自洽检查: 从根出发, 递归验每个节点的边 (子节点合法、兄弟不重字节)。
+///
+/// **只从根可达的部分走** —— 不能遍历整个节点池: 空闲节点的"首边"字段里存的是**自由链**
+/// (一个合法的边号), 把它当边去跟就会跟出一堆垃圾并报假警 (第一版就是这么挂的)。
+fn tr_check_node(t: ptr, e: ptr, i: u32, ncap: u32, ecap: u32, depth: u32) -> bool {
+    if depth > ecap {
+        return false; // 兜底: 结构里有环时不要无限递归
+    }
+    let x: u32 = tr_first_edge(t, i);
+    let cnt: u32 = 0;
+    while x != TR_NIL {
+        if x >= ecap {
+            return false;
+        }
+        let c: u32 = tr_echild(e, x);
+        if c >= ncap {
+            return false;
+        }
+        let y: u32 = tr_first_edge(t, i);
+        while y != x {
+            if tr_ech(e, y) == tr_ech(e, x) {
+                return false;
+            }
+            y = tr_enext(e, y);
+        }
+        if tr_check_node(t, e, c, ncap, ecap, depth + 1) == false {
+            return false;
+        }
+        x = tr_enext(e, x);
+        cnt = cnt + 1;
+        if cnt > ecap {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn trie_check(t: ptr, e: ptr, ncap: u32, ecap: u32) -> bool {
+    return tr_check_node(t, e, 0, ncap, ecap, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_trie_put_get() -> bool {
+    let t: ptr = alloc(trie_nodes_bytes(32));
+    let e: ptr = alloc(trie_edges_bytes(32));
+    trie_init(t, 32, e, 32);
+    let a: u32 = trie_put(t, e, "cat", 1);
+    let b: u32 = trie_put(t, e, "car", 2);
+    let c: u32 = trie_put(t, e, "dog", 3);
+    return a == 1 && b == 1 && c == 1 && trie_get(t, e, "cat") == 1
+        && trie_get(t, e, "car") == 2 && trie_get(t, e, "dog") == 3
+        && trie_has(t, e, "cow") == false && trie_key_count(t) == 3;
+}
+
+fn test_trie_shared_prefix_does_not_collide() -> bool {
+    // cat 与 car 共用 "ca" 两个节点 —— 共享前缀的写法错一点就会互相覆盖。
+    let t: ptr = alloc(trie_nodes_bytes(32));
+    let e: ptr = alloc(trie_edges_bytes(32));
+    trie_init(t, 32, e, 32);
+    trie_put(t, e, "cat", 1);
+    trie_put(t, e, "car", 2);
+    // 节点数 = 根 + c + a + t + r = 5 (共享了 "ca" 那两个)
+    return trie_get(t, e, "cat") == 1 && trie_get(t, e, "car") == 2
+        && trie_get(t, e, "ca") == TR_NOVAL && trie_node_count(t) == 5;
+}
+
+fn test_trie_prefix_is_not_a_key() -> bool {
+    // "ca" 是 "cat" 的前缀, 但它自己不是键。
+    let t: ptr = alloc(trie_nodes_bytes(16));
+    let e: ptr = alloc(trie_edges_bytes(16));
+    trie_init(t, 16, e, 16);
+    trie_put(t, e, "cat", 1);
+    return trie_has_prefix(t, e, "ca") && trie_has(t, e, "ca") == false
+        && trie_has_prefix(t, e, "cat") && trie_has(t, e, "cat");
+}
+
+fn test_trie_overwrite() -> bool {
+    let t: ptr = alloc(trie_nodes_bytes(16));
+    let e: ptr = alloc(trie_edges_bytes(16));
+    trie_init(t, 16, e, 16);
+    let a: u32 = trie_put(t, e, "x", 1);
+    let b: u32 = trie_put(t, e, "x", 2);
+    return a == 1 && b == 0 && trie_get(t, e, "x") == 2 && trie_key_count(t) == 1;
+}
+
+fn test_trie_empty_key() -> bool {
+    // 空串是合法的键 (在根上打终端标记)。
+    let t: ptr = alloc(trie_nodes_bytes(16));
+    let e: ptr = alloc(trie_edges_bytes(16));
+    trie_init(t, 16, e, 16);
+    let a: u32 = trie_put(t, e, "", 7);
+    return a == 1 && trie_has(t, e, "") && trie_get(t, e, "") == 7
+        && trie_key_count(t) == 1;
+}
+
+fn test_trie_del_only_clears_terminal() -> bool {
+    // 删掉 "ca" 不能连带毁掉 "cat"。
+    let t: ptr = alloc(trie_nodes_bytes(32));
+    let e: ptr = alloc(trie_edges_bytes(32));
+    trie_init(t, 32, e, 32);
+    trie_put(t, e, "ca", 1);
+    trie_put(t, e, "cat", 2);
+    let d: bool = trie_del(t, e, "ca");
+    return d && trie_has(t, e, "ca") == false && trie_get(t, e, "cat") == 2
+        && trie_has_prefix(t, e, "ca") && trie_del(t, e, "ca") == false;
+}
+
+fn test_trie_longest_prefix() -> bool {
+    let t: ptr = alloc(trie_nodes_bytes(32));
+    let e: ptr = alloc(trie_edges_bytes(32));
+    trie_init(t, 32, e, 32);
+    trie_put(t, e, "ab", 1);
+    trie_put(t, e, "abcd", 2);
+    // "abcdef" 的最长"是键"前缀是 "abcd" (4)
+    let a: u32 = trie_longest_prefix(t, e, "abcdef");
+    // "abz" 的最长是 "ab" (2)
+    let b: u32 = trie_longest_prefix(t, e, "abz");
+    // "zz" 一个都不匹配
+    let c: u32 = trie_longest_prefix(t, e, "zz");
+    return a == 4 && b == 2 && c == 0;
+}
+
+fn test_trie_pool_exhaustion_returns_failure() -> bool {
+    // 节点池只够 2 个节点: 根 + 1。插一个 2 字母的键需要 3 个节点 -> 必须失败。
+    let t: ptr = alloc(trie_nodes_bytes(2));
+    let e: ptr = alloc(trie_edges_bytes(4));
+    trie_init(t, 2, e, 4);
+    let a: u32 = trie_put(t, e, "a", 1);
+    let b: u32 = trie_put(t, e, "ab", 2);
+    return a == 1 && b == 2 && trie_get(t, e, "a") == 1 && trie_key_count(t) == 1;
+}
+
+fn test_trie_edge_pool_exhaustion() -> bool {
+    let t: ptr = alloc(trie_nodes_bytes(8));
+    let e: ptr = alloc(trie_edges_bytes(1));
+    trie_init(t, 8, e, 1);
+    let a: u32 = trie_put(t, e, "a", 1);
+    let b: u32 = trie_put(t, e, "b", 2);
+    return a == 1 && b == 2 && trie_get(t, e, "a") == 1 && trie_has(t, e, "b") == false;
+}
+
+fn test_trie_many_keys() -> bool {
+    // 用 3 字母组合造 27 个键, 全部查回来 —— 共享前缀大规模出现时的正确性。
+    // 键直接在缓冲里造, 走**字节切片**入口 (语言里没法从缓冲造 str)。
+    let t: ptr = alloc(trie_nodes_bytes(128));
+    let e: ptr = alloc(trie_edges_bytes(128));
+    trie_init(t, 128, e, 128);
+    let kb: ptr = alloc(8);
+    let bad: u32 = 0;
+    let a: u32 = 0;
+    while a < 3 {
+        let b: u32 = 0;
+        while b < 3 {
+            let c: u32 = 0;
+            while c < 3 {
+                mk3(kb, a, b, c);
+                let v: u64 = (a * 9 + b * 3 + c) as u64;
+                if trie_put_b(t, e, kb, 0, 3, v) != 1 {
+                    bad = 1;
+                }
+                c = c + 1;
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    let d: u32 = 0;
+    while d < 3 {
+        let f: u32 = 0;
+        while f < 3 {
+            let g: u32 = 0;
+            while g < 3 {
+                mk3(kb, d, f, g);
+                if trie_get_b(t, e, kb, 0, 3) != (d * 9 + f * 3 + g) as u64 {
+                    bad = 1;
+                }
+                g = g + 1;
+            }
+            f = f + 1;
+        }
+        d = d + 1;
+    }
+    return bad == 0 && trie_key_count(t) == 27 && trie_check(t, e, 128, 128);
+}
+
+/// 把三个字母 (0..2 -> 'a'..'c') 写进缓冲。
+fn mk3(b: ptr, a: u32, c: u32, d: u32) {
+    store8(b, 0, (97 + a) as u8);
+    store8(b, 1, (97 + c) as u8);
+    store8(b, 2, (97 + d) as u8);
+}
+
+fn test_trie_check_detects_bad_child() -> bool {
+    let t: ptr = alloc(trie_nodes_bytes(16));
+    let e: ptr = alloc(trie_edges_bytes(16));
+    trie_init(t, 16, e, 16);
+    trie_put(t, e, "a", 1);
+    let ok: bool = trie_check(t, e, 16, 16);
+    // 把首边的子节点指到一个不存在的节点号 —— 检查必须发现。
+    mem_store32(e, tr_eat(e, tr_first_edge(t, 0)) + 8, 99);
+    return ok && trie_check(t, e, 16, 16) == false;
+}

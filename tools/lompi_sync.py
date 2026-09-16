@@ -40,6 +40,10 @@ DEFAULT_SKILL = Path.home() / ".claude" / "skills" / "lompi"
 #: 指南在仓内的落脚点（也是安装器往外拷的那份）。
 REPO_SKILL = ROOT / ".claude" / "skills" / "lompi"
 SKILL_FILES = ("SKILL.md",)
+#: **标准库 store** 的正本（开发者工作区），仓内落在 `lompi/store/`。
+#: 它是 lompi 的库（`std` 127 个模块 + `host` 7 个），随 Loment 一起装 —— 用户 2026-09-15 定。
+DEFAULT_STORE = Path(r"D:\Dev\Lolment-ku\store")
+REPO_STORE = ROOT / "lompi" / "store"
 
 #: 跟随同步的源文件：**产品模块** + **自检驱动**。
 #:
@@ -58,6 +62,9 @@ MODULES = ("lompi.lomt", "lpi_cli.lomt", "lpi_idn.lomt", "lpi_pkg.lomt",
 
 #: 一并跟着走的目录（判据要用它当 store）。
 DIRS = ("fixture",)
+#: 整棵树照单全收的那种配对（store）用这个当 `names`：它的布局是
+#: `<name>/<version>/*.lomt`，没有"顶层文件白名单"可言 —— 逐层列出来只会漏。
+WHOLE_TREE: tuple[str, ...] | None = None
 
 
 def _norm(b: bytes) -> bytes:
@@ -79,6 +86,8 @@ def _walk(d: Path) -> list[str]:
 
 
 def _files(side: Path, names=MODULES, subdirs=DIRS) -> list[str]:
+    if names is None:                     # 整棵树照单全收（store）
+        return _walk(side)
     out = [m for m in names if (side / m).is_file()]
     for d in subdirs:
         if (side / d).is_dir():
@@ -143,6 +152,9 @@ def _pairs(arg: str | None) -> list[dict]:
          "names": MODULES, "dirs": DIRS},
         {"label": "指南", "src": Path(os.environ.get("LOMENT_LOMPI_SKILL") or DEFAULT_SKILL),
          "dst": REPO_SKILL, "names": SKILL_FILES, "dirs": ()},
+        # 标准库 store：整棵树照收（`<name>/<version>/*.lomt`），所以 names=None。
+        {"label": "标准库", "src": Path(os.environ.get("LOMENT_LOMPI_STORE") or DEFAULT_STORE),
+         "dst": REPO_STORE, "names": WHOLE_TREE, "dirs": ()},
     ]
 
 
@@ -152,6 +164,10 @@ def _selfcheck(prs) -> list[str]:
     for pair in prs:
         if not pair["dst"].is_dir():
             bad.append(str(pair["dst"]))
+            continue
+        if pair["names"] is None:          # 整棵树：只要求非空
+            if not _walk(pair["dst"]):
+                bad.append(f'{pair["label"]}: {pair["dst"]} 是空的')
             continue
         for m in pair["names"]:
             if not (pair["dst"] / m).is_file():

@@ -41,6 +41,13 @@ GLOBS = [
     "tools/loment_cli_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
+    # lompi 的标准库: 随 Loment 一起装 (std 127 模块 + host, 共 137 个文件, 用户 2026-09-16)。
+    # **版本号是故意写死的**: 自举那边 (loment/tools/lomrel.lomt) 的 glob 只认"一段目录 +
+    # 一个名字模式", `**` 在那边展开不出递归 (实测只给一层, 于是把 std/ host/ 两个**目录**
+    # 当文件收了进来)。升版本要同时改两份清单 —— `loment_lompi_test` 里那条
+    # `test_release_manifest_covers_every_store_file` 就是钉这个的: 库改版而清单没跟上,
+    # `loment_release --check` 会**看不见文件而照样绿**, 那条会红。
+    "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",

@@ -1,0 +1,173 @@
+// std/out.lomt — 游标式输出层 (可移植层)
+//
+// 为什么要它: 工具们在拼输出时全是同一个形状 —— "手上有个缓冲和一个偏移,
+// 往里写点东西, 偏移往前走"。lomstatus 里是 p1 / pcopy / pstr / pdec / pend 五个函数,
+// 别的工具各有一份同形的。而这些留在工具里, 代价是每次都要手写指针运算:
+// 我在迁移 lomstatus 的 pdec 时就被迫写了一行 `(( out as u64) + (o as u64)) as ptr`。
+// 这一层就是把它收成一份。
+//
+// 分层: 这是**可移植的**那层 (core), 只依赖同包的 numfmt —— 一个 syscall 都不发。
+// 裸 syscall 后端 (io) 在另一个包 (host); 换后端时工具代码动的是 out_* 而不是 io_*,
+// 所以 out 绝不能反过来依赖 io —— 那正是 2026-09-15 拆包时改掉的方向。
+//
+// 形状: 一律 (buf, o, ...) 进, 返回**新偏移**。刻意**不用 struct** ——
+// 包内链接器还不支持按值传聚合 (skill §6.9), 而 (buf, off) 两个标量表达同一个游标
+// 效果完全一样, 却处处能编。这是被实测钉出来的选择, 不是风格。
+//
+// 命名: 平名字空间, 公开 API 一律 out_*, 内部一律 oui_* (docs/158 §2)。
+// 自检函数也一样 (`test_out_*`) —— **私有名同样占全局拼写**, 所以两个模块各有
+// `test_dec_zero` 会被按 E13 拦下。本文件第一版就是这么挂的: 它 use 了 io.lomt,
+// 而两边都叫 test_dec_zero / test_dec_u64_max。规则很简单: 顶层名 (含 test_) 一律带模块前缀。
+
+module out
+
+use "numfmt.lomt"
+
+/// 写一个字节, 返回新偏移。
+pub fn out_byte(buf: ptr, o: u32, b: u32) -> u32 {
+    store8(buf, o, b as u8);
+    return o + 1;
+}
+
+/// 从 src 的 so 处拷 n 字节。
+pub fn out_bytes(buf: ptr, o: u32, src: ptr, so: u32, n: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        k = out_byte(buf, k, load8(src, so + i));
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 写静态字符串。
+pub fn out_str(buf: ptr, o: u32, s: str) -> u32 {
+    return out_bytes(buf, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 写 u64 十进制。借 numfmt 的纯格式化, 不重复实现一遍取模。
+pub fn out_dec(buf: ptr, o: u32, v: u64) -> u32 {
+    let n: u32 = numfmt_dec_into(oui_at(buf, o), v);
+    return o + n;
+}
+
+/// 写固定宽度小写十六进制 (左侧补 0)。
+pub fn out_hex(buf: ptr, o: u32, v: u64, w: u32) -> u32 {
+    let n: u32 = numfmt_hex_into(oui_at(buf, o), v, w);
+    return o + n;
+}
+
+/// 写一个换行。
+pub fn out_nl(buf: ptr, o: u32) -> u32 {
+    return out_byte(buf, o, 10);
+}
+
+/// 收尾: 先把尾部空白压掉, 再补一个换行 (对应 Python 的 `rstrip() + "\n"`)。
+/// 与 lomstatus 里的 seq_end 同一语义 —— 提上来是因为它不是那一个工具的特性,
+/// 而是"生成文本"这件事的通用收尾。
+pub fn out_end(buf: ptr, o: u32) -> u32 {
+    let b: u32 = o;
+    let go: u32 = 1;
+    while b > 0 && go == 1 {
+        let c: u32 = load8(buf, b - 1);
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            b = b - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return out_byte(buf, b, 10);
+}
+
+/// 缓冲 + 偏移 -> 该处的 ptr。
+///
+/// 不用内建 `ptr_add`: 它在 **Rust 路径** (rustc 编出来的那条, `loment.py test` 走的是它)
+/// 降级成裸 `.add()` 而没包 `unsafe`, rustc 直接拒 E0133。转成整数再转回来两条路径都过,
+/// 去整数再转回来两条路径都过。
+fn oui_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_out_byte_advances() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = out_byte(b, 0, 65);
+    return o == 1 && load8(b, 0) == 65;
+}
+
+fn test_out_str() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = out_str(b, 0, "abc");
+    return o == 3 && load8(b, 0) == 97 && load8(b, 2) == 99;
+}
+
+fn test_out_str_at_offset() -> bool {
+    let b: ptr = alloc(32);
+    let o1: u32 = out_str(b, 0, "xy");
+    let o2: u32 = out_str(b, o1, "z");
+    return o1 == 2 && o2 == 3 && load8(b, 2) == 122;
+}
+
+fn test_out_dec_zero() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = out_dec(b, 0, 0);
+    return o == 1 && load8(b, 0) == 48;
+}
+
+fn test_out_dec_roundtrip_offsets() -> bool {
+    // "12" + "345" —— 两段各写各的, 偏移要接得上。
+    let b: ptr = alloc(32);
+    let o1: u32 = out_dec(b, 0, 12);
+    let o2: u32 = out_dec(b, o1, 345);
+    return o1 == 2 && o2 == 5 && load8(b, 0) == 49 && load8(b, 4) == 53;
+}
+
+fn test_out_dec_u64_max() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = out_dec(b, 0, 18446744073709551615);
+    return o == 20 && load8(b, 0) == 49 && load8(b, 19) == 53;
+}
+
+fn test_out_hex() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = out_hex(b, 0, 255, 4);
+    return o == 4 && load8(b, 0) == 48 && load8(b, 3) == 102;
+}
+
+fn test_out_nl() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = out_nl(b, 0);
+    return o == 1 && load8(b, 0) == 10;
+}
+
+fn test_out_end_rstrips_then_newline() -> bool {
+    // "ab   " -> "ab\n" : 尾部三个空格压掉, 补一个换行。
+    let b: ptr = alloc(32);
+    let o1: u32 = out_str(b, 0, "ab   ");
+    let o2: u32 = out_end(b, o1);
+    return o2 == 3 && load8(b, 0) == 97 && load8(b, 2) == 10;
+}
+
+fn test_out_end_keeps_interior_space() -> bool {
+    let b: ptr = alloc(32);
+    let o1: u32 = out_str(b, 0, "a b");
+    let o2: u32 = out_end(b, o1);
+    return o2 == 4 && load8(b, 1) == 32 && load8(b, 3) == 10;
+}
+
+fn test_out_end_on_empty() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = out_end(b, 0);
+    return o == 1 && load8(b, 0) == 10;
+}
+
+fn test_out_mixed_sequence() -> bool {
+    // 一行的典型形状: 标签 + 十进制 + 换行。
+    // 布局: "n=" 占 0..1, "42" 占 2..3, 换行在 4 —— 所以 b[2]='4'(52), b[3]='2'(50)。
+    let b: ptr = alloc(64);
+    let o1: u32 = out_str(b, 0, "n=");
+    let o2: u32 = out_dec(b, o1, 42);
+    let o3: u32 = out_nl(b, o2);
+    return o3 == 5 && load8(b, 0) == 110 && load8(b, 2) == 52 && load8(b, 3) == 50 && load8(b, 4) == 10;
+}

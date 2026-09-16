@@ -450,6 +450,14 @@ pub const WS_SNAMES_CAP: u32 = 65536;
 /// 那样第一次调用就会把路径改写成 "store/名字/版本", 第二次调用拿到的就是坏路径。
 pub const WS_STORE: u32 = 1245568;
 pub const WS_STORE_CAP: u32 = 4096;
+/// **一个专属的 0 字节** —— 哈希时当分隔符用。
+/// 为什么值得单独占一个地址: 它一度和 `pkg_edges` 的暂存共用 WS_TMP+0, 于是那个"0"
+/// 其实是上一个包边名的残字 —— **同一份源码在不同仓库里算出了不同的身份**, 而
+/// "同一份源码 ⇒ 同一个身份"正是整套设计的地基。测试没能抓到它, 因为污染依赖
+/// "这个仓库里还有哪些包", 而出错的那几条恰好左右都是 0。
+/// 凡是要往哈希里喂一个 0 的地方, 一律用这里, 别再用"顺手拿得到的某块暂存"。
+pub const WS_ZERO: u32 = 1249664;
+pub const WS_ZERO_CAP: u32 = 8;
 /// 给调用方 (lpi_cli) 用的**报告输出**区 —— 内部不碰它, 所以可以边查边往里拼。
 pub const WS_REPORT: u32 = 1253760;
 pub const WS_REPORT_CAP: u32 = 131072;
@@ -593,7 +601,7 @@ pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
     let file: ptr = W(ws, WS_FILE);
     let st: ptr = W(ws, WS_SHA);
     let scr: ptr = W(ws, WS_SCR2);      // 自己的暂存 —— 不许写调用方给的 path
-    let zero: ptr = W(ws, WS_TMP);
+    let zero: ptr = W(ws, WS_ZERO);
     let pathn: u32 = txt_len_cstr(path);
     store8(zero, 0, 0 as u8);
     sha_init(st);
@@ -1418,7 +1426,8 @@ fn test_pkg_ws_layout_does_not_overlap() -> bool {
         && WS_ONAMES + WS_ONAMES_CAP <= WS_INAMES
         && WS_INAMES + WS_INAMES_CAP <= WS_SNAMES
         && WS_SNAMES + WS_SNAMES_CAP <= WS_STORE
-        && WS_STORE + WS_STORE_CAP <= WS_REPORT
+        && WS_STORE + WS_STORE_CAP <= WS_ZERO
+        && WS_ZERO + WS_ZERO_CAP <= WS_REPORT
         && WS_REPORT + WS_REPORT_CAP <= ws_size();
     // 暂存内部的三处固定用法 (zero 在 TMP+0, leaf 在 TMP+2048, sto_scan 的包名在
     // TMP+4096) 必须都落在 TMP 里 —— 也就是上面那条 WS_TMP + WS_TMP_CAP <= WS_ONAMES。

@@ -1,0 +1,183 @@
+// std/endian.lomt — 字节序读写与翻转
+//
+// 为什么单独一层: mem 只给**小端** (目标 x86-64 就是小端, 所以那是对的)。但凡是要读
+// 网络报文、BMP、PNG、ASN.1、CBOR 的地方, 数据都是**大端**的 —— 手写一遍
+// `(b0<<24)|(b1<<16)|(b2<<8)|b3` 十几次, 每次都有把移位方向写反的机会。
+// 本模块把"哪种序"写进函数名, 让调用点自己说出来。
+//
+// 分层: 依赖 mem (小端读写的正式版), 不重复实现一遍。LE 那几个是 mem 的别名式包装 ——
+// 看着多余, 但意义是**调用点显式** (写 `mem_load32` 时读的人得自己去查那是哪一端)。
+//
+// 命名: 公开 endian_*, 内部 en_*。自检 test_endian_*。
+
+module endian
+
+use "mem.lomt"
+
+/// 本目标只有 x86-64, 因此恒为小端。写成函数而不是常量: 语言没有 bool 常量。
+pub fn endian_is_le() -> bool {
+    return true;
+}
+
+/// 16 位字节交换。
+pub fn endian_swap16(v: u32) -> u32 {
+    return ((v & 255) << 8) | ((v >> 8) & 255);
+}
+
+/// 32 位字节交换 (按字节反转, 不是按位)。
+pub fn endian_swap32(v: u32) -> u32 {
+    let b0: u32 = (v & 255) << 24;
+    let b1: u32 = ((v >> 8) & 255) << 16;
+    let b2: u32 = ((v >> 16) & 255) << 8;
+    let b3: u32 = (v >> 24) & 255;
+    return b0 | b1 | b2 | b3;
+}
+
+/// 64 位字节交换: 两半各自交换 32 位再对调。
+pub fn endian_swap64(v: u64) -> u64 {
+    let hi: u64 = endian_swap32((v >> 32) as u32) as u64;
+    let lo: u64 = endian_swap32((v & 4294967295) as u32) as u64;
+    return (lo << 32) | hi;
+}
+
+/// 读 16 位小端 (mem 的正式版, 这里给个同族名字)。
+pub fn endian_load16le(p: ptr, o: u32) -> u32 {
+    return mem_load16(p, o);
+}
+
+/// 读 16 位大端。
+pub fn endian_load16be(p: ptr, o: u32) -> u32 {
+    return endian_swap16(mem_load16(p, o));
+}
+
+pub fn endian_load32le(p: ptr, o: u32) -> u32 {
+    return mem_load32(p, o);
+}
+
+/// 读 32 位大端。
+pub fn endian_load32be(p: ptr, o: u32) -> u32 {
+    return endian_swap32(mem_load32(p, o));
+}
+
+pub fn endian_load64le(p: ptr, o: u32) -> u64 {
+    return mem_load64(p, o);
+}
+
+pub fn endian_load64be(p: ptr, o: u32) -> u64 {
+    return endian_swap64(mem_load64(p, o));
+}
+
+pub fn endian_store16le(p: ptr, o: u32, v: u32) {
+    mem_store16(p, o, v);
+}
+
+/// 写 16 位大端 —— 高位字节落在低地址。
+pub fn endian_store16be(p: ptr, o: u32, v: u32) {
+    mem_store16(p, o, endian_swap16(v));
+}
+
+pub fn endian_store32le(p: ptr, o: u32, v: u32) {
+    mem_store32(p, o, v);
+}
+
+pub fn endian_store32be(p: ptr, o: u32, v: u32) {
+    mem_store32(p, o, endian_swap32(v));
+}
+
+pub fn endian_store64le(p: ptr, o: u32, v: u64) {
+    mem_store64(p, o, v);
+}
+
+pub fn endian_store64be(p: ptr, o: u32, v: u64) {
+    mem_store64(p, o, endian_swap64(v));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_endian_swap16() -> bool {
+    return endian_swap16(4660) == 13330 && endian_swap16(1) == 256;
+}
+
+fn test_endian_swap32_by_bytes() -> bool {
+    // 0x12345678 -> 0x78563412
+    return endian_swap32(305419896) == 2018915346;
+}
+
+fn test_endian_swap32_identity_on_symmetric() -> bool {
+    // 每个字节相同的值 (0x11111111), 交换后应当不变 —— 写错成"按位移"的实现会挂在这里。
+    return endian_swap32(286331153) == 286331153;
+}
+
+fn test_endian_swap64_double_is_identity() -> bool {
+    let v: u64 = 81985529216486895;
+    return endian_swap64(endian_swap64(v)) == v;
+}
+
+fn test_endian_swap64_known() -> bool {
+    // 0x0102030405060708 -> 0x0807060504030201
+    let v: u64 = 72623859790382856;
+    let w: u64 = endian_swap64(v);
+    return (w >> 56) == 8 && ((w >> 48) & 255) == 7 && (w & 255) == 1;
+}
+
+fn test_endian_store32be_byte_order() -> bool {
+    // 大端: 0x12 落在最低地址。这条是端序写反时唯一会挂的地方。
+    let b: ptr = alloc(16);
+    endian_store32be(b, 0, 305419896);
+    return load8(b, 0) == 18 && load8(b, 1) == 52 && load8(b, 2) == 86 && load8(b, 3) == 120;
+}
+
+fn test_endian_store32le_byte_order() -> bool {
+    let b: ptr = alloc(16);
+    endian_store32le(b, 0, 305419896);
+    return load8(b, 0) == 120 && load8(b, 3) == 18;
+}
+
+fn test_endian_be_le_are_reverses() -> bool {
+    let b: ptr = alloc(16);
+    let c: ptr = alloc(16);
+    endian_store32be(b, 0, 305419896);
+    endian_store32le(c, 0, 305419896);
+    return load8(b, 0) == load8(c, 3) && load8(b, 3) == load8(c, 0) && load8(b, 1) == load8(c, 2);
+}
+
+fn test_endian_load32be_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    endian_store32be(b, 4, 4294967295);
+    return endian_load32be(b, 4) == 4294967295 && endian_load32be(b, 4) == endian_load32le(b, 4);
+}
+
+fn test_endian_load32be_from_literal_bytes() -> bool {
+    // 直接按字节摆一个已知数, 不经写入路径 —— 否则"写反+读反"会互相抵消而看上去是对的。
+    let b: ptr = alloc(16);
+    store8(b, 0, 1 as u8);
+    store8(b, 1, 2 as u8);
+    store8(b, 2, 3 as u8);
+    store8(b, 3, 4 as u8);
+    return endian_load32be(b, 0) == 16909060 && endian_load32le(b, 0) == 67305985;
+}
+
+fn test_endian_load64be_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    let v: u64 = 72623859790382856;
+    endian_store64be(b, 0, v);
+    return endian_load64be(b, 0) == v && load8(b, 0) == 1 && load8(b, 7) == 8;
+}
+
+fn test_endian_load16be() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 18 as u8);
+    store8(b, 1, 52 as u8);
+    return endian_load16be(b, 0) == 4660 && endian_load16le(b, 0) == 13330;
+}
+
+fn test_endian_at_offset_does_not_touch_neighbours() -> bool {
+    let b: ptr = alloc(16);
+    mem_fill(b, 0, 16, 0);
+    endian_store32be(b, 5, 305419896);
+    return load8(b, 4) == 0 && load8(b, 9) == 0 && endian_load32be(b, 5) == 305419896;
+}
+
+fn test_endian_is_le() -> bool {
+    return endian_is_le();
+}

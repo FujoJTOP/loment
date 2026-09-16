@@ -1,0 +1,273 @@
+// std/dir.lomt — 目录遍历 (getdents64)
+//
+// 为什么要它: 工具要遍历目录 (lomrel / lomstatus 都碰过), 而 getdents64 返回的是
+// **一串变长记录**, 每条自带长度 —— 走错一步就会把名字读成 inode。这一层把那串
+// 记录的结构收起来。
+//
+// 分界: `getdents64`(217) 在 PE 垫片实现的那 8 个 syscall 里, 所以两边都能走。
+// 但垫片**每次只返回一条**记录 (docs/167 §5), 而 Linux 一次返回一批 ——
+// 所以调用方必须按"读一批 → 走完这批 → 再读一批"的循环写, 不能假设一次读完。
+// `dir_count` 就是这个循环的现成版本。
+//
+// linux_dirent64 的布局 (x86-64 Linux):
+//   @0 d_ino(8) @8 d_off(8) @16 d_reclen(2) @18 d_type(1) @19 d_name[…NUL]
+//
+// 命名: 公开一律 dir_*, 内部一律 di_*。自检 test_dir_*。
+
+module dir
+
+use "io.lomt"
+
+/// 失败哨兵。
+pub const DIR_ERR: u32 = 4294967295;
+/// openat 要目录时加的 O_DIRECTORY 位。
+pub const DIR_O_DIRECTORY: u64 = 65536;
+/// d_type: 目录。
+pub const DIR_TYPE_DIR: u32 = 4;
+/// d_type: 普通文件。
+pub const DIR_TYPE_REG: u32 = 8;
+/// 记录里名字的起始偏移。
+pub const DIR_NAME_OFF: u32 = 19;
+/// 一条记录的最小长度 (名字为空时)。
+pub const DIR_MIN_RECLEN: u32 = 20;
+
+/// 打开目录。返回 fd, 负数 = 失败 (不是目录也会失败)。
+pub fn dir_open(path: ptr) -> i64 {
+    return syscall4(257, IO_AT_FDCWD, path as u64, DIR_O_DIRECTORY);
+}
+
+pub fn dir_open_lit(scr: ptr, lit: str) -> i64 {
+    io_put_lit(scr, lit);
+    return dir_open(scr);
+}
+
+/// 读一批目录项到 buf。返回字节数 (0 = 读完), 负数 = 出错。
+pub fn dir_read(fd: i64, buf: ptr, cap: u64) -> i64 {
+    return syscall4(217, fd as u64, buf as u64, cap);
+}
+
+pub fn dir_close(fd: i64) -> i64 {
+    return io_close(fd);
+}
+
+/// 记录长度 d_reclen (小端 u16)。
+pub fn dir_reclen_at(buf: ptr, off: u32) -> u32 {
+    let lo: u32 = load8(buf, off + 16);
+    let hi: u32 = load8(buf, off + 17);
+    return lo | (hi << 8);
+}
+
+/// 记录类型 d_type。
+pub fn dir_type_at(buf: ptr, off: u32) -> u32 {
+    return load8(buf, off + 18);
+}
+
+/// 名字长度 (到 NUL 或记录末尾)。
+pub fn dir_name_len_at(buf: ptr, off: u32) -> u32 {
+    let r: u32 = dir_reclen_at(buf, off);
+    let i: u32 = DIR_NAME_OFF;
+    while i < r && load8(buf, off + i) != 0 {
+        i = i + 1;
+    }
+    return i - DIR_NAME_OFF;
+}
+
+/// 名字的首字节指针 (直接可以喂 io_write_all)。
+pub fn dir_name_ptr_at(buf: ptr, off: u32) -> ptr {
+    return ((buf as u64) + ((off + DIR_NAME_OFF) as u64)) as ptr;
+}
+
+/// 下一条记录的偏移; 返回 n 表示这批走完。
+/// 长度小于最小记录时**停下** —— 畸形数据里硬走会变成死循环。
+pub fn dir_next_at(buf: ptr, off: u32, n: u32) -> u32 {
+    let r: u32 = dir_reclen_at(buf, off);
+    if r < DIR_MIN_RECLEN {
+        return n;
+    }
+    let k: u32 = off + r;
+    if k >= n {
+        return n;
+    }
+    return k;
+}
+
+/// 名字是 "." 或 ".." 吗 (遍历时通常要跳过)。
+pub fn dir_is_dot_at(buf: ptr, off: u32) -> bool {
+    let l: u32 = dir_name_len_at(buf, off);
+    if l == 1 && load8(buf, off + DIR_NAME_OFF) == 46 {
+        return true;
+    }
+    if l == 2 && load8(buf, off + DIR_NAME_OFF) == 46
+        && load8(buf, off + DIR_NAME_OFF + 1) == 46 {
+        return true;
+    }
+    return false;
+}
+
+/// 数目录里的条目 (不含 "." 与 "..")。失败返回 DIR_ERR。
+pub fn dir_count(scr: ptr, lit: str, buf: ptr, cap: u64) -> u32 {
+    io_put_lit(scr, lit);
+    let fd: i64 = dir_open(scr);
+    if fd < 0 {
+        return DIR_ERR;
+    }
+    let c: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let rn: i64 = dir_read(fd, buf, cap);
+        if rn <= 0 {
+            go = 0;
+        } else {
+            let m: u32 = rn as u32;
+            let off: u32 = 0;
+            let more: u32 = 1;
+            while more == 1 {
+                if off + DIR_MIN_RECLEN > m {
+                    more = 0;
+                } else {
+                    if dir_is_dot_at(buf, off) == false {
+                        c = c + 1;
+                    }
+                    let nx: u32 = dir_next_at(buf, off, m);
+                    if nx <= off {
+                        more = 0;
+                    } else {
+                        off = nx;
+                    }
+                }
+            }
+        }
+    }
+    dir_close(fd);
+    return c;
+}
+
+/// 数目录里某一类 (按 d_type) 的条目数。
+pub fn dir_count_type(scr: ptr, lit: str, buf: ptr, cap: u64, want: u32) -> u32 {
+    io_put_lit(scr, lit);
+    let fd: i64 = dir_open(scr);
+    if fd < 0 {
+        return DIR_ERR;
+    }
+    let c: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let rn: i64 = dir_read(fd, buf, cap);
+        if rn <= 0 {
+            go = 0;
+        } else {
+            let m: u32 = rn as u32;
+            let off: u32 = 0;
+            let more: u32 = 1;
+            while more == 1 {
+                if off + DIR_MIN_RECLEN > m {
+                    more = 0;
+                } else {
+                    if dir_is_dot_at(buf, off) == false {
+                        if dir_type_at(buf, off) == want {
+                            c = c + 1;
+                        }
+                    }
+                    let nx: u32 = dir_next_at(buf, off, m);
+                    if nx <= off {
+                        more = 0;
+                    } else {
+                        off = nx;
+                    }
+                }
+            }
+        }
+    }
+    dir_close(fd);
+    return c;
+}
+
+// ---------------------------------------------------------------- 自检
+// 系统调用那半 (open/read) 只能在真目录上验, 由消费方的端到端测试覆盖。
+// 这里测的是**记录解析**——用人在缓冲里搭出来的 linux_dirent64 记录。
+// 走错一步就把名字读成 inode 的那类错, 正是这一段。
+
+fn dt_build(buf: ptr, off: u32, typ: u32, name: str) -> u32 {
+    let reclen: u32 = 24;
+    store8(buf, off + 16, (reclen & 255) as u8);
+    store8(buf, off + 17, ((reclen >> 8) & 255) as u8);
+    store8(buf, off + 18, typ as u8);
+    let nl: u32 = str_len(name);
+    let i: u32 = 0;
+    while i < nl {
+        store8(buf, off + DIR_NAME_OFF + i, str_byte(name, i) as u8);
+        i = i + 1;
+    }
+    store8(buf, off + DIR_NAME_OFF + nl, 0 as u8);
+    return reclen;
+}
+
+fn test_dir_reclen_at() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_REG, "a.txt");
+    return dir_reclen_at(b, 0) == 24;
+}
+
+fn test_dir_type_at() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_DIR, "sub");
+    return dir_type_at(b, 0) == DIR_TYPE_DIR && dir_type_at(b, 0) != DIR_TYPE_REG;
+}
+
+fn test_dir_name_len_at() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_REG, "a.txt");
+    return dir_name_len_at(b, 0) == 5;
+}
+
+fn test_dir_name_ptr_at() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_REG, "a.txt");
+    let p: ptr = dir_name_ptr_at(b, 0);
+    return load8(p, 0) == 97 && load8(p, 4) == 116;
+}
+
+fn test_dir_walks_two_records() -> bool {
+    // 两条记录接着放: 第一条 24 字节, 所以第二条在 24。
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_REG, "one");
+    dt_build(b, 24, DIR_TYPE_DIR, "two");
+    let n1: u32 = dir_next_at(b, 0, 48);
+    return n1 == 24 && dir_type_at(b, n1) == DIR_TYPE_DIR
+        && dir_name_len_at(b, n1) == 3 && load8(dir_name_ptr_at(b, n1), 0) == 116;
+}
+
+fn test_dir_next_past_end_is_end() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_REG, "one");
+    // 这批只有 24 字节 -> 下一条就是结束。
+    return dir_next_at(b, 0, 24) == 24;
+}
+
+fn test_dir_next_rejects_malformed() -> bool {
+    // 长度 0 的记录会变成死循环 —— 必须停下。
+    let b: ptr = alloc(128);
+    store8(b, 16, 0 as u8);
+    store8(b, 17, 0 as u8);
+    return dir_next_at(b, 0, 4096) == 4096;
+}
+
+fn test_dir_is_dot() -> bool {
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_DIR, ".");
+    dt_build(b, 24, DIR_TYPE_DIR, "..");
+    dt_build(b, 48, DIR_TYPE_REG, "ok");
+    return dir_is_dot_at(b, 0) && dir_is_dot_at(b, 24) && !dir_is_dot_at(b, 48);
+}
+
+fn test_dir_is_dot_not_confused_by_prefix() -> bool {
+    // ".git" 不是 "." —— 前缀相同但长度不同。
+    let b: ptr = alloc(128);
+    dt_build(b, 0, DIR_TYPE_DIR, ".git");
+    return !dir_is_dot_at(b, 0);
+}
+
+fn test_dir_constants() -> bool {
+    return DIR_TYPE_DIR == 4 && DIR_TYPE_REG == 8 && DIR_NAME_OFF == 19
+        && DIR_MIN_RECLEN == 20 && DIR_O_DIRECTORY == 65536 && DIR_ERR == 4294967295;
+}

@@ -1,0 +1,182 @@
+// std/ring.lomt — 环形缓冲 (FIFO, 调用方持有数组)
+//
+// 与 vec 的分别: vec 的元素数只增, 索引就是下标; 环形的元素数有上界, 且读写位置会绕回去。
+// 所以这里的 "游标" 不是一个下标而是一对 (head, count) —— 两个 u32, 并进一个 u64
+// (借 num 的打包约定)。head 是**下一个要写的位置**, 队首则是往回数 count 个。
+//
+// 为什么不像 vec 那样拆成两个标量参数: 那样一个 push 要传 5 个参数、返回 1 个,
+// 调用点会很难读; 而且 head/count 永远是一起变的, 分开传只会给"只更新一半"留机会。
+//
+// 满/空的判定: count == cap 是满, count == 0 是空 —— 不需要哨兵,
+// 因为 count 本身就是可信状态。
+//
+// 命名: 公开一律 ring_*, 内部一律 rg_*。自检 test_ring_*。
+
+module ring
+
+use "mem.lomt"
+use "num.lomt"
+
+/// 元素宽度 (u32)。
+pub const RING_W: u32 = 4;
+
+/// 环游标里的 head (下一个写入位置)。
+pub fn ring_head(hc: u64) -> u32 {
+    return num_hi(hc);
+}
+
+/// 环游标里的 count (当前元素数)。
+pub fn ring_count(hc: u64) -> u32 {
+    return num_lo(hc);
+}
+
+pub fn ring_full(cap: u32, hc: u64) -> bool {
+    return num_lo(hc) >= cap;
+}
+
+pub fn ring_empty(hc: u64) -> bool {
+    return num_lo(hc) == 0;
+}
+
+/// 队首元素在缓冲里的下标。空环返回 0 (调用方本就该先判空)。
+pub fn ring_front(cap: u32, hc: u64) -> u32 {
+    let h: u32 = num_hi(hc);
+    let c: u32 = num_lo(hc);
+    if c == 0 {
+        return 0;
+    }
+    if h >= c {
+        return h - c;
+    }
+    return cap - (c - h);
+}
+
+/// 入队。返回新游标; **满时原样返回**。
+pub fn ring_push(base: ptr, cap: u32, hc: u64, v: u32) -> u64 {
+    let h: u32 = num_hi(hc);
+    let c: u32 = num_lo(hc);
+    if c >= cap {
+        return hc;
+    }
+    mem_store32(base, h * RING_W, v);
+    let nh: u32 = h + 1;
+    if nh >= cap {
+        nh = 0;
+    }
+    return num_pack2(nh, c + 1);
+}
+
+/// 看队首的值 (不出队)。**空环返回 0** —— 是真的 0, 不是缓冲里的残留字节。
+///
+/// 这个判空是自检逼出来的: 第一版直接读 `ring_front` 算出的下标, 而空环时那个下标
+/// 是 0, 于是返回的是上一次出队留下的旧值。注释当时写着"空环返回 0", 也就是说
+/// 注释在撒谎 —— 与其改注释, 不如让代码对得起它。
+pub fn ring_peek(base: ptr, cap: u32, hc: u64) -> u32 {
+    if num_lo(hc) == 0 {
+        return 0;
+    }
+    return mem_load32(base, ring_front(cap, hc) * RING_W);
+}
+
+/// 出队。返回新游标 (count - 1); head 不动。
+/// **调用方必须先判非空** —— 空环上调用会让 count 回绕。
+pub fn ring_pop(cap: u32, hc: u64) -> u64 {
+    let h: u32 = num_hi(hc);
+    let c: u32 = num_lo(hc);
+    if c == 0 {
+        return hc;
+    }
+    return num_pack2(h, c - 1);
+}
+
+/// 清空 (把 count 归零, head 保留 —— 归零 head 没有额外好处)。
+pub fn ring_clear(hc: u64) -> u64 {
+    return num_pack2(num_hi(hc), 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ring_push_peek() -> bool {
+    let b: ptr = alloc(64);
+    let hc: u64 = ring_push(b, 4, 0, 7);
+    return ring_count(hc) == 1 && ring_head(hc) == 1 && ring_peek(b, 4, hc) == 7;
+}
+
+fn test_ring_fifo_order() -> bool {
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 4, 0, 11);
+    let h2: u64 = ring_push(b, 4, h1, 22);
+    let h3: u64 = ring_push(b, 4, h2, 33);
+    let a: u32 = ring_peek(b, 4, h3);
+    let p1: u64 = ring_pop(4, h3);
+    let bb: u32 = ring_peek(b, 4, p1);
+    let p2: u64 = ring_pop(4, p1);
+    let c: u32 = ring_peek(b, 4, p2);
+    return a == 11 && bb == 22 && c == 33 && ring_count(p2) == 1;
+}
+
+fn test_ring_full_returns_same() -> bool {
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 2, 0, 1);
+    let h2: u64 = ring_push(b, 2, h1, 2);
+    let h3: u64 = ring_push(b, 2, h2, 3);
+    return ring_full(2, h2) && h3 == h2 && ring_count(h3) == 2;
+}
+
+fn test_ring_wraps_around() -> bool {
+    // 容量 3: 入 3 个 (满), 出 1 个, 再入 1 个 —— head 应绕回 0。
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 3, 0, 1);
+    let h2: u64 = ring_push(b, 3, h1, 2);
+    let h3: u64 = ring_push(b, 3, h2, 3);
+    let p: u64 = ring_pop(3, h3);
+    let h4: u64 = ring_push(b, 3, p, 4);
+    // 现在应有 2,3,4 三个, 队首是 2
+    let f: u32 = ring_peek(b, 3, h4);
+    let p2: u64 = ring_pop(3, h4);
+    let g: u32 = ring_peek(b, 3, p2);
+    let p3: u64 = ring_pop(3, p2);
+    let h: u32 = ring_peek(b, 3, p3);
+    return ring_head(h3) == 0 && f == 2 && g == 3 && h == 4 && ring_count(h4) == 3;
+}
+
+fn test_ring_front_index_wrap() -> bool {
+    // head 绕到 1、count 3、容量 3 时, 队首下标应是 1 (即 1+3-3 = 1)。
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 3, 0, 10);
+    let h2: u64 = ring_push(b, 3, h1, 20);
+    let h3: u64 = ring_push(b, 3, h2, 30);
+    let p: u64 = ring_pop(3, h3);
+    let h4: u64 = ring_push(b, 3, p, 40);
+    // head=1, count=3 -> front = 3 - (3-1) = 1
+    return ring_head(h4) == 1 && ring_front(3, h4) == 1 && ring_peek(b, 3, h4) == 20;
+}
+
+fn test_ring_empty() -> bool {
+    let b: ptr = alloc(64);
+    let hc: u64 = ring_push(b, 4, 0, 5);
+    let p: u64 = ring_pop(4, hc);
+    return ring_empty(p) && ring_front(4, p) == 0 && ring_peek(b, 4, p) == 0;
+}
+
+fn test_ring_pop_on_empty_is_noop() -> bool {
+    let b: ptr = alloc(64);
+    let hc: u64 = ring_pop(4, 0);
+    return ring_count(hc) == 0 && ring_empty(hc);
+}
+
+fn test_ring_clear() -> bool {
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 4, 0, 1);
+    let h2: u64 = ring_push(b, 4, h1, 2);
+    let c: u64 = ring_clear(h2);
+    return ring_empty(c) && ring_count(c) == 0;
+}
+
+fn test_ring_reuse_after_clear() -> bool {
+    let b: ptr = alloc(64);
+    let h1: u64 = ring_push(b, 4, 0, 1);
+    let c: u64 = ring_clear(h1);
+    let h2: u64 = ring_push(b, 4, c, 9);
+    return ring_peek(b, 4, h2) == 9 && ring_count(h2) == 1;
+}

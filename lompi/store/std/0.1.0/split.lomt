@@ -1,0 +1,127 @@
+// std/split.lomt — 按分隔符切分
+//
+// 为什么要它: lomstatus 的 `split_cells` 是它的一个特化 —— 按未转义的 '|' 切 Markdown
+// 表格。别的工具按空格切、按 ':' 切、按 ',' 切, 各写一遍。共同形状是"游标往前走,
+// 每步交出一段 [起点, 终点)"。
+//
+// 游标约定: 每步返回 (下一段起点 << 32) | 本段终点。没有下一段时, 下一段起点 == 终点 == hi
+// —— 调用方判 `next_start < hi` 就知道结束没结束, 不需要额外的哨兵。
+// 空段是**正常的**: "a,,b" 按 ',' 切是三段, 中间那段是空的。
+//
+// 命名: 公开一律 split_*, 内部一律 sp_*。自检 test_split_*。
+
+module split
+
+use "num.lomt"
+
+/// 在 [from, hi) 里找下一个分隔符 d。
+/// 返回 (下一段起点 << 32) | 本段终点。
+pub fn split_next(p: ptr, from: u32, hi: u32, d: u32) -> u64 {
+    let i: u32 = from;
+    while i < hi {
+        if load8(p, i) == d {
+            return num_pack2(i + 1, i);
+        }
+        i = i + 1;
+    }
+    return num_pack2(hi, hi);
+}
+
+/// 本段终点 (不含分隔符)。
+pub fn split_end(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 下一段起点。等于 `split_end` 时表示没有下一段。
+pub fn split_next_start(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// 还有下一段吗。
+pub fn split_has_more(t: u64, hi: u32) -> bool {
+    return num_hi(t) < hi;
+}
+
+/// 按 d 切出几段。空区间返回 0 段 —— "没有内容"不该算"一段空的"。
+pub fn split_count(p: ptr, lo: u32, hi: u32, d: u32) -> u32 {
+    if hi <= lo {
+        return 0;
+    }
+    let n: u32 = 1;
+    let i: u32 = lo;
+    while i < hi {
+        if load8(p, i) == d {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// (这里本来有个 `split_nth` 加一对 `split_seg_lo/hi`, 已删除 —— 它引入了**第二套打包**
+//  (段的 lo/hi) 与 `split_next` 的游标打包 (下一段起点/本段终点) 混在一起, 而两者
+//  的 num_lo/num_hi 含义正好相反。一套打包就够了: 要第 k 段的调用方自己循环 k 次;
+//  "取第 k 段"这个便利函数换来的是误用, 不划算。)
+
+// ---------------------------------------------------------------- 自检
+
+fn test_split_next_basic() -> bool {
+    // "a,b" 从头切: 本段 [0,1), 下一段起点 2。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 44 as u8);
+    store8(b, 2, 98 as u8);
+    let t: u64 = split_next(b, 0, 3, 44);
+    return split_end(t) == 1 && split_next_start(t) == 2 && split_has_more(t, 3);
+}
+
+fn test_split_next_last_segment() -> bool {
+    // 最后一段没有分隔符: 终点 == 下一段起点 == hi。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    let t: u64 = split_next(b, 0, 1, 44);
+    return split_end(t) == 1 && split_next_start(t) == 1 && !split_has_more(t, 1);
+}
+
+fn test_split_empty_segment_is_normal() -> bool {
+    // "a,,b": 第二段是空的 [2,2)。段的起点 = 上一段的 next_start, 终点 = 本段的 end。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 44 as u8);
+    store8(b, 2, 44 as u8);
+    store8(b, 3, 98 as u8);
+    let t1: u64 = split_next(b, 0, 4, 44);
+    let t2: u64 = split_next(b, split_next_start(t1), 4, 44);
+    return split_end(t1) == 1 && split_next_start(t1) == 2
+        && split_end(t2) == 2 && split_next_start(t2) == 3;
+}
+
+fn test_split_walk_all_segments() -> bool {
+    // 走完 "a,b,c": 段应为 [0,1) [2,3) [4,5)。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 44 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 44 as u8);
+    store8(b, 4, 99 as u8);
+    let from: u32 = 0;
+    let t1: u64 = split_next(b, from, 5, 44);
+    let t2: u64 = split_next(b, split_next_start(t1), 5, 44);
+    let t3: u64 = split_next(b, split_next_start(t2), 5, 44);
+    let m1: bool = split_has_more(t1, 5);
+    let m2: bool = split_has_more(t2, 5);
+    let m3: bool = split_has_more(t3, 5);
+    return split_end(t1) == 1 && split_end(t2) == 3 && split_end(t3) == 5
+        && m1 && m2 && !m3;
+}
+
+fn test_split_count() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 44 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 44 as u8);
+    store8(b, 4, 99 as u8);
+    return split_count(b, 0, 5, 44) == 3 && split_count(b, 0, 2, 44) == 2
+        && split_count(b, 0, 0, 44) == 0;
+}

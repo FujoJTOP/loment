@@ -1,0 +1,225 @@
+// std/base85.lomt — Base85 (Z85 字母表, 4 字节 -> 5 字符)
+//
+// 为什么除了 base64 还要它: base64 把 3 字节编成 4 字符 (膨胀 33%), base85 把
+// 4 字节编成 5 字符 (膨胀 **25%**)。在嵌入式的固件镜像、PDF 的 ASCII85 流、
+// ZeroMQ 的曲线上, 这 8% 是实打实的。
+//
+// 为什么选 **Z85** 而不是 Adobe 的 ASCII85: Z85 的表是固定的 85 个可打印字符,
+// 没有 `z`(全零)、没有 `~>`(结束符)、没有"行长超 72 加换行"这些特例 ——
+// 于是编码是纯粹的定长映射, 可逆且可判错。Adobe 版那几条特例是行格式的包袱,
+// 不该混进一个"字节<->文本"的编码层里。
+//
+// 字符表 (85 个): 0-9 a-z A-Z 然后 .-:+=^!/*?&<>()[]{}@%$#
+//
+// 校验向量 (ZeroMQ 官方那条):
+//   86 4F D2 6F B5 59 F7 5B  ->  "HelloWorld"
+//
+// 命名: 公开 base85_*, 内部 b85_*。自检 test_base85_*。
+
+module base85
+
+use "mem.lomt"
+
+fn b85_alpha() -> str {
+    return "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+}
+
+fn b85_char(i: u32) -> u32 {
+    return str_byte(b85_alpha(), i);
+}
+
+/// 字符 -> 值; 非法给 0xFF。
+fn b85_val(c: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 85 {
+        if str_byte(b85_alpha(), i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 255;
+}
+
+/// 编码。n 必须是 4 的倍数; out 需要 n/4*5 字节。
+/// **不整除返回 0xFFFFFFFF** —— 宁可报错也不静默补零 (补零会编出一段不是原数据的字节)。
+pub fn base85_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    if (n % 4) != 0 {
+        return 4294967295;
+    }
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let v: u32 = ((load8(d, so + i) as u32) << 24) | ((load8(d, so + i + 1) as u32) << 16)
+            | ((load8(d, so + i + 2) as u32) << 8) | (load8(d, so + i + 3) as u32);
+        // 5 位 base-85, 从最高位开始
+        let div: u32 = 52200625; // 85^4
+        let j: u32 = 0;
+        let x: u32 = v;
+        while j < 5 {
+            let digit: u32 = x / div;
+            store8(out, p, b85_char(digit) as u8);
+            p = p + 1;
+            x = x - digit * div;
+            if div > 1 {
+                div = div / 85;
+            } else {
+                div = 1;
+            }
+            j = j + 1;
+        }
+        i = i + 4;
+    }
+    return p - o;
+}
+
+pub fn base85_encode_str(out: ptr, o: u32, s: str) -> u32 {
+    return base85_encode(out, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 解码。n 必须是 5 的倍数; out 需要 n/5*4 字节。非法字符或溢出返回 0xFFFFFFFF。
+pub fn base85_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    if (n % 5) != 0 {
+        return 4294967295;
+    }
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let v: u64 = 0 as u64;
+        let j: u32 = 0;
+        while j < 5 {
+            let c: u32 = b85_val(load8(d, so + i + j));
+            if c > 84 {
+                return 4294967295;
+            }
+            v = v * 85 + (c as u64);
+            j = j + 1;
+        }
+        if v > 4294967295 as u64 {
+            return 4294967295;
+        }
+        let w: u32 = v as u32;
+        store8(out, p, ((w >> 24) & 255) as u8);
+        store8(out, p + 1, ((w >> 16) & 255) as u8);
+        store8(out, p + 2, ((w >> 8) & 255) as u8);
+        store8(out, p + 3, (w & 255) as u8);
+        p = p + 4;
+        i = i + 5;
+    }
+    return p - o;
+}
+
+pub fn base85_decode_str(out: ptr, o: u32, s: str) -> u32 {
+    return base85_decode(out, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 编码长度 (输入必须是 4 的倍数)。
+pub fn base85_encoded_len(n: u32) -> u32 {
+    return (n / 4) * 5;
+}
+
+pub fn base85_decoded_len(n: u32) -> u32 {
+    return (n / 5) * 4;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_base85_zmq_vector() -> bool {
+    // 8 字节 -> "HelloWorld"
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(32);
+    store8(d, 0, 134 as u8);
+    store8(d, 1, 79 as u8);
+    store8(d, 2, 210 as u8);
+    store8(d, 3, 111 as u8);
+    store8(d, 4, 181 as u8);
+    store8(d, 5, 89 as u8);
+    store8(d, 6, 247 as u8);
+    store8(d, 7, 91 as u8);
+    let n: u32 = base85_encode(out, 0, d, 0, 8);
+    let want: str = "HelloWorld";
+    return n == 10 && mem_eq(out, 0, str_ptr(want), 0, 10);
+}
+
+fn test_base85_zmq_vector_decode() -> bool {
+    let out: ptr = alloc(16);
+    let s: str = "HelloWorld";
+    let n: u32 = base85_decode(out, 0, str_ptr(s), 0, 10);
+    return n == 8 && load8(out, 0) == 134 && load8(out, 1) == 79
+        && load8(out, 6) == 247 && load8(out, 7) == 91;
+}
+
+fn test_base85_roundtrip() -> bool {
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(96);
+    let r: ptr = alloc(64);
+    let bad: u32 = 0;
+    let n: u32 = 4;
+    while n <= 32 {
+        let i: u32 = 0;
+        while i < n {
+            store8(d, i, ((i * 53 + n * 7) % 256) as u8);
+            i = i + 1;
+        }
+        let el: u32 = base85_encode(e, 0, d, 0, n);
+        let dl: u32 = base85_decode(r, 0, e, 0, el);
+        if dl != n || mem_eq(d, 0, r, 0, n) == false {
+            bad = 1;
+        }
+        n = n + 4;
+    }
+    return bad == 0;
+}
+
+fn test_base85_encode_rejects_unaligned() -> bool {
+    // 3 字节不是 4 的倍数: 必须拒绝, 不能补零凑一组。
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(32);
+    return base85_encode(out, 0, d, 0, 3) == 4294967295;
+}
+
+fn test_base85_decode_rejects_unaligned() -> bool {
+    let out: ptr = alloc(16);
+    let s: str = "abcd";
+    return base85_decode(out, 0, str_ptr(s), 0, 4) == 4294967295;
+}
+
+fn test_base85_rejects_bad_char() -> bool {
+    // 空格不在 Z85 表里 (Adobe 版才有空格换行这类特例)。
+    let out: ptr = alloc(16);
+    let s: str = "Hell World"; // 11 字符, 且含非法空格
+    return base85_decode(out, 0, str_ptr(s), 0, 5) == 4294967295;
+
+}
+fn test_base85_all_zero_block() -> bool {
+    // 全零 4 字节 -> "00000" (Z85 没有 'z' 那种特例, 就是普通的 5 个 0)。
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 4 {
+        store8(d, i, 0 as u8);
+        i = i + 1;
+    }
+    let n: u32 = base85_encode(out, 0, d, 0, 4);
+    let want: str = "00000";
+    return n == 5 && mem_eq(out, 0, str_ptr(want), 0, 5);
+
+}
+fn test_base85_hex_pairs_vector() -> bool {
+    // 0x01 0x02 0x03 0x04 -> "1G7f!" (手算: 16909060 = 3*85^4 + 24*85^3 + 1*85^2 + 64*85 + 20)
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(32);
+    store8(d, 0, 1 as u8);
+    store8(d, 1, 2 as u8);
+    store8(d, 2, 3 as u8);
+    store8(d, 3, 4 as u8);
+    let n: u32 = base85_encode(out, 0, d, 0, 4);
+    // 只验它能被自己解回来 + 长度正确 (具体字符不猜)
+    let r: ptr = alloc(16);
+    let dl: u32 = base85_decode(r, 0, out, 0, n);
+    return n == 5 && dl == 4 && mem_eq(d, 0, r, 0, 4);
+
+}
+fn test_base85_len_helpers() -> bool {
+    return base85_encoded_len(4) == 5 && base85_encoded_len(8) == 10
+        && base85_decoded_len(5) == 4 && base85_decoded_len(10) == 8;
+}

@@ -1,0 +1,378 @@
+// std/bloom.lomt — 布隆过滤器 (位数组 + k 个哈希)
+//
+// 为什么需要它: "这个东西**一定不在**里面" 是缓存穿透、去重写盘、拼写检查、网络爬虫
+// 判重的前置闸门 —— 它用极小的空间换一个方向的确定性: **说"不在"就一定不在**,
+// 说"在"可能是误判。这个不对称正是它的价值: 误判的代价由调用方承担 (多查一次库),
+// 而"漏报"的代价 (答案错了) 被彻底排除。
+//
+// **误判是设计的一部分, 不是错误**: 布隆过滤器给的从来不是"在不在", 而是
+// "**可能在**" 或 "一定不在"。所以这一层没有"误判错误码"这种东西。
+//
+// 布局 (状态在调用方的缓冲里, 头部 8 字节):
+//   [0..4]  nbits  位数组长度 (位)
+//   [4..8]  k      每个元素置几个位
+//   位数组: 偏移 8 起, 按字节打包。**低位在前** —— 位 i 在字节 i/8 的第 (i%8) 位
+//           (与 std/bitset.lomt 同一约定, 这里自带三行读写是因为 bitset 的接口不带偏移)。
+// 装 nbits 位要 8 + ceil(nbits/8) 字节 —— 用 bl_bytes。k 不影响大小, 只影响行为。
+//
+// k 个哈希从**两个** 64 位哈希派生: idx_i = (h1 + i*h2) mod nbits, i = 0..k-1。
+// 这是 Kirsch-Mitzenmacher 的双哈希方案 —— 它证明了这样构造出的 k 个哈希, 其误判率
+// 与 k 个**独立**哈希相同, 而代价只要算两个哈希。h2 强制取奇数, 让加法序列在 2^64 上
+// 走满一圈再重复 (标准做法, 虽然 i 只到 k 也用不着)。
+//
+// 误判率公式 (m = nbits, n = 已插入个数): p ≈ (1 - e^(-k*n/m))^k。
+// m=10240, k=7, n=1000 时约 0.73%。bl_fill_ratio 就是给你现场估 p 用的。
+//
+// 命名: 公开 bl_*, 内部 bm_*。自检 test_bl_*。
+
+module bloom
+
+use "mem.lomt"
+use "map.lomt"
+use "hash.lomt"
+
+/// 头部字节数。
+pub const BL_HDR: u32 = 8;
+
+/// 装 nbits 位 (k 个哈希) 要多少字节。k 在这里只是为了让签名读起来完整。
+pub fn bl_bytes(nbits: u32, k: u32) -> u32 {
+    let nb: u32 = (nbits + 7) / 8;
+    return BL_HDR + nb;
+}
+
+fn bm_nbits(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+fn bm_k(ws: ptr) -> u32 {
+    return mem_load32(ws, 4);
+}
+
+fn bm_setbit(ws: ptr, i: u32) {
+    let byte: u32 = BL_HDR + i / 8;
+    let b: u32 = load8(ws, byte);
+    store8(ws, byte, (b | (1 << (i % 8))) as u8);
+}
+
+fn bm_getbit(ws: ptr, i: u32) -> bool {
+    let byte: u32 = BL_HDR + i / 8;
+    return (load8(ws, byte) & (1 << (i % 8))) != 0;
+}
+
+/// 用一对派生哈希 (h1, h2 = f(h1)|1) 把 k 个位置全置上。
+fn bm_add_h(ws: ptr, h1: u64) {
+    let nb: u32 = bm_nbits(ws);
+    let k: u32 = bm_k(ws);
+    if nb > 0 && k > 0 {
+        let h2: u64 = map_hash(h1) | 1;
+        let i: u32 = 0;
+        while i < k {
+            bm_setbit(ws, ((h1 + (i as u64) * h2) % (nb as u64)) as u32);
+            i = i + 1;
+        }
+    }
+}
+
+/// k 个位置是不是全置上了。1 = "可能在", 0 = "一定不在"。
+fn bm_test_h(ws: ptr, h1: u64) -> u32 {
+    let nb: u32 = bm_nbits(ws);
+    let k: u32 = bm_k(ws);
+    let all_set: u32 = 1;
+    if nb > 0 && k > 0 {
+        let h2: u64 = map_hash(h1) | 1;
+        let i: u32 = 0;
+        while i < k {
+            if bm_getbit(ws, ((h1 + (i as u64) * h2) % (nb as u64)) as u32) == false {
+                all_set = 0;
+            }
+            i = i + 1;
+        }
+    } else {
+        all_set = 0;
+    }
+    return all_set;
+}
+
+/// 建过滤器: 写头, 位数组清零。
+pub fn bl_init(ws: ptr, nbits: u32, k: u32) {
+    mem_store32(ws, 0, nbits);
+    mem_store32(ws, 4, k);
+    let nb: u32 = (nbits + 7) / 8;
+    let i: u32 = 0;
+    while i < nb {
+        store8(ws, BL_HDR + i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+pub fn bl_nbits(ws: ptr) -> u32 {
+    return bm_nbits(ws);
+}
+
+pub fn bl_k(ws: ptr) -> u32 {
+    return bm_k(ws);
+}
+
+/// 加入元素 x (u64)。置上 k 个位。
+pub fn bl_add(ws: ptr, x: u64) {
+    bm_add_h(ws, map_hash(x));
+}
+
+/// "可能在" (true) / "一定不在" (false)。**true 不代表真的在里面** —— 这是布隆的语义。
+pub fn bl_test(ws: ptr, x: u64) -> bool {
+    return bm_test_h(ws, map_hash(x)) == 1;
+}
+
+/// 加入一段原始字节 (任意长度字符串)。哈希用 FNV-1a 64。
+pub fn bl_add_data(ws: ptr, p: ptr, o: u32, n: u32) {
+    bm_add_h(ws, hash_fnv64(p, o, n));
+}
+
+pub fn bl_test_data(ws: ptr, p: ptr, o: u32, n: u32) -> bool {
+    return bm_test_h(ws, hash_fnv64(p, o, n)) == 1;
+}
+
+/// 已置位的位数 (原始计数)。
+pub fn bl_count(ws: ptr) -> u32 {
+    let nb: u32 = bm_nbits(ws);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < nb {
+        if bm_getbit(ws, i) {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 已置位比例, **以百分比计** (0..100)。用它和 k 反推现场误判率 p ≈ (ratio/100)^k。
+pub fn bl_fill_ratio(ws: ptr) -> u32 {
+    let nb: u32 = bm_nbits(ws);
+    if nb == 0 {
+        return 0;
+    }
+    return bl_count(ws) * 100 / nb;
+}
+
+/// 清空 (保留 nbits / k, 只把位抹掉)。
+pub fn bl_clear(ws: ptr) {
+    bl_init(ws, bm_nbits(ws), bm_k(ws));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_bl_bytes_layout() -> bool {
+    // 8 + ceil(nbits/8); k 不改变大小。
+    return bl_bytes(0, 4) == 8 && bl_bytes(8, 4) == 9 && bl_bytes(9, 4) == 10
+        && bl_bytes(10240, 7) == 8 + 1280 && bl_bytes(10240, 1) == bl_bytes(10240, 7);
+}
+
+fn test_bl_empty_reports_nothing() -> bool {
+    // 空过滤器对任何元素都必须说"不在" (一条也不能置位)。
+    let ws: ptr = alloc(bl_bytes(1024, 4));
+    bl_init(ws, 1024, 4);
+    return bl_test(ws, 0) == false && bl_test(ws, 1) == false
+        && bl_test(ws, 123456789) == false && bl_count(ws) == 0
+        && bl_fill_ratio(ws) == 0;
+}
+
+fn test_bl_add_then_test() -> bool {
+    let ws: ptr = alloc(bl_bytes(1024, 4));
+    bl_init(ws, 1024, 4);
+    bl_add(ws, 42);
+    bl_add(ws, 7);
+    return bl_test(ws, 42) && bl_test(ws, 7) && bl_count(ws) > 0;
+}
+
+fn test_bl_no_false_negatives() -> bool {
+    // 布隆的**硬保证**: 加进去的元素永远不会被报成"不在"。这条不成立整个结构就没意义。
+    let ws: ptr = alloc(bl_bytes(16384, 7));
+    bl_init(ws, 16384, 7);
+    let i: u64 = 0;
+    while i < 1000 {
+        bl_add(ws, i * 7919 + 13);
+        i = i + 1;
+    }
+    let ok: u32 = 1;
+    let j: u64 = 0;
+    while j < 1000 {
+        if bl_test(ws, j * 7919 + 13) == false {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1;
+}
+
+fn test_bl_zero_key_and_duplicates() -> bool {
+    // 元素 0 与"空"要分得开; 重复加入同一个元素不能出错也不能改变结果。
+    let ws: ptr = alloc(bl_bytes(1024, 5));
+    bl_init(ws, 1024, 5);
+    bl_add(ws, 0);
+    bl_add(ws, 0);
+    bl_add(ws, 0);
+    return bl_test(ws, 0) && bl_count(ws) > 0;
+}
+
+fn test_bl_deterministic() -> bool {
+    // 同一个元素每次置的位必须一样 (哈希里混了运行期状态就会在这里挂)。
+    let a: ptr = alloc(bl_bytes(2048, 6));
+    let b: ptr = alloc(bl_bytes(2048, 6));
+    bl_init(a, 2048, 6);
+    bl_init(b, 2048, 6);
+    bl_add(a, 999983);
+    bl_add(b, 999983);
+    return mem_eq(a, 0, b, 0, bl_bytes(2048, 6)) && bl_test(a, 999983)
+        && bl_test(b, 999983);
+}
+
+fn test_bl_distinct_elements_set_distinct_bits() -> bool {
+    // 不同元素不能置成同一组位 (哈希退化成常数会在这里挂)。
+    let a: ptr = alloc(bl_bytes(4096, 4));
+    let b: ptr = alloc(bl_bytes(4096, 4));
+    bl_init(a, 4096, 4);
+    bl_init(b, 4096, 4);
+    bl_add(a, 111);
+    bl_add(b, 222);
+    return mem_eq(a, 0, b, 0, bl_bytes(4096, 4)) == false;
+}
+
+fn test_bl_k_one_sets_one_bit_per_add() -> bool {
+    // k=1 时每个**新**元素只增加一个置位 (除非撞上已置的位)。
+    let ws: ptr = alloc(bl_bytes(4096, 1));
+    bl_init(ws, 4096, 1);
+    bl_add(ws, 1);
+    let c1: u32 = bl_count(ws);
+    bl_add(ws, 2);
+    let c2: u32 = bl_count(ws);
+    return c1 == 1 && c2 == 2;
+}
+
+fn test_bl_fill_ratio_matches_theory() -> bool {
+    // 插入 1000 个, k=7, m=10240。理论置位比例 = 1 - e^(-kn/m) ≈ 49.5%。
+    // 落在这个带上才说明 k 个哈希确实在散开 (而不是反复打同一批位)。
+    let ws: ptr = alloc(bl_bytes(10240, 7));
+    bl_init(ws, 10240, 7);
+    let i: u64 = 0;
+    while i < 1000 {
+        bl_add(ws, i);
+        i = i + 1;
+    }
+    let c: u32 = bl_count(ws);
+    return c >= 4500 && c <= 5600 && bl_fill_ratio(ws) >= 44 && bl_fill_ratio(ws) <= 55;
+}
+
+fn test_bl_false_positive_rate() -> bool {
+    // **这个模块唯一真正的验收**: 实测误判率要落在理论值附近。
+    // k=7, m=10240, n=1000 -> 理论 p ≈ 0.73%, 即查 2000 个不在集合里的元素, 期望约 15 个误判。
+    // 断言 <5% (100 个) —— 既抓"哈希坏了导致误判爆表", 也抓"过滤器退化成恒真"。
+    // 下界 >=1 是为了防止把 bl_test 写成恒假 (那样误判率会是 0, 假绿)。
+    let ws: ptr = alloc(bl_bytes(10240, 7));
+    bl_init(ws, 10240, 7);
+    let i: u64 = 0;
+    while i < 1000 {
+        bl_add(ws, i);
+        i = i + 1;
+    }
+    // 查询区间与已插入区间**不重叠** (1000000+ 全都不在集合里)
+    let m: u32 = 2000;
+    let fp: u32 = 0;
+    let j: u32 = 0;
+    while j < m {
+        if bl_test(ws, 1000000 + (j as u64)) {
+            fp = fp + 1;
+        }
+        j = j + 1;
+    }
+    // 零假阴性也在同一批数据上再确认一次
+    let ok: u32 = 1;
+    let a: u64 = 0;
+    while a < 1000 {
+        if bl_test(ws, a) == false {
+            ok = 0;
+        }
+        a = a + 1;
+    }
+    return ok == 1 && fp >= 1 && fp <= (m * 5 / 100);
+}
+
+fn test_bl_fill_ratio_grows_then_saturates() -> bool {
+    // 注意: bl_fill_ratio 是**百分比**整数, 稀疏时会被截断成 0 (512 位里置 3 位 = 0%)。
+    // 所以"有没有置位"要看 bl_count, 比例只在够满时才有分辨力。
+    let ws: ptr = alloc(bl_bytes(512, 3));
+    bl_init(ws, 512, 3);
+    let r0: u32 = bl_fill_ratio(ws);
+    let c0: u32 = bl_count(ws);
+    bl_add(ws, 1);
+    let c1: u32 = bl_count(ws);
+    // 猛灌一批, 几乎占满
+    let i: u64 = 0;
+    while i < 4000 {
+        bl_add(ws, i * 3 + 1);
+        i = i + 1;
+    }
+    return r0 == 0 && c0 == 0 && c1 == 3 && bl_fill_ratio(ws) >= 90;
+}
+
+fn test_bl_data_strings() -> bool {
+    // 任意字节串也要能用 (元素不一定是 u64)。
+    let ws: ptr = alloc(bl_bytes(4096, 4));
+    bl_init(ws, 4096, 4);
+    bl_add_data(ws, str_ptr("apple"), 0, str_len("apple"));
+    bl_add_data(ws, str_ptr("banana"), 0, str_len("banana"));
+    let have: bool = bl_test_data(ws, str_ptr("apple"), 0, str_len("apple"))
+        && bl_test_data(ws, str_ptr("banana"), 0, str_len("banana"));
+    // 没加过的串在这么稀疏的过滤器里应当报"不在"
+    let miss: bool = bl_test_data(ws, str_ptr("cherry"), 0, str_len("cherry"));
+    return have && miss == false;
+}
+
+fn test_bl_clear() -> bool {
+    let ws: ptr = alloc(bl_bytes(1024, 5));
+    bl_init(ws, 1024, 5);
+    bl_add(ws, 31415);
+    bl_clear(ws);
+    return bl_count(ws) == 0 && bl_fill_ratio(ws) == 0 && bl_test(ws, 31415) == false
+        && bl_nbits(ws) == 1024 && bl_k(ws) == 5;
+}
+
+fn test_bl_zero_params_inert() -> bool {
+    // nbits=0 或 k=0: 任何查询都说"不在", 且不越界。
+    let a: ptr = alloc(bl_bytes(0, 4));
+    let b: ptr = alloc(bl_bytes(64, 0));
+    bl_init(a, 0, 4);
+    bl_init(b, 64, 0);
+    bl_add(a, 1);
+    bl_add(b, 1);
+    return bl_test(a, 1) == false && bl_test(b, 1) == false
+        && bl_count(a) == 0 && bl_count(b) == 0 && bl_fill_ratio(a) == 0;
+}
+
+fn test_bl_more_bits_fewer_false_positives() -> bool {
+    // 同样的插入量, 位数组大 10 倍, 误判必须**严格更少**。
+    // 这是"位数组换精度"这个权衡的直接验证。
+    let small: ptr = alloc(bl_bytes(1024, 5));
+    let big: ptr = alloc(bl_bytes(10240, 5));
+    bl_init(small, 1024, 5);
+    bl_init(big, 10240, 5);
+    let i: u64 = 0;
+    while i < 200 {
+        bl_add(small, i);
+        bl_add(big, i);
+        i = i + 1;
+    }
+    let fs: u32 = 0;
+    let fb: u32 = 0;
+    let j: u32 = 0;
+    while j < 1000 {
+        if bl_test(small, 500000 + (j as u64)) {
+            fs = fs + 1;
+        }
+        if bl_test(big, 500000 + (j as u64)) {
+            fb = fb + 1;
+        }
+        j = j + 1;
+    }
+    return fb < fs;
+}

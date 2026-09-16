@@ -1,0 +1,131 @@
+// std/trim.lomt — 去空白
+//
+// 为什么要它: lomstatus 里有 `trim_a` / `trim_b` 两个函数, 别的工具各有同形的。
+// 而且它们只认 ' ' / \t / \r 三个 —— 漏了 \n, 这在跨行文本上是静默错。
+//
+// 返回值: 打包 (hi << 32) | lo —— 与 argv_off/argv_len 同一套约定 (高 32 = 起点, 低 32 = 终点/长度)。
+//
+// 命名: 公开一律 trim_*, 内部一律 tr_*。自检 test_trim_*。
+
+module trim
+
+use "char.lomt"
+use "num.lomt"
+
+/// 去掉 [lo, hi) 两端的 ASCII 空白, 返回新的 (hi << 32) | lo。
+/// 整段都是空白时塌成 (lo, lo) —— 塌在**左端**, 不是右端 (先收右端再收左端,
+/// 结果自然是左端; 写测试时我一开始按 (hi, hi) 断言, 是错的)。
+pub fn trim_span(p: ptr, lo: u32, hi: u32) -> u64 {
+    let b: u32 = trim_right(p, lo, hi);
+    let a: u32 = trim_left(p, lo, b);
+    return num_pack2(b, a);
+}
+
+/// 只去左端, 返回新 lo。
+pub fn trim_left(p: ptr, lo: u32, hi: u32) -> u32 {
+    let a: u32 = lo;
+    let go: u32 = 1;
+    while a < hi && go == 1 {
+        if char_is_space(load8(p, a)) {
+            a = a + 1;
+        } else {
+            go = 0;
+        }
+    }
+    return a;
+}
+
+/// 只去右端, 返回新 hi。
+pub fn trim_right(p: ptr, lo: u32, hi: u32) -> u32 {
+    let b: u32 = hi;
+    let go: u32 = 1;
+    while b > lo && go == 1 {
+        if char_is_space(load8(p, b - 1)) {
+            b = b - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return b;
+}
+
+/// 解包: 起点。
+pub fn trim_lo(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 解包: 终点。
+pub fn trim_hi(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// 这段是不是全是空白 (空段也算 —— "没有非空白字符"就是把两边裁没)。
+pub fn trim_is_blank(p: ptr, lo: u32, hi: u32) -> bool {
+    return trim_left(p, lo, hi) >= trim_right(p, lo, hi);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_trim_both_sides() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 32 as u8);
+    store8(b, 1, 97 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 32 as u8);
+    let t: u64 = trim_span(b, 0, 4);
+    return trim_lo(t) == 1 && trim_hi(t) == 3;
+}
+
+fn test_trim_all_whitespace_collapses_left() -> bool {
+    // 整段都是空白 -> 塌成 (0, 0), 塌在左端。
+    let b: ptr = alloc(32);
+    store8(b, 0, 32 as u8);
+    store8(b, 1, 9 as u8);
+    store8(b, 2, 10 as u8);
+    let t: u64 = trim_span(b, 0, 3);
+    return trim_lo(t) == 0 && trim_hi(t) == 0 && trim_is_blank(b, 0, 3);
+}
+
+fn test_trim_all_whitespace_collapses_left_not_origin() -> bool {
+    // 起点不是 0 时也塌在**左端** (即 lo), 不是塌回 0。
+    let b: ptr = alloc(32);
+    store8(b, 0, 120 as u8);
+    store8(b, 1, 32 as u8);
+    store8(b, 2, 32 as u8);
+    let t: u64 = trim_span(b, 1, 3);
+    return trim_lo(t) == 1 && trim_hi(t) == 1;
+}
+
+fn test_trim_newline_is_whitespace() -> bool {
+    // 手抄版只认 ' ' / \t / \r, 漏了 \n —— 这条就是盯它的。
+    let b: ptr = alloc(32);
+    store8(b, 0, 120 as u8);
+    store8(b, 1, 10 as u8);
+    let t: u64 = trim_span(b, 0, 2);
+    return trim_lo(t) == 0 && trim_hi(t) == 1;
+}
+
+fn test_trim_keeps_interior() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 32 as u8);
+    store8(b, 1, 97 as u8);
+    store8(b, 2, 32 as u8);
+    store8(b, 3, 98 as u8);
+    store8(b, 4, 32 as u8);
+    let t: u64 = trim_span(b, 0, 5);
+    return trim_lo(t) == 1 && trim_hi(t) == 4;
+}
+
+fn test_trim_empty_range() -> bool {
+    let b: ptr = alloc(32);
+    let t: u64 = trim_span(b, 2, 2);
+    return trim_lo(t) == 2 && trim_hi(t) == 2;
+}
+
+fn test_trim_only_left() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 32 as u8);
+    store8(b, 1, 97 as u8);
+    store8(b, 2, 32 as u8);
+    return trim_left(b, 0, 3) == 1 && trim_right(b, 0, 3) == 2;
+}

@@ -1,0 +1,470 @@
+// std/civil.lomt — 公历日期/时间的**纯整数**换算
+//
+// 为什么需要它: 这个语言**没有浮点** (f64 是另一个软浮点库), 而系统要给文件的
+// mtime 打时间戳、要给日志盖时间、要把 `stat` 的秒数变成人能看的日期。这些全是
+// "哪一年哪一月哪一天"的整数算术 —— 一天是 86400 秒, 一个月是 28~31 天, 闰年是
+// 4 年一闰、100 年不闰、400 年又闰。没有这一层, 每个工具都会各自手写一遍, 而其中
+// 至少一半会把 1900 当闰年 (它是 100 的倍数、不是 400 的倍数)。
+//
+// 算法出处 (不是我自己推的, 是公认实现):
+//   Howard Hinnant, "chrono-Compatible Low-Level Date Algorithms" (2013)
+//   http://howardhinnant.github.io/date_algorithms.html
+//   —— 这两支 (`days_from_civil` / `civil_from_days`) 被 C++20 的 std::chrono 采用,
+//      并且是**整数闭式**的 (没有循环、没有查表), 用"纪元按 400 年切块"的技巧把
+//      闰年规则吸收进常数 146097 / 1460 / 36524 / 146096 里。原算法写在 C++ 上,
+//      依赖"整数除法**向零截断**" —— 本语言的 `/` 正是这个语义 (实测: -7/2 == -3),
+//      所以可以逐行照搬, 不需要改写。反过来, 若哪天除法语义变了, 这里会先挂。
+//
+// 纪元: **1970-01-01 (Unix 纪元) 是第 0 天**。有符号 —— 1969-12-31 是 -1。
+// 时间戳 ts 一律是**有符号**的 Unix 秒 (秒数 0 = 1970-01-01T00:00:00Z)。
+//
+// 边界 (诚实清单):
+//   - **不校验日期有效性**。`cv_days_from(2000, 2, 30)` 不会报错, 它会外推成
+//     "2000-02-29 的次日" (即 2000-03-01) —— 因为 doy 里只是 `+ d - 1`。
+//     有效性判断是 `cv_days_in_month` 的事, 调用方**先问再算**。
+//     1900-02-29 同理不存在: 它就等于 1900-03-01 (自检里钉了这条)。
+//   - `cv_from_days` 写出的年/月/日是 **u32** —— 公元前与 y > 40 亿的年份无法表达。
+//     日常 (1..9999) 完全够; 要更宽就自己从 z 推。
+//   - `cv_hms_of_secs` 只接受 [0, 86400) 的"当日秒数", 之外返回 CV_ERR ——
+//     要归一化请走 `cv_ymd_from_unix` (它内部做取整除法)。
+//   - **没有时区、没有夏令时、没有闰秒**。这一层是"公历 + UTC"的算术, 把本地时间
+//     当 UTC 用是调用方的选择 (而且是个常见的坑)。
+//
+// 内存布局: 本层不用聚合体、不分配。出参一律是**调用方给的 4 字节槽**, 一个 u32 一个槽:
+//     oy -> [u32 年]   om -> [u32 月]   od -> [u32 日]
+//     oh -> [u32 时]   omin -> [u32 分] os -> [u32 秒]
+// 内部不 alloc —— 换算路径上零分配。
+//
+// 命名: 公开 cv_*, 内部 cvf_*。自检 test_civil_*。
+
+module civil
+
+use "mem.lomt"
+
+/// 失败哨兵 (0xFFFFFFFF)。
+pub const CV_ERR: u32 = 4294967295;
+/// 成功 (0)。`cv_from_days` / `cv_hms_of_secs` / `cv_ymd_from_unix` 返回它。
+pub const CV_OK: u32 = 0;
+
+/// 一天的秒数。
+pub const CV_DAY_SECS: i64 = 86400;
+
+// ---------------------------------------------------------------- 除法
+
+/// 截断向零的整数除法。
+///
+/// 单列一层**不是因为它是新算法** —— 本语言的 `/` 语义就是它。列出来是为了把
+/// "这里依赖向零截断"写成代码而不是写成注释: 哪天语义变了, 这一处先挂, 而不是
+/// 让 Hinnant 的两支公式在某几个闰年边界上悄悄错一位。
+fn cvf_tdiv(a: i64, b: i64) -> i64 {
+    return a / b;
+}
+
+/// 向下取整的整数除法 (负数时与 cvf_tdiv 不同: -7/2 得 -4 而不是 -3)。
+/// 时间戳拆"第几天 + 当日秒"必须用它 —— ts = -1 要等于 1969-12-31 的第 86399 秒,
+/// 用截断除法会拆成"第 0 天的 -1 秒"。
+fn cvf_fdiv(a: i64, b: i64) -> i64 {
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    if r != 0 {
+        if r < 0 && b > 0 {
+            q = q - 1;
+        }
+        if r > 0 && b < 0 {
+            q = q - 1;
+        }
+    }
+    return q;
+}
+
+/// i64 的低 32 位写进 p[0..4]。
+fn cvf_put(p: ptr, v: i64) {
+    mem_store32(p, 0, v as u32);
+}
+
+// ---------------------------------------------------------------- 历法
+
+/// 是不是闰年 (公历规则: 4 的倍数是, 但 100 的倍数不是, 400 的倍数又是)。
+pub fn cv_is_leap(y: i64) -> bool {
+    if y % 4 != 0 {
+        return false;
+    }
+    if y % 100 != 0 {
+        return true;
+    }
+    return y % 400 == 0;
+}
+
+/// y 年 m 月的天数。**m 非法 (不在 1..12) 返回 0** —— 0 天不是任何一个真月份,
+/// 调用方拿它当哨兵用不会与真值混淆。
+pub fn cv_days_in_month(y: i64, m: u32) -> u32 {
+    if m < 1 || m > 12 {
+        return 0;
+    }
+    if m == 2 {
+        if cv_is_leap(y) {
+            return 29;
+        }
+        return 28;
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 {
+        return 30;
+    }
+    return 31;
+}
+
+/// 公历 (y, m, d) -> 距 1970-01-01 的天数 (可为负)。
+///
+/// Hinnant 原文的逐行照搬; **不做有效性校验** (见文件头"诚实清单")。
+pub fn cv_days_from(y: i64, m: i64, d: i64) -> i64 {
+    // 把 1、2 月并到前一年的尾巴上 —— 这样闰日永远是"这一块的最后一个 doy",
+    // 闰年规则就只剩 %4/%100/%400 三条, 不再需要在月表里特判二月。
+    let y0: i64 = y;
+    if m <= 2 {
+        y0 = y - 1;
+    }
+    let e0: i64 = y0;
+    if y0 < 0 {
+        e0 = y0 - 399;
+    }
+    let era: i64 = cvf_tdiv(e0, 400);
+    let yoe: i64 = y0 - era * 400; // 本 400 年块里的第几年, [0, 399]
+    let mi: i64 = m + 9;
+    if m > 2 {
+        mi = m - 3; // 3 月 -> 0 ... 次年 2 月 -> 11
+    }
+    let doy: i64 = cvf_tdiv(153 * mi + 2, 5) + d - 1; // 本历年里的第几天, [0, 365]
+    let doe: i64 = yoe * 365 + cvf_tdiv(yoe, 4) - cvf_tdiv(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// 距 1970-01-01 的天数 -> 公历, 年/月/日分别写进三个 4 字节槽。
+///
+/// 返回 CV_OK。三槽的**写入顺序是 y, m, d** —— 与参数表同序, 不看返回值也不会搞混。
+pub fn cv_from_days(z: i64, oy: ptr, om: ptr, od: ptr) -> u32 {
+    let zz: i64 = z + 719468; // 纪元挪到 0000-03-01, 让"块内"计算全是正数
+    let e0: i64 = zz;
+    if zz < 0 {
+        e0 = zz - 146096;
+    }
+    let era: i64 = cvf_tdiv(e0, 146097);
+    let doe: i64 = zz - era * 146097; // 本 400 年块里的第几天, [0, 146096]
+    let yoe: i64 = cvf_tdiv(
+        doe - cvf_tdiv(doe, 1460) + cvf_tdiv(doe, 36524) - cvf_tdiv(doe, 146096), 365);
+    let y: i64 = yoe + era * 400;
+    let doy: i64 = doe - (365 * yoe + cvf_tdiv(yoe, 4) - cvf_tdiv(yoe, 100));
+    let mp: i64 = cvf_tdiv(5 * doy + 2, 153); // 3 月 -> 0 ... 次年 2 月 -> 11
+    let d: i64 = doy - cvf_tdiv(153 * mp + 2, 5) + 1;
+    let mm: i64 = mp + 3;
+    if mp >= 10 {
+        mm = mp - 9; // 回到 1 月 / 2 月
+    }
+    let yy: i64 = y;
+    if mm <= 2 {
+        yy = y + 1; // 1、2 月已经并到前一年了, 加回来
+    }
+    cvf_put(oy, yy);
+    cvf_put(om, mm);
+    cvf_put(od, d);
+    return CV_OK;
+}
+
+/// 星期几。**0 = 周日**, 1 = 周一, ..., 6 = 周六 (与 C 的 struct tm 一致)。
+/// 1970-01-01 是周四 —— 所以是 `(z + 4) % 7`。
+pub fn cv_weekday(z: i64) -> u32 {
+    let r: i64 = (z + 4) % 7;
+    if r < 0 {
+        r = r + 7; // i64 的 % 跟随被除数符号, 负数要拨回来
+    }
+    return r as u32;
+}
+
+// ---------------------------------------------------------------- 时刻
+
+/// 时:分:秒 -> 当日秒数 (不校验范围, 纯线性组合)。
+pub fn cv_secs_of_day(h: i64, m: i64, s: i64) -> i64 {
+    return h * 3600 + m * 60 + s;
+}
+
+/// 当日秒数 -> 时/分/秒 (三个 4 字节槽)。**只接受 [0, 86400)**, 之外返回 CV_ERR。
+pub fn cv_hms_of_secs(secs: i64, oh: ptr, om: ptr, os: ptr) -> u32 {
+    if secs < 0 || secs >= CV_DAY_SECS {
+        return CV_ERR;
+    }
+    let h: i64 = secs / 3600;
+    let r: i64 = secs % 3600;
+    cvf_put(oh, h);
+    cvf_put(om, r / 60);
+    cvf_put(os, r % 60);
+    return CV_OK;
+}
+
+/// 有符号 Unix 秒 -> 公历 + 时刻, 六个 4 字节槽 (y, m, d, h, min, s)。
+///
+/// 先做**取整除法**拆出"第几天 + 当日秒数" —— 这是负数时间戳唯一容易错的地方:
+/// ts = -1 必须是 1969-12-31 的 23:59:59, 而不是"第 0 天的 -1 秒"。
+pub fn cv_ymd_from_unix(ts: i64, oy: ptr, om: ptr, od: ptr, oh: ptr, omin: ptr, os: ptr) -> u32 {
+    let days: i64 = cvf_fdiv(ts, CV_DAY_SECS);
+    let sod: i64 = ts - days * CV_DAY_SECS; // 恒 [0, 86400)
+    cv_from_days(days, oy, om, od);
+    return cv_hms_of_secs(sod, oh, omin, os);
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 真值来源: Python 的 `datetime` / `calendar` (`datetime.date(1970,1,1)` 作纪元,
+// `(d2 - d1).days`, `calendar.isleap`, `calendar.monthrange`) —— 全部先算出来再抄进来,
+// 没有一个是我推的。
+
+fn test_civil_days_from_epoch_anchors() -> bool {
+    return cv_days_from(1970, 1, 1) == 0
+        && cv_days_from(2000, 1, 1) == 10957
+        && cv_days_from(1969, 12, 31) == 0 - 1;
+}
+
+fn test_civil_days_from_negative_boundary() -> bool {
+    // 负数是最容易错的: 差一天、差一年都在这里露。Python:
+    //   (date(1969,12,31) - date(1970,1,1)).days == -1
+    //   (date(1969,12,30) - date(1970,1,1)).days == -2
+    //   (date(1969,1,1)  - date(1970,1,1)).days == -365
+    return cv_days_from(1969, 12, 31) == 0 - 1
+        && cv_days_from(1969, 12, 30) == 0 - 2
+        && cv_days_from(1969, 1, 1) == 0 - 365
+        && cv_days_from(1968, 12, 31) == 0 - 366; // 1968 是闰年
+}
+
+fn test_civil_from_days_zero_is_epoch() -> bool {
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let st: u32 = cv_from_days(0, y, m, d);
+    return st == CV_OK && mem_load32(y, 0) == 1970 && mem_load32(m, 0) == 1
+        && mem_load32(d, 0) == 1;
+}
+
+fn test_civil_from_days_negative() -> bool {
+    // -1 -> 1969-12-31 (而非 1969-12-30)
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    cv_from_days(0 - 1, y, m, d);
+    let ok1: bool = mem_load32(y, 0) == 1969 && mem_load32(m, 0) == 12
+        && mem_load32(d, 0) == 31;
+    cv_from_days(0 - 25567, y, m, d); // Python: date(1900,1,1) - date(1970,1,1)
+    let ok2: bool = mem_load32(y, 0) == 1900 && mem_load32(m, 0) == 1
+        && mem_load32(d, 0) == 1;
+    return ok1 && ok2;
+}
+
+fn test_civil_leap_rules() -> bool {
+    // Python: calendar.isleap —— 1900 False / 2000 True / 2023 False / 2024 True /
+    // 1600 True / 1700 False / 2100 False / 2400 True
+    return cv_is_leap(1900) == false && cv_is_leap(2000) && cv_is_leap(2023) == false
+        && cv_is_leap(2024) && cv_is_leap(1600) && cv_is_leap(1700) == false
+        && cv_is_leap(2100) == false && cv_is_leap(2400);
+}
+
+fn test_civil_days_in_month_feb() -> bool {
+    // Python: calendar.monthrange(y,2)[1] —— 1900:28 / 2000:29 / 2023:28 / 2024:29
+    return cv_days_in_month(1900, 2) == 28 && cv_days_in_month(2000, 2) == 29
+        && cv_days_in_month(2023, 2) == 28 && cv_days_in_month(2024, 2) == 29;
+}
+
+fn test_civil_days_in_month_lengths() -> bool {
+    // Python: calendar.monthrange(2023,m)[1] 全 12 个月
+    return cv_days_in_month(2023, 1) == 31 && cv_days_in_month(2023, 3) == 31
+        && cv_days_in_month(2023, 4) == 30 && cv_days_in_month(2023, 5) == 31
+        && cv_days_in_month(2023, 6) == 30 && cv_days_in_month(2023, 7) == 31
+        && cv_days_in_month(2023, 8) == 31 && cv_days_in_month(2023, 9) == 30
+        && cv_days_in_month(2023, 10) == 31 && cv_days_in_month(2023, 11) == 30
+        && cv_days_in_month(2023, 12) == 31 && cv_days_in_month(2023, 2) == 28;
+}
+
+fn test_civil_days_in_month_rejects_bad_month() -> bool {
+    // 月 0 / 13 是调用方的错 —— 给 0 而不是某个真月份的 28~31。
+    return cv_days_in_month(2023, 0) == 0 && cv_days_in_month(2023, 13) == 0;
+}
+
+fn test_civil_1900_feb29_does_not_exist() -> bool {
+    // **本模块的存在理由之一**: 1900 是 100 的倍数、不是 400 的倍数, 所以不是闰年,
+    // 1900-02-29 不存在。Hinnant 的公式不会报错 —— 它会把这个"不存在的日子"外推成
+    // 与 1900-03-01 **同一天数**, 这正是日历层"没有这一天"的数学表达。
+    //   Python: days(1900,2,29) 在 date 上根本构造不出来 (ValueError),
+    //          而算法层 days_from_civil(1900,2,29) == days_from_civil(1900,3,1) == -25508
+    let bad: i64 = cv_days_from(1900, 2, 29);
+    let good: i64 = cv_days_from(1900, 3, 1);
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    cv_from_days(bad, y, m, d);
+    let canon: bool = mem_load32(y, 0) == 1900 && mem_load32(m, 0) == 3
+        && mem_load32(d, 0) == 1;
+    return cv_days_in_month(1900, 2) == 28 && cv_is_leap(1900) == false
+        && bad == good && bad == 0 - 25508 && canon;
+}
+
+fn test_civil_2000_feb29_exists() -> bool {
+    // 400 年规则的另一半: 2000 是闰年, 2000-02-29 真的存在, 且能原样转回来。
+    //   Python: days_from_civil(2000,2,29) == 11016
+    let z: i64 = cv_days_from(2000, 2, 29);
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    cv_from_days(z, y, m, d);
+    return cv_days_in_month(2000, 2) == 29 && z == 11016
+        && mem_load32(y, 0) == 2000 && mem_load32(m, 0) == 2 && mem_load32(d, 0) == 29;
+}
+
+fn test_civil_roundtrip_2000_days() -> bool {
+    // 从 1900-01-01 起连续 2000 天, 每一"天号 -> 日期 -> 天号"都要闭合。
+    // 单个锚点对不上的话, 这里会在某个闰年边界上先炸。
+    let base: i64 = cv_days_from(1900, 1, 1);
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let i: i64 = 0;
+    let ok: bool = true;
+    while i < 2000 {
+        let z: i64 = base + i;
+        cv_from_days(z, y, m, d);
+        let back: i64 = cv_days_from(mem_load32(y, 0) as i64, mem_load32(m, 0) as i64,
+                                     mem_load32(d, 0) as i64);
+        if back != z {
+            ok = false;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+fn test_civil_roundtrip_span_known() -> bool {
+    // 1900-01-01 + 2000 天 == 1905-06-24 (Python: date(1900,1,1)+timedelta(2000))
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    cv_from_days(cv_days_from(1900, 1, 1) + 2000, y, m, d);
+    return mem_load32(y, 0) == 1905 && mem_load32(m, 0) == 6 && mem_load32(d, 0) == 24;
+}
+
+fn test_civil_weekday_2026_09_15() -> bool {
+    // Python: (date(2026,9,15).weekday() + 1) % 7 == 2 -> 周二 (0 = 周日)
+    return cv_weekday(cv_days_from(2026, 9, 15)) == 2
+        && cv_days_from(2026, 9, 15) == 20711;
+}
+
+fn test_civil_weekday_anchors() -> bool {
+    // Python: (date(1970,1,1).weekday()+1)%7 == 4 -> 周四
+    //         (date(2000,1,1).weekday()+1)%7 == 6 -> 周六
+    //         (date(1969,12,31).weekday()+1)%7 == 3 -> 周三 (负数日号)
+    return cv_weekday(0) == 4 && cv_weekday(10957) == 6
+        && cv_weekday(0 - 1) == 3 && cv_weekday(0 - 25567) == 1; // 1900-01-01 是周一
+}
+
+fn test_civil_hms_roundtrip() -> bool {
+    let h: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    let secs: i64 = cv_secs_of_day(13, 45, 59);
+    let st: u32 = cv_hms_of_secs(secs, h, m, s);
+    return secs == 49559 && st == CV_OK && mem_load32(h, 0) == 13
+        && mem_load32(m, 0) == 45 && mem_load32(s, 0) == 59;
+}
+
+fn test_civil_hms_rejects_out_of_range() -> bool {
+    let h: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    return cv_hms_of_secs(0 - 1, h, m, s) == CV_ERR
+        && cv_hms_of_secs(86400, h, m, s) == CV_ERR
+        && cv_hms_of_secs(86399, h, m, s) == CV_OK && mem_load32(h, 0) == 23
+        && mem_load32(m, 0) == 59 && mem_load32(s, 0) == 59;
+}
+
+fn test_civil_unix_zero() -> bool {
+    // Python: datetime.fromtimestamp(0, timezone.utc) == 1970-01-01T00:00:00+00:00
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let h: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    let st: u32 = cv_ymd_from_unix(0, y, m, d, h, mi, s);
+    return st == CV_OK && mem_load32(y, 0) == 1970 && mem_load32(m, 0) == 1
+        && mem_load32(d, 0) == 1 && mem_load32(h, 0) == 0 && mem_load32(mi, 0) == 0
+        && mem_load32(s, 0) == 0;
+}
+
+fn test_civil_unix_minus_one() -> bool {
+    // **负数时间戳的经典边界**: -1 是 1969-12-31T23:59:59Z, 不是"第 0 天的 -1 秒"。
+    // Python: datetime.fromtimestamp(-1, timezone.utc).isoformat() 正是这个值。
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let h: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    cv_ymd_from_unix(0 - 1, y, m, d, h, mi, s);
+    return mem_load32(y, 0) == 1969 && mem_load32(m, 0) == 12 && mem_load32(d, 0) == 31
+        && mem_load32(h, 0) == 23 && mem_load32(mi, 0) == 59 && mem_load32(s, 0) == 59;
+}
+
+fn test_civil_unix_known_stamp() -> bool {
+    // Python: datetime.fromtimestamp(1789480980, timezone.utc) == 2026-09-15T14:03:00+00:00
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let h: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    cv_ymd_from_unix(1789480980, y, m, d, h, mi, s);
+    return mem_load32(y, 0) == 2026 && mem_load32(m, 0) == 9 && mem_load32(d, 0) == 15
+        && mem_load32(h, 0) == 14 && mem_load32(mi, 0) == 3 && mem_load32(s, 0) == 0;
+}
+
+fn test_civil_unix_leap_day_stamp() -> bool {
+    // Python: datetime.fromtimestamp(951782400, timezone.utc) == 2000-02-29T00:00:00+00:00
+    //         datetime.fromtimestamp(946684800, timezone.utc) == 2000-01-01T00:00:00+00:00
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let h: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    cv_ymd_from_unix(951782400, y, m, d, h, mi, s);
+    let ok1: bool = mem_load32(y, 0) == 2000 && mem_load32(m, 0) == 2
+        && mem_load32(d, 0) == 29 && mem_load32(h, 0) == 0;
+    cv_ymd_from_unix(946684800, y, m, d, h, mi, s);
+    let ok2: bool = mem_load32(y, 0) == 2000 && mem_load32(m, 0) == 1
+        && mem_load32(d, 0) == 1;
+    return ok1 && ok2;
+}
+
+fn test_civil_unix_roundtrip_negative() -> bool {
+    // 负数秒的往返: ts -> 日期/时刻 -> 天号 -> 秒, 必须闭合。
+    // 用取整除法拆, 再用"天号*86400 + 当日秒"拼回来。
+    let ts: i64 = 0 - 1789480980;
+    let y: ptr = alloc(4);
+    let m: ptr = alloc(4);
+    let d: ptr = alloc(4);
+    let h: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let s: ptr = alloc(4);
+    cv_ymd_from_unix(ts, y, m, d, h, mi, s);
+    let back: i64 = cv_days_from(mem_load32(y, 0) as i64, mem_load32(m, 0) as i64,
+                                 mem_load32(d, 0) as i64) * CV_DAY_SECS
+        + cv_secs_of_day(mem_load32(h, 0) as i64, mem_load32(mi, 0) as i64,
+                          mem_load32(s, 0) as i64);
+    // 真值 (Python 的 floor 除法 + 独立实现的 civil_from_days 算出来, 不靠 fromtimestamp
+    // —— Windows 上它拒绝负时间戳):
+    //   -1789480980 -> 天号 -20712, 当日秒 35820 -> 1913-04-18T09:57:00Z
+    return back == ts && mem_load32(y, 0) == 1913 && mem_load32(m, 0) == 4
+        && mem_load32(d, 0) == 18 && mem_load32(h, 0) == 9 && mem_load32(mi, 0) == 57
+        && mem_load32(s, 0) == 0;
+}
+
+fn test_civil_fdiv_floor_semantics() -> bool {
+    // cvf_fdiv 是负数时间戳拆天的地基: -1/86400 必须是 -1 (向下), 不是 0 (向零)。
+    return cvf_fdiv(0 - 1, 86400) == 0 - 1 && cvf_fdiv(0 - 86400, 86400) == 0 - 1
+        && cvf_fdiv(0 - 86401, 86400) == 0 - 2 && cvf_fdiv(1, 86400) == 0
+        && cvf_fdiv(86400, 86400) == 1;
+}

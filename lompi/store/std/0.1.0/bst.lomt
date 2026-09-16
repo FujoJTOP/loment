@@ -1,0 +1,591 @@
+// std/bst.lomt — 二叉搜索树 (有序映射, 节点池在调用方的缓冲里)
+//
+// 为什么除了 map 还要它: 哈希表很快, 但它**没有顺序**。要"取大于等于 x 的最小键"、
+// "把键按序走一遍"、"取第 k 个"这类问题, 哈希表帮不上忙, 而有序映射天生就能。
+//
+// 代价要讲清楚: 这棵树**不旋转** (没有 AVL / 红黑), 所以有序插入 1..n 会退化成链表,
+// 查找从 O(log n) 掉到 O(n)。做成平衡树需要额外的高度字段与旋转代码, 那是另一件事;
+// 这一层先给"有序"这个能力, 并且用 bst_height 把退化暴露出来 —— 数据接近有序时就
+// 换别的手段 (打乱后再插, 或者用 map + 排序数组)。
+//
+// 布局: 头 16 字节 —— [根 u32][键数 u32][自由链 u32][保留];
+// 节点从偏移 16 起, 每个 24 字节 —— [左 u32][右 u32][键 u64][值 u64]。
+// 装 cap 个节点要 16 + 24*cap 字节 —— 用 bst_bytes。
+//
+// 命名: 公开 bst_*, 内部 bs_*。自检 test_bst_*。
+
+module bst
+
+use "mem.lomt"
+
+/// "没有节点" / "没有这个键"。
+pub const BST_NIL: u32 = 4294967295;
+/// 查不到时返回的值。
+pub const BST_NOVAL: u64 = 18446744073709551615;
+/// 头部字节数。
+pub const BST_HDR: u32 = 16;
+/// 一个节点的字节数。
+pub const BST_NODE: u32 = 24;
+
+pub fn bst_bytes(cap: u32) -> u32 {
+    return BST_HDR + BST_NODE * cap;
+}
+
+fn bs_nat(b: ptr, i: u32) -> u32 {
+    return BST_HDR + BST_NODE * i;
+}
+
+fn bs_root(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn bs_count(b: ptr) -> u32 {
+    return mem_load32(b, 4);
+}
+
+fn bs_free(b: ptr) -> u32 {
+    return mem_load32(b, 12);
+}
+
+fn bs_set_root(b: ptr, i: u32) {
+    mem_store32(b, 0, i);
+}
+
+fn bs_set_count(b: ptr, n: u32) {
+    mem_store32(b, 4, n);
+}
+
+fn bs_set_free(b: ptr, i: u32) {
+    mem_store32(b, 12, i);
+}
+
+pub fn bst_left(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, bs_nat(b, i));
+}
+
+pub fn bst_right(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, bs_nat(b, i) + 4);
+}
+
+pub fn bst_key(b: ptr, i: u32) -> u64 {
+    return mem_load64(b, bs_nat(b, i) + 8);
+}
+
+pub fn bst_val(b: ptr, i: u32) -> u64 {
+    return mem_load64(b, bs_nat(b, i) + 16);
+}
+
+fn bs_set_left(b: ptr, i: u32, v: u32) {
+    mem_store32(b, bs_nat(b, i), v);
+}
+
+fn bs_set_right(b: ptr, i: u32, v: u32) {
+    mem_store32(b, bs_nat(b, i) + 4, v);
+}
+
+fn bs_set_key(b: ptr, i: u32, k: u64) {
+    mem_store64(b, bs_nat(b, i) + 8, k);
+}
+
+fn bs_set_val(b: ptr, i: u32, v: u64) {
+    mem_store64(b, bs_nat(b, i) + 16, v);
+}
+
+/// 建树: 把所有节点串成自由链。
+pub fn bst_init(b: ptr, cap: u32) {
+    bs_set_root(b, BST_NIL);
+    bs_set_count(b, 0);
+    if cap == 0 {
+        bs_set_free(b, BST_NIL);
+    } else {
+        bs_set_free(b, 0);
+        let i: u32 = 0;
+        while i < cap {
+            let nx: u32 = i + 1;
+            if nx >= cap {
+                nx = BST_NIL;
+            }
+            bs_set_left(b, i, BST_NIL);
+            bs_set_right(b, i, nx);
+            i = i + 1;
+        }
+    }
+}
+
+pub fn bst_len(b: ptr) -> u32 {
+    return bs_count(b);
+}
+
+pub fn bst_is_empty(b: ptr) -> bool {
+    return bs_count(b) == 0;
+}
+
+/// 自由链借用**右**字段 —— 这与 bst_init 里挂链用的字段必须一致。
+/// (第一版这里读的是左字段, 而 init 挂的是右字段: 结果是池只发得出一个节点,
+/// 第二个插入永远失败。字段选哪个都行, 但两边必须同一个。)
+fn bs_alloc(b: ptr) -> u32 {
+    let f: u32 = bs_free(b);
+    if f == BST_NIL {
+        return BST_NIL;
+    }
+    bs_set_free(b, bst_right(b, f));
+    bs_set_left(b, f, BST_NIL);
+    bs_set_right(b, f, BST_NIL);
+    return f;
+}
+
+fn bs_free_node(b: ptr, i: u32) {
+    bs_set_left(b, i, BST_NIL);
+    bs_set_right(b, i, bs_free(b));
+    bs_set_free(b, i);
+}
+
+/// 插入或覆盖。1 = 新增, 0 = 覆盖, 2 = 失败 (池满)。
+pub fn bst_insert(b: ptr, cap: u32, k: u64, v: u64) -> u32 {
+    let r: u32 = bs_root(b);
+    if r == BST_NIL {
+        let n: u32 = bs_alloc(b);
+        if n == BST_NIL {
+            return 2;
+        }
+        bs_set_key(b, n, k);
+        bs_set_val(b, n, v);
+        bs_set_root(b, n);
+        bs_set_count(b, bs_count(b) + 1);
+        return 1;
+    }
+    let cur: u32 = r;
+    let go: u32 = 1;
+    while go == 1 {
+        let ck: u64 = bst_key(b, cur);
+        if ck == k {
+            bs_set_val(b, cur, v);
+            return 0;
+        }
+        if k < ck {
+            let l: u32 = bst_left(b, cur);
+            if l == BST_NIL {
+                let n: u32 = bs_alloc(b);
+                if n == BST_NIL {
+                    return 2;
+                }
+                bs_set_key(b, n, k);
+                bs_set_val(b, n, v);
+                bs_set_left(b, cur, n);
+                bs_set_count(b, bs_count(b) + 1);
+                return 1;
+            }
+            cur = l;
+        } else {
+            let rr: u32 = bst_right(b, cur);
+            if rr == BST_NIL {
+                let n: u32 = bs_alloc(b);
+                if n == BST_NIL {
+                    return 2;
+                }
+                bs_set_key(b, n, k);
+                bs_set_val(b, n, v);
+                bs_set_right(b, cur, n);
+                bs_set_count(b, bs_count(b) + 1);
+                return 1;
+            }
+            cur = rr;
+        }
+    }
+    return 2;
+}
+
+/// 找键: 返回节点下标, 并把**父亲**写进 out_parent[0..4] (根的父亲是 BST_NIL)。
+/// 两个结果装不下一个返回值, 所以父亲走缓冲 —— 与库里的其它函数一致。
+pub fn bst_find_node(b: ptr, k: u64, out_parent: ptr) -> u32 {
+    let p: u32 = BST_NIL;
+    let cur: u32 = bs_root(b);
+    while cur != BST_NIL {
+        let ck: u64 = bst_key(b, cur);
+        if ck == k {
+            mem_store32(out_parent, 0, p);
+            return cur;
+        }
+        p = cur;
+        if k < ck {
+            cur = bst_left(b, cur);
+        } else {
+            cur = bst_right(b, cur);
+        }
+    }
+    mem_store32(out_parent, 0, BST_NIL);
+    return BST_NIL;
+}
+
+pub fn bst_find(b: ptr, k: u64, sc: ptr) -> u64 {
+    let i: u32 = bst_find_node(b, k, sc);
+    if i == BST_NIL {
+        return BST_NOVAL;
+    }
+    return bst_val(b, i);
+}
+
+pub fn bst_has(b: ptr, k: u64, sc: ptr) -> bool {
+    return bst_find_node(b, k, sc) != BST_NIL;
+}
+
+/// 最小键所在的节点 (空树给 BST_NIL)。
+pub fn bst_min_node(b: ptr) -> u32 {
+    let cur: u32 = bs_root(b);
+    if cur == BST_NIL {
+        return BST_NIL;
+    }
+    while bst_left(b, cur) != BST_NIL {
+        cur = bst_left(b, cur);
+    }
+    return cur;
+}
+
+pub fn bst_max_node(b: ptr) -> u32 {
+    let cur: u32 = bs_root(b);
+    if cur == BST_NIL {
+        return BST_NIL;
+    }
+    while bst_right(b, cur) != BST_NIL {
+        cur = bst_right(b, cur);
+    }
+    return cur;
+}
+
+/// 严格大于 k 的最小键; 没有就给 BST_NOVAL。**不用父亲指针**
+/// (从根往下走, 一路记住"比 k 大的候选里最小的那个")。
+pub fn bst_next_gt(b: ptr, k: u64) -> u64 {
+    let cur: u32 = bs_root(b);
+    let best: u64 = BST_NOVAL;
+    while cur != BST_NIL {
+        let ck: u64 = bst_key(b, cur);
+        if ck > k {
+            best = ck;
+            cur = bst_left(b, cur);
+        } else {
+            cur = bst_right(b, cur);
+        }
+    }
+    return best;
+}
+
+/// 严格小于 k 的最大键。
+pub fn bst_prev_lt(b: ptr, k: u64) -> u64 {
+    let cur: u32 = bs_root(b);
+    let best: u64 = BST_NOVAL;
+    while cur != BST_NIL {
+        let ck: u64 = bst_key(b, cur);
+        if ck < k {
+            best = ck;
+            cur = bst_right(b, cur);
+        } else {
+            cur = bst_left(b, cur);
+        }
+    }
+    return best;
+}
+
+/// 把父亲 p 的孩子 old 换成 nw。
+fn bs_replace_child(b: ptr, p: u32, old: u32, nw: u32) {
+    if p == BST_NIL {
+        bs_set_root(b, nw);
+    } else if bst_left(b, p) == old {
+        bs_set_left(b, p, nw);
+    } else {
+        bs_set_right(b, p, nw);
+    }
+}
+
+/// 删除。三种情形都要对: 叶子、只有一个孩子、两个孩子 (用右子树的最小节点顶替)。
+pub fn bst_remove(b: ptr, k: u64, sc: ptr) -> bool {
+    let i: u32 = bst_find_node(b, k, sc);
+    if i == BST_NIL {
+        return false;
+    }
+    let p: u32 = mem_load32(sc, 0);
+    let l: u32 = bst_left(b, i);
+    let r: u32 = bst_right(b, i);
+    if l == BST_NIL || r == BST_NIL {
+        let child: u32 = l;
+        if l == BST_NIL {
+            child = r;
+        }
+        bs_replace_child(b, p, i, child);
+        bs_free_node(b, i);
+    } else {
+        // 右子树里的最小节点 s: 它没有左孩子, 所以摘它等价于"只有一个孩子"
+        let ps: u32 = i;
+        let s: u32 = r;
+        while bst_left(b, s) != BST_NIL {
+            ps = s;
+            s = bst_left(b, s);
+        }
+        // 把 s 的键值搬到 i 上, 然后从树上摘掉 s
+        bs_set_key(b, i, bst_key(b, s));
+        bs_set_val(b, i, bst_val(b, s));
+        bs_replace_child(b, ps, s, bst_right(b, s));
+        bs_free_node(b, s);
+    }
+    bs_set_count(b, bs_count(b) - 1);
+    return true;
+}
+
+/// 高度 (空树 0 个节点 -> 0)。退化成链表时长成 n —— 用它来发现退化。
+pub fn bst_height_node(b: ptr, i: u32) -> u32 {
+    if i == BST_NIL {
+        return 0;
+    }
+    let a: u32 = bst_height_node(b, bst_left(b, i));
+    let c: u32 = bst_height_node(b, bst_right(b, i));
+    let m: u32 = a;
+    if c > m {
+        m = c;
+    }
+    return m + 1;
+}
+
+pub fn bst_height(b: ptr) -> u32 {
+    return bst_height_node(b, bs_root(b));
+}
+
+/// 自洽: 从最小键开始沿"下一个更大"走一遍, 必须**严格递增**地走完 count 个键。
+/// 这同时验了 BST 性质与计数 (有环或断链都会在这里露出来)。
+pub fn bst_check(b: ptr) -> bool {
+    let n: u32 = bs_count(b);
+    if n == 0 {
+        return bs_root(b) == BST_NIL;
+    }
+    if bs_root(b) == BST_NIL {
+        return false;
+    }
+    let cur: u64 = bst_key(b, bst_min_node(b));
+    let seen: u32 = 1;
+    let go: u32 = 1;
+    while go == 1 {
+        let nxt: u64 = bst_next_gt(b, cur);
+        if nxt == BST_NOVAL {
+            go = 0;
+        } else {
+            if nxt <= cur {
+                return false;
+            }
+            cur = nxt;
+            seen = seen + 1;
+            if seen > n {
+                return false;
+            }
+        }
+    }
+    return seen == n;
+}
+
+/// 中序写进数组 (升序)。返回写出的个数。
+pub fn bst_inorder_into(b: ptr, out: ptr, cap: u32) -> u32 {
+    let n: u32 = bs_count(b);
+    if n > cap || n == 0 {
+        return 0;
+    }
+    let cur: u64 = bst_key(b, bst_min_node(b));
+    mem_store64(out, 0, cur);
+    let i: u32 = 1;
+    let go: u32 = 1;
+    let v: u64 = cur;
+    while go == 1 && i < n {
+        let nxt: u64 = bst_next_gt(b, v);
+        if nxt == BST_NOVAL {
+            go = 0;
+        } else {
+            mem_store64(out, 8 * i, nxt);
+            v = nxt;
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_bst_insert_find() -> bool {
+    let b: ptr = alloc(bst_bytes(16));
+    let sc: ptr = alloc(8);
+    bst_init(b, 16);
+    let a: u32 = bst_insert(b, 16, 5, 50);
+    let c: u32 = bst_insert(b, 16, 3, 30);
+    let d: u32 = bst_insert(b, 16, 8, 80);
+    return a == 1 && c == 1 && d == 1 && bst_find(b, 5, sc) == 50
+        && bst_find(b, 3, sc) == 30 && bst_find(b, 8, sc) == 80
+        && bst_find(b, 4, sc) == BST_NOVAL && bst_len(b) == 3;
+}
+
+fn test_bst_overwrite() -> bool {
+    let b: ptr = alloc(bst_bytes(8));
+    let sc: ptr = alloc(8);
+    bst_init(b, 8);
+    let a: u32 = bst_insert(b, 8, 1, 10);
+    let c: u32 = bst_insert(b, 8, 1, 11);
+    return a == 1 && c == 0 && bst_find(b, 1, sc) == 11 && bst_len(b) == 1;
+}
+
+fn test_bst_inorder_is_sorted() -> bool {
+    // 乱序插入, 中序出来必须升序。
+    let b: ptr = alloc(bst_bytes(16));
+    let o: ptr = alloc(128);
+    bst_init(b, 16);
+    bst_insert(b, 16, 8, 0);
+    bst_insert(b, 16, 3, 0);
+    bst_insert(b, 16, 12, 0);
+    bst_insert(b, 16, 1, 0);
+    bst_insert(b, 16, 5, 0);
+    let n: u32 = bst_inorder_into(b, o, 16);
+    return n == 5 && mem_load64(o, 0) == 1 && mem_load64(o, 8) == 3
+        && mem_load64(o, 16) == 5 && mem_load64(o, 24) == 8 && mem_load64(o, 32) == 12;
+}
+
+fn test_bst_min_max() -> bool {
+    let b: ptr = alloc(bst_bytes(16));
+    bst_init(b, 16);
+    bst_insert(b, 16, 8, 0);
+    bst_insert(b, 16, 3, 0);
+    bst_insert(b, 16, 12, 0);
+    return bst_key(b, bst_min_node(b)) == 3 && bst_key(b, bst_max_node(b)) == 12;
+}
+
+fn test_bst_empty_min_max() -> bool {
+    let b: ptr = alloc(bst_bytes(4));
+    bst_init(b, 4);
+    return bst_min_node(b) == BST_NIL && bst_max_node(b) == BST_NIL
+        && bst_height(b) == 0 && bst_check(b);
+}
+
+fn test_bst_next_prev() -> bool {
+    let b: ptr = alloc(bst_bytes(16));
+    bst_init(b, 16);
+    bst_insert(b, 16, 10, 0);
+    bst_insert(b, 16, 20, 0);
+    bst_insert(b, 16, 30, 0);
+    return bst_next_gt(b, 10) == 20 && bst_next_gt(b, 25) == 30
+        && bst_next_gt(b, 30) == BST_NOVAL && bst_prev_lt(b, 20) == 10
+        && bst_prev_lt(b, 15) == 10 && bst_prev_lt(b, 10) == BST_NOVAL;
+}
+
+fn test_bst_remove_leaf() -> bool {
+    let b: ptr = alloc(bst_bytes(8));
+    let sc: ptr = alloc(8);
+    bst_init(b, 8);
+    bst_insert(b, 8, 5, 0);
+    bst_insert(b, 8, 3, 0);
+    let d: bool = bst_remove(b, 3, sc);
+    return d && bst_len(b) == 1 && bst_find(b, 3, sc) == BST_NOVAL
+        && bst_find(b, 5, sc) == 0 && bst_check(b);
+}
+
+fn test_bst_remove_one_child() -> bool {
+    let b: ptr = alloc(bst_bytes(8));
+    let sc: ptr = alloc(8);
+    bst_init(b, 8);
+    bst_insert(b, 8, 5, 0);
+    bst_insert(b, 8, 3, 0);
+    bst_insert(b, 8, 1, 0);
+    // 删掉 3: 它只有一个左孩子 1, 孩子必须接到 5 的左边
+    let d: bool = bst_remove(b, 3, sc);
+    return d && bst_find(b, 1, sc) == 0 && bst_find(b, 3, sc) == BST_NOVAL
+        && bst_key(b, bst_min_node(b)) == 1 && bst_left(b, bs_root(b)) == bst_min_node(b)
+        && bst_check(b);
+}
+
+fn test_bst_remove_two_children() -> bool {
+    // 删有两个孩子的节点 —— 用右子树最小节点顶替, 树的有序性必须保持。
+    let b: ptr = alloc(bst_bytes(16));
+    let sc: ptr = alloc(8);
+    let o: ptr = alloc(128);
+    bst_init(b, 16);
+    bst_insert(b, 16, 10, 0);
+    bst_insert(b, 16, 5, 0);
+    bst_insert(b, 16, 15, 0);
+    bst_insert(b, 16, 12, 0);
+    let d: bool = bst_remove(b, 10, sc);
+    let n: u32 = bst_inorder_into(b, o, 16);
+    return d && bst_len(b) == 3 && n == 3 && mem_load64(o, 0) == 5
+        && mem_load64(o, 8) == 12 && mem_load64(o, 16) == 15 && bst_check(b);
+}
+
+fn test_bst_remove_root() -> bool {
+    let b: ptr = alloc(bst_bytes(8));
+    let sc: ptr = alloc(8);
+    bst_init(b, 8);
+    bst_insert(b, 8, 7, 0);
+    bst_insert(b, 8, 3, 0);
+    let d: bool = bst_remove(b, 7, sc);
+    return d && bst_len(b) == 1 && bst_key(b, bs_root(b)) == 3 && bst_check(b);
+}
+
+fn test_bst_remove_missing() -> bool {
+    let b: ptr = alloc(bst_bytes(8));
+    let sc: ptr = alloc(8);
+    bst_init(b, 8);
+    bst_insert(b, 8, 1, 0);
+    return bst_remove(b, 99, sc) == false && bst_len(b) == 1;
+}
+
+fn test_bst_full_refuses() -> bool {
+    let b: ptr = alloc(bst_bytes(2));
+    bst_init(b, 2);
+    let a: u32 = bst_insert(b, 2, 1, 0);
+    let c: u32 = bst_insert(b, 2, 2, 0);
+    let d: u32 = bst_insert(b, 2, 3, 0);
+    return a == 1 && c == 1 && d == 2 && bst_len(b) == 2;
+}
+
+fn test_bst_node_reuse_after_remove() -> bool {
+    let b: ptr = alloc(bst_bytes(2));
+    let sc: ptr = alloc(8);
+    bst_init(b, 2);
+    bst_insert(b, 2, 1, 0);
+    bst_insert(b, 2, 2, 0);
+    bst_remove(b, 1, sc);
+    let d: u32 = bst_insert(b, 2, 3, 0);
+    return d == 1 && bst_find(b, 3, sc) == 0 && bst_check(b);
+}
+
+fn test_bst_height_and_degeneration() -> bool {
+    // 有序插入会退化成一条链 —— 这不是 bug, 但必须能被**看见** (height == n)。
+    let b: ptr = alloc(bst_bytes(8));
+    bst_init(b, 8);
+    let i: u64 = 1;
+    while i <= 6 {
+        bst_insert(b, 8, i, 0);
+        i = i + 1;
+    }
+    let degenerated: bool = bst_height(b) == 6;
+    // 打乱顺序插同一批键, 高度必须明显更小
+    let c: ptr = alloc(bst_bytes(8));
+    bst_init(c, 8);
+    bst_insert(c, 8, 4, 0);
+    bst_insert(c, 8, 2, 0);
+    bst_insert(c, 8, 6, 0);
+    bst_insert(c, 8, 1, 0);
+    bst_insert(c, 8, 3, 0);
+    bst_insert(c, 8, 5, 0);
+    return degenerated && bst_height(c) < 6 && bst_check(c);
+}
+
+fn test_bst_check_detects_corruption() -> bool {
+    // 把一个键改大到违反有序性, check 必须发现。
+    let b: ptr = alloc(bst_bytes(8));
+    bst_init(b, 8);
+    bst_insert(b, 8, 1, 0);
+    bst_insert(b, 8, 5, 0);
+    bst_insert(b, 8, 9, 0);
+    let ok: bool = bst_check(b);
+    bs_set_key(b, bs_root(b), 100);
+    return ok && bst_check(b) == false;
+}
+
+fn test_bst_zero_key() -> bool {
+    // 键 0 与"空节点"必须分得开。
+    let b: ptr = alloc(bst_bytes(4));
+    let sc: ptr = alloc(8);
+    bst_init(b, 4);
+    bst_insert(b, 4, 0, 42);
+    return bst_find(b, 0, sc) == 42 && bst_len(b) == 1;
+}

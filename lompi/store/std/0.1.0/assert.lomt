@@ -1,0 +1,196 @@
+// std/assert.lomt — 断言与定位
+//
+// 为什么要它: 自检函数的形状是 `fn test_x() -> bool { return ... }`, 一旦为 false, 测试
+// 框架只说"这条挂了", 不说挂在哪一步。一个自检里有 5 个条件时, 得靠二分地删条件来找。
+// 断言把"第几条"变成一个错误码, 失败时 panic(code) 直接指出位置。
+//
+// 两条路都提供, 因为它们用在不同的地方:
+//   - assert_*  : **不可返回**, 失败即 panic(code) —— 给自检和"这不可能"位置用;
+//   - assert_code: **返回** 0 或 code —— 给生产代码用 (那里不能因为一个校验就崩掉整个进程)。
+//
+// 没有全局计数器: 语言没有模块级可变状态 (类型表里没有 static, const 又只能是整数字面量),
+// 所以"这次跑了多少条"这件事只能由调用方自己数。这是刻意的 —— 与其造一个假的全局状态,
+// 不如让调用点显式。
+//
+// 命名: 公开 assert_*, 内部 as_*。自检 test_assert_*。
+
+module assert
+
+use "mem.lomt"
+
+/// `assert_first_diff` 的"没有差异"返回值 (与 mem 的 MEM_NONE 同源: u32 全 1)。
+pub const ASSERT_NONE: u32 = 4294967295;
+
+/// cond 为假 -> panic(code)。
+pub fn assert_true(cond: bool, code: u32) {
+    if cond == false {
+        panic(code);
+    }
+}
+
+/// cond 为真 -> panic(code)。
+pub fn assert_false(cond: bool, code: u32) {
+    if cond {
+        panic(code);
+    }
+}
+
+pub fn assert_eq64(a: u64, b: u64, code: u32) {
+    if a != b {
+        panic(code);
+    }
+}
+
+pub fn assert_eq32(a: u32, b: u32, code: u32) {
+    if a != b {
+        panic(code);
+    }
+}
+
+pub fn assert_ne64(a: u64, b: u64, code: u32) {
+    if a == b {
+        panic(code);
+    }
+}
+
+pub fn assert_lt64(a: u64, b: u64, code: u32) {
+    if a >= b {
+        panic(code);
+    }
+}
+
+pub fn assert_le64(a: u64, b: u64, code: u32) {
+    if a > b {
+        panic(code);
+    }
+}
+
+pub fn assert_gt64(a: u64, b: u64, code: u32) {
+    if a <= b {
+        panic(code);
+    }
+}
+
+/// 两段字节必须相同。
+pub fn assert_bytes_eq(a: ptr, ao: u32, b: ptr, bo: u32, n: u32, code: u32) {
+    if mem_eq(a, ao, b, bo, n) == false {
+        panic(code);
+    }
+}
+
+/// 不 panic 版: cond 为假时返回 code, 否则返回 0。
+/// 给生产路径用 —— 那里"校验失败"要做的事通常是返回一个错误, 不是崩掉。
+pub fn assert_code(cond: bool, code: u32) -> u32 {
+    if cond == false {
+        return code;
+    }
+    return 0;
+}
+
+/// 两段字节第一个不同的下标; 全同返回 ASSERT_NONE。
+/// 断言只告诉你"不一样", 这个告诉你"从第几个字节开始不一样" —— 调二进制格式时省一轮。
+pub fn assert_first_diff(a: ptr, ao: u32, b: ptr, bo: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return ASSERT_NONE;
+}
+
+/// 两段字节不同的字节个数。
+pub fn assert_count_diff(a: ptr, ao: u32, b: ptr, bo: u32, n: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 注意: panic 那条路**没法自检** —— 触发它就把测试进程打死了, 而 `loment test` 会把
+// "进程非零退出"记成整条测试挂。所以这里只钉"通过时不 panic"与返回值路径;
+// "该 panic 时确实 panic"由调用点的代码审查保证 (或由用它的人手工验一次)。
+
+fn test_assert_true_passes_silently() -> bool {
+    assert_true(true, 9001);
+    return true;
+}
+
+fn test_assert_eq_passes_silently() -> bool {
+    assert_eq64(7 as u64, 7 as u64, 9002);
+    assert_eq32(7, 7, 9003);
+    assert_ne64(7 as u64, 8 as u64, 9004);
+    assert_lt64(7 as u64, 8 as u64, 9005);
+    assert_le64(7 as u64, 7 as u64, 9006);
+    assert_gt64(8 as u64, 7 as u64, 9007);
+    assert_false(false, 9008);
+    return true;
+}
+
+fn test_assert_bytes_eq_passes() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 8, 42);
+    mem_fill(b, 2, 8, 42);
+    assert_bytes_eq(a, 0, b, 2, 8, 9009);
+    return true;
+}
+
+fn test_assert_code_returns_zero_on_true() -> bool {
+    return assert_code(true, 9010) == 0;
+}
+
+fn test_assert_code_returns_code_on_false() -> bool {
+    // 这条是"返回而不是 panic"的判据: 若 assert_code 改成 panic, 整条测试会挂。
+    return assert_code(false, 9011) == 9011;
+}
+
+fn test_assert_first_diff_finds_index() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 8, 5);
+    mem_fill(b, 0, 8, 5);
+    store8(b, 3, 6 as u8);
+    return assert_first_diff(a, 0, b, 0, 8) == 3;
+}
+
+fn test_assert_first_diff_none_when_equal() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 8, 5);
+    mem_fill(b, 0, 8, 5);
+    return assert_first_diff(a, 0, b, 0, 8) == ASSERT_NONE;
+}
+
+fn test_assert_first_diff_zero_length() -> bool {
+    // 空区间恒"相等" —— 不能让循环条件在 n=0 时给出一个假的差异位置。
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    return assert_first_diff(a, 0, b, 0, 0) == ASSERT_NONE;
+}
+
+fn test_assert_count_diff() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 8, 1);
+    mem_fill(b, 0, 8, 1);
+    store8(b, 1, 2 as u8);
+    store8(b, 5, 2 as u8);
+    return assert_count_diff(a, 0, b, 0, 8) == 2;
+}
+
+fn test_assert_count_diff_zero_when_equal() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 8, 3);
+    mem_fill(b, 0, 8, 3);
+    return assert_count_diff(a, 0, b, 0, 8) == 0;
+}

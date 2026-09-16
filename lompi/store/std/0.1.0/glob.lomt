@@ -1,0 +1,452 @@
+// std/glob.lomt — glob 通配匹配 (`*` `?` `[...]` `\`), 含路径语义
+//
+// 为什么要它: 工具要按 `*.lomt` 挑文件、按 `[0-9]*` 过滤名字。看着简单, 但有两处
+// 一定会写错的坑, 这里都踩过了:
+//
+//   1) **递归会爆栈**: 直接的写法是 "遇到 '*' 就 `match(pat+1, s) || match(pat+1, s+1) || ...`",
+//      那是指数复杂度, `*a*a*a*a*b` 对一长串 'a' 会让进程卡死。这里用
+//      **双指针 + 星号回溯** (记住上一个 '*' 的 (模式位置, 主体位置)), 最坏 O(模式长 ×
+//      主体长), 空间 O(1)。**没有递归** —— 恶意模式不该能让它崩。
+//   2) **`*` 该不该跨 `/`**: shell 里 `*` 不跨目录, `rm *.txt` 不会删到子目录里。
+//      这正是 POSIX fnmatch 的 `FNM_PATHNAME`。所以分两个入口: `glob_match` (不跨) 与
+//      `glob_match_path` (不跨)。`**` 在路径模式下跨目录。
+//
+// 匹配是**按 Unicode 码点**而不是按字节做的: `?` 匹配一个码点 (于是不会把一个汉字
+// 劈成两半), 字符类里放的也是码点。这与"字节导向"的 POSIX fnmatch 不同 —— fnmatch
+// 是字节的, 在 UTF-8 上 `?` 会咬掉半个字符。本库有 utf8 层, 所以选了码点口径。非法
+// UTF-8 的字节按"一个字节 = 一个码点, 值 = 0x110000 + 字节"处理, 仍可被逐字面匹配。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **`[` 不闭合时按字面 `[` 处理**, 不报错。这是 POSIX fnmatch 的行为
+//     ("If the pattern does not contain a closing bracket, the '[' shall be treated as
+//     an ordinary character"), 也是唯一能和"模式里就是想匹配一个 '['"兼容的选法。
+//   - **不做 shell 的 `a/**/b ≡ a/b` 特例**: 本层的 `**` 就是"能跨 `/` 的 `*`", 所以
+//     `a/**/c` **不**匹配 `a/c` (因为 `**` 后面那个 `/` 还得真有一个 `/`)。这是简化。
+//   - **不做 `{}` 花括号展开** (那是 shell 的展开层, 不属匹配), 不做 `[[:alpha:]]`
+//     命名字符类, 不做 `[a-c]` 里 `]` 作首字符的字面规则 (首个 `]` 直接闭合)。
+//   - **前导 `.` 无特殊含义**: 不像 shell, `*` 能匹配 `.hidden`。要那种行为得在调用方加。
+//
+// 没有哨兵: `glob_*` 返回 bool, 没有"坏模式"这一类 (畸形模式有确定的字面解释)。要
+// 组合行为用 `glob_match_flags` + 下面两个 flag。
+//
+// 命名: 公开 glob_*, 内部 g_*。自检 test_glob_*。
+
+module glob
+
+use "case.lomt"
+
+/// `*` 与 `?` 不跨 `/` (POSIX `FNM_PATHNAME`)。
+pub const GLOB_PATHNAME: u32 = 1;
+/// 不区分大小写 (走 case.lomt 的小写折叠)。
+pub const GLOB_ICASE: u32 = 2;
+
+// 回溯时"还没有见过 '*'": 用一个不可能的模式下标当哨兵。
+const G_NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 码点解码
+
+/// 解一个码点, 返回 `(码点 << 32) | 消耗字节数`。
+/// 非法字节: 码点 = 0x110000 + 字节值 (高于任何合法码点, 所以不会和合法字符撞),
+/// 消耗 1 —— 于是坏字节仍能被逐字面匹配, 又不会把不同的坏字节混为一谈。
+fn g_dec(p: ptr, i: u32, hi: u32) -> u64 {
+    if i >= hi {
+        return 0;
+    }
+    let b0: u32 = load8(p, i);
+    if b0 < 128 {
+        return (b0 as u64) * 4294967296 + 1;
+    }
+    if (b0 & 224) == 192 && i + 2 <= hi {
+        let b1: u32 = load8(p, i + 1);
+        if (b1 & 192) == 128 {
+            return (((b0 & 31) * 64 + (b1 & 63)) as u64) * 4294967296 + 2;
+        }
+    }
+    if (b0 & 240) == 224 && i + 3 <= hi {
+        let b1: u32 = load8(p, i + 1);
+        let b2: u32 = load8(p, i + 2);
+        if (b1 & 192) == 128 && (b2 & 192) == 128 {
+            return (((b0 & 15) * 4096 + (b1 & 63) * 64 + (b2 & 63)) as u64) * 4294967296 + 3;
+        }
+    }
+    if (b0 & 248) == 240 && i + 4 <= hi {
+        let b1: u32 = load8(p, i + 1);
+        let b2: u32 = load8(p, i + 2);
+        let b3: u32 = load8(p, i + 3);
+        if (b1 & 192) == 128 && (b2 & 192) == 128 && (b3 & 192) == 128 {
+            return (((b0 & 7) * 262144 + (b1 & 63) * 4096 + (b2 & 63) * 64 + (b3 & 63)) as u64) * 4294967296 + 4;
+        }
+    }
+    return ((1114112 + b0) as u64) * 4294967296 + 1;
+}
+
+fn g_cp(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+fn g_used(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+/// 比较两个码点是否相等 (IGNORE_CASE 时先各自小写折叠)。
+fn g_eq(a: u32, b: u32, flags: u32) -> bool {
+    if (flags & GLOB_ICASE) != 0 {
+        return case_lower_cp(a) == case_lower_cp(b);
+    }
+    return a == b;
+}
+
+/// 解析字符类里的一个项 (可能是 `\` 转义), 返回 `(码点 << 32) | 该项占的模式字节数`。
+fn g_item(pat: ptr, plen: u32, i: u32) -> u64 {
+    if i < plen && load8(pat, i) == 92 && i + 1 < plen {
+        let t: u64 = g_dec(pat, i + 1, plen);
+        return (g_cp(t) as u64) * 4294967296 + ((g_used(t) + 1) as u64);
+    }
+    return g_dec(pat, i, plen);
+}
+
+/// 字符类 `[...]`。pat[p] == '['。返回**匹配时消耗的模式字节数**, 不匹配给 0
+/// (和 g_unit 同一约定)。没有闭合 `]` 时按字面 `[` 处理 (POSIX 行为)。
+fn g_class(pat: ptr, plen: u32, p: u32, cp: u32, flags: u32) -> u32 {
+    let i: u32 = p + 1;
+    let neg: u32 = 0;
+    if i < plen && (load8(pat, i) == 33 || load8(pat, i) == 94) {
+        neg = 1; // '!' 或 '^'
+        i = i + 1;
+    }
+    let hit: u32 = 0;
+    let closed: u32 = 0;
+    let first: u32 = 1;
+    while i < plen && closed == 0 {
+        if load8(pat, i) == 93 && first == 0 {
+            closed = 1;
+            i = i + 1;
+        } else {
+            first = 0;
+            let a: u64 = g_item(pat, plen, i);
+            let alo: u32 = g_cp(a);
+            let au: u32 = g_used(a);
+            let j: u32 = i + au;
+            // 范围 `a-z`: '-' 后面还有项, 且不是闭合的 ']'
+            if j < plen && load8(pat, j) == 45 && j + 1 < plen && load8(pat, j + 1) != 93 {
+                let b: u64 = g_item(pat, plen, j + 1);
+                let bhi: u32 = g_cp(b);
+                let bu: u32 = g_used(b);
+                // 折叠后再比范围 (只用小写折叠 —— 够用且和比较口径一致)
+                let lo: u32 = g_fold(alo, flags);
+                let hi: u32 = g_fold(bhi, flags);
+                let cc: u32 = g_fold(cp, flags);
+                if cc >= lo && cc <= hi {
+                    hit = 1;
+                }
+                i = j + 1 + bu;
+            } else {
+                if g_eq(alo, cp, flags) {
+                    hit = 1;
+                }
+                i = i + au;
+            }
+        }
+    }
+    if closed == 0 {
+        // 没闭合: '[' 就是一个普通字符
+        if cp == 91 {
+            return 1;
+        }
+        return 0;
+    }
+    let m: u32 = hit;
+    if neg == 1 {
+        m = 1 - hit;
+    }
+    if m == 0 {
+        return 0;
+    }
+    return i - p;
+}
+
+fn g_fold(cp: u32, flags: u32) -> u32 {
+    if (flags & GLOB_ICASE) != 0 {
+        return case_lower_cp(cp);
+    }
+    return cp;
+}
+
+/// 模式下标 p 处的一个单元能否匹配码点 cp。匹配返回消耗的**模式字节数**, 否则 0。
+/// `*` 不在这里管 (主循环单独处理, 它要吃主体而不是对上一个码点)。
+fn g_unit(pat: ptr, plen: u32, p: u32, cp: u32, flags: u32) -> u32 {
+    let c: u32 = load8(pat, p);
+    if c == 63 {
+        // '?': 恰好一个码点。路径模式下不跨 '/'
+        if (flags & GLOB_PATHNAME) != 0 && cp == 47 {
+            return 0;
+        }
+        return 1;
+    }
+    if c == 92 {
+        // '\': 转义下一个码点。尾部孤立的反斜杠不匹配任何东西。
+        if p + 1 >= plen {
+            return 0;
+        }
+        let t: u64 = g_dec(pat, p + 1, plen);
+        if g_eq(g_cp(t), cp, flags) {
+            return 1 + g_used(t);
+        }
+        return 0;
+    }
+    if c == 91 {
+        return g_class(pat, plen, p, cp, flags);
+    }
+    let t: u64 = g_dec(pat, p, plen);
+    if g_eq(g_cp(t), cp, flags) {
+        return g_used(t);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 匹配
+
+/// 核心匹配。flags 是 `GLOB_PATHNAME` / `GLOB_ICASE` 的位或。
+///
+/// 双指针 + 星号回溯, **不递归**: 记下最后一个 `*` 之后的 (模式位置, 主体位置),
+/// 失配就让它多吃一个码点再来; 连它都吃不动才判失败。递归写法在 `*a*a*a*b` 这类
+/// 对抗模式上是指数级, 这里最坏 O(模式长 × 主体长)。
+pub fn glob_match_flags(pat: ptr, plen: u32, d: ptr, so: u32, n: u32, flags: u32) -> bool {
+    let hi: u32 = so + n;
+    let p: u32 = 0;
+    let s: u32 = so;
+    let star_p: u32 = G_NONE;
+    let star_s: u32 = 0;
+    let star_cross: u32 = 0;
+    let ok: u32 = 1;
+    let done: u32 = 0;
+    while done == 0 {
+        if s >= hi {
+            done = 1;
+        } else if p < plen && load8(pat, p) == 42 {
+            // '*' —— 先当它吃掉 0 个码点, 记下回溯点。
+            // 路径模式下 `**` 是两个连写的 '*', 允许跨 '/'。
+            let np: u32 = p + 1;
+            let cross: u32 = 0;
+            if (flags & GLOB_PATHNAME) != 0 && np < plen && load8(pat, np) == 42 {
+                cross = 1;
+            }
+            let go: u32 = 1;
+            let k: u32 = np;
+            while k < plen && go == 1 {
+                if load8(pat, k) == 42 {
+                    k = k + 1;
+                } else {
+                    go = 0;
+                }
+            }
+            star_p = k;
+            star_s = s;
+            star_cross = cross;
+            p = k;
+        } else {
+            let st: u64 = g_dec(d, s, hi);
+            let cp: u32 = g_cp(st);
+            let su: u32 = g_used(st);
+            let u: u32 = 0;
+            if p < plen {
+                u = g_unit(pat, plen, p, cp, flags);
+            }
+            if u != 0 {
+                p = p + u;
+                s = s + su;
+            } else if star_p != G_NONE && star_s < hi {
+                // 回溯: 让最后一个 '*' 多吃一个码点
+                let st2: u64 = g_dec(d, star_s, hi);
+                let c2: u32 = g_cp(st2);
+                if (flags & GLOB_PATHNAME) != 0 && c2 == 47 && star_cross == 0 {
+                    ok = 0;
+                    done = 1;
+                } else {
+                    star_s = star_s + g_used(st2);
+                    s = star_s;
+                    p = star_p;
+                }
+            } else {
+                ok = 0;
+                done = 1;
+            }
+        }
+    }
+    // 尾部剩下的 '*' 吃掉 (它们能匹配空串); 还有别的字符就是没匹配上。
+    while p < plen && load8(pat, p) == 42 {
+        p = p + 1;
+    }
+    return ok == 1 && p == plen;
+}
+
+pub fn glob_match(pat: ptr, plen: u32, d: ptr, so: u32, n: u32) -> bool {
+    return glob_match_flags(pat, plen, d, so, n, 0);
+}
+
+/// `*` 与 `?` 不跨 `/`; `**` 跨 (见文件头诚实清单)。
+pub fn glob_match_path(pat: ptr, plen: u32, d: ptr, so: u32, n: u32) -> bool {
+    return glob_match_flags(pat, plen, d, so, n, GLOB_PATHNAME);
+}
+
+/// 不区分大小写 (小写折叠, 走 case.lomt)。
+pub fn glob_match_ci(pat: ptr, plen: u32, d: ptr, so: u32, n: u32) -> bool {
+    return glob_match_flags(pat, plen, d, so, n, GLOB_ICASE);
+}
+
+pub fn glob_match_ci_path(pat: ptr, plen: u32, d: ptr, so: u32, n: u32) -> bool {
+    return glob_match_flags(pat, plen, d, so, n, GLOB_PATHNAME | GLOB_ICASE);
+}
+
+/// 两个 str 的便利版 (模式, 主体)。
+pub fn glob_match_str(pat: str, s: str) -> bool {
+    return glob_match(str_ptr(pat), str_len(pat), str_ptr(s), 0, str_len(s));
+}
+
+/// 便利版: 路径语义。
+pub fn glob_match_path_str(pat: str, s: str) -> bool {
+    return glob_match_path(str_ptr(pat), str_len(pat), str_ptr(s), 0, str_len(s));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_glob_literal() -> bool {
+    let p: str = "abc";
+    return glob_match_str(p, "abc") && glob_match_str(p, "abd") == false
+        && glob_match_str(p, "ab") == false && glob_match_str(p, "abcd") == false;
+}
+
+fn test_glob_star_suffix() -> bool {
+    let p: str = "*.txt";
+    return glob_match_str(p, "a.txt") && glob_match_str(p, "file.txt")
+        && glob_match_str(p, ".txt")
+        && glob_match_str(p, "a.txt.bak") == false;
+}
+
+fn test_glob_question_exactly_one() -> bool {
+    let p: str = "a?c";
+    return glob_match_str(p, "abc") && glob_match_str(p, "ac") == false
+        && glob_match_str(p, "abbc") == false;
+}
+
+fn test_glob_class_range() -> bool {
+    let p: str = "[a-c]x";
+    return glob_match_str(p, "ax") && glob_match_str(p, "bx") && glob_match_str(p, "cx")
+        && glob_match_str(p, "dx") == false && glob_match_str(p, "a") == false;
+}
+
+fn test_glob_class_mixed_single_and_range() -> bool {
+    let p: str = "[a-cx]z";
+    return glob_match_str(p, "az") && glob_match_str(p, "cz") && glob_match_str(p, "xz")
+        && glob_match_str(p, "dz") == false;
+}
+
+fn test_glob_class_negate() -> bool {
+    let bang: str = "[!a]b";
+    let caret: str = "[^a]b";
+    return glob_match_str(bang, "cb") && glob_match_str(bang, "ab") == false
+        && glob_match_str(caret, "cb") && glob_match_str(caret, "ab") == false;
+}
+
+fn test_glob_escape() -> bool {
+    // "\\*" 是反斜杠 + 星号: 匹配**字面**的 '*', 不是通配。
+    let p: str = "\\*";
+    return glob_match_str(p, "*") && glob_match_str(p, "abc") == false
+        && glob_match_str(p, "**") == false;
+}
+
+fn test_glob_star_in_middle() -> bool {
+    let p: str = "a*b*c";
+    return glob_match_str(p, "aXbYc") && glob_match_str(p, "abc")
+        && glob_match_str(p, "aXc") == false;
+}
+
+fn test_glob_trailing_star_matches_empty() -> bool {
+    let p: str = "abc*";
+    return glob_match_str(p, "abc") && glob_match_str(p, "abcdef")
+        && glob_match_str(p, "ab") == false;
+}
+
+fn test_glob_empty_pattern() -> bool {
+    return glob_match_str("", "") && glob_match_str("", "a") == false;
+}
+
+fn test_glob_only_star() -> bool {
+    return glob_match_str("*", "") && glob_match_str("*", "anything")
+        && glob_match_str("**", "x/y/z") && glob_match_str("***", "");
+}
+
+fn test_glob_star_crosses_slash_without_pathname() -> bool {
+    let p: str = "*";
+    let s: str = "a/b";
+    return glob_match_str(p, s);
+}
+
+fn test_glob_path_star_does_not_cross_slash() -> bool {
+    let p: str = "a*c";
+    let s: str = "a/b";
+    // 非路径模式跨 ('*' 吃 '/'), 路径模式不跨 —— 这是 FNM_PATHNAME 的核心。
+    return glob_match_str(p, "abc")
+        && glob_match_path_str(p, "abc")
+        && glob_match_path_str(p, "a/b") == false
+        && glob_match_path_str("*", s) == false
+        && glob_match_str("*", s);
+}
+
+fn test_glob_path_question_does_not_cross_slash() -> bool {
+    let p: str = "a?c";
+    return glob_match_path_str(p, "abc") && glob_match_path_str(p, "a/c") == false;
+}
+
+fn test_glob_path_star_between_dirs() -> bool {
+    let p: str = "a/*/c";
+    return glob_match_path_str(p, "a/b/c") && glob_match_path_str(p, "a/b/x/c") == false;
+}
+
+fn test_glob_path_doublestar_crosses() -> bool {
+    // `**` 跨目录; 但 `a/**/c` **不**匹配 `a/c` (shell 的特例没做, 见诚实清单)。
+    let p: str = "a/**/c";
+    return glob_match_path_str(p, "a/b/x/c") && glob_match_path_str(p, "a/c") == false
+        && glob_match_path_str("a/**", "a/b/c/d");
+}
+
+fn test_glob_unclosed_bracket_is_literal() -> bool {
+    // POSIX: 没有闭合 ']' 时 '[' 是普通字符。
+    let p: str = "[abc";
+    return glob_match_str(p, "[abc") && glob_match_str(p, "a") == false
+        && glob_match_str(p, "[a") == false;
+}
+
+fn test_glob_question_matches_one_codepoint() -> bool {
+    // '?' 匹配一个**码点**: é 是 2 字节, 中 是 3 字节, 都各算一个。
+    return glob_match_str("?", "é") && glob_match_str("a?c", "a中c")
+        && glob_match_str("?", "ab") == false;
+}
+
+fn test_glob_ci_ascii() -> bool {
+    let p: str = "*.TXT";
+    return glob_match_ci(str_ptr(p), str_len(p), str_ptr("a.txt"), 0, 5)
+        && glob_match_ci(str_ptr("ABC"), 3, str_ptr("abc"), 0, 3)
+        && glob_match_str("ABC", "abc") == false; // 大小写敏感的那条不该被带跑
+}
+
+fn test_glob_ci_unicode() -> bool {
+    // 'É' 与 'é' 折叠相等 (走 case.lomt)。
+    let up: str = "É";
+    let lo: str = "é";
+    return glob_match_ci(str_ptr(up), str_len(up), str_ptr(lo), 0, str_len(lo))
+        && glob_match_ci_path(str_ptr("A/*.TXT"), 7, str_ptr("a/readme.txt"), 0, 12);
+}
+
+fn test_glob_adversarial_no_blowup() -> bool {
+    // 递归实现在这条上会指数爆炸 (十秒级); 双指针是多项式的, 秒回。
+    let p: str = "*a*a*a*a*b";
+    let many: str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";      // 40 个 a
+    let manyb: str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";    // 40 个 a + b
+    return glob_match_str(p, many) == false && glob_match_str(p, manyb);
+}
+
+fn test_glob_dot_has_no_special_meaning() -> bool {
+    // 与 shell 不同: '*' 能匹配前导 '.'。这是取舍 (见诚实清单)。
+    return glob_match_str("*.hidden", ".hidden") && glob_match_str("*", ".hidden");
+}

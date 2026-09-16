@@ -1,0 +1,583 @@
+// std/flags.lomt — 位标志集合 (通用小位集工具)
+//
+// 为什么需要它: 配置里写 `rw|x|exec`、命令行上写 `--flag=a,b,c`、日志里写
+// `O_CREAT|O_TRUNC` —— 这些都是"名字 <-> 32 位掩码"的同一种转换。仓库里已经在
+// 好几处各写了一遍: 每处都要决定"逗号还是竖线还是空白当分隔符""不认识的名字怎么办"
+// "名字表怎么存"。这一层把决定**钉死一次**并写进文档。
+//
+// 与 std/bitset.lomt 的分工: bitset 是"大位图, 存在字节缓冲里, 按下标读写";
+// 本层是"**32 位以内**的标志字, 按**名字**读写"。所以这里没有缓冲、没有下标,
+// 全部是标量进出。32 位这一级的基本位运算**已经**在 std/bit.lomt 里了 —— 本层
+// 不再抄一遍, `fl_set` 等就是那 6 个函数的薄封装 (抄第二遍正是仓库里被反复
+// 抱怨的"同一个操作四份实现")。
+//
+// 名字表格式: 一段 **NUL 分隔** 的字节串, 形如 `"rw\0x\0exec\0"`。**位号 = 名字在表
+// 里的序号** (第 0 个名字是 bit 0, 第 1 个是 bit 1, ...)。这没有"标准答案", 是本层
+// 定的规矩 —— 定死比选对更重要, 因为两侧 (解析和打印) 都读这张表。
+// 注意: **本语言的字面量写不出 `\0`** (转义只有 `\n \t \" \\`, 别的会静默退化成
+// 字母), 所以表一律在运行期用 store8 造。这条不是本层的选择, 是语言的硬约束。
+//
+// 分隔符: 逗号 `,`、竖线 `|`、空格、`\t`、`\n`、CR —— **全都认**, 而且可以混着用。
+// 连续分隔符产生的**空段一律跳过** (`"rw,,x"` 与 `"rw,x"` 等价, 前导/尾随分隔符同理),
+// 因为那是人的笔误或对齐习惯, 不是"名字叫空字符串"。
+//
+// 未知名字的策略 (定死): **快速失败**。`fl_names_to_mask` 遇到不认识的名字就
+// 返回 FL_ERR, 并把 `*out_unknown` 设成那个名字在输入里的**起始偏移** (好让调用方
+// 指出来是哪个)。理由: 配置里的拼写错误被静默忽略, 比直接报错糟得多 ——
+// "我明明写了 exec 却没生效"是最难查的一类 bug。同时 `*out_mask` 仍然写着
+// **出错前已累积的掩码**, 调用方要"尽力而为"也有东西可用。
+// 反过来 `fl_mask_to_names` 遇到**表里没有的位**不丢信息: 它写成 `#<位号>`。
+// (代价: `"#3"` 反过来解析不认识 —— 所以"名字打印 -> 名字解析"的往返只对
+//  表覆盖到的位成立。这条写在下面每个函数的注释里。)
+//
+// 命名: 公开 fl_*, 内部 flf_*。自检 test_flags_*。
+
+module flags
+
+use "mem.lomt"
+use "bit.lomt"
+use "numfmt.lomt"
+
+/// 解析失败哨兵 (0xFFFFFFFF) —— "输入里有不认识的名字"。
+pub const FL_ERR: u32 = 4294967295;
+/// "没有/找不到"哨兵 (0xFFFFFFFE) —— 与 FL_ERR **刻意分开**: 前者是"你给的东西坏了",
+/// 后者是"东西是好的, 只是没有下一个置位"。调用方要用不同的办法处理。
+pub const FL_NO: u32 = 4294967294;
+
+/// 本层能表示的最大位数 (u32)。
+pub const FL_BITS: u32 = 32;
+
+// ---------------------------------------------------------------- 基本位运算
+//
+// 就是 std/bit.lomt 那 6 个函数。下标 >= 32 时 bit_* 的原语义是"原值返回 / 测出 false"
+// —— 这里**保持**那个语义 (不做 panic, 这个语言也没有 panic)。
+// 名字写成 fl_* 是为了让调用方只依赖本层, 不必同时知道 bit.lomt 的拼写。
+
+/// 置位。i >= 32 原值返回。
+pub fn fl_set(m: u32, i: u32) -> u32 {
+    return bit_set(m, i);
+}
+
+/// 清位。i >= 32 原值返回。
+pub fn fl_clr(m: u32, i: u32) -> u32 {
+    return bit_clr(m, i);
+}
+
+/// 翻位。i >= 32 原值返回。
+pub fn fl_toggle(m: u32, i: u32) -> u32 {
+    return bit_toggle(m, i);
+}
+
+/// 测位。i >= 32 恒 false。
+pub fn fl_test(m: u32, i: u32) -> bool {
+    return bit_test(m, i);
+}
+
+/// 1 的个数 (0..32)。
+pub fn fl_popcount(m: u32) -> u32 {
+    return bit_popcount32(m);
+}
+
+/// 最低的置位下标。**m == 0 返回 FL_NO** (bit_ctz32 对 0 返回 32, 那是"位宽"不是
+/// "下标", 这里换成显式哨兵)。
+pub fn fl_lowest_bit(m: u32) -> u32 {
+    if m == 0 {
+        return FL_NO;
+    }
+    return bit_ctz32(m);
+}
+
+/// 从下标 `from` 起 (含) 的第一个置位下标; 没有则 FL_NO。
+///
+/// `from >= 32` 返回 FL_NO。这条是"逐个取出"的纯函数形态:
+///     i = fl_next(m, 0);  while i != FL_NO { ...; i = fl_next(m, i + 1); }
+pub fn fl_next(m: u32, from: u32) -> u32 {
+    if from >= FL_BITS {
+        return FL_NO;
+    }
+    let x: u32 = m >> from; // 把 from 以下的位甩掉; 剩下的最低位就是答案
+    if x == 0 {
+        return FL_NO;
+    }
+    return from + bit_ctz32(x);
+}
+
+/// 游标式的"逐个取出": `cur` 指向调用方给的 **4 字节游标**, 首次调用前必须把它置 0。
+///
+/// 每次返回下一个置位下标, 并把游标推进到它之后; 取完返回 FL_NO (并把游标钉在 32,
+/// 于是后续调用继续返回 FL_NO, 不会绕回去)。调用方**不要在两次调用之间改游标**。
+///
+/// 为什么不只用 `fl_next`: 调用方写在循环更新的位置容易漏掉 `+ 1` (于是死循环)。
+/// 游标把"上次取到哪"这个状态从调用方手里拿走。
+pub fn fl_foreach(m: u32, cur: ptr) -> u32 {
+    let i: u32 = mem_load32(cur, 0);
+    let r: u32 = fl_next(m, i);
+    if r == FL_NO {
+        mem_store32(cur, 0, FL_BITS);
+        return FL_NO;
+    }
+    mem_store32(cur, 0, r + 1);
+    return r;
+}
+
+// ---------------------------------------------------------------- 名字表
+
+/// 表里有多少个名字 (NUL 分隔, **连续 NUL 产生的空名不计**, 末尾没有 NUL 也算一个)。
+pub fn fl_table_count(tp: ptr, tl: u32) -> u32 {
+    let c: u32 = 0;
+    let in_name: u32 = 0;
+    let i: u32 = 0;
+    while i < tl {
+        if load8(tp, i) == 0 {
+            if in_name == 1 {
+                c = c + 1;
+                in_name = 0;
+            }
+        } else {
+            in_name = 1;
+        }
+        i = i + 1;
+    }
+    if in_name == 1 {
+        c = c + 1; // 末尾没补 NUL 的表也认
+    }
+    return c;
+}
+
+/// 第 idx 个名字在表里的起始偏移; 越界返回 FL_NO。
+fn flf_name_off(tp: ptr, tl: u32, idx: u32) -> u32 {
+    let seen: u32 = 0;
+    let in_name: u32 = 0;
+    let start: u32 = 0;
+    let i: u32 = 0;
+    while i < tl {
+        if load8(tp, i) == 0 {
+            if in_name == 1 {
+                if seen == idx {
+                    return start;
+                }
+                seen = seen + 1;
+                in_name = 0;
+            }
+        } else if in_name == 0 {
+            start = i;
+            in_name = 1;
+        }
+        i = i + 1;
+    }
+    if in_name == 1 && seen == idx {
+        return start;
+    }
+    return FL_NO;
+}
+
+/// 从 off 起扫到 NUL (或表尾) 的长度。
+fn flf_name_len(tp: ptr, tl: u32, off: u32) -> u32 {
+    let i: u32 = off;
+    while i < tl {
+        if load8(tp, i) == 0 {
+            return i - off;
+        }
+        i = i + 1;
+    }
+    return tl - off;
+}
+
+/// 把第 idx 个名字抄进 out[oo..), 返回抄了几个字节; 越界返回 FL_NO。
+pub fn fl_table_name(tp: ptr, tl: u32, idx: u32, out: ptr, oo: u32) -> u32 {
+    let off: u32 = flf_name_off(tp, tl, idx);
+    if off == FL_NO {
+        return FL_NO;
+    }
+    let l: u32 = flf_name_len(tp, tl, off);
+    mem_copy(out, oo, tp, off, l);
+    return l;
+}
+
+/// 本层的分隔符: 逗号 / 竖线 / 空格 / 制表 / 换行 / 回车。
+fn flf_is_sep(c: u32) -> bool {
+    if c == 44 {
+        return true; // ','
+    }
+    if c == 124 {
+        return true; // '|'
+    }
+    if c == 32 {
+        return true; // ' '
+    }
+    if c == 9 {
+        return true; // '\t'
+    }
+    if c == 10 {
+        return true; // '\n'
+    }
+    if c == 13 {
+        return true; // CR
+    }
+    return false;
+}
+
+/// 在表里找 token, 返回它的位号; 没有返回 FL_NO。表超过 32 个名字时只看前 32 个。
+fn flf_lookup(tp: ptr, tl: u32, np: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = fl_table_count(tp, tl);
+    if n > FL_BITS {
+        n = FL_BITS;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let off: u32 = flf_name_off(tp, tl, i);
+        let l: u32 = flf_name_len(tp, tl, off);
+        if l == nlen {
+            if mem_eq(tp, off, np, noff, nlen) {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return FL_NO;
+}
+
+/// `名字串 -> 掩码`。
+///
+/// 返回**匹配到的名字个数**; 只要有一个不认识就返回 FL_ERR。无论成败:
+///   `*out_mask`    <- 已累积的掩码 (失败时是出错前那部分 —— 不会半路清零)
+///   `*out_unknown` <- 第一个不认识的 token 在名字串里的**起始偏移**; 全认识则 FL_NO
+///
+/// 空段 (连续分隔符/前导/尾随) 跳过, 不计入个数, 也不报错。
+pub fn fl_names_to_mask(np: ptr, nl: u32, tp: ptr, tl: u32, out_mask: ptr, out_unknown: ptr) -> u32 {
+    let mask: u32 = 0;
+    let cnt: u32 = 0;
+    let bad: u32 = FL_NO;
+    let i: u32 = 0;
+    while i < nl {
+        if flf_is_sep(load8(np, i)) {
+            i = i + 1;
+        } else {
+            let s: u32 = i;
+            let go: u32 = 1;
+            while i < nl && go == 1 {
+                if flf_is_sep(load8(np, i)) {
+                    go = 0;
+                } else {
+                    i = i + 1;
+                }
+            }
+            let idx: u32 = flf_lookup(tp, tl, np, s, i - s);
+            if idx == FL_NO {
+                // 只记第一个坏名字: 快速失败, 报一个比报一串有用。
+                if bad == FL_NO {
+                    bad = s;
+                }
+            } else {
+                mask = mask | (1 << idx);
+                cnt = cnt + 1;
+            }
+        }
+    }
+    mem_store32(out_mask, 0, mask);
+    mem_store32(out_unknown, 0, bad);
+    if bad != FL_NO {
+        return FL_ERR;
+    }
+    return cnt;
+}
+
+/// `掩码 -> 名字串`。按**位号从小到大**拼, 以 `|` 相连; 表里没有的位写成 `#<位号>`。
+///
+/// 返回**新的写偏移** (oo + 写出的字节数)。掩码为 0 时**什么都不写**, 返回 oo。
+/// 需要 out 至少有 32 * (最长名字 + 1) + 8 字节 —— 名字多长是调用方知道的, 本层
+/// 不做容量检查 (这个语言里也没有"越界会报错"这回事)。
+pub fn fl_mask_to_names(mask: u32, tp: ptr, tl: u32, out: ptr, oo: u32) -> u32 {
+    let k: u32 = oo;
+    let cnt: u32 = fl_table_count(tp, tl);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while i < FL_BITS {
+        if (mask & (1 << i)) != 0 {
+            if first == 0 {
+                store8(out, k, 124 as u8); // '|'
+                k = k + 1;
+            }
+            first = 0;
+            if i < cnt {
+                let off: u32 = flf_name_off(tp, tl, i);
+                let l: u32 = flf_name_len(tp, tl, off);
+                mem_copy(out, k, tp, off, l);
+                k = k + l;
+            } else {
+                store8(out, k, 35 as u8); // '#'
+                k = k + 1;
+                k = k + numfmt_dec_into(flf_at(out, k), i as u64);
+            }
+        }
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 缓冲 + 偏移 -> 该处的 ptr。不用内建 `ptr_add` —— 它在 Rust 路径上降级成裸
+/// `.add()` 而没有 `unsafe` 包裹 (见 out.lomt 的同名函数, docs/150 M82)。
+fn flf_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 造一张测试用的表: `"rw\0x\0exec\0"` (10 字节)。**不能写成字面量** —— 本语言
+/// 没有 `\0` 转义, 写了会静默变成字母 '0' (48)。
+fn flf_mk_table(t: ptr) -> u32 {
+    store8(t, 0, 114 as u8); // 'r'
+    store8(t, 1, 119 as u8); // 'w'
+    store8(t, 2, 0 as u8);
+    store8(t, 3, 120 as u8); // 'x'
+    store8(t, 4, 0 as u8);
+    store8(t, 5, 101 as u8); // 'e'
+    store8(t, 6, 120 as u8); // 'x'
+    store8(t, 7, 101 as u8); // 'e'
+    store8(t, 8, 99 as u8);  // 'c'
+    store8(t, 9, 0 as u8);
+    return 10;
+}
+
+/// 造一张 3 个名字的表: `"a\0bb\0ccc\0"` (10 字节)。
+fn flf_mk_table2(t: ptr) -> u32 {
+    store8(t, 0, 97 as u8);  // 'a'
+    store8(t, 1, 0 as u8);
+    store8(t, 2, 98 as u8);  // 'b'
+    store8(t, 3, 98 as u8);
+    store8(t, 4, 0 as u8);
+    store8(t, 5, 99 as u8);  // 'c'
+    store8(t, 6, 99 as u8);
+    store8(t, 7, 99 as u8);
+    store8(t, 8, 0 as u8);
+    return 9;
+}
+
+fn test_flags_set_clr_toggle_test() -> bool {
+    let a: u32 = fl_set(0, 3);
+    let b: u32 = fl_clr(a, 3);
+    let c: u32 = fl_toggle(0, 5);
+    let d: u32 = fl_toggle(c, 5);
+    return a == 8 && b == 0 && c == 32 && d == 0
+        && fl_test(4, 2) && fl_test(4, 1) == false
+        && fl_test(1, 32) == false && fl_clr(8, 3) == 0;
+}
+
+fn test_flags_popcount() -> bool {
+    // 0 / 全 1 / 最高位 / 交替模式 —— 交替模式专门盯"每次都数出同一半"的实现错。
+    return fl_popcount(0) == 0
+        && fl_popcount(4294967295) == 32
+        && fl_popcount(2147483648) == 1
+        && fl_popcount(1) == 1
+        && fl_popcount(2863311530) == 16 // 0xAAAAAAAA
+        && fl_popcount(1431655765) == 16 // 0x55555555
+        && fl_popcount(4042322160) == 16; // 0xF0F0F0F0
+}
+
+fn test_flags_lowest_bit() -> bool {
+    return fl_lowest_bit(0) == FL_NO && fl_lowest_bit(1) == 0 && fl_lowest_bit(8) == 3
+        && fl_lowest_bit(65536) == 16 && fl_lowest_bit(2147483648) == 31
+        && fl_lowest_bit(6) == 1; // 0b110 -> 最低的是 bit 1
+}
+
+fn test_flags_lowest_bit_distinguishes_from_no() -> bool {
+    // FL_NO 与 FL_ERR 必须不同 —— 混用会让"没有下一个"被当成"输入坏了"。
+    return FL_NO != FL_ERR && fl_lowest_bit(0) == FL_NO && fl_lowest_bit(0) != FL_ERR;
+}
+
+fn test_flags_next() -> bool {
+    // 掩码 0b1011 = 位 0, 1, 3
+    let m: u32 = 11;
+    return fl_next(m, 0) == 0 && fl_next(m, 1) == 1 && fl_next(m, 2) == 3
+        && fl_next(m, 3) == 3 && fl_next(m, 4) == FL_NO && fl_next(m, 32) == FL_NO
+        && fl_next(0, 0) == FL_NO;
+}
+
+fn test_flags_foreach_order() -> bool {
+    // 游标式: 0, 1, 3, 然后一直是 FL_NO (不绕回去)。
+    let cur: ptr = alloc(4);
+    mem_store32(cur, 0, 0);
+    let m: u32 = 11;
+    let a: u32 = fl_foreach(m, cur);
+    let b: u32 = fl_foreach(m, cur);
+    let c: u32 = fl_foreach(m, cur);
+    let d: u32 = fl_foreach(m, cur);
+    let e: u32 = fl_foreach(m, cur);
+    return a == 0 && b == 1 && c == 3 && d == FL_NO && e == FL_NO;
+}
+
+fn test_flags_foreach_empty_mask() -> bool {
+    let cur: ptr = alloc(4);
+    mem_store32(cur, 0, 0);
+    return fl_foreach(0, cur) == FL_NO && fl_foreach(0, cur) == FL_NO;
+}
+
+fn test_flags_foreach_matches_next() -> bool {
+    // 两条路必须给出同一串下标 —— 游标版是 next 版的状态化包装, 不该有分歧。
+    let cur: ptr = alloc(4);
+    mem_store32(cur, 0, 0);
+    let m: u32 = 2147483715; // bit 0,1,6,31  (1 + 2 + 64 + 2147483648)
+    let a1: u32 = fl_foreach(m, cur);
+    let a2: u32 = fl_foreach(m, cur);
+    let a3: u32 = fl_foreach(m, cur);
+    let a4: u32 = fl_foreach(m, cur);
+    return a1 == 0 && a2 == 1 && a3 == 6 && a4 == 31
+        && fl_next(m, 2) == 6 && fl_next(m, 7) == 31 && fl_next(m, 32) == FL_NO;
+}
+
+fn test_flags_table_count() -> bool {
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let t2: ptr = alloc(16);
+    let n2: u32 = flf_mk_table2(t2);
+    return n == 10 && n2 == 9 && fl_table_count(t, n) == 3 && fl_table_count(t2, n2) == 3
+        && fl_table_count(t, 0) == 0;
+}
+
+fn test_flags_table_name() -> bool {
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let o: ptr = alloc(16);
+    let l0: u32 = fl_table_name(t, n, 0, o, 0);
+    let ok0: bool = l0 == 2 && mem_eq(o, 0, str_ptr("rw"), 0, 2);
+    let l2: u32 = fl_table_name(t, n, 2, o, 0);
+    let ok2: bool = l2 == 4 && mem_eq(o, 0, str_ptr("exec"), 0, 4);
+    return ok0 && ok2 && fl_table_name(t, n, 3, o, 0) == FL_NO;
+}
+
+fn test_flags_names_to_mask_basic() -> bool {
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = "rw|x";
+    let r: u32 = fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    // rw = bit0, x = bit1 -> 0b11 = 3
+    return r == 2 && mem_load32(om, 0) == 3 && mem_load32(ou, 0) == FL_NO;
+}
+
+fn test_flags_names_to_mask_single_and_order() -> bool {
+    // 顺序不影响结果; 单个名字也对。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let a: str = "exec";
+    let b: str = "exec|rw";
+    let ra: u32 = fl_names_to_mask(str_ptr(a), str_len(a), t, n, om, ou);
+    let ma: u32 = mem_load32(om, 0);
+    let rb: u32 = fl_names_to_mask(str_ptr(b), str_len(b), t, n, om, ou);
+    let mb: u32 = mem_load32(om, 0);
+    return ra == 1 && ma == 4 && rb == 2 && mb == 5; // exec=bit2 -> 4; |rw -> 5
+}
+
+fn test_flags_names_to_mask_whitespace_and_empty_segments() -> bool {
+    // " rw , , x |exec " —— 前导/尾随空格、连续分隔、混合分隔全都要吃掉,
+    // 空段**不算一个名字** (所以个数是 3 不是 5)。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = " rw , , x |exec ";
+    let r: u32 = fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    return r == 3 && mem_load32(om, 0) == 7 && mem_load32(ou, 0) == FL_NO;
+}
+
+fn test_flags_names_to_mask_only_separators() -> bool {
+    // 全分隔符 = 空输入: 0 个名字、掩码 0、没有坏名字 —— 不是错误。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = " , | ,";
+    let r: u32 = fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    return r == 0 && mem_load32(om, 0) == 0 && mem_load32(ou, 0) == FL_NO;
+}
+
+fn test_flags_names_to_mask_unknown_reports_offset() -> bool {
+    // "rw,bogus" —— 'b' 在偏移 3。返回 FL_ERR, 但掩码保留出错前累积的 rw=1。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = "rw,bogus";
+    let r: u32 = fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    return r == FL_ERR && mem_load32(ou, 0) == 3 && mem_load32(om, 0) == 1;
+}
+
+fn test_flags_names_to_mask_first_unknown_wins() -> bool {
+    // 两个坏名字时只报第一个 (偏移 0)。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = "nope,alsonope";
+    let r: u32 = fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    return r == FL_ERR && mem_load32(ou, 0) == 0;
+}
+
+fn test_flags_mask_to_names() -> bool {
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let o: ptr = alloc(64);
+    // 0b101 = rw|exec
+    let k1: u32 = fl_mask_to_names(5, t, n, o, 0);
+    let ok1: bool = k1 == 7 && mem_eq(o, 0, str_ptr("rw|exec"), 0, 7);
+    // 0b111 = rw|x|exec (9 字节)
+    let k2: u32 = fl_mask_to_names(7, t, n, o, 0);
+    let ok2: bool = k2 == 9 && mem_eq(o, 0, str_ptr("rw|x|exec"), 0, 9);
+    return ok1 && ok2;
+}
+
+fn test_flags_mask_to_names_empty() -> bool {
+    // 掩码 0 -> 什么都不写, 偏移原样返回。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let o: ptr = alloc(64);
+    return fl_mask_to_names(0, t, n, o, 3) == 3;
+}
+
+fn test_flags_mask_to_names_unnamed_bits() -> bool {
+    // 表只有 3 个名字, 但 bit 3 也亮着 —— **不丢信息**, 写成 "#3"。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let o: ptr = alloc(64);
+    let k: u32 = fl_mask_to_names(11, t, n, o, 0); // 0b1011 = 位 0,1,3
+    // "rw|x|#3" = 2 + 1 + 1 + 1 + 2 = 7 字节
+    return k == 7 && mem_eq(o, 0, str_ptr("rw|x|#3"), 0, 7);
+}
+
+fn test_flags_mask_to_names_high_bit() -> bool {
+    // bit 31 -> "#31" (两位十进制, 盯住"只写了低 4 位"那种错)。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let o: ptr = alloc(64);
+    let k: u32 = fl_mask_to_names(2147483648, t, n, o, 0);
+    return k == 3 && mem_eq(o, 0, str_ptr("#31"), 0, 3);
+}
+
+fn test_flags_names_roundtrip() -> bool {
+    // 掩码 -> 文本 -> 掩码。表里覆盖到的位必须闭合 (未覆盖的位走 "#N", 反过来不认,
+    // 那是写明的取舍)。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table2(t); // "a\0bb\0ccc\0"
+    let o: ptr = alloc(64);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let k: u32 = fl_mask_to_names(5, t, n, o, 0); // 位 0 + 位 2 -> "a|ccc"
+    let r: u32 = fl_names_to_mask(o, k, t, n, om, ou);
+    return k == 5 && mem_eq(o, 0, str_ptr("a|ccc"), 0, 5)
+        && r == 2 && mem_load32(om, 0) == 5 && mem_load32(ou, 0) == FL_NO;
+}
+
+fn test_flags_popcount_of_named_mask() -> bool {
+    // 表解析出来的掩码与 popcount 对上 —— 两条独立路径的交叉验证。
+    let t: ptr = alloc(16);
+    let n: u32 = flf_mk_table(t);
+    let om: ptr = alloc(4);
+    let ou: ptr = alloc(4);
+    let s: str = "rw|x|exec";
+    fl_names_to_mask(str_ptr(s), str_len(s), t, n, om, ou);
+    return mem_load32(om, 0) == 7 && fl_popcount(mem_load32(om, 0)) == 3
+        && fl_lowest_bit(mem_load32(om, 0)) == 0 && fl_next(mem_load32(om, 0), 1) == 1;
+}

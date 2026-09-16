@@ -1,0 +1,384 @@
+// std/tmpf.lomt — 临时文件**名字**的生成 (没有 mkdir/unlink/getpid 时怎么不撞名)
+//
+// 为什么是"生成名字"而不是"建临时文件": 这个目标上没有 mkdir、没有 unlink、也没有
+// getpid —— 想走"建个文件占住名字"那条经典路子根本没接口。所以本模块只做一件
+// 能做的事: **给定种子, 稳定地生成一个不冲突的名字**, 剩下的交给调用方
+// (它可能拿去 open(O_CREAT), 也可能只是要一个唯一的日志键)。
+//
+// **"给定种子 -> 给定名字"是这个模块存在的全部理由**: 同一个种子必须给同一个名字
+// (重试/复现要能命中同一个路径), 不同种子必须给不同名字 (不然并发/多次调用就撞了)。
+// 两条都进了自检 —— 后者是重点, 因为"随机数写死成常数"这种错只有它会红。
+//
+// 字符集 (32 个, 写死): `abcdefghijkmnpqrstuvwxyz23456789`
+//   —— 小写字母去掉 `l` 与 `o`, 数字去掉 `0` 与 `1`。**为什么去掉那几个**: 临时名字
+//   经常人手抄/口述, `l/1/I` 与 `o/0/O` 是抄错的重灾区。32 个字符正好是 2 的幂,
+//   于是"从混合值取一位"的取模是**无偏**的 (不必做拒绝采样)。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不保证全局唯一, 只保证"同种子同名、异种子异名"**。真·唯一要靠 open(O_EXCL)
+//     的原子性, 而这个目标没那个接口 —— 本模块不假装能提供原子性。
+//   - **不用时钟/地址当种子**: 那些在这里读不到 (且会让"可复现"失效)。种子必须调用方给。
+//   - **只填 `X` 占位符**, 不认 `%d`/`{}`/`*` 那类模板语法 —— 一种占位符没有歧义。
+//   - 生成的字符集是 **小写**; 大小写不敏感的文件系统上无所谓, 敏感的上面也无所谓
+//     (名字本来就是新的)。
+//
+// 命名: 公开 tf_*, 内部 tf_*。自检 test_tmpf_*。
+
+module tmpf
+
+use "mem.lomt"
+
+/// 模式非法 (空 / 含路径分隔符或控制字符)。
+pub const TF_ERR: u32 = 4294967295;
+/// 模式里一个 `X` 都没有 —— 合法但没有可变的位, 生成不出不撞的名字。
+pub const TF_NO: u32 = 4294967294;
+
+// 混合器常量 (十进制; 十六进制大数 `as u64` 会被截断到 32 位)。
+const TF_GOLD: u64 = 11400714819323198485;
+const TF_MX1: u64 = 13787848793156543929;
+const TF_MX2: u64 = 10723151780598845931;
+
+fn tf_charset() -> str {
+    return "abcdefghijkmnpqrstuvwxyz23456789";
+}
+
+/// 字符集大小 (32)。
+pub fn tf_charset_size() -> u32 {
+    return 32;
+}
+
+fn tf_is_sep(c: u32) -> bool {
+    return c == 47 || c == 92;
+}
+
+/// 一个 splitmix64 式的混合 —— 只要"输入差 1, 输出差很多"这一条性质。
+fn tf_mix(z0: u64) -> u64 {
+    let z: u64 = z0;
+    z = (z ^ (z >> 30)) * TF_MX1;
+    z = (z ^ (z >> 27)) * TF_MX2;
+    return z ^ (z >> 31);
+}
+
+// ---------------------------------------------------------------- 校验
+
+/// 名字能不能直接当文件名用: 非空、不是 `.`/`..`、不含 `/` `\\` 与控制字符。
+pub fn tf_valid_name(s: str) -> bool {
+    let n: u32 = str_len(s);
+    if n == 0 {
+        return false;
+    }
+    if n == 1 && str_byte(s, 0) == 46 {
+        return false;
+    }
+    if n == 2 && str_byte(s, 0) == 46 && str_byte(s, 1) == 46 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if tf_is_sep(c) || c < 32 || c == 127 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 模式里 `X` 的个数。
+pub fn tf_placeholder_count(pattern: str) -> u32 {
+    let n: u32 = str_len(pattern);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(pattern, i) == 88 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 展开
+
+/// 展开到 `out` 的偏移 `oo` 处, 返回 **`out` 上写出的总长度** (含 oo 之前的空洞
+/// 也占位, 即返回 `oo + 展开长度`)。
+///
+/// 每个 `X` 的字符 = `charset[ mix(seed + k*GOLD) >> 45 的低 5 位 ]` (k 是第几个 X)。
+/// 用 `>` 40 位而不是低位: 混合器的低位没有高位散得好。
+fn tf_expand_at(pattern: str, seed: u64, out: ptr, oo: u32) -> u32 {
+    let n: u32 = str_len(pattern);
+    let w: u32 = oo;
+    let k: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(pattern, i);
+        if c == 88 {
+            let v: u64 = tf_mix(seed + ((k as u64) * TF_GOLD));
+            let idx: u32 = ((v >> 45) % 32) as u32;
+            store8(out, w, str_byte(tf_charset(), idx) as u8);
+            w = w + 1;
+            k = k + 1;
+        } else {
+            store8(out, w, c as u8);
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+/// 用 `seed` 填掉 `pattern` 里的 `X`, 写进 `out` (从偏移 0 起), 返回长度。
+/// 模式非法 -> TF_ERR; 没有 `X` -> TF_NO。
+/// `out` 至少 str_len(pattern) 字节。
+pub fn tf_expand(pattern: str, seed: u64, out: ptr) -> u32 {
+    if tf_valid_name(pattern) == false {
+        return TF_ERR;
+    }
+    if tf_placeholder_count(pattern) == 0 {
+        return TF_NO;
+    }
+    return tf_expand_at(pattern, seed, out, 0);
+}
+
+/// 目录 + 展开后的名字, 写进 `out`, 返回总长度。
+///
+/// dir 为空 -> 就是名字; dir 末尾已有 `/` 或 `\\` -> 不重复补; 否则补一个 `/`。
+/// 模式非法 -> TF_ERR / TF_NO (**在写任何东西之前就判掉**, 免得半个名字留在 out 里)。
+/// `out` 至少 `str_len(dir) + 1 + str_len(pattern)` 字节。
+pub fn tf_gen(dir: str, pattern: str, seed: u64, out: ptr) -> u32 {
+    if tf_valid_name(pattern) == false {
+        return TF_ERR;
+    }
+    if tf_placeholder_count(pattern) == 0 {
+        return TF_NO;
+    }
+    let dl: u32 = str_len(dir);
+    let start: u32 = 0;
+    let add: u32 = 0;
+    if dl > 0 {
+        let last: u32 = str_byte(dir, dl - 1);
+        if tf_is_sep(last) {
+            start = dl;
+        } else {
+            start = dl + 1;
+            add = 1;
+        }
+    }
+    // 先展开到"最终位置", 再把目录拷到前面 —— 两段互不重叠 (目录是只读 rodata,
+    // 名字在 out 里的 dl(+1) 之后)。
+    let w: u32 = tf_expand_at(pattern, seed, out, start);
+    if dl > 0 {
+        mem_copy(out, 0, str_ptr(dir), 0, dl);
+        if add == 1 {
+            store8(out, dl, 47 as u8);
+        }
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn tf_in_charset(c: u32) -> bool {
+    let n: u32 = tf_charset_size();
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(tf_charset(), i) == c {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 展开结果是否全是字符集里的字符 (固定部分除外 —— 用只含 X 的模式测)。
+fn tf_all_charset(out: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if tf_in_charset(load8(out, i)) == false {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_tmpf_placeholder_count() -> bool {
+    let a: str = "XXXXXX";
+    let b: str = "aXbXc";
+    let c: str = "abc";
+    let d: str = "";
+    return tf_placeholder_count(a) == 6 && tf_placeholder_count(b) == 2
+        && tf_placeholder_count(c) == 0 && tf_placeholder_count(d) == 0;
+}
+
+fn test_tmpf_expand_length() -> bool {
+    let p: str = "tmp-XXXXXX.tmp";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_expand(p, 1, out);
+    return n == 14;
+}
+
+fn test_tmpf_expand_same_seed_same_name() -> bool {
+    // **模块的存在理由之一**: 同种子 -> 逐字节同名。
+    let p: str = "XXXXXX";
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let n1: u32 = tf_expand(p, 123456789, a);
+    let n2: u32 = tf_expand(p, 123456789, b);
+    return n1 == 6 && n2 == 6 && mem_eq(a, 0, b, 0, 6);
+}
+
+fn test_tmpf_expand_different_seed_differs() -> bool {
+    // **模块的存在理由之二**: 异种子 -> 异名。常数/写死的实现会在这里红。
+    let p: str = "XXXXXX";
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let n1: u32 = tf_expand(p, 1, a);
+    let n2: u32 = tf_expand(p, 2, b);
+    let diff: bool = n1 == 6 && n2 == 6 && mem_eq(a, 0, b, 0, 6) == false;
+    // 再多比几对, 免得碰巧一对相同就判定实现错了。
+    let ok: u32 = 1;
+    let s: u64 = 1000;
+    while s < 1008 {
+        let x: ptr = alloc(32);
+        let y: ptr = alloc(32);
+        tf_expand(p, s, x);
+        tf_expand(p, s + 1, y);
+        if mem_eq(x, 0, y, 0, 6) {
+            ok = 0;
+        }
+        s = s + 1;
+    }
+    return diff && ok == 1;
+}
+
+fn test_tmpf_expand_charset_only() -> bool {
+    // 纯 X 模式展开出来必须全部落在声明的字符集里。
+    let p: str = "XXXXXXXXXXXXXXXX";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_expand(p, 424242, out);
+    return n == 16 && tf_all_charset(out, 16);
+}
+
+fn test_tmpf_expand_preserves_fixed_chars() -> bool {
+    // 固定部分必须原样保留 (只动 X)。
+    let p: str = "log-XXXX.txt";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_expand(p, 7, out);
+    let pre: str = "log-";
+    let suf: str = ".txt";
+    return n == 12 && mem_eq(out, 0, str_ptr(pre), 0, 4) && mem_eq(out, 8, str_ptr(suf), 0, 4);
+}
+
+fn test_tmpf_expand_rejects_no_placeholder() -> bool {
+    // 没有 X 的模式是 TF_NO (合法但生成不出不撞的名字), 与 TF_ERR 分开。
+    let p: str = "fixed-name";
+    let out: ptr = alloc(64);
+    return tf_expand(p, 1, out) == TF_NO;
+}
+
+fn test_tmpf_expand_rejects_bad_pattern() -> bool {
+    let out: ptr = alloc(64);
+    let empty: str = "";
+    let slash: str = "a/XX";
+    let back: str = "a\\XX";
+    let tab: str = "a\tXX"; // \t 是合法转义, 控制字符 < 32 -> 拒
+    let dot: str = "..";
+    return tf_expand(empty, 1, out) == TF_ERR && tf_expand(slash, 1, out) == TF_ERR
+        && tf_expand(back, 1, out) == TF_ERR && tf_expand(tab, 1, out) == TF_ERR
+        && tf_expand(dot, 1, out) == TF_ERR;
+}
+
+fn test_tmpf_valid_name_ok() -> bool {
+    let a: str = "abc";
+    let b: str = "a.b-1_2";
+    let c: str = "X";
+    let d: str = ".hidden";
+    return tf_valid_name(a) && tf_valid_name(b) && tf_valid_name(c) && tf_valid_name(d);
+}
+
+fn test_tmpf_valid_name_rejects() -> bool {
+    let empty: str = "";
+    let dot: str = ".";
+    let dotdot: str = "..";
+    let slash: str = "a/b";
+    let back: str = "a\\b";
+    let tab: str = "a\tb";
+    return tf_valid_name(empty) == false && tf_valid_name(dot) == false
+        && tf_valid_name(dotdot) == false && tf_valid_name(slash) == false
+        && tf_valid_name(back) == false && tf_valid_name(tab) == false;
+}
+
+fn test_tmpf_gen_with_dir() -> bool {
+    let dir: str = "/tmp";
+    let p: str = "XXXX";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_gen(dir, p, 55, out);
+    let pre: str = "/tmp/";
+    return n == 9 && mem_eq(out, 0, str_ptr(pre), 0, 5) && tf_all_charset_off(out, 5, 4);
+}
+
+/// 从偏移 oo 起 n 个字符是否都在字符集里。
+fn tf_all_charset_off(out: ptr, oo: u32, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if tf_in_charset(load8(out, oo + i)) == false {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_tmpf_gen_dir_trailing_sep() -> bool {
+    // 目录尾部已有分隔符 -> 不重复补。
+    let dir: str = "/tmp/";
+    let p: str = "XXXX";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_gen(dir, p, 9, out);
+    let pre: str = "/tmp/";
+    return n == 9 && mem_eq(out, 0, str_ptr(pre), 0, 5);
+}
+
+fn test_tmpf_gen_backslash_dir() -> bool {
+    let dir: str = "C:\\logs";
+    let p: str = "XX";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_gen(dir, p, 3, out);
+    // "C:\\logs" 长度 7, 补 '/' -> 8, 再加 2 个字符 = 10
+    return n == 10 && load8(out, 7) == 47;
+}
+
+fn test_tmpf_gen_empty_dir() -> bool {
+    let dir: str = "";
+    let p: str = "XXX";
+    let out: ptr = alloc(64);
+    let n: u32 = tf_gen(dir, p, 11, out);
+    return n == 3 && tf_all_charset(out, 3);
+}
+
+fn test_tmpf_gen_rejects_bad_pattern_before_writing() -> bool {
+    // 非法模式要在**写 out 之前**就判掉 —— 否则 out 里会留下半个名字。
+    let dir: str = "/tmp";
+    let bad: str = "a/bXX";
+    let out: ptr = alloc(64);
+    mem_fill(out, 0, 32, 170);
+    let r: u32 = tf_gen(dir, bad, 1, out);
+    return r == TF_ERR && load8(out, 0) == 170 && load8(out, 9) == 170;
+}
+
+fn test_tmpf_gen_matches_expand() -> bool {
+    // tf_gen(dir="") 必须与 tf_expand 逐字节一致 —— 这条把两个入口的一致性钉住。
+    let p: str = "tmp-XXXX";
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    let n1: u32 = tf_expand(p, 2026, a);
+    let n2: u32 = tf_gen("", p, 2026, b);
+    return n1 == n2 && mem_eq(a, 0, b, 0, n1);
+}
+
+fn test_tmpf_charset_size() -> bool {
+    return tf_charset_size() == 32 && str_len(tf_charset()) == 32
+        && tf_in_charset(97) && tf_in_charset(50) && tf_in_charset(108) == false
+        && tf_in_charset(111) == false && tf_in_charset(48) == false && tf_in_charset(49) == false;
+}

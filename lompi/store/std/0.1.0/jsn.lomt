@@ -1,0 +1,1303 @@
+// std/jsn.lomt — JSON 读取 (游标式, 不建 DOM)
+//
+// 为什么不是"解析成一棵树": 这门语言**不能按值传聚合体** (loment skill §6.9),
+// 所以 `Value` 那种枚举树要一层层借出去, 每层都得调用方自己开池子 —— 用起来全是噪声。
+// JSON 的读取需求其实只有一句: "从这个位置, 按名字/下标走到那个位置, 把标量取出来"。
+// 所以这里是**游标 API**: 每个 `..._at` / `..._get` 返回的是**值在原文里的字节下标**,
+// 值本身留在原文里, 不复制。零分配 (除了取字符串时要一块输出缓冲)。
+//
+// 三条边界, 写清楚:
+//   1. **只读**。不提供生成器 —— 写 JSON 是另一个模块的事, 混在一起两边都变糊涂。
+//   2. **不解析成 double**。`1e-320` 这种要正确舍入得有 strtod, 本层没有。取数用
+//      `jsn_u64` / `jsn_i64` (整数) 或 `jsn_num_parts` (拆成 尾数×10^-scale, **精确**),
+//      需要浮点时由调用方接 `f64` / `bigdec` —— 那才是它们该管的精度决策。
+//   3. **严格**。按 RFC 8259 判: 键必须带引号、不许尾逗号、数字必须是合法 JSON 数字。
+//      宽容解析会把错误数据变成"能跑但值不对", 那比报错坏。
+//
+// 命名: 公开 jsn_*, 内部 j_*。自检 test_jsn_*。
+// (**注意前缀是 jsn_ 不是 json_**: 仓库的 loment/lib/json.lomt 占了 json_。)
+
+module jsn
+
+use "mem.lomt"
+
+/// 语法/类型错。
+pub const JSN_ERR: u32 = 4294967295;
+/// 没有这个键 / 下标越界 (与"错"区分开: 缺键是正常的, 错不是)。
+pub const JSN_NO: u32 = 4294967294;
+
+pub const JSN_NULL: u32 = 0;
+pub const JSN_BOOL: u32 = 1;
+pub const JSN_NUM: u32 = 2;
+pub const JSN_STR: u32 = 3;
+pub const JSN_ARR: u32 = 4;
+pub const JSN_OBJ: u32 = 5;
+
+/// 嵌套深度上限。递归下降在恶意输入上会爆栈, 所以显式设一条线。
+pub const JSN_MAX_DEPTH: u32 = 64;
+
+/// `[len: u32][字节...]` 形式的键缓冲: 取键的函数把长度写在偏移 0, 内容写在偏移 4。
+/// 调用方分配 4 + 最长键字节数。这样"键内容 + 键长度"就能一次返回 (语言没有多返回值)。
+pub const JSN_KEY_HDR: u32 = 4;
+
+// ---------------------------------------------------------------- 基础扫描
+
+fn j_ws(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            i = i + 1;
+        } else {
+            return i;
+        }
+    }
+    return i;
+}
+
+/// 这个位置上的值是什么类型; 不是合法值起点给 JSN_ERR。
+pub fn jsn_type_at(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = j_ws(d, so, n, i0);
+    if i >= n {
+        return JSN_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 34 {
+        return JSN_STR; // '"'
+    }
+    if c == 123 {
+        return JSN_OBJ; // '{'
+    }
+    if c == 91 {
+        return JSN_ARR; // '['
+    }
+    if c == 116 || c == 102 {
+        return JSN_BOOL; // 't' 'f'
+    }
+    if c == 110 {
+        return JSN_NULL; // 'n'
+    }
+    if c == 45 || (c >= 48 && c <= 57) {
+        return JSN_NUM;
+    }
+    return JSN_ERR;
+}
+
+/// i0 落在开引号上 -> 闭引号之后的位置。
+fn j_str_end(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0 + 1;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 92 {
+            i = i + 2; // 转义的下一个字节无条件吃掉 (含 \" 与 \\)
+        } else if c == 34 {
+            return i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return JSN_ERR;
+}
+
+fn j_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 按 RFC 8259 的数字文法走完, 返回之后的位置。
+fn j_num_end(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    if i < n && load8(d, so + i) == 45 {
+        i = i + 1;
+    }
+    if i >= n {
+        return JSN_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 48 {
+        i = i + 1; // 前导 0 之后不能再跟数字
+    } else if c >= 49 && c <= 57 {
+        while i < n && j_digit(load8(d, so + i)) {
+            i = i + 1;
+        }
+    } else {
+        return JSN_ERR;
+    }
+    if i < n && load8(d, so + i) == 46 {
+        i = i + 1;
+        if i >= n || j_digit(load8(d, so + i)) == false {
+            return JSN_ERR;
+        }
+        while i < n && j_digit(load8(d, so + i)) {
+            i = i + 1;
+        }
+    }
+    if i < n && (load8(d, so + i) == 101 || load8(d, so + i) == 69) {
+        i = i + 1;
+        if i < n && (load8(d, so + i) == 43 || load8(d, so + i) == 45) {
+            i = i + 1;
+        }
+        if i >= n || j_digit(load8(d, so + i)) == false {
+            return JSN_ERR;
+        }
+        while i < n && j_digit(load8(d, so + i)) {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+/// 匹配一个关键字 (true/false/null), 返回其后位置或 JSN_ERR。
+fn j_lit(d: ptr, so: u32, n: u32, i: u32, s: str) -> u32 {
+    let L: u32 = str_len(s);
+    if i + L > n {
+        return JSN_ERR;
+    }
+    if mem_eq(d, so + i, str_ptr(s), 0, L) == false {
+        return JSN_ERR;
+    }
+    return i + L;
+}
+
+/// 跳过 i0 处的整个值, 返回其后的位置; 语法错给 JSN_ERR。
+pub fn jsn_skip(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    return j_skip(d, so, n, i0, 0);
+}
+
+fn j_skip(d: ptr, so: u32, n: u32, i0: u32, depth: u32) -> u32 {
+    if depth > JSN_MAX_DEPTH {
+        return JSN_ERR;
+    }
+    let i: u32 = j_ws(d, so, n, i0);
+    let t: u32 = jsn_type_at(d, so, n, i);
+    if t == JSN_ERR {
+        return JSN_ERR;
+    }
+    if t == JSN_STR {
+        return j_str_end(d, so, n, i);
+    }
+    if t == JSN_NUM {
+        return j_num_end(d, so, n, i);
+    }
+    if t == JSN_BOOL {
+        let a: u32 = j_lit(d, so, n, i, "true");
+        if a != JSN_ERR {
+            return a;
+        }
+        return j_lit(d, so, n, i, "false");
+    }
+    if t == JSN_NULL {
+        return j_lit(d, so, n, i, "null");
+    }
+    if t == JSN_ARR {
+        let k: u32 = j_ws(d, so, n, i + 1);
+        if k < n && load8(d, so + k) == 93 {
+            return k + 1; // 空数组
+        }
+        let out: u32 = JSN_ERR;
+        let done: u32 = 0;
+        while done == 0 {
+            k = j_skip(d, so, n, k, depth + 1);
+            if k == JSN_ERR {
+                return JSN_ERR;
+            }
+            k = j_ws(d, so, n, k);
+            if k >= n {
+                return JSN_ERR;
+            }
+            let c: u32 = load8(d, so + k);
+            if c == 44 {
+                k = k + 1; // ','
+            } else if c == 93 {
+                out = k + 1;
+                done = 1;
+            } else {
+                return JSN_ERR;
+            }
+        }
+        return out;
+    }
+    // JSN_OBJ
+    let k: u32 = j_ws(d, so, n, i + 1);
+    if k < n && load8(d, so + k) == 125 {
+        return k + 1; // 空对象
+    }
+    let out: u32 = JSN_ERR;
+    let done: u32 = 0;
+    while done == 0 {
+        k = j_ws(d, so, n, k);
+        if k >= n || load8(d, so + k) != 34 {
+            return JSN_ERR; // 键必须带引号
+        }
+        k = j_str_end(d, so, n, k);
+        if k == JSN_ERR {
+            return JSN_ERR;
+        }
+        k = j_ws(d, so, n, k);
+        if k >= n || load8(d, so + k) != 58 {
+            return JSN_ERR; // ':'
+        }
+        k = j_skip(d, so, n, k + 1, depth + 1);
+        if k == JSN_ERR {
+            return JSN_ERR;
+        }
+        k = j_ws(d, so, n, k);
+        if k >= n {
+            return JSN_ERR;
+        }
+        let c: u32 = load8(d, so + k);
+        if c == 44 {
+            k = k + 1;
+        } else if c == 125 {
+            out = k + 1;
+            done = 1;
+        } else {
+            return JSN_ERR;
+        }
+    }
+    return out;
+}
+
+/// 整个缓冲区是不是恰好一个 JSON 值 (前后只多空白)。
+pub fn jsn_validate(d: ptr, so: u32, n: u32) -> bool {
+    let e: u32 = jsn_skip(d, so, n, 0);
+    if e == JSN_ERR {
+        return false;
+    }
+    return j_ws(d, so, n, e) == n;
+}
+
+// ---------------------------------------------------------------- 字符串解码
+
+fn j_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 4294967295;
+}
+
+/// i 处起 4 个十六进制位 -> 码元; 不合法给 JSN_ERR。
+fn j_hex4(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < 4 {
+        let h: u32 = j_hexval(load8(d, so + i + k));
+        if h == 4294967295 {
+            return JSN_ERR;
+        }
+        v = (v << 4) | h;
+        k = k + 1;
+    }
+    return v;
+}
+
+fn j_unesc(e: u32) -> u32 {
+    if e == 34 {
+        return 34; // \"
+    }
+    if e == 92 {
+        return 92; // \\
+    }
+    if e == 47 {
+        return 47; // \/
+    }
+    if e == 98 {
+        return 8; // \b
+    }
+    if e == 102 {
+        return 12; // \f
+    }
+    if e == 110 {
+        return 10; // \n
+    }
+    if e == 114 {
+        return 13; // \r
+    }
+    if e == 116 {
+        return 9; // \t
+    }
+    return 4294967295;
+}
+
+/// 一个码点写成 UTF-8, 返回写了几字节。
+fn j_put_cp(out: ptr, o: u32, cp: u32) -> u32 {
+    if cp < 128 {
+        store8(out, o, cp as u8);
+        return 1;
+    }
+    if cp < 2048 {
+        store8(out, o, (192 | (cp >> 6)) as u8);
+        store8(out, o + 1, (128 | (cp & 63)) as u8);
+        return 2;
+    }
+    if cp < 65536 {
+        store8(out, o, (224 | (cp >> 12)) as u8);
+        store8(out, o + 1, (128 | ((cp >> 6) & 63)) as u8);
+        store8(out, o + 2, (128 | (cp & 63)) as u8);
+        return 3;
+    }
+    store8(out, o, (240 | (cp >> 18)) as u8);
+    store8(out, o + 1, (128 | ((cp >> 12) & 63)) as u8);
+    store8(out, o + 2, (128 | ((cp >> 6) & 63)) as u8);
+    store8(out, o + 3, (128 | (cp & 63)) as u8);
+    return 4;
+}
+
+/// 取字符串的**解码后**内容 (转义还原, `\uXXXX` 写成 UTF-8)。
+/// i0 必须在开引号上; 返回写出的字节数, 类型不对/语法错给 JSN_ERR。
+/// out 至少要有 (闭引号位置 - i0) 字节 —— 解码后绝不比原文长。
+pub fn jsn_str(d: ptr, so: u32, n: u32, i0: u32, out: ptr, oo: u32) -> u32 {
+    let i: u32 = j_ws(d, so, n, i0);
+    if jsn_type_at(d, so, n, i) != JSN_STR {
+        return JSN_ERR;
+    }
+    i = i + 1;
+    let p: u32 = oo;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 34 {
+            return p - oo;
+        }
+        if c != 92 {
+            store8(out, p, c as u8);
+            p = p + 1;
+            i = i + 1;
+        } else {
+            if i + 1 >= n {
+                return JSN_ERR;
+            }
+            let e: u32 = load8(d, so + i + 1);
+            if e == 117 {
+                // '\u'
+                if i + 5 >= n {
+                    return JSN_ERR;
+                }
+                let hi: u32 = j_hex4(d, so, n, i + 2);
+                if hi == JSN_ERR {
+                    return JSN_ERR;
+                }
+                let cp: u32 = hi;
+                let adv: u32 = 6;
+                if hi >= 55296 && hi <= 56319 {
+                    // 高位代理: 后面必须跟低位代理才是一个字符
+                    if i + 11 < n && load8(d, so + i + 6) == 92 && load8(d, so + i + 7) == 117 {
+                        let lo: u32 = j_hex4(d, so, n, i + 8);
+                        if lo != JSN_ERR && lo >= 56320 && lo <= 57343 {
+                            cp = 65536 + ((hi - 55296) << 10) + (lo - 56320);
+                            adv = 12;
+                        } else {
+                            cp = 65533; // 落单的代理 -> U+FFFD, 不假装它是字符
+                        }
+                    } else {
+                        cp = 65533;
+                    }
+                } else if hi >= 56320 && hi <= 57343 {
+                    cp = 65533; // 孤立低位代理
+                }
+                p = p + j_put_cp(out, p, cp);
+                i = i + adv;
+            } else {
+                let r: u32 = j_unesc(e);
+                if r == 4294967295 {
+                    return JSN_ERR;
+                }
+                store8(out, p, r as u8);
+                p = p + 1;
+                i = i + 2;
+            }
+        }
+    }
+    return JSN_ERR;
+}
+
+/// 解码后的字符串有多长 (和解码一遍同样的结果, 但不写出)。
+pub fn jsn_str_len(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = j_ws(d, so, n, i0);
+    if jsn_type_at(d, so, n, i) != JSN_STR {
+        return JSN_ERR;
+    }
+    let e: u32 = j_str_end(d, so, n, i);
+    if e == JSN_ERR {
+        return JSN_ERR;
+    }
+    // 没有反斜杠就没有转义, 长度就是原文长度减引号
+    let h: u32 = 0;
+    let k: u32 = i + 1;
+    while k + 1 < e {
+        if load8(d, so + k) == 92 {
+            h = 1;
+            k = e;
+        } else {
+            k = k + 1;
+        }
+    }
+    if h == 0 {
+        return e - i - 2;
+    }
+    let tmp: ptr = alloc(e - i);
+    return jsn_str(d, so, n, i, tmp, 0);
+}
+
+// ---------------------------------------------------------------- 对象 / 数组
+
+pub fn jsn_key_len(keybuf: ptr) -> u32 {
+    return mem_load32(keybuf, 0);
+}
+
+/// 键内容的指针 (解码后)。
+pub fn jsn_key_ptr(keybuf: ptr) -> ptr {
+    return ((keybuf as u64) + 4) as ptr;
+}
+
+fn j_take_key(d: ptr, so: u32, n: u32, k: u32, keybuf: ptr) -> u32 {
+    let kl: u32 = jsn_str(d, so, n, k, keybuf, JSN_KEY_HDR);
+    if kl == JSN_ERR {
+        return JSN_ERR;
+    }
+    mem_store32(keybuf, 0, kl);
+    return 0;
+}
+
+/// 对象第一个键的**值**下标; 空对象给 JSN_NO, 语法错给 JSN_ERR。
+/// 键 (解码后) 写进 keybuf 的 [4..], 长度写进 keybuf 的偏移 0。
+pub fn jsn_obj_first(d: ptr, so: u32, n: u32, i: u32, keybuf: ptr) -> u32 {
+    let k: u32 = j_ws(d, so, n, i + 1);
+    if k < n && load8(d, so + k) == 125 {
+        return JSN_NO;
+    }
+    if k >= n || load8(d, so + k) != 34 {
+        return JSN_ERR;
+    }
+    if j_take_key(d, so, n, k, keybuf) == JSN_ERR {
+        return JSN_ERR;
+    }
+    let ke: u32 = j_str_end(d, so, n, k);
+    if ke == JSN_ERR {
+        return JSN_ERR;
+    }
+    let c: u32 = j_ws(d, so, n, ke);
+    if c >= n || load8(d, so + c) != 58 {
+        return JSN_ERR;
+    }
+    return j_ws(d, so, n, c + 1);
+}
+
+/// 从 cur_val (某个键的值) 走到下一个键的值; 到头给 JSN_NO。
+pub fn jsn_obj_next(d: ptr, so: u32, n: u32, cur_val: u32, keybuf: ptr) -> u32 {
+    let k: u32 = j_skip(d, so, n, cur_val, 0);
+    if k == JSN_ERR {
+        return JSN_ERR;
+    }
+    k = j_ws(d, so, n, k);
+    if k >= n {
+        return JSN_ERR;
+    }
+    let c: u32 = load8(d, so + k);
+    if c == 125 {
+        return JSN_NO;
+    }
+    if c != 44 {
+        return JSN_ERR;
+    }
+    let k2: u32 = j_ws(d, so, n, k + 1);
+    if k2 >= n || load8(d, so + k2) != 34 {
+        return JSN_ERR;
+    }
+    if j_take_key(d, so, n, k2, keybuf) == JSN_ERR {
+        return JSN_ERR;
+    }
+    let ke: u32 = j_str_end(d, so, n, k2);
+    if ke == JSN_ERR {
+        return JSN_ERR;
+    }
+    let k3: u32 = j_ws(d, so, n, ke);
+    if k3 >= n || load8(d, so + k3) != 58 {
+        return JSN_ERR;
+    }
+    return j_ws(d, so, n, k3 + 1);
+}
+
+/// 对象里数多少个键。
+pub fn jsn_obj_len(d: ptr, so: u32, n: u32, i: u32, keybuf: ptr) -> u32 {
+    let v: u32 = jsn_obj_first(d, so, n, i, keybuf);
+    let c: u32 = 0;
+    while v != JSN_NO && v != JSN_ERR {
+        c = c + 1;
+        v = jsn_obj_next(d, so, n, v, keybuf);
+    }
+    return c;
+}
+
+/// 按名字取值下标 (键按**解码后**比对)。缺键给 JSN_NO, 类型不对给 JSN_ERR。
+pub fn jsn_obj_get(d: ptr, so: u32, n: u32, i: u32, kp: ptr, kn: u32, keybuf: ptr) -> u32 {
+    if jsn_type_at(d, so, n, i) != JSN_OBJ {
+        return JSN_ERR;
+    }
+    let v: u32 = jsn_obj_first(d, so, n, i, keybuf);
+    while v != JSN_NO && v != JSN_ERR {
+        if mem_load32(keybuf, 0) == kn && mem_eq(keybuf, JSN_KEY_HDR, kp, 0, kn) {
+            return v;
+        }
+        v = jsn_obj_next(d, so, n, v, keybuf);
+    }
+    return v;
+}
+
+pub fn jsn_obj_get_str(d: ptr, so: u32, n: u32, i: u32, key: str, keybuf: ptr) -> u32 {
+    return jsn_obj_get(d, so, n, i, str_ptr(key), str_len(key), keybuf);
+}
+
+/// 数组第一个元素下标; 空数组给 JSN_NO。
+pub fn jsn_arr_first(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let k: u32 = j_ws(d, so, n, i + 1);
+    if k < n && load8(d, so + k) == 93 {
+        return JSN_NO;
+    }
+    return k;
+}
+
+/// 从 cur 走到下一个元素; 到头给 JSN_NO。
+pub fn jsn_arr_next(d: ptr, so: u32, n: u32, cur: u32) -> u32 {
+    let k: u32 = j_skip(d, so, n, cur, 0);
+    if k == JSN_ERR {
+        return JSN_ERR;
+    }
+    k = j_ws(d, so, n, k);
+    if k >= n {
+        return JSN_ERR;
+    }
+    let c: u32 = load8(d, so + k);
+    if c == 93 {
+        return JSN_NO;
+    }
+    if c != 44 {
+        return JSN_ERR;
+    }
+    return j_ws(d, so, n, k + 1);
+}
+
+pub fn jsn_arr_len(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let v: u32 = jsn_arr_first(d, so, n, i);
+    let c: u32 = 0;
+    while v != JSN_NO && v != JSN_ERR {
+        c = c + 1;
+        v = jsn_arr_next(d, so, n, v);
+    }
+    return c;
+}
+
+/// 第 idx 个元素的下标; 越界给 JSN_NO。
+pub fn jsn_arr_at(d: ptr, so: u32, n: u32, i: u32, idx: u32) -> u32 {
+    if jsn_type_at(d, so, n, i) != JSN_ARR {
+        return JSN_ERR;
+    }
+    let v: u32 = jsn_arr_first(d, so, n, i);
+    let c: u32 = 0;
+    while v != JSN_NO && v != JSN_ERR && c < idx {
+        v = jsn_arr_next(d, so, n, v);
+        c = c + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 取值
+
+pub fn jsn_is_null(d: ptr, so: u32, n: u32, i: u32) -> bool {
+    return jsn_type_at(d, so, n, i) == JSN_NULL;
+}
+
+/// 取布尔; 不是布尔给 false 并把 ok 置 0。
+pub fn jsn_bool(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> bool {
+    mem_store32(ok_out, 0, 0);
+    let k: u32 = j_ws(d, so, n, i);
+    if jsn_type_at(d, so, n, k) != JSN_BOOL {
+        return false;
+    }
+    let a: u32 = j_lit(d, so, n, k, "true");
+    if a != JSN_ERR {
+        mem_store32(ok_out, 0, 1);
+        return true;
+    }
+    let b: u32 = j_lit(d, so, n, k, "false");
+    if b != JSN_ERR {
+        mem_store32(ok_out, 0, 1);
+        return false;
+    }
+    return false;
+}
+
+/// 取无符号整数。不是整数 (有小数点/指数)、是负数、或超 u64 都置 ok=0。
+pub fn jsn_u64(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 0);
+    let k: u32 = j_ws(d, so, n, i);
+    if jsn_type_at(d, so, n, k) != JSN_NUM {
+        return 0;
+    }
+    if load8(d, so + k) == 45 {
+        return 0; // 负数不是 u64
+    }
+    let v: u64 = 0;
+    let j: u32 = k;
+    let stop: u32 = 0;
+    while j < n && stop == 0 {
+        let c: u32 = load8(d, so + j);
+        if j_digit(c) {
+            if v > 1844674407370955161 {
+                return 0;
+            }
+            let nv: u64 = v * 10 + ((c - 48) as u64);
+            if nv < v {
+                return 0; // 绕回来了 = 溢出
+            }
+            v = nv;
+            j = j + 1;
+        } else {
+            stop = 1;
+        }
+    }
+    if j < n {
+        let c2: u32 = load8(d, so + j);
+        if c2 == 46 || c2 == 101 || c2 == 69 {
+            return 0; // '.' 'e' 'E' —— 不是整数
+        }
+    }
+    mem_store32(ok_out, 0, 1);
+    return v;
+}
+
+/// 取有符号整数。范围是 i64。
+pub fn jsn_i64(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> i64 {
+    mem_store32(ok_out, 0, 0);
+    let k: u32 = j_ws(d, so, n, i);
+    if jsn_type_at(d, so, n, k) != JSN_NUM {
+        return 0;
+    }
+    let neg: u32 = 0;
+    let j: u32 = k;
+    if load8(d, so + j) == 45 {
+        neg = 1;
+        j = j + 1;
+    }
+    let lim: u64 = 9223372036854775807;
+    let v: u64 = 0;
+    let stop: u32 = 0;
+    while j < n && stop == 0 {
+        let c: u32 = load8(d, so + j);
+        if j_digit(c) {
+            if v > 922337203685477580 {
+                return 0;
+            }
+            v = v * 10 + ((c - 48) as u64);
+            if v > lim && neg == 0 {
+                return 0;
+            }
+            if v > lim + 1 && neg == 1 {
+                return 0;
+            }
+            j = j + 1;
+        } else {
+            stop = 1;
+        }
+    }
+    if j < n {
+        let c2: u32 = load8(d, so + j);
+        if c2 == 46 || c2 == 101 || c2 == 69 {
+            return 0;
+        }
+    }
+    mem_store32(ok_out, 0, 1);
+    if neg == 1 {
+        return (0 - v) as i64;
+    }
+    return v as i64;
+}
+
+/// 把数字原文抄进 out (不做任何解释)。i 必须在数字上。
+pub fn jsn_num_text(d: ptr, so: u32, n: u32, i: u32, out: ptr, oo: u32) -> u32 {
+    let k: u32 = j_ws(d, so, n, i);
+    if jsn_type_at(d, so, n, k) != JSN_NUM {
+        return JSN_ERR;
+    }
+    let e: u32 = j_num_end(d, so, n, k);
+    if e == JSN_ERR {
+        return JSN_ERR;
+    }
+    mem_copy(out, oo, d, so + k, e - k);
+    return e - k;
+}
+
+/// 把数字拆成 **`(-1)^负号 × 尾数 × 10^-scale`** —— 精确保留, 不做二进制舍入。
+///
+/// 尾数最多 18 位 (u64 装得下); 再长的数字会把超出的位数加进 scale 并置 ok=0,
+/// 也就是**如实报告"这里丢了精度"**, 而不是悄悄给个错值。要完整精度就先用
+/// `jsn_num_text` 拿原文再喂 `bigdec`。
+/// 返回负号 (0 正 1 负); 不是数字给 JSN_ERR。
+pub fn jsn_num_parts(d: ptr, so: u32, n: u32, i: u32, mant_out: ptr, scale_out: ptr, ok_out: ptr) -> u32 {
+    mem_store32(ok_out, 0, 0);
+    mem_store32(scale_out, 0, 0);
+    mem_store32(mant_out, 0, 0);
+    let k: u32 = j_ws(d, so, n, i);
+    if jsn_type_at(d, so, n, k) != JSN_NUM {
+        return JSN_ERR;
+    }
+    let e: u32 = j_num_end(d, so, n, k);
+    if e == JSN_ERR {
+        return JSN_ERR;
+    }
+    let neg: u32 = 0;
+    let j: u32 = k;
+    if load8(d, so + j) == 45 {
+        neg = 1;
+        j = j + 1;
+    }
+    let mant: u64 = 0;
+    let scale: u32 = 0;
+    let lost: u32 = 0;   // 因溢出而没能装进尾数的位数
+    let dot: u32 = 0;    // 已过小数点
+    let exp: u32 = 0;
+    let expneg: u32 = 0;
+    let seen_e: u32 = 0;
+
+    let stop: u32 = 0;
+    while j < e && stop == 0 {
+        let c: u32 = load8(d, so + j);
+        if j_digit(c) {
+            if seen_e == 1 {
+                exp = exp * 10 + (c - 48);
+            } else {
+                if mant > 1844674407370955161 {
+                    lost = lost + 1; // 尾数满了: 记下来, 后面折算进 scale
+                } else {
+                    mant = mant * 10 + ((c - 48) as u64);
+                }
+                if dot == 1 {
+                    scale = scale + 1;
+                }
+            }
+        } else if c == 46 {
+            dot = 1;
+        } else if c == 101 || c == 69 {
+            seen_e = 1;
+        } else if c == 43 {
+            // 指数的 '+', 忽略
+        } else if c == 45 {
+            expneg = 1;
+        }
+        j = j + 1;
+    }
+    // 指数作用于 scale: 1e3 = 1000 -> scale 0 (尾数 ×1000); 1e-3 -> scale 3
+    if seen_e == 1 {
+        if expneg == 1 {
+            scale = scale + exp;
+        } else {
+            if exp >= scale {
+                let mul: u32 = exp - scale; // **先算再清零**, 否则 mul 会变成 exp 本身
+                scale = 0;
+                let t: u32 = 0;
+                while t < mul {
+                    if mant > 1844674407370955161 {
+                        mem_store32(ok_out, 0, 0);
+                        return neg;
+                    }
+                    mant = mant * 10;
+                    t = t + 1;
+                }
+            } else {
+                scale = scale - exp;
+            }
+        }
+    }
+    mem_store32(scale_out, 0, scale);
+    // u64 尾数写回调用方的缓冲 (8 字节)
+    let m: u64 = mant;
+    mem_store32(mant_out, 0, (m & 4294967295) as u32);
+    mem_store32(mant_out, 4, ((m >> 32) & 4294967295) as u32);
+    if lost == 0 {
+        mem_store32(ok_out, 0, 1);
+    }
+    return neg;
+}
+
+/// 读回 `jsn_num_parts` 写出的 8 字节尾数。
+pub fn jsn_num_parts_mant(mant_out: ptr) -> u64 {
+    let lo: u64 = mem_load32(mant_out, 0) as u64;
+    let hi: u64 = mem_load32(mant_out, 4) as u64;
+    return (hi << 32) | lo;
+}
+
+// ---------------------------------------------------------------- 路径
+
+/// 按 `a.b[2].c` 这样的路径走到某个值, 返回它的下标。
+/// 段之间用 `.`, 每段后面可以跟任意多个 `[下标]`; 空路径给根。
+/// 缺键/越界给 JSN_NO, 路径写法不对或类型不对给 JSN_ERR。
+pub fn jsn_path(d: ptr, so: u32, n: u32, path: str, keybuf: ptr) -> u32 {
+    let pp: ptr = str_ptr(path);
+    let pl: u32 = str_len(path);
+    let cur: u32 = j_ws(d, so, n, 0);
+    let i: u32 = 0;
+    while i < pl {
+        let a: u32 = i;
+        while i < pl && load8(pp, i) != 46 && load8(pp, i) != 91 {
+            i = i + 1;
+        }
+        if i > a {
+            cur = jsn_obj_get(d, so, n, cur, ((pp as u64) + a as u64) as ptr, i - a, keybuf);
+        }
+        // 后面的 [下标] (可以连着来)
+        while i < pl && load8(pp, i) == 91 {
+            i = i + 1;
+            let num: u32 = 0;
+            let any: u32 = 0;
+            while i < pl && j_digit(load8(pp, i)) {
+                num = num * 10 + (load8(pp, i) - 48);
+                any = 1;
+                i = i + 1;
+            }
+            if any == 0 || i >= pl || load8(pp, i) != 93 {
+                return JSN_ERR;
+            }
+            i = i + 1;
+            cur = jsn_arr_at(d, so, n, cur, num);
+        }
+        if i < pl {
+            if load8(pp, i) != 46 {
+                return JSN_ERR;
+            }
+            i = i + 1;
+            if i >= pl {
+                return JSN_ERR; // 末尾多个 '.'
+            }
+        }
+        if cur == JSN_ERR || cur == JSN_NO {
+            return cur;
+        }
+    }
+    return cur;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 自检用的一小段"真"文档: 嵌套对象 + 数组 + 各种转义。
+fn doc() -> str {
+    return "{\"n\":42,\"neg\":-7,\"pi\":3.14,\"ok\":true,\"z\":null,\"s\":\"a\\nb\\t\\\"c\\\"\",\"u\":\"\\u4e2d\",\"obj\":{\"deep\":{\"x\":1}},\"arr\":[1,\"two\",[3,4],{\"k\":5}]}";
+}
+
+fn test_jsn_validate_ok() -> bool {
+    let s: str = doc();
+    return jsn_validate(str_ptr(s), 0, str_len(s));
+}
+
+fn test_jsn_validate_whitespace_ok() -> bool {
+    // JSON 的空白是**四种**: 空格 TAB LF CR。
+    // CR 用字节拼 —— 字面量里写 `\r` 会被静默当成字母 'r', 那样这个测试就白测了。
+    let d: ptr = alloc(32);
+    store8(d, 0, 32 as u8); // ' '
+    store8(d, 1, 9 as u8);  // TAB
+    store8(d, 2, 10 as u8); // LF
+    store8(d, 3, 13 as u8); // CR
+    store8(d, 4, 91 as u8); // '['
+    store8(d, 5, 49 as u8); // '1'
+    store8(d, 6, 93 as u8); // ']'
+    store8(d, 7, 13 as u8); // CR
+    store8(d, 8, 10 as u8); // LF
+    store8(d, 9, 32 as u8); // ' '
+    let ok4: bool = jsn_validate(d, 0, 10);
+    // 只认这四种: 垂直制表 (0x0B) 不是 JSON 空白。
+    store8(d, 0, 11 as u8);
+    return ok4 && jsn_validate(d, 0, 10) == false;
+}
+
+fn test_jsn_validate_empty_containers() -> bool {
+    let a: str = "{}";
+    let b: str = "[]";
+    let c: str = "[[]]";
+    let d: str = "{\"a\":{}}";
+    return jsn_validate(str_ptr(a), 0, 2) && jsn_validate(str_ptr(b), 0, 2)
+        && jsn_validate(str_ptr(c), 0, 4) && jsn_validate(str_ptr(d), 0, 8);
+}
+
+fn test_jsn_validate_rejects_trailing() -> bool {
+    let s: str = "{} {}";
+    return jsn_validate(str_ptr(s), 0, 5) == false;
+}
+
+fn test_jsn_validate_rejects_bad_forms() -> bool {
+    // 逐个都是"不合法但很常见的写法" —— 宽容解析会把它们变成错数据。
+    let a: str = "{a:1}";        // 键没引号
+    let b: str = "{\"a\":1,}";   // 尾逗号
+    let c: str = "[1,2,]";       // 尾逗号
+    let d: str = "01";           // 前导零
+    let e: str = "1.";           // 小数点后没数字
+    let f: str = "nul";          // 关键字残缺
+    let g: str = "'a'";          // 单引号
+    let h: str = "1e";           // 指数没数字
+    return jsn_validate(str_ptr(a), 0, 5) == false && jsn_validate(str_ptr(b), 0, 8) == false
+        && jsn_validate(str_ptr(c), 0, 6) == false && jsn_validate(str_ptr(d), 0, 2) == false
+        && jsn_validate(str_ptr(e), 0, 2) == false && jsn_validate(str_ptr(f), 0, 3) == false
+        && jsn_validate(str_ptr(g), 0, 3) == false && jsn_validate(str_ptr(h), 0, 2) == false;
+}
+
+fn test_jsn_validate_rejects_unclosed() -> bool {
+    let a: str = "{\"a\":1";
+    let b: str = "[1,2";
+    let c: str = "\"abc";
+    return jsn_validate(str_ptr(a), 0, 6) == false && jsn_validate(str_ptr(b), 0, 4) == false
+        && jsn_validate(str_ptr(c), 0, 4) == false;
+}
+
+fn test_jsn_depth_guard() -> bool {
+    // 超过 64 层的嵌套要被拒, 而不是把栈吃掉。
+    let d: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < 100 {
+        store8(d, i, 91 as u8); // '['
+        i = i + 1;
+    }
+    while i < 200 {
+        store8(d, i, 93 as u8); // ']'
+        i = i + 1;
+    }
+    let deep: bool = jsn_validate(d, 0, 200);
+    // 64 层以内要能过
+    let e: ptr = alloc(64);
+    let j: u32 = 0;
+    while j < 20 {
+        store8(e, j, 91 as u8);
+        j = j + 1;
+    }
+    while j < 40 {
+        store8(e, j, 93 as u8);
+        j = j + 1;
+    }
+    return deep == false && jsn_validate(e, 0, 40);
+}
+
+fn test_jsn_type_at() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let o: u32 = jsn_path(str_ptr(s), 0, str_len(s), "", kb);
+    let ok0: bool = jsn_type_at(str_ptr(s), 0, str_len(s), o) == JSN_OBJ;
+    let n: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "n", kb);
+    let ok1: bool = jsn_type_at(str_ptr(s), 0, str_len(s), n) == JSN_NUM;
+    let st: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "s", kb);
+    let ok2: bool = jsn_type_at(str_ptr(s), 0, str_len(s), st) == JSN_STR;
+    let b: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "ok", kb);
+    let ok3: bool = jsn_type_at(str_ptr(s), 0, str_len(s), b) == JSN_BOOL;
+    let z: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "z", kb);
+    let ok4: bool = jsn_type_at(str_ptr(s), 0, str_len(s), z) == JSN_NULL;
+    let a: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "arr", kb);
+    return ok0 && ok1 && ok2 && ok3 && ok4
+        && jsn_type_at(str_ptr(s), 0, str_len(s), a) == JSN_ARR;
+}
+
+fn test_jsn_obj_get_basic() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let n: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "n", kb);
+    let v: u64 = jsn_u64(str_ptr(s), 0, str_len(s), n, ok);
+    let ok1: bool = v == 42 && mem_load32(ok, 0) == 1;
+    let g: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "neg", kb);
+    let nv: i64 = jsn_i64(str_ptr(s), 0, str_len(s), g, ok);
+    let zero: i64 = 0;
+    let want: i64 = zero - 7;
+    return ok1 && nv == want;
+}
+
+fn test_jsn_obj_get_skips_nested_values() -> bool {
+    // 关键点: 走到 "obj" 之前必须先整段跳过 "s" 那个带转义的字符串,
+    // 跳错一个字节后面全乱。
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let obj: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "obj", kb);
+    let ok1: bool = jsn_type_at(str_ptr(s), 0, str_len(s), obj) == JSN_OBJ;
+    let deep: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), obj, "deep", kb);
+    let x: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), deep, "x", kb);
+    let okp: ptr = alloc(8);
+    let v: u64 = jsn_u64(str_ptr(s), 0, str_len(s), x, okp);
+    return ok1 && v == 1 && mem_load32(okp, 0) == 1;
+}
+
+fn test_jsn_obj_get_missing() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let a: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "nope", kb);
+    let b: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "obj", kb);
+    let c: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), b, "nope", kb);
+    return a == JSN_NO && c == JSN_NO;
+}
+
+fn test_jsn_obj_get_on_non_object() -> bool {
+    let s: str = "[1,2]";
+    let kb: ptr = alloc(64);
+    let a: u32 = jsn_obj_get_str(str_ptr(s), 0, 5, 0, "x", kb);
+    return a == JSN_ERR;
+}
+
+fn test_jsn_obj_iteration() -> bool {
+    // 键要按出现顺序出来, 且名字对得上。
+    let s: str = "{\"a\":1,\"bb\":2,\"ccc\":3}"; // 22 字节
+    let n: u32 = 22;
+    let kb: ptr = alloc(64);
+    let v0: u32 = jsn_obj_first(str_ptr(s), 0, n, 0, kb);
+    let ok1: bool = jsn_key_len(kb) == 1 && load8(jsn_key_ptr(kb), 0) == 97;
+    let v1: u32 = jsn_obj_next(str_ptr(s), 0, n, v0, kb);
+    let ok2: bool = jsn_key_len(kb) == 2 && load8(jsn_key_ptr(kb), 0) == 98;
+    let v2: u32 = jsn_obj_next(str_ptr(s), 0, n, v1, kb);
+    let ok3: bool = jsn_key_len(kb) == 3 && load8(jsn_key_ptr(kb), 2) == 99;
+    let v3: u32 = jsn_obj_next(str_ptr(s), 0, n, v2, kb);
+    let cnt: u32 = jsn_obj_len(str_ptr(s), 0, n, 0, kb);
+    return ok1 && ok2 && ok3 && v3 == JSN_NO && cnt == 3;
+}
+
+fn test_jsn_array_navigation() -> bool {
+    let s: str = "[10,\"x\",[3,4],{\"k\":5}]";
+    let n: u32 = str_len(s);
+    let ok1: bool = jsn_arr_len(str_ptr(s), 0, n, 0) == 4;
+    let a1: u32 = jsn_arr_at(str_ptr(s), 0, n, 0, 1);
+    let ok2: bool = jsn_type_at(str_ptr(s), 0, n, a1) == JSN_STR;
+    let a2: u32 = jsn_arr_at(str_ptr(s), 0, n, 0, 2);
+    let ok3: bool = jsn_type_at(str_ptr(s), 0, n, a2) == JSN_ARR;
+    let inner: u32 = jsn_arr_at(str_ptr(s), 0, n, a2, 1);
+    let op: ptr = alloc(8);
+    let v: u64 = jsn_u64(str_ptr(s), 0, n, inner, op);
+    let a9: u32 = jsn_arr_at(str_ptr(s), 0, n, 0, 9);
+    return ok1 && ok2 && ok3 && v == 4 && mem_load32(op, 0) == 1 && a9 == JSN_NO;
+}
+
+fn test_jsn_array_empty() -> bool {
+    let s: str = "[]";
+    return jsn_arr_len(str_ptr(s), 0, 2, 0) == 0 && jsn_arr_first(str_ptr(s), 0, 2, 0) == JSN_NO;
+}
+
+fn test_jsn_obj_empty() -> bool {
+    let kb: ptr = alloc(64);
+    let s: str = "{}";
+    return jsn_obj_len(str_ptr(s), 0, 2, 0, kb) == 0
+        && jsn_obj_first(str_ptr(s), 0, 2, 0, kb) == JSN_NO;
+}
+
+fn test_jsn_str_escapes() -> bool {
+    // "a\nb\t\"c\"" 应解成 7 字节: a LF b TAB " c "  —— 等等, 是 a LF b TAB " c " 共 7。
+    let s: str = "{\"s\":\"a\\nb\\t\\\"c\\\"\"}";
+    let kb: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let v: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "s", kb);
+    let n: u32 = jsn_str(str_ptr(s), 0, str_len(s), v, out, 0);
+    let ok2: bool = load8(out, 0) == 97 && load8(out, 1) == 10 && load8(out, 2) == 98
+        && load8(out, 3) == 9 && load8(out, 4) == 34 && load8(out, 5) == 99
+        && load8(out, 6) == 34;
+    // 长度查询与实解一致
+    let l: u32 = jsn_str_len(str_ptr(s), 0, str_len(s), v);
+    return n == 7 && ok2 && l == n;
+}
+
+fn test_jsn_str_unicode_escape() -> bool {
+    // \u4e2d -> E4 B8 AD (U+4E2D 中)
+    let s: str = "{\"u\":\"\\u4e2d\"}";
+    let kb: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let v: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "u", kb);
+    let n: u32 = jsn_str(str_ptr(s), 0, str_len(s), v, out, 0);
+    return n == 3 && load8(out, 0) == 228 && load8(out, 1) == 184 && load8(out, 2) == 173;
+}
+
+fn test_jsn_str_surrogate_pair() -> bool {
+    // \uD83D\uDE00 -> U+1F600 -> F0 9F 98 80 (4 字节)
+    let s: str = "{\"e\":\"\\uD83D\\uDE00\"}";
+    let kb: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let o: u32 = j_ws(str_ptr(s), 0, str_len(s), 0);
+    let v: u32 = jsn_obj_get_str(str_ptr(s), 0, str_len(s), o, "e", kb);
+    let n: u32 = jsn_str(str_ptr(s), 0, str_len(s), v, out, 0);
+    return n == 4 && load8(out, 0) == 240 && load8(out, 1) == 159
+        && load8(out, 2) == 152 && load8(out, 3) == 128;
+}
+
+fn test_jsn_str_lone_surrogate_is_replacement() -> bool {
+    // 落单的高位代理 -> U+FFFD (EF BF BD), 不假装它是一个字符。
+    let s: str = "\"\\uD83D\"";
+    let out: ptr = alloc(32);
+    let n: u32 = jsn_str(str_ptr(s), 0, str_len(s), 0, out, 0);
+    return n == 3 && load8(out, 0) == 239 && load8(out, 1) == 191 && load8(out, 2) == 189;
+}
+
+fn test_jsn_str_bad_escape_rejected() -> bool {
+    let s: str = "\"a\\qb\"";
+    let out: ptr = alloc(32);
+    return jsn_str(str_ptr(s), 0, str_len(s), 0, out, 0) == JSN_ERR;
+}
+
+fn test_jsn_str_wrong_type() -> bool {
+    let s: str = "42";
+    let out: ptr = alloc(32);
+    return jsn_str(str_ptr(s), 0, 2, 0, out, 0) == JSN_ERR;
+}
+
+fn test_jsn_u64_bounds() -> bool {
+    let ok: ptr = alloc(8);
+    let a: str = "0";
+    let b: str = "18446744073709551615"; // u64 最大值
+    let c: str = "18446744073709551616"; // 溢出
+    let d: str = "1.5";
+    let e: str = "-1";
+    let f: str = "1e3";
+    let va: u64 = jsn_u64(str_ptr(a), 0, 1, 0, ok);
+    let oka: bool = va == 0 && mem_load32(ok, 0) == 1;
+    let vb: u64 = jsn_u64(str_ptr(b), 0, 20, 0, ok);
+    let okb: bool = mem_load32(ok, 0) == 1;
+    let oc: u64 = jsn_u64(str_ptr(c), 0, 20, 0, ok);
+    let okc: bool = mem_load32(ok, 0) == 0;
+    let od: u64 = jsn_u64(str_ptr(d), 0, 3, 0, ok);
+    let okd: bool = mem_load32(ok, 0) == 0;
+    let oe: u64 = jsn_u64(str_ptr(e), 0, 2, 0, ok);
+    let oke: bool = mem_load32(ok, 0) == 0;
+    let of: u64 = jsn_u64(str_ptr(f), 0, 3, 0, ok);
+    let okf: bool = mem_load32(ok, 0) == 0;
+    return oka && okb && okc && okd && oke && okf && oc == 0 && od == 0 && oe == 0 && of == 0
+        && vb == 18446744073709551615;
+}
+
+fn test_jsn_i64_negative() -> bool {
+    let ok: ptr = alloc(8);
+    let a: str = "-9223372036854775808"; // i64 最小值
+    let b: str = "9223372036854775807";  // i64 最大值
+    let c: str = "9223372036854775808";  // 溢出
+    let va: i64 = jsn_i64(str_ptr(a), 0, 20, 0, ok);
+    let oka: bool = mem_load32(ok, 0) == 1;
+    let vb: i64 = jsn_i64(str_ptr(b), 0, 19, 0, ok);
+    let okb: bool = mem_load32(ok, 0) == 1;
+    let oc: i64 = jsn_i64(str_ptr(c), 0, 19, 0, ok);
+    let okc: bool = mem_load32(ok, 0) == 0;
+    let zero: i64 = 0;
+    return oka && okb && okc && va < zero && vb > zero && oc == zero;
+}
+
+fn test_jsn_bool_and_null() -> bool {
+    let ok: ptr = alloc(8);
+    let t: str = "true";
+    let f: str = "false";
+    let z: str = "null";
+    let a: bool = jsn_bool(str_ptr(t), 0, 4, 0, ok);
+    let oka: bool = a && mem_load32(ok, 0) == 1;
+    let b: bool = jsn_bool(str_ptr(f), 0, 5, 0, ok);
+    let okb: bool = b == false && mem_load32(ok, 0) == 1;
+    let c: bool = jsn_bool(str_ptr(z), 0, 4, 0, ok);
+    let okc: bool = c == false && mem_load32(ok, 0) == 0;
+    return oka && okb && okc && jsn_is_null(str_ptr(z), 0, 4, 0)
+        && jsn_is_null(str_ptr(t), 0, 4, 0) == false;
+}
+
+fn test_jsn_num_parts_decimal() -> bool {
+    // 12.34 -> 尾数 1234, scale 2  (1234 * 10^-2 = 12.34)
+    let s: str = "12.34";
+    let m: ptr = alloc(8);
+    let sc: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    let neg: u32 = jsn_num_parts(str_ptr(s), 0, 5, 0, m, sc, ok);
+    let mant: u64 = jsn_num_parts_mant(m);
+    return neg == 0 && mem_load32(ok, 0) == 1 && mant == 1234 && mem_load32(sc, 0) == 2;
+}
+
+fn test_jsn_num_parts_exponent() -> bool {
+    // 1e3 -> 尾数 1000, scale 0; 1.5e-2 -> 尾数 15, scale 3
+    let a: str = "1e3";
+    let b: str = "1.5e-2";
+    let m: ptr = alloc(8);
+    let sc: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    let na: u32 = jsn_num_parts(str_ptr(a), 0, 3, 0, m, sc, ok);
+    let oka: bool = na == 0 && jsn_num_parts_mant(m) == 1000 && mem_load32(sc, 0) == 0
+        && mem_load32(ok, 0) == 1;
+    let nb: u32 = jsn_num_parts(str_ptr(b), 0, 6, 0, m, sc, ok);
+    let okb: bool = nb == 0 && jsn_num_parts_mant(m) == 15 && mem_load32(sc, 0) == 3;
+    return oka && okb;
+}
+
+fn test_jsn_num_parts_negative() -> bool {
+    let s: str = "-2.5";
+    let m: ptr = alloc(8);
+    let sc: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    let neg: u32 = jsn_num_parts(str_ptr(s), 0, 4, 0, m, sc, ok);
+    return neg == 1 && jsn_num_parts_mant(m) == 25 && mem_load32(sc, 0) == 1;
+}
+
+fn test_jsn_num_text_raw() -> bool {
+    let s: str = "[-0.5e2]";
+    let out: ptr = alloc(16);
+    let a: u32 = jsn_arr_at(str_ptr(s), 0, 8, 0, 0);
+    let n: u32 = jsn_num_text(str_ptr(s), 0, 8, a, out, 0);
+    let want: str = "-0.5e2";
+    return n == 6 && mem_eq(out, 0, str_ptr(want), 0, 6);
+}
+
+fn test_jsn_path_dotted() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let x: u32 = jsn_path(str_ptr(s), 0, str_len(s), "obj.deep.x", kb);
+    let v: u64 = jsn_u64(str_ptr(s), 0, str_len(s), x, ok);
+    return v == 1 && mem_load32(ok, 0) == 1;
+}
+
+fn test_jsn_path_indexed() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let o: u32 = jsn_path(str_ptr(s), 0, str_len(s), "arr[2][1]", kb);
+    let ok: ptr = alloc(8);
+    let v: u64 = jsn_u64(str_ptr(s), 0, str_len(s), o, ok);
+    let ok1: bool = v == 4 && mem_load32(ok, 0) == 1;
+    let s2: u32 = jsn_path(str_ptr(s), 0, str_len(s), "arr[3].k", kb);
+    let v2: u64 = jsn_u64(str_ptr(s), 0, str_len(s), s2, ok);
+    return ok1 && v2 == 5;
+}
+
+fn test_jsn_path_missing_and_bad() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let a: u32 = jsn_path(str_ptr(s), 0, str_len(s), "nope.x", kb);
+    let b: u32 = jsn_path(str_ptr(s), 0, str_len(s), "arr[99]", kb);
+    let c: u32 = jsn_path(str_ptr(s), 0, str_len(s), "obj.", kb);
+    let d: u32 = jsn_path(str_ptr(s), 0, str_len(s), "arr[x]", kb);
+    return a == JSN_NO && b == JSN_NO && c == JSN_ERR && d == JSN_ERR;
+}
+
+fn test_jsn_path_empty_is_root() -> bool {
+    let s: str = doc();
+    let kb: ptr = alloc(64);
+    let r: u32 = jsn_path(str_ptr(s), 0, str_len(s), "", kb);
+    return jsn_type_at(str_ptr(s), 0, str_len(s), r) == JSN_OBJ;
+}
+
+fn test_jsn_deep_doc_roundtrip() -> bool {
+    // 真实形状的一小段配置, 走一遍常见读法。
+    let s: str = "{\n  \"name\": \"demo\",\n  \"ports\": [80, 443],\n  \"limits\": {\"rps\": 1000, \"burst\": null},\n  \"tags\": [\"a\", \"b\"]\n}";
+    let n: u32 = str_len(s);
+    let kb: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let name: u32 = jsn_path(str_ptr(s), 0, n, "name", kb);
+    let nl: u32 = jsn_str(str_ptr(s), 0, n, name, out, 0);
+    let ok1: bool = nl == 4 && mem_eq(out, 0, str_ptr("demo"), 0, 4);
+    let p1: u32 = jsn_path(str_ptr(s), 0, n, "ports[1]", kb);
+    let v1: u64 = jsn_u64(str_ptr(s), 0, n, p1, ok);
+    let ok2: bool = v1 == 443;
+    let rps: u32 = jsn_path(str_ptr(s), 0, n, "limits.rps", kb);
+    let v2: u64 = jsn_u64(str_ptr(s), 0, n, rps, ok);
+    let ok3: bool = v2 == 1000;
+    let burst: u32 = jsn_path(str_ptr(s), 0, n, "limits.burst", kb);
+    let ok4: bool = jsn_is_null(str_ptr(s), 0, n, burst);
+    let ok5: bool = jsn_arr_len(str_ptr(s), 0, n, jsn_path(str_ptr(s), 0, n, "tags", kb)) == 2;
+    return ok1 && ok2 && ok3 && ok4 && ok5;
+}

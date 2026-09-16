@@ -1,0 +1,570 @@
+// std/lzss.lomt — LZSS (滑动窗口 + 长度/距离对)
+//
+// LZ77 的原版是"距离/长度/下一个字面"三元组, 每个 token 都背一个用不上的字面;
+// LZSS 把"下一个字面"挪出来, 用一个**标志位**说"这一格是字面还是引用":
+//   标志位 = 1  -> 后面 1 个字节是字面
+//   标志位 = 0  -> 后面 2 个字节是一次回引 (长度, 距离)
+// 一个引用通常服务 3~34 个字节, 所以一个标志位摊掉不到 1/3 字节 —— 这就是它比原版省的原因。
+//
+// ---------------------------------------------------------------- 格式 (写死, 不是"随便定")
+//
+//  流 = 若干**组**。每组: 1 个标志字节 + 最多 8 个 token。
+//  标志字节的 bit0 是**这一组第一个** token 的类型, bit1 是第二个 …… bit7 是第八个。
+//  位序是**从低位往高位** —— 这样解码器只要 `flag >>= 1` 取最低位就行, 不必记位号。
+//  最后那一组可以不足 8 个 token (流走到头为止)。
+//
+//  字面 token: 1 字节, 就是那个字节本身。
+//  引用 token: 2 字节, **小端** 16 位, 位布局:
+//      bit 0..10  : 距离 - 1      (11 位 -> 距离 1..2048)
+//      bit 11..15 : 长度 - 3      (5 位  -> 长度 3..34)
+//      合计正好 16 位, 一位不浪费 —— 这是"窗口 2048、最短 3、最长 34"这三个数
+//      凑出来的巧合 (11 + 5 = 16), 也是选它们的原因。
+//
+//  为什么是 2048 而不是更常见的 4096: 距离位宽每翻一倍, 长度位宽就少一位。
+//  2048/5 位长度 (最长 34) 比 4096/4 位长度 (最长 18) 在本层的使用场景 (文本、重复块)
+//  压得更实 —— 长匹配比远匹配值钱。这个取舍写在这里, 换窗口就得重推位布局。
+//
+//  解码需要**已知输出长度** (LZSS 流自带终止符, 靠长度停) —— 调用方把原始长度传进来。
+//
+// 诚实清单:
+//   - 编码器是**贪心**的: 在当前位置找到最长匹配就直接用它, **不做懒惰匹配**
+//     (不比较"这一格放字面、下一格匹配会不会更长")。懒惰能多榨 1~3%, 但要让编码器
+//     多存一整轮匹配结果, 本层的收益不值这个复杂度。
+//   - 匹配用**哈希链**找, 但**限制链长** (LZ_CHAIN_MAX), 并且链只在同一个哈希桶里走。
+//     所以不保证找到真正最长的匹配 —— 保证的是"有界的时间"和"格式正确"。
+//   - 位置用 **u16** 存 (省一半内存), 于是 **n 必须 <= 65534**。超了直接 LZ_ERR。
+//     要编更大的输入得把 head/prev 换成 u32, 那是改格式之外的独立改动。
+//   - 不做"距离也可以更近就选更近"之类的代价权衡: 只按长度最大选, 长度相同选最先遇到的。
+//   - 不做 DEFLATE 那样把 (长度,距离) 再走一层霍夫曼 —— 那是 inflate/huffman 的活。
+//
+// 命名: 公开 lzss_*, 内部 lz_*。自检 test_lzss_*。
+
+module lzss
+
+use "mem.lomt"
+
+pub const LZ_ERR: u32 = 4294967295;
+
+/// 滑动窗口大小 (字节)。距离 1..2048。
+pub const LZ_WINDOW: u32 = 2048;
+/// 最短匹配长度 —— 比它还短的回引用不划算 (2 字节换不回本)。
+pub const LZ_MIN_MATCH: u32 = 3;
+/// 最长匹配长度 (5 位能表达的上限)。
+pub const LZ_MAX_MATCH: u32 = 34;
+/// 一个标志字节带几个 token。
+pub const LZ_GROUP: u32 = 8;
+/// 哈希桶数 (8 位哈希)。
+pub const LZ_HASH: u32 = 256;
+/// head 表占的字节数 (每桶 2 字节)。
+pub const LZ_HEAD_BYTES: u32 = 512;
+/// head 的"空"标记。位置永远到不了 65535 (n <= 65534), 所以能当哨兵。
+pub const LZ_NONE: u32 = 65535;
+/// 一条哈希链最多走多少步。防病态输入把编码拖成平方。
+pub const LZ_CHAIN_MAX: u32 = 16;
+/// 位置字段是 u16 决定的输入上限。
+pub const LZ_MAX_INPUT: u32 = 65534;
+
+/// 编码器要的工作区大小 (调用方开一块给编码器, 它是唯一需要状态的一侧)。
+/// 布局: [head: 256 * 2 字节][prev: 2048 * 2 字节]
+pub fn lzss_scratch_bytes() -> u32 {
+    return LZ_HEAD_BYTES + LZ_WINDOW * 2;
+}
+
+/// 编码后长度的上界 (最坏情况: 全是字面)。每组 8 个字面配 1 个标志字节,
+/// 所以是 n + ceil(n/8)。这里给 n + n/8 + 1, 宽 1 字节买个省心。
+pub fn lzss_max_encoded(n: u32) -> u32 {
+    return n + (n / 8) + 1;
+}
+
+// ---------------------------------------------------------------- 哈希链
+
+fn lz_hash(d: ptr, p: u32) -> u32 {
+    return ((load8(d, p) << 4) ^ (load8(d, p + 1) << 2) ^ load8(d, p + 2)) & 255;
+}
+
+fn lz_head_get(sc: ptr, h: u32) -> u32 {
+    return mem_load16(sc, h * 2);
+}
+
+fn lz_head_set(sc: ptr, h: u32, v: u32) {
+    mem_store16(sc, h * 2, v);
+}
+
+fn lz_prev_get(sc: ptr, pos: u32) -> u32 {
+    return mem_load16(sc, LZ_HEAD_BYTES + (pos & (LZ_WINDOW - 1)) * 2);
+}
+
+fn lz_prev_set(sc: ptr, pos: u32, v: u32) {
+    mem_store16(sc, LZ_HEAD_BYTES + (pos & (LZ_WINDOW - 1)) * 2, v);
+}
+
+/// 把位置 pos 插进它那个哈希桶的链头。pos 后面不足 3 字节就没什么可哈希的, 跳过。
+fn lz_insert(sc: ptr, d: ptr, so: u32, pos: u32, n: u32) {
+    if pos + 2 < n {
+        let h: u32 = lz_hash(d, so + pos);
+        let old: u32 = lz_head_get(sc, h);
+        lz_prev_set(sc, pos, old);
+        lz_head_set(sc, h, pos);
+    }
+}
+
+// ---------------------------------------------------------------- 编码
+
+/// 编码 n 字节到 out。out 至少 `lzss_max_encoded(n)` 字节, sc 至少 `lzss_scratch_bytes()`。
+/// 返回写入字节数, n 超上限给 LZ_ERR。
+pub fn lzss_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32, sc: ptr) -> u32 {
+    if n > LZ_MAX_INPUT {
+        return LZ_ERR;
+    }
+    mem_fill(sc, 0, LZ_HEAD_BYTES, 255); // head[*] = LZ_NONE
+    let p: u32 = o;
+    let i: u32 = 0;
+    let flag: u32 = 0; // 当前组的标志字节在 out 里的偏移
+    let cnt: u32 = 0;  // 本组已经放了几个 token
+    while i < n {
+        if cnt == 0 {
+            flag = p;
+            store8(out, p, 0 as u8);
+            p = p + 1;
+        }
+        let cap: u32 = n - i;
+        if cap > LZ_MAX_MATCH {
+            cap = LZ_MAX_MATCH;
+        }
+        let best_len: u32 = 0;
+        let best_dist: u32 = 0;
+        if i + 2 < n && cap >= LZ_MIN_MATCH {
+            let h: u32 = lz_hash(d, so + i);
+            let cur: u32 = lz_head_get(sc, h);
+            let stop: bool = false;
+            let depth: u32 = 0;
+            while cur != LZ_NONE && stop == false && depth < LZ_CHAIN_MAX {
+                // 链里可能混进"已经被新位置覆盖过的 prev" —— 那种候选会 >= i 或跑出窗口。
+                // 遇到就整条链放弃 (不是这一个候选), 因为再往后走只会更离谱。
+                if cur >= i || (i - cur) > LZ_WINDOW {
+                    stop = true;
+                } else {
+                    let l: u32 = 0;
+                    while l < cap && load8(d, so + cur + l) == load8(d, so + i + l) {
+                        l = l + 1;
+                    }
+                    if l > best_len {
+                        best_len = l;
+                        best_dist = i - cur;
+                    }
+                    if l == cap {
+                        stop = true; // 到本段上限了, 再找也不会更长
+                    } else {
+                        cur = lz_prev_get(sc, cur);
+                    }
+                }
+                depth = depth + 1;
+            }
+        }
+        if best_len >= LZ_MIN_MATCH {
+            let tok: u32 = (best_dist - 1) | ((best_len - LZ_MIN_MATCH) << 11);
+            store8(out, p, (tok & 255) as u8);
+            store8(out, p + 1, ((tok >> 8) & 255) as u8);
+            p = p + 2;
+            // 匹配覆盖到的每个位置都要进链, 不然下一段就找不到它们了
+            let j: u32 = 0;
+            while j < best_len {
+                lz_insert(sc, d, so, i + j, n);
+                j = j + 1;
+            }
+            i = i + best_len;
+        } else {
+            store8(out, flag, (load8(out, flag) | (1 << cnt)) as u8);
+            store8(out, p, load8(d, so + i) as u8);
+            p = p + 1;
+            lz_insert(sc, d, so, i, n);
+            i = i + 1;
+        }
+        cnt = cnt + 1;
+        if cnt == LZ_GROUP {
+            cnt = 0;
+        }
+    }
+    return p - o;
+}
+
+// ---------------------------------------------------------------- 解码
+
+/// 解码。outlen 是**原始长度** (LZSS 流靠它停)。返回写出的字节数 (== outlen),
+/// 坏流给 LZ_ERR。used_out 收到"吃掉了几个输入字节" —— 流后面还可能接别的东西。
+pub fn lzss_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32, outlen: u32, used_out: ptr) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    let cnt: u32 = 0;
+    let flag: u32 = 0;
+    while i < n && (p - o) < outlen {
+        if cnt == 0 {
+            flag = load8(d, so + i);
+            i = i + 1;
+        }
+        let is_lit: bool = (flag & 1) != 0;
+        flag = flag >> 1;
+        cnt = cnt + 1;
+        if cnt == LZ_GROUP {
+            cnt = 0;
+        }
+        if is_lit {
+            if i >= n {
+                mem_store32(used_out, 0, i);
+                return LZ_ERR; // 字面被截断
+            }
+            store8(out, p, load8(d, so + i) as u8);
+            p = p + 1;
+            i = i + 1;
+        } else {
+            if i + 2 > n {
+                mem_store32(used_out, 0, i);
+                return LZ_ERR; // 引用 token 被截断
+            }
+            let tok: u32 = load8(d, so + i) | (load8(d, so + i + 1) << 8);
+            i = i + 2;
+            let dist: u32 = (tok & 2047) + 1;
+            let len: u32 = ((tok >> 11) & 31) + LZ_MIN_MATCH;
+            if dist > (p - o) {
+                mem_store32(used_out, 0, i);
+                return LZ_ERR; // 距离指到输出开头之前 —— 坏流
+            }
+            if (p - o) + len > outlen {
+                mem_store32(used_out, 0, i);
+                return LZ_ERR; // 会写出界
+            }
+            // 逐字节拷, **允许重叠** (dist 可以小于 len) —— 那是"自己引用自己"的重复串,
+            // 必须一字节一字节来; 用 mem_copy 会把还没生成的字节拷进去。
+            let k: u32 = 0;
+            while k < len {
+                store8(out, p, load8(out, p - dist) as u8);
+                p = p + 1;
+                k = k + 1;
+            }
+        }
+    }
+    mem_store32(used_out, 0, i);
+    if (p - o) != outlen {
+        return LZ_ERR; // 输入走到头也没凑满 outlen
+    }
+    return p - o;
+}
+
+/// 不带用量的简写。
+pub fn lzss_decode_simple(out: ptr, o: u32, d: ptr, so: u32, n: u32, outlen: u32) -> u32 {
+    let tmp: ptr = alloc(4);
+    return lzss_decode(out, o, d, so, n, outlen, tmp);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn lz_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn lz_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = lz_hv(str_byte(s, k * 2));
+        let lo: u32 = lz_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 填 n 个字节 = "abcabcabc..." 的第 k 个。用短横线以外的方式, 免得和字面常量混淆。
+fn lz_abc(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, (97 + (i % 3)) as u8);
+        i = i + 1;
+    }
+}
+
+/// 伪随机字节流 (确定性 LCG, 乘积留在 u32 里不溢出)。
+fn lz_noise(p: ptr, n: u32, seed: u32) {
+    let x: u32 = seed;
+    let i: u32 = 0;
+    while i < n {
+        x = (x * 1103 + 12345) & 65535;
+        store8(p, i, ((x >> 8) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn test_lzss_scratch_bytes_matches_layout() -> bool {
+    return lzss_scratch_bytes() == LZ_HEAD_BYTES + LZ_WINDOW * 2 && lzss_scratch_bytes() > 0;
+}
+
+fn test_lzss_empty_roundtrip() -> bool {
+    let d: ptr = alloc(8);
+    let e: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    let u: ptr = alloc(4);
+    let el: u32 = lzss_encode(e, 0, d, 0, 0, sc);
+    let dl: u32 = lzss_decode(r, 0, e, 0, el, 0, u);
+    return el == 0 && dl == 0 && mem_load32(u, 0) == 0;
+}
+
+fn test_lzss_known_encoding_run() -> bool {
+    // 10 个 'A': 第一个当字面, 剩下的用 (长度 9, 距离 1) 一次引回来。
+    //   token = (1-1) | ((9-3)<<11) = 6<<11 = 0x3000 -> 小端 00 30
+    //   标志字节 bit0=1 (字面), bit1=0 (引用) -> 0x01
+    // => 01 41 00 30
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(64);
+    let want: ptr = alloc(64);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    mem_fill(d, 0, 10, 65);
+    let el: u32 = lzss_encode(e, 0, d, 0, 10, sc);
+    let wn: u32 = lz_hx(want, "01410030");
+    return el == wn && mem_eq(e, 0, want, 0, wn);
+}
+
+fn test_lzss_known_encoding_between_runs() -> bool {
+    // "ABCDEABCDE": 前 5 个是字面, 后 5 个用 (长度 5, 距离 5) 引回开头。
+    //   token = (5-1) | ((5-3)<<11) = 4 | 4096 = 0x1004 -> 小端 04 10
+    //   标志字节 = 0b00011111 = 0x1F
+    // => 1F 41 42 43 44 45 04 10
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(64);
+    let want: ptr = alloc(64);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    let n: u32 = lz_hx(d, "41424344454142434445");
+    let el: u32 = lzss_encode(e, 0, d, 0, n, sc);
+    let wn: u32 = lz_hx(want, "1f41424344450410");
+    return el == wn && mem_eq(e, 0, want, 0, wn);
+}
+
+fn test_lzss_known_decoding() -> bool {
+    // 上一条向量的反向 —— 这一条是对着**外部手推的字节**解, 不是解自己编的。
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    let want: ptr = alloc(16);
+    let u: ptr = alloc(4);
+    let n: u32 = lz_hx(d, "1f41424344450410");
+    let dl: u32 = lzss_decode(r, 0, d, 0, n, 10, u);
+    let wn: u32 = lz_hx(want, "41424344454142434445");
+    return dl == 10 && mem_eq(r, 0, want, 0, wn) && mem_load32(u, 0) == n;
+}
+
+fn test_lzss_decoding_self_reference_overlap() -> bool {
+    // "距离 1、长度 20" 就是"把上一个字节重复 20 次" —— 这是**必须重叠拷**的情形,
+    // 换成一次性 mem_copy 会拷到还没生成的字节。
+    //   流 = 01 58 | 00 88   (字面 'X', 再 (长度 20, 距离 1))
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(32);
+    let u: ptr = alloc(4);
+    let n: u32 = lz_hx(d, "01580088");
+    let dl: u32 = lzss_decode(r, 0, d, 0, n, 21, u);
+    let ok1: bool = dl == 21 && load8(r, 0) == 88 && load8(r, 1) == 88 && load8(r, 20) == 88;
+    let i: u32 = 0;
+    while i < 21 {
+        if load8(r, i) != 88 {
+            ok1 = false;
+        }
+        i = i + 1;
+    }
+    return ok1;
+}
+
+fn test_lzss_roundtrip_matrix() -> bool {
+    // 一次编/解通过多种形状, 省得每个形状都开一块工作区 (堆只有 64 KiB)。
+    let d: ptr = alloc(400);
+    let e: ptr = alloc(600);
+    let r: ptr = alloc(400);
+    let u: ptr = alloc(4);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    let bad: u32 = 0;
+    // ① 高重复文本
+    lz_abc(d, 300);
+    let e1: u32 = lzss_encode(e, 0, d, 0, 300, sc);
+    let d1: u32 = lzss_decode(r, 0, e, 0, e1, 300, u);
+    if d1 != 300 || mem_eq(d, 0, r, 0, 300) == false {
+        bad = 1;
+    }
+    // ② 不可压 (伪随机): 必须往返一致, 且不超过上界
+    lz_noise(d, 350, 7);
+    let e2: u32 = lzss_encode(e, 0, d, 0, 350, sc);
+    if e2 > lzss_max_encoded(350) {
+        bad = 2;
+    }
+    let d2: u32 = lzss_decode(r, 0, e, 0, e2, 350, u);
+    if d2 != 350 || mem_eq(d, 0, r, 0, 350) == false {
+        bad = 3;
+    }
+    // ③ 单字节
+    store8(d, 0, 200 as u8);
+    let e3: u32 = lzss_encode(e, 0, d, 0, 1, sc);
+    let d3: u32 = lzss_decode(r, 0, e, 0, e3, 1, u);
+    if d3 != 1 || load8(r, 0) != 200 {
+        bad = 4;
+    }
+    // ④ 高重复 + 尾巴 (让最后一组不足 8 个 token)
+    mem_fill(d, 0, 200, 66);
+    store8(d, 200, 1 as u8);
+    store8(d, 201, 2 as u8);
+    let e4: u32 = lzss_encode(e, 0, d, 0, 202, sc);
+    let d4: u32 = lzss_decode(r, 0, e, 0, e4, 202, u);
+    if d4 != 202 || mem_eq(d, 0, r, 0, 202) == false {
+        bad = 5;
+    }
+    return bad == 0;
+}
+
+fn test_lzss_highly_repetitive_compresses_small() -> bool {
+    // "abc" 重复 100 次 = 300 字节。相同内容重复 -> 应该压到 40 字节以内。
+    let d: ptr = alloc(320);
+    let e: ptr = alloc(600);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    lz_abc(d, 300);
+    let el: u32 = lzss_encode(e, 0, d, 0, 300, sc);
+    return el < 40 && el > 0;
+}
+
+fn test_lzss_incompressible_within_bound() -> bool {
+    // 不可压数据可以**变大**, 但不能超过 lzss_max_encoded —— 那是调用方开缓冲的依据。
+    let d: ptr = alloc(370);
+    let e: ptr = alloc(600);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    lz_noise(d, 370, 99);
+    let el: u32 = lzss_encode(e, 0, d, 0, 370, sc);
+    return el <= lzss_max_encoded(370);
+}
+
+fn test_lzss_max_encoded_holds_across_sizes() -> bool {
+    // 上界逐个长度验一遍 (从 0 到 64), 不能有缝。
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(96);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    let bad: u32 = 0;
+    lz_noise(d, 64, 5);
+    let n: u32 = 0;
+    while n <= 64 {
+        let el: u32 = lzss_encode(e, 0, d, 0, n, sc);
+        if el > lzss_max_encoded(n) {
+            bad = 1;
+        }
+        n = n + 1;
+    }
+    return bad == 0;
+}
+
+fn test_lzss_match_length_boundaries() -> bool {
+    // 最短 (3) 与最长 (34) 两个边界都走一遍, 且第 35 个字节要另起一段。
+    let d: ptr = alloc(200);
+    let e: ptr = alloc(300);
+    let r: ptr = alloc(200);
+    let u: ptr = alloc(4);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    store8(d, 0, 90 as u8);
+    let i: u32 = 1;
+    while i < 100 {
+        store8(d, i, 90 as u8); // 后面 99 个全是 90 -> 距离 1 的长匹配
+        i = i + 1;
+    }
+    let el: u32 = lzss_encode(e, 0, d, 0, 100, sc);
+    let dl: u32 = lzss_decode(r, 0, e, 0, el, 100, u);
+    // 长度上限 34: 99 个引用字节不可能一次引完 -> 至少 3 段
+    let ok1: bool = el <= lzss_max_encoded(100);
+    return ok1 && dl == 100 && mem_eq(d, 0, r, 0, 100);
+}
+
+fn test_lzss_long_distance_roundtrip() -> bool {
+    // 造一段"前一半随机、后一半等于前一半"的数据: 后一半必须靠**长距离**回引。
+    // 距离 2048 是窗口上限, 只要不越界就行; 这里实际距离 = 150。
+    let d: ptr = alloc(320);
+    let e: ptr = alloc(500);
+    let r: ptr = alloc(320);
+    let u: ptr = alloc(4);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    lz_noise(d, 150, 3);
+    mem_copy(d, 150, d, 0, 150);
+    let el: u32 = lzss_encode(e, 0, d, 0, 300, sc);
+    let dl: u32 = lzss_decode(r, 0, e, 0, el, 300, u);
+    return dl == 300 && mem_eq(d, 0, r, 0, 300) && el < 200;
+}
+
+fn test_lzss_offset_is_respected() -> bool {
+    // 从缓冲中间开始编 / 往缓冲中间解。
+    let d: ptr = alloc(128);
+    let e: ptr = alloc(200);
+    let r: ptr = alloc(128);
+    let u: ptr = alloc(4);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    mem_fill(d, 32, 40, 77);
+    let el: u32 = lzss_encode(e, 5, d, 32, 40, sc);
+    let dl: u32 = lzss_decode(r, 20, e, 5, el, 40, u);
+    return dl == 40 && mem_eq(d, 32, r, 20, 40);
+}
+
+fn test_lzss_rejects_truncated_literal() -> bool {
+    // 标志字节说 bit0 是字面, 后面却没有字节。
+    let d: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let u: ptr = alloc(4);
+    let n: u32 = lz_hx(d, "01");
+    return lzss_decode(r, 0, d, 0, n, 4, u) == LZ_ERR;
+}
+
+fn test_lzss_rejects_truncated_token() -> bool {
+    // 标志字节说 bit0 是引用, 但 2 字节的 token 只给了 1 个。
+    let d: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let u: ptr = alloc(4);
+    let n: u32 = lz_hx(d, "0000");
+    return lzss_decode(r, 0, d, 0, n, 4, u) == LZ_ERR;
+}
+
+fn test_lzss_rejects_distance_before_start() -> bool {
+    // 输出还是空的, 却来了个距离 5 的引用 —— 指到输出开始之前, 必须拒。
+    let d: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let u: ptr = alloc(4);
+    // token = (5-1) | ((3-3)<<11) = 4 -> 小端 04 00
+    let n: u32 = lz_hx(d, "000400");
+    return lzss_decode(r, 0, d, 0, n, 4, u) == LZ_ERR;
+}
+
+fn test_lzss_rejects_short_output() -> bool {
+    // 流只产出 1 个字节, 但声称原始长度是 5 —— 必须报错而不是返回那 1 个字节。
+    let d: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let u: ptr = alloc(4);
+    let n: u32 = lz_hx(d, "0141");
+    return lzss_decode(r, 0, d, 0, n, 5, u) == LZ_ERR;
+}
+
+fn test_lzss_rejects_oversized_input() -> bool {
+    // n 超过 u16 位置能表达的范围 -> 直接拒, 而不是把位置绕回去编出错数据。
+    let d: ptr = alloc(8);
+    let e: ptr = alloc(16);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    return lzss_encode(e, 0, d, 0, 65535, sc) == LZ_ERR;
+}
+
+fn test_lzss_reports_consumed_bytes() -> bool {
+    // used_out 必须是真正吃掉的输入长度 —— 流后面接别的东西时全靠它。
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(64);
+    let r: ptr = alloc(16);
+    let u: ptr = alloc(4);
+    let sc: ptr = alloc(lzss_scratch_bytes());
+    let n: u32 = lz_hx(d, "41424344454142434445");
+    let el: u32 = lzss_encode(e, 0, d, 0, n, sc);
+    // 故意在后面接 3 个垃圾字节
+    store8(e, el, 255 as u8);
+    store8(e, el + 1, 255 as u8);
+    store8(e, el + 2, 255 as u8);
+    let dl: u32 = lzss_decode(r, 0, e, 0, el + 3, 10, u);
+    return dl == 10 && mem_load32(u, 0) == el && el == 8;
+}

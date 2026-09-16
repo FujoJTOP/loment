@@ -1,0 +1,431 @@
+// std/round.lomt — 取整语义 (浮点四种模式 + 整数除法/倍数)
+//
+// 为什么要它: f64 那一层只做 IEEE 的**默认舍入** (一次运算就近到偶数)。而"往里取整"
+// 是另一件事 —— 同一个值, 写报表要 floor、算分页要 ceil、算平均值要就近。
+// 这两件事混在一起最容易出的是**边界**: 负数、恰好 .5、已经是整数。
+// 所以本模块把四种模式分开写, 并各自钉住负数的行为。
+//
+// 另一半是整数: 除法的取整方向和"向上取整到 m 的倍数"在仓库里到处手写, 而且
+// `(a + b - 1) / b` 那套在 a + b 溢出时静默出错。这里给出不下溢的写法。
+//
+// 命名: 公开 round_*, 内部 ro_*。自检 test_round_*。
+
+module round
+
+use "f64.lomt"
+use "f64bits.lomt"
+use "wide.lomt"
+use "mem.lomt"
+
+// ------------------------------------------------------------ 浮点: 四种模式
+
+/// 截断向零 (即 C 的 `(long)x`)。NaN/无穷原样返回。
+pub fn round_trunc(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    let e: u32 = f64bits_exp(x);
+    if e >= 1075 {
+        return x; // 已经是整数
+    }
+    if e < 1023 {
+        return f64bits_pack(f64bits_sign(x), 0, 0); // |x| < 1 -> 带符号的零
+    }
+    // 清掉小数位 (即尾数的低 (1075-e) 位)。
+    let sh: u32 = 1075 - e;
+    let m: u64 = f64_mant53(x);
+    let t: u64 = (m >> sh) << sh;
+    return f64bits_pack(f64bits_sign(x), e, t & 4503599627370495);
+}
+
+/// 有没有小数部分。
+fn ro_has_frac(x: u64) -> bool {
+    let e: u32 = f64bits_exp(x);
+    if e >= 1075 || e == 0 {
+        return false;
+    }
+    if e < 1023 {
+        return true; // |x| < 1 且非零 -> 有小数
+    }
+    let sh: u32 = 1075 - e;
+    let mask: u64 = ((1 as u64) << sh) - 1;
+    return (f64_mant53(x) & mask) != 0;
+}
+
+/// |小数部分| >= 0.5 ?
+///
+/// 权重 2^-1 对应尾数里的哪一位: 值 = f64_mant53 * 2^(e-1075), 所以
+/// 位 p 的权重 = 2^(p + e - 1075); 令它等于 2^-1 得 p = 1074 - e。
+/// e == 1022 是 [0.5, 1) 那一档 —— 此时小数部分就是自己, 天然 >= 0.5。
+/// (第一版把这一档写成 1023, 于是 1.4 被当成了 1.9。)
+fn ro_frac_ge_half(x: u64) -> bool {
+    let e: u32 = f64bits_exp(x);
+    if e >= 1075 {
+        return false;
+    }
+    if e < 1022 {
+        return false; // |x| < 0.5
+    }
+    if e == 1022 {
+        return true; // |x| 在 [0.5, 1)
+    }
+    let sh: u32 = 1075 - e;
+    return ((f64_mant53(x) >> (sh - 1)) & 1) == 1;
+}
+
+/// |小数部分| 恰好是 0.5 ? 即在权重 2^-1 上有一位、且它下面全空。
+fn ro_frac_is_half(x: u64) -> bool {
+    let e: u32 = f64bits_exp(x);
+    if e == 0 || e >= 1075 {
+        return false;
+    }
+    let pos: i64 = 1074 as i64 - (e as i64);
+    if pos < 0 || pos > 52 {
+        return false; // 2^-1 那一档在这条曲线上不存在 -> 不可能是 0.5
+    }
+    let p: u32 = pos as u32;
+    let m: u64 = f64_mant53(x);
+    let below: u64 = m & (((1 as u64) << p) - 1);
+    return ((m >> p) & 1) == 1 && below == 0;
+}
+
+/// 整数值是不是偶数 (只对已经是整数的值有意义)。
+///
+/// "偶数"是**值**的性质, 不是位模式的性质 —— 2.0 的尾数在指数域 1024 上写着
+/// 2^52 (看着像个大奇数)。所以要看最低置位的**权重**:
+/// 最低位权重 = ctz(m) + e - 1075, 它 >= 1 才说明这个整数能被 2 整除。
+/// (第一版直接拿 e 和 1075 比, 于是 2.0 被判成奇数, 2.5 就进位到了 3。)
+fn ro_is_even(x: u64) -> bool {
+    let e: u32 = f64bits_exp(x);
+    if e == 0 {
+        return true; // 零
+    }
+    if e >= 1076 {
+        return true; // ULP >= 2 -> 一定是偶数
+    }
+    let need: u32 = 1076 - e;
+    if need > 63 {
+        return false;
+    }
+    return wide_ctz64(f64_mant53(x)) >= need;
+}
+
+/// 向下取整。负数上这是**远离零**的方向 (-2.5 -> -3)。
+pub fn round_floor(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    let t: u64 = round_trunc(x);
+    if f64bits_is_negative(x) && ro_has_frac(x) {
+        return f64_sub(t, F64_ONE);
+    }
+    return t;
+}
+
+/// 向上取整。负数上是**朝零**的方向 (-2.5 -> -2)。
+pub fn round_ceil(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    let t: u64 = round_trunc(x);
+    if f64bits_is_negative(x) == false && ro_has_frac(x) {
+        return f64_add(t, F64_ONE);
+    }
+    return t;
+}
+
+/// 四舍五入, **中点远离零** (-2.5 -> -3, 2.5 -> 3)。这是人写报表时默认想要的那个。
+pub fn round_half_away(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    let t: u64 = round_trunc(x);
+    if ro_has_frac(x) == false {
+        return x;
+    }
+    if ro_frac_ge_half(x) {
+        if f64bits_is_negative(x) {
+            return f64_sub(t, F64_ONE);
+        }
+        return f64_add(t, F64_ONE);
+    }
+    return t;
+}
+
+/// 四舍五入, **中点到偶数** (与 IEEE 的默认舍入一致: 2.5 -> 2, 3.5 -> 4)。
+/// 反复对一堆数取整时, 这个模式不会把平均值推高 —— 那是它存在的理由。
+pub fn round_half_even(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    let t: u64 = round_trunc(x);
+    if ro_has_frac(x) == false {
+        return x;
+    }
+    if ro_frac_is_half(x) {
+        if ro_is_even(t) {
+            return t;
+        }
+        if f64bits_is_negative(x) {
+            return f64_sub(t, F64_ONE);
+        }
+        return f64_add(t, F64_ONE);
+    }
+    if ro_frac_ge_half(x) {
+        if f64bits_is_negative(x) {
+            return f64_sub(t, F64_ONE);
+        }
+        return f64_add(t, F64_ONE);
+    }
+    return t;
+}
+
+/// 小数部分 (带符号), 用 f64 的两个数表达: 商进 out[0..8], 余进 out[8..16]。
+/// 语言只能返回一个值, 所以拆两个结果的时候一律走缓冲。
+pub fn round_divmod(x: u64, out: ptr) {
+    let t: u64 = round_trunc(x);
+    mem_store64(out, 0, t);
+    mem_store64(out, 8, f64_sub(x, t));
+}
+
+// ------------------------------------------------------------ 整数
+
+/// 向下取整的除法 (a/b), b 非 0。
+pub fn round_div_floor(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    return a / b;
+}
+
+/// 向上取整的除法。写成 `a/b + (余数不为 0)` 而不是 `(a + b - 1) / b` ——
+/// 后者在 a + b 溢出时会静默给出错答。
+pub fn round_div_ceil(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    let q: u64 = a / b;
+    if a % b != 0 {
+        return q + 1;
+    }
+    return q;
+}
+
+/// 就近取整的除法, 中点向上。
+pub fn round_div_nearest(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    let q: u64 = a / b;
+    let r: u64 = a % b;
+    // 比较 2r 与 b 而不用 r 与 b/2 —— 后者在 b 为奇数时会偏。
+    if r >= b - r {
+        return q + 1;
+    }
+    return q;
+}
+
+/// 向上取整到 m 的倍数 (m == 0 时原样返回)。
+pub fn round_up_to(n: u64, m: u64) -> u64 {
+    if m == 0 {
+        return n;
+    }
+    let r: u64 = n % m;
+    if r == 0 {
+        return n;
+    }
+    return n + (m - r);
+}
+
+/// 向下取整到 m 的倍数。
+pub fn round_down_to(n: u64, m: u64) -> u64 {
+    if m == 0 {
+        return n;
+    }
+    return n - (n % m);
+}
+
+/// 取到最近的倍数, 中点向上。
+pub fn round_to_multiple(n: u64, m: u64) -> u64 {
+    if m == 0 {
+        return n;
+    }
+    let down: u64 = n - (n % m);
+    if n - down >= m - (n - down) {
+        return down + m;
+    }
+    return down;
+}
+
+/// 不小于 n 的最小 2 的幂 (n <= 1 给 1)。已经在 2^63 以上时饱和到 2^63 ——
+/// 再往上就没有"下一个 2 的幂"了, 静默回绕会把一个天文数字变成 0。
+pub fn round_pow2_up(n: u64) -> u64 {
+    if n <= 1 {
+        return 1;
+    }
+    let p: u32 = 63 - wide_clz64(n - 1);
+    if p >= 63 {
+        return 9223372036854775808;
+    }
+    return (1 as u64) << (p + 1);
+}
+
+/// 不大于 n 的最大 2 的幂 (0 给 0)。
+pub fn round_pow2_down(n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    return (1 as u64) << (63 - wide_clz64(n));
+}
+
+/// 是不是 2 的幂 (0 不是)。
+pub fn round_is_pow2(n: u64) -> bool {
+    if n == 0 {
+        return false;
+    }
+    return (n & (n - 1)) == 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_round_trunc_positive_and_negative() -> bool {
+    let x: u64 = 0x400399999999999A;   // 2.45
+    let y: u64 = 0xC00399999999999A;   // -2.45
+    return round_trunc(x) == F64_TWO && round_trunc(y) == 0xC000000000000000;
+}
+
+fn test_round_trunc_integers_unchanged() -> bool {
+    return round_trunc(F64_THREE) == F64_THREE
+        && round_trunc(0xC008000000000000) == 0xC008000000000000
+        && round_trunc(F64_MAX) == F64_MAX;
+}
+
+fn test_round_trunc_small_values() -> bool {
+    let x: u64 = 0x3FE0000000000000; // 0.5
+    let y: u64 = 0xBFE0000000000000; // -0.5
+    return round_trunc(x) == F64_POS_ZERO && round_trunc(y) == F64_NEG_ZERO;
+}
+
+fn test_round_floor_negative_goes_away_from_zero() -> bool {
+    return round_floor(0xC004000000000000) == 0xC008000000000000  // -2.5 -> -3
+        && round_floor(0x4004000000000000) == F64_TWO;            // 2.5 -> 2
+}
+
+fn test_round_ceil_negative_goes_toward_zero() -> bool {
+    return round_ceil(0xC004000000000000) == 0xC000000000000000   // -2.5 -> -2
+        && round_ceil(0x4004000000000000) == F64_THREE;           // 2.5 -> 3
+}
+
+fn test_round_floor_ceil_on_integers() -> bool {
+    return round_floor(F64_THREE) == F64_THREE && round_ceil(F64_THREE) == F64_THREE
+        && round_floor(0xC008000000000000) == 0xC008000000000000;
+}
+
+fn test_round_half_away_symmetric() -> bool {
+    // 中点必须**远离零**: 2.5 -> 3 且 -2.5 -> -3 (对称)。
+    return round_half_away(0x4004000000000000) == F64_THREE
+        && round_half_away(0xC004000000000000) == 0xC008000000000000;
+}
+
+fn test_round_half_away_below_half() -> bool {
+    // 2.4 -> 2; 2.6 -> 3
+    return round_half_away(0x4003333333333333) == F64_TWO
+        && round_half_away(0x4004CCCCCCCCCCCD) == F64_THREE;
+}
+
+fn test_round_half_even_ties() -> bool {
+    // 2.5 -> 2 (偶数), 3.5 -> 4 (偶数); 负数同样到偶数: -2.5 -> -2, -3.5 -> -4
+    return round_half_even(0x4004000000000000) == F64_TWO
+        && round_half_even(0x400C000000000000) == 0x4010000000000000
+        && round_half_even(0xC004000000000000) == 0xC000000000000000
+        && round_half_even(0xC00C000000000000) == 0xC010000000000000;
+}
+
+fn test_round_half_even_not_a_tie() -> bool {
+    // 非中点时两个模式必须一致 —— 否则说明"到偶数"被写成了"全都不进"。
+    return round_half_even(0x4004CCCCCCCCCCCD) == F64_THREE
+        && round_half_even(0x4003333333333333) == F64_TWO;
+}
+
+fn test_round_half_even_always_even_result_on_ties() -> bool {
+    // 0.5 -> 0, 1.5 -> 2, 2.5 -> 2, 4.5 -> 4, 5.5 -> 6
+    return round_half_even(F64_HALF) == F64_POS_ZERO
+        && round_half_even(0x3FF8000000000000) == F64_TWO
+        && round_half_even(0x4004000000000000) == F64_TWO
+        && round_half_even(0x4012000000000000) == 0x4010000000000000
+        && round_half_even(0x4016000000000000) == 0x4018000000000000;
+}
+
+fn test_round_modes_agree_on_integers() -> bool {
+    // 已经是整数时四种模式必须一个都不动 —— 否则说明"有没有小数"的判定有问题。
+    let x: u64 = 0xC028000000000000; // -12.0
+    return round_trunc(x) == x && round_floor(x) == x && round_ceil(x) == x
+        && round_half_away(x) == x && round_half_even(x) == x;
+}
+
+fn test_round_preserves_specials() -> bool {
+    return round_floor(F64_QNAN) == F64_QNAN && round_ceil(F64_POS_INF) == F64_POS_INF
+        && round_half_even(F64_NEG_ZERO) == F64_NEG_ZERO
+        && round_trunc(F64_POS_INF) == F64_POS_INF;
+}
+
+fn test_round_divmod() -> bool {
+    let t: ptr = alloc(16);
+    round_divmod(0x4004CCCCCCCCCCCD, t); // 2.6
+    return mem_load64(t, 0) == F64_TWO && f64_gt(mem_load64(t, 8), F64_HALF);
+}
+
+fn test_round_div_floor_and_ceil() -> bool {
+    return round_div_floor(7, 2) == 3 && round_div_ceil(7, 2) == 4
+        && round_div_floor(8, 2) == 4 && round_div_ceil(8, 2) == 4;
+}
+
+fn test_round_div_ceil_at_zero_numerator() -> bool {
+    return round_div_ceil(0, 5) == 0 && round_div_floor(0, 5) == 0;
+}
+
+fn test_round_div_nearest() -> bool {
+    return round_div_nearest(7, 2) == 4 && round_div_nearest(5, 2) == 3
+        && round_div_nearest(4, 2) == 2 && round_div_nearest(1, 3) == 0
+        && round_div_nearest(2, 3) == 1;
+}
+
+fn test_round_up_down_to_multiple() -> bool {
+    return round_up_to(7, 4) == 8 && round_down_to(7, 4) == 4
+        && round_up_to(8, 4) == 8 && round_down_to(8, 4) == 8
+        && round_up_to(0, 4) == 0;
+}
+
+fn test_round_to_multiple_ties_up() -> bool {
+    return round_to_multiple(6, 4) == 8 && round_to_multiple(5, 4) == 4
+        && round_to_multiple(4, 4) == 4;
+}
+
+fn test_round_multiple_with_zero_is_identity() -> bool {
+    // m == 0 会变成除零 —— 必须原样返回, 不能崩。
+    return round_up_to(7, 0) == 7 && round_down_to(7, 0) == 7
+        && round_to_multiple(7, 0) == 7 && round_div_ceil(7, 0) == 0;
+}
+
+fn test_round_pow2() -> bool {
+    return round_pow2_up(1) == 1 && round_pow2_up(2) == 2 && round_pow2_up(3) == 4
+        && round_pow2_up(5) == 8 && round_pow2_down(7) == 4 && round_pow2_down(8) == 8
+        && round_pow2_down(0) == 0;
+}
+
+fn test_round_pow2_up_saturates() -> bool {
+    // 2^63 已是极限, 再往上是 2^64 —— 装不进 u64, 所以饱和而不是回绕成 0。
+    return round_pow2_up(9223372036854775808) == 9223372036854775808
+        && round_pow2_up(18446744073709551615) == 9223372036854775808;
+}
+
+fn test_round_is_pow2() -> bool {
+    return round_is_pow2(1) && round_is_pow2(2) && round_is_pow2(1024)
+        && round_is_pow2(0) == false && round_is_pow2(3) == false;
+}
+
+fn test_round_pow2_up_down_consistent() -> bool {
+    let n: u64 = 1000;
+    return round_pow2_down(round_pow2_up(n)) == 1024 && round_pow2_up(n) == 1024
+        && round_pow2_down(n) == 512;
+}

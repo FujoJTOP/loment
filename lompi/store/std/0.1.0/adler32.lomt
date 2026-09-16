@@ -1,0 +1,197 @@
+// std/adler32.lomt — Adler-32
+//
+// 为什么除了 CRC 还要它: Adler-32 比 CRC-32 快得多 (只有加法和取模, 没有移位异或
+// 循环), 校验能力弱一些但足够。zlib 的每个块都带一个 Adler-32 —— 要读 zlib 流就必须
+// 有这个。它的结构也简单到可以边算边增量 (流式), 所以顺带给了更新接口。
+//
+// 算法: 两个和都模 65521 (小于 2^16 的最大素数)。
+//   a = 1 + Σ byte_i
+//   b = Σ a_i        (即 a 的前缀和之和)
+//   结果 = (b << 16) | a
+//
+// 校验向量: "123456789" = 0x091E01DE; "Wikipedia" = 0x11E60398。
+//
+// 命名: 公开 adler32_*, 内部 ad_*。自检 test_adler32_*。
+
+module adler32
+
+use "mem.lomt"
+
+/// 取模用的素数。
+pub const AD_MOD: u32 = 65521;
+/// 初始值 (即空输入的校验和)。
+pub const AD_INIT: u32 = 1;
+
+/// 一步: 把一段字节并进已有的校验和 (流式用)。
+/// 先做满 5552 字节再取一次模 —— 那是"两和最坏情况下也不越 32 位"的经典分批长度;
+/// 不分批而每字节取模当然也对, 但慢几倍。
+pub fn adler32_update(sum: u32, d: ptr, o: u32, n: u32) -> u32 {
+    let a: u32 = sum & 65535;
+    let b: u32 = (sum >> 16) & 65535;
+    let i: u32 = 0;
+    let batch: u32 = 5552;
+    while i < n {
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > batch {
+            m = batch;
+        }
+        let j: u32 = 0;
+        while j < m {
+            a = a + load8(d, o + i + j);
+            b = b + a;
+            j = j + 1;
+        }
+        a = a % AD_MOD;
+        b = b % AD_MOD;
+        i = i + m;
+    }
+    return (b << 16) | a;
+}
+
+/// 一次算完。
+pub fn adler32(d: ptr, o: u32, n: u32) -> u32 {
+    return adler32_update(AD_INIT, d, o, n);
+}
+
+pub fn adler32_str(s: str) -> u32 {
+    return adler32(str_ptr(s), 0, str_len(s));
+}
+
+/// 把两个校验和**接起来** (对应两段数据的拼接) —— 流式校验的关键性质。
+///
+/// 写法照 zlib 的那份 (先做减法再判、而不是一路取模): 每个中间量都留在 u32 里,
+/// 而且减法是常数次而不是循环。
+pub fn adler32_combine(sum1: u32, sum2: u32, len2: u32) -> u32 {
+    let base: u32 = AD_MOD;
+    let rem: u32 = len2 % base;
+    let a1: u32 = sum1 & 65535;
+    let b1: u32 = (sum1 >> 16) & 65535;
+    let a2: u32 = sum2 & 65535;
+    let b2: u32 = (sum2 >> 16) & 65535;
+    // 第二段的 b 要把"第一段的 a 重复 len2 次"补上 —— 这是拼接与相加的差别所在。
+    let t1: u32 = (rem * a1) % base;
+    let a: u32 = a1 + a2 + base - 1;
+    let b: u32 = t1 + b1 + b2 + base - rem;
+    let r1: u32 = a;
+    if r1 >= base {
+        r1 = r1 - base;
+    }
+    let r2: u32 = r1;
+    if r2 >= base {
+        r2 = r2 - base;
+    }
+    let s1: u32 = b;
+    let s2: u32 = s1;
+    if s2 >= (base * 2) {
+        s2 = s2 - (base * 2);
+    }
+    let s3: u32 = s2;
+    if s3 >= base {
+        s3 = s3 - base;
+    }
+    return (s3 << 16) | r2;
+}
+
+/// 把校验和拆成两个分量 (诊断用)。
+pub fn adler32_parts(sum: u32) -> u64 {
+    return ((sum & 65535) as u64) | ((((sum >> 16) & 65535) as u64) << 32);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_adler32_vector_digits() -> bool {
+    let s: str = "123456789";
+    return adler32(str_ptr(s), 0, 9) == 0x091E01DE;
+}
+
+fn test_adler32_vector_wikipedia() -> bool {
+    let s: str = "Wikipedia";
+    return adler32(str_ptr(s), 0, 9) == 0x11E60398;
+}
+
+fn test_adler32_empty() -> bool {
+    // 空输入就是初始值: a=1, b=0 -> 0x00000001。
+    let b: ptr = alloc(4);
+    return adler32(b, 0, 0) == 1;
+}
+
+fn test_adler32_parts() -> bool {
+    let s: str = "123456789";
+    let p: u64 = adler32_parts(adler32_str(s));
+    let a: u32 = (p & 4294967295) as u32;
+    let bb: u32 = (p >> 32) as u32;
+    // "123456789" 的字节和 = 477; a = 1 + 477 = 478。
+    // b = Σ a_i = 9 + 2*477 - ... 直接与校验值对: 高位应当是 0x091E。
+    return a == 478 && bb == 0x091E;
+}
+
+fn test_adler32_update_matches_oneshot() -> bool {
+    // 分两段喂 (并且第二段故意跨过 5552 的分批边界) 必须与一次算完相同。
+    let d: ptr = alloc(12000);
+    let i: u32 = 0;
+    while i < 12000 {
+        store8(d, i, ((i * 31 + 7) % 251) as u8);
+        i = i + 1;
+    }
+    let one: u32 = adler32(d, 0, 12000);
+    let s1: u32 = adler32_update(AD_INIT, d, 0, 5000);
+    let s2: u32 = adler32_update(s1, d, 5000, 7000);
+    return one == s2;
+
+}
+fn test_adler32_updates_are_incremental() -> bool {
+    // 一次喂一个字节, 结果必须与一次算完相同 (校验"增量"这件事本身)。
+    let d: ptr = alloc(64);
+    let s: str = "The quick brown fox";
+    mem_copy(d, 0, str_ptr(s), 0, 19);
+    let one: u32 = adler32(d, 0, 19);
+    let acc: u32 = AD_INIT;
+    let i: u32 = 0;
+    while i < 19 {
+        acc = adler32_update(acc, d, i, 1);
+        i = i + 1;
+    }
+    return one == acc;
+
+}
+fn test_adler32_detects_byte_swap() -> bool {
+    // Adler-32 对"同字节和但顺序不同"不敏感吗? a 一样但 b 不同 -> 结果应当不同。
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    store8(a, 0, 1 as u8);
+    store8(a, 1, 200 as u8);
+    store8(b, 0, 200 as u8);
+    store8(b, 1, 1 as u8);
+    return adler32(a, 0, 2) != adler32(b, 0, 2);
+
+}
+fn test_adler32_single_bit_flip() -> bool {
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 8, 65);
+    let a: u32 = adler32(d, 0, 8);
+    store8(d, 4, 66 as u8);
+    return a != adler32(d, 0, 8);
+
+}
+fn test_adler32_combine() -> bool {
+    // combine(前段, 后段, 后段长度) 必须等于对拼接后的数据一次算完。
+    // 这是流式校验的关键性质, 也是这个模块里唯一"两个校验和拼一个"的地方。
+    let d: ptr = alloc(64);
+    let s: str = "abcdefghijklmnopqrstuvwxyz";
+    mem_copy(d, 0, str_ptr(s), 0, 26);
+    let whole: u32 = adler32(d, 0, 26);
+    let p1: u32 = adler32(d, 0, 10);
+    let p2: u32 = adler32(d, 10, 16);
+    return adler32_combine(p1, p2, 16) == whole;
+}
+
+fn test_adler32_combine_with_empty_tail() -> bool {
+    // 后段长度为 0 时应当原样返回前段。
+    let d: ptr = alloc(64);
+    let s: str = "abcdefghij";
+    mem_copy(d, 0, str_ptr(s), 0, 10);
+    let p1: u32 = adler32(d, 0, 10);
+    let p0: u32 = adler32(d, 10, 0);
+    return adler32_combine(p1, p0, 0) == p1;
+}

@@ -1,0 +1,212 @@
+// std/argv.lomt — 进程启动参数
+//
+// 为什么要它: 8 个工具文件**全都有**一份自己的 argv 实现 —— argv_n 3 份
+// (lomelf/lomrel/lomstatus)、argv1 4 份 (lomdoc/lomfmt/driver 各一份 + 同形的特化)、
+// lsp 一份四参数变体。机制是读 /proc/self/cmdline 再扫 NUL 分隔字段, 二十几行
+// 带游标状态的手写循环, 而签名已经分叉成两种。
+//
+// 返回值约定: 一个 u64 打包 (起始偏移 << 32) | 长度。**0 = 没有这个参数**。
+// 打包不是风格 —— Loment 的函数只返回一个值、也没有出参, 所以 (off, len) 只能并成
+// 一个数 (lomc 的 v_pack 是同一个套路)。解包用 argv_off / argv_len, 别在调用点手写
+// 移位: 移位写错是静默的。
+//
+// 与 io.lomt 分层: 本库不碰 syscall, 全部经 io.lomt 的公开 API。顺带把那个
+// `open_ro(p, n, scr)` 分歧解决了 —— 4 份工具演化出它, 是为了让库内部补 NUL;
+// 这里就照那个思路做, 但**不新增 open 变体**: `io_put_lit` 收 str (自带长度),
+// 补完 NUL 再交给 `io_open_ro`。路径只在库内部构造, 调用方不需要给余量。
+//
+// 边界: 走 /proc/self/cmdline, 与 io.lomt 一样是**宿主侧**机制。裸机那侧没有 procfs,
+// 启动参数的传递方式由内核线按名解析入口时另行约定 (docs/155 §3)。
+//
+// 命名: 平名字空间, 公开 API 一律 argv_*, 内部一律 av_*。自检函数也带模块前缀
+// (`test_argv_*`) —— 私有名同样占全局拼写, 不带前缀会按 E13 撞车 (docs/158 §2)。
+
+module argv
+
+// 同目录兄弟模块用**裸名**: `use` 先试仓库根, 再试**引用文件自己所在的目录**
+// (lomentc.py resolve_deps)。所以这里写 "std/io.lomt" 会解析成 std/std/io.lomt。
+// 消费方从自己那边写, 从工作区根就是 "std/argv.lomt"。
+use "io.lomt"
+
+/// 2^32: 打包时长度占低 32 位。
+const AV_SCALE: u64 = 4294967296;
+
+/// 扫 /proc/self/cmdline, 返回第 n 个字段的 (起始 << 32) | 长度; 0 = 没有。
+/// n = 0 是程序名本身, n = 1 是第一个参数。
+///
+/// scr 是调用方给的暂存 —— 只用来放 NUL 结尾的路径, 不参与返回结果。
+/// buf 收原始 cmdline (NUL 分隔), cap 是它的容量。
+pub fn argv_scan(buf: ptr, cap: u64, scr: ptr, n: u32) -> u64 {
+    io_put_lit(scr, "/proc/self/cmdline");
+    let fd: i64 = io_open_ro(scr);
+    if fd < 0 {
+        return 0;
+    }
+    let rn: u64 = io_read_all(fd, buf, cap);
+    io_close(fd);
+    if rn == 0 {
+        return 0;
+    }
+    return av_scan_buf(buf, rn as u32, n);
+}
+
+/// 纯扫描: 在已读进 buf 的 m 字节里定位第 n 个字段。与读 procfs 分开, 是为了让
+/// 这段最容易静默差一的逻辑能被自检覆盖 —— 它收不到 fd, 只收一段字节。
+/// 私有 (av_ 前缀防跨库重名: 平名字空间下私有名也占位, docs/158 §2)。
+fn av_scan_buf(buf: ptr, m: u32, n: u32) -> u64 {
+    let i: u32 = 0;
+    let f: u32 = 0;      // 已数过的字段数
+    let s: u32 = 0;      // 当前字段起点
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * AV_SCALE + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    // 末字段可能没有结尾 NUL。`s == m` 表示结尾那个 NUL 只是终结了前一个字段、
+    // 后面什么都没有 —— 不能据此认定又多出一个空字段。八份手抄都漏了这一点
+    // (只有 lomdoc 的 argv1 挡了, 它判 alen == 0); 症状是"无参数时 argv[1] 存在且为空"。
+    // 注意反面: 显式空参数 (cmdline 里连着两个 NUL) 仍然算"存在但长度 0"。
+    if f == n && s < m {
+        hit = (s as u64) * AV_SCALE + ((m - s) as u64);
+    }
+    return hit;
+}
+
+/// 解包: 起始偏移。
+pub fn argv_off(av: u64) -> u32 {
+    return (av >> 32) as u32;
+}
+
+/// 解包: 长度。
+pub fn argv_len(av: u64) -> u32 {
+    return (av % AV_SCALE) as u32;
+}
+
+/// 参数数据指针 (buf 里那一段), 直接可以交给 io_write_all。
+pub fn argv_at(buf: ptr, av: u64) -> ptr {
+    return ((buf as u64) + (argv_off(av) as u64)) as ptr;
+}
+
+/// 这个参数是否等于某个字面量 (查 `--check` 这类开关用)。
+/// av 为 0 (没这个参数) 时返回 false。
+pub fn argv_eq(buf: ptr, av: u64, lit: str) -> bool {
+    if av == 0 {
+        return false;
+    }
+    let n: u32 = argv_len(av);
+    if n != str_len(lit) {
+        return false;
+    }
+    return io_bytes_eq(buf, argv_off(av), n, str_ptr(lit), 0, str_len(lit));
+}
+
+/// 把一个参数原样写到 fd (回显/诊断用)。
+pub fn argv_write(fd: i64, buf: ptr, av: u64) -> u64 {
+    return io_write_all(fd, argv_at(buf, av), argv_len(av) as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+// `python tools/loment.py test std/argv.lomt`。只测解包/比较那条路径:
+// argv_scan 要读 /proc/self/cmdline, 那是宿主相关的, 由消费方的端到端覆盖。
+// 打包约定正是最容易静默写错的地方, 所以这几条要留着。
+
+fn test_argv_off_len_roundtrip() -> bool {
+    let av: u64 = 3 * 4294967296 + 5;
+    return argv_off(av) == 3 && argv_len(av) == 5;
+}
+
+fn test_argv_off_len_high_bits_do_not_leak() -> bool {
+    // 长度不能污染起始偏移, 反之亦然 —— 移位写错时这条会挂。
+    let av: u64 = 7 * 4294967296 + 4294967295;
+    return argv_off(av) == 7 && argv_len(av) == 4294967295;
+}
+
+fn test_argv_eq_hit() -> bool {
+    let b: ptr = alloc(64);
+    io_put_lit(b, "--check");            // 7 字节, 第 8 字节是 NUL
+    let av: u64 = 0 * AV_SCALE + 7;
+    return argv_eq(b, av, "--check");
+}
+
+fn test_argv_eq_prefix_is_not_a_match() -> bool {
+    let b: ptr = alloc(64);
+    io_put_lit(b, "--check");
+    let av: u64 = 0 * AV_SCALE + 7;
+    return !argv_eq(b, av, "--chec");
+}
+
+fn test_argv_eq_zero_is_false() -> bool {
+    let b: ptr = alloc(64);
+    io_put_lit(b, "--check");
+    return !argv_eq(b, 0, "--check");
+}
+
+fn test_argv_at_points_into_buf() -> bool {
+    let b: ptr = alloc(64);
+    io_put_lit(b, "abcdef");
+    let av: u64 = 2 * AV_SCALE + 3;      // 偏移 2 长度 3 -> "cde"
+    let p: ptr = argv_at(b, av);
+    return load8(p, 0) == 99 && load8(p, 1) == 100 && load8(p, 2) == 101;
+}
+
+fn test_argv_scan_convention_on_synthetic_buffer() -> bool {
+    // 人造 cmdline "prog\0ab\0": 字段 0 = 偏移 0 长度 4, 字段 1 = 偏移 5 长度 2。
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");                        // NUL 落在偏移 4
+    io_put_lit(((b as u64) + 5) as ptr, "ab");    // 第二个字段从偏移 5 起
+    let a0: u64 = 0 * AV_SCALE + 4;
+    let a1: u64 = 5 * AV_SCALE + 2;
+    let p1: ptr = argv_at(b, a1);
+    return argv_off(a0) == 0 && argv_len(a0) == 4
+        && argv_off(a1) == 5 && argv_len(a1) == 2
+        && load8(p1, 0) == 97 && load8(p1, 1) == 98
+        && argv_eq(b, a0, "prog") && argv_eq(b, a1, "ab");
+}
+
+// 以下几条打的是扫描循环的边界 —— 它们是这个库里唯一会静默出错的地方。
+
+fn test_argv_buf_field_zero_is_prog_name() -> bool {
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");
+    let av: u64 = av_scan_buf(b, 5, 0);
+    return argv_off(av) == 0 && argv_len(av) == 4;
+}
+
+fn test_argv_buf_last_field_without_trailing_nul() -> bool {
+    // "prog\0ab" (m=7, 末尾无 NUL): 字段 1 = 偏移 5 长度 2。
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");
+    io_put_lit(((b as u64) + 5) as ptr, "ab");
+    let av: u64 = av_scan_buf(b, 7, 1);
+    return argv_off(av) == 5 && argv_len(av) == 2;
+}
+
+fn test_argv_buf_trailing_nul_is_not_an_extra_field() -> bool {
+    // "prog\0" (m=5): 只有一个字段。结尾 NUL 不该造出"字段 1 存在且为空"。
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");
+    return av_scan_buf(b, 5, 1) == 0;
+}
+
+fn test_argv_buf_explicit_empty_arg_is_present() -> bool {
+    // "prog\0\0" (m=6): 真的有个空参数 —— 存在但长度 0, 与"没有"必须区分开。
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");
+    store8(b, 5, 0 as u8);
+    let av: u64 = av_scan_buf(b, 6, 1);
+    return av != 0 && argv_len(av) == 0 && argv_off(av) == 5;
+}
+
+fn test_argv_buf_beyond_last_field_is_zero() -> bool {
+    // "prog\0ab\0" (m=8) 里没有字段 2。
+    let b: ptr = alloc(64);
+    io_put_lit(b, "prog");
+    io_put_lit(((b as u64) + 5) as ptr, "ab");
+    return av_scan_buf(b, 8, 2) == 0 && av_scan_buf(b, 8, 1) != 0;
+}

@@ -1,0 +1,578 @@
+// std/matrix.lomt — 稠密矩阵 (i64, 行主序)
+//
+// 为什么需要它: 变换、线性方程组、图的邻接矩阵乘法、协方差……"一堆数按行排开"是
+// 这些形状的共同底层。这一层给的是**最朴素的稠密**实现: 不做稀疏、不做分块、
+// 不搞缓存友好的三重循环重排 —— 那些在有真实性能需求时才值得, 而这里先要的是"对"。
+//
+// 布局 (状态在调用方的缓冲里, 头部 8 字节):
+//   [0..4]  rows 行数
+//   [4..8]  cols 列数
+//   元素从偏移 8 起, **行主序**: (r, c) 在偏移 8 + 8*(r*cols + c), 每个 i64。
+// 装 rows x cols 要 8 + 8*rows*cols 字节 —— 用 mx_bytes。
+//
+// 溢出: **不做检查**。i64 相乘相加越界时按补码回绕 (release 语义), 结果是错的但不会崩。
+// 要安全就得每次乘加带溢出判定, 那是"大整数"那一层 (bigint) 的事, 不是这里的。
+//
+// 别名: 所有 _into 函数都要求 dst 与输入**不是同一块缓冲** —— 就地乘会读到已被覆盖的元素。
+// 这不是疏忽, 是实现代价; 调用方多开一块缓冲即可。
+//
+// 分配策略: mx_mul / mx_transpose / mx_det 这几个"算完给一块新结果"的会自己 alloc,
+// 是给一次性调用的方便; _into 版本与 mx_det_work 一个字节都不分配, 进循环用那些。
+//
+// 命名: 公开 mx_*, 内部 ma_*。自检 test_mx_*。
+
+module matrix
+
+use "mem.lomt"
+
+/// 头部字节数 (rows + cols)。
+pub const MX_HDR: u32 = 8;
+
+/// 装 rows x cols 的矩阵要多少字节。
+pub fn mx_bytes(rows: u32, cols: u32) -> u32 {
+    return MX_HDR + 8 * rows * cols;
+}
+
+pub fn mx_rows(m: ptr) -> u32 {
+    return mem_load32(m, 0);
+}
+
+pub fn mx_cols(m: ptr) -> u32 {
+    return mem_load32(m, 4);
+}
+
+/// (r, c) 在缓冲里的字节偏移。**不做越界检查** —— 调用方保证 r/c 合法。
+fn ma_off(m: ptr, r: u32, c: u32) -> u32 {
+    return MX_HDR + 8 * (r * mx_cols(m) + c);
+}
+
+/// 建矩阵: 写头, 全部清零。
+pub fn mx_init(m: ptr, rows: u32, cols: u32) {
+    mem_store32(m, 0, rows);
+    mem_store32(m, 4, cols);
+    let i: u32 = 0;
+    let n: u32 = rows * cols;
+    while i < n {
+        mem_store64(m, MX_HDR + 8 * i, 0);
+        i = i + 1;
+    }
+}
+
+/// 取 (r, c)。越界给 0 (不崩) —— 但那是调用方的错, 别依赖它。
+pub fn mx_get(m: ptr, r: u32, c: u32) -> i64 {
+    if r >= mx_rows(m) || c >= mx_cols(m) {
+        return 0;
+    }
+    return mem_load64(m, ma_off(m, r, c)) as i64;
+}
+
+/// 写 (r, c)。越界返回 false。
+pub fn mx_set(m: ptr, r: u32, c: u32, v: i64) -> bool {
+    if r >= mx_rows(m) || c >= mx_cols(m) {
+        return false;
+    }
+    mem_store64(m, ma_off(m, r, c), v as u64);
+    return true;
+}
+
+/// 全部元素填成 v。
+pub fn mx_fill(m: ptr, v: i64) {
+    let i: u32 = 0;
+    let n: u32 = mx_rows(m) * mx_cols(m);
+    while i < n {
+        mem_store64(m, MX_HDR + 8 * i, v as u64);
+        i = i + 1;
+    }
+}
+
+/// 设成 n x n 单位阵。缓冲必须至少有 mx_bytes(n, n)。
+pub fn mx_identity(m: ptr, n: u32) {
+    mx_init(m, n, n);
+    let i: u32 = 0;
+    while i < n {
+        mx_set(m, i, i, 1);
+        i = i + 1;
+    }
+}
+
+/// dst <- src。要求维度相同。返回是否成功。
+pub fn mx_copy(dst: ptr, src: ptr) -> bool {
+    if mx_rows(dst) != mx_rows(src) || mx_cols(dst) != mx_cols(src) {
+        return false;
+    }
+    let i: u32 = 0;
+    let n: u32 = mx_rows(src) * mx_cols(src);
+    while i < n {
+        mem_store64(dst, MX_HDR + 8 * i, mem_load64(src, MX_HDR + 8 * i));
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 维度与元素都相同。
+pub fn mx_eq(a: ptr, b: ptr) -> bool {
+    if mx_rows(a) != mx_rows(b) || mx_cols(a) != mx_cols(b) {
+        return false;
+    }
+    let i: u32 = 0;
+    let n: u32 = mx_rows(a) * mx_cols(a);
+    while i < n {
+        if mem_load64(a, MX_HDR + 8 * i) != mem_load64(b, MX_HDR + 8 * i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// dst <- a x b。a 是 r x k, b 是 k x c, dst 必须**已经建成** r x c 且不与 a/b 同一块。
+pub fn mx_mul_into(dst: ptr, a: ptr, b: ptr) -> bool {
+    let r: u32 = mx_rows(a);
+    let k: u32 = mx_cols(a);
+    if k != mx_rows(b) {
+        return false;
+    }
+    let c: u32 = mx_cols(b);
+    if mx_rows(dst) != r || mx_cols(dst) != c {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < r {
+        let j: u32 = 0;
+        while j < c {
+            let s: i64 = 0;
+            let t: u32 = 0;
+            while t < k {
+                s = s + mx_get(a, i, t) * mx_get(b, t, j);
+                t = t + 1;
+            }
+            mx_set(dst, i, j, s);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// a x b 的方便版: 自己分配结果并返回。维度不匹配时返回 0 号指针 (用 `p as u64 == 0` 判)。
+pub fn mx_mul(a: ptr, b: ptr) -> ptr {
+    if mx_cols(a) != mx_rows(b) {
+        return 0 as u64 as ptr;
+    }
+    let dst: ptr = alloc(mx_bytes(mx_rows(a), mx_cols(b)));
+    mx_init(dst, mx_rows(a), mx_cols(b));
+    mx_mul_into(dst, a, b);
+    return dst;
+}
+
+/// dst <- src 的转置。dst 必须**已经建成** (cols x rows) 且不与 src 同一块。
+pub fn mx_transpose_into(dst: ptr, src: ptr) -> bool {
+    let r: u32 = mx_rows(src);
+    let c: u32 = mx_cols(src);
+    if mx_rows(dst) != c || mx_cols(dst) != r {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < r {
+        let j: u32 = 0;
+        while j < c {
+            mx_set(dst, j, i, mx_get(src, i, j));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 转置的方便版: 自己分配结果并返回。
+pub fn mx_transpose(src: ptr) -> ptr {
+    let dst: ptr = alloc(mx_bytes(mx_cols(src), mx_rows(src)));
+    mx_init(dst, mx_cols(src), mx_rows(src));
+    mx_transpose_into(dst, src);
+    return dst;
+}
+
+/// 迹 (主对角线之和)。非方阵按前 min(rows, cols) 个对角线元素求和。
+pub fn mx_trace(m: ptr) -> i64 {
+    let n: u32 = mx_rows(m);
+    if mx_cols(m) < n {
+        n = mx_cols(m);
+    }
+    let s: i64 = 0;
+    let i: u32 = 0;
+    while i < n {
+        s = s + mx_get(m, i, i);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn ma_swap_rows(m: ptr, a: u32, b: u32) {
+    let j: u32 = 0;
+    let c: u32 = mx_cols(m);
+    while j < c {
+        let x: i64 = mx_get(m, a, j);
+        mx_set(m, a, j, mx_get(m, b, j));
+        mx_set(m, b, j, x);
+        j = j + 1;
+    }
+}
+
+/// 在 t (n x n 的**副本**) 上跑 Bareiss 无分数高斯消元, 返回行列式。
+/// Bareiss 的中间量全是整数 (每步除法都整除), 所以用 i64 能精确算 —— 普通高斯消元
+/// 会把整数矩阵算成分数, 而这里没有浮点。
+fn ma_det_work(t: ptr, n: u32) -> i64 {
+    // prev 是上一轮的主元 (M^(k-1)[k-1][k-1]), 第一轮约定为 1。
+    let sign: i64 = 1;
+    let prev: i64 = 1;
+    let k: u32 = 0;
+    let dead: u32 = 0;
+    while k + 1 < n && dead == 0 {
+        // 选主元: 从第 k 行往下找第一个该列非 0 的。整列全 0 -> 行列式为 0。
+        let p: u32 = k;
+        let found: u32 = 0;
+        let i: u32 = k;
+        while i < n && found == 0 {
+            if mx_get(t, i, k) != 0 {
+                p = i;
+                found = 1;
+            }
+            i = i + 1;
+        }
+        if found == 0 {
+            dead = 1;
+        } else {
+            if p != k {
+                ma_swap_rows(t, p, k);
+                sign = 0 as i64 - sign;
+            }
+            let piv: i64 = mx_get(t, k, k);
+            let i2: u32 = k + 1;
+            while i2 < n {
+                let j2: u32 = k + 1;
+                while j2 < n {
+                    let v: i64 = (piv * mx_get(t, i2, j2) - mx_get(t, i2, k) * mx_get(t, k, j2)) / prev;
+                    mx_set(t, i2, j2, v);
+                    j2 = j2 + 1;
+                }
+                i2 = i2 + 1;
+            }
+            prev = piv;
+            k = k + 1;
+        }
+    }
+    if dead == 1 {
+        return 0;
+    }
+    return sign * mx_get(t, n - 1, n - 1);
+}
+
+/// 行列式 (方阵)。非方阵给 0 (行列式对非方阵本就没有定义)。
+/// 内部拷一份再消元, 所以**不改动传进来的矩阵** —— 但那份拷贝是 alloc 出来的。
+pub fn mx_det(m: ptr) -> i64 {
+    let rows: u32 = mx_rows(m);
+    let cols: u32 = mx_cols(m);
+    if rows != cols {
+        return 0;
+    }
+    if rows == 0 {
+        return 1;   // 空矩阵的行列式按约定为 1
+    }
+    if rows == 1 {
+        return mx_get(m, 0, 0);
+    }
+    let t: ptr = alloc(mx_bytes(rows, cols));
+    mx_init(t, rows, cols);
+    mx_copy(t, m);
+    return ma_det_work(t, rows);
+}
+
+/// 行列式的**不分配**版: work 是调用方给的暂存, 至少 mx_bytes(rows, cols) 大。
+pub fn mx_det_work(m: ptr, work: ptr) -> i64 {
+    let rows: u32 = mx_rows(m);
+    let cols: u32 = mx_cols(m);
+    if rows != cols {
+        return 0;
+    }
+    if rows == 0 {
+        return 1;
+    }
+    if rows == 1 {
+        return mx_get(m, 0, 0);
+    }
+    mx_init(work, rows, cols);
+    mx_copy(work, m);
+    return ma_det_work(work, rows);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mx_bytes_and_init() -> bool {
+    let m: ptr = alloc(mx_bytes(2, 3));
+    mx_init(m, 2, 3);
+    // 8 + 8*2*3 = 56; 元素全 0
+    return mx_bytes(0, 0) == 8 && mx_bytes(2, 3) == 56 && mx_rows(m) == 2
+        && mx_cols(m) == 3 && mx_get(m, 0, 0) == 0 && mx_get(m, 1, 2) == 0;
+}
+
+fn test_mx_set_get_and_bounds() -> bool {
+    let m: ptr = alloc(mx_bytes(2, 2));
+    mx_init(m, 2, 2);
+    let a: bool = mx_set(m, 0, 1, 7);
+    let b: bool = mx_set(m, 1, 1, 0 as i64 - 3);
+    // 越界写要被拒, 越界读给 0
+    return a && b && mx_get(m, 0, 1) == 7 && mx_get(m, 1, 1) == 0 as i64 - 3
+        && mx_set(m, 2, 0, 9) == false && mx_get(m, 5, 5) == 0;
+}
+
+fn test_mx_identity() -> bool {
+    let m: ptr = alloc(mx_bytes(3, 3));
+    mx_identity(m, 3);
+    return mx_get(m, 0, 0) == 1 && mx_get(m, 1, 1) == 1 && mx_get(m, 2, 2) == 1
+        && mx_get(m, 0, 1) == 0 && mx_get(m, 2, 0) == 0;
+}
+
+fn test_mx_identity_mul_is_identity() -> bool {
+    // I x A == A: 单位阵乘任何阵必须原样返回。
+    let a: ptr = alloc(mx_bytes(3, 3));
+    let id: ptr = alloc(mx_bytes(3, 3));
+    let r: ptr = alloc(mx_bytes(3, 3));
+    mx_init(a, 3, 3);
+    mx_set(a, 0, 0, 6); mx_set(a, 0, 1, 1); mx_set(a, 0, 2, 1);
+    mx_set(a, 1, 0, 4); mx_set(a, 1, 1, 0 as i64 - 2); mx_set(a, 1, 2, 5);
+    mx_set(a, 2, 0, 2); mx_set(a, 2, 1, 8); mx_set(a, 2, 2, 7);
+    mx_identity(id, 3);
+    mx_init(r, 3, 3);
+    let ok: bool = mx_mul_into(r, id, a);
+    return ok && mx_eq(r, a);
+}
+
+fn test_mx_mul_2x2_known() -> bool {
+    // [[1,2],[3,4]] x [[5,6],[7,8]] = [[19,22],[43,50]]
+    let a: ptr = alloc(mx_bytes(2, 2));
+    let b: ptr = alloc(mx_bytes(2, 2));
+    let r: ptr = alloc(mx_bytes(2, 2));
+    mx_init(a, 2, 2);
+    mx_set(a, 0, 0, 1); mx_set(a, 0, 1, 2); mx_set(a, 1, 0, 3); mx_set(a, 1, 1, 4);
+    mx_init(b, 2, 2);
+    mx_set(b, 0, 0, 5); mx_set(b, 0, 1, 6); mx_set(b, 1, 0, 7); mx_set(b, 1, 1, 8);
+    mx_init(r, 2, 2);
+    let ok: bool = mx_mul_into(r, a, b);
+    return ok && mx_get(r, 0, 0) == 19 && mx_get(r, 0, 1) == 22
+        && mx_get(r, 1, 0) == 43 && mx_get(r, 1, 1) == 50;
+}
+
+fn test_mx_mul_3x3_known() -> bool {
+    // A3 x B, 真值用 Python 的精确分数消元算过。
+    let a: ptr = alloc(mx_bytes(3, 3));
+    let b: ptr = alloc(mx_bytes(3, 3));
+    let r: ptr = alloc(mx_bytes(3, 3));
+    mx_init(a, 3, 3);
+    mx_set(a, 0, 0, 6); mx_set(a, 0, 1, 1); mx_set(a, 0, 2, 1);
+    mx_set(a, 1, 0, 4); mx_set(a, 1, 1, 0 as i64 - 2); mx_set(a, 1, 2, 5);
+    mx_set(a, 2, 0, 2); mx_set(a, 2, 1, 8); mx_set(a, 2, 2, 7);
+    mx_init(b, 3, 3);
+    mx_set(b, 0, 0, 1); mx_set(b, 0, 1, 0); mx_set(b, 0, 2, 2);
+    mx_set(b, 1, 0, 0); mx_set(b, 1, 1, 1); mx_set(b, 1, 2, 3);
+    mx_set(b, 2, 0, 4); mx_set(b, 2, 1, 5); mx_set(b, 2, 2, 6);
+    mx_init(r, 3, 3);
+    let ok: bool = mx_mul_into(r, a, b);
+    return ok && mx_get(r, 0, 0) == 10 && mx_get(r, 0, 1) == 6 && mx_get(r, 0, 2) == 21
+        && mx_get(r, 1, 0) == 24 && mx_get(r, 1, 1) == 23 && mx_get(r, 1, 2) == 32
+        && mx_get(r, 2, 0) == 30 && mx_get(r, 2, 1) == 43 && mx_get(r, 2, 2) == 70;
+}
+
+fn test_mx_mul_non_square() -> bool {
+    // 3x3 乘 3x2 -> 3x2; 真值 Python 算过。
+    let a: ptr = alloc(mx_bytes(3, 3));
+    let b: ptr = alloc(mx_bytes(3, 2));
+    let r: ptr = alloc(mx_bytes(3, 2));
+    mx_init(a, 3, 3);
+    mx_set(a, 0, 0, 6); mx_set(a, 0, 1, 1); mx_set(a, 0, 2, 1);
+    mx_set(a, 1, 0, 4); mx_set(a, 1, 1, 0 as i64 - 2); mx_set(a, 1, 2, 5);
+    mx_set(a, 2, 0, 2); mx_set(a, 2, 1, 8); mx_set(a, 2, 2, 7);
+    mx_init(b, 3, 2);
+    mx_set(b, 0, 0, 1); mx_set(b, 0, 1, 2);
+    mx_set(b, 1, 0, 3); mx_set(b, 1, 1, 4);
+    mx_set(b, 2, 0, 5); mx_set(b, 2, 1, 6);
+    mx_init(r, 3, 2);
+    let ok: bool = mx_mul_into(r, a, b);
+    return ok && mx_get(r, 0, 0) == 14 && mx_get(r, 0, 1) == 22
+        && mx_get(r, 1, 0) == 23 && mx_get(r, 1, 1) == 30
+        && mx_get(r, 2, 0) == 61 && mx_get(r, 2, 1) == 78;
+}
+
+fn test_mx_mul_dim_mismatch_refuses() -> bool {
+    let a: ptr = alloc(mx_bytes(2, 3));
+    let b: ptr = alloc(mx_bytes(2, 2));
+    let r: ptr = alloc(mx_bytes(2, 2));
+    mx_init(a, 2, 3);
+    mx_init(b, 2, 2);
+    mx_init(r, 2, 2);
+    // a 是 2x3, b 是 2x2: 3 != 2, 必须拒
+    return mx_mul_into(r, a, b) == false;
+}
+
+fn test_mx_mul_allocating_matches_into() -> bool {
+    let a: ptr = alloc(mx_bytes(2, 2));
+    let b: ptr = alloc(mx_bytes(2, 2));
+    let r: ptr = alloc(mx_bytes(2, 2));
+    mx_init(a, 2, 2);
+    mx_set(a, 0, 0, 1); mx_set(a, 0, 1, 2); mx_set(a, 1, 0, 3); mx_set(a, 1, 1, 4);
+    mx_init(b, 2, 2);
+    mx_set(b, 0, 0, 5); mx_set(b, 0, 1, 6); mx_set(b, 1, 0, 7); mx_set(b, 1, 1, 8);
+    mx_init(r, 2, 2);
+    mx_mul_into(r, a, b);
+    let p: ptr = mx_mul(a, b);
+    return mx_eq(p, r) && mx_rows(p) == 2 && mx_cols(p) == 2;
+}
+
+fn test_mx_transpose_into_and_double() -> bool {
+    // 转置两次 == 原阵 (非方阵也成立, 维度要跟着换过来)。
+    let a: ptr = alloc(mx_bytes(2, 3));
+    mx_init(a, 2, 3);
+    mx_set(a, 0, 0, 1); mx_set(a, 0, 1, 2); mx_set(a, 0, 2, 3);
+    mx_set(a, 1, 0, 4); mx_set(a, 1, 1, 5); mx_set(a, 1, 2, 6);
+    let t: ptr = alloc(mx_bytes(3, 2));
+    mx_init(t, 3, 2);
+    let ok1: bool = mx_transpose_into(t, a);
+    let tt: ptr = alloc(mx_bytes(2, 3));
+    mx_init(tt, 2, 3);
+    let ok2: bool = mx_transpose_into(tt, t);
+    return ok1 && ok2 && mx_get(t, 0, 1) == 4 && mx_get(t, 2, 0) == 3
+        && mx_rows(t) == 3 && mx_cols(t) == 2 && mx_eq(tt, a);
+}
+
+fn test_mx_transpose_allocating() -> bool {
+    let a: ptr = alloc(mx_bytes(1, 4));
+    mx_init(a, 1, 4);
+    mx_set(a, 0, 0, 9); mx_set(a, 0, 3, 0 as i64 - 1);
+    let t: ptr = mx_transpose(a);
+    return mx_rows(t) == 4 && mx_cols(t) == 1 && mx_get(t, 0, 0) == 9
+        && mx_get(t, 3, 0) == 0 as i64 - 1 && mx_get(t, 1, 0) == 0;
+}
+
+fn test_mx_trace() -> bool {
+    let a: ptr = alloc(mx_bytes(3, 3));
+    mx_init(a, 3, 3);
+    mx_set(a, 0, 0, 6); mx_set(a, 1, 1, 0 as i64 - 2); mx_set(a, 2, 2, 7);
+    mx_set(a, 0, 1, 99);   // 非对角元素不该被算进迹
+    return mx_trace(a) == 11;
+}
+
+fn test_mx_trace_non_square() -> bool {
+    let a: ptr = alloc(mx_bytes(2, 4));
+    mx_init(a, 2, 4);
+    mx_set(a, 0, 0, 5); mx_set(a, 1, 1, 6); mx_set(a, 0, 3, 100);
+    return mx_trace(a) == 11;
+}
+
+fn test_mx_det_2x2_ad_bc() -> bool {
+    // [[3,8],[4,6]] -> 3*6 - 8*4 = -14
+    let m: ptr = alloc(mx_bytes(2, 2));
+    mx_init(m, 2, 2);
+    mx_set(m, 0, 0, 3); mx_set(m, 0, 1, 8);
+    mx_set(m, 1, 0, 4); mx_set(m, 1, 1, 6);
+    return mx_det(m) == 0 as i64 - 14;
+}
+
+fn test_mx_det_3x3_known() -> bool {
+    // A3 -> -306 (Python 精确消元验证过); 另一个经典 [[1,2,3],[4,5,6],[7,8,10]] -> -3
+    let a: ptr = alloc(mx_bytes(3, 3));
+    mx_init(a, 3, 3);
+    mx_set(a, 0, 0, 6); mx_set(a, 0, 1, 1); mx_set(a, 0, 2, 1);
+    mx_set(a, 1, 0, 4); mx_set(a, 1, 1, 0 as i64 - 2); mx_set(a, 1, 2, 5);
+    mx_set(a, 2, 0, 2); mx_set(a, 2, 1, 8); mx_set(a, 2, 2, 7);
+    let b: ptr = alloc(mx_bytes(3, 3));
+    mx_init(b, 3, 3);
+    mx_set(b, 0, 0, 1); mx_set(b, 0, 1, 2); mx_set(b, 0, 2, 3);
+    mx_set(b, 1, 0, 4); mx_set(b, 1, 1, 5); mx_set(b, 1, 2, 6);
+    mx_set(b, 2, 0, 7); mx_set(b, 2, 1, 8); mx_set(b, 2, 2, 10);
+    return mx_det(a) == 0 as i64 - 306 && mx_det(b) == 0 as i64 - 3;
+}
+
+fn test_mx_det_4x4_known() -> bool {
+    // [[2,0,1,3],[1,4,0,2],[3,1,2,0],[0,2,1,4]] -> 65 (Python 算过)
+    let m: ptr = alloc(mx_bytes(4, 4));
+    mx_init(m, 4, 4);
+    mx_set(m, 0, 0, 2); mx_set(m, 0, 1, 0); mx_set(m, 0, 2, 1); mx_set(m, 0, 3, 3);
+    mx_set(m, 1, 0, 1); mx_set(m, 1, 1, 4); mx_set(m, 1, 2, 0); mx_set(m, 1, 3, 2);
+    mx_set(m, 2, 0, 3); mx_set(m, 2, 1, 1); mx_set(m, 2, 2, 2); mx_set(m, 2, 3, 0);
+    mx_set(m, 3, 0, 0); mx_set(m, 3, 1, 2); mx_set(m, 3, 2, 1); mx_set(m, 3, 3, 4);
+    let d: i64 = mx_det(m);
+    // 顺带确认行列式**没有改动输入**
+    return d == 65 && mx_get(m, 0, 0) == 2 && mx_get(m, 3, 3) == 4 && mx_get(m, 1, 2) == 0;
+}
+
+fn test_mx_det_singular_is_zero() -> bool {
+    // [[1,2,3],[4,5,6],[7,8,9]] 第三行 = 2*第二行 - 第一行, 行列式必为 0。
+    let m: ptr = alloc(mx_bytes(3, 3));
+    mx_init(m, 3, 3);
+    mx_set(m, 0, 0, 1); mx_set(m, 0, 1, 2); mx_set(m, 0, 2, 3);
+    mx_set(m, 1, 0, 4); mx_set(m, 1, 1, 5); mx_set(m, 1, 2, 6);
+    mx_set(m, 2, 0, 7); mx_set(m, 2, 1, 8); mx_set(m, 2, 2, 9);
+    return mx_det(m) == 0;
+}
+
+fn test_mx_det_zero_pivot_needs_swap() -> bool {
+    // [[0,2,3],[4,5,6],[7,8,10]] 首主元为 0 -> 必须换行; det = -5 (Python 算过)。
+    // 不换行 (直接除以 0) 的实现在这里会崩或者给错。
+    let m: ptr = alloc(mx_bytes(3, 3));
+    mx_init(m, 3, 3);
+    mx_set(m, 0, 0, 0); mx_set(m, 0, 1, 2); mx_set(m, 0, 2, 3);
+    mx_set(m, 1, 0, 4); mx_set(m, 1, 1, 5); mx_set(m, 1, 2, 6);
+    mx_set(m, 2, 0, 7); mx_set(m, 2, 1, 8); mx_set(m, 2, 2, 10);
+    return mx_det(m) == 0 as i64 - 5;
+}
+
+fn test_mx_det_identity_and_permutation_sign() -> bool {
+    // 单位阵 det = 1; **只交换两行** (奇置换) 后 det = -1 —— 换行带来的符号必须体现出来。
+    // (我第一版交换了两次, 那是个 3-循环 = 偶置换, det 仍是 +1 —— 是断言错了不是库错。)
+    let a: ptr = alloc(mx_bytes(3, 3));
+    let b: ptr = alloc(mx_bytes(3, 3));
+    mx_identity(a, 3);
+    mx_identity(b, 3);
+    ma_swap_rows(b, 0, 1);
+    return mx_det(a) == 1 && mx_det(b) == 0 as i64 - 1;
+}
+
+fn test_mx_det_non_square_is_zero() -> bool {
+    let m: ptr = alloc(mx_bytes(2, 3));
+    mx_init(m, 2, 3);
+    mx_set(m, 0, 0, 5);
+    return mx_det(m) == 0;
+}
+
+fn test_mx_det_work_matches_allocating() -> bool {
+    // 不分配版 (调用方给暂存) 必须与方便版给一样的值。
+    let m: ptr = alloc(mx_bytes(3, 3));
+    mx_init(m, 3, 3);
+    mx_set(m, 0, 0, 6); mx_set(m, 0, 1, 1); mx_set(m, 0, 2, 1);
+    mx_set(m, 1, 0, 4); mx_set(m, 1, 1, 0 as i64 - 2); mx_set(m, 1, 2, 5);
+    mx_set(m, 2, 0, 2); mx_set(m, 2, 1, 8); mx_set(m, 2, 2, 7);
+    let work: ptr = alloc(mx_bytes(3, 3));
+    let d: i64 = mx_det_work(m, work);
+    return d == mx_det(m) && d == 0 as i64 - 306 && mx_get(m, 0, 0) == 6;
+}
+
+fn test_mx_fill_and_eq() -> bool {
+    let a: ptr = alloc(mx_bytes(2, 2));
+    let b: ptr = alloc(mx_bytes(2, 2));
+    mx_init(a, 2, 2);
+    mx_init(b, 2, 2);
+    mx_fill(a, 0 as i64 - 7);
+    mx_fill(b, 0 as i64 - 7);
+    let same: bool = mx_eq(a, b);
+    mx_set(b, 1, 1, 7);
+    return same && mx_eq(a, b) == false && mx_get(a, 0, 0) == 0 as i64 - 7
+        && mx_get(a, 1, 1) == 0 as i64 - 7;
+}
+
+fn test_mx_det_1x1_and_0x0() -> bool {
+    let a: ptr = alloc(mx_bytes(1, 1));
+    mx_init(a, 1, 1);
+    mx_set(a, 0, 0, 0 as i64 - 9);
+    let z: ptr = alloc(mx_bytes(0, 0));
+    mx_init(z, 0, 0);
+    return mx_det(a) == 0 as i64 - 9 && mx_det(z) == 1;
+}

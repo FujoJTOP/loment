@@ -1,0 +1,744 @@
+// std/stats.lomt — 基本统计量 (均值 / 方差 / 中位数 / 分位数 / 直方图 / 相关系数)
+//
+// 为什么单开一个: 这些量每个都**看起来**一行能写, 而每个都有一种安静的写错法 ——
+// 均值取整方向、方差用错公式、中位数偶数个的规则、分位数的下标、相关系数的符号。
+// 集中在一处钉死, 比散在十个调用点各错一遍强。
+//
+// **量纲约定 (整个模块唯一的一条)**: 输入是 i64 数组, 但"有小数"的结果一律以
+// **千分比 (×1000) 的 i64** 写进 `out`。原因是这门语言没有浮点: 与其返回一个
+// 截断的整数让调用方猜, 不如返回千分比, 让"2.5"变成"2500" —— 信息不丢, 语义明确。
+// 整数结果 (和) 就是原值。
+//
+// **方差为什么用两遍法**: 教科书上的 `E[x²] - E[x]²` (一次遍历) 在均值远大于标准差时
+// **灾难性丢精度** —— 两个接近的大数相减, 有效位被吃光, 结果可能是负数 (方差不该是
+// 负的!)。两遍法 (先算均值, 再算偏差平方和) 每步的量级都不过度放大, 是这里的唯一
+// 写法。Welford 的在线版同样正确, 但两遍法更容易逐条自检。
+//   本模块用的是**总体方差** (除以 n), 不是样本方差 (除以 n-1)。要样本方差请自己
+//   ×n/(n-1)。选总体是因为它对应"这就是全部数据"的默认场景。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不用 sort.lomt**: 读过它了 —— 它是 u32 就地排序, 而本模块的数据是 i64。
+//     为省一个类型转换要塞一个"把 i64 映成 u32 再映回来"的拐棍, 反而更容易错;
+//     中位数只要 n 较小的 (排序是 O(n²) 的插入排序)。真实的大数组统计请先自己排好序
+//     再调 `st_median_sorted` 那类接口 (本版没提供, 属于另一个决定)。
+//   - **中位数偶数个取两个中间值的平均** (×1000 后是整数, 不会丢 .5)。奇数个取正中间。
+//   - **分位数用最近秩 (nearest-rank)**: `idx = ceil(p/1000 * n) - 1`, 夹在 [0, n-1]。
+//     这是最简单、最容易解释的定义; 插值型分位数是另一个约定, 不混进来。
+//   - **直方图越界一律夹进首/末桶** (x < lo 进第 0 桶, x >= hi 进最后一桶), 不丢弃 ——
+//     丢弃会让"总数"对不上 n, 而调用方多半要靠总数判样本量。
+//   - **溢出一律 ST_ERR**: 不给回绕后的假数字。相关系数要求 |偏差| < 2^32 (平方和不溢出)。
+//   - `st_corr_permille` 在退化输入 (**某一边全同值**, 标准差为 0) 时返回 ST_NO ——
+//     相关系数在那时没有定义, 不是 0。
+//
+// 命名: 公开 st_*, 内部 st_*。自检 test_stats_*。
+
+module stats
+
+use "mem.lomt"
+use "intmath.lomt"
+
+pub const ST_OK: u32 = 0;
+/// 溢出 / 参数不合法 / 数据量超出本实现的界。
+pub const ST_ERR: u32 = 4294967295;
+/// "没有" (空数组 / 退化的相关系数)。与 ST_ERR 分开。
+pub const ST_NO: u32 = 4294967294;
+
+const ST_U64MAX: u64 = 18446744073709551615;
+const ST_I64MAX: u64 = 9223372036854775807;
+const ST_I64MIN_MAG: u64 = 9223372036854775808;
+
+// ---------------------------------------------------------------- 基础
+
+fn st_sign(x: i64) -> u32 {
+    if x > 0 {
+        return 1;
+    }
+    if x < 0 {
+        return 2;
+    }
+    return 0;
+}
+
+fn st_abs_u(x: i64) -> u64 {
+    let v: u64 = x as u64;
+    if x < 0 {
+        return (v ^ ST_U64MAX) + 1;
+    }
+    return v;
+}
+
+/// `a + b` 会不会溢出。
+///
+/// 用**符号位技巧** (GCC/Clang 的 `__builtin_add_overflow` 就是这么判的):
+/// 加数双方与结果的符号都翻转才算溢出。**不要用"符号不同/相同"那套朴素判据** ——
+/// 它在 0 身上会错: 第一版 `st_ovf_sub(0, 14)` 被误判成溢出 (0 与 14 符号不同、
+/// 结果 -14 又与 0 不同), 于是相关系数里凡是 y_i=0 的那一路全部提前返回 ST_ERR,
+/// 伪装成"实现拒绝了输入"。
+fn st_ovf_add(a: i64, b: i64) -> bool {
+    let s: i64 = a + b;
+    let t: i64 = (a ^ s) & (b ^ s);
+    return t < 0;
+}
+
+/// `a - b` 会不会溢出 (同样的符号位技巧)。
+fn st_ovf_sub(a: i64, b: i64) -> bool {
+    let s: i64 = a - b;
+    let t: i64 = (a ^ b) & (a ^ s);
+    return t < 0;
+}
+
+/// `a * b` 会不会溢出。
+fn st_ovf_mul(a: i64, b: i64) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let na: u64 = st_abs_u(a);
+    let nb: u64 = st_abs_u(b);
+    if na > ST_U64MAX / nb {
+        return true;
+    }
+    let p: u64 = na * nb;
+    if st_sign(a) == st_sign(b) {
+        return p > ST_I64MAX;
+    }
+    return p > ST_I64MIN_MAG;
+}
+
+/// `num / den` 四舍五入 (half away from zero); den > 0。
+fn st_rdiv(num: i64, den: i64) -> i64 {
+    let nu: u64 = st_abs_u(num);
+    let du: u64 = den as u64;
+    if du == 0 {
+        return 0;
+    }
+    let q: u64 = nu / du;
+    let r: u64 = nu % du;
+    let v: u64 = q;
+    if r >= du - r {
+        v = q + 1;
+    }
+    if num < 0 {
+        return ((v ^ ST_U64MAX) + 1) as i64;
+    }
+    return v as i64;
+}
+
+/// 抄一份并插入排序 (i64 元素)。只在 n 小时用。
+fn st_sort_i64(base: ptr, n: u32) {
+    let i: u32 = 1;
+    while i < n {
+        let v: i64 = mem_load64(base, i * 8) as i64;
+        let j: u32 = i;
+        let go: u32 = 1;
+        while j > 0 && go == 1 {
+            let prev: i64 = mem_load64(base, (j - 1) * 8) as i64;
+            if prev > v {
+                mem_store64(base, j * 8, prev as u64);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        mem_store64(base, j * 8, v as u64);
+        i = i + 1;
+    }
+}
+
+/// 中位数/分位数要的临时区字节数。
+pub fn st_scratch_bytes(n: u32) -> u32 {
+    return n * 8;
+}
+
+// ---------------------------------------------------------------- 和 / 均值
+
+/// 数组元素之和 (i64)。溢出 -> ST_ERR。
+pub fn st_sum(d: ptr, n: u32, out: ptr) -> u32 {
+    let s: i64 = 0;
+    let ovf: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let x: i64 = mem_load64(d, i * 8) as i64;
+        if st_ovf_add(s, x) {
+            ovf = 1;
+        }
+        s = s + x;
+        i = i + 1;
+    }
+    if ovf == 1 {
+        return ST_ERR;
+    }
+    mem_store64(out, 0, s as u64);
+    return ST_OK;
+}
+
+/// 均值 ×1000 (i64)。空数组 -> ST_NO。
+pub fn st_mean(d: ptr, n: u32, out: ptr) -> u32 {
+    if n == 0 {
+        return ST_NO;
+    }
+    let s: i64 = 0;
+    let ovf: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let x: i64 = mem_load64(d, i * 8) as i64;
+        if st_ovf_add(s, x) {
+            ovf = 1;
+        }
+        s = s + x;
+        i = i + 1;
+    }
+    if ovf == 1 || st_ovf_mul(s, 1000) {
+        return ST_ERR;
+    }
+    mem_store64(out, 0, st_rdiv(s * 1000, n as i64) as u64);
+    return ST_OK;
+}
+
+// ---------------------------------------------------------------- 方差
+
+/// **总体方差** ×1000 (i64)。空数组 -> ST_NO。
+///
+/// 两遍法: 第一遍求和, 第二遍算 `Σ(x_i·n - sum)²` 再除以 `n³` (乘千分之一)。
+/// 写成 `x_i·n - sum` 是为了让偏差是**整数** —— `x_i - mean` 在定点下会先丢一次精度。
+pub fn st_variance(d: ptr, n: u32, out: ptr) -> u32 {
+    if n == 0 {
+        return ST_NO;
+    }
+    let n64: u64 = n as u64;
+    if n64 > 4294967295 {
+        return ST_ERR;
+    }
+    let s: i64 = 0;
+    let ovf: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let x: i64 = mem_load64(d, i * 8) as i64;
+        if st_ovf_add(s, x) {
+            ovf = 1;
+        }
+        s = s + x;
+        i = i + 1;
+    }
+    if ovf == 1 {
+        return ST_ERR;
+    }
+    let ss: u64 = 0;
+    i = 0;
+    while i < n {
+        let x: i64 = mem_load64(d, i * 8) as i64;
+        if st_ovf_mul(x, n as i64) {
+            return ST_ERR;
+        }
+        let t: i64 = x * (n as i64);
+        if st_ovf_sub(t, s) {
+            return ST_ERR;
+        }
+        let dev: i64 = t - s;
+        let du: u64 = st_abs_u(dev);
+        // |dev| 必须 < 2^32, 否则 dev² 顶出 u64。
+        if du > 4294967295 {
+            return ST_ERR;
+        }
+        let sq: u64 = du * du;
+        if ss > ST_U64MAX - sq {
+            return ST_ERR;
+        }
+        ss = ss + sq;
+        i = i + 1;
+    }
+    // 分母 n³
+    let n2: u64 = n64 * n64;
+    if n2 > ST_U64MAX / n64 {
+        return ST_ERR;
+    }
+    let n3: u64 = n2 * n64;
+    if ss > ST_U64MAX / 1000 {
+        return ST_ERR;
+    }
+    let num: u64 = ss * 1000;
+    let q: u64 = num / n3;
+    let r: u64 = num % n3;
+    let v: u64 = q;
+    if r >= n3 - r {
+        v = q + 1;
+    }
+    if v > ST_I64MAX {
+        return ST_ERR;
+    }
+    mem_store64(out, 0, v);
+    return ST_OK;
+}
+
+// ---------------------------------------------------------------- 中位数 / 分位数
+
+/// 中位数 ×1000 (i64)。空数组 -> ST_NO。`sc` 至少 `st_scratch_bytes(n)`。
+pub fn st_median(d: ptr, n: u32, sc: ptr, out: ptr) -> u32 {
+    if n == 0 {
+        return ST_NO;
+    }
+    let i: u32 = 0;
+    while i < n {
+        mem_store64(sc, i * 8, mem_load64(d, i * 8));
+        i = i + 1;
+    }
+    st_sort_i64(sc, n);
+    if n % 2 == 1 {
+        let v: i64 = mem_load64(sc, (n / 2) * 8) as i64;
+        if st_ovf_mul(v, 1000) {
+            return ST_ERR;
+        }
+        mem_store64(out, 0, (v * 1000) as u64);
+        return ST_OK;
+    }
+    let a: i64 = mem_load64(sc, (n / 2 - 1) * 8) as i64;
+    let b: i64 = mem_load64(sc, (n / 2) * 8) as i64;
+    if st_ovf_add(a, b) || st_ovf_mul(a + b, 500) {
+        return ST_ERR;
+    }
+    // (a+b)/2 * 1000 == (a+b) * 500 —— 正好是整数, 不丢 .5。
+    mem_store64(out, 0, ((a + b) * 500) as u64);
+    return ST_OK;
+}
+
+/// 第 `p` 百分位 ×1000 (i64)。`p` 是**千分比** (0..1000), 即 p=500 表示第 50 百分位。
+/// 最近秩法; 空数组 -> ST_NO; p > 1000 -> ST_ERR。`sc` 至少 `st_scratch_bytes(n)`。
+pub fn st_percentile(d: ptr, n: u32, p: u32, sc: ptr, out: ptr) -> u32 {
+    if n == 0 {
+        return ST_NO;
+    }
+    if p > 1000 {
+        return ST_ERR;
+    }
+    let i: u32 = 0;
+    while i < n {
+        mem_store64(sc, i * 8, mem_load64(d, i * 8));
+        i = i + 1;
+    }
+    st_sort_i64(sc, n);
+    let num: u64 = (p as u64) * (n as u64);
+    let idx: u64 = (num + 999) / 1000; // ceil
+    let k: u32 = 0;
+    if idx == 0 {
+        k = 0;
+    } else {
+        k = (idx - 1) as u32;
+    }
+    if k >= n {
+        k = n - 1;
+    }
+    let v: i64 = mem_load64(sc, k * 8) as i64;
+    if st_ovf_mul(v, 1000) {
+        return ST_ERR;
+    }
+    mem_store64(out, 0, (v * 1000) as u64);
+    return ST_OK;
+}
+
+// ---------------------------------------------------------------- 直方图
+
+/// 把 n 个元素装进 `nbins` 个桶 (桶在 `out` 里, 每桶一个 u32)。返回装进去的总数 (= n);
+/// 参数非法 -> ST_ERR。
+pub fn st_histogram(d: ptr, n: u32, lo: i64, hi: i64, nbins: u32, out: ptr) -> u32 {
+    if nbins == 0 || hi <= lo {
+        return ST_ERR;
+    }
+    if st_ovf_sub(hi, lo) {
+        return ST_ERR;
+    }
+    let span: i64 = hi - lo;
+    let w: i64 = span / (nbins as i64);
+    if w <= 0 {
+        return ST_ERR; // 桶比数据范围还密
+    }
+    mem_fill(out, 0, nbins * 4, 0);
+    let i: u32 = 0;
+    while i < n {
+        let x: i64 = mem_load64(d, i * 8) as i64;
+        let b: u32 = 0;
+        if x < lo {
+            b = 0;
+        } else if x >= hi {
+            b = nbins - 1;
+        } else {
+            // 这个分支里 0 <= x-lo < span, 不会溢出。
+            let rel: u64 = (x - lo) as u64;
+            let bb: u64 = rel / (w as u64);
+            b = bb as u32;
+            if b >= nbins {
+                b = nbins - 1;
+            }
+        }
+        mem_store32(out, b * 4, mem_load32(out, b * 4) + 1);
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 相关系数
+
+/// 皮尔逊相关系数 ×1000 (带符号的 i64)。空数组或退化输入 (标准差为 0) -> ST_NO;
+/// 溢出 -> ST_ERR。
+///
+/// 两遍法 + 整数开方: `r = Σdx·dy / sqrt(Σdx² · Σdy²)`, 其中 `dx = x_i·n - Σx`。
+/// 完全线性 (正) 给 +1000, (负) 给 -1000 —— 这两条都进了自检, 因为它们是**精确**的,
+/// 蒙不过去。
+pub fn st_corr_permille(xs: ptr, ys: ptr, n: u32) -> i64 {
+    if n == 0 {
+        return 4294967294 as i64; // ST_NO
+    }
+    let sx: i64 = 0;
+    let sy: i64 = 0;
+    let ovf: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let a: i64 = mem_load64(xs, i * 8) as i64;
+        let b: i64 = mem_load64(ys, i * 8) as i64;
+        if st_ovf_add(sx, a) || st_ovf_add(sy, b) {
+            ovf = 1;
+        }
+        sx = sx + a;
+        sy = sy + b;
+        i = i + 1;
+    }
+    if ovf == 1 {
+        return 4294967295 as i64; // ST_ERR
+    }
+    let sxy: i64 = 0;
+    let sxx: u64 = 0;
+    let syy: u64 = 0;
+    i = 0;
+    while i < n {
+        let a: i64 = mem_load64(xs, i * 8) as i64;
+        let b: i64 = mem_load64(ys, i * 8) as i64;
+        if st_ovf_mul(a, n as i64) || st_ovf_mul(b, n as i64) {
+            return 4294967295 as i64;
+        }
+        let ta: i64 = a * (n as i64);
+        let tb: i64 = b * (n as i64);
+        if st_ovf_sub(ta, sx) || st_ovf_sub(tb, sy) {
+            return 4294967295 as i64;
+        }
+        let dx: i64 = ta - sx;
+        let dy: i64 = tb - sy;
+        if st_ovf_mul(dx, dy) || st_ovf_add(sxy, dx * dy) {
+            return 4294967295 as i64;
+        }
+        sxy = sxy + dx * dy;
+        let ux: u64 = st_abs_u(dx);
+        let uy: u64 = st_abs_u(dy);
+        if ux > 4294967295 || uy > 4294967295 {
+            return 4294967295 as i64;
+        }
+        if sxx > ST_U64MAX - ux * ux || syy > ST_U64MAX - uy * uy {
+            return 4294967295 as i64;
+        }
+        sxx = sxx + ux * ux;
+        syy = syy + uy * uy;
+        i = i + 1;
+    }
+    if sxx == 0 || syy == 0 {
+        return 4294967294 as i64; // 标准差为 0: 相关系数没有定义
+    }
+    if sxx > ST_U64MAX / syy {
+        return 4294967295 as i64;
+    }
+    let root: u64 = im_isqrt(sxx * syy);
+    if root == 0 {
+        return 4294967294 as i64;
+    }
+    let mag: u64 = st_abs_u(sxy);
+    if mag > ST_U64MAX / 1000 {
+        return 4294967295 as i64;
+    }
+    let num: u64 = mag * 1000;
+    let q: u64 = num / root;
+    let r: u64 = num % root;
+    let v: u64 = q;
+    if r >= root - r {
+        v = q + 1;
+    }
+    if v > ST_I64MAX {
+        return 4294967295 as i64;
+    }
+    if sxy < 0 {
+        return ((v ^ ST_U64MAX) + 1) as i64;
+    }
+    return v as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 把 d 的 [0,n) 填成 vals 里给的值。
+fn st_fill(d: ptr, a: i64, b: i64, c: i64, e: i64, n: u32) -> u32 {
+    mem_store64(d, 0, a as u64);
+    if n > 1 {
+        mem_store64(d, 8, b as u64);
+    }
+    if n > 2 {
+        mem_store64(d, 16, c as u64);
+    }
+    if n > 3 {
+        mem_store64(d, 24, e as u64);
+    }
+    return n;
+}
+
+fn test_stats_sum() -> bool {
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    let r: u32 = st_sum(d, 4, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 10;
+}
+
+fn test_stats_sum_negative() -> bool {
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, -5, 3, -2, 0, 4);
+    let r: u32 = st_sum(d, 4, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == -4;
+}
+
+fn test_stats_sum_overflow_is_err() -> bool {
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 9223372036854775807, 9223372036854775807, 0, 0, 2);
+    return st_sum(d, 2, out) == ST_ERR;
+}
+
+fn test_stats_mean_permille() -> bool {
+    // {1,2,3,4} 均值 2.5 -> 2500
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    let r: u32 = st_mean(d, 4, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 2500;
+}
+
+fn test_stats_mean_negative_rounds() -> bool {
+    // {-1,-2,-3} 均值 -2 -> -2000; {-1,-2} 均值 -1.5 -> -1500
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, -1, -2, -3, 0, 3);
+    let ok1: bool = st_mean(d, 3, out) == ST_OK && (mem_load64(out, 0) as i64) == -2000;
+    st_fill(d, -1, -2, 0, 0, 2);
+    let ok2: bool = st_mean(d, 2, out) == ST_OK && (mem_load64(out, 0) as i64) == -1500;
+    return ok1 && ok2;
+}
+
+fn test_stats_mean_empty_is_no() -> bool {
+    let d: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    return st_mean(d, 0, out) == ST_NO;
+}
+
+fn test_stats_variance_population() -> bool {
+    // {1,2,3,4} 总体方差 1.25 -> 1250 (Python statistics.pvariance 对过)
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    let r: u32 = st_variance(d, 4, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 1250;
+}
+
+fn test_stats_variance_known_vector() -> bool {
+    // {2,4,4,4,5,5,7,9} 总体方差 = 4 -> 4000 (教科书那条)
+    let d: ptr = alloc(128);
+    mem_store64(d, 0, 2 as u64);
+    mem_store64(d, 8, 4 as u64);
+    mem_store64(d, 16, 4 as u64);
+    mem_store64(d, 24, 4 as u64);
+    mem_store64(d, 32, 5 as u64);
+    mem_store64(d, 40, 5 as u64);
+    mem_store64(d, 48, 7 as u64);
+    mem_store64(d, 56, 9 as u64);
+    let out: ptr = alloc(8);
+    let r: u32 = st_variance(d, 8, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 4000;
+}
+
+fn test_stats_variance_constant_is_zero() -> bool {
+    // 全同元素 -> 偏差全 0 -> 方差 0 (这条能抓出"偏差算错但平方和凑巧非零"的 bug)。
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 5, 5, 5, 5, 4);
+    let ok1: bool = st_variance(d, 4, out) == ST_OK && (mem_load64(out, 0) as i64) == 0;
+    st_fill(d, 7, 0, 0, 0, 1);
+    let ok2: bool = st_variance(d, 1, out) == ST_OK && (mem_load64(out, 0) as i64) == 0;
+    return ok1 && ok2;
+}
+
+fn test_stats_variance_empty_is_no() -> bool {
+    let d: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    return st_variance(d, 0, out) == ST_NO;
+}
+
+fn test_stats_median_odd() -> bool {
+    // {3,1,2} 中位数 = 2 -> 2000 (要排序才拿得到, 输入故意乱序)
+    let d: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 3, 1, 2, 0, 3);
+    let r: u32 = st_median(d, 3, sc, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 2000;
+}
+
+fn test_stats_median_even() -> bool {
+    // {1,2,3,4} 偶数个 -> (2+3)/2 = 2.5 -> 2500 (偶数规则: 取两中间值的平均)
+    let d: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    let r: u32 = st_median(d, 4, sc, out);
+    return r == ST_OK && (mem_load64(out, 0) as i64) == 2500;
+}
+
+fn test_stats_median_empty_is_no() -> bool {
+    let d: ptr = alloc(8);
+    let sc: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    return st_median(d, 0, sc, out) == ST_NO;
+}
+
+fn test_stats_median_does_not_mutate_input() -> bool {
+    // 中位数内部排序的是**副本** —— 原数组必须原样不动。
+    let d: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 3, 1, 2, 0, 3);
+    st_median(d, 3, sc, out);
+    return (mem_load64(d, 0) as i64) == 3 && (mem_load64(d, 8) as i64) == 1
+        && (mem_load64(d, 16) as i64) == 2;
+}
+
+fn test_stats_percentile_nearest_rank() -> bool {
+    // {1,2,3,4}: p=0 -> 1 (1000); p=250 -> 1; p=500 -> 2 (2000); p=1000 -> 4 (4000)
+    let d: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    let ok: u32 = 1;
+    if st_percentile(d, 4, 0, sc, out) != ST_OK || (mem_load64(out, 0) as i64) != 1000 {
+        ok = 0;
+    }
+    if st_percentile(d, 4, 250, sc, out) != ST_OK || (mem_load64(out, 0) as i64) != 1000 {
+        ok = 0;
+    }
+    if st_percentile(d, 4, 500, sc, out) != ST_OK || (mem_load64(out, 0) as i64) != 2000 {
+        ok = 0;
+    }
+    if st_percentile(d, 4, 1000, sc, out) != ST_OK || (mem_load64(out, 0) as i64) != 4000 {
+        ok = 0;
+    }
+    return ok == 1;
+}
+
+fn test_stats_percentile_bad_p() -> bool {
+    let d: ptr = alloc(64);
+    let sc: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    st_fill(d, 1, 2, 3, 4, 4);
+    return st_percentile(d, 4, 1001, sc, out) == ST_ERR && st_percentile(d, 0, 500, sc, out) == ST_NO;
+}
+
+fn test_stats_histogram() -> bool {
+    // 数据 {1,1,1,5,9}, 范围 [0,10) 分 5 桶 (宽 2): 期望 [3,0,1,0,1]
+    let d: ptr = alloc(128);
+    mem_store64(d, 0, 1 as u64);
+    mem_store64(d, 8, 1 as u64);
+    mem_store64(d, 16, 1 as u64);
+    mem_store64(d, 24, 5 as u64);
+    mem_store64(d, 32, 9 as u64);
+    let bins: ptr = alloc(32);
+    let r: u32 = st_histogram(d, 5, 0, 10, 5, bins);
+    let ok: bool = r == 5 && mem_load32(bins, 0) == 3 && mem_load32(bins, 4) == 0
+        && mem_load32(bins, 8) == 1 && mem_load32(bins, 12) == 0 && mem_load32(bins, 16) == 1;
+    return ok;
+}
+
+fn test_stats_histogram_clamps_outliers() -> bool {
+    // 越界夹进首/末桶 (不丢弃 —— 丢了对不上总数)。
+    let d: ptr = alloc(64);
+    st_fill(d, 0 - 100, 100, 5, 0, 3);
+    let bins: ptr = alloc(64);
+    let r: u32 = st_histogram(d, 3, 0, 10, 5, bins);
+    // -100 -> 桶 0; 100 -> 桶 4; 5 -> 桶 2
+    return r == 3 && mem_load32(bins, 0) == 1 && mem_load32(bins, 8) == 1
+        && mem_load32(bins, 16) == 1;
+}
+
+fn test_stats_histogram_bad_args() -> bool {
+    let d: ptr = alloc(64);
+    let bins: ptr = alloc(64);
+    return st_histogram(d, 4, 10, 0, 5, bins) == ST_ERR
+        && st_histogram(d, 4, 0, 10, 0, bins) == ST_ERR
+        && st_histogram(d, 4, 0, 3, 100, bins) == ST_ERR; // 桶比范围还密
+}
+
+fn test_stats_corr_perfect_positive() -> bool {
+    // y = 2x + 1 -> r = +1 -> +1000 (精确, 不是"约等于")
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    st_fill(x, 1, 2, 3, 4, 4);
+    st_fill(y, 3, 5, 7, 9, 4);
+    return st_corr_permille(x, y, 4) == 1000;
+}
+
+fn test_stats_corr_perfect_negative() -> bool {
+    // y = -2x + 11 -> r = -1 -> -1000
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    st_fill(x, 1, 2, 3, 4, 4);
+    st_fill(y, 9, 7, 5, 3, 4);
+    return st_corr_permille(x, y, 4) == -1000;
+}
+
+fn test_stats_corr_partial_known() -> bool {
+    // x=[1,2,3,4,5], y=[2,4,5,4,5] -> 150/193*1000 = 777 (Python 复算)
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    mem_store64(x, 0, 1 as u64);
+    mem_store64(x, 8, 2 as u64);
+    mem_store64(x, 16, 3 as u64);
+    mem_store64(x, 24, 4 as u64);
+    mem_store64(x, 32, 5 as u64);
+    mem_store64(y, 0, 2 as u64);
+    mem_store64(y, 8, 4 as u64);
+    mem_store64(y, 16, 5 as u64);
+    mem_store64(y, 24, 4 as u64);
+    mem_store64(y, 32, 5 as u64);
+    return st_corr_permille(x, y, 5) == 777;
+}
+
+fn test_stats_corr_degenerate_is_no() -> bool {
+    // 某一边全同值 -> 标准差 0 -> 相关系数无定义 -> ST_NO (不是 0)。
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    st_fill(x, 5, 5, 5, 5, 4);
+    st_fill(y, 1, 2, 3, 4, 4);
+    let a: bool = st_corr_permille(x, y, 4) == 4294967294 as i64;
+    let b: bool = st_corr_permille(x, y, 0) == 4294967294 as i64;
+    return a && b;
+}
+
+fn test_stats_corr_antisymmetric() -> bool {
+    // 交换两个数组 -> 相关系数取反。这条不依赖任何真值, 纯结构性。
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    mem_store64(x, 0, 1 as u64);
+    mem_store64(x, 8, 2 as u64);
+    mem_store64(x, 16, 3 as u64);
+    mem_store64(x, 24, 9 as u64);
+    mem_store64(y, 0, 4 as u64);
+    mem_store64(y, 8, 0 as u64);
+    mem_store64(y, 16, 3 as u64);
+    mem_store64(y, 24, 7 as u64);
+    let a: i64 = st_corr_permille(x, y, 4);
+    let b: i64 = st_corr_permille(y, x, 4);
+    return a == b && a == 757 && a < 1000;
+}
+
+fn test_stats_scratch_bytes() -> bool {
+    return st_scratch_bytes(0) == 0 && st_scratch_bytes(10) == 80;
+}

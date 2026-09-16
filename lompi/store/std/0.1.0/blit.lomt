@@ -1,0 +1,608 @@
+// std/blit.lomt — 位块传送: 拷贝 / alpha 混合 / 缩放 / 着色 / 颜色键
+//
+// 为什么需要它: raster.lomt 能画到**自己**的缓冲上, 但真正要拼一张图, 得把一块像素
+// 搬到另一块上 —— 而且要处理"半透明""缩小放大""整体染色""某个颜色当透明"这四件
+// 几乎所有贴图都要的事。
+//
+// 像素格式沿用 raster.lomt 的 **0xAARRGGBB** (小端存储 = 内存里 B G R A)。
+//
+// **没有浮点** (本语言没有浮点类型), 所以:
+//   - alpha 混合用整数公式 `dst = (src*a + dst*(255-a)) / 255`, **就地截断** (不四舍五入)。
+//     为什么是 /255 而不是 >>8: 两者差一个"地板除 vs 除以 256"的偏差, 而 255 是**正确**
+//     的那个 —— `>>8` 会让 alpha=255 时结果偏暗 (255*x/256 而非 x), 淡入淡出到满不透明
+//     时永远差一点。这一代的差异肉眼看不出来, 但连续几十帧叠加就会显形。
+//   - 双线性缩放用 **16.16 定点**: 每个采样点的权是 0..65535, 乘完右移 16 位。
+//     采样坐标用**像素中心**映射 (`(2i+1)*src/(2*dst) - 0.5`), 不是直接 `i*src/dst` ——
+//     后者会把整张图往左上"拉"半个像素, 缩小时尤其明显 (边缘被吃掉一条)。
+//
+// 裁剪: 和 raster 一样, **每个写像素的地方都判界**, 越界不写、不崩。
+//
+// 诚实清单:
+//   - **alpha 通道也参与混合** (四个通道一视同仁)。所以"半透明源盖在实心底上"得到的
+//     像素 alpha 是中间值 (≈191), 不是 255。要"结果保持不透明"的合成语义, 请自己在
+//     上面把 dst 的 alpha 定回来 —— 本层给的是**公式本身的**结果, 不是某种合成模式。
+//   - 缩放**不做 mipmap/预乘**: 缩小时直接点采样, 会有走样 (这是最近邻的固有代价);
+//     要抗锯齿得自己上多采样。
+//   - 双线性采样坐标 (16.16) 用 u32 装: `sw * dsw` 得小于约 32768 才不溢出, 也就是
+//     "源和目标的宽相乘"那一档。要缩到几千像素宽以上请分块。
+//   - **只做正向缩放与平移**, 不做旋转/任意仿射 (那要另一层矩阵)。
+//
+// 命名: 公开 bl_*, 内部 bl_*。自检 test_blit_*。
+
+module blit
+
+use "mem.lomt"
+
+pub const BL_ERR: u32 = 4294967295;
+/// "跳过"/"没有" —— 与 BL_ERR 分开。
+pub const BL_NO: u32 = 4294967294;
+
+// ---------------------------------------------------------------- 颜色小工具
+
+pub fn bl_rgba(r: u32, g: u32, b: u32, a: u32) -> u32 {
+    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
+pub fn bl_a(v: u32) -> u32 {
+    return (v >> 24) & 255;
+}
+
+pub fn bl_r(v: u32) -> u32 {
+    return (v >> 16) & 255;
+}
+
+pub fn bl_g(v: u32) -> u32 {
+    return (v >> 8) & 255;
+}
+
+pub fn bl_b(v: u32) -> u32 {
+    return v & 255;
+}
+
+/// 源缓冲要多少字节。
+pub fn bl_bytes(w: u32, h: u32) -> u32 {
+    return w * h * 4;
+}
+
+fn bl_inside(w: u32, h: u32, x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 {
+        return false;
+    }
+    return (x as u32) < w && (y as u32) < h;
+}
+
+fn bl_at(buf: ptr, w: u32, x: i32, y: i32) -> u32 {
+    return mem_load32(buf, ((y as u32) * w + (x as u32)) * 4);
+}
+
+fn bl_put(buf: ptr, w: u32, x: i32, y: i32, v: u32) {
+    mem_store32(buf, ((y as u32) * w + (x as u32)) * 4, v);
+}
+
+// ---------------------------------------------------------------- 拷贝
+
+/// 把整个 src (sw × sh) 拷到 dst 的 (dx,dy)。**逐点裁剪** —— 源和目标都对得上才写。
+/// 返回写了几个像素。
+pub fn bl_copy(dst: ptr, dw: u32, dh: u32, dx: i32, dy: i32, src: ptr, sw: u32, sh: u32) -> u32 {
+    let cnt: u32 = 0;
+    let sy: u32 = 0;
+    while sy < sh {
+        let sx: u32 = 0;
+        while sx < sw {
+            let px: i32 = dx + (sx as i32);
+            let py: i32 = dy + (sy as i32);
+            if bl_inside(dw, dh, px, py) {
+                bl_put(dst, dw, px, py, bl_at(src, sw, sx as i32, sy as i32));
+                cnt = cnt + 1;
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 混合
+
+/// alpha 混合: `dst = (src*a + dst*(255-a)) / 255`, 四个通道一视同仁。
+/// `a` 取自**源像素自己的 alpha** (bits 24..31)。返回写了几个像素。
+///
+/// 为什么不用浮点: 见文件头。为什么用 /255 而不是 >>8: 同上 —— `>>8` 在 a=255 时
+/// 得到的不是 src。
+pub fn bl_blend(dst: ptr, dw: u32, dh: u32, dx: i32, dy: i32, src: ptr, sw: u32, sh: u32) -> u32 {
+    let cnt: u32 = 0;
+    let sy: u32 = 0;
+    while sy < sh {
+        let sx: u32 = 0;
+        while sx < sw {
+            let px: i32 = dx + (sx as i32);
+            let py: i32 = dy + (sy as i32);
+            if bl_inside(dw, dh, px, py) {
+                let s: u32 = bl_at(src, sw, sx as i32, sy as i32);
+                let d: u32 = bl_at(dst, dw, px, py);
+                let sa: u32 = bl_a(s);
+                let ia: u32 = 255 - sa;
+                let nr: u32 = (((s >> 16) & 255) * sa + ((d >> 16) & 255) * ia) / 255;
+                let ng: u32 = (((s >> 8) & 255) * sa + ((d >> 8) & 255) * ia) / 255;
+                let nb: u32 = ((s & 255) * sa + (d & 255) * ia) / 255;
+                let na: u32 = (bl_a(s) * sa + bl_a(d) * ia) / 255;
+                bl_put(dst, dw, px, py, (na << 24) | (nr << 16) | (ng << 8) | nb);
+                cnt = cnt + 1;
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 缩放
+
+/// 最近邻缩放: 把 src (sw × sh) 缩到目标矩形 `dsw × dsh` 再放到 (dx,dy)。
+/// `dst(sx=dst_i*sw/dsw, sy=dst_j*sh/dsh)` —— 整数除法的抽样点, 快、走样小图看不出来。
+pub fn bl_scale_nn(dst: ptr, dw: u32, dh: u32, dx: i32, dy: i32, dsw: u32, dsh: u32, src: ptr, sw: u32, sh: u32) -> u32 {
+    let cnt: u32 = 0;
+    if sw == 0 || sh == 0 || dsw == 0 || dsh == 0 {
+        return 0;
+    }
+    let j: u32 = 0;
+    while j < dsh {
+        let i: u32 = 0;
+        while i < dsw {
+            let px: i32 = dx + (i as i32);
+            let py: i32 = dy + (j as i32);
+            if bl_inside(dw, dh, px, py) {
+                let sxs: u32 = (i * sw) / dsw;
+                let sys: u32 = (j * sh) / dsh;
+                bl_put(dst, dw, px, py, bl_at(src, sw, sxs as i32, sys as i32));
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return cnt;
+}
+
+/// 16.16 定点插值: f 在 0..65535 之间, 结果是 a 与 b 的线性插值。
+fn bl_lerp(a: u32, b: u32, f: u32) -> u32 {
+    return (a * (65536 - f) + b * f) >> 16;
+}
+
+/// 一次采样所需的源坐标与权 (16.16), 写进 out: `[x0][x1][f]`。
+///
+/// 坐标是**像素中心映射**: `u = (2k+1)*src/(2*dst) - 0.5`, 再夹到 `[0, src-1]`。
+/// **中间量走 i64** —— `(2k+1)*src*65536` 在 u32 里会溢出, 而 `u` 减 32768 在 u32 里
+/// 会**借位成天文数字** (第一版就栽在这: 左边界被映射到了最右边, 整列像素全错)。
+fn bl_uv(src_n: u32, dst_n: u32, k: u32, out: ptr) {
+    let kk: i64 = (2 * (k as i64) + 1) * (src_n as i64) * 65536 / (2 * (dst_n as i64));
+    let u: i64 = kk - 32768;
+    let uc: i64 = u;
+    if uc < 0 {
+        uc = 0;
+    }
+    let mu: i64 = ((src_n - 1) as i64) * 65536;
+    if uc > mu {
+        uc = mu;
+    }
+    let x0: u32 = (uc >> 16) as u32;
+    let fx: u32 = (uc & 65535) as u32;
+    let x1: u32 = x0 + 1;
+    if x1 >= src_n {
+        x1 = src_n - 1;
+    }
+    mem_store32(out, 0, x0);
+    mem_store32(out, 4, x1);
+    mem_store32(out, 8, fx);
+}
+
+/// 双线性缩放。**像素中心映射** (见文件头), 四个通道各自插值。
+pub fn bl_scale_bilinear(dst: ptr, dw: u32, dh: u32, dx: i32, dy: i32, dsw: u32, dsh: u32, src: ptr, sw: u32, sh: u32) -> u32 {
+    let cnt: u32 = 0;
+    if sw == 0 || sh == 0 || dsw == 0 || dsh == 0 {
+        return 0;
+    }
+    let uvx: ptr = alloc(12);
+    let uvy: ptr = alloc(12);
+    let j: u32 = 0;
+    while j < dsh {
+        bl_uv(sh, dsh, j, uvy);
+        let i: u32 = 0;
+        while i < dsw {
+            bl_uv(sw, dsw, i, uvx);
+            let px: i32 = dx + (i as i32);
+            let py: i32 = dy + (j as i32);
+            if bl_inside(dw, dh, px, py) {
+                let x0: u32 = mem_load32(uvx, 0);
+                let x1: u32 = mem_load32(uvx, 4);
+                let fx: u32 = mem_load32(uvx, 8);
+                let y0: u32 = mem_load32(uvy, 0);
+                let y1: u32 = mem_load32(uvy, 4);
+                let fy: u32 = mem_load32(uvy, 8);
+                let p00: u32 = bl_at(src, sw, x0 as i32, y0 as i32);
+                let p10: u32 = bl_at(src, sw, x1 as i32, y0 as i32);
+                let p01: u32 = bl_at(src, sw, x0 as i32, y1 as i32);
+                let p11: u32 = bl_at(src, sw, x1 as i32, y1 as i32);
+                let v: u32 = 0;
+                let shb: u32 = 24;
+                let q: u32 = 0;
+                while q < 4 {
+                    let top: u32 = bl_lerp((p00 >> shb) & 255, (p10 >> shb) & 255, fx);
+                    let bot: u32 = bl_lerp((p01 >> shb) & 255, (p11 >> shb) & 255, fx);
+                    v = v | (bl_lerp(top, bot, fy) << shb);
+                    shb = shb - 8;
+                    q = q + 1;
+                }
+                bl_put(dst, dw, px, py, v);
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 着色 / 掩码
+
+/// 整体着色: 每个颜色通道乘 `t/255` (t=255 是恒等)。alpha **不动** ——
+/// 着色不该改透明度, 那是另一件事。
+pub fn bl_tint(ws: ptr, w: u32, h: u32, tr: u32, tg: u32, tb: u32) -> u32 {
+    let n: u32 = w * h;
+    let i: u32 = 0;
+    while i < n {
+        let v: u32 = mem_load32(ws, i * 4);
+        let nr: u32 = ((v >> 16) & 255) * (tr & 255) / 255;
+        let ng: u32 = ((v >> 8) & 255) * (tg & 255) / 255;
+        let nb: u32 = (v & 255) * (tb & 255) / 255;
+        mem_store32(ws, i * 4, (v & 4278190080) | (nr << 16) | (ng << 8) | nb);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 颜色键透明: 源里颜色**恰为 key** (低 24 位, alpha 不比) 的像素不写。
+/// 为什么只比 24 位: 颜色键是"这个 RGB 代表透明"的老办法, alpha 是另一套机制, 混着比
+/// 会让 `key=0x00FF00` 匹配不上 `0xFFFF00` 这种"绿色但 alpha 是 255"的像素 —— 那不是
+/// 使用者想要的。返回写了几个像素。
+pub fn bl_mask(dst: ptr, dw: u32, dh: u32, dx: i32, dy: i32, src: ptr, sw: u32, sh: u32, key: u32) -> u32 {
+    let cnt: u32 = 0;
+    let k: u32 = key & 16777215;
+    let sy: u32 = 0;
+    while sy < sh {
+        let sx: u32 = 0;
+        while sx < sw {
+            let px: i32 = dx + (sx as i32);
+            let py: i32 = dy + (sy as i32);
+            if bl_inside(dw, dh, px, py) {
+                let s: u32 = bl_at(src, sw, sx as i32, sy as i32);
+                if (s & 16777215) != k {
+                    bl_put(dst, dw, px, py, s);
+                    cnt = cnt + 1;
+                }
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn bcr() -> u32 {
+    return bl_rgba(255, 0, 0, 255);
+}
+
+fn bcg() -> u32 {
+    return bl_rgba(0, 255, 0, 255);
+}
+
+fn bcb() -> u32 {
+    return bl_rgba(0, 0, 255, 255);
+}
+
+fn bcy() -> u32 {
+    return bl_rgba(255, 255, 0, 255);
+}
+
+/// "mem_fill 填 v 之后, mem_load32 读回来是多少"。
+///
+/// `mem_fill` 是**按字节**填的 (mem.lomt), 所以填 7 得到的是四个字节各是 7 ——
+/// `mem_load32` 读回来是 0x07070707, **不是** 7。这里第一版有 5 条自检直接把
+/// `mem_load32(...) == 7` 写了上去, 于是全红; 算法本身没错, 是**期望值**把
+/// "字节"当成了"字"。凡是要验"这段内存没被动过"的地方, 都从 `bfill(v)` 比。
+fn bfill(v: u32) -> u32 {
+    return v * 16843009; // 0x01010101
+}
+
+fn test_blit_rgba_packing() -> bool {
+    return bcr() == 4294901760 && bcb() == 4278190335
+        && bl_a(bcr()) == 255 && bl_r(bcr()) == 255 && bl_g(bcg()) == 255
+        && bl_b(bcb()) == 255 && bl_bytes(4, 3) == 48;
+}
+
+fn test_blit_copy_exact() -> bool {
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(4, 4));
+    mem_store32(src, 0, bcr());
+    mem_store32(src, 4, bcg());
+    mem_store32(src, 8, bcb());
+    mem_store32(src, 12, bcy());
+    mem_fill(dst, 0, bl_bytes(4, 4), 7);
+    let n: u32 = bl_copy(dst, 4, 4, 1, 1, src, 2, 2);
+    let ok: bool = n == 4
+        && mem_load32(dst, (1 * 4 + 1) * 4) == bcr()
+        && mem_load32(dst, (1 * 4 + 2) * 4) == bcg()
+        && mem_load32(dst, (2 * 4 + 1) * 4) == bcb()
+        && mem_load32(dst, (2 * 4 + 2) * 4) == bcy()
+        && mem_load32(dst, 0) == bfill(7); // 没被盖到的像素还是"四个字节各 7"
+    return ok;
+}
+
+fn test_blit_copy_clipped_left_top() -> bool {
+    let src: ptr = alloc(bl_bytes(3, 3));
+    let dst: ptr = alloc(bl_bytes(3, 3));
+    mem_fill(src, 0, bl_bytes(3, 3), 9);
+    mem_fill(dst, 0, bl_bytes(3, 3), 0);
+    // 放到 (-2,-2): 只有 src 的 (2,2) 落在 dst (0,0)
+    let n: u32 = bl_copy(dst, 3, 3, 0 - 2, 0 - 2, src, 3, 3);
+    return n == 1 && mem_load32(dst, 0) == bfill(9)
+        && mem_load32(dst, 4) == 0 && mem_load32(dst, 12) == 0;
+}
+
+fn test_blit_copy_clipped_right_bottom() -> bool {
+    let src: ptr = alloc(bl_bytes(3, 3));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    mem_fill(src, 0, bl_bytes(3, 3), 5);
+    mem_fill(dst, 0, bl_bytes(2, 2), 0);
+    let n: u32 = bl_copy(dst, 2, 2, 1, 1, src, 3, 3);
+    return n == 1 && mem_load32(dst, (1 * 2 + 1) * 4) == bfill(5)
+        && mem_load32(dst, 0) == 0;
+}
+
+fn test_blit_copy_guard_bytes() -> bool {
+    // 哨兵: 源目标都贴 8 字节守卫, 大范围越界拷完之后守卫必须没动。
+    let sbytes: u32 = bl_bytes(3, 2);
+    let sper: ptr = alloc(8);
+    let src: ptr = alloc(sbytes);
+    let spost: ptr = alloc(8);
+    mem_fill(sper, 0, 8, 171);
+    mem_fill(src, 0, sbytes, 4);
+    mem_fill(spost, 0, 8, 171);
+    let dbytes: u32 = bl_bytes(4, 4);
+    let dper: ptr = alloc(8);
+    let dst: ptr = alloc(dbytes);
+    let dpost: ptr = alloc(8);
+    mem_fill(dper, 0, 8, 171);
+    mem_fill(dst, 0, dbytes, 0);
+    mem_fill(dpost, 0, 8, 171);
+    bl_copy(dst, 4, 4, 0 - 9, 0 - 9, src, 3, 2);
+    bl_blend(dst, 4, 4, 3, 3, src, 3, 2);
+    bl_mask(dst, 4, 4, 0 - 4, 2, src, 3, 2, 4);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        if load8(sper, i) != 171 || load8(spost, i) != 171
+            || load8(dper, i) != 171 || load8(dpost, i) != 171 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_blit_blend_alpha_zero_keeps_dst() -> bool {
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_store32(src, 0, bl_rgba(200, 100, 50, 0));
+    mem_store32(dst, 0, bl_rgba(10, 20, 30, 255));
+    let n: u32 = bl_blend(dst, 1, 1, 0, 0, src, 1, 1);
+    return n == 1 && mem_load32(dst, 0) == bl_rgba(10, 20, 30, 255);
+}
+
+fn test_blit_blend_alpha_255_equals_src() -> bool {
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_store32(src, 0, bl_rgba(200, 100, 50, 255));
+    mem_store32(dst, 0, bl_rgba(10, 20, 30, 255));
+    let n: u32 = bl_blend(dst, 1, 1, 0, 0, src, 1, 1);
+    return n == 1 && mem_load32(dst, 0) == bl_rgba(200, 100, 50, 255);
+}
+
+fn test_blit_blend_half_known_value() -> bool {
+    // Python 算的真值: (200,100,50,128) over (10,20,30,255) = 0xBF693C28
+    //   r = (200*128 + 10*127)/255 = 105, g = (100*128+20*127)/255 = 60,
+    //   b = (50*128+30*127)/255 = 40, a = (128*128+255*127)/255 = 191
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_store32(src, 0, bl_rgba(200, 100, 50, 128));
+    mem_store32(dst, 0, bl_rgba(10, 20, 30, 255));
+    bl_blend(dst, 1, 1, 0, 0, src, 1, 1);
+    let v: u32 = mem_load32(dst, 0);
+    return v == 3211344936 && bl_r(v) == 105 && bl_g(v) == 60
+        && bl_b(v) == 40 && bl_a(v) == 191;
+}
+
+fn test_blit_blend_differs_from_shift8() -> bool {
+    // 钉住"用 /255 而不是 >>8": 找一个两者不同的算例。
+    // src=1 (r 通道), a=1: (1*1 + 0*254)/255 = 0; 而 (1*1)>>8 = 0 —— 太弱。
+    // 取 r: s=255,a=200, d=0: 255*200/255 = 200; >>8 给 (255*200)>>8 = 199。
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_store32(src, 0, bl_rgba(255, 255, 255, 200));
+    mem_store32(dst, 0, bl_rgba(0, 0, 0, 0));
+    bl_blend(dst, 1, 1, 0, 0, src, 1, 1);
+    let v: u32 = mem_load32(dst, 0);
+    return bl_r(v) == 200 && bl_g(v) == 200 && bl_b(v) == 200;
+}
+
+fn test_blit_blend_noop_when_alpha_zero_all() -> bool {
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    mem_fill(src, 0, bl_bytes(2, 2), 0);
+    mem_store32(dst, 0, bcr());
+    mem_store32(dst, 4, bcg());
+    mem_store32(dst, 8, bcb());
+    mem_store32(dst, 12, bcy());
+    let n: u32 = bl_blend(dst, 2, 2, 0, 0, src, 2, 2);
+    return n == 4 && mem_load32(dst, 0) == bcr() && mem_load32(dst, 12) == bcy();
+}
+
+fn test_blit_scale_nn_double() -> bool {
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(4, 4));
+    mem_store32(src, 0, bcr());
+    mem_store32(src, 4, bcg());
+    mem_store32(src, 8, bcb());
+    mem_store32(src, 12, bcy());
+    let n: u32 = bl_scale_nn(dst, 4, 4, 0, 0, 4, 4, src, 2, 2);
+    // 2 倍: 每格摊成 2×2
+    let ok: bool = n == 16
+        && mem_load32(dst, 0) == bcr() && mem_load32(dst, 4) == bcr()
+        && mem_load32(dst, (1 * 4) * 4) == bcr()
+        && mem_load32(dst, (0 * 4 + 3) * 4) == bcg()
+        && mem_load32(dst, (3 * 4) * 4) == bcb()
+        && mem_load32(dst, (3 * 4 + 3) * 4) == bcy();
+    return ok;
+}
+
+fn test_blit_scale_nn_one_to_three() -> bool {
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(bl_bytes(3, 3));
+    mem_store32(src, 0, bcr());
+    mem_fill(dst, 0, bl_bytes(3, 3), 0);
+    let n: u32 = bl_scale_nn(dst, 3, 3, 0, 0, 3, 3, src, 1, 1);
+    let ok: bool = n == 9 && mem_load32(dst, 0) == bcr()
+        && mem_load32(dst, 32) == bcr() && mem_load32(dst, 16) == bcr();
+    return ok;
+}
+
+fn test_blit_scale_nn_downscale_picks_samples() -> bool {
+    // 4×4 -> 2×2: 抽样点是 (0,0) (2,0) (0,2) (2,2)。
+    let src: ptr = alloc(bl_bytes(4, 4));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    let i: u32 = 0;
+    while i < 16 {
+        mem_store32(src, i * 4, i * 100);
+        i = i + 1;
+    }
+    bl_scale_nn(dst, 2, 2, 0, 0, 2, 2, src, 4, 4);
+    // idx(0,0)=0, idx(2,0)=2 -> 200, idx(0,2)=8 -> 800, idx(2,2)=10 -> 1000
+    return mem_load32(dst, 0) == 0 && mem_load32(dst, 4) == 200
+        && mem_load32(dst, 8) == 800 && mem_load32(dst, 12) == 1000;
+}
+
+fn test_blit_scale_nn_clipped() -> bool {
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    mem_fill(src, 0, bl_bytes(2, 2), 6);
+    mem_fill(dst, 0, bl_bytes(2, 2), 0);
+    // 目标矩形放在 (1,1) 大小 4×4 -> 只有 (1,1) 在界内
+    let n: u32 = bl_scale_nn(dst, 2, 2, 1, 1, 4, 4, src, 2, 2);
+    return n == 1 && mem_load32(dst, (1 * 2 + 1) * 4) == bfill(6)
+        && mem_load32(dst, 0) == 0;
+}
+
+fn test_blit_scale_bilinear_corners_are_exact() -> bool {
+    // 2×2 -> 4×4: 四个角必须**恰好**是源的四角 (像素中心映射的对称性)。
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(4, 4));
+    mem_store32(src, 0, bcr());
+    mem_store32(src, 4, bcg());
+    mem_store32(src, 8, bcb());
+    mem_store32(src, 12, bcy());
+    let n: u32 = bl_scale_bilinear(dst, 4, 4, 0, 0, 4, 4, src, 2, 2);
+    let ok: bool = n == 16
+        && mem_load32(dst, 0) == bcr()
+        && mem_load32(dst, 3 * 4) == bcg()
+        && mem_load32(dst, (3 * 4) * 4) == bcb()
+        && mem_load32(dst, (3 * 4 + 3) * 4) == bcy();
+    return ok;
+}
+
+fn test_blit_scale_bilinear_identity_2x2() -> bool {
+    // 同尺寸放大: 输出必须**逐字节等于**输入 (这是"没把图拉偏"的最强证据)。
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    mem_store32(src, 0, bl_rgba(10, 20, 30, 255));
+    mem_store32(src, 4, bl_rgba(200, 210, 220, 255));
+    mem_store32(src, 8, bl_rgba(40, 50, 60, 255));
+    mem_store32(src, 12, bl_rgba(90, 100, 110, 255));
+    bl_scale_bilinear(dst, 2, 2, 0, 0, 2, 2, src, 2, 2);
+    return mem_eq(src, 0, dst, 0, 16);
+}
+
+fn test_blit_scale_bilinear_known_midpoint() -> bool {
+    // Python 真值: 2×2 -> 4×4 的 (1,1) 是 0xFF9F3F2F (r=159,g=63,b=47)。
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(4, 4));
+    mem_store32(src, 0, bcr());
+    mem_store32(src, 4, bcg());
+    mem_store32(src, 8, bcb());
+    mem_store32(src, 12, bcy());
+    bl_scale_bilinear(dst, 4, 4, 0, 0, 4, 4, src, 2, 2);
+    // (1,1) = 0xFF9F3F2F = 4288626479, (1,2) = 0xFF5FBF0F = 4284464911
+    return mem_load32(dst, (1 * 4 + 1) * 4) == 4288626479
+        && mem_load32(dst, (1 * 4 + 2) * 4) == 4284464911;
+}
+
+fn test_blit_tint_known_and_identity() -> bool {
+    let a: ptr = alloc(4);
+    mem_store32(a, 0, bl_rgba(200, 100, 50, 255));
+    let n: u32 = bl_tint(a, 1, 1, 128, 64, 32);
+    let ok: bool = n == 1 && mem_load32(a, 0) == 4284750086
+        && bl_r(mem_load32(a, 0)) == 100 && bl_g(mem_load32(a, 0)) == 25
+        && bl_b(mem_load32(a, 0)) == 6 && bl_a(mem_load32(a, 0)) == 255;
+    let b: ptr = alloc(4);
+    mem_store32(b, 0, bl_rgba(37, 89, 143, 200));
+    bl_tint(b, 1, 1, 255, 255, 255);
+    return ok && mem_load32(b, 0) == bl_rgba(37, 89, 143, 200);
+}
+
+fn test_blit_tint_leaves_alpha() -> bool {
+    let a: ptr = alloc(4);
+    mem_store32(a, 0, bl_rgba(200, 200, 200, 77));
+    bl_tint(a, 1, 1, 0, 0, 0);
+    // 三通道归零, alpha 仍是 77 —— 着色不该动透明度
+    return mem_load32(a, 0) == bl_rgba(0, 0, 0, 77);
+}
+
+fn test_blit_mask_color_key() -> bool {
+    let src: ptr = alloc(bl_bytes(2, 2));
+    let dst: ptr = alloc(bl_bytes(2, 2));
+    mem_store32(src, 0, bl_rgba(0, 255, 0, 255)); // 绿 -> 透明
+    mem_store32(src, 4, bcr());
+    // **别在这儿放 `bcg()`**: 它也是绿 (0x00FF00), 会被同一个 key 一起键掉, 于是
+    // 期望的"写 3 个"实际是 2 个。第一版就是这么写的 (同一张 2×2 里放了两个绿),
+    // 自检红的是"写少了", 而不是代码错。换成黄, 一张图里只剩**一个**绿。
+    mem_store32(src, 8, bcy());
+    mem_store32(src, 12, bcb());
+    mem_fill(dst, 0, bl_bytes(2, 2), 0);
+    // key = 0x00FF00 绿; 注意 src 的绿像素 alpha 是 255 —— 只比低 24 位所以要匹配上
+    let n: u32 = bl_mask(dst, 2, 2, 0, 0, src, 2, 2, 65280);
+    let ok: bool = n == 3 && mem_load32(dst, 0) == 0 && mem_load32(dst, 4) == bcr()
+        && mem_load32(dst, 8) == bcy() && mem_load32(dst, 12) == bcb();
+    return ok;
+}
+
+fn test_blit_mask_key_with_alpha_does_not_match_forever() -> bool {
+    // key 只取低 24 位: 传进来的 key 带了高位也不会"谁都不匹配"或"匹配错人"。
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_store32(src, 0, 0);
+    mem_store32(dst, 0, 12345);
+    let a: u32 = bl_mask(dst, 1, 1, 0, 0, src, 1, 1, 16777215); // key 低 24 位 = 0xFFFFFF
+    let b: u32 = bl_mask(dst, 1, 1, 0, 0, src, 1, 1, 4278190080); // key 低 24 位 = 0
+    return a == 1 && b == 0 && mem_load32(dst, 0) == 0;
+}
+
+fn test_blit_zero_size_is_noop() -> bool {
+    let src: ptr = alloc(4);
+    let dst: ptr = alloc(4);
+    mem_fill(dst, 0, 4, 3);
+    let a: u32 = bl_scale_nn(dst, 1, 1, 0, 0, 0, 2, src, 1, 1);
+    let b: u32 = bl_scale_bilinear(dst, 1, 1, 0, 0, 2, 0, src, 1, 1);
+    let c: u32 = bl_scale_nn(dst, 1, 1, 0, 0, 2, 2, src, 0, 1);
+    return a == 0 && b == 0 && c == 0 && mem_load32(dst, 0) == bfill(3);
+}

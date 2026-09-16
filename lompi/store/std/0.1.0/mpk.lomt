@@ -1,0 +1,1007 @@
+// std/mpk.lomt — MessagePack 读取 (游标式)
+//
+// 为什么需要它: JSON 读起来是文本, 一个 `1` 占 1 字节但它得先被判成数字; 一个
+// 32 位整数 `1234567` 在 JSON 里是 7 字节, 在 MessagePack 里是 **5 字节** (标记 + 4),
+// 而一个 1000 字节的字符串在 JSON 里还要再多吃转义。凡是"机器之间传结构化数据、
+// 不想让文本编码参与"的场合, msgpack 就是那层。RPC、日志、游戏状态同步都在用。
+//
+// 与 jsn 一样是**游标 API**: 取到的是"值在原文里的下标", 值本身不复制。
+// 区别在于 **msgpack 没有字符串解码这一步** —— 字符串就是它的字节 (UTF-8),
+// 所以 `mpk_str` 只做复制, 不做转义还原。
+//
+// 三条边界:
+//   1. **只读**。不写生成器。
+//   2. **浮点给位模式** (`mpk_f64bits` 返回 u64), 不给 `f64` —— 本层不该替调用方
+//      决定要不要解释 NaN/子正规数; 要算就把它交给 `f64` 模块。
+//   3. **严格**: 长度超界、类型标记不认识、多出尾巴都算错, 不猜。
+//
+// 关于 map 的键: msgpack 的键可以是**任意类型**。所以这里不假设键是字符串 ——
+// `mpk_map_first` 把**键的下标**交给调用方, 由调用方自己判类型比对; 只有
+// `mpk_map_get_str` 才是"键必须是字符串"的那条快路。
+//
+// 命名: 公开 mpk_*, 内部 m_*。自检 test_mpk_*。
+
+module mpk
+
+use "mem.lomt"
+
+pub const MPK_ERR: u32 = 4294967295;
+pub const MPK_NO: u32 = 4294967294;
+
+pub const MPK_NIL: u32 = 0;
+pub const MPK_BOOL: u32 = 1;
+pub const MPK_UINT: u32 = 2;
+pub const MPK_INT: u32 = 3;
+pub const MPK_F32: u32 = 4;
+pub const MPK_F64: u32 = 5;
+pub const MPK_STR: u32 = 6;
+pub const MPK_BIN: u32 = 7;
+pub const MPK_ARR: u32 = 8;
+pub const MPK_MAP: u32 = 9;
+pub const MPK_EXT: u32 = 10;
+
+/// 嵌套深度上限 —— 恶意/损坏的输入不该把栈吃掉。
+pub const MPK_MAX_DEPTH: u32 = 64;
+
+// ---------------------------------------------------------------- 大端读取
+
+fn m_be16(d: ptr, so: u32, i: u32) -> u32 {
+    return (load8(d, so + i) << 8) | load8(d, so + i + 1);
+}
+
+fn m_be32(d: ptr, so: u32, i: u32) -> u32 {
+    let v: u32 = load8(d, so + i);
+    v = (v << 8) | load8(d, so + i + 1);
+    v = (v << 8) | load8(d, so + i + 2);
+    return (v << 8) | load8(d, so + i + 3);
+}
+
+fn m_be64(d: ptr, so: u32, i: u32) -> u64 {
+    let v: u64 = 0;
+    let k: u32 = 0;
+    while k < 8 {
+        v = (v << 8) | (load8(d, so + i + k) as u64);
+        k = k + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 类型
+
+/// i 处的值的类型; 不认识的标记给 MPK_ERR。
+pub fn mpk_type_at(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    if i >= n {
+        return MPK_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c <= 127 {
+        return MPK_UINT; // positive fixint
+    }
+    if c >= 224 {
+        return MPK_INT; // negative fixint
+    }
+    if c >= 160 && c <= 191 {
+        return MPK_STR; // fixstr
+    }
+    if c >= 144 && c <= 159 {
+        return MPK_ARR; // fixarray
+    }
+    if c >= 128 && c <= 143 {
+        return MPK_MAP; // fixmap
+    }
+    if c == 192 {
+        return MPK_NIL;
+    }
+    if c == 194 || c == 195 {
+        return MPK_BOOL;
+    }
+    if c == 196 || c == 197 || c == 198 {
+        return MPK_BIN;
+    }
+    if c == 202 {
+        return MPK_F32;
+    }
+    if c == 203 {
+        return MPK_F64;
+    }
+    if c == 204 || c == 205 || c == 206 || c == 207 {
+        return MPK_UINT;
+    }
+    if c == 208 || c == 209 || c == 210 || c == 211 {
+        return MPK_INT;
+    }
+    if c == 217 || c == 218 || c == 219 {
+        return MPK_STR;
+    }
+    if c == 220 || c == 221 {
+        return MPK_ARR;
+    }
+    if c == 222 || c == 223 {
+        return MPK_MAP;
+    }
+    if c >= 212 && c <= 216 {
+        return MPK_EXT; // fixext 1/2/4/8/16
+    }
+    if c == 199 || c == 200 || c == 201 {
+        return MPK_EXT;
+    }
+    return MPK_ERR;
+}
+
+/// 值的**字节长度** (含标记), 不解析内容。给调用方开缓冲/切片用。
+/// 数组与 map 看的是"它自己的头有多长" (即 1 / 3 / 5 字节), **不含元素**。
+pub fn mpk_head_len(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t == MPK_ERR {
+        return MPK_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if t == MPK_STR || t == MPK_BIN || t == MPK_EXT {
+        // 长度字段的宽度
+        if c == 217 || c == 196 || c == 199 {
+            return 2;
+        }
+        if c == 218 || c == 197 || c == 200 {
+            return 3;
+        }
+        if c == 219 || c == 198 || c == 201 {
+            return 5;
+        }
+        // fixext1/2/4/8/16 没有长度字段, 头就是标记本身那 1 个字节 ——
+        // 它的类型字节跟在头**后面** (和 str/bin 一样的位置规则), 所以头不算它。
+        return 1; // fixstr / fixext
+    }
+    if c == 204 || c == 208 {
+        return 2;
+    }
+    if c == 205 || c == 209 {
+        return 3;
+    }
+    if c == 206 || c == 210 || c == 202 {
+        return 5;
+    }
+    if c == 207 || c == 211 || c == 203 {
+        return 9;
+    }
+    if c == 220 || c == 222 {
+        return 3;
+    }
+    if c == 221 || c == 223 {
+        return 5;
+    }
+    return 1; // fixint / nil / bool / fixarray / fixmap
+}
+
+/// 字符串/二进制/扩展的**载荷长度** (不含头和长度字段)。
+/// 对别的类型给 MPK_ERR —— 它们没有"载荷长度"这个概念。
+pub fn mpk_payload_len(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t == MPK_ERR {
+        return MPK_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if t == MPK_STR && c >= 160 && c <= 191 {
+        return c - 160;
+    }
+    if t == MPK_EXT && c >= 212 && c <= 216 {
+        // fixext 1/2/4/8/16
+        let k: u32 = c - 212;
+        if k == 0 {
+            return 1;
+        }
+        if k == 1 {
+            return 2;
+        }
+        if k == 2 {
+            return 4;
+        }
+        if k == 3 {
+            return 8;
+        }
+        return 16;
+    }
+    if c == 217 || c == 196 || c == 199 {
+        if i + 1 >= n {
+            return MPK_ERR;
+        }
+        return load8(d, so + i + 1);
+    }
+    if c == 218 || c == 197 || c == 200 {
+        if i + 2 >= n {
+            return MPK_ERR;
+        }
+        return m_be16(d, so, i + 1);
+    }
+    if c == 219 || c == 198 || c == 201 {
+        if i + 4 >= n {
+            return MPK_ERR;
+        }
+        return m_be32(d, so, i + 1);
+    }
+    return MPK_ERR;
+}
+
+/// 数组/映射的**元素个数**。
+pub fn mpk_count(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    if i >= n {
+        return MPK_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c >= 144 && c <= 159 {
+        return c - 144;
+    }
+    if c >= 128 && c <= 143 {
+        return c - 128;
+    }
+    if c == 220 || c == 222 {
+        if i + 2 >= n {
+            return MPK_ERR;
+        }
+        return m_be16(d, so, i + 1);
+    }
+    if c == 221 || c == 223 {
+        if i + 4 >= n {
+            return MPK_ERR;
+        }
+        return m_be32(d, so, i + 1);
+    }
+    return MPK_ERR;
+}
+
+// ---------------------------------------------------------------- 跳过 / 校验
+
+pub fn mpk_skip(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    return m_skip(d, so, n, i0, 0);
+}
+
+fn m_skip(d: ptr, so: u32, n: u32, i0: u32, depth: u32) -> u32 {
+    if depth > MPK_MAX_DEPTH {
+        return MPK_ERR;
+    }
+    let t: u32 = mpk_type_at(d, so, n, i0);
+    if t == MPK_ERR {
+        return MPK_ERR;
+    }
+    let h: u32 = mpk_head_len(d, so, n, i0);
+    if h == MPK_ERR {
+        return MPK_ERR;
+    }
+    let p: u32 = i0 + h;
+    if t == MPK_STR || t == MPK_BIN {
+        let L: u32 = mpk_payload_len(d, so, n, i0);
+        if L == MPK_ERR || p + L > n {
+            return MPK_ERR;
+        }
+        return p + L;
+    }
+    if t == MPK_EXT {
+        let L: u32 = mpk_payload_len(d, so, n, i0);
+        // 载荷后面还跟一个类型字节
+        if L == MPK_ERR || p + L + 1 > n {
+            return MPK_ERR;
+        }
+        return p + L + 1;
+    }
+    if t == MPK_ARR {
+        let cnt: u32 = mpk_count(d, so, n, i0);
+        if cnt == MPK_ERR {
+            return MPK_ERR;
+        }
+        let k: u32 = p;
+        let j: u32 = 0;
+        while j < cnt {
+            k = m_skip(d, so, n, k, depth + 1);
+            if k == MPK_ERR {
+                return MPK_ERR;
+            }
+            j = j + 1;
+        }
+        return k;
+    }
+    if t == MPK_MAP {
+        let cnt: u32 = mpk_count(d, so, n, i0);
+        if cnt == MPK_ERR {
+            return MPK_ERR;
+        }
+        let k: u32 = p;
+        let j: u32 = 0;
+        while j < cnt {
+            // 每对是 键 值 两个值
+            k = m_skip(d, so, n, k, depth + 1);
+            if k == MPK_ERR {
+                return MPK_ERR;
+            }
+            k = m_skip(d, so, n, k, depth + 1);
+            if k == MPK_ERR {
+                return MPK_ERR;
+            }
+            j = j + 1;
+        }
+        return k;
+    }
+    // 定长标量: 头的长度走完就到了
+    if p > n {
+        return MPK_ERR;
+    }
+    return p;
+}
+
+/// 整段正好是一个 msgpack 值 (不多不少)。
+pub fn mpk_validate(d: ptr, so: u32, n: u32) -> bool {
+    let e: u32 = mpk_skip(d, so, n, 0);
+    return e == n;
+}
+
+// ---------------------------------------------------------------- 取值
+
+pub fn mpk_is_nil(d: ptr, so: u32, n: u32, i: u32) -> bool {
+    return mpk_type_at(d, so, n, i) == MPK_NIL;
+}
+
+pub fn mpk_bool(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> bool {
+    mem_store32(ok_out, 0, 0);
+    if mpk_type_at(d, so, n, i) != MPK_BOOL {
+        return false;
+    }
+    mem_store32(ok_out, 0, 1);
+    return load8(d, so + i) == 195; // 0xc3 = true
+}
+
+/// 取无符号整数。装不下或类型不是无符号整数就置 ok=0。
+pub fn mpk_u64(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 0);
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t == MPK_ERR {
+        return 0;
+    }
+    let c: u32 = load8(d, so + i);
+    if t == MPK_UINT {
+        mem_store32(ok_out, 0, 1);
+        if c <= 127 {
+            return c as u64;
+        }
+        if c == 204 {
+            if i + 1 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            return load8(d, so + i + 1) as u64;
+        }
+        if c == 205 {
+            if i + 2 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            return m_be16(d, so, i + 1) as u64;
+        }
+        if c == 206 {
+            if i + 4 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            return m_be32(d, so, i + 1) as u64;
+        }
+        if i + 8 > n {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        return m_be64(d, so, i + 1);
+    }
+    if t == MPK_INT {
+        // 负数 (含负的 fixint) —— u64 取不下, 老老实实报 ok=0
+        return 0;
+    }
+    return 0;
+}
+
+/// 取有符号整数。无符号整数只要不超 i64 也收 (这是"数值"意义上的合理宽容)。
+pub fn mpk_i64(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> i64 {
+    mem_store32(ok_out, 0, 0);
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t == MPK_ERR {
+        return 0;
+    }
+    let c: u32 = load8(d, so + i);
+    if t == MPK_INT {
+        mem_store32(ok_out, 0, 1);
+        if c >= 224 {
+            // 负 fixint: 值 = c - 256
+            return (c as i64) - 256;
+        }
+        if c == 208 {
+            if i + 1 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            let b: u32 = load8(d, so + i + 1);
+            if b < 128 {
+                return b as i64;
+            }
+            return (b as i64) - 256;
+        }
+        if c == 209 {
+            if i + 2 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            let v: u32 = m_be16(d, so, i + 1);
+            if v < 32768 {
+                return v as i64;
+            }
+            return (v as i64) - 65536;
+        }
+        if c == 210 {
+            if i + 4 >= n {
+                mem_store32(ok_out, 0, 0);
+                return 0;
+            }
+            // int32 的 4 个字节是**补码**, 高位为 1 时要减去 2^32 —— 直接把 u32 当 i64
+            // 会得到 4294967295 而不是 -1。
+            let v: u32 = m_be32(d, so, i + 1);
+            if v < 2147483648 {
+                return v as i64;
+            }
+            return (v as i64) - 4294967296;
+        }
+        if i + 8 > n {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        return m_be64(d, so, i + 1) as i64;
+    }
+    if t == MPK_UINT {
+        let u: u64 = mpk_u64(d, so, n, i, ok_out);
+        if mem_load32(ok_out, 0) == 0 {
+            return 0;
+        }
+        if u > 9223372036854775807 {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        return u as i64;
+    }
+    return 0;
+}
+
+/// float64 的**位模式** (IEEE 754 二进制 64 位, 直接搬, 不做解释)。
+/// 要运算就把它交给 f64 模块; 要判 NaN/无穷看 f64bits。
+pub fn mpk_f64bits(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 0);
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t == MPK_F64 {
+        if i + 9 > n {
+            return 0;
+        }
+        mem_store32(ok_out, 0, 1);
+        return m_be64(d, so, i + 1);
+    }
+    if t == MPK_F32 {
+        // float32 -> float64: 低位补 0 就够了吗? **不够** —— 那只是把数值搬过去,
+        // 指数与尾数宽度不同。真正要算得走 f64conv; 这里只把 float32 的位模式
+        // 原样放到低 32 位, 并**不**冒充是 double。
+        return 0;
+    }
+    return 0;
+}
+
+/// float32 的位模式。float32 在 msgpack 里比 float64 省一半字节。
+pub fn mpk_f32bits(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> u32 {
+    mem_store32(ok_out, 0, 0);
+    if mpk_type_at(d, so, n, i) != MPK_F32 {
+        return 0;
+    }
+    if i + 5 > n {
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    return m_be32(d, so, i + 1);
+}
+
+/// 跳过标记与长度字段, 返回字符串第一个字节的下标。
+pub fn mpk_str_at(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let t: u32 = mpk_type_at(d, so, n, i);
+    if t != MPK_STR && t != MPK_BIN {
+        return MPK_ERR;
+    }
+    let h: u32 = mpk_head_len(d, so, n, i);
+    if h == MPK_ERR {
+        return MPK_ERR;
+    }
+    let L: u32 = mpk_payload_len(d, so, n, i);
+    if L == MPK_ERR || i + h + L > n {
+        return MPK_ERR;
+    }
+    return i + h;
+}
+
+/// 字符串/二进制**载荷**的长度 (不含头)。
+pub fn mpk_str_len(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    if mpk_str_at(d, so, n, i) == MPK_ERR {
+        return MPK_ERR;
+    }
+    return mpk_payload_len(d, so, n, i);
+}
+
+/// 把字符串/二进制载荷抄进 out。msgpack 的字符串就是字节, **没有转义要还原**。
+pub fn mpk_str(d: ptr, so: u32, n: u32, i: u32, out: ptr, oo: u32) -> u32 {
+    let p: u32 = mpk_str_at(d, so, n, i);
+    if p == MPK_ERR {
+        return MPK_ERR;
+    }
+    let L: u32 = mpk_payload_len(d, so, n, i);
+    mem_copy(out, oo, d, so + p, L);
+    return L;
+}
+
+/// 扩展类型: 载荷写进 out, 类型字节写进 type_out。
+pub fn mpk_ext(d: ptr, so: u32, n: u32, i: u32, out: ptr, oo: u32, type_out: ptr) -> u32 {
+    if mpk_type_at(d, so, n, i) != MPK_EXT {
+        return MPK_ERR;
+    }
+    let h: u32 = mpk_head_len(d, so, n, i);
+    if h == MPK_ERR {
+        return MPK_ERR;
+    }
+    let L: u32 = mpk_payload_len(d, so, n, i);
+    if L == MPK_ERR || i + h + L + 1 > n {
+        return MPK_ERR;
+    }
+    mem_store32(type_out, 0, load8(d, so + i + h));
+    mem_copy(out, oo, d, so + i + h + 1, L);
+    return L;
+}
+
+// ---------------------------------------------------------------- 数组 / 映射
+
+pub fn mpk_arr_first(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    if mpk_type_at(d, so, n, i) != MPK_ARR {
+        return MPK_ERR;
+    }
+    let cnt: u32 = mpk_count(d, so, n, i);
+    if cnt == MPK_ERR || cnt == 0 {
+        return MPK_NO;
+    }
+    let h: u32 = mpk_head_len(d, so, n, i);
+    if h == MPK_ERR || i + h > n {
+        return MPK_ERR;
+    }
+    return i + h;
+}
+
+/// 从 cur 走到下一个元素; 到头给 MPK_NO。
+pub fn mpk_arr_next(d: ptr, so: u32, n: u32, cur: u32) -> u32 {
+    let e: u32 = m_skip(d, so, n, cur, 0);
+    if e == MPK_ERR {
+        return MPK_ERR;
+    }
+    if e >= n {
+        return MPK_NO;
+    }
+    return e;
+}
+
+pub fn mpk_arr_len(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let c: u32 = mpk_count(d, so, n, i);
+    if c == MPK_ERR {
+        return MPK_ERR;
+    }
+    return c;
+}
+
+/// 第 idx 个元素的下标; 越界给 MPK_NO。
+pub fn mpk_arr_at(d: ptr, so: u32, n: u32, i: u32, idx: u32) -> u32 {
+    let v: u32 = mpk_arr_first(d, so, n, i);
+    let c: u32 = 0;
+    while v != MPK_NO && v != MPK_ERR && c < idx {
+        v = mpk_arr_next(d, so, n, v);
+        c = c + 1;
+    }
+    return v;
+}
+
+/// 映射第一项的**值**下标; 键的下标写进 key_out。空映射给 MPK_NO。
+pub fn mpk_map_first(d: ptr, so: u32, n: u32, i: u32, key_out: ptr) -> u32 {
+    mem_store32(key_out, 0, MPK_NO);
+    if mpk_type_at(d, so, n, i) != MPK_MAP {
+        return MPK_ERR;
+    }
+    let cnt: u32 = mpk_count(d, so, n, i);
+    if cnt == MPK_ERR || cnt == 0 {
+        return MPK_NO;
+    }
+    let h: u32 = mpk_head_len(d, so, n, i);
+    if h == MPK_ERR || i + h > n {
+        return MPK_ERR;
+    }
+    mem_store32(key_out, 0, i + h);
+    let v: u32 = m_skip(d, so, n, i + h, 0);
+    if v == MPK_ERR {
+        return MPK_ERR;
+    }
+    return v;
+}
+
+/// 从 cur_val (某项的值) 走到下一项的值; 键下标写进 key_out; 到头给 MPK_NO。
+pub fn mpk_map_next(d: ptr, so: u32, n: u32, cur_val: u32, key_out: ptr) -> u32 {
+    mem_store32(key_out, 0, MPK_NO);
+    let e: u32 = m_skip(d, so, n, cur_val, 0);
+    if e == MPK_ERR {
+        return MPK_ERR;
+    }
+    if e >= n {
+        return MPK_NO;
+    }
+    mem_store32(key_out, 0, e);
+    let v: u32 = m_skip(d, so, n, e, 0);
+    if v == MPK_ERR {
+        return MPK_ERR;
+    }
+    return v;
+}
+
+/// 按**字符串键**取值。键不是字符串时不会命中 (但它不会被跳过 —— 会走到下一项)。
+pub fn mpk_map_get_str(d: ptr, so: u32, n: u32, i: u32, kp: ptr, kn: u32, key_out: ptr) -> u32 {
+    let v: u32 = mpk_map_first(d, so, n, i, key_out);
+    while v != MPK_NO && v != MPK_ERR {
+        let k: u32 = mem_load32(key_out, 0);
+        if mpk_type_at(d, so, n, k) == MPK_STR {
+            let kl: u32 = mpk_payload_len(d, so, n, k);
+            if kl == kn {
+                let p: u32 = mpk_str_at(d, so, n, k);
+                if mem_eq(d, so + p, kp, 0, kn) {
+                    return v;
+                }
+            }
+        }
+        v = mpk_map_next(d, so, n, v, key_out);
+    }
+    return v;
+}
+
+pub fn mpk_map_get(d: ptr, so: u32, n: u32, i: u32, key: str, key_out: ptr) -> u32 {
+    return mpk_map_get_str(d, so, n, i, str_ptr(key), str_len(key), key_out);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// 把十六进制字面量解成字节写进 out, 返回字节数。自检里写向量比一串 store8 清楚得多。
+fn hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = hv(str_byte(s, k * 2));
+        let lo: u32 = hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+fn test_mpk_fixint_and_small() -> bool {
+    let d: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "007fcc80");
+    let a: u64 = mpk_u64(d, 0, n, 0, ok);
+    let oka: bool = a == 0 && mem_load32(ok, 0) == 1;
+    let b: u64 = mpk_u64(d, 0, n, 1, ok);
+    let okb: bool = b == 127;
+    let c: u64 = mpk_u64(d, 0, n, 2, ok);
+    return oka && okb && c == 128;
+}
+
+fn test_mpk_uint_widths() -> bool {
+    let d: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "cd0100ce00010000cfffffffffffffffff");
+    let a: u64 = mpk_u64(d, 0, n, 0, ok);
+    let ok1: bool = a == 256 && mem_load32(ok, 0) == 1;
+    let b: u64 = mpk_u64(d, 0, n, 3, ok);
+    let ok2: bool = b == 65536;
+    let c: u64 = mpk_u64(d, 0, n, 8, ok);
+    return ok1 && ok2 && c == 18446744073709551615 && mem_load32(ok, 0) == 1;
+}
+
+fn test_mpk_negative_fixint() -> bool {
+    // 0xff 是负 fixint = -1; 0xe0 = -32
+    let d: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "ffe0");
+    let zero: i64 = 0;
+    let a: i64 = mpk_i64(d, 0, n, 0, ok);
+    let ok1: bool = a == (zero - 1) && mem_load32(ok, 0) == 1;
+    let b: i64 = mpk_i64(d, 0, n, 1, ok);
+    return ok1 && b == (zero - 32);
+}
+
+fn test_mpk_int_widths() -> bool {
+    let d: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    let zero: i64 = 0;
+    // d0 80 = int8 -128; d1 ff7f = int16 -129; d3 <i64min>
+    let n: u32 = hx(d, "d080d1ff7fd38000000000000000");
+    let a: i64 = mpk_i64(d, 0, n, 0, ok);
+    let ok1: bool = a == (zero - 128) && mem_load32(ok, 0) == 1;
+    let b: i64 = mpk_i64(d, 0, n, 2, ok);
+    let ok2: bool = b == (zero - 129);
+    // d3 在下标 5 (0/1 是 d0 80, 2..4 是 d1 ff 7f)
+    let c: i64 = mpk_i64(d, 0, n, 5, ok);
+    return ok1 && ok2 && c == (zero - 9223372036854775807 - 1);
+}
+
+fn test_mpk_int32_sign_extension() -> bool {
+    // d2 ffffffff = int32 -1 —— 34 亿与 -1 的差别就在这里
+    let d: ptr = alloc(16);
+    let ok: ptr = alloc(8);
+    let zero: i64 = 0;
+    let n: u32 = hx(d, "d2ffffffff");
+    let a: i64 = mpk_i64(d, 0, n, 0, ok);
+    let ok1: bool = a == (zero - 1) && mem_load32(ok, 0) == 1;
+    let n2: u32 = hx(d, "d27fffffff");
+    let b: i64 = mpk_i64(d, 0, n2, 0, ok);
+    return ok1 && b == 2147483647;
+}
+
+fn test_mpk_u64_rejects_negative() -> bool {
+    let d: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "ff");
+    mpk_u64(d, 0, n, 0, ok);
+    return mem_load32(ok, 0) == 0;
+}
+
+fn test_mpk_nil_bool() -> bool {
+    let d: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "c0c2c3");
+    let a: bool = mpk_is_nil(d, 0, n, 0);
+    let f: bool = mpk_bool(d, 0, n, 1, ok);
+    let okf: bool = f == false && mem_load32(ok, 0) == 1;
+    let t: bool = mpk_bool(d, 0, n, 2, ok);
+    return a && okf && t == true && mem_load32(ok, 0) == 1
+        && mpk_is_nil(d, 0, n, 1) == false;
+}
+
+fn test_mpk_float64_bits() -> bool {
+    // cb 3ff0000000000000 = 1.0
+    let d: ptr = alloc(16);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "cb3ff0000000000000");
+    let v: u64 = mpk_f64bits(d, 0, n, 0, ok);
+    let ok1: bool = mem_load32(ok, 0) == 1 && v == 4607182418800017408;
+    // 0.1 是最能暴露"字节序搞错"的那个值
+    let n2: u32 = hx(d, "cb3fb999999999999a");
+    let v2: u64 = mpk_f64bits(d, 0, n2, 0, ok);
+    return ok1 && v2 == 4591870180066957722;
+}
+
+fn test_mpk_float32_bits() -> bool {
+    let d: ptr = alloc(16);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "ca3f800000");
+    let v: u32 = mpk_f32bits(d, 0, n, 0, ok);
+    let ok1: bool = mem_load32(ok, 0) == 1 && v == 1065353216;
+    // float32 **不**冒充 float64
+    mpk_f64bits(d, 0, n, 0, ok);
+    return ok1 && mem_load32(ok, 0) == 0;
+}
+
+fn test_mpk_fixstr() -> bool {
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    // a5 "hello"
+    let n: u32 = hx(d, "a568656c6c6f");
+    let L: u32 = mpk_str(d, 0, n, 0, out, 0);
+    let want: str = "hello";
+    return L == 5 && mem_eq(out, 0, str_ptr(want), 0, 5)
+        && mpk_str_len(d, 0, n, 0) == 5;
+}
+
+fn test_mpk_str8_and_empty() -> bool {
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    // d9 05 "world"
+    let n: u32 = hx(d, "d905776f726c64");
+    let L: u32 = mpk_str(d, 0, n, 0, out, 0);
+    let ok1: bool = L == 5 && mem_eq(out, 0, str_ptr("world"), 0, 5);
+    // a0 空字符串
+    let n2: u32 = hx(d, "a0");
+    return ok1 && mpk_str(d, 0, n2, 0, out, 0) == 0;
+}
+
+fn test_mpk_bin() -> bool {
+    // c4 03 01 02 03  —— 二进制和字符串一样取, 但类型不同
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let n: u32 = hx(d, "c403010203");
+    let L: u32 = mpk_str(d, 0, n, 0, out, 0);
+    let ok1: bool = L == 3 && load8(out, 0) == 1 && load8(out, 2) == 3;
+    let ok2: bool = mpk_type_at(d, 0, n, 0) == MPK_BIN;
+    return ok1 && ok2;
+}
+
+fn test_mpk_array() -> bool {
+    let d: ptr = alloc(32);
+    let ok: ptr = alloc(8);
+    // 93 01 02 03  —— 三个元素
+    let n: u32 = hx(d, "93010203");
+    let ok1: bool = mpk_type_at(d, 0, n, 0) == MPK_ARR && mpk_arr_len(d, 0, n, 0) == 3;
+    let e1: u32 = mpk_arr_at(d, 0, n, 0, 1);
+    let v: u64 = mpk_u64(d, 0, n, e1, ok);
+    let e9: u32 = mpk_arr_at(d, 0, n, 0, 9);
+    return ok1 && v == 2 && e9 == MPK_NO;
+}
+
+fn test_mpk_array_nested_and_skip() -> bool {
+    let d: ptr = alloc(64);
+    let ok: ptr = alloc(8);
+    // 92 81 a1 6b 05 90   ——  [ {"k":5}, [] ]
+    let n: u32 = hx(d, "9281a16b0590");
+    let ok1: bool = mpk_validate(d, 0, n) && mpk_arr_len(d, 0, n, 0) == 2;
+    let e0: u32 = mpk_arr_first(d, 0, n, 0);
+    let key: ptr = alloc(8);
+    let v: u32 = mpk_map_first(d, 0, n, e0, key);
+    let val: u64 = mpk_u64(d, 0, n, v, ok);
+    let e1: u32 = mpk_arr_next(d, 0, n, e0);
+    let ok2: bool = mpk_type_at(d, 0, n, e1) == MPK_ARR && mpk_arr_len(d, 0, n, e1) == 0;
+    return ok1 && val == 5 && ok2;
+}
+
+fn test_mpk_map_string_keys() -> bool {
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(32);
+    let key: ptr = alloc(8);
+    let ok: ptr = alloc(8);
+    // 82 a1 61 01 a1 62 02  ——  {"a":1,"b":2}
+    let n: u32 = hx(d, "82a16101a16202");
+    let ok1: bool = mpk_type_at(d, 0, n, 0) == MPK_MAP && mpk_validate(d, 0, n);
+    let vb: u32 = mpk_map_get(d, 0, n, 0, "b", key);
+    let v: u64 = mpk_u64(d, 0, n, vb, ok);
+    let vn: u32 = mpk_map_get(d, 0, n, 0, "zz", key);
+    // "a" 也要能取到 (不是只认最后一个)
+    let va: u32 = mpk_map_get(d, 0, n, 0, "a", key);
+    let vav: u64 = mpk_u64(d, 0, n, va, ok);
+    return ok1 && v == 2 && vn == MPK_NO && vav == 1;
+}
+
+fn test_mpk_map_integer_keys() -> bool {
+    // 键是整数时不能假设它是字符串: 遍历要照样走得动, 只是 mpk_map_get_str 不命中。
+    let d: ptr = alloc(64);
+    let key: ptr = alloc(8);
+    // 81 01 a3 6f 6e 65 —— {1: "one"}
+    let n: u32 = hx(d, "8101a36f6e65");
+    let ok1: bool = mpk_validate(d, 0, n);
+    let k: u32 = mpk_map_first(d, 0, n, 0, key);
+    let ok2: bool = mem_load32(key, 0) == 1 && mpk_type_at(d, 0, n, 1) == MPK_UINT;
+    let miss: u32 = mpk_map_get(d, 0, n, 0, "1", key);
+    return ok1 && ok2 && miss == MPK_NO && k != MPK_ERR;
+}
+
+fn test_mpk_ext8() -> bool {
+    // c7 04 7f 01 02 03 04 —— ext8: 长度 4, 类型 0x7f, 载荷 4 字节
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(16);
+    let t: ptr = alloc(8);
+    let n: u32 = hx(d, "c7047f01020304");
+    let L: u32 = mpk_ext(d, 0, n, 0, out, 0, t);
+    return L == 4 && mem_load32(t, 0) == 127 && load8(out, 0) == 1 && load8(out, 3) == 4
+        && mpk_validate(d, 0, n);
+}
+
+fn test_mpk_fixext_widths() -> bool {
+    // fixext1/2/4/8/16 的载荷长度来自**标记本身**, 没有长度字段 ——
+    // 表写错的话 4/8/16 会互相串。
+    //
+    // 这里每个向量用**独立缓冲**: 共用一个的话, 后面的 hx 会把前面的覆盖掉,
+    // 于是最后那句 validate 验的其实是最后一个向量 (写这条注释是因为我先踩了)。
+    let d: ptr = alloc(64);
+    let out: ptr = alloc(32);
+    let t: ptr = alloc(8);
+    let a: u32 = hx(d, "d4ff01");
+    let ok1: bool = mpk_ext(d, 0, a, 0, out, 0, t) == 1 && mem_load32(t, 0) == 255
+        && mpk_validate(d, 0, a);
+    let b: u32 = hx(d, "d5ff0102");
+    let ok2: bool = mpk_ext(d, 0, b, 0, out, 0, t) == 2 && mpk_validate(d, 0, b);
+    let c: u32 = hx(d, "d6ff01020304");
+    let ok3: bool = mpk_ext(d, 0, c, 0, out, 0, t) == 4 && load8(out, 3) == 4
+        && mpk_validate(d, 0, c);
+    let e: u32 = hx(d, "d7ff0102030405060708");
+    let ok4: bool = mpk_ext(d, 0, e, 0, out, 0, t) == 8 && load8(out, 7) == 8
+        && mpk_validate(d, 0, e);
+    let f: u32 = hx(d, "d8ff0102030405060708090a0b0c0d0e0f10");
+    let ok5: bool = mpk_ext(d, 0, f, 0, out, 0, t) == 16 && load8(out, 15) == 16
+        && mpk_validate(d, 0, f);
+    return ok1 && ok2 && ok3 && ok4 && ok5;
+}
+
+fn test_mpk_validate_rejects_truncated() -> bool {
+    let d: ptr = alloc(32);
+    // cd 01   —— uint16 只有 1 个字节
+    let a: u32 = hx(d, "cd01");
+    let ok1: bool = mpk_validate(d, 0, a) == false;
+    // a5 68 69  —— fixstr 说 5 字节, 只给 2
+    let b: u32 = hx(d, "a56869");
+    let ok2: bool = mpk_validate(d, 0, b) == false;
+    // 92 01  —— 数组说 2 个元素, 只有 1 个
+    let c: u32 = hx(d, "9201");
+    let ok3: bool = mpk_validate(d, 0, c) == false;
+    return ok1 && ok2 && ok3;
+}
+
+fn test_mpk_validate_rejects_trailing_and_unknown() -> bool {
+    let d: ptr = alloc(32);
+    // 00 00 —— 两个值连着, 不是"一个值"
+    let a: u32 = hx(d, "0000");
+    let ok1: bool = mpk_validate(d, 0, a) == false;
+    // c1 是 msgpack 里**唯一**保留不用的标记
+    let b: u32 = hx(d, "c1");
+    let ok2: bool = mpk_validate(d, 0, b) == false;
+    return ok1 && ok2;
+}
+
+fn test_mpk_head_len() -> bool {
+    let d: ptr = alloc(32);
+    let a: u32 = hx(d, "00");
+    let ok1: bool = mpk_head_len(d, 0, a, 0) == 1;
+    let b: u32 = hx(d, "cd0100");
+    let ok2: bool = mpk_head_len(d, 0, b, 0) == 3;
+    let c: u32 = hx(d, "cb0000000000000000");
+    let ok3: bool = mpk_head_len(d, 0, c, 0) == 9;
+    let e: u32 = hx(d, "da0003");
+    let ok4: bool = mpk_head_len(d, 0, e, 0) == 3;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_mpk_depth_guard() -> bool {
+    // 100 层嵌套数组: 必须被拒, 不是把栈吃穿。
+    let d: ptr = alloc(128);
+    let i: u32 = 0;
+    while i < 100 {
+        store8(d, i, 145 as u8); // fixarray(1)
+        i = i + 1;
+    }
+    store8(d, 100, 192 as u8); // nil 收尾
+    let deep: bool = mpk_validate(d, 0, 101) == false;
+    // 20 层要能过
+    let e: ptr = alloc(32);
+    let j: u32 = 0;
+    while j < 20 {
+        store8(e, j, 145 as u8);
+        j = j + 1;
+    }
+    store8(e, 20, 192 as u8);
+    return deep && mpk_validate(e, 0, 21);
+}
+
+fn test_mpk_realistic_document() -> bool {
+    // 一段实际会传的东西: {"id":7,"tags":["a","b"],"ok":true,"ratio":0.1}
+    let d: ptr = alloc(128);
+    let key: ptr = alloc(8);
+    let out: ptr = alloc(32);
+    let ok: ptr = alloc(8);
+    let n: u32 = hx(d, "84a2696407a47461677392a161a162a26f6bc3a5726174696fcb3fb999999999999a");
+    let ok1: bool = mpk_validate(d, 0, n);
+    let id: u32 = mpk_map_get(d, 0, n, 0, "id", key);
+    let v: u64 = mpk_u64(d, 0, n, id, ok);
+    let ok2: bool = v == 7 && mem_load32(ok, 0) == 1;
+    let tags: u32 = mpk_map_get(d, 0, n, 0, "tags", key);
+    let ok3: bool = mpk_arr_len(d, 0, n, tags) == 2;
+    let t1: u32 = mpk_arr_at(d, 0, n, tags, 1);
+    let L: u32 = mpk_str(d, 0, n, t1, out, 0);
+    let ok4: bool = L == 1 && load8(out, 0) == 98;
+    let okv: u32 = mpk_map_get(d, 0, n, 0, "ok", key);
+    let b: bool = mpk_bool(d, 0, n, okv, ok);
+    let ok5: bool = b && mem_load32(ok, 0) == 1;
+    let ratio: u32 = mpk_map_get(d, 0, n, 0, "ratio", key);
+    let rb: u64 = mpk_f64bits(d, 0, n, ratio, ok);
+    return ok1 && ok2 && ok3 && ok4 && ok5 && rb == 4591870180066957722;
+}

@@ -1,0 +1,460 @@
+// std/noise.lomt — 定点值噪声 / Perlin 噪声 / 分形叠加 (fbm)
+//
+// 为什么用**定点整数**而不是浮点: 这门语言没有浮点原语 (f64 是软浮点库, 在"每个像素
+// 算一次"的场合慢得离谱), 而噪声恰恰是那种每个采样点算一次的东西。所以坐标一律是
+// **放大 1024 倍的 i64**: x=1024 表示 1.0, x=512 表示 0.5。格子大小也是 1024。
+// 输入输出同量纲 —— 与 `interp.lomt` 的千分比约定一致, 于是插值可以直接复用它。
+//
+// **值域约定 (钉死, 自检里遍历验证)**:
+//   - `nz_value`  在 **[0, 1024]** —— "值噪声"是格点随机值的双线性插值。
+//   - `nz_perlin` 在 **[-1024, 1024]** —— 梯度噪声, 格点上**恰好为 0** (这是它区别于
+//     值噪声的定义性质之一, 见自检)。
+//   - `nz_fbm`    在 **[0, 1024]** —— 多个倍频值噪声的**加权平均** (不是求和!),
+//     所以它自动留在同一值域里, 不用调用方再归一化。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不做 SIMD / 批量接口**: 单个采样点一次函数调用。批量要走"一次算一行"的优化,
+//     那是调用方的循环布局决定, 不该由这一层规定。
+//   - **坐标有界**: `nz_fbm` 内部要左移频率 (x<<k), 所以要求 |x|, |y| < 2^30 且
+//     octaves <= 10。超了会静默回绕 —— 调用方自己判界 (本模块不 panic, 因为噪声常用在
+//     无处可报错的渲染循环里)。
+//   - **不是 Perlin 的原始实现**: 梯度只取 8 个方向 (±1,±1 那一圈), 不是 12/16 方向的
+//     `perlinImproved`。视觉上足够, 而且省掉一个梯度表。
+//   - **不保证各向同性**: 8 方向的梯度在对角方向略强 —— 这是简化梯度的代价, 写在明处。
+//
+// 命名: 公开 nz_*, 内部 nz_*。自检 test_noise_*。
+
+module noise
+
+use "interp.lomt"
+
+/// 格子大小 (定点): 1024 = 1.0。
+const NZ_CELL: i64 = 1024;
+
+// 混合常量 (十进制; 十六进制大数 `as u64` 会被截断到 32 位)。
+const NZ_C1: u64 = 11400714819323198485;
+const NZ_C2: u64 = 14029467366897019727;
+const NZ_C3: u64 = 1609587929392839161;
+const NZ_C4: u64 = 9650029242287828579;
+
+// ---------------------------------------------------------------- 基础
+
+/// 向下取整除法 (b > 0)。Rust/C 的 `/` 是向零截断, 负坐标下会差一格 —— 那一格就是
+/// 整个噪声图案的一半 (负半轴) 错位的来源。
+fn nz_floor_div(a: i64, b: i64) -> i64 {
+    let q: i64 = a / b;
+    if a < 0 && a % b != 0 {
+        q = q - 1;
+    }
+    return q;
+}
+
+/// 取模到 [0, b) (b > 0)。
+fn nz_frac(a: i64, b: i64) -> u32 {
+    return (a - nz_floor_div(a, b) * b) as u32;
+}
+
+/// `num / den` 四舍五入 (half away from zero)。本模块所有除法都走它 —— 截断会让
+/// "Perlin 在格点恰好为 0"这条性质在负半轴上时对时错。
+fn nz_rdiv(num: i64, den: i64) -> i64 {
+    let n: i64 = num;
+    let neg: u32 = 0;
+    if n < 0 {
+        n = 0 - n;
+        neg = 1;
+    }
+    let q: i64 = n / den;
+    let r: i64 = n % den;
+    if r * 2 >= den {
+        q = q + 1;
+    }
+    if neg == 1 {
+        return 0 - q;
+    }
+    return q;
+}
+
+/// 格点 (ix, iy) 的哈希。三个输入都要混进去 —— 只混坐标不混种子会让"换种子"变成
+/// 换了个平移而已 (图案一样, 只是挪了一格)。
+fn nz_hash2(ix: i64, iy: i64, seed: u64) -> u64 {
+    let h: u64 = (ix as u64) * NZ_C1 ^ (iy as u64) * NZ_C2 ^ seed;
+    h = h ^ (h >> 33);
+    h = h * NZ_C3;
+    h = h ^ (h >> 29);
+    h = h * NZ_C4;
+    h = h ^ (h >> 32);
+    return h;
+}
+
+/// 格点上的随机值, 落在 [0, 1024]。
+fn nz_lat_val(ix: i64, iy: i64, seed: u64) -> i64 {
+    let h: u64 = nz_hash2(ix, iy, seed);
+    // 24 位 -> [0,1024]: `x*1025 >> 24` 的最大值正好是 1024。
+    let x: u64 = (h >> 40) & 16777215;
+    return ((x * 1025) >> 24) as i64;
+}
+
+/// 梯度方向的 x 分量。8 个方向: 0..3 是四条轴 (右/上/左/下), 4..7 是四个对角。
+fn nz_gx(g: u32) -> i64 {
+    if g < 4 {
+        if g == 0 {
+            return 1024;
+        }
+        if g == 2 {
+            return 0 - 1024;
+        }
+        return 0;
+    }
+    if (g & 1) == 1 {
+        return 0 - 1024;
+    }
+    return 1024;
+}
+
+/// 梯度方向的 y 分量。
+fn nz_gy(g: u32) -> i64 {
+    if g < 4 {
+        if g == 1 {
+            return 1024;
+        }
+        if g == 3 {
+            return 0 - 1024;
+        }
+        return 0;
+    }
+    if (g & 2) == 2 {
+        return 0 - 1024;
+    }
+    return 1024;
+}
+
+// ---------------------------------------------------------------- 值噪声
+
+/// 值噪声, 输出 [0, 1024]。格点上是均匀随机值, 格内用 smoothstep 双线性插值。
+///
+/// 为什么用 smoothstep 而不是线性: 线性插值的格点处**一阶导不连续**, 画出来是能看见的
+/// 棋盘格边。smoothstep 端点导数为 0, 边界就"抹平"了。
+pub fn nz_value(x: i64, y: i64, seed: u64) -> i64 {
+    let ix: i64 = nz_floor_div(x, NZ_CELL);
+    let iy: i64 = nz_floor_div(y, NZ_CELL);
+    let fx: u32 = nz_frac(x, NZ_CELL);
+    let fy: u32 = nz_frac(y, NZ_CELL);
+    let sx: u32 = ip_smoothstep(fx) as u32;
+    let sy: u32 = ip_smoothstep(fy) as u32;
+    let v00: i64 = nz_lat_val(ix, iy, seed);
+    let v10: i64 = nz_lat_val(ix + 1, iy, seed);
+    let v01: i64 = nz_lat_val(ix, iy + 1, seed);
+    let v11: i64 = nz_lat_val(ix + 1, iy + 1, seed);
+    let a: i64 = ip_lerp(v00, v10, sx);
+    let b: i64 = ip_lerp(v01, v11, sx);
+    return ip_lerp(a, b, sy);
+}
+
+// ---------------------------------------------------------------- Perlin
+
+/// 四个角里某一个的"梯度点积"。`dx/dy` 是采样点相对该角的偏移 (定点, 可正可负)。
+/// **不开临时区** —— 噪声是每像素一次的调用, 堆是只涨不回收的 bump 堆, 这里一个
+/// alloc 会在渲染循环里被调用百万次。
+fn nz_dot(ix: i64, iy: i64, seed: u64, dx: i64, dy: i64) -> i64 {
+    let g: u32 = ((nz_hash2(ix, iy, seed) >> 60) & 7) as u32;
+    return nz_gx(g) * dx + nz_gy(g) * dy;
+}
+
+/// Perlin 梯度噪声, 输出 [-1024, 1024], **格点上恰好 0**。
+pub fn nz_perlin(x: i64, y: i64, seed: u64) -> i64 {
+    let ix: i64 = nz_floor_div(x, NZ_CELL);
+    let iy: i64 = nz_floor_div(y, NZ_CELL);
+    let fx: i64 = nz_frac(x, NZ_CELL) as i64;
+    let fy: i64 = nz_frac(y, NZ_CELL) as i64;
+    let sx: u32 = ip_smoothstep(fx as u32) as u32;
+    let sy: u32 = ip_smoothstep(fy as u32) as u32;
+    let n00: i64 = nz_dot(ix, iy, seed, fx, fy);
+    let n10: i64 = nz_dot(ix + 1, iy, seed, fx - NZ_CELL, fy);
+    let n01: i64 = nz_dot(ix, iy + 1, seed, fx, fy - NZ_CELL);
+    let n11: i64 = nz_dot(ix + 1, iy + 1, seed, fx - NZ_CELL, fy - NZ_CELL);
+    let a: i64 = ip_lerp(n00, n10, sx);
+    let b: i64 = ip_lerp(n01, n11, sx);
+    let v: i64 = ip_lerp(a, b, sy);
+    // 角点最大点积 = 1024*1024 + 1024*1024 = 2^21, 除以 2048 得到 ±1024。
+    return nz_rdiv(v, 2048);
+}
+
+// ---------------------------------------------------------------- fbm
+
+/// 分形叠加: octaves 个倍频值噪声的**加权平均** (振幅每层减半)。
+/// 输出 [0, 1024]。octaves == 0 -> 0; octaves > 10 夹到 10。
+pub fn nz_fbm(x: i64, y: i64, seed: u64, octaves: u32) -> i64 {
+    let oct: u32 = octaves;
+    if oct > 10 {
+        oct = 10;
+    }
+    let total: i64 = 0;
+    let amp: i64 = 1024;
+    let amp_sum: i64 = 0;
+    let f: i64 = 1;
+    let i: u32 = 0;
+    while i < oct && amp > 0 {
+        total = total + nz_value(x * f, y * f, seed + (i as u64)) * amp;
+        amp_sum = amp_sum + amp;
+        amp = amp / 2;
+        f = f * 2;
+        i = i + 1;
+    }
+    if amp_sum == 0 {
+        return 0;
+    }
+    return nz_rdiv(total, amp_sum);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_noise_value_deterministic() -> bool {
+    // 同一个输入两次必须一模一样 (噪声是纯函数, 没有内部状态)。
+    let ok: u32 = 1;
+    let x: i64 = 0 - 3000;
+    while x < 3000 {
+        let a: i64 = nz_value(x, 1234, 7);
+        let b: i64 = nz_value(x, 1234, 7);
+        if a != b {
+            ok = 0;
+        }
+        x = x + 137;
+    }
+    return ok == 1;
+}
+
+fn test_noise_value_range() -> bool {
+    // 遍历一批格点: 全部落在 [0,1024]。
+    let bad: u32 = 0;
+    let x: i64 = 0 - 5120;
+    while x <= 5120 {
+        let y: i64 = 0 - 5120;
+        while y <= 5120 {
+            let v: i64 = nz_value(x, y, 99);
+            if v < 0 || v > 1024 {
+                bad = 1;
+            }
+            y = y + 331;
+        }
+        x = x + 331;
+    }
+    return bad == 0;
+}
+
+fn test_noise_value_varies() -> bool {
+    // 不能是常数 —— "永远返回 0" 也能过值域检查, 过不了这条。
+    let seen: u32 = 0;
+    let x: i64 = 0;
+    let first: i64 = nz_value(0, 0, 3);
+    while x < 8000 {
+        if nz_value(x, 0, 3) != first {
+            seen = 1;
+        }
+        x = x + 500;
+    }
+    // 同一格内相邻点必须有变化 (否则等于常数内插)。
+    let inner: u32 = 0;
+    let k: i64 = 0;
+    let v0: i64 = nz_value(100, 100, 5);
+    while k < 1024 {
+        if nz_value(100 + k, 100, 5) != v0 {
+            inner = 1;
+        }
+        k = k + 64;
+    }
+    return seen == 1 && inner == 1;
+}
+
+fn test_noise_value_continuity() -> bool {
+    // 相邻采样点 (差 1/1024 格) 的值差必须有界 —— 有跳变就说明格点边界没接上。
+    // smoothstep 端点导数为 0, 所以界很紧; 给 8 留余量。
+    let bad: u32 = 0;
+    let prev: i64 = nz_value(0, 0, 11);
+    let x: i64 = 1;
+    while x < 4096 {
+        let v: i64 = nz_value(x, 0, 11);
+        let d: i64 = v - prev;
+        if d > 8 || d < 0 - 8 {
+            bad = 1;
+        }
+        prev = v;
+        x = x + 1;
+    }
+    return bad == 0;
+}
+
+fn test_noise_value_seed_changes_pattern() -> bool {
+    // 换种子必须换图案 (至少有一个采样点不同)。
+    let diff: u32 = 0;
+    let x: i64 = 0;
+    while x < 5000 {
+        if nz_value(x, 100, 1) != nz_value(x, 100, 2) {
+            diff = 1;
+        }
+        x = x + 250;
+    }
+    return diff == 1;
+}
+
+fn test_noise_perlin_zero_at_lattice() -> bool {
+    // **Perlin 的定义性质**: 格点上梯度点积恒为 0。这条比"值域对"有力得多 ——
+    // 它同时钉住了"偏差算对""插值端点 = 角点""格点识别对"三件事。
+    let ok: u32 = 1;
+    let k: i64 = 0 - 3;
+    while k <= 3 {
+        let m: i64 = 0 - 3;
+        while m <= 3 {
+            if nz_perlin(k * 1024, m * 1024, 42) != 0 {
+                ok = 0;
+            }
+            m = m + 1;
+        }
+        k = k + 1;
+    }
+    return ok == 1;
+}
+
+fn test_noise_perlin_range() -> bool {
+    let bad: u32 = 0;
+    let x: i64 = 0 - 5120;
+    while x <= 5120 {
+        let y: i64 = 0 - 5120;
+        while y <= 5120 {
+            let v: i64 = nz_perlin(x, y, 8);
+            if v < 0 - 1024 || v > 1024 {
+                bad = 1;
+            }
+            y = y + 341;
+        }
+        x = x + 341;
+    }
+    return bad == 0;
+}
+
+fn test_noise_perlin_deterministic_and_seeded() -> bool {
+    let ok: u32 = 1;
+    let diff: u32 = 0;
+    let x: i64 = 0;
+    while x < 6000 {
+        let a: i64 = nz_perlin(x, 77, 5);
+        let b: i64 = nz_perlin(x, 77, 5);
+        if a != b {
+            ok = 0;
+        }
+        if a != nz_perlin(x, 77, 6) {
+            diff = 1;
+        }
+        x = x + 271;
+    }
+    return ok == 1 && diff == 1;
+}
+
+fn test_noise_perlin_is_zero_mean_ish() -> bool {
+    // Perlin 有正有负 (值域跨 0) —— 全是正的就说明梯度的负半边丢了。
+    let pos: u32 = 0;
+    let neg: u32 = 0;
+    let x: i64 = 0;
+    while x < 20000 {
+        let v: i64 = nz_perlin(x, 300, 13);
+        if v > 0 {
+            pos = 1;
+        }
+        if v < 0 {
+            neg = 1;
+        }
+        x = x + 173;
+    }
+    return pos == 1 && neg == 1;
+}
+
+fn test_noise_fbm_range() -> bool {
+    let bad: u32 = 0;
+    let x: i64 = 0 - 3000;
+    while x <= 3000 {
+        let y: i64 = 0 - 3000;
+        while y <= 3000 {
+            let v: i64 = nz_fbm(x, y, 21, 5);
+            if v < 0 || v > 1024 {
+                bad = 1;
+            }
+            y = y + 511;
+        }
+        x = x + 511;
+    }
+    return bad == 0;
+}
+
+fn test_noise_fbm_deterministic() -> bool {
+    let ok: u32 = 1;
+    let x: i64 = 0;
+    while x < 4000 {
+        if nz_fbm(x, 900, 2, 6) != nz_fbm(x, 900, 2, 6) {
+            ok = 0;
+        }
+        x = x + 333;
+    }
+    return ok == 1;
+}
+
+fn test_noise_fbm_octaves() -> bool {
+    // octaves=0 -> 0; 1 个与 4 个倍频的结果必须不同 (否则"叠加"没生效)。
+    let z: bool = nz_fbm(1234, 567, 1, 0) == 0;
+    let diff: u32 = 0;
+    let x: i64 = 0;
+    while x < 9000 {
+        if nz_fbm(x, 15, 4, 1) != nz_fbm(x, 15, 4, 4) {
+            diff = 1;
+        }
+        x = x + 199;
+    }
+    // 超过 10 被夹到 10, 所以 10 与 20 应当相同。
+    let clamp: bool = nz_fbm(800, 900, 6, 10) == nz_fbm(800, 900, 6, 20);
+    return z && diff == 1 && clamp;
+}
+
+fn test_noise_negative_axis_is_continuous() -> bool {
+    // **负半轴的 floor 处理**: 若用向零截断 (而非向下取整), x 从 -1 到 0 时
+    // 格号与格内偏移会同时跳变, 值就会在 0 处出现一个大跳 —— 围绕 0 扫一遍就能抓住。
+    // (`nz_floor_div` 本身的正确性另有一条专测, 这里测的是它在整条链路上的效果。)
+    let bad: u32 = 0;
+    let prev: i64 = nz_value(0 - 2048, 0, 31);
+    let x: i64 = 0 - 2047;
+    while x <= 2048 {
+        let v: i64 = nz_value(x, 0, 31);
+        let d: i64 = v - prev;
+        if d > 8 || d < 0 - 8 {
+            bad = 1;
+        }
+        if v < 0 || v > 1024 {
+            bad = 1;
+        }
+        prev = v;
+        x = x + 1;
+    }
+    return bad == 0;
+}
+
+fn test_noise_floor_and_frac_helpers() -> bool {
+    // 自己钉住两个底层助手 (上面所有自检都建在它们上)。
+    let ok1: bool = nz_floor_div(2048, 1024) == 2 && nz_floor_div(2047, 1024) == 1
+        && nz_floor_div(0, 1024) == 0 && nz_floor_div(0 - 1, 1024) == 0 - 1
+        && nz_floor_div(0 - 1024, 1024) == 0 - 1 && nz_floor_div(0 - 1025, 1024) == 0 - 2;
+    let ok2: bool = nz_frac(0, 1024) == 0 && nz_frac(1023, 1024) == 1023
+        && nz_frac(1024, 1024) == 0 && nz_frac(0 - 1, 1024) == 1023
+        && nz_frac(0 - 1024, 1024) == 0 && nz_frac(0 - 1025, 1024) == 1023;
+    return ok1 && ok2;
+}
+
+fn test_noise_value_at_lattice_is_one_of_1025() -> bool {
+    // 格点上的值必须是 [0,1024] 里的整数 (格点无插值误差)。
+    let bad: u32 = 0;
+    let k: i64 = 0 - 6;
+    while k <= 6 {
+        let v: i64 = nz_value(k * 1024, 2 * 1024, 77);
+        if v < 0 || v > 1024 {
+            bad = 1;
+        }
+        k = k + 1;
+    }
+    return bad == 0;
+}

@@ -12,15 +12,19 @@
 
 它是**用 Loment 写的**，由同一条自举链编出来，所以"随包发行"这件事本身是可复现的。
 
-## 1. 正本在外面，仓里只放快照（两组配对）
+## 1. 正本在外面，仓里只放快照（三组配对）
 
-lompi **在外面开发**，本仓 `lompi/` 是**随包发布的快照**。有两组配对，
+lompi **在外面开发**，本仓 `lompi/` 是**随包发布的快照**。有三组配对，
 `tools/lompi_sync.py` 管它们：
 
 | 组 | 正本 | 仓内副本 |
 |---|---|---|
 | 源码 + 夹具 | `D:\Dev\Lolment-ku\lompi`（`--from-dir` / `LOMENT_LOMPI_DEV` 可换） | `lompi/` |
 | agent 指南 | `~/.claude/skills/lompi/SKILL.md`（lompi 线在那里写它） | `.claude/skills/lompi/SKILL.md` |
+| 标准库 store | `D:\Dev\Lolment-ku\store`（`LOMENT_LOMPI_STORE` 可换） | `lompi/store/` |
+
+第三组是**整棵树照收**（`<name>/<version>/*`，没有"顶层文件白名单"可言），所以它的清单
+是 `None` 而不是一串模块名 —— 逐层列出来只会漏。
 
 ```
 python tools/lompi_sync.py                # 门禁模式: 逐字节比 (正本不在本机则**明说跳过**)
@@ -43,7 +47,17 @@ python tools/lompi_sync.py --status       # 只打印两边的摘要与各自哈
   CWD 那一格是给**路径形式的 `use "..."`** 用的 —— 自举镜按 **CWD** 解析相对路径
   （参考实现按入口文件所在目录），仓库其它工具全用名字形式（`use bytes`），所以它们一律
   写 `"."`。**lompi 是唯一一个用路径形式 import 的**，它那格是 `"lompi"`。
-- 包里落 `bin/lompi`（Windows 是 `bin/lompi.exe`）、`share/lompi/skill/SKILL.md`。
+- 包里落 `bin/lompi`（Windows 是 `bin/lompi.exe`）、`share/lompi/skill/SKILL.md`、
+  `share/lompi/store/`。
+- **标准库随包一起装**（用户 2026-09-16 定）：`std`（127 个模块 + `std.lomt` 门面）与
+  `host`，各带一份 `pkg.lomp`，**共 137 个文件**。包里那份是**纯净副本**，安装器再照
+  lompi 自己认的全局 store 拷一份过去。
+  - **目的地一律问 `lompi config`**，不在这儿重推 `cfg_root()` 的三条规则 ——
+    重推一份的下场是**漂**：lompi 改了规则，装在别处的库它自己看不见，而这边一切正常。
+    判据 `test_installers_ask_lompi_where_the_store_is` 盯这条（脚本里出现 `.lompi`
+    就红，那是 fallback 规则的尾巴、自己推才写得出）。
+  - **卸载只收回本包发过的那几个 `<name>/<version>`**（从装出来的纯净副本里列出来），
+    用户自己装的别的版本不碰。卸载时**先问再删** —— `bin/lompi` 一删就问不着了。
 - **agent 指南与 loment 那份同一套装法**（用户 2026-09-15 要求）：
   装进 `~/.claude/skills/lompi/`、往 Codex 的 `~/.codex/AGENTS.md` 写一段**独立标记**的
   指针、卸载时摘掉。**标记用 `lompi:` 前缀而不复用 `loment:`** —— 两份指南是两件事，
@@ -66,7 +80,7 @@ python tools/lompi_sync.py --status       # 只打印两边的摘要与各自哈
 判据 `test_lompi_is_not_a_loment_subcommand` 钉着这条（往启动器或 `lomcli.lomt` 的目录里
 塞 `lompi` 会立刻红）。
 
-## 4. 判据（13 条，`tools/loment_lompi_test.py`）
+## 4. 判据（17 条，`tools/loment_lompi_test.py`）
 
 判的是"它作为**发行件的一部分**是好的"，不判 lompi 自己的功能对不对（那是它的自检驱动的事）。
 
@@ -76,10 +90,13 @@ python tools/lompi_sync.py --status       # 只打印两边的摘要与各自哈
 | 跑得对 | **`lpi_test.lomt` 逐模块自检全绿**（7 个模块，退出码即结论）；`index` 列出夹具里的 5 个包，且**同名不同版本给不同内容哈希**；`check` 有**分辨力**（合法库退 0 说 OK，现造的坏库退 1）；`show` 报完整 64 位内容哈希；`version` 与源码真源一致且钉在 0.1.0 |
 | 边界 | `lompi` 不出现在 `lomcli.lomt` 的命令目录 / help 总览，也不出现在两个启动器里 |
 | 装法 | 包里有指南；两个安装器都按 loment 那套处理它，**且带自己的标记**；卸载摘得掉；五个脚本纯 ASCII |
+| 标准库 | 137 个文件一件不少地进包、进 `_fresh_sources`（**源码直出**，漏重打包就红）；发布清单逐条覆盖 store；两个安装器都**问 `lompi config`** 而不是自己推规则；端到端**真装一遍**再让 lompi 自己去 `index` 那个 store |
 | 一致性 | 仓内快照与外面正本逐字节一致（正本不在则明说跳过） |
 
 **证伪过**：往启动器塞 `lompi` → 红；安装脚本混一个中文字符 → 红；把 lompi 的标记并成
-loment 的 → 红；版本号漂到 0.2.0 → 红。
+loment 的 → 红；版本号漂到 0.2.0 → 红。加标准库这一轮又当场抓了三条自己的错：
+判据把 store 路径少写了一层版本目录、装前/装后的前缀本就该是两个（写成了相等）、
+以及发布清单里的 `**` 在自举的 glob 上**不递归**。
 
 ## 5. 诚实清单
 
@@ -91,5 +108,19 @@ loment 的 → 红；版本号漂到 0.2.0 → 红。
 - **`lpi_test.lomt` 不进发行包**（它不是 `bin/lompi` 的组成部分），但**跟着一起收进仓**，
   留在这里当判据用 —— 它比冒烟一条命令强得多。
 - **lompi 自己的功能判据在它那边**（正本里的自检驱动）。本文件只守"随包"这一层。
+- **POSIX 上全局根是个带反斜杠的怪名字**。`cfg_root()` 是**为 Windows 写的**：它认
+  `\AppData\Local\` 与 `\Users\`，都不是就退到 `<exe 目录>\.lompi`。而 `cfg_join()` 拼
+  子路径时**一律用 `\`** —— 于是在 Linux 上 `lompi config` 打出来的是
+  `/opt/loment/bin\.lompi\store`，`mkdir -p` 会造出一个名字里**带反斜杠**的目录。
+  它**能用**（lompi 自己算的是同一个串，找得到），只是难看。**这是 lompi 的设计，不是
+  装脚本的锅** —— 装脚本照它说的那个路径放，不自作主张改成 `/`（改了它就真找不着了）。
+  要治得治 lompi 那边（它的正本在开发区）。安装时那个路径会**原样打出来**，不藏。
+- **发布清单里 store 的版本号是写死的**（`lompi/store/std/0.1.0/*`），因为自举的 glob
+  只认"一段目录 + 一个名字模式"：`lompi/store/**` 在那边只展开一层，把 `std`/`host`
+  两个**目录**当文件收了进来（实测 215 vs 213）。两条清单必须同时改，所以钉了一条判据
+  `test_release_manifest_covers_every_store_file` —— 否则"库升版、清单没跟上"时
+  `loment_release --check` 会**看不见文件却照样绿**。
+- **`loment_dist --check` 原来有个洞，这轮补了**：它只在"归档里有这个条目"时才发现陈旧，
+  于是新加一个 store 模块却忘了重打包，永远抓不到。现在**归档里缺条目也算陈旧**。
 - 打包用的是 **stage1**（自举镜），不是参考实现 —— 因为发行包就是这么编的，判据要判
   "发出去的那个东西"。

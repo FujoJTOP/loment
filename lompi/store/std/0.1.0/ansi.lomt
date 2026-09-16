@@ -1,0 +1,690 @@
+// std/ansi.lomt — ANSI 转义序列 (SGR / 光标 / 屏幕) + 流解析
+//
+// 为什么需要它: 终端上"上一个颜色"是**状态**不是函数调用 —— 你想让某几个字变红, 就得
+// 往流里插一段 `ESC [ 3 1 m`, 而这段字节的**每一位**都有人写错过。把它收进一个模块,
+// 写错的机会就从"每次拼串"降到"抄一次常量"。
+//
+// **这门语言没有 `\x1b` 也没有 `\e`** —— 转义只有 `\n \t \" \\` 四种。所以 ESC 一律是
+// `store8(out, k, 27 as u8)`, **逐字节写**。同理 `\r` 在这门语言里会**静默退化成字母 r**
+// (见项目踩坑记录), 所以本模块里没有任何一处依赖 `\r`。
+//
+// 约定: 所有发射函数的签名都是 `fn(out, oo) -> u32`, 返回**写完之后的下一个位置**
+// (不是写了几字节) —— 这样一串调用可以自然地串起来:
+//     let k: u32 = 0;
+//     k = an_reset(out, k);
+//     k = an_fg(out, k, 196);
+// 想要字节数就 `k - oo`。
+//
+// attr 编码 (给 an_scan / tui 用): 一个 u32
+//     0..255           —— 调色板索引 (0..255 的 256 色终端)
+//     0x01000000 | RGB —— 真彩色 (bit24 是"这是 RGB"的标记, 不是颜色的一部分)
+//     AN_DEFAULT       —— 终端默认色 (0xFFFFFFFF)
+// 为什么用 bit24 当标记而不是"小的 RGB 也当索引": RGB 的 (0,0,5) 和调色板 5 号
+// 数值上撞车, 不设标记就没法区分 —— 而这正是 256 色与真彩混用的终端里最常见的一处静默错。
+//
+// 诚实清单:
+//   - 只认 **CSI 序列** (`ESC [ ... 终结字节`) 的 `m`; 其它终结字节 (光标移动等) 会
+//     被跳过但**不改属性** —— 这是对的 (它们本来就不改属性), 但本层不去执行它们。
+//   - 只解析 SGR 的常用子集 (0-9 / 22 / 30-37 / 39 / 40-47 / 49 / 90-97 / 100-107 /
+//     38/48 的 5;n 与 2;r;g;b)。**不认识的就忽略** (不报错) —— 终端本来就该忽略未知 SGR,
+//     而"因为我认不得就把整个属性清掉"会更糟。
+//   - 不做 UTF-8 解析 (那是 width.lomt 的事), 不光标定位, 不管宽字符。
+//
+// 命名: 公开 an_*, 内部 an_*(同样前缀 —— 私有名也占全局拼写, 见 mem.lomt 头注)。
+// 自检 test_ansi_*。
+
+module ansi
+
+use "mem.lomt"
+
+/// 终端默认色。**每个值都是合法颜色** —— 所以本模块不用 0xFFFFFFFF 之类当"无"哨兵时
+/// 要额外想清楚; 这里它是真的"默认色"。
+pub const AN_DEFAULT: u32 = 4294967295;
+
+/// attr 的槽位 (state 缓冲里的字节偏移)。
+pub const AN_FG: u32 = 0;
+pub const AN_BG: u32 = 4;
+pub const AN_FLAGS: u32 = 8;
+/// 解析用的临时槽 —— 让 `an_scan` **零分配**: 参数值借这个槽在两个函数之间传。
+pub const AN_SCRATCH: u32 = 12;
+/// `an_scan` 的 state 缓冲至少要多少字节。
+pub const AN_STATE_BYTES: u32 = 16;
+
+// attr 的 flag 位
+pub const AN_BOLD: u32 = 1;
+pub const AN_DIM: u32 = 2;
+pub const AN_ITALIC: u32 = 4;
+pub const AN_UNDERLINE: u32 = 8;
+pub const AN_REVERSE: u32 = 16;
+pub const AN_HIDDEN: u32 = 32;
+
+/// RGB 标记位 (attr 里)。
+pub const AN_RGB_BIT: u32 = 16777216;
+
+// ---------------------------------------------------------------- 低位写入器
+
+fn an_pc(out: ptr, w: u32, b: u32) -> u32 {
+    store8(out, w, b as u8);
+    return w + 1;
+}
+
+/// `ESC [`
+fn an_csi(out: ptr, w0: u32) -> u32 {
+    let w: u32 = w0;
+    w = an_pc(out, w, 27);
+    w = an_pc(out, w, 91);
+    return w;
+}
+
+/// 十进制, 至少一位。**不用 alloc**: 先求出最高位权, 从高位往低位写 ——
+/// 每个 SGR 都 alloc 一次的话, 一个 TUI 每帧几百次分配, 堆 (64 KiB 不回收) 直接见底。
+fn an_pu(out: ptr, w0: u32, v: u32) -> u32 {
+    let w: u32 = w0;
+    if v == 0 {
+        return an_pc(out, w, 48);
+    }
+    let p: u32 = 1;
+    while p <= v / 10 {
+        p = p * 10;
+    }
+    let x: u32 = v;
+    while p > 0 {
+        let d: u32 = x / p;
+        w = an_pc(out, w, 48 + d);
+        x = x - d * p;
+        if p == 1 {
+            p = 0;
+        } else {
+            p = p / 10;
+        }
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- SGR
+
+pub fn an_reset(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pc(out, w, 48); // '0'
+    return an_pc(out, w, 109); // 'm'
+}
+
+/// `ESC [ <code> m` 的单参数版本 (粗体/斜体/下划线/反显)。
+fn an_sgr1(out: ptr, oo: u32, code: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pu(out, w, code);
+    return an_pc(out, w, 109);
+}
+
+pub fn an_bold(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 1);
+}
+
+pub fn an_dim(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 2);
+}
+
+pub fn an_italic(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 3);
+}
+
+pub fn an_underline(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 4);
+}
+
+pub fn an_reverse(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 7);
+}
+
+/// 256 色: `ESC [ 38 ; 5 ; idx m` (base=38 前景) 或 `48` (背景)。
+fn an_sgr256(out: ptr, oo: u32, base: u32, idx: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pu(out, w, base);
+    w = an_pc(out, w, 59); // ';'
+    w = an_pu(out, w, 5);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, idx);
+    return an_pc(out, w, 109);
+}
+
+pub fn an_fg(out: ptr, oo: u32, idx: u32) -> u32 {
+    return an_sgr256(out, oo, 38, idx);
+}
+
+pub fn an_bg(out: ptr, oo: u32, idx: u32) -> u32 {
+    return an_sgr256(out, oo, 48, idx);
+}
+
+/// 真彩色: `ESC [ 38 ; 2 ; r ; g ; b m` (base=38 前景 / 48 背景)。
+fn an_sgr_rgb(out: ptr, oo: u32, base: u32, r: u32, g: u32, b: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pu(out, w, base);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, 2);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, r & 255);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, g & 255);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, b & 255);
+    return an_pc(out, w, 109);
+}
+
+pub fn an_rgb_fg(out: ptr, oo: u32, r: u32, g: u32, b: u32) -> u32 {
+    return an_sgr_rgb(out, oo, 38, r, g, b);
+}
+
+pub fn an_rgb_bg(out: ptr, oo: u32, r: u32, g: u32, b: u32) -> u32 {
+    return an_sgr_rgb(out, oo, 48, r, g, b);
+}
+
+pub fn an_default_fg(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 39);
+}
+
+pub fn an_default_bg(out: ptr, oo: u32) -> u32 {
+    return an_sgr1(out, oo, 49);
+}
+
+// ---------------------------------------------------------------- 光标 / 屏幕
+
+/// 移到 (row, col), **都是 1 基** (终端的行列惯例)。`ESC [ r ; c H`。
+pub fn an_move(out: ptr, oo: u32, row: u32, col: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pu(out, w, row);
+    w = an_pc(out, w, 59);
+    w = an_pu(out, w, col);
+    return an_pc(out, w, 72); // 'H'
+}
+
+pub fn an_home(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    return an_pc(out, w, 72);
+}
+
+fn an_cursor(out: ptr, oo: u32, n: u32, fin: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pu(out, w, n);
+    return an_pc(out, w, fin);
+}
+
+pub fn an_up(out: ptr, oo: u32, n: u32) -> u32 {
+    return an_cursor(out, oo, n, 65); // 'A'
+}
+
+pub fn an_down(out: ptr, oo: u32, n: u32) -> u32 {
+    return an_cursor(out, oo, n, 66); // 'B'
+}
+
+pub fn an_right(out: ptr, oo: u32, n: u32) -> u32 {
+    return an_cursor(out, oo, n, 67); // 'C'
+}
+
+pub fn an_left(out: ptr, oo: u32, n: u32) -> u32 {
+    return an_cursor(out, oo, n, 68); // 'D'
+}
+
+/// `ESC [ ? 2 5 l` —— 藏光标。
+pub fn an_hide(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pc(out, w, 63); // '?'
+    w = an_pc(out, w, 50);
+    w = an_pc(out, w, 53);
+    return an_pc(out, w, 108); // 'l'
+}
+
+/// `ESC [ ? 2 5 h` —— 显光标。
+pub fn an_show(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pc(out, w, 63);
+    w = an_pc(out, w, 50);
+    w = an_pc(out, w, 53);
+    return an_pc(out, w, 104); // 'h'
+}
+
+/// `ESC [ 2 J` —— 清整屏 (光标不动)。
+pub fn an_clear(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pc(out, w, 50);
+    return an_pc(out, w, 74); // 'J'
+}
+
+/// `ESC [ 2 K` —— 清整行。
+pub fn an_clear_line(out: ptr, oo: u32) -> u32 {
+    let w: u32 = an_csi(out, oo);
+    w = an_pc(out, w, 50);
+    return an_pc(out, w, 75); // 'K'
+}
+
+// ---------------------------------------------------------------- attr 工具
+
+pub fn an_attr_rgb(r: u32, g: u32, b: u32) -> u32 {
+    return AN_RGB_BIT | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
+pub fn an_is_rgb(v: u32) -> bool {
+    if v == AN_DEFAULT {
+        return false;
+    }
+    return (v & AN_RGB_BIT) != 0;
+}
+
+/// 取出真彩色的 0x00RRGGBB (v 不是 RGB 时结果无意义 —— 先 `an_is_rgb`)。
+pub fn an_rgb_of(v: u32) -> u32 {
+    return v & 16777215;
+}
+
+pub fn an_pal_of(v: u32) -> u32 {
+    return v & 255;
+}
+
+pub fn an_scan_init(state: ptr) {
+    mem_store32(state, AN_FG, AN_DEFAULT);
+    mem_store32(state, AN_BG, AN_DEFAULT);
+    mem_store32(state, AN_FLAGS, 0);
+    mem_store32(state, AN_SCRATCH, 0);
+}
+
+pub fn an_fg_of(state: ptr) -> u32 {
+    return mem_load32(state, AN_FG);
+}
+
+pub fn an_bg_of(state: ptr) -> u32 {
+    return mem_load32(state, AN_BG);
+}
+
+pub fn an_flags_of(state: ptr) -> u32 {
+    return mem_load32(state, AN_FLAGS);
+}
+
+// ---------------------------------------------------------------- SGR 解析
+
+/// 读下一个十进制参数 (到 `;` 或 e), 值写进 state 的临时槽, 返回新位置。
+/// **空参数当 0** (SGR 的惯例, 比如 `ESC[;1m` 等价于 `ESC[0;1m`)。
+fn an_param(buf: ptr, e: u32, i0: u32, state: ptr) -> u32 {
+    let i: u32 = i0;
+    let v: u32 = 0;
+    while i < e && load8(buf, i) != 59 {
+        let c: u32 = load8(buf, i);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        i = i + 1;
+    }
+    if i < e {
+        i = i + 1;
+    }
+    mem_store32(state, AN_SCRATCH, v);
+    return i;
+}
+
+fn an_set_fg(state: ptr, v: u32) {
+    mem_store32(state, AN_FG, v);
+}
+
+fn an_set_bg(state: ptr, v: u32) {
+    mem_store32(state, AN_BG, v);
+}
+
+/// 把 buf[p .. e) 这串 SGR 参数**就地应用**到 state 上。
+fn an_sgr_apply(buf: ptr, p: u32, e: u32, state: ptr) {
+    let i: u32 = p;
+    while i < e {
+        i = an_param(buf, e, i, state);
+        let v: u32 = mem_load32(state, AN_SCRATCH);
+        if v == 0 {
+            // 0 是"全部复位到默认" —— 不是"什么都不做"。
+            an_scan_init(state);
+        } else if v == 1 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_BOLD);
+        } else if v == 2 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_DIM);
+        } else if v == 3 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_ITALIC);
+        } else if v == 4 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_UNDERLINE);
+        } else if v == 7 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_REVERSE);
+        } else if v == 8 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) | AN_HIDDEN);
+        } else if v == 22 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) & 4294967292);
+        } else if v == 24 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) & 4294967287);
+        } else if v == 27 {
+            mem_store32(state, AN_FLAGS, mem_load32(state, AN_FLAGS) & 4294967279);
+        } else if v == 39 {
+            an_set_fg(state, AN_DEFAULT);
+        } else if v == 49 {
+            an_set_bg(state, AN_DEFAULT);
+        } else if v >= 30 && v <= 37 {
+            an_set_fg(state, v - 30);
+        } else if v >= 40 && v <= 47 {
+            an_set_bg(state, v - 40);
+        } else if v >= 90 && v <= 97 {
+            an_set_fg(state, v - 82);
+        } else if v >= 100 && v <= 107 {
+            an_set_bg(state, v - 92);
+        } else if v == 38 || v == 48 {
+            i = an_param(buf, e, i, state);
+            let mode: u32 = mem_load32(state, AN_SCRATCH);
+            if mode == 5 {
+                i = an_param(buf, e, i, state);
+                let idx: u32 = mem_load32(state, AN_SCRATCH) & 255;
+                if v == 38 {
+                    an_set_fg(state, idx);
+                } else {
+                    an_set_bg(state, idx);
+                }
+            } else if mode == 2 {
+                i = an_param(buf, e, i, state);
+                let r: u32 = mem_load32(state, AN_SCRATCH) & 255;
+                i = an_param(buf, e, i, state);
+                let g: u32 = mem_load32(state, AN_SCRATCH) & 255;
+                i = an_param(buf, e, i, state);
+                let b: u32 = mem_load32(state, AN_SCRATCH) & 255;
+                if v == 38 {
+                    an_set_fg(state, an_attr_rgb(r, g, b));
+                } else {
+                    an_set_bg(state, an_attr_rgb(r, g, b));
+                }
+            }
+        }
+        // 其它参数: 忽略 (终端也该忽略未知 SGR, 而不是清掉属性)。
+    }
+}
+
+/// 扫一遍 buf, 把其中**所有 SGR 序列**按顺序应用到 state。返回应用了几条。
+///
+/// 只处理 `ESC [ ... m`; `ESC [ ... <其它终结字节>` 会被**跳过且不改属性**
+/// (光标移动本来就不该改颜色)。坏序列 (没有终结字节) 到流尾为止。
+pub fn an_scan(buf: ptr, n: u32, state: ptr) -> u32 {
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(buf, i) == 27 && i + 1 < n && load8(buf, i + 1) == 91 {
+            let j: u32 = i + 2;
+            while j < n && (load8(buf, j) < 64 || load8(buf, j) > 126) {
+                j = j + 1;
+            }
+            if j < n {
+                if load8(buf, j) == 109 {
+                    an_sgr_apply(buf, i + 2, j, state);
+                    cnt = cnt + 1;
+                }
+                i = j + 1;
+            } else {
+                i = n;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 自检用的字节串构造器: 往 buf[i] 写 v, 返回下一个位置。
+fn atb(buf: ptr, i: u32, v: u32) -> u32 {
+    store8(buf, i, v as u8);
+    return i + 1;
+}
+
+/// 往 buf 的 o0 起写 `ESC [ <ps[0..cnt)> ; 分隔 <终结字节>`, 返回**末尾位置**。
+/// 参数从调用方给的数组里取 —— 这样自检不额外分配。
+fn aseq(buf: ptr, o0: u32, ps: ptr, cnt: u32, fin: u32) -> u32 {
+    let k: u32 = o0;
+    k = atb(buf, k, 27);
+    k = atb(buf, k, 91);
+    let i: u32 = 0;
+    while i < cnt {
+        if i > 0 {
+            k = atb(buf, k, 59); // ';'
+        }
+        k = an_pu(buf, k, mem_load32(ps, i * 4));
+        i = i + 1;
+    }
+    return atb(buf, k, fin);
+}
+
+fn test_ansi_reset_bytes() -> bool {
+    let out: ptr = alloc(16);
+    let n: u32 = an_reset(out, 0);
+    // 1B 5B 30 6D
+    return n == 4 && load8(out, 0) == 27 && load8(out, 1) == 91
+        && load8(out, 2) == 48 && load8(out, 3) == 109;
+}
+
+fn test_ansi_bold_bytes() -> bool {
+    let out: ptr = alloc(16);
+    let n: u32 = an_bold(out, 0);
+    return n == 4 && load8(out, 0) == 27 && load8(out, 1) == 91
+        && load8(out, 2) == 49 && load8(out, 3) == 109;
+}
+
+fn test_ansi_fg_single_digit() -> bool {
+    let out: ptr = alloc(16);
+    // an_fg(1) = ESC [ 38 ; 5 ; 1 m
+    let n: u32 = an_fg(out, 0, 1);
+    // 不写字面量 ESC —— 逐字节比
+    return n == 9 && load8(out, 0) == 27 && load8(out, 1) == 91 && load8(out, 2) == 51
+        && load8(out, 3) == 56 && load8(out, 4) == 59 && load8(out, 5) == 53
+        && load8(out, 6) == 59 && load8(out, 7) == 49 && load8(out, 8) == 109;
+}
+
+fn test_ansi_fg_multi_digit() -> bool {
+    // 196 = 1 9 6 —— 三位数必须逐位对
+    let out: ptr = alloc(16);
+    let n: u32 = an_fg(out, 0, 196);
+    return n == 11 && load8(out, 0) == 27 && load8(out, 1) == 91 && load8(out, 2) == 51
+        && load8(out, 3) == 56 && load8(out, 4) == 59 && load8(out, 5) == 53
+        && load8(out, 6) == 59 && load8(out, 7) == 49 && load8(out, 8) == 57
+        && load8(out, 9) == 54 && load8(out, 10) == 109;
+}
+
+fn test_ansi_bg_bytes() -> bool {
+    let out: ptr = alloc(16);
+    let n: u32 = an_bg(out, 0, 4);
+    // ESC [ 48 ; 5 ; 4 m -> 1B 5B 34 38 3B 35 3B 34 6D
+    return n == 9 && load8(out, 2) == 52 && load8(out, 3) == 56
+        && load8(out, 7) == 52 && load8(out, 8) == 109;
+}
+
+fn test_ansi_rgb_fg_bytes() -> bool {
+    let out: ptr = alloc(32);
+    let n: u32 = an_rgb_fg(out, 0, 255, 128, 0);
+    // 1B 5B 33 38 3B 32 3B 32 35 35 3B 31 32 38 3B 30 6D  (17 字节)
+    let ok0: bool = n == 17 && load8(out, 0) == 27 && load8(out, 1) == 91
+        && load8(out, 2) == 51 && load8(out, 3) == 56 && load8(out, 4) == 59
+        && load8(out, 5) == 50 && load8(out, 6) == 59;
+    let ok1: bool = load8(out, 7) == 50 && load8(out, 8) == 53 && load8(out, 9) == 53
+        && load8(out, 10) == 59 && load8(out, 11) == 49 && load8(out, 12) == 50
+        && load8(out, 13) == 56 && load8(out, 14) == 59 && load8(out, 15) == 48
+        && load8(out, 16) == 109;
+    return ok0 && ok1;
+}
+
+fn test_ansi_move_one_one() -> bool {
+    let out: ptr = alloc(16);
+    let n: u32 = an_move(out, 0, 1, 1);
+    // 1B 5B 31 3B 31 48 —— 是 **6** 字节 (CSI 2 + 行 1 + 分号 1 + 列 1 + 'H' 1)。
+    return n == 6 && load8(out, 0) == 27 && load8(out, 1) == 91 && load8(out, 2) == 49
+        && load8(out, 3) == 59 && load8(out, 4) == 49 && load8(out, 5) == 72;
+}
+
+fn test_ansi_move_multi_digit() -> bool {
+    let out: ptr = alloc(16);
+    let n: u32 = an_move(out, 0, 12, 34);
+    // ESC [ 12 ; 34 H -> 1B 5B 31 32 3B 33 34 48  (8 字节)
+    return n == 8 && load8(out, 2) == 49 && load8(out, 3) == 50
+        && load8(out, 4) == 59 && load8(out, 5) == 51 && load8(out, 6) == 52
+        && load8(out, 7) == 72;
+}
+
+fn test_ansi_cursor_directions() -> bool {
+    let out: ptr = alloc(16);
+    let a: u32 = an_up(out, 0, 3);
+    let b: u32 = an_down(out, 0, 3);
+    let c: u32 = an_right(out, 0, 3);
+    let d: u32 = an_left(out, 0, 3);
+    // ESC[3A = 27 91 51 65 (4 字节)。最后一次是 left -> out[3]=='D'=68。
+    return a == 4 && b == 4 && c == 4 && d == 4
+        && load8(out, 2) == 51 && load8(out, 3) == 68;
+}
+
+fn test_ansi_hide_show_clear() -> bool {
+    let out: ptr = alloc(16);
+    let h1: u32 = an_hide(out, 0);
+    // ESC [ ? 2 5 l
+    let ok1: bool = h1 == 6 && load8(out, 2) == 63 && load8(out, 3) == 50
+        && load8(out, 4) == 53 && load8(out, 5) == 108;
+    let h2: u32 = an_show(out, 0);
+    let ok2: bool = h2 == 6 && load8(out, 5) == 104;
+    let h3: u32 = an_clear(out, 0);
+    let ok3: bool = h3 == 4 && load8(out, 2) == 50 && load8(out, 3) == 74;
+    let h4: u32 = an_clear_line(out, 0);
+    let ok4: bool = h4 == 4 && load8(out, 2) == 50 && load8(out, 3) == 75;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_ansi_chained_offset() -> bool {
+    // 返回的是"下一个位置" —— 串起来再取字节数要与逐段相加一致。
+    let out: ptr = alloc(32);
+    let k: u32 = 0;
+    k = an_reset(out, k);
+    k = an_fg(out, k, 7);
+    k = an_reset(out, k);
+    let ok: bool = k == 4 + 9 + 4 && load8(out, 4) == 27 && load8(out, 12) == 109
+        && load8(out, 13) == 27;
+    let direct: u32 = an_reset(out, k);
+    return ok && direct == k + 4;
+}
+
+fn test_ansi_scan_simple_sgr() -> bool {
+    let b: ptr = alloc(32);
+    let ps: ptr = alloc(8);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    mem_store32(ps, 0, 31);
+    mem_store32(ps, 4, 1);
+    let n: u32 = aseq(b, 0, ps, 2, 109); // ESC[31;1m
+    let c: u32 = an_scan(b, n, st);
+    return c == 1 && an_fg_of(st) == 1 && an_flags_of(st) == AN_BOLD;
+}
+
+fn test_ansi_scan_reset() -> bool {
+    let b: ptr = alloc(32);
+    let ps: ptr = alloc(8);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    // 先弄脏: 下划线 + 蓝底
+    mem_store32(ps, 0, 4);
+    mem_store32(ps, 4, 42);
+    let n1: u32 = aseq(b, 0, ps, 2, 109);
+    let c1: u32 = an_scan(b, n1, st);
+    let dirty: bool = (an_flags_of(st) & AN_UNDERLINE) != 0 && an_bg_of(st) == 2;
+    // 再复位
+    mem_store32(ps, 0, 0);
+    let n2: u32 = aseq(b, 0, ps, 1, 109); // ESC[0m
+    let c2: u32 = an_scan(b, n2, st);
+    return c1 == 1 && dirty && c2 == 1 && an_fg_of(st) == AN_DEFAULT
+        && an_bg_of(st) == AN_DEFAULT && an_flags_of(st) == 0;
+}
+
+fn test_ansi_scan_truecolor() -> bool {
+    let b: ptr = alloc(32);
+    let ps: ptr = alloc(20);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    // ESC[38;2;10;20;30m
+    mem_store32(ps, 0, 38);
+    mem_store32(ps, 4, 2);
+    mem_store32(ps, 8, 10);
+    mem_store32(ps, 12, 20);
+    mem_store32(ps, 16, 30);
+    let n: u32 = aseq(b, 0, ps, 5, 109);
+    let c: u32 = an_scan(b, n, st);
+    let v: u32 = an_fg_of(st);
+    return c == 1 && an_is_rgb(v) && an_rgb_of(v) == 660510;
+}
+
+fn test_ansi_scan_256_and_default() -> bool {
+    let b: ptr = alloc(32);
+    let ps: ptr = alloc(12);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    mem_store32(ps, 0, 38);
+    mem_store32(ps, 4, 5);
+    mem_store32(ps, 8, 200);
+    let n: u32 = aseq(b, 0, ps, 3, 109); // ESC[38;5;200m
+    let c: u32 = an_scan(b, n, st);
+    let ok1: bool = c == 1 && an_fg_of(st) == 200 && an_is_rgb(an_fg_of(st)) == false;
+    mem_store32(ps, 0, 39);
+    let n2: u32 = aseq(b, 0, ps, 1, 109); // ESC[39m 默认前景
+    let c2: u32 = an_scan(b, n2, st);
+    return ok1 && c2 == 1 && an_fg_of(st) == AN_DEFAULT;
+}
+
+fn test_ansi_scan_ignores_non_sgr() -> bool {
+    // ESC[2J (清屏) 与 ESC[5A (上移) 都不该改属性。
+    let b: ptr = alloc(32);
+    let ps: ptr = alloc(4);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    mem_store32(ps, 0, 2);
+    let k: u32 = aseq(b, 0, ps, 1, 74); // ESC[2J
+    mem_store32(ps, 0, 5);
+    let k2: u32 = aseq(b, k, ps, 1, 65); // ESC[5A
+    let c: u32 = an_scan(b, k2, st);
+    return c == 0 && an_fg_of(st) == AN_DEFAULT && an_flags_of(st) == 0;
+}
+
+fn test_ansi_scan_multiple_in_stream() -> bool {
+    // 一段流里夹着文字与两条 SGR: 两条都要按顺序生效。
+    let b: ptr = alloc(64);
+    let ps: ptr = alloc(4);
+    let st: ptr = alloc(AN_STATE_BYTES);
+    an_scan_init(st);
+    let k: u32 = atb(b, 0, 104); // 'h'
+    mem_store32(ps, 0, 1);
+    let k2: u32 = aseq(b, k, ps, 1, 109); // ESC[1m
+    let k3: u32 = atb(b, k2, 105); // 'i'
+    mem_store32(ps, 0, 31);
+    let k4: u32 = aseq(b, k3, ps, 1, 109); // ESC[31m
+    let c: u32 = an_scan(b, k4, st);
+    return c == 2 && an_fg_of(st) == 1 && (an_flags_of(st) & AN_BOLD) != 0;
+}
+
+fn test_ansi_attr_helpers() -> bool {
+    let v: u32 = an_attr_rgb(255, 0, 128);
+    return an_is_rgb(v) && an_rgb_of(v) == 16711808 && an_pal_of(200) == 200
+        && an_is_rgb(AN_DEFAULT) == false && an_is_rgb(5) == false
+        && an_is_rgb(0) == false;
+}
+
+fn test_ansi_default_colors_are_distinct_from_rgb_marker() -> bool {
+    // 真彩色的标记位不能和"默认色"或调色板撞上 —— 这是 attr 编码的正确性核心。
+    let black_rgb: u32 = an_attr_rgb(0, 0, 0);
+    let blk: bool = an_is_rgb(black_rgb) && an_rgb_of(black_rgb) == 0;
+    let one_rgb: u32 = an_attr_rgb(0, 0, 1);
+    return blk && an_is_rgb(one_rgb) && an_is_rgb(1) == false
+        && an_is_rgb(AN_DEFAULT) == false;
+}
+
+fn test_ansi_pu_edges() -> bool {
+    // 十进制写入器: 0 / 9 / 10 / 100 / 4294967295 都要对。
+    let out: ptr = alloc(32);
+    let a: u32 = an_pu(out, 0, 0);
+    let b: u32 = an_pu(out, 3, 9);
+    let c: u32 = an_pu(out, 5, 10);
+    let d: u32 = an_pu(out, 8, 100);
+    let e: u32 = an_pu(out, 12, 4294967295);
+    let ok: bool = a == 1 && load8(out, 0) == 48;
+    let ok2: bool = b == 4 && load8(out, 3) == 57;
+    let ok3: bool = c == 7 && load8(out, 5) == 49 && load8(out, 6) == 48;
+    let ok4: bool = d == 11 && load8(out, 8) == 49 && load8(out, 9) == 48
+        && load8(out, 10) == 48;
+    let ok5: bool = e == 22 && load8(out, 12) == 52 && load8(out, 21) == 53;
+    return ok && ok2 && ok3 && ok4 && ok5;
+}

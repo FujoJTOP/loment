@@ -1,0 +1,130 @@
+// std/crc32.lomt — CRC-32 (IEEE 802.3, 反射多项式 0xEDB88320)
+//
+// 为什么不用查表: 一张 256 项的 u32 表要 1 KiB, 而"表放哪"是调用方的决定 ——
+// 标准库不该替它定。逐位算法慢 8 倍但零内存, 对校验这种一次性场景完全够;
+// 真要快的调用方可以自己建表再调 `crc32_update` 逐字节喂。
+//
+// 参数是 IEEE 的那套 (init 0xFFFFFFFF, 末尾取反) —— 也就是 gzip/zip/PNG 用的那个,
+// 不是 CRC-32C 也不是 CRC-32/BZIP2。名字里不写后缀时, 默认的就是这个。
+//
+// 命名: 公开一律 crc32_*, 内部一律 cr_*。自检 test_crc32_*。
+
+module crc32
+
+/// 初始值 (未取反)。
+pub fn crc32_init() -> u32 {
+    return 4294967295;
+}
+
+/// 结束: 取反。分段计算时中间值不取反, 最后取一次。
+pub fn crc32_finish(c: u32) -> u32 {
+    return c ^ 4294967295;
+}
+
+/// 喂一个字节 (增量式)。传入的是**未取反**的中间值。
+pub fn crc32_update(c: u32, b: u32) -> u32 {
+    let x: u32 = c ^ (b & 255);
+    let i: u32 = 0;
+    while i < 8 {
+        if (x & 1) != 0 {
+            x = (x >> 1) ^ 3988292384;
+        } else {
+            x = x >> 1;
+        }
+        i = i + 1;
+    }
+    return x;
+}
+
+/// 算一段字节的 CRC-32 (含首尾两步)。
+pub fn crc32(p: ptr, so: u32, n: u32) -> u32 {
+    let c: u32 = crc32_init();
+    let i: u32 = 0;
+    while i < n {
+        c = crc32_update(c, load8(p, so + i));
+        i = i + 1;
+    }
+    return crc32_finish(c);
+}
+
+/// 对编译期字面量。
+pub fn crc32_str(s: str) -> u32 {
+    return crc32(str_ptr(s), 0, str_len(s));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn cr_fill(dst: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_crc32_empty() -> bool {
+    let b: ptr = alloc(32);
+    return crc32(b, 0, 0) == 0;
+}
+
+fn test_crc32_check_vector() -> bool {
+    // "123456789" -> 0xCBF43926 = 3421780262。这是 CRC-32 的标准检验值,
+    // 参数写错 (init/多项式/反射) 时它必然对不上。
+    let b: ptr = alloc(32);
+    let n: u32 = cr_fill(b, "123456789");
+    return crc32(b, 0, n) == 3421780262;
+}
+
+fn test_crc32_str_matches() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = cr_fill(b, "loment");
+    return crc32_str("loment") == crc32(b, 0, n);
+}
+
+fn test_crc32_incremental_matches() -> bool {
+    // 两步算与一次算相同: 中间值不取反, 最后取一次。
+    let b: ptr = alloc(32);
+    let n: u32 = cr_fill(b, "hello");
+    let whole: u32 = crc32(b, 0, n);
+    let c0: u32 = crc32_init();
+    let c1: u32 = crc32_update(c0, 104);
+    let c2: u32 = crc32_update(c1, 101);
+    let c3: u32 = crc32_update(c2, 108);
+    let c4: u32 = crc32_update(c3, 108);
+    let c5: u32 = crc32_update(c4, 111);
+    return whole == crc32_finish(c5);
+}
+
+fn test_crc32_differs_on_single_bit() -> bool {
+    let a: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    cr_fill(a, "abcdef");
+    cr_fill(c, "abcdef");
+    store8(c, 3, 103 as u8);       // 'c' -> 'g', 差一位
+    return crc32(a, 0, 6) != crc32(c, 0, 6);
+}
+
+fn test_crc32_order_matters() -> bool {
+    let a: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    cr_fill(a, "ab");
+    cr_fill(c, "ba");
+    return crc32(a, 0, 2) != crc32(c, 0, 2);
+}
+
+fn test_crc32_slice() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = cr_fill(b, "xabcy");
+    return crc32(b, 1, 3) == crc32_str("abc");
+}
+
+fn test_crc32_update_is_byte_masked() -> bool {
+    // 传进来超过 255 的值时只取低 8 位 —— 不然调用方少写一个 & 255 就会静默算错。
+    return crc32_update(crc32_init(), 104) == crc32_update(crc32_init(), 104 + 256);
+}
+
+fn test_crc32_init_finish_are_involutions() -> bool {
+    return crc32_finish(crc32_init()) == 0 && crc32_finish(crc32_finish(0)) == 0;
+}

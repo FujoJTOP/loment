@@ -1,0 +1,154 @@
+// std/arena.lomt — 基于调用方缓冲的 bump 分配器
+//
+// 为什么要它: 仓库里每个大一点的程序都自己切一块内存再手工分偏移 ——
+// lomstatus 顶部那一串 `M_ARGV = 0` / `M_IN = 8192` / `M_OUT = 1056768` ……
+// 就是一份手写的、不可重排的 arena 布局。手工偏移的毛病不是啰嗦, 是**改一处就错一处**
+// (它们全是编译期常量, 没人检查重叠)。
+//
+// 这一层不分配内存 —— 内存是调用方给的 (base + cap)。它只做**对齐算术 + 越界判定**,
+// 把 used 当成调用方持有的标量。
+//
+// 为什么不是 struct: 包内链接器还不支持按值传聚合 (skill §6.9)。所以游标用标量表达:
+// 分配结果打包成 (新 used << 32) | 块偏移 —— 打包约定借 num.lomt 的, 不另起一套。
+//
+// 命名: 公开一律 arena_*, 内部一律 ar_*。自检 test_arena_*。
+
+module arena
+
+use "num.lomt"
+
+/// 分配失败的哨兵。
+///
+/// 它等于 (0 << 32) | 0xFFFFFFFF —— 而块偏移恒小于 used, 所以这个组合取不到,
+/// 不会和一次正常分配撞上。
+pub const ARENA_OOM: u64 = 4294967295;
+
+/// 把 v 向上对齐到 a 的倍数 (a 必须是 2 的幂; a <= 1 时原样返回)。
+pub fn arena_align(v: u32, a: u32) -> u32 {
+    if a <= 1 {
+        return v;
+    }
+    let mask: u32 = a - 1;
+    return (v + mask) & (4294967295 - mask);
+}
+
+/// 这次分配能不能装下 (只判不取)。
+pub fn arena_can(used: u32, cap: u32, n: u32) -> bool {
+    if used > cap {
+        return false;
+    }
+    return n <= cap - used;
+}
+
+/// 从 used 起分配 n 字节、按 a 对齐。
+/// 返回 (新 used << 32) | 块偏移; 装不下返回 ARENA_OOM。
+///
+/// 用法: `let t: u64 = arena_take(used, cap, n, 8);` 然后
+/// `if t == ARENA_OOM { ...错误... } else { used = num_hi(t); let p = arena_ptr(base, num_lo(t)); }`
+///
+/// 注意 `used` 只按**起点**对齐往前推, 不把块尾抬到对齐边界 (与 malloc 同):
+/// 要 4 字节对齐、依次要 5+3+2 字节, 偏移是 0 / 8 / 12, used 走到 14 ——
+/// 不是 0/8/12 与 used 8/12/16。终点对齐交给下一次分配自己再做。
+pub fn arena_take(used: u32, cap: u32, n: u32, a: u32) -> u64 {
+    let off: u32 = arena_align(used, a);
+    if off > cap {
+        return ARENA_OOM;
+    }
+    if n > cap - off {
+        return ARENA_OOM;
+    }
+    return num_pack2(off + n, off);
+}
+
+/// 分配结果里的块偏移。
+pub fn arena_off(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 分配结果里的新 used。
+pub fn arena_used(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// base + 偏移 -> 该处的 ptr。
+pub fn arena_ptr(base: ptr, off: u32) -> ptr {
+    return ((base as u64) + (off as u64)) as ptr;
+}
+
+/// 这块够不够放 n 字节 (已有偏移 + 容量算起)。
+pub fn arena_fits(off: u32, cap: u32, n: u32) -> bool {
+    if off > cap {
+        return false;
+    }
+    return n <= cap - off;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_arena_align() -> bool {
+    return arena_align(0, 8) == 0 && arena_align(1, 8) == 8 && arena_align(8, 8) == 8
+        && arena_align(9, 8) == 16 && arena_align(5, 1) == 5 && arena_align(5, 0) == 5;
+}
+
+fn test_arena_take_first() -> bool {
+    let t: u64 = arena_take(0, 1024, 16, 8);
+    return arena_off(t) == 0 && arena_used(t) == 16;
+}
+
+fn test_arena_take_aligned() -> bool {
+    // 先占 3 字节, 再要 8 对齐的一块 —— 偏移要跳到 8。
+    let t: u64 = arena_take(3, 1024, 4, 8);
+    return arena_off(t) == 8 && arena_used(t) == 12;
+}
+
+fn test_arena_take_exact_fit() -> bool {
+    let t: u64 = arena_take(0, 16, 16, 1);
+    return arena_off(t) == 0 && arena_used(t) == 16;
+}
+
+fn test_arena_take_oom_exact() -> bool {
+    // 差一字节就该失败 —— 允许"刚好超出"是最常见的越界来源。
+    let t: u64 = arena_take(0, 16, 17, 1);
+    return t == ARENA_OOM;
+}
+
+fn test_arena_take_oom_by_alignment() -> bool {
+    // 对齐之后放不下: used=9, 对齐到 16, cap=20, n=8 -> 16+8 > 20。
+    let t: u64 = arena_take(9, 20, 8, 16);
+    return t == ARENA_OOM;
+}
+
+fn test_arena_take_no_underflow() -> bool {
+    // used > cap 的畸形输入不能因为减法回绕而变成"装得下"。
+    let t: u64 = arena_take(100, 10, 1, 1);
+    return t == ARENA_OOM;
+}
+
+fn test_arena_can() -> bool {
+    return arena_can(0, 16, 16) && !arena_can(0, 16, 17) && !arena_can(100, 10, 1);
+}
+
+fn test_arena_ptr() -> bool {
+    let b: ptr = alloc(64);
+    store8(b, 0, 65 as u8);
+    store8(b, 9, 66 as u8);
+    let p: ptr = arena_ptr(b, 9);
+    return load8(p, 0) == 66 && load8(arena_ptr(b, 0), 0) == 65;
+}
+
+fn test_arena_oom_is_unreachable_as_a_real_result() -> bool {
+    // OOM 哨兵是 (0<<32)|0xFFFFFFFF, 而真实结果的偏移 < used, 所以永不相等。
+    let t: u64 = arena_take(0, 4294967295, 4294967294, 1);
+    return t != ARENA_OOM && arena_off(t) == 0;
+}
+
+fn test_arena_sequential_layout() -> bool {
+    // 依次要 5+3+2 字节、对齐 4。偏移严丝合缝接上 (0/8/12);
+    // used 走 5 -> 11 -> 14 —— 只按起点对齐, 块尾不被抬到边界。
+    let t1: u64 = arena_take(0, 4096, 5, 4);
+    let t2: u64 = arena_take(arena_used(t1), 4096, 3, 4);
+    let t3: u64 = arena_take(arena_used(t2), 4096, 2, 4);
+    return arena_off(t1) == 0 && arena_used(t1) == 5
+        && arena_off(t2) == 8 && arena_used(t2) == 11
+        && arena_off(t3) == 12 && arena_used(t3) == 14;
+}

@@ -1,0 +1,125 @@
+// std/char.lomt — 字节分类与大小写
+//
+// 为什么要它: 这门语言里的"字符"就是字节码 (u32), 没有 char 类型。而 `is_digit` /
+// `hexval` 这类判断在工具里各写了一份 (lomstatus 有 is_digit, lomc 有 hexval,
+// 自举侧还有一套)。分类函数是纯函数、零依赖, 最适合先收。
+//
+// 范围: 只做 ASCII。UTF-8 的多字节序列不在这层 —— 那是 text.lomt 的 utf8 部分
+// (按码点计数) 的事, 混在一起会让"一个字节"和"一个字符"不分。
+//
+// 命名: 公开一律 char_*, 内部一律 ch_*。自检 test_char_*。
+
+module char
+
+/// 无效输入的哨兵 (对应 char_digit_val / char_hex_val)。
+pub const CH_NONE: u32 = 4294967295;
+
+pub fn char_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+pub fn char_is_upper(c: u32) -> bool {
+    return c >= 65 && c <= 90;
+}
+
+pub fn char_is_lower(c: u32) -> bool {
+    return c >= 97 && c <= 122;
+}
+
+pub fn char_is_alpha(c: u32) -> bool {
+    return char_is_upper(c) || char_is_lower(c);
+}
+
+pub fn char_is_alnum(c: u32) -> bool {
+    return char_is_alpha(c) || char_is_digit(c);
+}
+
+/// 空白: 空格 \t \n \r \v \f。与 Rust 的 `is_ascii_whitespace` 同集合。
+pub fn char_is_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+}
+
+pub fn char_is_hex(c: u32) -> bool {
+    if char_is_digit(c) {
+        return true;
+    }
+    if c >= 97 && c <= 102 {
+        return true;
+    }
+    return c >= 65 && c <= 70;
+}
+
+pub fn char_to_upper(c: u32) -> u32 {
+    if char_is_lower(c) {
+        return c - 32;
+    }
+    return c;
+}
+
+pub fn char_to_lower(c: u32) -> u32 {
+    if char_is_upper(c) {
+        return c + 32;
+    }
+    return c;
+}
+
+/// '0'..'9' -> 0..9; 其余返回 CH_NONE。
+pub fn char_digit_val(c: u32) -> u32 {
+    if char_is_digit(c) {
+        return c - 48;
+    }
+    return CH_NONE;
+}
+
+/// 十六进制字符 -> 0..15 (大小写都收); 其余返回 CH_NONE。
+pub fn char_hex_val(c: u32) -> u32 {
+    if char_is_digit(c) {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return CH_NONE;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_char_is_digit() -> bool {
+    return char_is_digit(48) && char_is_digit(57) && !char_is_digit(47) && !char_is_digit(58);
+}
+
+fn test_char_is_alpha() -> bool {
+    return char_is_alpha(65) && char_is_alpha(122) && !char_is_alpha(64) && !char_is_alpha(91);
+}
+
+fn test_char_is_alnum() -> bool {
+    return char_is_alnum(48) && char_is_alnum(90) && !char_is_alnum(32);
+}
+
+fn test_char_is_space() -> bool {
+    return char_is_space(32) && char_is_space(9) && char_is_space(10) && char_is_space(13)
+        && !char_is_space(48) && !char_is_space(0);
+}
+
+fn test_char_is_hex() -> bool {
+    return char_is_hex(48) && char_is_hex(70) && char_is_hex(102) && !char_is_hex(71) && !char_is_hex(32);
+}
+
+fn test_char_case_convert() -> bool {
+    return char_to_upper(97) == 65 && char_to_lower(65) == 97
+        && char_to_upper(65) == 65 && char_to_lower(48) == 48;
+}
+
+fn test_char_digit_val() -> bool {
+    return char_digit_val(48) == 0 && char_digit_val(57) == 9 && char_digit_val(97) == CH_NONE;
+}
+
+fn test_char_hex_val() -> bool {
+    return char_hex_val(48) == 0 && char_hex_val(57) == 9
+        && char_hex_val(97) == 10 && char_hex_val(102) == 15
+        && char_hex_val(65) == 10 && char_hex_val(70) == 15
+        && char_hex_val(103) == CH_NONE;
+}

@@ -1,0 +1,640 @@
+// std/intmath.lomt — 整数数论 (gcd / lcm / isqrt / powmod / invmod / 素性 / 试除分解)
+//
+// 为什么要它: math.lomt 里只有 gcd/lcm/isqrt/ipow 四条 (编译器自举要用的那几条)。
+// 数论里真正难写对的是另外四条 —— **模幂 (要先有防溢出的模乘)**、**模逆**、
+// **Miller-Rabin 素性** (选错底集合会把卡迈克尔数判成素数)、**试除分解**。
+// 这四条每个都至少踩过一次坑, 所以单开一个模块把它们钉死。
+//
+// 语言约束 (这三条决定了本模块所有的写法, 不是风格问题):
+//   - **没有 i128**。所以 `a * b mod m` 里的 `a * b` 在 u64 上会静默回绕 —— 必须用
+//     俄农法 (逐位加倍相加) 做模乘 (见 im_mulmod)。这不是性能取舍, 是唯一正确的路。
+//   - **没有浮点**。开方走逐位逼近, 不是牛顿迭代 —— 牛顿的收敛判据要除法, 而除法的
+//     终止条件在 u64 满位宽上很容易写错 (math.lomt 里那条注释就是为此写的)。
+//     逐位逼近是**每一位都独立可验证**的, 而且天然给出精确的 floor。
+//   - **rustc 的 `#![deny(arithmetic_overflow)]` 会把常量折叠出来的溢出变成编译错误**。
+//     所以本模块里没有一条"先溢出再判"的写法 —— 全是**先判再算**。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不保证抗侧信道**: im_powmod / im_invmod 的分支依赖指数与输入, 计时会泄漏。
+//     要抗侧信道就不是这些算法, 那是另一门工程 (常量时间模幂)。
+//   - **im_is_prime 是概率性算法的确定性特例**: 底集合 {2,3,5,7,11,13,17,19,23,29,31,37}
+//     对 n < 3.3e24 是**确定性**的 (Sorenson & Webster 2015 证明的界), 而 u64 上界是
+//     1.8e19 < 3.3e24 —— 所以对 u64 **全域精确**, 不是"大概率"。这是本模块唯一一处
+//     "证明了从而敢用"的地方, 见 im_mr_base 的注释。
+//   - **im_factor_small 是试除, 不是因式分解**: 它只除到调用方给的上界, 剩下的余因子
+//     原样吐出 (可能仍是合数)。要真分解是 Pollard rho 那一档, 不在这一层。
+//   - 所有取模函数的模数都限定在**有符号 i64 能表示的正数** (≤ 2^63-1), 因为 C 系的
+//     整数除法在这一点上没有统一惯例, 硬定在 i64 上比"看情况"可靠。
+//
+// 命名: 公开 im_*, 内部 im_* (私有函数也带 im_ 前缀, 平名字空间里不带前缀会按 E13 撞车)。
+// 自检 test_intmath_*。
+
+module intmath
+
+use "mem.lomt"
+
+/// 成功。
+pub const IM_OK: u32 = 0;
+/// 失败 (溢出 / 不存在 / 缓冲不够)。与 IM_NO 分开 —— 两者含义不同。
+pub const IM_ERR: u32 = 4294967295;
+
+const IM_U64MAX: u64 = 18446744073709551615;
+const IM_I64MAX: u64 = 9223372036854775807;
+
+// ---------------------------------------------------------------- 基础
+
+/// u64 取负 (二进制补码)。**在 u64 上做**: i64 的最小值没有对应的正数, 在 i64 上
+/// `-x` 对 i64::MIN 会溢出 —— 而这个函数存在的唯一理由就是处理 i64::MIN。
+fn im_neg_u(v: u64) -> u64 {
+    return (v ^ IM_U64MAX) + 1;
+}
+
+/// i64 的绝对值, 以 u64 返回。i64::MIN 得到 2^63 (u64 装得下)。
+fn im_abs_u(a: i64) -> u64 {
+    let v: u64 = a as u64;
+    if a < 0 as i64 {
+        return im_neg_u(v);
+    }
+    return v;
+}
+
+/// 最大公约数 (欧几里得, **迭代**)。恒返回非负; im_gcd(0, 0) == 0。
+///
+/// 用循环不用递归: 递归在这个 checkout 上是风险写法 (先定义后使用 + 自举侧的表按语料
+/// 规模定尺寸), 而欧几里得本来就一行循环。取绝对值后再走循环 —— 负数被吃掉, 于是
+/// gcd(-12, 18) == gcd(12, 18) == 6。
+pub fn im_gcd(a: i64, b: i64) -> i64 {
+    let x: u64 = im_abs_u(a);
+    let y: u64 = im_abs_u(b);
+    while y != 0 {
+        let t: u64 = x % y;
+        x = y;
+        y = t;
+    }
+    return x as i64;
+}
+
+/// 最小公倍数 (非负), 结果写进 `out` (8 字节, u64 小端)。溢出返回 `IM_ERR`。
+///
+/// **先除后乘**: `(a/g) * b` 而不是 `a*b/g` —— 后者在 a 与 b 有公因子时白白多一位,
+/// 是 lcm 溢出最常见的来源。除完还要再判一次乘法会不会顶出 u64。
+/// 任一为 0 时 lcm 是 0 (约定, 与 math.lomt 一致)。
+pub fn im_lcm(a: i64, b: i64, out: ptr) -> u32 {
+    let x: u64 = im_abs_u(a);
+    let y: u64 = im_abs_u(b);
+    if x == 0 || y == 0 {
+        mem_store64(out, 0, 0);
+        return IM_OK;
+    }
+    let g: u64 = im_gcd(a, b) as u64;
+    let q: u64 = x / g;
+    if q > IM_U64MAX / y {
+        return IM_ERR;
+    }
+    mem_store64(out, 0, q * y);
+    return IM_OK;
+}
+
+/// 整数平方根 (向下取整)。**逐位逼近**, 不用牛顿。
+///
+/// 教科书写法: 从 2^62 起试每个偶次位, 能减就减并把结果位立起来。每一位的处理是
+/// 独立的, 所以"结果到底对不对"可以逐位验 —— 而牛顿的收敛判据写错时是**静默错**。
+/// 后置条件 (自检里真的验): n² ≤ v < (n+1)²。v == 0 给 0。
+pub fn im_isqrt(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let num: u64 = v;
+    let res: u64 = 0;
+    let bit: u64 = 1 << 62;
+    // bit 降到不超过 v 的最大 2^(2k)。
+    let b0: u64 = bit;
+    let start: u64 = im_isqrt_bit(b0, num);
+    let b: u64 = start;
+    let n: u64 = num;
+    let r: u64 = res;
+    while b != 0 {
+        if n >= r + b {
+            n = n - (r + b);
+            r = (r >> 1) + b;
+        } else {
+            r = r >> 1;
+        }
+        b = b >> 2;
+    }
+    return r;
+}
+
+/// 找到不超过 v 的最大 2^(2k) (k ≥ 0)。单独拎出来是因为主循环里塞进这个会让
+/// "哪一位在动"看不清楚。
+fn im_isqrt_bit(b0: u64, v: u64) -> u64 {
+    let b: u64 = b0;
+    while b > v {
+        b = b >> 2;
+    }
+    return b;
+}
+
+// ---------------------------------------------------------------- 模运算
+
+/// `a * b mod m` (u64, 防溢出)。**俄农法**: 逐位看 b, 每步把 a 翻倍对 m 取模。
+///
+/// 为什么不能直接写 `a * b % m`: 没有 i128, 而 u64 的 `*` 是回绕的 —— a 与 b 都是
+/// ~2^63 时乘积静默丢掉高 64 位, 结果看着像个随机数, **不报错**。这是整个模块里
+/// 最容易写错的一处, 所以它单独成函数、单独被自检。
+///
+/// 加法的防溢出用"先比再减": `r + x` 可能 ≥ 2^64, 但 `r ≥ m - x` 等价于 `r + x ≥ m`,
+/// 减掉 m 即可 —— 因为 r, x < m, 所以 r + x < 2m, 减一次必够。
+pub fn im_mulmod(a: u64, b: u64, m: u64) -> u64 {
+    if m == 0 {
+        return 0;
+    }
+    let r: u64 = 0;
+    let x: u64 = a % m;
+    let y: u64 = b;
+    while y > 0 {
+        if (y & 1) != 0 {
+            if r >= m - x {
+                r = r - (m - x);
+            } else {
+                r = r + x;
+            }
+        }
+        if x >= m - x {
+            x = x - (m - x);
+        } else {
+            x = x + x;
+        }
+        y = y >> 1;
+    }
+    return r;
+}
+
+/// 模幂 `base^exp mod m` (平方乘)。**四种边界都处理**:
+///   - m == 0: 数学上无定义, 返回 0 (文档化, 不 panic);
+///   - m == 1: 任何数模 1 都是 0 (包括 exp == 0 —— 1 本身也被模掉了);
+///   - exp == 0: 返回 `1 mod m`;
+///   - 全程走 im_mulmod, 所以中间乘积不会溢出。
+pub fn im_powmod(base: u64, exp: u64, m: u64) -> u64 {
+    if m == 0 {
+        return 0;
+    }
+    if m == 1 {
+        return 0;
+    }
+    let r: u64 = 1 % m;
+    let b: u64 = base % m;
+    let e: u64 = exp;
+    while e > 0 {
+        if (e & 1) != 0 {
+            r = im_mulmod(r, b, m);
+        }
+        b = im_mulmod(b, b, m);
+        e = e >> 1;
+    }
+    return r;
+}
+
+/// 模逆: 找 x 使 `a * x ≡ 1 (mod m)`, 结果写进 `out` (8 字节 u64)。不存在返回 `IM_ERR`。
+///
+/// 扩展欧几里得。**要求 m > 1**: m ≤ 1 时没有逆可言 (模 1 的环只有一个元素)。
+/// a 先规约到 [0, m)。当 gcd(a, m) != 1 时不存在逆 —— 这就是 `if r > 1` 那一条。
+///
+/// 溢出界 (写明): 中间量被 m 界住, 所以要求 m ≤ 2^62 左右; 更大时 `q * newt` 可能
+/// 顶出 i64。u64 全域的模逆要用"半扩展欧几里得 + 无符号", 不在这一层。
+pub fn im_invmod(a: i64, m: i64, out: ptr) -> u32 {
+    if m <= 1 {
+        return IM_ERR;
+    }
+    let a0: i64 = im_mod_i64(a, m);
+    let t: i64 = 0;
+    let nt: i64 = 1;
+    let r: i64 = m;
+    let nr: i64 = a0;
+    while nr != 0 {
+        let q: i64 = r / nr;
+        let t2: i64 = t - q * nt;
+        t = nt;
+        nt = t2;
+        let r2: i64 = r - q * nr;
+        r = nr;
+        nr = r2;
+    }
+    if r > 1 {
+        return IM_ERR;
+    }
+    let res: i64 = im_mod_i64(t, m);
+    mem_store64(out, 0, res as u64);
+    return IM_OK;
+}
+
+/// 有符号取模, **结果恒在 [0, m)** (Rust 的 `%` 会给出负余数, 那不适合做模运算)。
+fn im_mod_i64(a: i64, m: i64) -> i64 {
+    let r: i64 = a % m;
+    if r < 0 as i64 {
+        return r + m;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------- 素性
+
+/// 第 i 个 Miller-Rabin 底。
+///
+/// **为什么是这十二个**: 对 n < 3,317,044,064,679,887,385,961,981 (≈3.3e24) 用
+/// 底集合 {2,3,5,7,11,13,17,19,23,29,31,37} 做 Miller-Rabin 是**确定性**的
+/// (Sorenson & Webster, "Strong pseudoprimes to twelve prime bases", 2015)。
+/// u64 的最大值是 1.8e19, 远在这个界之内 —— 所以本模块对 u64 **全域没有假阳性**。
+/// 卡迈克尔数 (561/1105/1729) 会被它判成合数, 这是自检里钉死的一条。
+fn im_mr_base(i: u32) -> u64 {
+    if i == 0 {
+        return 2;
+    }
+    if i == 1 {
+        return 3;
+    }
+    if i == 2 {
+        return 5;
+    }
+    if i == 3 {
+        return 7;
+    }
+    if i == 4 {
+        return 11;
+    }
+    if i == 5 {
+        return 13;
+    }
+    if i == 6 {
+        return 17;
+    }
+    if i == 7 {
+        return 19;
+    }
+    if i == 8 {
+        return 23;
+    }
+    if i == 9 {
+        return 29;
+    }
+    if i == 10 {
+        return 31;
+    }
+    return 37;
+}
+
+/// 以 a 为底的一次 Miller-Rabin 检验: n 是奇数合数时, 返回 false 的概率 ≥ 3/4。
+/// n-1 = d * 2^s (d 为奇数)。
+fn im_mr_witness(n: u64, d: u64, s: u32, a: u64) -> bool {
+    let x: u64 = im_powmod(a, d, n);
+    if x == 1 || x == n - 1 {
+        return true;
+    }
+    let i: u32 = 1;
+    while i < s {
+        x = im_mulmod(x, x, n);
+        if x == n - 1 {
+            return true;
+        }
+        if x == 1 {
+            // 出现了模 n 的非平凡平方根 -> n 必是合数 (1 之外还有别的 1 的平方根)。
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// n 是不是素数。
+///
+/// 流程: 小素数试除 (把 2..37 的倍数先清掉, 顺带把 n < 41 全判对) -> 剩下的 n ≥ 41,
+/// 与 2·3·…·37 互素 -> 十二个底的 Miller-Rabin。
+/// 底 ≤ 37 < 41 ≤ n, 所以"底必须小于 n"这个前提自动成立, 不用再判。
+pub fn im_is_prime(n: u64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n % 2 == 0 {
+        return n == 2;
+    }
+    if n % 3 == 0 {
+        return n == 3;
+    }
+    if n % 5 == 0 {
+        return n == 5;
+    }
+    if n % 7 == 0 {
+        return n == 7;
+    }
+    if n % 11 == 0 {
+        return n == 11;
+    }
+    if n % 13 == 0 {
+        return n == 13;
+    }
+    if n % 17 == 0 {
+        return n == 17;
+    }
+    if n % 19 == 0 {
+        return n == 19;
+    }
+    if n % 23 == 0 {
+        return n == 23;
+    }
+    if n % 29 == 0 {
+        return n == 29;
+    }
+    if n % 31 == 0 {
+        return n == 31;
+    }
+    if n % 37 == 0 {
+        return n == 37;
+    }
+    let d: u64 = n - 1;
+    let s: u32 = 0;
+    let dd: u64 = d;
+    let ss: u32 = s;
+    while (dd & 1) == 0 {
+        dd = dd >> 1;
+        ss = ss + 1;
+    }
+    let i: u32 = 0;
+    while i < 12 {
+        if im_mr_witness(n, dd, ss, im_mr_base(i)) == false {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 试除分解
+
+/// 试除分解: 把 n 的小素因子写进 `out` (每个 8 字节 u64, 小端), 返回因子个数。
+///
+/// 试除到 `limit` 为止 (也到 sqrt(n) 为止)。**除完还剩的余因子原样写进表尾** ——
+/// 它可能是素数, 也可能仍是合数 (当 limit < sqrt(余因子) 时)。这是试除法的固有
+/// 性质, 不是漏写: "因式分解"是 Pollard rho 那一档, 这一层只做试除。
+/// 结果按**非降序**给出 (试除天然升序)。缓冲不够返回 `IM_ERR` (不静默截断)。
+/// n < 2 时因子个数是 0。
+pub fn im_factor_small(n: u64, limit: u64, out: ptr, cap: u32) -> u32 {
+    let x: u64 = n;
+    let cnt: u32 = 0;
+    let d: u64 = 2;
+    let stop: u32 = 0;
+    while stop == 0 && x > 1 && d <= limit && d <= x / d {
+        if x % d == 0 {
+            if cnt >= cap {
+                stop = 1;
+            } else {
+                mem_store64(out, cnt * 8, d);
+                cnt = cnt + 1;
+                x = x / d;
+            }
+        } else {
+            d = d + 1;
+        }
+    }
+    if stop == 0 && x > 1 {
+        if cnt >= cap {
+            stop = 1;
+        } else {
+            mem_store64(out, cnt * 8, x);
+            cnt = cnt + 1;
+        }
+    }
+    if stop == 1 {
+        return IM_ERR;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_intmath_gcd_known() -> bool {
+    // 含 0 与负数 —— gcd(0,0) 按约定是 0 (不是未定义)。
+    return im_gcd(12, 18) == 6 && im_gcd(18, 12) == 6 && im_gcd(7, 13) == 1
+        && im_gcd(0, 5) == 5 && im_gcd(5, 0) == 5 && im_gcd(0, 0) == 0
+        && im_gcd(0 as i64 - 12, 18) == 6 && im_gcd(0 as i64 - 4, 0 as i64 - 6) == 2;
+}
+
+fn test_intmath_gcd_coprime_pairs() -> bool {
+    // 相邻整数互素 —— 遍历验一批, 比单点断言有力。
+    let i: i64 = 1;
+    let ok: u32 = 1;
+    while i < 50 {
+        if im_gcd(i, i + 1) != 1 {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1;
+}
+
+fn test_intmath_lcm_known() -> bool {
+    let out: ptr = alloc(8);
+    let s1: u32 = im_lcm(4, 6, out);
+    let v1: u64 = mem_load64(out, 0);
+    let s2: u32 = im_lcm(3, 5, out);
+    let v2: u64 = mem_load64(out, 0);
+    let s3: u32 = im_lcm(0, 7, out);
+    let v3: u64 = mem_load64(out, 0);
+    let s4: u32 = im_lcm(0 as i64 - 4, 6, out);
+    let v4: u64 = mem_load64(out, 0);
+    return s1 == IM_OK && v1 == 12 && s2 == IM_OK && v2 == 15
+        && s3 == IM_OK && v3 == 0 && s4 == IM_OK && v4 == 12;
+}
+
+fn test_intmath_lcm_overflow_is_err() -> bool {
+    // 两个互素的大数: 乘积远超 u64 —— 必须报 IM_ERR, 不能回绕成一个看着像值的数。
+    let out: ptr = alloc(8);
+    let s: u32 = im_lcm(9223372036854775807, 9223372036854775806, out);
+    return s == IM_ERR;
+}
+
+fn test_intmath_lcm_no_false_err() -> bool {
+    // 大公因子时必须**先除后乘**才不误报: lcm(2^40, 2^40) = 2^40。
+    let out: ptr = alloc(8);
+    let s: u32 = im_lcm(1099511627776, 1099511627776, out);
+    return s == IM_OK && mem_load64(out, 0) == 1099511627776;
+}
+
+fn test_intmath_isqrt_small() -> bool {
+    return im_isqrt(0) == 0 && im_isqrt(1) == 1 && im_isqrt(2) == 1 && im_isqrt(3) == 1
+        && im_isqrt(4) == 2 && im_isqrt(8) == 2 && im_isqrt(9) == 3 && im_isqrt(10) == 3
+        && im_isqrt(99) == 9 && im_isqrt(100) == 10;
+}
+
+fn test_intmath_isqrt_exact_squares() -> bool {
+    // 完全平方给精确根; 减一给根-1。12345^2 = 152399025。
+    return im_isqrt(152399025) == 12345 && im_isqrt(152399024) == 12344
+        && im_isqrt(152399026) == 12345;
+}
+
+fn test_intmath_isqrt_u64_bounds() -> bool {
+    // 2^62 = 4611686018427387904 -> 恰好 2^31; 2^62-1 -> 2^31-1。
+    // u64 最大值 -> 4294967295 (因为 4294967295^2 = 18446744065119617025 < 2^64-1)。
+    // 2^64-1 的下一行 (2^62 那一对) 逼着"高位也不许错"。
+    return im_isqrt(4611686018427387904) == 2147483648
+        && im_isqrt(4611686018427387903) == 2147483647
+        && im_isqrt(18446744073709551615) == 4294967295;
+}
+
+fn test_intmath_isqrt_postcondition() -> bool {
+    // **逐位可验证的后置条件**: n² ≤ v < (n+1)²。遍历一批 v 真验, 不是抽查。
+    let v: u64 = 1;
+    let ok: u32 = 1;
+    while v < 400 {
+        let n: u64 = im_isqrt(v);
+        if n * n > v {
+            ok = 0;
+        }
+        if (n + 1) * (n + 1) <= v {
+            ok = 0;
+        }
+        v = v + 1;
+    }
+    return ok == 1;
+}
+
+fn test_intmath_powmod_known() -> bool {
+    // 2^10 mod 1000 = 1024 mod 1000 = 24。
+    return im_powmod(2, 10, 1000) == 24 && im_powmod(5, 3, 13) == 8
+        && im_powmod(3, 4, 100) == 81;
+}
+
+fn test_intmath_powmod_edges() -> bool {
+    // exp = 0 -> 1 mod m; m = 1 -> 0 (连 1 也被模掉); m = 0 -> 0 (文档化的约定)。
+    return im_powmod(12345, 0, 7) == 1 && im_powmod(0, 0, 7) == 1
+        && im_powmod(12345, 99, 1) == 0 && im_powmod(5, 3, 0) == 0
+        && im_powmod(0, 5, 7) == 0;
+}
+
+fn test_intmath_powmod_no_wraparound() -> bool {
+    // 直接 a*b 会回绕的那一档: (2^63) * (2^63) mod (2^63-1)。俄农法必须给对。
+    // (2^63 mod (2^63-1)) = 1, 所以结果是 1^2 = 1。
+    let m: u64 = 9223372036854775807;
+    let a: u64 = 9223372036854775808;
+    return im_mulmod(a, a, m) == 1 && im_powmod(a, 2, m) == 1;
+}
+
+fn test_intmath_mulmod_identity() -> bool {
+    // a*b mod m 必须等于 (a%m)*(b%m) 用 Python 算出来的真值 —— 用小值抽查一批,
+    // 每个乘积都在 u64 内, 所以能用普通乘法当参照。
+    let ok: u32 = 1;
+    let a: u64 = 1;
+    while a < 40 {
+        let b: u64 = 1;
+        while b < 40 {
+            let m: u64 = 97;
+            if im_mulmod(a, b, m) != (a * b) % m {
+                ok = 0;
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    return ok == 1;
+}
+
+fn test_intmath_invmod_known() -> bool {
+    let out: ptr = alloc(8);
+    // 3 * 5 = 15 ≡ 1 (mod 7); 3 * 4 = 12 ≡ 1 (mod 11)
+    let s1: u32 = im_invmod(3, 7, out);
+    let v1: u64 = mem_load64(out, 0);
+    let s2: u32 = im_invmod(3, 11, out);
+    let v2: u64 = mem_load64(out, 0);
+    // 负数先规约: -1 mod 7 = 6, 6 * 6 = 36 ≡ 1 (mod 7)
+    let s3: u32 = im_invmod(0 as i64 - 1, 7, out);
+    let v3: u64 = mem_load64(out, 0);
+    return s1 == IM_OK && v1 == 5 && s2 == IM_OK && v2 == 4
+        && s3 == IM_OK && v3 == 6;
+}
+
+fn test_intmath_invmod_nonexistent() -> bool {
+    let out: ptr = alloc(8);
+    // gcd(2,4)=2, gcd(6,9)=3, 都没有逆; m ≤ 1 也没有逆。
+    return im_invmod(2, 4, out) == IM_ERR && im_invmod(6, 9, out) == IM_ERR
+        && im_invmod(3, 1, out) == IM_ERR && im_invmod(3, 0, out) == IM_ERR;
+}
+
+fn test_intmath_invmod_roundtrip() -> bool {
+    // a * inv(a) ≡ 1 (mod m) —— 用它自己当判据, 遍历一批 a。
+    let out: ptr = alloc(8);
+    let m: i64 = 101;
+    let a: i64 = 1;
+    let ok: u32 = 1;
+    while a < m {
+        let s: u32 = im_invmod(a, m, out);
+        if s == IM_OK {
+            let x: u64 = mem_load64(out, 0);
+            if im_mulmod(a as u64, x, m as u64) != 1 {
+                ok = 0;
+            }
+        }
+        a = a + 1;
+    }
+    return ok == 1;
+}
+
+fn test_intmath_prime_small() -> bool {
+    return im_is_prime(2) && im_is_prime(3) && im_is_prime(5) && im_is_prime(7)
+        && im_is_prime(11) && im_is_prime(13) && im_is_prime(37) && im_is_prime(41)
+        && im_is_prime(97) && im_is_prime(7919)
+        && !im_is_prime(0) && !im_is_prime(1) && !im_is_prime(4) && !im_is_prime(9)
+        && !im_is_prime(15) && !im_is_prime(25) && !im_is_prime(91)
+        && !im_is_prime(39) && !im_is_prime(121);
+}
+
+fn test_intmath_prime_carmichael_rejected() -> bool {
+    // **卡迈克尔数**: 对每个与 n 互素的底 a 都满足 a^(n-1) ≡ 1 (mod n), 所以
+    // 朴素 Fermat 检验会全部放行。Miller-Rabin 必须全部判合数。
+    //   561 = 3·11·17, 1105 = 5·13·17, 1729 = 7·13·19, 6601 = 7·23·41
+    return !im_is_prime(561) && !im_is_prime(1105) && !im_is_prime(1729)
+        && !im_is_prime(6601) && !im_is_prime(2465) && !im_is_prime(2821);
+}
+
+fn test_intmath_prime_strong_pseudoprimes() -> bool {
+    // 对底 2 的强伪素数 2047 = 23·89, 对底 2/3/5/7 的 3215031751 = 151·751·28351。
+    // 只用一个底的实现会在这里翻车。
+    return !im_is_prime(2047) && !im_is_prime(3215031751) && !im_is_prime(1373653);
+}
+
+fn test_intmath_prime_u64_extremes() -> bool {
+    // 16973857 (小), 2147483647 = 2^31-1 (梅森素数), 4294967291 (最大 32 位素数),
+    // 18446744073709551557 (最大 u64 素数), 18446744073709551615 = 2^64-1 = 3·5·17·…
+    return im_is_prime(2147483647) && im_is_prime(4294967291)
+        && im_is_prime(18446744073709551557)
+        && !im_is_prime(18446744073709551615)
+        && !im_is_prime(18446744073709551614);
+}
+
+fn test_intmath_factor_small_basic() -> bool {
+    // 360 = 2^3 · 3^2 · 5 —— 非降序, 共 6 个。
+    let out: ptr = alloc(64);
+    let n: u32 = im_factor_small(360, 100, out, 8);
+    return n == 6 && mem_load64(out, 0) == 2 && mem_load64(out, 8) == 2
+        && mem_load64(out, 16) == 2 && mem_load64(out, 24) == 3
+        && mem_load64(out, 32) == 3 && mem_load64(out, 40) == 5;
+}
+
+fn test_intmath_factor_small_tail_cofactor() -> bool {
+    // 9797 = 97 · 101: 试除走到 97 (97² > 9797 之前最后的机会) 就能除净。
+    // 2 与 1 没有因子; 素数原样吐出。
+    let out: ptr = alloc(64);
+    let a: u32 = im_factor_small(9797, 200, out, 8);
+    let ok1: bool = a == 2 && mem_load64(out, 0) == 97 && mem_load64(out, 8) == 101;
+    let b: u32 = im_factor_small(97, 200, out, 8);
+    let ok2: bool = b == 1 && mem_load64(out, 0) == 97;
+    let c: u32 = im_factor_small(1, 200, out, 8);
+    let d: u32 = im_factor_small(0, 200, out, 8);
+    let e: u32 = im_factor_small(2, 0, out, 8);
+    return ok1 && ok2 && c == 0 && d == 0 && e == 1 && mem_load64(out, 0) == 2;
+}
+
+fn test_intmath_factor_small_capacity() -> bool {
+    // 缓冲不够报 IM_ERR, 不静默截断 (截断的因子表会让上层算出错的 gcd)。
+    let out: ptr = alloc(64);
+    let n: u32 = im_factor_small(1024, 100, out, 3);
+    return n == IM_ERR;
+}

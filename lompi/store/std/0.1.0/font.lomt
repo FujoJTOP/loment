@@ -1,0 +1,340 @@
+// std/font.lomt — 8×8 点阵字体与文字绘制
+//
+// 为什么需要它: raster.lomt 能画线画框, blit 能搬像素, 但要在屏幕上写出一行字,
+// 得有字模 + 绘制。这个模块就是那一层: 一张覆盖可打印 ASCII 的 8×8 点阵表, 加上
+// "把某个字符画到某块像素缓冲上"的几个函数。
+//
+// ---------------------------------------------------------------- 位布局 (先定死)
+//
+// 一个字符 = **8 个字节**, 一个字节 = **一行** (第 0 行在最上)。字节里 **bit7 是最左
+// 的列** (bit0 是最右)。也就是说, 一行 `0x18` = `0001 1000` 的第 3、4 列有墨。
+//
+//   表里第 b 个字节 = (码点 - 32) * 8 + 行号      b ∈ [0, 760)
+//
+// 为什么 bit7 在左: 这与 VGA/console 字体以及 `tools/gen_font8x8.py` 那份源表一致,
+// 也和"十六进制从左往右读"同向 —— 手抄/核对时不用在脑子里镜像。
+//
+// 表由 `tools/gen_font8x8.py` 生成 (95 个字符 × 8 字节 = 760 字节), 这里以十六进制
+// 串内嵌。**别手工编 hex**: 改表就改脚本再跑。
+//
+// ---------------------------------------------------------------- 像素格式
+//
+// 沿用 raster/blit 的 **0xAARRGGBB** (小端存储 = 内存里 B G R A)。一个字只写
+// 置位的像素, 其余**一个字节都不碰** —— 所以可以先把底图铺好再往上写字。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **只有 ASCII 32..126** 这 95 个字符。中文/拉丁扩展/框线字符都没有, 也没有
+//     可变宽度 —— 每个字符固定占 8 列。要别的字形得换表或加第二张表。
+//   - **`ft_text` 不处理换行/制表**: 它把 `s` 的每个字节当一个格子横向排开, `\n`
+//     只会画出一个空位。多行文字请一行一行自己调 (每行把 r 加上 8)。
+//   - **绘制逐像素裁边**: 越界不写、不崩 (与 raster/blit 同一条规矩)。返回的是
+//     **真正落笔的像素数**, 所以被裁掉的部分不计入。
+//   - `tools/gen_font8x8.py` 那份源表里 **0x7E '~' 是整格空白**, 本模块给它补画了
+//     一道波浪 —— 一个"看得见的可打印字符渲染成空气"是真缺陷, 而下面那条
+//     "每个可打印字符都有像素"的自检正是要抓这种东西。
+//
+// 命名: 公开 ft_*, 内部 ft_*。自检 test_font_*。
+
+module font
+
+use "mem.lomt"
+
+/// 表里没有这个码点。
+pub const FT_NO: u32 = 4294967294;
+pub const FT_ERR: u32 = 4294967295;
+
+/// 一个字模的宽高 (格数)。
+pub const FT_W: u32 = 8;
+pub const FT_H: u32 = 8;
+/// 表覆盖的码点区间 (含两端): 可打印 ASCII。
+pub const FT_FIRST: u32 = 32;
+pub const FT_LAST: u32 = 126;
+/// 表里字符个数 (95)。
+pub const FT_COUNT: u32 = 95;
+/// 一个字模几个字节。
+pub const FT_GLYPH: u32 = 8;
+
+// ---------------------------------------------------------------- 字模表 (脚本生成)
+
+fn ft_hex0() -> str {
+    return "0000000000000000183c3c1818001800363600000000000036367f367f3636000c3e031e301f0c00006333180c6663001c361c6e3b336e000606030000000000180c0606060c1800060c1818180c060000663cff3c660000000c0c3f0c0c000000000000000c0c060000003f0000000000000000000c0c006030180c060301003e63737b6f673e000c0e0c0c0c0c3f001e33301c06333f001e33301c30331e00383c36337f3078003f031f3030331e001c06031f33331e003f3330180c0c0c001e33331e33331e001e33333e30180e00000c0c00000c0c00000c0c00000c0c06180c0603060c180000003f00003f0000060c1830180c06001e3330180c000c003e637b7b7b031e000c1e33333f3333003f66663e66663f003c66030303663c001f36666666361f007f46161e16467f007f46161e16060f003c66030373667c003333333f333333001e0c0c0c0c0c1e007830303033331e006766361e366667000f06060646667f0063777f7f6b63630063676f7b736363001c36636363361c00";
+}
+
+fn ft_hex1() -> str {
+    return "3f66663e06060f001e3333333b1e38003f66663e366667001e33070e38331e003f2d0c0c0c0c1e003333333333333f0033333333331e0c006363636b7f7763006363361c366363003333331e0c0c1e007f6331184c667f001e06060606061e0003060c18306040001e18181818181e00081c36630000000000000000000000ff0c0c18000000000000001e303e336e000706063e66663b0000001e3303331e003830303e33336e0000001e333f031e001c36060f06060f0000006e33333e301f0706366e666667000c000e0c0c0c1e00300030303033331e070666361e3667000e0c0c0c0c0c1e000000337f7f6b630000001f333333330000001e3333331e0000003b66663e060f00006e33333e307800003b6e66060f0000003e031e301f00080c3e0c0c2c18000000333333336e0000003333331e0c000000636b7f7f3600000063361c36630000003333333e301f00006331184c66001c36062606361c000c0c0c000c0c0c001c36303830361c0000000076dc000000";
+}
+
+fn ft_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// 表里第 b 个字节 (b ∈ [0, 760))。前 384 个在 ft_hex0, 其余在 ft_hex1。
+fn ft_tab(b: u32) -> u32 {
+    if b < 384 {
+        return (ft_hv(str_byte(ft_hex0(), b * 2)) << 4) | ft_hv(str_byte(ft_hex0(), b * 2 + 1));
+    }
+    let j: u32 = b - 384;
+    return (ft_hv(str_byte(ft_hex1(), j * 2)) << 4) | ft_hv(str_byte(ft_hex1(), j * 2 + 1));
+}
+
+// ---------------------------------------------------------------- 取字模
+
+/// 字符 cp 第 row 行 (0 = 最上) 的 8 个像素; **bit7 = 最左列**。
+/// 码点或行号越界给 0 (不是错误 —— "这格没墨")。
+pub fn ft_row(cp: u32, row: u32) -> u32 {
+    if cp < FT_FIRST || cp > FT_LAST || row >= FT_H {
+        return 0;
+    }
+    return ft_tab((cp - FT_FIRST) * FT_GLYPH + row);
+}
+
+/// 把字符 cp 的 8 行字节写进 out8 (需要 8 字节)。返回 8; 码点不在表里给 FT_NO。
+pub fn ft_glyph(cp: u32, out8: ptr) -> u32 {
+    if cp < FT_FIRST || cp > FT_LAST {
+        return FT_NO;
+    }
+    let r: u32 = 0;
+    while r < FT_H {
+        store8(out8, r, ft_row(cp, r) as u8);
+        r = r + 1;
+    }
+    return FT_GLYPH;
+}
+
+/// 字符 cp 有几笔 (置位数)。不在表里给 0。
+pub fn ft_ink(cp: u32) -> u32 {
+    if cp < FT_FIRST || cp > FT_LAST {
+        return 0;
+    }
+    let n: u32 = 0;
+    let r: u32 = 0;
+    while r < FT_H {
+        let bits: u32 = ft_row(cp, r);
+        let k: u32 = 0;
+        while k < 8 {
+            if ((bits >> k) & 1) != 0 {
+                n = n + 1;
+            }
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+    return n;
+}
+
+/// 画一个字到像素缓冲 `ws` (w × h, 0xAARRGGBB) 的 (r 行, c 列) 左上角。
+/// 逐像素裁边: 越界的不写。返回**真正落笔**的像素数。
+pub fn ft_draw(ws: ptr, w: u32, h: u32, r: i32, c: i32, cp: u32, color: u32) -> u32 {
+    if cp < FT_FIRST || cp > FT_LAST {
+        return 0;
+    }
+    let cnt: u32 = 0;
+    let dy: u32 = 0;
+    while dy < FT_H {
+        let bits: u32 = ft_row(cp, dy);
+        let dx: u32 = 0;
+        while dx < FT_W {
+            // bit7 = 最左列 -> 第 dx 列对应 bit (7 - dx)
+            if ((bits >> (7 - dx)) & 1) != 0 {
+                let px: i32 = c + (dx as i32);
+                let py: i32 = r + (dy as i32);
+                if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                    mem_store32(ws, ((py as u32) * w + (px as u32)) * 4, color);
+                    cnt = cnt + 1;
+                }
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    return cnt;
+}
+
+/// 在 (r, c) 起横向写一串字符 (每个 8 列宽, 不处理换行 —— 见诚实清单)。
+/// 返回所有字符落笔像素的总和。
+pub fn ft_text(ws: ptr, w: u32, h: u32, r: i32, c: i32, s: str, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        cnt = cnt + ft_draw(ws, w, h, r, c + (i as i32) * (FT_W as i32), str_byte(s, i), color);
+        i = i + 1;
+    }
+    return cnt;
+}
+
+/// 一行字符串渲染出来有几列宽 (每字符 8 列)。
+pub fn ft_text_width(s: str) -> u32 {
+    return str_len(s) * FT_W;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn fg(out: ptr, a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) {
+    store8(out, 0, a as u8);
+    store8(out, 1, b as u8);
+    store8(out, 2, c as u8);
+    store8(out, 3, d as u8);
+    store8(out, 4, e as u8);
+    store8(out, 5, f as u8);
+    store8(out, 6, g as u8);
+    store8(out, 7, h as u8);
+}
+
+fn test_font_glyph_A_known() -> bool {
+    // 真值来自 tools/gen_font8x8.py 的 0x41 那一行 (别猜, 打印出来抄)。
+    let g: ptr = alloc(8);
+    let n: u32 = ft_glyph(65, g);
+    return n == 8 && load8(g, 0) == 12 && load8(g, 1) == 30 && load8(g, 2) == 51
+        && load8(g, 3) == 51 && load8(g, 4) == 63 && load8(g, 5) == 51
+        && load8(g, 6) == 51 && load8(g, 7) == 0;
+}
+
+fn test_font_glyph_bang_known() -> bool {
+    let g: ptr = alloc(8);
+    return ft_glyph(33, g) == 8 && load8(g, 0) == 24 && load8(g, 1) == 60
+        && load8(g, 3) == 24 && load8(g, 5) == 0 && load8(g, 6) == 24;
+}
+
+fn test_font_space_is_blank() -> bool {
+    let g: ptr = alloc(8);
+    return ft_glyph(32, g) == 8 && ft_row(32, 0) == 0 && ft_row(32, 7) == 0 && ft_ink(32) == 0;
+}
+
+fn test_font_row_bit7_is_leftmost() -> bool {
+    // '!'(0x21) 的第 0 行是 0x18 = 0b0001_1000 -> 只有第 3、4 列有墨 (bit7 在左)。
+    let bits: u32 = ft_row(33, 0);
+    return bits == 24 && ((bits >> 7) & 1) == 0 && ((bits >> 4) & 1) == 1
+        && ((bits >> 3) & 1) == 1 && ((bits >> 2) & 1) == 0;
+}
+
+fn test_font_out_of_range_is_no() -> bool {
+    let g: ptr = alloc(8);
+    return ft_glyph(31, g) == FT_NO && ft_glyph(127, g) == FT_NO
+        && ft_glyph(300, g) == FT_NO && ft_row(200, 0) == 0 && ft_row(65, 8) == 0
+        && ft_ink(9) == 0;
+}
+
+fn test_font_text_width() -> bool {
+    return ft_text_width("") == 0 && ft_text_width("A") == 8
+        && ft_text_width("ABC") == 24 && ft_text_width("hello") == 40;
+}
+
+fn test_font_draw_places_pixels() -> bool {
+    // 在 8×8 的空缓冲上画 '!': 落笔数 = 该字的置位数 (16)。
+    let buf: ptr = alloc(8 * 8 * 4);
+    mem_fill(buf, 0, 8 * 8 * 4, 0);
+    let red: u32 = 4294901760; // 0xFFFF0000
+    let n: u32 = ft_draw(buf, 8, 8, 0, 0, 33, red);
+    // '!' 第 0 行 0x18 -> 第 3、4 列
+    let ok: bool = n == ft_ink(33) && ft_ink(33) == 16
+        && mem_load32(buf, (0 * 8 + 3) * 4) == red
+        && mem_load32(buf, (0 * 8 + 4) * 4) == red
+        && mem_load32(buf, (0 * 8 + 0) * 4) == 0
+        && mem_load32(buf, (0 * 8 + 7) * 4) == 0
+        && mem_load32(buf, (5 * 8 + 3) * 4) == 0;
+    return ok;
+}
+
+fn test_font_draw_clipped_and_guard() -> bool {
+    // 哨兵: 缓冲两侧各贴 8 字节, 把字画到边界外之后守卫必须没动, 落笔数要相应减少。
+    let pre: ptr = alloc(8);
+    let buf: ptr = alloc(8 * 8 * 4);
+    let post: ptr = alloc(8);
+    mem_fill(pre, 0, 8, 171);
+    mem_fill(buf, 0, 8 * 8 * 4, 0);
+    mem_fill(post, 0, 8, 171);
+    // 画在 (-4,-4): 只有右下 4×4 那一角可能在界内
+    let n: u32 = ft_draw(buf, 8, 8, 0 - 4, 0 - 4, 65, 255);
+    // 'A' 在移进来的 4×4 区域里的置位数: 手数第 4..7 行 × 第 4..7 列
+    //   行4 0x3F = ..111111 -> 列4,5,6,7 全有 (bit3..0) : 4
+    //   行5 0x33 = ..110011 -> 列4,5 有 : 2
+    //   行6 0x33 -> 2
+    //   行7 0x00 -> 0
+    let ok: bool = n == 8 && load8(pre, 0) == 171 && load8(pre, 7) == 171
+        && load8(post, 0) == 171 && load8(post, 7) == 171;
+    // 完全在界外: 一笔都不落
+    let m: u32 = ft_draw(buf, 8, 8, 100, 100, 65, 255);
+    return ok && m == 0 && load8(post, 3) == 171;
+}
+
+fn test_font_text_draws_all_chars() -> bool {
+    // "AB" 画进 16×8: 落笔数 = ink(A) + ink(B), 且 B 从第 8 列开始。
+    let buf: ptr = alloc(16 * 8 * 4);
+    mem_fill(buf, 0, 16 * 8 * 4, 0);
+    let n: u32 = ft_text(buf, 16, 8, 0, 0, "AB", 4278255360);
+    let ok: bool = n == ft_ink(65) + ft_ink(66) && ft_ink(65) == 28 && ft_ink(66) == 33;
+    // A 顶行 0x0C = 0b0000_1100 -> bit3、bit2 -> 第 4、5 列。
+    // B 顶行 0x3F = 0b0011_1111 -> bit7、bit6 是 0 -> 局部第 0、1 列是空的,
+    // 也就是全局第 8、9 列该是 0, 第 10 列起才有墨 —— 这条同时验了"横向推进 8 列"。
+    let ok2: bool = mem_load32(buf, (0 * 16 + 4) * 4) == 4278255360
+        && mem_load32(buf, (0 * 16 + 5) * 4) == 4278255360
+        && mem_load32(buf, (0 * 16 + 8) * 4) == 0
+        && mem_load32(buf, (0 * 16 + 9) * 4) == 0
+        && mem_load32(buf, (0 * 16 + 10) * 4) == 4278255360
+        && mem_load32(buf, (0 * 16 + 13) * 4) == 4278255360;
+    return ok && ok2;
+}
+
+fn test_font_every_printable_has_ink() -> bool {
+    // 防"表里混进空字符": 除空格外 (0x20 本来就该是空白), 32..126 每个都得有墨。
+    // 第一次跑这条时 0x7E '~' 是整格 0 —— 源表留下的洞, 补画之后才过。
+    let cp: u32 = 33;
+    let bad: u32 = 0;
+    while cp <= 126 {
+        if ft_ink(cp) == 0 {
+            bad = bad + 1;
+        }
+        cp = cp + 1;
+    }
+    return bad == 0;
+}
+
+fn test_font_table_tail_is_reachable() -> bool {
+    // 0x7E 是表的**最后一个**字符, 它的字模落在第二段 hex (b >= 384) 里 ——
+    // 这条钉住"分段没把尾巴切掉": 取得到它补画的那两行波浪。
+    return FT_COUNT == 95 && FT_LAST - FT_FIRST + 1 == FT_COUNT
+        && ft_row(126, 3) == 118 && ft_row(126, 4) == 220
+        && ft_row(126, 7) == 0;
+}
+
+fn test_font_glyph_writes_exactly_eight_bytes() -> bool {
+    // ft_glyph 的输出缓冲只有 8 字节: 两侧贴哨兵, 写完之后守卫必须没动。
+    // (表/循环要是多走一格, 这里会红 —— 那是会踩坏调用方内存的写法。)
+    let pre: ptr = alloc(8);
+    let g: ptr = alloc(8);
+    let post: ptr = alloc(8);
+    mem_fill(pre, 0, 8, 205);
+    mem_fill(g, 0, 8, 0);
+    mem_fill(post, 0, 8, 205);
+    let a1: u32 = ft_glyph(65, g);  // 写入 'A'
+    let a2: u32 = ft_glyph(32, g);  // 再写入空格 (8 个 0)
+    let a3: u32 = ft_glyph(31, g);  // 越界: FT_NO, 一个字节都不该写
+    return a1 == 8 && a2 == 8 && a3 == FT_NO
+        && load8(pre, 0) == 205 && load8(pre, 7) == 205
+        && load8(post, 0) == 205 && load8(post, 7) == 205
+        && load8(g, 0) == 0 && load8(g, 7) == 0;
+}
+
+fn test_font_ink_matches_unclipped_draw() -> bool {
+    // 不裁边时 ft_draw 的落笔数必须**恰好**等于 ft_ink —— 两条独立路径 (数位 / 画点)
+    // 对同一张表给出的答案要一致。只查"某些字符有墨"是不够的, 这条覆盖每一个。
+    let buf: ptr = alloc(8 * 8 * 4);
+    let cp: u32 = 33;
+    let bad: u32 = 0;
+    while cp <= 126 {
+        mem_fill(buf, 0, 8 * 8 * 4, 0);
+        if ft_draw(buf, 8, 8, 0, 0, cp, 4294967295) != ft_ink(cp) {
+            bad = bad + 1;
+        }
+        cp = cp + 1;
+    }
+    return bad == 0 && ft_ink(33) == 16 && ft_ink(65) == 28;
+}

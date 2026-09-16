@@ -1,0 +1,662 @@
+// std/sched.lomt — 数据驱动的合作式调度表 (**不是抢占式调度器** —— 先说清楚)
+//
+// ============================================================================
+// 这不是什么, 以及为什么只能做成这样
+// ============================================================================
+// 真正的调度器要能在任务跑到一半时把它**打断**(时钟中断 / 信号), 还要能切换它的执行
+// 现场(换栈、换寄存器)。这门语言两样都没有:
+//
+//   1. **没有抢占**。PE 目标只有 8 个 syscall, 没有定时器、没有信号、没有 alarm。
+//      没有任何东西能"从外面"打断一个正在跑的任务。
+//   2. **不能切换现场**。没有 `asm`、没有 setjmp/longjmp、没有 clone
+//      —— 栈指针根本摸不着 (见 coro.lomt 开头那段, 理由是一样的)。
+//   3. **没有函数指针**。所以任务表里**存不下"任务本体"** —— 存不了入口地址,
+//      也就没法"调用"一个任务。任务本体只能由**调用方自己** `match 下标 { ... }` 分发。
+//
+// 于是能做的只有一件事: **把"该谁跑"这件事从代码里挪到数据里**。
+// 这个模块提供一张**任务表** (每项: 状态 / 下次可运行时刻 / 已运行次数 / 优先级)
+// 和三个选择策略, 由 `sc_next` 回答"按策略, 下一个该跑的是谁 (下标)", 由 `sc_pick`
+// 顺手把账记上。**它自己一个任务都不会跑** —— "跑"是调用方拿到下标之后的事。
+//
+// ============================================================================
+// 合作式的意思 (以及它带来的诚实缺口)
+// ============================================================================
+// "合作"= 任务必须**自己**跑完一段就回来 (调用方拿到下标 → 跑一段 → 再问下一个)。
+// 后果:
+//   · **一个任务不回来, 整个表就停了**。没有东西能把它拉回来 —— 没有抢占。
+//   · **没有阻塞/唤醒**: 等 I/O 只能"这一轮先不跑它" —— 由调用方把它的状态改成
+//     不是 READY (或把 `next_at` 推到将来), 这个模块不掺和。也没有等待队列、没有事件。
+//   · **固定优先级会饿死低优先级任务**: 这里**没有优先级老化, 也没有优先级继承**。
+//     `SC_FIXED` 就是老老实实每次取优先级最高的那个, 你要是让高优先级一直 READY,
+//     低优先级的 `skips` 就会一直涨 —— 那个涨着的数**就是**饥饿的证据, 不是 bug。
+//   · **时间不是真的**: `now` 是一个**被调用方推着走的整数** (`sc_set_now` / `sc_tick` /
+//     `sc_pick` 里的 slice), 不是时钟。没有 clock_gettime。所以 `next_at` 是"第几个
+//     时间单位", 单位由调用方定义。
+//   · **没有优先级的"数值越大越优先"以外的语义**: 优先级就是个 u32, 越大越优先。
+//
+// ============================================================================
+// 三个策略 (都只看**此刻可运行**的任务)
+// ============================================================================
+//   一个任务算"可运行"当且仅当: `state == SC_READY` **且** `next_at <= now`。
+//   (所以"还没到点"的任务会被所有策略跳过 —— 这是统一的, 不按策略分叉。)
+//
+//   SC_RR    轮转: 从 `cursor` 开始环形扫, 取第一个可运行的; `sc_pick` 把 cursor 推到
+//                  它后面一个。**只查不跑不会轮转** —— cursor 是 `sc_pick` 推的。
+//   SC_EDF   最早可运行: 在所有可运行的任务里取 `next_at` 最小的那个 ——
+//                  也就是"等得最久"的那个。平手取下标小的。
+//                  (名字借的是最早截止, 但这里 `next_at` 的含义是"最早能跑的时刻",
+//                   不是 deadline —— 所以它实际是"最先可运行者优先"/FCFS-by-release。
+//                   这么定是因为全表只有这四个字段, 没有单独的 deadline 位置。)
+//   SC_FIXED 固定优先级: 取 `prio` 最大的, 平手取下标小的。
+//
+// ============================================================================
+// 布局 (调用方给工作区; 16 字节头 + 每任务 20 字节)
+// ============================================================================
+//   头:  ws+0  = ntasks      任务个数 (初始化后不变)
+//        ws+4  = policy      SC_RR / SC_EDF / SC_FIXED
+//        ws+8  = now         当前时刻 (整数, 单位由调用方定)
+//        ws+12 = cursor      RR 的轮转指针 (只有 SC_RR 用它)
+//   任务 i 在 `sc_base(i) = 16 + 20*i`:
+//        +0  state    SC_FREE / SC_READY / SC_DONE
+//        +4  next_at  下次可运行时刻
+//        +8  runs     跑过几次
+//        +12 skips    被"让过"几次 (可运行但没被选中)
+//        +16 prio     优先级 (大者优先)
+//
+// 命名: 公开 sc_*, 内部无。自检 test_sched_*。
+
+module sched
+
+use "mem.lomt"
+
+/// 出错 / "没有" —— 这个模块两者用得上, 所以按惯例分开:
+///   SC_ERR 只用在"参数不合法" (`sc_set_task` 越界); SC_NO 只用在 `sc_next` / `sc_pick`
+///   回答"没人该跑"。分开是为了让调用方能一眼分清"我传错了"和"现在没活干"。
+pub const SC_ERR: u32 = 4294967295;
+pub const SC_NO: u32 = 4294967294;
+
+/// 任务状态。FREE = 空槽 (还没填), READY = 可跑, DONE = 跑完了不再参与。
+pub const SC_FREE: u32 = 0;
+pub const SC_READY: u32 = 1;
+pub const SC_DONE: u32 = 2;
+
+/// 策略。
+pub const SC_RR: u32 = 0;
+pub const SC_EDF: u32 = 1;
+pub const SC_FIXED: u32 = 2;
+
+pub const SC_HDR: u32 = 16;
+pub const SC_STRIDE: u32 = 20;
+
+pub const SC_NTASKS: u32 = 0;
+pub const SC_POLICY: u32 = 4;
+pub const SC_NOW: u32 = 8;
+pub const SC_CURSOR: u32 = 12;
+
+pub const SC_T_STATE: u32 = 0;
+pub const SC_T_NEXT: u32 = 4;
+pub const SC_T_RUNS: u32 = 8;
+pub const SC_T_SKIPS: u32 = 12;
+pub const SC_T_PRIO: u32 = 16;
+
+/// 装 n 个任务要多少字节。
+pub fn sc_bytes(n: u32) -> u32 {
+    return SC_HDR + SC_STRIDE * n;
+}
+
+/// 第 i 个任务在 ws 里的偏移。
+pub fn sc_base(i: u32) -> u32 {
+    return SC_HDR + SC_STRIDE * i;
+}
+
+// ---------------------------------------------------------------- 建 / 读
+
+/// 建表: 所有槽 FREE、计数归零、`now` 与 `cursor` 归零。
+/// (表内容要清 —— 堆是 bump 的, 不清就会把上一份的 runs/skips 接着用。)
+pub fn sc_init(ws: ptr, n: u32, policy: u32) {
+    mem_store32(ws, SC_NTASKS, n);
+    mem_store32(ws, SC_POLICY, policy);
+    mem_store32(ws, SC_NOW, 0);
+    mem_store32(ws, SC_CURSOR, 0);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = sc_base(i);
+        mem_store32(ws, b + SC_T_STATE, SC_FREE);
+        mem_store32(ws, b + SC_T_NEXT, 0);
+        mem_store32(ws, b + SC_T_RUNS, 0);
+        mem_store32(ws, b + SC_T_SKIPS, 0);
+        mem_store32(ws, b + SC_T_PRIO, 0);
+        i = i + 1;
+    }
+}
+
+pub fn sc_ntasks(ws: ptr) -> u32 {
+    return mem_load32(ws, SC_NTASKS);
+}
+
+pub fn sc_policy(ws: ptr) -> u32 {
+    return mem_load32(ws, SC_POLICY);
+}
+
+/// 当前时刻。**它不是时钟** —— 只被 `sc_set_now` / `sc_tick` / `sc_pick` 推动。
+pub fn sc_now(ws: ptr) -> u32 {
+    return mem_load32(ws, SC_NOW);
+}
+
+pub fn sc_set_now(ws: ptr, t: u32) {
+    mem_store32(ws, SC_NOW, t);
+}
+
+/// 把时刻往前推 `d` (调用方在外面过了一段时间后调它)。
+pub fn sc_tick(ws: ptr, d: u32) {
+    mem_store32(ws, SC_NOW, mem_load32(ws, SC_NOW) + d);
+}
+
+/// RR 的轮转指针 (诊断 / 手工摆位用)。
+pub fn sc_cursor(ws: ptr) -> u32 {
+    return mem_load32(ws, SC_CURSOR);
+}
+
+pub fn sc_task_state(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, sc_base(i) + SC_T_STATE);
+}
+
+pub fn sc_next_at(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, sc_base(i) + SC_T_NEXT);
+}
+
+pub fn sc_runs(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, sc_base(i) + SC_T_RUNS);
+}
+
+pub fn sc_skips(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, sc_base(i) + SC_T_SKIPS);
+}
+
+pub fn sc_prio(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, sc_base(i) + SC_T_PRIO);
+}
+
+/// 填一个任务槽: 状态 / 下次可运行时刻 / 优先级。越界返回 false (**不静默丢弃** ——
+/// 悄悄丢掉一个任务比报错坏得多)。
+pub fn sc_set_task(ws: ptr, i: u32, state: u32, next_at: u32, prio: u32) -> bool {
+    if i >= sc_ntasks(ws) {
+        return false;
+    }
+    let b: u32 = sc_base(i);
+    mem_store32(ws, b + SC_T_STATE, state);
+    mem_store32(ws, b + SC_T_NEXT, next_at);
+    mem_store32(ws, b + SC_T_PRIO, prio);
+    return true;
+}
+
+/// 只改"下次可运行时刻" (比如任务自己说"我要等 10 个单位")。
+pub fn sc_set_next_at(ws: ptr, i: u32, t: u32) -> bool {
+    if i >= sc_ntasks(ws) {
+        return false;
+    }
+    mem_store32(ws, sc_base(i) + SC_T_NEXT, t);
+    return true;
+}
+
+/// 只改状态 (READY / DONE / FREE 之间搬)。
+pub fn sc_set_state(ws: ptr, i: u32, s: u32) -> bool {
+    if i >= sc_ntasks(ws) {
+        return false;
+    }
+    mem_store32(ws, sc_base(i) + SC_T_STATE, s);
+    return true;
+}
+
+// ---------------------------------------------------------------- 可运行性
+
+/// 此刻能不能跑: 状态是 READY **且** `next_at <= now`。
+pub fn sc_ready(ws: ptr, i: u32) -> bool {
+    if sc_task_state(ws, i) != SC_READY {
+        return false;
+    }
+    return sc_next_at(ws, i) <= sc_now(ws);
+}
+
+/// 此刻能跑的任务有几个。
+pub fn sc_eligible_count(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if sc_ready(ws, i) {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 此刻**没有**能跑的任务了吗。
+/// ⚠️ 它是按**时刻**算的, 不是"没有 READY 状态的任务": 一个 READY 但还没到
+/// `next_at` 的任务不算"能跑"。表是空的 (n=0) 也算没有。
+pub fn sc_no_runnable(ws: ptr) -> bool {
+    return sc_eligible_count(ws) == 0;
+}
+
+// ---------------------------------------------------------------- 三个策略
+
+/// 轮转: 从 cursor 起环形扫, 第一个可运行的。**只读, 不推 cursor** ——
+/// 所以连问两次得到的是同一个答案; 轮转要靠 `sc_pick`。
+fn sc_next_rr(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    if n == 0 {
+        return SC_NO;
+    }
+    let cur: u32 = mem_load32(ws, SC_CURSOR);
+    let k: u32 = 0;
+    while k < n {
+        let i: u32 = (cur + k) % n;
+        if sc_ready(ws, i) {
+            return i;
+        }
+        k = k + 1;
+    }
+    return SC_NO;
+}
+
+/// 最早可运行: `next_at` 最小者。下标从小到大扫、只在**严格更小**时替换,
+/// 所以平手自然落在下标小的那个上 —— 这一条不能靠"随机"或"碰巧"。
+fn sc_next_edf(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let best: u32 = SC_NO;
+    let best_at: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if sc_ready(ws, i) {
+            let t: u32 = sc_next_at(ws, i);
+            if best == SC_NO || t < best_at {
+                best = i;
+                best_at = t;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// 固定优先级: `prio` 最大者, 平手取下标的。
+fn sc_next_fixed(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let best: u32 = SC_NO;
+    let best_pr: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if sc_ready(ws, i) {
+            let p: u32 = sc_prio(ws, i);
+            if best == SC_NO || p > best_pr {
+                best = i;
+                best_pr = p;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// **按策略回答"下一个该跑的是谁" (下标)**, 没有可运行的返回 SC_NO。
+/// 纯查询: 不改任何字节 (不会推 cursor, 不会记 runs/skips) —— 想"选了就记账"用 `sc_pick`。
+pub fn sc_next(ws: ptr) -> u32 {
+    let p: u32 = sc_policy(ws);
+    if p == SC_EDF {
+        return sc_next_edf(ws);
+    }
+    if p == SC_FIXED {
+        return sc_next_fixed(ws);
+    }
+    return sc_next_rr(ws);
+}
+
+// ---------------------------------------------------------------- 记账
+
+fn sc_bump_skips(ws: ptr, i: u32) {
+    let b: u32 = sc_base(i) + SC_T_SKIPS;
+    mem_store32(ws, b, mem_load32(ws, b) + 1);
+}
+
+/// 手工给某个任务记一次"被让过"。想自己定义什么叫跳过时用它。
+pub fn sc_skip(ws: ptr, i: u32) -> bool {
+    if i >= sc_ntasks(ws) {
+        return false;
+    }
+    sc_bump_skips(ws, i);
+    return true;
+}
+
+/// 给所有**此刻可运行**且不是 `chosen` 的任务各记一次跳过, 返回记了几个。
+/// 这就是"跳过"的定义: 它能跑, 但这次选的是别人。
+pub fn sc_note_skips(ws: ptr, chosen: u32) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if i != chosen && sc_ready(ws, i) {
+            sc_bump_skips(ws, i);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// **选中并记账**: 挑一个 (同 `sc_next`), 然后
+///   · 没挑到 -> 返回 SC_NO, 一个字节都不改
+///   · 挑到了 -> 记其它可运行任务各一次跳过; 被选中的 `runs` +1;
+///               `next_at = now + slice`; `now = now + slice`;
+///               SC_RR 时把 cursor 推到它后面一个
+///
+/// `slice` 同时扮演两个角色: 这次"花掉"的时间, 以及这个任务下次最早能再跑的时刻间隔。
+/// 只有两个数字可用却要表达两件事, 所以**明确合并**在这里, 而不是藏起来。
+/// 想要别的周期就在 pick 之后 `sc_set_next_at` 单独改。
+pub fn sc_pick(ws: ptr, slice: u32) -> u32 {
+    let i: u32 = sc_next(ws);
+    if i == SC_NO {
+        return SC_NO;
+    }
+    sc_note_skips(ws, i);
+    let now: u32 = sc_now(ws);
+    let nxt: u32 = now + slice;
+    let b: u32 = sc_base(i);
+    mem_store32(ws, b + SC_T_RUNS, mem_load32(ws, b + SC_T_RUNS) + 1);
+    mem_store32(ws, b + SC_T_NEXT, nxt);
+    mem_store32(ws, SC_NOW, nxt);
+    mem_store32(ws, SC_CURSOR, (i + 1) % sc_ntasks(ws));
+    return i;
+}
+
+/// 所有任务 `runs` 的总和 (= 这张表一共被调度了多少次)。
+pub fn sc_total_runs(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        c = c + sc_runs(ws, i);
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 所有任务 `skips` 的总和 (= 一共发生了多少次"能跑但没被选")。
+pub fn sc_total_skips(ws: ptr) -> u32 {
+    let n: u32 = sc_ntasks(ws);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        c = c + sc_skips(ws, i);
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 自检
+
+// 自检边界: 这个模块没有并发语义 (它只是一张表 + 几个选择函数), 所以这里没有
+// "未验证的并发性质"。测的是: 策略的选择结果、平手规则、时刻门槛、记账 (runs/skips/now/
+// cursor)、越界拒绝、空表与全 DONE 的边界。
+// **没测也测不了**: "任务真的被跑了" —— 这个模块一个任务都不跑, 跑是调用方的事。
+
+/// 字节数与步长要和布局常量对得上。
+fn test_sched_bytes_and_stride() -> bool {
+    return sc_bytes(0) == 16 && sc_bytes(1) == 36 && sc_bytes(3) == 76
+        && sc_base(0) == 16 && sc_base(2) == 56 && SC_STRIDE == 20 && SC_HDR == 16;
+}
+
+/// 建表: 头清干净, 每个槽 FREE 且四个字段全 0。
+fn test_sched_init_clears_everything() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_RR);
+    return sc_ntasks(ws) == 3 && sc_policy(ws) == SC_RR && sc_now(ws) == 0
+        && sc_cursor(ws) == 0 && sc_task_state(ws, 0) == SC_FREE
+        && sc_task_state(ws, 2) == SC_FREE && sc_next_at(ws, 1) == 0
+        && sc_runs(ws, 1) == 0 && sc_skips(ws, 1) == 0 && sc_prio(ws, 1) == 0;
+}
+
+/// 建表要**清掉旧账**: 同一块工作区建两次, 第二次不能还带着第一次的 runs/skips。
+fn test_sched_init_clears_stale_accounts() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 5);
+    sc_pick(ws, 3);
+    sc_init(ws, 2, SC_FIXED);
+    return sc_runs(ws, 0) == 0 && sc_skips(ws, 0) == 0 && sc_now(ws) == 0
+        && sc_cursor(ws) == 0 && sc_task_state(ws, 0) == SC_FREE && sc_policy(ws) == SC_FIXED;
+}
+
+/// 填槽与读回。
+fn test_sched_set_task_and_read_back() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_EDF);
+    let ok: bool = sc_set_task(ws, 1, SC_READY, 7, 9);
+    return ok && sc_task_state(ws, 1) == SC_READY && sc_next_at(ws, 1) == 7
+        && sc_prio(ws, 1) == 9 && sc_task_state(ws, 0) == SC_FREE;
+}
+
+/// 越界一律拒绝: 下标 == n 不行, 大得多的下标也不行。
+fn test_sched_set_task_rejects_out_of_range() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    return sc_set_task(ws, 2, SC_READY, 0, 0) == false
+        && sc_set_task(ws, 99, SC_READY, 0, 0) == false
+        && sc_set_next_at(ws, 2, 5) == false && sc_set_state(ws, 2, SC_READY) == false
+        && sc_skip(ws, 2) == false && sc_set_task(ws, 1, SC_READY, 0, 0);
+}
+
+/// 可运行性: 状态要 READY **且** 到点了。`next_at == now` 算到点 (闭区间左边)。
+fn test_sched_ready_respects_state_and_time() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_RR);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 0, SC_READY, 10, 0);   // 正好到点 -> 能跑
+    sc_set_task(ws, 1, SC_READY, 11, 0);   // 差一点 -> 不能
+    sc_set_task(ws, 2, SC_DONE, 0, 0);     // 状态不对 -> 不能
+    let n: u32 = sc_eligible_count(ws);
+    return sc_ready(ws, 0) && sc_ready(ws, 1) == false && sc_ready(ws, 2) == false
+        && n == 1 && sc_no_runnable(ws) == false;
+}
+
+/// 轮转: 三个都能跑时按 0 -> 1 -> 2 -> 0 循环, cursor 跟着走。
+fn test_sched_rr_cycle_order() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 0);
+    sc_set_task(ws, 1, SC_READY, 0, 0);
+    sc_set_task(ws, 2, SC_READY, 0, 0);
+    let a: u32 = sc_pick(ws, 1);
+    let c1: u32 = sc_cursor(ws);
+    let b: u32 = sc_pick(ws, 1);
+    let c2: u32 = sc_cursor(ws);
+    let c: u32 = sc_pick(ws, 1);
+    let c3: u32 = sc_cursor(ws);
+    let d: u32 = sc_pick(ws, 1);
+    return a == 0 && b == 1 && c == 2 && d == 0 && c1 == 1 && c2 == 2 && c3 == 0;
+}
+
+/// 轮转要**跳过不能跑的那个**: 中间那个是 DONE, 顺序就是 0 -> 2。
+fn test_sched_rr_skips_unavailable() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 0);
+    sc_set_task(ws, 1, SC_DONE, 0, 0);
+    sc_set_task(ws, 2, SC_READY, 0, 0);
+    let a: u32 = sc_next(ws);
+    sc_pick(ws, 1);
+    let b: u32 = sc_next(ws);
+    return a == 0 && b == 2;
+}
+
+/// `sc_next` 是**纯查询**: 连问两次答案一样, 而且 cursor / now / runs 一个都不动。
+fn test_sched_next_is_pure_query() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 0);
+    sc_set_task(ws, 1, SC_READY, 0, 0);
+    let a: u32 = sc_next(ws);
+    let b: u32 = sc_next(ws);
+    return a == 0 && b == 0 && sc_cursor(ws) == 0 && sc_now(ws) == 0
+        && sc_runs(ws, 0) == 0 && sc_skips(ws, 1) == 0;
+}
+
+/// EDF: 取 `next_at` 最小的 —— 也就是**等得最久**的那个。
+fn test_sched_edf_picks_longest_waiting() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_EDF);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 0, SC_READY, 5, 0);
+    sc_set_task(ws, 1, SC_READY, 2, 0);
+    sc_set_task(ws, 2, SC_READY, 9, 0);
+    return sc_next(ws) == 1;
+}
+
+/// EDF 平手 -> 下标小的 (不能靠碰巧, 得靠"只在严格更小时替换")。
+fn test_sched_edf_tie_break_by_index() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_EDF);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 2, SC_READY, 4, 0);
+    sc_set_task(ws, 1, SC_READY, 4, 0);
+    sc_set_task(ws, 0, SC_READY, 9, 0);
+    return sc_next(ws) == 1;
+}
+
+/// EDF: 都还没到点 -> 没人可跑。
+fn test_sched_edf_ignores_not_yet_released() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_EDF);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 0, SC_READY, 20, 0);
+    sc_set_task(ws, 1, SC_READY, 21, 0);
+    sc_set_task(ws, 2, SC_READY, 22, 0);
+    return sc_next(ws) == SC_NO && sc_no_runnable(ws);
+}
+
+/// 固定优先级: 取 `prio` 最大的。
+fn test_sched_fixed_picks_highest_prio() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_FIXED);
+    sc_set_task(ws, 0, SC_READY, 0, 3);
+    sc_set_task(ws, 1, SC_READY, 0, 9);
+    sc_set_task(ws, 2, SC_READY, 0, 5);
+    return sc_next(ws) == 1;
+}
+
+/// 固定优先级平手 -> 下标小的。
+fn test_sched_fixed_tie_break_by_index() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_FIXED);
+    sc_set_task(ws, 0, SC_READY, 0, 7);
+    sc_set_task(ws, 1, SC_READY, 0, 7);
+    sc_set_task(ws, 2, SC_READY, 0, 2);
+    return sc_next(ws) == 0;
+}
+
+/// 策略是**从表里读的**: 同一张表改 policy 字段, 选择结果立刻跟着变。
+/// 三个策略在这张表上给出**两个不同的答案** —— 这样才真的测到了"按策略分叉",
+/// 而不是"三个都碰巧返回 0"。
+fn test_sched_policy_is_data_driven() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 0, SC_READY, 1, 1);   // 等得久 (next_at 小), 但优先级低
+    sc_set_task(ws, 1, SC_READY, 6, 9);   // 优先级高, 但刚放出来
+    let rr: u32 = sc_next(ws);            // 轮转从头扫 -> 0
+    mem_store32(ws, SC_POLICY, SC_FIXED);
+    let fx: u32 = sc_next(ws);            // prio 9 -> 1
+    mem_store32(ws, SC_POLICY, SC_EDF);
+    let ed: u32 = sc_next(ws);            // next_at 1 < 6 -> 0
+    return rr == 0 && fx == 1 && ed == 0 && sc_policy(ws) == SC_EDF;
+}
+
+/// pick 的账: runs +1、`next_at = now + slice`、`now` 推 `slice`、cursor 推一格。
+fn test_sched_pick_accounts_time_runs_cursor() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 0);
+    sc_set_now(ws, 100);
+    let i: u32 = sc_pick(ws, 4);
+    return i == 0 && sc_runs(ws, 0) == 1 && sc_next_at(ws, 0) == 104 && sc_now(ws) == 104
+        && sc_cursor(ws) == 1 && sc_runs(ws, 1) == 0;
+}
+
+/// pick 给**没被选中的可运行任务**各记一次跳过; 被选中的那个不记。
+fn test_sched_pick_notes_skips_on_others() -> bool {
+    let ws: ptr = alloc(sc_bytes(3));
+    sc_init(ws, 3, SC_EDF);
+    sc_set_now(ws, 10);
+    sc_set_task(ws, 0, SC_READY, 1, 0);
+    sc_set_task(ws, 1, SC_READY, 2, 0);
+    sc_set_task(ws, 2, SC_READY, 3, 0);
+    let i: u32 = sc_pick(ws, 1);
+    return i == 0 && sc_skips(ws, 0) == 0 && sc_skips(ws, 1) == 1 && sc_skips(ws, 2) == 1
+        && sc_total_skips(ws) == 2 && sc_total_runs(ws) == 1;
+}
+
+/// 空表: 什么都挑不到, 而且**不会崩** (n=0 时取模那条路必须绕开)。
+fn test_sched_empty_table_is_safe() -> bool {
+    let ws: ptr = alloc(sc_bytes(0));
+    sc_init(ws, 0, SC_RR);
+    return sc_ntasks(ws) == 0 && sc_next(ws) == SC_NO && sc_pick(ws, 1) == SC_NO
+        && sc_no_runnable(ws) && sc_eligible_count(ws) == 0 && sc_total_runs(ws) == 0
+        && sc_total_skips(ws) == 0;
+}
+
+/// 全 DONE: 没人可跑, pick 一个字节都不改 (不会把 now 推着走)。
+fn test_sched_all_done_picks_nothing() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_task(ws, 0, SC_DONE, 0, 0);
+    sc_set_task(ws, 1, SC_DONE, 0, 0);
+    let now_before: u32 = sc_now(ws);
+    let i: u32 = sc_pick(ws, 5);
+    return i == SC_NO && sc_now(ws) == now_before && sc_cursor(ws) == 0
+        && sc_no_runnable(ws) && sc_total_runs(ws) == 0;
+}
+
+/// `sc_tick` 是"外面过了一段时间": 推完时刻, 原本没到点的任务就该能跑了。
+fn test_sched_tick_releases_task() -> bool {
+    let ws: ptr = alloc(sc_bytes(1));
+    sc_init(ws, 1, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 50, 0);
+    let before: bool = sc_no_runnable(ws);
+    sc_tick(ws, 30);
+    let mid: bool = sc_no_runnable(ws);
+    sc_tick(ws, 20);
+    let after: bool = sc_ready(ws, 0);
+    return before && mid && after && sc_now(ws) == 50;
+}
+
+/// **饥饿是看得见的**: 固定优先级下一直让高优先级可运行, 低优先级的 `skips` 一直涨,
+/// 而 `runs` 一直是 0。这不是 bug, 是策略的定义 —— 自检把它摆出来当文档。
+fn test_sched_fixed_priority_starves_low() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_FIXED);
+    sc_set_task(ws, 0, SC_READY, 0, 9);
+    sc_set_task(ws, 1, SC_READY, 0, 1);
+    let r: u32 = 0;
+    while r < 5 {
+        // 每轮把高优先级的"下次可运行"拉回当下, 模拟它一直有活干
+        sc_set_next_at(ws, 0, sc_now(ws));
+        sc_pick(ws, 1);
+        r = r + 1;
+    }
+    return sc_runs(ws, 0) == 5 && sc_runs(ws, 1) == 0 && sc_skips(ws, 1) == 5
+        && sc_total_runs(ws) == 5;
+}
+
+/// 轮转**不会**饿死人: 两个任务各跑 5 次, 一个不多一个不少。
+fn test_sched_rr_is_fair_over_many_rounds() -> bool {
+    let ws: ptr = alloc(sc_bytes(2));
+    sc_init(ws, 2, SC_RR);
+    sc_set_task(ws, 0, SC_READY, 0, 0);
+    sc_set_task(ws, 1, SC_READY, 0, 0);
+    let r: u32 = 0;
+    while r < 10 {
+        sc_pick(ws, 1);
+        r = r + 1;
+    }
+    return sc_runs(ws, 0) == 5 && sc_runs(ws, 1) == 5 && sc_total_runs(ws) == 10;
+}

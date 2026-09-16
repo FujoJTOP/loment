@@ -1,0 +1,405 @@
+// std/heap.lomt — 二叉最小堆 (优先队列)
+//
+// 为什么需要它: "每次取最小的那个"是调度、合并、TopK、Dijkstra 的共同形状。用有序数组
+// 每次插入要挪一遍, 用无序数组每次取要扫一遍 —— 堆把两件事都压到 O(log n)。
+//
+// 布局 (状态在调用方的缓冲里): buf[0..4] = 元素个数 n, 元素从偏移 8 起, 每个 u64。
+// 所以装 cap 个元素要 8 + 8*cap 字节 —— 用 heap_bytes。
+//
+// 只存 u64 值, 不存卫星数据: 语言不能按值传聚合, 所以"堆里放结构体"这件事在这里表达成
+// "堆里放 u64, 卫星数据自己按下标放别的数组"。这比造一个泛型堆诚实 —— 包内链接器
+// 连按值传结构体都不支持。
+//
+// 命名: 公开 heap_*, 内部 hp_* / hpa_*。自检 test_heap_*。
+
+module heap
+
+use "mem.lomt"
+
+/// 头部字节数 (只放元素个数)。
+pub const HP_HDR: u32 = 8;
+/// 空堆取出来给的值。
+pub const HP_NIL: u64 = 18446744073709551615;
+
+/// 装 cap 个元素要多少字节。
+pub fn heap_bytes(cap: u32) -> u32 {
+    return HP_HDR + 8 * cap;
+}
+
+fn hp_at(b: ptr, i: u32) -> u32 {
+    return HP_HDR + 8 * i;
+}
+
+fn hp_n(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn hp_set_n(b: ptr, n: u32) {
+    mem_store32(b, 0, n);
+}
+
+pub fn heap_init(b: ptr) {
+    hp_set_n(b, 0);
+}
+
+pub fn heap_len(b: ptr) -> u32 {
+    return hp_n(b);
+}
+
+pub fn heap_is_empty(b: ptr) -> bool {
+    return hp_n(b) == 0;
+}
+
+fn hp_swap(b: ptr, i: u32, j: u32) {
+    let x: u64 = mem_load64(b, hp_at(b, i));
+    let y: u64 = mem_load64(b, hp_at(b, j));
+    mem_store64(b, hp_at(b, i), y);
+    mem_store64(b, hp_at(b, j), x);
+}
+
+/// 从 i 往下沉, 直到它不大于两个孩子。
+fn hp_sift(b: ptr, n: u32, i0: u32) {
+    let i: u32 = i0;
+    let go: u32 = 1;
+    while go == 1 {
+        let l: u32 = 2 * i + 1;
+        let r: u32 = l + 1;
+        let m: u32 = i;
+        if l < n && mem_load64(b, hp_at(b, l)) < mem_load64(b, hp_at(b, m)) {
+            m = l;
+        }
+        if r < n && mem_load64(b, hp_at(b, r)) < mem_load64(b, hp_at(b, m)) {
+            m = r;
+        }
+        if m == i {
+            go = 0;
+        } else {
+            hp_swap(b, i, m);
+            i = m;
+        }
+    }
+}
+
+/// 压入。满了返回 false (**不静默丢** —— 丢掉一个任务比报错坏得多)。
+pub fn heap_push(b: ptr, cap: u32, v: u64) -> bool {
+    let n: u32 = hp_n(b);
+    if n >= cap {
+        return false;
+    }
+    mem_store64(b, hp_at(b, n), v);
+    hp_set_n(b, n + 1);
+    // 上浮: 只要比父亲小就交换
+    let i: u32 = n;
+    let go: u32 = 1;
+    while i > 0 && go == 1 {
+        let p: u32 = (i - 1) / 2;
+        if mem_load64(b, hp_at(b, i)) < mem_load64(b, hp_at(b, p)) {
+            hp_swap(b, i, p);
+            i = p;
+        } else {
+            go = 0;
+        }
+    }
+    return true;
+}
+
+pub fn heap_peek(b: ptr) -> u64 {
+    if hp_n(b) == 0 {
+        return HP_NIL;
+    }
+    return mem_load64(b, hp_at(b, 0));
+}
+
+/// 弹出最小。空堆给 HP_NIL。
+pub fn heap_pop(b: ptr) -> u64 {
+    let n: u32 = hp_n(b);
+    if n == 0 {
+        return HP_NIL;
+    }
+    let top: u64 = mem_load64(b, hp_at(b, 0));
+    hp_set_n(b, n - 1);
+    if n > 1 {
+        // 末尾那个搬到根上再下沉
+        mem_store64(b, hp_at(b, 0), mem_load64(b, hp_at(b, n - 1)));
+        hp_sift(b, n - 1, 0);
+    }
+    return top;
+}
+
+/// 把 b[8..8+8n) 里**已经摆好**的 n 个元素整理成堆 (自底向上, O(n) 而不是 n 次 push)。
+pub fn heap_build(b: ptr, cap: u32, n: u32) -> bool {
+    if n > cap {
+        return false;
+    }
+    hp_set_n(b, n);
+    let i: u32 = n / 2;
+    while i > 0 {
+        i = i - 1;
+        hp_sift(b, n, i);
+    }
+    return true;
+}
+
+/// 堆性质检查 (每个父亲都不大于孩子)。不变量检查比"看结果对不对"值钱。
+pub fn heap_check(b: ptr) -> bool {
+    let n: u32 = hp_n(b);
+    let i: u32 = 1;
+    while i < n {
+        let p: u32 = (i - 1) / 2;
+        if mem_load64(b, hp_at(b, i)) < mem_load64(b, hp_at(b, p)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 把所有元素取出来 (堆变空), 按升序写进 out。返回写出的个数。
+/// 会破坏堆 —— 名字里写清楚。
+pub fn heap_drain_sorted(b: ptr, out: ptr, cap: u32) -> u32 {
+    let n: u32 = hp_n(b);
+    if n > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        mem_store64(out, 8 * i, heap_pop(b));
+        i = i + 1;
+    }
+    return n;
+}
+
+// -------------------------------------------------- 独立数组上的堆排序
+
+fn hpa_at(i: u32) -> u32 {
+    return 8 * i;
+}
+
+/// 对**裸数组** (偏移 0 起, n 个 u64) 就地升序排序。
+/// 与上面的堆是两件东西: 那个用头部记长度, 这个直接吃数组 —— 因为排序的调用方
+/// 手里往往就是一段数组, 不该被迫先加一个头。
+pub fn heap_sort_array(b: ptr, n: u32) {
+    // 建最大堆
+    let i: u32 = n / 2;
+    while i > 0 {
+        i = i - 1;
+        hpa_sift_max(b, n, i);
+    }
+    // 每次把根 (当前最大) 换到末尾, 堆缩小一格
+    let end: u32 = n;
+    while end > 1 {
+        let x: u64 = mem_load64(b, hpa_at(0));
+        let y: u64 = mem_load64(b, hpa_at(end - 1));
+        mem_store64(b, hpa_at(0), y);
+        mem_store64(b, hpa_at(end - 1), x);
+        end = end - 1;
+        hpa_sift_max(b, end, 0);
+    }
+}
+
+fn hpa_sift_max(b: ptr, n: u32, i0: u32) {
+    let i: u32 = i0;
+    let go: u32 = 1;
+    while go == 1 {
+        let l: u32 = 2 * i + 1;
+        let r: u32 = l + 1;
+        let m: u32 = i;
+        if l < n && mem_load64(b, hpa_at(l)) > mem_load64(b, hpa_at(m)) {
+            m = l;
+        }
+        if r < n && mem_load64(b, hpa_at(r)) > mem_load64(b, hpa_at(m)) {
+            m = r;
+        }
+        if m == i {
+            go = 0;
+        } else {
+            let x: u64 = mem_load64(b, hpa_at(i));
+            let y: u64 = mem_load64(b, hpa_at(m));
+            mem_store64(b, hpa_at(i), y);
+            mem_store64(b, hpa_at(m), x);
+            i = m;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_heap_push_pop_sorted_output() -> bool {
+    // 乱序压入, 必须升序弹出 —— 这是堆唯一的核心承诺。
+    let b: ptr = alloc(heap_bytes(16));
+    heap_init(b);
+    heap_push(b, 16, 5);
+    heap_push(b, 16, 1);
+    heap_push(b, 16, 9);
+    heap_push(b, 16, 3);
+    let a: u64 = heap_pop(b);
+    let c: u64 = heap_pop(b);
+    let d: u64 = heap_pop(b);
+    let e: u64 = heap_pop(b);
+    let f: u64 = heap_pop(b);
+    return a == 1 && c == 3 && d == 5 && e == 9 && f == HP_NIL;
+}
+
+fn test_heap_peek_does_not_remove() -> bool {
+    let b: ptr = alloc(heap_bytes(8));
+    heap_init(b);
+    heap_push(b, 8, 42);
+    let p: u64 = heap_peek(b);
+    return p == 42 && heap_len(b) == 1 && heap_pop(b) == 42 && heap_is_empty(b);
+}
+
+fn test_heap_full_refuses() -> bool {
+    let b: ptr = alloc(heap_bytes(2));
+    heap_init(b);
+    let a: bool = heap_push(b, 2, 2);
+    let c: bool = heap_push(b, 2, 1);
+    let d: bool = heap_push(b, 2, 3);
+    return a && c && d == false && heap_len(b) == 2;
+}
+
+fn test_heap_duplicates() -> bool {
+    let b: ptr = alloc(heap_bytes(8));
+    heap_init(b);
+    heap_push(b, 8, 7);
+    heap_push(b, 8, 7);
+    heap_push(b, 8, 7);
+    return heap_pop(b) == 7 && heap_pop(b) == 7 && heap_pop(b) == 7;
+}
+
+fn test_heap_extremes() -> bool {
+    let b: ptr = alloc(heap_bytes(8));
+    heap_init(b);
+    heap_push(b, 8, 18446744073709551615);
+    heap_push(b, 8, 0);
+    return heap_pop(b) == 0 && heap_pop(b) == 18446744073709551615;
+}
+
+fn test_heap_maintains_invariant_through_many_ops() -> bool {
+    // 交替压入弹出, 每一步都检查堆性质 —— 抓那种"多数时候对"的错误。
+    let b: ptr = alloc(heap_bytes(32));
+    heap_init(b);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 30 {
+        heap_push(b, 32, ((i * 7919) % 100) as u64);
+        if heap_check(b) == false {
+            bad = 1;
+        }
+        if (i % 3) == 0 {
+            heap_pop(b);
+            if heap_check(b) == false {
+                bad = 1;
+            }
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_heap_check_detects_violation() -> bool {
+    // 一个永远返回 true 的检查没有价值 —— 手工破坏堆性质, 它必须说"不"。
+    let b: ptr = alloc(heap_bytes(4));
+    heap_init(b);
+    heap_push(b, 4, 1);
+    heap_push(b, 4, 2);
+    heap_push(b, 4, 3);
+    let ok: bool = heap_check(b);
+    mem_store64(b, HP_HDR + 8 * 0, 99);
+    return ok && heap_check(b) == false;
+}
+
+fn test_heap_build_from_unsorted_array() -> bool {
+    let b: ptr = alloc(heap_bytes(8));
+    mem_store64(b, HP_HDR, 9);
+    mem_store64(b, HP_HDR + 8, 4);
+    mem_store64(b, HP_HDR + 16, 7);
+    mem_store64(b, HP_HDR + 24, 1);
+    mem_store64(b, HP_HDR + 32, 5);
+    let ok: bool = heap_build(b, 8, 5);
+    let good: bool = heap_check(b);
+    return ok && good && heap_pop(b) == 1 && heap_pop(b) == 4;
+}
+
+fn test_heap_build_rejects_oversize() -> bool {
+    let b: ptr = alloc(heap_bytes(2));
+    return heap_build(b, 2, 5) == false;
+}
+
+fn test_heap_drain_sorted() -> bool {
+    let b: ptr = alloc(heap_bytes(8));
+    let o: ptr = alloc(64);
+    heap_init(b);
+    heap_push(b, 8, 30);
+    heap_push(b, 8, 10);
+    heap_push(b, 8, 20);
+    let n: u32 = heap_drain_sorted(b, o, 8);
+    return n == 3 && mem_load64(o, 0) == 10 && mem_load64(o, 8) == 20
+        && mem_load64(o, 16) == 30 && heap_is_empty(b);
+}
+
+fn test_heap_sort_array_ascending() -> bool {
+    // 裸数组就地排序: 8 3 5 1 9 2 7 -> 1 2 3 5 7 8 9
+    let b: ptr = alloc(64);
+    mem_store64(b, 0, 8);
+    mem_store64(b, 8, 3);
+    mem_store64(b, 16, 5);
+    mem_store64(b, 24, 1);
+    mem_store64(b, 32, 9);
+    mem_store64(b, 40, 2);
+    mem_store64(b, 48, 7);
+    heap_sort_array(b, 7);
+    let want: u32 = 0;
+    let i: u32 = 0;
+    while i < 7 {
+        let expect: u64 = 1;
+        if i == 1 {
+            expect = 2;
+        } else if i == 2 {
+            expect = 3;
+        } else if i == 3 {
+            expect = 5;
+        } else if i == 4 {
+            expect = 7;
+        } else if i == 5 {
+            expect = 8;
+        } else if i == 6 {
+            expect = 9;
+        }
+        if mem_load64(b, 8 * i) != expect {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_heap_sort_array_edge_sizes() -> bool {
+    // 0 个与 1 个元素不能崩 (下沉循环的边界最容易在这里挂)。
+    let b: ptr = alloc(64);
+    heap_sort_array(b, 0);
+    heap_sort_array(b, 1);
+    mem_store64(b, 0, 7);
+    heap_sort_array(b, 1);
+    return mem_load64(b, 0) == 7;
+}
+
+fn test_heap_sort_array_already_sorted() -> bool {
+    let b: ptr = alloc(64);
+    mem_store64(b, 0, 1);
+    mem_store64(b, 8, 2);
+    mem_store64(b, 16, 3);
+    mem_store64(b, 24, 4);
+    heap_sort_array(b, 4);
+    return mem_load64(b, 0) == 1 && mem_load64(b, 24) == 4;
+}
+
+fn test_heap_sort_array_all_equal() -> bool {
+    let b: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 5 {
+        mem_store64(b, 8 * i, 6);
+        i = i + 1;
+    }
+    heap_sort_array(b, 5);
+    return mem_load64(b, 0) == 6 && mem_load64(b, 32) == 6;
+}

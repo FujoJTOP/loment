@@ -1,0 +1,767 @@
+// std/mathf.lomt — 浮点超越函数 (sqrt / exp / log / 三角)
+//
+// 为什么能写出来: 这一层**不需要任何魔法系数**。常见的做法是塞一串 Remez 极小化
+// 多项式系数, 那些常量是不可推导的位模式, 手写必错。这里改用**归约 + 级数**:
+//
+//   exp : 先取 k = round(x/ln2), 把自变量压到 |r| <= ln2/2 (~0.35), 再 Taylor。
+//         压到这个区间后十几项就到双精度了。
+//   log : x = m x 2^k 拆开, m 归到 [1/sqrt2, sqrt2), 再用
+//         log(m) = 2 atanh(t), t = (m-1)/(m+1) —— |t| <= 0.17, 收敛很快。
+//   sin/cos : 先按 pi/2 归约到 |r| <= pi/4, 再 Taylor。
+//   atan : 先用 atan(x) = 2 atan(x/(1+sqrt(1+x^2))) 把 |x| 压到 0.05 以下, 再 Taylor。
+//          这个半角公式没有系数, 只用一次 sqrt —— 正是这种写法让整层不需要常量表。
+//   sqrt : 把指数折半归约到 [0.5, 2), 从 1.0 牛顿迭代 (二次收敛, 六次足够)。
+//
+// 因此本模块里唯一的"外来"位模式是 ln2 / pi 这几个**公认**的值 (它们在 IEEE 754
+// 里是标准常量), 其余全是小整数经过 f64conv 现算出来的。
+//
+// 精度: 目标 ~1 ULP, **不承诺**正确舍入 (正确舍入的超越函数需要 Ziv 检验, 那是
+// 另一件工程)。自检因此用相对误差判据 (2^-45), 精确值附近才要求逐位相等。
+//
+// 已知边界: 三角函数的自变量很大时 (|x| > 2^20 左右) 归约会丢精度 —— 因为
+// pi/2 本身只有 53 位有效数字。这是所有非特殊实现都有的性质, 不是本模块的疏漏。
+//
+// 命名: 公开 mathf_*, 内部 mf_*。自检 test_mathf_*。
+
+module mathf
+
+use "f64.lomt"
+use "f64bits.lomt"
+use "f64conv.lomt"
+use "round.lomt"
+
+// 常量一律**写成位模式的十六进制**。第一版我把它们写成十进制, 结果 log2e 抄成了
+// 2.0 的字面值 (4607182418800017408 = 0x3FF0000000000000) —— 手算十进制到 19 位
+// 必错, 而错一个常量只会让某个函数整体偏一点, 极难查。hex 是自我核对的。
+
+/// ln 2。
+pub const MF_LN2: u64 = 0x3FE62E42FEFA39EF;
+/// log2 e (= 1/ln2)。
+pub const MF_LOG2E: u64 = 0x3FF71547652B82FE;
+/// pi。
+pub const MF_PI: u64 = 0x400921FB54442D18;
+/// pi/2。
+pub const MF_PI2: u64 = 0x3FF921FB54442D18;
+/// pi/4。
+pub const MF_PI4: u64 = 0x3FE921FB54442D18;
+/// 2 pi。
+pub const MF_TWO_PI: u64 = 0x401921FB54442D18;
+/// sqrt(2)。
+pub const MF_SQRT2: u64 = 0x3FF6A09E667F3BCD;
+/// 1/sqrt(2)。
+pub const MF_INV_SQRT2: u64 = 0x3FE6A09E667F3BCD;
+/// ln 10。
+pub const MF_LN10: u64 = 0x40026BB1BBB55516;
+/// log10 e。
+pub const MF_LOG10E: u64 = 0x3FDBCB7B1526E50E;
+/// 级数收敛阈值 (2^-60)。
+pub const MF_EPS: u64 = 0x3C30000000000000;
+/// 相对误差判据 (2^-45, 约 2.8e-14)。
+pub const MF_TOL: u64 = 0x3D20000000000000;
+
+/// 小整数 -> f64 (省得满篇写位模式)。
+fn mf_i(v: u64) -> u64 {
+    return f64conv_from_u64(v);
+}
+
+/// x * 2^n。范围内直接改指数域 (**精确**), 越界才退化成反复乘除。
+fn mf_scalbn(x: u64, n: i64) -> u64 {
+    if f64bits_is_zero(x) || f64bits_is_inf(x) || f64bits_is_nan(x) {
+        return x;
+    }
+    let e: i64 = (f64bits_exp(x) as i64) + n;
+    if e >= 1 && e <= 2046 {
+        return f64bits_pack(f64bits_sign(x), e as u32, f64bits_mant(x));
+    }
+    let y: u64 = x;
+    let i: i64 = 0;
+    if n > 0 {
+        while i < n {
+            y = f64_mul(y, F64_TWO);
+            i = i + 1;
+        }
+    } else {
+        while i < (0 as i64 - n) {
+            y = f64_mul(y, F64_HALF);
+            i = i + 1;
+        }
+    }
+    return y;
+}
+
+/// 取整到 i64 (就近, 中点远离零)。
+fn mf_round_i64(x: u64) -> i64 {
+    return f64conv_to_i64(round_half_away(x));
+}
+
+/// |a - b| <= tol * max(1, |b|) ?
+fn mf_close(a: u64, b: u64, tol: u64) -> bool {
+    let d: u64 = f64_abs(f64_sub(a, b));
+    let ab: u64 = f64_abs(b);
+    let scale: u64 = F64_ONE;
+    if f64_gt(ab, F64_ONE) {
+        scale = ab;
+    }
+    return f64_le(d, f64_mul(tol, scale));
+}
+
+// ------------------------------------------------------------------ sqrt
+
+/// 平方根。
+pub fn mathf_sqrt(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_zero(x) {
+        return x;
+    }
+    if f64bits_is_negative(x) {
+        return F64_QNAN;
+    }
+    if f64bits_is_inf(x) {
+        return x;
+    }
+    // 归约到 [1,2): 指数折半, 余数**规范到 0 或 1** ——
+    // e 为负时 `e % 2` 是 -1, 而 2^(1/2) 与 2^(-1/2) 一个是乘 sqrt2 一个是乘 1/sqrt2,
+    // 不归一就会在 x < 1 那一侧整体偏 sqrt2 倍 (第一版正是这么错的)。
+    let e: i64 = (f64bits_exp(x) as i64) - 1023;
+    let half: i64 = e / 2;
+    let odd0: i64 = e % 2;
+    let half2: i64 = half;
+    let odd: i64 = odd0;
+    if odd0 < 0 {
+        odd = 1;
+        half2 = half - 1;
+    }
+    let scaled: u64 = mf_scalbn(x, 0 as i64 - (2 * half2) - odd);
+    let y: u64 = F64_ONE;
+    let i: u32 = 0;
+    while i < 8 {
+        // 牛顿: y = (y + scaled/y) / 2
+        let q: u64 = f64_div(scaled, y);
+        y = f64_mul(f64_add(y, q), F64_HALF);
+        i = i + 1;
+    }
+    let r: u64 = mf_scalbn(y, half2);
+    if odd == 1 {
+        return f64_mul(r, MF_SQRT2);
+    }
+    return r;
+}
+
+/// 立方根 (牛顿: y = (2y + x/y^2)/3)。
+pub fn mathf_cbrt(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_zero(x) || f64bits_is_inf(x) {
+        return x;
+    }
+    let neg: bool = f64bits_is_negative(x);
+    let ax: u64 = f64bits_abs(x);
+    let e: i64 = (f64bits_exp(ax) as i64) - 1023;
+    let third: i64 = e / 3;
+    let scaled: u64 = mf_scalbn(ax, 0 as i64 - (3 * third));
+    let y: u64 = F64_ONE;
+    let i: u32 = 0;
+    while i < 12 {
+        let y2: u64 = f64_mul(y, y);
+        let q: u64 = f64_div(scaled, y2);
+        let num: u64 = f64_add(f64_add(y, y), q);
+        y = f64_div(num, mf_i(3));
+        i = i + 1;
+    }
+    let r: u64 = mf_scalbn(y, third);
+    if neg {
+        return f64_neg(r);
+    }
+    return r;
+}
+
+// ------------------------------------------------------------------ exp
+
+/// e^x。
+pub fn mathf_exp(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return x;
+    }
+    if f64bits_is_inf(x) {
+        if f64bits_is_negative(x) {
+            return F64_POS_ZERO;
+        }
+        return x;
+    }
+    if f64bits_is_zero(x) {
+        return F64_ONE;
+    }
+    // 溢出/下溢的快速出口: ln(2^1024) ~ 709.78
+    if f64_gt(x, mf_i(710)) {
+        return F64_POS_INF;
+    }
+    if f64_lt(x, mf_i(745)) {
+        let neg: bool = f64bits_is_negative(x);
+        if neg {
+            return F64_POS_ZERO;
+        }
+    }
+    // k = round(x / ln2), r = x - k*ln2
+    let k: i64 = mf_round_i64(f64_mul(x, MF_LOG2E));
+    let kf: u64 = f64conv_from_i64(k);
+    let r: u64 = f64_sub(x, f64_mul(kf, MF_LN2));
+    // Taylor
+    let sum: u64 = F64_ONE;
+    let term: u64 = F64_ONE;
+    let n: u32 = 1;
+    let go: u32 = 1;
+    while n < 60 && go == 1 {
+        term = f64_div(f64_mul(term, r), mf_i(n as u64));
+        sum = f64_add(sum, term);
+        if f64_lt(f64_abs(term), MF_EPS) {
+            go = 0;
+        }
+        n = n + 1;
+    }
+    return mf_scalbn(sum, k);
+}
+
+/// 2^x。
+pub fn mathf_exp2(x: u64) -> u64 {
+    return mathf_exp(f64_mul(x, MF_LN2));
+}
+
+/// 自然对数。
+pub fn mathf_log(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return x;
+    }
+    if f64bits_is_zero(x) {
+        return F64_NEG_INF;
+    }
+    if f64bits_is_negative(x) {
+        return F64_QNAN;
+    }
+    if f64bits_is_inf(x) {
+        return x;
+    }
+    // m = x 的尾数当成 [1,2) 的数; k = x 的无偏指数
+    let k: i64 = (f64bits_exp(x) as i64) - 1023;
+    let m: u64 = f64bits_pack(0, 1023, f64bits_mant(x));
+    // 归到 [1/sqrt2, sqrt2)
+    let mm: u64 = m;
+    let kk: i64 = k;
+    if f64_gt(m, MF_SQRT2) {
+        mm = f64_mul(m, F64_HALF);
+        kk = k + 1;
+    }
+    // log(mm) = 2 atanh(t), t = (mm-1)/(mm+1)
+    let num: u64 = f64_sub(mm, F64_ONE);
+    let den: u64 = f64_add(mm, F64_ONE);
+    let t: u64 = f64_div(num, den);
+    let t2: u64 = f64_mul(t, t);
+    let sum: u64 = t;
+    let term: u64 = t;
+    let j: u32 = 1;
+    let go: u32 = 1;
+    while j < 40 && go == 1 {
+        term = f64_mul(term, t2);
+        let add: u64 = f64_div(term, mf_i((2 * j + 1) as u64));
+        sum = f64_add(sum, add);
+        if f64_lt(f64_abs(add), MF_EPS) {
+            go = 0;
+        }
+        j = j + 1;
+    }
+    let lm: u64 = f64_mul(sum, F64_TWO);
+    let kf: u64 = f64conv_from_i64(kk);
+    return f64_add(f64_mul(kf, MF_LN2), lm);
+}
+
+pub fn mathf_log2(x: u64) -> u64 {
+    return f64_mul(mathf_log(x), MF_LOG2E);
+}
+
+pub fn mathf_log10(x: u64) -> u64 {
+    return f64_mul(mathf_log(x), MF_LOG10E);
+}
+
+// ------------------------------------------------------------------ pow
+
+/// 幂。整指数走精确路径, 其余走 exp(y log x)。
+pub fn mathf_pow(x: u64, y: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_nan(y) {
+        return F64_QNAN;
+    }
+    if f64bits_is_zero(y) {
+        return F64_ONE; // x^0 = 1 (含 0^0, 按 IEEE 惯例)
+    }
+    if f64_eq(x, F64_ONE) {
+        return F64_ONE;
+    }
+    // 负底数: 只有整数指数才有实数结果
+    if f64bits_is_negative(x) {
+        if f64bits_is_integer(y) == false {
+            return F64_QNAN;
+        }
+        let ax: u64 = mathf_pow(f64bits_abs(x), y);
+        let n: i64 = f64conv_to_i64(y);
+        if (n % 2) != 0 {
+            return f64_neg(ax);
+        }
+        return ax;
+    }
+    if f64bits_is_zero(x) {
+        if f64bits_is_negative(y) {
+            return F64_POS_INF;
+        }
+        return F64_POS_ZERO;
+    }
+    if f64bits_is_inf(x) {
+        if f64bits_is_negative(y) {
+            return F64_POS_ZERO;
+        }
+        return F64_POS_INF;
+    }
+    return mathf_exp(f64_mul(y, mathf_log(x)));
+}
+
+// ------------------------------------------------------------------ 三角
+
+/// 归约到 |r| <= pi/4, 象限写进 q_out[0..4]。
+fn mf_reduce_pi2(x: u64, q_out: ptr) -> u64 {
+    let k: i64 = mf_round_i64(f64_div(x, MF_PI2));
+    let kf: u64 = f64conv_from_i64(k);
+    let r: u64 = f64_sub(x, f64_mul(kf, MF_PI2));
+    let q: i64 = k % 4;
+    if q < 0 {
+        q = q + 4;
+    }
+    mem_store32(q_out, 0, q as u32);
+    return r;
+}
+
+/// |r| <= pi/4 上的 sin。
+fn mf_sin_core(r: u64) -> u64 {
+    let r2: u64 = f64_mul(r, r);
+    let sum: u64 = r;
+    let term: u64 = r;
+    let n: u32 = 1;
+    let go: u32 = 1;
+    while n < 20 && go == 1 {
+        term = f64_mul(term, r2);
+        term = f64_div(term, mf_i(((2 * n) * (2 * n + 1)) as u64));
+        term = f64_neg(term);
+        sum = f64_add(sum, term);
+        if f64_lt(f64_abs(term), MF_EPS) {
+            go = 0;
+        }
+        n = n + 1;
+    }
+    return sum;
+}
+
+/// |r| <= pi/4 上的 cos。
+fn mf_cos_core(r: u64) -> u64 {
+    let r2: u64 = f64_mul(r, r);
+    let sum: u64 = F64_ONE;
+    let term: u64 = F64_ONE;
+    let n: u32 = 1;
+    let go: u32 = 1;
+    while n < 20 && go == 1 {
+        term = f64_mul(term, r2);
+        term = f64_div(term, mf_i(((2 * n - 1) * (2 * n)) as u64));
+        term = f64_neg(term);
+        sum = f64_add(sum, term);
+        if f64_lt(f64_abs(term), MF_EPS) {
+            go = 0;
+        }
+        n = n + 1;
+    }
+    return sum;
+}
+
+pub fn mathf_sin(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) {
+        return F64_QNAN;
+    }
+    if f64bits_is_zero(x) {
+        return x;
+    }
+    let qp: ptr = alloc(8);
+    let r: u64 = mf_reduce_pi2(x, qp);
+    let q: u32 = mem_load32(qp, 0);
+    if q == 0 {
+        return mf_sin_core(r);
+    }
+    if q == 1 {
+        return mf_cos_core(r);
+    }
+    if q == 2 {
+        return f64_neg(mf_sin_core(r));
+    }
+    return f64_neg(mf_cos_core(r));
+}
+
+pub fn mathf_cos(x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_inf(x) {
+        return F64_QNAN;
+    }
+    if f64bits_is_zero(x) {
+        return F64_ONE;
+    }
+    let qp: ptr = alloc(8);
+    let r: u64 = mf_reduce_pi2(x, qp);
+    let q: u32 = mem_load32(qp, 0);
+    if q == 0 {
+        return mf_cos_core(r);
+    }
+    if q == 1 {
+        return f64_neg(mf_sin_core(r));
+    }
+    if q == 2 {
+        return f64_neg(mf_cos_core(r));
+    }
+    return mf_sin_core(r);
+}
+
+pub fn mathf_tan(x: u64) -> u64 {
+    let s: u64 = mathf_sin(x);
+    let c: u64 = mathf_cos(x);
+    return f64_div(s, c);
+}
+
+/// arctan。半角公式把自变量压到 0.05 以下再上 Taylor —— 不需要系数表。
+pub fn mathf_atan(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return x;
+    }
+    if f64bits_is_inf(x) {
+        if f64bits_is_negative(x) {
+            return f64_neg(MF_PI2);
+        }
+        return MF_PI2;
+    }
+    let neg: bool = f64bits_is_negative(x);
+    let ax0: u64 = f64bits_abs(x);
+    // |x| > 1 -> pi/2 - atan(1/x)
+    let invert: bool = f64_gt(ax0, F64_ONE);
+    let ax1: u64 = ax0;
+    if invert {
+        ax1 = f64_div(F64_ONE, ax0);
+    }
+    // 五次半角: atan(a) = 2 atan(a/(1+sqrt(1+a^2)))
+    let a: u64 = ax1;
+    let i: u32 = 0;
+    while i < 5 {
+        let s: u64 = mathf_sqrt(f64_add(F64_ONE, f64_mul(a, a)));
+        a = f64_div(a, f64_add(F64_ONE, s));
+        i = i + 1;
+    }
+    // Taylor: a - a^3/3 + a^5/5 - ...
+    let a2: u64 = f64_mul(a, a);
+    let sum: u64 = a;
+    let term: u64 = a;
+    let j: u32 = 1;
+    let go: u32 = 1;
+    while j < 30 && go == 1 {
+        term = f64_mul(term, a2);
+        let add: u64 = f64_div(term, mf_i((2 * j + 1) as u64));
+        if (j % 2) == 1 {
+            sum = f64_sub(sum, add);
+        } else {
+            sum = f64_add(sum, add);
+        }
+        if f64_lt(f64_abs(add), MF_EPS) {
+            go = 0;
+        }
+        j = j + 1;
+    }
+    let r0: u64 = f64_mul(sum, mf_i(32)); // 五次半角 -> 乘 2^5
+    let r1: u64 = r0;
+    if invert {
+        r1 = f64_sub(MF_PI2, r0);
+    }
+    let r2: u64 = r1;
+    if neg {
+        r2 = f64_neg(r1);
+    }
+    return r2;
+}
+
+/// 两参数的 arctan, 按象限返回 (-pi, pi]。
+pub fn mathf_atan2(y: u64, x: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_nan(y) {
+        return F64_QNAN;
+    }
+    if f64bits_is_zero(x) {
+        if f64bits_is_zero(y) {
+            return F64_POS_ZERO; // 约定: atan2(±0, +0) = 0
+        }
+        if f64bits_is_negative(y) {
+            return f64_neg(MF_PI2);
+        }
+        return MF_PI2;
+    }
+    let q: u64 = mathf_atan(f64_div(y, x));
+    if f64bits_is_negative(x) {
+        if f64bits_is_negative(y) {
+            return f64_sub(q, MF_PI);
+        }
+        return f64_add(q, MF_PI);
+    }
+    return q;
+}
+
+pub fn mathf_asin(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return x;
+    }
+    let one: u64 = F64_ONE;
+    if f64_gt(f64_abs(x), one) {
+        return F64_QNAN;
+    }
+    let t: u64 = mathf_sqrt(f64_sub(F64_ONE, f64_mul(x, x)));
+    return mathf_atan2(x, t);
+}
+
+pub fn mathf_acos(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return x;
+    }
+    if f64_gt(f64_abs(x), F64_ONE) {
+        return F64_QNAN;
+    }
+    let t: u64 = mathf_sqrt(f64_sub(F64_ONE, f64_mul(x, x)));
+    return mathf_atan2(t, x);
+}
+
+/// 斜边 (先按较大的一边缩放, 免得平方就溢出了)。
+pub fn mathf_hypot(x: u64, y: u64) -> u64 {
+    let ax: u64 = f64_abs(x);
+    let ay: u64 = f64_abs(y);
+    if f64bits_is_inf(ax) || f64bits_is_inf(ay) {
+        return F64_POS_INF;
+    }
+    if f64bits_is_nan(ax) || f64bits_is_nan(ay) {
+        return F64_QNAN;
+    }
+    let m: u64 = f64_max(ax, ay);
+    if f64bits_is_zero(m) {
+        return F64_POS_ZERO;
+    }
+    let a: u64 = f64_div(ax, m);
+    let b: u64 = f64_div(ay, m);
+    let s: u64 = mathf_sqrt(f64_add(f64_mul(a, a), f64_mul(b, b)));
+    return f64_mul(s, m);
+}
+
+/// 余数 x - trunc(x/y)*y (与 C 的 fmod 同语义)。
+pub fn mathf_fmod(x: u64, y: u64) -> u64 {
+    if f64bits_is_nan(x) || f64bits_is_nan(y) || f64bits_is_zero(y) || f64bits_is_inf(x) {
+        return F64_QNAN;
+    }
+    if f64bits_is_zero(x) || f64bits_is_inf(y) {
+        return x;
+    }
+    let q: u64 = round_trunc(f64_div(x, y));
+    return f64_sub(x, f64_mul(q, y));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mathf_sqrt_exact_cases() -> bool {
+    // 完全平方数必须**逐位**相等, 不是"接近": sqrt(4)=2, sqrt(0.25)=0.5, sqrt(1)=1。
+    return mathf_sqrt(F64_POS_ZERO) == F64_POS_ZERO
+        && mathf_sqrt(F64_ONE) == F64_ONE
+        && mathf_sqrt(0x4010000000000000) == F64_TWO
+        && mathf_sqrt(0x3FD0000000000000) == F64_HALF;
+}
+
+fn test_mathf_sqrt_known_values() -> bool {
+    // sqrt(2) 与 sqrt(0.25) = 0.5
+    let s2: u64 = mathf_sqrt(F64_TWO);
+    let q: u64 = mathf_sqrt(0x3FD0000000000000);
+    return mf_close(s2, MF_SQRT2, MF_TOL) && q == F64_HALF;
+}
+
+fn test_mathf_sqrt_roundtrip() -> bool {
+    // sqrt(x)^2 应当回到 x (在相对误差内)。
+    let x: u64 = 0x3FF8000000000000; // 1.5
+    let s: u64 = mathf_sqrt(x);
+    return mf_close(f64_mul(s, s), x, MF_TOL);
+}
+
+fn test_mathf_sqrt_specials() -> bool {
+    let a: u64 = mathf_sqrt(F64_POS_INF);
+    let b: u64 = mathf_sqrt(0xBFF0000000000000);
+    return a == F64_POS_INF && f64bits_is_nan(b)
+        && mathf_sqrt(F64_QNAN) == F64_QNAN;
+}
+
+fn test_mathf_exp_basics() -> bool {
+    // e^0 = 1 逐位; e^1 = e = 0x4005BF0A8B145769
+    let e1: u64 = mathf_exp(F64_ONE);
+    return mathf_exp(F64_POS_ZERO) == F64_ONE && mf_close(e1, 0x4005BF0A8B145769, MF_TOL);
+}
+
+fn test_mathf_exp_inverse_of_log() -> bool {
+    // exp(log(x)) = x
+    let x: u64 = mf_i(7);
+    let l: u64 = mathf_log(x);
+    return mf_close(mathf_exp(l), x, MF_TOL);
+}
+
+fn test_mathf_log_basics() -> bool {
+    // log(1) = 0 逐位; log(e) = 1; log(2) = ln2
+    let l2: u64 = mathf_log(F64_TWO);
+    let le: u64 = mathf_log(0x4005BF0A8B145769);
+    return mathf_log(F64_ONE) == F64_POS_ZERO && mf_close(l2, MF_LN2, MF_TOL)
+        && mf_close(le, F64_ONE, MF_TOL);
+}
+
+fn test_mathf_log_specials() -> bool {
+    let a: u64 = mathf_log(F64_POS_ZERO);
+    let b: u64 = mathf_log(0xBFF0000000000000);
+    return a == F64_NEG_INF && f64bits_is_nan(b) && mathf_log(F64_POS_INF) == F64_POS_INF;
+}
+
+fn test_mathf_log2_log10() -> bool {
+    // log2(1024) = 10; log10(1000) = 3
+    let a: u64 = mathf_log2(mf_i(1024));
+    let b: u64 = mathf_log10(mf_i(1000));
+    return mf_close(a, mf_i(10), MF_TOL) && mf_close(b, mf_i(3), MF_TOL);
+}
+
+fn test_mathf_pow_integer_and_fractional() -> bool {
+    // 2^10 = 1024; 9^0.5 = 3; 8^(1/3) = 2
+    let a: u64 = mathf_pow(F64_TWO, mf_i(10));
+    let half: u64 = 0x3FE0000000000000;
+    let b: u64 = mathf_pow(mf_i(9), half);
+    let third: u64 = f64_div(F64_ONE, mf_i(3));
+    let c: u64 = mathf_pow(mf_i(8), third);
+    return mf_close(a, mf_i(1024), MF_TOL) && mf_close(b, mf_i(3), MF_TOL)
+        && mf_close(c, F64_TWO, MF_TOL);
+}
+
+fn test_mathf_pow_special_cases() -> bool {
+    // x^0 = 1; 负底数配整数指数 (奇负偶正); 负底数配非整数 -> NaN
+    let a: u64 = mathf_pow(F64_TWO, F64_POS_ZERO);
+    let b: u64 = mathf_pow(0xBFF0000000000000, mf_i(3)); // (-1)^3 = -1
+    let c: u64 = mathf_pow(0xBFF0000000000000, mf_i(4)); // (-1)^4 = 1
+    let d: u64 = mathf_pow(0xBFF0000000000000, F64_HALF);
+    return a == F64_ONE && b == 0xBFF0000000000000 && c == F64_ONE && f64bits_is_nan(d);
+}
+
+fn test_mathf_trig_exact_points() -> bool {
+    // sin(0)=0, cos(0)=1 逐位; sin(pi/6)=0.5, cos(pi/3)=0.5, sin(pi/2)=1
+    let six: u64 = f64_div(MF_PI, mf_i(6));
+    let three: u64 = f64_div(MF_PI, mf_i(3));
+    let s0: u64 = mathf_sin(F64_POS_ZERO);
+    let c0: u64 = mathf_cos(F64_POS_ZERO);
+    let sp6: u64 = mathf_sin(six);
+    let cp3: u64 = mathf_cos(three);
+    let sp2: u64 = mathf_sin(MF_PI2);
+    return s0 == F64_POS_ZERO && c0 == F64_ONE && mf_close(sp6, F64_HALF, MF_TOL)
+        && mf_close(cp3, F64_HALF, MF_TOL) && mf_close(sp2, F64_ONE, MF_TOL);
+}
+
+fn test_mathf_trig_identities() -> bool {
+    // sin^2 + cos^2 = 1, 在几个点上
+    let x1: u64 = mf_i(1);
+    let x2: u64 = 0x4008000000000000; // 3
+    let a: u64 = f64_add(f64_mul(mathf_sin(x1), mathf_sin(x1)), f64_mul(mathf_cos(x1), mathf_cos(x1)));
+    let b: u64 = f64_add(f64_mul(mathf_sin(x2), mathf_sin(x2)), f64_mul(mathf_cos(x2), mathf_cos(x2)));
+    return mf_close(a, F64_ONE, MF_TOL) && mf_close(b, F64_ONE, MF_TOL);
+}
+
+fn test_mathf_trig_periodicity_and_signs() -> bool {
+    // sin(-x) = -sin(x); cos(-x) = cos(x); sin(pi) = 0
+    let x: u64 = 0x4008000000000000; // 3
+    let sn: u64 = mathf_sin(f64_neg(x));
+    let cs: u64 = mathf_cos(f64_neg(x));
+    let sp: u64 = mathf_sin(MF_PI);
+    return mf_close(sn, f64_neg(mathf_sin(x)), MF_TOL) && mf_close(cs, mathf_cos(x), MF_TOL)
+        && f64_lt(f64_abs(sp), MF_TOL);
+}
+
+fn test_mathf_atan_known_points() -> bool {
+    // atan(0)=0, atan(1)=pi/4, atan(inf)=pi/2, atan(-1)=-pi/4
+    let a: u64 = mathf_atan(F64_ONE);
+    let b: u64 = mathf_atan(F64_POS_INF);
+    let c: u64 = mathf_atan(0xBFF0000000000000);
+    return mathf_atan(F64_POS_ZERO) == F64_POS_ZERO && mf_close(a, MF_PI4, MF_TOL)
+        && mf_close(b, MF_PI2, MF_TOL) && mf_close(c, f64_neg(MF_PI4), MF_TOL);
+}
+
+fn test_mathf_atan_odd_and_monotone() -> bool {
+    // atan(-x) = -atan(x); 以及 atan 单调
+    let x: u64 = 0x3FF8000000000000; // 1.5
+    let a: u64 = mathf_atan(x);
+    let b: u64 = mathf_atan(f64_neg(x));
+    let c: u64 = mathf_atan(F64_TWO);
+    return mf_close(b, f64_neg(a), MF_TOL) && f64_gt(c, a) && f64_lt(a, MF_PI2)
+        && f64_gt(a, MF_PI4);
+}
+
+fn test_mathf_atan2_quadrants() -> bool {
+    // atan2(1,1)=pi/4, atan2(1,-1)=3pi/4, atan2(-1,-1)=-3pi/4, atan2(1,0)=pi/2
+    let a: u64 = mathf_atan2(F64_ONE, F64_ONE);
+    let b: u64 = mathf_atan2(F64_ONE, 0xBFF0000000000000);
+    let c: u64 = mathf_atan2(0xBFF0000000000000, 0xBFF0000000000000);
+    let d: u64 = mathf_atan2(F64_ONE, F64_POS_ZERO);
+    let three_pi4: u64 = f64_mul(MF_PI, mf_i(3) as u64);
+    let t: u64 = f64_div(three_pi4, mf_i(4));
+    return mf_close(a, MF_PI4, MF_TOL) && mf_close(b, t, MF_TOL)
+        && mf_close(c, f64_neg(t), MF_TOL) && mf_close(d, MF_PI2, MF_TOL);
+}
+
+fn test_mathf_asin_acos() -> bool {
+    // asin(0)=0, asin(1)=pi/2, acos(1)=0, acos(0)=pi/2, asin(0.5)=pi/6
+    let a: u64 = mathf_asin(F64_ONE);
+    let b: u64 = mathf_acos(F64_ONE);
+    let c: u64 = mathf_acos(F64_POS_ZERO);
+    let h: u64 = F64_HALF;
+    let d: u64 = mathf_asin(h);
+    let six: u64 = f64_div(MF_PI, mf_i(6));
+    return mathf_asin(F64_POS_ZERO) == F64_POS_ZERO && mf_close(a, MF_PI2, MF_TOL)
+        && b == F64_POS_ZERO && mf_close(c, MF_PI2, MF_TOL) && mf_close(d, six, MF_TOL);
+}
+
+fn test_mathf_asin_domain() -> bool {
+    // |x| > 1 必须给 NaN, 不能静默算出个数
+    let a: u64 = mathf_asin(F64_TWO);
+    let b: u64 = mathf_acos(0xC000000000000000);
+    return f64bits_is_nan(a) && f64bits_is_nan(b);
+}
+
+fn test_mathf_hypot() -> bool {
+    // 3-4-5 与缩放后不溢出
+    let a: u64 = mathf_hypot(mf_i(3), mf_i(4));
+    let big: u64 = 0x7FE0000000000000; // 约 1e308
+    let b: u64 = mathf_hypot(big, big);
+    return mf_close(a, mf_i(5), MF_TOL) && f64bits_is_inf(b) == false && f64_gt(b, F64_POS_ZERO);
+}
+
+fn test_mathf_fmod() -> bool {
+    // fmod(7,3)=1; fmod(-7,3)=-1 (符号跟着被除数); fmod(x,0)=NaN
+    let a: u64 = mathf_fmod(mf_i(7), mf_i(3));
+    let b: u64 = mathf_fmod(f64_neg(mf_i(7)), mf_i(3));
+    let c: u64 = mathf_fmod(F64_ONE, F64_POS_ZERO);
+    return mf_close(a, F64_ONE, MF_TOL) && mf_close(b, f64_neg(F64_ONE), MF_TOL)
+        && f64bits_is_nan(c);
+}
+
+fn test_mathf_cbrt() -> bool {
+    // cbrt(27)=3, cbrt(-8)=-2, cbrt(0)=0
+    let a: u64 = mathf_cbrt(mf_i(27));
+    let b: u64 = mathf_cbrt(0xC020000000000000);
+    return mf_close(a, mf_i(3), MF_TOL) && mf_close(b, f64_neg(F64_TWO), MF_TOL)
+        && mathf_cbrt(F64_POS_ZERO) == F64_POS_ZERO;
+}
+
+fn test_mathf_scalbn_exactness() -> bool {
+    // 2 的整数次幂的缩放必须精确 (在范围内是改指数域, 不是乘)
+    let a: u64 = mf_scalbn(F64_ONE, 10);
+    let b: u64 = mf_scalbn(F64_ONE, 0 as i64 - 10);
+    return a == mf_i(1024) && mf_close(b, f64_div(F64_ONE, mf_i(1024)), MF_TOL);
+}
+
+fn test_mathf_tan_is_sin_over_cos() -> bool {
+    let x: u64 = 0x3FF8000000000000; // 1.5
+    let t: u64 = mathf_tan(x);
+    let s: u64 = f64_div(mathf_sin(x), mathf_cos(x));
+    return mf_close(t, s, MF_TOL);
+}

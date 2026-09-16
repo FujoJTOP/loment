@@ -1,0 +1,261 @@
+// std/hex.lomt — 十六进制编解码与转储
+//
+// 为什么要它: 自举工具链里全是十六进制 (工件哈希、地址、字节码), 而 `hexval` /
+// `hex_dig` / `j_hexdig` 这类小函数在若干文件里各写一份。
+//
+// 约定: 编码一律**小写** (与 sha256/lomc 的输出对齐); 解码大小写都收。
+// 解码返回 (写出的字节数 << 32) | 消耗的输入字符数 —— 借 argv 的打包约定, 这样
+// "输入奇数个字符"这种情形能被调用方看见, 而不是静默丢掉半个字节。
+//
+// 定义顺序: 本语言要求**先定义后使用**, 所以 hex_val 排在 hex_decode 前面 ——
+// 这不是风格, 是编译器会拦的规则 (skill §6.7)。
+//
+// 命名: 公开一律 hex_*, 内部一律 hx_*。自检 test_hex_*。
+
+module hex
+
+/// 不是十六进制字符 (hex_val 的返回值)。
+pub const HEX_NONE: u32 = 4294967295;
+
+/// 一个 0..15 的值 -> 小写十六进制字符码。
+pub fn hex_digit(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 一个字符 -> 0..15; 非十六进制字符返回 HEX_NONE。
+pub fn hex_val(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return HEX_NONE;
+}
+
+/// 把一段字节编成十六进制文本, 返回新偏移。
+pub fn hex_encode(buf: ptr, o: u32, src: ptr, so: u32, n: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = load8(src, so + i);
+        store8(buf, k, hex_digit(b >> 4) as u8);
+        store8(buf, k + 1, hex_digit(b & 15) as u8);
+        k = k + 2;
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 编码 n 字节需要多少文本字节 (恒为 2n)。
+pub fn hex_encoded_len(n: u32) -> u32 {
+    return n * 2;
+}
+
+/// 解码: (写出的字节数 << 32) | 消耗的输入字符数。
+/// 碰到非十六进制字符就停 —— 所以也能当"解析前缀"用。
+/// 只剩单个字符 (凑不成一个字节) 时停下, 不做任何猜测。
+pub fn hex_decode(dst: ptr, doff: u32, src: ptr, so: u32, n: u32) -> u64 {
+    let w: u32 = 0;
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while i + 1 < n && go == 1 {
+        let hi: u32 = hex_val(load8(src, so + i));
+        let lo: u32 = hex_val(load8(src, so + i + 1));
+        if hi == HEX_NONE || lo == HEX_NONE {
+            go = 0;
+        } else {
+            store8(dst, doff + w, ((hi * 16 + lo) & 255) as u8);
+            w = w + 1;
+            i = i + 2;
+        }
+    }
+    return (w as u64) * 4294967296 + (i as u64);
+}
+
+/// 解包: 写出多少字节。
+pub fn hex_written(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+/// 解包: 消耗多少输入字符。
+pub fn hex_used(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+/// 8 位小写十六进制地址。
+fn hx_write_addr(buf: ptr, o: u32, addr: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i < 8 {
+        let shift: u32 = (7 - i) * 4;
+        store8(buf, k, hex_digit((addr >> shift) & 15) as u8);
+        k = k + 1;
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 转储一行: `OOOOOOOO  xx xx …  |ascii|`, **不含换行** (换行交给 out_nl)。
+/// 不足 16 字节时两列都补空格 —— 列不对齐的转储没法看。返回新偏移。
+pub fn hex_dump_line(buf: ptr, o: u32, src: ptr, so: u32, n: u32, addr: u32) -> u32 {
+    let k: u32 = hx_write_addr(buf, o, addr);
+    store8(buf, k, 32 as u8);
+    store8(buf, k + 1, 32 as u8);
+    let hs: u32 = k + 2;
+    let hc: u32 = hs;
+    let i: u32 = 0;
+    while i < 16 {
+        if i < n {
+            let b: u32 = load8(src, so + i);
+            store8(buf, hc, hex_digit(b >> 4) as u8);
+            store8(buf, hc + 1, hex_digit(b & 15) as u8);
+        } else {
+            store8(buf, hc, 32 as u8);
+            store8(buf, hc + 1, 32 as u8);
+        }
+        hc = hc + 2;
+        if i < 15 {
+            store8(buf, hc, 32 as u8);
+            hc = hc + 1;
+        }
+        i = i + 1;
+    }
+    // 16 字节 * 2 字符 + 15 个分隔空格 = 47
+    let e: u32 = hs + 47;
+    store8(buf, e, 32 as u8);
+    store8(buf, e + 1, 124 as u8);
+    let ac: u32 = e + 2;
+    let j: u32 = 0;
+    while j < n {
+        let b: u32 = load8(src, so + j);
+        if b >= 32 && b <= 126 {
+            store8(buf, ac, b as u8);
+        } else {
+            store8(buf, ac, 46 as u8);
+        }
+        ac = ac + 1;
+        j = j + 1;
+    }
+    store8(buf, ac, 124 as u8);
+    return ac + 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_hex_digit() -> bool {
+    return hex_digit(0) == 48 && hex_digit(9) == 57 && hex_digit(10) == 97 && hex_digit(15) == 102;
+}
+
+fn test_hex_val() -> bool {
+    return hex_val(48) == 0 && hex_val(97) == 10 && hex_val(65) == 10 && hex_val(122) == HEX_NONE;
+}
+
+fn test_hex_encode() -> bool {
+    let s: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(s, 0, 255 as u8);
+    store8(s, 1, 0 as u8);
+    let o: u32 = hex_encode(d, 0, s, 0, 2);
+    return o == 4 && load8(d, 0) == 102 && load8(d, 1) == 102
+        && load8(d, 2) == 48 && load8(d, 3) == 48;
+}
+
+fn test_hex_encode_at_offset() -> bool {
+    let s: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(s, 0, 10 as u8);
+    let o1: u32 = hex_encode(d, 0, s, 0, 1);
+    let o2: u32 = hex_encode(d, o1, s, 0, 1);
+    return o1 == 2 && o2 == 4 && load8(d, 2) == 48 && load8(d, 3) == 97;
+}
+
+fn test_hex_roundtrip() -> bool {
+    let s: ptr = alloc(32);
+    let m: ptr = alloc(32);
+    let d: ptr = alloc(32);
+    store8(s, 0, 222 as u8);
+    store8(s, 1, 173 as u8);
+    let mlen: u32 = hex_encode(m, 0, s, 0, 2);
+    let t: u64 = hex_decode(d, 0, m, 0, mlen);
+    return mlen == 4 && hex_written(t) == 2 && hex_used(t) == 4
+        && load8(d, 0) == 222 && load8(d, 1) == 173;
+}
+
+fn test_hex_decode_uppercase() -> bool {
+    let m: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(m, 0, 65 as u8);
+    store8(m, 1, 70 as u8);
+    let t: u64 = hex_decode(d, 0, m, 0, 2);
+    return hex_written(t) == 1 && load8(d, 0) == 175;
+}
+
+fn test_hex_decode_stops_at_bad_char() -> bool {
+    let m: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(m, 0, 97 as u8);
+    store8(m, 1, 98 as u8);
+    store8(m, 2, 122 as u8);
+    store8(m, 3, 97 as u8);
+    let t: u64 = hex_decode(d, 0, m, 0, 4);
+    return hex_written(t) == 1 && hex_used(t) == 2;
+}
+
+fn test_hex_decode_single_char_writes_nothing() -> bool {
+    // 一个十六进制字符凑不成一个字节: 不丢也不猜, 写出 0 字节、消耗 0 字符。
+    let m: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(m, 0, 97 as u8);
+    let t: u64 = hex_decode(d, 0, m, 0, 1);
+    return hex_written(t) == 0 && hex_used(t) == 0;
+}
+
+fn test_hex_encoded_len() -> bool {
+    return hex_encoded_len(0) == 0 && hex_encoded_len(1) == 2 && hex_encoded_len(32) == 64;
+}
+
+fn test_hex_dump_line_layout() -> bool {
+    // "AB" -> "00000000  41 42 ... 空格 |AB|" —— 长度 60 + n = 62。
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(128);
+    store8(s, 0, 65 as u8);
+    store8(s, 1, 66 as u8);
+    let o: u32 = hex_dump_line(b, 0, s, 0, 2, 0);
+    return o == 62
+        && load8(b, 0) == 48 && load8(b, 7) == 48
+        && load8(b, 10) == 52 && load8(b, 11) == 49
+        && load8(b, o - 1) == 124 && load8(b, o - 2) == 66 && load8(b, o - 3) == 65;
+}
+
+fn test_hex_dump_line_address() -> bool {
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(128);
+    store8(s, 0, 65 as u8);
+    let o: u32 = hex_dump_line(b, 0, s, 0, 1, 16);
+    return load8(b, 6) == 49 && load8(b, 7) == 48 && o == 61;
+}
+
+fn test_hex_dump_line_pads_short_rows() -> bool {
+    // 只给 1 字节时, 十六进制列剩下的位置应是空格 —— 列对齐靠这个。
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(128);
+    store8(s, 0, 65 as u8);
+    let o: u32 = hex_dump_line(b, 0, s, 0, 1, 0);
+    return load8(b, 12) == 32 && load8(b, 13) == 32 && o == 61;
+}
+
+fn test_hex_dump_line_nonprintable() -> bool {
+    // 控制字符在 ASCII 列里显示成 '.'。
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(128);
+    store8(s, 0, 7 as u8);
+    let o: u32 = hex_dump_line(b, 0, s, 0, 1, 0);
+    return load8(b, o - 2) == 46;
+}

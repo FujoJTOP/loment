@@ -1,0 +1,469 @@
+// std/map.lomt — 开放寻址哈希表 (u64 -> u64)
+//
+// 为什么需要它: 之前所有"按名字找东西"的地方都在线性扫 (lomstatus 找文件、pkg 找包),
+// 十个元素还行, 一千个就是 O(n²)。哈希表是这一整类形状的解药。
+//
+// 为什么是开放寻址而不是拉链: 拉链要节点分配, 而这里的分配器要么是 bump (不回收)
+// 要么是调用方的 arena。开放寻址把表本身放在调用方的缓冲里, 一个节点都不分配 ——
+// 于是它天然适合"一块缓冲算完就丢"的批处理形状。
+//
+// 布局: buf[0..4] = 容量 (必须是 2 的幂), [4..8] = 已用键数, [8..12] = 墓碑数,
+// 槽从偏移 16 起, 每个 24 字节: [键 u64][值 u64][状态 u32][补 4 字节]。
+// 状态: 0 = 空 (探测到此为止), 1 = 已用, 2 = 墓碑 (探测继续)。
+// 装 cap 个槽要 16 + 24*cap 字节 —— 用 map_bytes。
+//
+// **不自动扩容**: 容量由调用方一次定好, 装载率超过七成性能就开始塌。
+// 用 map_load_pct 盯着, 或者一开始就开两倍。不自动扩的理由是"扩容要分配",
+// 而这一层的整个前提就是"不分配"。
+//
+// 哈希用 splitmix64 的收尾混合 —— 它把哪怕是连续的下标也搅开 (取模容量是 2 的幂,
+// 不搅开就会全撞在同一个槽上)。
+//
+// 命名: 公开 map_*, 内部 mp_*。自检 test_map_*。
+
+module map
+
+use "mem.lomt"
+
+/// 头部: 容量 / 键数 / 墓碑数 / 保留。
+pub const MAP_HDR: u32 = 16;
+/// 一个槽的字节数: 键 8 + 值 8 + 状态 4 + 补 4。
+pub const MAP_SLOT: u32 = 24;
+/// 查不到时返回的值。
+pub const MAP_NIL: u64 = 18446744073709551615;
+/// 遍历结束的下标。
+pub const MAP_NONE: u32 = 4294967295;
+
+pub const MAP_EMPTY: u32 = 0;
+pub const MAP_USED: u32 = 1;
+pub const MAP_TOMB: u32 = 2;
+
+/// 装 cap 个槽要多少字节。
+pub fn map_bytes(cap: u32) -> u32 {
+    return MAP_HDR + MAP_SLOT * cap;
+}
+
+fn mp_cap(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn mp_count(b: ptr) -> u32 {
+    return mem_load32(b, 4);
+}
+
+fn mp_tomb(b: ptr) -> u32 {
+    return mem_load32(b, 8);
+}
+
+fn mp_set_count(b: ptr, v: u32) {
+    mem_store32(b, 4, v);
+}
+
+fn mp_set_tomb(b: ptr, v: u32) {
+    mem_store32(b, 8, v);
+}
+
+fn mp_slot(b: ptr, i: u32) -> u32 {
+    return MAP_HDR + MAP_SLOT * i;
+}
+
+fn mp_state(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, mp_slot(b, i) + 16);
+}
+
+fn mp_set_state(b: ptr, i: u32, s: u32) {
+    mem_store32(b, mp_slot(b, i) + 16, s);
+}
+
+fn mp_set_key(b: ptr, i: u32, k: u64) {
+    mem_store64(b, mp_slot(b, i), k);
+}
+
+fn mp_set_val(b: ptr, i: u32, v: u64) {
+    mem_store64(b, mp_slot(b, i) + 8, v);
+}
+
+/// 已用槽里的键 (给遍历用)。
+pub fn map_key_at(b: ptr, i: u32) -> u64 {
+    return mem_load64(b, mp_slot(b, i));
+}
+
+pub fn map_val_at(b: ptr, i: u32) -> u64 {
+    return mem_load64(b, mp_slot(b, i) + 8);
+}
+
+pub fn map_state_at(b: ptr, i: u32) -> u32 {
+    return mp_state(b, i);
+}
+
+/// splitmix64 的收尾混合。
+pub fn map_hash(k: u64) -> u64 {
+    let z: u64 = k + 11400714819323198485;
+    z = (z ^ (z >> 30)) * 13787848793156543929;
+    z = (z ^ (z >> 27)) * 10723151780598845931;
+    return z ^ (z >> 31);
+}
+
+/// 建表。cap 必须是 2 的幂且非 0 —— 取模靠位与, 用非 2 的幂会静默算错。
+pub fn map_init(b: ptr, cap: u32) -> bool {
+    if cap == 0 {
+        return false;
+    }
+    if (cap & (cap - 1)) != 0 {
+        return false;
+    }
+    mem_store32(b, 0, cap);
+    mem_store32(b, 4, 0);
+    mem_store32(b, 8, 0);
+    mem_store32(b, 12, 0);
+    let i: u32 = 0;
+    while i < cap {
+        mp_set_state(b, i, MAP_EMPTY);
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn map_len(b: ptr) -> u32 {
+    return mp_count(b);
+}
+
+pub fn map_capacity(b: ptr) -> u32 {
+    return mp_cap(b);
+}
+
+pub fn map_is_empty(b: ptr) -> bool {
+    return mp_count(b) == 0;
+}
+
+/// 装载率 (百分比)。超过 70 就该换更大的表了。
+pub fn map_load_pct(b: ptr) -> u32 {
+    let c: u32 = mp_cap(b);
+    if c == 0 {
+        return 0;
+    }
+    return (mp_count(b) + mp_tomb(b)) * 100 / c;
+}
+
+/// 找键所在的槽, 返回下标; 没找到返回 MAP_NONE。
+fn mp_find(b: ptr, k: u64) -> u32 {
+    let c: u32 = mp_cap(b);
+    if c == 0 {
+        return MAP_NONE;
+    }
+    let mask: u32 = c - 1;
+    let h: u32 = (map_hash(k) & (mask as u64)) as u32;
+    let i: u32 = 0;
+    while i <= c {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = mp_state(b, s);
+        if st == MAP_EMPTY {
+            return MAP_NONE;
+        }
+        if st == MAP_USED && map_key_at(b, s) == k {
+            return s;
+        }
+        i = i + 1;
+    }
+    return MAP_NONE;
+}
+
+/// 插入或覆盖。新键返回 true, 覆盖已有键返回 false。
+///
+/// 探测要**走到底** (遇到空槽才停), 同时记住第一个墓碑 —— 直接插进第一个墓碑会让
+/// 后面同哈希的键找不到 (墓碑后面可能还有同一个键)。这是开放寻址最容易写错的一处。
+pub fn map_put(b: ptr, k: u64, v: u64) -> bool {
+    let c: u32 = mp_cap(b);
+    if c == 0 {
+        return false;
+    }
+    let mask: u32 = c - 1;
+    let h: u32 = (map_hash(k) & (mask as u64)) as u32;
+    let tomb_at: u32 = MAP_NONE;
+    let i: u32 = 0;
+    while i <= c {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = mp_state(b, s);
+        if st == MAP_EMPTY {
+            // 到空了: 用第一个墓碑 (如果有), 否则用这个空槽
+            let t: u32 = s;
+            if tomb_at != MAP_NONE {
+                t = tomb_at;
+                mp_set_tomb(b, mp_tomb(b) - 1);
+            }
+            mp_set_key(b, t, k);
+            mp_set_val(b, t, v);
+            mp_set_state(b, t, MAP_USED);
+            mp_set_count(b, mp_count(b) + 1);
+            return true;
+        }
+        if st == MAP_USED && map_key_at(b, s) == k {
+            mp_set_val(b, s, v);
+            return false;
+        }
+        if st == MAP_TOMB && tomb_at == MAP_NONE {
+            tomb_at = s;
+        }
+        i = i + 1;
+    }
+    // 表满了 (全是已用或墓碑, 没有空槽): 不静默丢, 返回 false 让调用方去扩容。
+    return false;
+}
+
+pub fn map_get(b: ptr, k: u64) -> u64 {
+    let s: u32 = mp_find(b, k);
+    if s == MAP_NONE {
+        return MAP_NIL;
+    }
+    return map_val_at(b, s);
+}
+
+pub fn map_has(b: ptr, k: u64) -> bool {
+    return mp_find(b, k) != MAP_NONE;
+}
+
+/// 删除。置成墓碑而不是空 —— 置空会把探测链切断, 后面同哈希的键就查不到了。
+pub fn map_del(b: ptr, k: u64) -> bool {
+    let s: u32 = mp_find(b, k);
+    if s == MAP_NONE {
+        return false;
+    }
+    mp_set_state(b, s, MAP_TOMB);
+    mp_set_count(b, mp_count(b) - 1);
+    mp_set_tomb(b, mp_tomb(b) + 1);
+    return true;
+}
+
+/// 清空 (不擦数据, 只把状态全置空)。
+pub fn map_clear(b: ptr) {
+    let c: u32 = mp_cap(b);
+    let i: u32 = 0;
+    while i < c {
+        mp_set_state(b, i, MAP_EMPTY);
+        i = i + 1;
+    }
+    mp_set_count(b, 0);
+    mp_set_tomb(b, 0);
+}
+
+/// 从 from 起下一个已用槽; 没有则 MAP_NONE。遍历用。
+pub fn map_next_used(b: ptr, from: u32) -> u32 {
+    let c: u32 = mp_cap(b);
+    let i: u32 = from;
+    while i < c {
+        if mp_state(b, i) == MAP_USED {
+            return i;
+        }
+        i = i + 1;
+    }
+    return MAP_NONE;
+}
+
+/// 自洽: 数出来的已用槽个数与记的数一致。
+pub fn map_check(b: ptr) -> bool {
+    let c: u32 = mp_cap(b);
+    let used: u32 = 0;
+    let tomb: u32 = 0;
+    let i: u32 = 0;
+    while i < c {
+        let s: u32 = mp_state(b, i);
+        if s == MAP_USED {
+            used = used + 1;
+        } else if s == MAP_TOMB {
+            tomb = tomb + 1;
+        }
+        i = i + 1;
+    }
+    return used == mp_count(b) && tomb == mp_tomb(b);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_map_init_rejects_non_pow2() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    return map_init(b, 8) && map_init(b, 12) == false && map_init(b, 0) == false;
+}
+
+fn test_map_put_get_basic() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    let n1: bool = map_put(b, 100, 1);
+    let n2: bool = map_put(b, 200, 2);
+    let n3: bool = map_put(b, 300, 3);
+    return n1 && n2 && n3 && map_get(b, 100) == 1 && map_get(b, 200) == 2
+        && map_get(b, 300) == 3 && map_len(b) == 3;
+}
+
+fn test_map_missing_key() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    map_put(b, 5, 50);
+    return map_get(b, 6) == MAP_NIL && map_has(b, 6) == false && map_has(b, 5);
+}
+
+fn test_map_put_overwrites() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    let first: bool = map_put(b, 7, 1);
+    let second: bool = map_put(b, 7, 2);
+    return first && second == false && map_get(b, 7) == 2 && map_len(b) == 1;
+}
+
+fn test_map_key_zero_is_distinguishable_from_empty() -> bool {
+    // 键 0 与"空槽"必须分得开 —— 用状态字节而不是哨兵值, 这条就是那个理由。
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    map_put(b, 0, 99);
+    return map_has(b, 0) && map_get(b, 0) == 99 && map_len(b) == 1
+        && map_has(b, 1) == false;
+}
+
+fn test_map_delete_keeps_probe_chain() -> bool {
+    // 删掉一个键之后, 其他键仍然必须找得到。8 个槽塞 6 个键 -> 按鸽笼原理必然出现
+    // 同哈希簇, 于是这条确实在考"删除不能把探测链切断" (置空实现会在这里挂)。
+    // 再交替删掉一半, 把墓碑夹在存活键之间 —— 那是最容易断链的摆法。
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    let i: u64 = 1;
+    while i <= 6 {
+        map_put(b, i, i * 10);
+        i = i + 1;
+    }
+    map_del(b, 1);
+    map_del(b, 3);
+    map_del(b, 5);
+    let ok: u32 = 1;
+    let j: u64 = 1;
+    while j <= 6 {
+        let want: u64 = j * 10;
+        if (j % 2) == 1 {
+            if map_has(b, j) {
+                ok = 0;
+            }
+        } else if map_get(b, j) != want {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && map_len(b) == 3 && map_check(b);
+}
+
+fn test_map_delete_then_reinsert() -> bool {
+    // 墓碑槽要被复用 (否则反复增删会把表填满墓碑)。
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    map_put(b, 1, 1);
+    map_put(b, 9, 9);
+    map_del(b, 1);
+    map_put(b, 2, 2);
+    return map_get(b, 9) == 9 && map_get(b, 2) == 2 && map_check(b);
+}
+
+fn test_map_many_keys_roundtrip() -> bool {
+    // 往 64 槽里塞 40 个键, 每个都查得回来, 且没有丢失。
+    let b: ptr = alloc(map_bytes(64));
+    map_init(b, 64);
+    let i: u64 = 0;
+    while i < 40 {
+        map_put(b, i * 7 + 1, i);
+        i = i + 1;
+    }
+    let j: u64 = 0;
+    let ok: u32 = 1;
+    while j < 40 {
+        if map_get(b, j * 7 + 1) != j {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && map_len(b) == 40 && map_check(b) && map_load_pct(b) < 70;
+}
+
+fn test_map_sequential_keys_do_not_collide_badly() -> bool {
+    // 连续键 (最坏输入) 在 2 的幂容量 + splitmix 下也要散开。
+    let b: ptr = alloc(map_bytes(64));
+    map_init(b, 64);
+    let i: u64 = 0;
+    while i < 32 {
+        map_put(b, i, i * 2);
+        i = i + 1;
+    }
+    let j: u64 = 0;
+    let ok: u32 = 1;
+    while j < 32 {
+        if map_get(b, j) != j * 2 {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && map_len(b) == 32;
+}
+
+fn test_map_full_table_refuses() -> bool {
+    // 2 个槽塞 3 个键: 第三次必须返回 false, 而不是无声地覆盖或死循环。
+    let b: ptr = alloc(map_bytes(2));
+    map_init(b, 2);
+    let a: bool = map_put(b, 1, 1);
+    let c: bool = map_put(b, 2, 2);
+    let d: bool = map_put(b, 3, 3);
+    return a && c && d == false && map_len(b) == 2;
+}
+
+fn test_map_iteration() -> bool {
+    let b: ptr = alloc(map_bytes(16));
+    map_init(b, 16);
+    map_put(b, 11, 110);
+    map_put(b, 22, 220);
+    map_put(b, 33, 330);
+    let seen: u32 = 0;
+    let sum: u64 = 0;
+    let i: u32 = map_next_used(b, 0);
+    while i != MAP_NONE {
+        seen = seen + 1;
+        sum = sum + map_val_at(b, i);
+        i = map_next_used(b, i + 1);
+    }
+    return seen == 3 && sum == 660;
+}
+
+fn test_map_clear_and_reuse() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    map_put(b, 1, 1);
+    map_put(b, 2, 2);
+    map_clear(b);
+    let e: bool = map_is_empty(b);
+    map_put(b, 3, 3);
+    return e && map_len(b) == 1 && map_get(b, 3) == 3 && map_has(b, 1) == false
+        && map_check(b);
+}
+
+fn test_map_hash_spreads_low_bits() -> bool {
+    // 关键在**低位**: 容量是 2 的幂, 取模就是"取低位"。所以特意喂 16 的倍数 ——
+    // 一个不搅开的哈希 (k & 15) 会把它们**全**塞进 0 号槽, splitmix 必须散开。
+    // (拿 1..8 测是不对的: 8 个值进 16 个桶本来就有很大概率撞, 那不是哈希的错。)
+    let seen: u32 = 0;
+    let i: u64 = 0;
+    while i < 8 {
+        seen = seen | (1 << ((map_hash(i * 16) & 15) as u32));
+        i = i + 1;
+    }
+    let distinct: u32 = 0;
+    let j: u32 = 0;
+    while j < 16 {
+        if (seen & (1 << j)) != 0 {
+            distinct = distinct + 1;
+        }
+        j = j + 1;
+    }
+    return distinct >= 5;
+}
+
+fn test_map_check_detects_tampering() -> bool {
+    let b: ptr = alloc(map_bytes(8));
+    map_init(b, 8);
+    map_put(b, 5, 5);
+    let ok: bool = map_check(b);
+    mem_store32(b, 4, 7);
+    return ok && map_check(b) == false;
+}

@@ -1,0 +1,776 @@
+// std/udiff.lomt — 行级差异 (LCS + 统一 diff)
+//
+// 为什么需要它: "这次构建和上次差在哪"是这个项目天天要问的问题 (锁、种子、生成的表、
+// 配置)。逐字节比较只能回答"不一样", 回答不了"哪几行变了" —— 而后者才是能看的。
+//
+// 算法: **最长公共子序列的动态规划**。教科书上更漂亮的是 Myers (O(ND), 差异小时飞快),
+// 但 Myers 要留住每一步的 V 数组来回溯, 内存 O(D²); 而 DP 表是 O(n·m)、结构简单到不
+// 容易写错。这个库的取舍一贯是"先对, 再快" —— 而且实际输入是几百行的配置/清单,
+// n·m 完全够用。**代价写在明处**: `ud_scratch_bytes` 说是多少, `ud_fits` 让你先问一句
+// 吃不吃得下, 吃不下就明说, 不静默退化成逐字节比较。
+//
+// **两段式**, 因为"算差异"和"打印差异"要的信息不一样:
+//   1. `ud_script` 只算**编辑脚本** —— 一串 (种类, 行数) 游程, 不碰文本。
+//   2. `ud_render` 拿脚本 + 原文, 打出统一 diff。要换格式 (并排、JSON、只看统计)
+//      就自己遍历脚本, 算法不用改。
+//
+// 边界 (诚实清单):
+//   - **只看行, 不看字节**: 一行里改一个字符也算"这行变了"。不做行内字符级 diff ——
+//     那要第二层 DP, 而"哪一行变了"已经解决了绝大部分问题。
+//   - 行相等 = 长度相同且字节相同。**不忽略空白、不忽略行尾 CR** —— 忽略是上层的策略
+//     (先把行规整好再喂进来); 埋在底层会让"我明明改了"变成"diff 说没改"。
+//   - DP 表是 O(n·m) 的 u32, 输入大时要先 `ud_fits`。
+//   - 渲染器只打 **hunk**, 不打 `--- a/x` / `+++ b/y` 那两行头 —— 文件名/时间戳是调用方
+//     的事, 而且让它自己写才不会被这一层的规定格式绑住。
+//
+// 命名: 公开 ud_*, 内部 d_*。自检 test_udiff_*。
+
+module udiff
+
+use "mem.lomt"
+
+pub const UD_ERR: u32 = 4294967295;
+
+/// 编辑脚本里的三种动作。
+pub const UD_EQUAL: u32 = 0;
+pub const UD_DELETE: u32 = 1;
+pub const UD_INSERT: u32 = 2;
+
+/// 默认上下文行数 (统一 diff 的惯例是 3)。
+pub const UD_CTX: u32 = 3;
+
+// ---------------------------------------------------------------- 行
+
+/// 第 i 行的起始偏移。
+fn d_off(st: ptr, i: u32) -> u32 {
+    return mem_load32(st, i * 4);
+}
+
+/// 第 i 行的长度 (行起始数组最后一个是总长)。
+fn d_len(st: ptr, i: u32) -> u32 {
+    return mem_load32(st, (i + 1) * 4) - mem_load32(st, i * 4);
+}
+
+/// 两行内容是否相同。**先比长度再比字节** —— 长度不同就直接跳过 mem_eq。
+fn d_eq(abuf: ptr, ast: ptr, i: u32, bbuf: ptr, bst: ptr, j: u32) -> bool {
+    let al: u32 = d_len(ast, i);
+    if al != d_len(bst, j) {
+        return false;
+    }
+    if al == 0 {
+        return true;
+    }
+    return mem_eq(abuf, d_off(ast, i), bbuf, d_off(bst, j), al);
+}
+
+// ---------------------------------------------------------------- 工作区
+
+/// DP 表要多少字节: (an+1) * (bn+1) * 4。
+pub fn ud_scratch_bytes(an: u32, bn: u32) -> u32 {
+    if an >= 65535 || bn >= 65535 {
+        return UD_ERR;
+    }
+    return (an + 1) * (bn + 1) * 4;
+}
+
+/// 这份输入还吃得下吗 (按手上工作区的字节数)。
+pub fn ud_fits(an: u32, bn: u32, ws_bytes: u32) -> bool {
+    let need: u32 = ud_scratch_bytes(an, bn);
+    if need == UD_ERR {
+        return false;
+    }
+    return need <= ws_bytes;
+}
+
+/// 脚本缓冲至少要多少: 最坏情况每行一个游程, 每游程 8 字节。
+pub fn ud_script_cap(an: u32, bn: u32) -> u32 {
+    return (an + bn + 2) * 8;
+}
+
+/// `ud_render` 要多少临时区: (an+bn+2) * 12。
+pub fn ud_render_scratch(an: u32, bn: u32) -> u32 {
+    return (an + bn + 2) * 12;
+}
+
+// ---------------------------------------------------------------- 编辑脚本
+
+/// 算编辑脚本。
+///
+/// 输入是两块缓冲与各自的**行起始偏移数组** (`ast` 有 an+1 个 u32, 最后一个是总长),
+/// 由调用方用 `line.lomt` / `split.lomt` 切好 —— 这一层不管"什么算一行"。
+///
+/// 输出写进 `out`, 每 8 字节一个游程: `[种类 u32][行数 u32]`。返回游程个数。
+/// 语义 (按这个走就不会错):
+///   - `UD_EQUAL`  消耗 A 与 B 各 C 行
+///   - `UD_DELETE` 只消耗 A 的 C 行
+///   - `UD_INSERT` 只消耗 B 的 C 行
+pub fn ud_script(abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u32, sc: ptr, out: ptr, out_cap: u32) -> u32 {
+    if ud_fits(an, bn, 4294967295) == false {
+        return UD_ERR;
+    }
+    if out_cap < ud_script_cap(an, bn) {
+        return UD_ERR;
+    }
+    // 表: (an+1) 行 × (bn+1) 列 的 u32。T[i][j] = 前 i 行与前 j 行的 LCS 长度。
+    let wide: u32 = bn + 1;
+    let bytes: u32 = ud_scratch_bytes(an, bn);
+    mem_fill(sc, 0, bytes, 0);
+    let i: u32 = 1;
+    while i <= an {
+        let j: u32 = 1;
+        while j <= bn {
+            let v: u32 = 0;
+            if d_eq(abuf, ast, i - 1, bbuf, bst, j - 1) {
+                v = mem_load32(sc, (i - 1) * wide * 4 + (j - 1) * 4) + 1;
+            } else {
+                let up: u32 = mem_load32(sc, (i - 1) * wide * 4 + j * 4);
+                let left: u32 = mem_load32(sc, i * wide * 4 + (j - 1) * 4);
+                if up >= left {
+                    v = up;
+                } else {
+                    v = left;
+                }
+            }
+            mem_store32(sc, i * wide * 4 + j * 4, v);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    // 从右下往左上回溯。走出来的顺序是**反的**, 所以先攒成游程, 末尾整体反转
+    // (每个游程自足, 反转游程列表即可, 游程内部的计数不用动)。
+    let cnt: u32 = 0;
+    let cur_kind: u32 = 4294967295;
+    let cur_cnt: u32 = 0;
+    let ci: u32 = an;
+    let cj: u32 = bn;
+    while ci > 0 || cj > 0 {
+        let k: u32 = 4294967295;
+        if ci > 0 && cj > 0 && d_eq(abuf, ast, ci - 1, bbuf, bst, cj - 1) {
+            k = UD_EQUAL;
+            ci = ci - 1;
+            cj = cj - 1;
+        } else if ci > 0 && (cj == 0 || mem_load32(sc, (ci - 1) * wide * 4 + cj * 4) > mem_load32(sc, ci * wide * 4 + (cj - 1) * 4)) {
+            // **并列时偏向"插入"不是随便选的**: 回溯是从右下往左上走, 走出来的游程
+            // 列表最后要**整体反转** —— 所以这里先记下的, 反转后会排在后面。
+            // 想让渲染出来是"先 - 后 +" (统一 diff 的惯例), 就得在这里偏向插入。
+            // 第一版写成 `>=` 偏向删除, 于是每处"改一行"都渲染成先 `+` 后 `-`,
+            // 五条 replace 的自检一起红 —— 算法没错, 只是排出来的顺序不合惯例。
+            k = UD_DELETE;
+            ci = ci - 1;
+        } else {
+            k = UD_INSERT;
+            cj = cj - 1;
+        }
+        if k == cur_kind {
+            cur_cnt = cur_cnt + 1;
+        } else {
+            if cur_cnt > 0 {
+                mem_store32(out, cnt * 8, cur_kind);
+                mem_store32(out, cnt * 8 + 4, cur_cnt);
+                cnt = cnt + 1;
+            }
+            cur_kind = k;
+            cur_cnt = 1;
+        }
+    }
+    if cur_cnt > 0 {
+        mem_store32(out, cnt * 8, cur_kind);
+        mem_store32(out, cnt * 8 + 4, cur_cnt);
+        cnt = cnt + 1;
+    }
+    let a2: u32 = 0;
+    let b2: u32 = cnt;
+    while a2 + 1 < b2 {
+        b2 = b2 - 1;
+        let k1: u32 = mem_load32(out, a2 * 8);
+        let c1: u32 = mem_load32(out, a2 * 8 + 4);
+        let k2: u32 = mem_load32(out, b2 * 8);
+        let c2: u32 = mem_load32(out, b2 * 8 + 4);
+        mem_store32(out, a2 * 8, k2);
+        mem_store32(out, a2 * 8 + 4, c2);
+        mem_store32(out, b2 * 8, k1);
+        mem_store32(out, b2 * 8 + 4, c1);
+        a2 = a2 + 1;
+    }
+    return cnt;
+}
+
+/// 两份输入的 LCS 长度 (只要个数时用; 工作区同 ud_scratch_bytes)。
+pub fn ud_lcs_len(abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u32, sc: ptr) -> u32 {
+    if ud_fits(an, bn, 4294967295) == false {
+        return UD_ERR;
+    }
+    let wide: u32 = bn + 1;
+    mem_fill(sc, 0, ud_scratch_bytes(an, bn), 0);
+    let i: u32 = 1;
+    while i <= an {
+        let j: u32 = 1;
+        while j <= bn {
+            let v: u32 = 0;
+            if d_eq(abuf, ast, i - 1, bbuf, bst, j - 1) {
+                v = mem_load32(sc, (i - 1) * wide * 4 + (j - 1) * 4) + 1;
+            } else {
+                let up: u32 = mem_load32(sc, (i - 1) * wide * 4 + j * 4);
+                let left: u32 = mem_load32(sc, i * wide * 4 + (j - 1) * 4);
+                if up >= left {
+                    v = up;
+                } else {
+                    v = left;
+                }
+            }
+            mem_store32(sc, i * wide * 4 + j * 4, v);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return mem_load32(sc, an * wide * 4 + bn * 4);
+}
+
+/// 相似度 (千分数): 2*LCS/(an+bn)。两边都空算 1000。给"这两份够不够像"用。
+pub fn ud_similar_permille(abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u32, sc: ptr) -> u32 {
+    if an == 0 && bn == 0 {
+        return 1000;
+    }
+    let l: u32 = ud_lcs_len(abuf, ast, an, bbuf, bst, bn, sc);
+    if l == UD_ERR {
+        return UD_ERR;
+    }
+    return (2000 * l) / (an + bn);
+}
+
+// ---------------------------------------------------------------- 渲染
+
+fn d_puts(out: ptr, w: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    mem_copy(out, w, str_ptr(s), 0, n);
+    return w + n;
+}
+
+fn d_putu(out: ptr, w: u32, v: u32) -> u32 {
+    if v == 0 {
+        store8(out, w, 48 as u8);
+        return w + 1;
+    }
+    let tmp: ptr = alloc(16);
+    let k: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(tmp, k, (48 + x % 10) as u8);
+        x = x / 10;
+        k = k + 1;
+    }
+    let j: u32 = 0;
+    while j < k {
+        store8(out, w + j, load8(tmp, k - 1 - j) as u8);
+        j = j + 1;
+    }
+    return w + k;
+}
+
+/// 一行原文抄进 out; 原文这行没有换行符就补一个 —— 不补的话渲染出来的 diff
+/// 会挤成一坨, 而且**看不出来**是原文缺换行还是渲染错了。
+fn d_putline(out: ptr, w: u32, buf: ptr, st: ptr, i: u32) -> u32 {
+    let o: u32 = d_off(st, i);
+    let l: u32 = d_len(st, i);
+    mem_copy(out, w, buf, o, l);
+    let e: u32 = w + l;
+    if l > 0 && load8(buf, o + l - 1) == 10 {
+        return e;
+    }
+    store8(out, e, 10 as u8);
+    return e + 1;
+}
+
+/// 把编辑脚本展开成**逐行动作表**: 每 12 字节 = `[种类][A 已消耗行数][B 已消耗行数]`。
+/// 用"已消耗计数"而不是"本行下标", 是为了让 hunk 头里的 `-起点,行数` 能直接相减得出 ——
+/// 空文件/空 hunk 那几个特例 (起点算 0 还是 1) 就是这么绕开的。
+fn d_expand(ops: ptr, nops: u32, acts: ptr) -> u32 {
+    let na: u32 = 0;
+    let nb: u32 = 0;
+    let ne: u32 = 0;
+    let i: u32 = 0;
+    while i < nops {
+        let k: u32 = mem_load32(ops, i * 8);
+        let c: u32 = mem_load32(ops, i * 8 + 4);
+        let z: u32 = 0;
+        while z < c {
+            if k == UD_EQUAL {
+                na = na + 1;
+                nb = nb + 1;
+            } else if k == UD_DELETE {
+                na = na + 1;
+            } else {
+                nb = nb + 1;
+            }
+            mem_store32(acts, ne * 12, k);
+            mem_store32(acts, ne * 12 + 4, na);
+            mem_store32(acts, ne * 12 + 8, nb);
+            ne = ne + 1;
+            z = z + 1;
+        }
+        i = i + 1;
+    }
+    return ne;
+}
+
+fn d_put_hunk(out: ptr, w0: u32, acts: ptr, start: u32, stop: u32, abuf: ptr, ast: ptr, bbuf: ptr, bst: ptr) -> u32 {
+    // **形参不能赋值** —— 转译出来的 Rust 是 `let w: u32` 而不是 `let mut w`。
+    // 任何"一路往右推"的写入器都得先把形参抄进局部变量, 这是这门语言的硬约束。
+    let w: u32 = w0;
+    let a_before: u32 = 0;
+    let b_before: u32 = 0;
+    if start > 0 {
+        a_before = mem_load32(acts, (start - 1) * 12 + 4);
+        b_before = mem_load32(acts, (start - 1) * 12 + 8);
+    }
+    let a_cnt: u32 = mem_load32(acts, (stop - 1) * 12 + 4) - a_before;
+    let b_cnt: u32 = mem_load32(acts, (stop - 1) * 12 + 8) - b_before;
+    w = d_puts(out, w, "@@ -");
+    w = d_putu(out, w, a_before + 1);
+    w = d_puts(out, w, ",");
+    w = d_putu(out, w, a_cnt);
+    w = d_puts(out, w, " +");
+    w = d_putu(out, w, b_before + 1);
+    w = d_puts(out, w, ",");
+    w = d_putu(out, w, b_cnt);
+    w = d_puts(out, w, " @@\n");
+    let k: u32 = start;
+    while k < stop {
+        let kind: u32 = mem_load32(acts, k * 12);
+        if kind == UD_EQUAL {
+            store8(out, w, 32 as u8); // ' '
+            w = w + 1;
+            w = d_putline(out, w, abuf, ast, mem_load32(acts, k * 12 + 4) - 1);
+        } else if kind == UD_DELETE {
+            store8(out, w, 45 as u8); // '-'
+            w = w + 1;
+            w = d_putline(out, w, abuf, ast, mem_load32(acts, k * 12 + 4) - 1);
+        } else {
+            store8(out, w, 43 as u8); // '+'
+            w = w + 1;
+            w = d_putline(out, w, bbuf, bst, mem_load32(acts, k * 12 + 8) - 1);
+        }
+        k = k + 1;
+    }
+    return w;
+}
+
+/// 把编辑脚本渲染成统一 diff 的 **hunk** 文本 (不含 `---` / `+++` 头两行, 那两行调用方自己写)。
+///
+/// `ctx` 是上下文行数 (惯例用 `UD_CTX`)。`sc` 至少 `ud_render_scratch(an, bn)` 字节。
+/// 返回写出字节数; 缓冲不够**不管** (调用方按 `ud_render_bytes` 开, 或者先渲染再问)。
+///
+/// **注意**: `sc` 会覆盖 `ud_script` 用的那张表 —— 渲染已经不需要它了, 但如果你还想
+/// 复用同一块工作区, 这是允许的 (脚本本身在 `ops` 里, 已经和表无关)。
+pub fn ud_render(ops: ptr, nops: u32, abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u32, ctx: u32, sc: ptr, out: ptr, oo: u32) -> u32 {
+    let acts: ptr = sc;
+    let ne: u32 = d_expand(ops, nops, acts);
+    let w: u32 = oo;
+    let i: u32 = 0;
+    while i < ne {
+        if mem_load32(acts, i * 12) == UD_EQUAL {
+            i = i + 1;
+        } else {
+            // hunk 起点往前回退 ctx 行
+            let start: u32 = 0;
+            if i > ctx {
+                start = i - ctx;
+            }
+            // 往后扫: 改动之间隔了超过 2*ctx 行相等就断成两个 hunk
+            let last: u32 = i;
+            let j: u32 = i;
+            let brk: u32 = 0;
+            while j < ne && brk == 0 {
+                if mem_load32(acts, j * 12) != UD_EQUAL {
+                    last = j;
+                    j = j + 1;
+                } else {
+                    let e: u32 = j;
+                    while e < ne && mem_load32(acts, e * 12) == UD_EQUAL {
+                        e = e + 1;
+                    }
+                    if e < ne && (e - j) > 2 * ctx {
+                        brk = 1;
+                    } else {
+                        j = e;
+                    }
+                }
+            }
+            let stop: u32 = 0;
+            if last + 1 + ctx < ne {
+                stop = last + 1 + ctx;
+            } else {
+                stop = ne;
+            }
+            w = d_put_hunk(out, w, acts, start, stop, abuf, ast, bbuf, bst);
+            i = last + 1;
+        }
+    }
+    return w - oo;
+}
+
+/// 渲染出来最多要多少字节 (粗, 但**上界是真的**): 行数 × (最长行 + 4) + hunk 头。
+pub fn ud_render_bytes(abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u32, ctx: u32) -> u32 {
+    let mx: u32 = 0;
+    let i: u32 = 0;
+    while i < an {
+        if d_len(ast, i) > mx {
+            mx = d_len(ast, i);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < bn {
+        if d_len(bst, i) > mx {
+            mx = d_len(bst, i);
+        }
+        i = i + 1;
+    }
+    let hunks: u32 = 2;
+    if ctx > 0 {
+        hunks = (an + bn) / ctx + 2;
+    } else {
+        hunks = an + bn + 2;
+    }
+    return (an + bn + 4) * (mx + 4) + hunks * 40;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 把 `"a\nb\nc\n"` 切成**行起始偏移数组** (返回行数)。
+///
+/// 约定: `st[0] = 0`, 之后每个"下一行的起点", 末尾再放**总长**; 于是第 i 行是
+/// `[st[i], st[i+1])` —— 最后一行靠末尾那个总长收边, 所以原文缺换行符也能正确切出。
+/// 数组得有 (行数 + 1) 个 u32。
+///
+/// 自检用 —— 真实调用方该用 `line.lomt` / `split.lomt`。
+/// (**第一版忘了写 st[0]=0**, 把"行尾"当成了"行首", 于是每一行都往前错一格,
+/// 除了一条以外的 diff 自检全红 —— 脚手架写错比算法写错更难看出来。)
+fn mk(text: str, st: ptr) -> u32 {
+    let n: u32 = str_len(text);
+    mem_store32(st, 0, 0);
+    if n == 0 {
+        return 0;
+    }
+    let k: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if load8(str_ptr(text), i) == 10 && i + 1 < n {
+            mem_store32(st, k * 4, i + 1);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    mem_store32(st, k * 4, n);
+    return k;
+}
+
+/// 一整套: 切行 -> 算脚本 -> 渲染, 返回渲染出的字节数。
+///
+/// **尺寸要抠**: 堆是 64 KiB 的 bump 堆且不回收, 而这个函数每个自检都调一次。
+/// 第一版每调一次要 9728 字节、九个自检就 87 KB —— 于是**靠后的自检拿到坏指针、
+/// 静默返回假结果**, 看上去像"渲染算错了"。缩到 2816 字节之后才见真章。
+fn run(a: str, b: str, ctx: u32, out: ptr) -> u32 {
+    let ast: ptr = alloc(128);
+    let bst: ptr = alloc(128);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(2048);
+    let ops: ptr = alloc(512);
+    let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, ops, 512);
+    if nops == UD_ERR {
+        return UD_ERR;
+    }
+    return ud_render(ops, nops, str_ptr(a), ast, na, str_ptr(b), bst, nb, ctx, sc, out, 0);
+}
+
+fn eqn(out: ptr, n: u32, want: str) -> bool {
+    if n != str_len(want) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(want), 0, n);
+}
+
+/// 数几个 hunk —— **只数"行首的 @@"**。
+/// (第一版数 `@@` 出现次数, 于是每个 hunk 被数了两次: `@@ -1,4 +1,4 @@` 里
+///  开头和结尾各有一组。断言数字对了但含义是错的, 两条自检一起红。)
+fn count_hunks(out: ptr, n: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i + 1 < n {
+        if load8(out, i) == 64 && load8(out, i + 1) == 64 {
+            if i == 0 || load8(out, i - 1) == 10 {
+                c = c + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn test_udiff_lcs_known() -> bool {
+    // "ABCBDAB" 与 "BDCABA" 的 LCS 长度是 4 —— 教科书上的经典答案。
+    let a: str = "A\nB\nC\nB\nD\nA\nB\n";
+    let b: str = "B\nD\nC\nA\nB\nA\n";
+    let ast: ptr = alloc(64);
+    let bst: ptr = alloc(64);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(1024);
+    return na == 7 && nb == 6 && ud_lcs_len(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 4;
+}
+
+fn test_udiff_identical() -> bool {
+    let a: str = "x\ny\nz\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let n: u32 = mk(a, ast);
+    let nb: u32 = mk(a, bst);
+    let sc: ptr = alloc(1024);
+    return n == 3 && nb == 3 && ud_lcs_len(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc) == n
+        && ud_similar_permille(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc) == 1000;
+}
+
+fn test_udiff_script_all_equal() -> bool {
+    let a: str = "one\ntwo\nthree\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let n: u32 = mk(a, ast);
+    let nb: u32 = mk(a, bst);
+    let sc: ptr = alloc(1024);
+    let out: ptr = alloc(256);
+    let nops: u32 = ud_script(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc, out, 256);
+    return nb == 3 && nops == 1 && mem_load32(out, 0) == UD_EQUAL && mem_load32(out, 4) == 3;
+}
+
+fn test_udiff_line_split_convention() -> bool {
+    // 切行约定本身要单独钉一条 —— 上面好几条自检都建在它上面, 它错了会一起红。
+    let a: str = "a\nb\n";
+    let ast: ptr = alloc(32);
+    let ok1: bool = mk(a, ast) == 2 && d_off(ast, 0) == 0 && d_off(ast, 1) == 2
+        && d_len(ast, 0) == 2 && d_len(ast, 1) == 2;
+    // 末尾没有换行符: 最后一行靠"总长"收边
+    let b: str = "a\nb";
+    let bst: ptr = alloc(32);
+    let ok2: bool = mk(b, bst) == 2 && d_len(bst, 1) == 1;
+    // 空文档是 0 行
+    let c: str = "";
+    let cst: ptr = alloc(32);
+    let ok3: bool = mk(c, cst) == 0;
+    // 中间的空行也是一行
+    let e: str = "a\n\nb\n";
+    let est: ptr = alloc(32);
+    let ok4: bool = mk(e, est) == 3 && d_len(est, 1) == 1;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_udiff_script_all_different() -> bool {
+    // 没有公共行 -> 一整段删除 + 一整段插入 (谁先谁后都合法)
+    let a: str = "a\nb\n";
+    let b: str = "c\nd\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(1024);
+    let out: ptr = alloc(256);
+    let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, out, 256);
+    let del: u32 = 0;
+    let ins: u32 = 0;
+    let i: u32 = 0;
+    while i < nops {
+        if mem_load32(out, i * 8) == UD_DELETE {
+            del = del + mem_load32(out, i * 8 + 4);
+        } else {
+            ins = ins + mem_load32(out, i * 8 + 4);
+        }
+        i = i + 1;
+    }
+    return nops == 2 && del == 2 && ins == 2;
+}
+
+fn test_udiff_script_reconstruction_invariant() -> bool {
+    // **真正的不变量**: 按脚本走一遍, A 与 B 的行数都必须正好耗尽, 且每个 UD_EQUAL
+    // 段两边内容一致。脚本写错的话这条必红 —— 它比"某条 diff 长得对"有力得多。
+    let a: str = "keep1\nold\nkeep2\nkeep3\nold2\nkeep4\n";
+    let b: str = "keep1\nkeep2\nnew\nkeep3\nkeep4\n";
+    let ast: ptr = alloc(64);
+    let bst: ptr = alloc(64);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(2048);
+    let out: ptr = alloc(256);
+    let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, out, 256);
+    if nops == UD_ERR {
+        return false;
+    }
+    let ai: u32 = 0;
+    let bi: u32 = 0;
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < nops {
+        let k: u32 = mem_load32(out, i * 8);
+        let c: u32 = mem_load32(out, i * 8 + 4);
+        let z: u32 = 0;
+        while z < c {
+            if k == UD_EQUAL {
+                if d_eq(str_ptr(a), ast, ai, str_ptr(b), bst, bi) == false {
+                    bad = 1;
+                }
+                ai = ai + 1;
+                bi = bi + 1;
+            } else if k == UD_DELETE {
+                ai = ai + 1;
+            } else {
+                bi = bi + 1;
+            }
+            z = z + 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0 && ai == na && bi == nb;
+}
+
+fn test_udiff_render_basic() -> bool {
+    let out: ptr = alloc(1024);
+    let n: u32 = run("one\ntwo\nthree\n", "one\nTWO\nthree\n", 3, out);
+    return eqn(out, n, "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n");
+}
+
+fn test_udiff_render_insert_only() -> bool {
+    let out: ptr = alloc(1024);
+    let n: u32 = run("a\nb\n", "a\nNEW\nb\n", 3, out);
+    return eqn(out, n, "@@ -1,2 +1,3 @@\n a\n+NEW\n b\n");
+}
+
+fn test_udiff_render_delete_only() -> bool {
+    let out: ptr = alloc(1024);
+    let n: u32 = run("a\ngone\nb\n", "a\nb\n", 3, out);
+    return eqn(out, n, "@@ -1,3 +1,2 @@\n a\n-gone\n b\n");
+}
+
+fn test_udiff_render_empty_to_something() -> bool {
+    // 空文件 -> 一行: 起点是 `-1,0` 而不是 `-0,0` —— 统一 diff 的老规矩。
+    let out: ptr = alloc(1024);
+    let n: u32 = run("", "x\n", 3, out);
+    return eqn(out, n, "@@ -1,0 +1,1 @@\n+x\n");
+}
+
+fn test_udiff_render_line_without_newline() -> bool {
+    // 原文最后一行没有换行符: 渲染要**补**一个, 否则后面挤上来。
+    let out: ptr = alloc(1024);
+    let n: u32 = run("a\nb", "a\nc", 3, out);
+    return eqn(out, n, "@@ -1,2 +1,2 @@\n a\n-b\n+c\n");
+}
+
+fn test_udiff_render_pure_delete_all() -> bool {
+    let out: ptr = alloc(1024);
+    let n: u32 = run("x\ny\n", "", 3, out);
+    return eqn(out, n, "@@ -1,2 +1,0 @@\n-x\n-y\n");
+}
+
+fn test_udiff_render_blank_lines() -> bool {
+    // 空行也是行: "a\n\nb\n" 是 3 行, 中间那个是空的 —— 切行和比较都不能把它吃掉。
+    let a: str = "a\n\nb\n";
+    let ast: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let sc: ptr = alloc(1024);
+    let bst: ptr = alloc(32);
+    let nb: u32 = mk(a, bst);
+    return na == 3 && nb == 3 && ud_lcs_len(str_ptr(a), ast, na, str_ptr(a), bst, nb, sc) == 3
+        && d_len(ast, 1) == 1;
+}
+
+fn test_udiff_hunk_splits_when_far_apart() -> bool {
+    // 两处改动隔着 18 行相等 (> 2*ctx): 必须是**两个 hunk**, 不能把中间全打出来。
+    let a: str = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n";
+    let b: str = "X\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\nY\n";
+    let out: ptr = alloc(4096);
+    let n: u32 = run(a, b, 3, out);
+    if n == UD_ERR {
+        return false;
+    }
+    return count_hunks(out, n) == 2;
+}
+
+fn test_udiff_hunk_merges_when_close() -> bool {
+    // 改动挨得近 (中间只隔 3 行 <= 2*ctx): 合成**一个** hunk。
+    let a: str = "1\n2\n3\n4\n5\n6\n7\n8\n";
+    let b: str = "X\n2\n3\n4\nY\n6\n7\n8\n";
+    let out: ptr = alloc(4096);
+    let n: u32 = run(a, b, 3, out);
+    if n == UD_ERR {
+        return false;
+    }
+    return count_hunks(out, n) == 1;
+}
+
+fn test_udiff_ctx_zero_is_all_changed() -> bool {
+    // ctx=0: 不留上下文, 只打改动的行 —— 头里那两个行数就是纯改动数。
+    let out: ptr = alloc(1024);
+    let n: u32 = run("a\nb\nc\n", "a\nX\nc\n", 0, out);
+    return eqn(out, n, "@@ -2,1 +2,1 @@\n-b\n+X\n");
+}
+
+fn test_udiff_similar_permille() -> bool {
+    let a: str = "a\nb\nc\n";
+    let b: str = "a\nb\nd\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(1024);
+    // LCS = 2 -> 2000*2/6 = 666
+    return ud_similar_permille(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 666;
+}
+
+fn test_udiff_similar_disjoint_is_zero() -> bool {
+    let a: str = "1\n2\n";
+    let b: str = "3\n4\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(1024);
+    return ud_similar_permille(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 0;
+}
+
+fn test_udiff_scratch_accounting() -> bool {
+    let a: str = "a\nb\nc\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(a, bst);
+    let out: ptr = alloc(256);
+    let big: ptr = alloc(4096);
+    let ok1: bool = ud_script(str_ptr(a), ast, na, str_ptr(a), bst, nb, big, out, 256) != UD_ERR;
+    return ok1 && ud_fits(na, nb, 63) == false && ud_fits(na, nb, 64)
+        && ud_scratch_bytes(3, 3) == 64 && ud_render_scratch(3, 3) == 96;
+}
+
+fn test_udiff_rejects_small_output_buffer() -> bool {
+    // 输出缓冲不够时**报错**, 不截断 —— 截断的 diff 看上去像"文件到这就没了"。
+    let a: str = "a\nb\n";
+    let ast: ptr = alloc(32);
+    let bst: ptr = alloc(32);
+    let na: u32 = mk(a, ast);
+    let sc: ptr = alloc(1024);
+    let tiny: ptr = alloc(8);
+    return ud_script(str_ptr(a), ast, na, str_ptr(a), bst, na, sc, tiny, 8) == UD_ERR;
+}
+
+fn test_udiff_many_line_one_change() -> bool {
+    // 20 行只改中间一行: LCS = 19, 且脚本只有 4 段 (相等/删/插/相等)。
+    let a: str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n";
+    let b: str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nCHANGED\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n";
+    let ast: ptr = alloc(128);
+    let bst: ptr = alloc(128);
+    let na: u32 = mk(a, ast);
+    let nb: u32 = mk(b, bst);
+    let sc: ptr = alloc(2048);
+    let ops: ptr = alloc(512);
+    let ok1: bool = na == 20 && nb == 20 && ud_fits(na, nb, 2048)
+        && ud_lcs_len(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 19;
+    let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, ops, 512);
+    return ok1 && nops == 4;
+}

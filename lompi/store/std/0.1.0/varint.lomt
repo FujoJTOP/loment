@@ -1,0 +1,184 @@
+// std/varint.lomt — LEB128 变长整数 + zigzag
+//
+// 为什么要它: 自举侧有 `FJRU v1 rule bytecode 778B` 这种紧凑字节码 (docs/fuai.lom),
+// 而紧凑编码里整数就是变长的。手写"每 7 位一节、高位接续"最容易错的是
+// **最后一节的边界**与**溢出截断** —— 两处都在自检里钉了。
+//
+// 读的接口拆成两个函数而不是返回打包值: 值本身是 u64, 而还要同时告诉调用方
+// 消耗了几个字节 —— 两个 u64 塞不进一个 u64。所以
+//   `varint_get_len` 先告诉你吃几个字节, `varint_get` 再给值。
+// 这与 parse.lomt 的"原语 + 谓词"是同一个思路, 理由也一样 (没有出参)。
+//
+// 命名: 公开一律 varint_*, 内部一律 vi_*。自检 test_varint_*。
+
+module varint
+
+/// 编码 v 需要几个字节。
+pub fn varint_size(v: u64) -> u32 {
+    let n: u32 = 1;
+    let x: u64 = v >> 7;
+    while x != 0 {
+        n = n + 1;
+        x = x >> 7;
+    }
+    return n;
+}
+
+/// 写 LEB128 (无符号), 返回新偏移。
+pub fn varint_put(buf: ptr, o: u32, v: u64) -> u32 {
+    let k: u32 = o;
+    let x: u64 = v;
+    let go: u32 = 1;
+    while go == 1 {
+        let b: u32 = (x & 127) as u32;
+        x = x >> 7;
+        if x == 0 {
+            store8(buf, k, b as u8);
+            k = k + 1;
+            go = 0;
+        } else {
+            store8(buf, k, (b | 128) as u8);
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+/// 读一个 LEB128 会消耗几个字节。
+/// 直接在 [o, o+n) 上扫到第一个没有续接位的字节 —— 见 get_len 的判据。
+pub fn varint_get_len(p: ptr, o: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n && i < 10 {
+        let b: u32 = load8(p, o + i);
+        if (b & 128) == 0 {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 读一个 LEB128 的值 (调用方保证这段是合法的; 用 `varint_get_len` 判过)。
+pub fn varint_get(p: ptr, o: u32) -> u64 {
+    let v: u64 = 0;
+    let shift: u32 = 0;
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let b: u32 = load8(p, o + i);
+        v = v | (((b & 127) as u64) << shift);
+        i = i + 1;
+        if (b & 128) == 0 {
+            go = 0;
+        } else {
+            shift = shift + 7;
+        }
+    }
+    return v;
+}
+
+/// 有符号 -> 无符号 (zigzag)。小的负数也只占一个字节。
+///
+/// 不用 `(v << 1) ^ (v >> 63)` 那种位技巧: 它依赖算术右移, 而这里不做假设。
+/// 分支写法对任何输入都有定义, 代价只是一次比较。
+pub fn zigzag_enc(v: i64) -> u64 {
+    if v < 0 {
+        return ((0 - v) as u64) * 2 - 1;
+    }
+    return (v as u64) * 2;
+}
+
+/// 无符号 -> 有符号。
+pub fn zigzag_dec(z: u64) -> i64 {
+    if (z & 1) != 0 {
+        return (0 - ((z / 2) as i64)) - 1;
+    }
+    return (z / 2) as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_varint_size() -> bool {
+    return varint_size(0) == 1 && varint_size(127) == 1 && varint_size(128) == 2
+        && varint_size(16383) == 2 && varint_size(16384) == 3;
+}
+
+fn test_varint_put_get_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, 300);
+    let k: u32 = varint_get_len(b, 0, 16);
+    return o == 2 && k == 2 && varint_get(b, 0) == 300;
+}
+
+fn test_varint_one_byte_value() -> bool {
+    // 127 是单字节能放的最大值, 128 必须跨字节 —— 边界就在这。
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, 127);
+    return o == 1 && load8(b, 0) == 127 && varint_get(b, 0) == 127;
+}
+
+fn test_varint_128_needs_two() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, 128);
+    return o == 2 && (load8(b, 0) & 128) != 0 && varint_get(b, 0) == 128;
+}
+
+fn test_varint_zero() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, 0);
+    return o == 1 && load8(b, 0) == 0 && varint_get(b, 0) == 0;
+}
+
+fn test_varint_sequence() -> bool {
+    // 连写三个, 依次读回 —— 游标接不上时这条会挂。
+    let b: ptr = alloc(32);
+    let o1: u32 = varint_put(b, 0, 1);
+    let o2: u32 = varint_put(b, o1, 200);
+    let o3: u32 = varint_put(b, o2, 100000);
+    let k1: u32 = varint_get_len(b, 0, 32);
+    let k2: u32 = varint_get_len(b, o1, 32);
+    let k3: u32 = varint_get_len(b, o2, 32);
+    return varint_get(b, 0) == 1 && varint_get(b, o1) == 200
+        && varint_get(b, o2) == 100000 && k1 == o1 && k2 == o2 - o1 && k3 == o3 - o2;
+}
+
+fn test_varint_u64_max() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, 18446744073709551615);
+    return o == 10 && varint_get_len(b, 0, 16) == 10
+        && varint_get(b, 0) == 18446744073709551615;
+}
+
+fn test_varint_get_len_rejects_truncated() -> bool {
+    // 全是续接位 = 没读完 —— 必须报 0 而不是硬读。
+    let b: ptr = alloc(16);
+    store8(b, 0, 128 as u8);
+    store8(b, 1, 128 as u8);
+    return varint_get_len(b, 0, 2) == 0;
+}
+
+fn test_varint_get_len_short_range() -> bool {
+    // 范围只给 1 字节, 而数据需要 2 —— 也要报 0。
+    let b: ptr = alloc(16);
+    varint_put(b, 0, 300);
+    return varint_get_len(b, 0, 1) == 0;
+}
+
+fn test_zigzag_known() -> bool {
+    return zigzag_enc(0) == 0 && zigzag_enc(0 - 1) == 1 && zigzag_enc(1) == 2
+        && zigzag_enc(0 - 2) == 3 && zigzag_enc(2) == 4;
+}
+
+fn test_zigzag_roundtrip() -> bool {
+    return zigzag_dec(zigzag_enc(0)) == 0
+        && zigzag_dec(zigzag_enc(0 - 12345)) == 0 - 12345
+        && zigzag_dec(zigzag_enc(12345)) == 12345
+        && zigzag_dec(zigzag_enc(0 - 1000000)) == 0 - 1000000;
+}
+
+fn test_zigzag_small_negative_is_one_byte() -> bool {
+    // zigzag 的意义就在这: -1 编码成 1, 一个字节就够; 不用 zigzag 的话它是 10 字节。
+    let b: ptr = alloc(16);
+    let o: u32 = varint_put(b, 0, zigzag_enc(0 - 1));
+    return o == 1 && varint_get(b, 0) == 1;
+}

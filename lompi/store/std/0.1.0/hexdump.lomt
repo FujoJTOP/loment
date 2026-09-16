@@ -1,0 +1,406 @@
+// std/hexdump.lomt — 十六进制转储 (hexdump -C / xxd 风格)
+//
+// 为什么要它: std/hex.lomt 的 `hex_dump_line` 是"地址 + 一排 hex + |ascii|"的**简版**,
+// 而真正给人看、给缺陷报告贴、给协议分析贴的那种转储是 `hexdump -C` 的**规范版**:
+// 十六进制区分成 8+8 两列 (中间多一格), ASCII 列两侧竖线, 每 16 字节一行, 末行不足
+// 时十六进制区补空格但 ASCII 只显示真实字节。这一层把那套版式钉死。
+//
+// 版式 (逐字符对齐, 这是本模块存在的全部理由 —— 抄错一格自检就红):
+//   OOOOOOOO  xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx  |asciiiiiiiiiiii|
+//   ^0       ^8^9                     ^36                      ^60
+//   - 偏移: 恰好 8 位小写十六进制, 之后**两个**空格。
+//   - 十六进制: 16 个"xx "槽位; 第 8 个槽位后**多加一格**(所以两列之间是 2 格),
+//     最后一个槽位后也多加一格(所以与 ASCII 竖线之间是 2 格)。
+//   - ASCII: 两侧各一根 '|'; 只显示**真实存在**的字节 (0x20..0x7E 原样, 其余 '.')。
+//     不足 16 字节时十六进制区补空格把竖线顶到第 60 列 —— 列对齐就是这么来的。
+//   - 整段转储末尾补**最终偏移**那一行 (只有 8 位偏移 + 换行), 与 hexdump -C 一致。
+//
+// 版式的真值来源: util-linux `hexdump -C` (即 `hd`) 的 `--canonical` 格式, 与
+// Wikipedia "Hex dump" 条目的规范样例逐字符核对过:
+//   00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|
+// 16 字节整行 78 字符, 15 字节 77, 1 字节 63 —— ASCII 竖线恒在第 60 列 (0 基)。
+//
+// 偏移宽度 (决定并写明): **8 位**, 即 u32 全宽。所以单次转储最大 4 GiB - 1 字节;
+// 偏移是 u32, 超过 0xFFFFFFFF 不会"变长", 而是按 u32 回绕 (与 hexdump -C 早年的
+// 32 位行为一致)。要 64 位偏移得改接口, 本层不做 —— 输入长度 `n` 本身就是 u32。
+//
+// 换行: 一律 LF(10)。**不写 CR** —— Loment 转义表只有 \n \t \" \\, 写 "\r" 会静默
+// 退化成字母 r (踩过); 所以本文件里出现 13 的地方都是显式 store8 或断言。
+//
+// 诚实清单:
+//   - 不做 `-v`/去重 (`*` 行): 重复行原样打出。去重是显示策略, 不是转储本身。
+//   - 不做别名字节序/端序显示 (那是 xxd -e / -g 的事)。
+//   - 不做端到端的"读文件 + 转储": 本层只吃 (ptr, len), 读写交给 host/io。
+//   - 大小上界 `hxd_bytes_needed` 是**精确值**不是上界 —— 它按 63*m + n + 9 算,
+//     与逐行宽度严格相等 (自检里拿真实转储长度对过)。
+//
+// 命名: 公开 hexdump_* 的缩写 `hxd_*`, 内部 `xd_*`。自检 test_hexdump_*。
+// (内部前缀故意用 xd_ 而不是 hx_ —— hex.lomt 已经占了 hx_, 平名字空间下私有名也
+//  占全局拼写, 撞了会被 E13 拦下, 见 docs/158 §2。)
+
+module hexdump
+
+use "mem.lomt"
+
+/// 失败哨兵 (宽度查询越界等)。
+pub const HXD_ERR: u32 = 4294967295;
+
+/// 每行几个字节。
+pub const HXD_ROW: u32 = 16;
+
+/// 一行的"固定部分"宽度 (偏移 8 + 空 2 + 16 槽 48 + 分组多 1 + 竖线前多 1), 不含字节自身
+/// 与 ASCII 内容。所以一行是 HXD_LINE_BASE + m 字符 (m = 本行真实字节数)。
+pub const HXD_LINE_BASE: u32 = 62;
+
+/// 整段转储末尾那一行 ("%08x\n") 的字节数。
+pub const HXD_TRAILER: u32 = 9;
+
+/// 尺寸查询的安全上限: 过了就报 HXD_ERR, 免得 rows*63 撞 u32 (2^24 行 = 16 MiB 数据)。
+pub const HXD_MAX_N: u32 = 16777215;
+
+// ---------------------------------------------------------------- 小工具
+
+/// 0..15 -> 小写十六进制字符码。
+fn xd_digit(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 写 2 位小写十六进制, 返回新偏移。
+fn xd_hex2(buf: ptr, o: u32, v: u32) -> u32 {
+    store8(buf, o, xd_digit((v >> 4) & 15) as u8);
+    store8(buf, o + 1, xd_digit(v & 15) as u8);
+    return o + 2;
+}
+
+/// 写 8 位小写十六进制 (定宽, 前导零), 返回新偏移。
+fn xd_hex8(buf: ptr, o: u32, v: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(buf, k, xd_digit((v >> ((7 - i) * 4)) & 15) as u8);
+        k = k + 1;
+        i = i + 1;
+    }
+    return k;
+}
+
+// ---------------------------------------------------------------- 一行
+
+/// 渲染**一行** (`OOOOOOOO  xx.. |ascii|`, **不含换行**)。`n` 是本行可用字节数
+/// (0..16, 超过 16 只取前 16 —— 一行就 16 字节, 这是版式不是可选)。`addr` 是这一行
+/// 起始偏移。返回写出后的**新偏移** (即 `oo + 本行字符数`)。
+///
+/// 不足 16 字节的槽位补 3 个空格; ASCII 列**只**写真实字节 —— 这样竖线恒在第 60 列。
+pub fn hxd_line(d: ptr, so: u32, n: u32, addr: u32, out: ptr, oo: u32) -> u32 {
+    let m: u32 = n;
+    if m > HXD_ROW {
+        m = HXD_ROW;
+    }
+    let w: u32 = xd_hex8(out, oo, addr);
+    store8(out, w, 32 as u8);
+    store8(out, w + 1, 32 as u8);
+    w = w + 2;
+    let i: u32 = 0;
+    while i < HXD_ROW {
+        if i < m {
+            // 槽位是 "xx " 三个字符 —— 每个字节后面都跟一格空格, 缺了它整个十六进制区
+            // 就糊成一片 (第一版正是漏了这格, 所有逐字符自检一起红)。
+            w = xd_hex2(out, w, load8(d, so + i));
+            store8(out, w, 32 as u8);
+            w = w + 1;
+        } else {
+            store8(out, w, 32 as u8);
+            store8(out, w + 1, 32 as u8);
+            store8(out, w + 2, 32 as u8);
+            w = w + 3;
+        }
+        if i == 7 {
+            // 8+8 两列之间多一格 —— 少了它十六进制区就是平铺的, 长行没法竖着数。
+            store8(out, w, 32 as u8);
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    store8(out, w, 32 as u8);
+    store8(out, w + 1, 124 as u8); // '|'
+    w = w + 2;
+    let j: u32 = 0;
+    while j < m {
+        let b: u32 = load8(d, so + j);
+        if b >= 32 && b <= 126 {
+            store8(out, w, b as u8);
+        } else {
+            store8(out, w, 46 as u8); // '.'
+        }
+        w = w + 1;
+        j = j + 1;
+    }
+    store8(out, w, 124 as u8); // '|'
+    return w + 1;
+}
+
+// ---------------------------------------------------------------- 整段
+
+/// 渲染整段: 每 16 字节一行的数据行 (每行后跟 LF), 末尾补最终偏移行 (8 位 + LF)。
+/// 返回写出的字节数。等价于 `hexdump -C` 的完整输出。
+///
+/// 偏移从 0 起算 —— 数据在文件里的绝对位置由调用方在 `addr` 概念上自行对齐;
+/// 本接口的 addr 恒等于"已转储的字节数" (即 0,16,32,...)。
+pub fn hxd_dump(d: ptr, so: u32, n: u32, out: ptr, oo: u32) -> u32 {
+    let w: u32 = oo;
+    let i: u32 = 0;
+    let addr: u32 = 0;
+    while i < n {
+        let m: u32 = n - i;
+        if m > HXD_ROW {
+            m = HXD_ROW;
+        }
+        w = hxd_line(d, so + i, m, addr, out, w);
+        store8(out, w, 10 as u8); // LF
+        w = w + 1;
+        i = i + m;
+        addr = addr + m;
+    }
+    w = xd_hex8(out, w, addr);
+    store8(out, w, 10 as u8);
+    return w + 1 - oo;
+}
+
+// ---------------------------------------------------------------- 尺寸
+
+/// n 字节要几行。
+pub fn hxd_rows(n: u32) -> u32 {
+    return (n + HXD_ROW - 1) / HXD_ROW;
+}
+
+/// 渲染 m 字节的**一行**要几字符 (不含换行); m > 16 报 HXD_ERR。
+pub fn hxd_line_bytes(m: u32) -> u32 {
+    if m > HXD_ROW {
+        return HXD_ERR;
+    }
+    return HXD_LINE_BASE + m;
+}
+
+/// 转储 n 字节总共要几字节 (**精确值**, 不是上界): 每行 63 + 该行字节数, 收尾 9。
+pub fn hxd_bytes_needed(n: u32) -> u32 {
+    if n > HXD_MAX_N {
+        return HXD_ERR;
+    }
+    return hxd_rows(n) * (HXD_LINE_BASE + 1) + n + HXD_TRAILER;
+}
+
+/// 转储 n 字节里, ASCII 区 (含两侧竖线) 占几字节: 每行 n_i + 2。
+pub fn hxd_ascii_needed(n: u32) -> u32 {
+    if n > HXD_MAX_N {
+        return HXD_ERR;
+    }
+    return n + hxd_rows(n) * 2;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn eqn(out: ptr, n: u32, want: str) -> bool {
+    if n != str_len(want) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(want), 0, n);
+}
+
+/// 把字符串字面量拷进缓冲 (做输入用)。返回长度。
+fn put(d: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    mem_copy(d, 0, str_ptr(s), 0, n);
+    return n;
+}
+
+fn test_hexdump_line_one_byte() -> bool {
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    put(d, "A");
+    let n: u32 = hxd_line(d, 0, 1, 0, out, 0) - 0;
+    return n == 63 && eqn(out, n, "00000000  41                                                |A|");
+}
+
+fn test_hexdump_line_full_sixteen() -> bool {
+    // 整 16 字节: 78 字符, 两列之间与竖线之前各 2 格。
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    put(d, "0123456789ABCDEF");
+    let n: u32 = hxd_line(d, 0, 16, 0, out, 0);
+    return n == 78
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
+}
+
+fn test_hexdump_line_fifteen_pads_hex_area() -> bool {
+    // 末行不足 16: 十六进制区补空格, ASCII 只显示 15 个字符。
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    put(d, "0123456789abcde");
+    let n: u32 = hxd_line(d, 0, 15, 0, out, 0);
+    return n == 77
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|");
+}
+
+fn test_hexdump_line_high_and_control_are_dots() -> bool {
+    // 0x00 0x1f 0x7f 0x80 0xff -> '.'; 0x20 原样空格; 0x41 'A'; 0x7e '~'。
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    store8(d, 0, 0 as u8);
+    store8(d, 1, 31 as u8);
+    store8(d, 2, 32 as u8);
+    store8(d, 3, 65 as u8);
+    store8(d, 4, 126 as u8);
+    store8(d, 5, 127 as u8);
+    store8(d, 6, 128 as u8);
+    store8(d, 7, 255 as u8);
+    put(((d as u64) + 8) as ptr, "hi!");
+    let n: u32 = hxd_line(d, 0, 11, 0, out, 0);
+    return n == 73
+        && eqn(out, n, "00000000  00 1f 20 41 7e 7f 80 ff  68 69 21                 |.. A~...hi!|");
+}
+
+fn test_hexdump_ascii_boundary_chars() -> bool {
+    // 四角: 0x1f '.', 0x20 ' ', 0x7e '~', 0x7f '.'。竖线前那一格是最后一个 ASCII 字符。
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(128);
+    store8(d, 0, 31 as u8);
+    let a: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  1f                                                |.|");
+    store8(d, 0, 32 as u8);
+    let b: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  20                                                | |");
+    store8(d, 0, 126 as u8);
+    let c: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7e                                                |~|");
+    store8(d, 0, 127 as u8);
+    let e: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7f                                                |.|");
+    return a && b && c && e;
+}
+
+fn test_hexdump_dump_empty_is_trailer_only() -> bool {
+    // 0 字节: 没有数据行, 只有最终偏移行。
+    let out: ptr = alloc(64);
+    let d: ptr = alloc(16);
+    let n: u32 = hxd_dump(d, 0, 0, out, 0);
+    return n == 9 && eqn(out, n, "00000000\n");
+}
+
+fn test_hexdump_dump_one_byte() -> bool {
+    let out: ptr = alloc(128);
+    let d: ptr = alloc(16);
+    put(d, "A");
+    let n: u32 = hxd_dump(d, 0, 1, out, 0);
+    return n == 73 && eqn(out, n, "00000000  41                                                |A|\n00000001\n");
+}
+
+fn test_hexdump_dump_sixteen_final_offset() -> bool {
+    let out: ptr = alloc(128);
+    let d: ptr = alloc(32);
+    put(d, "0123456789ABCDEF");
+    let n: u32 = hxd_dump(d, 0, 16, out, 0);
+    return n == 88
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010\n");
+}
+
+fn test_hexdump_dump_seventeen_two_rows() -> bool {
+    // 17 字节 = 一整行 + 一行 1 字节; 最终偏移是 00000011。
+    let out: ptr = alloc(256);
+    let d: ptr = alloc(32);
+    put(d, "0123456789ABCDEFZ");
+    let n: u32 = hxd_dump(d, 0, 17, out, 0);
+    return n == 152
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010  5a                                                |Z|\n00000011\n");
+}
+
+fn test_hexdump_dump_fifteen_uses_lowercase_hex() -> bool {
+    let out: ptr = alloc(128);
+    let d: ptr = alloc(32);
+    put(d, "0123456789abcde");
+    let n: u32 = hxd_dump(d, 0, 15, out, 0);
+    return n == 87
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|\n0000000f\n");
+}
+
+fn test_hexdump_bar_column_is_fixed() -> bool {
+    // 这就是"列对齐"的全部意义: 不论本行几个字节, 竖线都在第 60 列 (0 基)。
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    put(d, "0123456789ABCDEF");
+    let n1: u32 = hxd_line(d, 0, 16, 0, out, 0);
+    let ok1: bool = load8(out, 60) == 124 && load8(out, n1 - 1) == 124;
+    let n2: u32 = hxd_line(d, 0, 3, 0, out, 0);
+    let ok2: bool = load8(out, 60) == 124 && load8(out, 61) == 48 && load8(out, n2 - 1) == 124;
+    let n3: u32 = hxd_line(d, 0, 0, 0, out, 0);
+    // 0 字节行: 竖线紧挨着, ASCII 区是空的。
+    return ok1 && ok2 && n3 == 62 && load8(out, 60) == 124 && load8(out, 61) == 124;
+}
+
+fn test_hexdump_offset_is_eight_digits() -> bool {
+    // 8 位定宽: 16 -> "00000010"; 全 1 -> "ffffffff" (u32 全宽的边界)。
+    // 先把行渲染出来再断言 —— 第一版把 load8(out,..) 写在 hxd_line 之前, 而 `&&` 短路,
+    // 于是 hxd_line 根本没被调用, 断言看的是刚 alloc 出来的未初始化内存。
+    let d: ptr = alloc(16);
+    let out: ptr = alloc(128);
+    store8(d, 0, 65 as u8);
+    let n1: u32 = hxd_line(d, 0, 1, 16, out, 0);
+    let ok1: bool = n1 == 63 && load8(out, 0) == 48 && load8(out, 6) == 49 && load8(out, 7) == 48
+        && eqn(out, n1, "00000010  41                                                |A|");
+    let n2: u32 = hxd_line(d, 0, 1, 4294967295, out, 0);
+    return ok1 && n2 == 63 && load8(out, 0) == 102 && load8(out, 7) == 102;
+}
+
+fn test_hexdump_bytes_needed_is_exact() -> bool {
+    // 尺寸查询要对得上真实转储长度 —— 差一在这里露。
+    let out: ptr = alloc(256);
+    let d: ptr = alloc(32);
+    put(d, "0123456789ABCDEFZ");
+    let a: bool = hxd_bytes_needed(0) == 9 && hxd_bytes_needed(1) == 73
+        && hxd_bytes_needed(15) == 87 && hxd_bytes_needed(16) == 88 && hxd_bytes_needed(17) == 152;
+    let n16: u32 = hxd_dump(d, 0, 16, out, 0);
+    let n17: u32 = hxd_dump(d, 0, 17, out, 0);
+    return a && n16 == hxd_bytes_needed(16) && n17 == hxd_bytes_needed(17)
+        && hxd_bytes_needed(16777216) == HXD_ERR;
+}
+
+fn test_hexdump_ascii_needed() -> bool {
+    return hxd_ascii_needed(0) == 0 && hxd_ascii_needed(1) == 3
+        && hxd_ascii_needed(16) == 18 && hxd_ascii_needed(17) == 21
+        && hxd_ascii_needed(32) == 36;
+}
+
+fn test_hexdump_line_bytes_formula() -> bool {
+    return hxd_line_bytes(0) == 62 && hxd_line_bytes(1) == 63
+        && hxd_line_bytes(16) == 78 && hxd_line_bytes(17) == HXD_ERR;
+}
+
+fn test_hexdump_line_caps_at_sixteen() -> bool {
+    // 一行只 16 字节: 给了 20 字节也只渲染前 16, 宽度与 16 字节行相同。
+    let d: ptr = alloc(32);
+    let out: ptr = alloc(128);
+    put(d, "0123456789ABCDEFZYXW");
+    let n: u32 = hxd_line(d, 0, 20, 0, out, 0);
+    return n == 78
+        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
+}
+
+fn test_hexdump_no_cr_only_lf() -> bool {
+    // 换行一律 LF。**CR(13) 一个都不能有** —— 写 CRLF 会让转储在管道里多出隐形字符。
+    let out: ptr = alloc(256);
+    let d: ptr = alloc(32);
+    put(d, "0123456789ABCDEFZ");
+    let n: u32 = hxd_dump(d, 0, 17, out, 0);
+    let i: u32 = 0;
+    let cr: u32 = 0;
+    while i < n {
+        if load8(out, i) == 13 {
+            cr = cr + 1;
+        }
+        i = i + 1;
+    }
+    return cr == 0 && load8(out, n - 1) == 10;
+}
+
+fn test_hexdump_rows() -> bool {
+    return hxd_rows(0) == 0 && hxd_rows(1) == 1 && hxd_rows(16) == 1
+        && hxd_rows(17) == 2 && hxd_rows(32) == 2 && hxd_rows(33) == 3;
+}

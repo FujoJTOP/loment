@@ -1,0 +1,402 @@
+// std/rng.lomt — 确定性伪随机 (splitmix64 播种 + xoshiro256** 生成 + 无偏取模 + 洗牌)
+//
+// 为什么是这一套 (不是 `rand()` 那种):
+//   1. **可复现**。同一个种子必须给同一串数 —— 测试要能钉死向量的前几项, 模拟要能重放。
+//      所以这里没有任何"读时钟 / 读地址"当种子的东西: 种子**由调用方给**。
+//   2. **无偏**。`next_u64() % n` 有偏 —— 当 n 不整除 2^64 时, 靠前的几个结果概率更高。
+//      桶少时肉眼看不出来 (偏差 ~2^-64·n), 但它是**错的**, 而且这个库的存在就是替调用方
+//      把这种"差不多"挡掉。所以 `rg_next_below` 走**拒绝采样**。
+//   3. **质量够**。xoshiro256** 是这一档里通过 BigCrush 的经典之选, 状态只有 32 字节。
+//
+// splitmix64 在这里的角色**只是播种器**: 它的输出用于把任意种子摊成 xoshiro 的 4 个状态字。
+// 也可以直接当 64 位 PRNG 用 (rg_splitmix64_next), 质量比 xoshiro 略低但便宜。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不是密码学安全**: xoshiro256** 的状态能从少量输出反推 (它是线性递推 + 非线性输出)。
+//     要不可预测请用 CSPRNG (别的模块), 这里不假装能顶替。
+//   - **`rg_next_below` 可能多抽几次** (拒绝采样), 所以它"抽取次数"不固定 —— 依赖精确
+//     抽取次数的用法在这里没有保证。n 越接近 2 的幂, 拒绝概率越低。
+//   - **没有浮点**: 不给 `next_f64`。要 [0,1) 的定点数, 用 `rg_next_below(ws, 1000)`。
+//   - 状态由调用方持有 (`ws`), 库**不藏全局单例** —— 隐藏的全局状态是并行/嵌套模拟的噩梦。
+//
+// 命名: 公开 rg_*, 内部 rg_*。自检 test_rng_*。
+//
+// 真值来源: 下面的 splitmix64 / xoshiro256** 向量是**照参考实现用 Python 复算**出来的
+// (splitmix64 与 xoshiro256** 的 C 参考都在公有领域, 复算比抄网上的值可靠)。
+
+module rng
+
+use "mem.lomt"
+
+/// 无效参数 (n == 0)。
+pub const RG_ERR: u32 = 4294967295;
+/// "没有更多" —— 本模块暂不用, 但按库惯例与 RG_ERR 分开保留。
+pub const RG_NO: u32 = 4294967294;
+
+// splitmix64 的常量 (十进制字面量 —— 十六进制大数 `as u64` 会被截断到 32 位)。
+const RG_GOLD: u64 = 11400714819323198485;   // 0x9E3779B97F4A7C15
+const RG_MX1: u64 = 13787848793156543929;    // 0xBF58476D1CE4E5B9
+const RG_MX2: u64 = 10723151780598845931;    // 0x94D049BB133111EB
+
+/// xoshiro256** 状态的字节数 (4 × u64)。
+pub fn rg_state_bytes() -> u32 {
+    return 32;
+}
+
+fn rg_rotl64(x: u64, r: u32) -> u64 {
+    return (x << r) | (x >> (64 - r));
+}
+
+/// splitmix64 的混合函数: 吃"已加上黄金比常数"的状态字, 吐输出。
+fn rg_sm64(z0: u64) -> u64 {
+    let z: u64 = z0;
+    z = (z ^ (z >> 30)) * RG_MX1;
+    z = (z ^ (z >> 27)) * RG_MX2;
+    return z ^ (z >> 31);
+}
+
+/// splitmix64 的**有状态**一步: 原地推进 `sp` 指的 8 字节状态, 返回本次输出。
+pub fn rg_splitmix64_next(sp: ptr) -> u64 {
+    let s: u64 = mem_load64(sp, 0) + RG_GOLD;
+    mem_store64(sp, 0, s);
+    return rg_sm64(s);
+}
+
+// ---------------------------------------------------------------- xoshiro256**
+
+/// 用 splitmix64 把任意种子摊成 4 个状态字 (参考实现的标准播种法)。
+/// 为什么不用"种子直接填 4 个字": 那会让相近的种子给出相关的第一条输出 ——
+/// 摊一遍就把种子的每一位扩散到整个状态。
+pub fn rg_seed(ws: ptr, seed: u64) {
+    let st: u64 = seed;
+    let i: u32 = 0;
+    while i < 4 {
+        st = st + RG_GOLD;
+        mem_store64(ws, i * 8, rg_sm64(st));
+        i = i + 1;
+    }
+}
+
+/// 推进一步, 返回 64 位输出 (xoshiro256**)。
+///
+/// 顺序**不能改**: `s2^=s0; s3^=s1; s1^=s2; s0^=s3` 里每一步用的都是"当前"的值,
+/// 而且 `s1` 在第 3 步被更新, 所以第 2 步的 `s3^=s1` 必须用它**旧的**。先把四个字
+/// 全读进局部变量再算, 就是为了这个。
+pub fn rg_next_u64(ws: ptr) -> u64 {
+    let s0: u64 = mem_load64(ws, 0);
+    let s1: u64 = mem_load64(ws, 8);
+    let s2: u64 = mem_load64(ws, 16);
+    let s3: u64 = mem_load64(ws, 24);
+    let result: u64 = rg_rotl64(s1 * 5, 7) * 9;
+    let t: u64 = s1 << 17;
+    let n2: u64 = s2 ^ s0;
+    let n3: u64 = s3 ^ s1;
+    let n1: u64 = s1 ^ n2;
+    let n0: u64 = s0 ^ n3;
+    mem_store64(ws, 0, n0);
+    mem_store64(ws, 8, n1);
+    mem_store64(ws, 16, n2 ^ t);
+    mem_store64(ws, 24, rg_rotl64(n3, 45));
+    return result;
+}
+
+/// 取 32 位 (用**高** 32 位 —— xoshiro** 的高位质量更好)。
+fn rg_next_u32(ws: ptr) -> u32 {
+    return (rg_next_u64(ws) >> 32) as u32;
+}
+
+/// [0, n) 上的均匀整数, **拒绝采样, 不取模**。
+///
+/// 取模有偏的理由: 2^32 不是 n 的整数倍时, 余数落在较小那一段 —— 例如 n=10 时, 0..5
+/// 会比 6..9 各多出 (2^32 mod 10)/10 的概率。拒绝采样先算出"多出来的那一小段" `lim`,
+/// 把落在那里的抽取丢掉, 剩下的区间正好是 n 的整数倍, 于是每个值的概率严格相等。
+///
+/// n == 0 是错 (给 RG_ERR); n == 1 恒给 0。
+pub fn rg_next_below(ws: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return RG_ERR;
+    }
+    if n == 1 {
+        return 0;
+    }
+    // lim = 2^32 mod n。用 (2^32-1) mod n + 1 再绕一圈算 —— u32 装不下 2^32 本身。
+    let lim: u32 = (4294967295 % n) + 1;
+    if lim == n {
+        lim = 0;
+    }
+    let go: u32 = 1;
+    let r: u32 = 0;
+    while go == 1 {
+        r = rg_next_u32(ws);
+        if r >= lim {
+            go = 0;
+        }
+    }
+    return r % n;
+}
+
+/// 原地 Fisher-Yates 洗牌 (从后往前)。**用 rg_next_below** —— 取模版会引入偏差,
+/// 而洗牌的偏差是能被统计出来的 (某些排列出现得多)。要确定的排列就给定种子。
+pub fn rg_shuffle(ws: ptr, base: ptr, n: u32) {
+    let i: u32 = n;
+    while i > 1 {
+        i = i - 1;
+        let j: u32 = rg_next_below(ws, i + 1);
+        let a: u32 = mem_load32(base, i * 4);
+        let b: u32 = mem_load32(base, j * 4);
+        mem_store32(base, i * 4, b);
+        mem_store32(base, j * 4, a);
+    }
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_rng_splitmix64_seed0() -> bool {
+    // 种子 0 的前 6 个输出 (Python 复算)。
+    let sp: ptr = alloc(8);
+    mem_store64(sp, 0, 0);
+    let a: u64 = rg_splitmix64_next(sp);
+    let b: u64 = rg_splitmix64_next(sp);
+    let c: u64 = rg_splitmix64_next(sp);
+    return a == 16294208416658607535 && b == 7960286522194355700 && c == 487617019471545679;
+}
+
+fn test_rng_splitmix64_seed12345() -> bool {
+    let sp: ptr = alloc(8);
+    mem_store64(sp, 0, 12345);
+    let a: u64 = rg_splitmix64_next(sp);
+    let b: u64 = rg_splitmix64_next(sp);
+    return a == 2454886589211414944 && b == 3778200017661327597;
+}
+
+fn test_rng_splitmix64_state_advances() -> bool {
+    // 状态本身也要推进 (只看输出会被"输出对了但状态没动"骗过)。
+    let sp: ptr = alloc(8);
+    mem_store64(sp, 0, 0);
+    rg_splitmix64_next(sp);
+    return mem_load64(sp, 0) == 11400714819323198485;
+}
+
+fn test_rng_xoshiro_seed1_state() -> bool {
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 1);
+    return mem_load64(ws, 0) == 10451216379200822465 && mem_load64(ws, 8) == 13757245211066428519
+        && mem_load64(ws, 16) == 17911839290282890590 && mem_load64(ws, 24) == 8196980753821780235;
+}
+
+fn test_rng_xoshiro_seed1_sequence() -> bool {
+    // xoshiro256** 种子 1 的前 5 个输出 (Python 复算)。
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 1);
+    let a: u64 = rg_next_u64(ws);
+    let b: u64 = rg_next_u64(ws);
+    let c: u64 = rg_next_u64(ws);
+    let d: u64 = rg_next_u64(ws);
+    let e: u64 = rg_next_u64(ws);
+    return a == 12966619160104079557 && b == 9600361134598540522 && c == 10590380919521690900
+        && d == 7218738570589545383 && e == 12860671823995680371;
+}
+
+fn test_rng_xoshiro_seed42() -> bool {
+    // 换种子 -> 完全不同的序列 (这条同时钉住了"播种确实用到了种子")。
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 42);
+    let a: u64 = rg_next_u64(ws);
+    let b: u64 = rg_next_u64(ws);
+    return a == 1546998764402558742 && b == 6990951692964543102
+        && a != 12966619160104079557;
+}
+
+fn test_rng_xoshiro_deterministic() -> bool {
+    // 两个独立状态、同一个种子 -> 逐项相同。可复现是这个模块的立身之本。
+    let w1: ptr = alloc(32);
+    let w2: ptr = alloc(32);
+    rg_seed(w1, 777);
+    rg_seed(w2, 777);
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 8 {
+        if rg_next_u64(w1) != rg_next_u64(w2) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1;
+}
+
+fn test_rng_next_below_range_inclusive() -> bool {
+    // next_below(6): 1000 次全部落在 [0,6); 而且 6 个值都出现过。
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 99);
+    let seen: ptr = alloc(64);
+    mem_fill(seen, 0, 24, 0);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 1000 {
+        let v: u32 = rg_next_below(ws, 6);
+        if v >= 6 {
+            bad = 1;
+        }
+        mem_store32(seen, v * 4, mem_load32(seen, v * 4) + 1);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    let missing: u32 = 0;
+    while j < 6 {
+        if mem_load32(seen, j * 4) == 0 {
+            missing = 1;
+        }
+        j = j + 1;
+    }
+    return bad == 0 && missing == 0;
+}
+
+fn test_rng_next_below_distribution() -> bool {
+    // 分布检查: 1000 次 next_below(10), 每个桶都出现。取模版在长程上也能过这条,
+    // 但它至少能挡住"常数 / 卡死 / 越界"这三类明显坏掉。
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 2024);
+    let seen: ptr = alloc(64);
+    mem_fill(seen, 0, 40, 0);
+    let i: u32 = 0;
+    while i < 1000 {
+        let v: u32 = rg_next_below(ws, 10);
+        if v < 10 {
+            mem_store32(seen, v * 4, mem_load32(seen, v * 4) + 1);
+        }
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    let missing: u32 = 0;
+    while j < 10 {
+        if mem_load32(seen, j * 4) == 0 {
+            missing = 1;
+        }
+        j = j + 1;
+    }
+    return missing == 0;
+}
+
+fn test_rng_next_below_edge_cases() -> bool {
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 1);
+    // n=0 是错; n=1 恒 0; n=2 只出 0/1。
+    let e: bool = rg_next_below(ws, 0) == RG_ERR;
+    let one: bool = rg_next_below(ws, 1) == 0;
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 200 {
+        if rg_next_below(ws, 2) > 1 {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return e && one && ok == 1;
+}
+
+fn test_rng_next_below_power_of_two_no_reject() -> bool {
+    // n 是 2 的幂时 lim==0, 永远不会拒绝 —— 所以 next_below(ws,8) 必然等于
+    // `(下一步 64 位输出 >> 32) % 8`。任何多余的抽取都会让两条流错位。
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 5);
+    let chk: ptr = alloc(32);
+    rg_seed(chk, 5);
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 64 {
+        let v: u32 = rg_next_below(ws, 8);
+        let expect: u32 = ((rg_next_u64(chk) >> 32) % 8) as u32;
+        if v != expect {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_rng_shuffle_is_permutation() -> bool {
+    // 洗牌后必须是同一多重集: 排序后逐元素相同。
+    let a: ptr = alloc(128);
+    let b: ptr = alloc(128);
+    let i: u32 = 0;
+    while i < 32 {
+        mem_store32(a, i * 4, i * 7 + 3);
+        mem_store32(b, i * 4, i * 7 + 3);
+        i = i + 1;
+    }
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 4242);
+    rg_shuffle(ws, a, 32);
+    let sc: ptr = alloc(128);
+    mem_copy(sc, 0, a, 0, 128);
+    // 冒泡排序 (32 个元素, 自检无所谓效率; 不引 sort.lomt 以免多一个依赖)。
+    let x: u32 = 0;
+    while x < 32 {
+        let y: u32 = 0;
+        while y + 1 < 32 - x {
+            if mem_load32(sc, y * 4) > mem_load32(sc, (y + 1) * 4) {
+                let t: u32 = mem_load32(sc, y * 4);
+                mem_store32(sc, y * 4, mem_load32(sc, (y + 1) * 4));
+                mem_store32(sc, (y + 1) * 4, t);
+            }
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    return mem_eq(sc, 0, b, 0, 128);
+}
+
+fn test_rng_shuffle_actually_reorders() -> bool {
+    // 洗牌要真的动过 (恒等排列说明 next_below 恒 0 或者交换没生效)。
+    let a: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 16 {
+        mem_store32(a, i * 4, i);
+        i = i + 1;
+    }
+    let ws: ptr = alloc(32);
+    rg_seed(ws, 31337);
+    rg_shuffle(ws, a, 16);
+    let same: u32 = 1;
+    i = 0;
+    while i < 16 {
+        if mem_load32(a, i * 4) != i {
+            same = 0;
+        }
+        i = i + 1;
+    }
+    return same == 0;
+}
+
+fn test_rng_shuffle_respects_seed() -> bool {
+    // 同一多重集、同一种子 -> 同一排列; 换种子 -> (大概率) 不同排列。
+    let a: ptr = alloc(256);
+    let b: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < 64 {
+        mem_store32(a, i * 4, i + 100);
+        mem_store32(b, i * 4, i + 100);
+        i = i + 1;
+    }
+    let w1: ptr = alloc(32);
+    let w2: ptr = alloc(32);
+    let w3: ptr = alloc(32);
+    rg_seed(w1, 1);
+    rg_seed(w2, 1);
+    rg_seed(w3, 2);
+    rg_shuffle(w1, a, 64);
+    rg_shuffle(w2, b, 64);
+    let same_seed: bool = mem_eq(a, 0, b, 0, 256);
+    let c: ptr = alloc(256);
+    let j: u32 = 0;
+    while j < 64 {
+        mem_store32(c, j * 4, j + 100);
+        j = j + 1;
+    }
+    rg_shuffle(w3, c, 64);
+    return same_seed && mem_eq(a, 0, c, 0, 256) == false;
+}
+
+fn test_rng_state_bytes() -> bool {
+    return rg_state_bytes() == 32;
+}

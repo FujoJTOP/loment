@@ -1,0 +1,356 @@
+// std/sha256.lomt — SHA-256 (FIPS 180-4)
+//
+// 这一层是"该用的那个": 抗碰撞、无已知实用攻击, 而且是签名、证书、内容寻址、
+// 口令派生 (经 HMAC) 的默认选择。要一个摘要而不知道该选哪个的时候, 选它。
+//
+// 表怎么来的: 64 个 K 是**前 64 个素数立方根小数部分的前 32 位** —— 我用整数算法
+// (整数牛顿法开立方, 不用浮点) 算出来贴进去的, 不是手抄的。H 的 8 个初值同理
+// (前 8 个素数平方根的小数部分)。手抄这两张表必错一个, 而错一个的表现就是
+// "所有向量都挂却不告诉你是哪个"。
+//
+// 布局 (调用方给 ctx, 364 字节):
+//   [0..32]   H0..H7
+//   [32..40]  已处理字节数 (低/高 u32)
+//   [40..104] 64 字节块缓冲
+//   [104..108] 缓冲已用
+//   [108..364] w[64] 消息扩展工作区
+//
+// 命名: 公开 sha256_*, 内部 s2_*。自检 test_sha256_*。
+
+module sha256
+
+use "mem.lomt"
+
+pub const SHA256_CTX: u32 = 364;
+pub const SHA256_DIGEST: u32 = 32;
+
+const S2_BUF: u32 = 40;
+const S2_USED: u32 = 104;
+const S2_LENLO: u32 = 32;
+const S2_LENHI: u32 = 36;
+const S2_W: u32 = 108;
+
+fn sha256_k_hex() -> str {
+    return "428a2f9871374491b5c0fbcfe9b5dba53956c25b59f111f1923f82a4ab1c5ed5d807aa9812835b01243185be550c7dc372be5d7480deb1fe9bdc06a7c19bf174e49b69c1efbe47860fc19dc6240ca1cc2de92c6f4a7484aa5cb0a9dc76f988da983e5152a831c66db00327c8bf597fc7c6e00bf3d5a7914706ca63511429296727b70a852e1b21384d2c6dfc53380d13650a7354766a0abb81c2c92e92722c85a2bfe8a1a81a664bc24b8b70c76c51a3d192e819d6990624f40e3585106aa07019a4c1161e376c082748774c34b0bcb5391c0cb34ed8aa4a5b9cca4f682e6ff3748f82ee78a5636f84c878148cc7020890befffaa4506cebbef9a3f7c67178f2";
+}
+
+fn s2_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+/// 表里第 i 个常量。
+fn sha256_k(i: u32) -> u32 {
+    let s: str = sha256_k_hex();
+    let base: u32 = i * 8;
+    let v: u32 = 0;
+    let j: u32 = 0;
+    while j < 8 {
+        v = (v << 4) | s2_hv(str_byte(s, base + j));
+        j = j + 1;
+    }
+    return v;
+}
+
+fn s2_rotr(v: u32, n: u32) -> u32 {
+    return (v >> n) | (v << (32 - n));
+}
+
+fn s2_bswap(v: u32) -> u32 {
+    return ((v & 255) << 24) | ((v & 65280) << 8) | ((v >> 8) & 65280) | ((v >> 24) & 255);
+}
+
+fn s2_h(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, 4 * i);
+}
+
+fn s2_set_h(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, 4 * i, v);
+}
+
+fn s2_w(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, S2_W + 4 * i);
+}
+
+fn s2_set_w(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, S2_W + 4 * i, v);
+}
+
+pub fn sha256_init(ctx: ptr) {
+    // H = 前 8 个素数平方根小数部分的前 32 位 (脚本算得)
+    s2_set_h(ctx, 0, 0x6A09E667);
+    s2_set_h(ctx, 1, 0xBB67AE85);
+    s2_set_h(ctx, 2, 0x3C6EF372);
+    s2_set_h(ctx, 3, 0xA54FF53A);
+    s2_set_h(ctx, 4, 0x510E527F);
+    s2_set_h(ctx, 5, 0x9B05688C);
+    s2_set_h(ctx, 6, 0x1F83D9AB);
+    s2_set_h(ctx, 7, 0x5BE0CD19);
+    mem_store32(ctx, S2_LENLO, 0);
+    mem_store32(ctx, S2_LENHI, 0);
+    mem_store32(ctx, S2_USED, 0);
+}
+
+fn s2_compress(ctx: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        s2_set_w(ctx, i, s2_bswap(mem_load32(ctx, S2_BUF + 4 * i)));
+        i = i + 1;
+    }
+    i = 16;
+    while i < 64 {
+        let x: u32 = s2_w(ctx, i - 15);
+        let y: u32 = s2_w(ctx, i - 2);
+        let s0: u32 = s2_rotr(x, 7) ^ s2_rotr(x, 18) ^ (x >> 3);
+        let s1: u32 = s2_rotr(y, 17) ^ s2_rotr(y, 19) ^ (y >> 10);
+        s2_set_w(ctx, i, s2_w(ctx, i - 16) + s0 + s2_w(ctx, i - 7) + s1);
+        i = i + 1;
+    }
+    let a: u32 = s2_h(ctx, 0);
+    let b: u32 = s2_h(ctx, 1);
+    let c: u32 = s2_h(ctx, 2);
+    let d: u32 = s2_h(ctx, 3);
+    let e: u32 = s2_h(ctx, 4);
+    let f: u32 = s2_h(ctx, 5);
+    let g: u32 = s2_h(ctx, 6);
+    let h: u32 = s2_h(ctx, 7);
+    i = 0;
+    while i < 64 {
+        let bs: u32 = s2_rotr(e, 6) ^ s2_rotr(e, 11) ^ s2_rotr(e, 25);
+        let ch: u32 = (e & f) ^ ((e ^ 4294967295) & g);
+        let t1: u32 = h + bs + ch + sha256_k(i) + s2_w(ctx, i);
+        let asig: u32 = s2_rotr(a, 2) ^ s2_rotr(a, 13) ^ s2_rotr(a, 22);
+        let maj: u32 = (a & b) ^ (a & c) ^ (b & c);
+        let t2: u32 = asig + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        i = i + 1;
+    }
+    s2_set_h(ctx, 0, s2_h(ctx, 0) + a);
+    s2_set_h(ctx, 1, s2_h(ctx, 1) + b);
+    s2_set_h(ctx, 2, s2_h(ctx, 2) + c);
+    s2_set_h(ctx, 3, s2_h(ctx, 3) + d);
+    s2_set_h(ctx, 4, s2_h(ctx, 4) + e);
+    s2_set_h(ctx, 5, s2_h(ctx, 5) + f);
+    s2_set_h(ctx, 6, s2_h(ctx, 6) + g);
+    s2_set_h(ctx, 7, s2_h(ctx, 7) + h);
+}
+
+pub fn sha256_update(ctx: ptr, d: ptr, o: u32, n: u32) {
+    let used: u32 = mem_load32(ctx, S2_USED);
+    let lo: u32 = mem_load32(ctx, S2_LENLO) + n;
+    let carry: u32 = 0;
+    if lo < mem_load32(ctx, S2_LENLO) {
+        carry = 1;
+    }
+    mem_store32(ctx, S2_LENLO, lo);
+    mem_store32(ctx, S2_LENHI, mem_load32(ctx, S2_LENHI) + carry);
+    let i: u32 = 0;
+    while i < n {
+        let space: u32 = 64 - used;
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > space {
+            m = space;
+        }
+        mem_copy(ctx, S2_BUF + used, d, o + i, m);
+        used = used + m;
+        i = i + m;
+        if used == 64 {
+            s2_compress(ctx);
+            used = 0;
+        }
+    }
+    mem_store32(ctx, S2_USED, used);
+}
+
+pub fn sha256_final(ctx: ptr, out: ptr) {
+    let used: u32 = mem_load32(ctx, S2_USED);
+    let bl: u32 = mem_load32(ctx, S2_LENLO);
+    let bh: u32 = mem_load32(ctx, S2_LENHI);
+    store8(ctx, S2_BUF + used, 128 as u8);
+    used = used + 1;
+    if used > 56 {
+        let z: u32 = used;
+        while z < 64 {
+            store8(ctx, S2_BUF + z, 0 as u8);
+            z = z + 1;
+        }
+        s2_compress(ctx);
+        used = 0;
+    }
+    let z2: u32 = used;
+    while z2 < 56 {
+        store8(ctx, S2_BUF + z2, 0 as u8);
+        z2 = z2 + 1;
+    }
+    let lo8: u32 = bl << 3;
+    let hi8: u32 = (bh << 3) | (bl >> 29);
+    mem_store32(ctx, S2_BUF + 56, s2_bswap(hi8));
+    mem_store32(ctx, S2_BUF + 60, s2_bswap(lo8));
+    s2_compress(ctx);
+    // 摘要是**大端**
+    let i: u32 = 0;
+    while i < 8 {
+        mem_store32(out, 4 * i, s2_bswap(s2_h(ctx, i)));
+        i = i + 1;
+    }
+    mem_store32(ctx, S2_USED, 0);
+}
+
+pub fn sha256(d: ptr, o: u32, n: u32, out: ptr, ctx: ptr) {
+    sha256_init(ctx);
+    sha256_update(ctx, d, o, n);
+    sha256_final(ctx, out);
+}
+
+pub fn sha256_str(s: str, out: ptr, ctx: ptr) {
+    sha256(str_ptr(s), 0, str_len(s), out, ctx);
+}
+
+pub fn sha256_hex(out: ptr, o: u32, digest: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 32 {
+        let v: u32 = load8(digest, i);
+        store8(out, o + 2 * i, s2_hexch((v >> 4) & 15) as u8);
+        store8(out, o + 2 * i + 1, s2_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 64;
+}
+
+fn s2_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sha256_k_table() -> bool {
+    // 首、尾与两个换段点 —— 表顺序错了这里会露。
+    return sha256_k(0) == 0x428A2F98 && sha256_k(1) == 0x71374491
+        && sha256_k(63) == 0xC67178F2 && sha256_k(16) == 0xE49B69C1;
+}
+
+fn test_sha256_init_state() -> bool {
+    let ctx: ptr = alloc(SHA256_CTX);
+    sha256_init(ctx);
+    return s2_h(ctx, 0) == 0x6A09E667 && s2_h(ctx, 7) == 0x5BE0CD19;
+}
+
+fn test_sha256_vector_empty() -> bool {
+    // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    let ctx: ptr = alloc(SHA256_CTX);
+    let out: ptr = alloc(SHA256_DIGEST);
+    let hex: ptr = alloc(80);
+    sha256_init(ctx);
+    sha256_final(ctx, out);
+    sha256_hex(hex, 0, out);
+    let want: str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_sha256_vector_abc() -> bool {
+    // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    let ctx: ptr = alloc(SHA256_CTX);
+    let out: ptr = alloc(SHA256_DIGEST);
+    let hex: ptr = alloc(80);
+    let s: str = "abc";
+    sha256_str(s, out, ctx);
+    sha256_hex(hex, 0, out);
+    let want: str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_sha256_vector_two_blocks() -> bool {
+    // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    //   = 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+    let ctx: ptr = alloc(SHA256_CTX);
+    let out: ptr = alloc(SHA256_DIGEST);
+    let hex: ptr = alloc(80);
+    let s: str = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    sha256_str(s, out, ctx);
+    sha256_hex(hex, 0, out);
+    let want: str = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+
+}
+fn test_sha256_streaming_matches_oneshot() -> bool {
+    let c1: ptr = alloc(SHA256_CTX);
+    let c2: ptr = alloc(SHA256_CTX);
+    let d: ptr = alloc(200);
+    let o1: ptr = alloc(SHA256_DIGEST);
+    let o2: ptr = alloc(SHA256_DIGEST);
+    let i: u32 = 0;
+    while i < 200 {
+        store8(d, i, ((i * 41 + 3) % 256) as u8);
+        i = i + 1;
+    }
+    sha256(d, 0, 200, o1, c1);
+    sha256_init(c2);
+    sha256_update(c2, d, 0, 7);
+    sha256_update(c2, d, 7, 57);
+    sha256_update(c2, d, 64, 136);
+    sha256_final(c2, o2);
+    return mem_eq(o1, 0, o2, 0, 32);
+
+}
+fn test_sha256_block_boundaries() -> bool {
+    let ctx: ptr = alloc(SHA256_CTX);
+    let d: ptr = alloc(64);
+    let a: ptr = alloc(SHA256_DIGEST);
+    let b: ptr = alloc(SHA256_DIGEST);
+    let c: ptr = alloc(SHA256_DIGEST);
+    mem_fill(d, 0, 64, 99);
+    sha256(d, 0, 55, a, ctx);
+    sha256(d, 0, 56, b, ctx);
+    sha256(d, 0, 64, c, ctx);
+    return mem_eq(a, 0, b, 0, 32) == false && mem_eq(b, 0, c, 0, 32) == false
+        && mem_eq(a, 0, c, 0, 32) == false;
+
+}
+fn test_sha256_one_bit_change() -> bool {
+    let ctx: ptr = alloc(SHA256_CTX);
+    let d: ptr = alloc(16);
+    let a: ptr = alloc(SHA256_DIGEST);
+    let b: ptr = alloc(SHA256_DIGEST);
+    mem_fill(d, 0, 16, 0);
+    sha256(d, 0, 16, a, ctx);
+    store8(d, 8, 128 as u8);
+    sha256(d, 0, 16, b, ctx);
+    return mem_eq(a, 0, b, 0, 32) == false;
+
+}
+fn test_sha256_hex_is_lowercase_hex() -> bool {
+    let ctx: ptr = alloc(SHA256_CTX);
+    let out: ptr = alloc(SHA256_DIGEST);
+    let hex: ptr = alloc(80);
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 16, 7);
+    sha256(d, 0, 16, out, ctx);
+    let n: u32 = sha256_hex(hex, 0, out);
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < 64 {
+        let c: u32 = load8(hex, i);
+        if (c < 48 || c > 57) && (c < 97 || c > 102) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return n == 64 && ok == 1;
+
+}

@@ -1,0 +1,607 @@
+// std/wrap.lomt — 按**显示宽度**折行 (word wrap)
+//
+// 为什么不能按字节或码点数折: 折行的整个意义是"每一行在等宽终端里不超过 N 格"。`中`
+// 占 2 格、组合记号占 0 格, 所以"第 20 个字节"和"第 20 格"是两回事; 拿字节数折, 中文
+// 段落会折歪; 拿码点数折, 重音字母会折歪。宽度判定走 width.lomt (那把尺子), 本层只负责
+// "从哪儿断"。
+//
+// 断行优先级 (从高到低):
+//   1. 输入里的 `\n` 是**段落边界**, 无条件断开 —— 它不是空格, 不该被折叠成空格
+//   2. 空格处 —— 断在空格**前面**, 空格连同它后面一串空白被吃掉
+//   3. `-` / `'` **之后** —— 排版惯例: "don't" 断成 "don'" + "t" 而不是 "don" + "'t"
+//   4. 都没有就**硬断** (按列切到刚好放下为止)
+//
+// 超长单词 (一个词比整行还宽) 的取舍: 硬断 **还是** 整词溢出? 本层选**硬断**, 理由是
+// 折行的下游 (表格渲染、终端、分页) 都建立在"每行不超过给定列宽"这个不变量上; 让一行
+// 超宽把这层保证打破, 省下的那点"词完整"在下游全赔回去。要改成整词溢出, 只需让
+// `wrap_break_at` 在第 5 步返回"词尾位置"而不是 `fit` —— 但那样 §4 的不变量就不成立了,
+// 所以别改, 那是另一个模块该做的决定。
+//
+// 缩进: `indent` 只加在**首行**, `hang` 加在**所有续行**。这是列表与引用块的实际需要 ——
+// "1. 一个很长很长的条目" 的续行要对齐到文字, 不是对齐到 "1."。
+//
+// 游标是**字节位置**, 不是行号。行号做游标的话, 每次都要从头折一遍才能定位到第 k 行;
+// 字节位置还能让调用方在两个折行调用之间插别的事 (比如先切 Markdown 单元格再折行)。
+//
+// 工作区: **不需要**。本层一次 alloc 都没有 —— 折行是"每字符一次"的热路径, 而堆是
+// 64 KiB 的 bump 堆 (`free` 是占位不回收), 每字符 alloc 4 字节在长段落上会把堆吃穿。
+// 所以解码器在这里自己写了一份 (见 wr_step), **宽度判定仍然调 width_cp** —— 偷掉的
+// 只是 width_utf8 里那个码点暂存。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不做两端对齐 (justify)**: 那要把空格撑开, 是另一个层次的事 (它要求先知道整段的
+//     最优断点, 不是贪心)；本层只有贪心。
+//   - **不做连字 (hyphenation)**: 不在词中间插入连字符 —— 那要一张各语言的音节表。
+//     `-` 处能断, 是因为原文那儿本来就有个 `-`。
+//   - **不吃双倍宽/东亚语境**: 制表符 `─` 这类"歧义宽度"字符 width.lomt 当 1 格
+//     (西文语境), 本层跟着它, 不另作判断。
+//   - **宽度 0 或 1 时允许一行超宽**: 见 wrap_break_at 第 3 步。宁可那一行占 2 格, 也
+//     不能让"前进量 = 0"把调用方卡成死循环。所以"每行 <= 限制"这条不变量在
+//     `width - indent >= 2` 时才成立 (自检里就是按这个前提验的)。
+//   - **段落边界后的行首空白会被吃掉**: `"a\n   b"` 折出来是 `a` / `b`, 不是 `a` / `   b`。
+//     理由与断点处吃空格同源: 缩进该由 `indent`/`hang` 表达, 不该由原文里的空格表达。
+//
+// 命名: 公开 wrap_*, 内部 wr_*。自检 test_wrap_*。
+
+module wrap
+
+use "mem.lomt"
+use "num.lomt"
+use "width.lomt"
+
+/// "不变量被破坏 / 没有这一行" 的哨兵。wrap_line_count 在发现前进量为 0 时返回它
+/// —— 那说明 wrap_break_at 给出的行长为 0 却没有可吃的换行, 是不该发生的状态。
+pub const WRAP_NONE: u32 = 4294967295;
+
+/// 2^32。wrap_next 把**两个**数 (从输入吃掉的字节数, 写进 out 的字节数) 打包进一个 u64
+/// —— 与 num_pack2 / split_next / trim_span 同一套约定, 不另发明第二种。
+const WRAP_SCALE: u64 = 4294967296;
+
+// ---------------------------------------------------------------- 解码 (不 alloc)
+
+/// 解出 so+i 处一个字符: 返回 (字节数 << 32) | 列宽; i 越界给 0。
+/// 落单的续字节 / 过长编码 / 被截断的多字节一律按 U+FFFD 算 (1 字节 1 格),
+/// 与 width.lomt 里 w_decode 的处理**逐条对齐** —— 两边不一致的话折行的边界会和
+/// width_fit 的边界打架 (自检 test_wrap_step_matches_width_module 就盯这个)。
+fn wr_step(d: ptr, so: u32, n: u32, i: u32) -> u64 {
+    if i >= n {
+        return 0;
+    }
+    let b0: u32 = load8(d, so + i);
+    if b0 < 128 {
+        return WRAP_SCALE + (width_cp(b0) as u64);
+    }
+    if b0 < 194 {
+        return WRAP_SCALE + (1 as u64);
+    }
+    if b0 < 224 {
+        if i + 1 >= n {
+            return WRAP_SCALE + (1 as u64);
+        }
+        let cp: u32 = ((b0 & 31) << 6) | (load8(d, so + i + 1) & 63);
+        return (2 as u64) * WRAP_SCALE + (width_cp(cp) as u64);
+    }
+    if b0 < 240 {
+        if i + 2 >= n {
+            return WRAP_SCALE + (1 as u64);
+        }
+        let cp: u32 = ((b0 & 15) << 12) | ((load8(d, so + i + 1) & 63) << 6)
+            | (load8(d, so + i + 2) & 63);
+        return (3 as u64) * WRAP_SCALE + (width_cp(cp) as u64);
+    }
+    if b0 < 245 {
+        if i + 3 >= n {
+            return WRAP_SCALE + (1 as u64);
+        }
+        let cp: u32 = ((b0 & 7) << 18) | ((load8(d, so + i + 1) & 63) << 12)
+            | ((load8(d, so + i + 2) & 63) << 6) | (load8(d, so + i + 3) & 63);
+        return (4 as u64) * WRAP_SCALE + (width_cp(cp) as u64);
+    }
+    return WRAP_SCALE + (1 as u64);
+}
+
+/// 打包值的高 32 位 = 这一行从输入里**吃掉**的字节数 (= 游标前进量)。
+pub fn wrap_used(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// 打包值的低 32 位 = 写进 out 的字节数 (缩进 + 行内容)。
+pub fn wrap_len(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 从 so 起最多放 max_cols 格 -> 返回能安全截断到的字节偏移。
+/// 语义与 width_fit **完全一致** (宽字符放不下就整个不放, 宁可空一格也不切半个字),
+/// 区别只是不 alloc。
+fn wr_fit(d: ptr, so: u32, n: u32, max_cols: u32) -> u32 {
+    let cols: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let st: u64 = wr_step(d, so, n, i);
+        if st == 0 {
+            return i;
+        }
+        let w: u32 = num_lo(st);
+        if cols + w > max_cols {
+            return i;
+        }
+        cols = cols + w;
+        i = i + num_hi(st);
+    }
+    return n;
+}
+
+/// so 起 [0, lim) 里第一个 `\n` 的下标; 没有给 WRAP_NONE。
+fn wr_first_nl(d: ptr, so: u32, lim: u32) -> u32 {
+    let i: u32 = 0;
+    while i < lim {
+        if load8(d, so + i) == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return WRAP_NONE;
+}
+
+// ---------------------------------------------------------------- 断点
+
+/// 在不超过 budget **列**的前提下, 给出这一行能放到 d[so .. so+返回值) 的字节长度。
+///
+/// 返回 0 只有两种情况: n == 0, 或者 d[so] 本身就是 `\n` (空行)。后者不会卡住调用方
+/// —— wrap_next 会把那个 `\n` 当成"吃掉但不写出"的字节, 游标照样前进。
+pub fn wrap_break_at(d: ptr, so: u32, n: u32, budget: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let fit: u32 = wr_fit(d, so, n, budget);
+    // 1. 段落边界优先: `\n` 无条件断, 而且要取**第一个** —— 它后面的内容属于下一段,
+    //    在这儿再往前找可断点是错的。行尾的空格与 `\r` 不算内容 (CRLF 的 `\r` 不是字符)。
+    let m: u32 = wr_first_nl(d, so, fit);
+    if m < fit {
+        let e: u32 = m;
+        if e > 0 && load8(d, so + e - 1) == 13 {
+            e = e - 1;
+        }
+        while e > 0 && load8(d, so + e - 1) == 32 {
+            e = e - 1;
+        }
+        return e;
+    }
+    // 2. 整段放得下
+    if fit >= n {
+        return n;
+    }
+    // 3. 连一个字符都放不下 (budget 比一个宽字符还窄)。**必须**吃掉一个完整字符:
+    //    返回 0 会让调用方永远前进不了。代价是这一行可能超宽一格, 见头部诚实清单。
+    if fit == 0 {
+        return num_hi(wr_step(d, so, n, 0));
+    }
+    // 4. 从 fit 往前找最后一个可断点。`k` 一定 < n (上面 fit >= n 已经返回了),
+    //    所以 load8(d, so+k) 不会越界。
+    let k: u32 = fit;
+    while k > 0 {
+        if load8(d, so + k) == 32 {
+            return k; // 空格: 断在它前面, 空格本身由 wrap_next 吃掉
+        }
+        let c: u32 = load8(d, so + k - 1);
+        if c == 45 || c == 39 {
+            return k; // '-' 或 '\'' 之后
+        }
+        k = k - 1;
+    }
+    // 5. 一个可断点都没有 -> 硬断 (超长单词, 见头部说明)
+    return fit;
+}
+
+// ---------------------------------------------------------------- 游标
+
+/// 折出一行但**不写 out** —— 只算两个长度。wrap_next 拿它当核心, wrap_line_count 靠它
+/// 数行数 (数行数不需要输出缓冲, 这正是把它拆出来的原因: 一行最长可以是整段输入,
+/// 为了数行数去开一块 n 字节的缓冲很蠢)。
+///
+/// 返回 (吃掉的字节数 << 32) | 写出的字节数。**两个数会不一样**, 这正是要点:
+/// 断点处那串空白 (空格 / `\r\n` / `\n` / 新段落的行首空白) 被吃掉但不写出来 ——
+/// 写出来的话续行会顶着一串空格, 再叠加 `hang` 就双份了。
+fn wr_advance(d: ptr, so: u32, n: u32, row: u32, indent: u32, hang: u32, width: u32) -> u64 {
+    if row >= n {
+        return num_pack2(0, 0);
+    }
+    let ind: u32 = indent;
+    if row > 0 {
+        ind = hang;
+    }
+    // 缩进比总宽还大时把预算夹到 0 —— wrap_break_at 的第 3 步会保证仍然前进
+    let budget: u32 = 0;
+    if width > ind {
+        budget = width - ind;
+    }
+    let lim: u32 = n - row;
+    let ret: u32 = wrap_break_at(d, so + row, lim, budget);
+    let used: u32 = ret;
+    // 断点处的空白: 先空格 (段落边界那行的行尾空格也算), 再 `\r\n` / `\n`, 再新段落
+    // 的行首空白。顺序不能反 —— 反了的话 "abc \n def" 会折出多余的空白行。
+    while used < lim && load8(d, so + row + used) == 32 {
+        used = used + 1;
+    }
+    if used < lim && load8(d, so + row + used) == 13 {
+        used = used + 1;
+    }
+    if used < lim && load8(d, so + row + used) == 10 {
+        used = used + 1;
+    }
+    while used < lim && load8(d, so + row + used) == 32 {
+        used = used + 1;
+    }
+    return num_pack2(used, ind + ret);
+}
+
+/// 折出**下一行**, 行内容 (缩进 + 正文) 写进 out[oo ..]。
+///
+/// `row` 是输入里的字节游标 (0 表示从头上开始); `indent` 用在首行 (row == 0),
+/// `hang` 用在所有续行; `width` 是这一行的总列宽上限 (缩进算在里面)。
+/// 返回 (吃掉的输入字节数 << 32) | 写出的字节数 —— 用 wrap_used / wrap_len 解包。
+pub fn wrap_next(d: ptr, so: u32, n: u32, row: u32, indent: u32, hang: u32, width: u32, out: ptr, oo: u32) -> u64 {
+    let t: u64 = wr_advance(d, so, n, row, indent, hang, width);
+    if row < n {
+        let ind: u32 = indent;
+        if row > 0 {
+            ind = hang;
+        }
+        let k: u32 = 0;
+        while k < ind {
+            store8(out, oo + k, 32 as u8);
+            k = k + 1;
+        }
+        // num_lo(t) - ind 就是行内容的字节数 (ret)
+        mem_copy(out, oo + ind, d, so + row, num_lo(t) - ind);
+    }
+    return t;
+}
+
+/// 折成几行。走的是与 wrap_next 同一条核心路径, 所以两者不会各算各的。
+pub fn wrap_line_count(d: ptr, so: u32, n: u32, indent: u32, hang: u32, width: u32) -> u32 {
+    let row: u32 = 0;
+    let c: u32 = 0;
+    while row < n {
+        let t: u64 = wr_advance(d, so, n, row, indent, hang, width);
+        let used: u32 = num_hi(t);
+        if used == 0 {
+            // 前进量为 0 = 不该发生; 报哨兵, 不要死循环
+            return WRAP_NONE;
+        }
+        row = row + used;
+        c = c + 1;
+    }
+    return c;
+}
+
+/// 调用方该给 out 开多少字节。
+///
+/// 上界 = n + max(indent, hang) 就够了: 一行的内容不会比整段输入还长 (退化情形下最多
+/// 多出一个字符的字节数, 而那一格早被 n 覆盖), 缩进最多 max(indent, hang) 字节。
+pub fn wrap_out_bytes(n: u32, indent: u32, hang: u32) -> u32 {
+    let m: u32 = indent;
+    if hang > m {
+        m = hang;
+    }
+    return n + m;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 把整段折出来, 每行后面补一个 `\n` 写进 out; 返回行数, 总字节数写进 tot_out。
+/// 自检反复要用, 而且它走的是 wrap_next 本尊, 所以顺带把写缓冲那条路也验了。
+fn wr_dump(d: ptr, so: u32, n: u32, indent: u32, hang: u32, width: u32, out: ptr, tot_out: ptr) -> u32 {
+    let row: u32 = 0;
+    let w: u32 = 0;
+    let c: u32 = 0;
+    while row < n {
+        let t: u64 = wrap_next(d, so, n, row, indent, hang, width, out, w);
+        let used: u32 = num_hi(t);
+        w = w + num_lo(t);
+        store8(out, w, 10 as u8);
+        w = w + 1;
+        if used == 0 {
+            row = n; // 不前进就收工, 别死循环
+        } else {
+            row = row + used;
+            c = c + 1;
+        }
+    }
+    mem_store32(tot_out, 0, w);
+    return c;
+}
+
+fn test_wrap_ascii_simple() -> bool {
+    let s: str = "hello world";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 5, out, tot);
+    let want: str = "hello\nworld\n";
+    return c == 2 && mem_load32(tot, 0) == 12 && mem_eq(out, 0, str_ptr(want), 0, 12);
+}
+
+fn test_wrap_greedy_fills_line() -> bool {
+    // 贪心: 一行尽量塞满。5 格下 "the quick brown" 是 三行, 不是两行。
+    let s: str = "the quick brown";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 5, out, tot);
+    let want: str = "the\nquick\nbrown\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_break_at_prefers_space() -> bool {
+    let s: str = "hello world";
+    let d: ptr = str_ptr(s);
+    let n: u32 = str_len(s);
+    // 7 格: fit=7 ("hello w"), 但最靠后的可断点是那个空格 (下标 5)
+    // 5 格: 正好在空格处
+    // 11 格: 整段放得下
+    return wrap_break_at(d, 0, n, 7) == 5
+        && wrap_break_at(d, 0, n, 5) == 5
+        && wrap_break_at(d, 0, n, 11) == 11;
+}
+
+fn test_wrap_break_after_hyphen() -> bool {
+    let s: str = "foo-bar baz";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 4, out, tot);
+    let want: str = "foo-\nbar\nbaz\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_break_after_apostrophe() -> bool {
+    // 排版惯例: 撇号留在前一行 ("don'" + "t"), 不是 "'t" 另起一行
+    let s: str = "don't stop";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 4, out, tot);
+    let want: str = "don'\nt\nstop\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_cjk_two_cols_each() -> bool {
+    // 汉字占 2 格 -> 4 格宽正好两个汉字一行。拿字节数折的话这里是 1 个半汉字。
+    let s: str = "中文中文";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 4, out, tot);
+    let want: str = "中文\n中文\n";
+    return c == 2 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_cjk_never_splits_char() -> bool {
+    // 3 格: 中(2) + a(1) 刚好满; 第二个中要 2 格放不下 -> 断在它**前面**,
+    // 不能切在它的第 1 或第 2 个字节上 (那样终端里是个乱码方块)。
+    let s: str = "中a中b";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 3, out, tot);
+    let want: str = "中a\n中b\n";
+    return c == 2 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_combining_is_zero_width() -> bool {
+    // "e" + 组合尖音符 U+0301 是**一个**字符宽。这里逐字节拼而不是写字面量: 组合序列
+    // 放进源码, 编辑器或工具链可能把它规范化成预组合的 é —— 那这条自检就测不到东西了。
+    let b: ptr = alloc(16);
+    store8(b, 0, 101 as u8); // 'e'
+    store8(b, 1, 204 as u8); // 0xCC
+    store8(b, 2, 129 as u8); // 0x81 -> 合起来是 U+0301
+    store8(b, 3, 101 as u8);
+    store8(b, 4, 204 as u8);
+    store8(b, 5, 129 as u8);
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(b, 0, 6, 0, 0, 2, out, tot);
+    // 每对 (e + 组合记号) 只占 1 格 -> 2 格装得下两对 -> 一行 6 字节
+    return c == 1 && mem_load32(tot, 0) == 7 && mem_eq(out, 0, b, 0, 6)
+        && width_utf8(b, 0, 6) == 2;
+}
+
+fn test_wrap_long_word_hard_break() -> bool {
+    // 一个 10 字节的词放进 4 格 -> 硬断成 4/4/2, 而不是整词溢出 (见头部说明)
+    let s: str = "abcdefghij";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 4, out, tot);
+    let want: str = "abcd\nefgh\nij\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_indent_first_line_only() -> bool {
+    // indent 只吃首行的预算: 首行 6-2=4 格 ("aaaa"), 续行 6 格
+    let s: str = "aaaa bbbb cccc";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 2, 0, 6, out, tot);
+    let want: str = "  aaaa\nbbbb\ncccc\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_hanging_indent() -> bool {
+    // hang 吃续行的预算: 续行 8-3=5 格, 所以 "bbbbbbbb" 断成 bbbbb / bbb
+    let s: str = "aaaaaaaa bbbbbbbb";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 3, 8, out, tot);
+    let want: str = "aaaaaaaa\n   bbbbb\n   bbb\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_forced_newline() -> bool {
+    // `\n` 是段落边界, 100 格也照断
+    let s: str = "abc\ndef";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 100, out, tot);
+    let want: str = "abc\ndef\n";
+    return c == 2 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_blank_line_preserved() -> bool {
+    // 连续两个 `\n` = 一个空行, 不能被折叠掉 (Markdown 段落靠它分隔)
+    let s: str = "a\n\nb";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 100, out, tot);
+    let want: str = "a\n\nb\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_crlf_is_not_content() -> bool {
+    // CRLF 的 `\r` 不该变成行内容。源码里写不出 `\r` (转义只有 \n \t \" \\, 而 `\r`
+    // 会**静默退化成字母 r**), 所以这里逐字节拼: 13 = CR, 10 = LF。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);  // 'a'
+    store8(b, 1, 98 as u8);  // 'b'
+    store8(b, 2, 99 as u8);  // 'c'
+    store8(b, 3, 32 as u8);  // 空格
+    store8(b, 4, 13 as u8);  // CR
+    store8(b, 5, 10 as u8);  // LF
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(b, 0, 6, 0, 0, 100, out, tot);
+    let want: str = "abc\n";
+    return c == 1 && mem_load32(tot, 0) == 4 && mem_eq(out, 0, str_ptr(want), 0, 4);
+}
+
+fn test_wrap_space_before_newline_swallowed() -> bool {
+    // "abc \n def": 空行尾巴的空格与下一段开头的空格都被吃掉, 不该凭空多出一个空白行
+    // (第一版把吃空格放在吃 `\n` **之前**只做一遍, 结果这里折出三行: abc / (空) / def)
+    let s: str = "abc \n def";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 100, out, tot);
+    let want: str = "abc\ndef\n";
+    return c == 2 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_degenerate_width_zero() -> bool {
+    // 宽度 0: 每个字符自占一行 —— 关键是**必须前进**, 不许死循环
+    let s: str = "ab";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 0, out, tot);
+    let want: str = "a\nb\n";
+    return c == 2 && mem_eq(out, 0, str_ptr(want), 0, 4);
+}
+
+fn test_wrap_degenerate_width_one_overflows_by_design() -> bool {
+    // 宽度 1 装不下 2 格宽的汉字 -> 这一行**故意**占 2 格 (见 wrap_break_at 第 3 步)。
+    // 所以"每行 <= 限制"的不变量只在 width-indent>=2 时成立, 这里就把它挑明。
+    let s: str = "a中b";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 1, out, tot);
+    let want: str = "a\n中\nb\n";
+    return c == 3 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_wrap_trailing_whitespace_no_blank_line() -> bool {
+    // 结尾那串空格不该再折出一个空白行 —— 折行器不是"逐行复读机"
+    let s: str = "abc   ";
+    let out: ptr = alloc(64);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(str_ptr(s), 0, str_len(s), 0, 0, 3, out, tot);
+    return c == 1 && mem_load32(tot, 0) == 4;
+}
+
+fn test_wrap_empty_input_zero_lines() -> bool {
+    let s: str = "";
+    let d: ptr = str_ptr(s);
+    let out: ptr = alloc(8);
+    let tot: ptr = alloc(8);
+    let c: u32 = wr_dump(d, 0, 0, 0, 0, 4, out, tot);
+    // 空输入: 0 行, 0 字节, 而且 wrap_next 在 row>=n 时**不碰** out
+    return c == 0 && mem_load32(tot, 0) == 0
+        && wrap_line_count(d, 0, 0, 0, 0, 4) == 0
+        && wrap_next(d, 0, 0, 0, 0, 0, 4, out, 0) == 0;
+}
+
+/// 折完所有行, 每一行的显示宽度都必须 <= width —— 这是折行存在的理由, 要真循环验一遍。
+fn wr_check_invariant(d: ptr, n: u32, indent: u32, hang: u32, width: u32, buf: ptr) -> bool {
+    let row: u32 = 0;
+    let ok: bool = true;
+    let c: u32 = 0;
+    while row < n {
+        let t: u64 = wrap_next(d, 0, n, row, indent, hang, width, buf, 0);
+        let used: u32 = num_hi(t);
+        if used == 0 || width_utf8(buf, 0, num_lo(t)) > width {
+            ok = false;
+            row = n; // 出问题就收工, 不要死循环
+        } else {
+            row = row + used;
+            c = c + 1;
+        }
+    }
+    // 行数还要与 wrap_line_count 对上 —— 两条路径 (写 out 的 / 只算长度的) 必须一致
+    if wrap_line_count(d, 0, n, indent, hang, width) != c {
+        ok = false;
+    }
+    return ok;
+}
+
+fn test_wrap_invariant_all_lines_within_width() -> bool {
+    let s: str = "The quick 中文 brown fox jumps over 懒狗 lazy dog";
+    let d: ptr = str_ptr(s);
+    let n: u32 = str_len(s);
+    let buf: ptr = alloc(256);
+    // 纯列宽限制
+    let a: bool = wr_check_invariant(d, n, 0, 0, 12, buf);
+    // 带缩进: 缩进也占列, 所以这里同时验了"预算 = width - indent"的算法没算错
+    let b2: bool = wr_check_invariant(d, n, 2, 3, 10, buf);
+    return a && b2;
+}
+
+fn test_wrap_line_count_agrees_with_walk() -> bool {
+    let s: str = "the quick brown fox jumps over the lazy dog";
+    let d: ptr = str_ptr(s);
+    let n: u32 = str_len(s);
+    // 走一遍记账, 与 wrap_line_count 对
+    let row: u32 = 0;
+    let c: u32 = 0;
+    let buf: ptr = alloc(64);
+    while row < n {
+        let used: u32 = num_hi(wrap_next(d, 0, n, row, 0, 0, 10, buf, 0));
+        if used == 0 {
+            row = n;
+        } else {
+            row = row + used;
+            c = c + 1;
+        }
+    }
+    return c == 5 && wrap_line_count(d, 0, n, 0, 0, 10) == 5;
+}
+
+fn test_wrap_step_matches_width_module() -> bool {
+    // 自己写的解码器必须与 width 那把尺子得出同样的宽度和同样的切点 —— 不一致的话
+    // 折行的边界会和 width_fit 的边界打架 (表格、截断都会跟着歪)。
+    let s: str = "a中b😀e";
+    let d: ptr = str_ptr(s);
+    let n: u32 = str_len(s);
+    let ok: bool = true;
+    let i: u32 = 0;
+    let cols: u32 = 0;
+    while i < n {
+        let st: u64 = wr_step(d, 0, n, i);
+        if st == 0 {
+            ok = false;
+            i = n;
+        } else {
+            cols = cols + num_lo(st);
+            i = i + num_hi(st);
+        }
+    }
+    // 每一个预算下, wr_fit 与 width_fit 必须给出同一个截断点
+    let k: u32 = 0;
+    while k <= n {
+        if wr_fit(d, 0, n, k) != width_fit(d, 0, n, k) {
+            ok = false;
+        }
+        k = k + 1;
+    }
+    return ok && cols == width_utf8(d, 0, n);
+}

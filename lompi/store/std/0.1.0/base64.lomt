@@ -1,0 +1,257 @@
+// std/base64.lomt — Base64 (标准字母表, 带 '=' 填充)
+//
+// 为什么要它: 工件清单、内嵌资源、测试夹具里都会冒出 base64, 而现在只能靠外部工具。
+// 它是纯字节算法, 零依赖, 属于"标准库该有"的那一类。
+//
+// 解码的停止条件: 遇非法字符、遇 '=' 填充、或剩余不足 4 个字符, 都停在**那一步之前**,
+// 并如实报告消耗了几个字符 —— 半截输入不会被静默接受, 也不会被静默丢弃。
+//
+// 命名: 公开一律 b64_*, 内部一律 b6_*。自检 test_b64_*。
+
+module base64
+
+/// 非法字符 (b64_val 的返回值)。
+pub const B64_NONE: u32 = 4294967295;
+
+/// 0..63 -> 标准字母表字符 (A-Z a-z 0-9 + /)。
+pub fn b64_char(v: u32) -> u32 {
+    if v < 26 {
+        return 65 + v;
+    }
+    if v < 52 {
+        return 97 + v - 26;
+    }
+    if v < 62 {
+        return 48 + v - 52;
+    }
+    if v == 62 {
+        return 43;
+    }
+    return 47;
+}
+
+/// 字符 -> 0..63; 非法 (含 '=') 返回 B64_NONE。
+pub fn b64_val(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c - 65;
+    }
+    if c >= 97 && c <= 122 {
+        return c - 97 + 26;
+    }
+    if c >= 48 && c <= 57 {
+        return c - 48 + 52;
+    }
+    if c == 43 {
+        return 62;
+    }
+    if c == 47 {
+        return 63;
+    }
+    return B64_NONE;
+}
+
+/// 编码 n 字节后的文本长度 (含 '=' 填充)。
+pub fn b64_encoded_len(n: u32) -> u32 {
+    let g: u32 = n / 3;
+    if n % 3 == 0 {
+        return g * 4;
+    }
+    return g * 4 + 4;
+}
+
+/// 编码, 返回新偏移 (含 '=' 填充)。
+pub fn b64_encode(buf: ptr, o: u32, src: ptr, so: u32, n: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i + 3 <= n {
+        let a: u32 = load8(src, so + i);
+        let b: u32 = load8(src, so + i + 1);
+        let c: u32 = load8(src, so + i + 2);
+        store8(buf, k, b64_char(a >> 2) as u8);
+        store8(buf, k + 1, b64_char((a & 3) * 16 + (b >> 4)) as u8);
+        store8(buf, k + 2, b64_char((b & 15) * 4 + (c >> 6)) as u8);
+        store8(buf, k + 3, b64_char(c & 63) as u8);
+        k = k + 4;
+        i = i + 3;
+    }
+    let rem: u32 = n - i;
+    if rem == 1 {
+        let a: u32 = load8(src, so + i);
+        store8(buf, k, b64_char(a >> 2) as u8);
+        store8(buf, k + 1, b64_char((a & 3) * 16) as u8);
+        store8(buf, k + 2, 61 as u8);
+        store8(buf, k + 3, 61 as u8);
+        k = k + 4;
+    }
+    if rem == 2 {
+        let a: u32 = load8(src, so + i);
+        let b: u32 = load8(src, so + i + 1);
+        store8(buf, k, b64_char(a >> 2) as u8);
+        store8(buf, k + 1, b64_char((a & 3) * 16 + (b >> 4)) as u8);
+        store8(buf, k + 2, b64_char((b & 15) * 4) as u8);
+        store8(buf, k + 3, 61 as u8);
+        k = k + 4;
+    }
+    return k;
+}
+
+/// 解码: (写出的字节数 << 32) | 消耗的输入字符数。
+///
+/// 这个函数**能**提前 return, 因为它是"有返回值"的 —— 本语言没有无值的 `return;`
+/// (skill §6.3), 但带值的早退是允许的, 于是下面比塞一堆嵌套 if 清楚得多。
+pub fn b64_decode(dst: ptr, doff: u32, src: ptr, so: u32, n: u32) -> u64 {
+    let w: u32 = 0;
+    let i: u32 = 0;
+    while i + 4 <= n {
+        let c0: u32 = b64_val(load8(src, so + i));
+        let c1: u32 = b64_val(load8(src, so + i + 1));
+        if c0 == B64_NONE || c1 == B64_NONE {
+            return (w as u64) * 4294967296 + (i as u64);
+        }
+        store8(dst, doff + w, ((c0 * 4 + (c1 >> 4)) & 255) as u8);
+        w = w + 1;
+        let cc2: u32 = load8(src, so + i + 2);
+        if cc2 == 61 {
+            return (w as u64) * 4294967296 + ((i + 4) as u64);
+        }
+        let v2: u32 = b64_val(cc2);
+        if v2 == B64_NONE {
+            return (w as u64) * 4294967296 + (i as u64);
+        }
+        store8(dst, doff + w, (((c1 & 15) * 16 + (v2 >> 2)) & 255) as u8);
+        w = w + 1;
+        let cc3: u32 = load8(src, so + i + 3);
+        if cc3 == 61 {
+            return (w as u64) * 4294967296 + ((i + 4) as u64);
+        }
+        let v3: u32 = b64_val(cc3);
+        if v3 == B64_NONE {
+            return (w as u64) * 4294967296 + (i as u64);
+        }
+        store8(dst, doff + w, (((v2 & 3) * 64 + v3) & 255) as u8);
+        w = w + 1;
+        i = i + 4;
+    }
+    return (w as u64) * 4294967296 + (i as u64);
+}
+
+/// 解包: 写出多少字节。
+pub fn b64_written(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+/// 解包: 消耗多少输入字符。
+pub fn b64_used(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_b64_char() -> bool {
+    return b64_char(0) == 65 && b64_char(25) == 90 && b64_char(26) == 97
+        && b64_char(51) == 122 && b64_char(52) == 48 && b64_char(61) == 57
+        && b64_char(62) == 43 && b64_char(63) == 47;
+}
+
+fn test_b64_val_roundtrip_all() -> bool {
+    // 64 个值全部来回 —— 字母表的三个区间最容易切错。
+    let v: u32 = 0;
+    let ok: u32 = 1;
+    while v < 64 {
+        if b64_val(b64_char(v)) != v {
+            ok = 0;
+        }
+        v = v + 1;
+    }
+    return ok == 1;
+}
+
+fn test_b64_encoded_len() -> bool {
+    return b64_encoded_len(0) == 0 && b64_encoded_len(1) == 4 && b64_encoded_len(2) == 4
+        && b64_encoded_len(3) == 4 && b64_encoded_len(4) == 8;
+}
+
+fn test_b64_encode_known_vector() -> bool {
+    // "Man" -> "TWFu" (RFC 4648 的标准例子)
+    let s: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(s, 0, 77 as u8);
+    store8(s, 1, 97 as u8);
+    store8(s, 2, 110 as u8);
+    let o: u32 = b64_encode(d, 0, s, 0, 3);
+    return o == 4 && load8(d, 0) == 84 && load8(d, 1) == 87 && load8(d, 2) == 70 && load8(d, 3) == 117;
+}
+
+fn test_b64_encode_padding_one_byte() -> bool {
+    // "M" -> "TQ=="
+    let s: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(s, 0, 77 as u8);
+    let o: u32 = b64_encode(d, 0, s, 0, 1);
+    return o == 4 && load8(d, 0) == 84 && load8(d, 1) == 81
+        && load8(d, 2) == 61 && load8(d, 3) == 61;
+}
+
+fn test_b64_encode_padding_two_bytes() -> bool {
+    // "Ma" -> "TWE="
+    // (这两条本来合在一起, 共用一个缓冲 —— 第二次编码把第一次的结果盖了,
+    //  断言却要到 return 才求值。测试自己的缓冲复用才是那个 bug。)
+    let s: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(s, 0, 77 as u8);
+    store8(s, 1, 97 as u8);
+    let o: u32 = b64_encode(d, 0, s, 0, 2);
+    return o == 4 && load8(d, 0) == 84 && load8(d, 1) == 87
+        && load8(d, 2) == 69 && load8(d, 3) == 61;
+}
+
+fn test_b64_roundtrip() -> bool {
+    let s: ptr = alloc(32);
+    let m: ptr = alloc(64);
+    let d: ptr = alloc(32);
+    store8(s, 0, 1 as u8);
+    store8(s, 1, 2 as u8);
+    store8(s, 2, 3 as u8);
+    store8(s, 3, 250 as u8);
+    store8(s, 4, 251 as u8);
+    let mlen: u32 = b64_encode(m, 0, s, 0, 5);
+    let t: u64 = b64_decode(d, 0, m, 0, mlen);
+    return b64_written(t) == 5 && b64_used(t) == mlen
+        && load8(d, 0) == 1 && load8(d, 2) == 3 && load8(d, 3) == 250 && load8(d, 4) == 251;
+}
+
+fn test_b64_roundtrip_padded() -> bool {
+    let s: ptr = alloc(32);
+    let m: ptr = alloc(64);
+    let d: ptr = alloc(32);
+    store8(s, 0, 77 as u8);
+    let mlen: u32 = b64_encode(m, 0, s, 0, 1);
+    let t: u64 = b64_decode(d, 0, m, 0, mlen);
+    return b64_written(t) == 1 && load8(d, 0) == 77;
+}
+
+fn test_b64_decode_stops_at_bad_char() -> bool {
+    let m: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(m, 0, 84 as u8);
+    store8(m, 1, 87 as u8);
+    store8(m, 2, 70 as u8);
+    store8(m, 3, 117 as u8);
+    store8(m, 4, 33 as u8);      // '!' 非法
+    store8(m, 5, 65 as u8);
+    store8(m, 6, 65 as u8);
+    store8(m, 7, 65 as u8);
+    let t: u64 = b64_decode(d, 0, m, 0, 8);
+    return b64_written(t) == 3 && b64_used(t) == 4;
+}
+
+fn test_b64_decode_incomplete_tail_is_ignored() -> bool {
+    // 只有 3 个字符 —— 不成组, 不猜, 消耗 0。
+    let m: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    store8(m, 0, 84 as u8);
+    store8(m, 1, 87 as u8);
+    store8(m, 2, 70 as u8);
+    let t: u64 = b64_decode(d, 0, m, 0, 3);
+    return b64_written(t) == 0 && b64_used(t) == 0;
+}

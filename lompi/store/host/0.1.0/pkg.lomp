@@ -1,0 +1,11 @@
+// host/pkg.lomp — 宿主侧库的清单。
+
+module pkg
+
+pub fn name() -> str {
+    return "host";
+}
+
+pub fn version() -> str {
+    return "0.1.0";
+}

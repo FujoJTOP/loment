@@ -1,0 +1,576 @@
+// std/qoi.lomt — QOI 图像格式 (Quite Ok Image, 规范 v1.0)
+//
+// 为什么需要它: QOI 是"无损、逐像素、能在一屏代码里写完"的格式 —— 没有熵编码、
+// 没有校验和、没有调色板。对"把一块像素存下来再原样读回来"这件事, 它比 PNG 简单
+// 一个数量级, 而压缩率对截图/图标这类图仍然够用。这里给解码器和编码器。
+//
+// ---------------------------------------------------------------- 格式 (逐字节)
+//
+// 头 14 字节: `qoif`(4) + 宽 u32(**大端**) + 高 u32(**大端**) + 通道数 u8
+//             (3 = RGB, 4 = RGBA) + 色彩空间 u8 (0 = sRGB, 1 = 线性)。**头是大端**,
+//             和 BMP 正好相反 —— 这两个模块并排放着, 就是为了让这个对比看得见。
+// 数据流: 一串指令, 每条的**最高两位**决定种类。
+// 结尾 8 字节: 7 个 0x00 再 1 个 0x01 (解码器会核对)。
+//
+// 指令:
+//   0xFE  QOI_OP_RGB   后跟 R,G,B (3 字节)
+//   0xFF  QOI_OP_RGBA  后跟 R,G,B,A (4 字节)
+//   0x00  QOI_OP_INDEX 低 6 位是索引 (0..63), 取索引数组里那一格当像素
+//   0x40  QOI_OP_DIFF  低 6 位拆成 dr,dg,db 各 2 位, 都减 2 -> 增量 -2..1
+//   0x80  QOI_OP_LUMA  低 6 位是 dg (减 32); 再跟一字节, 高 4 位/低 4 位各减 8
+//                       是 (dr-dg) 与 (db-dg)
+//   0xC0  QOI_OP_RUN   低 6 位是"(重复次数 - 1)", 即后面还跟着这么多**同一个**像素
+//
+// **0xFE / 0xFF 必须在 0xC0 之前判**: 它们的最高两位也是 `11`, 会和 RUN 撞上。
+// 判序反了的话每个 RGB 字面量都会被当成一段 RUN —— 解出来的图像"有颜色但全错位"。
+//
+// 索引数组 64 项, 哈希 `(r*3 + g*5 + b*7 + a*11) % 64`。**初值是全 0**, 而当前像素
+// 从 (0,0,0,255) 起步 —— 这两个初始值不一样是有讲究的 (见下)。
+//
+// ---------------------------------------------------------------- 内存布局 (没有 struct)
+//
+// `qo_header` 写进调用方给的 `out` (需要 `qo_header_bytes()` = 16 字节):
+//
+//     0  width    4  height    8  channels    12  colorspace
+//
+// `qo_decode` 的 `out_len` 是一个 ptr, 解出的**像素个数**写在它的 0 偏移上。
+//
+// ---------------------------------------------------------------- 像素格式
+//
+// 对外一律 **0xAARRGGBB** (与 raster/blit/font/bmp 一致)。通道数为 3 的流没有 alpha,
+// 解出来一律 255。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **解码要一块 256 字节的索引表**。`qo_decode` 内部 `alloc` 一次 (不是每像素),
+//     循环里反复解码请用 `qo_decode_ws` 自己传一块复用的。
+//   - 编码器**只做"够好"的选择**: DIFF/LUMA/INDEX/RUN 都按规范能用的条件用满, 但
+//     不做"两种编码哪个更省"的穷举 (规范也没要求; 参考实现同样是按优先级贪心)。
+//   - **编码时通道数按实际数据定**: 只要有一个像素 alpha != 255 就写 RGBA(4), 否则写
+//     RGB(3)。色彩空间一律写 0 (sRGB)。
+//   - **不做色彩空间/伽马转换**, 也不做任何有损近似 —— 解码是逐字节精确的。
+//   - 索引数组的初值是全 0、当前像素初值是 (0,0,0,255): 这是规范规定的, 两者
+//     **不一致**是有意的, 编码器/解码器必须**一模一样**才不会错位。
+//
+// 命名: 公开 qo_*, 内部 qo_*。自检 test_qoi_*。
+
+module qoi
+
+use "mem.lomt"
+
+pub const QO_ERR: u32 = 4294967295;
+pub const QO_NO: u32 = 4294967294;
+
+/// 解码器要的索引表字节数 (64 项 × 4 字节)。
+pub fn qo_index_bytes() -> u32 {
+    return 256;
+}
+
+pub fn qo_header_bytes() -> u32 {
+    return 16;
+}
+
+/// 编码输出的上界: 每像素最坏 5 字节 (RGBA), 加 14 字节头 + 8 字节尾。
+pub fn qo_max_out(w: u32, h: u32) -> u32 {
+    return w * h * 5 + 22;
+}
+
+// ---------------------------------------------------------------- 大端
+
+fn qo_be32(p: ptr, o: u32) -> u32 {
+    return (load8(p, o) << 24) | (load8(p, o + 1) << 16) | (load8(p, o + 2) << 8) | load8(p, o + 3);
+}
+
+fn qo_put_be32(p: ptr, o: u32, v: u32) {
+    store8(p, o, ((v >> 24) & 255) as u8);
+    store8(p, o + 1, ((v >> 16) & 255) as u8);
+    store8(p, o + 2, ((v >> 8) & 255) as u8);
+    store8(p, o + 3, (v & 255) as u8);
+}
+
+fn qo_magic_ok(buf: ptr, n: u32) -> bool {
+    if n < 14 {
+        return false;
+    }
+    return load8(buf, 0) == 113 && load8(buf, 1) == 111
+        && load8(buf, 2) == 105 && load8(buf, 3) == 102;
+}
+
+/// 解析 14 字节头 (不校验数据流)。`out` 需要 `qo_header_bytes()` 字节。
+/// 返回 0, 或 QO_ERR (魔数/通道数/尺寸).
+pub fn qo_header(buf: ptr, n: u32, out: ptr) -> u32 {
+    if qo_magic_ok(buf, n) == false {
+        return QO_ERR;
+    }
+    let w: u32 = qo_be32(buf, 4);
+    let h: u32 = qo_be32(buf, 8);
+    let ch: u32 = load8(buf, 12);
+    if w == 0 || h == 0 {
+        return QO_ERR;
+    }
+    if ch != 3 && ch != 4 {
+        return QO_ERR;
+    }
+    mem_store32(out, 0, w);
+    mem_store32(out, 4, h);
+    mem_store32(out, 8, ch);
+    mem_store32(out, 12, load8(buf, 13));
+    return 0;
+}
+
+// ---------------------------------------------------------------- 解码
+
+/// 解码。`ws` 需要 `qo_index_bytes()` = 256 字节 (64 项索引表)。
+/// 像素写进 `pixels` (每像素一个 u32, 0xAARRGGBB), 容量 `cap` (像素个数);
+/// 解出的像素个数写在 `out_len` 的 0 偏移上。
+/// 返回 0, 或 QO_ERR (头坏 / 缓冲不够 / 数据流越界 / 结尾标记不对).
+pub fn qo_decode_ws(buf: ptr, n: u32, pixels: ptr, cap: u32, out_len: ptr, ws: ptr) -> u32 {
+    if n < 22 {
+        return QO_ERR;
+    }
+    if qo_magic_ok(buf, n) == false {
+        return QO_ERR;
+    }
+    let w: u32 = qo_be32(buf, 4);
+    let h: u32 = qo_be32(buf, 8);
+    let ch: u32 = load8(buf, 12);
+    if w == 0 || h == 0 || (ch != 3 && ch != 4) {
+        return QO_ERR;
+    }
+    let total: u32 = w * h;
+    if total > cap {
+        return QO_ERR;
+    }
+    mem_fill(ws, 0, 256, 0); // 索引表初值全 0 (规范)
+    let r: u32 = 0;
+    let g: u32 = 0;
+    let b: u32 = 0;
+    let a: u32 = 255; // 当前像素初值 (0,0,0,255)
+    let p: u32 = 14;
+    let run: u32 = 0;
+    let i: u32 = 0;
+    while i < total {
+        if run > 0 {
+            run = run - 1;
+        } else {
+            if p >= n {
+                return QO_ERR;
+            }
+            let b1: u32 = load8(buf, p);
+            p = p + 1;
+            if b1 == 254 {
+                // RGB 字面量 —— 必须在 RUN 之前判 (最高两位也是 11)
+                if p + 2 >= n {
+                    return QO_ERR;
+                }
+                r = load8(buf, p);
+                g = load8(buf, p + 1);
+                b = load8(buf, p + 2);
+                p = p + 3;
+            } else if b1 == 255 {
+                if p + 3 >= n {
+                    return QO_ERR;
+                }
+                r = load8(buf, p);
+                g = load8(buf, p + 1);
+                b = load8(buf, p + 2);
+                a = load8(buf, p + 3);
+                p = p + 4;
+            } else if (b1 & 192) == 0 {
+                let v: u32 = mem_load32(ws, (b1 & 63) * 4);
+                a = (v >> 24) & 255;
+                r = (v >> 16) & 255;
+                g = (v >> 8) & 255;
+                b = v & 255;
+            } else if (b1 & 192) == 64 {
+                let dr: i32 = (((b1 >> 4) & 3) as i32) - 2;
+                let dg: i32 = (((b1 >> 2) & 3) as i32) - 2;
+                let db: i32 = ((b1 & 3) as i32) - 2;
+                r = (((r as i32) + dr) as u32) & 255;
+                g = (((g as i32) + dg) as u32) & 255;
+                b = (((b as i32) + db) as u32) & 255;
+            } else if (b1 & 192) == 128 {
+                if p >= n {
+                    return QO_ERR;
+                }
+                let b2: u32 = load8(buf, p);
+                p = p + 1;
+                let dg: i32 = ((b1 & 63) as i32) - 32;
+                let dr: i32 = (dg - 8) + ((b2 >> 4) as i32);
+                let db: i32 = (dg - 8) + ((b2 & 15) as i32);
+                r = (((r as i32) + dr) as u32) & 255;
+                g = (((g as i32) + dg) as u32) & 255;
+                b = (((b as i32) + db) as u32) & 255;
+            } else {
+                run = b1 & 63;
+            }
+        }
+        mem_store32(ws, ((r * 3 + g * 5 + b * 7 + a * 11) % 64) * 4, (a << 24) | (r << 16) | (g << 8) | b);
+        mem_store32(pixels, i * 4, (a << 24) | (r << 16) | (g << 8) | b);
+        i = i + 1;
+    }
+    // 结尾: 7 个 0 + 1 个 1。
+    if p + 8 > n {
+        return QO_ERR;
+    }
+    let k: u32 = 0;
+    while k < 7 {
+        if load8(buf, p + k) != 0 {
+            return QO_ERR;
+        }
+        k = k + 1;
+    }
+    if load8(buf, p + 7) != 1 {
+        return QO_ERR;
+    }
+    mem_store32(out_len, 0, total);
+    return 0;
+}
+
+/// 便利外壳: 自己开索引表。循环里反复解码请用 `qo_decode_ws`。
+pub fn qo_decode(buf: ptr, n: u32, pixels: ptr, cap: u32, out_len: ptr) -> u32 {
+    let ws: ptr = alloc(qo_index_bytes());
+    return qo_decode_ws(buf, n, pixels, cap, out_len, ws);
+}
+
+// ---------------------------------------------------------------- 编码
+
+/// 编码。`out` 需要 `qo_max_out(w,h)` 字节。返回写出字节数, 或 QO_ERR。
+/// `ws` 需要 `qo_index_bytes()` 字节。
+pub fn qo_encode_ws(pixels: ptr, w: u32, h: u32, out: ptr, oo: u32, ws: ptr) -> u32 {
+    if w == 0 || h == 0 {
+        return QO_ERR;
+    }
+    let total: u32 = w * h;
+    // 通道数: 有任何一个像素 alpha != 255 就得用 RGBA。
+    let has_a: u32 = 0;
+    let k: u32 = 0;
+    while k < total {
+        if ((mem_load32(pixels, k * 4) >> 24) & 255) != 255 {
+            has_a = 1;
+        }
+        k = k + 1;
+    }
+    let ch: u32 = 3;
+    if has_a == 1 {
+        ch = 4;
+    }
+    store8(out, oo, 113); // 'q'
+    store8(out, oo + 1, 111); // 'o'
+    store8(out, oo + 2, 105); // 'i'
+    store8(out, oo + 3, 102); // 'f'
+    qo_put_be32(out, oo + 4, w);
+    qo_put_be32(out, oo + 8, h);
+    store8(out, oo + 12, ch as u8);
+    store8(out, oo + 13, 0 as u8); // 色彩空间 sRGB
+    mem_fill(ws, 0, 256, 0);
+    let p: u32 = oo + 14;
+    let pr: u32 = 0;
+    let pg: u32 = 0;
+    let pb: u32 = 0;
+    let pa: u32 = 255;
+    let run: u32 = 0;
+    let i: u32 = 0;
+    while i < total {
+        let v: u32 = mem_load32(pixels, i * 4);
+        let cr: u32 = (v >> 16) & 255;
+        let cg: u32 = (v >> 8) & 255;
+        let cb: u32 = v & 255;
+        let ca: u32 = (v >> 24) & 255;
+        if cr == pr && cg == pg && cb == pb && ca == pa {
+            run = run + 1;
+            if run == 62 || i + 1 == total {
+                store8(out, p, (192 | (run - 1)) as u8);
+                p = p + 1;
+                run = 0;
+            }
+        } else {
+            if run > 0 {
+                store8(out, p, (192 | (run - 1)) as u8);
+                p = p + 1;
+                run = 0;
+            }
+            let hv: u32 = (cr * 3 + cg * 5 + cb * 7 + ca * 11) % 64;
+            if mem_load32(ws, hv * 4) == v {
+                store8(out, p, hv as u8); // INDEX: 高两位是 00
+                p = p + 1;
+            } else {
+                mem_store32(ws, hv * 4, v);
+                if ca == pa {
+                    let dr: i32 = (cr as i32) - (pr as i32);
+                    let dg: i32 = (cg as i32) - (pg as i32);
+                    let db: i32 = (cb as i32) - (pb as i32);
+                    if dr >= 0 - 2 && dr <= 1 && dg >= 0 - 2 && dg <= 1 && db >= 0 - 2 && db <= 1 {
+                        store8(out, p, (64 | (((dr + 2) as u32) << 4)
+                            | (((dg + 2) as u32) << 2) | ((db + 2) as u32)) as u8);
+                        p = p + 1;
+                    } else {
+                        let rd: i32 = dr - dg;
+                        let bd: i32 = db - dg;
+                        if dg >= 0 - 32 && dg <= 31 && rd >= 0 - 8 && rd <= 7 && bd >= 0 - 8 && bd <= 7 {
+                            store8(out, p, (128 | ((dg + 32) as u32)) as u8);
+                            store8(out, p + 1, ((((rd + 8) as u32) << 4) | ((bd + 8) as u32)) as u8);
+                            p = p + 2;
+                        } else {
+                            store8(out, p, 254 as u8);
+                            store8(out, p + 1, cr as u8);
+                            store8(out, p + 2, cg as u8);
+                            store8(out, p + 3, cb as u8);
+                            p = p + 4;
+                        }
+                    }
+                } else {
+                    store8(out, p, 255 as u8);
+                    store8(out, p + 1, cr as u8);
+                    store8(out, p + 2, cg as u8);
+                    store8(out, p + 3, cb as u8);
+                    store8(out, p + 4, ca as u8);
+                    p = p + 5;
+                }
+            }
+        }
+        pr = cr;
+        pg = cg;
+        pb = cb;
+        pa = ca;
+        i = i + 1;
+    }
+    // 结尾: 7 个 0 + 1 个 1。
+    store8(out, p, 0 as u8);
+    store8(out, p + 1, 0 as u8);
+    store8(out, p + 2, 0 as u8);
+    store8(out, p + 3, 0 as u8);
+    store8(out, p + 4, 0 as u8);
+    store8(out, p + 5, 0 as u8);
+    store8(out, p + 6, 0 as u8);
+    store8(out, p + 7, 1 as u8);
+    return p + 8 - oo;
+}
+
+/// 便利外壳: 自己开索引表。
+pub fn qo_encode(pixels: ptr, w: u32, h: u32, out: ptr, oo: u32) -> u32 {
+    let ws: ptr = alloc(qo_index_bytes());
+    return qo_encode_ws(pixels, w, h, out, oo, ws);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn qo_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn qo_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = qo_hv(str_byte(s, k * 2));
+        let lo: u32 = qo_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 最小的 1×1 RGB 流: 头 + QOI_OP_RGB(0x12,0x34,0x56) + 结尾。
+fn qo_v1() -> str {
+    return "716F696600000001000000010300FE1234560000000000000001";
+}
+
+fn test_qoi_header_parse() -> bool {
+    let f: ptr = alloc(64);
+    let hi: ptr = alloc(16);
+    let n: u32 = qo_hx(f, qo_v1());
+    let r: u32 = qo_header(f, n, hi);
+    return n == 26 && r == 0 && mem_load32(hi, 0) == 1 && mem_load32(hi, 4) == 1
+        && mem_load32(hi, 8) == 3 && mem_load32(hi, 12) == 0;
+}
+
+fn test_qoi_header_rejects_bad_magic() -> bool {
+    let f: ptr = alloc(64);
+    let hi: ptr = alloc(16);
+    let n: u32 = qo_hx(f, qo_v1());
+    store8(f, 0, 120 as u8); // 'q' -> 'x'
+    return qo_header(f, n, hi) == QO_ERR;
+}
+
+fn test_qoi_header_rejects_zero_size() -> bool {
+    let f: ptr = alloc(64);
+    let hi: ptr = alloc(16);
+    let n: u32 = qo_hx(f, qo_v1());
+    mem_store32(f, 4, 0); // 宽 0 -> 非法
+    return qo_header(f, n, hi) == QO_ERR;
+}
+
+fn test_qoi_decode_1x1_rgb() -> bool {
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, qo_v1());
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(ol, 0) == 1 && mem_load32(px, 0) == 4279383126;
+}
+
+fn test_qoi_decode_run() -> bool {
+    // 3×1 同一个色: 一个字面 + 一条 RUN(2 个)。RUN 的低 6 位是"次数-1" -> 0xC1。
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, "716F696600000003000000010300FE112233C10000000000000001");
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(ol, 0) == 3
+        && mem_load32(px, 0) == 4279312947 && mem_load32(px, 4) == 4279312947
+        && mem_load32(px, 8) == 4279312947;
+}
+
+fn test_qoi_decode_index() -> bool {
+    // 3×1: 红 -> 另一个色 -> 回到红。第三个像素命中索引表, 指令 0x17 (索引 23)。
+    let f: ptr = alloc(96);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, "716F696600000003000000010300FE010203FE090909170000000000000001");
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(ol, 0) == 3
+        && mem_load32(px, 0) == 4278256131 && mem_load32(px, 4) == 4278782217
+        && mem_load32(px, 8) == 4278256131;
+}
+
+fn test_qoi_decode_diff() -> bool {
+    // 2×1, 第二个像素每个通道 +1: DIFF 的 6 位 = (1+2) 各三位 -> 0x7F。
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, "716F696600000002000000010300FE0A141E7F0000000000000001");
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(ol, 0) == 2
+        && mem_load32(px, 0) == 4278850590 && mem_load32(px, 4) == 4278916383;
+}
+
+fn test_qoi_decode_luma() -> bool {
+    // 2×1, 第二个像素 dg=16、dr-dg=-8、db-dg=+7 -> 0xB0 0x0F。
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, "716F696600000002000000010300FE646464B00F0000000000000001");
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(ol, 0) == 2
+        && mem_load32(px, 0) == 4284769380 && mem_load32(px, 4) == 4285297787;
+}
+
+fn test_qoi_decode_rgba_channel() -> bool {
+    // 4 通道的流: QOI_OP_RGBA(0xFF) 带 alpha。
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, "716F696600000001000000010400FF112233440000000000000001");
+    let r: u32 = qo_decode(f, n, px, 4, ol);
+    return r == 0 && mem_load32(px, 0) == 1141973555;
+}
+
+fn test_qoi_reject_bad_magic() -> bool {
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, qo_v1());
+    store8(f, 3, 100 as u8); // 'f' -> 'd'
+    return qo_decode(f, n, px, 4, ol) == QO_ERR;
+}
+
+fn test_qoi_reject_bad_channels() -> bool {
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, qo_v1());
+    store8(f, 12, 2 as u8); // 通道数只能是 3 或 4
+    return qo_decode(f, n, px, 4, ol) == QO_ERR;
+}
+
+fn test_qoi_reject_bad_end_marker() -> bool {
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, qo_v1());
+    store8(f, n - 1, 0 as u8); // 结尾最后一个字节应该是 1
+    return qo_decode(f, n, px, 4, ol) == QO_ERR;
+}
+
+fn test_qoi_reject_short_buffer() -> bool {
+    let f: ptr = alloc(64);
+    let px: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let n: u32 = qo_hx(f, qo_v1());
+    // 头 14 + 尾 8 = 22 是下限; 少给就报错。
+    return qo_decode(f, 12, px, 4, ol) == QO_ERR
+        && qo_decode(f, n, px, 0, ol) == QO_ERR; // 容量 0 装不下 1 个像素
+}
+
+fn test_qoi_roundtrip_varied() -> bool {
+    // 6×4: 一段重复 (RUN) + 一段变化 (DIFF/LUMA/RGB) + 一段带 alpha (RGBA)。
+    let w: u32 = 6;
+    let h: u32 = 4;
+    let src: ptr = alloc(w * h * 4);
+    let enc: ptr = alloc(qo_max_out(w, h));
+    let dec: ptr = alloc(w * h * 4);
+    let ol: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < w * h {
+        let v: u32 = 0;
+        if i >= 4 && i < 9 {
+            v = 4279246896; // 0xFF102030, 连着 5 个相同 -> RUN
+        } else {
+            v = (((i * 37) & 255) << 24) | (((i * 11) & 255) << 16)
+                | (((i * 7) & 255) << 8) | ((i * 5) & 255);
+        }
+        mem_store32(src, i * 4, v);
+        i = i + 1;
+    }
+    let en: u32 = qo_encode(src, w, h, enc, 0);
+    if en == QO_ERR {
+        return false;
+    }
+    // 有 alpha != 255 的像素 -> 通道数应该是 4
+    if load8(enc, 12) != 4 {
+        return false;
+    }
+    let r: u32 = qo_decode(enc, en, dec, w * h, ol);
+    // 精确长度不钉死 (它随编码策略变化), 只要求: 在界内、头对、结尾标记在。
+    return r == 0 && mem_load32(ol, 0) == w * h
+        && mem_eq(src, 0, dec, 0, w * h * 4)
+        && en > 22 && en <= qo_max_out(w, h)
+        && load8(enc, 0) == 113 && load8(enc, 3) == 102 && load8(enc, en - 1) == 1;
+}
+
+fn test_qoi_encode_opaque_writes_3channels() -> bool {
+    // 全是 alpha=255 的图 -> 通道数写 3; 反过来解出来 alpha 仍然是 255。
+    let w: u32 = 2;
+    let h: u32 = 2;
+    let src: ptr = alloc(w * h * 4);
+    let enc: ptr = alloc(qo_max_out(w, h));
+    let dec: ptr = alloc(w * h * 4);
+    let ol: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < w * h {
+        mem_store32(src, i * 4, 4278190080 | (i * 40));
+        i = i + 1;
+    }
+    let en: u32 = qo_encode(src, w, h, enc, 0);
+    qo_decode(enc, en, dec, w * h, ol);
+    return load8(enc, 12) == 3 && mem_load32(ol, 0) == 4
+        && mem_eq(src, 0, dec, 0, w * h * 4);
+}
+
+fn test_qoi_max_out_bound_holds() -> bool {
+    // 上界是调用方开缓冲的依据: 编出来的流绝不能超过它。
+    let w: u32 = 5;
+    let h: u32 = 3;
+    let src: ptr = alloc(w * h * 4);
+    let enc: ptr = alloc(qo_max_out(w, h));
+    qo_hx(src, "FFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCCFFAABBCC");
+    let en: u32 = qo_encode(src, w, h, enc, 0);
+    return qo_max_out(5, 3) == 5 * 3 * 5 + 22 && en != QO_ERR && en <= qo_max_out(w, h);
+}

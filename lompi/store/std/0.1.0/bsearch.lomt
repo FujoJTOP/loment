@@ -1,0 +1,166 @@
+// std/bsearch.lomt — 已排序 u32 数组上的二分
+//
+// 为什么要它: 自举侧的符号查找是**线性扫** (docs/158 §4: 自编译 12.8s 的瓶颈就在这),
+// 而"把表排好再二分"是那一类问题的正解。这层是那个正解的最小件。
+//
+// 三个语义不同的函数, 名字区分清楚 (混用它们是最容易犯的错):
+//   * `bsearch_lower` —— 第一个 >= v 的下标 (lower_bound)。插到这说明 v 之前没有相等的。
+//   * `bsearch_upper` —— 第一个 > v 的下标 (upper_bound)。v 的出现次数 = upper - lower。
+//   * `bsearch_find`  —— 找到某个等于 v 的下标, 没有返回 BSEARCH_NONE。
+//
+// 约定: 区间是 [0, n), 数组**必须已升序**。没排序的输入不报错 —— 二分对未排序输入
+// 只是给不出有意义的结果, 检测它要比排序本身还贵。
+//
+// 命名: 公开一律 bsearch_*, 内部一律 bs_*。自检 test_bsearch_*。
+
+module bsearch
+
+use "mem.lomt"
+
+/// 找不到的哨兵。
+pub const BSEARCH_NONE: u32 = 4294967295;
+
+/// 第一个 >= v 的下标 (可能等于 n, 表示全部小于 v)。
+pub fn bsearch_lower(base: ptr, n: u32, v: u32) -> u32 {
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let m: u32 = lo + (hi - lo) / 2;
+        if mem_load32(base, m * 4) < v {
+            lo = m + 1;
+        } else {
+            hi = m;
+        }
+    }
+    return lo;
+}
+
+/// 第一个 > v 的下标。
+pub fn bsearch_upper(base: ptr, n: u32, v: u32) -> u32 {
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let m: u32 = lo + (hi - lo) / 2;
+        if mem_load32(base, m * 4) <= v {
+            lo = m + 1;
+        } else {
+            hi = m;
+        }
+    }
+    return lo;
+}
+
+/// v 出现的次数。
+pub fn bsearch_count(base: ptr, n: u32, v: u32) -> u32 {
+    return bsearch_upper(base, n, v) - bsearch_lower(base, n, v);
+}
+
+/// 找到任意一个等于 v 的下标; 没有返回 BSEARCH_NONE。
+pub fn bsearch_find(base: ptr, n: u32, v: u32) -> u32 {
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let m: u32 = lo + (hi - lo) / 2;
+        let x: u32 = mem_load32(base, m * 4);
+        if x == v {
+            return m;
+        }
+        if x < v {
+            lo = m + 1;
+        } else {
+            hi = m;
+        }
+    }
+    return BSEARCH_NONE;
+}
+
+pub fn bsearch_contains(base: ptr, n: u32, v: u32) -> bool {
+    return bsearch_find(base, n, v) != BSEARCH_NONE;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn bs_fill(base: ptr, n: u32) {
+    // 造一个 [0, 10, 20, 30, 40] 的升序表
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(base, i * 4, i * 10);
+        i = i + 1;
+    }
+}
+
+fn test_bsearch_find_hit() -> bool {
+    let b: ptr = alloc(64);
+    bs_fill(b, 5);
+    return bsearch_find(b, 5, 0) == 0 && bsearch_find(b, 5, 20) == 2
+        && bsearch_find(b, 5, 40) == 4 && bsearch_contains(b, 5, 30);
+}
+
+fn test_bsearch_find_miss() -> bool {
+    let b: ptr = alloc(64);
+    bs_fill(b, 5);
+    return bsearch_find(b, 5, 25) == BSEARCH_NONE && bsearch_find(b, 5, 100) == BSEARCH_NONE
+        && !bsearch_contains(b, 5, 25);
+}
+
+fn test_bsearch_lower_bound() -> bool {
+    let b: ptr = alloc(64);
+    bs_fill(b, 5);
+    // 25 应插在下标 3; 小于 0 的插在 0; 大于 40 的插在 5 (= n)
+    return bsearch_lower(b, 5, 25) == 3 && bsearch_lower(b, 5, 0) == 0
+        && bsearch_lower(b, 5, 40) == 4 && bsearch_lower(b, 5, 41) == 5;
+}
+
+fn test_bsearch_upper_bound() -> bool {
+    // 表是 [0, 10, 20, 30, 40]。upper 的第一个 > v 的下标。
+    // 注意 v=5 时 0 不满足 "> 5", 所以是 1 不是 0 (我第一版写的就是 0)。
+    let b: ptr = alloc(64);
+    bs_fill(b, 5);
+    return bsearch_upper(b, 5, 20) == 3 && bsearch_upper(b, 5, 0) == 1
+        && bsearch_upper(b, 5, 41) == 5 && bsearch_upper(b, 5, 5) == 1
+        && bsearch_lower(b, 5, 5) == 1;
+}
+
+fn test_bsearch_duplicates() -> bool {
+    // [1, 2, 2, 2, 3]: 2 出现 3 次, lower=1, upper=4
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 1);
+    mem_store32(b, 4, 2);
+    mem_store32(b, 8, 2);
+    mem_store32(b, 12, 2);
+    mem_store32(b, 16, 3);
+    return bsearch_lower(b, 5, 2) == 1 && bsearch_upper(b, 5, 2) == 4
+        && bsearch_count(b, 5, 2) == 3 && bsearch_count(b, 5, 1) == 1
+        && bsearch_count(b, 5, 9) == 0;
+}
+
+fn test_bsearch_empty() -> bool {
+    let b: ptr = alloc(64);
+    return bsearch_find(b, 0, 5) == BSEARCH_NONE && bsearch_lower(b, 0, 5) == 0
+        && bsearch_upper(b, 0, 5) == 0 && bsearch_count(b, 0, 5) == 0;
+}
+
+fn test_bsearch_single() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 7);
+    return bsearch_find(b, 1, 7) == 0 && bsearch_find(b, 1, 8) == BSEARCH_NONE
+        && bsearch_lower(b, 1, 8) == 1 && bsearch_upper(b, 1, 7) == 1;
+}
+
+fn test_bsearch_all_equal() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 5);
+    mem_store32(b, 4, 5);
+    mem_store32(b, 8, 5);
+    return bsearch_lower(b, 3, 5) == 0 && bsearch_upper(b, 3, 5) == 3
+        && bsearch_count(b, 3, 5) == 3;
+}
+
+fn test_bsearch_large() -> bool {
+    // 1024 个元素: 线性扫与二分的差别在边界上, 这条把边界走一遍。
+    let b: ptr = alloc(8192);
+    bs_fill(b, 1024);
+    return bsearch_find(b, 1024, 0) == 0 && bsearch_find(b, 1024, 10230) == 1023
+        && bsearch_find(b, 1024, 10240) == BSEARCH_NONE
+        && bsearch_lower(b, 1024, 10240) == 1024;
+}

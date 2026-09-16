@@ -1,0 +1,723 @@
+// std/table.lomt — 对齐表格渲染 (列宽 + 填充 + 分隔线)
+//
+// 为什么要它: 把几列文本排成"竖线对齐"的表格, 难点全在**宽度**上。用字节数或码点数
+// 算列宽, 只要有一列是中文, 整张表就歪 —— `中` 占 2 格而不是 1 格 (见 width.lomt)。
+// 所以列宽一律用 width_utf8 量, 填充也按**列**补空格, 不按字节补。
+//
+// **没有"行对象"**: 这门语言不能按值传聚合体 (struct/enum 当参数), 所有 API 都是标量,
+// 所以表不是"行的数组", 而是**一块扁平缓冲 + 一张单元偏移表**。布局如下, 一切偏移都是
+// **相对表首 t** 的字节偏移, 全部小端 u32:
+//
+//   t+0  : nrows
+//   t+4  : ncols
+//   t+8  : text_len            —— 文字区已经用掉多少字节
+//   t+12 : ready               —— 0 = 列宽还没算过; tbl_render 会拒绝 (返回 TBL_ERR)
+//   t+16 : colw[ncols]         —— 列宽 (显示格数), tbl_widths 填
+//   t+16 + 4*ncols       : al[ncols]      —— 每列对齐 (TBL_LEFT / TBL_RIGHT / TBL_CENTER)
+//   t+16 + 8*ncols       : 单元表, 每个单元 8 字节: (文字起点, 长度)
+//   t+16 + 8*ncols + 8*nrows*ncols : 文字区 —— 各单元的文字**顺序追加**在这里
+//
+// 单元 i 的文字 = t[ off[i] .. off[i]+len[i] ), 其中 i = r*ncols + c。
+// 表缓冲要多大: tbl_bytes(nrows, ncols, text_bytes) —— text_bytes 是各单元文字加起来。
+//
+// 为什么列宽也塞进表头 (草稿里是让调用方另给一块 sc 暂存): 列宽本来就是这张表的属性,
+// 而且 tbl_render 必须用它 —— 再传一遍是冗余, 还多一块调用方要管的内存。同理 ready
+// 标志也放表头: tbl_render 拿不到列宽时**报错**比默默按 0 宽渲染 (整列被截没) 好得多。
+//
+// 每行的形状 —— 每一行的显示宽度都相同, 这正是这个模块存在的理由:
+//   | 单元 单元 |   —— 行首一个 `|`, 每个单元两侧各一个空格, 单元之间一个 `|`
+//   |-----------|   —— sep != 0 时在第 0 行 (表头) 之后加一条等宽分隔线
+// 一行的显示宽度 = 1 + Σ(列宽 + 3)。
+//
+// 超宽单元 (比列宽还宽) 的政策: **截断**, 不撑开列宽。撑开列宽会把一张放在窄终端里的
+// 表顶爆, 而截断至少还能看。截断按**显示宽度**做 (width_truncate), 所以不会把一个
+// 汉字切成半个。想"让列宽 = 最宽单元"就别调 tbl_widths_clamp —— 那是 tbl_widths 干的。
+//
+// 单元里的 `\n`: **不支持多行单元** —— 一个单元只渲染它的**第一行**, `\n` 及其后内容
+// 被丢弃, 列宽也只按第一行算。支持多行要引入"行高"这个新维度, 而"没有行对象"的布局里
+// 没地方放它; 真需要多行, 就在调用方先用 wrap.lomt 把文字折成几行、拆成几个单元塞进来。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不做框线样式** (圆角、双线、ASCII-only): 只有 `|` 与 `-` 这一种。样式是审美,
+//     要换样式改渲染那一处就行, 不值当在这层做一套开关。
+//   - **不做自动折行**: 单元内容不长脚。要折就在调用方折好 (wrap.lomt) 再塞。
+//   - **不做单元格跨行/跨列**: 那要引入合并区间, 复杂度比这个模块本身还大。
+//   - **不做流式追加**: `tbl_set` 只往文字区**追加**, 不回收; 改了单元要重开表
+//     (或者接受文字区里留下上一个版本的字节)。
+//   - **居中偏左**: 余数是奇数时多出来的那格补在**右边** (lp = pad/2)。
+//
+// 命名: 公开 tbl_*, 内部 tb_* (与 deps 的 me_/w_/nu_ 前缀都不撞)。自检 test_tbl_*。
+
+module table
+
+use "mem.lomt"
+use "width.lomt"
+
+/// 出错哨兵 (tbl_render 在列宽还没算过时返回它)。
+pub const TBL_ERR: u32 = 4294967295;
+
+/// "列宽不设上限" (tbl_widths 用, 也当 tbl_widths_clamp 的对照)。
+pub const TBL_NO_MAX: u32 = 4294967295;
+
+pub const TBL_LEFT: u32 = 0;
+pub const TBL_RIGHT: u32 = 1;
+pub const TBL_CENTER: u32 = 2;
+
+// ---------------------------------------------------------------- 布局
+
+/// 对齐表在表首的偏移。
+fn tb_align_at(ncols: u32) -> u32 {
+    return 16 + 4 * ncols;
+}
+
+/// 单元表在表首的偏移。
+fn tb_cells_at(ncols: u32) -> u32 {
+    return 16 + 8 * ncols;
+}
+
+/// 文字区在表首的偏移。
+fn tb_text_at(nrows: u32, ncols: u32) -> u32 {
+    return 16 + 8 * ncols + 8 * nrows * ncols;
+}
+
+/// 一张 nrows×ncols、各单元文字一共 text_bytes 字节的表需要多少内存。
+pub fn tbl_bytes(nrows: u32, ncols: u32, text_bytes: u32) -> u32 {
+    return 16 + 8 * ncols + 8 * nrows * ncols + text_bytes;
+}
+
+/// 初始化表头: 单元一律空 (起点 = 文字区起点, 长度 0), 列宽 0, 对齐全左, ready=0。
+/// 这里有一次 O(nrows*ncols) 的清零 —— 一次性开销, 不在渲染热路径上。
+pub fn tbl_begin(t: ptr, nrows: u32, ncols: u32) {
+    mem_store32(t, 0, nrows);
+    mem_store32(t, 4, ncols);
+    mem_store32(t, 8, 0);
+    mem_store32(t, 12, 0);
+    let n: u32 = nrows * ncols;
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(t, tb_cells_at(ncols) + 8 * i, tb_text_at(nrows, ncols));
+        mem_store32(t, tb_cells_at(ncols) + 8 * i + 4, 0);
+        i = i + 1;
+    }
+    let c: u32 = 0;
+    while c < ncols {
+        mem_store32(t, 16 + 4 * c, 0);
+        mem_store32(t, tb_align_at(ncols) + 4 * c, TBL_LEFT);
+        c = c + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 读写单元
+
+pub fn tbl_nrows(t: ptr) -> u32 {
+    return mem_load32(t, 0);
+}
+
+pub fn tbl_ncols(t: ptr) -> u32 {
+    return mem_load32(t, 4);
+}
+
+/// 第 i 个单元的文字起点 (相对表首)。
+pub fn tbl_off(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, tb_cells_at(tbl_ncols(t)) + 8 * i);
+}
+
+pub fn tbl_len(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, tb_cells_at(tbl_ncols(t)) + 8 * i + 4);
+}
+
+pub fn tbl_off_rc(t: ptr, r: u32, c: u32) -> u32 {
+    return tbl_off(t, r * tbl_ncols(t) + c);
+}
+
+pub fn tbl_len_rc(t: ptr, r: u32, c: u32) -> u32 {
+    return tbl_len(t, r * tbl_ncols(t) + c);
+}
+
+/// 填一个单元: 把 src[so .. so+len) **拷进**表里。不引用调用方的缓冲 —— 引用的话调用方
+/// 得保证那块内存在渲染之前一直活着, 而"表"应当是自足的。
+///
+/// 会顺手把 ready 置 0: 改了内容, 之前算的列宽就不作数了。不置的话调用方"先算列宽、
+/// 又加了一个更宽的单元、忘了重算"会渲染出被截断的列 —— 那是静默错。
+pub fn tbl_set(t: ptr, r: u32, c: u32, src: ptr, so: u32, len: u32) {
+    let ncols: u32 = tbl_ncols(t);
+    let nrows: u32 = tbl_nrows(t);
+    let i: u32 = r * ncols + c;
+    let ta: u32 = tb_text_at(nrows, ncols);
+    let tl: u32 = mem_load32(t, 8);
+    mem_copy(t, ta + tl, src, so, len);
+    mem_store32(t, tb_cells_at(ncols) + 8 * i, ta + tl);
+    mem_store32(t, tb_cells_at(ncols) + 8 * i + 4, len);
+    mem_store32(t, 8, tl + len);
+    mem_store32(t, 12, 0);
+}
+
+pub fn tbl_set_str(t: ptr, r: u32, c: u32, s: str) {
+    tbl_set(t, r, c, str_ptr(s), 0, str_len(s));
+}
+
+/// 设某列的对齐。改动**不影响**列宽, 所以不置 ready=0。
+pub fn tbl_align(t: ptr, c: u32, code: u32) {
+    mem_store32(t, tb_align_at(tbl_ncols(t)) + 4 * c, code);
+}
+
+pub fn tbl_align_of(t: ptr, c: u32) -> u32 {
+    return mem_load32(t, tb_align_at(tbl_ncols(t)) + 4 * c);
+}
+
+/// 单元里**可见**的字节数: 到第一个 `\n` 为止 (单元不支持多行, 见头部)。
+fn tb_vis(t: ptr, off: u32, len: u32) -> u32 {
+    let i: u32 = 0;
+    while i < len {
+        if load8(t, off + i) == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------- 列宽
+
+/// 算列宽写进表头 (ready 置 1), 返回所有列宽之和。
+/// maxw == TBL_NO_MAX 表示不设上限。上限只管**列宽**, 截断是渲染时做的。
+fn tb_scan(t: ptr, maxw: u32) -> u32 {
+    let nrows: u32 = tbl_nrows(t);
+    let ncols: u32 = tbl_ncols(t);
+    let c: u32 = 0;
+    while c < ncols {
+        mem_store32(t, 16 + 4 * c, 0);
+        c = c + 1;
+    }
+    let r: u32 = 0;
+    while r < nrows {
+        let cc: u32 = 0;
+        while cc < ncols {
+            let i: u32 = r * ncols + cc;
+            let off: u32 = tbl_off(t, i);
+            let w: u32 = width_utf8(t, off, tb_vis(t, off, tbl_len(t, i)));
+            if maxw != TBL_NO_MAX && w > maxw {
+                w = maxw;
+            }
+            if w > mem_load32(t, 16 + 4 * cc) {
+                mem_store32(t, 16 + 4 * cc, w);
+            }
+            cc = cc + 1;
+        }
+        r = r + 1;
+    }
+    let sum: u32 = 0;
+    let k: u32 = 0;
+    while k < ncols {
+        sum = sum + mem_load32(t, 16 + 4 * k);
+        k = k + 1;
+    }
+    mem_store32(t, 12, 1);
+    return sum;
+}
+
+/// 列宽 = 该列最宽单元 (不设上限)。返回列宽之和。宽度用 width_utf8 量, 不数字节。
+pub fn tbl_widths(t: ptr) -> u32 {
+    return tb_scan(t, TBL_NO_MAX);
+}
+
+/// 列宽上限 maxw —— 比它宽的单元渲染时按**显示宽度**截断 (不切宽字符)。
+pub fn tbl_widths_clamp(t: ptr, maxw: u32) -> u32 {
+    return tb_scan(t, maxw);
+}
+
+pub fn tbl_colw(t: ptr, c: u32) -> u32 {
+    return mem_load32(t, 16 + 4 * c);
+}
+
+pub fn tbl_ready(t: ptr) -> bool {
+    return mem_load32(t, 12) != 0;
+}
+
+/// 一张表渲染出来**一行**的显示宽度 = 1 + Σ(列宽 + 3)。自检的不变量就盯这个。
+pub fn tbl_line_cols(t: ptr) -> u32 {
+    let ncols: u32 = tbl_ncols(t);
+    let w: u32 = 1 + 3 * ncols;
+    let c: u32 = 0;
+    while c < ncols {
+        w = w + mem_load32(t, 16 + 4 * c);
+        c = c + 1;
+    }
+    return w;
+}
+
+/// tbl_render 需要调用方开多少字节 (每行后面都带一个 `\n`)。
+///
+/// 这是**上界**, 不是精确值 —— 精确值等于把渲染重算一遍。别把 "行宽(格)" 当 "字节数":
+/// 一个 2 格的汉字占 3 字节, 所以字节数可以比格数多。推导:
+///   一行字节数 = 1 + Σ(3 + 左右填充 + 单元可见字节数) <= 行宽(格) + 该行所有单元的可见字节数
+/// 把所有单元的可见字节数一次全加上, 就得到这个安全上界 (第一版这里直接写
+/// `行数 × (行宽+1)`, 碰上中文表就**低估**了 —— 调用方按它开缓冲会写出去)。
+pub fn tbl_out_bytes(t: ptr, sep: u32) -> u32 {
+    let nrows: u32 = tbl_nrows(t);
+    let ncols: u32 = tbl_ncols(t);
+    let lines: u32 = nrows;
+    if sep != 0 && nrows > 0 {
+        lines = lines + 1;
+    }
+    let tot: u32 = lines * (tbl_line_cols(t) + 1);
+    let r: u32 = 0;
+    while r < nrows {
+        let c: u32 = 0;
+        while c < ncols {
+            let i: u32 = r * ncols + c;
+            tot = tot + tb_vis(t, tbl_off(t, i), tbl_len(t, i));
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return tot;
+}
+
+// ---------------------------------------------------------------- 渲染
+
+fn tb_fill(out: ptr, o: u32, k: u32, ch: u32) -> u32 {
+    let i: u32 = 0;
+    while i < k {
+        store8(out, o + i, ch as u8);
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 渲染第 r 行: `|` + 每列 (` ` + 左填充 + 单元 + 右填充 + ` ` + `|`) + `\n`。
+/// 返回写出的**字节数** —— 它的显示宽度恒为 tbl_line_cols(t), 字节数则在有中文时更多。
+fn tb_row(t: ptr, out: ptr, o: u32, r: u32) -> u32 {
+    let ncols: u32 = tbl_ncols(t);
+    let w: u32 = o;
+    store8(out, w, 124 as u8); // '|'
+    w = w + 1;
+    let c: u32 = 0;
+    while c < ncols {
+        let colw: u32 = mem_load32(t, 16 + 4 * c);
+        let i: u32 = r * ncols + c;
+        let off: u32 = tbl_off(t, i);
+        let len: u32 = tb_vis(t, off, tbl_len(t, i));
+        store8(out, w, 32 as u8); // 单元左内侧那个固定空格
+        w = w + 1;
+        // 填充量必须按**截断之后**的实际格数算, 不能按 "min(单元宽, 列宽)" 算:
+        // 列宽 3 的槽里放 "ab中" (4 格), 按显示宽度截出来是 "ab" 只有 2 格 ——
+        // 中 要 2 格放不下就整个不放。差这一格整行就短了, 不变量当场破。
+        //
+        // **先量后写**: 用 width_fit 只算"能放下多少字节", 不落笔。第一版是先把单元
+        // 拷出去再算填充, 于是填充永远排在单元**后面** —— 右对齐和居中就只是把空格
+        // 堆在右边, 单元根本没被推过去。长度对、内容不对, 四条对齐自检全红。
+        let n1: u32 = width_fit(t, off, len, colw);
+        let pad: u32 = colw - width_utf8(t, off, n1);
+        let al: u32 = mem_load32(t, tb_align_at(ncols) + 4 * c);
+        let lp: u32 = 0;
+        let rp: u32 = pad;
+        if al == TBL_RIGHT {
+            lp = pad;
+            rp = 0;
+        } else if al == TBL_CENTER {
+            lp = pad / 2; // 余数补右边 (偏左)
+            rp = pad - lp;
+        }
+        w = w + tb_fill(out, w, lp, 32);
+        mem_copy(out, w, t, off, n1);
+        w = w + n1;
+        w = w + tb_fill(out, w, rp, 32);
+        store8(out, w, 32 as u8); // 右内侧
+        w = w + 1;
+        store8(out, w, 124 as u8); // '|'
+        w = w + 1;
+        c = c + 1;
+    }
+    store8(out, w, 10 as u8); // '\n'
+    w = w + 1;
+    return w - o;
+}
+
+/// 分隔线: `|` + 每列 (列宽+2 个 `-` + `|`) + `\n`。宽度与 tb_row 相同。
+fn tb_sep(t: ptr, out: ptr, o: u32) -> u32 {
+    let ncols: u32 = tbl_ncols(t);
+    let w: u32 = o;
+    store8(out, w, 124 as u8);
+    w = w + 1;
+    let c: u32 = 0;
+    while c < ncols {
+        w = w + tb_fill(out, w, mem_load32(t, 16 + 4 * c) + 2, 45); // '-'
+        store8(out, w, 124 as u8);
+        w = w + 1;
+        c = c + 1;
+    }
+    store8(out, w, 10 as u8);
+    w = w + 1;
+    return w - o;
+}
+
+/// 渲染整张表; `sep != 0` 时在第 0 行 (表头) 后画分隔线。返回写出的字节数。
+///
+/// 没先调 tbl_widths / tbl_widths_clamp 就返回 TBL_ERR —— 那时列宽全是 0, 每个单元都会
+/// 被截成空, "渲染成功但表是空的"这种静默错比报错难查得多。
+pub fn tbl_render(t: ptr, out: ptr, oo: u32, sep: u32) -> u32 {
+    if tbl_ready(t) == false {
+        return TBL_ERR;
+    }
+    let nrows: u32 = tbl_nrows(t);
+    let w: u32 = oo;
+    let r: u32 = 0;
+    while r < nrows {
+        w = w + tb_row(t, out, w, r);
+        if r == 0 && sep != 0 {
+            w = w + tb_sep(t, out, w);
+        }
+        r = r + 1;
+    }
+    return w - oo;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 逐行量渲染结果的显示宽度: **每一行都必须等于 lw**, 否则返回 false。
+/// 一次扫完, 不做"取第 k 行"那种会越界的索引 —— 渲染结果恒以 `\n` 收尾, 所以在每个
+/// `\n` 处结算一行就够了。
+fn tb_check_widths(out: ptr, oo: u32, total: u32, lw: u32) -> bool {
+    let i: u32 = 0;
+    let lo: u32 = 0;
+    let ok: bool = true;
+    while i < total {
+        if load8(out, oo + i) == 10 {
+            if width_utf8(out, oo + lo, i - lo) != lw {
+                ok = false;
+            }
+            lo = i + 1;
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+/// 渲染出来一共几行 (按 `\n` 数)。
+fn tb_line_count(out: ptr, oo: u32, total: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < total {
+        if load8(out, oo + i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 第 k 行的**显示宽度** (不含换行符)。给"每一行列数都相等"那条不变量自检用。
+///
+/// 没有 `total` 参数是有意的: 它靠"数到第 k 个换行"定位, 所以调用方要保证
+/// `k < 行数`。渲染结果每行都以 `\n` 收尾, 这个前提成立。
+fn tb_line_width(out: ptr, oo: u32, k: u32) -> u32 {
+    let i: u32 = oo;
+    let line: u32 = 0;
+    let lo: u32 = oo;
+    while line < k {
+        if load8(out, i) == 10 {
+            line = line + 1;
+            lo = i + 1;
+        }
+        i = i + 1;
+    }
+    let e: u32 = lo;
+    while load8(out, e) != 10 {
+        e = e + 1;
+    }
+    return width_utf8(out, lo, e - lo);
+}
+
+fn test_tbl_layout_bytes() -> bool {
+    // 布局算术: 表头 16 + 对齐/列宽 8*ncols + 单元表 8*nrows*ncols + 文字
+    return tbl_bytes(2, 3, 10) == 16 + 24 + 48 + 10
+        && tbl_bytes(1, 1, 0) == 32;
+}
+
+fn test_tbl_2x2_with_header() -> bool {
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 2, 2);
+    tbl_set_str(t, 0, 0, "a");
+    tbl_set_str(t, 0, 1, "b");
+    tbl_set_str(t, 1, 0, "c");
+    tbl_set_str(t, 1, 1, "d");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 1);
+    let want: str = "| a | b |\n|---|---|\n| c | d |\n";
+    return sum == 2 && tbl_line_cols(t) == 9 && n == 30 && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, 30);
+}
+
+fn test_tbl_widths_unequal_third_longest() -> bool {
+    // 三列宽度 1/2/3: 每列的槽宽必须各按各的最宽单元来
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 1, 3);
+    tbl_set_str(t, 0, 0, "a");
+    tbl_set_str(t, 0, 1, "bb");
+    tbl_set_str(t, 0, 2, "ccc");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| a | bb | ccc |\n";
+    // `tbl_line_cols` 是**行宽(格), 不含换行**; 渲染写出的字节数**含每行的换行**,
+    // 所以 n = 行宽 + 1。用 str_len(want) 而不是写死数字, 免得再漂。
+    return sum == 6 && tbl_colw(t, 0) == 1 && tbl_colw(t, 1) == 2 && tbl_colw(t, 2) == 3
+        && tbl_line_cols(t) == 16 && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, n);
+}
+
+fn test_tbl_cjk_measured_by_display_width() -> bool {
+    // "中" 是 1 个字符但 2 格; "abcd" 是 4 个字符 4 格。列宽必须按**格**算,
+    // 否则第二列会短两格, 两行就对不齐了。
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 1, 2);
+    tbl_set_str(t, 0, 0, "中");
+    tbl_set_str(t, 0, 1, "abcd");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| 中 | abcd |\n";
+    return sum == 6 && tbl_colw(t, 0) == 2 && tbl_colw(t, 1) == 4
+        && tbl_line_cols(t) == 13 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_cjk_column_aligns_across_rows() -> bool {
+    // 一列里放 "中" 与 "ab" —— 两者都是 2 格, 所以槽宽 2, 两行的竖线必须落在同一格上。
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 2, 2);
+    tbl_set_str(t, 0, 0, "中");
+    tbl_set_str(t, 0, 1, "x");
+    tbl_set_str(t, 1, 0, "ab");
+    tbl_set_str(t, 1, 1, "y");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| 中 | x |\n| ab | y |\n";
+    return sum == 3 && tbl_colw(t, 0) == 2 && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, str_len(want))
+        && tb_line_width(out, 0, 0) == tb_line_width(out, 0, 1);
+}
+
+fn test_tbl_right_align_numbers() -> bool {
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 2, 1);
+    tbl_set_str(t, 0, 0, "1");
+    tbl_set_str(t, 1, 0, "100");
+    tbl_align(t, 0, TBL_RIGHT);
+    tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "|   1 |\n| 100 |\n";
+    return tbl_align_of(t, 0) == TBL_RIGHT && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_center_align() -> bool {
+    // 余数补右边: 槽 5 格放 "ab" (2 格) -> 左 1 右 2
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 2, 1);
+    tbl_set_str(t, 0, 0, "ab");
+    tbl_set_str(t, 1, 0, "abcde");
+    tbl_align(t, 0, TBL_CENTER);
+    tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "|  ab   |\n| abcde |\n";
+    return n == str_len(want) && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_empty_cell() -> bool {
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 2, 2);
+    tbl_set_str(t, 0, 0, "a");
+    // (0,1) 不放东西 —— tbl_begin 已经把它初始化成空单元
+    tbl_set_str(t, 1, 0, "bb");
+    tbl_set_str(t, 1, 1, "cc");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| a  |    |\n| bb | cc |\n";
+    return sum == 4 && tbl_len_rc(t, 0, 1) == 0 && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_single_cell() -> bool {
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "x");
+    tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| x |\n";
+    return n == 6 && tbl_line_cols(t) == 5 && mem_eq(out, 0, str_ptr(want), 0, 6);
+}
+
+fn test_tbl_single_cell_cjk() -> bool {
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "中");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| 中 |\n";
+    return sum == 2 && tbl_line_cols(t) == 6 && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_truncate_overwide_cell() -> bool {
+    // 列宽夹到 3, 单元 7 格 -> 截成 "abc"
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "abcdefg");
+    tbl_widths_clamp(t, 3);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| abc |\n";
+    return tbl_colw(t, 0) == 3 && n == 8 && mem_eq(out, 0, str_ptr(want), 0, 8);
+}
+
+fn test_tbl_truncate_never_splits_wide_char() -> bool {
+    // 列宽 3 放 "ab中" (4 格): 中 放不下就整个不放 -> 截出 "ab" 只有 2 格, 再补 1 格空格。
+    // 如果改按 min(单元宽,列宽)=3 去算填充, 这行就会短一格 —— 不变量当场破。
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "ab中");
+    tbl_widths_clamp(t, 3);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| ab  |\n";
+    return n == 8 && n == tbl_line_cols(t) + 1
+        && mem_eq(out, 0, str_ptr(want), 0, 8);
+}
+
+fn test_tbl_newline_in_cell_is_first_line_only() -> bool {
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "ab\ncd");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let want: str = "| ab |\n";
+    // 列宽按**第一行**算 (2), 单元也只渲染第一行。
+    // 行宽 6 格 + 换行 = 7 字节 (原来写死 8 是把行宽当成了字节数)。
+    return sum == 2 && tbl_line_cols(t) == 6 && n == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, n);
+}
+
+fn test_tbl_render_requires_widths() -> bool {
+    let t: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "x");
+    // 还没算列宽 -> 报错, 不是"渲染出个空表"
+    let bad: bool = tbl_render(t, out, 0, 0) == TBL_ERR && tbl_ready(t) == false;
+    tbl_widths(t);
+    return bad && tbl_ready(t) && tbl_render(t, out, 0, 0) == 6;
+}
+
+fn test_tbl_set_invalidates_widths() -> bool {
+    // 算完列宽又改单元 -> ready 归 0, 渲染必须再报错 (否则会拿旧列宽静默截断新内容)
+    let t: ptr = alloc(128);
+    let out: ptr = alloc(128);
+    tbl_begin(t, 1, 1);
+    tbl_set_str(t, 0, 0, "a");
+    tbl_widths(t);
+    let ok1: bool = tbl_render(t, out, 0, 0) == 6;
+    tbl_set_str(t, 0, 0, "aaaaaaaa");
+    let ok2: bool = tbl_render(t, out, 0, 0) == TBL_ERR;
+    tbl_widths(t);
+    let want: str = "| aaaaaaaa |\n";
+    return ok1 && ok2 && tbl_render(t, out, 0, 0) == str_len(want)
+        && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_tbl_out_bytes_is_safe_upper_bound() -> bool {
+    // `tbl_out_bytes` 的契约是**上界**, 不是精确值 (精确值等于把渲染重算一遍)。
+    // 所以这里验的是"渲染实际写出的字节数 <= 报告的上界":
+    // **不能**写成 `n == want` —— 那是把"列数"当成"字节数"的旧假设, 中文表上必错
+    // (一个 2 格的汉字占 3 字节)。上界也要求不离谱, 否则等于没给上界。
+    let t: ptr = alloc(256);
+    let out: ptr = alloc(256);
+    let out2: ptr = alloc(256);
+    tbl_begin(t, 3, 2);
+    tbl_set_str(t, 0, 0, "name");
+    tbl_set_str(t, 0, 1, "值");
+    tbl_set_str(t, 1, 0, "a");
+    tbl_set_str(t, 1, 1, "longvalue");
+    tbl_set_str(t, 2, 0, "");
+    tbl_set_str(t, 2, 1, "x");
+    tbl_widths(t);
+    let want: u32 = tbl_out_bytes(t, 1);
+    let n: u32 = tbl_render(t, out, 0, 1);
+    // 无分隔线的渲染写进**另一块缓冲** —— 同写一块的话下面数行数数的是被覆盖过的内容
+    let n0: u32 = tbl_render(t, out2, 0, 0);
+    let ok1: bool = n <= want && n0 <= want && tb_line_count(out, 0, n) == 4
+        && tb_line_count(out2, 0, n0) == 3;
+    return ok1 && want <= 2 * n + 32;
+}
+
+fn test_tbl_invariant_all_lines_equal_width() -> bool {
+    // **这个模块存在的理由**: 渲染出来的每一行显示宽度都相等。3x3 混合表, 真的逐行量。
+    let t: ptr = alloc(512);
+    let out: ptr = alloc(512);
+    tbl_begin(t, 3, 3);
+    tbl_set_str(t, 0, 0, "姓名");
+    tbl_set_str(t, 0, 1, "年龄");
+    tbl_set_str(t, 0, 2, "");
+    tbl_set_str(t, 1, 0, "Alice");
+    tbl_set_str(t, 1, 1, "30");
+    tbl_set_str(t, 1, 2, "中文");
+    tbl_set_str(t, 2, 0, "Bo");
+    tbl_set_str(t, 2, 1, "7");
+    tbl_set_str(t, 2, 2, "x");
+    let sum: u32 = tbl_widths(t);
+    let n: u32 = tbl_render(t, out, 0, 1);
+    let lw: u32 = tbl_line_cols(t);
+    let lines: u32 = tb_line_count(out, 0, n);
+    // 字节数 **>=** 列数+1: 每个字符至少 1 字节, 再加换行。中文行会更多。
+    // (原来这里写的是等号, 那是"列数=字节数"的旧假设。)
+    let ok: bool = sum == 13 && lw == 23 && lines == 4 && n >= 4 * (lw + 1);
+    let k: u32 = 0;
+    while k < lines {
+        if tb_line_width(out, 0, k) != lw {
+            return false; // 有一行宽度不等于 lw 就不变量破了
+        }
+        k = k + 1;
+    }
+    return ok;
+}
+
+fn test_tbl_invariant_survives_truncation_and_align() -> bool {
+    // 夹了列宽 + 右对齐 + 空单元 + 中文, 四种情形叠在一起, 每行宽度仍然必须相等。
+    let t: ptr = alloc(512);
+    let out: ptr = alloc(512);
+    tbl_begin(t, 3, 3);
+    tbl_set_str(t, 0, 0, "abcdefgh");   // 会被夹到 4
+    tbl_set_str(t, 0, 1, "中文中文中文"); // 会被夹到 4 (整字截)
+    tbl_set_str(t, 0, 2, "7");
+    tbl_set_str(t, 1, 0, "");           // 空
+    tbl_set_str(t, 1, 1, "ab");
+    tbl_set_str(t, 1, 2, "-12");
+    tbl_set_str(t, 2, 0, "x");
+    tbl_set_str(t, 2, 1, "y");
+    tbl_set_str(t, 2, 2, "3");
+    tbl_align(t, 0, TBL_RIGHT);
+    tbl_align(t, 1, TBL_CENTER);
+    let sum: u32 = tbl_widths_clamp(t, 4);
+    let n: u32 = tbl_render(t, out, 0, 0);
+    let lw: u32 = tbl_line_cols(t);
+    let lines: u32 = tb_line_count(out, 0, n);
+    // 列宽是**逐单元夹到 4** 再取该列最大值: col0 max(4,0,1)=4, col1 max(4,2,1)=4,
+    // col2 max(1,3,1)=3 -> sum=11; 行宽 = 1 + 3*3 + 11 = 21。
+    // 字节数 **>=** 列数+1 (每字符至少 1 字节, 再加换行); 中文行会更多。
+    let ok: bool = sum == 11 && lw == 21 && lines == 3 && n >= 3 * (lw + 1);
+    let k: u32 = 0;
+    while k < lines {
+        if tb_line_width(out, 0, k) != lw {
+            return false;
+        }
+        k = k + 1;
+    }
+    return ok;
+}

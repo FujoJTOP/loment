@@ -1,0 +1,382 @@
+// std/mall.lomt — 空闲块分配器 (在调用方给的 arena 上)
+//
+// 为什么要它: 内建 `alloc` 是**只能往前的 bump 堆**, 一共 64 KiB, `free` 是占位 ——
+// 不真回收。于是"分配-释放-再分配"这种形状在仓库里根本没法写: 一个循环里分配两次,
+// 跑几百轮就撞顶。链表节点、哈希桶、解析中间结果全都要这个形状。
+//
+// **不能在 brk 上做**: 那要发 syscall, 就落到宿主层去了。本模块只在**调用方给的缓冲**
+// 里记账 —— 所以它是可移植的, 而且可测 (同一块缓冲里跑完整生命周期, 不需要真内存)。
+//
+// 布局: 每个块有 8 字节头 —— [size: u32][flags: u32], size 是**含头**的总长, flags 0=空闲 1=已用。
+// 块从偏移 0 起首尾相接铺满 arena, 所以"走一遍"就能算出账。空闲表由**块头自身的 flags**
+// 表达, 不另建链表 —— 于是模块没有状态, 每个函数只吃 (buf, cap)。
+//
+// 这带来一个取舍: 分配是**首次适应线性扫描** (O(块数)), 不是 O(1)。arena 小、块少时这不是
+// 问题, 换来的是"没有任何模块级状态、每个函数可单独测"。要 O(1) 就用 pool。
+//
+// 名字: 模块叫 mall 而**不能叫 alloc / free** —— 实测顶层名撞内建时 `check` 不给告警,
+// 而且调用会静默落到内建上 (`alloc` 那次就是这么被吞掉的)。
+//
+// 命名: 公开 mall_*, 内部 ml_*。自检 test_mall_*。
+
+module mall
+
+use "mem.lomt"
+
+/// "没有块 / 失败" 的哨兵。
+pub const MALL_NIL: u32 = 4294967295;
+/// 块头字节数。
+pub const MALL_HDR: u32 = 8;
+/// 分配对齐 (u64 要 8 对齐)。
+pub const MALL_ALIGN: u32 = 8;
+/// 空闲标志。
+pub const MALL_FREE: u32 = 0;
+/// 已用标志。
+pub const MALL_USED: u32 = 1;
+
+/// 把整块 arena 变成一个空闲块。返回可用的净字节数 (扣除块头)。
+pub fn mall_init(buf: ptr, cap: u32) -> u32 {
+    mem_store32(buf, 0, cap);
+    mem_store32(buf, 4, MALL_FREE);
+    if cap < MALL_HDR {
+        return 0;
+    }
+    return cap - MALL_HDR;
+}
+
+/// 把 n 向上取到 8 的倍数。
+fn ml_align(n: u32) -> u32 {
+    let r: u32 = n % MALL_ALIGN;
+    if r == 0 {
+        return n;
+    }
+    return n + (MALL_ALIGN - r);
+}
+
+/// 分配 n 字节 (内部按 8 对齐)。返回**远离块头的偏移**, 失败返回 MALL_NIL。
+pub fn mall_alloc(buf: ptr, cap: u32, n: u32) -> u32 {
+    if n == 0 {
+        return MALL_NIL;
+    }
+    let need: u32 = ml_align(n) + MALL_HDR;
+    let off: u32 = 0;
+    while off < cap {
+        let size: u32 = mem_load32(buf, off);
+        // 尺寸不合法就停 —— 否则 `off = off + 0` 会死循环 (比报错更坏: 它挂住整个程序)。
+        if size < MALL_HDR || off + size > cap {
+            return MALL_NIL;
+        }
+        let flags: u32 = mem_load32(buf, off + 4);
+        if flags == MALL_FREE && size >= need {
+            let rest: u32 = size - need;
+            if rest >= MALL_HDR + MALL_ALIGN {
+                // 拆开: 前面 used 块, 后面留一个 free 块。
+                mem_store32(buf, off, need);
+                mem_store32(buf, off + 4, MALL_USED);
+                mem_store32(buf, off + need, rest);
+                mem_store32(buf, off + need + 4, MALL_FREE);
+            } else {
+                // 余量太小, 整块给出 (不产生碎片头)。
+                mem_store32(buf, off + 4, MALL_USED);
+            }
+            return off + MALL_HDR;
+        }
+        off = off + size;
+    }
+    return MALL_NIL;
+}
+
+/// 把相邻的空闲块合并。反复扫到不再发生变化为止 —— 合并是单调的 (块数只减),
+/// 所以一定终止。`bad` 是给"块头已损坏"准备的出口: 语言没有无值 return,
+/// 又要从两层循环里同时出来, 就用一个标志。
+fn ml_coalesce(buf: ptr, cap: u32) {
+    let changed: u32 = 1;
+    let bad: u32 = 0;
+    while changed == 1 && bad == 0 {
+        changed = 0;
+        let off: u32 = 0;
+        while off < cap && bad == 0 {
+            let size: u32 = mem_load32(buf, off);
+            if size < MALL_HDR || off + size > cap {
+                bad = 1;
+            } else {
+                let nxt: u32 = off + size;
+                if mem_load32(buf, off + 4) == MALL_FREE && nxt < cap {
+                    let nsize: u32 = mem_load32(buf, nxt);
+                    if nsize >= MALL_HDR && mem_load32(buf, nxt + 4) == MALL_FREE {
+                        mem_store32(buf, off, size + nsize);
+                        changed = 1;
+                    }
+                }
+                off = off + mem_load32(buf, off);
+            }
+        }
+    }
+}
+
+/// 释放 `mall_alloc` 返回的偏移。返回是否真的释放了 (非法偏移 / 重复释放 -> false)。
+pub fn mall_free(buf: ptr, cap: u32, at: u32) -> bool {
+    if at < MALL_HDR || at >= cap {
+        return false;
+    }
+    let off: u32 = at - MALL_HDR;
+    let size: u32 = mem_load32(buf, off);
+    if size < MALL_HDR || off + size > cap {
+        return false;
+    }
+    if mem_load32(buf, off + 4) == MALL_FREE {
+        return false;
+    }
+    mem_store32(buf, off + 4, MALL_FREE);
+    ml_coalesce(buf, cap);
+    return true;
+}
+
+/// 已用块的净字节数 (不含块头)。
+pub fn mall_used(buf: ptr, cap: u32) -> u32 {
+    let acc: u32 = 0;
+    let off: u32 = 0;
+    let bad: u32 = 0;
+    while off < cap && bad == 0 {
+        let size: u32 = mem_load32(buf, off);
+        if size < MALL_HDR || off + size > cap {
+            bad = 1;
+        } else {
+            if mem_load32(buf, off + 4) == MALL_USED {
+                acc = acc + (size - MALL_HDR);
+            }
+            off = off + size;
+        }
+    }
+    return acc;
+}
+
+/// 空闲块的净字节数。
+pub fn mall_free_bytes(buf: ptr, cap: u32) -> u32 {
+    let acc: u32 = 0;
+    let off: u32 = 0;
+    let bad: u32 = 0;
+    while off < cap && bad == 0 {
+        let size: u32 = mem_load32(buf, off);
+        if size < MALL_HDR || off + size > cap {
+            bad = 1;
+        } else {
+            if mem_load32(buf, off + 4) == MALL_FREE {
+                acc = acc + (size - MALL_HDR);
+            }
+            off = off + size;
+        }
+    }
+    return acc;
+}
+
+/// 块总数 (含空闲块)。碎片程度看它。
+pub fn mall_block_count(buf: ptr, cap: u32) -> u32 {
+    let n: u32 = 0;
+    let off: u32 = 0;
+    let bad: u32 = 0;
+    while off < cap && bad == 0 {
+        let size: u32 = mem_load32(buf, off);
+        if size < MALL_HDR || off + size > cap {
+            bad = 1;
+        } else {
+            n = n + 1;
+            off = off + size;
+        }
+    }
+    return n;
+}
+
+/// 空闲块数。
+pub fn mall_free_block_count(buf: ptr, cap: u32) -> u32 {
+    let n: u32 = 0;
+    let off: u32 = 0;
+    let bad: u32 = 0;
+    while off < cap && bad == 0 {
+        let size: u32 = mem_load32(buf, off);
+        if size < MALL_HDR || off + size > cap {
+            bad = 1;
+        } else {
+            if mem_load32(buf, off + 4) == MALL_FREE {
+                n = n + 1;
+            }
+            off = off + size;
+        }
+    }
+    return n;
+}
+
+/// arena 自洽: 块首尾相接铺满、每个尺寸合法。
+/// 不变量检查比"看结果对不对"值钱 —— 它能抓住那些此刻恰好还正确的记账错误。
+pub fn mall_check(buf: ptr, cap: u32) -> bool {
+    let off: u32 = 0;
+    while off < cap {
+        let size: u32 = mem_load32(buf, off);
+        if size < MALL_HDR || off + size > cap {
+            return false;
+        }
+        off = off + size;
+    }
+    return off == cap;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mall_init_reports_net() -> bool {
+    let b: ptr = alloc(256);
+    return mall_init(b, 256) == 248 && mall_block_count(b, 256) == 1;
+}
+
+fn test_mall_alloc_returns_aligned_offset() -> bool {
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o: u32 = mall_alloc(b, 256, 16);
+    return o == MALL_HDR && o % MALL_ALIGN == 0;
+}
+
+fn test_mall_alloc_rounds_up_to_alignment() -> bool {
+    // 要 9 字节, 拿到的是 16 —— 下一个块接着 16 对齐。
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o1: u32 = mall_alloc(b, 256, 9);
+    let o2: u32 = mall_alloc(b, 256, 8);
+    return o1 == 8 && o2 == 32 && o2 % MALL_ALIGN == 0;
+}
+
+fn test_mall_two_allocs_do_not_overlap() -> bool {
+    // 分配两块, 各写各的花纹, 再验回来 —— 重叠时这条必挂。
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o1: u32 = mall_alloc(b, 256, 32);
+    let o2: u32 = mall_alloc(b, 256, 32);
+    mem_fill(b, o1, 32, 17);
+    mem_fill(b, o2, 32, 34);
+    return mem_eq(b, o1, b, o1, 32) && load8(b, o1) == 17 && load8(b, o1 + 31) == 17
+        && load8(b, o2) == 34 && load8(b, o2 + 31) == 34;
+}
+
+fn test_mall_write_read_payload() -> bool {
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o: u32 = mall_alloc(b, 256, 24);
+    mem_store64(b, o, 1234567890123);
+    mem_store64(b, o + 8, 987654321 as u64);
+    return mem_load64(b, o) == 1234567890123 && mem_load64(b, o + 8) == 987654321 as u64;
+}
+
+fn test_mall_used_free_accounting() -> bool {
+    // 真正的不变量是"账能对上": 净用量 + 净空闲 + 每块 8 字节头 == 容量。
+    // (第一版我写成 free == 248-64, 那是把"初始净值"当成了常量 —— 拆块会多出一个头。)
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o1: u32 = mall_alloc(b, 256, 32);
+    let o2: u32 = mall_alloc(b, 256, 32);
+    let blocks: u32 = mall_block_count(b, 256);
+    let used: u32 = mall_used(b, 256);
+    let freeb: u32 = mall_free_bytes(b, 256);
+    let f1: bool = mall_free(b, 256, o1);
+    return used == 64 && blocks == 3 && used + freeb + blocks * MALL_HDR == 256
+        && f1 && mall_used(b, 256) == 32;
+}
+
+fn test_mall_free_coalesces() -> bool {
+    // 相邻的两块都释放后, 应当重新变回 1 块 —— 不合并的话块数会一路涨。
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o1: u32 = mall_alloc(b, 256, 32);
+    let o2: u32 = mall_alloc(b, 256, 32);
+    mall_free(b, 256, o1);
+    mall_free(b, 256, o2);
+    return mall_block_count(b, 256) == 1 && mall_free_bytes(b, 256) == 248;
+}
+
+fn test_mall_free_then_realloc_reuses_space() -> bool {
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o1: u32 = mall_alloc(b, 256, 32);
+    mall_free(b, 256, o1);
+    let o2: u32 = mall_alloc(b, 256, 32);
+    return o2 == o1;
+}
+
+fn test_mall_coalesce_keeps_middle_used() -> bool {
+    // A B C 三个块, 释放 A 和 C —— B 还占着, 所以不能合成一块。
+    let b: ptr = alloc(512);
+    mall_init(b, 512);
+    let a: u32 = mall_alloc(b, 512, 64);
+    let c: u32 = mall_alloc(b, 512, 64);
+    let d: u32 = mall_alloc(b, 512, 64);
+    mem_fill(b, c, 64, 77);
+    mall_free(b, 512, a);
+    mall_free(b, 512, d);
+    return mall_free_block_count(b, 512) == 2 && mall_used(b, 512) == 64
+        && load8(b, c) == 77 && mall_check(b, 512);
+}
+
+fn test_mall_exhaustion_returns_nil() -> bool {
+    let b: ptr = alloc(128);
+    mall_init(b, 128);
+    let o: u32 = mall_alloc(b, 128, 200);
+    return o == MALL_NIL && mall_used(b, 128) == 0;
+}
+
+fn test_mall_alloc_zero_is_nil() -> bool {
+    let b: ptr = alloc(128);
+    mall_init(b, 128);
+    return mall_alloc(b, 128, 0) == MALL_NIL;
+}
+
+fn test_mall_many_allocs_fill_arena() -> bool {
+    // 反复分配直到失败。256 字节的 arena, 每次要 16 (对齐后 16 + 8 头 = 24),
+    // 所以是 10 次, 剩 16 字节的自由块不够下一次 —— 那条边界正是这条测试盯的东西。
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let n: u32 = 0;
+    let o: u32 = mall_alloc(b, 256, 16);
+    while o != MALL_NIL {
+        n = n + 1;
+        o = mall_alloc(b, 256, 16);
+    }
+    return n == 10 && mall_used(b, 256) == 160 && mall_free_bytes(b, 256) == 8
+        && mall_check(b, 256);
+}
+
+fn test_mall_double_free_refused() -> bool {
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let o: u32 = mall_alloc(b, 256, 32);
+    let first: bool = mall_free(b, 256, o);
+    let second: bool = mall_free(b, 256, o);
+    return first && second == false;
+}
+
+fn test_mall_free_bad_offset_refused() -> bool {
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    return mall_free(b, 256, 0) == false && mall_free(b, 256, 9999) == false;
+}
+
+fn test_mall_check_detects_corruption() -> bool {
+    // 手工把块头写坏, mall_check 必须能说"不自洽" —— 一个永远返回 true 的检查没有价值。
+    let b: ptr = alloc(256);
+    mall_init(b, 256);
+    let ok: bool = mall_check(b, 256);
+    mem_store32(b, 0, 4);
+    return ok && mall_check(b, 256) == false;
+}
+
+fn test_mall_fragmentation_pattern() -> bool {
+    // 真实形状: 交替分配/释放, 然后量碎片。
+    let b: ptr = alloc(1024);
+    mall_init(b, 1024);
+    let o1: u32 = mall_alloc(b, 1024, 64);
+    let o2: u32 = mall_alloc(b, 1024, 64);
+    let o3: u32 = mall_alloc(b, 1024, 64);
+    let o4: u32 = mall_alloc(b, 1024, 64);
+    mall_free(b, 1024, o2);
+    mall_free(b, 1024, o4);
+    let frag: u32 = mall_free_block_count(b, 1024);
+    mall_free(b, 1024, o1);
+    mall_free(b, 1024, o3);
+    return frag == 2 && mall_block_count(b, 1024) == 1 && mall_free_bytes(b, 1024) == 1016;
+}

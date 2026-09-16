@@ -1,0 +1,218 @@
+// std/memdbg.lomt — 分配记账与哨兵
+//
+// 为什么需要它: 100 个模块里有一大半要自己管缓冲 —— 越界写一个字节, 症状往往出现在
+// 很远的地方 (下次分配拿到的块里数据莫名变了), 或者根本不出现 (写到还没用到的空闲区)。
+// 这类 bug 靠"看结果对不对"抓不住, 靠**记账**和**哨兵**能马上抓住。
+//
+// 两件事:
+//   1. 记账 —— 分配次数/释放次数/累计字节, 用来抓泄漏 (分配了没释放) 和数量失衡;
+//   2. 哨兵 —— 在调用方缓冲的两端各写一个魔数, 事后验一次就知道有没有越界。
+//
+// **没有全局状态**: 语言里没有 static, const 又只能是整数字面量, 所以计数器必须由调用方
+// 给一块 24 字节的 state。这是这一层唯一诚实的做法 —— 与其造一个假全局, 不如让状态显式。
+//
+// 命名: 公开 memdbg_*, 内部 mdb_*。自检 test_memdbg_*。
+
+module memdbg
+
+use "mem.lomt"
+
+/// state 的自检魔数。随便挑的一个不常见值, 用来抓"拿错块当 state"。
+pub const MEMDBG_MAGIC: u32 = 1959364786;
+/// 哨兵字节。
+pub const MEMDBG_GUARD: u32 = 165;
+/// state 需要的字节数: magic + allocs + frees + bytes(lo) + bytes(hi) = 20, 取 24 对齐。
+pub const MEMDBG_STATE: u32 = 24;
+
+/// 初始化 state 并盖魔数。
+pub fn memdbg_init(state: ptr) {
+    mem_store32(state, 0, MEMDBG_MAGIC);
+    mem_store32(state, 4, 0);
+    mem_store32(state, 8, 0);
+    mem_store32(state, 12, 0);
+    mem_store32(state, 16, 0);
+    mem_store32(state, 20, 0);
+}
+
+/// state 是不是本模块初始化过的。
+pub fn memdbg_valid(state: ptr) -> bool {
+    return mem_load32(state, 0) == MEMDBG_MAGIC;
+}
+
+/// 累计分配字节数 (u64 —— 32 位在几千次分配后就会绕回来, 那就抓不到泄漏了)。
+pub fn memdbg_bytes(state: ptr) -> u64 {
+    let lo: u64 = mem_load32(state, 12) as u64;
+    let hi: u64 = mem_load32(state, 16) as u64;
+    return (hi << 32) | lo;
+}
+
+fn mdb_add_bytes(state: ptr, n: u64) {
+    let v: u64 = memdbg_bytes(state) + n;
+    mem_store32(state, 12, (v & 4294967295) as u32);
+    mem_store32(state, 16, (v >> 32) as u32);
+}
+
+/// 记一次分配 (n 字节)。带魔数校验: 拿错的块调它不会污染别的东西, 只是不记账。
+pub fn memdbg_note_alloc(state: ptr, n: u32) {
+    if memdbg_valid(state) {
+        mem_store32(state, 4, mem_load32(state, 4) + 1);
+        mdb_add_bytes(state, n as u64);
+    }
+}
+
+/// 记一次释放 (n 字节)。
+pub fn memdbg_note_free(state: ptr, n: u32) {
+    if memdbg_valid(state) {
+        mem_store32(state, 8, mem_load32(state, 8) + 1);
+    }
+}
+
+pub fn memdbg_allocs(state: ptr) -> u32 {
+    return mem_load32(state, 4);
+}
+
+pub fn memdbg_frees(state: ptr) -> u32 {
+    return mem_load32(state, 8);
+}
+
+/// 还活着的分配数 (分配次数 - 释放次数)。
+pub fn memdbg_live(state: ptr) -> u32 {
+    return mem_load32(state, 4) - mem_load32(state, 8);
+}
+
+/// 有没有泄漏 (分配次数 != 释放次数)。
+pub fn memdbg_leaked(state: ptr) -> bool {
+    return mem_load32(state, 4) != mem_load32(state, 8);
+}
+
+// ------------------------------------------------------------ 哨兵
+
+/// 在 buf[off .. off+n) 的两端外侧各写一个哨兵字节。
+/// 调用方要留出 n+2 的空间: 数据在 buf[off+1 .. off+1+n)。
+pub fn memdbg_guard(buf: ptr, off: u32, n: u32) {
+    store8(buf, off, MEMDBG_GUARD as u8);
+    if n > 0 {
+        store8(buf, off + n + 1, MEMDBG_GUARD as u8);
+    }
+}
+
+/// 数据区起点 (哨兵之后)。
+pub fn memdbg_data(buf: ptr, off: u32) -> u32 {
+    return off + 1;
+}
+
+/// 两端哨兵是否还在。
+pub fn memdbg_guard_ok(buf: ptr, off: u32, n: u32) -> bool {
+    if load8(buf, off) != MEMDBG_GUARD {
+        return false;
+    }
+    if n == 0 {
+        return true;
+    }
+    return load8(buf, off + n + 1) == MEMDBG_GUARD;
+}
+
+/// 哨兵区是否被改过 —— 越界写一个字节就会命中。
+pub fn memdbg_guard_broken(buf: ptr, off: u32, n: u32) -> bool {
+    return memdbg_guard_ok(buf, off, n) == false;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_memdbg_init_and_valid() -> bool {
+    let s: ptr = alloc(48);
+    memdbg_init(s);
+    return memdbg_valid(s) && memdbg_allocs(s) == 0 && memdbg_frees(s) == 0
+        && memdbg_bytes(s) == 0 as u64;
+}
+
+fn test_memdbg_invalid_state_untouched() -> bool {
+    // 没初始化过的 state 必须先被识破 —— 否则会把别的块当计数器改。
+    let s: ptr = alloc(48);
+    mem_fill(s, 0, 24, 7);
+    let before: u32 = mem_load32(s, 4);
+    memdbg_note_alloc(s, 100);
+    return memdbg_valid(s) == false && mem_load32(s, 4) == before;
+}
+
+fn test_memdbg_counts_allocs_and_frees() -> bool {
+    let s: ptr = alloc(48);
+    memdbg_init(s);
+    memdbg_note_alloc(s, 16);
+    memdbg_note_alloc(s, 16);
+    memdbg_note_free(s, 16);
+    return memdbg_allocs(s) == 2 && memdbg_frees(s) == 1 && memdbg_live(s) == 1;
+}
+
+fn test_memdbg_detects_leak() -> bool {
+    let s: ptr = alloc(48);
+    memdbg_init(s);
+    memdbg_note_alloc(s, 32);
+    let leaked: bool = memdbg_leaked(s);
+    memdbg_note_free(s, 32);
+    return leaked && memdbg_leaked(s) == false;
+}
+
+fn test_memdbg_bytes_accumulate() -> bool {
+    let s: ptr = alloc(48);
+    memdbg_init(s);
+    memdbg_note_alloc(s, 1000);
+    memdbg_note_alloc(s, 24);
+    return memdbg_bytes(s) == 1024 as u64;
+}
+
+fn test_memdbg_bytes_cross_32bit() -> bool {
+    // 单次 3 GiB: 32 位累加会绕回去。这条是"必须用 u64"的判据。
+    let s: ptr = alloc(48);
+    memdbg_init(s);
+    memdbg_note_alloc(s, 3221225472);
+    memdbg_note_alloc(s, 3221225472);
+    return memdbg_bytes(s) == 6442450944;
+}
+
+fn test_memdbg_guard_ok() -> bool {
+    let b: ptr = alloc(64);
+    memdbg_guard(b, 0, 8);
+    return memdbg_guard_ok(b, 0, 8) && load8(b, 0) == 165 && load8(b, 9) == 165;
+}
+
+fn test_memdbg_guard_detects_underwrite() -> bool {
+    let b: ptr = alloc(64);
+    memdbg_guard(b, 4, 8);
+    store8(b, 4, 0 as u8);
+    return memdbg_guard_broken(b, 4, 8);
+}
+
+fn test_memdbg_guard_detects_overwrite() -> bool {
+    let b: ptr = alloc(64);
+    memdbg_guard(b, 0, 8);
+    store8(b, 9, 0 as u8);
+    return memdbg_guard_broken(b, 0, 8);
+}
+
+fn test_memdbg_guard_survives_correct_writes() -> bool {
+    // 只写数据区 (不碰两端) 时哨兵必须还在 —— 否则这个检查会天天误报, 没人会留着它。
+    let b: ptr = alloc(64);
+    memdbg_guard(b, 0, 8);
+    let d: u32 = memdbg_data(b, 0);
+    mem_fill(b, d, 8, 99);
+    return memdbg_guard_ok(b, 0, 8) && load8(b, d) == 99 && load8(b, d + 7) == 99;
+}
+
+fn test_memdbg_guard_zero_length() -> bool {
+    let b: ptr = alloc(64);
+    memdbg_guard(b, 2, 0);
+    return memdbg_guard_ok(b, 2, 0) && load8(b, 2) == 165;
+}
+
+fn test_memdbg_counter_not_confused_by_neighbour() -> bool {
+    // 两个独立 state 互不影响 —— 这条钉"状态属于调用方"这个设计。
+    let a: ptr = alloc(48);
+    let c: ptr = alloc(48);
+    memdbg_init(a);
+    memdbg_init(c);
+    memdbg_note_alloc(a, 8);
+    memdbg_note_alloc(a, 8);
+    memdbg_note_alloc(c, 8);
+    return memdbg_allocs(a) == 2 && memdbg_allocs(c) == 1 && memdbg_bytes(a) == 16 as u64;
+}

@@ -1,0 +1,534 @@
+// std/png.lomt — PNG 容器: 签名 / 块遍历 / IHDR / 扫描线反滤波
+//
+// 为什么需要它: PNG 是"块套块"的容器 —— 真正难的两件事 (DEFLATE 解压、扫描线重建)
+// 里, 解压已经有 std/inflate.lomt, 剩下的就是**把容器拆开**和**把滤波去掉**。
+// 本模块做后两件。
+//
+// ---------------------------------------------------------------- 一条明确的边界
+//
+//   **本模块不解 IDAT 的压**。PNG 的像素数据是"若干条扫描线 -> 逐行滤波 -> DEFLATE
+//   压缩"三层套起来的, 这里是**第二层**: 拿解压**之后**的原始扫描线字节, 做反滤波。
+//   解码一个完整 PNG 的正确顺序是:
+//
+//       pn_chunk_next 游标遍历 -> pn_ihdr 拿宽高/颜色类型 -> 把 IDAT 的**数据段**
+//       拼起来交给 inf_inflate_full (std/inflate.lomt) -> pn_unfilter 反滤波
+//
+//   把这条写在明处, 是因为"调了 pn_unfilter 却直接喂文件里的 IDAT 字节"是个
+//   看起来很像会工作、实际必然错的用法。
+//
+// ---------------------------------------------------------------- 签名 (逐字节)
+//
+//   89 50 4E 47 0D 0A 1A 0A
+//
+//   **不能用字符串字面量写它**: 这门语言的转义只有 `\n \t \" \\` —— 写 `\r` 会静默
+//   退化成字母 `r`, 写 `\x89` 这种更是没有。所以只能 `store8(..., 13 as u8)` /
+//   `10 as u8` 逐字节摆 (本文件里 `pn_v1()` 就是这样造向量的)。
+//
+// ---------------------------------------------------------------- 块
+//
+//   长度(4, **大端**) 类型(4) 数据(长度 字节) CRC(4, **大端**)
+//
+//   CRC 是 **type + data** (不含长度) 的标准 CRC-32, 用 `std/crc32.lomt` 算。
+//   `pn_chunk_next` 会核对它 —— 不匹配就报错, 不静默放过。
+//
+// ---------------------------------------------------------------- 滤波 (反滤波)
+//
+//   每个扫描线前面有一个**滤波类型字节**, 后跟 stride 个数据字节。stride =
+//   `ceil(宽 × 通道数 × 位深 / 8)`。反滤波就是**逐字节加回预测值** (mod 256):
+//
+//     0 None     原样
+//     1 Sub      + 左边 (bpp 字节前)
+//     2 Up       + 上边 (上一行同列)
+//     3 Average  + floor((左 + 上) / 2)
+//     4 Paeth    + Paeth 预测器 (见 pn_paeth: 三个候选里离 p=a+b-c 最近的那个,
+//                            **并列时的优先序是 a > b > c**, 这条最容易写反)
+//
+//   `bpp` = 一个**完整像素**占几字节 (24 位 RGB 是 3, 8 位灰度是 1, 16 位 RGBA 是 8),
+//   不是位深。Sub/Average/Paeth 都按它回退。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **不做隔行 (Adam7)**。IHDR 的 interlace 是 1 时 `pn_ihdr` 明确返回 `PN_NO`
+//     ("不支持"), **绝不静默当成非隔行** —— 那样解出来是花的, 而调用方不知道。
+//   - **不解 IDAT 的压** (见上)。
+//   - **不校验 IDAT 的可解性**, 也不把多块 IDAT 拼起来 —— 那是调用方的事 (给数据段
+//     偏移和长度就够)。
+//   - **不做辅助块 (tEXt/zTXt/gAMA/...)** 的语义解析; 游标能跳过它们, 但内容不看。
+//   - 只认 `pn_channels` 认得的那 5 种颜色类型 (0/2/3/4/6); 颜色类型 3 (调色板) 的
+//     实际取色要 PLTE 块, 本层只报"每像素 1 个索引"。
+//   - 反滤波**只按 `stride`/`bpp` 走**, 不检查位深/颜色类型组合的合法性 ——
+//     那是 `pn_ihdr` 的职责。
+//
+// 命名: 公开 pn_*, 内部 pn_*。自检 test_png_*。
+
+module png
+
+use "mem.lomt"
+use "crc32.lomt"
+
+pub const PN_ERR: u32 = 4294967295;
+/// "不支持" (目前只有隔行是这一档, 与 PN_ERR 分开)。
+pub const PN_NO: u32 = 4294967294;
+
+/// 块的类型码 (大端拼成 u32)。
+pub const PN_IHDR: u32 = 1229472850; // 0x49484452 "IHDR"
+pub const PN_PLTE: u32 = 1347179589; // 0x504C5445 "PLTE"
+pub const PN_IDAT: u32 = 1229209940; // 0x49444154 "IDAT"
+pub const PN_IEND: u32 = 1229278788; // 0x49454E44 "IEND"
+
+/// 签名长度 / 块头 (长度+类型+CRC) 长度。
+pub const PN_SIG: u32 = 8;
+pub const PN_CHUNK_HDR: u32 = 12;
+
+pub fn pn_chunk_info_bytes() -> u32 {
+    return 16;
+}
+
+pub fn pn_ihdr_bytes() -> u32 {
+    return 28;
+}
+
+// ---------------------------------------------------------------- 大端
+
+fn pn_be32(p: ptr, o: u32) -> u32 {
+    return (load8(p, o) << 24) | (load8(p, o + 1) << 16) | (load8(p, o + 2) << 8) | load8(p, o + 3);
+}
+
+// ---------------------------------------------------------------- 签名
+
+/// PNG 签名对得上吗 (需要至少 8 字节)。
+pub fn pn_signature_ok(buf: ptr, n: u32) -> bool {
+    if n < PN_SIG {
+        return false;
+    }
+    return load8(buf, 0) == 137 && load8(buf, 1) == 80 && load8(buf, 2) == 78
+        && load8(buf, 3) == 71 && load8(buf, 4) == 13 && load8(buf, 5) == 10
+        && load8(buf, 6) == 26 && load8(buf, 7) == 10;
+}
+
+// ---------------------------------------------------------------- 块遍历
+
+/// 一段字节的标准 CRC-32 (type + data 用)。
+fn pn_crc(buf: ptr, o: u32, len: u32) -> u32 {
+    let c: u32 = crc32_init();
+    let i: u32 = 0;
+    while i < len {
+        c = crc32_update(c, load8(buf, o + i));
+        i = i + 1;
+    }
+    return crc32_finish(c);
+}
+
+/// 解析 `pos` 处的块, 结果写进 `out` (需要 `pn_chunk_info_bytes()` = 16 字节):
+///
+///     0  length       数据段长度
+///     4  data offset  数据段起点
+///     8  type         块类型 (大端拼成的 u32, 如 PN_IHDR)
+///    12  next         下一个块的起点 (= 本块之后第一个字节)
+///
+/// 返回下一个块的起点 (总是 > pos), 或 PN_ERR (越界 / CRC 不匹配)。
+/// **CRC 不匹配是错误, 不是警告** —— 静默放过等于把损坏当正常。
+pub fn pn_chunk_next(buf: ptr, n: u32, pos: u32, out: ptr) -> u32 {
+    // 用减法判界, 不用 `pos + 12 > n` —— 荒谬的 pos 会让加法回绕。
+    if pos > n || n - pos < PN_CHUNK_HDR {
+        return PN_ERR;
+    }
+    let len: u32 = pn_be32(buf, pos);
+    let t: u32 = pn_be32(buf, pos + 4);
+    let data: u32 = pos + 8;
+    // **不做 `data + len` 的加法判界**: 荒谬的 len 会让加法在 u32 里回绕。
+    if data > n || len > n - data {
+        return PN_ERR;
+    }
+    let after: u32 = data + len;
+    if after > n || n - after < 4 {
+        return PN_ERR;
+    }
+    if pn_crc(buf, pos + 4, 4 + len) != pn_be32(buf, after) {
+        return PN_ERR;
+    }
+    mem_store32(out, 0, len);
+    mem_store32(out, 4, data);
+    mem_store32(out, 8, t);
+    mem_store32(out, 12, after + 4);
+    return after + 4;
+}
+
+// ---------------------------------------------------------------- IHDR
+
+/// 颜色类型 -> 每像素通道数; 不认识的给 0。
+pub fn pn_channels(color_type: u32) -> u32 {
+    if color_type == 0 {
+        return 1; // 灰度
+    }
+    if color_type == 2 {
+        return 3; // RGB
+    }
+    if color_type == 3 {
+        return 1; // 调色板 (每像素一个索引)
+    }
+    if color_type == 4 {
+        return 2; // 灰度 + alpha
+    }
+    if color_type == 6 {
+        return 4; // RGBA
+    }
+    return 0;
+}
+
+/// 该颜色类型允许的位深。
+fn pn_bitdepth_ok(ct: u32, bd: u32) -> bool {
+    if ct == 0 {
+        return bd == 1 || bd == 2 || bd == 4 || bd == 8 || bd == 16;
+    }
+    if ct == 3 {
+        return bd == 1 || bd == 2 || bd == 4 || bd == 8;
+    }
+    if ct == 2 || ct == 4 || ct == 6 {
+        return bd == 8 || bd == 16;
+    }
+    return false;
+}
+
+/// 解析 IHDR (文件必须以签名开头, 且第一块必须是 IHDR)。
+/// `out` 需要 `pn_ihdr_bytes()` = 28 字节:
+///
+///     0  width   4  height   8  bit depth   12 color type
+///    16  compression        20 filter      24 interlace
+///
+/// 返回 0; 隔行给 PN_NO (**信息照样写进 out, 方便调用方报"是哪种不支持的图"**);
+/// 头坏了给 PN_ERR。**不核对 IHDR 自己的 CRC** (那是 `pn_chunk_next` 的事) ——
+/// 这样自检能直接改字段验解析, 而不必每次重算 CRC。
+pub fn pn_ihdr(buf: ptr, n: u32, out: ptr) -> u32 {
+    if pn_signature_ok(buf, n) == false {
+        return PN_ERR;
+    }
+    if n < PN_SIG + 25 {
+        return PN_ERR;
+    }
+    if pn_be32(buf, PN_SIG) != 13 || pn_be32(buf, PN_SIG + 4) != PN_IHDR {
+        return PN_ERR;
+    }
+    let d: u32 = PN_SIG + 8;
+    let w: u32 = pn_be32(buf, d);
+    let h: u32 = pn_be32(buf, d + 4);
+    let bd: u32 = load8(buf, d + 8);
+    let ct: u32 = load8(buf, d + 9);
+    let cm: u32 = load8(buf, d + 10);
+    let fm: u32 = load8(buf, d + 11);
+    let il: u32 = load8(buf, d + 12);
+    if w == 0 || h == 0 {
+        return PN_ERR;
+    }
+    if cm != 0 || fm != 0 {
+        return PN_ERR; // 压缩/滤波方法只有 0 一种
+    }
+    if pn_bitdepth_ok(ct, bd) == false {
+        return PN_ERR;
+    }
+    mem_store32(out, 0, w);
+    mem_store32(out, 4, h);
+    mem_store32(out, 8, bd);
+    mem_store32(out, 12, ct);
+    mem_store32(out, 16, cm);
+    mem_store32(out, 20, fm);
+    mem_store32(out, 24, il);
+    if il != 0 {
+        return PN_NO; // Adam7 明确"不支持", 绝不静默当非隔行
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 反滤波
+
+/// PNG 的 Paeth 预测器: 在 a(左) / b(上) / c(左上) 里挑离 `p = a+b-c` 最近的那个。
+/// **并列的优先序是 a > b > c** (先 <= 判 a, 再 <= 判 b) —— 写反了解出来就错。
+pub fn pn_paeth(a: u32, b: u32, c: u32) -> u32 {
+    let p: i32 = (a as i32) + (b as i32) - (c as i32);
+    let pa: i32 = p - (a as i32);
+    let pb: i32 = p - (b as i32);
+    let pc: i32 = p - (c as i32);
+    let da: i32 = pa;
+    if da < 0 {
+        da = 0 - da;
+    }
+    let db: i32 = pb;
+    if db < 0 {
+        db = 0 - db;
+    }
+    let dc: i32 = pc;
+    if dc < 0 {
+        dc = 0 - dc;
+    }
+    if da <= db && da <= dc {
+        return a;
+    }
+    if db <= dc {
+        return b;
+    }
+    return c;
+}
+
+/// 反滤波。`raw` 是**解压之后**的扫描线字节 (每行 = 1 个滤波字节 + stride 个数据);
+/// `out` 写成 h × stride 的裸像素字节。`bpp` 是一个完整像素的字节数 (>= 1)。
+/// 返回 0, 或 PN_ERR (raw 不够长 / 滤波类型不在 0..4).
+pub fn pn_unfilter(raw: ptr, raw_n: u32, out: ptr, stride: u32, h: u32, bpp: u32) -> u32 {
+    if bpp == 0 || stride == 0 {
+        return PN_ERR;
+    }
+    // 用除法判长度, 防 `(stride+1)*h` 回绕 (同 bmp 的教训)。
+    let rl: u32 = stride + 1;
+    if h > raw_n / rl {
+        return PN_ERR;
+    }
+    let y: u32 = 0;
+    while y < h {
+        let ft: u32 = load8(raw, y * rl);
+        if ft > 4 {
+            return PN_ERR;
+        }
+        let x: u32 = 0;
+        while x < stride {
+            let rv: u32 = load8(raw, y * rl + 1 + x);
+            let a: u32 = 0;
+            let b: u32 = 0;
+            let c: u32 = 0;
+            if x >= bpp {
+                a = load8(out, y * stride + x - bpp);
+            }
+            if y > 0 {
+                b = load8(out, (y - 1) * stride + x);
+            }
+            if x >= bpp && y > 0 {
+                c = load8(out, (y - 1) * stride + x - bpp);
+            }
+            let v: u32 = 0;
+            if ft == 0 {
+                v = rv;
+            } else if ft == 1 {
+                v = rv + a;
+            } else if ft == 2 {
+                v = rv + b;
+            } else if ft == 3 {
+                v = rv + (a + b) / 2;
+            } else {
+                v = rv + pn_paeth(a, b, c);
+            }
+            store8(out, y * stride + x, (v & 255) as u8);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn pn_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn pn_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = pn_hv(str_byte(s, k * 2));
+        let lo: u32 = pn_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 一个真 PNG: 签名 + IHDR(2×2, 8 位 RGBA) + IDAT(4 字节) + IEND。CRC 由 Python 算。
+fn pn_v1() -> str {
+    return "89504E470D0A1A0A0000000D494844520000000200000002080600000072B60D240000000449444154010203047D5BC3D60000000049454E44AE426082";
+}
+
+fn test_png_signature_ok_and_bad() -> bool {
+    let f: ptr = alloc(96);
+    let n: u32 = pn_hx(f, pn_v1());
+    let ok: bool = pn_signature_ok(f, n);
+    store8(f, 7, 11 as u8); // 签名最后一个字节本该是 10
+    let bad: bool = pn_signature_ok(f, n);
+    return n == 61 && ok && bad == false && pn_signature_ok(f, 5) == false;
+}
+
+fn test_png_chunk_walk_three_chunks() -> bool {
+    // 从 8 开始游标走三个块: IHDR(13) -> IDAT(4) -> IEND(0), 结束正好是文件尾。
+    let f: ptr = alloc(96);
+    let info: ptr = alloc(16);
+    let n: u32 = pn_hx(f, pn_v1());
+    let p1: u32 = pn_chunk_next(f, n, 8, info);
+    let ok1: bool = p1 == 33 && mem_load32(info, 0) == 13
+        && mem_load32(info, 4) == 16 && mem_load32(info, 8) == PN_IHDR;
+    let p2: u32 = pn_chunk_next(f, n, p1, info);
+    let ok2: bool = p2 == 49 && mem_load32(info, 0) == 4
+        && mem_load32(info, 4) == 41 && mem_load32(info, 8) == PN_IDAT;
+    let p3: u32 = pn_chunk_next(f, n, p2, info);
+    let ok3: bool = p3 == 61 && mem_load32(info, 0) == 0 && mem_load32(info, 8) == PN_IEND
+        && mem_load32(info, 12) == 61;
+    return ok1 && ok2 && ok3;
+}
+
+fn test_png_chunk_crc_mismatch_is_error() -> bool {
+    // 改一个 IDAT 数据字节 -> 它那个块的 CRC 就不再匹配, 遍历到它必须报错。
+    let f: ptr = alloc(96);
+    let info: ptr = alloc(16);
+    let n: u32 = pn_hx(f, pn_v1());
+    store8(f, 41, 9 as u8); // IDAT 数据第 1 字节
+    // IHDR 段没被碰 -> 仍然能过
+    let ok1: bool = pn_chunk_next(f, n, 8, info) == 33;
+    let bad: u32 = pn_chunk_next(f, n, 33, info);
+    return ok1 && bad == PN_ERR;
+}
+
+fn test_png_ihdr_parse_rgba() -> bool {
+    let f: ptr = alloc(96);
+    let hi: ptr = alloc(28);
+    let n: u32 = pn_hx(f, pn_v1());
+    let r: u32 = pn_ihdr(f, n, hi);
+    return r == 0 && mem_load32(hi, 0) == 2 && mem_load32(hi, 4) == 2
+        && mem_load32(hi, 8) == 8 && mem_load32(hi, 12) == 6
+        && mem_load32(hi, 16) == 0 && mem_load32(hi, 20) == 0 && mem_load32(hi, 24) == 0;
+}
+
+fn test_png_ihdr_each_color_type_and_depth() -> bool {
+    // 直接改 IHDR 的**数据字节**验解析 (pn_ihdr 不核对 CRC, 所以这么测是合法的)。
+    // IHDR 数据段从偏移 16 起, 里面: 位深 +8, 颜色类型 +9, 隔行 +12。
+    let f: ptr = alloc(96);
+    let hi: ptr = alloc(28);
+    let n: u32 = pn_hx(f, pn_v1());
+    let d: u32 = 16;
+    let bad: u32 = 0;
+    // 每三个 u32 一组: (颜色类型, 位深, 期望通道数)
+    let cts: ptr = alloc(48);
+    mem_store32(cts, 0, 0);  mem_store32(cts, 4, 8);  mem_store32(cts, 8, 1);
+    mem_store32(cts, 12, 2); mem_store32(cts, 16, 16); mem_store32(cts, 20, 3);
+    mem_store32(cts, 24, 3); mem_store32(cts, 28, 1);  mem_store32(cts, 32, 1);
+    mem_store32(cts, 36, 4); mem_store32(cts, 40, 8);  mem_store32(cts, 44, 2);
+    let i: u32 = 0;
+    while i < 4 {
+        let ct: u32 = mem_load32(cts, i * 12);
+        let bd: u32 = mem_load32(cts, i * 12 + 4);
+        let ch: u32 = mem_load32(cts, i * 12 + 8);
+        store8(f, d + 8, bd as u8);
+        store8(f, d + 9, ct as u8);
+        if pn_ihdr(f, n, hi) != 0 {
+            bad = bad + 1;
+        }
+        if mem_load32(hi, 12) != ct || mem_load32(hi, 8) != bd
+            || mem_load32(hi, 0) != 2 || pn_channels(ct) != ch {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_png_ihdr_rejects_unknown_color_type() -> bool {
+    let f: ptr = alloc(96);
+    let hi: ptr = alloc(28);
+    let n: u32 = pn_hx(f, pn_v1());
+    store8(f, 25, 5 as u8); // 颜色类型 5 不存在
+    let a: u32 = pn_ihdr(f, n, hi);
+    store8(f, 25, 2 as u8);
+    store8(f, 24, 4 as u8); // 颜色类型 2 (RGB) 不允许 4 位深
+    let b: u32 = pn_ihdr(f, n, hi);
+    return a == PN_ERR && b == PN_ERR;
+}
+
+fn test_png_ihdr_interlaced_is_no_not_silent() -> bool {
+    // 隔行 = 1: 必须**明确报不支持** (PN_NO), 而不是当非隔行解出一张花图。
+    // 信息仍然写进 out —— 调用方要能说清"是哪种不支持的图"。
+    let f: ptr = alloc(96);
+    let hi: ptr = alloc(28);
+    let n: u32 = pn_hx(f, pn_v1());
+    store8(f, 28, 1 as u8);
+    let r: u32 = pn_ihdr(f, n, hi);
+    return r == PN_NO && r != PN_ERR && mem_load32(hi, 24) == 1
+        && mem_load32(hi, 0) == 2 && mem_load32(hi, 12) == 6;
+}
+
+fn test_png_channels_table() -> bool {
+    return pn_channels(0) == 1 && pn_channels(2) == 3 && pn_channels(3) == 1
+        && pn_channels(4) == 2 && pn_channels(6) == 4
+        && pn_channels(1) == 0 && pn_channels(5) == 0 && pn_channels(7) == 0;
+}
+
+fn test_png_paeth_predictor() -> bool {
+    // 手算几组: 关键在"并列时优先 a, 其次 b"。
+    // (10,20,10): p=20, 到 a=10 距 10、b=20 距 0、c=10 距 10 -> b
+    // (10,10,10): p=10, 三个都距 0 -> 并列取 a
+    // (0,0,0):    -> a
+    return pn_paeth(10, 20, 10) == 20 && pn_paeth(10, 10, 10) == 10
+        && pn_paeth(0, 0, 0) == 0 && pn_paeth(5, 9, 3) == 9;
+}
+
+fn pn_unf(rawhex: str, outhex: str, stride: u32, h: u32, bpp: u32) -> bool {
+    // 一条脚手架: 反滤波 rawhex, 结果必须逐字节等于 outhex (真值由 Python 算)。
+    let raw: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let want: ptr = alloc(64);
+    let rn: u32 = pn_hx(raw, rawhex);
+    let on: u32 = pn_hx(want, outhex);
+    mem_fill(out, 0, 64, 0);
+    if pn_unfilter(raw, rn, out, stride, h, bpp) != 0 {
+        return false;
+    }
+    return mem_eq(out, 0, want, 0, on);
+}
+
+fn test_png_unfilter_none() -> bool {
+    // 0 None: 原样。
+    return pn_unf("000A141E28", "0A141E28", 4, 1, 1);
+}
+
+fn test_png_unfilter_sub() -> bool {
+    // 1 Sub (bpp=1): 逐字节加左边。raw 明文全 0x0A, 解出 10,20,30,40。
+    return pn_unf("010A0A0A0A", "0A141E28", 4, 1, 1);
+}
+
+fn test_png_unfilter_up() -> bool {
+    // 2 Up: 第二行加第一行。
+    return pn_unf("000A141E280202050307", "0A141E280C19212F", 4, 2, 1);
+}
+
+fn test_png_unfilter_average() -> bool {
+    // 3 Average: 加 floor((左+上)/2)。
+    return pn_unf("000A141E2803070A070D", "0A141E280C1A2332", 4, 2, 1);
+}
+
+fn test_png_unfilter_paeth() -> bool {
+    // 4 Paeth: 加 Paeth(左, 上, 左上)。
+    return pn_unf("000A141E28040207080C", "0A141E280C1B2634", 4, 2, 1);
+}
+
+fn test_png_unfilter_paeth_bpp2() -> bool {
+    // bpp=2 (16 位灰度): 回退 2 字节, 不是 1。用同一个字节数测会错。
+    return pn_unf("00050A141E28320402040507090D", "050A141E2832070E1925313F", 6, 2, 2);
+}
+
+fn test_png_unfilter_rejects_bad_filter() -> bool {
+    // 滤波类型 5 不存在 -> 报错, 不能当成某种滤波硬解。
+    let raw: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let rn: u32 = pn_hx(raw, "050A141E28");
+    return pn_unfilter(raw, rn, out, 4, 1, 1) == PN_ERR;
+}
+
+fn test_png_unfilter_rejects_short_raw() -> bool {
+    // raw 不够一整行 (每行 stride+1 字节) -> 报错; bpp=0 也是错的。
+    let raw: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let rn: u32 = pn_hx(raw, "000A141E28020A141E"); // 9 字节, 两行要 10
+    return pn_unfilter(raw, rn, out, 4, 2, 1) == PN_ERR
+        && pn_unfilter(raw, rn, out, 4, 2, 0) == PN_ERR
+        && pn_unfilter(raw, rn, out, 4, 1, 1) == 0;
+}

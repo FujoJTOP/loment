@@ -1,0 +1,422 @@
+// std/f64conv.lomt — 整数 <-> 浮点, 以及单精度 <-> 双精度
+//
+// 为什么单独一层: 整数与浮点之间的转换**每个方向都有独立的边界**, 而且边界各不相同:
+//   - 整数 -> 浮点: 大于 2^53 就不能精确表示了, 要舍入;
+//   - 浮点 -> 整数: 是**截断向零**还是舍入? 负数怎么办? 超出 u64 怎么办?
+//   - 单精度 <-> 双精度: 一边有 24 位尾数一半有 53 位, 指数范围也差得远。
+// 把它们混在 f64 里会让"算术"那一层看不清; 单列出来, 每个方向的取舍就写在名字下面。
+//
+// 取舍 (都取最常见的那种, 并在这里写明):
+//   - 浮点 -> 整数: **截断向零** (与 C/Rust 的 `as` 一样), NaN -> 0, 越界**饱和**
+//     (不环绕 —— 环绕会静默给出一个看起来合理的错数)。
+//   - 单精度 -> 双精度: 永远精确, 不会舍入 (24 位尾数放得进 53 位)。
+//
+// 命名: 公开 f64conv_*, 内部 fc_*。自检 test_f64conv_*。
+
+module f64conv
+
+use "f64.lomt"
+use "f64bits.lomt"
+use "wide.lomt"
+
+/// u64 -> f64。超过 2^53 的部分按就近到偶数舍入。
+pub fn f64conv_from_u64(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    return f64_finish_round(0, v, 63 - wide_clz64(v), 0 as i64, 0);
+}
+
+pub fn f64conv_from_u32(v: u32) -> u64 {
+    return f64conv_from_u64(v as u64);
+}
+
+/// i64 -> f64。符号与幅值分开处理, 于是 i64 的最小值 (没有对应正数) 也能算。
+pub fn f64conv_from_i64(v: i64) -> u64 {
+    let mag: u64 = v as u64;
+    let sign: u32 = 0;
+    if (mag >> 63) == 1 {
+        sign = 1;
+        // 取负在 u64 上做 (二进制补码), 避开 i64 的 `-MIN` 溢出。
+        mag = (mag ^ 18446744073709551615) + 1;
+    }
+    if mag == 0 {
+        return 0;
+    }
+    return f64_finish_round(sign, mag, 63 - wide_clz64(mag), 0 as i64, 0);
+}
+
+pub fn f64conv_from_i32(v: i32) -> u64 {
+    return f64conv_from_i64(v as i64);
+}
+
+/// f64 -> u64, **按幅值截断**, 不管符号。内部用。
+fn fc_to_u64_abs(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return 0;
+    }
+    if f64bits_is_inf(x) {
+        return 18446744073709551615;
+    }
+    let e: u32 = f64bits_exp(x);
+    if e == 0 {
+        return 0; // 次正规 -> 绝对值 < 1 -> 0
+    }
+    let sh: i64 = (e as i64) - 1075;
+    let m: u64 = f64_mant53(x);
+    if sh >= 0 {
+        // m < 2^53, 左移超过 11 位就装不下 u64 了 -> 饱和。
+        if sh > 11 {
+            return 18446744073709551615;
+        }
+        return m << (sh as u32);
+    }
+    let s: u32 = (0 as i64 - sh) as u32;
+    if s >= 64 {
+        return 0;
+    }
+    return m >> s;
+}
+
+/// f64 -> u64。负数给 0, NaN 给 0, 越界饱和到 u64 最大值。
+pub fn f64conv_to_u64(x: u64) -> u64 {
+    if f64bits_is_nan(x) {
+        return 0;
+    }
+    if f64bits_is_negative(x) {
+        return 0;
+    }
+    return fc_to_u64_abs(x);
+}
+
+pub fn f64conv_to_u32(x: u64) -> u32 {
+    let v: u64 = f64conv_to_u64(x);
+    if v > 4294967295 {
+        return 4294967295;
+    }
+    return v as u32;
+}
+
+/// f64 -> i64。截断向零, NaN 给 0, 越界饱和 (两个方向各自饱和)。
+pub fn f64conv_to_i64(x: u64) -> i64 {
+    if f64bits_is_nan(x) {
+        return 0;
+    }
+    let mag: u64 = fc_to_u64_abs(x);
+    if f64bits_is_negative(x) {
+        // i64 的最小值写不出正字面量, 用 (0 - MAX) - 1 表达, 避开溢出。
+        if mag >= 9223372036854775808 {
+            return (0 as i64) - (9223372036854775807 as i64) - 1;
+        }
+        return (0 as i64) - (mag as i64);
+    }
+    if mag > 9223372036854775807 {
+        return 9223372036854775807;
+    }
+    return mag as i64;
+}
+
+pub fn f64conv_to_i32(x: u64) -> i32 {
+    let v: i64 = f64conv_to_i64(x);
+    if v > 2147483647 {
+        return 2147483647;
+    }
+    if v < (0 as i64) - (2147483647 as i64) - 1 {
+        return (0 as i32) - (2147483647 as i32) - 1;
+    }
+    return v as i32;
+}
+
+/// u64 -> f64 -> u64 是否无损 (即这个整数能被 f64 精确表示)。
+pub fn f64conv_u64_is_exact(v: u64) -> bool {
+    if v == 0 {
+        return true;
+    }
+    // 只保留最高 53 位后还与原来相等, 就是精确的。
+    let p: u32 = 63 - wide_clz64(v);
+    if p < 53 {
+        return true;
+    }
+    let drop: u32 = p - 52;
+    let mask: u64 = ((1 as u64) << drop) - 1;
+    return (v & mask) == 0;
+}
+
+// ------------------------------------------------------------ 单精度
+
+/// f32 的 qNaN (0x7FC00000)。
+pub const F32_QNAN: u32 = 2143289344;
+/// f32 的正无穷 (0x7F800000)。
+pub const F32_POS_INF: u32 = 2139095040;
+/// f32 的尾数掩码。
+pub const F32_MANT_MASK: u32 = 8388607;
+/// f32 隐含的 1 (第 23 位)。
+pub const F32_IMPLICIT: u32 = 8388608;
+
+/// f64 -> f32, 就近到偶数。溢出给无穷, 下溢给次正规或零。
+pub fn f64conv_to_f32(x: u64) -> u32 {
+    let sign: u32 = f64bits_sign(x);
+    if f64bits_is_nan(x) {
+        return (sign << 31) | F32_QNAN;
+    }
+    if f64bits_is_inf(x) {
+        return (sign << 31) | F32_POS_INF;
+    }
+    if f64bits_is_zero(x) {
+        return sign << 31;
+    }
+    // 归一到"最高位 = 25", 于是尾数 = m >> 2 是 24 位, 低两位是 G/R。
+    let m: u64 = f64_mant53(x) << 3;
+    let e: i64 = f64_exp_lsb(x) - 3;
+    let p: u32 = 63 - wide_clz64(m);
+    let sticky: u32 = 0;
+    while p < 25 {
+        m = m << 1;
+        p = p + 1;
+        e = e - 1;
+    }
+    while p > 25 {
+        if (m & 1) != 0 {
+            sticky = 1;
+        }
+        m = m >> 1;
+        p = p - 1;
+        e = e + 1;
+    }
+    let mant: u64 = m >> 2;
+    let g: u64 = (m >> 1) & 1;
+    let r: u64 = m & 1;
+    let ef: i64 = e + 2 + 150;
+    if ef >= 255 {
+        return (sign << 31) | F32_POS_INF;
+    }
+    if ef <= 0 {
+        return fc_to_f32_sub(sign, mant, g, r, sticky, ef);
+    }
+    let out: u64 = mant;
+    let e2: i64 = ef;
+    let up: bool = g == 1 && (r == 1 || sticky == 1 || (out & 1) == 1);
+    if up {
+        out = out + 1;
+        if (out >> 24) != 0 {
+            out = out >> 1;
+            e2 = e2 + 1;
+        }
+    }
+    if e2 >= 255 {
+        return (sign << 31) | F32_POS_INF;
+    }
+    return (sign << 31) | ((e2 as u32) << 23) | ((out & 8388607) as u32);
+}
+
+fn fc_to_f32_sub(sign: u32, mant: u64, g0: u64, r0: u64, s0: u32, ef: i64) -> u32 {
+    let shift: u32 = (1 as i64 - ef) as u32;
+    if shift > 24 {
+        return sign << 31;
+    }
+    let k: u64 = mant >> shift;
+    let g: u64 = 0;
+    let r: u64 = 0;
+    let s: u32 = s0;
+    if shift == 1 {
+        g = mant & 1;
+        r = g0;
+        if r0 == 1 {
+            s = 1;
+        }
+    } else {
+        g = (mant >> (shift - 1)) & 1;
+        r = (mant >> (shift - 2)) & 1;
+        if (mant & (((1 as u64) << (shift - 2)) - 1)) != 0 || g0 == 1 || r0 == 1 {
+            s = 1;
+        }
+    }
+    let out: u64 = k;
+    let up: bool = g == 1 && (r == 1 || s == 1 || (out & 1) == 1);
+    if up {
+        out = k + 1;
+    }
+    if out == 8388608 {
+        return (sign << 31) | 8388608; // 进位成最小正规
+    }
+    return (sign << 31) | (out as u32);
+}
+
+/// f32 -> f64。**永远精确** —— 24 位尾数放得进 53 位, 指数范围也小得多。
+pub fn f64conv_from_f32(b: u32) -> u64 {
+    let sign: u32 = b >> 31;
+    let e: u32 = (b >> 23) & 255;
+    let m: u32 = b & 8388607;
+    if e == 255 {
+        if m == 0 {
+            return f64bits_pack(sign, 2047, 0);
+        }
+        // 保留"是 NaN", 载荷换成 f64 的规范 quiet 位 (不做载荷位搬运)。
+        return f64bits_pack(sign, 2047, 2251799813685248);
+    }
+    if e == 0 {
+        if m == 0 {
+            return f64bits_pack(sign, 0, 0);
+        }
+        let mm: u64 = m as u64;
+        return f64_finish_round(sign, mm, 63 - wide_clz64(mm), (0 as i64) - (149 as i64), 0);
+    }
+    let mm: u64 = (m as u64) | 8388608;
+    return f64_finish_round(sign, mm, 23, (e as i64) - (150 as i64), 0);
+}
+
+/// f64 -> f32 -> f64 是否无损。
+pub fn f64conv_f32_roundtrip_ok(x: u64) -> bool {
+    return f64conv_from_f32(f64conv_to_f32(x)) == x;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_f64conv_from_u64_small() -> bool {
+    return f64conv_from_u64(0) == 0 && f64conv_from_u64(1) == 0x3FF0000000000000
+        && f64conv_from_u64(2) == 0x4000000000000000 && f64conv_from_u64(3) == 0x4008000000000000;
+}
+
+fn test_f64conv_from_u64_exact_range() -> bool {
+    // 2^53 以内都能精确表示, 逐点验几个。
+    let v: u64 = 4503599627370495; // 2^52-1
+    let w: u64 = 4503599627370496; // 2^52
+    return f64conv_to_u64(f64conv_from_u64(v)) == v
+        && f64conv_to_u64(f64conv_from_u64(w)) == w
+        && f64conv_from_u64(w) == 0x4330000000000000;
+}
+
+fn test_f64conv_from_u64_rounds_at_2pow53() -> bool {
+    // 2^53 + 1 落在两个可表示值正中间 -> 到偶数 -> 2^53。
+    return f64conv_from_u64(9007199254740993) == 0x4340000000000000
+        && f64conv_from_u64(9007199254740995) == 0x4340000000000002;
+}
+
+fn test_f64conv_from_u64_max_saturates_to_2pow64() -> bool {
+    // u64 最大值舍到最近的 double 就是 2^64 (指数域 1087)。
+    return f64conv_from_u64(18446744073709551615) == 0x43F0000000000000;
+}
+
+fn test_f64conv_from_i64_signs() -> bool {
+    return f64conv_from_i64(0 as i64) == 0
+        && f64conv_from_i64(-1 as i64) == 0xBFF0000000000000
+        && f64conv_from_i64(-2 as i64) == 0xC000000000000000
+        && f64conv_from_i64(3 as i64) == F64_THREE;
+}
+
+fn test_f64conv_from_i64_min() -> bool {
+    // i64 的最小值没有对应的正数 —— 取负在 u64 上做才不会在这里炸。
+    return f64conv_from_i64((0 as i64) - (9223372036854775807 as i64) - 1) == 0xC3E0000000000000;
+}
+
+fn test_f64conv_to_u64_truncates_toward_zero() -> bool {
+    // 2.7 -> 2; -2.7 -> 0 (负数给 0, 不是 -2)。
+    let x: u64 = 0x400599999999999A; // 2.7
+    return f64conv_to_u64(x) == 2 && f64conv_to_u64(0xC00599999999999A) == 0;
+}
+
+fn test_f64conv_to_u64_small_values() -> bool {
+    return f64conv_to_u64(F64_ONE) == 1 && f64conv_to_u64(F64_HALF) == 0
+        && f64conv_to_u64(F64_MIN_SUB) == 0 && f64conv_to_u64(F64_POS_ZERO) == 0;
+}
+
+fn test_f64conv_to_u64_saturation() -> bool {
+    // 2^64 及以上的有限值饱和到 u64 最大值, 而不是环绕成 0。
+    let nan: u64 = 9221120237041090560;
+    return f64conv_to_u64(0x43F0000000000000) == 18446744073709551615
+        && f64conv_to_u64(F64_POS_INF) == 18446744073709551615
+        && f64conv_to_u64(nan) == 0;
+}
+
+fn test_f64conv_to_i64_signs() -> bool {
+    return f64conv_to_i64(F64_ONE) == 1
+        && f64conv_to_i64(0xBFF0000000000000) == -1 as i64
+        && f64conv_to_i64(0xC000000000000000) == -2 as i64
+        && f64conv_to_i64(F64_MIN_SUB) == 0;
+}
+
+fn test_f64conv_to_i64_saturation() -> bool {
+    return f64conv_to_i64(0x43F0000000000000) == 9223372036854775807
+        && f64conv_to_i64(0xC3F0000000000000) == (0 as i64) - (9223372036854775807 as i64) - 1
+        && f64conv_to_i64(F64_POS_INF) == 9223372036854775807;
+}
+
+fn test_f64conv_to_i64_min_exact() -> bool {
+    // -2^63 是能精确表示的, 必须原样给回来 (这条走的是 mag == 2^63 的分支)。
+    return f64conv_to_i64(0xC3E0000000000000) == (0 as i64) - (9223372036854775807 as i64) - 1;
+}
+
+fn test_f64conv_to_u32_and_i32() -> bool {
+    return f64conv_to_u32(0x43F0000000000000) == 4294967295
+        && f64conv_to_u32(F64_ONE) == 1
+        && f64conv_to_i32(0xC3F0000000000000) == (0 as i32) - (2147483647 as i32) - 1
+        && f64conv_to_i32(F64_THREE) == 3;
+}
+
+fn test_f64conv_u64_is_exact() -> bool {
+    return f64conv_u64_is_exact(0) && f64conv_u64_is_exact(4503599627370496)
+        && f64conv_u64_is_exact(9007199254740992)
+        && f64conv_u64_is_exact(9007199254740993) == false
+        && f64conv_u64_is_exact(18446744073709551615) == false;
+}
+
+fn test_f64conv_roundtrip_u64_exact_only() -> bool {
+    // 精确的来回一致; 不精确的必然被改 (改得对不对由上面那条判据管)。
+    let a: u64 = 1234567890123456;
+    let b: u64 = 9007199254740993;
+    return f64conv_to_u64(f64conv_from_u64(a)) == a
+        && f64conv_to_u64(f64conv_from_u64(b)) != b;
+}
+
+fn test_f64conv_to_f32_basics() -> bool {
+    return f64conv_to_f32(F64_ONE) == 1065353216
+        && f64conv_to_f32(F64_TWO) == 1073741824
+        && f64conv_to_f32(F64_HALF) == 1056964608
+        && f64conv_to_f32(F64_POS_ZERO) == 0;
+}
+
+fn test_f64conv_to_f32_sign_and_specials() -> bool {
+    return f64conv_to_f32(0x8000000000000000) == 2147483648
+        && f64conv_to_f32(0xBFF0000000000000) == 3212836864
+        && f64conv_to_f32(F64_POS_INF) == F32_POS_INF
+        && f64conv_to_f32(F64_QNAN) == 2143289344;
+}
+
+fn test_f64conv_to_f32_overflow_and_underflow() -> bool {
+    // f64 最大 -> f32 无穷; 最小次正规 -> f32 零。
+    return f64conv_to_f32(F64_MAX) == F32_POS_INF
+        && f64conv_to_f32(F64_MIN_SUB) == 0
+        && f64conv_to_f32(0x8000000000000001) == 2147483648;
+}
+
+fn test_f64conv_to_f32_subnormal_result() -> bool {
+    // 2^-130 < f32 的最小正规 2^-126 -> 落在 f32 的次正规里:
+    //   f32 次正规 = K * 2^-149, 所以 K = 2^-130 / 2^-149 = 2^19 = 524288。
+    // 2^-150 恰好是最小次正规的一半 -> 到偶数 -> 0。
+    let small: u64 = 0x37D0000000000000; // 2^-130 (指数域 = 1023-130 = 893 = 0x37D)
+    let half_min: u64 = 0x3690000000000000; // 2^-150
+    return f64conv_to_f32(small) == 524288 && f64conv_to_f32(half_min) == 0;
+}
+
+fn test_f64conv_from_f32_exact() -> bool {
+    return f64conv_from_f32(1065353216) == F64_ONE
+        && f64conv_from_f32(1073741824) == F64_TWO
+        && f64conv_from_f32(2147483648) == 0x8000000000000000
+        && f64conv_from_f32(F32_POS_INF) == F64_POS_INF;
+}
+
+fn test_f64conv_from_f32_subnormal() -> bool {
+    // f32 最小次正规 (位模式 1) = 2^-149 -> f64 里的正规数。
+    return f64conv_from_f32(1) == 0x36A0000000000000;
+}
+
+fn test_f64conv_f32_roundtrip() -> bool {
+    // f32 能表示的数, 来回一趟必须一个字节都不差; f64 特有的精度必须丢掉。
+    return f64conv_f32_roundtrip_ok(F64_ONE) && f64conv_f32_roundtrip_ok(F64_THREE)
+        && f64conv_f32_roundtrip_ok(0x3FB999999999999A) == false;
+}
+
+fn test_f64conv_f32_rounds_to_nearest_even() -> bool {
+    // 0.1f32 = 0x3DCCCCCD (f64 的 0.1 舍进 24 位尾数时向上一位)。
+    return f64conv_to_f32(0x3FB999999999999A) == 1036831949;
+}

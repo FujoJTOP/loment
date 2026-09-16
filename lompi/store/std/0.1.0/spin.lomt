@@ -1,0 +1,502 @@
+// std/spin.lomt — ticket 锁 / 有界自旋等待 / 计数信号量 / latch
+//
+// 为什么这个模块是**自旋**的: PE 目标只有 8 个 syscall, 没有 futex, 没有 nanosleep,
+// 没有 sched_yield (见 atomics.lomt 第二节第 6 条)。所以"拿不到就睡下去等叫醒"这条
+// 路根本不存在 —— 拿不到只能**烧 CPU 转着等**。这不是省事, 是目标平台上没有别的选择。
+//
+// 为什么是 **ticket** 锁而不是普通自旋锁: 普通自旋锁要用 CAS 把自己从"开"改成"关"
+// (test-and-set), 而 CAS **不存在**。ticket 锁只要 fetch-and-add: 两个计数器, 进门先取号
+// (`next++`), 然后自旋等叫号 (`serving == 我的号`)。**它是真正的锁** —— 真多核上也是对的,
+// 而且是 **FIFO 的**: 先到先得, 没有饥饿, 没有"谁手快谁抢到"。
+//
+// ============================================================================
+// 为什么 ticket 锁在 x86 上真的成立 (以及它靠什么)
+// ============================================================================
+//   1. 取号是一次 seq_cst RMW (`lock xadd`) —— 它自带**全屏障**, 所以临界区里的普通
+//      读写不会被编译器或 CPU 提到取号之前。
+//   2. 等叫号也读的是同一个字, 而且用的是 RMW 加 0 (见 `at_get_atomic`), 所以看到的是
+//      真值而不是某个缓存副本。
+//   3. 释放时写叫号也是一次 seq_cst RMW, 自带全屏障 —— 临界区里写下的普通数据,
+//      在下一个持锁者看到叫号之前就已经可见。
+//   这三条合起来 = ticket 锁是对的。**但它建在一个假设上**: "seq_cst 的 RMW 既保原子
+//   又保顺序"。这个假设在 x86-64 上是真的, 但**没有在本仓库被真并发验证过**。
+//
+// ============================================================================
+// 诚实清单: 即使锁是对的, 下面这些仍然**没有** (不要照标准库去期待)
+// ============================================================================
+//   · **没有阻塞**: `sp_lock_acquire` 拿不到就是空转, 不睡。长临界区 + 多核 = 白烧电。
+//   · **没有超时**: 自旋是**有限次尝试** (`tries` 由调用方给), 不是"等 5 毫秒"。
+//     没有时钟可读 (没有 clock_gettime, PE 只有那 8 个 syscall), 所以做不出真超时。
+//   · **没有让步 / 退避指令**: `pause` / `yield` 都没有 (`inb`/`outb` 只在 Rust 路径存在)。
+//     要多核上少打缓存行, 只能自己插一个有副作用的空转 —— 而优化器可能把它删掉。
+//   · **没有所有权检查**: `sp_lock_release(ws, t)` 只校验"叫号是不是 t", **不校验
+//     "你是不是 t"** —— 语言里没有线程身份 (`gettid` 不在那 8 个 syscall 里),
+//     没法校验。谁拿着别人的号来放, 锁就坏了。这是真缺口, 不是简化。
+//   · **不可重入, 不检测死锁**: 同一个执行流重复取号会自己把自己卡死, 没人拦。
+//   · **不保证公平之外的任何事**: 没有读者/写者之分, 没有优先级继承。
+//   · **本文件每一个函数都只在单线程下测过** —— 单线程测的是"编号、状态、有界退出"
+//     这些逻辑与不变量; 原子性与可见性**未验证** (见文件末尾)。
+//
+// ============================================================================
+// 布局 (调用方给工作区; 一律 4 字节步长, 工作区基址要 4 对齐 —— 见 atomics.lomt 第四节)
+// ============================================================================
+//   ticket 锁  ws+0 = next      下一个要发的号 (只增)
+//              ws+4 = serving   当前叫到的号
+//              共 8 字节 (SP_LOCK_BYTES)。`next - serving` = 持有者 + 还在等的人数。
+//   信号量     ws+0 = count     还有几张许可
+//              共 4 字节 (SP_SEM_BYTES)。
+//   latch      ws+0 = arrived   已经到的个数
+//              ws+4 = target    要几个才算齐
+//              共 8 字节 (SP_LATCH_BYTES)。
+//
+// 命名: 公开 sp_*, 内部无。自检 test_sp_*。
+
+module spin
+
+use "mem.lomt"
+use "atomics.lomt"
+
+/// 出错 (不会被这些函数返回, 留给调用方统一风格)。
+pub const SP_ERR: u32 = 4294967295;
+/// "没拿到" —— 与 SP_ERR 分开。**注意**: 号本身是 u32 计数的, 理论上 4294967294 与
+/// 4294967295 是两个合法的号; 实际要跑满 2^32 次取号才可能撞上, 所以这里不避让。
+pub const SP_NO: u32 = 4294967294;
+
+pub const SP_LOCK_BYTES: u32 = 8;
+pub const SP_NEXT: u32 = 0;
+pub const SP_SERVING: u32 = 4;
+
+pub const SP_SEM_BYTES: u32 = 4;
+
+pub const SP_LATCH_BYTES: u32 = 8;
+pub const SP_ARRIVED: u32 = 0;
+pub const SP_TARGET: u32 = 4;
+
+// ---------------------------------------------------------------- 有界自旋等待
+
+/// `tries` 的处理: **0 当作 1** —— 留这一手是为了不让调用方写出"一次都不看"的循环。
+/// 每次进函数**至少看一次**; 看得够多还没等到就返回 false, **不会死循环**。
+fn sp_norm(tries: u32) -> u32 {
+    if tries == 0 {
+        return 1;
+    }
+    return tries;
+}
+
+/// 自旋等 `*(p+off) == want`。最多看 `tries` 次 (0 按 1 算)。
+///
+/// 读用的是 `at_get_atomic` (RMW 加 0) —— 因为**没有原子 load**, 普通读在真并发下
+/// 看不到别的核的写 (见 atomics.lomt 第二节第 3 条)。代价是每次轮询都独占缓存行。
+/// 单线程下这条**第一次就会命中或立刻返回 false**, 所以自检跑得动。
+pub fn sp_wait_eq(p: ptr, off: u32, want: u32, tries: u32) -> bool {
+    let t: u32 = sp_norm(tries);
+    let at: ptr = at_ptr(p, off);
+    let i: u32 = 0;
+    while i < t {
+        if at_get_atomic(at) == want {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 自旋等 `*(p+off) != want`。用途: 等一个标志从"别人占着"变掉。
+pub fn sp_wait_ne(p: ptr, off: u32, want: u32, tries: u32) -> bool {
+    let t: u32 = sp_norm(tries);
+    let at: ptr = at_ptr(p, off);
+    let i: u32 = 0;
+    while i < t {
+        if at_get_atomic(at) != want {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 自旋等 `*(p+off) >= want`。用途: 等累加到某个门槛 (计数型的进度)。
+pub fn sp_wait_ge(p: ptr, off: u32, want: u32, tries: u32) -> bool {
+    let t: u32 = sp_norm(tries);
+    let at: ptr = at_ptr(p, off);
+    let i: u32 = 0;
+    while i < t {
+        if at_get_atomic(at) >= want {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- ticket 锁
+
+/// 初始化: 下一个号是 0, 叫到 0。两个计数器都归零。
+pub fn sp_lock_init(ws: ptr) {
+    mem_store32(ws, SP_NEXT, 0);
+    mem_store32(ws, SP_SERVING, 0);
+}
+
+/// 下一个要发的号 (只读快照, 不是原子的, 单线程/已保护场景用)。
+pub fn sp_lock_next(ws: ptr) -> u32 {
+    return mem_load32(ws, SP_NEXT);
+}
+
+/// 当前叫到的号。空锁时它等于下一个要发的号。
+pub fn sp_lock_serving(ws: ptr) -> u32 {
+    return mem_load32(ws, SP_SERVING);
+}
+
+/// 持有者 + 还在等的人数 = `next - serving`。空锁是 0。
+/// 有**有限的**诊断价值: 谁在等、几个人, 一眼能看见 (没有别的观测手段)。
+pub fn sp_lock_pending(ws: ptr) -> u32 {
+    return mem_load32(ws, SP_NEXT) - mem_load32(ws, SP_SERVING);
+}
+
+/// **取号** (原子, 立刻返回): 拿到自己的号, 但还没拿到锁。
+/// 这一步是 seq_cst RMW, 自带全屏障 —— 之后临界区里的普通读写不会被提到它前面。
+pub fn sp_lock_ticket(ws: ptr) -> u32 {
+    return at_inc(at_ptr(ws, SP_NEXT));
+}
+
+/// 现在轮到我了吗 (号 t 是不是当前叫到的号)。
+pub fn sp_lock_mine(ws: ptr, t: u32) -> bool {
+    return sp_wait_eq(ws, SP_SERVING, t, 1);
+}
+
+/// **有界等我的号**: 最多看 `tries` 次。等到 true, 没等到 false。
+///
+/// 这是给"能保证会轮到我"的场合用的。⚠️ 如果这里返回 false, **那张号已经烧掉了** ——
+/// `next` 已经往前走, 而 `serving` 还停在原处, 于是**后面所有取号的人都卡死**。
+/// 这是"没有 CAS、没有超时"的必然结果, 不是实现缺陷。要能放弃就别用有界等待,
+/// 用无界语义的 `sp_lock_acquire` 的**单线程等价物** (见下面 acquire 的注释)。
+pub fn sp_lock_wait(ws: ptr, t: u32, tries: u32) -> bool {
+    return sp_wait_eq(ws, SP_SERVING, t, tries);
+}
+
+/// 取号 + 等。等到返回号, 等不到返回 SP_NO。
+///
+/// ⚠️ **超时的代价**: 见 `sp_lock_wait` —— 号烧掉, 锁可能永久卡住。生产语义是
+/// "自旋到拿到为止" (真无界循环), 但**无界循环在这个仓库里没法自检** (单线程会死循环,
+/// 语言里也没有 `break` 可以特判退出), 所以这里只提供有界版本, 把选择权与风险
+/// 都摆在调用方面前。
+pub fn sp_lock_acquire(ws: ptr, tries: u32) -> u32 {
+    let t: u32 = sp_lock_ticket(ws);
+    if sp_lock_wait(ws, t, tries) {
+        return t;
+    }
+    return SP_NO;
+}
+
+/// 释放: 把自己那张号叫过去 (`serving = t + 1`)。
+///
+/// **只校验"叫号是不是 t", 不校验"你是不是 t"** —— 见文件头的诚实清单。
+/// 返回 false 表示"现在叫的不是你这张号", 说明调用方弄错了 (重复释放 / 号不配对),
+/// 此时**什么都不改** —— 宁可不动也不要让锁的状态更乱。
+pub fn sp_lock_release(ws: ptr, t: u32) -> bool {
+    if sp_wait_eq(ws, SP_SERVING, t, 1) == false {
+        return false;
+    }
+    let old: u32 = at_inc(at_ptr(ws, SP_SERVING));
+    return old == t;
+}
+
+// ---------------------------------------------------------------- 计数信号量
+
+/// 初始化成 `n` 张许可。
+pub fn sp_sem_init(ws: ptr, n: u32) {
+    mem_store32(ws, 0, n);
+}
+
+/// 读当前值。⚠️ **这不是"还剩几张"的精确读数**: 真并发下 try 的"减一再还回来"中间,
+/// 这个值会**瞬时**变成 4294967295 (看起来像 -1)。要一个可靠的读数只能靠锁。
+pub fn sp_sem_value(ws: ptr) -> u32 {
+    return at_get_atomic(ws);
+}
+
+/// 试拿一张许可。拿到 true, 没有 false (**不等待, 不重试** —— 等待由调用方自己安排)。
+///
+/// 原理: 原子地减一, 看**旧值**。旧值 >= 1 说明减之前确实有货 -> 拿到。
+/// 旧值是 0 说明这次减下去把它变成了 4294967295 (-1) -> 立刻加一还回去。
+/// 中间那个 -1 是**可见的** (别的核可能读到), 但**不会导致多发一张许可**:
+/// 只有"旧值 >= 1"的分支才会返回 true, 而每个旧值只能被一个调用者拿到。
+pub fn sp_sem_try(ws: ptr) -> bool {
+    let old: u32 = at_dec(ws);
+    if old >= 1 {
+        return true;
+    }
+    let _back: u32 = at_inc(ws);
+    return false;
+}
+
+/// 还一张许可。返回**旧值** (即还之前的张数)。
+/// 不检查上限 —— 多还一张就是多一张, 这是调用方的责任 (没有计数器上限的概念)。
+pub fn sp_sem_release(ws: ptr) -> u32 {
+    return at_inc(ws);
+}
+
+// ---------------------------------------------------------------- latch / 同步点
+
+/// 初始化: 要到 `n` 个才算齐。
+/// `n == 0` 时**永远不会发**: 判据是 `old + 1 == target` (见 arrive 的注释),
+/// 而 `old + 1` 最小是 1, 撞不上 0。要让 latch 有用, 传 >= 1。
+pub fn sp_latch_init(ws: ptr, n: u32) {
+    mem_store32(ws, SP_ARRIVED, 0);
+    mem_store32(ws, SP_TARGET, n);
+}
+
+/// 到齐了几个 (原子读)。
+pub fn sp_latch_count(ws: ptr) -> u32 {
+    return at_get_atomic(at_ptr(ws, SP_ARRIVED));
+}
+
+/// 目标个数。
+pub fn sp_latch_target(ws: ptr) -> u32 {
+    return mem_load32(ws, SP_TARGET);
+}
+
+/// **到了。返回"我是不是最后一个"。**
+///
+/// 判据是 `old + 1 == target` —— `old` 是原子加一**之前**的值 (fetch-add 返回旧值,
+/// 这是最容易写反的一处: 写成 `old == target` 就永远晚一个)。
+/// 这个判据只需要 fetch-and-add, 不需要 CAS: 每个 old 值只被一个调用者拿到,
+/// 所以**恰好有一个人**会看到 `old + 1 == target`。
+pub fn sp_latch_arrive(ws: ptr) -> bool {
+    let old: u32 = at_inc(at_ptr(ws, SP_ARRIVED));
+    return old + 1 == mem_load32(ws, SP_TARGET);
+}
+
+/// 到齐了吗 (能等齐时用得上; 也是"到齐后大家怎么知道"的替代 —— 没有广播机制)。
+pub fn sp_latch_reached(ws: ptr) -> bool {
+    let t: u32 = mem_load32(ws, SP_TARGET);
+    if t == 0 {
+        return false;
+    }
+    return sp_wait_ge(ws, SP_ARRIVED, t, 1);
+}
+
+// ---------------------------------------------------------------- 自检
+
+// 自检边界 (诚实说明):
+//   单线程测得出: 取号严格递增且每次 +1、`serving == my ticket` 的第一时间命中、
+//                 **有界尝试在没轮到时返回"没拿到"且不死循环**、释放只认自己那张号、
+//                 信号量的"拿到/拿不到/还回去"、latch 的"恰好一个最后到达者"、
+//                 pending 的算术。
+//   单线程**测不出**: 两个核同时取号会不会拿到同一个号 (原子性)、一个核写的 serving
+//                 另一个核多久看到 (可见性)、FIFO 在真并发下确实按序放行、
+//                 RMW 自带屏障这个假设。**这些在真并发下全部未验证。**
+
+/// 空锁: 两个计数器都是 0, pending 也是 0。
+fn test_sp_lock_init_zero() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    return sp_lock_next(ws) == 0 && sp_lock_serving(ws) == 0 && sp_lock_pending(ws) == 0;
+}
+
+/// 取号**严格递增, 每次 +1**, 而且 `next` 只增不减 —— 这是全模块的地基。
+fn test_sp_lock_ticket_increments_by_one() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let a: u32 = sp_lock_ticket(ws);
+    let b: u32 = sp_lock_ticket(ws);
+    let c: u32 = sp_lock_ticket(ws);
+    return a == 0 && b == 1 && c == 2 && sp_lock_next(ws) == 3 && sp_lock_serving(ws) == 0;
+}
+
+/// 空锁上来的第一个号就是当前叫到的号 -> **立刻**拿到 (第一次检查就命中)。
+/// 放掉之后再 acquire 一次, 那个号也应该是**当场**轮到。
+fn test_sp_lock_first_ticket_is_served_now() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let t: u32 = sp_lock_ticket(ws);
+    let mine: bool = sp_lock_mine(ws, t) && sp_lock_wait(ws, t, 1);
+    sp_lock_release(ws, t);
+    let again: u32 = sp_lock_acquire(ws, 1);
+    return mine && t == 0 && again == 1;
+}
+
+/// **超时会烧号** —— 把文档里那条警告钉成自检。
+/// 别人持有 0 时 acquire 取到 1、等到超时、返回 SP_NO; 此时 `next` 已经走到 2,
+/// 而 `serving` 还停在 0 —— 后面取号的人全部卡住。这是"没有 CAS、没有超时"的必然结果,
+/// 不是实现缺陷; 自检把它**摆出来**, 免得调用方以为"失败了重试一下就行"。
+fn test_sp_lock_acquire_timeout_burns_ticket() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let holder: u32 = sp_lock_ticket(ws);
+    let got: u32 = sp_lock_acquire(ws, 3);
+    let burned: bool = sp_lock_next(ws) == 2 && sp_lock_serving(ws) == 0;
+    return holder == 0 && got == SP_NO && burned && sp_lock_pending(ws) == 2;
+}
+
+/// **有界尝试**: 号还没轮到 -> 返回 false, 且**一次都不改锁的字** (只读)。
+/// 这条是"单线程能自检自旋"的关键 —— 无界自旋在这里会死循环。
+fn test_sp_lock_wait_bounded_returns_false() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let t: u32 = sp_lock_ticket(ws);       // t = 0
+    let ahead: u32 = sp_lock_ticket(ws);   // ahead = 1
+    let before_next: u32 = sp_lock_next(ws);
+    let before_serving: u32 = sp_lock_serving(ws);
+    let got: bool = sp_lock_wait(ws, ahead, 8);
+    return got == false && sp_lock_next(ws) == before_next
+        && sp_lock_serving(ws) == before_serving && t == 0 && ahead == 1;
+}
+
+/// tries = 0 按 1 次算: 够得着就 true, 够不着就 false, 两种情况都不会转圈。
+fn test_sp_lock_wait_zero_tries_is_one_check() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let t: u32 = sp_lock_ticket(ws);
+    let hit: bool = sp_lock_wait(ws, t, 0);
+    let miss: bool = sp_lock_wait(ws, t + 5, 0);
+    return hit && miss == false;
+}
+
+/// 释放: 只有"当前叫到的号"放得动。放对了 -> 叫号 +1; 放错了 -> 什么都不改。
+fn test_sp_lock_release_only_own_ticket() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let t: u32 = sp_lock_ticket(ws);
+    let wrong: bool = sp_lock_release(ws, t + 7);
+    let served_before: u32 = sp_lock_serving(ws);
+    let right: bool = sp_lock_release(ws, t);
+    let twice: bool = sp_lock_release(ws, t);
+    return wrong == false && served_before == 0 && right && sp_lock_serving(ws) == 1
+        && twice == false;
+}
+
+/// FIFO: 号 i 只在叫到 i 时能拿。手工把叫号推上去模拟"前面的人放锁"。
+fn test_sp_lock_fifo_hand_off() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let a: u32 = sp_lock_ticket(ws);
+    let b: u32 = sp_lock_ticket(ws);
+    let blocked: bool = sp_lock_wait(ws, b, 2) == false;
+    sp_lock_release(ws, a);
+    let now_b: bool = sp_lock_wait(ws, b, 2);
+    return a == 0 && b == 1 && blocked && now_b && sp_lock_serving(ws) == 1;
+}
+
+/// pending = next - serving: 持有者 + 还在等的人。
+fn test_sp_lock_pending_counts_holder_and_waiters() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    sp_lock_ticket(ws);
+    sp_lock_ticket(ws);
+    sp_lock_ticket(ws);
+    let p3: u32 = sp_lock_pending(ws);
+    sp_lock_release(ws, 0);
+    return p3 == 3 && sp_lock_pending(ws) == 2;
+}
+
+/// 信号量: 拿得完、拿完了拿不到、还回去又拿得到。
+fn test_sp_sem_acquire_exhaust_release() -> bool {
+    let ws: ptr = alloc(SP_SEM_BYTES);
+    sp_sem_init(ws, 2);
+    let a: bool = sp_sem_try(ws);
+    let b: bool = sp_sem_try(ws);
+    let c: bool = sp_sem_try(ws);
+    let spent: u32 = sp_sem_value(ws);
+    let back: u32 = sp_sem_release(ws);
+    let d: bool = sp_sem_try(ws);
+    return a && b && c == false && spent == 0 && back == 0 && d;
+}
+
+/// 拿不到时**必须把减下去的加回来** —— 少了这一步, 空信号量会把计数越减越负。
+/// 这条自检就是钉这个的: try 失败之后值必须**原样**是 0。
+fn test_sp_sem_failed_try_restores_count() -> bool {
+    let ws: ptr = alloc(SP_SEM_BYTES);
+    sp_sem_init(ws, 0);
+    let a: bool = sp_sem_try(ws);
+    let after: u32 = sp_sem_value(ws);
+    let b: bool = sp_sem_try(ws);
+    let after2: u32 = sp_sem_value(ws);
+    return a == false && after == 0 && b == false && after2 == 0;
+}
+
+/// 许可不会凭空多出来: n 张就只能拿 n 次 (旧值判据把多发这条路堵死了)。
+fn test_sp_sem_never_over_grants() -> bool {
+    let ws: ptr = alloc(SP_SEM_BYTES);
+    sp_sem_init(ws, 3);
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < 10 {
+        if sp_sem_try(ws) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n == 3 && sp_sem_value(ws) == 0;
+}
+
+/// latch: 到齐 n 个时**恰好一个**返回 true, 而且是**最后一个**那个。
+fn test_sp_latch_last_arriver_is_the_one() -> bool {
+    let ws: ptr = alloc(SP_LATCH_BYTES);
+    sp_latch_init(ws, 3);
+    let a: bool = sp_latch_arrive(ws);
+    let b: bool = sp_latch_arrive(ws);
+    let c: bool = sp_latch_arrive(ws);
+    return a == false && b == false && c && sp_latch_count(ws) == 3 && sp_latch_reached(ws);
+}
+
+/// target = 1: 第一个到的就是最后一个。
+fn test_sp_latch_target_one_fires_immediately() -> bool {
+    let ws: ptr = alloc(SP_LATCH_BYTES);
+    sp_latch_init(ws, 1);
+    let first: bool = sp_latch_arrive(ws);
+    let second: bool = sp_latch_arrive(ws);
+    return first && second == false && sp_latch_count(ws) == 2;
+}
+
+/// target = 0 永远不发 —— 判据是 `old + 1 == target`, 不是 `old == target`。
+/// (写反了的时候这条会红: 第一个到的人 old=0 会被误判成"到齐了"。)
+fn test_sp_latch_zero_target_never_fires() -> bool {
+    let ws: ptr = alloc(SP_LATCH_BYTES);
+    sp_latch_init(ws, 0);
+    let a: bool = sp_latch_arrive(ws);
+    let b: bool = sp_latch_arrive(ws);
+    return a == false && b == false && sp_latch_reached(ws) == false;
+}
+
+/// 三种等待都**有界**: 等不到就 false, 不会转圈。
+fn test_sp_wait_class_all_bounded() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let eq_hit: bool = sp_wait_eq(ws, SP_NEXT, 0, 3);
+    let eq_miss: bool = sp_wait_eq(ws, SP_NEXT, 9, 3);
+    let ne_hit: bool = sp_wait_ne(ws, SP_NEXT, 9, 3);
+    let ne_miss: bool = sp_wait_ne(ws, SP_NEXT, 0, 3);
+    let ge_hit: bool = sp_wait_ge(ws, SP_NEXT, 0, 3);
+    let ge_miss: bool = sp_wait_ge(ws, SP_NEXT, 9, 3);
+    return eq_hit && eq_miss == false && ne_hit && ne_miss == false && ge_hit
+        && ge_miss == false;
+}
+
+/// 一整套流程走一遍: 三个人排队, 按 FIFO 依次拿到锁、各改一次普通字、依次释放。
+///
+/// **注意这里为什么不能连调三次 `sp_lock_acquire`**: 单线程里没人会去释放, 所以
+/// 第二个人的 `acquire` 会（有界地）失败 —— 这正是"单线程测不出真锁"的地方。
+/// 所以自检用 `ticket` 排好队, 再**手工按序放锁**, 模拟"前一个人用完了"。
+/// 断言最后的账: next == serving == 3 (全放干净), pending 归零。
+fn test_sp_lock_whole_queue_drains() -> bool {
+    let ws: ptr = alloc(SP_LOCK_BYTES);
+    sp_lock_init(ws);
+    let t0: u32 = sp_lock_ticket(ws);
+    let t1: u32 = sp_lock_ticket(ws);
+    let t2: u32 = sp_lock_ticket(ws);
+    let queued: bool = t0 == 0 && t1 == 1 && t2 == 2 && sp_lock_pending(ws) == 3;
+    // 第二个人此刻**还没轮到**: 有界等必须说"没拿到"
+    let early: bool = sp_lock_wait(ws, t1, 4) == false;
+    let steps: u32 = 0;
+    if sp_lock_wait(ws, t0, 4) && sp_lock_release(ws, t0) {
+        steps = 1;
+    }
+    if sp_lock_wait(ws, t1, 4) && sp_lock_release(ws, t1) {
+        steps = 2;
+    }
+    if sp_lock_wait(ws, t2, 4) && sp_lock_release(ws, t2) {
+        steps = 3;
+    }
+    return queued && early && steps == 3 && sp_lock_next(ws) == 3
+        && sp_lock_serving(ws) == 3 && sp_lock_pending(ws) == 0;
+}

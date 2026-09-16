@@ -1,0 +1,147 @@
+// std/fmt.lomt — 对齐与填充
+//
+// 为什么单独一层: out.lomt 只管"把字节放进去", io.lomt 只管"数字怎么变文本"。
+// 而"右对齐到第 12 列""左侧补零到 8 位"是**排版**——它要先用 math 算出位数才知道
+// 该补几个。这就是为什么它自己一层, 而不是塞进 out。
+//
+// 命名: 公开一律 fmt_*, 内部一律 fm_*。自检 test_fmt_*。
+
+module fmt
+
+use "math.lomt"
+use "out.lomt"
+
+/// 写 n 个 ch 字符。
+pub fn fmt_fill(buf: ptr, o: u32, n: u32, ch: u32) -> u32 {
+    let k: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        k = out_byte(buf, k, ch);
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 十进制**右对齐**到 width (左侧补空格)。宽于 width 时不截断 —— 数字截断比不齐更难查。
+pub fn fmt_dec_pad(buf: ptr, o: u32, v: u64, width: u32) -> u32 {
+    let d: u32 = math_ilog10(v);
+    let k: u32 = o;
+    if width > d {
+        k = fmt_fill(buf, k, width - d, 32);
+    }
+    return out_dec(buf, k, v);
+}
+
+/// 十进制**左侧补零**到 width (定宽编号用)。
+pub fn fmt_dec_zero(buf: ptr, o: u32, v: u64, width: u32) -> u32 {
+    let d: u32 = math_ilog10(v);
+    let k: u32 = o;
+    if width > d {
+        k = fmt_fill(buf, k, width - d, 48);
+    }
+    return out_dec(buf, k, v);
+}
+
+/// "0x" + 定宽小写十六进制。
+pub fn fmt_hex_prefixed(buf: ptr, o: u32, v: u64, width: u32) -> u32 {
+    store8(buf, o, 48 as u8);
+    store8(buf, o + 1, 120 as u8);
+    return out_hex(buf, o + 2, v, width);
+}
+
+/// 字符串右对齐到 width (左侧补空格)。
+pub fn fmt_str_pad(buf: ptr, o: u32, s: str, width: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = o;
+    if width > n {
+        k = fmt_fill(buf, k, width - n, 32);
+    }
+    return out_str(buf, k, s);
+}
+
+/// 有符号十进制。
+///
+/// i64 最小值也能打对: 本语言的 `-` 是回绕运算, 所以 `0 - v` 在 v = i64 最小值时
+/// 回绕回自身, 转成 u64 恰好就是 9223372036854775808 —— 幅值是对的。
+/// 这条不是巧合, 是"同一套算术规则"的红利, 自检里钉了。
+pub fn fmt_i64(buf: ptr, o: u32, v: i64) -> u32 {
+    if v < 0 {
+        let k: u32 = out_byte(buf, o, 45);
+        return out_dec(buf, k, (0 - v) as u64);
+    }
+    return out_dec(buf, o, v as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fmt_fill() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = fmt_fill(b, 0, 3, 42);
+    return o == 3 && load8(b, 0) == 42 && load8(b, 2) == 42 && load8(b, 3) == 0;
+}
+
+fn test_fmt_fill_zero() -> bool {
+    let b: ptr = alloc(16);
+    return fmt_fill(b, 2, 0, 42) == 2;
+}
+
+fn test_fmt_dec_pad() -> bool {
+    // "42" 右对齐到 5 -> "   42"
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_dec_pad(b, 0, 42, 5);
+    return o == 5 && load8(b, 0) == 32 && load8(b, 2) == 32
+        && load8(b, 3) == 52 && load8(b, 4) == 50;
+}
+
+fn test_fmt_dec_pad_narrower_than_value() -> bool {
+    // 值比宽度长时不截断, 原样写出。
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_dec_pad(b, 0, 12345, 2);
+    return o == 5 && load8(b, 0) == 49;
+}
+
+fn test_fmt_dec_zero() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_dec_zero(b, 0, 7, 4);
+    return o == 4 && load8(b, 0) == 48 && load8(b, 1) == 48 && load8(b, 2) == 48 && load8(b, 3) == 55;
+}
+
+fn test_fmt_dec_zero_zero_value() -> bool {
+    // 0 的位数是 1 (math_ilog10 的定义), 所以补 3 个零 -> "0000"。
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_dec_zero(b, 0, 0, 4);
+    return o == 4 && load8(b, 0) == 48 && load8(b, 3) == 48;
+}
+
+fn test_fmt_hex_prefixed() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_hex_prefixed(b, 0, 255, 4);
+    return o == 6 && load8(b, 0) == 48 && load8(b, 1) == 120
+        && load8(b, 2) == 48 && load8(b, 5) == 102;
+}
+
+fn test_fmt_str_pad() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_str_pad(b, 0, "ab", 4);
+    return o == 4 && load8(b, 0) == 32 && load8(b, 1) == 32
+        && load8(b, 2) == 97 && load8(b, 3) == 98;
+}
+
+fn test_fmt_i64_positive() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_i64(b, 0, 42);
+    return o == 2 && load8(b, 0) == 52;
+}
+
+fn test_fmt_i64_negative() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = fmt_i64(b, 0, 0 - 7);
+    return o == 2 && load8(b, 0) == 45 && load8(b, 1) == 55;
+}
+
+fn test_fmt_i64_min() -> bool {
+    // -9223372036854775808 -> "-9223372036854775808" (20 位数字 + 符号)
+    let b: ptr = alloc(64);
+    let o: u32 = fmt_i64(b, 0, 0 - 9223372036854775807 - 1);
+    return o == 20 && load8(b, 0) == 45 && load8(b, 1) == 57 && load8(b, 19) == 56;
+}

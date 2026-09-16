@@ -1,0 +1,488 @@
+// std/search.lomt — 文本搜索: 朴素 / KMP / Boyer-Moore-Horspool
+//
+// 为什么三个都要: 它们在不同的输入上各有所长, 而且互为**参照系** —— 同一段 haystack/needle
+// 走三条独立实现, 结果必须逐位一致。这是本模块自检里最强的一条。
+//
+//   sr_naive  —— 逐位置 mem_eq。代码最短, 最坏 O(n*m) (输入如 "aaa...a" 找 "aa...ab")。
+//   sr_kmp    —— 前缀函数, 最坏 O(n+m), **不会因病态输入退化**。代价: 要 m 个 u32 的 pi 缓冲。
+//   sr_bmh    —— 坏字符表, 平均最快 (常接近 O(n/m)), 要一张 256 项的 u32 表; 最坏仍是 O(n*m)。
+//
+// 什么时候别用 BMH: 针很短时它反而慢 —— 建 256 项表 (1024 字节) 的开销摊不平,
+// 而朴素法在短针上几乎等于线性。经验阈值: **m < 4 用 sr_naive, 否则 sr_bmh / sr_kmp**。
+// 要"绝不退化" (对抗性输入) 就用 KMP, 不管 n/m 多大。
+//
+// 缓冲 (都由调用方 alloc):
+//   pi  —— u32[m], KMP 的前缀函数。
+//   bc  —— u32[256], BMH 的坏字符表。
+//
+// 边界约定 (三个算法**一致**):
+//   * 空针 (m == 0): 视为在偏移 0 处匹配一次。sr_kmp/naive/bmh 返回 0; sr_all 写 [0] 返回 1。
+//     这是个约定, 不是"显然" —— 明确写出来免得三种实现各选各的。
+//   * 针比海草长 (m > n): 没有出现, 首个匹配返回 SR_NONE, sr_all/sr_count 返回 0。
+//   * sr_all 的输出缓冲不够放: 返回 SR_ERR (而不是截断或溢出)。
+//
+// 诚实清单:
+//   * 只按**字节**匹配, 不懂 UTF-8 码点 —— 多字节字符上可能匹配到半个字符。要按码点搜先
+//     用 utf8.lomt 解码。
+//   * BMH 只实现坏字符规则, 没有好后缀规则 (那要 O(m) 的额外表和更复杂逻辑, 收益主要在
+//     大字母表长针上)。纯坏字符版已覆盖绝大多数实际场景。
+//   * 不返回"匹配的重叠关系": sr_all 会把重叠出现都算上 (如 "aaaa" 找 "aa" 给 0,1,2) ——
+//     这是刻意的, 与 strstr 的"不重叠"语义不同。
+//
+// 命名: 公开 sr_*, 内部 sr_* 辅助 + ts_* 自检。自检 test_search_*。
+
+module search
+
+use "mem.lomt"
+
+pub const SR_NONE: u32 = 4294967295;
+pub const SR_ERR: u32 = 4294967294;
+
+// ---------------------------------------------------------------- 朴素
+
+/// 首个匹配的偏移, 没有 SR_NONE。最坏 O(n*m)。
+pub fn sr_naive(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32) -> u32 {
+    if m == 0 {
+        return 0;
+    }
+    if m > n {
+        return SR_NONE;
+    }
+    let i: u32 = 0;
+    while i + m <= n {
+        if mem_eq(d, so + i, p, po, m) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return SR_NONE;
+}
+
+// ---------------------------------------------------------------- KMP
+
+/// 前缀函数: pi[i] = 子串 p[..=i] 的**最长真前缀**长度, 该前缀同时是它的后缀。
+pub fn sr_pi_build(p: ptr, po: u32, m: u32, pi: ptr) {
+    if m > 0 {
+        mem_store32(pi, 0, 0);
+        let i: u32 = 1;
+        let k: u32 = 0;
+        while i < m {
+            let go: u32 = 1;
+            while go == 1 {
+                if load8(p, po + i) == load8(p, po + k) {
+                    k = k + 1;
+                    go = 0;
+                } else if k > 0 {
+                    k = mem_load32(pi, 4 * (k - 1));
+                } else {
+                    go = 0;
+                }
+            }
+            mem_store32(pi, 4 * i, k);
+            i = i + 1;
+        }
+    }
+}
+
+/// 首个匹配的偏移 (KMP)。pi 是调用方给的 u32[m] 缓冲。最坏 O(n+m)。
+pub fn sr_kmp(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32, pi: ptr) -> u32 {
+    let found: u32 = SR_NONE;
+    if m == 0 {
+        found = 0;
+    } else if m <= n {
+        sr_pi_build(p, po, m, pi);
+        let i: u32 = 0;
+        let k: u32 = 0;
+        let stop: u32 = 0;
+        while i < n && stop == 0 {
+            let go: u32 = 1;
+            while go == 1 {
+                if load8(d, so + i) == load8(p, po + k) {
+                    k = k + 1;
+                    go = 0;
+                } else if k > 0 {
+                    k = mem_load32(pi, 4 * (k - 1));
+                } else {
+                    go = 0;
+                }
+            }
+            if k == m {
+                found = i + 1 - m;
+                stop = 1;
+            }
+            i = i + 1;
+        }
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------- BMH
+
+/// 坏字符表: 256 项, 每项 = "该字符在针里最后一次出现的位距末尾的距离"。
+/// 没出现在针里的字符得到 m (整体右移一格针长); 末字符若不重复出现于别处, 天然留成 m。
+pub fn sr_bmh_build(p: ptr, po: u32, m: u32, bc: ptr) {
+    let c: u32 = 0;
+    while c < 256 {
+        mem_store32(bc, 4 * c, m);
+        c = c + 1;
+    }
+    if m > 0 {
+        let i: u32 = 0;
+        while i < m - 1 {
+            let ch: u32 = load8(p, po + i);
+            mem_store32(bc, 4 * ch, m - 1 - i);
+            i = i + 1;
+        }
+    }
+}
+
+/// 首个匹配的偏移 (Boyer-Moore-Horspool)。bc 是调用方给的 u32[256] 缓冲。
+pub fn sr_bmh(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32, bc: ptr) -> u32 {
+    let found: u32 = SR_NONE;
+    if m == 0 {
+        found = 0;
+    } else if m <= n {
+        sr_bmh_build(p, po, m, bc);
+        let shift: u32 = 0;
+        let stop: u32 = 0;
+        while shift + m <= n && stop == 0 {
+            let j: u32 = m - 1;
+            let matched: u32 = 1;
+            let scanning: u32 = 1;
+            // 从右往左比, 一错就停 (坏字符规则靠的就是这个从右往左)
+            while scanning == 1 {
+                if load8(d, so + shift + j) == load8(p, po + j) {
+                    if j == 0 {
+                        scanning = 0;
+                    } else {
+                        j = j - 1;
+                    }
+                } else {
+                    matched = 0;
+                    scanning = 0;
+                }
+            }
+            if matched == 1 {
+                found = shift;
+                stop = 1;
+            } else {
+                // 对齐到窗口末尾的那个海草字符, 查表右移。
+                // 表里所有值 >= 1 (m-1-i 在 i<=m-2 时 >= 1; 未覆盖项是 m), 所以不会原地踏步。
+                let bad: u32 = load8(d, so + shift + m - 1);
+                shift = shift + mem_load32(bc, 4 * bad);
+            }
+        }
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------- 全部出现位置
+
+/// 把每个匹配的起始偏移写进 out (u32), 返回出现次数 (含**重叠**出现)。
+/// 用 KMP 保证线性。out 不够放返回 SR_ERR。pi 是 u32[m] 缓冲。
+pub fn sr_all(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32, pi: ptr, out: ptr, out_cap: u32) -> u32 {
+    if m == 0 {
+        if out_cap == 0 {
+            return SR_ERR;
+        }
+        mem_store32(out, 0, 0);
+        return 1;
+    }
+    if m > n {
+        return 0;
+    }
+    sr_pi_build(p, po, m, pi);
+    let cnt: u32 = 0;
+    let over: u32 = 0;
+    let i: u32 = 0;
+    let k: u32 = 0;
+    while i < n {
+        let go: u32 = 1;
+        while go == 1 {
+            if load8(d, so + i) == load8(p, po + k) {
+                k = k + 1;
+                go = 0;
+            } else if k > 0 {
+                k = mem_load32(pi, 4 * (k - 1));
+            } else {
+                go = 0;
+            }
+        }
+        if k == m {
+            if cnt >= out_cap {
+                over = 1;
+            } else {
+                mem_store32(out, 4 * cnt, i + 1 - m);
+            }
+            cnt = cnt + 1;
+            k = mem_load32(pi, 4 * (m - 1));   // 继续找重叠出现
+        }
+        i = i + 1;
+    }
+    if over == 1 {
+        return SR_ERR;
+    }
+    return cnt;
+}
+
+/// 出现次数 (含重叠), 不需要 out 缓冲。
+pub fn sr_count(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32, pi: ptr) -> u32 {
+    if m == 0 {
+        return 1;
+    }
+    if m > n {
+        return 0;
+    }
+    sr_pi_build(p, po, m, pi);
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    let k: u32 = 0;
+    while i < n {
+        let go: u32 = 1;
+        while go == 1 {
+            if load8(d, so + i) == load8(p, po + k) {
+                k = k + 1;
+                go = 0;
+            } else if k > 0 {
+                k = mem_load32(pi, 4 * (k - 1));
+            } else {
+                go = 0;
+            }
+        }
+        if k == m {
+            cnt = cnt + 1;
+            k = mem_load32(pi, 4 * (m - 1));
+        }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn ts_h_xxabcxx() -> str {
+    return "xxabcxx";
+}
+
+fn ts_n_abc() -> str {
+    return "abc";
+}
+
+fn ts_n_ab() -> str {
+    return "ab";
+}
+
+fn ts_h_a4() -> str {
+    return "aaaa";
+}
+
+fn ts_n_aa() -> str {
+    return "aa";
+}
+
+fn ts_h_a20() -> str {
+    return "aaaaaaaaaaaaaaaaaaaa";
+}
+
+fn ts_n_aaab() -> str {
+    return "aaab";
+}
+
+fn ts_h_aaaab() -> str {
+    return "aaaab";
+}
+
+fn ts_h_aabaaab() -> str {
+    return "aabaaab";
+}
+
+fn ts_h_abcd() -> str {
+    return "abcd";
+}
+
+fn ts_n_bcd() -> str {
+    return "bcd";
+}
+
+fn ts_n_z() -> str {
+    return "z";
+}
+
+fn ts_n_empty() -> str {
+    return "";
+}
+
+/// 三种算法在给定 h/n 上取首个匹配, 返回它们是否都等于 want。
+fn ts_agree(h: str, nd: str, want: u32) -> bool {
+    let hp: ptr = str_ptr(h);
+    let hl: u32 = str_len(h);
+    let np: ptr = str_ptr(nd);
+    let nl: u32 = str_len(nd);
+    let pi: ptr = alloc(128);
+    let bc: ptr = alloc(1024);
+    let a: u32 = sr_naive(hp, 0, hl, np, 0, nl);
+    let b: u32 = sr_kmp(hp, 0, hl, np, 0, nl, pi);
+    let c: u32 = sr_bmh(hp, 0, hl, np, 0, nl, bc);
+    return a == want && b == want && c == want;
+}
+
+fn test_search_naive_basic() -> bool {
+    let h: str = ts_h_xxabcxx();
+    let nd: str = ts_n_abc();
+    return sr_naive(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd)) == 2;
+}
+
+fn test_search_kmp_basic() -> bool {
+    let h: str = ts_h_xxabcxx();
+    let nd: str = ts_n_abc();
+    let pi: ptr = alloc(64);
+    return sr_kmp(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), pi) == 2;
+}
+
+fn test_search_bmh_basic() -> bool {
+    let h: str = ts_h_xxabcxx();
+    let nd: str = ts_n_abc();
+    let bc: ptr = alloc(1024);
+    return sr_bmh(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), bc) == 2;
+}
+
+fn test_search_three_agree_across_cases() -> bool {
+    // 同一批 haystack/needle 走三条独立实现, 结果必须一致。
+    return ts_agree(ts_h_xxabcxx(), ts_n_abc(), 2)
+        && ts_agree(ts_h_xxabcxx(), ts_n_bcd(), SR_NONE)
+        && ts_agree(ts_h_abcd(), ts_n_bcd(), 1)
+        && ts_agree(ts_h_abcd(), ts_n_ab(), 0)
+        && ts_agree(ts_h_a4(), ts_n_aa(), 0);
+}
+
+fn test_search_all_positions_overlapping() -> bool {
+    // "aaaa" 找 "aa": 重叠出现 => 0,1,2 三处。
+    let h: str = ts_h_a4();
+    let nd: str = ts_n_aa();
+    let pi: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let c: u32 = sr_all(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), pi, out, 16);
+    return c == 3 && mem_load32(out, 0) == 0 && mem_load32(out, 4) == 1 && mem_load32(out, 8) == 2;
+}
+
+/// 朴素法数重叠出现次数 (自检里当第四条参照实现)。
+fn ts_naive_all(d: ptr, so: u32, n: u32, p: ptr, po: u32, m: u32) -> u32 {
+    let c: u32 = 0;
+    if m == 0 {
+        return 1;
+    }
+    if m <= n {
+        let i: u32 = 0;
+        while i + m <= n {
+            if mem_eq(d, so + i, p, po, m) {
+                c = c + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return c;
+}
+
+fn test_search_count_matches_naive_and_all() -> bool {
+    // sr_all / sr_count / 朴素计数 三者必须一致。
+    let h: str = ts_h_a20();
+    let nd: str = ts_n_aa();
+    let hp: ptr = str_ptr(h);
+    let hl: u32 = str_len(h);
+    let np: ptr = str_ptr(nd);
+    let nl: u32 = str_len(nd);
+    let pi: ptr = alloc(64);
+    let out: ptr = alloc(256);
+    let c1: u32 = sr_all(hp, 0, hl, np, 0, nl, pi, out, 64);
+    let c2: u32 = sr_count(hp, 0, hl, np, 0, nl, pi);
+    let c3: u32 = ts_naive_all(hp, 0, hl, np, 0, nl);
+    // 20 个 a 里找 "aa" => 19 处重叠
+    return c1 == 19 && c2 == 19 && c3 == 19;
+}
+
+fn test_search_adversarial_a20_aaab() -> bool {
+    // "aaa...a" 找 "aaab": 三种都该报"没有", 且 KMP 不退化 (这里只验结果)。
+    return ts_agree(ts_h_a20(), ts_n_aaab(), SR_NONE);
+}
+
+fn test_search_adversarial_kmp_linear_case() -> bool {
+    // 经典 KMP 场景: "aaaab" 找 "aaab" => 偏移 1。朴素在这里最坏, KMP 线性。
+    return ts_agree(ts_h_aaaab(), ts_n_aaab(), 1);
+}
+
+fn test_search_needle_longer_than_haystack() -> bool {
+    let h: str = ts_n_abc();          // 海草只有 3
+    let nd: str = ts_h_xxabcxx();     // 针 7
+    let pi: ptr = alloc(64);
+    let bc: ptr = alloc(1024);
+    let out: ptr = alloc(64);
+    let a: u32 = sr_naive(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd));
+    let b: u32 = sr_kmp(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), pi);
+    let c: u32 = sr_bmh(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), bc);
+    let d: u32 = sr_all(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), pi, out, 16);
+    return a == SR_NONE && b == SR_NONE && c == SR_NONE && d == 0;
+}
+
+fn test_search_empty_needle() -> bool {
+    // 约定: 空针在偏移 0 处匹配一次; 三种首个匹配都给 0。
+    return ts_agree(ts_h_abcd(), ts_n_empty(), 0)
+        && sr_count(str_ptr(ts_h_abcd()), 0, 4, str_ptr(ts_n_empty()), 0, 0, str_ptr(ts_h_abcd())) == 1;
+}
+
+fn test_search_all_overflow_returns_err() -> bool {
+    // 5 个匹配点, 只给 2 个槽 => SR_ERR, 绝不溢出。
+    let h: str = ts_h_aabaaab();   // 7 字节, 找 "aa" 有多处
+    let nd: str = ts_n_aa();
+    let pi: ptr = alloc(64);
+    let out: ptr = alloc(8);
+    let c: u32 = sr_all(str_ptr(h), 0, str_len(h), str_ptr(nd), 0, str_len(nd), pi, out, 2);
+    return c == SR_ERR;
+}
+
+fn test_search_match_at_start_and_end() -> bool {
+    let h: str = ts_h_abcd();
+    let nd1: str = ts_n_ab();
+    let nd2: str = ts_n_bcd();
+    let pi: ptr = alloc(64);
+    return sr_kmp(str_ptr(h), 0, 4, str_ptr(nd1), 0, 2, pi) == 0
+        && sr_kmp(str_ptr(h), 0, 4, str_ptr(nd2), 0, 3, pi) == 1;
+}
+
+fn test_search_single_char() -> bool {
+    // 单字符针: BMH 的表退化成正向扫 (步长恒 1), 结果仍要对。
+    return ts_agree(ts_h_abcd(), ts_n_z(), SR_NONE);
+}
+
+fn test_search_bmh_badchar_table_values() -> bool {
+    // 针 "abcd": bc['a']=3, bc['b']=2, bc['c']=1, bc['d']=4 (末字符没被 i<m-1 覆盖)。
+    let nd: str = ts_h_abcd();
+    let bc: ptr = alloc(1024);
+    sr_bmh_build(str_ptr(nd), 0, 4, bc);
+    return mem_load32(bc, 4 * 97) == 3    // 'a'
+        && mem_load32(bc, 4 * 98) == 2    // 'b'
+        && mem_load32(bc, 4 * 99) == 1    // 'c'
+        && mem_load32(bc, 4 * 100) == 4   // 'd'
+        && mem_load32(bc, 4 * 122) == 4;  // 'z' 没出现 -> m
+}
+
+fn test_search_pi_prefix_function() -> bool {
+    // "aabaaab" 的 pi = [0,1,0,1,2,2,3]。
+    let nd: str = ts_h_aabaaab();
+    let pi: ptr = alloc(64);
+    sr_pi_build(str_ptr(nd), 0, 7, pi);
+    return mem_load32(pi, 0) == 0 && mem_load32(pi, 4) == 1 && mem_load32(pi, 8) == 0
+        && mem_load32(pi, 12) == 1 && mem_load32(pi, 16) == 2 && mem_load32(pi, 20) == 2
+        && mem_load32(pi, 24) == 3;
+}
+
+fn test_search_all_on_matches_at_every_offset() -> bool {
+    // 单字符针 "a" 在 "aaaa" 里 => 4 处 0,1,2,3。
+    let h: str = ts_h_a4();
+    let nd: str = ts_n_aa();
+    let pi: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    // 用 "a" 当针: 借 "aa" 的第 0 字节
+    let m: u32 = 1;
+    let c: u32 = sr_all(str_ptr(h), 0, 4, str_ptr(nd), 0, m, pi, out, 16);
+    return c == 4 && mem_load32(out, 0) == 0 && mem_load32(out, 12) == 3;
+}

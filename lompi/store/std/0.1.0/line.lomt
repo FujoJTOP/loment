@@ -1,0 +1,128 @@
+// std/line.lomt — 按行遍历
+//
+// 为什么要它: lomstatus 的 `line_end` 只看 \n, 而它读的 Markdown 在 Windows 上是 CRLF ——
+// 于是它得在别处补一个 `strip_cr` 预处理。正确的做法是在**这一层**就把行尾的 \r 吃掉:
+// 行迭代是唯一知道"这一行到哪结束"的地方, 让每个调用方各判一次才是错的来源。
+// (io_strip_cr 仍然有用 —— 整块预处理比逐行判便宜, 两条路都留着。)
+//
+// 游标约定: 每步返回 (下一行起点 << 32) | 本行终点 (不含换行, 也不含行尾 \r)。
+//
+// 命名: 公开一律 line_*, 内部一律 ln_*。自检 test_line_*。
+
+module line
+
+use "num.lomt"
+
+/// 从 from 起找本行。返回 (下一行起点 << 32) | 本行终点。
+/// 行尾的 \r 被排除在终点之外 —— CRLF 与 LF 都得到同样的行内容。
+pub fn line_next(p: ptr, from: u32, n: u32) -> u64 {
+    let i: u32 = from;
+    while i < n {
+        if load8(p, i) == 10 {
+            let e: u32 = i;
+            if e > from && load8(p, e - 1) == 13 {
+                return num_pack2(i + 1, e - 1);
+            }
+            return num_pack2(i + 1, e);
+        }
+        i = i + 1;
+    }
+    return num_pack2(n, n);
+}
+
+/// 本行终点 (不含换行与行尾 \r)。
+pub fn line_end(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 下一行起点。等于 `line_end` 且已到 n 时表示没有下一行了。
+pub fn line_next_start(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// 还有下一行吗。注意末行没有 \n 时 `line_next` 返回 (n << 32) | n, 所以判的是 hi < n。
+pub fn line_has_more(t: u64, n: u32) -> bool {
+    return num_hi(t) < n;
+}
+
+/// 行数。
+/// 空输入 0 行; 以 \n 结尾的文本, 末尾那个 \n **不**多算一行 (与 `wc -l` 同口径)。
+pub fn line_count(p: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if load8(p, n - 1) == 10 {
+        c = c - 1;
+    }
+    return c;
+}
+
+// (这里本来有个 `line_len(t)`, 其实是恒等于 0 的坏函数 —— 打包里只有终点没有起点,
+//  长度算不出来。行长度请用 `line_end(t) - from`, 起点是调用方手上就有的。)
+
+// ---------------------------------------------------------------- 自检
+
+fn test_line_lf() -> bool {
+    // "ab\ncd" —— 第一行 [0,2), 下一行起点 3。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    store8(b, 2, 10 as u8);
+    store8(b, 3, 99 as u8);
+    let t: u64 = line_next(b, 0, 4);
+    return line_end(t) == 2 && line_next_start(t) == 3 && line_has_more(t, 4);
+}
+
+fn test_line_crlf_end_excludes_cr() -> bool {
+    // "ab\r\ncd" —— 第一行的终点应是 2 (不含 \r), 不是 3。
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    store8(b, 2, 13 as u8);
+    store8(b, 3, 10 as u8);
+    store8(b, 4, 99 as u8);
+    let t: u64 = line_next(b, 0, 5);
+    return line_end(t) == 2 && line_next_start(t) == 4;
+}
+
+fn test_line_last_without_newline() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    let t: u64 = line_next(b, 0, 2);
+    return line_end(t) == 2 && line_next_start(t) == 2 && !line_has_more(t, 2);
+}
+
+fn test_line_count() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 10 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 10 as u8);
+    return line_count(b, 4) == 2 && line_count(b, 3) == 2 && line_count(b, 2) == 1
+        && line_count(b, 0) == 0;
+}
+
+fn test_line_count_no_trailing_newline() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 10 as u8);
+    store8(b, 2, 98 as u8);
+    return line_count(b, 3) == 2;
+}
+
+fn test_line_empty_lines_count() -> bool {
+    // "\n\n" 是两行空的 (与 wc -l 一致: 2 个换行 -> 2 行)。
+    let b: ptr = alloc(16);
+    store8(b, 0, 10 as u8);
+    store8(b, 1, 10 as u8);
+    return line_count(b, 2) == 2 && line_count(b, 1) == 1;
+}

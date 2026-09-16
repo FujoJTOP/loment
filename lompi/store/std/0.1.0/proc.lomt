@@ -1,0 +1,684 @@
+// std/proc.lomt — `/proc/self/*` 的**解析**
+//
+// 为什么需要它: 自己在跑的时候要回答几个问题 —— 我叫什么 (`/proc/self/status` 的
+// `Name:`)、我的命令行长什么样 (`/proc/self/cmdline`)、我开了哪些内存段
+// (`/proc/self/maps`)、环境变量里 `PATH` 是啥 (`/proc/self/environ`)。这四个文件
+// 的格式**互不相同**, 而且都有各自的坑:
+//
+//   status   `Key:\tValue\n`  —— 值里**可以有空格和制表符** (Uid 那行有四个值),
+//                               而且键名要**整词匹配** (`VmRSS` 不能用 `VmRS` 找到,
+//                               `VmRSS2` 也不能被 `VmRSS` 找到)。
+//   cmdline  NUL 分隔, **末尾可能有两个 NUL** —— 一个终结、一个填充。
+//   environ  `KEY=VAL\0` —— 值可以是**空串** (`TERM=` 是合法的)。
+//   maps     `start-end perms ...` —— 地址是**十六进制且超过 32 位** (x86-64 的
+//                               用户栈在 0x7ff...), 用 u32 解会直接崩。
+//
+// 全是**纯解析**, 一个 syscall 都不发 (除了末尾那个显式的读文件函数) —— 所以
+// 自检可以拿手写的文本直接喂。这一点很重要: `/proc` 的内容随进程变, 拿真文件当
+// 测试输入是测不出确定结果的, **手写的输入才是可复现的真值**。
+//
+// 边界 (诚实清单):
+//   - **解析器不"清洗"输入**。status 的值里带 `\t`、带空格, 原样抄给调用方 ——
+//     要不要按制表符再切 (像 `Uid:` 那样) 是调用方的事, 本层不替它猜。
+//   - status 的键匹配是**行首整词**: `key` 后面必须紧跟 `:`。所以我们不做
+//     "包含匹配" —— `Name` 不会命中 `Names` (`Names:` 里 `Name` 后面是 `s`, 不是 `:`),
+//     这正是我们要的; 但相应地, **键名的大小写必须完全一致** (`name:` 找不到)。
+//   - `pr_cmdline_argc` 对**末尾的空字段一律丢弃**。理由: `/proc/self/cmdline`
+//     用两个 NUL 收尾很常见 (内核填充), 而"最后一个参数真的是空串"几乎不存在,
+//     两者在字节上**无法区分** —— 选更常见的那个。中间的**空参数会保留**
+//     (`"a\0\0b"` 是三个参数, 中间那个是空串)。这条是取舍, 不是疏漏。
+//   - maps 的地址用 u64。**超过 16 位十六进制会静默回绕** —— /proc 最长 16 位,
+//     所以正常输入碰不到; 要防的手写输入得自己先验长度。
+//   - `pr_read` 走 syscall, **本机 (Windows PE) 未验证** —— 见它的注释。本模块的
+//     自检**完全不碰它**, 只测纯解析。
+//
+// 命名: 公开 pr_*, 内部 prf_*。自检 test_proc_*。
+
+module proc
+
+use "mem.lomt"
+use "hex.lomt"
+
+/// 解析失败哨兵 (0xFFFFFFFF) —— "输入不是这个格式"。
+pub const PR_ERR: u32 = 4294967295;
+/// "没有/找不到"哨兵 (0xFFFFFFFE) —— 与 PR_ERR **刻意分开**: "没有下一个参数"
+/// 是正常结束, "这一行坏了"是另一回事, 调用方要用不同的办法处理。
+pub const PR_NO: u32 = 4294967294;
+
+// ---------------------------------------------------------------- 行/字段工具
+
+/// 从 o 起找行尾 (第一个 `\n`) 的下标; 没有则返回 n。
+fn prf_line_end(buf: ptr, n: u32, o: u32) -> u32 {
+    let i: u32 = o;
+    while i < n {
+        if load8(buf, i) == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// "内容的真实长度": 末尾的 NUL (可能有好几个) 不算。全 NUL 则返回 0。
+///
+/// 这是 cmdline / environ 那两个"末尾双 NUL"问题的**唯一**处处理点 ——
+/// 先砍掉尾部的 NUL, 后面就都是普通的字段切分了。
+fn prf_span_end(buf: ptr, n: u32) -> u32 {
+    let e: u32 = n;
+    let go: u32 = 1;
+    while e > 0 && go == 1 {
+        if load8(buf, e - 1) == 0 {
+            e = e - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return e;
+}
+
+/// 数 buf[0, e) 里 NUL 分隔的字段数 (e 必须已经砍掉尾部 NUL)。
+/// e == 0 时是 0 个字段 —— 空串不是"一个空字段"。
+fn prf_count_fields(buf: ptr, e: u32) -> u32 {
+    if e == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < e {
+        if load8(buf, i) == 0 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- status
+
+/// 在 `/proc/self/status` 里取 `key:` 的值, 写进 out, 返回**值的字节数**。
+/// 找不到返回 PR_NO。`key` 是编译期字面量 (`"Name"` / `"PPid"` / `"VmRSS"`)。
+pub fn pr_status_get(buf: ptr, n: u32, key: str, out: ptr) -> u32 {
+    return pr_status_get_b(buf, n, str_ptr(key), str_len(key), out);
+}
+
+/// `pr_status_get` 的字节版 —— 键名在运行期才知道时用这个
+/// (`key` 不需要 NUL 结尾, 只读 p[0, klen))。
+///
+/// 匹配规则: **只认行首**, 且 `key` 之后必须紧跟 `:` —— 所以 `Name` 命中
+/// `Name:\tbash`, 不命中 `NameX:\t...`。值从 `:` 后面**跳过一串制表/空格**开始,
+/// 一直到行尾的 `\n` (行尾的 CR 也削掉, 兼容 \r\n 的输入)。
+pub fn pr_status_get_b(buf: ptr, n: u32, kp: ptr, klen: u32, out: ptr) -> u32 {
+    let line: u32 = 0;
+    let found: u32 = 0;
+    let vs: u32 = 0;
+    let ve: u32 = 0;
+    while line < n && found == 0 {
+        let e: u32 = prf_line_end(buf, n, line);
+        if line + klen + 1 <= e {
+            if load8(buf, line + klen) == 58 { // ':'
+                if mem_eq(buf, line, kp, 0, klen) {
+                    let v: u32 = line + klen + 1;
+                    let go: u32 = 1;
+                    while v < e && go == 1 {
+                        let c: u32 = load8(buf, v);
+                        if c == 9 || c == 32 { // '\t' / ' '
+                            v = v + 1;
+                        } else {
+                            go = 0;
+                        }
+                    }
+                    vs = v;
+                    ve = e;
+                    if ve > vs {
+                        if load8(buf, ve - 1) == 13 {
+                            ve = ve - 1; // CRLF 容错
+                        }
+                    }
+                    found = 1;
+                }
+            }
+        }
+        if found == 0 {
+            line = e + 1;
+        }
+    }
+    if found == 0 {
+        return PR_NO;
+    }
+    let l: u32 = ve - vs;
+    mem_copy(out, 0, buf, vs, l);
+    return l;
+}
+
+// ---------------------------------------------------------------- cmdline
+
+/// `/proc/self/cmdline` 有几个参数 (末尾的 NUL 填充不算参数)。
+pub fn pr_cmdline_argc(buf: ptr, n: u32) -> u32 {
+    return prf_count_fields(buf, prf_span_end(buf, n));
+}
+
+/// 第 idx 个参数写进 out, 返回它的字节数 (**空参数返回 0**)。
+/// idx 越界返回 PR_NO —— 与"长度 0"是两回事, 调用方分得开。
+pub fn pr_cmdline_arg(buf: ptr, n: u32, idx: u32, out: ptr) -> u32 {
+    let e: u32 = prf_span_end(buf, n);
+    let k: u32 = 0;
+    let s: u32 = 0;
+    let i: u32 = 0;
+    let os: u32 = PR_NO;
+    let oe: u32 = 0;
+    while i < e {
+        if load8(buf, i) == 0 {
+            if k == idx {
+                os = s;
+                oe = i;
+            }
+            k = k + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if k == idx { // 最后一个字段没有 NUL 收尾
+        os = s;
+        oe = e;
+    }
+    if os == PR_NO {
+        return PR_NO;
+    }
+    let l: u32 = oe - os;
+    mem_copy(out, 0, buf, os, l);
+    return l;
+}
+
+// ---------------------------------------------------------------- environ
+
+/// 在 `/proc/self/environ` 里取环境变量 `key` 的值, 写进 out, 返回字节数。
+/// 找不到返回 PR_NO。值本身**可以是空串** (`TERM=` -> 长度 0, 不是 PR_NO)。
+pub fn pr_environ_get(buf: ptr, n: u32, key: str, out: ptr) -> u32 {
+    return pr_environ_get_b(buf, n, str_ptr(key), str_len(key), out);
+}
+
+/// `pr_environ_get` 的字节版。
+/// 匹配规则: 字段以 `key` 开头, **紧跟 `=`** —— `PATH` 不命中 `PATHX=1`。
+pub fn pr_environ_get_b(buf: ptr, n: u32, kp: ptr, klen: u32, out: ptr) -> u32 {
+    let e: u32 = prf_span_end(buf, n);
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i <= e {
+        if i == e || load8(buf, i) == 0 {
+            if i - s > klen { // 至少要有 "key=" 这么长
+                if load8(buf, s + klen) == 61 { // '='
+                    if mem_eq(buf, s, kp, 0, klen) {
+                        let l: u32 = i - s - klen - 1;
+                        mem_copy(out, 0, buf, s + klen + 1, l);
+                        return l;
+                    }
+                }
+            }
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return PR_NO;
+}
+
+// ---------------------------------------------------------------- maps
+
+/// 从 o 起解一个十六进制数 (最多到 lim), 值以 u64 写进 out (8 字节)。
+/// 返回消耗的字符数; **一个十六进制字符都没有时返回 0** (调用方当解析失败用)。
+fn prf_hex_u64(buf: ptr, o: u32, lim: u32, out: ptr) -> u32 {
+    let v: u64 = 0;
+    let i: u32 = o;
+    let go: u32 = 1;
+    while i < lim && go == 1 {
+        let d: u32 = hex_val(load8(buf, i));
+        if d == HEX_NONE {
+            go = 0;
+        } else {
+            v = v * 16 + (d as u64);
+            i = i + 1;
+        }
+    }
+    mem_store64(out, 0, v);
+    return i - o;
+}
+
+/// 解 `/proc/self/maps` 的一行: `start-end perms offset dev inode path`。
+///
+/// 从 `off` 开始那一行:
+///   `out_start` <- 起始地址 (u64, **8 字节**)
+///   `out_end`   <- 结束地址 (u64, 8 字节)
+///   `out_perm`  <- 权限 4 个字符原样 (`rwxp` / `r-xp` / `r--p`, **4 字节**;
+///                  本层不译成 mode 位 —— 那是 perm.lomt 的事, 而且 maps 的
+///                  第四位是 `p`/`s` 而不是权限位, 直接抄给调用方最诚实)
+///
+/// 返回**下一行的起始偏移**; 这一行坏了返回 PR_ERR; `off >= n` (没有下一行了)
+/// 返回 PR_NO。于是遍历是:
+///     off = 0; while off != PR_NO { off = pr_maps_line(...); }
+///
+/// 地址是 u64 —— x86-64 的栈在 0x7ff... 一带, **超过 32 位**, 用 u32 解会崩。
+pub fn pr_maps_line(buf: ptr, n: u32, off: u32, out_start: ptr, out_end: ptr, out_perm: ptr) -> u32 {
+    if off >= n {
+        return PR_NO;
+    }
+    let e: u32 = prf_line_end(buf, n, off);
+    let i: u32 = off;
+    let k1: u32 = prf_hex_u64(buf, i, e, out_start);
+    if k1 == 0 {
+        return PR_ERR;
+    }
+    i = i + k1;
+    if i >= e || load8(buf, i) != 45 { // '-'
+        return PR_ERR;
+    }
+    i = i + 1;
+    let k2: u32 = prf_hex_u64(buf, i, e, out_end);
+    if k2 == 0 {
+        return PR_ERR;
+    }
+    i = i + k2;
+    if i >= e || load8(buf, i) != 32 { // ' '
+        return PR_ERR;
+    }
+    i = i + 1;
+    if i + 4 > e {
+        return PR_ERR;
+    }
+    mem_copy(out_perm, 0, buf, i, 4);
+    let nx: u32 = e + 1;
+    if nx > n {
+        return n;
+    }
+    return nx;
+}
+
+// ---------------------------------------------------------------- 读文件 (未验证)
+
+/// Linux x86-64 的 syscall 号 (与 host/io.lomt 同一套约定)。
+const PRF_SYS_READ: u64 = 0;
+const PRF_SYS_CLOSE: u64 = 3;
+const PRF_SYS_OPENAT: u64 = 257;
+/// AT_FDCWD (-100 的 u64 补码)。
+const PRF_AT_FDCWD: u64 = 18446744073709551516;
+
+/// 把 `path` 指向的文件读进 `buf` (最多 cap 字节), 返回读到的字节数。
+/// `sc` 是**调用方给的 `str_len(path)+1` 字节暂存** —— 内核要的是 NUL 结尾的路径,
+/// 而本语言的 `str` 不保证 NUL (这个约定与 host/io.lomt 的 `io_put_lit` 一致)。
+/// 打不开或读失败返回 PR_ERR。
+///
+/// 典型用法:
+///     sc = alloc(32); b = alloc(4096);
+///     n = pr_read("/proc/self/status", sc, b, 4096);
+///     pr_status_get(b, n, "Name", out);
+///
+/// **本机未验证**: 走 openat/read/close 三个 Linux syscall (号 257/0/3)。
+/// 本机是 Windows PE, **没有这些号**; 在拿到目标机 (跑 Linux 那一侧) 的结果之前,
+/// **别信它的返回值**。自检不碰它。
+pub fn pr_read(path: str, sc: ptr, buf: ptr, cap: u32) -> u32 {
+    let pl: u32 = str_len(path);
+    mem_copy(sc, 0, str_ptr(path), 0, pl);
+    store8(sc, pl, 0 as u8);
+    let fd: i64 = syscall4(PRF_SYS_OPENAT, PRF_AT_FDCWD, sc as u64, 0);
+    if fd < 0 {
+        return PR_ERR;
+    }
+    let total: u32 = 0;
+    let go: u32 = 1;
+    while total < cap && go == 1 {
+        let r: i64 = syscall4(PRF_SYS_READ, fd as u64, (buf as u64) + (total as u64),
+                              (cap - total) as u64);
+        if r <= 0 {
+            go = 0;
+        } else {
+            total = total + (r as u32);
+        }
+    }
+    syscall4(PRF_SYS_CLOSE, fd as u64, 0, 0);
+    return total;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 输入全是**手写的文本** —— `/proc` 的真文件随进程变, 拿它当测试夹具测不出
+// 确定结果。手写的才是可复现的真值。带 `\0` 的那些**只能**在运行期用 store8 造
+// (本语言的字面量写不出 `\0`, 写了会静默变成字母 '0'=48)。
+
+/// 测试用: 把字面量拷进缓冲, 返回新偏移。
+fn prf_put(buf: ptr, o: u32, s: str) -> u32 {
+    mem_copy(buf, o, str_ptr(s), 0, str_len(s));
+    return o + str_len(s);
+}
+
+fn test_proc_status_get_name() -> bool {
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Name:\tbash\nState:\tS (sleeping)\n";
+    let n: u32 = pr_status_get(str_ptr(s), str_len(s), "Name", o);
+    return n == 4 && mem_eq(o, 0, str_ptr("bash"), 0, 4);
+}
+
+fn test_proc_status_get_value_with_spaces() -> bool {
+    // 值里有空格 —— 不能按空白切, 必须到行尾。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Name:\tbash\nState:\tS (sleeping)\n";
+    let n: u32 = pr_status_get(str_ptr(s), str_len(s), "State", o);
+    return n == 12 && mem_eq(o, 0, str_ptr("S (sleeping)"), 0, 12);
+}
+
+fn test_proc_status_get_skips_tabs_and_spaces() -> bool {
+    // `:` 后面可能是混合的制表/空格 (VmRSS 那行就是)。全部跳过, 但**值内部的
+    // 空格保留**。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "VmRSS:\t   1234 kB\n";
+    let n: u32 = pr_status_get(str_ptr(s), str_len(s), "VmRSS", o);
+    return n == 7 && mem_eq(o, 0, str_ptr("1234 kB"), 0, 7);
+}
+
+fn test_proc_status_get_value_keeps_tabs() -> bool {
+    // Uid 那行有四个制表符分隔的字段 —— 本层**原样**给出, 不替调用方切。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Uid:\t1000\t1000\t1000\t1000\n";
+    let n: u32 = pr_status_get(str_ptr(s), str_len(s), "Uid", o);
+    return n == 19 && load8(o, 4) == 9 && mem_eq(o, 0, str_ptr("1000\t1000\t1000\t1000"), 0, 19);
+}
+
+fn test_proc_status_get_not_found() -> bool {
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Name:\tbash\nPid:\t42\n";
+    return pr_status_get(str_ptr(s), str_len(s), "VmRSS", o) == PR_NO
+        && pr_status_get(str_ptr(s), str_len(s), "pid", o) == PR_NO; // 大小写敏感
+}
+
+fn test_proc_status_get_requires_whole_key() -> bool {
+    // **整词匹配**: `Name` 不能命中 `NameX:`, 也不能命中值里出现的 `Name:`。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s1: str = "NameX:\tnope\n";
+    let ok1: bool = pr_status_get(str_ptr(s1), str_len(s1), "Name", o) == PR_NO;
+    let s2: str = "Note:\tName: inside\n";
+    let ok2: bool = pr_status_get(str_ptr(s2), str_len(s2), "Name", o) == PR_NO;
+    // 但真键仍然找得到, 且值里的冒号不被截断
+    let s3: str = "X:\ta:b\nName:\treal\n";
+    let n3: u32 = pr_status_get(str_ptr(s3), str_len(s3), "Name", o);
+    let ok3: bool = n3 == 4 && mem_eq(o, 0, str_ptr("real"), 0, 4);
+    let s4: str = "Name:\ta:b\n";
+    let n4: u32 = pr_status_get(str_ptr(s4), str_len(s4), "Name", o);
+    let ok4: bool = n4 == 3 && mem_eq(o, 0, str_ptr("a:b"), 0, 3);
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_proc_status_get_last_line_without_newline() -> bool {
+    // 文件末尾没有换行 (读了 cap 字节的截断情形) —— 最后一行也要能找到。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Name:\tbash\nPPid:\t7";
+    let n: u32 = pr_status_get(str_ptr(s), str_len(s), "PPid", o);
+    return n == 1 && load8(o, 0) == 55;
+}
+
+fn test_proc_status_get_crlf_tolerated() -> bool {
+    // \r\n 结尾时值末尾的 CR 要削掉 (本语言写不出字面 `\r`, 用 store8 造)。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let n0: u32 = prf_put(b, 0, "Name:\tbz");
+    store8(b, n0, 13 as u8);
+    store8(b, n0 + 1, 10 as u8);
+    let n: u32 = pr_status_get(b, n0 + 2, "Name", o);
+    return n == 2 && mem_eq(o, 0, str_ptr("bz"), 0, 2);
+}
+
+fn test_proc_status_get_empty_value() -> bool {
+    // `Key:\n` (值为空) —— 长度 0, **不是 PR_NO**。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let s: str = "Empty:\nNext:\t1\n";
+    return pr_status_get(str_ptr(s), str_len(s), "Empty", o) == 0;
+}
+
+fn test_proc_cmdline_argc_basic() -> bool {
+    // "prog\0-a\0b\0" -> 3 个参数
+    let b: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "prog");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "-a");
+    store8(b, o2, 0 as u8);
+    let o3: u32 = prf_put(b, o2 + 1, "b");
+    store8(b, o3, 0 as u8);
+    return pr_cmdline_argc(b, o3 + 1) == 3;
+}
+
+fn test_proc_cmdline_argc_double_trailing_nul() -> bool {
+    // "prog\0-a\0\0" -> **仍然是 2** (末尾那个 NUL 是填充, 不是"空的第二个参数")
+    let b: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "prog");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "-a");
+    store8(b, o2, 0 as u8);
+    store8(b, o2 + 1, 0 as u8);
+    return pr_cmdline_argc(b, o2 + 2) == 2;
+}
+
+fn test_proc_cmdline_argc_middle_empty() -> bool {
+    // "prog\0\0-a\0" -> **3** —— 中间的空参数是**真的**参数, 必须保留。
+    let b: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "prog");
+    store8(b, o1, 0 as u8);
+    store8(b, o1 + 1, 0 as u8);
+    let o3: u32 = prf_put(b, o1 + 2, "-a");
+    store8(b, o3, 0 as u8);
+    return pr_cmdline_argc(b, o3 + 1) == 3;
+}
+
+fn test_proc_cmdline_argc_degenerate() -> bool {
+    // 空缓冲 / 全 NUL -> 0 个参数 (空串不是"一个空参数")。
+    let b: ptr = alloc(8);
+    store8(b, 0, 0 as u8);
+    store8(b, 1, 0 as u8);
+    return pr_cmdline_argc(b, 0) == 0 && pr_cmdline_argc(b, 2) == 0;
+}
+
+fn test_proc_cmdline_arg_values() -> bool {
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(16);
+    let o1: u32 = prf_put(b, 0, "prog");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "-a");
+    store8(b, o2, 0 as u8);
+    let tot: u32 = o2 + 1;
+    let n0: u32 = pr_cmdline_arg(b, tot, 0, o);
+    let ok0: bool = n0 == 4 && mem_eq(o, 0, str_ptr("prog"), 0, 4);
+    let n1: u32 = pr_cmdline_arg(b, tot, 1, o);
+    let ok1: bool = n1 == 2 && mem_eq(o, 0, str_ptr("-a"), 0, 2);
+    let n2: u32 = pr_cmdline_arg(b, tot, 2, o);
+    return ok0 && ok1 && n2 == PR_NO; // 越界 -> PR_NO, 不是 0
+}
+
+fn test_proc_cmdline_arg_empty_middle_is_zero_not_no() -> bool {
+    // 中间的空参数: 长度 **0**, 与越界的 PR_NO 必须分得开。
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(16);
+    let o1: u32 = prf_put(b, 0, "a");
+    store8(b, o1, 0 as u8);
+    store8(b, o1 + 1, 0 as u8);
+    let o3: u32 = prf_put(b, o1 + 2, "b");
+    store8(b, o3, 0 as u8);
+    let tot: u32 = o3 + 1;
+    let n1: u32 = pr_cmdline_arg(b, tot, 1, o);
+    let n2: u32 = pr_cmdline_arg(b, tot, 2, o);
+    let ok2: bool = n2 == 1 && load8(o, 0) == 98;
+    return n1 == 0 && n1 != PR_NO && ok2 && pr_cmdline_arg(b, tot, 3, o) == PR_NO;
+}
+
+fn test_proc_cmdline_arg_double_trailing_nul() -> bool {
+    // 双 NUL 收尾时, argv 的个数与取值必须一致 (两边用同一个"尾部砍 NUL"的规则)。
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(16);
+    let o1: u32 = prf_put(b, 0, "x");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "yy");
+    store8(b, o2, 0 as u8);
+    store8(b, o2 + 1, 0 as u8);
+    let tot: u32 = o2 + 2;
+    let n: u32 = pr_cmdline_arg(b, tot, 1, o);
+    return pr_cmdline_argc(b, tot) == 2 && n == 2 && mem_eq(o, 0, str_ptr("yy"), 0, 2)
+        && pr_cmdline_arg(b, tot, 2, o) == PR_NO;
+}
+
+fn test_proc_environ_get() -> bool {
+    // "PATH=/usr/bin\0HOME=/root\0"
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "PATH=/usr/bin");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "HOME=/root");
+    store8(b, o2, 0 as u8);
+    let tot: u32 = o2 + 1;
+    let s: str = "HOME";
+    let n: u32 = pr_environ_get(b, tot, s, o);
+    return n == 5 && mem_eq(o, 0, str_ptr("/root"), 0, 5);
+}
+
+fn test_proc_environ_get_empty_value() -> bool {
+    // `TERM=` 是合法的 —— 值空, 长度 0, **不是 PR_NO**。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "TERM=");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "X=1");
+    store8(b, o2, 0 as u8);
+    let s: str = "TERM";
+    return pr_environ_get(b, o2 + 1, s, o) == 0;
+}
+
+fn test_proc_environ_get_requires_equals() -> bool {
+    // `PATH` 不能命中 `PATHX=1` (整词), 也不能命中值里含 `PATH=` 的别的键。
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "PATHX=1");
+    store8(b, o1, 0 as u8);
+    let o2: u32 = prf_put(b, o1 + 1, "NOTE=PATH=2");
+    store8(b, o2, 0 as u8);
+    let s: str = "PATH";
+    let ok1: bool = pr_environ_get(b, o2 + 1, s, o) == PR_NO;
+    // 但真的 PATH= 找得到
+    let b2: ptr = alloc(64);
+    let p1: u32 = prf_put(b2, 0, "Z=0");
+    store8(b2, p1, 0 as u8);
+    let p2: u32 = prf_put(b2, p1 + 1, "PATH=/bin");
+    store8(b2, p2, 0 as u8);
+    let n: u32 = pr_environ_get(b2, p2 + 1, s, o);
+    return ok1 && n == 4 && mem_eq(o, 0, str_ptr("/bin"), 0, 4);
+}
+
+fn test_proc_environ_get_double_trailing_nul() -> bool {
+    let b: ptr = alloc(64);
+    let o: ptr = alloc(32);
+    let o1: u32 = prf_put(b, 0, "A=1");
+    store8(b, o1, 0 as u8);
+    store8(b, o1 + 1, 0 as u8);
+    let s: str = "A";
+    let n: u32 = pr_environ_get(b, o1 + 2, s, o);
+    let s2: str = "B";
+    return n == 1 && load8(o, 0) == 49 && pr_environ_get(b, o1 + 2, s2, o) == PR_NO;
+}
+
+fn test_proc_maps_line_parse() -> bool {
+    // 真格式: `start-end perms offset dev inode  path`
+    //   7f9c1a2b3000-7f9c1a2b5000 r-xp 00000000 08:01 1234567   /usr/lib/libc.so.6
+    // 这一行长 75 字节, 所以下一行起点是 75。
+    let s: str = "7f9c1a2b3000-7f9c1a2b5000 r-xp 00000000 08:01 1234567   /usr/lib/libc.so.6\n";
+    let n: u32 = str_len(s);
+    let p: ptr = str_ptr(s);
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    let nx: u32 = pr_maps_line(p, n, 0, st, en, pm);
+    return n == 75 && nx == n && mem_load32(st, 4) == 32668 && mem_load32(st, 0) == 439037952
+        && mem_load32(en, 4) == 32668 && mem_load32(en, 0) == 439046144
+        && mem_eq(pm, 0, str_ptr("r-xp"), 0, 4);
+}
+
+fn test_proc_maps_line_exceeds_32_bits() -> bool {
+    // **这条是本模块存在的理由之一**: x86-64 的地址超过 32 位。
+    //   ffffffffff600000 (vDSO 区) = hi 4294967295 / lo 4284481536
+    //   ffffffffff601000            = hi 4294967295 / lo 4284485632
+    // 用 u32 解会得到 0xff600000 = 4284481536 —— 高 32 位直接丢光, 高半是 0。
+    let s: str = "ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0  [vdso]\n";
+    let n: u32 = str_len(s);
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    pr_maps_line(str_ptr(s), n, 0, st, en, pm);
+    return mem_load32(st, 4) == 4294967295 && mem_load32(st, 0) == 4284481536
+        && mem_load32(en, 4) == 4294967295 && mem_load32(en, 0) == 4284485632
+        && mem_eq(pm, 0, str_ptr("r-xp"), 0, 4);
+}
+
+fn test_proc_maps_line_walk_two_lines() -> bool {
+    // 遍历两行: 第一次返回第一行长度, 第二次返回总长度, 第三次 off >= n -> PR_NO。
+    let s1: str = "55d4e0a00000-55d4e0a21000 r--p 00000000 08:01 1234567  /usr/bin/cat\n";
+    let s2: str = "7f9c1a2b3000-7f9c1a2b5000 rw-p 00000000 00:00 0 \n";
+    let b: ptr = alloc(256);
+    let o1: u32 = prf_put(b, 0, s1);
+    let o2: u32 = prf_put(b, o1, s2);
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    let off1: u32 = pr_maps_line(b, o2, 0, st, en, pm);
+    let ok1: bool = off1 == o1 && mem_load32(st, 4) == 21972 && mem_load32(st, 0) == 3768582144
+        && mem_eq(pm, 0, str_ptr("r--p"), 0, 4);
+    let off2: u32 = pr_maps_line(b, o2, off1, st, en, pm);
+    let ok2: bool = off2 == o2 && mem_load32(en, 4) == 32668 && mem_load32(en, 0) == 439046144
+        && mem_eq(pm, 0, str_ptr("rw-p"), 0, 4);
+    return ok1 && ok2 && pr_maps_line(b, o2, off2, st, en, pm) == PR_NO;
+}
+
+fn test_proc_maps_line_malformed() -> bool {
+    // 空行 / 没有 '-' / 地址非十六进制 / perms 不够 4 字符 -> PR_ERR (不是 PR_NO)。
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    let s1: str = "\n";
+    let ok1: bool = pr_maps_line(str_ptr(s1), str_len(s1), 0, st, en, pm) == PR_ERR;
+    let s2: str = "notanaddress r-xp 0 0 0\n";
+    let ok2: bool = pr_maps_line(str_ptr(s2), str_len(s2), 0, st, en, pm) == PR_ERR;
+    let s3: str = "1000 r-xp 00000000 00:00 0\n";
+    let ok3: bool = pr_maps_line(str_ptr(s3), str_len(s3), 0, st, en, pm) == PR_ERR;
+    let s4: str = "1000-2000 r-\n"; // perms 只有 2 个字符
+    let ok4: bool = pr_maps_line(str_ptr(s4), str_len(s4), 0, st, en, pm) == PR_ERR;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_proc_maps_line_past_end_is_no_not_err() -> bool {
+    // 走过头是**正常结束** (PR_NO), 坏行才是 PR_ERR —— 两个哨兵不能混。
+    let s: str = "1000-2000 r-xp 0 0 0 x\n";
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    let n: u32 = str_len(s);
+    let nx: u32 = pr_maps_line(str_ptr(s), n, 0, st, en, pm);
+    return nx == n && pr_maps_line(str_ptr(s), n, n, st, en, pm) == PR_NO
+        && pr_maps_line(str_ptr(s), n, n + 5, st, en, pm) == PR_NO
+        && PR_NO != PR_ERR;
+}
+
+fn test_proc_maps_line_offset() -> bool {
+    // 从一个缓冲中间的某一行起解 (off 不是 0)。
+    let b: ptr = alloc(128);
+    let o1: u32 = prf_put(b, 0, "garbage first line\n");
+    let o2: u32 = prf_put(b, o1, "1000-2000 rw-s 00000000 00:00 0\n");
+    let st: ptr = alloc(8);
+    let en: ptr = alloc(8);
+    let pm: ptr = alloc(8);
+    let nx: u32 = pr_maps_line(b, o2, o1, st, en, pm);
+    return nx == o2 && mem_load32(st, 0) == 4096 && mem_load32(en, 0) == 8192
+        && mem_eq(pm, 0, str_ptr("rw-s"), 0, 4);
+}
+
+fn test_proc_constants_are_distinct() -> bool {
+    // PR_ERR 与 PR_NO 必须不同 —— 混用会让"读完了"被当成"文件坏了"。
+    return PR_ERR == 4294967295 && PR_NO == 4294967294 && PR_ERR != PR_NO;
+}

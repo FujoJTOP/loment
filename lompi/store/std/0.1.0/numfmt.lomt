@@ -1,0 +1,103 @@
+// std/numfmt.lomt — 纯数字格式化 (整数 -> 文本)
+//
+// 为什么单独一层: 这两个函数原来住在 `io.lomt` 里, 但**它们一个 syscall 都不发** ——
+// 只是把数字写进一块缓冲。把它留在 io 的后果是**分层倒了**: out.lomt / buf.lomt
+// (可移植层) 要跨越 io (宿主层) 去拿它, 于是"可移植的那层依赖宿主层"。
+//
+// 拆成库系统之后这个错误就藏不住了: 包的依赖边是算出来的, 而 `std -> io -> ...` 这种
+// 方向是不可接受的 —— io 属于宿主侧。所以本模块是 std 里最底下的一层:
+//   std (可移植) -> numfmt ; host (宿主) -> std -> numfmt
+//
+// 接口与原来一致 (io_dec_into 那套), 只换了前缀。
+//
+// 命名: 公开一律 numfmt_*, 内部一律 nf_*。自检 test_numfmt_*。
+
+module numfmt
+
+/// `numfmt_dec_into` 最多写出这么多字节 (u64 十进制上限 20 位)。
+pub const NUMFMT_DEC_MAX: u32 = 20;
+/// `numfmt_hex_into` 的 width 上限 (u64 = 16 个十六进制位)。
+pub const NUMFMT_HEX_MAX: u32 = 16;
+
+/// u64 -> 十进制, 写进 dst, 返回长度 (最多 NUMFMT_DEC_MAX 字节)。
+///
+/// 两趟: 先数位数, 再从末位往回填。手抄版是"倒着写进临时区再翻转", 那需要
+/// dst 之后有暂存余量; 这里不要了 —— 少一个隐式约定, 也绕开了 ptr_add 在
+/// Rust 路径上的降级缺陷。
+pub fn numfmt_dec_into(dst: ptr, v: u64) -> u32 {
+    let d: u32 = 0;
+    let x: u64 = v;
+    while x > 0 {
+        x = x / 10;
+        d = d + 1;
+    }
+    if d == 0 {
+        store8(dst, 0, 48 as u8);
+        return 1;
+    }
+    let y: u64 = v;
+    let i: u32 = 0;
+    while i < d {
+        // 显式中间变量, 不写成 `(48 + (y % 10) as u32) as u8`: 自举 codegen 会把
+        // 外层 `as u8` 的源类型取成内层 u64, 发射非法 IR。既有 bug, docs/150 M82。
+        let digit: u32 = (y % 10) as u32;
+        store8(dst, d - 1 - i, (48 + digit) as u8);
+        y = y / 10;
+        i = i + 1;
+    }
+    return d;
+}
+
+/// u64 -> 小写十六进制, 固定 width 位 (左侧补 0)。width 超过 NUMFMT_HEX_MAX 就按
+/// NUMFMT_HEX_MAX 截断 —— 静默截断是刻意的: 调用方数错位宽时得到一个能看的数,
+/// 而不是越界写。dst 需要 width 字节。
+pub fn numfmt_hex_into(dst: ptr, v: u64, width: u32) -> u32 {
+    let w: u32 = NUMFMT_HEX_MAX;
+    if width < NUMFMT_HEX_MAX {
+        w = width;
+    }
+    let i: u32 = 0;
+    while i < w {
+        let shift: u32 = (w - 1 - i) * 4;
+        let digit: u32 = ((v >> shift) & 15) as u32;
+        if digit < 10 {
+            store8(dst, i, (48 + digit) as u8);
+        } else {
+            store8(dst, i, (87 + digit) as u8);
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_numfmt_dec_zero() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = numfmt_dec_into(b, 0);
+    return n == 1 && load8(b, 0) == 48;
+}
+
+fn test_numfmt_dec_multi() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = numfmt_dec_into(b, 12345);
+    return n == 5 && load8(b, 0) == 49 && load8(b, 4) == 53;
+}
+
+fn test_numfmt_dec_u64_max() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = numfmt_dec_into(b, 18446744073709551615);
+    return n == 20 && load8(b, 0) == 49 && load8(b, 19) == 53;
+}
+
+fn test_numfmt_hex_pad() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = numfmt_hex_into(b, 255, 4);
+    return n == 4 && load8(b, 0) == 48 && load8(b, 2) == 102 && load8(b, 3) == 102;
+}
+
+fn test_numfmt_hex_wide_clamped() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = numfmt_hex_into(b, 1, 99);
+    return n == 16 && load8(b, 15) == 49;
+}

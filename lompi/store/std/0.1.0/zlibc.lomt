@@ -1,0 +1,383 @@
+// std/zlibc.lomt — zlib (RFC 1950) 容器: 头 + DEFLATE 数据 + 大端 Adler-32
+//
+// 为什么需要它而不是直接用 `inflate.lomt`: 现实里的压缩数据**几乎都不裸放 DEFLATE**。
+// PNG 的每个 IDAT、gzip 之外的 HTTP 内容编码、很多二进制格式, 外面都裹着 zlib 的头与
+// 校验。裸 inflate 会:
+//   1. 把 2 字节头当成 DEFLATE 位流 —— 立刻解出垃圾或报错;
+//   2. **完全不看尾部那 4 字节 Adler-32** —— 数据被截断/损坏时它照样"成功"返回。
+// 第 2 条是真正危险的: 一个静默返回坏数据的解压器比一个报错的解压器糟得多。
+//
+// **这个模块唯一不显然的职责是 `consumed_out`**: 一个 zlib 流后面常常还跟着别的数据
+// (PNG 里是一串 IDAT 块, 归档里是下一条记录)。不把"我吃掉了多少个字节"报出来,
+// 调用方就只能**猜**边界 —— 而猜边界正是解析器最经典的漏洞来源。
+//
+// 格式 (RFC 1950 §2.2):
+//   CMF  u8     低 4 位 CM 必须 == 8 (deflate); 高 4 位 CINFO 是窗口大小, <= 7
+//   FLG  u8     低 5 位 FCHECK, 第 5 位 FDICT, 高 2 位 FLEVEL
+//   **校验** `(CMF*256 + FLG) % 31 == 0` —— 这是头里唯一能自证的冗余
+//   FDICT 置位时后面跟 4 字节字典 id —— **本模块不支持预设字典**, 报 ZC_NO
+//   ... DEFLATE 数据 ...
+//   ADLER u32   **大端** (网络序), 不是小端 —— 这是最容易写反的一个字节序
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **只解压, 不压缩**: 压缩器 (尤其是一个"够好"的匹配搜索) 是另一个数量级的代码,
+//     而且要它就得连 `deflate.lomt` 一起背。这里只做"读"这一半。
+//   - **不支持预设字典 (FDICT)**: 报 `ZC_NO` 而不是硬解。字典 id 后面没有字典数据时
+//     硬解会得到垃圾 —— 那正是"静默错"。
+//   - **Adler 不匹配一律 ZC_ERR**: 一个字节都不返回。宁可整块失败也不给可能坏的数据。
+//   - **不做多成员流 (gzip 那种 concat)**: 一个调用解一个流, 下一个流的起点由
+//     `consumed_out` 自己接 —— 把"循环"留给调用方。
+//
+// 命名: 公开 zc_*, 内部 zc_*。自检 test_zlibc_*。
+
+module zlibc
+
+use "mem.lomt"
+use "inflate.lomt"
+use "adler32.lomt"
+
+pub const ZC_OK: u32 = 0;
+/// 坏流 / 校验不匹配 / 被截断。
+pub const ZC_ERR: u32 = 4294967295;
+/// 合法但不支持 (FDICT 预设字典)。
+pub const ZC_NO: u32 = 4294967294;
+
+/// 便捷入口 (`zc_inflate`) 要的临时区字节数: inflate 的工作区 + 两个 4 字节输出槽。
+pub fn zc_scratch_bytes() -> u32 {
+    return inf_scratch_bytes() + 8;
+}
+
+fn zc_at(p: ptr, o: u32) -> ptr {
+    return ((p as u64) + (o as u64)) as ptr;
+}
+
+/// 读 32 位**大端** (zlib 尾部的 Adler-32 是网络序)。
+fn zc_be32(p: ptr, o: u32) -> u32 {
+    let b0: u32 = load8(p, o);
+    let b1: u32 = load8(p, o + 1);
+    let b2: u32 = load8(p, o + 2);
+    let b3: u32 = load8(p, o + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+/// 解压一个 zlib 流。`ws` 至少 `zc_scratch_bytes()` 字节 (由调用方复用, 循环解多个流时
+/// 用它而不是 `zc_inflate`, 因为 bump 堆不回收)。
+///
+/// 成功返回 ZC_OK, 并把
+///   - 解出的字节数写进 `out_len_out` (4 字节),
+///   - **吃掉的输入字节数**写进 `consumed_out` (4 字节) —— 含 2 字节头 + DEFLATE + 4 字节校验。
+/// 失败返回 ZC_ERR / ZC_NO, 此时**两个输出都不写**。
+pub fn zc_inflate_full(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, consumed_out: ptr, ws: ptr) -> u32 {
+    if sn < 2 {
+        return ZC_ERR;
+    }
+    let cmf: u32 = load8(src, 0);
+    let flg: u32 = load8(src, 1);
+    // CM 低 4 位必须是 8 (deflate)。别把这一条与下面的 %31 混为一谈 —— 两条独立。
+    if (cmf & 15) != 8 {
+        return ZC_ERR;
+    }
+    if (cmf >> 4) > 7 {
+        return ZC_ERR; // CINFO > 7: 窗口比 32K 还大, 不是合法 zlib
+    }
+    if (cmf * 256 + flg) % 31 != 0 {
+        return ZC_ERR; // FCHECK 不过: 头被改过
+    }
+    if (flg & 32) != 0 {
+        return ZC_NO; // FDICT: 需要预设字典, 本模块不支持
+    }
+    let sb: u32 = inf_scratch_bytes();
+    let iws: ptr = ws;
+    let used: ptr = zc_at(ws, sb);
+    let olen: ptr = zc_at(ws, sb + 4);
+    // 把指针推到 DEFLATE 数据起点 (头 2 字节之后), 长度也相应缩短。
+    let src2: ptr = zc_at(src, 2);
+    let r: u32 = inf_inflate_full(src2, sn - 2, out, out_cap, olen, used, iws);
+    if r != 0 {
+        return ZC_ERR;
+    }
+    let u: u32 = mem_load32(used, 0);
+    let ol: u32 = mem_load32(olen, 0);
+    // 尾部还必须有 4 字节 Adler。先判 u 不越界再判"剩下够不够 4 字节" —— 两次都避免加溢出。
+    if u > sn - 2 {
+        return ZC_ERR;
+    }
+    if (sn - 2) - u < 4 {
+        return ZC_ERR;
+    }
+    let want: u32 = zc_be32(src2, u);
+    let got: u32 = adler32(out, 0, ol);
+    if want != got {
+        return ZC_ERR; // 校验不过 -> 一个字节都不交出去
+    }
+    mem_store32(out_len_out, 0, ol);
+    mem_store32(consumed_out, 0, u + 6); // 2(头) + u(DEFLATE) + 4(Adler)
+    return ZC_OK;
+}
+
+/// 便捷入口: 自己开工作区。**循环解很多流时别用这个** (bump 堆不回收)。
+pub fn zc_inflate(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, consumed_out: ptr) -> u32 {
+    let ws: ptr = alloc(zc_scratch_bytes());
+    return zc_inflate_full(src, sn, out, out_cap, out_len_out, consumed_out, ws);
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 向量来源: **Python `zlib.compress` 编出来的真流** (每个自检上方的注释标了原文与级别)。
+// 自编自解只能证明两边一样错; 用另一个实现编、我们解, 才说明对得上。
+
+fn zc_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn zc_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = zc_hv(str_byte(s, k * 2));
+        let lo: u32 = zc_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// Python: `zlib.compress(b"hello hello hello hello")` -> 16 字节。
+fn zc_hello() -> str {
+    return "789ccb48cdc9c957c8402701680308b1";
+}
+
+/// Python: `zlib.compress(b"")` -> 8 字节 (只有头 + 空块 + 校验)。
+fn zc_empty() -> str {
+    return "789c030000000001";
+}
+
+/// Python: `zlib.compress(b"abc")` -> 11 字节 (Adler = 0x024D0127)。
+fn zc_abc() -> str {
+    return "789c4b4c4a0600024d0127";
+}
+
+/// Python: `zlib.compress(b"z")` -> 9 字节。
+fn zc_z() -> str {
+    return "789cab0200007b007b";
+}
+
+/// Python: `zlib.compress(b"abcdefghij"*3, 0)` —— level 0 走**存储块** -> 41 字节。
+fn zc_stored() -> str {
+    return "7801011e00e1ff6162636465666768696a6162636465666768696a6162636465666768696ab7840be6";
+}
+
+/// Python: `zlib.compress(b"payload data here")` 后面拼 `deadbeef` -> 29 字节。
+fn zc_payload_tail() -> str {
+    return "789c2b48acccc94f4c5148492c4954c8482d4a05003b010669deadbeef";
+}
+
+/// 同 payload 流, 但 adler (最后 4 字节) 被翻过 —— 数据本身是好的。
+fn zc_payload_bad_adler() -> str {
+    return "789c2b48acccc94f4c5148492c4954c8482d4a05003b010696";
+}
+
+fn zc_want_text() -> str {
+    return "hello hello hello hello";
+}
+
+fn test_zlibc_inflate_text() -> bool {
+    // 真流 -> 原文逐字节相等 + consumed 正好是流的全长 (16)。
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_hello());
+    let r: u32 = zc_inflate(src, sn, out, 64, ol, cs);
+    if r != ZC_OK {
+        return false;
+    }
+    return sn == 16 && mem_load32(ol, 0) == 23 && mem_load32(cs, 0) == 16
+        && mem_eq(out, 0, str_ptr(zc_want_text()), 0, 23);
+}
+
+fn test_zlibc_inflate_empty() -> bool {
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_empty());
+    let r: u32 = zc_inflate(src, sn, out, 16, ol, cs);
+    return r == ZC_OK && sn == 8 && mem_load32(ol, 0) == 0 && mem_load32(cs, 0) == 8;
+}
+
+fn test_zlibc_inflate_abc_big_endian_adler() -> bool {
+    // "abc" 的 Adler-32 是 0x024D0127, 流里按**大端**写成 02 4D 01 27。
+    // 若把尾部按小端读, 会得到 0x27014D02 对不上 -> 这条立刻红。
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_abc());
+    let r: u32 = zc_inflate(src, sn, out, 16, ol, cs);
+    let want: str = "abc";
+    return r == ZC_OK && mem_load32(ol, 0) == 3 && mem_load32(cs, 0) == 11
+        && mem_eq(out, 0, str_ptr(want), 0, 3);
+}
+
+fn test_zlibc_inflate_stored_block() -> bool {
+    // level 0 的流走 BTYPE=00 存储块 (含 LEN/NLEN 校验) —— 与固定/动态霍夫曼是不同代码路径。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_stored());
+    let r: u32 = zc_inflate(src, sn, out, 64, ol, cs);
+    let want: str = "abcdefghijabcdefghijabcdefghij";
+    return r == ZC_OK && mem_load32(ol, 0) == 30 && mem_load32(cs, 0) == 41
+        && mem_eq(out, 0, str_ptr(want), 0, 30);
+}
+
+fn test_zlibc_adler_mismatch_is_err() -> bool {
+    // 数据完好、只有尾部 Adler 被改 -> 必须报错, **不能**静默返回解出来的数据。
+    // 这条是本模块存在的理由之一: 裸 inflate 会"成功"。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_payload_bad_adler());
+    let r: u32 = zc_inflate(src, sn, out, 64, ol, cs);
+    return sn == 25 && r == ZC_ERR;
+}
+
+fn test_zlibc_consumed_reports_trailing() -> bool {
+    // 流后面跟着 `deadbeef`: consumed 必须是 25 (流长), 不是 29 (整段输入长)。
+    // 这条钉住"边界靠 consumed 报, 不靠输入长度猜"。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_payload_tail());
+    let r: u32 = zc_inflate(src, sn, out, 64, ol, cs);
+    let want: str = "payload data here";
+    return sn == 29 && r == ZC_OK && mem_load32(ol, 0) == 17 && mem_load32(cs, 0) == 25
+        && mem_eq(out, 0, str_ptr(want), 0, 17);
+}
+
+fn test_zlibc_parses_two_concatenated_streams() -> bool {
+    // 两个 zlib 流首尾相接: 靠 consumed 找到第二条的起点。这正是 PNG 多 IDAT 的形状。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let n1: u32 = zc_hx(src, zc_abc());
+    let n2: u32 = zc_hx(zc_at(src, n1), zc_z());
+    let total: u32 = n1 + n2;
+    let r1: u32 = zc_inflate(src, total, out, 64, ol, cs);
+    let ok1: bool = r1 == ZC_OK && mem_load32(cs, 0) == 11 && mem_load32(ol, 0) == 3;
+    let c1: u32 = mem_load32(cs, 0);
+    let out2: ptr = alloc(16);
+    let ol2: ptr = alloc(8);
+    let cs2: ptr = alloc(8);
+    let r2: u32 = zc_inflate(zc_at(src, c1), total - c1, out2, 16, ol2, cs2);
+    let ok2: bool = r2 == ZC_OK && mem_load32(ol2, 0) == 1 && load8(out2, 0) == 122;
+    return ok1 && ok2 && c1 + mem_load32(cs2, 0) == total;
+}
+
+fn test_zlibc_bad_cm_is_err() -> bool {
+    // CMF=0x79 低 4 位是 9 (不是 8); FLG=0x18 让 %31 仍然成立 ——
+    // 于是这条**只**测 CM 检查, 不会被 FCHECK 提前拦下。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    store8(src, 0, 121 as u8); // 0x79
+    store8(src, 1, 24 as u8);  // 0x18
+    return zc_inflate(src, 2, out, 16, ol, cs) == ZC_ERR;
+}
+
+fn test_zlibc_bad_fcheck_is_err() -> bool {
+    // CMF=0x78 (合法) 但 FLG=0x9d 让 (CMF*256+FLG)%31 = 1 —— FCHECK 不过。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    store8(src, 0, 120 as u8); // 0x78
+    store8(src, 1, 157 as u8); // 0x9d
+    return zc_inflate(src, 2, out, 16, ol, cs) == ZC_ERR;
+}
+
+fn test_zlibc_cinfo_too_big_is_err() -> bool {
+    // CMF=0x88: CM=8 合法, 但 CINFO=8 > 7; FLG=0x1c 让 %31 成立。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    store8(src, 0, 136 as u8); // 0x88
+    store8(src, 1, 28 as u8);  // 0x1c
+    return zc_inflate(src, 2, out, 16, ol, cs) == ZC_ERR;
+}
+
+fn test_zlibc_fdict_is_no() -> bool {
+    // CMF=0x78, FLG=0x20: %31 成立, FDICT 置位 -> ZC_NO (合法但不支持), 不是 ZC_ERR。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    store8(src, 0, 120 as u8); // 0x78
+    store8(src, 1, 32 as u8);  // 0x20
+    return zc_inflate(src, 2, out, 16, ol, cs) == ZC_NO;
+}
+
+fn test_zlibc_too_short_is_err() -> bool {
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    return zc_inflate(src, 0, out, 16, ol, cs) == ZC_ERR
+        && zc_inflate(src, 1, out, 16, ol, cs) == ZC_ERR;
+}
+
+fn test_zlibc_truncated_adler_is_err() -> bool {
+    // 把尾部 4 字节校验切掉: DEFLATE 能解、但尾部不够 -> ZC_ERR。
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_hello());
+    let r: u32 = zc_inflate(src, sn - 4, out, 64, ol, cs);
+    return sn == 16 && r == ZC_ERR;
+}
+
+fn test_zlibc_corrupt_deflate_is_err() -> bool {
+    // 把 DEFLATE 数据里一个字节打坏: 要么 inflate 报错, 要么 Adler 对不上 —— 两条都归 ERR。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let cs: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_hello());
+    store8(src, 5, (load8(src, 5) ^ 255) as u8);
+    return zc_inflate(src, sn, out, 64, ol, cs) == ZC_ERR;
+}
+
+fn test_zlibc_ws_variant_matches_convenience() -> bool {
+    // 复用工作区的版本与便捷版必须给出完全相同的结果。
+    let src: ptr = alloc(32);
+    let o1: ptr = alloc(64);
+    let o2: ptr = alloc(64);
+    let l1: ptr = alloc(8);
+    let l2: ptr = alloc(8);
+    let c1: ptr = alloc(8);
+    let c2: ptr = alloc(8);
+    let sn: u32 = zc_hx(src, zc_hello());
+    let r1: u32 = zc_inflate(src, sn, o1, 64, l1, c1);
+    let ws: ptr = alloc(zc_scratch_bytes());
+    let r2: u32 = zc_inflate_full(src, sn, o2, 64, l2, c2, ws);
+    return r1 == ZC_OK && r2 == ZC_OK && mem_load32(l1, 0) == mem_load32(l2, 0)
+        && mem_load32(c1, 0) == mem_load32(c2, 0) && mem_eq(o1, 0, o2, 0, 23);
+}
+
+fn test_zlibc_scratch_bytes() -> bool {
+    return zc_scratch_bytes() == inf_scratch_bytes() + 8 && inf_scratch_bytes() == 2880;
+}

@@ -1,0 +1,536 @@
+// std/case.lomt — Unicode 简单大小写映射与不区分大小写比较
+//
+// 为什么不能只做 ASCII: 只把 'a'..'z' 减 32 是**错**的 —— 土耳其语、希腊语、
+// 西里尔、全角字母、以及星形平面的 Deseret 都各有各的 delta, 而且同一段里还会
+// 断开 (拉丁小写 0x61..0x7A 是 -32, 但 0xF7 '÷' 没有映射, 所以 0xE0..0xFE 要分成
+// 两段)。手写这些区间必错, 所以这张表由 `tools/gen_case_tables.py` 从 Python 的
+// str.upper()/str.lower() 生成, 压缩成"码点连续 + delta 相同"的区间。
+//
+// 表在源码里是十六进制串, 每段 17 个字符: 起 6 位 + 止 6 位 + (delta+65536) 5 位。
+// **delta 要 5 位不是 4 位**: 切罗基文 (U+13A0..U+13F5 大写 与 U+AB70..U+ABBF 小写)
+// 的 delta 是 ±38864, 16 位装不下 —— 第一版我按 4 位编, 生成的表直接把切罗基文
+// 悄悄截断成了别的码点 (不报错, 查出来是错的)。读表时 delta = 字段 - 65536,
+// 在 u32 下加法回绕, 负数自动正确。
+//
+// 范围: 只扫到 0x20000。Unicode 全部单字符大小写映射都在这之下 (最高是 Adlam
+// U+1E900 一带), 但**这不是全部 Unicode**: 下面是明确的取舍清单。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **只做 simple case mapping**, 不做 full: 'ß'.upper() 在真实 Unicode 里是
+//     "SS" 两个字符, 'İ'.lower() 是 "i"+组合点。这里都**不做** —— 那是"一变多",
+//     会改变字符串长度结构, 属于 case folding 的上层。于是 case_upper_cp(0xDF) == 0xDF
+//     (原样返回), 这是取舍不是 bug。
+//   - **不做 full case folding**: 比较用**小写折叠**, 不是 Unicode 的 CaseFolding.txt。
+//     于是 'K'(Kelvin U+212A) 与 'k' 相等 (两者小写都是 'k'), 但 'ß' 与 "SS" 不等,
+//     'ſ'(U+017F) 与 's' 不等。要做精确折叠得再引一张 CaseFolding 表。
+//   - **不做 locale 敏感的大写**: 土耳其语的 'i'/'I' 无点/有点规则不在这里 ——
+//     那需要运行时知道 locale, 而这一层没有那个信息。
+//   - **非法 UTF-8 原样拷字节**, 不当成 U+FFFD: 转换的最常见用途就是"原样透传用户
+//     文本再动其中几个字母", 把坏字节替换掉会悄悄改变数据。
+//
+// 命名: 公开 case_*, 内部 c_*。自检 test_case_*。
+
+module case
+
+use "mem.lomt"
+use "utf8.lomt"
+
+/// 码点在本表里没有映射。**公开 API 不用它**: `case_upper_cp` 等无映射时原样返回
+/// 输入。它只对 `c_seg_find` 这一层的"没查到"有意义, 暴露出来是为了让调用方在
+/// 需要区分"改了"和"没改"时有个哨兵 (对比: 没有映射是正常情况, 不是错误, 所以
+/// 和 `CASE_ERR` 分开; 本模块根本没有"坏输入"这一类, 故没有 CASE_ERR)。
+pub const CASE_NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 映射表 (生成)
+
+fn c_up_hex() -> str {
+    return "00006100007a0ffe00000b50000b5102e70000e00000f60ffe00000f80000fe0ffe00000ff0000ff100790001010001010ffff0001030001030ffff0001050001050ffff0001070001070ffff0001090001090ffff00010b00010b0ffff00010d00010d0ffff00010f00010f0ffff0001110001110ffff0001130001130ffff0001150001150ffff0001170001170ffff0001190001190ffff00011b00011b0ffff00011d00011d0ffff00011f00011f0ffff0001210001210ffff0001230001230ffff0001250001250ffff0001270001270ffff0001290001290ffff00012b00012b0ffff00012d00012d0ffff00012f00012f0ffff0001310001310ff180001330001330ffff0001350001350ffff0001370001370ffff00013a00013a0ffff00013c00013c0ffff00013e00013e0ffff0001400001400ffff0001420001420ffff0001440001440ffff0001460001460ffff0001480001480ffff00014b00014b0ffff00014d00014d0ffff00014f00014f0ffff0001510001510ffff0001530001530ffff0001550001550ffff0001570001570ffff0001590001590ffff00015b00015b0ffff00015d00015d0ffff00015f00015f0ffff0001610001610ffff0001630001630ffff0001650001650ffff0001670001670ffff0001690001690ffff00016b00016b0ffff00016d00016d0ffff00016f00016f0ffff0001710001710ffff0001730001730ffff0001750001750ffff0001770001770ffff00017a00017a0ffff00017c00017c0ffff00017e00017e0ffff00017f00017f0fed4000180000180100c30001830001830ffff";
+}
+fn c_up_hex_1() -> str {
+    return "0001850001850ffff0001880001880ffff00018c00018c0ffff0001920001920ffff000195000195100610001990001990ffff00019a00019a100a300019e00019e100820001a10001a10ffff0001a30001a30ffff0001a50001a50ffff0001a80001a80ffff0001ad0001ad0ffff0001b00001b00ffff0001b40001b40ffff0001b60001b60ffff0001b90001b90ffff0001bd0001bd0ffff0001bf0001bf100380001c50001c50ffff0001c60001c60fffe0001c80001c80ffff0001c90001c90fffe0001cb0001cb0ffff0001cc0001cc0fffe0001ce0001ce0ffff0001d00001d00ffff0001d20001d20ffff0001d40001d40ffff0001d60001d60ffff0001d80001d80ffff0001da0001da0ffff0001dc0001dc0ffff0001dd0001dd0ffb10001df0001df0ffff0001e10001e10ffff0001e30001e30ffff0001e50001e50ffff0001e70001e70ffff0001e90001e90ffff0001eb0001eb0ffff0001ed0001ed0ffff0001ef0001ef0ffff0001f20001f20ffff0001f30001f30fffe0001f50001f50ffff0001f90001f90ffff0001fb0001fb0ffff0001fd0001fd0ffff0001ff0001ff0ffff0002010002010ffff0002030002030ffff0002050002050ffff0002070002070ffff0002090002090ffff00020b00020b0ffff00020d00020d0ffff00020f00020f0ffff0002110002110ffff0002130002130ffff0002150002150ffff0002170002170ffff0002190002190ffff00021b00021b0ffff00021d00021d0ffff00021f00021f0ffff0002230002230ffff0002250002250ffff0002270002270ffff0002290002290ffff";
+}
+fn c_up_hex_2() -> str {
+    return "00022b00022b0ffff00022d00022d0ffff00022f00022f0ffff0002310002310ffff0002330002330ffff00023c00023c0ffff00023f00024012a3f0002420002420ffff0002470002470ffff0002490002490ffff00024b00024b0ffff00024d00024d0ffff00024f00024f0ffff00025000025012a1f00025100025112a1c00025200025212a1e0002530002530ff2e0002540002540ff320002560002570ff330002590002590ff3600025b00025b0ff3500025c00025c1a54f0002600002600ff330002610002611a54b0002630002630ff310002650002651a5280002660002661a5440002680002680ff2f0002690002690ff2d00026a00026a1a54400026b00026b129f700026c00026c1a54100026f00026f0ff2d000271000271129fd0002720002720ff2b0002750002750ff2a00027d00027d129e70002800002800ff260002820002821a5430002830002830ff260002870002871a52a0002880002880ff260002890002890ffbb00028a00028b0ff2700028c00028c0ffb90002920002920ff2500029d00029d1a51500029e00029e1a512000345000345100540003710003710ffff0003730003730ffff0003770003770ffff00037b00037d100820003ac0003ac0ffda0003ad0003af0ffdb0003b10003c10ffe00003c20003c20ffe10003c30003cb0ffe00003cc0003cc0ffc00003cd0003ce0ffc10003d00003d00ffc20003d10003d10ffc70003d50003d50ffd10003d60003d60ffca0003d70003d70fff80003d90003d90ffff0003db0003db0ffff0003dd0003dd0ffff0003df0003df0ffff0003e10003e10ffff";
+}
+fn c_up_hex_3() -> str {
+    return "0003e30003e30ffff0003e50003e50ffff0003e70003e70ffff0003e90003e90ffff0003eb0003eb0ffff0003ed0003ed0ffff0003ef0003ef0ffff0003f00003f00ffaa0003f10003f10ffb00003f20003f2100070003f30003f30ff8c0003f50003f50ffa00003f80003f80ffff0003fb0003fb0ffff00043000044f0ffe000045000045f0ffb00004610004610ffff0004630004630ffff0004650004650ffff0004670004670ffff0004690004690ffff00046b00046b0ffff00046d00046d0ffff00046f00046f0ffff0004710004710ffff0004730004730ffff0004750004750ffff0004770004770ffff0004790004790ffff00047b00047b0ffff00047d00047d0ffff00047f00047f0ffff0004810004810ffff00048b00048b0ffff00048d00048d0ffff00048f00048f0ffff0004910004910ffff0004930004930ffff0004950004950ffff0004970004970ffff0004990004990ffff00049b00049b0ffff00049d00049d0ffff00049f00049f0ffff0004a10004a10ffff0004a30004a30ffff0004a50004a50ffff0004a70004a70ffff0004a90004a90ffff0004ab0004ab0ffff0004ad0004ad0ffff0004af0004af0ffff0004b10004b10ffff0004b30004b30ffff0004b50004b50ffff0004b70004b70ffff0004b90004b90ffff0004bb0004bb0ffff0004bd0004bd0ffff0004bf0004bf0ffff0004c20004c20ffff0004c40004c40ffff0004c60004c60ffff0004c80004c80ffff0004ca0004ca0ffff0004cc0004cc0ffff0004ce0004ce0ffff0004cf0004cf0fff10004d10004d10ffff0004d30004d30ffff";
+}
+fn c_up_hex_4() -> str {
+    return "0004d50004d50ffff0004d70004d70ffff0004d90004d90ffff0004db0004db0ffff0004dd0004dd0ffff0004df0004df0ffff0004e10004e10ffff0004e30004e30ffff0004e50004e50ffff0004e70004e70ffff0004e90004e90ffff0004eb0004eb0ffff0004ed0004ed0ffff0004ef0004ef0ffff0004f10004f10ffff0004f30004f30ffff0004f50004f50ffff0004f70004f70ffff0004f90004f90ffff0004fb0004fb0ffff0004fd0004fd0ffff0004ff0004ff0ffff0005010005010ffff0005030005030ffff0005050005050ffff0005070005070ffff0005090005090ffff00050b00050b0ffff00050d00050d0ffff00050f00050f0ffff0005110005110ffff0005130005130ffff0005150005150ffff0005170005170ffff0005190005190ffff00051b00051b0ffff00051d00051d0ffff00051f00051f0ffff0005210005210ffff0005230005230ffff0005250005250ffff0005270005270ffff0005290005290ffff00052b00052b0ffff00052d00052d0ffff00052f00052f0ffff0005610005860ffd00010d00010fa10bc00010fd0010ff10bc00013f80013fd0fff8001c80001c800e792001c81001c810e793001c82001c820e79c001c83001c840e79e001c85001c850e79d001c86001c860e7a4001c87001c870e7db001c88001c88189c2001d79001d7918a04001d7d001d7d10ee6001d8e001d8e18a38001e01001e010ffff001e03001e030ffff001e05001e050ffff001e07001e070ffff001e09001e090ffff001e0b001e0b0ffff001e0d001e0d0ffff001e0f001e0f0ffff001e11001e110ffff";
+}
+fn c_up_hex_5() -> str {
+    return "001e13001e130ffff001e15001e150ffff001e17001e170ffff001e19001e190ffff001e1b001e1b0ffff001e1d001e1d0ffff001e1f001e1f0ffff001e21001e210ffff001e23001e230ffff001e25001e250ffff001e27001e270ffff001e29001e290ffff001e2b001e2b0ffff001e2d001e2d0ffff001e2f001e2f0ffff001e31001e310ffff001e33001e330ffff001e35001e350ffff001e37001e370ffff001e39001e390ffff001e3b001e3b0ffff001e3d001e3d0ffff001e3f001e3f0ffff001e41001e410ffff001e43001e430ffff001e45001e450ffff001e47001e470ffff001e49001e490ffff001e4b001e4b0ffff001e4d001e4d0ffff001e4f001e4f0ffff001e51001e510ffff001e53001e530ffff001e55001e550ffff001e57001e570ffff001e59001e590ffff001e5b001e5b0ffff001e5d001e5d0ffff001e5f001e5f0ffff001e61001e610ffff001e63001e630ffff001e65001e650ffff001e67001e670ffff001e69001e690ffff001e6b001e6b0ffff001e6d001e6d0ffff001e6f001e6f0ffff001e71001e710ffff001e73001e730ffff001e75001e750ffff001e77001e770ffff001e79001e790ffff001e7b001e7b0ffff001e7d001e7d0ffff001e7f001e7f0ffff001e81001e810ffff001e83001e830ffff001e85001e850ffff001e87001e870ffff001e89001e890ffff001e8b001e8b0ffff001e8d001e8d0ffff001e8f001e8f0ffff001e91001e910ffff001e93001e930ffff001e95001e950ffff001e9b001e9b0ffc5001ea1001ea10ffff001ea3001ea30ffff001ea5001ea50ffff";
+}
+fn c_up_hex_6() -> str {
+    return "001ea7001ea70ffff001ea9001ea90ffff001eab001eab0ffff001ead001ead0ffff001eaf001eaf0ffff001eb1001eb10ffff001eb3001eb30ffff001eb5001eb50ffff001eb7001eb70ffff001eb9001eb90ffff001ebb001ebb0ffff001ebd001ebd0ffff001ebf001ebf0ffff001ec1001ec10ffff001ec3001ec30ffff001ec5001ec50ffff001ec7001ec70ffff001ec9001ec90ffff001ecb001ecb0ffff001ecd001ecd0ffff001ecf001ecf0ffff001ed1001ed10ffff001ed3001ed30ffff001ed5001ed50ffff001ed7001ed70ffff001ed9001ed90ffff001edb001edb0ffff001edd001edd0ffff001edf001edf0ffff001ee1001ee10ffff001ee3001ee30ffff001ee5001ee50ffff001ee7001ee70ffff001ee9001ee90ffff001eeb001eeb0ffff001eed001eed0ffff001eef001eef0ffff001ef1001ef10ffff001ef3001ef30ffff001ef5001ef50ffff001ef7001ef70ffff001ef9001ef90ffff001efb001efb0ffff001efd001efd0ffff001eff001eff0ffff001f00001f0710008001f10001f1510008001f20001f2710008001f30001f3710008001f40001f4510008001f51001f5110008001f53001f5310008001f55001f5510008001f57001f5710008001f60001f6710008001f70001f711004a001f72001f7510056001f76001f7710064001f78001f7910080001f7a001f7b10070001f7c001f7d1007e001fb0001fb110008001fbe001fbe0e3db001fd0001fd110008001fe0001fe110008001fe5001fe51000700214e00214e0ffe400217000217f0fff00021840021840ffff0024d00024e90ffe6";
+}
+fn c_up_hex_7() -> str {
+    return "002c30002c5f0ffd0002c61002c610ffff002c65002c650d5d5002c66002c660d5d8002c68002c680ffff002c6a002c6a0ffff002c6c002c6c0ffff002c73002c730ffff002c76002c760ffff002c81002c810ffff002c83002c830ffff002c85002c850ffff002c87002c870ffff002c89002c890ffff002c8b002c8b0ffff002c8d002c8d0ffff002c8f002c8f0ffff002c91002c910ffff002c93002c930ffff002c95002c950ffff002c97002c970ffff002c99002c990ffff002c9b002c9b0ffff002c9d002c9d0ffff002c9f002c9f0ffff002ca1002ca10ffff002ca3002ca30ffff002ca5002ca50ffff002ca7002ca70ffff002ca9002ca90ffff002cab002cab0ffff002cad002cad0ffff002caf002caf0ffff002cb1002cb10ffff002cb3002cb30ffff002cb5002cb50ffff002cb7002cb70ffff002cb9002cb90ffff002cbb002cbb0ffff002cbd002cbd0ffff002cbf002cbf0ffff002cc1002cc10ffff002cc3002cc30ffff002cc5002cc50ffff002cc7002cc70ffff002cc9002cc90ffff002ccb002ccb0ffff002ccd002ccd0ffff002ccf002ccf0ffff002cd1002cd10ffff002cd3002cd30ffff002cd5002cd50ffff002cd7002cd70ffff002cd9002cd90ffff002cdb002cdb0ffff002cdd002cdd0ffff002cdf002cdf0ffff002ce1002ce10ffff002ce3002ce30ffff002cec002cec0ffff002cee002cee0ffff002cf3002cf30ffff002d00002d250e3a0002d27002d270e3a0002d2d002d2d0e3a000a64100a6410ffff00a64300a6430ffff00a64500a6450ffff00a64700a6470ffff00a64900a6490ffff";
+}
+fn c_up_hex_8() -> str {
+    return "00a64b00a64b0ffff00a64d00a64d0ffff00a64f00a64f0ffff00a65100a6510ffff00a65300a6530ffff00a65500a6550ffff00a65700a6570ffff00a65900a6590ffff00a65b00a65b0ffff00a65d00a65d0ffff00a65f00a65f0ffff00a66100a6610ffff00a66300a6630ffff00a66500a6650ffff00a66700a6670ffff00a66900a6690ffff00a66b00a66b0ffff00a66d00a66d0ffff00a68100a6810ffff00a68300a6830ffff00a68500a6850ffff00a68700a6870ffff00a68900a6890ffff00a68b00a68b0ffff00a68d00a68d0ffff00a68f00a68f0ffff00a69100a6910ffff00a69300a6930ffff00a69500a6950ffff00a69700a6970ffff00a69900a6990ffff00a69b00a69b0ffff00a72300a7230ffff00a72500a7250ffff00a72700a7270ffff00a72900a7290ffff00a72b00a72b0ffff00a72d00a72d0ffff00a72f00a72f0ffff00a73300a7330ffff00a73500a7350ffff00a73700a7370ffff00a73900a7390ffff00a73b00a73b0ffff00a73d00a73d0ffff00a73f00a73f0ffff00a74100a7410ffff00a74300a7430ffff00a74500a7450ffff00a74700a7470ffff00a74900a7490ffff00a74b00a74b0ffff00a74d00a74d0ffff00a74f00a74f0ffff00a75100a7510ffff00a75300a7530ffff00a75500a7550ffff00a75700a7570ffff00a75900a7590ffff00a75b00a75b0ffff00a75d00a75d0ffff00a75f00a75f0ffff00a76100a7610ffff00a76300a7630ffff00a76500a7650ffff00a76700a7670ffff00a76900a7690ffff00a76b00a76b0ffff00a76d00a76d0ffff00a76f00a76f0ffff";
+}
+fn c_up_hex_9() -> str {
+    return "00a77a00a77a0ffff00a77c00a77c0ffff00a77f00a77f0ffff00a78100a7810ffff00a78300a7830ffff00a78500a7850ffff00a78700a7870ffff00a78c00a78c0ffff00a79100a7910ffff00a79300a7930ffff00a79400a7941003000a79700a7970ffff00a79900a7990ffff00a79b00a79b0ffff00a79d00a79d0ffff00a79f00a79f0ffff00a7a100a7a10ffff00a7a300a7a30ffff00a7a500a7a50ffff00a7a700a7a70ffff00a7a900a7a90ffff00a7b500a7b50ffff00a7b700a7b70ffff00a7b900a7b90ffff00a7bb00a7bb0ffff00a7bd00a7bd0ffff00a7bf00a7bf0ffff00a7c100a7c10ffff00a7c300a7c30ffff00a7c800a7c80ffff00a7ca00a7ca0ffff00a7d100a7d10ffff00a7d700a7d70ffff00a7d900a7d90ffff00a7f600a7f60ffff00ab5300ab530fc6000ab7000abbf0683000ff4100ff5a0ffe001042801044f0ffd80104d80104fb0ffd80105970105a10ffd90105a30105b10ffd90105b30105b90ffd90105bb0105bc0ffd9010cc0010cf20ffc00118c00118df0ffe0016e60016e7f0ffe001e92201e9430ffde";
+}
+
+fn c_lo_hex() -> str {
+    return "00004100005a100200000c00000d6100200000d80000de10020000100000100100010001020001021000100010400010410001000106000106100010001080001081000100010a00010a1000100010c00010c1000100010e00010e10001000110000110100010001120001121000100011400011410001000116000116100010001180001181000100011a00011a1000100011c00011c1000100011e00011e10001000120000120100010001220001221000100012400012410001000126000126100010001280001281000100012a00012a1000100012c00012c1000100012e00012e100010001320001321000100013400013410001000136000136100010001390001391000100013b00013b1000100013d00013d1000100013f00013f100010001410001411000100014300014310001000145000145100010001470001471000100014a00014a1000100014c00014c1000100014e00014e10001000150000150100010001520001521000100015400015410001000156000156100010001580001581000100015a00015a1000100015c00015c1000100015e00015e10001000160000160100010001620001621000100016400016410001000166000166100010001680001681000100016a00016a1000100016c00016c1000100016e00016e10001000170000170100010001720001721000100017400017410001000176000176100010001780001780ff870001790001791000100017b00017b1000100017d00017d10001000181000181100d20001820001821000100018400018410001000186000186100ce00018700018710001";
+}
+fn c_lo_hex_1() -> str {
+    return "00018900018a100cd00018b00018b1000100018e00018e1004f00018f00018f100ca000190000190100cb00019100019110001000193000193100cd000194000194100cf000196000196100d3000197000197100d10001980001981000100019c00019c100d300019d00019d100d500019f00019f100d60001a00001a0100010001a20001a2100010001a40001a4100010001a60001a6100da0001a70001a7100010001a90001a9100da0001ac0001ac100010001ae0001ae100da0001af0001af100010001b10001b2100d90001b30001b3100010001b50001b5100010001b70001b7100db0001b80001b8100010001bc0001bc100010001c40001c4100020001c50001c5100010001c70001c7100020001c80001c8100010001ca0001ca100020001cb0001cb100010001cd0001cd100010001cf0001cf100010001d10001d1100010001d30001d3100010001d50001d5100010001d70001d7100010001d90001d9100010001db0001db100010001de0001de100010001e00001e0100010001e20001e2100010001e40001e4100010001e60001e6100010001e80001e8100010001ea0001ea100010001ec0001ec100010001ee0001ee100010001f10001f1100020001f20001f2100010001f40001f4100010001f60001f60ff9f0001f70001f70ffc80001f80001f8100010001fa0001fa100010001fc0001fc100010001fe0001fe10001000200000200100010002020002021000100020400020410001000206000206100010002080002081000100020a00020a1000100020c00020c1000100020e00020e1000100021000021010001";
+}
+fn c_lo_hex_2() -> str {
+    return "0002120002121000100021400021410001000216000216100010002180002181000100021a00021a1000100021c00021c1000100021e00021e100010002200002200ff7e0002220002221000100022400022410001000226000226100010002280002281000100022a00022a1000100022c00022c1000100022e00022e10001000230000230100010002320002321000100023a00023a12a2b00023b00023b1000100023d00023d0ff5d00023e00023e12a28000241000241100010002430002430ff3d0002440002441004500024500024510047000246000246100010002480002481000100024a00024a1000100024c00024c1000100024e00024e1000100037000037010001000372000372100010003760003761000100037f00037f100740003860003861002600038800038a1002500038c00038c1004000038e00038f1003f0003910003a1100200003a30003ab100200003cf0003cf100080003d80003d8100010003da0003da100010003dc0003dc100010003de0003de100010003e00003e0100010003e20003e2100010003e40003e4100010003e60003e6100010003e80003e8100010003ea0003ea100010003ec0003ec100010003ee0003ee100010003f40003f40ffc40003f70003f7100010003f90003f90fff90003fa0003fa100010003fd0003ff0ff7e00040000040f1005000041000042f10020000460000460100010004620004621000100046400046410001000466000466100010004680004681000100046a00046a1000100046c00046c1000100046e00046e100010004700004701000100047200047210001";
+}
+fn c_lo_hex_3() -> str {
+    return "00047400047410001000476000476100010004780004781000100047a00047a1000100047c00047c1000100047e00047e100010004800004801000100048a00048a1000100048c00048c1000100048e00048e10001000490000490100010004920004921000100049400049410001000496000496100010004980004981000100049a00049a1000100049c00049c1000100049e00049e100010004a00004a0100010004a20004a2100010004a40004a4100010004a60004a6100010004a80004a8100010004aa0004aa100010004ac0004ac100010004ae0004ae100010004b00004b0100010004b20004b2100010004b40004b4100010004b60004b6100010004b80004b8100010004ba0004ba100010004bc0004bc100010004be0004be100010004c00004c01000f0004c10004c1100010004c30004c3100010004c50004c5100010004c70004c7100010004c90004c9100010004cb0004cb100010004cd0004cd100010004d00004d0100010004d20004d2100010004d40004d4100010004d60004d6100010004d80004d8100010004da0004da100010004dc0004dc100010004de0004de100010004e00004e0100010004e20004e2100010004e40004e4100010004e60004e6100010004e80004e8100010004ea0004ea100010004ec0004ec100010004ee0004ee100010004f00004f0100010004f20004f2100010004f40004f4100010004f60004f6100010004f80004f8100010004fa0004fa100010004fc0004fc100010004fe0004fe1000100050000050010001000502000502100010005040005041000100050600050610001";
+}
+fn c_lo_hex_4() -> str {
+    return "0005080005081000100050a00050a1000100050c00050c1000100050e00050e10001000510000510100010005120005121000100051400051410001000516000516100010005180005181000100051a00051a1000100051c00051c1000100051e00051e10001000520000520100010005220005221000100052400052410001000526000526100010005280005281000100052a00052a1000100052c00052c1000100052e00052e10001000531000556100300010a00010c511c600010c70010c711c600010cd0010cd11c600013a00013ef197d00013f00013f510008001c90001cba0f440001cbd001cbf0f440001e00001e0010001001e02001e0210001001e04001e0410001001e06001e0610001001e08001e0810001001e0a001e0a10001001e0c001e0c10001001e0e001e0e10001001e10001e1010001001e12001e1210001001e14001e1410001001e16001e1610001001e18001e1810001001e1a001e1a10001001e1c001e1c10001001e1e001e1e10001001e20001e2010001001e22001e2210001001e24001e2410001001e26001e2610001001e28001e2810001001e2a001e2a10001001e2c001e2c10001001e2e001e2e10001001e30001e3010001001e32001e3210001001e34001e3410001001e36001e3610001001e38001e3810001001e3a001e3a10001001e3c001e3c10001001e3e001e3e10001001e40001e4010001001e42001e4210001001e44001e4410001001e46001e4610001001e48001e4810001001e4a001e4a10001001e4c001e4c10001001e4e001e4e10001001e50001e5010001001e52001e5210001";
+}
+fn c_lo_hex_5() -> str {
+    return "001e54001e5410001001e56001e5610001001e58001e5810001001e5a001e5a10001001e5c001e5c10001001e5e001e5e10001001e60001e6010001001e62001e6210001001e64001e6410001001e66001e6610001001e68001e6810001001e6a001e6a10001001e6c001e6c10001001e6e001e6e10001001e70001e7010001001e72001e7210001001e74001e7410001001e76001e7610001001e78001e7810001001e7a001e7a10001001e7c001e7c10001001e7e001e7e10001001e80001e8010001001e82001e8210001001e84001e8410001001e86001e8610001001e88001e8810001001e8a001e8a10001001e8c001e8c10001001e8e001e8e10001001e90001e9010001001e92001e9210001001e94001e9410001001e9e001e9e0e241001ea0001ea010001001ea2001ea210001001ea4001ea410001001ea6001ea610001001ea8001ea810001001eaa001eaa10001001eac001eac10001001eae001eae10001001eb0001eb010001001eb2001eb210001001eb4001eb410001001eb6001eb610001001eb8001eb810001001eba001eba10001001ebc001ebc10001001ebe001ebe10001001ec0001ec010001001ec2001ec210001001ec4001ec410001001ec6001ec610001001ec8001ec810001001eca001eca10001001ecc001ecc10001001ece001ece10001001ed0001ed010001001ed2001ed210001001ed4001ed410001001ed6001ed610001001ed8001ed810001001eda001eda10001001edc001edc10001001ede001ede10001001ee0001ee010001001ee2001ee210001001ee4001ee410001001ee6001ee610001";
+}
+fn c_lo_hex_6() -> str {
+    return "001ee8001ee810001001eea001eea10001001eec001eec10001001eee001eee10001001ef0001ef010001001ef2001ef210001001ef4001ef410001001ef6001ef610001001ef8001ef810001001efa001efa10001001efc001efc10001001efe001efe10001001f08001f0f0fff8001f18001f1d0fff8001f28001f2f0fff8001f38001f3f0fff8001f48001f4d0fff8001f59001f590fff8001f5b001f5b0fff8001f5d001f5d0fff8001f5f001f5f0fff8001f68001f6f0fff8001f88001f8f0fff8001f98001f9f0fff8001fa8001faf0fff8001fb8001fb90fff8001fba001fbb0ffb6001fbc001fbc0fff7001fc8001fcb0ffaa001fcc001fcc0fff7001fd8001fd90fff8001fda001fdb0ff9c001fe8001fe90fff8001fea001feb0ff90001fec001fec0fff9001ff8001ff90ff80001ffa001ffb0ff82001ffc001ffc0fff70021260021260e2a300212a00212a0df4100212b00212b0dfba0021320021321001c00216000216f10010002183002183100010024b60024cf1001a002c00002c2f10030002c60002c6010001002c62002c620d609002c63002c630f11a002c64002c640d619002c67002c6710001002c69002c6910001002c6b002c6b10001002c6d002c6d0d5e4002c6e002c6e0d603002c6f002c6f0d5e1002c70002c700d5e2002c72002c7210001002c75002c7510001002c7e002c7f0d5c1002c80002c8010001002c82002c8210001002c84002c8410001002c86002c8610001002c88002c8810001002c8a002c8a10001002c8c002c8c10001002c8e002c8e10001002c90002c9010001002c92002c9210001";
+}
+fn c_lo_hex_7() -> str {
+    return "002c94002c9410001002c96002c9610001002c98002c9810001002c9a002c9a10001002c9c002c9c10001002c9e002c9e10001002ca0002ca010001002ca2002ca210001002ca4002ca410001002ca6002ca610001002ca8002ca810001002caa002caa10001002cac002cac10001002cae002cae10001002cb0002cb010001002cb2002cb210001002cb4002cb410001002cb6002cb610001002cb8002cb810001002cba002cba10001002cbc002cbc10001002cbe002cbe10001002cc0002cc010001002cc2002cc210001002cc4002cc410001002cc6002cc610001002cc8002cc810001002cca002cca10001002ccc002ccc10001002cce002cce10001002cd0002cd010001002cd2002cd210001002cd4002cd410001002cd6002cd610001002cd8002cd810001002cda002cda10001002cdc002cdc10001002cde002cde10001002ce0002ce010001002ce2002ce210001002ceb002ceb10001002ced002ced10001002cf2002cf21000100a64000a6401000100a64200a6421000100a64400a6441000100a64600a6461000100a64800a6481000100a64a00a64a1000100a64c00a64c1000100a64e00a64e1000100a65000a6501000100a65200a6521000100a65400a6541000100a65600a6561000100a65800a6581000100a65a00a65a1000100a65c00a65c1000100a65e00a65e1000100a66000a6601000100a66200a6621000100a66400a6641000100a66600a6661000100a66800a6681000100a66a00a66a1000100a66c00a66c1000100a68000a6801000100a68200a6821000100a68400a6841000100a68600a68610001";
+}
+fn c_lo_hex_8() -> str {
+    return "00a68800a6881000100a68a00a68a1000100a68c00a68c1000100a68e00a68e1000100a69000a6901000100a69200a6921000100a69400a6941000100a69600a6961000100a69800a6981000100a69a00a69a1000100a72200a7221000100a72400a7241000100a72600a7261000100a72800a7281000100a72a00a72a1000100a72c00a72c1000100a72e00a72e1000100a73200a7321000100a73400a7341000100a73600a7361000100a73800a7381000100a73a00a73a1000100a73c00a73c1000100a73e00a73e1000100a74000a7401000100a74200a7421000100a74400a7441000100a74600a7461000100a74800a7481000100a74a00a74a1000100a74c00a74c1000100a74e00a74e1000100a75000a7501000100a75200a7521000100a75400a7541000100a75600a7561000100a75800a7581000100a75a00a75a1000100a75c00a75c1000100a75e00a75e1000100a76000a7601000100a76200a7621000100a76400a7641000100a76600a7661000100a76800a7681000100a76a00a76a1000100a76c00a76c1000100a76e00a76e1000100a77900a7791000100a77b00a77b1000100a77d00a77d075fc00a77e00a77e1000100a78000a7801000100a78200a7821000100a78400a7841000100a78600a7861000100a78b00a78b1000100a78d00a78d05ad800a79000a7901000100a79200a7921000100a79600a7961000100a79800a7981000100a79a00a79a1000100a79c00a79c1000100a79e00a79e1000100a7a000a7a01000100a7a200a7a21000100a7a400a7a41000100a7a600a7a61000100a7a800a7a810001";
+}
+fn c_lo_hex_9() -> str {
+    return "00a7aa00a7aa05abc00a7ab00a7ab05ab100a7ac00a7ac05ab500a7ad00a7ad05abf00a7ae00a7ae05abc00a7b000a7b005aee00a7b100a7b105ad600a7b200a7b205aeb00a7b300a7b3103a000a7b400a7b41000100a7b600a7b61000100a7b800a7b81000100a7ba00a7ba1000100a7bc00a7bc1000100a7be00a7be1000100a7c000a7c01000100a7c200a7c21000100a7c400a7c40ffd000a7c500a7c505abd00a7c600a7c6075c800a7c700a7c71000100a7c900a7c91000100a7d000a7d01000100a7d600a7d61000100a7d800a7d81000100a7f500a7f51000100ff2100ff3a10020010400010427100280104b00104d31002801057001057a1002701057c01058a1002701058c0105921002701059401059510027010c80010cb2100400118a00118bf10020016e40016e5f1002001e90001e92110022";
+}
+
+// ---------------------------------------------------------------- 查表
+
+fn c_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// 从 s 的第 i 个字符起读 k 个十六进制位。
+fn c_hex(s: str, i: u32, k: u32) -> u32 {
+    let v: u32 = 0;
+    let j: u32 = 0;
+    while j < k {
+        v = (v << 4) | c_hv(str_byte(s, i + j));
+        j = j + 1;
+    }
+    return v;
+}
+
+/// 在一段表里查 cp。查不到给 CASE_NONE。
+/// 区间按**起点排序**, 所以"当前段起点已经比 cp 大"就能停 —— 后面只会更大。
+fn c_seg_find(s: str, cp: u32) -> u32 {
+    let n: u32 = str_len(s) / 17;
+    let i: u32 = 0;
+    while i < n {
+        let lo: u32 = c_hex(s, i * 17, 6);
+        if cp < lo {
+            return CASE_NONE;
+        }
+        if cp <= c_hex(s, i * 17 + 6, 6) {
+            // delta = 字段 - 65536; 负数时 u32 回绕, cp + delta 仍正确
+            return cp + (c_hex(s, i * 17 + 12, 5) - 65536);
+        }
+        i = i + 1;
+    }
+    return CASE_NONE;
+}
+
+fn c_up_find(cp: u32) -> u32 {
+    let v: u32 = c_seg_find(c_up_hex(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_1(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_2(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_3(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_4(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_5(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_6(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_7(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_8(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_up_hex_9(), cp);
+    if v != CASE_NONE { return v; }
+    return CASE_NONE;
+}
+
+fn c_lo_find(cp: u32) -> u32 {
+    let v: u32 = c_seg_find(c_lo_hex(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_1(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_2(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_3(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_4(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_5(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_6(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_7(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_8(), cp);
+    if v != CASE_NONE { return v; }
+    v = c_seg_find(c_lo_hex_9(), cp);
+    if v != CASE_NONE { return v; }
+    return CASE_NONE;
+}
+
+// ---------------------------------------------------------------- 单码点
+
+/// 大写映射; 没有映射原样返回。
+pub fn case_upper_cp(cp: u32) -> u32 {
+    let v: u32 = c_up_find(cp);
+    if v == CASE_NONE {
+        return cp;
+    }
+    return v;
+}
+
+/// 小写映射; 没有映射原样返回。
+pub fn case_lower_cp(cp: u32) -> u32 {
+    let v: u32 = c_lo_find(cp);
+    if v == CASE_NONE {
+        return cp;
+    }
+    return v;
+}
+
+/// 是不是大写字母。判据是"小写会改变它" —— 这是**近似**: 对 Lu/Lt 都算真,
+/// 而 Unicode 的严格判据还看类别 (比如某些符号不是字母却有小写映射)。
+pub fn case_is_upper_cp(cp: u32) -> bool {
+    return case_lower_cp(cp) != cp;
+}
+
+pub fn case_is_lower_cp(cp: u32) -> bool {
+    return case_upper_cp(cp) != cp;
+}
+
+// ---------------------------------------------------------------- 整段转换
+
+/// 一段 UTF-8 转换后要几字节。up==1 转大写, 否则转小写。
+fn c_map_len(d: ptr, so: u32, n: u32, up: u32) -> u32 {
+    let end: u32 = so + n;
+    let i: u32 = so;
+    let w: u32 = 0;
+    while i < end {
+        let t: u64 = utf8_get(d, i, end);
+        let k: u32 = utf8_used(t);
+        if k == 0 {
+            w = w + 1;
+            i = i + 1;
+        } else {
+            let cp: u32 = utf8_cp(t);
+            let m: u32 = case_lower_cp(cp);
+            if up == 1 {
+                m = case_upper_cp(cp);
+            }
+            w = w + utf8_len_of(m);
+            i = i + k;
+        }
+    }
+    return w;
+}
+
+/// 一段 UTF-8 转换后需要几字节 (不写输出)。
+pub fn case_upper_len(d: ptr, so: u32, n: u32) -> u32 {
+    return c_map_len(d, so, n, 1);
+}
+
+pub fn case_lower_len(d: ptr, so: u32, n: u32) -> u32 {
+    return c_map_len(d, so, n, 0);
+}
+
+/// 转换一段 UTF-8 写进 out[oo..], 返回写的字节数。长度可能**变**:
+/// 0x131 (ı, 2 字节) 的大写是 'I' (1 字节), 0xB5 (µ, 2 字节) 的大写是
+/// U+039C (Μ, 2 字节, 不变), 0x212A (K, 3 字节) 的小写是 'k' (1 字节)。
+/// 输出缓冲要按 `case_upper_len`/`case_lower_len` 留够。
+fn c_map(d: ptr, so: u32, n: u32, out: ptr, oo: u32, up: u32) -> u32 {
+    let end: u32 = so + n;
+    let i: u32 = so;
+    let w: u32 = oo;
+    while i < end {
+        let t: u64 = utf8_get(d, i, end);
+        let k: u32 = utf8_used(t);
+        if k == 0 {
+            store8(out, w, load8(d, i) as u8);
+            w = w + 1;
+            i = i + 1;
+        } else {
+            let cp: u32 = utf8_cp(t);
+            let m: u32 = case_lower_cp(cp);
+            if up == 1 {
+                m = case_upper_cp(cp);
+            }
+            w = utf8_put(out, w, m);
+            i = i + k;
+        }
+    }
+    return w - oo;
+}
+
+pub fn case_upper(d: ptr, so: u32, n: u32, out: ptr, oo: u32) -> u32 {
+    return c_map(d, so, n, out, oo, 1);
+}
+
+pub fn case_lower(d: ptr, so: u32, n: u32, out: ptr, oo: u32) -> u32 {
+    return c_map(d, so, n, out, oo, 0);
+}
+
+pub fn case_upper_str(out: ptr, oo: u32, s: str) -> u32 {
+    return c_map(str_ptr(s), 0, str_len(s), out, oo, 1);
+}
+
+pub fn case_lower_str(out: ptr, oo: u32, s: str) -> u32 {
+    return c_map(str_ptr(s), 0, str_len(s), out, oo, 0);
+}
+
+// ---------------------------------------------------------------- 不区分大小写比较
+
+/// 两段 UTF-8 不区分大小写是否相等。
+/// 折叠方式是**小写折叠** (两边各取 `case_lower_cp` 再比), 不是 full case folding ——
+/// 这让 'K'(U+212A) 等于 'k', 但 'ß' 不等于 "SS" (见文件头诚实清单)。
+/// 字节长度可以不同 (K 是 3 字节, 'k' 是 1 字节, 这条路径是活的)。
+/// 任一侧出现非法 UTF-8 时退化成**逐字节**比较那一步 (不做替换, 不越界)。
+pub fn case_eq_ignore_case(ap: ptr, ao: u32, an: u32, bp: ptr, bo: u32, bn: u32) -> bool {
+    let ae: u32 = ao + an;
+    let be: u32 = bo + bn;
+    let ai: u32 = ao;
+    let bi: u32 = bo;
+    let done: u32 = 0;
+    let eq: u32 = 1;
+    while done == 0 {
+        if ai >= ae && bi >= be {
+            done = 1;
+        } else if ai >= ae || bi >= be {
+            eq = 0;
+            done = 1;
+        } else {
+            let x: u64 = utf8_get(ap, ai, ae);
+            let y: u64 = utf8_get(bp, bi, be);
+            let ux: u32 = utf8_used(x);
+            let uy: u32 = utf8_used(y);
+            if ux == 0 || uy == 0 {
+                if load8(ap, ai) != load8(bp, bi) {
+                    eq = 0;
+                }
+                ai = ai + 1;
+                bi = bi + 1;
+            } else {
+                if case_lower_cp(utf8_cp(x)) != case_lower_cp(utf8_cp(y)) {
+                    eq = 0;
+                }
+                ai = ai + ux;
+                bi = bi + uy;
+            }
+        }
+    }
+    return eq == 1;
+}
+
+/// 传 str 的便利版。
+pub fn case_eq_ignore_case_str(a: str, b: str) -> bool {
+    return case_eq_ignore_case(str_ptr(a), 0, str_len(a), str_ptr(b), 0, str_len(b));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_case_ascii_upper() -> bool {
+    let out: ptr = alloc(32);
+    let n: u32 = case_upper(str_ptr("hello world"), 0, 11, out, 0);
+    let want: str = "HELLO WORLD";
+    return n == 11 && mem_eq(out, 0, str_ptr(want), 0, 11);
+}
+
+fn test_case_ascii_lower() -> bool {
+    let out: ptr = alloc(32);
+    let src: str = "Hello, World!";
+    let n: u32 = case_lower(str_ptr(src), 0, str_len(src), out, 0);
+    let want: str = "hello, world!";
+    return n == str_len(src) && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_case_ascii_non_letters_untouched() -> bool {
+    // 数字与标点没有映射 -> 原样。
+    let out: ptr = alloc(32);
+    let src: str = "a1 B2-c3";
+    let n: u32 = case_upper(str_ptr(src), 0, str_len(src), out, 0);
+    let want: str = "A1 B2-C3";
+    return n == 8 && mem_eq(out, 0, str_ptr(want), 0, 8);
+}
+
+fn test_case_latin1_upper() -> bool {
+    // é (C3 A9) -> É (C3 89)
+    let out: ptr = alloc(16);
+    let src: str = "é";
+    let n: u32 = case_upper(str_ptr(src), 0, str_len(src), out, 0);
+    let want: str = "É";
+    return n == 2 && mem_eq(out, 0, str_ptr(want), 0, 2);
+}
+
+fn test_case_latin1_lower() -> bool {
+    // ẞ (U+1E9E) -> ß (U+00DF). 这条盯着"简单映射里 ẞ 有小写", 而反过来 ß 无大写。
+    return case_lower_cp(0x1E9E) == 0xDF && case_upper_cp(0xDF) == 0xDF;
+}
+
+fn test_case_greek_roundtrip() -> bool {
+    let up: ptr = alloc(16);
+    let down: ptr = alloc(16);
+    let src: str = "αβγ";
+    let n: u32 = case_upper(str_ptr(src), 0, str_len(src), up, 0);
+    let want: str = "ΑΒΓ";
+    let m: u32 = case_lower(up, 0, n, down, 0);
+    return n == 6 && mem_eq(up, 0, str_ptr(want), 0, 6) && m == 6 && mem_eq(down, 0, str_ptr(src), 0, 6);
+}
+
+fn test_case_cyrillic() -> bool {
+    let out: ptr = alloc(32);
+    let src: str = "привет";
+    let n: u32 = case_upper(str_ptr(src), 0, str_len(src), out, 0);
+    let want: str = "ПРИВЕТ";
+    return n == 12 && mem_eq(out, 0, str_ptr(want), 0, 12);
+}
+
+fn test_case_fullwidth() -> bool {
+    // 全角 ａ(U+FF41) -> Ａ(U+FF21), 小写区与大写区相隔 0xFF20。
+    let out: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    let a: u32 = utf8_put(d, 0, 65345); // ａ
+    let b: u32 = utf8_put(d, a, 65346); // ｂ
+    let n: u32 = case_upper(d, 0, b, out, 0);
+    let e: ptr = alloc(16);
+    let c: u32 = utf8_put(e, 0, 65313); // Ａ (0xFF21)
+    let g: u32 = utf8_put(e, c, 65314); // Ｂ (0xFF22)
+    return n == g && mem_eq(out, 0, e, 0, g);
+}
+
+fn test_case_deseret_astral() -> bool {
+    // 𐐨 U+10428 -> 𐐀 U+10400。星形平面, 4 字节 UTF-8 —— 走的是 4 字节分支。
+    let d: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let e: ptr = alloc(8);
+    let n: u32 = utf8_put(d, 0, 66600);
+    let m: u32 = case_upper(d, 0, n, out, 0);
+    let k: u32 = utf8_put(e, 0, 66560);
+    return n == 4 && m == 4 && mem_eq(out, 0, e, 0, 4) && case_upper_cp(66600) == 66560;
+}
+
+fn test_case_cherokee_big_delta() -> bool {
+    // 切罗基文: 大小写块相距 ±38864 —— 表里 delta 字段必须是 5 个十六进制位。
+    // 第一版我按 4 位编, 这条会挂 (而且不报错, 只是给出错的码点)。
+    return case_upper_cp(0xAB70) == 0x13A0 && case_lower_cp(0x13A0) == 0xAB70;
+}
+
+fn test_case_micro_sign() -> bool {
+    // µ (U+00B5) 的大写是希腊 Μ (U+039C) —— 不是 ASCII, 且 delta 是正的 743。
+    return case_upper_cp(0xB5) == 0x39C && case_lower_cp(0x39C) == 0x3BC;
+}
+
+fn test_case_identity_when_no_mapping() -> bool {
+    // 汉字、数字、符号都没有大小写 —— 原样返回。
+    return case_upper_cp(0x4E2D) == 0x4E2D && case_lower_cp(0x4E2D) == 0x4E2D
+        && case_upper_cp(0x30) == 0x30 && case_upper_cp(0x2603) == 0x2603;
+}
+
+fn test_case_is_upper_lower() -> bool {
+    return case_is_lower_cp(0x61) && case_is_upper_cp(0x41)
+        && case_is_lower_cp(0x3B1) && case_is_upper_cp(0x391)
+        && !case_is_upper_cp(0x30) && !case_is_lower_cp(0x30)
+        && !case_is_upper_cp(0x4E2D);
+}
+
+fn test_case_upper_len_shrinks() -> bool {
+    // ı (U+0131) 是 2 字节, 大写是 'I' (1 字节) —— 长度真的会变。
+    // 输出缓冲按 case_upper_len 留的话不会溢出。
+    let d: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let n: u32 = utf8_put(d, 0, 305);
+    let l: u32 = case_upper_len(d, 0, n);
+    let w: u32 = case_upper(d, 0, n, out, 0);
+    return n == 2 && l == 1 && w == 1 && load8(out, 0) == 73;
+}
+
+fn test_case_upper_len_ascii() -> bool {
+    let s: str = "abc";
+    return case_upper_len(str_ptr(s), 0, 3) == 3 && case_lower_len(str_ptr(s), 0, 3) == 3
+        && case_upper_len(str_ptr(s), 0, 0) == 0;
+}
+
+fn test_case_eq_ignore_case_ascii() -> bool {
+    let a: str = "HeLLo";
+    let b: str = "hello";
+    let c: str = "hellp";
+    let d: str = "hell";
+    return case_eq_ignore_case_str(a, b) && !case_eq_ignore_case_str(a, c)
+        && !case_eq_ignore_case_str(a, d) && case_eq_ignore_case_str(a, a);
+}
+
+fn test_case_eq_ignore_case_latin_greek() -> bool {
+    let e1: str = "É";
+    let e2: str = "é";
+    let g1: str = "ΑΒΓ";
+    let g2: str = "αβγ";
+    return case_eq_ignore_case_str(e1, e2) && case_eq_ignore_case_str(g1, g2)
+        && !case_eq_ignore_case_str(g1, "ΑΒΔ");
+}
+
+fn test_case_eq_ignore_case_diff_byte_len() -> bool {
+    // Kelvin K (U+212A, 3 字节) 与 ASCII 'k' (1 字节) —— 折叠后相等, 但两侧
+    // 推进的字节数不同。这条路走岔了会死循环或越界。
+    let d: ptr = alloc(8);
+    let n: u32 = utf8_put(d, 0, 8490);
+    let k: str = "k";
+    let yes: bool = case_eq_ignore_case(d, 0, n, str_ptr(k), 0, 1);
+    let no: bool = case_eq_ignore_case(d, 0, n, str_ptr(k), 0, 0);
+    return n == 3 && yes && !no;
+}
+
+fn test_case_eq_ignore_case_bad_bytes() -> bool {
+    // 非法 UTF-8: 退化成逐字节比较, 不替换、不越界。
+    // 第一版我把 b 的首字节也写成 'A', 结果 a/b 在前几字节就折叠相等了 ——
+    // 那条断言恒真, 等于没测。改成 'b' 才真的走到"不相等"。
+    let a: ptr = alloc(8);
+    let b: ptr = alloc(8);
+    store8(a, 0, 97 as u8);  // 'a'
+    store8(a, 1, 255 as u8); // 坏字节
+    store8(b, 0, 98 as u8);  // 'b' —— 与 'a' 不折叠相等
+    store8(b, 1, 255 as u8);
+    let same: bool = case_eq_ignore_case(a, 0, 2, a, 0, 2);
+    let diff: bool = case_eq_ignore_case(a, 0, 2, b, 0, 2) == false;
+    // 坏字节本身不同也要判不等 (不能因为"解不出码点"就跳过这一段)
+    let c: ptr = alloc(8);
+    store8(c, 0, 97 as u8);
+    store8(c, 1, 254 as u8);
+    let diff2: bool = case_eq_ignore_case(a, 0, 2, c, 0, 2) == false;
+    return same && diff && diff2;
+}
+
+fn test_case_table_shape() -> bool {
+    // 每段 17 个十六进制字符; 首段第一个区间是 'a'..'z' (上表) / 'A'..'Z' (下表)。
+    let u: str = c_up_hex();
+    let l: str = c_lo_hex();
+    return (str_len(u) % 17) == 0 && (str_len(l) % 17) == 0
+        && c_hex(u, 0, 6) == 0x61 && c_hex(u, 6, 6) == 0x7A
+        && c_hex(u, 12, 5) == 65504 // delta -32 -> 65536-32
+        && c_hex(l, 0, 6) == 0x41 && c_hex(l, 6, 6) == 0x5A
+        && c_up_find(0x61) == 0x41 && c_up_find(0x4E2D) == CASE_NONE;
+}

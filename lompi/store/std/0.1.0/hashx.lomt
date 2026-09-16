@@ -1,0 +1,572 @@
+// std/hashx.lomt — 非加密哈希 (FNV-1a / xxHash32) + 一致性哈希环
+//
+// 为什么是这几个而不是别的: 仓库里 `hash.lomt` 只有一个 djb2 式的乘加 (够散列表用,
+// 但雪崩差), `crc32` 是校验码不是哈希 (线性, 改两位常抵消)。缺的是两类东西:
+//   1. **快速非加密哈希** —— 字符串键的散列、去重、指纹。FNV-1a 一行就能写对且有
+//      公开真值可对; xxHash32 是这一档里雪崩好、又只要 32 位运算的那个。
+//   2. **一致性哈希环** —— 缓存/分片里"节点增删只挪 ~1/N 的键"这件事, 唯一的正确做法。
+//      取模分片一加节点几乎全挪, 那不是"实现差异", 是结构性错误。
+//
+// **为什么自己写 xxHash32 而不是抄**: 抄来的实现没法对官方测试向量说话。这里的
+// xxh32 是照 xxHash 规范 (xxhash.c 的 XXH32) 一句句重写的, 并且用**官方空串向量
+// `XXH32("", 0) == 0x02CC5D05`、`XXH32("a", 0) == 0x550D7456`、`XXH32("", 1) == 0x0B2CB792`**
+// 钉死 —— 这三条对上了, 后面所有输入才可信。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **都不是加密安全的**: xxHash32 与 FNV 都可被有意构造碰撞, 别拿它们当 MAC/口令哈希。
+//     要那个请用 `sha256` / `blake` 那一档 (在别的模块)。
+//   - **FNV 的雪崩一般**: 改一个字节只会影响高位一点点扩散 —— 这是 FNV 本身的性质
+//     (它只有一次乘法), 不是写错了。下面的雪崩自检因此**只对 xxh32 断言"约半数位变"**,
+//     对 FNV **只断言"输出会变"** (诚实的弱断言)。
+//   - 一致性哈希环**每个节点只放一个点** (one token per node)。点多了负载更均衡, 但
+//     增删时的迁移比例也更接近 1/N —— 本模块选简单的一 token, 并把"迁移只发生在
+//     新节点名下"这条**结构性不变量**钉进自检 (它比统计比例更难蒙对)。
+//   - 环的插入是 **O(n) 移位**: 节点数 (通常几十个) 远小于键数, 不值得为它上平衡树。
+//
+// 命名: 公开 hx_*, 内部 hx_* (私有名也占全局拼写, 不带前缀会按 E13 撞车)。自检 test_hashx_*。
+
+module hashx
+
+use "mem.lomt"
+
+pub const HX_OK: u32 = 0;
+/// 出错 (容量不够 / 节点不存在 / 重复)。
+pub const HX_ERR: u32 = 4294967295;
+/// "没有" (环空、查不到)。
+pub const HX_NO: u32 = 4294967294;
+
+// 常量一律写十进制 —— `<宽字面量> as u64` 会截断到 32 位, 十六进制大数会静默变成截断值。
+const HX_FNV32_OFF: u32 = 2166136261;   // 0x811c9dc5
+const HX_FNV32_PRM: u32 = 16777619;     // 0x01000193
+const HX_FNV64_OFF: u64 = 14695981039346656037;  // 0xcbf29ce484222325
+const HX_FNV64_PRM: u64 = 1099511628211;         // 0x100000001b3
+
+const HX_P32_1: u32 = 2654435761;  // 0x9E3779B1
+const HX_P32_2: u32 = 2246822519;  // 0x85EBCA77
+const HX_P32_3: u32 = 3266489917;  // 0xC2B2AE3D
+const HX_P32_4: u32 = 668265263;   // 0x27D4EB2F
+const HX_P32_5: u32 = 374761393;   // 0x165667B1
+
+// ---------------------------------------------------------------- FNV-1a
+
+/// FNV-1a 32 位。真值 (对过 hash 表的公开向量): `"" -> 0x811c9dc5`, `"a" -> 0xe40c292c`,
+/// `"foobar" -> 0xbf9cf968`, `"hello" -> 0x4f9f2cab`。
+pub fn hx_fnv1a32(d: ptr, o: u32, n: u32) -> u32 {
+    let h: u32 = HX_FNV32_OFF;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ load8(d, o + i)) * HX_FNV32_PRM;
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn hx_fnv1a32_str(s: str) -> u32 {
+    return hx_fnv1a32(str_ptr(s), 0, str_len(s));
+}
+
+/// 流式 (先算一段, 再把下一段并进来)。FNV 可增量是它的卖点之一。
+pub fn hx_fnv1a32_update(h0: u32, d: ptr, o: u32, n: u32) -> u32 {
+    let h: u32 = h0;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ load8(d, o + i)) * HX_FNV32_PRM;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// FNV-1a 64 位。`"" -> 0xcbf29ce484222325`, `"hello" -> 0xa430d84680aabd0b`。
+pub fn hx_fnv1a64(d: ptr, o: u32, n: u32) -> u64 {
+    let h: u64 = HX_FNV64_OFF;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ (load8(d, o + i) as u64)) * HX_FNV64_PRM;
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn hx_fnv1a64_str(s: str) -> u64 {
+    return hx_fnv1a64(str_ptr(s), 0, str_len(s));
+}
+
+// ---------------------------------------------------------------- xxHash32
+
+fn hx_rotl32(x: u32, r: u32) -> u32 {
+    return (x << r) | (x >> (32 - r));
+}
+
+/// 一轮: `acc = rotl(acc + inp*P2, 13) * P1`。
+fn hx_round(acc: u32, inp: u32) -> u32 {
+    return hx_rotl32(acc + inp * HX_P32_2, 13) * HX_P32_1;
+}
+
+/// xxHash32。官方测试向量:
+///   `XXH32("", 0) == 0x02CC5D05`, `XXH32("a", 0) == 0x550D7456`, `XXH32("", 1) == 0x0B2CB792`。
+///
+/// 结构照规范三段式: (>=16 字节时) 四路并行的 16 字节块 -> 尾部 4 字节块 -> 尾部单字节
+/// -> 最后的三个雪崩步骤。**`h = h + n` 那一步是长度吸收, 漏了它空串和 1 字节串会碰巧
+/// 差不多** —— 规范里它紧跟"块合并"之后。
+pub fn hx_xxh32(d: ptr, o: u32, n: u32, seed: u32) -> u32 {
+    let i: u32 = 0;
+    let h: u32 = 0;
+    if n >= 16 {
+        let v1: u32 = seed + HX_P32_1 + HX_P32_2;
+        let v2: u32 = seed + HX_P32_2;
+        let v3: u32 = seed;
+        let v4: u32 = seed - HX_P32_1;
+        let lim: u32 = n - 16;
+        while i <= lim {
+            v1 = hx_round(v1, mem_load32(d, o + i));
+            v2 = hx_round(v2, mem_load32(d, o + i + 4));
+            v3 = hx_round(v3, mem_load32(d, o + i + 8));
+            v4 = hx_round(v4, mem_load32(d, o + i + 12));
+            i = i + 16;
+        }
+        h = hx_rotl32(v1, 1) + hx_rotl32(v2, 7) + hx_rotl32(v3, 12) + hx_rotl32(v4, 18);
+    } else {
+        h = seed + HX_P32_5;
+    }
+    h = h + n;
+    while i + 4 <= n {
+        h = h + mem_load32(d, o + i) * HX_P32_3;
+        h = hx_rotl32(h, 17) * HX_P32_4;
+        i = i + 4;
+    }
+    while i < n {
+        h = h + (load8(d, o + i) as u32) * HX_P32_5;
+        h = hx_rotl32(h, 11) * HX_P32_1;
+        i = i + 1;
+    }
+    h = h ^ (h >> 15);
+    h = h * HX_P32_2;
+    h = h ^ (h >> 13);
+    h = h * HX_P32_3;
+    h = h ^ (h >> 16);
+    return h;
+}
+
+pub fn hx_xxh32_str(s: str, seed: u32) -> u32 {
+    return hx_xxh32(str_ptr(s), 0, str_len(s), seed);
+}
+
+/// 数 u32 里 1 的个数 (雪崩自检用)。
+fn hx_pop32(v: u32) -> u32 {
+    let x: u32 = v;
+    let c: u32 = 0;
+    while x != 0 {
+        c = c + (x & 1);
+        x = x >> 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 一致性哈希环
+//
+// 内存布局 (调用方给 `hx_ring_bytes(cap)` 字节的 ws, 头部注释里的"为什么"在此):
+//   ws[0..4)   count   u32   —— 当前节点数
+//   ws[4..8)   cap     u32   —— 容量 (节点数上限)
+//   ws[8 ..)   每条 12 字节, 按 hash 升序排列:
+//       [0..8)  hash  u64 (小端)
+//       [8..12) node  u32
+// 环上"key 属于谁" = 找第一个 hash >= hash(key) 的条目, 找不到就绕回第 0 条 (环)。
+// 于是**只有落在新节点那一段弧里的 key 会改主** —— 这就是"增删只挪 ~1/N"的全部机制。
+
+/// 环工作区要多少字节。
+pub fn hx_ring_bytes(cap: u32) -> u32 {
+    return 8 + cap * 12;
+}
+
+pub fn hx_ring_init(ws: ptr, cap: u32) {
+    mem_store32(ws, 0, 0);
+    mem_store32(ws, 4, cap);
+}
+
+pub fn hx_ring_count(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+/// 第 i 条的 hash (只给自检/诊断用, 不打算当公开契约)。
+fn hx_ring_hash_at(ws: ptr, i: u32) -> u64 {
+    return mem_load64(ws, 8 + i * 12);
+}
+
+pub fn hx_ring_node_at(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, 8 + i * 12 + 8);
+}
+
+/// 把一个 u32 节点 id 散成环上的点 (FNV-1a 64, 吃 4 个小端字节)。
+fn hx_node_hash(node: u32) -> u64 {
+    let h: u64 = HX_FNV64_OFF;
+    let x: u32 = node;
+    let i: u32 = 0;
+    while i < 4 {
+        h = (h ^ ((x & 255) as u64)) * HX_FNV64_PRM;
+        x = x >> 8;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// 加一个节点。返回新的节点数; 重复节点或环满 -> HX_ERR。
+pub fn hx_ring_add(ws: ptr, node: u32) -> u32 {
+    let cnt: u32 = mem_load32(ws, 0);
+    let cap: u32 = mem_load32(ws, 4);
+    if cnt >= cap {
+        return HX_ERR;
+    }
+    // 去重: 同一个节点加两次会让"删除"语义含糊, 直接在源头挡掉。
+    let d: u32 = 0;
+    let dup: u32 = 0;
+    while d < cnt {
+        if mem_load32(ws, 8 + d * 12 + 8) == node {
+            dup = 1;
+        }
+        d = d + 1;
+    }
+    if dup == 1 {
+        return HX_ERR;
+    }
+    let kh: u64 = hx_node_hash(node);
+    // 二分找第一个 hash >= kh 的位置。
+    let lo: u32 = 0;
+    let hi: u32 = cnt;
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        if hx_ring_hash_at(ws, mid) < kh {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // [lo, cnt) 整体右移一格 (从尾部往前搬, 否则会盖掉)。
+    let j: u32 = cnt;
+    while j > lo {
+        mem_store64(ws, 8 + j * 12, mem_load64(ws, 8 + (j - 1) * 12));
+        mem_store32(ws, 8 + j * 12 + 8, mem_load32(ws, 8 + (j - 1) * 12 + 8));
+        j = j - 1;
+    }
+    mem_store64(ws, 8 + lo * 12, kh);
+    mem_store32(ws, 8 + lo * 12 + 8, node);
+    mem_store32(ws, 0, cnt + 1);
+    return cnt + 1;
+}
+
+/// 删一个节点。返回新的节点数; 找不到 -> HX_ERR。
+pub fn hx_ring_remove(ws: ptr, node: u32) -> u32 {
+    let cnt: u32 = mem_load32(ws, 0);
+    let at: u32 = 0;
+    let found: u32 = 0;
+    while at < cnt && found == 0 {
+        if mem_load32(ws, 8 + at * 12 + 8) == node {
+            found = 1;
+        } else {
+            at = at + 1;
+        }
+    }
+    if found == 0 {
+        return HX_ERR;
+    }
+    let j: u32 = at;
+    while j + 1 < cnt {
+        mem_store64(ws, 8 + j * 12, mem_load64(ws, 8 + (j + 1) * 12));
+        mem_store32(ws, 8 + j * 12 + 8, mem_load32(ws, 8 + (j + 1) * 12 + 8));
+        j = j + 1;
+    }
+    mem_store32(ws, 0, cnt - 1);
+    return cnt - 1;
+}
+
+/// key 归哪个节点。环空 -> HX_NO。
+pub fn hx_ring_lookup(ws: ptr, kp: ptr, kn: u32) -> u32 {
+    let cnt: u32 = mem_load32(ws, 0);
+    if cnt == 0 {
+        return HX_NO;
+    }
+    let kh: u64 = hx_fnv1a64(kp, 0, kn);
+    let lo: u32 = 0;
+    let hi: u32 = cnt;
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        if hx_ring_hash_at(ws, mid) < kh {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo >= cnt {
+        lo = 0; // 越过最后一个点 -> 绕回环首
+    }
+    return mem_load32(ws, 8 + lo * 12 + 8);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_hashx_fnv1a32_vectors() -> bool {
+    // 四条公开向量 —— "" 是偏移基, "a"/"b"/"foobar" 来自 FNV 参考表。
+    // **注意**: 任务书里写 "hello" 的 FNV-1a32 是 0x4F9C2CAB, 但按参考实现算出来是
+    // 0x4F9F2CAB (第 3 个 hex 位是 F 不是 C) —— 上面三条已知向量全部对上, 所以这里是
+    // 任务书那个字的笔误, 采用算出来的值。
+    let s1: str = "";
+    let s2: str = "a";
+    let s3: str = "b";
+    let s4: str = "foobar";
+    let s5: str = "hello";
+    return hx_fnv1a32_str(s1) == 0x811C9DC5 && hx_fnv1a32_str(s2) == 0xE40C292C
+        && hx_fnv1a32_str(s3) == 0xE70C2DE5 && hx_fnv1a32_str(s4) == 0xBF9CF968
+        && hx_fnv1a32_str(s5) == 0x4F9F2CAB;
+}
+
+fn test_hashx_fnv1a64_vectors() -> bool {
+    let s1: str = "";
+    let s2: str = "hello";
+    let s3: str = "abc";
+    return hx_fnv1a64_str(s1) == 0xCBF29CE484222325 && hx_fnv1a64_str(s2) == 0xA430D84680AABD0B
+        && hx_fnv1a64_str(s3) == 0xE71FA2190541574B;
+}
+
+fn test_hashx_fnv32_is_incremental() -> bool {
+    // 分两段喂必须等于一次算完 —— FNV 可增量是它被选中的理由之一。
+    let d: ptr = alloc(32);
+    let s: str = "abcdefghij";
+    mem_copy(d, 0, str_ptr(s), 0, 10);
+    let one: u32 = hx_fnv1a32(d, 0, 10);
+    let two: u32 = hx_fnv1a32_update(hx_fnv1a32(d, 0, 3), d, 3, 7);
+    return one == two;
+}
+
+fn test_hashx_fnv32_avalanche_weak() -> bool {
+    // 诚实版雪崩: FNV 只有一次乘法, 不能要求"约半数位变"。只断言**改一字节输出会变**,
+    // 而且与不改时不同 —— 这是弱断言, 但它是真的。
+    let d: ptr = alloc(32);
+    let s: str = "avalanche";
+    mem_copy(d, 0, str_ptr(s), 0, 9);
+    let a: u32 = hx_fnv1a32(d, 0, 9);
+    store8(d, 4, 151 as u8);
+    let b: u32 = hx_fnv1a32(d, 0, 9);
+    return a != b;
+}
+
+fn test_hashx_xxh32_official_vectors() -> bool {
+    // 官方向量 (xxHash 参考实现自带的 sanity 集)。
+    let e: str = "";
+    let a: str = "a";
+    let hello: str = "hello";
+    return hx_xxh32_str(e, 0) == 0x02CC5D05 && hx_xxh32_str(e, 1) == 0x0B2CB792
+        && hx_xxh32_str(a, 0) == 0x550D7456 && hx_xxh32_str(hello, 0) == 0xFB0077F9;
+}
+
+fn test_hashx_xxh32_known_strings() -> bool {
+    // 这几条是**照规范重写后**用 Python 复算得到的 (空串/单串已对过官方向量)。
+    let abc: str = "abc";
+    let nir: str = "Nobody inspects the spammish repetition";
+    return hx_xxh32_str(abc, 0) == 0x32D153FF && hx_xxh32_str(nir, 0) == 0xE2293B2F;
+}
+
+fn test_hashx_xxh32_16byte_block() -> bool {
+    // 16 字节正好走"四路并行块"那条分支 —— 单独钉一条, 免得那条分支从没被跑到。
+    let d: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 20 {
+        store8(d, i, i as u8);
+        i = i + 1;
+    }
+    // 16 字节 'a'*16 = 0x5DACDD8C; 20 字节 0..19 (走块 + 4 字节尾) = 0x828B819C。
+    let d2: ptr = alloc(32);
+    let j: u32 = 0;
+    while j < 16 {
+        store8(d2, j, 97 as u8);
+        j = j + 1;
+    }
+    return hx_xxh32(d2, 0, 16, 0) == 0x5DACDD8C && hx_xxh32(d, 0, 20, 0) == 0x828B819C;
+}
+
+fn test_hashx_xxh32_avalanche() -> bool {
+    // 雪崩: 逐个翻转 16 字节输入的 128 个 bit, 平均 Hamming 距离应当 ≈ 16 (半数)。
+    // 这是 xxh32 存在的理由 —— 用它而不是 FNV 就是因为这一条。
+    let base: ptr = alloc(32);
+    let work: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 16 {
+        store8(base, i, i as u8);
+        i = i + 1;
+    }
+    let h0: u32 = hx_xxh32(base, 0, 16, 0);
+    let tot: u32 = 0;
+    let bit: u32 = 0;
+    while bit < 128 {
+        mem_copy(work, 0, base, 0, 16);
+        store8(work, bit / 8, (load8(work, bit / 8) ^ (1 << (bit % 8))) as u8);
+        tot = tot + hx_pop32(h0 ^ hx_xxh32(work, 0, 16, 0));
+        bit = bit + 1;
+    }
+    // 平均 = tot/128; 断言落在 [12,20] —— "约半数"而不是恒真。
+    return tot >= 1536 && tot <= 2560;
+}
+
+fn hx_key(n: u32, buf: ptr) {
+    store8(buf, 0, (n & 255) as u8);
+    store8(buf, 1, ((n >> 8) & 255) as u8);
+    store8(buf, 2, ((n >> 16) & 255) as u8);
+    store8(buf, 3, ((n >> 24) & 255) as u8);
+}
+
+fn test_hashx_ring_basic_lookup() -> bool {
+    let ws: ptr = alloc(hx_ring_bytes(16));
+    hx_ring_init(ws, 16);
+    let k: ptr = alloc(8);
+    let ok: u32 = 1;
+    if hx_ring_count(ws) != 0 {
+        ok = 0;
+    }
+    if hx_ring_lookup(ws, k, 4) != HX_NO {
+        ok = 0; // 空环 -> NO
+    }
+    if hx_ring_add(ws, 10) != 1 || hx_ring_add(ws, 20) != 2 || hx_ring_add(ws, 30) != 3 {
+        ok = 0;
+    }
+    // 同一个 key 两次必须落到同一个节点 (环是纯函数)。
+    hx_key(1234, k);
+    let a: u32 = hx_ring_lookup(ws, k, 4);
+    let b: u32 = hx_ring_lookup(ws, k, 4);
+    if a != b {
+        ok = 0;
+    }
+    if a != 10 && a != 20 && a != 30 {
+        ok = 0;
+    }
+    // 所有 key 都要落到某个存在的节点上 (遍历一批)。
+    let i: u32 = 0;
+    while i < 200 {
+        hx_key(i, k);
+        let o: u32 = hx_ring_lookup(ws, k, 4);
+        if o != 10 && o != 20 && o != 30 {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1;
+}
+
+fn test_hashx_ring_remove() -> bool {
+    let ws: ptr = alloc(hx_ring_bytes(8));
+    hx_ring_init(ws, 8);
+    hx_ring_add(ws, 1);
+    hx_ring_add(ws, 2);
+    hx_ring_add(ws, 3);
+    let k: ptr = alloc(8);
+    if hx_ring_remove(ws, 2) != 2 {
+        return false;
+    }
+    if hx_ring_remove(ws, 2) != HX_ERR {
+        return false; // 删不存在的 -> ERR
+    }
+    // 删完之后任何 key 都不该再落到 2。
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 300 {
+        hx_key(i, k);
+        if hx_ring_lookup(ws, k, 4) == 2 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return hx_ring_count(ws) == 2 && bad == 0;
+}
+
+fn test_hashx_ring_rejects_full_and_dup() -> bool {
+    let ws: ptr = alloc(hx_ring_bytes(2));
+    hx_ring_init(ws, 2);
+    let ok1: bool = hx_ring_add(ws, 7) == 1 && hx_ring_add(ws, 8) == 2;
+    let full: bool = hx_ring_add(ws, 9) == HX_ERR;   // 满
+    let dup: bool = hx_ring_add(ws, 7) == HX_ERR;    // 重复
+    return ok1 && full && dup;
+}
+
+/// **这个结构存在的唯一理由**: 加一个节点, 只有"新节点那段弧"里的 key 改主。
+/// 断言的是**结构性不变量**而不是比例: 每个改主的 key 新主人必须正好是新节点,
+/// 且没改主的 key 一定不会是新节点。这比"迁移率约 1/N"这种统计断言难蒙对得多。
+fn test_hashx_ring_remap_only_new_node() -> bool {
+    let n: u32 = 384;
+    let ws: ptr = alloc(hx_ring_bytes(16));
+    hx_ring_init(ws, 16);
+    let nd: u32 = 1;
+    while nd <= 8 {
+        hx_ring_add(ws, nd);
+        nd = nd + 1;
+    }
+    let before: ptr = alloc(n * 4);
+    let after: ptr = alloc(n * 4);
+    let k: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < n {
+        hx_key(i, k);
+        mem_store32(before, i * 4, hx_ring_lookup(ws, k, 4));
+        i = i + 1;
+    }
+    hx_ring_add(ws, 9);
+    i = 0;
+    while i < n {
+        hx_key(i, k);
+        mem_store32(after, i * 4, hx_ring_lookup(ws, k, 4));
+        i = i + 1;
+    }
+    // 逐 key 检查: changed <-> after==9。
+    let changed: u32 = 0;
+    let bad: u32 = 0;
+    i = 0;
+    while i < n {
+        let oa: u32 = mem_load32(before, i * 4);
+        let ob: u32 = mem_load32(after, i * 4);
+        if oa != ob {
+            changed = changed + 1;
+            if ob != 9 {
+                bad = 1; // 改主了却不是给新节点 -> 违反一致性
+            }
+        } else {
+            if ob == 9 {
+                bad = 1; // 没改主却变成新节点 -> 不可能
+            }
+        }
+        i = i + 1;
+    }
+    // 取模分片搬走的比例 (对照): 加第 9 个时约 8/9 的 key 换主。
+    let mod_moved: u32 = 0;
+    i = 0;
+    while i < n {
+        let m1: u32 = 1 + (i % 8);
+        let m2: u32 = 1 + (i % 9);
+        if m1 != m2 {
+            mod_moved = mod_moved + 1;
+        }
+        i = i + 1;
+    }
+    // 一致性哈希搬走的必须远少于取模。1/9≈0.111, 取模≈0.889。
+    return bad == 0 && changed > 0 && changed < n / 2 && mod_moved > n - n / 4 && changed * 2 < mod_moved;
+}
+
+fn test_hashx_ring_is_sorted_by_hash() -> bool {
+    // 环内部必须按 hash 升序 —— 二分查找建立在这上面; 乱了是静默错。
+    let ws: ptr = alloc(hx_ring_bytes(16));
+    hx_ring_init(ws, 16);
+    let nd: u32 = 0;
+    while nd < 12 {
+        hx_ring_add(ws, nd * 37 + 5);
+        nd = nd + 1;
+    }
+    let cnt: u32 = hx_ring_count(ws);
+    let i: u32 = 1;
+    let ok: u32 = 1;
+    while i < cnt {
+        if hx_ring_hash_at(ws, i - 1) > hx_ring_hash_at(ws, i) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return cnt == 12 && ok == 1;
+}
+
+fn test_hashx_ring_workspace_helpers() -> bool {
+    return hx_ring_bytes(1) == 20 && hx_ring_bytes(10) == 128;
+}

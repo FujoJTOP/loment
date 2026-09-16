@@ -1,0 +1,681 @@
+// std/raster.lomt — 像素缓冲: 填充 / 矩形 / 直线 / 圆
+//
+// 为什么需要它: 有了像素缓冲, "画个框""画条线""画个圆"才是**可测的** —— 它把图形
+// 问题变成"往某个偏移写某个 u32", 于是能拿哨兵字节去证明"越界没写出去"。
+// GUI 那一层 (窗口、事件) 千变万化, 但像素的算术是死的。
+//
+// 像素格式: **0xAARRGGBB** (小端存进内存, 也就是内存里是 B G R A 四个字节)。
+//     bits 24..31 = alpha (本层**只是存着**, 不用它做混合 —— 混合在 blit.lomt)
+//     bits 16..23 = 红
+//     bits  8..15 = 绿
+//     bits  0..7  = 蓝
+// 为什么把 alpha 放高位: 与 ansi.lomt 的 `0x01000000|RGB` 标记同向, 也符合 `rgba()`
+// 的书写直觉 (A 在前)。**内存里是小端** —— 想看"第一个字节是蓝"就对了。
+//
+// **没有浮点** (本语言没有浮点类型): 圆的填充用整数平方根 `ra_isqrt`, 不用 `sqrt`;
+// 直线用 Bresenham 的整数误差项。这不是将就 —— 定点/整数画线本来就是这个领域的正统做法。
+//
+// **裁剪是安全要求, 不是优化**: 像素缓冲是调用方给的裸内存, 越界写一笔就是踩别人的数据
+// (在 64 KiB 不回收的堆上尤其致命)。所以**每个**写像素的公开函数都先判界: 越界的不写、
+// 不崩、返回的计数也不含它们。自检里用**哨兵字节**把缓冲两头包起来, 画完验哨兵没动。
+//
+// 诚实清单:
+//   - **每个 u32 都是合法像素**, 所以本层**没有可以用作"无"的哨兵颜色**。要"取不到"
+//     的语义就用 `ra_get_safe(..., dflt)` 或者先 `ra_inside`; 拿 0xFFFFFFFF 当"无"
+//     在这里是错的 (它是合法的白色)。
+//   - `ra_circle_fill` 的 `rad` 上限约 **46340** (rad² 要装进 u32); 再大请自己分块。
+//   - 计数返回值是**写入次数**, 不是"不同像素个数": 退化图形 (1 格的框、半径 0 的圆
+//     在点上重复) 角落会重复计。要"涂了几个格子"请用 `ra_rect` 那种不做重叠的。
+//   - 不做抗锯齿、不做 alpha 混合、不做图案铺贴。
+//
+// 命名: 公开 ra_*, 内部 ra_*。自检 test_raster_*。
+
+module raster
+
+use "mem.lomt"
+
+pub const RA_ERR: u32 = 4294967295;
+/// "没有交集"/"取不到" —— 与 RA_ERR 分开: 一个是**算不出来**, 一个是**合法地没有**。
+pub const RA_NO: u32 = 4294967294;
+
+// ---------------------------------------------------------------- 小工具
+
+fn ra_rgba(r: u32, g: u32, b: u32, a: u32) -> u32 {
+    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
+fn ra_maxi(a: i32, b: i32) -> i32 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn ra_mini(a: i32, b: i32) -> i32 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn ra_absi(a: i32) -> i32 {
+    if a < 0 {
+        return 0 - a;
+    }
+    return a;
+}
+
+/// 整数平方根 (向下取整)。牛顿迭代, **不用浮点**。
+pub fn ra_isqrt(v: u32) -> u32 {
+    if v == 0 {
+        return 0;
+    }
+    let x: u32 = v;
+    let y: u32 = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    return x;
+}
+
+/// 缓冲要多少字节。
+pub fn ra_bytes(w: u32, h: u32) -> u32 {
+    return w * h * 4;
+}
+
+pub fn ra_inside(w: u32, h: u32, x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 {
+        return false;
+    }
+    return (x as u32) < w && (y as u32) < h;
+}
+
+// ---------------------------------------------------------------- 单像素
+
+/// 写一个像素。**越界返回 false 且不写** —— 这是所有绘制的地基。
+pub fn ra_pixel(ws: ptr, w: u32, h: u32, x: i32, y: i32, color: u32) -> bool {
+    if ra_inside(w, h, x, y) == false {
+        return false;
+    }
+    mem_store32(ws, ((y as u32) * w + (x as u32)) * 4, color);
+    return true;
+}
+
+/// 读一个像素。**不判界** (调用方保证在内) —— 判界的版本是 `ra_get_safe`。
+pub fn ra_get(ws: ptr, w: u32, h: u32, x: i32, y: i32) -> u32 {
+    return mem_load32(ws, ((y as u32) * w + (x as u32)) * 4);
+}
+
+/// 读一个像素, 越界给 `dflt`。
+pub fn ra_get_safe(ws: ptr, w: u32, h: u32, x: i32, y: i32, dflt: u32) -> u32 {
+    if ra_inside(w, h, x, y) == false {
+        return dflt;
+    }
+    return ra_get(ws, w, h, x, y);
+}
+
+// ---------------------------------------------------------------- 裁剪
+
+/// 把矩形 (x,y,rw,rh) 与网格裁成交集, 写进 out 的 4 个 u32: `x0, y0, x1, y1`
+/// (**右/下开区间**)。有交集返回 1, 没有返回 `RA_NO`, 参数非法返回 `RA_ERR`。
+/// 这是"裁剪"这件事的**可复用形态** —— 直接拿它去算, 别在每处重写一遍判界。
+pub fn ra_clip(w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, out: ptr) -> u32 {
+    if rw <= 0 || rh <= 0 {
+        return RA_ERR;
+    }
+    let x0: i32 = ra_maxi(x, 0);
+    let y0: i32 = ra_maxi(y, 0);
+    let x1: i32 = ra_mini(x + rw, w as i32);
+    let y1: i32 = ra_mini(y + rh, h as i32);
+    if x0 >= x1 || y0 >= y1 {
+        return RA_NO;
+    }
+    mem_store32(out, 0, x0 as u32);
+    mem_store32(out, 4, y0 as u32);
+    mem_store32(out, 8, x1 as u32);
+    mem_store32(out, 12, y1 as u32);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 填充与线
+
+/// 整块填色。
+pub fn ra_fill(ws: ptr, w: u32, h: u32, color: u32) -> u32 {
+    return ra_rect(ws, w, h, 0, 0, w as i32, h as i32, color);
+}
+
+/// 水平线: 从 (x,y) 起往右 len 格。
+pub fn ra_hline(ws: ptr, w: u32, h: u32, x: i32, y: i32, len: i32, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    // 行不在界内就整条不画; 起点在左右界外**没关系** —— 逐点判界, 进来的那截照画。
+    if len > 0 && y >= 0 && (y as u32) < h {
+        let i: i32 = 0;
+        while i < len {
+            if ra_pixel(ws, w, h, x + i, y, color) {
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 垂直线: 从 (x,y) 起往下 len 格。
+pub fn ra_vline(ws: ptr, w: u32, h: u32, x: i32, y: i32, len: i32, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    if len > 0 && x >= 0 && (x as u32) < w {
+        let i: i32 = 0;
+        while i < len {
+            if ra_pixel(ws, w, h, x, y + i, color) {
+                cnt = cnt + 1;
+            }
+            i = i + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 实心矩形 (x,y 左上, rw × rh)。全裁剪。
+pub fn ra_rect(ws: ptr, w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    if rw > 0 && rh > 0 {
+        let x0: i32 = ra_maxi(x, 0);
+        let y0: i32 = ra_maxi(y, 0);
+        let x1: i32 = ra_mini(x + rw, w as i32);
+        let y1: i32 = ra_mini(y + rh, h as i32);
+        let r: i32 = y0;
+        while r < y1 {
+            let c: i32 = x0;
+            while c < x1 {
+                if ra_pixel(ws, w, h, c, r, color) {
+                    cnt = cnt + 1;
+                }
+                c = c + 1;
+            }
+            r = r + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 空心矩形 (四条边)。四个角画两次 (上下边都含端) —— 返回的是**写入次数**。
+pub fn ra_rect_outline(ws: ptr, w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    if rw > 0 && rh > 0 {
+        cnt = cnt + ra_hline(ws, w, h, x, y, rw, color);
+        cnt = cnt + ra_hline(ws, w, h, x, y + rh - 1, rw, color);
+        cnt = cnt + ra_vline(ws, w, h, x, y + 1, rh - 2, color);
+        cnt = cnt + ra_vline(ws, w, h, x + rw - 1, y + 1, rh - 2, color);
+    }
+    return cnt;
+}
+
+/// Bresenham 直线, **八个象限都对** (误差项的符号天然处理了方向)。全裁剪。
+pub fn ra_line(ws: ptr, w: u32, h: u32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> u32 {
+    let ax: i32 = x0;
+    let ay: i32 = y0;
+    let dx: i32 = ra_absi(x1 - x0);
+    let dy: i32 = 0 - ra_absi(y1 - y0);
+    let sx: i32 = 0 - 1;
+    if ax < x1 {
+        sx = 1;
+    }
+    let sy: i32 = 0 - 1;
+    if ay < y1 {
+        sy = 1;
+    }
+    let err: i32 = dx + dy;
+    let cnt: u32 = 0;
+    let done: u32 = 0;
+    let grd: u32 = 0;
+    // 步数上界: 曼哈顿距离 + 4。**既是保险也是防呆** —— 万一误差项写错成死循环,
+    // 这里会让它停下而不是把整个程序挂住 (自检里最怕的就是"没输出也不退出")。
+    // (名字不叫 guard: `guard` 是这门语言的能力卫兵关键字, 拿来当变量名编译不过。)
+    let maxit: u32 = (dx - dy) as u32 + 4;
+    while done == 0 && grd <= maxit {
+        if ra_pixel(ws, w, h, ax, ay, color) {
+            cnt = cnt + 1;
+        }
+        if ax == x1 && ay == y1 {
+            done = 1;
+        } else {
+            let e2: i32 = 2 * err;
+            if e2 >= dy {
+                err = err + dy;
+                ax = ax + sx;
+            }
+            if e2 <= dx {
+                err = err + dx;
+                ay = ay + sy;
+            }
+        }
+        grd = grd + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 圆
+
+fn ra_p8x(cx: i32, x: i32, y: i32, i: u32) -> i32 {
+    if i == 0 {
+        return cx + x;
+    }
+    if i == 1 {
+        return cx - x;
+    }
+    if i == 2 {
+        return cx + x;
+    }
+    if i == 3 {
+        return cx - x;
+    }
+    if i == 4 {
+        return cx + y;
+    }
+    if i == 5 {
+        return cx - y;
+    }
+    if i == 6 {
+        return cx + y;
+    }
+    return cx - y;
+}
+
+fn ra_p8y(cy: i32, x: i32, y: i32, i: u32) -> i32 {
+    if i == 0 {
+        return cy + y;
+    }
+    if i == 1 {
+        return cy + y;
+    }
+    if i == 2 {
+        return cy - y;
+    }
+    if i == 3 {
+        return cy - y;
+    }
+    if i == 4 {
+        return cy + x;
+    }
+    if i == 5 {
+        return cy + x;
+    }
+    if i == 6 {
+        return cy - x;
+    }
+    return cy - x;
+}
+
+/// 一个点的八路对称 (圆环靠它)。**去重**: (x==y 或 y==0 时若干点会重合),
+/// 重合的只算一次 —— 不然后面"半径 0 的圆有 8 个像素"这种归谁都不对。
+fn ra_plot8(ws: ptr, w: u32, h: u32, cx: i32, cy: i32, x: i32, y: i32, color: u32) -> u32 {
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let px: i32 = ra_p8x(cx, x, y, i);
+        let py: i32 = ra_p8y(cy, x, y, i);
+        let dup: u32 = 0;
+        let j: u32 = 0;
+        while j < i {
+            if ra_p8x(cx, x, y, j) == px && ra_p8y(cy, x, y, j) == py {
+                dup = 1;
+            }
+            j = j + 1;
+        }
+        if dup == 0 {
+            if ra_pixel(ws, w, h, px, py, color) {
+                cnt = cnt + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+/// 中点圆 (空心)。全裁剪。
+pub fn ra_circle(ws: ptr, w: u32, h: u32, cx: i32, cy: i32, rad: i32, color: u32) -> u32 {
+    if rad < 0 {
+        return 0;
+    }
+    let x: i32 = rad;
+    let y: i32 = 0;
+    let err: i32 = 1 - rad;
+    let cnt: u32 = 0;
+    while x >= y {
+        cnt = cnt + ra_plot8(ws, w, h, cx, cy, x, y, color);
+        y = y + 1;
+        if err < 0 {
+            err = err + 2 * y + 1;
+        } else {
+            x = x - 1;
+            err = err + 2 * (y - x) + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 实心圆。每一行画一条横线, 半宽由**整数平方根**算 (`ra_isqrt(rad² - dy²)`)。
+pub fn ra_circle_fill(ws: ptr, w: u32, h: u32, cx: i32, cy: i32, rad: i32, color: u32) -> u32 {
+    if rad < 0 {
+        return 0;
+    }
+    let rr: u32 = (rad * rad) as u32;
+    let cnt: u32 = 0;
+    let dy: i32 = 0 - rad;
+    while dy <= rad {
+        let d2: u32 = (dy * dy) as u32;
+        let hw: u32 = ra_isqrt(rr - d2);
+        let half: i32 = hw as i32;
+        cnt = cnt + ra_hline(ws, w, h, cx - half, cy + dy, 2 * half + 1, color);
+        dy = dy + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 自检用: 三种不透明色。
+fn rcr() -> u32 {
+    return ra_rgba(255, 0, 0, 255);
+}
+
+fn rcg() -> u32 {
+    return ra_rgba(0, 255, 0, 255);
+}
+
+fn rcb() -> u32 {
+    return ra_rgba(0, 0, 255, 255);
+}
+
+/// 自检用: (x,y) 是不是某个颜色 (1/0)。圆对称性自检靠它。
+fn pon(ws: ptr, x: i32, y: i32, c: u32) -> u32 {
+    if ra_get(ws, 21, 21, x, y) == c {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_raster_bytes() -> bool {
+    return ra_bytes(10, 4) == 160 && ra_bytes(1, 1) == 4 && ra_bytes(0, 5) == 0;
+}
+
+fn test_raster_rgba_packing() -> bool {
+    let v: u32 = rcr();
+    return v == 4294901760 && rcb() == 4278190335 && rcg() == 4278255360
+        && ra_rgba(1, 2, 3, 4) == 67174915;
+}
+
+fn test_raster_fill_whole() -> bool {
+    let ws: ptr = alloc(ra_bytes(4, 3));
+    let n: u32 = ra_fill(ws, 4, 3, rcg());
+    let ok: bool = n == 12 && ra_get(ws, 4, 3, 0, 0) == rcg()
+        && ra_get(ws, 4, 3, 3, 2) == rcg() && ra_get(ws, 4, 3, 1, 1) == rcg();
+    return ok;
+}
+
+fn test_raster_pixel_and_get_safe() -> bool {
+    let ws: ptr = alloc(ra_bytes(4, 3));
+    ra_fill(ws, 4, 3, 0);
+    let a: bool = ra_pixel(ws, 4, 3, 2, 1, rcr());
+    let b: bool = ra_pixel(ws, 4, 3, 4, 1, rcr());
+    let c: bool = ra_pixel(ws, 4, 3, 0 - 1, 1, rcr());
+    let d: bool = ra_pixel(ws, 4, 3, 1, 3, rcr());
+    let ok: bool = a && b == false && c == false && d == false
+        && ra_get(ws, 4, 3, 2, 1) == rcr()
+        && ra_get_safe(ws, 4, 3, 9, 9, 12345) == 12345;
+    return ok;
+}
+
+fn test_raster_inside() -> bool {
+    return ra_inside(8, 4, 0, 0) && ra_inside(8, 4, 7, 3)
+        && ra_inside(8, 4, 8, 0) == false && ra_inside(8, 4, 0, 0 - 1) == false
+        && ra_inside(8, 4, 0 - 1, 5) == false;
+}
+
+fn test_raster_rect_inside() -> bool {
+    let ws: ptr = alloc(ra_bytes(8, 5));
+    ra_fill(ws, 8, 5, 0);
+    let n: u32 = ra_rect(ws, 8, 5, 2, 1, 3, 2, rcg());
+    // (2,1) (3,1) (4,1) (2,2) (3,2) (4,2) = 6 格
+    let ok: bool = n == 6 && ra_get(ws, 8, 5, 2, 1) == rcg()
+        && ra_get(ws, 8, 5, 4, 2) == rcg()
+        && ra_get(ws, 8, 5, 1, 1) == 0 && ra_get(ws, 8, 5, 5, 1) == 0
+        && ra_get(ws, 8, 5, 2, 0) == 0 && ra_get(ws, 8, 5, 2, 3) == 0;
+    return ok;
+}
+
+fn test_raster_rect_clipped_right_bottom() -> bool {
+    let ws: ptr = alloc(ra_bytes(6, 4));
+    ra_fill(ws, 6, 4, 0);
+    // 从 (4,2) 起 5×5 —— 大部分在界外, 只剩 (4,2) (5,2) (4,3) (5,3)
+    let n: u32 = ra_rect(ws, 6, 4, 4, 2, 5, 5, rcr());
+    let ok: bool = n == 4 && ra_get(ws, 6, 4, 5, 3) == rcr()
+        && ra_get(ws, 6, 4, 3, 2) == 0 && ra_get(ws, 6, 4, 0, 0) == 0;
+    return ok;
+}
+
+fn test_raster_rect_fully_outside() -> bool {
+    let ws: ptr = alloc(ra_bytes(4, 4));
+    ra_fill(ws, 4, 4, rcb());
+    let a: u32 = ra_rect(ws, 4, 4, 10, 10, 3, 3, rcr());
+    let b: u32 = ra_rect(ws, 4, 4, 0 - 5, 0 - 5, 3, 3, rcr());
+    return a == 0 && b == 0 && ra_get(ws, 4, 4, 0, 0) == rcb()
+        && ra_get(ws, 4, 4, 3, 3) == rcb();
+}
+
+fn test_raster_guard_bytes_untouched() -> bool {
+    // 最有力的一条: 在**负数坐标**和**越界坐标**上画一大堆, 验两端哨兵没被改。
+    // 用顺序堆把 8 字节哨兵贴在缓冲两端 —— 越界一字节都看得见。
+    let bytes: u32 = ra_bytes(8, 4); // 128
+    let pre: ptr = alloc(8);
+    let ws: ptr = alloc(bytes);
+    let post: ptr = alloc(8);
+    mem_fill(pre, 0, 8, 171);
+    mem_fill(post, 0, 8, 171);
+    ra_rect(ws, 8, 4, 0 - 20, 0 - 20, 200, 200, rcr());
+    ra_hline(ws, 8, 4, 0 - 5, 2, 40, rcg());
+    ra_vline(ws, 8, 4, 3, 0 - 5, 40, rcb());
+    ra_line(ws, 8, 4, 0 - 30, 0 - 30, 60, 60, rcr());
+    ra_circle(ws, 8, 4, 4, 2, 3, rcg());
+    ra_circle_fill(ws, 8, 4, 4, 2, 2, rcb());
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 8 {
+        if load8(pre, i) != 171 || load8(post, i) != 171 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_raster_hline_vline() -> bool {
+    let ws: ptr = alloc(ra_bytes(8, 5));
+    ra_fill(ws, 8, 5, 0);
+    let a: u32 = ra_hline(ws, 8, 5, 1, 2, 4, rcr());
+    let b: u32 = ra_vline(ws, 8, 5, 6, 0, 5, rcg());
+    let ok: bool = a == 4 && b == 5 && ra_get(ws, 8, 5, 1, 2) == rcr()
+        && ra_get(ws, 8, 5, 4, 2) == rcr() && ra_get(ws, 8, 5, 5, 2) == 0
+        && ra_get(ws, 8, 5, 6, 4) == rcg() && ra_get(ws, 8, 5, 6, 3) == rcg();
+    return ok;
+}
+
+fn test_raster_rect_outline() -> bool {
+    let ws: ptr = alloc(ra_bytes(8, 6));
+    ra_fill(ws, 8, 6, 0);
+    ra_rect_outline(ws, 8, 6, 1, 1, 5, 4, rcb());
+    let ok: bool = ra_get(ws, 8, 6, 1, 1) == rcb() && ra_get(ws, 8, 6, 5, 1) == rcb()
+        && ra_get(ws, 8, 6, 1, 4) == rcb() && ra_get(ws, 8, 6, 5, 4) == rcb()
+        && ra_get(ws, 8, 6, 3, 1) == rcb() && ra_get(ws, 8, 6, 1, 3) == rcb()
+        && ra_get(ws, 8, 6, 5, 3) == rcb()
+        // 内部不该被涂
+        && ra_get(ws, 8, 6, 3, 2) == 0 && ra_get(ws, 8, 6, 2, 2) == 0;
+    return ok;
+}
+
+fn test_raster_line_axis_and_diagonal() -> bool {
+    let ws: ptr = alloc(ra_bytes(9, 9));
+    ra_fill(ws, 9, 9, 0);
+    let h: u32 = ra_line(ws, 9, 9, 0, 0, 8, 0, rcr());   // 水平 -> 9 格
+    let v: u32 = ra_line(ws, 9, 9, 0, 0, 0, 8, rcg());   // 垂直 -> 9 格
+    let d: u32 = ra_line(ws, 9, 9, 0, 0, 8, 8, rcb());   // 对角 -> 9 格
+    let ok: bool = h == 9 && v == 9 && d == 9
+        && ra_get(ws, 9, 9, 8, 0) == rcr() && ra_get(ws, 9, 9, 0, 8) == rcg()
+        && ra_get(ws, 9, 9, 8, 8) == rcb() && ra_get(ws, 9, 9, 4, 4) == rcb()
+        && ra_get(ws, 9, 9, 1, 0) == rcr();
+    return ok;
+}
+
+fn test_raster_line_eight_octants() -> bool {
+    // 从中心往八个方向各画一条 (半径 6): 每条都该是 7 格, 且八个端点都被点上。
+    // 曼哈顿步数 = max(|dx|,|dy|) = 6 -> 7 格 —— 这正是 Bresenham 该给的。
+    let ws: ptr = alloc(ra_bytes(21, 21));
+    ra_fill(ws, 21, 21, 0);
+    let c: u32 = rcr();
+    let a0: u32 = ra_line(ws, 21, 21, 10, 10, 16, 10, c);
+    let a1: u32 = ra_line(ws, 21, 21, 10, 10, 4, 10, c);
+    let a2: u32 = ra_line(ws, 21, 21, 10, 10, 10, 16, c);
+    let a3: u32 = ra_line(ws, 21, 21, 10, 10, 10, 4, c);
+    let a4: u32 = ra_line(ws, 21, 21, 10, 10, 16, 16, c);
+    let a5: u32 = ra_line(ws, 21, 21, 10, 10, 4, 4, c);
+    let a6: u32 = ra_line(ws, 21, 21, 10, 10, 16, 4, c);
+    let a7: u32 = ra_line(ws, 21, 21, 10, 10, 4, 16, c);
+    let ok: bool = a0 == 7 && a1 == 7 && a2 == 7 && a3 == 7
+        && a4 == 7 && a5 == 7 && a6 == 7 && a7 == 7;
+    // 八个端点
+    let e: bool = ra_get(ws, 21, 21, 16, 10) == c && ra_get(ws, 21, 21, 4, 10) == c
+        && ra_get(ws, 21, 21, 10, 16) == c && ra_get(ws, 21, 21, 10, 4) == c
+        && ra_get(ws, 21, 21, 16, 16) == c && ra_get(ws, 21, 21, 4, 4) == c
+        && ra_get(ws, 21, 21, 16, 4) == c && ra_get(ws, 21, 21, 4, 16) == c;
+    return ok && e;
+}
+
+fn test_raster_circle_axis_points() -> bool {
+    let ws: ptr = alloc(ra_bytes(21, 21));
+    ra_fill(ws, 21, 21, 0);
+    let c: u32 = rcg();
+    let n: u32 = ra_circle(ws, 21, 21, 10, 10, 5, c);
+    let ok: bool = n > 0
+        && ra_get(ws, 21, 21, 15, 10) == c && ra_get(ws, 21, 21, 5, 10) == c
+        && ra_get(ws, 21, 21, 10, 15) == c && ra_get(ws, 21, 21, 10, 5) == c
+        // 圆心不该被画 (空心) 且对角外侧不该点
+        && ra_get(ws, 21, 21, 10, 10) == 0
+        && ra_get(ws, 21, 21, 14, 14) == 0;
+    return ok;
+}
+
+fn test_raster_circle_eight_fold_symmetry() -> bool {
+    // 圆环必须有完整的八重对称 —— 中点圆的八路画法错一路这里就红。
+    let ws: ptr = alloc(ra_bytes(21, 21));
+    ra_fill(ws, 21, 21, 0);
+    let c: u32 = rcb();
+    ra_circle(ws, 21, 21, 10, 10, 6, c);
+    let bad: u32 = 0;
+    let i: i32 = 0 - 6;
+    while i <= 6 {
+        let j: i32 = 0 - 6;
+        while j <= 6 {
+            let v0: u32 = pon(ws, 10 + i, 10 + j, c);
+            let v1: u32 = pon(ws, 10 - i, 10 + j, c);
+            let v2: u32 = pon(ws, 10 + i, 10 - j, c);
+            let v3: u32 = pon(ws, 10 - i, 10 - j, c);
+            let v4: u32 = pon(ws, 10 + j, 10 + i, c);
+            let v5: u32 = pon(ws, 10 - j, 10 + i, c);
+            let v6: u32 = pon(ws, 10 + j, 10 - i, c);
+            let v7: u32 = pon(ws, 10 - j, 10 - i, c);
+            if v0 != v1 || v0 != v2 || v0 != v3 || v0 != v4
+                || v0 != v5 || v0 != v6 || v0 != v7 {
+                bad = 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_raster_circle_fill_span_and_count() -> bool {
+    // rad=5 的实心圆: 逐行半宽 = isqrt(25-dy²) = 5,4,4,4,3,0 -> 面积 81。
+    let ws: ptr = alloc(ra_bytes(21, 21));
+    ra_fill(ws, 21, 21, 0);
+    let c: u32 = rcr();
+    let n: u32 = ra_circle_fill(ws, 21, 21, 10, 10, 5, c);
+    let ok: bool = n == 81
+        && ra_get(ws, 21, 21, 10, 10) == c          // 圆心在
+        && ra_get(ws, 21, 21, 15, 10) == c          // 边界点算在内
+        && ra_get(ws, 21, 21, 16, 10) == 0          // 再外一格不在
+        && ra_get(ws, 21, 21, 5, 10) == c
+        && ra_get(ws, 21, 21, 10, 15) == c          // dy=5 -> 半宽 0
+        && ra_get(ws, 21, 21, 11, 15) == 0;
+    return ok;
+}
+
+fn test_raster_circle_fill_radius_zero_and_one() -> bool {
+    let ws: ptr = alloc(ra_bytes(9, 9));
+    ra_fill(ws, 9, 9, 0);
+    let n0: u32 = ra_circle_fill(ws, 9, 9, 4, 4, 0, rcr());
+    let ok0: bool = n0 == 1 && ra_get(ws, 9, 9, 4, 4) == rcr();
+    ra_fill(ws, 9, 9, 0);
+    let n1: u32 = ra_circle_fill(ws, 9, 9, 4, 4, 1, rcg());
+    // dy=-1: hw=0 -> (4,3); dy=0: hw=1 -> (3,4)(4,4)(5,4); dy=1: hw=0 -> (4,5) = 5 格
+    let ok1: bool = n1 == 5 && ra_get(ws, 9, 9, 4, 4) == rcg()
+        && ra_get(ws, 9, 9, 3, 4) == rcg() && ra_get(ws, 9, 9, 4, 3) == rcg()
+        && ra_get(ws, 9, 9, 3, 3) == 0;
+    return ok0 && ok1;
+}
+
+fn test_raster_circle_clipped() -> bool {
+    // 圆心在左上角外: 半径 7 的圆弧里 (7,0) 与 (0,7) 正好落在 8×8 的第一行/列上。
+    let ws: ptr = alloc(ra_bytes(8, 8));
+    ra_fill(ws, 8, 8, 0);
+    let n: u32 = ra_circle(ws, 8, 8, 0, 0, 7, rcr());
+    let ok: bool = n > 0 && ra_get(ws, 8, 8, 7, 0) == rcr()
+        && ra_get(ws, 8, 8, 0, 7) == rcr()
+        // 界外那半必须没画进来 (第一行除 (7,0) 外都该空着)
+        && ra_get(ws, 8, 8, 0, 0) == 0 && ra_get(ws, 8, 8, 6, 0) == 0;
+    return ok;
+}
+
+fn test_raster_clip_helper() -> bool {
+    let o: ptr = alloc(16);
+    let a: u32 = ra_clip(8, 4, 0 - 2, 1, 6, 2, o);
+    // 交集 x: 0..4, y: 1..3
+    let ok: bool = a == 1 && mem_load32(o, 0) == 0 && mem_load32(o, 4) == 1
+        && mem_load32(o, 8) == 4 && mem_load32(o, 12) == 3;
+    let b: u32 = ra_clip(8, 4, 20, 20, 3, 3, o);
+    let c: u32 = ra_clip(8, 4, 0, 0, 0, 5, o);
+    return ok && b == RA_NO && c == RA_ERR;
+}
+
+fn test_raster_isqrt() -> bool {
+    return ra_isqrt(0) == 0 && ra_isqrt(1) == 1 && ra_isqrt(3) == 1
+        && ra_isqrt(4) == 2 && ra_isqrt(8) == 2 && ra_isqrt(9) == 3
+        && ra_isqrt(24) == 4 && ra_isqrt(25) == 5 && ra_isqrt(26) == 5
+        && ra_isqrt(1000000) == 1000;
+}
+
+fn test_raster_line_is_clipped_not_wrapped() -> bool {
+    // 一条从界外到界外的线: 穿过的那段该画上, 但不该在别处"折回来"乱涂。
+    let ws: ptr = alloc(ra_bytes(8, 8));
+    ra_fill(ws, 8, 8, 0);
+    let n: u32 = ra_line(ws, 8, 8, 0 - 5, 4, 20, 4, rcr());
+    let ok: bool = n == 8 && ra_get(ws, 8, 8, 0, 4) == rcr()
+        && ra_get(ws, 8, 8, 7, 4) == rcr();
+    // 别的行必须干净
+    let bad: u32 = 0;
+    let r: i32 = 0;
+    while r < 8 {
+        if r != 4 {
+            let c: i32 = 0;
+            while c < 8 {
+                if ra_get(ws, 8, 8, c, r) != 0 {
+                    bad = 1;
+                }
+                c = c + 1;
+            }
+        }
+        r = r + 1;
+    }
+    return ok && bad == 0;
+}

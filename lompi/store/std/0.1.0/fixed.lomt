@@ -1,0 +1,417 @@
+// std/fixed.lomt — 定点小数 (i64, 六位小数)
+//
+// 为什么除了 bigdec 还要它: bigdec 是任意精度, 代价是每次运算都要一块缓冲和多次大整数
+// 操作。而"钱"的绝大多数场合 (单价 x 数量、税额、分摊) 只需要**六位小数**就够,
+// 而且要快、不要分配。这一层就是那个: 一个 i64, 低六位当小数。
+//
+//     值 = x / 10^6        FIXED_ONE = 10^6
+//
+// 于是 0.1 与 0.2 也是精确的 (100000 + 200000 = 300000), 没有二进制误差。
+//
+// 范围 (诚实写明, 这是定点的固有代价):
+//   - |值| <= 约 9.2e12 (因为要留出六位小数);
+//   - `fixed_mul` 的中间量是 a x (b 的小数部分), 所以要求 |a| <= 约 9.2e12 ——
+//     超出这个范围会**溢出** (不是回绕, 是 i64 溢出的 panic)。
+//   真要更大的范围就用 bigdec, 那一层没有这个限制。
+//
+// 舍入: 乘法与除法的最后一步**远离零取整** (2.5 -> 3, -2.5 -> -3), 与"算钱"的直觉一致;
+// 截断另给了 fixed_trunc_mul。要别的舍入模式就自己在调用点做。
+//
+// 命名: 公开 fixed_*, 内部 fx_*。自检 test_fixed_*。
+
+module fixed
+
+use "mem.lomt"
+
+/// 小数位数。
+pub const FIXED_SCALE: u32 = 6;
+/// 1.0。
+pub const FIXED_ONE: i64 = 1000000;
+/// 0.5。
+pub const FIXED_HALF: i64 = 500000;
+/// 10^6 (做除数/除模用)。
+pub const FIXED_BASE: i64 = 1000000;
+
+/// 整数 -> 定点 (乘以 10^6)。|v| > 9.2e12 时溢出。
+pub fn fixed_from_i64(v: i64) -> i64 {
+    return v * FIXED_ONE;
+}
+
+/// 定点 -> 整数, **截断向零**。
+pub fn fixed_to_i64(x: i64) -> i64 {
+    return x / FIXED_BASE;
+}
+
+/// 小数部分 (带符号, |它| < 10^6)。
+pub fn fixed_frac(x: i64) -> i64 {
+    return x % FIXED_BASE;
+}
+
+pub fn fixed_add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+pub fn fixed_sub(a: i64, b: i64) -> i64 {
+    return a - b;
+}
+
+pub fn fixed_neg(a: i64) -> i64 {
+    return 0 as i64 - a;
+}
+
+pub fn fixed_abs(a: i64) -> i64 {
+    if a < 0 as i64 {
+        return 0 as i64 - a;
+    }
+    return a;
+}
+
+/// 取负在 u64 上做 (二进制补码) —— i64 的最小值没有对应的正数, `-x` 会溢出。
+fn fx_neg_u(v: u64) -> u64 {
+    return (v ^ 18446744073709551615) + 1;
+}
+
+/// num/den 转成定点 (`capped` 到 i64 范围就不管了 —— 见文件头的范围说明)。
+pub fn fixed_from_ratio(num: i64, den: i64) -> i64 {
+    if den == 0 {
+        return 0;
+    }
+    // 先整数部分, 再小数部分 —— 避免 num * 10^6 直接把中间量顶出 i64。
+    let q: i64 = num / den;
+    let r: i64 = num % den;
+    return q * FIXED_BASE + (r * FIXED_BASE) / den;
+}
+
+/// a x b, 远离零取整。
+///
+/// 拆成"整数部分 + 小数部分"两条路: a x b = a x b_int + a x b_frac / 10^6。
+/// 这样中间量只有 a x b_frac (而不是 a x b), 范围大一档。
+pub fn fixed_mul(a: i64, b: i64) -> i64 {
+    let bi: i64 = b / FIXED_BASE;
+    let bf: i64 = b % FIXED_BASE;
+    let head: i64 = a * bi;
+    let tail: i64 = fx_round_div(a * bf, FIXED_BASE);
+    return head + tail;
+}
+
+/// 截断版乘法 (不要舍入时用)。
+pub fn fixed_mul_trunc(a: i64, b: i64) -> i64 {
+    let bi: i64 = b / FIXED_BASE;
+    let bf: i64 = b % FIXED_BASE;
+    return a * bi + (a * bf) / FIXED_BASE;
+}
+
+/// a / b, 远离零取整。
+pub fn fixed_div(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    return q * FIXED_BASE + fx_round_div(r * FIXED_BASE, b);
+}
+
+/// 整数除法, 就近**远离零**取整: 2.5 -> 3, -2.5 -> -3。
+fn fx_round_div(p: i64, q: i64) -> i64 {
+    if q == 0 {
+        return 0;
+    }
+    let t: i64 = p / q;
+    let r: i64 = p % q;
+    let ar: i64 = fixed_abs(r);
+    let aq: i64 = fixed_abs(q);
+    if ar * 2 >= aq {
+        if (p < 0 as i64) == (q < 0 as i64) {
+            return t + 1;
+        }
+        return t - 1;
+    }
+    return t;
+}
+
+/// 按基点收(或付): a x bp / 10000。bp = 100 表示 1%。
+pub fn fixed_mul_bp(a: i64, bp: i64) -> i64 {
+    return fx_round_div(a * bp, 10000);
+}
+
+/// 向下取整到整数 (向负无穷)。
+pub fn fixed_floor(x: i64) -> i64 {
+    let t: i64 = x / FIXED_BASE;
+    if x < 0 as i64 && (x % FIXED_BASE) != 0 {
+        return (t - 1) * FIXED_BASE;
+    }
+    return t * FIXED_BASE;
+}
+
+/// 向上取整到整数。
+pub fn fixed_ceil(x: i64) -> i64 {
+    let t: i64 = x / FIXED_BASE;
+    if x > 0 as i64 && (x % FIXED_BASE) != 0 {
+        return (t + 1) * FIXED_BASE;
+    }
+    return t * FIXED_BASE;
+}
+
+/// 就近取整到整数, 中点远离零。
+pub fn fixed_round(x: i64) -> i64 {
+    if x >= 0 as i64 {
+        return fx_round_div(x, FIXED_BASE) * FIXED_BASE;
+    }
+    return 0 as i64 - (fx_round_div(0 as i64 - x, FIXED_BASE) * FIXED_BASE);
+}
+
+/// 输出文本 (六位小数固定, 末尾不裁)。返回长度。
+pub fn fixed_to_str(out: ptr, o: u32, x: i64) -> u32 {
+    let p: u32 = o;
+    let mag: u64 = x as u64;
+    if (mag >> 63) == 1 {
+        store8(out, p, 45 as u8);
+        p = p + 1;
+        mag = fx_neg_u(mag);
+    }
+    let ip: u64 = mag / 1000000;
+    let fp: u64 = mag % 1000000;
+    p = fx_put_u64(out, p, ip);
+    store8(out, p, 46 as u8);
+    p = p + 1;
+    // 小数部分补足六位
+    let div: u64 = 100000;
+    let i: u32 = 0;
+    while i < 6 {
+        store8(out, p, (48 + ((fp / div) % 10)) as u8);
+        p = p + 1;
+        if div >= 10 {
+            div = div / 10;
+        } else {
+            div = 1;
+        }
+        i = i + 1;
+    }
+    return p - o;
+}
+
+fn fx_put_u64(out: ptr, o: u32, v: u64) -> u32 {
+    let d: u32 = 1;
+    let x: u64 = v;
+    while x >= 10 {
+        x = x / 10;
+        d = d + 1;
+    }
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < d {
+        let cur: u64 = v;
+        let j: u32 = d - 1 - i;
+        let k: u32 = 0;
+        while k < j {
+            cur = cur / 10;
+            k = k + 1;
+        }
+        store8(out, p, (48 + (cur % 10)) as u8);
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 从文本读 (可选负号 + 数字 + 至多一个小数点, 小数超过六位就截断)。
+pub fn fixed_from_str(s: ptr, o: u32, n: u32) -> i64 {
+    let neg: bool = n > 0 && load8(s, o) == 45;
+    let i: u32 = 0;
+    if neg {
+        i = 1;
+    }
+    let ip: i64 = 0;
+    let fp: i64 = 0;
+    let fd: u32 = 0;
+    let seen: u32 = 0;
+    while i < n {
+        let c: u32 = load8(s, o + i);
+        if c >= 48 && c <= 57 {
+            if seen == 0 {
+                ip = ip * 10 + ((c - 48) as i64);
+            } else if fd < FIXED_SCALE {
+                fp = fp * 10 + ((c - 48) as i64);
+                fd = fd + 1;
+            }
+        } else if c == 46 {
+            seen = 1;
+        }
+        i = i + 1;
+    }
+    // 补齐到六位
+    let j: u32 = fd;
+    while j < FIXED_SCALE {
+        fp = fp * 10;
+        j = j + 1;
+    }
+    let v: i64 = ip * FIXED_BASE + fp;
+    if neg {
+        return 0 as i64 - v;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fixed_from_and_to_i64() -> bool {
+    return fixed_from_i64(3 as i64) == 3000000 as i64
+        && fixed_to_i64(3500000 as i64) == 3 as i64
+        && fixed_to_i64(0 as i64 - 3500000 as i64) == 0 as i64 - 3 as i64;
+}
+
+fn test_fixed_add_is_exact_for_decimal() -> bool {
+    // 0.1 + 0.2 == 0.3 精确 —— 这一层存在的理由。
+    let a: i64 = 100000 as i64;
+    let b: i64 = 200000 as i64;
+    return fixed_add(a, b) == 300000 as i64;
+}
+
+fn test_fixed_frac_and_abs() -> bool {
+    return fixed_frac(1234567 as i64) == 234567 as i64
+        && fixed_frac(0 as i64 - 1234567 as i64) == 0 as i64 - 234567 as i64
+        && fixed_abs(0 as i64 - 500000 as i64) == 500000 as i64;
+}
+
+fn test_fixed_mul_basic() -> bool {
+    // 1.5 x 2.5 = 3.75; 2.0 x 3.0 = 6.0
+    let a: i64 = 1500000 as i64;
+    let b: i64 = 2500000 as i64;
+    let c: i64 = fixed_mul(a, b);
+    let d: i64 = fixed_mul(2000000 as i64, 3000000 as i64);
+    return c == 3750000 as i64 && d == 6000000 as i64;
+}
+
+fn test_fixed_mul_signs() -> bool {
+    return fixed_mul(0 as i64 - 1500000 as i64, 2000000 as i64) == 0 as i64 - 3000000 as i64
+        && fixed_mul(0 as i64 - 2000000 as i64, 0 as i64 - 3000000 as i64) == 6000000 as i64;
+}
+
+fn test_fixed_mul_rounds_away_from_zero() -> bool {
+    // 0.5 x 0.000001 = 0.0000005 -> 远离零 -> 0.000001
+    let a: i64 = 500000 as i64;
+    let tiny: i64 = 1 as i64;
+    let p: i64 = fixed_mul(a, tiny);
+    let n: i64 = fixed_mul(0 as i64 - 500000 as i64, tiny);
+    return p == 1 as i64 && n == 0 as i64 - 1 as i64;
+}
+
+fn test_fixed_mul_trunc_differs() -> bool {
+    // 截断版对同一个 0.0000005 给 0 (证明两个函数确实不一样, 不是一个的别名)。
+    return fixed_mul_trunc(500000 as i64, 1 as i64) == 0 as i64;
+}
+
+fn test_fixed_div_basic() -> bool {
+    // 3.0 / 4.0 = 0.75; 1.0 / 3.0 = 0.333333 (截到六位)
+    let a: i64 = fixed_div(3000000 as i64, 4000000 as i64);
+    let b: i64 = fixed_div(1000000 as i64, 3000000 as i64);
+    return a == 750000 as i64 && b == 333333 as i64;
+}
+
+fn test_fixed_div_by_zero_is_zero() -> bool {
+    return fixed_div(1000000 as i64, 0 as i64) == 0 as i64;
+}
+
+fn test_fixed_mul_div_roundtrip() -> bool {
+    // (x * 3) / 3 应当回到 x (六位以内)
+    let x: i64 = 1234567 as i64;
+    let m: i64 = fixed_mul(x, 3000000 as i64);
+    return fixed_div(m, 3000000 as i64) == x;
+}
+
+fn test_fixed_bp() -> bool {
+    // 100.0 收 5% (bp = 500) -> 5.0; 收 1% (bp=100) -> 1.0
+    let a: i64 = fixed_mul_bp(100000000 as i64, 500 as i64);
+    let b: i64 = fixed_mul_bp(100000000 as i64, 100 as i64);
+    return a == 5000000 as i64 && b == 1000000 as i64;
+}
+
+fn test_fixed_floor_ceil_round() -> bool {
+    // 2.5 -> floor 2 / ceil 3 / round 3 (中点远离零)
+    let x: i64 = 2500000 as i64;
+    let nx: i64 = 0 as i64 - 2500000 as i64;
+    return fixed_floor(x) == 2000000 as i64 && fixed_ceil(x) == 3000000 as i64
+        && fixed_round(x) == 3000000 as i64
+        && fixed_floor(nx) == 0 as i64 - 3000000 as i64
+        && fixed_ceil(nx) == 0 as i64 - 2000000 as i64
+        && fixed_round(nx) == 0 as i64 - 3000000 as i64;
+}
+
+fn test_fixed_floor_ceil_on_integers() -> bool {
+    let x: i64 = 3000000 as i64;
+    let nx: i64 = 0 as i64 - 3000000 as i64;
+    return fixed_floor(x) == x && fixed_ceil(x) == x && fixed_floor(nx) == nx
+        && fixed_ceil(nx) == nx;
+}
+
+fn test_fixed_to_str() -> bool {
+    let out: ptr = alloc(64);
+    let a: u32 = fixed_to_str(out, 0, 1234567 as i64);
+    let ok1: bool = a == 8 && fx_eq(out, a, "1.234567");
+    let n: u32 = fixed_to_str(out, 0, 0 as i64 - 500000 as i64);
+    // "-0.500000" 是 9 个字符 (负号 + 1 位整数 + 小数点 + 6 位小数)。
+    let ok2: bool = n == 9 && fx_eq(out, n, "-0.500000");
+    let z: u32 = fixed_to_str(out, 0, 1000000 as i64);
+    return ok1 && ok2 && z == 8 && fx_eq(out, z, "1.000000");
+}
+
+fn fx_eq(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(s), 0, n);
+}
+
+fn test_fixed_to_str_small_values() -> bool {
+    // 0.000001 不能打成 ".000001" —— 整数部分的 0 必须补出来。
+    // 注意两次调用共用同一块缓冲, 所以**必须先比完再写第二次**。
+    let out: ptr = alloc(64);
+    let n: u32 = fixed_to_str(out, 0, 1 as i64);
+    let ok1: bool = n == 8 && fx_eq(out, n, "0.000001");
+    let z: u32 = fixed_to_str(out, 0, 0 as i64);
+    return ok1 && z == 8 && fx_eq(out, z, "0.000000");
+}
+
+fn test_fixed_from_str() -> bool {
+    let s1: str = "12.5";
+    let s2: str = "-0.25";
+    let s3: str = "3";
+    return fixed_from_str(str_ptr(s1), 0, 4) == 12500000 as i64
+        && fixed_from_str(str_ptr(s2), 0, 5) == 0 as i64 - 250000 as i64
+        && fixed_from_str(str_ptr(s3), 0, 1) == 3000000 as i64;
+}
+
+fn test_fixed_str_roundtrip() -> bool {
+    // 文本 -> 定点 -> 文本, 六位以内必须一个字符不差。
+    // "-123.456789" 是 11 个字符 (负号 1 + 整数 3 + 点 1 + 小数 6) —— 长度写错会静默
+    // 少读一位, 于是打印出 "-12.345678"。
+    let out: ptr = alloc(64);
+    let s: str = "-123.456789";
+    let v: i64 = fixed_from_str(str_ptr(s), 0, 11);
+    let n: u32 = fixed_to_str(out, 0, v);
+    return n == 11 && fx_eq(out, n, "-123.456789");
+}
+
+fn test_fixed_from_str_truncates_extra_digits() -> bool {
+    // 超过六位直接截 (1.2345678 -> 1.234567)。
+    let s: str = "1.2345678";
+    return fixed_from_str(str_ptr(s), 0, 9) == 1234567 as i64;
+}
+
+fn test_fixed_from_ratio() -> bool {
+    // 1/3 -> 0.333333; 7/2 -> 3.5
+    let a: i64 = fixed_from_ratio(1 as i64, 3 as i64);
+    let b: i64 = fixed_from_ratio(7 as i64, 2 as i64);
+    let c: i64 = fixed_from_ratio(1 as i64, 0 as i64);
+    return a == 333333 as i64 && b == 3500000 as i64 && c == 0 as i64;
+}
+
+fn test_fixed_money_arithmetic() -> bool {
+    // 单价 19.99 x 3 件 = 59.97 (这是这一层真正要算的东西)
+    let price: i64 = fixed_from_str(str_ptr("19.99"), 0, 5);
+    let qty: i64 = 3 as i64;
+    let total: i64 = fixed_mul(price, qty * FIXED_BASE);
+    let out: ptr = alloc(64);
+    let n: u32 = fixed_to_str(out, 0, total);
+    return total == 59970000 as i64 && n == 9 && fx_eq(out, n, "59.970000");
+}

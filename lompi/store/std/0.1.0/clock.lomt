@@ -1,0 +1,441 @@
+// std/clock.lomt — 时间的**文本表示**与**时长算术**
+//
+// 为什么需要它: 时间戳 (一个整数) 到处都是 —— stat 的 mtime、日志的一行、/proc 的
+// starttime。但"1443 天零 6 小时"这种数字没人看得懂, 而"1d6h1m15s"看得懂。
+// 这个模块把三件反复要写的事收成一份: 时间戳 -> ISO 文本, 秒数 -> 人能读的时长,
+// 两个 64 位时刻 -> 微秒差。
+//
+// 依赖 std/civil.lomt 做公历换算 —— 本层**不重复实现历法** (闰年、400 年规则那些
+// 全在那边, 有它自己的真值自检)。本层只负责排版和 64 位减法。
+//
+// 时长格式的规则 (**定死的, 写在这里**: 因为"多久才叫久"没有标准答案):
+//   - 依次是 `d` `h` `m` `s` 四个单位, 直接拼接, 中间**不加空格**: `1d1h1m1s`。
+//   - **为 0 的单位省略** —— 3600 是 `1h`, 不是 `1h0m0s`。
+//   - **兜底**: 四个单位全是 0 时写 `0s` (所以 0 -> `0s`, 不会输出空串)。
+//   - **超过一天照常写 `d`, 不折算成更大的单位** (没有周/月/年 —— 一个月是几天
+//     取决于哪个月, 折算出来是错的): 10 天就是 `10d`, 400 天就是 `400d`。
+//   - **负数**: 先写 `-`, 再按上面的规则格式化绝对值: -5 -> `-5s`。
+//   - 不做"精度截断" (没有"约 1 小时"这种东西) —— 这一层只做无歧义的机械格式。
+//
+// 边界 (诚实清单):
+//   - **没有时区、没有本地时间、没有夏令时**。`ck_fmt_iso` 恒输出 UTC, 尾部那个
+//     `Z` 是**字面的 UTC 标记**, 不是"某个可配置的区"。要本地时间请在外面加偏移
+//     (注意加了偏移之后 `Z` 就不该再写了 —— 本层不替你做这个决定, 所以不提供)。
+//   - **没有闰秒**。Unix 时间戳本来就不含闰秒, 这一层跟着它。
+//   - `ck_elapsed_us` 在**时钟回退** (t1 < t0) 时返回 **0**, 不是负数、不是回绕出的
+//     天文数字 —— 单调时钟理论上不回退, 真回退了"0 微秒"比"1844 亿秒"安全。
+//     要区分"真 0"和"回退"得自己先比一遍 (两个数都在手上)。
+//   - `ck_fmt_secs` 对 **i64 最小值**不做特判: `0 - v` 会回绕成它自己, 于是输出
+//     一串无意义的数字。**不会崩**, 但那个值不是人能用的时间 (2920 亿年)。
+//   - **单调时钟读取走 syscall, 在本机 (Windows PE) 未验证** —— 见函数注释。
+//     本模块的自检**完全不碰它**, 只测纯逻辑。
+//
+// 内存布局: 不用聚合体。`ck_fmt_iso_sc` 要一块 **24 字节**的暂存 (六个 u32 槽:
+//   年 月 日 时 分 秒), 由调用方给 —— 见 `ck_scratch_bytes()`。
+//   为什么不留一个模块级静态缓冲: 本语言没有可变全局 (const 初值只能是整数字面量),
+//   也没有取局部变量地址的语法; 唯一的"存储"是 alloc, 而堆不回收 —— 在循环里
+//   每次 alloc 24 字节, 几千次就把 64 KiB 用光了。所以按库惯例: **调用方给缓冲**。
+//
+// 命名: 公开 ck_*, 内部 ckf_*。自检 test_clock_*。
+
+module clock
+
+use "mem.lomt"
+use "numfmt.lomt"
+use "civil.lomt"
+
+/// `ck_fmt_iso_sc` 需要的暂存字节数 (六个 u32 槽)。
+pub const CK_ISO_SCRATCH: u32 = 24;
+
+/// `ck_elapsed_us` 用到的 2^32 —— 把 (hi, lo) 拼回 u64 用。
+pub const CK_SCALE: u64 = 4294967296;
+
+/// 失败哨兵 (0xFFFFFFFF)。
+pub const CK_ERR: u32 = 4294967295;
+
+// 字符码 (标出来是哪个字符, 别靠记忆认数字):
+//   '-' 45  ':' 58  'T' 84  'Z' 90  '0' 48
+//   'd' 100 'h' 104 'm' 109 's' 115
+
+// ---------------------------------------------------------------- 小工具
+
+/// 缓冲 + 偏移 -> 该处的 ptr。不用内建 `ptr_add` (它在 Rust 路径上降级成裸 `.add()`,
+/// 见 out.lomt 的同名函数与 docs/150 M82)。
+fn ckf_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+/// 十进制位数 (0 -> 1)。
+fn ckf_digits(v: u32) -> u32 {
+    let d: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        d = d + 1;
+    }
+    return d;
+}
+
+/// 写两位十进制, **左侧补零** (月/日/时/分/秒都是两位)。
+fn ckf_pad2(out: ptr, o: u32, v: u32) -> u32 {
+    let k: u32 = o;
+    if v < 10 {
+        store8(out, k, 48 as u8);
+        k = k + 1;
+    }
+    return k + numfmt_dec_into(ckf_at(out, k), v as u64);
+}
+
+/// 写四位十进制, 左侧补零 (年份)。**超过四位不截断** —— 原样写出, 宁可宽一列,
+/// 也不把一个年份说错 (与 fmt_dec_pad 对超宽值不截断是同一个取舍)。
+fn ckf_pad4(out: ptr, o: u32, v: u32) -> u32 {
+    let k: u32 = o;
+    let d: u32 = ckf_digits(v);
+    let z: u32 = 0;
+    while z + d < 4 {
+        store8(out, k, 48 as u8);
+        k = k + 1;
+        z = z + 1;
+    }
+    return k + numfmt_dec_into(ckf_at(out, k), v as u64);
+}
+
+/// 写 "<十进制><单位字符>"。时长格式化的原子步骤。
+fn ckf_unit(out: ptr, o: u32, v: i64, ch: u32) -> u32 {
+    let k: u32 = o + numfmt_dec_into(ckf_at(out, o), v as u64);
+    store8(out, k, ch as u8);
+    return k + 1;
+}
+
+// ---------------------------------------------------------------- ISO 文本
+
+/// 时间戳 -> `YYYY-MM-DDTHH:MM:SSZ` (UTC), 恒 20 个字符。
+/// `sc` 是**调用方给的 24 字节暂存** (`ck_scratch_bytes()`)。
+///
+/// 返回写出的字节数 (恒 20) —— 与 `pm_to_text` 一样, 恒成功、不返回哨兵。
+pub fn ck_fmt_iso_sc(ts: i64, out: ptr, oo: u32, sc: ptr) -> u32 {
+    // 六个 u32 槽: 年 月 日 时 分 秒, 摆成 [0,4) [4,8) [8,12) [12,16) [16,20) [20,24)
+    cv_ymd_from_unix(ts, sc, ckf_at(sc, 4), ckf_at(sc, 8), ckf_at(sc, 12),
+                     ckf_at(sc, 16), ckf_at(sc, 20));
+    let k: u32 = oo;
+    k = ckf_pad4(out, k, mem_load32(sc, 0));
+    store8(out, k, 45 as u8);
+    k = k + 1; // '-'
+    k = ckf_pad2(out, k, mem_load32(sc, 4));
+    store8(out, k, 45 as u8);
+    k = k + 1; // '-'
+    k = ckf_pad2(out, k, mem_load32(sc, 8));
+    store8(out, k, 84 as u8);
+    k = k + 1; // 'T'
+    k = ckf_pad2(out, k, mem_load32(sc, 12));
+    store8(out, k, 58 as u8);
+    k = k + 1; // ':'
+    k = ckf_pad2(out, k, mem_load32(sc, 16));
+    store8(out, k, 58 as u8);
+    k = k + 1; // ':'
+    k = ckf_pad2(out, k, mem_load32(sc, 20));
+    store8(out, k, 90 as u8);
+    return k + 1 - oo; // 'Z'
+}
+
+/// 三参便利版: 内部 `alloc(24)` 拿暂存。
+///
+/// **每次调用会吃掉堆里 24 字节且不回收** —— 循环里请改用 `ck_fmt_iso_sc`,
+/// 自己拿一块 24 字节的暂存反复用。这个版本存在只是为了"只印一个时间戳"的场合
+/// 少写一个参数。
+pub fn ck_fmt_iso(ts: i64, out: ptr, oo: u32) -> u32 {
+    let sc: ptr = alloc(24);
+    return ck_fmt_iso_sc(ts, out, oo, sc);
+}
+
+/// `ck_fmt_iso_sc` 要多少暂存。
+pub fn ck_scratch_bytes() -> u32 {
+    return CK_ISO_SCRATCH;
+}
+
+// ---------------------------------------------------------------- 时长文本
+
+/// 秒数 -> 人能读的时长 (`1d1h1m1s`)。规则见文件头, 简述:
+/// 省略为 0 的单位、全 0 兜底成 `0s`、超过一天照写 `d`、负数加 `-` 前缀。
+///
+/// 返回写出的字节数。**不需要暂存、不分配**。
+pub fn ck_fmt_secs(secs: i64, out: ptr, oo: u32) -> u32 {
+    let k: u32 = oo;
+    let v: i64 = secs;
+    if v < 0 {
+        store8(out, k, 45 as u8);
+        k = k + 1; // '-'
+        v = 0 - v;
+    }
+    let d: i64 = v / 86400;
+    let r: i64 = v % 86400;
+    let h: i64 = r / 3600;
+    let rm: i64 = r % 3600;
+    let mi: i64 = rm / 60;
+    let s: i64 = rm % 60;
+    let wrote: u32 = 0;
+    if d > 0 {
+        k = ckf_unit(out, k, d, 100); // 'd'
+        wrote = 1;
+    }
+    if h > 0 {
+        k = ckf_unit(out, k, h, 104); // 'h'
+        wrote = 1;
+    }
+    if mi > 0 {
+        k = ckf_unit(out, k, mi, 109); // 'm'
+        wrote = 1;
+    }
+    if s > 0 {
+        k = ckf_unit(out, k, s, 115); // 's'
+        wrote = 1;
+    }
+    if wrote == 0 {
+        k = ckf_unit(out, k, 0, 115); // 全 0 -> "0s"（不是空串）
+    }
+    return k - oo;
+}
+
+// ---------------------------------------------------------------- 时刻差
+
+/// 两个 64 位微秒时刻之差。**这是本模块唯一容易写错的地方**: 低 32 位要**借位**。
+///
+/// `t0_lo > t1_lo` 时必须从高位借 1 —— 直接写 `t1_lo - t0_lo` 在 u32 上会回绕成
+/// 一个接近 40 亿的数, 于是"过了 3 微秒"被报成"过了 4294967293 微秒"。自检里专门
+/// 有四种组合 (不借 / 借 1 / 两端低 32 位相等 / t1_lo 为 0) 钉这条。
+///
+/// 时钟回退 (t1 < t0) 返回 **0**, 见文件头"诚实清单"。
+pub fn ck_elapsed_us(t0_hi: u32, t0_lo: u32, t1_hi: u32, t1_lo: u32) -> u64 {
+    let back: bool = false;
+    if t1_hi < t0_hi {
+        back = true;
+    }
+    if t1_hi == t0_hi && t1_lo < t0_lo {
+        back = true;
+    }
+    if back {
+        return 0;
+    }
+    let lo: u32 = t1_lo - t0_lo; // 要不要借位由下一行判
+    let borrow: u32 = 0;
+    if t1_lo < t0_lo {
+        borrow = 1;
+    }
+    let hi: u32 = t1_hi - t0_hi - borrow;
+    return (hi as u64) * CK_SCALE + (lo as u64);
+}
+
+// ---------------------------------------------------------------- 单调时钟 (未验证)
+
+/// 读单调时钟 (CLOCK_MONOTONIC) 的纳秒值, 高低 32 位分别写进 `oh` / `ol`。
+/// `sc` 是**调用方给的 16 字节暂存** (内核把 struct timespec {i64 tv_sec; i64 tv_nsec}
+/// 直接写进去; 本层再从那里拆)。
+/// 返回 0 = 成功, CK_ERR = 调用失败。
+///
+/// **本机未验证**: 走的是 Linux x86-64 的 syscall ABI (`clock_gettime` = 228,
+/// `CLOCK_MONOTONIC` = 1) —— 与 host/io.lomt 走的是同一套约定。本机是 Windows PE,
+/// **没有这个 syscall**, 所以这段只能由目标机 (FujoOS 外面跑 Linux 那一侧) 验。
+/// 自检不碰它 (碰了会返回垃圾值, 而不是失败 —— 那才是最坏的情况)。
+/// 在拿到目标机结果之前, **别把它的输出当时间用**。
+pub fn ck_monotonic_ns(sc: ptr, oh: ptr, ol: ptr) -> u32 {
+    let r: i64 = syscall4(228, 1, sc as u64, 0);
+    if r != 0 {
+        return CK_ERR;
+    }
+    let sec: i64 = mem_load64(sc, 0) as i64;
+    let ns: i64 = mem_load64(sc, 8) as i64;
+    // 纳秒 = sec * 1e9 + ns, 分高低两半写出去 (避免一次要 64 位除法)。
+    let total: u64 = (sec as u64) * 1000000000 + (ns as u64);
+    mem_store32(oh, 0, (total >> 32) as u32);
+    mem_store32(ol, 0, (total & 4294967295) as u32);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// ISO 与时长格式的真值来自 Python 的 `datetime` / 手工推算 (见每条注释);
+// 借位那几条是**手算**的, 因为它们的定义就是算术本身。
+
+fn test_clock_fmt_iso_epoch() -> bool {
+    // Python: datetime.fromtimestamp(0, timezone.utc).isoformat() -> 1970-01-01T00:00:00+00:00
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(0, o, 0, sc);
+    return n == 20 && mem_eq(o, 0, str_ptr("1970-01-01T00:00:00Z"), 0, 20);
+}
+
+fn test_clock_fmt_iso_2000_leap_day() -> bool {
+    // Python: 951782400 -> 2000-02-29T00:00:00+00:00 (400 年规则的闰日)
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(951782400, o, 0, sc);
+    return n == 20 && mem_eq(o, 0, str_ptr("2000-02-29T00:00:00Z"), 0, 20);
+}
+
+fn test_clock_fmt_iso_2024() -> bool {
+    // Python: 1709618828 -> 2024-03-05T06:07:08+00:00
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(1709618828, o, 0, sc);
+    return n == 20 && mem_eq(o, 0, str_ptr("2024-03-05T06:07:08Z"), 0, 20);
+}
+
+fn test_clock_fmt_iso_2026() -> bool {
+    // Python: 1789480980 -> 2026-09-15T14:03:00+00:00
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(1789480980, o, 0, sc);
+    return n == 20 && mem_eq(o, 0, str_ptr("2026-09-15T14:03:00Z"), 0, 20);
+}
+
+fn test_clock_fmt_iso_negative() -> bool {
+    // **负数边界**: Python datetime.fromtimestamp(-1, utc) -> 1969-12-31T23:59:59+00:00
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(0 - 1, o, 0, sc);
+    return n == 20 && mem_eq(o, 0, str_ptr("1969-12-31T23:59:59Z"), 0, 20);
+}
+
+fn test_clock_fmt_iso_layout() -> bool {
+    // 逐位钉住分隔符的位置 —— 只看"和真值相等"的话, 一次偏移会同时被掩盖。
+    //   "2000-01-01T00:00:00Z": [4]='-' [7]='-' [10]='T' [13]=':' [16]=':' [19]='Z'
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    ck_fmt_iso_sc(946684800, o, 0, sc);
+    return load8(o, 4) == 45 && load8(o, 7) == 45 && load8(o, 10) == 84
+        && load8(o, 13) == 58 && load8(o, 16) == 58 && load8(o, 19) == 90
+        && load8(o, 0) == 50 && load8(o, 5) == 48 && load8(o, 17) == 48;
+}
+
+fn test_clock_fmt_iso_at_offset() -> bool {
+    // 写进缓冲中间, 不假设从 0 开始。
+    let sc: ptr = alloc(24);
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_iso_sc(0, o, 3, sc);
+    return n == 20 && load8(o, 0) == 0 && mem_eq(o, 3, str_ptr("1970-01-01T00:00:00Z"), 0, 20)
+        && load8(o, 23) == 0;
+}
+
+fn test_clock_fmt_iso_alloc_variant() -> bool {
+    // 三参便利版 (内部 alloc) 与 _sc 版必须给出同一串字节。
+    let o1: ptr = alloc(32);
+    let o2: ptr = alloc(32);
+    let sc: ptr = alloc(24);
+    let n1: u32 = ck_fmt_iso(946684800, o1, 0);
+    let n2: u32 = ck_fmt_iso_sc(946684800, o2, 0, sc);
+    return n1 == 20 && n2 == 20 && mem_eq(o1, 0, o2, 0, 20)
+        && mem_eq(o1, 0, str_ptr("2000-01-01T00:00:00Z"), 0, 20);
+}
+
+fn test_clock_scratch_bytes() -> bool {
+    return ck_scratch_bytes() == 24 && CK_ISO_SCRATCH == 24 && CK_SCALE == 4294967296;
+}
+
+fn test_clock_fmt_secs_zero_and_small() -> bool {
+    // 0 -> "0s" (**不是空串**); 1 -> "1s"; 59 -> "59s"
+    let o: ptr = alloc(32);
+    let n0: u32 = ck_fmt_secs(0, o, 0);
+    let ok0: bool = n0 == 2 && mem_eq(o, 0, str_ptr("0s"), 0, 2);
+    let n1: u32 = ck_fmt_secs(1, o, 0);
+    let ok1: bool = n1 == 2 && mem_eq(o, 0, str_ptr("1s"), 0, 2);
+    let n59: u32 = ck_fmt_secs(59, o, 0);
+    let ok59: bool = n59 == 3 && mem_eq(o, 0, str_ptr("59s"), 0, 3);
+    return ok0 && ok1 && ok59;
+}
+
+fn test_clock_fmt_secs_minutes() -> bool {
+    // 60 -> "1m" (0 的秒被省略); 61 -> "1m1s"; 3599 -> "59m59s"
+    let o: ptr = alloc(32);
+    ck_fmt_secs(60, o, 0);
+    let ok60: bool = mem_eq(o, 0, str_ptr("1m"), 0, 2);
+    ck_fmt_secs(61, o, 0);
+    let ok61: bool = mem_eq(o, 0, str_ptr("1m1s"), 0, 4);
+    ck_fmt_secs(3599, o, 0);
+    let ok3599: bool = mem_eq(o, 0, str_ptr("59m59s"), 0, 6);
+    return ok60 && ok61 && ok3599;
+}
+
+fn test_clock_fmt_secs_hours() -> bool {
+    // 3600 -> "1h"; 3661 -> "1h1m1s"; 7199 -> "1h59m59s"
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_secs(3600, o, 0);
+    let ok1: bool = n == 2 && mem_eq(o, 0, str_ptr("1h"), 0, 2);
+    let n2: u32 = ck_fmt_secs(3661, o, 0);
+    let ok2: bool = n2 == 6 && mem_eq(o, 0, str_ptr("1h1m1s"), 0, 6);
+    ck_fmt_secs(7199, o, 0);
+    let ok3: bool = mem_eq(o, 0, str_ptr("1h59m59s"), 0, 8);
+    return ok1 && ok2 && ok3;
+}
+
+fn test_clock_fmt_secs_days() -> bool {
+    // 86400 -> "1d"; 90061 -> "1d1h1m1s"; 864000 -> "10d" (超过一天不折算成别的单位)
+    let o: ptr = alloc(32);
+    let n1: u32 = ck_fmt_secs(86400, o, 0);
+    let ok1: bool = n1 == 2 && mem_eq(o, 0, str_ptr("1d"), 0, 2);
+    let n2: u32 = ck_fmt_secs(90061, o, 0);
+    let ok2: bool = n2 == 8 && mem_eq(o, 0, str_ptr("1d1h1m1s"), 0, 8);
+    let n3: u32 = ck_fmt_secs(864000, o, 0);
+    let ok3: bool = n3 == 3 && mem_eq(o, 0, str_ptr("10d"), 0, 3);
+    return ok1 && ok2 && ok3;
+}
+
+fn test_clock_fmt_secs_negative() -> bool {
+    // -5 -> "-5s"; -3661 -> "-1h1m1s" (负号只写一次, 单位规则不变)
+    let o: ptr = alloc(32);
+    let n1: u32 = ck_fmt_secs(0 - 5, o, 0);
+    let ok1: bool = n1 == 3 && mem_eq(o, 0, str_ptr("-5s"), 0, 3);
+    let n2: u32 = ck_fmt_secs(0 - 3661, o, 0);
+    let ok2: bool = n2 == 7 && mem_eq(o, 0, str_ptr("-1h1m1s"), 0, 7);
+    return ok1 && ok2;
+}
+
+fn test_clock_fmt_secs_at_offset() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = ck_fmt_secs(61, o, 5);
+    return n == 4 && load8(o, 5) == 49 && mem_eq(o, 5, str_ptr("1m1s"), 0, 4);
+}
+
+fn test_clock_elapsed_no_borrow() -> bool {
+    // 低 32 位不退位: 9-5 = 4; 高 32 位相同 -> 结果就是 4。
+    // 跨一整圈: (1,0) -> (2,0) = 2^32 = 4294967296。
+    return ck_elapsed_us(0, 5, 0, 9) == 4
+        && ck_elapsed_us(1, 0, 2, 0) == 4294967296
+        && ck_elapsed_us(0, 0, 0, 1) == 1;
+}
+
+fn test_clock_elapsed_borrow_one() -> bool {
+    // **借位**: t0_lo = 2^32-1, t1_lo = 3。3 - 4294967295 在 u32 上回绕成 4,
+    // 同时高 32 位要少 1 (6-5-1 = 0) -> 答案 4, 而不是 4294967300。
+    return ck_elapsed_us(5, 4294967295, 6, 3) == 4
+        && ck_elapsed_us(0, 4294967295, 1, 4294967294) == 4294967295
+        && ck_elapsed_us(0, 0, 1, 4294967295) == 4294967295 + 4294967296;
+}
+
+fn test_clock_elapsed_equal_low() -> bool {
+    // 两端低 32 位相等 -> 不借位, 高位的差刚好是整圈数。
+    return ck_elapsed_us(0, 7, 0, 7) == 0
+        && ck_elapsed_us(3, 7, 4, 7) == 4294967296
+        && ck_elapsed_us(0, 0, 5, 0) == 5 * 4294967296;
+}
+
+fn test_clock_elapsed_zero_low() -> bool {
+    // t1_lo 为 0: 只有当 t0_lo 也是 0 时才不借位。
+    return ck_elapsed_us(0, 0, 0, 0) == 0
+        && ck_elapsed_us(0, 0, 1, 0) == 4294967296
+        && ck_elapsed_us(1, 0, 1, 0) == 0
+        && ck_elapsed_us(1, 1, 2, 0) == 4294967295; // 借位一回
+}
+
+fn test_clock_elapsed_backwards_is_zero() -> bool {
+    // 时钟回退 -> 0 (两个方向都要判: 先比高位, 高位相等再比低位)。
+    return ck_elapsed_us(5, 0, 4, 9) == 0
+        && ck_elapsed_us(5, 9, 5, 8) == 0
+        && ck_elapsed_us(5, 9, 5, 9) == 0;
+}
+
+fn test_clock_elapsed_wide_span() -> bool {
+    // 跨多个整圈: (0,0) -> (4294967295, 0) 应是 4294967295 * 2^32。
+    let x: u64 = ck_elapsed_us(0, 0, 4294967295, 0);
+    return x == 4294967295 * 4294967296
+        && ck_elapsed_us(4294967294, 4294967295, 4294967295, 0) == 1;
+}

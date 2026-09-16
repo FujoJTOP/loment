@@ -1,0 +1,307 @@
+// std/deque.lomt — 双端队列 (环形缓冲)
+//
+// 为什么除了 ring 还要它: 仓库里已有的 ring 是**字节**环形缓冲 (读日志那种)。这里要的是
+// **元素**队列: 两头都能进出, 元素是 u64。滑动窗口、BFS 的待办表、零拷贝的请求队列
+// 都是这个形状。
+//
+// 布局: buf[0..4] = 头下标, [4..8] = 元素个数, [8..12] = 容量, [12..16] = 保留,
+// 元素从偏移 16 起。装 cap 个元素要 16 + 8*cap 字节 —— 用 deque_bytes。
+//
+// 存的是**下标**而不是指针: 索引要 mod 容量, 所以 head 与 count 必须一起变 ——
+// 把它们当两个独立变量维护的写法迟早会错开一格, 这里的每个函数都只从 (head, count)
+// 现算下标, 不做增量缓存。
+//
+// 命名: 公开 deque_*, 内部 dq_*。自检 test_deque_*。
+
+module deque
+
+use "mem.lomt"
+
+/// 头部字节数。
+pub const DQ_HDR: u32 = 16;
+/// 空队列取出来给的值。
+pub const DQ_NIL: u64 = 18446744073709551615;
+
+/// 装 cap 个元素要多少字节。
+pub fn deque_bytes(cap: u32) -> u32 {
+    return DQ_HDR + 8 * cap;
+}
+
+fn dq_head(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn dq_count(b: ptr) -> u32 {
+    return mem_load32(b, 4);
+}
+
+fn dq_cap(b: ptr) -> u32 {
+    return mem_load32(b, 8);
+}
+
+fn dq_set_head(b: ptr, v: u32) {
+    mem_store32(b, 0, v);
+}
+
+fn dq_set_count(b: ptr, v: u32) {
+    mem_store32(b, 4, v);
+}
+
+/// 第 i 个元素 (0 = 队首) 在缓冲里的偏移。
+fn dq_slot(b: ptr, i: u32) -> u32 {
+    let c: u32 = dq_cap(b);
+    if c == 0 {
+        return DQ_HDR;
+    }
+    return DQ_HDR + 8 * ((dq_head(b) + i) % c);
+}
+
+/// 建队列。cap == 0 时建出来是空的, 一切入队都会失败 —— 但不会崩。
+pub fn deque_init(b: ptr, cap: u32) {
+    mem_store32(b, 0, 0);
+    mem_store32(b, 4, 0);
+    mem_store32(b, 8, cap);
+    mem_store32(b, 12, 0);
+}
+
+pub fn deque_len(b: ptr) -> u32 {
+    return dq_count(b);
+}
+
+pub fn deque_capacity(b: ptr) -> u32 {
+    return dq_cap(b);
+}
+
+pub fn deque_is_empty(b: ptr) -> bool {
+    return dq_count(b) == 0;
+}
+
+pub fn deque_is_full(b: ptr) -> bool {
+    return dq_count(b) >= dq_cap(b);
+}
+
+pub fn deque_clear(b: ptr) {
+    dq_set_head(b, 0);
+    dq_set_count(b, 0);
+}
+
+/// 尾部入队。满了返回 false。
+pub fn deque_push_back(b: ptr, v: u64) -> bool {
+    if deque_is_full(b) {
+        return false;
+    }
+    mem_store64(b, dq_slot(b, dq_count(b)), v);
+    dq_set_count(b, dq_count(b) + 1);
+    return true;
+}
+
+/// 头部入队。满了返回 false。
+pub fn deque_push_front(b: ptr, v: u64) -> bool {
+    if deque_is_full(b) {
+        return false;
+    }
+    let c: u32 = dq_cap(b);
+    let h: u32 = dq_head(b);
+    let nh: u32 = 0;
+    if h == 0 {
+        nh = c - 1;
+    } else {
+        nh = h - 1;
+    }
+    dq_set_head(b, nh);
+    dq_set_count(b, dq_count(b) + 1);
+    mem_store64(b, DQ_HDR + 8 * nh, v);
+    return true;
+}
+
+pub fn deque_pop_front(b: ptr) -> u64 {
+    if deque_is_empty(b) {
+        return DQ_NIL;
+    }
+    let h: u32 = dq_head(b);
+    let v: u64 = mem_load64(b, DQ_HDR + 8 * h);
+    let c: u32 = dq_cap(b);
+    let nh: u32 = h + 1;
+    if nh >= c {
+        nh = 0;
+    }
+    dq_set_head(b, nh);
+    dq_set_count(b, dq_count(b) - 1);
+    return v;
+}
+
+pub fn deque_pop_back(b: ptr) -> u64 {
+    if deque_is_empty(b) {
+        return DQ_NIL;
+    }
+    let n: u32 = dq_count(b);
+    let v: u64 = mem_load64(b, dq_slot(b, n - 1));
+    dq_set_count(b, n - 1);
+    return v;
+}
+
+pub fn deque_peek_front(b: ptr) -> u64 {
+    if deque_is_empty(b) {
+        return DQ_NIL;
+    }
+    return mem_load64(b, dq_slot(b, 0));
+}
+
+pub fn deque_peek_back(b: ptr) -> u64 {
+    if deque_is_empty(b) {
+        return DQ_NIL;
+    }
+    return mem_load64(b, dq_slot(b, dq_count(b) - 1));
+}
+
+/// 第 i 个元素 (0 = 队首)。越界给 DQ_NIL。
+pub fn deque_get(b: ptr, i: u32) -> u64 {
+    if i >= dq_count(b) {
+        return DQ_NIL;
+    }
+    return mem_load64(b, dq_slot(b, i));
+}
+
+pub fn deque_set(b: ptr, i: u32, v: u64) -> bool {
+    if i >= dq_count(b) {
+        return false;
+    }
+    mem_store64(b, dq_slot(b, i), v);
+    return true;
+}
+
+/// 队列自洽: head 在容量之内、count 不超过容量。
+pub fn deque_check(b: ptr) -> bool {
+    let c: u32 = dq_cap(b);
+    if c == 0 {
+        return dq_count(b) == 0 && dq_head(b) == 0;
+    }
+    return dq_head(b) < c && dq_count(b) <= c;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_deque_init_and_empty() -> bool {
+    let b: ptr = alloc(deque_bytes(4));
+    deque_init(b, 4);
+    return deque_len(b) == 0 && deque_is_empty(b) && deque_is_full(b) == false
+        && deque_pop_front(b) == DQ_NIL && deque_peek_back(b) == DQ_NIL && deque_check(b);
+}
+
+fn test_deque_fifo_from_back() -> bool {
+    // 尾进头出 = 队列 (先进先出)
+    let b: ptr = alloc(deque_bytes(4));
+    deque_init(b, 4);
+    deque_push_back(b, 10);
+    deque_push_back(b, 20);
+    deque_push_back(b, 30);
+    return deque_pop_front(b) == 10 && deque_pop_front(b) == 20 && deque_pop_front(b) == 30;
+}
+
+fn test_deque_lifo_from_front() -> bool {
+    // 头进头出 = 栈
+    let b: ptr = alloc(deque_bytes(4));
+    deque_init(b, 4);
+    deque_push_front(b, 1);
+    deque_push_front(b, 2);
+    deque_push_front(b, 3);
+    return deque_pop_front(b) == 3 && deque_pop_front(b) == 2 && deque_pop_front(b) == 1;
+}
+
+fn test_deque_both_ends() -> bool {
+    let b: ptr = alloc(deque_bytes(4));
+    deque_init(b, 4);
+    deque_push_back(b, 2);
+    deque_push_front(b, 1);
+    deque_push_back(b, 3);
+    let f: u64 = deque_peek_front(b);
+    let k: u64 = deque_peek_back(b);
+    return f == 1 && k == 3 && deque_pop_front(b) == 1 && deque_pop_back(b) == 3
+        && deque_pop_back(b) == 2 && deque_is_empty(b);
+}
+
+fn test_deque_wraps_around() -> bool {
+    // 反复进出把 head 推到容量末尾再绕回来 —— 环绕写错时只有几百次操作后才暴露。
+    // "先压后挤"的规则下, 每一轮结束队列里是最后两个元素, 所以收尾时是 [98, 99]。
+    // (第一版我断言收尾是 [97,98,99] —— 那是"先挤后压"的结果, 两种规则差一个元素。)
+    let b: ptr = alloc(deque_bytes(3));
+    deque_init(b, 3);
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 100 {
+        deque_push_back(b, i as u64);
+        if deque_is_full(b) {
+            deque_pop_front(b);
+        }
+        if deque_check(b) == false {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0 && deque_len(b) == 2 && deque_pop_front(b) == 98
+        && deque_pop_front(b) == 99 && deque_is_empty(b);
+}
+
+fn test_deque_full_refuses() -> bool {
+    let b: ptr = alloc(deque_bytes(2));
+    deque_init(b, 2);
+    let a: bool = deque_push_back(b, 1);
+    let c: bool = deque_push_back(b, 2);
+    let d: bool = deque_push_back(b, 3);
+    let e: bool = deque_push_front(b, 0);
+    return a && c && d == false && e == false && deque_len(b) == 2;
+}
+
+fn test_deque_indexing() -> bool {
+    let b: ptr = alloc(deque_bytes(4));
+    deque_init(b, 4);
+    deque_push_back(b, 7);
+    deque_push_back(b, 8);
+    deque_push_front(b, 6);
+    // 现在是 6 7 8
+    let a: u64 = deque_get(b, 0);
+    let c: u64 = deque_get(b, 1);
+    let d: u64 = deque_get(b, 2);
+    let e: u64 = deque_get(b, 3);
+    let set_ok: bool = deque_set(b, 1, 77);
+    return a == 6 && c == 7 && d == 8 && e == DQ_NIL && set_ok && deque_get(b, 1) == 77
+        && deque_set(b, 9, 0) == false;
+}
+
+fn test_deque_capacity_zero_is_inert() -> bool {
+    // cap == 0: 任何入队都失败, 但不能除零崩掉。
+    let b: ptr = alloc(deque_bytes(0));
+    deque_init(b, 0);
+    return deque_push_back(b, 1) == false && deque_push_front(b, 1) == false
+        && deque_check(b) && deque_is_empty(b);
+}
+
+fn test_deque_clear_and_reuse() -> bool {
+    let b: ptr = alloc(deque_bytes(3));
+    deque_init(b, 3);
+    deque_push_back(b, 1);
+    deque_push_back(b, 2);
+    deque_clear(b);
+    let a: bool = deque_is_empty(b);
+    deque_push_back(b, 9);
+    return a && deque_len(b) == 1 && deque_peek_front(b) == 9;
+}
+
+fn test_deque_sliding_window_pattern() -> bool {
+    // 真实形状: 固定窗口滑动, 每步丢掉最旧的。
+    // 窗口长度累加 = 1+2+3 (前三次填满) + 7 次 × 3 (i=3..9) = 27。
+    let b: ptr = alloc(deque_bytes(3));
+    deque_init(b, 3);
+    let acc: u64 = 0;
+    let i: u32 = 0;
+    while i < 10 {
+        if deque_is_full(b) {
+            deque_pop_front(b);
+        }
+        deque_push_back(b, i as u64);
+        acc = acc + (deque_len(b) as u64);
+        i = i + 1;
+    }
+    // 窗口最终是 7 8 9
+    return deque_get(b, 0) == 7 && deque_get(b, 2) == 9 && acc == 27;
+}

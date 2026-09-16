@@ -1,0 +1,161 @@
+// std/buf.lomt — 有容量检查的字节构建器
+//
+// 与 out.lomt 的分别是**边界**: `out_*` 假设缓冲够, 一路写下去; `buf_*` 每步都问
+// "还剩多少"。工具里两种都要 —— 尺寸已知的拼装用 out 更快, 尺寸算不准的 (比如
+// 把用户给的名字拼进一行日志) 用 buf 才安全。
+//
+// 满的约定与 `vec_push` 一致: **写不进去就原样返回偏移**。于是 `new == old` 就是失败,
+// 不需要额外的错误通道, 也不用为"半个数字"这种状态操心 —— `buf_dec` 是整块成功或整块不做。
+//
+// 命名: 公开一律 buf_*, 内部一律 bu_*。自检 test_buf_*。
+
+module buf
+
+use "numfmt.lomt"
+use "math.lomt"
+
+/// 还剩多少字节。
+pub fn buf_left(off: u32, cap: u32) -> u32 {
+    if off >= cap {
+        return 0;
+    }
+    return cap - off;
+}
+
+pub fn buf_full(off: u32, cap: u32) -> bool {
+    return off >= cap;
+}
+
+/// 写一个字节。满了不写, 原样返回 off。
+pub fn buf_put(base: ptr, off: u32, cap: u32, b: u32) -> u32 {
+    if off >= cap {
+        return off;
+    }
+    store8(base, off, b as u8);
+    return off + 1;
+}
+
+/// 写 n 个字节 (逐个判容量, 满了就停)。
+pub fn buf_bytes(base: ptr, off: u32, cap: u32, src: ptr, so: u32, n: u32) -> u32 {
+    let k: u32 = off;
+    let i: u32 = 0;
+    while i < n {
+        k = buf_put(base, k, cap, load8(src, so + i));
+        i = i + 1;
+    }
+    return k;
+}
+
+pub fn buf_str(base: ptr, off: u32, cap: u32, s: str) -> u32 {
+    return buf_bytes(base, off, cap, str_ptr(s), 0, str_len(s));
+}
+
+pub fn buf_nl(base: ptr, off: u32, cap: u32) -> u32 {
+    return buf_put(base, off, cap, 10);
+}
+
+/// 写十进制。**整块成功或整块不做** —— 放不下时不写出半截数字。
+pub fn buf_dec(base: ptr, off: u32, cap: u32, v: u64) -> u32 {
+    let need: u32 = math_ilog10(v);
+    if need > buf_left(off, cap) {
+        return off;
+    }
+    let n: u32 = numfmt_dec_into(((base as u64) + (off as u64)) as ptr, v);
+    return off + n;
+}
+
+/// 写定宽小写十六进制 (同样整块成功或整块不做)。
+pub fn buf_hex(base: ptr, off: u32, cap: u32, v: u64, width: u32) -> u32 {
+    let w: u32 = width;
+    if w > 16 {
+        w = 16;
+    }
+    if w > buf_left(off, cap) {
+        return off;
+    }
+    let n: u32 = numfmt_hex_into(((base as u64) + (off as u64)) as ptr, v, w);
+    return off + n;
+}
+
+/// 这次写成功了吗 (比较写前写后的偏移)。
+pub fn buf_wrote(before: u32, after: u32) -> bool {
+    return after > before;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_buf_put() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = buf_put(b, 0, 4, 65);
+    return o == 1 && load8(b, 0) == 65;
+}
+
+fn test_buf_put_when_full() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = buf_put(b, 4, 4, 65);
+    return o == 4 && load8(b, 4) == 0;
+}
+
+fn test_buf_left_and_full() -> bool {
+    return buf_left(0, 8) == 8 && buf_left(8, 8) == 0 && buf_left(99, 8) == 0
+        && buf_full(8, 8) && !buf_full(7, 8);
+}
+
+fn test_buf_str() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = buf_str(b, 0, 16, "abc");
+    return o == 3 && load8(b, 0) == 97 && load8(b, 2) == 99;
+}
+
+fn test_buf_str_truncates_at_cap() -> bool {
+    // 容量 2 时只写前两个字符 —— 不越界, 也不报错。
+    let b: ptr = alloc(16);
+    let o: u32 = buf_str(b, 0, 2, "abcd");
+    return o == 2 && load8(b, 0) == 97 && load8(b, 1) == 98 && load8(b, 2) == 0;
+}
+
+fn test_buf_dec() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = buf_dec(b, 0, 32, 12345);
+    return o == 5 && load8(b, 0) == 49 && load8(b, 4) == 53;
+}
+
+fn test_buf_dec_all_or_nothing() -> bool {
+    // 只剩 3 字节而 12345 要 5 —— 一个字节都不该写。
+    let b: ptr = alloc(32);
+    let o: u32 = buf_dec(b, 0, 3, 12345);
+    return o == 0 && load8(b, 0) == 0 && !buf_wrote(0, o);
+}
+
+fn test_buf_dec_exact_fit() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = buf_dec(b, 0, 5, 12345);
+    return o == 5 && buf_wrote(0, o);
+}
+
+fn test_buf_hex() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = buf_hex(b, 0, 32, 255, 4);
+    return o == 4 && load8(b, 0) == 48 && load8(b, 3) == 102;
+}
+
+fn test_buf_hex_clamps_width() -> bool {
+    // width 超过 16 时按 16 算, 不越界。
+    let b: ptr = alloc(32);
+    let o: u32 = buf_hex(b, 0, 32, 1, 99);
+    return o == 16;
+}
+
+fn test_buf_mixed_sequence_fits() -> bool {
+    let b: ptr = alloc(32);
+    let o1: u32 = buf_str(b, 0, 32, "n=");
+    let o2: u32 = buf_dec(b, o1, 32, 42);
+    let o3: u32 = buf_nl(b, o2, 32);
+    // "n=" 占 0,1; "42" 落在 2,3 —— 所以 b[2]='4'(52), b[3]='2'(50)。
+    // (这个下标/偏移混用的错, 我在 out.lomt 里犯过一次, 这里又犯了一次。)
+    return o3 == 5 && load8(b, 0) == 110 && load8(b, 2) == 52 && load8(b, 3) == 50 && load8(b, 4) == 10;
+}
+
+fn test_buf_wrote() -> bool {
+    return buf_wrote(0, 1) && !buf_wrote(3, 3) && !buf_wrote(5, 4);
+}

@@ -1,0 +1,946 @@
+// std/inflate.lomt — DEFLATE 解压 (RFC 1951)
+//
+// 为什么需要它: DEFLATE 是那张**通用网络货币** —— zlib/gzip/PNG/ZIP/HTTP 的
+// Content-Encoding 全都落在它上面。仓库里已经有 rle / lzss / huffman 三个"零件",
+// 但零件不是格式: 谁想读一个 .png 的 IDAT, 手里都得有一个能把 RFC 1951 的位流
+// 还原成字节的东西。这就是本模块。
+//
+// ---------------------------------------------------------------- 三种块
+//
+// 一个 DEFLATE 流是**块**的序列, 每块开头 3 个位: BFINAL(1) + BTYPE(2)。
+//   BTYPE = 00  存储块: 对齐到字节边界, 4 字节头 (LEN, NLEN=~LEN), 然后 LEN 个原样字节。
+//   BTYPE = 01  固定霍夫曼: 码长表**写死在 RFC** (§3.2.6), 见下。
+//   BTYPE = 10  动态霍夫曼: 码长表**在流里** (先传一张 19 符号的"码长码表",
+//               再用它把 lit/dist 两张表的码长拼出来, 带 16/17/18 三个重复符号)。
+//   BTYPE = 11  非法 —— 必须报错, 不能当成某种"扩展"。
+// BFINAL=1 的那块处理完就结束。
+//
+// ---------------------------------------------------------------- 位序 (最容易错的地方)
+//
+// **两条相反的规则同时成立**, 这是 DEFLATE 最著名的坑:
+//
+//   ① 位流本身是 **LSB-first** 打包的: 一个字节里 bit0 是**先**读到的位,
+//      下一个字节接在它后面。所以"取 n 位"必须**按位拼**, 不能按字节搬 ——
+//      按字节搬的话, 一个 3 位的块头会把 8 位全吃掉。
+//
+//   ② 霍夫曼码**自己**是 **MSB-first** 放的: 把码字从上往下写进 ①的位流里 ——
+//      即"第一个读出来的位是码字的最高位"。
+//
+// 这两条合起来的效果: 逐位读 + `code = (code << 1) | bit` 拼出来的整数, **正好**
+// 等于 RFC §3.2.2 那套规范码算出来的码字 (也就是 huffman.lomt 的 `huffman_codes`
+// 的输出)。换句话说 —— 从字节流里按字节"看见"的码字是**位反序**的, 而"按位左移拼"
+// 正好把它反回来。本模块走的就是这条路 (`nf_hsym`); 反过来, 编码侧 (deflate.lomt)
+// 必须**先把码字反序**再往位流里塞。
+//
+//   长度/距离的**额外位**是这条规则的例外: 它们是普通整数, 直接 LSB-first 写。
+//   别跟着码字一起反了 —— 那是编出"看着像压缩数据"却全错的东西的最快办法。
+//
+// ---------------------------------------------------------------- 码表要点
+//
+// lit/len 表 288 个符号: 0..255 字面, 256 块结束, 257..285 长度 (286/287 非法)。
+// 长度码的基础值 + 额外位 见 `inf_len_base` / `inf_len_extra` (RFC §3.2.5 那张表)。
+// dist 表 30 个有效符号 (0..29), 基础值 + 额外位 见 `inf_dist_base` / `inf_dist_extra`。
+//   **两处都是照 RFC 的表抄的, 不是自己推的** —— 自检里逐条对了一遍。
+//
+// 动态块里那张 19 符号的码长码表, 它的**读取顺序是固定的置换序**
+// (16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15), 见 `nf_perm`。
+// 为什么是这么个乱序: 按"用得多的排前面"选的, 于是 HCLEN 可以截短 —— 后面的符号
+// 直接省掉不给。用**声明顺序**读会得到一张完全错的表, 而且往往还能"解出东西"来。
+//
+// ---------------------------------------------------------------- 重叠拷贝 (经典陷阱)
+//
+// 距离可以**小于**长度: "距离 1、长度 20" 就是"把上一个字节重复 20 次"。这是
+// DEFLATE 压缩重复串的标准手段, 不是坏流。所以拷匹配必须**逐字节**来 ——
+// 一次 `mem_copy` 会把"还没生成的字节"也拷进去。本模块在 `nf_block` 里逐字节写。
+//
+// ---------------------------------------------------------------- 工作区 (调用方给)
+//
+// 全部用"基址 + 固定偏移", 没有结构体。布局 (u32 为单位, 但偏移是字节偏移):
+//     0  NF_POS      读到的输入字节位置 (也是"吃掉了多少字节"的答案)
+//     4  NF_BUF      位缓冲, **bit0 = 下一个要读的位** (LSB-first)
+//     8  NF_CNT      缓冲里还有几个没读的位
+//    12  NF_ERR      非 0 = 出错 (所有内部函数靠它提前收敛, 语言没有无值 return)
+//    16  NF_OLEN     已写出的字节数
+//    32  NF_LIT_LENS   288 * 4   字面/长度码的码长
+//  1184  NF_LIT_CODES  288 * 4   字面/长度码的码字 (规范码, MSB-first)
+//  2336  NF_DIST_LENS   32 * 4   距离码的码长
+//  2464  NF_DIST_CODES  32 * 4   距离码的码字
+//  2592  NF_CL_LENS     19 * 4   码长码的码长
+//  2668  NF_CL_CODES    19 * 4   码长码的码字
+//  2744  NF_TMP        136       给 huffman_codes 用的临时表
+//  合计 2880 字节。
+//
+// **堆是 64 KiB 的 bump 堆且不回收**: `inf_inflate` 每次调用要 2880 字节, 循环解
+// 很多流会耗光 —— 要循环的调用方请用 `inf_inflate_full` 自己传一块复用的。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **只解, 不重新组包**: 不校验流尾有没有多余字节, 也不去猜"到这里该结束了"。
+//     调用方用 `used_out` 自己判 (zlibc.lomt 就是这么接 Adler-32 的)。
+//   - 动态块的码长表**过满** (违反 Kraft) 会被拒 (借 huffman.lomt 的检查); 但**不完整**
+//     的码表 (Kraft < 1) 是**合法**的 —— RFC 允许, 只是某些位型解不出, 那时才报错。
+//   - 输出缓冲不够**报错**, 不截断: 截断出来的是**看着像对**的半个文件, 最坑。
+//   - 距离"超过 32 KiB 窗口"在合法流里本不该出现, 但这里只查硬约束"距离 > 已输出
+//     字节数" —— 前者是格式洁癖, 后者是防越界。RFC 的压缩器不会产越窗距离。
+//   - 不做预设字典 (那是 RFC 1950 / zlibc 那层的事)。
+//   - 解码是**逐位 + 线性扫表** (每个码长扫一遍全表), 不建查找表。字面表 288 项、
+//     最长 15 位, 一条流也就几万次比较 —— 够用。要每秒几十 MB 得上两级查找表。
+//   - **不分配**: 所有热点路径只用调用方给的缓冲; 唯一的 `alloc` 在 `inf_inflate`
+//     那个便捷外壳里, 一次一块, 不在逐字节循环里。
+//   - 固定块每次遇到都**重建码表** (288+32 次写)。这是为了不和动态块抢那两张表 ——
+//     缓存一份"固定表副本"要多 2304 字节工作区, 不值。
+//
+// 命名: 公开 inf_*, 内部 nf_*。自检 test_inflate_*。
+
+module inflate
+
+use "mem.lomt"
+use "huffman.lomt"
+
+/// 解压失败 (坏流 / 缓冲不够)。成功返回 0。
+pub const INF_ERR: u32 = 4294967295;
+/// 内部哨兵: 霍夫曼表里找不到匹配的码。
+pub const INF_NO: u32 = 4294967294;
+
+// 工作区偏移。`const` 的初值只能是整数字面量, 所以这些数字是手算好写死的 ——
+// 和上面注释里那张表一一对应, 改布局要**两处一起改**。
+const NF_POS: u32 = 0;
+const NF_BUF: u32 = 4;
+const NF_CNT: u32 = 8;
+const NF_ERR: u32 = 12;
+const NF_OLEN: u32 = 16;
+const NF_LIT_LENS: u32 = 32;
+const NF_LIT_CODES: u32 = 1184;
+const NF_DIST_LENS: u32 = 2336;
+const NF_DIST_CODES: u32 = 2464;
+const NF_CL_LENS: u32 = 2592;
+const NF_CL_CODES: u32 = 2668;
+const NF_TMP: u32 = 2744;
+
+/// 工作区要多少字节。
+pub fn inf_scratch_bytes() -> u32 {
+    return 2880;
+}
+
+/// 给定输入 n 字节, 解出来**最多**能有多少字节 —— 这是**真的上界**, 但很松。
+///
+/// 推导: 最"多产"的一块是"长度 258 (码 285, 8 位, 0 额外位) + 距离 1
+/// (距离码 0, 5 位, 0 额外位)" = 13 位换 258 字节。n 字节 = 8n 位, 于是
+/// 输出 <= 258 * 8n / 13 = 158.77n。取 160n 留余量, 再加 64 盖住块头/EOB。
+/// **别拿它当真去开缓冲** (1 KiB 的压缩炸弹能要到 160 KiB); 它只保证"不会写越界"。
+pub fn inf_max_out(n: u32) -> u32 {
+    return 160 * n + 64;
+}
+
+/// 基址 + 偏移 -> 新 ptr。
+///
+/// **不用内建 `ptr_add`**: 它在 Rust 路径 (也就是 `loment.py test` 走的那条) 降级成
+/// 裸 `.add()` 而没包 `unsafe`, rustc 直接拒 E0133。转成整数再加、再转回来, 两条路径都过。
+/// (这个坑是 out.lomt 先踩到的, 这里抄它的解法。)
+fn nf_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 位读 (LSB-first)
+
+/// 把输入字节填进位缓冲, 直到攒够 want 位或输入见底。
+///
+/// 为什么新字节要按 `c` 位移着**或**进去, 而不是直接赋值: 缓冲里可能还剩上一位字节
+/// 没读完的几位, 新字节得接在它们后面。这就是"LSB-first 打包"的全部内容。
+fn nf_refill(ws: ptr, src: ptr, sn: u32, want: u32) {
+    let go: u32 = 1;
+    while go == 1 {
+        let c: u32 = mem_load32(ws, NF_CNT);
+        let p: u32 = mem_load32(ws, NF_POS);
+        if c >= want || p >= sn {
+            go = 0;
+        } else {
+            let b: u32 = load8(src, p);
+            mem_store32(ws, NF_BUF, mem_load32(ws, NF_BUF) | (b << c));
+            mem_store32(ws, NF_CNT, c + 8);
+            mem_store32(ws, NF_POS, p + 1);
+        }
+    }
+}
+
+/// 读 n 位 (n <= 24), 低位在前。输入不够时给 0 并置错误位。
+fn nf_bits(ws: ptr, src: ptr, sn: u32, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    if n >= 25 {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    nf_refill(ws, src, sn, n);
+    let c: u32 = mem_load32(ws, NF_CNT);
+    if c < n {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    let v: u32 = mem_load32(ws, NF_BUF);
+    mem_store32(ws, NF_BUF, v >> n);
+    mem_store32(ws, NF_CNT, c - n);
+    return v & ((1 << n) - 1);
+}
+
+/// 丢掉当前字节里还没用掉的位, 对齐到字节边界 (存储块的 LEN 之前必须做)。
+///
+/// "未读位数不是 8 的倍数"就说明正读在半个字节中间; 余数那几位属于**当前这个字节
+/// 已经用掉的尾巴**, 直接扔。扔完 cnt 是 8 的倍数, 后面 `nf_bits(16)` 读出来的
+/// 就是干净的两个字节 (LSB-first -> 正好是 LEN 的小端值)。
+fn nf_align(ws: ptr) {
+    let c: u32 = mem_load32(ws, NF_CNT);
+    let drop: u32 = c % 8;
+    if drop > 0 {
+        mem_store32(ws, NF_BUF, mem_load32(ws, NF_BUF) >> drop);
+        mem_store32(ws, NF_CNT, c - drop);
+    }
+}
+
+// ---------------------------------------------------------------- 霍夫曼解码
+
+/// 从流里解一个符号, 返回符号下标; 解不出 (或输入耗尽) 给 INF_NO 并置错误位。
+///
+/// 这就是文件头"位序"那段说的第二条: **逐位读、左移拼**, 拼出来的整数正好是规范码。
+/// 每拼长一位就横扫一遍全表找 (码长, 码字) 都对上的那一项 —— 前缀码保证最多一个。
+fn nf_hsym(ws: ptr, src: ptr, sn: u32, lens: ptr, codes: ptr, nsym: u32, maxbits: u32) -> u32 {
+    let code: u32 = 0;
+    let len: u32 = 1;
+    let found: u32 = INF_NO;
+    while len <= maxbits && found == INF_NO {
+        let bit: u32 = nf_bits(ws, src, sn, 1);
+        if mem_load32(ws, NF_ERR) != 0 {
+            len = maxbits + 1; // 输入耗尽: 把循环条件顶出去 (语言没有 break)
+        } else {
+            code = (code << 1) | bit;
+            let i: u32 = 0;
+            while i < nsym && found == INF_NO {
+                if mem_load32(lens, i * 4) == len && mem_load32(codes, i * 4) == code {
+                    found = i;
+                }
+                i = i + 1;
+            }
+            if found == INF_NO {
+                len = len + 1;
+            }
+        }
+    }
+    if found == INF_NO {
+        mem_store32(ws, NF_ERR, 1); // 表不完整 / 位型非法: 都是坏流
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------- 长度/距离表 (照 RFC §3.2.5 抄)
+
+/// 长度码 257..285 的基础长度 (RFC §3.2.5 那张表):
+///   257..264 -> 3..10                 (0 额外位)
+///   265..268 -> 11,13,15,17           (1 位, 段内步长 2)
+///   269..272 -> 19,23,27,31           (2 位, 步长 4)
+///   273..276 -> 35,43,51,59           (3 位, 步长 8)
+///   277..280 -> 67,83,99,115          (4 位, 步长 16)
+///   281..284 -> 131,163,195,227       (5 位, 步长 32)
+///   285      -> 258                   (0 额外位 —— 特例, 不是"步长 64")
+pub fn inf_len_base(c: u32) -> u32 {
+    if c <= 264 {
+        return c - 254;
+    }
+    if c <= 268 {
+        return 11 + (c - 265) * 2;
+    }
+    if c <= 272 {
+        return 19 + (c - 269) * 4;
+    }
+    if c <= 276 {
+        return 35 + (c - 273) * 8;
+    }
+    if c <= 280 {
+        return 67 + (c - 277) * 16;
+    }
+    if c <= 284 {
+        return 131 + (c - 281) * 32;
+    }
+    return 258;
+}
+
+pub fn inf_len_extra(c: u32) -> u32 {
+    if c <= 264 {
+        return 0;
+    }
+    if c <= 268 {
+        return 1;
+    }
+    if c <= 272 {
+        return 2;
+    }
+    if c <= 276 {
+        return 3;
+    }
+    if c <= 280 {
+        return 4;
+    }
+    if c <= 284 {
+        return 5;
+    }
+    return 0;
+}
+
+/// 距离码 0..29 的基础距离 (RFC §3.2.5): 1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,
+/// 193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577。
+/// 每两档一段: 段内步长翻倍, 段与段之间从 "2^k + 1" 起步。
+pub fn inf_dist_base(c: u32) -> u32 {
+    if c <= 3 {
+        return c + 1;
+    }
+    if c <= 5 {
+        return 5 + (c - 4) * 2;
+    }
+    if c <= 7 {
+        return 9 + (c - 6) * 4;
+    }
+    if c <= 9 {
+        return 17 + (c - 8) * 8;
+    }
+    if c <= 11 {
+        return 33 + (c - 10) * 16;
+    }
+    if c <= 13 {
+        return 65 + (c - 12) * 32;
+    }
+    if c <= 15 {
+        return 129 + (c - 14) * 64;
+    }
+    if c <= 17 {
+        return 257 + (c - 16) * 128;
+    }
+    if c <= 19 {
+        return 513 + (c - 18) * 256;
+    }
+    if c <= 21 {
+        return 1025 + (c - 20) * 512;
+    }
+    if c <= 23 {
+        return 2049 + (c - 22) * 1024;
+    }
+    if c <= 25 {
+        return 4097 + (c - 24) * 2048;
+    }
+    if c <= 27 {
+        return 8193 + (c - 26) * 4096;
+    }
+    return 16385 + (c - 28) * 8192;
+}
+
+/// 0..3 -> 0 位, 4..5 -> 1 位, 6..7 -> 2 位, ... 每两档加一位。
+pub fn inf_dist_extra(c: u32) -> u32 {
+    if c <= 3 {
+        return 0;
+    }
+    return (c - 4) / 2 + 1;
+}
+
+/// 动态块里码长码的读取置换序 (RFC §3.2.7)。
+fn nf_perm(k: u32) -> u32 {
+    if k == 0 {
+        return 16;
+    }
+    if k == 1 {
+        return 17;
+    }
+    if k == 2 {
+        return 18;
+    }
+    if k == 3 {
+        return 0;
+    }
+    if k == 4 {
+        return 8;
+    }
+    if k == 5 {
+        return 7;
+    }
+    if k == 6 {
+        return 9;
+    }
+    if k == 7 {
+        return 6;
+    }
+    if k == 8 {
+        return 10;
+    }
+    if k == 9 {
+        return 5;
+    }
+    if k == 10 {
+        return 11;
+    }
+    if k == 11 {
+        return 4;
+    }
+    if k == 12 {
+        return 12;
+    }
+    if k == 13 {
+        return 3;
+    }
+    if k == 14 {
+        return 13;
+    }
+    if k == 15 {
+        return 2;
+    }
+    if k == 16 {
+        return 14;
+    }
+    if k == 17 {
+        return 1;
+    }
+    return 15;
+}
+
+// ---------------------------------------------------------------- 固定表的码长
+
+/// RFC §3.2.6 的固定字面/长度码长: 0..143 -> 8, 144..255 -> 9, 256..279 -> 7,
+/// 280..287 -> 8。写进 `lens` 的 288 个 u32 槽。
+pub fn inf_fixed_lit_lens(lens: ptr) {
+    let i: u32 = 0;
+    while i < 288 {
+        let v: u32 = 8;
+        if i >= 144 && i <= 255 {
+            v = 9;
+        }
+        if i >= 256 && i <= 279 {
+            v = 7;
+        }
+        mem_store32(lens, i * 4, v);
+        i = i + 1;
+    }
+}
+
+/// 固定距离表: 32 个符号**全是 5 位** (于是规范码就是 0..31 本身)。
+fn nf_fixed_dist_lens(lens: ptr) {
+    let i: u32 = 0;
+    while i < 32 {
+        mem_store32(lens, i * 4, 5);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 码长序列的展开
+
+/// 码长序列的第 i 个槽 —— 前 hlit 个属于 lit/len 表, 后面属于 dist 表。
+/// 两张表**不是分开传的**: 流里就是一条连续的码长序列, 靠 HLIT/HDIST 切开。
+fn nf_putlen(ws: ptr, i: u32, v: u32, hlit: u32) {
+    if i < hlit {
+        mem_store32(nf_at(ws, NF_LIT_LENS), i * 4, v);
+    } else {
+        mem_store32(nf_at(ws, NF_DIST_LENS), (i - hlit) * 4, v);
+    }
+}
+
+fn nf_getlen(ws: ptr, i: u32, hlit: u32) -> u32 {
+    if i < hlit {
+        return mem_load32(nf_at(ws, NF_LIT_LENS), i * 4);
+    }
+    return mem_load32(nf_at(ws, NF_DIST_LENS), (i - hlit) * 4);
+}
+
+/// 从 i0 起写 r 个同样的码长。**越过 total 是坏流** —— RFC 要求正好铺满, 多出来的
+/// 重复说明码长表和 HLIT/HDIST 对不上, 必须拒 (不拒的话会把后面的位读错位)。
+fn nf_rep(ws: ptr, i0: u32, total: u32, v: u32, r: u32, hlit: u32) -> u32 {
+    let i: u32 = i0;
+    let k: u32 = 0;
+    while k < r && mem_load32(ws, NF_ERR) == 0 {
+        if i >= total {
+            mem_store32(ws, NF_ERR, 1);
+        } else {
+            nf_putlen(ws, i, v, hlit);
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------- 块
+
+/// 存储块 (BTYPE=00): 对齐 -> LEN/NLEN -> 原样拷。
+fn nf_stored(ws: ptr, src: ptr, sn: u32, out: ptr, out_cap: u32) -> u32 {
+    nf_align(ws);
+    let len: u32 = nf_bits(ws, src, sn, 16);
+    let nlen: u32 = nf_bits(ws, src, sn, 16);
+    if mem_load32(ws, NF_ERR) != 0 {
+        return 0;
+    }
+    // NLEN 必须是 LEN 的反码 —— 这是存储块唯一的结构校验, 也是"块头写歪了"的哨兵。
+    if (len ^ 65535) != nlen {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    let p: u32 = mem_load32(ws, NF_OLEN);
+    let pos: u32 = mem_load32(ws, NF_POS);
+    if pos + len > sn {
+        mem_store32(ws, NF_ERR, 1); // 输入不够
+    } else if p + len > out_cap {
+        mem_store32(ws, NF_ERR, 1); // 输出装不下
+    } else {
+        mem_copy(out, p, src, pos, len);
+        mem_store32(ws, NF_OLEN, p + len);
+        mem_store32(ws, NF_POS, pos + len);
+    }
+    return 0;
+}
+
+/// 一个霍夫曼块的主体: 反复解符号直到块结束码 256。
+/// 两张表就在工作区的固定偏移上, 所以这里只要两个"最长码长"来控制扫表范围。
+fn nf_block(ws: ptr, src: ptr, sn: u32, out: ptr, out_cap: u32, lmax: u32, dmax: u32) -> u32 {
+    let llens: ptr = nf_at(ws, NF_LIT_LENS);
+    let lcodes: ptr = nf_at(ws, NF_LIT_CODES);
+    let dlens: ptr = nf_at(ws, NF_DIST_LENS);
+    let dcodes: ptr = nf_at(ws, NF_DIST_CODES);
+    let p: u32 = mem_load32(ws, NF_OLEN);
+    let done: u32 = 0;
+    while done == 0 && mem_load32(ws, NF_ERR) == 0 {
+        let sym: u32 = nf_hsym(ws, src, sn, llens, lcodes, 288, lmax);
+        if mem_load32(ws, NF_ERR) != 0 {
+            done = 1;
+        } else if sym == 256 {
+            done = 1; // 块结束
+        } else if sym < 256 {
+            if p >= out_cap {
+                mem_store32(ws, NF_ERR, 1);
+            } else {
+                store8(out, p, sym as u8);
+                p = p + 1;
+            }
+        } else if sym <= 285 {
+            let lex: u32 = nf_bits(ws, src, sn, inf_len_extra(sym));
+            let len: u32 = inf_len_base(sym) + lex;
+            let dsym: u32 = nf_hsym(ws, src, sn, dlens, dcodes, 32, dmax);
+            if mem_load32(ws, NF_ERR) != 0 {
+                done = 1;
+            } else if dsym > 29 {
+                mem_store32(ws, NF_ERR, 1); // 30/31 是保留码, 不合法
+            } else {
+                let dex: u32 = nf_bits(ws, src, sn, inf_dist_extra(dsym));
+                let dist: u32 = inf_dist_base(dsym) + dex;
+                if dist > p {
+                    mem_store32(ws, NF_ERR, 1); // 指到输出开头之前
+                } else if p + len > out_cap {
+                    mem_store32(ws, NF_ERR, 1); // 会写出界
+                } else {
+                    // **逐字节拷, 允许重叠**: dist < len 时源就在目标左近, 一次 mem_copy
+                    // 会把"还没生成的字节"拷进去。DEFLATE 的重复串全靠这条活着。
+                    let k: u32 = 0;
+                    while k < len {
+                        store8(out, p, load8(out, p - dist) as u8);
+                        p = p + 1;
+                        k = k + 1;
+                    }
+                }
+            }
+        } else {
+            mem_store32(ws, NF_ERR, 1); // 286/287: 没有对应的长度, 坏流
+        }
+    }
+    mem_store32(ws, NF_OLEN, p);
+    return 0;
+}
+
+/// 动态块 (BTYPE=10): 读码长码表 -> 用它展开 lit/dist 码长 -> 解主体。
+fn nf_dynamic(ws: ptr, src: ptr, sn: u32, out: ptr, out_cap: u32) -> u32 {
+    let hlit: u32 = nf_bits(ws, src, sn, 5) + 257;
+    let hdist: u32 = nf_bits(ws, src, sn, 5) + 1;
+    let hclen: u32 = nf_bits(ws, src, sn, 4) + 4;
+    if mem_load32(ws, NF_ERR) != 0 {
+        return 0;
+    }
+    let cll: ptr = nf_at(ws, NF_CL_LENS);
+    let clc: ptr = nf_at(ws, NF_CL_CODES);
+    let llens: ptr = nf_at(ws, NF_LIT_LENS);
+    let dlens: ptr = nf_at(ws, NF_DIST_LENS);
+    // 19 个码长码的码长, **按置换序**放; 没给的 (HCLEN..19) 保持 0。
+    let z: u32 = 0;
+    while z < 19 {
+        mem_store32(cll, z * 4, 0);
+        z = z + 1;
+    }
+    let k: u32 = 0;
+    while k < hclen && mem_load32(ws, NF_ERR) == 0 {
+        let l: u32 = nf_bits(ws, src, sn, 3);
+        mem_store32(cll, nf_perm(k) * 4, l);
+        k = k + 1;
+    }
+    if mem_load32(ws, NF_ERR) != 0 {
+        return 0;
+    }
+    // 码长码最长 7 位; 过满的话 huffman_codes 给 HUFF_ERR, 直接拒。
+    let r0: u32 = huffman_codes(cll, 19, clc, nf_at(ws, NF_TMP), 7);
+    if r0 == HUFF_ERR {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    let total: u32 = hlit + hdist;
+    let i: u32 = 0;
+    while i < total && mem_load32(ws, NF_ERR) == 0 {
+        let s: u32 = nf_hsym(ws, src, sn, cll, clc, 19, 7);
+        if mem_load32(ws, NF_ERR) == 0 {
+            if s < 16 {
+                nf_putlen(ws, i, s, hlit);
+                i = i + 1;
+            } else if s == 18 {
+                // 18 = "接下来 11..138 个 0"
+                i = nf_rep(ws, i, total, 0, nf_bits(ws, src, sn, 7) + 11, hlit);
+            } else if s == 17 {
+                // 17 = "接下来 3..10 个 0"
+                i = nf_rep(ws, i, total, 0, nf_bits(ws, src, sn, 3) + 3, hlit);
+            } else {
+                // 16 = "上一个码长再重复 3..6 次"; 开头就出现 16 是坏流 (没有"上一个")
+                if i == 0 {
+                    mem_store32(ws, NF_ERR, 1);
+                } else {
+                    let prev: u32 = nf_getlen(ws, i - 1, hlit);
+                    i = nf_rep(ws, i, total, prev, nf_bits(ws, src, sn, 2) + 3, hlit);
+                }
+            }
+        }
+    }
+    if mem_load32(ws, NF_ERR) != 0 {
+        return 0;
+    }
+    // 表里没写到的槽全清 0 (它们没有码)。
+    let j: u32 = hlit;
+    while j < 288 {
+        mem_store32(llens, j * 4, 0);
+        j = j + 1;
+    }
+    j = hdist;
+    while j < 32 {
+        mem_store32(dlens, j * 4, 0);
+        j = j + 1;
+    }
+    // 两张表各自的 Kraft 检查都在 huffman_codes 里 —— 过满直接拒。
+    // "全是 0" 不是错 (返回 0): 没有距离码的块合法, 只是不能有匹配。
+    let r1: u32 = huffman_codes(llens, 288, nf_at(ws, NF_LIT_CODES), nf_at(ws, NF_TMP), 15);
+    if r1 == HUFF_ERR {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    let r2: u32 = huffman_codes(dlens, 32, nf_at(ws, NF_DIST_CODES), nf_at(ws, NF_TMP), 15);
+    if r2 == HUFF_ERR {
+        mem_store32(ws, NF_ERR, 1);
+        return 0;
+    }
+    nf_block(ws, src, sn, out, out_cap, 15, 15);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 对外
+
+/// 完整形态: 工作区由调用方给。`used_out` 收到"吃掉了几个输入字节" —— 一个 DEFLATE
+/// 流后面常接着别的东西 (zlib 的 Adler、PNG 的下一个 IDAT), 不给这个数调用方走不下去。
+///
+/// `out_len_out` 收到解出的字节数 (**出错时是出错前解出的那部分**, 方便定位)。
+/// 成功返回 0, 出错返回 INF_ERR。
+pub fn inf_inflate_full(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, used_out: ptr, ws: ptr) -> u32 {
+    mem_store32(ws, NF_POS, 0);
+    mem_store32(ws, NF_BUF, 0);
+    mem_store32(ws, NF_CNT, 0);
+    mem_store32(ws, NF_ERR, 0);
+    mem_store32(ws, NF_OLEN, 0);
+    // 变量名别叫 final —— 它在 Rust 里是保留字, 转译出来的 `let mut final` 直接编译不过。
+    let lastblk: u32 = 0;
+    while lastblk == 0 && mem_load32(ws, NF_ERR) == 0 {
+        let bfinal: u32 = nf_bits(ws, src, sn, 1);
+        let btype: u32 = nf_bits(ws, src, sn, 2);
+        if mem_load32(ws, NF_ERR) != 0 {
+            lastblk = 1;
+        } else {
+            lastblk = bfinal;
+            if btype == 0 {
+                nf_stored(ws, src, sn, out, out_cap);
+            } else if btype == 1 {
+                // 固定表每次重建 —— 动态块会覆盖同一片内存, 缓存"一份副本"要多
+                // 2304 字节工作区, 不值这 320 次写。
+                inf_fixed_lit_lens(nf_at(ws, NF_LIT_LENS));
+                nf_fixed_dist_lens(nf_at(ws, NF_DIST_LENS));
+                huffman_codes(nf_at(ws, NF_LIT_LENS), 288, nf_at(ws, NF_LIT_CODES), nf_at(ws, NF_TMP), 9);
+                huffman_codes(nf_at(ws, NF_DIST_LENS), 32, nf_at(ws, NF_DIST_CODES), nf_at(ws, NF_TMP), 15);
+                nf_block(ws, src, sn, out, out_cap, 9, 15);
+            } else if btype == 2 {
+                nf_dynamic(ws, src, sn, out, out_cap);
+            } else {
+                mem_store32(ws, NF_ERR, 1); // BTYPE=11 不存在
+            }
+        }
+    }
+    mem_store32(out_len_out, 0, mem_load32(ws, NF_OLEN));
+    mem_store32(used_out, 0, mem_load32(ws, NF_POS));
+    if mem_load32(ws, NF_ERR) != 0 {
+        return INF_ERR;
+    }
+    return 0;
+}
+
+/// 便捷外壳: 自己开工作区。**循环解很多流时别用这个** (bump 堆不回收);
+/// 那种场合用 `inf_inflate_full` 传一块复用的。
+pub fn inf_inflate(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr) -> u32 {
+    let ws: ptr = alloc(inf_scratch_bytes());
+    let used: ptr = alloc(4);
+    return inf_inflate_full(src, sn, out, out_cap, out_len_out, used, ws);
+}
+
+/// 同上, 但把"吃掉了几个字节"交给调用方。
+pub fn inf_inflate_used(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, used_out: ptr) -> u32 {
+    let ws: ptr = alloc(inf_scratch_bytes());
+    return inf_inflate_full(src, sn, out, out_cap, out_len_out, used_out, ws);
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 向量来源: **Python 的 zlib 生成的真流** (见每个自检上方的注释)。三条主干向量
+// (固定块 / 动态块 / 存储块) 都是"别的实现编出来、我们解出来逐字节等于原文" ——
+// 这是本模块唯一有说服力的验收方式: 自编自解只能证明两边一样错。
+//
+// 堆只有 64 KiB 且不回收, **整个文件的自检加起来的分配量必须留在里面** ——
+// 超了的话靠后的自检会拿到坏指针、静默变成假绿或者干脆没输出。所以这里的缓冲
+// 一律按向量实际大小开, 不图宽敞。
+
+fn nf_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// hex 文本 -> 字节, 返回字节数。
+fn nf_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = nf_hv(str_byte(s, k * 2));
+        let lo: u32 = nf_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+fn nf_txt() -> str {
+    return "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. ";
+}
+
+/// 282 字节"词汤" —— zlib level 9 给它排的是**动态霍夫曼**块。
+fn nf_words() -> str {
+    return "for in are of and at to on be of they is of and as as and that and at as of be to that be of be be are of that of at in was as in at to be was at a to be be is on to at and be of this is his at as for with be with on was that a that and be was they his for with was this and to they ";
+}
+
+/// DEFLATE 流 (49 字节, **固定霍夫曼**, Python `Z_FIXED` 编 "The quick brown fox...")。
+fn nf_fix_stream() -> str {
+    return "0bc94855282ccd4cce56482aca2fcf5348cbaf50c82acd2d2856c82f4b2d5228014ae72456552aa4e4a7eb2984d04c3100";
+}
+
+/// DEFLATE 流 (121 字节, **动态霍夫曼**, Python 默认策略编上面那段词汤)。
+fn nf_dyn_stream() -> str {
+    return "454f510ac53008bb4aaed6c756da9f0a9b30deed17a3db406a8d26d16e07e6423b7658475b1b9ac30db6f013e463ff639e6ff754f0e783934568ea9340a6f0e4f26594b6f050f130bc5228ace5c73941d4aa9211b62bca727a3622ce8894de9d475cd38754225b1ae48adfa665a29382fdf2129d759869e206";
+}
+
+fn test_inflate_fixed_block_text() -> bool {
+    // 外部真向量 ①: 固定霍夫曼块, 135 字节英文 -> 49 字节。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(160);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, nf_fix_stream());
+    let r: u32 = inf_inflate(src, sn, out, 160, ol);
+    if r != 0 {
+        return false;
+    }
+    return sn == 49 && mem_load32(ol, 0) == 135 && mem_eq(out, 0, str_ptr(nf_txt()), 0, 135);
+}
+
+fn test_inflate_dynamic_block_words() -> bool {
+    // 外部真向量 ②: 动态霍夫曼块 (含码长码表 + 16/17/18 重复语义 + 匹配)。
+    let src: ptr = alloc(128);
+    let out: ptr = alloc(320);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, nf_dyn_stream());
+    let r: u32 = inf_inflate(src, sn, out, 320, ol);
+    if r != 0 {
+        return false;
+    }
+    return sn == 121 && mem_load32(ol, 0) == 282 && mem_eq(out, 0, str_ptr(nf_words()), 0, 282);
+}
+
+fn test_inflate_stored_block_random() -> bool {
+    // 外部真向量 ③: level 0 -> 存储块。165 = 5 字节块头 + 160 字节原样数据。
+    let src: ptr = alloc(192);
+    let out: ptr = alloc(192);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "01a0005fffe13b032e112a32b579080f08b1f7ed4c2e5d3a07f97f21ee232d178a209af6b5887f66e8092402aa49f2c1551b27fe53266e490db138489ce814d58d145a8b4f994fed15c5b2fdaeeff317f157e1e0978c3f5fd5df3d34f8c08262b03750894fa5e42428ca6d189213702ca29ceb218325da6733cb63eb78b869d759689a1eb44efff1aa474318544a23a657001f2c4b6f14ddc8a66ac38f9bd8a34d2f858ed2");
+    let r: u32 = inf_inflate(src, sn, out, 192, ol);
+    // 存储块的硬性质: LEN/NLEN 是反码, payload 逐字节原样。头 5 字节 -> 数据起于 5。
+    // 这里再独立核一遍"我们拷出来的 == 流里那 160 个字节", 不走原图。
+    if r != 0 {
+        return false;
+    }
+    return sn == 165 && mem_load32(ol, 0) == 160 && mem_eq(out, 0, src, 5, 160);
+}
+
+fn test_inflate_multi_block_stored_then_fixed() -> bool {
+    // 两块接力: 存储块 (BFINAL=0, "HELLO") + 固定块 (BFINAL=1, "HELLO")。
+    // 位流的"块与块之间重新对齐"和"存储块后的字节边界"都在这条上。
+    let src: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "000500faff48454c4c4ff370f5f1f10700");
+    let r: u32 = inf_inflate(src, sn, out, 32, ol);
+    let w: str = "HELLOHELLO";
+    return r == 0 && sn == 17 && mem_load32(ol, 0) == 10 && mem_eq(out, 0, str_ptr(w), 0, 10);
+}
+
+fn test_inflate_empty_stream() -> bool {
+    // 空输入的固定块: BFINAL=1 + BTYPE=01 + EOB = 10 个位 -> 两个字节 03 00。
+    // 这也是 Python `zlib.compressobj(...,-15,...,Z_FIXED).flush()` 对空串的输出。
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "0300");
+    let r: u32 = inf_inflate(src, sn, out, 8, ol);
+    return r == 0 && sn == 2 && mem_load32(ol, 0) == 0;
+}
+
+fn test_inflate_rejects_bad_block_type() -> bool {
+    // BTYPE=11 不存在。当成"某种扩展"往下读会越界 —— 必须报错。
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "07");
+    return inf_inflate(src, sn, out, 8, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_invalid_length_code() -> bool {
+    // 字面 'A' 后面跟长度码 286 —— 286/287 没有对应长度, 是坏流。
+    // (Python 的 zlib 对同一串给 "invalid literal/length code"。)
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "731c03");
+    return inf_inflate(src, sn, out, 16, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_distance_past_start() -> bool {
+    // 只输出了 1 个字节, 却来一个"距离 5"的匹配 —— 指到输出开头之前, 必须拒。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "730412");
+    return inf_inflate(src, sn, out, 16, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_bad_stored_nlen() -> bool {
+    // 存储块里 NLEN != ~LEN: 块头写歪了。必须拒, 而不是把后面 65530 个字节当数据。
+    let src: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "0105000000");
+    return inf_inflate(src, sn, out, 16, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_truncated_stream() -> bool {
+    // 把动态块的真流砍掉一半: 必须报错, 不能当成"就到这了"。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(320);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "454f510ac53008bb4aaed6c756da9f0a9b30deed17a3db406a8d26d16e07e6423b7658475b1b9ac30db6f013e463ff");
+    return sn == 47 && inf_inflate(src, sn, out, 320, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_overfull_code_table() -> bool {
+    // 手工拼的动态块: 给 lit 表的 0/1/2 三个符号各 1 位码 -> Kraft = 3/2 > 1,
+    // 根本不是前缀码。huffman_codes 的 Kraft 检查必须把它挡下来。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, "05e0010400000000101c0000000000000000000000000000000000000000000000000000000000000000");
+    return sn == 42 && inf_inflate(src, sn, out, 64, ol) == INF_ERR;
+}
+
+fn test_inflate_rejects_output_overflow() -> bool {
+    // 输出只给 10 字节, 却要解 282 字节 —— 报错, **不截断** (截断出来的是半个文件,
+    // 看着像对的最坑)。缓冲给 16 字节: 真越界了 Rust 那边会直接崩, 能返回就说明没越界。
+    let src: ptr = alloc(128);
+    let out: ptr = alloc(16);
+    let ol: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, nf_dyn_stream());
+    let r: u32 = inf_inflate(src, sn, out, 10, ol);
+    return r == INF_ERR && mem_load32(ol, 0) <= 10;
+}
+
+fn test_inflate_reports_consumed_bytes() -> bool {
+    // 真流后面接 3 个垃圾字节: used 必须只算真流那部分, 垃圾一个不吃。
+    let src: ptr = alloc(64);
+    let out: ptr = alloc(160);
+    let ol: ptr = alloc(8);
+    let us: ptr = alloc(8);
+    let sn: u32 = nf_hx(src, nf_fix_stream());
+    store8(src, sn, 255 as u8);
+    store8(src, sn + 1, 255 as u8);
+    store8(src, sn + 2, 255 as u8);
+    let r: u32 = inf_inflate_used(src, sn + 3, out, 160, ol, us);
+    return r == 0 && sn == 49 && mem_load32(ol, 0) == 135
+        && mem_load32(us, 0) == 49 && mem_eq(out, 0, str_ptr(nf_txt()), 0, 135);
+}
+
+fn test_inflate_respects_offsets() -> bool {
+    // 从缓冲中间读、往缓冲中间写: 偏移必须被尊重 (调用方常把两块拼在一个缓冲里)。
+    // mem_move 而不是 mem_copy —— 目标在源之后, 前向拷会把源盖掉。
+    let src: ptr = alloc(96);
+    let out: ptr = alloc(200);
+    let ol: ptr = alloc(8);
+    let us: ptr = alloc(8);
+    let ws: ptr = alloc(inf_scratch_bytes());
+    let sn: u32 = nf_hx(src, nf_fix_stream());
+    mem_move(src, 32, src, 0, sn);
+    let r: u32 = inf_inflate_full(nf_at(src, 32), sn, nf_at(out, 20), 150, ol, us, ws);
+    return r == 0 && mem_load32(ol, 0) == 135 && mem_load32(us, 0) == 49
+        && mem_eq(out, 20, str_ptr(nf_txt()), 0, 135);
+}
+
+fn test_inflate_length_and_distance_tables_match_rfc() -> bool {
+    // RFC §3.2.5 的表逐条对。手推的"每段步长翻倍"式公式看着再顺, 也得对着真表走一遍 ——
+    // 这两张表错一格, 解出来的就是一段"有内容但是错的"字节 (最坏的错法)。
+    let ok1: bool = inf_len_base(257) == 3 && inf_len_base(264) == 10 && inf_len_base(265) == 11
+        && inf_len_base(268) == 17 && inf_len_base(272) == 31 && inf_len_base(276) == 59
+        && inf_len_base(280) == 115 && inf_len_base(284) == 227 && inf_len_base(285) == 258;
+    let ok2: bool = inf_len_extra(257) == 0 && inf_len_extra(264) == 0 && inf_len_extra(265) == 1
+        && inf_len_extra(269) == 2 && inf_len_extra(273) == 3 && inf_len_extra(277) == 4
+        && inf_len_extra(281) == 5 && inf_len_extra(285) == 0;
+    let ok3: bool = inf_dist_base(0) == 1 && inf_dist_base(3) == 4 && inf_dist_base(4) == 5
+        && inf_dist_base(9) == 25 && inf_dist_base(13) == 97 && inf_dist_base(17) == 385
+        && inf_dist_base(21) == 1537 && inf_dist_base(25) == 6145 && inf_dist_base(29) == 24577;
+    let ok4: bool = inf_dist_extra(0) == 0 && inf_dist_extra(3) == 0 && inf_dist_extra(4) == 1
+        && inf_dist_extra(5) == 1 && inf_dist_extra(6) == 2 && inf_dist_extra(29) == 13;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_inflate_rejects_rep_past_table_end() -> bool {
+    // 重复符号 (16/17/18) 一口气写超过 HLIT+HDIST 个槽 —— 必须置错误位。
+    // 这条直接验那条不变量本身: 从 250 槽起重复 20 个, 但表只到 258。
+    let ws: ptr = alloc(inf_scratch_bytes());
+    mem_store32(ws, NF_ERR, 0);
+    let i: u32 = nf_rep(ws, 250, 258, 0, 20, 257);
+    return i == 258 && mem_load32(ws, NF_ERR) != 0;
+}
+
+fn test_inflate_scratch_and_bound_accounting() -> bool {
+    // 工作区够装下所有表 (NF_TMP 那段要 136 字节); 上界公式随 n 单调增, 且
+    // 罩得住最坏情形: "13 位换 258 字节" 最少要 2 个输入字节, 所以 inf_max_out(2) >= 258。
+    let ok1: bool = inf_scratch_bytes() == 2880 && inf_scratch_bytes() >= NF_TMP + 136;
+    let ok2: bool = inf_max_out(0) == 64 && inf_max_out(1) == 224 && inf_max_out(100) > inf_max_out(99);
+    let ok3: bool = inf_max_out(2) >= 258 && inf_max_out(8) >= 1280;
+    return ok1 && ok2 && ok3;
+}

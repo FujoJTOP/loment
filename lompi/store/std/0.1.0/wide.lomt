@@ -1,0 +1,456 @@
+// std/wide.lomt — 64 位之上的算术 (128 位积、128/64 除、跨字移位、位计数)
+//
+// 为什么要它: 语言里**没有 u128**, 而软浮点的乘法和除法都必须要它:
+//   - 两个 53 位尾数相乘是 106 位 —— 不丢位就算不出正确的舍入;
+//   - 除法要一次拿到 55 位以上的商加余数, 才知道该不该进位。
+// 拿 u64 硬凑是错的 (会丢低位 -> 舍入方向错), 所以先把这层做出来。
+//
+// 顺带把 clz/ctz/popcount/循环移位收进来: 这些在仓库里被反复手写, 而且 clz 是
+// 浮点归一化的核心 —— 归一化写错, 结果只在某些指数上错, 极难查。
+//
+// 命名: 公开 wide_*, 内部 wd_*。自检 test_wide_*。
+
+module wide
+
+use "mem.lomt"
+
+/// 低 32 位掩码 (拆 32 位肢体做乘法用)。
+pub const WIDE_LO32: u64 = 4294967295;
+/// 64 位全 1。
+pub const WIDE_ALL: u64 = 18446744073709551615;
+
+/// 低 s 位全 1; s >= 64 时给全 1 (不退化成未定义的移位)。
+fn wd_mask_lo(s: u32) -> u64 {
+    if s >= 64 {
+        return WIDE_ALL;
+    }
+    return ((1 as u64) << s) - 1;
+}
+
+/// 前导零个数; 0 给 64。
+pub fn wide_clz64(v: u64) -> u32 {
+    if v == 0 {
+        return 64;
+    }
+    let n: u32 = 0;
+    let x: u64 = v;
+    if (x >> 32) == 0 {
+        n = n + 32;
+        x = x << 32;
+    }
+    if (x >> 48) == 0 {
+        n = n + 16;
+        x = x << 16;
+    }
+    if (x >> 56) == 0 {
+        n = n + 8;
+        x = x << 8;
+    }
+    if (x >> 60) == 0 {
+        n = n + 4;
+        x = x << 4;
+    }
+    if (x >> 62) == 0 {
+        n = n + 2;
+        x = x << 2;
+    }
+    if (x >> 63) == 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+/// 末尾零个数; 0 给 64。
+pub fn wide_ctz64(v: u64) -> u32 {
+    if v == 0 {
+        return 64;
+    }
+    let n: u32 = 0;
+    let x: u64 = v;
+    if (x & 4294967295) == 0 {
+        n = n + 32;
+        x = x >> 32;
+    }
+    if (x & 65535) == 0 {
+        n = n + 16;
+        x = x >> 16;
+    }
+    if (x & 255) == 0 {
+        n = n + 8;
+        x = x >> 8;
+    }
+    if (x & 15) == 0 {
+        n = n + 4;
+        x = x >> 4;
+    }
+    if (x & 3) == 0 {
+        n = n + 2;
+        x = x >> 2;
+    }
+    if (x & 1) == 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+/// 最高位的位置 (0..63); 0 给 64 表示"没有".
+pub fn wide_bitlen64(v: u64) -> u32 {
+    if v == 0 {
+        return 0;
+    }
+    return 64 - wide_clz64(v);
+}
+
+/// 1 的个数。
+pub fn wide_popcount64(v: u64) -> u32 {
+    let n: u32 = 0;
+    let x: u64 = v;
+    while x != 0 {
+        if (x & 1) != 0 {
+            n = n + 1;
+        }
+        x = x >> 1;
+    }
+    return n;
+}
+
+/// 循环左移。n 会先对 64 取模 —— 直接 `v << 64` 是未定义行为。
+pub fn wide_rotl64(v: u64, n: u32) -> u64 {
+    let k: u32 = n % 64;
+    if k == 0 {
+        return v;
+    }
+    return (v << k) | (v >> (64 - k));
+}
+
+pub fn wide_rotr64(v: u64, n: u32) -> u64 {
+    let k: u32 = n % 64;
+    if k == 0 {
+        return v;
+    }
+    return (v >> k) | (v << (64 - k));
+}
+
+/// 64x64 -> 128 位积 (拆 32 位肢体的手算乘法)。
+/// 写进 out: out[0..8] = 低 64 位, out[8..16] = 高 64 位。
+pub fn wide_umul64(a: u64, b: u64, out: ptr) {
+    let a0: u64 = a & WIDE_LO32;
+    let a1: u64 = a >> 32;
+    let b0: u64 = b & WIDE_LO32;
+    let b1: u64 = b >> 32;
+    let p00: u64 = a0 * b0;
+    let p01: u64 = a0 * b1;
+    let p10: u64 = a1 * b0;
+    let p11: u64 = a1 * b1;
+    // 中间列: p00 的高半 + 两个交叉项的低半
+    let mid: u64 = (p00 >> 32) + (p01 & WIDE_LO32) + (p10 & WIDE_LO32);
+    let lo: u64 = (p00 & WIDE_LO32) | (mid << 32);
+    let hi: u64 = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    mem_store64(out, 0, lo);
+    mem_store64(out, 8, hi);
+}
+
+/// (hi:lo) / d, 商写进 out[0..8], 返回余数。
+///
+/// **前提 hi < d** (否则商装不进 64 位)。按位做恢复式除法, 64 轮。
+/// hi < d 时余数恒 < d, 于是 `(r << 1) | bit` 最多到 2d-1, 溢出到第 65 位时
+/// 减去 d 的结果可以靠回绕直接得到 —— 所以进位分支不需要 128 位。
+pub fn wide_udivmod128(hi: u64, lo: u64, d: u64, out: ptr) -> u64 {
+    if d == 0 {
+        mem_store64(out, 0, WIDE_ALL);
+        return 0;
+    }
+    if hi >= d {
+        // 前提被破坏: 给饱和值, 不让它静默给出错误的商。
+        mem_store64(out, 0, WIDE_ALL);
+        return 0;
+    }
+    let q: u64 = 0;
+    let r: u64 = hi;
+    let i: u32 = 0;
+    while i < 64 {
+        let bit: u64 = (lo >> (63 - i)) & 1;
+        let carry: u64 = r >> 63;
+        let cur: u64 = ((r << 1) | bit) & WIDE_ALL;
+        if carry == 1 || cur >= d {
+            // 借位时 (cur < d) 真值是 2^64 + cur, 减 d 后要回绕 —— 但 u64 的 `cur - d`
+            // 在 cur < d 时**会 panic** (Rust debug 的减法溢出检查), 所以写成
+            // 2^64 - (d - cur), 中间量都不下溢。
+            if cur >= d {
+                r = cur - d;
+            } else {
+                r = 18446744073709551615 - (d - cur) + 1;
+            }
+            q = q | ((1 as u64) << (63 - i));
+        } else {
+            r = cur;
+        }
+        i = i + 1;
+    }
+    mem_store64(out, 0, q);
+    return r;
+}
+
+/// 128 位右移 s 位。写进 out: out[0..8] = 结果的低 64 位, out[8..16] = 高 64 位。
+/// 返回 **s 位里是否丢掉了非零位** (sticky) —— 软浮点的舍入全靠这个。
+pub fn wide_shr128(hi: u64, lo: u64, s: u32, out: ptr) -> u32 {
+    if s == 0 {
+        mem_store64(out, 0, lo);
+        mem_store64(out, 8, hi);
+        return 0;
+    }
+    if s >= 128 {
+        let lost: u32 = 1;
+        if hi == 0 && lo == 0 {
+            lost = 0;
+        }
+        mem_store64(out, 0, 0);
+        mem_store64(out, 8, 0);
+        return lost;
+    }
+    if s >= 64 {
+        let k: u32 = s - 64;
+        let mut_lost: u32 = 0;
+        if (hi & wd_mask_lo(k)) != 0 || lo != 0 {
+            mut_lost = 1;
+        }
+        mem_store64(out, 0, hi >> k);
+        mem_store64(out, 8, 0);
+        return mut_lost;
+    }
+    let lost: u32 = 0;
+    let low: u64 = lo & wd_mask_lo(s);
+    if low != 0 {
+        lost = 1;
+    }
+    mem_store64(out, 0, (lo >> s) | (hi << (64 - s)));
+    mem_store64(out, 8, hi >> s);
+    return lost;
+}
+
+/// 128 位左移 s 位。写进 out: out[0..8] = 低, out[8..16] = 高。
+///
+/// 写成 if/else if 链而**不是**提前 `return;` —— 本语言没有无值的 return (skill §6.3),
+/// 无返回值的函数要靠 if 包住主体来表达"提前结束"。
+pub fn wide_shl128(hi: u64, lo: u64, s: u32, out: ptr) {
+    if s == 0 {
+        mem_store64(out, 0, lo);
+        mem_store64(out, 8, hi);
+    } else if s >= 128 {
+        mem_store64(out, 0, 0);
+        mem_store64(out, 8, 0);
+    } else if s >= 64 {
+        let k: u32 = s - 64;
+        mem_store64(out, 0, 0);
+        mem_store64(out, 8, lo << k);
+    } else {
+        mem_store64(out, 0, lo << s);
+        mem_store64(out, 8, (hi << s) | (lo >> (64 - s)));
+    }
+}
+
+/// 128 位无符号比较: 1 = a>b, 0 = 相等, 2 = a<b (不返回负数 —— 语言里比较和值分开更干净)。
+pub fn wide_cmp128(a_hi: u64, a_lo: u64, b_hi: u64, b_lo: u64) -> u32 {
+    if a_hi > b_hi {
+        return 1;
+    }
+    if a_hi < b_hi {
+        return 2;
+    }
+    if a_lo > b_lo {
+        return 1;
+    }
+    if a_lo < b_lo {
+        return 2;
+    }
+    return 0;
+}
+
+pub fn wide_is_zero128(hi: u64, lo: u64) -> bool {
+    return hi == 0 && lo == 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_wide_clz64() -> bool {
+    return wide_clz64(0) == 64 && wide_clz64(1) == 63 && wide_clz64(18446744073709551615) == 0
+        && wide_clz64(4294967296) == 31;
+}
+
+fn test_wide_ctz64() -> bool {
+    return wide_ctz64(0) == 64 && wide_ctz64(1) == 0 && wide_ctz64(8) == 3
+        && wide_ctz64(9223372036854775808) == 63;
+}
+
+fn test_wide_clz_ctz_are_consistent() -> bool {
+    // 1234567890123456 落在 [2^50, 2^51) -> bitlen 51, clz 13;
+    // 它 = 64 x 19290123283179 (奇) -> ctz 6。
+    let v: u64 = 1234567890123456;
+    return wide_bitlen64(v) == 51 && wide_bitlen64(v) == 64 - wide_clz64(v)
+        && wide_clz64(v) == 13 && wide_ctz64(v) == 6;
+}
+
+fn test_wide_bitlen64() -> bool {
+    return wide_bitlen64(0) == 0 && wide_bitlen64(1) == 1 && wide_bitlen64(255) == 8
+        && wide_bitlen64(256) == 9;
+}
+
+fn test_wide_popcount64() -> bool {
+    return wide_popcount64(0) == 0 && wide_popcount64(7) == 3
+        && wide_popcount64(18446744073709551615) == 64 && wide_popcount64(256) == 1;
+}
+
+fn test_wide_rotl_rotr_roundtrip() -> bool {
+    let v: u64 = 12345678901234567;
+    return wide_rotr64(wide_rotl64(v, 13), 13) == v && wide_rotl64(v, 64) == v
+        && wide_rotl64(v, 0) == v;
+}
+
+fn test_wide_rotl_moves_bits() -> bool {
+    // 0x8000000000000001 左移 1 -> 0x0000000000000003
+    return wide_rotl64(9223372036854775809, 1) == 3;
+}
+
+fn test_wide_umul64_small() -> bool {
+    let t: ptr = alloc(32);
+    wide_umul64(4294967296, 4294967296, t);
+    return mem_load64(t, 0) == 0 && mem_load64(t, 8) == 1;
+}
+
+fn test_wide_umul64_exact_128() -> bool {
+    // (2^64-1)^2 = 2^128 - 2^65 + 1 -> 高 64 位 = 2^64-2, 低 64 位 = 1
+    let t: ptr = alloc(32);
+    wide_umul64(18446744073709551615, 18446744073709551615, t);
+    return mem_load64(t, 0) == 1 && mem_load64(t, 8) == 18446744073709551614;
+}
+
+fn test_wide_umul64_known_product() -> bool {
+    // 1234567890 * 9876543210 = 12193263111263526900 -> 拆成 hi/lo
+    let t: ptr = alloc(32);
+    wide_umul64(1234567890, 9876543210, t);
+    let lo: u64 = mem_load64(t, 0);
+    let hi: u64 = mem_load64(t, 8);
+    return hi == 0 && lo == 12193263111263526900;
+}
+
+fn test_wide_umul64_matches_repeated_add() -> bool {
+    // 小值上交叉验证: 13 * 17 必须等于 221, 且高半为 0。
+    let t: ptr = alloc(32);
+    wide_umul64(13, 17, t);
+    return mem_load64(t, 0) == 221 && mem_load64(t, 8) == 0;
+}
+
+fn test_wide_udivmod128_basic() -> bool {
+    let t: ptr = alloc(32);
+    let r: u64 = wide_udivmod128(0, 100, 7, t);
+    return mem_load64(t, 0) == 14 && r == 2;
+}
+
+fn test_wide_udivmod128_uses_high_word() -> bool {
+    // (1<<64) / 3 = 6148914691236517205 余 1 —— 高位真正参与时才看得出来。
+    let t: ptr = alloc(32);
+    let r: u64 = wide_udivmod128(1, 0, 3, t);
+    return mem_load64(t, 0) == 6148914691236517205 && r == 1;
+}
+
+fn test_wide_udivmod128_exact_power() -> bool {
+    let t: ptr = alloc(32);
+    let r: u64 = wide_udivmod128(0, 18446744073709551615, 18446744073709551615, t);
+    return mem_load64(t, 0) == 1 && r == 0;
+}
+
+fn test_wide_udivmod128_precondition_broken() -> bool {
+    // hi >= d 时不许静默给出错的商。
+    let t: ptr = alloc(32);
+    let r: u64 = wide_udivmod128(10, 0, 3, t);
+    return mem_load64(t, 0) == 18446744073709551615 && r == 0;
+}
+
+fn test_wide_shr128_small_shift() -> bool {
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(0, 16, 2, t);
+    return mem_load64(t, 0) == 4 && mem_load64(t, 8) == 0 && lost == 0;
+}
+
+fn test_wide_shr128_reports_sticky() -> bool {
+    // 右移丢掉的那一位必须被报出来 —— 舍入方向全靠它, 静默丢掉会让半个结果错。
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(0, 5, 1, t);
+    return mem_load64(t, 0) == 2 && lost == 1;
+}
+
+fn test_wide_shr128_sticky_zero_when_exact() -> bool {
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(0, 4, 2, t);
+    return mem_load64(t, 0) == 1 && lost == 0;
+}
+
+fn test_wide_shr128_crosses_word() -> bool {
+    // (8 x 2^64) >> 1 = 4 x 2^64 -> **高字**是 4, 低字是 0。
+    // 第一版我把 4 写到低字上去比, 挂了 —— 这条正好钉住"哪个字是哪个字"。
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(8, 0, 1, t);
+    return mem_load64(t, 0) == 0 && mem_load64(t, 8) == 4 && lost == 0;
+}
+
+fn test_wide_shr128_at_64() -> bool {
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(9, 5, 64, t);
+    return mem_load64(t, 0) == 9 && mem_load64(t, 8) == 0 && lost == 1;
+}
+
+fn test_wide_shr128_zero_shift_is_identity() -> bool {
+    let t: ptr = alloc(32);
+    let lost: u32 = wide_shr128(7, 9, 0, t);
+    return mem_load64(t, 0) == 9 && mem_load64(t, 8) == 7 && lost == 0;
+}
+
+fn test_wide_shl128_small_shift() -> bool {
+    let t: ptr = alloc(32);
+    wide_shl128(0, 3, 4, t);
+    return mem_load64(t, 0) == 48 && mem_load64(t, 8) == 0;
+}
+
+fn test_wide_shl128_carries_into_high() -> bool {
+    let t: ptr = alloc(32);
+    wide_shl128(1, 9223372036854775808, 1, t);
+    return mem_load64(t, 0) == 0 && mem_load64(t, 8) == 3;
+}
+
+fn test_wide_shl_shr_roundtrip_when_exact() -> bool {
+    // 位移量必须让中间结果仍装得下 128 位 —— 用 70 的话左移就把高字挤出界了,
+    // 往返当然回不到原值 (第一版就是这么错的)。20 位两头都安全。
+    let t: ptr = alloc(32);
+    let u: ptr = alloc(32);
+    wide_shl128(5, 7, 20, t);
+    wide_shr128(mem_load64(t, 8), mem_load64(t, 0), 20, u);
+    let lost: u32 = 0;
+    if mem_load64(u, 0) != 7 || mem_load64(u, 8) != 5 {
+        lost = 1;
+    }
+    return lost == 0;
+}
+
+fn test_wide_cmp128() -> bool {
+    return wide_cmp128(1, 0, 0, 9) == 1 && wide_cmp128(0, 9, 1, 0) == 2
+        && wide_cmp128(3, 4, 3, 4) == 0 && wide_cmp128(3, 5, 3, 4) == 1;
+}
+
+fn test_wide_is_zero128() -> bool {
+    return wide_is_zero128(0, 0) && wide_is_zero128(0, 1) == false
+        && wide_is_zero128(1, 0) == false;
+}
+
+fn test_wide_umul_then_divide_recovers_operand() -> bool {
+    // 交叉验证乘法与除法互为逆: (a*b) / b == a 且余数为 0。
+    // 两个坑都在这条里踩过: ① 指针加整数在 Rust 路径上是
+    // `E0369 cannot add {integer} to *mut u8`, 所以用**两块**缓冲而不是 `t + 16`;
+    // ② `wide_udivmod128` 的**返回值是余数**, 商写在 out 里 —— 我第一版拿返回值当商比。
+    let t: ptr = alloc(32);
+    let u: ptr = alloc(32);
+    let a: u64 = 4294967297;
+    let b: u64 = 1000000007;
+    wide_umul64(a, b, t);
+    let rem: u64 = wide_udivmod128(mem_load64(t, 8), mem_load64(t, 0), b, u);
+    return mem_load64(u, 0) == a && rem == 0;
+}

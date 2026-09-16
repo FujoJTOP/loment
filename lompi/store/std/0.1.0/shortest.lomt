@@ -1,0 +1,625 @@
+// std/shortest.lomt — 最短路: Dijkstra / Bellman-Ford / Floyd-Warshall
+//
+// 为什么三个都要: 它们不是"同一个问题的三个实现", 而是三种**前提**:
+//   * Dijkstra  —— 权非负, 快 O((n+m)log n), 单源。
+//   * Bellman-Ford —— 允许负权, 还能**报出负环**, O(n*m), 单源。
+//   * Floyd-Warshall —— 全源, 代码最短, O(n^3), 且能处理负权边。
+// 选哪个由"权里有没有负数""要不要全源""要不要负环检测"决定, 不是口味问题。
+//
+// 图用 graph.lomt 的表示 (eb -> csr), 本模块只加算法。dist 是 i64 数组 (要装 INF 和负数),
+// 前驱是 u32 数组。
+//
+// 内存布局 (都由调用方 alloc):
+//   dist —— i64[n], 不可达 = SP_INF (i64 max)。
+//   prev —— u32[n], 无前驱 = SP_NONE。
+//   heap/pos —— **本模块内联的"索引堆"**: heap 是 [size:u32][节点:u32*n], pos 是 u32[n]
+//               (节点在堆里的位置, 不在堆里 = SP_NONE)。sp_heap_bytes(n) 给大小。
+//   为何不用 std/heap.lomt: 那个堆只比 u64 值本身, 而 Dijkstra 要在**松弛后改键**
+//   (decrease-key) —— 只能按外部 dist[] 比大小的堆。硬用 u64 堆就得把 (dist,node)
+//   编码进一个 u64, 那会把"单条路径权重 < 2^32"变成一条人为上限。索引堆没这个限制,
+//   还能对着负权 (虽然 Dijkstra 本身不用负权)。
+//   mat —— i64[n*n], Floyd 的矩阵。sp_floyd_bytes(n) 给大小。
+//
+// 返回值: 一律 u32 状态码, 不用 bool 硬塞 —— "负环"和"负权"是两件不同的事, 必须分开:
+//   SP_OK        0   正常
+//   SP_NEGCYCLE  1   Bellman-Ford 检出负环 (dist 已不可信)
+//   SP_NEGW      2   Dijkstra 遇到负权边 (该换 Bellman-Ford)
+//   SP_BADSRC    3   起点越界
+//
+// 诚实清单:
+//   * Dijkstra 要求非负权。遇到负权边返回 SP_NEGW, 但**只检查可达边** —— 挂在不可达子树上的
+//     负权边不会被发现。这是刻意的: 全扫一遍违背 Dijkstra 只碰可达点的初衷。
+//   * 路径重建 sp_path 在 prev 成环时会停下并报"无路" (靠 out_cap 步数上限兜底), 不会死循环。
+//   * Floyd 用 INF 哨兵 + 跳过任一为 INF 的相加, 避免 INF+INF 溢出。但**两条真实路径之和**
+//     若超过 i64 范围仍会溢出 (没做保护, 那要每次加都判一次, 太贵)。
+//   * 不检测平行边以外的东西: 同一对点多条边取最小的那条 (Floyd 的 fill 与邻接表都自然如此)。
+//   * 所有算法都假设点号 < n。eb->csr 的越界由 gr_build 拦下。
+//
+// 命名: 公开 sp_*, 内部 sp_* 里再细分 (ts_* 只给自检用)。自检 test_shortest_*。
+
+module shortest
+
+use "mem.lomt"
+use "graph.lomt"
+
+pub const SP_INF: i64 = 9223372036854775807;
+pub const SP_NONE: u32 = 4294967295;
+
+pub const SP_OK: u32 = 0;
+pub const SP_NEGCYCLE: u32 = 1;
+pub const SP_NEGW: u32 = 2;
+pub const SP_BADSRC: u32 = 3;
+
+fn sp_d_load(d: ptr, i: u32) -> i64 {
+    return mem_load64(d, 8 * i) as i64;
+}
+
+fn sp_d_store(d: ptr, i: u32, v: i64) {
+    mem_store64(d, 8 * i, v as u64);
+}
+
+// ---------------------------------------------------------------- 索引堆 (内部)
+
+pub fn sp_heap_bytes(n: u32) -> u32 {
+    return 4 + 4 * n;
+}
+
+fn sp_hsize(h: ptr) -> u32 {
+    return mem_load32(h, 0);
+}
+
+fn sp_hset_n(h: ptr, v: u32) {
+    mem_store32(h, 0, v);
+}
+
+fn sp_hat(h: ptr, i: u32) -> u32 {
+    return mem_load32(h, 4 + 4 * i);
+}
+
+fn sp_hsetat(h: ptr, i: u32, v: u32) {
+    mem_store32(h, 4 + 4 * i, v);
+}
+
+fn sp_hswap(h: ptr, pos: ptr, i: u32, j: u32) {
+    let a: u32 = sp_hat(h, i);
+    let b: u32 = sp_hat(h, j);
+    sp_hsetat(h, i, b);
+    sp_hsetat(h, j, a);
+    mem_store32(pos, 4 * a, j);
+    mem_store32(pos, 4 * b, i);
+}
+
+fn sp_less(dist: ptr, a: u32, b: u32) -> bool {
+    return sp_d_load(dist, a) < sp_d_load(dist, b);
+}
+
+fn sp_up(h: ptr, pos: ptr, dist: ptr, i0: u32) {
+    let i: u32 = i0;
+    let go: u32 = 1;
+    while i > 0 && go == 1 {
+        let p: u32 = (i - 1) / 2;
+        if sp_less(dist, sp_hat(h, i), sp_hat(h, p)) {
+            sp_hswap(h, pos, i, p);
+            i = p;
+        } else {
+            go = 0;
+        }
+    }
+}
+
+fn sp_down(h: ptr, pos: ptr, dist: ptr, i0: u32) {
+    let n: u32 = sp_hsize(h);
+    let i: u32 = i0;
+    let go: u32 = 1;
+    while go == 1 {
+        let l: u32 = 2 * i + 1;
+        let r: u32 = l + 1;
+        let m: u32 = i;
+        if l < n && sp_less(dist, sp_hat(h, l), sp_hat(h, m)) {
+            m = l;
+        }
+        if r < n && sp_less(dist, sp_hat(h, r), sp_hat(h, m)) {
+            m = r;
+        }
+        if m == i {
+            go = 0;
+        } else {
+            sp_hswap(h, pos, i, m);
+            i = m;
+        }
+    }
+}
+
+/// 把 node 放进堆 (假设不在) 。容量的责任在调用方 —— 每个点最多进堆一次, 所以 n 个槽够。
+fn sp_hpush(h: ptr, pos: ptr, dist: ptr, node: u32) {
+    let n: u32 = sp_hsize(h);
+    sp_hsetat(h, n, node);
+    sp_hset_n(h, n + 1);
+    mem_store32(pos, 4 * node, n);
+    sp_up(h, pos, dist, n);
+}
+
+fn sp_hpop(h: ptr, pos: ptr, dist: ptr) -> u32 {
+    let n: u32 = sp_hsize(h);
+    let root: u32 = sp_hat(h, 0);
+    mem_store32(pos, 4 * root, SP_NONE);
+    sp_hset_n(h, n - 1);
+    if n > 1 {
+        let last: u32 = sp_hat(h, n - 1);
+        sp_hsetat(h, 0, last);
+        mem_store32(pos, 4 * last, 0);
+        sp_down(h, pos, dist, 0);
+    }
+    return root;
+}
+
+/// decrease-key: 不在堆里就压入, 在堆里就上浮。
+fn sp_hmove(h: ptr, pos: ptr, dist: ptr, node: u32) {
+    let p: u32 = mem_load32(pos, 4 * node);
+    if p == SP_NONE {
+        sp_hpush(h, pos, dist, node);
+    } else {
+        sp_up(h, pos, dist, p);
+    }
+}
+
+// ---------------------------------------------------------------- Dijkstra
+
+/// 单源最短路 (非负权)。写 dist[n] 与前驱 prev[n]。返回 SP_OK / SP_NEGW / SP_BADSRC。
+pub fn sp_dijkstra(csr: ptr, src: u32, dist: ptr, prev: ptr, heap: ptr, pos: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    if src >= n {
+        return SP_BADSRC;
+    }
+    let i: u32 = 0;
+    while i < n {
+        sp_d_store(dist, i, SP_INF);
+        mem_store32(prev, 4 * i, SP_NONE);
+        mem_store32(pos, 4 * i, SP_NONE);
+        i = i + 1;
+    }
+    sp_hset_n(heap, 0);
+    sp_d_store(dist, src, 0);
+    sp_hpush(heap, pos, dist, src);
+    let code: u32 = SP_OK;
+    while sp_hsize(heap) > 0 {
+        let u: u32 = sp_hpop(heap, pos, dist);
+        let du: i64 = sp_d_load(dist, u);
+        let d: u32 = gr_degree(csr, u);
+        let k: u32 = 0;
+        while k < d {
+            let v: u32 = gr_to(csr, u, k);
+            let w: i64 = gr_w(csr, u, k);
+            if w < 0 as i64 {
+                code = SP_NEGW;
+            } else {
+                let nd: i64 = du + w;
+                if nd < sp_d_load(dist, v) {
+                    sp_d_store(dist, v, nd);
+                    mem_store32(prev, 4 * v, u);
+                    sp_hmove(heap, pos, dist, v);
+                }
+            }
+            k = k + 1;
+        }
+    }
+    return code;
+}
+
+// ---------------------------------------------------------------- Bellman-Ford
+
+/// 一趟全边松弛。返回是否有任何 dist 被改小。
+fn sp_relax_all(csr: ptr, dist: ptr, prev: ptr) -> bool {
+    let n: u32 = gr_n(csr);
+    let changed: u32 = 0;
+    let u: u32 = 0;
+    while u < n {
+        let du: i64 = sp_d_load(dist, u);
+        if du != SP_INF {
+            let d: u32 = gr_degree(csr, u);
+            let k: u32 = 0;
+            while k < d {
+                let v: u32 = gr_to(csr, u, k);
+                let nd: i64 = du + gr_w(csr, u, k);
+                if nd < sp_d_load(dist, v) {
+                    sp_d_store(dist, v, nd);
+                    mem_store32(prev, 4 * v, u);
+                    changed = 1;
+                }
+                k = k + 1;
+            }
+        }
+        u = u + 1;
+    }
+    return changed == 1;
+}
+
+/// 单源最短路 (允许负权)。写 dist[n] 与前驱 prev[n]。
+/// 返回 SP_OK (正常) 或 SP_NEGCYCLE (**检出负环, 此时 dist 已无意义, 别用**)、SP_BADSRC。
+/// 判别法: 松弛 n-1 轮后**再松弛一轮**, 若还能改小, 说明存在从源可达的负环。
+pub fn sp_bellman_ford(csr: ptr, src: u32, dist: ptr, prev: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    if src >= n {
+        return SP_BADSRC;
+    }
+    let i: u32 = 0;
+    while i < n {
+        sp_d_store(dist, i, SP_INF);
+        mem_store32(prev, 4 * i, SP_NONE);
+        i = i + 1;
+    }
+    sp_d_store(dist, src, 0);
+    let it: u32 = 1;
+    while it < n {
+        sp_relax_all(csr, dist, prev);
+        it = it + 1;
+    }
+    if sp_relax_all(csr, dist, prev) {
+        return SP_NEGCYCLE;
+    }
+    return SP_OK;
+}
+
+// ---------------------------------------------------------------- Floyd-Warshall
+
+pub fn sp_floyd_bytes(n: u32) -> u32 {
+    return 8 * n * n;
+}
+
+fn sp_m(mat: ptr, n: u32, i: u32, j: u32) -> i64 {
+    return mem_load64(mat, 8 * (i * n + j)) as i64;
+}
+
+fn sp_mset(mat: ptr, n: u32, i: u32, j: u32, v: i64) {
+    mem_store64(mat, 8 * (i * n + j), v as u64);
+}
+
+/// 初始化: 对角线 0, 其余 INF。
+pub fn sp_floyd_init(mat: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        let j: u32 = 0;
+        while j < n {
+            let v: i64 = SP_INF;
+            if i == j {
+                v = 0;
+            }
+            sp_mset(mat, n, i, j, v);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+/// 把邻接表的边灌进矩阵 (平行边取最小)。不跑算法。
+pub fn sp_floyd_fill(csr: ptr, mat: ptr) {
+    let n: u32 = gr_n(csr);
+    let u: u32 = 0;
+    while u < n {
+        let d: u32 = gr_degree(csr, u);
+        let k: u32 = 0;
+        while k < d {
+            let v: u32 = gr_to(csr, u, k);
+            let w: i64 = gr_w(csr, u, k);
+            if w < sp_m(mat, n, u, v) {
+                sp_mset(mat, n, u, v, w);
+            }
+            k = k + 1;
+        }
+        u = u + 1;
+    }
+}
+
+/// init + fill, 一步到位。
+pub fn sp_floyd_build(csr: ptr, mat: ptr) {
+    sp_floyd_init(mat, gr_n(csr));
+    sp_floyd_fill(csr, mat);
+}
+
+/// 三重心动。允许负权边, **不禁负环** —— 负环会让对角线上出现负数, 那正是它的信号。
+pub fn sp_floyd_run(mat: ptr, n: u32) {
+    let k: u32 = 0;
+    while k < n {
+        let i: u32 = 0;
+        while i < n {
+            let ik: i64 = sp_m(mat, n, i, k);
+            if ik != SP_INF {
+                let j: u32 = 0;
+                while j < n {
+                    let kj: i64 = sp_m(mat, n, k, j);
+                    if kj != SP_INF {
+                        let s: i64 = ik + kj;
+                        if s < sp_m(mat, n, i, j) {
+                            sp_mset(mat, n, i, j, s);
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+}
+
+pub fn sp_floyd_get(mat: ptr, n: u32, u: u32, v: u32) -> i64 {
+    return sp_m(mat, n, u, v);
+}
+
+// ---------------------------------------------------------------- 路径重建
+
+/// 从 prev[] 反推 src->dst 的路径, 写进 out (u32, 含两端)。
+/// 返回: >0 = 路径长度 (点数); 0 = out 缓冲不够; SP_NONE = 无路径。
+/// prev 成环时靠 out_cap 步数上限停下, 不会死循环。
+pub fn sp_path(prev: ptr, src: u32, dst: u32, out: ptr, out_cap: u32) -> u32 {
+    let cur: u32 = dst;
+    let cnt: u32 = 0;
+    let reason: u32 = 1;
+    while reason == 1 && cnt < out_cap {
+        mem_store32(out, 4 * cnt, cur);
+        cnt = cnt + 1;
+        if cur == src {
+            reason = 0;
+        } else {
+            let p: u32 = mem_load32(prev, 4 * cur);
+            if p == SP_NONE {
+                reason = 2;
+            } else {
+                cur = p;
+            }
+        }
+    }
+    if reason == 2 {
+        return SP_NONE;
+    }
+    if reason == 1 {
+        return 0;
+    }
+    // 就地反转
+    let i: u32 = 0;
+    while i < cnt / 2 {
+        let a: u32 = mem_load32(out, 4 * i);
+        let b: u32 = mem_load32(out, 4 * (cnt - 1 - i));
+        mem_store32(out, 4 * i, b);
+        mem_store32(out, 4 * (cnt - 1 - i), a);
+        i = i + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// CLRS 图 24.6 的有向带权图: 源 0 的答案 0,8,9,7,5 (教科书原题)。
+fn ts_clrs_csr() -> ptr {
+    let eb: ptr = alloc(gr_edges_bytes(10));
+    gr_edges_init(eb, 10);
+    gr_add_edge(eb, 0, 1, 10);
+    gr_add_edge(eb, 0, 4, 5);
+    gr_add_edge(eb, 1, 2, 1);
+    gr_add_edge(eb, 1, 4, 2);
+    gr_add_edge(eb, 2, 3, 4);
+    gr_add_edge(eb, 3, 0, 7);
+    gr_add_edge(eb, 3, 2, 6);
+    gr_add_edge(eb, 4, 1, 3);
+    gr_add_edge(eb, 4, 2, 9);
+    gr_add_edge(eb, 4, 3, 2);
+    let csr: ptr = alloc(gr_csr_bytes(5, 10));
+    gr_build(eb, csr, 5);
+    return csr;
+}
+
+fn ts_dijkstra(clrs: ptr, src: u32, dist: ptr, prev: ptr) -> u32 {
+    let h: ptr = alloc(sp_heap_bytes(8));
+    let pos: ptr = alloc(32);
+    return sp_dijkstra(clrs, src, dist, prev, h, pos);
+}
+
+fn test_shortest_dijkstra_clrs_5node() -> bool {
+    let csr: ptr = ts_clrs_csr();
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = ts_dijkstra(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 0) == 0 && sp_d_load(dist, 1) == 8
+        && sp_d_load(dist, 2) == 9 && sp_d_load(dist, 3) == 7 && sp_d_load(dist, 4) == 5;
+}
+
+fn test_shortest_dijkstra_unreachable_is_inf() -> bool {
+    // 0->1 一条边, 点 2 够不着 -> INF。
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 3);
+    let csr: ptr = alloc(gr_csr_bytes(3, 1));
+    gr_build(eb, csr, 3);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = ts_dijkstra(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 0) == 0 && sp_d_load(dist, 1) == 3
+        && sp_d_load(dist, 2) == SP_INF;
+}
+
+fn test_shortest_dijkstra_single_node() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    let csr: ptr = alloc(gr_csr_bytes(1, 0));
+    gr_build(eb, csr, 1);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = ts_dijkstra(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 0) == 0;
+}
+
+fn test_shortest_dijkstra_rejects_negative_edge() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 0 as i64 - 4);
+    let csr: ptr = alloc(gr_csr_bytes(2, 1));
+    gr_build(eb, csr, 2);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    return ts_dijkstra(csr, 0, dist, prev) == SP_NEGW;
+}
+
+fn test_shortest_dijkstra_bad_src() -> bool {
+    let csr: ptr = ts_clrs_csr();
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    return ts_dijkstra(csr, 9, dist, prev) == SP_BADSRC;
+}
+
+fn test_shortest_path_reconstruction() -> bool {
+    // CLRS 图上 0->2 的最短路是 0,4,1,2 (5+3+1=9)。
+    let csr: ptr = ts_clrs_csr();
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    ts_dijkstra(csr, 0, dist, prev);
+    let out: ptr = alloc(32);
+    let len: u32 = sp_path(prev, 0, 2, out, 8);
+    return len == 4 && mem_load32(out, 0) == 0 && mem_load32(out, 4) == 4
+        && mem_load32(out, 8) == 1 && mem_load32(out, 12) == 2;
+}
+
+fn test_shortest_path_no_route() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 1);
+    let csr: ptr = alloc(gr_csr_bytes(3, 1));
+    gr_build(eb, csr, 3);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    ts_dijkstra(csr, 0, dist, prev);
+    let out: ptr = alloc(32);
+    return sp_path(prev, 0, 2, out, 8) == SP_NONE
+        && sp_path(prev, 0, 0, out, 8) == 1 && mem_load32(out, 0) == 0;
+}
+
+fn test_shortest_bellman_ford_clrs_24_4() -> bool {
+    // CLRS 图 24.4 (含负权): 源 0 的答案 0,2,7,4,-2。
+    let eb: ptr = alloc(gr_edges_bytes(10));
+    gr_edges_init(eb, 10);
+    gr_add_edge(eb, 0, 1, 6);
+    gr_add_edge(eb, 0, 2, 7);
+    gr_add_edge(eb, 1, 2, 8);
+    gr_add_edge(eb, 1, 3, 5);
+    gr_add_edge(eb, 1, 4, 0 as i64 - 4);
+    gr_add_edge(eb, 2, 3, 0 as i64 - 3);
+    gr_add_edge(eb, 2, 4, 9);
+    gr_add_edge(eb, 3, 1, 0 as i64 - 2);
+    gr_add_edge(eb, 4, 0, 2);
+    gr_add_edge(eb, 4, 3, 7);
+    let csr: ptr = alloc(gr_csr_bytes(5, 10));
+    gr_build(eb, csr, 5);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = sp_bellman_ford(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 0) == 0 && sp_d_load(dist, 1) == 2
+        && sp_d_load(dist, 2) == 7 && sp_d_load(dist, 3) == 4 && sp_d_load(dist, 4) == 0 as i64 - 2;
+}
+
+fn test_shortest_bellman_ford_negative_no_cycle() -> bool {
+    // 有负权但无负环: 0->1:4, 0->2:5, 1->2:-3 => d2 = min(5, 4-3=1) = 1。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 4);
+    gr_add_edge(eb, 0, 2, 5);
+    gr_add_edge(eb, 1, 2, 0 as i64 - 3);
+    let csr: ptr = alloc(gr_csr_bytes(3, 3));
+    gr_build(eb, csr, 3);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = sp_bellman_ford(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 2) == 1 && mem_load32(prev, 8) == 1;
+}
+
+fn test_shortest_bellman_ford_detects_negative_cycle() -> bool {
+    // 1<->2 之和为 -2 的负环, 从 0 可达。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 0 as i64 - 3);
+    gr_add_edge(eb, 2, 1, 1);
+    let csr: ptr = alloc(gr_csr_bytes(3, 3));
+    gr_build(eb, csr, 3);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    return sp_bellman_ford(csr, 0, dist, prev) == SP_NEGCYCLE;
+}
+
+fn test_shortest_bellman_ford_unreachable_inf() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 5);
+    let csr: ptr = alloc(gr_csr_bytes(3, 1));
+    gr_build(eb, csr, 3);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let code: u32 = sp_bellman_ford(csr, 0, dist, prev);
+    return code == SP_OK && sp_d_load(dist, 2) == SP_INF && mem_load32(prev, 8) == SP_NONE;
+}
+
+fn test_shortest_floyd_three_node() -> bool {
+    // 0->1:3, 1->2:1, 0->2:10 => 0 到 2 应缩短到 4; 1 到 0 不通 = INF; 对角线 0。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 3);
+    gr_add_edge(eb, 1, 2, 1);
+    gr_add_edge(eb, 0, 2, 10);
+    let csr: ptr = alloc(gr_csr_bytes(3, 3));
+    gr_build(eb, csr, 3);
+    let mat: ptr = alloc(sp_floyd_bytes(3));
+    sp_floyd_build(csr, mat);
+    sp_floyd_run(mat, 3);
+    return sp_floyd_get(mat, 3, 0, 2) == 4 && sp_floyd_get(mat, 3, 1, 0) == SP_INF
+        && sp_floyd_get(mat, 3, 0, 0) == 0 && sp_floyd_get(mat, 3, 2, 2) == 0;
+}
+
+fn test_shortest_floyd_negative_edge() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 0 as i64 - 2);
+    gr_add_edge(eb, 0, 2, 5);
+    let csr: ptr = alloc(gr_csr_bytes(3, 3));
+    gr_build(eb, csr, 3);
+    let mat: ptr = alloc(sp_floyd_bytes(3));
+    sp_floyd_build(csr, mat);
+    sp_floyd_run(mat, 3);
+    return sp_floyd_get(mat, 3, 0, 2) == 0 as i64 - 1;
+}
+
+fn test_shortest_floyd_matches_dijkstra_5node() -> bool {
+    // 最强自检: 全源 Floyd 的每一格 == 逐源 Dijkstra。两条独立路径互验。
+    let csr: ptr = ts_clrs_csr();
+    let mat: ptr = alloc(sp_floyd_bytes(5));
+    sp_floyd_build(csr, mat);
+    sp_floyd_run(mat, 5);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(32);
+    let s: u32 = 0;
+    let good: u32 = 1;
+    while s < 5 {
+        ts_dijkstra(csr, s, dist, prev);
+        let j: u32 = 0;
+        while j < 5 {
+            if sp_floyd_get(mat, 5, s, j) != sp_d_load(dist, j) {
+                good = 0;
+            }
+            j = j + 1;
+        }
+        s = s + 1;
+    }
+    return good == 1;
+}
+
+fn test_shortest_floyd_parallel_edge_keeps_min() -> bool {
+    // 同向两条边 0->1: 9 与 2, 保留 2。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 9);
+    gr_add_edge(eb, 0, 1, 2);
+    let csr: ptr = alloc(gr_csr_bytes(2, 2));
+    gr_build(eb, csr, 2);
+    let mat: ptr = alloc(sp_floyd_bytes(2));
+    sp_floyd_build(csr, mat);
+    sp_floyd_run(mat, 2);
+    return sp_floyd_get(mat, 2, 0, 1) == 2;
+}

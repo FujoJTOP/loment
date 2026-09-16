@@ -1,0 +1,342 @@
+// std/kdf.lomt — 密钥派生 (PBKDF2 与 HKDF, 都基于 HMAC-SHA256)
+//
+// 为什么不能直接用 HMAC 当"从口令生成密钥": 两个不同的需求, 两套算法。
+//
+//   PBKDF2 (RFC 8018): 输入是**低熵**的口令, 目标是"让暴力破解变慢" ——
+//     所以它有一个**迭代次数**, 每次都用上一轮的输出当输入, 串成一条链。
+//     迭代次数就是安全参数: 存下来的不是次数而是"当时有多贵"。
+//
+//   HKDF (RFC 5869): 输入已经是**高熵**的 (DH 共享密钥、随机种子), 目标是
+//     "把它摊成几把用途不同的密钥"。它不慢化, 只做两次 HMAC:
+//     extract (把输入压成固定长度的 PRK) + expand (按 info 标签拉出任意长度)。
+//
+// 混用是常见错误: 拿 HKDF 处理口令等于没做慢化; 拿 PBKDF2 去摊派生密钥是浪费。
+//
+// 校验向量: PBKDF2-HMAC-SHA256("password","salt",1,32) 与 RFC 5869 的 Test Case 1。
+//
+// 临时区: 两块, 都由调用方给 —— 尤其 PBKDF2 会迭代上万次, 内部不能有任何分配。
+//
+// 命名: 公开 kdf_*, 内部 kd_*。自检 test_kdf_*。
+
+module kdf
+
+use "hmac.lomt"
+use "sha256.lomt"
+use "mem.lomt"
+
+/// PBKDF2 的临时区大小 (salt||块号 + 三个 32 字节的工作块)。
+pub fn kdf_pbkdf2_scratch(sn: u32) -> u32 {
+    return sn + 4 + 96;
+}
+
+/// HKDF-Expand 的临时区大小: [0..32) T(n-1) + [32..64) 输出块 + [64..) 消息。
+/// 消息最多 32(T) + sn(info) + 1(计数器) 字节。
+pub fn kdf_hkdf_scratch(sn: u32) -> u32 {
+    return 64 + 32 + sn + 1;
+}
+
+fn kd_at(b: ptr, off: u32) -> ptr {
+    return ((b as u64) + (off as u64)) as ptr;
+}
+
+/// PBKDF2-HMAC-SHA256。sc 是 hmac 的临时区 (hmac_sha256_scratch() 字节),
+/// sbuf 至少 kdf_pbkdf2_scratch(sn) 字节。
+pub fn kdf_pbkdf2_sha256(pw: ptr, po: u32, pn: u32, salt: ptr, so: u32, sn: u32,
+                        iter: u32, out: ptr, dklen: u32, sc: ptr, sbuf: ptr) {
+    let u: ptr = kd_at(sbuf, sn + 4);
+    let u2: ptr = kd_at(sbuf, sn + 36);
+    let t: ptr = kd_at(sbuf, sn + 68);
+    let done: u32 = 0;
+    let idx: u32 = 1;
+    while done < dklen {
+        // 块号按**大端**接在 salt 后面 —— 写反了会让所有向量都对不上。
+        mem_copy(sbuf, 0, salt, so, sn);
+        store8(sbuf, sn, ((idx >> 24) & 255) as u8);
+        store8(sbuf, sn + 1, ((idx >> 16) & 255) as u8);
+        store8(sbuf, sn + 2, ((idx >> 8) & 255) as u8);
+        store8(sbuf, sn + 3, (idx & 255) as u8);
+        hmac_sha256(pw, po, pn, sbuf, 0, sn + 4, u, sc);
+        mem_copy(t, 0, u, 0, 32);
+        let j: u32 = 1;
+        while j < iter {
+            hmac_sha256(pw, po, pn, u, 0, 32, u2, sc);
+            mem_copy(u, 0, u2, 0, 32);
+            let k: u32 = 0;
+            while k < 32 {
+                store8(t, k, (load8(t, k) ^ load8(u, k)) as u8);
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+        // 拷出这一块 (最后一块可能只要一部分)
+        let take: u32 = dklen - done;
+        let m: u32 = take;
+        if m > 32 {
+            m = 32;
+        }
+        mem_copy(out, done, t, 0, m);
+        done = done + m;
+        idx = idx + 1;
+    }
+}
+
+/// HKDF-Extract: prk = HMAC(salt, ikm), 32 字节。
+pub fn kdf_hkdf_extract(salt: ptr, so: u32, sn: u32, ikm: ptr, io: u32, in_: u32,
+                        prk: ptr, sc: ptr) {
+    hmac_sha256(salt, so, sn, ikm, io, in_, prk, sc);
+}
+
+/// HKDF-Expand。sbuf 至少 kdf_hkdf_scratch(sn) 字节 (sn 是 info 的长度)。
+pub fn kdf_hkdf_expand(prk: ptr, info: ptr, io: u32, in_: u32, out: ptr, dklen: u32,
+                       sc: ptr, sbuf: ptr) {
+    let tn: ptr = sbuf;                 // T(n-1)
+    let tnext: ptr = kd_at(sbuf, 32);   // T(n) 的输出
+    let msg: ptr = kd_at(sbuf, 64);     // T(n-1) || info || n
+    let done: u32 = 0;
+    let counter: u32 = 1;
+    let prevlen: u32 = 0;
+    while done < dklen {
+        // T(n) = HMAC(prk, T(n-1) || info || n)。三个区**不重叠**:
+        // 输出块在 [32..64), 消息在 [64..) —— 第一版把输出块放在消息后面,
+        // info 一长就会重叠 (HMAC 的输出直接盖掉还没读完的输入)。
+        mem_copy(msg, 0, tn, 0, prevlen);
+        mem_copy(msg, prevlen, info, io, in_);
+        store8(msg, prevlen + in_, (counter & 255) as u8);
+        hmac_sha256(prk, 0, 32, msg, 0, prevlen + in_ + 1, tnext, sc);
+        mem_copy(tn, 0, tnext, 0, 32);
+        let take: u32 = dklen - done;
+        let m: u32 = take;
+        if m > 32 {
+            m = 32;
+        }
+        mem_copy(out, done, tn, 0, m);
+        prevlen = 32;
+        done = done + m;
+        counter = counter + 1;
+        if counter > 255 {
+            // HKDF 的长度上限就是 255 个块; 到了就停, 免得无限转
+            done = dklen;
+        }
+    }
+}
+
+/// 一步到位: extract + expand。
+pub fn kdf_hkdf_sha256(salt: ptr, so: u32, sn: u32, ikm: ptr, io: u32, in_: u32,
+                       info: ptr, qo: u32, qn: u32, out: ptr, dklen: u32,
+                       sc: ptr, sbuf: ptr) {
+    let prk: ptr = kd_at(sbuf, 0);
+    kdf_hkdf_extract(salt, so, sn, ikm, io, in_, prk, sc);
+    // expand 只用它自己那块 sbuf (从 sbuf[64..) 起), 所以 prk 留在 sbuf[0..32) 是安全的 ——
+    // 两块不重叠。把 PRK 放在 expand 的区里就会在第一轮被自己覆盖掉。
+    kdf_hkdf_expand(prk, info, qo, qn, out, dklen, sc, kd_at(sbuf, 64));
+}
+
+/// 摘要 -> 十六进制 (自检用)。
+fn kd_hex(out: ptr, o: u32, d: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let v: u32 = load8(d, i);
+        store8(out, o + 2 * i, kd_hexch((v >> 4) & 15) as u8);
+        store8(out, o + 2 * i + 1, kd_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 2 * n;
+}
+
+fn kd_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 十六进制 -> 字节 (自检里造输入用)。
+fn kd_unhex(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = kd_hv(str_byte(s, 2 * i));
+        let lo: u32 = kd_hv(str_byte(s, 2 * i + 1));
+        store8(out, i, ((hi << 4) | lo) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn kd_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_kdf_pbkdf2_sha256_iter1() -> bool {
+    // PBKDF2-HMAC-SHA256("password","salt",1,32)
+    //   = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let sbuf: ptr = alloc(kdf_pbkdf2_scratch(4));
+    let out: ptr = alloc(32);
+    let hex: ptr = alloc(80);
+    let pw: str = "password";
+    let salt: str = "salt";
+    kdf_pbkdf2_sha256(str_ptr(pw), 0, 8, str_ptr(salt), 0, 4, 1, out, 32, sc, sbuf);
+    kd_hex(hex, 0, out, 32);
+    let want: str = "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_kdf_pbkdf2_sha256_iter2() -> bool {
+    // c = 2 -> ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let sbuf: ptr = alloc(kdf_pbkdf2_scratch(4));
+    let out: ptr = alloc(32);
+    let hex: ptr = alloc(80);
+    let pw: str = "password";
+    let salt: str = "salt";
+    kdf_pbkdf2_sha256(str_ptr(pw), 0, 8, str_ptr(salt), 0, 4, 2, out, 32, sc, sbuf);
+    kd_hex(hex, 0, out, 32);
+    let want: str = "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_kdf_pbkdf2_sha256_iter4096() -> bool {
+    // c = 4096 -> c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a
+    // 这一条同时验了"迭代链真的在迭代"—— 少迭代或多迭代都会给出别的值。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let sbuf: ptr = alloc(kdf_pbkdf2_scratch(4));
+    let out: ptr = alloc(32);
+    let hex: ptr = alloc(80);
+    let pw: str = "password";
+    let salt: str = "salt";
+    kdf_pbkdf2_sha256(str_ptr(pw), 0, 8, str_ptr(salt), 0, 4, 4096, out, 32, sc, sbuf);
+    kd_hex(hex, 0, out, 32);
+    let want: str = "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+
+}
+fn test_kdf_pbkdf2_multi_block_length() -> bool {
+    // dkLen > 32 会走第二个块 (块号要按大端接在 salt 后) —— 只出 32 字节的实现会挂。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let sbuf: ptr = alloc(kdf_pbkdf2_scratch(4));
+    let out: ptr = alloc(64);
+    let hex: ptr = alloc(140);
+    let pw: str = "password";
+    let salt: str = "salt";
+    kdf_pbkdf2_sha256(str_ptr(pw), 0, 8, str_ptr(salt), 0, 4, 1, out, 64, sc, sbuf);
+    kd_hex(hex, 0, out, 64);
+    // 前 32 字节必须等于单块那条向量, 后 32 字节必须**不同**(否则说明块号没变)
+    let want: str = "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64) && mem_eq(hex, 64, hex, 0, 32) == false;
+
+}
+fn test_kdf_pbkdf2_iter1_is_plain_hmac() -> bool {
+    // 迭代 1 次时 PBKDF2 = HMAC(pw, salt || 00000001) —— 用另一个入口对一遍。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let sbuf: ptr = alloc(kdf_pbkdf2_scratch(4));
+    let out: ptr = alloc(32);
+    let want: ptr = alloc(32);
+    let msg: ptr = alloc(16);
+    let pw: str = "password";
+    let salt: str = "salt";
+    mem_copy(msg, 0, str_ptr(salt), 0, 4);
+    store8(msg, 4, 0 as u8);
+    store8(msg, 5, 0 as u8);
+    store8(msg, 6, 0 as u8);
+    store8(msg, 7, 1 as u8);
+    kdf_pbkdf2_sha256(str_ptr(pw), 0, 8, str_ptr(salt), 0, 4, 1, out, 32, sc, sbuf);
+    hmac_sha256(str_ptr(pw), 0, 8, msg, 0, 8, want, sc);
+    return mem_eq(out, 0, want, 0, 32);
+
+}
+fn test_kdf_hkdf_extract_rfc5869_tc1() -> bool {
+    // PRK = 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let ikm: ptr = alloc(32);
+    let salt: ptr = alloc(32);
+    let prk: ptr = alloc(32);
+    let hex: ptr = alloc(80);
+    mem_fill(ikm, 0, 22, 11);
+    let sn: u32 = kd_unhex(salt, "000102030405060708090a0b0c");
+    kdf_hkdf_extract(salt, 0, sn, ikm, 0, 22, prk, sc);
+    kd_hex(hex, 0, prk, 32);
+    let want: str = "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+
+}
+fn test_kdf_hkdf_expand_rfc5869_tc1() -> bool {
+    // OKM (42 字节) = 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf
+    //                34007208d5b887185865
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let prk: ptr = alloc(32);
+    let info: ptr = alloc(32);
+    let out: ptr = alloc(64);
+    let hex: ptr = alloc(140);
+    let sbuf: ptr = alloc(kdf_hkdf_scratch(10) + 64);
+    let pn: u32 = kd_unhex(prk, "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
+    let qn: u32 = kd_unhex(info, "f0f1f2f3f4f5f6f7f8f9");
+    kdf_hkdf_expand(prk, info, 0, qn, out, 42, sc, sbuf);
+    kd_hex(hex, 0, out, 42);
+    let want: str = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
+    return pn == 32 && qn == 10 && mem_eq(hex, 0, str_ptr(want), 0, 84);
+
+}
+fn test_kdf_hkdf_oneshot_rfc5869_tc1() -> bool {
+    // 一步到位: salt/ikm/info 都是 RFC 5869 的 Test Case 1, L = 42。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let ikm: ptr = alloc(32);
+    let salt: ptr = alloc(32);
+    let info: ptr = alloc(32);
+    let out: ptr = alloc(64);
+    let hex: ptr = alloc(140);
+    let sbuf: ptr = alloc(kdf_hkdf_scratch(10) + 128);
+    mem_fill(ikm, 0, 22, 11);
+    let sn: u32 = kd_unhex(salt, "000102030405060708090a0b0c");
+    let qn: u32 = kd_unhex(info, "f0f1f2f3f4f5f6f7f8f9");
+    kdf_hkdf_sha256(salt, 0, sn, ikm, 0, 22, info, 0, qn, out, 42, sc, sbuf);
+    kd_hex(hex, 0, out, 42);
+    let want: str = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
+    return mem_eq(hex, 0, str_ptr(want), 0, 84);
+
+}
+fn test_kdf_hkdf_expand_longer_than_one_block() -> bool {
+    // 拉 64 字节 -> 要两个 T 块, 第二块要把第一块拼在前面。
+    // 与"只出一块"的实现相比, 后 32 字节必然不同。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let prk: ptr = alloc(32);
+    let info: ptr = alloc(16);
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(32);
+    let sbuf: ptr = alloc(kdf_hkdf_scratch(0) + 128);
+    mem_fill(prk, 0, 32, 7);
+    let qn: u32 = kd_unhex(info, "aabbcc");
+    kdf_hkdf_expand(prk, info, 0, qn, a, 64, sc, sbuf);
+    kdf_hkdf_expand(prk, info, 0, qn, b, 32, sc, sbuf);
+    return mem_eq(a, 0, b, 0, 32) && mem_eq(a, 32, b, 0, 32) == false;
+
+}
+fn test_kdf_hkdf_empty_salt_and_info() -> bool {
+    // salt 与 info 都可以为空 —— 空 salt 等价于全零块 (HMAC 里仍然是 64 字节)。
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let ikm: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let zero: ptr = alloc(32);
+    let sbuf: ptr = alloc(kdf_hkdf_scratch(0) + 128);
+    mem_fill(ikm, 0, 32, 3);
+    mem_fill(zero, 0, 32, 0);
+    kdf_hkdf_sha256(zero, 0, 0, ikm, 0, 32, zero, 0, 0, out, 32, sc, sbuf);
+    let i: u32 = 0;
+    let nz: u32 = 0;
+    while i < 32 {
+        if load8(out, i) != 0 {
+            nz = 1;
+        }
+        i = i + 1;
+    }
+    return nz == 1;
+
+}

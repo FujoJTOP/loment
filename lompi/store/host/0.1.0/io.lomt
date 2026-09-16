@@ -1,0 +1,351 @@
+// std/io.lomt — Loment 的第一个库: 宿主侧 IO 与字节原语
+//
+// 为什么要它: 自举工具链里那一层"打开/读完/写出/失败就死"的东西被抄了九遍。
+// 实测重复 (loment/tools + loment/selfhost): die 9 份, sys_alloc 9 份,
+// open_ro 9 份, read_all / write_all 各 8 份, wdec / wstr 各 6 份,
+// copy_bytes 4 份, strip_cr 5 份。本文件是那份被抄了九遍的东西的单一真源。
+//
+// 命名: `use` 是**平名字空间** (顶层名字在单元内唯一, 不做 mangling, docs/158 §2),
+// 载入是递归先序拼进同一个单元。所以库的公开名字就是 ABI —— 公开 API 一律 `io_*`,
+// 内部一律 `ioi_*`。撞名会被检查器按 E-DUP 拦下, 但那时两个库都已经不能用了;
+// 前缀是硬要求, 不是风格。新加公开名字前先想清楚它会永久占掉这个拼写。
+// 自检函数同样要带前缀 (`test_io_*`) —— 私有名也占全局拼写, 不带前缀时两个模块
+// 各写一个 `test_dec_zero` 就会被 E13 拦下 (out.lomt 第一版正是这么撞的)。
+//
+// 边界 (刻意划的, 不是没做完):
+//   * 这是**宿主侧**层 —— 走 Linux syscall ABI (read/write/openat/brk/exit),
+//     给跑在 FujoOS 外面的工具链用。裸机与能力域那侧不走这里: 那边没有 syscall。
+//   * 不依赖 `loment/build/fuai_syscalls.lomt` (46 个 `fuai_*`, 由 lom/fuai.lom
+//     单源生成)。FUAI 是另一层原语; 故意不 import, 这样本文件能单独编译、
+//     单独验证, 也能被非 FUAI 的消费者用。
+//   * 不引入分配策略。需要暂存的函数由**调用方给缓冲** (与 loment/lib/json.lomt
+//     的 arena 约定一致) —— 分配器是独立的一层, 不该由 io 决定。
+//
+// 已知的形态修正 (相对那九份手抄):
+//   1. `wdec` 的签名原本是分叉的: lompkg 里收 u32, lomc 里收 u64。这里统一 u64,
+//      u32 调用方显式转换 —— 分叉正是"没有单一真源"的产物。
+//   2. `bytes_eq` 返回 bool (与 json.lomt 的 `json_key_eq` 一致), 不再返回 u32 让
+//      调用方写 `== 1`。
+//   3. 数字格式化不再要"dst 之后的暂存余量": 手抄版倒着写进临时区再翻转, 于是
+//      要求调用方多留 64 字节 (lomc 的 `wdec` 就是 `ptr_add(tmp, 64)`)。这里两趟
+//      直写, 少一个隐式约定。
+
+module io
+
+// 纯数字格式化 (原来的 io_dec_into / io_hex_into 与那两个 MAX 常量) 已移到同包的
+// numfmt.lomt —— 它们一个 syscall 都不发, 留在 io 里会让**可移植层反过来依赖宿主层**
+// (out/buf 得跨过 io 去拿它)。拆包之后这个方向错误藏不住了, 所以修掉:
+//   std (可移植) -> numfmt ;  host (宿主) -> std -> numfmt
+// 本模块只做与宿主系统打交道的事: 系统调用, fd, NUL 串, 字节序。
+use std
+
+// ---------------------------------------------------------------- 常量
+
+/// openat 的 dirfd: AT_FDCWD (-100 的 u64 补码)。
+pub const IO_AT_FDCWD: u64 = 18446744073709551516;
+
+pub const IO_O_RDONLY: u64 = 0;
+/// O_WRONLY | O_CREAT | O_TRUNC —— 就是手抄版里那个魔数 577。
+pub const IO_O_WRONLY_CREAT_TRUNC: u64 = 577;
+/// 0644。
+pub const IO_MODE_RW: u64 = 420;
+
+// fd 在本库全程是 **i64**, 不是 u64 —— 因为 open 用负数报错, 调用方判的是 `fd < 0`。
+// 于是"把 fd 转成 syscall 要的 u64"这件事只在本库内部发生一次, 不用每个调用点都写
+// `fd as u64` (那九份手抄就是在各自调用点转的)。
+pub const IO_STDIN: i64 = 0;
+pub const IO_STDOUT: i64 = 1;
+pub const IO_STDERR: i64 = 2;
+
+
+const IOI_SYS_READ: u64 = 0;
+const IOI_SYS_WRITE: u64 = 1;
+const IOI_SYS_CLOSE: u64 = 3;
+const IOI_SYS_BRK: u64 = 12;
+const IOI_SYS_EXIT: u64 = 60;
+const IOI_SYS_OPENAT: u64 = 257;
+
+// ---------------------------------------------------------------- 系统调用
+
+/// exit(code) —— 不返回。
+pub fn io_exit(code: u64) -> u32 {
+    syscall4(IOI_SYS_EXIT, code, 0, 0);
+    return 0;
+}
+
+/// 失败路径的出口: 消息写 stderr, 然后 exit(1)。返回类型只为占位。
+pub fn io_fail(msg: str) -> u32 {
+    io_write_all(IO_STDERR, str_ptr(msg), str_len(msg) as u64);
+    return io_exit(1);
+}
+
+/// brk 分配: 把堆尾向前推 n 字节, 返回**旧**堆尾 (即拿到的块首)。
+/// 失败返回 0 —— 调用方必须判 0。不做对齐, 不做释放。
+///
+/// 不用内建 `alloc`: 内建走的是编译器那 64 KiB 静态堆 (docs/155 明说别扩),
+/// 工具链要的比这多。自举驱动同样走 brk。
+pub fn io_brk_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(IOI_SYS_BRK, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(IOI_SYS_BRK, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+// ---------------------------------------------------------------- 读 / 写
+
+/// 写满 n 字节, 处理短写。返回实际写出的字节数 (小于 n 即出错/对端关闭)。
+pub fn io_write_all(fd: i64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(IOI_SYS_WRITE, fd as u64, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+/// 写静态字符串 (编译期常量)。
+pub fn io_write_str(fd: i64, s: str) -> u64 {
+    return io_write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+pub fn io_write_bytes(fd: i64, p: ptr, n: u32) -> u64 {
+    return io_write_all(fd, p, n as u64);
+}
+
+/// 读到 buf 满或 EOF。返回读到的字节数 (0 = EOF)。
+pub fn io_read_all(fd: i64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(IOI_SYS_READ, fd as u64, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+// ---------------------------------------------------------------- 文件
+
+/// 打开只读。返回 fd, 负数 = 失败。`path` 必须是 NUL 结尾的字节串
+/// (静态字面量用 `io_put_lit` 拷进缓冲; 别直接把 `str` 传进来 —— 它不保证 NUL)。
+pub fn io_open_ro(path: ptr) -> i64 {
+    return syscall4(IOI_SYS_OPENAT, IO_AT_FDCWD, path as u64, IO_O_RDONLY);
+}
+
+/// 打开写 (O_WRONLY|O_CREAT|O_TRUNC, 0644)。返回 fd, 负数 = 失败。
+pub fn io_open_wo(path: ptr) -> i64 {
+    return syscall6(IOI_SYS_OPENAT, IO_AT_FDCWD, path as u64,
+                    IO_O_WRONLY_CREAT_TRUNC, IO_MODE_RW, 0);
+}
+
+pub fn io_close(fd: i64) -> i64 {
+    return syscall4(IOI_SYS_CLOSE, fd as u64, 0, 0);
+}
+
+/// 打开只读, 路径是**编译期字面量**, NUL 由本函数补进调用方给的 scr
+/// (scr 需要 str_len(lit) + 1 字节)。
+///
+/// 为什么要这一对: 9 份手抄里有 5 处写成 `open_ro(cstr(scr, "字面量"))` 这种嵌套,
+/// 另有 4 份干脆演化出 `open_ro(p, n, scr)` 三参数变体 —— 都在表达同一件事:
+/// "要打开的路径我手上是字面量, 但内核要的是 NUL 结尾的字节串"。这一对把它写成一行。
+/// (运行期才知道的路径 —— 比如 argv 给的文件名 —— 是另一个需求, 那个要
+/// `(ptr, len)` 形式, 等真有调用点时再加, 不在这里预先发明。)
+pub fn io_open_ro_lit(scr: ptr, lit: str) -> i64 {
+    io_put_lit(scr, lit);
+    return io_open_ro(scr);
+}
+
+/// 打开写 (O_WRONLY|O_CREAT|O_TRUNC, 0644), 路径字面量, NUL 补进 scr。
+pub fn io_open_wo_lit(scr: ptr, lit: str) -> i64 {
+    io_put_lit(scr, lit);
+    return io_open_wo(scr);
+}
+
+// ---------------------------------------------------------------- 字节
+
+/// NUL 结尾串的长度 (不含 NUL)。非 NUL 结尾的缓冲请用 io_copy + 显式长度。
+pub fn io_strlen(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+pub fn io_copy(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// memset: 把 dst[0..n) 置 0。
+pub fn io_zeros(dst: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+/// 拷 NUL 结尾串**含** NUL。返回不含 NUL 的长度。
+pub fn io_copy_cstr(dst: ptr, src: ptr) -> u32 {
+    let i: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = load8(src, i);
+        store8(dst, i, c as u8);
+        if c == 0 {
+            going = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+/// 比较两个区间。返回 bool (不再返回 1/0 让调用方写 `== 1`)。
+pub fn io_bytes_eq(a: ptr, ao: u32, al: u32, b: ptr, bo: u32, bl: u32) -> bool {
+    if al != bl {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < al {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 把静态字符串拷进缓冲并补 NUL (做路径用)。返回不含 NUL 的长度。
+pub fn io_put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+/// CRLF -> LF, 原地压紧。返回新长度。
+/// 只吃 \r\n 这一对; 单独的 \r 保留 (有些工具靠它做进度条回写)。
+pub fn io_strip_cr(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(buf, i);
+        if c == 13 && i + 1 < n && load8(buf, i + 1) == 10 {
+            i = i + 1;
+        } else {
+            store8(buf, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+/// 写十进制。buf 需要 NUMFMT_DEC_MAX 字节 (调用方给的暂存, 本层不分配)。
+pub fn io_write_dec(fd: i64, buf: ptr, v: u64) -> u64 {
+    let n: u32 = numfmt_dec_into(buf, v);
+    return io_write_all(fd, buf, n as u64);
+}
+
+/// 写固定宽度小写十六进制。buf 需要 NUMFMT_HEX_MAX 字节。
+pub fn io_write_hex(fd: i64, buf: ptr, v: u64, width: u32) -> u64 {
+    let n: u32 = numfmt_hex_into(buf, v, width);
+    return io_write_all(fd, buf, n as u64);
+}
+
+// `io_utf8_len` 已移出本模块 —— UTF-8 不是 IO 的事, 它现在住在 std/utf8.lomt
+// (`utf8_count`, 同一算法, 另外还多了合法性检查)。分层原则: io 只放**与宿主
+// 系统打交道**的东西; 纯字节算法归各自那一层。
+// (当时还剩 io_dec_into / io_hex_into 这类 纯格式化住在 io 里 的问题 —— 2026-09-15
+//  随库系统的拆包一并修掉: 它们现在住在 numfmt.lomt, 本模块 use 了它。)
+
+// ---------------------------------------------------------------- 自检
+// `python tools/loment.py test std/io.lomt` 跑这些 (返回 false 即 FAIL)。
+// 只测纯函数: 编解码与字节比较。读写在真 fd 上, 由消费方的测试覆盖。
+
+fn test_io_strlen_and_copy() -> bool {
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    let n: u32 = io_put_lit(a, "hello");
+    io_copy(b, 0, a, 0, n);
+    store8(b, n, 0 as u8);
+    return n == 5 && io_strlen(b) == 5;
+}
+
+fn test_io_copy_cstr_keeps_nul() -> bool {
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    io_put_lit(a, "ab");
+    let n: u32 = io_copy_cstr(b, a);
+    return n == 2 && load8(b, 2) == 0;
+}
+
+fn test_io_bytes_eq() -> bool {
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    io_put_lit(a, "abcd");
+    io_put_lit(b, "abcd");
+    let same: bool = io_bytes_eq(a, 0, 4, b, 0, 4);
+    let diff: bool = io_bytes_eq(a, 0, 4, b, 1, 3);
+    return same && !diff;
+}
+
+// 注意: 这里用 store8 逐字节搭 "a\r\nb\n", **不能**写成字符串字面量 ——
+// 转义表只有 \n \t \" \\ (lomc.py:61), `"\r"` 会静默降级成字母 `r` 且不报错。
+fn test_io_strip_cr() -> bool {
+    let b: ptr = alloc(64);
+    store8(b, 0, 97 as u8);    // 'a'
+    store8(b, 1, 13 as u8);    // CR
+    store8(b, 2, 10 as u8);    // LF
+    store8(b, 3, 98 as u8);    // 'b'
+    store8(b, 4, 10 as u8);    // LF
+    let n: u32 = io_strip_cr(b, 5);
+    return n == 4 && load8(b, 1) == 10 && load8(b, 3) == 10;
+}
+
+fn test_io_strip_cr_lone_cr() -> bool {
+    let b: ptr = alloc(64);
+    store8(b, 0, 97 as u8);    // 'a'
+    store8(b, 1, 13 as u8);    // 孤立 CR 必须保留
+    store8(b, 2, 98 as u8);    // 'b'
+    let n: u32 = io_strip_cr(b, 3);
+    return n == 3 && load8(b, 1) == 13;
+}
+
+// (原 test_io_utf8_len 随函数一起移到 std/utf8.lomt, 在那边叫 test_utf8_count_*。)
+
+fn test_io_open_lit_on_missing_path_is_negative() -> bool {
+    // 只要求"内核返回负数" —— 不是"路径构造失败"。这条同时是
+    // io_open_ro_lit 整条链 (io_put_lit 补 NUL -> openat) 的冒烟测试。
+    let scr: ptr = alloc(256);
+    return io_open_ro_lit(scr, "no/such/path/__loment_absent__") < 0;
+}
+
+// ---------------------------------------------------------------- 为何不用 ptr_add
+//
+// 本文件刻意避开 `ptr_add` / `ptr_sub`。它们在 **Rust 路径** (rustc 编出来的那条,
+// `loment.py test` 走的就是它) 降级成裸 `(*mut u8).add(n)`, 没有包 `unsafe`,
+// rustc 直接拒: E0133 "call to unsafe function"。IR/原生路径不受影响, 所以
+// 342 处既有用法一直没暴露 —— 那 15 个文件都不走 Rust 路径。
+//
+// 编译器侧的真修法在 tools/lomentc.py 的 Rust 降级里把指针运算包进 unsafe,
+// 那是另一个提交 (且触及冻结面, docs/158 §2)。这里只是不依赖它。
+// 需要偏移时用 `(p as u64) + n` 再转回来 —— 与 io_read_all / io_write_all 同形。

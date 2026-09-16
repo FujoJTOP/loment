@@ -1,0 +1,260 @@
+// std/sum.lomt — 加法族校验和 (Fletcher / 反码和 / 字节和 / 异或)
+//
+// 为什么除了 CRC 还要它们: 各有各的用处, 而且都是**既有格式**要求的:
+//   - Fletcher-16/32: 只有加法与取模, 没有查表和移位循环, 在算力紧的地方比 CRC 划算;
+//   - 反码和 (ones' complement): IP / TCP / UDP / ICMP 头里就是它 —— 要构造或校验
+//     一个报头就必须有;
+//   - 字节和 / 异或: 老格式里当"够不够用"的粗糙校验。
+//
+// 校验向量: Fletcher-16("abcde") = 0xC8F0; 经典 IP 头的反码校验 = 0xB861。
+//
+// 命名: 公开 sum_*, 内部 su_*。自检 test_sum_*。
+
+module sum
+
+use "mem.lomt"
+
+/// Fletcher 的模 (16 位版)。
+pub const SUM_MOD16: u32 = 255;
+/// Fletcher 的模 (32 位版)。
+pub const SUM_MOD32: u32 = 65535;
+
+/// Fletcher-16: 两个和都模 255。
+pub fn sum_fletcher16(d: ptr, o: u32, n: u32) -> u32 {
+    let s1: u32 = 0;
+    let s2: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        s1 = (s1 + load8(d, o + i)) % SUM_MOD16;
+        s2 = (s2 + s1) % SUM_MOD16;
+        i = i + 1;
+    }
+    return (s2 << 8) | s1;
+}
+
+/// Fletcher-32: 两个和都模 65535 (按**字节**处理, 不是 16 位字)。
+/// 批处理与 Adler-32 同理: 每 360 字节取一次模, 免得两和越界。
+pub fn sum_fletcher32(d: ptr, o: u32, n: u32) -> u32 {
+    let s1: u32 = 0;
+    let s2: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > 360 {
+            m = 360;
+        }
+        let j: u32 = 0;
+        while j < m {
+            s1 = s1 + load8(d, o + i + j);
+            s2 = s2 + s1;
+            j = j + 1;
+        }
+        s1 = s1 % SUM_MOD32;
+        s2 = s2 % SUM_MOD32;
+        i = i + m;
+    }
+    return (s2 << 16) | s1;
+}
+
+/// Fletcher-16 的两个分量 (诊断用): 低 32 位 s1, 高 32 位 s2。
+pub fn sum_fletcher16_parts(d: ptr, o: u32, n: u32) -> u64 {
+    let s1: u32 = 0;
+    let s2: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        s1 = (s1 + load8(d, o + i)) % SUM_MOD16;
+        s2 = (s2 + s1) % SUM_MOD16;
+        i = i + 1;
+    }
+    return (s1 as u64) | ((s2 as u64) << 32);
+}
+
+/// 字节和 (不取模, 用 u64 装)。
+pub fn sum_bytes(d: ptr, o: u32, n: u32) -> u64 {
+    let s: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < n {
+        s = s + (load8(d, o + i) as u64);
+        i = i + 1;
+    }
+    return s;
+}
+
+/// 异或校验。
+pub fn sum_xor(d: ptr, o: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        s = s ^ load8(d, o + i);
+        i = i + 1;
+    }
+    return s;
+}
+
+/// 16 位字的大端和 (奇数长度时末尾补一个 0 字节)。
+pub fn sum_words16(d: ptr, o: u32, n: u32) -> u64 {
+    let s: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i + 1 < n {
+        s = s + (((load8(d, o + i) as u64) << 8) | (load8(d, o + i + 1) as u64));
+        i = i + 2;
+    }
+    if i < n {
+        s = s + ((load8(d, o + i) as u64) << 8);
+    }
+    return s;
+}
+
+/// 反码和 (不取反), 即"校验和字段之外的和"。
+pub fn sum_ones_complement(d: ptr, o: u32, n: u32) -> u32 {
+    let s: u64 = sum_words16(d, o, n);
+    // 把进位折回低 16 位 (折叠两次就够: 每次最多只剩一个进位的量级)
+    let a: u32 = ((s & 65535) + ((s >> 16) & 65535)) as u32;
+    let b: u32 = (a & 65535) + (a >> 16);
+    return b & 65535;
+}
+
+/// 该填进报头校验和字段的值 (反码和的按位取反)。
+pub fn sum_net_checksum(d: ptr, o: u32, n: u32) -> u32 {
+    return (sum_ones_complement(d, o, n) ^ 65535) & 65535;
+}
+
+/// 校验一个**已含校验和字段**的报头: 正确时返回 true。
+/// 这是反码和最好用的性质 —— 不需要把字段抠出来, 整段一起算, 结果应当是 0。
+pub fn sum_net_verify(d: ptr, o: u32, n: u32) -> bool {
+    return sum_ones_complement(d, o, n) == 65535;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sum_fletcher16_vector() -> bool {
+    let s: str = "abcde";
+    return sum_fletcher16(str_ptr(s), 0, 5) == 0xC8F0;
+}
+
+fn test_sum_fletcher16_empty() -> bool {
+    let b: ptr = alloc(4);
+    return sum_fletcher16(b, 0, 0) == 0;
+}
+
+fn test_sum_fletcher16_parts_match() -> bool {
+    let s: str = "abcde";
+    let p: u64 = sum_fletcher16_parts(str_ptr(s), 0, 5);
+    let s1: u32 = (p & 4294967295) as u32;
+    let s2: u32 = (p >> 32) as u32;
+    // s1 = 495 mod 255 = 240 = 0xF0; s2 = 1475 mod 255 = 200 = 0xC8
+    return s1 == 0xF0 && s2 == 0xC8 && ((s2 << 8) | s1) == sum_fletcher16(str_ptr(s), 0, 5);
+
+}
+fn test_sum_fletcher32_small_exact() -> bool {
+    // 单字节 {97}: 两个和都不到模, 结果可以手算 -> (97 << 16) | 97。
+    // (第一版我拿 Fletcher-32 的分量与 Fletcher-16 的分量比 —— 那是错的:
+    //  两者模不同 (65535 vs 255), 和一旦超过 255 就对不上。)
+    let d: ptr = alloc(8);
+    store8(d, 0, 97 as u8);
+    return sum_fletcher32(d, 0, 1) == 6357089;
+}
+
+fn test_sum_fletcher32_components_in_range() -> bool {
+    let s: str = "abcdefghij";
+    let f: u32 = sum_fletcher32(str_ptr(s), 0, 10);
+    return (f & 65535) < 65535 && ((f >> 16) & 65535) < 65535
+        && sum_fletcher32(str_ptr(s), 0, 10) != sum_fletcher32(str_ptr(s), 0, 9);
+
+}
+fn test_sum_bytes_and_xor() -> bool {
+    let d: ptr = alloc(8);
+    store8(d, 0, 1 as u8);
+    store8(d, 1, 2 as u8);
+    store8(d, 2, 3 as u8);
+    return sum_bytes(d, 0, 3) == 6 as u64 && sum_xor(d, 0, 3) == 0
+        && sum_xor(d, 0, 2) == 3;
+}
+
+fn test_sum_bytes_empty() -> bool {
+    let d: ptr = alloc(4);
+    return sum_bytes(d, 0, 0) == 0 as u64 && sum_xor(d, 0, 0) == 0;
+}
+
+fn test_sum_words16_big_endian() -> bool {
+    // {0x12, 0x34} 应当被读成 0x1234 (大端), 不是 0x3412。
+    let d: ptr = alloc(8);
+    store8(d, 0, 18 as u8);
+    store8(d, 1, 52 as u8);
+    return sum_words16(d, 0, 2) == 4660 as u64;
+}
+
+fn test_sum_words16_odd_length_pads() -> bool {
+    let d: ptr = alloc(8);
+    store8(d, 0, 18 as u8);
+    store8(d, 1, 52 as u8);
+    store8(d, 2, 86 as u8);
+    // 0x1234 + 0x5600 = 26676 —— 写成 `(0x1234 + 0x5600) as u64` 会被解析期拒掉
+    // ("as 只能作用于整型/布尔 (得到 None)"): 常量表达式在标注前还没有类型。
+    return sum_words16(d, 0, 3) == 26676 as u64;
+}
+
+/// 经典 IP 头写进缓冲: 45 00 00 73 00 00 40 00 40 11 00 00 c0 a8 00 01 c0 a8 00 c7。
+/// **必须逐字节写**: mem_store16 是**小端**, 直接写 0x4500 会得到 00 45 的字节序 ——
+/// 第一版就是这么错的, 于是校验值对不上 (而算法其实是对的)。
+fn ip_header(d: ptr) {
+    store8(d, 0, 69 as u8);
+    store8(d, 1, 0 as u8);
+    store8(d, 2, 0 as u8);
+    store8(d, 3, 115 as u8);
+    store8(d, 4, 0 as u8);
+    store8(d, 5, 0 as u8);
+    store8(d, 6, 64 as u8);
+    store8(d, 7, 0 as u8);
+    store8(d, 8, 64 as u8);
+    store8(d, 9, 17 as u8);
+    store8(d, 10, 0 as u8);
+    store8(d, 11, 0 as u8);
+    store8(d, 12, 192 as u8);
+    store8(d, 13, 168 as u8);
+    store8(d, 14, 0 as u8);
+    store8(d, 15, 1 as u8);
+    store8(d, 16, 192 as u8);
+    store8(d, 17, 168 as u8);
+    store8(d, 18, 0 as u8);
+    store8(d, 19, 199 as u8);
+}
+
+fn test_sum_net_checksum_ip_header_vector() -> bool {
+    let d: ptr = alloc(32);
+    ip_header(d);
+    return sum_net_checksum(d, 0, 20) == 0xB861;
+}
+
+fn test_sum_net_verify_after_filling_checksum() -> bool {
+    // 把算出来的校验和填进去, 再整段验一次 -> 必须通过。
+    // 这是反码和的核心性质, 也是"实现对了"的最强判据 (不依赖任何外部向量)。
+    let d: ptr = alloc(32);
+    ip_header(d);
+    let ck: u32 = sum_net_checksum(d, 0, 20);
+    store8(d, 10, ((ck >> 8) & 255) as u8);
+    store8(d, 11, (ck & 255) as u8);
+    return sum_net_verify(d, 0, 20);
+}
+
+fn test_sum_net_verify_detects_corruption() -> bool {
+    let d: ptr = alloc(32);
+    ip_header(d);
+    let ck: u32 = sum_net_checksum(d, 0, 20);
+    store8(d, 10, ((ck >> 8) & 255) as u8);
+    store8(d, 11, (ck & 255) as u8);
+    let ok: bool = sum_net_verify(d, 0, 20);
+    store8(d, 0, 70 as u8);
+    return ok && sum_net_verify(d, 0, 20) == false;
+}
+
+fn test_sum_offset_respected() -> bool {
+    let d: ptr = alloc(32);
+    let s: str = "abcde";
+    mem_fill(d, 0, 4, 255);
+    mem_copy(d, 4, str_ptr(s), 0, 5);
+    return sum_fletcher16(d, 4, 5) == sum_fletcher16(str_ptr(s), 0, 5)
+        && sum_fletcher16(d, 0, 5) != sum_fletcher16(str_ptr(s), 0, 5);
+
+}

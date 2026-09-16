@@ -20,7 +20,10 @@
 也就是说不只是"包里没 Python"，现在是**包里没有任何外部依赖**：`loment build`/`run`
 在一台干净的 Windows 上开箱即用。详见 `docs/167 §5`。
 
-**包里还带 lompi**（2026-09-15 加）：`bin/lompi` + `share/lompi/skill/SKILL.md`。
+**包里还带 lompi**（2026-09-15 加）：`bin/lompi` + `share/lompi/skill/SKILL.md`
++ **`share/lompi/store/`（它的标准库，137 个文件 —— `std` 127 个模块 + `host`，
+各带一份 `pkg.lomp`；安装时照 `lompi config` 说的路径拷进 lompi 的全局 store，
+装完就能直接 `use std`，卸载收回本包发过的那几个版本）**。
 它是 **Loment 库的包管理器**，用 Loment 自己写的，但**不是 Loment 官方工具** —— 是**另一个
 命令**：`loment help` 里没有它，`loment <任何东西>` 也不转发给它。它的指南与 loment 那份
 **同一套装法**（进 `~/.claude/skills/lompi/`、往 Codex 写**独立标记**的指针、卸载摘掉）。

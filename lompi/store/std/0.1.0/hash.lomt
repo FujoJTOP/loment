@@ -1,0 +1,154 @@
+// std/hash.lomt — 非加密哈希
+//
+// 为什么要 FNV-1a: 它**是**这个项目的哈希 —— docs/158 §6 的跨线 ABI 里写着
+// "域名词采用 FNV-1a 32 位"。也就是说域描述表的键就是它算的, 别的实现也得用同一个。
+// 把常量与算法收进标准库, 比散在工具里各自记得住 2166136261 可靠。
+//
+// 加密哈希 (sha256) 不在这一层, 它已经在 `loment/lib/sha256.lomt` 里了。
+//
+// 命名: 公开一律 hash_*, 内部一律 hs_*。自检 test_hash_*。
+
+module hash
+
+/// FNV-1a 32 的偏移基数。
+pub const HASH_FNV32_OFFSET: u32 = 2166136261;
+/// FNV-1a 32 的质数。
+pub const HASH_FNV32_PRIME: u32 = 16777619;
+/// FNV-1a 64 的偏移基数。
+pub const HASH_FNV64_OFFSET: u64 = 14695981039346656037;
+/// FNV-1a 64 的质数。
+pub const HASH_FNV64_PRIME: u64 = 1099511628211;
+
+/// 往 32 位 FNV-1a 里再喂一个字节 (增量式)。
+pub fn hash_fnv32_byte(h: u32, b: u32) -> u32 {
+    let x: u32 = h ^ (b & 255);
+    return x * HASH_FNV32_PRIME;
+}
+
+/// FNV-1a 32。
+pub fn hash_fnv32(p: ptr, so: u32, n: u32) -> u32 {
+    let h: u32 = HASH_FNV32_OFFSET;
+    let i: u32 = 0;
+    while i < n {
+        h = hash_fnv32_byte(h, load8(p, so + i));
+        i = i + 1;
+    }
+    return h;
+}
+
+/// FNV-1a 32, 对编译期字面量。
+pub fn hash_fnv32_str(s: str) -> u32 {
+    return hash_fnv32(str_ptr(s), 0, str_len(s));
+}
+
+/// FNV-1a 64。
+pub fn hash_fnv64(p: ptr, so: u32, n: u32) -> u64 {
+    let h: u64 = HASH_FNV64_OFFSET;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ (load8(p, so + i) as u64)) * HASH_FNV64_PRIME;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// djb2 —— 比 FNV 老, 但有些既有格式用它, 所以要有一个实现而不是让调用方自己抄。
+pub fn hash_djb2(p: ptr, so: u32, n: u32) -> u32 {
+    let h: u32 = 5381;
+    let i: u32 = 0;
+    while i < n {
+        h = h * 33 + load8(p, so + i);
+        i = i + 1;
+    }
+    return h;
+}
+
+/// 两个哈希是否碰撞 (域名词会不会撞表就是靠它判的)。
+pub fn hash_collides(a: u32, b: u32) -> bool {
+    return a == b;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn hs_fill(dst: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_hash_fnv32_known() -> bool {
+    // FNV-1a 32 of "" 是偏移基数本身; 对 "a" 是 0xE40C292C。
+    let b: ptr = alloc(32);
+    hs_fill(b, "a");
+    return hash_fnv32(b, 0, 0) == HASH_FNV32_OFFSET
+        && hash_fnv32(b, 0, 1) == 3826002220;
+}
+
+fn test_hash_fnv32_empty_vs_nonempty() -> bool {
+    let b: ptr = alloc(32);
+    hs_fill(b, "abc");
+    return hash_fnv32(b, 0, 0) != hash_fnv32(b, 0, 3);
+}
+
+fn test_hash_fnv32_incremental_matches() -> bool {
+    // 逐字节喂与一次算完必须一致 —— 增量式接口的意义就在这。
+    let b: ptr = alloc(32);
+    let n: u32 = hs_fill(b, "hello");
+    let whole: u32 = hash_fnv32(b, 0, n);
+    let inc: u32 = hash_fnv32_byte(hash_fnv32_byte(hash_fnv32_byte(hash_fnv32_byte(hash_fnv32_byte(HASH_FNV32_OFFSET, 104), 101), 108), 108), 111);
+    return whole == inc;
+}
+
+fn test_hash_fnv32_str_matches() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = hs_fill(b, "lomt");
+    return hash_fnv32_str("lomt") == hash_fnv32(b, 0, n);
+}
+
+fn test_hash_fnv32_differs_on_diff() -> bool {
+    let a: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    hs_fill(a, "disk");
+    hs_fill(c, "disl");
+    return hash_fnv32(a, 0, 4) != hash_fnv32(c, 0, 4);
+}
+
+fn test_hash_fnv32_order_matters() -> bool {
+    let a: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    hs_fill(a, "ab");
+    hs_fill(c, "ba");
+    return hash_fnv32(a, 0, 2) != hash_fnv32(c, 0, 2);
+}
+
+fn test_hash_fnv32_offset_slice() -> bool {
+    // 只喂中间一段, 与单独算那一段必须一致。
+    let b: ptr = alloc(32);
+    let n: u32 = hs_fill(b, "xabcy");
+    return hash_fnv32(b, 1, 3) == hash_fnv32_str("abc");
+}
+
+fn test_hash_fnv64() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = hs_fill(b, "a");
+    return hash_fnv64(b, 0, 0) == HASH_FNV64_OFFSET
+        && hash_fnv64(b, 0, 1) == 12638187200555641996;
+}
+
+fn test_hash_djb2() -> bool {
+    // djb2("") = 5381; djb2("a") = 5381*33 + 97 = 177670
+    // (我第一版把期望值写成 177671 —— 是算错了一, 不是库错。)
+    let b: ptr = alloc(32);
+    hs_fill(b, "a");
+    return hash_djb2(b, 0, 0) == 5381 && hash_djb2(b, 0, 1) == 177670;
+}
+
+fn test_hash_are_distinct_algorithms() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = hs_fill(b, "abc");
+    return hash_fnv32(b, 0, n) != hash_djb2(b, 0, n);
+}

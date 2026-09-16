@@ -1,0 +1,633 @@
+// std/rle.lomt — 行程编码 (RLE) 的两种常见形态
+//
+// 为什么这里要**两套**而不是一套: "RLE" 不是一个格式, 是一族格式。压缩层里被叫作
+// RLE 的东西至少有两种语义完全不同的:
+//
+//   1. **字节流 RLE** (PackBits 那一族, TIFF / PICT / MacPaint / Photoshop 都在用):
+//      控制字节 c 分三段 ——
+//        c < 128    : 后面紧接 c+1 个**字面**字节
+//        c == 128   : 空操作 (什么都不做, 跳过)
+//        c > 128    : 下一个字节重复 (257 - c) 次, 即 2..128 次
+//      它**没有"转义字节"** —— 控制字节自己带类型, 所以 256 个字节值全都能当数据,
+//      不存在"数据里正好出现了转义符"的歧义。这正是它比"值 计数 + 转义"那类
+//      设计好的地方: 挑一个值当转义符, 就必然要有"这个值怎么表示"的二级规则。
+//
+//   2. **位图行 RLE** (BMP RLE8 那一族): 面向"一行一行的像素", 基本单位是
+//      (次数, 值) 对子, 另有以 0x00 开头的**保留码**:
+//        00 00            : 行末 (EOL)
+//        00 01            : 图末 (EOB)
+//        00 02 dx dy      : 跳过 (delta) —— 向右 dx 列、向下 dy 行
+//        00 n  (n >= 3)   : 后面 n 个**字面**字节, 且**补齐到偶数**
+//      位图里"跳过"是有意义的 (大片同色背景根本不写), 所以它需要 delta,
+//      而字节流 RLE 不需要 —— 这就是两者不能互相替代的原因。
+//
+// 诚实清单 (不做什么、为什么):
+//   - PackBits 这边**不跨调用保留状态**: 一次调用一段。要多段连续, 自己拿游标接。
+//   - 位图编码器**不产出 delta 码**, 只解不产。产出 delta 要先扫整张图找大块同色
+//     背景, 那是位图优化器的活, 不是 RLE 层该背的。
+//   - 位图编码器**不管行宽的字节对齐** —— 一行是多少字节由调用方 (rowbytes) 说了算,
+//     它不假设"每行 4 字节对齐"之类的事。
+//   - 解码遇到截断或非法码一律 RLE_ERR, **不产出半截结果** —— 半个像素比不给更坏。
+//   - 不做 RLE 的"最优解析" (什么样的串该走字面、阈值定几)。这里用的是固定启发:
+//     连续 >= 2 个相同字节走 run, 否则攒字面。够用, 且可预测。
+//
+// 命名: 公开 rle_*, 内部 rl_*。自检 test_rle_*。
+
+module rle
+
+use "mem.lomt"
+
+/// 出错信封 (截断、行数超界)。
+pub const RLE_ERR: u32 = 4294967295;
+
+/// PackBits 单次最大的"重复/字面"长度 (控制字节能表达的上限)。
+pub const RLE_MAX_RUN: u32 = 128;
+
+// 位图行 RLE 的保留码 (都跟在 0x00 之后)
+pub const RLE_BMP_EOL: u32 = 0;   // 00 00
+pub const RLE_BMP_EOB: u32 = 1;   // 00 01
+pub const RLE_BMP_DELTA: u32 = 2; // 00 02 dx dy
+
+// ---------------------------------------------------------------- 字节流 RLE (PackBits)
+
+/// 编码 n 字节到 out。out 至少要 `rle_max_encoded(n)` 字节。返回写入的字节数。
+pub fn rle_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        // 先数这一处的重复长度 (上限 128 —— 一段长重复要靠多个 run 拼)
+        let run: u32 = 1;
+        while i + run < n && run < RLE_MAX_RUN && load8(d, so + i + run) == load8(d, so + i) {
+            run = run + 1;
+        }
+        if run >= 2 {
+            store8(out, p, (257 - run) as u8); // 129..255: 下一个字节重复 (257-c) 次
+            store8(out, p + 1, load8(d, so + i) as u8);
+            p = p + 2;
+            i = i + run;
+        } else {
+            // 字面串: 一直攒到"三次重复要开始"为止, 或攒满 128 个。
+            // 停在三连处而**不是**二连处, 是因为 2 个字节的 run 只省 1 字节 (2 进 2 出),
+            // 而把这两字节留在字面里会多花一个控制字节 —— 三连才真的值得单开一个 run。
+            let start: u32 = i;
+            let stop: bool = false;
+            while i < n && stop == false && (i - start) < RLE_MAX_RUN {
+                let r: u32 = 1;
+                while i + r < n && r < 3 && load8(d, so + i + r) == load8(d, so + i) {
+                    r = r + 1;
+                }
+                if r >= 3 && i > start {
+                    stop = true;
+                } else {
+                    i = i + 1;
+                }
+            }
+            let cnt: u32 = i - start;
+            store8(out, p, (cnt - 1) as u8); // 0..127: 字面 cnt 个
+            mem_copy(out, p + 1, d, so + start, cnt);
+            p = p + 1 + cnt;
+        }
+    }
+    return p - o;
+}
+
+/// 解码。out 至少要 `rle_decoded_len(...)` 字节。截断给 RLE_ERR。
+pub fn rle_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        i = i + 1;
+        if c < 128 {
+            let cnt: u32 = c + 1;
+            if i + cnt > n {
+                return RLE_ERR; // 字面串被截断
+            }
+            mem_copy(out, p, d, so + i, cnt);
+            p = p + cnt;
+            i = i + cnt;
+        } else if c > 128 {
+            if i >= n {
+                return RLE_ERR; // 说了要重复, 但后面没字节
+            }
+            let cnt: u32 = 257 - c;
+            mem_fill(out, p, cnt, load8(d, so + i));
+            p = p + cnt;
+            i = i + 1;
+        }
+        // c == 128 是空操作 —— 什么都不做就是对的
+    }
+    return p - o;
+}
+
+/// 只算解码长度, 不落字节 (要从流里先量再开缓冲区时用)。截断给 RLE_ERR。
+pub fn rle_decoded_len(d: ptr, so: u32, n: u32) -> u32 {
+    let total: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        i = i + 1;
+        if c < 128 {
+            let cnt: u32 = c + 1;
+            if i + cnt > n {
+                return RLE_ERR;
+            }
+            i = i + cnt;
+            total = total + cnt;
+        } else if c > 128 {
+            if i >= n {
+                return RLE_ERR;
+            }
+            i = i + 1;
+            total = total + (257 - c);
+        }
+    }
+    return total;
+}
+
+/// 编码后长度的**上界** (最坏情况: 全是互不相同的字节)。
+/// 字面组每组最多 128 字节、每组花 1 个控制字节, 所以是 n + ceil(n/128)。
+/// 这里给 n + n/128 + 1 —— 比真上界宽 1 字节, 图个省事也图个保险。
+pub fn rle_max_encoded(n: u32) -> u32 {
+    return n + (n / 128) + 1;
+}
+
+// ---------------------------------------------------------------- 位图行 RLE (BMP RLE8)
+
+/// 编码 rowbytes*height 的位图。out 至少要 `rle_bmp_max_encoded(rowbytes, height)` 字节。
+/// 逐行编: 每行末尾写 00 00, 全图末尾写 00 01。返回写入字节数。
+pub fn rle_bmp_encode(out: ptr, o: u32, d: ptr, so: u32, rowbytes: u32, height: u32) -> u32 {
+    let p: u32 = o;
+    let y: u32 = 0;
+    while y < height {
+        let ro: u32 = so + y * rowbytes;
+        let x: u32 = 0;
+        while x < rowbytes {
+            let run: u32 = 1;
+            while x + run < rowbytes && run < 255 && load8(d, ro + x + run) == load8(d, ro + x) {
+                run = run + 1;
+            }
+            if run >= 2 {
+                store8(out, p, run as u8);
+                store8(out, p + 1, load8(d, ro + x) as u8);
+                p = p + 2;
+                x = x + run;
+            } else {
+                // 字面串: 攒到"两个相同字节要开始"为止 —— 那一对交给下一轮的 run
+                let start: u32 = x;
+                let stop: bool = false;
+                while x < rowbytes && stop == false && (x - start) < 255 {
+                    let two: bool = false;
+                    if x + 1 < rowbytes && load8(d, ro + x + 1) == load8(d, ro + x) {
+                        two = true;
+                    }
+                    if two && x > start {
+                        stop = true;
+                    } else {
+                        x = x + 1;
+                    }
+                }
+                let cnt: u32 = x - start;
+                if cnt < 3 {
+                    // 00 n 里 n<3 是保留码, 所以 1~2 个字节只能用对子写 (对子也正好不吃亏)
+                    let k: u32 = 0;
+                    while k < cnt {
+                        store8(out, p, 1 as u8);
+                        store8(out, p + 1, load8(d, ro + start + k) as u8);
+                        p = p + 2;
+                        k = k + 1;
+                    }
+                } else {
+                    store8(out, p, 0 as u8);
+                    store8(out, p + 1, cnt as u8);
+                    mem_copy(out, p + 2, d, ro + start, cnt);
+                    p = p + 2 + cnt;
+                    if (cnt % 2) != 0 {
+                        store8(out, p, 0 as u8); // 字面串补齐到偶数 —— 格式规定
+                        p = p + 1;
+                    }
+                }
+            }
+        }
+        store8(out, p, RLE_BMP_EOL as u8);
+        store8(out, p + 1, 0 as u8);
+        p = p + 2;
+        y = y + 1;
+    }
+    store8(out, p, 0 as u8);
+    store8(out, p + 1, RLE_BMP_EOB as u8);
+    p = p + 2;
+    return p - o;
+}
+
+/// 解码 BMP RLE8 到 out (需要 rowbytes*height 字节)。返回填满的字节数, 出错给 RLE_ERR。
+/// delta 码**要能解** (编码器不产, 但别人的流里会有)。
+/// 要求流恰好以 00 01 收尾、行数正好是 height、输入被整个吃光 —— 三者缺一都算坏流。
+pub fn rle_bmp_decode(out: ptr, o: u32, rowbytes: u32, height: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let x: u32 = 0;
+    let y: u32 = 0;
+    let i: u32 = 0;
+    let done: bool = false;
+    while i < n && done == false {
+        let b: u32 = load8(d, so + i);
+        i = i + 1;
+        if b != 0 {
+            // (次数, 值) 对子。像素串**不跨行** —— 越出本行右侧的忽略, 但不悄悄换行。
+            if i >= n {
+                return RLE_ERR;
+            }
+            let v: u32 = load8(d, so + i);
+            i = i + 1;
+            if y >= height {
+                return RLE_ERR; // 行数超了: 流比声明的图还长
+            }
+            let k: u32 = 0;
+            while k < b {
+                if x < rowbytes {
+                    store8(out, o + y * rowbytes + x, v as u8);
+                }
+                x = x + 1;
+                k = k + 1;
+            }
+        } else {
+            if i >= n {
+                return RLE_ERR;
+            }
+            let code: u32 = load8(d, so + i);
+            i = i + 1;
+            if code == RLE_BMP_EOL {
+                if x > rowbytes {
+                    return RLE_ERR; // 本行写出去的比一行还多
+                }
+                y = y + 1;
+                x = 0;
+            } else if code == RLE_BMP_EOB {
+                done = true;
+            } else if code == RLE_BMP_DELTA {
+                if i + 2 > n {
+                    return RLE_ERR;
+                }
+                x = x + load8(d, so + i);
+                y = y + load8(d, so + i + 1);
+                i = i + 2;
+            } else {
+                // 字面串: code (>= 3) 个字节, 后面补齐到偶数
+                if i + code > n {
+                    return RLE_ERR;
+                }
+                if y >= height {
+                    return RLE_ERR;
+                }
+                let k: u32 = 0;
+                while k < code {
+                    if x < rowbytes {
+                        store8(out, o + y * rowbytes + x, load8(d, so + i + k) as u8);
+                    }
+                    x = x + 1;
+                    k = k + 1;
+                }
+                i = i + code;
+                if (code % 2) != 0 {
+                    i = i + 1; // 补齐字节, 不读它
+                }
+            }
+        }
+    }
+    if done == false || i != n || y != height {
+        return RLE_ERR;
+    }
+    return rowbytes * height;
+}
+
+/// 位图编码后长度的上界: 最坏情况每字节变成一个对子 (2 字节), 再加每行 2 字节行末
+/// 与全图 2 字节图末。
+pub fn rle_bmp_max_encoded(rowbytes: u32, height: u32) -> u32 {
+    return height * (2 * rowbytes + 2) + 2;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// hex 字符串 -> 字节。名字带 rl_ 前缀: 私有名同样占全局拼写, 别和同包里别的 hx 撞。
+fn rl_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn rl_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = rl_hv(str_byte(s, k * 2));
+        let lo: u32 = rl_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+fn rl_fill_seq(p: ptr, n: u32, seed: u32) {
+    // 相邻字节必然不同 (步长 7 与 251 互素), 用来造"最坏情况"输入。
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, ((i * 7 + seed) % 251) as u8);
+        i = i + 1;
+    }
+}
+
+fn test_rle_empty() -> bool {
+    let d: ptr = alloc(8);
+    let e: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    let el: u32 = rle_encode(e, 0, d, 0, 0);
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return el == 0 && dl == 0 && rle_decoded_len(e, 0, el) == 0 && rle_max_encoded(0) >= 0;
+}
+
+fn test_rle_single_byte() -> bool {
+    // 1 个字节没有重复可找 -> 只能走字面: 控制字节 0x00 + 那 1 个字节。
+    let d: ptr = alloc(8);
+    let e: ptr = alloc(8);
+    let r: ptr = alloc(8);
+    store8(d, 0, 65 as u8);
+    let el: u32 = rle_encode(e, 0, d, 0, 1);
+    let ok1: bool = el == 2 && load8(e, 0) == 0 && load8(e, 1) == 65;
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return ok1 && dl == 1 && load8(r, 0) == 65;
+}
+
+fn test_rle_all_same_byte() -> bool {
+    // 200 个 'A': 128 + 72 两段 run -> 4 字节。比 200 短得多。
+    let d: ptr = alloc(256);
+    let e: ptr = alloc(64);
+    let r: ptr = alloc(256);
+    mem_fill(d, 0, 200, 65);
+    let el: u32 = rle_encode(e, 0, d, 0, 200);
+    let ok1: bool = el == 4 && load8(e, 0) == 129 && load8(e, 1) == 65
+        && load8(e, 2) == 185 && load8(e, 3) == 65;
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return ok1 && dl == 200 && mem_eq(d, 0, r, 0, 200);
+}
+
+fn test_rle_alternating_bytes() -> bool {
+    // "ABAB..." 64 组 = 128 字节, 一次重复都没有 -> 一整块字面。
+    let d: ptr = alloc(128);
+    let e: ptr = alloc(160);
+    let i: u32 = 0;
+    while i < 128 {
+        store8(d, i, (65 + (i % 2)) as u8);
+        i = i + 1;
+    }
+    let el: u32 = rle_encode(e, 0, d, 0, 128);
+    // 128 个字面正好一个满组: 1 个控制字节 + 128 字节
+    let ok1: bool = el == 129 && load8(e, 0) == 127;
+    let r: ptr = alloc(128);
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return ok1 && dl == 128 && mem_eq(d, 0, r, 0, 128);
+}
+
+fn test_rle_known_vector_encode() -> bool {
+    // "AAABCD" -> FE 41 02 42 43 44
+    //   AAAB.. 前三个 A 是三连 -> run 3 -> 257-3 = FE, 值 41
+    //   剩下的 BCD 三连不动 -> 字面 3 个 -> 控制 2, 字节 42 43 44
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(32);
+    let want: ptr = alloc(32);
+    let n: u32 = rl_hx(d, "414141424344");
+    let el: u32 = rle_encode(e, 0, d, 0, n);
+    let wn: u32 = rl_hx(want, "fe4102424344");
+    return el == wn && mem_eq(e, 0, want, 0, wn);
+}
+
+fn test_rle_known_vector_decode() -> bool {
+    // 同一个向量的反向: FE 41 02 42 43 44 -> "AAABCD"
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    let want: ptr = alloc(16);
+    let n: u32 = rl_hx(d, "fe4102424344");
+    let dl: u32 = rle_decode(r, 0, d, 0, n);
+    let wn: u32 = rl_hx(want, "414141424344");
+    return dl == wn && mem_eq(r, 0, want, 0, wn);
+}
+
+fn test_rle_run_of_128_boundary() -> bool {
+    // 恰好 128 个相同字节 -> 单个 run, 2 字节。这是控制字节能表达的**上限**, 边界最容易写错。
+    let d: ptr = alloc(128);
+    let e: ptr = alloc(16);
+    mem_fill(d, 0, 128, 90);
+    let el: u32 = rle_encode(e, 0, d, 0, 128);
+    return el == 2 && load8(e, 0) == 129 && load8(e, 1) == 90;
+}
+
+fn test_rle_run_of_129_splits() -> bool {
+    // 129 个相同字节: 一个满 run (128) + 1 个落单的字面 -> 81 5A 00 5A
+    let d: ptr = alloc(129);
+    let e: ptr = alloc(16);
+    let want: ptr = alloc(16);
+    mem_fill(d, 0, 129, 90);
+    let el: u32 = rle_encode(e, 0, d, 0, 129);
+    let wn: u32 = rl_hx(want, "815a005a");
+    return el == wn && mem_eq(e, 0, want, 0, wn);
+}
+
+fn test_rle_worst_case_no_repeats() -> bool {
+    // 全是不相同字节 = 最坏情况。编码结果必须 <= 上界 (否则调用方按上界开的缓冲区会炸),
+    // 且必须能原样解回来。
+    let d: ptr = alloc(300);
+    let e: ptr = alloc(512);
+    let r: ptr = alloc(300);
+    rl_fill_seq(d, 300, 3);
+    let el: u32 = rle_encode(e, 0, d, 0, 300);
+    let ok1: bool = el <= rle_max_encoded(300);
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return ok1 && dl == 300 && mem_eq(d, 0, r, 0, 300);
+}
+
+fn test_rle_max_encoded_holds_for_all_sizes() -> bool {
+    // 上界函数本身要经得起逐个子: 每个长度都真编一遍, 结果都不能超过上界。
+    let d: ptr = alloc(600);
+    let e: ptr = alloc(1024);
+    let bad: u32 = 0;
+    rl_fill_seq(d, 600, 11);
+    let n: u32 = 1;
+    while n <= 600 {
+        let el: u32 = rle_encode(e, 0, d, 0, n);
+        if el > rle_max_encoded(n) {
+            bad = 1;
+        }
+        n = n + 1;
+    }
+    return bad == 0;
+}
+
+fn test_rle_decoded_len_matches() -> bool {
+    // decoded_len 必须等于真解出来的长度 —— 它是"先量后开缓冲"的依据, 量错就白搭。
+    let d: ptr = alloc(400);
+    let e: ptr = alloc(512);
+    let r: ptr = alloc(400);
+    rl_fill_seq(d, 400, 5);
+    store8(d, 10, 200 as u8);
+    store8(d, 11, 200 as u8);
+    store8(d, 12, 200 as u8);
+    let el: u32 = rle_encode(e, 0, d, 0, 400);
+    let want: u32 = rle_decoded_len(e, 0, el);
+    let got: u32 = rle_decode(r, 0, e, 0, el);
+    return want == 400 && got == want;
+}
+
+fn test_rle_rejects_truncated_literal() -> bool {
+    // 控制 5 -> 说好 6 个字面, 只给 3 个。必须拒, 不能把后面的字节当自己的。
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    let n: u32 = rl_hx(d, "05414243");
+    return rle_decode(r, 0, d, 0, n) == RLE_ERR && rle_decoded_len(d, 0, n) == RLE_ERR;
+}
+
+fn test_rle_rejects_truncated_run() -> bool {
+    // 控制 200 (>128) 说了要重复, 后面却没有那个字节。
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    let n: u32 = rl_hx(d, "c8");
+    return rle_decode(r, 0, d, 0, n) == RLE_ERR && rle_decoded_len(d, 0, n) == RLE_ERR;
+}
+
+fn test_rle_noop_control_byte() -> bool {
+    // 0x80 (128) 是空操作: 它不该产出字节, 也不该被当成字面或 run。
+    let d: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    let n: u32 = rl_hx(d, "800041800041");
+    let dl: u32 = rle_decode(r, 0, d, 0, n);
+    return dl == 2 && load8(r, 0) == 65 && load8(r, 1) == 65;
+}
+
+fn test_rle_escape_value_is_plain_data() -> bool {
+    // 反面教材的靶子: 如果设计成"挑一个转义字节", 数据里出现它就得特判。
+    // PackBits 没这回事 —— 0x80 当数据就是普通字节。这段数据整段含 0x80, 必须往返无误。
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(32);
+    let r: ptr = alloc(16);
+    store8(d, 0, 128 as u8);
+    store8(d, 1, 128 as u8);
+    store8(d, 2, 0 as u8);
+    store8(d, 3, 128 as u8);
+    let el: u32 = rle_encode(e, 0, d, 0, 4);
+    let dl: u32 = rle_decode(r, 0, e, 0, el);
+    return dl == 4 && mem_eq(d, 0, r, 0, 4);
+}
+
+fn test_rle_offset_is_respected() -> bool {
+    // 从缓冲中间开始编/解 (调用方给的偏移不能丢)。
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    mem_fill(d, 0, 16, 7);
+    store8(d, 8, 1 as u8);
+    store8(d, 9, 2 as u8);
+    store8(d, 10, 3 as u8);
+    let el: u32 = rle_encode(e, 4, d, 8, 8);
+    let dl: u32 = rle_decode(r, 12, e, 4, el);
+    return dl == 8 && mem_eq(d, 8, r, 12, 8);
+}
+
+// --- 位图行 RLE
+
+fn test_rle_bmp_known_vector() -> bool {
+    // rowbytes=4, height=2
+    //   行 0 = 41 41 41 41 -> 对子 (4, 41)          = 04 41
+    //   行 1 = 42 43 44 45 -> 字面 4 个 (偶数, 不补) = 00 04 42 43 44 45
+    // 每行后 00 00, 全图后 00 01
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(64);
+    let want: ptr = alloc(64);
+    let n: u32 = rl_hx(d, "4141414142434445");
+    let el: u32 = rle_bmp_encode(e, 0, d, 0, 4, 2);
+    let wn: u32 = rl_hx(want, "0441000000044243444500000001");
+    return el == wn && mem_eq(e, 0, want, 0, wn);
+}
+
+fn test_rle_bmp_roundtrip() -> bool {
+    // 三行, 混合 run / 字面, 逐行解回原样。
+    let d: ptr = alloc(48);
+    let e: ptr = alloc(128);
+    let r: ptr = alloc(48);
+    mem_fill(d, 0, 12, 9);          // 行 0 全同
+    rl_fill_seq(d, 12, 21);         // 行 1 全不同 —— 先填再用 copy 覆盖
+    mem_copy(d, 12, d, 0, 12);
+    store8(d, 12, 9 as u8);
+    store8(d, 13, 9 as u8);
+    store8(d, 14, 8 as u8);
+    store8(d, 15, 7 as u8);
+    let el: u32 = rle_bmp_encode(e, 0, d, 0, 12, 3);
+    let ok1: bool = el <= rle_bmp_max_encoded(12, 3);
+    let dl: u32 = rle_bmp_decode(r, 0, 12, 3, e, 0, el);
+    return ok1 && dl == 36 && mem_eq(d, 0, r, 0, 36);
+}
+
+fn test_rle_bmp_delta_decode() -> bool {
+    // 编码器不产 delta, 但别人的流里会有 —— 解码必须支持。
+    // 02 AA | 00 02 00 01 | 02 BB | 00 00 | 00 01
+    //   左下角写 2 个 AA, 跳过 (0 列, 1 行) 到第二行, 再写 2 个 BB。
+    let d: ptr = alloc(32);
+    let r: ptr = alloc(32);
+    let n: u32 = rl_hx(d, "02aa0002000102bb00000001");
+    let dl: u32 = rle_bmp_decode(r, 0, 4, 2, d, 0, n);
+    return dl == 8 && load8(r, 0) == 170 && load8(r, 1) == 170
+        && load8(r, 2) == 0 && load8(r, 3) == 0
+        && load8(r, 4) == 0 && load8(r, 5) == 0
+        && load8(r, 6) == 187 && load8(r, 7) == 187;
+}
+
+fn test_rle_bmp_literal_padding() -> bool {
+    // 字面串长度是奇数时要补一个字节 —— 不补的话下一个控制码会整体错位。
+    // rowbytes=3, height=1, 数据 41 42 43 -> 00 03 41 42 43 00 | 00 00 | 00 01
+    let d: ptr = alloc(16);
+    let e: ptr = alloc(32);
+    let r: ptr = alloc(16);
+    let want: ptr = alloc(32);
+    let n: u32 = rl_hx(d, "414243");
+    let el: u32 = rle_bmp_encode(e, 0, d, 0, 3, 1);
+    let wn: u32 = rl_hx(want, "00034142430000000001");
+    let ok1: bool = el == wn && mem_eq(e, 0, want, 0, wn);
+    let dl: u32 = rle_bmp_decode(r, 0, 3, 1, e, 0, el);
+    return ok1 && dl == 3 && mem_eq(d, 0, r, 0, 3);
+}
+
+fn test_rle_bmp_rejects_bad_streams() -> bool {
+    // ① 缺图末: 只有一行数据, 没有 00 01
+    let a: ptr = alloc(32);
+    let r: ptr = alloc(32);
+    let na: u32 = rl_hx(a, "04410000");
+    let ok1: bool = rle_bmp_decode(r, 0, 4, 1, a, 0, na) == RLE_ERR;
+    // ② 图末后面还挂着字节 -> 流没被吃干净
+    let b: ptr = alloc(32);
+    let nb: u32 = rl_hx(b, "044100000001ff");
+    let ok2: bool = rle_bmp_decode(r, 0, 4, 1, b, 0, nb) == RLE_ERR;
+    // ③ 行数不够: 说好 2 行, 只给 1 行就图末
+    let c: ptr = alloc(32);
+    let nc: u32 = rl_hx(c, "044100000001");
+    let ok3: bool = rle_bmp_decode(r, 0, 4, 2, c, 0, nc) == RLE_ERR;
+    // ④ 字面串被截断
+    let e: ptr = alloc(32);
+    let ne: u32 = rl_hx(e, "00054142");
+    let ok4: bool = rle_bmp_decode(r, 0, 8, 1, e, 0, ne) == RLE_ERR;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_rle_bmp_max_encoded_holds() -> bool {
+    // 上界必须真的兜得住: 造一段最坏形状 (每字节一个对子/小字面), 逐行编过去都不能越界。
+    let d: ptr = alloc(96);
+    let e: ptr = alloc(512);
+    let i: u32 = 0;
+    while i < 96 {
+        // 每两字节一对相同值 -> 全走对子, 2 字节进 2 字节出, 是编码器最不划算的形状之一
+        store8(d, i, ((i / 2) % 200) as u8);
+        store8(d, i + 1, ((i / 2) % 200) as u8);
+        i = i + 2;
+    }
+    let el: u32 = rle_bmp_encode(e, 0, d, 0, 8, 12);
+    return el <= rle_bmp_max_encoded(8, 12);
+}

@@ -1,0 +1,260 @@
+// std/csv.lomt — CSV 字段的读写 (RFC 4180 的那套引号规则)
+//
+// 为什么要它: 工具要吐表格 (docs/154 的状态矩阵就是一张表), 而"什么时候要加引号、
+// 引号里的引号怎么翻倍、行尾怎么算"这三件事手写必错。它也不是 split 的一个参数 ——
+// 引号里的分隔符不算分隔符, 这一点 split 表达不了。
+//
+// 读的返回值: (消耗的输入字节数 << 32) | 写到 dst 的字节数。
+// 两个 u32 —— 因为解引号会让"读进去的"和"写出来的"长度不同, 只报一个会丢信息。
+// 消耗数**包含**结尾那个分隔符 (若有), 所以调用方每次 `o = o + consumed` 即可推进。
+//
+// 行尾: 字段扫到 \n 或 \r 就停, 且**不消费**它 (返回的消耗数停在换行前) ——
+// 换行由调用方处理, 这样一个函数既能读一行内的字段, 也能让调用方决定要不要跨行。
+//
+// 命名: 公开一律 csv_*, 内部一律 cv_*。自检 test_csv_*。
+
+module csv
+
+/// 这个字段写出时要不要加引号。
+/// 判据: 含分隔符/引号/换行, 或首尾有空格 (否则读回来会被 trim 掉)。
+pub fn csv_needs_quote(src: ptr, so: u32, n: u32, delim: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    if load8(src, so) == 32 || load8(src, so + n - 1) == 32 {
+        return true;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = load8(src, so + i);
+        if b == delim || b == 34 || b == 10 || b == 13 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 写一个字段 (必要时加引号, 内部引号翻倍), 返回新偏移。
+pub fn csv_write_field(buf: ptr, o: u32, src: ptr, so: u32, n: u32, delim: u32) -> u32 {
+    let k: u32 = o;
+    if csv_needs_quote(src, so, n, delim) == false {
+        let i: u32 = 0;
+        while i < n {
+            store8(buf, k, load8(src, so + i) as u8);
+            k = k + 1;
+            i = i + 1;
+        }
+        return k;
+    }
+    store8(buf, k, 34 as u8);
+    k = k + 1;
+    let j: u32 = 0;
+    while j < n {
+        let b: u32 = load8(src, so + j);
+        if b == 34 {
+            store8(buf, k, 34 as u8);
+            k = k + 1;
+        }
+        store8(buf, k, b as u8);
+        k = k + 1;
+        j = j + 1;
+    }
+    store8(buf, k, 34 as u8);
+    return k + 1;
+}
+
+/// 解包: 消耗的输入字节数。
+pub fn csv_consumed(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+/// 解包: 写到 dst 的字节数。
+pub fn csv_written(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+/// 读一个字段。
+pub fn csv_read_field(dst: ptr, doff: u32, src: ptr, so: u32, n: u32, delim: u32) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    if load8(src, so) != 34 {
+        let i: u32 = 0;
+        while i < n {
+            let b: u32 = load8(src, so + i);
+            if b == delim {
+                return ((i + 1) as u64) * 4294967296 + (i as u64);
+            }
+            if b == 10 || b == 13 {
+                return (i as u64) * 4294967296 + (i as u64);
+            }
+            store8(dst, doff + i, b as u8);
+            i = i + 1;
+        }
+        return (n as u64) * 4294967296 + (n as u64);
+    }
+    let w: u32 = 0;
+    let i: u32 = 1;
+    while i < n {
+        let b: u32 = load8(src, so + i);
+        if b == 34 {
+            if i + 1 < n && load8(src, so + i + 1) == 34 {
+                store8(dst, doff + w, 34 as u8);
+                w = w + 1;
+                i = i + 2;
+            } else {
+                if i + 1 < n && load8(src, so + i + 1) == delim {
+                    return ((i + 2) as u64) * 4294967296 + (w as u64);
+                }
+                return ((i + 1) as u64) * 4294967296 + (w as u64);
+            }
+        } else {
+            store8(dst, doff + w, b as u8);
+            w = w + 1;
+            i = i + 1;
+        }
+    }
+    return (n as u64) * 4294967296 + (w as u64);
+}
+
+/// 半行里有几列 (到 \n / \r 为止)。空输入 0 列。
+pub fn csv_count_fields(src: ptr, so: u32, n: u32, delim: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    let q: u32 = 0;
+    while i < n {
+        let b: u32 = load8(src, so + i);
+        if b == 34 {
+            if q == 0 {
+                q = 1;
+            } else {
+                if i + 1 < n && load8(src, so + i + 1) == 34 {
+                    i = i + 1;
+                } else {
+                    q = 0;
+                }
+            }
+            i = i + 1;
+        } else {
+            if q == 0 && b == delim {
+                c = c + 1;
+            }
+            if q == 0 && (b == 10 || b == 13) {
+                return c;
+            }
+            i = i + 1;
+        }
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn cv_lit(dst: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_csv_needs_quote() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    let n1: u32 = cv_lit(a, "plain");
+    let n2: u32 = cv_lit(b, "a,b");
+    let n3: u32 = cv_lit(c, " lead");
+    return !csv_needs_quote(a, 0, n1, 44) && csv_needs_quote(b, 0, n2, 44)
+        && csv_needs_quote(c, 0, n3, 44);
+}
+
+fn test_csv_write_plain() -> bool {
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "abc");
+    let o: u32 = csv_write_field(b, 0, s, 0, n, 44);
+    return o == 3 && load8(b, 0) == 97 && load8(b, 2) == 99;
+}
+
+fn test_csv_write_quotes_when_needed() -> bool {
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "a,b");
+    let o: u32 = csv_write_field(b, 0, s, 0, n, 44);
+    return o == 5 && load8(b, 0) == 34 && load8(b, 1) == 97
+        && load8(b, 3) == 98 && load8(b, 4) == 34;
+}
+
+fn test_csv_write_doubles_inner_quotes() -> bool {
+    let s: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "a\"b");
+    let o: u32 = csv_write_field(b, 0, s, 0, n, 44);
+    // 写成 "a""b" -> 6 字节
+    return o == 6 && load8(b, 0) == 34 && load8(b, 2) == 34 && load8(b, 3) == 34;
+}
+
+fn test_csv_read_plain_field() -> bool {
+    let s: ptr = alloc(32);
+    let d: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "abc,def");
+    let t: u64 = csv_read_field(d, 0, s, 0, n, 44);
+    return csv_consumed(t) == 4 && csv_written(t) == 3 && load8(d, 0) == 97 && load8(d, 2) == 99;
+}
+
+fn test_csv_read_quoted_field_with_delimiter() -> bool {
+    // "b,c" 里的逗号不算分隔符 —— 这正是 split 做不到的事。
+    let s: ptr = alloc(32);
+    let d: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "\"b,c\",d");
+    let t: u64 = csv_read_field(d, 0, s, 0, n, 44);
+    return csv_consumed(t) == 6 && csv_written(t) == 3
+        && load8(d, 0) == 98 && load8(d, 1) == 44 && load8(d, 2) == 99;
+}
+
+fn test_csv_read_quoted_unescapes_doubled_quote() -> bool {
+    let s: ptr = alloc(32);
+    let d: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "\"a\"\"b\"");
+    let t: u64 = csv_read_field(d, 0, s, 0, n, 44);
+    return csv_written(t) == 3 && load8(d, 1) == 34 && load8(d, 2) == 98;
+}
+
+fn test_csv_read_stops_at_newline() -> bool {
+    let s: ptr = alloc(32);
+    let d: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "abc\ndef");
+    let t: u64 = csv_read_field(d, 0, s, 0, n, 44);
+    return csv_consumed(t) == 3 && csv_written(t) == 3;
+}
+
+fn test_csv_write_read_roundtrip() -> bool {
+    let s: ptr = alloc(32);
+    let m: ptr = alloc(64);
+    let d: ptr = alloc(32);
+    let n: u32 = cv_lit(s, "x,\"y\"");
+    let o: u32 = csv_write_field(m, 0, s, 0, n, 44);
+    let t: u64 = csv_read_field(d, 0, m, 0, o, 44);
+    return csv_consumed(t) == o && csv_written(t) == n
+        && load8(d, 0) == 120 && load8(d, 1) == 44 && load8(d, 3) == 121;
+}
+
+fn test_csv_count_fields() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    let n1: u32 = cv_lit(a, "a,b,c");
+    let n2: u32 = cv_lit(b, "\"a,b\",c");
+    let n3: u32 = cv_lit(c, "a,b\nc,d");
+    return csv_count_fields(a, 0, n1, 44) == 3
+        && csv_count_fields(b, 0, n2, 44) == 2
+        && csv_count_fields(c, 0, n3, 44) == 2
+        && csv_count_fields(a, 0, 0, 44) == 0;
+}

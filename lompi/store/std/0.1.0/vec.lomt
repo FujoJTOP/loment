@@ -1,0 +1,223 @@
+// std/vec.lomt — u32 动态数组 (调用方持有缓冲)
+//
+// 为什么元素是 u32: 仓库里所有容器装的都是**偏移** (arena 偏移、字段偏移), 就是 u32。
+// 也正因如此, 这里不做泛型容器 —— 泛型在这个 checkout 上还有坑 (skill §6.4),
+// 而"装偏移的数组"覆盖了实际用到的全部。
+//
+// 形状: 状态是 (base, len, cap) 三个标量, **调用方持有 len**。
+// 每个改动型函数都返回新的 len —— 因为本语言没有出参、没有可变全局
+// (skill §3 的内建表里没有那一类东西), 所以"传进去 + 返回新值"是唯一的表达方式。
+//
+// 满/空的判定不用哨兵: `vec_push` 满时**原样返回 len**。于是
+// `new == old` 就是失败, `new == old + 1` 就是成功 —— 不需要额外的错误通道。
+//
+// 命名: 公开一律 vec_*, 内部一律 ve_*。自检 test_vec_*。
+
+module vec
+
+use "mem.lomt"
+
+/// 找不到的哨兵。
+pub const VEC_NONE: u32 = 4294967295;
+
+/// 元素宽度 (字节)。
+pub const VEC_W: u32 = 4;
+
+/// 有位置放第 len 个元素吗。
+pub fn vec_has_room(len: u32, cap: u32) -> bool {
+    return len < cap;
+}
+
+/// 追加。返回新 len; **满时原样返回 len** (调用方据此判成败)。
+pub fn vec_push(base: ptr, len: u32, cap: u32, v: u32) -> u32 {
+    if len >= cap {
+        return len;
+    }
+    mem_store32(base, len * VEC_W, v);
+    return len + 1;
+}
+
+/// 取第 i 个 (调用方保证 i < len)。
+pub fn vec_get(base: ptr, i: u32) -> u32 {
+    return mem_load32(base, i * VEC_W);
+}
+
+pub fn vec_set(base: ptr, i: u32, v: u32) {
+    mem_store32(base, i * VEC_W, v);
+}
+
+/// 弹出一个: 返回 (新 len << 32) | 值。
+/// **调用方必须先判 len > 0** —— 空栈弹出没有可返回的值, 这里不编一个。
+pub fn vec_pop(base: ptr, len: u32) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    let v: u32 = mem_load32(base, (len - 1) * VEC_W);
+    return ((len - 1) as u64) * 4294967296 + (v as u64);
+}
+
+/// 解包: 弹出后的新 len。
+pub fn vec_pop_len(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+/// 解包: 弹出的值。
+pub fn vec_pop_val(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+/// 从头找第一个等于 v 的下标; 没有返回 VEC_NONE。
+pub fn vec_find(base: ptr, len: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < len {
+        if mem_load32(base, i * VEC_W) == v {
+            return i;
+        }
+        i = i + 1;
+    }
+    return VEC_NONE;
+}
+
+/// 原地反转。
+pub fn vec_reverse(base: ptr, len: u32) {
+    let i: u32 = 0;
+    while i < len / 2 {
+        let j: u32 = len - 1 - i;
+        let a: u32 = mem_load32(base, i * VEC_W);
+        let b: u32 = mem_load32(base, j * VEC_W);
+        mem_store32(base, i * VEC_W, b);
+        mem_store32(base, j * VEC_W, a);
+        i = i + 1;
+    }
+}
+
+/// 在 [from, len) 里找第一个等于 v 的下标 (从指定的位置往后找)。
+pub fn vec_find_from(base: ptr, from: u32, len: u32, v: u32) -> u32 {
+    let i: u32 = from;
+    while i < len {
+        if mem_load32(base, i * VEC_W) == v {
+            return i;
+        }
+        i = i + 1;
+    }
+    return VEC_NONE;
+}
+
+/// 相同元素连续出现的最长长度 (跑长编码等场合用)。
+pub fn vec_max_run(base: ptr, len: u32) -> u32 {
+    if len == 0 {
+        return 0;
+    }
+    let best: u32 = 1;
+    let cur: u32 = 1;
+    let i: u32 = 1;
+    while i < len {
+        if mem_load32(base, i * VEC_W) == mem_load32(base, (i - 1) * VEC_W) {
+            cur = cur + 1;
+        } else {
+            cur = 1;
+        }
+        if cur > best {
+            best = cur;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_vec_push() -> bool {
+    let b: ptr = alloc(64);
+    let len: u32 = 0;
+    let l1: u32 = vec_push(b, len, 4, 11);
+    let l2: u32 = vec_push(b, l1, 4, 22);
+    return l1 == 1 && l2 == 2 && vec_get(b, 0) == 11 && vec_get(b, 1) == 22;
+}
+
+fn test_vec_push_full_returns_same_len() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 1, 7);
+    let l2: u32 = vec_push(b, l1, 1, 8);
+    return l1 == 1 && l2 == 1 && vec_get(b, 0) == 7;
+}
+
+fn test_vec_set_get() -> bool {
+    let b: ptr = alloc(64);
+    vec_push(b, 0, 4, 1);
+    vec_set(b, 0, 99);
+    return vec_get(b, 0) == 99;
+}
+
+fn test_vec_pop() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 4, 5);
+    let l2: u32 = vec_push(b, l1, 4, 6);
+    let t: u64 = vec_pop(b, l2);
+    return vec_pop_len(t) == 1 && vec_pop_val(t) == 6;
+}
+
+fn test_vec_pop_empty_returns_zero() -> bool {
+    // 空弹出没有可返回的值 —— 返回 0, 且新 len 也是 0。调用方本来就该先判 len > 0。
+    let b: ptr = alloc(64);
+    return vec_pop(b, 0) == 0;
+}
+
+fn test_vec_find() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 8, 10);
+    let l2: u32 = vec_push(b, l1, 8, 20);
+    let l3: u32 = vec_push(b, l2, 8, 30);
+    return vec_find(b, l3, 20) == 1 && vec_find(b, l3, 99) == VEC_NONE
+        && vec_find_from(b, 2, l3, 20) == VEC_NONE;
+}
+
+fn test_vec_reverse_odd() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 8, 1);
+    let l2: u32 = vec_push(b, l1, 8, 2);
+    let l3: u32 = vec_push(b, l2, 8, 3);
+    vec_reverse(b, l3);
+    return vec_get(b, 0) == 3 && vec_get(b, 1) == 2 && vec_get(b, 2) == 1;
+}
+
+fn test_vec_reverse_even() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 8, 1);
+    let l2: u32 = vec_push(b, l1, 8, 2);
+    vec_reverse(b, l2);
+    return vec_get(b, 0) == 2 && vec_get(b, 1) == 1;
+}
+
+fn test_vec_reverse_empty_and_single() -> bool {
+    let b: ptr = alloc(64);
+    vec_reverse(b, 0);
+    let l: u32 = vec_push(b, 0, 8, 9);
+    vec_reverse(b, l);
+    return vec_get(b, 0) == 9;
+}
+
+fn test_vec_max_run() -> bool {
+    let b: ptr = alloc(64);
+    let vals: [u32; 7] = [1, 1, 1, 2, 3, 3, 3];
+    let len: u32 = 0;
+    let i: u32 = 0;
+    let n: u32 = 7;
+    while i < n {
+        len = vec_push(b, len, 8, vals[i]);
+        i = i + 1;
+    }
+    return vec_max_run(b, len) == 3;
+}
+
+fn test_vec_max_run_no_repeats() -> bool {
+    let b: ptr = alloc(64);
+    let l1: u32 = vec_push(b, 0, 8, 1);
+    let l2: u32 = vec_push(b, l1, 8, 2);
+    let l3: u32 = vec_push(b, l2, 8, 3);
+    return vec_max_run(b, l3) == 1 && vec_max_run(b, 0) == 0;
+}
+
+fn test_vec_has_room() -> bool {
+    return vec_has_room(0, 1) && !vec_has_room(1, 1) && !vec_has_room(2, 1);
+}

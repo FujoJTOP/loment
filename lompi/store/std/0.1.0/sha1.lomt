@@ -1,0 +1,360 @@
+// std/sha1.lomt — SHA-1 (FIPS 180-4)
+//
+// 与 MD5 一样的定位: 作为**密码学**摘要它已被弃用 (2017 年 SHAttered 之后, 抗碰撞不能
+// 再依赖它), 但它仍然是 git 的对象名、老 TLS、HMAC-SHA1 的一部分 —— 要读那些东西就得有。
+//
+// **安全警告**: 抗碰撞用途请用 sha256/sha512。
+//
+// 结构上比 MD5 干净的地方: 80 轮里只有 4 个常量, 而且**消息扩展**要一块 320 字节的
+// 工作区 (w[80])。那 320 字节放在 ctx 里 —— 不能在压缩函数里分配, 因为压缩是每 64 字节
+// 调一次的, 在里面分配会把 bump 堆撑爆 (这正是我写完 MD5 后定下的做法)。
+//
+// 布局 (调用方给 ctx, 416 字节):
+//   [0..20]   H0..H4
+//   [20..28]  已处理字节数 (低/高 u32)
+//   [28..92]  64 字节块缓冲
+//   [92..96]  缓冲已用字节数
+//   [96..416] w[80] (消息扩展工作区)
+//
+// 命名: 公开 sha1_*, 内部 sh_*。自检 test_sha1_*。
+
+module sha1
+
+use "mem.lomt"
+
+pub const SHA1_CTX: u32 = 416;
+pub const SHA1_DIGEST: u32 = 20;
+
+const SH_W: u32 = 96;
+const SH_BUF: u32 = 28;
+const SH_USED: u32 = 92;
+const SH_LENLO: u32 = 20;
+const SH_LENHI: u32 = 24;
+
+fn sh_rotl(v: u32, n: u32) -> u32 {
+    return (v << n) | (v >> (32 - n));
+}
+
+/// 字节序翻转 (SHA-1 是大端)。
+fn sh_bswap(v: u32) -> u32 {
+    return ((v & 255) << 24) | ((v & 65280) << 8) | ((v >> 8) & 65280) | ((v >> 24) & 255);
+}
+
+fn sh_h(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, 4 * i);
+}
+
+fn sh_set_h(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, 4 * i, v);
+}
+
+fn sh_w(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, SH_W + 4 * i);
+}
+
+fn sh_set_w(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, SH_W + 4 * i, v);
+}
+
+pub fn sha1_init(ctx: ptr) {
+    sh_set_h(ctx, 0, 1732584193); // 0x67452301
+    sh_set_h(ctx, 1, 4023233417); // 0xefcdab89
+    sh_set_h(ctx, 2, 2562383102); // 0x98badcfe
+    sh_set_h(ctx, 3, 271733878); // 0x10325476
+    sh_set_h(ctx, 4, 3285377520); // 0xc3d2e1f0
+    mem_store32(ctx, SH_LENLO, 0);
+    mem_store32(ctx, SH_LENHI, 0);
+    mem_store32(ctx, SH_USED, 0);
+}
+
+/// 轮常量: 四段各一个。
+fn sh_k(i: u32) -> u32 {
+    if i < 20 {
+        return 1518500249; // 0x5a827999
+    }
+    if i < 40 {
+        return 1859775393; // 0x6ed9eba1
+    }
+    if i < 60 {
+        return 2400959708; // 0x8f1bbcdc
+    }
+    return 3395469782; // 0xca62c1d6
+}
+
+fn sh_compress(ctx: ptr) {
+    // w[0..16] 从块里读 (大端)
+    let i: u32 = 0;
+    while i < 16 {
+        sh_set_w(ctx, i, sh_bswap(mem_load32(ctx, SH_BUF + 4 * i)));
+        i = i + 1;
+    }
+    // 扩展到 80
+    i = 16;
+    while i < 80 {
+        let v: u32 = sh_w(ctx, i - 3) ^ sh_w(ctx, i - 8) ^ sh_w(ctx, i - 14) ^ sh_w(ctx, i - 16);
+        sh_set_w(ctx, i, sh_rotl(v, 1));
+        i = i + 1;
+    }
+    let a: u32 = sh_h(ctx, 0);
+    let b: u32 = sh_h(ctx, 1);
+    let c: u32 = sh_h(ctx, 2);
+    let d: u32 = sh_h(ctx, 3);
+    let e: u32 = sh_h(ctx, 4);
+    i = 0;
+    while i < 80 {
+        let f: u32 = 0;
+        if i < 20 {
+            f = (b & c) | ((b ^ 4294967295) & d);
+        } else if i < 40 {
+            f = b ^ c ^ d;
+        } else if i < 60 {
+            f = (b & c) | (b & d) | (c & d);
+        } else {
+            f = b ^ c ^ d;
+        }
+        let tmp: u32 = sh_rotl(a, 5) + f + e + sh_k(i) + sh_w(ctx, i);
+        e = d;
+        d = c;
+        c = sh_rotl(b, 30);
+        b = a;
+        a = tmp;
+        i = i + 1;
+    }
+    sh_set_h(ctx, 0, sh_h(ctx, 0) + a);
+    sh_set_h(ctx, 1, sh_h(ctx, 1) + b);
+    sh_set_h(ctx, 2, sh_h(ctx, 2) + c);
+    sh_set_h(ctx, 3, sh_h(ctx, 3) + d);
+    sh_set_h(ctx, 4, sh_h(ctx, 4) + e);
+}
+
+pub fn sha1_update(ctx: ptr, d: ptr, o: u32, n: u32) {
+    let used: u32 = mem_load32(ctx, SH_USED);
+    let lo: u32 = mem_load32(ctx, SH_LENLO) + n;
+    let carry: u32 = 0;
+    if lo < mem_load32(ctx, SH_LENLO) {
+        carry = 1;
+    }
+    mem_store32(ctx, SH_LENLO, lo);
+    mem_store32(ctx, SH_LENHI, mem_load32(ctx, SH_LENHI) + carry);
+    let i: u32 = 0;
+    while i < n {
+        let space: u32 = 64 - used;
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > space {
+            m = space;
+        }
+        mem_copy(ctx, SH_BUF + used, d, o + i, m);
+        used = used + m;
+        i = i + m;
+        if used == 64 {
+            sh_compress(ctx);
+            used = 0;
+        }
+    }
+    mem_store32(ctx, SH_USED, used);
+}
+
+/// 收尾 (大端长度)。
+pub fn sha1_final(ctx: ptr, out: ptr) {
+    let used: u32 = mem_load32(ctx, SH_USED);
+    let bl: u32 = mem_load32(ctx, SH_LENLO);
+    let bh: u32 = mem_load32(ctx, SH_LENHI);
+    store8(ctx, SH_BUF + used, 128 as u8);
+    used = used + 1;
+    if used > 56 {
+        let z: u32 = used;
+        while z < 64 {
+            store8(ctx, SH_BUF + z, 0 as u8);
+            z = z + 1;
+        }
+        sh_compress(ctx);
+        used = 0;
+    }
+    let z2: u32 = used;
+    while z2 < 56 {
+        store8(ctx, SH_BUF + z2, 0 as u8);
+        z2 = z2 + 1;
+    }
+    // 64 位**大端**比特长度
+    let lo8: u32 = bl << 3;
+    let hi8: u32 = (bh << 3) | (bl >> 29);
+    mem_store32(ctx, SH_BUF + 56, sh_bswap(hi8));
+    mem_store32(ctx, SH_BUF + 60, sh_bswap(lo8));
+    sh_compress(ctx);
+    // **摘要是大端的**: 直接 mem_store32 (小端) 会把每个字里的字节序弄反 ——
+    // 症状是结果的每个 8 位十六进制块内部被倒过来 (a9993e36 变成 363e99a9)。
+    // 这个错误值不假, 只是字节相反, 光看"对不上"猜不出来, 得把实际值打出来看。
+    let i: u32 = 0;
+    while i < 5 {
+        mem_store32(out, 4 * i, sh_bswap(sh_h(ctx, i)));
+        i = i + 1;
+    }
+    mem_store32(ctx, SH_USED, 0);
+}
+
+pub fn sha1(d: ptr, o: u32, n: u32, out: ptr, ctx: ptr) {
+    sha1_init(ctx);
+    sha1_update(ctx, d, o, n);
+    sha1_final(ctx, out);
+}
+
+pub fn sha1_str(s: str, out: ptr, ctx: ptr) {
+    sha1(str_ptr(s), 0, str_len(s), out, ctx);
+}
+
+pub fn sha1_hex(out: ptr, o: u32, digest: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 20 {
+        let v: u32 = load8(digest, i);
+        store8(out, o + 2 * i, sh_hexch((v >> 4) & 15) as u8);
+        store8(out, o + 2 * i + 1, sh_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 40;
+}
+
+fn sh_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sha1_k_segments() -> bool {
+    return sh_k(0) == 0x5A827999 && sh_k(19) == 0x5A827999 && sh_k(20) == 0x6ED9EBA1
+        && sh_k(40) == 0x8F1BBCDC && sh_k(60) == 0xCA62C1D6 && sh_k(79) == 0xCA62C1D6;
+}
+
+fn test_sha1_bswap() -> bool {
+    return sh_bswap(0x01020304) == 0x04030201 && sh_bswap(0) == 0
+        && sh_bswap(0xFFFFFFFF) == 0xFFFFFFFF;
+}
+
+fn test_sha1_vector_empty() -> bool {
+    // SHA1("") = da39a3ee5e6b4b0d3255bfef95601890afd80709
+    let ctx: ptr = alloc(SHA1_CTX);
+    let out: ptr = alloc(SHA1_DIGEST);
+    let hex: ptr = alloc(64);
+    sha1_init(ctx);
+    sha1_final(ctx, out);
+    sha1_hex(hex, 0, out);
+    let want: str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_sha1_vector_abc() -> bool {
+    // SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
+    let ctx: ptr = alloc(SHA1_CTX);
+    let out: ptr = alloc(SHA1_DIGEST);
+    let hex: ptr = alloc(64);
+    let s: str = "abc";
+    sha1_str(s, out, ctx);
+    sha1_hex(hex, 0, out);
+    let want: str = "a9993e364706816aba3e25717850c26c9cd0d89d";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_sha1_vector_two_blocks() -> bool {
+    // 标准里那条 56 字节的向量 (会走到"装不下长度"的分支):
+    // "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    //   = 84983e441c3bd26ebaae4aa1f95129e5e54670f1
+    let ctx: ptr = alloc(SHA1_CTX);
+    let out: ptr = alloc(SHA1_DIGEST);
+    let hex: ptr = alloc(64);
+    let s: str = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    sha1_str(s, out, ctx);
+    sha1_hex(hex, 0, out);
+    let want: str = "84983e441c3bd26ebaae4aa1f95129e5e54670f1";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_sha1_vector_million_a() -> bool {
+    // 一百万个 'a' = 34aa973cd4c4daa4f61eeb2bdbad27316534016f。
+    // 这条同时压了"多次 update 拼起来"与"跨很多块"两条路 —— 也是 100 万字节。
+    let ctx: ptr = alloc(SHA1_CTX);
+    let out: ptr = alloc(SHA1_DIGEST);
+    let hex: ptr = alloc(64);
+    let chunk: ptr = alloc(1000);
+    mem_fill(chunk, 0, 1000, 97);
+    sha1_init(ctx);
+    let i: u32 = 0;
+    while i < 1000 {
+        sha1_update(ctx, chunk, 0, 1000);
+        i = i + 1;
+    }
+    sha1_final(ctx, out);
+    sha1_hex(hex, 0, out);
+    let want: str = "34aa973cd4c4daa4f61eeb2bdbad27316534016f";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_sha1_streaming_matches_oneshot() -> bool {
+    let c1: ptr = alloc(SHA1_CTX);
+    let c2: ptr = alloc(SHA1_CTX);
+    let d: ptr = alloc(200);
+    let o1: ptr = alloc(SHA1_DIGEST);
+    let o2: ptr = alloc(SHA1_DIGEST);
+    let i: u32 = 0;
+    while i < 200 {
+        store8(d, i, ((i * 53 + 17) % 256) as u8);
+        i = i + 1;
+    }
+    sha1(d, 0, 200, o1, c1);
+    sha1_init(c2);
+    sha1_update(c2, d, 0, 1);
+    sha1_update(c2, d, 1, 64);
+    sha1_update(c2, d, 65, 135);
+    sha1_final(c2, o2);
+    return mem_eq(o1, 0, o2, 0, 20);
+
+}
+fn test_sha1_one_bit_change() -> bool {
+    let ctx: ptr = alloc(SHA1_CTX);
+    let d: ptr = alloc(16);
+    let a: ptr = alloc(SHA1_DIGEST);
+    let b: ptr = alloc(SHA1_DIGEST);
+    mem_fill(d, 0, 16, 0);
+    sha1(d, 0, 16, a, ctx);
+    store8(d, 0, 1 as u8);
+    sha1(d, 0, 16, b, ctx);
+    return mem_eq(a, 0, b, 0, 20) == false;
+
+}
+fn test_sha1_hex_is_lowercase_hex() -> bool {
+    let ctx: ptr = alloc(SHA1_CTX);
+    let out: ptr = alloc(SHA1_DIGEST);
+    let hex: ptr = alloc(64);
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 16, 255);
+    sha1(d, 0, 16, out, ctx);
+    let n: u32 = sha1_hex(hex, 0, out);
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < 40 {
+        let c: u32 = load8(hex, i);
+        if (c < 48 || c > 57) && (c < 97 || c > 102) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return n == 40 && ok == 1;
+
+}
+fn test_sha1_block_boundary_lengths() -> bool {
+    // 55/56/64 是补位的三个接缝, 摘要必须互不相同。
+    let ctx: ptr = alloc(SHA1_CTX);
+    let d: ptr = alloc(64);
+    let a: ptr = alloc(SHA1_DIGEST);
+    let b: ptr = alloc(SHA1_DIGEST);
+    let c: ptr = alloc(SHA1_DIGEST);
+    mem_fill(d, 0, 64, 122);
+    sha1(d, 0, 55, a, ctx);
+    sha1(d, 0, 56, b, ctx);
+    sha1(d, 0, 64, c, ctx);
+    return mem_eq(a, 0, b, 0, 20) == false && mem_eq(b, 0, c, 0, 20) == false
+        && mem_eq(a, 0, c, 0, 20) == false;
+
+}

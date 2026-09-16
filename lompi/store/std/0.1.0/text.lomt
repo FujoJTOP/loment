@@ -1,0 +1,191 @@
+// std/text.lomt — 字节段的比较与查找
+//
+// 为什么**不**叫 str: `str` 是内建类型名, 模块撞类型名会按 E9 拦下。
+// 而且这层操作的是 (ptr, off, len) 这种**运行期**文本, 不是 `str` 那种编译期字面量 ——
+// 换个名字正好把这件事说清楚。
+//
+// 为什么要它: 工具里 `span_has` / `span_eq2` / `same_bytes` / `bytes_eq` / `find_after`
+// 各写各的, 全是"在一段字节里比/找"。这一层收口。
+//
+// 命名: 公开一律 text_*, 内部一律 tx_*。自检 test_text_*。
+
+module text
+
+use "char.lomt"
+use "mem.lomt"
+
+/// 找不到的哨兵。
+pub const TEXT_NONE: u32 = 4294967295;
+
+/// 两段字节按字典序比较: 前 < 后 返回 -1, 相等 0, 前 > 后 1。
+/// 先比公共前缀, 再比长度 —— 与 Rust 的 `&[u8]` 序一致。
+pub fn text_cmp(p: ptr, ao: u32, al: u32, q: ptr, bo: u32, bl: u32) -> i64 {
+    let n: u32 = al;
+    if bl < n {
+        n = bl;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let a: u32 = load8(p, ao + i);
+        let b: u32 = load8(q, bo + i);
+        if a < b {
+            return 0 - 1;
+        }
+        if a > b {
+            return 1;
+        }
+        i = i + 1;
+    }
+    if al < bl {
+        return 0 - 1;
+    }
+    if al > bl {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn text_eq(p: ptr, ao: u32, al: u32, q: ptr, bo: u32, bl: u32) -> bool {
+    if al != bl {
+        return false;
+    }
+    return mem_eq(p, ao, q, bo, al);
+}
+
+/// 与一个编译期字面量比较。
+pub fn text_eq_lit(p: ptr, o: u32, n: u32, lit: str) -> bool {
+    return text_eq(p, o, n, str_ptr(lit), 0, str_len(lit));
+}
+
+/// 在 p[o .. o+n) 里找字面量, 返回它**起始**的偏移; 找不到 TEXT_NONE。
+/// 朴素匹配 —— 这里的文本都是标记/关键字量级, 不值得上 KMP。
+pub fn text_find(p: ptr, o: u32, n: u32, lit: str) -> u32 {
+    let L: u32 = str_len(lit);
+    if L == 0 || L > n {
+        return TEXT_NONE;
+    }
+    let i: u32 = 0;
+    while i + L <= n {
+        if text_eq(p, o + i, L, str_ptr(lit), 0, L) {
+            return o + i;
+        }
+        i = i + 1;
+    }
+    return TEXT_NONE;
+}
+
+pub fn text_starts_with(p: ptr, o: u32, n: u32, lit: str) -> bool {
+    let L: u32 = str_len(lit);
+    if L > n {
+        return false;
+    }
+    return text_eq(p, o, L, str_ptr(lit), 0, L);
+}
+
+pub fn text_ends_with(p: ptr, o: u32, n: u32, lit: str) -> bool {
+    let L: u32 = str_len(lit);
+    if L > n {
+        return false;
+    }
+    return text_eq(p, o + n - L, L, str_ptr(lit), 0, L);
+}
+
+/// 某个字节出现几次。
+pub fn text_count_byte(p: ptr, o: u32, n: u32, v: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, o + i) == v {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 整段是否全为十进制数字 (空段返回 false —— "没有内容"不该算"是数字")。
+pub fn text_is_digits(p: ptr, o: u32, n: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if char_is_digit(load8(p, o + i)) == false {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_text_cmp() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 3, 97);          // "aaa"
+    mem_fill(b, 0, 3, 97);
+    store8(b, 2, 98 as u8);         // "aab"
+    return text_cmp(a, 0, 3, b, 0, 3) == 0 - 1 && text_cmp(b, 0, 3, a, 0, 3) == 1
+        && text_cmp(a, 0, 3, a, 0, 3) == 0;
+}
+
+fn test_text_cmp_prefix_shorter_is_less() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    mem_fill(a, 0, 6, 120);         // "xxxxxx"
+    return text_cmp(a, 0, 3, a, 0, 6) == 0 - 1 && text_cmp(a, 0, 6, a, 0, 3) == 1;
+}
+
+fn test_text_eq_lit() -> bool {
+    let a: ptr = alloc(16);
+    let n: u32 = 0;
+    store8(a, 0, 45 as u8);
+    store8(a, 1, 45 as u8);
+    store8(a, 2, 120 as u8);
+    return text_eq_lit(a, 0, 3, "--x") && !text_eq_lit(a, 0, 2, "--x");
+}
+
+fn test_text_find() -> bool {
+    let a: ptr = alloc(32);
+    store8(a, 0, 97 as u8);
+    store8(a, 1, 98 as u8);
+    store8(a, 2, 99 as u8);
+    store8(a, 3, 100 as u8);
+    return text_find(a, 0, 4, "cd") == 2 && text_find(a, 0, 4, "xy") == TEXT_NONE
+        && text_find(a, 0, 4, "ab") == 0;
+}
+
+fn test_text_find_empty_or_too_long() -> bool {
+    let a: ptr = alloc(16);
+    mem_fill(a, 0, 4, 97);
+    return text_find(a, 0, 4, "") == TEXT_NONE && text_find(a, 0, 2, "aaa") == TEXT_NONE;
+}
+
+fn test_text_starts_ends() -> bool {
+    let a: ptr = alloc(16);
+    store8(a, 0, 47 as u8);
+    store8(a, 1, 116 as u8);
+    store8(a, 2, 109 as u8);
+    store8(a, 3, 112 as u8);
+    return text_starts_with(a, 0, 4, "/t") && text_ends_with(a, 0, 4, "mp")
+        && !text_starts_with(a, 0, 2, "/tmp");
+}
+
+fn test_text_count_byte() -> bool {
+    let a: ptr = alloc(16);
+    mem_fill(a, 0, 8, 97);
+    store8(a, 3, 44 as u8);
+    store8(a, 6, 44 as u8);
+    return text_count_byte(a, 0, 8, 44) == 2 && text_count_byte(a, 0, 8, 122) == 0;
+}
+
+fn test_text_is_digits() -> bool {
+    let a: ptr = alloc(16);
+    store8(a, 0, 49 as u8);
+    store8(a, 1, 50 as u8);
+    let ok: bool = text_is_digits(a, 0, 2);
+    store8(a, 1, 120 as u8);
+    let bad: bool = text_is_digits(a, 0, 2);
+    return ok && !bad && !text_is_digits(a, 0, 0);
+}

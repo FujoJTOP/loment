@@ -1,0 +1,724 @@
+// std/huffman.lomt — 霍夫曼编码: 频率表 -> 码长 -> **规范码**
+//
+// 为什么最后一定落到"规范码"上 (RFC 1951 §3.2.2): 一般霍夫曼树有**很多**棵都能达到
+// 同样的最优代价, 而它们给出的具体码字不同。如果编码器和解码器各自建一棵, 就得把
+// 整棵树传过去。规范码把"选哪棵树"砍到只剩**码长** —— 只要两边拿到同样的码长表,
+// 码字就唯一确定了 (按长度分层、同层按符号升序、用那个两行的递推式算出来)。
+// DEFLATE 的动态块里传的就是码长表, 不是树。
+//
+// 本模块给三层, 每层都能单独用:
+//   huffman_lengths   频率 -> 码长
+//   huffman_codes     码长 -> 码字      (纯 RFC 1951 §3.2.2, 不含建树)
+//   huffman_build     频率 -> 码长 + 码字(前两者串起来)
+// 外加一个 huffman_decode: 从"MSB 先出的位窗口"里解一个符号。
+//
+// **没有树节点结构体** (本语言不能按值传聚合体), 所以树是**平坦数组 + 下标**:
+//   weight[i] 权重 (叶子是频率, 内部节点是和), parent[i] 父下标 (u16, 65535 = 无)
+// 内部节点排在叶子之后, 而且只有**频率 > 0** 的叶子参与建树 —— 频率 0 的符号
+// 不能进树, 否则它会被当成"最小权重"挂到最深处, 白占一个码位。
+//
+// 诚实清单:
+//   - 建树是 **O(n^2) 扫描找两个最小值**, 不是堆。符号数最多 288 (DEFLATE 的字面表),
+//     288^2 = 8 万次比较, 便宜到不值得写堆。要编几千个符号的表就得换堆。
+//   - **只做码长上限的裁剪, 不做包并 (package-merge)**。超过 maxbits 时用 zlib 那套
+//     "把最深的叶子往下挪" 的修正, 得到的码**合法但可能略非最优** (差几个 bit)。
+//     真最优要 package-merge, 那是另一个量级的代码, DEFLATE 里 zlib 也是这么做的。
+//   - parent 用 u16 存: 所以 nsym 不能超过 32767 (节点数 2*nsym-1 要装进 u16)。
+//     超了 `huffman_lengths` 给 HUFF_ERR。
+//   - `huffman_decode` 是**线性查找** (每个码长扫一遍全表), 不建查找表。对几十个符号
+//     的 DEFLATE 表够用; 每秒解几 MB 就得上两级表。
+//   - 全零频率**不是错**, 是"没有码": 返回 0, 所有码长为 0。DEFLATE 的空块会用到。
+//
+// 命名: 公开 huffman_*, 内部 hf_*。自检 test_huffman_*。
+
+module huffman
+
+use "mem.lomt"
+
+pub const HUFF_ERR: u32 = 4294967295;
+pub const HUFF_NONE: u32 = 4294967294;
+/// `huffman_decode` 解不出符号时的返回值 (64 位全 1)。
+pub const HUFF_NONE64: u64 = 18446744073709551615;
+/// 常用的码长上限 (DEFLATE 规定 <= 15)。
+pub const HUFF_MAX_BITS: u32 = 15;
+/// parent 数组里"没有父"的标记。
+pub const HUFF_NOPARENT: u32 = 65535;
+
+/// `huffman_lengths` / `huffman_build` 要的工作区大小。
+/// 布局: [weight: 2*nsym*4][parent: 2*nsym*2][order: nsym*4][bl_count + next_code: 2*(maxbits+2)*4]
+pub fn huffman_scratch_bytes(nsym: u32, maxbits: u32) -> u32 {
+    return 16 * nsym + 8 * (maxbits + 2);
+}
+
+/// `huffman_codes` 单独用时要的工作区大小 (就两个小表)。
+pub fn huffman_codes_scratch_bytes(maxbits: u32) -> u32 {
+    return 8 * (maxbits + 2);
+}
+
+// ---------------------------------------------------------------- 建树 (内部)
+
+/// 在 0..n 里挑一个 parent 为空、权重最小、且不是 skip 的节点。
+/// **权重为 0 的叶子不算候选** —— 这就是"只让频率 > 0 的叶子进树"的落点。
+fn hf_pick(sc: ptr, pb: u32, n: u32, nsym: u32, skip: u32) -> u32 {
+    let best: u32 = HUFF_ERR;
+    let bw: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if i != skip && mem_load16(sc, pb + i * 2) == HUFF_NOPARENT {
+            let w: u32 = mem_load32(sc, i * 4);
+            if w > 0 && (best == HUFF_ERR || w < bw) {
+                best = i;
+                bw = w;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- 频率 -> 码长
+
+/// 频率表 -> 码长表。返回"有几个符号拿到了码" (频率 > 0 的符号数), 出错给 HUFF_ERR。
+/// 全零频率返回 0 (合法, 表示没有码)。**只有一种符号时给它码长 1** —— RFC 1951 的
+/// 规定, 也是"一棵只有一个叶子的树"唯一说得通的编码方式 (码长 0 就没法编了)。
+pub fn huffman_lengths(freqs: ptr, nsym: u32, lens_out: ptr, sc: ptr, maxbits: u32) -> u32 {
+    if nsym == 0 || nsym > 32767 || maxbits == 0 || maxbits > 30 {
+        return HUFF_ERR;
+    }
+    let cap: u32 = 2 * nsym;
+    let pb: u32 = cap * 4;
+    let ob: u32 = pb + cap * 2;
+    let cb: u32 = ob + nsym * 4;
+    // 装 weight / parent, 数一数有几个叶子是活的
+    let active: u32 = 0;
+    let i: u32 = 0;
+    while i < nsym {
+        let f: u32 = mem_load32(freqs, i * 4);
+        mem_store32(sc, i * 4, f);
+        mem_store16(sc, pb + i * 2, HUFF_NOPARENT);
+        if f > 0 {
+            active = active + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < nsym {
+        mem_store32(lens_out, i * 4, 0);
+        i = i + 1;
+    }
+    if active == 0 {
+        return 0;
+    }
+    if active == 1 {
+        i = 0;
+        while i < nsym {
+            if mem_load32(freqs, i * 4) > 0 {
+                mem_store32(lens_out, i * 4, 1);
+                i = nsym;
+            } else {
+                i = i + 1;
+            }
+        }
+        return 1;
+    }
+    // 建树: 每次取两个最小的合一个, 内部节点接着往后排
+    let n: u32 = nsym;
+    let target: u32 = nsym + active - 1;
+    while n < target {
+        let a: u32 = hf_pick(sc, pb, n, nsym, HUFF_ERR);
+        let b: u32 = hf_pick(sc, pb, n, nsym, a);
+        if a == HUFF_ERR || b == HUFF_ERR {
+            return HUFF_ERR; // 不该发生 (active >= 2)
+        }
+        mem_store32(sc, n * 4, mem_load32(sc, a * 4) + mem_load32(sc, b * 4));
+        mem_store16(sc, pb + n * 2, HUFF_NOPARENT);
+        mem_store16(sc, pb + a * 2, n);
+        mem_store16(sc, pb + b * 2, n);
+        n = n + 1;
+    }
+    // 叶子深度 = 到根的跳数 = 码长
+    i = 0;
+    while i < nsym {
+        if mem_load32(sc, i * 4) > 0 {
+            let d: u32 = 0;
+            let c: u32 = i;
+            while mem_load16(sc, pb + c * 2) != HUFF_NOPARENT {
+                c = mem_load16(sc, pb + c * 2);
+                d = d + 1;
+            }
+            mem_store32(lens_out, i * 4, d);
+        }
+        i = i + 1;
+    }
+    // bl_count: 每个长度各有几个码; 顺手把超过 maxbits 的记成 overflow
+    let bl: u32 = maxbits + 2;
+    i = 0;
+    while i < bl {
+        mem_store32(sc, cb + i * 4, 0);
+        i = i + 1;
+    }
+    let overflow: u32 = 0;
+    i = 0;
+    while i < nsym {
+        let d0: u32 = mem_load32(lens_out, i * 4);
+        if d0 > 0 {
+            let c: u32 = d0;
+            if c > maxbits {
+                c = maxbits;
+                overflow = overflow + 1;
+            }
+            mem_store32(sc, cb + c * 4, mem_load32(sc, cb + c * 4) + 1);
+        }
+        i = i + 1;
+    }
+    // 码长上限的修正: 把一个较浅的叶子往下挪一层, 换掉两个最深的, 净效果是
+    // "码字总数不变、最深的变浅"。
+    //
+    // **挪几步不是"被裁掉几个"** —— 这是踩过的坑。裁剪会让 Kraft 和 (按 2^maxbits
+    // 归一后) 变成 need > space, 而每一步修正让 need 正好减 1 (推导: 减掉
+    // 2^(maxbits-b), 加上 2*2^(maxbits-b-1), 再减 1, 恰好净 --1)。所以循环次数 =
+    // need - space, 一步不多一步不少。zlib 那版数的是 overflow 再每次减 2, 因为
+    // 它数的是**含内部节点**的被裁节点数; 只数叶子的话会少跑一轮, 结果过满。
+    let steps: u32 = 0;
+    if overflow > 0 {
+        let space: u32 = 1 << maxbits;
+        let need: u32 = 0;
+        let bits0: u32 = 1;
+        while bits0 <= maxbits {
+            need = need + (mem_load32(sc, cb + bits0 * 4) << (maxbits - bits0));
+            bits0 = bits0 + 1;
+        }
+        if need > space {
+            steps = need - space;
+        }
+    }
+    let st: u32 = 0;
+    while st < steps {
+        let bits: u32 = maxbits - 1;
+        let searching: bool = true;
+        while searching {
+            if bits == 0 {
+                searching = false;
+            } else if mem_load32(sc, cb + bits * 4) > 0 {
+                searching = false;
+            } else {
+                bits = bits - 1;
+            }
+        }
+        if bits == 0 {
+            st = steps; // 找不到可挪的层: 极病态输入, 只能放弃修正
+        } else {
+            mem_store32(sc, cb + bits * 4, mem_load32(sc, cb + bits * 4) - 1);
+            mem_store32(sc, cb + (bits + 1) * 4, mem_load32(sc, cb + (bits + 1) * 4) + 2);
+            mem_store32(sc, cb + maxbits * 4, mem_load32(sc, cb + maxbits * 4) - 1);
+            st = st + 1;
+        }
+    }
+    // 把码长按**频率降序**重新发下去: 频率高的拿短码。
+    // (上面的 bl_count 只说了"每个长度有几个", 没说"给谁"。)
+    let k: u32 = 0;
+    i = 0;
+    while i < nsym {
+        if mem_load32(sc, i * 4) > 0 {
+            mem_store32(sc, ob + k * 4, i);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    let a: u32 = 1;
+    while a < k {
+        let v: u32 = mem_load32(sc, ob + a * 4);
+        let w: u32 = mem_load32(sc, v * 4);
+        let b: u32 = a;
+        let moving: bool = true;
+        while b > 0 && moving {
+            let pv: u32 = mem_load32(sc, ob + (b - 1) * 4);
+            if mem_load32(sc, pv * 4) < w {
+                mem_store32(sc, ob + b * 4, pv);
+                b = b - 1;
+            } else {
+                moving = false;
+            }
+        }
+        mem_store32(sc, ob + b * 4, v);
+        a = a + 1;
+    }
+    i = 0;
+    while i < nsym {
+        mem_store32(lens_out, i * 4, 0);
+        i = i + 1;
+    }
+    let idx: u32 = 0;
+    let L: u32 = 1;
+    while L <= maxbits {
+        let c: u32 = mem_load32(sc, cb + L * 4);
+        let j: u32 = 0;
+        while j < c && idx < k {
+            mem_store32(lens_out, mem_load32(sc, ob + idx * 4) * 4, L);
+            idx = idx + 1;
+            j = j + 1;
+        }
+        L = L + 1;
+    }
+    return k;
+}
+
+// ---------------------------------------------------------------- 码长 -> 规范码
+
+/// RFC 1951 §3.2.2 的规范码生成。sc 需要 `huffman_codes_scratch_bytes(maxbits)` 字节。
+/// 返回拿到码的符号数; 码长超过 maxbits、或码空间**过满**(违反 Kraft 不等式)
+/// 都给 HUFF_ERR —— 后者是给 inflate 用的: 动态块的码长表直接从流里读, 会是坏的。
+pub fn huffman_codes(lens: ptr, nsym: u32, codes_out: ptr, sc: ptr, maxbits: u32) -> u32 {
+    if nsym == 0 || maxbits == 0 || maxbits > 30 {
+        return HUFF_ERR;
+    }
+    let cb: u32 = 0;
+    let nb: u32 = (maxbits + 2) * 4;
+    mem_fill(sc, 0, nb * 2, 0);
+    let i: u32 = 0;
+    let used: u32 = 0;
+    while i < nsym {
+        let L: u32 = mem_load32(lens, i * 4);
+        if L != 0 {
+            if L > maxbits {
+                return HUFF_ERR;
+            }
+            mem_store32(sc, cb + L * 4, mem_load32(sc, cb + L * 4) + 1);
+            used = used + 1;
+        }
+        i = i + 1;
+    }
+    // 第 1 步 + 第 2 步: 每一层最小的码字
+    let code: u32 = 0;
+    let bits: u32 = 1;
+    while bits <= maxbits {
+        code = (code + mem_load32(sc, cb + (bits - 1) * 4)) << 1;
+        mem_store32(sc, nb + bits * 4, code);
+        bits = bits + 1;
+    }
+    // Kraft 检查: sum(bl_count[L] * 2^(maxbits-L)) 不能超过 2^maxbits。
+    // 超了说明这组码长**根本不是**前缀码 (两个码字互为前缀), 必须拒。
+    let space: u32 = 1 << maxbits;
+    let need: u32 = 0;
+    bits = 1;
+    while bits <= maxbits {
+        need = need + (mem_load32(sc, cb + bits * 4) << (maxbits - bits));
+        bits = bits + 1;
+    }
+    if need > space {
+        return HUFF_ERR;
+    }
+    // 第 3 步: 按**符号升序**发码 (同一层里连续), 这才是规范码的"规范"所在。
+    i = 0;
+    while i < nsym {
+        mem_store32(codes_out, i * 4, 0);
+        let L2: u32 = mem_load32(lens, i * 4);
+        if L2 != 0 {
+            let c2: u32 = mem_load32(sc, nb + L2 * 4);
+            mem_store32(codes_out, i * 4, c2);
+            mem_store32(sc, nb + L2 * 4, c2 + 1);
+        }
+        i = i + 1;
+    }
+    return used;
+}
+
+/// 频率表 -> 码长 + 码字。sc 用 `huffman_scratch_bytes(nsym, maxbits)` 那一份。
+/// 返回符号数 (与 huffman_codes 相同), 出错给 HUFF_ERR。
+pub fn huffman_build(freqs: ptr, nsym: u32, lens_out: ptr, codes_out: ptr, sc: ptr, maxbits: u32) -> u32 {
+    let a: u32 = huffman_lengths(freqs, nsym, lens_out, sc, maxbits);
+    if a == HUFF_ERR {
+        return HUFF_ERR;
+    }
+    // huffman_codes 只用 sc 开头那两个小表 —— 建树用的 weight/parent 已经没用了,
+    // 直接复用同一块工作区, 不必再多要一份。
+    let c: u32 = huffman_codes(lens_out, nsym, codes_out, sc, maxbits);
+    if c == HUFF_ERR || c != a {
+        return HUFF_ERR;
+    }
+    return c;
+}
+
+/// 加权码长 (总位数) —— 用来判断一组码长比另一组好在哪。
+pub fn huffman_weighted_length(lens: ptr, nsym: u32, freqs: ptr) -> u32 {
+    let t: u32 = 0;
+    let i: u32 = 0;
+    while i < nsym {
+        t = t + mem_load32(lens, i * 4) * mem_load32(freqs, i * 4);
+        i = i + 1;
+    }
+    return t;
+}
+
+// ---------------------------------------------------------------- 解码一个符号
+
+/// 从"最高位是码流第一个位"的窗口 peek 里解一个符号。
+/// 返回 `(符号 << 32) | 用掉的位数`; 解不出给 HUFF_NONE64。
+///
+/// 为什么是这个位序: 霍夫曼码在流里是**高位先出**的, 所以"下一个码字"在窗口里
+/// 就占着最高的几位。调用方只要把接下来的 maxbits 个位按 MSB-first 装进 u32 就行
+/// (位不够就补 0 —— 补出来的那些永远不会被读到, 因为合法码字不会那么长)。
+pub fn huffman_decode(codes: ptr, lens: ptr, nsym: u32, peek: u32, maxbits: u32) -> u64 {
+    let code: u32 = 0;
+    let len: u32 = 1;
+    let found: u64 = HUFF_NONE64;
+    while len <= maxbits {
+        code = (code << 1) | ((peek >> (maxbits - len)) & 1);
+        let i: u32 = 0;
+        while i < nsym {
+            if mem_load32(lens, i * 4) == len && mem_load32(codes, i * 4) == code {
+                found = ((i as u64) << 32) | (len as u64);
+                i = nsym; // 找到就停 (没有 break, 用下标顶出去)
+            } else {
+                i = i + 1;
+            }
+        }
+        if found != HUFF_NONE64 {
+            len = maxbits + 1;
+        } else {
+            len = len + 1;
+        }
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn hf_fill_lens(lens: ptr, n: u32, v: u32) {
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(lens, i * 4, v);
+        i = i + 1;
+    }
+}
+
+/// RFC 1951 §3.2.6 那块**固定字面/长度**表的码长。
+/// 0..143 -> 8 位, 144..255 -> 9 位, 256..279 -> 7 位, 280..287 -> 8 位。
+fn hf_rfc_fixed_lit_lens(lens: ptr) {
+    let i: u32 = 0;
+    while i < 288 {
+        let v: u32 = 8;
+        if i >= 144 && i <= 255 {
+            v = 9;
+        } else if i >= 256 && i <= 279 {
+            v = 7;
+        }
+        mem_store32(lens, i * 4, v);
+        i = i + 1;
+    }
+}
+
+fn test_huffman_rfc1951_fixed_literal_codes() -> bool {
+    // 外部真值: RFC 1951 §3.2.6 直接印出来的那张表。
+    // 规范码算法跑在那组码长上, 必须**逐字**得到 RFC 印的那些码字。
+    let lens: ptr = alloc(288 * 4);
+    let codes: ptr = alloc(288 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(9));
+    hf_rfc_fixed_lit_lens(lens);
+    let used: u32 = huffman_codes(lens, 288, codes, sc, 9);
+    //   0   -> 00110000 (0x30)      143 -> 10111111 (0xBF)
+    //   144 -> 110010000 (0x190)    255 -> 111111111 (0x1FF)
+    //   256 -> 0000000 (0x00)       279 -> 0010111 (0x17)
+    //   280 -> 11000000 (0xC0)      287 -> 11000111 (0xC7)
+    return used == 288
+        && mem_load32(codes, 0 * 4) == 0x30 && mem_load32(codes, 143 * 4) == 0xBF
+        && mem_load32(codes, 144 * 4) == 0x190 && mem_load32(codes, 255 * 4) == 0x1FF
+        && mem_load32(codes, 256 * 4) == 0x00 && mem_load32(codes, 279 * 4) == 0x17
+        && mem_load32(codes, 280 * 4) == 0xC0 && mem_load32(codes, 287 * 4) == 0xC7;
+}
+
+fn test_huffman_rfc1951_fixed_literal_lengths() -> bool {
+    // 同一张表的码长侧: 每层各有多少个码。这是对上一条的独立复核 ——
+    // 码字对了但码长错了是不可能的, 所以两边都要对。
+    let lens: ptr = alloc(288 * 4);
+    let codes: ptr = alloc(288 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(9));
+    hf_rfc_fixed_lit_lens(lens);
+    huffman_codes(lens, 288, codes, sc, 9);
+    let n7: u32 = 0;
+    let n8: u32 = 0;
+    let n9: u32 = 0;
+    let i: u32 = 0;
+    while i < 288 {
+        let L: u32 = mem_load32(lens, i * 4);
+        if L == 7 {
+            n7 = n7 + 1;
+        } else if L == 8 {
+            n8 = n8 + 1;
+        } else if L == 9 {
+            n9 = n9 + 1;
+        }
+        i = i + 1;
+    }
+    // 7 位 24 个 (256..279), 8 位 152 个 (0..143 + 280..287), 9 位 112 个 (144..255)
+    return n7 == 24 && n8 == 152 && n9 == 112;
+}
+
+fn test_huffman_rfc1951_fixed_distance_codes() -> bool {
+    // 固定距离表: 32 个符号**全是 5 位**, 于是规范码就是 0..31 本身。
+    let lens: ptr = alloc(32 * 4);
+    let codes: ptr = alloc(32 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(5));
+    hf_fill_lens(lens, 32, 5);
+    let used: u32 = huffman_codes(lens, 32, codes, sc, 5);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        if mem_load32(codes, i * 4) != i {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return used == 32 && bad == 0;
+}
+
+fn test_huffman_hand_computed_lengths_and_codes() -> bool {
+    // 频率 [3,3,2,1,1] 手推一遍:
+    //   合 1+1=2 -> 合 2+2=4 -> 合 3+3=6 -> 合 4+6=10
+    //   深度: 0,1,2 -> 2; 3,4 -> 3。加权总长 = 2*(3+3+2) + 3*(1+1) = 22。
+    //   规范码: bl_count[2]=3, bl_count[3]=2 -> 码长 2 的从 0 起, 码长 3 的从 6 起。
+    //   按**符号升序**发: 0,1,2 -> 0,1,2; 3,4 -> 6,7。
+    let f: ptr = alloc(5 * 4);
+    let lens: ptr = alloc(5 * 4);
+    let codes: ptr = alloc(5 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(5, 15));
+    mem_store32(f, 0 * 4, 3);
+    mem_store32(f, 1 * 4, 3);
+    mem_store32(f, 2 * 4, 2);
+    mem_store32(f, 3 * 4, 1);
+    mem_store32(f, 4 * 4, 1);
+    let n: u32 = huffman_build(f, 5, lens, codes, sc, 15);
+    let ok1: bool = n == 5
+        && mem_load32(lens, 0 * 4) == 2 && mem_load32(lens, 1 * 4) == 2
+        && mem_load32(lens, 2 * 4) == 2 && mem_load32(lens, 3 * 4) == 3
+        && mem_load32(lens, 4 * 4) == 3;
+    let ok2: bool = mem_load32(codes, 0 * 4) == 0 && mem_load32(codes, 1 * 4) == 1
+        && mem_load32(codes, 2 * 4) == 2 && mem_load32(codes, 3 * 4) == 6
+        && mem_load32(codes, 4 * 4) == 7;
+    return ok1 && ok2 && huffman_weighted_length(lens, 5, f) == 22;
+}
+
+fn test_huffman_single_symbol_gets_one_bit() -> bool {
+    // RFC 1951: 只有一种符号时, 它的码长是 **1** 而不是 0 (0 位没法编)。
+    let f: ptr = alloc(4 * 4);
+    let lens: ptr = alloc(4 * 4);
+    let codes: ptr = alloc(4 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(4, 15));
+    mem_store32(f, 0 * 4, 0);
+    mem_store32(f, 1 * 4, 0);
+    mem_store32(f, 2 * 4, 7);
+    mem_store32(f, 3 * 4, 0);
+    let n: u32 = huffman_build(f, 4, lens, codes, sc, 15);
+    return n == 1 && mem_load32(lens, 2 * 4) == 1 && mem_load32(codes, 2 * 4) == 0
+        && mem_load32(lens, 0 * 4) == 0 && mem_load32(lens, 1 * 4) == 0
+        && mem_load32(lens, 3 * 4) == 0;
+}
+
+fn test_huffman_single_symbol_decodes() -> bool {
+    // 单符号的码长 1、码字 0 —— 读一个位就出来, 且必须正好用 1 位。
+    let f: ptr = alloc(4 * 4);
+    let lens: ptr = alloc(4 * 4);
+    let codes: ptr = alloc(4 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(4, 15));
+    mem_store32(f, 0 * 4, 0);
+    mem_store32(f, 1 * 4, 5);
+    mem_store32(f, 2 * 4, 0);
+    mem_store32(f, 3 * 4, 0);
+    huffman_build(f, 4, lens, codes, sc, 15);
+    let r: u64 = huffman_decode(codes, lens, 4, 0, 15);
+    let sym: u32 = (r >> 32) as u32;
+    let blen: u32 = (r & 4294967295) as u32;
+    return sym == 1 && blen == 1;
+}
+
+fn test_huffman_all_zero_frequencies() -> bool {
+    // 全零频率不是错, 是"没有码": 返回 0, 所有码长为 0, 也没有码字分出去。
+    let f: ptr = alloc(8 * 4);
+    let lens: ptr = alloc(8 * 4);
+    let codes: ptr = alloc(8 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(8, 15));
+    hf_fill_lens(f, 8, 0);
+    let n: u32 = huffman_build(f, 8, lens, codes, sc, 15);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        if mem_load32(lens, i * 4) != 0 || mem_load32(codes, i * 4) != 0 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return n == 0 && bad == 0;
+}
+
+fn test_huffman_zero_freq_symbols_excluded() -> bool {
+    // 频率 0 的符号**不许**进树: 它们不能拿到码, 也不能把别人的码长挤长。
+    // 只有 0 号和 2 号活着 -> 两个符号各 1 位。
+    let f: ptr = alloc(5 * 4);
+    let lens: ptr = alloc(5 * 4);
+    let codes: ptr = alloc(5 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(5, 15));
+    mem_store32(f, 0 * 4, 9);
+    mem_store32(f, 1 * 4, 0);
+    mem_store32(f, 2 * 4, 4);
+    mem_store32(f, 3 * 4, 0);
+    mem_store32(f, 4 * 4, 0);
+    let n: u32 = huffman_build(f, 5, lens, codes, sc, 15);
+    return n == 2 && mem_load32(lens, 0 * 4) == 1 && mem_load32(lens, 2 * 4) == 1
+        && mem_load32(lens, 1 * 4) == 0 && mem_load32(lens, 3 * 4) == 0
+        && mem_load32(codes, 0 * 4) == 0 && mem_load32(codes, 2 * 4) == 1;
+}
+
+fn test_huffman_code_length_limit_is_enforced() -> bool {
+    // 斐波那契频率会造出一棵"梳子"树 —— 20 个符号深度 1..19, 一定撞 15 的上限。
+    // 修正之后必须: 所有码长 <= 15, 码字仍是一组合法前缀码 (huffman_codes 的
+    // Kraft 检查会替我们判), 且符号数没丢。
+    let f: ptr = alloc(20 * 4);
+    let lens: ptr = alloc(20 * 4);
+    let codes: ptr = alloc(20 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(20, 15));
+    let a: u32 = 0;
+    let b: u32 = 1;
+    let i: u32 = 0;
+    while i < 20 {
+        mem_store32(f, i * 4, b);
+        let t: u32 = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    let n: u32 = huffman_build(f, 20, lens, codes, sc, 15);
+    if n != 20 {
+        return false;
+    }
+    let maxlen: u32 = 0;
+    i = 0;
+    while i < 20 {
+        let L: u32 = mem_load32(lens, i * 4);
+        if L > maxlen {
+            maxlen = L;
+        }
+        i = i + 1;
+    }
+    return maxlen <= 15;
+}
+
+fn test_huffman_kraft_overfull_is_rejected() -> bool {
+    // 三个符号都给 1 位 -> Kraft = 3/2 > 1, 根本不是前缀码。必须拒。
+    let lens: ptr = alloc(4 * 4);
+    let codes: ptr = alloc(4 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(15));
+    hf_fill_lens(lens, 3, 1);
+    mem_store32(lens, 3 * 4, 0);
+    let r: u32 = huffman_codes(lens, 4, codes, sc, 15);
+    // 对照: 两个符号各 1 位是**正好满**的 (Kraft = 1), 必须过。
+    let lens2: ptr = alloc(4 * 4);
+    let codes2: ptr = alloc(4 * 4);
+    hf_fill_lens(lens2, 2, 1);
+    mem_store32(lens2, 2 * 4, 0);
+    mem_store32(lens2, 3 * 4, 0);
+    let r2: u32 = huffman_codes(lens2, 4, codes2, sc, 15);
+    return r == HUFF_ERR && r2 == 2;
+}
+
+fn test_huffman_rejects_oversized_length() -> bool {
+    // 码长超过了声明的 maxbits —— 拒。不拒的话解码端会用错的位数去找。
+    let lens: ptr = alloc(4 * 4);
+    let codes: ptr = alloc(4 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(8));
+    mem_store32(lens, 0 * 4, 9);
+    mem_store32(lens, 1 * 4, 0);
+    mem_store32(lens, 2 * 4, 0);
+    mem_store32(lens, 3 * 4, 0);
+    return huffman_codes(lens, 4, codes, sc, 8) == HUFF_ERR;
+}
+
+fn test_huffman_codes_round_trip_through_decoder() -> bool {
+    // 表里每个符号, 按它的码字造一个位窗口, 解码器都必须还回同一个符号 + 同样位数。
+    let f: ptr = alloc(6 * 4);
+    let lens: ptr = alloc(6 * 4);
+    let codes: ptr = alloc(6 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(6, 15));
+    let maxbits: u32 = 15;
+    mem_store32(f, 0 * 4, 10);
+    mem_store32(f, 1 * 4, 6);
+    mem_store32(f, 2 * 4, 4);
+    mem_store32(f, 3 * 4, 2);
+    mem_store32(f, 4 * 4, 1);
+    mem_store32(f, 5 * 4, 1);
+    let n: u32 = huffman_build(f, 6, lens, codes, sc, maxbits);
+    if n != 6 {
+        return false;
+    }
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 6 {
+        let L: u32 = mem_load32(lens, i * 4);
+        let c: u32 = mem_load32(codes, i * 4);
+        // 码字占窗口最高的 L 位 —— MSB 先出
+        let peek: u32 = c << (maxbits - L);
+        let r: u64 = huffman_decode(codes, lens, 6, peek, maxbits);
+        let sym: u32 = (r >> 32) as u32;
+        let blen: u32 = (r & 4294967295) as u32;
+        if sym != i || blen != L {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_huffman_decoder_uses_fixed_literal_table() -> bool {
+    // 拿 RFC 的固定字面表去解 'A' (65)。65 的码是 0x30 + 65 = 0x71, 8 位。
+    // 再解 256 (块结束码), 7 位, 码字 0。
+    let lens: ptr = alloc(288 * 4);
+    let codes: ptr = alloc(288 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(9));
+    hf_rfc_fixed_lit_lens(lens);
+    huffman_codes(lens, 288, codes, sc, 9);
+    let peek_a: u32 = mem_load32(codes, 65 * 4) << (9 - 8);
+    let ra: u64 = huffman_decode(codes, lens, 288, peek_a, 9);
+    let peek_end: u32 = mem_load32(codes, 256 * 4) << (9 - 7);
+    let re: u64 = huffman_decode(codes, lens, 288, peek_end, 9);
+    let sa: u32 = (ra >> 32) as u32;
+    let la: u32 = (ra & 4294967295) as u32;
+    let se: u32 = (re >> 32) as u32;
+    let le: u32 = (re & 4294967295) as u32;
+    return sa == 65 && la == 8 && se == 256 && le == 7;
+}
+
+fn test_huffman_decode_returns_none_on_garbage() -> bool {
+    // 只有两个 1 位码 (0 和 1) 的表, 窗口里给的全是 1 —— 第一个位就是码 1,
+    // 能解出符号 1。要造"解不出"得用一个**不完整**的表: 只有码长 2 的两个码,
+    // 于是 0b00 是码、0b01 是码, 但 peek=0b1100... 的头两位是 11, 解不出来。
+    let lens: ptr = alloc(4 * 4);
+    let codes: ptr = alloc(4 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(15));
+    mem_store32(lens, 0 * 4, 2);
+    mem_store32(lens, 1 * 4, 2);
+    mem_store32(lens, 2 * 4, 0);
+    mem_store32(lens, 3 * 4, 0);
+    huffman_codes(lens, 4, codes, sc, 15);
+    // 0b11 打头 (在 maxbits=15 的窗口里就是最高的两位) -> 前两位是 3, 既不是 0 也不是 1
+    let r: u64 = huffman_decode(codes, lens, 4, 24576, 15);
+    return r == HUFF_NONE64;
+}
+
+fn test_huffman_scratch_sizes_are_sane() -> bool {
+    // 工作区公式要能罩住三个函数真正用到的那几段。
+    let a: u32 = huffman_scratch_bytes(288, 15);
+    let b: u32 = huffman_codes_scratch_bytes(15);
+    return a == 16 * 288 + 8 * 17 && b == 8 * 17 && a > b
+        && huffman_scratch_bytes(0, 0) == 16;
+}
+
+fn test_huffman_single_symbol_in_larger_table() -> bool {
+    // 单符号特例出现在**表的末尾**时也要对 (符号下标不等于 0)。
+    let f: ptr = alloc(19 * 4);
+    let lens: ptr = alloc(19 * 4);
+    let codes: ptr = alloc(19 * 4);
+    let sc: ptr = alloc(huffman_scratch_bytes(19, 15));
+    hf_fill_lens(f, 19, 0);
+    mem_store32(f, 18 * 4, 3);
+    let n: u32 = huffman_build(f, 19, lens, codes, sc, 15);
+    return n == 1 && mem_load32(lens, 18 * 4) == 1 && mem_load32(codes, 18 * 4) == 0;
+}

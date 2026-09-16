@@ -79,6 +79,11 @@ SKILL = ".claude/skills/loment/SKILL.md"
 #: 装进 ~/.claude/skills/lompi/、往 Codex 的 AGENTS.md 写一段**独立标记**的指针、卸载摘掉。
 #: 标记用 `lompi:` 前缀而**不复用** loment 的 —— 两份指南是两件事，卸载一份不该动另一份。
 SKILL_LOMPI = ".claude/skills/lompi/SKILL.md"
+#: lompi 的**标准库 store**：`std` 128 个 .lomt（127 个模块 + `std.lomt` 门面）与 `host`
+#: 7 个，各带一份 `pkg.lomp`，共 137 个文件。**随 Loment 一起装**（用户 2026-09-16 定），
+#: 落在包里 `share/lompi/store/`，安装时再拷进 lompi 自己认的全局 store。
+#: 正本在开发者工作区，见 tools/lompi_sync.py 的第三组配对（docs/170）。
+STORE_DIR = "lompi/store"
 
 #: 纯文本脚本一律 ASCII: Windows PowerShell 5.1 用 ANSI 读无 BOM 的 .ps1, 非 ASCII 会变乱码
 #: 并连带把后续行解析坏 (docs/157 §3.4 踩过)。中文说明在 README.md 与 docs/162 里。
@@ -382,6 +387,23 @@ done
 src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$uninstall" = 1 ]; then
+    # Take back the libraries this package put into lompi's store. Ask lompi where that is
+    # BEFORE deleting the binary (same question the install side asked, so same answer),
+    # and remove only the <name>/<version> trees this package shipped -- other versions the
+    # user installed under the same name are none of our business.
+    store_dst=""
+    if [ -x "$prefix/bin/lompi" ]; then
+        store_dst=$("$prefix/bin/lompi" config 2>/dev/null | sed -n 's/^store:[[:space:]]*//p' | tr -d '\r' | head -1)
+    fi
+    store_base="$prefix/share/lompi/store"
+    if [ -n "$store_dst" ] && [ -d "$store_base" ]; then
+        for d in "$store_base"/*/*; do
+            [ -d "$d" ] || continue
+            rm -rf "$store_dst/${d#$store_base/}"
+        done
+        rmdir "$store_dst" 2>/dev/null || true
+        rmdir "$(dirname "$store_dst")" 2>/dev/null || true
+    fi
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
           "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf" \
           "$prefix/bin/loment-cli" \
@@ -421,6 +443,23 @@ chmod 755 "$prefix/bin/"*
 "$prefix/bin/lompi" 2>&1 | grep -q "package manager for Loment" || {
     echo "install: installed but 'lompi' did not run" >&2; exit 1; }
 echo "install: Loment @DISPLAY@ -> $prefix"
+
+# lompi's standard library (std: 127 modules, host: 7 -- 137 files) goes into the store
+# lompi itself would use, so it is there the moment Loment is installed. ASK lompi for that
+# path -- never re-derive it here: cfg_root() has three rules (AppData / Users / exe dir)
+# and a second copy of them in this script would drift from lompi's.
+store_src="$prefix/share/lompi/store"
+if [ -d "$store_src" ]; then
+    store_dst=$("$prefix/bin/lompi" config 2>/dev/null | sed -n 's/^store:[[:space:]]*//p' | tr -d '\r' | head -1)
+    if [ -n "$store_dst" ]; then
+        mkdir -p "$store_dst"
+        cp -R "$store_src/." "$store_dst/"
+        echo "install: lompi store -> $store_dst"
+    else
+        echo "install: 'lompi config' gave no store path; the libraries stay at" >&2
+        echo "         $store_src -- pass that to lompi explicitly." >&2
+    fi
+fi
 
 # Ship the self-contained agent skill into the user-level Claude skills dir, so a coding
 # agent in ANY project can read it. Skipped when ~/.claude is absent (then it just stays
@@ -639,8 +678,44 @@ function Unregister-FileType {
     Say "[--] .lomt/.lom registration removed"
 }
 
+function Get-LompiStore([string]$Exe) {
+    # Ask lompi itself where its store is. cfg_root() has three rules (AppData / Users /
+    # exe dir); re-deriving them here would be a second copy that drifts -- so we read the
+    # line `lompi config` prints instead.
+    if (-not (Test-Path -LiteralPath $Exe)) { return '' }
+    foreach ($line in (& $Exe config 2>$null)) {
+        if ($line -match '^store:\s*(.+?)\s*$') { return $Matches[1] }
+    }
+    return ''
+}
+
 if ($Uninstall) {
     if ($DryRun) { Say "[dry-run] would remove $Prefix, the file-type keys and the agent skill"; exit 0 }
+    # Take back the libraries this package put into lompi's store. Ask lompi where that is
+    # BEFORE removing anything (the binary and the pristine copy both live under $Prefix),
+    # and drop only the <name>/<version> trees this package shipped -- other versions the
+    # user installed under the same name are none of our business.
+    $storeSrc = Join-Path $Prefix 'share\lompi\store'
+    if (Test-Path -LiteralPath $storeSrc) {
+        $dst = Get-LompiStore (Join-Path $BinDir 'lompi.exe')
+        if ($dst) {
+            foreach ($pkg in Get-ChildItem -LiteralPath $storeSrc -Directory -ErrorAction SilentlyContinue) {
+                foreach ($ver in Get-ChildItem -LiteralPath $pkg.FullName -Directory -ErrorAction SilentlyContinue) {
+                    Remove-Item -LiteralPath (Join-Path $dst "$($pkg.Name)\$($ver.Name)") `
+                                -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            if ((Test-Path -LiteralPath $dst) -and -not (Get-ChildItem -LiteralPath $dst -Force)) {
+                Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
+                # the store's parent (e.g. %LOCALAPPDATA%\lompi) too, but only if we left it
+                # empty -- a user's own cache dir stays
+                $up = Split-Path -Parent $dst
+                if ((Test-Path -LiteralPath $up) -and -not (Get-ChildItem -LiteralPath $up -Force)) {
+                    Remove-Item -LiteralPath $up -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
     Remove-Item -LiteralPath $Prefix -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $NoPath) { Remove-PathEntry $BinDir }
     if (-not $NoFileType) { Unregister-FileType }
@@ -712,6 +787,24 @@ if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LAST
 & (Join-Path $BinDir 'loment.cmd') ir (Join-Path $shareDir 'examples\user_hello.lomt') > $null
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: compiling user_hello.lomt" }
 Say "[5/6] smoke test ok (version + compile)"
+
+# lompi's standard library (std: 127 modules, host: 7 -- 137 files): keep the pristine copy
+# under the prefix, then put it where lompi will actually look. ASK lompi for that path --
+# cfg_root() has three rules, and a second copy of them in this script would drift.
+$storeSrc = Join-Path $lompiShareDir 'store'
+$storeFrom = Join-Path $Payload 'share\lompi\store'
+if (Test-Path -LiteralPath $storeFrom) {
+    New-Item -ItemType Directory -Path $storeSrc -Force | Out-Null
+    Copy-Item -Path (Join-Path $storeFrom '*') -Destination $storeSrc -Recurse -Force
+    $dst = Get-LompiStore (Join-Path $BinDir 'lompi.exe')
+    if ($dst) {
+        New-Item -ItemType Directory -Path $dst -Force | Out-Null
+        Copy-Item -Path (Join-Path $storeSrc '*') -Destination $dst -Recurse -Force
+        Say "[5a/6] lompi store (std + host, 137 files) -> $dst"
+    } else {
+        Say "[5a/6] 'lompi config' gave no store path; the libraries stay at $storeSrc"
+    }
+}
 
 # --- agent skill: hand it to whatever agent is here, NOT just Claude --------------------
 # There is no OS-wide way to push a skill into an arbitrary LLM: every tool reads its own
@@ -859,6 +952,7 @@ README_MD = """# Loment {DISPLAY}
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |
 | `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
 | `share/lompi/skill/SKILL.md` | **lompi 的说明书**（同一种装法：进 `~/.claude/skills/lompi/`，并往 Codex 的 AGENTS.md 写指针） |
+| `share/lompi/store/` | **lompi 的标准库**：`std`（127 个模块 + `std.lomt` 门面）与 `host`，共 137 个文件。装的时候会一并拷进 **lompi 自己认的全局 store**（问 `lompi config`），装完就能直接 `lompi index` / `use std` |
 
 ## 安装（三种方式，装出来一样）
 
@@ -1019,6 +1113,18 @@ def _read(p: str) -> bytes:
     return (ROOT / p).read_bytes()
 
 
+def _store_files() -> dict[str, bytes]:
+    """随包的 lompi 标准库 -> {`<name>/<version>/<file>`: 字节}。
+
+    **整棵树照收** —— store 的布局是 `<name>/<version>/*`，没有"顶层文件白名单"可言
+    （加一个模块就多一个文件）。所以这里不列名字，走目录；`_fresh_sources` 也用它，
+    于是"库里加了新模块却忘了重打包"会被 `--check` 抓住。
+    """
+    base = ROOT / STORE_DIR
+    return {p.relative_to(base).as_posix(): p.read_bytes()
+            for p in sorted(base.rglob("*")) if p.is_file()}
+
+
 def _git(*args: str) -> str:
     r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True,
                        shell=False, encoding="utf-8", errors="replace")
@@ -1052,6 +1158,11 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
     # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
     files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)
+    # lompi 的标准库 (std 127 模块 + host 7 个, 共 137 个文件)。放在包里是**纯净的那一份**,
+    # 安装器再照 lompi 自己认的全局 store 拷过去 (见 install.sh / install.ps1) —— 于是
+    # 装完就能直接用, 同时"这一版 Loment 到底随包发了哪一版库"有据可查。
+    for rel, body in _store_files().items():
+        files[f"share/lompi/store/{rel}"] = (body, 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
     files["LICENSE"] = (_read(LICENSE), 0o644)
     if kind == "linux":
@@ -1284,6 +1395,7 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
     out = {
         "share/loment/skill/SKILL.md": _read(SKILL),
         "share/lompi/skill/SKILL.md": _read(SKILL_LOMPI),
+        **{f"share/lompi/store/{k}": v for k, v in _store_files().items()},
         "share/loment/seed.ll": _read("loment/build/selfhost_driver.ll"),
         f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
         "README.md": _subst(README_MD).encode(),
@@ -1291,8 +1403,13 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
     }
     if kind == "linux":
         out["bin/loment"] = _subst(LAUNCHER_SH).encode("ascii")
+        out["install.sh"] = _subst(INSTALL_SH).encode("ascii")
     else:
         out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD)).encode("ascii")
+        # 安装脚本也是**模板直出**的 —— 改了模板不重打包, 归档里就是旧的, 而
+        # `--check` 原先照样绿 (2026-09-16 加 store 时踩到: 改完 INSTALL_SH 才发现)。
+        out["install.ps1"] = _crlf(_subst(INSTALL_PS1)).encode("ascii")
+        out["install.cmd"] = _crlf(_subst(INSTALL_CMD)).encode("ascii")
     return out
 
 
@@ -1324,7 +1441,11 @@ def check(out_dir: Path | None = None) -> int:
             continue
         got = _read_archive(p)
         for rel, want in _fresh_sources(kind).items():
-            if rel in got and got[rel] != want:
+            # 归档里**缺**这条也算陈旧: 新加一个 store 模块却忘了重打包时, 它不在
+            # SHA256SUMS 里, 光比内容永远看不出来 (2026-09-16 加 store 时发现的洞)。
+            if rel not in got:
+                stale.append(f"{arc}:{rel} (归档里没有)")
+            elif got[rel] != want:
                 stale.append(f"{arc}:{rel}")
     sz = out / "loment-skill.zip"
     if sz.exists() and _read_archive(sz).get("SKILL.md") != _read(SKILL):

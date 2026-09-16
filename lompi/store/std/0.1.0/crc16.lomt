@@ -1,0 +1,196 @@
+// std/crc16.lomt — CRC-16 的几种常见参数
+//
+// 为什么值得单列: "CRC-16" 不是一个算法, 是**一族**。多项式、初值、是否反转、
+// 结果是否异或, 四个参数一换就是另一个 CRC —— 而它们的名字 (CCITT / ARC / MODBUS…)
+// 与参数之间的对应关系没人记得住。所以这里把**参数写进函数名**, 并且把两个通用
+// 形状 (反射式 / 非反射式) 公开出来: 遇到没列到的变体, 调用方直接传参数, 不用改这一层。
+//
+// 校验向量 ("123456789" 这九个字节, 是所有 CRC 的通用测试串):
+//   CCITT-FALSE = 0x29B1   XMODEM = 0x31C3   ARC = 0xBB3D
+//   MODBUS      = 0x4B37   USB    = 0xB4C8
+// 这五条都写进了自检 —— 它们是"不属于我的判断"的判据。
+//
+// 命名: 公开 crc16_*, 内部 cr_*。自检 test_crc16_*。
+
+module crc16
+
+use "mem.lomt"
+
+pub const CRC16_CCITT_POLY: u32 = 4129; // 0x1021
+pub const CRC16_ARC_POLY_REF: u32 = 40961; // 0xA001 (0x8005 的位反转)
+pub const CRC16_ARC_POLY: u32 = 32773; // 0x8005
+
+/// **反射式** (每个字节从低位往高位处理)。poly_ref 是多项式反转后的值。
+pub fn crc16_reflected(d: ptr, o: u32, n: u32, poly_ref: u32, init: u32, xorout: u32) -> u32 {
+    let crc: u32 = init & 65535;
+    let i: u32 = 0;
+    while i < n {
+        crc = crc ^ load8(d, o + i);
+        let j: u32 = 0;
+        while j < 8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ poly_ref;
+            } else {
+                crc = crc >> 1;
+            }
+            j = j + 1;
+        }
+        crc = crc & 65535;
+        i = i + 1;
+    }
+    return (crc ^ xorout) & 65535;
+}
+
+/// **非反射式** (每个字节从高位往高位处理)。
+pub fn crc16_normal(d: ptr, o: u32, n: u32, poly: u32, init: u32, xorout: u32) -> u32 {
+    let crc: u32 = init & 65535;
+    let i: u32 = 0;
+    while i < n {
+        crc = crc ^ ((load8(d, o + i) & 255) << 8);
+        let j: u32 = 0;
+        while j < 8 {
+            if (crc & 32768) != 0 {
+                crc = ((crc << 1) ^ poly) & 65535;
+            } else {
+                crc = (crc << 1) & 65535;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return (crc ^ xorout) & 65535;
+}
+
+/// CRC-16/CCITT-FALSE: 0x1021 / 初值 0xFFFF / 不反转 / 不异或。
+pub fn crc16_ccitt(d: ptr, o: u32, n: u32) -> u32 {
+    return crc16_normal(d, o, n, CRC16_CCITT_POLY, 65535, 0);
+}
+
+/// CRC-16/XMODEM: 同上但初值为 0。
+pub fn crc16_xmodem(d: ptr, o: u32, n: u32) -> u32 {
+    return crc16_normal(d, o, n, CRC16_CCITT_POLY, 0, 0);
+}
+
+/// CRC-16/ARC: 0x8005 反射 / 初值 0 / 反射输出。
+pub fn crc16_arc(d: ptr, o: u32, n: u32) -> u32 {
+    return crc16_reflected(d, o, n, CRC16_ARC_POLY_REF, 0, 0);
+}
+
+/// CRC-16/MODBUS: 同上但初值 0xFFFF。
+pub fn crc16_modbus(d: ptr, o: u32, n: u32) -> u32 {
+    return crc16_reflected(d, o, n, CRC16_ARC_POLY_REF, 65535, 0);
+}
+
+/// CRC-16/USB: **输入输出都反射**, 初值 0xFFFF, 结果异或 0xFFFF。
+///
+/// 也就是"MODBUS 再把结果取反" —— 于是它的校验值必然是 0x4B37 ^ 0xFFFF = 0xB4C8。
+/// 第一版我把它写成了"非反射输入 + 反射输出", 三个参数里错了一个, 结果就对不上;
+/// 这类"参数记错一个"的错误只有校验向量能抓, 读代码是看不出来的。
+pub fn crc16_usb(d: ptr, o: u32, n: u32) -> u32 {
+    return crc16_reflected(d, o, n, CRC16_ARC_POLY_REF, 65535, 65535);
+}
+
+/// 16 位位反转。
+fn cr_rev16(v: u32) -> u32 {
+    let x: u32 = v & 65535;
+    let r: u32 = 0;
+    let i: u32 = 0;
+    while i < 16 {
+        r = (r << 1) | (x & 1);
+        x = x >> 1;
+        i = i + 1;
+    }
+    return r & 65535;
+}
+
+/// str 版本 (日常入口)。
+pub fn crc16_ccitt_str(s: str) -> u32 {
+    return crc16_ccitt(str_ptr(s), 0, str_len(s));
+}
+
+pub fn crc16_arc_str(s: str) -> u32 {
+    return crc16_arc(str_ptr(s), 0, str_len(s));
+}
+
+pub fn crc16_modbus_str(s: str) -> u32 {
+    return crc16_modbus(str_ptr(s), 0, str_len(s));
+}
+
+pub fn crc16_usb_str(s: str) -> u32 {
+    return crc16_usb(str_ptr(s), 0, str_len(s));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_crc16_vector_ccitt_false() -> bool {
+    let s: str = "123456789";
+    return crc16_ccitt(str_ptr(s), 0, 9) == 0x29B1;
+}
+
+fn test_crc16_vector_xmodem() -> bool {
+    let s: str = "123456789";
+    return crc16_xmodem(str_ptr(s), 0, 9) == 0x31C3;
+}
+
+fn test_crc16_vector_arc() -> bool {
+    let s: str = "123456789";
+    return crc16_arc(str_ptr(s), 0, 9) == 0xBB3D;
+}
+
+fn test_crc16_vector_modbus() -> bool {
+    let s: str = "123456789";
+    return crc16_modbus(str_ptr(s), 0, 9) == 0x4B37;
+}
+
+fn test_crc16_vector_usb() -> bool {
+    let s: str = "123456789";
+    return crc16_usb(str_ptr(s), 0, 9) == 0xB4C8;
+}
+
+fn test_crc16_str_wrappers_match_buffer_versions() -> bool {
+    let s: str = "123456789";
+    return crc16_ccitt_str(s) == crc16_ccitt(str_ptr(s), 0, 9)
+        && crc16_arc_str(s) == crc16_arc(str_ptr(s), 0, 9)
+        && crc16_modbus_str(s) == crc16_modbus(str_ptr(s), 0, 9)
+        && crc16_usb_str(s) == crc16_usb(str_ptr(s), 0, 9);
+}
+
+fn test_crc16_empty_is_init() -> bool {
+    // 空输入时, 结果应当是 init (再异或 xorout)。
+    let b: ptr = alloc(4);
+    return crc16_ccitt(b, 0, 0) == 65535 && crc16_arc(b, 0, 0) == 0
+        && crc16_modbus(b, 0, 0) == 65535;
+}
+
+fn test_crc16_offset_is_respected() -> bool {
+    // 从偏移读与从头读同一段字节必须一样 —— 偏移写错时这条会挂。
+    let b: ptr = alloc(32);
+    store8(b, 0, 255 as u8);
+    store8(b, 1, 255 as u8);
+    let s: str = "123456789";
+    mem_copy(b, 4, str_ptr(s), 0, 9);
+    return crc16_ccitt(b, 4, 9) == crc16_ccitt_str(s)
+        && crc16_ccitt(b, 0, 4) != crc16_ccitt_str(s);
+
+}
+fn test_crc16_single_byte_differs_by_poly() -> bool {
+    // 同一个字节, 不同参数必须给出不同结果 —— 全相等说明参数根本没接上。
+    let b: ptr = alloc(4);
+    store8(b, 0, 65 as u8);
+    let a: u32 = crc16_ccitt(b, 0, 1);
+    let c: u32 = crc16_arc(b, 0, 1);
+    let d: u32 = crc16_xmodem(b, 0, 1);
+    return a != c && c != d && d != a;
+
+}
+fn test_crc16_rev16() -> bool {
+    return cr_rev16(32768) == 1 && cr_rev16(1) == 32768 && cr_rev16(65535) == 65535
+        && cr_rev16(0) == 0;
+}
+
+fn test_crc16_longer_input_changes_result() -> bool {
+    // 加一个字节必须改变结果 (否则说明循环没走)。
+    let s: str = "123456789";
+    let t: str = "1234567890";
+    return crc16_ccitt_str(s) != crc16_ccitt_str(t);
+}

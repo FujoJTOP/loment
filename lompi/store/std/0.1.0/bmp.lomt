@@ -1,0 +1,506 @@
+// std/bmp.lomt — BMP 读写 (只做未压缩 24/32 位)
+//
+// 为什么需要它: BMP 是最容易手写、也最容易用肉眼验的位图格式 (没有压缩、没有熵编码,
+// 头是固定布局), 所以它适合当"图像管线的第一站": 截图给进来、把像素读出来,
+// 或者反过来把一块像素存成能被任何看图软件打开的文件。
+//
+// ---------------------------------------------------------------- 三个最容易错的点
+//
+// ① **头是小端**。BMP 是 Windows 的血统: 文件头 14 字节 + 信息头 40 字节, 里面
+//    每个多字节字段都是**小端** —— 和 PNG/QOI 的大端正好相反。混着写会得到
+//    "宽度是一个天文数字"的文件。
+//
+// ② **行是自下而上的**。BITMAPINFOHEADER 的 height 是**正数**时, 文件里第一行是
+//    图像的**最下面**一行; height 是**负数**时才是自上而下。本模块把两种都认,
+//    并把它归一化成"y=0 是最上面"给调用方用 —— 但 `bm_write` 一律写**正高度**
+//    (也就是自下而上), 因为那是兼容性最好的写法。
+//
+// ③ **每行按 4 字节对齐**。一行像素的字节数是 `宽 × (位深/8)`, 但文件里每行会**在末尾
+//    补零**到 4 的倍数。3 个像素宽的 24 位图, 一行是 9 字节数据 + **3 字节填充**。
+//    忘掉填充会让第二行起全部错位 —— 而且宽是 4 的倍数时又"看不出错", 所以自检
+//    专门用 3 宽的图去踩它 (`test_bmp_row_alignment_3x2`)。
+//
+// ---------------------------------------------------------------- 内存布局 (没有 struct)
+//
+// `bm_parse` 把解析结果写进调用方给的 `out` (需要 `bm_info_bytes()` = 24 字节):
+//
+//     0  width      宽 (像素)
+//     4  height     **绝对值** (行数)
+//     8  bpp        24 或 32
+//    12  offbits    像素数据在文件里的偏移
+//    16  stride     每行在文件里占多少字节 (**含 4 字节对齐的填充**)
+//    20  bottom_up  1 = 文件自下而上 (height 为正), 0 = 自上而下 (height 为负)
+//
+// ---------------------------------------------------------------- 像素格式
+//
+// 对外一律 **0xAARRGGBB** (和 raster/blit/font 一致)。24 位的图没有 alpha 字节,
+// 读出来 alpha 一律补 255; 32 位的图第 4 个字节**原样当 alpha** 读出来
+// (BMP 规范说 32 位 BI_RGB 那个字节"未使用", 但既然它在, 直通才能往返一致)。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **只做未压缩** (BI_RGB, compression = 0)。RLE4/RLE8/BITFIELDS 一律 `BM_ERR`,
+//     绝不"当没压缩似的硬读" —— 那会读出一堆错像素而调用方无从察觉。
+//   - **只做 24/32 位**。1/4/8 位调色板图要读调色板再查表, 是另一件事;
+//     碰到就报错。
+//   - **不校验 offbits 之后是否还有别的段** (有些 BMP 后面挂 ICC 配置)。像素数据的
+//     边界按 `offbits + stride × height` 判, 后面多余字节不管。
+//   - **写出的图不带调色板、不带 ICC**; 不写 1/4/8 位。
+//   - 尺寸上界 1<<24 (宽和高各自), 只为挡住"宽 × 4 撑爆 u32"的荒谬头, 不是格式限制。
+//
+// 命名: 公开 bm_*, 内部 bm_*。自检 test_bmp_*。
+
+module bmp
+
+use "mem.lomt"
+
+pub const BM_ERR: u32 = 4294967295;
+/// "不是 24/32 位"之类的"没有" (与 BM_ERR 分开)。
+pub const BM_NO: u32 = 4294967294;
+
+/// 解析结果要几字节。
+pub fn bm_info_bytes() -> u32 {
+    return 24;
+}
+
+/// 尺寸上界 (宽或高): 挡住会撑爆 u32 的荒谬头。
+pub const BM_MAX_DIM: u32 = 16777216;
+
+/// 基址 + 偏移 -> 新 ptr (不用内建 ptr_add, 见 deflate 里的同一处说明)。
+fn bm_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 头字段 (直读, 不分配)
+
+fn bm_width(buf: ptr) -> u32 {
+    return mem_load32(buf, 18);
+}
+
+/// 文件里的 height 原值 (可能带符号)。
+fn bm_hraw(buf: ptr) -> u32 {
+    return mem_load32(buf, 22);
+}
+
+/// 正高度 = 自下而上。
+fn bm_bottom_up(buf: ptr) -> bool {
+    return bm_hraw(buf) < 2147483648;
+}
+
+/// height 的绝对值。
+fn bm_abs_h(buf: ptr) -> u32 {
+    let v: u32 = bm_hraw(buf);
+    if v < 2147483648 {
+        return v;
+    }
+    return (0 - (v as i32)) as u32;
+}
+
+fn bm_bpp(buf: ptr) -> u32 {
+    return mem_load16(buf, 28);
+}
+
+fn bm_off(buf: ptr) -> u32 {
+    return mem_load32(buf, 10);
+}
+
+/// 每行在文件里占的字节 (含补齐到 4 的倍数)。
+fn bm_stride_of(w: u32, bpp: u32) -> u32 {
+    return ((w * (bpp / 8)) + 3) / 4 * 4;
+}
+
+fn bm_stride(buf: ptr) -> u32 {
+    return bm_stride_of(bm_width(buf), bm_bpp(buf));
+}
+
+/// 头是否可用 (且像素数据在 `n` 之内)。**不做像素访问前的每次校验都靠它**。
+fn bm_header_ok(buf: ptr, n: u32) -> bool {
+    if n < 54 {
+        return false;
+    }
+    if load8(buf, 0) != 66 || load8(buf, 1) != 77 {
+        return false; // "BM"
+    }
+    if mem_load32(buf, 14) != 40 {
+        return false; // BITMAPINFOHEADER
+    }
+    if mem_load16(buf, 26) != 1 {
+        return false; // planes
+    }
+    let bpp: u32 = bm_bpp(buf);
+    if bpp != 24 && bpp != 32 {
+        return false;
+    }
+    if mem_load32(buf, 30) != 0 {
+        return false; // BI_RGB only
+    }
+    let w: u32 = bm_width(buf);
+    let h: u32 = bm_abs_h(buf);
+    if w == 0 || h == 0 || w > BM_MAX_DIM || h > BM_MAX_DIM {
+        return false;
+    }
+    // **用除法判边界, 不做 `off + stride*h` 的乘法** —— 荒谬头能让乘法在 u32 里回绕,
+    // 回绕之后的"小数字"反而通过了 `<= n`, 于是越界访问。除法不会回绕。
+    let off: u32 = bm_off(buf);
+    if off > n {
+        return false;
+    }
+    let stride: u32 = bm_stride_of(w, bpp);
+    if stride == 0 {
+        return false;
+    }
+    return h <= (n - off) / stride;
+}
+
+// ---------------------------------------------------------------- 解析
+
+/// 解析头。`out` 需要 `bm_info_bytes()` 字节 (布局见文件头)。
+/// 返回 0, 或 BM_ERR (魔数/位深/压缩方式/尺寸/像素数据越界).
+pub fn bm_parse(buf: ptr, n: u32, out: ptr) -> u32 {
+    if bm_header_ok(buf, n) == false {
+        return BM_ERR;
+    }
+    mem_store32(out, 0, bm_width(buf));
+    mem_store32(out, 4, bm_abs_h(buf));
+    mem_store32(out, 8, bm_bpp(buf));
+    mem_store32(out, 12, bm_off(buf));
+    mem_store32(out, 16, bm_stride(buf));
+    let bu: u32 = 0;
+    if bm_bottom_up(buf) {
+        bu = 1;
+    }
+    mem_store32(out, 20, bu);
+    return 0;
+}
+
+/// 取一个像素, 写成 0xAARRGGBB 存进 `out_px`。
+/// `x` 向左、`y` 向下 (**y=0 是最上面**, 与文件里的行序无关 —— 这里替你归一化了)。
+/// 返回 0, 或 BM_ERR (头坏了 / 越界).
+pub fn bm_pixel(buf: ptr, n: u32, x: u32, y: u32, out_px: ptr) -> u32 {
+    if bm_header_ok(buf, n) == false {
+        return BM_ERR;
+    }
+    let w: u32 = bm_width(buf);
+    let h: u32 = bm_abs_h(buf);
+    if x >= w || y >= h {
+        return BM_ERR;
+    }
+    // 文件里第几行: 自下而上时最上面那行在文件末尾。
+    let frow: u32 = y;
+    if bm_bottom_up(buf) {
+        frow = h - 1 - y;
+    }
+    let bpp: u32 = bm_bpp(buf);
+    let o: u32 = bm_off(buf) + frow * bm_stride_of(w, bpp) + x * (bpp / 8);
+    let b: u32 = load8(buf, o);
+    let g: u32 = load8(buf, o + 1);
+    let r: u32 = load8(buf, o + 2);
+    let a: u32 = 255;
+    if bpp == 32 {
+        a = load8(buf, o + 3);
+    }
+    mem_store32(out_px, 0, (a << 24) | (r << 16) | (g << 8) | b);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 写
+
+/// 一个 w×h、位深 bpp 的未压缩 BMP 要多少字节。
+pub fn bm_out_bytes(w: u32, h: u32, bpp: u32) -> u32 {
+    return 54 + bm_stride_of(w, bpp) * h;
+}
+
+fn bm_write_bpp(w: u32, h: u32, pixels: ptr, out: ptr, oo: u32, bpp: u32) -> u32 {
+    if w == 0 || h == 0 || w > BM_MAX_DIM || h > BM_MAX_DIM {
+        return BM_ERR;
+    }
+    if bpp != 24 && bpp != 32 {
+        return BM_ERR;
+    }
+    let stride: u32 = bm_stride_of(w, bpp);
+    // 同 header_ok: 用除法确认 `54 + stride*h` 装得进 u32, 再乘。
+    if stride == 0 || h > 4000000000 / stride {
+        return BM_ERR;
+    }
+    let size: u32 = 54 + stride * h;
+    store8(out, oo, 66); // 'B'
+    store8(out, oo + 1, 77); // 'M'
+    mem_store32(out, oo + 2, size);
+    mem_store32(out, oo + 6, 0);
+    mem_store32(out, oo + 10, 54);
+    mem_store32(out, oo + 14, 40);
+    mem_store32(out, oo + 18, w);
+    mem_store32(out, oo + 22, h); // **正高度** = 自下而上 (兼容性最好)
+    mem_store16(out, oo + 26, 1);
+    mem_store16(out, oo + 28, bpp);
+    mem_store32(out, oo + 30, 0); // BI_RGB
+    mem_store32(out, oo + 34, stride * h);
+    mem_store32(out, oo + 38, 2835); // ~72 DPI
+    mem_store32(out, oo + 42, 2835);
+    mem_store32(out, oo + 46, 0);
+    mem_store32(out, oo + 50, 0);
+    let y: u32 = 0;
+    while y < h {
+        let base: u32 = oo + 54 + y * stride;
+        // 先把这一行填 0 —— 填充字节就此留白, 不用后面再补。
+        mem_fill(out, base, stride, 0);
+        let src_row: u32 = h - 1 - y; // 文件第 y 行 = 图像第 (h-1-y) 行
+        let x: u32 = 0;
+        while x < w {
+            let v: u32 = mem_load32(pixels, (src_row * w + x) * 4);
+            let p: u32 = base + x * (bpp / 8);
+            store8(out, p, (v & 255) as u8); // B
+            store8(out, p + 1, ((v >> 8) & 255) as u8); // G
+            store8(out, p + 2, ((v >> 16) & 255) as u8); // R
+            if bpp == 32 {
+                store8(out, p + 3, ((v >> 24) & 255) as u8); // A
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return size;
+}
+
+/// 写一个 **32 位** BMP (保留 alpha)。`out` 需要 `bm_out_bytes(w,h,32)`。
+/// 返回写出字节数, 或 BM_ERR。
+pub fn bm_write(w: u32, h: u32, pixels: ptr, out: ptr, oo: u32) -> u32 {
+    return bm_write_bpp(w, h, pixels, out, oo, 32);
+}
+
+/// 写一个 **24 位** BMP (丢掉 alpha)。`out` 需要 `bm_out_bytes(w,h,24)`。
+pub fn bm_write24(w: u32, h: u32, pixels: ptr, out: ptr, oo: u32) -> u32 {
+    return bm_write_bpp(w, h, pixels, out, oo, 24);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn bm_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// 十六进制串 -> 字节 (自检造向量用, 与 base85 的自检同一套写法)。
+fn bm_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = bm_hv(str_byte(s, k * 2));
+        let lo: u32 = bm_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 手搓的 2×2 24 位 BMP: 上面一行红/绿, 下面一行蓝/白 (Python struct 生成)。
+fn bm_v1() -> str {
+    return "424D460000000000000036000000280000000200000002000000010018000000000010000000130B0000130B00000000000000000000FF0000FFFFFF00000000FF00FF000000";
+}
+
+/// 手搓的 3×2 24 位 BMP: 宽不是 4 的倍数 -> 每行 9 字节数据 + 3 字节填充。
+fn bm_v2() -> str {
+    return "424D4E0000000000000036000000280000000300000002000000010018000000000018000000130B0000130B00000000000000000000786E64968C82B4AAA00000001E140A3C32285A5046000000";
+}
+
+fn test_bmp_parse_2x2_24_handmade() -> bool {
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let n: u32 = bm_hx(f, bm_v1());
+    let r: u32 = bm_parse(f, n, info);
+    return n == 70 && r == 0
+        && mem_load32(info, 0) == 2      // width
+        && mem_load32(info, 4) == 2      // height
+        && mem_load32(info, 8) == 24     // bpp
+        && mem_load32(info, 12) == 54    // offbits
+        && mem_load32(info, 16) == 8     // stride (6 -> 补齐到 8)
+        && mem_load32(info, 20) == 1;    // bottom_up
+}
+
+fn test_bmp_pixel_2x2_24_handmade() -> bool {
+    // **y=0 是最上面**: 上面那行是红/绿。文件里它是第二行 (自下而上)。
+    let f: ptr = alloc(128);
+    let px: ptr = alloc(4);
+    let n: u32 = bm_hx(f, bm_v1());
+    bm_pixel(f, n, 0, 0, px);
+    let p00: u32 = mem_load32(px, 0);
+    bm_pixel(f, n, 1, 0, px);
+    let p10: u32 = mem_load32(px, 0);
+    bm_pixel(f, n, 0, 1, px);
+    let p01: u32 = mem_load32(px, 0);
+    bm_pixel(f, n, 1, 1, px);
+    let p11: u32 = mem_load32(px, 0);
+    return p00 == 4294901760 && p10 == 4278255360
+        && p01 == 4278190335 && p11 == 4294967295;
+}
+
+fn test_bmp_row_alignment_3x2() -> bool {
+    // 3 宽 24 位: stride = 12 (9 数据 + 3 填充)。第二行起要是没按 12 算就全错位。
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let px: ptr = alloc(4);
+    let n: u32 = bm_hx(f, bm_v2());
+    if bm_parse(f, n, info) != 0 {
+        return false;
+    }
+    if mem_load32(info, 16) != 12 || mem_load32(info, 0) != 3 {
+        return false;
+    }
+    // 上左 = (10,20,30) = 0xFF0A141E; 下右 = (160,170,180) = 0xFFA0AAB4
+    bm_pixel(f, n, 0, 0, px);
+    let a: u32 = mem_load32(px, 0);
+    bm_pixel(f, n, 2, 1, px);
+    let b: u32 = mem_load32(px, 0);
+    bm_pixel(f, n, 2, 0, px);
+    let c: u32 = mem_load32(px, 0);
+    return a == 4278850590 && b == 4288719540 && c == 4282798170;
+}
+
+fn test_bmp_pixel_out_of_range() -> bool {
+    let f: ptr = alloc(128);
+    let px: ptr = alloc(4);
+    let n: u32 = bm_hx(f, bm_v1());
+    return bm_pixel(f, n, 2, 0, px) == BM_ERR
+        && bm_pixel(f, n, 0, 2, px) == BM_ERR
+        && bm_pixel(f, n, 9, 9, px) == BM_ERR;
+}
+
+fn test_bmp_reject_bad_magic() -> bool {
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let n: u32 = bm_hx(f, bm_v1());
+    store8(f, 0, 88 as u8); // 'B' -> 'X'
+    return bm_parse(f, n, info) == BM_ERR;
+}
+
+fn test_bmp_reject_bad_bpp() -> bool {
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let n: u32 = bm_hx(f, bm_v1());
+    mem_store16(f, 28, 8); // 8 位是调色板图, 本层不做
+    return bm_parse(f, n, info) == BM_ERR;
+}
+
+fn test_bmp_reject_compression() -> bool {
+    // compression != 0 (RLE/BITFIELDS): 必须报错, 不能"当没压缩硬读"。
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let n: u32 = bm_hx(f, bm_v2());
+    mem_store32(f, 30, 1);
+    return bm_parse(f, n, info) == BM_ERR;
+}
+
+fn test_bmp_reject_truncated() -> bool {
+    let f: ptr = alloc(128);
+    let info: ptr = alloc(24);
+    let n: u32 = bm_hx(f, bm_v1());
+    return bm_parse(f, 20, info) == BM_ERR && bm_parse(f, 60, info) == BM_ERR;
+}
+
+fn test_bmp_top_down_negative_height() -> bool {
+    // height 改成负数 -> 文件第一行变成**最上面**那一行。同一个文件, 像素语义翻转。
+    let f: ptr = alloc(128);
+    let px: ptr = alloc(4);
+    let n: u32 = bm_hx(f, bm_v1());
+    mem_store32(f, 22, 4294967294); // -2
+    let r: u32 = bm_pixel(f, n, 0, 0, px);
+    // 自上而下时 y=0 读文件第 0 行 = 蓝 (0xFF0000FF), 不再是红。
+    return r == 0 && mem_load32(px, 0) == 4278190335;
+}
+
+fn test_bmp_roundtrip_32_preserves_alpha() -> bool {
+    let w: u32 = 4;
+    let h: u32 = 3;
+    let src: ptr = alloc(w * h * 4);
+    let out: ptr = alloc(bm_out_bytes(w, h, 32));
+    let i: u32 = 0;
+    while i < w * h {
+        // 掺一个 alpha 不是 255 的像素, 验 32 位往返不丢 alpha
+        let a: u32 = 255;
+        if i == 5 {
+            a = 17;
+        }
+        mem_store32(src, i * 4, (a << 24) | ((i * 11) << 16) | ((i * 7) << 8) | (i * 3));
+        i = i + 1;
+    }
+    let wn: u32 = bm_write(w, h, src, out, 0);
+    let info: ptr = alloc(24);
+    if wn != bm_out_bytes(w, h, 32) || bm_parse(out, wn, info) != 0 {
+        return false;
+    }
+    if mem_load32(info, 8) != 32 {
+        return false;
+    }
+    let px: ptr = alloc(4);
+    let bad: u32 = 0;
+    let y: u32 = 0;
+    while y < h {
+        let x: u32 = 0;
+        while x < w {
+            bm_pixel(out, wn, x, y, px);
+            if mem_load32(px, 0) != mem_load32(src, (y * w + x) * 4) {
+                bad = bad + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // 第 5 个像素的 alpha 是 17 —— 往返回来还是 17 (32 位不丢 alpha)。
+    return bad == 0 && mem_load32(src, 5 * 4) == 288826127
+        && (mem_load32(src, 5 * 4) >> 24) == 17;
+}
+
+fn test_bmp_roundtrip_24_drops_alpha_to_255() -> bool {
+    let w: u32 = 3;
+    let h: u32 = 2;
+    let src: ptr = alloc(w * h * 4);
+    let out: ptr = alloc(bm_out_bytes(w, h, 24));
+    let i: u32 = 0;
+    while i < w * h {
+        mem_store32(src, i * 4, (7 << 24) | ((i * 40) << 16) | ((i * 20) << 8) | (i * 10));
+        i = i + 1;
+    }
+    let wn: u32 = bm_write24(w, h, src, out, 0);
+    let px: ptr = alloc(4);
+    let bad: u32 = 0;
+    let i2: u32 = 0;
+    while i2 < w * h {
+        bm_pixel(out, wn, i2 % w, i2 / w, px);
+        let v: u32 = mem_load32(px, 0);
+        // 24 位丢掉 alpha -> 回来一律 255, 但 RGB 必须原样。
+        if (v >> 24) != 255 || (v & 16777215) != (mem_load32(src, i2 * 4) & 16777215) {
+            bad = bad + 1;
+        }
+        i2 = i2 + 1;
+    }
+    return wn == bm_out_bytes(w, h, 24) && bad == 0;
+}
+
+fn test_bmp_write_at_offset_and_guards() -> bool {
+    // 输出从缓冲中间写: 前 8 字节的哨兵和后面都得原封不动, 返回的是**净**字节数。
+    let w: u32 = 2;
+    let h: u32 = 2;
+    let src: ptr = alloc(w * h * 4);
+    let buf: ptr = alloc(256);
+    mem_fill(src, 0, w * h * 4, 0);
+    mem_fill(buf, 0, 256, 171);
+    let n: u32 = bm_write24(w, h, src, buf, 8);
+    let info: ptr = alloc(24);
+    let ok: bool = n == bm_out_bytes(w, h, 24) && load8(buf, 0) == 171 && load8(buf, 7) == 171
+        && load8(buf, 8 + n) == 171
+        && bm_parse(bm_at(buf, 8), n, info) == 0;
+    return ok;
+}
+
+fn test_bmp_out_bytes_accounting() -> bool {
+    // 2×2 24 位: 54 + 8*2 = 70 (与手搓向量的长度对上)。
+    // 3×2 24 位: 54 + 12*2 = 78 (同上)。
+    // 32 位 1×1: stride = ((1*4)+3)/4*4 = 4 -> 54 + 4 = 58。
+    return bm_out_bytes(2, 2, 24) == 70 && bm_out_bytes(3, 2, 24) == 78
+        && bm_out_bytes(1, 1, 32) == 58 && bm_out_bytes(3, 1, 24) == 54 + 12;
+}

@@ -1,0 +1,599 @@
+// std/tui.lomt — 终端界面: 单元格网格 + 差异渲染 + 画框
+//
+// 为什么需要它: 每帧把整屏重发一遍 (`an_clear` + 全文) 会让终端**闪** —— 因为终端
+// 不是一次画完的, 它按顺序执行你给的字节, 中间那几毫秒屏幕是半成品。真正的终端界面
+// 只发"这一帧和上一帧不一样的地方"。这个模块就是那件事的第一步: 一块内存里的网格,
+// 加一个只吐差量的渲染器。
+//
+// 缓冲区布局 (**调用方给缓冲**, `tu_bytes(w,h)` 字节; 两块分开存):
+//     [0 .. w*h*4)          —— 每个格子一个 **码点 u32** (行优先, r*w+c)
+//     [w*h*4 .. w*h*8)      —— 每个格子一个 **属性 u32**
+// 为什么分两块而不是交错成一个 8 字节结构体: **本语言没有 struct, 不能按值传聚合体**,
+// 交错布局会让每个字段访问都要 `i*8+k` 算一遍; 分两块之后"属性"那半的偏移就是一个常量
+// `w*h*4`, 热点路径少一次乘法。
+//
+// 属性 (attr) 编码 —— 一个 u32, 三个字节 + 一个标志字节:
+//     bits 0..7   fg  (0..254 = 调色板; **255 = 默认色**)
+//     bits 8..15  bg  (同上; 255 = 默认色)
+//     bits 16..23 flags (1 粗体, 2 下划线, 4 反显)
+// 为什么用 255 当"默认"而不是另开一个位: 256 色调色板本来就占满 0..255, 而"默认前景/
+// 默认背景"是终端自己定的那两个色 —— 给它一个**专值**比给一个额外的标志位省一层判断,
+// 也让 `tu_attr(255,255,0)` 直接读作"啥都不设"。
+//
+// **宽字符**: 一个占 2 格的字符 (汉字/全角), 第一格放码点, 第二格放 `TU_CONT` 当**续格**。
+// 这是最容易错的地方, 三条规矩写在 `tu_put` 上方。
+//
+// 诚实清单:
+//   - **不做输入** (键盘/鼠标解析), 不做行编辑, 不做滚动区。本层只管"一块网格怎么画到
+//     终端上"。
+//   - 属性只到 256 色调色板, **不做真彩色** —— 真彩要 4 字节属性, 而 8 字节/格已经不小;
+//     要真彩的调用方可以自己维护一层映射。ansi.lomt 有真彩原语, 但 tui 不用。
+//   - `tu_diff` 假设**终端光标就在上一次写完之后的位置**。它靠这个省掉连续变化格子的
+//     定位序列; 如果调用方在 diff 输出之间插了自己的字节, 这个假设就破了 —— 那时该把
+//     `oo` 重新对齐或者整屏重画。
+//   - 不处理自动换行 (末列写完终端会不会折行因终端而异), 所以 `tu_diff` **总是**显式
+//     定位到每个不连续的格子。
+//
+// 命名: 公开 tu_*, 内部 tu_*(私有名同样占全局拼写)。自检 test_tui_*。
+
+module tui
+
+use "mem.lomt"
+use "width.lomt"
+use "ansi.lomt"
+
+pub const TU_ERR: u32 = 4294967295;
+/// 宽字符的**续格** (第二格)。它是个码点位置上的哨兵 —— 真实码点不会是这个值。
+pub const TU_CONT: u32 = 4294967294;
+
+/// 空白格 (空格码点)。
+pub const TU_SPACE: u32 = 32;
+/// 默认属性: 默认前景 (255) + 默认背景 (255) + 无标志 (0) = 0x0000FFFF。
+pub const TU_ATTR_DEFAULT: u32 = 65535;
+
+/// 组一个属性。
+pub fn tu_attr(fg: u32, bg: u32, flags: u32) -> u32 {
+    return ((flags & 255) << 16) | ((bg & 255) << 8) | (fg & 255);
+}
+
+pub fn tu_attr_fg(at: u32) -> u32 {
+    return at & 255;
+}
+
+pub fn tu_attr_bg(at: u32) -> u32 {
+    return (at >> 8) & 255;
+}
+
+pub fn tu_attr_flags(at: u32) -> u32 {
+    return (at >> 16) & 255;
+}
+
+/// 网格要多少字节。
+pub fn tu_bytes(w: u32, h: u32) -> u32 {
+    return w * h * 8;
+}
+
+// ---------------------------------------------------------------- 读写
+
+fn tu_cp_i(ws: ptr, ww: u32, i: u32) -> u32 {
+    return mem_load32(ws, i * 4);
+}
+
+fn tu_at_i(ws: ptr, ww: u32, i: u32) -> u32 {
+    return mem_load32(ws, ww * 4 + i * 4);
+}
+
+fn tu_set_cp(ws: ptr, ww: u32, i: u32, v: u32) {
+    mem_store32(ws, i * 4, v);
+}
+
+fn tu_set_at(ws: ptr, ww: u32, i: u32, v: u32) {
+    mem_store32(ws, ww * 4 + i * 4, v);
+}
+
+/// 某个格子的码点; 越界给 `TU_ERR`。
+pub fn tu_get(ws: ptr, w: u32, h: u32, r: u32, c: u32) -> u32 {
+    if r >= h || c >= w {
+        return TU_ERR;
+    }
+    return tu_cp_i(ws, w * h, r * w + c);
+}
+
+/// 某个格子的属性; 越界给 `TU_ERR`。
+pub fn tu_get_attr(ws: ptr, w: u32, h: u32, r: u32, c: u32) -> u32 {
+    if r >= h || c >= w {
+        return TU_ERR;
+    }
+    return tu_at_i(ws, w * h, r * w + c);
+}
+
+/// 全网格填成 (cp, attr)。返回填了几个格子。
+pub fn tu_init(ws: ptr, w: u32, h: u32, cp: u32, attr: u32) -> u32 {
+    let ww: u32 = w * h;
+    let i: u32 = 0;
+    while i < ww {
+        tu_set_cp(ws, ww, i, cp);
+        tu_set_at(ws, ww, i, attr);
+        i = i + 1;
+    }
+    return ww;
+}
+
+/// 全网格填成空格 + 默认属性。
+pub fn tu_clear(ws: ptr, w: u32, h: u32) -> u32 {
+    return tu_init(ws, w, h, TU_SPACE, TU_ATTR_DEFAULT);
+}
+
+/// 往 (r,c) 放一个码点。**宽字符的三条规矩**:
+///
+///   1. 占 2 格的字符要**同时**写第一格 (码点) 与第二格 (`TU_CONT`), 两格属性一样。
+///   2. **最后一列放不下宽字符**: 本层选择**在那一格写一个空格**, 而不是把它挤到下一行
+///      (自动换行因终端而异, 挤行会毁掉整个网格坐标) 也不是写半个 (半个汉字比空格难看
+///      得多)。这是**决定**, 不是疏漏。
+///   3. **覆盖要修另一半**: 如果新字符盖住了一个旧宽字符的一半, 那一半的搭档必须被抹成
+///      空格 —— 否则屏幕上会留下一个"孤儿半字", 而且 `tu_diff` 也修不掉它 (它只看变化
+///      的格子)。
+///
+/// 返回实际占用了几格 (1 或 2); 越界返回 0 且不写任何东西。
+pub fn tu_put(ws: ptr, w: u32, h: u32, r: u32, c: u32, cp: u32, attr: u32) -> u32 {
+    if r >= h || c >= w {
+        return 0;
+    }
+    let ww: u32 = w * h;
+    let i: u32 = r * w + c;
+    let old: u32 = tu_cp_i(ws, ww, i);
+    // 先修旧字符留下的一半 (只改码点, **不动属性** —— 少一个变化就少一段 diff 输出)。
+    if old == TU_CONT {
+        if c > 0 {
+            tu_set_cp(ws, ww, i - 1, TU_SPACE);
+        }
+    } else if width_cp(old) == 2 {
+        if c + 1 < w {
+            tu_set_cp(ws, ww, i + 1, TU_SPACE);
+        }
+    }
+    let wd: u32 = width_cp(cp);
+    if wd == 2 && c + 1 < w {
+        tu_set_cp(ws, ww, i, cp);
+        tu_set_at(ws, ww, i, attr);
+        tu_set_cp(ws, ww, i + 1, TU_CONT);
+        tu_set_at(ws, ww, i + 1, attr);
+        return 2;
+    }
+    if wd == 2 {
+        // 最后一列: 规矩 2
+        tu_set_cp(ws, ww, i, TU_SPACE);
+        tu_set_at(ws, ww, i, attr);
+        return 1;
+    }
+    tu_set_cp(ws, ww, i, cp);
+    tu_set_at(ws, ww, i, attr);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 画框
+
+/// 第 r 行所有格子的显示宽度合计。**续格算 0** —— 它本来就不占额外宽度。
+/// (不变量: 一个正常维护的网格, 每行合计 == w。自检里真的逐行遍历验证。)
+pub fn tu_row_width(ws: ptr, w: u32, h: u32, r: u32) -> u32 {
+    if r >= h {
+        return TU_ERR;
+    }
+    let sum: u32 = 0;
+    let c: u32 = 0;
+    while c < w {
+        let cp: u32 = tu_cp_i(ws, w * h, r * w + c);
+        if cp != TU_CONT {
+            sum = sum + width_cp(cp);
+        }
+        c = c + 1;
+    }
+    return sum;
+}
+
+/// 画一个单线框 (`─│┌┐└┘`), 角在 (r0,c0) 与 (r1,c1) 两格上。返回画了几格。
+///
+/// 退化情形 (写成注释而不是藏着): 宽 1 (c0==c1) 时上边取 `┌` 下边取 `└` (靠 `else if`
+/// 的顺序), 高 1 时左右列不画。这些在图元级不报错 —— 画一个 1 格的框是合法需求。
+pub fn tu_box(ws: ptr, w: u32, h: u32, r0: u32, c0: u32, r1: u32, c1: u32, attr: u32) -> u32 {
+    if r0 > r1 || c0 > c1 || r1 >= h || c1 >= w {
+        return 0;
+    }
+    let cnt: u32 = 0;
+    let c: u32 = c0;
+    while c <= c1 {
+        let top: u32 = 9472; // ─ U+2500
+        if c == c0 {
+            top = 9484; // ┌ U+250C
+        } else if c == c1 {
+            top = 9488; // ┐ U+2510
+        }
+        cnt = cnt + tu_put(ws, w, h, r0, c, top, attr);
+        let bot: u32 = 9472;
+        if c == c0 {
+            bot = 9492; // └ U+2514
+        } else if c == c1 {
+            bot = 9496; // ┘ U+2518
+        }
+        cnt = cnt + tu_put(ws, w, h, r1, c, bot, attr);
+        c = c + 1;
+    }
+    let r: u32 = r0 + 1;
+    while r < r1 {
+        cnt = cnt + tu_put(ws, w, h, r, c0, 9474, attr); // │ U+2502
+        cnt = cnt + tu_put(ws, w, h, r, c1, 9474, attr);
+        r = r + 1;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- UTF-8 输出
+
+/// 把一个码点按 UTF-8 写进 out。返回新位置。
+fn tu_utf8(out: ptr, o0: u32, cp: u32) -> u32 {
+    let o: u32 = o0;
+    if cp < 128 {
+        store8(out, o, cp as u8);
+        return o + 1;
+    }
+    if cp < 2048 {
+        store8(out, o, (192 | (cp >> 6)) as u8);
+        store8(out, o + 1, (128 | (cp & 63)) as u8);
+        return o + 2;
+    }
+    if cp < 65536 {
+        store8(out, o, (224 | (cp >> 12)) as u8);
+        store8(out, o + 1, (128 | ((cp >> 6) & 63)) as u8);
+        store8(out, o + 2, (128 | (cp & 63)) as u8);
+        return o + 3;
+    }
+    store8(out, o, (240 | (cp >> 18)) as u8);
+    store8(out, o + 1, (128 | ((cp >> 12) & 63)) as u8);
+    store8(out, o + 2, (128 | ((cp >> 6) & 63)) as u8);
+    store8(out, o + 3, (128 | (cp & 63)) as u8);
+    return o + 4;
+}
+
+/// 属性 -> ANSI 序列。先 `an_reset` 把上一次的干净擦掉, 再按需设 —— 顺序无关的一串
+/// "设/不设" 比"记住上一次是什么再算差"简单得多, 而出错的机会也就少。
+fn tu_emit_attr(out: ptr, o0: u32, at: u32) -> u32 {
+    let o: u32 = an_reset(out, o0);
+    let fg: u32 = tu_attr_fg(at);
+    let bg: u32 = tu_attr_bg(at);
+    let fl: u32 = tu_attr_flags(at);
+    if fg != 255 {
+        o = an_fg(out, o, fg);
+    }
+    if bg != 255 {
+        o = an_bg(out, o, bg);
+    }
+    if (fl & 1) != 0 {
+        o = an_bold(out, o);
+    }
+    if (fl & 2) != 0 {
+        o = an_underline(out, o);
+    }
+    if (fl & 4) != 0 {
+        o = an_reverse(out, o);
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 差异渲染
+
+/// 只把 `next` 相对 `prev` **变化了的格子**写成 ANSI, 追加到 out 的 oo 之后。
+/// 返回写了**几个字节**。完全相同 -> 0 字节 (这就是这个模块存在的理由)。
+///
+/// 光标假设 (同上诚实清单): `cur_r/cur_c` 记录"上一条字节发完之后终端光标在哪"。
+/// 相邻的变化格子 (下一个正好等于光标该在的位置) **省掉定位序列**; 不连续的必须显式
+/// `an_move`。属性只在变化时发。续格 (`TU_CONT`) 自己**不产生输出** —— 它由它左边那格
+/// 一起写出 (宽字符一次占用光标两格, 所以 `cur_c` 要 +2)。
+pub fn tu_diff(prev: ptr, next: ptr, w: u32, h: u32, out: ptr, oo: u32) -> u32 {
+    let ww: u32 = w * h;
+    let o: u32 = oo;
+    let cur_attr: u32 = TU_ATTR_DEFAULT;
+    let cur_r: u32 = TU_ERR;
+    let cur_c: u32 = TU_ERR;
+    let r: u32 = 0;
+    while r < h {
+        let c: u32 = 0;
+        while c < w {
+            let i: u32 = r * w + c;
+            let ncp: u32 = tu_cp_i(next, ww, i);
+            if ncp != TU_CONT {
+                let pcp: u32 = tu_cp_i(prev, ww, i);
+                let nat: u32 = tu_at_i(next, ww, i);
+                let pat: u32 = tu_at_i(prev, ww, i);
+                if ncp != pcp || nat != pat {
+                    if cur_r != r || cur_c != c {
+                        o = an_move(out, o, r + 1, c + 1);
+                        cur_r = r;
+                        cur_c = c;
+                    }
+                    if nat != cur_attr {
+                        o = tu_emit_attr(out, o, nat);
+                        cur_attr = nat;
+                    }
+                    o = tu_utf8(out, o, ncp);
+                    cur_c = cur_c + width_cp(ncp);
+                }
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return o - oo;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tui_bytes() -> bool {
+    return tu_bytes(10, 4) == 320 && tu_bytes(1, 1) == 8 && tu_bytes(80, 24) == 15360;
+}
+
+fn test_tui_clear_fills_spaces() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    let n: u32 = tu_clear(ws, 8, 4);
+    let ok: bool = n == 32 && tu_get(ws, 8, 4, 0, 0) == 32 && tu_get(ws, 8, 4, 3, 7) == 32
+        && tu_get_attr(ws, 8, 4, 2, 5) == TU_ATTR_DEFAULT;
+    return ok;
+}
+
+fn test_tui_put_get_roundtrip() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    let a: u32 = tu_attr(4, 1, 2);
+    let k: u32 = tu_put(ws, 8, 4, 1, 2, 65, a); // 'A'
+    return k == 1 && tu_get(ws, 8, 4, 1, 2) == 65 && tu_get_attr(ws, 8, 4, 1, 2) == a
+        && tu_get(ws, 8, 4, 1, 1) == 32;
+}
+
+fn test_tui_put_out_of_bounds_is_noop() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    let a: u32 = 16711935; // 哨兵属性
+    let k1: u32 = tu_put(ws, 8, 4, 4, 0, 88, a); // r == h
+    let k2: u32 = tu_put(ws, 8, 4, 0, 8, 88, a); // c == w
+    let ok: bool = k1 == 0 && k2 == 0 && tu_get(ws, 8, 4, 0, 0) == 32
+        && tu_get_attr(ws, 8, 4, 0, 0) == TU_ATTR_DEFAULT;
+    return ok;
+}
+
+fn test_tui_wide_takes_two_cells() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    let a: u32 = tu_attr(1, 255, 0);
+    let k: u32 = tu_put(ws, 8, 4, 0, 0, 20013, a); // 中 U+4E2D
+    return k == 2 && tu_get(ws, 8, 4, 0, 0) == 20013
+        && tu_get(ws, 8, 4, 0, 1) == TU_CONT
+        && tu_get_attr(ws, 8, 4, 0, 1) == a
+        && tu_get(ws, 8, 4, 0, 2) == 32;
+}
+
+fn test_tui_wide_at_last_col_becomes_space() -> bool {
+    // 宽字符落在最后一列: 决定是"写一个空格" (规矩 2)。绝不写出界。
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    let a: u32 = tu_attr(1, 255, 0);
+    let k: u32 = tu_put(ws, 8, 4, 0, 7, 20013, a);
+    let ok: bool = k == 1 && tu_get(ws, 8, 4, 0, 7) == 32
+        && tu_get_attr(ws, 8, 4, 0, 7) == a;
+    // 下一行第一格不能被写坏
+    return ok && tu_get(ws, 8, 4, 1, 0) == 32;
+}
+
+fn test_tui_overwrite_wide_clears_cont() -> bool {
+    // 规矩 3: 用窄字符盖住宽字符的第一格, 它的续格必须被抹成空格。
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    tu_put(ws, 8, 4, 0, 0, 20013, TU_ATTR_DEFAULT);
+    let k: u32 = tu_put(ws, 8, 4, 0, 0, 88, TU_ATTR_DEFAULT); // 'X'
+    return k == 1 && tu_get(ws, 8, 4, 0, 0) == 88 && tu_get(ws, 8, 4, 0, 1) == 32;
+}
+
+fn test_tui_overwrite_cont_clears_base() -> bool {
+    // 规矩 3 的另一半: 用字符盖住续格, 左邻的宽字符必须被抹成空格。
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    tu_put(ws, 8, 4, 0, 0, 20013, TU_ATTR_DEFAULT);
+    let k: u32 = tu_put(ws, 8, 4, 0, 1, 89, TU_ATTR_DEFAULT); // 'Y'
+    return k == 1 && tu_get(ws, 8, 4, 0, 0) == 32 && tu_get(ws, 8, 4, 0, 1) == 89;
+}
+
+fn test_tui_row_width_invariant() -> bool {
+    // 不变量: 每行显示宽度合计 == w。含中文、含空行, **逐行遍历**验。
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    tu_put(ws, 8, 4, 0, 0, 20013, TU_ATTR_DEFAULT); // 中
+    tu_put(ws, 8, 4, 0, 2, 25991, TU_ATTR_DEFAULT); // 文
+    tu_put(ws, 8, 4, 2, 1, 65, TU_ATTR_DEFAULT);    // 'A'
+    let bad: u32 = 0;
+    let r: u32 = 0;
+    while r < 4 {
+        if tu_row_width(ws, 8, 4, r) != 8 {
+            bad = 1;
+        }
+        r = r + 1;
+    }
+    return bad == 0;
+}
+
+fn test_tui_box_corners() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    let a: u32 = tu_attr(255, 255, 0);
+    let n: u32 = tu_box(ws, 8, 4, 0, 0, 2, 3, a);
+    // 上边 4 格 + 下边 4 格 + 中间一行左右各 1 = 10
+    let ok: bool = n == 10 && tu_get(ws, 8, 4, 0, 0) == 9484
+        && tu_get(ws, 8, 4, 0, 3) == 9488
+        && tu_get(ws, 8, 4, 2, 0) == 9492 && tu_get(ws, 8, 4, 2, 3) == 9496;
+    return ok;
+}
+
+fn test_tui_box_edges() -> bool {
+    let ws: ptr = alloc(tu_bytes(8, 4));
+    tu_clear(ws, 8, 4);
+    tu_box(ws, 8, 4, 0, 0, 2, 3, TU_ATTR_DEFAULT);
+    let ok: bool = tu_get(ws, 8, 4, 0, 1) == 9472 && tu_get(ws, 8, 4, 0, 2) == 9472
+        && tu_get(ws, 8, 4, 1, 0) == 9474 && tu_get(ws, 8, 4, 1, 3) == 9474
+        // 框内不该被动
+        && tu_get(ws, 8, 4, 1, 1) == 32;
+    // 框是完全单宽的 (制表符在 width.lomt 里算 1 格), 所以每行宽度不变
+    return ok && tu_row_width(ws, 8, 4, 0) == 8;
+}
+
+fn test_tui_diff_identical_is_zero() -> bool {
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    return tu_diff(a, b, 8, 4, out, 0) == 0;
+}
+
+fn test_tui_diff_one_cell() -> bool {
+    // 只改一格: 输出必须**只有** ESC[2;3H 加那个字符, 一共 7 字节。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(a, 8, 4, 1, 2, 65, TU_ATTR_DEFAULT); // 'A'
+    tu_put(b, 8, 4, 1, 2, 88, TU_ATTR_DEFAULT); // 'X'
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    // 1B 5B 32 3B 33 48 58
+    return n == 7 && load8(out, 0) == 27 && load8(out, 1) == 91 && load8(out, 2) == 50
+        && load8(out, 3) == 59 && load8(out, 4) == 51 && load8(out, 5) == 72
+        && load8(out, 6) == 88;
+}
+
+fn test_tui_diff_no_other_positions() -> bool {
+    // 改一格时, 输出里**不该出现别的位置的定位** —— 只有一条 ESC[ 且紧跟 'H'。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(b, 8, 4, 3, 6, 90, TU_ATTR_DEFAULT); // 'Z' (只此一格)
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    let esc: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) == 27 {
+            esc = esc + 1;
+        }
+        i = i + 1;
+    }
+    return esc == 1 && load8(out, n - 1) == 90;
+}
+
+fn test_tui_diff_consecutive_saves_move() -> bool {
+    // 相邻两格一起变: 第二条**不该**再发定位 —— 光标本来就在那。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(b, 8, 4, 0, 2, 65, TU_ATTR_DEFAULT);
+    tu_put(b, 8, 4, 0, 3, 66, TU_ATTR_DEFAULT);
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    let esc: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) == 27 {
+            esc = esc + 1;
+        }
+        i = i + 1;
+    }
+    // 一条定位 (6 字节) + 'A' + 'B' = 8 字节, 只有一组 ESC[
+    return n == 8 && esc == 1 && load8(out, 6) == 65 && load8(out, 7) == 66;
+}
+
+fn test_tui_diff_attr_change_emits_color() -> bool {
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(a, 8, 4, 0, 0, 65, TU_ATTR_DEFAULT);
+    tu_put(b, 8, 4, 0, 0, 65, tu_attr(196, 255, 1)); // 同字符, 属性变了
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    // 定位(6) + reset(4) + fg(11) + bold(4) + 'A'(1)
+    // 只是后面必须出现 ESC[38;5;196m 的逐字节痕迹: 38 5 196
+    let found: u32 = 0;
+    let i: u32 = 0;
+    while i + 2 < n {
+        if load8(out, i) == 51 && load8(out, i + 1) == 56
+            && load8(out, i + 2) == 59 && load8(out, i + 3) == 53 {
+            found = 1;
+        }
+        i = i + 1;
+    }
+    return found == 1 && load8(out, n - 1) == 65;
+}
+
+fn test_tui_diff_wide_char_output() -> bool {
+    // 把一格改成汉字: 输出必须是它的 UTF-8 (E4 B8 AD), 而且这一格占 2 个光标列。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(b, 8, 4, 0, 0, 20013, TU_ATTR_DEFAULT); // 中
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    // 定位(6) + 中(3) = 9; 续格不产生输出
+    return n == 9 && load8(out, 6) == 228 && load8(out, 7) == 184 && load8(out, 8) == 173;
+}
+
+fn test_tui_diff_cont_cell_alone_is_silent() -> bool {
+    // 只有续格"变"了 (构造出来的病态输入): 本层不单独输出它 —— 由它左边那格负责。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    // 两屏第一格都是汉字 (相同), 但 b 的续格属性不一样 —— 仍不该有输出
+    tu_put(a, 8, 4, 0, 0, 20013, TU_ATTR_DEFAULT);
+    tu_put(b, 8, 4, 0, 0, 20013, tu_attr(1, 255, 0));
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    // 第一格 (基格) 属性变了 -> 要输出一次 (占 2 列); 续格不再重复
+    // 定位(6) + reset(4) + fg(9) + 中(3) = 22
+    return n == 22;
+}
+
+fn test_tui_diff_row_jump_moves_cursor() -> bool {
+    // 两个变化格子不在同一行且不相邻 -> 必须两条定位。
+    let a: ptr = alloc(tu_bytes(8, 4));
+    let b: ptr = alloc(tu_bytes(8, 4));
+    let out: ptr = alloc(64);
+    tu_clear(a, 8, 4);
+    tu_clear(b, 8, 4);
+    tu_put(b, 8, 4, 0, 0, 65, TU_ATTR_DEFAULT);
+    tu_put(b, 8, 4, 3, 5, 66, TU_ATTR_DEFAULT);
+    let n: u32 = tu_diff(a, b, 8, 4, out, 0);
+    let esc: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) == 27 {
+            esc = esc + 1;
+        }
+        i = i + 1;
+    }
+    return n == 14 && esc == 2;
+}
+
+fn test_tui_utf8_widths() -> bool {
+    let out: ptr = alloc(8);
+    let a: u32 = tu_utf8(out, 0, 65);
+    let mk: u32 = tu_utf8(out, 1, 20013);
+    let em: u32 = tu_utf8(out, 4, 128512); // 😀 U+1F600
+    return a == 1 && load8(out, 0) == 65
+        && mk == 4 && load8(out, 1) == 228 && load8(out, 2) == 184 && load8(out, 3) == 173
+        && em == 8 && load8(out, 4) == 240 && load8(out, 7) == 128;
+}
+
+fn test_tui_attr_helpers() -> bool {
+    let a: u32 = tu_attr(196, 22, 5);
+    return tu_attr_fg(a) == 196 && tu_attr_bg(a) == 22 && tu_attr_flags(a) == 5
+        && tu_attr(255, 255, 0) == TU_ATTR_DEFAULT;
+}

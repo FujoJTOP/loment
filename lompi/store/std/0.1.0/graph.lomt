@@ -1,0 +1,724 @@
+// std/graph.lomt — 图的基础表示与遍历
+//
+// 为什么需要它: "一堆东西两两相连"是编译器的 CFG、依赖图、路由、社交网络的共同形状。
+// 本模块只做**表示 + 遍历** —— 带权最短路在 shortest.lomt, 生成树在 mst.lomt, 它们
+// 都 use 本模块的边缓冲与 CSR 构造 (图的"形状"只有一种, 不该抄三遍)。
+//
+// 语言约束把设计逼到这里 (见 skill §6.3): 不能按值传结构体, 没有对象, 没有 malloc。
+// 所以"图"不是类型, 而是**两块调用方给的缓冲 + 一个偏移约定**:
+//
+//   eb  (边缓冲, 你先往里塞边):
+//     [0]  m      已塞入的边数
+//     [4]  cap    容量
+//     [8..] 边记录, 每条 16 字节: [u:u32][v:u32][w:i64(8字节)]
+//           每条记录是**一条边**, 方向性交给 build 决定 (见下)。
+//
+//   **不要混用**: 无向图只有两种正确写法, 选一种 ——
+//     (A) 每条无向边 gr_add_edge 一次  + gr_build_undirected  => 自动补反向边
+//     (B) 每个方向各 gr_add_edge 一次   + gr_build            => 手动双向
+//   把 (B) 的边再喂给 gr_build_undirected 会把每条边铺成 4 条 —— 曾经的 gr_add_undirected
+//   就是为这个坑删掉的: 少一个会翻倍的便捷函数, 好过多一个静默翻倍的坑。
+//
+//   csr (邻接表, gr_build 从 eb 铺好):
+//     [0]   n          点数
+//     [4]   m'         铺好后的**有向**边数 (无向 build 时 = 2*原边数)
+//     [8..] rowstart, n+1 个 u32: 点 u 的第 k 个邻居在 to 里的下标 = rowstart[u]+k
+//     接着 to, m' 个 u32: 邻居
+//     接着 wt, m' 个 i64: 对应权重 (8 字节一条)
+//
+//   逻辑行 >= 4, 内存块 4 KiB, 线性布局。容量由调用方算, 见 gr_edges_bytes / gr_csr_bytes。
+//
+// 复杂度: build O(n+m) (计数排序式, **无额外 scratch**: 用"游标即 rowstart 再整体右移"
+// 的老技巧); BFS/DFS O(n+m); 连通分量 O(n+m); 拓扑 O(n+m)。
+//
+// 诚实清单:
+//   * BFS 是**按边数**的最短路, 不是按权重 —— 它完全不看 w。要按权重走用 shortest.lomt。
+//     权重存在边里只是让两个下游模块能复用同一份表示, 不是让 BFS 变 Dijkstra。
+//   * DFS 是显式栈的**迭代版**。为什么不用递归: 本语言递归没有尾调用优化, 深图 (10 万点链)
+//     会把原生栈打穿; 而且迭代版把"栈"变成调用方能控制大小的数组, 不会静默崩在一个深分支上。
+//     代价: 邻居压栈顺序与递归版相反, 所以访问次序与手写的递归 DFS 不一定逐点相同 —— 但
+//     访问**集合**与"每点恰一次"的不变量相同。
+//   * 自环 (u==v) 允许。拓扑排序里自环会让入度永远降不到 0, 于是报环 —— 这是对的 (自环就是环)。
+//   * 平行边 (同一对点多条) 允许, 遍历时会各出现一次。
+//   * gr_build 遇到越界点号 (u>=n 或 v>=n) **返回 false**, 且此时 csr 内容未定义 (已被写脏);
+//     调用方应把 false 当成"这份 csr 作废"。
+//   * rowstart/t/邻接表按"边加入顺序"稳定排列 —— 不排序, 因为排序不是免费, 而遍历不需要。
+//
+// 命名: 公开 gr_*, 内部 gb_*。自检 test_graph_*。
+
+module graph
+
+use "mem.lomt"
+
+/// "不可达 / 没有" —— 正常结果, 不是错误。
+pub const GR_NO: u32 = 4294967294;
+/// "空槽 / 无前驱 (源点自己)"。
+pub const GR_NONE: u32 = 4294967295;
+/// "出错" (容量越界等)。
+pub const GR_ERR: u32 = 4294967293;
+
+// ---------------------------------------------------------------- 边缓冲 eb
+
+fn gr_eh() -> u32 {
+    return 8;
+}
+
+/// 边缓冲要多少字节。
+pub fn gr_edges_bytes(cap: u32) -> u32 {
+    return gr_eh() + 16 * cap;
+}
+
+/// 建边缓冲。cap 是能塞的最大边数。
+pub fn gr_edges_init(eb: ptr, cap: u32) {
+    mem_store32(eb, 0, 0);
+    mem_store32(eb, 4, cap);
+}
+
+pub fn gr_len(eb: ptr) -> u32 {
+    return mem_load32(eb, 0);
+}
+
+pub fn gr_cap(eb: ptr) -> u32 {
+    return mem_load32(eb, 4);
+}
+
+/// 加一条**有向**边 u->v, 权重 w。满了返回 false (不静默丢)。
+pub fn gr_add_edge(eb: ptr, u: u32, v: u32, w: i64) -> bool {
+    let m: u32 = mem_load32(eb, 0);
+    if m >= mem_load32(eb, 4) {
+        return false;
+    }
+    let o: u32 = gr_eh() + 16 * m;
+    mem_store32(eb, o, u);
+    mem_store32(eb, o + 4, v);
+    mem_store64(eb, o + 8, w as u64);
+    mem_store32(eb, 0, m + 1);
+    return true;
+}
+
+pub fn gr_edge_u(eb: ptr, i: u32) -> u32 {
+    return mem_load32(eb, gr_eh() + 16 * i);
+}
+
+pub fn gr_edge_v(eb: ptr, i: u32) -> u32 {
+    return mem_load32(eb, gr_eh() + 16 * i + 4);
+}
+
+pub fn gr_edge_w(eb: ptr, i: u32) -> i64 {
+    return mem_load64(eb, gr_eh() + 16 * i + 8) as i64;
+}
+
+/// 改写第 i 条边。给"就地按权重排序边"这类操作一个不依赖记录内部偏移的写入口
+/// (mst 的边排序要用) —— 记录是 16 字节还是 24 字节是 graph 的内部事, 别人不该知道。
+pub fn gr_set_edge(eb: ptr, i: u32, u: u32, v: u32, w: i64) {
+    let o: u32 = gr_eh() + 16 * i;
+    mem_store32(eb, o, u);
+    mem_store32(eb, o + 4, v);
+    mem_store64(eb, o + 8, w as u64);
+}
+
+// ---------------------------------------------------------------- CSR 构造
+
+/// CSR 要多少字节。m 是**铺好后**的有向边数 (无向图传 2*原边数)。
+pub fn gr_csr_bytes(n: u32, m: u32) -> u32 {
+    return 8 + 4 * (n + 1) + 4 * m + 8 * m;
+}
+
+fn gb_rs() -> u32 {
+    return 8;
+}
+
+fn gb_to(csr: ptr) -> u32 {
+    return gb_rs() + 4 * (mem_load32(csr, 0) + 1);
+}
+
+fn gb_wt(csr: ptr) -> u32 {
+    return gb_to(csr) + 4 * mem_load32(csr, 4);
+}
+
+/// 放一条已计数好的边: 写 to/wt 到 rowstart[u] 这个游标处, 然后游标 +1。
+/// (构造结束后游标会被整体右移回正确的 rowstart。)
+fn gb_put(csr: ptr, u: u32, v: u32, w: u64) {
+    let p: u32 = mem_load32(csr, gb_rs() + 4 * u);
+    mem_store32(csr, gb_to(csr) + 4 * p, v);
+    mem_store64(csr, gb_wt(csr) + 8 * p, w);
+    mem_store32(csr, gb_rs() + 4 * u, p + 1);
+}
+
+/// 从 eb 铺一份 CSR。dbl=1 有向原样, dbl=2 每条边正反各铺一次。
+///
+/// 无 scratch 的两遍计数排序: 第一遍只数, 前缀和得到行首, 第二遍用行首当游标往里填,
+/// 填完每个游标正好等于"下一行的行首", 于是整体右移一格就还原成真正的 rowstart。
+/// 省掉了一份 n 个 u32 的临时游标数组 —— 那点内存在 64 KiB 堆里不是小事。
+fn gb_fill(eb: ptr, csr: ptr, n: u32, dbl: u32) -> bool {
+    let m: u32 = mem_load32(eb, 0);
+    // 先验点号, 避免写越界。验不过就整体作废。
+    let c: u32 = 0;
+    while c < m {
+        if gr_edge_u(eb, c) >= n || gr_edge_v(eb, c) >= n {
+            return false;
+        }
+        c = c + 1;
+    }
+    mem_store32(csr, 0, n);
+    mem_store32(csr, 4, m * dbl);
+    // 清 rowstart
+    let i: u32 = 0;
+    while i <= n {
+        mem_store32(csr, gb_rs() + 4 * i, 0);
+        i = i + 1;
+    }
+    // 计数: rowstart[u+1] 记 u 的扇出
+    let e: u32 = 0;
+    while e < m {
+        let u: u32 = gr_edge_u(eb, e);
+        let v: u32 = gr_edge_v(eb, e);
+        mem_store32(csr, gb_rs() + 4 * (u + 1), mem_load32(csr, gb_rs() + 4 * (u + 1)) + 1);
+        if dbl == 2 {
+            mem_store32(csr, gb_rs() + 4 * (v + 1), mem_load32(csr, gb_rs() + 4 * (v + 1)) + 1);
+        }
+        e = e + 1;
+    }
+    // 前缀和 -> rowstart[i] = 行 i 的起点
+    let p: u32 = 1;
+    while p <= n {
+        mem_store32(csr, gb_rs() + 4 * p, mem_load32(csr, gb_rs() + 4 * p) + mem_load32(csr, gb_rs() + 4 * (p - 1)));
+        p = p + 1;
+    }
+    // 放置 (rowstart 此时是游标, 顺序稳定)
+    let e2: u32 = 0;
+    while e2 < m {
+        let u2: u32 = gr_edge_u(eb, e2);
+        let v2: u32 = gr_edge_v(eb, e2);
+        let w2: u64 = mem_load64(eb, gr_eh() + 16 * e2 + 8);
+        gb_put(csr, u2, v2, w2);
+        if dbl == 2 {
+            gb_put(csr, v2, u2, w2);
+        }
+        e2 = e2 + 1;
+    }
+    // 游标右移一格还原成 rowstart
+    let q: u32 = n;
+    while q > 0 {
+        mem_store32(csr, gb_rs() + 4 * q, mem_load32(csr, gb_rs() + 4 * (q - 1)));
+        q = q - 1;
+    }
+    mem_store32(csr, gb_rs(), 0);
+    return true;
+}
+
+/// 铺有向 CSR (每条 eb 边一个方向)。返回 false 表示有点号越界, csr 已作废。
+pub fn gr_build(eb: ptr, csr: ptr, n: u32) -> bool {
+    return gb_fill(eb, csr, n, 1);
+}
+
+/// 铺**无向** CSR (每条 eb 边正反各一条)。csr 必须按 gr_csr_bytes(n, 2*gr_len(eb)) 分配。
+pub fn gr_build_undirected(eb: ptr, csr: ptr, n: u32) -> bool {
+    return gb_fill(eb, csr, n, 2);
+}
+
+// ---------------------------------------------------------------- CSR 访问
+
+pub fn gr_n(csr: ptr) -> u32 {
+    return mem_load32(csr, 0);
+}
+
+/// 铺好后的有向边数 (无向建图时是原边数的两倍)。
+pub fn gr_m(csr: ptr) -> u32 {
+    return mem_load32(csr, 4);
+}
+
+pub fn gr_row_start(csr: ptr, u: u32) -> u32 {
+    return mem_load32(csr, gb_rs() + 4 * u);
+}
+
+pub fn gr_degree(csr: ptr, u: u32) -> u32 {
+    return mem_load32(csr, gb_rs() + 4 * (u + 1)) - mem_load32(csr, gb_rs() + 4 * u);
+}
+
+/// 点 u 的第 k 个邻居。
+pub fn gr_to(csr: ptr, u: u32, k: u32) -> u32 {
+    return mem_load32(csr, gb_to(csr) + 4 * (mem_load32(csr, gb_rs() + 4 * u) + k));
+}
+
+pub fn gr_w(csr: ptr, u: u32, k: u32) -> i64 {
+    return mem_load64(csr, gb_wt(csr) + 8 * (mem_load32(csr, gb_rs() + 4 * u) + k)) as i64;
+}
+
+/// u->v 是否有边 (线性扫, 不是 O(1) —— 稀疏图够用, 稠密图应改邻接矩阵)。
+pub fn gr_has_edge(csr: ptr, u: u32, v: u32) -> bool {
+    let d: u32 = gr_degree(csr, u);
+    let k: u32 = 0;
+    while k < d {
+        if gr_to(csr, u, k) == v {
+            return true;
+        }
+        k = k + 1;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 遍历
+
+/// 从 src 起 BFS, 把**按边数**的距离写进 dist[n] (不可达 = GR_NO)。返回可达点数。
+/// dist 由调用方清零前的初值无所谓 —— 本函数只写访问到的点, 但**不可达点的 dist 由本函数
+/// 统一写成 GR_NO**, 所以调用方不必预清。
+pub fn gr_bfs(csr: ptr, src: u32, dist: ptr, queue: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(dist, 4 * i, GR_NO);
+        i = i + 1;
+    }
+    if src >= n {
+        return 0;
+    }
+    let head: u32 = 0;
+    let tail: u32 = 0;
+    mem_store32(dist, 4 * src, 0);
+    mem_store32(queue, 0, src);
+    tail = 1;
+    while head < tail {
+        let u: u32 = mem_load32(queue, 4 * head);
+        head = head + 1;
+        let du: u32 = mem_load32(dist, 4 * u);
+        let d: u32 = gr_degree(csr, u);
+        let k: u32 = 0;
+        while k < d {
+            let v: u32 = gr_to(csr, u, k);
+            if mem_load32(dist, 4 * v) == GR_NO {
+                mem_store32(dist, 4 * v, du + 1);
+                mem_store32(queue, 4 * tail, v);
+                tail = tail + 1;
+            }
+            k = k + 1;
+        }
+    }
+    return tail;
+}
+
+/// 同 gr_bfs, 另写前驱 prev[n] (源点与不可达点 = GR_NONE)。返回可达点数。
+pub fn gr_bfs_prev(csr: ptr, src: u32, dist: ptr, prev: ptr, queue: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(dist, 4 * i, GR_NO);
+        mem_store32(prev, 4 * i, GR_NONE);
+        i = i + 1;
+    }
+    if src >= n {
+        return 0;
+    }
+    let head: u32 = 0;
+    let tail: u32 = 1;
+    mem_store32(dist, 4 * src, 0);
+    mem_store32(queue, 0, src);
+    while head < tail {
+        let u: u32 = mem_load32(queue, 4 * head);
+        head = head + 1;
+        let du: u32 = mem_load32(dist, 4 * u);
+        let d: u32 = gr_degree(csr, u);
+        let k: u32 = 0;
+        while k < d {
+            let v: u32 = gr_to(csr, u, k);
+            if mem_load32(dist, 4 * v) == GR_NO {
+                mem_store32(dist, 4 * v, du + 1);
+                mem_store32(prev, 4 * v, u);
+                mem_store32(queue, 4 * tail, v);
+                tail = tail + 1;
+            }
+            k = k + 1;
+        }
+    }
+    return tail;
+}
+
+/// 从 src 起迭代 DFS, 访问次序写进 order[n], 返回访问到的点数。
+/// visited[n] 由本函数清零并标记; stack[n] 是显式栈的 scratch。
+pub fn gr_dfs(csr: ptr, src: u32, order: ptr, stack: ptr, visited: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(visited, 4 * i, 0);
+        i = i + 1;
+    }
+    if src >= n {
+        return 0;
+    }
+    let sp: u32 = 0;
+    mem_store32(stack, 0, src);
+    sp = 1;
+    let cnt: u32 = 0;
+    while sp > 0 {
+        sp = sp - 1;
+        let u: u32 = mem_load32(stack, 4 * sp);
+        if mem_load32(visited, 4 * u) == 0 {
+            mem_store32(visited, 4 * u, 1);
+            mem_store32(order, 4 * cnt, u);
+            cnt = cnt + 1;
+            let d: u32 = gr_degree(csr, u);
+            let k: u32 = 0;
+            while k < d {
+                let v: u32 = gr_to(csr, u, k);
+                if mem_load32(visited, 4 * v) == 0 {
+                    mem_store32(stack, 4 * sp, v);
+                    sp = sp + 1;
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 连通分量
+
+/// 无向连通分量。comp[n] 写分量号 (0,1,2...), queue[n] 是 BFS scratch。返回分量数。
+/// 有向图上它给的是"弱连通分量"的近似 —— 严格说是从各点出发能到的地方, 对无向图才是标准分量。
+pub fn gr_components(csr: ptr, comp: ptr, queue: ptr) -> u32 {
+    let n: u32 = gr_n(csr);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(comp, 4 * i, GR_NONE);
+        i = i + 1;
+    }
+    let ncomp: u32 = 0;
+    let s: u32 = 0;
+    while s < n {
+        if mem_load32(comp, 4 * s) == GR_NONE {
+            let head: u32 = 0;
+            let tail: u32 = 1;
+            mem_store32(queue, 0, s);
+            mem_store32(comp, 4 * s, ncomp);
+            while head < tail {
+                let u: u32 = mem_load32(queue, 4 * head);
+                head = head + 1;
+                let d: u32 = gr_degree(csr, u);
+                let k: u32 = 0;
+                while k < d {
+                    let v: u32 = gr_to(csr, u, k);
+                    if mem_load32(comp, 4 * v) == GR_NONE {
+                        mem_store32(comp, 4 * v, ncomp);
+                        mem_store32(queue, 4 * tail, v);
+                        tail = tail + 1;
+                    }
+                    k = k + 1;
+                }
+            }
+            ncomp = ncomp + 1;
+        }
+        s = s + 1;
+    }
+    return ncomp;
+}
+
+// ---------------------------------------------------------------- 拓扑排序
+
+/// Kahn 拓扑排序。order[n] 收结果, indeg[n] 是入度 scratch, queue[n] 是 scratch。
+/// 无环返回 true 且 order 填满 n 个点; **有环 (含自环) 返回 false**, 此时 order 内容不完整。
+/// 返回 false 是"报错", 不是"结果为空" —— 用来区分"图有环"与"图是空图" (空图返回 true)。
+pub fn gr_topo(csr: ptr, order: ptr, indeg: ptr, queue: ptr) -> bool {
+    let n: u32 = gr_n(csr);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(indeg, 4 * i, 0);
+        i = i + 1;
+    }
+    let u: u32 = 0;
+    while u < n {
+        let d: u32 = gr_degree(csr, u);
+        let k: u32 = 0;
+        while k < d {
+            let v: u32 = gr_to(csr, u, k);
+            mem_store32(indeg, 4 * v, mem_load32(indeg, 4 * v) + 1);
+            k = k + 1;
+        }
+        u = u + 1;
+    }
+    let head: u32 = 0;
+    let tail: u32 = 0;
+    let j: u32 = 0;
+    while j < n {
+        if mem_load32(indeg, 4 * j) == 0 {
+            mem_store32(queue, 4 * tail, j);
+            tail = tail + 1;
+        }
+        j = j + 1;
+    }
+    let cnt: u32 = 0;
+    while head < tail {
+        let x: u32 = mem_load32(queue, 4 * head);
+        head = head + 1;
+        mem_store32(order, 4 * cnt, x);
+        cnt = cnt + 1;
+        let d2: u32 = gr_degree(csr, x);
+        let k2: u32 = 0;
+        while k2 < d2 {
+            let y: u32 = gr_to(csr, x, k2);
+            mem_store32(indeg, 4 * y, mem_load32(indeg, 4 * y) - 1);
+            if mem_load32(indeg, 4 * y) == 0 {
+                mem_store32(queue, 4 * tail, y);
+                tail = tail + 1;
+            }
+            k2 = k2 + 1;
+        }
+    }
+    return cnt == n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn tg_mk(n: u32, m: u32) -> ptr {
+    return alloc(gr_csr_bytes(n, m));
+}
+
+// --- 一棵树: 0->1, 0->2, 1->3, 1->4。BFS 层次应当 0,1,1,2,2。
+fn tg_tree_eb() -> ptr {
+    let eb: ptr = alloc(gr_edges_bytes(8));
+    gr_edges_init(eb, 8);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 0, 2, 1);
+    gr_add_edge(eb, 1, 3, 1);
+    gr_add_edge(eb, 1, 4, 1);
+    return eb;
+}
+
+fn test_graph_bfs_levels_on_tree() -> bool {
+    let eb: ptr = tg_tree_eb();
+    let csr: ptr = tg_mk(5, 4);
+    let ok: bool = gr_build(eb, csr, 5);
+    let dist: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let r: u32 = gr_bfs(csr, 0, dist, q);
+    return ok && r == 5 && mem_load32(dist, 0) == 0 && mem_load32(dist, 4) == 1
+        && mem_load32(dist, 8) == 1 && mem_load32(dist, 12) == 2 && mem_load32(dist, 16) == 2;
+}
+
+fn test_graph_bfs_unreachable_is_no() -> bool {
+    // 加一个孤点 5: dist[5] 必须是 GR_NO, 可达数仍是 5。
+    let eb: ptr = tg_tree_eb();
+    let csr: ptr = tg_mk(6, 4);
+    gr_build(eb, csr, 6);
+    let dist: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let r: u32 = gr_bfs(csr, 0, dist, q);
+    return r == 5 && mem_load32(dist, 20) == GR_NO;
+}
+
+fn test_graph_bfs_prev_reconstructs_path() -> bool {
+    // 0->1->2->3 链: prev[3]=2, prev[2]=1, prev[1]=0, prev[0]=GR_NONE
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 1);
+    gr_add_edge(eb, 2, 3, 1);
+    let csr: ptr = tg_mk(4, 3);
+    gr_build(eb, csr, 4);
+    let dist: ptr = alloc(64);
+    let prev: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let r: u32 = gr_bfs_prev(csr, 0, dist, prev, q);
+    return r == 4 && mem_load32(prev, 12) == 2 && mem_load32(prev, 8) == 1
+        && mem_load32(prev, 4) == 0 && mem_load32(prev, 0) == GR_NONE
+        && mem_load32(dist, 12) == 3;
+}
+
+fn test_graph_dfs_visits_each_once() -> bool {
+    let eb: ptr = tg_tree_eb();
+    let csr: ptr = tg_mk(5, 4);
+    gr_build(eb, csr, 5);
+    let order: ptr = alloc(64);
+    let stack: ptr = alloc(64);
+    let vis: ptr = alloc(64);
+    let r: u32 = gr_dfs(csr, 0, order, stack, vis);
+    // 访问数 = 5, 起点先访问, 且 visited 全 1
+    let all: u32 = 0;
+    let i: u32 = 0;
+    while i < 5 {
+        if mem_load32(vis, 4 * i) == 1 {
+            all = all + 1;
+        }
+        i = i + 1;
+    }
+    return r == 5 && all == 5 && mem_load32(order, 0) == 0;
+}
+
+fn test_graph_components_two() -> bool {
+    // 无向: 0-1-2 一个分量, 3-4 一个 -> 2 个分量。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 1);
+    gr_add_edge(eb, 3, 4, 1);
+    let csr: ptr = tg_mk(5, 6);
+    let ok: bool = gr_build_undirected(eb, csr, 5);
+    let comp: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let nc: u32 = gr_components(csr, comp, q);
+    let c0: u32 = mem_load32(comp, 0);
+    let c3: u32 = mem_load32(comp, 12);
+    return ok && nc == 2 && c0 == mem_load32(comp, 4) && c0 == mem_load32(comp, 8)
+        && c3 == mem_load32(comp, 16) && c0 != c3;
+}
+
+fn test_graph_components_one_when_connected() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 2, 3, 1);
+    gr_add_edge(eb, 1, 2, 1);
+    let csr: ptr = tg_mk(4, 6);
+    gr_build_undirected(eb, csr, 4);
+    let comp: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    return gr_components(csr, comp, q) == 1;
+}
+
+fn test_graph_undirected_degree() -> bool {
+    // 一条无向边 0-1 (写法 A): 两边度数都是 1, 且双向可查。
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 7);
+    let csr: ptr = tg_mk(2, 2);
+    let ok: bool = gr_build_undirected(eb, csr, 2);
+    return ok && gr_m(csr) == 2 && gr_degree(csr, 0) == 1 && gr_degree(csr, 1) == 1
+        && gr_has_edge(csr, 0, 1) && gr_has_edge(csr, 1, 0) && gr_w(csr, 0, 0) == 7;
+}
+
+fn test_graph_directed_manual_both_ways() -> bool {
+    // 写法 B: 手动补反向边再 gr_build (dbl=1) —— 度数同样是 1/1, 不该翻倍。
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 1, 7);
+    gr_add_edge(eb, 1, 0, 7);
+    let csr: ptr = tg_mk(2, 2);
+    let ok: bool = gr_build(eb, csr, 2);
+    return ok && gr_m(csr) == 2 && gr_degree(csr, 0) == 1 && gr_degree(csr, 1) == 1
+        && gr_has_edge(csr, 0, 1) && gr_has_edge(csr, 1, 0);
+}
+
+fn test_graph_build_layout() -> bool {
+    // 有向 0->2, 0->1, 1->2: rowstart = [0,2,3,3], to = [2,1,2] (按加入顺序稳定)。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 2, 1);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 1);
+    let csr: ptr = tg_mk(3, 3);
+    let ok: bool = gr_build(eb, csr, 3);
+    return ok && gr_n(csr) == 3 && gr_m(csr) == 3
+        && gr_row_start(csr, 0) == 0 && gr_row_start(csr, 1) == 2
+        && gr_row_start(csr, 2) == 3 && gr_row_start(csr, 3) == 3
+        && gr_to(csr, 0, 0) == 2 && gr_to(csr, 0, 1) == 1 && gr_to(csr, 1, 0) == 2
+        && gr_degree(csr, 2) == 0;
+}
+
+fn test_graph_topo_order_respects_every_edge() -> bool {
+    // CLRS 图 22.5 的 DAG: 5->2,5->0,4->0,4->1,2->3,3->1
+    let eb: ptr = alloc(gr_edges_bytes(8));
+    gr_edges_init(eb, 8);
+    gr_add_edge(eb, 5, 2, 1);
+    gr_add_edge(eb, 5, 0, 1);
+    gr_add_edge(eb, 4, 0, 1);
+    gr_add_edge(eb, 4, 1, 1);
+    gr_add_edge(eb, 2, 3, 1);
+    gr_add_edge(eb, 3, 1, 1);
+    let csr: ptr = tg_mk(6, 6);
+    gr_build(eb, csr, 6);
+    let order: ptr = alloc(64);
+    let indeg: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let ok: bool = gr_topo(csr, order, indeg, q);
+    // 不变量检查: 对**每一条**边 u->v, pos[u] < pos[v]。
+    let pos: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 6 {
+        mem_store32(pos, 4 * mem_load32(order, 4 * i), i);
+        i = i + 1;
+    }
+    let e: u32 = 0;
+    let good: u32 = 1;
+    while e < gr_len(eb) {
+        let u: u32 = gr_edge_u(eb, e);
+        let v: u32 = gr_edge_v(eb, e);
+        if mem_load32(pos, 4 * u) >= mem_load32(pos, 4 * v) {
+            good = 0;
+        }
+        e = e + 1;
+    }
+    return ok && good == 1;
+}
+
+fn test_graph_topo_cycle_detected() -> bool {
+    // 三环 0->1->2->0: 必须报 false。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 1);
+    gr_add_edge(eb, 1, 2, 1);
+    gr_add_edge(eb, 2, 0, 1);
+    let csr: ptr = tg_mk(3, 3);
+    gr_build(eb, csr, 3);
+    let order: ptr = alloc(64);
+    let indeg: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    return gr_topo(csr, order, indeg, q) == false;
+}
+
+fn test_graph_topo_self_loop_is_cycle() -> bool {
+    // 自环是环 —— 入度永远降不到 0。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 0, 1);
+    gr_add_edge(eb, 0, 1, 1);
+    let csr: ptr = tg_mk(2, 2);
+    gr_build(eb, csr, 2);
+    let order: ptr = alloc(64);
+    let indeg: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    return gr_topo(csr, order, indeg, q) == false;
+}
+
+fn test_graph_single_node() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    let csr: ptr = tg_mk(1, 0);
+    let ok: bool = gr_build(eb, csr, 1);
+    let dist: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    let comp: ptr = alloc(64);
+    let order: ptr = alloc(64);
+    let indeg: ptr = alloc(64);
+    let r: u32 = gr_bfs(csr, 0, dist, q);
+    return ok && r == 1 && mem_load32(dist, 0) == 0 && gr_components(csr, comp, q) == 1
+        && gr_topo(csr, order, indeg, q) && mem_load32(order, 0) == 0;
+}
+
+fn test_graph_edges_full_refused() -> bool {
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    let a: bool = gr_add_edge(eb, 0, 1, 1);
+    let b: bool = gr_add_edge(eb, 1, 0, 1);
+    let c: bool = gr_add_edge(eb, 0, 0, 1);
+    return a && b && c == false && gr_len(eb) == 2;
+}
+
+fn test_graph_build_rejects_bad_node() -> bool {
+    // 点号 5 越界 (n=3): 必须 false, 不能悄悄写坏内存。
+    let eb: ptr = alloc(gr_edges_bytes(2));
+    gr_edges_init(eb, 2);
+    gr_add_edge(eb, 0, 5, 1);
+    let csr: ptr = tg_mk(3, 1);
+    return gr_build(eb, csr, 3) == false;
+}
+
+fn test_graph_parallel_and_self_edges_counted() -> bool {
+    // 平行边与自环都各占一条: 0->1 两次 + 0->0 一次 => 度 3。
+    let eb: ptr = alloc(gr_edges_bytes(4));
+    gr_edges_init(eb, 4);
+    gr_add_edge(eb, 0, 1, 5);
+    gr_add_edge(eb, 0, 1, 6);
+    gr_add_edge(eb, 0, 0, 9);
+    let csr: ptr = tg_mk(2, 3);
+    let ok: bool = gr_build(eb, csr, 2);
+    return ok && gr_degree(csr, 0) == 3 && gr_has_edge(csr, 0, 0) && gr_w(csr, 0, 2) == 9;
+}

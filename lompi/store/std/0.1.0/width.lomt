@@ -1,0 +1,365 @@
+// std/width.lomt — 终端里的**显示宽度** (东亚宽度)
+//
+// 为什么不能用字节数或码点数: 排版到等宽终端上时, `中` 占 **2 格**, `a` 占 1 格,
+// 而组合记号 (比如 e 上加的那个撇) 占 **0 格**。拿字节数排版的话中文表格会歪,
+// 拿码点数排版的话重音字母会歪。要列对齐、要换行、要画表格, 都得先有这一层。
+//
+// 三档 ширины:
+//   WIDTH_ZERO   (0) —— 控制字符、组合记号、变体选择符、零宽空格
+//   WIDTH_NARROW (1) —— 绝大多数西文字母、数字、标点
+//   WIDTH_WIDE   (2) —— 中日韩文字、全角标点、以及多数 emoji
+//
+// **Ambiguous (A) 一律当 1**: 希腊字母、制表符 `─`、圈数字这些在东亚字体里是双宽,
+// 在西文字体里是单宽。没有运行时能问"当前字体是哪套", 所以本层选 1 (西文语境),
+// 这是**取舍**不是疏漏 —— 要东亚语境得自己在上面加一层。
+//
+// 两张区间表用十六进制串内嵌 (每段 12 个字符: 起 6 位 + 止 6 位), 由
+// `tools/gen_width_tables.py` 生成。改表就改脚本再跑, 别手工编 hex。
+//
+// 命名: 公开 width_*, 内部 w_*。自检 test_width_*。
+
+module width
+
+use "mem.lomt"
+
+pub const WIDTH_ZERO: u32 = 0;
+pub const WIDTH_NARROW: u32 = 1;
+pub const WIDTH_WIDE: u32 = 2;
+
+// ---------------------------------------------------------------- 区间表
+
+fn w_wide_hex() -> str {
+    return "00110000115f00231a00231b00232900232a0023e90023ec0023f00023f00023f30023f30025fd0025fe00261400261500264800265300267f00267f0026930026930026a10026a10026aa0026ab0026bd0026be0026c40026c50026ce0026ce0026d40026d40026ea0026ea0026f20026f30026f50026f50026fa0026fa0026fd0026fd00270500270500270a00270b00272800272800274c00274c00274e00274e0027530027550027570027570027950027970027b00027b00027bf0027bf002b1b002b1c002b50002b50002b55002b55002e80002e99002e9b002ef3002f00002fd5002ff0002ffb00300000303e0030410030960030990030ff00310500312f00313100318e0031900031e30031f000321e003220003247003250004dbf004e0000a48c00a49000a4c600a96000a97c00ac0000d7a300f90000faff00fe1000fe1900fe3000fe5200fe5400fe6600fe6800fe6b00ff0100ff6000ffe000ffe6016fe0016fe4016ff0016ff10170000187f7018800018cd501b00001b12201b15001b15201b16401b16701b17001b2fb01f00401f00401f0cf01f0cf01f18e01f18e01f19101f19a01f20001f20201f21001f23b01f24001f24801f25001f25101f26001f26501f30001f32001f32d01f33501f33701f37c01f37e01f39301f3a001f3ca01f3cf01f3d301f3e001f3f001f3f401f3f401f3f801f43e01f44001f44001f44201f4fc01f4ff01f53d01f54b01f54e01f55001f56701f57a01f57a01f59501f59601f5a401f5a401f5fb01f64f01f68001f6c501f6cc01f6cc01f6d001f6d201f6d501f6d701f6dc01f6df01f6eb01f6ec";
+}
+
+fn w_wide_hex_1() -> str {
+    return "01f6f401f6fc01f7e001f7eb01f7f001f7f001f90c01f93a01f93c01f94501f94701f9ff01fa7001fa7c01fa8001fa8801fa9001fabd01fabf01fac501face01fadb01fae001fae801faf001faf802000002fffd03000003fffd";
+}
+fn w_zero_hex() -> str {
+    return "00030000036f0004830004890005910005bd0005bf0005bf0005c10005c20005c40005c50005c70005c700061000061a00064b00065f0006700006700006d60006dc0006df0006e40006e70006e80006ea0006ed00071100071100073000074a0007a60007b00007eb0007f300081600081900081b00082300082500082700082900082d00085900085b0008e300090300093a00093c00094100094800094d00094d0009510009570009620009630009810009810009bc0009bc0009c10009c40009cd0009cd000a01000a02000a3c000a3c000a41000a42000a47000a48000a4b000a4d000abc000abc000ac1000ac5000ac7000ac8000acd000acd000b3c000b3c000b3f000b3f000b41000b44000b4d000b4d000bcd000bcd000c3e000c40000c46000c48000c4a000c4d000cbc000cbc000ccc000ccd000d41000d44000d4d000d4d000dca000dca000e31000e31000e34000e3a000e47000e4e000eb1000eb1000eb4000ebc000ec8000ecd000f18000f19000f35000f35000f37000f37000f39000f39000f71000f7e000f80000f84000f86000f87000f8d000f97000f99000fbc000fc6000fc600102d00103000103200103700103900103a00105800105900135d00135f0017120017140017320017340017520017530017720017730017b40017b50017b70017bd0017c60017c60017c90017d30017dd0017dd00180b00180d0018a90018a9001ab0001aff001b00001b03001b34001b34001b36001b3a001b3c001b3c001b42001b42001b6b001b73001dc0001dff00200b00200f00202a00202e00206000206400206600206f0020d00020f0";
+}
+
+fn w_zero_hex_1() -> str {
+    return "002cef002cf1002d7f002d7f00302a00302d00309900309a00a66f00a67200a67400a67d00a69e00a69f00a6f000a6f100a80200a80200a80600a80600a80b00a80b00a82500a82600a8c400a8c500a8e000a8f100a92600a92d00a94700a95100a98000a98200a9b300a9b300a9b600a9b900a9bc00a9bc00a9cd00a9cd00aa2900aa2e00aa3100aa3200aa3500aa3600aa4300aa4300aa4c00aa4c00aa7c00aa7c00aab000aab000aab200aab400aab700aab800aabe00aabf00aac100aac100aaec00aaed00aaf600aaf600abe500abe500abe800abe800abed00abed00fb1e00fb1e00fe0000fe0f00fe2000fe2f00feff00feff0101fd0101fd0102e00102e001037601037a010a01010a03010a05010a06010a0c010a0f010a38010a3a010a3f010a3f01100101100101103801104601107f0110810110b30110b60110b90110ba01110001110201112701112b01112d0111340111730111730111800111810111b60111be01122f01123101123401123401123601123701123e01123e0112df0112df0112e30112ea01130001130101133c01133c01134001134001136601136c01137001137401143801143f0114420114440114460114460114b30114b80114ba0114ba0114bf0114c00114c20114c30115b20115b50115bc0115bd0115bf0115c00115dc0115dd01163301163a01163d01163d01163f0116400116ab0116ab0116ad0116ad0116b00116b50116b70116b701171d01171f01172201172501172701172b01182f01183701183901183a01193b01193c01193e01193e0119430119430119d40119d70119da0119db0119e00119e0";
+}
+
+fn w_zero_hex_2() -> str {
+    return "011a01011a0a011a33011a38011a3b011a3e011a47011a47011a51011a56011a59011a5b011a8a011a96011a98011a99011c30011c36011c38011c3d011c3f011c3f011c92011ca7011caa011cb0011cb2011cb3011cb5011cb6011d31011d36011d3a011d3a011d3c011d3d011d3f011d45011d47011d47011d90011d91011d95011d95011d97011d97011ef3011ef4016af0016af4016b30016b36016f4f016f4f016f8f016f92016fe4016fe401bc9d01bc9e01d16701d16901d17b01d18201d18501d18b01d1aa01d1ad01d24201d24401da0001da3601da3b01da6c01da7501da7501da8401da8401da9b01da9f01daa101daaf01e00001e00601e00801e01801e01b01e02101e02301e02401e02601e02a01e13001e13601e2ec01e2ef01e8d001e8d601e94401e94a0e01000e01ef";
+}
+
+// ---------------------------------------------------------------- 查表
+
+fn w_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+/// 表里第 i 个 6 位十六进制数。
+fn w_num(s: str, i: u32) -> u32 {
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < 6 {
+        v = (v << 4) | w_hv(str_byte(s, i + k));
+        k = k + 1;
+    }
+    return v;
+}
+
+/// 码点在不在这张表里。区间是**按起点排序**的, 所以扫到"起点已经比 cp 大"就能停 ——
+/// 不靠这个提前退出的话每个字符要扫几百段。
+fn w_in(s: str, cp: u32) -> bool {
+    let n: u32 = str_len(s) / 12;
+    let i: u32 = 0;
+    while i < n {
+        let lo: u32 = w_num(s, i * 12);
+        if cp < lo {
+            return false;
+        }
+        if cp <= w_num(s, i * 12 + 6) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 宽字符表是分段的 (单个字符串字面量放不下), 这里按段依次查。
+fn w_is_wide(cp: u32) -> bool {
+    if w_in(w_wide_hex(), cp) {
+        return true;
+    }
+    if w_in(w_wide_hex_1(), cp) {
+        return true;
+    }
+    return false;
+}
+
+fn w_is_zero(cp: u32) -> bool {
+    if w_in(w_zero_hex(), cp) {
+        return true;
+    }
+    if w_in(w_zero_hex_1(), cp) {
+        return true;
+    }
+    if w_in(w_zero_hex_2(), cp) {
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 宽度
+
+/// 一个码点占几格。
+pub fn width_cp(cp: u32) -> u32 {
+    if cp == 0 {
+        return WIDTH_ZERO;
+    }
+    if cp < 32 {
+        return WIDTH_ZERO; // C0 控制字符
+    }
+    if cp >= 127 && cp < 160 {
+        return WIDTH_ZERO; // DEL 与 C1
+    }
+    if w_is_zero(cp) {
+        return WIDTH_ZERO;
+    }
+    if w_is_wide(cp) {
+        return WIDTH_WIDE;
+    }
+    return WIDTH_NARROW;
+}
+
+pub fn width_is_wide(cp: u32) -> bool {
+    return width_cp(cp) == WIDTH_WIDE;
+}
+
+pub fn width_is_zero(cp: u32) -> bool {
+    return width_cp(cp) == WIDTH_ZERO;
+}
+
+/// 从字节流里解出下一个码点, 返回它是几字节 (0 = 坏字节)。
+fn w_decode(d: ptr, so: u32, n: u32, i: u32, cp_out: ptr) -> u32 {
+    if i >= n {
+        mem_store32(cp_out, 0, 0);
+        return 0;
+    }
+    let b0: u32 = load8(d, so + i);
+    if b0 < 128 {
+        mem_store32(cp_out, 0, b0);
+        return 1;
+    }
+    if b0 < 194 {
+        mem_store32(cp_out, 0, 65533);
+        return 1; // 落单的续字节 / 过长编码
+    }
+    if b0 < 224 {
+        if i + 1 >= n {
+            mem_store32(cp_out, 0, 65533);
+            return 1;
+        }
+        mem_store32(cp_out, 0, ((b0 & 31) << 6) | (load8(d, so + i + 1) & 63));
+        return 2;
+    }
+    if b0 < 240 {
+        if i + 2 >= n {
+            mem_store32(cp_out, 0, 65533);
+            return 1;
+        }
+        mem_store32(cp_out, 0, ((b0 & 15) << 12) | ((load8(d, so + i + 1) & 63) << 6)
+            | (load8(d, so + i + 2) & 63));
+        return 3;
+    }
+    if b0 < 245 {
+        if i + 3 >= n {
+            mem_store32(cp_out, 0, 65533);
+            return 1;
+        }
+        mem_store32(cp_out, 0, ((b0 & 7) << 18) | ((load8(d, so + i + 1) & 63) << 12)
+            | ((load8(d, so + i + 2) & 63) << 6) | (load8(d, so + i + 3) & 63));
+        return 4;
+    }
+    mem_store32(cp_out, 0, 65533);
+    return 1;
+}
+
+/// 一段 UTF-8 占几格。
+pub fn width_utf8(d: ptr, so: u32, n: u32) -> u32 {
+    let cp: ptr = alloc(4);
+    let w: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let k: u32 = w_decode(d, so, n, i, cp);
+        if k == 0 {
+            i = n;
+        } else {
+            w = w + width_cp(mem_load32(cp, 0));
+            i = i + k;
+        }
+    }
+    return w;
+}
+
+pub fn width_str(s: str) -> u32 {
+    return width_utf8(str_ptr(s), 0, str_len(s));
+}
+
+/// 从 so 起最多取 max_cols 格 —— 返回**能安全截断到的字节位置**。
+/// 一个宽字符如果放不下就整个不放 (留一格空着比切半个汉字好)。
+pub fn width_fit(d: ptr, so: u32, n: u32, max_cols: u32) -> u32 {
+    let cp: ptr = alloc(4);
+    let cols: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let k: u32 = w_decode(d, so, n, i, cp);
+        if k == 0 {
+            return i;
+        }
+        let w: u32 = width_cp(mem_load32(cp, 0));
+        if cols + w > max_cols {
+            return i;
+        }
+        cols = cols + w;
+        i = i + k;
+    }
+    return n;
+}
+
+/// 把 so 起至多 max_cols 格抄进 out, 返回抄了几个字节。
+pub fn width_truncate(d: ptr, so: u32, n: u32, max_cols: u32, out: ptr, oo: u32) -> u32 {
+    let e: u32 = width_fit(d, so, n, max_cols);
+    mem_copy(out, oo, d, so, e);
+    return e;
+}
+
+/// 用空白把宽度补到 at_least 格 (已经够宽就原样抄)。给表格对齐用。
+pub fn width_pad(d: ptr, so: u32, n: u32, at_least: u32, out: ptr, oo: u32) -> u32 {
+    mem_copy(out, oo, d, so, n);
+    let have: u32 = width_utf8(d, so, n);
+    let w: u32 = n;
+    let c: u32 = have;
+    while c < at_least {
+        store8(out, oo + w, 32 as u8);
+        w = w + 1;
+        c = c + 1;
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_width_ascii() -> bool {
+    return width_str("abc") == 3 && width_str("") == 0 && width_str("a b") == 3
+        && width_cp(65) == WIDTH_NARROW && width_cp(126) == WIDTH_NARROW;
+}
+
+fn test_width_cjk_is_two() -> bool {
+    // 中 文 汉字 一个 2 格 —— 这是这一层存在的理由
+    return width_str("中文") == 4 && width_cp(0x4E00) == WIDTH_WIDE
+        && width_cp(0x9FFF) == WIDTH_WIDE;
+}
+
+fn test_width_mixed() -> bool {
+    return width_str("a中b") == 4;
+}
+
+fn test_width_kana_hangul_fullwidth() -> bool {
+    return width_cp(0x3042) == WIDTH_WIDE   // あ
+        && width_cp(0xD55C) == WIDTH_WIDE   // 한
+        && width_cp(0xFF21) == WIDTH_WIDE   // Ａ (全角 A)
+        && width_cp(0x3000) == WIDTH_WIDE;  // 全角空格
+}
+
+fn test_width_emoji_is_two() -> bool {
+    // 😀 U+1F600 (4 字节 UTF-8) 在终端里占 2 格
+    return width_cp(0x1F600) == WIDTH_WIDE && width_cp(0x1F004) == WIDTH_WIDE
+        && width_str("😀") == 2;
+}
+
+fn test_width_combining_is_zero() -> bool {
+    // "e" + 组合尖音符 —— 排版上是**一个**字符宽。
+    return width_cp(0x0301) == WIDTH_ZERO && width_cp(0x0300) == WIDTH_ZERO
+        && width_cp(0x036F) == WIDTH_ZERO
+        && width_str("é") == 1;
+}
+
+fn test_width_control_and_format_zero() -> bool {
+    return width_cp(0) == WIDTH_ZERO && width_cp(9) == WIDTH_ZERO
+        && width_cp(27) == WIDTH_ZERO && width_cp(0x7F) == WIDTH_ZERO
+        && width_cp(0x200B) == WIDTH_ZERO   // 零宽空格
+        && width_cp(0xFE0F) == WIDTH_ZERO;  // 变体选择符
+}
+
+fn test_width_ambiguous_treated_as_narrow() -> bool {
+    // 制表符 `─` (U+2500) 与希腊字母 α 在东亚是双宽、在西文是单宽。
+    // 本层**选单宽**, 这是取舍: 没有运行时能问当前字体是哪套。
+    return width_cp(0x2500) == WIDTH_NARROW && width_cp(0x3B1) == WIDTH_NARROW
+        && width_cp(0x2460) == WIDTH_NARROW; // 圈 1
+}
+
+fn test_width_range_boundaries() -> bool {
+    // 边界的"刚好在内/刚好在外"各来一个 —— 表抄错一位这里就露。
+    return width_cp(0x1100) == WIDTH_WIDE && width_cp(0x115F) == WIDTH_WIDE
+        && width_cp(0x1160) == WIDTH_NARROW
+        && width_cp(0x4E00) == WIDTH_WIDE && width_cp(0xA48C) == WIDTH_WIDE
+        && width_cp(0xA48D) == WIDTH_NARROW
+        && width_cp(0xAC00) == WIDTH_WIDE && width_cp(0xD7A3) == WIDTH_WIDE
+        && width_cp(0xD7A4) == WIDTH_NARROW
+        && width_cp(0x20000) == WIDTH_WIDE && width_cp(0x1FFFF) == WIDTH_NARROW;
+}
+
+fn test_width_latin1_is_narrow() -> bool {
+    // 带重音的拉丁字母仍然是 1 格 (它们是**预组合**字符, 不是组合记号)。
+    return width_cp(0xE9) == WIDTH_NARROW && width_cp(0xC0) == WIDTH_NARROW
+        && width_cp(0x1E9E) == WIDTH_NARROW;
+}
+
+fn test_width_fit_does_not_split_wide() -> bool {
+    // "a中" 放到 2 格: 'a' 占 1, 汉字要 2 格放不下 -> 截到 1 字节。
+    let s: str = "a中";
+    let e: u32 = width_fit(str_ptr(s), 0, str_len(s), 2);
+    return e == 1 && width_fit(str_ptr(s), 0, str_len(s), 3) == str_len(s)
+        && width_fit(str_ptr(s), 0, str_len(s), 0) == 0;
+}
+
+fn test_width_truncate() -> bool {
+    let out: ptr = alloc(32);
+    let s: str = "a中b";
+    let n: u32 = width_truncate(str_ptr(s), 0, str_len(s), 3, out, 0);
+    // 'a'(1) + 中(2) = 3 格 -> 抄 4 字节
+    return n == 4 && width_utf8(out, 0, n) == 3 && load8(out, 0) == 97;
+}
+
+fn test_width_pad() -> bool {
+    let out: ptr = alloc(32);
+    let s: str = "中";
+    let n: u32 = width_pad(str_ptr(s), 0, str_len(s), 5, out, 0);
+    // 汉字 2 格 + 3 个空格 = 5 格 / 6 字节
+    return n == 6 && width_utf8(out, 0, n) == 5 && load8(out, 5) == 32;
+}
+
+fn test_width_pad_never_shrinks() -> bool {
+    let out: ptr = alloc(32);
+    let s: str = "abcd";
+    let n: u32 = width_pad(str_ptr(s), 0, 4, 2, out, 0);
+    return n == 4 && mem_eq(out, 0, str_ptr(s), 0, 4);
+}
+
+fn test_width_bad_utf8_counts_as_one() -> bool {
+    // 坏字节 -> U+FFFD, 算 1 格 —— 不崩、不跳过后面所有内容。
+    let d: ptr = alloc(8);
+    store8(d, 0, 255 as u8);
+    store8(d, 1, 97 as u8); // 'a'
+    return width_utf8(d, 0, 2) == 2;
+}
+
+fn test_width_table_shape() -> bool {
+    // 表是 12 字符一段, 长度必须是 12 的整数倍 —— 抄坏一位这里先炸。
+    let a: u32 = str_len(w_wide_hex());
+    return (a % 12) == 0 && (str_len(w_zero_hex()) % 12) == 0 && a > 0
+        && w_num(w_wide_hex(), 0) == 0x1100 && w_num(w_wide_hex(), 6) == 0x115F;
+}

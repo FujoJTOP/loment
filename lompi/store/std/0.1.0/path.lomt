@@ -1,0 +1,168 @@
+// std/path.lomt — 路径切分
+//
+// 为什么要它: 工具要按扩展名分派 (`.lomt` / `.lom`)、按目录找兄弟文件, 而路径切分
+// 在仓库里散着写。它也是"看起来显然、实际最容易差一"的一类: 尾斜杠、无斜杠、
+// 只有一个点、点开头 (隐藏文件) 各是一个边界。
+//
+// 返回值: 借用 argv 的打包约定 —— (起点 << 32) | 长度, 用 path_off / path_len 解。
+// 找不到时长度 0、起点落在原位 (不是哨兵): 路径操作里"空"是合法结果。
+//
+// 只认 '/' —— 目标就两个平台, 而 Windows 的那一侧由 PE 垫片统一成 '/' 语义。
+// 反斜杠不在这里处理, 免得同一个字符串里两套分隔符规则打架。
+//
+// 命名: 公开一律 path_*, 内部一律 pa_*。自检 test_path_*。
+
+module path
+
+use "num.lomt"
+
+/// 最后一段 (basename): (起点 << 32) | 长度。
+pub fn path_basename(p: ptr, o: u32, n: u32) -> u64 {
+    let s: u32 = o;
+    let i: u32 = o;
+    while i < o + n {
+        if load8(p, i) == 47 {
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return num_pack2(s, o + n - s);
+}
+
+/// 去掉最后一段 (dirname): (起点 << 32) | 长度。
+/// 没有 '/' 时长度 0 (相对路径的目录是"当前目录", 不该编成一个点)。
+pub fn path_dirname(p: ptr, o: u32, n: u32) -> u64 {
+    let e: u32 = o;
+    let i: u32 = o;
+    while i < o + n {
+        if load8(p, i) == 47 {
+            e = i;
+        }
+        i = i + 1;
+    }
+    return num_pack2(o, e - o);
+}
+
+/// 扩展名 (不含点): (起点 << 32) | 长度。
+/// 目录里的点不算: "a.b/c" 没有扩展名。最后一段以点开头也不算 (".gitignore")。
+pub fn path_ext(p: ptr, o: u32, n: u32) -> u64 {
+    let b: u64 = path_basename(p, o, n);
+    let bs: u32 = num_hi(b);
+    let bl: u32 = num_lo(b);
+    let i: u32 = o + n;
+    while i > bs + 1 {
+        i = i - 1;
+        if load8(p, i) == 46 {
+            return num_pack2(i + 1, o + n - i - 1);
+        }
+    }
+    return num_pack2(o + n, 0);
+}
+
+pub fn path_is_abs(p: ptr, o: u32, n: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    return load8(p, o) == 47;
+}
+
+/// 解包: 起点。
+pub fn path_off(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+/// 解包: 长度。
+pub fn path_len(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_path_basename() -> bool {
+    // "/a/b/c.txt"
+    let b: ptr = alloc(32);
+    let lit: str = "/a/b/c.txt";
+    let i: u32 = 0;
+    while i < str_len(lit) {
+        store8(b, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    let t: u64 = path_basename(b, 0, 10);
+    return path_off(t) == 5 && path_len(t) == 5;
+}
+
+fn test_path_basename_trailing_slash() -> bool {
+    // "/a/b/" 的最后一段是空的 —— 尾斜杠不该让 basename 变成 "b/"。
+    let b: ptr = alloc(32);
+    store8(b, 0, 47 as u8);
+    store8(b, 1, 97 as u8);
+    store8(b, 2, 47 as u8);
+    let t: u64 = path_basename(b, 0, 3);
+    return path_off(t) == 3 && path_len(t) == 0;
+}
+
+fn test_path_basename_no_slash() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    let t: u64 = path_basename(b, 0, 2);
+    return path_off(t) == 0 && path_len(t) == 2;
+}
+
+fn test_path_dirname() -> bool {
+    let b: ptr = alloc(32);
+    let lit: str = "/a/b/c.txt";
+    let i: u32 = 0;
+    while i < str_len(lit) {
+        store8(b, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    let t: u64 = path_dirname(b, 0, 10);
+    return path_off(t) == 0 && path_len(t) == 4;
+}
+
+fn test_path_dirname_no_slash() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 97 as u8);
+    let t: u64 = path_dirname(b, 0, 1);
+    return path_len(t) == 0;
+}
+
+fn test_path_ext() -> bool {
+    let b: ptr = alloc(32);
+    let lit: str = "a/b/c.lomt";
+    let i: u32 = 0;
+    while i < str_len(lit) {
+        store8(b, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    let t: u64 = path_ext(b, 0, 10);
+    return path_off(t) == 6 && path_len(t) == 4;
+}
+
+fn test_path_ext_dot_in_dir_is_not_ext() -> bool {
+    // "a.b/c" —— 目录里的点不算扩展名。
+    let b: ptr = alloc(32);
+    let lit: str = "a.b/c";
+    let i: u32 = 0;
+    while i < str_len(lit) {
+        store8(b, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    return path_len(path_ext(b, 0, 5)) == 0;
+}
+
+fn test_path_ext_hidden_file_is_not_ext() -> bool {
+    // ".gitignore" —— 开头的点不算扩展名 (与 Rust 的 Path::extension 一致)。
+    let b: ptr = alloc(32);
+    store8(b, 0, 46 as u8);
+    store8(b, 1, 103 as u8);
+    return path_len(path_ext(b, 0, 2)) == 0;
+}
+
+fn test_path_is_abs() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 47 as u8);
+    store8(b, 1, 97 as u8);
+    return path_is_abs(b, 0, 2) && !path_is_abs(b, 1, 1) && !path_is_abs(b, 0, 0);
+}

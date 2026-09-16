@@ -1,0 +1,93 @@
+// std/fs.lomt — 整文件读写 (在 io 之上)
+//
+// 为什么要它: io.lomt 给的是 fd 一级的原语 (openat/read/write/close), 而工具里
+// 九成的地方要的是"把这个文件读进来""把这段写出去"。中间那三步 open→read→close
+// 每个工具都手写一遍, 且每一步的失败分支都要记得写。这一层把那个形状收成一行。
+//
+// 失败约定: 返回 u64, **FS_ERR = u64 最大值**表示失败。
+// 这不是"返回值有点大就行" —— 读 2^64-1 字节不可能, 所以这个哨兵取不到。
+//
+// 为什么不做追加写/定位读: 那需要 O_APPEND / lseek, 而 PE 目标只实现了 8 个
+// syscall (`lseek` 不在其中, docs 与 skill §3 都写明了)。写了也用不了。
+//
+// 命名: 公开一律 fs_*, 内部一律 fsi_*。自检 test_fs_*。
+
+module fs
+
+use "io.lomt"
+
+/// 失败哨兵。
+pub const FS_ERR: u64 = 18446744073709551615;
+
+/// 读整个文件到 buf (最多 cap 字节)。
+/// 返回实际读到的字节数; **打不开返回 FS_ERR** (读到的长度本身不可能是哨兵)。
+pub fn fs_read(path: ptr, buf: ptr, cap: u64) -> u64 {
+    let fd: i64 = io_open_ro(path);
+    if fd < 0 {
+        return FS_ERR;
+    }
+    let n: u64 = io_read_all(fd, buf, cap);
+    io_close(fd);
+    return n;
+}
+
+/// 路径是编译期字面量时用这个 (NUL 由库补进 scr)。
+pub fn fs_read_lit(scr: ptr, lit: str, buf: ptr, cap: u64) -> u64 {
+    io_put_lit(scr, lit);
+    return fs_read(scr, buf, cap);
+}
+
+/// 写整个文件 (截断创建, 0644)。返回写出的字节数; 打不开返回 FS_ERR。
+pub fn fs_write(path: ptr, buf: ptr, n: u64) -> u64 {
+    let fd: i64 = io_open_wo(path);
+    if fd < 0 {
+        return FS_ERR;
+    }
+    let w: u64 = io_write_all(fd, buf, n);
+    io_close(fd);
+    return w;
+}
+
+pub fn fs_write_lit(scr: ptr, lit: str, buf: ptr, n: u64) -> u64 {
+    io_put_lit(scr, lit);
+    return fs_write(scr, buf, n);
+}
+
+/// 这次操作成功了吗。
+pub fn fs_ok(n: u64) -> bool {
+    return n != FS_ERR;
+}
+
+/// 文件读得进吗 (大小够不够放得下都算"打得开")。
+pub fn fs_exists(path: ptr) -> bool {
+    let fd: i64 = io_open_ro(path);
+    if fd < 0 {
+        return false;
+    }
+    io_close(fd);
+    return true;
+}
+
+pub fn fs_exists_lit(scr: ptr, lit: str) -> bool {
+    io_put_lit(scr, lit);
+    return fs_exists(scr);
+}
+
+// ---------------------------------------------------------------- 自检
+// 真文件读写要真 fd, 所以这里只测**纯逻辑**那部分 (哨兵判等)。
+// 端到端由消费方覆盖 —— 迁移后的 lomstatus 就在读 docs/145。
+
+fn test_fs_err_is_unreachable_as_length() -> bool {
+    // 哨兵的价值就在这: 它不是任何一个可能的读长度。
+    return FS_ERR == 18446744073709551615 && !fs_ok(FS_ERR);
+}
+
+fn test_fs_ok() -> bool {
+    return fs_ok(0) && fs_ok(1) && fs_ok(1048576) && !fs_ok(FS_ERR);
+}
+
+// (这里本来有 `test_fs_err_plus_one_wraps_if_misused`, 断言 FS_ERR + 1 == 0。
+//  它被删掉有两个理由: 一是它在测语言级的回绕性质, 不是本模块的事;
+//  二是 `FS_ERR + 1` 是**常量溢出**, 而 rustc 对常量溢出直接报错
+//  (error: this arithmetic operation will overflow) —— 原生路径却会静默回绕。
+//  这是两个后端的一处分歧, 值得单独报, 但不该由这条测试来承载。)

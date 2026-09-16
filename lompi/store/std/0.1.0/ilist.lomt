@@ -1,0 +1,482 @@
+// std/ilist.lomt — 侵入式双向链表 (节点池在调用方的缓冲里)
+//
+// 为什么除了 vec/deque 还要它: 前两个是**连续**的, 中间插一个要挪半条。而"从中间摘掉
+// 一个已知节点"是 O(1) 的形状 —— LRU 的淘汰、事件订阅表、空闲链 —— 那才是链表的用处。
+// 在数组上模拟它 (存 prev/next 下标) 就是这一层做的事, 而且因为没有指针, 可以整体
+// 序列化和整体拷贝。
+//
+// 布局: 头 16 字节 —— [头节点 u32][尾节点 u32][个数 u32][空闲链 u32];
+// 节点从偏移 16 起, 每个 16 字节 —— [前驱 u32][后继 u32][值 u64]。
+// 装 cap 个节点要 16 + 16*cap 字节 —— 用 ilist_bytes。
+//
+// 节点是**从池里分配的** (有自由链, 可以回收), 这一点与"侵入式"的本义 (节点嵌在
+// 调用方的数据里) 略有出入 —— 语言不支持把字段的地址取出来当节点用, 所以退一步:
+// 值是 u64, 要放更大的东西就放一个下标。
+//
+// 命名: 公开 ilist_*, 内部 il_*。自检 test_ilist_*。
+
+module ilist
+
+use "mem.lomt"
+
+/// "没有这个节点"。
+pub const IL_NIL: u32 = 4294967295;
+/// 头部字节数。
+pub const IL_HDR: u32 = 16;
+/// 一个节点的字节数。
+pub const IL_NODE: u32 = 16;
+
+/// 装 cap 个节点要多少字节。
+pub fn ilist_bytes(cap: u32) -> u32 {
+    return IL_HDR + IL_NODE * cap;
+}
+
+fn il_head(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn il_tail(b: ptr) -> u32 {
+    return mem_load32(b, 4);
+}
+
+fn il_count(b: ptr) -> u32 {
+    return mem_load32(b, 8);
+}
+
+fn il_free(b: ptr) -> u32 {
+    return mem_load32(b, 12);
+}
+
+fn il_set_head(b: ptr, i: u32) {
+    mem_store32(b, 0, i);
+}
+
+fn il_set_tail(b: ptr, i: u32) {
+    mem_store32(b, 4, i);
+}
+
+fn il_set_count(b: ptr, n: u32) {
+    mem_store32(b, 8, n);
+}
+
+fn il_set_free(b: ptr, i: u32) {
+    mem_store32(b, 12, i);
+}
+
+fn il_nat(b: ptr, i: u32) -> u32 {
+    return IL_HDR + IL_NODE * i;
+}
+
+pub fn ilist_prev(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, il_nat(b, i));
+}
+
+pub fn ilist_next(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, il_nat(b, i) + 4);
+}
+
+pub fn ilist_value(b: ptr, i: u32) -> u64 {
+    return mem_load64(b, il_nat(b, i) + 8);
+}
+
+pub fn ilist_set_value(b: ptr, i: u32, v: u64) {
+    mem_store64(b, il_nat(b, i) + 8, v);
+}
+
+fn il_set_prev(b: ptr, i: u32, v: u32) {
+    mem_store32(b, il_nat(b, i), v);
+}
+
+fn il_set_next(b: ptr, i: u32, v: u32) {
+    mem_store32(b, il_nat(b, i) + 4, v);
+}
+
+/// 建表: 把所有节点串成自由链。
+pub fn ilist_init(b: ptr, cap: u32) {
+    il_set_head(b, IL_NIL);
+    il_set_tail(b, IL_NIL);
+    il_set_count(b, 0);
+    if cap == 0 {
+        il_set_free(b, IL_NIL);
+    } else {
+        il_set_free(b, 0);
+        let i: u32 = 0;
+        while i < cap {
+            let nx: u32 = i + 1;
+            if nx >= cap {
+                nx = IL_NIL;
+            }
+            il_set_prev(b, i, IL_NIL);
+            il_set_next(b, i, nx);
+            i = i + 1;
+        }
+    }
+}
+
+pub fn ilist_len(b: ptr) -> u32 {
+    return il_count(b);
+}
+
+pub fn ilist_is_empty(b: ptr) -> bool {
+    return il_count(b) == 0;
+}
+
+pub fn ilist_first(b: ptr) -> u32 {
+    return il_head(b);
+}
+
+pub fn ilist_last(b: ptr) -> u32 {
+    return il_tail(b);
+}
+
+/// 从自由链摘一个节点 (不给值和链接)。
+fn il_alloc(b: ptr) -> u32 {
+    let f: u32 = il_free(b);
+    if f == IL_NIL {
+        return IL_NIL;
+    }
+    il_set_free(b, ilist_next(b, f));
+    il_set_prev(b, f, IL_NIL);
+    il_set_next(b, f, IL_NIL);
+    return f;
+}
+
+/// 把节点还给自由链。
+pub fn ilist_free_node(b: ptr, i: u32) {
+    il_set_prev(b, i, IL_NIL);
+    il_set_next(b, i, il_free(b));
+    il_set_free(b, i);
+}
+
+/// 头插。满了返回 IL_NIL。
+pub fn ilist_push_front(b: ptr, cap: u32, v: u64) -> u32 {
+    let i: u32 = il_alloc(b);
+    if i == IL_NIL {
+        return IL_NIL;
+    }
+    ilist_set_value(b, i, v);
+    let h: u32 = il_head(b);
+    il_set_next(b, i, h);
+    if h != IL_NIL {
+        il_set_prev(b, h, i);
+    } else {
+        il_set_tail(b, i);
+    }
+    il_set_head(b, i);
+    il_set_count(b, il_count(b) + 1);
+    return i;
+}
+
+/// 尾插。
+pub fn ilist_push_back(b: ptr, cap: u32, v: u64) -> u32 {
+    let i: u32 = il_alloc(b);
+    if i == IL_NIL {
+        return IL_NIL;
+    }
+    ilist_set_value(b, i, v);
+    let t: u32 = il_tail(b);
+    il_set_prev(b, i, t);
+    if t != IL_NIL {
+        il_set_next(b, t, i);
+    } else {
+        il_set_head(b, i);
+    }
+    il_set_tail(b, i);
+    il_set_count(b, il_count(b) + 1);
+    return i;
+}
+
+/// 在已有节点 i 之后插入。i == IL_NIL 时等价于头插。
+pub fn ilist_insert_after(b: ptr, cap: u32, at: u32, v: u64) -> u32 {
+    if at == IL_NIL {
+        return ilist_push_front(b, cap, v);
+    }
+    let i: u32 = il_alloc(b);
+    if i == IL_NIL {
+        return IL_NIL;
+    }
+    ilist_set_value(b, i, v);
+    let nx: u32 = ilist_next(b, at);
+    il_set_prev(b, i, at);
+    il_set_next(b, i, nx);
+    il_set_next(b, at, i);
+    if nx != IL_NIL {
+        il_set_prev(b, nx, i);
+    } else {
+        il_set_tail(b, i);
+    }
+    il_set_count(b, il_count(b) + 1);
+    return i;
+}
+
+/// 把节点 i 从链上摘下来 (不还池)。返回是否真的摘到了。
+pub fn ilist_unlink(b: ptr, i: u32) -> bool {
+    if i == IL_NIL {
+        return false;
+    }
+    let p: u32 = ilist_prev(b, i);
+    let n: u32 = ilist_next(b, i);
+    if p != IL_NIL {
+        il_set_next(b, p, n);
+    } else {
+        il_set_head(b, n);
+    }
+    if n != IL_NIL {
+        il_set_prev(b, n, p);
+    } else {
+        il_set_tail(b, p);
+    }
+    il_set_prev(b, i, IL_NIL);
+    il_set_next(b, i, IL_NIL);
+    il_set_count(b, il_count(b) - 1);
+    return true;
+}
+
+/// 摘下来并还池。
+pub fn ilist_remove(b: ptr, i: u32) -> bool {
+    if ilist_unlink(b, i) == false {
+        return false;
+    }
+    ilist_free_node(b, i);
+    return true;
+}
+
+pub fn ilist_pop_front(b: ptr) -> u64 {
+    let h: u32 = il_head(b);
+    if h == IL_NIL {
+        return 18446744073709551615;
+    }
+    let v: u64 = ilist_value(b, h);
+    ilist_remove(b, h);
+    return v;
+}
+
+pub fn ilist_pop_back(b: ptr) -> u64 {
+    let t: u32 = il_tail(b);
+    if t == IL_NIL {
+        return 18446744073709551615;
+    }
+    let v: u64 = ilist_value(b, t);
+    ilist_remove(b, t);
+    return v;
+}
+
+/// 线性查找第一个值等于 v 的节点。
+pub fn ilist_find(b: ptr, v: u64) -> u32 {
+    let i: u32 = il_head(b);
+    while i != IL_NIL {
+        if ilist_value(b, i) == v {
+            return i;
+        }
+        i = ilist_next(b, i);
+    }
+    return IL_NIL;
+}
+
+/// 自洽: 正向走一遍与反向走一遍的元素个数一致, 且都等于记的数;
+/// 自由链里没有重复节点。双向链表的错法几乎都是"只改了一边"。
+pub fn ilist_check(b: ptr, cap: u32) -> bool {
+    let fwd: u32 = 0;
+    let i: u32 = il_head(b);
+    while i != IL_NIL && fwd <= cap {
+        let n: u32 = ilist_next(b, i);
+        if n != IL_NIL && ilist_prev(b, n) != i {
+            return false;
+        }
+        i = n;
+        fwd = fwd + 1;
+    }
+    if i != IL_NIL {
+        return false;
+    }
+    let bwd: u32 = 0;
+    let j: u32 = il_tail(b);
+    while j != IL_NIL && bwd <= cap {
+        let p: u32 = ilist_prev(b, j);
+        if p != IL_NIL && ilist_next(b, p) != j {
+            return false;
+        }
+        j = p;
+        bwd = bwd + 1;
+    }
+    if j != IL_NIL {
+        return false;
+    }
+    let free_n: u32 = 0;
+    let k: u32 = il_free(b);
+    while k != IL_NIL && free_n <= cap {
+        k = ilist_next(b, k);
+        free_n = free_n + 1;
+    }
+    if k != IL_NIL {
+        return false;
+    }
+    return fwd == bwd && fwd == il_count(b) && fwd + free_n == cap;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ilist_init_empty() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    return ilist_len(b) == 0 && ilist_is_empty(b) && ilist_first(b) == IL_NIL
+        && ilist_last(b) == IL_NIL && ilist_check(b, 4);
+}
+
+fn test_ilist_push_back_order() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    ilist_push_back(b, 4, 10);
+    ilist_push_back(b, 4, 20);
+    ilist_push_back(b, 4, 30);
+    return ilist_pop_front(b) == 10 && ilist_pop_front(b) == 20 && ilist_pop_front(b) == 30
+        && ilist_is_empty(b) && ilist_check(b, 4);
+}
+
+fn test_ilist_push_front_order() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    ilist_push_front(b, 4, 1);
+    ilist_push_front(b, 4, 2);
+    ilist_push_front(b, 4, 3);
+    return ilist_pop_front(b) == 3 && ilist_pop_front(b) == 2 && ilist_pop_front(b) == 1;
+}
+
+fn test_ilist_both_ends() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    ilist_push_back(b, 4, 2);
+    ilist_push_front(b, 4, 1);
+    ilist_push_back(b, 4, 3);
+    return ilist_first_value(b) == 1 && ilist_pop_back(b) == 3 && ilist_pop_back(b) == 2
+        && ilist_pop_back(b) == 1 && ilist_check(b, 4);
+}
+
+fn ilist_first_value(b: ptr) -> u64 {
+    let i: u32 = ilist_first(b);
+    if i == IL_NIL {
+        return 18446744073709551615;
+    }
+    return ilist_value(b, i);
+}
+
+fn test_ilist_remove_middle_node() -> bool {
+    // 链表的看家本领: 从中间摘掉一个已知节点是 O(1), 而且两边的链接都要更新对。
+    let b: ptr = alloc(ilist_bytes(8));
+    ilist_init(b, 8);
+    let a: u32 = ilist_push_back(b, 8, 1);
+    let c: u32 = ilist_push_back(b, 8, 2);
+    let d: u32 = ilist_push_back(b, 8, 3);
+    let ok: bool = ilist_remove(b, c);
+    return ok && ilist_len(b) == 2 && ilist_next(b, a) == d
+        && ilist_prev(b, d) == a && ilist_check(b, 8);
+}
+
+fn test_ilist_remove_head_and_tail() -> bool {
+    let b: ptr = alloc(ilist_bytes(8));
+    ilist_init(b, 8);
+    let a: u32 = ilist_push_back(b, 8, 1);
+    let c: u32 = ilist_push_back(b, 8, 2);
+    let d: u32 = ilist_push_back(b, 8, 3);
+    let ok1: bool = ilist_remove(b, a);
+    let ok2: bool = ilist_remove(b, d);
+    return ok1 && ok2 && ilist_len(b) == 1 && ilist_first(b) == c && ilist_last(b) == c
+        && ilist_prev(b, c) == IL_NIL && ilist_next(b, c) == IL_NIL && ilist_check(b, 8);
+}
+
+fn test_ilist_node_reuse_after_remove() -> bool {
+    // 摘掉再插入必须回收那个节点 —— 否则池会一路缩小。
+    let b: ptr = alloc(ilist_bytes(2));
+    ilist_init(b, 2);
+    let a: u32 = ilist_push_back(b, 2, 1);
+    let c: u32 = ilist_push_back(b, 2, 2);
+    let d: u32 = ilist_push_back(b, 2, 3);
+    let ok: bool = d == IL_NIL;
+    ilist_remove(b, a);
+    let e: u32 = ilist_push_back(b, 2, 4);
+    return ok && e != IL_NIL && ilist_len(b) == 2 && ilist_check(b, 2);
+}
+
+fn test_ilist_insert_after() -> bool {
+    let b: ptr = alloc(ilist_bytes(8));
+    ilist_init(b, 8);
+    let a: u32 = ilist_push_back(b, 8, 1);
+    let c: u32 = ilist_push_back(b, 8, 3);
+    let m: u32 = ilist_insert_after(b, 8, a, 2);
+    // 顺序应为 1 2 3
+    return ilist_next(b, a) == m && ilist_next(b, m) == c && ilist_prev(b, c) == m
+        && ilist_len(b) == 3 && ilist_check(b, 8);
+}
+
+fn test_ilist_insert_after_tail_updates_tail() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    let a: u32 = ilist_push_back(b, 4, 1);
+    let m: u32 = ilist_insert_after(b, 4, a, 2);
+    return ilist_last(b) == m && ilist_next(b, a) == m && ilist_check(b, 4);
+}
+
+fn test_ilist_insert_at_nil_is_head() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    ilist_push_back(b, 4, 5);
+    let f: u32 = ilist_insert_after(b, 4, IL_NIL, 9);
+    return ilist_first(b) == f && ilist_value(b, f) == 9 && ilist_len(b) == 2;
+}
+
+fn test_ilist_full_returns_nil() -> bool {
+    let b: ptr = alloc(ilist_bytes(2));
+    ilist_init(b, 2);
+    let a: u32 = ilist_push_back(b, 2, 1);
+    let c: u32 = ilist_push_back(b, 2, 2);
+    let d: u32 = ilist_push_back(b, 2, 3);
+    return a != IL_NIL && c != IL_NIL && d == IL_NIL && ilist_len(b) == 2
+        && ilist_check(b, 2);
+}
+
+fn test_ilist_find_and_update() -> bool {
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    ilist_push_back(b, 4, 11);
+    let m: u32 = ilist_push_back(b, 4, 22);
+    ilist_push_back(b, 4, 33);
+    let f: u32 = ilist_find(b, 22);
+    let ok: bool = f == m;
+    ilist_set_value(b, f, 99);
+    return ok && ilist_value(b, m) == 99 && ilist_find(b, 77) == IL_NIL;
+}
+
+fn test_ilist_check_detects_broken_link() -> bool {
+    // 手工把后继写坏, check 必须发现 —— 一个永远说 ok 的检查没有价值。
+    let b: ptr = alloc(ilist_bytes(4));
+    ilist_init(b, 4);
+    let a: u32 = ilist_push_back(b, 4, 1);
+    ilist_push_back(b, 4, 2);
+    let ok: bool = ilist_check(b, 4);
+    mem_store32(b, il_nat(b, a) + 4, IL_NIL);
+    return ok && ilist_check(b, 4) == false;
+}
+
+fn test_ilist_lru_pattern() -> bool {
+    // 真实形状: LRU —— 访问到的挪到队首, 满了从队尾淘汰。
+    let b: ptr = alloc(ilist_bytes(3));
+    ilist_init(b, 3);
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 20 {
+        let key: u64 = (i % 5) as u64;
+        let f: u32 = ilist_find(b, key);
+        if f != IL_NIL {
+            ilist_unlink(b, f);
+            ilist_free_node(b, f);
+        } else if ilist_len(b) >= 3 {
+            ilist_pop_back(b);
+        }
+        ilist_push_front(b, 3, key);
+        if ilist_check(b, 3) == false || ilist_len(b) > 3 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0 && ilist_len(b) == 3 && ilist_value(b, ilist_first(b)) == 4;
+}

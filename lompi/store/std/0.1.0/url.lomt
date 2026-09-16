@@ -1,0 +1,309 @@
+// std/url.lomt — URL 百分号编码 / 解码 + 查询串取值
+//
+// 为什么需要它: 凡是把数据放进 URL (查询参数、路径段、表单) 就得做百分号编码,
+// 而"哪些字符可以不编"这条规则极容易记错 —— **不编码集合**只有
+//   A-Z a-z 0-9 以及 `-` `_` `.` `~`  (RFC 3986 的 unreserved)
+// 其余一律要编。常见的错法是"把 `/` `:` 也留着不编" (它们在路径里有特殊含义) 或
+// "把 `~` 也编了" (它不该编)。
+//
+// 表单编码与 URL 编码只差一条: **表单里空格编成 `+`**, 而 URL 里是 `%20`。
+// 所以解码分成 url_decode (严格) 与 url_decode_form (`+` 还原成空格) 两个入口 ——
+// 混用会让 "a+b" 在 URL 里被解成 "a b" (错)。
+//
+// 命名: 公开 url_*, 内部 u_*。自检 test_url_*。
+
+module url
+
+use "mem.lomt"
+
+/// 解码/取值失败。
+pub const URL_NO: u32 = 4294967295;
+
+/// RFC 3986 的 unreserved: 这些字符在 URL 里**不需要**编码。
+pub fn url_is_unreserved(c: u32) -> bool {
+    if c >= 65 && c <= 90 {
+        return true; // A-Z
+    }
+    if c >= 97 && c <= 122 {
+        return true; // a-z
+    }
+    if c >= 48 && c <= 57 {
+        return true; // 0-9
+    }
+    if c == 45 || c == 95 || c == 46 || c == 126 {
+        return true; // - _ . ~
+    }
+    return false;
+}
+
+fn u_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 255;
+}
+
+fn u_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 55 + v; // 大写十六进制 (RFC 推荐)
+}
+
+/// 百分号编码。out 至少 url_encoded_len(n) 字节。
+pub fn url_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if url_is_unreserved(c) {
+            store8(out, p, c as u8);
+            p = p + 1;
+        } else {
+            store8(out, p, 37 as u8); // '%'
+            store8(out, p + 1, u_hexch((c >> 4) & 15) as u8);
+            store8(out, p + 2, u_hexch(c & 15) as u8);
+            p = p + 3;
+        }
+        i = i + 1;
+    }
+    return p - o;
+}
+
+pub fn url_encode_str(out: ptr, o: u32, s: str) -> u32 {
+    return url_encode(out, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 编码后长度上界 (每个字节最多变成 3 个)。
+pub fn url_encoded_len(n: u32) -> u32 {
+    return 3 * n;
+}
+
+/// 严格解码 (`+` 是普通字符)。遇到残缺的 `%` 或非十六进制返回 URL_NO。
+pub fn url_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    return u_dec(out, o, d, so, n, 0);
+}
+
+/// 表单解码 (`+` -> 空格)。**只用在 application/x-www-form-urlencoded 上**。
+pub fn url_decode_form(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    return u_dec(out, o, d, so, n, 1);
+}
+
+fn u_dec(out: ptr, o: u32, d: ptr, so: u32, n: u32, plus_is_space: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 37 {
+            if i + 2 >= n {
+                return URL_NO;
+            }
+            let h: u32 = u_hexval(load8(d, so + i + 1));
+            let l: u32 = u_hexval(load8(d, so + i + 2));
+            if h > 15 || l > 15 {
+                return URL_NO;
+            }
+            store8(out, p, ((h << 4) | l) as u8);
+            p = p + 1;
+            i = i + 3;
+        } else if c == 43 && plus_is_space == 1 {
+            store8(out, p, 32 as u8);
+            p = p + 1;
+            i = i + 1;
+        } else {
+            store8(out, p, c as u8);
+            p = p + 1;
+            i = i + 1;
+        }
+    }
+    return p - o;
+}
+
+pub fn url_decode_str(out: ptr, o: u32, s: str) -> u32 {
+    return url_decode(out, o, str_ptr(s), 0, str_len(s));
+}
+
+pub fn url_decode_form_str(out: ptr, o: u32, s: str) -> u32 {
+    return url_decode_form(out, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 在一段查询串里取 key 的值 (表单解码后写进 out), 返回长度; 找不到给 URL_NO。
+/// 查询串形如 "a=1&b=hello%20world"; 前导 '?' 会被跳过。
+pub fn url_query_get(d: ptr, so: u32, n: u32, kp: ptr, ko: u32, kn: u32, out: ptr, oo: u32) -> u32 {
+    let start: u32 = so;
+    let len: u32 = n;
+    if len > 0 && load8(d, start) == 63 {
+        // '?'
+        return url_query_get(((d as u64) + 1) as ptr, 0, len - 1, kp, ko, kn, out, oo);
+    }
+    let i: u32 = 0;
+    while i <= len {
+        // 每个字段的起点
+        let fstart: u32 = i;
+        // 找到该字段的结尾 ('&' 或末尾)
+        while i < len && load8(d, start + i) != 38 {
+            i = i + 1;
+        }
+        let flen: u32 = i - fstart;
+        // 字段里找 '='
+        let eq: u32 = URL_NO;
+        let j: u32 = 0;
+        while j < flen {
+            if load8(d, start + fstart + j) == 61 {
+                eq = j;
+                j = flen;
+            } else {
+                j = j + 1;
+            }
+        }
+        let nlen: u32 = flen;
+        if eq != URL_NO {
+            nlen = eq;
+        }
+        if nlen == kn && mem_eq(d, start + fstart, kp, ko, kn) {
+            if eq == URL_NO {
+                return 0; // 有键无值
+            }
+            let vlen: u32 = flen - eq - 1;
+            return url_decode_form(out, oo, d, start + fstart + eq + 1, vlen);
+        }
+        i = i + 1; // 跳过 '&'
+    }
+    return URL_NO;
+}
+
+pub fn url_query_get_str(d: ptr, so: u32, n: u32, key: str, out: ptr, oo: u32) -> u32 {
+    return url_query_get(d, so, n, str_ptr(key), 0, str_len(key), out, oo);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn u_eq(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(s), 0, n);
+}
+
+fn test_url_unreserved_set() -> bool {
+    return url_is_unreserved(65) && url_is_unreserved(122) && url_is_unreserved(48)
+        && url_is_unreserved(45) && url_is_unreserved(95) && url_is_unreserved(46)
+        && url_is_unreserved(126) && url_is_unreserved(32) == false
+        && url_is_unreserved(47) == false && url_is_unreserved(43) == false;
+}
+
+fn test_url_encode_keeps_unreserved() -> bool {
+    let out: ptr = alloc(64);
+    let s: str = "abc-_.~XYZ019";
+    let n: u32 = url_encode_str(out, 0, s);
+    return u_eq(out, n, "abc-_.~XYZ019");
+}
+
+fn test_url_encode_space_and_specials() -> bool {
+    // 空格 -> %20; '/' '?' '=' '&' 都必须编 —— 它们在 URL 里有结构含义。
+    let out: ptr = alloc(64);
+    let s: str = "a b";
+    let n: u32 = url_encode_str(out, 0, s);
+    let ok1: bool = u_eq(out, n, "a%20b");
+    let s2: str = "a/b?c=d&e";
+    let n2: u32 = url_encode_str(out, 0, s2);
+    return ok1 && u_eq(out, n2, "a%2Fb%3Fc%3Dd%26e");
+
+}
+fn test_url_encode_uppercase_hex() -> bool {
+    // RFC 3986 推荐大写; 小写虽然能解, 但对自己的输出要求大写。
+    let out: ptr = alloc(64);
+    let d: ptr = alloc(4);
+    store8(d, 0, 0xAB as u8);
+    let n: u32 = url_encode(out, 0, d, 0, 1);
+    return u_eq(out, n, "%AB");
+
+}
+fn test_url_decode_roundtrip() -> bool {
+    let d: ptr = alloc(64);
+    let e: ptr = alloc(192);
+    let r: ptr = alloc(64);
+    let s: str = "a b/c?d=e&f+g%h~i";
+    let n: u32 = str_len(s);
+    mem_copy(d, 0, str_ptr(s), 0, n);
+    let el: u32 = url_encode(e, 0, d, 0, n);
+    let dl: u32 = url_decode(r, 0, e, 0, el);
+    return dl == n && mem_eq(d, 0, r, 0, n);
+}
+
+fn test_url_decode_plus_is_literal() -> bool {
+    // 严格解码里 '+' 就是 '+'。
+    let out: ptr = alloc(32);
+    let s: str = "a+b";
+    let n: u32 = url_decode_str(out, 0, s);
+    let want: str = "a+b";
+    return n == 3 && mem_eq(out, 0, str_ptr(want), 0, 3);
+}
+
+fn test_url_decode_form_plus_is_space() -> bool {
+    let out: ptr = alloc(32);
+    let s: str = "a+b";
+    let n: u32 = url_decode_form_str(out, 0, s);
+    let want: str = "a b";
+    return n == 3 && mem_eq(out, 0, str_ptr(want), 0, 3);
+}
+
+fn test_url_decode_rejects_malformed() -> bool {
+    let out: ptr = alloc(32);
+    let a: str = "%zz";
+    let b: str = "%4";
+    let c: str = "abc%";
+    return url_decode_str(out, 0, a) == URL_NO && url_decode_str(out, 0, b) == URL_NO
+        && url_decode_str(out, 0, c) == URL_NO;
+}
+
+fn test_url_decode_lowercase_hex_accepted() -> bool {
+    // 解码要宽容 (小写十六进制是合法输入), 编码才要求大写。
+    let out: ptr = alloc(32);
+    let s: str = "%2f";
+    let n: u32 = url_decode_str(out, 0, s);
+    return n == 1 && load8(out, 0) == 47;
+}
+
+fn test_url_query_get_basic() -> bool {
+    let q: str = "a=1&b=hello%20world&c=";
+    let out: ptr = alloc(32);
+    let n: u32 = url_query_get_str(str_ptr(q), 0, str_len(q), "b", out, 0);
+    let want: str = "hello world";
+    return n == 11 && mem_eq(out, 0, str_ptr(want), 0, 11);
+}
+
+fn test_url_query_get_first_and_empty_value() -> bool {
+    let q: str = "a=1&b=2";
+    let out: ptr = alloc(32);
+    let n1: u32 = url_query_get_str(str_ptr(q), 0, str_len(q), "a", out, 0);
+    let ok1: bool = n1 == 1 && load8(out, 0) == 49;
+    let n2: u32 = url_query_get_str(str_ptr(q), 0, str_len(q), "b", out, 0);
+    let ok2: bool = n2 == 1 && load8(out, 0) == 50;
+    let q2: str = "x=";
+    let n3: u32 = url_query_get_str(str_ptr(q2), 0, 2, "x", out, 0);
+    return ok1 && ok2 && n3 == 0;
+}
+
+fn test_url_query_get_missing_and_leading_question() -> bool {
+    let out: ptr = alloc(32);
+    let q: str = "a=1";
+    let m: u32 = url_query_get_str(str_ptr(q), 0, 3, "zz", out, 0);
+    let q2: str = "?k=v";
+    let n: u32 = url_query_get_str(str_ptr(q2), 0, 4, "k", out, 0);
+    return m == URL_NO && n == 1 && load8(out, 0) == 118;
+}
+
+fn test_url_query_get_does_not_match_partial_name() -> bool {
+    // "ab=1" 里找 "b" 不该命中 —— 键必须整段相等。
+    let out: ptr = alloc(32);
+    let q: str = "ab=1";
+    return url_query_get_str(str_ptr(q), 0, 4, "b", out, 0) == URL_NO;
+
+}

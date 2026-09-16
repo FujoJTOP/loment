@@ -1,0 +1,440 @@
+// std/mapstr.lomt — 字符串键哈希表 (字节串 -> u64)
+//
+// 为什么除了 map 还要它: 程序里"按名字找"的键绝大多数是**字符串**, 不是整数。
+// 把字符串转成整数需要一个全局驻留表, 而那一层又是另一个要维护的东西。这里直接以
+// 字节串为键: 哈希比对先比摘要再比字节内容 (摘要相同不保证内容相同)。
+//
+// 两块缓冲, 都由调用方给:
+//   t    —— 表: [0..4] 容量, [4..8] 键数, [8..12] 空, [12..16] 空;
+//           槽从 16 起, 每个 32 字节: [哈希 u64][键偏移 u32][键长 u32][值 u64][状态 u32][补 4]
+//   keys —— 键字节池: [0..4] 已用字节, 键字节从偏移 4 起**追加**
+// 键写进池里就不会再变 —— 所以池**不能回收**, 除非整表重建 (删表里的条目不影响池)。
+// 这是刻意的取舍: 回收池要引用计数, 而字符串键的表通常一次性建好就不动。
+//
+// 容量规则与 map 一致: 2 的幂, 不自动扩容。
+//
+// 命名: 公开 mapstr_*, 内部 ms_*。自检 test_mapstr_*。
+
+module mapstr
+
+use "mem.lomt"
+
+pub const MS_HDR: u32 = 16;
+/// 一个槽的字节数。
+pub const MS_SLOT: u32 = 32;
+pub const MS_NIL: u64 = 18446744073709551615;
+pub const MS_NONE: u32 = 4294967295;
+pub const MS_EMPTY: u32 = 0;
+pub const MS_USED: u32 = 1;
+pub const MS_TOMB: u32 = 2;
+/// 键池头部字节数 (存已用字节数)。
+pub const MS_KEYHDR: u32 = 4;
+
+/// 表要多少字节。
+pub fn mapstr_table_bytes(cap: u32) -> u32 {
+    return MS_HDR + MS_SLOT * cap;
+}
+
+/// 键池要多少字节 (n 是键字节总预算)。
+pub fn mapstr_keys_bytes(n: u32) -> u32 {
+    return MS_KEYHDR + n;
+}
+
+fn ms_cap(t: ptr) -> u32 {
+    return mem_load32(t, 0);
+}
+
+fn ms_count(t: ptr) -> u32 {
+    return mem_load32(t, 4);
+}
+
+fn ms_set_count(t: ptr, v: u32) {
+    mem_store32(t, 4, v);
+}
+
+fn ms_slot(t: ptr, i: u32) -> u32 {
+    return MS_HDR + MS_SLOT * i;
+}
+
+fn ms_state(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, ms_slot(t, i) + 24);
+}
+
+fn ms_set_state(t: ptr, i: u32, s: u32) {
+    mem_store32(t, ms_slot(t, i) + 24, s);
+}
+
+fn ms_key_off(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, ms_slot(t, i) + 8);
+}
+
+fn ms_key_len(t: ptr, i: u32) -> u32 {
+    return mem_load32(t, ms_slot(t, i) + 12);
+}
+
+fn ms_hash_at(t: ptr, i: u32) -> u64 {
+    return mem_load64(t, ms_slot(t, i));
+}
+
+fn ms_val(t: ptr, i: u32) -> u64 {
+    return mem_load64(t, ms_slot(t, i) + 16);
+}
+
+fn ms_set_val(t: ptr, i: u32, v: u64) {
+    mem_store64(t, ms_slot(t, i) + 16, v);
+}
+
+/// 键池用了多少字节。
+pub fn mapstr_keys_used(keys: ptr) -> u32 {
+    return mem_load32(keys, 0);
+}
+
+/// FNV-1a (64 位)。与 std/hash.lomt 里的同一族, 这里为了不跨模块依赖再写一遍。
+pub fn mapstr_hash(p: ptr, o: u32, n: u32) -> u64 {
+    let h: u64 = 14695981039346656037;
+    let i: u32 = 0;
+    while i < n {
+        h = h ^ (load8(p, o + i) as u64);
+        h = h * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn mapstr_init(t: ptr, cap: u32, keys: ptr) -> bool {
+    if cap == 0 || (cap & (cap - 1)) != 0 {
+        return false;
+    }
+    mem_store32(t, 0, cap);
+    mem_store32(t, 4, 0);
+    mem_store32(t, 8, 0);
+    mem_store32(t, 12, 0);
+    let i: u32 = 0;
+    while i < cap {
+        ms_set_state(t, i, MS_EMPTY);
+        i = i + 1;
+    }
+    mem_store32(keys, 0, 0);
+    return true;
+}
+
+pub fn mapstr_len(t: ptr) -> u32 {
+    return ms_count(t);
+}
+
+pub fn mapstr_capacity(t: ptr) -> u32 {
+    return ms_cap(t);
+}
+
+/// 槽 i 的键 (已用槽)。
+pub fn mapstr_key_at(t: ptr, keys: ptr, i: u32) -> u64 {
+    let o: u32 = ms_key_off(t, i);
+    if o == MS_NONE {
+        return 0;
+    }
+    return o as u64;
+}
+
+pub fn mapstr_key_len_at(t: ptr, i: u32) -> u32 {
+    return ms_key_len(t, i);
+}
+
+pub fn mapstr_val_at(t: ptr, i: u32) -> u64 {
+    return ms_val(t, i);
+}
+
+pub fn mapstr_next_used(t: ptr, from: u32) -> u32 {
+    let c: u32 = ms_cap(t);
+    let i: u32 = from;
+    while i < c {
+        if ms_state(t, i) == MS_USED {
+            return i;
+        }
+        i = i + 1;
+    }
+    return MS_NONE;
+}
+
+/// 找到键所在的槽 (先比哈希再比字节 —— 摘要相同不代表内容相同)。
+fn ms_find(t: ptr, keys: ptr, kp: ptr, ko: u32, kn: u32) -> u32 {
+    let c: u32 = ms_cap(t);
+    if c == 0 {
+        return MS_NONE;
+    }
+    let mask: u32 = c - 1;
+    let hsh: u64 = mapstr_hash(kp, ko, kn);
+    let h: u32 = (hsh & (mask as u64)) as u32;
+    let i: u32 = 0;
+    while i <= c {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = ms_state(t, s);
+        if st == MS_EMPTY {
+            return MS_NONE;
+        }
+        if st == MS_USED && ms_hash_at(t, s) == hsh {
+            let so: u32 = ms_key_off(t, s);
+            let sn: u32 = ms_key_len(t, s);
+            if sn == kn && mem_eq(keys, so, kp, ko, kn) {
+                return s;
+            }
+        }
+        i = i + 1;
+    }
+    return MS_NONE;
+}
+
+/// 插入或覆盖。返回: 1 = 新增, 0 = 覆盖, 2 = 失败 (表满或键池满)。
+pub fn mapstr_put(t: ptr, keys: ptr, kcap: u32, kp: ptr, ko: u32, kn: u32, v: u64) -> u32 {
+    let c: u32 = ms_cap(t);
+    if c == 0 {
+        return 2;
+    }
+    let s0: u32 = ms_find(t, keys, kp, ko, kn);
+    if s0 != MS_NONE {
+        ms_set_val(t, s0, v);
+        return 0;
+    }
+    // 键字节先追加到池里 (覆盖时不会走到这里, 所以池里不会有重复键)
+    let used: u32 = mem_load32(keys, 0);
+    if used + kn > kcap {
+        return 2;
+    }
+    mem_copy(keys, MS_KEYHDR + used, kp, ko, kn);
+    mem_store32(keys, 0, used + kn);
+    let hsh: u64 = mapstr_hash(kp, ko, kn);
+    let mask: u32 = c - 1;
+    let h: u32 = (hsh & (mask as u64)) as u32;
+    let tomb_at: u32 = MS_NONE;
+    let i: u32 = 0;
+    while i <= c {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = ms_state(t, s);
+        if st == MS_EMPTY || (st == MS_TOMB && tomb_at == MS_NONE) {
+            let dst: u32 = s;
+            if st == MS_TOMB {
+                tomb_at = s;
+            } else {
+                // 到空了: 有墓碑就用最早的墓碑
+                if tomb_at != MS_NONE {
+                    dst = tomb_at;
+                }
+                mem_store64(t, ms_slot(t, dst), hsh);
+                mem_store32(t, ms_slot(t, dst) + 8, MS_KEYHDR + used);
+                mem_store32(t, ms_slot(t, dst) + 12, kn);
+                ms_set_val(t, dst, v);
+                ms_set_state(t, dst, MS_USED);
+                ms_set_count(t, ms_count(t) + 1);
+                return 1;
+            }
+        }
+        if st == MS_TOMB && tomb_at == MS_NONE {
+            // 上面已经记过, 这里不会重复
+            tomb_at = s;
+        }
+        i = i + 1;
+    }
+    return 2;
+}
+
+/// str 版本 (日常入口)。
+pub fn mapstr_put_str(t: ptr, keys: ptr, kcap: u32, s: str, v: u64) -> u32 {
+    return mapstr_put(t, keys, kcap, str_ptr(s), 0, str_len(s), v);
+}
+
+pub fn mapstr_get(t: ptr, keys: ptr, kp: ptr, ko: u32, kn: u32) -> u64 {
+    let s: u32 = ms_find(t, keys, kp, ko, kn);
+    if s == MS_NONE {
+        return MS_NIL;
+    }
+    return ms_val(t, s);
+}
+
+pub fn mapstr_get_str(t: ptr, keys: ptr, s: str) -> u64 {
+    return mapstr_get(t, keys, str_ptr(s), 0, str_len(s));
+}
+
+pub fn mapstr_has(t: ptr, keys: ptr, kp: ptr, ko: u32, kn: u32) -> bool {
+    return ms_find(t, keys, kp, ko, kn) != MS_NONE;
+}
+
+pub fn mapstr_has_str(t: ptr, keys: ptr, s: str) -> bool {
+    return mapstr_has(t, keys, str_ptr(s), 0, str_len(s));
+}
+
+/// 删除 (置墓碑, 探测链不断)。
+pub fn mapstr_del_str(t: ptr, keys: ptr, s: str) -> bool {
+    let kp: ptr = str_ptr(s);
+    let kn: u32 = str_len(s);
+    let i: u32 = ms_find(t, keys, kp, 0, kn);
+    if i == MS_NONE {
+        return false;
+    }
+    ms_set_state(t, i, MS_TOMB);
+    ms_set_count(t, ms_count(t) - 1);
+    return true;
+}
+
+pub fn mapstr_check(t: ptr) -> bool {
+    let c: u32 = ms_cap(t);
+    let used: u32 = 0;
+    let i: u32 = 0;
+    while i < c {
+        if ms_state(t, i) == MS_USED {
+            used = used + 1;
+        }
+        i = i + 1;
+    }
+    return used == ms_count(t);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mapstr_put_get_str() -> bool {
+    let t: ptr = alloc(mapstr_table_bytes(16));
+    let k: ptr = alloc(mapstr_keys_bytes(128));
+    mapstr_init(t, 16, k);
+    let s1: str = "alpha";
+    let s2: str = "beta";
+    let a: u32 = mapstr_put_str(t, k, 128, s1, 1);
+    let b: u32 = mapstr_put_str(t, k, 128, s2, 2);
+    return a == 1 && b == 1 && mapstr_get_str(t, k, s1) == 1
+        && mapstr_get_str(t, k, s2) == 2 && mapstr_len(t) == 2;
+}
+
+fn test_mapstr_missing_key() -> bool {
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(64));
+    mapstr_init(t, 8, k);
+    let s: str = "x";
+    let q: str = "y";
+    mapstr_put_str(t, k, 64, s, 1);
+    return mapstr_get_str(t, k, q) == MS_NIL && mapstr_has_str(t, k, q) == false;
+}
+
+fn test_mapstr_overwrite() -> bool {
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(64));
+    mapstr_init(t, 8, k);
+    let s: str = "same";
+    let a: u32 = mapstr_put_str(t, k, 64, s, 1);
+    let b: u32 = mapstr_put_str(t, k, 64, s, 2);
+    return a == 1 && b == 0 && mapstr_get_str(t, k, s) == 2 && mapstr_len(t) == 1;
+}
+
+fn test_mapstr_prefix_keys_are_distinct() -> bool {
+    // "ab" 与 "abc" 是**不同的键** —— 只比哈希前缀或只比长度的实现会在这里挂。
+    let t: ptr = alloc(mapstr_table_bytes(16));
+    let k: ptr = alloc(mapstr_keys_bytes(64));
+    mapstr_init(t, 16, k);
+    let s1: str = "ab";
+    let s2: str = "abc";
+    mapstr_put_str(t, k, 64, s1, 1);
+    mapstr_put_str(t, k, 64, s2, 2);
+    return mapstr_get_str(t, k, s1) == 1 && mapstr_get_str(t, k, s2) == 2
+        && mapstr_len(t) == 2;
+}
+
+fn test_mapstr_same_length_different_bytes() -> bool {
+    // 同长度的不同串: 只比长度或只做部分比较的实现会混掉。
+    let t: ptr = alloc(mapstr_table_bytes(16));
+    let k: ptr = alloc(mapstr_keys_bytes(64));
+    mapstr_init(t, 16, k);
+    let s1: str = "aaa";
+    let s2: str = "aab";
+    mapstr_put_str(t, k, 64, s1, 1);
+    mapstr_put_str(t, k, 64, s2, 2);
+    return mapstr_get_str(t, k, s1) == 1 && mapstr_get_str(t, k, s2) == 2;
+}
+
+fn test_mapstr_empty_key() -> bool {
+    // 空串也是合法的键 (不能跟"空槽"混为一谈)。
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(32));
+    mapstr_init(t, 8, k);
+    let e: str = "";
+    let a: u32 = mapstr_put_str(t, k, 32, e, 5);
+    return a == 1 && mapstr_get_str(t, k, e) == 5 && mapstr_len(t) == 1
+        && mapstr_has_str(t, k, e);
+}
+
+fn test_mapstr_del_keeps_chain() -> bool {
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(128));
+    mapstr_init(t, 8, k);
+    let s1: str = "one";
+    let s2: str = "two";
+    let s3: str = "three";
+    mapstr_put_str(t, k, 128, s1, 1);
+    mapstr_put_str(t, k, 128, s2, 2);
+    mapstr_put_str(t, k, 128, s3, 3);
+    let d: bool = mapstr_del_str(t, k, s2);
+    return d && mapstr_get_str(t, k, s1) == 1 && mapstr_get_str(t, k, s3) == 3
+        && mapstr_has_str(t, k, s2) == false && mapstr_len(t) == 2 && mapstr_check(t);
+}
+
+fn test_mapstr_key_pool_accounting() -> bool {
+    // 覆盖不该往池里再写一份字节 —— 长跑之后池会被撑爆。
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(64));
+    mapstr_init(t, 8, k);
+    let s: str = "abc";
+    mapstr_put_str(t, k, 64, s, 1);
+    let after_first: u32 = mapstr_keys_used(k);
+    mapstr_put_str(t, k, 64, s, 2);
+    mapstr_put_str(t, k, 64, s, 3);
+    return after_first == 3 && mapstr_keys_used(k) == 3;
+}
+
+fn test_mapstr_key_pool_full_fails() -> bool {
+    let t: ptr = alloc(mapstr_table_bytes(8));
+    let k: ptr = alloc(mapstr_keys_bytes(4));
+    mapstr_init(t, 8, k);
+    let s: str = "abcde";
+    return mapstr_put_str(t, k, 4, s, 1) == 2 && mapstr_len(t) == 0;
+}
+
+/// 把 "k" + 十进制(i) 写进 b, 返回长度。自检用的小工具 (私有名也占全局拼写, 带 ms_ 前缀)。
+fn ms_key(b: ptr, i: u32) -> u32 {
+    store8(b, 0, 107 as u8);
+    let d: u32 = 1;
+    let x: u32 = i;
+    while x >= 10 {
+        x = x / 10;
+        d = d + 1;
+    }
+    let v: u32 = i;
+    let j: u32 = 0;
+    while j < d {
+        store8(b, d - j, (48 + (v % 10)) as u8);
+        v = v / 10;
+        j = j + 1;
+    }
+    return d + 1;
+}
+
+fn test_mapstr_many_keys() -> bool {
+    // 40 个键塞进 64 槽, 每个都查得回来。键先用小缓冲造好再交给 put ——
+    // put 会把字节**拷进键池**, 所以缓冲可以复用。
+    let t: ptr = alloc(mapstr_table_bytes(64));
+    let k: ptr = alloc(mapstr_keys_bytes(1024));
+    let kb: ptr = alloc(16);
+    mapstr_init(t, 64, k);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 40 {
+        let n: u32 = ms_key(kb, i);
+        if mapstr_put(t, k, 1024, kb, 0, n, i as u64) != 1 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < 40 {
+        let n: u32 = ms_key(kb, j);
+        if mapstr_get(t, k, kb, 0, n) != j as u64 {
+            bad = 1;
+        }
+        j = j + 1;
+    }
+    return bad == 0 && mapstr_len(t) == 40 && mapstr_check(t);
+}

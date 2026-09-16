@@ -1,0 +1,218 @@
+// std/mem.lomt — 多字节读写与块操作
+//
+// 为什么要它: 内建只有 load8 / store8, 而 16/32/64 位访问在仓库里被反复手写 ——
+// `loment/examples/bytes.lomt` 一个**示例**在给五个以上文件当库用, 被引用 12 次。
+// 本模块是那件事的正式版: 16/32/64 位读写 + 块的拷/移/填/比/找。
+//
+// 命名: 平名字空间, 公开一律 mem_*, 内部一律 me_*。自检函数也带前缀 (test_mem_*) ——
+// 私有名同样占全局拼写, 不带前缀会按 E13 撞车 (docs/158 §2)。
+//
+// 字节序: 小端 (与 x86-64 目标一致)。这不是"碰巧" —— 目标就这一个, 写死比
+// 运行期判定省一层。
+
+module mem
+
+/// 读 16 位小端。
+pub fn mem_load16(p: ptr, o: u32) -> u32 {
+    let b0: u32 = load8(p, o);
+    let b1: u32 = load8(p, o + 1);
+    return b0 | (b1 << 8);
+}
+
+pub fn mem_store16(p: ptr, o: u32, v: u32) {
+    store8(p, o, (v & 255) as u8);
+    store8(p, o + 1, ((v >> 8) & 255) as u8);
+}
+
+/// 读 32 位小端。
+pub fn mem_load32(p: ptr, o: u32) -> u32 {
+    let b0: u32 = load8(p, o);
+    let b1: u32 = load8(p, o + 1);
+    let b2: u32 = load8(p, o + 2);
+    let b3: u32 = load8(p, o + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+pub fn mem_store32(p: ptr, o: u32, v: u32) {
+    store8(p, o, (v & 255) as u8);
+    store8(p, o + 1, ((v >> 8) & 255) as u8);
+    store8(p, o + 2, ((v >> 16) & 255) as u8);
+    store8(p, o + 3, ((v >> 24) & 255) as u8);
+}
+
+/// 读 64 位小端 (由两段 32 位拼出 —— 不需要 64 位加载指令)。
+pub fn mem_load64(p: ptr, o: u32) -> u64 {
+    let lo: u64 = mem_load32(p, o) as u64;
+    let hi: u64 = mem_load32(p, o + 4) as u64;
+    return lo | (hi << 32);
+}
+
+pub fn mem_store64(p: ptr, o: u32, v: u64) {
+    mem_store32(p, o, (v & 4294967295) as u32);
+    mem_store32(p, o + 4, (v >> 32) as u32);
+}
+
+/// 拷 n 字节。**区间不重叠**时用这个; 可能重叠用 mem_move。
+pub fn mem_copy(dst: ptr, doff: u32, src: ptr, so: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, so + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 拷 n 字节, **重叠安全**: 目标在后就从尾部倒着拷。
+///
+/// 注意这里没有 `return;` 提前退出 —— 本语言**没有无值的 return** (skill §6.3),
+/// 所以"什么都不做"的情形靠 if 包住主体来表达。
+pub fn mem_move(dst: ptr, doff: u32, src: ptr, so: u32, n: u32) {
+    let dp: u64 = dst as u64;
+    let sp: u64 = src as u64;
+    let noop: bool = dp == sp && doff == so;
+    if noop == false {
+        if doff <= so {
+            let i: u32 = 0;
+            while i < n {
+                store8(dst, doff + i, load8(src, so + i) as u8);
+                i = i + 1;
+            }
+        } else {
+            let i: u32 = n;
+            while i > 0 {
+                i = i - 1;
+                store8(dst, doff + i, load8(src, so + i) as u8);
+            }
+        }
+    }
+}
+
+/// 把 dst[doff .. doff+n) 全填成 v。
+pub fn mem_fill(dst: ptr, doff: u32, n: u32, v: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, v as u8);
+        i = i + 1;
+    }
+}
+
+/// 两段字节是否相同。
+pub fn mem_eq(a: ptr, ao: u32, b: ptr, bo: u32, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 在 p[from .. from+n) 里找第一个等于 v 的字节, 返回偏移; 找不到返回 MEM_NONE。
+pub const MEM_NONE: u32 = 4294967295;
+
+pub fn mem_find_byte(p: ptr, from: u32, n: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, from + i) == v {
+            return from + i;
+        }
+        i = i + 1;
+    }
+    return MEM_NONE;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mem_16_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    mem_store16(b, 0, 4660);
+    return load8(b, 0) == 52 && load8(b, 1) == 18 && mem_load16(b, 0) == 4660;
+}
+
+fn test_mem_32_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    mem_store32(b, 0, 305419896);
+    return load8(b, 0) == 120 && load8(b, 3) == 18 && mem_load32(b, 0) == 305419896;
+}
+
+fn test_mem_32_at_offset() -> bool {
+    let b: ptr = alloc(16);
+    mem_store32(b, 5, 4294967295);
+    return mem_load32(b, 5) == 4294967295 && load8(b, 0) == 0;
+}
+
+fn test_mem_64_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    mem_store64(b, 0, 1311768467463790320);
+    return mem_load64(b, 0) == 1311768467463790320;
+}
+
+fn test_mem_64_split() -> bool {
+    // 低位全 1、高位全 1 —— 拼装写错时这条会挂。
+    let b: ptr = alloc(16);
+    mem_store64(b, 0, 18446744073709551615);
+    return mem_load32(b, 0) == 4294967295 && mem_load32(b, 4) == 4294967295;
+}
+
+fn test_mem_fill() -> bool {
+    let b: ptr = alloc(16);
+    mem_fill(b, 2, 4, 170);
+    return load8(b, 1) == 0 && load8(b, 2) == 170 && load8(b, 5) == 170 && load8(b, 6) == 0;
+}
+
+fn test_mem_copy() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    mem_fill(a, 0, 8, 7);
+    mem_copy(b, 3, a, 0, 8);
+    return load8(b, 2) == 0 && load8(b, 3) == 7 && load8(b, 10) == 7 && load8(b, 11) == 0;
+}
+
+fn test_mem_eq() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    mem_fill(a, 0, 4, 9);
+    mem_fill(b, 0, 4, 9);
+    let same: bool = mem_eq(a, 0, b, 0, 4);
+    store8(b, 3, 8 as u8);
+    let diff: bool = mem_eq(a, 0, b, 0, 4);
+    return same && !diff;
+}
+
+fn test_mem_move_forward_overlap() -> bool {
+    // 目标(0) 在源(1) 之前 -> 走前向分支。"ABCDE" 从偏移 1 挪到 0 -> "BCDE E"。
+    let b: ptr = alloc(32);
+    store8(b, 0, 65 as u8);
+    store8(b, 1, 66 as u8);
+    store8(b, 2, 67 as u8);
+    store8(b, 3, 68 as u8);
+    store8(b, 4, 69 as u8);
+    mem_move(b, 0, b, 1, 4);
+    return load8(b, 0) == 66 && load8(b, 1) == 67 && load8(b, 3) == 69 && load8(b, 4) == 69;
+}
+
+fn test_mem_move_backward_overlap() -> bool {
+    // 目标(1) 在源(0) **之后** -> 必须倒着拷, 否则会把还没读到的源字节盖掉。
+    // "ABCD" 从偏移 0 挪到 1 -> "AABCD"。
+    let b: ptr = alloc(32);
+    store8(b, 0, 65 as u8);
+    store8(b, 1, 66 as u8);
+    store8(b, 2, 67 as u8);
+    store8(b, 3, 68 as u8);
+    mem_move(b, 1, b, 0, 4);
+    return load8(b, 0) == 65 && load8(b, 1) == 65 && load8(b, 2) == 66 && load8(b, 4) == 68;
+}
+
+fn test_mem_move_noop() -> bool {
+    let b: ptr = alloc(16);
+    mem_fill(b, 0, 4, 3);
+    mem_move(b, 0, b, 0, 4);
+    return load8(b, 0) == 3 && load8(b, 3) == 3;
+}
+
+fn test_mem_find_byte() -> bool {
+    let b: ptr = alloc(16);
+    mem_fill(b, 0, 8, 1);
+    store8(b, 5, 99 as u8);
+    return mem_find_byte(b, 0, 8, 99) == 5 && mem_find_byte(b, 0, 8, 100) == MEM_NONE;
+}

@@ -1,0 +1,293 @@
+// std/set.lomt — 哈希集合 (u64)
+//
+// 为什么不从零写一遍: 集合就是"键 -> 什么都不关心"的映射。已经有 map 了, 再抄一遍
+// 开放寻址的探测、墓碑、扩容账只会多一份要维护的代码 —— 而**两份实现迟早会分叉**
+// (这一层的第一版就是这么省下来的)。
+//
+// 代价是每个元素白占 8 字节的值域。对"去重"这个用途, 值域本来就是空的, 那 8 字节
+// 换来的是一份实现, 值得。
+//
+// 布局与容量规则完全跟 map 一致 (见 map.lomt 的文件头): 容量必须是 2 的幂,
+// 不自动扩容, 装载率超过七成自己换表。
+//
+// 命名: 公开 set_*, 自检 test_set_*。
+
+module set
+
+use "map.lomt"
+use "mem.lomt"
+
+/// 建集合要多少字节 (与 map 相同)。
+pub fn set_bytes(cap: u32) -> u32 {
+    return map_bytes(cap);
+}
+
+pub fn set_init(b: ptr, cap: u32) -> bool {
+    return map_init(b, cap);
+}
+
+pub fn set_len(b: ptr) -> u32 {
+    return map_len(b);
+}
+
+pub fn set_capacity(b: ptr) -> u32 {
+    return map_capacity(b);
+}
+
+pub fn set_is_empty(b: ptr) -> bool {
+    return map_is_empty(b);
+}
+
+/// 加入。**新元素**返回 true, 已经在里面返回 false。
+pub fn set_add(b: ptr, k: u64) -> bool {
+    return map_put(b, k, 1);
+}
+
+pub fn set_has(b: ptr, k: u64) -> bool {
+    return map_has(b, k);
+}
+
+pub fn set_del(b: ptr, k: u64) -> bool {
+    return map_del(b, k);
+}
+
+pub fn set_clear(b: ptr) {
+    map_clear(b);
+}
+
+pub fn set_check(b: ptr) -> bool {
+    return map_check(b);
+}
+
+/// 遍历: 下一个元素的下标 (配合 set_at 取键)。
+pub fn set_next(b: ptr, from: u32) -> u32 {
+    return map_next_used(b, from);
+}
+
+pub fn set_at(b: ptr, i: u32) -> u64 {
+    return map_key_at(b, i);
+}
+
+/// r = a ∪ c。返回写进 r 的元素个数。r 必须与 a/c 是不同的缓冲, 且容量足够。
+pub fn set_union(r: ptr, a: ptr, c: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = map_next_used(a, 0);
+    while i != MAP_NONE {
+        if set_add(r, map_key_at(a, i)) {
+            n = n + 1;
+        }
+        i = map_next_used(a, i + 1);
+    }
+    let j: u32 = map_next_used(c, 0);
+    while j != MAP_NONE {
+        if set_add(r, map_key_at(c, j)) {
+            n = n + 1;
+        }
+        j = map_next_used(c, j + 1);
+    }
+    return n;
+}
+
+/// r = a ∩ c。
+pub fn set_intersect(r: ptr, a: ptr, c: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = map_next_used(a, 0);
+    while i != MAP_NONE {
+        let k: u64 = map_key_at(a, i);
+        if set_has(c, k) {
+            set_add(r, k);
+            n = n + 1;
+        }
+        i = map_next_used(a, i + 1);
+    }
+    return n;
+}
+
+/// r = a \ c (在 a 里不在 c 里)。
+pub fn set_difference(r: ptr, a: ptr, c: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = map_next_used(a, 0);
+    while i != MAP_NONE {
+        let k: u64 = map_key_at(a, i);
+        if set_has(c, k) == false {
+            set_add(r, k);
+            n = n + 1;
+        }
+        i = map_next_used(a, i + 1);
+    }
+    return n;
+}
+
+/// a 是不是 c 的子集。
+pub fn set_is_subset(a: ptr, c: ptr) -> bool {
+    let i: u32 = map_next_used(a, 0);
+    while i != MAP_NONE {
+        if set_has(c, map_key_at(a, i)) == false {
+            return false;
+        }
+        i = map_next_used(a, i + 1);
+    }
+    return true;
+}
+
+/// 两个集合有没有交集。
+pub fn set_intersects(a: ptr, c: ptr) -> bool {
+    let i: u32 = map_next_used(a, 0);
+    while i != MAP_NONE {
+        if set_has(c, map_key_at(a, i)) {
+            return true;
+        }
+        i = map_next_used(a, i + 1);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_set_add_and_has() -> bool {
+    let b: ptr = alloc(set_bytes(16));
+    set_init(b, 16);
+    let a: bool = set_add(b, 42);
+    let c: bool = set_add(b, 43);
+    let d: bool = set_add(b, 42);
+    return a && c && d == false && set_has(b, 42) && set_has(b, 99) == false
+        && set_len(b) == 2;
+}
+
+fn test_set_del() -> bool {
+    let b: ptr = alloc(set_bytes(16));
+    set_init(b, 16);
+    set_add(b, 7);
+    set_add(b, 8);
+    let d: bool = set_del(b, 7);
+    return d && set_has(b, 7) == false && set_has(b, 8) && set_len(b) == 1
+        && set_del(b, 7) == false && set_check(b);
+}
+
+fn test_set_zero_element() -> bool {
+    // 元素 0 与"空"必须分得开。
+    let b: ptr = alloc(set_bytes(8));
+    set_init(b, 8);
+    set_add(b, 0);
+    return set_has(b, 0) && set_len(b) == 1;
+}
+
+fn test_set_union() -> bool {
+    let a: ptr = alloc(set_bytes(16));
+    let c: ptr = alloc(set_bytes(16));
+    let r: ptr = alloc(set_bytes(16));
+    set_init(a, 16);
+    set_init(c, 16);
+    set_init(r, 16);
+    set_add(a, 1);
+    set_add(a, 2);
+    set_add(c, 2);
+    set_add(c, 3);
+    let n: u32 = set_union(r, a, c);
+    return n == 3 && set_has(r, 1) && set_has(r, 2) && set_has(r, 3)
+        && set_len(r) == 3 && set_check(r);
+}
+
+fn test_set_intersect() -> bool {
+    let a: ptr = alloc(set_bytes(16));
+    let c: ptr = alloc(set_bytes(16));
+    let r: ptr = alloc(set_bytes(16));
+    set_init(a, 16);
+    set_init(c, 16);
+    set_init(r, 16);
+    set_add(a, 1);
+    set_add(a, 2);
+    set_add(a, 3);
+    set_add(c, 2);
+    set_add(c, 3);
+    set_add(c, 4);
+    let n: u32 = set_intersect(r, a, c);
+    return n == 2 && set_has(r, 2) && set_has(r, 3) && set_has(r, 1) == false
+        && set_has(r, 4) == false;
+}
+
+fn test_set_difference() -> bool {
+    let a: ptr = alloc(set_bytes(16));
+    let c: ptr = alloc(set_bytes(16));
+    let r: ptr = alloc(set_bytes(16));
+    set_init(a, 16);
+    set_init(c, 16);
+    set_init(r, 16);
+    set_add(a, 1);
+    set_add(a, 2);
+    set_add(c, 2);
+    let n: u32 = set_difference(r, a, c);
+    return n == 1 && set_has(r, 1) && set_has(r, 2) == false;
+}
+
+fn test_set_subset_and_intersects() -> bool {
+    let a: ptr = alloc(set_bytes(16));
+    let c: ptr = alloc(set_bytes(16));
+    let d: ptr = alloc(set_bytes(16));
+    set_init(a, 16);
+    set_init(c, 16);
+    set_init(d, 16);
+    set_add(a, 1);
+    set_add(a, 2);
+    set_add(c, 1);
+    set_add(c, 2);
+    set_add(c, 3);
+    set_add(d, 9);
+    return set_is_subset(a, c) && set_is_subset(c, a) == false
+        && set_intersects(a, c) && set_intersects(a, d) == false
+        && set_is_subset(a, d) == false;
+}
+
+fn test_set_empty_is_subset_of_everything() -> bool {
+    let a: ptr = alloc(set_bytes(8));
+    let c: ptr = alloc(set_bytes(8));
+    set_init(a, 8);
+    set_init(c, 8);
+    set_add(c, 5);
+    return set_is_subset(a, c) && set_intersects(a, c) == false;
+}
+
+fn test_set_many_elements() -> bool {
+    let b: ptr = alloc(set_bytes(128));
+    set_init(b, 128);
+    let i: u64 = 0;
+    while i < 50 {
+        set_add(b, i * 3);
+        i = i + 1;
+    }
+    let j: u64 = 0;
+    let ok: u32 = 1;
+    while j < 50 {
+        if set_has(b, j * 3) == false {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    return ok == 1 && set_len(b) == 50 && set_check(b);
+}
+
+fn test_set_clear() -> bool {
+    let b: ptr = alloc(set_bytes(16));
+    set_init(b, 16);
+    set_add(b, 1);
+    set_add(b, 2);
+    set_clear(b);
+    return set_is_empty(b) && set_has(b, 1) == false && set_check(b);
+}
+
+fn test_set_iteration_visits_all() -> bool {
+    let b: ptr = alloc(set_bytes(32));
+    set_init(b, 32);
+    set_add(b, 5);
+    set_add(b, 6);
+    set_add(b, 7);
+    let seen: u32 = 0;
+    let sum: u64 = 0;
+    let i: u32 = set_next(b, 0);
+    while i != MAP_NONE {
+        seen = seen + 1;
+        sum = sum + set_at(b, i);
+        i = set_next(b, i + 1);
+    }
+    return seen == 3 && sum == 18;
+}

@@ -1,0 +1,856 @@
+// std/bigint.lomt — 任意精度无符号整数
+//
+// 为什么绕不开它: 把 double 精确打印成十进制, 需要算出 M * 5^k —— 指数最大时
+// k = 1074, 那是 5^1074, 约 2500 位。u64 差着两个数量级。反过来把十进制字符串
+// 精确读回 double 也一样。所以浮点的**文本**那一半必须站在大整数上。
+//
+// 布局 (和别的模块一样, 状态由调用方给缓冲):
+//   buf[0..4]        = 用到的肢体数 nl (小端在前, 允许前导零肢体, 但各函数会规范掉)
+//   buf[4 + 4*i]     = 第 i 个肢体, u32
+// 所以装 cap 个肢体要 4 + 4*cap 字节。
+//
+// 为什么用 u32 肢体而不是 u64: 语言里没有 u128, 而 u32*u32 正好落在 u64 里,
+// 连加进位也刚好不溢出 (见 bigint_mul 的注释)。用 u64 肢体就得手写 128 位乘加,
+// 那正是这一层要避免的复杂度。
+//
+// 命名: 公开 bigint_*, 内部 bi_*。自检 test_bigint_*。
+
+module bigint
+
+use "mem.lomt"
+
+/// 2^32, 肢体的进位基数。
+pub const BIG_BASE: u64 = 4294967296;
+/// 单个肢体的掩码。
+pub const BIG_MASK: u64 = 4294967295;
+/// 十进制每组的位数 (一次除 10^9 出 9 位, 比逐位除快一个数量级)。
+pub const BIG_DEC_GROUP: u32 = 9;
+/// 10^9。
+pub const BIG_GROUP_BASE: u32 = 1000000000;
+
+fn bi_nl(b: ptr) -> u32 {
+    return mem_load32(b, 0);
+}
+
+fn bi_set_nl(b: ptr, n: u32) {
+    mem_store32(b, 0, n);
+}
+
+fn bi_limb(b: ptr, i: u32) -> u32 {
+    return mem_load32(b, 4 + 4 * i);
+}
+
+fn bi_set_limb(b: ptr, i: u32, v: u32) {
+    mem_store32(b, 4 + 4 * i, v);
+}
+
+/// 去掉高位的零肢体 (规范形式), 返回新的长度。
+fn bi_trim(b: ptr) -> u32 {
+    let n: u32 = bi_nl(b);
+    while n > 0 && bi_limb(b, n - 1) == 0 {
+        n = n - 1;
+    }
+    bi_set_nl(b, n);
+    return n;
+}
+
+/// 置 0。
+pub fn bigint_zero(b: ptr, cap: u32) -> u32 {
+    bi_set_nl(b, 0);
+    let i: u32 = 0;
+    while i < cap {
+        bi_set_limb(b, i, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 从 u64 装入。
+///
+/// 注意 `bigint_zero` 会把长度置 0, 所以写完肢体**必须**自己把长度设回去 ——
+/// 靠 bi_trim 是由 0 开始裁的, 结果永远是 0 长度 (第一版就是这么错的:
+/// 从 u64 进来的数全都成了零值, 而十进制路径看不出来, 因为它走 mul_small/add_small)。
+pub fn bigint_from_u64(b: ptr, cap: u32, v: u64) -> u32 {
+    bigint_zero(b, cap);
+    let lo: u32 = (v & BIG_MASK) as u32;
+    let hi: u32 = (v >> 32) as u32;
+    bi_set_limb(b, 0, lo);
+    bi_set_limb(b, 1, hi);
+    bi_set_nl(b, 2);
+    return bi_trim(b);
+}
+
+pub fn bigint_len(b: ptr) -> u32 {
+    return bi_nl(b);
+}
+
+pub fn bigint_is_zero(b: ptr) -> bool {
+    return bi_nl(b) == 0;
+}
+
+pub fn bigint_limb_at(b: ptr, i: u32) -> u32 {
+    return bi_limb(b, i);
+}
+
+/// 位长 (0 给 0)。
+pub fn bigint_bitlen(a: ptr) -> u32 {
+    let n: u32 = bi_nl(a);
+    if n == 0 {
+        return 0;
+    }
+    let top: u32 = bi_limb(a, n - 1);
+    let p: u32 = 0;
+    let x: u32 = top;
+    if x == 0 {
+        p = 0;
+    } else {
+        p = 32;
+        let y: u32 = x;
+        while y < 2147483648 {
+            y = y << 1;
+            p = p - 1;
+        }
+    }
+    return (n - 1) * 32 + p;
+}
+
+/// 比较: 1 = a>b, 0 = 相等, 2 = a<b。
+pub fn bigint_cmp(a: ptr, b: ptr) -> u32 {
+    let na: u32 = bi_nl(a);
+    let nb: u32 = bi_nl(b);
+    if na > nb {
+        return 1;
+    }
+    if na < nb {
+        return 2;
+    }
+    let i: u32 = na;
+    while i > 0 {
+        i = i - 1;
+        let x: u32 = bi_limb(a, i);
+        let y: u32 = bi_limb(b, i);
+        if x > y {
+            return 1;
+        }
+        if x < y {
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/// r = a + b。r 必须与 a/b 是不同的缓冲。
+pub fn bigint_add(r: ptr, cap: u32, a: ptr, b: ptr) -> u32 {
+    let na: u32 = bi_nl(a);
+    let nb: u32 = bi_nl(b);
+    let n: u32 = na;
+    if nb > n {
+        n = nb;
+    }
+    let carry: u64 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let x: u64 = 0;
+        if i < na {
+            x = bi_limb(a, i) as u64;
+        }
+        if i < nb {
+            x = x + (bi_limb(b, i) as u64);
+        }
+        x = x + carry;
+        bi_set_limb(r, i, (x & BIG_MASK) as u32);
+        carry = x >> 32;
+        i = i + 1;
+    }
+    let nl: u32 = n;
+    if carry != 0 && n < cap {
+        bi_set_limb(r, n, carry as u32);
+        nl = n + 1;
+    }
+    bi_set_nl(r, nl);
+    return bi_trim(r);
+}
+
+/// r = a - b。**要求 a >= b** (用 bigint_cmp 先判); 不满足时给出 0 并返回 false。
+pub fn bigint_sub(r: ptr, cap: u32, a: ptr, b: ptr) -> bool {
+    if bigint_cmp(a, b) == 2 {
+        bigint_zero(r, cap);
+        return false;
+    }
+    let na: u32 = bi_nl(a);
+    let nb: u32 = bi_nl(b);
+    // 借位用 s64 表达: u64 减出负数会 panic, 所以每一步都先判够不够减。
+    let borrow: u64 = 0;
+    let i: u32 = 0;
+    while i < na {
+        let x: u64 = bi_limb(a, i) as u64;
+        let y: u64 = 0;
+        if i < nb {
+            y = bi_limb(b, i) as u64;
+        }
+        let sub: u64 = y + borrow;
+        if x >= sub {
+            bi_set_limb(r, i, (x - sub) as u32);
+            borrow = 0;
+        } else {
+            bi_set_limb(r, i, (((x + BIG_BASE) - sub) & BIG_MASK) as u32);
+            borrow = 1;
+        }
+        i = i + 1;
+    }
+    bi_set_nl(r, na);
+    bi_trim(r);
+    return true;
+}
+
+/// r = a * k (k 是单个 32 位)。乘小常数用这个, 比走完整乘法快也简单。
+pub fn bigint_mul_small(r: ptr, cap: u32, a: ptr, k: u32) -> u32 {
+    let na: u32 = bi_nl(a);
+    let carry: u64 = 0;
+    let i: u32 = 0;
+    while i < na {
+        let t: u64 = (bi_limb(a, i) as u64) * (k as u64) + carry;
+        if i < cap {
+            bi_set_limb(r, i, (t & BIG_MASK) as u32);
+        }
+        carry = t >> 32;
+        i = i + 1;
+    }
+    let nl: u32 = na;
+    if carry != 0 && na < cap {
+        bi_set_limb(r, na, carry as u32);
+        nl = na + 1;
+    }
+    bi_set_nl(r, nl);
+    return bi_trim(r);
+}
+
+/// r = a + k。
+pub fn bigint_add_small(r: ptr, cap: u32, a: ptr, k: u32) -> u32 {
+    let na: u32 = bi_nl(a);
+    let carry: u64 = k as u64;
+    let nl: u32 = na;
+    let i: u32 = 0;
+    while i < na && carry != 0 {
+        let t: u64 = (bi_limb(a, i) as u64) + carry;
+        bi_set_limb(r, i, (t & BIG_MASK) as u32);
+        carry = t >> 32;
+        i = i + 1;
+    }
+    if carry != 0 && na < cap {
+        bi_set_limb(r, na, carry as u32);
+        nl = na + 1;
+    }
+    bi_set_nl(r, nl);
+    return bi_trim(r);
+}
+
+/// q = a / d, **返回余数** (d 是单个 32 位)。
+pub fn bigint_divmod_small(q: ptr, cap: u32, a: ptr, d: u32) -> u32 {
+    let na: u32 = bi_nl(a);
+    let rem: u64 = 0;
+    let i: u32 = na;
+    while i > 0 {
+        i = i - 1;
+        let cur: u64 = (rem << 32) | (bi_limb(a, i) as u64);
+        if i < cap {
+            bi_set_limb(q, i, (cur / (d as u64)) as u32);
+        }
+        rem = cur % (d as u64);
+    }
+    bi_set_nl(q, na);
+    bi_trim(q);
+    return rem as u32;
+}
+
+/// r = a * b (学校式逐肢体乘法)。r 必须与 a/b 是不同的缓冲。
+pub fn bigint_mul(r: ptr, cap: u32, a: ptr, b: ptr) -> u32 {
+    let na: u32 = bi_nl(a);
+    let nb: u32 = bi_nl(b);
+    bigint_zero(r, cap);
+    if na == 0 || nb == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < na {
+        let ai: u64 = bi_limb(a, i) as u64;
+        let carry: u64 = 0;
+        let j: u32 = 0;
+        while j < nb {
+            let idx: u32 = i + j;
+            if idx < cap {
+                // 上界: (2^32-1)^2 + (2^32-1) + (2^32-1) = 2^64-1, 刚好不溢出。
+                let t: u64 = ai * (bi_limb(b, j) as u64) + (bi_limb(r, idx) as u64) + carry;
+                bi_set_limb(r, idx, (t & BIG_MASK) as u32);
+                carry = t >> 32;
+            }
+            j = j + 1;
+        }
+        let idx2: u32 = i + nb;
+        while carry != 0 && idx2 < cap {
+            let t: u64 = (bi_limb(r, idx2) as u64) + carry;
+            bi_set_limb(r, idx2, (t & BIG_MASK) as u32);
+            carry = t >> 32;
+            idx2 = idx2 + 1;
+        }
+        i = i + 1;
+    }
+    let nl: u32 = na + nb;
+    if nl > cap {
+        bi_set_nl(r, cap);
+    } else {
+        bi_set_nl(r, nl);
+    }
+    return bi_trim(r);
+}
+
+/// r = a << s 位。
+pub fn bigint_shl_bits(r: ptr, cap: u32, a: ptr, s: u32) -> u32 {
+    let limbs: u32 = s / 32;
+    let bits: u32 = s % 32;
+    let na: u32 = bi_nl(a);
+    bigint_zero(r, cap);
+    let carry: u64 = 0;
+    let i: u32 = 0;
+    while i < na {
+        let t: u64 = ((bi_limb(a, i) as u64) << bits) | carry;
+        let idx: u32 = i + limbs;
+        if idx < cap {
+            bi_set_limb(r, idx, (t & BIG_MASK) as u32);
+        }
+        carry = t >> 32;
+        i = i + 1;
+    }
+    let nl: u32 = na + limbs;
+    let n2: u32 = nl;
+    if carry != 0 && nl < cap {
+        bi_set_limb(r, nl, carry as u32);
+        n2 = nl + 1;
+    }
+    if n2 > cap {
+        bi_set_nl(r, cap);
+    } else {
+        bi_set_nl(r, n2);
+    }
+    return bi_trim(r);
+}
+
+/// r = a >> s 位。返回"被移出的位里有没有非零"(给舍入用)。
+pub fn bigint_shr_bits(r: ptr, cap: u32, a: ptr, s: u32) -> u32 {
+    let limbs: u32 = s / 32;
+    let bits: u32 = s % 32;
+    let na: u32 = bi_nl(a);
+    bigint_zero(r, cap);
+    let lost: u32 = 0;
+    let i: u32 = 0;
+    while i < limbs && i < na {
+        if bi_limb(a, i) != 0 {
+            lost = 1;
+        }
+        i = i + 1;
+    }
+    if bits != 0 && limbs < na {
+        let low: u32 = bi_limb(a, limbs);
+        if (low & (((1 as u32) << bits) - 1)) != 0 {
+            lost = 1;
+        }
+    }
+    let out: u32 = 0;
+    let i2: u32 = limbs;
+    while i2 < na {
+        let hi: u64 = 0;
+        let lo: u64 = bi_limb(a, i2) as u64;
+        let hi2: u32 = 0;
+        if i2 + 1 < na {
+            hi2 = bi_limb(a, i2 + 1);
+        }
+        let cur: u64 = ((hi2 as u64) << 32) | lo;
+        let v: u32 = (cur >> bits) as u32;
+        if out < cap {
+            bi_set_limb(r, out, v);
+        }
+        out = out + 1;
+        i2 = i2 + 1;
+    }
+    bi_set_nl(r, out);
+    return lost;
+}
+
+/// 取低 64 位 (溢出时截断 —— 叫 u64 就不该假装能给更多)。
+pub fn bigint_to_u64(a: ptr) -> u64 {
+    let n: u32 = bi_nl(a);
+    if n == 0 {
+        return 0;
+    }
+    let lo: u64 = bi_limb(a, 0) as u64;
+    if n == 1 {
+        return lo;
+    }
+    return lo | ((bi_limb(a, 1) as u64) << 32);
+}
+
+/// 是不是 0 或 1 (给"除到 1 就停"这类循环用)。
+pub fn bigint_is_one(a: ptr) -> bool {
+    return bi_nl(a) == 1 && bi_limb(a, 0) == 1;
+}
+
+// ------------------------------------------------------------ 十进制
+
+/// 把 a 输出成十进制字符串, 写进 out[o..], 返回长度。零给 "0"。
+///
+/// 临时区 tmp 的用法分两段: 前 4+4*tmpcap 字节放 a 的副本 (反复除以 10^9 的商),
+/// 之后按 4 字节一组攒余数。**两段不能重叠** —— 见 bigint_dec_tmp_bytes。
+pub fn bigint_to_dec(out: ptr, o: u32, a: ptr, tmp: ptr, tmpcap: u32) -> u32 {
+    if bi_nl(a) == 0 {
+        store8(out, o, 48 as u8);
+        return 1;
+    }
+    let q: ptr = tmp;
+    let goff: u32 = 4 + 4 * tmpcap;
+    bigint_copy(q, tmpcap, a);
+    // 每轮除 10^9 得 9 位。组从低位往高位出, 所以先攒着, 最后倒着拼。
+    // 商写回 q 自己: divmod_small 从高位往低位扫, 原地安全。
+    let groups: u32 = 0;
+    while bi_nl(q) != 0 {
+        let rem: u32 = bigint_divmod_small(q, tmpcap, q, BIG_GROUP_BASE);
+        mem_store32(tmp, goff + 4 * groups, rem);
+        groups = groups + 1;
+    }
+    // 最高组不补前导零, 其余每组补足 9 位 —— 这正是 "1234567890" 里那个 0 的来源。
+    let len: u32 = 0;
+    let g: u32 = groups;
+    while g > 0 {
+        g = g - 1;
+        let v: u32 = mem_load32(tmp, goff + 4 * g);
+        if g + 1 == groups {
+            len = len + bi_u32_dec(out, o + len, v);
+        } else {
+            len = len + bi_u32_dec_pad(out, o + len, v, BIG_DEC_GROUP);
+        }
+    }
+    return len;
+}
+
+/// u32 -> 十进制 (不补零), 返回位数。
+fn bi_u32_dec(out: ptr, o: u32, v: u32) -> u32 {
+    let d: u32 = bi_u32_digits(v);
+    let i: u32 = 0;
+    let x: u32 = v;
+    while i < d {
+        store8(out, o + d - 1 - i, (48 + (x % 10)) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return d;
+}
+
+/// u32 -> 十进制, 补足到 width 位 (左侧补 '0')。
+fn bi_u32_dec_pad(out: ptr, o: u32, v: u32, width: u32) -> u32 {
+    let d: u32 = bi_u32_digits(v);
+    let i: u32 = 0;
+    let x: u32 = v;
+    while i < d {
+        store8(out, o + width - 1 - i, (48 + (x % 10)) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    let j: u32 = d;
+    while j < width {
+        store8(out, o + width - 1 - j, 48 as u8);
+        j = j + 1;
+    }
+    return width;
+}
+
+fn bi_u32_digits(v: u32) -> u32 {
+    if v == 0 {
+        return 1;
+    }
+    let d: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        x = x / 10;
+        d = d + 1;
+    }
+    return d;
+}
+
+/// 从十进制字符串 (s[o..o+n), 只认数字) 装进 a, 返回肢体数。
+pub fn bigint_from_dec(a: ptr, cap: u32, s: ptr, o: u32, n: u32) -> u32 {
+    bigint_zero(a, cap);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(s, o + i);
+        if c >= 48 && c <= 57 {
+            // a = a * 10 + digit, 原地安全 (mul_small/add_small 都是低位往高位写)。
+            bigint_mul_small(a, cap, a, 10);
+            bigint_add_small(a, cap, a, c - 48);
+        }
+        i = i + 1;
+    }
+    return bi_trim(a);
+}
+
+/// 从 str 装 (日常入口)。**注意** 字符串字面量是 `str` 不是 `ptr`,
+/// 所以 `bigint_from_dec(a, cap, "...", 0, 3)` 会被 E1 挡下 —— 用这个。
+pub fn bigint_from_str(a: ptr, cap: u32, s: str) -> u32 {
+    return bigint_from_dec(a, cap, str_ptr(s), 0, str_len(s));
+}
+
+/// a * 5^k (给浮点的十进制转换用: 1/2^k = 5^k / 10^k)。
+/// 每步乘 5^13 (=1220703125 < 2^32), 于是 k 步变 k/13 步。
+pub fn bigint_mul_pow5(r: ptr, cap: u32, a: ptr, k: u32) -> u32 {
+    let step: u32 = 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5 * 5;
+    let full: u32 = k / 13;
+    let rest: u32 = k % 13;
+    let i: u32 = 0;
+    bigint_copy(r, cap, a);
+    while i < full {
+        bigint_mul_small(r, cap, r, step);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < rest {
+        bigint_mul_small(r, cap, r, 5);
+        j = j + 1;
+    }
+    return bi_nl(r);
+}
+
+/// a * 10^k。
+pub fn bigint_mul_pow10(r: ptr, cap: u32, a: ptr, k: u32) -> u32 {
+    let full: u32 = k / 9;
+    let rest: u32 = k % 9;
+    let i: u32 = 0;
+    bigint_copy(r, cap, a);
+    while i < full {
+        bigint_mul_small(r, cap, r, BIG_GROUP_BASE);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    let small: u32 = 10;
+    while j < rest {
+        bigint_mul_small(r, cap, r, small);
+        j = j + 1;
+    }
+    return bi_nl(r);
+}
+
+/// r = a (整块搬运, 含长度)。
+pub fn bigint_copy(r: ptr, cap: u32, a: ptr) {
+    let n: u32 = bi_nl(a);
+    let i: u32 = 0;
+    while i < n && i < cap {
+        bi_set_limb(r, i, bi_limb(a, i));
+        i = i + 1;
+    }
+    if n > cap {
+        bi_set_nl(r, cap);
+    } else {
+        bi_set_nl(r, n);
+    }
+}
+
+/// tmp 需要多少字节才能给 bigint_to_dec 当临时区 (cap 个肢体的副本 + 组计数)。
+pub fn bigint_dec_tmp_bytes(cap: u32) -> u32 {
+    return 4 + 4 * cap + 4 + 4 * (cap + 8) * 4;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 把 out[0..n) 与字符串比 —— 测试里到处要用, 收成一个 (私有名也占全局拼写, 所以带 bi_ 前缀)。
+fn bi_dec_eq(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(s), 0, n);
+}
+
+/// 十进制出, 顺手比字符串。out 由调用方给。
+fn bi_dec_is(r: ptr, s: str) -> bool {
+    let tmp: ptr = alloc(bigint_dec_tmp_bytes(32));
+    let out: ptr = alloc(128);
+    let n: u32 = bigint_to_dec(out, 0, r, tmp, 32);
+    return bi_dec_eq(out, n, s);
+}
+
+fn test_bigint_from_u64_and_to_u64() -> bool {
+    let b: ptr = alloc(64);
+    bigint_from_u64(b, 4, 18446744073709551615);
+    return bigint_len(b) == 2 && bigint_to_u64(b) == 18446744073709551615
+        && bigint_limb_at(b, 0) == 4294967295 && bigint_limb_at(b, 1) == 4294967295;
+}
+
+fn test_bigint_zero_trims_to_zero_limbs() -> bool {
+    let b: ptr = alloc(64);
+    bigint_from_u64(b, 4, 0);
+    return bigint_len(b) == 0 && bigint_is_zero(b);
+}
+
+fn test_bigint_add_carry_chain() -> bool {
+    // (2^64-1) + 1 = 2^64 -> 肢体变成 [0,0,1]
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_u64(a, 4, 18446744073709551615);
+    bigint_from_u64(c, 4, 1);
+    bigint_add(r, 4, a, c);
+    return bigint_len(r) == 3 && bigint_limb_at(r, 0) == 0 && bigint_limb_at(r, 2) == 1;
+}
+
+fn test_bigint_add_is_commutative() -> bool {
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    let r1: ptr = alloc(64);
+    let r2: ptr = alloc(64);
+    bigint_from_str(a, 8, "123456789012345678901234567890");
+    bigint_from_str(c, 8, "987654321098765432109876543210");
+    bigint_add(r1, 8, a, c);
+    bigint_add(r2, 8, c, a);
+    return bigint_cmp(r1, r2) == 0 && bi_dec_is(r1, "1111111110111111111011111111100");
+}
+
+fn test_bigint_sub_basic() -> bool {
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_str(a, 8, "1000000000000000000000");
+    bigint_from_str(c, 8, "1");
+    bigint_sub(r, 8, a, c);
+    return bi_dec_is(r, "999999999999999999999");
+}
+
+fn test_bigint_sub_requires_ge() -> bool {
+    // a < b 时必须**拒绝** (返回 false 并给 0), 而不是回绕成一个巨大的数。
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_u64(a, 8, 5);
+    bigint_from_u64(c, 8, 9);
+    let ok: bool = bigint_sub(r, 8, a, c);
+    return ok == false && bigint_is_zero(r);
+}
+
+fn test_bigint_add_sub_roundtrip() -> bool {
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    let s: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_str(a, 8, "340282366920938463463374607431768211456"); // 2^128
+    bigint_from_str(c, 8, "123456789");
+    bigint_add(s, 8, a, c);
+    bigint_sub(r, 8, s, c);
+    return bigint_cmp(r, a) == 0;
+}
+
+fn test_bigint_mul_small() -> bool {
+    let a: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_u64(a, 8, 4294967296); // 2^32
+    bigint_mul_small(r, 8, a, 4294967295);
+    // 2^32 * (2^32-1) = 2^64 - 2^32 -> 低肢体 0, 高肢体 2^32-1
+    return bigint_len(r) == 2 && bigint_limb_at(r, 0) == 0 && bigint_limb_at(r, 1) == 4294967295;
+}
+
+fn test_bigint_mul_wide() -> bool {
+    // (2^32)^2 = 2^64 -> 肢体 [0,0,1]
+    let a: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_u64(a, 8, 4294967296);
+    bigint_mul(r, 8, a, a);
+    return bigint_len(r) == 3 && bigint_limb_at(r, 0) == 0 && bigint_limb_at(r, 2) == 1;
+}
+
+fn test_bigint_mul_known_product() -> bool {
+    // 20! = 2432902008176640000 —— 落在 u64 之内, 所以可以直接拿 u64 当判据。
+    let a: ptr = alloc(64);
+    let t: ptr = alloc(64);
+    bigint_from_u64(a, 8, 1);
+    let i: u64 = 1;
+    while i <= 20 {
+        bigint_mul_small(t, 8, a, i as u32);
+        bigint_copy(a, 8, t);
+        i = i + 1;
+    }
+    return bigint_to_u64(a) == 2432902008176640000 && bigint_len(a) == 2;
+}
+
+fn test_bigint_divmod_small() -> bool {
+    let a: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    bigint_from_u64(a, 8, 1000000007);
+    let r: u32 = bigint_divmod_small(q, 8, a, 10);
+    return bigint_to_u64(q) == 100000000 && r == 7;
+}
+
+fn test_bigint_shl_bits_2pow100() -> bool {
+    // 2^100 = 1267650600228229401496703205376
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    bigint_from_u64(a, 16, 1);
+    bigint_shl_bits(r, 16, a, 100);
+    return bi_dec_is(r, "1267650600228229401496703205376");
+}
+
+fn test_bigint_shr_bits_reports_lost() -> bool {
+    let a: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    bigint_from_u64(a, 8, 5);
+    return bigint_shr_bits(r, 8, a, 1) == 1 && bigint_to_u64(r) == 2;
+}
+
+fn test_bigint_shr_then_shl_roundtrip_when_aligned() -> bool {
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    let back: ptr = alloc(128);
+    bigint_from_str(a, 16, "123456789012345678901234567890");
+    bigint_shl_bits(r, 16, a, 64);
+    let lost: u32 = bigint_shr_bits(back, 16, r, 64);
+    return lost == 0 && bigint_cmp(back, a) == 0;
+}
+
+fn test_bigint_bitlen() -> bool {
+    let a: ptr = alloc(64);
+    bigint_from_u64(a, 8, 0);
+    let z: u32 = bigint_bitlen(a);
+    bigint_from_u64(a, 8, 1);
+    let one: u32 = bigint_bitlen(a);
+    bigint_from_u64(a, 8, 4294967296);
+    let two32: u32 = bigint_bitlen(a);
+    return z == 0 && one == 1 && two32 == 33;
+}
+
+fn test_bigint_cmp() -> bool {
+    let a: ptr = alloc(64);
+    let c: ptr = alloc(64);
+    bigint_from_str(a, 8, "999999999999999999999999999999");
+    bigint_from_str(c, 8, "1000000000000000000000000000000");
+    let lt: bool = bigint_cmp(a, c) == 2;
+    let eq: bool = bigint_cmp(a, a) == 0;
+    let gt: bool = bigint_cmp(c, a) == 1;
+    return lt && eq && gt;
+}
+
+fn test_bigint_dec_roundtrip() -> bool {
+    // 十进制进 -> 十进制出, 必须一个字符不差。这条不需要我知道中间肢体长什么样。
+    let a: ptr = alloc(128);
+    bigint_from_str(a, 16, "340282366920938463463374607431768211455");
+    return bi_dec_is(a, "340282366920938463463374607431768211455");
+}
+
+fn test_bigint_dec_zero() -> bool {
+    let a: ptr = alloc(64);
+    let tmp: ptr = alloc(bigint_dec_tmp_bytes(8));
+    let out: ptr = alloc(64);
+    bigint_from_u64(a, 8, 0);
+    let n: u32 = bigint_to_dec(out, 0, a, tmp, 8);
+    return n == 1 && load8(out, 0) == 48;
+}
+
+fn test_bigint_dec_group_boundaries() -> bool {
+    // 10^9 与 10^9-1 正好落在"补零组"的边界上 —— 补零写错时只有这两条会挂。
+    let a: ptr = alloc(64);
+    let tmp: ptr = alloc(bigint_dec_tmp_bytes(8));
+    let out: ptr = alloc(64);
+    bigint_from_str(a, 8, "1000000000");
+    let n1: u32 = bigint_to_dec(out, 0, a, tmp, 8);
+    let ok1: bool = bi_dec_eq(out, n1, "1000000000");
+    bigint_from_str(a, 8, "999999999");
+    let n2: u32 = bigint_to_dec(out, 0, a, tmp, 8);
+    let ok2: bool = bi_dec_eq(out, n2, "999999999");
+    return ok1 && ok2;
+}
+
+fn test_bigint_dec_multi_group_padding() -> bool {
+    // 1234567890123456789 = "1" + "234567890" + "123456789" —— 中间那组必须补足 9 位。
+    let a: ptr = alloc(128);
+    bigint_from_str(a, 12, "1234567890123456789");
+    return bi_dec_is(a, "1234567890123456789");
+}
+
+fn test_bigint_dec_offset_write() -> bool {
+    // 从偏移 3 开始写, 两侧的字节都不能被碰 —— 布局约定的一部分。
+    let a: ptr = alloc(64);
+    let tmp: ptr = alloc(bigint_dec_tmp_bytes(8));
+    let out: ptr = alloc(64);
+    mem_fill(out, 0, 24, 170);
+    bigint_from_u64(a, 8, 12345);
+    let n: u32 = bigint_to_dec(out, 3, a, tmp, 8);
+    return n == 5 && load8(out, 2) == 170 && load8(out, 8) == 170
+        && bi_dec_eq_at(out, 3, n, "12345");
+}
+
+fn bi_dec_eq_at(out: ptr, o: u32, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, o, str_ptr(s), 0, n);
+}
+
+fn test_bigint_mul_pow5_known() -> bool {
+    // 5^20 = 95367431640625
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    bigint_from_u64(a, 16, 1);
+    bigint_mul_pow5(r, 16, a, 20);
+    return bi_dec_is(r, "95367431640625");
+}
+
+fn test_bigint_mul_pow5_matches_repeated_mul() -> bool {
+    // 分块乘 5^13 的写法必须与逐次乘 5 完全一致 (分块边界最容易差一)。
+    let a: ptr = alloc(128);
+    let x: ptr = alloc(128);
+    let y: ptr = alloc(128);
+    bigint_from_str(a, 16, "12345678901234567890");
+    bigint_mul_pow5(x, 16, a, 27); // 27 = 2*13 + 1 -> 两条路径都走到
+    bigint_copy(y, 16, a);
+    let i: u32 = 0;
+    while i < 27 {
+        bigint_mul_small(y, 16, y, 5);
+        i = i + 1;
+    }
+    return bigint_cmp(x, y) == 0;
+}
+
+fn test_bigint_mul_pow10() -> bool {
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    bigint_from_u64(a, 16, 7);
+    bigint_mul_pow10(r, 16, a, 30);
+    return bi_dec_is(r, "7000000000000000000000000000000");
+}
+
+fn test_bigint_pow2_128_exact() -> bool {
+    // 2^128 的十进制是 340282366920938463463374607431768211456 ——
+    // 拿"移位"和"十进制读入"两条独立路径对撞。
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    let c: ptr = alloc(128);
+    bigint_from_u64(a, 16, 1);
+    bigint_shl_bits(r, 16, a, 128);
+    bigint_from_str(c, 16, "340282366920938463463374607431768211456");
+    return bigint_cmp(r, c) == 0 && bigint_bitlen(r) == 129;
+}
+
+fn test_bigint_factorial_25_vs_division() -> bool {
+    // 25! 算出来再一路除回去, 必须回到 1 —— 乘与除互为逆的交叉验证。
+    let a: ptr = alloc(128);
+    let t: ptr = alloc(128);
+    let q: ptr = alloc(128);
+    let one: ptr = alloc(64);
+    bigint_from_u64(a, 16, 1);
+    let i: u32 = 1;
+    while i <= 25 {
+        bigint_mul_small(t, 16, a, i);
+        bigint_copy(a, 16, t);
+        i = i + 1;
+    }
+    let j: u32 = 25;
+    while j > 0 {
+        bigint_divmod_small(q, 16, a, j);
+        bigint_copy(a, 16, q);
+        j = j - 1;
+    }
+    bigint_from_u64(one, 16, 1);
+    return bigint_cmp(a, one) == 0 && bi_dec_is(a, "1");
+}

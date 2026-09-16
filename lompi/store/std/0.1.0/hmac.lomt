@@ -1,0 +1,339 @@
+// std/hmac.lomt — HMAC (RFC 2104)
+//
+// 为什么需要它: 裸摘要是**无密钥**的 —— 谁都能改消息再重算一个。HMAC 把摘要变成
+// 带密钥的认证: 没有密钥就伪造不出 (消息, 标签) 对。会话 token、签名 API、
+// 口令派生的第一步 (PBKDF2) 都站在它上面。
+//
+// 为什么是三个函数而不是一个通用的: 语言**没有函数指针** —— 没法把"用哪个哈希"
+// 当参数传进来。所以这里是 hmac_sha1 / hmac_sha256 / hmac_sha512 三个独立入口,
+// 每个内部调对应的哈希。重复的是十二行样板, 换来的是不需要语言特性。
+//
+// 结构 (RFC 2104):
+//   K0 = 密钥 (太长就先哈希, 再补零到块长)
+//   内层 = H((K0 ^ ipad) || msg)      ipad = 0x36
+//   HMAC = H((K0 ^ opad) || 内层)     opad = 0x5c
+//
+// 校验向量 (RFC 4231 / RFC 2202): 密钥 20 个 0x0b, 消息 "Hi There" ->
+//   HMAC-SHA256 = b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+//   HMAC-SHA1   = b617318655057264e28bc0b6fb378c8ef146be00
+//   HMAC-SHA512 = 87aa7cdea5ef619d4ff0b4241a1d6cb0...
+//
+// 临时区: 每个函数都要一块调用方给的缓冲 (内部没有可分配的余地 —— 尤其 PBKDF2
+// 会把它调用上万次, 在内部 alloc 会直接把堆耗尽)。
+//
+// 命名: 公开 hmac_*, 内部 hm_*。自检 test_hmac_*。
+
+module hmac
+
+use "sha1.lomt"
+use "sha256.lomt"
+use "sha512.lomt"
+use "mem.lomt"
+
+pub const HM_BLK64: u32 = 64;
+pub const HM_BLK128: u32 = 128;
+pub const HM_IPAD: u32 = 54; // 0x36
+pub const HM_OPAD: u32 = 92; // 0x5c
+
+/// hmac_sha256 需要 [0..524): k0 64 + 块 64 + ctx 364 + 内层 32。
+pub fn hmac_sha256_scratch() -> u32 {
+    return 544;
+}
+
+/// hmac_sha1 需要 [0..564): k0 64 + 块 64 + ctx 416 + 内层 20。
+pub fn hmac_sha1_scratch() -> u32 {
+    return 576;
+}
+
+/// hmac_sha512 需要 [0..1172): k0 128 + 块 128 + ctx 852 + 内层 64。
+pub fn hmac_sha512_scratch() -> u32 {
+    return 1216;
+}
+
+/// 把密钥归约成块长的 K0 (太长先哈希, 不足补零)。out 必须已有 blk 字节。
+/// 缓冲加偏移 -> ptr (指针加整数在 Rust 路径上会报 E0369)。
+fn hm_at(b: ptr, off: u32) -> ptr {
+    return ((b as u64) + (off as u64)) as ptr;
+}
+
+fn hm_key64(k0: ptr, tmp: ptr, key: ptr, ko: u32, kn: u32, is_sha1: u32) {
+    mem_fill(k0, 0, HM_BLK64, 0);
+    if kn > HM_BLK64 {
+        let c: ptr = tmp;
+        let o: ptr = hm_at(tmp, 64);
+        if is_sha1 == 1 {
+            sha1(key, ko, kn, c, o);
+            mem_copy(k0, 0, c, 0, 20);
+        } else {
+            sha256(key, ko, kn, c, o);
+            mem_copy(k0, 0, c, 0, 32);
+        }
+    } else {
+        mem_copy(k0, 0, key, ko, kn);
+    }
+}
+
+pub fn hmac_sha256(key: ptr, ko: u32, kn: u32, msg: ptr, mo: u32, mn: u32, out: ptr, sc: ptr) {
+    let k0: ptr = sc;
+    let blk: ptr = hm_at(sc, 64);
+    let ctx: ptr = hm_at(sc, 128);
+    let inner: ptr = hm_at(sc, 492);
+    hm_key64(k0, hm_at(sc, 128), key, ko, kn, 0);
+    // 内层
+    let i: u32 = 0;
+    while i < HM_BLK64 {
+        store8(blk, i, (load8(k0, i) ^ HM_IPAD) as u8);
+        i = i + 1;
+    }
+    sha256_init(ctx);
+    sha256_update(ctx, blk, 0, HM_BLK64);
+    sha256_update(ctx, msg, mo, mn);
+    sha256_final(ctx, inner);
+    // 外层
+    i = 0;
+    while i < HM_BLK64 {
+        store8(blk, i, (load8(k0, i) ^ HM_OPAD) as u8);
+        i = i + 1;
+    }
+    sha256_init(ctx);
+    sha256_update(ctx, blk, 0, HM_BLK64);
+    sha256_update(ctx, inner, 0, 32);
+    sha256_final(ctx, out);
+}
+
+pub fn hmac_sha256_str(key: ptr, ko: u32, kn: u32, s: str, out: ptr, sc: ptr) {
+    hmac_sha256(key, ko, kn, str_ptr(s), 0, str_len(s), out, sc);
+}
+
+pub fn hmac_sha1(key: ptr, ko: u32, kn: u32, msg: ptr, mo: u32, mn: u32, out: ptr, sc: ptr) {
+    let k0: ptr = sc;
+    let blk: ptr = hm_at(sc, 64);
+    let ctx: ptr = hm_at(sc, 128);
+    let inner: ptr = hm_at(sc, 544);
+    hm_key64(k0, hm_at(sc, 128), key, ko, kn, 1);
+    let i: u32 = 0;
+    while i < HM_BLK64 {
+        store8(blk, i, (load8(k0, i) ^ HM_IPAD) as u8);
+        i = i + 1;
+    }
+    sha1_init(ctx);
+    sha1_update(ctx, blk, 0, HM_BLK64);
+    sha1_update(ctx, msg, mo, mn);
+    sha1_final(ctx, inner);
+    i = 0;
+    while i < HM_BLK64 {
+        store8(blk, i, (load8(k0, i) ^ HM_OPAD) as u8);
+        i = i + 1;
+    }
+    sha1_init(ctx);
+    sha1_update(ctx, blk, 0, HM_BLK64);
+    sha1_update(ctx, inner, 0, 20);
+    sha1_final(ctx, out);
+}
+
+pub fn hmac_sha1_str(key: ptr, ko: u32, kn: u32, s: str, out: ptr, sc: ptr) {
+    hmac_sha1(key, ko, kn, str_ptr(s), 0, str_len(s), out, sc);
+}
+
+pub fn hmac_sha512(key: ptr, ko: u32, kn: u32, msg: ptr, mo: u32, mn: u32, out: ptr, sc: ptr) {
+    let k0: ptr = sc;
+    let blk: ptr = hm_at(sc, 128);
+    let ctx: ptr = hm_at(sc, 256);
+    let inner: ptr = hm_at(sc, 1108);
+    mem_fill(k0, 0, HM_BLK128, 0);
+    if kn > HM_BLK128 {
+        sha512(key, ko, kn, blk, ctx);
+        mem_copy(k0, 0, blk, 0, 64);
+    } else {
+        mem_copy(k0, 0, key, ko, kn);
+    }
+    let i: u32 = 0;
+    while i < HM_BLK128 {
+        store8(blk, i, (load8(k0, i) ^ HM_IPAD) as u8);
+        i = i + 1;
+    }
+    sha512_init(ctx);
+    sha512_update(ctx, blk, 0, HM_BLK128);
+    sha512_update(ctx, msg, mo, mn);
+    sha512_final(ctx, inner);
+    i = 0;
+    while i < HM_BLK128 {
+        store8(blk, i, (load8(k0, i) ^ HM_OPAD) as u8);
+        i = i + 1;
+    }
+    sha512_init(ctx);
+    sha512_update(ctx, blk, 0, HM_BLK128);
+    sha512_update(ctx, inner, 0, 64);
+    sha512_final(ctx, out);
+}
+
+pub fn hmac_sha512_str(key: ptr, ko: u32, kn: u32, s: str, out: ptr, sc: ptr) {
+    hmac_sha512(key, ko, kn, str_ptr(s), 0, str_len(s), out, sc);
+}
+
+/// 摘要 -> 十六进制 (复用各哈希的转换: 这里重写一份小的, 免得再引一层)。
+pub fn hmac_hex(out: ptr, o: u32, digest: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let v: u32 = load8(digest, i);
+        store8(out, o + 2 * i, hm_hexch((v >> 4) & 15) as u8);
+        store8(out, o + 2 * i + 1, hm_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 2 * n;
+}
+
+fn hm_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// RFC 4231 的测试密钥: 20 个 0x0b。
+fn hm_key20(k: ptr) {
+    mem_fill(k, 0, 20, 11);
+}
+
+fn test_hmac_sha256_rfc4231_tc1() -> bool {
+    let k: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let hex: ptr = alloc(80);
+    hm_key20(k);
+    let s: str = "Hi There";
+    hmac_sha256_str(k, 0, 20, s, out, sc);
+    hmac_hex(hex, 0, out, 32);
+    let want: str = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_hmac_sha256_rfc4231_tc2() -> bool {
+    // 密钥短于块长: "Jefe", 消息 "what do ya want for nothing?"
+    let k: str = "Jefe";
+    let out: ptr = alloc(32);
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let hex: ptr = alloc(80);
+    let m: str = "what do ya want for nothing?";
+    hmac_sha256(str_ptr(k), 0, 4, str_ptr(m), 0, 28, out, sc);
+    hmac_hex(hex, 0, out, 32);
+    let want: str = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+    return mem_eq(hex, 0, str_ptr(want), 0, 64);
+}
+
+fn test_hmac_sha1_rfc2202_tc1() -> bool {
+    let k: ptr = alloc(32);
+    let out: ptr = alloc(20);
+    let sc: ptr = alloc(hmac_sha1_scratch());
+    let hex: ptr = alloc(80);
+    hm_key20(k);
+    let s: str = "Hi There";
+    hmac_sha1_str(k, 0, 20, s, out, sc);
+    hmac_hex(hex, 0, out, 20);
+    let want: str = "b617318655057264e28bc0b6fb378c8ef146be00";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_hmac_sha1_rfc2202_tc2() -> bool {
+    // "Jefe" / "what do ya want for nothing?" -> effcdf6ae5eb2fa2d27416d5f184df9c259a7c79
+    let k: str = "Jefe";
+    let out: ptr = alloc(20);
+    let sc: ptr = alloc(hmac_sha1_scratch());
+    let hex: ptr = alloc(80);
+    let m: str = "what do ya want for nothing?";
+    hmac_sha1(str_ptr(k), 0, 4, str_ptr(m), 0, 28, out, sc);
+    hmac_hex(hex, 0, out, 20);
+    let want: str = "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79";
+    return mem_eq(hex, 0, str_ptr(want), 0, 40);
+}
+
+fn test_hmac_sha512_rfc4231_tc1() -> bool {
+    let k: ptr = alloc(32);
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(hmac_sha512_scratch());
+    let hex: ptr = alloc(140);
+    hm_key20(k);
+    let s: str = "Hi There";
+    hmac_sha512_str(k, 0, 20, s, out, sc);
+    hmac_hex(hex, 0, out, 64);
+    let want: str = "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854";
+    return mem_eq(hex, 0, str_ptr(want), 0, 128);
+}
+
+fn test_hmac_sha512_rfc4231_tc2() -> bool {
+    let k: str = "Jefe";
+    let out: ptr = alloc(64);
+    let sc: ptr = alloc(hmac_sha512_scratch());
+    let hex: ptr = alloc(140);
+    let m: str = "what do ya want for nothing?";
+    hmac_sha512(str_ptr(k), 0, 4, str_ptr(m), 0, 28, out, sc);
+    hmac_hex(hex, 0, out, 64);
+    let want: str = "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737";
+    return mem_eq(hex, 0, str_ptr(want), 0, 128);
+}
+
+fn test_hmac_long_key_is_hashed() -> bool {
+    // 密钥长于块长时必须先哈希 —— 直接截断会给出另一个 (错的) 标签。
+    // RFC 4231 TC 6 用的是 131 字节的密钥; 这里只验"长密钥与它的哈希得到的密钥等价",
+    // 那正是 RFC 的这条规则。
+    let long: ptr = alloc(200);
+    let sc1: ptr = alloc(hmac_sha256_scratch());
+    let sc2: ptr = alloc(hmac_sha256_scratch());
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let h: ptr = alloc(32);
+    let hctx: ptr = alloc(SHA256_CTX);
+    mem_fill(long, 0, 131, 170);
+    sha256(long, 0, 131, h, hctx);
+    let m: str = "Test Using Larger Than Block-Size Key - Hash Key First";
+    hmac_sha256(long, 0, 131, str_ptr(m), 0, 54, a, sc1);
+    hmac_sha256(h, 0, 32, str_ptr(m), 0, 54, b, sc2);
+    return mem_eq(a, 0, b, 0, 32);
+
+}
+fn test_hmac_empty_message() -> bool {
+    // 空消息也是合法的, 而且标签不是全零 —— 全零说明内层没算。
+    let k: str = "key";
+    let out: ptr = alloc(32);
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let e: str = "";
+    hmac_sha256(str_ptr(k), 0, 3, str_ptr(e), 0, 0, out, sc);
+    let i: u32 = 0;
+    let nz: u32 = 0;
+    while i < 32 {
+        if load8(out, i) != 0 {
+            nz = 1;
+        }
+        i = i + 1;
+    }
+    return nz == 1;
+
+}
+fn test_hmac_different_keys_differ() -> bool {
+    let k1: str = "key1";
+    let k2: str = "key2";
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let m: str = "message";
+    hmac_sha256_str(str_ptr(k1), 0, 4, m, a, sc);
+    hmac_sha256_str(str_ptr(k2), 0, 4, m, b, sc);
+    return mem_eq(a, 0, b, 0, 32) == false;
+
+}
+fn test_hmac_message_offset_respected() -> bool {
+    let k: str = "key";
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let sc: ptr = alloc(hmac_sha256_scratch());
+    let d: ptr = alloc(64);
+    let m: str = "message";
+    mem_fill(d, 0, 8, 0);
+    mem_copy(d, 8, str_ptr(m), 0, 7);
+    hmac_sha256(str_ptr(k), 0, 3, str_ptr(m), 0, 7, a, sc);
+    hmac_sha256(str_ptr(k), 0, 3, d, 8, 7, b, sc);
+    return mem_eq(a, 0, b, 0, 32);
+
+}

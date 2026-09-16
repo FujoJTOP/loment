@@ -1,0 +1,361 @@
+// std/fenwick.lomt — 树状数组 / BIT (单点加 + 前缀和)
+//
+// 为什么需要它: "一边改一边问前缀和"是实时计数、排名、直方图累积、加权抽样的共同形状。
+// 朴素数组改一次 O(1) 但问一次 O(n), 前缀和数组问一次 O(1) 但改一次 O(n)。
+// 树状数组两头都是 O(log n) —— 它把"i 及其覆盖区间"编进下标的二进制里。
+//
+// 布局 (状态在调用方的缓冲里, 头部 8 字节):
+//   [0..4]  n      元素个数
+//   [4..8]  保留
+//   树数组: 偏移 8 起, 每个元素 **i64** (8 字节), 下标 1..n 有意义。
+//   下标 0 那格 (偏移 8) 是**空的** —— 换掉它是为了保住"i 的十进制下标 = 偏移/8"
+//   这条不用换算的对应关系, 8 个字节买一个不会算错的下标, 值。
+// 装 n 个元素要 8 + 8*(n+1) 字节 —— 用 fw_bytes。
+//
+// 元素是 **i64** 而不是 u32: 计数/累加很容易越过 42 亿, 而树状数组里每个格子存的是
+// 一段区间之和, 溢出会**静默**给出错误前缀和。i64 的上界对任何还在内存里的数组都够。
+//
+// fw_find_kth 要求所有位置非负 —— 它是"二分找第一个前缀和 >= k 的位置"。
+// 有负数时"前缀和"不单调, 二分就失去意义; 树状数组本身 (sum/range) 仍然正确。
+//
+// 复杂度: fw_add / fw_sum / fw_range / fw_find_kth 全是 O(log n); 额外空间 O(n)。
+//
+// 命名: 公开 fw_*, 内部 fwt_*。自检 test_fw_*。
+
+module fenwick
+
+use "mem.lomt"
+use "rand.lomt"
+
+/// 头部字节数。
+pub const FW_HDR: u32 = 8;
+
+/// 装 n 个元素要多少字节 (含下标 0 的留空格)。
+pub fn fw_bytes(n: u32) -> u32 {
+    return FW_HDR + 8 * (n + 1);
+}
+
+fn fwt_n(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+/// 元素 i (1-based) 的字节偏移。
+fn fwt_off(i: u32) -> u32 {
+    return FW_HDR + 8 * i;
+}
+
+fn fwt_at(ws: ptr, i: u32) -> i64 {
+    return mem_load64(ws, fwt_off(i)) as i64;
+}
+
+fn fwt_set(ws: ptr, i: u32, v: i64) {
+    mem_store64(ws, fwt_off(i), v as u64);
+}
+
+/// i 二进制里最低的那个 1 (i & -i)。用 `i ^ (i-1)` 表达, 不碰无符号取负。
+fn fwt_low(i: u32) -> u32 {
+    return i & (i ^ (i - 1));
+}
+
+/// 建树: 全部清零。
+pub fn fw_init(ws: ptr, n: u32) {
+    mem_store32(ws, 0, n);
+    mem_store32(ws, 4, 0);
+    let i: u32 = 0;
+    while i <= n {
+        fwt_set(ws, i, 0);
+        i = i + 1;
+    }
+}
+
+pub fn fw_size(ws: ptr) -> u32 {
+    return fwt_n(ws);
+}
+
+/// 在位置 i (1-based) 上加 delta。i 越界返回 false (不静默丢)。
+pub fn fw_add(ws: ptr, i: u32, delta: i64) -> bool {
+    let n: u32 = fwt_n(ws);
+    if i == 0 || i > n {
+        return false;
+    }
+    let x: u32 = i;
+    let go: u32 = 1;
+    while go == 1 {
+        if x > n {
+            go = 0;
+        } else {
+            fwt_set(ws, x, fwt_at(ws, x) + delta);
+            x = x + fwt_low(x);
+        }
+    }
+    return true;
+}
+
+/// 前缀和 a[1] + ... + a[i]。i 超过 n 按 n 算 (取到全部); i == 0 给 0。
+pub fn fw_sum(ws: ptr, i: u32) -> i64 {
+    let n: u32 = fwt_n(ws);
+    let x: u32 = i;
+    if x > n {
+        x = n;
+    }
+    let s: i64 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        if x == 0 {
+            go = 0;
+        } else {
+            s = s + fwt_at(ws, x);
+            x = x - fwt_low(x);
+        }
+    }
+    return s;
+}
+
+/// 区间和 a[l] + ... + a[r] (两端都含, 1-based)。l > r 给 0; l == 0 当 1 处理。
+pub fn fw_range(ws: ptr, l0: u32, r: u32) -> i64 {
+    let l: u32 = l0;
+    if l == 0 {
+        l = 1;
+    }
+    if l > r {
+        return 0;
+    }
+    let hi: i64 = fw_sum(ws, r);
+    let lo: i64 = 0;
+    if l > 1 {
+        lo = fw_sum(ws, l - 1);
+    }
+    return hi - lo;
+}
+
+/// 第一个前缀和 >= k 的位置 (1-based)。要求所有位置非负、k > 0。
+/// **返回 n+1 表示 k 超过了总和** —— 这是个哨兵, 不是错误。
+///
+/// 做法是二进制抬升: 从"不超过 n 的最大 2 的幂"开始试跳, 跳过去仍不足 k 就跳并减去
+/// 那一段。它等价于在树状数组上做二分, 但不用真的二分。
+/// k 用 i64 是为了跟元素同一量纲 —— 元素可以很大, 用 u32 的 k 就永远够不到大前缀和。
+pub fn fw_find_kth(ws: ptr, k: i64) -> u32 {
+    let n: u32 = fwt_n(ws);
+    if n == 0 || k <= 0 as i64 {
+        return 0;
+    }
+    let pw: u32 = 1;
+    while pw * 2 <= n {
+        pw = pw * 2;
+    }
+    let pos: u32 = 0;
+    let rem: i64 = k;
+    let go: u32 = 1;
+    while go == 1 {
+        if pw == 0 {
+            go = 0;
+        } else {
+            let nxt: u32 = pos + pw;
+            if nxt <= n {
+                let v: i64 = fwt_at(ws, nxt);
+                if v < rem {
+                    pos = nxt;
+                    rem = rem - v;
+                }
+            }
+            pw = pw / 2;
+        }
+    }
+    return pos + 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fw_init_all_zero() -> bool {
+    let ws: ptr = alloc(fw_bytes(8));
+    fw_init(ws, 8);
+    return fw_size(ws) == 8 && fw_sum(ws, 0) == 0 && fw_sum(ws, 8) == 0
+        && fw_range(ws, 1, 8) == 0;
+}
+
+fn test_fw_add_then_sum_basic() -> bool {
+    let ws: ptr = alloc(fw_bytes(5));
+    fw_init(ws, 5);
+    fw_add(ws, 1, 3);
+    fw_add(ws, 2, 5);
+    fw_add(ws, 5, 7);
+    return fw_sum(ws, 1) == 3 && fw_sum(ws, 2) == 8 && fw_sum(ws, 4) == 8
+        && fw_sum(ws, 5) == 15 && fw_range(ws, 2, 5) == 12 && fw_range(ws, 3, 4) == 0;
+}
+
+fn test_fw_matches_naive_prefix_sums() -> bool {
+    // 伪随机数据, **每一项**前缀和都跟朴素累加比一遍 —— 这是真值, 不是手算。
+    let n: u32 = 32;
+    let ws: ptr = alloc(fw_bytes(n));
+    let snap: ptr = alloc(8 * (n + 1));
+    fw_init(ws, n);
+    let st: u64 = rand_seed(2026);
+    let i: u32 = 1;
+    while i <= n {
+        let v: i64 = (rand_next(st) % 1000) as i64;
+        fw_add(ws, i, v);
+        mem_store64(snap, 8 * i, v as u64);
+        st = rand_next(st);
+        i = i + 1;
+    }
+    let bad: u32 = 0;
+    let run: i64 = 0;
+    let j: u32 = 1;
+    while j <= n {
+        run = run + (mem_load64(snap, 8 * j) as i64);
+        if fw_sum(ws, j) != run {
+            bad = 1;
+        }
+        j = j + 1;
+    }
+    return bad == 0 && fw_sum(ws, n) == run;
+}
+
+fn test_fw_range_matches_naive_all_pairs() -> bool {
+    // 16 个元素的所有 (l, r) 组合, 每个都跟朴素求和比 —— 136 个区间。
+    let n: u32 = 16;
+    let ws: ptr = alloc(fw_bytes(n));
+    let snap: ptr = alloc(8 * (n + 1));
+    fw_init(ws, n);
+    let st: u64 = rand_seed(77);
+    let i: u32 = 1;
+    while i <= n {
+        let v: i64 = (rand_next(st) % 50) as i64;
+        fw_add(ws, i, v);
+        mem_store64(snap, 8 * i, v as u64);
+        st = rand_next(st);
+        i = i + 1;
+    }
+    let bad: u32 = 0;
+    let l: u32 = 1;
+    while l <= n {
+        let r: u32 = l;
+        while r <= n {
+            let s: i64 = 0;
+            let k: u32 = l;
+            while k <= r {
+                s = s + (mem_load64(snap, 8 * k) as i64);
+                k = k + 1;
+            }
+            if fw_range(ws, l, r) != s {
+                bad = 1;
+            }
+            r = r + 1;
+        }
+        l = l + 1;
+    }
+    return bad == 0;
+}
+
+fn test_fw_range_edge_cases() -> bool {
+    let ws: ptr = alloc(fw_bytes(4));
+    fw_init(ws, 4);
+    fw_add(ws, 1, 10);
+    fw_add(ws, 2, 20);
+    fw_add(ws, 3, 30);
+    // 单点区间、l==0 当 1 处理、l > r 给 0、整体
+    return fw_range(ws, 2, 2) == 20 && fw_range(ws, 0, 2) == 30
+        && fw_range(ws, 3, 1) == 0 && fw_range(ws, 1, 3) == 60;
+}
+
+fn test_fw_add_out_of_range_refused() -> bool {
+    // 越界不能静默写坏别人内存。
+    let ws: ptr = alloc(fw_bytes(3));
+    fw_init(ws, 3);
+    return fw_add(ws, 0, 5) == false && fw_add(ws, 4, 5) == false
+        && fw_sum(ws, 3) == 0 && fw_add(ws, 3, 1) && fw_sum(ws, 3) == 1;
+}
+
+fn test_fw_find_kth_all_ones() -> bool {
+    // 每个位置 1 时, 前缀和 == 下标, 于是 find_kth(k) 必须正好是 k。
+    let ws: ptr = alloc(fw_bytes(8));
+    fw_init(ws, 8);
+    let i: u32 = 1;
+    while i <= 8 {
+        fw_add(ws, i, 1);
+        i = i + 1;
+    }
+    let ok: u32 = 1;
+    let k: i64 = 1;
+    while k <= 8 {
+        if fw_find_kth(ws, k) != (k as u32) {
+            ok = 0;
+        }
+        k = k + 1;
+    }
+    return ok == 1;
+}
+
+fn test_fw_find_kth_with_zeros() -> bool {
+    // 前缀和 0,0,5,5: k=1 与 k=5 都落在位置 3。
+    let ws: ptr = alloc(fw_bytes(4));
+    fw_init(ws, 4);
+    fw_add(ws, 3, 5);
+    return fw_find_kth(ws, 1) == 3 && fw_find_kth(ws, 5) == 3;
+}
+
+fn test_fw_find_kth_mixed_prefix() -> bool {
+    // 值 [2,3,1] -> 前缀 2,5,6。边界: k=2 落在 1, k=3 落在 2。
+    let ws: ptr = alloc(fw_bytes(3));
+    fw_init(ws, 3);
+    fw_add(ws, 1, 2);
+    fw_add(ws, 2, 3);
+    fw_add(ws, 3, 1);
+    return fw_find_kth(ws, 1) == 1 && fw_find_kth(ws, 2) == 1
+        && fw_find_kth(ws, 3) == 2 && fw_find_kth(ws, 5) == 2 && fw_find_kth(ws, 6) == 3;
+}
+
+fn test_fw_find_kth_beyond_total_is_n_plus_one() -> bool {
+    let ws: ptr = alloc(fw_bytes(4));
+    fw_init(ws, 4);
+    fw_add(ws, 1, 3);
+    fw_add(ws, 2, 3);
+    // 总和 6: k=7 超过总和 -> 哨兵 n+1 = 5; k=0 无意义给 0。
+    return fw_find_kth(ws, 7) == 5 && fw_find_kth(ws, 0) == 0 && fw_find_kth(ws, 6) == 2;
+}
+
+fn test_fw_large_i64_accumulation() -> bool {
+    // 每个元素 10^12 (用乘法拼出来, 不写超宽字面量), 1000 个 -> 10^15, 早已越过 u32。
+    let n: u32 = 1000;
+    let ws: ptr = alloc(fw_bytes(n));
+    fw_init(ws, n);
+    let e12: i64 = 1000000000000 as i64;
+    let i: u32 = 1;
+    while i <= n {
+        fw_add(ws, i, e12);
+        i = i + 1;
+    }
+    // 10..20 是 11 个元素; find_kth(500 个元素的和) 落在第 500 个位置
+    return fw_sum(ws, n) == e12 * 1000 && fw_range(ws, 10, 20) == e12 * 11
+        && fw_find_kth(ws, e12 * 500) == 500 && fw_find_kth(ws, 1) == 1;
+}
+
+fn test_fw_negative_delta() -> bool {
+    // 树状数组本身允许减 (find_kth 才要求非负)。
+    let ws: ptr = alloc(fw_bytes(4));
+    fw_init(ws, 4);
+    fw_add(ws, 1, 100);
+    fw_add(ws, 2, 100);
+    fw_add(ws, 1, 0 as i64 - 30);
+    return fw_sum(ws, 1) == 70 && fw_sum(ws, 4) == 170 && fw_range(ws, 1, 2) == 170;
+}
+
+fn test_fw_zero_delta_is_noop() -> bool {
+    let ws: ptr = alloc(fw_bytes(2));
+    fw_init(ws, 2);
+    fw_add(ws, 1, 5);
+    fw_add(ws, 1, 0);
+    return fw_sum(ws, 2) == 5;
+}
+
+fn test_fw_zero_size_is_inert() -> bool {
+    let ws: ptr = alloc(fw_bytes(0));
+    fw_init(ws, 0);
+    return fw_size(ws) == 0 && fw_sum(ws, 0) == 0 && fw_find_kth(ws, 1) == 0
+        && fw_add(ws, 1, 1) == false;
+}
+
+fn test_fw_bytes_layout() -> bool {
+    // 头部 8 + (n+1) 个 i64
+    return fw_bytes(0) == 16 && fw_bytes(1) == 24 && fw_bytes(8) == 80;
+}

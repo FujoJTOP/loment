@@ -1,0 +1,1434 @@
+// std/toml.lomt — TOML 读取 (游标式)
+//
+// 为什么还要一个配置文件格式: INI 没有嵌套也没有类型, JSON 没有注释也不能多行字符串,
+// 而"给人手写的配置"这两样恰恰最要紧。TOML 就是为了"人写起来舒服"设计的,
+// 代价是**它的语法比 JSON 复杂得多** —— 同一个值有四种字符串写法, 数组和行内表都能跨行,
+// 表还有 `[a.b]` 与 `[[a]]` 两种。这一层把这些都收掉, 给上面的调用方只剩一句
+// "按路径取值"。
+//
+// 取值只有一条入口: **`toml_get(path)`**。路径形如 `server.port`、`db.replicas[1].host`。
+// 返回的是**值在原文里的下标** (值不复制; 要字符串内容再调 toml_str)。
+//
+// 支持: 裸键与引号键、`[表]`、`[[表数组]]` (用 `[i]` 索引)、四种字符串
+// (基本/字面/多行基本/多行字面)、整数 (含 0x 0o 0b 与 `_` 分隔)、布尔、
+// 数组 (可跨行、可尾逗号、可嵌套)、行内表。
+//
+// **不支持 (诚实清单)**:
+//   - **点分键** (`a.b = 1` 写在表体里)。它和 `[a]` + `b = 1` 等价, 要支持得把
+//     "当前前缀"改成可增长的, 而收益只是少数文档的写法差异。
+//   - **日期时间的解释**: `2024-01-02T03:04:05Z` 当**原文**交出来 (`toml_raw`)。
+//     怎么解释是 `civil` 那层的事, 这一层不猜时区。
+//   - 数值的浮点解释: 同样给原文; 要 double 就接 `f64`。
+//   - 键的重复检测 (TOML 规范说是错误)。本层取**第一个**匹配 —— 读配置时
+//     "先写的那条生效"比"整个文件读不出来"更有用, 但这一点值得你知道。
+//
+// 命名: 公开 toml_*, 内部 t_*。自检 test_toml_*。
+
+module toml
+
+use "mem.lomt"
+
+pub const TOML_ERR: u32 = 4294967295;
+pub const TOML_NO: u32 = 4294967294;
+
+pub const TOML_STR: u32 = 0;
+pub const TOML_INT: u32 = 1;
+pub const TOML_BOOL: u32 = 2;
+pub const TOML_FLOAT: u32 = 3;
+pub const TOML_DATETIME: u32 = 4;
+pub const TOML_ARR: u32 = 5;
+pub const TOML_TABLE: u32 = 6;   // 行内表 `{ ... }`
+
+/// 路径里每一段名字的长度上限 (超过给 TOML_ERR, 不静默截断)。
+pub const TOML_MAX_KEY: u32 = 255;
+
+// ---------------------------------------------------------------- 基础扫描
+
+fn t_is_ws(c: u32) -> bool {
+    return c == 32 || c == 9;
+}
+
+fn t_line_end(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n && load8(d, so + i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 行内空白 (不含换行)。
+fn t_ws(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n && t_is_ws(load8(d, so + i)) {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 换行与空白都跳。
+fn t_ws_nl(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            i = i + 1;
+        } else {
+            return i;
+        }
+    }
+    return i;
+}
+
+/// 跳到下一个"有内容的行的开头": 跳过空行、注释行、以及行尾空白。
+fn t_next_line(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n {
+        let j: u32 = t_ws(d, so, n, i);
+        if j >= n {
+            return n;
+        }
+        let c: u32 = load8(d, so + j);
+        if c == 13 || c == 10 {
+            i = j + 1;
+        } else if c == 35 {
+            i = t_line_end(d, so, n, j) + 1;
+        } else {
+            return j;
+        }
+    }
+    return n;
+}
+
+/// 跳到一个字符串字面量之后 (i 在引号上)。四种写法都认。
+fn t_str_end(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let c: u32 = load8(d, so + i);
+    if c == 39 {
+        // ' 或 '''
+        if i + 2 < n && load8(d, so + i + 1) == 39 && load8(d, so + i + 2) == 39 {
+            let k: u32 = i + 3;
+            while k + 2 < n {
+                if load8(d, so + k) == 39 && load8(d, so + k + 1) == 39 && load8(d, so + k + 2) == 39 {
+                    return k + 3;
+                }
+                k = k + 1;
+            }
+            return TOML_ERR;
+        }
+        let k: u32 = i + 1;
+        while k < n {
+            if load8(d, so + k) == 10 {
+                return TOML_ERR; // 单行字面量不许跨行
+            }
+            if load8(d, so + k) == 39 {
+                return k + 1;
+            }
+            k = k + 1;
+        }
+        return TOML_ERR;
+    }
+    // "
+    if i + 2 < n && load8(d, so + i + 1) == 34 && load8(d, so + i + 2) == 34 {
+        let k: u32 = i + 3;
+        while k + 2 < n {
+            if load8(d, so + k) == 34 && load8(d, so + k + 1) == 34 && load8(d, so + k + 2) == 34 {
+                // 收尾三个引号之后**最多还能再跟两个** —— `""""` 是内容里一个 `"` 加结束符。
+                let e: u32 = k + 3;
+                let x: u32 = 0;
+                while x < 2 && e + x < n && load8(d, so + e + x) == 34 {
+                    x = x + 1;
+                }
+                return e + x;
+            }
+            if load8(d, so + k) == 92 {
+                k = k + 2;
+            } else {
+                k = k + 1;
+            }
+        }
+        return TOML_ERR;
+    }
+    let k2: u32 = i + 1;
+    while k2 < n {
+        let b: u32 = load8(d, so + k2);
+        if b == 92 {
+            k2 = k2 + 2;
+        } else if b == 34 {
+            return k2 + 1;
+        } else if b == 10 {
+            return TOML_ERR; // 单行基本串不许跨行
+        } else {
+            k2 = k2 + 1;
+        }
+    }
+    return TOML_ERR;
+}
+
+/// 从 open 处的括号走到匹配的 close 之后; 字符串里的括号不算。多行也可以。
+fn t_container_end(d: ptr, so: u32, n: u32, i: u32, open: u32, close: u32) -> u32 {
+    if load8(d, so + i) != open {
+        return TOML_ERR;
+    }
+    let depth: u32 = 0;
+    let k: u32 = i;
+    while k < n {
+        let c: u32 = load8(d, so + k);
+        if c == 34 || c == 39 {
+            let e: u32 = t_str_end(d, so, n, k);
+            if e == TOML_ERR {
+                return TOML_ERR;
+            }
+            k = e;
+        } else if c == open {
+            depth = depth + 1;
+            k = k + 1;
+        } else if c == close {
+            depth = depth - 1;
+            if depth == 0 {
+                return k + 1;
+            }
+            k = k + 1;
+        } else if c == 35 {
+            k = t_line_end(d, so, n, k) + 1;
+        } else {
+            k = k + 1;
+        }
+    }
+    return TOML_ERR;
+}
+
+/// 容器里一个**标量**到哪结束: `,` `]` `}` `#` 或换行。
+/// 顶层用行尾是因为一行一个键值; 容器里不行 —— `[1, 2, 3]` 整行都是值,
+/// 走到行尾会把后面所有元素一起吞掉 (这是数组相关测试集体失败的那个根因)。
+fn t_scalar_end(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n {
+        let c: u32 = load8(d, so + i);
+        if c == 44 || c == 93 || c == 125 || c == 35 || c == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 跳过一个值 (i 在值的第一个字节上), 返回之后的位置。
+pub fn toml_skip_value(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    return t_skip_v(d, so, n, i0, 0);
+}
+
+/// `in_container` = 1 时标量按容器规则结束 (见 t_scalar_end)。
+fn t_skip_v(d: ptr, so: u32, n: u32, i0: u32, in_container: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, i0);
+    if i >= n {
+        return TOML_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 34 || c == 39 {
+        return t_str_end(d, so, n, i);
+    }
+    if c == 91 {
+        return t_container_end(d, so, n, i, 91, 93);
+    }
+    if c == 123 {
+        return t_container_end(d, so, n, i, 123, 125);
+    }
+    if in_container == 1 {
+        return t_scalar_end(d, so, n, i);
+    }
+    return t_line_end(d, so, n, i);
+}
+
+// ---------------------------------------------------------------- 类型判定
+
+fn t_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 值属于哪一类。i 必须在值的第一个字节上 (前面先跳过空白)。
+pub fn toml_type_at(d: ptr, so: u32, n: u32, i0: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, i0);
+    if i >= n {
+        return TOML_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 34 || c == 39 {
+        return TOML_STR;
+    }
+    if c == 91 {
+        return TOML_ARR;
+    }
+    if c == 123 {
+        return TOML_TABLE;
+    }
+    if c == 116 || c == 102 {
+        return TOML_BOOL; // true / false
+    }
+    // 日期时间长得像数字, 先用"有没有 '-' 或 ':'"分开
+    let e: u32 = t_line_end(d, so, n, i);
+    let k: u32 = i;
+    let colon: u32 = 0;
+    let dash: u32 = 0;
+    while k < e {
+        let b: u32 = load8(d, so + k);
+        if b == 58 {
+            colon = 1;
+        }
+        if b == 45 && k > i {
+            dash = 1;
+        }
+        k = k + 1;
+    }
+    if colon == 1 || dash == 1 {
+        return TOML_DATETIME;
+    }
+    if c == 43 || c == 45 || t_is_digit(c) {
+        // 有 '.' 或 'e'/'E' 就是浮点 (但要小心 0x 十六进制里没有 e 以外的情况)
+        if c == 48 && i + 1 < n && (load8(d, so + i + 1) == 120 || load8(d, so + i + 1) == 111 || load8(d, so + i + 1) == 98) {
+            return TOML_INT; // 0x / 0o / 0b
+        }
+        k = i;
+        while k < e {
+            let b: u32 = load8(d, so + k);
+            if b == 46 || b == 101 || b == 69 {
+                return TOML_FLOAT;
+            }
+            k = k + 1;
+        }
+        return TOML_INT;
+    }
+    return TOML_ERR;
+}
+
+// ---------------------------------------------------------------- 键
+
+fn t_bare_key_char(c: u32) -> bool {
+    if c >= 65 && c <= 90 {
+        return true;
+    }
+    if c >= 97 && c <= 122 {
+        return true;
+    }
+    if t_is_digit(c) {
+        return true;
+    }
+    return c == 95 || c == 45; // _ -
+}
+
+/// 读一个键写进 out (解码后), 返回写出的长度; i 处的键前面可以有空白。
+/// 裸键或引号键都认。
+fn t_read_key(d: ptr, so: u32, n: u32, i0: u32, out: ptr) -> u32 {
+    let i: u32 = t_ws(d, so, n, i0);
+    if i >= n {
+        return TOML_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 34 || c == 39 {
+        // 键用引号包着: 内容原样, 不做转义 (配置里的键几乎都是路径, 转义只会添乱)
+        let e: u32 = t_str_end(d, so, n, i);
+        if e == TOML_ERR {
+            return TOML_ERR;
+        }
+        let body: u32 = e - i - 2;
+        if body > TOML_MAX_KEY {
+            return TOML_ERR;
+        }
+        mem_copy(out, 0, d, so + i + 1, body);
+        return body;
+    }
+    let k: u32 = i;
+    while k < n && t_bare_key_char(load8(d, so + k)) {
+        k = k + 1;
+    }
+    if k == i {
+        return TOML_ERR;
+    }
+    if k - i > TOML_MAX_KEY {
+        return TOML_ERR;
+    }
+    mem_copy(out, 0, d, so + i, k - i);
+    return k - i;
+}
+
+/// 键这个**记号**到哪结束 (含引号)。`t_find_eq` 要从这里往后找 '=' ——
+/// 用"内容长度"去加的话, 带引号的键会把收尾引号当成下一个字符串的开头。
+fn t_after_key(d: ptr, so: u32, n: u32, j: u32) -> u32 {
+    let c: u32 = load8(d, so + j);
+    if c == 34 || c == 39 {
+        return t_str_end(d, so, n, j);
+    }
+    let k: u32 = j;
+    while k < n && t_bare_key_char(load8(d, so + k)) {
+        k = k + 1;
+    }
+    return k;
+}
+
+/// 在一行里找 '=' (字符串外的那个), 返回它的位置; 没有给 TOML_NO。
+fn t_find_eq(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    let e: u32 = t_line_end(d, so, n, i);
+    let k: u32 = i;
+    while k < e {
+        let c: u32 = load8(d, so + k);
+        if c == 34 || c == 39 {
+            let s: u32 = t_str_end(d, so, n, k);
+            if s == TOML_ERR || s > e {
+                return TOML_NO;
+            }
+            k = s;
+        } else if c == 61 {
+            return k;
+        } else {
+            k = k + 1;
+        }
+    }
+    return TOML_NO;
+}
+
+// ---------------------------------------------------------------- 表头
+
+/// 读一个表头的路径写进 out (点连起来, 去掉 `[` `]` 与空白), 返回长度。
+/// `arr_out` 收 0/1: 1 表示这是 `[[表数组]]`。语法坏给 TOML_ERR。
+fn t_read_header(d: ptr, so: u32, n: u32, i: u32, out: ptr, arr_out: ptr) -> u32 {
+    mem_store32(arr_out, 0, 0);
+    if load8(d, so + i) != 91 {
+        return TOML_ERR;
+    }
+    let array: u32 = 0;
+    let b: u32 = i + 1;
+    if b < n && load8(d, so + b) == 91 {
+        array = 1;
+        b = b + 1;
+    }
+    // 收尾的 ']' (表数组是两个)
+    let e: u32 = t_line_end(d, so, n, b);
+    let s: u32 = e;
+    while s > b && t_is_ws(load8(d, so + s - 1)) {
+        s = s - 1;
+    }
+    if s <= b || load8(d, so + s - 1) != 93 {
+        return TOML_ERR;
+    }
+    s = s - 1;
+    if array == 1 {
+        if s <= b || load8(d, so + s - 1) != 93 {
+            return TOML_ERR;
+        }
+        s = s - 1;
+    }
+    while s > b && t_is_ws(load8(d, so + s - 1)) {
+        s = s - 1;
+    }
+    let w: u32 = 0;
+    let k: u32 = b;
+    while k < s {
+        let c: u32 = load8(d, so + k);
+        if t_is_ws(c) == false {
+            if w >= TOML_MAX_KEY {
+                return TOML_ERR;
+            }
+            store8(out, w, c as u8);
+            w = w + 1;
+        }
+        k = k + 1;
+    }
+    mem_store32(arr_out, 0, array);
+    return w;
+}
+
+/// 把 `src[0..srclen] + "." + key` 拼进 dst, 返回长度。srclen 为 0 就只是 key。
+fn t_build_expected(dst: ptr, src: ptr, srclen: u32, kp: ptr, klen: u32) -> u32 {
+    let w: u32 = 0;
+    if srclen > 0 {
+        if srclen + 1 + klen > TOML_MAX_KEY {
+            return TOML_ERR;
+        }
+        mem_copy(dst, 0, src, 0, srclen);
+        w = srclen;
+        store8(dst, w, 46 as u8); // '.'
+        w = w + 1;
+    } else if klen > TOML_MAX_KEY {
+        return TOML_ERR;
+    }
+    mem_copy(dst, w, kp, 0, klen);
+    return w + klen;
+}
+
+// ---------------------------------------------------------------- 表区
+
+/// 表体的结束位置: 从 scan_from 起找下一个表头; 没有就是 n。
+/// 走的是"键 = 值"然后跳过整个值, 所以跨行的数组不会被误判成表头。
+fn t_region_end(d: ptr, so: u32, n: u32, scan_from: u32) -> u32 {
+    let i: u32 = scan_from;
+    while i < n {
+        let j: u32 = t_next_line(d, so, n, i);
+        if j >= n {
+            return n;
+        }
+        if load8(d, so + j) == 91 {
+            return j; // 下一个表头 = 本表体到头
+        }
+        let eq: u32 = t_find_eq(d, so, n, j);
+        if eq == TOML_NO {
+            i = t_line_end(d, so, n, j) + 1;
+        } else {
+            let v: u32 = toml_skip_value(d, so, n, eq + 1);
+            if v == TOML_ERR {
+                i = t_line_end(d, so, n, j) + 1;
+            } else {
+                i = t_line_end(d, so, n, v) + 1;
+            }
+        }
+    }
+    return n;
+}
+
+/// 在 [hdr_from, region_end) 里找第 occ 个路径等于 want 的表头, 返回它的位置; 没有给 TOML_NO。
+/// hdr_from 是本区里"第一个可能出现的表头"的位置。
+fn t_find_header(d: ptr, so: u32, n: u32, hdr_from: u32, region_end: u32, want: ptr, wantlen: u32, hbuf: ptr, occ: u32) -> u32 {
+    let left: u32 = occ;
+    let arr: ptr = ((hbuf as u64) + TOML_MAX_KEY as u64) as ptr;
+    let i: u32 = hdr_from;
+    while i < region_end {
+        let j: u32 = t_next_line(d, so, n, i);
+        if j >= region_end {
+            return TOML_NO;
+        }
+        if load8(d, so + j) == 91 {
+            let hl: u32 = t_read_header(d, so, n, j, hbuf, arr);
+            if hl != TOML_ERR && hl == wantlen && mem_eq(hbuf, 0, want, 0, wantlen) {
+                if left == 0 {
+                    return j;
+                }
+                left = left - 1;
+            }
+            i = t_line_end(d, so, n, j) + 1;
+        } else {
+            let eq: u32 = t_find_eq(d, so, n, j);
+            if eq == TOML_NO {
+                i = t_line_end(d, so, n, j) + 1;
+            } else {
+                let v: u32 = toml_skip_value(d, so, n, eq + 1);
+                if v == TOML_ERR {
+                    i = t_line_end(d, so, n, j) + 1;
+                } else {
+                    i = t_line_end(d, so, n, v) + 1;
+                }
+            }
+        }
+    }
+    return TOML_NO;
+}
+
+/// 在表体 [body_from, region_end) 里找键等于 kp 的那一行的值, 返回值的下标; 没有给 TOML_NO。
+/// `cont` = 1 表示当前搜索范围是**行内表的花括号里面**: 成员之间用 `,` 分,
+/// 走到 `}` 到头 —— 而不是"一行一个键值"。用行模式搜花括号里的话, 第一个成员
+/// 的值一跳到行尾就把后面的成员全跳过去了。
+fn t_find_kv(d: ptr, so: u32, n: u32, body_from: u32, region_end: u32, kp: ptr, kn: u32, kbuf: ptr, cont: u32) -> u32 {
+    let i: u32 = body_from;
+    while i < region_end {
+        let j: u32 = 0;
+        if cont == 1 {
+            j = t_ws_nl(d, so, n, i);
+            if j >= region_end || load8(d, so + j) == 125 {
+                return TOML_NO;
+            }
+        } else {
+            j = t_next_line(d, so, n, i);
+            if j >= region_end {
+                return TOML_NO;
+            }
+            if load8(d, so + j) == 91 {
+                return TOML_NO; // 走到下一个表头了
+            }
+        }
+        let kl: u32 = t_read_key(d, so, n, j, kbuf);
+        if kl == TOML_ERR {
+            if cont == 1 {
+                return TOML_NO;
+            }
+            i = t_line_end(d, so, n, j) + 1;
+        } else {
+            let eq: u32 = t_find_eq(d, so, n, t_after_key(d, so, n, j));
+            if eq == TOML_NO {
+                if cont == 1 {
+                    return TOML_NO;
+                }
+                i = t_line_end(d, so, n, j) + 1;
+            } else if kl == kn && mem_eq(kbuf, 0, kp, 0, kn) {
+                return t_ws(d, so, n, eq + 1);
+            } else {
+                let v: u32 = t_skip_v(d, so, n, eq + 1, cont);
+                if v == TOML_ERR {
+                    if cont == 1 {
+                        return TOML_NO;
+                    }
+                    i = t_line_end(d, so, n, j) + 1;
+                } else if cont == 1 {
+                    let k: u32 = t_ws_nl(d, so, n, v);
+                    if k < region_end && load8(d, so + k) == 44 {
+                        i = k + 1;
+                    } else {
+                        return TOML_NO;
+                    }
+                } else {
+                    i = t_line_end(d, so, n, v) + 1;
+                }
+            }
+        }
+    }
+    return TOML_NO;
+}
+
+// ---------------------------------------------------------------- 路径取值
+
+fn t_digit_val(c: u32) -> u32 {
+    return c - 48;
+}
+
+/// 按路径取值, 返回值的下标; 找不到给 TOML_NO, 语法坏给 TOML_ERR。
+///
+/// 路径语法: `a.b.c` 走表与行内表, `a[0]` 走数组 (含 `[[表数组]]` 的第 0 项),
+/// 所以 `db.replicas[1].host` 是合法的。
+///
+/// 临时区: `sc` 至少 3 * TOML_MAX_KEY —— 内部要放"当前表头前缀"和两个键。
+pub fn toml_get(d: ptr, so: u32, n: u32, path: str, sc: ptr) -> u32 {
+    return toml_get_ptr(d, so, n, str_ptr(path), str_len(path), sc);
+}
+
+/// 路径的**写法**对不对 (与"文档里有没有"无关)。
+/// 先查一遍再走, 是为了让 TOML_ERR / TOML_NO 的分工干净:
+/// 路径写错 -> 不管你查哪份文档都是 ERR, 不会因为"第一个键恰好没找到"就变成 NO。
+fn t_path_ok(pp: ptr, plen: u32) -> bool {
+    if plen == 0 {
+        return true; // 空路径 = 根, 合法 (但根不是一个"值")
+    }
+    let i: u32 = 0;
+    while i < plen {
+        if load8(pp, i) == 34 || load8(pp, i) == 39 {
+            let q: u32 = load8(pp, i);
+            i = i + 1;
+            let st: u32 = i;
+            while i < plen && load8(pp, i) != q {
+                i = i + 1;
+            }
+            if i >= plen || i == st {
+                return false; // 引号没闭合, 或空名字
+            }
+            i = i + 1;
+        } else {
+            let st2: u32 = i;
+            while i < plen && load8(pp, i) != 46 && load8(pp, i) != 91 {
+                i = i + 1;
+            }
+            if i == st2 {
+                return false; // 空段 (比如 a..b 或开头就是 '.')
+            }
+        }
+        while i < plen && load8(pp, i) == 91 {
+            i = i + 1;
+            let st3: u32 = i;
+            while i < plen && t_is_digit(load8(pp, i)) {
+                i = i + 1;
+            }
+            if i == st3 || i >= plen || load8(pp, i) != 93 {
+                return false; // 下标必须是十进制数字
+            }
+            i = i + 1;
+        }
+        if i < plen {
+            if load8(pp, i) != 46 {
+                return false;
+            }
+            i = i + 1;
+            if i >= plen {
+                return false; // 末尾多余的 '.'
+            }
+        }
+    }
+    return true;
+}
+
+pub fn toml_get_ptr(d: ptr, so: u32, n: u32, pp: ptr, plen: u32, sc: ptr) -> u32 {
+    if t_path_ok(pp, plen) == false {
+        return TOML_ERR;
+    }
+    // 临时区分四块 (每块 TOML_MAX_KEY 字节):
+    //   [0] 当前表头前缀   [1] 期望的表头路径   [2] 读到的表头   [3] 本段的键
+    // 四块**必须分开**: 拿同一块既当"期望"又当"读到"的话, 那个比较就永远成立。
+    let ebuf: ptr = ((sc as u64) + TOML_MAX_KEY as u64) as ptr;
+    let hbuf: ptr = ((sc as u64) + (2 * TOML_MAX_KEY) as u64) as ptr;
+    let kbuf: ptr = ((sc as u64) + (3 * TOML_MAX_KEY) as u64) as ptr;
+
+    let body: u32 = 0;
+    let hdr: u32 = 0;
+    let rend: u32 = t_region_end(d, so, n, hdr);
+    let pfxlen: u32 = 0;
+    let pi: u32 = 0;
+    let val: u32 = TOML_NO;
+    let have: u32 = 0;
+    let cont: u32 = 0; // 1 = 已经钻进行内表的花括号里
+
+    while pi < plen {
+        // 段名: 到 '.' 或 '[' 为止。**带引号的段要一直读到收尾引号** ——
+        // `"x.y"` 这种键名里本来就有 '.', 按 '.' 切会把它切成两半。
+        let a: u32 = pi;
+        let nlen: u32 = 0;
+        if load8(pp, pi) == 34 || load8(pp, pi) == 39 {
+            let q: u32 = load8(pp, pi);
+            pi = pi + 1;
+            while pi < plen && load8(pp, pi) != q {
+                pi = pi + 1;
+            }
+            if pi >= plen {
+                return TOML_ERR; // 引号没闭合
+            }
+            pi = pi + 1;
+            nlen = pi - a;
+        } else {
+            while pi < plen && load8(pp, pi) != 46 && load8(pp, pi) != 91 {
+                pi = pi + 1;
+            }
+            nlen = pi - a;
+        }
+        if nlen == 0 || nlen > TOML_MAX_KEY {
+            return TOML_ERR;
+        }
+        let segp: u32 = a;
+        let segl: u32 = nlen;
+        if load8(pp, a) == 34 || load8(pp, a) == 39 {
+            segp = a + 1;
+            segl = nlen - 2;
+        }
+        mem_copy(kbuf, 0, pp, segp, segl);
+
+        // 紧跟的 [n]
+        let occ: u32 = 0;
+        let has_idx: u32 = 0;
+        if pi < plen && load8(pp, pi) == 91 {
+            pi = pi + 1;
+            let num: u32 = 0;
+            let dg: u32 = 0;
+            while pi < plen && t_is_digit(load8(pp, pi)) {
+                num = num * 10 + t_digit_val(load8(pp, pi));
+                dg = 1;
+                pi = pi + 1;
+            }
+            if dg == 0 || pi >= plen || load8(pp, pi) != 93 {
+                return TOML_ERR;
+            }
+            pi = pi + 1;
+            occ = num;
+            has_idx = 1;
+        }
+
+        let v: u32 = t_find_kv(d, so, n, body, rend, kbuf, segl, hbuf, cont);
+        if v != TOML_NO {
+            val = v;
+            have = 1;
+            // 值上的索引: a[0][1] 这样的可以连着来
+            if has_idx == 1 {
+                val = t_index_arr(d, so, n, val, occ);
+                have = 1;
+                while pi < plen && load8(pp, pi) == 91 {
+                    pi = pi + 1;
+                    let num2: u32 = 0;
+                    let dg2: u32 = 0;
+                    while pi < plen && t_is_digit(load8(pp, pi)) {
+                        num2 = num2 * 10 + t_digit_val(load8(pp, pi));
+                        dg2 = 1;
+                        pi = pi + 1;
+                    }
+                    if dg2 == 0 || pi >= plen || load8(pp, pi) != 93 {
+                        return TOML_ERR;
+                    }
+                    pi = pi + 1;
+                    val = t_index_arr(d, so, n, val, num2);
+                }
+            }
+        } else {
+            // 子表: `[前缀.名字]` 或 `[[前缀.名字]]` (occ 选第几个)
+            let elen: u32 = t_build_expected(ebuf, sc, pfxlen, kbuf, segl);
+            if elen == TOML_ERR {
+                return TOML_ERR;
+            }
+            // 表头要搜到**文件末尾**, 不是搜到本区尽头: 子表可以写在很后面,
+            // 而"它到底是不是本表的子表"由**前缀比对**保证 (要匹配 `前缀.名字`),
+            // 所以把范围放大不会张冠李戴。
+            let h: u32 = t_find_header(d, so, n, hdr, n, ebuf, elen, hbuf, occ);
+            if h == TOML_NO {
+                return TOML_NO;
+            }
+            body = t_line_end(d, so, n, h) + 1;
+            hdr = body;
+            rend = t_region_end(d, so, n, hdr);
+            mem_copy(sc, 0, ebuf, 0, elen);
+            pfxlen = elen;
+            val = body;
+            have = 0;
+        }
+
+        if val == TOML_NO || val == TOML_ERR {
+            return val;
+        }
+        if pi < plen {
+            if load8(pp, pi) != 46 {
+                return TOML_ERR;
+            }
+            pi = pi + 1;
+            if pi >= plen {
+                return TOML_ERR; // 末尾多余的 '.'
+            }
+            // 后面还有段, 那这个值必须是个**能往里走的容器**。
+            // 行内表 `{ x = 1 }` 就把搜索范围缩进到那对花括号之间;
+            // 别的类型 (标量、数组) 没有"下一段"可走, 直接说没有。
+            if have == 1 {
+                let vt: u32 = toml_type_at(d, so, n, val);
+                if vt == TOML_TABLE {
+                    let ce: u32 = t_container_end(d, so, n, val, 123, 125);
+                    if ce == TOML_ERR {
+                        return TOML_ERR;
+                    }
+                    body = val + 1;
+                    rend = ce - 1;
+                    hdr = rend; // 花括号里没有表头
+                    have = 0;
+                    cont = 1;
+                } else {
+                    return TOML_NO;
+                }
+            }
+        }
+    }
+    if have == 0 {
+        return TOML_NO; // 路径停在"表"上 —— 表本身不是值
+    }
+    return val;
+}
+
+/// 数组第 i 个元素的值的下标 —— 元素之间用逗号分, 可以跨行、可以尾逗号。
+fn t_index_arr(d: ptr, so: u32, n: u32, arr: u32, idx: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, arr);
+    if i >= n || load8(d, so + i) != 91 {
+        return TOML_ERR;
+    }
+    i = t_ws_nl(d, so, n, i + 1);
+    let c: u32 = 0;
+    while i < n && c < idx {
+        let e: u32 = t_skip_v(d, so, n, i, 1);
+        if e == TOML_ERR {
+            return TOML_ERR;
+        }
+        let k: u32 = t_ws_nl(d, so, n, e);
+        if k >= n || load8(d, so + k) != 44 {
+            return TOML_NO; // 不够这么多个
+        }
+        i = t_ws_nl(d, so, n, k + 1);
+        if i < n && load8(d, so + i) == 93 {
+            return TOML_NO; // 尾逗号后到头
+        }
+        c = c + 1;
+    }
+    if i < n && load8(d, so + i) == 93 {
+        return TOML_NO;
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------- 取值
+
+/// 数组长度。
+pub fn toml_arr_len(d: ptr, so: u32, n: u32, arr: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, arr);
+    if i >= n || load8(d, so + i) != 91 {
+        return TOML_ERR;
+    }
+    i = t_ws_nl(d, so, n, i + 1);
+    if i < n && load8(d, so + i) == 93 {
+        return 0;
+    }
+    let c: u32 = 0;
+    while i < n {
+        let e: u32 = t_skip_v(d, so, n, i, 1);
+        if e == TOML_ERR {
+            return TOML_ERR;
+        }
+        c = c + 1;
+        let k: u32 = t_ws_nl(d, so, n, e);
+        if k >= n {
+            return TOML_ERR;
+        }
+        if load8(d, so + k) == 93 {
+            return c;
+        }
+        if load8(d, so + k) != 44 {
+            return TOML_ERR;
+        }
+        i = t_ws_nl(d, so, n, k + 1);
+        if i < n && load8(d, so + i) == 93 {
+            return c; // 尾逗号
+        }
+    }
+    return TOML_ERR;
+}
+
+pub fn toml_arr_at(d: ptr, so: u32, n: u32, arr: u32, idx: u32) -> u32 {
+    return t_index_arr(d, so, n, arr, idx);
+}
+
+/// 字符串值的内容 (转义解开)。多行基本串的换行保留, 行尾反斜杠续行也处理。
+pub fn toml_str(d: ptr, so: u32, n: u32, i0: u32, out: ptr, oo: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, i0);
+    if i >= n {
+        return TOML_ERR;
+    }
+    let c: u32 = load8(d, so + i);
+    if c == 39 {
+        // 字面量串: 原文照抄, **不解释任何转义** —— 这是 ' 存在的全部意义
+        let ml: u32 = 0;
+        let b: u32 = 0;
+        let e: u32 = t_str_end(d, so, n, i);
+        if e == TOML_ERR {
+            return TOML_ERR;
+        }
+        if i + 2 < n && load8(d, so + i + 1) == 39 && load8(d, so + i + 2) == 39 {
+            ml = 1;
+            b = i + 3;
+            e = e - 3;
+        } else {
+            b = i + 1;
+            e = e - 1;
+        }
+        if ml == 1 && b < e && load8(d, so + b) == 10 {
+            b = b + 1; // 多行串紧跟换行时, 那个换行不算内容
+        }
+        mem_copy(out, oo, d, so + b, e - b);
+        return e - b;
+    }
+    if c != 34 {
+        return TOML_ERR;
+    }
+    let ml2: u32 = 0;
+    let mut_body: u32 = 0;
+    let mut_stop: u32 = 0;
+    if i + 2 < n && load8(d, so + i + 1) == 34 && load8(d, so + i + 2) == 34 {
+        ml2 = 1;
+        mut_body = i + 3;
+        mut_stop = t_str_end(d, so, n, i) - 3;
+    } else {
+        mut_body = i + 1;
+        mut_stop = t_str_end(d, so, n, i) - 1;
+    }
+    if ml2 == 1 && mut_body < mut_stop && load8(d, so + mut_body) == 10 {
+        mut_body = mut_body + 1;
+    }
+    let mut_w: u32 = oo;
+    let k: u32 = mut_body;
+    while k < mut_stop {
+        let b: u32 = load8(d, so + k);
+        if b != 92 {
+            store8(out, mut_w, b as u8);
+            mut_w = mut_w + 1;
+            k = k + 1;
+        } else {
+            if k + 1 >= mut_stop {
+                return TOML_ERR;
+            }
+            let e2: u32 = load8(d, so + k + 1);
+            if e2 == 10 || e2 == 13 {
+                // **续行**: 多行串里行尾的反斜杠把换行**和下一行的前导空白**一起吃掉。
+                let mut_j: u32 = k + 2;
+                let resume: u32 = mut_stop;
+                let done: u32 = 0;
+                while mut_j < mut_stop && done == 0 {
+                    let wc: u32 = load8(d, so + mut_j);
+                    if wc == 32 || wc == 9 || wc == 10 || wc == 13 {
+                        mut_j = mut_j + 1;
+                    } else {
+                        resume = mut_j; // 撞上非空白: 从那里接着当内容
+                        done = 1;
+                    }
+                }
+                k = resume;
+            } else {
+                let r: u32 = t_unesc(e2);
+                if r == 4294967295 {
+                    // \uXXXX / \UXXXXXXXX
+                    if e2 == 117 || e2 == 85 {
+                        let need: u32 = 8;
+                        if e2 == 117 {
+                            need = 4; // \u 四位, \U 八位
+                        }
+                        let cp: u32 = t_hex_cp(d, so, n, k + 2, need);
+                        if cp == TOML_ERR {
+                            return TOML_ERR;
+                        }
+                        mut_w = mut_w + put_utf8(out, mut_w, cp);
+                        k = k + 2 + need;
+                    } else {
+                        return TOML_ERR;
+                    }
+                } else {
+                    store8(out, mut_w, r as u8);
+                    mut_w = mut_w + 1;
+                    k = k + 2;
+                }
+            }
+        }
+    }
+    return mut_w - oo;
+}
+
+fn t_unesc(e: u32) -> u32 {
+    if e == 98 {
+        return 8; // \b
+    }
+    if e == 116 {
+        return 9; // \t
+    }
+    if e == 110 {
+        return 10; // \n
+    }
+    if e == 102 {
+        return 12; // \f
+    }
+    if e == 114 {
+        return 13; // \r
+    }
+    if e == 34 {
+        return 34; // \"
+    }
+    if e == 92 {
+        return 92; // \\
+    }
+    return 4294967295;
+}
+
+fn t_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 4294967295;
+}
+
+fn t_hex_cp(d: ptr, so: u32, n: u32, i: u32, cnt: u32) -> u32 {
+    if i + cnt > n {
+        return TOML_ERR;
+    }
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < cnt {
+        let h: u32 = t_hexval(load8(d, so + i + k));
+        if h == 4294967295 {
+            return TOML_ERR;
+        }
+        v = (v << 4) | h;
+        k = k + 1;
+    }
+    return v;
+}
+
+fn put_utf8(out: ptr, o: u32, cp: u32) -> u32 {
+    if cp < 128 {
+        store8(out, o, cp as u8);
+        return 1;
+    }
+    if cp < 2048 {
+        store8(out, o, (192 | (cp >> 6)) as u8);
+        store8(out, o + 1, (128 | (cp & 63)) as u8);
+        return 2;
+    }
+    if cp < 65536 {
+        store8(out, o, (224 | (cp >> 12)) as u8);
+        store8(out, o + 1, (128 | ((cp >> 6) & 63)) as u8);
+        store8(out, o + 2, (128 | (cp & 63)) as u8);
+        return 3;
+    }
+    store8(out, o, (240 | (cp >> 18)) as u8);
+    store8(out, o + 1, (128 | ((cp >> 12) & 63)) as u8);
+    store8(out, o + 2, (128 | ((cp >> 6) & 63)) as u8);
+    store8(out, o + 3, (128 | (cp & 63)) as u8);
+    return 4;
+}
+
+/// 布尔值; 不是布尔给 ok=0。
+pub fn toml_bool(d: ptr, so: u32, n: u32, i: u32, ok_out: ptr) -> bool {
+    mem_store32(ok_out, 0, 0);
+    if toml_type_at(d, so, n, i) != TOML_BOOL {
+        return false;
+    }
+    mem_store32(ok_out, 0, 1);
+    return load8(d, so + t_ws(d, so, n, i)) == 116; // 't' = true
+}
+
+/// 整数取成 i64。十进制 / 0x / 0o / 0b 都认, `_` 当分隔符去掉。超范围给 ok=0。
+pub fn toml_int(d: ptr, so: u32, n: u32, i0: u32, ok_out: ptr) -> i64 {
+    mem_store32(ok_out, 0, 0);
+    let i: u32 = t_ws(d, so, n, i0);
+    if i >= n {
+        return 0;
+    }
+    let zero: i64 = 0;
+    let neg: bool = load8(d, so + i) == 45;
+    if neg || load8(d, so + i) == 43 {
+        i = t_ws(d, so, n, i + 1);
+    }
+    let e: u32 = t_line_end(d, so, n, i);
+    let base: u32 = 10;
+    let mut_k: u32 = i;
+    if i + 1 < e && load8(d, so + i) == 48 {
+        let p: u32 = load8(d, so + i + 1);
+        if p == 120 {
+            base = 16;
+            mut_k = i + 2;
+        } else if p == 111 {
+            base = 8;
+            mut_k = i + 2;
+        } else if p == 98 {
+            base = 2;
+            mut_k = i + 2;
+        }
+    }
+    let v: u64 = 0;
+    let any: u32 = 0;
+    while mut_k < e {
+        let c: u32 = load8(d, so + mut_k);
+        if c == 95 {
+            mut_k = mut_k + 1;
+        } else {
+            let dg: u32 = 4294967295;
+            if base == 16 {
+                dg = t_hexval(c);
+            } else {
+                if t_is_digit(c) {
+                    dg = c - 48;
+                }
+            }
+            if dg == 4294967295 || dg >= base {
+                mut_k = e;
+            } else {
+                if v > 1844674407370955161 {
+                    return 0;
+                }
+                v = v * (base as u64) + (dg as u64);
+                any = 1;
+                mut_k = mut_k + 1;
+            }
+        }
+    }
+    if any == 0 {
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    if !neg {
+        if v > 9223372036854775807 {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        return v as i64;
+    }
+    if v > 9223372036854775808 {
+        mem_store32(ok_out, 0, 0);
+        return 0;
+    }
+    return zero - (v as i64);
+}
+
+/// 值的**原文** (去掉两端空白)。浮点与日期时间用这条拿 ——
+/// 它们的解释属于 `f64` / `civil`, 这一层不替它们做决定。
+pub fn toml_raw(d: ptr, so: u32, n: u32, i0: u32, out: ptr, oo: u32) -> u32 {
+    let i: u32 = t_ws(d, so, n, i0);
+    let e: u32 = toml_skip_value(d, so, n, i);
+    if e == TOML_ERR {
+        return TOML_ERR;
+    }
+    let mut_s: u32 = i;
+    let mut_t: u32 = e;
+    while mut_t > mut_s && (load8(d, so + mut_t - 1) == 32 || load8(d, so + mut_t - 1) == 9
+        || load8(d, so + mut_t - 1) == 13) {
+        mut_t = mut_t - 1;
+    }
+    mem_copy(out, oo, d, so + mut_s, mut_t - mut_s);
+    return mut_t - mut_s;
+}
+
+/// 表里有没有这个键 (按路径)。
+pub fn toml_has(d: ptr, so: u32, n: u32, path: str, sc: ptr) -> bool {
+    let v: u32 = toml_get(d, so, n, path, sc);
+    return v != TOML_NO && v != TOML_ERR;
+}
+
+/// 取值函数要多少临时区: 4 * TOML_MAX_KEY。
+pub fn toml_scratch_bytes() -> u32 {
+    return 4 * TOML_MAX_KEY;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 自检用的配置: 全局键 + 表 + 子表 + 表数组 + 各种值形态。
+fn cfg() -> str {
+    return "# 顶注释\ntitle = \"demo\"\ncount = 42\nratio = 3.14\non = true\nbig = 1_000_000\nhex = 0xff\nwhen = 1979-05-27T07:32:00Z\nlit = 'C:\\path\\no\\escapes'\nmulti = \"\"\"line1\nline2\"\"\"\narr = [1, 2, 3]\nmixed = [\n  \"a\",\n  \"b\",\n]\npoint = { x = 1, y = 2 }\n\n[server]\nhost = \"127.0.0.1\"\nport = 8080\n\n[server.tls]\nenabled = false\n\n[db]\nname = \"x\"\n\n[[products]]\nname = \"hammer\"\nsku = 100\n\n[[products]]\nname = \"nail\"\nsku = 200\n";
+}
+
+fn sc() -> ptr {
+    return alloc(1024);
+}
+
+fn test_toml_root_scalars() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let out: ptr = alloc(128);
+    let t: u32 = toml_get(str_ptr(s), 0, n, "title", z);
+    let tl: u32 = toml_str(str_ptr(s), 0, n, t, out, 0);
+    let ok1: bool = tl == 4 && mem_eq(out, 0, str_ptr("demo"), 0, 4);
+    let c: u32 = toml_get(str_ptr(s), 0, n, "count", z);
+    let ok2: bool = toml_int(str_ptr(s), 0, n, c, ok) == 42 && mem_load32(ok, 0) == 1;
+    let b: u32 = toml_get(str_ptr(s), 0, n, "on", z);
+    let ok3: bool = toml_bool(str_ptr(s), 0, n, b, ok) && mem_load32(ok, 0) == 1;
+    return ok1 && ok2 && ok3;
+}
+
+fn test_toml_integer_forms() -> bool {
+    // 下划线分隔、十六进制 —— 配置里最常见两种"不是十进制"的写法。
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let a: u32 = toml_get(str_ptr(s), 0, n, "big", z);
+    let ok1: bool = toml_int(str_ptr(s), 0, n, a, ok) == 1000000 && mem_load32(ok, 0) == 1;
+    let b: u32 = toml_get(str_ptr(s), 0, n, "hex", z);
+    let ok2: bool = toml_int(str_ptr(s), 0, n, b, ok) == 255;
+    return ok1 && ok2;
+}
+
+fn test_toml_types() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok1: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "title", z)) == TOML_STR;
+    let ok2: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "count", z)) == TOML_INT;
+    let ok3: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "ratio", z)) == TOML_FLOAT;
+    let ok4: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "on", z)) == TOML_BOOL;
+    let ok5: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "when", z)) == TOML_DATETIME;
+    let ok6: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "arr", z)) == TOML_ARR;
+    let ok7: bool = toml_type_at(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "point", z)) == TOML_TABLE;
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
+}
+
+fn test_toml_float_and_datetime_are_raw() -> bool {
+    // 这两类**不当数值解释**, 原文交出来 —— 解释属于 f64 / civil 那层。
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let out: ptr = alloc(64);
+    let r: u32 = toml_raw(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "ratio", z), out, 0);
+    let ok1: bool = r == 4 && mem_eq(out, 0, str_ptr("3.14"), 0, 4);
+    let w: u32 = toml_raw(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "when", z), out, 0);
+    let want: str = "1979-05-27T07:32:00Z";
+    return ok1 && w == 20 && mem_eq(out, 0, str_ptr(want), 0, 20);
+}
+
+fn test_toml_literal_string_keeps_backslashes() -> bool {
+    // 单引号串里 `\` 就是 `\` —— 这是它存在的理由 (Windows 路径、正则)。
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let out: ptr = alloc(64);
+    let v: u32 = toml_get(str_ptr(s), 0, n, "lit", z);
+    let L: u32 = toml_str(str_ptr(s), 0, n, v, out, 0);
+    let want: str = "C:\\path\\no\\escapes";
+    return L == str_len(want) && mem_eq(out, 0, str_ptr(want), 0, str_len(want));
+}
+
+fn test_toml_multiline_string() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let out: ptr = alloc(64);
+    let v: u32 = toml_get(str_ptr(s), 0, n, "multi", z);
+    let L: u32 = toml_str(str_ptr(s), 0, n, v, out, 0);
+    let want: str = "line1\nline2";
+    return L == 11 && mem_eq(out, 0, str_ptr(want), 0, 11);
+}
+
+fn test_toml_array() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let arr: u32 = toml_get(str_ptr(s), 0, n, "arr", z);
+    let ok1: bool = toml_arr_len(str_ptr(s), 0, n, arr) == 3;
+    let e2: u32 = toml_arr_at(str_ptr(s), 0, n, arr, 2);
+    let ok2: bool = toml_int(str_ptr(s), 0, n, e2, ok) == 3;
+    return ok1 && ok2;
+}
+
+fn test_toml_array_multiline_trailing_comma() -> bool {
+    // 跨行 + 尾逗号 —— TOML 允许, 而且鼓励 (加一行只改一行)。
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let out: ptr = alloc(32);
+    let arr: u32 = toml_get(str_ptr(s), 0, n, "mixed", z);
+    let ok1: bool = toml_arr_len(str_ptr(s), 0, n, arr) == 2;
+    let e1: u32 = toml_arr_at(str_ptr(s), 0, n, arr, 1);
+    let L: u32 = toml_str(str_ptr(s), 0, n, e1, out, 0);
+    return ok1 && L == 1 && load8(out, 0) == 98;
+}
+
+fn test_toml_inline_table() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let p: u32 = toml_get(str_ptr(s), 0, n, "point", z);
+    let ok1: bool = toml_type_at(str_ptr(s), 0, n, p) == TOML_TABLE;
+    let y: u32 = toml_get(str_ptr(s), 0, n, "point.y", z);
+    return ok1 && toml_int(str_ptr(s), 0, n, y, ok) == 2;
+}
+
+fn test_toml_table_navigation() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let out: ptr = alloc(64);
+    let h: u32 = toml_get(str_ptr(s), 0, n, "server.host", z);
+    let L: u32 = toml_str(str_ptr(s), 0, n, h, out, 0);
+    let ok1: bool = L == 9 && mem_eq(out, 0, str_ptr("127.0.0.1"), 0, 9);
+    let p: u32 = toml_get(str_ptr(s), 0, n, "server.port", z);
+    let ok2: bool = toml_int(str_ptr(s), 0, n, p, ok) == 8080;
+    return ok1 && ok2;
+}
+
+fn test_toml_nested_table() -> bool {
+    // [server.tls] 是 [server] 的子表 —— 前缀必须一路记得住。
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let e: u32 = toml_get(str_ptr(s), 0, n, "server.tls.enabled", z);
+    let ok1: bool = toml_bool(str_ptr(s), 0, n, e, ok) == false && mem_load32(ok, 0) == 1;
+    // 子表里的键不该被上层听到
+    let ok2: bool = toml_get(str_ptr(s), 0, n, "enabled", z) == TOML_NO;
+    // 上层也不该串进下层
+    let ok3: bool = toml_get(str_ptr(s), 0, n, "server.count", z) == TOML_NO;
+    return ok1 && ok2 && ok3;
+}
+
+fn test_toml_array_of_tables() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let out: ptr = alloc(64);
+    let n0: u32 = toml_get(str_ptr(s), 0, n, "products[0].name", z);
+    let L0: u32 = toml_str(str_ptr(s), 0, n, n0, out, 0);
+    let ok1: bool = L0 == 6 && mem_eq(out, 0, str_ptr("hammer"), 0, 6);
+    let n1: u32 = toml_get(str_ptr(s), 0, n, "products[1].name", z);
+    let L1: u32 = toml_str(str_ptr(s), 0, n, n1, out, 0);
+    let ok2: bool = L1 == 4 && mem_eq(out, 0, str_ptr("nail"), 0, 4);
+    let s1: u32 = toml_get(str_ptr(s), 0, n, "products[1].sku", z);
+    let ok3: bool = toml_int(str_ptr(s), 0, n, s1, ok) == 200;
+    let ok4: bool = toml_get(str_ptr(s), 0, n, "products[9].sku", z) == TOML_NO;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_toml_missing_and_bad_path() -> bool {
+    let s: str = cfg();
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok1: bool = toml_get(str_ptr(s), 0, n, "nope", z) == TOML_NO;
+    let ok2: bool = toml_get(str_ptr(s), 0, n, "server.nope", z) == TOML_NO;
+    let ok3: bool = toml_get(str_ptr(s), 0, n, "nope.deep", z) == TOML_NO;
+    // 路径写法错 -> ERR (与"没这个键"分开)
+    let ok4: bool = toml_get(str_ptr(s), 0, n, "server.", z) == TOML_ERR;
+    let ok5: bool = toml_get(str_ptr(s), 0, n, "server[x]", z) == TOML_ERR;
+    let ok6: bool = toml_get(str_ptr(s), 0, n, "a..b", z) == TOML_ERR;
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+}
+
+fn test_toml_missing_returns_no_not_err() -> bool {
+    // "没这个键"是 TOML_NO 不是 TOML_ERR —— 配置读不到某个字段是正常情况,
+    // 和"文件语法坏了"要能分开, 否则调用方只能一律当成致命错误。
+    let s: str = "[a]\nb = 1\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    return toml_get(str_ptr(s), 0, n, "a.c", z) == TOML_NO
+        && toml_has(str_ptr(s), 0, n, "a.c", z) == false
+        && toml_has(str_ptr(s), 0, n, "a.b", z) == true;
+}
+
+fn test_toml_comments_and_blank_lines() -> bool {
+    let s: str = "# 顶注释\n\na = 1  # 行尾注释\n\n# 又一个\nb = 2\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    return toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "a", z), ok) == 1
+        && toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "b", z), ok) == 2;
+}
+
+fn test_toml_quoted_key() -> bool {
+    // 键里有 '.' 或空格时必须带引号 —— 路径里也要能引用到。
+    let s: str = "[a]\n\"x.y\" = 5\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let v: u32 = toml_get(str_ptr(s), 0, n, "a.\"x.y\"", z);
+    return toml_int(str_ptr(s), 0, n, v, ok) == 5;
+}
+
+fn test_toml_nested_arrays() -> bool {
+    let s: str = "m = [[1, 2], [3, 4]]\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let a: u32 = toml_get(str_ptr(s), 0, n, "m", z);
+    let ok1: bool = toml_arr_len(str_ptr(s), 0, n, a) == 2;
+    let r1: u32 = toml_arr_at(str_ptr(s), 0, n, a, 1);
+    let ok2: bool = toml_arr_len(str_ptr(s), 0, n, r1) == 2;
+    let v: u32 = toml_arr_at(str_ptr(s), 0, n, r1, 0);
+    let ok3: bool = toml_int(str_ptr(s), 0, n, v, ok) == 3;
+    // 路径里连着索引
+    let ok4: bool = toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "m[1][1]", z), ok) == 4;
+    return ok1 && ok2 && ok3 && ok4;
+}
+
+fn test_toml_array_with_multiline_string() -> bool {
+    // 数组里装跨行字符串: 表体扫描如果按"行"走就会在这里迷路。
+    let s: str = "a = [\"\"\"one\ntwo\"\"\", 2]\n\n[t]\nk = 3\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let a: u32 = toml_get(str_ptr(s), 0, n, "a", z);
+    let ok1: bool = toml_arr_len(str_ptr(s), 0, n, a) == 2;
+    let ok2: bool = toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "t.k", z), ok) == 3;
+    return ok1 && ok2;
+}
+
+fn test_toml_negative_and_underscore() -> bool {
+    let s: str = "a = -17\nb = 1_2_3\nc = -0x10\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    let zero: i64 = 0;
+    return toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "a", z), ok) == (zero - 17)
+        && toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "b", z), ok) == 123
+        && toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "c", z), ok) == (zero - 16);
+}
+
+fn test_toml_first_match_wins() -> bool {
+    // TOML 规范说重复键是错误; 本层取**第一个**。写清这条, 因为它是取舍不是疏漏。
+    let s: str = "a = 1\na = 2\n";
+    let n: u32 = str_len(s);
+    let z: ptr = sc();
+    let ok: ptr = alloc(8);
+    return toml_int(str_ptr(s), 0, n, toml_get(str_ptr(s), 0, n, "a", z), ok) == 1;
+}

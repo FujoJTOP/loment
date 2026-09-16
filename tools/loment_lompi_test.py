@@ -315,6 +315,200 @@ def test_install_scripts_stay_pure_ascii():
         assert not bad, f"{name} 里有非 ASCII 字符: {bad[:3]}"
 
 
+# ---------------------------------------------------------------- 标准库随包（用户 2026-09-16）
+
+#: 随包发的标准库：`std` 127 个模块 + `std.lomt` 门面 = 128 个 `.lomt`；`host` 7 个。
+#: 各带一份 `pkg.lomp`，所以整棵树是 137 个文件。用户说的"127 个库"就是 std 的模块数。
+STORE_DIR = ROOT / "lompi" / "store"
+STORE_MODULES = {"std": 128, "host": 7}
+STORE_FILES = 137
+
+
+def _store_line(out: str) -> str:
+    """从 `lompi config` 的输出里取 `store:` 那一行 —— 和安装器读的是同一行。"""
+    for ln in out.replace("\r\n", "\n").split("\n"):
+        if ln.startswith("store:"):
+            return ln[len("store:"):].strip()
+    return ""
+
+
+def _lomt_count(d: Path, pkg: str) -> int:
+    return len(list((d / pkg).glob("*/*.lomt")))
+
+
+@test
+def test_package_carries_the_whole_store():
+    """137 个文件一件不少地进包，且 `--check` 盯得住它们（进了 _fresh_sources）。"""
+    d = _dist()
+    files = d._store_files()
+    assert len(files) == STORE_FILES, f"随包的 store 是 {len(files)} 个文件，应为 {STORE_FILES}"
+    for pkg, n in STORE_MODULES.items():
+        got = [f for f in files if f.startswith(f"{pkg}/") and f.endswith(".lomt")]
+        assert len(got) == n, f"{pkg} 有 {len(got)} 个 .lomt，应为 {n}"
+        # 版本目录必须和 lompi 自己认的那个版本一致，否则装过去它看不见
+        assert f"{pkg}/{STABLE_VERSION}/pkg.lomp" in files, f"{pkg} 缺 {STABLE_VERSION}/pkg.lomp"
+    # 包里的路径（store 是 `<name>/<version>/`，别漏了版本那一层）
+    for rel in (f"share/lompi/store/std/{STABLE_VERSION}/std.lomt",
+                f"share/lompi/store/host/{STABLE_VERSION}/pkg.lomp"):
+        assert rel in d.payload("linux", {}), f"{rel} 没进归档"
+    # 源码直出：改了库里任何一个模块而不重打包，--check 要红
+    fresh = d._fresh_sources("linux")
+    missing = [f for f in files if f"share/lompi/store/{f}" not in fresh]
+    assert not missing, f"这些 store 文件没被 _fresh_sources 盯住: {missing[:3]}"
+
+
+@test
+def test_release_manifest_covers_every_store_file():
+    """发布清单必须**逐条**覆盖随包的 store —— 少一个就是漏发。
+
+    `loment_release.GLOBS` 里那两条模式把版本号 `0.1.0` **写死了**（自举那边的 glob
+    只认"一段目录 + 一个名字模式"，`**` 展开不出递归）。写死的代价是"库升版、清单没跟上"，
+    而那种情况下 `loment_release --check` 会**看不见文件却照样绿** —— 所以钉在这里：
+    库一改版，这条红。
+    """
+    d = _dist()
+    import loment_release  # noqa: E402
+    covered = {x["path"] for x in loment_release.build()["files"]}
+    want = {f"lompi/store/{rel}" for rel in d._store_files()}
+    missing = sorted(want - covered)
+    assert not missing, (
+        f"发布清单漏了 {len(missing)} 个 store 文件（例: {missing[:3]}）—— "
+        "loment_release.GLOBS 与 loment/tools/lomrel.lomt 的 globs_text() 要同时改")
+    assert loment_release.RELEASE == d.VER, "发行号两个真源不一致"
+
+
+@test
+def test_installers_ask_lompi_where_the_store_is():
+    """装/卸都不许自己重推 cfg_root 的三条规则 —— 一律问 `lompi config`。
+
+    重推一份的下场是**漂**：lompi 那边改了规则，装到别处的库它自己看不见，而这边
+    一切正常。所以判据盯两件事：脚本里出现 `config` + `store:`（真的在问、真的在读
+    那一行），且不出现 `.lompi`（那是 fallback 规则的尾巴，自己推才会写出来）。
+    """
+    d = _dist()
+    for name, txt in (("install.sh", d.INSTALL_SH), ("install.ps1", d.INSTALL_PS1)):
+        assert " config" in txt, f"{name} 没问 lompi config"
+        assert "store:" in txt, f"{name} 没解析 lompi 打的那一行 store:"
+        assert ".lompi" not in txt, (
+            f"{name} 里出现了 `.lompi` —— 这是在自己重推 cfg_root 的 fallback 规则，"
+            "该去问 lompi config")
+        # 卸载也要**先问再删**（卸载时 bin/lompi 会被删掉，问晚了就问不着）
+        assert txt.count(" config") >= 2 or txt.count("Get-LompiStore") >= 2, \
+            f"{name} 只在装的时候问了，卸载没问"
+    # 卸载只收回本包发过的 <name>/<version>，别人的版本不碰
+    assert "store/lompi/store" in d.INSTALL_SH or "share/lompi/store" in d.INSTALL_SH
+
+
+@test
+def test_installed_store_is_discoverable_by_lompi():
+    """端到端：真跑一遍 install，再问**装出来的那个 lompi**「你的 store 在哪」，去那儿查。
+
+    不硬编码 cfg_root 的任何一条规则 —— 判据硬写哪条都会在别的机器上假红。**三条都跑**：
+
+    | 前缀形状 | 命中 | 全局根 |
+    |---|---|---|
+    | `<沙箱>\\Loment` | 规则 2 (fallback) | `<前缀>\\.lompi` |
+    | `<沙箱>\\AppData\\Local\\Loment` | 规则 0 | `<沙箱>\\AppData\\Local\\lompi` |
+    | `<沙箱>\\Users\\bob\\Loment` | 规则 1 | `<沙箱>\\Users\\bob\\.lompi` |
+
+    **三条都能沙箱化**，因为 `cfg_root()` 返回的根永远是 **argv[0] 自己的前缀** ——
+    把 `\\AppData\\Local\\` 放进前缀里，规则 0 就指到沙箱内部去了。规则 0 正是 Windows
+    的**默认安装位置**（`%LOCALAPPDATA%\\Loment`），不能只测 fallback。
+    （POSIX 上前两条命中不了：`cfg_find_ci` 找的是字面 `\\AppData\\Local\\`，那边路径是
+    `/`，所以只有规则 2 会跑 —— 这是 lompi 的 Windows 形状，见 docs/170 §5。）
+
+    沙箱建在 `loment/dist/` 下（已被 .gitignore）；**装任何东西之前**先问一次，目的地
+    若在沙箱外就整体跳过 —— 绝不去动用户真实的 store。
+    """
+    d = _dist()
+    arc_name = (f"loment-{d.VER}-windows-x64.zip" if IS_WIN
+                else f"loment-{d.VER}-linux-x64.tar.gz")
+    arc = ROOT / "loment" / "dist" / arc_name
+    if not arc.exists():
+        print(f"         (跳过: {arc_name} 还没构建，先跑 loment_dist.py --emit)")
+        return
+    td = Path(tempfile.mkdtemp(dir=ROOT / "loment" / "dist", prefix=".e2e-store-"))
+    try:
+        payload = td / "payload"
+        payload.mkdir()
+        if IS_WIN:
+            import zipfile
+            with zipfile.ZipFile(arc) as z:
+                z.extractall(payload)
+        else:
+            import tarfile
+            with tarfile.open(arc) as tf:
+                tf.extractall(payload)
+        top = next(p for p in payload.iterdir() if p.is_dir())
+        binname = "lompi.exe" if IS_WIN else "lompi"
+        ps = shutil.which("powershell") or "powershell.exe"
+        ins = "install.ps1" if IS_WIN else "install.sh"
+
+        def run(prefix: Path, *extra: str):
+            if IS_WIN:
+                cmd = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                       str(top / ins), "-Prefix", str(prefix),
+                       "-NoPath", "-NoFileType", "-NoSkill", *extra]
+            else:
+                cmd = ["sh", str(top / ins), "--prefix", str(prefix),
+                       "--no-path", "--no-skill", *extra]
+            return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", shell=False, timeout=600)
+
+        # 装之前先问一次：目的地落在沙箱外就整体别装（那意味着这条判据会去动真东西）
+        probe = subprocess.run([str(top / "bin" / binname), "config"], cwd=str(top),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", shell=False, timeout=120)
+        assert _store_line(probe.stdout or ""), \
+            f"lompi config 没给出 store 路径: {(probe.stdout or '')[:200]!r}"
+        if not str(Path(_store_line(probe.stdout)).resolve()).lower().startswith(
+                str(td.resolve()).lower()):
+            print(f"         (跳过: 本机 lompi 全局根是 {_store_line(probe.stdout)}，"
+                  "在沙箱外 —— 不去动用户的 store)")
+            return
+
+        shapes: list[Path] = [td / "pfx"]
+        if IS_WIN:   # 规则 0 与规则 1 只有 Windows 形状的 argv[0] 才命中得了
+            shapes += [td / "AppData" / "Local" / "Loment", td / "Users" / "bob" / "Loment"]
+        for prefix in shapes:
+            r = run(prefix)
+            assert r.returncode == 0, \
+                f"装到 {prefix.name} 失败({r.returncode}): {(r.stdout or '')[-400:]}{(r.stderr or '')[-400:]}"
+
+            # 包里那份纯净副本
+            pristine = prefix / "share" / "lompi" / "store"
+            got = sum(1 for _ in pristine.rglob("*") if _.is_file())
+            assert got == STORE_FILES, f"装进 {prefix.name} 的 store 是 {got} 个文件，应为 {STORE_FILES}"
+
+            # 装出来的 lompi 自己说 store 在哪 —— 那才是判据该查的地方
+            c = subprocess.run([str(prefix / "bin" / binname), "config"], cwd=str(prefix),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", shell=False, timeout=120)
+            dst = Path(_store_line(c.stdout or ""))
+            assert str(dst.resolve()).lower().startswith(str(td.resolve()).lower()), \
+                f"{prefix.name}: 装出来的 lompi 指向沙箱外的 store: {dst}"
+            for pkg, n in STORE_MODULES.items():
+                assert _lomt_count(dst, pkg) == n, \
+                    f"{prefix.name}: 装完 {dst / pkg} 里不是 {n} 个 .lomt"
+
+            # 真正的验收：lompi 自己去 index 那个 store，认得 std 与 host
+            c = subprocess.run([str(prefix / "bin" / binname), "index", str(dst)],
+                               cwd=str(prefix), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", shell=False, timeout=180)
+            out = (c.stdout or "") + (c.stderr or "")
+            assert c.returncode == 0, f"{prefix.name}: lompi index 失败: {out[-300:]!r}"
+            for pkg in STORE_MODULES:
+                assert pkg in out, f"{prefix.name}: lompi index 没报出 {pkg}: {out[-300:]!r}"
+
+            # 卸载只收回本包发过的那些 <name>/<version>
+            r = run(prefix, "-Uninstall" if IS_WIN else "--uninstall")
+            assert r.returncode == 0, f"{prefix.name}: 卸载失败: {(r.stdout or '')[-300:]}"
+            for pkg in STORE_MODULES:
+                assert _lomt_count(dst, pkg) == 0, f"{prefix.name}: 卸载之后 {dst / pkg} 还在"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- 与正本的一致性
 
 @test

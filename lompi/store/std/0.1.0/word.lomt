@@ -1,0 +1,362 @@
+// std/word.lomt — 排版语义上的"词" (word segmentation)
+//
+// 为什么不能只按空格切: `split.lomt` 已经会按分隔符切了。这里要的是**排版意义上的词**,
+// 换行、搜索高亮、统计词数都要它。三件事让"按空格切"不够用:
+//   1) 标点紧贴着词 (`hello,world` 里 'world' 前面粘着逗号), 按空格切不出来;
+//   2) 撇号与连字号在**词内** (`don't`, `well-known` 是一个词) —— 这是排版换行的实际
+//      需要: 断行时不能停在 "don" 和 "t" 之间, 否则读起来是另一个东西;
+//   3) 交替的空白 (`a\tb\nc` 三个词)。
+//
+// 游标约定**照抄 split.lomt 的那一套** (一份打包就够, 别引第二套): 每步返回
+// `(词起点 << 32) | 词终点`; 没有下一个词时起点 == 终点 == so+n —— 判 `word_has_more`
+// 就知道结束没结束, 不需要哨兵。(split.lomt 里那段注释记的正是"两套打包会打架", 这里
+// 不重蹈。)
+//
+// 词字符 = ASCII 字母或数字, 外加 `'` (0x27) 与 `-` (0x2D)。**非 ASCII 字节 (>=0x80)
+// 一律算词字符** —— 这是个近似, 换来一个很有用的性质: 多字节 UTF-8 字符的**字节之间**
+// 因此永远不会成为断点 (两侧都是词字符), 所以断行/游标不会把字符劈成两半。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **不是 Unicode 的 UAX#29 词边界算法**: 没做数字/货币/连字/东南亚无空格文字那一堆
+//     规则。它要引一张大属性表, 而这里的用途 (等宽终端里换行与数词) 用不上。
+//   - **非 ASCII 全算词字符**因此 `你好，世界` (中文逗号也是非 ASCII) 是**一个**词, 不是两个。
+//     中日韩没有空格, 真按词切得靠词典, 不是这里能做的。
+//   - **'.' 不是词内字符**: `3.14` 切成 `3` 与 `14`; `snake_case` 切成两段; 单独一个
+//     `-` 或 `'` 夹在空格之间会**自成一词** (`a - b` 是三个词)。这些是简单规则的边界,
+//     写出来免得别人以为漏了。
+//   - **尾撇号会粘住**: `dogs'` 是一个词 (撇号算词内)。真实文本里那该是 `dogs` +
+//     标点, 但简单规则区分不了。
+//
+// 命名: 公开 word_*, 内部 w_*。自检 test_word_*。
+
+module word
+
+use "char.lomt"
+use "num.lomt"
+use "width.lomt"
+
+/// "位置不在任何词里" (word_at 用)。注意游标那一族**不用**它: 那边"没有下一个词"
+/// 用位置 so+n 表示 (与 split.lomt 一致)。这不是两套打包, 只是两种语义:
+/// "某个位置属于哪个词" 需要哨兵, "游标走到头" 不需要。
+pub const WORD_NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 词字符判定
+
+/// 这个字节算不算词字符。撇号与连字号算 —— 见文件头第 2 条。
+fn w_is_word_byte(c: u32) -> bool {
+    return char_is_alnum(c) || c == 39 || c == 45 || c >= 128;
+}
+
+pub fn word_is_word_at(d: ptr, so: u32, n: u32, i: u32) -> bool {
+    if i < so || i >= so + n {
+        return false;
+    }
+    return w_is_word_byte(load8(d, i));
+}
+
+/// 包含字节 i 的那个词的**起点**; i 不在词里给 WORD_NONE。
+/// 和游标那族不同: 这个从 i 往**回**找词首, 所以 i 落在词中间也能给对。
+pub fn word_at(d: ptr, so: u32, n: u32, i: u32) -> u32 {
+    if word_is_word_at(d, so, n, i) == false {
+        return WORD_NONE;
+    }
+    let s: u32 = i;
+    let done: u32 = 0;
+    while done == 0 {
+        if s > so && w_is_word_byte(load8(d, s - 1)) {
+            s = s - 1;
+        } else {
+            done = 1;
+        }
+    }
+    return s;
+}
+
+// ---------------------------------------------------------------- 游标
+
+/// from 起下一个词, 打包成 `(起点 << 32) | 终点`; 没有给 `(so+n, so+n)`。
+/// `from` 应当落在词界上 (通常是上一个词的 `word_end`); 落在词中间会把词截断 ——
+/// 与 split_next 同约定。
+pub fn word_next(d: ptr, so: u32, n: u32, from: u32) -> u64 {
+    let hi: u32 = so + n;
+    let i: u32 = from;
+    let s: u32 = hi;
+    let done: u32 = 0;
+    while i < hi && done == 0 {
+        if w_is_word_byte(load8(d, i)) {
+            s = i;
+            done = 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    if s == hi {
+        return num_pack2(hi, hi);
+    }
+    let e: u32 = s;
+    while e < hi && w_is_word_byte(load8(d, e)) {
+        e = e + 1;
+    }
+    return num_pack2(s, e);
+}
+
+pub fn word_first(d: ptr, so: u32, n: u32) -> u64 {
+    return word_next(d, so, n, so);
+}
+
+pub fn word_start(t: u64) -> u32 {
+    return num_hi(t);
+}
+
+pub fn word_end(t: u64) -> u32 {
+    return num_lo(t);
+}
+
+/// 还有下一个词吗 (与 split_has_more 同形)。
+pub fn word_has_more(t: u64, so: u32, n: u32) -> bool {
+    return num_hi(t) < so + n;
+}
+
+/// 词的字节长度。
+pub fn word_len(t: u64) -> u32 {
+    return num_lo(t) - num_hi(t);
+}
+
+// ---------------------------------------------------------------- 计数
+
+pub fn word_count(d: ptr, so: u32, n: u32) -> u32 {
+    let c: u32 = 0;
+    let t: u64 = word_first(d, so, n);
+    while word_has_more(t, so, n) {
+        c = c + 1;
+        t = word_next(d, so, n, word_end(t));
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 断行
+
+/// 位置 i 能不能断行。可断 = i 在两端, 或 i 的两侧**不同时**是词字符。
+/// 于是词内部不可断 (`don't` 中间不行), 而多字节字符的字节之间也不可断
+/// (两侧都是词字符) —— 正好保护了 UTF-8 不被劈开。
+pub fn word_is_boundary(d: ptr, so: u32, n: u32, i: u32) -> bool {
+    if i <= so || i >= so + n {
+        return true;
+    }
+    let a: bool = w_is_word_byte(load8(d, i - 1));
+    let b: bool = w_is_word_byte(load8(d, i));
+    if a && b {
+        return false;
+    }
+    return true;
+}
+
+/// 从 so 起, 在**显示宽度**不超过 max_cols 的前提下, 返回最适合断行的字节位置
+/// (它之前的留在本行)。按词断: 返回**最后一个装得下的词的词尾**。
+///
+/// 宽度用 width.lomt 的 `width_utf8` 量 —— 不能数字节: `中文` 是 2 格不是 6 格,
+/// 数了字节中文行会短一半。
+///
+/// 连第一个词都装不下时, 返回第一个词的词尾 —— **必须保证有进展**, 否则调用方
+/// `p = word_wrap_break(...)` 会原地死循环。
+///
+/// 每词调一次 width_utf8 (它内部会 alloc 4 字节临时区)。**按词调用而不是按字节**,
+/// 就是为了不让 64 KiB 的 bump 堆在热点路径上被吃光。
+pub fn word_wrap_break(d: ptr, so: u32, n: u32, max_cols: u32) -> u32 {
+    let hi: u32 = so + n;
+    let t: u64 = word_first(d, so, n);
+    if word_has_more(t, so, n) == false {
+        return hi;
+    }
+    let fs: u32 = word_start(t);
+    let best: u32 = word_end(t);
+    // 首词宽度从词首量起 (行首的前导空白不该挤占宽度)
+    let cols: u32 = width_utf8(d, fs, word_end(t) - fs);
+    let prev_end: u32 = word_end(t);
+    let done: u32 = 0;
+    while done == 0 {
+        let t2: u64 = word_next(d, so, n, prev_end);
+        if word_has_more(t2, so, n) == false {
+            done = 1;
+        } else {
+            let e: u32 = word_end(t2);
+            // 从上一个词尾量到本词尾 —— 一并含掉中间的分隔空白
+            let add: u32 = width_utf8(d, prev_end, e - prev_end);
+            if cols + add <= max_cols {
+                cols = cols + add;
+                best = e;
+                prev_end = e;
+            } else {
+                done = 1;
+            }
+        }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_word_ascii_basic() -> bool {
+    // 第一版我把 "最后一个词之后没有词" 写成对**它自己**判 word_has_more == false,
+    // 那是错的: word_has_more(t) 的含义是"t 是一个真词" (哨兵是 (hi,hi))。
+    // 要判"后面没了", 得先走到下一个词再判。
+    let s: str = "hello world";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    let u: u64 = word_next(str_ptr(s), 0, str_len(s), word_end(t));
+    let v: u64 = word_next(str_ptr(s), 0, str_len(s), word_end(u));
+    return word_start(t) == 0 && word_end(t) == 5
+        && word_start(u) == 6 && word_end(u) == 11
+        && word_has_more(t, 0, 11) && word_has_more(u, 0, 11)
+        && word_has_more(v, 0, 11) == false;
+}
+
+fn test_word_leading_trailing_space() -> bool {
+    // "  hi  there  " 里 there 落在 [6,11) —— 我第一版把手数的下标写成了 [8,13)。
+    let s: str = "  hi  there  ";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    let u: u64 = word_next(str_ptr(s), 0, str_len(s), word_end(t));
+    return word_start(t) == 2 && word_end(t) == 4
+        && word_start(u) == 6 && word_end(u) == 11;
+}
+
+fn test_word_apostrophe_is_internal() -> bool {
+    // don't 是一个词 —— 断行不能停在 don|t。
+    let s: str = "don't stop";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    return word_start(t) == 0 && word_end(t) == 5 && word_count(str_ptr(s), 0, str_len(s)) == 2;
+}
+
+fn test_word_hyphen_is_internal() -> bool {
+    let s: str = "well-known fact";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    return word_start(t) == 0 && word_end(t) == 10;
+}
+
+fn test_word_alnum_runs_together() -> bool {
+    let s: str = "abc123 42";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    return word_end(t) == 6 && word_count(str_ptr(s), 0, str_len(s)) == 2;
+}
+
+fn test_word_punctuation_splits() -> bool {
+    // '.' 不是词内字符 -> "a.b" 是两个词。这是简单规则的边界, 注释里写了。
+    let s: str = "a.b";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    let u: u64 = word_next(str_ptr(s), 0, 3, word_end(t));
+    return word_start(t) == 0 && word_end(t) == 1
+        && word_start(u) == 2 && word_end(u) == 3;
+}
+
+fn test_word_count_edges() -> bool {
+    let empty: str = "";
+    let blanks: str = "   \t\n";
+    let one: str = "solo";
+    return word_count(str_ptr(empty), 0, 0) == 0
+        && word_count(str_ptr(blanks), 0, str_len(blanks)) == 0
+        && word_count(str_ptr(one), 0, 4) == 1
+        && word_count(str_ptr("one two three"), 0, 13) == 3;
+}
+
+fn test_word_nonascii_bytes_are_word_chars() -> bool {
+    // é 是 2 字节 -> 一个词, 跨度就是 2 字节。
+    let e: str = "é";
+    let t: u64 = word_first(str_ptr(e), 0, str_len(e));
+    return word_start(t) == 0 && word_end(t) == 2 && word_len(t) == 2;
+}
+
+fn test_word_cjk_words() -> bool {
+    // 中(3) 空格(1) 文(3): 两个词, 跨度按字节算。
+    let s: str = "中 文";
+    let t: u64 = word_first(str_ptr(s), 0, str_len(s));
+    let u: u64 = word_next(str_ptr(s), 0, str_len(s), word_end(t));
+    return word_start(t) == 0 && word_end(t) == 3
+        && word_start(u) == 4 && word_end(u) == 7;
+}
+
+fn test_word_multibyte_byte_gap_is_not_a_boundary() -> bool {
+    // "é" 两个字节之间 (位置 1) 不能断 —— 两侧都是词字符。断了就把字符劈开了。
+    let e: str = "é";
+    let d: ptr = str_ptr(e);
+    return word_is_boundary(d, 0, 2, 0) && word_is_boundary(d, 0, 2, 2)
+        && word_is_boundary(d, 0, 2, 1) == false;
+}
+
+fn test_word_is_boundary_ascii() -> bool {
+    // "ab cd": 0 可断, 1 在词内不可断, 2 是空格前的缝可断, 3 是空格后可断, 5 到界可断。
+    let s: str = "ab cd";
+    let d: ptr = str_ptr(s);
+    return word_is_boundary(d, 0, 5, 0) && word_is_boundary(d, 0, 5, 2)
+        && word_is_boundary(d, 0, 5, 3) && word_is_boundary(d, 0, 5, 5)
+        && word_is_boundary(d, 0, 5, 1) == false;
+}
+
+fn test_word_at_finds_containing_word() -> bool {
+    // "ab cd": 位置 1 属于词 "ab" (起点 0); 位置 4 属于 "cd" (起点 3); 位置 2 是空格。
+    let s: str = "ab cd";
+    let d: ptr = str_ptr(s);
+    return word_at(d, 0, 5, 1) == 0 && word_at(d, 0, 5, 4) == 3
+        && word_at(d, 0, 5, 2) == WORD_NONE && word_at(d, 0, 5, 5) == WORD_NONE;
+}
+
+fn test_word_walk_all() -> bool {
+    // 走完 "one two three": 三段 (0,3) (4,7) (8,13)。
+    let s: str = "one two three";
+    let d: ptr = str_ptr(s);
+    let t1: u64 = word_first(d, 0, 13);
+    let t2: u64 = word_next(d, 0, 13, word_end(t1));
+    let t3: u64 = word_next(d, 0, 13, word_end(t2));
+    let t4: u64 = word_next(d, 0, 13, word_end(t3));
+    return word_start(t1) == 0 && word_end(t1) == 3
+        && word_start(t2) == 4 && word_end(t2) == 7
+        && word_start(t3) == 8 && word_end(t3) == 13
+        && word_has_more(t1, 0, 13) && word_has_more(t2, 0, 13)
+        && word_has_more(t3, 0, 13) && word_has_more(t4, 0, 13) == false;
+}
+
+fn test_word_wrap_ascii() -> bool {
+    // "hello world foo" 限 11 格: "hello world" 正好 11 格, 断在 world 之后 (字节 11)。
+    let s: str = "hello world foo";
+    return word_wrap_break(str_ptr(s), 0, str_len(s), 11) == 11
+        && word_wrap_break(str_ptr(s), 0, str_len(s), 5) == 5;
+}
+
+fn test_word_wrap_measures_width_not_bytes() -> bool {
+    // "中文 abc" 限 5 格: 中文占 4 格 (不是 6 字节), 再加 " abc" 是 4 格 -> 超。
+    // 断点落在中文词尾 = 字节 6。若按字节量, 这题会给出别的位置。
+    let s: str = "中文 abc";
+    return word_wrap_break(str_ptr(s), 0, str_len(s), 5) == 6;
+}
+
+fn test_word_wrap_all_fits() -> bool {
+    let s: str = "ab cd";
+    return word_wrap_break(str_ptr(s), 0, 5, 100) == 5
+        && word_wrap_break(str_ptr(s), 0, 5, 0) == 2; // 连首词都放不下 -> 给出首词尾
+}
+
+fn test_word_wrap_first_word_too_long() -> bool {
+    // 首词本身就超宽: 必须仍返回首词尾 (有进展), 否则调用方原地死循环。
+    let s: str = "supercalifragilistic ab";
+    return word_wrap_break(str_ptr(s), 0, str_len(s), 5) == 20;
+}
+
+fn test_word_wrap_empty() -> bool {
+    let s: str = "   ";
+    return word_wrap_break(str_ptr(s), 0, 3, 10) == 3
+        && word_wrap_break(str_ptr(s), 0, 0, 10) == 0;
+}
+
+fn test_word_tab_newline_separators() -> bool {
+    let s: str = "a\tb\nc";
+    return word_count(str_ptr(s), 0, 5) == 3;
+}
+
+fn test_word_offset_subrange() -> bool {
+    // so 不为 0 也要对 (在缓冲区中段切一个子串)。
+    let s: str = "xxhi yy";
+    let d: ptr = str_ptr(s);
+    let t: u64 = word_first(d, 2, 5); // "hi yy"
+    let u: u64 = word_next(d, 2, 5, word_end(t));
+    return word_start(t) == 2 && word_end(t) == 4
+        && word_start(u) == 5 && word_end(u) == 7
+        && word_count(d, 2, 5) == 2;
+}

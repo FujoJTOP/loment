@@ -1,0 +1,166 @@
+// std/rand.lomt — 确定性伪随机 (xorshift)
+//
+// 为什么是**确定性**的: 这个项目的整套纪律建立在"同输入同输出"上 (逐字节可复现、
+// 发布清单 sha256)。一个要读系统熵的随机源会把这种可复现性毁掉, 所以这里的随机数
+// 是"给定种子就完全确定的伪随机" —— 要不可预测的场景 (密钥) 本来也不该用非加密
+// 随机数, 那种需求归 sha256 那一类模块。
+//
+// xorshift64star 的状态是 u64, 但**状态 0 是吸收态** (0 永远算不出非 0),
+// 所以种子那一层专门把 0 换掉 —— 这是这类算法最常见的坑, 不留给调用方踩。
+//
+// 命名: 公开一律 rand_*, 内部一律 rd_*。自检 test_rand_*。
+
+module rand
+
+/// 把 32 位种子摊成一个像样的 64 位状态。种子 0 也不会得到状态 0。
+pub fn rand_seed(seed: u32) -> u64 {
+    let s: u64 = (seed as u64) * 6364136223846793005 + 1442695040888963407;
+    // 对当前常量, 加法那项的常数非 0, 所以 u32 种子里取不到 0 —— 这条分支**不可达**。
+    // 留着是因为换常量时它会立刻变得可达, 而"状态 0"是个会静默退化成常量的故障。
+    if s == 0 {
+        return 88172645463325252;
+    }
+    return s;
+}
+
+/// 推进一步状态 (调用方持有状态)。
+pub fn rand_next(s: u64) -> u64 {
+    let x: u64 = s;
+    x = x ^ (x >> 12);
+    x = x ^ (x << 25);
+    x = x ^ (x >> 27);
+    return x * 2685821657736338717;
+}
+
+/// 取 0..bound-1 的值 (bound 为 0 时返回 0)。
+pub fn rand_below(s: u64, bound: u32) -> u32 {
+    if bound == 0 {
+        return 0;
+    }
+    return (rand_next(s) % (bound as u64)) as u32;
+}
+
+/// 取 0..=max 的值。
+pub fn rand_upto(s: u64, max: u32) -> u32 {
+    return rand_below(s, max + 1);
+}
+
+/// 平坦分布的 0/1 (用于布尔选择)。
+pub fn rand_bit(s: u64) -> u32 {
+    return (rand_next(s) & 1) as u32;
+}
+
+/// 把状态重新搅一遍 (用于"再换个序列"而不换种子)。
+pub fn rand_mix(s: u64) -> u64 {
+    return rand_next(s) ^ 14695981039346656037;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_rand_state_never_zero() -> bool {
+    // 状态 0 是吸收态 —— 播种层必须保证给不出 0。
+    // 这里断言的是**性质**而不是某个具体值: 我第一版断言了兜底常量 88172645463325252,
+    // 但 seed=0 时算出的是 1442695040888963407 (非 0), 那条 if 根本没走到 ——
+    // 也就是说那个兜底对当前常量不可达, 只是保险。断言具体值等于把保险当成了实现。
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < 300 {
+        if rand_seed(i) == 0 {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1 && rand_next(0) == 0;
+}
+
+fn test_rand_deterministic() -> bool {
+    let s: u64 = rand_seed(42);
+    return rand_next(s) == rand_next(s) && rand_below(s, 100) == rand_below(s, 100);
+}
+
+fn test_rand_different_seeds_differ() -> bool {
+    return rand_next(rand_seed(1)) != rand_next(rand_seed(2));
+}
+
+fn test_rand_sequence_advances() -> bool {
+    // 状态要一直变, 不能停在不动点上。
+    let s: u64 = rand_seed(7);
+    let a: u64 = rand_next(s);
+    let b: u64 = rand_next(a);
+    let c: u64 = rand_next(b);
+    return a != b && b != c && a != c;
+}
+
+fn test_rand_below_range() -> bool {
+    let s: u64 = rand_seed(12345);
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    let st: u64 = s;
+    while i < 200 {
+        let v: u32 = rand_below(st, 10);
+        if v >= 10 {
+            ok = 0;
+        }
+        st = rand_next(st);
+        i = i + 1;
+    }
+    return ok == 1;
+}
+
+fn test_rand_below_zero_bound() -> bool {
+    return rand_below(rand_seed(1), 0) == 0;
+}
+
+fn test_rand_upto_includes_max() -> bool {
+    // 取 0..=3 多跑几次, 4 不该出现, 且 3 应该出现过 —— 后者证明上界是闭的。
+    let st: u64 = rand_seed(99);
+    let i: u32 = 0;
+    let saw3: u32 = 0;
+    let too_big: u32 = 0;
+    while i < 200 {
+        let v: u32 = rand_upto(st, 3);
+        if v == 3 {
+            saw3 = 1;
+        }
+        if v > 3 {
+            too_big = 1;
+        }
+        st = rand_next(st);
+        i = i + 1;
+    }
+    return saw3 == 1 && too_big == 0;
+}
+
+fn test_rand_bit_is_binary() -> bool {
+    let st: u64 = rand_seed(5);
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 100 {
+        if rand_bit(st) > 1 {
+            bad = 1;
+        }
+        st = rand_next(st);
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_rand_spreads_across_seeds() -> bool {
+    // 相邻种子不该给出相邻的首值 —— 播种函数太弱时这条会挂。
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    while i < 50 {
+        let a: u32 = rand_below(rand_seed(i), 1000);
+        let b: u32 = rand_below(rand_seed(i + 1), 1000);
+        if a == b {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1;
+}
+
+fn test_rand_mix_changes_state() -> bool {
+    let s: u64 = rand_seed(3);
+    return rand_mix(s) != s && rand_mix(s) != rand_next(s);
+}

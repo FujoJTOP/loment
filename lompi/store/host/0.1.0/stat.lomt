@@ -1,0 +1,120 @@
+// std/stat.lomt — 文件元信息 (newfstatat)
+//
+// 为什么要它: "这路径存在吗""它是目录还是文件"是工具里最常见的两问, 而现在只能靠
+// open 成功与否去猜 —— 猜不出"是目录"。newfstatat(262) 在 PE 垫片实现的那 8 个
+// syscall 里, 所以这条路两边都能走。
+//
+// **平台差异要如实说**: PE 垫片只填 st_mode 那一个字段 (docs/167 §5 写明"只填
+// 消费方实际读取的"), 所以 `stat_size` 在 PE 上拿到的是垃圾。跨平台要用大小的话,
+// 只能靠 fs_read 读到 EOF 去数 —— 那才是两边都成立的办法。
+//
+// struct stat 的偏移是 x86-64 Linux 的布局, 写死在这里:
+//   st_mode @24 (u32)   st_size @48 (u64)
+//
+// 命名: 公开一律 stat_*, 内部一律 st_*。自检 test_stat_*。
+
+module stat
+
+use "io.lomt"
+use std
+
+/// newfstatat 的系统调用号。
+pub const STAT_SYS_NEWFSTATAT: u64 = 262;
+
+/// S_IFMT 掩码与两个最常见的类型。
+pub const STAT_IFMT: u32 = 61440;
+pub const STAT_IFDIR: u32 = 16384;
+pub const STAT_IFREG: u32 = 32768;
+
+/// stat 一个 NUL 结尾的路径, 结果写进 buf (至少 144 字节)。
+/// 返回 0 = 成功, 负数 = 失败 (失败时 buf 内容不可信)。
+pub fn stat_path(path: ptr, buf: ptr) -> i64 {
+    return syscall4(STAT_SYS_NEWFSTATAT, IO_AT_FDCWD, path as u64, buf as u64);
+}
+
+/// 只看 mode 位; 失败返回 0 (0 不是合法的 mode —— st_mode 最低位是权限位, 总有一位不同)。
+pub fn stat_mode(path: ptr, buf: ptr) -> u32 {
+    let r: i64 = stat_path(path, buf);
+    if r < 0 {
+        return 0;
+    }
+    return mem_load32(buf, 24);
+}
+
+pub fn stat_exists(path: ptr, buf: ptr) -> bool {
+    return stat_path(path, buf) >= 0;
+}
+
+/// 路径是字面量时用这个。
+pub fn stat_mode_lit(scr: ptr, lit: str, buf: ptr) -> u32 {
+    io_put_lit(scr, lit);
+    return stat_mode(scr, buf);
+}
+
+pub fn stat_exists_lit(scr: ptr, lit: str, buf: ptr) -> bool {
+    io_put_lit(scr, lit);
+    return stat_exists(scr, buf);
+}
+
+pub fn stat_is_dir(mode: u32) -> bool {
+    return (mode & STAT_IFMT) == STAT_IFDIR;
+}
+
+pub fn stat_is_reg(mode: u32) -> bool {
+    return (mode & STAT_IFMT) == STAT_IFREG;
+}
+
+/// 文件大小。**只在 Linux 上有意义** (见文件头: PE 垫片不填这一格)。
+pub fn stat_size(buf: ptr) -> u64 {
+    return mem_load64(buf, 48);
+}
+
+// ---------------------------------------------------------------- 自检
+// 真 stat 要真路径, 所以这里测的是**位判定**与偏移常量 —— 那也是最容易写错的一层
+// (S_IFMT 用错时"是目录"会漏判, 而漏判是静默的)。
+
+fn test_stat_ifmt_constants() -> bool {
+    return STAT_IFMT == 61440 && STAT_IFDIR == 16384 && STAT_IFREG == 32768;
+}
+
+fn test_stat_is_dir() -> bool {
+    // 目录 0755 | IFDIR = 0o040755 = 16877
+    return stat_is_dir(16877) && !stat_is_dir(33188) && !stat_is_dir(0);
+}
+
+fn test_stat_is_reg() -> bool {
+    // 普通文件 0644 | IFREG = 0o100644 = 33188
+    return stat_is_reg(33188) && !stat_is_reg(16877) && !stat_is_reg(0);
+}
+
+fn test_stat_mode_zero_means_failure() -> bool {
+    // 0 不是合法 mode: 位判定必须把它当成"不是目录也不是文件", 而不是误判成某种类型。
+    return !stat_is_dir(0) && !stat_is_reg(0);
+}
+
+fn test_stat_type_masks_off_permission_bits() -> bool {
+    // 同一个目录, 权限位不同, 判定必须一样 —— 掩码写错时这条会挂。
+    return stat_is_dir(16877) && stat_is_dir(16876) && stat_is_dir(16879);
+}
+
+fn test_stat_dir_and_reg_are_exclusive() -> bool {
+    return !(stat_is_dir(16877) && stat_is_reg(16877))
+        && !(stat_is_dir(33188) && stat_is_reg(33188));
+}
+
+fn test_stat_syscall_number() -> bool {
+    return STAT_SYS_NEWFSTATAT == 262;
+}
+
+fn test_stat_mode_offset() -> bool {
+    // 偏移写错的话读出来的是 st_nlink 之类的别的格子, 而它也可能"像个 mode"。
+    // 这里把偏移钉在 24 上, 并顺手验证 mem 的读法确实读到那一格。
+    let b: ptr = alloc(160);
+    mem_store32(b, 24, 33188);
+    return stat_mode_from_buf_peek(b) == 33188 && mem_load32(b, 24) == 33188;
+}
+
+/// 只读缓冲里的 mode (不碰系统调用) —— 给上面那条偏移自检用。
+fn stat_mode_from_buf_peek(buf: ptr) -> u32 {
+    return mem_load32(buf, 24);
+}

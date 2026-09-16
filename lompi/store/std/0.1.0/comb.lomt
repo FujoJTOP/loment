@@ -1,0 +1,730 @@
+// std/comb.lomt — 组合数学 (阶乘 / 二项式 / 排列 / 卡特兰 / 斯特林)
+//
+// 为什么要它: 这五样东西是"数数"的五个基本动作 —— 路径计数 (卡特兰)、集合划分
+// (斯特林)、取样方案数 (二项式/排列)、以及它们的公共砖块 (阶乘)。编译器自己的
+// 表尺寸推导、哈希桶数估计、测试用例枚举都要拿它们当依据, 而**算错一个数量级
+// 在这类地方是静默的**: 缓冲区小一号只会表现为"跑到某个用例才崩"。
+//
+// 贯穿全模块的一条纪律 —— **溢出报错, 绝不回绕**:
+//   u64 的 `*` 是回绕的 (docs/158: "+ - * 为回绕运算")。组合数量增长极快:
+//   20! = 2432902008176640000 装得下, 21! = 51090942171709440000 装不下。
+//   如果让 21! 回绕, 得到一个 1.5e19 附近的"看着很像数"的值, **不报错** ——
+//   这比直接崩掉危险得多。所以本模块每一个乘法前都判界, 越界一律 `CB_ERR`。
+//
+// 三条核心算法上的选择 (都是"先对, 再快"的具体体现):
+//   1. **二项式走递推约分, 不走 n!/(k!(n-k)!)**。后者要三个阶乘, 于是 C(21,10)
+//      这种"结果很小"的组合也会因为 21! 溢出而报错 —— 白白丢掉一大片可解区间。
+//      本模块的写法每一步都先约分再乘, 中间量始终**不超过最终结果**,
+//      所以能算的范围就是"结果装得下"的范围 (C(67,33) = 14226520737620288370 可以,
+//      C(68,34) 超出 u64 才报错)。
+//   2. **卡特兰走递推** Cat(n+1) = Cat(n)·2(2n+1)/(n+2)。同样地, 先约分再乘,
+//      中间量不超过结果 —— 于是能算到 n=36 (Cat(36) = 11959798385860453492),
+//      n=37 才报错。若走 C(2n,n)/(n+1) 就只能到 n=33, 因为 C(2n,n) 比 Cat(n) 大
+//      (n+1) 倍, 提前撞上天花板。
+//   3. **斯特林数走递推表, 但只滚两行**。递推式只依赖上一行, 所以 ws 只要
+//      2*(k+1) 个 u64, 而不是 (n+1)*(k+1) —— 堆是 64 KiB 且不回收, 差一个数量级。
+//
+// 诚实清单 (不做什么, 为什么):
+//   - **全部结果以 u64 为准**。n 大到结果放不下就报 CB_ERR, 不返回大数对象 ——
+//     任意精度整数是 bigint.lomt 那一层的事, 混进来会让这个模块的每个调用点都要
+//     管内存。调用方如果需要 C(200,100), 该去用 bigint。
+//   - **cb_binom(n, k) 在 k > n 时给 0**, 不是报错。这是组合数学的通行约定
+//     (从 n 个里取 k 个, k 超过 n 就是 0 种取法), 报错反而会让"遍历所有 k"的
+//     调用方到处写边界判断。**k > n 与"溢出"是两回事**, 所以一个给 0 一个给 ERR。
+//   - **斯特林数的 ws 由调用方给**, 且必须 ≥ cb_stirling_bytes(k) 字节。本模块
+//     不检查 ws 大小 (没有长度信息可查), 这是本模块唯一一处信任调用方的地方。
+//     cb_stirling1/2 的 n 可以远大于 k, 但中间行会溢出时同样报 CB_ERR ——
+//     s1 的溢出点是 n≈22, s2 是 n≈27 (因为 s1 的行和是 n!, s2 的行和是 Bell 数)。
+//   - **不提供"模意义下的组合数"** (n,p 不大但结果巨大时的那种)。那要另一个模块
+//     (它得先有 im_mulmod 一类的东西), 而且语义不同, 混在一起会让人分不清
+//     "报错是因为真溢出还是因为模运算".
+//
+// 命名: 公开 cb_*, 内部 cb_* (私有名也占全局拼写, 不带前缀会按 E13 撞车)。
+// 自检 test_comb_*。
+
+module comb
+
+use "mem.lomt"
+
+/// 成功。
+pub const CB_OK: u32 = 0;
+/// 溢出 / 除不尽 / 缓冲不够。与"参数超出定义域"分得很清楚: 后者有自己的约定。
+pub const CB_ERR: u32 = 4294967295;
+
+const CB_U64MAX: u64 = 18446744073709551615;
+
+// ---------------------------------------------------------------- 基础
+
+/// u64 最大公约数 (欧几里得, 迭代)。cb_gcd_u(0, 0) == 0。
+///
+/// 为什么不复用 intmath 的 im_gcd: 那个在 i64 上, 而这里的操作数是被 u64 全域
+/// 界住的 (比如 CB_U64MAX 附近的余数)。跨 i64/u64 边界转一次就多一处隐式假设。
+fn cb_gcd_u(a: u64, b: u64) -> u64 {
+    let x: u64 = a;
+    let y: u64 = b;
+    while y != 0 {
+        let t: u64 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+/// **先约分再乘**: 结果写进 `out + oo` (8 字节 u64 小端), 成功 `CB_OK`。
+///
+/// 约分三步, 缺一不可:
+///   1. `g  = gcd(r, den)` —— 把 r 里能吃掉的因子先除掉;
+///   2. `g2 = gcd(num, d2)` —— 再把 num 里能吃掉剩下的除数的因子除掉;
+///   3. 此时 d3 必须等于 1。**不是 1 就报错**, 不硬除。
+///
+/// 第 3 条是关键: 本模块的两个数列 (二项式、卡特兰) 的部分积都是整数, 所以 d3
+/// 恒为 1; 如果哪一步算出来不是 1, 说明"这一步的公式不适用" (比如有人拿这个
+/// 去算 `1/2 + 1/4`), 而静默地整数除会把这个错误埋成一个看起来合理的数。
+/// 除不尽时返回 CB_ERR —— 这是本模块里唯一一处"防御性检查", 它有真实的自检。
+///
+/// 溢出判定放在最后: 约分完再判 `r2 > U64MAX / n2`。因为**中间量已经被约到最小**,
+/// 这个判据是最松的 (先乘后判会因为中间量本身就溢出而误报)。
+fn cb_scale_div(r: u64, num: u64, den: u64, out: ptr, oo: u32) -> u32 {
+    if den == 0 {
+        return CB_ERR;
+    }
+    let g: u64 = cb_gcd_u(r, den);
+    let r2: u64 = r / g;
+    let d2: u64 = den / g;
+    let g2: u64 = cb_gcd_u(num, d2);
+    let n2: u64 = num / g2;
+    let d3: u64 = d2 / g2;
+    if d3 != 1 {
+        return CB_ERR;
+    }
+    if n2 != 0 && r2 > CB_U64MAX / n2 {
+        return CB_ERR;
+    }
+    mem_store64(out, oo, r2 * n2);
+    return CB_OK;
+}
+
+// ---------------------------------------------------------------- 阶乘与排列
+
+/// n! 写进 `out` (8 字节 u64)。溢出报 `CB_ERR`。
+///
+/// 有效范围: n ≤ 20 (20! = 2432902008176640000 < 2^64 ≤ 21!= 51090942171709440000)。
+/// 边界是**算出来的不是猜的**: 判据是每一步 `r > U64MAX / i`, 所以 20! 最后一步的
+/// 19! = 121645100408832000 对上界 922337203685477580 还有很大余量, 不会误报。
+/// n = 0 与 n = 1 都给 1 (0! 的定义)。
+pub fn cb_fact(n: u32, out: ptr) -> u32 {
+    let r: u64 = 1;
+    let i: u32 = 2;
+    while i <= n {
+        let f: u64 = i as u64;
+        if r > CB_U64MAX / f {
+            mem_store64(out, 0, 0);
+            return CB_ERR;
+        }
+        r = r * f;
+        i = i + 1;
+    }
+    mem_store64(out, 0, r);
+    return CB_OK;
+}
+
+/// 排列数 P(n, k) = n·(n-1)·…·(n-k+1) —— 从 n 个里**有序**取 k 个。
+///
+/// 递推就是定义本身 (逐步降因子), 不需要约分, 只需要逐步判界。
+/// k > n 给 0 (取不出这么多), 与"溢出"区分开。
+pub fn cb_perm(n: u32, k: u32, out: ptr) -> u32 {
+    if k > n {
+        mem_store64(out, 0, 0);
+        return CB_OK;
+    }
+    let r: u64 = 1;
+    let i: u32 = 0;
+    while i < k {
+        let f: u64 = (n - i) as u64;
+        if r > CB_U64MAX / f {
+            mem_store64(out, 0, 0);
+            return CB_ERR;
+        }
+        r = r * f;
+        i = i + 1;
+    }
+    mem_store64(out, 0, r);
+    return CB_OK;
+}
+
+// ---------------------------------------------------------------- 二项式
+
+/// 二项式系数 C(n, k) —— 从 n 个里**无序**取 k 个。溢出报 `CB_ERR`, k > n 给 0。
+///
+/// 递推: C(n, j) = C(n, j-1)·(n-j+1)/j, 每一步先约分 (cb_scale_div) 再乘。
+/// **对称性先用在入口**: k 与 n-k 里取小的那个当迭代次数 —— C(100, 3) 只要 3 步,
+/// 而不是 3 步之外还把 (n-j+1) 这一串大因子乘进去。
+///
+/// 这条对称缩减不只是快: 它同时把"分子的因子数"和"迭代次数"绑成同一个量, 于是
+/// 部分积里不会出现无谓的大因子, 中间量始终等于某个 C(n, j) ≤ 最终结果。
+pub fn cb_binom(n: u32, k: u32, out: ptr) -> u32 {
+    if k > n {
+        mem_store64(out, 0, 0);
+        return CB_OK;
+    }
+    let kk: u32 = k;
+    if n - k < k {
+        kk = n - k;
+    }
+    let r: u64 = 1;
+    let i: u32 = 1;
+    while i <= kk {
+        let s: u32 = cb_scale_div(r, (n - kk + i) as u64, i as u64, out, 0);
+        if s == CB_ERR {
+            mem_store64(out, 0, 0);
+            return CB_ERR;
+        }
+        r = mem_load64(out, 0);
+        i = i + 1;
+    }
+    mem_store64(out, 0, r);
+    return CB_OK;
+}
+
+/// 第 n 行帕斯卡三角 (C(n,0)..C(n,n)) 写进 `out`, 每个 8 字节 u64 小端。
+/// 返回**写出的个数** (n+1); `cap` 不够 (cap < n+1) 或中途溢出返回 `CB_ERR`。
+///
+/// 逐项相邻递推 C(n,k) = C(n,k-1)·(n-k+1)/k —— 一次乘法一次约分, 不走阶乘。
+/// 第一项 C(n,0) = 1 直接落盘, 循环从 k=1 开始。
+pub fn cb_pascal_row(n: u32, out: ptr, cap: u32) -> u32 {
+    if n == 4294967295 {
+        // n+1 会回绕成 0, 下面那条容量检查就形同虚设 —— 显式挡掉。
+        return CB_ERR;
+    }
+    if cap <= n {
+        return CB_ERR;
+    }
+    mem_store64(out, 0, 1);
+    let r: u64 = 1;
+    let k: u32 = 1;
+    while k <= n {
+        let s: u32 = cb_scale_div(r, (n - k + 1) as u64, k as u64, out, k * 8);
+        if s == CB_ERR {
+            return CB_ERR;
+        }
+        r = mem_load64(out, k * 8);
+        k = k + 1;
+    }
+    return n + 1;
+}
+
+// ---------------------------------------------------------------- 卡特兰
+
+/// 卡特兰数 Cat(n) 写进 `out`。溢出报 `CB_ERR`。Cat(0) = Cat(1) = 1。
+///
+/// 递推: Cat(n+1) = Cat(n)·2·(2n+1)/(n+2)。
+/// 与二项式共用 `cb_scale_div`, 于是同样享受"先约分再乘, 中间量不超过结果"。
+/// 这就是能到 n=36 (Cat(36) = 11959798385860453492) 的原因 —— 换成
+/// `C(2n,n)/(n+1)` 那条路只能到 n=33, 因为中间的 C(2n,n) 大 (n+1) 倍。
+/// n=37 的 Cat 是 45950804324621742364 > 2^64, 报 CB_ERR。
+pub fn cb_catalan(n: u32, out: ptr) -> u32 {
+    let r: u64 = 1;
+    let i: u32 = 0;
+    while i < n {
+        // 分子 2*(2i+1), 分母 i+2。括号不能省: `i * 2 + 1 * 2` 是错的。
+        let s: u32 = cb_scale_div(r, ((i * 2 + 1) * 2) as u64, (i + 2) as u64, out, 0);
+        if s == CB_ERR {
+            mem_store64(out, 0, 0);
+            return CB_ERR;
+        }
+        r = mem_load64(out, 0);
+        i = i + 1;
+    }
+    mem_store64(out, 0, r);
+    return CB_OK;
+}
+
+// ---------------------------------------------------------------- 斯特林数
+
+/// 算第 `n` 行第 `k` 列斯特林数所需的 ws 字节数: 两行 (k+1) 个 u64。
+///
+/// 为什么只有两行就够: 递推式 `f(i, j)` 只引用 `f(i-1, ·)`, 所以整个 (n+1)×(k+1)
+/// 的表里真正被读的只有相邻两行。堆是 64 KiB 且不回收, 从 (n+1)(k+1) 降到 2(k+1)
+/// 是必须的, 不是优化。
+pub fn cb_stirling_bytes(k: u32) -> u32 {
+    return (k + 1) * 16;
+}
+
+/// 滚动两行做完递推, 结果写进 `out`。`second` 非 0 时算第二类, 否则第一类。
+///
+/// 两类只差递推式的那个乘数:
+///   第一类 (无符号) c(i,j) = c(i-1,j-1) + (i-1)·c(i-1,j)  ← 行和是 n!
+///   第二类         S(i,j) = S(i-1,j-1) + j·S(i-1,j)        ← 行和是 Bell 数
+/// 所以骨架共用, 乘数由 `second` 挑 —— 复制一份骨架会让"两行滚动"的正确性
+/// 被验两次, 而它其实只有一份。
+///
+/// 三个判界点: 乘数 (i-1 或 j) 与 c 的乘积、以及"乘积 + 左上项"的加法。
+fn cb_stirling_core(n: u32, k: u32, ws: ptr, out: ptr, second: u32) -> u32 {
+    if k > n {
+        mem_store64(out, 0, 0);
+        return CB_OK;
+    }
+    let wide_bytes: u32 = (k + 1) * 8;
+    mem_fill(ws, 0, wide_bytes * 2, 0);
+    mem_store64(ws, 0, 1); // 第 0 行: c(0,0) = 1
+    let a0: u32 = 0; // 当前行 (i-1) 的偏移
+    let b0: u32 = wide_bytes; // 要被写的下一行偏移
+    let i: u32 = 1;
+    while i <= n {
+        // 第 i ≥ 1 行的 c(i,0) 恒为 0 (从 i 个元素里分 0 个非空组, 只有 i=0 才行)。
+        mem_store64(ws, b0, 0);
+        let m: u64 = (i - 1) as u64;
+        let j: u32 = 1;
+        while j <= k {
+            if second != 0 {
+                m = j as u64;
+            }
+            let left: u64 = mem_load64(ws, a0 + (j - 1) * 8); // c(i-1, j-1)
+            let up: u64 = mem_load64(ws, a0 + j * 8); // c(i-1, j)
+            let prod: u64 = 0;
+            if up != 0 && m != 0 {
+                if up > CB_U64MAX / m {
+                    return CB_ERR;
+                }
+                prod = up * m;
+            }
+            if left > CB_U64MAX - prod {
+                return CB_ERR;
+            }
+            mem_store64(ws, b0 + j * 8, left + prod);
+            j = j + 1;
+        }
+        // 换行: 刚写完的成为"上一行"。
+        let t: u32 = a0;
+        a0 = b0;
+        b0 = t;
+        i = i + 1;
+    }
+    mem_store64(out, 0, mem_load64(ws, a0 + k * 8));
+    return CB_OK;
+}
+
+/// 无符号第一类斯特林数 c(n, k): 把 n 个元素排成 k 个**环**的方案数。
+/// 溢出报 `CB_ERR` (n≈22 起, 因为行和是 n!)。k > n 给 0。
+/// ws 至少 `cb_stirling_bytes(k)` 字节。
+pub fn cb_stirling1(n: u32, k: u32, ws: ptr, out: ptr) -> u32 {
+    return cb_stirling_core(n, k, ws, out, 0);
+}
+
+/// 第二类斯特林数 S(n, k): 把 n 个元素分成 k 个**非空**集合的方案数。
+/// 溢出报 `CB_ERR` (n≈27 起, 因为行和是 Bell 数)。k > n 给 0。
+pub fn cb_stirling2(n: u32, k: u32, ws: ptr, out: ptr) -> u32 {
+    return cb_stirling_core(n, k, ws, out, 1);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_comb_fact_known() -> bool {
+    let o: ptr = alloc(16);
+    let a: u32 = cb_fact(0, o);
+    let v0: u64 = mem_load64(o, 0);
+    let b: u32 = cb_fact(1, o);
+    let v1: u64 = mem_load64(o, 0);
+    let c: u32 = cb_fact(5, o);
+    let v5: u64 = mem_load64(o, 0);
+    let d: u32 = cb_fact(10, o);
+    let v10: u64 = mem_load64(o, 0);
+    let e: u32 = cb_fact(20, o);
+    let v20: u64 = mem_load64(o, 0);
+    return a == CB_OK && v0 == 1 && b == CB_OK && v1 == 1
+        && c == CB_OK && v5 == 120 && d == CB_OK && v10 == 3628800
+        && e == CB_OK && v20 == 2432902008176640000;
+}
+
+fn test_comb_fact_overflow_is_err() -> bool {
+    // 20! 是 u64 装得下的最后一个阶乘, 21! 必须**报错而不是回绕**。
+    // 回绕会给一个 1.5e19 附近的"看着像数"的值 —— 这才是危险的失败方式。
+    let o: ptr = alloc(16);
+    let a: u32 = cb_fact(21, o);
+    let v: u64 = mem_load64(o, 0);
+    return a == CB_ERR && v == 0 && cb_fact(25, o) == CB_ERR
+        && cb_fact(4294967295, o) == CB_ERR;
+}
+
+fn test_comb_binom_known() -> bool {
+    let o: ptr = alloc(16);
+    let a: u32 = cb_binom(10, 5, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_binom(4, 2, o);
+    let w: u64 = mem_load64(o, 0);
+    let c: u32 = cb_binom(0, 0, o);
+    let x: u64 = mem_load64(o, 0);
+    let d: u32 = cb_binom(6, 3, o);
+    let y: u64 = mem_load64(o, 0);
+    let e: u32 = cb_binom(52, 5, o);
+    let z: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 252 && b == CB_OK && w == 6
+        && c == CB_OK && x == 1 && d == CB_OK && y == 20
+        && e == CB_OK && z == 2598960;
+}
+
+fn test_comb_binom_edges() -> bool {
+    // C(n,0)=1, C(n,n)=1, C(n,1)=n —— 三条边界约定, 遍历一批。
+    // 用 `ok` 标志位而不是提前 return (没有无值 return, 也为了不跳过后面几项)。
+    let o: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 20 {
+        cb_binom(n, 0, o);
+        if mem_load64(o, 0) != 1 {
+            ok = 0;
+        }
+        cb_binom(n, n, o);
+        if mem_load64(o, 0) != 1 {
+            ok = 0;
+        }
+        if n >= 1 {
+            cb_binom(n, 1, o);
+            if mem_load64(o, 0) != n as u64 {
+                ok = 0;
+            }
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_binom_k_gt_n_is_zero() -> bool {
+    // k > n 是"0 种取法", 不是错误 —— 两个不同概念给两个不同结果。
+    let o: ptr = alloc(16);
+    let a: u32 = cb_binom(3, 5, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_binom(0, 1, o);
+    let w: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 0 && b == CB_OK && w == 0;
+}
+
+fn test_comb_binom_symmetry() -> bool {
+    // C(n,k) == C(n,n-k) 遍历验 —— 比一个单点断言有力得多: 只要约分或对称缩减
+    // 写错一步, 这个环就会在某个 (n,k) 上破。
+    let o1: ptr = alloc(16);
+    let o2: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 30 {
+        let k: u32 = 0;
+        while k <= n {
+            let a: u32 = cb_binom(n, k, o1);
+            let b: u32 = cb_binom(n, n - k, o2);
+            if a != b || mem_load64(o1, 0) != mem_load64(o2, 0) {
+                ok = 0;
+            }
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_binom_overflow_boundary() -> bool {
+    // 递推约分的价值就在这条: C(67,33) = 14226520737620288370 装得下 (OK),
+    // C(68,34) = 28453041475240576740 装不下 (ERR)。若走 n!/(k!(n-k)!) 那条路,
+    // 连 C(21,10) 都会因为 21! 溢出而报错 —— 那才是真的浪费可解区间。
+    let o: ptr = alloc(16);
+    let a: u32 = cb_binom(67, 33, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_binom(68, 34, o);
+    let c: u32 = cb_binom(21, 10, o);
+    let y: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 14226520737620288370 && b == CB_ERR
+        && c == CB_OK && y == 352716;
+}
+
+fn test_comb_binom_relation_to_fact() -> bool {
+    // 真正的恒等式: C(n,k)·k!·(n-k)! == n!。它同时压住阶乘与二项式两条路 ——
+    // 任何一个的递推写错都会在这里露出来, 比"某个数对不对"强。
+    let o: ptr = alloc(16);
+    let f: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 12 {
+        cb_fact(n, f);
+        let nf: u64 = mem_load64(f, 0);
+        let k: u32 = 0;
+        while k <= n {
+            cb_binom(n, k, o);
+            let c: u64 = mem_load64(o, 0);
+            cb_fact(k, f);
+            let kf: u64 = mem_load64(f, 0);
+            cb_fact(n - k, f);
+            let rk: u64 = mem_load64(f, 0);
+            if c * kf * rk != nf {
+                ok = 0;
+            }
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_perm_known() -> bool {
+    let o: ptr = alloc(16);
+    let a: u32 = cb_perm(5, 2, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_perm(5, 0, o);
+    let w: u64 = mem_load64(o, 0);
+    let c: u32 = cb_perm(5, 5, o);
+    let x: u64 = mem_load64(o, 0);
+    let d: u32 = cb_perm(10, 3, o);
+    let y: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 20 && b == CB_OK && w == 1
+        && c == CB_OK && x == 120 && d == CB_OK && y == 720;
+}
+
+fn test_comb_perm_k_gt_n_is_zero() -> bool {
+    let o: ptr = alloc(16);
+    let a: u32 = cb_perm(3, 5, o);
+    let v: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 0 && cb_perm(0, 1, o) == CB_OK && mem_load64(o, 0) == 0;
+}
+
+fn test_comb_perm_overflow_is_err() -> bool {
+    // P(20,20) = 20! 恰好装得下; P(21,20) = 21! 装不下 —— 必须报错。
+    let o: ptr = alloc(16);
+    let a: u32 = cb_perm(20, 20, o);
+    let v: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 2432902008176640000 && cb_perm(21, 20, o) == CB_ERR
+        && cb_perm(21, 21, o) == CB_ERR;
+}
+
+fn test_comb_perm_vs_binom() -> bool {
+    // 两个数之间也有恒等式: P(n,k) == C(n,k)·k! —— 顺带把 k=0 与 k=n 两端也扫到。
+    let o: ptr = alloc(16);
+    let f: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 12 {
+        let k: u32 = 0;
+        while k <= n {
+            cb_perm(n, k, o);
+            let p: u64 = mem_load64(o, 0);
+            cb_binom(n, k, f);
+            let c: u64 = mem_load64(f, 0);
+            cb_fact(k, f);
+            if p != c * mem_load64(f, 0) {
+                ok = 0;
+            }
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_catalan_known() -> bool {
+    let o: ptr = alloc(16);
+    let ok: u32 = 1;
+    // 1, 1, 2, 5, 14, 42, 132 —— 教科书上的前七项。
+    let want: ptr = alloc(64);
+    mem_store64(want, 0, 1);
+    mem_store64(want, 8, 1);
+    mem_store64(want, 16, 2);
+    mem_store64(want, 24, 5);
+    mem_store64(want, 32, 14);
+    mem_store64(want, 40, 42);
+    mem_store64(want, 48, 132);
+    let n: u32 = 0;
+    while n <= 6 {
+        let s: u32 = cb_catalan(n, o);
+        if s != CB_OK || mem_load64(o, 0) != mem_load64(want, n * 8) {
+            ok = 0;
+        }
+        n = n + 1;
+    }
+    if cb_catalan(10, o) != CB_OK || mem_load64(o, 0) != 16796 {
+        ok = 0;
+    }
+    return ok == 1;
+}
+
+fn test_comb_catalan_recurrence_invariant() -> bool {
+    // 卡特兰的基本恒等式: Cat(n+1)·(n+2) == Cat(n)·2·(2n+1)。
+    // **这条是递推本身的正确性证书** —— 只断言"前几项对了"无法排除"某一项之后开始漂"。
+    let o: ptr = alloc(16);
+    let p: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 25 {
+        cb_catalan(n, o);
+        cb_catalan(n + 1, p);
+        let cn: u64 = mem_load64(o, 0);
+        let cn1: u64 = mem_load64(p, 0);
+        if cn1 * ((n + 2) as u64) != cn * (((n * 2 + 1) * 2) as u64) {
+            ok = 0;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_catalan_overflow_boundary() -> bool {
+    // 递推路线的代价与收益都在这条上: Cat(36) 装得下 (OK), Cat(37) 装不下 (ERR)。
+    // 换 C(2n,n)/(n+1) 的话 n=34 就会因为 C(68,34) 溢出而误报。
+    let o: ptr = alloc(16);
+    let a: u32 = cb_catalan(36, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_catalan(37, o);
+    return a == CB_OK && v == 11959798385860453492 && b == CB_ERR;
+}
+
+fn test_comb_pascal_row() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = cb_pascal_row(5, o, 16);
+    let ok: bool = n == 6 && mem_load64(o, 0) == 1 && mem_load64(o, 8) == 5
+        && mem_load64(o, 16) == 10 && mem_load64(o, 24) == 10
+        && mem_load64(o, 32) == 5 && mem_load64(o, 40) == 1;
+    let m: u32 = cb_pascal_row(0, o, 16);
+    let ok0: bool = m == 1 && mem_load64(o, 0) == 1;
+    // 缓冲不够 -> ERR, 不静默截断 (截断的行会让调用方以为"这行就到这")
+    let tiny: u32 = cb_pascal_row(5, o, 5);
+    return ok && ok0 && tiny == CB_ERR && cb_pascal_row(5, o, 6) == 6;
+}
+
+fn test_comb_pascal_row_matches_binom() -> bool {
+    // 行的每一项必须等于 cb_binom —— 两条独立实现互相钉住。
+    let o: ptr = alloc(256);
+    let b: ptr = alloc(16);
+    let ok: u32 = 1;
+    let n: u32 = 0;
+    while n <= 12 {
+        let got: u32 = cb_pascal_row(n, o, 32);
+        if got != n + 1 {
+            ok = 0;
+        }
+        let k: u32 = 0;
+        while k <= n {
+            cb_binom(n, k, b);
+            if mem_load64(o, k * 8) != mem_load64(b, 0) {
+                ok = 0;
+            }
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_stirling1_known() -> bool {
+    let ws: ptr = alloc(512);
+    let o: ptr = alloc(16);
+    let a: u32 = cb_stirling1(5, 2, ws, o);
+    let v1: u64 = mem_load64(o, 0);
+    let b: u32 = cb_stirling1(6, 3, ws, o);
+    let v2: u64 = mem_load64(o, 0);
+    let c: u32 = cb_stirling1(7, 4, ws, o);
+    let v3: u64 = mem_load64(o, 0);
+    let d: u32 = cb_stirling1(12, 5, ws, o);
+    let v4: u64 = mem_load64(o, 0);
+    let e: u32 = cb_stirling1(0, 0, ws, o);
+    let v5: u64 = mem_load64(o, 0);
+    let f: u32 = cb_stirling1(5, 0, ws, o);
+    let v6: u64 = mem_load64(o, 0);
+    return a == CB_OK && v1 == 50 && b == CB_OK && v2 == 225
+        && c == CB_OK && v3 == 735 && d == CB_OK && v4 == 45995730
+        && e == CB_OK && v5 == 1 && f == CB_OK && v6 == 0;
+}
+
+fn test_comb_stirling1_row_sum_is_fact() -> bool {
+    // **第一类斯特林数的行和等于 n!** —— 这不是巧合, 是"每个排列唯一分解成若干
+    // 环"这条组合事实。拿它当判据比逐个比数值强: 它把整行绑成一个约束。
+    let ws: ptr = alloc(512);
+    let o: ptr = alloc(16);
+    let f: ptr = alloc(16);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 10 {
+        let sum: u64 = 0;
+        let k: u32 = 0;
+        while k <= n {
+            cb_stirling1(n, k, ws, o);
+            sum = sum + mem_load64(o, 0);
+            k = k + 1;
+        }
+        cb_fact(n, f);
+        if sum != mem_load64(f, 0) {
+            ok = 0;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_stirling2_known() -> bool {
+    let ws: ptr = alloc(512);
+    let o: ptr = alloc(16);
+    let a: u32 = cb_stirling2(5, 2, ws, o);
+    let v1: u64 = mem_load64(o, 0);
+    let b: u32 = cb_stirling2(6, 3, ws, o);
+    let v2: u64 = mem_load64(o, 0);
+    let c: u32 = cb_stirling2(7, 3, ws, o);
+    let v3: u64 = mem_load64(o, 0);
+    let d: u32 = cb_stirling2(10, 5, ws, o);
+    let v4: u64 = mem_load64(o, 0);
+    let e: u32 = cb_stirling2(10, 1, ws, o);
+    let v5: u64 = mem_load64(o, 0);
+    let f: u32 = cb_stirling2(10, 10, ws, o);
+    let v6: u64 = mem_load64(o, 0);
+    return a == CB_OK && v1 == 15 && b == CB_OK && v2 == 90
+        && c == CB_OK && v3 == 301 && d == CB_OK && v4 == 42525
+        && e == CB_OK && v5 == 1 && f == CB_OK && v6 == 1;
+}
+
+fn test_comb_stirling2_row_sum_is_bell() -> bool {
+    // 第二类的行和是 Bell 数 (划分数): B(0..7) = 1, 1, 2, 5, 15, 52, 203, 877。
+    let ws: ptr = alloc(512);
+    let o: ptr = alloc(16);
+    let want: ptr = alloc(64);
+    mem_store64(want, 0, 1);
+    mem_store64(want, 8, 1);
+    mem_store64(want, 16, 2);
+    mem_store64(want, 24, 5);
+    mem_store64(want, 32, 15);
+    mem_store64(want, 40, 52);
+    mem_store64(want, 48, 203);
+    mem_store64(want, 56, 877);
+    let n: u32 = 0;
+    let ok: u32 = 1;
+    while n <= 7 {
+        let sum: u64 = 0;
+        let k: u32 = 0;
+        while k <= n {
+            cb_stirling2(n, k, ws, o);
+            sum = sum + mem_load64(o, 0);
+            k = k + 1;
+        }
+        if sum != mem_load64(want, n * 8) {
+            ok = 0;
+        }
+        n = n + 1;
+    }
+    return ok == 1;
+}
+
+fn test_comb_stirling_overflow_is_err() -> bool {
+    // 两类的溢出点不同 (行和分别是 n! 与 Bell 数), 所以分开验:
+    // 第一类 n=25 已经远超 u64, 第二类 n=30 也是。反之 s1(20,10) 必须仍然 OK。
+    let ws: ptr = alloc(2048);
+    let o: ptr = alloc(16);
+    let a: u32 = cb_stirling1(20, 10, ws, o);
+    let v: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 381922055502195
+        && cb_stirling1(25, 12, ws, o) == CB_ERR
+        && cb_stirling2(30, 12, ws, o) == CB_ERR;
+}
+
+fn test_comb_stirling_k_gt_n_is_zero() -> bool {
+    let ws: ptr = alloc(64);
+    let o: ptr = alloc(16);
+    let a: u32 = cb_stirling1(2, 5, ws, o);
+    let v: u64 = mem_load64(o, 0);
+    let b: u32 = cb_stirling2(2, 5, ws, o);
+    let w: u64 = mem_load64(o, 0);
+    return a == CB_OK && v == 0 && b == CB_OK && w == 0
+        && cb_stirling_bytes(4) == 80;
+}

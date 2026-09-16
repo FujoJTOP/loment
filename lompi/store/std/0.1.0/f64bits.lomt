@@ -1,0 +1,342 @@
+// std/f64bits.lomt — IEEE 754 双精度的位级视图
+//
+// 为什么先有它: 语言里**没有浮点类型** (实测 `let x: f64 = 1.5;` -> `E2 未知类型`)。
+// 要算浮点, 唯一的路是把 f64 当成一个 u64 位模式自己实现 —— 那就先得能干净地
+// 拆装符号/指数/尾数、判断 NaN/无穷/次正规。这一层只碰位, 不做算术, 所以它可以
+// 完全靠"已知位模式"来验证 (1.0 就是 0x3FF0000000000000, 不是"大概等于 1")。
+//
+// 布局 (52+11+1):
+//   [63] 符号 | [62:52] 指数 (偏置 1023) | [51:0] 尾数
+//   normal : 值 = (1 + 尾数/2^52) * 2^(指数-1023)
+//   subnormal: 指数域 0 且尾数非 0 -> 值 = 尾数 * 2^(-1074)   (没有隐含的 1)
+//
+// 常量只能写整数字面量 (skill §6.11: 不能是表达式、不能引用别的常量), 所以下面
+// 所有掩码都是**手算好的十进制**而不是 0x… 或 (1<<52)-1。
+//
+// 命名: 公开 f64bits_*, 内部 fb_*。自检 test_f64bits_*。
+
+module f64bits
+
+/// 指数偏置。
+pub const F64_BIAS: u32 = 1023;
+/// 尾数位数。
+pub const F64_MANT_BITS: u32 = 52;
+/// 偏置 + 尾数位 = 1075。normal 的值 = M * 2^(指数域 - 1075), M 是 53 位整数。
+pub const F64_EXP_OFFSET: u32 = 1075;
+/// 指数域全 1 (无穷 / NaN)。
+pub const F64_EXP_MAX: u32 = 2047;
+
+/// 符号位。
+pub const F64_SIGN_MASK: u64 = 9223372036854775808;
+/// 指数域。
+pub const F64_EXP_MASK: u64 = 9218868437227405312;
+/// 尾数域 (52 位)。
+pub const F64_MANT_MASK: u64 = 4503599627370495;
+/// 隐含的 1 (第 52 位)。
+pub const F64_IMPLICIT: u64 = 4503599627370496;
+
+pub const F64_POS_ZERO: u64 = 0;
+pub const F64_NEG_ZERO: u64 = 9223372036854775808;
+pub const F64_ONE: u64 = 4607182418800017408;
+pub const F64_TWO: u64 = 4611686018427387904;
+pub const F64_HALF: u64 = 4602678819172646912;
+pub const F64_THREE: u64 = 4613937818241073152;
+pub const F64_POS_INF: u64 = 9218868437227405312;
+pub const F64_NEG_INF: u64 = 18442240474082181120;
+pub const F64_QNAN: u64 = 9221120237041090560;
+/// 最大有限值 (0x7FEFFFFFFFFFFFFF)。
+pub const F64_MAX: u64 = 9218868437227405311;
+/// 最小正规 (0x0010000000000000)。
+pub const F64_MIN_NORMAL: u64 = 4503599627370496;
+/// 最小次正规 (0x0000000000000001) —— 也是"最接近 0 的正数"。
+pub const F64_MIN_SUB: u64 = 1;
+/// 最大次正规。
+pub const F64_MAX_SUB: u64 = 4503599627370495;
+/// 最小次正规的负数。
+pub const F64_NEG_MIN_SUB: u64 = 9223372036854775809;
+
+/// 分类码: 0 零 / 1 次正规 / 2 正规 / 3 无穷 / 4 NaN。
+pub const F64_C_ZERO: u32 = 0;
+pub const F64_C_SUB: u32 = 1;
+pub const F64_C_NORMAL: u32 = 2;
+pub const F64_C_INF: u32 = 3;
+pub const F64_C_NAN: u32 = 4;
+
+pub fn f64bits_sign(b: u64) -> u32 {
+    return (b >> 63) as u32;
+}
+
+/// 11 位指数域 (未减偏置)。
+pub fn f64bits_exp(b: u64) -> u32 {
+    return ((b & F64_EXP_MASK) >> 52) as u32;
+}
+
+/// 52 位尾数域 (**不含**隐含的 1)。
+pub fn f64bits_mant(b: u64) -> u64 {
+    return b & F64_MANT_MASK;
+}
+
+/// 拼装。指数域与尾数域都会被截到各自的宽度 —— 拼出非法的组合比静默溢出好。
+pub fn f64bits_pack(sign: u32, exp: u32, mant: u64) -> u64 {
+    return ((sign as u64) << 63) | (((exp & 2047) as u64) << 52) | (mant & F64_MANT_MASK);
+}
+
+pub fn f64bits_is_nan(b: u64) -> bool {
+    return f64bits_exp(b) == F64_EXP_MAX && f64bits_mant(b) != 0;
+}
+
+pub fn f64bits_is_inf(b: u64) -> bool {
+    return f64bits_exp(b) == F64_EXP_MAX && f64bits_mant(b) == 0;
+}
+
+pub fn f64bits_is_finite(b: u64) -> bool {
+    return f64bits_exp(b) != F64_EXP_MAX;
+}
+
+/// 正零与负零都算零。
+pub fn f64bits_is_zero(b: u64) -> bool {
+    return (b & 9223372036854775807) == 0;
+}
+
+pub fn f64bits_is_subnormal(b: u64) -> bool {
+    return f64bits_exp(b) == 0 && f64bits_mant(b) != 0;
+}
+
+pub fn f64bits_is_normal(b: u64) -> bool {
+    let e: u32 = f64bits_exp(b);
+    return e != 0 && e != F64_EXP_MAX;
+}
+
+/// 符号位是否为 1 (注意: 对 -0.0 也是 true)。
+pub fn f64bits_is_negative(b: u64) -> bool {
+    return (b >> 63) == 1;
+}
+
+pub fn f64bits_neg(b: u64) -> u64 {
+    return b ^ F64_SIGN_MASK;
+}
+
+pub fn f64bits_abs(b: u64) -> u64 {
+    return b & 9223372036854775807;
+}
+
+/// 取 a 的幅值、b 的符号。
+pub fn f64bits_copysign(a: u64, b: u64) -> u64 {
+    return (a & 9223372036854775807) | (b & F64_SIGN_MASK);
+}
+
+pub fn f64bits_classify(b: u64) -> u32 {
+    let e: u32 = f64bits_exp(b);
+    let m: u64 = f64bits_mant(b);
+    if e == F64_EXP_MAX {
+        if m == 0 {
+            return F64_C_INF;
+        }
+        return F64_C_NAN;
+    }
+    if e == 0 {
+        if m == 0 {
+            return F64_C_ZERO;
+        }
+        return F64_C_SUB;
+    }
+    return F64_C_NORMAL;
+}
+
+/// 下一个更大的可表示值 (ULP 步进)。
+pub fn f64bits_next_up(b: u64) -> u64 {
+    if f64bits_is_nan(b) {
+        return b;
+    }
+    if b == F64_POS_INF {
+        return b;
+    }
+    if b == F64_NEG_ZERO {
+        return F64_MIN_SUB;
+    }
+    if f64bits_is_negative(b) {
+        return b - 1;
+    }
+    return b + 1;
+}
+
+/// 下一个更小的可表示值。
+pub fn f64bits_next_down(b: u64) -> u64 {
+    if f64bits_is_nan(b) {
+        return b;
+    }
+    if b == F64_NEG_INF {
+        return b;
+    }
+    if b == F64_POS_ZERO {
+        return F64_NEG_MIN_SUB;
+    }
+    if f64bits_is_negative(b) {
+        return b + 1;
+    }
+    return b - 1;
+}
+
+/// 同号时两个可表示值之间隔了多少个 ULP (用来量精度损失)。
+/// 不同号或含 NaN 时按幅值之和 + 1 近似 —— 只用于诊断, 不用于判断。
+pub fn f64bits_ulp_diff(a: u64, b: u64) -> u64 {
+    if f64bits_is_nan(a) || f64bits_is_nan(b) {
+        return 18446744073709551615;
+    }
+    if f64bits_sign(a) == f64bits_sign(b) {
+        if a >= b {
+            return a - b;
+        }
+        return b - a;
+    }
+    return 0;
+}
+
+/// 这个值是不是"精确可表示"的整数 (指数域足够大且尾数低位为零)。
+pub fn f64bits_is_integer(b: u64) -> bool {
+    if f64bits_is_finite(b) == false {
+        return false;
+    }
+    let e: u32 = f64bits_exp(b);
+    if e == F64_EXP_MAX {
+        return false;
+    }
+    if f64bits_is_zero(b) {
+        return true;
+    }
+    // 尾数低位里"低于小数点"的那些位必须为 0。
+    if e >= 1023 + 52 {
+        return true;
+    }
+    if e < 1023 {
+        return false;
+    }
+    let frac_bits: u32 = 1023 + 52 - e;
+    let frac_mask: u64 = f64bits_mant(b) & (fb_mask_lo(frac_bits));
+    return frac_mask == 0;
+}
+
+fn fb_mask_lo(s: u32) -> u64 {
+    if s >= 64 {
+        return 18446744073709551615;
+    }
+    return ((1 as u64) << s) - 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_f64bits_known_patterns() -> bool {
+    // 这些不是"算出来的", 是 IEEE 754 里写着的位模式 —— 拿它们当锚点。
+    // 3.0 = 1.1b x 2^1 -> 尾数域是 2^51, 不是 2^52 (后者会被掩码截成 0, 也就成了 2.0)。
+    return F64_ONE == f64bits_pack(0, 1023, 0) && F64_TWO == f64bits_pack(0, 1024, 0)
+        && F64_HALF == f64bits_pack(0, 1022, 0)
+        && F64_THREE == f64bits_pack(0, 1024, 2251799813685248);
+}
+
+fn test_f64bits_fields_of_one() -> bool {
+    return f64bits_sign(F64_ONE) == 0 && f64bits_exp(F64_ONE) == 1023 && f64bits_mant(F64_ONE) == 0;
+}
+
+fn test_f64bits_fields_of_one_point_five() -> bool {
+    // 1.5 = 0x3FF8000000000000 -> 指数 1023, 尾数 2^51
+    let x: u64 = 4609434218613702656;
+    return f64bits_exp(x) == 1023 && f64bits_mant(x) == 2251799813685248
+        && f64bits_pack(0, 1023, 2251799813685248) == x;
+}
+
+fn test_f64bits_sign_extraction() -> bool {
+    return f64bits_sign(F64_NEG_ZERO) == 1 && f64bits_sign(F64_NEG_INF) == 1
+        && f64bits_is_negative(F64_NEG_ZERO) && f64bits_is_negative(F64_ONE) == false;
+}
+
+fn test_f64bits_pack_masks_fields() -> bool {
+    // 指数域给 4095 (11 位放不下) 时必须被截到 2047, 而不是污染符号位。
+    let x: u64 = f64bits_pack(0, 4095, 0);
+    return f64bits_exp(x) == 2047 && f64bits_sign(x) == 0;
+}
+
+fn test_f64bits_is_nan() -> bool {
+    return f64bits_is_nan(F64_QNAN) && f64bits_is_nan(F64_POS_INF) == false
+        && f64bits_is_nan(F64_ONE) == false;
+}
+
+fn test_f64bits_is_inf() -> bool {
+    return f64bits_is_inf(F64_POS_INF) && f64bits_is_inf(F64_NEG_INF)
+        && f64bits_is_inf(F64_QNAN) == false && f64bits_is_inf(F64_MAX) == false;
+}
+
+fn test_f64bits_is_finite() -> bool {
+    return f64bits_is_finite(F64_ONE) && f64bits_is_finite(F64_MAX)
+        && f64bits_is_finite(F64_MIN_SUB) && f64bits_is_finite(F64_POS_INF) == false
+        && f64bits_is_finite(F64_QNAN) == false;
+}
+
+fn test_f64bits_zero_includes_negative_zero() -> bool {
+    return f64bits_is_zero(F64_POS_ZERO) && f64bits_is_zero(F64_NEG_ZERO)
+        && f64bits_is_zero(F64_MIN_SUB) == false;
+}
+
+fn test_f64bits_classify() -> bool {
+    return f64bits_classify(F64_POS_ZERO) == F64_C_ZERO
+        && f64bits_classify(F64_NEG_ZERO) == F64_C_ZERO
+        && f64bits_classify(F64_MIN_SUB) == F64_C_SUB
+        && f64bits_classify(F64_MAX_SUB) == F64_C_SUB
+        && f64bits_classify(F64_MIN_NORMAL) == F64_C_NORMAL
+        && f64bits_classify(F64_ONE) == F64_C_NORMAL
+        && f64bits_classify(F64_POS_INF) == F64_C_INF
+        && f64bits_classify(F64_QNAN) == F64_C_NAN;
+}
+
+fn test_f64bits_min_normal_is_not_subnormal() -> bool {
+    // 次正规与正规的分界正是这一个 ULP —— 边界写错时只有它挂。
+    return f64bits_is_subnormal(F64_MIN_NORMAL) == false
+        && f64bits_is_subnormal(F64_MAX_SUB) && f64bits_is_normal(F64_MIN_NORMAL);
+}
+
+fn test_f64bits_neg_is_self_inverse() -> bool {
+    return f64bits_neg(f64bits_neg(F64_ONE)) == F64_ONE
+        && f64bits_neg(F64_ONE) == 13830554455654793216;
+}
+
+fn test_f64bits_abs_and_copysign() -> bool {
+    return f64bits_abs(F64_NEG_INF) == F64_POS_INF
+        && f64bits_copysign(F64_ONE, F64_NEG_ZERO) == f64bits_neg(F64_ONE)
+        && f64bits_copysign(F64_ONE, F64_THREE) == F64_ONE;
+}
+
+fn test_f64bits_next_up_walks_ulps() -> bool {
+    return f64bits_next_up(F64_POS_ZERO) == F64_MIN_SUB
+        && f64bits_next_up(F64_MIN_SUB) == 2 && f64bits_next_up(F64_ONE) == 4607182418800017409;
+}
+
+fn test_f64bits_next_up_from_neg_zero() -> bool {
+    // -0.0 向上跨过的是整个"零"这一格 -> 最小正次正规, 而不是 -0 加一。
+    return f64bits_next_up(F64_NEG_ZERO) == F64_MIN_SUB;
+}
+
+fn test_f64bits_next_down_from_zero() -> bool {
+    return f64bits_next_down(F64_POS_ZERO) == F64_NEG_MIN_SUB;
+}
+
+fn test_f64bits_next_up_down_roundtrip() -> bool {
+    let v: u64 = 4614256656552045848;
+    return f64bits_next_down(f64bits_next_up(v)) == v
+        && f64bits_next_up(f64bits_next_down(v)) == v;
+}
+
+fn test_f64bits_next_up_at_infinity_saturates() -> bool {
+    return f64bits_next_up(F64_POS_INF) == F64_POS_INF
+        && f64bits_next_down(F64_NEG_INF) == F64_NEG_INF;
+}
+
+fn test_f64bits_ulp_diff() -> bool {
+    return f64bits_ulp_diff(F64_ONE, f64bits_next_up(F64_ONE)) == 1
+        && f64bits_ulp_diff(F64_ONE, F64_ONE) == 0
+        && f64bits_ulp_diff(F64_ONE, F64_TWO) == 4503599627370496;
+}
+
+fn test_f64bits_is_integer() -> bool {
+    return f64bits_is_integer(F64_ONE) && f64bits_is_integer(F64_TWO)
+        && f64bits_is_integer(F64_POS_ZERO) && f64bits_is_integer(F64_HALF) == false
+        && f64bits_is_integer(F64_POS_INF) == false;
+}

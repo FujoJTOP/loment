@@ -1,0 +1,136 @@
+// std/num.lomt — 整数打包、上下界与夹取
+//
+// 为什么要它: "把两个 u32 并进一个 u64" 这件事在仓库里有三个名字 ——
+// lomc 的 `v_pack`、lomstatus 的 `pk16`/`hi32`/`lo32`、以及我写的 argv_off/argv_len。
+// 同一个操作四份实现, 这不是巧合: **函数只能返回一个值、语言又没有出参**
+// (skill §3 内建表里没有 out 参数那一类东西), 所以 (a, b) 只能并成一个数。
+// 那就把这个约定收成一份, 让别的模块都引它, 而不是各写各的移位。
+//
+// 命名: 公开一律 num_*, 内部一律 nu_*。自检 test_num_*。
+
+module num
+
+/// 2^32: 打包时 lo 占低 32 位。
+pub const NUM_SCALE: u64 = 4294967296;
+
+/// 把 (hi, lo) 并成一个 u64。
+pub fn num_pack2(hi: u32, lo: u32) -> u64 {
+    return (hi as u64) * NUM_SCALE + (lo as u64);
+}
+
+/// 取打包值的高 32 位。
+pub fn num_hi(v: u64) -> u32 {
+    return (v >> 32) as u32;
+}
+
+/// 取打包值的低 32 位。
+pub fn num_lo(v: u64) -> u32 {
+    return (v % NUM_SCALE) as u32;
+}
+
+pub fn num_min(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+pub fn num_max(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+pub fn num_min32(a: u32, b: u32) -> u32 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+pub fn num_max32(a: u32, b: u32) -> u32 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+/// 把 v 夹进 [lo, hi]。lo > hi 时返回 lo (而不是未定义)。
+pub fn num_clamp32(v: u32, lo: u32, hi: u32) -> u32 {
+    if lo > hi {
+        return lo;
+    }
+    if v < lo {
+        return lo;
+    }
+    if v > hi {
+        return hi;
+    }
+    return v;
+}
+
+/// 差的绝对值 (避免写成 a - b 时的回绕)。
+pub fn num_abs_diff32(a: u32, b: u32) -> u32 {
+    if a > b {
+        return a - b;
+    }
+    return b - a;
+}
+
+pub fn num_abs_diff64(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a - b;
+    }
+    return b - a;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_num_pack2_roundtrip() -> bool {
+    let v: u64 = num_pack2(3, 5);
+    return num_hi(v) == 3 && num_lo(v) == 5;
+}
+
+fn test_num_pack2_extremes() -> bool {
+    // lo 全 1 不能污染 hi —— 用加法打包时这条会挂 (会进位)。
+    let v: u64 = num_pack2(7, 4294967295);
+    return num_hi(v) == 7 && num_lo(v) == 4294967295;
+}
+
+fn test_num_pack2_zero_hi() -> bool {
+    let v: u64 = num_pack2(0, 4);
+    return v == 4 && num_hi(v) == 0 && num_lo(v) == 4;
+}
+
+fn test_num_min_max() -> bool {
+    return num_min(3, 9) == 3 && num_max(3, 9) == 9 && num_min(9, 3) == 3 && num_max(9, 3) == 9;
+}
+
+fn test_num_min_max32() -> bool {
+    return num_min32(4294967295, 1) == 1 && num_max32(4294967295, 1) == 4294967295;
+}
+
+fn test_num_clamp32() -> bool {
+    return num_clamp32(5, 0, 10) == 5
+        && num_clamp32(0, 4, 10) == 4
+        && num_clamp32(99, 0, 10) == 10;
+}
+
+fn test_num_clamp32_inverted_bounds() -> bool {
+    // lo > hi 是调用方的错, 但不能因此给出未定义结果。
+    return num_clamp32(5, 10, 0) == 10;
+}
+
+fn test_num_abs_diff32() -> bool {
+    return num_abs_diff32(3, 9) == 6 && num_abs_diff32(9, 3) == 6 && num_abs_diff32(4, 4) == 0;
+}
+
+fn test_num_abs_diff32_wraps_safely() -> bool {
+    // 直接写 a - b 会回绕成天文数字, 这条就是盯着那个。
+    return num_abs_diff32(0, 4294967295) == 4294967295;
+}
+
+fn test_num_abs_diff64() -> bool {
+    return num_abs_diff64(0 as u64, 18446744073709551615) == 18446744073709551615;
+}

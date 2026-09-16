@@ -1,0 +1,399 @@
+// std/once.lomt — 一次性初始化 (赢家选举 + 三态迁移)
+//
+// 为什么需要它: "这段初始化只能做一次, 而且只能一个人做"是个到处都有的形状 —— 建表、
+// 打开文件、算常量、填缓存。做两次可能只是浪费, 也可能是灾难 (第二个初始化把第一个的
+// 状态推倒重来)。
+//
+// 怎么做出来的 (没有 CAS 的前提下): 用**一个单调计数器 `claim` 的旧值**选举。
+//   `c = fetch_add(claim, 1)` —— 只有一个调用者会拿到 `c == 0`。那个就是赢家, 而且**恰好
+//   一个**: 每个旧值只被一个调用者拿到, 这不是"通常只有一个", 是**逻辑上只有一个**。
+//   选举不需要 CAS; CAS 在这里的唯一用处是"把 0 改成 1 同时判断原来是不是 0" ——
+//   而 `fetch_add(·, 1) == 0` 白送了同一件事。(前提: claim 从头到尾不做减法, 见失败策略。)
+//
+// ============================================================================
+// 三态 (加一个失败终态)
+// ============================================================================
+//   ON_IDLE   = 0  还没人开始
+//   ON_RUNNING= 1  有一个赢家在跑
+//   ON_DONE   = 2  跑完了, 结果可用
+//   ON_FAILED = 3  跑砸了 —— **终态**, 见下面的失败策略
+// 另外 `on_begin`/`on_claim` 可能返回 **ON_WON = 4**, 它**不是状态字里的值** ——
+// 它是给调用方的一句话: "你是那一个, 现在轮到你跑"。状态字里永远只有 0..3。
+//
+// 迁移只可能是这四条, 而且是**单向**的 (除了 on_reset):
+//     IDLE --赢家--> RUNNING --成功--> DONE      (终态)
+//                             --失败--> FAILED    (终态)
+// ============================================================================
+// 失败策略: **粘住, 不重试** (这是被"没有 CAS"逼出来的, 不是偏好)
+// ============================================================================
+//   赢家失败后 `claim` 停在 1 不回退, 状态落到 FAILED, 之后所有调用者**立刻**拿到 FAILED,
+//   不会有人再试一次。
+//
+//   **为什么不回退 claim 让它可重试**: 回退只能是 `fetch_add(claim, -1)`, 而这一减会与
+//   "另一个调用者正好在它减之前读到了 claim==1" 撞上 —— 那个调用者会认为自己不是赢家
+//   (对), 但紧接着的下一个调用者读到 claim==0 会认为自己**是**赢家 —— 于是**两个赢家
+//   先后跑了同一段初始化**。要原子地"回退并且确认没有人已经越过这条线", 需要 CAS。
+//   没有 CAS, 唯一安全的选择就是**不放开**。
+//
+//   要重试只有一条路: 显式 `on_reset(ws)` —— 它用**普通写**重置四个字, 所以**只能在
+//   确定没人在跑的时候调** (所有调用者都退出了, 或者在单线程里)。这是刻意的: 重试这件事
+//   必须由知道全局状态的人来决定, 不能由竞态来猜。
+//
+// ============================================================================
+// 诚实清单 (剩下的缺口)
+// ============================================================================
+//   · **不阻塞**: 输了的调用者只能在 `tries` 次里自旋着等 (`on_wait`), 没有 futex
+//     可以睡 (见 atomics.lomt 第二节第 6 条)。等不到就得自己决定"过会儿再来"。
+//   · **没有超时**: `tries` 是次数, 不是时间 —— 没有时钟可读。
+//   · **不能重入**: 赢家在跑的初始化里**不能**再回来调 `on_begin` (会看到 RUNNING),
+//     更不能调 `on_wait` (它等的就是自己 -> 有界地空转到超时)。没有死锁检测。
+//   · **没有内存屏障保证**: 状态字用普通写落盘、等待者用原子 RMW 读 (`at_get_atomic`),
+//     顺序靠"seq_cst 的 RMW 自带全屏障"这个假设 (atomics.lomt 第二节第 4 条) ——
+//     该假设**未在真并发下验证**。
+//   · **`on_state` 只该当诊断看**: 它是一次原子读, 但读到的那个瞬间的状态**只对你读到
+//     它的那一瞬间负责** —— 别拿它做"我读到 DONE 了所以数据一定对"的推理。赢家写普通
+//     数据的顺序保证只有一条: `on_finish` 里的屏障 + `at_get_atomic` 的全序。
+//   · **单线程测不出**: "两个调用者同时到" 这件事本身。自检测的是**状态机的迁移与计数**
+//     (谁赢、谁等、几次、幂等、失败粘住), 测不出选举在真并发下会不会选出两个赢家
+//     —— 那个只能靠上面的逻辑论证 + 真多核环境, 本仓库没有。
+//
+// ============================================================================
+// 布局 (调用方给工作区; 16 字节, 一律 4 字节步长, 基址要 4 对齐)
+// ============================================================================
+//   ws+0  = state     状态字 (0..3)
+//   ws+4  = claim     单调计数器; 只有把 0 加到 1 的那个是赢家
+//   ws+8  = attempts  赢家一共跑过几次 (这份实现里只可能是 0 或 1; 用计数而不是布尔,
+//                     是为了让"跑了两次"这种 bug 一眼能看出来, 而不是被 true/false 吞掉)
+//   ws+12 = waiters   有多少调用者看到 RUNNING 去等了 (诊断用)
+//
+// 命名: 公开 on_*, 内部无。自检 test_once_*。**注意** 模块名叫 once, 但函数前缀是 `on_`
+// (与 `at_` / `sp_` 分开, 免得和 atomics.lomt、spin.lomt 的私有名撞 E13)。
+
+module once
+
+use "mem.lomt"
+use "atomics.lomt"
+
+pub const ON_ERR: u32 = 4294967295;
+
+pub const ON_IDLE: u32 = 0;
+pub const ON_RUNNING: u32 = 1;
+pub const ON_DONE: u32 = 2;
+pub const ON_FAILED: u32 = 3;
+/// **不是状态**: `on_begin` 的"轮到你跑"返回值。
+pub const ON_WON: u32 = 4;
+
+pub const ON_STATE: u32 = 0;
+pub const ON_CLAIM: u32 = 4;
+pub const ON_ATTEMPTS: u32 = 8;
+pub const ON_WAITERS: u32 = 12;
+
+/// 工作区字节数 (固定 16, 不吃参数 —— 但留一个函数让调用方不用记数字)。
+pub fn on_bytes() -> u32 {
+    return 16;
+}
+
+// ---------------------------------------------------------------- 建 / 读
+
+/// 初始化成 IDLE。**新开一块工作区时必须调** —— 堆是 bump 的, 内容不是 0 就是脏的。
+pub fn on_init(ws: ptr) {
+    mem_store32(ws, ON_STATE, ON_IDLE);
+    mem_store32(ws, ON_CLAIM, 0);
+    mem_store32(ws, ON_ATTEMPTS, 0);
+    mem_store32(ws, ON_WAITERS, 0);
+}
+
+/// 当前状态 (0..3)。原子读。**只当诊断看** —— 见文件头诚实清单。
+pub fn on_state(ws: ptr) -> u32 {
+    return at_get_atomic(at_ptr(ws, ON_STATE));
+}
+
+/// 跑完了吗。
+pub fn on_done(ws: ptr) -> bool {
+    return on_state(ws) == ON_DONE;
+}
+
+/// 跑砸了吗 (终态)。
+pub fn on_failed(ws: ptr) -> bool {
+    return on_state(ws) == ON_FAILED;
+}
+
+/// 赢家跑过几次。**这份实现里只可能是 0 或 1**; 出现 2 就说明选举漏了。
+pub fn on_attempts(ws: ptr) -> u32 {
+    return mem_load32(ws, ON_ATTEMPTS);
+}
+
+/// 有多少调用者看到 RUNNING 去等了 (诊断用)。
+pub fn on_waiters(ws: ptr) -> u32 {
+    return mem_load32(ws, ON_WAITERS);
+}
+
+/// claim 的当前值 (= 一共有多少调用者进来过)。诊断用。
+pub fn on_claims(ws: ptr) -> u32 {
+    return mem_load32(ws, ON_CLAIM);
+}
+
+// ---------------------------------------------------------------- 选举
+
+/// 进来一次。返回:
+///   ON_WON      -> **你是那一个**, 去把初始化做掉, 做完**必须**调 `on_finish`
+///   ON_DONE     -> 别人已经做完了, 直接用结果
+///   ON_FAILED   -> 别人做砸了, 而且是终态, 重试要么 `on_reset`, 要么用别的办法
+///   ON_RUNNING  -> 有人正在跑, 你现在什么都别做 (要等就用 `on_wait`)
+pub fn on_begin(ws: ptr) -> u32 {
+    let c: u32 = at_inc(at_ptr(ws, ON_CLAIM));
+    if c == 0 {
+        // 把 claim 从 0 推到 1 的**只有这一个**调用者 -> 赢家。先立旗再干活:
+        // 后面到的人最坏读到 stale 的 IDLE, 那也只会被当成"有人在做"(偏悲观 = 安全)。
+        mem_store32(ws, ON_STATE, ON_RUNNING);
+        mem_store32(ws, ON_ATTEMPTS, mem_load32(ws, ON_ATTEMPTS) + 1);
+        return ON_WON;
+    }
+    // 走到这里的都已经不是赢家。这次读用的是**原子 RMW 读** ——
+    // 前一步的 at_inc 本身就是 seq_cst RMW, 所以这次读既不会读到撕裂的值, 也不会
+    // 被编译器提到那一步之前去。
+    let s: u32 = at_get_atomic(at_ptr(ws, ON_STATE));
+    if s == ON_DONE {
+        return ON_DONE;
+    }
+    if s == ON_FAILED {
+        return ON_FAILED;
+    }
+    at_inc(at_ptr(ws, ON_WAITERS));
+    return ON_RUNNING;
+}
+
+/// 赢家做完之后**必须**调一次。`ok` 是结果。
+/// 返回落定的状态 (ON_DONE / ON_FAILED); 如果根本没人在跑 (attempts == 0), 返回 ON_ERR
+/// 且**什么都不改** —— 那说明调用方把顺序写错了, 这时改状态只会掩盖问题。
+pub fn on_finish(ws: ptr, ok: bool) -> u32 {
+    if mem_load32(ws, ON_ATTEMPTS) == 0 {
+        return ON_ERR;
+    }
+    if ok {
+        mem_store32(ws, ON_STATE, ON_DONE);
+        // 屏障: 保证临界区里写下的普通数据, 在别人看到 DONE 之前已经可见。
+        // (状态字自己是一次 seq_cst RMW, 但普通数据的顺序要这一条来兜。)
+        at_fence(at_ptr(ws, ON_CLAIM));
+        return ON_DONE;
+    }
+    mem_store32(ws, ON_STATE, ON_FAILED);
+    at_fence(at_ptr(ws, ON_CLAIM));
+    return ON_FAILED;
+}
+
+/// 有界等待: 最多看 `tries` 次 (0 按 1 算, 至少看一次), 等状态**离开 RUNNING**。
+/// 返回看到的状态 (ON_DONE / ON_FAILED), 或者**还在跑就返回 ON_RUNNING** (超时)。
+///
+/// 轮询用的是原子 RMW 读, 不是普通读 —— 普通读会被编译器提出循环 (LLVM 看不见
+/// 别的核在改它), 那才是这类代码最常见的真 bug。代价是每次轮询独占缓存行。
+pub fn on_wait(ws: ptr, tries: u32) -> u32 {
+    let t: u32 = tries;
+    if t == 0 {
+        t = 1;
+    }
+    let at: ptr = at_ptr(ws, ON_STATE);
+    let i: u32 = 0;
+    while i < t {
+        let s: u32 = at_get_atomic(at);
+        if s != ON_RUNNING {
+            return s;
+        }
+        i = i + 1;
+    }
+    return ON_RUNNING;
+}
+
+/// 日常入口: 进来 + (如果别人在跑) 有界等一会儿。
+/// 返回 ON_WON / ON_DONE / ON_FAILED / ON_RUNNING (等超时, 还是没结果)。
+/// 看到 ON_WON 时**别忘了 `on_finish`** —— 忘了的话所有人都会一直看到 ON_RUNNING。
+pub fn on_claim(ws: ptr, tries: u32) -> u32 {
+    let r: u32 = on_begin(ws);
+    if r == ON_RUNNING {
+        return on_wait(ws, tries);
+    }
+    return r;
+}
+
+/// 重置 (唯一的重试路径)。**普通写, 没有任何同步** —— 只能在确定没人在跑时调,
+/// 否则会把别人正在做的初始化从底下抽掉 (那正是这个模块要防的事)。
+pub fn on_reset(ws: ptr) {
+    mem_store32(ws, ON_STATE, ON_IDLE);
+    mem_store32(ws, ON_CLAIM, 0);
+    mem_store32(ws, ON_ATTEMPTS, 0);
+    mem_store32(ws, ON_WAITERS, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+// 自检边界 (诚实说明):
+//   单线程测得出: 三态迁移的每一条边、赢家恰好一个 (在这个执行流里)、
+//                 重复调用幂等、attempts 不会重复计数、失败是终态、超时有界不死循环、
+//                 reset 之后能重来、finish 顺序写错会被拒。
+//   单线程**测不出**: "两个调用者同时到" 时选举会不会选出两个赢家 (原子性)、
+//                 赢家写的普通数据在输家看到 DONE 时是否真的可见 (可见性)、
+//                 轮询读会不会漏掉写 (进步性)。**这些在真并发下全部未验证**。
+
+/// 工作区字节数写死成 16 —— 布局里四个字的位置和它得对得上。
+fn test_once_bytes_match_layout() -> bool {
+    return on_bytes() == 16 && ON_STATE == 0 && ON_CLAIM == 4 && ON_ATTEMPTS == 8
+        && ON_WAITERS == 12;
+}
+
+/// 新建就是 IDLE, 四个计数全 0。
+fn test_once_init_is_idle() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    return on_state(ws) == ON_IDLE && on_claims(ws) == 0 && on_attempts(ws) == 0
+        && on_waiters(ws) == 0 && on_done(ws) == false && on_failed(ws) == false;
+}
+
+/// 第一个进来的是赢家: 拿 ON_WON, 状态转 RUNNING, attempts 记 1。
+fn test_once_first_caller_wins() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    let r: u32 = on_begin(ws);
+    return r == ON_WON && on_state(ws) == ON_RUNNING && on_attempts(ws) == 1
+        && on_claims(ws) == 1 && on_waiters(ws) == 0;
+}
+
+/// 第二个人进来看到 RUNNING, 记一次等待, 而且 **attempts 不许动** ——
+/// "每次 begin 都把 attempts 加一"是这里最容易写错的一处。
+fn test_once_second_caller_sees_running() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    let first: u32 = on_begin(ws);
+    let second: u32 = on_begin(ws);
+    return first == ON_WON && second == ON_RUNNING && on_attempts(ws) == 1
+        && on_waiters(ws) == 1 && on_claims(ws) == 2;
+}
+
+/// 有三个输家时 attempts 仍然是 1 —— 它在真并发下也是唯一的赢家计数。
+fn test_once_attempts_count_winner_only() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    on_begin(ws);
+    on_begin(ws);
+    on_begin(ws);
+    return on_attempts(ws) == 1 && on_waiters(ws) == 3 && on_claims(ws) == 4
+        && on_state(ws) == ON_RUNNING;
+}
+
+/// 成功收尾: 状态落 DONE, 之后来的人一律 ON_DONE, attempts 还是 1。
+fn test_once_finish_ok_then_later_done() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    let fin: u32 = on_finish(ws, true);
+    let after: u32 = on_begin(ws);
+    let after2: u32 = on_begin(ws);
+    return fin == ON_DONE && after == ON_DONE && after2 == ON_DONE && on_done(ws)
+        && on_attempts(ws) == 1 && on_failed(ws) == false;
+}
+
+/// 失败是**终态**: 落 FAILED 之后没人能再拿 ON_WON。这条钉死了"粘住"策略。
+fn test_once_failure_is_sticky() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    let fin: u32 = on_finish(ws, false);
+    let a: u32 = on_begin(ws);
+    let b: u32 = on_begin(ws);
+    let c: u32 = on_begin(ws);
+    return fin == ON_FAILED && a == ON_FAILED && b == ON_FAILED && c == ON_FAILED
+        && on_failed(ws) && on_done(ws) == false && on_attempts(ws) == 1
+        && on_state(ws) != ON_RUNNING;
+}
+
+/// 失败之后状态**不能停在 RUNNING** —— 停在那里的话等待者会一直等到超时,
+/// 而且永远不会知道"别再等了"。这是失败路径最容易漏的一步。
+fn test_once_failure_leaves_running_state() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    on_finish(ws, false);
+    return on_state(ws) != ON_RUNNING && on_wait(ws, 4) == ON_FAILED;
+}
+
+/// 赢了之后才能 finish。没人在跑时 finish 必须被拒, 而且**不改状态**。
+fn test_once_finish_before_begin_refused() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    let r: u32 = on_finish(ws, true);
+    return r == ON_ERR && on_state(ws) == ON_IDLE && on_attempts(ws) == 0;
+}
+
+/// 跑到一半时 on_wait **有界**返回 ON_RUNNING (单线程里没人会来收尾, 所以它必须
+/// 靠次数退出, 不能死循环 —— 这就是"没有超时, 只有次数"的后果)。
+fn test_once_wait_times_out_while_running() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    let w0: u32 = on_wait(ws, 1);
+    let w8: u32 = on_wait(ws, 8);
+    return w0 == ON_RUNNING && w8 == ON_RUNNING && on_state(ws) == ON_RUNNING;
+}
+
+/// 收尾之后再等, 第一次就该看到终态 (不是等到超时)。
+fn test_once_wait_sees_terminal_state() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    on_finish(ws, true);
+    let w: u32 = on_wait(ws, 1);
+    return w == ON_DONE;
+}
+
+/// `on_claim` 一把到位: 第一次是 ON_WON, 收尾之后是 ON_DONE。
+fn test_once_claim_win_then_done() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    let a: u32 = on_claim(ws, 4);
+    let fin: u32 = on_finish(ws, true);
+    let b: u32 = on_claim(ws, 4);
+    return a == ON_WON && fin == ON_DONE && b == ON_DONE && on_attempts(ws) == 1;
+}
+
+/// 赢家还在跑的时候, 后面的人 `on_claim` 超时返回 ON_RUNNING (有界, 不死循环)。
+fn test_once_claim_times_out_on_running() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    let r: u32 = on_claim(ws, 6);
+    return r == ON_RUNNING && on_attempts(ws) == 1 && on_waiters(ws) == 1;
+}
+
+/// on_reset 是**唯一**的重试路径: 它把四个字打回原样, 于是能重新选一次赢家。
+/// (也正因为如此, 它只能在确定没人在跑时调 —— 见文件头。)
+fn test_once_reset_allows_retry() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    on_finish(ws, false);
+    let stuck: bool = on_begin(ws) == ON_FAILED;
+    on_reset(ws);
+    let cleared: bool = on_state(ws) == ON_IDLE && on_claims(ws) == 0
+        && on_attempts(ws) == 0 && on_waiters(ws) == 0;
+    let again: u32 = on_begin(ws);
+    let ok: u32 = on_finish(ws, true);
+    return stuck && cleared && again == ON_WON && ok == ON_DONE && on_attempts(ws) == 1
+        && on_done(ws);
+}
+
+/// 幂等的强度: 做完之后连续 5 次进来, 每次都是 ON_DONE, attempts 与状态一个字都不动。
+fn test_once_idempotent_after_done() -> bool {
+    let ws: ptr = alloc(on_bytes());
+    on_init(ws);
+    on_begin(ws);
+    on_finish(ws, true);
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 5 {
+        if on_begin(ws) != ON_DONE {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0 && on_attempts(ws) == 1 && on_state(ws) == ON_DONE && on_claims(ws) == 6;
+}

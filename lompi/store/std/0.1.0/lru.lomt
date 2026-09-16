@@ -1,0 +1,770 @@
+// std/lru.lomt — LRU 缓存 (开放寻址哈希 + 双向链表, 节点用下标不用指针)
+//
+// 为什么需要它: "只留最近用到的 N 个" 是页缓存、DNS 缓存、编译器的符号缓存、连接池的
+// 共同形状。它要求两件事同时成立: **按 key 找 O(1)**, 且**按最近使用顺序淘汰 O(1)**。
+// 单一结构做不到 —— 哈希表没有顺序, 链表不能按 key 找。经典解是把两者拼起来: 哈希表
+// 存 key -> 节点下标, 链表管顺序。
+//
+// 为什么链表用 u32 下标而不是指针: 这个语言不能按值传聚合, 节点只能放在调用方缓冲里;
+// 那就自然是"数组 + 下标"。下标还有个好处 —— 下标会**越界崩溃**, 悬垂指针只会静默出错。
+//
+// 布局 (状态在调用方的缓冲里):
+//   头部 32 字节:
+//     [0..4]   cap       缓存容量 (最多放几个 entry)
+//     [4..8]   size      当前 entry 数
+//     [8..12]  tcap      哈希槽数 (2 的幂, 内部取 >= 4*cap)
+//     [12..16] head      最近使用端节点下标 (LRU, 空表时为 NIL)
+//     [16..20] tail      最久未使用端节点下标
+//     [20..24] free      空闲节点链头 (链借用节点的 next 字段)
+//     [24..28] tomb      哈希里的墓碑数 (超过 cap 就重建表, 见下)
+//     [28..32] 保留
+//   哈希槽: 偏移 32 起, tcap 个, 每个 16 字节 —— [键 u64][节点下标 u32][状态 u32]
+//     状态: 0 = 空 (探测到此为止), 1 = 在用, 2 = 墓碑 (探测继续)
+//   节点:   偏移 32 + 16*tcap 起, cap 个, 每个 24 字节 —— [键 u64][值 u64][prev u32][next u32]
+// 装 cap 个 entry 要多少字节 —— 用 lru_bytes。
+//
+// 哈希表容量取 **>= 4*cap** 而不是 2*cap, 是因为删除只能置墓碑 (直接置空会切断探测链),
+// 而墓碑会随淘汰累积。这里加一条兜底: 墓碑数一旦 >= cap 就**沿链表重建哈希表**
+// (链表本来就装着全部活 entry), 墓碑清零。于是表最多半满, 插入永远找得到空位,
+// 且重建是摊还 O(1) —— 每重建一次能扛住 cap 次淘汰。
+//
+// 命名: 公开 lru_*, 内部 lr_*。自检 test_lru_*。
+
+module lru
+
+use "mem.lomt"
+use "map.lomt"
+use "rand.lomt"
+
+/// 头部字节数。
+pub const LRU_HDR: u32 = 32;
+/// 一个哈希槽的字节数。
+pub const LRU_SLOT: u32 = 16;
+/// 一个节点的字节数。
+pub const LRU_NODE: u32 = 24;
+/// "没有节点 / 没有这个键"。
+pub const LRU_NIL: u32 = 4294967295;
+/// 空缓存里取 mru/lru 键给的值。
+pub const LRU_NOVAL: u64 = 18446744073709551615;
+
+const LR_S_EMPTY: u32 = 0;
+const LR_S_USED: u32 = 1;
+const LR_S_TOMB: u32 = 2;
+
+fn lr_pow2_ceil(n: u32) -> u32 {
+    let p: u32 = 1;
+    while p < n {
+        p = p * 2;
+    }
+    return p;
+}
+
+/// 装 cap 个 entry 要多少字节。
+pub fn lru_bytes(cap: u32) -> u32 {
+    if cap == 0 {
+        return LRU_HDR;
+    }
+    let tc: u32 = lr_pow2_ceil(4 * cap);
+    if tc < 8 {
+        tc = 8;
+    }
+    return LRU_HDR + LRU_SLOT * tc + LRU_NODE * cap;
+}
+
+// ---------------------------------------------------------------- 头部读写
+
+fn lr_cap(ws: ptr) -> u32 {
+    return mem_load32(ws, 0);
+}
+
+fn lr_size(ws: ptr) -> u32 {
+    return mem_load32(ws, 4);
+}
+
+fn lr_tcap(ws: ptr) -> u32 {
+    return mem_load32(ws, 8);
+}
+
+fn lr_head(ws: ptr) -> u32 {
+    return mem_load32(ws, 12);
+}
+
+fn lr_tail(ws: ptr) -> u32 {
+    return mem_load32(ws, 16);
+}
+
+fn lr_free(ws: ptr) -> u32 {
+    return mem_load32(ws, 20);
+}
+
+fn lr_tomb(ws: ptr) -> u32 {
+    return mem_load32(ws, 24);
+}
+
+fn lr_set_size(ws: ptr, v: u32) {
+    mem_store32(ws, 4, v);
+}
+
+fn lr_set_head(ws: ptr, v: u32) {
+    mem_store32(ws, 12, v);
+}
+
+fn lr_set_tail(ws: ptr, v: u32) {
+    mem_store32(ws, 16, v);
+}
+
+fn lr_set_free(ws: ptr, v: u32) {
+    mem_store32(ws, 20, v);
+}
+
+fn lr_set_tomb(ws: ptr, v: u32) {
+    mem_store32(ws, 24, v);
+}
+
+// ---------------------------------------------------------------- 槽 / 节点读写
+
+fn lr_so(ws: ptr, s: u32) -> u32 {
+    return LRU_HDR + LRU_SLOT * s;
+}
+
+fn lr_s_key(ws: ptr, s: u32) -> u64 {
+    return mem_load64(ws, lr_so(ws, s));
+}
+
+fn lr_s_node(ws: ptr, s: u32) -> u32 {
+    return mem_load32(ws, lr_so(ws, s) + 8);
+}
+
+fn lr_s_state(ws: ptr, s: u32) -> u32 {
+    return mem_load32(ws, lr_so(ws, s) + 12);
+}
+
+fn lr_s_set_key(ws: ptr, s: u32, k: u64) {
+    mem_store64(ws, lr_so(ws, s), k);
+}
+
+fn lr_s_set_node(ws: ptr, s: u32, n: u32) {
+    mem_store32(ws, lr_so(ws, s) + 8, n);
+}
+
+fn lr_s_set_state(ws: ptr, s: u32, v: u32) {
+    mem_store32(ws, lr_so(ws, s) + 12, v);
+}
+
+fn lr_no(ws: ptr, i: u32) -> u32 {
+    return LRU_HDR + LRU_SLOT * lr_tcap(ws) + LRU_NODE * i;
+}
+
+fn lr_n_key(ws: ptr, i: u32) -> u64 {
+    return mem_load64(ws, lr_no(ws, i));
+}
+
+fn lr_n_val(ws: ptr, i: u32) -> u64 {
+    return mem_load64(ws, lr_no(ws, i) + 8);
+}
+
+fn lr_n_prev(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, lr_no(ws, i) + 16);
+}
+
+fn lr_n_next(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, lr_no(ws, i) + 20);
+}
+
+fn lr_n_set_key(ws: ptr, i: u32, k: u64) {
+    mem_store64(ws, lr_no(ws, i), k);
+}
+
+fn lr_n_set_val(ws: ptr, i: u32, v: u64) {
+    mem_store64(ws, lr_no(ws, i) + 8, v);
+}
+
+fn lr_n_set_prev(ws: ptr, i: u32, v: u32) {
+    mem_store32(ws, lr_no(ws, i) + 16, v);
+}
+
+fn lr_n_set_next(ws: ptr, i: u32, v: u32) {
+    mem_store32(ws, lr_no(ws, i) + 20, v);
+}
+
+// ---------------------------------------------------------------- 哈希探测
+
+/// key 的"家"槽。tcap 是 2 的幂, 所以取模就是位与。
+/// 用 map_hash (splitmix64 收尾) 而不是直接取低位 —— 连续 key 不搅开会全撞在同一槽。
+fn lr_home(ws: ptr, k: u64) -> u32 {
+    return (map_hash(k) & ((lr_tcap(ws) - 1) as u64)) as u32;
+}
+
+/// 找 key 所在的槽下标; 没有给 LRU_NIL。
+fn lr_find_slot(ws: ptr, k: u64) -> u32 {
+    let tc: u32 = lr_tcap(ws);
+    if tc == 0 {
+        return LRU_NIL;
+    }
+    let mask: u32 = tc - 1;
+    let h: u32 = lr_home(ws, k);
+    let i: u32 = 0;
+    while i <= tc {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = lr_s_state(ws, s);
+        if st == LR_S_EMPTY {
+            return LRU_NIL;
+        }
+        if st == LR_S_USED && lr_s_key(ws, s) == k {
+            return s;
+        }
+        i = i + 1;
+    }
+    return LRU_NIL;
+}
+
+/// 找 key 的节点下标; 没有给 LRU_NIL。
+fn lr_find_node(ws: ptr, k: u64) -> u32 {
+    let s: u32 = lr_find_slot(ws, k);
+    if s == LRU_NIL {
+        return LRU_NIL;
+    }
+    return lr_s_node(ws, s);
+}
+
+/// 插入 (key -> node)。表里必有一个空槽可用 (见文件头: 最多半满)。
+/// 没有提前 return (本语言没有无值的 return), 用 done 标志收尾 —— 见 mem.lomt 的同类说明。
+fn lr_hash_put(ws: ptr, k: u64, node: u32) {
+    let mask: u32 = lr_tcap(ws) - 1;
+    let h: u32 = lr_home(ws, k);
+    let tomb_at: u32 = LRU_NIL;
+    let done: u32 = 0;
+    let i: u32 = 0;
+    while i <= lr_tcap(ws) && done == 0 {
+        let s: u32 = (h + i) & mask;
+        let st: u32 = lr_s_state(ws, s);
+        if st == LR_S_EMPTY {
+            // 优先复用路上遇到的第一个墓碑 (否则墓碑只增不减)
+            let t: u32 = s;
+            if tomb_at != LRU_NIL {
+                t = tomb_at;
+                lr_set_tomb(ws, lr_tomb(ws) - 1);
+            }
+            lr_s_set_key(ws, t, k);
+            lr_s_set_node(ws, t, node);
+            lr_s_set_state(ws, t, LR_S_USED);
+            done = 1;
+        } else if st == LR_S_USED && lr_s_key(ws, s) == k {
+            lr_s_set_node(ws, s, node);
+            done = 1;
+        } else {
+            if st == LR_S_TOMB && tomb_at == LRU_NIL {
+                tomb_at = s;
+            }
+            i = i + 1;
+        }
+    }
+}
+
+/// 删 key: 置墓碑 (置空会切断后面同簇键的探测链)。
+fn lr_hash_del(ws: ptr, k: u64) {
+    let s: u32 = lr_find_slot(ws, k);
+    if s != LRU_NIL {
+        lr_s_set_state(ws, s, LR_S_TOMB);
+        lr_set_tomb(ws, lr_tomb(ws) + 1);
+    }
+}
+
+/// 沿链表把全部活 entry 重插一遍, 顺带清掉所有墓碑。
+fn lr_rehash(ws: ptr) {
+    let tc: u32 = lr_tcap(ws);
+    let i: u32 = 0;
+    while i < tc {
+        lr_s_set_state(ws, i, LR_S_EMPTY);
+        i = i + 1;
+    }
+    lr_set_tomb(ws, 0);
+    let cur: u32 = lr_head(ws);
+    while cur != LRU_NIL {
+        lr_hash_put(ws, lr_n_key(ws, cur), cur);
+        cur = lr_n_next(ws, cur);
+    }
+}
+
+// ---------------------------------------------------------------- 链表 (都在节点下标上)
+
+/// 把节点 i 从链表里摘下来 (不管它在哪)。
+fn lr_unlink(ws: ptr, i: u32) {
+    let p: u32 = lr_n_prev(ws, i);
+    let n: u32 = lr_n_next(ws, i);
+    if p != LRU_NIL {
+        lr_n_set_next(ws, p, n);
+    } else {
+        lr_set_head(ws, n);
+    }
+    if n != LRU_NIL {
+        lr_n_set_prev(ws, n, p);
+    } else {
+        lr_set_tail(ws, p);
+    }
+}
+
+/// 把节点 i 挂到链头 (最近使用端)。
+fn lr_push_front(ws: ptr, i: u32) {
+    let h: u32 = lr_head(ws);
+    lr_n_set_prev(ws, i, LRU_NIL);
+    lr_n_set_next(ws, i, h);
+    if h != LRU_NIL {
+        lr_n_set_prev(ws, h, i);
+    }
+    lr_set_head(ws, i);
+    if lr_tail(ws) == LRU_NIL {
+        lr_set_tail(ws, i);
+    }
+}
+
+fn lr_move_front(ws: ptr, i: u32) {
+    lr_unlink(ws, i);
+    lr_push_front(ws, i);
+}
+
+/// 从空闲链摘一个节点下标; 没有给 LRU_NIL。
+fn lr_node_alloc(ws: ptr) -> u32 {
+    let f: u32 = lr_free(ws);
+    if f == LRU_NIL {
+        return LRU_NIL;
+    }
+    lr_set_free(ws, lr_n_next(ws, f));
+    lr_n_set_prev(ws, f, LRU_NIL);
+    lr_n_set_next(ws, f, LRU_NIL);
+    return f;
+}
+
+/// 还一个节点 (串回空闲链)。
+fn lr_node_free(ws: ptr, i: u32) {
+    lr_n_set_next(ws, i, lr_free(ws));
+    lr_set_free(ws, i);
+}
+
+// ---------------------------------------------------------------- 公开 API
+
+/// 建缓存。cap == 0 时建出来是"什么都放不进"的空壳, 但不会崩。
+pub fn lru_init(ws: ptr, cap: u32) {
+    mem_store32(ws, 0, cap);
+    mem_store32(ws, 4, 0);
+    let tc: u32 = 0;
+    if cap > 0 {
+        tc = lr_pow2_ceil(4 * cap);
+        if tc < 8 {
+            tc = 8;
+        }
+    }
+    mem_store32(ws, 8, tc);
+    mem_store32(ws, 12, LRU_NIL);
+    mem_store32(ws, 16, LRU_NIL);
+    mem_store32(ws, 24, 0);
+    mem_store32(ws, 28, 0);
+    let i: u32 = 0;
+    while i < tc {
+        lr_s_set_state(ws, i, LR_S_EMPTY);
+        i = i + 1;
+    }
+    if cap == 0 {
+        mem_store32(ws, 20, LRU_NIL);
+    } else {
+        mem_store32(ws, 20, 0);
+        let j: u32 = 0;
+        while j < cap {
+            let nx: u32 = j + 1;
+            if nx >= cap {
+                nx = LRU_NIL;
+            }
+            lr_n_set_prev(ws, j, LRU_NIL);
+            lr_n_set_next(ws, j, nx);
+            j = j + 1;
+        }
+    }
+}
+
+pub fn lru_capacity(ws: ptr) -> u32 {
+    return lr_cap(ws);
+}
+
+pub fn lru_size(ws: ptr) -> u32 {
+    return lr_size(ws);
+}
+
+pub fn lru_is_empty(ws: ptr) -> bool {
+    return lr_size(ws) == 0;
+}
+
+/// 最近使用的 key (空缓存给 LRU_NOVAL)。
+pub fn lru_mru_key(ws: ptr) -> u64 {
+    let h: u32 = lr_head(ws);
+    if h == LRU_NIL {
+        return LRU_NOVAL;
+    }
+    return lr_n_key(ws, h);
+}
+
+/// 最久未使用的 key —— 下一个会被淘汰的就是它。
+pub fn lru_lru_key(ws: ptr) -> u64 {
+    let t: u32 = lr_tail(ws);
+    if t == LRU_NIL {
+        return LRU_NOVAL;
+    }
+    return lr_n_key(ws, t);
+}
+
+/// 命中与否。命中时把值写进 out_val[0..8], **并把该 entry 提到链头**。
+pub fn lru_get(ws: ptr, key: u64, out_val: ptr) -> bool {
+    let s: u32 = lr_find_slot(ws, key);
+    if s == LRU_NIL {
+        return false;
+    }
+    let i: u32 = lr_s_node(ws, s);
+    mem_store64(out_val, 0, lr_n_val(ws, i));
+    lr_move_front(ws, i);
+    return true;
+}
+
+/// 只看值, **不动顺序** (调试/自检用)。
+pub fn lru_peek(ws: ptr, key: u64, out_val: ptr) -> bool {
+    let s: u32 = lr_find_slot(ws, key);
+    if s == LRU_NIL {
+        return false;
+    }
+    mem_store64(out_val, 0, lr_n_val(ws, lr_s_node(ws, s)));
+    return true;
+}
+
+pub fn lru_contains(ws: ptr, key: u64) -> bool {
+    return lr_find_slot(ws, key) != LRU_NIL;
+}
+
+/// 放入。**新键返回 true, 覆盖已有键返回 false**。满了淘汰最久未使用的。
+pub fn lru_put(ws: ptr, key: u64, val: u64) -> bool {
+    let cap: u32 = lr_cap(ws);
+    if cap == 0 {
+        return false;
+    }
+    let s: u32 = lr_find_slot(ws, key);
+    if s != LRU_NIL {
+        let i0: u32 = lr_s_node(ws, s);
+        lr_n_set_val(ws, i0, val);
+        lr_move_front(ws, i0);
+        return false;
+    }
+    // 墓碑攒够了先重建, 保证下面一定有空槽可插。
+    if lr_tomb(ws) >= cap {
+        lr_rehash(ws);
+    }
+    if lr_size(ws) >= cap {
+        let t: u32 = lr_tail(ws);
+        lr_hash_del(ws, lr_n_key(ws, t));
+        lr_unlink(ws, t);
+        lr_node_free(ws, t);
+        lr_set_size(ws, lr_size(ws) - 1);
+    }
+    let i: u32 = lr_node_alloc(ws);
+    if i == LRU_NIL {
+        return false;
+    }
+    lr_n_set_key(ws, i, key);
+    lr_n_set_val(ws, i, val);
+    lr_push_front(ws, i);
+    lr_set_size(ws, lr_size(ws) + 1);
+    lr_hash_put(ws, key, i);
+    return true;
+}
+
+pub fn lru_clear(ws: ptr) {
+    lru_init(ws, lr_cap(ws));
+}
+
+/// 自洽: 链表从头走到尾的步数 == size, prev/next 双向一致, 每个键都能在哈希里找到自己,
+/// 且哈希里在用槽数也是 size。
+pub fn lru_check(ws: ptr) -> bool {
+    let n: u32 = lr_size(ws);
+    let seen: u32 = 0;
+    let prev: u32 = LRU_NIL;
+    let cur: u32 = lr_head(ws);
+    while cur != LRU_NIL {
+        if seen > n {
+            return false;   // 有环
+        }
+        if lr_n_prev(ws, cur) != prev {
+            return false;
+        }
+        if lr_find_slot(ws, lr_n_key(ws, cur)) == LRU_NIL {
+            return false;
+        }
+        prev = cur;
+        cur = lr_n_next(ws, cur);
+        seen = seen + 1;
+    }
+    if seen != n {
+        return false;
+    }
+    if n == 0 {
+        return lr_head(ws) == LRU_NIL && lr_tail(ws) == LRU_NIL;
+    }
+    if lr_tail(ws) != prev {
+        return false;
+    }
+    // 数一遍哈希里在用的槽
+    let tc: u32 = lr_tcap(ws);
+    let used: u32 = 0;
+    let i: u32 = 0;
+    while i < tc {
+        if lr_s_state(ws, i) == LR_S_USED {
+            used = used + 1;
+        }
+        i = i + 1;
+    }
+    return used == n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_lru_bytes_and_capacity() -> bool {
+    // 头部 32; cap=1 -> tcap=8 -> 32 + 16*8 + 24*1 = 184
+    let ws: ptr = alloc(lru_bytes(1));
+    lru_init(ws, 1);
+    return lru_bytes(0) == 32 && lru_bytes(1) == 184 && lru_capacity(ws) == 1
+        && lru_size(ws) == 0 && lru_is_empty(ws);
+}
+
+fn test_lru_put_get_basic() -> bool {
+    let ws: ptr = alloc(lru_bytes(4));
+    let o: ptr = alloc(8);
+    lru_init(ws, 4);
+    let n1: bool = lru_put(ws, 10, 100);
+    let n2: bool = lru_put(ws, 20, 200);
+    let g1: bool = lru_get(ws, 10, o);
+    let v1: u64 = mem_load64(o, 0);
+    let g2: bool = lru_get(ws, 20, o);
+    let v2: u64 = mem_load64(o, 0);
+    let miss: bool = lru_get(ws, 30, o);
+    return n1 && n2 && g1 && v1 == 100 && g2 && v2 == 200 && miss == false
+        && lru_size(ws) == 2;
+}
+
+fn test_lru_cap2_evicts_least_recent() -> bool {
+    // 容量 2 塞 3 个, 最先放的必须被淘汰。
+    let ws: ptr = alloc(lru_bytes(2));
+    lru_init(ws, 2);
+    lru_put(ws, 1, 11);
+    lru_put(ws, 2, 22);
+    lru_put(ws, 3, 33);
+    return lru_contains(ws, 1) == false && lru_contains(ws, 2)
+        && lru_contains(ws, 3) && lru_size(ws) == 2
+        && lru_mru_key(ws) == 3 && lru_lru_key(ws) == 2;
+}
+
+fn test_lru_get_reorders() -> bool {
+    // 容量 2: 放了 1,2 之后 get(1), 再放 3 就该淘汰 2 而不是 1。
+    let ws: ptr = alloc(lru_bytes(2));
+    let o: ptr = alloc(8);
+    lru_init(ws, 2);
+    lru_put(ws, 1, 11);
+    lru_put(ws, 2, 22);
+    let hit: bool = lru_get(ws, 1, o);
+    lru_put(ws, 3, 33);
+    return hit && lru_contains(ws, 2) == false && lru_contains(ws, 1)
+        && lru_contains(ws, 3) && lru_mru_key(ws) == 3 && lru_lru_key(ws) == 1;
+}
+
+fn test_lru_put_existing_updates_no_grow() -> bool {
+    let ws: ptr = alloc(lru_bytes(4));
+    let o: ptr = alloc(8);
+    lru_init(ws, 4);
+    lru_put(ws, 7, 1);
+    lru_put(ws, 8, 2);
+    let again: bool = lru_put(ws, 7, 99);
+    let hit: bool = lru_get(ws, 7, o);
+    return again == false && hit && mem_load64(o, 0) == 99 && lru_size(ws) == 2
+        && lru_mru_key(ws) == 7;
+}
+
+fn test_lru_cap1_degenerate() -> bool {
+    // 容量 1: 后放的必须把前一个挤掉。
+    let ws: ptr = alloc(lru_bytes(1));
+    lru_init(ws, 1);
+    lru_put(ws, 1, 11);
+    lru_put(ws, 2, 22);
+    return lru_contains(ws, 1) == false && lru_contains(ws, 2)
+        && lru_size(ws) == 1 && lru_mru_key(ws) == 2 && lru_lru_key(ws) == 2;
+}
+
+fn test_lru_size_constant_after_full() -> bool {
+    let ws: ptr = alloc(lru_bytes(3));
+    lru_init(ws, 3);
+    let i: u64 = 0;
+    let bad: u32 = 0;
+    while i < 20 {
+        lru_put(ws, i, i * 2);
+        if lru_size(ws) > 3 {
+            bad = 1;
+        }
+        if i >= 2 && lru_size(ws) != 3 {
+            bad = 1;
+        }
+        i = i + 1;
+    }
+    return bad == 0 && lru_size(ws) == 3 && lru_check(ws);
+}
+
+fn test_lru_classic_sequence() -> bool {
+    // 教科书那一串: 容量 3。
+    //  put 1,2,3 -> [3,2,1];  get 1 -> [1,3,2];  put 4 淘汰 2 -> [4,1,3];
+    //  get 2 落空;  get 3 -> [3,4,1];  put 5 淘汰 1 -> [5,3,4]
+    let ws: ptr = alloc(lru_bytes(3));
+    let o: ptr = alloc(8);
+    lru_init(ws, 3);
+    lru_put(ws, 1, 1);
+    lru_put(ws, 2, 2);
+    lru_put(ws, 3, 3);
+    lru_get(ws, 1, o);
+    lru_put(ws, 4, 4);
+    let miss2: bool = lru_get(ws, 2, o);
+    lru_get(ws, 3, o);
+    lru_put(ws, 5, 5);
+    return miss2 == false && lru_contains(ws, 1) == false && lru_contains(ws, 2) == false
+        && lru_contains(ws, 3) && lru_contains(ws, 4) && lru_contains(ws, 5)
+        && lru_size(ws) == 3 && lru_mru_key(ws) == 5 && lru_lru_key(ws) == 4
+        && lru_check(ws);
+}
+
+fn test_lru_miss_does_not_change_order() -> bool {
+    let ws: ptr = alloc(lru_bytes(2));
+    let o: ptr = alloc(8);
+    lru_init(ws, 2);
+    lru_put(ws, 1, 1);
+    lru_put(ws, 2, 2);
+    let m1: u64 = lru_mru_key(ws);
+    let l1: u64 = lru_lru_key(ws);
+    let miss: bool = lru_get(ws, 9, o);
+    return miss == false && lru_mru_key(ws) == m1 && lru_lru_key(ws) == l1
+        && m1 == 2 && l1 == 1;
+}
+
+fn test_lru_peek_does_not_reorder() -> bool {
+    let ws: ptr = alloc(lru_bytes(2));
+    let o: ptr = alloc(8);
+    lru_init(ws, 2);
+    lru_put(ws, 1, 10);
+    lru_put(ws, 2, 20);
+    // 看 1 (最久未使用), 顺序不该变
+    let ok: bool = lru_peek(ws, 1, o);
+    return ok && mem_load64(o, 0) == 10 && lru_mru_key(ws) == 2 && lru_lru_key(ws) == 1
+        && lru_peek(ws, 9, o) == false;
+}
+
+fn test_lru_reinsert_after_evict() -> bool {
+    let ws: ptr = alloc(lru_bytes(2));
+    lru_init(ws, 2);
+    lru_put(ws, 1, 11);
+    lru_put(ws, 2, 22);
+    lru_put(ws, 3, 33);   // 淘汰 1
+    lru_put(ws, 1, 44);   // 淘汰 2, 1 回来了
+    return lru_contains(ws, 2) == false && lru_contains(ws, 1)
+        && lru_contains(ws, 3) && lru_size(ws) == 2 && lru_mru_key(ws) == 1
+        && lru_check(ws);
+}
+
+fn test_lru_many_keys_roundtrip() -> bool {
+    // 容量 8: 放 0..7, 再放 8..15, 前面 8 个必须全被挤掉, 后面 8 个全在。
+    let ws: ptr = alloc(lru_bytes(8));
+    lru_init(ws, 8);
+    let i: u64 = 0;
+    while i < 8 {
+        lru_put(ws, i, i);
+        i = i + 1;
+    }
+    let j: u64 = 8;
+    while j < 16 {
+        lru_put(ws, j, j);
+        j = j + 1;
+    }
+    let ok: u32 = 1;
+    let a: u64 = 0;
+    while a < 8 {
+        if lru_contains(ws, a) {
+            ok = 0;
+        }
+        a = a + 1;
+    }
+    let b: u64 = 8;
+    while b < 16 {
+        if lru_contains(ws, b) == false {
+            ok = 0;
+        }
+        b = b + 1;
+    }
+    return ok == 1 && lru_size(ws) == 8 && lru_check(ws);
+}
+
+fn test_lru_long_run_no_tombstone_leak() -> bool {
+    // 300 次放入, key 从 20 个里随机取 -> 大量淘汰 -> 墓碑会攒。若没有重建兜底,
+    // 表迟早塞满墓碑, 某个 put 会静默失败 (size 掉下 cap 或 check 挂)。
+    let ws: ptr = alloc(lru_bytes(4));
+    lru_init(ws, 4);
+    let st: u64 = rand_seed(7);
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < 300 {
+        let k: u64 = rand_next(st) % 20;
+        lru_put(ws, k, i as u64);
+        if lru_size(ws) > 4 {
+            bad = 1;
+        }
+        if lru_check(ws) == false {
+            bad = 1;
+        }
+        st = rand_next(st);
+        i = i + 1;
+    }
+    return bad == 0 && lru_size(ws) == 4;
+}
+
+fn test_lru_capacity_zero_inert() -> bool {
+    let ws: ptr = alloc(lru_bytes(0));
+    let o: ptr = alloc(8);
+    lru_init(ws, 0);
+    return lru_capacity(ws) == 0 && lru_size(ws) == 0 && lru_put(ws, 1, 1) == false
+        && lru_get(ws, 1, o) == false && lru_mru_key(ws) == LRU_NOVAL
+        && lru_lru_key(ws) == LRU_NOVAL && lru_check(ws);
+}
+
+fn test_lru_clear_and_reuse() -> bool {
+    let ws: ptr = alloc(lru_bytes(3));
+    let o: ptr = alloc(8);
+    lru_init(ws, 3);
+    lru_put(ws, 1, 1);
+    lru_put(ws, 2, 2);
+    lru_clear(ws);
+    let empty: bool = lru_is_empty(ws) && lru_capacity(ws) == 3 && lru_check(ws);
+    lru_put(ws, 9, 90);
+    let hit: bool = lru_get(ws, 9, o);
+    return empty && hit && mem_load64(o, 0) == 90 && lru_contains(ws, 1) == false
+        && lru_size(ws) == 1;
+}
+
+fn test_lru_check_detects_tampering() -> bool {
+    let ws: ptr = alloc(lru_bytes(3));
+    lru_init(ws, 3);
+    lru_put(ws, 1, 1);
+    lru_put(ws, 2, 2);
+    let ok: bool = lru_check(ws);
+    // 把 size 改大, check 必须发现
+    lr_set_size(ws, 5);
+    let bad: bool = lru_check(ws);
+    return ok && bad == false;
+}
+
+fn test_lru_zero_key_is_distinguishable() -> bool {
+    // key 0 与"空槽"必须分得开 (哈希用状态字节而不是拿 key 当哨兵)。
+    let ws: ptr = alloc(lru_bytes(2));
+    let o: ptr = alloc(8);
+    lru_init(ws, 2);
+    lru_put(ws, 0, 500);
+    let hit: bool = lru_get(ws, 0, o);
+    return hit && mem_load64(o, 0) == 500 && lru_contains(ws, 0)
+        && lru_contains(ws, 1) == false;
+}

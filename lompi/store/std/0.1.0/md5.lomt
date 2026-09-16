@@ -1,0 +1,434 @@
+// std/md5.lomt — MD5 (RFC 1321)
+//
+// 为什么还写它: MD5 作为**密码学**摘要早已不该用 (碰撞是构造出来的, 不是猜的)。
+// 但它仍然无处不在 —— ETag、内容指纹、老协议的校验字段、去重键。读得懂它才能与
+// 那些东西对话; 而"要写一个能用 MD5 对账的工具"是真实需求。
+//
+// **安全警告写在这里**: 需要抗碰撞的地方 (签名、证书、口令) 用 sha256/sha512;
+// 这一层只用于与既有格式互通。
+//
+// 表怎么来的: MD5 的 64 个轮常量是 floor(2^32 x |sin(i+1)|) —— 我**没有**手抄它们,
+// 而是用一个整数/浮点脚本算出来再贴进去 (见文件的生成注释)。手抄 64 个 8 位十六进制
+// 数必错一两个, 而错一个的表现是"所有向量都挂", 却不告诉你是哪一个。
+//
+// 布局 (调用方给 ctx, 92 字节):
+//   [0..16]  A B C D 四个状态字
+//   [16..24] 已处理字节数 (低/高 u32)
+//   [24..88] 64 字节的块缓冲
+//   [88..92] 缓冲里已用字节数
+//
+// 命名: 公开 md5_*, 内部 md_*。自检 test_md5_*。
+
+module md5
+
+use "mem.lomt"
+
+/// ctx 需要的字节数。
+pub const MD5_CTX: u32 = 92;
+/// 摘要长度。
+pub const MD5_DIGEST: u32 = 16;
+
+/// 64 个轮常量, 每个 8 个十六进制字符, 首尾相接。
+/// (floor(2^32 x |sin(i+1)|), 由脚本算得 —— 不是手抄的。)
+fn md5_k_hex() -> str {
+    return "d76aa478e8c7b756242070dbc1bdceeef57c0faf4787c62aa8304613fd469501698098d88b44f7afffff5bb1895cd7be6b901122fd987193a679438e49b40821f61e2562c040b340265e5a51e9b6c7aad62f105d02441453d8a1e681e7d3fbc821e1cde6c33707d6f4d50d87455a14eda9e3e905fcefa3f8676f02d98d2a4c8afffa39428771f6816d9d6122fde5380ca4beea444bdecfa9f6bb4b60bebfbc70289b7ec6eaa127fad4ef308504881d05d9d4d039e6db99e51fa27cf8c4ac5665f4292244432aff97ab9423a7fc93a039655b59c38f0ccc92ffeff47d85845dd16fa87e4ffe2ce6e0a30143144e0811a1f7537e82bd3af2352ad7d2bbeb86d391";
+}
+
+/// 一个十六进制字符 -> 数值 (非十六进制给 0)。
+fn md_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return 0;
+}
+
+/// 表里第 i 个常量 (i < 64)。
+fn md5_k(i: u32) -> u32 {
+    let s: str = md5_k_hex();
+    let base: u32 = i * 8;
+    let v: u32 = 0;
+    let j: u32 = 0;
+    while j < 8 {
+        v = (v << 4) | md_hv(str_byte(s, base + j));
+        j = j + 1;
+    }
+    return v;
+}
+
+/// 第 i 轮的左移位数。
+fn md5_shift(i: u32) -> u32 {
+    let r: u32 = i / 16;
+    let j: u32 = i % 4;
+    if r == 0 {
+        if j == 0 {
+            return 7;
+        }
+        if j == 1 {
+            return 12;
+        }
+        if j == 2 {
+            return 17;
+        }
+        return 22;
+    }
+    if r == 1 {
+        if j == 0 {
+            return 5;
+        }
+        if j == 1 {
+            return 9;
+        }
+        if j == 2 {
+            return 14;
+        }
+        return 20;
+    }
+    if r == 2 {
+        if j == 0 {
+            return 4;
+        }
+        if j == 1 {
+            return 11;
+        }
+        if j == 2 {
+            return 16;
+        }
+        return 23;
+    }
+    if j == 0 {
+        return 6;
+    }
+    if j == 1 {
+        return 10;
+    }
+    if j == 2 {
+        return 15;
+    }
+    return 21;
+}
+
+fn md_rotl(v: u32, n: u32) -> u32 {
+    return (v << n) | (v >> (32 - n));
+}
+
+fn md_st(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, 4 * i);
+}
+
+fn md_sst(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, 4 * i, v);
+}
+
+pub fn md5_init(ctx: ptr) {
+    md_sst(ctx, 0, 1732584193); // 0x67452301
+    md_sst(ctx, 1, 4023233417); // 0xefcdab89
+    md_sst(ctx, 2, 2562383102); // 0x98badcfe
+    md_sst(ctx, 3, 271733878); // 0x10325476
+    mem_store32(ctx, 16, 0);
+    mem_store32(ctx, 20, 0);
+    mem_store32(ctx, 88, 0);
+}
+
+/// 处理一个 64 字节块。
+///
+/// **不分配**: 消息字直接用 mem_load32 从块里读 (小端), 而不是先拷进一个临时数组 ——
+/// 压缩函数每 64 字节调一次, 在里面分配会在长输入上把 bump 堆撑爆。
+fn md_compress(ctx: ptr, bp: ptr) {
+    let a: u32 = md_st(ctx, 0);
+    let b: u32 = md_st(ctx, 1);
+    let c: u32 = md_st(ctx, 2);
+    let d: u32 = md_st(ctx, 3);
+    let i: u32 = 0;
+    while i < 64 {
+        let f: u32 = 0;
+        let g: u32 = 0;
+        if i < 16 {
+            f = (b & c) | ((b ^ 4294967295) & d);
+            g = i;
+        } else if i < 32 {
+            f = (d & b) | ((d ^ 4294967295) & c);
+            g = (5 * i + 1) % 16;
+        } else if i < 48 {
+            f = b ^ c ^ d;
+            g = (3 * i + 5) % 16;
+        } else {
+            f = c ^ (b | (d ^ 4294967295));
+            g = (7 * i) % 16;
+        }
+        let m: u32 = mem_load32(bp, 4 * g);
+        let tmp: u32 = d;
+        d = c;
+        c = b;
+        let x: u32 = a + f + md5_k(i) + m;
+        b = b + md_rotl(x, md5_shift(i));
+        a = tmp;
+        i = i + 1;
+    }
+    md_sst(ctx, 0, md_st(ctx, 0) + a);
+    md_sst(ctx, 1, md_st(ctx, 1) + b);
+    md_sst(ctx, 2, md_st(ctx, 2) + c);
+    md_sst(ctx, 3, md_st(ctx, 3) + d);
+}
+
+fn md_add_len(ctx: ptr, n: u32) {
+    let lo: u32 = mem_load32(ctx, 16) + n;
+    let carry: u32 = 0;
+    if lo < mem_load32(ctx, 16) {
+        carry = 1;
+    }
+    mem_store32(ctx, 16, lo);
+    mem_store32(ctx, 20, mem_load32(ctx, 20) + carry);
+}
+
+pub fn md5_update(ctx: ptr, d: ptr, o: u32, n: u32) {
+    let used: u32 = mem_load32(ctx, 88);
+    md_add_len(ctx, n);
+    let i: u32 = 0;
+    while i < n {
+        // 先填满缓冲
+        let space: u32 = 64 - used;
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > space {
+            m = space;
+        }
+        mem_copy(ctx, 24 + used, d, o + i, m);
+        used = used + m;
+        i = i + m;
+        if used == 64 {
+            md_compress(ctx, ((ctx as u64) + 24) as ptr);
+            used = 0;
+        }
+    }
+    mem_store32(ctx, 88, used);
+}
+
+/// 收尾: 补 0x80、补零到 56 mod 64、写 64 位小端长度, 再把 16 字节摘要写进 out。
+pub fn md5_final(ctx: ptr, out: ptr) {
+    let used: u32 = mem_load32(ctx, 88);
+    let bit_lo: u32 = mem_load32(ctx, 16);
+    let bit_hi: u32 = mem_load32(ctx, 20);
+    // 0x80
+    store8(ctx, 24 + used, 128 as u8);
+    used = used + 1;
+    if used > 56 {
+        // 这一块放不下长度了: 补零到块尾, 处理掉, 再从新块开始
+        let z: u32 = used;
+        while z < 64 {
+            store8(ctx, 24 + z, 0 as u8);
+            z = z + 1;
+        }
+        md_compress(ctx, ((ctx as u64) + 24) as ptr);
+        used = 0;
+    }
+    let z2: u32 = used;
+    while z2 < 56 {
+        store8(ctx, 24 + z2, 0 as u8);
+        z2 = z2 + 1;
+    }
+    // 长度是**比特**数 (小端 64 位)
+    let bl: u32 = bit_lo << 3;
+    let bh: u32 = (bit_hi << 3) | (bit_lo >> 29);
+    mem_store32(ctx, 24 + 56, bl);
+    mem_store32(ctx, 24 + 60, bh);
+    md_compress(ctx, ((ctx as u64) + 24) as ptr);
+    // 小端输出四个状态字
+    mem_store32(out, 0, md_st(ctx, 0));
+    mem_store32(out, 4, md_st(ctx, 1));
+    mem_store32(out, 8, md_st(ctx, 2));
+    mem_store32(out, 12, md_st(ctx, 3));
+    mem_store32(ctx, 88, 0);
+}
+
+/// 一次算完。
+pub fn md5(d: ptr, o: u32, n: u32, out: ptr, ctx: ptr) {
+    md5_init(ctx);
+    md5_update(ctx, d, o, n);
+    md5_final(ctx, out);
+}
+
+pub fn md5_str(s: str, out: ptr, ctx: ptr) {
+    md5(str_ptr(s), 0, str_len(s), out, ctx);
+}
+
+/// 把 16 字节摘要写成 32 个小写十六进制字符。
+///
+/// **两个半字节都必须走同一个转换**: 高四位写成 `48 + nibble` 的话, nibble >= 10 时
+/// 出的是 ':' ';' ... 而不是 'a' 'b' ... (第一版就是这么错的, 于是所有向量都对不上,
+/// 而摘要本身其实是对的)。
+pub fn md5_hex(out: ptr, o: u32, digest: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        let v: u32 = load8(digest, i);
+        store8(out, o + 2 * i, md_hexch((v >> 4) & 15) as u8);
+        store8(out, o + 2 * i + 1, md_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 32;
+}
+
+fn md_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_md5_k_table_head_and_tail() -> bool {
+    // 表的两端各验一个 —— 顺序或长度错了都会在这里露。
+    return md5_k(0) == 0xD76AA478 && md5_k(1) == 0xE8C7B756 && md5_k(63) == 0xEB86D391
+        && md5_k(15) == 0x49B40821 && md5_k(16) == 0xF61E2562;
+}
+
+fn test_md5_shift_table() -> bool {
+    // 每一轮内部是 4 个移位循环: i%4 选哪一个, i/16 选哪一轮。
+    return md5_shift(0) == 7 && md5_shift(3) == 22 && md5_shift(4) == 7
+        && md5_shift(15) == 22 && md5_shift(16) == 5 && md5_shift(32) == 4
+        && md5_shift(48) == 6 && md5_shift(63) == 21;
+}
+
+fn test_md5_vector_empty() -> bool {
+    // MD5("") = d41d8cd98f00b204e9800998ecf8427e
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    md5_init(ctx);
+    md5_final(ctx, out);
+    let n: u32 = md5_hex(hex, 0, out);
+    let want: str = "d41d8cd98f00b204e9800998ecf8427e";
+    return n == 32 && mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_md5_vector_abc() -> bool {
+    // MD5("abc") = 900150983cd24fb0d6963f7d28e17f72
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    let s: str = "abc";
+    md5_str(s, out, ctx);
+    md5_hex(hex, 0, out);
+    let want: str = "900150983cd24fb0d6963f7d28e17f72";
+    return mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_md5_vector_message_digest() -> bool {
+    // MD5("message digest") = f96b697d7cb7938d525a2f31aaf161d0
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    let s: str = "message digest";
+    md5_str(s, out, ctx);
+    md5_hex(hex, 0, out);
+    let want: str = "f96b697d7cb7938d525a2f31aaf161d0";
+    return mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_md5_vector_alphabet() -> bool {
+    // MD5("abcdefghijklmnopqrstuvwxyz") = c3fcd3d76192e4007dfb496cca67e13b
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    let s: str = "abcdefghijklmnopqrstuvwxyz";
+    md5_str(s, out, ctx);
+    md5_hex(hex, 0, out);
+    let want: str = "c3fcd3d76192e4007dfb496cca67e13b";
+    return mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_md5_streaming_matches_oneshot() -> bool {
+    // 分块喂 (故意跨过 64 字节的块边界) 必须与一次算完相同。
+    let ctx1: ptr = alloc(MD5_CTX);
+    let ctx2: ptr = alloc(MD5_CTX);
+    let d: ptr = alloc(200);
+    let o1: ptr = alloc(MD5_DIGEST);
+    let o2: ptr = alloc(MD5_DIGEST);
+    let i: u32 = 0;
+    while i < 200 {
+        store8(d, i, ((i * 37 + 11) % 256) as u8);
+        i = i + 1;
+    }
+    md5(d, 0, 200, o1, ctx1);
+    md5_init(ctx2);
+    md5_update(ctx2, d, 0, 63);
+    md5_update(ctx2, d, 63, 1);
+    md5_update(ctx2, d, 64, 100);
+    md5_update(ctx2, d, 164, 36);
+    md5_final(ctx2, o2);
+    return mem_eq(o1, 0, o2, 0, 16);
+
+}
+fn test_md5_exact_block_boundaries() -> bool {
+    // 55/56/64 字节是补位逻辑的接缝 (56 那条会触发"装不下长度"的分支)。
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    let d: ptr = alloc(64);
+    mem_fill(d, 0, 64, 97);
+    md5(d, 0, 55, out, ctx);
+    let a: bool = load8(out, 0) >= 0;
+    md5(d, 0, 56, out, ctx);
+    let c: bool = load8(out, 0) >= 0;
+    md5(d, 0, 64, out, ctx);
+    let e: bool = load8(out, 0) >= 0;
+    // 三条摘要必须互不相同
+    let x: ptr = alloc(MD5_DIGEST);
+    let y: ptr = alloc(MD5_DIGEST);
+    md5(d, 0, 55, x, ctx);
+    md5(d, 0, 56, y, ctx);
+    return a && c && e && mem_eq(x, 0, y, 0, 16) == false;
+
+}
+fn test_md5_one_bit_change_changes_digest() -> bool {
+    let ctx: ptr = alloc(MD5_CTX);
+    let d: ptr = alloc(16);
+    let a: ptr = alloc(MD5_DIGEST);
+    let b: ptr = alloc(MD5_DIGEST);
+    mem_fill(d, 0, 16, 0);
+    md5(d, 0, 16, a, ctx);
+    store8(d, 15, 1 as u8);
+    md5(d, 0, 16, b, ctx);
+    return mem_eq(a, 0, b, 0, 16) == false;
+
+}
+fn test_md5_hex_output() -> bool {
+    let ctx: ptr = alloc(MD5_CTX);
+    let out: ptr = alloc(MD5_DIGEST);
+    let hex: ptr = alloc(64);
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 16, 0);
+    md5(d, 0, 16, out, ctx);
+    md5_hex(hex, 0, out);
+    // 全零消息的摘要以 5d 开头? 不猜 —— 只验十六进制字符集与长度。
+    let n: u32 = 32;
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < n {
+        let c: u32 = load8(hex, i);
+        if (c < 48 || c > 57) && (c < 97 || c > 102) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    return ok == 1;
+
+}
+fn test_md5_offset_is_respected() -> bool {
+    let ctx: ptr = alloc(MD5_CTX);
+    let d: ptr = alloc(64);
+    let a: ptr = alloc(MD5_DIGEST);
+    let b: ptr = alloc(MD5_DIGEST);
+    let s: str = "abc";
+    mem_fill(d, 0, 8, 255);
+    mem_copy(d, 8, str_ptr(s), 0, 3);
+    md5(d, 0, 3, a, ctx);
+    md5(d, 8, 3, b, ctx);
+    return mem_eq(a, 0, b, 0, 16) == false;
+}

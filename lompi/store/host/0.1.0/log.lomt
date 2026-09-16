@@ -1,0 +1,157 @@
+// std/log.lomt — 工具链那套诊断行的约定
+//
+// 为什么要它: 工具们的输出有一条**没写下来的房子风格** ——
+//   `[OK] …` 到 stdout, `[ERR] …` / `[DIFF] …` 到 stderr,
+//   退出码 0 = 一致 / 1 = 有差异 / 2 = 用法或环境错。
+// 迁移 lomstatus 时我是逐行对着这个风格手写字符串字面量改的 —— 那就是"约定没人守"。
+//
+// **结构: 格式化与写出分开。** 第一版把两者揉在一起 (log_ok 直接写 fd), 结果 8 条自检
+// 挂了 7 条 —— 因为自检跑在 Rust 路径上、在 Windows 上执行宿主 syscall, 写入长度
+// 根本不可信。拆开之后: `log_line` / `log_kv_line` 是**纯函数**, 能逐字节核对;
+// `log_ok` 这些只是"格式化 + 一次 write"。这个分法不是为了好看, 是为了能测。
+//
+// 命名: 公开一律 log_*, 内部一律 lg_*。自检 test_log_*。
+
+module log
+
+use "io.lomt"
+use std
+
+/// 退出码约定 (与工具链一致)。
+pub const LOG_OK: u64 = 0;
+pub const LOG_DIFF: u64 = 1;
+pub const LOG_FAIL: u64 = 2;
+
+// ---------------------------------------------------------------- 纯格式化
+
+/// 把 `[tag] msg\n` 写进 buf, 返回新偏移。
+pub fn log_line(buf: ptr, o: u32, tag: str, msg: str) -> u32 {
+    let k: u32 = out_byte(buf, o, 91);
+    k = out_str(buf, k, tag);
+    k = out_str(buf, k, "] ");
+    k = out_str(buf, k, msg);
+    return out_nl(buf, k);
+}
+
+/// `[tag] msg\n` 的字节数 ("[" + tag + "] " + msg + "\n")。
+pub fn log_line_len(tag: str, msg: str) -> u32 {
+    return 4 + str_len(tag) + str_len(msg);
+}
+
+/// `label<十进制>\n` —— 诊断里最常见的形状 ("行数 12")。
+pub fn log_kv_line(buf: ptr, o: u32, label: str, v: u64) -> u32 {
+    let k: u32 = out_str(buf, o, label);
+    let k2: u32 = out_dec(buf, k, v);
+    return out_nl(buf, k2);
+}
+
+// ---------------------------------------------------------------- 写出去
+// 这一半带 fd, 自检覆盖不到 (Rust 路径上的 syscall 不可信), 由端到端测试覆盖。
+
+fn lg_emit(fd: i64, tag: str, msg: str, scr: ptr) -> u64 {
+    let o: u32 = log_line(scr, 0, tag, msg);
+    return io_write_all(fd, scr, o as u64);
+}
+
+pub fn log_ok(scr: ptr, msg: str) -> u64 {
+    return lg_emit(IO_STDOUT, "OK", msg, scr);
+}
+
+pub fn log_err(scr: ptr, msg: str) -> u64 {
+    return lg_emit(IO_STDERR, "ERR", msg, scr);
+}
+
+/// 有差异不等于出错: 输出到 stdout, 退出码 1。
+pub fn log_diff(scr: ptr, msg: str) -> u64 {
+    return lg_emit(IO_STDOUT, "DIFF", msg, scr);
+}
+
+/// "没跑"必须与"跑过了"分开说。
+pub fn log_skip(scr: ptr, msg: str) -> u64 {
+    return lg_emit(IO_STDOUT, "SKIP", msg, scr);
+}
+
+pub fn log_kv(scr: ptr, fd: i64, label: str, v: u64) -> u64 {
+    let o: u32 = log_kv_line(scr, 0, label, v);
+    return io_write_all(fd, scr, o as u64);
+}
+
+// ---- 收尾: 写一行然后退出 (工具的结尾几乎都是这个形状)
+
+pub fn log_ok_exit(scr: ptr, msg: str) -> u32 {
+    log_ok(scr, msg);
+    return io_exit(LOG_OK);
+}
+
+pub fn log_err_exit(scr: ptr, msg: str) -> u32 {
+    log_err(scr, msg);
+    return io_exit(LOG_FAIL);
+}
+
+pub fn log_diff_exit(scr: ptr, msg: str) -> u32 {
+    log_diff(scr, msg);
+    return io_exit(LOG_DIFF);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_log_exit_codes() -> bool {
+    return LOG_OK == 0 && LOG_DIFF == 1 && LOG_FAIL == 2;
+}
+
+fn test_log_line_ok_layout() -> bool {
+    // "[OK] hi\n"
+    let b: ptr = alloc(64);
+    let o: u32 = log_line(b, 0, "OK", "hi");
+    return o == 8 && load8(b, 0) == 91 && load8(b, 1) == 79 && load8(b, 2) == 75
+        && load8(b, 3) == 93 && load8(b, 4) == 32 && load8(b, 5) == 104
+        && load8(b, 6) == 105 && load8(b, 7) == 10;
+}
+
+fn test_log_line_len_matches() -> bool {
+    let b: ptr = alloc(64);
+    return log_line_len("OK", "hi") == log_line(b, 0, "OK", "hi")
+        && log_line_len("ERR", "") == log_line(b, 0, "ERR", "")
+        && log_line_len("DIFF", "abc") == 11;
+}
+
+fn test_log_line_empty_msg() -> bool {
+    let b: ptr = alloc(64);
+    // "[OK] " 加换行 = 1+2+2+0+1 = 6 字节 (我第一版写成 5, 是数错)
+    let o: u32 = log_line(b, 0, "OK", "");
+    return o == 6 && load8(b, 4) == 32 && load8(b, 5) == 10;
+}
+
+fn test_log_line_at_offset() -> bool {
+    let b: ptr = alloc(64);
+    // "[OK] a" 加换行 = 1+2+2+1+1 = 7 字节 (第一版写成 6)
+    let o1: u32 = log_line(b, 0, "OK", "a");
+    let o2: u32 = log_line(b, o1, "OK", "a");
+    return o1 == 7 && o2 == 14 && load8(b, 7) == 91;
+}
+
+fn test_log_line_four_tags_same_width() -> bool {
+    // ERR 与 SKIP 长度不同 —— 标签短时行会短, 这是对的 (不是补空格)。
+    let b: ptr = alloc(64);
+    return log_line_len("ERR", "x") == 8 && log_line_len("SKIP", "x") == 9
+        && log_line_len("DIFF", "x") == 9;
+}
+
+fn test_log_kv_line() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = log_kv_line(b, 0, "n=", 12);
+    return o == 5 && load8(b, 0) == 110 && load8(b, 1) == 61
+        && load8(b, 2) == 49 && load8(b, 3) == 50 && load8(b, 4) == 10;
+}
+
+fn test_log_kv_line_zero() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = log_kv_line(b, 0, "x", 0);
+    return o == 3 && load8(b, 1) == 48 && load8(b, 2) == 10;
+}
+
+fn test_log_kv_line_large() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = log_kv_line(b, 0, "", 18446744073709551615);
+    return o == 21 && load8(b, 0) == 49;
+}

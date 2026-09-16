@@ -1,0 +1,273 @@
+// std/sort.lomt — u32 数组排序 (原地)
+//
+// 两个算法, 各有它该在的场合:
+//   * `sort_insert` —— 插入排序。n 小、或数据近乎有序时它最快, 而且是**稳定**的;
+//   * `sort_heap`   —— 堆排序。O(n log n) 且**不需要额外内存、不用递归**。
+// 为什么不上快排: 递归在这个 checkout 上是有风险的写法 (先定义后使用 + 自举侧的
+// 表按语料规模定尺寸), 而堆排序同样的复杂度、同样的原地性, 却全是循环。
+// 为什么不用归并: 它要一块额外的缓冲 —— 而"缓冲从哪来"是调用方的决定, 不该由排序定。
+//
+// 都是升序。要降序就排完 `vec_reverse`。
+//
+// 命名: 公开一律 sort_*, 内部一律 so_*。自检 test_sort_*。
+
+module sort
+
+use "mem.lomt"
+
+/// 交换两个元素。
+fn so_swap(base: ptr, i: u32, j: u32) {
+    let a: u32 = mem_load32(base, i * 4);
+    let b: u32 = mem_load32(base, j * 4);
+    mem_store32(base, i * 4, b);
+    mem_store32(base, j * 4, a);
+}
+
+/// 把下标 i 处的元素在 n 大小的堆里往下沉。
+fn so_sift(base: ptr, n: u32, i: u32) {
+    let k: u32 = i;
+    let go: u32 = 1;
+    while go == 1 {
+        let l: u32 = k * 2 + 1;
+        if l >= n {
+            go = 0;
+        } else {
+            let big: u32 = l;
+            let r: u32 = l + 1;
+            if r < n && mem_load32(base, r * 4) > mem_load32(base, l * 4) {
+                big = r;
+            }
+            if mem_load32(base, k * 4) < mem_load32(base, big * 4) {
+                so_swap(base, k, big);
+                k = big;
+            } else {
+                go = 0;
+            }
+        }
+    }
+}
+
+/// 插入排序 (稳定)。小数组与近乎有序时首选。
+pub fn sort_insert(base: ptr, n: u32) {
+    let i: u32 = 1;
+    while i < n {
+        let v: u32 = mem_load32(base, i * 4);
+        let j: u32 = i;
+        let go: u32 = 1;
+        while j > 0 && go == 1 {
+            let prev: u32 = mem_load32(base, (j - 1) * 4);
+            if prev > v {
+                mem_store32(base, j * 4, prev);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        mem_store32(base, j * 4, v);
+        i = i + 1;
+    }
+}
+
+/// 堆排序 (原地, 非递归, O(n log n))。
+pub fn sort_heap(base: ptr, n: u32) {
+    if n > 1 {
+        let i: u32 = n / 2;
+        while i > 0 {
+            i = i - 1;
+            so_sift(base, n, i);
+        }
+        let e: u32 = n;
+        while e > 1 {
+            e = e - 1;
+            so_swap(base, 0, e);
+            so_sift(base, e, 0);
+        }
+    }
+}
+
+/// 是否已升序 (自检与断言用)。
+pub fn sort_is_sorted(base: ptr, n: u32) -> bool {
+    let i: u32 = 1;
+    while i < n {
+        if mem_load32(base, (i - 1) * 4) > mem_load32(base, i * 4) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 数组里是否有重复 (排序之后判最省)。
+pub fn sort_has_dup(base: ptr, n: u32) -> bool {
+    let i: u32 = 1;
+    while i < n {
+        if mem_load32(base, (i - 1) * 4) == mem_load32(base, i * 4) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 把 [0,n) 里每个元素置成它的名次 (0..n-1, 相等取最小名次) —— 用于排序空间统计。
+/// 需要调用方另给一块 n 个 u32 的临时区。
+pub fn sort_ranks(base: ptr, n: u32, tmp: ptr) {
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(tmp, i * 4, mem_load32(base, i * 4));
+        i = i + 1;
+    }
+    sort_heap(tmp, n);
+    i = 0;
+    while i < n {
+        let v: u32 = mem_load32(base, i * 4);
+        let lo: u32 = 0;
+        let hi: u32 = n;
+        while lo < hi {
+            let m: u32 = lo + (hi - lo) / 2;
+            if mem_load32(tmp, m * 4) < v {
+                lo = m + 1;
+            } else {
+                hi = m;
+            }
+        }
+        mem_store32(base, i * 4, lo);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn so_fill(base: ptr, vals: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(base, i * 4, mem_load32(vals, i * 4));
+        i = i + 1;
+    }
+}
+
+fn test_sort_heap_basic() -> bool {
+    let b: ptr = alloc(64);
+    let s: ptr = alloc(64);
+    mem_store32(s, 0, 5);
+    mem_store32(s, 4, 1);
+    mem_store32(s, 8, 4);
+    mem_store32(s, 12, 2);
+    mem_store32(s, 16, 3);
+    so_fill(b, s, 5);
+    sort_heap(b, 5);
+    let ok: bool = sort_is_sorted(b, 5);
+    // 升序后 b[0] 是最小值 1, b[4] (偏移 16) 是最大值 5。
+    // (第一版这里写了偏移 4 —— 那是**第二个**元素, 我把下标和偏移搞混了。)
+    return ok && mem_load32(b, 0) == 1 && mem_load32(b, 4) == 2 && mem_load32(b, 16) == 5;
+}
+
+fn test_sort_insert_basic() -> bool {
+    let b: ptr = alloc(64);
+    let s: ptr = alloc(64);
+    mem_store32(s, 0, 9);
+    mem_store32(s, 4, 3);
+    mem_store32(s, 8, 7);
+    so_fill(b, s, 3);
+    sort_insert(b, 3);
+    return sort_is_sorted(b, 3) && mem_load32(b, 0) == 3
+        && mem_load32(b, 4) == 7 && mem_load32(b, 8) == 9;
+}
+
+fn test_sort_already_sorted() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 1);
+    mem_store32(b, 4, 2);
+    mem_store32(b, 8, 3);
+    sort_heap(b, 3);
+    let h: bool = sort_is_sorted(b, 3);
+    sort_insert(b, 3);
+    return h && sort_is_sorted(b, 3);
+}
+
+fn test_sort_reverse_order() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 9);
+    mem_store32(b, 4, 8);
+    mem_store32(b, 8, 7);
+    mem_store32(b, 12, 6);
+    mem_store32(b, 16, 5);
+    sort_heap(b, 5);
+    return sort_is_sorted(b, 5) && mem_load32(b, 16) == 9;
+}
+
+fn test_sort_all_equal() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 4);
+    mem_store32(b, 4, 4);
+    mem_store32(b, 8, 4);
+    sort_heap(b, 3);
+    return sort_is_sorted(b, 3) && mem_load32(b, 0) == 4 && mem_load32(b, 8) == 4;
+}
+
+fn test_sort_with_duplicates() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 3);
+    mem_store32(b, 4, 1);
+    mem_store32(b, 8, 3);
+    mem_store32(b, 12, 1);
+    sort_heap(b, 4);
+    return sort_is_sorted(b, 4) && sort_has_dup(b, 4)
+        && mem_load32(b, 0) == 1 && mem_load32(b, 4) == 1
+        && mem_load32(b, 8) == 3 && mem_load32(b, 12) == 3;
+}
+
+fn test_sort_size_zero_and_one() -> bool {
+    let b: ptr = alloc(64);
+    sort_heap(b, 0);
+    sort_insert(b, 0);
+    mem_store32(b, 0, 7);
+    sort_heap(b, 1);
+    sort_insert(b, 1);
+    return mem_load32(b, 0) == 7;
+}
+
+fn test_sort_insert_matches_heap() -> bool {
+    // 同一个乱序, 两种算法结果必须一致。
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    let s: ptr = alloc(64);
+    mem_store32(s, 0, 42);
+    mem_store32(s, 4, 7);
+    mem_store32(s, 8, 99);
+    mem_store32(s, 12, 7);
+    mem_store32(s, 16, 0);
+    mem_store32(s, 20, 13);
+    so_fill(a, s, 6);
+    so_fill(b, s, 6);
+    sort_insert(a, 6);
+    sort_heap(b, 6);
+    let i: u32 = 0;
+    let same: u32 = 1;
+    while i < 6 {
+        if mem_load32(a, i * 4) != mem_load32(b, i * 4) {
+            same = 0;
+        }
+        i = i + 1;
+    }
+    return same == 1 && mem_load32(b, 0) == 0 && mem_load32(b, 20) == 99;
+}
+
+fn test_sort_has_dup() -> bool {
+    let b: ptr = alloc(64);
+    mem_store32(b, 0, 1);
+    mem_store32(b, 4, 2);
+    mem_store32(b, 8, 3);
+    return !sort_has_dup(b, 3);
+}
+
+fn test_sort_ranks() -> bool {
+    // [30, 10, 20] -> 名次 [2, 0, 1]
+    let b: ptr = alloc(64);
+    let t: ptr = alloc(64);
+    mem_store32(b, 0, 30);
+    mem_store32(b, 4, 10);
+    mem_store32(b, 8, 20);
+    sort_ranks(b, 3, t);
+    return mem_load32(b, 0) == 2 && mem_load32(b, 4) == 0 && mem_load32(b, 8) == 1;
+}

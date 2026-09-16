@@ -1,0 +1,246 @@
+// std/utf8.lomt — UTF-8 编解码与码点计数
+//
+// 为什么要它: 仓库里"一段字节里有几个字符"这件事被写了三处 —— 工具里的
+// `utf8_len`、`json.lomt` 里的 `j_utf8_put`、还有自举侧的一份。而且它一直在
+// **io.lomt 里**: 那不是它的位置 (UTF-8 不是 IO 的事), 这次一并挪过来。
+//
+// 为什么不只是"数字节里非续接字节的个数": 那个计数法对**非法** UTF-8 也会给出
+// 一个数, 且不告诉你是错的。所以这里除了 `utf8_count` (快、对合法输入正确) 之外
+// 还有 `utf8_valid` —— 要区分"数得对"和"没数错"。
+//
+// 非法输入的处理: `utf8_put` 把代理区 (U+D800..U+DFFF) 与超范围码点写成 U+FFFD
+// (替换字符), 而不是编出非法序列 —— 编非法序列是让错误往下游跑。
+//
+// 命名: 公开一律 utf8_*, 内部一律 u8_*。自检 test_utf8_*。
+
+module utf8
+
+/// 替换字符 U+FFFD —— 非法码点的落点。
+pub const UTF8_REPLACEMENT: u32 = 65533;
+
+/// 一个码点编码成几个字节。
+pub fn utf8_len_of(cp: u32) -> u32 {
+    if cp < 128 {
+        return 1;
+    }
+    if cp < 2048 {
+        return 2;
+    }
+    if cp < 65536 {
+        return 3;
+    }
+    return 4;
+}
+
+/// 写一个码点, 返回新偏移。代理区与超范围码点写成 U+FFFD。
+pub fn utf8_put(buf: ptr, o: u32, cp: u32) -> u32 {
+    let c: u32 = cp;
+    if c >= 55296 && c <= 57343 {
+        c = UTF8_REPLACEMENT;
+    }
+    if c > 1114111 {
+        c = UTF8_REPLACEMENT;
+    }
+    if c < 128 {
+        store8(buf, o, c as u8);
+        return o + 1;
+    }
+    if c < 2048 {
+        store8(buf, o, (192 + c / 64) as u8);
+        store8(buf, o + 1, (128 + c % 64) as u8);
+        return o + 2;
+    }
+    if c < 65536 {
+        store8(buf, o, (224 + c / 4096) as u8);
+        store8(buf, o + 1, (128 + (c / 64) % 64) as u8);
+        store8(buf, o + 2, (128 + c % 64) as u8);
+        return o + 3;
+    }
+    store8(buf, o, (240 + c / 262144) as u8);
+    store8(buf, o + 1, (128 + (c / 4096) % 64) as u8);
+    store8(buf, o + 2, (128 + (c / 64) % 64) as u8);
+    store8(buf, o + 3, (128 + c % 64) as u8);
+    return o + 4;
+}
+
+/// 读一个码点: 返回 (码点 << 32) | 消耗字节数。
+/// 非法首字节返回 0 (消耗也是 0) —— 调用方据此停或跳过。
+pub fn utf8_get(p: ptr, o: u32, n: u32) -> u64 {
+    if o >= n {
+        return 0;
+    }
+    let b0: u32 = load8(p, o);
+    if b0 < 128 {
+        return (b0 as u64) * 4294967296 + 1;
+    }
+    if (b0 & 224) == 192 {
+        if o + 2 > n {
+            return 0;
+        }
+        let b1: u32 = load8(p, o + 1);
+        if (b1 & 192) != 128 {
+            return 0;
+        }
+        return (((b0 & 31) * 64 + (b1 & 63)) as u64) * 4294967296 + 2;
+    }
+    if (b0 & 240) == 224 {
+        if o + 3 > n {
+            return 0;
+        }
+        let b1: u32 = load8(p, o + 1);
+        let b2: u32 = load8(p, o + 2);
+        if (b1 & 192) != 128 || (b2 & 192) != 128 {
+            return 0;
+        }
+        let cp: u32 = (b0 & 15) * 4096 + (b1 & 63) * 64 + (b2 & 63);
+        return (cp as u64) * 4294967296 + 3;
+    }
+    if (b0 & 248) == 240 {
+        if o + 4 > n {
+            return 0;
+        }
+        let b1: u32 = load8(p, o + 1);
+        let b2: u32 = load8(p, o + 2);
+        let b3: u32 = load8(p, o + 3);
+        if (b1 & 192) != 128 || (b2 & 192) != 128 || (b3 & 192) != 128 {
+            return 0;
+        }
+        let cp: u32 = (b0 & 7) * 262144 + (b1 & 63) * 4096 + (b2 & 63) * 64 + (b3 & 63);
+        return (cp as u64) * 4294967296 + 4;
+    }
+    return 0;
+}
+
+/// 解包: 码点。
+pub fn utf8_cp(t: u64) -> u32 {
+    return (t >> 32) as u32;
+}
+
+/// 解包: 消耗的字节数。
+pub fn utf8_used(t: u64) -> u32 {
+    return (t % 4294967296) as u32;
+}
+
+/// 码点数 (与 Python 的 `len(str)` 同口径)。对合法 UTF-8 正确, 不检查合法性 ——
+/// 要确认没数错用 `utf8_valid`。
+pub fn utf8_count(p: ptr, o: u32, n: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if (load8(p, o + i) & 192) != 128 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 整段是否合法 UTF-8 (逐码点解码并核对长度)。
+pub fn utf8_valid(p: ptr, o: u32, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        let t: u64 = utf8_get(p, o + i, n);
+        let k: u32 = utf8_used(t);
+        if k == 0 {
+            return false;
+        }
+        i = i + k;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_utf8_len_of() -> bool {
+    return utf8_len_of(0) == 1 && utf8_len_of(127) == 1 && utf8_len_of(128) == 2
+        && utf8_len_of(2047) == 2 && utf8_len_of(2048) == 3 && utf8_len_of(65535) == 3
+        && utf8_len_of(65536) == 4 && utf8_len_of(1114111) == 4;
+}
+
+fn test_utf8_put_ascii() -> bool {
+    let b: ptr = alloc(16);
+    let o: u32 = utf8_put(b, 0, 65);
+    return o == 1 && load8(b, 0) == 65;
+}
+
+fn test_utf8_put_two_byte() -> bool {
+    // U+00E9 (é) = C3 A9
+    let b: ptr = alloc(16);
+    let o: u32 = utf8_put(b, 0, 233);
+    return o == 2 && load8(b, 0) == 195 && load8(b, 1) == 169;
+}
+
+fn test_utf8_put_three_byte() -> bool {
+    // U+20AC (€) = E2 82 AC
+    let b: ptr = alloc(16);
+    let o: u32 = utf8_put(b, 0, 8364);
+    return o == 3 && load8(b, 0) == 226 && load8(b, 1) == 130 && load8(b, 2) == 172;
+}
+
+fn test_utf8_put_four_byte() -> bool {
+    // U+1F600 = F0 9F 98 80
+    let b: ptr = alloc(16);
+    let o: u32 = utf8_put(b, 0, 128512);
+    return o == 4 && load8(b, 0) == 240 && load8(b, 1) == 159
+        && load8(b, 2) == 152 && load8(b, 3) == 128;
+}
+
+fn test_utf8_put_replaces_surrogates() -> bool {
+    // 代理区是非法码点 —— 必须写成 U+FFFD, 不能编出非法序列。
+    let b: ptr = alloc(16);
+    let o: u32 = utf8_put(b, 0, 55296);
+    let d: ptr = alloc(16);
+    let expect: u32 = utf8_put(d, 0, UTF8_REPLACEMENT);
+    return o == expect && load8(b, 0) == load8(d, 0) && load8(b, 2) == load8(d, 2);
+}
+
+fn test_utf8_roundtrip_all_widths() -> bool {
+    let b: ptr = alloc(32);
+    let o1: u32 = utf8_put(b, 0, 65);
+    let o2: u32 = utf8_put(b, o1, 233);
+    let o3: u32 = utf8_put(b, o2, 8364);
+    let o4: u32 = utf8_put(b, o3, 128512);
+    let t1: u64 = utf8_get(b, 0, 10);
+    let t2: u64 = utf8_get(b, o1, 10);
+    let t3: u64 = utf8_get(b, o2, 10);
+    let t4: u64 = utf8_get(b, o3, 10);
+    return o4 == 10 && utf8_cp(t1) == 65 && utf8_cp(t2) == 233
+        && utf8_cp(t3) == 8364 && utf8_cp(t4) == 128512
+        && utf8_used(t1) == 1 && utf8_used(t2) == 2
+        && utf8_used(t3) == 3 && utf8_used(t4) == 4;
+}
+
+fn test_utf8_count_matches_python_semantics() -> bool {
+    // "é×" 是 2 个码点 / 3 个字节 —— 用字节数会把它当成 3 个。
+    let b: ptr = alloc(16);
+    let o1: u32 = utf8_put(b, 0, 233);
+    let o2: u32 = utf8_put(b, o1, 120);
+    return o2 == 3 && utf8_count(b, 0, 3) == 2;
+}
+
+fn test_utf8_valid_accepts_good() -> bool {
+    let b: ptr = alloc(16);
+    let o1: u32 = utf8_put(b, 0, 233);
+    utf8_put(b, o1, 128512);
+    return utf8_valid(b, 0, 6);
+}
+
+fn test_utf8_valid_rejects_bad_continuation() -> bool {
+    // 0xC3 后面跟的不是续接字节 —— 非法。
+    let b: ptr = alloc(16);
+    store8(b, 0, 195 as u8);
+    store8(b, 1, 65 as u8);
+    return !utf8_valid(b, 0, 2);
+}
+
+fn test_utf8_valid_rejects_truncated() -> bool {
+    // 只有首字节, 后面缺了。
+    let b: ptr = alloc(16);
+    store8(b, 0, 226 as u8);
+    return !utf8_valid(b, 0, 1);
+}
+
+fn test_utf8_get_on_empty() -> bool {
+    let b: ptr = alloc(16);
+    return utf8_get(b, 0, 0) == 0 && utf8_get(b, 5, 5) == 0;
+}

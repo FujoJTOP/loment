@@ -1,0 +1,341 @@
+// std/coro.lomt — 可恢复的状态机 (**不是有独立栈的协程** —— 先说清楚)
+//
+// ============================================================================
+// 这不是什么, 以及为什么做不到
+// ============================================================================
+// 这个名字借的是"协程", 但**这里没有协程**。真正的协程要在函数**中间**把执行挂起、
+// 之后再从**同一个位置**接着跑 —— 那需要三样东西, 这门语言三样都没有:
+//
+//   1. **没有栈切换**。挂起要保存当前栈指针、恢复要装回去。语言里没有 `asm`
+//      (不能自己写两行汇编绕过去), 没有 setjmp/longjmp, 没有 swapcontext,
+//      而 PE 目标也没有 `clone` —— 连"给每个协程开一条独立栈"都做不到。
+//      **栈指针根本摸不着**, 所以"保存现场"这件事无法表达。
+//   2. **没有函数指针**。就算能存下"恢复到哪一行", 也得有个东西能跳过去。语言里
+//      没有函数指针, 没有 `goto`, 没有标签 —— 恢复地址存下来也没处用。
+//   3. **局部变量活在栈帧里**, 而栈帧在返回时就没了。所以"跨挂起还活着的局部变量"
+//      必须自己找地方放 —— 这就是下面那个变量区 (`co_var`) 为什么存在。
+//
+// 于是能表达的只有一种东西: **把一段流程切成若干段, 每次进来跑一段, 段与段之间的状态
+// 存在工作区里。** 这就是个状态机, 只不过"该跑哪一段"这件事由这个模块替你记着。
+//
+// ============================================================================
+// 那它到底提供了什么 (为什么还有价值)
+// ============================================================================
+// 状态机本身是**调用方写的** —— 调用方写 `match co_enter(ws) { 0 => {...} 1 => {...} }`,
+// 这个模块负责的是三件**每次手写都会写错**的账:
+//   · 该跑哪一段 (`state`) 与怎么推进 (`co_goto` / `co_finish`)
+//   · 已经恢复过几次、推进过几步 (`co_resumes` / `co_steps`) —— "这一步是不是被我跑了
+//     两次"这类问题, 有个数就能一眼看出来
+//   · 跨段活下来的局部变量放哪 (`co_var` / `co_set_var`, 就在同一块工作区里)
+//
+// 典型写法 (调用方一侧, 示意):
+//      let s: u32 = co_enter(ws);
+//      if s == 0 { co_set_var(ws, 0, 起点); co_goto(ws, 1); }
+//      if s == 1 { ... ; co_goto(ws, 2); }
+//      if s == 2 { ... ; co_finish(ws); }
+//      if s == CO_DONE { /* 收尾 */ }
+// 调用方每次"想推进一下"就再调一次 `co_enter`, 跑到 CO_DONE 为止。
+//
+// **适合**: 手工摊平生成器式遍历、增量解析/词法状态机、握手与重试流程、
+//           "把长流程切成几步, 每步回来让调用方看一眼要不要继续"。
+// **不适合**: 在普通函数中间挂起再回到原处 (要栈); 协程里再套协程;
+//           把已有的普通函数"变成"协程 (做不到, 得重写)。
+//
+// **诚实说明**: 这个模块**薄**, 而且它是全库唯一一个**跟并发无关**的模块 —— 它不用
+// 任何原子操作, 单线程语义就是它的全部语义, 不存在"未验证的并发性质"。同样地,
+// 它也**不管理调用栈深度、不传播错误、不知道调用方有没有把状态机写歪** ——
+// `co_goto(ws, 7)` 跳到一段根本不存在的段上, 这里不会拦; 它只记账, 不看守。
+//
+// ============================================================================
+// 布局 (调用方给工作区; 16 字节头 + nvars 个 4 字节变量)
+// ============================================================================
+//   ws+0  = state    下次该跑哪一段 (CO_START = 0 起; CO_DONE = 已完成)
+//   ws+4  = resumes  `co_enter` 被调过几次
+//   ws+8  = steps    `co_goto` + `co_finish` 一共调过几次 (= 走完了几步)
+//   ws+12 = nvars    变量区有几个槽 (reset 保留它, 别的不保留)
+//   ws+16 = vars[0..nvars), 每个 4 字节
+//
+// 没有 CO_ERR / CO_NO: 这个模块每个函数要么**总是成功** (记账), 要么是个普通访问器;
+// 唯一可能"问错"的地方是变量下标越界, 那个由 `co_var_ok` 单独回答, 不需要一个哨兵值。
+//
+// 命名: 公开 co_*, 内部无。自检 test_coro_*。
+
+module coro
+
+use "mem.lomt"
+
+/// 已完成 —— 状态字取这个值就表示"没有下一段了"。
+pub const CO_DONE: u32 = 4294967295;
+/// 起始段的下标 (也是 `co_init` / `co_reset` 之后的值)。
+pub const CO_START: u32 = 0;
+
+pub const CO_STATE: u32 = 0;
+pub const CO_RESUMES: u32 = 4;
+pub const CO_STEPS: u32 = 8;
+pub const CO_NVARS: u32 = 12;
+pub const CO_HDR: u32 = 16;
+
+/// 装 `nvars` 个变量要多少字节。
+pub fn co_bytes(nvars: u32) -> u32 {
+    return CO_HDR + 4 * nvars;
+}
+
+/// 第 i 个变量在 ws 里的偏移 (越界与否由 `co_var_ok` 回答)。
+pub fn co_var_off(i: u32) -> u32 {
+    return CO_HDR + 4 * i;
+}
+
+// ---------------------------------------------------------------- 建 / 读
+
+/// 建: 状态回到起始段, 三个计数归零, 变量区清零。
+/// (变量区要清, 不清的话第一轮就会读到上一份残留 —— 那是最难查的一类错。)
+pub fn co_init(ws: ptr, nvars: u32) {
+    mem_store32(ws, CO_STATE, CO_START);
+    mem_store32(ws, CO_RESUMES, 0);
+    mem_store32(ws, CO_STEPS, 0);
+    mem_store32(ws, CO_NVARS, nvars);
+    mem_fill(ws, CO_HDR, 4 * nvars, 0);
+}
+
+/// 下次该跑哪一段。
+pub fn co_state(ws: ptr) -> u32 {
+    return mem_load32(ws, CO_STATE);
+}
+
+/// 被恢复过几次 (= `co_enter` 的调用次数)。
+pub fn co_resumes(ws: ptr) -> u32 {
+    return mem_load32(ws, CO_RESUMES);
+}
+
+/// 推进过几步 (= `co_goto` + `co_finish` 的次数)。
+/// "每段恰好跑一次"这种不变量就是靠 `steps` 与段数对齐来验的。
+pub fn co_steps(ws: ptr) -> u32 {
+    return mem_load32(ws, CO_STEPS);
+}
+
+/// 变量槽个数 (reset 会保留它)。
+pub fn co_nvars(ws: ptr) -> u32 {
+    return mem_load32(ws, CO_NVARS);
+}
+
+/// 跑完了吗。
+pub fn co_done(ws: ptr) -> bool {
+    return mem_load32(ws, CO_STATE) == CO_DONE;
+}
+
+// ---------------------------------------------------------------- 推进
+
+/// **每次要推进一次就调它**: 恢复计数 +1, 然后返回"这次该跑哪一段"。
+/// 返回值是 CO_DONE 就表示没得跑了 (再调也只是把 resumes 继续往上加)。
+pub fn co_enter(ws: ptr) -> u32 {
+    mem_store32(ws, CO_RESUMES, mem_load32(ws, CO_RESUMES) + 1);
+    return mem_load32(ws, CO_STATE);
+}
+
+/// 这一段跑完了, 下次从 `s` 段继续。步数 +1。
+pub fn co_goto(ws: ptr, s: u32) {
+    mem_store32(ws, CO_STEPS, mem_load32(ws, CO_STEPS) + 1);
+    mem_store32(ws, CO_STATE, s);
+}
+
+/// 最后一段跑完了。步数 +1, 状态落 CO_DONE。
+/// 与 `co_goto(ws, CO_DONE)` 等价 —— 分开写是为了让"正常结束"在源码里看得出来。
+pub fn co_finish(ws: ptr) {
+    mem_store32(ws, CO_STEPS, mem_load32(ws, CO_STEPS) + 1);
+    mem_store32(ws, CO_STATE, CO_DONE);
+}
+
+/// 重来一遍: 状态与三个计数归零, 变量区清空, **保留 nvars**。
+///
+/// ⚠️ 它**不知道**状态机现在跑在哪 —— 在"跑到一半"时调它, 就是把现场从底下抽掉。
+/// 这是调用方的责任 (跟 once.lomt 的 `on_reset` 同一个道理)。
+pub fn co_reset(ws: ptr) {
+    let n: u32 = mem_load32(ws, CO_NVARS);
+    mem_store32(ws, CO_STATE, CO_START);
+    mem_store32(ws, CO_RESUMES, 0);
+    mem_store32(ws, CO_STEPS, 0);
+    mem_fill(ws, CO_HDR, 4 * n, 0);
+}
+
+// ---------------------------------------------------------------- 变量区
+
+/// 读第 i 个变量。**不做越界检查** —— 要保险先问 `co_var_ok`。
+/// (不做检查是因为返回值没有"空位"可以用: 变量本身可以是任何 u32, 拿任何一个值当
+///  越界信号都是在制造歧义。所以把"问"和"读"分开。)
+pub fn co_var(ws: ptr, i: u32) -> u32 {
+    return mem_load32(ws, co_var_off(i));
+}
+
+/// 写第 i 个变量。同样不检查越界。
+pub fn co_set_var(ws: ptr, i: u32, v: u32) {
+    mem_store32(ws, co_var_off(i), v);
+}
+
+/// 第 i 个槽存在吗。
+pub fn co_var_ok(ws: ptr, i: u32) -> bool {
+    return i < mem_load32(ws, CO_NVARS);
+}
+
+// ---------------------------------------------------------------- 自检
+
+// 自检边界: 这个模块**不涉及并发**, 所以这里没有"未验证的并发性质"。
+// 测的是记账本身: 状态推进、恢复/步数计数、每个段恰好跑一次的整圈不变量、
+// done、reset 的清除范围、变量区与记账区不互相踩。
+
+/// 字节数与布局常量要对得上 —— 后面所有自检都建在它们上面。
+fn test_coro_bytes_and_layout() -> bool {
+    return co_bytes(0) == 16 && co_bytes(3) == 28 && CO_STATE == 0 && CO_RESUMES == 4
+        && CO_STEPS == 8 && CO_NVARS == 12 && CO_HDR == 16 && co_var_off(0) == 16
+        && co_var_off(2) == 24;
+}
+
+/// 建: 起始段、计数归零、变量槽个数记住、变量区是 0。
+fn test_coro_init_state() -> bool {
+    let ws: ptr = alloc(co_bytes(3));
+    co_init(ws, 3);
+    return co_state(ws) == CO_START && co_resumes(ws) == 0 && co_steps(ws) == 0
+        && co_nvars(ws) == 3 && co_done(ws) == false && co_var(ws, 0) == 0
+        && co_var(ws, 2) == 0;
+}
+
+/// init 必须**清变量区**: 拿一块脏工作区建两次, 第二次的变量必须是 0。
+/// (不清的话第一轮会读到上一份残留 —— 堆是 bump 的, 这件事真会发生。)
+fn test_coro_init_clears_stale_vars() -> bool {
+    let ws: ptr = alloc(co_bytes(2));
+    co_init(ws, 2);
+    co_set_var(ws, 0, 777);
+    co_set_var(ws, 1, 888);
+    co_init(ws, 2);
+    return co_var(ws, 0) == 0 && co_var(ws, 1) == 0;
+}
+
+/// enter 数恢复次数, 并**返回当前段** (不带副作用地推进状态 —— 推进是 goto 的事)。
+fn test_coro_enter_counts_and_returns_state() -> bool {
+    let ws: ptr = alloc(co_bytes(1));
+    co_init(ws, 1);
+    let a: u32 = co_enter(ws);
+    let b: u32 = co_enter(ws);
+    let c: u32 = co_enter(ws);
+    return a == CO_START && b == CO_START && c == CO_START && co_resumes(ws) == 3
+        && co_steps(ws) == 0 && co_state(ws) == CO_START;
+}
+
+/// goto: 状态换段, 步数 +1。
+fn test_coro_goto_advances() -> bool {
+    let ws: ptr = alloc(co_bytes(1));
+    co_init(ws, 1);
+    co_goto(ws, 1);
+    let s1: u32 = co_state(ws);
+    co_goto(ws, 5);
+    let s2: u32 = co_state(ws);
+    return s1 == 1 && s2 == 5 && co_steps(ws) == 2;
+}
+
+/// finish 与 goto(CO_DONE) 等价: 步数 +1, co_done 为真。
+fn test_coro_finish_marks_done() -> bool {
+    let ws: ptr = alloc(co_bytes(1));
+    co_init(ws, 1);
+    co_finish(ws);
+    let d: bool = co_done(ws);
+    co_init(ws, 1);
+    co_goto(ws, CO_DONE);
+    return d && co_state(ws) == CO_DONE && co_steps(ws) == 1;
+}
+
+/// 变量区往返。
+fn test_coro_vars_roundtrip() -> bool {
+    let ws: ptr = alloc(co_bytes(3));
+    co_init(ws, 3);
+    co_set_var(ws, 0, 11);
+    co_set_var(ws, 1, 22);
+    co_set_var(ws, 2, 33);
+    return co_var(ws, 0) == 11 && co_var(ws, 1) == 22 && co_var(ws, 2) == 33;
+}
+
+/// **变量区不能踩到记账区**: 变量槽写满了, state/resumes/steps/nvars 一个字都不能动。
+/// (布局若有一格错位, 这条必红 —— 它比"变量读得回来"有力得多。)
+fn test_coro_vars_do_not_touch_bookkeeping() -> bool {
+    let ws: ptr = alloc(co_bytes(4));
+    co_init(ws, 4);
+    co_goto(ws, 9);
+    co_enter(ws);
+    let st: u32 = co_state(ws);
+    let rs: u32 = co_resumes(ws);
+    let sp: u32 = co_steps(ws);
+    let nv: u32 = co_nvars(ws);
+    co_set_var(ws, 0, 4294967295);
+    co_set_var(ws, 3, 4294967295);
+    return co_var(ws, 0) == 4294967295 && co_var(ws, 3) == 4294967295
+        && co_state(ws) == st && co_resumes(ws) == rs && co_steps(ws) == sp
+        && co_nvars(ws) == nv && st == 9 && rs == 1 && sp == 1;
+}
+
+/// 越界问答: [0, nvars) 为真, nvars 本身为假; nvars = 0 时下标 0 就是越界。
+fn test_coro_var_ok_bounds() -> bool {
+    let a: ptr = alloc(co_bytes(2));
+    co_init(a, 2);
+    let b: ptr = alloc(co_bytes(0));
+    co_init(b, 0);
+    return co_var_ok(a, 0) && co_var_ok(a, 1) && co_var_ok(a, 2) == false
+        && co_var_ok(b, 0) == false;
+}
+
+/// reset: 状态与三个计数归零、变量区清空, 但 **nvars 保留** (否则之后就没法再用变量区了)。
+fn test_coro_reset_clears_but_keeps_nvars() -> bool {
+    let ws: ptr = alloc(co_bytes(2));
+    co_init(ws, 2);
+    co_set_var(ws, 0, 555);
+    co_enter(ws);
+    co_goto(ws, 4);
+    co_reset(ws);
+    return co_state(ws) == CO_START && co_resumes(ws) == 0 && co_steps(ws) == 0
+        && co_var(ws, 0) == 0 && co_nvars(ws) == 2 && co_done(ws) == false;
+}
+
+/// **整圈不变量**: 一个三段的状态机, 每段必须**恰好跑一次**, 四次要第 CO_DONE。
+/// 这是这个模块真正的价值所在 —— 手写时最容易错的就是"某段跑了两次"或"漏了一段",
+/// 而 `resumes` / `steps` 能把这两件事分辨开:
+///   resumes = 4 (三段各一次 + 收尾一次), steps = 3 (三次推进)。
+fn test_coro_full_cycle_three_segments() -> bool {
+    let ws: ptr = alloc(co_bytes(2));
+    co_init(ws, 2);
+    let seg0: u32 = 0;
+    let seg1: u32 = 0;
+    let seg2: u32 = 0;
+    let seg_end: u32 = 0;
+    let s1: u32 = co_enter(ws);
+    if s1 == 0 {
+        seg0 = seg0 + 1;
+        co_set_var(ws, 0, 42);
+        co_goto(ws, 1);
+    }
+    let s2: u32 = co_enter(ws);
+    if s2 == 1 {
+        seg1 = seg1 + 1;
+        co_set_var(ws, 1, co_var(ws, 0) + 1);
+        co_goto(ws, 2);
+    }
+    let s3: u32 = co_enter(ws);
+    if s3 == 2 {
+        seg2 = seg2 + 1;
+        co_finish(ws);
+    }
+    let s4: u32 = co_enter(ws);
+    if s4 == CO_DONE {
+        seg_end = seg_end + 1;
+    }
+    return s1 == 0 && s2 == 1 && s3 == 2 && s4 == CO_DONE && seg0 == 1 && seg1 == 1
+        && seg2 == 1 && seg_end == 1 && co_var(ws, 0) == 42 && co_var(ws, 1) == 43
+        && co_resumes(ws) == 4 && co_steps(ws) == 3 && co_done(ws);
+}
+
+/// 单段机: 第一次进来就做完。边界 (0 段 -> 直接结束) 不能崩。
+fn test_coro_single_segment_machine() -> bool {
+    let ws: ptr = alloc(co_bytes(0));
+    co_init(ws, 0);
+    let s1: u32 = co_enter(ws);
+    co_finish(ws);
+    let s2: u32 = co_enter(ws);
+    return s1 == CO_START && s2 == CO_DONE && co_resumes(ws) == 2 && co_steps(ws) == 1
+        && co_done(ws);
+}

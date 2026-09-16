@@ -1,0 +1,369 @@
+// std/atomics.lomt — 原子操作: 有什么、缺什么、缺的怎么替
+//
+// 为什么这个文件的**头**比代码长: 因为这门语言的原子原语一共只有**一个**, 而"只有一个"
+// 这件事决定了 spin/once/coro/sched 四个模块**只能**长成后来那个样子。把边界写在最前面,
+// 别人才不会照着"标准库该有什么"去期待, 也不会把这里没做的事误当成"还没写"。
+//
+// ============================================================================
+// 一、存在的原子原语 (全部, 没有别的)
+// ============================================================================
+//
+//     atomic_add(p: ptr, n: u32) -> u32     // seq_cst 的 fetch-and-add, 返回**旧值**
+//
+// 它落成 `atomicrmw add ... seq_cst` (x86 上是 `lock xadd`)。这是整个 std 库里**唯一**
+// 能拿到原子性的地方。注意签名: 参数是**一个字节偏移都没有的裸指针**加一个 u32 ——
+// 没有宽度参数, 没有内存序参数, 没有 64 位版本。
+//
+// ============================================================================
+// 二、因此**做不了**的经典算法 (不是"没写", 是"写不出来")
+// ============================================================================
+//
+// 1. **比较并交换 (CAS) / test-and-set —— 没有。**
+//    缺一个 CAS 直接堵死的:
+//      · 自旋锁的 CAS 版          -> 用 ticket 锁替代 (spin.lomt), 那个只要 fetch-add
+//      · 无锁栈 / 无锁队列        -> Treiber 栈、Michael-Scott 队列, 都要 CAS 做 top/next
+//      · 引用计数 (Arc / shared_ptr) -> "减到 0"那一步要 CAS; 没有它就会双重释放
+//      · 无锁哈希表、无锁链表、hazard pointer、epoch / RCU 回收 -> 全都要 CAS
+//      · ABA 问题本身也无从谈起 —— ABA 是 CAS 特有的失败模式
+//    缺它的物理原因: x86 上就是 `lock cmpxchg`, 而没有内建能生成它。`atomic_add`
+//    换不出 CAS: 用加/减模拟比较的经典做法("先加回去再判断")在并发下会选出**两个赢家**。
+//
+// 2. **原子交换 (exchange / swap) —— 没有。**
+//    锁的"所有权交接"、状态位的"读并替换"都做不了。想交换两个字的值, 唯一办法是
+//    先取号再等 (ticket), 或者接受"一方赢另一方退让"的竞态。
+//
+// 3. **原子载入 / 原子存储 —— 没有单独的原子 load/store。**
+//    `load8` / `mem_load32` **不是原子的** (它编译成一条普通 `mov`) —— 不是"没有内存序",
+//    是优化器和微架构都可以把它缓存、重排、拆开。影响:
+//      · 别的核正在写的字, 你**不能**用普通读去观察 —— 没有一致快照, 也就没有 seqlock
+//      · 发布 / 订阅 (先写数据, 再立一个标志让别人来读) 少了配对的原子写与原子读
+//      · **替代**: `at_add(p, 0)` 就是一次 seq_cst 的**原子读** —— 它把同一个值写回去,
+//        返回值是旧值, 整个动作是一条带锁前缀的 RMW, 所以是原子的、有全序的。
+//        见 `at_get_atomic`。代价: 每次都独占缓存行, 忙等里用它会比普通读贵一个数量级。
+//      · 同一个道理, `atomic_add(p, 1)` 返回旧值 = "原子地取一个号"。
+//
+// 4. **内存屏障指令 (mfence / 单独的 acquire / release fence) —— 没有内建。**
+//    **替代**: 对任意一个字做一次 seq_cst RMW 加 0, 就是一条全屏障 —— 见 `at_fence`。
+//    seq_cst 的 RMW 在 x86-64 上编译成 `lock` 前缀指令, `lock` 自带全屏障语义。
+//    本库所有跨核可见性的正确性都建立在**这一个假设**上: "seq_cst 的 RMW 既保原子又保顺序"。
+//    这在 x86-64 上是真的; 但这个假设**没有在本仓库被真并发验证过** (见文件末尾)。
+//
+// 5. **64 位原子 —— 没有。** `atomic_add` 只吃 u32; 64 位的原子加 / 读 / 写都不存在。
+//    `at_get64` / `at_set64` 是**两段 32 位**拼的: 读到一半被别人插进来就会**撕裂**。
+//    (x86-64 上一条 8 字节对齐的普通 `mov` 本是原子的, 但这里根本不是一条 mov。)
+//    要做无撕裂的 64 位读, 需要一个原子 load, 或者用两个 32 位字自我校验 —— 后者要 CAS。
+//
+// 6. **等待 / 唤醒 (futex / wait / wake / 条件变量) —— 没有。**
+//    PE 目标只实现了 8 个 syscall:
+//        read(0) write(1) close(3) brk(12) exit(60) getdents64(217) openat(257) newfstatat(262)
+//    没有 futex, 没有 nanosleep, 没有 sched_yield。后果是**结构性的**:
+//      · 本库的锁**全是自旋锁**: 拿不到就烧 CPU, 没有"睡下去等叫醒"这条路。
+//      · 也没有让步指令: 自旋体里插不进 `pause` / `yield` (`inb`/`outb` 只在 Rust 路径有)。
+//      · 没有超时机制的真实现 —— 自旋只能是**有限次尝试**, 由调用方给次数上限。
+//
+// 7. **线程 —— 没有。** PE 目标没有 `clone` / `fork`, 进程里只有**一个执行流**。
+//    所以本文件、spin.lomt、once.lomt 里的每个函数, **都只被单线程测过**。
+//    单线程测得出**逻辑与不变量** (取号递增、状态迁移、有界尝试会退出), 测不出
+//    **原子性与可见性** —— 那需要两个核同时跑, 本仓库没有那个环境。
+//    **未验证清单写在文件末尾的自检说明里, 不在这里假装。**
+//
+// ============================================================================
+// 三、fetch-and-add **真的**能做什么 (本库是照着这张表长出来的)
+// ============================================================================
+//
+//   · ticket 锁 (取号 / 叫号两个计数器, 谁也不抢谁的号) .................. spin.lomt
+//   · 计数信号量 (加 -1 看旧值, 拿不到再加回去) .......................... spin.lomt
+//   · latch / 同步点 (把计数加到 n 的那一个是最后一个) .................. spin.lomt
+//   · 有界自旋等条件 (RMW 加 0 当原子读, 限定次数退出) .................. spin.lomt
+//   · 一次性初始化的赢家选举 (把 0 加到 1 的那一个是赢家) ................ once.lomt
+//   · 单调计数器 / 序号发生器 (at_inc)
+//   上面这些在**真多核**上是对的 —— 前提是第 4 条那个假设成立。
+//
+// ============================================================================
+// 四、对齐: alloc 不保证对齐 (实测), 所以这里给了对齐助手
+// ============================================================================
+//
+// 实测: 堆是**逐字节** bump 的 (`__loment_alloc` 只做 `off + size`), 所以
+// `alloc(1)` 之后再 `alloc(4)` 拿到的指针**不是 4 对齐的**。而原子 RMW 需要一个
+// 对齐的字 (未对齐的 `lock xadd` 在 x86 上直接 #AC / 跨缓存行时会失去原子性)。
+//   于是: `at_align_off(p)` 告诉你"从 p 起要跳过几个字节才是 4 对齐", `at_aligned(p,o)`
+//   回答"p+o 对齐了吗"。**本库所有工作区的约定是: 状态一律 4 字节步长** —— 只要工作区
+//   基址 4 对齐, 里面的每个字就都 4 对齐, 不需要逐字再算。
+//   8 字节对齐拿不到保证 => 64 位字连"硬件上不会撕裂"的前提都不满足 (见第二节第 5 条)。
+//
+// 命名: 公开 at_*, 内部无 (全部是薄包装)。自检 test_at_*。
+
+module atomics
+
+use "mem.lomt"
+
+/// 通用错误值 (对齐助手不会用它, 留给调用方做统一风格)。
+pub const AT_ERR: u32 = 4294967295;
+/// "没有" —— 与 AT_ERR 分开, 免得调用方把"没有"当成"出错"。
+pub const AT_NO: u32 = 4294967294;
+/// 两个补码的 -1, 给需要"加负数"的调用方用 (at_dec 内部就是它)。
+pub const AT_MINUS1: u32 = 4294967295;
+/// 原子字要求的步长 (也是本库所有工作区的步长约定)。
+pub const AT_UNIT: u32 = 4;
+
+// ---------------------------------------------------------------- 原子加族
+
+/// 原子加, **返回旧值**。—— 这是最容易写错的一条: 调用方几乎总以为它返回新值。
+///
+/// 语义: `old = *p; *p = old + n; return old;` 整个过程不可分割, 且 seq_cst。
+/// 写 `if at_add(p, 1) == 0 { 我是第一个 }` 才是对的用法;
+/// 写成 `if at_add(p, 1) == 1 { 我是第一个 }` 会在真并发下**选错人**。
+pub fn at_add(p: ptr, n: u32) -> u32 {
+    return atomic_add(p, n);
+}
+
+/// 原子加 1, 返回旧值。取号 / 计数的日常入口。
+pub fn at_inc(p: ptr) -> u32 {
+    return atomic_add(p, 1);
+}
+
+/// 原子减 1, 返回旧值。到 0 之后再减会**回绕**成 4294967295 (不做饱和) ——
+/// 这是刻意的: 回绕能立刻看出来, 饱和会把"减多了"这个 bug 藏起来。
+pub fn at_dec(p: ptr) -> u32 {
+    return atomic_add(p, AT_MINUS1);
+}
+
+/// 原子读: RMW 加 0。**这是本库唯一一个真正的原子读** —— `at_get` 不是。
+/// 代价: 一条带锁前缀的 RMW, 独占缓存行。忙等里用它比普通读贵一个数量级,
+/// 但它是**对的**; 忙等里用普通读是**快但没保证**的。
+pub fn at_get_atomic(p: ptr) -> u32 {
+    return atomic_add(p, 0);
+}
+
+/// 全屏障的代用品: 对一个哑字做一次 seq_cst RMW 加 0。
+///
+/// `scratch` 由调用方给 (语言没有模块级可变变量), 调用前后它的值不变。
+/// 用法: 先在临界区里写普通数据, `at_fence(sc)` 再放别人要看的标志;
+/// 反过来, 读标志前 `at_fence(sc)` 再看普通数据。
+pub fn at_fence(scratch: ptr) {
+    let _old: u32 = atomic_add(scratch, 0);
+}
+
+// ---------------------------------------------------------------- 普通 (非原子) 读写
+
+/// 普通 32 位读。**不是原子的**, 不建立任何顺序 —— 名字里的 `plain` 就是提醒这件事。
+/// 单线程 / 已经用锁隔开的场景用它; 跨核观察别人正在写的字, 用 `at_get_atomic`。
+pub fn at_get_plain(p: ptr, off: u32) -> u32 {
+    return mem_load32(p, off);
+}
+
+/// 普通 32 位写。同样不是原子的。
+pub fn at_set_plain(p: ptr, off: u32, v: u32) {
+    mem_store32(p, off, v);
+}
+
+/// 64 位读, 小端, 由两段 32 位拼出。**会撕裂**: 读到低半与高半之间被别人插进来,
+/// 你拿到的就是这个字从未存在过的组合。要做无撕裂读需要原子 load —— 没有。
+/// 单线程 / 已被锁保护的场景才用它。
+pub fn at_get64(p: ptr, off: u32) -> u64 {
+    return mem_load64(p, off);
+}
+
+/// 64 位写, 小端, 两段 32 位。**同理, 会撕裂。**
+pub fn at_set64(p: ptr, off: u32, v: u64) {
+    mem_store64(p, off, v);
+}
+
+// ---------------------------------------------------------------- 对齐助手
+
+/// 从 `p` 起要跳过几个字节才到 4 对齐 (0..3)。
+///
+/// 存在的理由: **alloc 是逐字节 bump 的, 不保证对齐** —— 实测
+/// `alloc(1); alloc(4)` 的第二个指针不是 4 对齐的。原子字必须 4 对齐, 所以调用方
+/// 要么自己按这个偏移挪一格, 要么保证工作区基址本身 4 对齐 (本库按后者约定)。
+pub fn at_align_off(p: ptr) -> u32 {
+    let a: u64 = p as u64;
+    let r: u32 = (a % 4) as u32;
+    if r == 0 {
+        return 0;
+    }
+    return 4 - r;
+}
+
+/// `p + off` 是不是 4 对齐。
+pub fn at_aligned(p: ptr, off: u32) -> bool {
+    let a: u64 = (p as u64) + (off as u64);
+    return a % 4 == 0;
+}
+
+/// 把指针取成整数 (诊断 / 自检用; 想自己做对齐运算时也方便)。
+pub fn at_addr(p: ptr) -> u64 {
+    return p as u64;
+}
+
+/// 工作区 + 偏移 -> 该处的 ptr。
+///
+/// **不用内建 `ptr_add`**: 它在 **Rust 路径** (`loment.py test` 走的那条) 降级成裸
+/// `.add()` 而没包 `unsafe`, rustc 直接拒 (E0133, 实测)。经 `u64` 转一圈两条路径都过。
+/// 本库每个"在偏移处做原子操作"的调用都要经过它 —— 因为 `atomic_add` 只吃 `ptr`,
+/// 不吃 (ptr, off)。
+pub fn at_ptr(p: ptr, off: u32) -> ptr {
+    return ((p as u64) + (off as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 自检
+
+// 自检边界 (诚实说明, 不许当成彩蛋):
+//   单线程测得出: 返回值是旧的 (fetch-add 语义)、回绕、偏移只动本字、64 位拼装的
+//                 小端顺序、对齐助手的算术。
+//   单线程**测不出**: 原子性 (两个核同时加会不会丢)、可见性 (一个核写完另一个核
+//                 多久看得到)、RMW 自带屏障这个假设。这些在真并发下的正确性
+//                 **未验证** —— 本仓库没有多核测试环境, PE 目标也没有 clone。
+
+/// **最常错的一条**: atomic_add 返回的是**旧值**, 不是新值。
+fn test_at_add_returns_old() -> bool {
+    let p: ptr = alloc(AT_UNIT);
+    mem_store32(p, 0, 10);
+    let old: u32 = at_add(p, 5);
+    return old == 10 && mem_load32(p, 0) == 15;
+}
+
+/// 加 0 是原子读: 值不变、返回旧值 —— 这是"没有原子 load"的替代路径。
+fn test_at_add_zero_is_atomic_load() -> bool {
+    let p: ptr = alloc(AT_UNIT);
+    mem_store32(p, 0, 305419896);
+    let a: u32 = at_add(p, 0);
+    let b: u32 = at_add(p, 0);
+    return a == 305419896 && b == 305419896 && mem_load32(p, 0) == 305419896;
+}
+
+/// at_inc / at_dec 都返回旧值; 减到 0 以下**回绕**, 不饱和。
+fn test_at_inc_dec_return_old_and_wrap() -> bool {
+    let p: ptr = alloc(AT_UNIT);
+    mem_store32(p, 0, 0);
+    let a: u32 = at_inc(p);          // 旧值 0, 字变 1
+    let b: u32 = at_dec(p);          // 旧值 1, 字变 0
+    let c: u32 = at_dec(p);          // 旧值 0, 字回绕成 4294967295
+    return a == 0 && b == 1 && c == 0 && mem_load32(p, 0) == 4294967295;
+}
+
+/// 加到 u32 顶上再 +1 必须回绕到 0 (release 下 fetch_add 是 wrapping 的)。
+fn test_at_add_wraps_at_top() -> bool {
+    let p: ptr = alloc(AT_UNIT);
+    mem_store32(p, 0, 4294967295);
+    let old: u32 = at_inc(p);
+    return old == 4294967295 && mem_load32(p, 0) == 0;
+}
+
+/// 加一个近 2^32 的数等于减一 —— 两个补码绕过去, 不需要有符号类型。
+fn test_at_add_large_is_decrement() -> bool {
+    let p: ptr = alloc(AT_UNIT);
+    mem_store32(p, 0, 7);
+    let old: u32 = at_add(p, AT_MINUS1);
+    return old == 7 && mem_load32(p, 0) == 6;
+}
+
+/// fence 只碰 scratch 一个字, 值不变; 它存在是为了顺序, 不是为了数值。
+fn test_at_fence_leaves_value_alone() -> bool {
+    let sc: ptr = alloc(AT_UNIT);
+    mem_store32(sc, 0, 42);
+    at_fence(sc);
+    at_fence(sc);
+    return mem_load32(sc, 0) == 42;
+}
+
+/// 普通读写按偏移落在字上 (工作区 + 偏移的用法)。
+fn test_at_plain_read_write_by_offset() -> bool {
+    let p: ptr = alloc(16);
+    at_set_plain(p, 0, 11);
+    at_set_plain(p, 8, 22);
+    let a: u32 = at_get_plain(p, 0);
+    let b: u32 = at_get_plain(p, 8);
+    return a == 11 && b == 22 && at_get_plain(p, 4) == 0;
+}
+
+/// 原子加**只动本字**: 相邻的字不能被牵连 (工作区 + 偏移的正确性是靠这个立住的)。
+fn test_at_add_touches_only_its_word() -> bool {
+    let p: ptr = alloc(16);
+    mem_store32(p, 0, 100);
+    mem_store32(p, 4, 200);
+    mem_store32(p, 8, 300);
+    let old: u32 = at_add(at_ptr(p, 4), 1);
+    return old == 200 && mem_load32(p, 0) == 100 && mem_load32(p, 4) == 201
+        && mem_load32(p, 8) == 300;
+}
+
+/// `at_ptr` 就是 p + off, 且和直接用 p 时**同一个对象** (偏移 0 要能原地写回)。
+fn test_at_ptr_matches_base_arithmetic() -> bool {
+    let p: ptr = alloc(16);
+    let q: ptr = at_ptr(p, 0);
+    let r: ptr = at_ptr(p, 8);
+    let a: u64 = p as u64;
+    let b: u64 = q as u64;
+    let c: u64 = r as u64;
+    mem_store32(r, 0, 7);
+    return b == a && c == a + 8 && mem_load32(p, 8) == 7;
+}
+
+/// 64 位写必须**小端**: 低 4 字节在低偏移。写错顺序在单线程下也会立刻暴露。
+/// (0x123456789ABCDEF0 → 低半 0x9ABCDEF0=2596069104, 高半 0x12345678=305419896。)
+fn test_at_64_is_little_endian() -> bool {
+    let p: ptr = alloc(16);
+    at_set64(p, 0, 1311768467463790320);
+    return mem_load32(p, 0) == 2596069104 && mem_load32(p, 4) == 305419896;
+}
+
+/// 64 位读写往返; 两半全 1 时两边都必须是 4294967295 (拼装写错会露馅)。
+fn test_at_64_roundtrip_and_halves() -> bool {
+    let p: ptr = alloc(16);
+    at_set64(p, 0, 1311768467463790320);
+    let back: u64 = at_get64(p, 0);
+    at_set64(p, 4, 18446744073709551615);
+    let hi_ok: bool = mem_load32(p, 4) == 4294967295 && mem_load32(p, 8) == 4294967295;
+    return back == 1311768467463790320 && hi_ok;
+}
+
+/// 对齐算术: 偏移一定是 0..3, 加上它之后一定 4 对齐。
+fn test_at_align_off_yields_aligned() -> bool {
+    let p: ptr = alloc(4);
+    let q: ptr = alloc(1);
+    let r: ptr = alloc(4);
+    let o1: u32 = at_align_off(p);
+    let o2: u32 = at_align_off(q);
+    let o3: u32 = at_align_off(r);
+    return o1 <= 3 && o2 <= 3 && o3 <= 3 && at_aligned(p, o1) && at_aligned(q, o2)
+        && at_aligned(r, o3);
+}
+
+/// `at_aligned` 要断言的是**关系**, 不是"一定对齐"。
+///
+/// **踩坑注释**: 第一版写的是 `... && at_aligned(p, 1) == false`, 假定 alloc(4) 出来
+/// 就是 4 对齐的。它红了 —— 因为自检在**同一个进程里顺序跑、共用一条 bump 指针**, 而
+/// 前面 `test_at_align_off_yields_aligned` 里有个 `alloc(1)` 把指针推到了奇数偏移。
+/// 于是这条自检无意中**演示了它自己要说明的那个危险**: 对齐不是分配器给的, 是位置给的。
+/// 改写成断言关系之后, 无论落在哪个偏移都对。
+fn test_at_aligned_predicate() -> bool {
+    let p: ptr = alloc(4);
+    let a: u64 = p as u64;
+    let r: u32 = (a % 4) as u32;
+    // 四条都是恒等式, 跟 p 落在哪无关
+    let same_off0: bool = at_aligned(p, 0) == (r == 0);
+    let same_off1: bool = at_aligned(p, 1) == (r == 3);
+    let same_off4: bool = at_aligned(p, 4) == (r == 0);
+    let same_off8: bool = at_aligned(p, 8) == (r == 0);
+    // 正面的一条: 按 at_align_off 挪过去之后**必须**对齐, 而且再加 4 仍然对齐
+    let q: ptr = at_ptr(p, at_align_off(p));
+    let fixed: bool = at_aligned(q, 0) && at_aligned(q, 4);
+    return same_off0 && same_off1 && same_off4 && same_off8 && fixed;
+}
+
+/// 分配器是**逐字节**的 —— 这条支撑了"必须自己算对齐"这个结论。
+/// 如果哪天 alloc 改成 8 字节粒度, 这条会红, 上面那些注释就该跟着改。
+fn test_at_alloc_is_byte_granular() -> bool {
+    let p: ptr = alloc(1);
+    let q: ptr = alloc(1);
+    let a: u64 = p as u64;
+    let b: u64 = q as u64;
+    return b - a == 1;
+}
+
+/// at_addr 拿到的是**完整 64 位**地址 (PE 映像常在 4 GiB 以上, 截成 u32 就废了)。
+fn test_at_addr_is_full_width() -> bool {
+    let p: ptr = alloc(4);
+    return at_addr(p) > 4294967295;
+}

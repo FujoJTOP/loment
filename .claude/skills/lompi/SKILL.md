@@ -150,8 +150,8 @@ cp -r C:\Users\hooya\.lompi\store/geom/1.0.0 D:\proj\deps\geom
 cp -r C:\Users\hooya\.lompi\store/mathutil/0.2.0 D:\proj\deps\mathutil
 # lock (pin these; `lompi verify` compares against the store that produced them)
 # lompi lock v1
-geom 1.0.0 06b4cc0d3b1f136fc84d46176e0405a140b1395cae33f5426f297354a4278d0d
-mathutil 0.2.0 c5f88a0519c41888c6b307809854098c1df04e0727cb3d94970d5f99e1943ca0
+geom 1.0.0 7af928612aaaf1994c08642a8abf7b55c667159d6fff53c0330c09b79692ded0
+mathutil 0.2.0 492ec331d34a26a9f5b524572314eeda47795ed7fb61fcf09910b4a7b85449e3
 ```
 
 Order of operations: locate the package -> **validate it** -> compute the closure and
@@ -271,11 +271,11 @@ installs to the wrong directory.
 ```
 $ lompi index fixture/store
 5 package(s) in store
-geom 1.0.0 06b4cc0d3b1f136f
-mathutil 0.1.0 53ce217a387ed58a
-mathutil 0.2.0 c5f88a0519c41888
-multi 2.0.0 8326d0125e3b111d
-util 0.3.0 e0e90317698ff804
+geom 1.0.0 7af928612aaaf199
+mathutil 0.1.0 5d46f4477237f3bf
+mathutil 0.2.0 492ec331d34a26a9
+multi 2.0.0 5d6cff93ffc7edb1
+util 0.3.0 0dc87d1ec3449e92
 ```
 
 Each line is `name version first-16-of-identity`. **The same name appearing twice is
@@ -288,7 +288,7 @@ line counts **instances**.
 $ lompi show fixture/store geom
 name:    geom
 version: 1.0.0
-id:      06b4cc0d3b1f136fc84d46176e0405a140b1395cae33f5426f297354a4278d0d
+id:      7af928612aaaf1994c08642a8abf7b55c667159d6fff53c0330c09b79692ded0
 dir:     fixture/store/geom/1.0.0
 1 use edge(s):
   name mathutil
@@ -311,10 +311,10 @@ another build to know whether they are the same thing. The edges come in two kin
 
 ```
 $ lompi tree fixture/store_diamond diamond
-diamond@1.0.0 cb1c2ae8617e
-  geom@1.0.0 0f4bb3784d09
-    mathutil@0.1.0 53ce217a387e
-  mathutil@0.1.0 53ce217a387e  (already shown)
+diamond@1.0.0 12743554830f
+  geom@1.0.0 711abded0e3c
+    mathutil@0.1.0 5d46f4477237
+  mathutil@0.1.0 5d46f4477237  (already shown)
 ```
 
 Indentation is depth. When a diamond dependency makes the same package appear a second
@@ -327,8 +327,8 @@ and expanding it twice would misrepresent the tree.
 $ lompi resolve fixture/store geom > lompi.lock
 $ cat lompi.lock
 # lompi lock v1
-geom 1.0.0 06b4cc0d3b1f136fc84d46176e0405a140b1395cae33f5426f297354a4278d0d
-mathutil 0.2.0 c5f88a0519c41888c6b307809854098c1df04e0727cb3d94970d5f99e1943ca0
+geom 1.0.0 7af928612aaaf1994c08642a8abf7b55c667159d6fff53c0330c09b79692ded0
+mathutil 0.2.0 492ec331d34a26a9f5b524572314eeda47795ed7fb61fcf09910b4a7b85449e3
 ```
 
 Each line is `name version identity`. **The version is for humans; the identity is what the
@@ -358,9 +358,9 @@ $ lompi plan fixture/store geom --into mydeps
 # lompi plan (target dirs must already exist -- no mkdir on PE)
 mkdir -p mydeps
 # 2 package instance(s) in the closure:
-#   geom@1.0.0 06b4cc0d3b1f
+#   geom@1.0.0 7af928612aaa
 #     from fixture/store/geom/1.0.0
-#   mathutil@0.2.0 c5f88a0519c4
+#   mathutil@0.2.0 492ec331d34a
 #     from fixture/store/mathutil/0.2.0
 ```
 
@@ -383,7 +383,7 @@ into a shell.
 ```
 $ lompi hash fixture/store/multi/2.0.0
 files: 3
-self:  0e7e3ec5118a2a90316c38aa5d66f15f2816232dbc9d8a75808a5edfd089ec31
+self:  61ee6f19964aa745f1ed2d4bdf60f0fdd9b49d7f1fc96fc66211c60e82c9033e
 ```
 
 `self` is the hash of **this package's own source only**, which is **not** the instance
@@ -432,8 +432,8 @@ The practical consequence, worth remembering:
 
 ```
 The geom source is byte-identical, but sits in two different stores:
-  store A has mathutil 0.1.0 / 0.2.0  ->  geom id = 06b4cc0d3b1f...  (binds 0.2.0)
-  store B has only mathutil 0.1.0     ->  geom id = 0f4bb3784d09...  (binds 0.1.0)
+  store A has mathutil 0.1.0 / 0.2.0  ->  geom id = 7af928612aaa...  (binds 0.2.0)
+  store B has only mathutil 0.1.0     ->  geom id = 711abded0e3c...  (binds 0.1.0)
 ```
 
 **The two ids differing is correct.** The same source bound to different dependencies

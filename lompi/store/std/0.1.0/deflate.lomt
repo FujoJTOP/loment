@@ -1,0 +1,757 @@
+// std/deflate.lomt — DEFLATE 压缩 (RFC 1951)
+//
+// 为什么需要它: inflate 只能**读**别人编的东西。要往 PNG 里写一块 IDAT、要发一个
+// gzip、要在自检里造一条能解回来的流 —— 都得有编码侧。本模块给一个**能用的**
+// 编码器: 固定霍夫曼 + 贪心 LZ77 匹配。
+//
+// ---------------------------------------------------------------- 格式上的两个坑
+//
+// ① **位序**: 位流是 LSB-first 打包的 (先写的位在字节的低位), 但**霍夫曼码要
+//    MSB-first 写** (RFC §3.1.1: "Huffman codes are packed starting with the
+//    most-significant bit of the code")。两条规则合起来 -> 往位流里塞一个码字之前,
+//    必须**先把它按码长反序**。这就是 `dfl_rev` 存在的唯一理由, 也是 DEFLATE 编码侧
+//    最经典的一处错法: 忘了反序编出来的流"看着像压缩数据", 但一个符号都解不对。
+//    (长度/距离的**额外位**是普通整数, 不反, 直接 LSB-first 写。)
+//
+// ② **距离可以小于长度**: "距离 1、长度 200" 就是"把上一个字节重复 200 次"。编码器
+//    可以放心地要求"源从匹配起点往前 dist 个字节开始", 哪怕那段还没被"输出"完 ——
+//    解码器逐字节拷, 自然就重叠了。所以 `dfl_match_len` 直接拿**原始输入**比就行。
+//
+// ---------------------------------------------------------------- 算法与取舍
+//
+//   匹配: **贪心**, 哈希链找最长 (链长封顶 `DF_CHAIN_MAX`), 找到 >= 3 就直接用,
+//         不做懒惰匹配 (不比较"这一格放字面、下一格匹配会不会更长")。
+//   码表: **只做固定霍夫曼** (RFC §3.2.6)。动态霍夫曼能再省 10~25%, 但那要求编码器
+//         统计频率、跑 huffman.lomt 建表、再把码长表**按 16/17/18 压缩**了传出去 ——
+//         是另一个量级的工作量。这一层先不做, 见诚实清单。
+//   窗口: **16384**, 不是 RFC 允许的 32768。理由见 `df_scratch_bytes`。
+//
+// ---------------------------------------------------------------- 工作区 (调用方给)
+//
+//     0  DFW_POS     已写出的字节数
+//     4  DFW_BUF     位缓冲 (低位先放)
+//     8  DFW_CNT     缓冲里攒了几个位 (< 8)
+//    12  DFW_ERR    非 0 = 出错 (输出装不下 / 输入超上限)
+//    16  DFW_CAP     out_cap 的副本 (df_drain 用它防越界写)
+//    32  DFW_HEAD    DF_HASH(1024) * 2 字节  哈希桶 -> 最近一次出现的输入位置
+//  2080  DFW_PREV    min(n, DF_WINDOW) * 2 字节  每个位置的"同桶上一个位置"
+//  合计 2080 + min(n, 16384) * 2 —— 最大 34848 字节, 装得进 64 KiB 的 bump 堆。
+//
+// `DFW_HEAD`/`DFW_PREV` 里位置存成 **u16**, 65535 = 空。所以 n 必须 <= 65534。
+//
+// ---------------------------------------------------------------- 诚实清单
+//
+//   - **不做动态霍夫曼**。固定表下, 每个字面要 7~9 位, 而动态表在高偏斜文本上
+//     能把常用符号压到 4~6 位 —— 差的就是这部分。这个模块的取舍是"先对、能读、
+//     能跟 inflate 对上", 压缩率不是目标。
+//   - **贪心匹配, 不做最优解析** (lazy matching / 代价权衡)。贪心能多榨的那 1~3%
+//     换来的是编码器要多存一整轮匹配结果 —— 不值。
+//   - **窗口 16384 而不是 32768**: prev 表按窗口大小开, 32K 窗口要 64 KiB 工作区,
+//     光工作区就吃满 bump 堆。16K 窗口对 <= 65534 的输入仍然覆盖 1/4, 压缩率损失
+//     在小文件上基本看不见。要 32K 窗口就把 `DF_WINDOW` 改 32768 并自备堆。
+//   - **不切块**: 整个输入是**一个** BFINAL=1 的固定块。真实压缩器会按 32K~64K
+//     切块防止"码长失配", 固定表本来就不依赖统计, 所以不切也无所谓。
+//   - **不输出存储块**: 不可压数据会老老实实按字面输出 (9 位/字节, 稍微膨胀),
+//     而不是"压不动就退回存储块"。上界因此有保证, 但比"存储块兜底"多 1/8。
+//   - **不分配**: 热点路径只用调用方给的缓冲 (唯一 `alloc` 在 `df_deflate` 外壳里)。
+//
+// 命名: 公开 df_*, 内部 dfl_*。自检 test_deflate_*。
+
+module deflate
+
+use "mem.lomt"
+use "inflate.lomt"
+use "huffman.lomt"
+
+/// 压缩失败 (输出缓冲不够 / 输入超过 65534)。
+pub const DF_ERR: u32 = 4294967295;
+/// 哈希链的"空"标记 (也是 u16 的最大值)。
+pub const DF_NONE: u32 = 65535;
+/// 滑动窗口 (字节)。距离 1..16384。**改这个要连着改 df_scratch_bytes**。
+pub const DF_WINDOW: u32 = 16384;
+/// 哈希桶个数。桶表固定 1024 * 2 字节。
+pub const DF_HASH: u32 = 1024;
+/// 一条哈希链最多走几步 —— 防病态输入把编码拖成平方。
+pub const DF_CHAIN_MAX: u32 = 32;
+/// 最短/最长匹配 (RFC 的 3..258)。
+pub const DF_MIN_MATCH: u32 = 3;
+pub const DF_MAX_MATCH: u32 = 258;
+/// u16 位置字段决定的输入上限。
+pub const DF_MAX_INPUT: u32 = 65534;
+
+const DFW_POS: u32 = 0;
+const DFW_BUF: u32 = 4;
+const DFW_CNT: u32 = 8;
+const DFW_ERR: u32 = 12;
+const DFW_CAP: u32 = 16;
+const DFW_HEAD: u32 = 32;
+const DFW_PREV: u32 = 2080;
+
+/// 编码器要多少字节工作区。**按 n 自适应**: prev 表只需要 min(n, 窗口) 个槽 ——
+/// 位置永远不会超过 n, 给 n 个槽就不会有人访问到外面去。一个 300 字节的输入
+/// 只要 2680 字节, 而不是无脑的 34848。
+///
+/// 窗口取 16384 的代价与理由: prev 表按窗口开, 32768 的窗口要 64 KiB 工作区 ——
+/// 光工作区就把 64 KiB 的 bump 堆吃满了, 而这个模块的便捷外壳 (`df_deflate`)
+/// 是要自己开工作区的。16384 让**任何**能收下的输入都装得进堆。
+pub fn df_scratch_bytes(n: u32) -> u32 {
+    let m: u32 = n;
+    if m > DF_WINDOW {
+        m = DF_WINDOW;
+    }
+    return DFW_PREV + m * 2;
+}
+
+/// 压缩输出的上界。最坏情况是**全字面**: 144..255 的字面在固定表里要 9 位,
+/// 所以 8 位输入最多换 9 位输出 -> n * 9/8 = n + n/8。再加 64 字节盖住块头 (3 位)
+/// 和 EOB (7 位) 以及零头。
+/// 匹配**不会**比字面更贵: 最贵的匹配是"长度 3 + 最远距离" = 7+0+5+13 = 25 位换
+/// 3 字节 (8.33 位/字节) < 9 位/字节。所以上界只由字面决定。
+pub fn df_max_out(n: u32) -> u32 {
+    return n + n / 8 + 64;
+}
+
+/// 基址 + 偏移 -> 新 ptr。**不用内建 `ptr_add`** (它在 Rust 路径降级成裸 `.add()`
+/// 而没包 `unsafe`, rustc 拒 E0133); 转成整数再加回来两条路径都过。
+fn dfl_at(buf: ptr, o: u32) -> ptr {
+    return ((buf as u64) + (o as u64)) as ptr;
+}
+
+// ---------------------------------------------------------------- 位写 (LSB-first)
+
+/// 把 v 的低 n 位写进位流 (低位先出)。n <= 24。
+fn dfl_put(ws: ptr, out: ptr, v: u32, n: u32) {
+    if mem_load32(ws, DFW_ERR) == 0 {
+        mem_store32(ws, DFW_BUF, mem_load32(ws, DFW_BUF) | (v << mem_load32(ws, DFW_CNT)));
+        mem_store32(ws, DFW_CNT, mem_load32(ws, DFW_CNT) + n);
+        dfl_drain(ws, out);
+    }
+}
+
+/// 把缓冲里攒满的整字节挤出去。**越界只置错误位, 不写** —— 宁可输出一个"半截"
+/// 加一个错误码, 也不能越界写坏调用方的内存。
+fn dfl_drain(ws: ptr, out: ptr) {
+    while mem_load32(ws, DFW_CNT) >= 8 {
+        let p: u32 = mem_load32(ws, DFW_POS);
+        if p >= mem_load32(ws, DFW_CAP) {
+            mem_store32(ws, DFW_ERR, 1);
+        } else {
+            store8(out, p, (mem_load32(ws, DFW_BUF) & 255) as u8);
+            mem_store32(ws, DFW_POS, p + 1);
+        }
+        mem_store32(ws, DFW_BUF, mem_load32(ws, DFW_BUF) >> 8);
+        mem_store32(ws, DFW_CNT, mem_load32(ws, DFW_CNT) - 8);
+    }
+}
+
+/// 收尾: 不足一字节的余位补 0 凑成一个字节吐出去 (RFC 要求流末尾补齐到字节)。
+fn dfl_flush(ws: ptr, out: ptr) {
+    if mem_load32(ws, DFW_CNT) > 0 {
+        mem_store32(ws, DFW_CNT, 8); // 把余位凑满一字节再挤
+        dfl_drain(ws, out);
+        mem_store32(ws, DFW_CNT, 0);
+        mem_store32(ws, DFW_BUF, 0);
+    }
+}
+
+/// 把 v 的低 n 位**反序**。往位流里写霍夫曼码之前必须过这一道 —— 见文件头 ①。
+fn dfl_rev(v: u32, n: u32) -> u32 {
+    let r: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        r = (r << 1) | ((v >> i) & 1);
+        i = i + 1;
+    }
+    return r;
+}
+
+/// 写一个霍夫曼码: 先反序, 再按 LSB-first 塞进去。
+fn dfl_put_code(ws: ptr, out: ptr, code: u32, len: u32) {
+    dfl_put(ws, out, dfl_rev(code, len), len);
+}
+
+// ---------------------------------------------------------------- 固定霍夫曼表 (RFC §3.2.6)
+//
+// 这三个函数是"把 RFC 印的那张表写成代码"。自检里拿 huffman.lomt 的规范码算法
+// **逐条对了一遍** —— 手抄表最容易抄错一格, 而错一格编出来的流一个符号都解不对。
+
+/// 字面/长度符号 s 在固定表里的码长: 0..143 -> 8, 144..255 -> 9, 256..279 -> 7,
+/// 280..287 -> 8。
+fn dfl_lit_len(s: u32) -> u32 {
+    if s <= 143 {
+        return 8;
+    }
+    if s <= 255 {
+        return 9;
+    }
+    if s <= 279 {
+        return 7;
+    }
+    return 8;
+}
+
+/// 同上, 码字。0..143 从 0x30 起, 144..255 从 0x190 起 (9 位), 256..279 从 0 起
+/// (7 位), 280..287 从 0xC0 起。
+fn dfl_lit_code(s: u32) -> u32 {
+    if s <= 143 {
+        return 0x30 + s;
+    }
+    if s <= 255 {
+        return 0x190 + s - 144;
+    }
+    if s <= 279 {
+        return s - 256;
+    }
+    return 0xC0 + s - 280;
+}
+
+// ---------------------------------------------------------------- 长度/距离 -> 码
+
+/// 长度 l (3..258) -> 长度码。是 `inf_len_base` 那张表的**反查**:
+/// 找唯一一个满足 base(c) <= l < base(c) + 2^extra(c) 的 c。
+pub fn df_len_code(l: u32) -> u32 {
+    if l <= 10 {
+        return 254 + l; // 257..264 <- 3..10
+    }
+    if l <= 18 {
+        return 265 + (l - 11) / 2;
+    }
+    if l <= 34 {
+        return 269 + (l - 19) / 4;
+    }
+    if l <= 66 {
+        return 273 + (l - 35) / 8;
+    }
+    if l <= 130 {
+        return 277 + (l - 67) / 16;
+    }
+    if l <= 257 {
+        return 281 + (l - 131) / 32;
+    }
+    return 285; // 258 是特例: 0 额外位, 比 284 少花 5 位
+}
+
+/// 距离 d (1..32768) -> 距离码。同样是对 `inf_dist_base` 的反查。
+/// 相邻两码共用一段步长, 所以是"段首 + (d - 段首base) / 步长"。
+pub fn df_dist_code(d: u32) -> u32 {
+    if d <= 4 {
+        return d - 1; // 1..4 -> 0..3
+    }
+    if d <= 8 {
+        return 4 + (d - 5) / 2;
+    }
+    if d <= 16 {
+        return 6 + (d - 9) / 4;
+    }
+    if d <= 32 {
+        return 8 + (d - 17) / 8;
+    }
+    if d <= 64 {
+        return 10 + (d - 33) / 16;
+    }
+    if d <= 128 {
+        return 12 + (d - 65) / 32;
+    }
+    if d <= 256 {
+        return 14 + (d - 129) / 64;
+    }
+    if d <= 512 {
+        return 16 + (d - 257) / 128;
+    }
+    if d <= 1024 {
+        return 18 + (d - 513) / 256;
+    }
+    if d <= 2048 {
+        return 20 + (d - 1025) / 512;
+    }
+    if d <= 4096 {
+        return 22 + (d - 2049) / 1024;
+    }
+    if d <= 8192 {
+        return 24 + (d - 4097) / 2048;
+    }
+    if d <= 16384 {
+        return 26 + (d - 8193) / 4096;
+    }
+    return 28 + (d - 16385) / 8192;
+}
+
+// ---------------------------------------------------------------- 匹配
+
+/// 三个字节的哈希 -> 桶号 (DF_HASH = 1024, 所以与 1023)。
+fn dfl_hash(src: ptr, p: u32) -> u32 {
+    return ((load8(src, p) << 5) ^ (load8(src, p + 1) << 2) ^ load8(src, p + 2)) & 1023;
+}
+
+fn dfl_head_get(ws: ptr, h: u32) -> u32 {
+    return mem_load16(ws, DFW_HEAD + h * 2);
+}
+
+fn dfl_head_set(ws: ptr, h: u32, v: u32) {
+    mem_store16(ws, DFW_HEAD + h * 2, v);
+}
+
+/// prev 是**环**: 位置按 `pos & (窗口-1)` 落槽, 同槽会被新位置覆盖。所以走链时
+/// 必须自带两道哨兵 (`cur >= i` / 超出窗口), 见调用点。
+fn dfl_prev_get(ws: ptr, pos: u32) -> u32 {
+    return mem_load16(ws, DFW_PREV + (pos & 16383) * 2);
+}
+
+fn dfl_prev_set(ws: ptr, pos: u32, v: u32) {
+    mem_store16(ws, DFW_PREV + (pos & 16383) * 2, v);
+}
+
+/// 把位置 pos 插进它那个桶的链头。pos 后面不足 3 字节就没东西可哈希, 跳过。
+fn dfl_insert(ws: ptr, src: ptr, sn: u32, pos: u32) {
+    if pos + 2 < sn {
+        let h: u32 = dfl_hash(src, pos);
+        dfl_prev_set(ws, pos, dfl_head_get(ws, h));
+        dfl_head_set(ws, h, pos);
+    }
+}
+
+/// src[a..] 与 src[b..] 的最长公共前缀, 封顶 cap。
+/// **允许 a + l >= b**: 那就是"自己引用自己"的重复串, 解码端逐字节拷能还原,
+/// 而这里比的是**原始输入** (整块都在手上), 所以直接比就行, 不用管重叠。
+fn dfl_match_len(src: ptr, a: u32, b: u32, cap: u32) -> u32 {
+    let l: u32 = 0;
+    while l < cap && load8(src, a + l) == load8(src, b + l) {
+        l = l + 1;
+    }
+    return l;
+}
+
+// ---------------------------------------------------------------- 编码
+
+/// 工作区由调用方给。返回写出的字节数, 出错给 DF_ERR。
+pub fn df_deflate_ws(src: ptr, sn: u32, out: ptr, out_cap: u32, ws: ptr) -> u32 {
+    if sn > DF_MAX_INPUT {
+        return DF_ERR; // 位置字段是 u16, 再大就要把环表整个换掉
+    }
+    mem_store32(ws, DFW_POS, 0);
+    mem_store32(ws, DFW_BUF, 0);
+    mem_store32(ws, DFW_CNT, 0);
+    mem_store32(ws, DFW_ERR, 0);
+    mem_store32(ws, DFW_CAP, out_cap);
+    // head 表清成 0xFF -> 每个 u16 都是 65535 = DF_NONE (位置到不了 65535)。
+    mem_fill(ws, DFW_HEAD, 2048, 255);
+    // 块头: BFINAL=1, BTYPE=01 (固定霍夫曼)。两个字段都是 LSB-first 的普通整数。
+    dfl_put(ws, out, 1, 1);
+    dfl_put(ws, out, 1, 2);
+    let i: u32 = 0;
+    while i < sn && mem_load32(ws, DFW_ERR) == 0 {
+        let lim: u32 = sn - i;
+        let cap: u32 = lim;
+        if cap > DF_MAX_MATCH {
+            cap = DF_MAX_MATCH;
+        }
+        let best: u32 = 0;
+        let bestd: u32 = 0;
+        if i + 2 < sn && cap >= DF_MIN_MATCH {
+            let cur0: u32 = dfl_head_get(ws, dfl_hash(src, i));
+            let cur: u32 = cur0;
+            let depth: u32 = 0;
+            let stop: u32 = 0;
+            while cur != DF_NONE && stop == 0 && depth < DF_CHAIN_MAX {
+                depth = depth + 1;
+                // 两道哨兵: 环表可能存着"属于下一圈"的位置 (cur >= i), 也可能太旧。
+                // 遇到就**整条链放弃** (不是跳过这一个) —— 再往后只会更旧。
+                if cur >= i || (i - cur) > DF_WINDOW {
+                    stop = 1;
+                } else {
+                    let l: u32 = dfl_match_len(src, cur, i, cap);
+                    if l > best {
+                        best = l;
+                        bestd = i - cur;
+                    }
+                    if l >= cap {
+                        stop = 1; // 到本段上限了, 再找也不会更长
+                    } else {
+                        cur = dfl_prev_get(ws, cur);
+                    }
+                }
+            }
+        }
+        if best >= DF_MIN_MATCH {
+            // (长度, 距离) 各写"码 + 额外位"。额外位是普通整数, **不反序**。
+            let lc: u32 = df_len_code(best);
+            dfl_put_code(ws, out, dfl_lit_code(lc), dfl_lit_len(lc));
+            dfl_put(ws, out, best - inf_len_base(lc), inf_len_extra(lc));
+            let dc: u32 = df_dist_code(bestd);
+            // 固定距离表: 32 个符号全是 5 位, 规范码就是 0..31 本身。
+            dfl_put_code(ws, out, dc, 5);
+            dfl_put(ws, out, bestd - inf_dist_base(dc), inf_dist_extra(dc));
+            // 匹配覆盖到的每个位置都要进链, 否则下一段就找不到它们。
+            let j: u32 = 0;
+            while j < best {
+                dfl_insert(ws, src, sn, i + j);
+                j = j + 1;
+            }
+            i = i + best;
+        } else {
+            let b: u32 = load8(src, i);
+            dfl_put_code(ws, out, dfl_lit_code(b), dfl_lit_len(b));
+            dfl_insert(ws, src, sn, i);
+            i = i + 1;
+        }
+    }
+    // 块结束码 256 (码长 7, 码字 0), 然后把余位补齐成一个字节。
+    dfl_put_code(ws, out, dfl_lit_code(256), dfl_lit_len(256));
+    dfl_flush(ws, out);
+    if mem_load32(ws, DFW_ERR) != 0 {
+        return DF_ERR;
+    }
+    return mem_load32(ws, DFW_POS);
+}
+
+/// 便捷外壳: 自己开工作区。**循环压很多块时别用这个** (bump 堆不回收);
+/// 那种场合用 `df_deflate_ws` 传一块复用的。
+pub fn df_deflate(src: ptr, sn: u32, out: ptr, out_cap: u32) -> u32 {
+    // **检查要排在分配前面**: 这个便利版按输入长度开工作区, 而按未校验的长度开
+    // (65535 这种) 本身就够把 64 KiB 堆撑爆 —— 那就轮不到 df_deflate_ws 里的检查了。
+    // 第一版就是反过来的, 于是 test_deflate_rejects_oversized_input 直接把进程打死。
+    if sn > DF_MAX_INPUT {
+        return DF_ERR;
+    }
+    let ws: ptr = alloc(df_scratch_bytes(sn));
+    return df_deflate_ws(src, sn, out, out_cap, ws);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn dfl_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return c - 55;
+}
+
+fn dfl_hx(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < n / 2 {
+        let hi: u32 = dfl_hv(str_byte(s, k * 2));
+        let lo: u32 = dfl_hv(str_byte(s, k * 2 + 1));
+        store8(out, k, ((hi << 4) | lo) as u8);
+        k = k + 1;
+    }
+    return n / 2;
+}
+
+/// 伪随机字节 (确定性 LCG), 用来造"压不动"的数据。
+fn dfl_noise(p: ptr, n: u32, seed: u32) {
+    let x: u32 = seed;
+    let i: u32 = 0;
+    while i < n {
+        x = (x * 1103 + 12345) & 65535;
+        store8(p, i, ((x >> 8) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn dfl_txt() -> str {
+    return "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. ";
+}
+
+fn dfl_rep() -> str {
+    return "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc";
+}
+
+/// 编码 -> 用自己的 inflate 解回来, 逐字节比。返回是否一致。
+fn dfl_round(src: ptr, sn: u32, enc: ptr, dec: ptr, dcap: u32, ews: ptr, iws: ptr) -> u32 {
+    let ol: ptr = ptr_at_small();
+    let el: u32 = df_deflate_ws(src, sn, enc, df_max_out(sn), ews);
+    if el == DF_ERR || el > df_max_out(sn) {
+        return DF_ERR;
+    }
+    let r: u32 = inf_inflate_full(enc, el, dec, dcap, ol, ptr_at_small(), iws);
+    if r != 0 {
+        return DF_ERR;
+    }
+    if mem_load32(ol, 0) != sn {
+        return DF_ERR;
+    }
+    if sn > 0 && mem_eq(src, 0, dec, 0, sn) == false {
+        return DF_ERR;
+    }
+    return el;
+}
+
+/// 8 字节的暂存 (放解出长度 / 吃掉的字节数)。
+fn ptr_at_small() -> ptr {
+    return alloc(8);
+}
+
+fn test_deflate_empty_is_two_bytes() -> bool {
+    // 空输入: BFINAL=1 + BTYPE=01 + EOB(7 个 0) = 10 位 -> 03 00。
+    // 与 Python `zlib.compressobj(...,-15,...,Z_FIXED).flush()` 对空串的输出**逐字节相同**。
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(16);
+    let n: u32 = df_deflate(src, 0, out, 16);
+    return n == 2 && load8(out, 0) == 3 && load8(out, 1) == 0;
+}
+
+fn test_deflate_single_a_is_730400() -> bool {
+    // 'A'(65) 的固定码 = 0x30+65 = 0x71 (8 位), 反序后写进位流; 加上 EOB。
+    // 手推的位序列 -> 73 04 00; Python 的 Z_FIXED 编 'A' 也正好是 730400。
+    // 三个字节全对意味着: 块头位序 + 码字反序 + EOB 三件事同时正确 ——
+    // 这是最短的一条"能作弊都没有机会"的向量。
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(16);
+    store8(src, 0, 65 as u8);
+    let n: u32 = df_deflate(src, 1, out, 16);
+    return n == 3 && load8(out, 0) == 115 && load8(out, 1) == 4 && load8(out, 2) == 0;
+}
+
+fn test_deflate_roundtrip_text() -> bool {
+    let src: ptr = alloc(160);
+    let enc: ptr = alloc(256);
+    let dec: ptr = alloc(192);
+    let ews: ptr = alloc(df_scratch_bytes(135));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    let n: u32 = dfl_hx(src, "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e20");
+    return n == 135 && dfl_round(src, 135, enc, dec, 192, ews, iws) != DF_ERR;
+}
+
+fn test_deflate_text_compresses() -> bool {
+    // 这句英文重复三遍 -> 后两遍必须靠**长距离回引**吃掉, 输出要明显小于输入。
+    let src: ptr = alloc(160);
+    let enc: ptr = alloc(256);
+    let dec: ptr = alloc(192);
+    let ews: ptr = alloc(df_scratch_bytes(135));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    dfl_hx(src, "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e20");
+    let el: u32 = dfl_round(src, 135, enc, dec, 192, ews, iws);
+    return el != DF_ERR && el < 120 && el > 0;
+}
+
+fn test_deflate_highly_repetitive_compresses() -> bool {
+    // 300 个 'a': 第一个字面 + 一长串"距离 1"的匹配。258 是单次上限, 所以至少要
+    // 两段匹配才能盖完 —— 顺带验了 DF_MAX_MATCH 的切分。
+    let src: ptr = alloc(320);
+    let enc: ptr = alloc(400);
+    let dec: ptr = alloc(320);
+    let ews: ptr = alloc(df_scratch_bytes(300));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    mem_fill(src, 0, 300, 97);
+    let el: u32 = dfl_round(src, 300, enc, dec, 320, ews, iws);
+    return el != DF_ERR && el < 20;
+}
+
+fn test_deflate_incompressible_within_bound() -> bool {
+    // 不可压数据可以**变大**, 但绝不能超过 df_max_out —— 那是调用方开缓冲的依据。
+    let src: ptr = alloc(200);
+    let enc: ptr = alloc(320);
+    let dec: ptr = alloc(224);
+    let ews: ptr = alloc(df_scratch_bytes(150));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    dfl_noise(src, 150, 99);
+    let el: u32 = dfl_round(src, 150, enc, dec, 200, ews, iws);
+    return el != DF_ERR && el <= df_max_out(150);
+}
+
+fn test_deflate_max_out_holds_across_sizes() -> bool {
+    // 上界逐个长度验一遍 (0..64), 不能有缝。上界是**开的缓冲的依据**, 破了就是越界写。
+    let src: ptr = alloc(64);
+    let enc: ptr = alloc(160);
+    let ews: ptr = alloc(df_scratch_bytes(64));
+    let bad: u32 = 0;
+    dfl_noise(src, 64, 5);
+    let n: u32 = 0;
+    while n <= 64 {
+        let el: u32 = df_deflate_ws(src, n, enc, 160, ews);
+        if el == DF_ERR || el > df_max_out(n) {
+            bad = 1;
+        }
+        n = n + 1;
+    }
+    return bad == 0;
+}
+
+fn test_deflate_roundtrip_matrix() -> bool {
+    // 一次开工作区跑多种形状 (堆只有 64 KiB, 每个形状都开一套会爆)。
+    let src: ptr = alloc(400);
+    let enc: ptr = alloc(600);
+    let dec: ptr = alloc(400);
+    let ews: ptr = alloc(df_scratch_bytes(400));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    let bad: u32 = 0;
+    // ① 高重复
+    dfl_hx(src, "616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263616263");
+    if dfl_round(src, 192, enc, dec, 400, ews, iws) == DF_ERR {
+        bad = 1;
+    }
+    // ② 不可压
+    dfl_noise(src, 300, 7);
+    if dfl_round(src, 300, enc, dec, 320, ews, iws) == DF_ERR {
+        bad = 2;
+    }
+    // ③ 单字节
+    store8(src, 0, 200 as u8);
+    if dfl_round(src, 1, enc, dec, 400, ews, iws) == DF_ERR {
+        bad = 3;
+    }
+    // ④ 两个字节 (凑不满一个匹配)
+    store8(src, 0, 1 as u8);
+    store8(src, 1, 2 as u8);
+    if dfl_round(src, 2, enc, dec, 400, ews, iws) == DF_ERR {
+        bad = 4;
+    }
+    // ⑤ 恰好 3 个相同字节 (最短匹配的边界)
+    mem_fill(src, 0, 3, 88);
+    if dfl_round(src, 3, enc, dec, 400, ews, iws) == DF_ERR {
+        bad = 5;
+    }
+    // ⑥ 空
+    if dfl_round(src, 0, enc, dec, 400, ews, iws) != 2 {
+        bad = 6;
+    }
+    return bad == 0;
+}
+
+fn test_deflate_long_distance_roundtrip() -> bool {
+    // 前半段随机、后半段等于前半段 -> 后半段必须靠**长距离**回引 (距离 200)。
+    let src: ptr = alloc(420);
+    let enc: ptr = alloc(600);
+    let dec: ptr = alloc(420);
+    let ews: ptr = alloc(df_scratch_bytes(400));
+    let iws: ptr = alloc(inf_scratch_bytes());
+    dfl_noise(src, 200, 3);
+    mem_copy(src, 200, src, 0, 200);
+    let el: u32 = dfl_round(src, 400, enc, dec, 420, ews, iws);
+    return el != DF_ERR && el < 300;
+}
+
+fn test_deflate_rejects_small_output_buffer() -> bool {
+    // 输出缓冲明显不够时要**报错**, 不是硬写下去。缓冲给 4 字节, 输入 100 字节。
+    let src: ptr = alloc(128);
+    let out: ptr = alloc(8);
+    mem_fill(src, 0, 100, 66);
+    return df_deflate(src, 100, out, 4) == DF_ERR;
+}
+
+fn test_deflate_rejects_oversized_input() -> bool {
+    // 位置字段是 u16: 65535 以上的输入直接拒, 而不是把位置绕回去编出错数据。
+    let src: ptr = alloc(8);
+    let out: ptr = alloc(16);
+    return df_deflate(src, 65535, out, 16) == DF_ERR;
+}
+
+fn test_deflate_respects_offsets() -> bool {
+    // 从缓冲中间读、往缓冲中间写 (调用方常把两块拼在一个缓冲里)。
+    //
+    // 本模块的 API 是**指针式**的 (`df_deflate_ws(src, sn, out, out_cap, ws)`, 没有独立
+    // 的 offset 形参), 所以"偏移"就是传一个内插指针。这条自检钉的就是: 内插指针被当成
+    // 了真正的起点 —— 而不是被忽略掉。
+    //
+    // 第一版有两处错: (1) 把输入 `mem_move` 到 32 之后**仍然传 `src` 本体**, 等于没有
+    // 验"从中间读" (只是把同一段字节又复制了一份); (2) 把两次输出放在互相重叠的区间里
+    // 逐字节比 (`mem_eq(enc,0,enc,40,…)` 在 40 < e1 时比的是自己盖自己), 必然不等。
+    // 于是红的是这条自检, 而不是编码器。
+    let src: ptr = alloc(192);
+    let ref0: ptr = alloc(256);
+    let enc: ptr = alloc(256);
+    let ews: ptr = alloc(df_scratch_bytes(135));
+    let n: u32 = dfl_hx(src, "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2054686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e20");
+    mem_move(src, 32, src, 0, n);                  // 输入整块挪到偏移 32
+    // ① 从偏移 32 读, 往偏移 0 写 —— 这是参考流。
+    let e1: u32 = df_deflate_ws(dfl_at(src, 32), n, ref0, 220, ews);
+    // ② 往偏移 40 写: 整块先用哨兵 171 填满, 事后**除写出去的那 e1 字节之外**必须
+    //    原封不动 (写之前只填前 40 字节是不够的 —— 流尾后面那个字节没人初始化, 拿它
+    //    比哨兵会红, 而那是自检自己漏填, 不是代码越界)。
+    mem_fill(enc, 0, 256, 171);
+    let e2: u32 = df_deflate_ws(dfl_at(src, 32), n, dfl_at(enc, 40), 200, ews);
+    return n == 135 && e1 == e2 && e1 > 0 && e1 <= 200
+        && mem_eq(ref0, 0, enc, 40, e1)
+        && load8(enc, 0) == 171 && load8(enc, 39) == 171 && load8(enc, 40 + e1) == 171;
+}
+
+fn test_deflate_fixed_codes_match_huffman_module() -> bool {
+    // **最重要的一条**: 我手抄的 RFC §3.2.6 固定码表, 和 huffman.lomt 那套规范码
+    // 算法算出来的码长/码字, 必须**逐条**一致 (288 条)。手抄表最容易抄错一格,
+    // 而错一格编出来的流一个符号都解不对 —— 这条把"抄"变成"算"。
+    let lens: ptr = alloc(288 * 4);
+    let codes: ptr = alloc(288 * 4);
+    let sc: ptr = alloc(huffman_codes_scratch_bytes(9));
+    inf_fixed_lit_lens(lens);
+    let used: u32 = huffman_codes(lens, 288, codes, sc, 9);
+    if used != 288 {
+        return false;
+    }
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < 288 {
+        if mem_load32(lens, i * 4) != dfl_lit_len(i) {
+            bad = 1;
+        }
+        if mem_load32(codes, i * 4) != dfl_lit_code(i) {
+            bad = 2;
+        }
+        i = i + 1;
+    }
+    return bad == 0;
+}
+
+fn test_deflate_length_code_selection_inverts_rfc_table() -> bool {
+    // df_len_code 是 inf_len_base/extra 的反查: 对**每一个**合法长度 3..258,
+    // 反查出来的码必须真的覆盖它 (base <= l <= base+2^extra-1), 而且只能有一个码满足。
+    let bad: u32 = 0;
+    let l: u32 = 3;
+    while l <= 258 {
+        let c: u32 = df_len_code(l);
+        let b: u32 = inf_len_base(c);
+        let e: u32 = inf_len_extra(c);
+        if c < 257 || c > 285 {
+            bad = 1;
+        }
+        if l < b || l >= b + (1 << e) {
+            bad = 2;
+        }
+        l = l + 1;
+    }
+    // 边界抽查: 258 必须走 285 (0 额外位), 257 走 284。
+    let ok2: bool = df_len_code(258) == 285 && df_len_code(257) == 284
+        && df_len_code(3) == 257 && df_len_code(10) == 264 && df_len_code(11) == 265;
+    return bad == 0 && ok2;
+}
+
+fn test_deflate_distance_code_selection_inverts_rfc_table() -> bool {
+    // 同一件事的距离侧: 1..32768 每个距离都要落到唯一一个覆盖它的码上。
+    let bad: u32 = 0;
+    let d: u32 = 1;
+    while d <= 32768 {
+        let c: u32 = df_dist_code(d);
+        let b: u32 = inf_dist_base(c);
+        let e: u32 = inf_dist_extra(c);
+        if c > 29 {
+            bad = 1;
+        }
+        if d < b || d >= b + (1 << e) {
+            bad = 2;
+        }
+        d = d + 1;
+    }
+    let ok2: bool = df_dist_code(1) == 0 && df_dist_code(4) == 3 && df_dist_code(5) == 4
+        && df_dist_code(6) == 4 && df_dist_code(7) == 5 && df_dist_code(32768) == 29;
+    return bad == 0 && ok2;
+}
+
+
+
+
+
+
+
+fn test_deflate_scratch_and_bound_accounting() -> bool {
+    // 工作区随 n 增长但**封顶**: prev 表最多 16384 个槽, 所以 300 字节的输入
+    // 只要 2680, 而 40000 字节的输入也只要 34848 —— 都装得进 64 KiB 的 bump 堆。
+    let ok1: bool = df_scratch_bytes(0) == 2080 && df_scratch_bytes(300) == 2080 + 600
+        && df_scratch_bytes(16384) == 2080 + 32768 && df_scratch_bytes(60000) == 2080 + 32768;
+    let ok2: bool = df_scratch_bytes(60000) < 65536 && df_scratch_bytes(100) < df_scratch_bytes(200);
+    let ok3: bool = df_max_out(0) == 64 && df_max_out(8) == 8 + 1 + 64
+        && df_max_out(300) == 300 + 37 + 64;
+    return ok1 && ok2 && ok3;
+}

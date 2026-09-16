@@ -1,0 +1,728 @@
+// std/f64.lomt — 双精度浮点算术 (IEEE 754, 软实现)
+//
+// 为什么要有它: **语言里没有浮点类型** (实测 `let x: f64 = 1.5;` -> `E2 未知类型 f64`)。
+// 于是三角、指数、对数、科学计数、图形数学——整片都不存在。这一层把那片解锁。
+//
+// 表示: 一个 double 就是一个 u64 位模式, 照着 IEEE 754 做, 不引入任何新类型。
+//
+// 算法: 所有加减先归一成 "整数尾数 M x 2^E" 的形式 (M 的最位在固定位置),
+// 对齐时把小的一方右移并把丢掉的位或进 sticky, 最后由 f64_finish_round 统一做
+// **就近舍入到偶数** (RNE) 并处理次正规与溢出。乘法用 128 位积 (没有 u128, 用 wide),
+// 除法做 64 轮长除 —— 两者都把 sticky 一路带到同一条舍入路径上。
+//
+// 诚实边界: 只做 RNE 一种舍入模式 (IEEE 默认)。其余三种 (向零/向上/向下) 在 round 模块里,
+// 那是"怎么取整"的语义, 与"一次运算怎么舍入"分开。
+//
+// 不使用 alloc: 算术函数在循环里被调用, 而 bump 堆只有 64 KiB、`free` 是占位 ——
+// 在里面分配会把它耗尽。所以乘除法都**内联**算, 不要临时缓冲。
+//
+// 命名: 公开 f64_*, 内部 fa_*。自检 test_f64_*。
+
+module f64
+
+use "f64bits.lomt"
+use "wide.lomt"
+
+/// f64_cmp 的取值 (不用负数 —— 比较结果与值分开更干净)。
+pub const F64_CMP_LT: u32 = 0;
+pub const F64_CMP_EQ: u32 = 1;
+pub const F64_CMP_GT: u32 = 2;
+pub const F64_CMP_UN: u32 = 3;
+
+// ------------------------------------------------------------------ 拆装
+
+/// 有效尾数: 正规数补上隐含的 1, 次正规数原样。结果恒为 53 位整数的语义。
+pub fn f64_mant53(b: u64) -> u64 {
+    let f: u32 = f64bits_exp(b);
+    let m: u64 = f64bits_mant(b);
+    if f == 0 {
+        return m;
+    }
+    return m | 4503599627370496;
+}
+
+/// 尾数最低位对应的 2 的幂次: 值 = f64_mant53(b) * 2^f64_exp_lsb(b)。
+pub fn f64_exp_lsb(b: u64) -> i64 {
+    let f: u32 = f64bits_exp(b);
+    if f == 0 {
+        return (0 as i64) - (1074 as i64);
+    }
+    return (f as i64) - (1075 as i64);
+}
+
+/// 取反 (翻符号位)。对 NaN 也翻 —— 与 IEEE 的 negate 一致。
+pub fn f64_neg(b: u64) -> u64 {
+    return f64bits_neg(b);
+}
+
+/// 取幅值 (清符号位)。
+pub fn f64_abs(b: u64) -> u64 {
+    return f64bits_abs(b);
+}
+
+// ------------------------------------------------------------------ 舍入
+
+/// 把 (sign, m * 2^e) 归一、舍入、打包。m 的最高有效位在 pos (0..63)。
+///
+/// 这是整层的**唯一**舍入出口 —— 加减乘除都汇到这里, 于是 RNE 只需要对一次。
+pub fn f64_finish_round(sign: u32, m0: u64, pos0: u32, e0: i64, sticky0: u32) -> u64 {
+    if m0 == 0 {
+        return f64bits_pack(sign, 0, 0);
+    }
+    let m: u64 = m0;
+    let p: u32 = pos0;
+    let e: i64 = e0;
+    let sticky: u32 = sticky0;
+    // 归一到最高位 = 54 (低两位留给保护位/舍入位)
+    while p < 54 {
+        m = m << 1;
+        p = p + 1;
+        e = e - 1;
+    }
+    while p > 54 {
+        if (m & 1) != 0 {
+            sticky = 1;
+        }
+        m = m >> 1;
+        p = p - 1;
+        e = e + 1;
+    }
+    // m 的最高位在 54 -> 53 位尾数 = m >> 2, 保护位 G = bit1, 舍入位 R = bit0
+    let mant: u64 = m >> 2;
+    let g: u64 = (m >> 1) & 1;
+    let r: u64 = m & 1;
+    let ef: i64 = e + 1077;
+    if ef <= 0 {
+        return fa_subnormal(sign, mant, g, r, sticky, ef);
+    }
+    let out_m: u64 = mant;
+    let out_e: i64 = ef;
+    let up: bool = g == 1 && (r == 1 || sticky == 1 || (out_m & 1) == 1);
+    if up {
+        out_m = out_m + 1;
+        if (out_m >> 53) != 0 {
+            out_m = out_m >> 1;
+            out_e = out_e + 1;
+        }
+    }
+    if out_e >= 2047 {
+        return f64bits_pack(sign, 2047, 0);
+    }
+    return f64bits_pack(sign, out_e as u32, out_m & 4503599627370495);
+}
+
+/// 结果落到次正规 (或零) 时的舍入。ef <= 0。
+///
+/// 值 = mant * 2^(ef-1075); 次正规编码是 K * 2^-1074, 所以 K = mant * 2^(ef-1),
+/// 也就是右移 shift = 1 - ef 位。丢掉的位里, 保护位/舍入位取自 mant 本身,
+/// 而 mant 下面还有 (g, r, sticky) 那三个"尾数之外"的位, 它们全都并进 sticky。
+fn fa_subnormal(sign: u32, mant: u64, g0: u64, r0: u64, s0: u32, ef: i64) -> u64 {
+    let shift: u32 = (1 as i64 - ef) as u32;
+    if shift > 53 {
+        // mant 整个被丢掉 —— 结果远小于半个最小次正规, 舍到 0 (符号保留)。
+        return f64bits_pack(sign, 0, 0);
+    }
+    let k: u64 = mant >> shift;
+    let g: u64 = 0;
+    let r: u64 = 0;
+    let s: u32 = s0;
+    if shift == 1 {
+        g = mant & 1;
+        r = g0;
+        if r0 == 1 {
+            s = 1;
+        }
+    } else {
+        g = (mant >> (shift - 1)) & 1;
+        r = (mant >> (shift - 2)) & 1;
+        let low: u64 = mant & (((1 as u64) << (shift - 2)) - 1);
+        if low != 0 || g0 == 1 || r0 == 1 {
+            s = 1;
+        }
+    }
+    let out: u64 = k;
+    let up: bool = g == 1 && (r == 1 || s == 1 || (out & 1) == 1);
+    if up {
+        out = k + 1;
+    }
+    if out == 4503599627370496 {
+        // 进位成最小正规 —— 这是次正规与正规的接缝, 单独处理才不会错一格。
+        return f64bits_pack(sign, 1, 0);
+    }
+    return f64bits_pack(sign, 0, out);
+}
+
+// ------------------------------------------------------------------ 加减
+
+pub fn f64_add(a: u64, b: u64) -> u64 {
+    return fa_addsub(a, b, 0);
+}
+
+pub fn f64_sub(a: u64, b: u64) -> u64 {
+    return fa_addsub(a, b, 1);
+}
+
+fn fa_addsub(a: u64, b: u64, flipsign: u32) -> u64 {
+    if f64bits_is_nan(a) || f64bits_is_nan(b) {
+        return F64_QNAN;
+    }
+    let sa: u32 = f64bits_sign(a);
+    let sb: u32 = f64bits_sign(b) ^ flipsign;
+    if f64bits_is_inf(a) || f64bits_is_inf(b) {
+        if f64bits_is_inf(a) && f64bits_is_inf(b) {
+            if sa != sb {
+                return F64_QNAN; // inf - inf
+            }
+            return a;
+        }
+        if f64bits_is_inf(a) {
+            return a;
+        }
+        return f64bits_pack(sb, 2047, 0);
+    }
+    if f64bits_is_zero(a) && f64bits_is_zero(b) {
+        if sa == sb {
+            return f64bits_pack(sa, 0, 0);
+        }
+        return 0; // 异号零相加 -> +0 (IEEE)
+    }
+    if f64bits_is_zero(a) {
+        return f64bits_pack(sb, f64bits_exp(b), f64bits_mant(b));
+    }
+    if f64bits_is_zero(b) {
+        return f64bits_pack(sa, f64bits_exp(a), f64bits_mant(a));
+    }
+    // **放大 8 倍再对齐**: 对齐是右移, 右移会把低位的保护位/舍入位一起丢掉, 于是
+    // "恰好在中点"与"中点以下"变成一个 sticky, 分不开了 (第一版就是这么错的:
+    // 1 + 2^-53 本该原地不动、1 + 2^-53 + eps 本该进位, 两者都算成了原地不动)。
+    // 先 <<3 腾出三个低位, 对齐后它们落在权重 ebig-1/e-2/e-3 上 —— 正好是 G/R/S。
+    let ma: u64 = f64_mant53(a) << 3;
+    let mb: u64 = f64_mant53(b) << 3;
+    let ea: i64 = f64_exp_lsb(a);
+    let eb: i64 = f64_exp_lsb(b);
+    // 让指数大的一方在前
+    let mbig: u64 = ma;
+    let msmall: u64 = mb;
+    let ebig: i64 = ea;
+    let esmall: i64 = eb;
+    let sbig: u32 = sa;
+    let ssmall: u32 = sb;
+    if ea < eb {
+        mbig = mb;
+        msmall = ma;
+        ebig = eb;
+        esmall = ea;
+        sbig = sb;
+        ssmall = sa;
+    }
+    let diff: i64 = ebig - esmall;
+    let aligned: u64 = 0;
+    let sticky: u32 = 0;
+    if diff >= 64 {
+        // 小的一方整个落在保护位以下: 只剩一个 sticky。
+        if msmall != 0 {
+            sticky = 1;
+        }
+        aligned = 0;
+    } else {
+        let d: u32 = diff as u32;
+        let mask: u64 = ((1 as u64) << d) - 1; // d < 64, 安全
+        if (msmall & mask) != 0 {
+            sticky = 1;
+        }
+        aligned = msmall >> d;
+    }
+    let sign: u32 = sbig;
+    let m: u64 = 0;
+    if sbig == ssmall {
+        m = mbig + aligned;
+    } else {
+        if mbig >= aligned {
+            m = mbig - aligned;
+            sign = sbig;
+        } else {
+            m = aligned - mbig;
+            sign = ssmall;
+        }
+    }
+    if m == 0 {
+        return 0; // 精确抵消 -> +0
+    }
+    return f64_finish_round(sign, m, 63 - wide_clz64(m), ebig - 3, sticky);
+}
+
+// ------------------------------------------------------------------ 乘法
+
+pub fn f64_mul(a: u64, b: u64) -> u64 {
+    let sign: u32 = f64bits_sign(a) ^ f64bits_sign(b);
+    if f64bits_is_nan(a) || f64bits_is_nan(b) {
+        return F64_QNAN;
+    }
+    if f64bits_is_inf(a) || f64bits_is_inf(b) {
+        if f64bits_is_zero(a) || f64bits_is_zero(b) {
+            return F64_QNAN; // 0 * inf
+        }
+        return f64bits_pack(sign, 2047, 0);
+    }
+    if f64bits_is_zero(a) || f64bits_is_zero(b) {
+        return f64bits_pack(sign, 0, 0);
+    }
+    let ma: u64 = f64_mant53(a);
+    let mb: u64 = f64_mant53(b);
+    let ea: i64 = f64_exp_lsb(a);
+    let eb: i64 = f64_exp_lsb(b);
+    // 内联 64x64 -> 128 (拆 32 位肢体), 不调 wide_umul64 就不用临时缓冲。
+    let a0: u64 = ma & 4294967295;
+    let a1: u64 = ma >> 32;
+    let b0: u64 = mb & 4294967295;
+    let b1: u64 = mb >> 32;
+    let p00: u64 = a0 * b0;
+    let p01: u64 = a0 * b1;
+    let p10: u64 = a1 * b0;
+    let p11: u64 = a1 * b1;
+    let mid: u64 = (p00 >> 32) + (p01 & 4294967295) + (p10 & 4294967295);
+    let lo: u64 = (p00 & 4294967295) | (mid << 32);
+    let hi: u64 = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    // 积的最高位在 104 或 105 (两个 53 位尾数)
+    let clz: u32 = 0;
+    if hi != 0 {
+        clz = wide_clz64(hi);
+    } else {
+        clz = 64 + wide_clz64(lo);
+    }
+    let shift: u32 = 127 - clz - 54;
+    let m: u64 = (lo >> shift) | (hi << (64 - shift));
+    let sticky: u32 = 0;
+    if (lo & (((1 as u64) << shift) - 1)) != 0 {
+        sticky = 1;
+    }
+    return f64_finish_round(sign, m, 54, ea + eb + (shift as i64), sticky);
+}
+
+// ------------------------------------------------------------------ 除法
+
+pub fn f64_div(a: u64, b: u64) -> u64 {
+    let sign: u32 = f64bits_sign(a) ^ f64bits_sign(b);
+    if f64bits_is_nan(a) || f64bits_is_nan(b) {
+        return F64_QNAN;
+    }
+    if f64bits_is_inf(a) {
+        if f64bits_is_inf(b) {
+            return F64_QNAN; // inf / inf
+        }
+        return f64bits_pack(sign, 2047, 0);
+    }
+    if f64bits_is_inf(b) {
+        return f64bits_pack(sign, 0, 0); // 有限 / inf -> 带符号的零
+    }
+    if f64bits_is_zero(b) {
+        if f64bits_is_zero(a) {
+            return F64_QNAN; // 0 / 0
+        }
+        return f64bits_pack(sign, 2047, 0); // x / 0 -> 带符号的 inf
+    }
+    if f64bits_is_zero(a) {
+        return f64bits_pack(sign, 0, 0);
+    }
+    let ma: u64 = f64_mant53(a);
+    let mb: u64 = f64_mant53(b);
+    let ea: i64 = f64_exp_lsb(a);
+    let eb: i64 = f64_exp_lsb(b);
+    // 要 55 位以上的商才够舍入: 分子 = ma * 2^54 (128 位), 分母 = mb。
+    // ma 是 53 位 -> ma >> 10 < 2^43 < mb, 满足长除的前置条件。
+    let q: u64 = 0;
+    let rem: u64 = ma >> 10;
+    let i: u32 = 0;
+    while i < 64 {
+        let bit: u64 = ((ma << 54) >> (63 - i)) & 1;
+        let carry: u64 = rem >> 63;
+        let cur: u64 = ((rem << 1) | bit) & 18446744073709551615;
+        if carry == 1 || cur >= mb {
+            // 借位分支写成不下溢的形式 —— u64 的 `cur - mb` 在 cur < mb 时会 panic。
+            if cur >= mb {
+                rem = cur - mb;
+            } else {
+                rem = 18446744073709551615 - (mb - cur) + 1;
+            }
+            q = q | ((1 as u64) << (63 - i));
+        } else {
+            rem = cur;
+        }
+        i = i + 1;
+    }
+    if q == 0 {
+        return f64bits_pack(sign, 0, 0);
+    }
+    let sticky: u32 = 0;
+    if rem != 0 {
+        sticky = 1;
+    }
+    return f64_finish_round(sign, q, 63 - wide_clz64(q), ea - eb - 54, sticky);
+}
+
+// ------------------------------------------------------------------ 比较
+
+/// 三路比较: LT / EQ / GT / UN (无序 = 有一方是 NaN)。
+pub fn f64_cmp(a: u64, b: u64) -> u32 {
+    if f64bits_is_nan(a) || f64bits_is_nan(b) {
+        return F64_CMP_UN;
+    }
+    if f64bits_is_zero(a) && f64bits_is_zero(b) {
+        return F64_CMP_EQ; // +0 与 -0 相等
+    }
+    let sa: u32 = f64bits_sign(a);
+    let sb: u32 = f64bits_sign(b);
+    if sa != sb {
+        if sa == 1 {
+            return F64_CMP_LT;
+        }
+        return F64_CMP_GT;
+    }
+    // 同号: 比幅值, 负数反序
+    let ma: u64 = a & 9223372036854775807;
+    let mb: u64 = b & 9223372036854775807;
+    let mag: u32 = F64_CMP_EQ;
+    if ma > mb {
+        mag = F64_CMP_GT;
+    } else if ma < mb {
+        mag = F64_CMP_LT;
+    }
+    if sa == 1 {
+        if mag == F64_CMP_GT {
+            return F64_CMP_LT;
+        }
+        if mag == F64_CMP_LT {
+            return F64_CMP_GT;
+        }
+    }
+    return mag;
+}
+
+pub fn f64_eq(a: u64, b: u64) -> bool {
+    return f64_cmp(a, b) == F64_CMP_EQ;
+}
+
+pub fn f64_ne(a: u64, b: u64) -> bool {
+    return f64_cmp(a, b) != F64_CMP_EQ;
+}
+
+pub fn f64_lt(a: u64, b: u64) -> bool {
+    return f64_cmp(a, b) == F64_CMP_LT;
+}
+
+pub fn f64_le(a: u64, b: u64) -> bool {
+    let c: u32 = f64_cmp(a, b);
+    return c == F64_CMP_LT || c == F64_CMP_EQ;
+}
+
+pub fn f64_gt(a: u64, b: u64) -> bool {
+    return f64_cmp(a, b) == F64_CMP_GT;
+}
+
+pub fn f64_ge(a: u64, b: u64) -> bool {
+    let c: u32 = f64_cmp(a, b);
+    return c == F64_CMP_GT || c == F64_CMP_EQ;
+}
+
+/// 是不是 NaN (给调用方省一次 f64bits 引用)。
+pub fn f64_is_nan(b: u64) -> bool {
+    return f64bits_is_nan(b);
+}
+
+/// 取小。一方是 NaN 就给另一方; 两个零比较时给 -0 (IEEE 754-2008 minimumNumber 的约定)。
+pub fn f64_min(a: u64, b: u64) -> u64 {
+    if f64bits_is_nan(a) {
+        return b;
+    }
+    if f64bits_is_nan(b) {
+        return a;
+    }
+    if f64_eq(a, b) {
+        if f64bits_is_negative(a) {
+            return a;
+        }
+        return b;
+    }
+    if f64_lt(a, b) {
+        return a;
+    }
+    return b;
+}
+
+pub fn f64_max(a: u64, b: u64) -> u64 {
+    if f64bits_is_nan(a) {
+        return b;
+    }
+    if f64bits_is_nan(b) {
+        return a;
+    }
+    if f64_eq(a, b) {
+        if f64bits_is_negative(a) {
+            return b;
+        }
+        return a;
+    }
+    if f64_gt(a, b) {
+        return a;
+    }
+    return b;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_f64_add_small_integers() -> bool {
+    return f64_add(F64_ONE, F64_TWO) == F64_THREE
+        && f64_add(F64_ONE, F64_ONE) == F64_TWO
+        && f64_add(F64_TWO, F64_ONE) == F64_THREE;
+}
+
+fn test_f64_add_the_canonical_01_plus_02() -> bool {
+    // 0.1 + 0.2 = 0.30000000000000004 (不是 0.3) —— 浮点最出名的那条,
+    // 而且它同时验了"舍入到偶数"和"进位"两件事。
+    let a: u64 = 0x3FB999999999999A;
+    let b: u64 = 0x3FC999999999999A;
+    return f64_add(a, b) == 0x3FD3333333333334;
+}
+
+fn test_f64_add_exact_cancellation_gives_pos_zero() -> bool {
+    return f64_add(F64_ONE, 0xBFF0000000000000) == 0
+        && f64_add(0xBFF0000000000000, F64_ONE) == 0;
+}
+
+fn test_f64_add_negative_zeros() -> bool {
+    return f64_add(F64_NEG_ZERO, F64_NEG_ZERO) == F64_NEG_ZERO
+        && f64_add(F64_NEG_ZERO, F64_POS_ZERO) == 0;
+}
+
+fn test_f64_add_zero_identity() -> bool {
+    return f64_add(F64_ONE, F64_POS_ZERO) == F64_ONE
+        && f64_add(F64_POS_ZERO, F64_NEG_ZERO) == 0
+        && f64_add(F64_POS_ZERO, F64_ONE) == F64_ONE;
+}
+
+fn test_f64_add_absorbs_tiny() -> bool {
+    // 1 + 2^-53 恰好是"中点", 舍到偶数 -> 还是 1.0。
+    // 再加一个 ULP 就该进位 —— 这两条一起把 RNE 的两个方向都钉住。
+    return f64_add(F64_ONE, 0x3CA0000000000000) == F64_ONE
+        && f64_add(F64_ONE, 0x3CA0000000000001) == 0x3FF0000000000001;
+}
+
+fn test_f64_add_tie_to_even_at_2pow52() -> bool {
+    // 在 [2^52, 2^53) 上 ULP = 1, 所以 .5 结尾必然是"中点"。
+    //   2^52 + 0.5 -> 在尾数 0/1 之间, 偶数是 0 -> 2^52
+    //   2^52 + 1.5 -> 在尾数 1/2 之间, 偶数是 2 -> 2^52+2
+    //   2^52 + 2.5 -> 在尾数 2/3 之间, 偶数是 2 -> 2^52+2
+    // "就近到偶数"与"就近向上"的区别只在第二、三条上露出来 (后者会给出 3)。
+    let two52: u64 = 0x4330000000000000;
+    let half: u64 = 0x3FE0000000000000;
+    let one_and_half: u64 = 0x3FF8000000000000;
+    let two_and_half: u64 = 0x4004000000000000;
+    return f64_add(two52, half) == two52
+        && f64_add(two52, one_and_half) == 0x4330000000000002
+        && f64_add(two52, two_and_half) == 0x4330000000000002
+        && f64_add(two52, two_and_half) != 0x4330000000000003;
+}
+
+fn test_f64_add_infinity_rules() -> bool {
+    return f64_add(F64_POS_INF, F64_ONE) == F64_POS_INF
+        && f64_add(F64_ONE, F64_NEG_INF) == F64_NEG_INF
+        && f64bits_is_nan(f64_add(F64_POS_INF, F64_NEG_INF))
+        && f64_add(F64_POS_INF, F64_POS_INF) == F64_POS_INF
+        && f64_add(F64_NEG_INF, F64_NEG_INF) == F64_NEG_INF;
+}
+
+fn test_f64_add_nan_propagates() -> bool {
+    return f64bits_is_nan(f64_add(F64_QNAN, F64_ONE))
+        && f64bits_is_nan(f64_add(F64_ONE, F64_QNAN));
+}
+
+fn test_f64_add_overflow_to_inf() -> bool {
+    return f64_add(F64_MAX, F64_MAX) == F64_POS_INF
+        && f64_add(F64_MAX, F64_MIN_NORMAL) == F64_MAX;
+}
+
+fn test_f64_sub_basic() -> bool {
+    return f64_sub(F64_THREE, F64_ONE) == F64_TWO
+        && f64_sub(F64_ONE, F64_TWO) == 0xBFF0000000000000;
+}
+
+fn test_f64_sub_same_gives_pos_zero() -> bool {
+    return f64_sub(F64_THREE, F64_THREE) == 0;
+}
+
+fn test_f64_subnormal_arithmetic() -> bool {
+    // 最小次正规加自己 = 位模式 2 —— 次正规路径真的在跑, 不是一律洗成 0。
+    return f64_add(F64_MIN_SUB, F64_MIN_SUB) == 2
+        && f64_add(F64_MIN_SUB, F64_MIN_SUB) != F64_POS_ZERO;
+}
+
+fn test_f64_subnormal_edge_to_normal() -> bool {
+    // 最小正规 / 2 = 2^-1023 -> 次正规里尾数域是 2^51 (即 0x0008000000000000)。
+    // 注意**不是**最大次正规: 最大次正规 = 2^-1022 - 2^-1074 ≈ 最小正规, 比它大得多。
+    // (第一版我就把这两个搞混了。)
+    return f64_div(F64_MIN_NORMAL, F64_TWO) == 0x0008000000000000;
+}
+
+fn test_f64_add_normal_plus_subnormal() -> bool {
+    // 最小正规 + 最小次正规 = 2^-1022 + 2^-1074, 恰好是**下一个可表示值**
+    // (在那一档 ULP 就是 2^-1074), 所以不需要舍入, 尾数域 +1。
+    return f64_add(F64_ONE, F64_MIN_SUB) == F64_ONE
+        && f64_add(F64_MIN_NORMAL, F64_MIN_SUB) == 0x0010000000000001;
+}
+
+fn test_f64_mul_exact() -> bool {
+    return f64_mul(F64_TWO, F64_THREE) == 0x4018000000000000
+        && f64_mul(F64_TWO, F64_HALF) == F64_ONE
+        && f64_mul(F64_THREE, F64_ONE) == F64_THREE;
+}
+
+fn test_f64_mul_sign() -> bool {
+    return f64_mul(0xBFF0000000000000, F64_TWO) == 0xC000000000000000
+        && f64_mul(F64_ONE, 0x8000000000000000) == 0x8000000000000000
+        && f64_mul(0xBFF0000000000000, 0xBFF0000000000000) == F64_ONE;
+}
+
+fn test_f64_mul_zero_special_cases() -> bool {
+    return f64_mul(F64_POS_ZERO, F64_TWO) == F64_POS_ZERO
+        && f64bits_is_nan(f64_mul(F64_POS_ZERO, F64_POS_INF))
+        && f64_mul(F64_TWO, F64_POS_INF) == F64_POS_INF
+        && f64_mul(F64_TWO, F64_NEG_INF) == F64_NEG_INF;
+}
+
+fn test_f64_mul_overflow() -> bool {
+    return f64_mul(F64_MAX, F64_TWO) == F64_POS_INF
+        && f64_mul(F64_MAX, F64_ONE) == F64_MAX;
+}
+
+fn test_f64_mul_underflow_to_zero() -> bool {
+    // 最小次正规 * 0.5 舍到 0 (中点, 到偶数)。
+    return f64_mul(F64_MIN_SUB, F64_HALF) == F64_POS_ZERO;
+}
+
+fn test_f64_mul_rounds_once() -> bool {
+    // 两个 double 的精确积是 0.02 + 0.96 ULP -> 进位一位。
+    // 对照: 0.02 自身是 0x3F947AE147AE147B, 所以这里是 ...7C。差值只有 1 个 ULP ——
+    // 不真做 128 位积、拿 u64 硬凑的实现会给回 ...7B (少了那一进位)。
+    return f64_mul(0x3FB999999999999A, 0x3FC999999999999A) == 0x3F947AE147AE147C;
+}
+
+fn test_f64_div_exact() -> bool {
+    return f64_div(F64_ONE, F64_TWO) == F64_HALF
+        && f64_div(F64_THREE, F64_ONE) == F64_THREE
+        && f64_div(0x4018000000000000, F64_TWO) == F64_THREE;
+}
+
+fn test_f64_div_one_third() -> bool {
+    return f64_div(F64_ONE, F64_THREE) == 0x3FD5555555555555
+        && f64_div(F64_TWO, F64_THREE) == 0x3FE5555555555555
+        && f64_div(F64_ONE, 0x4018000000000000) == 0x3FC5555555555555;
+}
+
+fn test_f64_div_by_zero() -> bool {
+    return f64_div(F64_ONE, F64_POS_ZERO) == F64_POS_INF
+        && f64_div(F64_ONE, F64_NEG_ZERO) == F64_NEG_INF
+        && f64bits_is_nan(f64_div(F64_POS_ZERO, F64_POS_ZERO))
+        && f64_div(0xBFF0000000000000, F64_POS_ZERO) == F64_NEG_INF;
+}
+
+fn test_f64_div_infinity_rules() -> bool {
+    return f64bits_is_nan(f64_div(F64_POS_INF, F64_POS_INF))
+        && f64_div(F64_POS_INF, F64_TWO) == F64_POS_INF
+        && f64_div(F64_TWO, F64_POS_INF) == F64_POS_ZERO
+        && f64_div(F64_TWO, F64_NEG_INF) == F64_NEG_ZERO;
+}
+
+fn test_f64_div_sign_of_zero() -> bool {
+    return f64_div(F64_NEG_ZERO, F64_THREE) == F64_NEG_ZERO
+        && f64_div(F64_POS_ZERO, 0xBFF0000000000000) == F64_NEG_ZERO;
+}
+
+fn test_f64_div_roundtrip_within_one_ulp() -> bool {
+    // (1/3)*3 不等于 1, 但必须只差 1 个 ULP 以内 —— 拿 f64_lt/gt 把区间卡住,
+    // 不用去猜精确位模式。
+    let third: u64 = f64_div(F64_ONE, F64_THREE);
+    let back: u64 = f64_mul(third, F64_THREE);
+    let lo: bool = f64_ge(back, 0x3FEFFFFFFFFFFFFF);
+    let hi: bool = f64_le(back, 0x3FF0000000000001);
+    return lo && hi;
+}
+
+fn test_f64_div_subnormal_result() -> bool {
+    // 最小次正规的一半正好是中点 -> 到偶数 -> 0; 最小正规的一半是 2^-1023 (见上)。
+    return f64_div(F64_MIN_SUB, F64_TWO) == F64_POS_ZERO
+        && f64_div(F64_MIN_NORMAL, F64_TWO) == 0x0008000000000000;
+}
+
+fn test_f64_cmp_basic() -> bool {
+    return f64_cmp(F64_ONE, F64_TWO) == F64_CMP_LT
+        && f64_cmp(F64_TWO, F64_ONE) == F64_CMP_GT
+        && f64_cmp(F64_TWO, F64_TWO) == F64_CMP_EQ;
+}
+
+fn test_f64_cmp_negatives() -> bool {
+    return f64_cmp(0xC000000000000000, F64_ONE) == F64_CMP_LT
+        && f64_cmp(F64_ONE, 0xC000000000000000) == F64_CMP_GT
+        && f64_cmp(0xC000000000000000, 0xBFF0000000000000) == F64_CMP_LT;
+}
+
+fn test_f64_cmp_zeros_equal() -> bool {
+    return f64_cmp(F64_POS_ZERO, F64_NEG_ZERO) == F64_CMP_EQ
+        && f64_cmp(F64_NEG_ZERO, F64_POS_ZERO) == F64_CMP_EQ;
+}
+
+fn test_f64_cmp_unordered_on_nan() -> bool {
+    return f64_cmp(F64_QNAN, F64_ONE) == F64_CMP_UN
+        && f64_cmp(F64_ONE, F64_QNAN) == F64_CMP_UN
+        && f64_cmp(F64_QNAN, F64_QNAN) == F64_CMP_UN;
+}
+
+fn test_f64_predicates_with_nan() -> bool {
+    // IEEE: NaN 与任何东西的 == < <= > >= 都是 false, != 是 true。
+    return f64_eq(F64_QNAN, F64_QNAN) == false && f64_ne(F64_QNAN, F64_QNAN)
+        && f64_lt(F64_QNAN, F64_ONE) == false && f64_gt(F64_ONE, F64_QNAN) == false
+        && f64_le(F64_QNAN, F64_QNAN) == false && f64_ge(F64_QNAN, F64_QNAN) == false;
+}
+
+fn test_f64_le_ge_boundaries() -> bool {
+    return f64_le(F64_ONE, F64_ONE) && f64_ge(F64_ONE, F64_ONE)
+        && f64_lt(F64_ONE, F64_ONE) == false && f64_gt(F64_ONE, F64_ONE) == false;
+}
+
+fn test_f64_min_max_basic() -> bool {
+    return f64_min(F64_ONE, F64_TWO) == F64_ONE && f64_max(F64_ONE, F64_TWO) == F64_TWO
+        && f64_min(F64_TWO, F64_ONE) == F64_ONE && f64_max(F64_TWO, F64_ONE) == F64_TWO;
+}
+
+fn test_f64_min_max_with_nan() -> bool {
+    return f64_min(F64_QNAN, F64_THREE) == F64_THREE
+        && f64_min(F64_THREE, F64_QNAN) == F64_THREE
+        && f64_max(F64_QNAN, F64_THREE) == F64_THREE;
+}
+
+fn test_f64_min_max_zero_signs() -> bool {
+    return f64_min(F64_POS_ZERO, F64_NEG_ZERO) == F64_NEG_ZERO
+        && f64_max(F64_POS_ZERO, F64_NEG_ZERO) == F64_POS_ZERO;
+}
+
+fn test_f64_neg_abs_roundtrip() -> bool {
+    return f64_neg(F64_NEG_ZERO) == F64_POS_ZERO && f64_abs(0xBFF0000000000000) == F64_ONE
+        && f64_neg(f64_neg(F64_THREE)) == F64_THREE;
+}
+
+fn test_f64_associativity_breaks_where_expected() -> bool {
+    // (1 + 2^-53) + 2^-53 == 1 但 1 + (2^-53 + 2^-53) == 1.0000000000000002:
+    // 结合律在浮点上不成立 —— 这条钉住"每次运算都真舍入", 而不是攒着一起算。
+    let tiny: u64 = 0x3CA0000000000000;
+    let left: u64 = f64_add(f64_add(F64_ONE, tiny), tiny);
+    let right: u64 = f64_add(F64_ONE, f64_add(tiny, tiny));
+    return left == F64_ONE && right != F64_ONE;
+}
+
+fn test_f64_finish_round_direct() -> bool {
+    // 直接喂"整数尾数 x 2^E + 最高位位置"这种约定:
+    //   3 * 2^0 且 3 的最高位在位置 1  -> 3.0
+    //   2^52 * 2^0 且最高位在位置 52  -> 2^52 (= 0x4330000000000000)
+    return f64_finish_round(0, 3, 1, 0 as i64, 0) == F64_THREE
+        && f64_finish_round(0, 4503599627370496, 52, 0 as i64, 0) == 0x4330000000000000
+        && f64_finish_round(1, 3, 1, 0 as i64, 0) == 0xC008000000000000;
+}

@@ -91,11 +91,11 @@
   },
   {
    "path": "lompi/lpi_idn.lomt",
-   "sha256": "c58f00f40e8da918963198f2af784e3985673ced27a5678ce1d616addb543585"
+   "sha256": "ff492d6975dee2c97bb925484fa40ac3b55ee5a0b82ffdd133d76ae9d4bdcb5e"
   },
   {
    "path": "lompi/lpi_pkg.lomt",
-   "sha256": "dbfc5c3577dd3de0991d288240e1a1536cf835370cb534727a282fffb860b095"
+   "sha256": "3624f69e65855bde96ab5dc0b1e1306d68eaa1d0c8eb9fca9b08ad7b920eee59"
   },
   {
    "path": "lompi/lpi_sha.lomt",
@@ -114,12 +114,560 @@
    "sha256": "74aae7c556e0267246680ae900f95e3af2a9193f563205f34d693a65d96bb66a"
   },
   {
+   "path": "lompi/store/std/0.1.0/adler32.lomt",
+   "sha256": "71bd9ae9848be661df115fb66a36157b87a322c552ee55df5232bbda1bbc65d7"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/ansi.lomt",
+   "sha256": "7e6247853d226791d74ca91b00a1fa953fe16e20c669ae78ecfa2dcc743a3f01"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/arena.lomt",
+   "sha256": "edffa3dfe70ba00038a267d15910aaa3593c0307f36e763a3ea1ecd964b5f797"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/asn1.lomt",
+   "sha256": "f9db1d4aa87e64348c6a229fe81a0516493d5cfad3a9c34622dd766a4f6770e5"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/assert.lomt",
+   "sha256": "bbcbc5e908a9943d21962e25f0613364161d32980fc427baab7412f8f2f1a9ca"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/atomics.lomt",
+   "sha256": "4d5a25057bb1b330da11170d2a5f7b2465a005bd4cf9d175a1a893a481d01e1e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/base32.lomt",
+   "sha256": "53ff7600186d43bf53752ef62d4a8337742342c57105aa95f61953d222f00b42"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/base58.lomt",
+   "sha256": "28833f552ecf943a9a59e3678227e3101398e5b9e9fd209376d4d8798191deb7"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/base64.lomt",
+   "sha256": "0fd1d9c86c9fb4569c9d45e812d181ad18b9113238ff3c009d9dc3ba818b320d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/base85.lomt",
+   "sha256": "dab0248f8184a182857f6ae54bf75d5036d03fa5ea0540af1463c1c54555bc59"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bigdec.lomt",
+   "sha256": "912818f50bf38b7052e4372825e2931563b70d35715b43027037a5d5a4614dd0"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bigint.lomt",
+   "sha256": "fd615b50a585855d9567363f412604fc712b2a60585752989e7432d253c2fd59"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bit.lomt",
+   "sha256": "6336616c9590eab8e038cf06190f5f513afcc4acdea40101a010c82e1afd1fdf"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bitset.lomt",
+   "sha256": "346520d2b7882a26532e706a118c07f23fdc7c037c7d5c7414a9a3220930ddb9"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/blit.lomt",
+   "sha256": "d47457b1685de3b81dfac645585318151cfe8f078ac0486db71b0d2131245712"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bloom.lomt",
+   "sha256": "6aa6f4bc2d9fda5e8e367ef1a2ada1a994bb74ab7cca9a33ff0059d71965bd36"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bmp.lomt",
+   "sha256": "1cdd2d75583d563032fbff39f66049adb39e32c5158a306cc0ed41cc3f1432b3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bsearch.lomt",
+   "sha256": "4630e96eadb521dc89d04b551b09aff246ef744c2f1ef716ad6847282d0441a1"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bst.lomt",
+   "sha256": "26e740f2415990d431602e49c98de9b4e7d387c59ba4fbaeaf28b2169f2695e3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/buf.lomt",
+   "sha256": "fa9df4dcbf68afc93d97955761056c79ff1d1e9e63eebf17a5f9d174722e5ac1"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/bufio.lomt",
+   "sha256": "e781223c60b63dc83718610fbec59ef54c80201ec09b8374126a82ebc788212d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/case.lomt",
+   "sha256": "ce6bde554c7ee6bb4b57f2c3ff9917707713698f411d4ffc6fb594669889e06b"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/cbor.lomt",
+   "sha256": "9292ca6a16d7c3d0739d575a398431d0d829a3f96c47b620987c992ee1edd820"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/char.lomt",
+   "sha256": "4ffdfe6f73dd4c2d40eca7f7e3c7a103425eee6e268e882b6897325ebdf30a15"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/civil.lomt",
+   "sha256": "0935e067d3e7ca81d919d7a6d2e35d2726848e54ca8e86d992f08d3fcb4e691e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/clock.lomt",
+   "sha256": "bbd63a6c417502fe08ddf4be2d8045a9bb9030a8f30e9109cceb6fdaf6336c60"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/comb.lomt",
+   "sha256": "a5764b4c953ca1ecc9e0fc50665cbde801eca0f49d674f432ee502f26b07d0a5"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/coro.lomt",
+   "sha256": "d515559ff54052ee2599a8d551da04bb79897ef41604373c2c8d9e4612082696"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/crc16.lomt",
+   "sha256": "70a786745a12b535bfaf4bcf4693d1541300c07f3aa5be2889794d7644a59aa9"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/crc32.lomt",
+   "sha256": "43dfcaa7ce007ba3aab4b91b023a3036cff35bea8e678a09fe2edf7f3ff06183"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/crc32c.lomt",
+   "sha256": "2761fc3ce236e0ca2deee2d820ae00146e0d300c94d56c9c54071826d098b6d2"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/csv.lomt",
+   "sha256": "76863f9935d0b77a8868165f959ac76c37e21b0805d7334aab5cf850ecd46ffd"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/deflate.lomt",
+   "sha256": "42792f1f0922f8b71a83f9604a2435f1a5a217cc68f24a5375f19a3922c227d9"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/deque.lomt",
+   "sha256": "5921804f0f5cf83ec51421b120eddfccd02300d2c2c0ed8ce641a5acff4905e5"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/endian.lomt",
+   "sha256": "16fcc2deb534991624e172f939645e1016b9f00ffb43590d6b772e0036c6fc44"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/env.lomt",
+   "sha256": "bc67bcf55bfd8f3027486266733664fc23f561b1e282ee8ed09e062e6c584f63"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/f64.lomt",
+   "sha256": "0819ddb63969e89a3eb9525a22482b61c50c0b968035ede5ab9be5f55ded99e0"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/f64bits.lomt",
+   "sha256": "b30bfdeebe3c3fc18c3af3200a24355b002f2d759f109fa3e67486c95f5dcece"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/f64conv.lomt",
+   "sha256": "fdf359617bf41c85661f957d0163ab88644cd85ca56c0c6bb634f8bf59644f87"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/f64fmt.lomt",
+   "sha256": "d30e563fbc7e30ea38d2443a9af39da4241ee3e7cf8d0643135dd8401196c499"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/fenwick.lomt",
+   "sha256": "5db1a3ea21346f68d3b5612ac9762a1c75d5c193194d30c79cef4de568431904"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/fixed.lomt",
+   "sha256": "91dd4aba0c711a2f1ccc79a4f208b35c8dff19213c6625292a55d385db98b4ac"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/flags.lomt",
+   "sha256": "37f925a2e0f5fa70a19fb5d54d9dab8771af140e982406ca3837021b48552b1a"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/fmt.lomt",
+   "sha256": "86ea031aec91349f69263a812f3850f9b929929d5f9cf5e2d657c9cc47d882a2"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/font.lomt",
+   "sha256": "5c6855cfbe01da2703e5846526c4c39d3fa6ba75d082d3bbbaf92a30f9615161"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/fwalk.lomt",
+   "sha256": "eeeea7458de4877ad0fc536a7e8ff0acf535b4df0fc2aafc79accc65fcbf706d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/glob.lomt",
+   "sha256": "2edd7f514543807506003653ab870f67ca6e4a2eae17b9193d1b3f09f70135c6"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/graph.lomt",
+   "sha256": "bcdc40841f36e0bb119b2e166a27797e75f1e5ce52ab1c001a04f1c429bf519f"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/hash.lomt",
+   "sha256": "5f0246b6e4ba151ae15dd6a3b51e7412d2dcb2b62051df882b7d58a9db9148c9"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/hashx.lomt",
+   "sha256": "b09de15d9ed95c80c1ff4ef0bcee76cfc8c75528236efcb3e2ab38edac973c68"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/heap.lomt",
+   "sha256": "7a63acb0ba8da52051bd827472ba7725e665d08125420971e2b5fa683f18e952"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/hex.lomt",
+   "sha256": "90b7455dca8450919690db62c18c7619506c073dd6aba2a5110c7689af948751"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/hexdump.lomt",
+   "sha256": "18aa9d42de194df01e0ca9d111802f5a82ccae87535da726ab6c1476d79d5bd1"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/hmac.lomt",
+   "sha256": "071ed58ea9e63c412d8c1ea302278f99b3c6e6420a5d1714078b12b7ceca6527"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/huffman.lomt",
+   "sha256": "1259673d705b7c24a2f6c0ed51f8d64c6ad7261cb3993e8c008ec8cf6080f22f"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/ilist.lomt",
+   "sha256": "07ab3e57acb7ed6db9c63ffa6423764fabaacba9d5cf1da4a6277db42de91f54"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/inflate.lomt",
+   "sha256": "bd237d3171410b1c75e2fab6926b49daea959f71a78c354299253104dae73498"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/ini.lomt",
+   "sha256": "4d4b460463f114659333c001527cea2ac8f7c5dcf16607bf7cc477bc0890683e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/intern.lomt",
+   "sha256": "8448504b81fa735a9bff01e533dd608fc8a10506a8e9a4bdad53c21a9543c230"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/interp.lomt",
+   "sha256": "67780f0b962ab9a96bc0a8da1f480220a1f0c2fba7c6585e4a86425701494b2b"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/intmath.lomt",
+   "sha256": "116522eeea1274dd0931e97afe56ed76fe207d10c4b1325172287366df5c89fb"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/jsn.lomt",
+   "sha256": "03374454f4e7e9f3f44ad1d3f346e0795c43bda4513cb002c1af63142d863b48"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/kdf.lomt",
+   "sha256": "91bb050d687a030ad5470c3553dcee8eb61cee59bc5b958f8782f622248e24f3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/line.lomt",
+   "sha256": "4606660ec22be5a8b64c717ffefb5706bed0917e522bb2753c2623e7e73f88a5"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/lru.lomt",
+   "sha256": "c9fdbdb9b147cfb870e40070a47587345270f0961c2228a0398562aacf36b2f6"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/lzss.lomt",
+   "sha256": "8581856c015a68b4798d3fbdfc73f725b3edb400d5742883459dfa75a47d5b47"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mall.lomt",
+   "sha256": "833920c421454a10abc009a6ed3e204ab7fea12d9db03ccb3499a40d81b51312"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/map.lomt",
+   "sha256": "81029a02852e1a45e08a2a11c7e0e363c4ebb20682618e3b443272cc8e184537"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mapstr.lomt",
+   "sha256": "9435cd440793be46832ab05fdb0ab9af733d174027b2f96acb9d5175a9fd6639"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/math.lomt",
+   "sha256": "b117386835f9a5ce563f61dd2168f06e4b2c3ec1abfecbbc319472a85ee9687c"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mathf.lomt",
+   "sha256": "c98b8fec1d1ccba72cd38fe5bbc9c7340f8a935d88bae1c3551fca60cef16263"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/matrix.lomt",
+   "sha256": "6fd5455161b81a0c160b7cb4c9bf0832bfa2c15d421a5043eb3f91ca6fb3c27c"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/md5.lomt",
+   "sha256": "bb7f71f1aa98aac23787a1470ee298abd195a5a7d47b842152b810cb7514f8e6"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mem.lomt",
+   "sha256": "caa5a3009fc0e18aba58671d720a616b4673985cb057306d17311ed27e092e1e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/memdbg.lomt",
+   "sha256": "6f4ebaed814f53b61ef010ba630d20ce9c3ff5fd66ca2569285af19f2cc5ac50"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mpk.lomt",
+   "sha256": "f9e17c80e0aabf068c01b08aa32feb74fa033ad1d47d8735262b2be6a0c530b7"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/mst.lomt",
+   "sha256": "0aca763890fdd51a857d4eb69ac843cdbec227fbb0f0889ad00d414db732ef18"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/noise.lomt",
+   "sha256": "d6a3944761104c6b8f603e3af8ba82f0ff3a34c9fd6c8b3ab2393effb99d485b"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/num.lomt",
+   "sha256": "0f1435b8fad8282bb41eff9c6f0892d15bd4fb468e2dbea38ad1ae6eb0f20f25"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/numfmt.lomt",
+   "sha256": "77e10ceb5366ae77172eda0ef035adbd5b3d4ddac23e556a1d95e8f30e591ce1"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/once.lomt",
+   "sha256": "69dac8a33e043aa51882db35278d3a67e778399a3d67f88fc5fef353d2d235da"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/out.lomt",
+   "sha256": "055f3f1ff510e027062a5adde4a096cfde14ad154821dfedcb30b3864f18d0d3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/parse.lomt",
+   "sha256": "3000e5e64b0abe7d8fcf520006ff4410b7229a0cf5800bb1b266a6370f8c557d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/path.lomt",
+   "sha256": "d9d0b206ea097406b7d92217394d8ee5c7bb9fe330742a9ccec1e716925238e4"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/perm.lomt",
+   "sha256": "153576bdfccf978352364f4a30cab61f490837c473c0ee51cd435954eabf3e45"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/pkg.lomp",
+   "sha256": "c599a59eadd28fa3594de50123072e1f18b579e20ff82f6a3b907dff4f61e373"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/png.lomt",
+   "sha256": "2731005fec2d6b3f8c053fa86bd689b1ef990497b11f87409952a960ab8df632"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/pool.lomt",
+   "sha256": "14a35c1ff6c4f91340b8473d7f9ddfe0b6b0830542d5af26820b960a1b79b784"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/proc.lomt",
+   "sha256": "bd2faa6088561d43c38907d02af50efa54f32e0c81b8c9608333cbd5f77f91e3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/qoi.lomt",
+   "sha256": "72e1fb83f9faef1536ec1c52c27a865c2554723385652a52cee96d71211720db"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/quote.lomt",
+   "sha256": "f1e3b4abfb556d02e6856c8dd81181f8f6dbdf1197b8f39439b3300aefc8ae28"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/rand.lomt",
+   "sha256": "029501b03e5035293f2fb26bcb90dccc97399f54c9d24a8cf1f95ab6b13d9a07"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/raster.lomt",
+   "sha256": "3558ba5d70691cc8303569da9cd80bf95833446cf7ff21325addd2e4d793100e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/rational.lomt",
+   "sha256": "318a8edd5749db411a2738c6ce0e76689dda9305a0d020d2b069757c3334c30e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/ring.lomt",
+   "sha256": "94dc340009798ea081c5755f8f097145757bb509a10b856fca5a5f40093cd236"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/rle.lomt",
+   "sha256": "ec89a5517f3ffd7878e37a3efcf34658a9b54c95192433afd591577ed690c057"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/rng.lomt",
+   "sha256": "f29eb94d49917fe7b353d146d36b79097926fade644b2df7b9aab188fb6d6de0"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/round.lomt",
+   "sha256": "2ad96efdf02cc94f996b3048632f148c610b7e1a702084e60eb834690a07137e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sched.lomt",
+   "sha256": "3a2bb911f126fb2085271d9a5b2833d1253f886d23b8c5bf24ff05a73a47d78a"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/search.lomt",
+   "sha256": "de27b19fda183ea4bf9e96f0081c7ceb4a47b07d40fe15fc2437ae71e2ce4841"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/set.lomt",
+   "sha256": "f9f8d3dbb2522aceb286862490ac00b174f15f593519f2755907078ccc7f48ae"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sha1.lomt",
+   "sha256": "4f4cc38fe1f56f863eaa540f5411a4f98d52c440b47299f1ad474c0982c76bd5"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sha256.lomt",
+   "sha256": "87b75755127011ddd034608fd1c6807eee14641a5eec240b9b909f8ea4feb37d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sha512.lomt",
+   "sha256": "58107fab386036ad49e83e463113c048eedccc7409e14126c01358512eb974b8"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/shortest.lomt",
+   "sha256": "a34eb05e267de3c0b6373d07711cd6dbbd3828b9ced03fdcaa5b571b1b1e5a3d"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sort.lomt",
+   "sha256": "63945ebbdf1b287387be038906b576f0d3a48a0f1dad30267978ab294e13a9e3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/spin.lomt",
+   "sha256": "6a375633bec8442c35e3bb66ec9e66d0390754bdf06112108a31a841a8052364"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/split.lomt",
+   "sha256": "3f0ed0cf8f3828940e7ac0ee34ccde9a97568498798f502b0d963ee72eae305b"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/stats.lomt",
+   "sha256": "4f6336433b23c88e9219c624360d9ed48d6e31d179f97288ce3cea6bd0cbcf13"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/std.lomt",
+   "sha256": "d0f91c64c02a77c0f2b38b92b88936bad1e85a901457eb53e7704123cf86cf35"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/sum.lomt",
+   "sha256": "e0787a8a8b45ea774d67cd032112f488d6c6af7a47466c310b81581904ef90c1"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/table.lomt",
+   "sha256": "52b8e594b389e66797de7f1ea44087ec39facdd16ac2c680a05c235a7ff6bc51"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/text.lomt",
+   "sha256": "1843d59e1e33b9b07c26aff5d94535a91ebd102473db7fe24dc9a52b65db3db3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/tmpf.lomt",
+   "sha256": "ea5854c49d8c87d9f9bca66935e5c87c2d8e372b10f560d35f5bac282b2e5860"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/toml.lomt",
+   "sha256": "28a57924ff52de4a4a3269cff978b19f7316c6de9bcfd224539857e16681e173"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/trie.lomt",
+   "sha256": "5488d34f5d6ca7eb00d8665d0444c6316a22250a68eaefde9cb475caca192308"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/trim.lomt",
+   "sha256": "6b3d604d6788f6d275da46ea69edaa7a566435b9142db77bb225d8daae862d6e"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/tui.lomt",
+   "sha256": "7d0187aefc1a12204d0af494b1f31ae4f0afa23cffe65f9421d26e8e34701639"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/udiff.lomt",
+   "sha256": "7e3e0c8b499438bd46ca4ef752662f523378a9fe350fc407bcbeb3b2f5f1ce7f"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/unionfind.lomt",
+   "sha256": "54daee5ae077d0b0d4a15afcfa80004bb6f043509b011eee8b7ed6d5be6b94f3"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/url.lomt",
+   "sha256": "e1f49b96aa20510542c09d0837b3a5855c2fb74d36ea91a8ce0bda6535259d43"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/utf8.lomt",
+   "sha256": "645c25416cd14f79a6c8e57d6e9948e4fdfce771e1e1018f72ca0c326dd764d8"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/varint.lomt",
+   "sha256": "f440cb5e88cd250f944bffc260ec3d93ec9456755923521dd4677ffe0815ab20"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/vec.lomt",
+   "sha256": "22187579c8c63173cf82f0e52daa765956d5197e742e190965c65c20bd75db22"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/wide.lomt",
+   "sha256": "59c2095bd8b9ece7083b88786c2c39e197f126678e841f68bd45a15e21ccbc44"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/width.lomt",
+   "sha256": "1ae8f3fab58b16eb44c43fda154d4c110633f13a352cfd9c16bd442cdac2f17a"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/word.lomt",
+   "sha256": "7a90f88ccd19cc865aaed088443f3ee6d4a3a2eb64012704a5aeb4aaa0f06995"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/wrap.lomt",
+   "sha256": "26d80ef3c601a97345c9f957449168087e36f4d750705fadb0491c1be7579dfd"
+  },
+  {
+   "path": "lompi/store/std/0.1.0/zlibc.lomt",
+   "sha256": "ac167b38387ac7f40e237ad09cab9328f1e742887fae0029cf978c2383294991"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/argv.lomt",
+   "sha256": "602e0c7439da9fa901d3694016bd7d4ced52a2d0c314bb3b2b1315707c61f56c"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/dir.lomt",
+   "sha256": "e8fba22be5323b239f798cf9cc914572243669cd05bdd5cb6eb66ca5d1419728"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/fs.lomt",
+   "sha256": "57780caaff6e7d936c0c4e1c62789b4a869be99c7f04109e4d5c264f56b59731"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/host.lomt",
+   "sha256": "26fffd78145df2285885e3fbcb6e11bf345e40b6ccc29700b9775fb36777e3c6"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/io.lomt",
+   "sha256": "dd3cb7bd1c279abafb57c378fda4edebaa192f9af1a6f4243ca9250f35fbd8d6"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/log.lomt",
+   "sha256": "c4ae19b1b295d60861cd8df531259f148a065c70b2e3881b9a2a2af64a16698c"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/pkg.lomp",
+   "sha256": "cc8696b95af31803c137942226bcf33c71b37ba6e789531bba388a5cbbd7d56f"
+  },
+  {
+   "path": "lompi/store/host/0.1.0/stat.lomt",
+   "sha256": "eee0ef1e788483ab6b998f8fb03ce0323b757ce42c29292a02eb21e7ea91b545"
+  },
+  {
    "path": "tools/lompi_sync.py",
-   "sha256": "92b9728d2f18ec8b90f84dd14202a096a0f1b8be857b317368bf0e78d884af12"
+   "sha256": "17f2b2dc9be3e69e0c0d9a0cdc52f4c83b28dcc7e5e1340aa1fb0df256be72c3"
   },
   {
    "path": "tools/loment_lompi_test.py",
-   "sha256": "436f08ad83f6dbbf5913e7cd06a5edcf7a33bc4997f5fba039a2fa8ac2b29cbc"
+   "sha256": "9a2cb40fc1a7b3a2f90a0df3cd3fc753123c482d71bd58d6378971be41bd1997"
   },
   {
    "path": "tools/loment_publish.py",
@@ -299,7 +847,7 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "831fca3446f20cd1b4e1260bf9438f6fa9941f00da4cd8d6de273e6e0d3d3513"
+   "sha256": "e351bcb06f03c7ab1c95cb0e9be962b6ad239937ec2e07c13db4e6dd55de70a1"
   },
   {
    "path": "tools/loment_dist_test.py",
@@ -371,7 +919,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "0e81af7bf563dabc6a8fc396bea3da495520f17b5daa5731246c9cc9a031e34b"
+   "sha256": "603008ed9d3f00e375cbab39793858dbdd71bb99462328f8fdae598455b920e8"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -711,7 +1259,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "77da2981f39551f4d7a246a61d1f8dde8871ba19256d9cbff4d4074d72767420"
+   "sha256": "a9cfcd56105fa18f010ff2897ef013e10467493ca13e4024df96c400404b0a7c"
   },
   {
    "path": "docs/163-loment-signing.md",

@@ -1,0 +1,286 @@
+// std/base32.lomt — Base32 (RFC 4648, 字母表 A-Z2-7)
+//
+// 为什么除了 base64 还要它: base32 只用大写字母与数字, 有三个真实好处 ——
+// 不区分大小写 (人抄得动)、不含容易被念错/看错的字符、可以安全地放进
+// 不区分大小写的文件名与 DNS 标签里。代价是体积比 base64 大 20%。
+// TOTP、base32 编码的密钥、部分老协议的校验字段都是它。
+//
+// 字符表: A-Z (0..25) 然后 2-7 (26..31)。
+// 5 字节 -> 8 个字符; 不足 5 字节时补 '=' 到 8 的倍数。
+//
+// 校验向量 (RFC 4648 §10, 与 base64 那条同一组):
+//   "" -> ""            "f" -> "MY======"       "fo" -> "MZXQ===="
+//   "foo" -> "MZXW6===" "foob" -> "MZXW6YQ="    "fooba" -> "MZXW6YTB"
+//   "foobar" -> "MZXW6YTBOI======"
+//
+// 命名: 公开 base32_*, 内部 b32_*。自检 test_base32_*。
+
+module base32
+
+use "mem.lomt"
+
+pub const B32_PAD: u32 = 61; // '='
+
+fn b32_enc_char(v: u32) -> u32 {
+    if v < 26 {
+        return 65 + v;
+    }
+    return 50 + (v - 26);
+}
+
+/// 字符 -> 5 位值; 非法给 0xFF (调用方自己判)。
+fn b32_val(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c - 65;
+    }
+    if c >= 97 && c <= 122 {
+        return c - 97;
+    }
+    if c >= 50 && c <= 55 {
+        return 26 + (c - 50);
+    }
+    return 255;
+}
+
+/// 编码。out 至少需要 ((n + 4) / 5) * 8 字节。返回写出的长度。
+pub fn base32_encode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        let block: u32 = n - i;
+        let m: u32 = block;
+        if m > 5 {
+            m = 5;
+        }
+        // 把一个块的字节拼成一个 40 位整数 (高位对齐)
+        let acc: u64 = 0;
+        let j: u32 = 0;
+        while j < m {
+            acc = (acc << 8) | (load8(d, so + i + j) as u64);
+            j = j + 1;
+        }
+        // 不足 5 字节时左移, 让有效位对齐到最高
+        let shift: u32 = (5 - m) * 8;
+        acc = acc << shift;
+        // 出 8 个字符, 但不足 5 字节时只出前 ceil(m*8/5) 个
+        let chars: u32 = (m * 8 + 4) / 5;
+        j = 0;
+        while j < 8 {
+            if j < chars {
+                let v: u32 = ((acc >> (35 - 5 * j)) & 31) as u32;
+                store8(out, p, b32_enc_char(v) as u8);
+                p = p + 1;
+            } else {
+                store8(out, p, B32_PAD as u8);
+                p = p + 1;
+            }
+            j = j + 1;
+        }
+        i = i + m;
+    }
+    return p - o;
+}
+
+/// str 版本。
+pub fn base32_encode_str(out: ptr, o: u32, s: str) -> u32 {
+    return base32_encode(out, o, str_ptr(s), 0, str_len(s));
+}
+
+/// 解码。'=' 表示块结束; 非法字符返回 0xFFFFFFFF 表示失败。
+/// out 至少需要 (n / 8) * 5 字节。返回写出的字节数。
+pub fn base32_decode(out: ptr, o: u32, d: ptr, so: u32, n: u32) -> u32 {
+    let p: u32 = o;
+    let i: u32 = 0;
+    let bad: u32 = 0;
+    while i < n && bad == 0 {
+        // 一个 8 字符块
+        let acc: u64 = 0;
+        let got: u32 = 0;
+        let j: u32 = 0;
+        while j < 8 && i + j < n {
+            let c: u32 = load8(d, so + i + j);
+            if c == B32_PAD {
+                // 补位之后必须全是补位
+                let k: u32 = j;
+                while k < 8 && i + k < n {
+                    if load8(d, so + i + k) != B32_PAD {
+                        bad = 1;
+                    }
+                    k = k + 1;
+                }
+                j = 8;
+            } else {
+                let v: u32 = b32_val(c);
+                if v > 31 {
+                    bad = 1;
+                    j = 8;
+                } else {
+                    acc = (acc << 5) | (v as u64);
+                    got = got + 1;
+                    j = j + 1;
+                }
+            }
+        }
+        if bad == 0 {
+            // 一个块里合法字符数只能是 2/4/5/7/8 —— 其余的 (1/3/6) 是**残缺编码**,
+            // 必须拒掉, 而不是静默当成长度 0。第一版没有这条, 于是 "MY======M"
+            // 被解成空串而不是报错。
+            if got != 0 && got != 2 && got != 4 && got != 5 && got != 7 && got != 8 {
+                bad = 1;
+            }
+        }
+        if bad == 0 {
+            // got 个 5 位字符 -> bytes 个字节 (向下取整)
+            let bytes: u32 = got * 5 / 8;
+            // 把 acc 左移, 让有效位对齐到 64 位的高端, 再从高位往低取字节
+            let sh: u32 = 64 - got * 5;
+            acc = acc << sh;
+            let t: u32 = 0;
+            while t < bytes {
+                store8(out, p, ((acc >> (56 - 8 * t)) & 255) as u8);
+                p = p + 1;
+                t = t + 1;
+            }
+            // 补位必须全是 0 (否则不是合法编码)。
+            // **掩码是低 sh 位那一整段**, 不是某一个位 —— 第一版写成 `1 << (64-got*5+pad)`,
+            // 结果把合法的 1 字节编码 ("AE======", 有效位恰好落到那一位上) 判成了非法。
+            if sh > 0 {
+                let low: u64 = ((1 as u64) << sh) - 1;
+                if (acc & low) != 0 {
+                    bad = 1;
+                }
+            }
+        }
+        if i + 8 > n {
+            i = n;
+        } else {
+            i = i + 8;
+        }
+    }
+    if bad == 1 {
+        return 4294967295;
+    }
+    return p - o;
+}
+
+/// 解码长度估算 (给调用方开缓冲用): (n/8)*5。
+pub fn base32_decoded_len(n: u32) -> u32 {
+    return (n / 8) * 5;
+}
+
+/// 编码长度估算: ((n + 4) / 5) * 8。
+pub fn base32_encoded_len(n: u32) -> u32 {
+    return ((n + 4) / 5) * 8;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn b32_eq(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    return mem_eq(out, 0, str_ptr(s), 0, n);
+}
+
+fn test_base32_rfc4648_vectors() -> bool {
+    let out: ptr = alloc(64);
+    let f: str = "f";
+    let fo: str = "fo";
+    let foo: str = "foo";
+    let foob: str = "foob";
+    let fooba: str = "fooba";
+    let foobar: str = "foobar";
+    let a: u32 = base32_encode_str(out, 0, f);
+    let ok1: bool = b32_eq(out, a, "MY======");
+    let b: u32 = base32_encode_str(out, 0, fo);
+    let ok2: bool = b32_eq(out, b, "MZXQ====");
+    let c: u32 = base32_encode_str(out, 0, foo);
+    let ok3: bool = b32_eq(out, c, "MZXW6===");
+    let d: u32 = base32_encode_str(out, 0, foob);
+    let ok4: bool = b32_eq(out, d, "MZXW6YQ=");
+    let e: u32 = base32_encode_str(out, 0, fooba);
+    let ok5: bool = b32_eq(out, e, "MZXW6YTB");
+    let g: u32 = base32_encode_str(out, 0, foobar);
+    return ok1 && ok2 && ok3 && ok4 && ok5 && b32_eq(out, g, "MZXW6YTBOI======");
+}
+
+fn test_base32_empty() -> bool {
+    let out: ptr = alloc(16);
+    let e: str = "";
+    return base32_encode_str(out, 0, e) == 0;
+}
+
+fn test_base32_roundtrip_all_lengths() -> bool {
+    // 1..10 字节都来回一趟 —— 补位的那几种情形全覆盖。
+    let d: ptr = alloc(32);
+    let e: ptr = alloc(64);
+    let r: ptr = alloc(32);
+    let bad: u32 = 0;
+    let n: u32 = 1;
+    while n <= 10 {
+        let i: u32 = 0;
+        while i < n {
+            store8(d, i, ((i * 37 + n) % 256) as u8);
+            i = i + 1;
+        }
+        let el: u32 = base32_encode(e, 0, d, 0, n);
+        let dl: u32 = base32_decode(r, 0, e, 0, el);
+        if dl != n || mem_eq(d, 0, r, 0, n) == false {
+            bad = 1;
+        }
+        n = n + 1;
+    }
+    return bad == 0;
+}
+
+fn test_base32_decode_rejects_bad_char() -> bool {
+    let out: ptr = alloc(32);
+    let s: str = "MZXW6==!"; // '!' 不是合法字符
+    return base32_decode(out, 0, str_ptr(s), 0, 8) == 4294967295;
+}
+
+fn test_base32_decode_lowercase_accepted() -> bool {
+    // 字母表不区分大小写是 base32 的卖点之一, 解码必须收下小写。
+    let out: ptr = alloc(32);
+    let s: str = "mzxw6ytb";
+    let n: u32 = base32_decode(out, 0, str_ptr(s), 0, 8);
+    let want: str = "fooba";
+    return n == 5 && mem_eq(out, 0, str_ptr(want), 0, 5);
+}
+
+fn test_base32_lowercase_roundtrip() -> bool {
+    // 自己编的 (大写) 必须能被自己解 (大小写都收)。
+    let d: ptr = alloc(32);
+    let e: ptr = alloc(64);
+    let r: ptr = alloc(32);
+    let s: str = "The quick brown fox";
+    let n: u32 = 19;
+    mem_copy(d, 0, str_ptr(s), 0, n);
+    let el: u32 = base32_encode(e, 0, d, 0, n);
+    let dl: u32 = base32_decode(r, 0, e, 0, el);
+    return dl == n && mem_eq(d, 0, r, 0, n);
+}
+
+fn test_base32_encoded_len_helper() -> bool {
+    return base32_encoded_len(1) == 8 && base32_encoded_len(5) == 8
+        && base32_encoded_len(6) == 16 && base32_encoded_len(0) == 0;
+}
+
+fn test_base32_offset_respected() -> bool {
+    let d: ptr = alloc(64);
+    let e1: ptr = alloc(64);
+    let e2: ptr = alloc(64);
+    let s: str = "foobar";
+    mem_fill(d, 0, 8, 170);
+    mem_copy(d, 8, str_ptr(s), 0, 6);
+    let a: u32 = base32_encode(e1, 0, d, 8, 6);
+    let b: u32 = base32_encode(e2, 0, str_ptr(s), 0, 6);
+    return a == b && mem_eq(e1, 0, e2, 0, a);
+}
+
+fn test_base32_wrong_padding_rejected() -> bool {
+    // "MZXW6YTB" 后面不该再跟数据; 这里用补位后又跟字符的串。
+    let out: ptr = alloc(32);
+    let s: str = "MY======M";
+    return base32_decode(out, 0, str_ptr(s), 0, 9) == 4294967295;
+}
