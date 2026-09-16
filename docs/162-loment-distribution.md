@@ -197,6 +197,11 @@ python tools/loment_dist_test.py                         # 全量判据 (布局/
 
 也支持只打子集（门禁用它省时间）：`--emit --only driver --no-exe`。
 
+**`--emit` 要在 commit 之后跑。** 包里 `share/loment/version` 的 `commit <sha>` 是**打包那一刻
+的 `HEAD`**，所以在工作区改完就打包、之后才提交，产物上的那个 sha 会**永远落后一个提交**
+（`loment_dist --check` 看不出来 —— 它不是"源码直出"的条目）。要发的那一版：先提交，
+再 `--emit`。
+
 **边界（诚实清单）**：只在 x86_64 上打过；Linux 侧只给 tar.gz（没有 `.deb`/`.rpm`）；
 没有代码签名/公证；没有 aarch64 包（M92 的 aarch64 还没执行过，见 docs/145）；
 安装包不含 clang，也不含 Python —— 两者都不需要才能装，但 `run`/`build` 需要 clang。
