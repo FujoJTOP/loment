@@ -26,8 +26,11 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 2026-09-15 再升到 **0.1.4-alpha2.2**: 库系统 (docs/168) —— 依赖从源码的 use 推导、
 # 实例身份=递归哈希、同名多实例真能共存、能力需求沿闭包推导、.lomp 清单 (Loment 自己);
 # 并补上 agent 指南与 lomlib 的 Loment 孪生 (id)。tag 会另打 `v0.1.4-alpha2.2`。
-RELEASE = "0.1.4-alpha2.2"
-RELEASE_NAME = "0.1.4 Alpha2.2"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-15 再升到 **0.1.4-alpha2.3**: CLI 命令面 (docs/169) —— `loment` 从 9 条命令扩到 38 条,
+# 命令前端本身就是 Loment 写的 (loment/tools/lomcli.lomt), 两个启动器各加一行转发。
+# tag 会另打 `v0.1.4-alpha2.3`。
+RELEASE = "0.1.4-alpha2.3"
+RELEASE_NAME = "0.1.4 Alpha2.3"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
@@ -35,6 +38,7 @@ GLOBS = [
     "tools/potato_llm_arm.py",
     "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py", "tools/lomdoc.py",
     "tools/lompkg.py", "tools/lomlib.py", "tools/loment_lib_test.py",
+    "tools/loment_cli_test.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",

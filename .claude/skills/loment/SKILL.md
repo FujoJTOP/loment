@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法 / 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -23,10 +23,11 @@ description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研
 loment version
 ```
 
-拿到 `Loment 0.1.4 Alpha2.2 (0.1.4-alpha2.2), commit <短号>` 这类输出。**以它的 commit 为准**：
-不同 checkout 能力不同（本文件描述 0.1.4-alpha2.2 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2`）。
+拿到 `Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-alpha2.3 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2`）。
 
-命令面（安装后就在 PATH 上）：
+**命令面一共 38 条，敲 `loment help` 看全部**（分区 + 对齐 + 上色），`loment help <命令>` 看单条。
+最常用的这些：
 
 | 命令 | 作用 |
 |---|---|
@@ -38,6 +39,22 @@ loment version
 | `loment doc FILE` | 生成 API 文档 |
 | `loment lsp` | 语言服务（stdio 上的 LSP） |
 | `loment skill [--print]` | 打印**这份指南**的路径 / 全文 —— 不依赖任何目录约定 |
+
+**手边没有这份指南时，语言参考可以直接从 CLI 里问**（这正是它自足的意义）：
+
+| 命令 | 作用 |
+|---|---|
+| `loment cheat` | 一页速查（最容易踩的 14 条，按「最容易踩」排序） |
+| `loment syntax` | 语法速查表 |
+| `loment builtins` | 内建函数表（全部，没有别的） |
+| `loment types` / `keywords` / `caps` | 类型表 / 关键字 / 能力域 |
+| `loment codes` / `loment explain E4` | 错误码表 E1–E19 / 单条详解 |
+| `loment new NAME` | 生成一个能直接 `loment run` 的骨架 |
+| `loment stat` / `fns` / `grep` / `hash` / `cat` | 读源码（行数、函数签名、搜索、sha256、带行号打印） |
+| `loment ls` / `tree` / `examples` / `example tour` | 看目录与示例 |
+| `loment doctor` / `where` / `env` / `tools` | 排查安装（缺哪个组件、装在哪） |
+
+`--no-color`（或 `loment color off`）关掉 ANSI —— 管道里要干净输出时用它。
 
 **`build` / `run` 若报 `clang not found` 退出码 3** —— 你装的是**更早的包**（那时工具链装在
 WSL 里、靠 clang 链接）。升级到本代的包即可：现在链接由包内的 `loment-lomelf` 做，本机直接出

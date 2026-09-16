@@ -177,6 +177,7 @@ tools/lomdoc.py
 tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
+tools/loment_cli_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py
@@ -588,7 +589,7 @@ fn emit_json(mem: ptr, n: u32, out: ptr) -> u32 {
     k = put_str(k, out, " \"release\": \"");
     // 与 tools/loment_release.py 的 RELEASE 必须**逐字节一致** —— 版本名有两个实现,
     // 这里是自举镜像那一份; 判据 loment_rel_test 会对着比。
-    k = put_str(k, out, "0.1.4-alpha2.2");
+    k = put_str(k, out, "0.1.4-alpha2.3");
     k = put_str(k, out, "\",\n");
     k = put_str(k, out, " \"files\": [\n");
     let i: u32 = 0;

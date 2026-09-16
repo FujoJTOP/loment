@@ -52,6 +52,9 @@ TOOLS: list[tuple[str, str]] = [
     # `loment build/run` 的链接器 —— 自举侧的 lomelf 镜像。有它之后 **包里不再需要 clang**:
     # 存出来的产物本来就是目标平台自己的格式（Linux 出 ELF / Windows 出 PE）。
     ("loment-lomelf", "loment/tools/lomelf.lomt"),
+    # 命令面（help/codes/stat/grep/ls/tree/...）—— 用 Loment 自己写的 CLI 前端。
+    # 为什么不在启动器里写: 启动器有两份 (bash + batch), 命令写在那边就得写两遍并保持同步。
+    ("loment-cli", "loment/tools/lomcli.lomt"),
 ]
 #: 随包发的示例。`tour.lomt` 是**一个文件过完整门语言**的导览 —— 纯包用户没有仓库里的
 #: 其它示例, 所以它比 hello 更该在包里 (agent 指南 §1 讲的就是这一份, 三者同源)。
@@ -112,6 +115,7 @@ Loment @DISPLAY@  (@VERSION@)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
   loment skill [--print]      print the AI-agent guide (path, or the whole text)
+  loment help [COMMAND]       all commands (the full catalog lives in loment-cli)
 EOF
 }
 
@@ -182,8 +186,14 @@ case "${1:-help}" in
             echo "loment: $out"
         fi ;;
     help|-h|--help)
+        # The full catalog lives in loment-cli - one implementation, both launchers forward.
+        if cli=$(tool loment-cli); then exec "$cli" help; fi
         usage ;;
     *)
+        # New commands go into loment-cli (loment/tools/lomcli.lomt), NOT into this shell:
+        # there are two launchers (this one and loment.cmd) and anything written here has to
+        # be written twice and kept in sync. Forwarding keeps a single implementation.
+        if cli=$(tool loment-cli); then exec "$cli" "$@"; fi
         usage >&2; exit 2 ;;
 esac
 '''
@@ -197,9 +207,9 @@ set "here=%~dp0"
 set "share=%here%..\share\loment"
 set "cmd=%~1"
 if "%cmd%"=="" goto usage
-if "%cmd%"=="help" goto usage
-if "%cmd%"=="-h" goto usage
-if "%cmd%"=="--help" goto usage
+if "%cmd%"=="help" goto help
+if "%cmd%"=="-h" goto help
+if "%cmd%"=="--help" goto help
 if "%cmd%"=="version" goto version
 if "%cmd%"=="-v" goto version
 if "%cmd%"=="--version" goto version
@@ -211,7 +221,9 @@ if "%cmd%"=="lsp" goto lsp
 if "%cmd%"=="skill" goto skill
 if "%cmd%"=="build" goto build
 if "%cmd%"=="run" goto run
-goto usage
+rem Everything else goes to loment-cli: the command surface lives there (loment/tools/lomcli.lomt),
+rem not here - there are two launchers and anything written in both has to be kept in sync.
+goto forward
 
 :version
 type "%share%\version"
@@ -306,6 +318,16 @@ rmdir "%tmp%" >nul 2>nul
 echo loment: failed -- nothing was produced 1>&2
 exit /b 1
 
+:help
+if not exist "%here%loment-cli.exe" goto usage
+"%here%loment-cli.exe" help
+exit /b %ERRORLEVEL%
+
+:forward
+if not exist "%here%loment-cli.exe" goto usage
+"%here%loment-cli.exe" %*
+exit /b %ERRORLEVEL%
+
 :usage
 echo Loment @DISPLAY@  (@VERSION@)
 echo   loment version              print version
@@ -317,6 +339,7 @@ echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio
 echo   loment skill [--print]      print the AI-agent guide (path, or the whole text)
+echo   loment help [COMMAND]       all commands (the full catalog lives in loment-cli)
 exit /b 2
 '''
 
@@ -347,7 +370,8 @@ src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$uninstall" = 1 ]; then
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
-          "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf"
+          "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf" \
+          "$prefix/bin/loment-cli"
     rm -rf "$prefix/share/loment"
     # only what this installer created -- never ~/.claude/skills or AGENTS.md at large
     if [ "$no_skill" != 1 ]; then
@@ -731,7 +755,7 @@ if "%~1"=="" (
 README_MD = """# Loment {DISPLAY}
 
 版本 `{VERSION}`。这是一份**自包含**的 Loment 工具链发行包：包里**没有 Python**，也
-**不需要 clang、不需要 WSL** —— 五个可执行文件都是自举产物，`build`/`run` 用包内的
+**不需要 clang、不需要 WSL** —— 六个可执行文件都是自举产物，`build`/`run` 用包内的
 `loment-lomelf` 在本机直接出 ELF/PE。构建与安装的全部细节见仓库 `docs/162`。
 
 ## 包内容
@@ -744,6 +768,7 @@ README_MD = """# Loment {DISPLAY}
 | `bin/loment-doc` | API 文档生成器 |
 | `bin/loment` | 启动器（下面那些子命令） |
 | `bin/loment-lomelf` | 链接器：把 `.ll` 变成可执行文件（`build`/`run` 用它） |
+| `bin/loment-cli` | 命令前端：`help` / `codes` / `stat` / `grep` / `ls` / `tree` / …（Loment 自己写的，`loment/tools/lomcli.lomt`） |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |
 | `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
@@ -1079,6 +1104,19 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> 
     made.append(szip)
     print(f"  [{szip.name}] {szip.stat().st_size} 字节 (agent 指南)")
 
+    # 清掉**上一版**留下的发行件: 版本号进文件名, 所以新版不会覆盖旧版 —— 留着的话
+    # 产物目录里会同时躺着两个版本, 分不清哪个是当前件 (2026-09-15 踩过两次)。
+    # 只动本目录里名字像发行件的文件, 且只删**不在本次产物清单里**的。
+    keep = {p.name for p in made} | {"SHA256SUMS"}
+    # 注意 keep 里没有 --no-exe 时本该有的那份: 所以"名字含当前版本号"的一律保留,
+    # 免得 `--emit --no-exe` 把**当前**版本的 setup.exe 当陈旧件删掉。
+    stale = [p for p in sorted(out.iterdir())
+             if p.is_file() and p.name not in keep and VER not in p.name
+             and (p.name.startswith("loment-") or p.name.endswith("-setup.exe"))]
+    for p in stale:
+        _unlink_retry(p)
+        print(f"  [陈旧] 删掉 {p.name} (不是本次产物)")
+
     sums = write_sums(out)
     print(f"  [{sums.name}] {len(made)} 行")
     return 0
@@ -1205,7 +1243,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emit", action="store_true", help="构建并打包")
     ap.add_argument("--check", action="store_true", help="校验现有产物与 SHA256SUMS")
     ap.add_argument("--list", action="store_true", help="只列会打进去的文件")
-    ap.add_argument("--only", metavar="NAME[,NAME]", help="只构建这些工具 (driver,lsp,fmt,doc)")
+    ap.add_argument("--only", metavar="NAME[,NAME]",
+                    help="只构建这些工具 (driver,lsp,fmt,doc,lomelf,cli)")
     ap.add_argument("--no-exe", action="store_true", help="跳过 Windows 自解压安装包")
     ap.add_argument("--out", metavar="DIR", help="产物目录 (默认 loment/dist)")
     a = ap.parse_args(argv)

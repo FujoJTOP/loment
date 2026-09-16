@@ -1,6 +1,6 @@
 # 162 · Loment 发行包：命令安装与安装包安装
 
-> 版本 `0.1.4-alpha2.2`（显示名 **Loment 0.1.4 Alpha2.2**）· 构建器 `tools/loment_dist.py`
+> 版本 `0.1.4-alpha2.3`（显示名 **Loment 0.1.4 Alpha2.3**）· 构建器 `tools/loment_dist.py`
 > · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
@@ -27,8 +27,9 @@
 目标是"装完 Loment，AI agent 读它就能写 Loment"。随包那份与仓库里的
 `.claude/skills/loment/SKILL.md` **逐字节相同**（判据在 `loment_dist_test`）。
 
-**指南里的代码由判据守着**（2026-09-15 补）：§1 的 `tour` 与仓库
-`loment/examples/tour.lomt` 逐字节相同，且**每个 `rust` 围栏样例都必须过前端**。
+**指南里的代码由判据守着**（2026-09-15 补）：§1 的 `tour` **代码体**与仓库
+`loment/examples/tour.lomt` 逐字节相同（**只有开头那段 `//` 注释不同** —— 指南里那份
+去掉了指向仓库路径的注释，因为纯包用户没有本仓库），且**每个 `rust` 围栏样例都必须过前端**。
 起因是实测出来的 —— 指南里那份 tour 漏了个 `;`、根本编不过，而它正文自称"和仓库里那份
 是同一份"，此前没有任何东西守这句话；照抄它的用户只会得到一个莫名其妙的 E19。
 要展示**故意写错**的片段时，在围栏前一行加 `<!-- no-compile -->` 豁免。
@@ -53,9 +54,9 @@
 
 | 文件 | 装法 | 说明 |
 |---|---|---|
-| `loment-0.1.4-alpha2.2-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
-| `loment-0.1.4-alpha2.2-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
-| `loment-0.1.4-alpha2.2-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
+| `loment-0.1.4-alpha2.3-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
+| `loment-0.1.4-alpha2.3-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
+| `loment-0.1.4-alpha2.3-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
 | `SHA256SUMS` | — | 上面三件的 sha256 |
 
 **两个归档是确定性字节**：zip 固定时间戳（`1980-01-01`）+ 目录项排序 + unix 权限位，
@@ -71,9 +72,10 @@ tar.gz 的 `mtime=0` + 稳定 uid/gid/uname、gzip 头不带时间。同输入�
 | `bin/loment-lsp` | 语言服务（补全/跳转/诊断/`--check`），stdio 上的 LSP |
 | `bin/loment-fmt` | 格式化器（与 Python 版逐字节相同，docs/159） |
 | `bin/loment-doc` | API 文档生成器 |
-| `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`） |
+| `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`/`skill`；**其余命令转发给 `loment-cli`**） |
+| `bin/loment-cli` | **命令前端**（38 条命令：`help`/`codes`/`explain`/`syntax`/`cheat`/`stat`/`grep`/`ls`/`tree`/`new`/…，见 `docs/169`）。**用 Loment 自己写的** —— 命令面只写一份，两个启动器各转发一行 |
 | `share/loment/seed.ll` | 自举种子 —— 只用 clang 就能从它重建整套工具链 |
-| `share/loment/version` | `Loment 0.1.4 Alpha2.2 (0.1.4-alpha2.2)` + 提交号与提交日期 |
+| `share/loment/version` | `Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3)` + 提交号与提交日期 |
 | `share/loment/examples/user_hello.lomt` | 示例（用 syscall 打印） |
 | `SHA256SUMS` | **随包**校验和，安装脚本第一步就校它 |
 
