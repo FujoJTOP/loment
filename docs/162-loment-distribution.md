@@ -174,13 +174,33 @@ payload.zip + install.ps1 + install.cmd  --SED-->  loment-...-setup.exe
 --sign-gpg` 就能签回来；自签名消不掉 SmartScreen 警告，换 CA 证书只需设
 `LOMENT_SIGN_PFX`/`LOMENT_SIGN_PFX_PASS`，流程不变（`--print-cmd` 打印等价命令）。
 
-## 5. 判据（34 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
+## 5. 判据（65 条，`tools/loment_dist_test.py`，进门禁；审计里是 C15）
 
 | 组 | 判的是 |
 |---|---|
 | 布局 | 该有的文件都在；`.sh`/`.ps1`/`.cmd` 纯 ASCII；`.ps1`/`.cmd` 是 CRLF；`bin/loment` 是 LF；ELF 权限 755 |
 | 归档 | 归档内容与 payload **逐文件 sha256 相同**；zip/tar.gz 两次写出**字节相同** |
-| 产物 | `--check` 与 `SHA256SUMS` 一致；**且归档里「源码直出」的条目（skill / seed / 示例 / README / 启动器）等于当前仓库里的那份**（2026-09-15 补：原先只拿归档跟它自己的清单比，两边一起过期就永远报「一致」）；归档里的 driver == 构建产物 |
+| 产物 | `--check` 与 `SHA256SUMS` 一致；**且归档里「源码直出」的条目（skill / seed / 示例 / README / 启动器 / `version`）等于当前仓库里的那份**（2026-09-15 补：原先只拿归档跟它自己的清单比，两边一起过期就永远报「一致」）；归档里的 driver == 构建产物 |
+
+### 新鲜度这一列踩过四次，每次都是同一个形状
+
+「源码直出的条目」= 打进归档的字节**现在**就能从仓库算出来的那些。它们不在编译产物那一类，
+所以 `--emit` 不会因为改了就重算 —— 忘了重打包时，归档里是旧的，而 `--check` 只拿归档跟
+**它自己的** `SHA256SUMS` 比，两边一起过期就永远报「一致」。四次都是这么发现的（都不是假想）：
+
+| 时间 | 漏掉的条目 | 怎么发现的 |
+|---|---|---|
+| 2026-09-15 | `skill` / `seed` | 用户问「安装包更新了吗」 |
+| 2026-09-16 | `store`（新增 137 个文件） | 加 store 时补 `_fresh_sources` |
+| 2026-09-16 | `install.sh` / `install.ps1`（模板直出） | 改完模板重打包才发现归档里还是旧的 |
+| 2026-09-16 | **`share/loment/version`** | 打 0.1.4-pre1 时发现包里印的是**上一个**提交号的 commit 行 |
+
+最后一条比前三条更该被盯：它带 **HEAD 短号**，所以**每一次提交都会让它过期**。配套的两条纪律：
+
+1. **发射顺序**：先提交源码 → 重算发布清单 → 提交清单 → **最后**出包（`loment_dist --emit`）。
+   出包放最后，包里那个 commit 行才等于最终 HEAD；反过来先出包再提交，包里永远是上一代。
+2. **源码包要在出包之前**：`SHA256SUMS` 是出包时扫目录算的，里面也含 `loment-<ver>-src.zip`。
+   先出包再出源码包，清单里的 src.zip 哈希就对不上了（`--check` 会报 DIFF）。
 | **端到端 · Linux** | tar → 装进临时前缀 → `loment version` 出版本行 → **`loment ir` 的产物与参考实现逐字节相同** → `loment check` 正例 0 且不吐 IR → `loment run` 真跑出输出 → 缺组件时报错**指名**（`this package does not include loment-fmt`）→ `--uninstall` 摘干净 → 再装一次仍成功 |
 | **端到端 · Windows** | 解包 → `install.ps1` **真装**（`-Prefix <临时>` + `-NoPath -NoFileType`，不动用户 PATH 与注册表）→ 写出 `loment.cmd` 且指向包内原生 exe → `loment version` 能跑 → **`loment run` 在本机编出 PE 并真跑出输出**（不再经 WSL）→ 装出的 agent skill 与仓库里那份逐字节相同 → `--uninstall` 摘干净（含 agent skill，且别家 agent 的文件按标记精确还原） |
 | Windows 解析 | `install.ps1 -DryRun`、`-DryRun -PayloadZip`（自解压那条路）、**`install.cmd -DryRun`（zip 布局，用户双击那条路）** 在**真 PowerShell 5.1 / cmd** 下都能跑；`setup.exe` 是 PE 且非空 |
