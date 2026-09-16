@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -56,10 +56,24 @@ loment version
 
 `--no-color`（或 `loment color off`）关掉 ANSI —— 管道里要干净输出时用它。
 
-> **PATH 上可能还有一个 `lompi`** —— 那是 **Loment 库的包管理器**（管 store、锁文件、
-> `deps/`）。它是**独立命令，不是 `loment` 的子命令**：`loment help` 里没有它，
-> 也别试 `loment lompi`，直接敲 `lompi`。它自带一份指南，装法与这份同一套
-> （`~/.claude/skills/lompi/SKILL.md`）。
+> ### 任务碰到"库 / 依赖"，**先去读 lompi 的指南**
+>
+> lompi 是 **Loment 库的包管理器**（管 store、锁文件、`deps/`）。下面这些事，答案全在它那份
+> 指南里，**这份指南不讲**：
+>
+> - 装/取一个库、解析依赖、生成锁文件；
+> - "这台机器上有哪些 Loment 库"、"这个 store 里是什么"、"某个库的源码在哪"；
+> - `use <名字>` 到底解析到谁、哪个版本会被选中、两个版本能不能共存；
+> - 项目里的 `deps/` 是什么形状、编译器从哪里找库。
+>
+> **先读它再动手**，别照别的语言的包管理器猜 —— 模型不一样（库 = 一个目录，身份是**内容
+> 哈希**，依赖就是源码里的 `use`，不用另行声明）。
+>
+> 路径：`~/.claude/skills/lompi/SKILL.md`；只有安装包时在 `<前缀>/share/lompi/skill/SKILL.md`
+> （同一份）。**这份指南和它是一对**：讲语言语法看这里，讲库与依赖看它。
+>
+> 它是**独立命令，不是 `loment` 的子命令**：`loment help` 里没有它，也别试 `loment lompi`，
+> 直接敲 `lompi`。
 
 **`build` / `run` 若报 `clang not found` 退出码 3** —— 你装的是**更早的包**（那时工具链装在
 WSL 里、靠 clang 链接）。升级到本代的包即可：现在链接由包内的 `loment-lomelf` 做，本机直接出
@@ -433,6 +447,9 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
 
 仓库 = FujoOS 的 Loment 线工作树（`loment/`、`lom/`、`tools/loment*.py`、`docs/14?–16?-loment-*.md`）。
 有仓库时额外能用的：
+
+- **真要管库，用 `lompi`（§0 那条）** —— 它是**装好的**，不依赖仓库；下面这些 Python 工具是
+  仓库里的另一套（`docs/168` 的旧模型，`materialize` 那条路）。两者不是一回事，别混。
 
 - `python tools/loment.py lib ...` —— **库系统**（`docs/168`）：`tree`（依赖树 + 每个库的实例数）、
   `id`（实例身份）、`cap`（能力需求闭包，带来源链）、`check`（冲突）、`materialize`（把嵌套与
