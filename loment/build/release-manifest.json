@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "fdb97561f6ca8a877cb050d092d38e7047fe5f1c4f06ab8e2e55147468fce749"
+   "sha256": "ed29149bf7fb2682a2743ab4df334c9b15c4a41a08f79480046e05f6e722c2b8"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "88cff3a519793499bf5b068260926c227023b3d55261a6e9b3fbbad8e317a2d8"
+   "sha256": "c2e55ebc202edac9fd40854f257c2b36a1f2f212802729dd6680efbbbf8512b9"
   },
   {
    "path": "tools/potato.py",

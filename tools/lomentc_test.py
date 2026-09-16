@@ -38,6 +38,30 @@ def errs(src: str) -> list[str]:
 # ---------------------------------------------------------------- 正例
 
 @test
+def test_int_literal_as_ptr_is_legal_and_lowers_to_inttoptr():
+    """`0 as ptr`（空指针的惯用写法）要过检查，且**发射成 inttoptr**。
+
+    2026-09-15 由 lompi（另一条线用 Loment 写的包管理器）实测抓到：参考实现把整型
+    **字面量**转 ptr 判成非法目标（`as 目标类型非法 ptr`），而自举镜一直放行 ——
+    于是同一份源码**参考报错、打包版能编**。两条一起修，缺一条都不行：
+    只放行不修发射，参考会发出 `zext i32 0 to ptr`，而 zext 产不出指针，那是**非法 IR**。
+    """
+    NL = chr(10)
+    src = NL.join([
+        "module m", "",
+        "fn z() -> ptr {", "    return 0 as ptr;", "}", "",
+        "fn w(v: u64) -> ptr {", "    return v as ptr;", "}", "",
+        "fn _start() {", "    syscall4(60, 0, 0, 0);", "}", "",
+    ])
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "inttoptr i32 0 to ptr" in ir, ir
+    assert "zext i32 0 to ptr" not in ir, ir
+    # 变量那种窄写法本来就没坏，别在修字面量时把它碰坏
+    assert "inttoptr i64" in ir, ir
+
+
+@test
 def test_demo_parses_and_checks():
     mod = lomentc.load(DEMO)
     deps = lomentc.resolve_deps(mod, ROOT, DEMO.parent, entry=DEMO)

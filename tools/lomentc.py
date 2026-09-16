@@ -1819,7 +1819,11 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
             return
         if st is None and isinstance(e.expr, IntLit):  # 整型字面量按目标定宽
-            if e.type not in INT_TYPES:
+            # `ptr` 也算: 字面量的类型是 None, 所以上面那条 `e.type == "ptr" and st in
+            # INT_TYPES` 够不着它 —— 于是 `0 as ptr`(空指针的惯用写法) 被当成非法目标。
+            # 镜那边 (selfhost/checker.lomt, 同处按 `chk_ty_is_int`) 一直是放行的, 于是
+            # 同一份源码**参考报错、打包版能编**。2026-09-15 由 lompi 的 `0 as ptr` 实测抓到。
+            if e.type not in INT_TYPES and e.type != "ptr":
                 errs.append(f"{e.line}: as 目标类型非法 {e.type}")
             return
         if st is None or not (st in INT_TYPES or st == "bool"):
@@ -3107,9 +3111,13 @@ class _Ir:
                 r = self.t()
                 self.w(f"{r} = ptrtoint ptr {v} to {self.ll(e.type)}")
                 return e.type, r
-            if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
+            # M83: 整数 -> 指针 (brk/mmap 取内存)。**整型字面量也算** —— 它的类型是 None,
+            # 不特判就会落到下面那条通用分支发成 `zext i32 0 to ptr`, 而 zext 产不出指针,
+            # 那是**非法 LLVM**。镜发的是 `inttoptr i32 0 to ptr` (字面量按默认宽度 u32),
+            # 这条对齐它。2026-09-15 由 lompi 的 `0 as ptr` 实测抓到。
+            if e.type == "ptr" and (st in INT_TYPES or (st is None and isinstance(e.expr, IntLit))):
                 r = self.t()
-                self.w(f"{r} = inttoptr {self.ll(st)} {v} to ptr")
+                self.w(f"{r} = inttoptr {self.ll(st or 'u32')} {v} to ptr")
                 return "ptr", r
             si, di = self.ll(st or "u32"), self.ll(e.type)
             if si == di:  # 同宽异名 (u64 <-> i64): LLVM 里是同一个类型, 再 cast 是非法 IR
