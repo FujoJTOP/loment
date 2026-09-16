@@ -44,7 +44,7 @@ loment version
 
 | 命令 | 作用 |
 |---|---|
-| `loment cheat` | 一页速查（最容易踩的 14 条，按「最容易踩」排序） |
+| `loment cheat` | 一页速查（最容易踩的 16 条，按「最容易踩」排序） |
 | `loment syntax` | 语法速查表 |
 | `loment builtins` | 内建函数表（全部，没有别的） |
 | `loment types` / `keywords` / `caps` | 类型表 / 关键字 / 能力域 |
@@ -393,6 +393,17 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
 
 13. **`use` 后面不带分号**：`use mathutil;` 报 `顶层只允许 use/capability/fn，得到 ';'`；
     两种写法（`use 名字` / `use "路径.lomt"`）都不带。
+
+14. **非 void 的函数掉出末尾 → 运行期 SIGILL**。写 `fn f() -> u32 { ... }` 时最后一条**必须**
+    是 `return <expr>;` —— 忘了写，**check 照样放行**，跑起来直接 `Illegal instruction`
+    （2026-09-15 写 `loment/tools/lomcli.lomt` 时实测，一个 40 行的目录遍历函数就崩在这）。
+    这也是为什么早期返回要写成 `return 0;` 而不是裸 `return;`（§6.3）。
+    附带：返回类型只用来放行早退的，可以声明成 `-> u32` 然后 `return 0;`，调用方忽略返回值。
+
+15. **`let mut x: T = ...` 里的 `mut` 不是关键字**，是普通标识符（`loment/selfhost/checker.lomt`
+    里真有个变量就叫 `mut`）。写 `let mut len: u32 = ...` 等于"声明一个叫 `mut` 的变量、
+    后面再跟一个 `len`"，报的是 `期望 :，得到 'm'` 这种**指向别处**的语法错。
+    本地变量直接 `let x: T = ...;`，重新赋值不需要任何修饰。
 
 ## 7. 拿不到源码仓库时怎么办
 
