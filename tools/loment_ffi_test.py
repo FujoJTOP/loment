@@ -165,6 +165,95 @@ def test_three_args_and_void_call():
         print("      三实参 + void 调用 -> 退出码 123 (位置敏感)")
 
 
+#: Rust 那份。**`#![no_std]` + `#[no_mangle] extern "C"`** —— 这就是 Rust 库对外暴露 C ABI 的
+#: 标准做法 (`#[no_mangle]` 保住符号名, `extern "C"` 保住调用约定)。目标用
+#: `x86_64-unknown-none`(裸机, 对象格式是 ELF), 因为这台机器上只装了 msvc 与 none 两个 target。
+#: 同样挑**非交换**的减法, 理由见 `C_SOURCE` 的注释。
+RUST_SOURCE = """\
+#![no_std]
+#[no_mangle]
+pub extern "C" fn r_sub(a: i32, b: i32) -> i32 { a - b }
+#[panic_handler]
+fn ph(_: &core::panic::PanicInfo) -> ! { loop {} }
+"""
+
+
+def _rustc() -> str | None:
+    return shutil.which("rustc")
+
+
+def _rust_has_target() -> bool:
+    r = subprocess.run(["rustc", "--print", "target-list"], capture_output=True,
+                       text=True, shell=False)
+    return "x86_64-unknown-none" in r.stdout
+
+
+@test
+def test_rust_end_to_end():
+    """Rust: 一个 `#[no_mangle] extern "C"` 的静态库目标文件, 由 Loment 调。
+
+    **同一个机制, 不同的语言** —— C ABI 是那条共同接口: Rust 侧 `#[no_mangle]` 保符号名、
+    `extern "C"` 保调用约定, 我们这边 `extern fn` 声明 + 寄存器传参。所以"支持一个语言"
+    在阶段 1/2 里就是"给它写一条构建配方 + 一条判据", 不是给每个语言写一套 FFI。
+    """
+    rustc, clang = _rustc(), _clang()
+    if not rustc or not _rust_has_target() or not clang or not _wsl():
+        print("      SKIP: 需要 rustc + x86_64-unknown-none + clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "r.rs").write_text(RUST_SOURCE, encoding="utf-8", newline="\n")
+        r = subprocess.run([rustc, "--target", "x86_64-unknown-none", "--crate-type",
+                            "staticlib", "--emit=obj", "-O",
+                            "-o", str(td / "r.o"), str(td / "r.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, f"rustc 失败: {r.stderr[-300:]}"
+        (td / "m.lomt").write_text(
+            "module ffirust\n\n"
+            "extern fn r_sub(a: i32, b: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, r_sub(50 as i32, 8 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "r.o"], 42)
+        assert rc == 42, f"Rust 端到端结果不对: rc={rc} (期望 42) err={err[-300:]!r}"
+        print("      Rust: #[no_mangle] extern \"C\" 目标文件 -> 退出码 42")
+
+
+@test
+def test_cpp_end_to_end():
+    """C++: `extern "C"` 包一层 —— 与 C 同一个机制 (C 系列的语言都走这条)。
+
+    直接调 C++ 的重载/名字修饰符号需要 Itanium 还原, 那是另一件事; 库对外暴露的那一面
+    照例是 `extern "C"`。
+    """
+    clang = _clang()
+    cxx = shutil.which("clang++") or str(Path(clang).with_name("clang++.exe")) \
+        if clang else None
+    if not clang or not cxx or not Path(cxx).exists() or not _wsl():
+        print("      SKIP: 需要 clang++ + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "cxx.cc").write_text(
+            "namespace demo { int div(int a, int b) { return a / b; } }\n"
+            "extern \"C\" int cxx_div(int a, int b) { return demo::div(a, b); }\n",
+            encoding="utf-8", newline="\n")
+        r = subprocess.run([cxx, "--target=x86_64-unknown-linux-gnu", "-c", "-O1",
+                            "-ffreestanding", "-fno-stack-protector", "-fno-exceptions",
+                            "-fno-rtti", "-o", str(td / "cxx.o"), str(td / "cxx.cc")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, f"clang++ 失败: {r.stderr[-300:]}"
+        (td / "m.lomt").write_text(
+            "module fficxx\n\n"
+            "extern fn cxx_div(a: i32, b: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, cxx_div(84 as i32, 2 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "cxx.o"], 42)
+        assert rc == 42, f"C++ 端到端结果不对: rc={rc} (期望 42) err={err[-300:]!r}"
+        print("      C++: extern \"C\" 包装 -> 退出码 42")
+
+
 @test
 def test_object_with_relocations_is_rejected():
     """对象里有重定位 -> **硬拒**。

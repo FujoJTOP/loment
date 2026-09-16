@@ -184,9 +184,12 @@ case "${1:-help}" in
         [ $# -ge 1 ] || { usage >&2; exit 2; }
         src=$1; shift
         out=
+        links=()
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
+                # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
+                --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -197,7 +200,14 @@ case "${1:-help}" in
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
         # link with the self-hosted lomelf - the package no longer needs clang
-        "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
+        if [ ${#links[@]} -gt 0 ]; then
+            linkargs=
+            for l in "${links[@]}"; do linkargs="$linkargs --link $(to_posix "$l")"; done
+            # shellcheck disable=SC2086
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+        else
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
+        fi
         if [ "$mode" = run ]; then
             chmod 755 "$out"
             "$out"

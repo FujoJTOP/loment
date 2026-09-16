@@ -2158,13 +2158,24 @@ class ForeignObject:
         for s in secs:
             end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
             s["name"] = raw[shstr["off"] + s["nameoff"]:end].decode("utf-8", "replace")
-        # .text
-        text = b""
+        # 代码节: `.text` **与 `.text.*`**。
+        # **为什么必须认 `.text.*`**: clang/gcc 默认把所有函数塞进一个 `.text`, 但
+        # rustc/LLVM 默认**按函数分节** (每个函数一个 `.text.<名字>`), 此时 `.text` 本身
+        # 是**空的** (size 0) —— 只认 `.text` 会直接报"没有 .text" (实测 Rust 那条判据就是
+        # 这么红的)。所以把所有代码节**按节表顺序拼成一块**, 并记下每节在拼接结果里的偏移,
+        # 符号地址 = 该节偏移 + 符号的段内值 (16 对齐, 与函数对齐要求一致)。
+        code: list[dict] = []
+        buf = bytearray()
         for s in secs:
-            if s["name"] == ".text":
-                text = raw[s["off"]:s["off"] + s["size"]]
-        if not text:
-            raise Unsupported(f"{path.name}: 没有 .text")
+            if s["type"] == 1 and (s["name"] == ".text" or s["name"].startswith(".text.")):
+                while len(buf) % 16:
+                    buf.append(0)
+                s["at"] = len(buf)
+                buf += raw[s["off"]:s["off"] + s["size"]]
+                code.append(s)
+        if not code:
+            raise Unsupported(f"{path.name}: 没有代码节 (.text / .text.*)")
+        text = bytes(buf)
         # 符号: 只留**定义在 .text 里**的全局/弱符号; 未定义的非空名一律拒
         syms: dict[str, int] = {}
         undefined: list[str] = []
@@ -2183,9 +2194,10 @@ class ForeignObject:
                     undefined.append(nm)
                 # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
                 # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
-                elif shndx < len(secs) and secs[shndx]["name"] == ".text" \
-                        and (info & 0x0F) in (1, 2):                 # GLOBAL / WEAK
-                    syms[nm] = value
+                elif shndx < len(secs) and (info & 0x0F) in (1, 2):  # GLOBAL / WEAK
+                    tgt = secs[shndx]
+                    if "at" in tgt:                              # 落在某个代码节里
+                        syms[nm] = tgt["at"] + value
         # **未定义符号先查**: 一个调用 libc 的 C 函数**同时**有未定义符号与重定位, 先说
         # "它引用了 printf" 比说"它有重定位"有用得多 —— 前者直接告诉用户"第 1 阶段不链 libc",
         # 后者会把人引去查重定位。所以顺序是有意的, 不是顺手。

@@ -2931,6 +2931,19 @@ fn run(mem: ptr) -> u32 {
         wstr(2, "用法: lomelf IN.ll OUT\n");
         return die(2);
     }
+    // 多出来的实参只可能是启动器透传的 `--link FILE.o` (docs/173 FFI)。**必须明说**:
+    // 不看 argv[3] 的话这个选项会被**静静忽略**, 然后在 finalize 报一句 "未定义的标签: c_add"
+    // —— 用户看到的是"符号找不到", 而不是"这个功能还没实现", 方向完全错了。
+    //
+    // **判的是 lo32(长度) 不是整个返回值**: `/proc/self/cmdline` 以 NUL 结尾, 于是 argv_n
+    // 的收尾那句 (`if f == n`) 会给出一个**长度 0 的命中** —— 打包值 `m * PHI` 非零。
+    // 只判 `!= 0` 会把**每一次正常调用**都当成"多了个实参", 实测把 loment_elf_test 从 7/7
+    // 打到 5/7 (两条都是"镜像退出 2")。
+    let a3: u64 = argv_n(ab, 8192, 3);
+    if lo32(a3) != 0 {
+        wstr(2, "lomelf: 外部目标文件 (--link) 尚未在自举链接器实现 (docs/173-loment-ffi.md)\n");
+        return die(2);
+    }
     let inb: ptr = ptr_add(mem, M_IN);
     let ino: u32 = hi32(a1);
     let inn: u32 = lo32(a1);
