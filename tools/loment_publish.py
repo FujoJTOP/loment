@@ -58,6 +58,25 @@ REPOS: dict[str, dict] = {
         "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/",
         "topics": ["programming-language", "compiler", "rust", "self-hosted",
                    "systems-programming", "capability-security", "no-std"],
+        #: 写进仓库根的 `.gitattributes`（与 README 同一种做法：发布工具直出，不靠手敲）。
+        #: 两件事：**把 Loment 源码认到某个语言名下**，以及**把生成物排除出统计**。
+        #: 详见文件里的注释 —— 尤其是"为什么现在写 Rust 而不是 Loment"。
+        "gitattributes": """# GitHub classifies a repository with Linguist. This repository has two kinds of bytes
+# that Linguist would otherwise get wrong:
+#
+#   * `.lomt` / `.lom` are Loment source. Linguist does not know those extensions yet
+#     (an inclusion PR is open against github-linguist/linguist), so they are attributed
+#     to Rust in the meantime: Loment's syntax is a strict subset of Rust, so keywords,
+#     strings, comments and the resulting highlighting line up.
+#     **Once Linguist includes Loment, change these two lines to `Loment`** — or drop them
+#     and let the extensions be detected on their own.
+#   * `loment/build/` holds build output — the compiler seed as LLVM IR, per-target Potato
+#     form objects, transpiled Rust and C, the genesis assembler. Excluding it keeps a
+#     1.8 MB generated file from deciding that this repository is "LLVM".
+*.lomt linguist-language=Rust
+*.lom  linguist-language=Rust
+loment/build/** linguist-generated
+""",
         "readme": """# Loment
 
 Loment is a systems programming language for writing software that runs without a
@@ -359,6 +378,10 @@ def cmd_push(which: str) -> int:
                 return 1
             (td / "README.md").write_text(spec["readme"], encoding="utf-8", newline="\n")
             _git("add", "README.md", cwd=td)
+            if spec.get("gitattributes"):
+                (td / ".gitattributes").write_text(spec["gitattributes"],
+                                                   encoding="utf-8", newline="\n")
+                _git("add", ".gitattributes", cwd=td)
             _git("-c", "user.name=loment_publish", "-c", "user.email=noreply@fujo.invalid",
                  "commit", "--quiet", "-m", "README — 说清这是什么、怎么开始",
                  cwd=td)
