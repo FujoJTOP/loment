@@ -201,7 +201,7 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
 
 ## 10. M64 诊断分类
 
-`tools/loment_diag.py` 对编译器消息做模式分类，17 类错误各有稳定错误码（E001–E017）与
+`tools/loment_diag.py` 对编译器消息做模式分类，20 类错误各有稳定错误码（E001–E020）与
 可执行建议；测试用 13 个反例片段断言**每条都被分类**（无 E999）且带建议。
 
 两条与"分类表可信"直接相关的纪律：

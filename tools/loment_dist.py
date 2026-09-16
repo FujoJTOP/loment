@@ -41,13 +41,14 @@ OUT = ROOT / "loment" / "dist"
 STAGE = ROOT / "loment" / "build" / "dist"
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 
-DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Alpha
-VER = loment_release.RELEASE                # 机器: 0.1.4-alpha
+DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4 Pre1
+VER = loment_release.RELEASE                # 机器: 0.1.4-pre1
 
 #: 包里的工具 -> (入口源文件, 编译时的 CWD)。名字就是安装后的可执行名。
-#: CWD 那一格是给 **路径形式的 `use "..."`** 用的 —— 自举镜按 **CWD** 解析相对路径
-#: (参考实现按入口文件所在目录)。仓库其它工具全用名字形式 (`use bytes`), 那一套本来就是
-#: 相对 CWD 的搜索根, 所以它们一律写 "."。lompi 是唯一一个用路径形式 import 的。
+#: CWD 那一格是给 **路径形式的 `use "..."`** 用的 —— 它按「仓根 → 导入文件所在目录」解析,
+#: 两边实现同序 (2026-09-16 之前自举镜只按 CWD, 已修; 见 docs/158 §5)。仓库其它工具全用
+#: 名字形式 (`use bytes`), 那一套的搜索根是项目根/工具链, 与 CWD 无关, 所以它们一律写 "."。
+#: lompi 是唯一一个用路径形式 import 的。
 TOOLS: list[tuple[str, str, str]] = [
     ("loment-driver", "loment/selfhost/driver.lomt", "."),
     ("loment-lsp", "loment/tools/lsp.lomt", "."),
@@ -208,9 +209,18 @@ case "${1:-help}" in
         if cli=$(tool loment-cli); then exec "$cli" help; fi
         usage ;;
     *)
-        # New commands go into loment-cli (loment/tools/lomcli.lomt), NOT into this shell:
-        # there are two launchers (this one and loment.cmd) and anything written here has to
-        # be written twice and kept in sync. Forwarding keeps a single implementation.
+        # A USER command: `loment foo` -> `loment-foo` on PATH, exactly `git foo` -> `git-foo`.
+        # This is how software *written in Loment* registers a command: build it as
+        # `loment-foo`, put it on PATH, done - nothing to declare and no rebuild of Loment.
+        # The builtins above win, so a user command can NEVER shadow version/build/run/...
+        ucmd="${1:-}"
+        if [ -n "$ucmd" ] && command -v "loment-$ucmd" >/dev/null 2>&1; then
+            shift
+            exec "loment-$ucmd" "$@"
+        fi
+        # New OFFICIAL commands go into loment-cli (loment/tools/lomcli.lomt), NOT into this
+        # shell: there are two launchers (this one and loment.cmd) and anything written here has
+        # to be written twice and kept in sync. Forwarding keeps a single implementation.
         if cli=$(tool loment-cli); then exec "$cli" "$@"; fi
         usage >&2; exit 2 ;;
 esac
@@ -342,6 +352,21 @@ if not exist "%here%loment-cli.exe" goto usage
 exit /b %ERRORLEVEL%
 
 :forward
+rem A USER command: `loment foo a b` -> `loment-foo a b` on PATH, exactly `git foo` -> `git-foo`.
+rem This is how software *written in Loment* registers a command: build it as loment-foo.exe,
+rem put it on PATH, done. The builtins above win, so a user command can never shadow them.
+rem NOTE: the run must NOT sit inside a parenthesised block -- %ERRORLEVEL% there expands at
+rem parse time and would read the PREVIOUS value (the same trap the tool-failure note below
+rem describes). So: pick the path, leave the block, then run.
+set "uargs="
+for /f "tokens=1,*" %%A in ("%*") do set "uargs=%%B"
+set "ucmd="
+for /f "delims=" %%P in ('where "loment-%cmd%" 2^>nul') do if not defined ucmd set "ucmd=%%P"
+if not defined ucmd goto loment_forward_cli
+"%ucmd%" %uargs%
+exit /b %ERRORLEVEL%
+
+:loment_forward_cli
 if not exist "%here%loment-cli.exe" goto usage
 "%here%loment-cli.exe" %*
 exit /b %ERRORLEVEL%

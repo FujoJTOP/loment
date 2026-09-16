@@ -29,8 +29,13 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 2026-09-15 再升到 **0.1.4-alpha2.3**: CLI 命令面 (docs/169) —— `loment` 从 9 条命令扩到 38 条,
 # 命令前端本身就是 Loment 写的 (loment/tools/lomcli.lomt), 两个启动器各加一行转发。
 # tag 会另打 `v0.1.4-alpha2.3`。
-RELEASE = "0.1.4-alpha2.3"
-RELEASE_NAME = "0.1.4 Alpha2.3"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-16 升到 **0.1.4-pre1**: 语言的两处开口交给使用者 —— ①**后缀不再是语言的一部分**
+# (只有 `.lom` 是 L0, 别的后缀都是 L1 源; 项目用 `loment.conf` 的 `source_ext` 定自己的后缀),
+# ②**自定义 `loment` 命令** (`loment foo` -> PATH 上的 `loment-foo`, 像 `git foo`)。
+# 名字形式 `use <名字>` 也从"只认仓库四根"改成按层搜 (deps/ -> 自带 store -> 内置根)。
+# alpha 系列到此为止: 这两条是给**别人**用这个语言的口子, pre 之后不再改语言面。
+RELEASE = "0.1.4-pre1"
+RELEASE_NAME = "0.1.4 Pre1"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

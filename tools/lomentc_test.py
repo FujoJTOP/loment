@@ -1249,6 +1249,93 @@ def test_use_count_over_the_limit_is_an_error():
             raise AssertionError(f"{lomentc.MAX_USE + 1} 条 use 应当报错")
 
 
+# ---------------------------------------------------------------- 自定义后缀 (2026-09-16)
+# 后缀**不属于语言** (docs/143 §2.3): 名字形式找的是"哪个名字", 后缀是实现细节, 由项目自己
+# 那份 `loment.conf` 定。`use "x.foo"` 这种路径形式本来就自带后缀, 不受配置影响。
+
+@test
+def test_project_conf_sets_the_name_form_suffix():
+    """项目根那份 `loment.conf` 把名字形式的后缀从 `.lomt` 换成 `.foo`。
+
+    两半都要对: ① 名字形式 `use geom` 落到 `<项目根>/deps/geom/geom.foo`; ② 进了包以后,
+    包内的**路径形式** `use "area.foo"` 仍按被导入文件所在目录解析 —— 配置只管名字形式,
+    别把路径形式也一起改了 (那是两套规则, 混一起就没人能预期)。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        d = proj / "deps" / "geom"
+        d.mkdir(parents=True)
+        (proj / "loment.conf").write_bytes(
+            b'// \xe9\xa1\xb9\xe7\x9b\xae\xe9\x85\x8d\xe7\xbd\xae\n'
+            b'module conf\n\n'
+            b'pub fn source_ext() -> str {\n    return ".foo";\n}\n')
+        (d / "area.foo").write_bytes(
+            b"module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n")
+        (d / "geom.foo").write_bytes(
+            b'module geom\n\nuse "area.foo"\n\npub fn g_area(w: u32, h: u32) -> u32 {\n'
+            b"    return ar(w, h);\n}\n")
+        hi = proj / "hi.foo"
+        _entry(hi, "geom")
+        assert lomentc.source_ext_of(proj, None) == ".foo"
+        assert lomentc.resolve_name("geom", ROOT, proj, None, ".foo") == d / "geom.foo"
+        mod = lomentc.load(hi)
+        deps = lomentc.resolve_deps(mod, ROOT, proj, entry=hi)
+        assert [m.name for m in deps] == ["area", "geom"], [m.name for m in deps]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        assert ir and "@g_area" in ir, "自定义后缀的单元发不出 IR"
+
+
+@test
+def test_conf_is_optional_and_a_broken_one_falls_back():
+    """没配 / 配坏了 / 配了个不以 `.` 开头的 —— 一律**当没配**, 退回 `.lomt`。
+
+    配置文件也是源码, 它会被人改坏。改坏一个字母就把名字形式指到一堆奇怪的文件上, 比
+    "退回默认"糟得多: 前者是编译期一连串看不懂的错, 后者至少还编得过。
+
+    注意**不要求 `module` 头**: 与 `lompi.conf` 同一个形状 —— 那边也是一个词法器扫标签,
+    根本没有 parser 去要求文件头。另外注释里的同名字符串不该误命中 (词法器天然不会)。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        assert lomentc.source_ext_of(proj, None) == ".lomt", "没 loment.conf 就是默认"
+        assert lomentc.source_ext_of(None, None) == ".lomt"
+        for bad in (b'pub fn other() -> str { return ".foo"; }\n',
+                    b'pub fn source_ext() -> str { return ext; }\n',
+                    b'pub fn source_ext() -> str { return "foo"; }\n',
+                    b'pub fn source_ext() -> str { return ""; }\n',
+                    b'pub fn source_ext() -> str { return ".foo\n',
+                    b"fn broken( {\n"):
+            (proj / "loment.conf").write_bytes(bad)
+            assert lomentc.source_ext_of(proj, None) == ".lomt", bad
+        # 注释里出现的 `source_ext` + 字符串不算 —— 词法器扫, 注释进不了词法流
+        (proj / "loment.conf").write_bytes(
+            b'// source_ext ".bar"\nmodule conf\n\n'
+            b'pub fn source_ext() -> str { return ".foo"; }\n')
+        assert lomentc.source_ext_of(proj, None) == ".foo"
+        # 没有 `module` 头也认 —— 与 lompi.conf 同形 (它那边也没要求)
+        (proj / "loment.conf").write_bytes(b'pub fn source_ext() -> str { return ".foo"; }\n')
+        assert lomentc.source_ext_of(proj, None) == ".foo"
+
+
+@test
+def test_custom_suffix_still_reaches_the_toolchain_lomt():
+    """项目换成 `.foo` 之后, 工具链自带/内置根里的 `.lomt` 模块**照样找得到**。
+
+    兜底那条不是可选的: 使用者只该改**自己**的源码后缀 —— 仓库内置四根、以及装在工具链
+    旁边那份 store 全是 `.lomt`, 少了兜底, 换后缀等于把标准库整个弄丢。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        (proj / "loment.conf").write_bytes(
+            b'pub fn source_ext() -> str { return ".foo"; }\n')
+        assert lomentc._ext_chain(".foo") == (".foo", ".lomt")
+        assert lomentc._ext_chain(".lomt") == (".lomt",)
+        got = lomentc.resolve_name("mathutil", ROOT, proj, None, ".foo")
+        assert got == ROOT / "loment" / "examples" / "mathutil.lomt", got
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

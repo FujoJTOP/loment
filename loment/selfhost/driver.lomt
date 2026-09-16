@@ -40,6 +40,7 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [10304, 11328) 版本名: store 里列出的那个子目录 (NUL)
 //   [11328, 12352) 目录项缓冲 (getdents64)
 //   [12352, 13824) 子路径暂存 (<dir>/<entry>, 判是不是目录用)
+//   [13824, 14080) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
 const SCR_CAP: u32 = 16384;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
@@ -53,6 +54,8 @@ const TOOLDIR_OFF: u32 = 9280;   // 工具目录
 const VER_OFF: u32 = 10304;      // 版本名
 const DENT_OFF: u32 = 11328;     // 目录项缓冲
 const SUBP_OFF: u32 = 12352;     // 子路径暂存
+const EXT_OFF: u32 = 13824;      // 源后缀 (loment.conf)
+const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
 const DENT_CAP: u32 = 1024;      // 目录项缓冲上限 (PE 垫片一次只回一条记录)
 const SUBP_CAP: u32 = 1472;      // 子路径上限
@@ -398,7 +401,7 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
 
 /// `<名字>` 是否在 `<根>/deps/<名字>/<名字>.lomt` —— 项目本地的依赖 (lompi 落点)。
 /// 命中写进 tmp 并返回长度; 0 = 没这个目录。
-fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr) -> u32 {
+fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
     let d: u32 = 0;
     if rn > 0 {
         d = cat(tmp, d, root, rn);
@@ -408,14 +411,7 @@ fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr) -> u32 {
     d = cat(tmp, d, ptr_add(src, off), len);
     d = catl(tmp, d, "/");
     d = cat(tmp, d, ptr_add(src, off), len);
-    d = catl(tmp, d, ".lomt");
-    store8(tmp, d, 0 as u8);
-    let fd: i64 = open_ro(tmp, d, tmp);
-    if fd < 0 {
-        return 0;
-    }
-    syscall4(3, fd as u64, 0, 0);
-    return d;
+    return open_two(d, tmp, scr);
 }
 
 /// `<名字>` 是否在**工具链自带的库**里: `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`。
@@ -447,14 +443,7 @@ fn try_store(td: ptr, tn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr)
     d = cat(tmp, d, verd, cstr_len(verd));
     d = cat(tmp, d, str_ptr("/"), 1);
     d = cat(tmp, d, ptr_add(src, off), len);
-    d = catl(tmp, d, ".lomt");
-    store8(tmp, d, 0 as u8);
-    let fd: i64 = open_ro(tmp, d, tmp);
-    if fd < 0 {
-        return 0;
-    }
-    syscall4(3, fd as u64, 0, 0);
-    return d;
+    return open_two(d, tmp, scr);
 }
 
 /// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
@@ -470,7 +459,7 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
     let tmp: ptr = ptr_add(scr, NAMTMP_OFF);
     // 前面两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
     let r1: u32 = try_deps(ptr_add(scr, PROJ_OFF), cstr_len(ptr_add(scr, PROJ_OFF)),
-                           src, off, len, tmp);
+                           src, off, len, tmp, scr);
     if r1 > 0 {
         return cat(dst, 0, tmp, r1);
     }
@@ -499,22 +488,15 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
             d = d + 1;
             j = j + 1;
         }
-        store8(tmp, d, 46 as u8);   // ".lomt"
-        store8(tmp, d + 1, 108 as u8);
-        store8(tmp, d + 2, 111 as u8);
-        store8(tmp, d + 3, 109 as u8);
-        store8(tmp, d + 4, 116 as u8);
-        d = d + 5;
-        let fd: i64 = open_ro(tmp, d, scr);
-        if fd >= 0 {
-            syscall4(3, fd as u64, 0, 0);
+        let rl: u32 = open_two(d, tmp, scr);
+        if rl > 0 {
             if hits == 0 {
                 let q: u32 = 0;
-                while q < d {
+                while q < rl {
                     store8(dst, q, load8(tmp, q) as u8);
                     q = q + 1;
                 }
-                hit_len = d;
+                hit_len = rl;
             }
             hits = hits + 1;
         }
@@ -566,17 +548,120 @@ fn fix_rel(slot: ptr, sp: u32, sl: u32, path: ptr, n: u32, scr: ptr) -> u32 {
     return d;
 }
 
-fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
-    if sl < 7 {
+/// 在 `<tmp 里已拼好的 head><后缀>` 上试**两种**后缀: 先配置的那个 (scr+EXT_OFF),
+/// 再默认 `.lomt`。命中就把完整路径留在 tmp (NUL 结尾) 并返回长度; 0 = 都没有。
+///
+/// 为什么要试两种: 项目可以把自己的源后缀配成 `.foo`, 而**工具链自带的模块仍然是 `.lomt`**
+/// —— 名字形式既要找得到这个项目的库, 也要找得到自带的那些 (docs/143 的搜索层)。
+fn open_two(head: u32, tmp: ptr, scr: ptr) -> u32 {
+    let en: u32 = cstr_len(ptr_add(scr, EXT_OFF));
+    if en > 0 {
+        let d: u32 = cat(tmp, head, ptr_add(scr, EXT_OFF), en);
+        store8(tmp, d, 0 as u8);
+        let fd: i64 = open_ro(tmp, d, scr);
+        if fd >= 0 {
+            syscall4(3, fd as u64, 0, 0);
+            return d;
+        }
+    }
+    let d2: u32 = catl(tmp, head, ".lomt");
+    store8(tmp, d2, 0 as u8);
+    let fd2: i64 = open_ro(tmp, d2, scr);
+    if fd2 < 0 {
         return 0;
     }
-    let e: u32 = sp + sl - 1;   // 结尾的引号
-    if load8(src, e - 5) == 46 && load8(src, e - 4) == 108
-            && load8(src, e - 3) == 111 && load8(src, e - 2) == 109
-            && load8(src, e - 1) == 116 {
-        return 1;
+    syscall4(3, fd2 as u64, 0, 0);
+    return d2;
+}
+
+/// 从 `<dirp>/loment.conf` 读源后缀, 写进 dst (**不带引号**), 返回长度; 0 = 没配/读不出。
+///
+/// 配置就是**一份 Loment 源码** (与 `lompi.conf` / `pkg.lomp` 同一种形状), 只认一个标签:
+///
+///     pub fn source_ext() -> str { return ".foo"; }
+///
+/// 取 `source_ext` 之后**第一个字符串字面量** —— 用词法器扫, 所以注释里出现的同名字符串
+/// 不会误命中。`dirp` 长度 0 表示"当前目录"(项目自己放的那份优先)。读不出来就当没配。
+///
+/// 值必须以 `.` 开头, 否则也算没配: 写错一个字母就把名字形式指到一堆奇怪的文件上, 不如
+/// 退回默认那个 —— 配置文件会被人改坏, "编得过但改错了后缀"比"编不过"难查得多。
+fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -> u32 {
+    let d: u32 = 0;
+    if dl > 0 {
+        d = cat(scr, d, dirp, dl);
+        d = catl(scr, d, "/");
     }
-    return 0;
+    d = catl(scr, d, "loment.conf");
+    store8(scr, d, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let raw: u64 = read_all(fd as u64, buf, 65536);
+    syscall4(3, fd as u64, 0, 0);
+    if raw == 0 {
+        return 0;
+    }
+    let n: u32 = lex(buf, raw as u32, toks);
+    let found: u32 = 4294967295;
+    let i: u32 = 0;
+    while i < n && found == 4294967295 {
+        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "source_ext") == 1 {
+            found = i;
+        }
+        i = i + 1;
+    }
+    if found == 4294967295 {
+        return 0;
+    }
+    let s: u32 = 4294967295;
+    let j: u32 = found + 1;
+    while j < n && s == 4294967295 {
+        if load32(toks, j * 20) == 2 {      // 2 = 字符串
+            s = j;
+        }
+        j = j + 1;
+    }
+    if s == 4294967295 {
+        return 0;
+    }
+    let st: u32 = load32(toks, s * 20 + 4);
+    let sl: u32 = load32(toks, s * 20 + 8);   // 含两端的引号
+    if sl < 3 {
+        return 0;                             // 至少 `"."`
+    }
+    let q: u32 = 0;
+    let bad: u32 = 0;
+    while q < sl - 2 && q < EXT_CAP - 1 {
+        let ch: u8 = load8(buf, st + 1 + q) as u8;
+        if ch == 92 {
+            bad = 1;                          // 带转义的也拒 (见下)
+        }
+        store8(dst, q, ch);
+        q = q + 1;
+    }
+    store8(dst, q, 0 as u8);
+    // 不以 `.` 开头、或带转义的, 一律当没配。转义那条是对着参考实现钉的: 这里拷的是**原始
+    // 字节**(`\t` 两个字节), 参考实现的词法器给的却是**解码后**的值 —— 只在这一处会分叉,
+    // 而文件名后缀里本来就不该有转义, 两边一起拒掉最省事。
+    if q == 0 || load8(dst, 0) != 46 || bad == 1 {
+        return 0;
+    }
+    return q;
+}
+
+fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
+    // **L0 只有 `.lom` 一种后缀**, 别的任何后缀都算 L1 源 —— 后缀不是语言的一部分, 只是
+    // 习惯 (用户 2026-09-16: "Loment 也可以作为其他文件名后缀的诞生地")。别把这条改回
+    // "等于 .lomt 才算 L1": 那样 `use "x.foo"` 会被当成 L0 去找 .lom 而报"不存在"。
+    if sl >= 4 {
+        let e: u32 = sp + sl - 1;   // 结尾的引号
+        if load8(src, e - 4) == 46 && load8(src, e - 3) == 108
+                && load8(src, e - 2) == 111 && load8(src, e - 1) == 109 {
+            return 0;               // ".lom"
+        }
+    }
+    return 1;
 }
 
 /// 装载一个文件 (连同它的 `use`), 追加到 out 的第 off 字节起; 返回新的长度。
@@ -737,6 +822,18 @@ fn _start() -> u32 {
         return fail("fujoc-s: brk failed\n");
     }
     let toks: ptr = tokv as ptr;
+    // 源后缀 (名字形式 `use <名字>` 用它拼候选): **项目自己放的那份优先** (项目根 =
+    // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
+    // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
+    store8(scr, EXT_OFF, 0 as u8);
+    let _e0: u32 = cfg_source_ext(ptr_add(scr, PROJ_OFF),
+                                  cstr_len(ptr_add(scr, PROJ_OFF)),
+                                  ptr_add(scr, EXT_OFF), scr, unit, toks);
+    if _e0 == 0 {
+        let _e1: u32 = cfg_source_ext(ptr_add(scr, TOOLDIR_OFF),
+                                      cstr_len(ptr_add(scr, TOOLDIR_OFF)),
+                                      ptr_add(scr, EXT_OFF), scr, unit, toks);
+    }
     let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks);
     if len == 0 {
         return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");

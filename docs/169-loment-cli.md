@@ -1,6 +1,6 @@
 # 169 · Loment CLI：命令面与观感
 
-> 版本 `0.1.4-alpha2.3`（显示名 **Loment 0.1.4 Alpha2.3**）
+> 版本 `0.1.4-pre1`（显示名 **Loment 0.1.4 Pre1**）
 > · 实现 `loment/tools/lomcli.lomt`（**Loment 自己写的**）· 判据 `tools/loment_cli_test.py`
 > · 上游：`docs/148`（工具链）、`docs/162`（发行包）、`docs/159`（去 Python 自举）
 
@@ -94,6 +94,33 @@ UTF-8（`chcp 65001`）。
 **这条有判据守**：`test_every_command_outputs_pure_ascii` 逐条跑**每一条**命令，检查
 stdout+stderr 全是 ASCII —— 不是抽查，是全扫。加一个新命令而忘了这条，它会立刻红。
 
+## 3b. 自定义命令：`loment foo` → `loment-foo`
+
+**官方命令 38 条，但命令面不止 38 条。** 用户（或用户装的软件）可以在 `PATH` 上放一个叫
+`loment-<名字>` 的可执行文件，于是 `loment <名字> ...` 就能用 —— 与 `git` 的做法一样：
+
+```bash
+# PATH 上有 loment-git，就有了 `loment git`
+loment git status        # 转发给 loment-git，参数原样
+```
+
+规则（**两个启动器必须一致**，判据在 `loment_cli_test`）：
+
+| 情形 | 行为 |
+|---|---|
+| `loment <名字>` 且 `PATH` 上有 `loment-<名字>` | **原样转发**：`shift` 掉名字，后面的参数一个不动、退出码原样带出 |
+| `loment <名字>` 但 PATH 上没有 | 交回官方 CLI —— 那就是"未知命令"（红字 + 退出 2） |
+| `loment <官方命令>` | **永远走官方实现**，PATH 上有同名的 `loment-<官方命令>` 也顶不掉 |
+
+三条设计取舍，记下来免得下次有人"优化"掉：
+
+- **转发而非委托给 CLI**：官方 CLI 是一份**编译好的** Loment 程序，它只能看见自己那 38 条。
+  要"能长出新命令"就必须在**启动器**这一层做 —— 那是唯一看得见 `PATH` 的地方。
+- **官方优先**：否则装个 `loment-version` 就能把版本号换了，`doctor` 与判据全都失去意义。
+  这个顺序也让"注册自定义命令"永远不会破坏已有脚本。
+- **没有注册表**：约定就是**文件名**。没有配置文件、没有中心目录 —— 装了就生效，卸了就没了。
+  （与那条"配置是 Loment 源码"的口味一致：能用文件系统表达的不引入新格式。）
+
 ## 4. 实现要点
 
 - **只用 8 个跨平台 syscall**：`read` `write` `close` `brk` `exit` `getdents64` `openat`
@@ -133,7 +160,7 @@ stdout+stderr 全是 ASCII —— 不是抽查，是全扫。加一个新命令�
 9. **结尾空行不算一行**：文件以 `\n` 结尾时，行遍历会把最后那个空段也数成一行。
    按 `cat -n` 的惯例改为只在 `ls < n` 时收尾。
 
-## 6. 判据（28 条，`tools/loment_cli_test.py`，进门禁）
+## 6. 判据（32 条，`tools/loment_cli_test.py`，进门禁）
 
 | 组 | 判的 |
 |---|---|
@@ -153,7 +180,7 @@ stdout+stderr 全是 ASCII —— 不是抽查，是全扫。加一个新命令�
 ## 7. 复现
 
 ```bash
-python tools/loment_cli_test.py                     # 28 条判据 (本机原生跑生成的 PE)
+python tools/loment_cli_test.py                     # 32 条判据 (本机原生跑生成的 PE)
 python tools/loment_dist.py --emit                  # 四个产物; bin/loment-cli 从 lomcli.lomt 编出来
 loment help                                         # 装完之后看总览
 loment commands                                     # 拿命令名列表

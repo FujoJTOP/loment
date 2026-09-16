@@ -631,7 +631,7 @@ fn catalog(mem: ptr, fd: u64) {
     row(mem, fd, "types", "", "type table");
     row(mem, fd, "keywords", "", "keywords");
     row(mem, fd, "caps", "", "capability / guard");
-    row(mem, fd, "codes", "", "error code table E1-E19");
+    row(mem, fd, "codes", "", "error code table E1-E20");
     row(mem, fd, "explain", "CODE", "one error code explained");
     row(mem, fd, "cheat", "", "one-page cheat sheet");
     sec(mem, fd, "THIS INSTALL");
@@ -1241,6 +1241,7 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     codrow(mem, 1, "E17", "illegal `as` cast");
     codrow(mem, 1, "E18", "`use <name>` does not resolve - rename it, add the file, or use the path form");
     codrow(mem, 1, "E19", "parse error - fix that line as the `line:col` in the message says");
+    codrow(mem, 1, "E20", "more than 300 `use` in one file - split the facade");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "loment explain E4 for one of them in detail.");
@@ -1279,8 +1280,8 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let a: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
-    if code == 0 || code > 19 {
-        return err_usage(mem, "the code must be E1..E19");
+    if code == 0 || code > 20 {
+        return err_usage(mem, "the code must be E1..E20");
     }
     wstr(1, "\n  ");
     yellow(mem, 1);
@@ -1341,6 +1342,14 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
         wstr(1, "\n    (it must be `return <expr>;`).");
         wstr(1, "\n    Note: one parse error aborts the whole check, so later diagnostics never appear -");
         wstr(1, "\n    fix one thing at a time.");
+    }
+    else if code == 20 {
+        wstr(1, "\n  Too many `use` in one file (the limit is 300).");
+        wstr(1, "\n");
+        wstr(1, "\n    A facade that re-exports a whole library hits this. Split it into a few files");
+        wstr(1, "\n    that each re-export a group, then have the facade `use` those.");
+        wstr(1, "\n    The limit is per file, and it is loud on purpose: a silently dropped import");
+        wstr(1, "\n    shows up later as a bogus undefined function (E2) with no hint of the cause.");
     }
     else {
         wstr(1, "see the table in `loment codes` - this one belongs to one of the");

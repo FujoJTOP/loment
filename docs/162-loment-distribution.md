@@ -1,6 +1,6 @@
 # 162 · Loment 发行包：命令安装与安装包安装
 
-> 版本 `0.1.4-alpha2.3`（显示名 **Loment 0.1.4 Alpha2.3**）· 构建器 `tools/loment_dist.py`
+> 版本 `0.1.4-pre1`（显示名 **Loment 0.1.4 Pre1**）· 构建器 `tools/loment_dist.py`
 > · 只要**源码 + 编辑器工具**的那种包见 `docs/164-loment-source-kit.md`
 > · 判据 `tools/loment_dist_test.py`（进门禁；审计里是 C15）
 
@@ -32,7 +32,7 @@
 **包里还带一份 agent skill**（2026-09-15 加）：`share/loment/skill/SKILL.md` ——
 安装时同时写进 `~/.claude/skills/loment/`（用户级，任何工程都读得到；`--no-skill` /
 `-NoSkill` 可关，卸载会摘掉；`~/.claude` 不存在就只留在包里并打印怎么手动放）。
-它**自足**：内建函数表、语法、E1–E19 错误码、包内命令全在里面，不引用源码仓库路径 ——
+它**自足**：内建函数表、语法、E1–E20 错误码、包内命令全在里面，不引用源码仓库路径 ——
 目标是"装完 Loment，AI agent 读它就能写 Loment"。随包那份与仓库里的
 `.claude/skills/loment/SKILL.md` **逐字节相同**（判据在 `loment_dist_test`）。
 
@@ -63,9 +63,9 @@
 
 | 文件 | 装法 | 说明 |
 |---|---|---|
-| `loment-0.1.4-alpha2.3-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
-| `loment-0.1.4-alpha2.3-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
-| `loment-0.1.4-alpha2.3-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
+| `loment-0.1.4-pre1-linux-x64.tar.gz` | 解包 → `sh install.sh` | Linux / WSL；含 `install.sh` |
+| `loment-0.1.4-pre1-windows-x64.zip` | 解包 → `powershell -File install.ps1` | Windows；含 `install.ps1` / `install.cmd` |
+| `loment-0.1.4-pre1-windows-x64-setup.exe` | **双击** | 自解压安装包（Windows 自带 `iexpress` 做的） |
 | `SHA256SUMS` | — | 上面三件的 sha256 |
 
 **两个归档是确定性字节**：zip 固定时间戳（`1980-01-01`）+ 目录项排序 + unix 权限位，
@@ -81,11 +81,11 @@ tar.gz 的 `mtime=0` + 稳定 uid/gid/uname、gzip 头不带时间。同输入�
 | `bin/loment-lsp` | 语言服务（补全/跳转/诊断/`--check`），stdio 上的 LSP |
 | `bin/loment-fmt` | 格式化器（与 Python 版逐字节相同，docs/159） |
 | `bin/loment-doc` | API 文档生成器 |
-| `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`/`skill`；**其余命令转发给 `loment-cli`**） |
+| `bin/loment` | 启动器（`version`/`ir`/`check`/`build`/`run`/`fmt`/`doc`/`lsp`/`skill`；**其余命令先看 `PATH` 上有没有 `loment-<名字>`** —— 有就是用户注册的命令，原样转发；没有再交给 `loment-cli`。见 `docs/169` §3b） |
 | `bin/loment-cli` | **命令前端**（38 条命令：`help`/`codes`/`explain`/`syntax`/`cheat`/`stat`/`grep`/`ls`/`tree`/`new`/…，见 `docs/169`）。**用 Loment 自己写的** —— 命令面只写一份，两个启动器各转发一行 |
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，源码 `lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi`；详见 `docs/170` |
 | `share/loment/seed.ll` | 自举种子 —— 只用 clang 就能从它重建整套工具链 |
-| `share/loment/version` | `Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3)` + 提交号与提交日期 |
+| `share/loment/version` | `Loment 0.1.4 Pre1 (0.1.4-pre1)` + 提交号与提交日期 |
 | `share/loment/examples/user_hello.lomt` | 示例（用 syscall 打印） |
 | `SHA256SUMS` | **随包**校验和，安装脚本第一步就校它 |
 
@@ -96,6 +96,20 @@ clang(种子 selfhost_driver.ll) -> stage1
 stage1 <entry.lomt>            -> IR      (与参考实现逐字节相同, 见 docs/158)
 clang -nostdlib -static        -> ELF     (无 libc, _start 即入口)
 ```
+
+## 2b. 包不是封闭的：两个扩展点（0.1.4-pre1）
+
+装好的 Loment 是**长东西的底座**，不是一组固定文件 + 一组固定命令。两处开口都在**文件系统**
+上表达，没有注册表、没有新格式：
+
+| 想做的事 | 怎么做 | 规范 |
+|---|---|---|
+| 自己的源码后缀（`.foo` 而不是 `.lomt`） | 项目根放 `loment.conf`，`pub fn source_ext() -> str { return ".foo"; }` | `docs/143` §2.3 |
+| 自己的 `loment` 子命令 | 把可执行文件命名成 `loment-<名字>` 放进 `PATH`；`loment <名字> ...` 原样转发 | `docs/169` §3b |
+
+两条都不需要重装 Loment，也不需要工具链知道你的项目 —— 这也是为什么它们能由**第三方**用：
+`loment git` 里的 `git` 不是 Loment 官方命令，而是"某个用 Loment 写的软件注册了它"。
+官方命令（`version`/`build`/…）**优先**，所以注册自定义命令永远不会盖掉已有行为。
 
 ## 3. 安装语义
 

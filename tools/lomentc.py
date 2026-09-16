@@ -762,17 +762,21 @@ class Parser:
             if t.val == "use":
                 self.next()
                 # 两种写法并存:
-                #   use "loment/examples/bytes.lomt"   路径形式 (L0 布局只能是这一种)
-                #   use bytes                          名字形式 (只解析 .lomt, 见 NAME_ROOTS)
+                #   use "loment/examples/bytes.lomt"   路径形式
+                #   use bytes                          名字形式 (后缀见 resolve_name)
                 nxt = self.peek()
                 if nxt.kind == "ident":
                     mod.name_imports.append(self.next().val)
                 else:
-                    p = self.expect("string", None, "（.lom 或 .lomt 路径）").val
-                    if p.endswith(".lomt"):
-                        mod.imports.append(p)
-                    else:
+                    p = self.expect("string", None, "（.lom 或源文件路径）").val
+                    # **L0 只有 `.lom` 一种后缀**, 别的任何后缀都算 L1 源 —— 后缀不是
+                    # 语言的一部分, 只是习惯 (用户 2026-09-16: "Loment 也可以作为其他
+                    # 文件名后缀的诞生地")。别把这条改回"等于 .lomt 才算 L1": 那样
+                    # `use "x.foo"` 会被当成 L0 去找 .lom 而报"不存在"。
+                    if p.endswith(L0_EXT):
                         mod.uses.append(p)
+                    else:
+                        mod.imports.append(p)
             elif t.val == "capability":
                 mod.caps.append(self.parse_capability())
             elif t.val == "struct":
@@ -1962,6 +1966,14 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
 #: 于是不存在"这个名字算 L0 还是 L1"的歧义。顺序: 标准库在前, 后面三个覆盖仓库自身。
 #: 这四个根是**仓库自己的纪律** (名字不许重), 见 `resolve_name` 第 3 层。
 NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools")
+#: L0 布局的**唯一**后缀。**L1 没有专属后缀** —— 路径形式里"不是 .lom 就是 L1 模块",
+#: 所以 `use "x.foo"` 是合法的 L1 导入 (用户 2026-09-16 定)。名字形式找的文件后缀见
+#: `L1_EXT`, 那个是可以配的 (`loment.conf`)。
+L0_EXT = ".lom"
+#: 名字形式 `use <名字>` 找的文件后缀。默认 `.lomt`; 可由工具链旁边的 `loment.conf`
+#: 的 `source_ext()` 改写 (见 `source_ext_of`)。
+DEFAULT_L1_EXT = ".lomt"
+
 #: 项目本地的依赖目录 —— lompi `plan/install --into deps` 的落点:
 #: `<项目根>/deps/<名字>/<名字>.lomt`。项目根 = 入口文件所在目录 (docs/168 §4.1)。
 LOCAL_DEPS = "deps"
@@ -1976,8 +1988,64 @@ TOOLCHAIN_STORE = ("share", "lompi", "store")
 MAX_USE = 300
 
 
-def _store_pick(store: Path, name: str) -> Path | None:
-    """自带 store 里取 `<store>/<名字>/<版本>/<名字>.lomt`; 没有这个包返回 None。
+def _conf_ext_from_tokens(toks: list) -> str | None:
+    """从词法流里取 `source_ext` 之后**第一个字符串字面量** (去掉两端引号)。
+
+    用**词法器**而不是解析器, 与 `lompi` 读 `lompi.conf` / `pkg.lomp` 的做法一致 (它那里是
+    `lex_find_label`): 配置文件里常常是一堆注释加一行标签, 为它套一个完整 parser 不值得,
+    而且"注释里的同名字符串误命中"这件事词法器天然就不会犯。**自举镜用同一条规则**
+    (`driver.lomt:cfg_source_ext`), 两边必须一起改。
+    """
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val != "source_ext":
+            continue
+        for t2 in toks[i + 1:]:
+            if t2.kind == "string":
+                v = t2.val          # 这里的 `val` 已经去掉引号 (自举镜的 token 是**原始跨度**,
+                                    # 含引号, 它那边自己剥 —— 两边的差别只在这一层, 别互相抄)
+                if not v.startswith(".") or "\\" in v:
+                    return None     # 不以 `.` 开头 = 没配; 带转义的也拒 —— 后缀是文件名的一段,
+                                    # 不该有转义, 而"转义解不解"正是两个实现最容易分叉的地方
+                return v
+        return None      # 有标签但后面没有字符串 = 没配
+    return None
+
+
+def source_ext_of(proj: Path | None, tool_dir: Path | None) -> str:
+    """名字形式 `use <名字>` 找的文件后缀: **项目自己那份 `loment.conf` 优先**, 再工具链
+    旁边那份, 都没配就是 `DEFAULT_L1_EXT`（`.lomt`）。
+
+    配置就是**一份 Loment 源码** —— 与 `lompi.conf` / `pkg.lomp` 同一种形状, 只认一个标签:
+
+        pub fn source_ext() -> str { return ".foo"; }
+
+    读不出来（没文件 / 没这个标签 / 后面不是字符串）一律当没配 —— 配置文件坏掉不该让编译
+    炸。后缀必须以 `.` 开头, 否则也当没配: 写错一个字母就把名字形式指到一堆奇怪的文件上,
+    不如退回默认那个。
+    """
+    for d in (proj, tool_dir):
+        if d is None:
+            continue
+        conf = d / "loment.conf"
+        if not conf.is_file():
+            continue
+        try:
+            ext = _conf_ext_from_tokens(lomc.lex(conf.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001  (读不动 = 没配, 不是编译错误)
+            continue
+        if ext:
+            return ext
+    return DEFAULT_L1_EXT
+
+
+def _ext_chain(ext: str) -> tuple[str, ...]:
+    """候选后缀, 按优先级。配了自定义后缀就**再兜一个默认 `.lomt`** —— 项目把自己的源
+    改成 `.foo` 之后，工具链自带的那些模块仍然是 `.lomt`，名字形式得两个都找得到。"""
+    return (ext,) if ext == DEFAULT_L1_EXT else (ext, DEFAULT_L1_EXT)
+
+
+def _store_pick(store: Path, name: str, ext: str) -> Path | None:
+    """自带 store 里取 `<store>/<名字>/<版本>/<名字><后缀>`; 没有这个包返回 None。
 
     版本那一层**只允许一个**: 编译器不做版本选择 (docs/168 §4.2 —— 多版本是"物化"那层
     解决的, 编译器完全不需要知道版本存在)。有多个就明说并指向 `deps/`, 不猜。
@@ -1991,42 +2059,54 @@ def _store_pick(store: Path, name: str) -> Path | None:
     if len(vers) > 1:
         raise LomError(1, 1, f"自带的库里 {name} 有 {len(vers)} 个版本 ({', '.join(vers)})"
                              f" —— 编译器不做版本选择, 要指定版本就用 deps/{name}/")
-    return pkg / vers[0] / f"{name}.lomt"
+    return pkg / vers[0] / f"{name}{ext}"
 
 
 def resolve_name(name: str, root: Path, proj: Path | None = None,
-                 tool_dir: Path | None = None) -> Path:
+                 tool_dir: Path | None = None, ext: str = DEFAULT_L1_EXT) -> Path:
     """`use <名字>` -> 真实文件。**按层搜, 先命中先用** (像 PYTHONPATH):
 
-      1. `<项目根>/deps/<名字>/<名字>.lomt`  —— 项目本地 (lompi materialize 的落点)
-      2. `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`  —— 随包自带
-      3. 内置四根 `<仓根>/<根>/<名字>.lomt`  —— **这一层命中必须唯一**
+      1. `<项目根>/deps/<名字>/<名字><后缀>`  —— 项目本地 (lompi materialize 的落点)
+      2. `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>`  —— 随包自带
+      3. 内置四根 `<仓根>/<根>/<名字><后缀>`  —— **这一层命中必须唯一**
+
+    后缀来自 `loment.conf`（`source_ext_of`），默认 `.lomt`；每层都按 `_ext_chain` 的顺序
+    试（自定义后缀优先，再兜默认），所以项目换后缀不会把工具链自带的模块弄丢。
 
     唯一性只管第 3 层, 而且"找不到"要四层全空才报。这样: 项目本地有 `deps/std`、仓库里
     也有 `lib/std` 时不会假报歧义 (前两层先命中就停), 而仓库自己的四根仍保留"名字不许
     重"那条纪律 —— 它抓的是**作者写错**, 不是使用者选错。
     """
+    exts = _ext_chain(ext)
     if proj is not None:
         d = proj / LOCAL_DEPS / name
         if d.is_dir():
-            f = d / f"{name}.lomt"
-            if not f.exists():
-                raise LomError(1, 1, f"依赖 {name} 里没有同名模块 {name}.lomt —— "
-                                     f"`use <名字>` 指的是**包内与包同名的那个模块**")
-            return f
+            for e in exts:
+                if (d / f"{name}{e}").exists():
+                    return d / f"{name}{e}"
+            raise LomError(1, 1, f"依赖 {name} 里没有同名模块 {name}{ext} —— "
+                                 f"`use <名字>` 指的是**包内与包同名的那个模块**")
     if tool_dir is not None:
-        f = _store_pick(tool_dir.parent.joinpath(*TOOLCHAIN_STORE), name)
-        if f is not None:
-            if not f.exists():
-                raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}.lomt: {f}")
-            return f
-    hits = [root / rel / f"{name}.lomt" for rel in NAME_ROOTS
-            if (root / rel / f"{name}.lomt").exists()]
+        store = tool_dir.parent.joinpath(*TOOLCHAIN_STORE)
+        for e in exts:
+            f = _store_pick(store, name, e)
+            if f is not None:
+                if not f.exists():
+                    raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}{e}: {f}")
+                return f
+    hits = [root / rel / f"{name}{e}" for rel in NAME_ROOTS for e in exts
+            if (root / rel / f"{name}{e}").exists()]
+    # 同一个根里 `.foo` 与 `.lomt` 都在时**只算一次命中** —— 兜底那条不该把"唯一性"顶成
+    # 假歧义 (那是"这份源码该用哪个后缀"的问题, 跟"两个根里都有这个名字"是两回事)。
+    uniq: dict[Path, Path] = {}
+    for h in hits:
+        uniq.setdefault(h.parent, h)
+    hits = sorted(uniq.values())
     if not hits:
         where = (f"项目本地 {proj / LOCAL_DEPS}、工具链自带的库、以及内置根 "
                  f"{', '.join(NAME_ROOTS)}" if proj is not None
                  else f"内置根 {', '.join(NAME_ROOTS)}")
-        raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}.lomt")
+        raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}{ext}")
     if len(hits) > 1:
         rel = ", ".join(str(h.relative_to(root)).replace("\\", "/") for h in hits)
         raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
@@ -2045,6 +2125,8 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None)
     stack: set[Path] = set()
     proj = Path(entry).resolve().parent if entry is not None else base
     tool_dir = Path(__file__).resolve().parent
+    # 名字形式找什么后缀: 项目自己那份 loment.conf 优先, 再工具链旁边那份, 默认 .lomt
+    ext = source_ext_of(proj, tool_dir)
     if entry is not None:
         rp = Path(entry).resolve()
         seen.add(rp)
@@ -2056,7 +2138,7 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None)
             raise LomError(1, 1, f"模块 {m.name} 的 use 有 {n_use} 条, 超过上限 "
                                  f"{MAX_USE} —— 门面拆小, 别把整库塞进一个文件")
         # 名字形式先落到绝对路径, 之后与路径形式走同一条流水线 (去重/循环/先序)
-        paths = list(m.imports) + [str(resolve_name(n, root, proj, tool_dir))
+        paths = list(m.imports) + [str(resolve_name(n, root, proj, tool_dir, ext))
                                    for n in m.name_imports]
         for imp in paths:
             p = Path(imp)

@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E20 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -23,8 +23,8 @@ description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研
 loment version
 ```
 
-拿到 `Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3), commit <短号>` 这类输出。**以它的 commit 为准**：
-不同 checkout 能力不同（本文件描述 0.1.4-alpha2.3 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2`）。
+拿到 `Loment 0.1.4 Pre1 (0.1.4-pre1), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-pre1 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2.3`）。
 
 **命令面一共 38 条，敲 `loment help` 看全部**（分区 + 对齐 + 上色），`loment help <命令>` 看单条。
 最常用的这些：
@@ -48,7 +48,7 @@ loment version
 | `loment syntax` | 语法速查表 |
 | `loment builtins` | 内建函数表（全部，没有别的） |
 | `loment types` / `keywords` / `caps` | 类型表 / 关键字 / 能力域 |
-| `loment codes` / `loment explain E4` | 错误码表 E1–E19 / 单条详解 |
+| `loment codes` / `loment explain E4` | 错误码表 E1–E20 / 单条详解 |
 | `loment new NAME` | 生成一个能直接 `loment run` 的骨架 |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | 读源码（行数、函数签名、搜索、sha256、带行号打印） |
 | `loment ls` / `tree` / `examples` / `example tour` | 看目录与示例 |
@@ -258,7 +258,7 @@ fn _start() {
 | 构造 | 写法 |
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
-| 导入 | **两种写法，后面都不带分号**：`use 名字`（如 `use bytes`，按 `loment/lib` → `examples` → `selfhost` → `tools` 找 `名字.lomt`）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。**写库**时 `<包>/deps/<名字>/` 优先（见 §8）。写成 `use x;` 会被解析期拒绝（§6.13） |
+| 导入 | **两种写法，后面都不带分号**：`use 名字`（**按层找，先命中先用**：① 项目根 `<项目>/deps/<名字>/<名字><后缀>` ② 工具链自带 `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>` ③ 内置四根 `loment/lib` → `examples` → `selfhost` → `tools`，**只有第 ③ 层要求名字唯一**）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。`<后缀>` 默认 `.lomt`，项目可以换成自己的（§7）。单文件最多 **300 条** use。写成 `use x;` 会被解析期拒绝（§6.13） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`）；**形参最多 10 个** |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
 | 常量 | `const NAME: u32 = 3` |
@@ -342,6 +342,7 @@ E2 @13 line 4: 1
 | E17 | `as` 转换非法 |
 | E18 | **`use <名字>` 解析不出来**（找不到，或命中多处）—— 改名字/补文件，或改用路径形式 `use "...lomt"` |
 | E19 | **语法错误（解析期）** —— 按消息给的 `行:列` 改那一行的写法 |
+| E20 | **一个文件的 `use` 超过 300 条** —— 门面拆小，别把整库塞进一个文件 |
 
 **最常见的**：`E2` 十有八九是**漏写类型标注**（`let x = 1;` 不合法，要 `let x: u32 = 1;`）
 或用了未定义的函数名；`E3` 是调用实参个数对不上；`E19` 见 §6.1/§6.3。
@@ -408,7 +409,7 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
     一串偏移量，只能一路把数字写死（`loment/tools/lompkg.lomt` 的开头就是这么写的）。
 
 12. **没有字符串常量**：`pub const NAME: str = "x";` 是**语法错**。要一个字符串标签就写成
-    `pub fn name() -> str { return "x"; }` —— `.lomp` 包清单就是这么写的（§8）。
+    `pub fn name() -> str { return "x"; }` —— `.lomp` 包清单就是这么写的（§9）。
 
 13. **`use` 后面不带分号**：`use mathutil;` 报 `顶层只允许 use/capability/fn，得到 ';'`；
     两种写法（`use 名字` / `use "路径.lomt"`）都不带。
@@ -430,7 +431,53 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
     后面再跟一个 `len`"，报的是 `期望 :，得到 'm'` 这种**指向别处**的语法错。
     本地变量直接 `let x: T = ...;`，重新赋值不需要任何修饰。
 
-## 7. 拿不到源码仓库时怎么办
+## 7. 两个开口：自己的后缀、自己的 `loment` 命令
+
+这两件事让 Loment 变成一个**能长别的东西的底座**，而不是只有一种文件、一组命令的语言。
+
+### 7.1 自定义源码后缀
+
+**后缀不属于语言** —— 语法里只有 `.lom` 是特殊的（L0 接口契约）。别的后缀统统当 L1 源码，
+写 `.lomt` 只是习惯。要让项目用自己的后缀，在**项目根**放一份 `loment.conf`（和 `lompi.conf`
+同一个形状：一个词法器扫标签，不需要 `module` 头、不需要整份文件合法）：
+
+```rust
+// loment.conf
+module conf
+
+pub fn source_ext() -> str {
+    return ".foo";
+}
+```
+
+之后 `use geom` 会去找 `deps/geom/geom.foo`（路径形式本来就不受影响，`use "area.foo"` 照旧）。
+三条边界：
+
+- **只管名字形式**。`use "area.foo"` 这种带路径的自己带后缀，配置管不着。
+- **默认后缀仍然兜底**：配成 `.foo` 之后，`loment/lib` 这些自带模块（还是 `.lomt`）照样找得到。
+- **读不出来就当没配**：没这个文件 / 没 `source_ext` / 值不以 `.` 开头 / 值里带转义 —— 一律退回
+  `.lomt`。配置文件会被人改坏，改坏时"退回默认"比"编出一串看不懂的错"好。
+
+工具链旁边那份（`<工具目录>/loment.conf`）是同一个键的**全局默认**，项目自己那份优先。
+
+### 7.2 自定义 `loment` 命令
+
+像 `git`：`loment foo ...` 先看 `PATH` 上有没有 `loment-foo`，有就**原样转发**（`shift` 掉名字，
+后面的参数一个不动、退出码原样带出来）；没有才交回官方 CLI（那就是"未知命令"）。所以：
+
+```bash
+# PATH 上放一个 loment-git，你就有了 `loment git ...`
+loment git status      # -> loment-git status
+```
+
+两条边界：
+
+- **官方命令优先**。`loment version` / `loment build` 这些永远走官方实现，PATH 上放一个同名
+  的 `loment-version` 顶不掉它。
+- **注册方是软件，不是用户配置**。这是一个**文件名约定**（可执行文件叫 `loment-<名字>`），
+  没有注册表、没有配置文件 —— 装了就生效，卸了就没了。
+
+## 8. 拿不到源码仓库时怎么办
 
 - **抄现成程序**：包里 `share/loment/examples/` 有 `tour.lomt`（就是 §1 这份）和
   `user_hello.lomt`。更多示例在源码仓库的 `loment/examples/` —— 没有仓库就用下面的办法。
@@ -443,7 +490,7 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
   并往 Codex 的 `~/.codex/AGENTS.md` 写一段**带标记的指针**，同时设 `LOMENT_SKILL`
   环境变量指向包内那份。正本只有一份 —— 别把它复制到别处去改。
 
-## 8. 下面这些路径**只在源码仓库里有**（没仓库就别去找）
+## 9. 下面这些路径**只在源码仓库里有**（没仓库就别去找）
 
 仓库 = FujoOS 的 Loment 线工作树（`loment/`、`lom/`、`tools/loment*.py`、`docs/14?–16?-loment-*.md`）。
 有仓库时额外能用的：

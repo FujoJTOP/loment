@@ -1,6 +1,6 @@
 # 170 · lompi 随 Loment 一起发行
 
-> 版本 `0.1.4-alpha2.3` · lompi `0.1.0`（完全稳定）· 实现 `loment/tools/lomcli.lomt` 之外
+> 版本 `0.1.4-pre1` · lompi `0.1.0`（完全稳定）· 实现 `loment/tools/lomcli.lomt` 之外
 > · 判据 `tools/loment_lompi_test.py` · 同步 `tools/lompi_sync.py`
 > · 边界见 `docs/169 §2`（`loment` 的命令面里**不出现** lompi）
 

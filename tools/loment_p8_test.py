@@ -1326,6 +1326,49 @@ def test_m85_driver_gate_on_probe_cases():
         assert rc4 != 0 and "超过上限" in err4, \
             f"{nlim} 条 use 没被拒: rc={rc4} err={err4[-300:]!r}"
         print(f"      use 超过 {lomentc.MAX_USE} 条: 驱动器报错并退出非零")
+        # ---- 自定义后缀 (2026-09-16, 见 docs/143 §2.3): `loment.conf` 把名字形式的后缀
+        # 从 `.lomt` 换成 `.foo`。**判据是两边逐字节一致** —— 这条路上有三处各自独立实现
+        # 的东西 (读配置的扫描器、两种后缀的候选顺序、后缀到扩展名的拼接), 只对一边测等于
+        # 只测了一半: 自举镜多试一个后缀、参考实现少试一个, 都是"装得少一点"的静默错误。
+        cust = Path(td) / "cust"
+        (cust / "deps" / "geom").mkdir(parents=True)
+        (cust / "loment.conf").write_text(
+            '// 项目配置: 源码后缀换成 .foo\nmodule conf\n\n'
+            'pub fn source_ext() -> str {\n    return ".foo";\n}\n',
+            encoding="utf-8", newline="\n")
+        (cust / "deps" / "geom" / "area.foo").write_text(
+            "module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n",
+            encoding="utf-8", newline="\n")
+        (cust / "deps" / "geom" / "geom.foo").write_text(
+            "module geom\n\nuse \"area.foo\"\n\npub fn g_area(w: u32, h: u32) -> u32 {\n"
+            "    return ar(w, h);\n}\n", encoding="utf-8", newline="\n")
+        c_hi = cust / "hi.foo"
+        c_hi.write_text("module hi\n\nuse geom\n\nfn main() -> u32 {\n"
+                        "    return g_area(3 as u32, 4 as u32);\n}\n",
+                        encoding="utf-8", newline="\n")
+        rc5, got5, err5 = _run_driver_raw(elf, _wsl_path(c_hi), td, "g_cust")
+        assert rc5 == 0, f"自定义后缀的工程没编过: rc={rc5} err={err5[-400:]!r}"
+        cmod = lomentc.load(c_hi)
+        assert lomentc.source_ext_of(cust, None) == ".foo", "参考实现没读出 loment.conf"
+        cdeps = lomentc.resolve_deps(cmod, ROOT, cust, entry=c_hi)
+        want5 = lomentc.emit_llvm(cmod, ROOT, cdeps)
+        assert "@g_area" in got5, got5[:200]
+        if got5 != want5:
+            k = next((i for i in range(min(len(got5), len(want5))) if got5[i] != want5[i]),
+                     min(len(got5), len(want5)))
+            raise AssertionError(f"自定义后缀的单元两个实现不一致 @{k}: "
+                                 f"驱动 {got5[max(0,k-60):k+40]!r} != 参考 {want5[max(0,k-60):k+40]!r}")
+        print("      自定义后缀 (.foo): 名字形式 + 包内路径形式, 驱动与参考逐字节一致")
+        # 配坏的后缀 (不以 `.` 开头) 两个实现都要**当没配** —— 否则"改了配置但发现没生效"
+        # 这件事只有一边看得见。这里只有 `geom.foo`, 后缀被忽略 => 找不到 => 必须报错。
+        (cust / "loment.conf").write_text(
+            'pub fn source_ext() -> str { return "foo"; }\n',
+            encoding="utf-8", newline="\n")
+        rc6, _o6, err6 = _run_driver_raw(elf, _wsl_path(c_hi), td, "g_badcfg")
+        assert rc6 != 0 and "名字导入" in err6, \
+            f"不以 `.` 开头的后缀没被忽略: rc={rc6} err={err6[-300:]!r}"
+        assert lomentc.source_ext_of(cust, None) == ".lomt", "参考实现没忽略配坏的后缀"
+        print("      配坏的后缀 (缺前导 `.`): 驱动与参考都当没配")
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:

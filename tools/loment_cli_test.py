@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -65,7 +66,7 @@ def _build() -> Path:
     exe.write_bytes(raw)
     exe.chmod(0o755)
     (pkg / "share" / "loment" / "version").write_text(
-        "Loment 0.1.4 Alpha2.3 (0.1.4-alpha2.3), commit 0123456\nbuild 2026-09-15\n",
+        "Loment 0.1.4 Pre1 (0.1.4-pre1), commit 0123456\nbuild 2026-09-15\n",
         encoding="utf-8", newline="\n")
     (pkg / "share" / "loment" / "examples" / "tour.lomt").write_text(
         "module tour\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
@@ -385,7 +386,7 @@ def test_new_refuses_to_overwrite():
 def test_version_reads_share_version():
     rc, out, _ = _run(["version"])
     assert rc == 0
-    assert out.startswith("Loment 0.1.4 Alpha2.3"), out
+    assert out.startswith("Loment 0.1.4 Pre1"), out
     assert "commit 0123456" in out
 
 
@@ -443,7 +444,7 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
     rc, _, err = _run(["explain", "E99"] + _no_color())
-    assert rc == 2 and "E1..E19" in err, err[:120]
+    assert rc == 2 and "E1..E20" in err, err[:120]
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -510,6 +511,91 @@ def test_launcher_forwards_unknown_to_cli():
                       ("launcher.cmd", loment_dist.LAUNCHER_CMD)):
         bad = [(i, c) for i, c in enumerate(txt) if ord(c) > 127]
         assert not bad, f"{name} 里有非 ASCII 字符: {bad[:3]}"
+
+
+# ---------------------------------------------------------------- 用户自定义命令 (git 模型)
+
+@test
+def test_user_command_on_path_is_run():
+    """`loment foo` -> PATH 上的 `loment-foo`（就是 `git foo` -> `git-foo`）。
+
+    这是"**用 Loment 写的软件注册一条命令**"的唯一机制: 把程序编成 `loment-foo`
+    放上 PATH 就完了 —— 不需要声明、不需要重建 Loment。所以它必须**真的**能跑, 而且
+    **不能把自己的名字当参数传下去**（`loment foo a b` 要变成 `loment-foo a b`）。
+    这里跑真的 bash 启动器 + 桩 loment-cli, 断言三件事: 命中用户命令、没命中仍转发、
+    内置命令不被顶掉。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        t = Path(td)
+        pf = t / "pf"
+        (pf / "bin").mkdir(parents=True)
+        (pf / "share" / "loment").mkdir(parents=True)
+        (pf / "share" / "loment" / "version").write_bytes(b"FAKE VERSION\n")
+        cli = pf / "bin" / "loment-cli"
+        cli.write_bytes(b'#!/bin/sh\necho "OFFICIAL $@"\n')
+        lom = pf / "bin" / "loment"
+        lom.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("utf-8"))
+        up = t / "userbin"
+        up.mkdir()
+        user = up / "loment-foo"
+        user.write_bytes(b'#!/bin/sh\necho "USER $@"\n')
+        for p in (cli, lom, user):
+            p.chmod(0o755)
+
+        bash = shutil.which("bash")
+        if not bash:
+            print("         (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+            return
+        def shp(p: Path) -> str:
+            """bash 认的路径: Windows 盘符转成 /c/...（Linux 上原样）。"""
+            s = str(p).replace("\\", "/")
+            return f"/{s[0].lower()}{s[2:]}" if len(s) > 2 and s[1] == ":" else s
+
+        env = dict(os.environ)
+        # **前置**到原 PATH 上: 换成只有这两个目录, bash 自己就找不到 dirname/cat 了
+        env["PATH"] = f"{shp(pf / 'bin')}:{shp(up)}:{env.get('PATH', '')}"
+
+        def run(*args: str) -> str:
+            r = subprocess.run([bash, shp(lom), *args], cwd=str(t), env=env,
+                               capture_output=True, text=True, timeout=60)
+            return ((r.stdout or "") + (r.stderr or "")).strip()
+
+        got = run("foo", "a", "b")
+        assert "USER a b" in got, f"`loment foo a b` 没跑到用户在 PATH 上放的那个: {got!r}"
+        assert "foo" not in got.split("USER")[1][:4], \
+            f"用户命令不该收到自己的名字 (`git foo` -> `git-foo`, 不是 `git-foo foo`): {got!r}"
+        got = run("nosuchthing")
+        assert "OFFICIAL" in got, f"没有对应的用户命令时应当转发给 loment-cli: {got!r}"
+        got = run("version")
+        assert "FAKE VERSION" in got, f"内置命令被 PATH 上的同名文件顶掉了: {got!r}"
+
+
+@test
+def test_user_command_lookup_in_both_launchers():
+    """两个启动器都要有这条查找, 且在**内置判断之后、转发之前**。
+
+    cmd 侧只做静态断言: 它的端到端由 `loment_dist_test` 装完包真跑 `loment.cmd` 覆盖
+    （这里没法凭空造一个 `loment-cli.exe` 桩）。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    assert 'command -v "loment-$ucmd"' in sh, "bash 启动器没有查 PATH 上的 loment-<名>"
+    assert sh.index("loment-$ucmd") < sh.index('exec "$cli" "$@"'), \
+        "用户命令的查找必须在转发给 loment-cli **之前**"
+    assert 'exec "loment-$ucmd" "$@"' in sh, \
+        "bash 启动器没把命令名从参数里摘掉（应先 shift 再 exec）"
+
+    assert 'where "loment-%cmd%"' in cmd, "cmd 启动器没有查 PATH 上的 loment-<名>"
+    assert cmd.index('where "loment-%cmd%"') < cmd.index(":loment_forward_cli"), \
+        "用户命令的查找必须在转发给 loment-cli **之前**"
+    # 运行时**不能**被括号块包住: 块里的 %ERRORLEVEL% 在解析期就展开了, 读到的是上一个
+    # 值 —— 仓库里那条"工具失败别用 if errorlevel"的注释记的就是同一个坑。
+    assert re.search(r'\n"%ucmd%" %uargs%\n', cmd), \
+        "cmd 启动器把用户命令的调用写进了括号块/缩进了 —— 退出码会读错"
 
 
 def main() -> int:
