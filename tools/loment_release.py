@@ -42,6 +42,8 @@ GLOBS = [
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
+    # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
+    "tools/loment_publish.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
