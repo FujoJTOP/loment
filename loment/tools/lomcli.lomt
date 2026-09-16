@@ -593,70 +593,63 @@ fn banner(mem: ptr, fd: u64, ver: ptr) {
     wstr(fd, "\n");
     wstr(fd, "\n  ");
     gray(mem, fd);
-    wstr(fd, "用法  loment <command> [参数]");
+    wstr(fd, "usage  loment <command> [args]");
     colr(mem, fd);
     wstr(fd, "\n");
 }
 
 fn catalog(mem: ptr, fd: u64) {
-    sec(mem, fd, "编译与运行");
-    row(mem, fd, "ir", "FILE", "打印 LLVM IR 到 stdout");
-    row(mem, fd, "check", "FILE", "只检查, 丢弃 IR (诊断走 stderr)");
-    row(mem, fd, "build", "FILE [-o NAME]", "编译并链接成可执行文件");
-    row(mem, fd, "run", "FILE", "编译、链接并运行");
-    row(mem, fd, "version", "", "打印版本行");
-    row(mem, fd, "lsp", "", "语言服务 (stdio 上的 LSP)");
-
-    sec(mem, fd, "源码工具");
-    row(mem, fd, "fmt", "FILE", "格式化 (打印结果, 不落盘)");
-    row(mem, fd, "doc", "FILE", "从 /// 注释生成 API 文档");
-    row(mem, fd, "skill", "[--print]", "AI agent 指南 (路径 / 全文)");
-
-    sec(mem, fd, "读源码");
-    row(mem, fd, "cat", "FILE", "带行号打印");
-    row(mem, fd, "stat", "FILE", "行数 / 字节数 / 最长行");
-    row(mem, fd, "count", "FILE", "函数 / 结构体 / 枚举 计数");
-    row(mem, fd, "fns", "FILE", "列出函数签名");
-    row(mem, fd, "tokens", "FILE", "词法直方图");
-    row(mem, fd, "grep", "PAT FILE", "按子串搜索, 带行号");
-    row(mem, fd, "todo", "FILE", "列出 TODO / FIXME / XXX");
-    row(mem, fd, "hash", "FILE", "sha256 内容哈希");
-
-    sec(mem, fd, "工程");
-    row(mem, fd, "ls", "[DIR]", "列目录 (目录带 /)");
-    row(mem, fd, "tree", "[DIR]", "递归目录树");
-    row(mem, fd, "new", "NAME", "生成 hello 骨架");
-    row(mem, fd, "examples", "", "列出包内示例");
-    row(mem, fd, "example", "NAME", "打印一个示例");
-
-    sec(mem, fd, "语言速查");
-    row(mem, fd, "syntax", "", "语法速查表");
-    row(mem, fd, "builtins", "", "内建函数表");
-    row(mem, fd, "types", "", "类型表");
-    row(mem, fd, "keywords", "", "关键字");
-    row(mem, fd, "caps", "", "能力域 capability / guard");
-    row(mem, fd, "codes", "", "错误码表 E1–E19");
-    row(mem, fd, "explain", "CODE", "单个错误码详解");
-    row(mem, fd, "cheat", "", "一页速查");
-
-    sec(mem, fd, "本机");
-    row(mem, fd, "tools", "", "包内工具清单与是否就位");
-    row(mem, fd, "where", "[TOOL]", "工具绝对路径");
-    row(mem, fd, "env", "", "安装前缀与环境");
-    row(mem, fd, "doctor", "", "体检: 组件是否齐全可跑");
-    row(mem, fd, "about", "", "构建信息");
-    row(mem, fd, "color", "[on|off]", "彩色开关");
-    row(mem, fd, "commands", "", "所有命令名 (给补全用)");
-    row(mem, fd, "help", "[COMMAND]", "这页 / 单条命令");
-
+    sec(mem, fd, "COMPILE & RUN");
+    row(mem, fd, "ir", "FILE", "print LLVM IR to stdout");
+    row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
+    row(mem, fd, "build", "FILE [-o NAME]", "compile and link to an executable");
+    row(mem, fd, "run", "FILE", "compile, link and run");
+    row(mem, fd, "version", "", "print the version line");
+    row(mem, fd, "lsp", "", "language server over stdio");
+    sec(mem, fd, "SOURCE TOOLS");
+    row(mem, fd, "fmt", "FILE", "format (prints the result, does not touch the file)");
+    row(mem, fd, "doc", "FILE", "API docs from /// comments");
+    row(mem, fd, "skill", "[--print]", "the AI-agent guide (its path, or the whole text)");
+    sec(mem, fd, "READ SOURCE");
+    row(mem, fd, "cat", "FILE", "print with line numbers");
+    row(mem, fd, "stat", "FILE", "lines / bytes / longest line");
+    row(mem, fd, "count", "FILE", "fn / struct / enum counts");
+    row(mem, fd, "fns", "FILE", "list function signatures");
+    row(mem, fd, "tokens", "FILE", "token histogram");
+    row(mem, fd, "grep", "PAT FILE", "substring search, with line numbers");
+    row(mem, fd, "todo", "FILE", "list TODO / FIXME / XXX");
+    row(mem, fd, "hash", "FILE", "sha256 content hash");
+    sec(mem, fd, "PROJECT");
+    row(mem, fd, "ls", "[DIR]", "list a directory (directories get a trailing /)");
+    row(mem, fd, "tree", "[DIR]", "recursive directory tree");
+    row(mem, fd, "new", "NAME", "write a hello skeleton");
+    row(mem, fd, "examples", "", "list the examples shipped in this package");
+    row(mem, fd, "example", "NAME", "print one example");
+    sec(mem, fd, "LANGUAGE REFERENCE");
+    row(mem, fd, "syntax", "", "syntax cheat-sheet");
+    row(mem, fd, "builtins", "", "builtin function table");
+    row(mem, fd, "types", "", "type table");
+    row(mem, fd, "keywords", "", "keywords");
+    row(mem, fd, "caps", "", "capability / guard");
+    row(mem, fd, "codes", "", "error code table E1-E19");
+    row(mem, fd, "explain", "CODE", "one error code explained");
+    row(mem, fd, "cheat", "", "one-page cheat sheet");
+    sec(mem, fd, "THIS INSTALL");
+    row(mem, fd, "tools", "", "tools in this package: present or missing");
+    row(mem, fd, "where", "[TOOL]", "absolute path of a tool");
+    row(mem, fd, "env", "", "install prefix and environment");
+    row(mem, fd, "doctor", "", "health check: is everything in place");
+    row(mem, fd, "about", "", "build info");
+    row(mem, fd, "color", "[on|off]", "ANSI colour switch");
+    row(mem, fd, "commands", "", "every command name (for completion)");
+    row(mem, fd, "help", "[COMMAND]", "this page, or one command");
     wstr(fd, "\n  ");
     gray(mem, fd);
-    wstr(fd, "loment help <command> 看单条 · loment commands 拿命令名列表");
+    wstr(fd, "loment help <command> for one command  .  loment commands for the names");
     colr(mem, fd);
     wstr(fd, "\n  ");
     gray(mem, fd);
-    // 表格里只写命令名 (干净), 这里给**可直接复制**的整行调用 —— 包括 agent 的第一动作
-    wstr(fd, "例  loment run hi.lomt · loment skill --print · loment explain E4");
+    wstr(fd, "e.g.  loment run hi.lomt  .  loment skill --print  .  loment explain E4");
     colr(mem, fd);
     wstr(fd, "\n\n");
 }
@@ -690,77 +683,76 @@ fn usage_line(mem: ptr, fd: u64, name: str, args: str, desc: str) {
 
 fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
     if eq_cstr(cmd, n, "ir") {
-        usage_line(mem, fd, "ir", "FILE", "编译到 LLVM IR, 打到 stdout。不链接, 不落盘。");
+        usage_line(mem, fd, "ir", "FILE", "Compile to LLVM IR and print it to stdout. No linking, nothing written.");
         return 0;
     }
     if eq_cstr(cmd, n, "check") {
-        usage_line(mem, fd, "check", "FILE", "只检查。诊断走 stderr, IR 丢弃 —— 所以不产出任何文件。\n  退出码非 0 = 有诊断。");
+        usage_line(mem, fd, "check", "FILE", "Check only. Diagnostics go to stderr, the IR is discarded, so no file is\n  produced. Non-zero exit code = there were diagnostics.");
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME]", "编译并链接成可执行文件。\n  -o 收的是**不带扩展名**的名字: -o hi 出 hi.exe (Windows) / hi (Linux)。");
+        usage_line(mem, fd, "build", "FILE [-o NAME]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {
-        usage_line(mem, fd, "run", "FILE", "编译、链接并运行。退出码就是被运行程序的退出码。");
+        usage_line(mem, fd, "run", "FILE", "Compile, link and run. The exit code is the program's own exit code.");
         return 0;
     }
     if eq_cstr(cmd, n, "fmt") {
-        usage_line(mem, fd, "fmt", "FILE", "格式化并把结果打到 stdout (不改原文件)。");
+        usage_line(mem, fd, "fmt", "FILE", "Format and print the result to stdout (the file itself is untouched).");
         return 0;
     }
     if eq_cstr(cmd, n, "grep") {
-        usage_line(mem, fd, "grep", "PAT FILE", "在 FILE 里按**子串**(不是正则)找 PAT, 命中打 `行号: 那一行`。\n  找不到 -> 退出码 1。");
+        usage_line(mem, fd, "grep", "PAT FILE", "Find PAT in FILE as a SUBSTRING (not a regex) and print `line: text`.\n  No match -> exit code 1.");
         return 0;
     }
     if eq_cstr(cmd, n, "new") {
-        usage_line(mem, fd, "new", "NAME", "在 NAME.lomt 写一个能直接 `loment run` 的 hello 骨架。\n  已存在则不覆盖, 退出码 1。");
+        usage_line(mem, fd, "new", "NAME", "Write a hello skeleton to NAME.lomt that runs with `loment run`.\n  Refuses to overwrite an existing file (exit code 1).");
         return 0;
     }
     if eq_cstr(cmd, n, "ls") {
-        usage_line(mem, fd, "ls", "[DIR]", "列目录。目录带 `/` 且上色, 文件不带。默认当前目录。");
+        usage_line(mem, fd, "ls", "[DIR]", "List a directory. Directories are coloured and get a trailing `/`.\n  Defaults to the current directory.");
         return 0;
     }
     if eq_cstr(cmd, n, "tree") {
-        usage_line(mem, fd, "tree", "[DIR]", "递归列目录树, 缩进表示层级。");
+        usage_line(mem, fd, "tree", "[DIR]", "Recursive directory tree; indentation shows depth.");
         return 0;
     }
     if eq_cstr(cmd, n, "color") {
-        usage_line(mem, fd, "color", "[on|off]", "彩色开关。无参数时打印当前策略。\n  默认 on —— 管道输出若不要转义序列, 用 `color off` 或加 --no-color。");
+        usage_line(mem, fd, "color", "[on|off]", "ANSI colour switch. With no argument it prints the current setting.\n  Default is on - for piped output use `color off` or --no-color.");
         return 0;
     }
     if eq_cstr(cmd, n, "explain") {
-        usage_line(mem, fd, "explain", "CODE", "给一个错误码 (E4 / e4 / 4 都行), 打它的含义与改法。");
+        usage_line(mem, fd, "explain", "CODE", "Give it an error code (E4, e4 or 4 all work) and it prints what it means\n  and what to change.");
         return 0;
     }
     if eq_cstr(cmd, n, "skill") {
-        usage_line(mem, fd, "skill", "[--print]", "AI agent 指南。无参数打路径, --print 打全文。");
+        usage_line(mem, fd, "skill", "[--print]", "The AI-agent guide. No argument prints its path, --print prints the text.");
         return 0;
     }
     if eq_cstr(cmd, n, "help") {
-        usage_line(mem, fd, "help", "[COMMAND]", "无参数打总览; 带命令名打单条。");
+        usage_line(mem, fd, "help", "[COMMAND]", "No argument prints the overview; with a command name it prints that one.");
         return 0;
     }
     if eq_cstr(cmd, n, "commands") {
-        usage_line(mem, fd, "commands", "", "每行一个命令名 (给补全脚本用)。");
+        usage_line(mem, fd, "commands", "", "One command name per line (for completion scripts).");
         return 0;
     }
     if eq_cstr(cmd, n, "doctor") {
-        usage_line(mem, fd, "doctor", "", "检查包内组件是否齐全、共享文件是否读得到。\n  退出码 0 = 全绿; 1 = 有缺失。");
+        usage_line(mem, fd, "doctor", "", "Check that every component in the package is present and that the shared\n  files are readable. Exit code 0 = all green, 1 = something is missing.");
         return 0;
     }
     if eq_cstr(cmd, n, "hash") {
-        usage_line(mem, fd, "hash", "FILE", "打印文件的 sha256 十六进制 (只打哈希, 不带文件名 —— 好喂给 sha256sum -c)。");
+        usage_line(mem, fd, "hash", "FILE", "Print the file's sha256 hex digest (the digest alone, no file name - so it\n  can be fed to `sha256sum -c`).");
         return 0;
     }
     if eq_cstr(cmd, n, "example") {
-        usage_line(mem, fd, "example", "NAME", "打印包内示例 NAME.lomt 的全文。");
+        usage_line(mem, fd, "example", "NAME", "Print the whole of the bundled example NAME.lomt.");
         return 0;
     }
-    // 其余命令: 表里有一行, 就把那一行单独打出来
     wstr(fd, "\n  ");
     gray(mem, fd);
-    wstr(fd, "没有更详细的手册页: ");
+    wstr(fd, "no manual page for this one: ");
     colr(mem, fd);
     bold(mem, fd);
     wbytes(fd, cmd, n);
@@ -768,7 +760,7 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
     wstr(fd, "\n");
     wstr(fd, "\n  ");
     gray(mem, fd);
-    wstr(fd, "试 loment commands 看全部, 或 loment help 看总览。");
+    wstr(fd, "try `loment commands` for every name, or `loment help` for the overview.");
     colr(mem, fd);
     wstr(fd, "\n\n");
     return 0;
@@ -825,7 +817,7 @@ fn err_usage(mem: ptr, msg: str) -> u32 {
     wstr(2, msg);
     wstr(2, "\n");
     gray(mem, 2);
-    wstr(2, "  试 loment help ");
+    wstr(2, "  try `loment help ");
     colr(mem, 2);
     return 2;
 }
@@ -858,7 +850,7 @@ fn read_arg(mem: ptr, ab: ptr, k: u32) -> u32 {
     arg_copy(mem, ab, k, path);
     let n: u32 = slurp(path, ptr_add(mem, M_FILE), FILE_CAP);
     if n == NOTFOUND {
-        err_path(mem, "打不开 ", path);
+        err_path(mem, "cannot open ", path);
         return NOTFOUND;
     }
     return n;
@@ -884,8 +876,7 @@ fn kvb(mem: ptr, fd: u64, k: str, v: ptr) {
     bold(mem, fd);
     wbuf(fd, v);
     colr(mem, fd);
-    wstr(fd, "
-");
+    wstr(fd, "\n");
 }
 
 fn kvs(mem: ptr, fd: u64, k: str, v: str) {
@@ -948,12 +939,13 @@ fn do_about(mem: ptr, ab: ptr, argc: u32) -> u32 {
     bindir_from(mem, ab, bindir);
     version_text(mem, bindir, ver);
     title(mem, 1, "Loment");
-    kvb(mem, 1, "版本", ver);
-    kvs(mem, 1, "入口", "loment-cli (Loment 自举产物)");
-    kvb(mem, 1, "安装于", bindir);
+    kvb(mem, 1, "version", ver);
+    kvs(mem, 1, "entry", "loment-cli (a Loment self-hosted binary)");
+    kvb(mem, 1, "installed", bindir);
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "这个 CLI 自己是 Loment 写的: 源码 loment/tools/lomcli.lomt, 只用 8 个跨平台 syscall。");
+    wstr(1, "This CLI is itself written in Loment: source loment/tools/lomcli.lomt,");
+    wstr(1, "\n  and it uses only 8 cross-platform syscalls.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -987,7 +979,7 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let p: ptr = ptr_add(mem, M_P2);
     let stb: ptr = ptr_add(mem, M_STB);
     bindir_from(mem, ab, bindir);
-    title(mem, 1, "包内工具");
+    title(mem, 1, "Tools in this package");
     let i: u32 = 0;
     let ok: u32 = 0;
     while i < 6 {
@@ -995,22 +987,22 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
         if tool_path(bindir, nm, p, stb) {
             wstr(1, "  ");
             green(mem, 1);
-            wstr(1, "✓ ");
+            wstr(1, "[ok] ");
             colr(mem, 1);
             wpad(1, nm, 18);
             gray(mem, 1);
-            wstr(1, "就位");
+            wstr(1, "present");
             colr(mem, 1);
             wstr(1, "\n");
             ok = ok + 1;
         } else {
             wstr(1, "  ");
             red(mem, 1);
-            wstr(1, "✗ ");
+            wstr(1, "[--] ");
             colr(mem, 1);
             wpad(1, nm, 18);
             gray(mem, 1);
-            wstr(1, "缺");
+            wstr(1, "MISSING");
             colr(mem, 1);
             wstr(1, "\n");
         }
@@ -1018,13 +1010,13 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "共 ");
+    wstr(1, "present: ");
     colr(mem, 1);
     bold(mem, 1);
     wdec(mem, 1, ok);
     colr(mem, 1);
     gray(mem, 1);
-    wstr(1, " / 6 就位");
+    wstr(1, " / 6");
     colr(mem, 1);
     wstr(1, "\n\n");
     if ok < 6 {
@@ -1058,6 +1050,8 @@ fn do_where(mem: ptr, ab: ptr, argc: u32) -> u32 {
         nm = "loment-lomelf";
     } else if eq_cstr(name, strlen_n(name), "cli") {
         nm = "loment-cli";
+    } else if eq_cstr(name, strlen_n(name), "lompi") {
+        nm = "lompi";
     } else {
         return err2_unknown(mem, name);
     }
@@ -1066,17 +1060,16 @@ fn do_where(mem: ptr, ab: ptr, argc: u32) -> u32 {
         wstr(1, "\n");
         return 0;
     }
-    // 报错要报**期望路径**, 不能报 tool_path 失败后清空的那个缓冲
     let q: ptr = ptr_add(mem, M_P1);
     let bn: u32 = strlen_n(bindir);
     put_n(q, bindir, bn);
     put(ptr_add(q, bn), nm);
-    err_path(mem, "没找到 ", q);
+    err_path(mem, "not found: ", q);
     return 1;
 }
 
 fn err2_unknown(mem: ptr, name: ptr) -> u32 {
-    err_path(mem, "不认识的工具 ", name);
+    err_path(mem, "no such tool: ", name);
     gray(mem, 2);
     wstr(2, "  driver / lsp / fmt / doc / lomelf / cli");
     colr(mem, 2);
@@ -1091,11 +1084,11 @@ fn do_env(mem: ptr, ab: ptr, argc: u32) -> u32 {
     bindir_from(mem, ab, bindir);
     share_dir(mem, ab, share);
     version_text(mem, bindir, ver);
-    title(mem, 1, "环境");
-    kvb(mem, 1, "bin 目录", bindir);
-    kvb(mem, 1, "share 目录", share);
-    kvb(mem, 1, "版本", ver);
-    kvs(mem, 1, "路径来自", "argv[0] —— CLI 自定位, 不读环境变量");
+    title(mem, 1, "Environment");
+    kvb(mem, 1, "bin dir", bindir);
+    kvb(mem, 1, "share dir", share);
+    kvb(mem, 1, "version", ver);
+    kvs(mem, 1, "paths from", "argv[0] - the CLI locates itself, it reads no env vars");
     return 0;
 }
 
@@ -1105,7 +1098,7 @@ fn do_doctor(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let stb: ptr = ptr_add(mem, M_STB);
     let ver: ptr = ptr_add(mem, M_P1);
     bindir_from(mem, ab, bindir);
-    title(mem, 1, "体检");
+    title(mem, 1, "Health check");
     let bad: u32 = 0;
     let i: u32 = 0;
     while i < 6 {
@@ -1113,47 +1106,47 @@ fn do_doctor(mem: ptr, ab: ptr, argc: u32) -> u32 {
         if tool_path(bindir, nm, p, stb) {
             wstr(1, "  ");
             green(mem, 1);
-            wstr(1, "ok   ");
+            wstr(1, "ok       ");
             colr(mem, 1);
             wstr(1, nm);
             wstr(1, "\n");
         } else {
             wstr(1, "  ");
             red(mem, 1);
-            wstr(1, "缺失 ");
+            wstr(1, "MISSING  ");
             colr(mem, 1);
             wstr(1, nm);
             wstr(1, "  ");
             gray(mem, 1);
-            wstr(1, "→ loment build/run 会不可用");
+            wstr(1, "-> loment build/run will not work");
             colr(mem, 1);
             wstr(1, "\n");
             bad = bad + 1;
         }
         i = i + 1;
     }
-    // share/version
     version_text(mem, bindir, ver);
     if eq_cstr(ver, strlen_n(ver), "unknown") {
         wstr(1, "  ");
         red(mem, 1);
-        wstr(1, "缺失 ");
+        wstr(1, "MISSING  ");
         colr(mem, 1);
-        wstr(1, "share/loment/version\n");
+        wstr(1, "share/loment/version");
+        wstr(1, "\n");
         bad = bad + 1;
     } else {
         wstr(1, "  ");
         green(mem, 1);
-        wstr(1, "ok   ");
+        wstr(1, "ok       ");
         colr(mem, 1);
-        wstr(1, "版本 ");
+        wstr(1, "version ");
         wbuf(1, ver);
         wstr(1, "\n");
     }
     wstr(1, "\n");
     if bad == 0 {
         green(mem, 1);
-        wstr(1, "  全绿");
+        wstr(1, "  all green");
         colr(mem, 1);
         wstr(1, "\n\n");
         return 0;
@@ -1161,7 +1154,7 @@ fn do_doctor(mem: ptr, ab: ptr, argc: u32) -> u32 {
     red(mem, 1);
     wstr(1, "  ");
     wdec(mem, 1, bad);
-    wstr(1, " 项缺失 —— 重装或把对应文件放回 bin/");
+    wstr(1, " missing - reinstall, or put the file back under bin/");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 1;
@@ -1177,12 +1170,12 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
         } else if eq_cstr(a, n, "off") {
             store32(mem, M_CELL + C_COLOR, 0);
         } else {
-            return err_usage(mem, "color 只认 on / off");
+            return err_usage(mem, "color takes on or off");
         }
     }
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "彩色 ");
+    wstr(1, "colour ");
     colr(mem, 1);
     if color_on(mem) {
         green(mem, 1);
@@ -1194,7 +1187,7 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
     colr(mem, 1);
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "默认 on。管道里不要转义序列时加 --no-color 或先跑 loment color off。");
+    wstr(1, "Default is on. For clean piped output use --no-color, or `loment color off` first.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1218,39 +1211,39 @@ fn termrow(mem: ptr, fd: u64, term: str, desc: str) {
     wpadx(fd, term, 10);
     colr(mem, fd);
     wstr(fd, desc);
-    wstr(fd, "
-");
+    wstr(fd, "\n");
 }
 
 fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "Loment 错误码");
+    title(mem, 1, "Loment error codes");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "码按「你该做什么」分, 不按措辞分。编译器打的是 E2 @13 line 4: x —— E2=E002, @13 是第 13 个 token。");
+    wstr(1, "Codes are grouped by WHAT TO DO, not by wording. The compiler prints e.g.");
+    wstr(1, "\n    `E2 @13 line 4: x`  -  E2 is E002, @13 is the 13th token.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    codrow(mem, 1, "E1", "类型对不上 (含 return / 载荷 / 内建实参)");
-    codrow(mem, 1, "E2", "有东西没声明 —— 十有八九是漏写类型标注, 或函数名拼错");
-    codrow(mem, 1, "E3", "实参个数不对");
-    codrow(mem, 1, "E4", "能力域问题 (未声明 / 越界 / 重复)");
-    codrow(mem, 1, "E5", "用了 excluded 声明出界的空间");
-    codrow(mem, 1, "E6", "值已被移动");
-    codrow(mem, 1, "E7", "借用冲突 (可变借用与借用并存 / 可变借用两次)");
-    codrow(mem, 1, "E8", "match / 枚举 (不穷尽、模式重复、载荷绑定不对)");
-    codrow(mem, 1, "E9", "命名与基类型冲突 / 空 struct / 空 enum");
-    codrow(mem, 1, "E10", "? 用在了不是 Result/Option 的地方");
-    codrow(mem, 1, "E11", "切片可变性 (只读切片不能写、形参要 mut)");
-    codrow(mem, 1, "E12", "悬垂引用");
-    codrow(mem, 1, "E13", "重复定义 / 重名");
-    codrow(mem, 1, "E14", "赋值目标不是左值");
-    codrow(mem, 1, "E15", "字段与下标 (无此字段、缺字段、重复初始化…)");
-    codrow(mem, 1, "E16", "数组字面量 / 长度与声明不符");
-    codrow(mem, 1, "E17", "as 转换非法");
-    codrow(mem, 1, "E18", "use <名字> 解析不出来 —— 改名字/补文件, 或改用路径形式");
-    codrow(mem, 1, "E19", "语法错误 (解析期) —— 按消息给的 行:列 改那一行");
+    codrow(mem, 1, "E1", "type mismatch (return / payload / builtin argument)");
+    codrow(mem, 1, "E2", "something is not declared - usually a missing type annotation or a misspelt name");
+    codrow(mem, 1, "E3", "wrong number of arguments");
+    codrow(mem, 1, "E4", "capability domain problem (undeclared / out of range / duplicate)");
+    codrow(mem, 1, "E5", "used space that an `excluded` declaration put out of bounds");
+    codrow(mem, 1, "E6", "value has been moved");
+    codrow(mem, 1, "E7", "borrow conflict (mutable borrow next to a borrow / two mutable borrows)");
+    codrow(mem, 1, "E8", "match / enum (not exhaustive, duplicate pattern, bad payload binding)");
+    codrow(mem, 1, "E9", "name clashes with a base type / empty struct / empty enum");
+    codrow(mem, 1, "E10", "`?` used where there is no Result or Option");
+    codrow(mem, 1, "E11", "slice mutability (cannot write a read-only slice; the parameter needs `mut`)");
+    codrow(mem, 1, "E12", "dangling reference");
+    codrow(mem, 1, "E13", "duplicate definition / duplicate name");
+    codrow(mem, 1, "E14", "assignment target is not an lvalue");
+    codrow(mem, 1, "E15", "field or index (no such field, missing field, duplicate init, field on a non-struct)");
+    codrow(mem, 1, "E16", "array literal / length does not match the declaration");
+    codrow(mem, 1, "E17", "illegal `as` cast");
+    codrow(mem, 1, "E18", "`use <name>` does not resolve - rename it, add the file, or use the path form");
+    codrow(mem, 1, "E19", "parse error - fix that line as the `line:col` in the message says");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "loment explain E4 看单条的详细改法。");
+    wstr(1, "loment explain E4 for one of them in detail.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1281,13 +1274,13 @@ fn parse_code(p: ptr, n: u32) -> u32 {
 
 fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "explain 需要一个错误码, 如 E4");
+        return err_usage(mem, "explain takes an error code, e.g. E4");
     }
     let a: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
     if code == 0 || code > 19 {
-        return err_usage(mem, "错误码得是 E1..E19");
+        return err_usage(mem, "the code must be E1..E19");
     }
     wstr(1, "\n  ");
     yellow(mem, 1);
@@ -1296,27 +1289,66 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     colr(mem, 1);
     wstr(1, "\n\n  ");
     if code == 1 {
-        wstr(1, "类型对不上。\n\n  常见: return 的值与声明不符; 枚举载荷类型不对; 内建函数实参类型不对。\n  改法: 看 IR 或对照函数签名; 转换要显式写 `as`。");
-    } else if code == 2 {
-        wstr(1, "有东西没声明。\n\n  最常见的三件事:\n    1. `let x = 1;` —— 语言没有类型推断, 要写 `let x: u32 = 1;`\n    2. 函数名拼错, 或忘了 `pub` (跨模块调用必须 pub)\n    3. 先用了后定义 —— 模块内要求先定义后使用\n  注意: 泛型函数实参定不出 T 时也报 E2, 那条消息会误导。");
-    } else if code == 3 {
-        wstr(1, "实参个数不对。\n\n  改法: 数一遍形参与实参; 形参最多 10 个。");
-    } else if code == 4 {
-        wstr(1, "能力域问题。\n\n  `capability c : disk[0..4]` 声明域, `guard c(i);` 用它。\n  字面量越界是编译期错误; 非字面量是运行期检查。\n  改法: 看域范围 [lo..hi] 是否含这个下标。");
-    } else if code == 8 {
-        wstr(1, "match / 枚举问题。\n\n  三种常见:\n    1. 臂体写成了表达式 —— 必须是块: `E::A => { return 0; }`\n    2. 泛型枚举要写单态化后的名字: `Result_i64_u32::Ok(v)`\n    3. 没穷尽, 也没写 `_` 臂");
-    } else if code == 18 {
-        wstr(1, "use 解析不出来。\n\n  两种写法: `use 名字` 或 `use \"路径.lomt\"`, 都**不带分号**。\n  改法: 确认文件在 loment/lib、examples、selfhost 或 tools 下; 自己目录里的伴生文件用路径形式。");
-    } else if code == 19 {
-        wstr(1, "语法错误 (解析期)。\n\n  消息给的是 行:列, 直接去那一行改。\n  两个最常见: `use x;` 多了分号; `return;` 没有值 (要 `return <expr>;`)。\n  注意: 一个解析错会中止整个检查, 后面的诊断都出不来 —— 一次只改一处。");
-    } else {
-        wstr(1, "见 loment codes 表:这一条属于「按你该做什么」分类的");
-        wstr(1, "  ");
-        wstr(1, "一类。");
+        wstr(1, "\n  Type mismatch.");
+        wstr(1, "\n");
+        wstr(1, "\n    Common cases: the value returned does not match the declaration; an enum payload");
+        wstr(1, "\n    has the wrong type; a builtin got an argument of the wrong type.");
+        wstr(1, "\n    Fix: check the signature; conversions must be written explicitly with `as`.");
+    }
+    else if code == 2 {
+        wstr(1, "\n  Something is not declared.");
+        wstr(1, "\n");
+        wstr(1, "\n    The three most common:");
+        wstr(1, "\n      1. `let x = 1;` - there is no type inference, write `let x: u32 = 1;`");
+        wstr(1, "\n      2. a misspelt function name, or a missing `pub` (cross-module needs pub)");
+        wstr(1, "\n      3. used before defined - inside a module, define before use");
+        wstr(1, "\n    Note: a generic fn whose T cannot be inferred also reports E2, and that message");
+        wstr(1, "\n    is misleading.");
+    }
+    else if code == 3 {
+        wstr(1, "\n  Wrong number of arguments.");
+        wstr(1, "\n");
+        wstr(1, "\n    Fix: count the parameters and the arguments; there are at most 10 parameters.");
+    }
+    else if code == 4 {
+        wstr(1, "\n  Capability domain problem.");
+        wstr(1, "\n");
+        wstr(1, "\n    `capability c : disk[0..4]` declares the domain, `guard c(i);` uses it.");
+        wstr(1, "\n    A literal out of range is a compile-time error; anything else is checked at run time.");
+        wstr(1, "\n    Fix: check whether [lo..hi] contains that index.");
+    }
+    else if code == 8 {
+        wstr(1, "\n  match / enum problem.");
+        wstr(1, "\n");
+        wstr(1, "\n    Three common cases:");
+        wstr(1, "\n      1. the arm body was written as an expression - it must be a BLOCK:");
+        wstr(1, "\n         `E::A => { return 0; }`");
+        wstr(1, "\n      2. a generic enum needs the monomorphised name: `Result_i64_u32::Ok(v)`");
+        wstr(1, "\n      3. not exhaustive, and no `_` arm");
+    }
+    else if code == 18 {
+        wstr(1, "\n  `use` does not resolve.");
+        wstr(1, "\n");
+        wstr(1, "\n    Two forms: `use name` or `use \"path.lomt\"` - neither takes a semicolon.");
+        wstr(1, "\n    Fix: make sure the file is under loment/lib, examples, selfhost or tools;");
+        wstr(1, "\n    a sibling file in your own directory needs the path form.");
+    }
+    else if code == 19 {
+        wstr(1, "\n  Parse error.");
+        wstr(1, "\n");
+        wstr(1, "\n    The message gives `line:col`; go and fix that line.");
+        wstr(1, "\n    The two most common: a stray semicolon after `use x;`, and a valueless `return;`");
+        wstr(1, "\n    (it must be `return <expr>;`).");
+        wstr(1, "\n    Note: one parse error aborts the whole check, so later diagnostics never appear -");
+        wstr(1, "\n    fix one thing at a time.");
+    }
+    else {
+        wstr(1, "see the table in `loment codes` - this one belongs to one of the");
+        wstr(1, "  categories listed there.");
     }
     wstr(1, "\n\n  ");
     gray(mem, 1);
-    wstr(1, "完整表: loment codes   语法: loment syntax   指南: loment skill --print");
+    wstr(1, "full table: loment codes   .   syntax: loment syntax   .   guide: loment skill --print");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1325,167 +1357,157 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
 // ---------------------------------------------------------------- 语言速查
 
 fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "Loment 语法速查");
+    title(mem, 1, "Loment syntax cheat-sheet");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "表面是 Rust 的严格子集, 只多加了能力域 (capability + guard)。");
+    wstr(1, "Surface is a strict subset of Rust plus one extra layer: capability domains.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    termrow(mem, 1, "模块", "首行 `module <name>` (无分号)");
-    termrow(mem, 1, "导入", "`use 名字` / `use \"路径.lomt\"` —— 都不带分号");
-    termrow(mem, 1, "函数", "`fn f(a: u32, b: str) -> u32 { ... }`, 无返回不写 ->, 形参 ≤ 10");
-    termrow(mem, 1, "导出", "跨模块可见加 pub");
-    termrow(mem, 1, "常量", "`const NAME: u32 = 3;` —— 初值只能是整数字面量");
-    termrow(mem, 1, "变量", "`let x: u32 = e;` —— 类型标注必写, 没有类型推断");
-    termrow(mem, 1, "控制流", "if / else if / else / while / for i in lo..hi");
-    termrow(mem, 1, "返回", "`return <expr>;` —— 必须有值, 没有裸 return;");
-    termrow(mem, 1, "结构体", "`struct S { a: u32 }`, 字面量 `S { a: 1 }`, 取字段 `s.a`");
-    termrow(mem, 1, "枚举", "`enum E { A, B(u32) }`, 构造 `E::B(3)`");
-    termrow(mem, 1, "match", "臂体是**块**不是表达式; 要穷尽或写 `_`");
-    termrow(mem, 1, "数组", "`[u8; 16]` / 字面量 `[1, 2, 3]` / 下标 xs[0] 可读写");
-    termrow(mem, 1, "切片", "参数 `[T]` / `mut [T]`, 传 `&xs` / `&mut xs`, `slice_len(s)`");
-    termrow(mem, 1, "泛型", "`fn max_of<T>(a: T, b: T) -> T`, 编译期单态化");
-    termrow(mem, 1, "trait", "`trait M { fn m(self) -> u32; }` + `impl M for S`, 静态派发");
-    termrow(mem, 1, "类型", "u8..u64 i8..i64 bool ptr str、struct 名、[T; N]、[T]、mut [T]");
-    termrow(mem, 1, "转换", "`x as u64` —— 整型/指针互转都要显式写");
-    termrow(mem, 1, "字符串", "\"...\", 转义只有 \\n \\t \\\" \\\\ —— **没有 \\x 转义**");
-    termrow(mem, 1, "注释", "// 与 /* */, /// 是文档注释 (loment doc 抽它)");
-    termrow(mem, 1, "入口", "freestanding 叫 `_start`, 不接参数; 退出用 syscall4(60, ...)");
+    termrow(mem, 1, "module", "first line `module <name>` (no semicolon)");
+    termrow(mem, 1, "import", "`use name` / `use \"path.lomt\"` - neither takes a semicolon");
+    termrow(mem, 1, "fn", "`fn f(a: u32, b: str) -> u32 { ... }`, no `->` when nothing is returned, <= 10 params");
+    termrow(mem, 1, "pub", "add `pub` to be visible across modules");
+    termrow(mem, 1, "const", "`const NAME: u32 = 3;` - the initialiser must be an integer literal");
+    termrow(mem, 1, "let", "`let x: u32 = e;` - the type annotation is mandatory, there is no inference");
+    termrow(mem, 1, "control flow", "if / else if / else / while / for i in lo..hi");
+    termrow(mem, 1, "return", "`return <expr>;` - it must carry a value, there is no bare `return;`");
+    termrow(mem, 1, "struct", "`struct S { a: u32 }`, literal `S { a: 1 }`, field access `s.a`");
+    termrow(mem, 1, "enum", "`enum E { A, B(u32) }`, construct `E::B(3)`");
+    termrow(mem, 1, "match", "arm bodies are BLOCKS, not expressions; must be exhaustive or have `_`");
+    termrow(mem, 1, "array", "`[u8; 16]`, literal `[1, 2, 3]`, index xs[0] is readable and writable");
+    termrow(mem, 1, "slice", "param `[T]` / `mut [T]`, pass `&xs` / `&mut xs`, `slice_len(s)`");
+    termrow(mem, 1, "generics", "`fn max_of<T>(a: T, b: T) -> T`, monomorphised at compile time");
+    termrow(mem, 1, "trait", "`trait M { fn m(self) -> u32; }` + `impl M for S`, static dispatch");
+    termrow(mem, 1, "types", "u8..u64 i8..i64 bool ptr str, struct names, [T; N], [T], mut [T]");
+    termrow(mem, 1, "cast", "`x as u64` - int<->pointer casts must be written explicitly");
+    termrow(mem, 1, "string", "\"...\", escapes are only \\n \\t \\\" \\\\ - there is NO \\x escape");
+    termrow(mem, 1, "comment", "// and /* */, /// is a doc comment (loment doc extracts it)");
+    termrow(mem, 1, "entry", "freestanding entry is `_start`, it takes no arguments; exit with syscall4(60, ...)");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "坑清单: loment cheat   内建: loment builtins   错误码: loment codes");
+    wstr(1, "traps: loment cheat   .   builtins: loment builtins   .   error codes: loment codes");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
 }
 
 fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "内建函数 (全部, 没有别的)");
+    title(mem, 1, "Builtin functions (all of them, there is nothing else)");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "没有标准库: 没有 String / Vec / HashMap, 没有 I/O 封装, 没有 printf。");
+    wstr(1, "No standard library: no String / Vec / HashMap, no I/O wrappers, no printf.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    termrow(mem, 1, "str_len", "str_len(s: str) -> u32  字节长度");
-    termrow(mem, 1, "str_byte", "str_byte(s: str, i: u32) -> u32  第 i 个字节");
-    termrow(mem, 1, "str_eq", "str_eq(a: str, b: str) -> bool  内容比较");
-    termrow(mem, 1, "str_cat", "str_concat(a, b) -> str  拼接 (bump 堆只有 64 KiB)");
-    termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr  数据指针 (喂 syscall)");
-    termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr  bump 堆 (64 KiB 上限)");
-    termrow(mem, 1, "free", "free(p: ptr) -> u32  占位, bump 堆不真回收");
-    termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32  读字节");
-    termrow(mem, 1, "store8", "store8(p: ptr, off: u32, v: u8) -> u32  写字节");
-    termrow(mem, 1, "ptr_add", "ptr_add(p: ptr, n: u32) -> ptr  (还有 ptr_sub)");
+    termrow(mem, 1, "str_len", "str_len(s: str) -> u32   byte length");
+    termrow(mem, 1, "str_byte", "str_byte(s: str, i: u32) -> u32   the i-th byte");
+    termrow(mem, 1, "str_eq", "str_eq(a: str, b: str) -> bool   content comparison");
+    termrow(mem, 1, "str_cat", "str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
+    termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
+    termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
+    termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
+    termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32   read a byte");
+    termrow(mem, 1, "store8", "store8(p: ptr, off: u32, v: u8) -> u32   write a byte");
+    termrow(mem, 1, "ptr_add", "ptr_add(p: ptr, n: u32) -> ptr   (also ptr_sub)");
     termrow(mem, 1, "slice_len", "slice_len(s: [T]) -> u32");
-    termrow(mem, 1, "panic", "panic(code: u32) -> u32  不可返回");
+    termrow(mem, 1, "panic", "panic(code: u32) -> u32   does not return");
     termrow(mem, 1, "atomic", "atomic_add(p: ptr, n: u32) -> u32");
     termrow(mem, 1, "get_bits", "get_bits(v: u8, hi, lo) / set_bits(v: u8, hi, lo, x)");
-    termrow(mem, 1, "inb/outb", "端口 I/O —— 只有 Rust 转译路径支持, 原生路径不支持");
-    termrow(mem, 1, "syscall4", "syscall4(nr: u64, a0, a1, a2) -> i64  裸 syscall (rax/rdi/rsi/rdx)");
+    termrow(mem, 1, "inb/outb", "port I/O - only the Rust transpile path supports it, not the native one");
+    termrow(mem, 1, "syscall4", "syscall4(nr: u64, a0, a1, a2) -> i64   raw syscall (rax/rdi/rsi/rdx)");
     termrow(mem, 1, "syscall6", "syscall6(nr: u64, a0..a4) -> i64");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "要输出数字就照抄 `loment example tour` 里的 write_dec —— 没有 printf。");
+    wstr(1, "to print a number, copy write_dec from `loment example tour` - there is no printf.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
 }
 
 fn do_types(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "类型");
-    termrow(mem, 1, "无符号", "u8 u16 u32 u64");
-    termrow(mem, 1, "有符号", "i8 i16 i32 i64");
-    termrow(mem, 1, "布尔", "bool —— 条件必须是它");
-    termrow(mem, 1, "指针", "ptr —— 裸指针, 偏移用 ptr_add");
-    termrow(mem, 1, "字符串", "str —— 不可变, 靠 str_* 操作");
-    termrow(mem, 1, "数组", "[T; N] 定长, 下标可读写");
-    termrow(mem, 1, "切片", "[T] 只读 / mut [T] 可写, 作形参用, 传 &xs / &mut xs");
-    termrow(mem, 1, "聚合", "struct 名 / enum 名 (泛型要写单态化后的名字)");
-    termrow(mem, 1, "预置", "Option / Result —— 泛型枚举, 配 ? 传播");
+    title(mem, 1, "Types");
+    termrow(mem, 1, "unsigned", "u8 u16 u32 u64");
+    termrow(mem, 1, "signed", "i8 i16 i32 i64");
+    termrow(mem, 1, "bool", "bool - conditions must be this");
+    termrow(mem, 1, "ptr", "ptr - a raw pointer; offset with ptr_add");
+    termrow(mem, 1, "str", "str - immutable, operate on it with the str_* builtins");
+    termrow(mem, 1, "array", "[T; N] fixed length, the index is readable and writable");
+    termrow(mem, 1, "slice", "[T] read-only / mut [T] writable, used as a parameter, pass &xs / &mut xs");
+    termrow(mem, 1, "aggregate", "struct name / enum name (generic ones need the monomorphised name)");
+    termrow(mem, 1, "prelude", "Option / Result - generic enums, propagate with `?`");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "转换一律 `x as T`; 没有隐式转换。写 Loment 没有类型推断, let 必须标类型。");
+    wstr(1, "casts are always `x as T`; there are no implicit conversions. Loment has no type\n  inference, so `let` must carry a type.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
 }
 
 fn do_keywords(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "关键字");
+    title(mem, 1, "Keywords");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "带 ★ 的是 Rust 没有、Loment 自己加的。");
+    wstr(1, "Those marked * are Loment's own, Rust does not have them.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    termrow(mem, 1, "结构", "module  use  fn  const  let  pub  struct  enum  trait  impl");
-    termrow(mem, 1, "控制", "if  else  while  for  in  match  return  break  continue");
-    termrow(mem, 1, "类型", "u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str mut");
-    termrow(mem, 1, "模式", "if let  _  as  self");
-    termrow(mem, 1, "★ 能力", "capability  guard  revocable  excluded");
+    termrow(mem, 1, "structure", "module  use  fn  const  let  pub  struct  enum  trait  impl");
+    termrow(mem, 1, "control", "if  else  while  for  in  match  return  break  continue");
+    termrow(mem, 1, "types", "u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str mut");
+    termrow(mem, 1, "patterns", "if let  _  as  self");
+    termrow(mem, 1, "* capability", "capability  guard  revocable  excluded");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "能力域是这个语言唯一「新的东西」: loment caps 看它, 或 loment syntax 看全表。");
+    wstr(1, "capability domains are the one genuinely new thing: loment caps   .   full table: loment syntax");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
 }
 
 fn do_caps(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "能力域 (capability / guard)");
+    title(mem, 1, "Capability domains (capability / guard)");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "Loment 相对 Rust 唯一多出来的语义层。");
+    wstr(1, "The one semantic layer Loment adds on top of Rust.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    wstr(1, "  ");
-    yellow(mem, 1);
-    wstr(1, "capability blk_write : disk[0..4] revocable");
-    colr(mem, 1);
-    wstr(1, "\n\n  ");
-    gray(mem, 1);
-    wstr(1, "guard blk_write(slot);   // 越界 -> trap; 通过 -> 审计计数 +1");
-    colr(mem, 1);
-    wstr(1, "\n\n");
-    codrow(mem, 1, "语义", "guard cap(e) 求值 e 得索引 -> 不在 [lo, hi] 就 trap");
-    codrow(mem, 1, "时机", "字面量越界是**编译期**错 (E4); 非字面量是运行期检查");
-    codrow(mem, 1, "revocable", "声明与域描述表里的一个标志");
-    codrow(mem, 1, "excluded", "声明出界的空间, 用了报 E5");
+    termrow(mem, 1, "meaning", "guard cap(e) evaluates e to an index -> outside [lo, hi] it traps");
+    termrow(mem, 1, "when", "a literal out of range is a COMPILE-time error (E4); anything else is a run-time check");
+    termrow(mem, 1, "revocable", "a flag in the declaration and the domain description table");
+    termrow(mem, 1, "excluded", "declares space as out of bounds; using it reports E5");
     wstr(1, "\n  ");
-    red(mem, 1);
-    wstr(1, "诚实边界");
+    gray(mem, 1);
+    wstr(1, "honest limit: `guard` only constrains the INDEX to the domain, it is NOT authorisation -\n  it does not check whether the current subject holds that capability. Subject-to-capability\n  binding lives in the kernel.");
     colr(mem, 1);
-    wstr(1, ": guard 只约束**索引**落在域内, **不是授权** ——");
-    wstr(1, "\n  它不检查「当前主体有没有这个能力」, 主体-能力的绑定在内核侧。");
     wstr(1, "\n\n");
     return 0;
 }
 
 fn do_cheat(mem: ptr, ab: ptr, argc: u32) -> u32 {
-    title(mem, 1, "一页速查");
+    title(mem, 1, "One-page cheat sheet");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "按「最容易踩」排序 —— 前两条最要命 (第 2 条是**静默**的: check 放行, 跑起来才崩)。");
+    wstr(1, "Ordered by how easily they bite - the first two are the worst (item 2 is SILENT: check passes, it crashes at run time).");
     colr(mem, 1);
     wstr(1, "\n\n");
-    codrow(mem, 1, "1", "match 臂体必须是**块**: `E::A => { return 0; }`, 不是 `E::A => 0,`");
-    codrow(mem, 1, "2", "**非 void 函数掉出末尾 -> 运行期 SIGILL**: check 放行, 跑起来直接 Illegal instruction —— 末尾必须有一条 return");
-    codrow(mem, 1, "3", "没有裸 `return;` —— 要么 `return <expr>;`, 要么 if/else 收尾");
-    codrow(mem, 1, "4", "泛型枚举模式写单态化名: `Result_i64_u32::Ok(v)`");
-    codrow(mem, 1, "5", "泛型函数实参定不出 T 时报 E2 (消息误导), 先 let 出带类型的变量");
-    codrow(mem, 1, "6", "结构体字面量不能直接当实参: 先 `let x: S = S { ... };` 再传");
-    codrow(mem, 1, "7", "条件位置的结构体字面量要加括号");
-    codrow(mem, 1, "8", "模块内先定义后使用, 别依赖前向引用");
-    codrow(mem, 1, "9", "一个解析错中止整个检查 —— 一次只改一处");
-    codrow(mem, 1, "10", "`==` 用在 struct/enum 上: checker 放行但原生后端拒 —— 显式比字段");
-    codrow(mem, 1, "11", "`const` 初值只能是整数字面量, 不能引用别的 const");
-    codrow(mem, 1, "12", "没有字符串常量: 要标签就写 `pub fn name() -> str { return \"x\"; }`");
-    codrow(mem, 1, "13", "`use` 后面不带分号");
-    codrow(mem, 1, "14", "字符串转义只有 \\n \\t \\\" \\\\ —— 没有 \\x / \\0");
-    codrow(mem, 1, "15", "let 必须写类型; 没有类型推断, 也没有隐式转换");
-    codrow(mem, 1, "16", "`let mut x` 里的 mut 是**普通标识符**不是关键字, 别写 (报的语法错会指向别处)");
+    termrow(mem, 1, "1", "match arm bodies must be BLOCKS: `E::A => { return 0; }`, not `E::A => 0,`");
+    termrow(mem, 1, "2", "** a non-void function falling off its end -> SIGILL at run time: check passes, then Illegal instruction. The last statement must be a return");
+    termrow(mem, 1, "3", "there is no bare `return;` - either `return <expr>;` or finish with if/else");
+    termrow(mem, 1, "4", "write generic enum patterns with the monomorphised name: `Result_i64_u32::Ok(v)`");
+    termrow(mem, 1, "5", "a generic fn whose T cannot be inferred reports E2 (misleading) - bind a typed `let` first");
+    termrow(mem, 1, "6", "a struct literal cannot be passed as an argument directly: `let x: S = S { ... };` first");
+    termrow(mem, 1, "7", "a struct literal in a condition needs parentheses");
+    termrow(mem, 1, "8", "define before use inside a module, do not rely on forward references");
+    termrow(mem, 1, "9", "one parse error aborts the whole check - fix one thing at a time");
+    termrow(mem, 1, "10", "`==` on struct/enum: the checker allows it, the native backend rejects it - compare fields");
+    termrow(mem, 1, "11", "a `const` initialiser must be an integer literal and cannot reference another const");
+    termrow(mem, 1, "12", "there are no string constants: for a label write `pub fn name() -> str { return \"x\"; }`");
+    termrow(mem, 1, "13", "`use` is not followed by a semicolon");
+    termrow(mem, 1, "14", "string escapes are only \\n \\t \\\" \\\\ - there is no \\x / \\0");
+    termrow(mem, 1, "15", "`let` must carry a type; there is no inference and no implicit conversion");
+    termrow(mem, 1, "17", "**non-ASCII output garbles on a Windows console**: the PE writes bytes straight to it and Windows decodes them with the codepage (936/GBK on Chinese Windows) - print ASCII only");
+    termrow(mem, 1, "16", "the `mut` in `let mut x` is an ORDINARY IDENTIFIER, not a keyword - do not write it (the syntax error points somewhere else)");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "全文: loment skill --print (装好的包里也有一份)");
+    wstr(1, "the whole guide: loment skill --print (a copy ships in the package too)");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1544,7 +1566,7 @@ fn print_numbered(mem: ptr, fd: u64, p: ptr, n: u32) {
 
 fn do_cat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "cat 需要一个文件名");
+        return err_usage(mem, "cat needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
@@ -1557,7 +1579,7 @@ fn do_cat(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "stat 需要一个文件名");
+        return err_usage(mem, "stat needs a file name");
     }
     let path: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, 2, path);
@@ -1597,19 +1619,19 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
         }
         i = i + 1;
     }
-    title(mem, 1, "源码统计");
-    kvb(mem, 1, "文件", path);
-    kv(mem, 1, "字节", n);
-    kv(mem, 1, "行数", lines);
-    kv(mem, 1, "空行", blanks);
-    kv(mem, 1, "非空行", lines - blanks);
-    kv(mem, 1, "最长行", maxl);
+    title(mem, 1, "Source statistics");
+    kvb(mem, 1, "file", path);
+    kv(mem, 1, "bytes", n);
+    kv(mem, 1, "lines", lines);
+    kv(mem, 1, "blank", blanks);
+    kv(mem, 1, "non-blank", lines - blanks);
+    kv(mem, 1, "longest line", maxl);
     return 0;
 }
 
 fn do_count(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "count 需要一个文件名");
+        return err_usage(mem, "count needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
@@ -1692,7 +1714,7 @@ fn do_count(mem: ptr, ab: ptr, argc: u32) -> u32 {
         }
         i = i + 1;
     }
-    title(mem, 1, "声明计数");
+    title(mem, 1, "Declaration counts");
     kv(mem, 1, "fn", nf);
     kv(mem, 1, "struct", ns);
     kv(mem, 1, "enum", ne);
@@ -1704,14 +1726,14 @@ fn do_count(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_fns(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "fns 需要一个文件名");
+        return err_usage(mem, "fns needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
         return 1;
     }
     let p: ptr = ptr_add(mem, M_FILE);
-    title(mem, 1, "函数签名");
+    title(mem, 1, "Function signatures");
     let i: u32 = 0;
     let ls: u32 = 0;
     let no: u32 = 1;
@@ -1773,7 +1795,7 @@ fn do_fns(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "\n  ");
     gray(mem, 1);
     wdec(mem, 1, cnt);
-    wstr(1, " 个函数");
+    wstr(1, " function(s)");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1781,7 +1803,7 @@ fn do_fns(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_tokens(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "tokens 需要一个文件名");
+        return err_usage(mem, "tokens needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
@@ -1841,13 +1863,13 @@ fn do_tokens(mem: ptr, ab: ptr, argc: u32) -> u32 {
             i = i + 1;
         }
     }
-    title(mem, 1, "词法直方图");
-    kv(mem, 1, "标识符", nid);
-    kv(mem, 1, "关键字", nkw);
-    kv(mem, 1, "数字", nnum);
-    kv(mem, 1, "字符串", nstr);
-    kv(mem, 1, "注释", ncom);
-    kv(mem, 1, "运算符/标点", nop);
+    title(mem, 1, "Token histogram");
+    kv(mem, 1, "identifiers", nid);
+    kv(mem, 1, "keywords", nkw);
+    kv(mem, 1, "numbers", nnum);
+    kv(mem, 1, "strings", nstr);
+    kv(mem, 1, "comments", ncom);
+    kv(mem, 1, "operators/punct", nop);
     return 0;
 }
 
@@ -1885,12 +1907,12 @@ fn is_kw(p: ptr, off: u32, n: u32) -> bool {
 
 fn do_grep(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 4 {
-        return err_usage(mem, "grep 需要 <PAT> <FILE> 两个参数");
+        return err_usage(mem, "grep takes two arguments: <PAT> <FILE>");
     }
     let pat: ptr = ptr_add(mem, M_P2);
     let pn: u32 = arg_copy(mem, ab, 2, pat);
     if pn == NOTFOUND || pn == 0 {
-        return err_usage(mem, "grep 的模式不能为空");
+        return err_usage(mem, "the grep pattern cannot be empty");
     }
     let n: u32 = read_arg(mem, ab, 3);
     if n == NOTFOUND {
@@ -1972,7 +1994,7 @@ fn find_bytes(p: ptr, n: u32, q: ptr, m: u32) -> u32 {
 
 fn do_todo(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "todo 需要一个文件名");
+        return err_usage(mem, "todo needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
@@ -1989,7 +2011,7 @@ fn do_todo(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "\n  ");
     gray(mem, 1);
     wdec(mem, 1, hits + h2 + h3);
-    wstr(1, " 条");
+    wstr(1, " found");
     colr(mem, 1);
     wstr(1, "\n\n");
     if hits + h2 + h3 == 0 {
@@ -2000,7 +2022,7 @@ fn do_todo(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_hash(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "hash 需要一个文件名");
+        return err_usage(mem, "hash needs a file name");
     }
     let n: u32 = read_arg(mem, ab, 2);
     if n == NOTFOUND {
@@ -2020,23 +2042,23 @@ fn do_hash(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_new(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "new 需要一个名字");
+        return err_usage(mem, "new needs a name");
     }
     let nm: ptr = ptr_add(mem, M_P1);
     let nn: u32 = arg_copy(mem, ab, 2, nm);
     if nn == NOTFOUND || nn == 0 {
-        return err_usage(mem, "名字不能为空");
+        return err_usage(mem, "the name cannot be empty");
     }
     let path: ptr = ptr_add(mem, M_P2);
     put_n(path, nm, nn);
     put(ptr_add(path, nn), ".lomt");
     let stb: ptr = ptr_add(mem, M_STB);
     if stat_mode(path, stb) != NOTFOUND {
-        return err_path(mem, "已经存在, 不覆盖: ", path);
+        return err_path(mem, "already exists, not overwriting: ", path);
     }
     let fd: i64 = open_wo(path);
     if fd < 0 {
-        return err_path(mem, "写不了 ", path);
+        return err_path(mem, "cannot write ", path);
     }
     wfd(fd, "module ");
     wfdp(fd, nm);
@@ -2045,12 +2067,12 @@ fn do_new(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wfd(fd, "    syscall4(60, 0, 0, 0);\n}\n");
     close_fd(fd);
     green(mem, 1);
-    wstr(1, "  写了 ");
+    wstr(1, "  wrote ");
     colr(mem, 1);
     wbuf(1, path);
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "跑它:  loment run ");
+    wstr(1, "run it:  loment run ");
     wbuf(1, path);
     colr(mem, 1);
     wstr(1, "\n\n");
@@ -2073,16 +2095,16 @@ fn do_examples(mem: ptr, ab: ptr, argc: u32) -> u32 {
     put(ptr_add(dir, dn), "examples/");
     let stb: ptr = ptr_add(mem, M_STB);
     if stat_mode(dir, stb) != S_IFDIR {
-        err_path(mem, "包里没有示例目录 ", dir);
+        err_path(mem, "no examples directory in this package: ", dir);
         return 1;
     }
-    title(mem, 1, "示例");
-    kvb(mem, 1, "位置", dir);
+    title(mem, 1, "Examples");
+    kvb(mem, 1, "location", dir);
     wstr(1, "\n");
     ls_dir(mem, 1, dir, 0, 0);
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "看一个: loment example tour");
+    wstr(1, "try one: loment example tour");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -2090,7 +2112,7 @@ fn do_examples(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 fn do_example(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
-        return err_usage(mem, "example 需要一个名字, 如 tour");
+        return err_usage(mem, "example needs a name, e.g. tour");
     }
     let dir: ptr = ptr_add(mem, M_P2);
     share_dir(mem, ab, dir);
@@ -2103,7 +2125,7 @@ fn do_example(mem: ptr, ab: ptr, argc: u32) -> u32 {
     put(ptr_add(dir, d2 + nn), ".lomt");
     let n: u32 = slurp(dir, ptr_add(mem, M_FILE), FILE_CAP);
     if n == NOTFOUND {
-        err_path(mem, "没有这个示例: ", dir);
+        err_path(mem, "no such example: ", dir);
         return 1;
     }
     write_all(1, ptr_add(mem, M_FILE), n as u64);
@@ -2119,7 +2141,7 @@ fn do_ls(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     let stb: ptr = ptr_add(mem, M_STB);
     if stat_mode(dir, stb) == NOTFOUND {
-        return err_path(mem, "打不开 ", dir);
+        return err_path(mem, "cannot open ", dir);
     }
     ls_dir(mem, 1, dir, 0, 0);
     return 0;
@@ -2134,7 +2156,7 @@ fn do_tree(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     let stb: ptr = ptr_add(mem, M_STB);
     if stat_mode(dir, stb) == NOTFOUND {
-        return err_path(mem, "打不开 ", dir);
+        return err_path(mem, "cannot open ", dir);
     }
     cyan(mem, 1);
     wbuf(1, dir);
@@ -2318,13 +2340,13 @@ fn dispatch(mem: ptr, ab: ptr, argc: u32) -> u32 {
     red(mem, 2);
     wstr(2, "loment: ");
     colr(mem, 2);
-    wstr(2, "未知命令 ");
+    wstr(2, "unknown command ");
     bold(mem, 2);
     wbytes(2, cmd, n);
     colr(mem, 2);
     wstr(2, "\n");
     gray(mem, 2);
-    wstr(2, "  试 loment help —— 或 loment commands 拿命令名\n");
+    wstr(2, "  try `loment help` - or `loment commands` for the names\n");
     colr(mem, 2);
     return 2;
 }
@@ -2334,11 +2356,12 @@ fn delegate_note(mem: ptr, cmd: ptr, n: u32, who: str) -> u32 {
     gray(mem, 1);
     wstr(1, "loment ");
     wbytes(1, cmd, n);
-    wstr(1, " 由启动器直接转发给 ");
+    wstr(1, " is forwarded by the launcher straight to ");
     wstr(1, who);
-    wstr(1, ", 不经 loment-cli。\n  直接跑 loment ");
+    wstr(1, ", it does not go through loment-cli.");
+    wstr(1, "\n  Just run loment ");
     wbytes(1, cmd, n);
-    wstr(1, " ... 即可。");
+    wstr(1, " ...");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;

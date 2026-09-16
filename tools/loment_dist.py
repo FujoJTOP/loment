@@ -486,7 +486,7 @@ else
         fi
     fi
     if [ -n "$hits" ]; then
-        echo "install: agent skill -> $hits (one guide at $skill_src)"
+        echo "install: agent skill -> $hits (guides under $prefix/share/{loment,lompi}/skill/)"
     else
         # No tool-specific dir to hook? The CLI is the hook.
         echo "install: no known agent dir here -- the guide is still reachable:"

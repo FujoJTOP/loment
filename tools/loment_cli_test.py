@@ -180,10 +180,55 @@ def test_help_page_for_one_command():
 
 
 @test
+def test_every_command_outputs_pure_ascii():
+    """**每一条命令的输出都必须是纯 ASCII。**
+
+    用户 2026-09-15 实测报的乱码（八个感叹号）：Windows 上 PE 把字节直接写进控制台，
+    而控制台按**当前代码页**解 —— 中文 Windows 是 936(GBK)，于是 UTF-8 的中文被按 GBK
+    解成 `婧愮爜缁熻`。垫片**没有 `WriteConsoleW`**，程序这边没有任何补救手段。
+
+    ASCII 是唯一**在任何代码页下都解码成同一个结果**的集合，所以这条不是风格问题：
+    非 ASCII 就算"在我这台机器上看着是好的"，到了 936 的控制台上就是乱码。
+
+    lompi 线已经因为同一条把它的输出全改成纯 ASCII 了 —— 这里是同一个坑的另一半。
+    """
+    bad = []
+    for n in _names():
+        rc, out, err = _run([n] + _no_color())
+        # delegate 的几条（ir/build/... 由启动器转发）只打一行说明，也要守
+        t = out + err
+        if not t.isascii():
+            where = sorted({c for c in t if ord(c) > 127})[:6]
+            bad.append((n, where))
+    assert not bad, f"这些命令的输出带非 ASCII（936 控制台下必乱码）: {bad}"
+
+
+@test
+def test_source_has_no_non_ascii_string_literals():
+    """静态判据：`lomcli.lomt` 的字符串字面量里不许有非 ASCII。
+
+    上面那条动态判据只跑 38 次调用 —— 没走到的分支（某个错误路径、某个 `help <cmd>`）
+    里面藏着中文它抓不到。这条按源码扫，一个都不放过。注释里的中文无所谓：注释不进二进制。
+    """
+    NL = chr(10)
+    Q = chr(34)
+    BS = chr(92)
+    src = SRC.read_text(encoding="utf-8")
+    body = re.sub(r"/[*].*?[*]/", "", src, flags=re.S)
+    body = re.sub("//[^" + NL + "]*", "", body)
+    strlit = re.compile(Q + "(?:[^" + BS + Q + "]|" + BS + BS + ".)*" + Q)
+    bad = []
+    for i, line in enumerate(body.split(NL), 1):
+        for m in strlit.finditer(line):
+            if any(ord(c) > 127 for c in m.group(0)):
+                bad.append((i, m.group(0)[:60]))
+    assert not bad, f"这些字符串字面量里有非 ASCII（936 控制台下必乱码）: {bad[:5]}"
+
+@test
 def test_unknown_command_is_an_error():
     rc, out, err = _run(["frobnicate"] + _no_color())
     assert rc == 2, f"未知命令应退 2, 实得 {rc}"
-    assert "未知命令" in err and "frobnicate" in err
+    assert "unknown command" in err and "frobnicate" in err
 
 
 # ---------------------------------------------------------------- 颜色
@@ -202,7 +247,7 @@ def test_color_flag_anywhere_in_argv_does_not_eat_the_command():
     f = _pkg / "share" / "loment" / "examples" / "tour.lomt"
     rc, out, err = _run(["--no-color", "stat", str(f)])
     assert rc == 0, f"rc={rc} err={err[:200]}"
-    assert "源码统计" in out
+    assert "Source statistics" in out
 
 
 # ---------------------------------------------------------------- 真算出来的东西
@@ -280,9 +325,9 @@ def test_tokens_picks_up_strings_and_comments():
     rc, out, _ = _run(["tokens", str(f)] + _no_color())
     assert rc == 0
     got = dict(re.findall(r"^\s*(\S+)\s+(\d+)\s*$", out, re.M))
-    assert got.get("字符串") == "1", out
-    assert got.get("注释") == "1", out
-    assert got.get("关键字") and int(got["关键字"]) >= 4, out
+    assert got.get("strings") == "1", out
+    assert got.get("comments") == "1", out
+    assert got.get("keywords") and int(got["keywords"]) >= 4, out
 
 
 # ---------------------------------------------------------------- 文件与目录
@@ -291,7 +336,7 @@ def test_tokens_picks_up_strings_and_comments():
 def test_missing_file_is_a_clean_error_not_a_crash():
     rc, out, err = _run(["cat", "/definitely/not/here.lomt"] + _no_color())
     assert rc == 1, f"rc={rc}"
-    assert "打不开" in err, err[:200]
+    assert "cannot open" in err, err[:200]
 
 
 @test
@@ -349,7 +394,7 @@ def test_doctor_reports_missing_tools_then_green_when_present():
     """体检必须有**分辨力**: 缺组件时红且退 1, 组件齐了就绿且退 0。"""
     rc, out, _ = _run(["doctor"] + _no_color())
     assert rc == 1, f"缺驱动时应当退 1, 实得 {rc}"
-    assert "缺失" in out
+    assert "MISSING" in out
     # 把六个名字都补上 (内容无所谓, 只要有这个文件)
     for n in ("loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
               "loment-lomelf", "loment-cli"):
@@ -358,7 +403,7 @@ def test_doctor_reports_missing_tools_then_green_when_present():
             p.write_bytes(b"stub")
     rc, out, _ = _run(["doctor"] + _no_color())
     assert rc == 0, f"组件齐了还退 {rc}: {out}"
-    assert "全绿" in out
+    assert "all green" in out
 
 
 @test
@@ -368,7 +413,7 @@ def test_where_resolves_and_reports_the_expected_path():
     assert out.strip().endswith("loment-driver" + (".exe" if IS_WIN else "")), out
     rc, _, err = _run(["where", "nosuchtool"] + _no_color())
     assert rc == 2, rc
-    assert "不认识" in err
+    assert "no such tool" in err
 
 
 @test
@@ -379,7 +424,7 @@ def test_examples_and_example_read_the_package():
     rc, out, _ = _run(["example", "tour"])
     assert rc == 0 and "module tour" in out, out[:200]
     rc, _, err = _run(["example", "nope"] + _no_color())
-    assert rc == 1 and "没有这个示例" in err, err[:200]
+    assert rc == 1 and "no such example" in err, err[:200]
 
 
 # ---------------------------------------------------------------- 参考页
@@ -396,7 +441,7 @@ def test_codes_lists_all_nineteen():
 def test_explain_accepts_three_spellings_and_rejects_junk():
     for spelling in ("E4", "e4", "4"):
         rc, out, _ = _run(["explain", spelling] + _no_color())
-        assert rc == 0 and "能力域" in out, (spelling, out[:120])
+        assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
     rc, _, err = _run(["explain", "E99"] + _no_color())
     assert rc == 2 and "E1..E19" in err, err[:120]
     rc, _, _ = _run(["explain"] + _no_color())

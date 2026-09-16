@@ -75,7 +75,7 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "aa733fe85e7413d0effda00cfb1b1e18150516fe811ff048b5f9caa82439e4b5"
+   "sha256": "801f847abeceebd85c59573709acedc476c80ce878eb049a4afc13996ae07df5"
   },
   {
    "path": "lompi/lompi.lomt",
@@ -295,7 +295,7 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "f81906cef933b2847543a76d6bbbb745c2db5d68e5f7c6f783dc2d0d2267dd83"
+   "sha256": "831fca3446f20cd1b4e1260bf9438f6fa9941f00da4cd8d6de273e6e0d3d3513"
   },
   {
    "path": "tools/loment_dist_test.py",
@@ -343,7 +343,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "975921afecf124fbd39e40eb3be9feebd13a03c109cf90b1900f375f644d1060"
+   "sha256": "137ba2bfc8c469544ef30586bfc383b71ffd36354e706bb182c8b9a30759dfbb"
   },
   {
    "path": "loment/tools/lomdoc.lomt",
@@ -731,7 +731,7 @@
   },
   {
    "path": "docs/169-loment-cli.md",
-   "sha256": "9bae9f7f191ff7c91a9f03154ad05f55dcf3f39f6974e37c7e3a02bbba4a5d3d"
+   "sha256": "d6b031ccca11159a5328f21d6a894b54333ceaf9b5f3d25243bdd1d15f070983"
   },
   {
    "path": "docs/manual/index.md",
