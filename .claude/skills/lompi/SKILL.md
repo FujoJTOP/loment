@@ -1,6 +1,6 @@
 ---
 name: lompi
-description: Use when managing Loment libraries with lompi, the package manager that ships with the Loment toolchain (a library is a directory; identity is a content hash; dependencies are the `use` lines in source). Triggers: installing, listing, or verifying a third-party Loment library / building or maintaining a package store / finding out what a library depends on / producing or checking a lockfile / debugging "missing dependency", "dependency cycle", or "lock does not match store" / questions about how packages are installed in Loment, which version gets picked, or whether two versions can coexist / mapping concepts over from pip, npm, or cargo. Also use for anything involving a Loment package store, `lompi.lock`, `deps/`, instance identity, or resolving `.lomt` library dependencies.
+description: Use when managing Loment libraries with lompi, the package manager that ships with the Loment toolchain (a library is a directory; identity is a content hash; dependencies are the `use` lines in source). Triggers: installing, listing, or verifying a third-party Loment library / building or maintaining a package store / finding out which Loment libraries exist on this machine, or what a store contains / locating a library's source to read its `pub fn` surface / finding out what a library depends on / producing or checking a lockfile / debugging "missing dependency", "dependency cycle", or "lock does not match store" / questions about how packages are installed in Loment, which version gets picked, or whether two versions can coexist / mapping concepts over from pip, npm, or cargo. Also use for anything involving a Loment package store, `lompi.lock`, `deps/`, instance identity, or resolving `.lomt` library dependencies.
 ---
 
 # lompi: the Loment package manager
@@ -195,6 +195,20 @@ That last refusal is the whole point of pinning content hashes instead of versio
 a lock taken from a store where `geom` bound a different `mathutil` names a *different
 instance*, and lompi says so instead of silently installing a lookalike.
 
+**`<name>` comes first and is never optional — not even with `--from-lock`.** A flag sitting
+in the name position is read as a package name, and the diagnostic misleads you about the
+cause:
+
+```
+$ lompi install --from-lock good.lock      # looks reasonable, is not
+lompi: no such package in store            # it went looking for a package named "--from-lock"
+$ lompi install                            # the real missing-name diagnostic, for contrast
+lompi: install needs a <name>
+```
+
+(No name at all exits **2**; a flag in the name position exits **1** with that misleading
+message. So write it as `lompi install geom --from-lock good.lock --into DIR --apply`.)
+
 ### 5.0.1 `check` — is this actually a Loment library?
 
 ```
@@ -388,9 +402,139 @@ self:  61ee6f19964aa745f1ed2d4bdf60f0fdd9b49d7f1fc96fc66211c60e82c9033e
 
 `self` is the hash of **this package's own source only**, which is **not** the instance
 identity from `show` — the instance identity also mixes in the identities of its
-dependencies (§7). Use this command to see whether the package body itself changed.
+dependencies (§8). Use this command to see whether the package body itself changed.
 
-## 6. Four common workflows
+## 6. Reading the store: what does this machine have?
+
+The entry point for "which Loment libraries are available here", "what is in the store",
+"where is the source for X".
+
+**Step 1 — locate the store. Ask, do not guess.**
+
+```
+$ lompi config
+version:  0.1.0
+exe:      C:\Users\hooya\.local\bin
+global:   C:\Users\hooya\.lompi
+  rule:   argv[0] sits under \Users\<name>\, so <that>\.lompi
+store:    C:\Users\hooya\.lompi\store
+cache:    C:\Users\hooya\.lompi\cache
+conf:     C:\Users\hooya\.local\bin\lompi.conf  (absent)
+registry: (not set) -- install will use the global store
+```
+
+The `store:` line **is** the store. The root is derived from **where the exe sits**, not
+compiled in — the same exe in two different locations reports two different roots — so ask
+the exe you will actually use and take that line verbatim. Never construct the path
+yourself.
+
+> A copy of lompi that lives in a build tree rather than on PATH falls to the last rule
+> (`<exe dir>\.lompi`) and reports a store that may **not exist at all** — `config` prints
+> the path whether or not it is there. An empty inventory can mean "wrong exe", not
+> "no packages".
+
+**Step 2 — inventory it.**
+
+```
+$ lompi index "<the store: path from above>"
+6 package(s) in store
+geom 1.0.0 7af928612aaaf199
+host 0.1.0 d127b1b91410747a
+mathutil 0.1.0 5d46f4477237f3bf
+mathutil 0.2.0 492ec331d34a26a9
+std 0.1.0 ccd59fc4f668bef0
+util 0.3.0 0dc87d1ec3449e92
+```
+
+One line per **instance**: `name version first-16-of-identity`. A name appearing twice is
+multi-version coexistence, not a duplicate. This answers "what exists" — and nothing else.
+
+**Step 3 — read one library.**
+
+```
+$ lompi show "<store>" host
+name:    host
+version: 0.1.0
+id:      d127b1b91410747a9cbc8abb2250cd5cadd9ed0677d2cbb78e8519f6f42e3803
+dir:     <store>/host/0.1.0
+7 use edge(s):
+  path argv.lomt
+  path dir.lomt
+  path fs.lomt
+  path io.lomt
+  path log.lomt
+  path stat.lomt
+  name std
+```
+
+**`dir:` is where you read the code.** lompi does not model an API surface — there is no
+"list the exported functions" command. To learn what a library offers, list `dir:` and read
+the `*.lomt` files, looking for `pub fn`. `show` gives you the two things the machine cares
+about: the identity, and which edges are `name` (a real dependency — another package, used
+for resolution and the hash) versus `path` (this package's own module, already part of its
+source).
+
+**The trap: `index` never checks that its argument is a store.** It reads exactly two
+directory levels — `<store>/<name>/<version>` — and believes what it finds. Pointed at a
+project root it prints a plausible table of lies (sample: pointing it at lompi's own source
+tree, where the first level is `fixture/`):
+
+```
+$ lompi index <a project root, not a store>
+9 package(s) in store
+fixture bad c19f11ab2d308355
+fixture iso_solo c19f11ab2d308355
+fixture store c19f11ab2d308355
+...            one row per first-level directory of whatever you pointed it at
+```
+
+the "names" are the root's first-level directories, the "versions" its second-level ones, and
+**every identity is the same** because those directories hold zero `.lomt` at that level — an
+all-equal id column is the tell that nothing real was read. Pointed instead at the flat
+`deps/` layout the compiler actually consumes, `index` prints **nothing** and exits **1** —
+because `deps/<name>/` holds files, not version directories.
+
+So:
+
+| you want to know | use |
+|---|---|
+| what is in a store | `lompi index <store>` |
+| whether a directory really is a Loment library | `lompi check <dir>` |
+| what a library provides | read `dir:` and the files themselves |
+| the own-source hash of one package directory | `lompi hash <package-dir>` |
+
+`check` accepts any directory that is supposed to be a package — a store entry, a
+`deps/<name>/` leaf, a work-in-progress directory — and it is the only command that tells you
+the truth about a directory whose layout you are unsure of:
+
+```
+$ lompi check "<store>\std\0.1.0"
+[ok] source files: 128
+[ok] package name: std
+[ok] every module name matches its file name
+[ok] pkg.lomp name() matches
+[ok] pkg.lomp version() matches
+[OK] lompi: this is a valid Loment library
+```
+
+**Inventorying a project's dependencies.** The compiler sees `<project>/deps/<name>/` (flat,
+no version level), so `index` is the wrong tool there. List the directory and check each
+entry:
+
+```
+ls <project>/deps
+lompi check <project>/deps/<name>
+```
+
+**Which version does `use <name>` bind?** The highest version present, compared numerically
+per `.` segment (`0.10.0 > 0.9.0`). In the store above, `use mathutil` means `0.2.0`.
+`lompi show <store> mathutil` prints the one that would be picked; `lompi index <store>` shows
+the alternatives. To pin one, use a lock (§5.4).
+
+**Do not read `pkg.lomp` to learn what a library does.** It is optional, is excluded from the
+identity hash, and carries two human labels only (`name()`, `version()`).
+
+## 7. Four common workflows
 
 **A. Make a library visible to a project**
 ```
@@ -418,7 +562,7 @@ Run `lompi show <store> <name>` in both and compare `id`. **A different id means
 different instance**, even if the source looks identical — which says it bound to
 different dependencies. That is exactly what the design is meant to catch.
 
-## 7. How identity is computed (this explains the behaviour)
+## 8. How identity is computed (this explains the behaviour)
 
 ```
 id(P) = sha256( own source ⊕ for each name edge: edge-name 0x00 child-identity 0x00 )
@@ -439,7 +583,7 @@ The geom source is byte-identical, but sits in two different stores:
 **The two ids differing is correct.** The same source bound to different dependencies
 means a different meaning, and merging them would be the harmful outcome.
 
-## 8. Boundaries (honest list)
+## 9. Boundaries (honest list)
 
 - **No network.** A store is a local directory, and a registry is a git repository you have
   already cloned. lompi emits the clone command (`lompi fetch`) but cannot run it — the PE
@@ -467,7 +611,7 @@ means a different meaning, and merging them would be the harmful outcome.
   256 KiB path pool.
 - **Tree/closure depth 256.**
 
-## 9. Error reference
+## 10. Error reference
 
 | what you see | meaning | what to do |
 |---|---|---|
@@ -482,7 +626,7 @@ means a different meaning, and merging them would be the harmful outcome.
 | `lompi: out of memory` | the store/closure exceeded the workspace | smaller store, or raise the workspace size |
 | non-zero exit with no output | usage error (exit 2) | supply the missing argument |
 
-## 10. Mapping from pip
+## 11. Mapping from pip
 
 | pip | lompi | difference |
 |---|---|---|

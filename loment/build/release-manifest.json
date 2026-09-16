@@ -663,7 +663,7 @@
   },
   {
    "path": "tools/lompi_sync.py",
-   "sha256": "17f2b2dc9be3e69e0c0d9a0cdc52f4c83b28dcc7e5e1340aa1fb0df256be72c3"
+   "sha256": "dcc08193aeb54336d5de0731af332384a0e7a5f050e98f863c8333ba4ef64ca9"
   },
   {
    "path": "tools/loment_lompi_test.py",

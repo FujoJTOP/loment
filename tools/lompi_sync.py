@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -77,6 +76,13 @@ def _norm(b: bytes) -> bytes:
     return b.replace(bytes([13, 10]), bytes([10])).replace(bytes([13]), bytes([10]))
 
 
+def _to_crlf(b: bytes) -> bytes:
+    """LF -> CRLF。二进制（含 NUL）原样。推回正本时用来**保住对方编辑器的行尾**。"""
+    if bytes([0]) in b:
+        return b
+    return b.replace(bytes([13, 10]), bytes([10])).replace(bytes([10]), bytes([13, 10]))
+
+
 def _sha(p: Path) -> str:
     return hashlib.sha256(_norm(p.read_bytes())).hexdigest()
 
@@ -120,27 +126,41 @@ def _copy(pair, normalize: bool) -> list[str]:
     """正本 -> 仓内副本，返回改动的相对路径。只动这一组的清单里的东西，别的一概不碰。
 
     `normalize=True`（进仓方向）把文本写成 LF —— 正本那边行尾不统一，仓里必须统一。
-    `normalize=False`（推回正本方向）**原样字节**写，不去动别人编辑器定的行尾。
+    `normalize=False`（推回正本方向）**按目标原来的行尾写**，不去动别人编辑器定的行尾。
+
+    **两个方向都按 `_norm` 判"变没变"**（不是按原字节）。这一条是 2026-09-16 补的：
+    原先推回正本时按原字节比，于是"正本是 CRLF、仓里是 LF"被当成**改动**，而判据
+    （`_compare`）又按归一后比、报"一致" —— 两边口径不一，结果是 `--to-dev` 把开发区
+    **全部** `.lomt` 的行尾抹平（那次只想推一份指南，三组配对一起被执行了，
+    开发区 163 个文件从 CRLF 变成 LF）。
     """
     src, dst = pair["src"], pair["dst"]
     names, subdirs = pair["names"], pair["dirs"]
     changed: list[str] = []
     dev_files = set(_files(src, names, subdirs))
     for f in _files(dst, names, subdirs):
-        if f not in dev_files:                      # 正本已经删了的，跟着删
-            (dst / f).unlink()
-            changed.append(f"- {f}")
+        # 只在**进仓**方向跟着删。推回正本时"仓里没有、正本有"意味着别人在正本那边
+        # 加了东西还没收进来 —— 那时候删掉就是**毁掉别人的活**，只让它被门禁报出来。
+        if f not in dev_files:
+            if normalize:
+                (dst / f).unlink()
+                changed.append(f"- {f}")
+            else:
+                changed.append(f"! {f} (仓里没有, 正本独有 -- 没动, 先收进来)")
     for f in sorted(dev_files):
         d = dst / f
         d.parent.mkdir(parents=True, exist_ok=True)
         raw = (src / f).read_bytes()
-        want = _norm(raw) if normalize else raw
-        if d.is_file() and d.read_bytes() == want:
-            continue
         if normalize:
+            want = _norm(raw)
+            if d.is_file() and d.read_bytes() == want:
+                continue
             d.write_bytes(want)
         else:
-            shutil.copyfile(src / f, d)
+            if d.is_file() and _norm(d.read_bytes()) == _norm(raw):
+                continue                        # 只有行尾不同 = 没改
+            crlf = d.is_file() and bytes([13, 10]) in d.read_bytes()
+            d.write_bytes(_to_crlf(raw) if crlf else raw)
         changed.append(f"+ {f}")
     return changed
 
