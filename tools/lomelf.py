@@ -209,14 +209,26 @@ class Global:
         self.addr = 0
 
 
-def parse_ll(text: str) -> tuple[list[Global], list[Func]]:
-    globals_, funcs, lines, i = [], [], text.split("\n"), 0
+def parse_ll(text: str) -> tuple[list[Global], list[Func], list[str]]:
+    """文本 IR -> (全局, 函数, **外部函数名**)。
+
+    第三个返回值是 `declare` 出来的外部符号 (docs/173 的 `extern fn`)。v0 原先**整行跳过**
+    `declare` —— 外部符号连表示都没有, 于是 `call @c_add` 会在 `finalize()` 里报"未定义的
+    标签"。现在记下来: 它们由 `--link` 进来的外部目标文件提供, 调用点还要按 **C ABI**
+    传参 (见 `Emitter._call`)。
+    """
+    globals_, funcs, externs, lines, i = [], [], [], text.split("\n"), 0
     while i < len(lines):
         line = lines[i].strip()
         i += 1
         if not line or line[0] in ";!":
             continue
-        if line.startswith(("target ", "attributes ", "source_filename", "declare ", "module ")):
+        if line.startswith("declare "):
+            m = re.match(r"declare\s+(?:[\w.]+\s+)*?(@[-A-Za-z0-9_.]+)\s*\(", line)
+            if m:
+                externs.append(m.group(1)[1:])
+            continue
+        if line.startswith(("target ", "attributes ", "source_filename", "module ")):
             continue
         if line.startswith("@"):
             globals_.append(_parse_global(line))
@@ -224,7 +236,7 @@ def parse_ll(text: str) -> tuple[list[Global], list[Func]]:
         if line.startswith("define "):
             fn, i = _parse_func(lines, i - 1)
             funcs.append(fn)
-    return globals_, funcs
+    return globals_, funcs, externs
 
 
 def _parse_global(line: str) -> Global:
@@ -590,8 +602,9 @@ def parse_phi(text: str) -> tuple[str, list[tuple[str, str]]]:
 
 
 class Emitter:
-    def __init__(self, globals_: list[Global]):
+    def __init__(self, globals_: list[Global], externs: set[str] | None = None):
         self.asm = Asm(TEXT_VADDR)
+        self.externs = externs or set()   # docs/173: 这些名字走 C ABI 传参
         self.globals = {g.name: g for g in globals_}
         self.cur: Func | None = None
         self.cur_block = ""
@@ -995,6 +1008,30 @@ class Emitter:
         if callee.startswith("%"):
             raise Unsupported("v0 不支持间接调用")
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
+        # ---- 外部函数 (docs/173): 实参走**寄存器**, 不走我们自己的栈约定。
+        # 求值顺序: **从右往左**逐个算进 RAX 再 push, 然后从左往右 pop 进目标寄存器 ——
+        # 这样 push 完栈顶正好是第 0 个实参, pop 的先后与寄存器顺序自然对齐。不能直接
+        # `self.get(ty, val, RDI)` 一个个算: `get` 内部要用 RAX/RCX 求值, 会把前面已经放好的
+        # 寄存器踩掉。
+        if callee[1:] in self.externs:
+            if len(args) > len(C_ARG_REGS):
+                raise Unsupported(f"extern 调用 {callee[1:]}: 第 1 阶段最多 6 个实参 (docs/173 §3)")
+            if ret_ty is not None and is_agg(ret_ty):
+                raise Unsupported(f"extern 调用 {callee[1:]}: 第 1 阶段不接受聚合返回值")
+            for ty, val in reversed(args):
+                if is_agg(ty):
+                    raise Unsupported(f"extern 调用 {callee[1:]}: 第 1 阶段不接受聚合实参")
+                self.get(ty, val, RAX)
+                self.asm.emit(push_r(RAX))
+            for reg, _a in zip(C_ARG_REGS, args):
+                self.asm.emit(pop_r(reg))
+            self.asm.call(callee[1:])
+            # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
+            # 后面读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (实测第一版就是这样:
+            # `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
+            if d is not None:
+                self.put(d, RAX)
+            return
         ret_agg = ret_ty is not None and is_agg(ret_ty)
         if len(args) > 16:
             raise Unsupported("v0 最多 16 个实参")
@@ -2070,7 +2107,7 @@ def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
 
 def compile_pe(text: str) -> tuple[bytes, dict]:
     global TEXT_VADDR
-    globals_, funcs = parse_ll(text)
+    globals_, funcs, _externs = parse_ll(text)
     if not any(f.name == "_start" for f in funcs):
         raise Unsupported("没有 _start 入口（PE 产物需要一个用户态入口）")
 
@@ -2090,10 +2127,90 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
 # ------------------------------------------------------------------ 驱动
 
 
-def compile_ll(text: str) -> tuple[bytes, dict]:
+class ForeignObject:
+    """一个外部 ELF64 可重定位目标文件里我们真正要用的那点东西 (docs/173 阶段 1)。
+
+    **只做静态、freestanding 的对象**: 取 `.text` 的字节 + 它导出的全局符号 (名字 -> 段内
+    偏移)。两条边界都**硬失败**而不是猜:
+
+    * 对象 `.text` 里**有重定位** → 报错。第 1 阶段不实现跨对象的符号重定位, 猜一个偏移
+      的后果是"调到一个错地址", 那是运行期崩溃而不是编译期报错。
+    * 对象**引用未定义符号** (典型是 libc 的 printf/malloc) → 报错。第 1 阶段不链 libc。
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        raw = path.read_bytes()
+        if raw[:4] != b"\x7fELF" or raw[4] != 2 or raw[5] != 1:
+            raise Unsupported(f"{path.name}: 不是 ELF64 小端目标文件")
+        if struct.unpack_from("<H", raw, 16)[0] != 1:      # e_type != ET_REL
+            raise Unsupported(f"{path.name}: 不是可重定位目标文件 (ET_REL)")
+        e_shoff, = struct.unpack_from("<Q", raw, 40)
+        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
+        secs = []
+        for k in range(e_shnum):
+            o = e_shoff + k * e_shentsize
+            nameoff, typ, flags, addr, off, size, link, info, align, entsize = \
+                struct.unpack_from("<IIQQQQIIQQ", raw, o)
+            secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
+                         "link": link, "entsize": entsize, "name": ""})
+        shstr = secs[e_shstrndx]
+        for s in secs:
+            end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
+            s["name"] = raw[shstr["off"] + s["nameoff"]:end].decode("utf-8", "replace")
+        # .text
+        text = b""
+        for s in secs:
+            if s["name"] == ".text":
+                text = raw[s["off"]:s["off"] + s["size"]]
+        if not text:
+            raise Unsupported(f"{path.name}: 没有 .text")
+        # 符号: 只留**定义在 .text 里**的全局/弱符号; 未定义的非空名一律拒
+        syms: dict[str, int] = {}
+        undefined: list[str] = []
+        for s in secs:
+            if s["type"] != 2:                             # SHT_SYMTAB
+                continue
+            strt = secs[s["link"]]
+            for k in range(s["size"] // 24):
+                o = s["off"] + k * 24
+                nameoff, info, other, shndx, value, size = struct.unpack_from("<IBBHQQ", raw, o)
+                if nameoff == 0:
+                    continue
+                end = raw.index(b"\x00", strt["off"] + nameoff)
+                nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
+                if shndx == 0:
+                    undefined.append(nm)
+                # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
+                # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
+                elif shndx < len(secs) and secs[shndx]["name"] == ".text" \
+                        and (info & 0x0F) in (1, 2):                 # GLOBAL / WEAK
+                    syms[nm] = value
+        # **未定义符号先查**: 一个调用 libc 的 C 函数**同时**有未定义符号与重定位, 先说
+        # "它引用了 printf" 比说"它有重定位"有用得多 —— 前者直接告诉用户"第 1 阶段不链 libc",
+        # 后者会把人引去查重定位。所以顺序是有意的, 不是顺手。
+        if undefined:
+            raise Unsupported(
+                f"{path.name}: 引用了未定义的符号 {', '.join(sorted(set(undefined))[:4])}"
+                f" —— 第 1 阶段不链 libc (docs/173 §3)")
+        for s in secs:
+            if s["type"] == 4 and s["size"] > 0:          # SHT_RELA
+                raise Unsupported(
+                    f"{path.name}: 对象里有重定位 ({s['name']}) —— 第 1 阶段不支持"
+                    f"跨对象重定位 (docs/173 §3)")
+        self.text = text
+        self.syms = syms
+
+
+#: System V AMD64 整数实参寄存器 (我们**自己的**约定是实参走栈, 这一套只给 extern 调用点)。
+C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
+
+
+def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
+    objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
-    globals_, funcs = parse_ll(text)
+    globals_, funcs, externs = parse_ll(text)
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -2111,7 +2228,11 @@ def compile_ll(text: str) -> tuple[bytes, dict]:
             bss = align_up(bss, 8)
             g.addr = DATA_VADDR + len(data) + bss
             bss += align_up(sz, 8)
-    em = Emitter(globals_)
+    # **`llvm.*` 不是外部函数, 是内建**: 运行期块里有 `declare void @llvm.trap()`, 而 `_call`
+    # 对它是**特判** (发 `ud2` 而不是真去 call)。放进 externs 会把它抢进 C ABI 那条路,
+    # 于是 `call llvm.trap` 在 finalize 里报"未定义的标签" —— 实测把 loment_elf_test 从
+    # 7/7 打到 4/7。所以这里滤掉 (除 llvm.* 之外没有别的内建 declare)。
+    em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")})
     for g in globals_:
         em.asm.labels[g.name] = g.addr
     if not any(f.name == "_start" for f in funcs):
@@ -2119,11 +2240,26 @@ def compile_ll(text: str) -> tuple[bytes, dict]:
     em.emit_entry_stub("_start")
     for f in funcs:
         em.emit_func(f)
+    # 外部目标文件: 它的 `.text` **接在我们自己的代码之后** (16 对齐), 并在它每个导出符号
+    # 的段内偏移处**立一个标签**。这样调用点照旧走现有的 `call`/重定位机制 —— 唯一多出来的
+    # 是"参数进寄存器"(C ABI), 见 `Emitter._call`。
+    appended: list[str] = []
+    for obj in objects:
+        while len(em.asm.buf) % 16:
+            em.asm.buf.append(0)
+        at = len(em.asm.buf)
+        for nm, val in obj.syms.items():
+            if nm in em.asm.labels:
+                continue          # 我们自己已经有这个符号: 以我们自己的为准
+            em.asm.labels[nm] = TEXT_VADDR + at + val
+            appended.append(nm)
+        em.asm.buf += obj.text
     text = em.asm.finalize()
     entry = em.asm.labels["__entry"]
     return build_elf(text, bytes(data), bss, entry), {
         "text": len(text), "data": len(data), "bss": bss, "entry": entry,
-        "funcs": [f.name for f in funcs],
+        "funcs": [f.name for f in funcs], "objects": [o.path.name for o in objects],
+        "linked": appended,
     }
 
 
@@ -2132,7 +2268,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
         return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
-    files = []
+    files: list[str] = []
+    link: list[Path] = []
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -2144,16 +2281,24 @@ def main(argv: list[str] | None = None) -> int:
             target = argv[i]
         elif a == "--check":
             check = True
+        elif a == "--link":
+            i += 1
+            link.append(Path(argv[i]))
         else:
             files.append(a)
         i += 1
     if len(files) != 1 or target not in ("elf", "pe"):
-        print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]", file=sys.stderr)
+        print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
+              " [--link OBJ.o ...]", file=sys.stderr)
+        return 2
+    if link and target == "pe":
+        print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
         return 2
     src = Path(files[0])
     try:
+        objs = [ForeignObject(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
-            src.read_text(encoding="utf-8"))
+            src.read_text(encoding="utf-8"), *(() if target == "pe" else (objs,)))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1
