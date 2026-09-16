@@ -267,11 +267,11 @@
   },
   {
    "path": "lompi/store/std/0.1.0/f64conv.lomt",
-   "sha256": "fdf359617bf41c85661f957d0163ab88644cd85ca56c0c6bb634f8bf59644f87"
+   "sha256": "7ffcda62d3cd7130721e2d44237f624a24f3c28d3f1392481b5c0ef238041053"
   },
   {
    "path": "lompi/store/std/0.1.0/f64fmt.lomt",
-   "sha256": "d30e563fbc7e30ea38d2443a9af39da4241ee3e7cf8d0643135dd8401196c499"
+   "sha256": "8ebfa9327d5fcad12610c6108f674c0cbf5324086c4a79514762b86d8c1c72b8"
   },
   {
    "path": "lompi/store/std/0.1.0/fenwick.lomt",
@@ -363,7 +363,7 @@
   },
   {
    "path": "lompi/store/std/0.1.0/kdf.lomt",
-   "sha256": "91bb050d687a030ad5470c3553dcee8eb61cee59bc5b958f8782f622248e24f3"
+   "sha256": "14397adab6f81ad4d8397a95b81480b8c9657bcc97060bee3829041814eaabdc"
   },
   {
    "path": "lompi/store/std/0.1.0/line.lomt",
@@ -395,7 +395,7 @@
   },
   {
    "path": "lompi/store/std/0.1.0/mathf.lomt",
-   "sha256": "c98b8fec1d1ccba72cd38fe5bbc9c7340f8a935d88bae1c3551fca60cef16263"
+   "sha256": "beecb8936f2601f63eeb40dbb734628de1277493ac75957c03ce1b41f19e9386"
   },
   {
    "path": "lompi/store/std/0.1.0/matrix.lomt",
@@ -503,7 +503,7 @@
   },
   {
    "path": "lompi/store/std/0.1.0/round.lomt",
-   "sha256": "2ad96efdf02cc94f996b3048632f148c610b7e1a702084e60eb834690a07137e"
+   "sha256": "e4e8ffe34b26c3105938a5a7a193594387c8489d55ac6ec574c43d2973588cfe"
   },
   {
    "path": "lompi/store/std/0.1.0/sched.lomt",

@@ -16,8 +16,6 @@
 module f64conv
 
 use "f64.lomt"
-use "f64bits.lomt"
-use "wide.lomt"
 
 /// u64 -> f64。超过 2^53 的部分按就近到偶数舍入。
 pub fn f64conv_from_u64(v: u64) -> u64 {

@@ -21,8 +21,6 @@
 module kdf
 
 use "hmac.lomt"
-use "sha256.lomt"
-use "mem.lomt"
 
 /// PBKDF2 的临时区大小 (salt||块号 + 三个 32 字节的工作块)。
 pub fn kdf_pbkdf2_scratch(sn: u32) -> u32 {

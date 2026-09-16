@@ -26,9 +26,7 @@
 module f64fmt
 
 use "f64.lomt"
-use "f64bits.lomt"
 use "bigint.lomt"
-use "mem.lomt"
 
 /// 大整数肢体重数。
 ///

@@ -13,9 +13,6 @@
 module round
 
 use "f64.lomt"
-use "f64bits.lomt"
-use "wide.lomt"
-use "mem.lomt"
 
 // ------------------------------------------------------------ 浮点: 四种模式
 
