@@ -1095,6 +1095,13 @@ fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
+            // 外部函数 (docs/173) **没有函数体** —— 不挡住的话, 找 `{` 的那一圈会一路扫到
+            // **下一个函数**的体入口, 于是把别人的字符串常量挂到外部函数名下
+            // (实测: `extern fn c_puts(p: ptr) -> i32;` + main 里的 "hello" 生成
+            //  `@.str.c_puts.0`, 而参考实现是 `@.str.main.0`)。
+            if i > 0 && tok_is(src, toks, i - 1, "extern") {
+                i = i + 1;
+            } else {
             store32(s, 524, 0);
             let j: u32 = i;
             while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") {
@@ -1124,6 +1131,7 @@ fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
                 j = j + 1;
             }
             i = j;
+            }
         } else {
             i = i + 1;
         }
@@ -1137,6 +1145,10 @@ fn strings_needed(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
+            // 外部函数没有函数体 —— 同上, 不挡就会把下一个函数的体算成它的 (docs/173)
+            if i > 0 && tok_is(src, toks, i - 1, "extern") {
+                i = i + 1;
+            } else {
             let j: u32 = i;
             while tok_kind(toks, j) != 4 && !tok_is(src, toks, j, "{") {
                 j = j + 1;
@@ -1156,6 +1168,7 @@ fn strings_needed(src: ptr, toks: ptr) -> u32 {
                 j = j + 1;
             }
             i = j;
+            }
         } else {
             i = i + 1;
         }
@@ -4369,7 +4382,12 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             // 附加信息: 0=普通 1=trait 声明里的方法 2=impl 方法 (名字 <recv>_<方法>)
             store32(s, fk_base(n), 0);
             store32(s, fk_base(n) + 4, 0);
-            if trait_depth != 0 && depth == trait_depth {
+            // 外部函数 (docs/173): 第三种"只声明不发射"的类型。判**前一个 token** 是不是
+            // `extern` —— 比挂一个粘性标志稳（`extern` 后面必须紧跟 `fn`, 看前一个 token 就
+            // 精确等价, 也不会被后面的 `fn` 误吃）。
+            if i > 0 && tok_is(src, toks, i - 1, "extern") {
+                store32(s, fk_base(n), 3);
+            } else if trait_depth != 0 && depth == trait_depth {
                 store32(s, fk_base(n), 1);
             } else if impl_depth != 0 && depth == impl_depth {
                 store32(s, fk_base(n), 2);
@@ -4511,6 +4529,36 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     if load32(s, 516) == 1 {
         emit_str(s, out, "@__loment_heap = internal global [65536 x i8] zeroinitializer\n@__loment_off = internal global i32 0\n\n");
     }
+    // 外部函数的 `declare` (docs/173): 每个外部符号一条, 按名字去重, **放在函数体之前**。
+    // 位置对着参考实现排: `emit_llvm` 把它们追加进 `globals_`, 而 `globals_` = [declares] +
+    // 每函数的 globals (字符串常量就在那一堆里), 之后统一补一个空行。所以这里插在**字符串
+    // globals 之前**, 空行只在"后面没有字符串 globals"时自己补 —— 有的话那个块已经补过了。
+    let dx: u32 = 0;
+    let nd: u32 = 0;
+    while dx < load32(s, 640) {
+        if load32(s, fk_base(dx)) == 3 {
+            nd = nd + 1;
+            emit_str(s, out, "declare ");
+            emit_ty(s, out, src, toks, load32(s, CG_FN + dx * 12 + 4));
+            emit_str(s, out, " @");
+            emit_tok(s, out, src, toks, load32(s, CG_FN + dx * 12));
+            emit_str(s, out, "(");
+            let dk: u32 = 0;
+            let dc: u32 = load32(s, CG_FN + dx * 12 + 8);
+            while dk < dc && dk < 10 {
+                if dk > 0 {
+                    emit_str(s, out, ", ");
+                }
+                emit_ty(s, out, src, toks, load32(s, CG_PARAM + dx * 80 + dk * 8 + 4));
+                dk = dk + 1;
+            }
+            emit_str(s, out, ")\n");
+        }
+        dx = dx + 1;
+    }
+    if nd > 0 && load32(s, 532) != 1 {
+        emit_str(s, out, "\n");
+    }
     if load32(s, 532) == 1 {
         emit_str_globals(s, out, src, toks);
         emit_str(s, out, "\n");
@@ -4531,6 +4579,13 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
                     tq = tq + 1;
                 }
                 i = tq + 1;
+            } else if load32(s, fk_base(fnix)) == 3 {   // 外部函数: 同样只有签名, 整条跳过
+                let erp: u32 = skip_parens(src, toks, find_paren(src, toks, i + 2));
+                let eq: u32 = erp + 1;
+                while tok_kind(toks, eq) != 4 && !tok_is(src, toks, eq, ";") {
+                    eq = eq + 1;
+                }
+                i = eq + 1;
             } else {
                 store32(s, 4, 0);    // temp 计数随函数重置
                 store32(s, 480, 0);  // label 计数随函数重置

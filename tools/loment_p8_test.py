@@ -1369,32 +1369,41 @@ def test_m85_driver_gate_on_probe_cases():
             f"不以 `.` 开头的后缀没被忽略: rc={rc6} err={err6[-300:]!r}"
         assert lomentc.source_ext_of(cust, None) == ".lomt", "参考实现没忽略配坏的后缀"
         print("      配坏的后缀 (缺前导 `.`): 驱动与参考都当没配")
-        # ---- 外部函数 (docs/173): 自举镜**尚未实现**, 必须**硬拒**而不是静默错编。
-        # 放过去的后果实测过: codegen 把 `extern fn c_add(a,b) -> T;` 当普通函数记进表,
-        # 发出一条没有函数体的 define, 游标从签名滑进下一个函数的体 —— main 整个消失,
-        # 退出码 0。所以这条判据钉的是"**响**"。
-        ext_dir = Path(td) / "ffi"
-        ext_dir.mkdir()
-        (ext_dir / "e.lomt").write_text(
-            "module e\n\nextern fn c_add(a: i32, b: i32) -> i32;\n\n"
-            "fn main() -> i32 {\n    return c_add(3 as i32, 4 as i32);\n}\n",
-            encoding="utf-8", newline="\n")
-        rc7, out7, err7 = _run_driver_raw(elf, _wsl_path(ext_dir / "e.lomt"), td, "g_ext")
-        assert rc7 != 0 and "外部函数" in err7, \
-            f"自举镜没有硬拒 extern: rc={rc7} out={out7[:200]!r} err={err7[-300:]!r}"
-        print("      extern fn: 自举镜尚未实现 -> 硬拒 (不是静默错编)")
-        # 反向的一条: `tok_is` 比的是 token 文本, 源码里的**字符串字面量** `"extern"` 也会
-        # 被它匹配上 —— 只判文本不判 kind 的话, `let s: str = "extern";` 这种完全正常的
-        # 程序会被误拒。这条钉住"必须判 kind == 0"。
+        # ---- 外部函数 (docs/173)。这条路上自举镜踩过两个**静默错编**, 两条都要钉住:
+        # ① 收集阶段把 `extern fn f(a,b) -> T;` 当普通函数 → 发出一条没有函数体的 define,
+        #    游标从签名滑进下一个函数的体 (main 整个消失, 退出码 0);
+        # ② `emit_str_globals`/`strings_needed` 靠"找 `{`"界定函数体 → 外部函数没有体,
+        #    于是把**下一个函数**的字符串常量挂到它名下 (`@.str.c_puts.0` 而不是 `@.str.main.0`)。
+        # 判据同时覆盖两种形态, 且**比的是两个实现逐字节相同** —— 这正是这两条错误的症状
+        # (前者让整段 IR 错位, 后者只错一个全局名, 只测"能不能编过"抓不到)。
+        for tag, src in (("g_ext", "module e\n\nextern fn c_add(a: i32, b: i32) -> i32;\n\n"
+                                  "fn main() -> i32 {\n    return c_add(3 as i32, 4 as i32);\n}\n"),
+                         ("g_extstr", "module e\n\nextern fn c_puts(p: ptr) -> i32;\n\n"
+                                      "fn main() -> i32 {\n    let s: str = \"hello\";\n"
+                                      "    c_puts(str_ptr(s));\n    return 0;\n}\n")):
+            d = Path(td) / tag
+            d.mkdir()
+            f = d / f"{tag}.lomt"
+            f.write_text(src, encoding="utf-8", newline="\n")
+            rc7, got7, err7 = _run_driver_raw(elf, _wsl_path(f), td, tag)
+            assert rc7 == 0, f"自举镜编不过 extern ({tag}): rc={rc7} err={err7[-300:]!r}"
+            want7 = lomentc.emit_llvm(lomentc.load(f), ROOT)
+            assert got7 == want7, f"extern 的 IR 两个实现不一致 ({tag})"
+        print("      extern fn: 声明 + 调用 + 字符串常量, 驱动与参考逐字节一致")
+        # `tok_is` 比的是 token 文本, 源码里的**字符串字面量** `"extern"` 也会被它匹配上 ——
+        # 判"前一个 token 是不是 extern"时必须同时判 kind == 0, 否则
+        # `let s: str = "extern";` 这种完全正常的程序会被误判成外部函数的声明。
         lit_dir = Path(td) / "ffi_lit"
         lit_dir.mkdir()
-        (lit_dir / "l.lomt").write_text(
+        lit_f = lit_dir / "l.lomt"
+        lit_f.write_text(
             "module l\n\nfn main() -> i32 {\n"
             '    let s: str = "extern";\n    return str_len(s) as i32;\n}\n',
             encoding="utf-8", newline="\n")
-        rc8, _o8, err8 = _run_driver_raw(elf, _wsl_path(lit_dir / "l.lomt"), td, "g_extlit")
+        rc8, got8, err8 = _run_driver_raw(elf, _wsl_path(lit_f), td, "g_extlit")
         assert rc8 == 0, f'字符串字面量 "extern" 被误拒了: rc={rc8} err={err8[-300:]!r}'
-        print('      字符串字面量 "extern": 正常通过 (守卫判的是 kind, 不是文本)')
+        assert got8 == lomentc.emit_llvm(lomentc.load(lit_f), ROOT), "字面量 extern 的 IR 不一致"
+        print('      字符串字面量 "extern": 不误判 (判的是 token kind, 不是文本)')
 
 
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:
