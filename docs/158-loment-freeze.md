@@ -1,6 +1,6 @@
 # 158 · Loment L1 冻结面（M96）
 
-> 版本：`L1 0.1.4-alpha2`（显示名 `Loment 0.1.4 Alpha2`；`loment/build/release-manifest.json`
+> 版本：`L1 0.1.4-alpha2.2`（显示名 `Loment 0.1.4 Alpha2.2`；`loment/build/release-manifest.json`
 > 的 `release` 字段由 `tools/loment_release.py:RELEASE` 单一真源给出）；对外 tag `v0.1.4-alpha`
 > 判据（docs/145 M96）：**冻结意味着"改动要付代价"** —— 任何触及冻结面的改动都必须
 > 同时改规范、改一致性套件、两个实现同一次提交改完，并走 §5 的流程。

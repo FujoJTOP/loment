@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法 / 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom) with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §8）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E19 错误 / 查 Loment 的内建函数或语法 / 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / 从别的语言迁到 Loment 时哪里不一样。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -23,8 +23,8 @@ description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研
 loment version
 ```
 
-拿到 `Loment 0.1.4 Alpha2 (0.1.4-alpha2), commit <短号>` 这类输出。**以它的 commit 为准**：
-不同 checkout 能力不同（本文件描述 0.1.4-alpha2 这一代；更早的包会显示 `0.1.4 Alpha`）。
+拿到 `Loment 0.1.4 Alpha2.2 (0.1.4-alpha2.2), commit <短号>` 这类输出。**以它的 commit 为准**：
+不同 checkout 能力不同（本文件描述 0.1.4-alpha2.2 这一代；更早的包会显示 `0.1.4 Alpha` / `0.1.4 Alpha2`）。
 
 命令面（安装后就在 PATH 上）：
 
@@ -222,7 +222,7 @@ fn _start() {
 | 构造 | 写法 |
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
-| 导入 | **两种写法**：`use 名字`（如 `use bytes`，按 `loment/lib` → `examples` → `selfhost` → `tools` 找 `名字.lomt`）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**） |
+| 导入 | **两种写法，后面都不带分号**：`use 名字`（如 `use bytes`，按 `loment/lib` → `examples` → `selfhost` → `tools` 找 `名字.lomt`）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。**写库**时 `<包>/deps/<名字>/` 优先（见 §8）。写成 `use x;` 会被解析期拒绝（§6.13） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`）；**形参最多 10 个** |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
 | 常量 | `const NAME: u32 = 3` |
@@ -366,6 +366,16 @@ Rust 先验能带你走完 90%（标量/字符串/切片/控制流/泛型/trait�
 
 10. **`==` 用在 struct / enum 上**：checker 放行，但原生后端会拒（`M0 只支持标量`）。
     比较聚合要用显式字段比较。
+
+11. **`const` 的初值只能是整数字面量** —— 不能是表达式，也不能引用别的 `const`
+    （`const B: u32 = A + 1;` 报 `期望 number（整数），得到 ...`）。所以像内存布局那种
+    一串偏移量，只能一路把数字写死（`loment/tools/lompkg.lomt` 的开头就是这么写的）。
+
+12. **没有字符串常量**：`pub const NAME: str = "x";` 是**语法错**。要一个字符串标签就写成
+    `pub fn name() -> str { return "x"; }` —— `.lomp` 包清单就是这么写的（§8）。
+
+13. **`use` 后面不带分号**：`use mathutil;` 报 `顶层只允许 use/capability/fn，得到 ';'`；
+    两种写法（`use 名字` / `use "路径.lomt"`）都不带。
 
 ## 7. 拿不到源码仓库时怎么办
 

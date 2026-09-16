@@ -23,8 +23,11 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 2026-09-13 由 0.1.3.4-alpha 升到 0.1.4-alpha: 去 Python 收口 (lompkg + L0 生成器 lomc)。
 # 2026-09-15 升到 **0.1.4-alpha2**: 三条腿全部落地 —— 去 WSL + 去 clang(产品/构建路径)
 # + 包内链接器换成自举镜像; 发行包首次自带 agent skill。tag 会另打 `v0.1.4-alpha2`。
-RELEASE = "0.1.4-alpha2"
-RELEASE_NAME = "0.1.4 Alpha2"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-15 再升到 **0.1.4-alpha2.2**: 库系统 (docs/168) —— 依赖从源码的 use 推导、
+# 实例身份=递归哈希、同名多实例真能共存、能力需求沿闭包推导、.lomp 清单 (Loment 自己);
+# 并补上 agent 指南与 lomlib 的 Loment 孪生 (id)。tag 会另打 `v0.1.4-alpha2.2`。
+RELEASE = "0.1.4-alpha2.2"
+RELEASE_NAME = "0.1.4 Alpha2.2"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

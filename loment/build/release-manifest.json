@@ -1,5 +1,5 @@
 {
- "release": "0.1.4-alpha2",
+ "release": "0.1.4-alpha2.2",
  "files": [
   {
    "path": "tools/lomc.py",
@@ -315,7 +315,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "9ea92d601a3c93395a8e0815e62af92d461593a0d5e5e6c4f4644c74a3134159"
+   "sha256": "8df42cfe7cf644434e9148dde2045f228346807cdf3d8c749e5001f5e2b825ea"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -639,7 +639,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "2439313cfcb1501d1283d61838a966e0439b6b382444dcc2106ad2b5c11df609"
+   "sha256": "d062f1c4d303d1cfffc6cc4a371378f16799cb4bc0b5c169931ba77919b88693"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -655,7 +655,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "9438b6461d7f9b8010bc54a593027ffbb9c14029772873c17eb8fb0644e667c1"
+   "sha256": "55e4d889c99b1a71e2864bae7abb7d14c9901760614cd20c68fec98875e92845"
   },
   {
    "path": "docs/163-loment-signing.md",
