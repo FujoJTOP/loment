@@ -160,8 +160,18 @@ loment lib materialize DIR --out DIR  # 物化成编译器能直接吃的树
   "逐文件统一改名"保语义。它有明确的失效路径（漏改/多改 → 编译器报未声明），但它是**这一层
   的实现方式**，不是语言保证 —— 真要语言级保证得让编译器按实例做名字解析（那时这层就该删掉）。
 - **真歧义拒掉**：一个文件同时点两个版本的同名项 → 报出来并拒绝物化（§4.2 末）。
-- **`lomlib.py` 没有 Loment 孪生**：`lompkg.py` 有的（`loment/tools/lompkg.lomt` + 逐字节
-  stdout 判据）。孪生还没写 —— 记在任务里，不假装对称。
+- **孪生只覆盖了 `id`**（`loment/tools/lomlib.lomt` + `loment_lib_test` 里的逐字节 stdout 判据）：
+  `tree` / `cap` / `check` / `materialize` 还没有 Loment 版。**别把"孪生"读成"全等"** ——
+  文件头写着同一句话。孪生程序不认得仓库内置的四个根，只认 `<包>/deps/`（它不知道自己在哪个
+  仓库里跑），所以判据的场景只用 `deps/`。
+- **写孪生时抓到一条既有 bug**：`loment/tools/lompkg.lomt` 的文件排序**方向写反**（成了降序），
+  而它的判据夹具每包只有一个 `.lomt`，所以一直没暴露 —— 多文件包上两个实现给出不同哈希。
+  已修，并给 `loment_pkg_test` 补了多文件包夹具（补夹具后先红、修完再绿）。
+- **自举镜有两处与参考实现产出的 IR 不一致**（2026-09-15 写 `lomlib.lomt` 时被 p8 语料抓到）：
+  ① **指针 + 整数**用运算符写时，镜发 `add ptr`，参考发 `getelementptr`；
+  ② **混宽比较**（`load8(...)` 是 u32 对 `as u8` 的右值）两边选的比较宽度不同。
+  本文件因此一律写 `ptr_add(p, n)`、比较两侧对齐到 u32 —— **不是风格, 是绕开镜的洞**。
+  两个洞本身没修（那是双实现 + 自举定点的事），记在任务里。
 - **实例会重复进二进制**：多版本共存意味着体积按实例数增长。工具**显示**它
   （`lib tree` / `lib check` 打印同名多实例），**藏起来的多份**才是问题。
 - **`_start` 冲突**：依赖里也定义 `_start` 时 `lib check` 报、`lib materialize` 拒 —— 入口只能有一个。
@@ -172,7 +182,7 @@ loment lib materialize DIR --out DIR  # 物化成编译器能直接吃的树
 
 ## 6. 判据（`tools/loment_lib_test.py`）
 
-8 条，每条对应上面某一条设计承诺；三条最关键的做过**证伪**（把实现改坏后必须变红）：
+13 条，每条对应上面某一条设计承诺；关键几条都做过**证伪**（把实现改坏后必须变红）：
 
 | 判据 | 钉住的设计承诺 |
 |---|---|
@@ -187,4 +197,5 @@ loment lib materialize DIR --out DIR  # 物化成编译器能直接吃的树
 | `test_deps_are_not_part_of_own_source` | `deps/` 不算本包源码（实测踩过的坑） |
 | `test_capability_closure_is_derived_and_conflicts_reported` | 判据 3 + 同名不同域报冲突 |
 | `test_multi_file_package_survives_materialize` | **库是多文件组成的**：包内 `use "路径"` 在物化后仍解得开，端到端退出码 = 21+21 |
+| `test_loment_lomlib_matches_python` | **孪生**：`lomlib.lomt`（链成可执行文件后跑）与 `lomlib.py id` 的 stdout 逐字节相同（覆盖面只到 `id`） |
 

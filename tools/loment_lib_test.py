@@ -2,8 +2,9 @@
 # loment_lib_test.py — Loment 库系统判据 (Alpha2.1, docs/168)
 #
 # 判据就是 docs/168 §2 那五条, 每条配一个可执行的最小复现。这里不测"功能看起来有了",
-# 测的是: 身份是不是递归的、菱形是不是去重、多版本是不是**精确报冲突**、
-# 物化出来的树是不是**真能编成可执行文件并跑出正确结果**。
+# 测的是: 身份是不是递归的、菱形是不是去重、多版本是不是**真能共存**、
+# 物化出来的树是不是**真能编成可执行文件并跑出正确结果**、以及
+# **孪生 (loment/tools/lomlib.lomt) 与 Python 版 stdout 逐字节相同**。
 #
 # 运行: python tools/loment_lib_test.py   (退出码 0 = 全绿)
 
@@ -500,6 +501,56 @@ def test_dependency_start_is_reported_once_and_correctly():
         except lomlib.LibError:
             return
         raise AssertionError("依赖带 _start 却物化成功了")
+
+
+@test
+def test_loment_lomlib_matches_python():
+    """孪生判据: 同一棵树, `loment/tools/lomlib.lomt`(链成可执行文件后跑) 与 `tools/lomlib.py`
+    的 **stdout 逐字节相同 + 退出码相同**。
+
+    **覆盖面不对称, 别读成全等**: 孪生只做 `id`(递归哈希) —— `tree` / `cap` / `check` /
+    `materialize` 都还没有 Loment 版 (lomlib.lomt 的文件头写着同一句话)。
+    只比 stdout 不比 stderr: 错误文案里含各自的绝对路径, 不可能逐字节相同 (与 loment_pkg_test 同法)。
+    """
+    twin = ROOT / "loment" / "tools" / "lomlib.lomt"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        # 1) 把孪生链成可执行文件 (走仓库自己的原生后端, 不经 clang)
+        mod = lomentc.load(twin)
+        deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"lomlib.lomt 自己检查不过: {errs[:2]}"
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        exe = td / "lomlib-twin"
+        exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt"
+                         else lomelf.compile_ll(ir))[0])
+        # 2) 两棵树: 菱形去重 + 同名多版本
+        for label, root in (("菱形", build_tree(td / "t1")),
+                            ("多版本", build_tree(td / "t2", v2_for_mid2=True))):
+            buf, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                py_rc = lomlib.main(["id", str(root)])
+            got = subprocess.run([str(exe), "id", str(root.resolve())],
+                                 capture_output=True, text=True, shell=False, timeout=120)
+            assert (py_rc, buf.getvalue()) == (got.returncode, got.stdout), (
+                f"[{label}] 不一致: rc py={py_rc} el={got.returncode} | "
+                f"py={buf.getvalue()!r} | el={got.stdout!r} | err={got.stderr[-120:]!r}")
+        # 3) 依赖找不到: 两边都必须非零
+        broken = td / "broken"
+        w(broken, "app/app.lomt", """module app
+
+use nope
+
+fn _start() {
+    syscall4(60, 0, 0, 0);
+}
+""")
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            py_rc = lomlib.main(["id", str(broken / "app")])
+        got = subprocess.run([str(exe), "id", str((broken / "app").resolve())],
+                             capture_output=True, text=True, shell=False, timeout=120)
+        assert py_rc != 0 and got.returncode != 0, (py_rc, got.returncode)
 
 
 def main() -> int:

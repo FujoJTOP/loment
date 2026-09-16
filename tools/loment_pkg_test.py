@@ -104,6 +104,12 @@ def _tree(base: Path) -> dict[str, Path]:
     _mk_src(base / "nest", "src/deep/d.lomt", "module deep\nfn g() -> u32 { return 2; }\n")
     # 空包: 一个 *.lomt 都没有 -> sha256(b"<empty>")
     _mk_pkg(base / "empty", "empty", "0.1.0", {})
+    # **多文件包**: 2026-09-15 补 —— 原先每包只有一个 .lomt, 于是 hid 了"文件排序方向"
+    # 这类 bug (lompkg.lomt 侧实际排成了降序, 两实现的哈希在多文件包上不一致却一路绿)
+    _mk_pkg(base / "multi", "multi", "0.1.0", {})
+    _mk_src(base / "multi", "src/a.lomt", "module a\n")
+    _mk_src(base / "multi", "src/b.lomt", "module b\n")
+    _mk_src(base / "multi", "src/c.lomt", "module c\n")
     # 依赖环
     _mk_pkg(base / "cyc_a", "cyc_a", "0.1.0", {"cyc_b": {"path": "../cyc_b"}})
     _mk_pkg(base / "cyc_b", "cyc_b", "0.1.0", {"cyc_a": {"path": "../cyc_a"}})
@@ -113,7 +119,8 @@ def _tree(base: Path) -> dict[str, Path]:
     (base / "noname").mkdir()
     (base / "noname" / "pkg.json").write_text(json.dumps({"version": "0.1.0"}), encoding="utf-8")
     return {n: base / n / "pkg.json" for n in
-            ("base", "mid", "top", "nest", "empty", "cyc_a", "cyc_b", "miss", "noname")}
+            ("base", "mid", "top", "nest", "empty", "multi",
+             "cyc_a", "cyc_b", "miss", "noname")}
 
 
 # ---------------------------------------------------------------- 两侧执行
@@ -194,7 +201,7 @@ def test_loment_lompkg_matches_python():
         m = _tree(base)
         elf = _build(td)
         n = 0
-        for name in ("top", "nest", "empty"):
+        for name in ("top", "nest", "empty", "multi"):
             _pair(elf, td, f"res_{name}",
                   ["resolve", str(m[name])],
                   ["resolve", _wsl_path(m[name])])

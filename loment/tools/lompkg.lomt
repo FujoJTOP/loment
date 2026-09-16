@@ -767,7 +767,9 @@ fn sort_idx(mem: ptr) {
         while j > 0 && going == 1 {
             let oj: u32 = load32(idx, (j - 1) * 8);
             let lj: u32 = load32(idx, (j - 1) * 8 + 4);
-            if bytes_lt(pool, oj, lj, pool, oi, li) == 1 {
+            // 方向: 要 [前一个 > 当前] 才右移。写成 bytes_lt(前, 后) 就成了降序 ——
+            // 每包只有一个 .lomt 时看不出来 (2026-09-15 写 lomlib 孪生时发现)。
+            if bytes_lt(pool, oi, li, pool, oj, lj) == 1 {
                 store32(idx, j * 8, oj);
                 store32(idx, j * 8 + 4, lj);
                 j = j - 1;
