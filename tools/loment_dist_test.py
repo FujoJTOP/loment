@@ -449,6 +449,24 @@ def test_check_detects_staleness() -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             rc = loment_dist.check(out)
         check("--check 能发现归档里的来源文件过期 (原先是个洞)", rc != 0, f"rc={rc}")
+    # 版本文件也带提交号, 所以它同属"打完包又提交了一次"那一类 —— 2026-09-16 之前它
+    # **不在** _fresh_sources 里, 于是 0.1.4-pre1 的包里印的是上一个提交号的 commit 行,
+    # 而 `--check` 照样绿 (真实事故, 不是假想)。
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        lin = loment_dist.payload("linux", {"loment-driver": (b"ELF", b"PE")})
+        lin["share/loment/version"] = (b"Loment 9.9.9 Stale (9.9.9-stale)\ncommit 0000000\n",
+                                       0o644)
+        (out / f"loment-{VER}-linux-x64.tar.gz").write_bytes(
+            loment_dist._tar_gz(f"loment-{VER}-linux-x64", lin))
+        loment_dist.write_sums(out)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = loment_dist.check(out)
+        check("--check 能发现归档里的 version 文件过期 (提交号印的是上一代)", rc != 0,
+              f"rc={rc}")
+    ver = loment_dist.version_text()
+    check("version 文件的提交号就是当前 HEAD",
+          loment_dist._git("rev-parse", "--short", "HEAD") in ver, ver.strip())
 
 
 def test_skill_example_sync() -> None:

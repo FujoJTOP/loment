@@ -1422,6 +1422,11 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
         "share/lompi/skill/SKILL.md": _read(SKILL_LOMPI),
         **{f"share/lompi/store/{k}": v for k, v in _store_files().items()},
         "share/loment/seed.ll": _read("loment/build/selfhost_driver.ll"),
+        # **版本文件也在这一列** (2026-09-16 补): 它带**提交号**, 所以"打完包又提交了一次"
+        # 就会让它过期。原先 `--check` 根本不看它 —— 于是 0.1.4-pre1 的包里印的是**上一个**
+        # 提交号的 commit 行, 而 `--check` 照样绿 (和上面 skill/store 那两个洞是同一种:
+        # 只跟自己的 SHA256SUMS 比, 两边一起过期就永远看不出来)。
+        "share/loment/version": version_text().encode(),
         f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
         "README.md": _subst(README_MD).encode(),
         "LICENSE": _read(LICENSE),
