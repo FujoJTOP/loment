@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -48,36 +49,118 @@ REPOS: dict[str, dict] = {
         ],
         "renames": [],
         "floor": 250,
+        #: 仓库的对外元数据。**放在这里而不是手敲 `gh repo edit`** —— 手敲的只生效一次,
+        #: 下次建库/换机器就丢了; 写进 spec 则每次 `--push` 都会对齐 (值一样时是无操作)。
+        #: 用户 2026-09-16 定: **Loment 公开**, 且**不打 tag** (tag 要等真发布)。
+        "visibility": "public",
+        "description": "Loment — a systems programming language with a Rust-subset syntax "
+                       "and capability domains; compiles to native binaries with no runtime",
+        "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/",
+        "topics": ["programming-language", "compiler", "rust", "self-hosted",
+                   "systems-programming", "capability-security", "no-std"],
         "readme": """# Loment
 
-FujoOS 自研的**底层语言**：Rust 的**严格子集**，只多加了**能力域**（`capability` / `guard`）
-这一层语义。能直接编成 **x86-64 原生可执行文件**（Linux ELF / Windows PE）——
-**没有运行时、没有 libc、不需要 Python**。
+Loment is a systems programming language for writing software that runs without a
+runtime. Its syntax is a strict subset of Rust, extended with **capability domains** —
+a first-class way to state which part of a program may touch which resource.
 
-## 从哪开始
+The compiler emits native x86-64 executables (Linux ELF and Windows PE) directly.
+Programs link against no runtime and no libc; building a program requires neither
+Python nor a C compiler.
 
-| 想干什么 | 去哪 |
+Project site: <https://fujojtop.github.io/FujoOSwebsite/loment/>
+
+## Status
+
+Current version: `0.1.4-pre1`.
+
+The language surface is frozen — syntax, type rules, diagnostics, unit loading and the
+capability semantics are documented in `docs/158-loment-freeze.md`, and any change to
+them has to go through the process described there. The implementation is not frozen.
+
+Prebuilt toolchains are not published yet; see [Getting the toolchain](#getting-the-toolchain).
+
+## Getting the toolchain
+
+### Prebuilt packages
+
+Linux and Windows packages will be published in this repository's
+[Releases](https://github.com/FujoJTOP/loment/releases). They are not available yet.
+
+### Building from source
+
+The compiler rebuilds itself from sources kept in this repository. No Python, no
+interpreter and no C compiler are required — the repository ships an assembler that
+serves as the starting point of the build chain:
+
+```
+$ sh loment/bootstrap.sh
+...
+SEED BOOTSTRAP OK
+```
+
+The script rebuilds the compiler from the committed seed and verifies that the rebuilt
+result is byte-identical to the seed, then checks that the second and third stages reach
+a fixed point. Given an entry file, it also prints the compiler output for that file:
+
+```
+$ sh loment/bootstrap.sh hi.lomt > hi.ll
+```
+
+## A first program
+
+```rust
+module hello
+
+fn _start() {
+    let s: str = "hello from Loment\\n";
+    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
+    syscall4(60, 0, 0, 0);
+}
+```
+
+```
+$ loment run hello.lomt
+hello from Loment
+```
+
+The entry point is `_start`; there is no `printf`, and output goes through a system call.
+The output is a single self-contained executable.
+
+## Documentation
+
+| Document | Contents |
 |---|---|
-| 写一个 Loment 程序 | `.claude/skills/loment/SKILL.md` —— 自足的指南（语法/内建/错误码/命令） |
-| 看语言的完整样子 | `loment/examples/tour.lomt`（一个文件过完整门语言） |
-| 看编译器怎么实现的 | `loment/selfhost/` —— **用 Loment 写的 Loment 编译器** |
-| 装工具链 | `docs/162-loment-distribution.md` |
-| 语言规范 | `docs/143-l1-loment-v0.md` · `docs/146-loment-capability-semantics.md` |
+| `.claude/skills/loment/SKILL.md` | Language guide: syntax, built-in functions, error codes, commands. Self-contained; the fastest way in for both people and coding agents. |
+| `loment/examples/tour.lomt` | The whole language in one file, with commentary. |
+| `docs/143-l1-loment-v0.md` | Language specification. |
+| `docs/146-loment-capability-semantics.md` | Capability domains. |
+| `docs/` | Design and measurement records, numbered by document. |
 
-```
-loment run hi.lomt        # 编译 + 链接 + 跑
-loment help               # 全部命令
-```
+The command line has 38 commands; `loment help` lists them, `loment cheat` is a one-page
+summary. Most design documents under `docs/` are written in Chinese.
 
-## 这个仓库是什么
+## Repository layout
 
-**它是 FujoOS 单仓的发布口，不是开发地。** 开发在主仓里做，这里按路径切出来发布
-（`tools/loment_publish.py`）。**别在这里直接提交** —— 下次发布会把它盖掉。
+| Path | Contents |
+|---|---|
+| `loment/selfhost/` | The compiler. It is written in Loment. |
+| `loment/tools/` | Command-line front end, formatter, documentation generator, language server, linker. |
+| `loment/examples/` | Example programs. |
+| `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
+| `editors/` | Editor support: syntax highlighting, completion and navigation for VS Code and Vim. |
+| `tools/` | Build, packaging and verification tools. |
+| `docs/` | Design and measurement records. |
 
-## 相邻的东西
+## Contributing
 
-- `lompi` —— Loment 库的包管理器，**独立命令**（不是 Loment 的子命令）：
-  <https://github.com/FujoJTOP/lompi>
+Development takes place in a private monorepo, and this repository is generated from a
+subset of it — commits made here are overwritten by the next publication. Bug reports and
+questions are welcome as issues; patches should be discussed there first.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 """,
     },
     "lompi": {
@@ -86,6 +169,11 @@ loment help               # 全部命令
         # 摊平: 让 `lompi.lomt` / `lpi_*.lomt` / `fixture/` 直接在根上
         "renames": [("lompi/", "")],
         "floor": 30,
+        # lompi 暂时仍是私有的 (用户 2026-09-16 只说开源 Loment 本体) —— 要一起开源就改这里。
+        "visibility": "private",
+        "description": "lompi — Loment 的包管理器（库是一个目录，身份是内容哈希）",
+        "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/lompi/",
+        "topics": ["package-manager", "loment"],
         "readme": """# lompi
 
 **Loment 库的包管理器** —— 库是一个目录，身份是**内容哈希**，依赖就是源码里的 `use`。
@@ -199,6 +287,53 @@ def cmd_check() -> int:
     return 0
 
 
+def _edit_meta(spec: dict) -> int:
+    """把仓库的对外元数据对齐到 spec：**可见性 / 简介 / 官网 / 主题**。
+
+    为什么要它: 这些值原先靠手敲 `gh repo edit`, 只生效一次 —— 换机器、重建库、
+    或者谁手动改回私有, 就悄悄漂了, 而 `--check` 看不见(它只看路径清单)。
+    写进 spec 之后, **每次 `--push` 都对齐一次**, 值本来就对时是空操作。
+
+    **可见性是唯一有"外向"后果的那一项**: 从私有变公开会在 GitHub 上留痕且基本不可逆,
+    所以变了要**打出来**, 不安静地做。
+    """
+    repo = spec["repo"]
+    r = subprocess.run(["gh", "repo", "view", repo, "--json",
+                        "visibility,description,homepageUrl,repositoryTopics"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False)
+    if r.returncode != 0:
+        print(f"[{repo}] 读不到元数据: {r.stderr[-200:]}")
+        return 1
+    cur = json.loads(r.stdout)
+    args, notes = [], []
+    if cur.get("visibility", "").lower() != spec["visibility"]:
+        args += ["--visibility", spec["visibility"]]
+        notes.append(f"可见性 {cur.get('visibility','?')} -> {spec['visibility']}")
+    if (cur.get("description") or "") != spec["description"]:
+        args += ["--description", spec["description"]]
+        notes.append("简介")
+    if (cur.get("homepageUrl") or "") != spec["homepage"]:
+        args += ["--homepage", spec["homepage"]]
+        notes.append("官网地址")
+    have = {t["name"] for t in (cur.get("repositoryTopics") or [])}
+    add = [t for t in spec["topics"] if t not in have]
+    if add:
+        args += ["--add-topic", ",".join(add)]
+        notes.append("主题 +" + ",".join(add))
+    if not args:
+        print(f"[{repo}] 元数据已对齐")
+        return 0
+    e = subprocess.run(["gh", "repo", "edit", repo, *args],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False)
+    if e.returncode != 0:
+        print(f"[{repo}] 改元数据失败: {((e.stdout or '') + (e.stderr or ''))[-300:]}")
+        return 1
+    print(f"[{repo}] 元数据: " + "; ".join(notes))
+    return 0
+
+
 def cmd_push(which: str) -> int:
     names = list(REPOS) if which == "all" else [which]
     for name in names:
@@ -222,7 +357,7 @@ def cmd_push(which: str) -> int:
             (td / "README.md").write_text(spec["readme"], encoding="utf-8", newline="\n")
             _git("add", "README.md", cwd=td)
             _git("-c", "user.name=loment_publish", "-c", "user.email=noreply@fujo.invalid",
-                 "commit", "--quiet", "-m", f"README: {spec['repo']} 是发布口, 开发在主仓",
+                 "commit", "--quiet", "-m", "README — 说清这是什么、怎么开始",
                  cwd=td)
             n = len(_git("ls-files", cwd=td).splitlines())
             print(f"[{name}] 切出 {n} 个文件；建库(如无)并推送")
@@ -230,20 +365,23 @@ def cmd_push(which: str) -> int:
             have = subprocess.run(["gh", "repo", "view", spec["repo"], "--json", "name"],
                                   capture_output=True, text=True, shell=False)
             if have.returncode != 0:
-                r = subprocess.run(["gh", "repo", "create", spec["repo"], "--private",
-                                    f"--description={name} (FujoOS 发布口, 开发在主仓)"],
+                r = subprocess.run(["gh", "repo", "create", spec["repo"],
+                                    f"--{spec['visibility']}",
+                                    f"--description={spec['description']}"],
                                    capture_output=True, text=True, encoding="utf-8",
                                    errors="replace", shell=False)
                 if r.returncode != 0:
                     print(((r.stdout or "") + (r.stderr or ""))[-500:])
                     return 1
-                print(f"[{name}] 建库 {spec['repo']} (private)")
+                print(f"[{name}] 建库 {spec['repo']} ({spec['visibility']})")
             # **推成 `main`**：`gh repo create --source --push` 会把**当前分支名**
             # （这里是 `Fujoos-FujoLang-DEV`）当成默认分支 —— 一个新库顶着单仓的开发分支名
             # 很怪（2026-09-15 第一次跑就撞上了）。空库的**第一个 ref** 会成为默认分支。
             _git("remote", "add", "origin", f"https://github.com/{spec['repo']}.git", cwd=td)
             _git("push", "--quiet", "--force", "-u", "origin", "HEAD:main", cwd=td)
             print(f"[{name}] 推到 main")
+            if _edit_meta(spec) != 0:
+                return 1
         finally:
             shutil.rmtree(td, ignore_errors=True)
     return 0

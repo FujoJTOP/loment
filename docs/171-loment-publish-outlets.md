@@ -1,18 +1,34 @@
-# 171 · Loment / lompi 的发布口（两个私有库）
+# 171 · Loment / lompi 的发布口
 
 > 2026-09-15 用户定 · 工具 `tools/loment_publish.py` · 判据（门禁模式）`--check`
 > · 上游：`docs/162`（发行包）、`docs/170`（lompi 随包）
 
 ## 0. 一句话
 
-**开发在主仓（FujoOS 单仓），发布在各自的私有库。**
+**开发在主仓（FujoOS 单仓），发布在各自的库。**
 
-| 库 | 地址 | 装什么 |
-|---|---|---|
-| loment | `github.com/FujoJTOP/loment`（private） | 语言本体 + 工具链 + 文档 + 编辑器支持 |
-| lompi | `github.com/FujoJTOP/lompi`（private） | 包管理器（摊平到根） |
+| 库 | 地址 | 可见性 | 装什么 |
+|---|---|---|---|
+| loment | `github.com/FujoJTOP/loment` | **public**（2026-09-16 用户定） | 语言本体 + 工具链 + 文档 + 编辑器支持 |
+| lompi | `github.com/FujoJTOP/lompi` | private（同一天用户只说了开源 Loment 本体） | 包管理器（摊平到根） |
 
 **单仓里的内容原样不动** —— 两个库是**额外的发布口**，不是搬家。判据与跨线引用照旧看单仓。
+
+### 0.1 三个决定（2026-09-16）
+
+- **loment 转公开。** 官网（`fujojtop.github.io/FujoOSwebsite`）本来就是公开的，
+  它上面的 Loment 页面此前只能指向两个私有库 —— 现在指向得到东西了。
+- **不打 tag。** 公开的是**仓库**，不是**发布**：安装包还没有对外分发，
+  打 tag 会被读成"这一版发布了"。tag 留到真发布（M100 的外部审计之后）。
+- **仓库元数据进 spec，不手敲。** `loment_publish.REPOS[*]` 里现在带
+  `visibility` / `description` / `homepage` / `topics` 四项，`--push` 每次把它对齐到 GitHub。
+  原先靠手敲 `gh repo edit`，只生效一次：换机器、重建库、或者谁手动改回私有，就悄悄漂了，
+  而 `--check` 看不见（它只看路径清单）。**可见性是唯一有外向后果的那一项** ——
+  私有变公开会在 GitHub 上留痕且基本不可逆，所以它变了会**打出来**，不安静地做。
+
+下载的指向也定死了：**安装包发在本仓库的 Releases**，官网指向 GitHub，不是反过来
+（用户 2026-09-16 明确："不要 Loment 去官网下载"）。README 里因此写的是
+「发在本仓库的 Releases 里 —— 现在还没有发布」。
 
 ## 1. 为什么是"发布口"而不是"搬家"
 
