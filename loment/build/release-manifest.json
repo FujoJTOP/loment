@@ -74,6 +74,10 @@
    "sha256": "2738174a211235a5d00d63da66c6568996f61ace5740f87de0abb997d5ef874e"
   },
   {
+   "path": "tools/loment_std_test.py",
+   "sha256": "672015373e37888c5900eebd388ff292d2c3ad9167a14f69d2f4497cd9000bb8"
+  },
+  {
    "path": "tools/loment_cli_test.py",
    "sha256": "483cc8453a37e2dcacbd704fd7e2af626d62ef6aecf53064af5ad501a6d83f7d"
   },
@@ -715,7 +719,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "458b74058b94464c8f5e5d795b8378b1a41b7cab5ac3f0695a8a325c7e8f2f6f"
+   "sha256": "9878549c9cb401753fba332f8706fe5fe38757f22d10098a91cc3434cde6dad7"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -814,12 +818,20 @@
    "sha256": "c2555fd7b2473730251fc8c952b10b6547eb022d4704adb8aabc6302e9dcc8ec"
   },
   {
+   "path": "loment/lib/mem.lomt",
+   "sha256": "a8e048d913a2a5a4ecf98ad315fd6d674be68bf606a0d22df7774af33e6bc612"
+  },
+  {
+   "path": "loment/lib/num.lomt",
+   "sha256": "b0092c17dd77aa697e7159cf26ec8c91e610284e4994a28e4851455cc2c2ca7f"
+  },
+  {
    "path": "loment/lib/proc.lomt",
    "sha256": "65f9da1a9be7d84221cdb05dca92d7a5f791e829e165811b0c5deecbb45bae1b"
   },
   {
    "path": "loment/lib/sha256.lomt",
-   "sha256": "2a68894ad9c72b9212c6126a31d35aa02f1f9539c975743688dbd5c4e7a2c1a0"
+   "sha256": "67ee46d29ed54bf3eedd45c4b918879ed29687c161231d462490be63d60985d0"
   },
   {
    "path": "tools/loment_lsp_test.py",
@@ -931,7 +943,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "4044db7a6a7af682065fa510d5f8b245d30879b7b73252756415f619fa3f1ba8"
+   "sha256": "8a849e06cc01fc2cc1f4efed603bf3d3d30358986db3501e9b40a6a1cf687ed1"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1239,7 +1251,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "6e40f66addebc485d650c747126ec53504e3a4a7eae16b25510d54db2a96b399"
+   "sha256": "1b985d8cdf5a4912f4229634d075f919a265042c3efd0fec03a9f87d678437c4"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -1303,7 +1315,7 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "1d3d0d2a5eba368383935f726565b3c746707123443f073b11b9d010c06d9ade"
+   "sha256": "2fbf61dc28215392d0b0c202fa5829146d76cdf2414e6762594864b2d2d3bb43"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
@@ -1320,6 +1332,10 @@
   {
    "path": "docs/179-multisyntax-frontends.md",
    "sha256": "42ce43d4f6d0fe0ccdf40f797f4b9b7df5bd652046157796fe46a38584ff7013"
+  },
+  {
+   "path": "docs/180-std-core.md",
+   "sha256": "d4b97f398ba4c508012d2ff93dd9a43b3dc679d3fd106c7683f5f7addebbb29d"
   },
   {
    "path": "docs/manual/index.md",
