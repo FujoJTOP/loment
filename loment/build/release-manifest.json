@@ -1315,7 +1315,7 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "2fbf61dc28215392d0b0c202fa5829146d76cdf2414e6762594864b2d2d3bb43"
+   "sha256": "d41661fbf08920997ad5d86a0c67dd52f11b1d2c2a46a07710a5835bcce67350"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
@@ -1331,7 +1331,7 @@
   },
   {
    "path": "docs/179-multisyntax-frontends.md",
-   "sha256": "35cb005a7ec8e557c82d19c7b17e94165da3baf3c0d40f4a8405ed2f74bef09e"
+   "sha256": "4d08f08e5e4f48c29fa847691a91b1067916f9825a110b33da182e6a4c2f8c18"
   },
   {
    "path": "docs/180-std-core.md",
