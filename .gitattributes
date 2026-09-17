@@ -43,7 +43,16 @@
 SHA256SUMS text eol=lf
 LICENSE text eol=lf
 # 自举种子 (参考实现发射的 IR): 文本, 但绝不能被换行转换改字节 —— 驱动按字节比对
-loment/build/selfhost_driver.ll text eol=lf
+#
+# **标成生成物, 且不进 diff** (docs/176 §4 A): 它 46 KB 宽、纯机器发射, 而一次语言面
+# 改动会让它整体位移 —— 实测 `extern fn` 那两次提交里它以 3858 行占了 diff 的 93%,
+# 把真正要看的 153 行手写淹掉。
+#
+# **敢藏是因为有替代的安全网**: `tools/loment_seed_test.py::test_seed_matches_reference`
+# 断言"种子 == 参考实现为 selfhost/driver.lomt 发射的 IR", 过期就红, 修法是
+# `tools/loment_seed.py --emit`。**所以这里的正确用法是重新生成, 不是手工合并** ——
+# `-diff` 让两边都改了种子时它整file 冲突, 那是**对的**: 逼你去 regenerate。
+loment/build/selfhost_driver.ll text eol=lf linguist-generated=true -diff
 .gitattributes text eol=lf
 .gitignore     text eol=lf
 # binary artifacts — never convert, never diff as text

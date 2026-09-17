@@ -51,6 +51,25 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 
 **不做**：不在语言冻结前把 Loment 产物提交成内核依赖、不把 Python 引入内核构建链（见 `docs/165`）。
 
+## 改语言面要付双倍的工：手写一条提交、生成一条提交
+
+**背景**：语言面（lexer / parser / checker / codegen + 诊断码 + 内建表）在仓里有**两个实现**
+（`tools/lomentc.py` 与 `loment/selfhost/*.lomt`），必须逐字节一致（`docs/158` §5）。
+每次改完，`loment/build/selfhost_driver.ll`（46 KB 的自举种子）会被 `--emit` 重生成，
+而 SSA 编号会整体位移 —— 实测 `extern fn` 那两次提交里它以 **3858 行占了 diff 的 93%**，
+把真正要看的 **153 行手写**淹掉（测量见 `docs/176` §1）。
+
+**约定**：
+
+1. **机械产物单独成一条提交**，消息里写明"只有生成物"。手写那条（源 + 文档 + 判据）与它
+   分开，这样 review 只需要看前者。
+2. **种子永远重新生成，不手工合并**。它在 `.gitattributes` 里标了 `-diff`，于是两边都改了
+   它时是**整file 冲突** —— 那是对的，逼你跑 `python tools/loment_seed.py --emit`
+   （`loment_seed_test` 会告诉你它是否过期）。
+3. 判据 `loment_seed_test::test_seed_is_marked_generated` 钉住"种子被标成生成物"，
+   防止这条纪律悄悄回退。**能藏的前提是它可复现** —— 上面那条"种子 == 参考实现的产物"
+   就是那个前提，两条是一对。
+
 ## 写 Loment 程序之前，先读那份 agent 指南
 
 **装好 Loment 工具链之后**（`loment version` 能跑），写或改 `.lomt` 之前先读指南：
