@@ -247,9 +247,7 @@ loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json
 lom/*.lom
-docs/14*.md
-docs/15*-loment-*.md
-docs/16*-loment-*.md
+docs/*.md
 docs/manual/*.md
 docs/manual/api/*.md
 ";

@@ -95,7 +95,17 @@ GLOBS = [
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
-    "lom/*.lom", "docs/14*.md", "docs/15*-loment-*.md", "docs/16*-loment-*.md",
+    "lom/*.lom",
+    # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
+    # 全是这条线的文档, 所以一条 `docs/*.md` 就够, 不必再按名字分段收。
+    #
+    # 原文是 `docs/14*.md` + `docs/15*-loment-*.md` + `docs/16*-loment-*.md` —— 那是
+    # **旧树**（`docs/` 里 FujoOS 与 Loment 两线混放）留下的写法。它在那边就已经两头不讨好:
+    # `14*` 捞进了内核文档 (`docs/14-tss-irq.md`、`144/145/146/149-内核-*`), 而 `15*`/`16*`
+    # 的 `-loment-` 收紧又**漏掉**了 110/142/147/17x 那几篇名字里没有 loment 的。
+    # 搬到开发口之后前一半变成 5 条**指向不存在文件**的陈旧项 —— 2026-09-17 归因
+    # `loment_rel_test` 那两条红时查出来的。
+    "docs/*.md",
     "docs/manual/*.md",
     "docs/manual/api/*.md",
 ]
