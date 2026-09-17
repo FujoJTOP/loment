@@ -436,6 +436,10 @@ def test_lomelf_selfhost_links_foreign_object():
          [(ffitest.C_SOURCE, "c")], ["c"], 52),
         ("ffi2", ffitest.LOMENT_TWO_OBJECTS_SOURCE,
          [(ffitest.C_SOURCE, "c"), (ffitest.C2_SOURCE, "d")], ["c", "d"], 75),
+        # 跨对象重定位 (docs/173 阶段 2): a.o 里的 PLT32 指向只有 b.o 知道的 c_sub。
+        # 这条必须逐字节比 —— 自举侧重定位算错的话, 参考侧照样绿。
+        ("ffi3", ffitest.LOMENT_MULTI_SOURCE,
+         [(ffitest.C_CALLER_SOURCE, "a"), (ffitest.C_SUB_SOURCE, "b")], ["a", "b"], 22),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -473,7 +477,8 @@ def test_lomelf_selfhost_links_foreign_object():
             finally:
                 for p in [elfrepo, llrepo, *clones]:
                     p.unlink(missing_ok=True)
-    print("      镜像 + --link 单/双对象: 与参考逐字节相同, 退出码 52 / 75")
+    print("      镜像 + --link 三例 (单对象/双对象/跨对象重定位): 与参考逐字节相同, "
+          "退出码 52 / 75 / 22")
 
 
 def main() -> int:

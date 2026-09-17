@@ -187,6 +187,28 @@ C2_SOURCE = """\
 int d_scale(int a, int b) { return a * 10 - b; }
 """
 
+#: **跨对象引用**的两半 (docs/173 阶段 2)。`c_add` 调 `c_sub`, 而 `c_sub` 只在另一个
+#: 目标文件里 —— 于是 `a.o` 里会有一条指向**未定义**符号的 `R_X86_64_PLT32`, 它只能靠
+#: "先摆好所有对象再建符号表"才解得出。`noinline` 是必须的: 不然 -O1 会把它内联掉,
+#: 重定位就没了, 判据会退化成"什么都没测"。
+C_SUB_SOURCE = """\
+int c_sub(int a, int b) { return a - b; }
+"""
+C_CALLER_SOURCE = """\
+extern int c_sub(int, int);
+__attribute__((noinline)) int c_add(int a, int b) { return a + b + c_sub(20, 5); }
+"""
+#: 调上面那一对的 Loment: 退出码 22 = `c_add(3,4)` = 7 + `c_sub(20,5)` = 15。
+LOMENT_MULTI_SOURCE = """\
+module multi
+
+extern fn c_add(a: i32, b: i32) -> i32;
+
+fn _start() {
+    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);
+}
+"""
+
 #: 调**两个** `.o` 的那份 Loment。它存在的理由是**名字池的基**:
 #: 自举链接器把外部符号名拷进**输入缓冲的尾部** —— 标签表存的是偏移, 而 `lbl_find` 拿
 #: 输入缓冲当基。若把名字留在**对象缓冲**里, 第二个 `.o` 一读进来就会把第一个的符号名
@@ -369,47 +391,34 @@ print(len(json.dumps([1,2,3])))"""
 
 @test
 def test_java_via_process_bridge():
-    """Java: 同一条腿。这台机器上 WSL 里没有 java, 所以**这里 SKIP** —— 配方在判据里。
+    """Java: 腿 2 上的第六个语言。JDK 是**免 sudo 下载**的 (Adoptium tarball, 见 `_tc.sh`)。
 
-    `proc_sh` 收的是一条 shell 命令, 所以 Java 与 Python 走的是**同一个函数**, 区别只在命令
-    与"怎么把结果打出来"。真正要写的是那段 Java: 编译成 class (或直接用 `java -` 的单文件源),
-    跑它, 结果打到 stdout, 我们读回来。没有 java 的机器上这条一律 SKIP, 不是静默通过。
+    走的是 Java **自己的生态**: `javac` 编一个 `.java`, 再 `java` 跑它 —— 与 Python / Perl /
+    Lua 是**同一个函数** (`proc_sh`), 区别只在命令。这就是腿 2 的意思: 不装绑定、不做接口层。
+
+    退出码 7 = `System.out.println(7)` 打出来的那个 7。
     """
     if not _wsl():
         print("      SKIP: 需要 WSL")
         return
-    has = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v java"],
-                         capture_output=True, text=True, timeout=60, shell=False)
-    if has.returncode != 0:
-        print("      SKIP: WSL 里没有 java (配方见本判据的 docstring)")
+    jdk = f"{_wsl_home()}/{TC_SUBDIR}/jdk/bin"
+    if not _wsl_ok(f"test -x '{jdk}/java'"):
+        print("      SKIP: 没有自建 jdk (跑 wsl -e bash tools/loment_toolchain.sh jdk)")
         return
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         (td / "Hello.java").write_text(
             "public class Hello { public static void main(String[] a) { "
             "System.out.println(7); } }\n", encoding="utf-8", newline="\n")
-        (td / "j.lomt").write_text(
-            "module javabridge\n\n"
-            "use proc\n\n"
-            "fn _start() {\n"
-            "    let buf: ptr = alloc(1024);\n"
-            "    let n: i64 = proc_sh(\"cd /tmp && javac Hello.java && java Hello\", buf, 1024);\n"
-            "    if n <= 0 {\n"
-            "        syscall4(60, 200 as u64, 0, 0);\n"
-            "    }\n"
-            "    syscall4(60, (load8(buf, 0) - 48) as u64, 0, 0);\n"
-            "}\n", encoding="utf-8", newline="\n")
-        mod = lomentc.load(td / "j.lomt")
-        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "j.lomt")
-        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
-        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
-        exe = td / "j.elf"
-        exe.write_bytes(blob)
+        # `javac` 得在**它自己的目录**里跑, 而那一侧要看得见这个 `.java` —— 所以先拷进 WSL。
         r = subprocess.run(["wsl", "-e", "bash", "-lc",
-                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
-                           capture_output=True, text=True, timeout=180, shell=False)
-        assert r.returncode == 7, f"Java 桥结果不对: rc={r.returncode} (期望 7)"
-        print("      Java: javac + java, 输出读回 -> 退出码 7")
+                            f"rm -rf /tmp/ffijava && mkdir -p /tmp/ffijava && "
+                            f"cp {_wsl_path(td)}/Hello.java /tmp/ffijava/"],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert r.returncode == 0, f"拷 .java 失败: {r.stderr[-200:]}"
+        _bridge_case(f"cd /tmp/ffijava && {jdk}/javac Hello.java && {jdk}/java Hello",
+                     7, "Java 桥")
+        print("      Java: javac + java (自建 JDK, 免 sudo) -> 退出码 7")
 
 
 @test
@@ -458,6 +467,176 @@ def test_javascript_via_process_bridge():
         print("      JavaScript: node + JSON 库, 输出读回 -> 退出码 7")
 
 
+def _wsl_ok(shell_cmd: str) -> bool:
+    """在 WSL 里跑一句 shell, 返回是否退出 0。探测解释器/工具链在不在用它。"""
+    return subprocess.run(["wsl", "-e", "bash", "-lc", shell_cmd],
+                          capture_output=True, text=True, timeout=120,
+                          shell=False).returncode == 0
+
+
+def _wsl_home() -> str:
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", "printf %s \"$HOME\""],
+                       capture_output=True, text=True, timeout=60, shell=False)
+    return r.stdout.strip()
+
+
+def _bridge_case(cmd: str, want_rc: int, label: str) -> None:
+    """走一遍进程桥: 起 `cmd`, 把它 stdout 的第一个字节减 48 当退出码 (所以输出要是**一位数字**)。
+
+    两条腿的差别在这里最清楚: 腿 2 **换语言只是换命令**, Loment 这边一行不改。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "p.lomt").write_text(
+            "module bridge\n\n"
+            "use proc\n\n"
+            "fn _start() {\n"
+            "    let buf: ptr = alloc(1024);\n"
+            f"    let n: i64 = proc_sh(\"{cmd}\", buf, 1024);\n"
+            "    if n <= 0 {\n"
+            "        syscall4(60, 200 as u64, 0, 0);\n"
+            "    }\n"
+            "    syscall4(60, (load8(buf, 0) - 48) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "p.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "p.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
+        exe = td / "p.elf"
+        exe.write_bytes(blob)
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                           capture_output=True, text=True, timeout=180, shell=False)
+        assert r.returncode == want_rc, (
+            f"{label} 结果不对: rc={r.returncode} (期望 {want_rc}) err={r.stderr[-300:]!r}")
+
+
+#: 免 sudo 拿的工具链放这儿 (docs/177 §2)。**必须在 `$HOME` 而不是 `/tmp`** —— WSL 闲置
+#: 会关停, tmpfs 一关就清空 (2026-09-17 实测: 下好的 zig 就这么没了)。
+#: 取法: `wsl -e bash tools/loment_toolchain.sh lua`
+TC_SUBDIR = "fujotc"
+
+
+@test
+def test_perl_via_process_bridge():
+    """Perl: 腿 2 上的第四个语言。**WSL 里本来就有 perl**, 所以这条真的跑。
+
+    用的是 Perl **自己的库** (`JSON::PP` 是核心模块) —— 这正是"支持一个语言的库"在腿 2 上
+    的意思: 不装绑定、不做接口层, 对方照旧用它自己的生态。
+
+    退出码 7 = `encode_json([1,2,3])` = `"[1,2,3]"` 的长度。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    if not _wsl_ok("command -v perl"):
+        print("      SKIP: WSL 里没有 perl")
+        return
+    # **用 `-MJSON::PP` 显式加载, 不写 `use JSON::PP`** —— 后者在 `-e` 里要分号与换行,
+    # 而我们的命令是塞进 Loment 字符串字面量的一行。
+    _bridge_case("perl -MJSON::PP -e 'print length(encode_json([1,2,3]))'", 7, "Perl 桥")
+    print("      Perl: JSON::PP 库, 输出读回 -> 退出码 7")
+
+
+@test
+def test_lua_via_process_bridge():
+    """Lua: 腿 2 上的第五个语言。解释器是**免 sudo 自建**的 (见 `tools/loment_toolchain.sh`)。
+
+    命令里避开了**双引号** (`string.char(44)` 代替 `","`) —— 它整条要塞进 Loment 的字符串
+    字面量, 而 Loment 的字符串用双引号括。这不是技巧, 是这条腿的真实约束: 命令是一行字符串。
+
+    退出码 5 = `table.concat({1,2,3}, ",")` = `"1,2,3"` 的长度。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    lua = f"{_wsl_home()}/{TC_SUBDIR}/lua-5.4.7/src/lua"
+    if not _wsl_ok(f"test -x '{lua}'"):
+        print(f"      SKIP: 没有自建 lua (跑 wsl -e bash tools/loment_toolchain.sh lua)")
+        return
+    _bridge_case(f"{lua} -e 'print(#table.concat({{1,2,3}},string.char(44)))'", 5, "Lua 桥")
+    print("      Lua: table.concat/string.char, 输出读回 -> 退出码 5")
+
+
+@test
+def test_zig_end_to_end():
+    """Zig: `export fn` 导出 C ABI 符号 —— **腿 1 上的第四个语言** (docs/177 P2)。
+
+    Zig 是**免 sudo 自建**的 (ziglang.org 的 tarball, 见 `tools/loment_toolchain.sh`)。
+
+    **`-OReleaseSmall` 不是随手挑的**: 默认档会把 Zig 自己的运行期一起编进来 —— 实测对象
+    **9.7 MB**、还带一整张 `.rela.data` 数据重定位表, 而这两种我们都不支持。`-OReleaseSmall`
+    把它压到 **880 字节**、只剩一条 `.rela.eh_frame`(那张节我们不摆, 按元数据跳过)。
+    所以"能不能用一个语言的库"在这里**不是**"有没有工具链", 而是"**那份对象是不是自包含的**"
+    —— 这正是 `docs/173` §3 那把尺子在量的事。
+
+    退出码 42 = `z_sub(50, 8)`。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    zig = f"{_wsl_home()}/{TC_SUBDIR}/zig/zig"
+    if not _wsl_ok(f"test -x '{zig}'"):
+        print(f"      SKIP: 没有自建 zig (跑 wsl -e bash tools/loment_toolchain.sh zig)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "z.zig").write_text(
+            "export fn z_sub(a: i32, b: i32) i32 { return a - b; }\n",
+            encoding="utf-8", newline="\n")
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"cd {_wsl_path(td)} && {zig} build-obj -OReleaseSmall "
+                            f"-femit-bin=z.o z.zig"],
+                           capture_output=True, text=True, timeout=300, shell=False)
+        assert r.returncode == 0, f"zig build-obj 失败: {r.stderr[-300:]}"
+        (td / "m.lomt").write_text(
+            "module zig\n\n"
+            "extern fn z_sub(a: i32, b: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, z_sub(50 as i32, 8 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "z.o"], 42)
+        assert rc == 42, f"Zig 端到端结果不对: rc={rc} (期望 42) err={err[-300:]!r}"
+        print("      Zig: export fn (自建工具链, -OReleaseSmall) -> 退出码 42")
+
+
+@test
+def test_go_via_process_bridge():
+    """Go: 腿 2 上的第七个语言。
+
+    Go 的编译器在**主机**上 (`C:\\Program Files\\Go\\bin\\go.exe`), 而我们的 ELF 跑在 WSL 里 ——
+    靠 **WSL interop** 直接把那个 `.exe` 起来 (WSL 的 binfmt 注册了 Windows 二进制)。这条路
+    成立恰恰说明腿 2 的定义是对的: "**起一个进程、读它的 stdout**"与对方是什么二进制无关。
+
+    命令里**只用单引号** —— 整条要塞进 Loment 的双引号字符串字面量, 而 `go.exe` 的路径带空格
+    必须引起来。这不是技巧, 是这条腿的真实约束 (Python / Perl / Lua / Java 的都一样)。
+
+    退出码 5 = `len(strings.Join([]string{"a","b","c"}, ","))` = `"a,b,c"` 的长度。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    go = "/mnt/c/Program Files/Go/bin/go.exe"
+    if not _wsl_ok(f"test -x '{go}'"):
+        print("      SKIP: 主机上没有 Go")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "m.go").write_text(
+            'package main\n'
+            'import ("fmt"; "strings")\n'
+            'func main() {\n'
+            '    fmt.Println(len(strings.Join([]string{"a", "b", "c"}, ",")))\n'
+            '}\n', encoding="utf-8", newline="\n")
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"rm -rf /tmp/ffigo && mkdir -p /tmp/ffigo && "
+                            f"cp {_wsl_path(td)}/m.go /tmp/ffigo/"],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert r.returncode == 0, f"拷 .go 失败: {r.stderr[-200:]}"
+        _bridge_case(f"cd /tmp/ffigo && '{go}' run m.go", 5, "Go 桥")
+        print("      Go: go run + strings 包 (WSL interop) -> 退出码 5")
+
+
 @test
 def test_multi_object_cross_reference():
     """**多目标文件**: `a.o` 调 `b.o` —— 跨对象重定位必须解开。
@@ -475,24 +654,15 @@ def test_multi_object_cross_reference():
         return
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        (td / "b.c").write_text("int c_sub(int a, int b) { return a - b; }\n",
-                                encoding="utf-8", newline="\n")
-        (td / "a.c").write_text(
-            "extern int c_sub(int, int);\n"
-            "__attribute__((noinline)) int c_add(int a, int b) { return a + b + c_sub(20, 5); }\n",
-            encoding="utf-8", newline="\n")
+        (td / "b.c").write_text(C_SUB_SOURCE, encoding="utf-8", newline="\n")
+        (td / "a.c").write_text(C_CALLER_SOURCE, encoding="utf-8", newline="\n")
         assert compile_c(clang, td / "a.c", td / "a.o") == 0, "C 编译失败"
         assert compile_c(clang, td / "b.c", td / "b.o") == 0, "C 编译失败"
         # 先确认这条判据真的踩在重定位上 —— 否则它测的是别的东西
         fo = lomelf.ForeignObject(td / "a.o")
         assert fo.relocs, "a.o 里没有重定位, 这条判据没测到该测的东西"
         assert "c_sub" in fo.undefined, f"a.o 没把 c_sub 记成未定义: {fo.undefined}"
-        (td / "m.lomt").write_text(
-            "module multi\n\n"
-            "extern fn c_add(a: i32, b: i32) -> i32;\n\n"
-            "fn _start() {\n"
-            "    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);\n"
-            "}\n", encoding="utf-8", newline="\n")
+        (td / "m.lomt").write_text(LOMENT_MULTI_SOURCE, encoding="utf-8", newline="\n")
         rc, err = build_and_run(td, td / "m.lomt", [td / "a.o", td / "b.o"], 22)
         assert rc == 22, f"跨对象引用结果不对: rc={rc} (期望 22) err={err[-300:]!r}"
         print("      多目标文件 (a.o 调 b.o, 跨对象重定位) -> 退出码 22")

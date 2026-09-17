@@ -82,6 +82,8 @@ const C_PE: u32 = 88;              // 1 = 出 PE (Windows)，0 = 出 ELF
 const C_SHIM: u32 = 92;            // PE：`__win_syscall` 在代码缓冲里的偏移
 const C_NEXT: u32 = 96;            // 外部函数 (declare) 个数 (docs/173)
 const C_EXTN: u32 = 100;           // 外部符号名池游标 (相对输入缓冲起点)
+const C_NFREL: u32 = 104;          // 外部目标文件里的重定位条数 (docs/173 阶段 2)
+const C_NOBJ: u32 = 108;           // 已摆好的外部对象个数
 
 // 表起址 (相对 M_TAB); 格区 256 字节
 const TB_G: u32 = 256;             // 全局表 stride 32 × 2048
@@ -133,6 +135,21 @@ const PH_ILEN: u32 = 12;
 const TB_EXT: u32 = 1587200;       // stride 8 × 4096: (起点, 长度)
 const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
+
+// 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
+const TB_OBJ: u32 = 1588000;       // stride 8 × 256
+const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
+
+// 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
+// —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
+const TB_FREL: u32 = 1589000;      // stride 32 × 4096
+const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
+const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
+const F2_OFF: u32 = 8;             // r_offset (节内偏移)
+const F2_TY: u32 = 12;             // 重定位类型 (ELF 的 R_X86_64_* 编号)
+const F2_NOFF: u32 = 16;           // 目标符号名 (名字池内偏移, 与标签表同基)
+const F2_NLEN: u32 = 20;
+const F2_ADD: u32 = 24;            // 加数 (i32 位型)
 
 // ---------------------------------------------------------------- 常量
 
@@ -2278,6 +2295,10 @@ fn sh_link(raw: ptr, k: u32) -> u32 {
     return load32(raw, sec_hdr(raw, k) + 40);
 }
 
+fn sh_info(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 44);
+}
+
 fn sh_num(raw: ptr) -> u32 {
     return rd16(raw, 60);
 }
@@ -2488,57 +2509,20 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
         wstr(2, "\n");
         return die(1);
     }
-    // **未定义符号先查**: 一个调用 libc 的 C 函数**同时**有未定义符号与重定位, 先说
-    // "它引用了 printf" 比说"它有重定位"有用得多 —— 前者直接告诉用户"第 1 阶段不链 libc",
-    // 后者会把人引去查重定位。所以顺序是有意的, 不是顺手。
+    // **未定义符号在这里不再是错误** (阶段 2): 它可能由**另一个对象**提供 —— 那正是多目标
+    // 文件 C 库的形状 (`a.o` 调 `b.o`)。判定推迟到"所有对象都摆好、重定位都应用完"。
+    // 之前那两段 (未定义就报错 / 见重定位就报错) 是在没有重定位能力时的硬拒; 现在两条都
+    // 换成了**真的去做**, 做不出来才报 —— 免得从"硬拒"退化成"静默忽略重定位"(那是错编)。
     let ns: u32 = sh_num(mem);
-    let i: u32 = 0;
-    let found: u32 = 0;
-    while i < ns {
-        if sh_type(mem, i) == 2 {
-            let link: u32 = sh_link(mem, i);
-            if link < ns {
-                let stro: u32 = sh_off(mem, link);
-                let so: u32 = sh_off(mem, i);
-                let cnt: u32 = sh_size(mem, i) / 24;
-                let k: u32 = 0;
-                while k < cnt {
-                    let o: u32 = so + k * 24;
-                    let nmoff: u32 = load32(mem, o);
-                    if nmoff != 0 && rd16(mem, o + 6) == 0 {
-                        if found == 0 {
-                            wstr(2, "lomelf: 引用了未定义的符号 ");
-                        } else {
-                            wstr(2, " ");
-                        }
-                        write_cstr(2, mem, stro + nmoff);
-                        if found >= 3 {
-                            k = cnt;
-                        }
-                        found = found + 1;
-                    }
-                    k = k + 1;
-                }
-            }
-        }
-        i = i + 1;
-    }
-    if found != 0 {
-        wstr(2, " —— 第 1 阶段不链 libc (docs/173 §3)\n");
-        return die(1);
-    }
-    let i2: u32 = 0;
-    while i2 < ns {
-        if sh_type(mem, i2) == 4 && sh_size(mem, i2) > 0 {
-            wstr(2, "lomelf: 对象里有重定位 —— 第 1 阶段不支持跨对象重定位 (docs/173 §3)\n");
-            return die(1);
-        }
-        i2 = i2 + 1;
-    }
     // 接在我们自己的代码之后 (16 对齐)。**先拼字节, 再立标签** —— 标签地址 = 起点 + 节错
     // + 符号值, 所以要先把每节的起点算出来。
     let at0: u32 = align_to(d, 16);
     pad_zero(txt, d, at0);
+    // 记下这个对象的代码在缓冲里的起点 —— 重定位要按它算 `S + A - P`, 而**应用**要等到
+    // 所有对象都摆好 (见 apply_relocs)。
+    let oi: u32 = cell(tab, C_NOBJ);
+    store32(tab, TB_OBJ + oi * 8 + O_TEXT, at0);
+    setcell(tab, C_NOBJ, oi + 1);
     let dd: u32 = at0;
     let i3: u32 = 0;
     while i3 < ns {
@@ -2564,7 +2548,11 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
                     let o2: u32 = so2 + k2 * 24;
                     let nmoff2: u32 = load32(mem, o2);
                     let shndx: u32 = rd16(mem, o2 + 6);
-                    let bind: u32 = (load8(mem, o2 + 4) as u32) % 16;
+                    // **`st_info` 的高 4 位是绑定, 低 4 位是类型** (`(bind << 4) | type`)。
+                    // 原文这里是 `% 16` —— 取到的是**类型**: 收定义时靠"类型是 FUNC/OBJECT"
+                    // 误打误撞能对, 但判"未定义的符号是不是全局的"就整个失效 (实测它让归档的
+                    // 固定点选不出成员)。与参考实现同一次修掉。
+                    let bind: u32 = (load8(mem, o2 + 4) as u32) / 16;
                     // GLOBAL(1) / WEAK(2), 且落在某个代码节里。shndx 可以是保留值
                     // (SHN_ABS=0xfff1 等), 比节表长 —— 直接拿去索引会读飞, 所以先比大小。
                     if nmoff2 != 0 && shndx != 0 && shndx < ns && (bind == 1 || bind == 2) {
@@ -2588,7 +2576,100 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
         }
         i4 = i4 + 1;
     }
+    // 重定位**只记不应用** (docs/173 阶段 2): 应用要等所有对象都摆好、标签都立好 ——
+    // `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。只认参考实现认的那六种; 其余**硬拒**
+    // (不认识的类型猜一个偏移 = 跳到错地址, 那是运行期崩溃不是编译期报错)。落在非代码节上的
+    // 也拒 —— 本档不摆那些节, 静默算出来的地址是错的。
+    let i5: u32 = 0;
+    while i5 < ns {
+        if sh_type(mem, i5) == 4 && sh_size(mem, i5) > 0 {
+            let tgt: u32 = sh_info(mem, i5);                  // sh_info = 被重定位的节
+            if tgt >= ns || sh_type(mem, tgt) != 1
+                || is_code_sec(mem, sec_name(mem, tgt)) == 0 {
+                wstr(2, "lomelf: 重定位指向非代码节 (docs/173 §3)\n");
+                return die(1);
+            }
+            let tsecat: u32 = sec_at(mem, tgt);
+            // **两个不同的偏移, 别搞混** (第一版就在这里错了两次):
+            //   `symsec` 是**符号表**节号; 符号记录在 `sh_off(symsec) + 下标*24`;
+            //   名字串却在**它 `sh_link` 指向的 `.strtab`** 里 —— 与符号表**不是同一节**。
+            //   拿符号表的偏移去查名字, 得到的是空串或垃圾, 报错里就印出一串乱码/空白。
+            let symsec: u32 = sh_link(mem, i5);
+            let symoff0: u32 = sh_off(mem, symsec);
+            let stro3: u32 = sh_off(mem, sh_link(mem, symsec));
+            let ents: u32 = sh_size(mem, i5) / 24;
+            let k5: u32 = 0;
+            while k5 < ents {
+                let o5: u32 = sh_off(mem, i5) + k5 * 24;
+                let roff: u32 = lo32(rd64(mem, o5));
+                let rinfo: u64 = rd64(mem, o5 + 8);
+                let ty: u32 = lo32(rinfo);
+                let si: u32 = hi32(rinfo);
+                if ty != 1 && ty != 2 && ty != 4 && ty != 10 && ty != 11 && ty != 24 {
+                    wstr(2, "lomelf: 不认识的重定位类型 (docs/173 §3)\n");
+                    return die(1);
+                }
+                let symoff: u32 = symoff0 + si * 24;
+                let nmoff3: u32 = load32(mem, symoff);
+                let nlen3: u32 = cstr_len(mem, stro3 + nmoff3);
+                let noff3: u32 = copy_name(tab, t, mem, stro3 + nmoff3);
+                let fi: u32 = cell(tab, C_NFREL);
+                let fb: u32 = TB_FREL + fi * 32;
+                store32(tab, fb + F2_OBJ, oi);
+                store32(tab, fb + F2_AT, tsecat);
+                store32(tab, fb + F2_OFF, roff);
+                store32(tab, fb + F2_TY, ty);
+                store32(tab, fb + F2_NOFF, noff3);
+                store32(tab, fb + F2_NLEN, nlen3);
+                store32(tab, fb + F2_ADD, lo32(rd64(mem, o5 + 16)));
+                setcell(tab, C_NFREL, fi + 1);
+                k5 = k5 + 1;
+            }
+        }
+        i5 = i5 + 1;
+    }
     return dd;
+}
+
+/// 应用外部目标文件的全部重定位。**必须在所有对象都摆好、标签都立好之后**跑 (docs/173 阶段 2)。
+///
+/// `PC64` 这里按**零扩展**写 (参考实现按有符号)。实测到不了这条路 —— 它只出现在数据节的
+/// 64 位 PC 相对引用上, 而落在非代码节的重定位我们**一开始就拒了**。留个记号免得以后有人
+/// 以为两边逐位一致。
+fn apply_relocs(tab: ptr, t: ptr, txt: ptr) -> u32 {
+    let n: u32 = cell(tab, C_NFREL);
+    let i: u32 = 0;
+    while i < n {
+        let base: u32 = TB_FREL + i * 32;
+        let oi: u32 = load32(tab, base + F2_OBJ);
+        let target: u32 = lbl_find(tab, t, load32(tab, base + F2_NOFF),
+                                   load32(tab, base + F2_NLEN), 0, 0);
+        if target == NO {
+            // **到链接结束才判"没人定义"**: 这是"多目标文件 C 库"与"引用 libc"的分界线 ——
+            // 前者由另一个对象提供, 后者到链接结束都空着。
+            wstr(2, "lomelf: 引用了未定义的符号 ");
+            write_all(2, ptr_add(t, load32(tab, base + F2_NOFF)),
+                      load32(tab, base + F2_NLEN) as u64);
+            wstr(2, " —— 到链接结束都没人提供它 (第 2 阶段仍不链 libc, docs/173 §3)\n");
+            return die(1);
+        }
+        let site: u32 = load32(tab, TB_OBJ + oi * 8 + O_TEXT)
+                        + load32(tab, base + F2_AT) + load32(tab, base + F2_OFF);
+        let p: u32 = TEXT_VADDR + site;                       // 公式里的 P
+        let val: u32 = target + load32(tab, base + F2_ADD);   // 公式里的 S + A
+        let ty: u32 = load32(tab, base + F2_TY);
+        if ty == 2 || ty == 4 {
+            store32(txt, site, val - p);                      // PC32 / PLT32
+        } else if ty == 24 {
+            w64(txt, site, (val - p) as u64);                 // PC64
+        } else if ty == 1 {
+            w64(txt, site, val as u64);                       // 64
+        } else {
+            store32(txt, site, val);                          // 32 / 32S
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 /// 把外部符号名拷进输入缓冲尾部的名字池, 返回它在 `t` 里的偏移。
@@ -3472,6 +3553,11 @@ fn run(mem: ptr) -> u32 {
     while got < nlink {
         tlen = link_object(tab, inb, txt, tlen, tobj, ptr_add(pbuf, obase + got * 1024));
         got = got + 1;
+    }
+    // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。
+    let rr: u32 = apply_relocs(tab, inb, txt);
+    if rr != 0 {
+        return rr;
     }
     let r: u32 = resolve_fixups(tab, inb, txt);
     if r != 0 {
