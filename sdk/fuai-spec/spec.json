@@ -1,0 +1,78 @@
+{
+  "$schema": "fujo-fuai-spec/v1",
+  "title": "FUAI supervisory runtime contract spec v1",
+  "version": "2026-09-07.1",
+  "authority": "docs/137-fuai-os-charter.md 判据A: 唯一权威, 实现从它派生或被校验",
+  "layers": {
+    "core": "host-agnostic supervisory primitives: 信任历史/权限域/质量信号/隔离调度/模型通道. 差分区只对 core 断言",
+    "host-ext": "host-specific extensions (x86 调试探针, Windows 盒桥). 不参与双实现差分"
+  },
+  "primitives": [
+    {"opcode": 20737, "name": "classify", "layer": "core", "sig": "a0=ptr a1=len", "fujo": "fujo_ai_classify", "linux": "fuai_classify", "semantics": "intent classify -> 0..4"},
+    {"opcode": 20738, "name": "fetch", "layer": "core", "sig": "a0=ptr a1=len", "fujo": "fujo_ai_fetch", "linux": null, "semantics": "context injection window (fujoctx)"},
+    {"opcode": 20740, "name": "info", "layer": "core", "sig": "a0=ptr a1=len", "fujo": "fujo_ai_info", "linux": null, "semantics": "model/link info"},
+    {"opcode": 32769, "name": "ctx_compress", "layer": "core", "sig": "a0..a4", "fujo": "fujo_ctx_compress", "linux": null, "semantics": "context compression"},
+    {"opcode": 32770, "name": "ctx_subscribe", "layer": "core", "sig": "a0=mask", "fujo": "fujo_ctx_subscribe", "linux": "fuai_ctx_subscribe", "semantics": "event ring subscribe (eyes)"},
+    {"opcode": 32771, "name": "ctx_events", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_ctx_events", "linux": "fuai_ctx_events", "semantics": "drain event ring"},
+    {"opcode": 32772, "name": "ctx_inject", "layer": "core", "sig": "a0=kind a1=a a2=b", "fujo": "fujo_ctx_inject", "linux": "fuai_ctx_inject", "semantics": "inject event"},
+    {"opcode": 32773, "name": "ctx_struct", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_ctx_struct", "linux": "fuai_ctx_struct", "semantics": "structural context text"},
+    {"opcode": 33025, "name": "cap_grant", "layer": "core", "sig": "a0=idx a1=perm", "fujo": "fujo_cap_grant", "linux": "fuai_cap_grant", "semantics": "grant capability slot 0..7"},
+    {"opcode": 33026, "name": "cap_check", "layer": "core", "sig": "a0=idx a1=perm", "fujo": "fujo_cap_check", "linux": "fuai_cap_check", "semantics": "check slot; deny -> audit + DENIES++"},
+    {"opcode": 33027, "name": "aud_log", "layer": "core", "sig": "a0=action a1=subject", "fujo": "fujo_aud_log", "linux": "fuai_aud_log", "semantics": "append audit entry"},
+    {"opcode": 33028, "name": "aud_read", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_aud_read", "linux": "fuai_aud_read", "semantics": "read audit ring"},
+    {"opcode": 33029, "name": "cap_exec", "layer": "core", "sig": "a0=act a1=a0 a2=a1", "fujo": "cap_exec", "linux": "fuai_cap_exec", "semantics": "A1 unauthorized act -> -1 no side effect DENIES++; A2 exactly one audit entry"},
+    {"opcode": 33030, "name": "cfg_get", "layer": "core", "sig": "a0=key", "fujo": "fujo_cfg_get", "linux": "fuai_cfg_get", "semantics": "config read (defaults 1->50 2->0 7->45 8->35)"},
+    {"opcode": 33031, "name": "dom_create", "layer": "core", "sig": "a0=perm a1=as_mask a2=irq", "fujo": "fujo_dom_create", "linux": "fuai_dom_create", "semantics": "create domain id 1..=4 (-17 full)"},
+    {"opcode": 33032, "name": "dom_bind", "layer": "core", "sig": "a0=id", "fujo": "set_current_domain", "linux": "fuai_dom_bind", "semantics": "bind current context (0=system)"},
+    {"opcode": 33033, "name": "dom_revoke", "layer": "core", "sig": "a0=id", "fujo": "fujo_dom_revoke", "linux": "fuai_dom_revoke", "semantics": "revoke; granted=false audited; all exec denied"},
+    {"opcode": 33034, "name": "dom_info", "layer": "core", "sig": "a0=out", "fujo": "fujo_dom_info", "linux": "fuai_dom_info", "semantics": "read domain table 5x5 u64"},
+    {"opcode": 33281, "name": "route_set", "layer": "core", "sig": "a0=route", "fujo": "fujo_route_set", "linux": null, "semantics": "route table set (M92)"},
+    {"opcode": 33282, "name": "route_classify", "layer": "core", "sig": "a0=ptr a1=len", "fujo": "fujo_route_classify", "linux": null, "semantics": "route classify"},
+    {"opcode": 33283, "name": "route_table", "layer": "core", "sig": "a0=out", "fujo": "fujo_route_table", "linux": null, "semantics": "route table readback"},
+    {"opcode": 33537, "name": "infer_run", "layer": "core", "sig": "a0..a3", "fujo": "fujo_infer_run", "linux": null, "semantics": "inference executor slot run (M93)"},
+    {"opcode": 33538, "name": "infer_slot", "layer": "core", "sig": "a0=slot", "fujo": "fujo_infer_slot", "linux": null, "semantics": "inference slot query"},
+    {"opcode": 33539, "name": "infer_set", "layer": "core", "sig": "a0=slot", "fujo": "fujo_infer_set", "linux": null, "semantics": "inference slot set"},
+    {"opcode": 33540, "name": "anom_run", "layer": "core", "sig": "a0=digest a1=len a2=out", "fujo": "fujo_anom_run", "linux": "fuai_anom_run", "semantics": "anomaly sentinel; out[0..2]=anom conf engine"},
+    {"opcode": 33541, "name": "plan_run", "layer": "core", "sig": "a0=goal a1=len a2=out", "fujo": "fujo_plan_run", "linux": "fuai_plan_run", "semantics": "planner -> action vector -> cap_exec each"},
+    {"opcode": 33542, "name": "io_predict", "layer": "core", "sig": "a0=seq a1=len a2=out", "fujo": "fujo_io_predict", "linux": "fuai_io_predict", "semantics": "IO predictor; out[0]=next block"},
+    {"opcode": 33543, "name": "nlc_set", "layer": "core", "sig": "a0=text a1=len a2=out", "fujo": "fujo_nlc_set", "linux": "fuai_nlc_set", "semantics": "NLC -> POL=k:v -> cfg_set; value-domain + tau-invariant rejections"},
+    {"opcode": 33544, "name": "env_scan", "layer": "core", "sig": "a0=out a1=out2", "fujo": "fujo_env_scan", "linux": "fuai_env_scan", "semantics": "environment scan -> profile/scene/cfg6"},
+    {"opcode": 33545, "name": "r3_probe", "layer": "core", "sig": "a0=mode a1=out", "fujo": "fujo_r3_probe", "linux": "fuai_r3_probe", "semantics": "R3 staleness probe"},
+    {"opcode": 33546, "name": "inv_run", "layer": "core", "sig": "a0=out a1=out2", "fujo": "fujo_inv_run", "linux": "fuai_inv_run", "semantics": "A1-A4 axiom self-check offline; expects 0xF"},
+    {"opcode": 33547, "name": "rules_load", "layer": "core", "sig": "a0=ptr a1=len", "fujo": "fujo_rules_load", "linux": "fuai_rules_load", "semantics": "load FJRU v1 bytecode -> entry count"},
+    {"opcode": 33548, "name": "ai_stats", "layer": "core", "sig": "a0=out", "fujo": "fujo_ai_stats", "linux": "fuai_ai_stats", "semantics": "model calls / rules / rule hits / ai audit entries"},
+    {"opcode": 33549, "name": "ai_audit", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_ai_audit", "linux": "fuai_ai_audit", "semantics": "export AI audit entries (88B each)"},
+    {"opcode": 33550, "name": "cr3_probe", "layer": "host-ext", "sig": "a0=out", "fujo": "fujo_cr3_probe", "linux": null, "semantics": "x86 CR3 debug probe (host-specific)"},
+    {"opcode": 33551, "name": "evl_mode", "layer": "core", "sig": "a0=mode", "fujo": "fujo_evl_mode", "linux": "fuai_evl_mode", "semantics": "0=auto 1=model 2=rules engine force"},
+    {"opcode": 33554, "name": "ev_digest", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_ev_digest", "linux": "fuai_ev_digest", "semantics": "event stream digest (sentinel perceives itself)"},
+    {"opcode": 33555, "name": "dom_admit", "layer": "core", "sig": "a0=duty a1=out", "fujo": "fujo_dom_admit", "linux": "fuai_dom_admit", "semantics": "quality->domain width; WIDEN_CONFIRM windows; shrink immediate. FujoOS: qual_test gate"},
+    {"opcode": 33556, "name": "qual_feed", "layer": "core", "sig": "a0=duty a1=hit", "fujo": "fujo_qual_feed", "linux": "fuai_qual_feed", "semantics": "quality ledger feed (per-duty rolling 64). FujoOS: qual_test gate"},
+    {"opcode": 33557, "name": "qual_seq", "layer": "core", "sig": "a0=out a1=n", "fujo": "fujo_qual_seq", "linux": "fuai_qual_seq", "semantics": "quality ledger export"},
+    {"opcode": 33558, "name": "box_run", "layer": "host-ext", "sig": "a0..a2", "fujo": "fujo_box_run", "linux": null, "semantics": "Windows box supplier command gate"},
+    {"opcode": 33559, "name": "box_stat", "layer": "host-ext", "sig": "a0=out a1=out2", "fujo": "fujo_box_stat", "linux": null, "semantics": "box state"},
+    {"opcode": 33560, "name": "box_result", "layer": "host-ext", "sig": "a0=out a1=cap", "fujo": "fujo_box_result", "linux": null, "semantics": "box artifact readback"},
+    {"opcode": 33561, "name": "box_fb_info", "layer": "host-ext", "sig": "a0=out", "fujo": "fujo_box_fb_info", "linux": null, "semantics": "box feedback info"},
+    {"opcode": 33568, "name": "box_contract", "layer": "host-ext", "sig": "a0..a3", "fujo": "fujo_box_contract", "linux": null, "semantics": "contract register/verify (pred max ttl mode)"},
+    {"opcode": 35841, "name": "unified_aud", "layer": "core", "sig": "a0=out a1=cap", "fujo": "fujo_unified_aud", "linux": "fuai_unified_aud", "semantics": "cap ring + ai ring unified export (32B entries)"}
+  ],
+  "formats": {
+    "shm_frame_v2": "payload@0x30 ctx@0x800 req.fifo/rsp.fifo FJAI:REQ line protocol — layout identical across implementations; verified by pointer check in v1.1",
+    "fjru_v1": "FJRU v1 rule bytecode 778B, sdk/rulebook/fjru.bin — load semantics identical across implementations; verified by loader diff in v1.1"
+  },
+  "gates": {
+    "dom_admit_qual_feed": "core primitives 0x8313/0x8314 carry a trust-adaptive authority gate (FujoOS: qual_test flag -> -12; LinuxFUAI: gate semantics for deployment)",
+    "tau_invariant": "cfg7>cfg8, cfg7>=35, cfg8<=45 (W46 policy envelope, both implementations)"
+  },
+  "deployment_params": {
+    "tau_high_default": {
+      "fujo": 45,
+      "linux": 46,
+      "note": "非接口差异: τ 默认值来自测量推导, 属部署参数。FujoOS 侧 W46 重标定 45 (v2 语义金标 T*=[0.429,0.454) 内); LinuxFUAI 冻结于 W40/W32 时代 46。P2 差分器必须用显式 cfg 声明的策略, 使两后端行为可比较。"
+    },
+    "tau_low_default": {
+      "fujo": 35,
+      "linux": 35,
+      "note": "一致"
+    }
+  }
+}

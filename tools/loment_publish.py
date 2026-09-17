@@ -41,6 +41,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ORG = "FujoJTOP"
 
+#: L0 契约的**对照物** —— 契约对面那一侧的源码，判据拿它们做逐字段对账。
+#:
+#: 它们不是 Loment 的实现，但**没有它们，对账判据就没有对照面**：`lom_audit`、
+#: `fuai_contract_check`、`lomc_test`、`loment_p7_test` 都直接 `ROOT / "kernel" / …`
+#: 这样读它们，读不到就是崩或红。
+#:
+#: 2026-09-17 搬开发口时，`sdk/`、`kernel/` 被整目录当 FujoOS 排除，于是这几条判据
+#: **静默失去对照面**。搬完只跑了三条判据就下了"验证好"的结论，是错的 —— 全量跑一遍
+#: 才撞出来。所以这一类要写成清单 + 判据（见 `cmd_check` 里的 COUNTERPARTS 那两条），
+#: 而不是靠人记得。
+#:
+#: **本仓这些是 vendored 副本**（与 `kernel/` 的既有约定一致：活的在 FujoOS，
+#: 本仓别当活的改）。它们只被读、不被构建。
+COUNTERPARTS = [
+    "kernel/src/syscall.rs",       # lom/fuai.lom 的 opcode + fujo_fn 对账面
+    "kernel/src/capability.rs",    # lom/fuc.lom 的 fujo_files
+    "kernel/src/fujr.rs",          # lom/fujr.lom 的 FUJR 魔数与版式
+    "kernel/src/fui/fuc.rs",       # fuc 版式常量
+    "kernel/src/fui/fuc_gen.rs",   # 由 lomc 生成的 fuc 常量（生成-消费闭合）
+    "sdk/fuai-spec/spec.json",     # 权威 = lom/fuai.lom 的生成物，双向逐字段
+    "tools/fuic.py",               # fuc 格式串的生成器（被对账的另一侧）
+    "tools/fujopack.py",           # 打包器，被 lomc_test 核对"用生成物而非手写"
+]
+
 #: 每个库：仓库名、切哪些路径（支持 glob）、重排规则、根 README。
 REPOS: dict[str, dict] = {
     "loment": {
@@ -89,6 +113,13 @@ REPOS: dict[str, dict] = {
             "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
             "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
             "tools/fuai_contract_check.py",
+            # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
+            # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
+            "tools/loment_probe.py",
+            # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
+            # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。
+            # 这 8 条是判据真正读的那些，一条一条点名。
+            *COUNTERPARTS,
         ],
         "renames": [],
         "floor": 250,
@@ -392,6 +423,14 @@ def cmd_check() -> int:
                 bad.append(f"{name}: 门禁闭包还缺 {len(miss)} 个 —— "
                            f"{' '.join('tools/' + m + '.py' for m in miss[:5])}"
                            f"{' …' if len(miss) > 5 else ''}（加进 paths，别靠手数）")
+            # L0 契约的对照物：**在树里**（不然本仓自己都红）且**在清单里**
+            # （不然开发口那侧的对账判据没有对照面）。两条分开报，因为修法不同。
+            for c in COUNTERPARTS:
+                if not (ROOT / c).exists():
+                    bad.append(f"{name}: 对照物 {c} 在树里就没有 —— 对账判据没有对照面")
+                elif not _hit(c, spec["paths"]):
+                    bad.append(f"{name}: 对照物 {c} 没进路径清单 —— "
+                               f"开发口那侧的对账判据会崩")
     for b in bad:
         print(f"[ERR] {b}")
     if bad:
