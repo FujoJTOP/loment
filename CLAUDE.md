@@ -13,6 +13,11 @@
 **做法**：把这些对照物**按原路径**带进来（`tools/loment_publish.py` 顶部 `COUNTERPARTS`
 是那份清单），判据因此一行都不用改。
 
+**另有一类**：`loment/corpus.json` 点名的**语料**（Potato LLM 那一臂的输入，含
+`sdk/linux/m1*.c` 与 `kernel/src/{smp,desk,graphics}.rs`）。它不是契约对照物，但同一个
+道理 —— 判据要读、文件在 FujoOS 侧。那一份**从 `corpus.json` 推导**，不手抄：语料随
+AI 线经常变，手抄必然静默漂。
+
 **约定**：
 
 1. **只读**。改它们要去 FujoOS 仓改，改完把副本重新拷一份过来 —— 与

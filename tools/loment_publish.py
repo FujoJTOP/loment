@@ -65,6 +65,36 @@ COUNTERPARTS = [
     "tools/fujopack.py",           # 打包器，被 lomc_test 核对"用生成物而非手写"
 ]
 
+
+def _corpus_paths() -> list[str]:
+    """`loment/corpus.json` 里点名的语料文件。
+
+    **推导而不是手抄**：语料是 Potato LLM 那一臂的输入（`potato_llm_arm.py`），而
+    `docs/175` §4 把 AI 训练列成两条主线之一 —— 它会**经常变**。手抄一份清单必然漂，
+    而漂法是静默的：多一条语料而清单没跟上，`potato_test` 就在开发口里红，人却以为
+    是"那台机器的问题"。所以直接从数据源读。
+
+    这些是**语料**不是契约对照物（见 `COUNTERPARTS`），但同一个道理：判据要读它们，
+    它们在 FujoOS 侧，本仓需要**只读副本**。
+    """
+    doc = json.loads((ROOT / "loment" / "corpus.json").read_text(encoding="utf-8"))
+    out: list[str] = []
+
+    def walk(o: object) -> None:
+        if isinstance(o, dict):
+            p = o.get("path")
+            if isinstance(p, str):
+                out.append(p)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(doc)
+    return out
+
+
 #: 每个库：仓库名、切哪些路径（支持 glob）、重排规则、根 README。
 REPOS: dict[str, dict] = {
     "loment": {
@@ -120,6 +150,8 @@ REPOS: dict[str, dict] = {
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。
             # 这 8 条是判据真正读的那些，一条一条点名。
             *COUNTERPARTS,
+            # 语料（Potato LLM 那一臂的输入）—— 推导，见 `_corpus_paths`。
+            *_corpus_paths(),
         ],
         "renames": [],
         "floor": 250,
@@ -425,12 +457,12 @@ def cmd_check() -> int:
                            f"{' …' if len(miss) > 5 else ''}（加进 paths，别靠手数）")
             # L0 契约的对照物：**在树里**（不然本仓自己都红）且**在清单里**
             # （不然开发口那侧的对账判据没有对照面）。两条分开报，因为修法不同。
-            for c in COUNTERPARTS:
+            for c in COUNTERPARTS + _corpus_paths():
                 if not (ROOT / c).exists():
-                    bad.append(f"{name}: 对照物 {c} 在树里就没有 —— 对账判据没有对照面")
+                    bad.append(f"{name}: 对照物/语料 {c} 在树里就没有 —— 判据没有对照面")
                 elif not _hit(c, spec["paths"]):
-                    bad.append(f"{name}: 对照物 {c} 没进路径清单 —— "
-                               f"开发口那侧的对账判据会崩")
+                    bad.append(f"{name}: 对照物/语料 {c} 没进路径清单 —— "
+                               f"开发口那侧会崩/会红")
     for b in bad:
         print(f"[ERR] {b}")
     if bad:
