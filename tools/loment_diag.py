@@ -109,10 +109,15 @@ RULES = [
     # 分类表里 —— `loment diag` 于是把它显示成 E999「未分类, 请报告」。语法错的修法只有一种
     # (按提示改那一行的写法), 所以按「码按修法分」的口径它们共用一个码。
     # **必须排在 E001 之后**: E001 的 `实参(期望|类型)` 里也有「期望」二字, 排前面会把它抢走。
-    ("E019", r"期望 .*得到|期望表达式",
-     "语法错误（解析期）",
-     "按消息给的 `行:列` 改那一行的写法。常见两种: `match` 的臂体要**块**（`=> { … }`，"
-     "不是 `=> 表达式`）；`return` 必须带值（没有 `return;`）。"),
+    # `非法字符` 是**词法**期的, 但它与解析期那批是同一类修法 (改那一行的写法), 所以
+    # 共用一个码。2026-09-17 补: 用一份 C 装 `.lomt` 时先撞到的就是它 (第 63 行的 `'0'`
+    # 字面量), 而它当时**一条都不在分类表里** —— 显示成 E999「未分类, 请报告」。
+    ("E019", r"期望 .*得到|期望表达式|非法字符",
+     "语法错误（词法/解析期）",
+     "按消息给的 `行:列` 改那一行的写法。常见三种: `match` 的臂体要**块**（`=> { … }`，"
+     "不是 `=> 表达式`）；`return` 必须带值（没有 `return;`）；用了 Loment 没有的"
+     "字面量或符号（单引号字符、`#`、`@`…）。**若这个文件本来就不是 Loment**，"
+     "`loment diag` 会另给一条提示（见 `foreign_note`）。"),
 ]
 
 
@@ -121,6 +126,37 @@ def classify(msg: str) -> tuple[str, str, str]:
         if re.search(pat, msg):
             return code, title, hint
     return "E999", "未分类", "请报告此消息以便补充分类规则。"
+
+
+def foreign_note(path: Path, errs: list[str]) -> str | None:
+    """文件报错、而**看内容是别的语言**时, 给一条对得上的建议。
+
+    **为什么非要有这一条**: 一份 C 源码叫 `.lomt` 时, `loment diag` 会照着 E019 的通用
+    建议说"按消息给的行:列**改那一行的写法**" —— 那条在这里是**错的**: 那份 C 的语法本来
+    就对, 它只是不是 Loment。照建议改会把一份好 C 改坏。
+
+    **触发条件是"有错就闻一下", 不是某一条特定消息** —— 这条是实测改过来的:
+    第一版只认 `期望 module`, 而那份 C 在第 63 行有个 `'0'` 字符字面量, **词法**先于解析
+    就把它拒了 (`63:25: 非法字符 "'"`), 于是根本没走到"期望 module", 提示不出现。
+    改文件的人会以为"这条判据没生效", 而真相是触发面太窄。
+    """
+    if not errs:
+        return None
+    try:
+        import potato_from
+        # 注意用 `resolve_lang` 而不是 `detect_lang`: 后缀优先 (一份 `.c` 有没有错都该
+        # 按 C 说), 内容兜底 —— 判语法的规则只有一处, 见 potato_from.resolve_lang。
+        lang, why = potato_from.resolve_lang(path, "auto")
+    except Exception:                                                # noqa: BLE001
+        return None
+    if lang in ("c", "rust", "python"):
+        return (f"这个文件**不是 Loment 语法**, 看内容是 **{lang.upper()}**（{why}）。"
+                f"别照上面那条改 —— 它的语法本来就是对的。走多语法前端:\n"
+                f"       python tools/lomt_from.py \"{path}\" --lang auto --out "
+                f"{path.with_suffix('.iface.lomt').name}\n"
+                f"      （它把外源语法转成 L1 接口单元, 再由 Loment 编译器编。"
+                f"见 docs/179）")
+    return None
 
 
 def diagnose(errs: list[str]) -> list[dict]:
@@ -146,12 +182,17 @@ def main(argv: list[str] | None = None) -> int:
     except lomentc.LomError as e:
         errs = [str(e)]
     diags = diagnose(errs)
+    note = foreign_note(p, errs)
     if a.json:
-        print(json.dumps(diags, ensure_ascii=False, indent=2))
+        print(json.dumps({"diagnostics": diags, "foreign_note": note},
+                         ensure_ascii=False, indent=2))
     else:
         for d in diags:
             print(f"{d['code']} [{d['title']}] {d['message']}")
             print(f"      建议: {d['hint']}")
+        if note:
+            print()
+            print("  ⚠ " + note)
         if not diags:
             print("[OK] 无错误")
     return 1 if diags else 0

@@ -32,6 +32,12 @@ C_TYPES = {
     "int8_t": "i8", "int16_t": "i16", "int32_t": "i32", "int64_t": "i64",
     "unsigned char": "u8", "unsigned short": "u16", "unsigned int": "u32",
     "unsigned long": "u64", "signed char": "i8", "short": "i16", "int": "i32",
+    # **`unsigned` / `signed` 单独写就是 `unsigned int` / `signed int`**（C 标准这么定，
+    # 不是缩写习惯）。原先这里没有它们，于是 `unsigned f(...)` 的返回类型"无映射"被跳过 ——
+    # 而那是最常见的 C 写法之一。2026-09-17 用一份 C 装 `.lomt` 实测撞到的：
+    # 5 个函数里 4 个因此被丢，而**报告还被工具扔了**，看起来像"只认出 1 个"。
+    # `char` 的符号性在 C 里是实现定义的；x86-64 Linux 上是 i8，照这个来。
+    "unsigned": "u32", "signed": "i32", "char": "i8",
     "long": "i64", "size_t": "u64", "ssize_t": "i64", "bool": "bool",
     "_Bool": "bool", "void": "()", "char *": "str", "const char *": "str",
     "void *": "ptr", "uintptr_t": "u64", "intptr_t": "i64",
@@ -45,6 +51,76 @@ RS_TYPES = {
     "bool": "bool", "()": "()", "usize": "u64", "isize": "i64",
 }
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# ---------------------------------------------------------------- 语法识别 (按内容)
+#
+# docs/175 §5 那条: "**非 Loment 源语法的 `.lomt` 文件**" —— 后缀说的是"这是 Loment 的
+# 源文件", 而那种文件里装的东西可以是**别的语法**。只按后缀判的话, 一份写着 C 的 `.lomt`
+# 会走进 Loment 解析器, 得到 `1:1: 期望 module（文件必须以 module 开头），得到 'int'`
+# —— 一条**把人引向错方向**的建议: 它会让你去改那一行的写法, 而那份 C 的语法本来就对,
+# 只是它不是 Loment (2026-09-17 用一份 C 装 `.lomt` 实测到的)。
+#
+# **判据顺序就是优先级**, 先认最专有的特征:
+#   ① `module <名字>` / `capability`·`guard`·`excluded` —— Loment 独有
+#   ② `def` / `import` / `class`                        —— Python
+#   ③ `fn` / `#[…]`                                     —— Rust
+#   ④ `#include` 之类预处理指令                          —— C
+#   ⑤ 函数定义的**形状** `<类型> <名字>(…)`              —— 放在最后, 因为它是启发式
+#
+# **它不假装完备**: 认不出就返回空串, 调用方据此报"请用 `--lang` 指明",
+# 而不是猜一个再去编 (猜错比认不出更坏 —— 见 lomelf 头注那条"把静默错编改成报错退出")。
+_LOMENT_MODULE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
+_LOMENT_OWN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:capability|guard)\b|^[ \t]*excluded[ \t]+\"",
+                         re.M)
+_PY_DEF = re.compile(r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+\w+|^[ \t]*import[ \t]+\w+",
+                     re.M)
+_RS_FN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:unsafe[ \t]+)?(?:async[ \t]+)?"
+                    r"(?:extern[ \t]+\"[^\"]*\"[ \t]+)?fn[ \t]+\w+", re.M)
+_C_PRE = re.compile(r"^[ \t]*#[ \t]*(?:include|define|ifdef|ifndef|pragma|endif|elif)\b", re.M)
+#: 一行只有"类型 + 名字 + 参数表"(行尾可选 `{`) —— C 的函数定义 (K&R 之后)。
+#: 排除 `return`/`if`/`while`/`for`/`switch`/`else` 开头, 免得把语句或调用当定义。
+_C_FNDEF = re.compile(r"^[ \t]*(?!(?:return|if|while|for|switch|else)\b)"
+                      r"[A-Za-z_][\w \t\*]*\*?[A-Za-z_]\w*[ \t]*\([^;{}\"()]*\)[ \t]*\{?[ \t]*$",
+                      re.M)
+#: 整份 C **一行写完** (`int add(int a, int b) { return a + b; }`) —— 上面那条要求行尾就是
+#: `)`, 所以它漏这一种, 而那是最常见的写法之一。
+#:
+#: **只认 C 的类型关键字开头**, 这是刻意的: Loment 的一行函数长成 `fn f() { return 1; }`,
+#: 而 `fn`/`struct`/`enum`/`const`/`capability` 都不在下面这张表里 —— 于是两种语言不会在这里
+#: 撞车。(带 `struct` 的 C 定义走 `_C_STRUCT`, 不靠这一条。)
+_C_TYPES_LEAD = ("void", "int", "char", "short", "long", "float", "double",
+                 "unsigned", "signed", "static", "inline", "size_t")
+_C_ONELINE = re.compile(r"^[ \t]*(?:" + "|".join(_C_TYPES_LEAD) + r")\b"
+                        r"[^;{}]*\([^;{}]*\)[ \t]*\{.*\}[ \t]*;?[ \t]*$", re.M)
+
+
+#: 判语法前先把注释去掉 —— 注释里出现 `fn`/`def`/`module` 会把人骗过去。
+#: (C 的 `/* */`、`//`; Python 的 `#` 不是 `_C_PRE` 那种 `#include`, 留着无所谓)
+_ANY_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+
+
+def detect_lang(src: str) -> tuple[str, str]:
+    """按**内容**判断源语法。返回 `(语言, 依据)`; 认不出返回 `("", 原因)`。
+
+    语言取值与 `LANGS` 的键一致 (另加 `"loment"` —— 那表示"这本来就是 Loment 源,
+    不该走前端")。
+    """
+    body = _ANY_COMMENT.sub(" ", src)
+    if _LOMENT_MODULE.search(body):
+        return "loment", "以 `module <名字>` 开头"
+    if _LOMENT_OWN.search(body):
+        return "loment", "有 `capability` / `guard` / `excluded` —— Loment 独有"
+    if _PY_DEF.search(body):
+        return "python", "有 `def` / `class` / `import`"
+    if _RS_FN.search(body):
+        return "rust", "有 `fn`"
+    if _C_PRE.search(body):
+        return "c", "有 `#include` 之类预处理指令"
+    if _C_FNDEF.search(body):
+        return "c", "有 `<类型> <名字>(…)` 形状的函数定义, 且没有 `fn`/`def`"
+    if _C_ONELINE.search(body):
+        return "c", "有整行写完的 C 函数定义 (`<类型关键字> …(…) { … }`)"
+    return "", "四种特征都没命中"
 
 
 def _ident(name: str, fallback: str = "unit") -> str:
@@ -397,11 +473,36 @@ LANGS = {"python": from_python, "c": from_c, "rust": from_rust}
 EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust"}
 
 
+def resolve_lang(path: Path, lang: str = "auto") -> tuple[str, str]:
+    """`(语言, 依据)` —— **后缀优先, 内容兜底**。`transcribe` 与各工具共用这一处,
+    免得"判语法"这事在两处各写一遍(那种必然漂)。
+
+    后缀认得就信后缀(显式比猜的可靠); 认不出(`.lomt` 就在这一档)才读内容判。
+    """
+    if lang != "auto":
+        return lang, "调用方指定的"
+    by_ext = EXT.get(path.suffix, "")
+    if by_ext:
+        return by_ext, f"后缀 {path.suffix}"
+    src = path.read_text(encoding="utf-8", errors="replace")
+    return detect_lang(src)
+
+
 def transcribe(path: Path, lang: str = "auto", mode: str = "strict"):
-    if lang == "auto":
-        lang = EXT.get(path.suffix, "")
-        if not lang:
-            raise ValueError(f"无法从扩展名判断语言: {path}")
+    """源文件 -> (形式对象, 报告)。
+
+    `lang="auto"` 时按 `resolve_lang` 的规则定语言 —— 它也就是 docs/175 §5 那条
+    "非 Loment 源语法的 `.lomt` 文件"落地的地方。
+    """
+    lang, why = resolve_lang(path, lang)
+    if lang == "loment":
+        raise ValueError(
+            f"{path} 是 **Loment 语法**（{why}）—— 它不该走多语法前端, "
+            f"直接交给编译器: loment check {path}")
+    if lang not in LANGS:
+        raise ValueError(
+            f"定不出源语法（后缀 {path.suffix!r} 不在 {sorted(EXT)}，内容：{why}）"
+            f"—— 用 --lang c|rust|python 指明")
     src = path.read_text(encoding="utf-8", errors="replace")
     return LANGS[lang](src, path.name, mode)
 

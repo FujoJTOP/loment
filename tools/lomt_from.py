@@ -255,7 +255,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if a.lang is not None:
             import potato_from
-            doc, _rep = potato_from.transcribe(Path(a.path), a.lang, a.mode)
+            # **先说清认成了什么** —— 这就是"检测"这一步: 用户拿一份 `.lomt` 装着 C
+            # 过来, 他要看到的是"认出来了", 而不是默默转出一个东西。
+            got, why = potato_from.resolve_lang(Path(a.path), a.lang)
+            print(f"[detect] {a.path} -> {got or '认不出'}（{why}）", file=sys.stderr)
+            if got == "loment":
+                print(f"[ERR] 这本来就是 Loment 语法, 不该走前端 —— "
+                      f"直接交给编译器: loment check {a.path}", file=sys.stderr)
+                return 2
+            doc, rep = potato_from.transcribe(Path(a.path), a.lang, a.mode)
+            # **转写那一步的跳过项也要报** —— 只报发射那一步等于把"前一步丢的"藏起来。
+            # 2026-09-17 实测: 一份 5 函数的 C 只发出 1 个, 而这里一条 `[skip]` 都没有,
+            # 看起来像"它只认出 1 个函数"(真相是另 4 个在转写那步因类型没映射被丢)。
+            for s in rep.skipped:
+                print(f"[skip] {s['name']}: {s['why']}", file=sys.stderr)
         else:
             doc = json.loads(Path(a.path).read_text(encoding="utf-8"))
         # 对象自身先要合法 —— 拿一份非法对象去发 L1 等于把错误往后传。

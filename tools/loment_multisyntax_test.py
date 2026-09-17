@@ -68,6 +68,68 @@ def f(a: int) -> int:
     return a + 1
 """
 
+#: **`.lomt` 后缀里装着 C** —— docs/175 §5 那条原话的形状。这份是照 2026-09-17 一个子
+#: agent 真写出来的 C 蒸馏的, 刻意保留了三处**当时把工具链绊倒**的东西:
+#:   * Allman 风格 (`{` 在下一行) —— 第一版 `_C_FNDEF` 只认同行 `{`;
+#:   * `unsigned` **单独写** —— 类型表里原先只有 `unsigned int`, 于是 5 个函数被丢 4 个;
+#:   * 单引号字符字面量 `'0'` —— Loment 词法没有它, 所以**词法**先报错 (不是解析),
+#:     而诊断工具第一版只认"期望 module"那条消息, 于是提示不出现。
+C_IN_LOMT = """\
+// 一份 C 源码 后缀是 lomt
+
+int c_fact(int n)
+{
+    int acc = 1;
+    int i;
+    if (n < 0) {
+        return 0;
+    }
+    for (i = 2; i <= n; i = i + 1) {
+        acc = acc * i;
+    }
+    return acc;
+}
+
+unsigned c_gcd(unsigned a, unsigned b)
+{
+    unsigned t;
+    while (b != 0) {
+        t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+int c_popcount(unsigned v)
+{
+    int n = 0;
+    while (v != 0) {
+        n = n + (int)(v & 1u);
+        v = v >> 1;
+    }
+    return n;
+}
+
+// 把数字写进调用方缓冲 返回写了几位
+int c_utoa(unsigned value, char *buf)
+{
+    unsigned scale = 1;
+    unsigned v = value;
+    int n = 0;
+    while (v >= 10) {
+        v = v / 10;
+        scale = scale * 10;
+    }
+    while (scale > 0) {
+        buf[n] = (char)('0' + (value / scale) % 10);
+        n = n + 1;
+        scale = scale / 10;
+    }
+    return n;
+}
+"""
+
 
 def _clang() -> str | None:
     for c in CLANG_CANDIDATES:
@@ -153,6 +215,99 @@ def _run_with_iface(td: Path, iface: Path, main_src: str, objs: list[Path],
     assert r.returncode == exit_want, \
         f"退出码 {r.returncode} != {exit_want} (stderr {r.stderr[-200:]!r})"
     return r.returncode, r.stderr
+
+
+# ---------------------------------------------------------------- 0. 按内容认出语法
+
+@test
+def test_sniffing_picks_the_right_language():
+    """**按内容**定语法: `.lomt` 后缀 + 外源内容 = 要能认出来 (docs/175 §5)。
+
+    这是整个多语法特性的入口 —— 认不出, 后面那半段根本不会被走到。
+    每条判据都带一个"依据"字符串, 出问题时能看出是**哪条特征**判的。
+    """
+    cases = [
+        ("loment", "module m\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+        ("loment", "module t\n\ncapability c : disk[0..4]\n\nfn f() {}\n"),
+        ("c", C_IN_LOMT),                       # ← `.lomt` 装着 C
+        ("c", "#include <stdio.h>\nint main(void) { return 0; }\n"),
+        ("rust", '#[no_mangle]\npub extern "C" fn g(x: i32) -> i32 { x + 1 }\n'),
+        ("rust", "pub struct P {\n    x: i32,\n}\n\npub fn h(x: i32) -> i32 { x }\n"),
+        ("python", PY_SOURCE),
+        ("", "some prose, no code at all\n"),
+    ]
+    for want, src in cases:
+        got, why = potato_from.detect_lang(src)
+        assert got == want, f"认成 {got!r}（{why}）, 期望 {want!r}：{src[:40]!r}"
+    # 注释里的关键字**不许**把人骗过去 (这里的 C 还是"整行写完"那种)
+    got, _ = potato_from.detect_lang("// fn def module 都在注释里\nint a(void) { return 1; }\n")
+    assert got == "c", got
+    # **反过来也要不撞车**: Loment 的一行函数长得很像, 不许被认成 C。
+    # 判据是"开头是 C 的类型关键字吗" —— Loment 从 `fn`/`struct`/`const` 开头, 都不是。
+    for loment_snippet in ("fn f() { return 1; }\n", "struct S { a: u32 }\n",
+                           "pub fn g(x: u32) { }\n"):
+        got, why = potato_from.detect_lang(loment_snippet)
+        assert got != "c", f"把 Loment 认成了 C（{why}）：{loment_snippet!r}"
+    print("      8 个样例都认对; 注释不误导; Loment 的一行函数不被认成 C")
+
+
+@test
+def test_detection_is_actually_used_by_the_pipeline():
+    """检测不是摆设: 一份 `.lomt` 装着 C, `--lang auto` 必须走通全链。"""
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "mod.lomt"                       # ← 后缀是 .lomt
+        p.write_text(C_IN_LOMT, encoding="utf-8", newline="\n")
+        lang, why = potato_from.resolve_lang(p, "auto")
+        assert lang == "c", (lang, why)
+        doc, rep = potato_from.transcribe(p, "auto")
+        assert not rep.validate_errors, rep.validate_errors[:2]
+        text, skipped = lomt_from.emit_lomt(doc)
+        assert "pub extern fn c_fact(n: i32) -> i32;" in text, text
+        assert "pub extern fn c_gcd(a: u32, b: u32) -> u32;" in text, text
+        assert "pub extern fn c_popcount(v: u32) -> i32;" in text, text
+        # `char *buf` -> `str` -> 出不了 FFI 第 1 阶段那道闸门。**必须报出来**, 不能少一条
+        # 声明还不出声 (Loment 没有重载, 少一条声明是安全的 —— 但沉默不是)。
+        assert "不是 C ABI" not in str(skipped), skipped
+        assert "c_utoa" in [n for n, _ in skipped], skipped
+        # 一份本来就是 Loment 的 `.lomt` 不许被当成外源语法
+        q = td / "real.lomt"
+        q.write_text("module real\n\nfn f() -> u32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.transcribe(q, "auto")
+        except ValueError as e:
+            assert "Loment 语法" in str(e), str(e)
+        else:
+            raise AssertionError("一份 Loment 源被当成外源语法转写了")
+    print("      `.lomt` 装着 C -> 认出来 -> 转出接口单元; 确实是 Loment 的会被告知走编译器")
+
+
+@test
+def test_diag_does_not_tell_you_to_fix_valid_c():
+    """诊断工具**不许**对一份语法正确的 C 说"改那一行的写法"。
+
+    实测过的那条弯路: 报的是 `63:25: 非法字符 "'"`（Loment 词法没有单引号字面量,
+    **词法**先于解析报错）, 而工具照 E019 的通用建议让人去改那一行 —— 照做会把一份好 C
+    改坏。第一版提示只认"期望 module"那条消息, 所以它**不出现**; 判据因此不测那条消息,
+    测的是"有错 + 内容是别的语言"这个**行为**。
+    """
+    import loment_diag
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        c = td / "m.lomt"
+        c.write_text(C_IN_LOMT, encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(c, ["63:25: 非法字符 \"'\""])
+        assert note and "C" in note, note
+        assert "改" in note and "不是 Loment" in note, note
+        # 一份**真 Loment** 带 typo: 不许出现这条提示 (否则把人从正确方向引开)
+        lp = td / "t.lomt"
+        lp.write_text("module t\n\nfn f() -> u32 {\n    return 1\n}\n",
+                      encoding="utf-8", newline="\n")
+        assert loment_diag.foreign_note(lp, ["5:1: 期望 ;，得到 '}'"]) is None
+        # 没报错时也不该有
+        assert loment_diag.foreign_note(c, []) is None
+    print("      C 装 `.lomt` -> 给出对得上的提示; Loment 的 typo -> 不给")
 
 
 # ---------------------------------------------------------------- 1. 对象必须合法
@@ -241,6 +396,53 @@ def test_rust_frontend_end_to_end():
                         "    syscall4(60, r_bump(20 as i32) as u64, 0, 0);\n"
                         "}\n", [td / "r.o"], 21)
     print("      Rust: extern \"C\" 发出来并跑通 (21); 普通 pub fn 被跳过并报出")
+
+
+@test
+def test_c_in_lomt_end_to_end():
+    """**端到端**: 一份 C 装 `.lomt` -> 认出来 -> 接口单元 -> L1 调用 -> 链真目标文件 -> 跑。
+
+    这是 docs/175 §5 那条的完整形态, 也是"多语法系统"这个说法唯一值得信的证据:
+    它跨了三个工具 (clang 编 C、lomt_from 转、lomentc 编 Loment)、两道链接 (lomelf 把
+    外部 `.o` 链进来), 最后**真的跑出正确结果** —— 退出码由 Python 独立算出来对照。
+
+    **`-x c` 不能省**: clang 按**后缀**认语言, 一份 `.lomt` 会被它当成 linker 输入
+    (警告 `'linker' input unused`) 然后 **rc=0 且什么都不产出** —— 2026-09-17 实测
+    撞到的第一个坑, 而且它**不报错**, 只在你去找产物时才发现是空的。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        src = td / "m.lomt"                       # ← 后缀是 .lomt, 内容是 C
+        src.write_text(C_IN_LOMT, encoding="utf-8", newline="\n")
+
+        iface, skipped = _iface_from_source(td, "m", C_IN_LOMT, "c")
+        txt = iface.read_text(encoding="utf-8")
+        assert "c_fact" in txt and "c_gcd" in txt and "c_popcount" in txt, txt
+        assert "c_utoa" in [n for n, _ in skipped], skipped
+
+        obj = td / "m.o"
+        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-x", "c", "-c",
+                            "-O1", "-ffreestanding", "-fno-stack-protector",
+                            "-o", str(obj), str(src)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        assert obj.exists() and obj.stat().st_size > 0, "clang 没产出目标文件 (漏了 -x c?)"
+
+        # Python 独立算: 6! = 720, gcd(1071,462) = 21, popcount(0xbeef) = 13
+        want = (720 + 21 + 13) % 256
+        _run_with_iface(td, iface,
+                        f'module msc\n\nuse "{(td / "m_iface.lomt").as_posix()}"\n\n'
+                        "fn _start() {\n"
+                        f"    let a: u32 = c_fact(6 as i32) as u32;\n"
+                        f"    let b: u32 = c_gcd(1071 as u32, 462 as u32);\n"
+                        f"    let c: u32 = c_popcount(48879 as u32) as u32;\n"
+                        "    syscall4(60, ((a + b + c) % 256) as u64, 0, 0);\n"
+                        "}\n", [obj], want)
+    print(f"      C 装 `.lomt`: 认出 -> 接口单元 -> 链真目标文件 -> 退出码 {want} (由 Python 算出)")
 
 
 # ---------------------------------------------------------------- 3. 闸门出声
