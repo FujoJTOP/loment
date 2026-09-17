@@ -159,8 +159,9 @@ identities -> emit the plan -> (with `--apply`) write the files. It refuses to i
 anything that fails validation (see 5.0.1) and says which rule failed.
 
 **`--apply` makes it real.** Without it you get the plan and nothing is touched. With it,
-lompi writes the files itself — but it still cannot create directories (no `mkdir` on PE),
-so it checks **every** target directory first and refuses with the full list of `mkdir`
+lompi writes the files itself — but the PE runtime it is compiled against has no `mkdir`
+yet (a toolchain gap, not a lompi decision: on ELF targets it is there, see 5.6), so it
+checks **every** target directory first and refuses with the full list of `mkdir`
 commands, rather than copying half and leaving a partial install:
 
 ```
@@ -255,10 +256,13 @@ git clone --depth 1 https://github.com/you/loment-libs C:\Users\hooya\.lompi\cac
 # to update later:  git -C C:\Users\hooya\.lompi\cache\loment-libs pull
 ```
 
-**lompi cannot download anything itself.** The Windows PE target implements 8 syscalls and
-none of them is `socket`; the runtime shim imports no `ws2_32` / `winhttp`. So `fetch` emits
-the exact command for a shell or CI to run — the same boundary as `mkdir` in 5.6. Run the
-printed command, then `lompi install <name>` will find the package in the cache.
+**lompi cannot download anything itself — yet.** The Windows PE target implements 8 syscalls
+and none of them is `socket`; the runtime shim imports no `ws2_32` / `winhttp`. So `fetch`
+emits the exact command for a shell or CI to run — the same situation as `mkdir` in 5.6.
+**Neither is a lompi design position**: both are gaps in the runtime the PE build is
+compiled against, and the socket one is scheduled to be lifted in lompi 0.1.1. Do not
+design a workflow around them being permanent. Run the printed command, then
+`lompi install <name>` will find the package in the cache.
 
 ### 5.0.3 `config` and `version`
 
@@ -585,17 +589,33 @@ means a different meaning, and merging them would be the harmful outcome.
 
 ## 9. Boundaries (honest list)
 
-- **No network.** A store is a local directory, and a registry is a git repository you have
-  already cloned. lompi emits the clone command (`lompi fetch`) but cannot run it — the PE
-  target has no socket. Installing is always reading local files.
+Two kinds are listed here, and the difference matters when you are planning work:
+**by design** (settled — do not design around it changing) and **not yet in the
+toolchain** (a gap in the runtime lompi is compiled with, not a decision lompi made).
+
+**By design**
+
 - **No server.** A "registry" is just a repository URL; lompi never talks to a service.
 - **No version range language.** Selection is "highest version" only; pin with
   `name@version` or with a lock.
 - **No binary distribution.** Generics are type-directed monomorphization, so consumers
   must see source.
-- **Neither `plan` nor `install` creates directories** (no `mkdir` on PE). `install --apply`
-  writes files into directories that already exist; it checks them all up front and lists
-  the `mkdir` commands you need instead of leaving a partial install.
+
+**Not yet in the toolchain** — treat as "not yet", and check the version before designing
+around one
+
+- **No socket.** The PE runtime exposes eight syscalls and none of them is a socket, so
+  `lompi fetch` emits the `git clone` command instead of running it, and installing is
+  always reading local files. **This is a toolchain gap, not a design position** — it is
+  scheduled to be lifted in lompi 0.1.1.
+- **No `mkdir`.** `install --apply` writes files into directories that already exist; it
+  checks them all up front and lists the `mkdir` commands you need instead of leaving a
+  partial install. Same status as the socket — the runtime does not offer it yet. On ELF
+  targets it *is* available (see 5.6), which is the tell that this is the PE shim
+  speaking, not lompi.
+
+**Behaviour you should know** (settled, and these are not limitations)
+
 - **Within a store, `use <name>` must resolve.** No version at all gives
   `lompi: missing dependency in store: <name>` and exit 1; several versions is **normal**
   (highest wins).
@@ -630,8 +650,8 @@ means a different meaning, and merging them would be the harmful outcome.
 
 | pip | lompi | difference |
 |---|---|---|
-| `pip install X` | `lompi install X --apply` (or `--into DIR`) | validates first; without `--apply` it only prints the plan; cannot create directories (no `mkdir` on PE) |
-| `pip download` | `lompi fetch` | prints the `git clone` for you to run; lompi has no network |
+| `pip install X` | `lompi install X --apply` (or `--into DIR`) | validates first; without `--apply` it only prints the plan; needs the target directories to exist (PE shim has no `mkdir` yet — see 9) |
+| `pip download` | `lompi fetch` | prints the `git clone` for you to run (no socket in the PE shim yet — scheduled for 0.1.1; see 9) |
 | `pip config` | `lompi config` | also shows *how* the global root was derived |
 | `twine check` / wheel validation | `lompi check <dir>` | structural rules that `use <name>` will actually depend on |
 | `pip index versions X` | `lompi index <store>` | lists every instance, not just one package |
