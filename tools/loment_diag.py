@@ -149,7 +149,10 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
         lang, why = potato_from.resolve_lang(path, "auto")
     except Exception:                                                # noqa: BLE001
         return None
-    if lang in ("c", "rust", "python"):
+    # **从 `potato_from` 推导, 不写死** —— 原先这里硬编码了 `("c","rust","python")`,
+    # 于是加了 Go/Java 之后, 一份 Go 源码的诊断提示**静默消失**(`resolve_lang` 明明
+    # 认出来了)。硬编码一份"支持哪些语言"的清单, 必然在加语言时漏掉。
+    if lang in potato_from.LANGS:
         return (f"这个文件**不是 Loment 语法**, 看内容是 **{lang.upper()}**（{why}）。"
                 f"别照上面那条改 —— 它的语法本来就是对的。走多语法前端:\n"
                 f"       python tools/lomt_from.py \"{path}\" --lang auto --out "

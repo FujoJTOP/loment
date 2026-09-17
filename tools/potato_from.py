@@ -52,6 +52,309 @@ RS_TYPES = {
 }
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+GO_TYPES = {
+    # `int`/`uint` 在 Go 里是**平台相关**的 (至少 32 位; amd64 上是 64 位)。
+    # 这里按**本仓唯一支持的目标** (x86-64) 读 —— 不假装它是精确的:
+    # 要精确就别用 `int`, 用 `int32`/`int64`。这条与 C 那边的 `int -> i32` 不同,
+    # 是**因为两种语言的规定不同**, 不是为了整齐。
+    "int": "i64", "int8": "i8", "int16": "i16", "int32": "i32", "int64": "i64",
+    "uint": "u64", "uint8": "u8", "uint16": "u16", "uint32": "u32", "uint64": "u64",
+    "byte": "u8", "rune": "i32", "bool": "bool", "uintptr": "u64",
+    # Go 的 `string` 就是「指针 + 长度」—— 与 Loment 的 `str` 同形, 所以映 `str`,
+    # **不**映 `ptr`。(它不是 C 字符串, 于是过不了 FFI 第 1 阶段那道闸门 —— 那是对的,
+    # 见 docs/179 §3。)
+    "string": "str",
+    # float 不在 Loment 的类型里 —— 显式写出来, 让报错是"无映射"而不是"未知类型"。
+    "float32": None, "float64": None, "complex64": None, "complex128": None,
+}
+#: `func name(...) T {` —— Go 的函数定义。`func` 这个关键字在 C/Rust/Python 里都不出现,
+#: 所以它是一条**很干净**的判据。
+_GO_FN = re.compile(r"^[ \t]*func[ \t]+([A-Za-z_]\w*)[ \t]*\(([^)]*)\)[ \t]*([^{;\n]*?)[ \t]*\{",
+                    re.M)
+_GO_STRUCT = re.compile(r"^[ \t]*type[ \t]+([A-Za-z_]\w*)[ \t]+struct[ \t]*\{(.*?)^[ \t]*\}",
+                        re.M | re.S)
+#: `//export name` —— 只有这样的 Go 函数才是 **C ABI** (cgo 的约定)。
+#: 普通 Go 函数走 Go 自己那套调用约定 (与 Rust 的普通 `pub fn` 同理), 照 C ABI 调就是错编。
+_GO_EXPORT = re.compile(r"^[ \t]*//[ \t]*export[ \t]+([A-Za-z_]\w*)", re.M)
+
+
+def _go_type(t: str, mode: str, known: set[str]) -> str | None:
+    t = re.sub(r"\s+", " ", t.strip())
+    if not t:
+        return "()"
+    if t.startswith("[]"):
+        # 切片是 (ptr, len, cap) 三个字 —— Loment 没有对应形态。**不猜成 ptr**:
+        # 猜成 ptr 会丢长度, 调用方按什么切? 报"无映射"让上游决定。
+        return None
+    if t.endswith("...T") or t.startswith("..."):
+        return None                          # 变参
+    n = 0
+    while t.endswith("*"):
+        t = t[:-1].strip()
+        n += 1
+    if n:
+        return "ptr"                         # `*T` 一律 ptr (Go 没有别的指针形态好用)
+    if t in known:
+        return t
+    return GO_TYPES.get(t) if t in GO_TYPES else None
+
+
+def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    rep = Report(name, "go", mode)
+    doc = _blank(_ident(Path(name).stem), "go")
+    # **注释要在取完 `//export` 之后再剥** —— 它本身就是一条注释。
+    exported = set(_GO_EXPORT.findall(src))
+    body = _C_COMMENT.sub(" ", src)
+    known: set[str] = set()
+    for m in _GO_STRUCT.finditer(body):
+        sname, inner = m.group(1), m.group(2)
+        fields = []
+        for line in inner.splitlines():
+            line = line.strip()
+            if not line or line.startswith("//"):
+                continue
+            parts = line.split()
+            if len(parts) < 2 or parts[0].startswith("//"):
+                continue
+            fname = parts[0]
+            if not IDENT_RE.match(fname):
+                continue
+            t = _go_type(" ".join(parts[1:]), mode, known)
+            if t is None:
+                rep.skip_field(sname, fname, f"字段类型 {' '.join(parts[1:])!r} 无映射")
+                continue
+            fields.append({"name": fname, "type": t})
+        if not fields:
+            rep.skip("type", sname, "无可用字段")
+            continue
+        doc["types"].append({"name": sname, "fields": fields})
+        known.add(sname)
+        rep.ok += 1
+    for m in _GO_FN.finditer(body):
+        fn, params, ret = m.group(1), m.group(2), m.group(3).strip()
+        # 只有 `//export` 过的才是 C ABI —— 与 Rust 那侧的 `extern "C"` 同一个道理。
+        abi = "c" if fn in exported else "go"
+        if ret.startswith("("):
+            rep.skip("fn", fn, "多返回值 —— Potato 是单返回")
+            continue
+        rt = _go_type(ret, mode, known)
+        if rt is None:
+            rep.skip("fn", fn, f"返回类型 {ret!r} 无映射")
+            continue
+        ps, bad = [], None
+        for raw in [p.strip() for p in params.split(",") if p.strip()]:
+            parts = raw.split()
+            if len(parts) != 2:
+                # `a, b int` 这种分组形参、以及 `f func(int)` 那种类型参数 ——
+                # 都在这一档。报出来, 不猜。
+                bad = f"形参 {raw!r} 不是 `名字 类型` 两段"
+                break
+            pn, pt = parts
+            if not IDENT_RE.match(pn):
+                bad = f"形参名 {pn!r} 非法"
+                break
+            t = _go_type(pt, mode, known)
+            if t is None:
+                bad = f"形参类型 {pt!r} 无映射"
+                break
+            ps.append({"name": pn, "type": t})
+        if bad:
+            rep.skip("fn", fn, bad)
+            continue
+        doc["functions"].append({"name": fn, "params": ps, "ret": rt, "abi": abi})
+        rep.ok += 1
+    return _finish(doc, rep)
+
+
+JAVA_TYPES = {
+    "byte": "i8", "short": "i16", "int": "i32", "long": "i64",
+    # Java 的 `char` 是 **16 位无符号** (不是 C 的 8 位) —— 映 `u16`, 别照 C 的习惯映 i8。
+    "char": "u16", "boolean": "bool",
+    "String": "str",
+    # float/double 不在 Loment 的类型里。
+    "float": None, "double": None,
+    # **装箱类型不映** (Integer/Long/Boolean…): 它们**可以为 null**, 而 Loment 的整型
+    # 不能。映成 i32 就把"可能没有值"这件事丢了 —— 那正是这套表示层最不该丢的东西。
+    # 报"无映射"让人显式处理, 而不是给一个看起来能用的 i32。
+    "Integer": None, "Long": None, "Short": None, "Byte": None, "Boolean": None,
+    "Character": None, "Float": None, "Double": None,
+    "Object": None, "List": None, "Map": None,
+}
+_JAVA_CLASS = re.compile(r"(?:^|\n)[ \t]*(?:public[ \t]+)?(?:final[ \t]+|abstract[ \t]+)*"
+                         r"class[ \t]+([A-Za-z_]\w*)[^{;]*\{")
+#: 字段 / 方法 / 常量。三者的区别只在修饰符与尾部形状, 所以分开写更好读。
+_JAVA_FIELD = re.compile(r"^[ \t]*(?:(?:public|private|protected|static|final|transient"
+                         r"|volatile)[ \t]+)*([A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*)[ \t]+"
+                         r"([A-Za-z_]\w*)[ \t]*(?:=[^;]*)?;[ \t]*$")
+_JAVA_METHOD = re.compile(r"^[ \t]*(?:(?:public|private|protected|static|final|abstract"
+                          r"|native|synchronized|default)[ \t]+)*"
+                          r"(?:<[^>]+>[ \t]+)?([A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*)[ \t]+"
+                          r"([A-Za-z_]\w*)[ \t]*\(([^)]*)\)")
+_JAVA_CONST = re.compile(r"^[ \t]*(?:(?:public|private|protected)[ \t]+)?static[ \t]+final[ \t]+"
+                         r"([A-Za-z_][\w.]*)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(-?\d+)[ \t]*;")
+_STR_LIT = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
+def _block_end(text: str, open_idx: int) -> int:
+    """`{` 的下标 -> 配对 `}` 的下标; 找不到返回 -1。
+
+    调用方**必须先把注释与字符串字面量剥掉** —— 否则 `"{"` 会把配对算错。
+    """
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _java_members(body: str) -> list[str]:
+    """类体里**顶层**的成员声明 (跳过方法体、内部类那些嵌套块)。
+
+    做法是走一遍花括号配平: 深度 0 上遇到 `;` 或遇到一个完整的 `{...}` 就收一个成员。
+    不这么做的话, 方法体里的局部变量会被当成字段 —— 那是**静默把声明抽错**。
+    """
+    out, cur, depth, start = [], [], 0, None
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == "{":
+            depth += 1
+            if depth == 1:
+                start = i
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                cur.append(body[start:i + 1])
+                out.append("".join(cur))
+                cur, start = [], None
+        elif c == ";" and depth == 0:
+            cur.append(c)
+            out.append("".join(cur))
+            cur = []
+        elif depth == 0:
+            cur.append(c)
+        i += 1
+    return [" ".join(m.split()) for m in out]
+
+
+def _java_type(t: str, mode: str, known: set[str]) -> str | None:
+    t = re.sub(r"\s+", " ", t.strip())
+    if not t:
+        return None
+    if t.endswith("[]"):
+        base = _java_type(t[:-2], mode, known)
+        # Java 数组是**动态长度**的 —— 与 Loment 的切片 `[T]` 同义 (不是定长 `[T; N]`)。
+        return f"[{base}]" if base else None
+    if t in known:
+        return t
+    if "<" in t:                       # 泛型: 元素类型被擦除, 表示层记不住
+        return None
+    return JAVA_TYPES.get(t) if t in JAVA_TYPES else None
+
+
+def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """Java 源码 -> 形式对象。
+
+    **Java 的调用约定不是 C ABI** —— JVM 方法是 JVM 的, `native` 方法走 JNI
+    (符号名还是 `Java_<类>_<方法>`, 且头两个参数是 `JNIEnv*`/`jobject`)。
+    所以这一族与 Python 一样进 `abi: "java"`, **一条都不会被发成 `extern fn`** ——
+    那不是缺陷, 是事实 (docs/173 §4: 运行时那一族走**进程桥**)。
+
+    那它有什么用: **把数据结构带过来**。类 -> `types`、`static final` 常量 -> `consts`,
+    于是 Loment 侧知道对面那块内存长什么样、桥那头交换的字节怎么解。链接型的语言
+    (C/Rust/Go) 给的是**能直接调的函数**, 运行型的给的是**数据形状 + 走桥的签名**。
+    """
+    rep = Report(name, "java", mode)
+    doc = _blank(_ident(Path(name).stem), "java")
+    body = _C_COMMENT.sub(" ", _STR_LIT.sub('""', src))
+    known: set[str] = set()
+    for m in _JAVA_CLASS.finditer(body):
+        cname = m.group(1)
+        open_idx = body.rindex("{", m.start(), m.end())
+        end = _block_end(body, open_idx)
+        if end < 0:
+            rep.skip("type", cname, "类体配平不了 (花括号不配对)")
+            continue
+        inner = body[open_idx + 1:end]
+        fields, consts, methods = [], [], []
+        for mem in _java_members(inner):
+            mc = _JAVA_CONST.match(mem)
+            if mc:
+                consts.append((mc.group(1), mc.group(2), int(mc.group(3))))
+                continue
+            # **方法要在字段之前判**: 抽象/接口/native 方法**以 `;` 结尾**却带参数表
+            # (`public native int j_native(int a);`)。按"以分号结尾 = 字段"先判的话,
+            # 它们会掉进字段那一支然后被丢掉 —— 静默丢, 而且丢的恰好是**唯一那类
+            # 与外部实现对接的方法**(2026-09-17 实测: Java 的 j_native 一直抽不出来)。
+            mm = _JAVA_METHOD.match(mem)
+            if mm and "(" in mem and IDENT_RE.match(mm.group(2)):
+                methods.append((mm.group(1), mm.group(2), mm.group(3)))
+                continue
+            if mem.rstrip().endswith(";"):
+                mf = _JAVA_FIELD.match(mem)
+                if mf and IDENT_RE.match(mf.group(2)):
+                    fields.append((mf.group(1), mf.group(2)))
+        # ---- 常量 (类里先取, 因为它们的类型也会进 known 的判断)
+        for ty, cn, val in consts:
+            if cn in {c["name"] for c in doc["consts"]}:
+                continue
+            t = _java_type(ty, mode, known)
+            if t is None or t not in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"):
+                rep.skip("const", cn, f"常量类型 {ty!r} 不是整型 (Loment 常量只收整型)")
+                continue
+            doc["consts"].append({"name": cn, "type": t, "value": val})
+            rep.ok += 1
+        # ---- 类 -> struct
+        flds = []
+        for fty, fname in fields:
+            t = _java_type(fty, mode, known)
+            if t is None:
+                rep.skip_field(cname, fname, f"字段类型 {fty!r} 无映射")
+                continue
+            flds.append({"name": fname, "type": t})
+        if flds:
+            doc["types"].append({"name": cname, "fields": flds})
+            known.add(cname)
+            rep.ok += 1
+        else:
+            rep.skip("type", cname, "无可用字段")
+        # ---- 方法 -> 函数 (abi=java)
+        for rty, mname, params in methods:
+            if mname == cname:
+                rep.skip("fn", mname, "构造器")
+                continue
+            rt = _java_type(rty, mode, known)
+            if rt is None:
+                rep.skip("fn", mname, f"返回类型 {rty!r} 无映射")
+                continue
+            ps, bad = [], None
+            for raw in [p.strip() for p in params.split(",") if p.strip()]:
+                parts = raw.split()
+                if len(parts) < 2:
+                    bad = f"形参 {raw!r} 不是 `类型 名字`"
+                    break
+                pn = parts[-1]
+                pt = " ".join(parts[:-1])
+                if not IDENT_RE.match(pn):
+                    bad = f"形参名 {pn!r} 非法"
+                    break
+                t = _java_type(pt, mode, known)
+                if t is None:
+                    bad = f"形参类型 {pt!r} 无映射"
+                    break
+                ps.append({"name": pn, "type": t})
+            if bad:
+                rep.skip("fn", mname, bad)
+                continue
+            doc["functions"].append({"name": mname, "params": ps, "ret": rt, "abi": "java"})
+            rep.ok += 1
+    return _finish(doc, rep)
+
+
 # ---------------------------------------------------------------- 语法识别 (按内容)
 #
 # docs/175 §5 那条: "**非 Loment 源语法的 `.lomt` 文件**" —— 后缀说的是"这是 Loment 的
@@ -72,10 +375,26 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOMENT_MODULE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 _LOMENT_OWN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:capability|guard)\b|^[ \t]*excluded[ \t]+\"",
                          re.M)
-_PY_DEF = re.compile(r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+\w+|^[ \t]*import[ \t]+\w+",
-                     re.M)
+#: **`class` 在 Python 与 Java 里都出现**, 所以两条判据按**结尾字符**分开:
+#: Python 的类是 `class X:` / `class X(Base):`(冒号), Java 的类是 `class X {`(花括号)。
+#: 只认"class"这个词会把两种语言混成一种 —— 那是最容易犯、也最难发现的一类错。
+_PY_DEF = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+\w+"
+                     r"|^[ \t]*class[ \t]+\w+[^\n{]*:[ \t]*$"
+                     r"|^[ \t]*(?:import|from)[ \t]+\w+", re.M)
 _RS_FN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:unsafe[ \t]+)?(?:async[ \t]+)?"
                     r"(?:extern[ \t]+\"[^\"]*\"[ \t]+)?fn[ \t]+\w+", re.M)
+#: Go: `func` 这个关键字在 C/Rust/Python/Java 里都不出现, 是一条很干净的判据。
+_GO_DEF = re.compile(r"^[ \t]*func[ \t]+\w+", re.M)
+#: **`package` 在 Go 与 Java 里都有** —— 按**有没有分号**分开: Go 是 `package main`,
+#: Java 是 `package com.example;`。不分开的话一份 Java 源码会被认成 Go
+#: (2026-09-17 实测: 加 Java 之后 detect_lang 对 Java 文件返回 'go')。
+_GO_PKG = re.compile(r"^[ \t]*package[ \t]+[A-Za-z_]\w*[ \t]*$", re.M)
+#: Java: `class` 前面带可见性/修饰符, 或者 `package a.b.c;` 开头。
+#: **`import java.util.List;` 这种也是 Java, 但它与 Python 的 `import x` 撞车** ——
+#: 所以 Java 只认 `package ...;` 与 `class`/`interface` 声明, 不认裸 `import`。
+_JAVA_DEF = re.compile(r"^[ \t]*(?:public[ \t]+|final[ \t]+|abstract[ \t]+)*(?:class|interface"
+                       r"|enum)[ \t]+\w+[^\n{]*\{"
+                       r"|^[ \t]*package[ \t]+[\w.]+[ \t]*;", re.M)
 _C_PRE = re.compile(r"^[ \t]*#[ \t]*(?:include|define|ifdef|ifndef|pragma|endif|elif)\b", re.M)
 #: 一行只有"类型 + 名字 + 参数表"(行尾可选 `{`) —— C 的函数定义 (K&R 之后)。
 #: 排除 `return`/`if`/`while`/`for`/`switch`/`else` 开头, 免得把语句或调用当定义。
@@ -97,6 +416,14 @@ _C_ONELINE = re.compile(r"^[ \t]*(?:" + "|".join(_C_TYPES_LEAD) + r")\b"
 #: 判语法前先把注释去掉 —— 注释里出现 `fn`/`def`/`module` 会把人骗过去。
 #: (C 的 `/* */`、`//`; Python 的 `#` 不是 `_C_PRE` 那种 `#include`, 留着无所谓)
 _ANY_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+#: **只有结构体、没有函数**的文件也要认得出 —— 而 `struct X {` 在 Rust 与 C 里都有。
+#: 按**字段写法**分: Rust 是 `名字: 类型`, C 是 `类型 名字;`。这是唯一可靠的区分点
+#: (`pub` 可有可无, 所以不能靠它)。2026-09-17 加多语法判据时撞到: 一份只有
+#: `struct T { x: i32 }` 的 Rust 源四种特征全不命中。
+_RS_STRUCT_MARK = re.compile(r"^[ \t]*(?:pub[ \t]+)?struct[ \t]+\w+[^{]*\{[^}]*?"
+                             r"^\s*\w+[ \t]*:[ \t]*\w", re.M | re.S)
+_C_STRUCT_MARK = re.compile(r"^[ \t]*(?:typedef[ \t]+)?struct[ \t]+\w*[^{]*\{[^}]*?"
+                            r"\b[A-Za-z_]\w*[ \t]+[A-Za-z_]\w*[ \t]*;", re.M | re.S)
 
 
 def detect_lang(src: str) -> tuple[str, str]:
@@ -114,13 +441,22 @@ def detect_lang(src: str) -> tuple[str, str]:
         return "python", "有 `def` / `class` / `import`"
     if _RS_FN.search(body):
         return "rust", "有 `fn`"
+    if _GO_DEF.search(body) or _GO_PKG.search(body):
+        return "go", "有 `func` / `package`"
+    if _JAVA_DEF.search(body):
+        return "java", "有 `class` / `interface` / `package …;`"
     if _C_PRE.search(body):
         return "c", "有 `#include` 之类预处理指令"
+    # 到这里剩下的多半是"只有声明没有函数"的文件 —— 按结构体字段的写法分。
+    if _RS_STRUCT_MARK.search(body):
+        return "rust", "有 `struct X { 名字: 类型 }` 形状的字段 (Rust 写法)"
+    if _C_STRUCT_MARK.search(body):
+        return "c", "有 `struct X { 类型 名字; }` 形状的字段 (C 写法)"
     if _C_FNDEF.search(body):
         return "c", "有 `<类型> <名字>(…)` 形状的函数定义, 且没有 `fn`/`def`"
     if _C_ONELINE.search(body):
         return "c", "有整行写完的 C 函数定义 (`<类型关键字> …(…) { … }`)"
-    return "", "四种特征都没命中"
+    return "", "已知特征都没命中"
 
 
 def _ident(name: str, fallback: str = "unit") -> str:
@@ -259,7 +595,10 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
 
 _C_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _C_STRUCT = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
-_C_FIELD = re.compile(r"^\s*(.+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;", re.M)
+#: 字段 = `类型 名字;`。**不锚行首** —— 原先锚了 `^\s*`, 于是 `struct P { int a; int b; };`
+#: 这种**一行写完的结构体**只抽得到第一个字段 (整个 `int a; int b;` 是一行, `.+?` 只吃一段),
+#: 而第二个字段**静默消失**。一行写 struct 在 C 里很常见 (2026-09-17 加多语法判据时撞到)。
+_C_FIELD = re.compile(r"([^;{}]+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;")
 _C_FN = re.compile(r"^[ \t]*(?:static\s+|inline\s+|const\s+)*"
                    r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]",
                    re.M)
@@ -400,6 +739,11 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
                 continue
             fn, ft = line.split(":", 1)
             fn, ft = fn.strip(), ft.strip()
+            # **`pub x: i32` 里的 `pub` 要剥掉** —— Rust 的结构体字段大多数是 `pub`,
+            # 不剥的话 `IDENT_RE.match("pub x")` 失败, 整个字段**静默消失**
+            # (2026-09-17 加多语法判据时撞到: `pub struct Pt { pub x: i32, pub y: i32 }`
+            # 抽出来 0 个字段)。`pub(crate)` 那种也一起剥。
+            fn = re.sub(r"^(?:pub(?:\s*\([^)]*\))?\s+)+", "", fn).strip()
             if not IDENT_RE.match(fn):
                 continue
             t = _rs_type(ft, mode, known)
@@ -469,8 +813,11 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
 
 # ---------------------------------------------------------------- CLI
 
-LANGS = {"python": from_python, "c": from_c, "rust": from_rust}
-EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust"}
+LANGS = {"python": from_python, "c": from_c, "rust": from_rust,
+         "go": from_go, "java": from_java}
+EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go", ".java": "java"}
+#: `abi` 的取值域 (与 `potato.ABIS` 对齐): `c` = 平台 C ABI, 能发 `extern fn`;
+#: 其余都是**运行时那一族**, 走进程桥 (docs/173 §4)。
 
 
 def resolve_lang(path: Path, lang: str = "auto") -> tuple[str, str]:

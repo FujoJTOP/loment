@@ -37,7 +37,10 @@ MODES = ("std", "no_std")
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)
-ABIS = ("c", "rust", "python")
+#:
+#: 加一个源语言就要在这里加一个名字 (`go` / `java`) —— **它不只是"记个名字"**:
+#: 每一种都是在说"这一族的函数不能用 C ABI 调", 而 `lomt_from` 据此把它们挡在产物外。
+ABIS = ("c", "rust", "python", "go", "java")
 
 
 def _is_array_type(t: object) -> bool:
