@@ -125,7 +125,7 @@ FFI 与三条既有承诺冲突，逐条收窄而不是推翻（原文都留着�
 | **Python** | **进程桥**：起 `python3`，让它 `import json` | `test_python_via_process_bridge` 退出码 9 |
 | **JavaScript** | 进程桥：起 `node` | `test_javascript_via_process_bridge` 退出码 7 |
 | **Java** | 进程桥（同一条腿，配方写在判据里） | 本机 WSL 没有 `java`，判据 **SKIP** |
-| Zig / Go / Swift / C# / Fortran … | C ABI 那一族，**同一个机制** | 本机没装工具链，配方在 §2 表里 |
+| Zig / Go / Swift / C# / Fortran … | C ABI 那一族，**同一个机制** | 见下面"机制覆盖 ≠ 现在就能链"那三条 |
 
 **"7 个语言"这句话要拆开说**，不然是虚的：
 
@@ -133,9 +133,19 @@ FFI 与三条既有承诺冲突，逐条收窄而不是推翻（原文都留着�
   Go(`-buildmode=c-archive`)、Swift、C#(NativeAOT)、Fortran、Ada…）——**同一个 `extern fn`，
   同一套寄存器约定**，加一个语言就是加一条构建配方 + 一条判据。第二条腿覆盖所有有解释器的
   语言（Python、Java、JS、Ruby、Lua…）——**连构建配方都不用**，换个命令。
-- **本机实测覆盖 5**：C / C++ / Rust / Python / JavaScript。Java 与其余因为没有工具链而
-  **SKIP**（不是静默通过）—— 要在这台机器上看到它们，装 `java` / `zig` / `go` 即可。
-- **这台机器缺的是工具链，不是通路。**
+- **本机实测覆盖 5**：C / C++ / Rust / Python / JavaScript。Java 因为 **WSL 里没有 `java`**
+  而 **SKIP**（不是静默通过）—— 注意主机上是装了 `java` 的，但进程桥只在 ELF 上可用
+  （PE 垫片没有 `fork`/`pipe`），所以主机那个用不上。
+- **"机制覆盖"与"现在就能链"是两件事**，差在三处（2026-09-17 核过本机工具链）：
+  1. **没装工具链**：`zig` / `swift` / `gfortran` 本机没有。它们的路线是**单个 `.o`**
+     （`zig build-obj` / `swiftc -emit-object` / `gfortran -c`），装上就能按 C/C++ 那两条
+     判据的样子写一条 —— 但**未实测**。
+  2. **卡在归档**（阶段 2）：`go build -buildmode=c-archive` 产出的是 `.a` + `.h`，
+     阶段 1 只吃**单个 `.o`**。本机**装了 `go`**，仍链不了，卡的是归档不是工具链。
+  3. **卡在运行期**（阶段 3）：C#(NativeAOT) 的目标文件引用它自己的运行期；Swift 的非平凡代码
+     引用 Swift 运行期。而第 1 阶段的硬边界是"**对象不许有未定义符号**"（不链 libc），
+     所以这类对象会被**明确拒绝**而不是猜一个地址。
+- **所以"这台机器缺的是工具链，不是通路"只对第 1 类成立。** 第 2、3 类是**通路本身还没修**。
 
 ### 三处"响的失败"（宁可不支持，也不静默错编）
 
