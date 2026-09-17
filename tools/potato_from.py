@@ -192,6 +192,8 @@ _JAVA_METHOD = re.compile(r"^[ \t]*(?:(?:public|private|protected|static|final|a
                           r"([A-Za-z_]\w*)[ \t]*\(([^)]*)\)")
 _JAVA_CONST = re.compile(r"^[ \t]*(?:(?:public|private|protected)[ \t]+)?static[ \t]+final[ \t]+"
                          r"([A-Za-z_][\w.]*)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(-?\d+)[ \t]*;")
+_JAVA_ENUM = re.compile(r"(?:^|\n)[ \t]*(?:public[ \t]+)?(?:final[ \t]+|static[ \t]+)*"
+                        r"enum[ \t]+([A-Za-z_]\w*)[^{;]*\{")
 _STR_LIT = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 
 
@@ -272,6 +274,36 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     doc = _blank(_ident(Path(name).stem), "java")
     body = _C_COMMENT.sub(" ", _STR_LIT.sub('""', src))
     known: set[str] = set()
+    # ---- Java 的 `enum Name { A, B, C }` —— **不是 class**, 所以上面那圈抓不到它。
+    # 原先 Java 的枚举**静默消失** (与 C 那边同一个口子)。
+    # 变体可以带构造实参 (`B(1)`) 与体 (`C { … }`), 这里只取**名字**: Potato 的 enums
+    # 只有变体名。带参/带体的那些在下面按"保真度损失"记一笔, 不假装它们与裸变体一样。
+    for m in _JAVA_ENUM.finditer(body):
+        ename = m.group(1)
+        open_idx = body.rindex("{", m.start(), m.end())
+        end = _block_end(body, open_idx)
+        if end < 0:
+            rep.skip("type", ename, "枚举体配平不了 (花括号不配对)")
+            continue
+        inner = body[open_idx + 1:end]
+        vs, lossy = [], False
+        for raw in inner.split(","):
+            raw = raw.strip().split()[0] if raw.strip() else ""
+            raw = raw.split("(")[0].split("{")[0].strip()
+            if not raw:
+                continue
+            if not IDENT_RE.match(raw):
+                continue
+            vs.append(raw)
+        if "(" in inner or "{" in inner:
+            lossy = True
+        if not vs:
+            rep.skip("type", ename, "枚举无变体")
+            continue
+        doc["enums"].append({"name": ename, "variants": vs})
+        if lossy:
+            rep.skip_field(ename, "<变体实参/枚举体>", "只取了变体名 (Potato 的 enums 没有值)")
+        rep.ok += 1
     for m in _JAVA_CLASS.finditer(body):
         cname = m.group(1)
         open_idx = body.rindex("{", m.start(), m.end())
@@ -392,8 +424,14 @@ _GO_PKG = re.compile(r"^[ \t]*package[ \t]+[A-Za-z_]\w*[ \t]*$", re.M)
 #: Java: `class` 前面带可见性/修饰符, 或者 `package a.b.c;` 开头。
 #: **`import java.util.List;` 这种也是 Java, 但它与 Python 的 `import x` 撞车** ——
 #: 所以 Java 只认 `package ...;` 与 `class`/`interface` 声明, 不认裸 `import`。
-_JAVA_DEF = re.compile(r"^[ \t]*(?:public[ \t]+|final[ \t]+|abstract[ \t]+)*(?:class|interface"
-                       r"|enum)[ \t]+\w+[^\n{]*\{"
+#:
+#: **`enum` 不算 Java 判据**: `enum X { A, B }` 在 **C、Java、Rust 里长得一模一样**
+#: (C 只是多一个行尾分号, 而那一行常常换个写法)。把它当 Java 的特征, 一份带枚举的 C
+#: 源码就会被判成 java —— 2026-09-17 实测撞到 (给 C 夹具加了个 `enum Mode` 之后
+#: `c_8_detected` 立刻红)。判据只认**专有**的东西, 这个不专有。
+#: 代价: 只有枚举、没有 class 的 Java 文件认不出 (用户用 `--lang java` 指明)。
+_JAVA_DEF = re.compile(r"^[ \t]*(?:public[ \t]+|final[ \t]+|abstract[ \t]+)*(?:class|interface)"
+                       r"[ \t]+\w+[^\n{]*\{"
                        r"|^[ \t]*package[ \t]+[\w.]+[ \t]*;", re.M)
 _C_PRE = re.compile(r"^[ \t]*#[ \t]*(?:include|define|ifdef|ifndef|pragma|endif|elif)\b", re.M)
 #: 一行只有"类型 + 名字 + 参数表"(行尾可选 `{`) —— C 的函数定义 (K&R 之后)。
@@ -595,6 +633,12 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
 
 _C_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _C_STRUCT = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
+#: C 的 `enum Name { A, B = 3, C };`。C **没有 enum 类型名以外的身份** ——
+#: 变体名是模块级常量, 所以两处都要看:
+#:   * 不带值的 -> `enums`(Potato 的 enums 只有变体名)
+#:   * **带值的 -> `consts`** —— 值没法塞进 enums 的 schema, 而它常常是**协议常量**,
+#:     丢值比丢名严重得多 (2026-09-17 补: 原先 C 的 enum 谁都不收, **静默消失**)。
+_C_ENUM = re.compile(r"\benum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
 #: 字段 = `类型 名字;`。**不锚行首** —— 原先锚了 `^\s*`, 于是 `struct P { int a; int b; };`
 #: 这种**一行写完的结构体**只抽得到第一个字段 (整个 `int a; int b;` 是一行, `.+?` 只吃一段),
 #: 而第二个字段**静默消失**。一行写 struct 在 C 里很常见 (2026-09-17 加多语法判据时撞到)。
@@ -609,6 +653,10 @@ def _c_type(t: str, mode: str, known: set[str]) -> str | None:
     t = re.sub(r"\s+", " ", t.strip())
     if t.endswith("[]"):
         t = t[:-2] + " *"
+    # `enum X` **在 C 里就是一个整型** (标准这么定) —— 映 i32。不认它的话, 凡是收
+    # `enum X` 形参的函数**整个被跳过**, 而那在真实 C 里到处都是 (2026-09-17 补)。
+    if t.startswith("enum "):
+        return "i32"
     if t in C_TYPES:
         return C_TYPES[t]
     if t.endswith("*"):
@@ -644,6 +692,44 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             continue
         doc["types"].append({"name": sname, "fields": fields})
         known.add(sname)
+        rep.ok += 1
+    # ---- C 的 enum。**整个枚举要么进 `enums`、要么全进 `consts`**, 不拆开 ——
+    # 拆开(把带值的那个单拎出来当 const)会造出一个**看着少了一个变体**的枚举, 那是误导。
+    # 判据是"有没有任何一个变体带显式值": 有 -> 全按 C 语义算出值、发芽成 consts;
+    # 没有 -> 就是一个普通枚举, 进 `enums`。
+    for m in _C_ENUM.finditer(body):
+        ename, inner = m.group(1), m.group(2)
+        members, cur, next_v = [], None, 0
+        for raw in inner.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if "=" in raw:
+                vn, vv = raw.split("=", 1)
+                vn, vv = vn.strip(), vv.strip()
+                if not IDENT_RE.match(vn) or not re.fullmatch(r"-?\d+", vv):
+                    cur = None
+                    rep.skip("const", raw, "枚举变体不是 `名字` 或 `名字 = 整数`")
+                    continue
+                next_v = int(vv)
+            else:
+                vn = raw
+                if not IDENT_RE.match(vn):
+                    cur = None
+                    rep.skip("const", raw, "枚举变体名非法")
+                    continue
+            members.append((vn, next_v))
+            next_v += 1
+        if not members:
+            rep.skip("type", ename, "枚举无变体")
+            continue
+        if all(v == i for i, (_n, v) in enumerate(members)):
+            doc["enums"].append({"name": ename, "variants": [n for n, _v in members]})
+        else:
+            for vn, vv in members:
+                if vn in {c["name"] for c in doc["consts"]}:
+                    continue
+                doc["consts"].append({"name": vn, "type": "i32", "value": vv})
         rep.ok += 1
     for m in _C_FN.finditer(body):
         rt, fn, params = m.group(1), m.group(2), m.group(3)

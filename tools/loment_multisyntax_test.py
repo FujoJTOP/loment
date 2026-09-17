@@ -58,6 +58,9 @@ CLANG_CANDIDATES = (r"C:\Program Files\LLVM\bin\clang.exe", "clang")
 C_SRC = """\
 struct Pair { int a; int b; };
 
+enum Mode { IDLE, RUN, DONE };
+enum Err { EOK = 0, EBAD = -1, EFULL = 5 };
+
 int c_add(int a, int b) { return a + b; }
 int c_sum(const unsigned char *p, unsigned n) { return 0; }
 int c_utoa(unsigned value, char *buf) { return 0; }
@@ -68,6 +71,8 @@ RUST_SRC = """\
 pub extern "C" fn r_add(a: i32, b: i32) -> i32 { a + b }
 
 pub struct Pt { pub x: i32, pub y: i32 }
+
+pub enum Mode { Idle, Run }
 
 pub fn r_plain(x: i32) -> i32 { x * 2 }
 
@@ -92,6 +97,8 @@ func g_slice(n int) []int { return nil }
 """
 JAVA_SRC = """\
 package demo;
+
+enum Level { LOW, MID, HIGH }
 
 public class Shape {
     public static final int SIDES = 4;
@@ -132,6 +139,11 @@ SYNTAXES = [
     {
         "lang": "c", "ext": ".c", "src": C_SRC, "leg": "link",
         "types": [("Pair", [("a", "i32"), ("b", "i32")])],
+        # 不带值的枚举走 `enums`; **带值的走 `consts`** (值进不了 enums 的 schema,
+        # 而它常常是协议常量 —— 丢值比丢名严重)。整个枚举要么进一边、要么进另一边,
+        # **不拆开** (拆开会造出一个看着少了一个变体的枚举)。
+        "enums": [("Mode", ["IDLE", "RUN", "DONE"])],
+        "consts": [("EOK", "i32", 0), ("EBAD", "i32", -1), ("EFULL", "i32", 5)],
         "fns": [("c_add", [("a", "i32"), ("b", "i32")], "i32", "c"),
                 ("c_sum", [("p", "ptr"), ("n", "u32")], "i32", "c"),
                 # `char *buf` 映 `str`(不是 C 字符串) -> 转写得出来, 但过不了
@@ -144,6 +156,7 @@ SYNTAXES = [
     {
         "lang": "rust", "ext": ".rs", "src": RUST_SRC, "leg": "link",
         "types": [("Pt", [("x", "i32"), ("y", "i32")])],
+        "enums": [("Mode", ["Idle", "Run"])],
         "fns": [("r_add", [("a", "i32"), ("b", "i32")], "i32", "c"),
                 ("r_plain", [("x", "i32")], "i32", "rust"),
                 ("r_big", [("x", "i64")], "u64", "rust")],
@@ -164,6 +177,7 @@ SYNTAXES = [
         "lang": "java", "ext": ".java", "src": JAVA_SRC, "leg": "runtime",
         "types": [("Shape", [("w", "i32"), ("h", "i32")])],
         "consts": [("SIDES", "i32", 4)],
+        "enums": [("Level", ["LOW", "MID", "HIGH"])],
         "fns": [("j_add", [("a", "i32"), ("b", "i32")], "i32", "java"),
                 ("j_native", [("a", "i32")], "i32", "java")],
         "skips": [("Shape", "构造器")],
@@ -247,15 +261,26 @@ def _mk(spec: dict):
             assert len(got[name]) == len(params), f"{lang}/{name}: 形参数 {got[name]}"
 
     def t_aggregate_becomes_type():
-        """2 结构体/类 -> `types`，字段逐个对。"""
+        """2 聚合与常量：结构体/类 -> `types`，枚举 -> `enums` 或 `consts`，常量 -> `consts`。
+
+        **带值的枚举走 `consts`**（值进不了 `enums` 的 schema，而它常常是协议常量 ——
+        丢值比丢名严重）；不带值的走 `enums`。整个枚举要么进一边、要么进另一边，
+        **不拆开** —— 拆开会造出一个"看着少了一个变体"的枚举。
+        """
         doc, _ = _transcribe(spec)
-        if not spec["types"]:
-            return                                    # 这门语言这一版不收聚合 (Python)
-        got = {t["name"]: [(f["name"], f["type"]) for f in t["fields"]]
-               for t in doc["types"]}
-        for name, fields in spec["types"]:
-            assert name in got, f"{lang}: 没有类型 {name}（有 {sorted(got)}）"
-            assert got[name] == fields, f"{lang}/{name}: {got[name]} != {fields}"
+        got_t = {t["name"]: [(f["name"], f["type"]) for f in t["fields"]]
+                 for t in doc["types"]}
+        for name, fields in spec.get("types", []):
+            assert name in got_t, f"{lang}: 没有类型 {name}（有 {sorted(got_t)}）"
+            assert got_t[name] == fields, f"{lang}/{name}: {got_t[name]} != {fields}"
+        got_e = {e["name"]: list(e["variants"]) for e in doc["enums"]}
+        for name, vs in spec.get("enums", []):
+            assert name in got_e, f"{lang}: 没有枚举 {name}（有 {sorted(got_e)}）"
+            assert got_e[name] == vs, f"{lang}/{name}: {got_e[name]} != {vs}"
+        got_c = {c["name"]: (c["type"], c["value"]) for c in doc["consts"]}
+        for name, ty, val in spec.get("consts", []):
+            assert got_c.get(name) == (ty, val), \
+                f"{lang}: 常量 {name} = {got_c.get(name)} 期望 {(ty, val)}"
 
     def t_signatures():
         """3 函数签名: 形参名、形参类型、返回类型都对得上。"""
@@ -463,6 +488,10 @@ def test_sniffing_separates_languages_that_share_keywords():
         ("go", "package main\n\ntype T struct {\n    X int\n}\n"),
         ("rust", "struct T {\n    x: i32,\n}\n"),
         ("c", "struct T { int x; };\n"),
+        # **`enum X { … }` 在 C / Java / Rust 里长得一样** -> 它不是任何一门的判据,
+        # 只能靠文件里**别的**特征定位。这一组钉住"带枚举的 C 不许被判成 java"。
+        ("c", "enum Color { RED, GREEN };\n\nint f(int a) { return a; }\n"),
+        ("java", "enum Color { RED, GREEN }\n\nclass T { int x; }\n"),
     ]
     for want, src in cases:
         got, why = potato_from.detect_lang(src)
