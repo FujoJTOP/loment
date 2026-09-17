@@ -109,43 +109,48 @@ FFI 与三条既有承诺冲突，逐条收窄而不是推翻（原文都留着�
 | 语言面：`extern fn` **两个实现都实现**，IR 逐字节一致 | ✅ `lomentc_test` 112/112 · `loment_p8_test` 16/16 |
 | 诊断码 **E021**（签名形态不支持） | ✅ |
 | 链接器 `lomelf.py`：读 ELF64 目标文件 + 多节拼接 + 符号解析 + **C ABI 传参** | ✅ |
+| **重定位** `R_X86_64_{64,PC32,PLT32,32,32S,PC64}` + **跨对象符号解析** | ✅（2026-09-17，阶段 2） |
+| **归档 `.a`**：`ar` 解析 + **固定点成员选择** | ✅（2026-09-17，阶段 2） |
 | 构建管线 `loment build --link FILE.o`（两个启动器） | ✅ |
-| 端到端判据 | ✅ `loment_ffi_test` **12/12**（已进静态门禁）+ `loment_elf_test` 的自举镜像那格 |
-| **自举链接器 `loment/tools/lomelf.lomt`** | ✅ **已镜像**（产品路径走它）—— 读 ELF64 目标文件、多节拼接、符号解析、C ABI 传参, 与参考**逐字节相同** |
-| 归档 `.a` / 动态库 / libc（阶段 2/3） | ⛔ 未开始 |
+| 端到端判据 | ✅ `loment_ffi_test` **18/18**（已进静态门禁）+ `loment_elf_test` 的自举镜像那格（8/8） |
+| **自举链接器 `loment/tools/lomelf.lomt`** | ✅ **已镜像**（产品路径走它）—— 含重定位, 与参考**逐字节相同** |
+| 动态库 / libc（阶段 3） | ⛔ 未开始 |
 | PE 侧 FFI | ⛔ 未开始（`--link` 配 `--target pe` 明确拒绝） |
 
 ### 已经能被调到的语言（这台机器上真跑通的）
 
-| 语言 | 走哪条腿 | 判据 |
+| 语言 | 走哪条腿 | 判据（`loment_ffi_test` 18/18，**没有一个 SKIP**） |
 |---|---|---|
-| **C** | `extern fn` + `--link`（clang 交叉编出 ELF 目标文件） | `test_c_end_to_end` 退出码 52 |
-| **C++** | 同上，`extern "C"` 包一层 | `test_cpp_end_to_end` 退出码 42 |
-| **Rust** | 同上，`#[no_mangle] pub extern "C"` | `test_rust_end_to_end` 退出码 42 |
-| **Python** | **进程桥**：起 `python3`，让它 `import json` | `test_python_via_process_bridge` 退出码 9 |
-| **JavaScript** | 进程桥：起 `node` | `test_javascript_via_process_bridge` 退出码 7 |
-| **Java** | 进程桥（同一条腿，配方写在判据里） | 本机 WSL 没有 `java`，判据 **SKIP** |
-| Zig / Go / Swift / C# / Fortran … | C ABI 那一族，**同一个机制** | 见下面"机制覆盖 ≠ 现在就能链"那三条 |
+| **C** | `extern fn` + `--link`（clang 交叉编出 ELF 目标文件） | `test_c_end_to_end` 52 · `test_three_args_and_void_call` 123 · **多目标** `test_multi_object_cross_reference` 22 · **归档** `test_archive_selects_only_needed_members` 22 |
+| **C++** | 同上，`extern "C"` 包一层 | `test_cpp_end_to_end` 42 |
+| **Rust** | 同上，`#[no_mangle] pub extern "C"` | `test_rust_end_to_end` 42 |
+| **Zig** | 同上，`export fn` + **`-OReleaseSmall`** | `test_zig_end_to_end` 42 |
+| **Go** | **进程桥**：`go run`（编译器在主机上，靠 WSL interop） | `test_go_via_process_bridge` 5 |
+| **Python** | 进程桥：起 `python3`，让它 `import json` | `test_python_via_process_bridge` 9 |
+| **Java** | 进程桥：`javac` + `java`（JDK 免 sudo 下载） | `test_java_via_process_bridge` 7 |
+| **JavaScript** | 进程桥：起 `node` | `test_javascript_via_process_bridge` 7 |
+| **Perl** | 进程桥：`perl -MJSON::PP`（WSL 里本来就有） | `test_perl_via_process_bridge` 7 |
+| **Lua** | 进程桥：自建解释器（`make linux`） | `test_lua_via_process_bridge` 5 |
+| Swift / C# / Fortran … | C ABI 那一族，**同一个机制** | 见下面"机制覆盖 ≠ 现在就能链"那三条 |
 
 **"7 个语言"这句话要拆开说**，不然是虚的：
 
-- **机制上覆盖 7+**：第一条腿覆盖所有能导出 C 符号的语言（C、C++、Rust、Zig、
-  Go(`-buildmode=c-archive`)、Swift、C#(NativeAOT)、Fortran、Ada…）——**同一个 `extern fn`，
-  同一套寄存器约定**，加一个语言就是加一条构建配方 + 一条判据。第二条腿覆盖所有有解释器的
-  语言（Python、Java、JS、Ruby、Lua…）——**连构建配方都不用**，换个命令。
-- **本机实测覆盖 5**：C / C++ / Rust / Python / JavaScript。Java 因为 **WSL 里没有 `java`**
-  而 **SKIP**（不是静默通过）—— 注意主机上是装了 `java` 的，但进程桥只在 ELF 上可用
-  （PE 垫片没有 `fork`/`pipe`），所以主机那个用不上。
-- **"机制覆盖"与"现在就能链"是两件事**，差在三处（2026-09-17 核过本机工具链）：
-  1. **没装工具链**：`zig` / `swift` / `gfortran` 本机没有。它们的路线是**单个 `.o`**
-     （`zig build-obj` / `swiftc -emit-object` / `gfortran -c`），装上就能按 C/C++ 那两条
-     判据的样子写一条 —— 但**未实测**。
-  2. **卡在归档**（阶段 2）：`go build -buildmode=c-archive` 产出的是 `.a` + `.h`，
-     阶段 1 只吃**单个 `.o`**。本机**装了 `go`**，仍链不了，卡的是归档不是工具链。
-  3. **卡在运行期**（阶段 3）：C#(NativeAOT) 的目标文件引用它自己的运行期；Swift 的非平凡代码
-     引用 Swift 运行期。而第 1 阶段的硬边界是"**对象不许有未定义符号**"（不链 libc），
-     所以这类对象会被**明确拒绝**而不是猜一个地址。
-- **所以"这台机器缺的是工具链，不是通路"只对第 1 类成立。** 第 2、3 类是**通路本身还没修**。
+- **机制上覆盖 7+**：第一条腿覆盖所有能导出 C 符号的语言（C、C++、Rust、Zig、Go、
+  Swift、C#(NativeAOT)、Fortran、Ada…）——**同一个 `extern fn`，同一套寄存器约定**，加一个
+  语言就是加一条构建配方 + 一条判据。第二条腿覆盖所有有解释器 / 有 CLI 的语言
+  （Python、Java、JS、Perl、Lua、Go…）——**连构建配方都不用**，换个命令。
+- **本机实测覆盖 10**（2026-09-17，`loment_ffi_test` 18/18 且**没有一个 SKIP**）：
+  C / C++ / Rust / Zig（腿 1）+ Go / Python / Java / JavaScript / Perl / Lua（腿 2）。
+- **"机制覆盖"与"现在就能链"仍是两件事**，但 2026-09-17 之后卡点换了：
+  1. ~~没装工具链~~ → 已用**免 sudo** 补齐（`tools/loment_toolchain.sh`：tarball 或源码自建）。
+     Swift / C# / Fortran 的路线仍是单个 `.o`，本机没有工具链，**未实测**。
+  2. ~~卡在归档~~ → **归档做完了**（阶段 2）。但 Go 走的是**进程桥**而不是 `c-archive`：
+     它的对象带自己的运行期（未定义符号 + `.init_array`），那是阶段 3 的事。
+  3. **卡在运行期**（阶段 3）：C#(NativeAOT) / Swift 的对象引用各自运行期，撞"对象不许有
+     未定义符号"这条硬边界 —— 会被**明确拒绝**，不猜地址。
+- **还有一个不显眼的卡点：对象必须自包含。** Zig 就是例子 —— 默认优化档把它的运行期编进来
+  （9.7 MB，还带一整张 `.rela.data`），`-OReleaseSmall` 才剩 880 字节。所以
+  "能不能用一个语言的库"量的是**那份对象**，不是"有没有工具链"。
 
 ### 三处"响的失败"（宁可不支持，也不静默错编）
 
