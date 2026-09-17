@@ -864,6 +864,16 @@ def test_m85_driver_checks_before_emitting():
         assert rc != 0, f"跨模块重名没被拒 (exit {rc})"
         assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
+        # 装载器级负例: 依赖里写了 `choose` (docs/143 §3.2)。这条**只能**在装载器判 ——
+        # 单元拼完之后模块边界就没了, 检查器分不清这句是入口写的还是被 use 进来的。
+        # 与 E018 同构, 所以没有 `loment_rule_parity` 那一环, 棘轮就在这里。
+        rel = "loment/selfhost/neg_dep_choose/entry.lomt"
+        rc, out, err = _run_driver_raw(elf, rel, td, "neg_dep_choose")
+        assert rc != 0, f"依赖里的 choose 没被拒 (exit {rc})"
+        assert "库不许写 choose" in err, f"没报装载器诊断: {err[:200]}"
+        # 报的必须是**依赖那个文件** —— 只说"有库写了 choose"等于让用户自己去翻
+        assert "neg_dep_choose/lib.lomt" in err, f"没点出是哪个库: {err[:200]}"
+        assert out.strip() == "", "被拒时不该产出 IR"
         for f in pos:
             rel = f.relative_to(ROOT).as_posix()
             unsupported = _unsupported(f)     # 参考实现的 IR 后端能不能发这个文件

@@ -1,0 +1,13 @@
+module choose_twice
+
+// `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只许出现一次。
+// 第二次出现报 E022 —— 不是"后一个覆盖前一个": 两个模式对同一份源码给出**两种不同的
+// 语义** (no_std 下碰 hosted 原语必须报错), 静默取一个就是把另一半程序的意思丢掉。
+// 见 docs/175 §3。
+
+choose std
+choose no_std
+
+fn f() -> u32 {
+    return 1;
+}

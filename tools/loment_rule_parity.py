@@ -40,8 +40,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 批次 2 第二段 (复合类型表 + 表达式遍历器 + 字段/下标/数组/`as`/实参/方法/match/`?`/
 # 移动借用) 后 **63/63** —— 自举 checker 与参考实现在这 63 条规则上完全等价
 # (含 M13 移动 E006 与 M17 悬垂 E012)。
+# 2026-09-17 项目模式 `choose` (E022) 进语言: 检查器那两条 (至多一次 / 模式名合法)
+# 补完, **65/65**。第三条 ("库不许 choose") 是装载器规则, 不在这个数里。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 63
+BUDGET = 65
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -157,6 +159,12 @@ _CASES: list[tuple[str, str]] = [
     # 返回局部变量的借用 = 悬垂 (`&arr` 借用局部数组)
     ("dangling-return",
      "module m\n\nfn f() -> [u32] {\n    let a: [u32; 2] = [1, 2];\n    return &a;\n}\n"),
+    # ---- 项目模式 `choose` (E022, docs/143 §3.2) --------------------------
+    # 这两条是**检查器**规则。第三条 ("库不许 choose") 是装载器规则, 装不进这里 ——
+    # 套件喂的是自包含单文件源码, 没有"被 use 进来的那一层"。与 E018 同构,
+    # 棘轮由驱动闸门 (`loment_p8_test` 的 neg_dep_choose) 承担, 这两条才进预算。
+    ("choose-twice", "module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-bad-mode", "module m\n\nchoose fast\n\nfn f() -> u32 {\n    return 1;\n}\n"),
 ]
 
 

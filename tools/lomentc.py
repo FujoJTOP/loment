@@ -680,6 +680,13 @@ class Module:
     #: 发出一条没有函数体的 define (非法 IR), 所以要分开。
     externs: list[Func] = field(default_factory=list)
     excluded: list[str] = field(default_factory=list)
+    #: 项目模式 (`choose no_std` / `choose std`, docs/143 §3.2)。**不写 = `std`**,
+    #: 所以 None 就是默认。它声明的是**整个程序**的运行模式, 不是某个模块的 ——
+    #: 见 `check()` 里那条"依赖不许 choose"。
+    choose: str | None = None
+    #: 每个 `choose` 的行号。**留成列表而不是只留最后一个**: "写两次"要能报出位置,
+    #: 只存一个值的话第二条会把第一条盖掉, 判据就只剩"有没有", 说不出"重复了"。
+    choose_lines: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 语法分析
@@ -822,6 +829,14 @@ class Parser:
                 for f in im.funcs:
                     f.name = f"{im.type}_{f.name}"  # 静态派发: 名字按接收者类型混淆
                     mod.funcs.append(f)
+            elif t.val == "choose":  # docs/143 §3.2: 项目模式
+                line = t.line
+                self.next()
+                mode = self.expect("ident", None, "（模式名：std 或 no_std）")
+                # **记录每个出现位置, 判定放到 check()** —— 与 `extern` 的重名同一条路数:
+                # 语法层只收集, 规则集中在一处, 两个实现要对齐的也就只有那一处。
+                mod.choose = mode.val
+                mod.choose_lines.append(line)
             elif t.val == "extern":  # docs/173: 外部函数声明
                 self.next()
                 f = self.parse_fn(extern=True)
@@ -2233,6 +2248,26 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             (dep_names if c.pub else dep_private).add(c.name)
             if c.pub:
                 const_scope.setdefault(c.name, c.type)
+
+    # ---- 项目模式 `choose` (docs/143 §3.2)。三条规则, 全部在这里 —— 语法层只收集,
+    # 两个实现要对齐的判断就只有这一处。
+    #
+    # **为什么"至多一次 + 只在根单元"**: 它声明的是**整个程序**的不变量, 不是某个模块的。
+    # 放开成按模块声明就会掉进 Rust `#![no_std]` 那个已知的组合痛点 —— 而 Loment 的单元模型
+    # (库 = 目录、依赖 = 源码里的 use) 会掉进同一个坑。库要表达需求就**声明能力需求**
+    # (`docs/168` 的 `lib cap` 已经在算闭包, 带来源链), 不是替项目选模式。
+    #
+    # 用户 2026-09-17 定: 不写 = `std`; `choose std` 与不写等价(建议写但不强制)。
+    if len(mod.choose_lines) > 1:
+        errs.append(f"{mod.choose_lines[1]}: `choose` 只能出现一次 "
+                    f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式")
+    if mod.choose is not None and mod.choose not in ("std", "no_std"):
+        errs.append(f"{mod.choose_lines[0]}: 模式只能是 `std` 或 `no_std` "
+                    f"（写的是 `{mod.choose}`）")
+    for d in deps:
+        if d.choose is not None:
+            errs.append(f"{d.choose_lines[0]}: 库不许 `choose`（在 `{d.name}` 里）"
+                        f" —— 库该声明**能力需求**, 由项目决定模式")
 
     # ---- 单元级唯一性 (2026-09-11 补): 发射出来的符号名是**平的**。
     # 内核线按名字找入口 (`_start` / `timer_isr` / syscall 包装, 见 docs/155 §3), 所以

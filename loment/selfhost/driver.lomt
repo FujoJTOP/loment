@@ -705,6 +705,18 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     // (每层各有一个槽, 所以递归不会踩到父层写下的这些路径)
     let rbase: u32 = nb;
     while load32(toks, i * 20) != 4 {
+        // `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只有**根单元**能写。
+        // 这条只能在这里判: 装载器是唯一分得清"这一层是根还是被 use 进来的"的地方 ——
+        // 单元拼完之后检查器看到的是一整块 token, 模块边界已经没了 (docs/158 §5 记过)。
+        // 与 E018 同构: 那是装载器规则, 进不了 `loment_rule_parity._CASES` (它喂的是
+        // 自包含单文件), 所以棘轮由驱动闸门承担, `BUDGET` 不动。
+        if depth > 0 && tok_is(slot, toks, i, "choose") {
+            let mc: str = "fujoc-s: 库不许写 choose (它是整个程序的模式, 只有根单元能定): ";
+            write_all(2, str_ptr(mc), str_len(mc) as u64);
+            write_all(2, path, n as u64);
+            write_all(2, str_ptr("\n"), 1);
+            die(1);
+        }
         if tok_is(slot, toks, i, "use") {
             let k: u32 = load32(toks, (i + 1) * 20);
             let up: u32 = load32(toks, (i + 1) * 20 + 4);

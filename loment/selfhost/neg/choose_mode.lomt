@@ -1,0 +1,11 @@
+module choose_mode
+
+// 模式名只有 `std` 与 `no_std` 两个 (docs/143 §3.2)。拼错的模式名**必须报错**, 不能
+// 退化成默认 std: 那会让"我要写 no_std 却打错了字"变成**静默的语义降级**。
+// 见 docs/175 §3。
+
+choose no_std2
+
+fn f() -> u32 {
+    return 1;
+}

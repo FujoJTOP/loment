@@ -42,6 +42,7 @@ const E_BORROW: u32 = 7;   // E007 借用冲突 (同一变量既借又可变借 
 const E_Q: u32 = 10;       // E010 `?` 误用
 const E_MOVE: u32 = 6;     // E006 移动后使用
 const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
+const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
 
 // 类型编码 (批次 2): 一个 u32 —— 0 = 未知, 其它按 (kind << TY_KIND_SHIFT) + payload。
 //   kind 1 = 基类型 (payload = 1..11 的内码)
@@ -2699,6 +2700,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let o: u32 = 0;
     let nexs: u32 = 0;
     let i: u32 = 0;
+    // `choose` 见过几次 —— 声明的是**整个程序**的模式, 所以只许一次 (docs/143 §3.2)。
+    // 存在栈上而不是 arena 里: 它只在这一遍的循环里用, 没有跨调用要留的东西。
+    let nch: u32 = 0;
     // 名表清理: 逐声明复用同一块暂存, 每次用都要"清零条数" —— 但 chk_* 系列用
     // 显式计数 (c) 而不是查找长度, 所以只需不读旧值即可, 无需 memclr。
     // ---- 第零遍: 先把**类型名**收齐再查签名。
@@ -2845,6 +2849,22 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 }
             }
             i = i + 4;
+        } else if chk_tok_is(src, t, i, "choose") {
+            // 项目模式 (docs/143 §3.2)。**只跟一条 token 前进** —— `choose` 是最后一个
+            // token 时 i+2 会越过 EOF 哨兵, 主循环就再也退不出来 (读到缓冲区外的字节)。
+            // 模式名让它下一轮当普通标识符扫过去, 反正没有别的分支接它。
+            // 这里只管两条**检查器**规则; "库不许 choose" 是装载器规则, 在 driver 的
+            // load_file 里 —— 与 E018 同构, 那边也是装载器规则进不了这一层。
+            nch = nch + 1;
+            if nch > 1 {
+                // 参考实现把这条挂在第**二**次出现的那一行上 (第一次的行号写进消息里)
+                o = sym_pub(src, t, out, o, E_MODE, i);
+            }
+            if !chk_tok_is(src, t, i + 1, "std") && !chk_tok_is(src, t, i + 1, "no_std") {
+                // 锚在 `choose` 上而不是模式名上: 参考实现也是报 choose_lines 那一行
+                o = sym_pub(src, t, out, o, E_MODE, i);
+            }
+            i = i + 1;
         } else {
             i = i + 1;
         }
