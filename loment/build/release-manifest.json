@@ -1339,7 +1339,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "3e1dd9d401a9a45193c1f1c64497f1b7d2568950e8b6a8e4fa322360e373bc08"
+   "sha256": "b65df84da636efb2eabfa9b2a8a34ffcd21b7bf0c4c66c5ea1f89144bc9af923"
   },
   {
    "path": "docs/manual/api/ahci.md",
