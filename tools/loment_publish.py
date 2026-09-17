@@ -8,8 +8,8 @@
 #     只是**由这里发**，不是在那边写的。
 #   * **发布是整体覆盖**（force-push 成 `main`）：**别在那边直接提交**，一定被下次发布盖掉。
 #     那边的 `README.md` 与 `.gitattributes` 也是本工具直出的（见 §cmd_push），不是手写的。
-#   * 名字与可见性：`FujoJTOP/loment` 与 `FujoJTOP/lompi`。**Loment 公开**
-#     （用户 2026-09-16 定，覆盖了 09-15 那句"私有"）；lompi 的可见性见它自己的 spec ——
+#   * 名字与可见性：`FujoJTOP/loment` 与 `FujoJTOP/lompi`，**两个都公开**
+#     （Loment 是用户 2026-09-16 定的；lompi 是 2026-09-17 定的 —— 见各自 spec 里的注解）。
 #     可见性写进 spec 而不是手敲 `gh repo edit`，因为手敲的只生效一次，换台机器就丢。
 #
 #   python tools/loment_publish.py --status          # 切出来会是什么样（路径数 + 树哈希）
@@ -45,13 +45,29 @@ REPOS: dict[str, dict] = {
     "loment": {
         "repo": f"{ORG}/loment",
         "paths": [
-            "loment/", "lom/", "editors/",
+            # 目录（整棵）。**`lompi/` 在这儿**：Loment 开发树离不开它
+            # （`loment_dist.py:67` 拿它构建随包发行的 lompi 工具，`loment_lompi_test.py`
+            # 读它的源）—— 所以 lompi 的可见性必须与这个库一致。用户 2026-09-17 定：
+            # **lompi 也开源**，于是两边都是 public（原先"只开源 Loment 本体"的划分作废）。
+            "loment/", "lom/", "lompi/", "editors/",
             "docs/manual/",
+            ".claude/skills/loment/", ".claude/skills/lompi/",
+            # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
+            "tools/lom*",
+            # 文档：主体走 glob，**但 glob 会静默漏掉名字里没有 "loment" 的那些** ——
+            # 下面这几条 explicit 的就是补漏。2026-09-17 审计出 5 篇（110/142/147/176/177），
+            # 其中 142/147 还被 `docs/175` 正文引用着：漏了它们，开发口里就有断链。
             "docs/14*-loment-*.md", "docs/141-l0-lom-spec.md",
             "docs/15*-loment-*.md", "docs/16*-loment-*.md", "docs/17*-loment-*.md",
-            "tools/lom*",
-            ".claude/skills/loment/",
-            "LICENSE",
+            "docs/110-w36-potato-lang.md",
+            "docs/142-potato-v0.md",
+            "docs/147-potato-v1-spec.md",
+            "docs/176-frozen-surface-cost.md",
+            "docs/177-ffi-complete.md",
+            # 仓库约定与许可：**开发口缺了它们就没法按本仓的规矩工作**
+            # （`CLAUDE.md` 是工作区级指令；`.gitignore` 不管住的话 `selfhost_driver.ll`
+            #   那种大件与构建产物会跟着进来）。
+            "CLAUDE.md", "AGENTS.md", ".gitignore", "LICENSE",
         ],
         "renames": [],
         "floor": 250,
@@ -198,8 +214,11 @@ MIT. See [LICENSE](LICENSE).
         # 摊平: 让 `lompi.lomt` / `lpi_*.lomt` / `fixture/` 直接在根上
         "renames": [("lompi/", "")],
         "floor": 30,
-        # lompi 暂时仍是私有的 (用户 2026-09-16 只说开源 Loment 本体) —— 要一起开源就改这里。
-        "visibility": "private",
+        # **公开** (用户 2026-09-17 定)。原先 2026-09-16 是私有的, 理由是"用户只说了开源
+        # Loment 本体"; 但 Loment 开发树离不开 `lompi/` (`loment_dist.py:67` 拿它构建随包
+        # 发行的 lompi 工具), 而 `FujoJTOP/loment` 是开发口且公开 —— 两边可见性必须一致,
+        # 否则要么公开库缺件、要么开发口得转私有。用户选了"lompi 也开源"。
+        "visibility": "public",
         "description": "lompi — Loment 的包管理器（库是一个目录，身份是内容哈希）",
         "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/lompi/",
         "topics": ["package-manager", "loment"],

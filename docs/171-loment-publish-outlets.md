@@ -5,14 +5,36 @@
 
 ## 0. 一句话
 
-**开发在主仓（FujoOS 单仓），发布在各自的库。**
+**开发在 `FujoJTOP/loment`（2026-09-17 起），发布口在各自的库。**
 
 | 库 | 地址 | 可见性 | 装什么 |
 |---|---|---|---|
-| loment | `github.com/FujoJTOP/loment` | **public**（2026-09-16 用户定） | 语言本体 + 工具链 + 文档 + 编辑器支持 |
-| lompi | `github.com/FujoJTOP/lompi` | private（同一天用户只说了开源 Loment 本体） | 包管理器（摊平到根） |
+| loment | `github.com/FujoJTOP/loment` | **public**（2026-09-16 用户定） | **开发口**：语言本体 + 工具链 + lompi + 文档 + 编辑器支持 |
+| lompi | `github.com/FujoJTOP/lompi` | **public**（2026-09-17 用户定；09-16 只说开源 Loment 本体） | 包管理器（摊平到根）—— 保留为**单独特化的发布口** |
 
-**单仓里的内容原样不动** —— 两个库是**额外的发布口**，不是搬家。判据与跨线引用照旧看单仓。
+**原先的形态**（09-15 到 09-17）：开发在 FujoOS 单仓，两个库只是额外的发布口。09-17 用户把
+开发口搬到了 `FujoJTOP/loment` —— 见 §0.2。
+
+### 0.2 开发口搬到 `FujoJTOP/loment`（2026-09-17）
+
+用户："未来这个库就是开发口了，你也需要从 FujoLang 文件中移除 FujoOS 源文件，FujoLang 分支
+从 Github 下架，FujoLang 文件夹改名 Loment-DEV"。
+
+- **FujoOS 源文件从 Loment 树里移走**：`kernel/` `sdk/` `ui/` `uisport/` `fujo-compat/`
+  `fujopack/` `fujorun/` `release/` `assets/` `eval_results_v2/` `scripts/` `Cargo.*`
+  与绝大多数 `docs/`。**这不是搬家** —— FujoOS 线有它自己的工作树
+  （`D:\Dev\FujoOS` / `FujoOS-compat` / `FujoOS-netDEV` …）。
+- **历史也滤掉**：新仓库只带 Loment 线的提交（`git filter-repo`）。只删文件是不够的 ——
+  kernel/sdk 那些 diff 与提交信息会留在历史里。
+- **lompi 跟着公开**：开发树离不开 `lompi/`（`loment_dist.py:67` 拿它构建**随包发行**的
+  lompi 工具，`loment_lompi_test.py` 读它的源），而开发口是 public —— 两边可见性必须一致。
+  用户选了"lompi 也开源"，于是 09-16 那条"只开源 Loment 本体"的划分作废。
+- **本地目录**：`D:\Dev\Loment-DEV`（新克隆）。`D:\Dev\FujoOS-FujoLang` **暂时留着当后路**，
+  等新开发口验证过再撤。
+- **`Fujoos-FujoLang-DEV` 远端分支**：等新开发口验证好再下架。核过：它比 `FujoDEV-V2`
+  领先 168 个提交，而那 168 个**只碰 Loment 线路径**，没有 kernel/sdk —— 所以下架不丢别的线。
+- **`loment_publish.py --push loment` 从此是"一次性引导"**，不是日常机制 —— 开发口用普通
+  `git push`。`lompi` 那个口照旧由它维护。
 
 ### 0.1 三个决定（2026-09-16）
 
