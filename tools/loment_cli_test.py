@@ -444,7 +444,12 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
     rc, _, err = _run(["explain", "E99"] + _no_color())
-    assert rc == 2 and "E1..E20" in err, err[:120]
+    assert rc == 2 and "E1..E22" in err, err[:120]
+    # 新增码必须**在表里也在 explain 的接受范围里** —— 两个数字各改一处, 漏一个就红
+    # (E21/E22 是 2026-09-17 加的, 原先上界是 20)
+    for c in ("E21", "E22"):
+        rc, out, _ = _run(["explain", c] + _no_color())
+        assert rc == 0 and c in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 

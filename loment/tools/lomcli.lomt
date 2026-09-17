@@ -631,7 +631,7 @@ fn catalog(mem: ptr, fd: u64) {
     row(mem, fd, "types", "", "type table");
     row(mem, fd, "keywords", "", "keywords");
     row(mem, fd, "caps", "", "capability / guard");
-    row(mem, fd, "codes", "", "error code table E1-E20");
+    row(mem, fd, "codes", "", "error code table E1-E22");
     row(mem, fd, "explain", "CODE", "one error code explained");
     row(mem, fd, "cheat", "", "one-page cheat sheet");
     sec(mem, fd, "THIS INSTALL");
@@ -1242,6 +1242,8 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     codrow(mem, 1, "E18", "`use <name>` does not resolve - rename it, add the file, or use the path form");
     codrow(mem, 1, "E19", "parse error - fix that line as the `line:col` in the message says");
     codrow(mem, 1, "E20", "more than 300 `use` in one file - split the facade");
+    codrow(mem, 1, "E21", "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only");
+    codrow(mem, 1, "E22", "bad `choose`: written twice, bad mode name, or written in a library");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "loment explain E4 for one of them in detail.");
@@ -1280,8 +1282,8 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let a: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
-    if code == 0 || code > 20 {
-        return err_usage(mem, "the code must be E1..E20");
+    if code == 0 || code > 22 {
+        return err_usage(mem, "the code must be E1..E22");
     }
     wstr(1, "\n  ");
     yellow(mem, 1);
@@ -1463,6 +1465,7 @@ fn do_keywords(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "types", "u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str mut");
     termrow(mem, 1, "patterns", "if let  _  as  self");
     termrow(mem, 1, "* capability", "capability  guard  revocable  excluded");
+    termrow(mem, 1, "* program/ABI", "choose  extern  interrupt");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "capability domains are the one genuinely new thing: loment caps   .   full table: loment syntax");

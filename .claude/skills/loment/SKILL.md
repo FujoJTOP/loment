@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E20 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E22 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -48,7 +48,7 @@ loment version
 | `loment syntax` | 语法速查表 |
 | `loment builtins` | 内建函数表（全部，没有别的） |
 | `loment types` / `keywords` / `caps` | 类型表 / 关键字 / 能力域 |
-| `loment codes` / `loment explain E4` | 错误码表 E1–E20 / 单条详解 |
+| `loment codes` / `loment explain E4` | 错误码表 E1–E22 / 单条详解 |
 | `loment new NAME` | 生成一个能直接 `loment run` 的骨架 |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | 读源码（行数、函数签名、搜索、sha256、带行号打印） |
 | `loment ls` / `tree` / `examples` / `example tour` | 看目录与示例 |
@@ -258,6 +258,7 @@ fn _start() {
 | 构造 | 写法 |
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
+| 项目模式 | `choose std` / `choose no_std`（**整个程序只写一次，只能写在入口那一份**，库不许写；不写就是 `std`）—— 见 §2.1 |
 | 导入 | **两种写法，后面都不带分号**：`use 名字`（**按层找，先命中先用**：① 项目根 `<项目>/deps/<名字>/<名字><后缀>` ② 工具链自带 `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>` ③ 内置四根 `loment/lib` → `examples` → `selfhost` → `tools`，**只有第 ③ 层要求名字唯一**）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。`<后缀>` 默认 `.lomt`，项目可以换成自己的（§7）。单文件最多 **300 条** use。写成 `use x;` 会被解析期拒绝（§6.13） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`）；**形参最多 10 个** |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
@@ -278,6 +279,23 @@ fn _start() {
 | 字符串 | `"..."`，转义 `\n \t \" \\`；操作见 §3 的 `str_*` |
 | 注释 | `//`、`/* */`；`///` 是文档注释（`loment doc` 会抽出来） |
 | 运算符 | 优先级同 Rust：`\|\| && == != < <= > >= \| ^ & << >> + - * / %`，一元 `- !` |
+
+### 2.1 项目模式 `choose`
+
+```rust
+module myapp
+
+choose no_std          // ← 整个程序只写这一次；不写就是 std
+```
+
+- **它是"整个程序"的属性，不是某个文件的**：所以只许出现一次，而且**只能写在入口那一份**
+  （被 `use` 进来的库写了就是 E22）。两个编译器都在管这件事。
+- 取值只有 `std` 与 `no_std` 两个（拼错是 E22）。
+- **`no_std` 才是 Loment 的本来面目**（它最初就是为了写 FujoOS）。`std` 是默认值，
+  意味着你可以用宿主能力。**什么时候必须写**: 写系统、写要在裸机上跑的东西时 ——
+  显式写出来是给读者和工具看的，语言不强制。
+- 它也会进 Potato 形式对象（`mode` 字段），所以"这份程序是哪个模式"在**不读源码**的
+  那一侧也看得见。
 
 ## 3. 内建函数（全部，没有别的）
 
@@ -343,6 +361,8 @@ E2 @13 line 4: 1
 | E18 | **`use <名字>` 解析不出来**（找不到，或命中多处）—— 改名字/补文件，或改用路径形式 `use "...lomt"` |
 | E19 | **语法错误（解析期）** —— 按消息给的 `行:列` 改那一行的写法 |
 | E20 | **一个文件的 `use` 超过 300 条** —— 门面拆小，别把整库塞进一个文件 |
+| E21 | **`extern fn` 的签名超出 FFI 第 1 阶段**（只收标量与 `ptr`）—— 见 §7.3.1 |
+| E22 | **`choose` 用法不对**（写两次 / 模式名拼错 / 库写了它）—— 见 §2.1 |
 
 **最常见的**：`E2` 十有八九是**漏写类型标注**（`let x = 1;` 不合法，要 `let x: u32 = 1;`）
 或用了未定义的函数名；`E3` 是调用实参个数对不上；`E19` 见 §6.1/§6.3。
