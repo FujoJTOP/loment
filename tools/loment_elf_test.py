@@ -13,7 +13,8 @@
 # 已知边界 (与 lomelf.py 头注同源, 逐条记账):
 #   * 调用约定是我们自己的 (实参走栈), **不是 System V** —— 原生产物 v0 不给 C 调;
 #   * 结构体动态下标 GEP / 间接调用 / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
-#   * 自举侧的镜像是 loment/tools/lomelf.lomt —— 第五条用例钉它与参考逐字节相同。
+#   * 自举侧的镜像是 loment/tools/lomelf.lomt —— 自举那几条用例钉它与参考逐字节相同,
+#     其中一条专门钉 FFI (`--link` 外部目标文件, docs/173)。
 #
 # 运行: python tools/loment_elf_test.py   (无 clang/WSL 时 SKIP, 退出码 0)
 
@@ -26,8 +27,9 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lomentc  # noqa: E402
-import lomelf   # noqa: E402
+import lomentc           # noqa: E402
+import lomelf            # noqa: E402
+import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与 Loment 源码)
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = [
@@ -105,6 +107,72 @@ def _run_bin(elf: Path, name: str, td: Path, timeout: int = 20) -> tuple[int, by
     except ValueError:
         rc = -1
     return rc, out
+
+
+# ---------------------------------------------------------------- 自举镜像 (只建一次)
+
+_MIRROR: Path | None = None
+_MIRROR_TD: tempfile.TemporaryDirectory | None = None
+
+
+def _mirror() -> Path:
+    """`loment/tools/lomelf.lomt` 的产物 —— **能替用户干活的那份**链接器。
+
+    种子 ->(clang 一次)-> stage1 ->(自举, 无 Python 无 clang)-> 镜像。clang 只在第一步
+    出现, 那一步的终点是 docs/167 §5 记的 genesis。
+
+    整条链**只跑一次**并在本进程内缓存: 三段自举编译每次一分多钟, 三条判据各建一遍是纯浪费。
+    """
+    global _MIRROR, _MIRROR_TD
+    if _MIRROR is not None:
+        return _MIRROR
+    clang = _clang()
+    assert clang, "缺 clang"
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子 (loment/build/selfhost_driver.ll)"
+    _MIRROR_TD = tempfile.TemporaryDirectory()      # 活到进程结束 (缓存产物在它里面)
+    td = Path(_MIRROR_TD.name)
+    s1 = td / "stage1"
+    r = subprocess.run(
+        [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-300:]
+    binn = "/tmp/lomelf_mir_s1.bin"
+    script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+              f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
+    rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                        capture_output=True, timeout=900, shell=False)
+    assert rr.returncode == 0, f"stage1 编译镜像失败: {rr.stderr[-300:]}"
+    mir_ll = td / "lomelf.ll"
+    mir_ll.write_bytes(rr.stdout)
+    assert len(rr.stdout) > 100000, f"镜像 IR 太小 ({len(rr.stdout)}B)"
+    mir = td / "lomelf.bin"
+    r2 = subprocess.run(
+        [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fno-pie", "-fuse-ld=lld", "-Wl,-e,_start", str(mir_ll), "-o", str(mir)],
+        capture_output=True, text=True, shell=False)
+    assert r2.returncode == 0, f"镜像链接失败: {r2.stderr[-300:]}"
+    _MIRROR = mir
+    return mir
+
+
+def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
+    """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
+
+    stdout 与退出码不混在一个流里: 先让它跑, 再单独 `echo -n $?` (与 `_run_bin` 同一条纪律)。
+    """
+    tag = "/tmp/lomelf_m.bin"
+    extra = "".join(f" --link {x}" for x in links)
+    script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
+              f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                       capture_output=True, timeout=900, shell=False)
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    return rc, r.stderr.decode("utf-8", "replace")
 
 
 # ---------------------------------------------------------------- 用例
@@ -232,36 +300,12 @@ def test_lomelf_selfhost_matches_reference():
     这格的规格书, 能替用户干活的是自举侧那份。链条里 clang 只出现在"种子 -> stage1"
     一步 (genesis, docs/167 §5 记账)。
     """
-    clang = _clang()
-    if not (clang and _wsl()):
+    if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
-    assert seed.exists(), "缺自举种子 (loment/build/selfhost_driver.ll)"
+    mir = _mirror()
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        s1 = td / "stage1"
-        r = subprocess.run(
-            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
-            capture_output=True, text=True, shell=False)
-        assert r.returncode == 0, r.stderr[-300:]
-        # stage1 编译镜像本体 (自举路, 无 Python) -> IR
-        binn = "/tmp/lomelf_s1.bin"
-        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
-                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                            capture_output=True, timeout=900, shell=False)
-        assert rr.returncode == 0, f"stage1 编译镜像失败: {rr.stderr[-300:]}"
-        mir_ll = td / "lomelf.ll"
-        mir_ll.write_bytes(rr.stdout)
-        assert len(rr.stdout) > 100000, f"镜像 IR 太小 ({len(rr.stdout)}B)"
-        mir = td / "lomelf.bin"
-        r2 = subprocess.run(
-            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-             "-static", "-fno-pie", "-fuse-ld=lld", "-Wl,-e,_start", str(mir_ll), "-o", str(mir)],
-            capture_output=True, text=True, shell=False)
-        assert r2.returncode == 0, f"镜像链接失败: {r2.stderr[-300:]}"
         # 语料: 参考 IR -> 镜像编 -> 与参考的字节比
         total = 0
         for rel in CORPUS:
@@ -273,15 +317,9 @@ def test_lomelf_selfhost_matches_reference():
             llrepo.parent.mkdir(parents=True, exist_ok=True)
             try:
                 llrepo.write_bytes(ll.read_bytes())
-                got = subprocess.run(
-                    ["wsl", "-e", "bash", "-lc",
-                     f"cp {_wsl_path(mir)} /tmp/lomelf_m.bin && chmod +x /tmp/lomelf_m.bin && "
-                     f"cd {_wsl_path(ROOT)} && /tmp/lomelf_m.bin "
-                     f"loment/build/_mirror_{srcl.stem}.ll "
-                     f"loment/build/_mirror_{srcl.stem}.elf"],
-                    capture_output=True, text=True, timeout=300, shell=False)
-                assert got.returncode == 0, (
-                    f"[{srcl.stem}] 镜像退出 {got.returncode}: {got.stderr[-200:]}")
+                rc, err = _mirror_run(mir, f"loment/build/_mirror_{srcl.stem}.ll",
+                                      f"loment/build/_mirror_{srcl.stem}.elf")
+                assert rc == 0, f"[{srcl.stem}] 镜像退出 {rc}: {err[-200:]}"
                 nat = elfrepo.read_bytes()
             finally:
                 elfrepo.unlink(missing_ok=True)
@@ -311,14 +349,19 @@ def test_lomelf_rebuilds_the_compiler_without_clang():
         elf.write_bytes(drv)
         binn = "/tmp/lomelf_drv.bin"
         outp = td / "drv2.ll"
+        errp = td / "drv2.err"
+        # **stderr 落文件而不是 /dev/null**: 这条曾经偶发红过一次, 而当时错误被丢掉了,
+        # 只留下"退出码 1" —— 一份说不出理由的红对本仓库没有用 (旁边那条重建用例一直是这么做的)。
         script = (
             f"cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
             f"cd {_wsl_path(ROOT)} && {binn} loment/selfhost/driver.lomt "
-            f"> {_wsl_path(outp)} 2>/dev/null; echo -n $?"
+            f"> {_wsl_path(outp)} 2> {_wsl_path(errp)}; echo -n $?"
         )
         r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                            capture_output=True, timeout=900, shell=False)
-        assert r.stdout.decode().strip() == "0", f"原生编译器退出非零: {r.stdout[:40]!r}"
+        etxt = errp.read_text(encoding="utf-8", errors="replace")[-400:] if errp.exists() else ""
+        assert r.stdout.decode().strip() == "0", \
+            f"原生编译器退出非零: {r.stdout[:40]!r} stderr={etxt!r}"
         got = outp.read_bytes()
     want = seed.read_bytes()
     assert got == want, f"[定点不成立] 自编译产物 {len(got)}B != 种子 {len(want)}B"
@@ -333,34 +376,14 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
     也就是说"重建这套工具链不需要 C 编译器、也不需要解释器"在**自举侧**成立 ——
     clang 只在第一步（种子 -> stage1）出现，那一步的终点是 docs/167 §5 记的 genesis。
     """
-    clang = _clang()
-    if not (clang and _wsl()):
+    if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
     seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
     assert seed.exists(), "缺自举种子"
+    mir = _mirror()
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        s1 = td / "stage1"
-        r = subprocess.run(
-            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
-            capture_output=True, text=True, shell=False)
-        assert r.returncode == 0, r.stderr[-300:]
-        binn = "/tmp/lomelf_rb1.bin"
-        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
-                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                            capture_output=True, timeout=900, shell=False)
-        assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"
-        mir_ll = td / "lomelf.ll"
-        mir_ll.write_bytes(rr.stdout)
-        mir = td / "lomelf.bin"
-        r2 = subprocess.run(
-            [clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-             "-static", "-fno-pie", "-fuse-ld=lld", "-Wl,-e,_start", str(mir_ll), "-o", str(mir)],
-            capture_output=True, text=True, shell=False)
-        assert r2.returncode == 0, f"镜像链接失败: {r2.stderr[-300:]}"
         # 镜像编种子 -> 新的编译器
         seed_c = td / "seed.elf"
         r3 = subprocess.run(
@@ -385,6 +408,72 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
     want = seed.read_bytes()
     assert got == want, f"[自举侧定点不成立] {len(got)}B != 种子 {len(want)}B"
     print(f"      镜像 -> 编译器 -> 自编译产物 == 种子 ({len(got)}B), 自举侧全程无 clang 无解释器")
+
+
+@test
+def test_lomelf_selfhost_links_foreign_object():
+    """**自举链接器也读外部 `.o`** (docs/173 FFI): 镜像 + `--link` 的产物与参考**逐字节相同**,
+    而且跑出正确答案。
+
+    这是 `docs/174 §4.1` 那条缺口的判据 —— 在此之前自举侧对 `--link` 是**硬拒**, 也就是说
+    **装好的工具链根本链不了 `extern`** (仓库里能跑、包里的不能)。判据落在"镜像能链 +
+    产物与参考一致 + 跑对", 不是"IR 里有 declare"。
+
+    两个场景: **单对象** (C ABI 传参) 与 **双对象** (再加"第一个对象的符号名不能被第二个
+    对象的读入盖掉")。双对象那条是**必须**的: 名字池的基若放错, 单对象照样绿。
+
+    夹具与 `loment_ffi_test` 共用 (同一份 C 与同一份 Loment 源码), 不抄第二遍 —— 抄一份
+    就会漂一份, 而"非交换运算"那条教训正是夹具本身的问题。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    bld = ROOT / "loment" / "build"
+    # (标签, Loment 源码, C 源文件, --link 的顺序, 期望退出码)
+    cases = [
+        ("ffi", ffitest.LOMENT_SOURCE,
+         [(ffitest.C_SOURCE, "c")], ["c"], 52),
+        ("ffi2", ffitest.LOMENT_TWO_OBJECTS_SOURCE,
+         [(ffitest.C_SOURCE, "c"), (ffitest.C2_SOURCE, "d")], ["c", "d"], 75),
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        bld.mkdir(parents=True, exist_ok=True)
+        for tag, lomt_src, csrcs, order, want_rc in cases:
+            objs, clones = {}, []
+            for text, stem in csrcs:
+                (td / f"{stem}.c").write_text(text, encoding="utf-8", newline="\n")
+                assert ffitest.compile_c(_clang(), td / f"{stem}.c", td / f"{stem}.o") == 0, \
+                    "C 编译失败"
+                objs[stem] = td / f"{stem}.o"
+            src = td / f"{tag}.lomt"
+            src.write_text(lomt_src, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            want, _info = lomelf.compile_ll(
+                ll.read_text(encoding="utf-8"),
+                [lomelf.ForeignObject(objs[s]) for s in order])
+            # 外部对象与 IR 都要放成**仓库内相对路径** —— 镜像在 WSL 里按相对路径找。
+            llrepo = bld / f"_mirror_{tag}.ll"
+            elfrepo = bld / f"_mirror_{tag}.elf"
+            rel_objs = [f"loment/build/_mirror_{tag}_{s}.o" for s in order]
+            try:
+                llrepo.write_bytes(ll.read_bytes())
+                for stem, rel in zip(order, rel_objs):
+                    p = ROOT / rel
+                    p.write_bytes(objs[stem].read_bytes())
+                    clones.append(p)
+                nat_rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
+                                          f"loment/build/_mirror_{tag}.elf", tuple(rel_objs))
+                assert nat_rc == 0, f"[{tag}] 镜像 + --link 退出 {nat_rc}: {err[-300:]}"
+                nat = elfrepo.read_bytes()
+                assert nat == want, f"[{tag}] 镜像的 FFI 产物与参考不同 ({len(nat)}B vs {len(want)}B)"
+                rc, out = _run_bin(elfrepo, f"ffi_{tag}", td)
+                assert rc == want_rc, f"[{tag}] 跑出的结果不对: rc={rc} (期望 {want_rc}) {out[:120]!r}"
+            finally:
+                for p in [elfrepo, llrepo, *clones]:
+                    p.unlink(missing_ok=True)
+    print("      镜像 + --link 单/双对象: 与参考逐字节相同, 退出码 52 / 75")
 
 
 def main() -> int:

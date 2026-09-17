@@ -511,6 +511,16 @@ $ loment build app.lomt --link lib.o -o app             # 我们链接
 调用点按**平台 C ABI** 传参（Linux: 前六个整数实参进 `rdi rsi rdx rcx r8 r9`；
 Windows: `rcx rdx r8 r9`），而 Loment 函数之间的调用照旧走 Loment 自己的约定（实参走栈）。
 
+**对方那份 `.o` 必须是自包含的**（这一档的硬边界，碰到了会**报错**而不是猜）：
+
+- 它里面**不能有重定位**，**不能引用未定义符号** —— 典型就是 `printf`/`malloc`。
+  也就是说**不链 libc**：编译对方那份时要按 freestanding 编（`-ffreestanding
+  -fno-stack-protector`），它自己只能调用自己。
+- 由此**两个 `.o` 也不能互相引用**（那对另一个来说就是未定义符号）。
+- 归档（`.a`）与动态库（`.so`/`.dll`）**都还没有**；PE 目标的 FFI 也还没有。
+- 一次可以给**多个** `--link`，它们会被依次接在代码后面。
+- 对方那个 `.o` **不能超过 4 MiB**（超了会报错，不会截断着编）。
+
 ### 7.3.2 Python / Java / JS（进程桥）
 
 ```rust

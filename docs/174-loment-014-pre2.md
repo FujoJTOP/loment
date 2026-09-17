@@ -30,6 +30,7 @@
 | 诊断码 **E021**（签名形态不支持：`str` / 聚合 / 变参） | `lomentc_test` 的负例 |
 | `loment build/run --link FILE.o`（两个启动器） | `loment_cli_test` 32/32 |
 | `loment/lib/proc.lomt`：进程桥（`proc_sh` / `proc_python`） | `loment_ffi_test` 的 Python / JS 两条 |
+| **自举链接器也读外部 `.o`** —— 装好的工具链真能链 `extern` | `loment_elf_test` 的自举镜像那格：单/双对象与参考**逐字节相同**，跑出 52 / 75 |
 
 ### 已经能被调到的语言（这台机器上真跑通的）
 
@@ -57,10 +58,10 @@
 ## 3. 判据
 
 ```bash
-python tools/loment_ffi_test.py     # 11/11: C / C++ / Rust 端到端 + Python / JS 桥 + 四条边界
+python tools/loment_ffi_test.py     # 12/12: C / C++ / Rust 端到端 + Python / JS 桥 + 五条边界
 python tools/lomentc_test.py        # 112/112: extern 正负例
 python tools/loment_p8_test.py      # 16/16: extern 两个实现逐字节一致 + 语料 54/54
-python tools/loment_elf_test.py     # 7/7 · loment_pe_test 9/9 · loment_cli_test 32/32
+python tools/loment_elf_test.py     # 8/8 · loment_pe_test 9/9 · loment_cli_test 32/32
 python tools/ci.py --static-only
 ```
 
@@ -95,17 +96,20 @@ python tools/ci.py --static-only
    且不报错**（`$ErrorActionPreference='Stop'` 拦不住无错的情况），安装器照样 rc=0。
    同一个文件里 store 那两处用的是 `-Path`，所以它们一直对。改成 `-Path`。
 
+> **上表里 `--link` 那一行的"硬拒"已经补掉了**（同一版内）。装一遍把"产品路径做不了 FFI"
+> 这个缺口**顶到台面上**之后，自举链接器也读了外部 `.o` —— 现在 `loment build app.lomt
+> --link x.o` 能链出可执行文件、跑出 52。判据是 `loment_elf_test` 的那格：**单对象与双对象
+> 两条**，产物与参考**逐字节相同**且跑对。补的时候踩到三件事，记在 `docs/173` §5b。
+
 ## 4. 不主张（这一版的关键缺口）
 
-1. **产品路径目前还做不了 FFI。** 打包出去的 `loment` 用的是**自举**链接器
-   (`loment-lomelf`)，而它**还没镜像**这一套 —— 它对 `--link` **硬拒**并指向 `docs/173`
-   （上面那张表里能看到这句话）。也就是说：**`extern fn` 能过检查、能出 IR，但装好的
-   工具链还不能把它链成可执行文件。** 这是下一版的第一件事。
-2. **只有静态链接、只有 ELF。** 归档（`.a`/`.lib`）与动态库（`.so`/`.dll`）都没做；
+1. **只有静态链接、只有 ELF。** 归档（`.a`/`.lib`）与动态库（`.so`/`.dll`）都没做；
    PE 侧 FFI 未开始（`--link` 配 `--target pe` 明确拒绝）。
-3. **不链 libc。** 引用了未定义符号（`printf`/`malloc`）的目标文件会被**硬拒**——
-   第 1 阶段没有能力解开它们。所以能调的是**自包含的**库。
-4. **签名只收标量与 `ptr`。** `str` 与按值聚合都在外面（E021）；变参、回调（函数指针）也不支持。
-5. **进程桥只在 Linux/ELF 可用**（Windows 垫片没有 `fork`/`pipe`），且**传的是字节流**
+2. **不链 libc。** 引用了未定义符号（`printf`/`malloc`）的目标文件会被**硬拒**——
+   第 1 阶段没有能力解开它们。所以能调的是**自包含的**库（`-ffreestanding` 编出来的那种）。
+3. **签名只收标量与 `ptr`。** `str` 与按值聚合都在外面（E021）；变参、回调（函数指针）也不支持。
+4. **进程桥只在 Linux/ELF 可用**（Windows 垫片没有 `fork`/`pipe`），且**传的是字节流**
    —— 不能把结构体递过去。
+5. **自举侧的外部目标文件上限 4 MiB**（一个暂存缓冲；参考实现没有这个上限）。超了会报错，
+   不会截断着编。
 6. 其余见 `docs/160 §2` 的不主张清单与 `docs/173` §3。

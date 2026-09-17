@@ -602,8 +602,8 @@ fn catalog(mem: ptr, fd: u64) {
     sec(mem, fd, "COMPILE & RUN");
     row(mem, fd, "ir", "FILE", "print LLVM IR to stdout");
     row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
-    row(mem, fd, "build", "FILE [-o NAME]", "compile and link to an executable");
-    row(mem, fd, "run", "FILE", "compile, link and run");
+    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "compile and link to an executable");
+    row(mem, fd, "run", "FILE [--link OBJ...]", "compile, link and run");
     row(mem, fd, "version", "", "print the version line");
     row(mem, fd, "lsp", "", "language server over stdio");
     sec(mem, fd, "SOURCE TOOLS");
@@ -691,11 +691,11 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.");
+        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  The object must be self-contained -- no relocations, no undefined symbols (no libc).");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {
-        usage_line(mem, fd, "run", "FILE", "Compile, link and run. The exit code is the program's own exit code.");
+        usage_line(mem, fd, "run", "FILE [--link OBJ...]", "Compile, link and run. The exit code is the program's own exit code.\n  --link OBJ adds a foreign ELF object (FFI), same rules as build.");
         return 0;
     }
     if eq_cstr(cmd, n, "fmt") {

@@ -50,6 +50,24 @@ int c_mix(int a, int b, int c) { return a * 100 + b * 10 + c; }
 void c_nop(void) { }
 """
 
+#: 调 `C_SOURCE` 的那份 Loment: 三个 `extern fn`, 结果 7 + 30 + 15 = **52**。
+#: 顺序敏感的是 `c_sub` (20-5=15; 寄存器对调会得到 -15) —— 与 `C_SOURCE` 的注释同一条理由。
+#: 常量放在模块级是为了让 `loment_elf_test` 的自举镜像判据共用**同一份**源码, 不抄第二遍。
+LOMENT_SOURCE = """\
+module ffidemo
+
+extern fn c_add(a: i32, b: i32) -> i32;
+extern fn c_mul(a: i32, b: i32) -> i32;
+extern fn c_sub(a: i32, b: i32) -> i32;
+
+fn _start() {
+    let r: i32 = c_add(3 as i32, 4 as i32)
+        + c_mul(5 as i32, 6 as i32)
+        + c_sub(20 as i32, 5 as i32);
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
 
 def _clang() -> str | None:
     for c in CLANG_CANDIDATES:
@@ -120,17 +138,7 @@ def test_c_end_to_end():
         td = Path(t)
         (td / "c.c").write_text(C_SOURCE, encoding="utf-8", newline="\n")
         assert compile_c(clang, td / "c.c", td / "c.o") == 0, "C 编译失败"
-        (td / "m.lomt").write_text(
-            "module ffidemo\n\n"
-            "extern fn c_add(a: i32, b: i32) -> i32;\n"
-            "extern fn c_mul(a: i32, b: i32) -> i32;\n"
-            "extern fn c_sub(a: i32, b: i32) -> i32;\n\n"
-            "fn _start() {\n"
-            "    let r: i32 = c_add(3 as i32, 4 as i32)\n"
-            "        + c_mul(5 as i32, 6 as i32)\n"
-            "        + c_sub(20 as i32, 5 as i32);\n"
-            "    syscall4(60, r as u64, 0, 0);\n"
-            "}\n", encoding="utf-8", newline="\n")
+        (td / "m.lomt").write_text(LOMENT_SOURCE, encoding="utf-8", newline="\n")
         rc, err = build_and_run(td, td / "m.lomt", [td / "c.o"], 52)
         assert rc == 52, f"C 端到端结果不对: rc={rc} (期望 52) err={err[-300:]!r}"
         print("      C: c_add/c_mul/c_sub 端到端 -> 退出码 52 (含次序敏感的一项)")
@@ -163,6 +171,53 @@ def test_three_args_and_void_call():
         rc, err = build_and_run(td, td / "m.lomt", [td / "c.o"], 123)
         assert rc == 123, f"三实参/void 结果不对: rc={rc} (期望 123) err={err[-300:]!r}"
         print("      三实参 + void 调用 -> 退出码 123 (位置敏感)")
+
+
+#: 第二个 `.o` 的内容 —— 只为"**两个**外部对象一起链"那条判据存在。
+C2_SOURCE = """\
+int d_scale(int a, int b) { return a * 10 - b; }
+"""
+
+#: 调**两个** `.o` 的那份 Loment。它存在的理由是**名字池的基**:
+#: 自举链接器把外部符号名拷进**输入缓冲的尾部** —— 标签表存的是偏移, 而 `lbl_find` 拿
+#: 输入缓冲当基。若把名字留在**对象缓冲**里, 第二个 `.o` 一读进来就会把第一个的符号名
+#: 盖掉, 然后在回填时报"未定义的标签: c_add"。**单对象测不出这个**: 只有一个对象时那块
+#: 缓冲始终是完整的。所以这条判据必须有两个对象才有意义。
+#: 退出码 75 = c_add(3,4)=7 + d_scale(7,2)=68。
+LOMENT_TWO_OBJECTS_SOURCE = """\
+module ffitwo
+
+extern fn c_add(a: i32, b: i32) -> i32;
+extern fn d_scale(a: i32, b: i32) -> i32;
+
+fn _start() {
+    let r: i32 = c_add(3 as i32, 4 as i32) + d_scale(7 as i32, 2 as i32);
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_two_foreign_objects():
+    """两个 `.o` 一起 `--link`: 第一个对象导出的符号不能被第二个对象的读入盖掉。
+
+    退出码 75 = 7 + (70 - 2)。`d_scale` 也是**非交换**的 (`a*10 - b`), 所以传参次序在
+    这条里同样被测到。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "c.c").write_text(C_SOURCE, encoding="utf-8", newline="\n")
+        (td / "d.c").write_text(C2_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "c.c", td / "c.o") == 0, "C 编译失败"
+        assert compile_c(clang, td / "d.c", td / "d.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_TWO_OBJECTS_SOURCE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "c.o", td / "d.o"], 75)
+        assert rc == 75, f"两个外部对象结果不对: rc={rc} (期望 75) err={err[-300:]!r}"
+        print("      两个外部对象一起链 -> 退出码 75")
 
 
 #: Rust 那份。**`#![no_std]` + `#[no_mangle] extern "C"`** —— 这就是 Rust 库对外暴露 C ABI 的

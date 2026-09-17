@@ -47,11 +47,13 @@ const M_TXT: u32 = 2105344;        // 2 MiB 代码缓冲
 const M_OUT: u32 = 4202496;        // 2 MiB 输出 ELF
 const M_GB: u32 = 6291456;         // 1 MiB 全局数据
 const M_TAB: u32 = 7340032;        // 2 MiB 表区
-const ARENA: u64 = 9437184;
+const M_OBJ: u32 = 9437184;        // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+const ARENA: u64 = 13631488;
 
 const IN_CAP: u32 = 2097152;
 const OUT_CAP: u32 = 2097152;
 const GB_CAP: u32 = 1048576;
+const OBJ_CAP: u32 = 4194304;
 
 // 表区内的格 (相对 M_TAB)
 const C_NG: u32 = 0;
@@ -78,6 +80,8 @@ const C_CC: u32 = 80;
 const C_CSS: u32 = 84;
 const C_PE: u32 = 88;              // 1 = 出 PE (Windows)，0 = 出 ELF
 const C_SHIM: u32 = 92;            // PE：`__win_syscall` 在代码缓冲里的偏移
+const C_NEXT: u32 = 96;            // 外部函数 (declare) 个数 (docs/173)
+const C_EXTN: u32 = 100;           // 外部符号名池游标 (相对输入缓冲起点)
 
 // 表起址 (相对 M_TAB); 格区 256 字节
 const TB_G: u32 = 256;             // 全局表 stride 32 × 2048
@@ -125,6 +129,11 @@ const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
 const PH_ILEN: u32 = 12;
 
+// 外部函数表 (docs/173): `declare` 出来的符号名, 偏移指向**输入文本** (与标签表同基)。
+const TB_EXT: u32 = 1587200;       // stride 8 × 4096: (起点, 长度)
+const E_NOFF: u32 = 0;
+const E_NLEN: u32 = 4;
+
 // ---------------------------------------------------------------- 常量
 
 const TEXT_VADDR: u32 = 4194304;   // 0x400000
@@ -139,6 +148,8 @@ const RSP: u32 = 4;
 const RBP: u32 = 5;
 const RSI: u32 = 6;
 const RDI: u32 = 7;
+const R8: u32 = 8;                 // 只为 System V 的第 5、6 个实参寄存器 (docs/173)
+const R9: u32 = 9;
 
 const ADD: u32 = 0;
 const SUB: u32 = 5;
@@ -897,6 +908,11 @@ fn em_jcc_raw(out: ptr, c: u32, cond: u32) -> u32 {
 fn em_push(out: ptr, c: u32, reg: u32) -> u32 {
     let d: u32 = em_rex(out, c, rex(0, 0, 0, reg));
     return e1(out, d, 80 + reg % 8);
+}
+
+fn em_pop(out: ptr, c: u32, reg: u32) -> u32 {
+    let d: u32 = em_rex(out, c, rex(0, 0, 0, reg));
+    return e1(out, d, 88 + reg % 8);
 }
 
 fn em_load_sized(out: ptr, c: u32, reg: u32, base: u32, disp: u32, size: u32) -> u32 {
@@ -1790,6 +1806,10 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     let lp: u32 = hi32(pr);
     let rp: u32 = lo32(pr);
     let nargs: u32 = nargs_of(t, lp, rp);
+    // ---- 外部函数 (docs/173): 实参走**寄存器**, 不走我们自己的栈约定。
+    if ext_has(tab, t, cs + 1, ce - cs - 1) == 1 {
+        return do_call_extern(tab, out, c, t, lp, rp, nargs, cs, ce, has_ret + ret_agg * 2);
+    }
     let total: u32 = 0;
     let q: u32 = 0;
     while q < nargs {
@@ -2176,6 +2196,415 @@ fn plan_params(tab: ptr, t: ptr, ls: u32, le: u32) -> u32 {
         a = skip_comma(t, ae, rp);
     }
     return ns;
+}
+
+// ---------------------------------------------------------------- 外部目标文件 (FFI, docs/173)
+//
+// 与 tools/lomelf.py 的 ForeignObject / compile_ll 后半段逐字对齐。第 1 阶段只认
+// **静态、freestanding 的 ELF64 可重定位对象**: 取代码节的字节 + 它导出的全局符号。
+// 两条边界**硬失败**而不是猜 (猜的后果是"调到一个错地址", 那是运行期崩溃而不是编译期报错):
+//
+//   * 对象里有重定位 -> 报错 (第 1 阶段不做跨对象重定位);
+//   * 对象引用未定义符号 (典型是 libc 的 printf/malloc) -> 报错 (不链 libc)。
+//
+// **为什么代码节要认 `.text.*`**: clang 把所有函数塞进一个 `.text`, 但 rustc/LLVM 默认
+// **按函数分节** (每个函数一个 `.text.<名字>`), 此时 `.text` 本身是空的。只认 `.text`
+// 会把 Rust 那一族直接判成"没有代码节" (参考侧实测就是这么红的)。所以把所有代码节
+// **按节表顺序拼成一块**, 并记下每节在拼接结果里的起点。
+
+fn rd16(p: ptr, off: u32) -> u32 {
+    let a: u32 = load8(p, off) as u32;
+    let b: u32 = load8(p, off + 1) as u32;
+    return a + b * 256;
+}
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let lo: u64 = load32(p, off) as u64;
+    let hi: u64 = load32(p, off + 4) as u64;
+    return lo + hi * PHI;
+}
+
+/// 写到 NUL 为止 (外部文件里的 C 字符串)。上限 4096 —— 畸形输入不许读飞。
+fn write_cstr(fd: u64, p: ptr, off: u32) -> u64 {
+    let n: u32 = 0;
+    while n < 4096 && load8(p, off + n) != 0 {
+        n = n + 1;
+    }
+    return write_all(fd, ptr_add(p, off), n as u64);
+}
+
+fn cstr_len(p: ptr, off: u32) -> u32 {
+    let n: u32 = 0;
+    while n < 4096 && load8(p, off + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+/// 把 16 对齐的缝隙显式**清零**。
+///
+/// 参考实现是 `while len(buf) % 16: buf.append(0)` —— 那些补齐字节**会进最终的 ELF**
+/// (build_elf 从 [0, tlen) 整段拷)。自举侧若只是跳到对齐位置而**不写**, 拷出去的是 arena
+/// 里的残留字节: 首次分配恰好是内核给的零页, 于是能对上, 但那**不是**一段可靠的性质 ——
+/// 只要 arena 被复用过一次就会悄悄变得与参考不同。所以这里明写。
+fn pad_zero(p: ptr, from: u32, to: u32) {
+    let k: u32 = from;
+    while k < to {
+        store8(p, k, 0 as u8);
+        k = k + 1;
+    }
+}
+
+// ELF64 节头字段 (相对节头起点的偏移) 与节表定位。字段偏移见 Elf64_Shdr:
+// sh_name@0 sh_type@4 sh_flags@8 sh_addr@16 sh_offset@24 sh_size@32 sh_link@40
+// sh_info@44 sh_addralign@48 sh_entsize@56 (共 64 字节)。
+fn sec_hdr(raw: ptr, k: u32) -> u32 {
+    return load32(raw, 40) + k * rd16(raw, 58);
+}
+
+fn sh_type(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 4);
+}
+
+fn sh_off(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 24);
+}
+
+fn sh_size(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 32);
+}
+
+fn sh_link(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 40);
+}
+
+fn sh_num(raw: ptr) -> u32 {
+    return rd16(raw, 60);
+}
+
+/// 第 k 节的**节名**在文件里的偏移 (取自 .shstrtab)。
+fn sec_name(raw: ptr, k: u32) -> u32 {
+    return sh_off(raw, rd16(raw, 62)) + load32(raw, sec_hdr(raw, k));
+}
+
+/// `.text` 或 `.text.*` —— 见上面"为什么必须认 .text.*"。
+fn is_code_sec(raw: ptr, noff: u32) -> u32 {
+    if load8(raw, noff) != 46 || load8(raw, noff + 1) != 116 || load8(raw, noff + 2) != 101
+        || load8(raw, noff + 3) != 120 || load8(raw, noff + 4) != 116 {
+        return 0;
+    }
+    if load8(raw, noff + 5) == 0 || load8(raw, noff + 5) == 46 {
+        return 1;
+    }
+    return 0;
+}
+
+fn has_code(raw: ptr) -> u32 {
+    let ns: u32 = sh_num(raw);
+    let i: u32 = 0;
+    while i < ns {
+        if sh_type(raw, i) == 1 && is_code_sec(raw, sec_name(raw, i)) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 第 k 节在**拼接后的外部代码**里的起点: 它之前每个代码节先对齐 16 再累加长度。
+/// 与参考实现里 `while len(buf) % 16: buf.append(0); s["at"] = len(buf)` 同一件事。
+fn sec_at(raw: ptr, k: u32) -> u32 {
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < k {
+        if sh_type(raw, i) == 1 && is_code_sec(raw, sec_name(raw, i)) == 1 {
+            cur = align_to(cur, 16) + sh_size(raw, i);
+        }
+        i = i + 1;
+    }
+    return align_to(cur, 16);
+}
+
+// ---------------------------------------------------------------- 外部符号名 (declare)
+
+fn ext_add(tab: ptr, noff: u32, nlen: u32) {
+    let k: u32 = cell(tab, C_NEXT);
+    let base: u32 = TB_EXT + k * 8;
+    store32(tab, base + E_NOFF, noff);
+    store32(tab, base + E_NLEN, nlen);
+    setcell(tab, C_NEXT, k + 1);
+}
+
+fn ext_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NEXT);
+    while k < n {
+        let base: u32 = TB_EXT + k * 8;
+        if span_eq(t, load32(tab, base + E_NOFF), load32(tab, base + E_NLEN), noff, nlen) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 扫 `declare` 行, 记下外部符号名 (docs/173)。`llvm.*` **不是外部函数**: 运行期块里有
+/// `declare void @llvm.trap()`, 而 do_call 对它是特判 (发 ud2)。把它收进来会抢进 C ABI
+/// 那条路, 于是 `call llvm.trap` 在回填时报"未定义的标签" —— 参考侧实测把 elf 判据从
+/// 7/7 打到 4/7。所以这里滤掉 (除 llvm.* 之外没有别的内建 declare)。
+fn collect_externs(tab: ptr, t: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if lit_at(t, ls, le, "declare ") == 1 {
+            let j: u32 = ls + 8;
+            while j < le && load8(t, j) != 64 {
+                j = j + 1;
+            }
+            if j < le {
+                let ne: u32 = word_end(t, j + 1, le);
+                if lit_at(t, j + 1, ne, "llvm.") == 0 {
+                    ext_add(tab, j + 1, ne - (j + 1));
+                }
+            }
+        }
+        i = le + 1;
+    }
+}
+
+// ---------------------------------------------------------------- C ABI 调用点 (docs/173)
+
+/// System V AMD64 整数实参寄存器: rdi rsi rdx rcx r8 r9。我们**自己的**约定是实参走栈,
+/// 这一套只给 extern 调用点。
+fn c_arg_reg(k: u32) -> u32 {
+    if k == 0 {
+        return RDI;
+    }
+    if k == 1 {
+        return RSI;
+    }
+    if k == 2 {
+        return RDX;
+    }
+    if k == 3 {
+        return RCX;
+    }
+    if k == 4 {
+        return R8;
+    }
+    return R9;
+}
+
+/// extern 调用: 实参进寄存器, 不走我们自己的栈约定。
+///
+/// 求值顺序**从右往左**: 逐个算进 RAX 再 push, 然后**从左往右** pop 进目标寄存器 ——
+/// 这样 push 完栈顶正好是第 0 个实参, pop 的先后与寄存器顺序自然对齐。**不能**直接
+/// 一个个 `emit_get(..., RDI)`: emit_get 内部要用 RAX/RCX 求值, 会把前面已经放好的
+/// 寄存器踩掉。
+///
+/// flags: bit0 = 有返回值, bit1 = 返回值是聚合 (第 1 阶段直接拒)。
+fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u32,
+                  cs: u32, ce: u32, flags: u32) -> u32 {
+    if nargs > 6 {
+        return fail("extern 调用: 第 1 阶段最多 6 个实参 (docs/173 §3)");
+    }
+    if flags % 4 >= 2 {
+        return fail("extern 调用: 第 1 阶段不接受聚合返回值");
+    }
+    let d: u32 = c;
+    let q: u32 = nargs;
+    while q > 0 {
+        q = q - 1;
+        let a2: u32 = arg_start(t, lp, rp, q);
+        let ts: u64 = type_span(t, a2, rp);
+        let to: u32 = hi32(ts);
+        let tl: u32 = lo32(ts);
+        if is_agg(t, to, tl) == 1 {
+            return fail("extern 调用: 第 1 阶段不接受聚合实参");
+        }
+        let vs: u32 = skip_sp(t, to + tl, rp);
+        let ve: u32 = word_end(t, vs, rp);
+        d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RAX);
+        d = em_push(out, d, RAX);
+    }
+    let k: u32 = 0;
+    while k < nargs {
+        d = em_pop(out, d, c_arg_reg(k));
+        k = k + 1;
+    }
+    d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+    // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
+    // 读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (参考侧实测第一版就是这样:
+    // `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
+    if flags % 2 == 1 {
+        d = emit_put(tab, out, d, t, cell(tab, C_DESTO), cell(tab, C_DESTL), RAX);
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------- 读一个外部目标文件
+
+/// 读 `path` 那个 `.o`, 把它的代码节接到代码缓冲之后, 并为它导出的符号立标签。
+/// 返回新的代码缓冲游标。四条边界都是**硬失败** (与参考实现同口径, docs/173 §3)。
+fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        wstr(2, "lomelf: 打不开外部目标文件: ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    let rn: u64 = read_all(fd as u64, mem, OBJ_CAP as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if rn == 0 {
+        wstr(2, "lomelf: 外部目标文件为空: ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    if rn >= (OBJ_CAP as u64) {
+        wstr(2, "lomelf: 外部目标文件超过 4 MiB 上限: ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76
+        || load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
+        wstr(2, "lomelf: 不是 ELF64 小端目标文件: ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    if rd16(mem, 16) != 1 {
+        wstr(2, "lomelf: 不是可重定位目标文件 (ET_REL): ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    if has_code(mem) == 0 {
+        wstr(2, "lomelf: 没有代码节 (.text / .text.*): ");
+        write_cstr(2, path, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    // **未定义符号先查**: 一个调用 libc 的 C 函数**同时**有未定义符号与重定位, 先说
+    // "它引用了 printf" 比说"它有重定位"有用得多 —— 前者直接告诉用户"第 1 阶段不链 libc",
+    // 后者会把人引去查重定位。所以顺序是有意的, 不是顺手。
+    let ns: u32 = sh_num(mem);
+    let i: u32 = 0;
+    let found: u32 = 0;
+    while i < ns {
+        if sh_type(mem, i) == 2 {
+            let link: u32 = sh_link(mem, i);
+            if link < ns {
+                let stro: u32 = sh_off(mem, link);
+                let so: u32 = sh_off(mem, i);
+                let cnt: u32 = sh_size(mem, i) / 24;
+                let k: u32 = 0;
+                while k < cnt {
+                    let o: u32 = so + k * 24;
+                    let nmoff: u32 = load32(mem, o);
+                    if nmoff != 0 && rd16(mem, o + 6) == 0 {
+                        if found == 0 {
+                            wstr(2, "lomelf: 引用了未定义的符号 ");
+                        } else {
+                            wstr(2, " ");
+                        }
+                        write_cstr(2, mem, stro + nmoff);
+                        if found >= 3 {
+                            k = cnt;
+                        }
+                        found = found + 1;
+                    }
+                    k = k + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if found != 0 {
+        wstr(2, " —— 第 1 阶段不链 libc (docs/173 §3)\n");
+        return die(1);
+    }
+    let i2: u32 = 0;
+    while i2 < ns {
+        if sh_type(mem, i2) == 4 && sh_size(mem, i2) > 0 {
+            wstr(2, "lomelf: 对象里有重定位 —— 第 1 阶段不支持跨对象重定位 (docs/173 §3)\n");
+            return die(1);
+        }
+        i2 = i2 + 1;
+    }
+    // 接在我们自己的代码之后 (16 对齐)。**先拼字节, 再立标签** —— 标签地址 = 起点 + 节错
+    // + 符号值, 所以要先把每节的起点算出来。
+    let at0: u32 = align_to(d, 16);
+    pad_zero(txt, d, at0);
+    let dd: u32 = at0;
+    let i3: u32 = 0;
+    while i3 < ns {
+        if sh_type(mem, i3) == 1 && is_code_sec(mem, sec_name(mem, i3)) == 1 {
+            let nd: u32 = align_to(dd, 16);
+            pad_zero(txt, dd, nd);
+            dd = nd;
+            copy_n(txt, dd, mem, sh_off(mem, i3), sh_size(mem, i3));
+            dd = dd + sh_size(mem, i3);
+        }
+        i3 = i3 + 1;
+    }
+    let i4: u32 = 0;
+    while i4 < ns {
+        if sh_type(mem, i4) == 2 {
+            let link2: u32 = sh_link(mem, i4);
+            if link2 < ns {
+                let stro2: u32 = sh_off(mem, link2);
+                let so2: u32 = sh_off(mem, i4);
+                let cnt2: u32 = sh_size(mem, i4) / 24;
+                let k2: u32 = 0;
+                while k2 < cnt2 {
+                    let o2: u32 = so2 + k2 * 24;
+                    let nmoff2: u32 = load32(mem, o2);
+                    let shndx: u32 = rd16(mem, o2 + 6);
+                    let bind: u32 = (load8(mem, o2 + 4) as u32) % 16;
+                    // GLOBAL(1) / WEAK(2), 且落在某个代码节里。shndx 可以是保留值
+                    // (SHN_ABS=0xfff1 等), 比节表长 —— 直接拿去索引会读飞, 所以先比大小。
+                    if nmoff2 != 0 && shndx != 0 && shndx < ns && (bind == 1 || bind == 2) {
+                        if sh_type(mem, shndx) == 1
+                            && is_code_sec(mem, sec_name(mem, shndx)) == 1 {
+                            // 名字必须拷进**输入缓冲尾部**的名字池: 标签表存的是偏移, 而
+                            // lbl_find 拿输入缓冲当基 —— 名字留在 .o 的缓冲里, 下一个 .o
+                            // 一读进来就被盖掉了。
+                            let noff: u32 = copy_name(tab, t, mem, stro2 + nmoff2);
+                            let nl: u32 = cstr_len(mem, stro2 + nmoff2);
+                            if lbl_find(tab, t, noff, nl, 0, 0) == NO {
+                                let val: u32 = lo32(rd64(mem, o2 + 8));
+                                lbl_add(tab, noff, nl, 0, 0,
+                                        TEXT_VADDR + at0 + sec_at(mem, shndx) + val);
+                            }
+                        }
+                    }
+                    k2 = k2 + 1;
+                }
+            }
+        }
+        i4 = i4 + 1;
+    }
+    return dd;
+}
+
+/// 把外部符号名拷进输入缓冲尾部的名字池, 返回它在 `t` 里的偏移。
+fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
+    let cur: u32 = cell(tab, C_EXTN);
+    let n: u32 = cstr_len(p, off);
+    if cur + n >= IN_CAP {
+        return fail("输入缓冲没有空间放外部符号名");
+    }
+    let k: u32 = 0;
+    while k < n {
+        store8(t, cur + k, load8(p, off + k) as u8);
+        k = k + 1;
+    }
+    setcell(tab, C_EXTN, cur + n);
+    return cur;
 }
 
 // ---------------------------------------------------------------- 落盘与回填
@@ -2931,18 +3360,53 @@ fn run(mem: ptr) -> u32 {
         wstr(2, "用法: lomelf IN.ll OUT\n");
         return die(2);
     }
-    // 多出来的实参只可能是启动器透传的 `--link FILE.o` (docs/173 FFI)。**必须明说**:
-    // 不看 argv[3] 的话这个选项会被**静静忽略**, 然后在 finalize 报一句 "未定义的标签: c_add"
-    // —— 用户看到的是"符号找不到", 而不是"这个功能还没实现", 方向完全错了。
+    // 多出来的实参只可能是启动器透传的 `--link FILE.o` (docs/173 FFI)。**必须解析**:
+    // 不看 argv[3..] 的话 `--link` 会被**静静忽略**, 然后在回填时报一句 "未定义的标签:
+    // c_add" —— 用户看到的是"符号找不到"而不是"这个功能没实现", 方向完全错了。
+    //
+    // **必须先收完再读输入**: argv_n 每次都把 `/proc/self/cmdline` 重新读进 argv 缓冲,
+    // 而它存放路径字符串的落点 (argv 缓冲 + 8192) **正是输入缓冲的起点** —— 读过输入之后
+    // 再调 argv_n 会把输入的头 19 个字节踩掉。
     //
     // **判的是 lo32(长度) 不是整个返回值**: `/proc/self/cmdline` 以 NUL 结尾, 于是 argv_n
     // 的收尾那句 (`if f == n`) 会给出一个**长度 0 的命中** —— 打包值 `m * PHI` 非零。
     // 只判 `!= 0` 会把**每一次正常调用**都当成"多了个实参", 实测把 loment_elf_test 从 7/7
     // 打到 5/7 (两条都是"镜像退出 2")。
-    let a3: u64 = argv_n(ab, 8192, 3);
-    if lo32(a3) != 0 {
-        wstr(2, "lomelf: 外部目标文件 (--link) 尚未在自举链接器实现 (docs/173-loment-ffi.md)\n");
-        return die(2);
+    let pbuf: ptr = ptr_add(mem, M_TXT);
+    let nlink: u32 = 0;
+    let obase: u32 = lo32(a1) + 8 + lo32(o1) + 8;   // 与下面的 pout 对齐
+    let ok: u32 = 3;
+    let go: u32 = 1;
+    while go == 1 {
+        let av: u64 = argv_n(ab, 8192, ok);
+        if lo32(av) == 0 {
+            go = 0;
+        } else {
+            if lo32(av) != 6 || lit_at(ab, hi32(av), hi32(av) + 6, "--link") == 0 {
+                wstr(2, "lomelf: unknown option ");
+                write_all(2, ptr_add(ab, hi32(av)), lo32(av) as u64);
+                wstr(2, "\n");
+                return die(2);
+            }
+            let pv: u64 = argv_n(ab, 8192, ok + 1);
+            if lo32(pv) == 0 {
+                wstr(2, "lomelf: --link 缺文件名\n");
+                return die(2);
+            }
+            let dst: u32 = obase + nlink * 1024;
+            if dst + 1024 >= 65536 {
+                wstr(2, "lomelf: --link 的文件太多\n");
+                return die(2);
+            }
+            let j: u32 = 0;
+            while j < lo32(pv) {
+                store8(pbuf, dst + j, load8(ab, hi32(pv) + j) as u8);
+                j = j + 1;
+            }
+            store8(pbuf, dst + lo32(pv), 0 as u8);
+            nlink = nlink + 1;
+            ok = ok + 2;
+        }
     }
     let inb: ptr = ptr_add(mem, M_IN);
     let ino: u32 = hi32(a1);
@@ -2950,7 +3414,6 @@ fn run(mem: ptr) -> u32 {
     let oo: u32 = hi32(o1);
     let ol: u32 = lo32(o1);
     // 先把两个路径拷到稳定缓冲 (argv 的 cmdline 缓冲在后面会被读入覆盖)
-    let pbuf: ptr = ptr_add(mem, M_TXT);
     let pin: u32 = 0;
     let i: u32 = 0;
     while i < inn {
@@ -2992,10 +3455,24 @@ fn run(mem: ptr) -> u32 {
             }
         }
     }
+    if nlink != 0 && pe == 1 {
+        wstr(2, "lomelf: --link 目前只支持 ELF 目标 (docs/173 §3)\n");
+        return die(2);
+    }
     setcell(tab, C_PE, pe);
+    // 外部符号名池的游标: 从输入文本的**末尾**开始, 见 copy_name。
+    setcell(tab, C_EXTN, n as u32);
     collect_globals(tab, inb, n as u32, gb);
+    collect_externs(tab, inb, n as u32);
     place_globals(tab, inb);
     let tlen: u32 = emit_all(tab, txt, 0, inb, n as u32);
+    // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, 导出符号立标签。
+    let tobj: ptr = ptr_add(mem, M_OBJ);
+    let got: u32 = 0;
+    while got < nlink {
+        tlen = link_object(tab, inb, txt, tlen, tobj, ptr_add(pbuf, obase + got * 1024));
+        got = got + 1;
+    }
     let r: u32 = resolve_fixups(tab, inb, txt);
     if r != 0 {
         return r;
