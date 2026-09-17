@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "allocator",
   "language": "loment",
+  "mode": "std",
   "imports": [
     "bytes"
   ],

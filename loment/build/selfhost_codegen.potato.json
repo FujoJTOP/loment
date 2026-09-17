@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "codegen",
   "language": "loment",
+  "mode": "std",
   "imports": [
     "bytes",
     "lexer"
@@ -367,6 +368,28 @@
         },
         {
           "name": "tt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "operand_type",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
           "type": "u32"
         }
       ],
@@ -885,6 +908,68 @@
         },
         {
           "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "syn_name",
+      "params": [
+        {
+          "name": "k",
+          "type": "u32"
+        },
+        {
+          "name": "line",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_syn",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        },
+        {
+          "name": "line",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "emit_local_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "nm",
           "type": "u32"
         }
       ],
@@ -1641,6 +1726,28 @@
       "ret": "u32"
     },
     {
+      "name": "emit_alloc_seq",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "szlvl",
+          "type": "u32"
+        },
+        {
+          "name": "lvl",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "expr_atom",
       "params": [
         {
@@ -2033,6 +2140,44 @@
       "ret": "u32"
     },
     {
+      "name": "emit_try_let",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "name",
+          "type": "u32"
+        },
+        {
+          "name": "ty",
+          "type": "u32"
+        },
+        {
+          "name": "eq",
+          "type": "u32"
+        },
+        {
+          "name": "lt",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "stmt",
       "params": [
         {
@@ -2171,6 +2316,54 @@
       "ret": "u32"
     },
     {
+      "name": "find_try_q",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "add_local",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name",
+          "type": "u32"
+        },
+        {
+          "name": "ty",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "collect_locals",
       "params": [
         {
@@ -2275,6 +2468,11 @@
       "ret": "u32"
     },
     {
+      "name": "cg_arena_bytes",
+      "params": [],
+      "ret": "u32"
+    },
+    {
       "name": "emit_module",
       "params": [
         {
@@ -2288,13 +2486,63 @@
         {
           "name": "out",
           "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
         }
       ],
       "ret": "u32"
     }
   ],
   "layouts": [],
-  "consts": [],
+  "consts": [
+    {
+      "name": "CG_FN",
+      "type": "u32",
+      "value": 12288
+    },
+    {
+      "name": "CG_MAXFN",
+      "type": "u32",
+      "value": 4600
+    },
+    {
+      "name": "CG_FK",
+      "type": "u32",
+      "value": 67488
+    },
+    {
+      "name": "CG_CUR",
+      "type": "u32",
+      "value": 104288
+    },
+    {
+      "name": "CG_ENUM",
+      "type": "u32",
+      "value": 105472
+    },
+    {
+      "name": "CG_MAXENUM",
+      "type": "u32",
+      "value": 320
+    },
+    {
+      "name": "CG_LOCAL",
+      "type": "u32",
+      "value": 131072
+    },
+    {
+      "name": "CG_PARAM",
+      "type": "u32",
+      "value": 135168
+    },
+    {
+      "name": "CG_BYTES",
+      "type": "u32",
+      "value": 503168
+    }
+  ],
   "enums": [],
   "types": [],
   "traits": [],

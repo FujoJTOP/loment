@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "parser",
   "language": "loment",
+  "mode": "std",
   "imports": [
     "bytes",
     "lexer"
@@ -117,6 +118,60 @@
       "ret": "u32"
     },
     {
+      "name": "hex_val",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "put_dec",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "put_num",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "pack",
       "params": [
         {
@@ -129,6 +184,50 @@
         }
       ],
       "ret": "u64"
+    },
+    {
+      "name": "put_str",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "insert_space",
+      "params": [
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "start",
+          "type": "u32"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
     },
     {
       "name": "unpk_i",
@@ -333,6 +432,32 @@
       "ret": "u64"
     },
     {
+      "name": "put_type",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
       "name": "parse_fn",
       "params": [
         {
@@ -353,6 +478,36 @@
         },
         {
           "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "parse_impl_fn",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "ty",
           "type": "u32"
         }
       ],

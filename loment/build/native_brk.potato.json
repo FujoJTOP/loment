@@ -1,42 +1,57 @@
 {
   "potato": "v2",
-  "unit": "native_mut",
+  "unit": "native_brk",
   "language": "loment",
   "mode": "std",
   "imports": [],
   "capabilities": [],
   "functions": [
     {
-      "name": "fill",
+      "name": "ptr_to_int",
       "params": [
         {
-          "name": "xs",
-          "type": "mut [u32]"
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "int_to_ptr",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "roundtrip",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "first_byte",
+      "params": [
+        {
+          "name": "p",
+          "type": "ptr"
         },
         {
           "name": "v",
-          "type": "u32"
+          "type": "u8"
         }
       ],
       "ret": "u32"
     },
     {
-      "name": "call_fill",
-      "params": [],
-      "ret": "u32"
-    },
-    {
-      "name": "read_only",
-      "params": [
-        {
-          "name": "xs",
-          "type": "[u32]"
-        }
-      ],
-      "ret": "u32"
-    },
-    {
-      "name": "call_read_only",
+      "name": "scratch_probe",
       "params": [],
       "ret": "u32"
     }

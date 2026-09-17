@@ -1,49 +1,79 @@
 {
   "potato": "v2",
-  "unit": "native_mut",
+  "unit": "native_match_full",
   "language": "loment",
   "mode": "std",
   "imports": [],
   "capabilities": [],
   "functions": [
     {
-      "name": "fill",
+      "name": "write_str",
       "params": [
         {
-          "name": "xs",
-          "type": "mut [u32]"
+          "name": "fd",
+          "type": "u64"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "write_dec",
+      "params": [
+        {
+          "name": "fd",
+          "type": "u64"
         },
         {
           "name": "v",
           "type": "u32"
         }
       ],
-      "ret": "u32"
+      "ret": "()"
     },
     {
-      "name": "call_fill",
-      "params": [],
-      "ret": "u32"
-    },
-    {
-      "name": "read_only",
+      "name": "full",
       "params": [
         {
-          "name": "xs",
-          "type": "[u32]"
+          "name": "k",
+          "type": "Kind"
         }
       ],
       "ret": "u32"
     },
     {
-      "name": "call_read_only",
-      "params": [],
+      "name": "with_wild",
+      "params": [
+        {
+          "name": "k",
+          "type": "Kind"
+        }
+      ],
       "ret": "u32"
+    },
+    {
+      "name": "_start",
+      "params": [],
+      "ret": "()"
     }
   ],
   "layouts": [],
   "consts": [],
-  "enums": [],
+  "enums": [
+    {
+      "name": "Kind",
+      "variants": [
+        "Red",
+        "Sized"
+      ],
+      "payloads": {
+        "Sized": "u32"
+      }
+    }
+  ],
   "types": [],
   "traits": [],
   "impls": [],

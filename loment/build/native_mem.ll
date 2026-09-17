@@ -45,6 +45,24 @@ end:
   ret void
 }
 
+define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %sp = getelementptr i8, ptr %s, i64 %i
+  %b = load i8, ptr %sp
+  %dp = getelementptr i8, ptr %d, i64 %i
+  store i8 %b, ptr %dp
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret void
+}
+
 define internal void @__loment_abort() {
   call void @llvm.trap()
   unreachable

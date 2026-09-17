@@ -1,13 +1,296 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "checker",
   "language": "loment",
+  "mode": "std",
   "imports": [
     "bytes",
     "lexer"
   ],
   "capabilities": [],
   "functions": [
+    {
+      "name": "chk_base_code",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_of_tok",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_is_int",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_new",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_arr",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "elem",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_slc",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "elem",
+          "type": "u32"
+        },
+        {
+          "name": "mut",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_kind",
+      "params": [
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_a",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_b",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_is_arr",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_is_slc",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_eq",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_range",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "lo",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_range_is_int",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "lo",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_builtin_ret",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
     {
       "name": "sym_get",
       "params": [
@@ -61,7 +344,7 @@
       "ret": "u32"
     },
     {
-      "name": "tok_kind",
+      "name": "chk_tok_kind",
       "params": [
         {
           "name": "t",
@@ -103,7 +386,7 @@
       "ret": "u32"
     },
     {
-      "name": "tok_is",
+      "name": "chk_tok_is",
       "params": [
         {
           "name": "src",
@@ -183,7 +466,45 @@
       "ret": "bool"
     },
     {
-      "name": "lookup",
+      "name": "chk_decl_method",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        },
+        {
+          "name": "argc",
+          "type": "u32"
+        },
+        {
+          "name": "ret",
+          "type": "u32"
+        },
+        {
+          "name": "recv",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lookup_slot",
       "params": [
         {
           "name": "src",
@@ -206,7 +527,7 @@
           "type": "u32"
         }
       ],
-      "ret": "u64"
+      "ret": "u32"
     },
     {
       "name": "declare",
@@ -232,11 +553,15 @@
           "type": "u32"
         },
         {
-          "name": "kind",
+          "name": "ka",
           "type": "u32"
         },
         {
-          "name": "argc",
+          "name": "ret",
+          "type": "u32"
+        },
+        {
+          "name": "aux",
           "type": "u32"
         },
         {
@@ -285,7 +610,7 @@
       "ret": "u64"
     },
     {
-      "name": "find_paren",
+      "name": "chk_find_paren",
       "params": [
         {
           "name": "src",
@@ -303,7 +628,349 @@
       "ret": "u32"
     },
     {
-      "name": "skip_type",
+      "name": "chk_skip_type",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "decl_tparams",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_is_kw",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_skip_body",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_is_int",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_dec",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tab_has",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "tab",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_find_brace",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_struct_body",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "lb",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        },
+        {
+          "name": "tab",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_enum_body",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "lb",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        },
+        {
+          "name": "tab",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_cap_collect",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "ctab",
+          "type": "ptr"
+        },
+        {
+          "name": "nc",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_caps_verify",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "ctab",
+          "type": "ptr"
+        },
+        {
+          "name": "n0",
+          "type": "u32"
+        },
+        {
+          "name": "exs",
+          "type": "ptr"
+        },
+        {
+          "name": "nexs",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_guard",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "ctab",
+          "type": "ptr"
+        },
+        {
+          "name": "nc",
+          "type": "u32"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_builtin_arity",
       "params": [
         {
           "name": "src",
@@ -350,12 +1017,16 @@
         {
           "name": "o",
           "type": "u32"
+        },
+        {
+          "name": "tab",
+          "type": "ptr"
         }
       ],
       "ret": "u64"
     },
     {
-      "name": "count_args",
+      "name": "chk_count_args",
       "params": [
         {
           "name": "src",
@@ -373,7 +1044,1379 @@
       "ret": "u32"
     },
     {
-      "name": "check",
+      "name": "chk_env_has",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_env_get",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_env_add",
+      "params": [
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        },
+        {
+          "name": "ty",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_name_ty",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_is_cmp",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_is_binop",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "j",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lh",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_lhlo",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lhhi",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lh3",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        },
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_lh3a",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lh3b",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lh3c",
+      "params": [
+        {
+          "name": "v",
+          "type": "u64"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tex",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tex_sub",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_tex_atom_arr",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tex_atom_enum",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tex_atom_dot",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh3",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arg_borrow",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_tex_atom_call",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_tex_atom_struct",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_match_paren",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_match_bracket",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_match_brace",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_sfield_exists",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "brc",
+          "type": "u32"
+        },
+        {
+          "name": "fname",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_sfield_ty",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "brc",
+          "type": "u32"
+        },
+        {
+          "name": "fname",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_evariant_idx",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "brc",
+          "type": "u32"
+        },
+        {
+          "name": "vname",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_epayload_range",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "brc",
+          "type": "u32"
+        },
+        {
+          "name": "vname",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_param_ty",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "slot0",
+          "type": "u32"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lookup_method",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "recv",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_lookup_method_any",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_builtin_arg",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arr_elem",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "ni",
+          "type": "u32"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "chk_find_at",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        },
+        {
+          "name": "what",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_env_params",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lp",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        },
+        {
+          "name": "oc2",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arr_count",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "ni",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_pub",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "code",
+          "type": "u32"
+        },
+        {
+          "name": "tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_tyt_of",
+      "params": [
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "ptr"
+    },
+    {
+      "name": "chk_find_assign",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_mv_has",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_mv_add",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_env_idx",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "name_tok",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_ty_noncopy",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_use",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_moves",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        },
+        {
+          "name": "e",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_mark_call_moves",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "lo",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "chk_q_ok",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "lo",
+          "type": "u32"
+        },
+        {
+          "name": "hi",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_fn_ret_is_result",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "slot0",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_match",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "lh",
+          "type": "u64"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_body",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "envc",
+          "type": "u32"
+        },
+        {
+          "name": "be",
+          "type": "u64"
+        },
+        {
+          "name": "ret",
+          "type": "u32"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "oc",
+          "type": "ptr"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "check_arena",
       "params": [
         {
           "name": "src",
@@ -386,8 +2429,76 @@
         {
           "name": "out",
           "type": "ptr"
+        },
+        {
+          "name": "syms",
+          "type": "ptr"
+        },
+        {
+          "name": "scr",
+          "type": "ptr"
+        },
+        {
+          "name": "ctab",
+          "type": "ptr"
+        },
+        {
+          "name": "nc",
+          "type": "ptr"
+        },
+        {
+          "name": "exs",
+          "type": "ptr"
+        },
+        {
+          "name": "env",
+          "type": "ptr"
+        },
+        {
+          "name": "tyt",
+          "type": "ptr"
         }
       ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_syms",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_scr",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_ctab",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_nc",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_exs",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_env",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_tyt",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_arena_bytes",
+      "params": [],
       "ret": "u32"
     }
   ],
@@ -414,9 +2525,19 @@
       "value": 4
     },
     {
+      "name": "K_TPARAM",
+      "type": "u32",
+      "value": 5
+    },
+    {
+      "name": "K_METHOD",
+      "type": "u32",
+      "value": 6
+    },
+    {
       "name": "E_DUP",
       "type": "u32",
-      "value": 1
+      "value": 13
     },
     {
       "name": "E_TYPE",
@@ -426,10 +2547,120 @@
     {
       "name": "E_FN",
       "type": "u32",
-      "value": 3
+      "value": 2
     },
     {
       "name": "E_ARITY",
+      "type": "u32",
+      "value": 3
+    },
+    {
+      "name": "E_CAP",
+      "type": "u32",
+      "value": 4
+    },
+    {
+      "name": "E_DEF",
+      "type": "u32",
+      "value": 9
+    },
+    {
+      "name": "E_TMISMATCH",
+      "type": "u32",
+      "value": 1
+    },
+    {
+      "name": "E_LVAL",
+      "type": "u32",
+      "value": 14
+    },
+    {
+      "name": "E_ACCESS",
+      "type": "u32",
+      "value": 15
+    },
+    {
+      "name": "E_ARR",
+      "type": "u32",
+      "value": 16
+    },
+    {
+      "name": "E_AS",
+      "type": "u32",
+      "value": 17
+    },
+    {
+      "name": "E_SLICE",
+      "type": "u32",
+      "value": 11
+    },
+    {
+      "name": "E_PATTERN",
+      "type": "u32",
+      "value": 8
+    },
+    {
+      "name": "E_BORROW",
+      "type": "u32",
+      "value": 7
+    },
+    {
+      "name": "E_Q",
+      "type": "u32",
+      "value": 10
+    },
+    {
+      "name": "E_MOVE",
+      "type": "u32",
+      "value": 6
+    },
+    {
+      "name": "E_DANGLE",
+      "type": "u32",
+      "value": 12
+    },
+    {
+      "name": "E_MODE",
+      "type": "u32",
+      "value": 22
+    },
+    {
+      "name": "TY_KIND_SHIFT",
+      "type": "u32",
+      "value": 28
+    },
+    {
+      "name": "TY_K_NAMED",
+      "type": "u32",
+      "value": 2
+    },
+    {
+      "name": "TY_BOOL",
+      "type": "u32",
+      "value": 268435465
+    },
+    {
+      "name": "TY_U32",
+      "type": "u32",
+      "value": 268435459
+    },
+    {
+      "name": "K_INT_MIN",
+      "type": "u32",
+      "value": 1
+    },
+    {
+      "name": "K_INT_MAX",
+      "type": "u32",
+      "value": 8
+    },
+    {
+      "name": "TY_ARRAY",
+      "type": "u32",
+      "value": 3
+    },
+    {
+      "name": "TY_SLICE",
       "type": "u32",
       "value": 4
     }

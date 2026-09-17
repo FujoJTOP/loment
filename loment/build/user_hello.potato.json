@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "user_hello",
   "language": "loment",
+  "mode": "std",
   "imports": [],
   "capabilities": [],
   "functions": [

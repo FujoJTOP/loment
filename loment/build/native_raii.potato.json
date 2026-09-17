@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "native_raii",
   "language": "loment",
+  "mode": "std",
   "imports": [],
   "capabilities": [],
   "functions": [

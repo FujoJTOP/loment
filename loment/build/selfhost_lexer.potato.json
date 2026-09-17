@@ -1,7 +1,8 @@
 {
-  "potato": "v1",
+  "potato": "v2",
   "unit": "lexer",
   "language": "loment",
+  "mode": "std",
   "imports": [
     "bytes"
   ],
@@ -49,6 +50,10 @@
           "type": "u32"
         },
         {
+          "name": "cap",
+          "type": "u32"
+        },
+        {
           "name": "kind",
           "type": "u32"
         },
@@ -72,6 +77,38 @@
       "ret": "()"
     },
     {
+      "name": "lex_cap",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "cap",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "is_hex",
+      "params": [
+        {
+          "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
       "name": "lex",
       "params": [
         {
@@ -88,16 +125,6 @@
         }
       ],
       "ret": "u32"
-    },
-    {
-      "name": "is_hex",
-      "params": [
-        {
-          "name": "c",
-          "type": "u32"
-        }
-      ],
-      "ret": "bool"
     }
   ],
   "layouts": [],

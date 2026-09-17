@@ -16,9 +16,10 @@ pub struct CapAssert {
     pub a4: bool,
 }
 
-pub static CAP_ASSERTS: &[CapAssert] = &[  // 2 条
+pub static CAP_ASSERTS: &[CapAssert] = &[  // 3 条
     CapAssert { unit: "demo", name: "blk_write", space: "disk", lo: 0, hi: 4, revocable: true, guards: 0, a1: true, a2: true, a3: true, a4: true },
     CapAssert { unit: "native_cap", name: "blk_write", space: "disk", lo: 0, hi: 4, revocable: true, guards: 2, a1: true, a2: true, a3: true, a4: true },
+    CapAssert { unit: "tour", name: "slots", space: "disk", lo: 0, hi: 4, revocable: true, guards: 1, a1: true, a2: true, a3: true, a4: true },
 ];
 
 /// 内核启动自检: 返回 (检查数, 失败数); 断言 failed == 0 (P7 接入)。

@@ -1,12 +1,20 @@
 {
   "potato": "v2",
-  "unit": "all_loment",
+  "unit": "tour",
   "language": "loment",
   "mode": "std",
-  "imports": [
-    "mathutil"
+  "imports": [],
+  "capabilities": [
+    {
+      "name": "slots",
+      "domain": {
+        "space": "disk",
+        "lo": 0,
+        "hi": 4
+      },
+      "revocable": true
+    }
   ],
-  "capabilities": [],
   "functions": [
     {
       "name": "write_str",
@@ -37,10 +45,40 @@
       "ret": "()"
     },
     {
-      "name": "fib",
+      "name": "total",
       "params": [
         {
-          "name": "n",
+          "name": "e",
+          "type": "Entry"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "score",
+      "params": [
+        {
+          "name": "k",
+          "type": "Kind"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "sum_slice",
+      "params": [
+        {
+          "name": "xs",
+          "type": "[u32]"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "guarded",
+      "params": [
+        {
+          "name": "slot",
           "type": "u32"
         }
       ],
@@ -67,9 +105,40 @@
     }
   ],
   "layouts": [],
-  "consts": [],
-  "enums": [],
-  "types": [],
+  "consts": [
+    {
+      "name": "LIMIT",
+      "type": "u32",
+      "value": 3
+    }
+  ],
+  "enums": [
+    {
+      "name": "Kind",
+      "variants": [
+        "Small",
+        "Big"
+      ],
+      "payloads": {
+        "Big": "u32"
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "Entry",
+      "fields": [
+        {
+          "name": "cents",
+          "type": "u32"
+        },
+        {
+          "name": "tax",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
   "traits": [],
   "impls": [],
   "generics": [
@@ -106,6 +175,6 @@
       ]
     }
   ],
-  "guards": 0,
+  "guards": 1,
   "excluded": []
 }

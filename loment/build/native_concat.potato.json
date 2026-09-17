@@ -1,45 +1,65 @@
 {
   "potato": "v2",
-  "unit": "native_str",
+  "unit": "native_concat",
   "language": "loment",
   "mode": "std",
   "imports": [],
   "capabilities": [],
   "functions": [
     {
-      "name": "hello_len",
+      "name": "concat_lit",
       "params": [],
       "ret": "u32"
     },
     {
-      "name": "same_lit",
+      "name": "concat_run",
       "params": [],
       "ret": "bool"
     },
     {
-      "name": "same_var",
-      "params": [],
-      "ret": "bool"
-    },
-    {
-      "name": "eq_var",
-      "params": [],
-      "ret": "bool"
-    },
-    {
-      "name": "diff_len",
-      "params": [],
-      "ret": "bool"
-    },
-    {
-      "name": "first_byte",
+      "name": "concat_three",
       "params": [],
       "ret": "u32"
     },
     {
-      "name": "third_byte",
+      "name": "concat_empty",
       "params": [],
       "ret": "u32"
+    },
+    {
+      "name": "concat_bytes",
+      "params": [],
+      "ret": "u32"
+    },
+    {
+      "name": "concat_var",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_concat_len",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_concat_value",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_concat_chain",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_concat_bytes",
+      "params": [],
+      "ret": "bool"
+    },
+    {
+      "name": "test_concat_vars",
+      "params": [],
+      "ret": "bool"
     }
   ],
   "layouts": [],
