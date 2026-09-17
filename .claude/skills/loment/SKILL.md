@@ -533,6 +533,15 @@ fn _start() {
 三条边界：**传的是字节流不是指针**（不能传结构体过去）；**只在 Linux/ELF 上可用**
 （Windows 的垫片没有 `fork`/`pipe`，那里返回 -1）；它要求机器上有那个解释器。
 
+**装了包（不是仓库）的时候**：`proc` 不在你的项目里，`use proc` 会说"名字导入找不到"。
+包里的那份在 `<前缀>/share/loment/lib/proc.lomt`，按 Loment 的正规做法放进项目就能用：
+
+```
+mkdir -p deps/proc && cp <前缀>/share/loment/lib/proc.lomt deps/proc/
+```
+
+（`deps/<名字>/<名字>.lomt` 是名字形式的第一层搜索落点 —— 也正是 `lompi` 装库时用的形状。）
+
 ## 8. 拿不到源码仓库时怎么办
 
 - **抄现成程序**：包里 `share/loment/examples/` 有 `tour.lomt`（就是 §1 这份）和

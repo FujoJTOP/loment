@@ -69,11 +69,38 @@ python tools/ci.py --static-only
 改用非交换的 `a-b` 与 `a*100+b*10+c` 之后对调立刻打红（rc=22≠52、rc=213≠123）。
 **教训**：测传参次序的判据，夹具里必须有非交换运算，否则测的是"能跑"而不是"传参对"。
 
+## 3b. 真装一遍看到的样子（2026-09-16 实测）
+
+把 `loment-0.1.4-pre2-windows-x64.zip` 装进临时前缀（`-NoPath -NoFileType -NoSkill`）后：
+
+| 命令 | 结果 |
+|---|---|
+| `loment version` | `Loment 0.1.4 Pre2 (0.1.4-pre2)` + commit |
+| `loment check` 一个带 `extern fn` 的程序 | **rc=0** —— 自举编译器接受 `extern` |
+| `loment ir` 同上 | 发出 `declare i32 @c_add(i32, i32)` |
+| `loment build app.lomt`（不给 `--link`） | rc=1 `lomelf: 未定义的标签: c_add` —— 如实报缺符号 |
+| `loment build app.lomt --link x.o` | rc=1 **`lomelf: 外部目标文件 (--link) 尚未在自举链接器实现`** |
+| `loment build app.lomt --bogus` | rc=2 `unknown option --bogus` |
+| `loment check` 一个 `use proc` 的程序 | rc=0（**前提**：先把包里的 `share/loment/lib/proc.lomt` 放进项目的 `deps/proc/`）|
+
+**装一遍抓到三个只有装过才看得见的问题**，都已修：
+
+1. **batch 启动器把 `--link` 吃掉了**（只有 bash 那份加了）。于是自举链接器那道硬拒
+   **永远不触发**，用户看到的是 `未定义的标签: c_add` —— 方向完全错了。现在两份都解析，
+   而且**未知选项一律 rc=2 拒绝**，不再静默忽略。
+2. **`loment/lib/` 没随包发**。名字形式的第三层搜索根是**相对当前目录**的 `loment/lib`，
+   装好的工具链里根本没有仓库 → `use proc` 只会说"名字导入找不到"。现在随包发到
+   `share/loment/lib/`。
+3. **`install.ps1` 里我用 `-LiteralPath` 配通配符** —— 它**不展开通配符**，那一行**什么都不拷
+   且不报错**（`$ErrorActionPreference='Stop'` 拦不住无错的情况），安装器照样 rc=0。
+   同一个文件里 store 那两处用的是 `-Path`，所以它们一直对。改成 `-Path`。
+
 ## 4. 不主张（这一版的关键缺口）
 
 1. **产品路径目前还做不了 FFI。** 打包出去的 `loment` 用的是**自举**链接器
-   (`loment-lomelf`)，而它**还没镜像**这一套 —— 它对 `--link` **硬拒**并指向 `docs/173`。
-   也就是说：FFI 在参考实现/开发侧可用，装出来的工具链还不行。**这是下一版的第一件事。**
+   (`loment-lomelf`)，而它**还没镜像**这一套 —— 它对 `--link` **硬拒**并指向 `docs/173`
+   （上面那张表里能看到这句话）。也就是说：**`extern fn` 能过检查、能出 IR，但装好的
+   工具链还不能把它链成可执行文件。** 这是下一版的第一件事。
 2. **只有静态链接、只有 ELF。** 归档（`.a`/`.lib`）与动态库（`.so`/`.dll`）都没做；
    PE 侧 FFI 未开始（`--link` 配 `--target pe` 明确拒绝）。
 3. **不链 libc。** 引用了未定义符号（`printf`/`malloc`）的目标文件会被**硬拒**——

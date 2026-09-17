@@ -128,7 +128,8 @@ Loment @DISPLAY@  (@VERSION@)
   loment version              print version
   loment ir FILE              compile to LLVM IR on stdout
   loment check FILE           check only (diagnostics on stderr, IR discarded)
-  loment build FILE [-o OUT]  compile and link to an executable
+  loment build FILE [-o OUT] [--link OBJ...]
+                              compile and link; --link adds a foreign object (FFI)
   loment run FILE             compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
@@ -309,29 +310,59 @@ type "%share%\skill\SKILL.md"
 exit /b %ERRORLEVEL%
 
 :build
+set "bmode=b"
+goto barg_begin
+
+:run
+set "bmode=r"
+
+:barg_begin
+rem Shared argument parsing for build and run. The bash launcher does the same with a
+rem `case`; keep the two in step (loment_cli_test checks the command sets match).
+rem NOTE: no parenthesised blocks -- `%ERRORLEVEL%` inside one expands at parse time.
 set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
-if /I "%~3"=="-o" set "out=%~4"
-if /I "%~3"=="--out" set "out=%~4"
+set "linkargs="
+shift
+shift
+:barg_loop
+if "%~1"=="" goto barg_done
+if /I "%~1"=="-o" goto barg_out
+if /I "%~1"=="--out" goto barg_out
+if /I "%~1"=="--link" goto barg_link
+rem Unknown options are REJECTED, not ignored: silently dropping `--link` used to end in
+rem "undefined label: c_add" from the linker, which points the user at the wrong thing.
+echo loment: unknown option %~1 1>&2
+exit /b 2
+:barg_out
+set "out=%~2"
+shift
+shift
+goto barg_loop
+:barg_link
+set "linkargs=%linkargs% --link %~2"
+shift
+shift
+goto barg_loop
+:barg_done
+if "%bmode%"=="r" goto run_go
+
 if "%out%"=="" set "out=%src:.lomt=%"
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
 if not "%ERRORLEVEL%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
 goto done
 
-:run
-set "src=%~2"
-if "%src%"=="" goto usage
-set "out=%TEMP%\loment-r%RANDOM%%RANDOM%"
+:run_go
 set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
 if not "%ERRORLEVEL%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
@@ -386,7 +417,8 @@ echo Loment @DISPLAY@  (@VERSION@)
 echo   loment version              print version
 echo   loment ir FILE              compile to LLVM IR on stdout
 echo   loment check FILE           check only (diagnostics on stderr, IR discarded)
-echo   loment build FILE [-o OUT]  compile and link to an executable
+echo   loment build FILE [-o OUT] [--link OBJ...]
+                              compile and link; --link adds a foreign object (FFI)
 echo   loment run FILE             compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
@@ -808,6 +840,20 @@ foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
         Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
     }
 }
+# loment/lib: the modules you can `use` by name (proc is one). The name-form search looks
+# at <cwd>/loment/lib, so a packaged user has no copy of it unless we ship one -- and the
+# directory must exist before Copy-Item writes into it.
+$libSrc = Join-Path $Payload 'share\loment\lib'
+if (Test-Path -LiteralPath $libSrc) {
+    $libDst = Join-Path $Prefix 'share\loment\lib'
+    New-Item -ItemType Directory -Path $libDst -Force | Out-Null
+    # `-Path`, NOT `-LiteralPath`: the latter does not expand wildcards, so that line
+    # copies NOTHING and says nothing ($ErrorActionPreference='Stop' does not catch it --
+    # there is no error). Measured: after install share/loment/lib was simply absent while
+    # the installer exited 0. The two store copies below already used -Path, which is why
+    # they were always fine.
+    Copy-Item -Path (Join-Path $libSrc '*') -Destination $libDst -Force
+}
 foreach ($rel in @('README.md', 'LICENSE')) {
     $f = Join-Path $Payload $rel
     if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel) -Force }
@@ -1190,6 +1236,12 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     for ex in EXAMPLES:
         files[f"share/loment/examples/{Path(ex).name}"] = (_read(ex), 0o644)
+    # `loment/lib/` 里的模块 (proc 就是其中一个)。**为什么必须随包发**: 名字形式的搜索根
+    # 第三层是**相对当前目录**的四个内置根 (`loment/lib` 等, docs/143 §2.3), 装好的工具链
+    # 里根本没有仓库 —— 不带上这一份, 包用户 `use proc` 只会得到"名字导入找不到".
+    # 2026-09-16 真装了一遍才看见 (判据里跑的都是仓库内的路径, 照不出来)。
+    for lib in sorted((ROOT / "loment" / "lib").glob("*.lomt")):
+        files[f"share/loment/lib/{lib.name}"] = (lib.read_bytes(), 0o644)
     files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
     # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
     files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)
@@ -1429,6 +1481,8 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
     """
     out = {
         "share/loment/skill/SKILL.md": _read(SKILL),
+        **{f"share/loment/lib/{p.name}": p.read_bytes()
+           for p in sorted((ROOT / "loment" / "lib").glob("*.lomt"))},
         "share/lompi/skill/SKILL.md": _read(SKILL_LOMPI),
         **{f"share/lompi/store/{k}": v for k, v in _store_files().items()},
         "share/loment/seed.ll": _read("loment/build/selfhost_driver.ll"),
