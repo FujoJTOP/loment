@@ -428,10 +428,15 @@ def cmd_push(which: str) -> int:
                 # `loment_p8_test` 的 AST 逐字节判据当场红（Loment 侧看到 `\n\n`、Python 侧
                 # 看到 `\n`）。以前 `loment` 只是"没人从它构建"的发布镜像所以没暴露；
                 # 2026-09-17 它成了**开发口**，就直接踩上了。
+                # **前插, 不是追加。** `.gitattributes` 是**后者覆盖前者**, 而工具这段是
+                # **通用**规则 (`loment/build/** linguist-generated`), 仓库那份是**具体**
+                # 规则 (`loment/build/selfhost_driver.ll … linguist-generated=true -diff`)。
+                # 追加的话通用规则会盖掉具体的 —— 今天两者一致所以看不出, 明天不一致就是
+                # 静默改变语义。惯例也是"通用在前、具体在后"。
                 ga = td / ".gitattributes"
                 cur = ga.read_text(encoding="utf-8") if ga.exists() else ""
                 if spec["gitattributes"].strip() not in cur:
-                    ga.write_text((cur.rstrip("\n") + "\n\n" + spec["gitattributes"]).lstrip("\n"),
+                    ga.write_text((spec["gitattributes"].rstrip("\n") + "\n\n" + cur).lstrip("\n"),
                                   encoding="utf-8", newline="\n")
                 _git("add", ".gitattributes", cwd=td)
             _git("-c", "user.name=loment_publish", "-c", "user.email=noreply@fujo.invalid",
