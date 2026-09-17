@@ -34,6 +34,10 @@ VERSIONS = ("v0", "v1", "v2")
 #: `mode` 的取值 = `choose` 的两个模式名 (docs/143 §3.2)。**只有这两个** ——
 #: 拼错的模式名在编译器那边是 E022, 在对象里就是这里报错。
 MODES = ("std", "no_std")
+#: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
+#:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
+#:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)
+ABIS = ("c", "rust", "python")
 
 
 def _is_array_type(t: object) -> bool:
@@ -195,6 +199,13 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{pw}.name 重复: {pn}")
                 else:
                     seen_p.add(pn)
+            # `abi` 是**可选**字段 (docs/179 §2): 外源模块的调用约定。省略 = 未声明。
+            # **可选是刻意的** —— 必填会逼着升 v3 (docs/178 §1 那条理由), 而这一个字段
+            # 不值得动契约版本: 不认识它的消费者忽略它就是对的 (它们本来也不判 ABI)。
+            # 只有"声明了"才校验取值, 免得拼错一个 ABI 名一路静默到链接期。
+            abi = f.get("abi")
+            if abi is not None and abi not in ABIS:
+                errs.append(f"{w}.abi 非法: {abi!r} (可选, 给了就必须是 {ABIS} 之一)")
     elif funcs is not None:
         errs.append("functions 必须是数组")
 

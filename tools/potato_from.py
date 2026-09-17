@@ -93,11 +93,23 @@ def _finish(doc: dict, rep: Report) -> tuple[dict, Report]:
 
 
 def _blank(unit: str, language: str) -> dict:
+    """一份空的**合法**对象。
+
+    停在 **v1** 而不是跟着编译器升到 v2 (`docs/178`): v2 的 `mode` 是"这个 Loment 程序
+    用哪个运行模式", 而这里的对象描述的是**外源模块**的结构 —— 它不是一个 Loment 程序,
+    给它填 `std` 就是**替它声称**一件源里没有的事。v1 仍然合法 (校验器收 v0/v1/v2),
+    "外源结构对象不声称程序模式"这条边界因此留在数据里。
+
+    **`guards: 0` 不能漏**(2026-09-17 修): v1 要求 `guards` 是**非负整数**, 而原先这里
+    没有这个键 —— 于是 `potato_from` 发出的每一份对象都是**非法 v1**, `validate_errors`
+    里一直挂着"N 项校验错误"。这是"没有判据盯着"的典型: 那个字段被**报到报告里**,
+    但从来没有任何测试断言报告是干净的。补判据见 `loment_multisyntax_test`。
+    """
     return {
         "potato": "v1", "unit": unit, "language": language, "imports": [],
         "capabilities": [], "functions": [], "layouts": [], "consts": [], "enums": [],
         "types": [], "traits": [], "impls": [], "generics": [], "instances": [],
-        "excluded": [],
+        "guards": 0, "excluded": [],
     }
 
 
@@ -151,7 +163,11 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             if ret is None:
                 rep.skip("fn", node.name, "返回类型无映射")
                 continue
-            doc["functions"].append({"name": node.name, "params": params, "ret": ret})
+            #: Python 的调用约定是自己那套 (CPython C-API / 解释器), 不是平台 C ABI ——
+            #: 记下来, 让下游知道它**不能**直接发 `extern fn`。要调 Python 走进程桥
+            #: (`loment/lib/proc.lomt`, docs/173 §4)。
+            doc["functions"].append({"name": node.name, "params": params, "ret": ret,
+                                     "abi": "python"})
             rep.ok += 1
         elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
                 and isinstance(node.targets[0], ast.Name) \
@@ -242,7 +258,9 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if bad:
             rep.skip("fn", fn, bad)
             continue
-        doc["functions"].append({"name": fn, "params": ps, "ret": ret})
+        #: C 的函数**按定义**就是 C ABI (`_c_bare` 只收裸函数, 不含 `static` 之类),
+        #: 所以这里不是猜。带结构体参数的那些会在 `lomt_from` 那侧被拒 (第 1 阶段只收标量)。
+        doc["functions"].append({"name": fn, "params": ps, "ret": ret, "abi": "c"})
         rep.ok += 1
     return _finish(doc, rep)
 
@@ -251,7 +269,10 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
 
 _RS_STRUCT = re.compile(r"\b(?:pub\s+)?struct\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
 _RS_ENUM = re.compile(r"\b(?:pub\s+)?enum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
-_RS_FN = re.compile(r"^[ \t]*(?:pub\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
+# `extern "C" fn` 里 `extern "C"` 夹在修饰符和 `fn` 之间 —— 原先的模式要求 `fn` 紧跟修饰符,
+# 于是**恰恰是那些真有 C ABI 的函数被漏掉**(2026-09-17 撞出来的)。捕获那个 ABI 串 (§5)。
+_RS_FN = re.compile(r"^[ \t]*(?:pub\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?"
+                    r"(?:extern\s+\"([^\"]*)\"\s+)?fn\s+"
                     r"([A-Za-z_]\w*)\s*(<[^>]*>)?\s*\(([^{)]*)\)\s*(?:->\s*([^{]+?))?\s*\{",
                     re.M)
 
@@ -329,7 +350,12 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         known.add(ename)
         rep.ok += 1
     for m in _RS_FN.finditer(body):
-        fn, generics, params, ret = m.group(1), m.group(2), m.group(3), m.group(4)
+        abi_g, fn, generics, params, ret = (m.group(1), m.group(2), m.group(3),
+                                            m.group(4), m.group(5))
+        #: 只有 `extern "C"` 才是 C ABI —— **不能拿普通 `pub fn` 当 FFI 声明**:
+        #: 它的 ABI 是 Rust 自己的, 照 C ABI 调就是错编。这个判断只有源语言这侧做得了,
+        #: 所以 ABI 记进对象 (§5), 由 `lomt_from` 决定能不能发 `extern fn`。
+        abi = "c" if (abi_g or "").strip() == "C" else "rust"
         if generics:
             rep.skip("fn", fn, "泛型函数")
             continue
@@ -360,7 +386,7 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if r is None:
             rep.skip("fn", fn, f"返回类型 {ret!r} 无映射")
             continue
-        doc["functions"].append({"name": fn, "params": ps, "ret": r})
+        doc["functions"].append({"name": fn, "params": ps, "ret": r, "abi": abi})
         rep.ok += 1
     return _finish(doc, rep)
 

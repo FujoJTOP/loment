@@ -209,6 +209,8 @@ tools/loment_json_test.py
 tools/lomelf.py
 tools/loment_elf_test.py
 tools/loment_pe_test.py
+tools/lomt_from.py
+tools/loment_multisyntax_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py

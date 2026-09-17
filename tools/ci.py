@@ -93,7 +93,10 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
                  "fuai_contract_check", "loment_eol", "loment_dist_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
-                 "loment_lompi_test", "lompi_sync", "loment_publish")
+                 "loment_lompi_test", "lompi_sync", "loment_publish",
+                 # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
+                 # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
+                 "loment_multisyntax_test")
 
 
 def run_static():

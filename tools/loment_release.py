@@ -70,6 +70,10 @@ GLOBS = [
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    # 多语法前端 (docs/179): 形式对象 -> L1 接口单元, 及其端到端判据。
+    # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
+    # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。
+    "tools/lomt_from.py", "tools/loment_multisyntax_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
