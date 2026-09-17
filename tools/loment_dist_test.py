@@ -217,6 +217,14 @@ def test_install_sh(tar: Path) -> None:
     check("loment run 编译+链接+运行并打出东西",
           r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
 
+    # `loment help [COMMAND]` 必须**走得到那一页**。启动器只转发 `help` 而不带后面的参数时,
+    # 详细页永远看不到 —— 而目录页里印的正是 `loment help [COMMAND]`。`loment-cli help build`
+    # 直呼是好的, 所以这条**只能由装好的启动器**来测 (源码级判据看不见这一层)。
+    r = wsl(f"{PREFIX_IT}/bin/loment", "help", "build")
+    check("装完后 `loment help build` 打到详细页 (sh 启动器转发了参数)",
+          r.returncode == 0 and "Compile and link to an executable" in r.stdout,
+          (r.stdout or r.stderr)[:140])
+
     # 缺件时的报错要指名：临时把 fmt 拿掉，`loment fmt` 应该明确说"这个包没包含"
     wsl("rm", "-f", f"{PREFIX_IT}/bin/loment-fmt")
     r = wsl(f"{PREFIX_IT}/bin/loment", "fmt",
@@ -316,6 +324,13 @@ def test_windows_installer(zipf: Path) -> None:
                         shell=False, encoding="utf-8", errors="replace", timeout=180)
     check("装完后 `loment version` 能跑",
           r2.returncode == 0 and loment_dist.DISPLAY in (r2.stdout or ""), (r2.stdout or "")[:120])
+
+    # 与 sh 启动器那条对称: `loment help build` 的详细页必须走得到 (两份启动器都要转参数)
+    r2b = subprocess.run(["cmd", "/c", str(cmd), "help", "build"], capture_output=True, text=True,
+                         shell=False, encoding="utf-8", errors="replace", timeout=180)
+    check("装完后 `loment help build` 打到详细页 (cmd 启动器转了参数)",
+          r2b.returncode == 0 and "Compile and link to an executable" in (r2b.stdout or ""),
+          (r2b.stdout or r2b.stderr or "")[:140])
 
     # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义
     ex = pfx / "share/loment/examples/user_hello.lomt"

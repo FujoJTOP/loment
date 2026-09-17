@@ -216,8 +216,11 @@ case "${1:-help}" in
             echo "loment: $out"
         fi ;;
     help|-h|--help)
-        # The full catalog lives in loment-cli - one implementation, both launchers forward.
-        if cli=$(tool loment-cli); then exec "$cli" help; fi
+        # The full catalog (and the per-command pages) live in loment-cli - one implementation,
+        # both launchers forward. **The rest of the argv goes with it**: `loment help build`
+        # must reach the per-command page, not just the catalog. Dropping it silently made
+        # `loment help [COMMAND]` (advertised right in the usage text) a no-op.
+        if cli=$(tool loment-cli); then shift; exec "$cli" help "$@"; fi
         usage ;;
     *)
         # A USER command: `loment foo` -> `loment-foo` on PATH, exactly `git foo` -> `git-foo`.
@@ -388,8 +391,10 @@ echo loment: failed -- nothing was produced 1>&2
 exit /b 1
 
 :help
+rem Forward the whole command line, not just `help`: `loment help build` must reach
+rem loment-cli's per-command page (the usage text advertises `loment help [COMMAND]`).
 if not exist "%here%loment-cli.exe" goto usage
-"%here%loment-cli.exe" help
+"%here%loment-cli.exe" %*
 exit /b %ERRORLEVEL%
 
 :forward
