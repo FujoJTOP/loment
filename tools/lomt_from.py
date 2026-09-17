@@ -251,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=("strict", "lenient"), default="strict")
     ap.add_argument("--out", metavar="PATH")
     a = ap.parse_args(argv)
+    #: 实际**认成**的那个语言 (不是 `a.lang` —— 用户多半给的是 `auto`)。
+    #: 初值给 `a.lang` 只是为了下面那个 `except SyntaxError` 里引用得到它。
+    got = a.lang
 
     try:
         if a.lang is not None:
@@ -269,8 +272,17 @@ def main(argv: list[str] | None = None) -> int:
             # 看起来像"它只认出 1 个函数"(真相是另 4 个在转写那步因类型没映射被丢)。
             for s in rep.skipped:
                 print(f"[skip] {s['name']}: {s['why']}", file=sys.stderr)
+            # **字段级跳过也要出声** (2026-09-17 实测): `float` / `list` / 无注解字段,
+            # 以及枚举类型的字段, 原先只躺在 `Report.field_notes` 里 —— 命令行**一个字都
+            # 不打**。一份 struct 少两个字段, `[OK]` 那行干干净净。字段不计进"实体分母"
+            # (见 `Report.skip_field`: 分子分母都是实体, 塞字段进去会让转化率失真) 是对的,
+            # 但**不计数不等于不报告** —— 五个前端都在调 `skip_field`, 这一处修的是全体。
+            for f in rep.field_notes:
+                print(f"[skip] {f['owner']}.{f['field']}: {f['why']}", file=sys.stderr)
+            n_pre = len(rep.skipped) + len(rep.field_notes)
         else:
             doc = json.loads(Path(a.path).read_text(encoding="utf-8"))
+            n_pre = 0
         # 对象自身先要合法 —— 拿一份非法对象去发 L1 等于把错误往后传。
         errs = potato.validate(doc)
         if errs:
@@ -280,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     except NotRepresentable as e:
         print(f"[ERR] 发不出来: {e}", file=sys.stderr)
         return 1
+    # **按错的语法去解析要报得出来** (2026-09-17 实测): 一份带 `import` 的 Java 原文
+    # 被内容兜底判成 python 之后, `ast.parse` 抛的是**裸 traceback** —— 用户看到的是一屏
+    # Python 内部栈, 一个字都没说"你这份东西不是 Python"。识别错了不丢人, 认错还甩栈才丢人。
+    except SyntaxError as e:
+        print(f"[ERR] 按 {got} 解析失败: 第 {e.lineno} 行 {e.msg}\n"
+              f"      这份源码不像是 {got} —— 用 `--lang <名字>` 指明, "
+              f"或检查它是否本来就是 Loment (`loment check`)。", file=sys.stderr)
+        return 2
     except (OSError, json.JSONDecodeError) as e:
         print(f"[ERR] 读取失败: {e}", file=sys.stderr)
         return 2
@@ -293,8 +313,9 @@ def main(argv: list[str] | None = None) -> int:
         # `newline="\n"`: 与 loment_build.py 同一处坑 (见那里的注释)
         Path(a.out).write_text(text, encoding="utf-8", newline="\n")
         n_fn = text.count("pub extern fn ")
+        n_skip = len(skipped) + n_pre
         print(f"[OK] {a.path} -> {a.out}"
-              + (f" (函数 {n_fn} 条, 跳过 {len(skipped)} 条)" if skipped else ""))
+              + (f" (函数 {n_fn} 条, 跳过 {n_skip} 条)" if n_skip else ""))
     else:
         sys.stdout.write(text)
     return 0

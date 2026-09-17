@@ -1,0 +1,87 @@
+// checksum — 校验和: 表驱动的 CRC-8/16/32, 外加一个最弱但最快的累加和。
+//
+// 用途: 帧尾校验 / 固件镜像的完整性。四种算法共用一套"滚动状态"接口:
+// init 建状态、feed 喂字节、final 收尾取结果 —— 宽度由 kind 决定。
+//
+// 这份源码是用 **Rust 语法**写的 Loment。前端只取声明, 函数体不进产物。
+//
+// ABI: 九个 `#[no_mangle] extern "C"` 的是真正要链进来的接口;
+// 末尾两条普通 pub fn 是**有意的**反例 (一条撞 String, 一条撞 Rust 调用约定)。
+
+// CRC-32 的多项式与初值。查表用的表长是 256。
+pub const CRC_POLY_32: u32 = 0x04C11DB7;
+pub const CRC_INIT_32: u32 = 0xFFFFFFFF;
+pub const CRC_TABLE_LEN: u32 = 256;
+
+// 四种算法。宽度与是否反射都由它决定, 不让调用方各传各的。
+pub enum CrcKind {
+    Crc8,
+    Crc16,
+    Crc32,
+    Sum8,
+}
+
+// 一个滚动中的校验状态。lo/hi 两半拼出当前值, 宽度由 kind 决定。
+pub struct CrcState {
+    pub lo: u32,
+    pub hi: u32,
+    pub kind: u32,
+    pub count: u32,
+}
+
+// 参数化一份自定义 CRC: 多项式 / 初值 / 是否反射。
+pub struct CrcParams {
+    pub poly: u32,
+    pub init: u32,
+    pub reflect: u32,
+}
+
+// 一次校验的收尾结果: 值 + 喂了多少字节 (值宽可能超过 32 位)。
+pub struct CrcResult {
+    pub value: u64,
+    pub bytes: u32,
+}
+
+// 用 kind 建一个滚动状态 (取每种的初值)。
+#[no_mangle]
+pub extern "C" fn crc_init(st: *mut CrcState, kind: u32) -> u32 { 0 }
+
+// 喂一个字节。返回喂进去之后的当前值。
+#[no_mangle]
+pub extern "C" fn crc_feed_byte(st: *mut CrcState, b: u8) -> u32 { 0 }
+
+// 喂一整块 (逐字节)。返回喂完的当前值。
+#[no_mangle]
+pub extern "C" fn crc_feed(st: *mut CrcState, p: *const u8, n: u32) -> u32 { 0 }
+
+// 只看当前值, 不结束、不复位 —— 用于分片计算的中途。
+#[no_mangle]
+pub extern "C" fn crc_value(st: *const CrcState) -> u32 { 0 }
+
+// 收尾: 按 kind 做最终异或, 返回结果并复位。
+#[no_mangle]
+pub extern "C" fn crc_final(st: *mut CrcState) -> u32 { 0 }
+
+// 只查表算一个字节 —— 给外部实现者拿来做对照实现。
+#[no_mangle]
+pub extern "C" fn crc_table_byte(kind: u32, idx: u32) -> u32 { 0 }
+
+// 一次性算 32 位 CRC (内部隐式建状态)。
+#[no_mangle]
+pub extern "C" fn crc32_of(p: *const u8, n: u32) -> u32 { 0 }
+
+// 八位累加和 —— 最弱的一种, 但也走同一套接口。
+#[no_mangle]
+pub extern "C" fn sum8_of(p: *const u8, n: u32) -> u32 { 0 }
+
+// 用参数结构体算自定义多项式的一次性校验。
+#[no_mangle]
+pub extern "C" fn crc_custom(p: *const u8, n: u32, params: *const CrcParams) -> u32 { 0 }
+
+// --- 下面两条是**有意的**普通 pub fn ---
+
+// 把当前状态打成可读串。返回 `String` 在表示层里没有形状, 会被跳过。
+pub fn crc_to_string(st: *const CrcState) -> String { String::new() }
+
+// 按名字选算法。`&str` 映得出 str, 但这条是普通 pub fn, 卡在 ABI 那道闸门上。
+pub fn crc_by_name(name: &str, p: *const u8, n: u32) -> u32 { 0 }

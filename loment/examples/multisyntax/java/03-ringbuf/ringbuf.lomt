@@ -1,0 +1,93 @@
+/*
+ * ringbuf —— 一个单生产者/单消费者的定长记录环形缓冲区。
+ *
+ * 这份源码是用 **Java 语法**写的 Loment: 后缀是 .lomt, 里面装的是 Java。
+ * 多语法前端只取声明 —— 类 -> 类型, static final -> 常量, 方法 -> 签名,
+ * 方法体不参与产出 (Java 方法走 JVM 的调用约定, 不是平台 C ABI, 不会被发成 extern fn)。
+ *
+ * 领域: 容量取 2 的幂、用掩码取模的环形缓冲。Slot 描述一个槽位的元信息,
+ * Ring 是缓冲本体 (读写游标 + 掩码), Watermark 记水位线的统计,
+ * RingStats 把水位与累计计数合起来; SlotState 是槽位的三态。
+ */
+
+package fujo.ringbuf;
+
+public enum SlotState {
+    FREE,
+    FILLED,
+    PINNED
+}
+
+public class Slot {
+    private int seq;
+    private int len;
+    private short state;
+    private boolean dropped;
+
+    public static final int RECORD_MAX = 512;
+
+    public Slot(int seq) { this.seq = seq; }
+
+    public int size() { return 0; }
+
+    public boolean isFree() { return false; }
+
+    public void advance() { }
+}
+
+public class Ring {
+    private Slot head;
+    private int capacity;
+    private int mask;
+    private int readIndex;
+    private int writeIndex;
+
+    public static final int DEFAULT_CAPACITY = 1024;
+    public static final int INDEX_MASK = 1023;
+    public static final int GROW_STEP = 512;
+    public static final int FLAG_WRAP = 1;
+    public static final int FLAG_OVERFLOW = 2;
+
+    public Ring(int capacity) { this.capacity = capacity; }
+
+    public int push(int len) { return 0; }
+
+    public int pop() { return 0; }
+
+    public int free() { return 0; }
+
+    public int maskIndex(int i) { return 0; }
+}
+
+public class Watermark {
+    private int low;
+    private int high;
+    private int peak;
+
+    public static final int HIGH_WATER = 768;
+    public static final int LOW_WATER = 256;
+
+    public Watermark(int low) { this.low = low; }
+
+    public int observe(int depth) { return 0; }
+
+    public int headroom() { return 0; }
+}
+
+public class RingStats {
+    private Watermark wm;
+    private long pushed;
+    private long popped;
+    private long dropped;
+
+    public static final int STATS_SLOTS = 4;
+    public static final int RING_MAGIC = 20046;
+
+    public RingStats(long pushed) { this.pushed = pushed; }
+
+    public long rate(long ticks) { return 0; }
+
+    public long miss() { return 0; }
+
+    public String summary() { return ""; }
+}

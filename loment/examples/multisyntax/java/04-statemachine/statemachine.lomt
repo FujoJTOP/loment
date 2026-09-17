@@ -1,0 +1,89 @@
+/*
+ * statemachine —— 一个带守卫的有限状态机 (状态 / 事件 / 转移 / 计数守卫)。
+ *
+ * 这份源码是用 **Java 语法**写的 Loment: 后缀是 .lomt, 里面装的是 Java。
+ * 多语法前端只取声明 —— 类 -> 类型, static final -> 常量, 方法 -> 签名,
+ * 方法体不参与产出 (Java 方法走 JVM 的调用约定, 不是平台 C ABI)。
+ *
+ * 领域: 迁移表驱动的状态机。Transition 是一条 (from, to, event) 迁移,
+ * Guard 是每个状态的重复次数上限与触发标志, Machine 把迁移与守卫装在一起;
+ * State / Event 两个枚举各自是状态集与事件集 —— 迁移两端用整型序号互相呼应。
+ */
+
+package fujo.statemachine;
+
+public enum State {
+    INIT,
+    READY,
+    BUSY,
+    FAULT,
+    DONE
+}
+
+public enum Event {
+    START,
+    STOP,
+    RESET,
+    TIMEOUT,
+    ERROR
+}
+
+public class Transition {
+    private int from;
+    private int to;
+    private int event;
+    private boolean guarded;
+
+    public static final int STATE_MASK = 15;
+    public static final int EVENT_MASK = 31;
+
+    public Transition(int from, int to) { this.from = from; this.to = to; }
+
+    public boolean matches(int state, int event) { return false; }
+
+    public int fire() { return 0; }
+}
+
+public class Guard {
+    private int limit;
+    private int count;
+    private boolean armed;
+
+    public static final int FAULT_LIMIT = 3;
+    public static final int FLAG_ARMED = 1;
+    public static final int FLAG_TRIPPED = 2;
+
+    public Guard(int limit) { this.limit = limit; }
+
+    public int trip() { return 0; }
+
+    public int headroom() { return 0; }
+
+    public void clear() { }
+}
+
+public class Machine {
+    private Transition tr;
+    private Guard guard;
+    private int state;
+    private int ticks;
+    private boolean running;
+
+    public static final int MAX_TICKS = 4096;
+    public static final int TIMEOUT_MS = 1500;
+    public static final int TICK_HZ = 100;
+    public static final int BOOT_TICKS = 8;
+    public static final int IDLE_TICKS = 2;
+
+    public Machine(int state) { this.state = state; }
+
+    public int step(int event) { return 0; }
+
+    public int reset() { return 0; }
+
+    public String stateName() { return ""; }
+
+    public boolean isFaulted() { return false; }
+
+    public void halt() { }
+}

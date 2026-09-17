@@ -1,0 +1,78 @@
+/*
+ * bitmap —— 一个按位分配的块管理器 (位图 + 块表 + 标量区间)。
+ *
+ * 这份源码是用 **Java 语法**写的 Loment: 后缀是 .lomt, 里面装的是 Java。
+ * 多语法前端只取声明 —— 类 -> 类型, static final -> 常量, 方法 -> 签名,
+ * 方法体不参与产出 (Java 方法走 JVM 的调用约定, 不是平台 C ABI)。
+ *
+ * 领域: 以 64 位字为单位的位图分配器。BitRange 是一段连续位的标量区间,
+ * BlockInfo 描述一个块的占位与属主, Bitmap 把块表与位图合起来;
+ * BitOrder 说明一个字节内部位的编号方向。
+ */
+
+package fujo.bitmap;
+
+public enum BitOrder {
+    LSB0,
+    MSB0
+}
+
+public class BitRange {
+    private int start;
+    private int count;
+    private int mask;
+
+    public static final int SPAN_MAX = 64;
+
+    public BitRange(int start) { this.start = start; }
+
+    public int last() { return 0; }
+
+    public boolean contains(int bit) { return false; }
+}
+
+public class BlockInfo {
+    private int index;
+    private int words;
+    private boolean allocated;
+    private long owner;
+
+    public static final int HEADER_WORDS = 4;
+
+    public BlockInfo(int index) { this.index = index; }
+
+    public int span() { return 0; }
+
+    public boolean isFree() { return false; }
+}
+
+public class Bitmap {
+    private BlockInfo head;
+    private int words;
+    private int capacity;
+    private boolean dirty;
+    private BitRange hint;
+
+    public static final int WORD_BITS = 64;
+    public static final int WORD_BYTES = 8;
+    public static final int MAX_BLOCKS = 4096;
+    public static final int FLAG_DIRTY = 1;
+    public static final int FLAG_FULL = 2;
+    public static final int FLAG_STICKY = 4;
+    public static final int INDEX_SHIFT = 6;
+    public static final int INDEX_MASK = 63;
+
+    public Bitmap(int words) { this.words = words; }
+
+    public int set(int bit) { return 0; }
+
+    public int clear(int bit) { return 0; }
+
+    public boolean test(int bit) { return false; }
+
+    public int findFree() { return 0; }
+
+    public long countUsed() { return 0; }
+
+    public void sync() { }
+}

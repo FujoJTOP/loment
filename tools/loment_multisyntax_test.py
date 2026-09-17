@@ -35,6 +35,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import subprocess
@@ -492,6 +494,11 @@ def test_sniffing_separates_languages_that_share_keywords():
         # 只能靠文件里**别的**特征定位。这一组钉住"带枚举的 C 不许被判成 java"。
         ("c", "enum Color { RED, GREEN };\n\nint f(int a) { return a; }\n"),
         ("java", "enum Color { RED, GREEN }\n\nclass T { int x; }\n"),
+        # **`import` 在 Python 与 Java 里都有** -> 按**行尾分号**分开。一份带 import 的
+        # 真 Java 文件原先被内容兜底判成 `python`, 然后 `ast.parse` 在 `package a.b;`
+        # 上抛一坨 traceback (2026-09-17, docs/179 §8.1 第 6 条)。
+        ("java", "package a.b;\nimport java.util.List;\npublic class T { int x; }\n"),
+        ("python", "import os\n\nclass A:\n    x: int\n"),
     ]
     for want, src in cases:
         got, why = potato_from.detect_lang(src)
@@ -672,6 +679,147 @@ def test_unrepresentable_object_is_rejected():
             continue
         raise AssertionError(f"{key} 非空却没有报错")
     print("      traits / layouts / imports 非空 -> 一律报错退出")
+
+
+@test
+def test_field_level_drops_are_reported_too():
+    """**字段级跳过也要出声** —— 语料库那条 (§8) 撞出来的第 1 个口子。
+
+    五个前端都在调 `Report.skip_field`, 而 `lomt_from` 原先**只打印**实体级的
+    `skipped` —— 一份 struct 少两个字段 (`scale: float` / `names: list`),
+    `[OK]` 那行干干净净, 一个数都不变。字段不进"实体分母"是对的 (见 `skip_field`
+    的注释), 但**不计数不等于不报告**。
+
+    这条测的是**工具的输出**, 不是某份对象 —— 所以它必须走 `lomt_from.main`,
+    而不是直接调 `transcribe`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        src = Path(t) / "cfg.py"
+        src.write_text("class Cfg:\n    base: int\n    scale: float\n    names: list\n",
+                       encoding="utf-8", newline="\n")
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            rc = lomt_from.main([str(src), "--lang", "auto"])
+        assert rc == 0, err.getvalue()
+    text = err.getvalue()
+    for f in ("Cfg.scale", "Cfg.names"):
+        assert f"[skip] {f}:" in text, f"{f} 没出声:\n{text}"
+    # 出声之后**仍然不许进产物** —— 报出来是为了让人知道, 不是为了硬塞一个 ptr
+    assert "scale" not in out.getvalue(), out.getvalue()
+    print("      `float`/`list` 字段: 报出来 (且仍不进产物)")
+
+
+@test
+def test_declaration_forms_that_used_to_vanish():
+    """三种**最平常**的声明写法曾经静默消失, 一处一种语言 (docs/179 §8.1)。
+
+    共同点: 丢了以后从产物上**看不出来** —— 少一个常量, 而汇总行不变、`[skip]` 没有。
+    语料里也各放了一份 (§8.2), 这条夹具把**形态本身**钉死。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        # Python: 带注解的常量 / 负号 / 移位表达式 —— 原先只认"裸整数字面量 + 赋值"
+        py = td / "c.py"
+        py.write_text("MAX: int = 8\nLOW = -5\nSHIFT = 1 << 4\n",
+                      encoding="utf-8", newline="\n")
+        doc, _ = potato_from.transcribe(py, "python")
+        got = {c["name"]: c["value"] for c in doc["consts"]}
+        assert got == {"MAX": 8, "LOW": -5, "SHIFT": 16}, got
+        # Rust: `pub const` 原先**一条都不抽** (那 5 个文件丢了 14 个)
+        rs = td / "c.rs"
+        rs.write_text("pub const MASK: u32 = 0xFF;\npub const NEG: i32 = -5;\n",
+                      encoding="utf-8", newline="\n")
+        doc, _ = potato_from.transcribe(rs, "rust")
+        assert {c["name"]: c["value"] for c in doc["consts"]} == {"MASK": 255, "NEG": -5}
+        # Java: `void` 原先报"返回类型 'void' 无映射" —— **那句提示本身是错的**,
+        # `void` 完全表示得了 (C 那边一直映 `"()"`)。注意它仍然是 `abi: "java"`,
+        # 照样不会被发成 `extern fn` —— 修的是**表示**, 不是**调用约定**。
+        jv = td / "D.java"
+        jv.write_text("public class D {\n    private int b;\n"
+                      "    public void set_b(int v) { }\n}\n",
+                      encoding="utf-8", newline="\n")
+        doc, rep = potato_from.transcribe(jv, "java")
+        fn = [x for x in doc["functions"] if x["name"] == "set_b"]
+        assert fn and fn[0]["ret"] == "()", doc["functions"]
+        assert fn[0]["abi"] == "java", fn[0]
+        assert not [x for x in rep.skipped if "void" in x["why"]], rep.skipped
+    print("      Python 注解/负号/移位、Rust `pub const`、Java `void` 都进得来")
+
+
+@test
+def test_array_typed_struct_field_does_not_invalidate_the_object():
+    """`[T; N]` 当**结构体字段**: 校验器曾经把它判成"未声明", 于是**整份对象非法**、
+    `lomt_from` 直接 `[ERR]` 退出 —— 一个字段的问题毁掉整个模块, 比 skip 更坏。
+
+    根因是**同一批字段被查了两遍**, 后一遍用裸字符串相等, 而且它的名单里
+    **不含 enums** (docs/179 §8.1 第 4 条)。两个 agent **各自独立**撞到。
+    """
+    doc = potato_from._blank("m", "rust")
+    doc["types"] = [{"name": "W", "fields": [{"name": "n", "type": "u32"},
+                                             {"name": "w", "type": "[u64; 8]"}]}]
+    assert not potato.validate(doc), potato.validate(doc)
+    # 枚举类型的字段也一起钉: 后一遍的 `declared` 曾经漏掉 enums
+    doc["enums"] = [{"name": "S", "variants": ["A", "B"]}]
+    doc["types"].append({"name": "U", "fields": [{"name": "s", "type": "S"}]})
+    assert not potato.validate(doc), potato.validate(doc)
+    print("      `[u64; 8]` 与枚举类型的字段都过得了校验")
+
+
+#: 多语法**语料**: 目录名就是它声称的语法。
+#: 布局 = `loment/examples/multisyntax/<语法>/<NN-名字>/<名字>.lomt`。
+#: 文件后缀是 `.lomt` —— 也就是走**内容兜底**那条路, 后缀一点忙都帮不上。
+CORPUS = ROOT / "loment" / "examples" / "multisyntax"
+#: 每个语法至少要有的项目数 (三个 agent × 5 个项目 = 15)。
+CORPUS_MIN = {"python": 5, "rust": 5, "java": 5}
+
+
+@test
+def test_multisyntax_corpus_projects_all_check():
+    """语料库: **每个项目的目录名就是它声称的语法**, 逐条验到底。
+
+    这一条比上面那批**更接近真事**: 那批是**我**照语法写的小夹具, 这里是**别人照自己
+    习惯写的整项目**。2026-09-17 实测, 它一次撞出六个"静默丢东西"的口子 ——
+    `float` 字段、`AnnAssign` 常量、Rust `pub const`、Java `void`、枚举类型的字段,
+    以及 `[T; N]` 字段让**整份对象**被判非法。夹具照着我写的规则写, 撞不出这些;
+    **只有不受控的输入能** —— 这就是语料库存在的理由。
+
+    钉住四件事, 缺一不可:
+      1. **认对** —— `detect_lang` 的结果要等于目录名 (目录名是**声称**, 不是输入);
+      2. **转成合法对象** —— v1 schema 校验干净 (`validate_errors` 为空);
+      3. **产物非空** —— 前三件事在一份"什么都没抽出来"的对象上**也全都成立**,
+         所以必须数一遍声明。这条是这组里最容易漏、也最要命的一条;
+      4. **过 `lomentc.check`** —— 产出的 L1 单元得真能编。
+    """
+    if not CORPUS.is_dir():
+        raise AssertionError(f"语料目录不在: {CORPUS}")
+    seen: dict[str, int] = {}
+    for langdir in sorted(p for p in CORPUS.iterdir() if p.is_dir()):
+        claim = langdir.name
+        assert claim in potato_from.LANGS, f"目录名不是已知语法: {claim}"
+        for proj in sorted(p for p in langdir.iterdir() if p.is_dir()):
+            src = next(iter(sorted(proj.glob("*.lomt"))), None)
+            assert src is not None, f"{proj} 里没有 .lomt"
+            text = src.read_text(encoding="utf-8")
+            got, why = potato_from.detect_lang(text)
+            assert got == claim, f"{src}: 认成 {got!r}（{why}）, 目录声称 {claim}"
+            doc, rep = potato_from.transcribe(src, claim)
+            assert not rep.validate_errors, (src, rep.validate_errors)
+            out, _skipped = lomt_from.emit_lomt(doc)
+            n_decl = sum(out.count("pub " + k)
+                         for k in ("const ", "struct ", "enum ", "extern fn "))
+            assert n_decl > 0, f"{src}: 产物是空的 (一个声明都没有)"
+            with tempfile.TemporaryDirectory() as t:
+                unit = Path(t) / (src.stem + ".iface.lomt")
+                unit.write_text(out, encoding="utf-8", newline="\n")
+                mod = lomentc.load(unit)
+                deps = lomentc.resolve_deps(mod, ROOT, unit.parent, entry=unit)
+                errs = lomentc.check(mod, deps=deps)
+                assert not errs, (src, errs[:3])
+            seen[claim] = seen.get(claim, 0) + 1
+    for lang, least in CORPUS_MIN.items():
+        n = seen.get(lang, 0)
+        assert n >= least, f"{lang} 只有 {n} 个项目 (至少 {least})"
+    print(f"      {sum(seen.values())} 个语料项目全部认对/合法/非空/过检: {seen}")
 
 
 for _spec in SYNTAXES:

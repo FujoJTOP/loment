@@ -1,0 +1,78 @@
+# bitmap.lomt —— 定长位图 (位集合) 的接口面。
+#
+# 用一个 32 位字数组表示 N 个位: 置位 / 清位 / 测位都是"字下标 + 字内偏移"两步,
+# 集合运算按字整块做。另带一个游标, 让"从上次找到的位置继续找下一个 1"不必每次
+# 从头扫 —— 这是稀疏位图最常用的那个操作。
+#
+# 这份源码是用 **Python 语法**写的 Loment —— 后缀 `.lomt` 说的是"这是 Loment 的
+# 文件", 里面装的是另一种语法。多语法前端只取**声明**, 函数体是占位。
+
+BM_WORD_BITS = 32              # 一个字 32 位
+BM_WORD_BYTES = 4              # 一个字 4 字节
+BM_MAX_WORDS = 16              # 一张位图最多 16 个字 = 512 位
+BM_FULL_WORD = 4294967295      # 一个字的全部位都置上
+BM_NONE = 2147483647           # "没找到" 的哨兵, 大于任何合法下标
+BM_SHIFT_BITS = 5              # 字内偏移 = 下标 & 31, 也就是右移 5 位后的余数
+
+
+class Bitmap:
+    # 位图本体 (words 是指针, word_count 是字数) 加它的容量描述。
+    words: bytes
+    word_count: int
+    bit_length: int
+    name: str
+
+
+class BitRange:
+    # 一段位区间 [first, first + count)。
+    first: int
+    count: int
+
+
+class BitCursor:
+    # "上次找到哪儿了" —— 让 find_next 从哪里起步是确定的。
+    word_index: int
+    bit_index: int
+    exhausted: bool
+
+
+def bm_clear_all(words: bytes, word_count: int) -> None:
+    return None
+
+
+def bm_set(words: bytes, index: int) -> bool:
+    return False
+
+
+def bm_clear(words: bytes, index: int) -> bool:
+    return False
+
+
+def bm_test(words: bytes, index: int) -> bool:
+    return False
+
+
+def bm_popcount(words: bytes, word_count: int) -> int:
+    # 置位总数 —— 按字做 SWAR 计数。
+    return 0
+
+
+def bm_find_first(words: bytes, word_count: int) -> int:
+    return 0
+
+
+def bm_find_next(words: bytes, start: int) -> int:
+    return 0
+
+
+def bm_union(dst: bytes, src: bytes, word_count: int) -> int:
+    return 0
+
+
+def bm_intersect(dst: bytes, src: bytes, word_count: int) -> int:
+    return 0
+
+
+def bm_count_range(words: bytes, first: int, count: int) -> int:
+    # 只数 [first, first + count) 这一段里的置位。
+    return 0

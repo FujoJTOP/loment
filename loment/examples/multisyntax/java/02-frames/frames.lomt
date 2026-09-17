@@ -1,0 +1,101 @@
+/*
+ * frames —— 一条二进制线上协议的帧版式与编解码器状态。
+ *
+ * 这份源码是用 **Java 语法**写的 Loment: 后缀是 .lomt, 里面装的是 Java。
+ * 多语法前端只取声明 —— 类 -> 类型, static final -> 协议常量, 方法 -> 签名,
+ * 方法体不参与产出 (它们走 JVM 的调用约定, 不是平台 C ABI)。
+ *
+ * 领域: 定长 20 字节头 + 变长载荷的帧。Header 记魔数/版本/种类/长度/序号,
+ * Checksum 记两种校验, Frame 把两者与载荷元信息合起来,
+ * Codec 是发送侧的重传窗口与编解码入口; FrameKind 是线上一眼可辨的种类。
+ */
+
+package fujo.frames;
+
+// 真实 Java 文件几乎都带 import, 所以这里**刻意**留一条。原先它会让整份文件被
+// 内容兜底判成 **python** (`import` 判据排在 Java 前面), 接着 ast.parse 在下面那行
+// `package ...;` 上抛一坨 traceback (docs/179 §8.1 第 6 条)。
+import java.util.List;
+
+public enum FrameKind {
+    HELLO,
+    DATA,
+    ACK,
+    NACK,
+    FIN
+}
+
+public class Header {
+    private int magic;
+    private short version;
+    private int kind;
+    private int length;
+    private long seq;
+
+    public static final int MAGIC = 20295;
+    public static final short VERSION = 2;
+    public static final int HEADER_BYTES = 20;
+    public static final int MAX_PAYLOAD = 65536;
+    public static final int KIND_MASK = 7;
+
+    public Header(int magic) { this.magic = magic; }
+
+    public int totalBytes() { return 0; }
+
+    public boolean hasPayload() { return false; }
+
+    public long nextSeq(long seq) { return 0; }
+}
+
+public class Checksum {
+    private int crc32;
+    private short sum16;
+    private boolean covered;
+
+    public Checksum(int crc32) { this.crc32 = crc32; }
+
+    public int crc() { return 0; }
+
+    public boolean ok(Checksum other) { return false; }
+}
+
+public class Frame {
+    private Header head;
+    private Checksum check;
+    private int payloadLen;
+    private boolean compressed;
+
+    public static final int FLAG_COMPRESSED = 1;
+    public static final int FLAG_ENCRYPTED = 2;
+    public static final int FLAG_FRAGMENT = 4;
+
+    public Frame(Header head) { this.head = head; }
+
+    public int wireSize() { return 0; }
+
+    public boolean isAck() { return false; }
+
+    public String kindName() { return ""; }
+}
+
+public class Codec {
+    private int windowSize;
+    private short retries;
+    private boolean crcEnabled;
+    private Frame last;
+
+    public static final int ACK_TIMEOUT_MS = 250;
+    public static final int RETRY_MAX = 5;
+    public static final int WINDOW_DEFAULT = 8;
+    public static final long SEQ_WRAP = 2147483647;
+
+    public Codec(int windowSize) { this.windowSize = windowSize; }
+
+    public int encode(Frame f) { return 0; }
+
+    public Frame decode(int n) { return null; }
+
+    public boolean retryLeft() { return false; }
+
+    public void arm() { }
+}

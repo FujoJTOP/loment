@@ -1,0 +1,92 @@
+# fixedpoint.lomt —— Q16.16 定点小数 (16 位整数 + 16 位小数) 的接口面。
+#
+# 没有浮点也能算小数: 一个 32 位整数按 2^-16 为单位解释, 加减就是整数加减,
+# 乘除要移位之后再按舍入模式补掉丢掉的低位。累加器单独记样本数, 于是"均值"
+# 是两步而不是一步 (先攒后除), 不必在每个样本上做一次除法。
+#
+# 这份源码是用 **Python 语法**写的 Loment —— 后缀 `.lomt` 说的是"这是 Loment 的
+# 文件", 里面装的是另一种语法。多语法前端只取**声明**, 函数体是占位。
+#
+# 常量那几行**刻意**用了三种写法 (带注解、负号、移位表达式): 它们都是最平常的
+# Python, 而前端原先只认"裸整数字面量 + 赋值" —— 另外三种会**静默消失**
+# (docs/179 §8.1 第 2 条)。放回语料是为了让这类写法回来时判据能红。
+
+FX_FRAC_BITS: int = 16         # 小数位数 (带注解的写法, 最 Pythonic 那种)
+FX_ONE = 65536                 # 1.0 的原始表示 = 1 << 16
+FX_HALF = 32768                # 0.5 的原始表示
+FX_MAX_RAW = 2147483647        # 顶满 i32, 也就是 Q16.16 的 32767.99998
+FX_MIN_RAW = -(1 << 31)        # 顶满 i32 的另一头 (负号 + 移位, 不是裸字面量)
+FX_QUARTER_ULP = 1 << 14       # 四分之一 ulp = 1 << (16 - 2) (纯字面量的表达式)
+FX_ROUND_TRUNC = 0             # 直接右移, 朝零舍
+FX_ROUND_NEAREST = 1           # 先加半个 ulp 再右移
+
+
+class Fixed16:
+    # 一个 Q16.16 值。raw 是那个 32 位整数本身 (符号解释在调用方)。
+    raw: int
+    frac_bits: int
+    unit: str
+
+
+class FixedRange:
+    # 一段闭区间 [lo, hi] (原始表示), 以及"这次夹过没有"。
+    lo: int
+    hi: int
+    clamped: bool
+
+
+class FixedAccum:
+    # 滑窗累加: 先攒 total / samples, 要读均值时再除一次。
+    total: int
+    samples: int
+    rounded: bool
+
+
+def fx_from_int(whole: int) -> int:
+    # 整数 -> Q16.16
+    return 0
+
+
+def fx_to_int(raw: int) -> int:
+    # Q16.16 -> 整数 (朝零截断)
+    return 0
+
+
+def fx_frac(raw: int) -> int:
+    # 只取小数部分, 仍然是 Q16.16 的量纲
+    return 0
+
+
+def fx_add(a: int, b: int) -> int:
+    return 0
+
+
+def fx_sub(a: int, b: int) -> int:
+    return 0
+
+
+def fx_mul(a: int, b: int) -> int:
+    # 乘完要右移 16 位, 按舍入模式补掉丢掉的低位
+    return 0
+
+
+def fx_div(a: int, b: int) -> int:
+    # 先左移 16 位再做整数除法
+    return 0
+
+
+def fx_clamp(raw: int, lo: int, hi: int) -> int:
+    return 0
+
+
+def fx_lerp(a: int, b: int, t: int) -> int:
+    # a + (b - a) * t, 其中 t 也是 Q16.16
+    return 0
+
+
+def fx_accum_add(total: int, sample: int) -> int:
+    return 0
+
+
+def fx_accum_mean(total: int, samples: int) -> int:
+    return 0

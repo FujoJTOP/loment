@@ -1,0 +1,98 @@
+# ringbuf.lomt —— 固定容量环形缓冲区 (ring buffer) 的接口面。
+#
+# 单生产者 / 单消费者的定长槽环: head 追着 tail 走, 容量取 2 的幂, 于是"绕回去"
+# 就是一次按位与。写满有两种策略 (丢新的 / 盖最老的), 读侧另有一个游标, 允许把
+# 同一段重放而不动 tail。
+#
+# 这份源码是用 **Python 语法**写的 Loment —— 后缀 `.lomt` 说的是"这是 Loment 的
+# 文件", 里面装的是另一种语法。多语法前端只取**声明** (类型 / 常量 / 函数签名),
+# 函数体不会被带过去, 所以下面那些 `return` 都是占位, 不是实现。
+
+RINGBUF_CAPACITY = 64          # 槽位数, 必须是 2 的幂
+RINGBUF_MASK = 63              # capacity - 1: 绕圈的模掩码
+RINGBUF_HIGH_WATER = 48        # 越过这个水位就开始记告警
+RINGBUF_MAGIC = 8241           # 头部魔数, 用来认出一块内存是不是本模块的环
+RINGBUF_POLICY_DROP = 0        # 满了丢新来的
+RINGBUF_POLICY_OVERWRITE = 1   # 满了盖最老的
+RINGBUF_SLOT_BYTES = 4         # 一个槽 4 字节
+
+
+class RingBuffer:
+    # 环的元数据。head == tail 表示空, (head + 1) & mask == tail 表示满。
+    head: int
+    tail: int
+    capacity: int
+    mask: int
+    high_water: int
+    overflowed: bool
+    tag: str
+
+
+class RingView:
+    # 一段**连续**可读区间。读取跨过尾部时会被切成两段, 这是其中一段。
+    offset: int
+    length: int
+    wrapped: bool
+
+
+class RingStats:
+    # 累计计数, 只在诊断路径上读。
+    pushed: int
+    popped: int
+    peak: int
+    errors: int
+
+
+class RingCursor:
+    # 消费者自己的读游标 —— 与环的 tail 分开, 于是同一段可以重放。
+    index: int
+    pending: int
+    attached: bool
+
+
+def rb_init(buf: bytes, capacity: int) -> bool:
+    # 在调用方给的一块内存上摆好元数据头。容量不是 2 的幂就拒绝。
+    return False
+
+
+def rb_reset(buf: bytes) -> None:
+    # 清空环, 保留容量, 丢掉所有未读槽位。
+    return None
+
+
+def rb_push(buf: bytes, value: int) -> bool:
+    # 生产者: 写一个 4 字节槽。满了按策略丢或盖, 返回是否真的写进去了。
+    return False
+
+
+def rb_pop(buf: bytes) -> int:
+    # 消费者: 读一个槽并推进 tail。空的时候返回哨兵。
+    return 0
+
+
+def rb_peek(buf: bytes, offset: int) -> int:
+    # 看一眼第 offset 个未读槽, 不推进 tail —— 给重放和调试用。
+    return 0
+
+
+def rb_len(buf: bytes) -> int:
+    # 当前未读槽位数。
+    return 0
+
+
+def rb_space(buf: bytes) -> int:
+    # 还能再塞几个槽。
+    return 0
+
+
+def rb_is_empty(buf: bytes) -> bool:
+    return True
+
+
+def rb_is_full(buf: bytes) -> bool:
+    return False
+
+
+def rb_choose_policy(full: bool, policy: int) -> int:
+    # 生产者与消费者共用的定策点: 满的时候到底丢还是盖。
+    return 0

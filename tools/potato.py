@@ -378,15 +378,18 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{fw}.type 非法或未声明: {ft!r}")
     elif types is not None:
         errs.append("types 必须是数组")
-    # 类型引用完整性 (基类型或已声明 struct)
-    if isinstance(types, list):
-        declared = set(TYPES) | seen_ty
-        for i, t in enumerate(types):
-            if not isinstance(t, dict) or not isinstance(t.get("fields"), list):
-                continue
-            for j, fd in enumerate(t["fields"]):
-                if isinstance(fd, dict) and isinstance(fd.get("type"), str) and fd["type"] not in declared:
-                    errs.append(f"types[{i}].fields[{j}].type 未声明: {fd['type']!r}")
+    # 类型引用完整性: **上面那条 `_type_ok` 已经查过了** (行 377, 用的是 `allowed_types`)。
+    #
+    # 这里原先还有一遍"再查一次"的循环, 用的是 `fd["type"] not in declared` —— **裸字符串
+    # 相等**。它与上一条查的是同一批字段, 只有两处不同, 而两处都是错的:
+    #   * 它不认复合类型 —— `[u64; 8]` / `[i32]` 过了 `_type_ok` 却过不了它, 于是
+    #     结构体里放一个数组字段, 整份对象被判**非法**, `lomt_from` 直接 `[ERR]` 退出
+    #     (比 skip 更坏: 一个字段的问题毁掉整个模块)。2026-09-17 由 Java/Rust 两个 agent
+    #     **各自独立**撞到 (`int[]` 字段与 `[u64; 8]` 字段)。
+    #   * `declared` 是 `TYPES | seen_ty`, **不含 enums** —— 而 `allowed_types` 含。
+    #     于是"字段类型是一个已声明的枚举"被误报未声明。
+    # 结论: 这一遍**只可能误报, 不可能多抓** (它查的字段集合是上一条的子集)。删掉它,
+    # 顺带消掉"两份判据各自漂移"的可能 —— 那种漂移就是这个 bug 的来源。
 
     # 类型名跨表唯一 (types / enums 共用一个命名空间)
     for n in sorted(seen_ty & seen_en):

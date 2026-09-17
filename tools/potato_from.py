@@ -168,6 +168,11 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
 
 JAVA_TYPES = {
     "byte": "i8", "short": "i16", "int": "i32", "long": "i64",
+    # `void` 映 `"()"` —— 与 C 那边**同一个口径** (`C_TYPES["void"]`), 发射时就没有 `-> T`。
+    # 2026-09-17 补: 原先 JAVA_TYPES 没有 `void`, 于是**每一个 setter**(真实 Java 里占
+    # 相当比例)都报"返回类型 'void' 无映射" —— 那句提示是**错的**: void 完全表示得了,
+    # 它只是没被加进来。注意这些方法仍然是 `abi: "java"`, 照样不会发 `extern fn`。
+    "void": "()",
     # Java 的 `char` 是 **16 位无符号** (不是 C 的 8 位) —— 映 `u16`, 别照 C 的习惯映 i8。
     "char": "u16", "boolean": "bool",
     "String": "str",
@@ -301,6 +306,14 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             rep.skip("type", ename, "枚举无变体")
             continue
         doc["enums"].append({"name": ename, "variants": vs})
+        # **枚举名要进 `known`** —— 否则类里一个 `private State s;` 字段查不到这个名字,
+        # 被当成"无映射"丢掉。2026-09-17 实测: 产物里明明有 `pub enum State`, 而同一个
+        # 文件里引用它的字段却没了 (三个 agent 里 Java 那位报的第三条)。
+        # 这一圈**排在类那一圈前面**, 所以同文件内"先声明枚举、后引用它"是通的。
+        # **类与类之间的先后依赖仍然不通** (A 引用后声明的 B): 那要预扫一遍名字, 而预扫
+        # 会把"字段没抽出来、整类被丢掉"的名字也放进去, 于是引用它的字段过不了校验器的
+        # "未声明"。宁可维持现状: 少映射要**出声** (`skip_field`), 不是静默。
+        known.add(ename)
         if lossy:
             rep.skip_field(ename, "<变体实参/枚举体>", "只取了变体名 (Potato 的 enums 没有值)")
         rep.ok += 1
@@ -410,9 +423,15 @@ _LOMENT_OWN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:capability|guard)\b|^[ \t]*ex
 #: **`class` 在 Python 与 Java 里都出现**, 所以两条判据按**结尾字符**分开:
 #: Python 的类是 `class X:` / `class X(Base):`(冒号), Java 的类是 `class X {`(花括号)。
 #: 只认"class"这个词会把两种语言混成一种 —— 那是最容易犯、也最难发现的一类错。
+#: **`import` 这条要长成 Python 的样子**: `import java.util.List;` 也是 import ——
+#: 与 Python 撞车, 而 Python 排在 Java 前面, 于是一份**带 import 的真 Java 文件在内容
+#: 兜底时被判成 python**, 接着 `ast.parse` 在 `package a.b;` 上**抛一坨 traceback**。
+#: 判别点是**行尾分号**: Python 的 import 语句不以 `;` 结尾 (写了也是罕见病),
+#: Java 的必然以 `;` 结尾。所以这里用 `[^\n;]*$` 把带分号的那行排除掉。
+#: 2026-09-17 实测撞到 (三个 agent 写语料, Java 那一份一个 `import` 都不敢写)。
 _PY_DEF = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+\w+"
                      r"|^[ \t]*class[ \t]+\w+[^\n{]*:[ \t]*$"
-                     r"|^[ \t]*(?:import|from)[ \t]+\w+", re.M)
+                     r"|^[ \t]*(?:import|from)[ \t]+\w[^\n;]*$", re.M)
 _RS_FN = re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:unsafe[ \t]+)?(?:async[ \t]+)?"
                     r"(?:extern[ \t]+\"[^\"]*\"[ \t]+)?fn[ \t]+\w+", re.M)
 #: Go: `func` 这个关键字在 C/Rust/Python/Java 里都不出现, 是一条很干净的判据。
@@ -574,11 +593,92 @@ def _py_type(node, mode: str) -> str | None:
     return "ptr" if mode == "lenient" else None  # lenient: 未知类型降级为指针
 
 
+#: 前端**自己**折叠整数表达式, 与 C enum 那处同一口径 (`_C_ENUM` 也要算出值来)。
+#: 只收"所有叶子都是整数字面量"的表达式 —— 有一个叶子是名字 (如 `1 << SHIFT`)
+#: 就**报出来**, 不猜它的值。
+#: `ast.Div` **不在**表里: 它产生 float, 折出来就不是整数常量了。
+_PY_FOLD_OPS = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod,
+                ast.LShift, ast.RShift, ast.BitOr, ast.BitAnd, ast.BitXor)
+_PY_INT_TYPES = {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
+
+
+def _py_int_literal(node) -> int | None:
+    """整数字面量, **含** `-5` / `1 << 4` 这类显然可折叠的形式。折不出来返回 None。"""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return node.value
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _py_int_literal(node.operand)
+        if v is None:
+            return None
+        return -v if isinstance(node.op, ast.USub) else v
+    if isinstance(node, ast.BinOp) and isinstance(node.op, _PY_FOLD_OPS):
+        a, b = _py_int_literal(node.left), _py_int_literal(node.right)
+        if a is None or b is None:
+            return None
+        try:
+            if isinstance(node.op, ast.Add):
+                return a + b
+            if isinstance(node.op, ast.Sub):
+                return a - b
+            if isinstance(node.op, ast.Mult):
+                return a * b
+            if isinstance(node.op, ast.FloorDiv):
+                return a // b
+            if isinstance(node.op, ast.Mod):
+                return a % b
+            if isinstance(node.op, ast.LShift):
+                return a << b
+            if isinstance(node.op, ast.RShift):
+                return a >> b
+            if isinstance(node.op, ast.BitOr):
+                return a | b
+            if isinstance(node.op, ast.BitAnd):
+                return a & b
+            return a ^ b
+        except (ZeroDivisionError, ValueError, OverflowError):
+            return None                       # 除零 / 负位移 / 位移过大 -> 当折不出来
+    return None
+
+
+def _py_const(name: str, value, ann, mode: str) -> tuple[dict | None, str]:
+    """模块级 `NAME = <整数>` 或 `NAME: int = <整数>` -> 一条常量。
+
+    第二个返回值非空时**调用方一定要出声** —— 这条函数的存在理由就是原先那三种写法
+    **一声不响地消失** (2026-09-17 加多语法语料时实测):
+
+      * `LOW = -5`      —— `-5` 是 `UnaryOp`, 不是 `Constant`
+      * `MAX: int = 8`  —— `AnnAssign`, 而这是**最 Pythonic 的写法**
+      * `SHIFT = 1 << 4` —— `BinOp`
+
+    产物里少三个常量、汇总行一个数都不变、`[skip]` 一行都没有 —— 不看产物根本发现不了。
+    **注解写了非整型就报出来**, 不能照值发 `i64`: 那会把作者声明的类型改掉。
+    """
+    v = _py_int_literal(value)
+    if v is None:
+        return None, "模块级常量的值不是整数字面量"
+    if ann is not None:
+        t = _py_type(ann, mode)
+        if t not in _PY_INT_TYPES:
+            return None, f"常量注解 {t or '无映射'} 不是整型"
+    return {"name": name, "type": "i64", "value": v}, ""
+
+
 def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "python", mode)
     doc = _blank(_ident(Path(name).stem), "python")
     tree = ast.parse(src)
     known: set[str] = set()
+
+    def _put_const(cname: str, cval, cann) -> None:
+        c, why = _py_const(cname, cval, cann, mode)
+        if c:
+            doc["consts"].append(c)
+            rep.ok += 1
+        else:
+            rep.skip("const", cname, why)
+
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             fields = []
@@ -619,13 +719,15 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             doc["functions"].append({"name": node.name, "params": params, "ret": ret,
                                      "abi": "python"})
             rep.ok += 1
+        # 模块级常量两种写法都收。**`isupper()` 是"这是不是常量"的判据**, 放在这里
+        # 而不是 `_py_const` 里 —— 模块级小写赋值是变量, 不是"没转成功的常量", 报它
+        # 只会淹掉真正的丢失。
         elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                and isinstance(node.targets[0], ast.Name) \
-                and node.targets[0].id.isupper() and isinstance(node.value, ast.Constant) \
-                and isinstance(node.value.value, int) and not isinstance(node.value.value, bool):
-            doc["consts"].append({"name": node.targets[0].id, "type": "i64",
-                                  "value": node.value.value})
-            rep.ok += 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id.isupper():
+            _put_const(node.targets[0].id, node.value, None)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id.isupper():
+            _put_const(node.target.id, node.value, node.annotation)
     return _finish(doc, rep)
 
 
@@ -776,6 +878,49 @@ _RS_FN = re.compile(r"^[ \t]*(?:pub\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?
                     r"(?:extern\s+\"([^\"]*)\"\s+)?fn\s+"
                     r"([A-Za-z_]\w*)\s*(<[^>]*>)?\s*\(([^{)]*)\)\s*(?:->\s*([^{]+?))?\s*\{",
                     re.M)
+#: Rust 的 `pub const NAME: TYPE = VALUE;`。**必须要求名字后面有冒号** ——
+#: `const fn f()` 也是 `const` 开头, 靠那个冒号把它挡在外面 (它由 `_RS_FN` 接走)。
+#: `static` **不算常量** (可变状态), 不收。
+_RS_CONST = re.compile(r"^[ \t]*(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?const[ \t]+"
+                       r"([A-Za-z_]\w*)[ \t]*:[ \t]*([^=;]+?)[ \t]*=[ \t]*([^;]+);", re.M)
+_RS_INT_RANGE = {
+    "i8": (-128, 127), "i16": (-32768, 32767),
+    "i32": (-(2 ** 31), 2 ** 31 - 1), "i64": (-(2 ** 63), 2 ** 63 - 1),
+    "u8": (0, 255), "u16": (0, 65535), "u32": (0, 2 ** 32 - 1), "u64": (0, 2 ** 64 - 1),
+}
+
+
+def _rs_int_literal(txt: str) -> int | None:
+    """Rust 整数字面量: `8` / `0xFF` / `0b1010` / `1_000` / `8u32`。
+
+    **只认字面量, 不认表达式** —— `_RS_CONST` 那处实测的 14 个常量全是字面量。折不出来
+    就返回 None, 由调用方**报出来**: 这条函数不假装能算 Rust 的常量表达式。
+    """
+    t = txt.strip().replace("_", "")
+    t = re.sub(r"(?:u|i)(?:8|16|32|64|128|size)$", "", t)   # 后缀 8u32 / 8usize
+    try:
+        return int(t, 0)
+    except ValueError:
+        return None
+
+
+def _rs_const(cname: str, ctype: str, cval: str, mode: str,
+              known: set[str]) -> tuple[dict | None, str]:
+    """一条 Rust 常量。第二个返回值非空时**调用方一定要出声**。
+
+    2026-09-17 补: 原先 `from_rust` 只有 struct/enum/fn 三条循环, **常量一条都不抽** ——
+    语料里 5 个文件共 14 个 `pub const` 既不进产物也**不报 `[skip]`**, 汇总行一个数都不变。
+    """
+    v = _rs_int_literal(cval)
+    if v is None:
+        return None, f"常量值 {cval.strip()!r} 不是整数字面量"
+    t = _rs_type(ctype, mode, known)
+    if t not in _RS_INT_RANGE:
+        return None, f"常量类型 {ctype.strip()!r} 不是整型"
+    lo, hi = _RS_INT_RANGE[t]
+    if not lo <= v <= hi:
+        return None, f"常量值 {v} 超出 {t} 的范围"
+    return {"name": cname, "type": t, "value": v}, ""
 
 
 def _rs_type(t: str, mode: str, known: set[str]) -> str | None:
@@ -855,6 +1000,13 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         doc["enums"].append({"name": ename, "variants": vs})
         known.add(ename)
         rep.ok += 1
+    for m in _RS_CONST.finditer(body):
+        c, why = _rs_const(m.group(1), m.group(2), m.group(3), mode, known)
+        if c:
+            doc["consts"].append(c)
+            rep.ok += 1
+        else:
+            rep.skip("const", m.group(1), why)
     for m in _RS_FN.finditer(body):
         abi_g, fn, generics, params, ret = (m.group(1), m.group(2), m.group(3),
                                             m.group(4), m.group(5))

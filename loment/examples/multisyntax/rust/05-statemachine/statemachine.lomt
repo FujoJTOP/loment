@@ -1,0 +1,97 @@
+// statemachine — 事件驱动的有限状态机: 状态 x 事件 -> 转移 (表驱动)。
+//
+// 用途: 协议握手 / 设备上电时序。机器本身只存"当前在哪"和几个计数,
+// 走哪一格由一张 `Transition` 数组决定, 于是换一张表就换一套行为。
+//
+// 这份源码是用 **Rust 语法**写的 Loment。前端只取声明, 函数体不进产物。
+//
+// 三条有代表性的形状: `State` / `Event` 两个裸枚举、一张按指针传的转移表、
+// 以及末尾两条**有意的**普通 pub fn (一条撞 Option, 一条撞 &mut 借用)。
+
+// 机器规模与哨兵值 —— 转移表的最大行数、事件表的最大列数、无效态。
+pub const SM_MAX_STATES: u32 = 16;
+pub const SM_MAX_EVENTS: u32 = 16;
+pub const SM_NO_STATE: u32 = 0xFFFFFFFF;
+
+// 状态的编号, 与转移表里的数字一一对应。
+pub enum State {
+    Idle,
+    Armed,
+    Running,
+    Fault,
+    Done,
+}
+
+// 能喂进来的事件。
+pub enum Event {
+    Start,
+    Stop,
+    Tick,
+    Error,
+    Reset,
+}
+
+// 一条转移: 在 from 态收到 event 时, 走到 to 态并置上 action。
+pub struct Transition {
+    pub from: u32,
+    pub event: u32,
+    pub to: u32,
+    pub action: u32,
+}
+
+// 机器本体: 当前状态 + 转过几格 + 上次动作 + 一小把标志位。
+pub struct StateMachine {
+    pub state: u32,
+    pub transitions: u32,
+    pub last_action: u32,
+    pub flags: u32,
+}
+
+// 建一台机器, 初态 Idle。返回初态。
+#[no_mangle]
+pub extern "C" fn sm_init(sm: *mut StateMachine) -> u32 { 0 }
+
+// 喂一个事件, 返回新状态; 没定义的转移就停在原状态。
+#[no_mangle]
+pub extern "C" fn sm_fire(sm: *mut StateMachine, event: u32) -> u32 { 0 }
+
+// 查表: (from, event) 这条转移合不合法。只读, 不改机器。
+#[no_mangle]
+pub extern "C" fn sm_allowed(from: u32, event: u32, table: *const Transition, n: u32) -> u32 { 0 }
+
+// 取 (from, event) 的目标态; 表里没有就返回 SM_NO_STATE。
+#[no_mangle]
+pub extern "C" fn sm_lookup(from: u32, event: u32, table: *const Transition, n: u32) -> u32 { 0 }
+
+// 当前状态。
+#[no_mangle]
+pub extern "C" fn sm_state(sm: *const StateMachine) -> u32 { 0 }
+
+// 转过几格了。
+#[no_mangle]
+pub extern "C" fn sm_count(sm: *const StateMachine) -> u32 { 0 }
+
+// 复位回 Idle, 计数清零。成功返回 1。
+#[no_mangle]
+pub extern "C" fn sm_reset(sm: *mut StateMachine) -> u32 { 0 }
+
+// 置一位标志 (机器自带的小状态), 返回旧值。
+#[no_mangle]
+pub extern "C" fn sm_set_flag(sm: *mut StateMachine, bit: u32) -> u32 { 0 }
+
+// 测一位标志。写侧读侧成对。
+#[no_mangle]
+pub extern "C" fn sm_test_flag(sm: *const StateMachine, bit: u32) -> u32 { 0 }
+
+// 直接按一条转移把机器推过去 (绕开表), 返回新状态。`unsafe` 是修饰符之一,
+// 前端认得它, 不影响这条能不能发出来。
+#[no_mangle]
+pub unsafe extern "C" fn sm_force(sm: *mut StateMachine, t: *const Transition) -> u32 { 0 }
+
+// --- 下面两条是**有意的**普通 pub fn, 各撞一种表示层的边界 ---
+
+// 把状态编号翻成人能读的名字。`Option<&'static str>` 在 Loment 里没有形状。
+pub fn sm_state_name(state: u32) -> Option<&'static str> { None }
+
+// 按值吃一条转移, 把机器推到目标态。`&mut StateMachine` 是裸借用, 无映射。
+pub fn sm_apply(sm: &mut StateMachine, t: Transition) -> u32 { 0 }

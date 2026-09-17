@@ -1,0 +1,82 @@
+// ringbuf — 定长字节环形缓冲区 (生产者 / 消费者)。
+//
+// 用途: 在中断或另一线程与主循环之间传定长消息。不分配、不拷贝头部,
+// 只挪 head / tail 两个游标; 容量取 2 的幂, 于是"对容量取模"是一次按位与。
+//
+// 这份源码是用 **Rust 语法**写的 Loment: 后缀 `.lomt` 说的是"这是 Loment 的
+// 文件", 而里面装的语法是 Rust。前端只取**声明**(类型 / 函数签名 / 常量),
+// 函数体不进产物 —— 所以下面每个体都只放一个占位值。
+//
+// ABI: 带 `#[no_mangle]` + `extern "C"` 的那些走平台 C ABI, 能被 Loment 直接
+// 链进来调; 文件末尾两条普通 `pub fn` 走 Rust 自己的调用约定, **发不出来**
+// (那是刻意的, 用来验证那道闸门还在)。
+
+// 容量的上下限。容量必须落在区间里, 且是 2 的幂 (于是 mask = cap - 1)。
+pub const RING_MIN_CAP: u32 = 2;
+pub const RING_MAX_CAP: u32 = 65536;
+
+// 三个状态是**派生**的, 由 head / tail 的追及关系算出来, 不进结构体。
+pub enum RingState {
+    Empty,
+    Partial,
+    Full,
+}
+
+// 一块调用方提供的内存 + 读写两个游标 + 掩码。字段全是标量与裸指针。
+pub struct RingBuf {
+    pub head: u32,
+    pub tail: u32,
+    pub cap: u32,
+    pub mask: u32,
+    pub data: *mut u8,
+}
+
+// 一次"取值"的结果: 从 base 起连续 count 个字节 (可能跨过回绕点)。
+pub struct RingSpan {
+    pub base: u32,
+    pub count: u32,
+}
+
+// 建一块缓冲区。容量非法 (不是 2 的幂或超出上下限) 返回 0, 成功返回 1。
+#[no_mangle]
+pub extern "C" fn rb_init(buf: *mut RingBuf, data: *mut u8, cap: u32) -> u32 { 0 }
+
+// 写入一个字节。满了返回 0, 成功返回 1。生产者的基本动作。
+#[no_mangle]
+pub extern "C" fn rb_push(buf: *mut RingBuf, byte: u8) -> u32 { 0 }
+
+// 批量写入, 返回**真正**写进去的字节数 (空间不够时可能少于 n)。
+#[no_mangle]
+pub extern "C" fn rb_write(buf: *mut RingBuf, src: *const u8, n: u32) -> u32 { 0 }
+
+// 取走一个字节到 out。空返回 0, 成功返回 1。消费者的基本动作。
+#[no_mangle]
+pub extern "C" fn rb_pop(buf: *mut RingBuf, out: *mut u8) -> u32 { 0 }
+
+// 批量取走, 返回真正取出的字节数。
+#[no_mangle]
+pub extern "C" fn rb_read(buf: *mut RingBuf, dst: *mut u8, n: u32) -> u32 { 0 }
+
+// 只看不取: off 是从 tail 起的偏移, 越界返回 0, 成功返回 1。
+#[no_mangle]
+pub extern "C" fn rb_peek(buf: *const RingBuf, off: u32, out: *mut u8) -> u32 { 0 }
+
+// 已存字节数。查询侧 (生产者与消费者都要问)。
+#[no_mangle]
+pub extern "C" fn rb_len(buf: *const RingBuf) -> u32 { 0 }
+
+// 还能再存多少字节。
+#[no_mangle]
+pub extern "C" fn rb_free(buf: *const RingBuf) -> u32 { 0 }
+
+// 当前状态, 返回 RingState 的序数值 (0=Empty / 1=Partial / 2=Full)。
+#[no_mangle]
+pub extern "C" fn rb_state(buf: *const RingBuf) -> u32 { 0 }
+
+// --- 下面两条是**有意的**普通 pub fn: 走 Rust 调用约定, 前端发不出来 ---
+
+// 把一片字节灌满缓冲区, 返回灌进去多少。`&[u8]` 能转写成切片, 但 ABI 不对。
+pub fn rb_fill_from(src: &[u8], buf: *mut RingBuf) -> usize { 0 }
+
+// 拷一份缓冲区快照。`&RingBuf` 是裸借用, 表示层里没有对应形状 —— 会被跳过。
+pub fn rb_snapshot(buf: &RingBuf) -> RingSpan { RingSpan { base: 0, count: 0 } }

@@ -1,0 +1,77 @@
+# checksum.lomt —— FNV-1a 系校验和的接口面。
+#
+# 32 位 FNV-1a: 每读一个字节先异或进 hash, 再乘一个素数。状态可以增量喂 (一大块
+# 拆成几段), 也可以把两段流的 hash 合成一段的。长度单独记着, 免得"空输入"与
+# "一次都没喂过"混成同一个值。
+#
+# 这份源码是用 **Python 语法**写的 Loment —— 后缀 `.lomt` 说的是"这是 Loment 的
+# 文件", 里面装的是另一种语法。多语法前端只取**声明**, 函数体是占位。
+
+CK_FNV_OFFSET = 2166136261     # FNV 的起始偏移 (32 位)
+CK_FNV_PRIME = 16777619        # FNV 的素数 (32 位)
+CK_SEED_ALT = 5381             # djb2 那一路的种子, 换算法时用
+CK_BLOCK_MAX = 256             # 一次 update 最多吃一个块
+CK_OK = 0
+CK_MISMATCH = 1
+
+
+class ChecksumState:
+    # 增量状态: 已经喂进去的字节数、当前 hash、是否已经收尾。
+    hash_value: int
+    length: int
+    finalized: bool
+    algorithm: str
+
+
+class ChecksumBlock:
+    # 一块待喂的数据 —— data 是指针, length 是长度, 分开给。
+    data: bytes
+    length: int
+    index: int
+
+
+class ChecksumPair:
+    # 两段流各自的 hash, 以及它们的合成结果。
+    left: int
+    right: int
+    combined: int
+
+
+def ck_init(seed: int) -> int:
+    # 起始偏移可以换 —— 换个种子就是另一条 FNV 变体。
+    return 0
+
+
+def ck_update(state: bytes, data: bytes, length: int) -> int:
+    return 0
+
+
+def ck_finalize(state: bytes) -> int:
+    return 0
+
+
+def ck_bytes(data: bytes, length: int) -> int:
+    # 一次算完一整块的快捷方式, 等价于 init + update + finalize。
+    return 0
+
+
+def ck_combine(left: int, right: int) -> int:
+    # 把两段连续的流合成一段的 hash。
+    return 0
+
+
+def ck_verify(expected: int, actual: int) -> bool:
+    return False
+
+
+def ck_reset(state: bytes, seed: int) -> None:
+    return None
+
+
+def ck_len(state: bytes) -> int:
+    return 0
+
+
+def ck_fold(hash_value: int, width: int) -> int:
+    # 把 32 位折成 width 位的短校验 (比如 16 位线上帧头)。
+    return 0

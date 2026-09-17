@@ -1,0 +1,76 @@
+// fixedpoint — Q16.16 定点小数: 高 16 位整数部分, 低 16 位小数部分。
+//
+// 用途: 没有 FPU 的机器上做比例运算 —— 加减就是整型加减, 乘除要移位;
+// 同一个 i32 上能同时给出整数值和小数值, 两个视角两个函数。
+//
+// 这份源码是用 **Rust 语法**写的 Loment。前端只取声明, 函数体不进产物。
+//
+// 浮点是**刻意**混进来的两处反例: `f32` 不在 Loment 的类型里, 那两条过不去
+// (而且两条过不去的原因不同 —— 一条在返回类型, 一条在形参)。整型那半边全过。
+
+// 1.0 / 0.5 的定点表示, 以及小数位数。移位与取整都读这几个。
+pub const FX_ONE: i32 = 65536;
+pub const FX_HALF: i32 = 32768;
+pub const FX_FRAC_BITS: u32 = 16;
+
+// 取整方向 —— 由调用方显式选, 不让实现悄悄定。
+pub enum Round {
+    TowardZero,
+    Nearest,
+    Floor,
+}
+
+// 一个 Q16.16 值。只有一个字段, 因为表示就是那个 i32。
+pub struct Q16 {
+    pub raw: i32,
+}
+
+// 一个定点区间 [lo, hi], 两端都是 Q16.16。
+pub struct FxRange {
+    pub lo: i32,
+    pub hi: i32,
+}
+
+// 整数 -> Q16.16 (乘 1<<16)。
+#[no_mangle]
+pub extern "C" fn fx_from_int(n: i32) -> i32 { 0 }
+
+// Q16.16 -> 整数 (右移 16, 向零截断)。
+#[no_mangle]
+pub extern "C" fn fx_to_int(x: i32) -> i32 { 0 }
+
+// 乘: 中间用 i64 承接再右移, 防溢出。这是定点最容易写错的一处。
+#[no_mangle]
+pub extern "C" fn fx_mul(a: i32, b: i32) -> i32 { 0 }
+
+// 除: 被除数先左移 16 再除。
+#[no_mangle]
+pub extern "C" fn fx_div(a: i32, b: i32) -> i32 { 0 }
+
+// 把 x 夹到 [lo, hi] (两端都是 Q16.16)。
+#[no_mangle]
+pub extern "C" fn fx_clamp(x: i32, lo: i32, hi: i32) -> i32 { 0 }
+
+// 按 mode (Round 的序数值) 取整到整数。
+#[no_mangle]
+pub extern "C" fn fx_round(x: i32, mode: u32) -> i32 { 0 }
+
+// 取小数部分 —— 低 16 位按无符号读, 于是"负数的 0.5"也能拿到 0x8000。
+#[no_mangle]
+pub extern "C" fn fx_frac(x: i32) -> u32 { 0 }
+
+// 区间是否有效 (lo <= hi)。构造成本低, 但每次夹取前都要问。
+#[no_mangle]
+pub extern "C" fn fx_range_valid(r: *const FxRange) -> u32 { 0 }
+
+// 把一个值卷进区间 (超界就绕回来, 不是夹取)。
+#[no_mangle]
+pub extern "C" fn fx_wrap(x: i32, r: *const FxRange) -> i32 { 0 }
+
+// --- 下面两条是**有意的**普通 pub fn, 而且都撞在浮点那道闸门上 ---
+
+// 定点 -> 浮点, 只给日志用。返回类型 `f32` 无映射, 整条被跳过。
+pub fn fx_to_float(x: i32) -> f32 { 0.0 }
+
+// 从浮点构造一个定点值。形参 `v: f32` 无映射, 整条被跳过。
+pub fn fx_from_float(v: f32) -> Q16 { Q16 { raw: 0 } }

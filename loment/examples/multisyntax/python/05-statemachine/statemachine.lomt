@@ -1,0 +1,97 @@
+# statemachine.lomt —— 显式状态机 (状态表 + 事件队列) 的接口面。
+#
+# 状态是整数编号, 转移记在 (from_state, event) -> to_state 的表里; 事件先排进
+# 队列, 再由 fsm_fire 逐个消化 —— 于是"哪一步炸的"能从 steps 与 previous 看出来。
+# 到不了的状态一律进 FAULT, 而 FAULT 是单向的: 只有 reset 能出来。
+#
+# 这份源码是用 **Python 语法**写的 Loment —— 后缀 `.lomt` 说的是"这是 Loment 的
+# 文件", 里面装的是另一种语法。多语法前端只取**声明**, 函数体是占位。
+
+FSM_STATE_DOWN = 0
+FSM_STATE_IDLE = 1
+FSM_STATE_ARMED = 2
+FSM_STATE_RUNNING = 3
+FSM_STATE_FAULT = 4
+FSM_EVENT_NONE = 0
+FSM_EVENT_START = 1
+FSM_EVENT_STOP = 2
+FSM_EVENT_FAULT = 3
+FSM_EVENT_RESET = 4
+FSM_MAX_TRANSITIONS = 32       # 一张转移表最多这么多行
+FSM_QUEUE_CAPACITY = 16        # 事件环的槽位数
+
+
+class Transition:
+    # 转移表里的一行。
+    from_state: int
+    to_state: int
+    event: int
+
+
+class MachineState:
+    # 机器的可观测状态: 如今在哪、上一步在哪、走了多少步。name 给日志用。
+    current: int
+    previous: int
+    steps: int
+    faulted: bool
+    name: str
+
+
+class TransitionTable:
+    # 定长转移表 —— entries 是那一串字节的指针, count 是已用条数。
+    entries: bytes
+    count: int
+    capacity: int
+
+
+class EventQueue:
+    # 待消化的事件环: head 进, tail 出, dropped 记溢出的条数。
+    head: int
+    tail: int
+    dropped: int
+
+
+def fsm_init(machine: bytes, initial: int) -> bool:
+    return False
+
+
+def fsm_reset(machine: bytes, initial: int) -> None:
+    # 唯一的出 FAULT 的路。
+    return None
+
+
+def fsm_fire(machine: bytes, event: int) -> int:
+    # 消化一个事件, 返回落到的那个新状态。
+    return 0
+
+
+def fsm_can(table: bytes, from_state: int, event: int) -> bool:
+    return False
+
+
+def fsm_state(machine: bytes) -> int:
+    return 0
+
+
+def fsm_steps(machine: bytes) -> int:
+    return 0
+
+
+def fsm_fault(machine: bytes, code: int) -> None:
+    return None
+
+
+def fsm_table_add(table: bytes, from_state: int, to_state: int, event: int) -> bool:
+    return False
+
+
+def fsm_table_lookup(table: bytes, from_state: int, event: int) -> int:
+    return 0
+
+
+def fsm_queue_push(queue: bytes, event: int) -> bool:
+    return False
+
+
+def fsm_queue_pop(queue: bytes) -> int:
+    return 0

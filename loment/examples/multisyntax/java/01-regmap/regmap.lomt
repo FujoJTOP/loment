@@ -1,0 +1,89 @@
+/*
+ * regmap —— 一个外设 MMIO 寄存器窗口的映射与访问描述。
+ *
+ * 这份源码是用 **Java 语法**写的 Loment: 后缀是 .lomt, 里面装的是 Java。
+ * 它给多语法前端当语料 —— 前端只取声明 (类 -> 类型, static final -> 常量,
+ * 方法 -> 签名), 方法体不参与产出。
+ *
+ * 领域: 一块 4 KiB 的寄存器窗口, 每个寄存器 4 字节、最多 64 个。
+ * FieldSpec 描述寄存器里的一个位域, RegisterSpec 描述一个寄存器,
+ * DeviceMap 把整块窗口串起来; RegAccess 说明每个位的读写方向。
+ */
+
+package fujo.regmap;
+
+public enum RegAccess {
+    RO,
+    WO,
+    RW
+}
+
+public class FieldSpec {
+    private short offset;
+    private short width;
+    private int mask;
+    private boolean signed;
+    private String fieldName;
+
+    public static final short WIDTH_MAX = 32;
+
+    public FieldSpec(short offset, short width) { this.offset = offset; this.width = width; }
+
+    public int shift() { return 0; }
+
+    public int fieldMask() { return 0; }
+
+    public boolean overlaps(FieldSpec other) { return false; }
+}
+
+public class RegisterSpec {
+    private int addr;
+    private int reset;
+    private short width;
+    private boolean readable;
+    private boolean writable;
+    private FieldSpec primary;
+
+    public static final short WIDTH_DEFAULT = 32;
+
+    public RegisterSpec(int addr) { this.addr = addr; }
+
+    public int resetValue() { return 0; }
+
+    public boolean isWritable() { return false; }
+
+    public int merge(RegisterSpec other) { return 0; }
+
+    public void clear() { }
+}
+
+public class DeviceMap {
+    private long base;
+    private int count;
+    private int stride;
+    private boolean littleEndian;
+    private RegisterSpec ctrl;
+
+    public static final long BASE_DEFAULT = 16908288;
+    public static final int REGION_BYTES = 4096;
+    public static final int COUNT_MAX = 64;
+    public static final int STRIDE_DEFAULT = 4;
+    public static final int CTRL_OFFSET = 0;
+    public static final int STATUS_OFFSET = 4;
+    public static final int IRQ_ENABLE = 256;
+    public static final int IRQ_MASK = 65280;
+    public static final int BIT_READY = 1;
+    public static final int BIT_ERROR = 32768;
+
+    public DeviceMap(long base) { this.base = base; }
+
+    public long addrOf(int index) { return 0; }
+
+    public int offsetOf(int index) { return 0; }
+
+    public boolean inRegion(int offset) { return false; }
+
+    public int wordAt(int offset) { return 0; }
+
+    public String dump() { return ""; }
+}

@@ -1,0 +1,93 @@
+// bitmap — 位图 (位集): 若干 u64 字, 字表由调用方提供, 不在这里分配。
+//
+// 用途: 空闲页表 / 已用槽位的标记。测一位、置一位、数一遍、扫第一个空位。
+// 所有动作都够小, 够得上"能被 C ABI 直接调"的门槛。
+//
+// 这份源码是用 **Rust 语法**写的 Loment: 后缀 `.lomt` 说的是"这是 Loment 的
+// 文件", 里面装的语法是 Rust。前端只取声明, 函数体不进产物。
+//
+// 这个文件里**刻意**放了三处表示层的边界, 都会被前端报出来 (见命令输出的
+// [skip]): 定长数组形参 `[u64; 8]` 与 `&str` 过不了 FFI 那道闸门 (只收标量 +
+// ptr), 泛型 `<T>` 与 `Vec` 则连转写都过不去。
+
+// 位图规模常量 —— 字数、总位数、每字几位。
+pub const BM_WORDS: u32 = 8;
+pub const BM_BITS: u32 = 512;
+pub const BM_WORD_BITS: u32 = 64;
+
+// 扫描方向: 从最低位往高, 还是从最高位往低。
+pub enum BitOrder {
+    Lsb0,
+    Msb0,
+}
+
+// 位图的头: 指向调用方的字表 + 字表长度 (以字计, 不是字节)。
+pub struct Bitmap {
+    pub words: *mut u64,
+    pub words_len: u32,
+}
+
+// 定长字表 —— 与上面的 `Bitmap` (字表由调用方给) 正相反: 这 8 个字就在结构体里。
+// **字段可以是定长数组** (`[T; N]`) 是 Rust 里最平常的写法之一, 而校验器曾经
+// 因为"有两遍判据、后一遍不认复合类型"把整份对象判非法 (docs/179 §8.1 第 4 条)。
+pub struct WordTable {
+    pub n: u32,
+    pub w: [u64; 8],
+}
+
+// 一个位位置拆成"第几字 + 第几号", 免得每处都写 / 和 %。
+pub struct BitPos {
+    pub word: u32,
+    pub bit: u32,
+}
+
+// 一段位区间 [start, start + count)。
+pub struct BitRange {
+    pub start: u32,
+    pub count: u32,
+}
+
+// 全清零。所有其他动作的前置。
+#[no_mangle]
+pub extern "C" fn bm_clear_all(bm: *mut Bitmap) -> u32 { 0 }
+
+// 把第 i 位置 1, 返回**旧值** (0/1) —— 调用方据此知道是不是自己先占上的。
+#[no_mangle]
+pub extern "C" fn bm_set(bm: *mut Bitmap, i: u32) -> u32 { 0 }
+
+// 把第 i 位清 0, 返回旧值。与 bm_set 成对。
+#[no_mangle]
+pub extern "C" fn bm_clear(bm: *mut Bitmap, i: u32) -> u32 { 0 }
+
+// 测第 i 位, 返回 0/1。只读侧。
+#[no_mangle]
+pub extern "C" fn bm_test(bm: *const Bitmap, i: u32) -> u32 { 0 }
+
+// 数全图里 1 的个数 (popcount 求和)。
+#[no_mangle]
+pub extern "C" fn bm_count(bm: *const Bitmap) -> u32 { 0 }
+
+// 找第一个 0 位, 返回下标; 全满时返回 BM_BITS。
+#[no_mangle]
+pub extern "C" fn bm_first_zero(bm: *const Bitmap) -> u32 { 0 }
+
+// 把 [start, start + count) 一段全置 1, 返回实际置了几位 (可能被末尾截断)。
+#[no_mangle]
+pub extern "C" fn bm_set_range(bm: *mut Bitmap, start: u32, count: u32) -> u32 { 0 }
+
+// 用一整打初始字铺一张位图 —— 定长数组**按值**传。
+// 它能转写成 `[u64; 8]`, 但过不了 FFI 第 1 阶段 (那一道只收标量与 ptr)。
+#[no_mangle]
+pub extern "C" fn bm_load_words(bm: *mut Bitmap, words: [u64; 8]) -> u32 { 0 }
+
+// 从十六进制串 (如 "ff00..") 灌一份位图。`&str` 映得出 str, 同样卡在 FFI 闸门上。
+#[no_mangle]
+pub extern "C" fn bm_from_hex(s: &str, bm: *mut Bitmap) -> u32 { 0 }
+
+// --- 下面两条是**有意的**普通 pub fn, 各撞一种更早的边界 ---
+
+// 按指定方向扫第一个 1 位。泛型 `<T>` 连转写都过不去。
+pub fn bm_scan_from<T>(bm: &Bitmap, order: T) -> u32 { 0 }
+
+// 把字表拷出来。返回 `Vec<u64>` 是动态数组, 表示层里没有形状。
+pub fn bm_words(bm: *const Bitmap) -> Vec<u64> { Vec::new() }
