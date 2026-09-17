@@ -77,6 +77,15 @@ def _clang() -> str | None:
     return None
 
 
+def _llvm_bin(name: str) -> str | None:
+    """LLVM 自带工具 (`llvm-ar` 等) —— 与 clang 同目录, Windows 上就有。"""
+    clang = _clang()
+    if not clang:
+        return None
+    p = Path(clang).with_name(name)
+    return str(p) if p.exists() else None
+
+
 def _wsl() -> bool:
     try:
         return subprocess.run(["wsl", "-e", "true"], capture_output=True,
@@ -104,7 +113,7 @@ def build_and_run(td: Path, lomt: Path, objs: list[Path], exit_want: int) -> tup
     errs = lomentc.check(mod)
     assert not errs, errs
     ir = lomentc.emit_llvm(mod, ROOT)
-    blob, _info = lomelf.compile_ll(ir, [lomelf.ForeignObject(p) for p in objs])
+    blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(p) for p in objs])
     exe = td / "ffi.elf"
     exe.write_bytes(blob)
     r = subprocess.run(["wsl", "-e", "bash", "-lc",
@@ -450,11 +459,106 @@ def test_javascript_via_process_bridge():
 
 
 @test
-def test_object_with_relocations_is_rejected():
-    """对象里有重定位 -> **硬拒**。
+def test_multi_object_cross_reference():
+    """**多目标文件**: `a.o` 调 `b.o` —— 跨对象重定位必须解开。
 
-    第 1 阶段不实现跨对象符号重定位。猜一个偏移的后果是"调到一个错地址" —— 运行期崩溃或
-    算出错值, 而不是编译期报错。所以宁可不支持, 也不静默错链。
+    这是 `docs/173` 阶段 2 的正题, 也是"真实 C 库"与"手工挑出来的单函数玩具"的分界线:
+    真实库就是多目标文件、成员互相引用、每个成员都带重定位。
+
+    退出码 22 = `c_add(3,4)` = 7 + `c_sub(20,5)` = 15。`c_sub` 只存在于 `b.o`,
+    所以 `a.o` 里那条 `R_X86_64_PLT32` 只能靠"**先摆好所有对象再建符号表**"才解得出 ——
+    先解后摆的话 `c_sub` 还是 UND。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "b.c").write_text("int c_sub(int a, int b) { return a - b; }\n",
+                                encoding="utf-8", newline="\n")
+        (td / "a.c").write_text(
+            "extern int c_sub(int, int);\n"
+            "__attribute__((noinline)) int c_add(int a, int b) { return a + b + c_sub(20, 5); }\n",
+            encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "a.c", td / "a.o") == 0, "C 编译失败"
+        assert compile_c(clang, td / "b.c", td / "b.o") == 0, "C 编译失败"
+        # 先确认这条判据真的踩在重定位上 —— 否则它测的是别的东西
+        fo = lomelf.ForeignObject(td / "a.o")
+        assert fo.relocs, "a.o 里没有重定位, 这条判据没测到该测的东西"
+        assert "c_sub" in fo.undefined, f"a.o 没把 c_sub 记成未定义: {fo.undefined}"
+        (td / "m.lomt").write_text(
+            "module multi\n\n"
+            "extern fn c_add(a: i32, b: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "a.o", td / "b.o"], 22)
+        assert rc == 22, f"跨对象引用结果不对: rc={rc} (期望 22) err={err[-300:]!r}"
+        print("      多目标文件 (a.o 调 b.o, 跨对象重定位) -> 退出码 22")
+
+
+@test
+def test_archive_selects_only_needed_members():
+    """**静态库 `.a`**: 只挑定义"当前需要的符号"的成员, **不整包收**。
+
+    退出码 22, 与上一条同一个程序, 只是把 `a.o`/`b.o` 打成了归档。
+
+    判据的关键是那个 **`junk.o`**: 它定义 `unused_junk`（谁也不需要）、却**引用了 `printf`**。
+    - 整包收的实现会把它拖进来, 于是"引用了未定义符号" → **整个库被拒**;
+    - 固定点选择只收 `a.o`(定义 c_add) → 它需要 c_sub → 再收 `b.o` → 停。`junk.o` 从不进。
+    真实库里几乎总有那么一两个成员带无关的 libc 依赖, 所以这条差别就是"能用/不能用"。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    # 打包器用 **llvm-ar** (与 clang 同一套, Windows 上就有) —— 不用 `ar`, 免得判据
+    # 在 Windows 上静默 SKIP (第一版就是那么写的, 结果它在最该跑的那台机器上没跑)。
+    ar = shutil.which("llvm-ar") or _llvm_bin("llvm-ar.exe") or shutil.which("ar")
+    if not ar:
+        print("      SKIP: 没有 llvm-ar/ar")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "a.c").write_text(
+            "extern int c_sub(int, int);\n"
+            "__attribute__((noinline)) int c_add(int a, int b) { return a + b + c_sub(20, 5); }\n",
+            encoding="utf-8", newline="\n")
+        (td / "b.c").write_text("int c_sub(int a, int b) { return a - b; }\n",
+                                encoding="utf-8", newline="\n")
+        (td / "junk.c").write_text(
+            "extern int printf(const char *, ...);\n"
+            "int unused_junk(void) { return printf(\"never called\"); }\n",
+            encoding="utf-8", newline="\n")
+        for stem in ("a", "b", "junk"):
+            assert compile_c(clang, td / f"{stem}.c", td / f"{stem}.o") == 0, "C 编译失败"
+        lib = td / "libdemo.a"
+        r = subprocess.run([ar, "rcs", str(lib), str(td / "a.o"), str(td / "b.o"),
+                            str(td / "junk.o")], capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, f"ar 失败: {r.stderr[-200:]}"
+        # 先钉住"固定点只挑该挑的" —— 不比这条, 整包收也能跑出 22, 判据就没意义了
+        picked = {o.name for o in lomelf.Archive(lib).select({"c_add"})}
+        assert picked == {"a.o/", "b.o/"}, f"归档挑错了成员: {picked}"
+        (td / "m.lomt").write_text(
+            "module arch\n\n"
+            "extern fn c_add(a: i32, b: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [lib], 22)
+        assert rc == 22, f"归档链接结果不对: rc={rc} (期望 22) err={err[-300:]!r}"
+        print("      归档 .a: 固定点只挑 a.o+b.o, 含 printf 的 junk.o 没被拖进来 -> 22")
+
+
+@test
+def test_object_with_relocations_is_rejected():
+    """**仍然硬的边界**: 不认识的重定位类型 -> 硬拒。
+
+    上面两条把重定位从"一律拒"放开到了"认识的那几种", 但**不认识的一律拒**这条没变 ——
+    猜一个偏移的后果是"跳到错地址", 那是运行期崩溃而不是编译期报错。
+
+    另外仍然拒的还有: 重定位指向**非代码节** (`.data`/`.rodata`) —— 本档不摆那些节。
     """
     clang = _clang()
     if not clang:
@@ -462,24 +566,45 @@ def test_object_with_relocations_is_rejected():
         return
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        # -fpic 会为外部/常量引用生成 R_X86_64_* 重定位
+        # 造一个假的重定位类型: 改掉 .rela.text 里 r_info 的低 32 位
         (td / "c.c").write_text(
-            "static const char *msg = \"reloc\";\n"
-            "const char *c_msg(void) { return msg; }\n",
+            "extern int c_sub(int, int);\n"
+            "__attribute__((noinline)) int c_add(int a, int b) { return a + b + c_sub(20, 5); }\n",
             encoding="utf-8", newline="\n")
-        assert compile_c(clang, td / "c.c", td / "c.o", ("-fpic",)) == 0
+        assert compile_c(clang, td / "c.c", td / "c.o") == 0
+        raw = bytearray((td / "c.o").read_bytes())
+        fo = lomelf.ForeignObject(td / "c.o")
+        assert fo.relocs, "夹具没生成重定位"
+        # 找 .rela.text 并把它第一条的 type 改成 0x7f (不认识的)
+        import struct as _s
+        e_shoff, = _s.unpack_from("<Q", raw, 40)
+        sent, shnum = _s.unpack_from("<HH", raw, 58)
+        for k in range(shnum):
+            o = e_shoff + k * sent
+            typ, = _s.unpack_from("<I", raw, o + 4)
+            if typ != 4:
+                continue
+            off, = _s.unpack_from("<Q", raw, o + 24)
+            _s.pack_into("<I", raw, off + 8, 0x7F)      # r_info 低 32 位 = 类型
+            break
+        (td / "bad.o").write_bytes(bytes(raw))
         try:
-            lomelf.ForeignObject(td / "c.o")
+            lomelf.ForeignObject(td / "bad.o")
         except lomelf.Unsupported as e:
             assert "重定位" in str(e), e
         else:
-            raise AssertionError("带重定位的目标文件应当被拒")
-        print("      带重定位的对象: 硬拒")
+            raise AssertionError("不认识的重定位类型应当被拒")
+        print("      不认识的重定位类型: 硬拒")
 
 
 @test
 def test_object_with_undefined_symbol_is_rejected():
-    """对象引用了未定义符号 (典型是 libc) -> **硬拒**, 不猜。"""
+    """一个符号**到链接结束都没人提供** (典型是 libc) -> **硬拒**, 不猜。
+
+    **判定点从"读对象时"挪到了"链接结束时"**（阶段 2）：未定义符号本身**不再是错误** ——
+    它可能由**另一个对象**提供, 那正是多目标文件 C 库的形状。所以这条给一个没人提供的符号,
+    断言它在**链接期**被拒。留住这条是为了钉住边界仍然硬: 拒掉, 而不是猜一个地址。
+    """
     clang = _clang()
     if not clang:
         print("      SKIP: 需要 clang")
@@ -490,13 +615,23 @@ def test_object_with_undefined_symbol_is_rejected():
                                 "int c_wrap(int x) { return not_defined_anywhere(x); }\n",
                                 encoding="utf-8", newline="\n")
         assert compile_c(clang, td / "c.c", td / "c.o") == 0
+        (td / "m.lomt").write_text(
+            "module undef\n\n"
+            "extern fn c_wrap(x: i32) -> i32;\n\n"
+            "fn _start() {\n"
+            "    syscall4(60, c_wrap(1 as i32) as u64, 0, 0);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "m.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "m.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
         try:
-            lomelf.ForeignObject(td / "c.o")
+            lomelf.compile_ll(ir, [lomelf.ForeignObject(td / "c.o")])
         except lomelf.Unsupported as e:
             assert "未定义" in str(e), e
         else:
-            raise AssertionError("引用未定义符号的对象应当被拒")
-        print("      引用未定义符号的对象: 硬拒 (第 1 阶段不链 libc)")
+            raise AssertionError("引用没人提供的符号应当被拒")
+        print("      没人提供的符号: 链接期硬拒 (第 2 阶段仍不链 libc)")
 
 
 @test

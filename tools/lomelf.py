@@ -2127,24 +2127,47 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
 # ------------------------------------------------------------------ 驱动
 
 
+#: 我们实现的重定位类型 (docs/173 阶段 2)。值就是 ELF 的 `R_X86_64_*` 编号。
+REL_64 = 1        # S + A
+REL_PC32 = 2      # S + A - P
+REL_PLT32 = 4     # 同 PC32 —— 静态链接里没有 PLT, 两者等价 (GNU ld 也这么处理)
+REL_32 = 10       # (S + A) 的低 32 位, 无符号
+REL_32S = 11      # 同上, 有符号 (x86-64 上 addrmode 的绝对值走这条)
+REL_PC64 = 24     # S + A - P, 64 位
+SUPPORTED_RELOCS = (REL_64, REL_PC32, REL_PLT32, REL_32, REL_32S, REL_PC64)
+
+
 class ForeignObject:
-    """一个外部 ELF64 可重定位目标文件里我们真正要用的那点东西 (docs/173 阶段 1)。
+    """一个外部 ELF64 可重定位目标文件里我们真正要用的那点东西 (docs/173 阶段 1/2)。
 
-    **只做静态、freestanding 的对象**: 取 `.text` 的字节 + 它导出的全局符号 (名字 -> 段内
-    偏移)。两条边界都**硬失败**而不是猜:
+    **取什么**: `.text` 的字节 + 节在其中的偏移 + 它导出的全局符号 (名字 -> 段内偏移)
+    + **重定位表**。三条边界仍然**硬失败**而不是猜:
 
-    * 对象 `.text` 里**有重定位** → 报错。第 1 阶段不实现跨对象的符号重定位, 猜一个偏移
-      的后果是"调到一个错地址", 那是运行期崩溃而不是编译期报错。
-    * 对象**引用未定义符号** (典型是 libc 的 printf/malloc) → 报错。第 1 阶段不链 libc。
+    * 重定位类型不认识 → 报错 (猜的后果是"跳到错地址", 那是运行期崩溃而不是编译期报错);
+    * 重定位指向**非代码节** (`.data`/`.rodata`) → 报错 —— 本档只摆代码节;
+    * 一个符号**有重定位引用它、但到链接结束都没人定义** → 报错 (第 2 阶段仍不链 libc)。
+
+    **未定义符号本身不再是错误**: 它可能由**另一个对象**提供 —— 这正是多目标文件 C 库的
+    形状 (`a.o` 调 `b.o`)。判定推迟到"所有对象都摆好、符号表建好之后"。
     """
 
     def __init__(self, path: Path):
+        self._load(path, path.name, path.read_bytes())
+
+    @classmethod
+    def from_bytes(cls, path: Path, name: str, raw: bytes) -> "ForeignObject":
+        """从**内存里的字节**构造 —— 归档成员没有自己的文件 (`docs/173` 阶段 2)。"""
+        self = cls.__new__(cls)
+        self._load(path, name, raw)
+        return self
+
+    def _load(self, path: Path, name: str, raw: bytes) -> None:
         self.path = path
-        raw = path.read_bytes()
+        self.name = name
         if raw[:4] != b"\x7fELF" or raw[4] != 2 or raw[5] != 1:
-            raise Unsupported(f"{path.name}: 不是 ELF64 小端目标文件")
+            raise Unsupported(f"{name}: 不是 ELF64 小端目标文件")
         if struct.unpack_from("<H", raw, 16)[0] != 1:      # e_type != ET_REL
-            raise Unsupported(f"{path.name}: 不是可重定位目标文件 (ET_REL)")
+            raise Unsupported(f"{name}: 不是可重定位目标文件 (ET_REL)")
         e_shoff, = struct.unpack_from("<Q", raw, 40)
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
         secs = []
@@ -2153,7 +2176,7 @@ class ForeignObject:
             nameoff, typ, flags, addr, off, size, link, info, align, entsize = \
                 struct.unpack_from("<IIQQQQIIQQ", raw, o)
             secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
-                         "link": link, "entsize": entsize, "name": ""})
+                         "link": link, "info": info, "entsize": entsize, "name": ""})
         shstr = secs[e_shstrndx]
         for s in secs:
             end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
@@ -2174,12 +2197,15 @@ class ForeignObject:
                 buf += raw[s["off"]:s["off"] + s["size"]]
                 code.append(s)
         if not code:
-            raise Unsupported(f"{path.name}: 没有代码节 (.text / .text.*)")
-        text = bytes(buf)
-        # 符号: 只留**定义在 .text 里**的全局/弱符号; 未定义的非空名一律拒
+            raise Unsupported(f"{name}: 没有代码节 (.text / .text.*)")
+        self.text = bytes(buf)
+        self.sec_at = {k: s["at"] for k, s in enumerate(secs) if "at" in s}
+        # 符号: 定义在代码节里的全局/弱符号进 `syms`; 未定义的只记名 (`undefined`)
         syms: dict[str, int] = {}
         undefined: list[str] = []
-        for s in secs:
+        #: (symtab 节号, 符号下标) -> 名字 —— 重定位按**下标**引用符号, 靠它回查名字
+        name_of: dict[tuple[int, int], str] = {}
+        for si, s in enumerate(secs):
             if s["type"] != 2:                             # SHT_SYMTAB
                 continue
             strt = secs[s["link"]]
@@ -2190,28 +2216,114 @@ class ForeignObject:
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
+                name_of[(si, k)] = nm
+                # **`st_info` 的高 4 位是绑定, 低 4 位是类型** —— `ELF64_ST_INFO(bind, type)`
+                # 就是 `(bind << 4) | type`。原文这里是 `info & 0x0F`, 取到的是**类型**:
+                # 收定义时靠"类型是 FUNC/OBJECT"误打误撞能对, 但一旦要判绑定 (比如"未定义
+                # 的符号是不是全局的") 就整个失效 —— 实测它让归档的固定点选不出成员
+                # (`c_sub` 的 info=0x10, `&0x0F` 得 0 被当成 LOCAL)。
+                bind = info >> 4
                 if shndx == 0:
-                    undefined.append(nm)
+                    if bind in (1, 2):                     # GLOBAL / WEAK
+                        undefined.append(nm)
                 # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
                 # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
-                elif shndx < len(secs) and (info & 0x0F) in (1, 2):  # GLOBAL / WEAK
+                elif shndx < len(secs) and bind in (1, 2):  # GLOBAL / WEAK
                     tgt = secs[shndx]
                     if "at" in tgt:                              # 落在某个代码节里
                         syms[nm] = tgt["at"] + value
-        # **未定义符号先查**: 一个调用 libc 的 C 函数**同时**有未定义符号与重定位, 先说
-        # "它引用了 printf" 比说"它有重定位"有用得多 —— 前者直接告诉用户"第 1 阶段不链 libc",
-        # 后者会把人引去查重定位。所以顺序是有意的, 不是顺手。
-        if undefined:
-            raise Unsupported(
-                f"{path.name}: 引用了未定义的符号 {', '.join(sorted(set(undefined))[:4])}"
-                f" —— 第 1 阶段不链 libc (docs/173 §3)")
-        for s in secs:
-            if s["type"] == 4 and s["size"] > 0:          # SHT_RELA
-                raise Unsupported(
-                    f"{path.name}: 对象里有重定位 ({s['name']}) —— 第 1 阶段不支持"
-                    f"跨对象重定位 (docs/173 §3)")
-        self.text = text
         self.syms = syms
+        self.undefined = sorted(set(undefined))
+        # 重定位: (目标节号, 节内偏移, 类型, 目标符号名, 加数)。**只摆代码节** ——
+        # 落在 `.data`/`.rodata` 上的一律拒, 因为本档不摆那些节, 静默算出来的地址是错的。
+        self.relocs: list[tuple[int, int, int, str, int]] = []
+        for s in secs:
+            if s["type"] != 4 or s["size"] == 0:        # SHT_RELA
+                continue
+            tgt = s["info"]
+            if tgt >= len(secs) or "at" not in secs[tgt]:
+                where = secs[tgt]["name"] if tgt < len(secs) else f"#{tgt}"
+                raise Unsupported(f"{name}: 重定位指向非代码节 ({where}) —— docs/173 §3")
+            for k in range(s["size"] // 24):
+                o = s["off"] + k * 24
+                r_off, r_info, r_add = struct.unpack_from("<QQq", raw, o)
+                ty, sym_i = r_info & 0xFFFFFFFF, r_info >> 32
+                if ty not in SUPPORTED_RELOCS:
+                    raise Unsupported(f"{name}: 不认识的重定位类型 {ty} (docs/173 §3)")
+                nm = name_of.get((s["link"], sym_i))
+                if nm is None:
+                    raise Unsupported(f"{name}: 重定位引用了下标记号外的符号 {sym_i}")
+                self.relocs.append((tgt, r_off, ty, nm, r_add))
+
+
+class Archive:
+    """一个 `ar` 归档 (`.a`): 静态库的**标准形状** (docs/173 阶段 2)。
+
+    **只取需要的东西**: 经典固定点选择 —— 某成员**定义**了当前需要的符号就收它, 收完把它
+    引用的未定义符号也加进需求, 重复到不再变化。**不整包收**: 整包收会把"某个成员用了
+    printf"这种根本用不到的成员也拖进来, 于是**整个库被拒** —— 而真实库里几乎总有那么
+    一两个成员带着无关的 libc 依赖。这个差别是"多目标文件 C 库"这条判据能过的原因。
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        raw = path.read_bytes()
+        if raw[:8] != b"!<arch>\n":
+            raise Unsupported(f"{path.name}: 不是 ar 归档 (缺 !<arch> 魔数)")
+        members: list[tuple[str, bytes]] = []
+        pos = 8
+        while pos + 60 <= len(raw):
+            hdr = raw[pos:pos + 60]
+            if hdr[58:60] != b"`\n":                # 成员头以 "`\n" 收尾 (0x60 0x0A)
+                raise Unsupported(f"{path.name}: 归档成员头损坏 (偏移 {pos})")
+            name = hdr[0:16].decode("ascii", "replace").strip()
+            size_s = hdr[48:58].decode("ascii", "replace").strip()
+            try:
+                size = int(size_s)
+            except ValueError:
+                raise Unsupported(f"{path.name}: 归档成员长度不是数字 ({size_s!r})")
+            data = raw[pos + 60:pos + 60 + size]
+            if len(data) != size:
+                raise Unsupported(f"{path.name}: 归档成员被截断 ({name})")
+            members.append((name, data))
+            pos += 60 + size + (size & 1)          # 数据按偶数对齐, 奇数补一个填充字节
+        if not members:
+            raise Unsupported(f"{path.name}: 归档里没有成员")
+        self.members = members
+
+    def select(self, needed: set) -> "list[ForeignObject]":
+        # 元数据成员 (`/` 符号索引、`//` 长名表、`/SYM64/`) 不是 ELF —— 按魔数滤掉最稳,
+        # 因为它们的名字格式在各家 ar 实现里并不一致。
+        pool = [(n, d) for n, d in self.members if d[:4] == b"\x7fELF"]
+        got: list[ForeignObject] = []
+        changed = True
+        while changed:
+            changed = False
+            rest = []
+            for name, data in pool:
+                try:
+                    fo = ForeignObject.from_bytes(self.path, name, data)
+                except Unsupported:
+                    continue        # 这个成员我们用不了: 放着; 真需要它的符号时后面会报到
+                if set(fo.syms) & needed:
+                    got.append(fo)
+                    needed |= set(fo.undefined)
+                    changed = True
+                else:
+                    rest.append((name, data))
+            pool = rest
+        return got
+
+
+def load_foreign(path: Path):
+    """按**内容**分流 (不看扩展名): `!<arch>\\n` 是归档, `\\x7fELF` 是目标文件。
+
+    看内容而不是后缀: `.a` / `.o` / `.lib` / 无后缀在各家工具链里并不统一, 而两种格式的
+    魔数都极短且不可能互串。
+    """
+    if path.read_bytes()[:8] == b"!<arch>\n":
+        return Archive(path)
+    return ForeignObject(path)
 
 
 #: System V AMD64 整数实参寄存器 (我们**自己的**约定是实参走栈, 这一套只给 extern 调用点)。
@@ -2223,6 +2335,19 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # 归档展开 (docs/173 阶段 2): 先算出"当前需要的符号", 再让每个归档按固定点挑成员。
+    # 需求有两个来源: ① 我们自己 `declare` 的外部符号; ② 直接给的 `.o` 里未定义的符号。
+    # 两者都要, 因为真实库里常常是"我的 a.o 引用 ar 成员里的 b"。
+    if any(isinstance(o, Archive) for o in objects):
+        need = {x for x in externs if not x.startswith("llvm.")}
+        direct = [o for o in objects if not isinstance(o, Archive)]
+        for o in direct:
+            need |= set(o.undefined)
+        flat = list(direct)
+        for a in objects:
+            if isinstance(a, Archive):
+                flat += a.select(need)
+        objects = flat
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -2252,26 +2377,56 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     em.emit_entry_stub("_start")
     for f in funcs:
         em.emit_func(f)
-    # 外部目标文件: 它的 `.text` **接在我们自己的代码之后** (16 对齐), 并在它每个导出符号
-    # 的段内偏移处**立一个标签**。这样调用点照旧走现有的 `call`/重定位机制 —— 唯一多出来的
-    # 是"参数进寄存器"(C ABI), 见 `Emitter._call`。
+    # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
+    #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
+    #   ② **建符号表**: 把我们自己的标签与所有对象的导出符号合成一张表。**必须先全摆完**:
+    #      `a.o` 调 `b.o` 时, `a.o` 的重定位指向一个只有 `b.o` 知道的地址;
+    #   ③ **应用重定位**: 到这一步才能算 `S + A - P`。
+    # 调用点照旧走现有的 `call`/fixup 机制 (唯一多出来的是"参数进寄存器", 见 `Emitter._call`)。
+    bases: list[int] = []
     appended: list[str] = []
     for obj in objects:
         while len(em.asm.buf) % 16:
             em.asm.buf.append(0)
-        at = len(em.asm.buf)
+        bases.append(len(em.asm.buf))
         for nm, val in obj.syms.items():
             if nm in em.asm.labels:
-                continue          # 我们自己已经有这个符号: 以我们自己的为准
-            em.asm.labels[nm] = TEXT_VADDR + at + val
+                continue          # 我们 (或先摆的那个对象) 已经有它: 以先来的为准
+            em.asm.labels[nm] = TEXT_VADDR + bases[-1] + val
             appended.append(nm)
         em.asm.buf += obj.text
+    applied = 0
+    for i, obj in enumerate(objects):
+        base = TEXT_VADDR + bases[i]
+        for sec, r_off, ty, nm, add in obj.relocs:
+            target = em.asm.labels.get(nm)
+            if target is None:
+                # **到这一步才判"没人定义"**: 这是多目标文件 C 库与"引用 libc"的分界线 ——
+                # 前者由另一个对象提供, 后者到链接结束都空着。
+                raise Unsupported(
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
+                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+            site = bases[i] + obj.sec_at[sec] + r_off     # 写进缓冲的位置 (缓冲内偏移)
+            here = base + obj.sec_at[sec] + r_off         # 公式里的 P (绝对地址)
+            val = target + add                            # 公式里的 S + A
+            if ty in (REL_PC32, REL_PLT32):
+                rel = val - here
+                if not -2 ** 31 <= rel < 2 ** 31:
+                    raise Unsupported(f"{obj.name}: PC32 重定位溢出 ({nm})")
+                struct.pack_into("<i", em.asm.buf, site, rel)
+            elif ty == REL_PC64:
+                struct.pack_into("<q", em.asm.buf, site, val - here)
+            elif ty == REL_64:
+                struct.pack_into("<Q", em.asm.buf, site, val & 0xFFFFFFFFFFFFFFFF)
+            else:                                          # REL_32 / REL_32S
+                struct.pack_into("<I", em.asm.buf, site, val & 0xFFFFFFFF)
+            applied += 1
     text = em.asm.finalize()
     entry = em.asm.labels["__entry"]
     return build_elf(text, bytes(data), bss, entry), {
         "text": len(text), "data": len(data), "bss": bss, "entry": entry,
-        "funcs": [f.name for f in funcs], "objects": [o.path.name for o in objects],
-        "linked": appended,
+        "funcs": [f.name for f in funcs], "objects": [o.name for o in objects],
+        "linked": appended, "relocs": applied,
     }
 
 
@@ -2308,7 +2463,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     src = Path(files[0])
     try:
-        objs = [ForeignObject(p) for p in link]
+        objs = [load_foreign(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
             src.read_text(encoding="utf-8"), *(() if target == "pe" else (objs,)))
     except Unsupported as e:
