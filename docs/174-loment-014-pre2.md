@@ -84,7 +84,7 @@ python tools/ci.py --static-only
 | `loment build app.lomt --bogus` | rc=2 `unknown option --bogus` |
 | `loment check` 一个 `use proc` 的程序 | rc=0（**前提**：先把包里的 `share/loment/lib/proc.lomt` 放进项目的 `deps/proc/`）|
 
-**装一遍抓到三个只有装过才看得见的问题**，都已修：
+**装一遍抓到四个只有装过才看得见的问题**，都已修：
 
 1. **batch 启动器把 `--link` 吃掉了**（只有 bash 那份加了）。于是自举链接器那道硬拒
    **永远不触发**，用户看到的是 `未定义的标签: c_add` —— 方向完全错了。现在两份都解析，
@@ -95,6 +95,11 @@ python tools/ci.py --static-only
 3. **`install.ps1` 里我用 `-LiteralPath` 配通配符** —— 它**不展开通配符**，那一行**什么都不拷
    且不报错**（`$ErrorActionPreference='Stop'` 拦不住无错的情况），安装器照样 rc=0。
    同一个文件里 store 那两处用的是 `-Path`，所以它们一直对。改成 `-Path`。
+4. **两份启动器都丢掉了 `loment help [COMMAND]` 的后半截**（同一版内补）。它们硬编码转发
+   `loment-cli help`，于是 `loment help build` 只印目录页 —— 那两页详细用法（`help_of`）
+   **在包里根本走不到**，而目录页里印的偏偏是 `loment help [COMMAND]`。`loment-cli help
+   build` 直呼是好的，所以**源码级判据和 `loment_cli_test`（它直呼 loment-cli 二进制）
+   全绿、一点没盖住它**。判据补在 `loment_dist_test` 的**真装**那两条里（sh 与 cmd 各一条）。
 
 > **上表里 `--link` 那一行的"硬拒"已经补掉了**（同一版内）。装一遍把"产品路径做不了 FFI"
 > 这个缺口**顶到台面上**之后，自举链接器也读了外部 `.o` —— 现在 `loment build app.lomt
