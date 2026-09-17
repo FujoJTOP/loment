@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "d412336afdc517adf7ecd63ff6b7621b3d6057b1678660962d40dd6e69018d22"
+   "sha256": "ff033bf45f0969e418f7865c5c920a3cd2fd9e1195b5a9c5539ba0762b994975"
   },
   {
    "path": "tools/potato_measure.py",
@@ -783,7 +783,7 @@
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "1bd68616ee02c8f5dbbdac7fb969c89c4b7452beea431e64aba815bad195020b"
+   "sha256": "97e05ae0f94947373af8bfa2ae0c136202a1700b504dbb9e61c9e5d35cd6e3b3"
   },
   {
    "path": "loment/build/win_shim.bin",
