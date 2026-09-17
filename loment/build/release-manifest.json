@@ -807,7 +807,7 @@
   },
   {
    "path": "loment/lib/proc.lomt",
-   "sha256": "005de668e021bc81c9791ed581eaa87b1a762421dcc6fce6c1aad8205a032298"
+   "sha256": "65f9da1a9be7d84221cdb05dca92d7a5f791e829e165811b0c5deecbb45bae1b"
   },
   {
    "path": "loment/lib/sha256.lomt",
@@ -1247,7 +1247,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "488daf712e79a7a0182ccdb413758bdf756fc47aae04009dd1c8bd273c61a1e5"
+   "sha256": "56c9aeb994479aa68ef4abae8eeae85749fb5e72b18aa94ec2b4fd10dd31a714"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
