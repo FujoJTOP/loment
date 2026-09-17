@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # loment_publish.py — 把单仓里的 Loment / lompi 切出来，发到各自的私有库 (docs/171)
 #
-# 分工（用户 2026-09-15 定）：
+# 分工（用户 2026-09-15 定，2026-09-17 修订）：
 #   * **开发在主仓**（FujoOS 单仓，`D:\Dev\FujoOS-FujoLang`），单仓里的内容**原样不动**；
-#   * 两个新库是**发布口**，不是开发地 —— 别在那里直接提交（提交了会被下次发布盖掉）。
-#   * 名字：`FujoJTOP/loment` 与 `FujoJTOP/lompi`，**私有**。
+#   * 两个库是**发布口**，而**每次开发提交之后都要 `--push` 一次**把主仓当时的状态发过去
+#     —— 用户 2026-09-17："以后提交到这，开发提交也在这"。所以**开发提交也会落在那两个库里**，
+#     只是**由这里发**，不是在那边写的。
+#   * **发布是整体覆盖**（force-push 成 `main`）：**别在那边直接提交**，一定被下次发布盖掉。
+#     那边的 `README.md` 与 `.gitattributes` 也是本工具直出的（见 §cmd_push），不是手写的。
+#   * 名字与可见性：`FujoJTOP/loment` 与 `FujoJTOP/lompi`。**Loment 公开**
+#     （用户 2026-09-16 定，覆盖了 09-15 那句"私有"）；lompi 的可见性见它自己的 spec ——
+#     可见性写进 spec 而不是手敲 `gh repo edit`，因为手敲的只生效一次，换台机器就丢。
 #
 #   python tools/loment_publish.py --status          # 切出来会是什么样（路径数 + 树哈希）
 #   python tools/loment_publish.py --check           # 门禁: 清单自洽（路径都存在、有条目）
