@@ -2136,6 +2136,15 @@ REL_32S = 11      # 同上, 有符号 (x86-64 上 addrmode 的绝对值走这条
 REL_PC64 = 24     # S + A - P, 64 位
 SUPPORTED_RELOCS = (REL_64, REL_PC32, REL_PLT32, REL_32, REL_32S, REL_PC64)
 
+#: 我们**不摆**、丢掉也无害的节: 展开信息与调试信息。代码引用不到它们, 所以针对它们的重定位
+#: 是空转 —— **跳过而不是报错**。
+#:
+#: **为什么只放这几个**: `.data`/`.rodata` 也"我们不摆", 但丢掉它们**不是无害的** —— 代码
+#: 里的字符串常量就住在 `.rodata`, 丢了会让程序读到垃圾 (静默错)。所以只有"代码引用不到"的
+#: 元数据节能进这张名单, 其余一律仍按"指向非代码节"硬拒。
+#: 实测来源: Zig 的 `-OReleaseSmall` 对象只剩一条 `.rela.eh_frame`, 不放行它整个语言就用不了。
+_META_SEC = (".eh_frame", ".debug", ".comment", ".note")
+
 
 class ForeignObject:
     """一个外部 ELF64 可重定位目标文件里我们真正要用的那点东西 (docs/173 阶段 1/2)。
@@ -2243,6 +2252,8 @@ class ForeignObject:
             tgt = s["info"]
             if tgt >= len(secs) or "at" not in secs[tgt]:
                 where = secs[tgt]["name"] if tgt < len(secs) else f"#{tgt}"
+                if tgt < len(secs) and secs[tgt]["name"].startswith(_META_SEC):
+                    continue          # 展开/调试信息: 我们不摆, 丢掉无损 (见 _META_SEC)
                 raise Unsupported(f"{name}: 重定位指向非代码节 ({where}) —— docs/173 §3")
             for k in range(s["size"] // 24):
                 o = s["off"] + k * 24
