@@ -1,0 +1,125 @@
+module num
+
+// num.lomt — 整数与文本的互转 (std 核)
+//
+// **为什么要有它**: 输出一个十进制数是每个程序都要做的事, 而库里已经有三处各写了一遍
+// 十六进制输出 (`json.lomt` 的 `j_hexdig`/`j_hex4`、`sha256.lomt` 的 `hex_dig`)。
+// 同一件事做三遍就是公共件缺失的信号 (docs/180 §2)。
+//
+// 约定 (docs/180 §3):
+//   * **就地写进调用方给的缓冲**, 返回**写出的字节数** —— 没有 `str` 返回值这种形态
+//     ("语言没有字符串常量"是这套设计的一部分, docs/143);
+//   * `num_to_*` 系列**不写终止符**: 长度就是返回值, 调用方按它切;
+//   * `num_parse_*` 系列**遇到第一个非法字符就停**, 返回已吃的部分组成的结果 ——
+//     这样它天然能做"读一个数然后接着读别的"。
+
+/// 十进制写多少位 (0 -> 1)。
+pub fn num_dec_len(v: u32) -> u32 {
+    let n: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+/// 十进制写出, 返回字节数。高位在前, **不补零** (0 写一个 '0')。
+pub fn num_to_dec(out: ptr, v: u32) -> u32 {
+    let n: u32 = num_dec_len(v);
+    let x: u32 = v;
+    let i: u32 = n;
+    while i > 0 {
+        i = i - 1;
+        store8(out, i, (48 as u32 + x % 10) as u8);
+        x = x / 10;
+    }
+    return n;
+}
+
+/// 读十进制。遇到非数字就停。一个都没读到返回 0 (调用方拿 0 长度判别)。
+pub fn num_parse_dec(p: ptr, n: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u8 = load8(p, i) as u8;
+        if c < 48 as u8 || c > 57 as u8 {
+            return v;
+        }
+        v = v * 10 + ((c as u32) - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 读了几个十进制字符 (与 `num_parse_dec` 同一口径, 用来推进游标)。
+pub fn num_dec_span(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u8 = load8(p, i) as u8;
+        if c < 48 as u8 || c > 57 as u8 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 一位十六进制的值: '0'..'9' / 'a'..'f' / 'A'..'F' -> 0..15, 其它 **-1**。
+pub fn num_hex_val(c: u8) -> i64 {
+    if c >= 48 as u8 && c <= 57 as u8 {
+        return (c as u32 - 48) as i64;
+    }
+    if c >= 97 as u8 && c <= 102 as u8 {
+        return (c as u32 - 87) as i64;
+    }
+    if c >= 65 as u8 && c <= 70 as u8 {
+        return (c as u32 - 55) as i64;
+    }
+    return 0 as i64 - 1;
+}
+
+/// 十六进制写出 `width` 位 (小写), 高位补 '0'。返回写出的字节数 = width。
+/// 值比 width 位能装的大时**只写低 width 位** (取模) —— 调用方负责给够宽度。
+pub fn num_to_hex(out: ptr, v: u32, width: u32) -> u32 {
+    let i: u32 = width;
+    let x: u32 = v;
+    while i > 0 {
+        i = i - 1;
+        let d: u32 = x % 16;
+        let ch: u32 = d + 48;
+        if d >= 10 {
+            ch = d + 87;                    // 'a' = 97, 10 -> 97
+        }
+        store8(out, i, ch as u8);
+        x = x / 16;
+    }
+    return width;
+}
+
+/// 读十六进制, 读到非法字符就停。
+pub fn num_parse_hex(p: ptr, n: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let d: i64 = num_hex_val(load8(p, i) as u8);
+        if d < 0 {
+            return v;
+        }
+        v = v * 16 + (d as u32);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 读了几个十六进制字符 (推进游标用)。
+pub fn num_hex_span(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if num_hex_val(load8(p, i) as u8) < 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}

@@ -1,0 +1,117 @@
+module mem
+
+// mem.lomt — 字节级原语 (std 核)
+//
+// **为什么要有它**: 语言内建只给单字节的 `load8`/`store8`, 于是一段"比较/拷贝/填"
+// 在每个用到的地方各写一遍 —— `json.lomt` 的 `j_slow_key_eq` 与 `sha256.lomt` 的各段
+// 循环就是同一件事做了好几遍。公共基础件该在的地方是这里 (docs/180 §2)。
+//
+// 约定 (与 json/sha256 一致, docs/180 §3):
+//   * 输入是 `(ptr, 长度)`, **不假设 NUL 结尾** —— 长度是调用方给的;
+//   * 只碰调用方给的区间, 不分配 (没有分配器: 内存一律由调用方 `alloc` 或给栈变量);
+//   * 返回 `i64` 的"找位置"类函数用 **-1 表示没找到** —— u32 上没法表达"比 0 还小"。
+
+/// 拷贝 n 字节。**区间可以重叠吗**: 不可以 —— 需要重叠安全的语义要用 `mem_move`。
+pub fn mem_copy(dst: ptr, src: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(src, i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 从**尾到头**拷贝 —— `dst > src` 且区间重叠时用它 (`mem_copy` 会从头覆盖还没读的字节)。
+pub fn mem_move(dst: ptr, src: ptr, n: u32) {
+    let i: u32 = n;
+    while i > 0 {
+        i = i - 1;
+        store8(dst, i, load8(src, i) as u8);
+    }
+}
+
+/// 填 n 个字节。
+pub fn mem_fill(dst: ptr, n: u32, v: u8) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, v);
+        i = i + 1;
+    }
+}
+
+/// 填 n 个 0。
+pub fn mem_zero(dst: ptr, n: u32) {
+    mem_fill(dst, n, 0 as u8);
+}
+
+/// 相等比较。长度不同**不是**它的事 —— 调用方比 (拿两边的 n 比)。
+pub fn mem_eq(a: ptr, b: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 小端读写 16/32 位。**与 `loment/examples/bytes.lomt` 的 `load16`/`store16`/… 同语义**
+/// (连写法都一样: 乘加而不是位移, 两份要能逐位对上)。
+///
+/// 那一个是既有的一份, 这里是 std 核里该有的那一份。**为什么非得有**: 原先
+/// `loment/lib/sha256.lomt` 直接调 `load32`/`store32` 却谁也不 `use` —— 靠的是
+/// **消费者** (lompkg) 碰巧把 `examples/bytes.lomt` 拉进了同一个单元。于是它
+/// **单独一份检查不过**, 而没有任何判据在问"每个 std 模块自己能不能过检查"
+/// (补上的是 `loment_std_test`)。两份尚未合并, 记在 `docs/180` §6。
+pub fn mem_load16(p: ptr, off: u32) -> u32 {
+    return load8(p, off) + load8(p, off + 1) * 256;
+}
+
+pub fn mem_load32(p: ptr, off: u32) -> u32 {
+    return mem_load16(p, off) + mem_load16(p, off + 2) * 65536;
+}
+
+pub fn mem_store16(p: ptr, off: u32, v: u32) {
+    store8(p, off, v as u8);
+    store8(p, off + 1, (v / 256) as u8);
+}
+
+pub fn mem_store32(p: ptr, off: u32, v: u32) {
+    mem_store16(p, off, v % 65536);
+    mem_store16(p, off + 2, v / 65536);
+}
+
+/// 找一个字节的位置。返回 **-1 表示没有**。
+///
+/// **`needle as u32` 那个转换不能省**: `load8` 的 Loment 类型是 `u32`, 而 `needle` 是 `u8`,
+/// 于是这里是**混宽比较**。混宽比较在今天的两个编译器里都会把操作数宽度搞错 ——
+/// 参考实现只提升左边、右边留 i8, 产出**非法 IR** (clang 当场拒: `'%t9' defined with type
+/// 'i8' but expected 'i32'`); 自举那边则把左边**截到 i8** 再比 (对 `load8` 恰好等价,
+/// 但对一般 `u32 == u8` 是错码)。两边在 `mem_find` 这个形状上还**不一致**。
+/// 判据与复现记在 `docs/158` §4 的 B1。显式把两边都变 `u32` 就绕开了, 且是合法 IR。
+pub fn mem_find(hay: ptr, hn: u32, needle: u8) -> i64 {
+    let want: u32 = needle as u32;
+    let i: u32 = 0;
+    while i < hn {
+        if load8(hay, i) == want {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 1;
+}
+
+/// 在 `[0, n)` 里找第一个**不等于** v 的字节位置。返回 -1 表示全都是 v。
+/// (取"去掉前导某字符"这一类操作用; 与 `mem_find` 一起构成两端裁剪)
+/// 同上: `v as u32` 是为了躲开混宽比较 (见 `mem_find`)。
+pub fn mem_find_ne(hay: ptr, hn: u32, v: u8) -> i64 {
+    let want: u32 = v as u32;
+    let i: u32 = 0;
+    while i < hn {
+        if load8(hay, i) != want {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 1;
+}
