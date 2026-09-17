@@ -109,16 +109,18 @@ REPOS: dict[str, dict] = {
             ".claude/skills/loment/", ".claude/skills/lompi/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
-            # 文档：主体走 glob，**但 glob 会静默漏掉名字里没有 "loment" 的那些** ——
-            # 下面这几条 explicit 的就是补漏。2026-09-17 审计出 5 篇（110/142/147/176/177），
-            # 其中 142/147 还被 `docs/175` 正文引用着：漏了它们，开发口里就有断链。
-            "docs/14*-loment-*.md", "docs/141-l0-lom-spec.md",
-            "docs/15*-loment-*.md", "docs/16*-loment-*.md", "docs/17*-loment-*.md",
-            "docs/110-w36-potato-lang.md",
-            "docs/142-potato-v0.md",
-            "docs/147-potato-v1-spec.md",
-            "docs/176-frozen-surface-cost.md",
-            "docs/177-ffi-complete.md",
+            # 文档：**一条 `docs/*.md` 收全**。
+            #
+            # 原文是按名字分段收（`docs/14*-loment-*.md` + 一串 explicit 补漏），那是在
+            # **旧树**（`docs/` 里 FujoOS 与 Loment 两线混放）里不得不那么写。它两头不讨好：
+            # `14*` 会把内核文档也捞进来，而 `-loment-` 的收紧又漏掉名字里没有 loment 的
+            # （110/142/147/176/177，其中 142/147 还被 `docs/175` 正文引用着 —— 漏了就是断链）。
+            # 补 explicit 能修一次，但每加一篇非 `*-loment-*` 的文档就得再想一遍。
+            #
+            # 本仓就是 Loment 的开发口，`docs/` 里全是这条线的文档，所以按目录收才是**说对了意图**。
+            # 2026-09-17 发布清单（`loment_release.GLOBS` 与自举的 `lomrel.lomt`）先这么改了；
+            # 这里跟上，三处口径一致。
+            "docs/*.md",
             # 仓库约定与许可：**开发口缺了它们就没法按本仓的规矩工作**
             # （`CLAUDE.md` 是工作区级指令；`.gitignore` 不管住的话 `selfhost_driver.ll`
             #   那种大件与构建产物会跟着进来）。
