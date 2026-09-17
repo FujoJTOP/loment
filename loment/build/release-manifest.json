@@ -675,7 +675,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "45afcdcfa0150142fb14ba719b3976db6c88dc98aa7eabaae3541c9e93b3cbc3"
+   "sha256": "0d36d36679912ad1ca95e57c01cdcce22d0fe6e90024b8503c7a3a43f0edf713"
   },
   {
    "path": "tools/loment_diag.py",
@@ -703,7 +703,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "9275b96440af6a02220d05a1dd86663a2d2590ea46e8e1057cc4b10561b07d9b"
+   "sha256": "f888b439f783505653871b5e1b5c7fb1bb5d6487a836837f66a22ef03fe24154"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -719,7 +719,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "9878549c9cb401753fba332f8706fe5fe38757f22d10098a91cc3434cde6dad7"
+   "sha256": "bba2a354341a7f10b026a1d03cb274cf38c006cd4e1561b69b1afe8a16b40ca5"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -751,7 +751,7 @@
   },
   {
    "path": "tools/loment_fmt_test.py",
-   "sha256": "3f2e21216aaa5b0c4ad2e89c49d83614ff0e033da8e5903934ff735011b35e41"
+   "sha256": "69351a975ad870ac7fc51085406334359050f7ff5bdab87e30ef8a43f6f7620d"
   },
   {
    "path": "tools/loment_audit.py",
@@ -759,11 +759,11 @@
   },
   {
    "path": "tools/loment_doc_test.py",
-   "sha256": "7f7dcc7a54a7ab3d6141d21faa638e31767054656cf6019788308c5cc4f0fc29"
+   "sha256": "ca9d6c9c257fc39014ec0b87f39bd07964b340e407bd724ba2e16060760bed5d"
   },
   {
    "path": "tools/loment_json_test.py",
-   "sha256": "79559218598b916d5785bab08b936ae5518af53479d647c2054717b188e833cf"
+   "sha256": "31f43e7af925e45323105dc45976b22c2a3040b50a8c5d95eea3866152c6de39"
   },
   {
    "path": "tools/lomelf.py",
@@ -771,11 +771,11 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "9e75764170ec733a599b55a15bfba65e4fd91b38a083dd410049e5396222364c"
+   "sha256": "3ce5c6edb10c94ae36d033afad606aa1ec1ebdc1239171b58d90d986758f47aa"
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "bdb62f6735e1d848fdabc80547d5a1353a93bfbd555cb2df79b9aa5bc64f78c6"
+   "sha256": "17cca351b15d60074b8d7a18d326cde264c27096ed900ac33ac6418a0c68b064"
   },
   {
    "path": "tools/lomt_from.py",
@@ -791,7 +791,7 @@
   },
   {
    "path": "tools/loment_genesis.py",
-   "sha256": "1629d1b05e634e1ab6325bb875f27eb75ecd743449943cafae2b2541e932c6e0"
+   "sha256": "20196f014a19edecf18c2218da0a18337d9257133733d70fd8ad9892c8de6198"
   },
   {
    "path": "tools/loment_genesis_test.py",
@@ -799,19 +799,19 @@
   },
   {
    "path": "tools/loment_status_test.py",
-   "sha256": "c60bec94ba90e1fd403515f26386f3135409d63f45a0315b44138e1bec351fb3"
+   "sha256": "d2562c51082d0242a6617346c4d2cd3f38e13cbf68df346c089b2f4350e6c45d"
   },
   {
    "path": "tools/loment_rel_test.py",
-   "sha256": "b34fab5cbf81177d14ad72f3f4a20ffa6c28e1879e3a7446cc6d0afcdfd03a02"
+   "sha256": "cbbf9801571f4543a7b22baccfcb59d20c505f82a7e26de726af126a5e609f2d"
   },
   {
    "path": "tools/loment_pkg_test.py",
-   "sha256": "3e0d8e5574a2005c450f498ef8392a2cf14d80706f4e10679abc772ee81cfa05"
+   "sha256": "0b18b1d1d653b71c34abb53a11960f356318007ddf23d6b5133331429618419c"
   },
   {
    "path": "tools/loment_lomc_test.py",
-   "sha256": "259bf398eb9558e3bec6dd6fbe23609a4c5a589acfbb1e97c30b6bf290f8aece"
+   "sha256": "2f9fe02f5c89744cb277f9642868867f173f23727d75bf422c866f95494ba0e5"
   },
   {
    "path": "loment/lib/json.lomt",
@@ -835,7 +835,7 @@
   },
   {
    "path": "tools/loment_lsp_test.py",
-   "sha256": "9a6dcfc181bcf2ec23643cbe73544eafa16a091230ef233ac1f553f4161310ab"
+   "sha256": "ee70ed31b9887e8ff9ace1064d82924ea605f16122f61089d8732240cdc09ef7"
   },
   {
    "path": "tools/loment_editors_test.py",
@@ -871,11 +871,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "e3149b910ce67ead26521a10aefafb42c67a00608ae3bc339b48767513619f9a"
+   "sha256": "eba7fd46dc7091d5fa29b919c45612ada621022c7c67d559ce247ccde510e07e"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "9f4f35ad31e0135b04a11ff19074278bcf1cbe204f35eb983d88d1564eecdea7"
+   "sha256": "7d1d9735292aae123ee3913c05c3d41325d68f177fb4dda3f402c9c61d647aa0"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1336,6 +1336,10 @@
   {
    "path": "docs/180-std-core.md",
    "sha256": "d4b97f398ba4c508012d2ff93dd9a43b3dc679d3fd106c7683f5f7addebbb29d"
+  },
+  {
+   "path": "docs/181-gate-parallel.md",
+   "sha256": "b141fdf432f087a83e39ab3a6f1b1bf229ca632e33f6bd009c183192a7465845"
   },
   {
    "path": "docs/manual/index.md",
