@@ -68,6 +68,13 @@ REPOS: dict[str, dict] = {
             # （`CLAUDE.md` 是工作区级指令；`.gitignore` 不管住的话 `selfhost_driver.ll`
             #   那种大件与构建产物会跟着进来）。
             "CLAUDE.md", "AGENTS.md", ".gitignore", "LICENSE",
+            # **`scripts/` 里只有这两个是 Loment 线的** —— 别整目录收（其余是 FujoOS 的
+            # 内核/ISO 构建脚本）。这两个被工具链当成**必需的启动脚本**引用：
+            # `loment_seed.py:72` 的 LAUNCH_SCRIPTS 点名 `scripts/lomc.ps1`（缺了它
+            # "装工具不需要 Python"这条会静默退化），`loment_release.py:91` 与
+            # `loment_src.py:49` 两个都点名。2026-09-17 把整个 `scripts/` 当 FujoOS 排除
+            # 是**错的**，是 `loment_seed_test` 1/4 红查出来的。
+            "scripts/lomc.ps1", "scripts/install-lsp.ps1",
         ],
         "renames": [],
         "floor": 250,
@@ -408,8 +415,20 @@ def cmd_push(which: str) -> int:
             (td / "README.md").write_text(spec["readme"], encoding="utf-8", newline="\n")
             _git("add", "README.md", cwd=td)
             if spec.get("gitattributes"):
-                (td / ".gitattributes").write_text(spec["gitattributes"],
-                                                   encoding="utf-8", newline="\n")
+                # **追加，不覆盖**（2026-09-17 修）。这个文件**不是发布工具的私产**：它带着
+                # `*.lomt text eol=lf` 那条规矩，而自举的逐字节判据依赖"检出换行不漂"
+                # （仓库里那段注释写着为什么：同一 commit 在两台机器上文件字节不同，
+                # 就会冒出"只在某个 worktree 才红"的假回归）。
+                #
+                # 原实现无条件覆盖，于是 `loment` 克隆出来时 `codegen.lomt` 是 **CRLF**,
+                # `loment_p8_test` 的 AST 逐字节判据当场红（Loment 侧看到 `\n\n`、Python 侧
+                # 看到 `\n`）。以前 `loment` 只是"没人从它构建"的发布镜像所以没暴露；
+                # 2026-09-17 它成了**开发口**，就直接踩上了。
+                ga = td / ".gitattributes"
+                cur = ga.read_text(encoding="utf-8") if ga.exists() else ""
+                if spec["gitattributes"].strip() not in cur:
+                    ga.write_text((cur.rstrip("\n") + "\n\n" + spec["gitattributes"]).lstrip("\n"),
+                                  encoding="utf-8", newline="\n")
                 _git("add", ".gitattributes", cwd=td)
             _git("-c", "user.name=loment_publish", "-c", "user.email=noreply@fujo.invalid",
                  "commit", "--quiet", "-m", "README — 说清这是什么、怎么开始",
