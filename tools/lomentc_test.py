@@ -105,7 +105,9 @@ def test_rust_output_shape():
 @test
 def test_potato_emits_used_layouts():
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v1" and doc["unit"] == "demo" and doc["language"] == "loment"
+    assert doc["potato"] == "v2" and doc["unit"] == "demo" and doc["language"] == "loment"
+    # v2 的新字段 (docs/143 §3.2): 没写 `choose` 就是默认 `std` —— 对象里永远显式。
+    assert doc["mode"] == "std", doc.get("mode")
     assert [r["name"] for r in doc["layouts"]] == ["Header", "Section"]
     cap = doc["capabilities"][0]
     assert cap == {"name": "blk_write", "domain": {"space": "disk", "lo": 0, "hi": 4}, "revocable": True}
@@ -1097,14 +1099,37 @@ def test_m45_form_object_v1_covers_slices_strings_generics():
 
 
 @test
-def test_m45_every_example_exports_valid_v1():
+def test_m45_every_example_exports_valid_v2():
     ex = ROOT / "loment" / "examples"
     names = sorted(p.stem for p in ex.glob("*.lomt"))
     assert len(names) >= 15, names
     for n in names:
         doc = _potato(n)
-        assert doc["potato"] == "v1", n
+        assert doc["potato"] == "v2", n
+        assert doc["mode"] in potato.MODES, (n, doc.get("mode"))
         assert potato.validate(doc) == [], (n, potato.validate(doc))
+
+
+@test
+def test_mode_follows_choose_and_defaults_to_std():
+    """`mode` 就是根单元 `choose` 的那一个值, 不写则 `std` (docs/143 §3.2 / docs/175 §8)。
+
+    这是 docs/175 §8 那条判据的**正向**一半: 形式对象里的 mode 必须跟着源码走。
+    反向那一半 (删掉字段 -> 校验器必须红) 在 `potato_test` 的 v2 负例里。
+    """
+    src = "module m\n\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+        assert doc["potato"] == "v2" and doc["mode"] == "no_std", doc.get("mode")
+    # 不写 choose -> std
+    src2 = "module m\n\nfn f() -> u32 {\n    return 1;\n}\n"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src2, encoding="utf-8", newline="\n")
+        doc2 = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+        assert doc2["mode"] == "std", doc2.get("mode")
 
 
 @test

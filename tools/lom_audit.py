@@ -217,17 +217,25 @@ def audit_fuc(diffs: list[str]) -> None:
         diffs.append("[fuc/kernel] fuc_gen.rs 与 .lom 生成结果不一致 (重新生成即可)")
 
 
-def audit_generated(diffs: list[str]) -> int:
-    """所有登记生成物必须与 .lom 生成结果逐字节一致。"""
+def generated_wants() -> list[tuple[Path, str]]:
+    """`GENERATED` 表里 `.lom` -> 各语言产物的 (路径, 应该是的字节)。"""
     cache: dict[Path, lomc.Module] = {}
+    out = []
     for lom, kind, path in GENERATED:
         if lom not in cache:
             cache[lom] = lomc.load(lom)
-        want = lomc.EMITTERS[kind](cache[lom])
+        out.append((path, lomc.EMITTERS[kind](cache[lom])))
+    return out
+
+
+def audit_generated(diffs: list[str]) -> int:
+    """所有登记生成物必须与 .lom 生成结果逐字节一致。"""
+    names = {path: lom.name for lom, _k, path in GENERATED}
+    for path, want in generated_wants():
         if not path.exists():
             diffs.append(f"[gen        ] {path.relative_to(ROOT)} 缺失")
         elif path.read_text(encoding="utf-8") != want:
-            diffs.append(f"[gen        ] {path.relative_to(ROOT)} 与 {lom.name} 生成结果不一致")
+            diffs.append(f"[gen        ] {path.relative_to(ROOT)} 与 {names[path]} 生成结果不一致")
     return len(GENERATED)
 
 
@@ -247,43 +255,78 @@ def audit_fujr(diffs: list[str]) -> None:
         diffs.append("[fujr       ] fujopack.py 未引用 lom/build/fujr.py")
 
 
-def audit_l1(diffs: list[str]) -> None:
-    """L1 产物必须与 .lomt 转译结果一致 (docs/143)。"""
-    import lomentc
+# --------------------------------------------------------------------------- 生成物清单
+#
+# 这一族是"**有判据、也必须能重新生成**"的产物 (docs/158 §5 第 3 条要的那一步)。
+# 审计与 `--emit` **共用同一次计算** —— 另外写一份"产物该长什么样"就是第二份真相,
+# 两份必然漂, 而漂法是静默的 (判据绿、产物错)。
+#
+# 为什么这个入口现在才补: 之前的流程是"到旧树跑一遍生成、把文件拷过来", 搬到开发口
+# 之后旧树不在了, 才发现有几件产物**只有判据、没有生成器** (自举那 4 个
+# `selfhost_*.potato.json` 就是) —— 2026-09-17 要给形式对象升 v2 时撞上的。
 
-    src = ROOT / "loment" / "examples" / "demo.lomt"
-    if not src.exists():
-        diffs.append("[l1         ] loment/examples/demo.lomt 缺失")
-        return
+def transpile_wants() -> list[tuple[Path, str]]:
+    """`loment/examples/` 的 .rs / .ll 产物。"""
+    import lomentc
+    ex = ROOT / "loment" / "examples"
+    b = ROOT / "loment" / "build"
+    src = ex / "demo.lomt"
     mod = lomentc.load(src)
     deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
-    for e in lomentc.check(mod, deps=deps):
-        diffs.append(f"[l1         ] {e}")
-    for path, want in (
-        (ROOT / "loment" / "build" / "demo.rs", lomentc.emit_rust(mod, ROOT, deps)),
-        (ROOT / "loment" / "build" / "native.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_agg.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_agg.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_str.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_str.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_slice.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_slice.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_mut.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_mut.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_gen.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_gen.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_trait.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_trait.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_res.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_res.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_mem.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_mem.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_bits.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_bits.lomt"), ROOT)),
-        (ROOT / "loment" / "build" / "native_entry.ll",
-         lomentc.emit_llvm(lomentc.load(ROOT / "loment" / "examples" / "native_entry.lomt"), ROOT)),
-    ):
+    out = [(b / "demo.rs", lomentc.emit_rust(mod, ROOT, deps))]
+    for n in ("native", "native_agg", "native_str", "native_slice", "native_mut",
+              "native_gen", "native_trait", "native_res", "native_mem", "native_bits",
+              "native_entry"):
+        out.append((b / f"{n}.ll", lomentc.emit_llvm(lomentc.load(ex / f"{n}.lomt"), ROOT)))
+    return out
+
+
+def example_potato_wants() -> list[tuple[Path, str]]:
+    """M45/M46: 每个示例一份形式对象 (编译器的强制导出面)。"""
+    import lomentc
+    ex = ROOT / "loment" / "examples"
+    b = ROOT / "loment" / "build"
+    out = []
+    for s in sorted(ex.glob("*.lomt")):
+        m = lomentc.load(s)
+        out.append((b / f"{s.stem}.potato.json",
+                    lomentc.emit_potato(m, ROOT,
+                                        lomentc.resolve_deps(m, ROOT, s.parent, entry=s))))
+    return out
+
+
+def selfhost_potato_wants() -> list[tuple[Path, str]]:
+    """M79/M80/M81/M82: 自举各模块的形式对象。"""
+    import lomentc
+    b = ROOT / "loment" / "build"
+    out = []
+    for stem in ("lexer", "parser", "checker", "codegen"):
+        sh = ROOT / "loment" / "selfhost" / f"{stem}.lomt"
+        if not sh.exists():
+            continue
+        m = lomentc.load(sh)
+        out.append((b / f"selfhost_{stem}.potato.json",
+                    lomentc.emit_potato(m, ROOT,
+                                        lomentc.resolve_deps(m, ROOT, sh.parent, entry=sh))))
+    return out
+
+
+def cap_asserts_want() -> tuple[Path, str]:
+    """M50: A1–A4 断言表。"""
+    import potato_assert
+    return (ROOT / "loment" / "build" / "cap_asserts.rs",
+            potato_assert.emit_rust(potato_assert.load_objects()))
+
+
+def syscalls_want() -> tuple[Path, str]:
+    """M72: 系统调用层由 `lom/fuai.lom` 单源生成。"""
+    import loment_syscalls
+    return (ROOT / "loment" / "build" / "fuai_syscalls.lomt", loment_syscalls.emit())
+
+
+def audit_l1(diffs: list[str]) -> None:
+    """L1 产物必须与 .lomt 转译结果一致 (docs/143)。"""
+    for path, want in transpile_wants():
         if not path.exists():
             diffs.append(f"[l1         ] {path.relative_to(ROOT)} 缺失")
         elif path.read_text(encoding="utf-8") != want:
@@ -291,10 +334,7 @@ def audit_l1(diffs: list[str]) -> None:
 
     # M45/M46: 每个示例必须有一份通过独立校验器的形式对象 (缺失/过期 = 门禁失败)
     import potato
-    for src2 in sorted((ROOT / "loment" / "examples").glob("*.lomt")):
-        obj = ROOT / "loment" / "build" / f"{src2.stem}.potato.json"
-        m2 = lomentc.load(src2)
-        want = lomentc.emit_potato(m2, ROOT, lomentc.resolve_deps(m2, ROOT, src2.parent, entry=src2))
+    for obj, want in example_potato_wants():
         if not obj.exists():
             diffs.append(f"[l1         ] {obj.relative_to(ROOT)} 缺失 (M46 强制导出)")
             continue
@@ -307,36 +347,25 @@ def audit_l1(diffs: list[str]) -> None:
             diffs.append(f"[l1         ] {obj.relative_to(ROOT)} 形式对象非法: {errs[0]}")
 
     # M50: A1–A4 断言表必须与形式对象一致
-    import potato_assert
-    cap = ROOT / "loment" / "build" / "cap_asserts.rs"
-    want_cap = potato_assert.emit_rust(potato_assert.load_objects())
+    cap, want_cap = cap_asserts_want()
     if not cap.exists():
         diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 缺失 (M50 断言绑定)")
     elif cap.read_text(encoding="utf-8") != want_cap:
         diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 与形式对象不一致 (M50)")
 
     # M72: 系统调用层必须由 lom/fuai.lom 单源生成
-    import loment_syscalls
-    syscalls = ROOT / "loment" / "build" / "fuai_syscalls.lomt"
-    want_sys = loment_syscalls.emit()
+    syscalls, want_sys = syscalls_want()
     if not syscalls.exists():
         diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 缺失 (M72)")
     elif syscalls.read_text(encoding="utf-8") != want_sys:
         diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 与 lom/fuai.lom 不一致 (M72)")
 
     # M79/M80/M81/M82: 自举 lexer/parser/checker/codegen 的形式对象必须与源码一致
-    for stem in ("lexer", "parser", "checker", "codegen"):
-        sh = ROOT / "loment" / "selfhost" / f"{stem}.lomt"
-        sh_obj = ROOT / "loment" / "build" / f"selfhost_{stem}.potato.json"
-        if not sh.exists():
-            continue
-        m3 = lomentc.load(sh)
-        want_sh = lomentc.emit_potato(m3, ROOT,
-                                      lomentc.resolve_deps(m3, ROOT, sh.parent, entry=sh))
+    for sh_obj, want_sh in selfhost_potato_wants():
         if not sh_obj.exists():
-            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 缺失 (自举 {stem})")
+            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 缺失 (自举形式对象)")
         elif sh_obj.read_text(encoding="utf-8") != want_sh:
-            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost/{stem}.lomt 不一致")
+            diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost 源码不一致")
 
     # M93/M95/M99: 手册站点与发布清单必须与当前工件一致
     import loment_manual
@@ -358,7 +387,40 @@ def audit_l1(diffs: list[str]) -> None:
             diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): {bad[:2]}")
 
 
-def main() -> int:
+def emit() -> int:
+    """把上面那一族的生成物**写出来** (docs/158 §5 第 3 条要的那一步)。
+
+    `.lom` -> 各语言那一族 (`GENERATED` + `lomc.EMITTERS`) 也一起写 —— 它们与 L1 那一族
+    是同一类东西 (有判据的生成物), `--emit` 只覆盖一半就是个陷阱。
+
+    **`newline="\\n"` 不能省**: 与 `loment_build.py` 同一处坑 —— 默认的平台转换会写出
+    CRLF, 而 `.gitattributes` 定的是 `eol=lf`, 于是"重生成 == 仓库里的"这条判据
+    在 Windows 上必然假红。
+
+    **注意它会写 `kernel/src/fui/fuc_gen.rs`** —— 那一份虽然落在内核目录里, 但它是
+    **这份仓的生成物** (由 `lom/fuc.lom` 生成, 内核只是消费方), 所以该跟着单源重生成。
+    `CLAUDE.md` 那条"kernel/ 是只读副本"管的是**他们的手写源码** (`syscall.rs` 之类),
+    不覆盖这一份。
+    """
+    items: list[tuple[Path, str]] = []
+    items += generated_wants()
+    items += transpile_wants()
+    items += example_potato_wants()
+    items += selfhost_potato_wants()
+    items.append(cap_asserts_want())
+    items.append(syscalls_want())
+    for path, text in items:
+        path.write_text(text, encoding="utf-8", newline="\n")
+        print(f"[wrote] {path.relative_to(ROOT)}")
+    print(f"lom_audit --emit: {len(items)} 个生成物")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "--emit":
+        return emit()
     diffs: list[str] = []
     try:
         n_prim, n_spec = audit_fuai(diffs)

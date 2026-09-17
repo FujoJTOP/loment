@@ -144,6 +144,15 @@ MUTATORS = [
     ("枚举名重复", lambda d: d["enums"].append(dict(d["enums"][0])), "重复"),
     ("类型名重复", lambda d: d["types"].append(dict(d["types"][0])), "重复"),
     ("布局名重复", lambda d: d["layouts"].append(dict(d["layouts"][0])), "重复"),
+    # v2 = v1 + 项目模式 (docs/143 §3.2)。**`mode` 必填** —— docs/175 §8 的判据就是
+    # "从形式对象里删掉该字段, 独立校验器必须红", 而"必填"正是**不能往 v1 加字段**的
+    # 原因: 那会让既有的 v1 对象 (含冻结样本 demo.v0.json 那一路) 全变非法, 而 v0/v1
+    # 是承诺过能回放的 (docs/147 §5)。所以升版本。
+    ("v2 缺 mode", lambda d: d.__setitem__("potato", "v2"), "mode 必须是"),
+    ("v2 mode 拼错", lambda d: (d.__setitem__("potato", "v2"),
+                            d.__setitem__("mode", "fast")), "mode 必须是"),
+    ("v2 mode 非字符串", lambda d: (d.__setitem__("potato", "v2"),
+                                d.__setitem__("mode", 1)), "mode 必须是"),
 ]
 
 
@@ -176,6 +185,17 @@ def test_v0_object_still_validates():
     d["potato"] = "v0"
     d["functions"] = d["functions"][:1]
     assert potato.validate(d) == [], potato.validate(d)
+
+
+@test
+def test_v2_object_validates_with_mode():
+    """v2 = v1 + `mode` (docs/143 §3.2)。**当前版本**, 所以它必须是能过的正例;
+    反例 (缺 mode / 拼错 / 非字符串) 在 `MUTATORS` 里 —— 一正一反才说明"必填"是真的。"""
+    d = fixture()
+    d["potato"] = "v2"
+    for m in potato.MODES:
+        d["mode"] = m
+        assert potato.validate(d) == [], (m, potato.validate(d))
 
 
 @test

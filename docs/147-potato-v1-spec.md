@@ -74,7 +74,9 @@ v0（docs/142）只覆盖标量/数组/struct/枚举/布局/能力域。P3/P4 �
 
 ## 5. 版本化与回放（M51）
 
-- 对象自带版本号；校验器接受 `v0`/`v1`，未知版本 = 非法；
+- 对象自带版本号；校验器接受 `v0`/`v1`/**`v2`**，未知版本 = 非法；
+  （`v2` 见 **`docs/178`** —— v1 + 必填 `mode`，即"这个程序是 std 还是 no_std"。
+  当前编译器**发 v2**；v0/v1 照旧合法。）
 - `python tools/potato.py replay FILE...` 按对象自带版本回放校验，`--expect-version` 可断言版本；
 - 冻结样本 `loment/build/legacy/demo.v0.json` 是 P5 之前编译器产出的真实 v0 对象，
   由 `potato_test` 持续回放 —— 旧对象不会因为新版本发布而失效。

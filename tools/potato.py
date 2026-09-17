@@ -25,11 +25,15 @@ TYPES = INT_TYPES + ("bool", "str", "ptr", "()")
 BUILTIN_TRAITS = {"Drop": {"drop"}}
 WIDTH = {"u8": 1, "u16": 2, "u32": 4, "u64": 8, "i8": 1, "i16": 2, "i32": 4, "i64": 8}
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45)
+# v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45); v2 = v1 + 项目模式 (docs/143 §3.2)
 TOP_KEYS_V0 = {"potato", "unit", "language", "imports", "capabilities", "functions", "layouts",
                "consts", "enums", "types", "excluded"}
 TOP_KEYS_V1 = TOP_KEYS_V0 | {"traits", "impls", "generics", "instances", "guards"}
-VERSIONS = ("v0", "v1")
+TOP_KEYS_V2 = TOP_KEYS_V1 | {"mode"}
+VERSIONS = ("v0", "v1", "v2")
+#: `mode` 的取值 = `choose` 的两个模式名 (docs/143 §3.2)。**只有这两个** ——
+#: 拼错的模式名在编译器那边是 E022, 在对象里就是这里报错。
+MODES = ("std", "no_std")
 
 
 def _is_array_type(t: object) -> bool:
@@ -82,17 +86,24 @@ def validate(doc: object) -> list[str]:
     if ver not in VERSIONS:
         errs.append(f"potato 版本必须是 {VERSIONS} 之一，得到 {ver!r}")
         ver = "v0"
-    top = TOP_KEYS_V0 if ver == "v0" else TOP_KEYS_V1
+    top = {"v0": TOP_KEYS_V0, "v1": TOP_KEYS_V1, "v2": TOP_KEYS_V2}[ver]
     for k in doc:
         if k not in top:
             errs.append(f"未知顶层字段 {k!r}（{ver} 不允许扩展字段）")
-    if ver == "v1":
+    if ver in ("v1", "v2"):
         for k in ("traits", "impls", "generics", "instances"):
             if not isinstance(doc.get(k), list):
                 errs.append(f"{ver}: 缺字段 {k}（必须是数组，可为空）")
         g = doc.get("guards")
         if not isinstance(g, int) or isinstance(g, bool) or g < 0:
             errs.append(f"{ver}: guards 必须是非负整数，得到 {g!r}")
+    if ver == "v2":
+        # **必填** (docs/175 §8 的判据: 从对象里删掉该字段, 校验器必须红)。这就是
+        # 必须升 v2 而不是往 v1 里加字段的原因 —— 要求必填会让既有的 v1 对象全变非法,
+        # 而 v0/v1 是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
+        m = doc.get("mode")
+        if m not in MODES:
+            errs.append(f"{ver}: mode 必须是 {MODES} 之一，得到 {m!r}")
     unit = _req(doc, "unit", "根", errs)
     if unit is not None and (not isinstance(unit, str) or not IDENT_RE.match(unit)):
         errs.append(f"unit 必须是标识符，得到 {unit!r}")

@@ -80,12 +80,17 @@ def build_one(p: Path, out: Path, root: Path) -> dict:
             return rec
         rust = lomentc.emit_rust(mod, root, deps)
         potato = lomentc.emit_potato(mod, root, deps)
-        (out / f"{p.stem}.rs").write_text(rust, encoding="utf-8")
-        (out / f"{p.stem}.potato.json").write_text(potato, encoding="utf-8")
+        # **`newline="\n"` 不能省**: 默认会按平台转换, 于是在 Windows 上写出的产物是 CRLF,
+        # 而 `.gitattributes` 对 `*.rs`/`*.json`/`*.ll` 定的是 `eol=lf` —— 检出回来是 LF。
+        # 两者一比就"不一致", 于是**"重生成的产物 == 仓库里的"这条判据在 Windows 上必然假红**。
+        # 同族的坑 `.gitattributes` 自己记过一条 ("IR 逐字节比较会假红")。
+        # 2026-09-17 归因: 重生成 potato 产物时发现 28 个 `.rs` 全"变了", 逐行看却一模一样。
+        (out / f"{p.stem}.rs").write_text(rust, encoding="utf-8", newline="\n")
+        (out / f"{p.stem}.potato.json").write_text(potato, encoding="utf-8", newline="\n")
         rec["artifacts"] = [f"{p.stem}.rs", f"{p.stem}.potato.json"]
         try:
             ll = lomentc.emit_llvm(mod, root, deps)
-            (out / f"{p.stem}.ll").write_text(ll, encoding="utf-8")
+            (out / f"{p.stem}.ll").write_text(ll, encoding="utf-8", newline="\n")
             rec["artifacts"].append(f"{p.stem}.ll")
         except lomentc.LomError as e:  # 原生后端不支持的部分: 记录但不失败
             rec["error"] = f"IR: {e}"
@@ -137,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             bad += 1
     dt = time.perf_counter() - t0
     index_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=1)
-                          + "\n", encoding="utf-8")
+                          + "\n", encoding="utf-8", newline="\n")
     print(f"[{'COLD' if hit == 0 else 'HOT '}] {len(files)} 个单元: "
           f"{hit} 命中 / {miss} 重编 / {bad} 失败 — {dt * 1000:.1f} ms")
     if a.report:

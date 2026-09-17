@@ -2993,9 +2993,17 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     instances += [{"kind": "type", "name": e.name, "of": e.from_generic,
                    "args": list(e.generic_args)} for e in mod.enums if e.from_generic]
     doc = {
-        "potato": "v1",
+        # v2 = v1 + 项目模式 (docs/143 §3.2 / docs/175 §8)。**升版本而不是往 v1 加字段**:
+        # `mode` 是必填的 (删掉它校验器必须红), 而往 v1 加必填字段会让既有的 v1 对象
+        # 全变非法 —— v0/v1 是承诺过能回放的 (docs/147 §5)。v2 的新字段是 **`mode`**。
+        "potato": "v2",
         "unit": mod.name,
         "language": "loment",
+        # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
+        # 所以对象里永远是显式的两值之一, 不存在"缺这项"的形态。
+        # 一个编译单元产出一个对象 (deps 走 `imports`), 所以这里没有"依赖的模式"
+        # 那种歧义: `mod.choose` 就是根单元自己声明的那一个。
+        "mode": mod.choose or "std",
         "imports": [d.name for d in (deps or [])],
         "capabilities": [
             {
@@ -3044,7 +3052,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     import potato as _potato
     errs = _potato.validate(doc)
     if errs:
-        raise LomError(1, 1, "形式对象自检失败 (Potato v1): " + "; ".join(errs[:5]))
+        raise LomError(1, 1, "形式对象自检失败 (Potato v2): " + "; ".join(errs[:5]))
     return text
 
 

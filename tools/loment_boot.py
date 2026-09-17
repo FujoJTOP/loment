@@ -44,7 +44,8 @@ def build_elf(src: Path, out: Path) -> Path:
         raise SystemExit(2)
     ll = out.with_suffix(".ll")
     text = lomentc.emit_llvm(mod, ROOT, deps)
-    ll.write_text(text, encoding="utf-8")
+    # `newline="\n"` 见 loment_build.py 里的说明: 默认的平台转换会与 `eol=lf` 打架
+    ll.write_text(text, encoding="utf-8", newline="\n")
     # 链接交给仓库自己的原生后端（tools/lomelf.py）—— 不再经 clang
     sys.path.insert(0, str(ROOT / "tools"))
     import lomelf
