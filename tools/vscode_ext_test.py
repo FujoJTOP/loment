@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+# vscode_ext_test.py — VS Code 扩展的无头验收 (M56 编辑器宿主)
+#
+# 判据: 编辑器集成不必靠肉眼看 GUI 才能验证 ——
+#   1) 扩展清单/语法文件结构合法, 且**每个语法正则都能编译** (否则会静默不高亮);
+#   2) src/server-path.js (纯 Node) 真的能从工作区找到 tools/loment_lsp.py;
+#   3) 对**真实语言服务**做一次完整 LSP 往返: initialize -> didOpen(诊断) ->
+#      completion -> definition -> formatting -> shutdown;
+#   4) .vsix 结构合法 (若已打包)。
+#
+# 用法: python tools/vscode_ext_test.py
+# 退出码: 0 = 全绿 / 1 = 失败 / 2 = 环境缺失。
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import vscode_ext  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+EXT = ROOT / "editors" / "vscode"
+VSIX = ROOT / "loment" / "build" / "loment-vscode.vsix"
+TESTS: list[tuple[str, object]] = []
+
+
+def test(fn):
+    TESTS.append((fn.__name__, fn))
+    return fn
+
+
+def _node() -> str | None:
+    return shutil.which("node")
+
+
+def _python() -> str:
+    return shutil.which("python") or "python"
+
+
+def _frame(obj: dict) -> bytes:
+    body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    return b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+
+def _parse_frames(data: bytes) -> list[dict]:
+    out = []
+    while True:
+        sep = data.find(b"\r\n\r\n")
+        if sep < 0:
+            return out
+        header = data[:sep].decode("ascii", "replace")
+        n = 0
+        for line in header.splitlines():
+            k, _, v = line.partition(":")
+            if k.strip().lower() == "content-length":
+                n = int(v.strip())
+        body = data[sep + 4:sep + 4 + n]
+        out.append(json.loads(body.decode("utf-8")))
+        data = data[sep + 4 + n:]
+
+
+# ---------------------------------------------------------------- 1. 清单与语法
+
+@test
+def test_vscode_ext_manifest_and_grammar():
+    # `node_modules/` 是 gitignore 的 (vsix 打包才需要它): 干净检出/别的机器上就是没有。
+    # 这属于**环境缺失**, 不是逻辑红 —— 所以只跳过那一项, 结构问题照常判。
+    missing_npm = not (EXT / "node_modules" / "vscode-languageclient" / "package.json").is_file()
+    bad = [b for b in vscode_ext.check() if "node_modules" not in b]
+    assert not bad, f"扩展结构问题: {bad}"
+    if missing_npm:
+        print("      SKIP 打包前置: 没装 node_modules (npm install --omit=dev 于 editors/vscode)"
+              " —— 干净检出/别的机器上如此, 不是逻辑问题")
+    node = _node()
+    if not node:
+        print("      SKIP 正则编译: 无 node")
+        return
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    # 每个 match / begin / end 都交给 node 编译一次 (Oniguruma 与 JS 正则不完全等价,
+    # 但括号/转义写错这类问题两者都会报 —— 这是防止"语法文件静默失效"的一层)
+    script = """
+const fs = require('fs');
+const files = process.argv.slice(1);
+let n = 0;
+for (const f of files) {
+  const doc = JSON.parse(fs.readFileSync(f, 'utf8'));
+  const walk = (o) => {
+    if (o && typeof o === 'object') {
+      for (const k of Object.keys(o)) {
+        const v = o[k];
+        if ((k === 'match' || k === 'begin' || k === 'end') && typeof v === 'string') {
+          try { new RegExp(v); n += 1; } catch (e) { throw new Error(f + ': ' + v + ' -> ' + e.message); }
+        } else { walk(v); }
+      }
+    }
+  };
+  walk(doc);
+}
+process.stdout.write(String(n));
+"""
+    grammars = [str(EXT / g["path"]) for g in pkg["contributes"]["grammars"]]
+    r = subprocess.run([node, "-e", script, *grammars], capture_output=True, text=True,
+                       shell=False)
+    assert r.returncode == 0, f"语法正则编译失败: {r.stderr[-300:]}"
+    assert int(r.stdout.strip()) >= 20, f"编译到的正则数偏少: {r.stdout!r}"
+
+
+@test
+def test_vscode_grammar_lints():
+    """语法高亮的**两类静默失效**必须挡住 (它们不报错, 只是颜色不对):
+
+    1. scope 名用了自造根名 —— 主题不认那段, 显示为默认前景色 (看起来"没高亮");
+    2. `match` 里吃掉引号 —— 它会截胡字符串的**开引号**, 于是整份文件剩下的部分都被
+       当成一个未闭合的字符串染成字符串色。我加 `excluded "` 时就踩了一次:
+       在 `demo.lomt` 上从第 21 行起整片变字符串。`begin`/`end` 才是能碰引号的地方。
+    """
+    roots = {"comment", "string", "constant", "keyword", "storage", "entity",
+             "support", "variable", "punctuation", "meta", "invalid"}
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    for g in pkg["contributes"]["grammars"]:
+        doc = json.loads((EXT / g["path"]).read_text(encoding="utf-8"))
+        assert doc["scopeName"] == g["scopeName"], (g["path"], doc["scopeName"])
+        names, quotes = [], []
+
+        def walk(o, key=""):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    walk(v, k)
+            elif isinstance(o, list):
+                for x in o:
+                    walk(x, key)
+            elif isinstance(o, str):
+                if key == "name" and o not in ("Loment", "L0 (.lom)"):
+                    names.append(o)
+                if key == "match" and '"' in o:
+                    quotes.append(o)
+
+        walk(doc)
+        bad = [n for n in names if n.split(".")[0] not in roots]
+        assert not bad, f"{g['path']}: 非标准 scope 根名 {bad[:4]}"
+        assert not quotes, f"{g['path']}: match 里出现引号 (会吃掉字符串引号): {quotes[:2]}"
+        print(f"      {g['path'].split('/')[-1]}: {len(set(names))} 个 scope 名合规, 无引号截胡")
+
+
+# ---------------------------------------------------------------- 2. 服务路径发现
+
+@test
+def test_vscode_ext_finds_language_server():
+    node = _node()
+    if not node:
+        print("      SKIP: 无 node")
+        return
+    script = (
+        "const {findServer} = require(process.argv[1]);"
+        "const hit = findServer(process.argv[2]);"
+        "const deep = findServer(process.argv[2] + '/loment/examples');"
+        "process.stdout.write(JSON.stringify({hit, deep}));"
+    )
+    r = subprocess.run([node, "-e", script, str(EXT / "src" / "server-path.js"), str(ROOT)],
+                       capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, f"server-path.js 执行失败: {r.stderr[-300:]}"
+    got = json.loads(r.stdout)
+    assert got["hit"] and got["hit"].replace("\\", "/").endswith("tools/loment_lsp.py"), got
+    assert got["deep"] and got["deep"] == got["hit"], f"从子目录也应当找到: {got}"
+
+
+# ---------------------------------------------------------------- 3. LSP 往返
+
+@test
+def test_vscode_lsp_roundtrip():
+    """对真实语言服务做一次完整会话 —— 这正是扩展依赖的契约。"""
+    src = "module m\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a+b;\n}\n\nfn use_it() -> u32 {\n    return add(1, 2);\n}\n"
+    uri = "file:///tmp/roundtrip.lomt"
+    frames = b"".join([
+        _frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        _frame({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                "params": {"textDocument": {"uri": uri, "text": src}}}),
+        _frame({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+                "params": {"textDocument": {"uri": uri}}}),
+        _frame({"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+                "params": {"textDocument": {"uri": uri},
+                           "position": {"line": 7, "character": 12}}}),
+        _frame({"jsonrpc": "2.0", "id": 4, "method": "textDocument/formatting",
+                "params": {"textDocument": {"uri": uri}}}),
+        _frame({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": {}}),
+    ])
+    r = subprocess.run([_python(), str(ROOT / "tools" / "loment_lsp.py")], input=frames,
+                       capture_output=True, shell=False, timeout=60)
+    msgs = _parse_frames(r.stdout)
+    by_id = {m.get("id"): m for m in msgs if m.get("id") is not None}
+    assert 1 in by_id, f"没有 initialize 应答: {r.stderr[-300:]!r}"
+    caps = by_id[1]["result"]["capabilities"]
+    for cap in ("textDocumentSync", "definitionProvider", "completionProvider",
+                "documentFormattingProvider"):
+        assert cap in caps, f"能力缺失: {cap} ({caps})"
+    diags = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert diags, "didOpen 之后应当推送诊断"
+    assert diags[-1]["params"]["uri"] == uri and diags[-1]["params"]["diagnostics"] == [], diags[-1]
+    labels = {it["label"] for it in by_id[2]["result"]["items"]}
+    assert "fn" in labels and "add" in labels and "u32" in labels, sorted(labels)[:10]
+    loc = by_id[3]["result"]
+    assert loc and loc["range"]["start"]["line"] == 2, f"定义应跳到第 3 行: {loc}"
+    edits = by_id[4]["result"]
+    assert edits and "a + b" in edits[0]["newText"], f"格式化应当整理运算符间距: {edits}"
+    assert 5 in by_id, "shutdown 应当有应答"
+
+
+@test
+def test_vscode_lsp_reports_type_errors():
+    """错误路径: 未声明的变量要变成诊断, 而不是静默。"""
+    src = "module m\n\nfn f() -> u32 {\n    return nope;\n}\n"
+    uri = "file:///tmp/bad.lomt"
+    frames = b"".join([
+        _frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        _frame({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                "params": {"textDocument": {"uri": uri, "text": src}}}),
+        _frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}}),
+    ])
+    r = subprocess.run([_python(), str(ROOT / "tools" / "loment_lsp.py")], input=frames,
+                       capture_output=True, shell=False, timeout=60)
+    msgs = _parse_frames(r.stdout)
+    diags = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert diags, "应当推送诊断"
+    got = diags[-1]["params"]["diagnostics"]
+    assert got and got[0]["severity"] == 1, f"未解析变量应当报错: {got}"
+    assert got[0]["range"]["start"]["line"] == 3, f"应当定位到第 4 行: {got[0]}"
+
+
+# ---------------------------------------------------------------- 4. VSIX
+
+@test
+def test_vscode_vsix_structure():
+    if not VSIX.is_file():
+        print("      SKIP: 尚未打包 (python tools/vscode_ext.py --emit …)")
+        return
+    bad = vscode_ext.verify_vsix(VSIX)
+    assert not bad, f"VSIX 结构问题: {bad}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    passed = 0
+    for name, fn in TESTS:
+        try:
+            fn()
+        except AssertionError as e:
+            print(f"  FAIL  {name}: {e}")
+        else:
+            print(f"  PASS  {name}")
+            passed += 1
+    print(f"\nvscode_ext_test: {passed}/{len(TESTS)} 通过")
+    return 0 if passed == len(TESTS) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

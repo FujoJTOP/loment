@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import re
 import hashlib
 import json
 import shutil
@@ -79,6 +80,15 @@ REPOS: dict[str, dict] = {
             # `loment_src.py:49` 两个都点名。2026-09-17 把整个 `scripts/` 当 FujoOS 排除
             # 是**错的**，是 `loment_seed_test` 1/4 红查出来的。
             "scripts/lomc.ps1", "scripts/install-lsp.ps1",
+            # **工具集按"门禁跑得起来"算, 不按名字 glob。** `tools/lom*` 那个 glob 实测
+            # 只捞到 **57/127** —— 静默漏掉 `ci.py`（门禁本身!）与整个 Potato 工具集,
+            # 而 `lomentc.py` 会 `import potato`, 于是开发口里**连编译器都跑不起来**。
+            # 2026-09-17 搬开发口时撞出来的; `--check` 里有一条闭包判据钉住它。
+            "tools/ci.py", "tools/_safepath.py", "tools/mono_trace.py",
+            "tools/potato.py", "tools/potato_assert.py", "tools/potato_cross.py",
+            "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
+            "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
+            "tools/fuai_contract_check.py",
         ],
         "renames": [],
         "floor": 250,
@@ -329,6 +339,44 @@ def cmd_status() -> int:
     return 0
 
 
+def _gate_missing(spec: dict) -> list[str]:
+    """`ci.py --static-only` 跑得起来所需的 `tools/*.py`，减去路径清单已经覆盖的。
+
+    **为什么必须有这条判据**：清单原先是靠名字 glob（`tools/lom*`）定的，实测只捞到
+    **57/127** —— 静默漏掉 `ci.py`（门禁本身）与整个 Potato 工具集，而 `lomentc.py`
+    会 `import potato`，于是开发口里**连编译器都跑不起来**（`python tools/lomentc.py`
+    在 `--emit-potato` 那条路上直接 ImportError）。
+
+    **靠手数清单是数不对的** —— 那个漏是在搬到开发口、真去跑门禁时才撞出来的。
+    所以把"门禁闭包"写成判据：门禁要跑的东西必须都在。
+    """
+    tools = ROOT / "tools"
+    allpy = {p.stem for p in tools.glob("*.py")}
+
+    def covered(stem: str) -> bool:
+        f = f"tools/{stem}.py"
+        return any(fnmatch.fnmatch(f, g) for g in spec["paths"])
+
+    have = {s for s in allpy if covered(s)}
+    need = set(have)
+    ci = tools / "ci.py"
+    if ci.exists():
+        head = ci.read_text(encoding="utf-8").split("STATIC_CHECKS")[1][:3000]
+        for m in re.findall(r'"([a-z0-9_]+)"', head):
+            if m in allpy:
+                need.add(m)
+    changed = True
+    while changed:                      # import 闭包
+        changed = False
+        for n in sorted(need):
+            src = (tools / f"{n}.py").read_text(encoding="utf-8", errors="replace")
+            for m in re.findall(r'^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)', src, re.M):
+                if m in allpy and m not in need:
+                    need.add(m)
+                    changed = True
+    return sorted(need - have)
+
+
 def cmd_check() -> int:
     bad = []
     for name, spec in REPOS.items():
@@ -338,6 +386,12 @@ def cmd_check() -> int:
         for p in spec["paths"]:
             if _rel_ok(p) == 0:
                 bad.append(f"{name}: {p} 一个文件都没匹配到")
+        if name == "loment":
+            miss = _gate_missing(spec)
+            if miss:
+                bad.append(f"{name}: 门禁闭包还缺 {len(miss)} 个 —— "
+                           f"{' '.join('tools/' + m + '.py' for m in miss[:5])}"
+                           f"{' …' if len(miss) > 5 else ''}（加进 paths，别靠手数）")
     for b in bad:
         print(f"[ERR] {b}")
     if bad:
