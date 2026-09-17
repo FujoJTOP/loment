@@ -1139,6 +1139,31 @@ def _host_target() -> str:
     return "pe" if sys.platform == "win32" else "elf"
 
 
+def _write_shared(path: Path, data: bytes) -> Path:
+    """把共享产物写进 `STAGE`：**内容一样就一个字节都不写**, 否则原子换入。
+
+    **为什么必须有这一条** (2026-09-17, 并行门禁撞出来的): `STAGE` 是**跨检查共享**的
+    (`loment_cli_test` / `loment_lompi_test` / `loment_dist_test` 都用 stage1), 而原先
+    这里**无条件重写** —— 一条判据正**执行**着 `stage1.exe`, 另一条把它重写掉, Windows 上
+    后面那次调用就 `PermissionError: [Errno 13]`。实测 `loment_lompi_test` 从 20/20 掉到
+    **10/20**, 就是这么来的。
+
+    稳态下内容不变 ⇒ 零写入 ⇒ 竞态根本不存在 (只有第一次构建会写, 而那时还没有人能
+    执行它)。写的时候用 `.pid` 临时名 + `os.replace`, 于是读方**永远看不到写了一半的文件**。
+    """
+    if path.exists():
+        try:
+            if path.read_bytes() == data:
+                return path
+        except OSError:                     # 别人正在换入: 当"内容不确定", 走完整路径
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    return path
+
+
 def build_stage1() -> Path:
     """种子 -> stage1（种子是 driver 的定点, 所以 stage1 就是驱动自身）。
 
@@ -1149,8 +1174,7 @@ def build_stage1() -> Path:
     STAGE.mkdir(parents=True, exist_ok=True)
     tgt = _host_target()
     stage1 = STAGE / ("stage1.exe" if tgt == "pe" else "stage1.elf")
-    stage1.write_bytes(_lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
-    return stage1
+    return _write_shared(stage1, _lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
 
 
 def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
@@ -1170,8 +1194,7 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
                        cwd=str(base), shell=False)
     if r.returncode != 0 or not r.stdout:
         raise SystemExit(f"stage1 failed on {entry}: {r.stderr[-400:]!r}")
-    out.write_bytes(r.stdout)
-    return out
+    return _write_shared(out, r.stdout)     # 共享产物: 见 _write_shared 的说明
 
 
 def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:

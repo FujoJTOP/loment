@@ -34,11 +34,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_dist  # noqa: E402
 import lomentc  # noqa: E402
 
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
+
 ROOT = loment_dist.ROOT
 OUT = loment_dist.OUT
 IT_OUT = loment_dist.STAGE / "it-out"   # 测试专用产物目录 (不碰 loment/dist)
 VER = loment_dist.VER
-PREFIX_IT = "/tmp/loment_dist_it"          # WSL 侧的安装前缀
+PREFIX_IT = f"{_T}loment_dist_it"          # WSL 侧的安装前缀
 RESULTS: list[tuple[str, bool, str]] = []
 
 

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import os
+
 import json
 import shutil
 import subprocess
@@ -22,6 +24,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 import loment_lsp as PY_LSP  # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lsp.lomt"
@@ -115,22 +122,22 @@ class Batch:
     def run(self, msgs: list[dict]) -> tuple[list[dict], int, str]:
         inp = self.td / "in.bin"
         inp.write_bytes(b"".join(frame(m) for m in msgs))
-        for a in (["rm", "-f", "/tmp/loment_lsp.bin"],
-                  ["cp", _wsl_path(self.elf), "/tmp/loment_lsp.bin"],
-                  ["chmod", "+x", "/tmp/loment_lsp.bin"],
-                  ["rm", "-f", "/tmp/loment_lsp_in.bin"],
-                  ["cp", _wsl_path(inp), "/tmp/loment_lsp_in.bin"]):
+        for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
+                  ["cp", _wsl_path(self.elf), f"{_T}loment_lsp.bin"],
+                  ["chmod", "+x", f"{_T}loment_lsp.bin"],
+                  ["rm", "-f", f"{_T}loment_lsp_in.bin"],
+                  ["cp", _wsl_path(inp), f"{_T}loment_lsp_in.bin"]):
             r = subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
             assert r.returncode == 0, (a, r)
         r = subprocess.run(
             ["wsl", "-e", "bash", "-lc",
-             "/tmp/loment_lsp.bin < /tmp/loment_lsp_in.bin > /tmp/loment_lsp_out.bin "
-             "2>/tmp/loment_lsp_err.bin; echo -n $?"],
+             f"{_T}loment_lsp.bin < {_T}loment_lsp_in.bin > {_T}loment_lsp_out.bin "
+             f"2>{_T}loment_lsp_err.bin; echo -n $?"],
             capture_output=True, text=True, timeout=300, shell=False)
         rc = int(r.stdout.strip() or -1)
-        raw = subprocess.run(["wsl", "-e", "cat", "/tmp/loment_lsp_out.bin"],
+        raw = subprocess.run(["wsl", "-e", "cat", f"{_T}loment_lsp_out.bin"],
                              capture_output=True, shell=False).stdout
-        err = subprocess.run(["wsl", "-e", "cat", "/tmp/loment_lsp_err.bin"],
+        err = subprocess.run(["wsl", "-e", "cat", f"{_T}loment_lsp_err.bin"],
                              capture_output=True, shell=False).stdout.decode("utf-8", "replace")
         return parse_frames(raw), rc, err
 
@@ -265,15 +272,15 @@ def test_lsp_check_mode_is_python_free():
         with tempfile.TemporaryDirectory() as tds:
             td = Path(tds)
             elf = _build(td)
-            for a in (["rm", "-f", "/tmp/loment_lsp.bin"],
-                      ["cp", _wsl_path(elf), "/tmp/loment_lsp.bin"],
-                      ["chmod", "+x", "/tmp/loment_lsp.bin"]):
+            for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
+                      ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
+                      ["chmod", "+x", f"{_T}loment_lsp.bin"]):
                 subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
             # 把**绝对 WSL 路径**当数据传给 --check (不经 shell, 也不猜仓库在哪) ——
             # 早先这里写死了 `cd /mnt/d/Dev/FujoOS-FujoLang`, 换个检出位置就 rc=2
             # (服务打不开文件), 会被误读成"服务没构建"。
             abs_probe = _wsl_path(probe)
-            r = subprocess.run(["wsl", "-e", "/tmp/loment_lsp.bin", "--check", abs_probe],
+            r = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", abs_probe],
                                capture_output=True, text=True, timeout=180, shell=False)
             out = r.stdout
             assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
@@ -286,7 +293,7 @@ def test_lsp_check_mode_is_python_free():
                 # 路径之后正好是 `:行:列` (两个冒号)
                 assert head[len(abs_probe):].count(":") == 2, ln
             clean = _wsl_path(ROOT / "loment" / "examples" / "mathutil.lomt")
-            r2 = subprocess.run(["wsl", "-e", "/tmp/loment_lsp.bin", "--check", clean],
+            r2 = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", clean],
                                 capture_output=True, text=True, timeout=180, shell=False)
             assert r2.returncode == 0 and r2.stdout.strip() == "", (r2.returncode, r2.stdout)
     finally:

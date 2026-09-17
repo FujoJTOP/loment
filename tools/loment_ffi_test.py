@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import os
+
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomelf                                                       # noqa: E402
 import lomentc                                                      # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 CLANG_CANDIDATES = (r"C:\Program Files\LLVM\bin\clang.exe", "clang")
@@ -412,11 +419,11 @@ def test_java_via_process_bridge():
             "System.out.println(7); } }\n", encoding="utf-8", newline="\n")
         # `javac` 得在**它自己的目录**里跑, 而那一侧要看得见这个 `.java` —— 所以先拷进 WSL。
         r = subprocess.run(["wsl", "-e", "bash", "-lc",
-                            f"rm -rf /tmp/ffijava && mkdir -p /tmp/ffijava && "
-                            f"cp {_wsl_path(td)}/Hello.java /tmp/ffijava/"],
+                            f"rm -rf {_T}ffijava && mkdir -p {_T}ffijava && "
+                            f"cp {_wsl_path(td)}/Hello.java {_T}ffijava/"],
                            capture_output=True, text=True, timeout=120, shell=False)
         assert r.returncode == 0, f"拷 .java 失败: {r.stderr[-200:]}"
-        _bridge_case(f"cd /tmp/ffijava && {jdk}/javac Hello.java && {jdk}/java Hello",
+        _bridge_case(f"cd {_T}ffijava && {jdk}/javac Hello.java && {jdk}/java Hello",
                      7, "Java 桥")
         print("      Java: javac + java (自建 JDK, 免 sudo) -> 退出码 7")
 
@@ -629,11 +636,11 @@ def test_go_via_process_bridge():
             '    fmt.Println(len(strings.Join([]string{"a", "b", "c"}, ",")))\n'
             '}\n', encoding="utf-8", newline="\n")
         r = subprocess.run(["wsl", "-e", "bash", "-lc",
-                            f"rm -rf /tmp/ffigo && mkdir -p /tmp/ffigo && "
-                            f"cp {_wsl_path(td)}/m.go /tmp/ffigo/"],
+                            f"rm -rf {_T}ffigo && mkdir -p {_T}ffigo && "
+                            f"cp {_wsl_path(td)}/m.go {_T}ffigo/"],
                            capture_output=True, text=True, timeout=120, shell=False)
         assert r.returncode == 0, f"拷 .go 失败: {r.stderr[-200:]}"
-        _bridge_case(f"cd /tmp/ffigo && '{go}' run m.go", 5, "Go 桥")
+        _bridge_case(f"cd {_T}ffigo && '{go}' run m.go", 5, "Go 桥")
         print("      Go: go run + strings 包 (WSL interop) -> 退出码 5")
 
 

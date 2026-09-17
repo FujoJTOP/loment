@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import os
+
 import contextlib
 import io
 import shutil
@@ -29,6 +31,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 import lomc     # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomc.lomt"
@@ -103,7 +110,7 @@ def _norm(s: str) -> str:
 def _run(elf: Path, td: Path, args: list[str], name: str) -> tuple[int, str, str]:
     outp = td / f"{name}.out"
     errp = td / f"{name}.err"
-    binn = f"/tmp/lomc_{name}.bin"
+    binn = f"{_T}lomc_{name}.bin"
     quoted = " ".join(args)  # 参数都是仓库相对路径, 无空格
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"cd {_wsl_path(ROOT)} && {binn} {quoted} "

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 LEXER = ROOT / "loment" / "selfhost" / "lexer.lomt"
@@ -804,8 +811,8 @@ def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, s
     got = Path(td) / f"{name}.out.ll"
     # rm -f 先删: 目标名固定, 上一次刚退出的进程可能还占着 inode
     # (cp 会报 "Text file busy"); unlink 总能成功, cp 于是写新 inode
-    script = (f"rm -f /tmp/{name} && cp {_wsl_path(elf)} /tmp/{name} && chmod +x /tmp/{name} && "
-              f"cd {_wsl_path(ROOT)} && /tmp/{name} {relpath} > {_wsl_path(got)}")
+    script = (f"rm -f {_T}{name} && cp {_wsl_path(elf)} {_T}{name} && chmod +x {_T}{name} && "
+              f"cd {_wsl_path(ROOT)} && {_T}{name} {relpath} > {_wsl_path(got)}")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     text = got.read_text(encoding="utf-8") if got.exists() else ""
@@ -1222,8 +1229,8 @@ def test_m86_selfhost_perf_budget():
         ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
         elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "perf_drv")
         subprocess.run(["wsl", "-e", "bash", "-lc",
-                        "rm -f /tmp/perf_drv && "
-                        f"cp {_wsl_path(elf)} /tmp/perf_drv && chmod +x /tmp/perf_drv"],
+                        f"rm -f {_T}perf_drv && "
+                        f"cp {_wsl_path(elf)} {_T}perf_drv && chmod +x {_T}perf_drv"],
                        capture_output=True, text=True, timeout=120, shell=False)
 
         def timed(cmd: str) -> float:
@@ -1233,7 +1240,7 @@ def test_m86_selfhost_perf_budget():
             return time.time() - t0
 
         base = min(timed("true") for _ in range(3))
-        runs = [timed(f"cd {_wsl_path(ROOT)} && /tmp/perf_drv loment/selfhost/driver.lomt "
+        runs = [timed(f"cd {_wsl_path(ROOT)} && {_T}perf_drv loment/selfhost/driver.lomt "
                       f"> /dev/null") for _ in range(2)]
         best = min(runs) - base
         budget = 30.0

@@ -12,12 +12,19 @@
 
 from __future__ import annotations
 
+import os
+
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -192,9 +199,9 @@ def _compile(probe: Path, td: Path, name: str) -> Path:
 
 def _run(elf: Path, td: Path) -> str:
     got = td / "probe.out"
-    script = (f"rm -f /tmp/json_probe.bin && cp {_wsl_path(elf)} /tmp/json_probe.bin && "
-              f"chmod +x /tmp/json_probe.bin && "
-              f"/tmp/json_probe.bin > {_wsl_path(got)}; echo -n $?")
+    script = (f"rm -f {_T}json_probe.bin && cp {_wsl_path(elf)} {_T}json_probe.bin && "
+              f"chmod +x {_T}json_probe.bin && "
+              f"{_T}json_probe.bin > {_wsl_path(got)}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     assert r.stdout.strip() == "0", f"探针退出码 {r.stdout!r}"

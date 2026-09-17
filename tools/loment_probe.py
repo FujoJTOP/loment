@@ -15,6 +15,7 @@
 """
 import pathlib
 import subprocess
+import os
 import sys
 import tempfile
 
@@ -22,6 +23,11 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import lomelf     # noqa: E402
 import lomentc    # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = _HERE.parent
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
@@ -47,8 +53,8 @@ def main() -> int:
     elf.write_bytes(drv)
     r = subprocess.run(
         ["wsl", "-e", "bash", "-lc",
-         f"cp {_wsl_path(elf)} /tmp/p8drv.bin && chmod +x /tmp/p8drv.bin && "
-         f"cd {_wsl_path(ROOT)} && /tmp/p8drv.bin "
+         f"cp {_wsl_path(elf)} {_T}p8drv.bin && chmod +x {_T}p8drv.bin && "
+         f"cd {_wsl_path(ROOT)} && {_T}p8drv.bin "
          f"{src.relative_to(ROOT).as_posix()}"],
         capture_output=True, timeout=600, shell=False)
     self_err = r.stderr.decode("utf-8", "replace").strip()

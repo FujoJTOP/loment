@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import os
+
 import shutil
 import subprocess
 import sys
@@ -30,6 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc           # noqa: E402
 import lomelf            # noqa: E402
 import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与 Loment 源码)
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = [
@@ -95,7 +102,7 @@ def _run_bin(elf: Path, name: str, td: Path, timeout: int = 20) -> tuple[int, by
     stdout 落文件、退出码单独 echo —— 不能把两者混在一个流里再切尾巴 (那会把程序自己的
     输出当成退出码, 判据会假绿)。
     """
-    binn = f"/tmp/lomelf_{name}.bin"
+    binn = f"{_T}lomelf_{name}.bin"
     outp = td / f"{name}.out"
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"timeout {timeout} {binn} > {_wsl_path(outp)} 2>/dev/null; echo -n $?")
@@ -138,7 +145,7 @@ def _mirror() -> Path:
          "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-300:]
-    binn = "/tmp/lomelf_mir_s1.bin"
+    binn = f"{_T}lomelf_mir_s1.bin"
     script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
               f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
     rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
@@ -162,7 +169,7 @@ def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (
 
     stdout 与退出码不混在一个流里: 先让它跑, 再单独 `echo -n $?` (与 `_run_bin` 同一条纪律)。
     """
-    tag = "/tmp/lomelf_m.bin"
+    tag = f"{_T}lomelf_m.bin"
     extra = "".join(f" --link {x}" for x in links)
     script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
               f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
@@ -272,7 +279,7 @@ def test_lomelf_compiles_selfhost_ir_without_clang():
         assert r.returncode == 0, r.stderr[-300:]
         # stage1 发 IR (自举路, 无 Python 无 clang)
         entry = ROOT / "loment" / "examples" / "user_hello.lomt"
-        binn = "/tmp/lomelf_s1.bin"
+        binn = f"{_T}lomelf_s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/examples/user_hello.lomt")
         rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
@@ -347,7 +354,7 @@ def test_lomelf_rebuilds_the_compiler_without_clang():
         td = Path(tds)
         elf = td / "drv.elf"
         elf.write_bytes(drv)
-        binn = "/tmp/lomelf_drv.bin"
+        binn = f"{_T}lomelf_drv.bin"
         outp = td / "drv2.ll"
         errp = td / "drv2.err"
         # **stderr 落文件而不是 /dev/null**: 这条曾经偶发红过一次, 而当时错误被丢掉了,
@@ -388,8 +395,8 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
         seed_c = td / "seed.elf"
         r3 = subprocess.run(
             ["wsl", "-e", "bash", "-lc",
-             f"cp {_wsl_path(mir)} /tmp/lomelf_rb2.bin && chmod +x /tmp/lomelf_rb2.bin && "
-             f"cd {_wsl_path(ROOT)} && /tmp/lomelf_rb2.bin loment/build/selfhost_driver.ll "
+             f"cp {_wsl_path(mir)} {_T}lomelf_rb2.bin && chmod +x {_T}lomelf_rb2.bin && "
+             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb2.bin loment/build/selfhost_driver.ll "
              f"{_wsl_path(seed_c)}"],
             capture_output=True, text=True, timeout=900, shell=False)
         assert r3.returncode == 0, f"镜像编种子失败: {r3.stderr[-300:]}"
@@ -397,8 +404,8 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
         outp = td / "again.ll"
         r4 = subprocess.run(
             ["wsl", "-e", "bash", "-lc",
-             f"cp {_wsl_path(seed_c)} /tmp/lomelf_rb3.bin && chmod +x /tmp/lomelf_rb3.bin && "
-             f"cd {_wsl_path(ROOT)} && /tmp/lomelf_rb3.bin loment/selfhost/driver.lomt "
+             f"cp {_wsl_path(seed_c)} {_T}lomelf_rb3.bin && chmod +x {_T}lomelf_rb3.bin && "
+             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb3.bin loment/selfhost/driver.lomt "
              f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?"],
             capture_output=True, text=True, timeout=900, shell=False)
         errf = td / "err.txt"

@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import os
+
 import shutil
 import subprocess
 import sys
@@ -20,6 +22,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 import lomfmt   # noqa: E402
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomfmt.lomt"
@@ -82,9 +89,9 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
     """在 WSL 里跑格式化器 (ELF 是 Linux 目标, 拷进 /tmp 才能执行)。"""
     got = td / f"{name}.out"
     err = td / f"{name}.err"
-    script = (f"rm -f /tmp/{name}.bin && cp {_wsl_path(elf)} /tmp/{name}.bin && "
-              f"chmod +x /tmp/{name}.bin && "
-              f"cd {_wsl_path(ROOT)} && /tmp/{name}.bin {entry.relative_to(ROOT).as_posix()} "
+    script = (f"rm -f {_T}{name}.bin && cp {_wsl_path(elf)} {_T}{name}.bin && "
+              f"chmod +x {_T}{name}.bin && "
+              f"cd {_wsl_path(ROOT)} && {_T}{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)

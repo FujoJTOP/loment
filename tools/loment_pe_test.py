@@ -35,6 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 import lomelf   # noqa: E402
 
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
+
 ROOT = Path(__file__).resolve().parent.parent
 LOMELF = ROOT / "tools" / "lomelf.py"
 PORTABLE = [
@@ -131,7 +136,7 @@ def _run_native(exe: Path, timeout: int = 20) -> tuple[int, bytes]:
 
 
 def _run_in_wsl(elf: Path, name: str, td: Path, timeout: int = 20) -> tuple[int, bytes]:
-    binn = f"/tmp/lompe_{name}.bin"
+    binn = f"{_T}lompe_{name}.bin"
     outp = td / f"{name}.out"
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"timeout {timeout} {binn} > {_wsl_path(outp)} 2>/dev/null; echo -n $?")
@@ -391,8 +396,8 @@ def test_pe_selfhost_mirror_matches_reference():
              "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
             capture_output=True, text=True, shell=False)
         assert r.returncode == 0, r.stderr[-300:]
-        script = (f"cp {_wsl_path(s1)} /tmp/lompe_s1.bin && chmod +x /tmp/lompe_s1.bin && "
-                  f"cd {_wsl_path(ROOT)} && /tmp/lompe_s1.bin loment/tools/lomelf.lomt")
+        script = (f"cp {_wsl_path(s1)} {_T}lompe_s1.bin && chmod +x {_T}lompe_s1.bin && "
+                  f"cd {_wsl_path(ROOT)} && {_T}lompe_s1.bin loment/tools/lomelf.lomt")
         rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                             capture_output=True, timeout=900, shell=False)
         assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"

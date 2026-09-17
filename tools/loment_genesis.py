@@ -23,12 +23,19 @@
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import hashlib
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
+#: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
+#: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
+_T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
@@ -89,8 +96,8 @@ def emit() -> int:
         assert r.returncode == 0, r.stderr[-300:]
         # stage1 编 lomelf.lomt -> IR (自举路, 无 Python)
         ir = work / "lomelf.ll"
-        script = (f"cp {_wsl_path(stage1)} /tmp/gen_s1.bin && chmod +x /tmp/gen_s1.bin && "
-                  f"cd {_wsl_path(ROOT)} && /tmp/gen_s1.bin "
+        script = (f"cp {_wsl_path(stage1)} {_T}gen_s1.bin && chmod +x {_T}gen_s1.bin && "
+                  f"cd {_wsl_path(ROOT)} && {_T}gen_s1.bin "
                   f"{MIRROR.relative_to(ROOT).as_posix()} > {_wsl_path(ir)}")
         rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                             capture_output=True, text=True, timeout=900, shell=False)
