@@ -125,7 +125,13 @@ pub fn proc_sh(cmd: str, out: ptr, cap: u32) -> i64 {
     let total: u32 = 0;
     let go: u32 = 1;
     while go == 1 && total < cap {
-        let rn: i64 = syscall4(0, rfd, (ptr_add(out, total)) as u64, (cap - total) as u64);
+        // **写成两条语句, 不写 `(ptr_add(out, total)) as u64`**: 自举 codegen 判 `ptr -> 整数`
+        // 的转换时看的是**源类型的 token**, 而括号里的表达式没有那个 token, 于是它会掉进
+        // int 那条路发出 `zext i32` —— 把指针截成 32 位 (参考实现发的是 `ptrtoint ptr`)。
+        // 这是自举侧一个**已知分叉** (记在 docs/158 §4): 语料里以前没有"括号包着的 ptr 表达式
+        // 再 as"这种写法, 所以一直没暴露。经过一个带类型的 `let` 就绕开了。
+        let dst: ptr = ptr_add(out, total);
+        let rn: i64 = syscall4(0, rfd, dst as u64, (cap - total) as u64);
         if rn <= 0 {
             go = 0;
         } else {

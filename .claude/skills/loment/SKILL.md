@@ -489,6 +489,8 @@ loment git status      # -> loment-git status
 ### 7.3.1 C ABI 那一族（真链接）
 
 ```rust
+module ffi_demo
+
 extern fn c_add(a: i32, b: i32) -> i32;    // 只有签名, 末尾分号
 extern fn c_free(p: ptr);                  // 不写 -> T 就是 void
 
@@ -512,12 +514,17 @@ Windows: `rcx rdx r8 r9`），而 Loment 函数之间的调用照旧走 Loment �
 ### 7.3.2 Python / Java / JS（进程桥）
 
 ```rust
+module py_demo
+
 use proc
 
 fn _start() {
     let buf: ptr = alloc(1024);
-    let n: i64 = proc_sh("python3 -c 'import json; print(len(json.dumps([1,2,3])))'", buf, 1024);
-    // n = 读到的字节数, 内容在 buf; -1 = 起不来
+    let n: i64 = proc_sh("python3 -c 'import json; print(1)'", buf, 1024);
+    if n > 0 {
+        syscall4(1, 1, buf as u64, n as u64);
+    }
+    syscall4(60, 0, 0, 0);
 }
 ```
 
