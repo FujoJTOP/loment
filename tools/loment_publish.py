@@ -67,7 +67,11 @@ REPOS: dict[str, dict] = {
             # 仓库约定与许可：**开发口缺了它们就没法按本仓的规矩工作**
             # （`CLAUDE.md` 是工作区级指令；`.gitignore` 不管住的话 `selfhost_driver.ll`
             #   那种大件与构建产物会跟着进来）。
-            "CLAUDE.md", "AGENTS.md", ".gitignore", "LICENSE",
+            # **`.gitattributes` 必须在这里** —— 工具会往它**追加**一段（不再覆盖，见
+            # `cmd_push`），前提是它已经跟着筛出来；不在清单里的话追加的是空文件，
+            # `*.lomt text eol=lf` 那条规矩照样丢。2026-09-17 第一次修漏写这一条，
+            # 远端那份仍只有工具自己那段，是查"克隆出来还是 CRLF"才发现的。
+            "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes", "LICENSE",
             # **`scripts/` 里只有这两个是 Loment 线的** —— 别整目录收（其余是 FujoOS 的
             # 内核/ISO 构建脚本）。这两个被工具链当成**必需的启动脚本**引用：
             # `loment_seed.py:72` 的 LAUNCH_SCRIPTS 点名 `scripts/lomc.ps1`（缺了它
