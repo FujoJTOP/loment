@@ -232,10 +232,46 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
     # 于是加了 Go/Java 之后, 一份 Go 源码的诊断提示**静默消失**(`resolve_lang` 明明
     # 认出来了)。硬编码一份"支持哪些语言"的清单, 必然在加语言时漏掉。
     if lang in potato_from.LANGS:
-        return (f"这个文件**不是 Loment 语法**, 看内容是 **{lang.upper()}**（{why}）。"
-                f"别照上面那条改 —— 它的语法本来就是对的。走多语法前端:\n"
-                f"       python tools/lomt_from.py \"{path}\" --lang auto --out "
-                f"{path.with_suffix('.iface.lomt').name}\n"
+        head = (f"这个文件**不是 Loment 语法**, 看内容是 **{lang.upper()}**（{why}）。"
+                f"别照上面那条改 —— 它的语法本来就是对的。")
+        # **该建议 `--impl` 还是接口单元，要看接口那条路走不走得通** —— 这不是锦上添花：
+        # Python 那类的 `abi` 不是 C，接口单元**一条函数都发不出来**，照默认那条命令敲会
+        # 得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`，但产物看着
+        # 像"编过了"）。一份"编过了但什么都没有"的东西，比报错还难查。
+        #
+        # **判据是问出来、不是按语言写死**：直接拿 `lomt_from.emit_lomt(impl=False)` 数
+        # 它到底发了几条 `pub extern fn`。写死一张"哪些语言有翻译器/哪些 ABI 是 C"的表，
+        # 必然在加语言时漏掉（上面那段注释就是为同一个毛病写的）。
+        try:
+            _doc, _rep = potato_from.transcribe(path, "auto", "strict")
+            n_body = sum(1 for f in (_doc.get("functions") or [])
+                         if isinstance(f.get("body"), str) and f["body"].strip())
+            import lomt_from
+            iface, _sk = lomt_from.emit_lomt(_doc, impl=False)
+            n_iface = iface.count("pub extern fn ")
+        except Exception:                                            # noqa: BLE001
+            return None
+        #: 命令行前缀。**`--impl` 由每个分支自己拼** —— 拼进这里会让"不带 --impl"那行
+        #: 也带上它（第一版就是这么错的：两条命令都变成了 `--impl`，还重了一遍）。
+        cmd = f"       python tools/lomt_from.py \"{path}\" --lang auto "
+        if n_body and n_iface == 0:
+            # 接口那条路一条都发不出来（ABI 不是 C，或者签名过不了 FFI 那道闸门）
+            return (head + f"**它带着函数的正文**，而这个语言走不了接口那条路"
+                    f"（ABI 不是 C，或签名超出 FFI 第 1 阶段）—— 只发接口会得到一个"
+                    f"**空 module**。翻成 Loment 实现：\n"
+                    f"{cmd}--impl --out {path.stem}.impl.lomt\n"
+                    f"      （`--impl` 把正文翻成真的 `pub fn`。见 docs/186 / docs/187）")
+        if n_body:
+            # 两条路都走得通：接口单元（实现在外面，链目标文件）或翻成实现
+            return (head + f"它**既可以**只出接口、也**可以**把正文翻成实现：\n"
+                    f"{cmd}--out {path.with_suffix('.iface.lomt').name}\n"
+                    f"           （不带 `--impl`：接口单元 —— 实现在源语言那一侧，"
+                    f"配外面编好的目标文件用。见 docs/179 §2）\n"
+                    f"{cmd}--impl --out {path.stem}.impl.lomt\n"
+                    f"           （带 `--impl`：把正文翻成真的 `pub fn`。"
+                    f"见 docs/186 / docs/187）")
+        return (head + f"走多语法前端:\n"
+                f"{cmd}--out {path.with_suffix('.iface.lomt').name}\n"
                 f"      （它把外源语法转成 L1 接口单元, 再由 Loment 编译器编。"
                 f"见 docs/179）")
     return None
