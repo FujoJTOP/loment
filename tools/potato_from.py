@@ -1417,17 +1417,29 @@ GRAMMAR_DECL_WORDS = ("choose", "write", "grammar")
 #: 但**收 `#`** —— `c#` 是个别名，把它当注释头切掉的话那个拼法就用不了了。
 #: （"读到空白或 `;` 为止"这条也是契约的一部分 —— 报错器那边同一处也是这么切的。）
 _GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
-_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"\b", re.M)
-_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"[ \t]+([^\s;]+)", re.M)
+#: 三个词之后**只认空白 / `;` / 行尾** —— 与报错器 `decl_at` 那处**同一刀**
+#: （它读完三个词也要求"后面是空白或 `;` 或行尾"）。
+#:
+#: **这一格从 `\b` 改成这个显式集合，是"与独立写的参照对拍"逼出来的**（见
+#: `loment_grammar_test` 那条枚举判据）：`\b` 会把 `choose write grammar#python`
+#: 也当成"声明头成立"，于是报"后面要写语法名"；而 `decl_at` 那边判**没有声明**、
+#: 退回嗅探。**两边对同一份源说不同的话** —— 正是这条线要防的那类分歧。
+#: 现在两边同一条规矩：非空白非 `;` 的字符接在 `grammar` 后面 ⇒ **根本没有声明头**。
+_GRAMMAR_TAIL = r"(?=[ \t;]|$)"
+_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
+#: 别名**必须空白分隔**：`choose write grammar;python` 里的 `;python` **不是**别名
+#: （那是"头写了、别名没写"⇒ 报"后面要写语法名"）。别名本体到空白或 `;` 为止 ——
+#: 所以 `c#` 里的 `#` 是别名的一部分，不是注释头。
+_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
+                           re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
 #:
-#: **那个 `\b` 不能省**（`af6ee7b` 漏了它，是随后的对拍抓出来的）：`.join(GRAMMAR_DECL_WORDS)`
-#: 拼出来的头是个**纯字面**，而尾巴又是**可选**的 —— 于是 `choose write grammars python`
+#: **尾巴那条边界不能省**（`af6ee7b` 漏了它，是随后的对拍抓出来的）：`.join(...)` 拼出来的
+#: 头是个**纯字面**，而尾巴又是**可选**的 —— 于是 `choose write grammars python`
 #: （拼错一个字母）会匹配到 `choose write grammar` 这个**前缀**、把前 20 个字符抹成空白、
-#: 留下 `s python`。而 `read_grammar_decl` 那边有 `\b`，所以它**不认为**这是个声明、
-#: 于是**不报错**，一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句
-#: 指不到点子的语法错。`\b` 一加，这种写法两边都不认，报的才是"看不出声明"那条路。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"\b(?:[ \t]+[^\n]*)?", re.M)
+#: 留下 `s python`。而 `read_grammar_decl` 那边有边界检查、**不认为**这是声明、**不报错**，
+#: 一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句指不到点子的语法错。
+_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
@@ -1443,34 +1455,57 @@ def strip_grammar_decl(src: str) -> str:
     return _GRAMMAR_LINE.sub(_blank_keep_off, src)
 
 
+def find_decl(src: str) -> tuple[bool, str | None, int]:
+    """**只"找"**那一行 —— 与报错器的 `decl_at` **同一个职责**（`docs/188` §1）。
+
+    返回 `(有没有声明头, 别名原文或 None, 行号)`。**不管**"必须在 `module` 之前"、
+    "只许写一次"、别名在不在出厂锁里 —— 那三条是 `read_grammar_decl` **在这之上**加的。
+
+    **为什么把这一层单独露出来**：报错器只要"找"（它是个独立的 Loment 程序，判不了别的），
+    而"找"是**两边共享的那一层**。分层之后，判据才能**逐条对拍这一层**；
+    不分层的话，拿"融合了三条规矩的结果"去比"只管找的结果"，对拍会满屏**假分歧**
+    （实测：`module m` 在前那一档，融合层报"必须在 module 之前"、找层说 python ——
+    两边都对，只是**答的不是同一个问题**）。
+    """
+    hits = list(_GRAMMAR_ANY.finditer(src))
+    if not hits:
+        return False, None, 0
+    first = hits[0]
+    line = src[:first.start()].count("\n") + 1
+    m = _GRAMMAR_DECL.match(src, first.start())
+    return True, (m.group(1) if m else None), line
+
+
 def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
 
     必须在 `module` **之前**：它决定后面怎么读，读到了 `module` 才说就晚了。
     只许写一次。没写就是 `("loment", None, False)` —— 源侧**可选**（`docs/188` §2）：
     99% 的文件是 Loment，每份写一遍是噪声；而"缺 = Loment"**没有歧义**。
+
+    **"找"在 `find_decl` 里**（那一层与报错器共享），这里只在它之上加三条规矩。
     """
-    hits = list(_GRAMMAR_ANY.finditer(src))
-    if not hits:
+    found, alias, line = find_decl(src)
+    if not found:
         return "loment", None, False
-    first = hits[0]
-    line_of = lambda i: src[:i].count("\n") + 1          # noqa: E731
+    first = _GRAMMAR_ANY.search(src)
+    assert first is not None
     mod = _MODULE_LINE.search(src)
     if mod is not None and mod.start() < first.start():
-        return "loment", (f"第 {line_of(first.start())} 行: `choose write grammar` 必须在 "
+        return "loment", (f"第 {line} 行: `choose write grammar` 必须在 "
                           f"`module` **之前** —— 它决定后面怎么读，"
                           f"读到 `module` 才说就晚了"), False
-    if len(hits) > 1:
-        return "loment", (f"第 {line_of(hits[1].start())} 行: `choose write grammar` "
-                          f"只许写一次"), False
-    m = _GRAMMAR_DECL.match(src, first.start())
-    if not m:
-        return "loment", (f"第 {line_of(first.start())} 行: `choose write grammar` "
+    later = list(_GRAMMAR_ANY.finditer(src))
+    if len(later) > 1:
+        return "loment", (f"第 {src[:later[1].start()].count(chr(10)) + 1} 行: "
+                          f"`choose write grammar` 只许写一次"), False
+    if alias is None:
+        return "loment", (f"第 {line} 行: `choose write grammar` "
                           f"后面要写语法名"), False
-    word = m.group(1).strip().lower()
+    word = alias.strip().lower()
     if word not in GRAMMAR_ALIASES:
         return "loment", (
-            f"第 {line_of(first.start())} 行: `grammar {m.group(1)}` 不在出厂锁的取值表里"
+            f"第 {line} 行: `grammar {alias}` 不在出厂锁的取值表里"
             f"—— 这张表由官方给，**不可扩展、不可覆盖**（`docs/188` §1.1）。"
             f"可写的是：{'、'.join(sorted(GRAMMAR_ALIASES))}"), False
     return GRAMMAR_ALIASES[word], None, True

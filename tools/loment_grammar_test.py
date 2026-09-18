@@ -301,6 +301,117 @@ def test_the_declaration_word_order_is_the_shared_contract():
     print("      词序/别名边界/词边界 == 共享契约，且产物里就是这三个词、按这个顺序")
 
 
+def _ref_find(src: str) -> tuple[bool, str | None, int]:
+    """**独立写的参照实现**：按字符走一遍，**一行正则都不用**。
+
+    它对着的是 `potato_from.find_decl` —— **只管"找"**那一层（有没有声明头、别名是什么、
+    第几行），**不管**"必须在 `module` 之前 / 只许写一次 / 别名在不在出厂锁里"。
+    分层是必要的：不分层的话，拿"融合了三条规矩的结果"去比"只管找的结果"，
+    对拍会满屏**假分歧**（实测：`module m` 在前那一档，融合层报"必须在 module 之前"、
+    找层说 python —— 两边都对，只是**答的不是同一个问题**）。
+
+    规则（与报错器 `decl_at` 同一刀）：行首可跳空白 → `choose` ␣ `write` ␣ `grammar`
+    （三个**空白分隔**的词）→ 第三个词后面只能是 **空白 / `;` / 行尾** → 别名是
+    **跳过空白之后**到空白/`;`/行尾为止的一串；跳完空白就撞上 `;` 或行尾 ⇒ **有头没别名**。
+    """
+    line = 1
+    for raw in src.split("\n"):
+        i, n = 0, len(raw)
+        while i < n and raw[i] in " \t":
+            i += 1
+        ok = True
+        for word in ("choose", "write", "grammar"):
+            if raw[i:i + len(word)] != word:
+                ok = False
+                break
+            i += len(word)
+            if i < n and raw[i] not in " \t;":
+                ok = False                       # 词后面贴了别的字符 ⇒ 不是这个词
+                break
+            j = i
+            while j < n and raw[j] in " \t":
+                j += 1
+            if word != "grammar" and j == i:
+                ok = False                       # 词与词之间必须有空白
+                break
+            i = j
+        if ok:
+            if i >= n or raw[i] == ";":
+                return True, None, line           # 有头、没写别名
+            j = i
+            while j < n and raw[j] not in " \t;":
+                j += 1
+            return True, raw[i:j], line
+        line += 1
+    return False, None, 0
+
+
+@test
+def test_the_scanner_agrees_with_an_independently_written_reference():
+    """**扫一批输入，与一个独立写的参照实现逐条对拍** —— 这是"重组是保义的吗"的答法。
+
+    loment-dev-86 那句话说到点子上：**"改实现"的证据标准比"写实现"高** ——
+    写的时候你只要证明新东西对，改的时候你要证明新旧**一样**，而"原有判据全过"
+    恰恰是最容易骗人的那种证据（它们覆盖的是**行为**，不是**改动**）。
+
+    这条就是那个标准的落地：不动手挑几条，而是**枚举**一批（原样 / 分隔符 / **每处
+    单字符替换** / 别名各种拼法 / 前缀杂质 / 两次声明），拿**按字符走**写的参照实现与
+    正则实现逐条比。手挑的表只能覆盖"想得到的写法"；枚举能覆盖到想不到的那些。
+
+    **它当场抓到了两件真东西**：
+
+    1. 参照自己写错过一处（`w[3:]` 应为 `w[len("grammar"):]`）—— 对拍**不保证谁对**，
+       它保证**分歧会浮出来**；
+    2. `choose write grammar#python` 这种"头后面贴着非空白非 `;`"的写法，
+       **我的扫描器与报错器 `decl_at` 说不同的话**（我认成"有头没别名"→报错，
+       它认成"没有声明"→退回嗅探）。于是把边界从 `\\b` 收紧成 **空白/`;`/行尾**
+       —— 两边现在同一条规矩。
+
+    **同时钉住最要命的那半**：参照说"根本没有声明"的行，`strip_grammar_decl` **一个字
+    都不许动** —— 漏边界那次正是这里出的错（把 `choose write grammars python` 切成了
+    `                    s python`，而预扫**不报错**，坏处全落在用户那行上）。
+    """
+    base = "choose write grammar python"
+    lines: set[str] = {base, "  " + base, "\t" + base, "x" + base, "#" + base,
+                       "// " + base, "/* " + base, "choose write grammars python",
+                       "choosewrite grammar python", "choose writes grammar c",
+                       "choose write grammar", "choose write grammar ",
+                       "choose write grammar;", "choose write grammar python;",
+                       "choose write grammar python // 说明",
+                       "choose write grammar\tpython",
+                       "choose write grammar python2", "choose write grammar Python",
+                       base + "\n" + base,
+                       "module m\n" + base, base + "\nmodule m"}
+    # **分隔符 × 别名**：三处间隔换成空白/制表，别名换成每一种。
+    for sep in (" ", "  ", "\t"):
+        for alias in ("py", "python", "c#", "c++", "go", "python2", "", "Python"):
+            lines.add(f"choose{sep}write{sep}grammar{sep}{alias}".rstrip())
+    # **每处单字符替换**：这是"覆盖想不到的写法"的那一半 —— 手挑挑不出这些。
+    for i in range(len(base)):
+        for ch in ("x", " ", "\t", ";", "#", "."):
+            lines.add(base[:i] + ch + base[i + 1:])
+
+    bad = []
+    for ln in sorted(lines):
+        src = ln + "\n"
+        mine, ref = potato_from.find_decl(src), _ref_find(src)
+        if mine != ref:
+            bad.append((ln, mine, ref))
+            continue
+        # **参照说"根本没有声明头"时，那一行一个字都不许被抹掉。**
+        # 只对这一档断言 —— "**有**头但写错了"（比如没写别名）那一档，`read_grammar_decl`
+        # 会当场报错、走不到抹除，抹不抹都无害；而"根本没有头"那一档**抹了就是把用户的
+        # 行切坏**，漏边界那次正是这里出的错。**这一档才要命。**
+        if not ref[0]:
+            after = potato_from.strip_grammar_decl(src)
+            if after != src:
+                bad.append((ln, "strip 动了不该动的行", repr(after)))
+    assert not bad, (
+        f"{len(lines)} 条里 {len(bad)} 条与参照对不上（前 5 条）：\n"
+        + "\n".join(f"  {ln!r}\n    find_decl={m}\n    参照={r}" for ln, m, r in bad[:5]))
+    print(f"      枚举 {len(lines)} 条，与独立写的参照逐条一致（含行号）；且无声明头时一个字未动")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:
