@@ -23,7 +23,7 @@
   },
   {
    "path": "tools/potato.py",
-   "sha256": "a1c5e7912bbe9ba10bd63b6862837bea3d7bf845b2328380369bc0293b4dc035"
+   "sha256": "aefbe4142a908720cb444f671ae04bcc58317ea35a59baeee11aac12a20e5e48"
   },
   {
    "path": "tools/potato_test.py",
@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "c64584e3ef46cd46a2bd639828fbf8a9e14e00c8199383beb50d654cadc9c7c3"
+   "sha256": "c8a1e6bd839ac5e843c6630b0f120dd28f0c1a3ef07e489c22dbdba2031f02fb"
   },
   {
    "path": "tools/potato_measure.py",
@@ -799,15 +799,15 @@
   },
   {
    "path": "tools/lomt_from.py",
-   "sha256": "23b6ce801c7426fcb08356a3addff208bdf137117955bc02acb283d7eb4d99ec"
+   "sha256": "55d8a2622776b16561671ac24efa27c73176e18b21a2b5ab70a7b9a97626d17c"
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "2d03307d9d57c8f275b0d7bb06a93725a68b37a20044b360143ab152d096087a"
+   "sha256": "b04fd35ef3c399ede42e9f2a94f71ac6f662f0c2025286de6beb36f194525166"
   },
   {
    "path": "tools/loment_multilang_test.py",
-   "sha256": "96fd2787f30672994508ca869f668e1483d610201f82b211388c2724c7eb66b7"
+   "sha256": "4262b171019a88836271e600dd48911fcd7b3db256510d53ee124e94133f730a"
   },
   {
    "path": "tools/ctrans.py",
@@ -815,7 +815,7 @@
   },
   {
    "path": "tools/loment_ctrans_test.py",
-   "sha256": "f37d3035ada93dde66a827433efed45f592420b30bddc6f922d24087a03281a5"
+   "sha256": "75edb1ba90ad7ff1d98761113ae03b6ab00fbb0569dbf2897585588d56023948"
   },
   {
    "path": "tools/pytrans.py",
@@ -1079,11 +1079,11 @@
   },
   {
    "path": "loment/examples/multilang/main.lomt",
-   "sha256": "b4bce72d3cb3e7e594082e0c34f3a398ee7f7795c0dd5830e20465f32a9db94e"
+   "sha256": "b762a2c56dc92721fc6292c88f737f143e635ef924075acb75abe9ff5ff40a16"
   },
   {
    "path": "loment/examples/multilang/01-c/pack.lomt",
-   "sha256": "e624906e0e346bb05c77eba6ebc64cfdc00c1353d34869df2a93180c2d065df8"
+   "sha256": "58fe8610d3fa29d18cb5a67570ba5f46892620841e66341ac89115295ce3e406"
   },
   {
    "path": "loment/examples/multilang/02-python/policy.lomt",
@@ -1523,11 +1523,15 @@
   },
   {
    "path": "docs/186-c-to-loment-translation.md",
-   "sha256": "1ce7ea713fcc7d3945e9e2aef8b7f0fe0d77b278b007671f04a78430dbb84af4"
+   "sha256": "dffc0fc807cbbad45002ab40fc92ed1c5a09c99bc23a244df1a4798cfbd82659"
   },
   {
    "path": "docs/187-python-to-loment-translation.md",
    "sha256": "755de905b4ca28236b03cdf9edf6c212d64bcbb7e89047c46dd8966a02791f4e"
+  },
+  {
+   "path": "docs/188-grammar-declaration.md",
+   "sha256": "8a235182346fd224b22c1f0fdcc04ec2f5db51951e85b44bcfa9fde6056d29ae"
   },
   {
    "path": "docs/manual/index.md",
