@@ -93,6 +93,8 @@ func g_add(a int, b int) int { return a + b }
 
 func g_plain(x int) int { return x * 2 }
 
+// `a, b int` —— **同类型共享名字**，Go 里极常见。它是一条**正面**用例：
+// 早先 `from_go` 不收这个写法，整个函数被跳过（而判据把那个 bug 记成了期望值）。
 func g_many(a, b int) int { return a }
 
 func g_slice(n int) []int { return nil }
@@ -179,8 +181,13 @@ SYNTAXES = [
         "lang": "go", "ext": ".go", "src": GO_SRC, "leg": "c-abi-subset",
         "types": [("Pt", [("X", "i64"), ("Y", "i64")])],
         "fns": [("g_add", [("a", "i64"), ("b", "i64")], "i64", "c"),
-                ("g_plain", [("x", "i64")], "i64", None)],   # 没 `//export` -> 不记 abi
-        "skips": [("g_many", "两段"), ("g_slice", "无映射")],
+                ("g_plain", [("x", "i64")], "i64", None),    # 没 `//export` -> 不记 abi
+                # `g_many(a, b int)` —— **同类型共享名字**。2026-09-18 做 Go 那一门时
+                # 发现 `from_go` **不收**这个写法（Go 里极常见），于是整个函数被跳过，
+                # 而这条判据把那个 bug 当成期望值记着。现在它是一条**正面**用例：
+                # 分组形参解析得出来，两个名字都进 `params`。
+                ("g_many", [("a", "i64"), ("b", "i64")], "i64", None)],
+        "skips": [("g_slice", "无映射")],
         "emitted": ["g_add"],
         "link": None,
     },
