@@ -1,0 +1,5 @@
+module gdecl
+
+fn main() -> u32 {
+    return 7;
+}

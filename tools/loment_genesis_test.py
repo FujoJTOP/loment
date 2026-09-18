@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,11 @@ import loment_genesis  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
+
+#: genesis 的源（自举镜像 `loment/tools/lomelf.lomt`）。判据从这里**读**它的常量，
+#: 不另抄一份 —— 与 `loment_p8_test::test_m85_codegen_table_capacity` 同一条纪律：
+#: 表放大了而守卫还卡在旧数，与反过来一样坏。
+LOMELF = ROOT / "loment" / "tools" / "lomelf.lomt"
 
 
 def test(fn):
@@ -53,6 +59,34 @@ def test_genesis_hash_and_reference():
     assert rc == 0, "loment_genesis --check 未通过 (缺文件 / 哈希不符 / 启动脚本没引用)"
     assert loment_genesis.GEN.exists(), "缺 genesis 二进制"
     print(f"      genesis {loment_genesis.GEN.stat().st_size} B, 哈希一致, bootstrap.sh 引用它")
+
+
+@test
+def test_seed_fits_lomelf_input_buffer():
+    """种子的 `.ll` 必须装得进 lomelf 的输入缓冲 —— 越界是**静默**的，所以要有判据。
+
+    2026-09-18 实测撞上的（`docs/192`）：`read_all(fd, inb, IN_CAP)` 读满 `IN_CAP` 就
+    返回，**不检查文件还有没有剩**，于是超限的 `.ll` 被**悄悄截断**，汇编出来的是一个
+    **启动就段错误**的可执行文件（不是报错）。同一份 `.ll`：
+
+        genesis 汇编 -> rc=139 (段错误)        clang 汇编 -> rc=0, 产物正常
+
+    而当时驱动单元的 `.ll` 已经涨到**离 2 MiB 只剩 1377 B** —— 它不是"很远的容量"，
+    是**下一次改动就撞**的东西。这条判据把它变成一条看得见的预算。
+
+    **它只报数、不抬上限**：越界仍然是静默的，修法（拒绝 / 抬布局）见 `docs/192` §5。
+    """
+    src = LOMELF.read_text(encoding="utf-8")
+    m = re.search(r"const IN_CAP: u32 = (\d+);", src)
+    assert m, f"在 {LOMELF.name} 里找不到 `const IN_CAP: u32 = <数>;`"
+    cap = int(m.group(1))
+    got = loment_genesis.SEED.stat().st_size
+    assert got < cap, (
+        f"种子 {got} B 超过 lomelf 输入上限 {cap} B (超 {got - cap} B)。"
+        f"**越界不报错, 而是静默截断**成一个启动就崩的二进制 (docs/192) —— "
+        f"要么把驱动单元改小, 要么抬 lomelf 的输入缓冲 (那一动要连 M_TXT/M_OUT/M_GB/"
+        f"M_TAB/M_OBJ 与 ARENA 整条布局一起改)")
+    print(f"      种子 {got} B / lomelf 输入上限 {cap} B, 余量 {cap - got} B")
 
 
 @test

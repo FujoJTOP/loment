@@ -423,6 +423,104 @@ fn strip_cr(buf: ptr, n: u32) -> u32 {
     return o;
 }
 
+/// `choose write grammar <别名>` 那一行 —— **解析之前抹掉**（`docs/188` §1、§7.2）。
+///
+/// 与参考实现的 `potato_from.strip_grammar_decl` **同一件事**：声明说的是"**怎么读**"，
+/// 不是那份源的一部分。不抹的话 `choose write grammar python` 会被读成"**取开关 `write`**"
+/// —— `choose` 在本语言里已经是开关关键字 —— 报出来是一句指不到点子的话。
+///
+/// **在 `lex` 之前、在字节上抹**（不是 token 上）：于是 lexer / parser 一行都不动，
+/// 语言面也就不必为它动任何规矩（**种子不必因为这一句而重生成**）。
+///
+/// **只收一种形状**：`module` 之前、只写一次、读法是 `loment`。别的形状一律拒，
+/// 理由与 `has_extblock` 是同一条纪律 —— **错要指在错的地方**：
+///
+/// * **别的写法**：自举侧还没有那些翻译器的 Loment 孪生（`docs/189` §4.1）。
+///   放它过去报的是"未定义的开关 `write`"，而真正的理由是"这门写法还没接上"。
+/// * **写在 `module` 之后 / 写两次**：参考实现这两种都**拒**（`docs/188` §1）——
+///   这里也拒，于是**接受面一致**（话术不同而已）。
+fn blank_skip(buf: ptr, p: u32, e: u32) -> u32 {
+    let i: u32 = p;
+    while i < e && (load8(buf, i) == 32 || load8(buf, i) == 9) {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 从 `p` 起跳空白、吃一个词；词正好是 `w` 就返回**词尾**，否则 0。
+/// 词的边界 = 空白 / `;` / 行尾 —— **与参考实现 `_GRAMMAR_TAIL` 的那个字符类同一个**
+/// （对拍过：`grammar#python` 两边都说"没有声明"，`grammar;` 两边都说"头成立、别名没写"）。
+fn word_skip(buf: ptr, p: u32, e: u32, w: str) -> u32 {
+    let a: u32 = blank_skip(buf, p, e);
+    let b: u32 = a;
+    while b < e && load8(buf, b) != 32 && load8(buf, b) != 9 && load8(buf, b) != 59 {
+        b = b + 1;
+    }
+    if b == a {
+        return 0;
+    }
+    if streq(ptr_add(buf, a), b - a, w) == 0 {
+        return 0;
+    }
+    return b;
+}
+
+/// `choose write grammar <别名>` 那一行 → **别名起点**（头不成立返回 0）。
+/// 别名 = 跳空白之后的那一串（到空白 / `;` / 行尾为止）。
+fn decl_alias(buf: ptr, s: u32, e: u32) -> u32 {
+    let p: u32 = word_skip(buf, s, e, "choose");
+    if p == 0 {
+        return 0;
+    }
+    p = word_skip(buf, p, e, "write");
+    if p == 0 {
+        return 0;
+    }
+    p = word_skip(buf, p, e, "grammar");
+    if p == 0 {
+        return 0;
+    }
+    return blank_skip(buf, p, e);
+}
+
+fn strip_grammar_decl(buf: ptr, n: u32) -> u32 {
+    let saw_module: u32 = 0;
+    let seen: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let e: u32 = i;
+        while e < n && load8(buf, e) != 10 {
+            e = e + 1;
+        }
+        if word_skip(buf, i, e, "module") != 0 {
+            saw_module = 1;
+        }
+        let al: u32 = decl_alias(buf, i, e);
+        if al != 0 {
+            let ae: u32 = al;
+            while ae < e && load8(buf, ae) != 32 && load8(buf, ae) != 9
+                    && load8(buf, ae) != 59 {
+                ae = ae + 1;
+            }
+            if saw_module == 0 && seen == 0 && streq(ptr_add(buf, al), ae - al, "loment") == 1 {
+                // **抹成等长空白**（保留换行 ⇒ 行号不漂，报错仍指得到那一行）
+                let z: u32 = i;
+                while z < e {
+                    if load8(buf, z) != 10 {
+                        store8(buf, z, 32 as u8);
+                    }
+                    z = z + 1;
+                }
+                seen = 1;
+            } else {
+                return fail("fujoc-s: 这份源的 `choose write grammar` 自举侧收不了 —— 只收 `choose write grammar loment` 这一种拼法（写在 `module` 之前、只写一次）。别的拼法/写法要等翻译器的 Loment 孪生（docs/189 §4.1），形状的规矩见 docs/188 §1。请用参考实现编译。\n");
+            }
+        }
+        i = e + 1;
+    }
+    return n;
+}
+
 /// `use <名字>` 的搜索根 (与参考实现的 `lomentc.NAME_ROOTS` **必须逐条一致**)。
 fn name_root_at(r: u32) -> str {
     if r == 0 {
@@ -948,6 +1046,10 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
     syscall4(3, fd as u64, 0, 0);
     let nb: u32 = strip_cr(slot, raw_n as u32);
+    // 声明说的是"**怎么读**"，不是那份源的一部分 —— **在 `lex` 之前抹掉**（`docs/188` §1）。
+    // 与参考实现的 `potato_from.strip_grammar_decl` 同一件事；放在这儿（而不是 token 层）
+    // 是为了让 lexer / parser **一行都不动** —— 也就不必为它重生成种子。
+    strip_grammar_decl(slot, nb);
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
     let ntf: u32 = lex(slot, nb, toks);
     // `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。

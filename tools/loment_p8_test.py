@@ -930,6 +930,58 @@ def test_m85_driver_checks_before_emitting():
         print(f"      驱动闸门: 负例 {len(neg)}/{len(neg)} 被拒, 正例 {len(pos)}/{len(pos)} 过检")
 
 
+#: `choose write grammar` 自举侧守卫的语料 (三个单元同一个模块名, 产物才好比)。
+GDECL = ROOT / "loment" / "selfhost" / "grammar_decl"
+
+
+@test
+def test_m87_driver_strips_grammar_decl():
+    """M87: 自举侧那条 `choose write grammar` 的守卫 —— 该收的收、该拒的拒, 抹掉之后不留痕。
+
+    声明说的是"**怎么读**", 不是那份源的一部分 (`docs/188` §1)。自举侧是在 `lex`
+    **之前按字节抹**的, 所以 lexer/parser/codegen 一行都没动 —— 收不收得下, 就是这一条在钉。
+
+    三件:
+
+      * **抹掉之后不留痕**: 带声明的那份与不带的那份 **产物逐字节相同**。对照面是
+        **另一个单元**, 不是参考实现 —— 两个实现**一起**错(比如都多抹了一行)时,
+        "自举 == 参考"照样绿 (`docs/182` §1.9 那条形状);
+      * **别的拼法拒**: 参考实现是**真收**那份 `grammar python` 的(它按 Python 读),
+        自举侧拒 —— 拒得说清"这门写法还没接上"(`docs/189` §4.1), **不是**"未定义的开关
+        `write`"(那是把"还没接上"错报成"你写错了");
+      * **拒的时候不产 IR**。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_grammar")
+        outs = {}
+        for name in ("plain", "decl"):
+            f = GDECL / f"{name}.lomt"
+            rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, name)
+            assert rc == 0, f"{name}.lomt: 自举侧退出 {rc}: {err[-300:]}"
+            m = lomentc.load(f)
+            d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
+            assert out == lomentc.emit_llvm(m, ROOT, d), f"{name}.lomt: 产物与参考不一致"
+            outs[name] = out
+        assert outs["decl"] == outs["plain"], (
+            "带着 `choose write grammar loment` 编译的产物与不带的不一样 —— 抹掉之后留痕了")
+        f = GDECL / "foreign.lomt"
+        rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, "foreign")
+        # 参考实现这份是**收**的 (拿它自己的前门按 Python 读) —— 分歧正是 docs/189 §4.1 那句话
+        m = lomentc.load(f)
+        d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
+        assert lomentc.emit_llvm(m, ROOT, d).strip(), "参考实现本该读得通这份 (夹具的前提)"
+        assert rc != 0, f"foreign.lomt: 别的拼法没被拒 (exit {rc})"
+        assert "自举侧收不了" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
+        assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
+        assert out.strip() == "", "被拒时不该产出 IR"
+        print("      声明: 抹掉后与不带那份逐字节一致; 别的拼法拒且指对原因")
+
+
 @test
 def test_m85_driver_emits_structured_diagnostics():
     """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
