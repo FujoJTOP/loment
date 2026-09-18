@@ -17,6 +17,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -328,6 +329,155 @@ process.stdout.write(JSON.stringify({
     # ⑤ 文件在工作区外 -> 报错（相对路径要传给外部命令，`..` 会指到别处）
     assert "error" in got["outside"], got["outside"]
     print("      编译/运行：清单↔实现对得上；分支判定 6 例（CLI / WSL / 开发树 / 报错×2）")
+
+
+# ---------------------------------------------------------------- 6. 扩展真的激活
+
+#: 一个**假的 `vscode` 模块** —— 足够让 `extension.js` 跑完 `activate`。
+#: `Module._load` 把 `require('vscode')` 拦下来换成它（另外把语言服务那个包也换掉，
+#: 免得为了跑一次激活去装 `node_modules`）。
+#:
+#: **为什么要跑真的 `activate`**：清单对、命令都注册了、纯模块单测全绿，扩展照样可能
+#: 一行都执行不到。实测过一次 —— `activate()` 里引用了没定义的 `root`（`if (root)`），
+#: JavaScript 到那一行抛 `ReferenceError`，于是它**后面**的任务提供者与语言服务
+#: 全都没注册；而用户在编辑器里看到的只是「按了没反应 / 没有用于调试 Loment 的扩展」。
+#: 那正是本仓最讨厌的静默（`docs/167`）。
+_ACTIVATE_HARNESS = r"""
+const Module = require('module');
+const EXT = process.argv[2];
+const ROOT = process.argv[3];
+
+const reg = [];
+const dis = () => ({ dispose() {} });
+const file = ROOT + '/loment/examples/user_hello.lomt';
+const SETTINGS = { enableLsp: false, toolCommand: 'loment', buildDir: 'loment/build' };
+
+function Task(def, scope, name, source, exec, matcher) {
+  this.definition = def; this.name = name; this.exec = exec; this.matcher = matcher;
+}
+const vscode = {
+  workspace: {
+    getConfiguration: () => ({ get: (k) => SETTINGS[k] }),
+    workspaceFolders: [{ uri: { fsPath: ROOT } }],
+    openTextDocument: async () => ({ uri: {} }),
+  },
+  window: {
+    activeTextEditor: { document: { uri: { fsPath: file }, languageId: 'loment' } },
+    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+    showWarningMessage: (m) => reg.push('warn:' + m),
+    showErrorMessage: (m) => reg.push('err:' + m),
+    showTextDocument: async () => ({}),
+  },
+  commands: {
+    registerCommand: (id) => { reg.push('cmd:' + id); return dis(); },
+    executeCommand: () => {},
+  },
+  tasks: {
+    registerTaskProvider: (t, p) => {
+      reg.push('taskProvider:' + t); vscode.__provider = p; return dis();
+    },
+    executeTask: async () => {},
+  },
+  debug: {
+    registerDebugAdapterDescriptorFactory: (t, f) => {
+      reg.push('debugFactory:' + t); vscode.__factory = f; return dis();
+    },
+  },
+  ProcessExecution: function (c, a, o) { this.cmd = c; this.args = a; this.opts = o; },
+  Task,
+  TaskScope: { Workspace: 1 },
+  TaskRevealKind: { Always: 1 },
+  TaskPanelKind: { Shared: 1 },
+  TaskGroup: { Build: 2 },
+  Uri: { file: (p) => ({ fsPath: p }) },
+  DebugAdapterExecutable: function (c, a) { this.cmd = c; this.args = a; },
+};
+
+const load = Module._load;
+Module._load = function (req) {
+  if (req === 'vscode') { return vscode; }
+  if (req === 'vscode-languageclient/node') {
+    return { LanguageClient: class { async start() {} async stop() {} } };
+  }
+  return load.apply(this, arguments);
+};
+
+(async () => {
+  const out = { ok: false, reg: [], subs: 0, tasks: null, buildGroup: null, dap: null };
+  try {
+    const ext = require(EXT);
+    const ctx = { subscriptions: [] };
+    await ext.activate(ctx);
+    out.ok = true;
+    out.subs = ctx.subscriptions.length;
+    if (vscode.__provider) {
+      const ts = await vscode.__provider.provideTasks();
+      out.tasks = ts.length;
+      out.buildGroup = ts.some((t) => t.group === vscode.TaskGroup.Build);
+    }
+    if (vscode.__factory) {
+      const d = vscode.__factory.createDebugAdapterDescriptor();
+      out.dap = d ? { cmd: d.cmd, args: d.args } : null;
+    }
+  } catch (e) {
+    out.error = String((e && e.stack) || e);
+  }
+  out.reg = reg;
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+@test
+def test_vscode_extension_activates():
+    """**扩展真的激活得起来，而且该注册的都注册了。**
+
+    `activate()` 抛异常时 VS Code 只会把扩展标红，功能**静默全丢** ——
+    而清单、纯模块单测、语法文件全都还是绿的。所以这一条要真的跑一遍它。
+    """
+    node = _node()
+    if not node:
+        print("      SKIP: 无 node")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        h = Path(td) / "activate-harness.js"
+        h.write_text(_ACTIVATE_HARNESS, encoding="utf-8")
+        r = subprocess.run([node, str(h), str(EXT / "src" / "extension.js"), str(ROOT)],
+                           capture_output=True, text=True, shell=False)
+
+    def fail(msg):
+        return AssertionError(f"{msg}\n  node stderr: {r.stderr.strip()[-400:]}")
+
+    assert r.returncode == 0, fail(f"激活脚手架本身就挂了 (rc={r.returncode})")
+    got = json.loads(r.stdout)
+    assert got.get("ok"), fail(f"`activate()` 抛了: {got.get('error', '')[:600]}")
+
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    reg = set(got["reg"])
+
+    # ① 清单里声明的**每一条命令**都要真的注册上 —— 少一条，用户点下去只说
+    #    "command not found"，而清单看着完全正常。
+    missing = sorted(c["command"] for c in pkg["contributes"]["commands"]
+                     if f"cmd:{c['command']}" not in reg)
+    assert not missing, fail(f"这些命令在清单里，但 activate 时没注册: {missing}")
+
+    # ② 任务提供者 / 调试适配器工厂：`Ctrl+Shift+B` 与 F5 各自只认这两样
+    assert "taskProvider:loment" in reg, fail(f"没有注册 loment 任务提供者: {sorted(reg)}")
+    assert "debugFactory:loment" in reg, fail(f"没有注册 loment 调试适配器工厂: {sorted(reg)}")
+
+    # ③ 任务提供者真给出两条任务，且「编译」是**默认生成任务**（`Ctrl+Shift+B` 靠它）
+    assert got["tasks"] == 2, fail(f"应当给「编译 / 编译并运行」两条任务，给了 {got['tasks']}")
+    assert got["buildGroup"] is True, fail("「编译」没有挂 TaskGroup.Build —— Ctrl+Shift+B 不会挑它")
+
+    # ④ 调试工厂给得出**真命令**（不是 undefined）。清单里 `debuggers[].type` 必须与
+    #    注册时用的那个名字一致 —— 不一致时 F5 还是会弹"没有用于调试的扩展"。
+    types = [d.get("type") for d in pkg["contributes"].get("debuggers") or []]
+    assert "loment" in types, fail(f"清单里的调试器类型对不上: {types}")
+    dap = got["dap"]
+    assert dap, fail("调试适配器工厂返回了 null/undefined（F5 会是一个没反应的会话）")
+    assert dap["args"] and any("loment_dap.py" in a for a in dap["args"]), fail(f"适配器命令不对: {dap}")
+    print(f"      activate() 跑通：{len(reg)} 项注册、{got['tasks']} 条任务（含默认生成任务）、"
+          f"调试适配器 `{dap['cmd']} …{Path(dap['args'][-1]).name}`")
 
 
 def main(argv: list[str] | None = None) -> int:

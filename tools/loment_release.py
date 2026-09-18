@@ -79,7 +79,11 @@ GLOBS = [
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
-    "tools/vscode_ext.py", "tools/vscode_ext_test.py", "tools/mono_trace.py",
+    "tools/vscode_ext.py", "tools/vscode_ext_test.py",
+    # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
+    # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
+    "tools/loment_dap.py", "tools/loment_dap_test.py",
+    "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",

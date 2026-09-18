@@ -25,15 +25,36 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 **`Ctrl+Shift+B`（运行生成任务）就是「编译当前文件」** —— 扩展注册了任务提供者，
 `编译` 是默认生成任务。
 
-> **F5 不能用来跑 Loment。** F5 在 VS Code 里恒等于「开始调试」，要它不弹
-> "没有用于调试 Loment 的扩展"就得有一个**调试器** —— 而 Loment 现在没有。
-> `loment dbg`（M75）只是**源码级符号化**（地址 ↔ 源行，走 DWARF 行表），
-> 那是调试器的**地基**，不是调试器（没有进程控制 / 断点 / 单步）。
-> 想用 F5 跑，只能自己在 `keybindings.json` 里把它改指过去：
->
-> ```json
-> { "key": "f5", "command": "workbench.action.tasks.runTask", "args": "Loment: 编译并运行" }
-> ```
+| **调试** | `tools/loment_dap.py`（DAP + `ptrace` 后端） | F5 断点 / 单步 / 调用栈；见下节 |
+
+### 调试（F5）
+
+F5 就是**开始调试**，所以要它可用就得有一个真调试器 —— 现在有了：扩展注册了
+`loment` 类型的调试适配器（`debuggers` 贡献 + `DebugAdapterDescriptorFactory`）。
+
+第一次按 F5 时 VS Code 会问用哪种配置，选 **Loment**，它会生成这样一份
+`launch.json`（也可以自己在 `.vscode/launch.json` 里写）：
+
+```json
+{
+  "type": "loment",
+  "request": "launch",
+  "name": "调试当前 Loment 文件",
+  "program": "${file}",
+  "stopOnEntry": false
+}
+```
+
+编辑区左边点一下设断点，F5 起会话，F10 单步跨过（`next`）、F11 单步进入（`stepIn`）、
+Shift+F11 跳出（`stepOut`），继续 F5。
+
+**它需要什么**：后端是 `ptrace`，所以适配器跑在 **WSL** 里（`wsl -e python3 …`）；
+编译那份带 DWARF 的 ELF 用 **Windows 侧的 LLVM**（`clang.exe` / `llvm-objdump.exe`）。
+两者缺一时按 F5 会**明确报错**（不会是一个没反应的会话）。
+
+**这一版没有的**：条件断点、表达式求值 / 悬停看值、源级局部变量（`变量` 面板里
+列的是寄存器）、多帧栈回溯、多线程。`stepOut` 是单步到函数变了为止的近似。
+细节与四个踩过的坑见 `docs/190-loment-debugger.md`。
 
 ### 「编译」走哪条路
 
@@ -68,6 +89,8 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 | `loment.serverPath` | 空 | `tools/loment_lsp.py` 绝对路径；留空则自动向上查找 |
 | `loment.serverCommand` / `serverArgs` | 空 | 改用别的命令起语言服务（**不需要 Python**），例：`wsl` + `["-e", "/home/<you>/.local/share/loment/lsp"]` |
 | `loment.toolCommand` / `toolArgs` | 空 | 「编译 / 运行」用哪个 Loment 命令，例：`wsl` + `["-e", "/home/<you>/.local/share/loment/bin/loment"]` |
+| `loment.dapScript` | 空 | 调试适配器 `tools/loment_dap.py` 绝对路径；留空则自动向上查找 |
+| `loment.dapCommand` / `dapArgs` | 空 | 改用别的命令起调试适配器。默认 Windows 走 `wsl -e python3 <dapScript>`，其它平台走 `python3 <dapScript>` |
 | `loment.enableLsp` | `true` | 关掉后只留语法高亮与命令 |
 | `loment.buildDir` | `loment/build` | `.ll` / `.potato.json` 输出目录（相对工作区根） |
 

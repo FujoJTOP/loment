@@ -17,6 +17,7 @@ const fs = require('fs');
 const { LanguageClient } = require('vscode-languageclient/node');
 const { findServer } = require('./server-path');
 const { invocation } = require('./build-cmd');
+const { invocation: debugInvocation } = require('./debug-cmd');
 
 const SERVER_COMMAND = 'python';
 const clientName = 'loment';
@@ -115,15 +116,10 @@ function toolPath(root, ...rest) {
  * ## 为什么要有它（而不是只留命令）
  *
  * `Ctrl+Shift+B`（运行生成任务）是 VS Code 里"编译这个项目"的**原生手势** ——
- * 而它只认**注册过的任务**，不认命令。所以只做命令的话，用户按 F5/`Ctrl+Shift+B`
- * 得到的是"没有用于调试 Loment 的扩展"，而不是编译。
+ * 而它只认**注册过的任务**，不认命令。
  *
- * ## 它**不**解决 F5
- *
- * F5 在 VS Code 里**恒等于「开始调试」**，要它不弹那个框就得有一个**调试器** ——
- * 而 Loment 现在没有：`loment dbg`（M75）只是**源码级符号化**（地址 ↔ 源行，
- * 走 DWARF 行表），那是调试器的**地基**，不是调试器（没有进程控制/断点/单步）。
- * 这里不做一个"看着像调试器但不能断点"的壳 —— 那正是本仓最讨厌的静默。
+ * F5 由**调试器**那一格负责（`debuggers` 贡献 + 下面的调试适配器工厂），
+ * 任务提供者管不了它 —— 两者是 VS Code 里两个不同的手势，别混。
  */
 class LomentTaskProvider {
   provideTasks() {
@@ -321,6 +317,7 @@ function activate(context) {
     vscode.commands.registerCommand('loment.formatDocument',
                                     () => vscode.commands.executeCommand('editor.action.formatDocument')));
 
+  const root = workspaceRoot();
   if (root) {
     output = vscode.window.createOutputChannel('Loment');
     output.appendLine(`Loment 扩展已激活 (工作区根: ${root})`);
@@ -329,6 +326,33 @@ function activate(context) {
   // 任务提供者: 让 `Ctrl+Shift+B` 与「Tasks: Run Task」看得到「编译 / 编译并运行」
   context.subscriptions.push(
     vscode.tasks.registerTaskProvider('loment', new LomentTaskProvider()));
+
+  // 调试适配器: 让 F5 真的开始调试，而不是弹"没有用于调试 Loment 的扩展"。
+  // **选哪条命令不在这里判** —— 那是 debug-cmd.js 的事（纯模块，判据无头跑它）。
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory('loment', {
+      createDebugAdapterDescriptor() {
+        const ed = vscode.window.activeTextEditor;
+        const file = ed ? ed.document.uri.fsPath : undefined;
+        const inv = debugInvocation({
+          root: workspaceRoot(file ? path.dirname(file) : undefined),
+          fileDir: file ? path.dirname(file) : undefined,
+          platform: process.platform,
+          dapScript: cfg().get('dapScript'),
+          dapCommand: cfg().get('dapCommand'),
+          dapArgs: cfg().get('dapArgs'),
+        });
+        if (inv.error) {
+          // 不能返回 undefined（那会是一个"按了没反应"的调试会话）—— 弹出来说清楚。
+          vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+          return undefined;
+        }
+        if (output) {
+          output.appendLine(`调试适配器: ${inv.cmd} ${inv.args.join(' ')}（${inv.how}）`);
+        }
+        return new vscode.DebugAdapterExecutable(inv.cmd, inv.args);
+      },
+    }));
 
   if (cfg().get('enableLsp') !== false) {
     startClient(context).then((c) => {

@@ -728,6 +728,14 @@ class Module:
     #: **正是**为了写 `choose` 才存在的，它自己还常常以 `addin <自己>` 开头。
     #: 不加这个标记，`chooseset.lomt` 会被自己的规则判死。
     from_addin: bool = False
+    #: **这个模块的源文件路径**（`load()` 填）。**只给调试信息用**（`docs/190`）——
+    #: DWARF 的 `!DIFile` 要说清"这一行在哪个文件里"，而 `name` 是**模块名**，不是路径。
+    #:
+    #: 原先用 `{name}.lomt` + 仓库根拼出来的路径**指向一个不存在的文件**（实测：
+    #: `loment/examples/user_hello.lomt` 的行表显示成 `D:/Dev/Loment-DEV\user_hello.lomt`）。
+    #: 那让 `loment dbg`（M75）报的"源码级符号化"指不到源，也让断点无从对起 ——
+    #: **调试器就是被这一条挡住的**。
+    src: "Path | None" = None
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -4605,24 +4613,49 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     cov_counter = [0] if coverage else None
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
+
+    def _difile(m) -> str:
+        """这个模块的源文件**真实路径** -> DWARF 的 `(filename, directory)`。
+
+        **不能拿 `m.name` 当文件名**（那是模块名）：`loment/examples/user_hello.lomt`
+        的模块名是 `user_hello`，拼出来的路径指到一个不存在的文件 —— 断点/单步就全错。
+        `m.src` 没有（手写的 Module、或从字符串 parse 出来的）时退回旧行为。
+        """
+        p = getattr(m, "src", None)
+        if p is None:
+            return f'"{m.name}.lomt"', f'"{lom_root.as_posix()}"'
+        # **绝对路径**：相对路径要靠消费方猜基准（编译时的 cwd），而读行表的是**调试器**，
+        # 它那边的基准是编辑器的文档 URI —— 猜错就是"断点落不上、栈帧指不到源"。
+        ap = Path(p).resolve()
+        return f'"{ap.name}"', f'"{ap.parent.as_posix()}"'
+
     if debug:  # M59: DWARF 最小元数据 (编译单元 + 文件 + 签名类型)
+        fn0, dir0 = _difile(mod)            # 编译单元挂**根模块**的文件
         meta += [
             '!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, '
             'producer: "lomentc", isOptimized: false, runtimeVersion: 0, '
             'emissionKind: FullDebug)',
-            f'!1 = !DIFile(filename: "{mod.name}.lomt", '
-            f'directory: "{lom_root.as_posix()}")',
+            f'!1 = !DIFile(filename: {fn0}, directory: {dir0})',
             "!2 = !DISubroutineType(types: !3)",
             "!3 = !{}",
         ]
+    #: 模块名 -> 它的 `!DIFile` 编号。**每模块一个** —— 一份程序可以 `use` 好几个
+    #: `.lomt`，共用一个文件的话，跳进库里的函数会显示根文件，断点也就落错了地方。
+    #: 根模块先占上 `!1`（编译单元那句已经引用它了），免得给它发第二份。
+    dbg_file: dict = {mod.name: 1} if debug else {}
     for m in mods:
         for f in m.funcs:
             scope, lines = None, {}
             if debug:
+                fid = dbg_file.get(m.name)
+                if fid is None:
+                    fn_m, dir_m = _difile(m)
+                    fid = dbg_file[m.name] = len(meta)
+                    meta.append(f'!{fid} = !DIFile(filename: {fn_m}, directory: {dir_m})')
                 scope = len(meta)
                 meta.append(
                     f'!{scope} = distinct !DISubprogram(name: "{f.name}", scope: !1, '
-                    f'file: !1, line: {f.line}, type: !2, unit: !0, '
+                    f'file: !{fid}, line: {f.line}, type: !2, unit: !0, '
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,

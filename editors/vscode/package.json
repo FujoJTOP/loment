@@ -106,9 +106,89 @@
           },
           "default": [],
           "description": "toolCommand 的参数。例：[\"-e\", \"/home/<you>/.local/share/loment/bin/loment\"]（配 toolCommand=\"wsl\"）。"
+        },
+        "loment.dapScript": {
+          "type": "string",
+          "default": "",
+          "description": "调试适配器 tools/loment_dap.py 的绝对路径。留空则从工作区逐级向上自动查找。"
+        },
+        "loment.dapCommand": {
+          "type": "string",
+          "default": "",
+          "description": "改用别的命令起调试适配器（默认 Windows 上走 `wsl -e python3 <dapScript>`，其它平台走 `python3 <dapScript>`）。留空即用默认。"
+        },
+        "loment.dapArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "dapCommand 的参数（不含脚本路径时，记得自己带上）。"
         }
       }
     },
+    "breakpoints": [
+      {
+        "language": "loment"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "loment",
+        "label": "Loment 调试",
+        "languages": [
+          "loment"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要调试的 .lomt 源文件（编译在调试会话里现做，带 DWARF）"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "传给被调试程序的参数"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "在入口（`_start` 的第一条指令）就停下"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "loment",
+            "request": "launch",
+            "name": "调试当前 Loment 文件",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Loment: 调试一个 .lomt 文件",
+            "description": "走 WSL 里的 ptrace（需要 Windows 侧装有 LLVM 的 clang / llvm-objdump）",
+            "body": {
+              "type": "loment",
+              "request": "launch",
+              "name": "调试 Loment",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ],
     "taskDefinitions": [
       {
         "type": "loment",
