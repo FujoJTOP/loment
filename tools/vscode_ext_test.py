@@ -302,7 +302,17 @@ process.stdout.write(JSON.stringify({
   dev_build: invocation({root:R, file:F, action:'build', platform:'win32'}),
   dev_run:   invocation({root:R, file:F, action:'run', platform:'win32'}),
   none:      invocation({root:R, file:F, action:'build', platform:'linux'}),
-  outside:   invocation({root:R, file:'D:/elsewhere/x.lomt', action:'build', platform:'linux'})
+  outside:   invocation({root:R, file:'D:/elsewhere/x.lomt', action:'build', platform:'linux'}),
+  // **没打开文件夹**（VS Code 空窗口）：调用方只能给"文件所在目录"，或者干脆给不出
+  empty_window: invocation({root:R + '/loment/examples', file:F, action:'run',
+                            platform:'win32', buildDir:'loment/build'}),
+  no_root:      invocation({file:F, action:'run', platform:'win32',
+                            buildDir:'loment/build'}),
+  // **库模块**（没有 `fn _start`）不该被"运行" —— 编得出 ELF，但一跑就 exit 11
+  lib_run:   invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
+                         action:'run', platform:'win32', buildDir:'loment/build'}),
+  lib_build: invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
+                         action:'build', platform:'win32', buildDir:'loment/build'})
 }));
 """
     r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT)],
@@ -339,7 +349,35 @@ process.stdout.write(JSON.stringify({
 
     # ⑤ 文件在工作区外 -> 报错（相对路径要传给外部命令，`..` 会指到别处）
     assert "error" in got["outside"], got["outside"]
-    print("      编译/运行：清单↔实现对得上；分支判定 6 例（CLI / WSL / 开发树 / 报错×2）")
+
+    # ⑥ **没打开文件夹时（VS Code 空窗口）也要能用**：从文件所在目录往上找
+    #    `scripts/lomc.ps1`。2026-09-18 实测：双击打开 `loment/examples/mathutil.lomt`
+    #    点运行 -> 「找不到能编译的东西」—— 工具链明明在，只是没往上看。
+    #    `server-path.js` / `debug-cmd.js` 早就是向上找的，`build-cmd.js` 原先不是。
+    for key in ("empty_window", "no_root"):
+        e = got[key]
+        assert e.get("how") == "lomc", f"{key}: 空窗口下没找到 scripts/lomc.ps1: {e}"
+        # cwd 必须是**仓库根** —— lomc.ps1 的 `-OutDir` 默认 `loment/build` 是相对 cwd 的
+        assert e["cwd"].replace("\\", "/").rstrip("/") == str(ROOT).replace("\\", "/").rstrip("/"), \
+            f"{key}: cwd 应当是仓库根: {e}"
+        assert e["args"][-1] == "-Run", e
+        # 相对路径的基准同样是仓库根（不是文件所在目录）
+        assert e["args"][3] == "loment/examples/tour.lomt", f"{key}: 相对路径基准不对: {e}"
+    print("      空窗口（没打开文件夹）：从文件往上找到 lomc.ps1，cwd 回到仓库根")
+
+    # ⑦ **库模块不能被"运行"**。`loment/examples/mathutil.lomt` 只有 `pub fn`，
+    #    没有 `_start` —— 编得出 ELF 但一跑就段错误（链接器那句
+    #    `cannot find entry symbol _start` 在任务输出里，而 `lomc.ps1` 自己退出码是 0）。
+    #    实测症状就是用户那句"跑不动"，而且不知道为什么。
+    lib = got["lib_run"]
+    assert "error" in lib, f"库模块不该被放行去运行: {lib}"
+    assert "_start" in lib["error"], f"报错要说清缺的是什么: {lib['error'][:80]}"
+    # **编译**不受影响（出 IR / 目标文件是正当用途）
+    assert got["lib_build"].get("how") == "lomc", \
+        f"库模块只是不能「运行」，编译照旧: {got['lib_build']}"
+    print("      库模块：`运行` 拦住并说明缺 `_start`；`编译` 照旧放行")
+    print(f"      编译/运行：清单↔实现对得上；分支判定 {len(got)} 例"
+          f"（CLI / WSL / 开发树 / 报错 / 空窗口）")
 
 
 # ---------------------------------------------------------------- 6. 扩展真的激活

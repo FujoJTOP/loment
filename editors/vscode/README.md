@@ -62,8 +62,9 @@ Shift+F11 跳出（`stepOut`），继续 F5。
 
 | 顺序 | 条件 | 用什么 |
 |---|---|---|
+| ⓪ | `运行` 的文件里没有 `fn _start` | **拦住并说明** —— 那是个库模块，编得出 ELF 但一跑就段错误。`编译` 照旧 |
 | ① | 配了 `loment.toolCommand` | 装好的 Loment 命令：`<cmd> <args> build FILE [-o NAME]` / `run FILE`。**不需要 Python** |
-| ② | Windows 且工作区里有 `scripts/lomc.ps1` | 开发树那条路：种子 + clang + WSL，出 `.ll` + `.elf` |
+| ② | Windows，且**从工作区或文件所在目录向上**找得到 `scripts/lomc.ps1` | 开发树那条路：种子 + clang + WSL，出 `.ll` + `.elf`。**不要求打开文件夹** —— 直接打开一个 `.lomt` 也能编 |
 | ③ | 两条都没有 | **明确报错**并告诉你去填哪个设置 —— 不静默（点了没反应是最难查的一种） |
 
 > 注意**仓库侧的 Python 没有"单文件出可执行"的命令**：`loment build DIR` 是**整目录增量构建**

@@ -34,6 +34,50 @@ function outName(buildDir, file) {
 }
 
 /**
+ * 从 startDir 逐级向上找 `<dir>/scripts/lomc.ps1`，最多 8 层。找不到返回 null。
+ *
+ * **为什么必须向上找**：VS Code 里"直接打开一个文件"（不打开文件夹）是极常见的用法 ——
+ * 那时窗口是**空的**，扩展只能拿**文件所在目录**当基准，而 `scripts/lomc.ps1` 在仓库根。
+ * 2026-09-18 实测：用户双击打开 `loment/examples/mathutil.lomt`，点运行得到
+ * 「找不到能编译的东西」—— 工具链明明在，只是没从那个目录往上看。
+ *
+ * `server-path.js` 与 `debug-cmd.js` 早就是向上找的，只有这里不是 —— 补齐这一处。
+ */
+function findWrapper(startDir, maxUp) {
+  const limit = typeof maxUp === 'number' ? maxUp : 8;
+  let cur = startDir ? path.resolve(startDir) : null;
+  for (let i = 0; i < limit && cur; i += 1) {
+    const cand = path.join(cur, 'scripts', 'lomc.ps1');
+    if (fs.existsSync(cand)) {
+      return cand;
+    }
+    const up = path.dirname(cur);
+    if (up === cur) {
+      break;
+    }
+    cur = up;
+  }
+  return null;
+}
+
+/**
+ * 这个文件里有没有 `fn _start`（ELF 的入口）。
+ *
+ * **必须自己有**：2026-09-18 全仓清点过，**没有一例**是"入口来自 `use` 的模块"
+ * （`loment` 下所有 `.lomt` 里，凡定义 `_start` 的文件都自己编成程序）。所以这一条能当判据用，
+ * 不用去解 `use` 树。
+ *
+ * 读不了就不拦（返回 true）—— 宁可让它去编，也不假装它是个库。
+ */
+function hasEntry(file) {
+  try {
+    return /\bfn\s+_start\b/.test(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    return true;
+  }
+}
+
+/**
  * 决定用哪条路。返回 `{cmd, args, cwd, how}` 或 `{error}`。
  *
  * @param {object} o
@@ -46,19 +90,36 @@ function outName(buildDir, file) {
  * @param {string} [o.buildDir]  `loment.buildDir`（相对工作区根）
  */
 function invocation(o) {
-  const root = o.root;
   const file = o.file;
   const action = o.action === 'run' ? 'run' : 'build';
   const platform = o.platform || process.platform;
   const tool = (o.toolCommand || '').trim();
-  const rel = posixRel(root, file);
-  if (!rel || rel.startsWith('..')) {
-    return { error: '这个文件不在工作区里 —— 编译命令的相对路径要以工作区根为基准。'
-                    + '把它的目录加进工作区，或把工作区设成它的上一层。' };
+  // 没打开文件夹时（空窗口）调用方给的是**文件所在目录** —— 那也是个合法的基准。
+  const root = o.root || path.dirname(file);
+
+  // ---- ⓪ 「运行」一个没有 `_start` 的文件，是**没有意义**的（也编不出可执行）
+  //
+  // 实测症状：链接器给一句 `cannot find entry symbol _start; not setting start address`，
+  // 然后那个 ELF 一跑就 `exit code 11`（段错误）—— **用户看到的是"跑不动"，而且不知道
+  // 为什么**（`lomc.ps1` 自己退出码还是 0）。这里把它变成一句能读懂的话。
+  //
+  // 例子：`loment/examples/mathutil.lomt` 是个库模块（只有 `pub fn`/`pub const`），
+  // 要运行的是**用它的那个入口文件**。**编译**不受影响（出 IR/目标文件是正当的）。
+  if (action === 'run' && !hasEntry(file)) {
+    return { error: `这个文件不是可运行的程序 —— 它里面没有 \`fn _start\`（ELF 的入口）。` +
+                    `\n多半它是个**库模块**：要运行的是**用它的那个入口文件**` +
+                    `（自己有 \`_start\` 的那个，例如同目录下的 \`tour.lomt\`）。` +
+                    `\n只想编它（出 IR / 目标文件）就用「Loment: 编译当前文件」。` };
   }
 
   // ---- ① 装了 Loment 命令（产品路径，不需要 Python）
   if (tool) {
+    const rel = posixRel(root, file);
+    if (!rel || rel.startsWith('..')) {
+      // 相对路径要传给外部命令，`..` 会指到别处（clang/WSL 那侧解出来不是这个文件）
+      return { error: '这个文件不在工作区里 —— 编译命令的基准是工作区根。'
+                      + '把它的目录加进工作区，或把工作区设成它的上一层。' };
+    }
     const extra = Array.isArray(o.toolArgs) ? o.toolArgs.map(String) : [];
     const args = extra.concat([action, rel]);
     if (action === 'build') {
@@ -69,13 +130,20 @@ function invocation(o) {
 
   // ---- ② Windows 开发树：scripts/lomc.ps1（种子 + clang + WSL）
   if (platform === 'win32') {
-    const wrapper = path.join(root, 'scripts', 'lomc.ps1');
-    if (fs.existsSync(wrapper)) {
-      const args = ['-NoProfile', '-File', wrapper, rel];
-      if (action === 'run') {
-        args.push('-Run');            // 用 WSL 跑那个 Linux ELF（程序用 Linux syscall）
+    // **从工作区和文件所在目录两处向上找** —— 见 `findWrapper` 那条注释。
+    const wrapper = findWrapper(root) || findWrapper(path.dirname(file));
+    if (wrapper) {
+      // `<仓库根>/scripts/lomc.ps1` -> `<仓库根>`：**这个**才是 cwd 与相对路径的基准
+      // （`lomc.ps1` 的 `-OutDir` 默认 `loment/build` 是相对 cwd 的）。
+      const base = path.dirname(path.dirname(wrapper));
+      const rel = posixRel(base, file);
+      if (rel && !rel.startsWith('..')) {
+        const args = ['-NoProfile', '-File', wrapper, rel];
+        if (action === 'run') {
+          args.push('-Run');          // 用 WSL 跑那个 Linux ELF（程序用 Linux syscall）
+        }
+        return { cmd: 'powershell', args, cwd: base, how: 'lomc' };
       }
-      return { cmd: 'powershell', args, cwd: root, how: 'lomc' };
     }
   }
 
@@ -85,8 +153,9 @@ function invocation(o) {
       + '  · 装好工具链后在设置里填 `loment.toolCommand`'
       + '（装了包的话它是 `loment`；Windows 上经 WSL 跑时填 `wsl`，'
       + '`loment.toolArgs` 填 ["-e", "/home/<你>/.local/share/loment/bin/loment"]）；\n'
-      + '  · 或者在 Windows 上打开**仓库根**当工作区 —— `scripts/lomc.ps1` 在的话会自动用它。',
+      + '  · 或者把这个文件放在 Loment 仓库里（`scripts/lomc.ps1` 在的话会自动用它 ——'
+      + '**不要求打开文件夹**，从文件往上找）。',
   };
 }
 
-module.exports = { invocation, posixRel, outName };
+module.exports = { invocation, posixRel, outName, findWrapper };
