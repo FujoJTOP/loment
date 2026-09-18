@@ -2,9 +2,9 @@
 
 # Loment
 
-Loment is a systems programming language. Its syntax is a strict subset of Rust; the
-compiler emits native x86-64 executables — Linux ELF and Windows PE — with no runtime and
-no libc, and the toolchain is self-hosted.
+Loment is a **systems programming language**: it compiles to native x86-64 executables —
+Linux ELF and Windows PE, or a freestanding object for bare metal — with no runtime and no
+libc. Its syntax is a strict subset of Rust, and the toolchain is itself written in Loment.
 
 Two things were added in the latest update, and they are why this repository is worth a
 look now:
