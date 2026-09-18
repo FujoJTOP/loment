@@ -699,7 +699,7 @@
   },
   {
    "path": "tools/loment_interp.py",
-   "sha256": "de4258b59f8ebc491c5fecd52674d8bfdfc79130a3387b84e39715c22caef226"
+   "sha256": "0aa46791a5a5f2990042566a08006f47ae91fb799a0aedf913b33605135dbf41"
   },
   {
    "path": "tools/loment_ct_test.py",
@@ -711,7 +711,7 @@
   },
   {
    "path": "tools/loment_comefor_test.py",
-   "sha256": "11220a208038d30500b59b6445453606b3484961867953762c21ecb0aec3f5c2"
+   "sha256": "47983680c9eb6cef0cc465071276b90d044d5dcfb8d30503dbbc8624741da21e"
   },
   {
    "path": "tools/loment_p7_test.py",
@@ -1028,6 +1028,10 @@
   {
    "path": "loment/ct/mem.lomt",
    "sha256": "5fb950678a42d8c210a1b316f73b2c9bbaec1818663c12e83a3311c56231da26"
+  },
+  {
+   "path": "loment/ct/nobuiltin.lomt",
+   "sha256": "0f1211b6ae025fcf1e71120856705228d9eee9c10c5c9626b5311da23045e892"
   },
   {
    "path": "loment/ct/offsets.lomt",
@@ -1427,7 +1431,7 @@
   },
   {
    "path": "docs/184-comefor-in-kernel-syntax-extension.md",
-   "sha256": "7369e185433c143c95434d65e85de8db9f0b8aebc73af9f45807fe4a86df7096"
+   "sha256": "f5f1f2843bca2c3b691474973091f9a425b2111c90d3c85d4e50e06af918229b"
   },
   {
    "path": "docs/manual/index.md",
