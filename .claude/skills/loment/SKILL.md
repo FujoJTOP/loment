@@ -259,6 +259,7 @@ fn _start() {
 |---|---|
 | 模块 | 首行 `module <name>`（无分号） |
 | 项目模式 | `choose std` / `choose no_std`（**整个程序只写一次，只能写在入口那一份**，库不许写；不写就是 `std`）—— 见 §2.1 |
+| 开关设定 | `addin <名字>`（**只写在入口那一份**）—— 拉一个"开关设定"单元进来，见 §2.2 |
 | 导入 | **两种写法，后面都不带分号**：`use 名字`（**按层找，先命中先用**：① 项目根 `<项目>/deps/<名字>/<名字><后缀>` ② 工具链自带 `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>` ③ 内置四根 `loment/lib` → `examples` → `selfhost` → `tools`，**只有第 ③ 层要求名字唯一**）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。`<后缀>` 默认 `.lomt`，项目可以换成自己的（§7）。单文件最多 **300 条** use。写成 `use x;` 会被解析期拒绝（§6.13） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`）；**形参最多 10 个** |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
@@ -296,6 +297,64 @@ choose no_std          // ← 整个程序只写这一次；不写就是 std
   显式写出来是给读者和工具看的，语言不强制。
 - 它也会进 Potato 形式对象（`mode` 字段），所以"这份程序是哪个模式"在**不读源码**的
   那一侧也看得见。
+
+### 2.2 开关 `set choose` / `choose` / `addin`
+
+**开关**是"打开才编进去的代码"。关着的那段**连词法 token 都不进解析器** —— 所以
+"关掉 = 不依赖"是字面成立的：体内引用的东西**不需要存在**。
+
+```rust
+module myapp
+
+// 定义：名字 + "打开时才编进去的代码"
+set choose verbose {
+    pub fn banner() -> u32 { return 0x5EED; }
+}
+
+choose verbose          // 取值：打开（`choose close verbose` 是关掉）
+                        // **不写就是关着**
+
+fn _start() {
+    syscall4(60, banner() as u64, 0, 0);   // 只有 verbose 开着时这一句才编得过
+}
+```
+
+几条规则（三条都是 **E22**，两个编译器都在管）：
+
+- 一个文件里开关可以有很多（**上限 500**，超了报错，绝不静默丢），但**同名只许写一次**；
+- 取值前要先用 `set choose <名字> { … }` **定义**过，否则报"未定义的开关"；
+- 开关声明**不许嵌在另一个开关体里**（那会让"开没开"变成鸡生蛋）；
+- **库不许写 `choose`** —— 库要表达需要就声明能力需求，由项目决定。
+
+**跨文件设定用 `addin`**（`addin chooseset` 拉一个开关设定单元，只在入口那份里写）。
+`chooseset.lomt` 长这样（**这一块自己能编**，可以整段拷走）：
+
+```rust
+module chooseset            // chooseset.lomt，与入口同目录
+
+addin chooseset             // 开头写它自己（约定）
+
+set choose verbose {
+    pub fn banner() -> u32 { return 0x5EED; }
+}
+```
+
+入口那一份则是（**这一块单独编不过** —— 它的定义在旁边的 `chooseset.lomt` 里，
+两半合起来才是完整的例子；可运行的那一对在仓库的 `loment/examples/addin/`）：
+
+<!-- no-compile -->
+```rust
+module myapp                // 入口
+
+addin chooseset             // 拉进来；它的 `choose` **在整个程序生效**
+choose verbose
+```
+
+- `addin` 拉进来的单元**只许写 choose 相关代码**（`module` / `addin` / 三种 `choose`）；
+  写别的（`fn`/`struct`/`use`）会被拒 —— 要装代码用 `use`（那是库），装开关才用 `addin`。
+- **它本身参与编译**，所以体里给入口用的函数要 `pub`。
+- **只有入口能写 `addin`**；库或 addin 单元里写了会被拒（写了也不会生效）。
+- 开关取值会进 Potato（`switches` 字段），所以"哪些开关开着"在**不读源码**的那一侧也看得见。
 
 ## 3. 内建函数（全部，没有别的）
 

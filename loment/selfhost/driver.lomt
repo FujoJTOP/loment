@@ -42,17 +42,22 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [12352, 13824) 子路径暂存 (<dir>/<entry>, 判是不是目录用)
 //   [13824, 14080) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
 //   [14080, 15104) --diag-out 路径 (NUL), 空 = 不吐结构化诊断 (docs/182 §5)
-const SCR_CAP: u32 = 16384;
+//   [15104, 17504) addin 清单 (MAX_ADDIN 条, 每条 8 字节: 起点 + 长度)
+const SCR_CAP: u32 = 17504;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
 //: 无上限: 同一份源码两个实现给出不同的单元 (2026-09-16 发现)。抬到 300 是让 std 那种
 //: 多模块门面装得下。
 const MAX_USE: u32 = 300;
+//: `addin` 的条数上限, **与参考实现 (`lomentc.MAX_ADDIN`) 同值**。与 `MAX_USE` 同一条
+//: 纪律: **超限报错, 绝不静默丢** —— 丢一条 `addin` = 一整份开关设定凭空消失。
+const MAX_ADDIN: u32 = 300;
 const USE_OFF: u32 = 4096;       // use 清单起点
 const NAMTMP_OFF: u32 = 6496;    // 候选路径暂存起点
 const PROJ_OFF: u32 = 8256;      // 项目根
 const TOOLDIR_OFF: u32 = 9280;   // 工具目录
 const VER_OFF: u32 = 10304;      // 版本名
+const ADDIN_OFF: u32 = 15104;    // addin 清单起点
 const DENT_OFF: u32 = 11328;     // 目录项缓冲
 const SUBP_OFF: u32 = 12352;     // 子路径暂存
 const EXT_OFF: u32 = 13824;      // 源后缀 (loment.conf)
@@ -775,14 +780,97 @@ fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
 }
 
 /// 装载一个文件 (连同它的 `use`), 追加到 out 的第 off 字节起; 返回新的长度。
+/// `addin <名字>` -> 真实路径。**先看项目根, 再走 `use` 那三层。**
+///
+/// 为什么必须多这一层: `resolve_use_name` 的三层是 `deps/<名字>/`、工具链 store、
+/// 内置四根 —— **没有一层是"入口文件旁边"**。可 `chooseset.lomt` 恰恰就住在项目根
+/// （`docs/182` §1.4）, 只走它会把 `addin chooseset` 判成**找不到**。
+fn resolve_addin_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
+    let tmp: ptr = ptr_add(scr, NAMTMP_OFF);
+    let d0: u32 = cat(tmp, 0, ptr_add(scr, PROJ_OFF), cstr_len(ptr_add(scr, PROJ_OFF)));
+    let d1: u32 = catl(tmp, d0, "/");
+    let d2: u32 = cat(tmp, d1, ptr_add(src, off), len);
+    let r: u32 = open_two(d2, tmp, scr);
+    if r > 0 {
+        return cat(dst, 0, tmp, r);
+    }
+    return resolve_use_name(src, off, len, dst, scr);
+}
+
+/// `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。违规就**硬报错**。
+///
+/// 白名单（深度 0 的顶层）: `module <名字>` / `addin <名字>` / `set choose <名字> { … }` /
+/// `choose <名字>` / `choose close <名字>`。注释词法器已经吃掉了, 不用管。
+///
+/// **为什么要有这条**: `addin` 拉的是**一份开关设定**, 不是库。它里面一旦能写
+/// `fn`/`struct`/`use`, 就等于"用 `addin` 从另一个方向绕开库的纪律" —— `use` 那条路
+/// 禁 `choose`, 这条路就得禁**其余的一切**。两个方向都堵上, "装代码"与"装开关"才真的
+/// 是两件事。
+fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
+    let d: u32 = 0;
+    let i: u32 = 0;
+    // eof 由循环条件挡掉 —— Loment 里 `return;`(不带值) 不成立。
+    while i < nt && load32(toks, i * 20) != 4 {
+        let k: u32 = load32(toks, i * 20);
+        if k == 3 {
+            let c: u32 = load8(src, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+                i = i + 1;
+            } else if c == 125 || c == 41 || c == 93 {
+                if d > 0 { d = d - 1; }
+                i = i + 1;
+            } else if d > 0 {
+                i = i + 1;
+            } else {
+                die_chooseset(path, n);
+            }
+        } else if d > 0 {
+            i = i + 1;
+        } else if k == 0 && tok_is(src, toks, i, "module") {
+            i = i + 2;
+        } else if k == 0 && tok_is(src, toks, i, "addin") {
+            i = i + 2;
+        } else if k == 0 && tok_is(src, toks, i, "set") {
+            i = i + 3;
+        } else if k == 0 && tok_is(src, toks, i, "choose")
+                && load32(toks, (i + 1) * 20) == 0 && tok_is(src, toks, i + 1, "close") {
+            i = i + 3;
+        } else if k == 0 && tok_is(src, toks, i, "choose") {
+            i = i + 2;
+        } else {
+            die_chooseset(path, n);
+        }
+    }
+}
+
+/// 「chooseset 白名单」那一条的报错出口。
+fn die_chooseset(path: ptr, n: u32) -> u32 {
+    let m: str = "fujoc-s: addin 拉进来的单元里只能写 choose 相关代码 (装代码请用 use): ";
+    write_all(2, str_ptr(m), str_len(m) as u64);
+    write_all(2, path, n as u64);
+    write_all(2, str_ptr("\n"), 1);
+    return die(1);
+}
+
 /// 父文件先读进自己的槽, 递归处理依赖, 最后才把自己补上去 —— 顺序=依赖在前。
 ///
 /// 形参不能叫 `entry`: LLVM 的块标签与局部值共用名字空间, 每个函数的第一块都叫
 /// `entry`, 于是 `%entry` 参数会让 clang 报 "unable to create block named 'entry'"。
 fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
-             depth: u32, scr: ptr, toks: ptr) -> u64 {
+             depth: u32, scr: ptr, toks: ptr, from_addin: u32) -> u64 {
     if depth >= MAXDEPTH {
-        return off;
+        // **报错, 不静默丢**（`docs/182` §1.10）。原来这里是 `return off` —— 依赖被悄悄
+        // 丢掉、编译继续, 而参考实现 `resolve_deps` **根本没有上限**: 同一份源码, 链深
+        // 过 8 层时两个实现给出**不同的单元**。这与 `MAX_USE` 那条是同一个形状 ——
+        // 那次修的是**条数**, **深度**没跟着修。实测仓库里最深是 7
+        // (`lompi/lpi_test.lomt`), 离静默截断只差一个 `use`。
+        let m0: str = "fujoc-s: 依赖嵌套超过 ";
+        write_all(2, str_ptr(m0), str_len(m0) as u64);
+        wdec(2, scr, MAXDEPTH);
+        let m1: str = " 层 —— 拆掉一层中间门面 (上限与参考实现同值)\n";
+        write_all(2, str_ptr(m1), str_len(m1) as u64);
+        die(1);
     }
     if seen_has(seen, snc, path, n) == 1 {
         return off;
@@ -805,9 +893,15 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     syscall4(3, fd as u64, 0, 0);
     let nb: u32 = strip_cr(slot, raw_n as u32);
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
-    lex(slot, nb, toks);
+    let ntf: u32 = lex(slot, nb, toks);
+    // `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。
+    if from_addin == 1 {
+        check_chooseset(slot, toks, ntf, path, n);
+    }
     let uses: ptr = ptr_add(scr, USE_OFF);
+    let addins: ptr = ptr_add(scr, ADDIN_OFF);
     let nu: u32 = 0;
+    let na: u32 = 0;
     let i: u32 = 0;
     // 两种写法都收进来, 统一成"确切的 (起点, 长度)"再递归:
     //   字符串形式 `use b` -> 剥掉引号
@@ -820,12 +914,54 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // 单元拼完之后检查器看到的是一整块 token, 模块边界已经没了 (docs/158 §5 记过)。
         // 与 E018 同构: 那是装载器规则, 进不了 `loment_rule_parity._CASES` (它喂的是
         // 自包含单文件), 所以棘轮由驱动闸门承担, `BUDGET` 不动。
-        if depth > 0 && tok_is(slot, toks, i, "choose") {
+        // `addin` 拉进来的单元**正是**为了写 `choose` 才存在的, 所以这条对它不适用 ——
+        // 反过来它有自己的白名单 (`check_chooseset`)。
+        if depth > 0 && from_addin == 0 && tok_is(slot, toks, i, "choose") {
             let mc: str = "fujoc-s: 库不许写 choose (它是整个程序的模式, 只有根单元能定): ";
             write_all(2, str_ptr(mc), str_len(mc) as u64);
             write_all(2, path, n as u64);
             write_all(2, str_ptr("\n"), 1);
             die(1);
+        }
+        // **库不许 `addin`** —— 装载器只走"根 + 根 `addin` 到的单元"那张图, 所以库里的
+        // `addin` **不会生效**。写了没生效正是本仓反复要消灭的那种东西, 所以报出来。
+        if depth > 0 && from_addin == 0 && tok_is(slot, toks, i, "addin")
+                && load32(toks, (i + 1) * 20) == 0 {
+            let ma: str = "fujoc-s: 库不许 `addin` (只有根单元能拉开关设定): ";
+            write_all(2, str_ptr(ma), str_len(ma) as u64);
+            write_all(2, path, n as u64);
+            write_all(2, str_ptr("\n"), 1);
+            die(1);
+        }
+        // `addin <名字>`: 与 `use` 同一条装载路径 —— 差别只有两处: **多一层同目录解析**、
+        // 拉进来的单元**允许写 `choose`**（它正是"开关设定"）。**根单元专属**。
+        if depth == 0 && tok_is(slot, toks, i, "addin")
+                && load32(toks, (i + 1) * 20) == 0 {
+            if na >= MAX_ADDIN {
+                let m3: str = "fujoc-s: 单个文件的 addin 超过上限 ";
+                let m4: str = " 条 —— 拆成几个 chooseset, 绝不静默丢\n";
+                write_all(2, str_ptr(m3), str_len(m3) as u64);
+                wdec(2, scr, MAX_ADDIN);
+                write_all(2, str_ptr(m4), str_len(m4) as u64);
+                die(1);
+            }
+            let ap: u32 = load32(toks, (i + 1) * 20 + 4);
+            let al: u32 = load32(toks, (i + 1) * 20 + 8);
+            // 解析出来的路径写在 `use` 那批名字之后 (19200 = MAX_USE(300) * 64) ——
+            // 固定偏移, 不与 `use` 抢格子。
+            let rl: u32 = resolve_addin_name(slot, ap, al,
+                                             ptr_add(slot, rbase + 19200 + na * 64), scr);
+            if rl == 0 {
+                let msg2: str = "fujoc-s: `addin` 找不到: ";
+                write_all(2, str_ptr(msg2), str_len(msg2) as u64);
+                write_all(2, ptr_add(slot, ap), al as u64);
+                write_all(2, str_ptr("\n"), 1);
+                die(1);
+            } else {
+                store32(addins, na * 8, rbase + 19200 + na * 64);
+                store32(addins, na * 8 + 4, rl);
+                na = na + 1;
+            }
         }
         if tok_is(slot, toks, i, "use") {
             let k: u32 = load32(toks, (i + 1) * 20);
@@ -874,12 +1010,23 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         let fr: u32 = fix_rel(slot, sp, sl, path, n, scr);
         if fr > 0 {
             off = load_file(ptr_add(scr, NAMTMP_OFF), fr, out, off, seen, snc,
-                            depth + 1, scr, toks);
+                            depth + 1, scr, toks, 0);
         } else {
             off = load_file(ptr_add(slot, sp), sl, out, off, seen, snc,
-                            depth + 1, scr, toks);
+                            depth + 1, scr, toks, 0);
         }
         u = u + 1;
+    }
+    // `addin` 目标紧随 `use` 依赖之后、**在本文件之前** —— 与参考实现 `resolve_deps`
+    // 的展开顺序一致（`deps` 里 use 的在先、addin 的在后, 最后才是根）。
+    // 顺序是身份的一部分: 单元拼出来的字节要两边一样。
+    let a: u32 = 0;
+    while a < na {
+        let asp: u32 = load32(addins, a * 8);
+        let asl: u32 = load32(addins, a * 8 + 4);
+        off = load_file(ptr_add(slot, asp), asl, out, off, seen, snc,
+                        depth + 1, scr, toks, 1);
+        a = a + 1;
     }
     copy_bytes(out, off, slot, 0, nb);
     return off + nb as u64;
@@ -987,7 +1134,7 @@ fn _start() -> u32 {
                                       cstr_len(ptr_add(scr, TOOLDIR_OFF)),
                                       ptr_add(scr, EXT_OFF), scr, unit, toks);
     }
-    let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks);
+    let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks, 0);
     if len == 0 {
         return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");
     }

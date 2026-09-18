@@ -31,9 +31,8 @@ def step_artifacts() -> list[str]:
     for name in MODULES:
         src = SELFHOST / f"{name}.lomt"
         dest = BUILD / f"selfhost_{name}.potato.json"
-        mod = lomentc.load(src)
-        want = lomentc.emit_potato(mod, ROOT,
-                                   lomentc.resolve_deps(mod, ROOT, src.parent, entry=src))
+        mod, deps = lomentc.load_unit(src, ROOT)    # 唯一入口（docs/182 §1.10）
+        want = lomentc.emit_potato(mod, ROOT, deps)
         if not dest.exists() or dest.read_text(encoding="utf-8") != want:
             bad.append(f"selfhost_{name}.potato.json")
     return bad

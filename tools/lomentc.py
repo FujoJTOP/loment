@@ -693,6 +693,22 @@ class Module:
     #: `choose close <名字>` 取值。由 `_apply_switches` 在**词法流上**落定后挂上来 ——
     #: 开关是**编译期**的事, 它的行不进 AST（关着的那段体连 token 都不进 parser）。
     switches: "SwitchTable | None" = None
+    #: **本模块自己**声明了哪些开关。与 `switches` 分开是必须的 —— 两个问题：
+    #:   * `switches` = **整个程序**的表（含 `addin` 单元里的定义）。"未定义的开关"、
+    #:     "同名两次"、超上限、进 Potato，用的都是**它**；
+    #:   * `own_switches` = **本模块自己写了没写**。只有"库不许 `choose`"用它 ——
+    #:     混用的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成库写了 choose。
+    own_switches: "SwitchTable | None" = None
+    #: `addin <名字>` 的位置（`docs/182` §1.4）。**只有根单元能写** —— 与"库不许 `choose`"
+    #: 是同一条纪律的两半。它不进 AST（`_apply_switches` 会抹掉），但**"写了没生效"必须报出来**：
+    #: 预扫只走"根 + `addin` 目标"那一张图，所以**被 `use` 进来的库里的 `addin` 会静默失效**
+    #: —— 那正是本仓反复要消灭的东西。
+    addin_lines: list[tuple[str, int]] = field(default_factory=list)
+    #: 这个模块是**根单元用 `addin` 拉进来的**（`docs/182` §1.4）。它与 `use` 进来的库
+    #: 在 `check()` 里**待遇相反**：库不许 `choose`、也不许 `addin`；而 addin 单元
+    #: **正是**为了写 `choose` 才存在的，它自己还常常以 `addin <自己>` 开头。
+    #: 不加这个标记，`chooseset.lomt` 会被自己的规则判死。
+    from_addin: bool = False
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -701,6 +717,20 @@ class Module:
 #: 与 `use` 的 300 条上限同一种保护: 超限**报错**, **绝不静默丢** —— 静默丢在这里的
 #: 后果比丢一个 use 更坏: 开关少了一个, 那段代码凭空消失, 而报错一句都没有。
 MAX_CHOOSE = 500
+
+#: `addin` 的**条数**上限（`docs/182` §1.4）。与 `MAX_USE` (300) 同一种保护：
+#: **超限报错，绝不静默丢** —— 静默丢在这里的后果是"开关少了一条"，那段代码凭空消失，
+#: 而一句报错都没有。
+MAX_ADDIN = 300
+
+#: 依赖/`addin` 的**嵌套深度**上限，与自举 `loment/selfhost/driver.lomt:29 MAXDEPTH` 同值。
+#:
+#: **参考实现以前没有这个上限，而自举有 —— 而且是静默截断**（`driver.lomt:784-786`
+#: `if depth >= MAXDEPTH { return off; }`）。于是**同一份源码，依赖链深过 8 层时两个实现
+#: 给出不同的单元**。这与 `MAX_USE` 那条（`driver.lomt:46-50` 自己记的"2026-09-16 发现"）
+#: 是同一个形状 —— 那次修的是**条数**，**深度**没跟着修。这一轮补齐：**两边同值，
+#: 超限一律报错**。实测仓库里最深是 7（`lompi/lpi_test.lomt`），离静默截断只差一个 `use`。
+MAXDEPTH = 8
 
 
 class SwitchTable:
@@ -735,30 +765,14 @@ class SwitchTable:
         return [{"name": n, "on": self.state(n)} for n in sorted(self.defs)]
 
 
-def _apply_switches(toks: list, tbl: SwitchTable) -> list:
-    """在**词法流**上把开关落定（`docs/182` §2）。
+def _collect_switches(toks: list, tbl: SwitchTable) -> None:
+    """把 token 流里**深度 0** 的开关声明收进 `tbl`：定义 + 取值。
 
-    **为什么要在这一层做**：关着的那段体要"**在解析之前**跳过"，而状态可能写在体的
-    **后面**：
+    先收全部、再摊开/抹掉 —— 这样"先定义后取值"与"先取值后定义"一个样（取值可能写在
+    体的**后面**，见 `_apply_switches` 的说明）。
 
-        set choose lomenterr { ... }      // 定义在前
-        choose close lomenterr            // 取值在后
-
-    在 token 流上做，那个顺序问题就消失了 —— 先扫一遍收全部取值，再扫第二遍摊开/抹掉。
-    而且这样**"关着就解析跳过"是字面为真的**：那段 token 根本没进 parser。
-
-    **花括号配对照做**（`docs/182` §2 那张表）：关着也要能挡住"少一个 `}` 把整份源
-    结构弄塌"这种错。
-
-    返回**新的** token 列表：
-      * `set choose X { 体 }` 开着 -> 换成 **体本身**（摊到顶层，那段代码从此属于模块）
-      * `set choose X { 体 }` 关着 -> **整段抹掉**
-      * `choose X` / `choose close X` / `set choose X` 的行 -> 抹掉（开关是编译期的事，
-        不进 AST；进 Potato 走 `SwitchTable.dump`）
-      * `choose std` / `choose no_std` -> **原样留着**（核心模式，parser 要读）
+    **只收，不动 `toks`** —— 所以预扫那一趟可以直接用它（`prescan_switches`）。
     """
-    # 第一遍: 收**定义**与**取值**。这样"先定义后取值"与"先取值后定义"一个样 ——
-    # 顺序问题（取值可能写在体的后面）在 token 流上就消失了。
     depth = 0
     i = 0
     while i < len(toks):
@@ -797,6 +811,127 @@ def _apply_switches(toks: list, tbl: SwitchTable) -> list:
                 else:
                     tbl.vals[nxt.val] = (True, t.line)
         i = i + 1
+
+
+def _reject_nested_switch_decls(toks: list) -> None:
+    """开关声明（`set choose X` / `choose X` / `addin X`）**不许出现在任何块内部**。
+
+    为什么必须掐掉（`docs/182` §1.10）：`set choose A { … }` 的体是**任意代码**，所以
+    `set choose A { set choose B { … } }` 语法上是可能的；可 `B` 算不算数取决于 `A` 开没开
+    —— 而 `A` 的状态正是装载器要算的东西。放开它就把"状态"变成**求不动点**，而不动点迭代
+    没有显然的终止证明（而且它自己就又需要一条判据）。
+
+    **必须在摊开之前判**：摊开之后"体里的声明"与"顶层的声明"在 token 流上就分不开了。
+
+    **判据是"声明形状"而不是词本身** —— `set`/`choose`/`addin` **都不是保留字**
+    （`docs/158` §4 第 12 条：参考实现接受关键字做标识符），所以 `fn set() -> u32`、
+    `let choose: u32 = 1;` 全都合法，按词判会误伤。形状对上了才报。
+    """
+    depth = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+            i = i + 1
+            continue
+        if t.kind == "punct" and t.val in "}])":
+            depth -= 1
+            i = i + 1
+            continue
+        if depth > 0 and t.kind == "ident":
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            nxt2 = toks[i + 2] if i + 2 < len(toks) else None
+            is_ident = nxt is not None and nxt.kind == "ident"
+            if t.val == "set" and is_ident and nxt.val == "choose" \
+                    and nxt2 is not None and nxt2.kind == "ident":
+                raise LomError(t.line, t.col, "开关声明不许写在另一个开关体里"
+                                               "（`set choose`）—— 预扫看不见它，"
+                                               "它算不算数取决于外层开关开没开")
+            if t.val == "choose" and is_ident and nxt.val not in ("std", "no_std"):
+                raise LomError(t.line, t.col, "开关取值不许写在另一个开关体里"
+                                               "（`choose`）—— 同上")
+            if t.val == "addin" and is_ident:
+                raise LomError(t.line, t.col, "`addin` 不许写在另一个开关体里 —— 同上")
+        i = i + 1
+
+
+def _check_chooseset(toks: list, where: str) -> None:
+    """`addin` 拉进来的单元**只许写 `choose` 相关代码**（`docs/182` §1.4）。
+
+    白名单（深度 0 的顶层）：`module <名字>` / `addin <名字>` / `set choose <名字> { … }` /
+    `choose <名字>` / `choose close <名字>`。注释词法器已经吃掉了，不用管。
+
+    **为什么要有这条**：`addin` 拉的是**一份开关设定**，不是库。它里面一旦能写 `fn`/`struct`/
+    `use`，就等于"用 `addin` 从另一个方向绕开库的纪律" —— `use` 那条路禁 `choose`，
+    这条路就得禁**其余的一切**。两个方向都堵上，"装代码"与"装开关"才真的是两件事。
+    """
+    allowed = ("module", "addin", "set", "choose")
+    depth = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "eof":                 # 词法器末尾补的那个 —— `val` 是空串
+            break
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+            i += 1
+            continue
+        if t.kind == "punct" and t.val in "}])":
+            depth -= 1
+            i += 1
+            continue
+        if depth > 0:                       # 体是**代码** —— 白名单只管顶层
+            i += 1
+            continue
+        if t.kind != "ident" or t.val not in allowed:
+            raise LomError(t.line, t.col,
+                           f"`addin` 拉进来的单元里只能写 choose 相关代码（在 {where}）"
+                           f" —— 这里是 {t.val!r}；装代码请用 `use`（那是库），"
+                           f"装开关才用 `addin`")
+        if t.val in ("module", "addin"):
+            i += 2                          # 吃掉名字
+        elif t.val == "set":
+            i += 3                          # `set choose <名字>`
+        else:
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            i += 3 if (nxt is not None and nxt.kind == "ident"
+                       and nxt.val == "close") else 2
+    return
+
+
+def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
+    """在**词法流**上把开关落定（`docs/182` §2）。
+
+    **为什么要在这一层做**：关着的那段体要"**在解析之前**跳过"，而状态可能写在体的
+    **后面**：
+
+        set choose lomenterr { ... }      // 定义在前
+        choose close lomenterr            // 取值在后
+
+    在 token 流上做，那个顺序问题就消失了 —— 先扫一遍收全部取值，再扫第二遍摊开/抹掉。
+    而且这样**"关着就解析跳过"是字面为真的**：那段 token 根本没进 parser。
+
+    **花括号配对照做**（`docs/182` §2 那张表）：关着也要能挡住"少一个 `}` 把整份源
+    结构弄塌"这种错。
+
+    返回**新的** token 列表：
+      * `set choose X { 体 }` 开着 -> 换成 **体本身**（摊到顶层，那段代码从此属于模块）
+      * `set choose X { 体 }` 关着 -> **整段抹掉**
+      * `choose X` / `choose close X` / `set choose X` 的行 -> 抹掉（开关是编译期的事，
+        不进 AST；进 Potato 走 `SwitchTable.dump`）
+      * `choose std` / `choose no_std` -> **原样留着**（核心模式，parser 要读）
+      * `addin <名字>` -> 抹掉（装载器的事，`docs/182` §1.4；与 `choose` 同理，不进 AST）
+
+    `collect=False` 时**跳过第一遍**：表已由预扫定死（`prescan_switches`，`docs/182` §1.10）。
+    这是给"两趟装载"留的 —— 真装载趟不该把表再收一遍。
+    """
+    _reject_nested_switch_decls(toks)
+
+    # 第一遍: 收**定义**与**取值**（抽成 `_collect_switches` —— 预扫那一趟也要用它，
+    # 而且必须**同一段代码**：两处各写一份就是两份会漂的实现）。
+    if collect:
+        _collect_switches(toks, tbl)
 
     # 第二遍: 摊开或抹掉。
     out: list = []
@@ -838,6 +973,11 @@ def _apply_switches(toks: list, tbl: SwitchTable) -> list:
                 continue
             if nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
                 i = i + 2                        # 吞掉 `choose <名字>`
+                continue
+        if depth == 0 and t.kind == "ident" and t.val == "addin":
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is not None and nxt.kind == "ident":
+                i = i + 2                        # 吞掉 `addin <名字>`
                 continue
         if t.kind == "punct" and t.val in "{[(":
             depth += 1
@@ -2323,7 +2463,91 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     return hits[0]
 
 
-def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None) -> list[Module]:
+def prescan_switches(entry: Path, root: Path, proj: Path | None,
+                     tool_dir: Path | None, ext: str) -> tuple[SwitchTable, list[Path]]:
+    """**两趟装载的第一趟**：只做词法，定出整张开关表（`docs/182` §1.6 ②、§1.10）。
+
+    返回 `(表, addin 目标路径)` —— 后者**不能丢**：`addin` 拉进来的单元不只是"一堆声明"，
+    它**本身要作为单元参与编译**（`set choose X { … }` 的体是**代码**，X 开着时那段代码
+    就是程序的一部分）。`docs/182` §1.7 把 C2 叫"**跨单元**"就是这个意思。
+
+    **为什么必须有这一趟**（§1.6 ② 那个鸡生蛋）：§2 定的语义是"关着就**在解析之前**
+    跳过"，所以开关状态必须在装载**之前**定；而状态来自根单元的 `choose`，`choose` 又按
+    名字找 `set choose` 的定义 —— 那份定义可能在 `addin` 进来的单元里，**还没读到**。
+
+    **做法与 `_conf_ext_from_tokens` 同源**：用**词法器**而不是解析器。为它套一个完整
+    parser 不值得，而且"注释里的同名标识符误命中"这件事词法器天然就不会犯。
+
+    递归走在 **`addin` 图上**（**不是** `use` 图）—— `addin` 目标里还能有 `addin`。
+    **环 = 去重，不是错误**：同一份开关设定套两次是幂等的，与 `use` 复查同处理
+    （`resolve_deps` 的 `seen`）。
+
+    这一趟**只收，不摊开也不抹掉** —— 摊开/抹掉是第二趟（`_apply_switches`）的事。
+    收的那一段与第二趟**共用同一个函数**（`_collect_switches`）：两处各写一份就是两份
+    会漂的实现。
+    """
+    tbl = SwitchTable()
+    seen: set[Path] = set()
+    addin_paths: list[Path] = []       # `addin` 目标，按遇到的顺序 —— 它们**要作为单元参与编译**
+    n_addin = 0
+
+    def _resolve_addin(name: str, base_dir: Path) -> Path:
+        """`addin <名字>` -> 真实文件。**先看同目录，再走 `use` 那套。**
+
+        为什么必须多这一层：`resolve_name` 的四层是 `deps/<名字>/`、工具链 store、
+        内置四根 —— **没有一层是"入口文件旁边"**。可 `chooseset.lomt` 恰恰就住在项目根
+        （`docs/182` §1.4），只走 `resolve_name` 会把 `addin chooseset` 判成**找不到**。
+        """
+        for e in _ext_chain(ext):
+            cand = base_dir / f"{name}{e}"
+            if cand.is_file():
+                return cand
+        return resolve_name(name, root, proj, tool_dir, ext)
+
+    def scan(path: Path, depth: int) -> None:
+        nonlocal n_addin
+        rp = path.resolve()
+        if rp in seen:
+            return
+        seen.add(rp)
+        if depth >= MAXDEPTH:
+            raise LomError(1, 1, f"`addin` 嵌套超过 {MAXDEPTH} 层: {rp} —— "
+                                 f"开关设定不该套这么深")
+        toks = lomc.lex(rp.read_text(encoding="utf-8"))
+        # 嵌套声明在这里也要拦：预扫**只收深度 0**（与第二趟同规则），体里那份定义它
+        # 本来就看不见 —— 不在这儿拦下，它会被**静默当成普通代码**。
+        _reject_nested_switch_decls(toks)
+        # **`addin` 目标只许是 chooseset** —— 而根单元是正常程序，不受这条管。
+        if depth > 0:
+            _check_chooseset(toks, str(rp))
+        _collect_switches(toks, tbl)
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "ident" and t.val == "addin" \
+                    and i + 1 < len(toks) and toks[i + 1].kind == "ident":
+                n_addin = n_addin + 1
+                if n_addin > MAX_ADDIN:
+                    raise LomError(t.line, t.col, f"`addin` 有 {n_addin} 条, 超过上限 "
+                                                  f"{MAX_ADDIN} —— 绝不静默丢")
+                nm = toks[i + 1]
+                try:
+                    tgt = _resolve_addin(nm.val, rp.parent)
+                except LomError as e:
+                    raise LomError(nm.line, nm.col, f"`addin {nm.val}` 找不到: {e}") from e
+                if tgt.resolve() not in seen:
+                    addin_paths.append(tgt)
+                scan(tgt, depth + 1)
+                i = i + 1
+            i = i + 1
+
+    scan(Path(entry), 0)
+    return tbl, addin_paths
+
+
+def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
+                 sw: SwitchTable | None = None,
+                 addin_paths: list[Path] | None = None) -> list[Module]:
     """按依赖序返回导入的 L1 模块 (被依赖者在前), 去重 + 循环检测。
 
     `proj` 是**项目根** (= 入口文件所在目录), 名字形式的第 1 层 `deps/` 相对**它** ——
@@ -2342,15 +2566,28 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None)
         seen.add(rp)
         stack.add(rp)
 
-    def visit(m: Module, cur_base: Path) -> None:
+    def visit(m: Module, cur_base: Path, depth: int) -> None:
+        # **超深度报错, 不静默丢。** 自举侧原先在这里是 `if depth >= MAXDEPTH { return off; }`
+        # —— 依赖被悄悄丢掉、编译继续, 而参考实现根本没有上限: 同一份源码, 链深过 8 层时
+        # 两个实现给出**不同的单元**。与 `MAX_USE` 那条是同一个形状（那次修了条数, 深度没跟）。
+        if depth >= MAXDEPTH:
+            raise LomError(1, 1, f"依赖嵌套超过 {MAXDEPTH} 层（在 {m.name} 这一层）—— "
+                                 f"拆掉一层中间门面; 上限与自举同值")
         n_use = len(m.imports) + len(m.name_imports)
         if n_use > MAX_USE:
             raise LomError(1, 1, f"模块 {m.name} 的 use 有 {n_use} 条, 超过上限 "
                                  f"{MAX_USE} —— 门面拆小, 别把整库塞进一个文件")
         # 名字形式先落到绝对路径, 之后与路径形式走同一条流水线 (去重/循环/先序)
-        paths = list(m.imports) + [str(resolve_name(n, root, proj, tool_dir, ext))
-                                   for n in m.name_imports]
-        for imp in paths:
+        # `is_addin` 跟着走 —— 它决定 `check()` 里那份模块算"库"还是算"开关设定"。
+        paths: list[tuple[str, bool]] = (
+            [(p, False) for p in m.imports]
+            + [(str(resolve_name(n, root, proj, tool_dir, ext)), False)
+               for n in m.name_imports])
+        if depth == 0 and addin_paths:
+            # `addin` 目标**只在根单元这一层**展开：`addin` 是根单元专属语法，库里的
+            # `addin` 已被 `check()` 拒（写了也不会生效 —— 报出来，不静默）。
+            paths += [(str(p), True) for p in addin_paths]
+        for imp, is_addin in paths:
             p = Path(imp)
             cand = p if p.is_absolute() else None
             if cand is None or not cand.exists():
@@ -2368,13 +2605,34 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None)
                 continue
             seen.add(rp)
             stack.add(rp)
-            sub = load(rp)
-            visit(sub, rp.parent)
+            sub = load(rp, sw=sw)
+            if is_addin:
+                sub.from_addin = True
+            visit(sub, rp.parent, depth + 1)
             order.append(sub)
             stack.discard(rp)
 
-    visit(mod, base)
+    visit(mod, base, 0)
     return order
+
+
+def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
+    """**读一个编译单元的唯一入口**：预扫 → 装载 → 解析依赖（`docs/182` §1.10）。
+
+    **别处别再自己拼 `load()` + `resolve_deps()`。** 少了预扫那一趟，`addin` 就白写了 ——
+    症状是"未定义的开关"加上 `addin` 目标**根本没进单元**。**实测**：`tools/loment.py`
+    的 `ir` 子命令原先就是自己拼的，加 `addin` 之后当场红；而编译链的判据全绿 ——
+    和 `docs/182` §1.9 那两条消费者缺口是同一个形状。
+
+    返回 `(根模块, 依赖)`；开关表挂在 `mod.switches`（**整个程序**的那张）。
+    """
+    tool_dir = Path(__file__).resolve().parent
+    ext = source_ext_of(path.parent, tool_dir)
+    sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
+    mod = load(path, sw=sw)
+    deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
+                        addin_paths=addin_paths)
+    return mod, deps
 
 
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
@@ -2423,9 +2681,25 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式。"
                     f"要开关请用 `set choose <名字> {{ … }}`")
     for d in deps:
+        if d.from_addin:
+            # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
+            # "库不许"对它**不适用**（`chooseset.lomt` 还常常以 `addin <自己>` 开头）。
+            # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的运行模式，
+            # addin 单元里写了就是**静默无效**，必须报出来（静默才是敌人）。
+            if d.choose is not None:
+                errs.append(f"{d.choose_lines[0]}: `addin` 单元不许声明核心模式"
+                            f"（在 `{d.name}` 里）—— `std`/`no_std` 是整个程序的运行模式，"
+                            f"只有根单元能定")
+            continue
         if d.choose is not None:
             errs.append(f"{d.choose_lines[0]}: 库不许 `choose`（在 `{d.name}` 里）"
                         f" —— 库该声明**能力需求**, 由项目决定模式")
+        if d.addin_lines:
+            _nm, _ln = d.addin_lines[0]
+            errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
+                        f" —— `addin` 是**根单元**专属的开关设定，装载器只走"
+                        f"「根 + 根 `addin` 到的单元」那张图，所以库里的 `addin` **不会生效**。"
+                        f"库要装代码请用 `use`")
     sw = mod.switches
     if sw is not None:
         n = len(sw.defs) + len(sw.vals) + sw.ndup
@@ -2440,7 +2714,9 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 errs.append(f"{line}: 未定义的开关 `{name}` —— 先写 "
                             f"`set choose {name} {{ … }}` 定义它")
         for d in deps:
-            if d.switches is not None and (d.switches.defs or d.switches.vals):
+            if d.from_addin:
+                continue        # `addin` 拉的是开关设定 —— 它的 choose 正是用途
+            if d.own_switches is not None and (d.own_switches.defs or d.own_switches.vals):
                 errs.append(f"1: 库不许 `choose`（在 `{d.name}` 里）")
 
     # ---- 单元级唯一性 (2026-09-11 补): 发射出来的符号名是**平的**。
@@ -4346,14 +4622,36 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 """
 
 
-def load(path: Path) -> Module:
+def load(path: Path, sw: SwitchTable | None = None) -> Module:
     text = path.read_text(encoding="utf-8")
     # 开关**在词法流上**落定（`docs/182` §2）：`set choose X {…}` 开着就把体摊到顶层、
     # 关着就整段抹掉, 那两行本身不进 AST。**这一步必须在 parse 之前** —— 顺序问题
     # （取值可能写在体的后面）在 token 流上就消失了。
-    tbl = SwitchTable()
-    mod = Parser(_apply_switches(lomc.lex(text), tbl), text).parse()
-    mod.switches = tbl
+    #
+    # **两张表，别混**（`docs/182` §1.10）：
+    #   * `sw`  = **整个程序**的表，来自预扫（`prescan_switches`），可能含**别的单元**
+    #     定义的开关 —— 裁减要用它，否则 `addin` 进来的开关管不到这里。
+    #   * `own` = **本模块自己**声明了哪些 —— 只有"库不许 `choose`"用它。
+    #
+    # 混成一张表的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成**库写了
+    # choose** —— 那会把 E022 第三条变成对所有库开火。
+    toks = lomc.lex(text)
+    own = SwitchTable()
+    _collect_switches(toks, own)
+    tbl = sw if sw is not None else own
+    mod = Parser(_apply_switches(toks, tbl, collect=False), text).parse()
+    mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
+    mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
+    # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
+    _d = 0
+    for _i, _t in enumerate(toks):
+        if _t.kind == "punct" and _t.val in "{[(":
+            _d += 1
+        elif _t.kind == "punct" and _t.val in "}])":
+            _d -= 1
+        elif _d == 0 and _t.kind == "ident" and _t.val == "addin" \
+                and _i + 1 < len(toks) and toks[_i + 1].kind == "ident":
+            mod.addin_lines.append((toks[_i + 1].val, _t.line))
     names = {e.name for e in mod.enums}  # M10: 预置 Option/Result
     if "Option" not in names or "Result" not in names:
         pre = Parser(lomc.lex(_PRELUDE), _PRELUDE).parse()
@@ -4454,14 +4752,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.lom_root) if args.lom_root else Path(__file__).resolve().parent.parent
     path = Path(args.file)
     try:
-        mod = load(path)
-    except LomError as e:
-        print(f"[ERR] {path}: {e}", file=sys.stderr)
-        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
-        return 1
-
-    try:
-        deps = resolve_deps(mod, root, path.parent, entry=path)
+        # 预扫 → 装载 → 解析依赖，**一个入口**（`docs/182` §1.10）。
+        mod, deps = load_unit(path, root)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])

@@ -1,0 +1,23 @@
+// `addin` 的例子：开关定义在**另一个单元**里，而取值写在入口。
+//
+// 这是"鸡生蛋"那条（`docs/182` §1.6 ②）：关着的那段要在**解析之前**跳过，所以开关状态
+// 必须**先定**；可状态来自入口的 `choose verbose`，而它按名字找的 `set choose verbose`
+// 定义在 `chooseset.lomt` 里 —— **还没读到**。装载器因此走两趟：先只扫开关行定状态，
+// 再真正装载与裁减（`lomentc.prescan_switches`）。
+//
+// 试这两下:
+//
+//   loment build main.lomt -o addin_demo && ./addin_demo ; echo $?   # 237 (0xED)
+//   # 把下面那行改成 `choose close verbose` 再编一次 —— `banner` 整段不在单元里,
+//   # 于是 `_start` 里那句调用会报"未定义的函数"。这就是"关掉 = 不依赖"。
+module main
+
+addin chooseset
+
+choose verbose
+
+fn _start() {
+    // `banner` 只因为上面那句 `choose verbose` 才存在 —— 定义在 chooseset 那一份里。
+    // 退出码取低 8 位: 0x5EED & 0xFF = 237。
+    syscall4(60, banner() as u64, 0, 0);
+}

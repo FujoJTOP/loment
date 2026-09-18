@@ -93,8 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(a.lom_root) if a.lom_root else ROOT
     p = Path(a.file)
     try:
-        mod = lomentc.load(p)
-        deps = lomentc.resolve_deps(mod, root, p.parent, entry=p)
+        mod, deps = lomentc.load_unit(p, root)      # 唯一入口（docs/182 §1.10）
         errs = lomentc.check(mod, deps=deps)
     except lomentc.LomError as e:
         print(f"[ERR] {p}: {e}", file=sys.stderr)

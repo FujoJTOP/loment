@@ -36,8 +36,7 @@ def _tool(name: str, fallback: str) -> str:
 
 
 def build_elf(src: Path, out: Path) -> Path:
-    mod = lomentc.load(src)
-    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    mod, deps = lomentc.load_unit(src, ROOT)        # 唯一入口（docs/182 §1.10）
     errs = lomentc.check(mod, deps=deps)
     if errs:
         print(f"[ERR] {src}: {errs[0]}", file=sys.stderr)

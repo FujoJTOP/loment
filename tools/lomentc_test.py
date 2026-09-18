@@ -1178,6 +1178,107 @@ def test_switches_elide_code_and_land_in_potato():
 
 
 @test
+def test_addin_carries_switches_across_units():
+    """`addin <名字>` + `chooseset.lomt` + **装载器预扫**（`docs/182` §1.4/§1.7，C2）。
+
+    **这条判据就是预扫存在的全部理由**（`docs/182` §1.6 ② 那个鸡生蛋）：根单元的
+    `choose verbose` 要按名字找到 `set choose verbose` 的定义，而那份定义在 `addin`
+    进来的、**还没读到**的单元里 —— 状态必须在装载**之前**定，可定义又在装载**之后**才
+    出现。预扫失效时（表定不下来），**这条是唯一会红的**。
+
+    "跨单元"是字面意思（§1.7）：`addin` 拉进来的单元**本身参与编译**，所以体里的函数
+    要给根用就得 `pub` —— 它仍然是一个模块。
+    """
+    CS = ("module chooseset\n\naddin chooseset\n\n"
+          "set choose verbose {\n"
+          "    pub fn banner() -> u32 {\n        return 0x5EED;\n    }\n}\n")
+    ROOT_SRC = ("module main\n\naddin chooseset\n\n%s\n"
+                "fn _start() {\n    syscall4(60, banner() as u64, 0, 0);\n}\n")
+
+    def build(value: str):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "chooseset.lomt").write_text(CS, encoding="utf-8", newline="\n")
+            p = d / "main.lomt"
+            p.write_text(ROOT_SRC % value, encoding="utf-8", newline="\n")
+            try:
+                mod, deps = lomentc.load_unit(p, ROOT)
+            except lomc.LomError as e:
+                return [e.msg], "", None
+            errs = lomentc.check(mod, deps=deps)
+            ir = "" if errs else lomentc.emit_llvm(mod, ROOT, deps)
+            return errs, ir, json.loads(lomentc.emit_potato(mod, ROOT, deps))
+
+    # 开着: `banner` 真的进了单元（预扫读到了 addin 单元里的定义）
+    errs, ir, doc = build("choose verbose")
+    assert not errs, errs
+    assert "define i32 @banner()" in ir, ir[:300]
+    assert doc["switches"] == [{"name": "verbose", "on": True}], doc["switches"]
+    # 关着: 体**整段不在** —— 引用它反而成了未定义。"关掉 = 不依赖"字面成立。
+    errs, ir, doc = build("choose close verbose")
+    assert doc["switches"] == [{"name": "verbose", "on": False}], doc["switches"]
+    assert "define i32 @banner" not in ir, ir[:300]
+    assert any("未定义的函数 banner" in e for e in errs), errs
+    print("      addin: 根 choose 读得到 addin 单元里的定义；关着时体整段不在")
+
+
+@test
+def test_addin_and_chooseset_rules():
+    """C2 的四条拒绝规则（`docs/182` §1.4/§1.10）—— 每条都要能证伪。"""
+    OK_CS = "module chooseset\n\naddin chooseset\n\nset choose feat {\n}\n"
+
+    def two(root_src: str, cs_src: str, name: str = "chooseset"):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / f"{name}.lomt").write_text(cs_src, encoding="utf-8", newline="\n")
+            p = d / "main.lomt"
+            p.write_text(root_src, encoding="utf-8", newline="\n")
+            try:
+                mod, deps = lomentc.load_unit(p, ROOT)
+            except lomc.LomError as e:
+                return [e.msg]
+            return lomentc.check(mod, deps=deps)
+
+    # ① addin 目标里写了非 choose 代码 -> 拒。**两个方向都要堵**: `use` 那条禁 choose,
+    #    这条路就得禁其余的一切, 否则"装代码"与"装开关"就又混成一件事了。
+    errs = two("module main\n\naddin chooseset\n",
+               OK_CS.replace("set choose feat {\n}",
+                             "fn helper() -> u32 {\n    return 1;\n}"))
+    assert errs and "只能写 choose 相关代码" in errs[0], errs
+
+    # ② **库里的 `addin`** -> 拒。它写了也**不会生效**（预扫只走"根 + 根 addin 到的单元"
+    #    那张图）—— 静默失效正是本仓反复要消灭的那种东西, 所以报出来。
+    errs = two('module main\n\nuse "lib.lomt"\n\nfn _start() {\n}\n',
+               "module lib\n\naddin chooseset\n\nfn helper() -> u32 {\n    return 1;\n}\n",
+               name="lib")
+    assert errs and "库不许 `addin`" in errs[0], errs
+
+    # ③ 开关声明**嵌在另一个开关体里** -> 拒。放开它就把"状态"变成求不动点
+    #    （`B` 算不算数取决于 `A` 开没开, 而 `A` 的状态正是预扫要算的东西）。
+    errs = two("module main\n\nset choose a {\n    set choose b {\n    }\n}\n\n"
+               "fn _start() {\n}\n", OK_CS)
+    assert errs and "不许写在另一个开关体里" in errs[0], errs
+
+    # ④ `addin` 递归超深度 -> **报错, 不静默丢**（与 `MAX_USE` 同一条纪律）
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        n = lomentc.MAXDEPTH + 1
+        for i in range(n):
+            nxt = f"addin a{i + 1}\n" if i + 1 < n else ""
+            (d / f"a{i}.lomt").write_text(f"module a{i}\n\n{nxt}", encoding="utf-8",
+                                          newline="\n")
+        p = d / "main.lomt"
+        p.write_text("module main\n\naddin a0\n\nfn _start() {\n}\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            lomentc.load_unit(p, ROOT)
+            raise AssertionError(f"{n} 层 addin 应当报错, 却过了")
+        except lomc.LomError as e:
+            assert "嵌套超过" in e.msg, e.msg
+    print("      addin/chooseset: 白名单/库不许 addin/嵌套拒绝/深度上限 四条都对")
+
+
+@test
 def test_mode_follows_choose_and_defaults_to_std():
     """`mode` 就是根单元 `choose` 的那一个值, 不写则 `std` (docs/143 §3.2 / docs/175 §8)。
 

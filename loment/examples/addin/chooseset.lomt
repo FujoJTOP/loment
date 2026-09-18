@@ -1,0 +1,17 @@
+// 开关设定单元（`docs/182` §1.4）—— 被入口用 `addin chooseset` 拉进来。
+//
+// **它只许写 choose 相关代码**：`module` / `addin` / `set choose` / `choose`。
+// 写别的（`fn`/`struct`/`use`）会被拒 —— 要装代码用 `use`（那是库），装开关才用 `addin`。
+// 两个方向都堵上，"装代码"与"装开关"才真的是两件事。
+module chooseset
+
+// 约定：开关设定单元开头写它自己。
+addin chooseset
+
+// 定义。**开着时**体里的代码就是程序的一部分 —— 所以这一段**在本文档里**。
+set choose verbose {
+    // 它**参与编译**（`docs/182` §1.7 叫这条"跨单元"），所以要给入口用就得 `pub`。
+    pub fn banner() -> u32 {
+        return 0x5EED;
+    }
+}

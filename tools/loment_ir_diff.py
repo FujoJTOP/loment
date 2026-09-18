@@ -26,8 +26,7 @@ ROOT = T.ROOT
 
 
 def _load(target: Path):
-    mod = lomentc.load(target)
-    deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+    mod, deps = lomentc.load_unit(target, ROOT)     # 唯一入口（docs/182 §1.10）
     return lomentc.emit_llvm(mod, ROOT, deps)
 
 

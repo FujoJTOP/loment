@@ -34,6 +34,53 @@ pub const SW_BYTES: u32 = 8008;
 /// 与 `checker.lomt` 的 `E_MODE` **同值同码**（E022）。常量初始化式里没有算术 ——
 /// 写字面量（`32 - 10` 会被解析器拒掉）。
 pub const E022: u32 = 22;
+/// 无符号里当"没有"用 —— token 下标从 0 起，这个值不可能撞上。
+pub const SW_NONE: u32 = 4294967295;
+/// 表尾那一格**空位**：存"第一个嵌套声明违规的 token 下标"（没有就是 `SW_NONE`）。
+/// 表是 8008 字节 = 500*16 条 + 4 字节条数 + **4 字节富余** —— 就用这 4 个字节，
+/// 不必给 `apply_switches` 加一个 errs 形参（那会动到 lomdoc/lsp/p8 夹具的调用点）。
+pub const SW_NEST: u32 = 8004;
+
+/// 开关声明**不许写在任何块内部**（`docs/182` §1.10）：返回**第一个**违规 token 的下标，
+/// 没有就是 `SW_NONE`。
+///
+/// **为什么必须掐掉**：`set choose A { … }` 的体是**任意代码**，所以
+/// `set choose A { set choose B { … } }` 语法上是可能的；可 `B` 算不算数取决于 `A` 开没开
+/// —— 而 `A` 的状态正是这一步要算的东西。放开它就把"状态"变成**求不动点**，而不动点迭代
+/// 没有显然的终止证明（它自己就又需要一条判据）。
+///
+/// **必须在摊开之前判**：摊开之后"体里的声明"与"顶层的声明"在 token 流上分不开了。
+///
+/// **判据是"声明形状"而不是词本身** —— `set`/`choose`/`addin` **都不是保留字**
+/// （`docs/158` §4 第 12 条：参考实现接受关键字做标识符），所以 `fn set() -> u32`、
+/// `let choose: u32 = 1;` 全都合法，按词判会误伤。形状对上了才报。
+fn nested_decl_at(unit: ptr, toks: ptr, nt: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt {
+        let k: u32 = load32(toks, i * 20);
+        if k == 3 {
+            let c: u32 = load8(unit, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 { d = d + 1; }
+            if c == 125 || c == 41 || c == 93 { d = d - 1; }
+        } else if d > 0 && k == 0 && i + 2 < nt {
+            if sw_tok_is(unit, toks, i, "set") && sw_tok_is(unit, toks, i + 1, "choose")
+                    && load32(toks, (i + 2) * 20) == 0 {
+                return i;
+            }
+            if sw_tok_is(unit, toks, i, "choose") && load32(toks, (i + 1) * 20) == 0
+                    && !sw_tok_is(unit, toks, i + 1, "std")
+                    && !sw_tok_is(unit, toks, i + 1, "no_std") {
+                return i;
+            }
+            if sw_tok_is(unit, toks, i, "addin") && load32(toks, (i + 1) * 20) == 0 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return SW_NONE;
+}
 
 /// 这个 token 的文本等于字面量 `s` 吗。字符串 token 直接不匹配 —— 与
 /// `checker.lomt` 的 `chk_tok_is` 同口径, 但**不依赖它**（本模块零依赖）。
@@ -150,6 +197,8 @@ pub fn sw_err(errs: ptr, o: u32, tok: u32) -> u32 {
 /// **两遍**: 先收全部取值（取值可能写在体的**后面**）, 再压缩。顺序问题在 token 流上
 /// 就消失了 —— 这正是"在装载器做"而不是"在解析器做"的理由。
 pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
+    // 嵌套声明**在这里判**（摊开之前）—— 结果先存进表尾空位，由 `switch_rules` 报成 E022。
+    store32(sw, SW_NEST, nested_decl_at(unit, toks, nt));
     // ---- 第一遍: 收定义与取值
     let ns: u32 = 0;
     let d: u32 = 0;
@@ -229,6 +278,11 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
     // 超上限（**绝不静默丢** —— 与 `use` 的 300 条同一条纪律）
     if ns > MAX_CHOOSE {
         n = sw_err(errs, n, 0);
+    }
+    // 嵌套声明（在 `apply_switches` 里、**摊开之前**判出来的，见那里的说明）
+    let nd: u32 = load32(sw, SW_NEST);
+    if nd != SW_NONE {
+        n = sw_err(errs, n, nd);
     }
     // 同名两次（**同类**才算: 定义+取值是正常配对）
     let i: u32 = 0;

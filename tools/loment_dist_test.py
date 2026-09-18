@@ -525,7 +525,15 @@ def test_skill_samples_compile() -> None:
     **Why**: 指南是"只装了包、没有仓库"的 agent 看到的唯一参考。样例错一个字符,
     他就卡在那里, 而且没有任何东西能告诉他哪边错了 —— 2026-09-15 实测过一次
     (`tour` 里漏了个 `;`, 指南还自称"和仓库里那份是同一份")。
-    **How to apply**: 要展示**故意写错**的片段, 在围栏前一行加 `<!-- no-compile -->`。
+    **How to apply**: 有两种片段要跳过, 都在围栏前一行加 `<!-- no-compile -->`:
+
+    1. **故意写错**的片段 (展示"这样会报 E22"之类);
+    2. **半块**片段 —— 需要**伴生文件**才编得过的那种 (实测: `addin` 的入口那一半,
+       它的 `set choose` 定义在旁边的 `chooseset.lomt` 里)。这类**必须写清为什么**,
+       并指到仓库里真能跑的那一对 (`loment/examples/addin/`) —— 否则"跳过"就成了
+       悄悄放宽。
+
+    只对 `rust` 围栏生效; 别的语言围栏不在扫描范围内。
     """
     sk = (ROOT / loment_dist.SKILL).read_text(encoding="utf-8")
     td = Path(tempfile.mkdtemp(prefix="lom_skill_"))

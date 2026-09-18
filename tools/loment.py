@@ -36,8 +36,10 @@ C_TYPES = {"u8": "unsigned char", "u16": "unsigned short", "u32": "unsigned int"
 
 def _load(file: str):
     p = Path(file)
-    mod = lomentc.load(p)
-    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    # **唯一入口**（`docs/182` §1.10）：预扫 → 装载 → 解析依赖。
+    # 这一处原先自己拼 `load` + `resolve_deps` —— 少了预扫那一趟 `addin` 就白写，
+    # 实测加 `addin` 之后当场红（"未定义的开关" + `addin` 目标根本没进单元）。
+    mod, deps = lomentc.load_unit(p, ROOT)
     errs = lomentc.check(mod, deps=deps)
     if errs:
         for e in errs:

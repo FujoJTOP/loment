@@ -1017,6 +1017,39 @@ def test_m83_selfhosted_driver_compiles_itself():
 
 
 @test
+def test_m86_driver_handles_addin():
+    """`addin` 是**跨单元**的（`docs/182` §1.4/§1.7）—— 自举驱动必须认得它。
+
+    这条钉三件事，缺一条 `addin` 就只是"写在纸上"：
+
+    1. 驱动**真的把 `addin` 目标拉进单元** —— 最坏的失败模式是**静默忽略**它，那样
+       开关取值就成了"未定义的开关"，而报出来的错与真正的原因（装载器不认它）对不上；
+    2. **鸡生蛋那条**（`docs/182` §1.6 ②）：`choose` 的取值写在入口、`set choose` 的定义
+       写在被拉进来的那一份里，`banner` 照样编得出来；
+    3. 产物与参考实现**逐字节相同** —— 装载顺序是身份的一部分（use 依赖在前、
+       `addin` 目标在后、根最后）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    rel = "loment/examples/addin/main.lomt"
+    target = ROOT / rel
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs86")
+        # 参考侧走**唯一入口**（预扫 → 装载 → 解析依赖）—— 手拼 `load` + `resolve_deps`
+        # 会漏掉预扫那一趟，`addin` 就白写了（实测 `tools/loment.py` 原先就是这么拼的）。
+        m2, d2 = lomentc.load_unit(target, ROOT)
+        want = lomentc.emit_llvm(m2, ROOT, d2)
+        got = _run_driver(elf, rel, td, "addin_main")
+        bad = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+        assert got == want, f"addin 用例上驱动与参考不一致 @{bad}"
+        assert "define i32 @banner()" in got, got[:300]
+        print(f"      addin: 驱动跨单元装载 + 开关定状态, 产物与参考逐字节相同 ({len(got)}B)")
+
+
+@test
 def test_m85_selfhosted_driver_compiles_corpus():
     """M85(核心): 自举驱动**自己做全部装载**, 按路径把整个语料编译一遍。
 
