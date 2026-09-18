@@ -28,8 +28,17 @@
 | 映成 | `i8` | **`u8`** |
 
 这是这一族的方言表里两门**唯一**没落在同一格上的类型。搞反不会报错、会**静默算错**
-（C# 的 `byte b = 200;` 会变成 -56），所以它单独一条判据 —— 而且判在 `potato_from`
-那一层，因为本子集的翻译器**不做整数宽度跟踪**（见 `tools/cstrans.py` 文件头那条边界）。
+（C# 的 `byte b = 200;` 会变成 -56），所以它单独**两条判据、两层各一条**：
+
+* `test_csharp_byte_is_unsigned_unlike_java` —— **对象层**（`potato_from`）：`byte` 映 `u8`、
+  Java 的 `byte` 映 `i8`，同一个字段名只有符号不同；
+* `test_a_byte_only_unit_runs_and_proves_it_is_unsigned` —— **端到端**：一份**全是 `byte`、
+  不混宽度**的单元（`Byte.cs`）真编真跑，两边都得 **200**（`200 >= 128` 为真 —— 无符号才成立）。
+
+**为什么要两份语料**：那条"混宽度会响亮失败"的边界只对**混**的单元有效，而端到端要验的是
+"**窄类型本身能过**" —— 所以 `Byte.cs` 刻意只有一种宽度。它也不能并进 `Sample.cs`：
+后者要与 `Sample.java` **逐行同源**，而 `byte` 的符号性正是两门**唯一**不同的一格
+（塞进去会当场把那条判据弄红，实测撞到过）。
 
 ## 对照组怎么跑
 
@@ -63,7 +72,7 @@ JEX = ROOT / "loment" / "jtrans"
 
 #: 期望值。**推出来的，不是抄的**：`level(1000)=2`、`gcd(48,18)=6`、
 #: `score(100)`（1..100 里 3 与 5 的公倍数 6 个 +3、能 3 不能 5 的 27 个 +1、
-#: 能 5 不能 3 的 14 个 +2）= 18 + 27 + 28 = 73 ⇒ `2*10 + 6 + 73 = **99**`。
+#: 能 5 不能 3 的 14 个 +2）= 18 + 27 + 28 = 73 ⇒ `2*10 + 6 + 73 = 99`。
 #: 与 `loment_jtrans_test.WANT_RC` **同一个数** —— 因为是同一个程序（见文件头）。
 WANT_RC = 2 * 10 + 6 + (6 * 3 + 27 * 1 + 14 * 2)
 
@@ -148,12 +157,25 @@ public class Harness
 }
 """
 
+#: 全 `byte` 那一份（`Byte.cs`）的夹具。**`(byte)200` 这个转换写在夹具里**，不写进语料：
+#: 语料是"一份普通的 C#"，夹具才是"测试用的入口"。
+_HARNESS_BYTE = """using LomentDemo;
 
-def _dotnet_run(td: Path, dotnet: str, src: Path) -> int:
+public class Harness
+{
+    public static int Main(string[] a)
+    {
+        return ByteProbe.probe((byte)200);
+    }
+}
+"""
+
+
+def _dotnet_run(td: Path, dotnet: str, src: Path, harness: str = _HARNESS) -> int:
     """C# 侧：dotnet 编「语料 + 夹具」，跑 dll，读退出码。"""
     tfm = _tfm(dotnet)
     (td / "p.csproj").write_text(_CSPROJ.format(tfm=tfm), encoding="utf-8", newline="\n")
-    (td / "Harness.cs").write_text(_HARNESS, encoding="utf-8", newline="\n")
+    (td / "Harness.cs").write_text(harness, encoding="utf-8", newline="\n")
     (td / src.name).write_text(src.read_text(encoding="utf-8"),
                                encoding="utf-8", newline="\n")
     r = subprocess.run([dotnet, "build", "-c", "Release", "-v", "q", "--nologo"],
@@ -174,14 +196,21 @@ fn _start() {
 }
 """
 
+#: 全 `byte` 那一份的 Loment 入口。**`as u64` 那个转换写在夹具里**，与夹具同侧。
+_L_ENTRY_BYTE = """
+fn _start() {
+    syscall4(60, probe(200) as u64, 0, 0);
+}
+"""
 
-def _build_loment(td: Path, doc: dict) -> Path:
+
+def _build_loment(td: Path, doc: dict, entry: str = _L_ENTRY) -> Path:
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     assert not skipped, f"发的时候跳过了东西: {skipped[:3]}"
     # **一条 `extern fn` 都不该有** —— C# 写法写出来的是 Loment（`docs/188` §3）
     assert "pub extern fn " not in text, text[:300]
     p = td / "l_side.lomt"
-    p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+    p.write_text(text + entry, encoding="utf-8", newline="\n")
     mod = lomentc.load(p)
     deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
     errs = lomentc.check(mod, deps=deps)
@@ -275,6 +304,47 @@ def test_csharp_byte_is_unsigned_unlike_java():
     # 同一个字段名、同一个宽度，**只有符号不同** —— 正是"这一族唯一不同的一格"
     assert cfields["value"] == jfields["value"] == "i32", (cfields, jfields)
     print(f"      C# `byte` -> {cfields['tag']}（0..255），Java `byte` -> {jfields['tag']}（-128..127）")
+
+
+@test
+def test_a_byte_only_unit_runs_and_proves_it_is_unsigned():
+    """**全 `byte` 的一份能整个过去、而且跑得对** —— 那条边界的**另一半**。
+
+    `docs/188` §7.1.1 与语言卡上写的都是"**混**宽度会响亮地失败"。
+    **另一半从来没写过**：不混呢？这一条就是那个答案 —— **能过，而且数是对的**。
+
+    它的**值**本身就是判据：`probe((byte)200)` 里 `200 >= 128` 为真 ⇒ 返回 **200**。
+    `byte` 若被映成**有符号**的 `i8`（Java 那个格子），要么当场报错（`i8` 装不下 200）、
+    要么变成 -56 ⇒ `-56 >= 128` 为假 ⇒ 返回 0 —— **两种都对不上 200**。
+
+    ⇒ 这一条把这一门的**头条格子**（`byte` 无符号）从"只在对象层验过"
+    补成了"**端到端验过**"。语料单独一份（`Byte.cs`）而非塞进 `Sample.cs`：
+    后者要与 `Sample.java` **逐行同源**，而 `byte` 的符号性正是两门**唯一**不同的一格
+    —— 塞进去会当场把那条判据弄红（实测撞到过）。
+    """
+    dotnet = _dotnet()
+    if not dotnet or not _wsl():
+        print("      SKIP: 需要 dotnet + WSL")
+        return
+    src = EX / "Byte.cs"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        doc, rep = potato_from.from_csharp(src.read_text(encoding="utf-8"),
+                                           "Byte.cs", "strict")
+        assert not potato.validate(doc), potato.validate(doc)[:3]
+        lost = [s for s in rep.skipped if s["kind"] == "fn"]
+        assert not lost, f"转写那一步丢了函数: {lost}"
+        # **对象层先说一次**：那个形参就是 `u8`（端到端那一半在下面）
+        probe = {f["name"]: f for f in doc["functions"]}["probe"]
+        assert probe["params"] == [{"name": "b", "type": "u8"}], probe
+        assert probe["ret"] == "u8", probe
+        cs_rc = _dotnet_run(td, dotnet, src, _HARNESS_BYTE)
+        l_rc = _run(_build_loment(td, doc, _L_ENTRY_BYTE))
+    assert cs_rc == 200, f"dotnet 那边就不对: {cs_rc} != 200（语料或期望值错了）"
+    assert l_rc == cs_rc, (
+        f"**全 byte 的一份没跑对**: {l_rc} != {cs_rc}。200 才是「无符号」的答案 —— "
+        f"得到 0 就是把 `byte` 当成有符号的了")
+    print(f"      dotnet -> {cs_rc}，翻译成 Loment -> {l_rc}（都是 200 = 无符号）")
 
 
 @test
