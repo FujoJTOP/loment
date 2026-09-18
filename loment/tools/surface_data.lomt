@@ -307,64 +307,70 @@ pub fn code_nfix(c: u32) -> u32 {
 // **键集 == `potato_from.LANGS`**（判据钉着）：翻译线加一门语言而这里没跟上,
 // 症状是"新语言的文件报错时只字不提怎么翻" —— 静默缺口。
 
-pub fn lang_count() -> u32 { return 6; }
+pub fn lang_count() -> u32 { return 7; }
 
 pub fn lang_key(i: u32) -> str {
-    if i == 0 { return "c"; }
-    if i == 1 { return "csharp"; }
-    if i == 2 { return "go"; }
+    if i == 0 { return "cpp"; }
+    if i == 1 { return "c"; }
+    if i == 2 { return "csharp"; }
     if i == 3 { return "java"; }
-    if i == 4 { return "python"; }
+    if i == 4 { return "go"; }
     if i == 5 { return "rust"; }
+    if i == 6 { return "python"; }
     return "";
 }
 
 pub fn lang_name(i: u32) -> str {
-    if i == 0 { return "C"; }
-    if i == 1 { return "C#"; }
-    if i == 2 { return "Go"; }
+    if i == 0 { return "C++"; }
+    if i == 1 { return "C"; }
+    if i == 2 { return "C#"; }
     if i == 3 { return "Java"; }
-    if i == 4 { return "Python"; }
+    if i == 4 { return "Go"; }
     if i == 5 { return "Rust"; }
+    if i == 6 { return "Python"; }
     return "";
 }
 
 pub fn lang_exts(i: u32) -> str {
-    if i == 0 { return ".c .h"; }
-    if i == 1 { return ".cs"; }
-    if i == 2 { return ".go"; }
+    if i == 0 { return ".cpp .cc .cxx .hpp"; }
+    if i == 1 { return ".c .h"; }
+    if i == 2 { return ".cs"; }
     if i == 3 { return ".java"; }
-    if i == 4 { return ".py"; }
+    if i == 4 { return ".go"; }
     if i == 5 { return ".rs"; }
+    if i == 6 { return ".py"; }
     return "";
 }
 
 pub fn lang_tokens(i: u32) -> str {
-    if i == 0 { return "#include|int main(|printf("; }
-    if i == 1 { return "using System|static void Main|string[] args"; }
-    if i == 2 { return "func |package main|import ("; }
+    if i == 0 { return "std::|template<|using namespace|#include <vector>"; }
+    if i == 1 { return "#include|int main(|printf("; }
+    if i == 2 { return "using System|static void Main|string[] args"; }
     if i == 3 { return "public class|static void main|System.out"; }
-    if i == 4 { return "def |__name__|self."; }
+    if i == 4 { return "func |package main|import ("; }
     if i == 5 { return "use std::|let mut |macro_rules!|#[derive"; }
+    if i == 6 { return "def |__name__|self."; }
     return "";
 }
 
 pub fn lang_edge(i: u32) -> str {
-    if i == 0 { return "指针算术、`union`、位域、宏、可变参数（`...`）、`goto` 进来的跳转都不翻；`int` 与条件混用（`if (x)`）、`&&` 出 int 要**补转换**（Loment 的条件只收 bool）。"; }
-    if i == 1 { return "类继承、接口、泛型、LINQ、属性（`get; set;`）、事件、委托、异常都不翻；`using` / `namespace` / `class` 三层外壳会被抹掉（花括号形与文件级 `namespace X;` 都收）；`bool` 与 `int` 是分开的（`&&` 出 bool，**不用补转换**，这点与 C 相反）；`>>>` 是 C# 11 起的无符号右移。**`byte` 是 0..255 无符号的** —— 与 Java 的 `byte`（-128..127 有符号）**相反**。**不做整数宽度跟踪**：`int f(byte b) { return b; }` 那种混宽度的单元，翻出来的 Loment 会在检查时报「return 类型 u8，函数声明 i32」—— **响亮地失败，不是静默算错**（宽度跟踪是下一版的事）。"; }
-    if i == 2 { return "goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）都不翻；**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、**没有 `while`**（只有 `for`）。`int` 有平台宽度；`/` 与 `%` 向零截断（与 Loment 同）。"; }
+    if i == 0 { return "类、模板、STL、异常、引用、指针、运算符重载都不翻；预处理指令（`#include` / `#define`）不收，所以语料不带 include；`std::cout` 那类成员访问也不收（`::` 连分词都过不去）。**它有真正的 `bool`**（不像 C 得靠 `<stdbool.h>`），而 `int x = (a < b);` 与 `if (x)`（x 是 int）**两边都合法** —— bool 与 int 双向隐式转换都留着，所以两个方向的强制转换**都要补**：结论与 C 一样、**理由完全不同**。`char` 的符号性由实现决定（x86-64 上 g++ 是 signed，ARM 上常常不是），映 `i8` / `u8` 都会在某台机器上悄悄算错，所以**拒**。"; }
+    if i == 1 { return "指针算术、`union`、位域、宏、可变参数（`...`）、`goto` 进来的跳转都不翻；`int` 与条件混用（`if (x)`）、`&&` 出 int 要**补转换**（Loment 的条件只收 bool）。"; }
+    if i == 2 { return "类继承、接口、泛型、LINQ、属性（`get; set;`）、事件、委托、异常都不翻；`using` / `namespace` / `class` 三层外壳会被抹掉（花括号形与文件级 `namespace X;` 都收）；`bool` 与 `int` 是分开的（`&&` 出 bool，**不用补转换**，这点与 C 相反）；`>>>` 是 C# 11 起的无符号右移。**`byte` 是 0..255 无符号的** —— 与 Java 的 `byte`（-128..127 有符号）**相反**。**不做整数宽度跟踪**：`int f(byte b) { return b; }` 那种混宽度的单元，翻出来的 Loment 会在检查时报「return 类型 u8，函数声明 i32」—— **响亮地失败，不是静默算错**（宽度跟踪是下一版的事）。"; }
     if i == 3 { return "类继承、接口、泛型擦除、异常、`String`、集合类都不翻；`boolean` 与 `int` 是分开的（`&&` 出 boolean，所以**不用补转换** —— 这点与 C 相反）；`>>>` 是无符号右移（Loment 的 `>>` 分有符号/无符号两种写法）。"; }
-    if i == 4 { return "动态类型、类继承、异常、生成器、装饰器、闭包捕获都不翻；`/` 是真除法（要整除得写 `//`，而 Loment 的 `/` 是整除）；`True`/`False` 是 int 的子类，**翻过来要补转换**。"; }
+    if i == 4 { return "goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）都不翻；**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、**没有 `while`**（只有 `for`）。`int` 有平台宽度；`/` 与 `%` 向零截断（与 Loment 同）。"; }
     if i == 5 { return "trait 对象、闭包、宏（`macro_rules!`）、生命周期标注、`async` 都不翻；`&str` 与 `String` 都是“指针+长度”，翻过来是 `str`；借用检查那一套 Loment 同样管，所以这块一般能对上。"; }
+    if i == 6 { return "动态类型、类继承、异常、生成器、装饰器、闭包捕获都不翻；`/` 是真除法（要整除得写 `//`，而 Loment 的 `/` 是整除）；`True`/`False` 是 int 的子类，**翻过来要补转换**。"; }
     return "";
 }
 
 pub fn lang_abi(i: u32) -> str {
-    if i == 0 { return "C ABI 是它默认的导出方式（`--link` 那份 `.o` 要自包含：不能有重定位、不能引用未定义的符号）。"; }
-    if i == 1 { return "**.NET 默认不导出 C ABI**；要链接得上 NativeAOT 或 `[UnmanagedCallersOnly]`。"; }
-    if i == 2 { return "默认**不**导 C ABI；要在源里显式写 `//export`。"; }
+    if i == 0 { return "能导 C ABI —— 要显式写 `extern \"C\"`（默认名字是 mangle 过的）。"; }
+    if i == 1 { return "C ABI 是它默认的导出方式（`--link` 那份 `.o` 要自包含：不能有重定位、不能引用未定义的符号）。"; }
+    if i == 2 { return "**.NET 默认不导出 C ABI**；要链接得上 NativeAOT 或 `[UnmanagedCallersOnly]`。"; }
     if i == 3 { return "**JVM 默认不导出 C ABI**；要链接得上 JNI 或 NativeAOT。"; }
-    if i == 4 { return "**CPython 不导出 C ABI** —— 只出接口单元会得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`）。要真链接得走 C 扩展那条路。"; }
+    if i == 4 { return "默认**不**导 C ABI；要在源里显式写 `//export`。"; }
     if i == 5 { return "Rust 要导 C ABI 得在源里显式写 `extern \"C\"` + `#[no_mangle]`。"; }
+    if i == 6 { return "**CPython 不导出 C ABI** —— 只出接口单元会得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`）。要真链接得走 C 扩展那条路。"; }
     return "";
 }
