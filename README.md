@@ -2,16 +2,17 @@
 
 # Loment
 
-Loment is a systems programming language for writing software that runs without a
-runtime. Its syntax is a strict subset of Rust, extended with **capability domains** —
-a first-class way to state which part of a program may touch which resource.
+Loment is a systems programming language. Its syntax is a strict subset of Rust; the
+compiler emits native x86-64 executables — Linux ELF and Windows PE — with no runtime and
+no libc, and the toolchain is self-hosted.
 
-The compiler emits native x86-64 executables (Linux ELF and Windows PE) directly.
-Programs link against no runtime and no libc. The toolchain is itself written in Loment
-and rebuilds from a seed committed to this repository, so compiling a program requires
-neither Python nor a C compiler.
+Two things were added in the latest update, and they are why this repository is worth a
+look now:
 
-Loment is the systems language of the FujoOS project.
+- **It calls libraries written in other languages** — ten of them, end to end, from C and
+  Rust to Python and Java.
+- **It reads source written in other languages' syntax** — C, Rust, Go, Java, Python —
+  and turns a library's source into a Loment interface unit.
 
 [Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
 [Manual](docs/manual/index.md) ·
@@ -27,23 +28,6 @@ published yet.
 The **language surface is frozen** — syntax, type rules, diagnostics, unit loading and
 capability semantics are specified in `docs/158-loment-freeze.md`, which also states what
 a change to them costs. The **implementation is not frozen**.
-
-## Why Loment?
-
-- **Nothing sits between the program and the machine.** No runtime, no libc, no garbage
-  collector. The entry point is `_start`, the interface to the operating system is a
-  system call, and the built-in surface is a fixed table you can read in one sitting —
-  there is no `printf`, no `String`, no `Vec`.
-- **Capability domains are part of the language, not a library.** A domain names a
-  resource space and the range of indices a program may use in it; a `guard` enforces
-  that range, and the compiler rejects indices it can already see to be outside it.
-- **Self-hosted, down to the assembler.** The compiler is written in Loment and the
-  build chain begins at an assembler committed to this repository. The bootstrap needs
-  no Python, no interpreter and no C compiler, and it checks that the compiler
-  reproduces itself byte for byte and that later stages reach a fixed point.
-- **The deviations from Rust are written down.** Rust's syntax and type system carry you
-  most of the way; where Loment differs, the differences are enumerated as a short list
-  with minimal reproductions, so you do not have to find them by failing to compile.
 
 ## Getting the toolchain
 
@@ -92,10 +76,90 @@ hello from Loment
 Source files are `.lomt`. `_start` is the entry point, and output goes through the `write`
 system call. `loment build hello.lomt` produces a single self-contained executable.
 
-## Capability domains
+## Calling other languages' libraries
 
-This is the one thing Loment adds to Rust. A capability domain declares a resource space,
-the range of indices a program may use inside it, and whether it can be revoked:
+`extern fn` declares a function that lives somewhere else; the call site uses the platform
+C ABI. There are two legs, and which one a language takes depends only on how it can be
+reached.
+
+### Static linking — anything that exports C symbols
+
+```rust
+extern fn c_add(a: i32, b: i32) -> i32;
+```
+
+```
+$ cc -c lib.c -o lib.o
+$ loment build app.lomt --link lib.o -o app
+```
+
+Several objects can be passed at once and symbols resolve across them. The linker in this
+repository also takes a static archive (`libfoo.a`): it applies relocations and pulls in
+only the members that define the symbols it needs. That is the difference between being
+able to call one hand-picked function and being able to use a real C library.
+
+C, C++, Rust and Zig all run end to end on this leg — C++ behind `extern "C"`, Rust behind
+`#[no_mangle] pub extern "C"`, Zig behind `export fn`. The mechanism is the same for
+anything else that exports C symbols.
+
+### Process bridge — languages whose runtime is not a C library
+
+Python, JavaScript, Java, Perl, Lua and Go are reached through `loment/lib/proc.lomt`:
+start the interpreter, hand it the code, read the answer back, and let it `import` its own
+libraries the way it always does. The price is a process boundary — bytes cross it, not
+pointers, so a struct cannot be passed — and it is Linux/ELF only, because the Windows
+shim has no pipe.
+
+**Ten languages, each with a criterion that runs the result** (`loment_ffi_test`, 18/18,
+none skipped): C / C++ / Rust / Zig, then Go / Python / Java / JavaScript / Perl / Lua.
+
+### What it does not do yet
+
+- Dynamic libraries (`.so` / `.dll`) and embedding a runtime (CPython, the JVM) — both are
+  later stages, and neither is started.
+- No `str` across the boundary. `str` is a pointer plus a length, not a C string, so a
+  signature carrying one is rejected rather than miscompiled.
+- No aggregates by value, no variadic functions, no callbacks.
+- No FFI on the PE target: a Windows build with a foreign object is refused rather than
+  producing something that does not link.
+
+## Reading other languages' source
+
+Any source syntax → a Potato form object → a L1 unit (`.lomt`) → the frozen core:
+
+```
+$ python tools/potato_from.py lib.rs --json lib.potato.json
+$ python tools/lomt_from.py  lib.potato.json --out lib.lomt
+
+$ python tools/lomt_from.py  lib.rs --lang rust --out lib.lomt    # both steps at once
+```
+
+The language is decided by extension first (`.c`/`.h`, `.rs`, `.go`, `.java`, `.py`) and,
+for a `.lomt` file holding foreign syntax, by its content. When it cannot tell, it asks for
+`--lang` instead of guessing — a wrong guess produces a wrong interface rather than an
+error.
+
+**What you get** are declarations: types, constants, capabilities and function signatures.
+Every function the front end can represent becomes `pub extern fn`, so the unit can be
+`use`d and linked against an object built from the same library. Five syntaxes, ten
+criteria each (`loment_multisyntax_test`).
+
+**What you do not get** are function bodies. The representation layer records what exists,
+not what it computes; carrying implementations would be a structural extension of it, not
+an extra field. Whatever cannot be represented — overloads, generics, managed runtimes —
+is reported with a name and a reason, and nothing is dropped silently.
+
+## The language itself
+
+- **Syntax**: Rust's, minus the parts that need a runtime. `module`, `use`, `fn`, `let`,
+  `if`, `while`, `for`, `match`, `enum`, `struct`, `trait`, generics, slices, `Result`.
+  Where it deviates, the deviations are enumerated with minimal reproductions in the
+  language guide, so you do not have to find them by failing to compile.
+- **Built-ins**: a short fixed table. There is no `printf`, no `String`, no `Vec`; the
+  interface to the operating system is a system call.
+- **Capability domains**: the one thing Loment adds to Rust. A domain declares a resource
+  space and the range of indices a program may use in it, and a `guard` enforces that
+  range:
 
 ```rust
 module blk
@@ -108,14 +172,11 @@ fn write_slot(slot: u32) -> u32 {
 }
 ```
 
-`guard blk_write(slot);` evaluates the index: outside `[0..4]` the program traps, with no
-other side effect; inside, one audit entry is counted. An index the compiler can see to be
-out of range — `guard blk_write(7)` — is rejected at compile time as `E4` instead.
-
-**The boundary is stated, not glossed** (`docs/146-loment-capability-semantics.md`): a
-guard constrains the *index*, not the *subject*. It does not ask whether the caller is
-entitled to the capability; binding a subject to a capability is the kernel's job.
-`revocable` is, on the language side, a declaration and a flag in the domain table.
+  Outside `[0..4]` the program traps, with no other side effect; inside, one audit entry is
+  counted. An index the compiler can see to be out of range — `guard blk_write(7)` — is
+  rejected at compile time as `E4` instead. The boundary is stated rather than glossed
+  (`docs/146-loment-capability-semantics.md`): a guard constrains the *index*, not the
+  *subject*, and binding a subject to a capability is the kernel's job.
 
 ## Documentation
 
@@ -127,6 +188,8 @@ entitled to the capability; binding a subject to a capability is the kernel's jo
 | `docs/143-l1-loment-v0.md` | Language specification. |
 | `docs/146-loment-capability-semantics.md` | Capability domains: semantics, what they guarantee, and what they do not cover. |
 | `docs/158-loment-freeze.md` | What is frozen, what is not, and what changing each part costs. |
+| `docs/173-loment-ffi.md` | Calling other languages' libraries: the four stages, and an honest ledger of what runs today. |
+| `docs/179-multisyntax-frontends.md` | Reading other languages' syntax into L1. |
 | `docs/` | Design and measurement records, numbered by document. |
 | [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager: a library is a directory, its identity is a content hash, and its dependencies are the `use` lines in the source. |
 
@@ -140,13 +203,13 @@ are written in Chinese.
 |---|---|
 | `loment/selfhost/` | The compiler. It is written in Loment. |
 | `loment/tools/` | Command-line front end, formatter, documentation generator, language server, linker. |
-| `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc`. |
+| `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc` (the last one is the process bridge). |
 | `loment/examples/` | 28 example programs. |
 | `loment/bootstrap.sh` | From-source build driver: seed, `stage1`, `stage2`, `stage3`. |
 | `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
 | `lompi/` | The package manager, written in Loment. Published separately as [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi). |
 | `editors/` | Editor support: syntax highlighting, completion and navigation for VS Code and Vim. |
-| `tools/` | Build, packaging and verification tools. |
+| `tools/` | Build, packaging and verification tools, including the multi-syntax front ends. |
 | `docs/` | Design and measurement records. |
 
 ## Getting help
