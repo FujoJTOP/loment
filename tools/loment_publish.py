@@ -157,6 +157,8 @@ REPOS: dict[str, dict] = {
             "tools/ctrans.py",
             # Python -> Loment 的翻译器（`docs/187`）。同上，名字不以 `lom` 开头。
             "tools/pytrans.py",
+            # Java -> Loment 的方言表（`docs/188` §7.1）。同上。
+            "tools/jtrans.py",
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",

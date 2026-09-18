@@ -271,19 +271,23 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             lang = doc.get("grammar") or "loment"
             if lang == "loment" and doc.get("language") in ("c", "python", "java", "go", "rust"):
                 lang = doc["language"]      # 旧对象（v≤5）还是按 language 记的
-            if lang == "c":
-                import ctrans           # 只在 `--impl` 这条路上要它 —— 默认那条不该被它拖进来
-                mod, errs = ctrans, (ctrans.Unsupported, ctrans.CError)
-                tool, hint = "tools/ctrans.py", ("只收整数标量、if/while/for、四则与位运算")
-            elif lang == "python":
-                import pytrans
-                mod, errs = pytrans, (pytrans.Unsupported, pytrans.PyError)
-                tool, hint = "tools/pytrans.py", ("只收整数标量、if/while/for、"
-                                                  "四则与位运算；参数与返回都要写类型注解")
-            else:
+            # **一门一张表** —— 加一门只加一行，别在这里长成一条 if 链。
+            # 每项: 模块名 · 它的 "子集外" 异常类 · 工具路径 · 给用户的子集提示。
+            _TOOLS = {
+                "c": ("ctrans", "Unsupported CError", "tools/ctrans.py",
+                      "只收整数标量、if/while/for、四则与位运算"),
+                "python": ("pytrans", "Unsupported PyError", "tools/pytrans.py",
+                           "只收整数标量、if/while/for、四则与位运算；参数与返回都要写类型注解"),
+                "java": ("jtrans", "Unsupported CError", "tools/jtrans.py",
+                         "只收整数标量、if/while/for、四则与位运算；`class` 外壳会被抹掉"),
+            }
+            if lang not in _TOOLS:
                 raise NotRepresentable(
-                    f"这份对象的 language 是 {lang!r} —— 带正文的函数还没有这一门的翻译器"
-                    f"（现在有 c 与 python 两门, 见 docs/186 / docs/187）")
+                    f"这份对象的 grammar 是 {lang!r} —— 带正文的函数还没有这一门的翻译器"
+                    f"（现在有 {sorted(_TOOLS)}，见 docs/186 / docs/187 / docs/188 §7.1）")
+            _mn, _en, tool, hint = _TOOLS[lang]
+            mod = __import__(_mn)       # 只在 `--impl` 这条路上要它 —— 默认那条不该被拖进来
+            errs = tuple(getattr(mod, e) for e in _en.split())
             # `externs` 只有 C 那门用得上：它的 `pub extern fn` 与翻译出来的实现能共处
             # 一个单元。Python 那门不导出 C ABI（`abi="python"` 的进不了 `extern fn`），
             # 所以 Python 单元里的跨函数调用只认带正文的那些 —— 缺了会**响亮报错**。

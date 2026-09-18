@@ -81,14 +81,15 @@ C = Dialect(
 
 
 def translate(src: str, keep: set[str] | None = None,
-              externs: dict[str, str] | None = None) -> str:
+              externs: dict[str, str] | None = None,
+              consts: dict[str, str] | None = None) -> str:
     """C 写法 -> Loment 源码（**只有函数**，`module` 头由调用方加）。
 
     * `keep` 给了就只翻这些函数 —— 一份 C 里可能既有"要翻译成 Loment"的函数，
       也有"留着外部链接（`pub extern fn`）"的函数。
     * `externs` 是**不在这份源码里、但调用点要认的**函数：`名字 -> Loment 返回类型`。
     """
-    return _translate(src, C, keep=keep, externs=externs)
+    return _translate(src, C, keep=keep, externs=externs, consts=consts)
 
 
 def parse(src: str) -> list:

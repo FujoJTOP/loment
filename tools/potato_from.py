@@ -223,11 +223,15 @@ def _block_end(text: str, open_idx: int) -> int:
     return -1
 
 
-def _java_members(body: str) -> list[str]:
+def _java_members(body: str) -> list[tuple[str, str]]:
     """类体里**顶层**的成员声明 (跳过方法体、内部类那些嵌套块)。
 
     做法是走一遍花括号配平: 深度 0 上遇到 `;` 或遇到一个完整的 `{...}` 就收一个成员。
     不这么做的话, 方法体里的局部变量会被当成字段 —— 那是**静默把声明抽错**。
+
+    返回 `(归一化文本, 原文)`。**原文那一份是给 `functions[i].body` 用的**
+    （`docs/188` §3）—— 归一化把空白压掉了, 拿它当 Java 源喂给前端会丢格式；
+    更要紧的是 `potato_from` 里那份 `body` 是**剥过注释**的, 直接当源用也失真。
     """
     out, cur, depth, start = [], [], 0, None
     i = 0
@@ -250,7 +254,7 @@ def _java_members(body: str) -> list[str]:
         elif depth == 0:
             cur.append(c)
         i += 1
-    return [" ".join(m.split()) for m in out]
+    return [(" ".join(m.split()), m) for m in out]
 
 
 def _java_type(t: str, mode: str, known: set[str]) -> str | None:
@@ -331,7 +335,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             continue
         inner = body[open_idx + 1:end]
         fields, consts, methods = [], [], []
-        for mem in _java_members(inner):
+        for mem, mem_raw in _java_members(inner):
             mc = _JAVA_CONST.match(mem)
             if mc:
                 consts.append((mc.group(1), mc.group(2), int(mc.group(3))))
@@ -342,7 +346,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             # 与外部实现对接的方法**(2026-09-17 实测: Java 的 j_native 一直抽不出来)。
             mm = _JAVA_METHOD.match(mem)
             if mm and "(" in mem and IDENT_RE.match(mm.group(2)):
-                methods.append((mm.group(1), mm.group(2), mm.group(3)))
+                methods.append((mm.group(1), mm.group(2), mm.group(3), mem_raw))
                 continue
             if mem.rstrip().endswith(";"):
                 mf = _JAVA_FIELD.match(mem)
@@ -373,7 +377,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         else:
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
-        for rty, mname, params in methods:
+        for rty, mname, params, mem_raw in methods:
             if mname == cname:
                 rep.skip("fn", mname, "构造器")
                 continue
@@ -404,7 +408,12 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             # "用 Java 写法写的 Loment"当成外国货，于是函数被 ABI 闸门整批挡掉 ——
             # 而它本来就该被翻成 `pub fn`。只有**源码显式宣称**外部 ABI 时才记
             # （见 Go 的 `//export`、Rust 的 `extern "C"`）。
-            doc["functions"].append({"name": mname, "params": ps, "ret": rt})
+            # 正文（`docs/188` §3 的 `functions[i].body`）：Java 那一侧同一形状。
+            # 存**整段方法原文** —— 见 `_java_members` 的注解。
+            ent: dict = {"name": mname, "params": ps, "ret": rt}
+            if mem_raw.strip():
+                ent["body"] = mem_raw.strip()
+            doc["functions"].append(ent)
             rep.ok += 1
     return _finish(doc, rep)
 

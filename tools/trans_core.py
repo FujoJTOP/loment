@@ -129,6 +129,18 @@ class Dialect:
     #: 撞上 Loment 保留字时给名字加的后缀。**每门不同** —— 两门用同一个后缀的话，
     #: 将来把两个单元合起来会莫名其妙撞名。
     safe_suffix: str = "_x"
+    #: **哪些修饰词标志着"这是一条常量声明"**。Java 的 `static final`、C# 的 `const`、
+    #: C++ 的 `constexpr` —— 它们在顶层出现时**不发成函数也不发成全局变量**，而是
+    #: 由 `potato_from` 收进 `consts`（`_JAVA_CONST` 那一条）、由 `lomt_from` 发成
+    #: `pub const`。翻译器只要**跳过**那条声明，并且认得那个名字。
+    #: **空集 = 这一族不收顶层常量**（C 就是 —— `potato_from` 也不收它的全局量）。
+    const_words: frozenset = frozenset()
+    #: **这一族特有的源码预处理**（`src -> src`），在分词**之前**跑。
+    #:   Java / C# —— 抹掉 `class` 外壳（函数住在类里，而解析器看的是顶层）
+    #:   C / C++   —— 没有
+    #: **必须保持行号与偏移**（换成等长空白，别抽出来拼一拼）—— 报错里的行号
+    #: 就是源里的行号，漂了就指不到点子。
+    pre: object = None
 
     def safe(self, name: str) -> str:
         """撞上 Loment 保留字就加后缀。
@@ -154,7 +166,7 @@ _TOKEN = re.compile(r"""
     | (?P<bc>/\*.*?\*/)
     | (?P<id>[A-Za-z_]\w*)
     | (?P<num>0[xX][0-9a-fA-F]+|\d+)
-    | (?P<op>>>>=|>>>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:])
+    | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:])
 """, re.X | re.S)
 
 #: 本子集不收的运算符：**必须**在分词那一步**整个**认出来再点名拒掉。
@@ -328,11 +340,18 @@ class Parser:
 
     # ---- 声明说明符
     def spec(self) -> tuple[str, str, int]:
-        """吃 `[unsigned] int` / `void` / … -> `(Loment 类型, 变量名, 行)`。"""
+        """吃 `[unsigned] int` / `void` / … -> `(Loment 类型, 变量名, 行)`。
+
+        **顺手把"这一条声明里出现过哪些词"记在 `self.last_spec` 上** ——
+        `unit()` 要靠它判"这是不是一条常量声明"（见 `Dialect.const_words`）。
+        """
         words: list[str] = []
+        seen: set[str] = set()
+        self.last_spec = seen
         line = self.peek()[2]
         while self.peek()[0] == "id" and self.peek()[1] in self.d.spec_words:
             w = self.peek()[1]
+            seen.add(w)
             if w in self.d.bad_spec:
                 raise Unsupported(f"第 {self.peek()[2]} 行: 不支持存储类/限定符 `{w}`")
             if w in self.d.linkage:
@@ -409,6 +428,11 @@ class Parser:
             if t[1] in self.d.kw:
                 raise Unsupported(f"第 {t[2]} 行: 表达式里不支持关键字 `{t[1]}`")
             self.i += 1
+            if self.at("."):
+                # 属性/字段访问（Java 的 `System.exit`、`this.w`、C++ 的 `ns::f`）。
+                # **点名**它 —— 不点的话会掉进"`System` 后面期望 `=` 或 `(`"，指不到点子。
+                raise Unsupported(f"第 {t[2]} 行: 不支持属性/字段访问 `{t[1]}.…`"
+                                  f"（本子集只有标量与自由函数）")
             if self.at("("):
                 self.i += 1
                 args = []
@@ -550,6 +574,29 @@ class Parser:
                 raise Unsupported(f"第 {self.peek()[2]} 行: 不支持预处理指令")
             ret, name, line = self.spec()
             if not self.at("("):
+                # **顶层常量声明**（Java 的 `static final`、C# 的 `const`、C++ 的
+                # `constexpr`）：它**不发成函数也不发成全局变量** —— `potato_from`
+                # 已经把它收进 `consts`（`_JAVA_CONST` 那一条），`lomt_from` 会发
+                # `pub const`。所以翻译器**跳过**它，只要认得那个名字。
+                #
+                # **`const_words` 为空就是这一族不收**（C 是 —— `potato_from` 也不收
+                # 它的全局量，跳过会造出一个下游认不出的名字）。所以这一格是**方言
+                # 说了算**，不是"看见 `=` 就跳"。
+                if (self.d.const_words & self.last_spec) and self.at("="):
+                    self.i += 1
+                    v = self.peek()
+                    neg = False
+                    if self.at("-") and self.peek(1)[0] == "num":
+                        neg = True
+                        self.i += 1
+                        v = self.peek()
+                    if v[0] != "num":
+                        raise Unsupported(
+                            f"第 {v[2]} 行: 顶层常量 `{name}` 的值不是整数字面量"
+                            f"（`potato_from` 只收得来整数常量）")
+                    self.i += 1
+                    self.want(";")
+                    continue
                 raise Unsupported(f"第 {line} 行: 不支持全局变量 `{name}`")
             self.i += 1
             params = []
@@ -586,10 +633,15 @@ class Emitter:
     与 `Parser` 一样：语言差异全走 `self.d`，这里不该有 `if <语言>`。
     """
 
-    def __init__(self, fns: dict[str, str], d: "Dialect") -> None:
+    def __init__(self, fns: dict[str, str], d: "Dialect",
+                 consts: dict[str, str] | None = None) -> None:
         #: 本单元**所有**函数的返回类型。调用点的类型靠它 —— 子集里没有跨单元调用。
         self.fns = fns
         self.d = d
+        #: **模块常量的名字**。`pub const` 由 `lomt_from` 从 Potato 的 `consts` 发，
+        #: 翻译器只要**认得那些名字**（顶层声明本身在解析时被跳过）。不给这张表的话
+        #: 函数体里一引用常量就报"用了没声明过的"。
+        self.consts: dict[str, str] = dict(consts or {})
         #: C 名字 -> 发出去的名字。`for` 的改名外提就靠这张表（见文件头 §语义选择 2）。
         self.vars: dict[str, str] = {}
         self.n = 0
@@ -629,6 +681,10 @@ class Emitter:
             return "bool" if self.d.bin[e.op][2] else "int"
         raise AssertionError(type(e))
 
+    def const_name(self, n: str) -> bool:
+        """这是不是一个**模块常量**（而不是局部名）。"""
+        return n in self.consts
+
     def ex(self, e: object, want: str) -> str:
         """表达式，**在 `want` 这个上下文里**的写法（必要时补转换）。
 
@@ -665,8 +721,13 @@ class Emitter:
         if isinstance(e, Lit):
             return str(e.v)
         if isinstance(e, Var):
+            if self.const_name(e.name):
+                return e.name          # 模块常量名照抄 —— `pub const` 在同层
             if e.name not in self.vars:
-                raise Unsupported(f"第 {e.line} 行: 用了没声明过的 `{e.name}`")
+                raise Unsupported(
+                    f"第 {e.line} 行: 用了没声明过的 `{e.name}`"
+                    f"（顶层常量声明在解析时被跳过，`pub const` 由 `lomt_from` 从 Potato "
+                    f"的 `consts` 发 —— 名字对不上的话就是那一步没收它）")
             return self.vars[e.name]
         if isinstance(e, Call):
             return f"{e.name}({', '.join(self.ex(a, 'int') for a in e.args)})"
@@ -792,11 +853,17 @@ class Emitter:
 
 
 def parse(src: str, d: "Dialect") -> list:
-    return Parser(tokens(src), d).unit()
+    return Parser(tokens(_pre(src, d)), d).unit()
+
+
+def _pre(src: str, d: "Dialect") -> str:
+    """这一族的源码预处理（见 `Dialect.pre`）。没给就是原样。"""
+    return d.pre(src) if d.pre else src
 
 
 def translate(src: str, d: "Dialect", keep: set[str] | None = None,
-              externs: dict[str, str] | None = None) -> str:
+              externs: dict[str, str] | None = None,
+              consts: dict[str, str] | None = None) -> str:
     """C 源码 -> Loment 源码（**只有函数**，`module` 头由调用方加）。
 
     * `keep` 给了就只翻这些函数 —— 一份 C 里可能既有"要翻译成 Loment"的函数，
@@ -804,7 +871,7 @@ def translate(src: str, d: "Dialect", keep: set[str] | None = None,
     * `externs` 是**不在这份源码里、但调用点要认的**函数：`名字 -> Loment 返回类型`。
       没有它的话，被翻译的代码一调到 `pub extern fn` 那种函数就会报"本单元没有"。
     """
-    fns = parse(src, d)
+    fns = Parser(tokens(_pre(src, d)), d).unit()
     rets = {f.name: f.ret for f in fns}
     if externs:
         rets.update(externs)
@@ -818,7 +885,7 @@ def translate(src: str, d: "Dialect", keep: set[str] | None = None,
     for f in fns:
         if keep is not None and f.name not in keep:
             continue
-        out.append(Emitter(rets, d).emit_fn(f))
+        out.append(Emitter(rets, d, consts).emit_fn(f))
     return "\n\n".join(out) + "\n"
 
 

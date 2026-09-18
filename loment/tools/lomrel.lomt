@@ -224,6 +224,8 @@ tools/ctrans.py
 tools/loment_ctrans_test.py
 tools/pytrans.py
 tools/loment_pytrans_test.py
+tools/jtrans.py
+tools/loment_jtrans_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py
@@ -269,6 +271,7 @@ loment/extblock/*.lomt
 loment/lex/*.lomt
 loment/ctrans/*.c
 loment/pytrans/*.py
+loment/jtrans/*.java
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json
