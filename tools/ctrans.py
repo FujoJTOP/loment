@@ -65,9 +65,21 @@ C = Dialect(
     spec_words=frozenset({"int", "unsigned", "signed", "long", "void",
                           "static", "const", "extern", "register", "volatile",
                           "typedef", "struct", "enum", "union", "char", "short",
-                          "float", "double", "inline", "_Bool"}),
-    linkage=frozenset({"static", "inline"}),
-    bad_spec=frozenset({"const", "extern", "register", "volatile", "typedef"}),
+                          "float", "double", "inline", "_Bool",
+                          # **`bool` 收进来只为那句报错**（`<stdbool.h>` 的宏，C23 才是关键字）。
+                          # 它不在 `types` 里，所以报的是"类型 `bool` 不在 Stage A 子集里" ——
+                          # 不收它的话 `bool b = 1;` 会掉进"`bool` 后面期望 `=` 或 `(`"，
+                          # 一句指不到点子的话。**映不映它是另一件事**（Loment 有 `bool`，
+                          # 理论上能映；那是独立的一条决定，见 docs/186 §9）。
+                          "bool"}),
+    #: **`const` 从"拒"挪到"收下并丢掉"**（2026-09-18，做 C++ 那一门时一并改）：
+    #: 在**只有标量、没有指针**的子集里，`const int x` / `const int a`（形参）
+    #: 丢掉 `const` 是**保义**的 —— 源侧本来就保证了它不会被改。原先那句
+    #: "它们都真的改语义"对 `const` 不成立，`docs/186` §6.3 已更正。
+    #: （**顶层** `const unsigned int MAX = 65535;` 仍然收不了 —— 那要
+    #: `potato_from` 把它收进 `consts`，是另一件事，`docs/186` §9 留着。）
+    linkage=frozenset({"static", "inline", "const"}),
+    bad_spec=frozenset({"extern", "register", "volatile", "typedef"}),
     agg=frozenset({"struct", "enum", "union"}),
     kw=frozenset(_KW),
     bin=dict(_BIN),

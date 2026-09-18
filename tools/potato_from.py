@@ -603,6 +603,27 @@ _JAVA_DEF = re.compile(r"^[ \t]*(?:public[ \t]+|final[ \t]+|abstract[ \t]+)*(?:c
 #: 源码判成 csharp，然后**按 C# 去翻**（静默翻错语言，比认不出坏得多）。
 #: 代价：一份**没写 using、也没有入口**的 C# 文件认不出，得用 `--lang csharp` 指明 ——
 #: `detect_lang` 本来就不假装完备，这条是"宁可认不出，不肯认错"那一侧的。
+#: C++：**只认 C 里根本不会出现的东西**（同一条"判据只认专有的"纪律）。
+#:
+#:   ① `std::`            —— 作用域解析，C 里没有 `::`；
+#:   ② `template<`        —— 模板；
+#:   ③ `using namespace`  —— C 没有 `using`；
+#:   ④ C++ 标准头（`<vector>` / `<iostream>` / …）—— `#include` 在 C 里也有，所以
+#:      **只看头名**，而且**要求紧跟 `>`**：`#include <string.h>` 是 **C 头**，
+#:      不写那个 `>` 的话 `string` 会把一份 C 源码判成 C++。
+#:
+#: **必须排在 `_C_PRE` 前面**：C++ 文件一样有 `#include`，而 `_C_PRE` 会把任何带预处理
+#: 指令的文件判成 C —— 排在后面的话 C++ 永远轮不到。
+#: **`namespace` / `class` 故意不当判据**：C# 也有它们，而那两门有**专有**判据
+#: （`_CS_DEF` 排在前面先把 C# 接走），拿它们认 C++ 会让别的语言被按 C++ 翻。
+_CPP_DEF = re.compile(
+    r"\bstd::"
+    r"|^[ \t]*template[ \t]*<"
+    r"|^[ \t]*using[ \t]+namespace[ \t]+"
+    r"|^[ \t]*#include[ \t]*<(?:iostream|vector|string|map|set|algorithm|memory"
+    r"|utility|functional|array|tuple|optional|variant|sstream|fstream|iomanip"
+    r"|numeric|queue|stack|deque|list|bitset|unordered_\w+|cstd\w+)>",
+    re.M)
 _CS_DEF = re.compile(r"^[ \t]*using[ \t]+[A-Z][\w.]*[ \t]*;"
                      r"|^[ \t]*(?:public[ \t]+|private[ \t]+|protected[ \t]+|internal[ \t]+)*"
                      r"static[ \t]+(?:void|int)[ \t]+Main[ \t]*\([ \t]*string[ \t]*\[",
@@ -655,6 +676,10 @@ def detect_lang(src: str) -> tuple[str, str]:
         return "rust", "有 `fn`"
     if _GO_DEF.search(body) or _GO_PKG.search(body):
         return "go", "有 `func` / `package`"
+    # **C++ 排在 C# / Java 前面**：它的判据（`std::` / `template<` / `using namespace` /
+    # C++ 标准头）是**专有**的，而它必须赶在 `_C_PRE` 前面（C++ 一样有 `#include`）。
+    if _CPP_DEF.search(body):
+        return "cpp", "有 `std::` / `template<` / `using namespace` / C++ 标准头"
     # **C# 要排在 Java 前面**：两门都写 `class X {`，一份 C# 源码对 `_JAVA_DEF` 也是
     # 命中的。而 C# 那两条判据是**专有**的（见 `_CS_DEF` 的注解），所以先问它。
     if _CS_DEF.search(body):
@@ -936,16 +961,24 @@ _C_FN = re.compile(r"^[ \t]*(?:static\s+|inline\s+|const\s+)*"
 _C_KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
-def _c_type(t: str, mode: str, known: set[str]) -> str | None:
+def _c_type(t: str, mode: str, known: set[str], types: dict) -> str | None:
+    """一门 C 系语言的类型拼法 -> Loment 类型。**表从外面传** —— C 与 C++ 不同
+    （C++ 的 `char` 与 C 一样是**实现定义**的符号性，所以那里要显式映成 `None`）。"""
     t = re.sub(r"\s+", " ", t.strip())
+    # 前置限定词先剥掉（`const int v` -> `int v`）。
+    # **这一层管的是数据形状，而限定词不改布局** —— `const` / `volatile` 都不动一个字节。
+    # 收还是拒是**翻译器**那一层的决定（`docs/186` §6.3 记了 `const` 从"拒"改到"收下并丢掉"），
+    # 不该在这里把一份**结构完全画得出来**的头文件整段判成"无映射"。
+    # 2026-09-18 做 C++ 那一门时撞到：`in_range(const int v, …)` 一个函数都没进来。
+    t = re.sub(r"^(?:(?:const|volatile|static|register)\s+)+", "", t)
     if t.endswith("[]"):
         t = t[:-2] + " *"
     # `enum X` **在 C 里就是一个整型** (标准这么定) —— 映 i32。不认它的话, 凡是收
     # `enum X` 形参的函数**整个被跳过**, 而那在真实 C 里到处都是 (2026-09-17 补)。
     if t.startswith("enum "):
         return "i32"
-    if t in C_TYPES:
-        return C_TYPES[t]
+    if t in types:
+        return types[t]
     if t.endswith("*"):
         base = re.sub(r"\s+", " ", t[:-1].strip())
         return "str" if base == "char" else "ptr"
@@ -964,9 +997,30 @@ def _blank_keep_off(m: "re.Match[str]") -> str:
     return "".join("\n" if ch == "\n" else " " for ch in m.group())
 
 
-def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
-    rep = Report(name, "c", mode)
-    doc = _blank(_ident(Path(name).stem), "c")
+#: **C++ 的类型表**。与 C 那张**只差 `char` 那一格**（其余同名同义，所以从 C 复制）：
+#: **`char` 的符号性在 C++ 里也是实现定义的**（x86-64 上 g++ 是 signed，ARM 上常常不是），
+#: 表示层不该猜 —— 猜错的话"对面那块内存里这个字段是 0..255 还是 -128..127"就记反了。
+#: C 那边映 `i8` 是**写下来的决定**（x86-64 Linux 上 clang 就是 signed）；C++ 这边
+#: 不给映射，让它**出声**（`无映射`），因为 C++ 没有"C 就是 x86-64 Linux"那个默认。
+#: `signed char` / `unsigned char` 是**明确**的，照映。
+CPP_TYPES = dict(C_TYPES, **{
+    "char": None,
+    "char *": None, "const char *": None,
+    "signed char": "i8", "unsigned char": "u8",
+    "long long": "i64", "unsigned long long": "u64",
+    "bool": "bool", "void *": "ptr",
+})
+
+
+def _from_c(src: str, name: str, mode: str, grammar: str,
+            types: dict) -> tuple[dict, Report]:
+    """**C 系那一门**（C / C++）的共用引擎：函数、结构体、枚举、常量四种声明。
+
+    形状一样，差异只在**类型表** —— 所以它当参数传进来（`docs/188` §7.1）。
+    这两门都不收顶层常量（`const` 全局量），所以没有 `const_words` 那一档。
+    """
+    rep = Report(name, grammar, mode)
+    doc = _blank(_ident(Path(name).stem), grammar)
     body = _C_COMMENT.sub(_blank_keep_off, src)
     body = re.sub(r"^[ \t]*#.*$", _blank_keep_off, body, flags=re.M)
     known: set[str] = set()
@@ -977,7 +1031,7 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             ft, fn, arr = fm.group(1), fm.group(2), fm.group(3)
             if fn in ("if", "while", "for", "return"):
                 continue
-            t = _c_type(ft, mode, known)
+            t = _c_type(ft, mode, known, types)
             if arr and t:
                 t = f"[{t}; {arr[1:-1].strip()}]"
             if t is None:
@@ -1035,7 +1089,7 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if "..." in params:
             rep.skip("fn", fn, "变参")
             continue
-        ret = _c_type(rt, mode, known)
+        ret = _c_type(rt, mode, known, types)
         if ret is None:
             rep.skip("fn", fn, f"返回类型 {rt!r} 无映射")
             continue
@@ -1048,7 +1102,7 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
                 bad = f"参数 {raw!r} 解析失败"
                 break
             pname = parts[-1]
-            t = _c_type(" ".join(parts[:-1]), mode, known)
+            t = _c_type(" ".join(parts[:-1]), mode, known, types)
             if t is None:
                 bad = f"参数类型 {raw!r} 无映射"
                 break
@@ -1080,6 +1134,17 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
+
+
+def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """C 源码 -> 形式对象。引擎在 `_from_c`，这里只是把 C 那张表递过去。"""
+    return _from_c(src, name, mode, "c", C_TYPES)
+
+
+def from_cpp(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """C++ 源码 -> 形式对象（`docs/188` §7.1）。引擎同上，表是 C++ 那张
+    —— 与 C 只差 `char` 那一格，见 `CPP_TYPES`。"""
+    return _from_c(src, name, mode, "cpp", CPP_TYPES)
 
 
 # ---------------------------------------------------------------- Rust (轻量解析)
@@ -1271,9 +1336,11 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
 # ---------------------------------------------------------------- CLI
 
 LANGS = {"python": from_python, "c": from_c, "rust": from_rust,
-         "go": from_go, "java": from_java, "csharp": from_csharp}
+         "go": from_go, "java": from_java, "csharp": from_csharp, "cpp": from_cpp}
+#: 后缀 -> 语言。**一个语言可以有好几个后缀**（`.cc`/`.cxx` 都是 C++ 的常见写法）。
 EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
-       ".java": "java", ".cs": "csharp"}
+       ".java": "java", ".cs": "csharp",
+       ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp"}
 #: `abi` 的取值域 (与 `potato.ABIS` 对齐): `c` = 平台 C ABI, 能发 `extern fn`;
 #: 其余都是**运行时那一族**, 走进程桥 (docs/173 §4)。
 

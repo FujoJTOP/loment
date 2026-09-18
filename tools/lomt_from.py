@@ -283,6 +283,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 "csharp": ("cstrans", "Unsupported CError", "tools/cstrans.py",
                            "只收整数标量、if/while/for、四则与位运算；"
                            "`using` / `namespace` / `class` 三层外壳都会被抹掉"),
+                "cpp": ("cpptrans", "Unsupported CError", "tools/cpptrans.py",
+                        "只收整数标量与 `bool`、if/while/for、四则与位运算；"
+                        "预处理指令、`std::` 与成员访问都不收"),
             }
             if lang not in _TOOLS:
                 raise NotRepresentable(

@@ -103,6 +103,12 @@ GLOBS = [
     # Java 翻成 Loment (docs/188 §7.1 六门里的第三门; 花括号族第二张方言表)。
     "tools/jtrans.py",
     "tools/loment_jtrans_test.py",
+    # C# 翻成 Loment (六门里的第四门; 花括号族**多两层壳**的那一门)。
+    "tools/cstrans.py",
+    "tools/loment_cstrans_test.py",
+    # C++ 翻成 Loment (六门里的第五门; 与 C 同一张形状、**不同的理由**要补转换)。
+    "tools/cpptrans.py",
+    "tools/loment_cpptrans_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
@@ -154,6 +160,9 @@ GLOBS = [
     "loment/pytrans/*.py",
     # Java 翻译器的语料 (docs/188 §7.1): 同理，是**普通 `.java`**。
     "loment/jtrans/*.java",
+    # C# / C++ 翻译器的语料: 同理，是**普通 `.cs` / `.cpp`**。
+    "loment/cstrans/*.cs",
+    "loment/cpptrans/*.cpp",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

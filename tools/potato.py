@@ -64,7 +64,7 @@ ABIS = ("c", "rust", "python", "go", "java")
 #:
 #: 源里可以写别名（`py` / `python`），但**进对象的只有这里这几个规范名** ——
 #: 否则同一份源出两串字节，判据当场红。
-GRAMMARS = ("loment", "c", "python", "java", "go", "rust", "csharp")
+GRAMMARS = ("loment", "c", "python", "java", "go", "rust", "csharp", "cpp")
 
 
 def _is_array_type(t: object) -> bool:

@@ -619,7 +619,32 @@ LANG_CARDS: dict[str, LangCard] = {
              "**响亮地失败，不是静默算错**（宽度跟踪是下一版的事）。",
         abi="**.NET 默认不导出 C ABI**；要链接得上 NativeAOT 或 `[UnmanagedCallersOnly]`。",
     ),
+    "cpp": LangCard(
+        key="cpp", display="C++", exts=(".cpp", ".cc", ".cxx", ".hpp"),
+        # 同上：**特征词必须是 C++ 独有的**，而且要能赶在 `c` 前面（见 `LANG_ORDER`）。
+        tokens=("std::", "template<", "using namespace", "#include <vector>"),
+        edge="类、模板、STL、异常、引用、指针、运算符重载都不翻；"
+             "预处理指令（`#include` / `#define`）不收，所以语料不带 include；"
+             "`std::cout` 那类成员访问也不收（`::` 连分词都过不去）。"
+             "**它有真正的 `bool`**（不像 C 得靠 `<stdbool.h>`），而 `int x = (a < b);` "
+             "与 `if (x)`（x 是 int）**两边都合法** —— bool 与 int 双向隐式转换都留着，"
+             "所以两个方向的强制转换**都要补**：结论与 C 一样、**理由完全不同**。"
+             "`char` 的符号性由实现决定（x86-64 上 g++ 是 signed，ARM 上常常不是），"
+             "映 `i8` / `u8` 都会在某台机器上悄悄算错，所以**拒**。",
+        abi="能导 C ABI —— 要显式写 `extern \"C\"`（默认名字是 mangle 过的）。",
+    ),
 }
+
+#: 渲染顺序 —— **不是字典序，是有意的先后**。
+#:
+#: `lang_by_tokens` 是**逐门问、取第一个命中**，所以"判据更专有"的必须排在前面：
+#: C++ 的 `#include <vector>` 会被 `c` 那三条（`#include` / `int main(` / `printf(`）
+#: 先接走，`csharp` 的 `public class` 会被 `java` 接走 —— 不调顺序的话，这两门
+#: 各自的外源提示会**指到另一门**上去。
+#:
+#: **没列到的语言自动排到最后（按字典序）**，所以加一门语言不必动这张表 ——
+#: 这和"键集由判据钉着 == `potato_from.LANGS`"是两件事，别混。
+LANG_ORDER = ("cpp", "c", "csharp", "java", "go", "rust", "python")
 
 
 
@@ -821,7 +846,9 @@ def surface_lomt() -> str:
     src += ["    return 0;", "}", ""]
 
     # 语言卡（与六语言翻译线衔接的那一半，docs/188 §7.1）
-    langs = sorted(LANG_CARDS)
+    # **按 `LANG_ORDER` 排，不按字典序** —— 逐门问、取第一个命中，所以顺序就是优先级。
+    _ord = {k: i for i, k in enumerate(LANG_ORDER)}
+    langs = sorted(LANG_CARDS, key=lambda k: (_ord.get(k, len(_ord)), k))
     src += ["// ---------------------------------------------------------------- 语言卡",
             "// **键集 == `potato_from.LANGS`**（判据钉着）：翻译线加一门语言而这里没跟上,",
             '// 症状是"新语言的文件报错时只字不提怎么翻" —— 静默缺口。',

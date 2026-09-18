@@ -252,7 +252,7 @@ _TOKEN = re.compile(r"""
     | (?P<bc>/\*.*?\*/)
     | (?P<id>[A-Za-z_]\w*)
     | (?P<num>0[xX][0-9a-fA-F]+|\d+)
-    | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:])
+    | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:#])
 """, re.X | re.S)
 
 #: 本子集不收的运算符：**必须**在分词那一步**整个**认出来再点名拒掉。
@@ -297,10 +297,17 @@ def tokens(src: str) -> list[tuple[str, str, int]]:
 
 
 class Lit:
-    __slots__ = ("v", "line")
+    """整数字面量。`b=True` 表示它是**布尔字面量**（源里的 `true` / `false`）。
 
-    def __init__(self, v: int, line: int) -> None:
-        self.v, self.line = v, line
+    **这一格不能省**：`bool t = true;` 若发成 `let t: bool = 1;` 就是本语言的类型错。
+    `bool` 与 `int` 是不是一回事，正是 Java/C#/C++ 这一族与 C 的分界线，而在这条线上
+    `true` 必须**带着它的类型**过去（见 `Emitter.ty_of` / `Emitter.raw`）。
+    """
+
+    __slots__ = ("v", "line", "b")
+
+    def __init__(self, v: int, line: int, b: bool = False) -> None:
+        self.v, self.line, self.b = v, line, b
 
 
 class Var:
@@ -510,6 +517,12 @@ class Parser:
         if t[0] == "num":
             self.i += 1
             return Lit(int(t[1], 0), t[2])
+        if t[0] == "id" and t[1] in ("true", "false"):
+            # **四门都有这两个字面量**，而 Loment 也有 `true` / `false` —— 直接映过去。
+            # 不走 `Var`：那样会报"用了没声明过的 `true`"，一句指不到点子的话
+            # （真原因是"这是个布尔字面量，不是变量"）。
+            self.i += 1
+            return Lit(1 if t[1] == "true" else 0, t[2], True)
         if t[0] == "id":
             if t[1] in self.d.kw:
                 raise Unsupported(f"第 {t[2]} 行: 表达式里不支持关键字 `{t[1]}`")
@@ -730,8 +743,17 @@ class Emitter:
         self.consts: dict[str, str] = dict(consts or {})
         #: C 名字 -> 发出去的名字。`for` 的改名外提就靠这张表（见文件头 §语义选择 2）。
         self.vars: dict[str, str] = {}
+        #: **变量声明时的类型**（Loment 类型串）。发射器只需要分**两档**：
+        #: `bool` 与"其它"（都当整数）。不分的话 `bool ok = …; if (ok) …` 会走错：
+        #: `ty_of` 一律报 "int"，于是 Java 那条 `coerce_int_to_bool=False` 的路
+        #: 会对一个**布尔**变量报"这里要的是条件，给的是整数" —— 一句**错的**诊断，
+        #: 而那段 Java 完全合法。C++ 那一门的语料一上来就撞到了。
+        self.varty: dict[str, str] = {}
         self.n = 0
         self.lines: list[str] = []
+        #: 当前这个函数**声明的**返回类型（`emit_fn` 里设）。`return` 要按它决定
+        #: 那个表达式是在"整数场合"还是"布尔场合"—— 见 `stmt` 的 `Return` 那支。
+        self.ret: str = "()"
 
     def fresh(self, base: str) -> str:
         while True:
@@ -752,8 +774,12 @@ class Emitter:
 
     # ---- 类型：只有 `int` / `bool` / `void` 三档
     def ty_of(self, e: object) -> str:
-        if isinstance(e, (Lit, Var)):
-            return "int"
+        if isinstance(e, Lit):
+            # `true` / `false` 是**布尔字面量**，不是 `1` / `0`（见 `Lit`）
+            return "bool" if e.b else "int"
+        if isinstance(e, Var):
+            # **看它声明时是什么**（见 `self.varty`），不是一律当整数
+            return "bool" if self.varty.get(e.name) == "bool" else "int"
         if isinstance(e, Call):
             r = self.fns.get(e.name)
             if r is None:
@@ -770,6 +796,17 @@ class Emitter:
     def const_name(self, n: str) -> bool:
         """这是不是一个**模块常量**（而不是局部名）。"""
         return n in self.consts
+
+    def want_of(self, ty: str) -> str:
+        """一个**声明出来的** Loment 类型，在这个发射器眼里是"整数场合"还是
+        "布尔场合"。
+
+        **所有"右边赋给左边"的地方都要走它**（`Decl` / `Assign` / `Return` /
+        `for` 的初值）—— 写死 `'int'` 的话，`bool ok = x > 0;` 会发成
+        `let ok: bool = (x > 0) as i32;`：左边声明是 `bool`、右边是 `i32`，
+        本语言的类型错。这一族里只有 `bool` 与整数两档要分（见 `self.varty`）。
+        """
+        return "bool" if ty == "bool" else "int"
 
     def ex(self, e: object, want: str) -> str:
         """表达式，**在 `want` 这个上下文里**的写法（必要时补转换）。
@@ -805,7 +842,7 @@ class Emitter:
     def raw(self, e: object) -> str:
         """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
         if isinstance(e, Lit):
-            return str(e.v)
+            return ("true" if e.v else "false") if e.b else str(e.v)
         if isinstance(e, Var):
             if self.const_name(e.name):
                 return e.name          # 模块常量名照抄 —— `pub const` 在同层
@@ -837,22 +874,34 @@ class Emitter:
             if s.ty == "()":
                 raise Unsupported(f"第 {s.line} 行: 不能声明 `void` 变量")
             self.vars[s.name] = self.d.safe(s.name)
+            self.varty[s.name] = s.ty
             if s.init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
                 self.out(f"let {self.d.safe(s.name)}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {self.d.safe(s.name)}: {s.ty} = {self.ex(s.init, 'int')};", depth)
+                self.out(f"let {self.d.safe(s.name)}: {s.ty} = "
+                         f"{self.ex(s.init, self.want_of(s.ty))};", depth)
             return
         if isinstance(s, Assign):
             if s.name not in self.vars:
                 raise Unsupported(f"第 {s.line} 行: 赋值给没声明过的 `{s.name}`")
-            self.out(f"{self.vars[s.name]} = {self.ex(s.e, 'int')};", depth)
+            w = self.want_of(self.varty.get(s.name, "int"))
+            self.out(f"{self.vars[s.name]} = {self.ex(s.e, w)};", depth)
             return
         if isinstance(s, Return):
             if s.e is None:
                 self.out("return;", depth)
             else:
-                self.out(f"return {self.ex(s.e, 'int')};", depth)
+                # **要的是这个函数声明的返回类型，不是写死的 `int`。**
+                # `bool positive(int x) { return x > 0; }` 里那个 `x > 0` 本来就是
+                # bool，写死 `int` 会把它补成 `(x > 0) as i32` —— 而函数声明的是
+                # `-> bool`，那是本语言的类型错（实测报"return 类型 i32，函数声明 bool"）。
+                #
+                # 只有**翻 `bool` 返回的函数**才撞得到这一处，而 C 那门根本没有 bool
+                # （Java/C# 的语料里也没有返回 bool 的函数），所以它一直没被逼出来 ——
+                # C++ 一上来就撞到了。
+                self.out(f"return {self.ex(s.e, 'bool' if self.ret == 'bool' else 'int')};",
+                         depth)
             return
         if isinstance(s, If):
             self.gap()
@@ -892,18 +941,23 @@ class Emitter:
         那种写法用的是外面的变量，本来就该影响外面。
         """
         self.gap()
-        saved: tuple[str, str] | None = None
+        saved: tuple[str, str | None, str | None] | None = None
         if isinstance(s.init, Decl):
             if s.init.ty == "()":
                 raise Unsupported(f"第 {s.init.line} 行: 不能声明 `void` 变量")
             old = self.vars.get(s.init.name)
+            oldty = self.varty.get(s.init.name)
             new = self.fresh(s.init.name)
             self.vars[s.init.name] = new
+            # 循环变量的**类型**也要跟着这个作用域走（见 `self.varty`）——
+            # 收在 `saved` 里，循环结束处一起还回去。
+            self.varty[s.init.name] = s.init.ty
             if s.init.init is None:
                 self.out(f"let {new}: {s.init.ty} = 0;", depth)
             else:
-                self.out(f"let {new}: {s.init.ty} = {self.ex(s.init.init, 'int')};", depth)
-            saved = (s.init.name, old) if old is not None else None
+                self.out(f"let {new}: {s.init.ty} = "
+                         f"{self.ex(s.init.init, self.want_of(s.init.ty))};", depth)
+            saved = (s.init.name, old, oldty)
         elif s.init is not None:
             self.stmt(s.init, depth)
 
@@ -915,14 +969,19 @@ class Emitter:
         self.out("}", depth)
 
         # 循环结束：那个名字的作用域也结束（C 的 for 语义）。有遮蔽就把外层的还回去。
-        if isinstance(s.init, Decl):
-            if saved is None:
-                del self.vars[s.init.name]
+        if isinstance(s.init, Decl) and saved is not None:
+            name, old, oldty = saved
+            if old is None:
+                del self.vars[name]
+                self.varty.pop(name, None)
             else:
-                self.vars[saved[0]] = saved[1]
+                self.vars[name] = old
+                self.varty[name] = oldty      # type: ignore[assignment]
 
     def emit_fn(self, f: Fn) -> str:
         self.vars = {n: self.d.safe(n) for (_t, n, _l) in f.params}
+        self.varty = {n: t for (t, n, _l) in f.params}
+        self.ret = f.ret
         self.n = 0
         self.lines = []
         ps = ", ".join(f"{self.d.safe(n)}: {t}" for (t, n, _l) in f.params)

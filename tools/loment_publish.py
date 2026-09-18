@@ -159,6 +159,11 @@ REPOS: dict[str, dict] = {
             "tools/pytrans.py",
             # Java -> Loment 的方言表（`docs/188` §7.1）。同上。
             "tools/jtrans.py",
+            # C# -> Loment 的方言表（`docs/188` §7.1）。同上 —— `loment_cstrans_test`
+            # 会 import 它。（共享核 `tools/trans_core.py` 在它自己那一条上，同批。）
+            "tools/cstrans.py",
+            # C++ -> Loment 的方言表（`docs/188` §7.1）。同上。
+            "tools/cpptrans.py",
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",
