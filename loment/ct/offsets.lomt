@@ -1,0 +1,35 @@
+// ct/offsets.lomt — 宿主内存里的**基址 + 偏移**（S4.0 语料）
+//
+// expect: OK 102
+//
+// **为什么单独一支**：`ct/mem.lomt` 只用了 `off = 0`，于是"`load8(p, off)` 漏掉 `off`"
+// 这个错在参考侧活了很久而判据全绿 —— 自举侧一直是对的，两边**藏着**分歧。
+// 20 字节一条记录是 `comefor` 宏体要用的形状（token 记录的 stride 就是 20），
+// 所以要有一条按 stride 存/取的语料从 S4.0 就把这个形状钉住。
+//
+// 期望值：a = 1（存 0 号槽），b = 2（存 4 字节处），1 * 100 + 2 = 102。
+// 漏掉偏移的实现会读成 2 和 2，得 202 —— 一眼能认出来。
+module ct_offsets
+
+const STRIDE: u32 = 8;
+
+fn main() -> u64 {
+    let p: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 3 {
+        store32(p, i * STRIDE, i + 1);
+        i = i + 1;
+    }
+    // 逐槽读回，累乘 —— 越界/串槽都会让结果偏
+    let a: u64 = load32(p, 0) as u64;
+    let b: u64 = load32(p, STRIDE) as u64;
+    let c: u64 = load32(p, STRIDE * 2) as u64;
+    // 单字节也要走偏移：在 1 号槽的第 1 字节写 0x7F，读回来应是 0x7F
+    store8(p, STRIDE + 1, 0x7F);
+    let d: u64 = load8(p, STRIDE + 1) as u64;
+    free(p);
+    if a != 1 || b != 2 || c != 3 || d != 0x7F {
+        return 999;
+    }
+    return a * 100 + b;
+}

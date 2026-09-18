@@ -205,20 +205,27 @@ class Interp:
         if n == "free":
             self.freed.append(_u(a[0]))
             return 0
+        # **基址 + 偏移是两件事**：`load8(p, off)` 读的是 `mem[p + off]`。
+        # 这四条原本只用 `a[0]`（漏了偏移）—— 而 `loment/ct/mem.lomt` 恰好只用 `off = 0`，
+        # 于是 §9 那条"两个解释器逐字节同结果"一直是绿的，分歧**藏着**。
+        # 自举侧本来就对，错的是这一侧；`loment/ct/offsets.lomt` 是补上的钉子。
         if n == "load8":
-            self._chk(a[0], 1)
-            return self.mem[a[0]]
+            p = a[0] + a[1]
+            self._chk(p, 1)
+            return self.mem[p]
         if n == "store8":
-            self._chk(a[0], 1)
-            self.mem[a[0]] = a[2] & 0xFF
+            p = a[0] + a[1]
+            self._chk(p, 1)
+            self.mem[p] = a[2] & 0xFF
             return 0
         if n == "load32":
-            self._chk(a[0], 4)
-            p = a[0]
+            p = a[0] + a[1]
+            self._chk(p, 4)
             return int.from_bytes(self.mem[p:p + 4], "little")
         if n == "store32":
-            self._chk(a[0], 4)
-            self.mem[a[0]:a[0] + 4] = (a[2] & 0xFFFFFFFF).to_bytes(4, "little")
+            p = a[0] + a[1]
+            self._chk(p, 4)
+            self.mem[p:p + 4] = (a[2] & 0xFFFFFFFF).to_bytes(4, "little")
             return 0
         if n == "str_len":
             return len(a[0]) if isinstance(a[0], str) else 0
