@@ -201,6 +201,31 @@ $ loment explain E4            # one error code, in detail
 $ loment codes                 # the whole table
 ```
 
+When `check`, `build` or `run` fails, the launcher hands the compiler's structured
+diagnostics to `lomenterr`, which renders them — the report you actually read:
+
+```
+error[E2]: 符号未声明
+  --> z.lomt:4:12
+  |
+4 |     return z;
+  |            ^
+  | 消息: 使用未声明的变量 z
+  | 错了什么: 用了一个没有声明的名字 —— 变量、函数、类型、常量都算。
+  | 怎么改:
+  |   1. 补类型标注：`let x: u32 = 1;`
+  |   2. 拼错了就改拼写；跨模块调用给声明加 `pub`，调用方补 `use <模块名>`
+```
+
+Two things about it: the prose is **Chinese** (so is the rest of this repository's
+writing — the English-facing counterpart is `loment codes`, one ASCII line per code), and
+colour is on by default, `-C` turns it off. `lomenterr` is also a standalone command, so
+`lomenterr diag.jsonl` renders a diagnostics file yourself if you want to.
+
+Compile-time only, today. Rendering a **trap** — a division by zero, a capability guard
+going out of range — from a copy of the reporter linked into your program is designed but
+not implemented; `docs/182-lomenterr-and-choose-switches.md` §10.4 says what it waits on.
+
 Two traps are worth knowing before your first real program, because neither is a compile
 error: a non-void function that falls off its end crashes at run time (the last statement
 must be a `return`), and every `match` arm body must be a block — `E::A => { return 0; }`,

@@ -413,6 +413,37 @@ fn write_slot(slot: u32) -> u32 {
   (`docs/146-loment-capability-semantics.md`): a guard constrains the *index*, not the
   *subject*, and binding a subject to a capability is the kernel's job.
 
+## Diagnostics
+
+The compiler reports *what* and *where* — a code, a file, a line, a column — as structured
+data. A separate program, `lomenterr`, renders it:
+
+```
+error[E2]: 符号未声明
+  --> z.lomt:4:12
+  |
+4 |     return z;
+  |            ^
+  | 消息: 使用未声明的变量 z
+  | 怎么改:
+  |   1. 补类型标注：`let x: u32 = 1;`
+```
+
+It is an independent command, like `lompi` and unlike a `loment` subcommand, so `loment
+help` does not list it. The split is deliberate: the reporter adds the title, what went
+wrong, why it is wrong and how to fix it, which means the self-hosted compiler carries no
+message table at all. The two implementations stay comparable on the part that matters —
+the code and the shape — instead of on wording.
+
+The prose is Chinese today, like most of this repository's writing. The English-facing
+listing is `loment codes`, one ASCII line per code. Colour is on by default; `-C` or
+`--no-color` turns it off, and `lomenterr diag.jsonl` renders a diagnostics file directly.
+
+Not yet: the same source rendered at **run time**. Rendering a trap — a division by zero, a
+capability guard going out of range — from a copy of the reporter linked into your program
+is designed but not implemented; `docs/182-lomenterr-and-choose-switches.md` §10.4 records
+what it is waiting on.
+
 ## Documentation
 
 | Document | Contents |
