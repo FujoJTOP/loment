@@ -241,6 +241,87 @@ def test_vscode_vsix_structure():
     assert not bad, f"VSIX 结构问题: {bad}"
 
 
+# ---------------------------------------------------------------- 5. 编译 / 运行
+
+@test
+def test_vscode_build_and_run_commands():
+    """**「编译 / 运行」两条命令真的接得上** —— 不是只写在清单里。
+
+    这一条钉两件事，它们各自都是**真的会坏**的：
+
+    1. **清单声明的命令都有实现**。清单里有、`extension.js` 里没 `registerCommand` ——
+       用户点下去 VS Code 只说 "command not found"，而清单看着完全正常。
+    2. **`build-cmd.js` 的分支判定**（纯模块，无头跑）。选错路的失败模式是
+       "点了没反应"或"编出来的是别的东西"，在编辑器里看不出来 —— 所以值得一条判据。
+
+    分支表见 `editors/vscode/src/build-cmd.js` 头注：装了 Loment 命令走它；
+    Windows 开发树走 `scripts/lomc.ps1`；两条都没有就**报错**（不静默返回空命令）。
+    """
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    declared = {c["command"] for c in pkg["contributes"]["commands"]}
+    js = (EXT / "src" / "extension.js").read_text(encoding="utf-8")
+    for c in ("loment.build", "loment.run"):
+        assert c in declared, f"清单里没有声明 {c}（用户在命令面板里找不到它）"
+        assert f"registerCommand('{c}'" in js, f"清单声明了 {c}，但扩展里没有实现它"
+    for k in ("loment.toolCommand", "loment.toolArgs"):
+        assert k in pkg["contributes"]["configuration"]["properties"], f"缺设置 {k}"
+
+    node = _node()
+    if not node:
+        print("      SKIP 分支判定: 无 node")
+        return
+    script = """
+const {invocation} = require(process.argv[1]);
+const R = process.argv[2];
+const F = R + '/loment/examples/tour.lomt';
+process.stdout.write(JSON.stringify({
+  cli_build: invocation({root:R, file:F, action:'build', platform:'win32',
+                         toolCommand:'loment', buildDir:'loment/build'}),
+  cli_run:   invocation({root:R, file:F, action:'run', platform:'win32',
+                         toolCommand:'wsl', toolArgs:['-e','/x/loment']}),
+  dev_build: invocation({root:R, file:F, action:'build', platform:'win32'}),
+  dev_run:   invocation({root:R, file:F, action:'run', platform:'win32'}),
+  none:      invocation({root:R, file:F, action:'build', platform:'linux'}),
+  outside:   invocation({root:R, file:'D:/elsewhere/x.lomt', action:'build', platform:'linux'})
+}));
+"""
+    r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT)],
+                       capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, f"build-cmd.js 执行失败: {r.stderr[-300:]}"
+    got = json.loads(r.stdout)
+
+    # ① 装了 Loment 命令 -> 走它。`build` 带 `-o`（**不带扩展名**，`lomcli.lomt:694`），
+    #    `run` 不带 —— 这条差别错了会编出个名字不对的文件，而命令看着是成功的。
+    b = got["cli_build"]
+    assert b.get("how") == "cli" and b["cmd"] == "loment", b
+    assert b["args"][0] == "build", b
+    assert "-o" in b["args"] and b["args"][-1].endswith("/tour"), b
+    assert b["args"][1] == "loment/examples/tour.lomt", f"要传相对路径（cwd 是工作区根）: {b}"
+
+    # ② 经 WSL 跑同一个命令：toolArgs 在前，子命令在后
+    run = got["cli_run"]
+    assert run["args"] == ["-e", "/x/loment", "run", "loment/examples/tour.lomt"], run
+    assert "-o" not in run["args"], f"`run` 不该带 -o: {run}"
+
+    # ③ Windows 开发树 -> scripts/lomc.ps1；**只有 run 带 `-Run`**
+    if (ROOT / "scripts" / "lomc.ps1").is_file():
+        d = got["dev_build"]
+        assert d.get("how") == "lomc", d
+        assert d["args"][:2] == ["-NoProfile", "-File"], d
+        assert "-Run" not in d["args"], f"`build` 不该带 -Run: {d}"
+        assert got["dev_run"]["args"][-1] == "-Run", got["dev_run"]
+    else:
+        print("      SKIP Windows 开发树那一支: 本仓没有 scripts/lomc.ps1")
+
+    # ④ 两条都没有 -> **报错**，不是静默给一个空命令（那等于"点了没反应"）
+    assert "error" in got["none"], f"没有可编译的东西时必须报错: {got['none']}"
+    assert "toolCommand" in got["none"]["error"], f"报错要说清该改哪个设置: {got['none']}"
+
+    # ⑤ 文件在工作区外 -> 报错（相对路径要传给外部命令，`..` 会指到别处）
+    assert "error" in got["outside"], got["outside"]
+    print("      编译/运行：清单↔实现对得上；分支判定 6 例（CLI / WSL / 开发树 / 报错×2）")
+
+
 def main(argv: list[str] | None = None) -> int:
     passed = 0
     for name, fn in TESTS:

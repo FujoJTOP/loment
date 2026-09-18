@@ -14,11 +14,26 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 | 诊断 | 同上 → `textDocument/publishDiagnostics` | 打开/编辑时跑类型检查，报在"问题"面板 |
 | 格式化 | 同上 → `textDocument/formatting`（实现是 `lomfmt`） | 格式化由**语言服务**提供，扩展不自己起进程 |
 | 生成 LLVM IR | 命令 → VS Code 任务 `tools/lomentc.py` | 产出 `<buildDir>/<stem>.ll` 并自动打开 |
+| **编译成可执行** | 命令 → `loment build FILE`（或 `scripts/lomc.ps1`） | 产出原生可执行文件（Linux ELF） |
+| **编译并运行** | 命令 → `loment run FILE`（或 `lomc.ps1 -Run`） | 编译后立刻跑，输出在终端 |
 | 静态检查 | 命令 → `tools/loment.py diag` | 输出到终端 |
 | 运行 `test_*` | 命令 → `tools/loment.py test` | 输出到终端 |
 | 在 FujoOS 里运行 | 命令 → `tools/loment_boot.py` | 需要内核镜像与 QEMU（见 docs/149） |
 
-命令面板里搜 `Loment:` 全部可见。
+命令面板里搜 `Loment:` 全部可见；`编译` / `编译并运行` 也在编辑器右键菜单里。
+
+### 「编译」走哪条路
+
+**这不是配置问题，是环境问题**，所以扩展自己检测（`src/build-cmd.js`，纯模块、可无头测）：
+
+| 顺序 | 条件 | 用什么 |
+|---|---|---|
+| ① | 配了 `loment.toolCommand` | 装好的 Loment 命令：`<cmd> <args> build FILE [-o NAME]` / `run FILE`。**不需要 Python** |
+| ② | Windows 且工作区里有 `scripts/lomc.ps1` | 开发树那条路：种子 + clang + WSL，出 `.ll` + `.elf` |
+| ③ | 两条都没有 | **明确报错**并告诉你去填哪个设置 —— 不静默（点了没反应是最难查的一种） |
+
+> 注意**仓库侧的 Python 没有"单文件出可执行"的命令**：`loment build DIR` 是**整目录增量构建**
+> 且只出 IR。单文件出可执行只有上面那两条（`loment/tools/lomcli.lomt:606`）。
 
 ## 依赖
 
@@ -30,11 +45,16 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 解释器固定为 `python`。若你只有 `py`/`python3`，改 `src/extension.js` 顶部的
 `SERVER_COMMAND` 一处即可（**这是刻意的**：可执行位置只放字面量，配置字符串不参与命令构造）。
 
+**语言服务与「编译」可以都不需要 Python**：前者用 `loment.serverCommand`，后者用
+`loment.toolCommand`。
+
 ## 设置
 
 | 项 | 默认 | 含义 |
 |---|---|---|
 | `loment.serverPath` | 空 | `tools/loment_lsp.py` 绝对路径；留空则自动向上查找 |
+| `loment.serverCommand` / `serverArgs` | 空 | 改用别的命令起语言服务（**不需要 Python**），例：`wsl` + `["-e", "/home/<you>/.local/share/loment/lsp"]` |
+| `loment.toolCommand` / `toolArgs` | 空 | 「编译 / 运行」用哪个 Loment 命令，例：`wsl` + `["-e", "/home/<you>/.local/share/loment/bin/loment"]` |
 | `loment.enableLsp` | `true` | 关掉后只留语法高亮与命令 |
 | `loment.buildDir` | `loment/build` | `.ll` / `.potato.json` 输出目录（相对工作区根） |
 

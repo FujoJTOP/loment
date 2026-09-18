@@ -16,6 +16,7 @@ const path = require('path');
 const fs = require('fs');
 const { LanguageClient } = require('vscode-languageclient/node');
 const { findServer } = require('./server-path');
+const { invocation } = require('./build-cmd');
 
 const SERVER_COMMAND = 'python';
 const clientName = 'loment';
@@ -153,8 +154,39 @@ async function startClient(context) {
   return c;
 }
 
+/**
+ * 编译（`action='build'`）或编译并运行（`'run'`）当前文件。
+ *
+ * **选哪条路不在这里判** —— 那是 `build-cmd.js` 的事（纯模块，判据能无头跑它）。
+ * 这里只负责：拿配置 -> 问它 -> 把结论交给 VS Code 任务。
+ *
+ * 它返回 `{error}` 时**必须弹给用户看**：这一格的失败模式就是"点了没反应"，
+ * 而那是最难查的一种（`docs/167` 那条"静默是敌人"）。
+ */
+async function compileCurrent(action) {
+  const file = currentFile();
+  if (!file) {
+    return;
+  }
+  const r = workspaceRoot(path.dirname(file));
+  const inv = invocation({
+    root: r,
+    file,
+    action,
+    platform: process.platform,
+    toolCommand: cfg().get('toolCommand'),
+    toolArgs: cfg().get('toolArgs'),
+    buildDir: cfg().get('buildDir'),
+  });
+  if (inv.error) {
+    await vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+    return;
+  }
+  await runExec(action === 'run' ? 'Loment: 编译并运行' : 'Loment: 编译', inv.cmd, inv.args,
+                inv.cwd);
+}
+
 function activate(context) {
-  const root = workspaceRoot();
 
   context.subscriptions.push(
     vscode.commands.registerCommand('loment.restartServer', async () => {
@@ -224,6 +256,9 @@ function activate(context) {
       const r = workspaceRoot(path.dirname(file));
       await runToolTask('Loment: 在 FujoOS 里运行', [toolPath(r, 'loment_boot.py'), file], r);
     }),
+
+    vscode.commands.registerCommand('loment.build', () => compileCurrent('build')),
+    vscode.commands.registerCommand('loment.run', () => compileCurrent('run')),
 
     vscode.commands.registerCommand('loment.formatDocument',
                                     () => vscode.commands.executeCommand('editor.action.formatDocument')));

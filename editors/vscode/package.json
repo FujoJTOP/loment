@@ -93,10 +93,31 @@
           "type": "string",
           "default": "loment/build",
           "description": "构建产物（.ll / .potato.json）输出目录，相对工作区根。"
+        },
+        "loment.toolCommand": {
+          "type": "string",
+          "default": "",
+          "description": "「编译 / 运行」用哪个 Loment 可执行文件（**不需要 Python**）。装了包就填 `loment`；Windows 上经 WSL 跑时填 `wsl`。留空时：Windows 上若工作区里有 scripts/lomc.ps1 就自动用它，否则命令**明确报错**（不会点了没反应）。"
+        },
+        "loment.toolArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "toolCommand 的参数。例：[\"-e\", \"/home/<you>/.local/share/loment/bin/loment\"]（配 toolCommand=\"wsl\"）。"
         }
       }
     },
     "commands": [
+      {
+        "command": "loment.build",
+        "title": "Loment: 编译当前文件"
+      },
+      {
+        "command": "loment.run",
+        "title": "Loment: 编译并运行"
+      },
       {
         "command": "loment.restartServer",
         "title": "Loment: 重启语言服务"
@@ -154,6 +175,26 @@
         {
           "command": "loment.runTests",
           "when": "editorLangId == loment"
+        },
+        {
+          "command": "loment.build",
+          "when": "editorLangId == loment"
+        },
+        {
+          "command": "loment.run",
+          "when": "editorLangId == loment"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "loment.build",
+          "when": "editorLangId == loment",
+          "group": "loment@1"
+        },
+        {
+          "command": "loment.run",
+          "when": "editorLangId == loment",
+          "group": "loment@2"
         }
       ]
     }
