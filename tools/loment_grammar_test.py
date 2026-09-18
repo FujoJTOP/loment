@@ -268,7 +268,16 @@ def test_the_declaration_word_order_is_the_shared_contract():
     ):
         g, err, declared = potato_from.read_grammar_decl(src)
         assert (g, err, declared) == (want, None, True), (src, g, err, declared)
-    print("      词序与别名边界（含 `;` 与 `c#`）是与报错器共享的契约，两边各钉一条")
+    # **词边界那条也钉上**：拼错一个字母不能被当成声明，更**不能**被抹掉半行。
+    # 这条是随后的**对拍**抓出来的真 bug（见 `_GRAMMAR_LINE` 的注解）：少了 `\b`，
+    # `choose write grammars python` 会被切成 `                    s python` ——
+    # 而预扫那边**不报错**（它不认这是声明），于是坏处全落在用户那一行上，
+    # 他拿到的是一行残缺的源 + 一句指不到点子的语法错。
+    for s in ("choose write grammars python\n", "choose writes grammar c\n"):
+        g, err, declared = potato_from.read_grammar_decl(s)
+        assert (g, err, declared) == ("loment", None, False), (s, g, err, declared)
+        assert potato_from.strip_grammar_decl(s) == s, f"拼错的那行被抹了半截: {s!r}"
+    print("      词序与别名边界（含 `;` / `c#` / 词边界）是与报错器共享的契约，两边各钉一条")
 
 
 def main() -> int:

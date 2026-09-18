@@ -1414,7 +1414,14 @@ _GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
 _GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"\b", re.M)
 _GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"[ \t]+([^\s;]+)", re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"(?:[ \t]+[^\n]*)?", re.M)
+#:
+#: **那个 `\b` 不能省**（`af6ee7b` 漏了它，是随后的对拍抓出来的）：`.join(GRAMMAR_DECL_WORDS)`
+#: 拼出来的头是个**纯字面**，而尾巴又是**可选**的 —— 于是 `choose write grammars python`
+#: （拼错一个字母）会匹配到 `choose write grammar` 这个**前缀**、把前 20 个字符抹成空白、
+#: 留下 `s python`。而 `read_grammar_decl` 那边有 `\b`，所以它**不认为**这是个声明、
+#: 于是**不报错**，一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句
+#: 指不到点子的语法错。`\b` 一加，这种写法两边都不认，报的才是"看不出声明"那条路。
+_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"\b(?:[ \t]+[^\n]*)?", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
