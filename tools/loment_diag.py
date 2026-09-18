@@ -861,6 +861,10 @@ def surface_lomt() -> str:
     # 是 Python，而报错器因为内容里没有 Python 特征词而一个字都不说）。
     import potato_from
     aliases = sorted(potato_from.GRAMMAR_ALIASES.items())
+    # 声明的**词序**同样导出（`choose write grammar`）—— 渲染器要靠它认那一行，
+    # 而在那边写死三个字面量就是**同一份契约抄两遍**：别名表已经走了这条管线，词序不走
+    # 就是不一致（而不一致正是这一节反复要治的东西）。共享常量**防**漂，判据只能**事后抓**。
+    decl_words = tuple(potato_from.GRAMMAR_DECL_WORDS)
 
     # 语言卡（与六语言翻译线衔接的那一半，docs/188 §7.1）
     # **按 `LANG_ORDER` 排，不按字典序** —— 逐门问、取第一个命中，所以顺序就是优先级。
@@ -872,6 +876,12 @@ def surface_lomt() -> str:
             "",
             f"pub fn lang_count() -> u32 {{ return {len(langs)}; }}",
             ""]
+    src += [f"pub fn decl_word_count() -> u32 {{ return {len(decl_words)}; }}", "",
+            "/// 声明的第 `i` 个词（`choose` / `write` / `grammar`）—— 词序是两边共享的契约。",
+            "pub fn decl_word(i: u32) -> str {"]
+    for i, w in enumerate(decl_words):
+        src.append(f"    if i == {i} {{ return {_lom_str(w)}; }}")
+    src += ['    return "";', "}", ""]
     src += [f"pub fn alias_count() -> u32 {{ return {len(aliases)}; }}", "",
             "/// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。",
             "pub fn alias_word(i: u32) -> str {"]

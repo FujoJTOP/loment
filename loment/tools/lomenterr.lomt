@@ -1089,6 +1089,53 @@ fn eat_word(sr: ptr, p: u32, e: u32, w: str) -> u32 {
 ///
 /// 工具链那边还有"必须在 `module` 之前""只许写一次"两条规矩 —— 那是**它该报的错**，
 /// 这里只管找到那一行；找不到就退回嗅探（判据钉着"语法变了就红"，不会静默漂）。
+/// 从行首起依次吃 `decl_word(0..n)`（`choose` / `write` / `grammar` —— **词序读
+/// `surface_data`，不在这儿写死**），再读别名。返回 `(别名起点 << 32) | 长度`，
+/// u64 最大值 = 这一行不是声明。
+///
+/// 词序走导出管线（与别名表同一条）：在渲染器里写死那三个字面量，就是**同一份契约抄两遍**
+/// —— 而这一节反复要治的就是那个。共享常量**防**漂；判据只能**事后抓**。
+fn decl_at(sr: ptr, s: u32, e: u32) -> u64 {
+    let p: u32 = skip_blank(sr, s, e);
+    let i: u32 = 0;
+    let bad: u64 = 18446744073709551615 as u64;
+    while i < decl_word_count() {
+        let q: u32 = eat_word(sr, p, e, decl_word(i));
+        if q == 0 {
+            return bad;
+        }
+        p = skip_blank(sr, q, e);
+        i = i + 1;
+    }
+    let a: u32 = p;
+    let go: u32 = 1;
+    while p < e && go == 1 {
+        if is_blank(load8(sr, p)) == true || load8(sr, p) == 59 {
+            go = 0;
+        } else {
+            p = p + 1;
+        }
+    }
+    if p == a {
+        return bad;
+    }
+    return (a as u64) * 4294967296 + (p - a) as u64;
+}
+
+/// 文件头有没有 `choose write grammar <别名>`？返回语言下标，`0xFFFFFFFF` = 没有/认不出。
+///
+/// **与工具链同一条次序**（`potato_from.resolve_lang`：**声明 > 后缀 > 内容**）。声明是
+/// **作者对这份文件说的**，而后缀是命名习惯、会说谎 —— 所以它压过后缀。渲染器看不到
+/// 工具链的解析结果，只能自己找这一行；**词序与语言名都取自 `surface_data`**，所以
+/// 两边仍是同一份契约。
+///
+/// **为什么非要有它**：实测一份 `choose write grammar python` 的 `.lomt`，工具链知道是
+/// Python，而报错器因为内容里没有 Python 特征词而**一个字都不说** —— 工具链知道、
+/// 渲染器沉默，是最坏的一种；而"指到另一门上"比不说还坏。
+///
+/// 工具链那边还有"必须在 `module` 之前""只许写一次""别名要在出厂锁里"三条规矩 ——
+/// 那都是**它该报的错**（重复判会出两条措辞不同的话）。这里只管找到那一行；
+/// 找不到就退回嗅探，而"声明的语法真变了"由判据钉着，不会静默漂。
 fn decl_lang(sr: ptr, srl: u32) -> u32 {
     let i: u32 = 0;
     while i < srl {
@@ -1100,30 +1147,9 @@ fn decl_lang(sr: ptr, srl: u32) -> u32 {
         if i < srl {
             i = i + 1;
         }
-        let p: u32 = skip_blank(sr, s, e);
-        let q: u32 = eat_word(sr, p, e, "choose");
-        if q != 0 {
-            let p2: u32 = skip_blank(sr, q, e);
-            let q2: u32 = eat_word(sr, p2, e, "write");
-            if q2 != 0 {
-                let p3: u32 = skip_blank(sr, q2, e);
-                let q3: u32 = eat_word(sr, p3, e, "grammar");
-                if q3 != 0 {
-                    let a: u32 = skip_blank(sr, q3, e);
-                    let b2: u32 = a;
-                    let go: u32 = 1;
-                    while b2 < e && go == 1 {
-                        if is_blank(load8(sr, b2)) == true || load8(sr, b2) == 59 {
-                            go = 0;
-                        } else {
-                            b2 = b2 + 1;
-                        }
-                    }
-                    if b2 > a {
-                        return lang_by_alias(sr, a, b2 - a);
-                    }
-                }
-            }
+        let d: u64 = decl_at(sr, s, e);
+        if d != 18446744073709551615 as u64 {
+            return lang_by_alias(sr, (d / 4294967296) as u32, (d % 4294967296) as u32);
         }
     }
     return 4294967295;
@@ -1131,11 +1157,15 @@ fn decl_lang(sr: ptr, srl: u32) -> u32 {
 
 /// 这个文件看起来是哪门源语言？`0xFFFFFFFF` = 认不出（多半本来就是 Loment）。
 ///
-/// **两条路，各有各的理由**:
-///   * **后缀**先看 —— 一份 `.java` 无论里面写了什么，都该按 Java 说（与
-///     `potato_from.resolve_lang` 同一条口径）；
-///   * **内容**兜底**只用在语法错上** —— 那才是"它可能根本不是 Loment"的信号。
+/// **三条路，次序与 `potato_from.resolve_lang` 一模一样**（声明 > 后缀 > 内容）——
+/// 两处口径不同的话，报错器会说出与工具链**相反**的一句话，而用户只能信一个：
+///   * **声明**（文件头 `choose write grammar <别名>`）最硬 —— 那是**作者对这份文件
+///     说的**，而后缀只是命名习惯、会说谎；
+///   * **后缀**其次 —— 一份 `.java` 无论里面写了什么，都该按 Java 说；
+///   * **内容**兜底，**且只用在语法错上** —— 那才是"它可能根本不是 Loment"的信号。
 ///     一份语法正确的 Loment 文件报语义错时按内容闻，会被注释里的一句 `import` 带跑。
+///
+/// 依据落在 `C_WHY` 上，由 `h_foreign` 说给用户听 —— 他要能判断这句话有多硬。
 fn sniff_lang(ctx: ptr, sr: ptr, srl: u32, cnum: u32, plen: u32) -> u32 {
     if srl > 0 {
         let d: u32 = decl_lang(sr, srl);
