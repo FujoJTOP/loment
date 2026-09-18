@@ -400,6 +400,40 @@ def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
     print("      注释里的外源特征词不误报 (命中要在行首)")
 
 @test
+def test_a_superset_language_is_not_reported_as_its_subset():
+    """**C++ 不能被报成 C、C# 不能被报成 Java** —— 认语言是"逐门问、取第一个命中"，
+    所以顺序**就是优先级**，而顺序写在 `loment_diag.LANG_ORDER` 里。
+
+    这一条是对端抓出来的真 bug：生成器原先 `sorted(LANG_CARDS)`（字典序），于是 `c`
+    排在 `cpp` 前面 —— 一份 C++ 文件里有 `#include`，**先被 C 那三条特征词接走**，
+    C++ 的提示永远轮不到；同理 `java` 会接走 `csharp` 的 `public class`。
+
+    它可证伪，而且证伪的方向明确：**把 `LANG_ORDER` 换回 `sorted` 这条就红**。
+    加一门新语言时，如果它的特征词是某一门的老超集（像 C++ 之于 C），就得排到那门
+    前面 —— 这是"顺序即优先级"的固有代价，写在这里免得下次再撞。
+    """
+    cases = [
+        ("cpp", "C++", "#include <vector>" + "\n"
+         + "int sum(int a) {" + "\n" + "    return a;" + "\n" + "}" + "\n"),
+        ("cs", "C#", "using System;" + "\n"
+         + "public class P {" + "\n"
+         + "    static void Main(string[] args) {}" + "\n" + "}" + "\n"),
+    ]
+    for ext, want, src in cases:
+        td = Path(tempfile.mkdtemp(prefix="lomenterr-order-"))
+        f = td / f"m.{ext}.lomt"        # 后缀是 .lomt -> 只能靠内容认
+        f.write_text(src, encoding="utf-8", newline="\n")
+        d = td / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(f), "--check", "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, (ext, r.returncode)
+        _, out = _render(d)
+        assert f"像 {want}" in out, f"{ext} 的文件被认成别的语言了: {out[-400:]!r}"
+    print("      C++ 不被认成 C、C# 不被认成 Java（顺序即优先级）")
+
+@test
 def test_foreign_section_is_given_once_per_file():
     """同一个外源文件给**一次**就够了 —— 重复 N 遍会把真正的诊断挤没。
 
