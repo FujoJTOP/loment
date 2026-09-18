@@ -301,6 +301,124 @@ def test_the_declaration_word_order_is_the_shared_contract():
     print("      词序/别名边界/词边界 == 共享契约，且产物里就是这三个词、按这个顺序")
 
 
+@test
+def test_front_door_handles_the_loment_half_without_the_parser():
+    """**前门：读法为 `loment` 时，抹掉声明那一行 —— parser 一行不动。**
+
+    `choose write grammar loment`（写明了读法就是 Loment）与**没写声明**是**同一条路**：
+    把那一行抹成等长空白，原样交给编译器。
+
+    **为什么是抹、不是让 parser 认这个构造**（这个选择决定了要不要付语言面的双倍工）：
+
+    * `choose` 在 Loment 里**已经是开关关键字**（`choose <名字>` / `choose close <名字>`），
+      所以 `choose write grammar python` 会被读成"开关 `write`"，然后卡在 `grammar` 上
+      —— 要让它成为真语法，就得在 lexer/parser 里加**特例**；
+    * 而语言面有两个实现（`tools/lomentc.py` 与 `loment/selfhost/*.lomt`），
+      按 `CLAUDE.md` 要一起改、**并且重生成种子**（那笔机械提交里 46 KB 的 IR 整体位移）。
+    * **抹掉**只在**前端**改一处 —— 而"声明"本来就**不是那份源的一部分**
+      （它说的是"**怎么读**"），所以它属于前端、不属于语法。
+
+    **代价记在这里**：`lomfmt` / `lomdoc` / LSP 那些**直接读源**的入口仍会看到那一行。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        # ① 声明 `loment`：抹掉那一行，其余原样
+        a = td / "a.lomt"
+        raw_a = "choose write grammar loment\nmodule m\n\npub fn f() -> i32 {\n    return 1;\n}\n"
+        a.write_text(raw_a, encoding="utf-8", newline="\n")
+        fa = potato_from.front_door(a)
+        assert (fa.grammar, fa.translated) == ("loment", False), (fa.grammar, fa.translated)
+        assert len(fa.source) == len(raw_a), "抹声明必须等长（行号才不漂）"
+        assert "choose" not in fa.source, "声明那一行没抹掉"
+        assert "module m" in fa.source and "pub fn f()" in fa.source, "正文该原样留着"
+
+        # ② **没写声明** —— 同一条路，而且**一个字都不动**
+        b = td / "b.lomt"
+        raw_b = "module m\n\npub fn f() -> i32 {\n    return 1;\n}\n"
+        b.write_text(raw_b, encoding="utf-8", newline="\n")
+        fb = potato_from.front_door(b)
+        assert (fb.grammar, fb.translated) == ("loment", False), (fb.grammar, fb.translated)
+        assert fb.source == raw_b, "没声明时不该动一个字节"
+    print("      读法为 `loment`：抹掉声明行（等长）；没声明时一字不动 —— parser 不参与")
+
+
+@test
+def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
+    """**读法是别的写法时，前门把它翻成 Loment —— 在本进程里算，不拉起那个语言。**
+
+    这是用户那条死要求的落地：
+
+    > Loment 在没有使用 `let py` 这行代码的情况下，**不会拉起 python 或其他任何编译器**，
+    > 它会让 potato 去翻译，而 Potato 怎么翻译，建立在**算法**上。
+
+    所以断言两件：
+
+    * 前门吐出来的**是 Loment**（`module` + `pub fn`，**一条 `extern fn` 都没有**）；
+    * 它**能编译、能跑**，数还对 —— 端到端。只断言文本的话，"翻出一份**看着像** Loment 的
+      东西"也会过（`docs/186` §1 那条）。
+    """
+    python_src = "choose write grammar python\n\ndef entry() -> int:\n    return 42\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "unit.lomt"
+        p.write_text(python_src, encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        assert (fu.grammar, fu.translated) == ("python", True), (fu.grammar, fu.translated)
+        assert "module " in fu.source, fu.source[:300]
+        assert "pub fn entry() -> i64 {" in fu.source, fu.source[:300]
+        assert "pub extern fn " not in fu.source, fu.source[:300]
+
+        l = td / "l.lomt"
+        l.write_text(fu.source + "\nfn _start() {\n    syscall4(60, entry() as u64, 0, 0);\n}\n",
+                     encoding="utf-8", newline="\n")
+        mod = lomentc.load(l)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=l)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"前门翻出来的 Loment 检查不过: {errs[:3]}"
+        blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+        exe = td / "l.elf"
+        exe.write_bytes(blob)
+        if subprocess.run(["wsl", "-e", "true"], capture_output=True).returncode != 0:
+            print("      （没有 WSL，跳过跑那一步）")
+            return
+        s = str(exe.resolve()).replace("\\", "/")
+        w = s if s.startswith("/") else "/mnt/" + s[0].lower() + s[2:]
+        r = subprocess.run(["wsl", "-e", "bash", "-lc", f"chmod +x {w} && {w}; echo -n $?"],
+                           capture_output=True, text=True, timeout=300)
+    assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
+    print("      别的写法 -> 翻成 Loment（无 extern fn）-> 真编真跑出 42")
+
+
+@test
+def test_front_door_refuses_loudly_when_a_unit_cannot_be_translated():
+    """**翻不出来的单元要拒，不能给一份"少算一步却照样能编"的。**
+
+    那一门是**全有或全无**的（一份源里只要有一个子集外的函数，整份就翻不了）。
+    **两层都会拒，而这条判据只要求"拒得响亮"**（不锁是哪一层）：
+
+    * `lomt_from.emit_lomt(…, impl=True)` 在**翻译器**报子集外时**自己**就抛
+      `NotRepresentable`（实测走的是这一路）；
+    * `front_door` 自己那一句查的是 `skipped` —— **函数之外的**东西（类型/常量）发不出来时
+      它可能是空的错、`skipped` 才有内容。那一支留着当第二道闸。
+
+    **不锁层是刻意的**：锁了就变成"钉实现的内部路径"，而这条判据要钉的是**行为**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "bad.lomt"
+        # `string` 是 C# 里最常见的拼法，而本语言没有字符串值
+        p.write_text("choose write grammar c#\n\nnamespace D\n{\n    public class T\n    {\n"
+                     "        public static int f(string s)\n        {\n            return 1;\n"
+                     "        }\n    }\n}\n", encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "string" in str(e), f"要点名那一处: {e}"
+            print(f"      翻不出来时拒得响亮: {str(e)[:80]}")
+        else:
+            raise AssertionError("子集外的一份被前门放过去了 —— 那是一份少算一步的单元")
+
+
 def _ref_find(src: str) -> tuple[bool, str | None, int]:
     """**独立写的参照实现**：按字符走一遍，**一行正则都不用**。
 

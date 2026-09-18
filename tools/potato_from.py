@@ -1511,6 +1511,81 @@ def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     return GRAMMAR_ALIASES[word], None, True
 
 
+class FrontUnit:
+    """**前门的产物**：这份源该以哪种读法被读、以及读出来的 **Loment 源码**。
+
+    `translated` 说的是"这份 Loment 是**翻出来的**"（源里写的是别的写法）。
+    它有用，因为**行号**：翻译器自己的错（子集外 / 语法错）带的是**原文**行号 ✓，
+    而编译器在**翻出来的那份**上报的错（类型不符之类）带的是**翻译后**的行号 ——
+    调用方据此可以说清"这些行号指的是哪一份"（`docs/179` §6.5 那类"把人引向错方向"）。
+    """
+
+    __slots__ = ("grammar", "source", "translated", "path")
+
+    def __init__(self, grammar: str, source: str, translated: bool, path: Path):
+        self.grammar = grammar
+        self.source = source
+        self.translated = translated
+        self.path = path
+
+
+def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
+    """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
+
+    按 `resolve_lang` 的次序（**声明 > 后缀 > 内容**）定读法，然后分两条路：
+
+    * **`loment`（含没写声明）** —— 它就是 Loment。把声明那一行**抹成等长空白**再交出去。
+    * **别的写法** —— 那份源按 `docs/188` §0 **仍然是 Loment**，只是拼法不同。所以走
+      `potato_from` + `lomt_from --impl` **翻成 Loment 源码**再交出去。
+      **全程在本进程里算，不拉起 python / java / …** —— 那是用户定的死要求
+      （"Loment 在没有使用 `let py` 这行代码的情况下，不会拉起 python 或其他任何编译器"）。
+
+    ## 为什么是"**抹掉那一行**"而不是"让 parser 认这个构造"
+
+    这一条决定了整件事**要不要付语言面的双倍工**，所以写清楚：
+
+    * 让 parser 认 `choose write grammar` —— 要动 lexer/parser，而语言面有**两个实现**
+      （`tools/lomentc.py` 与 `loment/selfhost/*.lomt`），按 `CLAUDE.md` 要一起改、
+      **并且重生成种子**（那笔机械提交里 46 KB 的 IR 会整体位移）。
+      而这一门**本来就有坑**：`choose` 在 Loment 里**已经是开关关键字**
+      （`choose <名字>` / `choose close <名字>`），所以 `choose write grammar python`
+      会被读成"开关 `write`"，然后卡在 `grammar` 上 —— 要加一条**特例**才分得开。
+    * **抹掉** —— 只在**前端**改一处，**parser 一行不动、种子不变**。
+
+    而"声明"本来就**不是那份源的一部分**（它说的是"**怎么读**"），所以它属于**前端**、
+    不属于语法。⇒ 这样选不是图省事，是把它放对了层。
+
+    **代价要说清**：`lomfmt` / `lomdoc` / LSP 这些**直接读源**的入口仍会看到那一行。
+    它们要不要认，是**另一件事**（`docs/182` §1.9 那张"读 L1 源的入口"清单），
+    这一版先只把**编译器**这条路走通，并在那张清单上记一笔。
+    """
+    lang, why = resolve_lang(path, lang)
+    if not lang:
+        raise ValueError(f"{path}: {why}")
+    src = path.read_text(encoding="utf-8", errors="replace")
+    if lang == "loment":
+        # 读法就是 Loment：**抹掉声明那一行**（等长空白，行号不动）后原样交出去
+        return FrontUnit("loment", strip_grammar_decl(src), False, path)
+    if lang not in LANGS:
+        raise ValueError(
+            f"{path}: 定不出源语法（后缀 {path.suffix!r} 不在 {sorted(EXT)}，内容：{why}）"
+            f"—— 用 --lang 指明，或在文件头写 `choose write grammar <语法名>`")
+    # **别的写法**：翻成 Loment。`lomt_from` 按需 import —— 它会把各门翻译器拉进来，
+    # 而这条路不是每个调用方都走得到（与 `lomt_from` 自己那条注解同一个道理）。
+    import lomt_from  # noqa: PLC0415
+    doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+    text, skipped = lomt_from.emit_lomt(doc, impl=True)
+    if skipped:
+        # **子集外的东西发不出来** —— 必须响亮，不能给一份"少算一步却照样能编"的单元。
+        # 抛 `NotRepresentable`（发射器自己的那个类型，`lomt_from` 顶上定义的）——
+        # 这一条的语义正是"这份单元**表示不出来**"，比 `ValueError` 说得准。
+        raise lomt_from.NotRepresentable(
+            f"{path}: 用 {lang} 写法写的单元里有 {len(skipped)} 处发不出来"
+            f"（前 3 处：{skipped[:3]}）—— 那一门整份是全有或全无，"
+            f"翻不出来的部分不会悄悄丢掉，这里直接拒")
+    return FrontUnit(lang, text, True, path)
+
+
 def resolve_lang(path: Path, lang: str = "auto") -> tuple[str, str]:
     """`(语言, 依据)` —— **声明 > 后缀 > 内容**。`transcribe` 与各工具共用这一处,
     免得"判语法"这事在两处各写一遍(那种必然漂)。
