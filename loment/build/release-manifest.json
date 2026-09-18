@@ -55,7 +55,7 @@
   },
   {
    "path": "tools/lomfmt.py",
-   "sha256": "0123263b3d023ce495d952a8da0440350c82c9278d416d3d7fc4baf0a5f550a9"
+   "sha256": "6a7edf655f5ffeb59930dbca0000148370efc1bb2089776c172d19904f08d156"
   },
   {
    "path": "tools/lomdoc.py",
@@ -719,7 +719,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "cf8f395e24d114a0566b48f2f39024973fd8bc0d4ac7a4f1a6e4e725219b1e85"
+   "sha256": "fb0eade544edbcb2758f9a93f7f94ef92808927fbcf4080963f55acc2c9cf225"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -919,7 +919,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "bb02dbcadc2675ea4f669af9fc353061a6903bf5af8e9269808da36b99ee3e8f"
+   "sha256": "c6a0a5a233131fc8ea28f22b02acc7749484bcb3b78f71f050fdc7f9595b2131"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -935,7 +935,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "d9219a69b0b77fb0cb63c046ce8db3f1fba28819c12cc02054dc897bb3c20549"
+   "sha256": "a75827b7993051c9a0ab1b73a4b9c05d29bd04930d8ec61ec4f5bbf8f3ba884c"
   },
   {
    "path": "loment/tools/lomdoc.lomt",
@@ -947,7 +947,7 @@
   },
   {
    "path": "loment/tools/lomfmt.lomt",
-   "sha256": "cf9c4aff625307d8c60c4770484986a8a534908c6be8d4e887a36ff8e125a7b1"
+   "sha256": "8bf8702bfda7ceb52b159b58e262cad1bc34ca6e1b347ed13b3f493185d23b48"
   },
   {
    "path": "loment/tools/lomlib.lomt",
@@ -1174,12 +1174,16 @@
    "sha256": "0e39f224f041eb800393b65b5ab49d6fa0f72240b434ae586b27e81acbedca5b"
   },
   {
+   "path": "loment/selfhost/comefor.lomt",
+   "sha256": "2909b2c86d2533a1938e9fd052ee3c51ba442a01ce883b4172481e5c99ba3de5"
+  },
+  {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "2293b66e33e275fe3b28b3521c9b43fedc6caecc4e5e4d64daf5c724a57c169b"
+   "sha256": "58f5ad68ff67d33b5da1ff3ca2288719ae3ac86f8869831ac02be3005e21c66b"
   },
   {
    "path": "loment/selfhost/interp.lomt",
-   "sha256": "76bfd4eb2d3b28c8a58e1c847b13e7953e937c69ecc2d27d8769cb7172d39e23"
+   "sha256": "b64cb3cd40a836faeccda4c9edffc9442ac3b46828ebb223cbd426e6ad2c00ac"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -1423,7 +1427,7 @@
   },
   {
    "path": "docs/184-comefor-in-kernel-syntax-extension.md",
-   "sha256": "fe47c5b229106e117ac8d0960903a77c2806de3f5630ca29610e154847f96bd4"
+   "sha256": "7369e185433c143c95434d65e85de8db9f0b8aebc73af9f45807fe4a86df7096"
   },
   {
    "path": "docs/manual/index.md",
