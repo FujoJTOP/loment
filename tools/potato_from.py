@@ -1529,6 +1529,11 @@ class FrontUnit:
         self.path = path
 
 
+#: **Loment 自己的源文件后缀**。这些后缀说的是"这是一份 **Loment 的源文件**"，
+#: 而声明说的是"它用哪种**写法**写的" —— 两件事，别混（`docs/188` §1、§2）。
+LOMENT_EXT = (".lomt", ".lom", ".lomp")
+
+
 def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
     """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
 
@@ -1558,14 +1563,39 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     **代价要说清**：`lomfmt` / `lomdoc` / LSP 这些**直接读源**的入口仍会看到那一行。
     它们要不要认，是**另一件事**（`docs/182` §1.9 那张"读 L1 源的入口"清单），
     这一版先只把**编译器**这条路走通，并在那张清单上记一笔。
+
+    ## 一处**刻意的不对称**：`.lomt` **不嗅探**（但 `resolve_lang` 会）
+
+    这条决定了这个函数与 `resolve_lang` 的分工，得写清楚：
+
+    * **`.lomt` / `.lom` / `.lomp`** —— 后缀已经说了"这是一份 Loment 的源文件"，
+      所以读法**只看声明**：写了别的写法就按它翻；**没写就是 Loment**（`docs/188` §2
+      "缺 = Loment，没有歧义"）。**不走内容嗅探** —— 那正是 §2 要治的：
+      > 这一下把 `detect_lang` 的**嗅探**换成**声明**；兜底从"猜"变"拒绝"。
+      嗅探在这里还会**翻错语言**：一份忘了写 `module` 的 Loment 文件会被嗅成 `rust`
+      （`_RS_FN` 认 `fn`），于是用户拿到的是一句 Rust 翻译错，而不是"这不是 Loment"。
+    * **别的后缀**（`.py` / `.c` / …）—— 按后缀说话，这就是 `resolve_lang` 那条路。
+
+    **而 `potato_from.resolve_lang` 照旧嗅探** —— 它是**前端工具**的入口（`transcribe`），
+    那里"猜一个再报出猜了什么"是有用的。两条路的差别不是不一致，是**分工**：
+    **编译器要求显式，前端工具可以先猜**。
     """
-    lang, why = resolve_lang(path, lang)
-    if not lang:
-        raise ValueError(f"{path}: {why}")
     src = path.read_text(encoding="utf-8", errors="replace")
-    if lang == "loment":
-        # 读法就是 Loment：**抹掉声明那一行**（等长空白，行号不动）后原样交出去
-        return FrontUnit("loment", strip_grammar_decl(src), False, path)
+    if lang == "auto" and path.suffix in LOMENT_EXT:
+        # Loment 的源文件：**只信声明**（缺 = Loment），**不嗅探** —— 见上面那一段
+        g, err, declared = read_grammar_decl(src)
+        if err:
+            raise ValueError(f"{path}: {err}")
+        if not declared or g == "loment":
+            return FrontUnit("loment", strip_grammar_decl(src), False, path)
+        lang, why = g, "文件头声明 `choose write grammar`"
+    else:
+        lang, why = resolve_lang(path, lang)
+        if not lang:
+            raise ValueError(f"{path}: {why}")
+        if lang == "loment":
+            # 读法就是 Loment：**抹掉声明那一行**（等长空白，行号不动）后原样交出去
+            return FrontUnit("loment", strip_grammar_decl(src), False, path)
     if lang not in LANGS:
         raise ValueError(
             f"{path}: 定不出源语法（后缀 {path.suffix!r} 不在 {sorted(EXT)}，内容：{why}）"

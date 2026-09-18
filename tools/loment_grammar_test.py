@@ -419,6 +419,82 @@ def test_front_door_refuses_loudly_when_a_unit_cannot_be_translated():
             raise AssertionError("子集外的一份被前门放过去了 —— 那是一份少算一步的单元")
 
 
+@test
+def test_lomentc_load_goes_through_the_front_door():
+    """**接线那一行也得钉住** —— 否则谁重写 `lomentc.py`，它就悄悄没了。
+
+    前门（`potato_from.front_door`）本身在别处判过（上面两条）—— 这条钉的是
+    **`lomentc.load` 真的走了它**：一份 `choose write grammar python` 的 `.lomt`
+    能被 `lomentc.load` **直接读进来**，而且读出来的是**翻译后的** Loment。
+
+    **为什么要单独一条**：接线只有一行，而 `lomentc.py` 是**共享文件**（多会话在改）。
+    没有这条判据的话，那一行被人从旧副本整体覆盖掉时**没有任何东西会红** ——
+    症状是"这功能昨天还好好的，今天又不行了"，而查起来要从前门一路查到 `load`。
+
+    另外钉住 `mod.src`：翻译出来的单元**不声称**源文件是那一份 `.lomt` ——
+    `mod.src` 只喂 DWARF 的 `!DIFile`，而**行号来自翻译后的正文**，
+    声称了就成了一句"把调试器引向错行"的话（`docs/179` §6.5 那一类）。
+    """
+    python_src = "choose write grammar python\n\ndef entry() -> int:\n    return 42\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "unit.lomt"
+        p.write_text(python_src, encoding="utf-8", newline="\n")
+        # **直接 `load`** —— 不先手工 `front_door`。它读出来的就该是翻译后的 Loment
+        mod = lomentc.load(p)
+        assert [f.name for f in mod.funcs] == ["entry"], \
+            f"`load` 没把 entry 读出来: {[f.name for f in mod.funcs]}"
+        assert mod.funcs[0].ret == "i64", mod.funcs[0].ret
+        assert mod.src is None, (
+            f"翻译出来的单元不该声称源文件是 {mod.src} —— 行号来自翻译后的正文，"
+            f"而 `mod.src` 只喂 DWARF 的 `!DIFile`（会指向错行）")
+
+        # **另一半**：一份**本来就是 Loment** 的文件，`src` 照旧记着（DWARF 那半边不能一起丢）
+        q = td / "plain.lomt"
+        q.write_text("module m\n\npub fn f() -> i32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert lomentc.load(q).src == q, "本来就是 Loment 的文件，`src` 该照旧记着"
+    print("      `lomentc.load` 走前门：python 写法的 `.lomt` 读得进来、`src` 不谎报；"
+          "而 Loment 那份照旧记账")
+
+
+@test
+def test_a_dot_lomt_is_never_sniffed_into_another_language():
+    """**`.lomt` 不嗅探** —— 一份忘了写 `module` 的 Loment 文件不许被"猜"成别的语言。
+
+    这是 `docs/188` §2 的正题：
+
+    > 这一下把 `detect_lang` 的**嗅探**换成**声明**；兜底从"猜"变"拒绝"。
+
+    嗅探在这里**会翻错语言**，而且症状很难查：一份没有 `module` 的 Loment 文件里有
+    `pub fn f() …`，而 `detect_lang` 的 `_RS_FN` 认 `fn` ⇒ 判成 **rust** ⇒ 前门按 Rust 去翻
+    ⇒ 用户拿到的是一句**Rust 翻译错**，而真正的原因是"这不是（或者还不完全是）Loment"。
+
+    **分工要说清**：`potato_from.resolve_lang`（前端工具的入口）**照旧嗅探** ——
+    那里"猜一个、并把猜了什么报出来"是有用的；而**编译器要求显式**。
+    """
+    rust_looking = "pub fn f() -> i32 {\n    return 1;\n}\n"     # 没有 module 行
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "nomodule.lomt"
+        p.write_text(rust_looking, encoding="utf-8", newline="\n")
+        # 前端工具那条路**会**嗅探（这是它的分工，不是 bug）
+        assert potato_from.resolve_lang(p)[0] == "rust", potato_from.resolve_lang(p)
+        # **而前门不嗅探** —— 它当它是 Loment（缺声明 = Loment），原样交出去
+        fu = potato_from.front_door(p)
+        assert (fu.grammar, fu.translated) == ("loment", False), (fu.grammar, fu.translated)
+        assert fu.source == rust_looking, "前门不该动它一个字节"
+        # 于是编译器报的是"这句 Loment 读不过"，而不是"Rust 翻不过去"
+        try:
+            lomentc.load(p)
+        except Exception as e:                                     # noqa: BLE001
+            msg = str(e)
+            assert "module" in msg, f"该报的是「以 module 开头」那条: {msg[:120]}"
+        else:
+            raise AssertionError("没有 module 的 `.lomt` 居然读得过去")
+    print("      `.lomt` 不嗅探（`.py` 那种才按后缀/内容走）；报的是 Loment 自己的错")
+
+
 def _ref_find(src: str) -> tuple[bool, str | None, int]:
     """**独立写的参照实现**：按字符走一遍，**一行正则都不用**。
 

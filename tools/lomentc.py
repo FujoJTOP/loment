@@ -4671,7 +4671,18 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 
 
 def load(path: Path, sw: SwitchTable | None = None) -> Module:
-    text = path.read_text(encoding="utf-8")
+    # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
+    # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
+    # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
+    # **全程在本进程里算，不拉起 python / java / …**（用户定死的那条）。
+    # 写明了 `grammar loment` 的那一行也在这里被抹成等长空白 —— **parser 不参与**，
+    # 所以语言面两个实现、种子，这一格都不用动。
+    #
+    # import 放函数里：`potato_from` 会把各门翻译器按需拉进来，而**绝大多数文件是 Loment**。
+    from potato_from import front_door          # noqa: PLC0415
+
+    _fu = front_door(path)
+    text = _fu.source
     # 开关**在词法流上**落定（`docs/182` §2）：`set choose X {…}` 开着就把体摊到顶层、
     # 关着就整段抹掉, 那两行本身不进 AST。**这一步必须在 parse 之前** —— 顺序问题
     # （取值可能写在体的后面）在 token 流上就消失了。
@@ -4723,6 +4734,12 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
                 # 注入项在目标文件里没有行, 就该是 0 (Loment 版 lomdoc 也是这么做的)。
                 e.line = 0
                 mod.enums.append(e)
+    # 记住源文件在哪 —— 调试信息（DWARF 的 `!DIFile`）要它。见 `Module.src` 的注释。
+    #
+    # **翻译出来的单元不声称源文件是那一份 `.lomt`**：`!DIFile` 说的是"行号属于哪个文件"，
+    # 而这份的行号来自**翻译后的正文** —— 声称了就成了一句把调试器**引向错行**的话
+    # （`docs/179` §6.5 那一类）。`m.src` 缺席时下游退回旧行为，**比说错话好**。
+    mod.src = None if _fu.translated else path
     return mod
 
 
