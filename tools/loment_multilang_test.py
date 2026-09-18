@@ -26,8 +26,8 @@ S2 落地时，这一步搬进编译器（`foruse` / `command`），**本判据�
 
 ## 两条腿都在这条链上（`docs/173` §2）
 
-* **C** 走**链接腿**：`lomt_from` 从 `pack.lomt` 生成接口单元（`pub extern fn`），
-  真编成 `.o`、真链进来、真按 C ABI 调；
+* **C** 走**翻译**（`docs/188` §3）：一份 C 写法写的单元**就是 Loment**，
+  `lomt_from --impl` 把 `pack.lomt` 翻成真 `pub fn` —— **不起 clang、不链 `.o`**；
 * **Python / Java** 走**运行期腿**：`proc_sh` 起进程，读 stdout。
 
 两条腿之间**传不了指针**，所以帧落成 4 字节小端的 `frame.bin`。**那个边界是这一节最该
@@ -120,11 +120,15 @@ def _materialize(td: Path) -> Path:
                                      encoding="utf-8", newline="\n")
     (td / "main.lomt").write_text((EX / "main.lomt").read_text(encoding="utf-8"),
                                   encoding="utf-8", newline="\n")
-    # C -> Potato -> L1 接口单元（`docs/179` 的那条链，前半段 + 后半段各一次）
+    # C -> Potato -> **翻译成 Loment**（`docs/188` §3）
+    #
+    # 2026-09-18 改：原来是"发接口单元 + clang 编 `.o` + 链进来"——那是**旧模型**
+    # （把 C 当外源代码）。按新模型，一份 C 写法写的单元**就是 Loment**，所以这里
+    # 走 `--impl` 翻成真 `pub fn`，**不用 clang、不用链**。
     doc, _rep = potato_from.LANGS["c"]((td / "pack.c").read_text(encoding="utf-8"), "pack.c",
                                        "strict")
-    text, _skipped = lomt_from.emit_lomt(doc)
-    (td / "pack_iface.lomt").write_text(text, encoding="utf-8", newline="\n")
+    text, _skipped = lomt_from.emit_lomt(doc, impl=True)
+    (td / "pack_impl.lomt").write_text(text, encoding="utf-8", newline="\n")
     return td
 
 
@@ -164,15 +168,8 @@ def test_three_syntaxes_feed_one_program():
         return
     with tempfile.TemporaryDirectory() as t:
         td = _materialize(Path(t))
-        # ---- 编译三段
-        # **要 `--target=...-linux-gnu`**: Windows 上裸 clang 出的是 COFF, 而 `lomelf`
-        # 只吃 ELF64 小端 —— 少了这一条会是"不是 ELF64 小端目标文件"（`docs/173` 那条链
-        # 是绕 Linux 目标建的，链接腿也只支持 ELF）。`loment_ffi_test.compile_c` 同一组开关。
-        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-c", "-O1",
-                            "-ffreestanding", "-fno-stack-protector",
-                            "-o", str(td / "pack.o"), str(td / "pack.c")],
-                           capture_output=True, text=True, shell=False)
-        assert r.returncode == 0, f"C 编译失败: {r.stderr[-300:]}"
+        # ---- C 那段**不需要编译器**了（它是表层语法，翻成 Loment 就完了）；
+        #      只剩 Java 那一段要 javac（它是**显式拉起**的运行期腿）。
         assert _wsl_ok(f"cd {_wsl_path(td)} && '{jdk}/javac' Machine.java"), "javac 失败"
         _write_java_shim(td, jdk)
         # ---- Loment 侧：接口单元 + 主程序 -> IR -> 链上 C 的目标文件
@@ -180,7 +177,8 @@ def test_three_syntaxes_feed_one_program():
         errs = lomentc.check(mod, deps=deps)
         assert not errs, f"main.lomt 检查不过: {errs[:3]}"
         ir = lomentc.emit_llvm(mod, ROOT, deps)
-        blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(td / "pack.o")])
+        # **没有 `load_foreign`** —— C 那段已经翻成 Loment 了，没有目标文件要链
+        blob, _info = lomelf.compile_ll(ir, [])
         exe = td / "multilang.elf"
         exe.write_bytes(blob)
         # ---- 跑：**cwd 设成这个目录**，那两段的命令行是相对路径（帧文件也落在这儿）
@@ -198,7 +196,7 @@ def test_three_syntaxes_feed_one_program():
             f"stdout 不对:\n  期望 {WANT_STDOUT!r}\n  实得 {stdout!r}\n"
             f"  rc={rc} stderr={stderr[-300:]!r}")
         assert rc == WANT_RC, f"退出码不对: {rc} != {WANT_RC}（三段都参与这个数）"
-        print(f"      C(链接腿) + Python(进程) + Java(进程) -> {WANT_STDOUT.strip()!r}, rc={rc}")
+        print(f"      C(翻译) + Python(进程) + Java(进程) -> {WANT_STDOUT.strip()!r}, rc={rc}")
 
 
 @test
@@ -217,10 +215,12 @@ def test_source_is_single_truth():
             b = (td / native).read_text(encoding="utf-8")
             assert a == b, f"{lomt} 与物化出来的 {native} 不同"
         # 接口单元是**生成物**（手改会被下次生成覆盖）—— 顶上那行注释就是标记
-        iface = (td / "pack_iface.lomt").read_text(encoding="utf-8")
-        assert iface.startswith("// 由 tools/lomt_from.py"), iface[:80]
-        assert "pub extern fn pack_frame" in iface, iface[:400]
-    print("      单一真源: 三份 .lomt 物化后逐字节相同；接口单元带生成物标记")
+        impl = (td / "pack_impl.lomt").read_text(encoding="utf-8")
+        assert impl.startswith("// 由 tools/lomt_from.py"), impl[:80]
+        # **是 `pub fn`，不是 `pub extern fn`** —— C 写法写出来的是 Loment（docs/188 §3）
+        assert "pub fn pack_frame" in impl, impl[:400]
+        assert "pub extern fn " not in impl, impl[:400]
+    print("      单一真源: 三份 .lomt 物化后逐字节相同；C 那段翻成 pub fn 且无 extern")
 
 
 def main() -> int:

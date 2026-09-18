@@ -139,29 +139,38 @@ LINK_RUST = {
 #: 每种语法的全部期望值。**加一个语言 = 加一项, 不改测试代码。**
 SYNTAXES = [
     {
-        "lang": "c", "ext": ".c", "src": C_SRC, "leg": "link",
+        # **`leg` 从 `"link"` 改成 `"grammar"`**（2026-09-18，`docs/188` §3）：
+        # 一份 C 写法写的单元**就是 Loment**，它不该被发成 `extern fn` —— 那不是
+        # "接口单元"，那是**旧模型**（外源代码）的形状。它走的是 `--impl` 翻译，
+        # 而翻译的判据在 `loment_ctrans_test`（那边真编真跑比数）。
+        # **这里仍留一条第 10 条**，但问的是另一件事：一条 `extern fn` 都不该有。
+        "lang": "c", "ext": ".c", "src": C_SRC, "leg": "grammar",
         "types": [("Pair", [("a", "i32"), ("b", "i32")])],
         # 不带值的枚举走 `enums`; **带值的走 `consts`** (值进不了 enums 的 schema,
         # 而它常常是协议常量 —— 丢值比丢名严重)。整个枚举要么进一边、要么进另一边,
         # **不拆开** (拆开会造出一个看着少了一个变体的枚举)。
         "enums": [("Mode", ["IDLE", "RUN", "DONE"])],
         "consts": [("EOK", "i32", 0), ("EBAD", "i32", -1), ("EFULL", "i32", 5)],
-        "fns": [("c_add", [("a", "i32"), ("b", "i32")], "i32", "c"),
-                ("c_sum", [("p", "ptr"), ("n", "u32")], "i32", "c"),
-                # `char *buf` 映 `str`(不是 C 字符串) -> 转写得出来, 但过不了
-                # FFI 第 1 阶段那道闸门。所以它在 fns 里, 也在 skips 里。
-                ("c_utoa", [("value", "u32"), ("buf", "str")], "i32", "c")],
-        "emitted": ["c_add", "c_sum"],
-        "skips": [("c_utoa", "签名超出"), ("c_avg", "无映射")],
-        "link": LINK_C,
+        # **第 4 项 = 源码里显式宣称的外部 ABI**（`docs/188` §3）。C 源里没有"宣称"
+        # 这回事 —— 一份 C 写法写的单元**就是 Loment**（`language: "loment"`），
+        # 所以它一个都不宣称，`emitted` 因此是空的：接口那条路对**表层语法**没有意义，
+        # 要走的是 `--impl`（翻译）。真 C（要链 `.o` 的那种）由 Loment 源里的
+        # `extern fn` 声明，见 `loment_ffi_test`。
+        "fns": [("c_add", [("a", "i32"), ("b", "i32")], "i32", None),
+                ("c_sum", [("p", "ptr"), ("n", "u32")], "i32", None),
+                ("c_utoa", [("value", "u32"), ("buf", "str")], "i32", None)],
+        "emitted": [],
+        "skips": [("c_utoa", "没带正文"), ("c_avg", "无映射")],
+        "link": None,
     },
     {
         "lang": "rust", "ext": ".rs", "src": RUST_SRC, "leg": "link",
         "types": [("Pt", [("x", "i32"), ("y", "i32")])],
         "enums": [("Mode", ["Idle", "Run"])],
         "fns": [("r_add", [("a", "i32"), ("b", "i32")], "i32", "c"),
-                ("r_plain", [("x", "i32")], "i32", "rust"),
-                ("r_big", [("x", "i64")], "u64", "rust")],
+                # 没写 `extern "C"` 的那两个**不再记 abi** —— 见 `docs/188` §3
+                ("r_plain", [("x", "i32")], "i32", None),
+                ("r_big", [("x", "i64")], "u64", None)],
         "skips": [],
         "emitted": ["r_add"],
         "link": LINK_RUST,
@@ -170,7 +179,7 @@ SYNTAXES = [
         "lang": "go", "ext": ".go", "src": GO_SRC, "leg": "c-abi-subset",
         "types": [("Pt", [("X", "i64"), ("Y", "i64")])],
         "fns": [("g_add", [("a", "i64"), ("b", "i64")], "i64", "c"),
-                ("g_plain", [("x", "i64")], "i64", "go")],
+                ("g_plain", [("x", "i64")], "i64", None)],   # 没 `//export` -> 不记 abi
         "skips": [("g_many", "两段"), ("g_slice", "无映射")],
         "emitted": ["g_add"],
         "link": None,
@@ -180,8 +189,8 @@ SYNTAXES = [
         "types": [("Shape", [("w", "i32"), ("h", "i32")])],
         "consts": [("SIDES", "i32", 4)],
         "enums": [("Level", ["LOW", "MID", "HIGH"])],
-        "fns": [("j_add", [("a", "i32"), ("b", "i32")], "i32", "java"),
-                ("j_native", [("a", "i32")], "i32", "java")],
+        "fns": [("j_add", [("a", "i32"), ("b", "i32")], "i32", None),
+                ("j_native", [("a", "i32")], "i32", None)],
         "skips": [("Shape", "构造器")],
         "emitted": [],
         "link": None,
@@ -189,9 +198,9 @@ SYNTAXES = [
     {
         "lang": "python", "ext": ".py", "src": PY_SRC, "leg": "runtime",
         "types": [],
-        "fns": [("py_add", [("a", "i64"), ("b", "i64")], "i64", "python"),
-                ("py_plain", [("x", "i64")], "i64", "python"),
-                ("py_big", [("x", "ptr")], "i64", "python")],
+        "fns": [("py_add", [("a", "i64"), ("b", "i64")], "i64", None),
+                ("py_plain", [("x", "i64")], "i64", None),
+                ("py_big", [("x", "ptr")], "i64", None)],
         "skips": [],
         "emitted": [],
         "link": None,
@@ -294,16 +303,22 @@ def _mk(spec: dict):
                 f"{lang}/{name}: {got.get(name)} != {(params, ret)}"
 
     def t_abi_classification():
-        """4 ABI 归类: 只有平台 C ABI 的那个能发 `extern fn`。
+        """4 ABI 归类: **只有源码显式宣称**的那个才记 `abi`（`docs/188` §3）。
 
         这一条是**这整套东西的安全阀**: 把普通 Rust `pub fn` 当 C ABI 调、
         把 Go 的 `//export` 与普通 `func` 当成一回事 —— 都是**错编**。
+
+        2026-09-18 改：**"因为这是个 X 文件"那条推断删了**。它把"用 X 写法写的
+        Loment"当成外国货，于是整批函数被 ABI 闸门挡掉、转出一个空 module。
+        现在 `None` 有确定的意思：**它是 Loment 函数**。
         """
         doc, _ = _transcribe(spec)
         got = {f["name"]: f.get("abi") for f in doc["functions"]}
         for name, _params, _ret, abi in spec["fns"]:
             assert got.get(name) == abi, f"{lang}/{name}: abi={got.get(name)!r} 期望 {abi!r}"
-            assert abi in potato.ABIS, f"{lang}: abi {abi!r} 不在 {potato.ABIS}"
+            assert abi is None or abi in potato.ABIS, \
+                f"{lang}: abi {abi!r} 不在 {potato.ABIS}"
+        assert doc.get("grammar") == lang, f"{lang}: grammar={doc.get('grammar')!r}"
 
     def t_unsupported_are_reported():
         """5 发不出来的**必须被报出来** (名字 + 原因) —— 静默丢比拒绝坏。"""
@@ -366,8 +381,11 @@ def _mk(spec: dict):
         decls = [ln.split("pub extern fn ", 1)[1].split("(", 1)[0]
                  for ln in text.splitlines() if ln.startswith("pub extern fn")]
         want = spec["emitted"]                # 应该出现在产物里的 extern fn
-        if spec["leg"] == "runtime":
-            assert not decls, f"{lang}: 运行型的语言不该有 extern fn 声明: {decls}"
+        if spec["leg"] in ("runtime", "grammar"):
+            # `runtime` = Java / Python：调用约定不是 C ABI，**不能**发 `extern fn`。
+            # `grammar` = C：它是**表层语法**，写出来的是 Loment 函数，`abi` 缺席，
+            # 所以同样一条都不该发（`docs/188` §3）。两条理由不同，结论一样。
+            assert not decls, f"{lang}: 不该有 extern fn 声明: {decls}"
             return
         if spec["leg"] == "c-abi-subset":
             assert decls == want, f"{lang}: 发出来的 {decls} != 该发的 {want}"
@@ -513,15 +531,23 @@ def test_sniffing_separates_languages_that_share_keywords():
 
 
 @test
-def test_abi_values_are_declared_in_the_schema():
-    """每种语法的 `abi` 都必须在 `potato.ABIS` 里 —— 校验器与前端不许各说各话。"""
+def test_grammar_and_abi_are_declared_in_the_schema():
+    """`grammar` 与 `abi` 都必须在 `potato` 的表里 —— 校验器与前端不许各说各话。
+
+    2026-09-18 改（`docs/188` §3）：**查的对象从 `abi` 换成了 `grammar`**。
+    `abi` 现在是"源码显式宣称的外部 ABI"，大多数函数没有它（`None`）；
+    而每种写法都必须落进 `potato.GRAMMARS` —— 那张表是**出厂锁**的官方表。
+    """
     for s in SYNTAXES:
         doc, _ = _transcribe(s)
+        assert doc["grammar"] in potato.GRAMMARS, (s["lang"], doc.get("grammar"))
+        assert doc["language"] == "loment", (s["lang"], doc["language"])
         for f in doc["functions"]:
-            assert f.get("abi") in potato.ABIS, (s["lang"], f["name"], f.get("abi"))
-    for extra in ("go", "java"):
-        assert extra in potato.ABIS, f"前端支持 {extra} 而 schema 的 ABIS 里没有"
-    print(f"      ABIS = {potato.ABIS}；五种语法都在里面")
+            a = f.get("abi")
+            assert a is None or a in potato.ABIS, (s["lang"], f["name"], a)
+    for g in ("loment",) + tuple(s["lang"] for s in SYNTAXES):
+        assert g in potato.GRAMMARS, f"前端支持 {g} 而 schema 的 GRAMMARS 里没有"
+    print(f"      GRAMMARS = {potato.GRAMMARS}；五种写法都记 grammar，language 一律 loment")
 
 
 @test
@@ -573,16 +599,28 @@ unsigned c_gcd(unsigned a, unsigned b)
     return a;
 }
 
-int c_popcount(unsigned v)
+// 2026-09-18: 原来写的是 `int n = 0; … n = n + (int)(v & 1u);`。
+// 那两样都过不了翻译器的 Stage A 子集，而且**第二样是真的错** ——
+// `n`（i32）加 `v & 1`（u32）在 C 里靠隐式转换成立，**Loment 里是类型错**。
+// 写成类型干净的版本（仍然是合法 C）：全用 `unsigned`。
+unsigned c_popcount(unsigned v)
 {
-    int n = 0;
+    unsigned n = 0;
     while (v != 0) {
-        n = n + (int)(v & 1u);
+        n = n + (v & 1);
         v = v >> 1;
     }
     return n;
 }
 
+"""
+
+#: **子集外**的那一份（2026-09-18 从 `C_IN_LOMT` 里拆出来的）。
+#:
+#: 拆的理由是 `--impl` **全有或全无**：一份源里有一个子集外的函数，整份就翻不了。
+#: 而 `char *` 与 `(char)` 强转在翻译器的 Stage A 子集之外（`docs/186` §4），
+#: 所以它没法跟上面那三个混在一起。它现在钉的是"**响亮拒绝**"那条。
+C_OUT_OF_SUBSET = """\
 // 把数字写进调用方缓冲 返回写了几位
 int c_utoa(unsigned value, char *buf)
 {
@@ -607,12 +645,20 @@ int c_utoa(unsigned value, char *buf)
 def test_c_source_named_lomt_end_to_end():
     """**一份 C 源码后缀写成 `.lomt`** —— `docs/175` §5 那条原话的完整形态。
 
-    认出 C → 生成接口单元 → L1 调用 → 链上 clang 真编出来的目标文件 → 跑。
-    期望的退出码由 Python **独立**算出来对照, 不是硬编码。
+    ## 2026-09-18：这条路从"接口单元 + 链 clang"改成了"**翻译**"
 
-    **`-x c` 不能省**: clang 按**后缀**认语言, 一份 `.lomt` 会被当成 linker 输入
-    (`'linker' input unused`) 然后 **rc=0 且不产出目标文件** —— 没有报错、没有非零
-    退出码, 只有你去找产物时才发现是空的。判据因此在 clang 那一步**先查产物非空**。
+    原来是：认出 C → 发 `pub extern fn` 接口单元 → clang 编 `.o` → 链进来 → 跑。
+    那是**旧模型**（把 C 当外源代码）。按 `docs/188` §3，一份 C 写法写的单元
+    **就是 Loment**，所以它该走 `--impl` 翻成 `pub fn` —— **不用 clang 编目标文件，
+    也不用链**。
+
+    判据本身没变，还是那句"**翻译出来的 Loment 跑出的数 == 直接编那份 C 跑出的数**"
+    （同一个形状在 `loment_ctrans_test` 里更全 —— 那边有三份语料）。这里钉的是
+    **后缀那一层**：后缀写 `.lomt`、内容是 C，照样认得出、照样跑得起来。
+
+    **`char *` 那个函数挪走了**（`C_OUT_OF_SUBSET`）：`--impl` 是**全有或全无**的
+    （一份源里有一个子集外的函数，整份就翻不了），所以带 `char *buf` 的那种没法
+    和这三个混在一份里。它现在钉的是"**响亮拒绝**"，见下面那条断言。
     """
     clang = _clang()
     if not clang or not _wsl():
@@ -624,20 +670,30 @@ def test_c_source_named_lomt_end_to_end():
         src.write_text(C_IN_LOMT, encoding="utf-8", newline="\n")
         got_lang, why = potato_from.resolve_lang(src, "auto")
         assert got_lang == "c", f"认成 {got_lang!r}（{why}）"
-        iface, skipped = _iface_from(td, "mymod", C_IN_LOMT, "c")
-        assert "c_fact" in iface.read_text(encoding="utf-8"), skipped
-        # 收 `char *` 的那个过不了 FFI 闸门 —— **必须被报出来**
-        assert "c_utoa" in [n for n, _ in skipped], skipped
-        obj = td / "mymod.o"
-        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-x", "c", "-c",
-                            "-O1", "-ffreestanding", "-fno-stack-protector",
-                            "-o", str(obj), str(src)],
-                           capture_output=True, text=True, shell=False)
-        assert r.returncode == 0, r.stderr[-300:]
-        assert obj.exists() and obj.stat().st_size > 0, "没产出目标文件 (漏了 -x c?)"
+
+        # 翻译那一步（`--impl`）：接的是 `grammar`，不再接 `language`
+        doc, _rep = potato_from.from_c(C_IN_LOMT, "mymod.lomt", "strict")
+        assert doc["language"] == "loment" and doc["grammar"] == "c", doc["language"]
+        impl, skipped = lomt_from.emit_lomt(doc, impl=True)
+        assert not skipped, skipped
+        # **一条 `extern fn` 都不该有** —— 它不是外国货，是 Loment
+        assert "pub extern fn " not in impl, impl[:300]
+        assert "pub fn c_fact(" in impl and "pub fn c_gcd(" in impl, impl[:300]
+        unit = td / "mymod.impl.lomt"
+        unit.write_text(impl, encoding="utf-8", newline="\n")
+
+        # 子集外的那个（`char *buf`）**必须响亮报错**，而且指得到点上
+        doc2, _r2 = potato_from.from_c(C_OUT_OF_SUBSET, "bad.c", "strict")
+        try:
+            lomt_from.emit_lomt(doc2, impl=True)
+        except lomt_from.NotRepresentable as e:
+            assert "char" in str(e) or "子集外" in str(e), str(e)
+        else:
+            raise AssertionError("`char *` 在子集外，却一个字都没报")
+
         want = (720 + 21 + 13) % 256            # 6! + gcd(1071,462) + popcount(0xbeef)
         main = td / "main.lomt"
-        main.write_text(f'module msc\n\nuse "{iface.as_posix()}"\n\n'
+        main.write_text(f'module msc\n\nuse "{unit.as_posix()}"\n\n'
                         "fn _start() {\n"
                         "    let a: u32 = c_fact(6 as i32) as u32;\n"
                         "    let b: u32 = c_gcd(1071 as u32, 462 as u32);\n"
@@ -648,8 +704,8 @@ def test_c_source_named_lomt_end_to_end():
         deps = lomentc.resolve_deps(mod, ROOT, main.parent, entry=main)
         errs = lomentc.check(mod, deps=deps)
         assert not errs, errs
-        blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps),
-                                    [lomelf.load_foreign(obj)])
+        # **没有 `load_foreign`** —— 没有目标文件要链了
+        blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "ms.elf"
         exe.write_bytes(blob)
         rr = subprocess.run(["wsl", "-e", "bash", "-lc",
@@ -658,7 +714,26 @@ def test_c_source_named_lomt_end_to_end():
                             capture_output=True, text=True, timeout=120, shell=False)
         assert rr.returncode == want, \
             f"退出码 {rr.returncode} != {want} (stderr {rr.stderr[-200:]!r})"
-    print(f"      C 装 `.lomt`: 认出 -> 接口单元 -> 链真目标文件 -> 退出码 {want} (Python 独立算出)")
+
+        # ---- 对照：把同一份 C 用 clang 直接编出来跑，数要一样（**比数不比文本**）
+        cside = td / "c_side.c"
+        cside.write_text(C_IN_LOMT + "\nstatic void _x(long c){\n"
+                         '    __asm__ volatile("syscall" : : "a"(60L), "D"(c)'
+                         ' : "rcx", "r11", "memory");\n}\n'
+                         "void _start(void){ _x((c_fact(6) + c_gcd(1071,462)"
+                         " + c_popcount(48879)) % 256); }\n",
+                         encoding="utf-8", newline="\n")
+        binp = td / "c_side.bin"
+        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-O1",
+                            "-ffreestanding", "-nostdlib", "-fno-stack-protector",
+                            "-o", str(binp), str(cside)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        rc2 = subprocess.run(["wsl", "-e", "bash", "-lc",
+                              f"chmod +x {_wsl_path(binp)} && {_wsl_path(binp)}; echo -n $?"],
+                             capture_output=True, text=True, timeout=120, shell=False)
+        assert int(rc2.stdout.strip()) == want, f"clang 那边 {rc2.stdout} != {want}"
+    print(f"      C 装 `.lomt`: 认出 -> 翻译成 Loment -> 跑出 {want}（clang 编那份 C 也是 {want}）")
 
 
 @test
@@ -741,7 +816,11 @@ def test_declaration_forms_that_used_to_vanish():
         doc, rep = potato_from.transcribe(jv, "java")
         fn = [x for x in doc["functions"] if x["name"] == "set_b"]
         assert fn and fn[0]["ret"] == "()", doc["functions"]
-        assert fn[0]["abi"] == "java", fn[0]
+        # 2026-09-18：**不再记 `abi`** —— "因为这是个 Java 文件"是推断，
+        # 按 `docs/188` §3 删了。`void` 那条修的是**表示**，仍然成立：
+        # 它照样不会被发成 `extern fn`（`abi` 缺席 = 它是 Loment 函数）。
+        assert "abi" not in fn[0], fn[0]
+        assert doc["grammar"] == "java" and doc["language"] == "loment", doc["grammar"]
         assert not [x for x in rep.skipped if "void" in x["why"]], rep.skipped
     print("      Python 注解/负号/移位、Rust `pub const`、Java `void` 都进得来")
 

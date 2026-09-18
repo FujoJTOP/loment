@@ -1,31 +1,37 @@
 /*
  * pack —— 帧的**打包与拆包**：一个 16 位传感器号 + 一个 16 位读数 -> 一个 32 位帧。
  *
- * **这份源码是 C 语法写的 Loment**：后缀是 `.lomt`，里面装的是 C。
- * `docs/179` §1.1 的第二层（按内容识别）就是认这种文件：后缀说"这是 Loment 的源文件"，
- * 里面装的东西可以是别的语法。
+ * **这份源码是 C 写法写的 Loment**（后缀 `.lomt`，里面装的是 C）。`docs/188` §0 把这条
+ * 说清楚了：Loment **可以被多种语法编写，最终行为无异** —— 用的还是 C 的拼法，
+ * 但写出来的是 Loment，语义听 Loment 的。
  *
- * 为什么这一段是 C：它是**位运算**，而位运算正是 C 这一族的主场 —— 也正好把
- * `docs/173` 那条**链接腿**走完：真编成 `.o`、真链进来、真调到。
+ * 为什么这一段是 C：它是**位运算**，而位运算正是 C 这一族的主场。
  *
- * 领域：sensor 取 0..65535，读数是**无符号**的 16 位量（所以高低两个半区各自独立，
- * 拆包回来必须与装进去的一模一样 —— 判据就是钉这个）。
+ * ## 2026-09-18：它从"链接腿"改成了"**翻译**"
+ *
+ * 原先这一份被当成**外源代码**：`lomt_from` 发 `pub extern fn`，clang 编成 `.o`，链进来。
+ * 按 `docs/188` 那是**错的读法** —— 一份 C 写法写的单元**就是 Loment**，它该被
+ * **翻成 Loment**（`lomt_from --impl`），而不是当成外国函数去链。
+ * 真 C（要链 `.o` 的那种）由 Loment 源里的 `extern fn` 声明，见 `loment_ffi_test`。
+ *
+ * ## 写成子集里的样子（`docs/186` §4）
+ *
+ * 原来用的是 `#define FRAME_SENSOR_MAX 65535u` —— 三样都在子集外：预处理指令、
+ * 无符号后缀、以及 C 子集**不收全局常量**。所以这里把字面量写进表达式里。
+ * （全局常量是子集里一个**真的缺口**，记在 `docs/186` §9 的下一步里。）
  */
-
-#define FRAME_SENSOR_MAX 65535u
-#define FRAME_VALUE_MAX 65535u
 
 /* 把两个 16 位半区拼成一个 32 位帧。高位放 sensor，低位放读数。 */
 unsigned int pack_frame(unsigned int sensor, unsigned int value) {
-    return ((sensor & FRAME_SENSOR_MAX) << 16) | (value & FRAME_VALUE_MAX);
+    return ((sensor & 65535) << 16) | (value & 65535);
 }
 
 /* 从帧里取回 sensor 号。 */
 unsigned int frame_sensor(unsigned int w) {
-    return (w >> 16) & FRAME_SENSOR_MAX;
+    return (w >> 16) & 65535;
 }
 
 /* 从帧里取回读数。 */
 unsigned int frame_value(unsigned int w) {
-    return w & FRAME_VALUE_MAX;
+    return w & 65535;
 }

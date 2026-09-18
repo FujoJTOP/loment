@@ -133,7 +133,9 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     for m in _GO_FN.finditer(body):
         fn, params, ret = m.group(1), m.group(2), m.group(3).strip()
         # 只有 `//export` 过的才是 C ABI —— 与 Rust 那侧的 `extern "C"` 同一个道理。
-        abi = "c" if fn in exported else "go"
+        # **`//export` 是源码显式宣称的 C ABI，留**；没写的那种原来记 `"go"`，
+        # 那是"因为这是个 Go 文件"的**推断** —— 按 `docs/188` §3 删掉（详见 `from_java`）。
+        abi = "c" if fn in exported else None
         if ret.startswith("("):
             rep.skip("fn", fn, "多返回值 —— Potato 是单返回")
             continue
@@ -161,7 +163,10 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if bad:
             rep.skip("fn", fn, bad)
             continue
-        doc["functions"].append({"name": fn, "params": ps, "ret": rt, "abi": abi})
+        ent = {"name": fn, "params": ps, "ret": rt}
+        if abi is not None:                 # 只有 `//export` 过的那种才记（见上）
+            ent["abi"] = abi
+        doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
 
@@ -395,7 +400,11 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             if bad:
                 rep.skip("fn", mname, bad)
                 continue
-            doc["functions"].append({"name": mname, "params": ps, "ret": rt, "abi": "java"})
+            # `abi` **不再由"这是什么文件"推**（`docs/188` §3）。那份推断会把
+            # "用 Java 写法写的 Loment"当成外国货，于是函数被 ABI 闸门整批挡掉 ——
+            # 而它本来就该被翻成 `pub fn`。只有**源码显式宣称**外部 ABI 时才记
+            # （见 Go 的 `//export`、Rust 的 `extern "C"`）。
+            doc["functions"].append({"name": mname, "params": ps, "ret": rt})
             rep.ok += 1
     return _finish(doc, rep)
 
@@ -561,24 +570,42 @@ def _finish(doc: dict, rep: Report) -> tuple[dict, Report]:
     return doc, rep
 
 
-def _blank(unit: str, language: str) -> dict:
+def _blank(unit: str, grammar: str) -> dict:
     """一份空的**合法**对象。
 
-    停在 **v1** 而不是跟着编译器升到 v2 (`docs/178`): v2 的 `mode` 是"这个 Loment 程序
-    用哪个运行模式", 而这里的对象描述的是**外源模块**的结构 —— 它不是一个 Loment 程序,
-    给它填 `std` 就是**替它声称**一件源里没有的事。v1 仍然合法 (校验器收 v0/v1/v2),
-    "外源结构对象不声称程序模式"这条边界因此留在数据里。
+    ## 2026-09-18: 这里原来是**错的**，改掉了
 
-    **`guards: 0` 不能漏**(2026-09-17 修): v1 要求 `guards` 是**非负整数**, 而原先这里
-    没有这个键 —— 于是 `potato_from` 发出的每一份对象都是**非法 v1**, `validate_errors`
-    里一直挂着"N 项校验错误"。这是"没有判据盯着"的典型: 那个字段被**报到报告里**,
-    但从来没有任何测试断言报告是干净的。补判据见 `loment_multisyntax_test`。
+    原文（保留作为记录）：
+
+    > 停在 **v1** 而不是跟着编译器升到 v2：v2 的 `mode` 是"这个 Loment 程序用哪个运行模式"，
+    > 而这里的对象描述的是**外源模块**的结构 —— 它**不是一个 Loment 程序**，给它填 `std`
+    > 就是**替它声称**一件源里没有的事。
+
+    那条理由建立在"外源代码"那个理解上。用户 2026-09-18 把它更正为**表层语法**
+    （`docs/188` §0）：一份用 C / Python / Java 写法写的单元**就是**一个 Loment 程序，
+    只是拼法不同。**所以它该有 `mode`、该是 `language: "loment"`**，而"用哪种写法写的"
+    是另一件事，记在新字段 `grammar` 上。
+
+    这个 bug **有实际后果**，不是洁癖：`language: "python"` 会被下游当成"外国货"，
+    而 `abi: "python"` 会被 `lomt_from` 的 ABI 闸门挡掉 —— 于是用 Python 写法写的单元
+    转出来是一份**空 module**（`loment_diag` 里那条"照建议敲会得到空 module"的提示，
+    根因就在这儿）。
+
+    **`guards: 0` 不能漏**（2026-09-17 修）：v1 要求 `guards` 是非负整数，而原先这里
+    没有这个键 —— 于是每一份对象都是**非法 v1**，`validate_errors` 里一直挂着错误。
+    这是"没有判据盯着"的典型：字段被报到报告里，但没有任何测试断言报告是干净的。
     """
     return {
-        "potato": "v1", "unit": unit, "language": language, "imports": [],
+        "potato": "v6", "unit": unit,
+        # `language` 说的是"这份东西**是**什么" —— 用别的写法写的，**它仍然是 Loment**。
+        "language": "loment",
+        # `grammar` 说的是"用什么**写法**写的"（`docs/188`）。两个字面不同，别混。
+        "grammar": grammar,
+        "imports": [],
         "capabilities": [], "functions": [], "layouts": [], "consts": [], "enums": [],
         "types": [], "traits": [], "impls": [], "generics": [], "instances": [],
         "guards": 0, "excluded": [],
+        "mode": "std", "switches": [], "dialects": [], "bodies": [],
     }
 
 
@@ -716,7 +743,8 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             #: Python 的调用约定是自己那套 (CPython C-API / 解释器), 不是平台 C ABI ——
             #: 记下来, 让下游知道它**不能**直接发 `extern fn`。要调 Python 走进程桥
             #: (`loment/lib/proc.lomt`, docs/173 §4)。
-            ent: dict = {"name": node.name, "params": params, "ret": ret, "abi": "python"}
+            # `abi` 按 `docs/188` §3 **不再由"这是什么文件"推** —— 见 `from_java` 那条注释。
+            ent: dict = {"name": node.name, "params": params, "ret": ret}
             # ---- 正文（`docs/186` §3 的 `functions[i].body`，Python 这一侧同一形状）。
             # **整段函数原文**，用 `ast.get_source_segment` 取 —— 它是按源码位置切的，
             # 与 C 那侧按下标切同一个道理：**保真**（`int` 注解与 `bool` 注解在 Potato
@@ -880,7 +908,10 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             continue
         #: C 的函数**按定义**就是 C ABI (`_c_bare` 只收裸函数, 不含 `static` 之类),
         #: 所以这里不是猜。带结构体参数的那些会在 `lomt_from` 那侧被拒 (第 1 阶段只收标量)。
-        ent: dict = {"name": fn, "params": ps, "ret": ret, "abi": "c"}
+        # `abi` 按 `docs/188` §3 **不再由"这是什么文件"推** —— 见 `from_java` 那条注释。
+        # 【真外国的 C】那条路是**源码里显式写的** `extern fn`，由 `lomentc.emit_potato`
+        # 记 `abi`；不是从"这份文件后缀是 .c"推出来的。
+        ent: dict = {"name": fn, "params": ps, "ret": ret}
         # ---- 正文（`docs/186`）：有体的函数把**原文**带上，没有的（声明）不带这个字段。
         #
         # **可选子字段**，与 `abi` 同一条先例（`docs/179` §3.1）：省略合法、给了必须认。
@@ -1046,7 +1077,9 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         #: 只有 `extern "C"` 才是 C ABI —— **不能拿普通 `pub fn` 当 FFI 声明**:
         #: 它的 ABI 是 Rust 自己的, 照 C ABI 调就是错编。这个判断只有源语言这侧做得了,
         #: 所以 ABI 记进对象 (§5), 由 `lomt_from` 决定能不能发 `extern fn`。
-        abi = "c" if (abi_g or "").strip() == "C" else "rust"
+        # `extern "C"` 是**源码显式宣称**的，留；没有它的原来记 `"rust"`，那是推断 ——
+        # 按 `docs/188` §3 删掉（详见 `from_java`）。
+        abi = "c" if (abi_g or "").strip() == "C" else None
         if generics:
             rep.skip("fn", fn, "泛型函数")
             continue
@@ -1077,7 +1110,10 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if r is None:
             rep.skip("fn", fn, f"返回类型 {ret!r} 无映射")
             continue
-        doc["functions"].append({"name": fn, "params": ps, "ret": r, "abi": abi})
+        ent = {"name": fn, "params": ps, "ret": r}
+        if abi is not None:                 # 只有 `extern "C"` 的那种才记（见上）
+            ent["abi"] = abi
+        doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
 

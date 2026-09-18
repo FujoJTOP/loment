@@ -233,14 +233,23 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             if impl and isinstance(bd, str) and bd.strip():
                 # **有正文时 ABI 那道闸门让开**：它不是"声明一条外部函数"，而是
                 # **定义**这个函数 —— 实现就在这儿（由 `ctrans` / `pytrans` 翻出来）。
-                # `abi` 描述的是"实现在源语言那一侧"这件事，而这里已经不是那样了。
-                # 所以 `abi="python"` 的函数在 `--impl` 下能发，在默认那条路上不能。
                 bodies[n] = bd
                 continue
             abi = f.get("abi")
+            # **`abi` 缺席 = 这是个 Loment 函数**（`docs/188` §3）。
+            #
+            # 旧读法是反过来的：`abi` 缺席被当成"没记 ABI 的外国函数"而跳过。
+            # 那套读法把 `potato_from` **推断**出来的 ABI（"因为它是个 Java 文件"）
+            # 当成了"实现在外面"的证据 —— 于是一份 Python 写法的单元整批被跳过，
+            # 转出一个**空 module**。现在 `potato_from` 只记**源码显式宣称**的 ABI
+            # （`extern "C"` / `//export`），所以缺席有确定的意思：它是 Loment。
+            if abi is None:
+                skipped.append((n, "这是个 Loment 函数但对象里没带正文 —— "
+                                   "接口单元里没有它的实现。带正文的加 `--impl` 翻出来"
+                                   "（docs/186 / docs/187）"))
+                continue
             if abi != "c":
-                skipped.append((n, f"调用约定不是 C ABI"
-                                   + (f" (abi={abi})" if abi else " (对象里没记 ABI)")))
+                skipped.append((n, f"调用约定不是 C ABI (abi={abi})"))
                 continue
             bad = [p.get("name") for p in (f.get("params") or [])
                    if not _ffi_ok(p.get("type"))]
@@ -256,7 +265,12 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
 
         # ---- 带正文的函数：把原文拼成一份源文件再翻（`docs/186` / `docs/187`）
         if bodies:
-            lang = doc.get("language")
+            # **按 `grammar` 分派，不按 `language`**（`docs/188` §3）：`language` 现在
+            # 一律是 `"loment"`（用别的写法写的**也是** Loment），"用哪种写法写的"
+            # 记在 `grammar` 上。旧对象没有 `grammar`（v≤5），兜底当 Loment。
+            lang = doc.get("grammar") or "loment"
+            if lang == "loment" and doc.get("language") in ("c", "python", "java", "go", "rust"):
+                lang = doc["language"]      # 旧对象（v≤5）还是按 language 记的
             if lang == "c":
                 import ctrans           # 只在 `--impl` 这条路上要它 —— 默认那条不该被它拖进来
                 mod, errs = ctrans, (ctrans.Unsupported, ctrans.CError)

@@ -252,26 +252,44 @@ def test_body_is_byte_faithful():
 
 
 @test
-def test_interface_unit_is_unchanged():
-    """**不开 `--impl` 时，带正文的函数照旧只发接口。**
+def test_c_is_a_grammar_not_a_foreign_module():
+    """**一份 C 写法写的单元是 Loment，不是外国货**（`docs/188` §3）。
 
-    这一条防的是"正文进了 Potato 之后，默认那条路被悄悄带歪" —— 而
-    `loment_multilang_test` 正是靠默认那条路（`extern fn` + 外面编好的 `.o`）跑起来的。
-    发了体就是同一个符号定义两遍，那是**链接期**的错，离这里很远，所以要在源头钉住。
+    ## 2026-09-18：这条测试的前提整个反过来了，所以改写了
+
+    原来叫 `test_interface_unit_is_unchanged`，钉的是："不开 `--impl` 时，带正文的
+    函数照旧只发 `pub extern fn`（接口单元）"。那是**旧模型**（把 C 当外源代码）。
+
+    按新模型：C 是**表层语法**之一，用 C 写法写的就是 Loment 函数 —— `language`
+    是 `"loment"`、`grammar` 是 `"c"`、**函数不带 `abi`**。所以：
+
+    * 接口那条路对**表层语法**没有意义（没有"外面"这回事），走它会得到"没带正文"；
+    * 该走的是 `--impl`，出来的是真 `pub fn`。
+
+    这一条同时钉住那个 bug 的**根因**：`potato_from` 一旦又开始"按文件后缀推 ABI"，
+    这里立刻红。
     """
     doc, _rep = potato_from.from_c((EX / "sample.c").read_text(encoding="utf-8"),
                                    "sample.c", "strict")
+    # ① 自我描述：**它是 Loment**，只是写法是 C
+    assert doc["language"] == "loment", doc["language"]
+    assert doc["grammar"] == "c", doc["grammar"]
+    for f in doc["functions"]:
+        assert "abi" not in f, f"按后缀推出来的 abi 又回来了: {f}"
+
+    # ② 接口那条路：一条 `extern fn` 都不该有 —— 它不是外国函数
     iface, skipped = lomt_from.emit_lomt(doc, impl=False)
-    assert "pub fn " not in iface, "默认那条路不该发出任何实现:\n" + iface[:400]
+    assert "pub extern fn " not in iface, iface[:400]
+    assert "pub fn " not in iface, iface[:400]
     for n in ("gcd", "classify", "score", "main"):
-        assert f"pub extern fn {n}(" in iface, f"{n} 的接口没发出来:\n{iface[:400]}"
-    # **正文不该被当成"跳过项"**：它没有丢，只是这条路用不上（`docs/179` §2 的接口单元）
-    assert not skipped, f"默认这条路上不该有跳过项（正文不是被丢的东西）: {skipped}"
+        assert n in [x for x, _ in skipped], skipped
+
+    # ③ `--impl`：真 `pub fn`，**一条 `extern fn` 都没有**
     impl, _s2 = lomt_from.emit_lomt(doc, impl=True)
-    assert "pub extern fn " not in impl, "带体的那几个不该同时发接口:\n" + impl[:400]
+    assert "pub extern fn " not in impl, impl[:400]
     for n in ("gcd", "classify", "score", "main"):
         assert f"pub fn {n}(" in impl, f"{n} 的实现没发出来"
-    print("      默认只发接口（无跳过项）；--impl 只发实现")
+    print("      C 写法 = Loment（language/grammar 对、无 abi）；库走 --impl 出 pub fn")
 
 
 @test
