@@ -719,7 +719,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "bba2a354341a7f10b026a1d03cb274cf38c006cd4e1561b69b1afe8a16b40ca5"
+   "sha256": "61b5817c60fc42b4b3ede602c26235d02c67a2e13ada6e8f56d9d4ee548ccd99"
   },
   {
    "path": "tools/vscode_ext.py",
