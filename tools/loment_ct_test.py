@@ -9,16 +9,21 @@
 
 1. `test_reference_interpreter_matches_corpus` —— 参考侧（`tools/loment_interp.py`）
    跑语料，逐支对上期望值。**这是规范**，自举侧要镜像的就是它。
-2. 自举侧（`loment/selfhost/interp.lomt`，**用 Loment 写的 Loment 解释器**）与参考侧
-   **逐字节同结果** —— S4.0 的核心判据，随 S4.0b 落地（`docs/184` §9）。
+2. `test_selfhosted_interpreter_matches_reference` —— 自举侧
+   （`loment/selfhost/interp.lomt`，**用 Loment 写的 Loment 解释器**）与参考侧
+   **逐字节同结果** —— S4.0 的核心判据（`docs/184` §9）。
 """
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomentc  # noqa: E402
 import loment_interp  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +65,76 @@ def test_reference_interpreter_matches_corpus():
             bad.append(f"{p.name}: 期望 {want!r}, 实得 {got!r}")
     assert not bad, "\n".join(bad)
     print(f"      参考侧: {len(cases)} 支语料全部对上期望值")
+
+
+#: 自举侧解释器的 C 外壳（与 p8 的夹具同一形状：**原生 exe**，带 CRT —— 不必交叉到 WSL）。
+#:
+#: ⚠️ **不要用 `printf("%s", out)`** —— 实测它会崩（`0xC0000005`），而 `fwrite` + `fputc`
+#: + `fflush` 没事。原因未查明，记在这里免得下次再踩。反正判据只要 stdout 上那一行。
+_DRIVER = r'''
+#include <stdio.h>
+extern unsigned int ct_run(char *src, unsigned int n, char *out);
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 2;
+    static char buf[1048576];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    static char out[4096];
+    out[0] = 0;
+    unsigned int rc = ct_run(buf, (unsigned int)n, out);
+    unsigned int L = 0;
+    while (L < 4095 && out[L]) L++;
+    fwrite(out, 1, L, stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+    return (int)rc;
+}
+'''
+
+
+@test
+def test_selfhosted_interpreter_matches_reference():
+    """自举侧（**用 Loment 写的 Loment 解释器**）与参考侧**逐字节同结果**。
+
+    这是 S4.0 的**核心判据**（`docs/184` §9）：两个解释器跑同一支编译期程序，连**错误的
+    种类**都要一样。它红 = `comefor` 的地基是错的。
+
+    为什么它值得单列一条：参考侧是 Python（走 AST），自举侧是 Loment（走 token）——
+    **两边连"程序长什么样"都不一样**，可结论必须一字不差。
+    """
+    clang = shutil.which("clang")
+    if not clang:
+        fb = r"C:\Program Files\LLVM\bin\clang.exe"
+        clang = fb if Path(fb).exists() else None
+    if not clang:
+        print("      SKIP: 无 clang")
+        return
+    src = ROOT / "loment" / "selfhost" / "interp.lomt"
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"interp.lomt 自己检查不过: {errs[:2]}"
+    cases = _corpus()
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "interp.ll").write_text(lomentc.emit_llvm(mod, ROOT, deps),
+                                       encoding="utf-8", newline="\n")
+        (tdp / "h.c").write_text(_DRIVER, encoding="utf-8", newline="\n")
+        exe = tdp / "interp.exe"
+        r = subprocess.run([clang, "-O1", "-o", str(exe), str(tdp / "h.c"),
+                            str(tdp / "interp.ll")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-500:]
+        bad: list[str] = []
+        for p, want in cases:
+            rr = subprocess.run([str(exe), str(p)], capture_output=True, text=True,
+                                timeout=60, shell=False)
+            got = rr.stdout.strip()
+            if got != want:
+                bad.append(f"{p.name}: 期望 {want!r}, 自举 {got!r} (rc={rr.returncode})")
+        assert not bad, "自举侧与参考侧不一致:\n" + "\n".join(bad)
+    print(f"      自举侧: {len(cases)} 支语料与参考侧逐字节同结果")
 
 
 def main() -> int:

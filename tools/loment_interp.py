@@ -79,6 +79,7 @@ class Interp:
         self.mem = bytearray(HEAP)
         self.top = 16          # 前 16 字节留空 —— 0 当"空指针"
         self.freed: list[int] = []
+        self.depth = 0
 
     # ---------------------------------------------------------------- 内存
     def _alloc(self, n: int) -> int:
@@ -233,12 +234,21 @@ class Interp:
         raise InterpError(f"nobuiltin:{n}", line)
 
     def call_fn(self, f, args: list):
-        env = dict(zip([p.name for p in f.params], args))
+        # **显式深度上限**，不靠 Python 的 `RecursionError` —— 那个上限是实现细节（默认 1000
+        # 上下，还随栈大小变），两个实现不可能靠它对齐。自举侧同值同语义。
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            self.depth -= 1
+            raise InterpError("depth")
         try:
-            self.exec_body(f.body, env)
-        except _Ret as r:
-            return r.value
-        return 0        # 无 return 落到末尾 -> 0（与"必须有值"的检查器不冲突：这里只求值）
+            env = dict(zip([p.name for p in f.params], args))
+            try:
+                self.exec_body(f.body, env)
+            except _Ret as r:
+                return r.value
+            return 0    # 无 return 落到末尾 -> 0（与"必须有值"的检查器不冲突：这里只求值）
+        finally:
+            self.depth -= 1
 
     # ---------------------------------------------------------------- 语句
     def exec_body(self, stmts: list, env: dict) -> None:
@@ -302,6 +312,9 @@ class Interp:
 
 #: 循环上限 —— 两个实现同值。宏体不该长跑；跑飞了要**报出来**，不是挂着。
 LIMIT = 1 << 22
+
+#: 调用深度上限 —— 两个实现同值（见 `call_fn` 那条注释：不能靠 `RecursionError`）。
+MAX_DEPTH = 256
 _WIDTHS = {"u8": 8, "u16": 16, "u32": 32, "u64": 64,
            "i8": 8, "i16": 16, "i32": 32, "i64": 64, "bool": 1, "ptr": 64}
 

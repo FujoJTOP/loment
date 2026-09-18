@@ -1,0 +1,1094 @@
+// interp.lomt — **编译期子集**解释器（S4.0b，`docs/184` §3/§9）
+//
+// **用 Loment 写的 Loment 解释器**：走 token 流，把一个编译期子集里的程序跑出一个值。
+// 它必须与 `tools/loment_interp.py`（参考侧）**逐字节同结果** —— 那才是 S4.0 的核心判据。
+// 参考侧的文件头是**规范**（收哪些语法、值模型、输出形式），以它为准。
+//
+// ## 五处不许改的约定（改了就是分叉）
+//   1. 整数一律 u64 语义：运算后 mod 2^64；`as` 到更窄的宽度按那个宽度掩码。
+//   2. `ptr` 是**本解释器内存**里的字节偏移（不是真实地址 —— 真实地址两边不可能相同）。
+//   3. 输出只有 `OK <十进制>` 与 `ERR <种类>` 两种；**错误的种类也要一致**。
+//   4. 调用深度上限 `MAX_DEPTH = 256`，与参考侧同值（**不能靠 Python 的 RecursionError**:
+//      那是实现细节，两个实现不可能靠它对齐）。
+//   5. 循环上限 `LIMIT`，同值。
+//
+// ## 返回值约定：不用 `parser.lomt` 的 `pack(i, o)`
+// u64 装不下"一个 u64 值 + 一个 token 下标"。这里 **`i` 按值进、按值出**，而**值走共享
+// 单元** `st+V`（"累加器"纪律：产出值的调用一返回，调用方**立刻**读它，中间不再调别的）。
+// `return` 走 `st+R` + 标志 `st+RF`。
+//
+// ## 内存（**64 KiB 硬上限**）
+// 语言自带的 `alloc` 堆只有 65536 字节（`lomentc.py:129`，越界是 `@__loment_abort` 一条
+// 非法指令）。缓冲全开小，且**加起来必须是硬常数**：
+//   token 12000 + 环境 2048 + 值堆 8192 + 实参栈 20480 + 输出 512 + 状态 40 = 43472 ✓
+//
+// ## S4.0 的已知边界（不是漏，是这一版不做）
+//   * **字符串字面量不做转义解码** —— 自举侧用 token 的原始跨度，参考侧解 `\n\t\"\\`。
+//     含转义的串两边会分叉，所以**语料里不许有转义**（判据钉着）。
+//   * 只收参考侧文件头列的那个子集；struct/enum/match/泛型/capability 都**不收**。
+
+module interp
+
+use bytes
+use lexer
+
+// ---------------------------------------------------------------- 尺寸与布局
+const TOK_CAP: u32 = 600;
+const TOK_BYTES: u32 = 12000;        // TOK_CAP * 20
+const ENV_CAP: u32 = 128;
+const ENV_BYTES: u32 = 2048;         // ENV_CAP * 16
+const ARENA_CAP: u32 = 8192;
+const ARGS_CAP: u32 = 20480;
+const OUT_CAP: u32 = 512;
+const ST_BYTES: u32 = 48;
+/// 每次调用给实参留的字节数（10 个槽 × 8 字节 —— Loment 的形参上限是 10）。
+const ARG_STEP: u32 = 80;
+/// 调用深度上限。**与 `tools/loment_interp.MAX_DEPTH` 同值**。
+const MAX_DEPTH: u32 = 256;
+/// 循环上限。**与参考侧 `LIMIT` 同值**（宏体不该长跑；跑飞了要报出来，不是挂着）。
+const LIMIT: u32 = 4194304;
+
+// 状态块 st 的布局（u32 偏移）
+const ST_ERR: u32 = 0;    // 错误码，0 = 没有
+const ST_NE: u32 = 4;     // 环境里的条数
+const ST_TOP: u32 = 8;    // 值堆顶
+const ST_V: u32 = 12;     // 表达式值（u64 = 12..19）
+const ST_R: u32 = 20;     // return 值（u64 = 20..27）
+const ST_RF: u32 = 28;    // return 标志
+const ST_AT: u32 = 32;    // 实参栈顶
+const ST_DP: u32 = 36;    // 当前深度
+
+// 错误码。**与参考侧 `InterpError` 的种类名一一对应**（`err_name` 是那张表）。
+const E_NONE: u32 = 0;
+const E_DIVZERO: u32 = 1;
+const E_OOB: u32 = 2;
+const E_UNDEF: u32 = 3;
+const E_ARITY: u32 = 4;
+const E_UNSUP: u32 = 5;
+const E_SPIN: u32 = 6;
+const E_OOM: u32 = 7;
+const E_NOENTRY: u32 = 8;
+const E_DEPTH: u32 = 9;
+const E_BADOP: u32 = 10;
+const E_NOTARR: u32 = 11;
+const E_NOBLTIN: u32 = 12;
+
+fn err_name(c: u32) -> str {
+    if c == E_DIVZERO { return "divzero"; }
+    if c == E_OOB { return "oob"; }
+    if c == E_UNDEF { return "undef"; }
+    if c == E_ARITY { return "arity"; }
+    if c == E_SPIN { return "spin"; }
+    if c == E_OOM { return "oom"; }
+    if c == E_NOENTRY { return "noentry"; }
+    if c == E_DEPTH { return "depth"; }
+    if c == E_BADOP { return "badop"; }
+    if c == E_NOTARR { return "notarray"; }
+    if c == E_NOBLTIN { return "nobuiltin"; }
+    return "unsupported";
+}
+
+fn set_err(st: ptr, c: u32) {
+    if load32(st, ST_ERR) == E_NONE {
+        store32(st, ST_ERR, c);
+    }
+}
+
+// ---------------------------------------------------------------- 小工具
+/// u64 拆两个 u32 存（没有 `load64`/`store64`，`bytes` 只到 32 位）。
+fn put64(p: ptr, o: u32, v: u64) {
+    store32(p, o, (v % 4294967296) as u32);
+    store32(p, o + 4, (v / 4294967296) as u32);
+}
+
+fn get64(p: ptr, o: u32) -> u64 {
+    return (load32(p, o + 4) as u64) * 4294967296 + (load32(p, o) as u64);
+}
+
+/// 真值归一：非 0 -> 1（与参考侧 `1 if x else 0` 同）。
+fn b2u(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+fn pack2(a: u32, b: u32) -> u64 {
+    return (a as u64) * 4294967296 + (b as u64);
+}
+
+fn unpk_a(r: u64) -> u32 { return (r / 4294967296) as u32; }
+fn unpk_b(r: u64) -> u32 { return (r % 4294967296) as u32; }
+
+fn puts(dst: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let q: u32 = 0;
+    while q < n {
+        store8(dst, o + q, str_byte(s, q) as u8);
+        q = q + 1;
+    }
+    return o + n;
+}
+
+/// 十进制。数字暂存在输出缓冲**尾部**（反着填再翻过来），不动别的内存。
+fn put_dec(dst: ptr, o: u32, v: u64) -> u32 {
+    if v == 0 {
+        store8(dst, o, 48 as u8);
+        return o + 1;
+    }
+    let tb: u32 = OUT_CAP - 24;
+    let n: u32 = 0;
+    let x: u64 = v;
+    while x > 0 {
+        // **显式 `let` 把宽度写死**：写成 `(48 + (x % 10) as u32) as u8` 时，那个字面量
+        // `48` 的宽度两个实现推得**不一样**（参考 = i32、自举 = i64），于是这一行 IR
+        // 差一个 `trunc i32` / `trunc i64` —— `loment_p8_test` 的驱动闸门当场红。
+        // 这正是 `docs/158` §4 第 11 条（混宽整数比较）的**同族**问题，绕法也一样:
+        // `loment/lib/mem.lomt` 的 `mem_find` 当初就是这么绕的（显式 `let want: u32 = ...`）。
+        // **根因两边都没修** —— 修它要走 §5 四条。
+        let d: u32 = (x % 10) as u32;
+        let c: u32 = 48 + d;
+        store8(dst, tb + n, c as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let q: u32 = 0;
+    while q < n {
+        store8(dst, o + q, load8(dst, tb + n - 1 - q) as u8);
+        q = q + 1;
+    }
+    return o + n;
+}
+
+// ---------------------------------------------------------------- token
+fn tk_kind(t: ptr, i: u32) -> u32 { return load32(t, i * 20); }
+fn tk_off(t: ptr, i: u32) -> u32 { return load32(t, i * 20 + 4); }
+fn tk_len(t: ptr, i: u32) -> u32 { return load32(t, i * 20 + 8); }
+
+/// token `i` 的文本等于字面量 `s` 吗（**字符串 token 不匹配**，与参考侧同口径）。
+fn tk_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tk_kind(t, i) == 2 {
+        return false;
+    }
+    let n: u32 = str_len(s);
+    if tk_len(t, i) != n {
+        return false;
+    }
+    let off: u32 = tk_off(t, i);
+    let sp: ptr = str_ptr(s);
+    let q: u32 = 0;
+    while q < n {
+        if (load8(src, off + q) as u32) != (load8(sp, q) as u32) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// `src[off..off+ln]` 等于字面量 `s` 吗（按**跨度**比，不是 token 下标）。
+fn span_is(src: ptr, off: u32, ln: u32, s: str) -> bool {
+    let n: u32 = str_len(s);
+    if n != ln {
+        return false;
+    }
+    let sp: ptr = str_ptr(s);
+    let q: u32 = 0;
+    while q < n {
+        if (load8(src, off + q) as u32) != (load8(sp, q) as u32) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// 两段源码跨度相等吗。
+///
+/// **找函数/常量必须按文本比，不能按偏移比** —— 同一个名字在定义处与调用处的 `start`
+/// 是**两个不同的数**。实测撞到：`fib(n-1)` 调不到自己（报 `nobuiltin`），因为
+/// 调用点的偏移和 `fn fib` 那处的偏移不相等。
+fn span_eq(src: ptr, a: u32, b: u32, ln: u32) -> bool {
+    let q: u32 = 0;
+    while q < ln {
+        if (load8(src, a + q) as u32) != (load8(src, b + q) as u32) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// 数字字面量 -> u64（十进制与 `0x`）。
+fn num_val(src: ptr, t: ptr, i: u32) -> u64 {
+    let off: u32 = tk_off(t, i);
+    let n: u32 = tk_len(t, i);
+    let v: u64 = 0;
+    let q: u32 = 0;
+    // **两边同宽度**：`load8` 的返回类型是 u32，所以拿它跟 `48 as u8`（i8）比会在
+    // LLVM 那层炸（`icmp eq i32 %x, i8 %y`）—— 正是 `docs/158` §4 第 11 条那个
+    // "混合宽度比较"的未修分叉。这里靠**不写 `as u8`** 绕开，字面量跟着 u32 走。
+    if n > 1 && load8(src, off) == 48
+            && (load8(src, off + 1) == 120 || load8(src, off + 1) == 88) {
+        q = 2;
+        while q < n {
+            let c: u32 = load8(src, off + q) as u32;
+            let d: u32 = 0;
+            if c >= 48 && c <= 57 { d = c - 48; }
+            if c >= 97 && c <= 102 { d = c - 87; }
+            if c >= 65 && c <= 70 { d = c - 55; }
+            v = v * 16 + (d as u64);
+            q = q + 1;
+        }
+    } else {
+        while q < n {
+            v = v * 10 + ((load8(src, off + q) as u32) - 48) as u64;
+            q = q + 1;
+        }
+    }
+    return v;
+}
+
+/// 跳过一个类型：`ptr` / `u64` / `[T; N]` / `mut [T]`。
+fn skip_type(src: ptr, t: ptr, nt: u32, i: u32) -> u32 {
+    let j: u32 = i;
+    if tk_is(src, t, j, "mut") {
+        j = j + 1;
+    }
+    if tk_is(src, t, j, "[") {
+        let d: u32 = 1;
+        let k: u32 = j + 1;
+        while k < nt && d > 0 {
+            if tk_is(src, t, k, "[") { d = d + 1; }
+            if tk_is(src, t, k, "]") { d = d - 1; }
+            k = k + 1;
+        }
+        return k;
+    }
+    return j + 1;
+}
+
+// ---------------------------------------------------------------- 环境
+// 槽 16B: 名起点(4) 名长(4) 值低(4) 值高(4)
+fn env_find(src: ptr, env: ptr, ne: u32, off: u32, ln: u32) -> u32 {
+    let k: u32 = ne;
+    while k > 0 {
+        let s: u32 = load32(env, (k - 1) * 16);
+        if load32(env, (k - 1) * 16 + 4) == ln {
+            let q: u32 = 0;
+            let ok: u32 = 1;
+            while q < ln {
+                if (load8(src, s + q) as u32) != (load8(src, off + q) as u32) {
+                    ok = 0;
+                }
+                q = q + 1;
+            }
+            if ok == 1 {
+                return k - 1;
+            }
+        }
+        k = k - 1;
+    }
+    return 4294967295;
+}
+
+fn env_push(src: ptr, env: ptr, st: ptr, t: ptr, i: u32, v: u64) {
+    let n: u32 = load32(st, ST_NE);
+    if n >= ENV_CAP {
+        set_err(st, E_OOM);
+    } else {
+        store32(env, n * 16, tk_off(t, i));
+        store32(env, n * 16 + 4, tk_len(t, i));
+        put64(env, n * 16 + 8, v);
+        store32(st, ST_NE, n + 1);
+    }
+}
+
+fn env_assign(src: ptr, env: ptr, st: ptr, off: u32, ln: u32, v: u64) {
+    let s: u32 = env_find(src, env, load32(st, ST_NE), off, ln);
+    if s == 4294967295 {
+        set_err(st, E_UNDEF);
+    } else {
+        put64(env, s * 16 + 8, v);
+    }
+}
+
+// ---------------------------------------------------------------- 值堆
+fn ar_alloc(st: ptr, n: u32) -> u32 {
+    let top: u32 = load32(st, ST_TOP);
+    let need: u32 = (n + 7) / 8 * 8;
+    if top + need > ARENA_CAP {
+        set_err(st, E_OOM);
+        return 0;
+    }
+    store32(st, ST_TOP, top + need);
+    return top;
+}
+
+// ---------------------------------------------------------------- 找函数
+/// 从 `fi`（一个 `fn` token）取 `(参数个数, 体起点 '{' 的下标)`，打包。
+fn sig(src: ptr, t: ptr, nt: u32, fi: u32) -> u64 {
+    let j: u32 = fi + 2;
+    let np: u32 = 0;
+    while j < nt && !tk_is(src, t, j, ")") {
+        if tk_kind(t, j) == 0 && tk_is(src, t, j + 1, ":") {
+            np = np + 1;
+        }
+        j = j + 1;
+    }
+    let k: u32 = j + 1;                    // ')' 之后
+    if tk_is(src, t, k, "-") && tk_is(src, t, k + 1, ">") {
+        return pack2(np, skip_type(src, t, nt, k + 2));
+    }
+    return pack2(np, k);
+}
+
+/// 找 `fn <名字>` 的 `fn` token 下标（**按文本比**，见 `span_eq`）；找不到 4294967295。
+fn find_fn(src: ptr, t: ptr, nt: u32, off: u32, ln: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if tk_is(src, t, i, "fn") && tk_kind(t, i + 1) == 0
+                && tk_len(t, i + 1) == ln
+                && span_eq(src, tk_off(t, i + 1), off, ln) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+fn find_main(src: ptr, t: ptr, nt: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if tk_is(src, t, i, "fn") && tk_is(src, t, i + 1, "main") {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 找 `const <名字>` 的**值 token**（**按文本比**）；找不到 4294967295。
+fn find_const(src: ptr, t: ptr, nt: u32, off: u32, ln: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if tk_is(src, t, i, "const") && tk_kind(t, i + 1) == 0
+                && tk_len(t, i + 1) == ln
+                && span_eq(src, tk_off(t, i + 1), off, ln) {
+            let k: u32 = skip_type(src, t, nt, i + 3);
+            if tk_is(src, t, k, "=") {
+                return k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+// ---------------------------------------------------------------- 运算符表
+// 编码与 `parser.lomt` 的 `op_code` **逐值相同**（那套跟 Python 版有逐字符对照）。
+fn op_code(src: ptr, t: ptr, i: u32) -> u32 {
+    if tk_is(src, t, i, "|") {
+        if tk_is(src, t, i + 1, "|") { return 1; }
+        return 17;
+    }
+    if tk_is(src, t, i, "&") {
+        if tk_is(src, t, i + 1, "&") { return 2; }
+        return 16;
+    }
+    if tk_is(src, t, i, "=") {
+        if tk_is(src, t, i + 1, "=") { return 3; }
+        return 0;
+    }
+    if tk_is(src, t, i, "!") {
+        if tk_is(src, t, i + 1, "=") { return 4; }
+        return 0;
+    }
+    if tk_is(src, t, i, "<") {
+        if tk_is(src, t, i + 1, "=") { return 6; }
+        if tk_is(src, t, i + 1, "<") { return 9; }
+        return 5;
+    }
+    if tk_is(src, t, i, ">") {
+        if tk_is(src, t, i + 1, "=") { return 8; }
+        if tk_is(src, t, i + 1, ">") { return 10; }
+        return 7;
+    }
+    if tk_is(src, t, i, "+") { return 11; }
+    if tk_is(src, t, i, "-") { return 12; }
+    if tk_is(src, t, i, "*") { return 13; }
+    if tk_is(src, t, i, "/") { return 14; }
+    if tk_is(src, t, i, "%") { return 15; }
+    if tk_is(src, t, i, "^") { return 18; }
+    return 0;
+}
+
+fn op_prec(c: u32) -> u32 {
+    if c == 1 { return 1; }
+    if c == 2 { return 2; }
+    if c == 3 || c == 4 { return 3; }
+    if c >= 5 && c <= 8 { return 4; }
+    if c == 17 { return 5; }
+    if c == 18 { return 6; }
+    if c == 16 { return 7; }
+    if c == 9 || c == 10 { return 8; }
+    if c == 11 || c == 12 { return 9; }
+    if c >= 13 && c <= 15 { return 10; }
+    return 0;
+}
+
+fn op_toks(c: u32) -> u32 {
+    if c <= 4 || c == 6 || c == 8 || c == 9 || c == 10 {
+        return 2;
+    }
+    return 1;
+}
+
+/// 二元运算的**求值**（短路那两条在 `ct_expr` 里单独处理）。`c` 是 `op_code` 的编码。
+fn apply_bin(st: ptr, c: u32, a: u64, b: u64) -> u64 {
+    if c == 11 { return a + b; }
+    if c == 12 { return a - b; }
+    if c == 13 { return a * b; }
+    if c == 14 {
+        if b == 0 {
+            set_err(st, E_DIVZERO);
+            return 0;
+        }
+        return a / b;
+    }
+    if c == 15 {
+        if b == 0 {
+            set_err(st, E_DIVZERO);
+            return 0;
+        }
+        return a % b;
+    }
+    if c == 16 { return a & b; }
+    if c == 17 { return a | b; }
+    if c == 18 { return a ^ b; }
+    if c == 9 { return a * two_pow(b % 64); }      // 移位量按 63 掩码 —— 与参考侧 `b & 63` 同
+    if c == 10 { return a / two_pow(b % 64); }
+    if c == 3 { return boolv(a == b); }
+    if c == 4 { return boolv(a != b); }
+    if c == 5 { return boolv(a < b); }
+    if c == 6 { return boolv(a <= b); }
+    if c == 7 { return boolv(a > b); }
+    if c == 8 { return boolv(a >= b); }
+    return 0;
+}
+
+fn boolv(b: bool) -> u64 {
+    if b {
+        return 1;
+    }
+    return 0;
+}
+
+/// `2^n`，`n >= 64` 时**不左移**（避免未定义；两边都当 0）。
+fn two_pow(n: u64) -> u64 {
+    if n >= 64 {
+        return 0;
+    }
+    let v: u64 = 1;
+    let q: u64 = 0;
+    while q < n {
+        v = v * 2;
+        q = q + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 内建
+/// 内建的形参个数；不是内建 -> 4294967295。
+fn bl_arity(src: ptr, off: u32, ln: u32) -> u32 {
+    if span_is(src, off, ln, "alloc") { return 1; }
+    if span_is(src, off, ln, "free") { return 1; }
+    if span_is(src, off, ln, "load8") { return 2; }
+    if span_is(src, off, ln, "store8") { return 3; }
+    if span_is(src, off, ln, "load32") { return 2; }
+    if span_is(src, off, ln, "store32") { return 3; }
+    if span_is(src, off, ln, "str_len") { return 1; }
+    if span_is(src, off, ln, "str_byte") { return 2; }
+    if span_is(src, off, ln, "str_ptr") { return 1; }
+    return 4294967295;
+}
+
+/// 跑一个内建。实参在 `args[base..]`，结果写 `st+V`。
+fn do_builtin(src: ptr, st: ptr, ar: ptr, args: ptr, base: u32,
+              off: u32, ln: u32) -> bool {
+    let a0: u64 = get64(args, base);
+    if span_is(src, off, ln, "alloc") {
+        put64(st, ST_V, ar_alloc(st, a0 as u32) as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "free") {
+        put64(st, ST_V, 0 as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "load8") {
+        put64(st, ST_V, load8(ar, (a0 as u32) + (get64(args, base + 8) as u32)) as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "store8") {
+        store8(ar, (a0 as u32) + (get64(args, base + 8) as u32),
+               (get64(args, base + 16) % 256) as u8);
+        put64(st, ST_V, 0 as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "load32") {
+        put64(st, ST_V, load32(ar, (a0 as u32) + (get64(args, base + 8) as u32)) as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "store32") {
+        store32(ar, (a0 as u32) + (get64(args, base + 8) as u32),
+                (get64(args, base + 16) % 4294967296) as u32);
+        put64(st, ST_V, 0 as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "str_len") {
+        put64(st, ST_V, a0 % 4294967296);
+        return true;
+    }
+    if span_is(src, off, ln, "str_byte") {
+        let ix: u64 = get64(args, base + 8);
+        if ix >= a0 % 4294967296 {
+            set_err(st, E_OOB);
+            put64(st, ST_V, 0 as u64);
+            return true;
+        }
+        put64(st, ST_V, load8(src, (a0 / 4294967296) as u32 + ix as u32) as u64);
+        return true;
+    }
+    if span_is(src, off, ln, "str_ptr") {
+        put64(st, ST_V, 0 as u64);   // 两个实现同规则：`str` 在宿主内存里没有实体
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 表达式
+/// 原子 + 后缀。返回新下标，值在 `st+V`。
+fn ct_atom(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+           i: u32) -> u32 {
+    let k: u32 = tk_kind(t, i);
+    if k == 1 {
+        put64(st, ST_V, num_val(src, t, i));
+        return i + 1;
+    }
+    if k == 2 {
+        // 字符串字面量：剥引号，值 = (源偏移 << 32) | 长度（见文件头"已知边界"）
+        put64(st, ST_V, (tk_off(t, i) + 1) as u64 * 4294967296
+                        + (tk_len(t, i) - 2) as u64);
+        return i + 1;
+    }
+    if tk_is(src, t, i, "true") {
+        put64(st, ST_V, 1 as u64);
+        return i + 1;
+    }
+    if tk_is(src, t, i, "false") {
+        put64(st, ST_V, 0 as u64);
+        return i + 1;
+    }
+    if tk_is(src, t, i, "(") {
+        let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 1, 1);
+        return j + 1;
+    }
+    if tk_is(src, t, i, "[") {
+        // 数组字面量 -> 值堆里的 [长度][元素...]；值 = 那个偏移
+        let p: u32 = ar_alloc(st, 8);
+        let n: u32 = 0;
+        let j: u32 = i + 1;
+        if !tk_is(src, t, j, "]") {
+            let go: u32 = 1;
+            while go == 1 {
+                j = ct_expr(src, t, nt, env, st, ar, args, j, 1);
+                let ep: u32 = ar_alloc(st, 8);
+                put64(ar, ep, get64(st, ST_V));
+                n = n + 1;
+                if tk_is(src, t, j, ",") {
+                    j = j + 1;
+                } else {
+                    go = 0;
+                }
+            }
+        }
+        put64(ar, p, n as u64);
+        put64(st, ST_V, p as u64);
+        return j + 1;
+    }
+    if k == 0 {
+        let off: u32 = tk_off(t, i);
+        let ln: u32 = tk_len(t, i);
+        if tk_is(src, t, i + 1, "(") {
+            let fi: u32 = find_fn(src, t, nt, off, ln);
+            let ba: u32 = bl_arity(src, off, ln);
+            if fi == 4294967295 && ba == 4294967295 {
+                set_err(st, E_NOBLTIN);
+                put64(st, ST_V, 0 as u64);
+                return i + 1;
+            }
+            let base: u32 = load32(st, ST_AT);
+            if base + ARG_STEP > ARGS_CAP {
+                set_err(st, E_OOM);
+                put64(st, ST_V, 0 as u64);
+                return i + 1;
+            }
+            store32(st, ST_AT, base + ARG_STEP);
+            let j: u32 = i + 2;
+            let q: u32 = 0;
+            if !tk_is(src, t, j, ")") {
+                let go: u32 = 1;
+                while go == 1 {
+                    j = ct_expr(src, t, nt, env, st, ar, args, j, 1);
+                    put64(args, base + q * 8, get64(st, ST_V));
+                    q = q + 1;
+                    if tk_is(src, t, j, ",") {
+                        j = j + 1;
+                    } else {
+                        go = 0;
+                    }
+                }
+            }
+            store32(st, ST_AT, base);
+            if fi != 4294967295 {
+                // **不能用 `call_fn` 的返回值当下标** —— 它返回的是**被调函数体的 `}` 之后**，
+                // 那是被调者 token 范围里的位置，跟调用点毫无关系。
+                // 实测撞到：`g(n-1) + g(n-2)` 里第一次调用之后下标就跳进被调者的体内，
+                // 于是死循环（`fib` 超时）。
+                call_fn(src, t, nt, env, st, ar, fi, args, base, q);
+                return j + 1;               // 调用点的 `)` 之后
+            }
+            if q != ba {
+                set_err(st, E_ARITY);
+                put64(st, ST_V, 0 as u64);
+                return j + 1;
+            }
+            if !do_builtin(src, st, ar, args, base, off, ln) {
+                set_err(st, E_NOBLTIN);
+                put64(st, ST_V, 0 as u64);
+            }
+            return j + 1;
+        }
+        let s: u32 = env_find(src, env, load32(st, ST_NE), off, ln);
+        if s != 4294967295 {
+            put64(st, ST_V, get64(env, s * 16 + 8));
+            return i + 1;
+        }
+        let ci: u32 = find_const(src, t, nt, off, ln);
+        if ci != 4294967295 {
+            put64(st, ST_V, num_val(src, t, ci));
+            return i + 1;
+        }
+        set_err(st, E_UNDEF);
+        put64(st, ST_V, 0 as u64);
+        return i + 1;
+    }
+    set_err(st, E_UNSUP);
+    put64(st, ST_V, 0 as u64);
+    return i + 1;
+}
+
+/// 后缀：`[下标]` 与 `as 类型`。值在 `st+V`。
+fn ct_postfix(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+              i: u32) -> u32 {
+    let i2: u32 = i;
+    let go: u32 = 1;
+    while go == 1 {
+        let base: u64 = get64(st, ST_V);
+        if tk_is(src, t, i2, "[") {
+            let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i2 + 1, 1);
+            let ix: u64 = get64(st, ST_V);
+            let p: u32 = base as u32;
+            let n: u64 = get64(ar, p);
+            if ix >= n {
+                set_err(st, E_OOB);
+                put64(st, ST_V, 0 as u64);
+                return j + 1;
+            }
+            put64(st, ST_V, get64(ar, p + 8 + (ix as u32) * 8));
+            i2 = j + 1;
+        } else if tk_is(src, t, i2, "as") {
+            let ty: u32 = i2 + 1;
+            let w: u32 = width_of(src, t, ty);
+            let v: u64 = get64(st, ST_V);
+            if w == 64 {
+                put64(st, ST_V, v);
+            } else {
+                put64(st, ST_V, v % two_pow(w as u64));
+            }
+            i2 = skip_type(src, t, nt, ty);
+        } else {
+            return i2;
+        }
+    }
+    return i2;
+}
+
+/// 类型的位宽；认不出就当 64。
+fn width_of(src: ptr, t: ptr, i: u32) -> u32 {
+    if tk_is(src, t, i, "u8") || tk_is(src, t, i, "i8") { return 8; }
+    if tk_is(src, t, i, "u16") || tk_is(src, t, i, "i16") { return 16; }
+    if tk_is(src, t, i, "u32") || tk_is(src, t, i, "i32") { return 32; }
+    if tk_is(src, t, i, "bool") { return 1; }
+    return 64;
+}
+
+fn ct_unary(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+            i: u32) -> u32 {
+    if tk_is(src, t, i, "!") {
+        let j: u32 = ct_unary(src, t, nt, env, st, ar, args, i + 1);
+        put64(st, ST_V, 1 as u64 - b2u(get64(st, ST_V)));
+        return j;
+    }
+    if tk_is(src, t, i, "-") {
+        let j2: u32 = ct_unary(src, t, nt, env, st, ar, args, i + 1);
+        put64(st, ST_V, (0 as u64) - get64(st, ST_V));
+        return j2;
+    }
+    let j3: u32 = ct_atom(src, t, nt, env, st, ar, args, i);
+    return ct_postfix(src, t, nt, env, st, ar, args, j3);
+}
+
+/// 优先级爬升（与 `parser.lomt` 的 `parse_expr` 同形）。返回新下标，值在 `st+V`。
+fn ct_expr(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+           i: u32, minp: u32) -> u32 {
+    let j: u32 = ct_unary(src, t, nt, env, st, ar, args, i);
+    let go: u32 = 1;
+    while go == 1 {
+        let c: u32 = op_code(src, t, j);
+        if c == 0 || op_prec(c) < minp || load32(st, ST_ERR) != E_NONE {
+            go = 0;
+        } else if c == 2 {
+            let a: u64 = get64(st, ST_V);
+            if a == 0 {
+                put64(st, ST_V, 0 as u64);
+                j = j + 2;
+            } else {
+                j = ct_expr(src, t, nt, env, st, ar, args, j + 2, op_prec(c) + 1);
+                put64(st, ST_V, b2u(get64(st, ST_V)));
+            }
+        } else if c == 1 {
+            let a2: u64 = get64(st, ST_V);
+            if a2 != 0 {
+                put64(st, ST_V, 1 as u64);
+                j = j + 2;
+            } else {
+                j = ct_expr(src, t, nt, env, st, ar, args, j + 2, op_prec(c) + 1);
+                put64(st, ST_V, b2u(get64(st, ST_V)));
+            }
+        } else {
+            let a3: u64 = get64(st, ST_V);
+            j = ct_expr(src, t, nt, env, st, ar, args, j + op_toks(c), op_prec(c) + 1);
+            let b3: u64 = get64(st, ST_V);
+            put64(st, ST_V, apply_bin(st, c, a3, b3));
+        }
+    }
+    return j;
+}
+
+// ---------------------------------------------------------------- 语句
+fn ct_block(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+            i: u32) -> u32 {
+    let save: u32 = load32(st, ST_NE);
+    let j: u32 = i;
+    while load32(st, ST_RF) == 0 && j < nt && load32(st, ST_ERR) == E_NONE
+            && !tk_is(src, t, j, "}") {
+        j = ct_stmt(src, t, nt, env, st, ar, args, j);
+    }
+    store32(st, ST_NE, save);
+    return j;
+}
+
+fn ct_stmt(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+           i: u32) -> u32 {
+    if tk_is(src, t, i, "let") {
+        let vi: u32 = i + 1;
+        let k: u32 = skip_type(src, t, nt, i + 3);
+        if tk_is(src, t, k, "=") {
+            let j: u32 = ct_expr(src, t, nt, env, st, ar, args, k + 1, 1);
+            env_push(src, env, st, t, vi, get64(st, ST_V));
+            return j + 1;
+        }
+        env_push(src, env, st, t, vi, 0 as u64);
+        return k + 1;
+    }
+    if tk_is(src, t, i, "return") {
+        let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 1, 1);
+        put64(st, ST_R, get64(st, ST_V));
+        store32(st, ST_RF, 1);
+        return j + 1;
+    }
+    if tk_is(src, t, i, "if") {
+        if tk_is(src, t, i + 1, "let") {
+            // `if let` 不在编译期子集里（参考侧也不收）—— 报出来，但**要把整条跳过去**，
+            // 否则后面的语句会被当成它的体继续解析。
+            set_err(st, E_UNSUP);
+            return skip_if(src, t, nt, i);
+        }
+        let cb: u32 = skip_expr(src, t, nt, i + 1);   // then 的 `{`
+        let e: u32 = block_end(src, t, nt, cb);       // then 的 `}`
+        let k: u32 = e + 1;
+        let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 1, 1);
+        let c: u64 = get64(st, ST_V);
+        if c != 0 {
+            let je: u32 = ct_block(src, t, nt, env, st, ar, args, cb + 1);
+            if load32(st, ST_RF) == 1 {
+                return je + 1;
+            }
+            if tk_is(src, t, k, "else") {
+                return skip_if(src, t, nt, i);   // 命中就不走 else —— **整条跳掉**
+            }
+            return k;
+        }
+        if tk_is(src, t, k, "else") {
+            if tk_is(src, t, k + 1, "if") {
+                return ct_stmt(src, t, nt, env, st, ar, args, k + 1);
+            }
+            let k2: u32 = ct_block(src, t, nt, env, st, ar, args, k + 1);
+            return k2 + 1;
+        }
+        return k;
+    }
+    if tk_is(src, t, i, "while") {
+        let ci: u32 = i + 1;
+        // 体的起点与收尾 `}` **用"只跳不求值"定**：参考侧每轮只求一次条件，这里若用
+        // `ct_expr` 去探边界，就会多求一次（多跑副作用、多报一次错）。
+        let cb: u32 = skip_expr(src, t, nt, ci);
+        let body: u32 = cb + 1;
+        let endi: u32 = block_end(src, t, nt, cb);
+        let spins: u32 = 0;
+        let go: u32 = 1;
+        while go == 1 {
+            let j: u32 = ct_expr(src, t, nt, env, st, ar, args, ci, 1);
+            if get64(st, ST_V) == 0 || load32(st, ST_ERR) != E_NONE {
+                go = 0;
+            } else {
+                spins = spins + 1;
+                if spins > LIMIT {
+                    set_err(st, E_SPIN);
+                    go = 0;
+                } else {
+                    let e: u32 = ct_block(src, t, nt, env, st, ar, args, body);
+                    if load32(st, ST_RF) == 1 {
+                        return e + 1;
+                    }
+                }
+            }
+        }
+        return endi + 1;
+    }
+    if tk_is(src, t, i, "for") {
+        // for <var> in <lo> .. <hi> { body }
+        let vi: u32 = i + 1;
+        let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 3, 1);
+        let lo: u64 = get64(st, ST_V);
+        let k: u32 = ct_expr(src, t, nt, env, st, ar, args, j + 2, 1);
+        let hi: u64 = get64(st, ST_V);
+        let body: u32 = k + 1;
+        let endi: u32 = block_end(src, t, nt, body - 1);
+        let cur: u64 = lo;
+        let spins: u32 = 0;
+        while cur < hi {
+            spins = spins + 1;
+            if spins > LIMIT {
+                set_err(st, E_SPIN);
+                return endi + 1;
+            }
+            let save: u32 = load32(st, ST_NE);
+            env_push(src, env, st, t, vi, cur);
+            let e: u32 = ct_block(src, t, nt, env, st, ar, args, body);
+            store32(st, ST_NE, save);
+            if load32(st, ST_RF) == 1 {
+                return e + 1;
+            }
+            cur = cur + 1;
+        }
+        return endi + 1;
+    }
+    if tk_kind(t, i) == 0 {
+        if tk_is(src, t, i + 1, "=") {
+            let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 2, 1);
+            env_assign(src, env, st, tk_off(t, i), tk_len(t, i), get64(st, ST_V));
+            return j + 1;
+        }
+        if tk_is(src, t, i + 1, "[") {
+            let j: u32 = ct_expr(src, t, nt, env, st, ar, args, i + 2, 1);
+            let ix: u64 = get64(st, ST_V);
+            let k: u32 = ct_expr(src, t, nt, env, st, ar, args, j + 2, 1);
+            let v: u64 = get64(st, ST_V);
+            let s: u32 = env_find(src, env, load32(st, ST_NE), tk_off(t, i), tk_len(t, i));
+            if s == 4294967295 {
+                set_err(st, E_UNDEF);
+            } else {
+                let p: u32 = get64(env, s * 16 + 8) as u32;
+                if ix >= get64(ar, p) {
+                    set_err(st, E_NOTARR);
+                } else {
+                    put64(ar, p + 8 + (ix as u32) * 8, v);
+                }
+            }
+            return k + 1;
+        }
+    }
+    // 表达式语句
+    let j2: u32 = ct_expr(src, t, nt, env, st, ar, args, i, 1);
+    return j2 + 1;
+}
+
+/// 从条件起点扫到那个 `{`，返回 `{` 的下标。
+fn cond_end(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr, args: ptr,
+            ci: u32) -> u32 {
+    let j: u32 = ct_expr(src, t, nt, env, st, ar, args, ci, 1);
+    return j + 1;
+}
+
+/// **只跳不求值**：从头扫到一个**顶层**的 `{` / `}` / `;`，返回它的下标。
+///
+/// 为什么需要它：`if` 的 `else` 分支与 `while` 的体，都必须**先知道边界**才知道该不该
+/// 求值；而用 `ct_expr` 去探边界会**真的把那个表达式算一遍**（多跑副作用、多报一次错）。
+/// 编译期子集里没有结构体字面量，所以"顶层 `{` 就是块起点"这条成立。
+fn skip_expr(src: ptr, t: ptr, nt: u32, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while j < nt {
+        if tk_is(src, t, j, "(") || tk_is(src, t, j, "[") {
+            d = d + 1;
+        }
+        if tk_is(src, t, j, ")") || tk_is(src, t, j, "]") {
+            if d > 0 {
+                d = d - 1;
+            }
+        }
+        // **括号要写全**：`a && (b || c || d)` —— 少了外层那对，`&&` 的优先级更高，
+        // 括号里那两个就成了无条件命中（`skip_expr` 会在错误的位置停下）。
+        if d == 0 && (tk_is(src, t, j, "{") || tk_is(src, t, j, "}")
+                      || tk_is(src, t, j, ";")) {
+            return j;
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 跳过一整条 `if`（含 `else` / `else if` 链），返回它之后的下标。**只跳不求值。**
+fn skip_if(src: ptr, t: ptr, nt: u32, i: u32) -> u32 {
+    let cb: u32 = skip_expr(src, t, nt, i + 1);
+    let e: u32 = block_end(src, t, nt, cb);
+    let k: u32 = e + 1;
+    if tk_is(src, t, k, "else") {
+        if tk_is(src, t, k + 1, "if") {
+            return skip_if(src, t, nt, k + 1);
+        }
+        return block_end(src, t, nt, k + 1) + 1;
+    }
+    return k;
+}
+
+/// `{` 在 `at` 时，配对的 `}` 的下标。
+fn block_end(src: ptr, t: ptr, nt: u32, at: u32) -> u32 {
+    let d: u32 = 1;
+    let e: u32 = at + 1;
+    while e < nt && d > 0 {
+        if tk_is(src, t, e, "{") { d = d + 1; }
+        if tk_is(src, t, e, "}") { d = d - 1; }
+        e = e + 1;
+    }
+    return e - 1;
+}
+
+// ---------------------------------------------------------------- 调用
+/// 调用 `fn`（`fi` 是那个 `fn` token）。实参已在 `args[base..base+nargs)`。
+/// 结果写 `st+V`；返回 `}` 之后的下标。
+fn call_fn(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr,
+           fi: u32, args: ptr, base: u32, nargs: u32) -> u32 {
+    let s: u64 = sig(src, t, nt, fi);
+    let np: u32 = unpk_a(s);
+    let brace: u32 = unpk_b(s);
+    if np != nargs {
+        set_err(st, E_ARITY);
+        return brace + 1;
+    }
+    let d: u32 = load32(st, ST_DP);
+    if d >= MAX_DEPTH {
+        set_err(st, E_DEPTH);
+        return brace + 1;
+    }
+    store32(st, ST_DP, d + 1);
+    let save: u32 = load32(st, ST_NE);
+    let pj: u32 = fi + 3;
+    let q: u32 = 0;
+    while q < np {
+        while !(tk_kind(t, pj) == 0 && tk_is(src, t, pj + 1, ":")) {
+            pj = pj + 1;
+        }
+        env_push(src, env, st, t, pj, get64(args, base + q * 8));
+        pj = skip_type(src, t, nt, pj + 2);
+        q = q + 1;
+    }
+    let rf: u32 = load32(st, ST_RF);
+    store32(st, ST_RF, 0);
+    let e: u32 = ct_block(src, t, nt, env, st, ar, args, brace + 1);
+    store32(st, ST_NE, save);
+    store32(st, ST_DP, d);
+    if load32(st, ST_RF) == 1 {
+        put64(st, ST_V, get64(st, ST_R));
+    } else {
+        put64(st, ST_V, 0 as u64);      // 无 return 落到末尾 -> 0
+    }
+    store32(st, ST_RF, rf);
+    return e + 1;
+}
+
+// ---------------------------------------------------------------- 入口
+/// 跑一支编译期子集里的程序；把 `OK <十进制>` 或 `ERR <种类>`（NUL 结尾）写进 `out`，
+/// 返回退出码（0 / 1 / 2）。
+pub fn ct_run(src: ptr, n: u32, out: ptr) -> u32 {
+    let toks: ptr = alloc(TOK_BYTES);
+    let env: ptr = alloc(ENV_BYTES);
+    let ar: ptr = alloc(ARENA_CAP);
+    // 状态与实参栈**连着分配** —— `args_for(st)` 就是 `st + ST_BYTES`，
+    // 所以这里必须一次要到两段（漏掉 ARGS_CAP 会让实参写到状态块后面去）。
+    let st: ptr = alloc(ST_BYTES + ARGS_CAP);
+    store32(st, ST_ERR, E_NONE);
+    store32(st, ST_NE, 0);
+    store32(st, ST_TOP, 16);        // 前 16 字节留空 —— 0 当"空指针"
+    store32(st, ST_RF, 0);
+    store32(st, ST_AT, 0);
+    store32(st, ST_DP, 0);
+    let nt: u32 = lex_cap(src, n, toks, TOK_CAP);
+    if nt > TOK_CAP {
+        return wr_err(out, E_OOM);
+    }
+    let fi: u32 = find_main(src, toks, nt);
+    if fi == 4294967295 {
+        return wr_err(out, E_NOENTRY);
+    }
+    let s: u64 = sig(src, toks, nt, fi);
+    if unpk_a(s) != 0 {
+        return wr_err(out, E_ARITY);
+    }
+    call_fn(src, toks, nt, env, st, ar, fi, args_for(st), 0, 0);
+    let e: u32 = load32(st, ST_ERR);
+    if e != E_NONE {
+        return wr_err(out, e);
+    }
+    return wr_ok(out, get64(st, ST_V));
+}
+
+/// 实参栈的基址。**放在 `st` 之后**，用状态块的地址算出来 —— 这样不必再传一个形参。
+/// （`alloc` 是顺序 bump，所以 `st` 之后紧挨着的是稳定的一块。）
+fn args_for(st: ptr) -> ptr {
+    return ptr_add(st, ST_BYTES);
+}
+
+fn wr_ok(out: ptr, v: u64) -> u32 {
+    let o: u32 = puts(out, 0, "OK ");
+    store8(out, put_dec(out, o, v), 0 as u8);
+    return 0;
+}
+
+fn wr_err(out: ptr, c: u32) -> u32 {
+    let o: u32 = puts(out, 0, "ERR ");
+    store8(out, puts(out, o, err_name(c)), 0 as u8);
+    return 1;
+}
