@@ -728,3 +728,38 @@ error[E002]: 符号未声明
 一个 `ESC` 都不剩；并且**剥掉转义之后与关色输出逐字节相同**（只差颜色，不少印东西）。
 另有启动器那一条：`loment check FILE --no-color` 之后，**渲染器真的收到了这个开关**
 （桩渲染器把自己的 argv 打出来，看得到）。
+
+## 13. 语法声明压过内容嗅探（2026-09-18）
+
+对端落了 `choose write grammar <别名>` 的**源侧**那一半（`docs/188` §2），
+`potato_from.resolve_lang` 的次序因此变成 **声明 > 后缀 > 内容**。
+他们当时说"`foreign_note` 那条链不受影响" —— **对 `foreign_note` 成立，对报错器不成立**：
+`foreign_note` 问的是 `potato_from`（答案自然跟着变），而**报错器自己嗅探**，看不见那一行。
+
+**实测出来的缺口**：一份 `choose write grammar python` 的 `.lomt`，工具链知道是 Python，
+而报错器因为内容里没有 Python 特征词（`def ` / `__name__` / `self.`）**一个字都不说** ——
+工具链知道、渲染器沉默，是最坏的一种。
+
+**修法**：`sniff_lang` 改成**与工具链同一条次序**，并把**依据**说给用户听：
+
+```
+| 这个文件看起来**不是 Loment** —— 看内容像 Python（据文件头 `choose write grammar` 声明）。
+| 这个文件看起来**不是 Loment** —— 看内容像 Java（据后缀）。
+| 这个文件看起来**不是 Loment** —— 看内容像 C（据内容特征词）。
+```
+
+用户要能判断这句话有多硬 —— 声明是作者写的，内容特征词只是"看像"。
+
+**别名表也走同一条管线**：`--dump-surface` 从 `potato_from.GRAMMAR_ALIASES` 导出
+`alias_count` / `alias_word` / `alias_lang`（16 条），所以"作者能写哪些词"仍是一处真源，
+渲染器不另抄一份。**导不出来时 `--dump-surface` 直接抛**，不给空表 —— 空表会让报错器在
+"文件头声明了语法"时沉默，正是这一步要治的病。
+
+**次序那条线埋的同一个坑又出现一次**：`decl_lang` 只找那一行，**不管**"必须在 `module`
+之前""只许写一次"—— 那是**工具链该报的错**。渲染器找不到就退回嗅探，
+而"语法真变了"由判据钉着（`test_a_grammar_declaration_beats_content_sniffing` 会红），
+不会静默漂。
+
+判据：`loment_err_test` 15/15 —— 声明压过内容嗅探（**内容里一个 Python 特征词都没有**
+也能认出来）、别名 `cs` / `c#` / `C#` 都落到 C#、依据说得出是哪一条路。
+`loment_tools_test` 26/26；两侧 IR 逐字节相同（`lomenterr` 与 `surface_data`）。

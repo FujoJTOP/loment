@@ -852,6 +852,16 @@ def surface_lomt() -> str:
         src.append(f"    if c == {c} {{ return {n}; }}")
     src += ["    return 0;", "}", ""]
 
+    # 语法声明的**别名表**（`choose write grammar <别名>`）—— 报错器拿它把文件头那一行
+    # 翻成语言。**从 `potato_from` 推导，不另抄一份**：别名是"作者写哪个词"，而它到语言的
+    # 映射由**出厂锁**定（`docs/188` §1.1，不可扩展、不可覆盖）。
+    #
+    # **导不出来就炸，不给空表**：空表会让报错器在"文件头声明了语法"时沉默 —— 那正是
+    # 这一步要治的病（实测：一份 `choose write grammar python` 的 `.lomt`，工具链知道
+    # 是 Python，而报错器因为内容里没有 Python 特征词而一个字都不说）。
+    import potato_from
+    aliases = sorted(potato_from.GRAMMAR_ALIASES.items())
+
     # 语言卡（与六语言翻译线衔接的那一半，docs/188 §7.1）
     # **按 `LANG_ORDER` 排，不按字典序** —— 逐门问、取第一个命中，所以顺序就是优先级。
     _ord = {k: i for i, k in enumerate(LANG_ORDER)}
@@ -862,6 +872,18 @@ def surface_lomt() -> str:
             "",
             f"pub fn lang_count() -> u32 {{ return {len(langs)}; }}",
             ""]
+    src += [f"pub fn alias_count() -> u32 {{ return {len(aliases)}; }}", "",
+            "/// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。",
+            "pub fn alias_word(i: u32) -> str {"]
+    for i, (word, _canon) in enumerate(aliases):
+        src.append(f"    if i == {i} {{ return {_lom_str(word.lower())}; }}")
+    src += ['    return "";', "}", "",
+            "/// 该别名对应的语言（= `LANG_CARDS` 的键 / `potato_from.LANGS` 的键）。",
+            "pub fn alias_lang(i: u32) -> str {"]
+    for i, (_word, canon) in enumerate(aliases):
+        src.append(f"    if i == {i} {{ return {_lom_str(canon)}; }}")
+    src += ['    return "";', "}", ""]
+
     for fn, get in (("lang_key", lambda lk: lk.key),
                     ("lang_name", lambda lk: lk.display),
                     ("lang_exts", lambda lk: " ".join(lk.exts)),

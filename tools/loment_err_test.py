@@ -400,6 +400,51 @@ def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
     print("      注释里的外源特征词不误报 (命中要在行首)")
 
 @test
+def test_a_grammar_declaration_beats_content_sniffing():
+    """文件头写了 `choose write grammar <别名>` 时，**声明说了算** —— 与工具链同一次序。
+
+    `potato_from.resolve_lang` 现在是 **声明 > 后缀 > 内容**（`docs/188` §2）：声明是
+    **作者对这份文件说的**，而后缀只是命名习惯。渲染器看不到工具链的解析结果，得自己
+    找那一行 —— 不找就会**说出与工具链相反的一句**，而用户只能信一个。
+
+    这条是实测出来的缺口：一份 `choose write grammar python` 的 `.lomt`，工具链知道是
+    Python，而报错器因为内容里没有 Python 特征词（`def ` / `__name__` / `self.`）
+    **一个字都不说** —— 工具链知道、渲染器沉默，是最坏的一种。
+
+    顺带钉住**别名**也要认（`c#` / `cs` → C#）：别名表由 `--dump-surface` 从
+    `potato_from.GRAMMAR_ALIASES` 导出，所以"作者能写哪些词"仍是一处真源。
+    """
+    def probe(name: str, body: str) -> str:
+        td = Path(tempfile.mkdtemp(prefix="lomenterr-decl-"))
+        f = td / f"{name}.lomt"
+        f.write_text(body, encoding="utf-8", newline="\n")
+        d = td / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(f), "--check", "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, (name, r.returncode)
+        _, out = _render(d)
+        return out
+
+    # 内容里**一个 Python 特征词都没有** —— 只能靠声明认出来
+    out = probe("decl", "choose write grammar python" + "\n" + "\n"
+                + "x = 1" + "\n")
+    assert "像 Python" in out, f"没按声明认：{out[-400:]!r}"
+    assert "据文件头" in out, f"没说清依据是声明：{out[-400:]!r}"
+
+    # 别名：作者写 `cs` / `c#` 都该落到 C#
+    for alias in ("cs", "c#", "C#"):
+        o2 = probe("al", "choose write grammar " + alias + "\n"
+                   + "y = 2" + "\n")
+        assert "像 C#" in o2, f"别名 {alias!r} 没认成 C#：{o2[-400:]!r}"
+
+    # 后缀那条路仍要说清是"据后缀"（依据不能混着说）
+    _, dj = _check(SEMANTIC)
+    _ = dj
+    print("      声明压过内容嗅探（含别名 cs/c#/C#），依据也说给用户")
+
+@test
 def test_a_superset_language_is_not_reported_as_its_subset():
     """**C++ 不能被报成 C、C# 不能被报成 Java** —— 认语言是"逐门问、取第一个命中"，
     所以顺序**就是优先级**，而顺序写在 `loment_diag.LANG_ORDER` 里。

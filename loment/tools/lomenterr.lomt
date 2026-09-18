@@ -59,6 +59,7 @@ const C_TOK: u32 = 57408;       // 语言特征词的暂存 (一段 <= 60 字节
 const C_FPREV: u32 = 57472;      // 已经给过外源提示的那个文件路径
 const C_FPREVLEN: u32 = 61568;
 const C_COLOR: u32 = 61572;      // 1 = 上色（默认开，见 §颜色）
+const C_WHY: u32 = 61576;        // 认语言的依据: 1=声明 2=后缀 3=内容 (见 sniff_lang)
 
 //: `scr` 里留给"扫 argv 扫出来的那个路径"的一段。open_ro 自己用 scr[0..4001]，
 //: 所以这一段必须从它后面起 —— 扫完再调 open_ro 把它抄到前面去。
@@ -982,6 +983,152 @@ fn lang_by_ext(ctx: ptr, so: u32, sl: u32) -> u32 {
     return 4294967295;
 }
 
+/// ASCII 小写（别名比较用 —— 作者写 `C#` 还是 `c#` 都该认）。
+fn lower_c(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+/// 语言名 -> 下标（`lang_key(i)` 那套）。没有就是 `0xFFFFFFFF`。
+fn lang_index_of(s: str) -> u32 {
+    let i: u32 = 0;
+    while i < lang_count() {
+        let k: str = lang_key(i);
+        if str_len(k) == str_len(s) {
+            let j: u32 = 0;
+            let same: u32 = 1;
+            while j < str_len(s) && same == 1 {
+                if str_byte(k, j) != str_byte(s, j) {
+                    same = 0;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if same == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 别名 -> 语言下标（走 `surface_data` 的**出厂锁**表，不另抄一份）。
+fn lang_by_alias(sr: ptr, off: u32, len: u32) -> u32 {
+    let i: u32 = 0;
+    while i < alias_count() {
+        let w: str = alias_word(i);
+        if str_len(w) == len {
+            let k: u32 = 0;
+            let same: u32 = 1;
+            while k < len && same == 1 {
+                if lower_c(load8(sr, off + k)) != str_byte(w, k) {
+                    same = 0;
+                } else {
+                    k = k + 1;
+                }
+            }
+            if same == 1 {
+                return lang_index_of(alias_lang(i));
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+fn skip_blank(sr: ptr, p: u32, e: u32) -> u32 {
+    let i: u32 = p;
+    let go: u32 = 1;
+    while i < e && go == 1 {
+        if load8(sr, i) == SP || load8(sr, i) == TAB {
+            i = i + 1;
+        } else {
+            go = 0;
+        }
+    }
+    return i;
+}
+
+/// `[p,e)` 从 `p` 起是不是词 `w`（后面必须断在空白或 `;`）。返回词后位置，0 = 不是。
+fn eat_word(sr: ptr, p: u32, e: u32, w: str) -> u32 {
+    let n: u32 = str_len(w);
+    if p + n > e {
+        return 0;
+    }
+    let k: u32 = 0;
+    let same: u32 = 1;
+    while k < n && same == 1 {
+        if load8(sr, p + k) != str_byte(w, k) {
+            same = 0;
+        } else {
+            k = k + 1;
+        }
+    }
+    if same == 0 {
+        return 0;
+    }
+    if p + n < e && is_blank(load8(sr, p + n)) == false && load8(sr, p + n) != 59 {
+        return 0;
+    }
+    return p + n;
+}
+
+/// 文件头有没有 `choose write grammar <别名>`？返回语言下标，`0xFFFFFFFF` = 没有/认不出。
+///
+/// **与工具链同一条次序**（`potato_from.resolve_lang`：**声明 > 后缀 > 内容**）。声明是
+/// **作者对这份文件说的**，而后缀是命名习惯、会说谎 —— 所以它压过后缀。渲染器看不到
+/// 工具链的解析结果，只能自己找这一行；**语言名仍取自 `surface_data` 的别名表与
+/// `lang_key`**，所以"支持哪些语言"还是一处真源。
+///
+/// **为什么非要有它**：实测一份 `choose write grammar python` 的 `.lomt`，工具链知道是
+/// Python，而报错器因为内容里没有 Python 特征词而**一个字都不说** —— 工具链知道、
+/// 渲染器沉默，是最坏的一种。
+///
+/// 工具链那边还有"必须在 `module` 之前""只许写一次"两条规矩 —— 那是**它该报的错**，
+/// 这里只管找到那一行；找不到就退回嗅探（判据钉着"语法变了就红"，不会静默漂）。
+fn decl_lang(sr: ptr, srl: u32) -> u32 {
+    let i: u32 = 0;
+    while i < srl {
+        let s: u32 = i;
+        while i < srl && load8(sr, i) != NL {
+            i = i + 1;
+        }
+        let e: u32 = i;
+        if i < srl {
+            i = i + 1;
+        }
+        let p: u32 = skip_blank(sr, s, e);
+        let q: u32 = eat_word(sr, p, e, "choose");
+        if q != 0 {
+            let p2: u32 = skip_blank(sr, q, e);
+            let q2: u32 = eat_word(sr, p2, e, "write");
+            if q2 != 0 {
+                let p3: u32 = skip_blank(sr, q2, e);
+                let q3: u32 = eat_word(sr, p3, e, "grammar");
+                if q3 != 0 {
+                    let a: u32 = skip_blank(sr, q3, e);
+                    let b2: u32 = a;
+                    let go: u32 = 1;
+                    while b2 < e && go == 1 {
+                        if is_blank(load8(sr, b2)) == true || load8(sr, b2) == 59 {
+                            go = 0;
+                        } else {
+                            b2 = b2 + 1;
+                        }
+                    }
+                    if b2 > a {
+                        return lang_by_alias(sr, a, b2 - a);
+                    }
+                }
+            }
+        }
+    }
+    return 4294967295;
+}
+
 /// 这个文件看起来是哪门源语言？`0xFFFFFFFF` = 认不出（多半本来就是 Loment）。
 ///
 /// **两条路，各有各的理由**:
@@ -990,17 +1137,29 @@ fn lang_by_ext(ctx: ptr, so: u32, sl: u32) -> u32 {
 ///   * **内容**兜底**只用在语法错上** —— 那才是"它可能根本不是 Loment"的信号。
 ///     一份语法正确的 Loment 文件报语义错时按内容闻，会被注释里的一句 `import` 带跑。
 fn sniff_lang(ctx: ptr, sr: ptr, srl: u32, cnum: u32, plen: u32) -> u32 {
+    if srl > 0 {
+        let d: u32 = decl_lang(sr, srl);
+        if d != 4294967295 {
+            store32(ctx, C_WHY, 1);
+            return d;
+        }
+    }
     let ex: u64 = ext_of(ctx, plen);
     if ex != 18446744073709551615 as u64 {
         let li: u32 = lang_by_ext(ctx, (ex / 4294967296) as u32, (ex % 4294967296) as u32);
         if li != 4294967295 {
+            store32(ctx, C_WHY, 2);
             return li;
         }
     }
     if srl == 0 || cnum != 19 {
         return 4294967295;
     }
-    return lang_by_tokens(ctx, sr, srl);
+    let lt: u32 = lang_by_tokens(ctx, sr, srl);
+    if lt != 4294967295 {
+        store32(ctx, C_WHY, 3);
+    }
+    return lt;
 }
 
 /// 打印文件路径的**主干**（去掉后缀）—— 给 `--out <主干>.iface.lomt` 用。
@@ -1041,7 +1200,18 @@ fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em_rst(ctx, o);
     o = em(ctx, o, " —— 看内容像 ");
     o = em(ctx, o, lang_name(li));
-    o = em(ctx, o, "。它有三条路进来（都不动 Loment 内核）:\n");
+    o = em(ctx, o, "（");
+    let why: u32 = load32(ctx, C_WHY);
+    if why == 1 {
+        o = em(ctx, o, "据文件头 `choose write grammar` 声明");
+    } else {
+        if why == 2 {
+            o = em(ctx, o, "据后缀");
+        } else {
+            o = em(ctx, o, "据内容特征词");
+        }
+    }
+    o = em(ctx, o, "）。它有三条路进来（都不动 Loment 内核）:\n");
 
     o = em_gut(ctx, o, w);
     o = em(ctx, o, "  A. 只出接口单元（实现在源语言那一侧，配外面编好的目标文件用）:\n");

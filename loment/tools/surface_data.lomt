@@ -309,6 +309,50 @@ pub fn code_nfix(c: u32) -> u32 {
 
 pub fn lang_count() -> u32 { return 7; }
 
+pub fn alias_count() -> u32 { return 16; }
+
+/// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。
+pub fn alias_word(i: u32) -> str {
+    if i == 0 { return "c"; }
+    if i == 1 { return "c#"; }
+    if i == 2 { return "c++"; }
+    if i == 3 { return "cc"; }
+    if i == 4 { return "cpp"; }
+    if i == 5 { return "cs"; }
+    if i == 6 { return "csharp"; }
+    if i == 7 { return "cxx"; }
+    if i == 8 { return "go"; }
+    if i == 9 { return "golang"; }
+    if i == 10 { return "java"; }
+    if i == 11 { return "loment"; }
+    if i == 12 { return "py"; }
+    if i == 13 { return "python"; }
+    if i == 14 { return "rs"; }
+    if i == 15 { return "rust"; }
+    return "";
+}
+
+/// 该别名对应的语言（= `LANG_CARDS` 的键 / `potato_from.LANGS` 的键）。
+pub fn alias_lang(i: u32) -> str {
+    if i == 0 { return "c"; }
+    if i == 1 { return "csharp"; }
+    if i == 2 { return "cpp"; }
+    if i == 3 { return "cpp"; }
+    if i == 4 { return "cpp"; }
+    if i == 5 { return "csharp"; }
+    if i == 6 { return "csharp"; }
+    if i == 7 { return "cpp"; }
+    if i == 8 { return "go"; }
+    if i == 9 { return "go"; }
+    if i == 10 { return "java"; }
+    if i == 11 { return "loment"; }
+    if i == 12 { return "python"; }
+    if i == 13 { return "python"; }
+    if i == 14 { return "rust"; }
+    if i == 15 { return "rust"; }
+    return "";
+}
+
 pub fn lang_key(i: u32) -> str {
     if i == 0 { return "cpp"; }
     if i == 1 { return "c"; }
