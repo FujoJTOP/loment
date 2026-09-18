@@ -1,0 +1,96 @@
+// surface_data.lomt — 由 `tools/loment_diag.py --dump-surface` 生成，别手改。
+//
+// 码 -> 文字。**唯一真源是 `tools/loment_diag.py` 的 RULES + ASCII_ONE_LINER**，
+// 这里只是它的可读副本（`docs/176` B 那条管线：数据从逻辑里拆出来，自举侧 use 它）。
+//
+// 为什么要生成而不是手抄第二份：`loment/tools/lomcli.lomt` 原先手抄了 24 条 `codrow`，
+// 与 `loment_diag.RULES` 是同一件事的两份 —— 而本仓那四个静默 bug（docs/179 §7.3）
+// 全出自"同一份清单抄第二遍"。
+//
+// 中文与 ASCII **不是重复**：CLI 输出必须纯 ASCII（docs/169，936 控制台下 UTF-8 中文
+// 被按 GBK 解成乱码，PE 垫片没有 WriteConsoleW），诊断那侧本来就是中文。两个受众。
+
+module surface_data
+
+pub fn n_codes() -> u32 { return 23; }
+
+pub fn code_title(c: u32) -> str {
+    if c == 1 { return "类型不匹配"; }
+    if c == 2 { return "符号未声明"; }
+    if c == 3 { return "实参数量不符"; }
+    if c == 4 { return "能力域非法"; }
+    if c == 5 { return "与出界声明冲突"; }
+    if c == 6 { return "移动后使用"; }
+    if c == 7 { return "借用冲突"; }
+    if c == 8 { return "match/变体用法非法"; }
+    if c == 9 { return "类型名非法"; }
+    if c == 10 { return "`?` 误用"; }
+    if c == 11 { return "只读切片写入"; }
+    if c == 12 { return "悬垂借用"; }
+    if c == 13 { return "重名"; }
+    if c == 14 { return "赋值目标非法"; }
+    if c == 15 { return "字段/下标/取址非法"; }
+    if c == 16 { return "数组字面量非法"; }
+    if c == 17 { return "`as` 转换非法"; }
+    if c == 18 { return "名字导入无法唯一解析"; }
+    if c == 19 { return "语法错误（词法/解析期）"; }
+    if c == 20 { return "单个文件的 use 太多"; }
+    if c == 21 { return "外部函数的签名不支持"; }
+    if c == 22 { return "项目模式（`choose`）用法不对"; }
+    if c == 23 { return "这一版还没实现（编译器限制）"; }
+    return "";
+}
+
+pub fn code_hint(c: u32) -> str {
+    if c == 1 { return "检查两侧类型；整型字面量按上下文定宽，必要时用 `as` 显式转换。"; }
+    if c == 2 { return "先声明后使用；跨模块调用需要 `pub`，或补 `use 名字` / `use \"...lomt\"`。"; }
+    if c == 3 { return "对照函数签名补/删实参；方法调用的 self 不计入实参。"; }
+    if c == 4 { return "在模块顶层声明 `capability name : space[lo..hi]`，并保证 lo ≤ hi。"; }
+    if c == 5 { return "要么删掉 `excluded \"<space>: ...\"`，要么换一个能力空间。"; }
+    if c == 6 { return "移动后改用引用（`&`/`&mut`）传参，或让类型实现 `Copy` 语义（全字段为整型）。"; }
+    if c == 7 { return "同一次调用里对同一变量只保留一种借用；先复制到临时变量再传。"; }
+    if c == 8 { return "模式必须覆盖所有变体且不重复；有载荷的变体要绑定变量，无载荷的不能带括号。"; }
+    if c == 9 { return "类型名不要与 `u32` 等基类型重名；类型至少要有一个字段/变体。"; }
+    if c == 10 { return "`?` 只能出现在 `let x: T = expr?;` 的绑定位置，且函数返回 `Result`。"; }
+    if c == 11 { return "把形参改成 `mut [T]`，调用处用 `&mut 数组`。"; }
+    if c == 12 { return "不要返回局部变量的引用；把值返回（按值），或在调用方分配。"; }
+    if c == 13 { return "同一作用域内重命名其中之一。"; }
+    if c == 14 { return "赋值左边必须是变量、字段或下标（左值）；先把结果存进变量。"; }
+    if c == 15 { return "字段名与顺序按声明补齐；下标与 `&`/`&mut` 只能作用于数组或切片。"; }
+    if c == 16 { return "字面量非空、元素类型一致，且个数等于声明的长度。"; }
+    if c == 17 { return "`as` 只能整数⇄整数/布尔，目标必须是基类型；其它转换要显式构造。"; }
+    if c == 18 { return "`use <名字>` 按层搜: 项目本地 `deps/<名字>/<名字>.lomt`、工具链自带的库 (`<工具目录>/../share/lompi/store/<名字>/<版本>/`)、然后是内置四根 loment/lib、loment/examples、loment/selfhost、loment/tools —— 前两层先命中先用, **唯一性只管最后一层**。找不到就补文件或用路径形式 `use \"...lomt\"` 指明位置；内置根命中多处是作者写错名字，改名字。"; }
+    if c == 19 { return "按消息给的 `行:列` 改那一行的写法。常见三种: `match` 的臂体要**块**（`=> { … }`，不是 `=> 表达式`）；`return` 必须带值（没有 `return;`）；用了 Loment 没有的字面量或符号（单引号字符、`#`、`@`…）。**若这个文件本来就不是 Loment**，`loment diag` 会另给一条提示（见 `foreign_note`）。"; }
+    if c == 20 { return "一个文件的 `use` 上限是 300 条 (路径形式 + 名字形式合起来算)。别把整个库塞进一个门面文件 —— 拆成几个, 每层少拉一点。"; }
+    if c == 21 { return "`extern fn` 第 1 阶段只收**标量**（i8..i64 / u8..u64 / bool）与 **ptr**, 不返回就省略 `-> T`。`str` 是「指针 + 长度」、不是 C 字符串；结构体/枚举/数组**按值**传参要走另一套寄存器分类规则 —— 两者都留到后面。见 `docs/173-loment-ffi.md` §3。"; }
+    if c == 22 { return "`choose` 声明的是**整个程序**的运行模式，所以它只能出现**一次**、只能在**根单元**（被 `use` 进来的库不许写），模式名只能是 `std` 或 `no_std`。不写就是 `std`。库要表达自己的需要就**声明能力需求**（`docs/168`），由项目决定模式。见 `docs/143` §3.2。"; }
+    if c == 23 { return "这不是你源码的语义错 —— 是编译器的 IR 后端还没做这块。**换一种写法绕开**；绕不开就报告（附上这条消息）。进度见 `docs/145` 的里程碑表。"; }
+    return "";
+}
+
+pub fn code_ascii(c: u32) -> str {
+    if c == 1 { return "type mismatch (return / payload / builtin argument)"; }
+    if c == 2 { return "something is not declared - usually a missing type annotation or a misspelt name"; }
+    if c == 3 { return "wrong number of arguments"; }
+    if c == 4 { return "capability domain problem (undeclared / out of range / duplicate)"; }
+    if c == 5 { return "used space that an `excluded` declaration put out of bounds"; }
+    if c == 6 { return "value has been moved"; }
+    if c == 7 { return "borrow conflict (mutable borrow next to a borrow / two mutable borrows)"; }
+    if c == 8 { return "match / enum (not exhaustive, duplicate pattern, bad payload binding)"; }
+    if c == 9 { return "name clashes with a base type / empty struct / empty enum"; }
+    if c == 10 { return "`?` used where there is no Result or Option"; }
+    if c == 11 { return "slice mutability (cannot write a read-only slice; the parameter needs `mut`)"; }
+    if c == 12 { return "dangling reference"; }
+    if c == 13 { return "duplicate definition / duplicate name"; }
+    if c == 14 { return "assignment target is not an lvalue"; }
+    if c == 15 { return "field or index (no such field, missing field, duplicate init, field on a non-struct)"; }
+    if c == 16 { return "array literal / length does not match the declaration"; }
+    if c == 17 { return "illegal `as` cast"; }
+    if c == 18 { return "`use <name>` does not resolve - rename it, add the file, or use the path form"; }
+    if c == 19 { return "parse error - fix that line as the `line:col` in the message says"; }
+    if c == 20 { return "more than 300 `use` in one file - split the facade"; }
+    if c == 21 { return "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only"; }
+    if c == 22 { return "bad `choose`: written twice, bad mode name, or written in a library"; }
+    if c == 23 { return "not implemented in this version - a compiler limit, not your code"; }
+    return "";
+}

@@ -679,7 +679,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "8ad72961ca4405e7c1a01a1047001a29961e831bfa34a7023dd3c8b7a010a234"
+   "sha256": "72bc8d68e80522622cc9850c4b02a2723ae04c5381783ab332e2693b2f186c46"
   },
   {
    "path": "tools/loment_build.py",
@@ -691,7 +691,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "1976b28d11b6762d555c4937bbea7d652bd9769394003f51aa83031ae3f28d02"
+   "sha256": "0320b1166f35c6a5631b0fb1b5bc3b7370bedebe28b519be15e08eea51d47b29"
   },
   {
    "path": "tools/loment_boot.py",
@@ -952,6 +952,10 @@
   {
    "path": "loment/tools/lsp.lomt",
    "sha256": "570d2a1d13c130b60cddd66fcf385418999eeb84d105b3c81d2ac316686bb72d"
+  },
+  {
+   "path": "loment/tools/surface_data.lomt",
+   "sha256": "6fb9e9c6cd28a5959c45354790a4f2f8f8fafe486568ca898586b9ff6950d8e1"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1343,7 +1347,7 @@
   },
   {
    "path": "docs/182-lomenterr-and-choose-switches.md",
-   "sha256": "b344dd445a80907688fe0f4e6ede850076eada821dd4fba3ff20a10e6888b229"
+   "sha256": "eea92db8702f6f88fa57dbb483b2b8513b1c608179f8dca7d0d5950f17629d83"
   },
   {
    "path": "docs/manual/index.md",
