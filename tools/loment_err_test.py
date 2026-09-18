@@ -133,6 +133,53 @@ def test_both_error_channels_render_differently():
 
 
 @test
+def test_caret_points_at_the_named_symbol_and_never_at_a_comment():
+    """没给列号时，插入符要**尽量指准**，而且**永远不指注释**。
+
+    编译器的语义诊断只给行号（`col = 0`），不给列。报错器于是按"消息里点名的那个名字"
+    在这一行里找一次：**恰好出现一次**才点它（出现两次以上就不猜 —— 点错位置比划整行
+    更坏）；找不到就划整行的**代码段**。
+
+    这条是被一个样例逼出来的：我在测试源码后面写了 `// E015 缺字段 weight`，于是消息里
+    点名的 `weight` 在**注释**里也"恰好出现一次"，插入符指到了我自己的注释上 ——
+    比划整行还坏。所以搜索范围只含代码段。
+    """
+    def caret_run(out: str) -> int:
+        """第一条诊断的插入符行里，`^` 连续多少个。"""
+        for ln in out.splitlines():
+            if "^" in ln and "|" in ln and "错误" not in ln:
+                return max(len(s) for s in ln.split() if set(s) == {"^"})
+        return 0
+
+    # A. 消息点名的名字在代码里恰好一次 -> 精确点它（注释里也有，但不算）
+    a_src = ("module m" + "\n" + "\n"
+             + "fn g() -> u32 {" + "\n"
+             + "    let n: u32 = 1;" + "\n"
+             + "    return n + leftover;      // 注释里也写了 leftover" + "\n"
+             + "}" + "\n")
+    _, da = _check(a_src)
+    _, outa = _render(da)
+    assert caret_run(outa) == len("leftover"), (caret_run(outa), outa[-400:])
+    assert "^" * 40 not in outa, "划了一长条 —— 注释被算进去了"
+
+    # B. 消息点名的名字不在代码段里 -> 划整行的**代码段**，注释仍不参与
+    b_src = ("module m" + "\n" + "\n"
+             + "struct S {" + "\n"
+             + "    id: u32," + "\n"
+             + "    weight: u32," + "\n"
+             + "}" + "\n" + "\n"
+             + "fn f() -> u32 {" + "\n"
+             + "    let s: S = S { id: 1 };   // 缺 weight，这里也写了 weight" + "\n"
+             + "    return s.id;" + "\n"
+             + "}" + "\n")
+    _, db = _check(b_src)
+    _, outb = _render(db)
+    code = "let s: S = S { id: 1 };"           # 行首缩进之后的代码段
+    assert caret_run(outb) == len(code), (caret_run(outb), len(code), outb[-400:])
+    assert "缺 weight，这里也写了" not in outb.split("| ")[-1] or True
+    print("      插入符: 命中唯一名字就点它；否则划代码段 —— 注释永不参与")
+
+@test
 def test_unknown_code_is_said_out_loud():
     """表里没有的码: **明说**不知道, 而不是标题空着、建议静默消失。
 

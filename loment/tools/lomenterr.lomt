@@ -471,7 +471,7 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
 
 /// 源码那两行。`col == 0` 表示**编译器只给了行号** (check() 的语义诊断都是这样):
 /// 那时划整行的可见部分 —— 位置确实就是"这一行", 不是猜一个列出来。
-fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32) -> u32 {
+fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen: u32) -> u32 {
     let sp: u64 = line_span(sr, srl, line);
     if sp == 18446744073709551615 as u64 {
         o = em_pad(ctx, o, w + 1);
@@ -499,17 +499,148 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32) -> u
     }
     let a: u32 = first_visible(sr, st, ln);
     let b: u32 = after_visible(sr, st, ln);
+    return h_snip_nocol(ctx, o, sr, st, a, b, mlen);
+}
+
+/// `col == 0`（编译器只给了行号）时**指哪一段**。三条路，从准到宽：
+///
+/// 1. **消息里点名的那个名字**（`使用未声明的变量 leftover` → `leftover`）在**这一行里
+///    恰好出现一次** —— 那就点它。这正是 rustc 的 `^^^` 位置，而它是**可证伪的近似**：
+///    出现两次以上就不猜（点错位置比划整行更坏）；
+/// 2. 否则划整行的**可见部分**，但**停在行注释之前** —— 编译器的位置说的是代码，
+///    把行尾那句 `// 注释` 一起划进去会拉出一条上百字符的插入符（实测过，很糙）；
+/// 3. 连可见部分都没有（空行）就只留一条 `| `。
+fn h_snip_nocol(ctx: ptr, o: u32, sr: ptr, st: u32, a: u32, b: u32, mlen: u32) -> u32 {
+    // **右端 = 代码段里最后一个可见字符**：先切在行注释之前，再去掉注释前的那些空格。
+    // 两条都是被自己的样例教会的：`let s: S = S { id: 1 };   // 缺 weight` 这条，
+    // 只切注释会连那三个空格一起划（插入符比代码长），而**只搜代码段**则是因为消息点名的
+    // `weight` 在注释里也"恰好出现一次"，于是插入符指到了我自己的注释上 —— 比划整行还坏。
+    let cc: u32 = trim_comment(sr, st + a, st + b) - st;
+    let w2: u32 = after_visible(sr, st + a, cc - a);
+    if w2 == 0 {
+        w2 = cc - a;
+    }
+    let hint: u64 = msg_hint(ctx, mlen);
+    if hint != 18446744073709551615 as u64 {
+        let hp: u32 = (hint / 4294967296) as u32;
+        let hn: u32 = (hint % 4294967296) as u32;
+        let at: u32 = sole_word_at(sr, st + a, st + a + w2, ptr_add(ctx, C_MSG + hp), hn);
+        if at != 4294967295 {
+            let t: u32 = 0;
+            while t < at - st {
+                o = em_byte(ctx, o, SP);
+                t = t + 1;
+            }
+            let q: u32 = 0;
+            while q < hn {
+                o = em_byte(ctx, o, 94);
+                q = q + 1;
+            }
+            return em(ctx, o, "\n");
+        }
+    }
     let t1: u32 = 0;
     while t1 < a {
         o = em_byte(ctx, o, SP);
         t1 = t1 + 1;
     }
     let t2: u32 = a;
-    while t2 < b {
+    while t2 < a + w2 {
         o = em_byte(ctx, o, 94);
         t2 = t2 + 1;
     }
     return em(ctx, o, "\n");
+}
+
+/// 标识符字符（ASCII 那套）。**只认 ASCII** —— Loment 的标识符就是这套，而消息里的中文
+/// 是说明文字，不是名字。
+fn is_word(c: u32) -> bool {
+    if c >= 48 && c <= 57 {
+        return true;
+    }
+    if c >= 65 && c <= 90 {
+        return true;
+    }
+    if c >= 97 && c <= 122 {
+        return true;
+    }
+    return c == 95;
+}
+
+/// 消息里**最后一个**长度 >= 2 的标识符（`(起点 << 32) | 长度`；没有就是 u64 最大值）。
+///
+/// "最后一个"是有理由的：这批消息的写法是"<说明> <名字>"（`使用未声明的变量 leftover`、
+/// `结构体 Job 缺字段 weight`），名字在末尾。长度门槛 2 是为了躲开 `return z;` 那种单字母
+/// —— 单字母在整行里到处都是，定位它没有信息量。
+fn msg_hint(ctx: ptr, mlen: u32) -> u64 {
+    let best: u64 = 18446744073709551615 as u64;
+    let i: u32 = 0;
+    while i < mlen {
+        if is_word(load8(ctx, C_MSG + i)) == true {
+            let s: u32 = i;
+            while i < mlen && is_word(load8(ctx, C_MSG + i)) == true {
+                i = i + 1;
+            }
+            if i - s >= 2 {
+                best = (s as u64) * 4294967296 + (i - s) as u64;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return best;
+}
+
+/// `[from, to)` 里**整词**等于 `needle` 的位置，**且只出现一次**；否则 `0xFFFFFFFF`。
+/// 词边界两边都要查（`leftover` 不能命中 `leftover_x`）。
+fn sole_word_at(sr: ptr, from: u32, to: u32, np: ptr, nn: u32) -> u32 {
+    let found: u32 = 4294967295;
+    let n: u32 = 0;
+    let i: u32 = from;
+    while i + nn <= to {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nn && same == 1 {
+            if load8(sr, i + k) != load8(np, k) {
+                same = 0;
+            } else {
+                k = k + 1;
+            }
+        }
+        if same == 1 {
+            let ok: u32 = 1;
+            if i > from && is_word(load8(sr, i - 1)) == true {
+                ok = 0;
+            }
+            if i + nn < to && is_word(load8(sr, i + nn)) == true {
+                ok = 0;
+            }
+            if ok == 1 {
+                n = n + 1;
+                found = i;
+            }
+        }
+        i = i + 1;
+    }
+    if n == 1 {
+        return found;
+    }
+    return 4294967295;
+}
+
+/// 划线的右端：**停在行注释之前**（`//`，且它前面是空白或就在可见段开头）。
+/// 要求"前面是空白"是为了不把 `a//b` 这种（虽然 Loment 里不合法）当成注释。
+fn trim_comment(sr: ptr, from: u32, to: u32) -> u32 {
+    let i: u32 = from;
+    while i + 1 < to {
+        if load8(sr, i) == 47 && load8(sr, i + 1) == 47 {
+            if i == from || is_blank(load8(sr, i - 1)) == true {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return to;
 }
 
 /// 编译器那句话说一遍。check() 的消息自带 `"4: "` 行号前缀, 而位置已经单独渲染了 ——
@@ -910,7 +1041,7 @@ fn _start() -> u32 {
                 let o2: u32 = h_loc(ctx, o, line, col, w, plen);
                 let o3: u32 = o2;
                 if have == 1 {
-                    o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w);
+                    o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w, mlen);
                 } else {
                     o3 = h_nosrc(ctx, o2, w, plen);
                 }
