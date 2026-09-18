@@ -244,16 +244,22 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
 def test_the_declaration_word_order_is_the_shared_contract():
     """**词序是与报错器共享的契约** —— 那三个词和"读到空白或 `;` 为止"。
 
-    `loment/tools/lomenterr.lomt` 的 `decl_lang` 是个**独立的 Loment 程序**：它问不到
-    `potato_from`，只能**逐词**匹配 `choose` / `write` / `grammar`，找不到就**退回嗅探**。
-    所以这条契约破了不会报错，只会**静默失配** —— 症状正是当初补 `decl_lang` 要治的那个：
+    `loment/tools/lomenterr.lomt` 的 `decl_at` 是个**独立的 Loment 程序**：它问不到
+    `potato_from`，只能逐词匹配 `choose` / `write` / `grammar`，找不到就**退回嗅探**。
+    破了不会报错，只会**静默失配** —— 症状正是当初补它要治的那个：
 
     > 一份 `choose write grammar python` 的 `.lomt`，**工具链知道是 Python，
     > 而报错器一个字都不说**。工具链知道、渲染器沉默，是最坏的一种。
 
-    那边有自己的判据（`loment_err_test::test_a_grammar_declaration_beats_content_sniffing`），
-    这边有这一条 —— **两边各钉一条**，所以改哪里都会红。真正合成一处（把这几个词也
-    `--dump-surface` 出去）留给下一版；现在这样已经够"不会静默漂"。
+    **这个契约现在走导出管线**（loment-dev-86 的 `14cb902`）：
+
+        常量 -> 我的正则 -> `--dump-surface` 的 `decl_word(i)` -> 渲染器逐词吃
+
+    所以"改词序"只有**一处**可改。这条判据钉的是**这个常量的语义**（词序 + 别名边界
+    + 词边界），并顺手钉住**产物里就是这三个词、按这个顺序** ——
+    它与对方那条"产物必须新鲜"的判据合起来，等于"渲染器拿到的就是常量里的词序"。
+    对方那条（`loment_err_test::test_a_grammar_declaration_beats_content_sniffing`）
+    钉的是另一件事："渲染器读得到"。**两条都在才有意义。**
     """
     assert potato_from.GRAMMAR_DECL_WORDS == ("choose", "write", "grammar"), (
         f"词序变了：{potato_from.GRAMMAR_DECL_WORDS}。**改了它就要同时改报错器的 "
@@ -277,7 +283,22 @@ def test_the_declaration_word_order_is_the_shared_contract():
         g, err, declared = potato_from.read_grammar_decl(s)
         assert (g, err, declared) == ("loment", None, False), (s, g, err, declared)
         assert potato_from.strip_grammar_decl(s) == s, f"拼错的那行被抹了半截: {s!r}"
-    print("      词序与别名边界（含 `;` / `c#` / 词边界）是与报错器共享的契约，两边各钉一条")
+
+    # **导出那半边也钉上**：产物里就是这三个词、按这个顺序。它 + 对方那条"产物必须新鲜"
+    # 的判据合起来，等于"渲染器拿到的就是常量里的词序" —— 改常量而忘了重新生成，
+    # 或者有人改了导出而没改常量，这条当场红，而不是等渲染器静默退回嗅探。
+    #
+    # **读产物文件，不 import `loment_diag`** —— 后者模块级 `import lomentc`，而那个文件
+    # 常有别的会话在改；读产物既够用，也不把这条判据绑上"编译器此刻可导入"。
+    surface = (ROOT / "loment" / "tools" / "surface_data.lomt").read_text(encoding="utf-8")
+    words = potato_from.GRAMMAR_DECL_WORDS
+    assert f"decl_word_count() -> u32 {{ return {len(words)}; }}" in surface, (
+        f"导出里的词数与常量对不上（常量 {len(words)} 个）—— 改完常量要重新生成 "
+        f"`loment/tools/surface_data.lomt`（`python tools/loment_diag.py --dump-surface`）")
+    for i, w in enumerate(words):
+        arm = f'    if i == {i} {{ return "{w}"; }}'
+        assert arm in surface, f"导出里没有这一条（顺序也要对）: {arm!r}"
+    print("      词序/别名边界/词边界 == 共享契约，且产物里就是这三个词、按这个顺序")
 
 
 def main() -> int:

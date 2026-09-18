@@ -1397,14 +1397,20 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
 #: **这是与报错器共享的一份契约，不是随便三个词。** 报错器是个**独立的 Loment 程序**
-#: （`loment/tools/lomenterr.lomt` 的 `decl_lang`），它问不到 `potato_from`，只能**逐词匹配**
-#: 这三个词；找不到就退回嗅探。所以改这里而那边没跟上，症状是
-#: **"工具链说 python、报错器一个字不说"** —— 那正是补 `decl_lang` 要治的那个病。
+#: （`loment/tools/lomenterr.lomt` 的 `decl_at`），它问不到 `potato_from`。
 #:
-#: 两边各有一条判据钉着它（这边 `test_the_declaration_word_order_is_the_shared_contract`，
-#: 那边 `test_a_grammar_declaration_beats_content_sniffing`），所以它**不可能悄悄变**。
-#: 真正把两处合成一处的做法（把这几个词也 `--dump-surface` 出去）留给下一版：
-#: 现在两边各钉一条，已经够"不会静默漂"。
+#: **它已经走导出管线了 —— 一处改、下游全跟**：
+#:
+#:     这个常量 -> 下面三条正则 -> `--dump-surface` 的 `decl_word(i)` -> 渲染器逐词吃
+#:
+#: 所以"改词序"只有**这一处**可改（改完要重新生成 `surface_data.lomt`，那边有判据钉新鲜度）。
+#: 这条管线是 loment-dev-86 拉直的（`14cb902`）；我原先主张"两边各钉一条判据就够"，
+#: **那个主张是错的** —— 判据只能**事后抓**，共享常量是**防**；而且别名表早就走了这条
+#: 管线，词序不走才是**不一致**。
+#:
+#: 两边各有一条判据仍然留着，但它们钉的不是同一件事：这边钉**这个常量的语义**
+#: （`test_the_declaration_word_order_is_the_shared_contract`，含词边界与别名边界），
+#: 那边钉**渲染器读得到**。
 GRAMMAR_DECL_WORDS = ("choose", "write", "grammar")
 
 #: `choose write grammar <别名>`。别名那一格**不收 `;`**（`grammar python;` 也收），
