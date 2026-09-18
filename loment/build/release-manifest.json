@@ -1359,7 +1359,11 @@
   },
   {
    "path": "docs/183-loment-library-vertical.md",
-   "sha256": "d177978534bf1d3966cbfae2d8498948cf3da060421b208d15220999d93b2959"
+   "sha256": "b7787e23f6294de0a8f1c5e0b4a4287dab1c1e4065653665f00aa568c18d4a1a"
+  },
+  {
+   "path": "docs/184-comefor-in-kernel-syntax-extension.md",
+   "sha256": "d540e882ba1ebf078160ac6189699f03e0f9f4358319424d0723d6df946f5ee3"
   },
   {
    "path": "docs/manual/index.md",
