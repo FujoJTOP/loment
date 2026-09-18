@@ -73,7 +73,10 @@ def test_reference_interpreter_matches_corpus():
 #: + `fflush` 没事。原因未查明，记在这里免得下次再踩。反正判据只要 stdout 上那一行。
 _DRIVER = r'''
 #include <stdio.h>
-extern unsigned int ct_run(char *src, unsigned int n, char *out);
+/* 第 4 个形参是**解释器的工作堆**（见 `interp.lomt` 的 `CT_HEAP_BYTES`）。
+ * 为什么不让它自己 alloc: 自举 driver 要跑宏体, 而它的 emit_module 一次要 49152B,
+ * 与解释器的 42768B 同在一进程 —— 都从语言那 64 KiB bump 堆拿就必然撞 (docs/184 §7 ①b)。 */
+extern unsigned int ct_run(char *src, unsigned int n, char *out, char *heap);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -82,7 +85,8 @@ int main(int argc, char **argv) {
     fclose(f);
     static char out[4096];
     out[0] = 0;
-    unsigned int rc = ct_run(buf, (unsigned int)n, out);
+    static char heap[__CT_HEAP_BYTES__];
+    unsigned int rc = ct_run(buf, (unsigned int)n, out, heap);
     unsigned int L = 0;
     while (L < 4095 && out[L]) L++;
     fwrite(out, 1, L, stdout);
@@ -91,6 +95,20 @@ int main(int argc, char **argv) {
     return (int)rc;
 }
 '''
+
+#: 从 `interp.lomt` 里读 `CT_HEAP_BYTES` —— **不另抄一份**。
+#:
+#: 抄一份就会漂：那个数改了（加一块缓冲、调一个 CAP）而这边没跟上，症状是外壳的
+#: `heap[]` 比解释器要的小 → 写穿栈 → 一段与本次改动无关的崩。判据要的是"两边一致"，
+#: 不是"两边都写了 42768"。
+_CT_HEAP_RE = re.compile(r"^pub const CT_HEAP_BYTES: u32 = (\d+);", re.M)
+
+
+def _ct_heap_bytes() -> int:
+    src = (ROOT / "loment" / "selfhost" / "interp.lomt").read_text(encoding="utf-8")
+    m = _CT_HEAP_RE.search(src)
+    assert m, "interp.lomt 里找不到 `pub const CT_HEAP_BYTES: u32 = <数>;`"
+    return int(m.group(1))
 
 
 @test
@@ -120,7 +138,9 @@ def test_selfhosted_interpreter_matches_reference():
         tdp = Path(td)
         (tdp / "interp.ll").write_text(lomentc.emit_llvm(mod, ROOT, deps),
                                        encoding="utf-8", newline="\n")
-        (tdp / "h.c").write_text(_DRIVER, encoding="utf-8", newline="\n")
+        (tdp / "h.c").write_text(
+            _DRIVER.replace("__CT_HEAP_BYTES__", str(_ct_heap_bytes())),
+            encoding="utf-8", newline="\n")
         exe = tdp / "interp.exe"
         r = subprocess.run([clang, "-O1", "-o", str(exe), str(tdp / "h.c"),
                             str(tdp / "interp.ll")],

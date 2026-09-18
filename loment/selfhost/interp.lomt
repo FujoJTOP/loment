@@ -48,6 +48,19 @@ const MAX_DEPTH: u32 = 256;
 /// 循环上限。**与参考侧 `LIMIT` 同值**（宏体不该长跑；跑飞了要报出来，不是挂着）。
 const LIMIT: u32 = 4194304;
 
+/// 解释器一次运行要的**堆字节数** —— 调用者按这个数给 `ct_run` 一块堆。
+///
+/// **为什么堆是传进来的，而不是用语言自带那 64 KiB bump 堆**（`docs/184` §7 墙 ①b）：
+/// 自举 driver 的 `emit_module` 一次要 49152B，而解释器要 42768B，**两者在同一个进程里**。
+/// 都从 `__LOMENT_HEAP` 拿就必然撞（91920 > 65536），症状是 `@__loment_abort` —— 一条
+/// 非法指令，看起来像"编译器崩了"。**把两者的内存结构性地分开才是解法**；把 64 KiB 改大
+/// 只是把撞车变成一个恰好够用的数字，而宏体是**用户写的**、吃多少未知，改数字治不了病。
+///
+/// 数写字面量，不写 `TOK_BYTES + ENV_BYTES + …`：常量在表达式里没有类型
+/// （见 `driver.lomt` 那条同源注释，`8008` 也是因此写的字面量）。
+/// 12000 + 2048 + 8192 + 48 + 20480 = 42768
+pub const CT_HEAP_BYTES: u32 = 42768;
+
 // 状态块 st 的布局（u32 偏移）
 const ST_ERR: u32 = 0;    // 错误码，0 = 没有
 const ST_NE: u32 = 4;     // 环境里的条数
@@ -1042,13 +1055,18 @@ fn call_fn(src: ptr, t: ptr, nt: u32, env: ptr, st: ptr, ar: ptr,
 // ---------------------------------------------------------------- 入口
 /// 跑一支编译期子集里的程序；把 `OK <十进制>` 或 `ERR <种类>`（NUL 结尾）写进 `out`，
 /// 返回退出码（0 / 1 / 2）。
-pub fn ct_run(src: ptr, n: u32, out: ptr) -> u32 {
-    let toks: ptr = alloc(TOK_BYTES);
-    let env: ptr = alloc(ENV_BYTES);
-    let ar: ptr = alloc(ARENA_CAP);
-    // 状态与实参栈**连着分配** —— `args_for(st)` 就是 `st + ST_BYTES`，
-    // 所以这里必须一次要到两段（漏掉 ARGS_CAP 会让实参写到状态块后面去）。
-    let st: ptr = alloc(ST_BYTES + ARGS_CAP);
+///
+/// `heap` 是**调用者给的**工作堆，至少 `CT_HEAP_BYTES` 字节（为什么不自己 `alloc`：见
+/// `CT_HEAP_BYTES`）。`src` 是源**文本**（NUL 不必要，长度由 `n` 给），`out` 至少 512 字节。
+pub fn ct_run(src: ptr, n: u32, out: ptr, heap: ptr) -> u32 {
+    // 四块缓冲从**调用者给的堆**上切，不碰语言自带的 64 KiB bump 堆 —— 理由见
+    // `CT_HEAP_BYTES` 那条注释（自举 driver 要跑宏体，两边的内存必须分开）。
+    // 顺序切 + 一次切一段 `ST_BYTES + ARGS_CAP`：`args_for(st)` 就是 `st + ST_BYTES`，
+    // 所以状态与实参栈必须连着（漏掉 ARGS_CAP 会让实参写到状态块后面去）。
+    let toks: ptr = heap;
+    let env: ptr = ptr_add(heap, TOK_BYTES);
+    let ar: ptr = ptr_add(heap, TOK_BYTES + ENV_BYTES);
+    let st: ptr = ptr_add(heap, TOK_BYTES + ENV_BYTES + ARENA_CAP);
     store32(st, ST_ERR, E_NONE);
     store32(st, ST_NE, 0);
     store32(st, ST_TOP, 16);        // 前 16 字节留空 —— 0 当"空指针"

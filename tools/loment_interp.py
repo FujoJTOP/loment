@@ -54,8 +54,18 @@ import lomentc  # noqa: E402
 import lomc  # noqa: E402
 
 MASK64 = (1 << 64) - 1
-#: 宿主内存大小 —— 与自举侧同值（`docs/184` §3 的一致性包含它）。
-HEAP = 1 << 20
+
+#: 被解释程序能用的**宿主内存**字节数。**与自举侧 `interp.lomt` 的 `ARENA_CAP` 同值。**
+#:
+#: 自举侧那边这块叫 `ar`（arena），被解释程序的 `alloc` 走 `ar_alloc`，上界就是 `ARENA_CAP`；
+#: 所以参考侧 `self.mem` 也只该是这么大 —— 它**不是**"解释器的全部工作内存"，只是
+#: **被解释程序看得见的那一块**。解释器自己的表（token 表 / 环境 / 状态块）是内部记账，
+#: 参考侧不必建模。
+#:
+#: 这条原先写成 `1 << 20`，于是 `alloc` 的上界两边不一致：自举侧 8192 就报 `oom`，
+#: 参考侧要 1 MiB 才报。**与 `load8` 漏偏移是同一类错** —— 语料没覆盖那个形状，
+#: 判据就绿。补 `loment/ct/oom.lomt` 把它钉住。
+ARENA_CAP = 8192
 
 
 class InterpError(Exception):
@@ -76,21 +86,24 @@ class Interp:
     def __init__(self, mod: lomentc.Module):
         self.funcs = {f.name: f for f in mod.funcs if not f.extern}
         self.consts = {c.name: c.value for c in mod.consts}
-        self.mem = bytearray(HEAP)
+        self.mem = bytearray(ARENA_CAP)
         self.top = 16          # 前 16 字节留空 —— 0 当"空指针"
         self.freed: list[int] = []
         self.depth = 0
 
     # ---------------------------------------------------------------- 内存
     def _alloc(self, n: int) -> int:
-        if self.top + n > HEAP:
+        # 上界与自举侧 `ar_alloc` 同式：**先判 `top + need > ARENA_CAP` 再动 `top`**，
+        # 且 `need` 要按 8 字节上调（漏了上调，两边"还能不能再要一块"就会差一个数）。
+        need = (n + 7) & ~7
+        if self.top + need > ARENA_CAP:
             raise InterpError("oom")
         p = self.top
-        self.top += (n + 7) & ~7
+        self.top += need
         return p
 
     def _chk(self, p: int, n: int) -> None:
-        if p < 0 or p + n > HEAP:
+        if p < 0 or p + n > ARENA_CAP:
             raise InterpError("oob")
 
     # ---------------------------------------------------------------- 表达式

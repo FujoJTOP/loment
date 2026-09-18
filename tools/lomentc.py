@@ -4639,7 +4639,15 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     own = SwitchTable()
     _collect_switches(toks, own)
     tbl = sw if sw is not None else own
-    mod = Parser(_apply_switches(toks, tbl, collect=False), text).parse()
+    tt = _apply_switches(toks, tbl, collect=False)
+    # `comefor` 的展开（`docs/184` §9 S4.1）：**也在 token 层，也在 parse 之前**。
+    #
+    # **必须在开关之后**，理由与"关着就解析跳过"是同一条：一个关着的 `set choose` 体里
+    # 写的 `comefor` 该连 token 都不剩。反过来先展开的话，那段体里的方言词会先被认成
+    # **一次使用**（而它本该整段消失）—— 顺序错一步，症状是"关着的语法仍然生效"。
+    import loment_comefor
+
+    mod = Parser(loment_comefor.expand(tt, text), text).parse()
     mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。

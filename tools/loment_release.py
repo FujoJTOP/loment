@@ -65,6 +65,13 @@ GLOBS = [
     "tools/loment_publish.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
+    # 编译期子集解释器 (S4.0, docs/184 §9): 参考侧解释器 + 它的判据 + 语料。
+    # **位置必须与自举那份 `lomrel.lomt` 逐行对齐** —— `lomrel` 的条目顺序就是这份
+    # GLOBS 的顺序, 两处插在不同位置会给出**同集合不同顺序**的两份清单, 判据报
+    # "落盘不同"而字节数一样 (见 `tools/lomt_from.py` 上面那条注释)。
+    "tools/loment_interp.py", "tools/loment_ct_test.py",
+    # `comefor` 的 token 层展开 (S4.1, docs/184 §9): 展开器 + 判据 + 最小方言演示。
+    "tools/loment_comefor.py", "tools/loment_comefor_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py", "tools/mono_trace.py",
@@ -101,6 +108,10 @@ GLOBS = [
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
+    # 编译期子集语料 (S4.0): `loment_ct_test` 读它们, 判据随包发就得连语料一起发。
+    "loment/ct/*.lomt",
+    # `comefor` 演示对：方言源 + 手写展开源（判据要两份都在才跑得起来）。
+    "loment/comefor/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

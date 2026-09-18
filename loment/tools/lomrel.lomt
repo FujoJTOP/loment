@@ -190,6 +190,10 @@ tools/loment_build.py
 tools/loment_lsp.py
 tools/loment_tools_test.py
 tools/loment_boot.py
+tools/loment_interp.py
+tools/loment_ct_test.py
+tools/loment_comefor.py
+tools/loment_comefor_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py
 tools/loment_p9_test.py
@@ -246,6 +250,8 @@ editors/vscode/language-configuration.json
 editors/vscode/README.md
 editors/vscode/src/*.js
 editors/vscode/syntaxes/*.json
+loment/ct/*.lomt
+loment/comefor/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

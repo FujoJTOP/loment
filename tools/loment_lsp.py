@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
@@ -36,8 +37,14 @@ def _parse(text: str):
     #
     # 注：这里**不做**预置枚举注入（`load` 会补 `Option`/`Result`），所以语言服务至今
     # 不认识这两个枚举 —— 那是**另一处**既有缺口，不在本次范围内，记在 docs/182 §1.9.2。
+    #
+    # **`comefor` 的展开同理**（`docs/184` §9 S4.1）：编译器在 `_apply_switches` 之后
+    # 还会展开方言，这里不补的话，一份**编得过**的方言源在编辑器里会满屏假错 ——
+    # 而"编得过但编辑器报错"比"两边都报错"更糟（同一处入口缺口，`docs/182` §1.9）。
+    # 顺序与 `lomentc.load` 一致：先开关，再方言。
     tbl = lomentc.SwitchTable()
-    mod = lomentc.Parser(lomentc._apply_switches(lomc.lex(text), tbl), text).parse()
+    tt = lomentc._apply_switches(lomc.lex(text), tbl)
+    mod = lomentc.Parser(loment_comefor.expand(tt, text), text).parse()
     mod.switches = tbl
     return mod
 

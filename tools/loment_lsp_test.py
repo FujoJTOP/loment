@@ -307,6 +307,24 @@ SW_OFF_SRC = ("module t\n\n"
               "        return missing_fn();\n    }\n}\n")
 SW_ON_SRC = SW_OFF_SRC + "\nchoose verbose\n"
 
+#: 一份**编得过**的方言源（`docs/184` §9 S4.1）。
+#:
+#: 宏体吃 4 个 token（`名字` `=` `数` `;`）**什么都不吐** —— `def ANSWER = 1;` 整条消失。
+#: 之所以不吐东西：这条判据要的是"**方言区被消费掉了**"，而不是"吐得对不对"
+#: （吐得对不对是 `loment_comefor_test` 那条逐字节判据的事）。吐东西要 `ct_syn` + 字符串，
+#: 会把这条判据变成一个**第二份展开器测试**，而它想测的是**语言服务这个消费者**。
+#:
+#: 于是形状是：**不展开 = `def`/`byuse` 被报成未知顶层关键字**（假错）；展开 = 干净。
+CF_SRC = ('module t\n\n'
+          'comefor let "def" to {\n'
+          '    fn main() -> u64 {\n'
+          '        return 4;\n'
+          '    }\n'
+          '}\n\n'
+          'def ANSWER = 1;\n\n'
+          'fn main() -> u64 { return 1; }\n\n'
+          'byuse "def" done\n')
+
 
 @test
 def test_lsp_check_honours_switches():
@@ -384,6 +402,42 @@ def test_python_lsp_also_honours_switches():
     on = diags(SW_ON_SRC)
     assert any("missing_fn" in d["message"] for d in on), f"打开后应报未定义函数: {on}"
     print("      Python 版语言服务: 关着不报错 / 打开报未定义函数 (与自举版同行为)")
+
+
+@test
+def test_python_lsp_honours_comefor():
+    """语言服务也要展开方言 —— 否则**编得过的源在编辑器里报假错**（`docs/184` §9 S4.1）。
+
+    与 `test_python_lsp_also_honours_switches` 是**同一个入口缺口的两半**
+    （`docs/182` §1.9 的消费方轴）：`tools/loment_lsp.py` 绕过了 `lomentc.load`，
+    只补开关不补方言的话，`comefor`/`byuse`/`def` 会被逐条报成未知顶层关键字
+    —— 而 `lomentc` 编同一份文件是**过**的。**"编得过但编辑器报错"比两边都报错更糟。**
+
+    **用判据自己带的那份源**（`CF_SRC`），不读 `loment/comefor/*.lomt` —— 那样判据
+    才自足：它同时**断言这份源真的编得过**，否则"没假错"可能只是因为本来就该报错。
+    """
+    def diags(text: str) -> list[dict]:
+        out = PY_LSP.handle({"id": 1, "method": "textDocument/didOpen",
+                             "params": {"textDocument": {"uri": "file:///cf.lomt",
+                                                         "text": text}}},
+                            {"file:///cf.lomt": text})
+        pub = [f for f in out if f.get("method") == "textDocument/publishDiagnostics"]
+        assert pub, f"didOpen 应当回一条 publishDiagnostics: {out}"
+        return pub[0]["params"]["diagnostics"]
+
+    # **前提**：这份源真的编得过（拿编译器自己验，不是拿语言服务验）。另外断言
+    # `def ANSWER = 1;` 那一段**真的被消费掉了** —— 不然"没报假错"可能只是因为
+    # 语言服务**根本没看**(比如把整份源吞了)。
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "cf.lomt"
+        p.write_text(CF_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)          # 不抛 = 编译器认这份方言源
+        assert [f.name for f in mod.funcs] == ["main"], \
+            f"前提不成立：`def …` 那一段应当被消费掉, 实得函数表 {[f.name for f in mod.funcs]}"
+        assert not mod.consts, f"前提不成立：宏体什么都不吐, 实得常量 {mod.consts}"
+    got = diags(CF_SRC)
+    assert got == [], f"编得过的方言源不该在编辑器里报假错, 实得 {got}"
+    print("      语言服务: 方言源**编得过**且不报假错")
 
 
 def main() -> int:

@@ -123,6 +123,28 @@ fn fail(msg: str) -> u32 {
     return die(1);
 }
 
+/// 词法流里有没有 `comefor let "…" to {` 这个**形状**（`docs/184` §11 的临时守卫，
+/// 镜像落地时删掉）。
+///
+/// **判形状而不是判词**：`comefor` 不是保留字（`docs/158` §4 第 12 条），
+/// `let comefor: u32 = 1;` 是合法的 —— 按词判会误伤。形状与参考侧
+/// `loment_comefor._comefor_at` 那五个 token 一一对应。
+fn has_comefor(src: ptr, t: ptr, nt: u32) -> u32 {
+    let i: u32 = 0;
+    let n: u32 = 20;                       // token 记录一个 20 字节
+    while i + 4 < nt {
+        if tok_is(src, t, i, "comefor")
+                && tok_is(src, t, i + 1, "let")
+                && load32(t, (i + 2) * n) == 2          // 2 = string（见 lexer.lomt 头）
+                && tok_is(src, t, i + 3, "to")
+                && tok_is(src, t, i + 4, "{") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 写一个 str 到 fd (长度交给 str_len —— 手数字节数会连字符串常量的 NUL 一起写出去)。
 fn wstr(fd: u64, s: str) -> u64 {
     return write_all(fd, str_ptr(s), str_len(s) as u64);
@@ -1173,6 +1195,14 @@ fn _start() -> u32 {
     }
     let sw: ptr = swv as ptr;
     let nt: u32 = apply_switches(unit, toks2, ntl, sw);
+    // `comefor` 的展开在**自举侧还没落地**（`docs/184` §11）：参考实现已经能展开，
+    // 这边还认不得。**必须在这里明确拒绝** —— 放它过去的话，`comefor`/`byuse` 会被当成
+    // 普通的标识符"照着编过去"，产出一份**与参考侧不同**的 IR 而**不报错**，
+    // 而 `docs/158` §5 要的是两边逐字节一致。**静默不一致比一条错难查得多**
+    // （`docs/182` §1.9 那两条消费者缺口就是这个形状）。镜像落地时删掉这一段。
+    if has_comefor(unit, toks2, nt) == 1 {
+        return fail("fujoc-s: comefor 的展开在自举侧还没实现 (参考实现能展开, 这边不能) — 见 docs/184 第 11 节\n");
+    }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);

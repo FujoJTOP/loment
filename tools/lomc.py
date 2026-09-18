@@ -55,6 +55,15 @@ class Tok:
     val: str
     line: int
     col: int
+    #: 这个 token 在**源文本**里的起点与长度（`docs/184` §3.2 的 20 字节记录要用它们）。
+    #:
+    #: **`val` 与 `off`/`len` 不是一回事**：`val` 是**解码后**的文本（字符串字面量的
+    #: 转义已经消掉、引号已经剥掉），而 `off`/`len` 圈的是**源里的原始片段**（含引号）。
+    #: 宏体要的是后者 —— 照抄进输出流时，"文本 + 位置"才都是原来那一份（`docs/184` §4
+    #: 那条"位置是构造出来的"）。自举侧的 token 记录本来就是 `(kind, off, len, line, col)`
+    #: 这个形状，所以这里补上之后，两边的 token 记录**逐字段同序**。
+    off: int = 0
+    len: int = 0
 
 
 _PUNCT = "{}()[]:;=@,.+-*/%<>!&|^?"
@@ -94,25 +103,27 @@ def lex(text: str) -> list[Tok]:
                     j += 1
             if j >= n:
                 raise LomError(line, col, "未闭合的字符串")
-            toks.append(Tok("string", "".join(buf), line, col))
+            toks.append(Tok("string", "".join(buf), line, col, i, j + 1 - i))
             i, col = j + 1, col + (j + 1 - i)
             continue
         m = re.match(r"0[xX][0-9A-Fa-f]+|\d+", text[i:])
         if m:
-            toks.append(Tok("number", m.group(0), line, col))
+            toks.append(Tok("number", m.group(0), line, col, i, m.end()))
             i, col = i + m.end(), col + m.end()
             continue
         m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])
         if m:
-            toks.append(Tok("ident", m.group(0), line, col))
+            toks.append(Tok("ident", m.group(0), line, col, i, m.end()))
             i, col = i + m.end(), col + m.end()
             continue
         if c in _PUNCT:
-            toks.append(Tok("punct", c, line, col))
+            toks.append(Tok("punct", c, line, col, i, 1))
             i, col = i + 1, col + 1
             continue
         raise LomError(line, col, f"非法字符 {c!r}")
-    toks.append(Tok("eof", "", line, col))
+    # eof 的 off/len 都指"末尾" —— 0 长度会与"空 token"混淆，所以 off 落在源尾、len 为 0，
+    # 而**任何真 token 的 off 都严格小于它**（判"到没到尾"靠 kind，不靠这个）。
+    toks.append(Tok("eof", "", line, col, n, 0))
     return toks
 
 

@@ -1,0 +1,17 @@
+// comefor/def_hand.lomt — `def_dialect.lomt` **手写展开后**的样子（`docs/184` §9）
+//
+// 这是 S4.1 那条判据的另一半：**用方言写的源**编出的 IR 必须与**这一份**逐字节相同。
+// 所以这份不许"顺手改得更漂亮" —— 它就是展开器应当吐出的东西：
+//
+//   def ANSWER = 42;
+//     -> const ANSWER : u32 = 42 ;
+//
+// token 的**顺序**（`const` `ANSWER` `:` `u32` `=` `42` `;`）与那七个 token 的
+// `kind`，两边要对得上；位置也指回原来那一行的 `ANSWER`。
+module comeform_demo
+
+const ANSWER : u32 = 42 ;
+
+fn main() -> u64 {
+    return ANSWER as u64;
+}

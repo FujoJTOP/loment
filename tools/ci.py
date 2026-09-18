@@ -84,6 +84,8 @@ KEY_HZ = 0.10
 STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potato_cross",
                  # 编译期子集解释器 (S4.0, docs/184 §9)
                  "loment_ct_test",
+                 # `comefor` 的 token 层展开 (S4.1, docs/184 §9)
+                 "loment_comefor_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",

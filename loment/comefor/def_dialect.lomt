@@ -1,0 +1,58 @@
+// comefor/def_dialect.lomt — S4.1 的**最小方言**演示（`docs/184` §9）
+//
+// 定义一个新词 `def`，写法是 `def 名字 = 数 ;`，展开成 `const 名字 : u32 = 数 ;`。
+// **手写展开的那一份是 `def_hand.lomt`** —— 判据说这两份编出的 IR **逐字节相同**。
+//
+// 这个方言故意小，但它是**真的**：吃的是任意 token、吐的是新造的 token、位置指回源里
+// 那一处（`docs/184` §4）。它同时把 §3.2 的四个内建全用了一遍。
+module comeform_demo
+
+comefor let "def" to {
+    /// 把一个字符串字面量的字节写进**宏体自己的宿主内存**，再合成一个 token。
+    ///
+    /// 这是"帮手写在体里面"的样子（`docs/184` §11：体是一支自足的程序，`use` 暂时不支持，
+    /// 所以帮手 fn 就写在体里）。合成 token 要的"文本"必须落在宿主内存上 —— `ct_syn`
+    /// 的第二个形参就是那个指针。
+    fn emit_s(s: str, k: u64, line: u64, col: u64) -> u64 {
+        let n: u32 = str_len(s) as u32;
+        let p: ptr = alloc(32);
+        let i: u32 = 0;
+        while i < n {
+            store8(p, i, str_byte(s, i) as u8);
+            i = i + 1;
+        }
+        return ct_syn(k, p, n as u64, line, col);
+    }
+
+    /// 吃 `名字 = 数 ;` 四个 token，吐 `const 名字 : u32 = 数 ;` 七个。
+    fn main() -> u64 {
+        let buf: ptr = alloc(32);
+        // 先把名字读进来 —— 为的不只是照抄它，还要把**它的行列**取出来给合成的那几个
+        // token 用。`docs/184` §4 那条"位置是构造出来的"就是这么来的：位置不是事后
+        // 对齐的，是宏体从游标上**读下来**填回去的。
+        ct_tok(0, buf);
+        // 行列各取**低字节**就够了：演示里源文件不到 256 行、列也窄。
+        // 要完整的 u32 得自己拼四个字节（体里没有 `bytes.lomt` 的 `load32`）。
+        let ln: u64 = load8(buf, 12) as u64;
+        let cl: u64 = load8(buf, 16) as u64;
+        emit_s("const", 0, ln, cl);
+        ct_out(buf);                    // 名字：照抄源 token，文本与位置都是它的
+        emit_s(":", 3, ln, cl);         // 3 = punct
+        emit_s("u32", 0, ln, cl);
+        ct_tok(1, buf);
+        ct_out(buf);                    // `=`
+        ct_tok(2, buf);
+        ct_out(buf);                    // 数值字面量
+        ct_tok(3, buf);
+        ct_out(buf);                    // `;`
+        return 4;                       // 吃了 4 个（从 `名字` 起算）
+    }
+}
+
+def ANSWER = 42;
+
+fn main() -> u64 {
+    return ANSWER as u64;
+}
+
+byuse "def" done
