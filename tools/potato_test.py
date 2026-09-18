@@ -170,6 +170,29 @@ MUTATORS = [
                              d.__setitem__("switches", [{"name": "a", "on": True},
                                                         {"name": "a", "on": False}])),
      "name 重复"),
+    # v4 = v3 + **方言**（`docs/184` §9 S4.3）：这份单元用了 `comefor` 定义的那些语法。
+    # 同一条纪律：**必填、可为空数组**。`body` 是定义处那段程序的**源文本** ——
+    # 只记名字的话，读产物的人知道"用了 `def`"却不知道 `def` 是什么（`docs/184` §7 ②）。
+    # 这几条都先补上 `switches`（v4 继承 v3 的检查），把要测的那一条**孤立出来**。
+    ("v4 缺 dialects", lambda d: (d.__setitem__("potato", "v4"),
+                              d.__setitem__("switches", []), d.pop("dialects", None)),
+     "dialects 必须是数组"),
+    ("v4 dialects 不是数组", lambda d: (d.__setitem__("potato", "v4"),
+                                 d.__setitem__("switches", []),
+                                 d.__setitem__("dialects", {})), "dialects 必须是数组"),
+    ("v4 方言名非法", lambda d: (d.__setitem__("potato", "v4"),
+                             d.__setitem__("switches", []),
+                             d.__setitem__("dialects", [{"name": "1x", "body": ""}])),
+     "name 非法"),
+    ("v4 方言名重复", lambda d: (d.__setitem__("potato", "v4"),
+                             d.__setitem__("switches", []),
+                             d.__setitem__("dialects", [{"name": "a", "body": ""},
+                                                        {"name": "a", "body": ""}])),
+     "name 重复"),
+    ("v4 body 不是字符串", lambda d: (d.__setitem__("potato", "v4"),
+                                 d.__setitem__("switches", []),
+                                 d.__setitem__("dialects", [{"name": "a", "body": 1}])),
+     "body 必须是字符串"),
 ]
 
 

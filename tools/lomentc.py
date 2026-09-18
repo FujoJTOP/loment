@@ -3447,7 +3447,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
         # 既有的对象全变非法 —— 旧版是承诺过能回放的 (docs/147 §5)。
         # v2 的新字段是 `mode`, **v3 的新字段是 `switches`**。
-        "potato": "v3",
+        # v4 = v3 + **方言**（`docs/184` §9 S4.3）。与 `mode`/`switches` 同一条纪律：
+        # **必填、可为空数组** —— 不存在"缺这项"的形态。带上 `body` 是为了让产物
+        # **自解释**：只记名字的话，读的人知道"用了方言 `def`"却不知道 `def` 是什么。
+        "potato": "v4",
         "unit": mod.name,
         "language": "loment",
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
@@ -3460,6 +3463,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
         # **按名字排序**(见 `SwitchTable.dump`) —— 确定性是判据。
         "switches": (mod.switches.dump() if mod.switches is not None else []),
+        "dialects": (getattr(mod, "dialects", None) or []),
         "imports": [d.name for d in (deps or [])],
         "capabilities": [
             {
@@ -4647,7 +4651,11 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # **一次使用**（而它本该整段消失）—— 顺序错一步，症状是"关着的语法仍然生效"。
     import loment_comefor
 
-    mod = Parser(loment_comefor.expand(tt, text), text).parse()
+    tt, _dias = loment_comefor.expand(tt, text)
+    mod = Parser(tt, text).parse()
+    # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
+    # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
+    mod.dialects = _dias
     mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。

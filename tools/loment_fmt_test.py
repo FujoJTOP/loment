@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomc     # noqa: E402
 import lomentc  # noqa: E402
 import lomfmt   # noqa: E402
 
@@ -81,8 +82,39 @@ def _build(td: Path) -> Path:
 def _corpus() -> list[Path]:
     files = sorted((ROOT / "loment" / "examples").glob("*.lomt"))
     files += sorted((ROOT / "loment" / "selfhost").glob("*.lomt"))
+    # `comefor` 的演示也进语料（`docs/184` §9 S4.3）：方言区**也**要被格式化 —— 见
+    # `test_fmt_preserves_dialect_tokens` 那条（它说明为什么"不透明块"对 `comefor`
+    # 是多余的）。
+    files += sorted((ROOT / "loment" / "comefor").glob("*.lomt"))
     files.append(SRC)
     return files
+
+
+@test
+def test_fmt_preserves_dialect_tokens():
+    """**格式化不改变 token 序列** —— 于是方言区被格式化了也无所谓（`docs/184` §9 S4.3）。
+
+    `docs/184` §9 给 S4.3 定的判据里有"`lomfmt` 不碰方言区"。**对 `comefor` 来说那条
+    是多余的**：方言区里的东西**仍然是 Loment 的 token**（`reg LEDS: 0x4000 { … }` 也是
+    标识符/标点/数字），而宏体读的就是 token。所以只要格式化**保序**，宏体看到的输入
+    一个字都没变 —— "别碰它"是在保护一件本来就不会坏的事。
+
+    **那条判据要等到有"非 Loment 词法"的方言区**才有内容（`docs/183` §8 的 S1：
+    外部代码块按原字节携带）。这里把这个区别钉下来，免得后来的人按 §9 的字面去写一个
+    用不上的"不透明块"。
+
+    判据就是保序 + 幂等，对**每一份**含有 `comefor` 的语料都跑 —— 不依赖 clang/WSL。
+    """
+    files = sorted((ROOT / "loment" / "comefor").glob("*.lomt"))
+    assert files, "语料空了 —— 判据会空转"
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        out = lomfmt.format_source(src)
+        a = [(t.kind, t.val) for t in lomc.lex(src) if t.kind != "eof"]
+        b = [(t.kind, t.val) for t in lomc.lex(out) if t.kind != "eof"]
+        assert a == b, f"{f.name}: 格式化改变了 token 序列（{len(a)} -> {len(b)}）"
+        assert lomfmt.format_source(out) == out, f"{f.name}: 格式化不幂等"
+    print(f"      保序: {len(files)} 份方言语料格式化后 token 序列一字未变")
 
 
 def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:

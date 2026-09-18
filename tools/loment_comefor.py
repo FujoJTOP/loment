@@ -206,6 +206,21 @@ class _Expander:
         self.toks = toks
         self.text = text
         self.active: dict[str, Macro] = {}
+        #: 定义过的方言 `{name, body}` —— 供 Potato v4 用（`docs/184` §9 S4.3）。
+        #: 定义那一段会被抹掉，所以**只有在这里**它还存在；不进 Potato 的话，
+        #: "这份产物用了哪些自定义语法"在**不读源码**的那一侧就看不见了。
+        self.dialects: list[dict] = []
+
+    def _body_text(self, lo: int, hi: int) -> str:
+        """`[lo, hi)` 这段 token 在**源文本**里的那一片。
+
+        空体给空串。取的是 `off`/`len`（源里的原始片段），不是解码后的值 ——
+        与 §3.2 那条"记录圈的是原始片段"同一条纪律。
+        """
+        if hi <= lo:
+            return ""
+        a, b = self.toks[lo], self.toks[hi - 1]
+        return self.text[a.off:b.off + b.len]
 
     # ---------------------------------------------------------------- 形状判定
     def _comefor_at(self, i: int):
@@ -350,6 +365,7 @@ class _Expander:
                                            f" —— 这套块不能嵌套，也不能重定义")
                     self.active[word] = Macro(word, self._body_module(lo, hi, t.line, t.col),
                                               t.line, t.col)
+                    self.dialects.append({"name": word, "body": self._body_text(lo, hi)})
                     i = nxt                  # 定义那一段整个抹掉
                     continue
                 b = self._byuse_at(i)
@@ -375,10 +391,16 @@ class _Expander:
         return out
 
 
-def expand(toks: list, text: str) -> list:
-    """`comefor`/`byuse` 的展开。**返回值是一份新的 token 表**（与 `_apply_switches` 同形）。
+def expand(toks: list, text: str) -> tuple[list, list]:
+    """`comefor`/`byuse` 的展开。
+
+    返回 `(新的 token 表, 方言清单)` —— 与 `_apply_switches` 同形（在 token 层给一份新的），
+    外加那份清单：定义那一段会被抹掉，**只有这一趟见过它**，而 Potato v4 要它
+    （`docs/184` §9 S4.3）。清单**按名字排序**（确定性是判据，与 `SwitchTable.dump` 同）。
 
     没有 `comefor` 的文件要**逐 token 原样通过** —— 这条是"S4.1 不改变任何既有程序的
     产物"的保证，判据 `test_no_comefor_is_identity` 钉它。
     """
-    return _Expander(toks, text).run()
+    ex = _Expander(toks, text)
+    out = ex.run()
+    return out, sorted(ex.dialects, key=lambda d: d["name"])

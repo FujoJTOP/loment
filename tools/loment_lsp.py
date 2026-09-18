@@ -44,7 +44,7 @@ def _parse(text: str):
     # 顺序与 `lomentc.load` 一致：先开关，再方言。
     tbl = lomentc.SwitchTable()
     tt = lomentc._apply_switches(lomc.lex(text), tbl)
-    mod = lomentc.Parser(loment_comefor.expand(tt, text), text).parse()
+    mod = lomentc.Parser(loment_comefor.expand(tt, text)[0], text).parse()
     mod.switches = tbl
     return mod
 

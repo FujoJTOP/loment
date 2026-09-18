@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
+import potato  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 CF = ROOT / "loment" / "comefor"
@@ -54,7 +56,7 @@ def test_no_comefor_is_identity():
         p = ROOT / rel
         txt = p.read_text(encoding="utf-8")
         a = lomc.lex(txt)
-        b = loment_comefor.expand(list(a), txt)
+        b = loment_comefor.expand(list(a), txt)[0]
         assert len(a) == len(b), f"{rel}: token 数变了 {len(a)} -> {len(b)}"
         for i, (x, y) in enumerate(zip(a, b)):
             assert x is y, (f"{rel}: 第 {i} 个 token 不是同一个对象"
@@ -101,7 +103,7 @@ def test_comefor_is_shape_not_reserved_word():
            "    let comefor: u32 = 3;\n"
            "    return (byuse() + to() + done() + comefor(4) + comefor) as u64;\n"
            "}\n")
-    toks = loment_comefor.expand(lomc.lex(txt), txt)
+    toks = loment_comefor.expand(lomc.lex(txt), txt)[0]
     mod = lomentc.Parser(toks, txt).parse()
     assert [f.name for f in mod.funcs] == ["byuse", "to", "done", "comefor", "main"], \
         [f.name for f in mod.funcs]
@@ -122,7 +124,7 @@ def test_body_rejects_use():
            "}\n"
            "byuse \"x\" done\n")
     try:
-        loment_comefor.expand(lomc.lex(txt), txt)
+        loment_comefor.expand(lomc.lex(txt), txt)[0]
     except lomc.LomError as e:
         assert "use" in str(e), e
         print("      体里的 use: 明确拒绝")
@@ -137,7 +139,7 @@ def test_byuse_unknown_name_is_rejected():
            "fn main() -> u64 { return 0; }\n"
            "byuse \"nope\" done\n")
     try:
-        loment_comefor.expand(lomc.lex(txt), txt)
+        loment_comefor.expand(lomc.lex(txt), txt)[0]
     except lomc.LomError as e:
         assert "nope" in str(e), e
         print("      byuse 收错名字: 明确拒绝")
@@ -159,7 +161,7 @@ def test_overconsumption_is_rejected():
            "x 1;\n"
            "byuse \"x\" done\n")
     try:
-        loment_comefor.expand(lomc.lex(txt), txt)
+        loment_comefor.expand(lomc.lex(txt), txt)[0]
     except lomc.LomError as e:
         assert "99" in str(e), e
         print("      宏体多吃: 明确拒绝")
@@ -184,7 +186,7 @@ def test_definition_must_be_top_level():
            "}\n"
            "byuse \"x\" done\n")
     try:
-        loment_comefor.expand(lomc.lex(txt), txt)
+        loment_comefor.expand(lomc.lex(txt), txt)[0]
     except lomc.LomError as e:
         assert "顶层" in str(e), e
         print("      块里的定义: 明确拒绝")
@@ -209,7 +211,7 @@ def test_entry_takes_no_params():
            "fn main() -> u64 { return 0; }\n"
            "byuse \"x\" done\n")
     try:
-        loment_comefor.expand(lomc.lex(txt), txt)
+        loment_comefor.expand(lomc.lex(txt), txt)[0]
     except lomc.LomError as e:
         assert "形参" in str(e), e
         print("      main 带形参: 明确拒绝")
@@ -243,19 +245,51 @@ def test_domain_is_the_builtin_table():
                 "fn main() -> u64 { return 0; }\n"
                 "byuse \"d\" done\n")
 
-    ok = loment_comefor.expand(lomc.lex(body("alloc(16) as u64")), body("alloc(16) as u64"))
+    ok = loment_comefor.expand(lomc.lex(body("alloc(16) as u64")), body("alloc(16) as u64"))[0]
     assert ok, "在表里的内建应当跑得通"
     for call, why in (("syscall4(60, 0 as u64, 0 as u64, 0 as u64)", "起进程/退出"),
                       ("open(1) as u64", "开文件")):
         txt = body(call)
         try:
-            loment_comefor.expand(lomc.lex(txt), txt)
+            loment_comefor.expand(lomc.lex(txt), txt)[0]
         except lomc.LomError as e:
             assert "nobuiltin" in str(e), (call, e)
             continue
         raise AssertionError(f"{call}（{why}）不该在宏体里可用 —— 它不在内建表里，"
                              f"而这张表**就是**编译期域（`docs/184` §5.1）")
     print("      域 = 内建表: 表外的名字调不到（syscall / 开文件）")
+
+
+@test
+def test_potato_v4_carries_dialects():
+    """产物里**看得出用了哪些方言** —— `docs/184` §9 给 S4.3 定的证伪判据。
+
+    方言定义那一段在展开时被**抹掉**了，所以不带上产物的话，读产物的人（"不读源码的那
+    一侧"，`docs/182` §1 里 Potato 存在的理由）**看不见**这份单元用了自定义语法。
+
+    `body` 一起带上（`docs/184` §7 ②）：只记名字的话，读的人知道"用了方言 `def`"
+    却不知道 `def` 是什么意思 —— 那正是"产物不自解释"。带上源文本，这一条就可重建。
+
+    反向那一半同样重要：**没有方言的单元必须是空数组**，且校验器认 v4
+    （`potato.validate`）—— 不然这条只是在自说自话。
+    """
+    mod, deps = lomentc.load_unit(CF / "def_dialect.lomt", ROOT)
+    doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+    assert doc["potato"] == "v4", doc["potato"]
+    names = [d["name"] for d in doc["dialects"]]
+    assert names == ["def"], f"方言清单应当是 ['def'], 实得 {names}"
+    body = doc["dialects"][0]["body"]
+    # `body` 是**定义处那段程序的源文本** —— 认它而不是认长度: 长度是巧合, 内容是契约。
+    assert "ct_syn" in body and "fn main" in body, body[:200]
+    assert potato.validate(doc) == [], potato.validate(doc)
+
+    # 反向: 没有 `comefor` 的单元 -> 空数组（不是"缺这项"）
+    plain = ROOT / "loment" / "examples" / "bytes.lomt"
+    m2, d2 = lomentc.load_unit(plain, ROOT)
+    doc2 = json.loads(lomentc.emit_potato(m2, ROOT, d2))
+    assert doc2["dialects"] == [], doc2["dialects"]
+    assert potato.validate(doc2) == [], potato.validate(doc2)
+    print(f"      Potato v4: 方言进产物（{names[0]}, body {len(body)}B）; 无方言 -> []")
 
 
 def main() -> int:
