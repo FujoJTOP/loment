@@ -105,7 +105,7 @@ def test_rust_output_shape():
 @test
 def test_potato_emits_used_layouts():
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v4" and doc["unit"] == "demo" and doc["language"] == "loment"
+    assert doc["potato"] == "v5" and doc["unit"] == "demo" and doc["language"] == "loment"
     # v2 的新字段 (docs/143 §3.2): 没写 `choose` 就是默认 `std` —— 对象里永远显式。
     assert doc["mode"] == "std", doc.get("mode")
     assert [r["name"] for r in doc["layouts"]] == ["Header", "Section"]
@@ -1105,7 +1105,7 @@ def test_m45_every_example_exports_a_valid_object():
     assert len(names) >= 15, names
     for n in names:
         doc = _potato(n)
-        assert doc["potato"] == "v4", n
+        assert doc["potato"] == "v5", n
         assert doc["mode"] in potato.MODES, (n, doc.get("mode"))
         assert potato.validate(doc) == [], (n, potato.validate(doc))
 
@@ -1144,7 +1144,7 @@ def test_switches_elide_code_and_land_in_potato():
     # 开着: helper 存在
     errs, doc = chk("module m\n\n" + BODY + "\nchoose feat\n\n" + CALL)
     assert not errs, errs
-    assert doc["potato"] == "v4" and doc["switches"] == [{"name": "feat", "on": True}], doc
+    assert doc["potato"] == "v5" and doc["switches"] == [{"name": "feat", "on": True}], doc
     # 关着: 体整个不在了 —— 引用 helper 反而成了未定义
     errs, doc = chk("module m\n\n" + BODY + "\nchoose close feat\n\n" + CALL)
     assert errs and "helper" in errs[0], errs
@@ -1290,7 +1290,7 @@ def test_mode_follows_choose_and_defaults_to_std():
         p = Path(td) / "m.lomt"
         p.write_text(src, encoding="utf-8", newline="\n")
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-        assert doc["potato"] == "v4" and doc["mode"] == "no_std", doc.get("mode")
+        assert doc["potato"] == "v5" and doc["mode"] == "no_std", doc.get("mode")
     # 不写 choose -> std
     src2 = "module m\n\nfn f() -> u32 {\n    return 1;\n}\n"
     with tempfile.TemporaryDirectory() as td:

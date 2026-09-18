@@ -1,0 +1,62 @@
+/*
+ * Machine —— 一个**状态机**：拿策略等级，给出下一个状态。
+ *
+ * **这份源码是 Java 语法写的 Loment**（后缀 `.lomt`，里面装的是 Java）。
+ *
+ * 为什么这一段是 Java：它是**状态迁移表**，而这一类东西在 Java 那一族里通常写成
+ * 带常量与静态方法的类 —— 这里保持那个形状。与 Python 那一段一样走**运行期腿**
+ * （起 `java`），不是 C ABI。
+ *
+ * 输入从上一段留下的 `level.txt` 读 —— 与 Python 从 `frame.bin` 读同一个道理：
+ * **进程之间只传字节**，不传指针。
+ *
+ * 迁移规则（告警是**粘**的：进了 ALARM 不会自己退回去）：
+ *
+ *     当前 \ 等级   0        1        2
+ *     IDLE          IDLE     WARN     ALARM
+ *     WARN          IDLE     WARN     ALARM
+ *     ALARM         ALARM    ALARM    ALARM
+ */
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+
+public class Machine {
+    public static final int IDLE = 0;
+    public static final int WARN = 1;
+    public static final int ALARM = 2;
+
+    /** 三个状态名，供打印与断言用。 */
+    public static final String[] NAMES = { "IDLE", "WARN", "ALARM" };
+
+    public static int step(int state, int level) {
+        if (state == ALARM) {
+            return ALARM;               // 粘住：只能显式 clear
+        }
+        if (level >= ALARM) {
+            return ALARM;
+        }
+        if (level >= WARN) {
+            return WARN;
+        }
+        return IDLE;
+    }
+
+    /** 读上一段落下的等级。读不到就返回 -1（**不是一个合法等级**，所以会被当成"没跑成"）。 */
+    public static int readLevel() throws IOException {
+        BufferedReader r = new BufferedReader(new FileReader("level.txt"));
+        try {
+            String line = r.readLine();
+            if (line == null) {
+                return -1;
+            }
+            return Integer.parseInt(line.trim());
+        } finally {
+            r.close();
+        }
+    }
+
+    public static void main(String[] args) throws IOException {
+        System.out.println(step(IDLE, readLevel()));
+    }
+}

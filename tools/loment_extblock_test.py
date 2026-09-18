@@ -11,11 +11,16 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+import lomentc  # noqa: E402
+import potato  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
 
 TESTS: list[tuple[str, object]] = []
 
@@ -128,6 +133,41 @@ def test_common_constructs_do_not_false_trigger():
         got = [t.kind for t in lomc.lex(src)]
         assert "raw" not in got, f"{name}: 误判成外部块 -> {got}"
     print(f"      反例: {len(cases)} 种常见构造都不误触发")
+
+
+@test
+def test_body_round_trips_into_potato():
+    """**正文往返逐字节相同** —— `docs/185` §6 给 S1.2/S1.3 定的证伪判据。
+
+    源 →（词法 raw）→ AST → **Potato v5**，正文必须一个字节都不差。
+
+    **为什么载体是 Potato 而不是 LLVM IR**：这一版**不编**那段正文（谁去编是 S2），
+    所以 IR 里没有它 —— 而"产物里看得见正文"正是 `docs/179` 那条"形式对象要自解释"的
+    要求。把正文塞进 IR 当字符串常量是**假动作**：LLVM IR 的字符串要转义，
+    "逐字节相同"就变成了"转义再解回来相同"，那证明不了什么。
+
+    反向那一半同样重要：**没有外部块的单元必须是空数组**，且校验器认 v5 ——
+    不然这条只是在自说自话。
+    """
+    src = (ROOT / "loment" / "extblock" / "evil.lomt").read_text(encoding="utf-8")
+    mod, deps = lomentc.load_unit(ROOT / "loment" / "extblock" / "evil.lomt", ROOT)
+    assert lomentc.check(mod, deps=deps) == [], "外部块不该让 check 报错（它没什么可查的）"
+    doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+    assert doc["potato"] == "v5", doc["potato"]
+    got = [(b["lang"], b["body"]) for b in doc["bodies"]]
+    assert [g[0] for g in got] == ["c", "py"], f"语言名或顺序不对: {[g[0] for g in got]}"
+    for lang, body in got:
+        assert body.encode("utf-8") in src.encode("utf-8"), f"{lang}: 正文不是源里的那一段"
+    # 正文里那三个"字符串字面量装不下"的字节，一个都不能少、不能变
+    assert "\\0" in got[0][1] and '"' in got[0][1] and "中文" in got[0][1], got[0][1]
+    assert potato.validate(doc) == [], potato.validate(doc)
+
+    plain = ROOT / "loment" / "examples" / "bytes.lomt"
+    m2, d2 = lomentc.load_unit(plain, ROOT)
+    doc2 = json.loads(lomentc.emit_potato(m2, ROOT, d2))
+    assert doc2["bodies"] == [], doc2["bodies"]
+    assert potato.validate(doc2) == [], potato.validate(doc2)
+    print(f"      Potato v5: 正文进产物（{[g[0] for g in got]}）; 无外部块 -> []")
 
 
 def main() -> int:

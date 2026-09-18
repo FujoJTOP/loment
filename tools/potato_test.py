@@ -193,7 +193,28 @@ MUTATORS = [
                                  d.__setitem__("switches", []),
                                  d.__setitem__("dialects", [{"name": "a", "body": 1}])),
      "body 必须是字符串"),
+    # v5 = v4 + **外部代码块**（`docs/185` §7 ①）：这份单元里嵌了别语言的正文。
+    # 必填、可为空数组；**按源里的顺序**（序列，与 `dialects` 那个集合不同）。
+    # 下面每一条都把前面几版的必填字段补齐，**只留要测的那一条**是坏的。
+    ("v5 缺 bodies", lambda d: (d.__setitem__("potato", "v5"), _full(d),
+                             d.pop("bodies", None)), "bodies 必须是数组"),
+    ("v5 bodies 不是数组", lambda d: (d.__setitem__("potato", "v5"), _full(d),
+                                 d.__setitem__("bodies", {})), "bodies 必须是数组"),
+    ("v5 语言名非法", lambda d: (d.__setitem__("potato", "v5"), _full(d),
+                             d.__setitem__("bodies", [{"lang": "1c", "body": ""}])),
+     "lang 非法"),
+    ("v5 body 不是字符串", lambda d: (d.__setitem__("potato", "v5"), _full(d),
+                                 d.__setitem__("bodies", [{"lang": "c", "body": 1}])),
+     "body 必须是字符串"),
 ]
+
+
+def _full(d: dict) -> dict:
+    """把**前几版的必填字段**补齐 —— 只留要测的那一条是坏的（否则报的是别的东西）。"""
+    d.setdefault("mode", "std")
+    d.setdefault("switches", [])
+    d.setdefault("dialects", [])
+    return d
 
 
 def mutated_objects():

@@ -124,6 +124,36 @@ fn fail(msg: str) -> u32 {
     return die(1);
 }
 
+/// 词法流里有没有**外部代码块**的痕迹（`docs/185` S1 的临时守卫，镜像落地时删掉）。
+///
+/// 认两样：一个 kind = 5 的 **raw token**（块正文），或者一个顶层的 `command` / `foruse`
+/// （语言名声明）。两样任一出现就说明这份源要 S1 的能力，而自举侧**还没实现**它。
+///
+/// **为什么必须在这里拒绝**：放它过去的话，`command`/`foruse` 与 raw 会被当成普通标识符
+/// 扫过去，报出来的是"E2 未定义符号 `py`"之类**指不到点子上**的错 —— 真正的理由是
+/// "这门语言还没学会收外部块"。**错要指在错的地方**。
+fn has_extblock(src: ptr, t: ptr, nt: u32) -> u32 {
+    let i: u32 = 0;
+    let d: u32 = 0;
+    while i < nt {
+        let k: u32 = load32(t, i * 20);
+        if k == 5 {
+            return 1;                       // raw token = 块正文，一定是它
+        }
+        if k == 3 {
+            let c: u32 = load8(src, load32(t, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 { d = d + 1; }
+            if (c == 125 || c == 41 || c == 93) && d > 0 { d = d - 1; }
+        }
+        if d == 0 && k == 0
+                && (tok_is(src, t, i, "command") || tok_is(src, t, i, "foruse")) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// `comefor` 展开失败了 —— 报出来并退出。
 ///
 /// **码是数、话在这儿** —— 展开器只管报哪一类，说法归 driver（与 `switch_rules` 报
@@ -1238,6 +1268,11 @@ fn _start() -> u32 {
     }
 
 
+    // 外部代码块（`docs/185` S1）在自举侧**还没落地** —— 参考实现收，这边还不认。
+    // 明确拒绝，别让它掉进"未定义符号"那种指不到点子的错里。镜像落地时删掉这一段。
+    if has_extblock(unit, toks2, nt) == 1 {
+        return fail("fujoc-s: 外部代码块 (let c { } / c { }) 在自举侧还没实现 — 见 docs/185\n");
+    }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);

@@ -663,6 +663,18 @@ class MethodCall:
 
 
 @dataclass
+class ExtBlock:
+    """一个**外部代码块**（`docs/185` S1）：`let c { … }` / 声明过的 `c { … }`。
+
+    `body` 是 `{` 与 `}` 之间的**原始字节**（词法器按 raw 模式收的，不经过转义表）。
+    **Loment 不看它一眼** —— 它只是一个要被原样带到产物里去的东西；谁去编它是 S2 的事。
+    """
+    lang: str
+    body: str
+    line: int
+
+
+@dataclass
 class Module:
     name: str
     uses: list[str] = field(default_factory=list)      # use "*.lom"  (L0 布局; 只有路径形式)
@@ -699,6 +711,13 @@ class Module:
     #:   * `own_switches` = **本模块自己写了没写**。只有"库不许 `choose`"用它 ——
     #:     混用的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成库写了 choose。
     own_switches: "SwitchTable | None" = None
+    #: **外部代码块**（`docs/185` S1）。两个字段而不是一个:
+    #:   * `ext_langs` = `command <语言>` / `foruse <语言>` **声明**过的语言名。
+    #:     词法器就是靠它消歧的（不带 `let` 的写法只认声明过的名字），parser 只是
+    #:     把它记下来 —— **S1 里它不驱动任何东西**，真去拉编译器是 S2；
+    #:   * `ext_blocks` = 块本身（语言名 + 正文）。
+    ext_langs: list[str] = field(default_factory=list)
+    ext_blocks: list[ExtBlock] = field(default_factory=list)
     #: `addin <名字>` 的位置（`docs/182` §1.4）。**只有根单元能写** —— 与"库不许 `choose`"
     #: 是同一条纪律的两半。它不进 AST（`_apply_switches` 会抹掉），但**"写了没生效"必须报出来**：
     #: 预扫只走"根 + `addin` 目标"那一张图，所以**被 `use` 进来的库里的 `addin` 会静默失效**
@@ -1128,6 +1147,28 @@ class Parser:
                 for f in im.funcs:
                     f.name = f"{im.type}_{f.name}"  # 静态派发: 名字按接收者类型混淆
                     mod.funcs.append(f)
+            elif t.val in ("command", "foruse"):
+                # 语言名声明（`docs/185` §3）。**语法层只收集** —— 与 `choose` 同一条路数。
+                # S1 里它唯一的作用是**让词法器消歧**（不带 `let` 的外部块只认声明过的名字）；
+                # 真去拉目标语言的编译器是 S2。
+                self.next()
+                lang = self.expect("ident", None, "（语言名，例如 c / py）").val
+                if lang not in mod.ext_langs:
+                    mod.ext_langs.append(lang)
+            elif (t.val == "let" and self.peek(1).kind == "ident"
+                    and self.peek(2).kind == "raw"):
+                # `let <语言> { 正文 }`（`docs/185` §3）。词法器已经把 `{…}` 收成**一个**
+                # raw token，所以这里看的是 `let` `IDENT` `raw` 三个。
+                self.next()
+                lang = self.next().val
+                r = self.next()
+                mod.ext_blocks.append(ExtBlock(lang, r.val, r.line))
+            elif t.val in mod.ext_langs and self.peek(1).kind == "raw":
+                # 不带 `let` 的写法 —— **只有声明过的语言名走得到这里**（词法器已经按这条
+                # 规则决定过要不要收 raw token；这里是同一规则在语法侧的镜像）。
+                lang = self.next().val
+                r = self.next()
+                mod.ext_blocks.append(ExtBlock(lang, r.val, r.line))
             elif t.val == "choose":  # docs/143 §3.2: 项目模式
                 line = t.line
                 self.next()
@@ -3450,7 +3491,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v4 = v3 + **方言**（`docs/184` §9 S4.3）。与 `mode`/`switches` 同一条纪律：
         # **必填、可为空数组** —— 不存在"缺这项"的形态。带上 `body` 是为了让产物
         # **自解释**：只记名字的话，读的人知道"用了方言 `def`"却不知道 `def` 是什么。
-        "potato": "v4",
+        "potato": "v5",
         "unit": mod.name,
         "language": "loment",
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
@@ -3464,6 +3505,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **按名字排序**(见 `SwitchTable.dump`) —— 确定性是判据。
         "switches": (mod.switches.dump() if mod.switches is not None else []),
         "dialects": (getattr(mod, "dialects", None) or []),
+        # 外部代码块（`docs/185` S1）：语言名 + 正文原文。**按源里的顺序**（序列，
+        # 与 `dialects` 那个集合不同）。正文是 `{` 与 `}` 之间的原始字节。
+        "bodies": [{"lang": b.lang, "body": b.body} for b in mod.ext_blocks],
         "imports": [d.name for d in (deps or [])],
         "capabilities": [
             {

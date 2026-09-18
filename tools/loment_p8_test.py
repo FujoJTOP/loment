@@ -100,29 +100,23 @@ def _loment_tokens(exe: Path, src: Path) -> list[tuple[int, int, int, int, int]]
 def _python_tokens(src: Path) -> list[tuple[int, int, int, int, int]]:
     # 按原始字节解码 (不经换行归一化), 否则 CRLF 检出会让字节偏移整体偏移
     text = src.read_bytes().decode("utf-8")
-    line_starts = [0]
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            line_starts.append(i + 1)
     out = []
     for t in lomc.lex(text):
-        start = line_starts[t.line - 1] + t.col - 1
-        # Loment 版按 UTF-8 字节偏移; 这里换算成字节
-        bstart = len(text[:start].encode("utf-8"))
+        # **跨度直接取 `t.off`/`t.len`，不要从 (line, col) 反推**：源里若有
+        # **跨行的字符串字面量**，那个换行按源码算确实是"行首"，按词法却不是 ——
+        # 两边会差出一个换行的字节数，而且是**越往后差得越多**。
+        # 这个形状语料里一个都没有，只有自举 driver 里那句被 heredoc 腐蚀的
+        # `fail("…\n")` 误打误撞撞出来过（见 `docs/185` §9.3）。
+        # 词法器的 `off`/`len` 本来就是**字符**下标/长度，Loment 那侧报的是字节，这里换算。
+        bstart = len(text[:t.off].encode("utf-8"))
+        blen = len(text[t.off:t.off + t.len].encode("utf-8"))
         if t.kind == "eof":
             out.append((4, bstart, 0, t.line, t.col))
-            continue
-        if t.kind == "raw":
+        elif t.kind == "raw":
             # 正文就是源里的原始字节（`docs/185` §4.1），`val` 与跨度是同一份
-            out.append((5, bstart, len(t.val.encode("utf-8")), t.line, t.col))
-            continue
-        if t.kind == "string":
-            j = start + 1
-            while j < len(text) and text[j] != '"':
-                j += 2 if text[j] == "\\" else 1
-            out.append((2, bstart, len(text[start:j + 1].encode("utf-8")), t.line, t.col))
+            out.append((5, bstart, blen, t.line, t.col))
         else:
-            out.append((KIND[t.kind], bstart, len(t.val.encode("utf-8")), t.line, t.col))
+            out.append((KIND[t.kind], bstart, blen, t.line, t.col))
     return out
 
 
@@ -137,7 +131,14 @@ def test_m79_loment_lexer_matches_python():
              ROOT / "loment" / "selfhost" / "lexer.lomt",
              # **外部代码块**（`docs/185` S1）：不加进来，raw 模式两边不一致也看不出来
              # —— 这正是本仓反复撞到的那个形状（判据只跑它跑的那些）。
-             ROOT / "loment" / "extblock" / "evil.lomt"]
+             ROOT / "loment" / "extblock" / "evil.lomt",
+             # **字符串里带裸换行**（`docs/185` §9.3）：上面那条"形状不存在就测不到"
+             # 同一个毛病 —— 语料里一份这样的源都没有，是 driver 里一句被 heredoc
+             # 腐蚀的 `fail("…\n")` 误打误撞撞出来的。这份源把那个形状钉成常驻。
+             # 放在 `loment/lex/` 而不是 `examples/`：**它是夹具不是 API** ——
+             # `examples/` 按定义全部进手册（`loment_manual.py` 直接 glob 它），
+             # 一份词法语料进去会平白长出一页"公开 API"。
+             ROOT / "loment" / "lex" / "multiline_str.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build(td)
         for f in files:

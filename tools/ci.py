@@ -88,6 +88,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_comefor_test",
                  # 外部代码块的字节保真 (S1, docs/185)
                  "loment_extblock_test",
+                 # 多语言程序 (docs/183 §8.2 的 S2 判据)
+                 "loment_multilang_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",

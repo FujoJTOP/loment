@@ -1,0 +1,38 @@
+"""policy —— 从帧里读出**策略等级**，并把等级落给下一段。
+
+**这份源码是 Python 语法写的 Loment**（后缀 `.lomt`，里面装的是 Python）。
+
+为什么这一段是 Python：它是**阈值**，而阈值天然是配置 —— 用模块级常量把它写清楚，
+换阈值不用碰 Loment 那一侧。
+
+走的是**运行期那条腿**（`docs/173` §2）：Python 不是"导出 C ABI 的库"，是解释器，
+所以不链接 —— `loment/lib/proc.lomt` 起一个 `python3` 进程，把 stdout 读回来。
+
+**数据怎么进来的**：上一段（C）把帧落成 `frame.bin` 的 **4 字节小端** —— 两条腿之间
+传不了指针，所以只能传字节。**输出**同样走文件（`level.txt`），交给下一段（Java）。
+命令行本身是**常量**（`python3 policy.py`）：`proc_sh` 收的是 `str` 字面量，
+把运行期的数拼进命令行是另一件事。
+"""
+
+#: 读数超过这两个阈值就升一级。改这里不影响 Loment 那一侧。
+WARN_LEVEL = 500
+ALARM_LEVEL = 900
+
+
+def level(frame):
+    """帧 -> 0（正常）/ 1（警告）/ 2（告警）。取低 16 位读数。"""
+    v = frame & 0xFFFF
+    if v >= ALARM_LEVEL:
+        return 2
+    if v >= WARN_LEVEL:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    with open("frame.bin", "rb") as f:
+        frame = int.from_bytes(f.read(4), "little")
+    lv = level(frame)
+    with open("level.txt", "w") as f:
+        f.write("%d\n" % lv)
+    print(lv)

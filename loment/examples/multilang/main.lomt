@@ -1,0 +1,154 @@
+// multilang/main.lomt —— **一条流水线，三段各用一门语法写**（Loment 当宿主）
+//
+//     C（链接腿）      Python（运行期腿）   Java（运行期腿）      Loment
+//     ──────────      ─────────────       ──────────────      ──────
+//     装帧/拆帧   ->   判策略等级     ->   走状态机        ->   合起来 + 打印
+//     01-c/pack.lomt   02-python/policy.lomt  03-java/Machine.lomt
+//
+// **三段都不在这份文件里**，各自写在同目录下那三份 `.lomt` 里 —— 但里面装的分别是
+// C / Python / Java 的语法（`docs/179` §1.1 第二层"按内容识别"）。Loment 在这里只做
+// 它最该做的事：**把它们接起来**，并决定谁负责哪一块。
+//
+// ## 两条腿在这里同时出现（`docs/173` §2）
+//
+//   * **C** 走**链接腿** —— `pack_frame` 是 `pub extern fn`（接口单元由 `lomt_from`
+//     从 `01-c/pack.lomt` 生成），实现在编好的 `.o` 里，`--link` 进来。传的是
+//     **真的按 C ABI 传参**。
+//   * **Python / Java** 走**运行期腿** —— 它们不导出 C ABI，是解释器/JVM，所以
+//     `proc_sh` 起一个进程，把 **stdout 读回来**。
+//
+// **两条腿之间传不了指针**，所以帧要落成**字节**（`frame.bin`，4 字节小端）给那两段读。
+// 这个边界是这一节的要害，不是实现偷懒：进程桥那一边没有我们的地址空间。
+module multilang
+
+use bytes                  // `store32`/`load32` 是**库**里的，不是语言内建
+use proc
+use "pack_iface.lomt"       // lomt_from 从 01-c/pack.lomt 生成的接口单元
+                            // **路径形式** —— 名字形式不搜同目录（SKILL §2）
+
+/// 帧落盘：4 字节小端。**字节**，不是指针 —— 见文件头那条边界。
+fn put_frame(w: u32) -> u32 {
+    let p: ptr = alloc(4);
+    store32(p, 0, w);
+    let fd: i64 = syscall6(257, (0 as u64) - 100, str_ptr("frame.bin") as u64,
+                           577 as u64, 420 as u64, 0);
+    if fd < 0 {
+        return 1;
+    }
+    let n: i64 = syscall4(1, fd as u64, p as u64, 4 as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if n != 4 {
+        return 2;
+    }
+    return 0;
+}
+
+/// 把十进制写进缓冲（反着填再翻过来）。返回位数。
+fn dec(dst: ptr, v: u32) -> u32 {
+    if v == 0 {
+        store8(dst, 0, 48 as u8);
+        return 1;
+    }
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(tmp, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let q: u32 = 0;
+    while q < n {
+        store8(dst, q, load8(tmp, n - 1 - q) as u8);
+        q = q + 1;
+    }
+    return n;
+}
+
+/// 起一条命令，把 stdout 里**第一个十进制数**解出来。失败返回 9（一个不可能的等级/状态）。
+fn ask(cmd: str, buf: ptr, cap: u32) -> u32 {
+    let n: i64 = proc_sh(cmd, buf, cap);
+    if n <= 0 {
+        return 9;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    let m: u32 = n as u32;
+    let any: u32 = 0;
+    while i < m {
+        let c: u32 = load8(buf, i) as u32;
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+            any = 1;
+        } else if any == 1 {
+            return v;                       // 数字段结束
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let buf: ptr = alloc(256);
+    let out: ptr = alloc(256);
+    let o: u32 = 0;
+
+    // ---- 1. C：装帧（**真按 C ABI 调用**，不是起进程）
+    let w: u32 = pack_frame(7 as u32, 1000 as u32);
+
+    // ---- 2. 帧落成字节，交给下面两段
+    let e: u32 = put_frame(w);
+    if e != 0 {
+        syscall4(60, 90 as u64, 0, 0);      // 落盘失败 -> 90（一个不可能的正常结果）
+    }
+
+    // ---- 3. Python：判策略等级
+    let lvl: u32 = ask("python3 policy.py", buf, 256);
+
+    // ---- 4. Java：走状态机（从 IDLE 开始）
+    //
+    // **为什么不是 `java Machine`**：进程桥 exec 的是 `/bin/sh -c <command>`，而它
+    // **不传环境**（`loment/lib/proc.lomt:120` 是 `execve(path, argv, NULL)`），
+    // 于是子进程的 `PATH` 只有 sh 自带的默认值 —— 自建 JDK 不在里面。
+    // `run-java.sh` 是**夹具生成的启动脚本**（与 `pack_iface.lomt` 一样是生成物）：
+    // **找到目标语言的运行时并摆到进程能看见的地方，本就是"调节器"的活儿**（S2 的 `foruse`），
+    // 在它落地之前由夹具顶上。判据比的是"这个程序跑出什么"，不是"谁去找到 java"。
+    let st: u32 = ask("sh run-java.sh Machine", buf, 256);
+
+    // ---- 5. 合一并打印：`frame=<十进制> level=<位> state=<位>`
+    let lit: str = "frame=";
+    let i: u32 = 0;
+    while i < str_len(lit) {
+        store8(out, o, str_byte(lit, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    o = o + dec(ptr_add(out, o), w);
+    let lit2: str = " level=";
+    let j: u32 = 0;
+    while j < str_len(lit2) {
+        store8(out, o, str_byte(lit2, j) as u8);
+        o = o + 1;
+        j = j + 1;
+    }
+    o = o + dec(ptr_add(out, o), lvl);
+    let lit3: str = " state=";
+    let k: u32 = 0;
+    while k < str_len(lit3) {
+        store8(out, o, str_byte(lit3, k) as u8);
+        o = o + 1;
+        k = k + 1;
+    }
+    o = o + dec(ptr_add(out, o), st);
+    store8(out, o, 10 as u8);
+    o = o + 1;
+    syscall4(1, 1 as u64, out as u64, o as u64);
+
+    // ---- 6. 退出码要**三段都参与**，任一环错都到不了这个数：
+    //        `sensor * 100 + value / 100 + state`
+    //        = 7*100 + 1000/100 + 2 = 712，低 8 位 = 200。
+    //        拆帧错 -> sensor 那一项就变；C 没被真调到 -> 整个都是 0；
+    //        Python/Java 没跑成 -> state 是 9（`ask` 的失败值）。
+    let code: u32 = (frame_sensor(w) % 16) * 100 + (frame_value(w) / 100) + st;
+    syscall4(60, code as u64, 0, 0);
+}

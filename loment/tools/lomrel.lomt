@@ -217,6 +217,7 @@ tools/loment_elf_test.py
 tools/loment_pe_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
+tools/loment_multilang_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py
@@ -253,7 +254,13 @@ editors/vscode/src/*.js
 editors/vscode/syntaxes/*.json
 loment/ct/*.lomt
 loment/comefor/*.lomt
+loment/examples/multilang/*.lomt
+loment/examples/multilang/01-c/*.lomt
+loment/examples/multilang/02-python/*.lomt
+loment/examples/multilang/03-java/*.lomt
+loment/examples/multilang/README.md
 loment/extblock/*.lomt
+loment/lex/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

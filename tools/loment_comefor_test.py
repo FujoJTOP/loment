@@ -275,7 +275,7 @@ def test_potato_v4_carries_dialects():
     """
     mod, deps = lomentc.load_unit(CF / "def_dialect.lomt", ROOT)
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v4", doc["potato"]
+    assert doc["potato"] == "v5", doc["potato"]
     names = [d["name"] for d in doc["dialects"]]
     assert names == ["def"], f"方言清单应当是 ['def'], 实得 {names}"
     body = doc["dialects"][0]["body"]

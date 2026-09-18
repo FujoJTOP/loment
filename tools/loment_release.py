@@ -86,6 +86,8 @@ GLOBS = [
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
     # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。
     "tools/lomt_from.py", "tools/loment_multisyntax_test.py",
+    # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
+    "tools/loment_multilang_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
@@ -114,8 +116,22 @@ GLOBS = [
     "loment/ct/*.lomt",
     # `comefor` 演示对：方言源 + 手写展开源（判据要两份都在才跑得起来）。
     "loment/comefor/*.lomt",
+    # 多语言程序那四份源 (三段外源语法 + 一份 Loment) 与它的说明。
+    # **只写尾部 `*`**（不写 `*/*`）: 自举侧那个 glob 匹配器不认中间的通配
+    # （实测 `loment/examples/multilang/*/*.lomt` 在它那边一条都展开不出来，
+    # `loment_rel_test` 当场红）。一条一层目录写清楚，两边就一致。
+    "loment/examples/multilang/*.lomt",
+    "loment/examples/multilang/01-c/*.lomt",
+    "loment/examples/multilang/02-python/*.lomt",
+    "loment/examples/multilang/03-java/*.lomt",
+    "loment/examples/multilang/README.md",
     # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
     "loment/extblock/*.lomt",
+    # **词法**语料: 只有词法器才看得见的形状。**故意不放进 `loment/examples/`** ——
+    # 那个目录按定义全是公开 API（`loment_manual.py` 直接 glob 它出手册页），
+    # 一份夹具进去会平白长出一页 "api/<名字>.md"。这里的文件只被 `loment_p8_test`
+    # 的 token 流对照点名，**不进任何编译语料**。
+    "loment/lex/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

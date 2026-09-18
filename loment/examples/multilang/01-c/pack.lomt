@@ -1,0 +1,31 @@
+/*
+ * pack —— 帧的**打包与拆包**：一个 16 位传感器号 + 一个 16 位读数 -> 一个 32 位帧。
+ *
+ * **这份源码是 C 语法写的 Loment**：后缀是 `.lomt`，里面装的是 C。
+ * `docs/179` §1.1 的第二层（按内容识别）就是认这种文件：后缀说"这是 Loment 的源文件"，
+ * 里面装的东西可以是别的语法。
+ *
+ * 为什么这一段是 C：它是**位运算**，而位运算正是 C 这一族的主场 —— 也正好把
+ * `docs/173` 那条**链接腿**走完：真编成 `.o`、真链进来、真调到。
+ *
+ * 领域：sensor 取 0..65535，读数是**无符号**的 16 位量（所以高低两个半区各自独立，
+ * 拆包回来必须与装进去的一模一样 —— 判据就是钉这个）。
+ */
+
+#define FRAME_SENSOR_MAX 65535u
+#define FRAME_VALUE_MAX 65535u
+
+/* 把两个 16 位半区拼成一个 32 位帧。高位放 sensor，低位放读数。 */
+unsigned int pack_frame(unsigned int sensor, unsigned int value) {
+    return ((sensor & FRAME_SENSOR_MAX) << 16) | (value & FRAME_VALUE_MAX);
+}
+
+/* 从帧里取回 sensor 号。 */
+unsigned int frame_sensor(unsigned int w) {
+    return (w >> 16) & FRAME_SENSOR_MAX;
+}
+
+/* 从帧里取回读数。 */
+unsigned int frame_value(unsigned int w) {
+    return w & FRAME_VALUE_MAX;
+}
