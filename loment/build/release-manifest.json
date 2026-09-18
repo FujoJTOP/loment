@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "a8d08cc1b705d9daba69e011ab33d924acd8754b66e7ee7ae83bcba2ae996fc7"
+   "sha256": "741333c6eb7abb1a735b62845c4fb92cd5ba788c5632bd44f734f878976c8c1d"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -675,7 +675,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "0c8d29e9874bdfad9819b76fc4f005dd323eeef27d20954db35b23f989c6664d"
+   "sha256": "1cc9b39e7884932dc358137f7c93e9097931834d9fb4181bb2c0650883bdb95d"
   },
   {
    "path": "tools/loment_diag.py",
@@ -691,7 +691,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "0320b1166f35c6a5631b0fb1b5bc3b7370bedebe28b519be15e08eea51d47b29"
+   "sha256": "83dfe084c21560d396da1bfad9fa2874f8803fab1e063d5dccdd9f4ec4d0ef32"
   },
   {
    "path": "tools/loment_boot.py",
@@ -703,7 +703,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "f888b439f783505653871b5e1b5c7fb1bb5d6487a836837f66a22ef03fe24154"
+   "sha256": "993977ac785d6acef9a6cc6c73241464067748c168d25fc4b3f8c670d862e6c2"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -903,7 +903,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "37e7e539a86c52e47b1df11b11cdaae16971b0ad94c287ed62dfb7da6fe33d66"
+   "sha256": "3a5ada3ea8fa450ba139e1a9e30af42c4fdf69dcb656c291b5baf9437f96ad9c"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1115,7 +1115,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "b501ae335ac69fafe3b446b379335fc10bd58c58ca4365452076e4c4598fe318"
+   "sha256": "8ce98f672347e2eaa2df2c6e99adbe6aa0132e419c8ebf556d5dbdc14939684c"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -1255,7 +1255,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "1b985d8cdf5a4912f4229634d075f919a265042c3efd0fec03a9f87d678437c4"
+   "sha256": "b8c6cf506bbbba25e20b307f366a5f20b473bb535f65982f9421fcca54cd1acf"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -1347,11 +1347,15 @@
   },
   {
    "path": "docs/182-lomenterr-and-choose-switches.md",
-   "sha256": "eea92db8702f6f88fa57dbb483b2b8513b1c608179f8dca7d0d5950f17629d83"
+   "sha256": "4a7806e28cd075286d07c6386d8ec87ba364e4c5780f24c147315e5a6e8f83ab"
+  },
+  {
+   "path": "docs/183-loment-library-vertical.md",
+   "sha256": "15a2c3971f251d6b042e58e097230c96546b690a270098f73c70c0b9a7fdfb28"
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "1a0cbf086f75f56b9ca6b320d501c8b617dfaafa15b96a04e80cfb6e37f4b0df"
+   "sha256": "2fd9ef8f0a82a21a489fa44ad5913cc7077180314aa030ea7093543dadbf3050"
   },
   {
    "path": "docs/manual/api/ahci.md",
