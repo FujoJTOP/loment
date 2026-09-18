@@ -38,6 +38,7 @@ const DIAG_CAP: u32 = 1048576;   // 诊断文件 (JSONL)
 const SRC_CAP: u32 = 1048576;    // 源文件 (按 file 字段读, 同一份只读一次)
 const SCR_CAP: u32 = 8192;       // 路径 NUL 暂存 (open_ro 用)
 const ARENA_CAP: u32 = 65536;    // 一行 JSON 的 DOM (每行重置)
+const DENT_CAP: u32 = 32768;     // getdents64 缓冲（E018 列 `./deps` 用；也当路径暂存）
 
 // ctx: 一条诊断的全部暂存。**一条渲染完立刻写出去**, 所以它只要能装下**一条**。
 // 偏移全是手算的字面量 (L1 的 const 只收整数字面量, 不能是表达式 —— 与 lomdoc 同)。
@@ -60,10 +61,33 @@ const C_FPREV: u32 = 57472;      // 已经给过外源提示的那个文件路�
 const C_FPREVLEN: u32 = 61568;
 const C_COLOR: u32 = 61572;      // 1 = 上色（默认开，见 §颜色）
 const C_WHY: u32 = 61576;        // 认语言的依据: 1=声明 2=后缀 3=内容 (见 sniff_lang)
+const C_LANG: u32 = 61580;       // 说哪种语言: 0=英文(**默认**) 1=中文 (errconfig 切, §语言)
+const C_MODE: u32 = 61584;       // 输出模式: 0=完整 1=--short 2=--json
+// 汇总: 出现过的码 + 各自的条数。**按码去重**, 所以定长 64 就够 (码是 E1..E23 那一段,
+// 未知码另算一格 —— 见 sum_add)。
+const C_SUMK: u32 = 61600;       // 64 个 u32: 码号
+const C_SUMV: u32 = 61856;       // 64 个 u32: 条数
+const C_SUMN: u32 = 62112;       // 已经记了几个不同的码
+const SUM_CAP: u32 = 64;
+const C_CFG: u32 = 62144;        // errconfig 读进来的原文
+const CFG_CAP: u32 = 2048;
+const C_SUG: u32 = 64192;        // "你是不是想写"那个候选名的字节
+const SUG_CAP: u32 = 256;
+const C_SUGN: u32 = 64448;       // 它的长度
+const C_SUGL: u32 = 64452;       // 它在第几行声明（给用户的跳转线索）
+//: 编辑距离的两行滚动数组（第 0 行 0..191、第 1 行 192..383）。名字上限 47 个字符 →
+//: 48 个格子 × 4 字节正好一行 192。**超过 47 的名字不参与比较**（见 edit_dist）——
+//: 那种长度的标识符拼错与否不是"想写哪一个"能回答的问题。
+const C_ROW: u32 = 64456;
+const ROW_STRIDE: u32 = 192;
+const NAME_MAX: u32 = 47;
 
 //: `scr` 里留给"扫 argv 扫出来的那个路径"的一段。open_ro 自己用 scr[0..4001]，
 //: 所以这一段必须从它后面起 —— 扫完再调 open_ro 把它抄到前面去。
 const SCR_DIAG: u32 = 4096;
+//: `scr` 里留给"工具链旁边那份 errconfig 的路径"的一段（`<工具目录>/../share/loment/errconfig`）。
+//: 同样在 open_ro 的 4001 字节之外。
+const SCR_TOOLCFG: u32 = 6144;
 
 // 字符常量走数字, 免得每处都要 `as u8`
 const NL: u32 = 10;
@@ -71,6 +95,368 @@ const CR: u32 = 13;
 const SP: u32 = 32;
 const TAB: u32 = 9;
 const COLON: u32 = 58;
+const QUOTE: u32 = 34;
+const LPAREN: u32 = 40;
+const COMMA: u32 = 44;
+const DOT: u32 = 46;
+const SEMI: u32 = 59;
+
+// ---------------------------------------------------------------- 界面字串
+//
+// 骨架字串（标签、说明句、用法）留在这里，散文（说明卡、语言卡）在 `surface_data` 里 ——
+// 但两者走**同一个语言槽**（`C_LANG`）。分成两处只是因为受众不同：这些字串 lomcli 看不见，
+// 没必要进表面数据表；而卡片必须进，因为 `loment codes` 也读它。
+//
+// **两个语言槽都不许空**（`loment_err_test::test_every_ui_string_has_both_languages` 钉着）：
+// 漏一条的症状是某种语言下渲染出一个**空标签**（`": 值"`），看着像渲染坏了。
+//
+// 键的编号是**契约**：判据按 `1..=S_SUG` 遍历，跳号会被抓出来（这样"加了键忘了写"
+// 与"写了一个谁都读不到的键"都藏不住）。
+
+const S_UNKNOWN_CODE: u32 = 1;   // 表里没有这个码
+const S_NOSRC_OPEN: u32 = 2;     // "(读不到源文件: "
+const S_NO_LINE: u32 = 3;        // "(源文件里没有这一行)"
+const S_MSG: u32 = 4;            // "消息: "
+const S_WHAT: u32 = 5;           // "错了什么"
+const S_WHY: u32 = 6;            // "为什么错"
+const S_HOWFIX: u32 = 7;         // "怎么改:"
+const S_YES: u32 = 8;            // "支持"
+const S_NO: u32 = 9;             // "不支持"
+const S_NOCARD1: u32 = 10;       // 没有说明卡（第一句）
+const S_NOCARD2: u32 = 11;       // 没有说明卡（怎么办）
+const S_FOREIGN1: u32 = 12;      // "这个文件看起来不是 Loment"
+const S_FOREIGN2: u32 = 13;      // " —— 看内容像 "
+const S_OPEN_PAREN: u32 = 14;    // "（"
+const S_WHY_DECL: u32 = 15;      // 依据: 文件头声明
+const S_WHY_EXT: u32 = 16;       // 依据: 后缀
+const S_WHY_TOK: u32 = 17;       // 依据: 内容特征词
+const S_FOREIGN3: u32 = 18;      // "）。它有三条路进来（都不动 Loment 内核）:"
+const S_ROUTE_A: u32 = 19;       // 路 A
+const S_ROUTE_B: u32 = 20;       // 路 B
+const S_ROUTE_C: u32 = 21;       // 路 C
+const S_ROUTE_C2: u32 = 22;      // 路 C 的补充（只在 ELF 上可用）
+const S_LANG_EDGE: u32 = 23;     // "这门语言的边界"
+const S_LANG_ABI: u32 = 24;      // "调用约定"
+const S_FOREIGN4: u32 = 25;      // "语言以 --lang auto 为准"
+const S_USAGE: u32 = 26;         // 用法
+const S_BADLINE: u32 = 27;       // 这一行不是合法 JSON
+const S_BROKEN: u32 = 28;        // 有几行不是合法 JSON
+const S_OK: u32 = 29;            // 没有诊断
+const S_TRUNC: u32 = 30;         // 这一条太长被截断
+const S_NERR: u32 = 31;          // " 条错误"（跟在数字后面）
+const S_SUM: u32 = 32;           // " 条错误："（汇总行的头）
+const S_SUM_X: u32 = 33;         // 汇总里 " x2" 那个 x
+const S_SUG: u32 = 34;           // "你是不是想写 "
+const S_NOOPEN: u32 = 35;        // 打不开诊断文件（环境错，不是诊断）
+const S_SUG_LINE: u32 = 36;      // 候选名与"在第几行声明"之间那半句
+const S_SUG_LINE2: u32 = 37;     // 尾巴（含换行）
+const S_NODEPS: u32 = 38;        // E018: 这里没有 `./deps`
+const S_CANDS: u32 = 39;         // E018: `./deps` 里最接近的名字
+const S_CANDS_NONE: u32 = 40;    // E018: `./deps` 在，但没有接近的
+
+/// 当前语言槽（0 = 英文 / 1 = 中文）。
+fn lg(ctx: ptr) -> u32 {
+    return load32(ctx, C_LANG);
+}
+
+/// 界面字串。**语言由 `C_LANG` 选，调用方不传** —— 传了就会有"这里忘了传"的漏口。
+fn ui(ctx: ptr, k: u32) -> str {
+    if load32(ctx, C_LANG) == 1 {
+        return ui_zh(k);
+    }
+    return ui_en(k);
+}
+
+/// 英文（**默认**）。这一份**全 ASCII** —— 判据钉着（`loment_err_test` 直接跑一遍真渲染，
+/// 逐字节查有没有 >=0x80 的字节）。理由不是洁癖：它存在的一半目的正是"默认输出在 936
+/// 代码页的控制台上不是乱码"（`docs/169` §3a），夹一个 `…` 或 `——` 进来就把这一半毁掉。
+///
+/// **另一半不在这一层**：编译器给的消息原文仍是它自己的语言（现在还是中文）。所以"默认
+/// 输出不再是乱码"这话要分开说 —— 渲染器自己那一部分修好了，消息那一行没有（`docs/182` §5.3）。
+fn ui_en(k: u32) -> str {
+    if k == 1 { return "unknown error code\n"; }
+    if k == 2 { return "(cannot read the source file: "; }
+    if k == 3 { return "(no such line in the source file)\n"; }
+    if k == 4 { return "message: "; }
+    if k == 5 { return "what went wrong"; }
+    if k == 6 { return "why"; }
+    if k == 7 { return "how to fix:"; }
+    if k == 8 { return "supported"; }
+    if k == 9 { return "not supported"; }
+    if k == 10 { return "no card for this code - it is not in the surface data table.\n"; }
+    if k == 11 { return "the toolchain versions may not match (an older renderer meeting a newer compiler). Judge by the message above; if this really is a new code, please report it.\n"; }
+    if k == 12 { return "this file does not look like Loment"; }
+    if k == 13 { return " - by its content it looks like "; }
+    if k == 14 { return " ("; }
+    if k == 15 { return "per the `choose write grammar` declaration in the file header"; }
+    if k == 16 { return "per the file extension"; }
+    if k == 17 { return "per the content's marker words"; }
+    if k == 18 { return "). There are three ways in, none of which touches the Loment kernel:\n"; }
+    if k == 19 { return "  A. interface unit only (the implementation stays on the source language's side, linked against an object file built outside):\n"; }
+    if k == 20 { return "  B. translate the body into a Loment implementation:\n"; }
+    if k == 21 { return "  C. run-time bridge, when that interpreter is on the machine: `use proc` + `proc_sh(\"...\")`\n"; }
+    if k == 22 { return "       - Linux/ELF only (the PE shim has no fork/pipe).\n"; }
+    if k == 23 { return "this language's boundary"; }
+    if k == 24 { return "calling convention"; }
+    if k == 25 { return "`--lang auto` decides the language - the above is only a hint from the content, do not treat it as a conclusion.\n"; }
+    if k == 26 { return "lomenterr: usage: lomenterr [--no-color] [--short|--json] <diagnostics.jsonl>\n  the diagnostics file is written by the compiler's --diag-out PATH (loment check FILE --diag-out d.jsonl).\n"; }
+    if k == 27 { return "[lomenterr] this line in the diagnostics file is not valid JSON, printing it as is:\n  "; }
+    if k == 28 { return " lines are not valid JSON (the diagnostics file is corrupt, or it is not from this compiler build)\n"; }
+    if k == 29 { return "[OK] no diagnostics\n"; }
+    if k == 30 { return "[lomenterr] this one is too long, the rendering above was truncated\n"; }
+    if k == 31 { return " errors\n"; }
+    if k == 32 { return " errors: "; }
+    if k == 33 { return " x"; }
+    if k == 34 { return "did you mean "; }
+    if k == 35 { return "lomenterr: cannot open the diagnostics file\n"; }
+    if k == 36 { return " (declared at line "; }
+    if k == 37 { return ")\n"; }
+    if k == 38 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
+    if k == 39 { return "`./deps` is here; the closest names in it are:\n"; }
+    if k == 40 { return "`./deps` is here, but it holds nothing close to this name.\n"; }
+    return "";
+}
+
+/// 中文。想读它就写一份 `errconfig`（`docs/182` §14）—— **不是**把这份删掉。
+fn ui_zh(k: u32) -> str {
+    if k == 1 { return "未知错误码\n"; }
+    if k == 2 { return "(读不到源文件: "; }
+    if k == 3 { return "(源文件里没有这一行)\n"; }
+    if k == 4 { return "消息: "; }
+    if k == 5 { return "错了什么"; }
+    if k == 6 { return "为什么错"; }
+    if k == 7 { return "怎么改:"; }
+    if k == 8 { return "支持"; }
+    if k == 9 { return "不支持"; }
+    if k == 10 { return "这一条没有说明卡 —— 这个码不在表面数据表里。\n"; }
+    if k == 11 { return "工具链的版本可能不一致（旧报错器遇上新编译器）。按上面的消息原文判断；若确属新码，请报告。\n"; }
+    if k == 12 { return "这个文件看起来**不是 Loment**"; }
+    if k == 13 { return " —— 看内容像 "; }
+    if k == 14 { return "（"; }
+    if k == 15 { return "据文件头 `choose write grammar` 声明"; }
+    if k == 16 { return "据后缀"; }
+    if k == 17 { return "据内容特征词"; }
+    if k == 18 { return "）。它有三条路进来（都不动 Loment 内核）:\n"; }
+    if k == 19 { return "  A. 只出接口单元（实现在源语言那一侧，配外面编好的目标文件用）:\n"; }
+    if k == 20 { return "  B. 把正文翻成 Loment 实现:\n"; }
+    if k == 21 { return "  C. 运行期桥（机器上有那个解释器时）: `use proc` + `proc_sh(\"...\")`\n"; }
+    if k == 22 { return "       —— 只在 Linux/ELF 上可用（PE 垫片没有 fork/pipe）。\n"; }
+    if k == 23 { return "这门语言的边界"; }
+    if k == 24 { return "调用约定"; }
+    if k == 25 { return "语言以 `--lang auto` 为准 —— 上面只是按内容给的提示，别拿它当结论。\n"; }
+    if k == 26 { return "lomenterr: 用法: lomenterr [--no-color] [--short|--json] <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n"; }
+    if k == 27 { return "[lomenterr] 诊断文件里这一行不是合法 JSON, 原样输出:\n  "; }
+    if k == 28 { return " 行不是合法 JSON (诊断文件损坏, 或与本次编译器不是同一版)\n"; }
+    if k == 29 { return "[OK] 无诊断\n"; }
+    if k == 30 { return "[lomenterr] 这一条太长, 上面的渲染被截断了\n"; }
+    if k == 31 { return " 条错误\n"; }
+    if k == 32 { return " 条错误："; }
+    if k == 33 { return " ×"; }
+    if k == 34 { return "你是不是想写 "; }
+    if k == 35 { return "lomenterr: 打不开诊断文件\n"; }
+    if k == 36 { return "（第 "; }
+    if k == 37 { return " 行声明过）\n"; }
+    if k == 38 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
+    if k == 39 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
+    if k == 40 { return "`./deps` 在这里，但里面没有与这个名字接近的。\n"; }
+    return "";
+}
+
+// ---------------------------------------------------------------- errconfig
+//
+// **说哪种语言的开关是一份独立的文件 `errconfig`**（不是 `loment.conf` 里多一个键，
+// 也不是命令行开关）。这条分界是 `docs/182` §7 那条的延伸：`loment.conf` 管
+// 「**工具链怎么读源码**」（后缀那类，词法器要读），而"报错器说哪种语言"是**渲染层**
+// 的口味，与怎么读源码无关。混进 `loment.conf` 会让一个"语言怎么认"的文件里出现一条
+// 与源码识别毫无关系的设置。
+//
+// 形状**照抄 `loment.conf`**（一个标签 + 一个字符串字面量），因为仓库里已经有一个人人
+// 认得的配置文件长这样；但**读者只有这一个**（Python 那边不读它）——
+// 所以这里没有"同一份契约抄两遍"，只有"长得像"。
+//
+// 三个值/两份文件：
+//   * 值 `"en"`（英） / `"zh"`（中）；大小写不敏感，`english` / `chinese` / `cn` 也认；
+//   * 找两份，**项目那份优先**（与 `loment.conf` 同一条）：`./errconfig` 然后是
+//     `<工具目录>/../share/loment/errconfig`；
+//   * **读不出来就当没配**，退回英文默认。坏配置退回默认，比编出一串看不懂的错好 ——
+//     这条也是从 `loment.conf` 抄的纪律。
+
+/// `buf[i..]` 是不是就是 `s`。
+fn at_word(buf: ptr, n: u32, i: u32, s: str) -> u32 {
+    let sn: u32 = str_len(s);
+    if i + sn > n {
+        return 0;
+    }
+    let j: u32 = 0;
+    while j < sn {
+        if load8(buf, i + j) != str_byte(s, j) {
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// 在配置原文里找 `error_lang(`，返回它后面**第一个字符串字面量**的内容
+/// `(起点 << 32) | 长度`；0 = 没有这一项 / 读不出来。
+///
+/// **标签后面必须紧跟 `(`**：这是"这是一条配置项"与"这只是提到一个词"的分界。
+/// 少了这一条，注释里写一句 `error_lang` 就能把语言悄悄改掉。
+/// （**它拦不住的是**注释里恰好也写了 `error_lang(` —— 那要认注释，得有个词法器，
+/// 而这里读的是一份两行的配置。如实记着：这一格比"任何位置出现就算"强很多，但不是无懈可击。）
+/// 值里出现换行、没有闭合引号、整份文件没有这一项 —— 一律 0（调用方退回默认）。
+fn cfg_lang(cfg: ptr, n: u32) -> u64 {
+    let key: str = "error_lang";
+    let i: u32 = 0;
+    let res: u64 = 0;
+    let go: u32 = 1;
+    while i < n && go == 1 {
+        if at_word(cfg, n, i, key) == 1 {
+            let p: u32 = skip_blank(cfg, i + str_len(key), n);
+            if p < n && load8(cfg, p) == LPAREN {
+                let q: u32 = p;
+                let hunt: u32 = 1;
+                while q < n && hunt == 1 {
+                    if load8(cfg, q) == QUOTE {
+                        let a: u32 = q + 1;
+                        let r: u32 = a;
+                        let scan: u32 = 1;
+                        while r < n && scan == 1 {
+                            let c: u32 = load8(cfg, r);
+                            if c == QUOTE {
+                                res = (a as u64) * 4294967296 + (r - a) as u64;
+                                scan = 0;
+                            } else {
+                                if c == NL {
+                                    scan = 0;
+                                } else {
+                                    r = r + 1;
+                                }
+                            }
+                        }
+                        hunt = 0;
+                    } else {
+                        q = q + 1;
+                    }
+                }
+            }
+            go = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return res;
+}
+
+/// 值 -> 语言槽：`0` = 英文、`1` = 中文、**`2` = 认不出来**（不是"默认值"，见 `cfg_try`）。
+///
+/// **一律大小写不敏感**（`ZH` / `Zh` / `chinese` / `Chinese` 都算）：配置是手写的，
+/// 逼用户记住大小写只会换来一次次"配了没生效" —— 而那种失败**没有任何提示**。
+/// （第一版只让长写法不敏感、`en`/`zh` 是逐字节比的 —— 实测 `"ZH"` 静默退回默认。
+/// 这类"文档说 A、代码做 B"只有判据能抓，所以下面那 5 个拼法各有一条。）
+fn lang_of_val(v: ptr, n: u32) -> u32 {
+    if lower_at(v, n, "en") == 1 || lower_at(v, n, "english") == 1 {
+        return 0;
+    }
+    if lower_at(v, n, "zh") == 1 || lower_at(v, n, "cn") == 1 || lower_at(v, n, "chinese") == 1 {
+        return 1;
+    }
+    return 2;
+}
+
+/// `s` 的小写形式是不是就是 `buf[0..]`（大小写不敏感的比较，长度也一并比）。
+fn lower_at(v: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if lower_c(load8(v, i)) != lower_c(str_byte(s, i)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 把 `<工具目录>/../share/loment/errconfig` 拼进 `sc + SCR_TOOLCFG`，返回长度（0 = 拼不出）。
+/// 形状与 `lomcli` 的 `share_dir` 同一件事：取 argv[0] 里最后一个分隔符之前的部分。
+fn tool_cfg_path(ab: ptr, sc: ptr) -> u32 {
+    let a: u64 = argv_at(ab, 65536, sc, 0);
+    if a == 0 {
+        return 0;
+    }
+    let p: ptr = ptr_add(ab, (a >> 32) as u32);
+    let n: u32 = (a % 4294967296) as u32;
+    let i: u32 = 0;
+    let last: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 47 || c == 92 {
+            last = i + 1;
+        }
+        i = i + 1;
+    }
+    if last == 0 {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < last && k < 1024 {
+        store8(sc, SCR_TOOLCFG + k, load8(p, k) as u8);
+        k = k + 1;
+    }
+    let tail: str = "../share/loment/errconfig";
+    let j: u32 = 0;
+    while j < str_len(tail) && k < 2000 {
+        store8(sc, SCR_TOOLCFG + k, str_byte(tail, j) as u8);
+        k = k + 1;
+        j = j + 1;
+    }
+    return k;
+}
+
+/// 读一份 errconfig（`p[0..n)`）：**真的定下了语言**才返回 1。
+///
+/// "文件在、标签在、但值认不出来"返回 **0**，不是"用默认值" —— 差别在 `cfg_load` 那里：
+/// 返回 0 才会**继续找下一份**。这是从 `loment.conf` 抄来的纪律（"读不出来就当没配"）：
+/// 项目里写错一个字母，不该把用户**系统级**的那份设置悄悄作废。
+fn cfg_try(ctx: ptr, p: ptr, n: u32, sc: ptr) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let fd: i64 = open_ro(p, n, sc);
+    if fd < 0 {
+        return 0;
+    }
+    let got: u32 = read_all(fd as u64, ptr_add(ctx, C_CFG), CFG_CAP as u64) as u32;
+    syscall4(3, fd as u64, 0, 0);
+    let v: u64 = cfg_lang(ptr_add(ctx, C_CFG), got);
+    if v == 0 {
+        return 0;
+    }
+    let vo: u32 = (v >> 32) as u32;
+    let vn: u32 = (v % 4294967296) as u32;
+    let lv: u32 = lang_of_val(ptr_add(ctx, C_CFG + vo), vn);
+    if lv == 2 {
+        return 0;
+    }
+    store32(ctx, C_LANG, lv);
+    return 1;
+}
+
+/// 决定说哪种语言：**项目那份优先，工具链旁边那份兜底**，都没有就是英文。
+/// 两份都读了也只认第一份 —— 这与 `loment.conf` 的"项目那份优先"是同一条。
+fn cfg_load(ctx: ptr, ab: ptr, sc: ptr) -> u32 {
+    let proj: str = "./errconfig";
+    if cfg_try(ctx, str_ptr(proj), str_len(proj), sc) == 1 {
+        return 1;
+    }
+    let n: u32 = tool_cfg_path(ab, sc);
+    if n == 0 {
+        return 0;
+    }
+    return cfg_try(ctx, ptr_add(sc, SCR_TOOLCFG), n, sc);
+}
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -207,13 +593,25 @@ fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
             if arg_is(p, n, "--no-color") == 1 || arg_is(p, n, "-C") == 1 {
                 store32(ctx, C_COLOR, 0);
             } else {
-                if found == 0 {
-                    let i: u32 = 0;
-                    while i < n && i < 4000 {
-                        store8(sc, SCR_DIAG + i, load8(p, i) as u8);
-                        i = i + 1;
+                // `--short` / `--json` **顺带关色**：它们存在的意义就是给管道与编辑器读
+                // （`docs/182` §15），一条带 ANSI 转义的"机器可读行"没人能 grep。
+                if arg_is(p, n, "--short") == 1 {
+                    store32(ctx, C_MODE, 1);
+                    store32(ctx, C_COLOR, 0);
+                } else {
+                    if arg_is(p, n, "--json") == 1 {
+                        store32(ctx, C_MODE, 2);
+                        store32(ctx, C_COLOR, 0);
+                    } else {
+                        if found == 0 {
+                            let i: u32 = 0;
+                            while i < n && i < 4000 {
+                                store8(sc, SCR_DIAG + i, load8(p, i) as u8);
+                                i = i + 1;
+                            }
+                            found = i;
+                        }
                     }
-                    found = i;
                 }
             }
             k = k + 1;
@@ -535,9 +933,9 @@ fn h_head(ctx: ptr, o: u32, cnum: u32, clen: u32) -> u32 {
     o = em_rst(ctx, o);
     // 判据是**查出来的标题空不空**, 不是"码号解出来没有" —— 解得出 42 而表里没有 42,
     // 也是一样的处境 (表是工具链自带的, 另一个版本可能多发了一个码)。
-    let t: str = code_title(cnum);
+    let t: str = code_title(cnum, lg(ctx));
     if str_len(t) == 0 {
-        return em(ctx, o, "未知错误码\n");
+        return em(ctx, o, ui(ctx, S_UNKNOWN_CODE));
     }
     o = em_col(ctx, o, "1");
     o = em(ctx, o, t);
@@ -548,7 +946,7 @@ fn h_head(ctx: ptr, o: u32, cnum: u32, clen: u32) -> u32 {
 /// 源文件读不到时也要说一句 —— 否则"没有源码那两行"看起来像渲染坏了。
 fn h_nosrc(ctx: ptr, o: u32, w: u32, plen: u32) -> u32 {
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "(读不到源文件: ");
+    o = em(ctx, o, ui(ctx, S_NOSRC_OPEN));
     let k: u32 = 0;
     while k < plen {
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
@@ -587,7 +985,7 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen
     let sp: u64 = line_span(sr, srl, line);
     if sp == 18446744073709551615 as u64 {
         o = em_gut(ctx, o, w);
-        return em(ctx, o, "(源文件里没有这一行)\n");
+        return em(ctx, o, ui(ctx, S_NO_LINE));
     }
     let st: u32 = (sp / 4294967296) as u32;
     let ln: u32 = (sp % 4294967296) as u32;
@@ -777,7 +1175,7 @@ fn h_msg(ctx: ptr, o: u32, off: u32, n: u32, w: u32) -> u32 {
     }
     o = em_gut(ctx, o, w);
     o = em_col(ctx, o, "1");
-    o = em(ctx, o, "消息: ");
+    o = em(ctx, o, ui(ctx, S_MSG));
     o = em_rst(ctx, o);
     let k: u32 = a;
     while k < n {
@@ -796,11 +1194,11 @@ fn h_card(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
     if nfix == 0 {
         return h_unknown(ctx, o, w);
     }
-    o = h_sect(ctx, o, w, "错了什么", code_what(cnum), "1");
-    o = h_sect(ctx, o, w, "为什么错", code_why(cnum), "1");
+    o = h_sect(ctx, o, w, ui(ctx, S_WHAT), code_what(cnum, lg(ctx)), "1");
+    o = h_sect(ctx, o, w, ui(ctx, S_WHY), code_why(cnum, lg(ctx)), "1");
     o = em_gut(ctx, o, w);
     o = em_col(ctx, o, "1");
-    o = em(ctx, o, "怎么改:");
+    o = em(ctx, o, ui(ctx, S_HOWFIX));
     o = em_rst(ctx, o);
     o = em(ctx, o, "\n");
     let i: u32 = 0;
@@ -809,21 +1207,21 @@ fn h_card(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
         o = em(ctx, o, "  ");
         o = em_u32(ctx, o, i + 1);
         o = em(ctx, o, ". ");
-        o = em_wrap(ctx, o, code_fix(cnum, i), w, 2);
+        o = em_wrap(ctx, o, code_fix(cnum, i, lg(ctx)), w, 2);
         o = em(ctx, o, "\n");
         i = i + 1;
     }
-    o = h_sect(ctx, o, w, "支持", code_yes(cnum), "1;32");
-    o = h_sect(ctx, o, w, "不支持", code_no(cnum), "1;31");
+    o = h_sect(ctx, o, w, ui(ctx, S_YES), code_yes(cnum, lg(ctx)), "1;32");
+    o = h_sect(ctx, o, w, ui(ctx, S_NO), code_no(cnum, lg(ctx)), "1;31");
     return o;
 }
 
 /// 表里没有这个码：**明说**，并把"该用什么判断"交代清楚。
 fn h_unknown(ctx: ptr, o: u32, w: u32) -> u32 {
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "这一条没有说明卡 —— 这个码不在表面数据表里。\n");
+    o = em(ctx, o, ui(ctx, S_NOCARD1));
     o = em_gut(ctx, o, w);
-    return em(ctx, o, "工具链的版本可能不一致（旧报错器遇上新编译器）。按上面的消息原文判断；若确属新码，请报告。\n");
+    return em(ctx, o, ui(ctx, S_NOCARD2));
 }
 
 /// 一段"标签: 值"，值里内嵌的换行按 gutter 缩进。值为空就整段不印。
@@ -939,7 +1337,7 @@ fn ext_of(ctx: ptr, plen: u32) -> u64 {
     let i: u32 = plen;
     while i > 0 {
         let c: u32 = load8(ctx, C_PATH + i - 1);
-        if c == 46 {
+        if c == DOT {
             return ((i - 1) as u64) * 4294967296 + (plen - (i - 1)) as u64;
         }
         if c == 47 || c == 92 {
@@ -1110,7 +1508,7 @@ fn decl_at(sr: ptr, s: u32, e: u32) -> u64 {
     let a: u32 = p;
     let go: u32 = 1;
     while p < e && go == 1 {
-        if is_blank(load8(sr, p)) == true || load8(sr, p) == 59 {
+        if is_blank(load8(sr, p)) == true || load8(sr, p) == SEMI {
             go = 0;
         } else {
             p = p + 1;
@@ -1226,25 +1624,25 @@ fn em_qpath(ctx: ptr, o: u32, plen: u32) -> u32 {
 fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em_gut(ctx, o, w);
     o = em_col(ctx, o, "1;31");
-    o = em(ctx, o, "这个文件看起来**不是 Loment**");
+    o = em(ctx, o, ui(ctx, S_FOREIGN1));
     o = em_rst(ctx, o);
-    o = em(ctx, o, " —— 看内容像 ");
+    o = em(ctx, o, ui(ctx, S_FOREIGN2));
     o = em(ctx, o, lang_name(li));
-    o = em(ctx, o, "（");
+    o = em(ctx, o, ui(ctx, S_OPEN_PAREN));
     let why: u32 = load32(ctx, C_WHY);
     if why == 1 {
-        o = em(ctx, o, "据文件头 `choose write grammar` 声明");
+        o = em(ctx, o, ui(ctx, S_WHY_DECL));
     } else {
         if why == 2 {
-            o = em(ctx, o, "据后缀");
+            o = em(ctx, o, ui(ctx, S_WHY_EXT));
         } else {
-            o = em(ctx, o, "据内容特征词");
+            o = em(ctx, o, ui(ctx, S_WHY_TOK));
         }
     }
-    o = em(ctx, o, "）。它有三条路进来（都不动 Loment 内核）:\n");
+    o = em(ctx, o, ui(ctx, S_FOREIGN3));
 
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "  A. 只出接口单元（实现在源语言那一侧，配外面编好的目标文件用）:\n");
+    o = em(ctx, o, ui(ctx, S_ROUTE_A));
     o = em_gut(ctx, o, w);
     o = em(ctx, o, "       python tools/lomt_from.py ");
     o = em_qpath(ctx, o, plen);
@@ -1253,7 +1651,7 @@ fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em(ctx, o, ".iface.lomt\n");
 
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "  B. 把正文翻成 Loment 实现:\n");
+    o = em(ctx, o, ui(ctx, S_ROUTE_B));
     o = em_gut(ctx, o, w);
     o = em(ctx, o, "       python tools/lomt_from.py ");
     o = em_qpath(ctx, o, plen);
@@ -1262,14 +1660,14 @@ fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em(ctx, o, ".impl.lomt\n");
 
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "  C. 运行期桥（机器上有那个解释器时）: `use proc` + `proc_sh(\"…\")`\n");
+    o = em(ctx, o, ui(ctx, S_ROUTE_C));
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "       —— 只在 Linux/ELF 上可用（PE 垫片没有 fork/pipe）。\n");
+    o = em(ctx, o, ui(ctx, S_ROUTE_C2));
 
-    o = h_sect(ctx, o, w, "这门语言的边界", lang_edge(li), "1");
-    o = h_sect(ctx, o, w, "调用约定", lang_abi(li), "1");
+    o = h_sect(ctx, o, w, ui(ctx, S_LANG_EDGE), lang_edge(li, lg(ctx)), "1");
+    o = h_sect(ctx, o, w, ui(ctx, S_LANG_ABI), lang_abi(li, lg(ctx)), "1");
     o = em_gut(ctx, o, w);
-    return em(ctx, o, "语言以 `--lang auto` 为准 —— 上面只是按内容给的提示，别拿它当结论。\n");
+    return em(ctx, o, ui(ctx, S_FOREIGN4));
 }
 
 /// 这个文件已经给过外源提示了吗（**一个文件只给一次** —— 一段几百字的建议重复 N 遍
@@ -1291,6 +1689,560 @@ fn foreign_remember(ctx: ptr, plen: u32) {
     store32(ctx, C_FPREVLEN, plen);
 }
 
+// ---------------------------------------------------------------- 另外两种输出
+//
+// `--short` 与 `--json`（`docs/182` §15）是**同一份渲染的另外两个出口**，不是另做一套
+// 判断：它们读的还是 `C_CODE` / `C_MSG` / `C_PATH` 那几格，查的还是同一张 `surface_data`。
+// 所以"总结给谁看"变了，"说什么"没变 —— 三者不会各说各话。
+//
+// **为什么两个都要**：`--short` 是给人 grep 的（CI 日志里一眼扫过），`--json` 是给**程序**
+// 读的（编辑器把 `what` / `why` / `fixes` 放进 quickfix 面板，或 CI 按码做统计）。
+// 只有 `--short` 的话，下游还得自己解析那一行文本 —— 那正是"同一件事抄两遍"的另一副面孔。
+
+fn hexd(h: u32) -> u32 {
+    if h < 10 {
+        return 48 + h;
+    }
+    return 87 + h;
+}
+
+/// `\u00XX`（**只给控制字符用**）。消息是编译器给的、卡片是表里的，理论上都不该有控制字符，
+/// 但 `--json` 的消费者是程序：一个坏 JSON 在编辑器那边表现为"报错器坏了"，
+/// 而不是"这条消息有点怪"。边界上的东西宁可多写四行。
+fn em_u00(ctx: ptr, o: u32, v: u32) -> u32 {
+    o = em_byte(ctx, o, 92);
+    o = em_byte(ctx, o, 117);
+    o = em_byte(ctx, o, 48);
+    o = em_byte(ctx, o, 48);
+    o = em_byte(ctx, o, hexd((v >> 4) & 15));
+    return em_byte(ctx, o, hexd(v & 15));
+}
+
+/// 把一段裸字节 `p[0..n)` 当作 JSON 字符串写出来（带引号、带转义）。
+/// **必须转义**：卡片正文里有反引号包裹的 `"`（E005 的 `excluded "<space>: ..."`）与反斜杠，
+/// 原样吐出去就是一个坏 JSON。
+///
+/// 收的是 `(ptr, len)` 而不是 `str`：诊断里的码/路径/消息都住在 `ctx` 的暂存格上，
+/// 而 Loment **没有从裸指针造 `str` 的办法**（`str_ptr` 只有反方向）。卡片那几段是字面量
+/// 才有 `str`，所以另包一层 `json_str` —— 转义规则只此一份（给两种入参各写一遍，
+/// 就是"同一件事抄两遍"，而这两份迟早会不同）。
+fn json_span(ctx: ptr, o: u32, p: ptr, n: u32) -> u32 {
+    o = em_byte(ctx, o, QUOTE);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == QUOTE {
+            o = em(ctx, o, "\\\"");
+        } else {
+            if c == 92 {
+                o = em(ctx, o, "\\\\");
+            } else {
+                if c == NL {
+                    o = em(ctx, o, "\\n");
+                } else {
+                    if c == CR {
+                        o = em(ctx, o, "\\r");
+                    } else {
+                        if c == TAB {
+                            o = em(ctx, o, "\\t");
+                        } else {
+                            if c < 32 {
+                                o = em_u00(ctx, o, c);
+                            } else {
+                                o = em_byte(ctx, o, c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return em_byte(ctx, o, QUOTE);
+}
+
+fn json_str(ctx: ptr, o: u32, s: str) -> u32 {
+    return json_span(ctx, o, str_ptr(s), str_len(s));
+}
+
+/// 码号写成 `E002` 那种三位补零的样子。**与 `--short` 里那条不同**：那里照抄编译器原样的
+/// 码字符串（`C_CODE`），这里归口重写 —— 汇总是一列，一列里混两种写法很难看。
+/// 解不出数字的码（`code_num` 给 0）写 `E?`：**不许写成 `E000`**，那是一个看着像真码的假码。
+fn em_code(ctx: ptr, o: u32, cnum: u32) -> u32 {
+    o = em_byte(ctx, o, 69);
+    if cnum == 0 {
+        return em_byte(ctx, o, 63);
+    }
+    if cnum < 10 {
+        o = em_byte(ctx, o, 48);
+        o = em_byte(ctx, o, 48);
+        return em_u32(ctx, o, cnum);
+    }
+    if cnum < 100 {
+        o = em_byte(ctx, o, 48);
+        return em_u32(ctx, o, cnum);
+    }
+    return em_u32(ctx, o, cnum);
+}
+
+/// `--short`：**一行一条**，形状 `file:line:col: error[E002]: message` —— 与 GCC / clang
+/// 那一族同一个惯例，所以编辑器不用任何配置就能按 `文件:行:列` 跳过去。
+/// 消息里的换行**折成一个空格**：不折的话一条诊断变成两三行，"一行一条"这个承诺就破了。
+fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> u32 {
+    let o: u32 = 0;
+    let k: u32 = 0;
+    while k < plen {
+        o = em_byte(ctx, o, load8(ctx, C_PATH + k));
+        k = k + 1;
+    }
+    o = em_byte(ctx, o, COLON);
+    o = em_u32(ctx, o, line);
+    // `col == 0` = 编译器只给了行号（`check()` 的语义诊断都是这样）。**那时不印列** ——
+    // 与 `h_loc` 同一条纪律：`x.lomt:9:0:` 会让编辑器按第 0 列跳，那是编出来的位置。
+    if col > 0 {
+        o = em_byte(ctx, o, COLON);
+        o = em_u32(ctx, o, col);
+    }
+    o = em(ctx, o, ": error[");
+    let j: u32 = 0;
+    while j < clen {
+        o = em_byte(ctx, o, load8(ctx, C_CODE + j));
+        j = j + 1;
+    }
+    o = em(ctx, o, "]: ");
+    let m: u32 = 0;
+    while m < mlen {
+        let c: u32 = load8(ctx, C_MSG + m);
+        if c == NL {
+            o = em_byte(ctx, o, SP);
+        } else {
+            o = em_byte(ctx, o, c);
+        }
+        m = m + 1;
+    }
+    return em_byte(ctx, o, NL);
+}
+
+/// `--json`：**一行一个对象**（JSONL，与编译器 `--diag-out` 吐进来的形状同族，只是多了
+/// 卡片那几个字段）。逐行而不是一个大数组：调用方可以流式读，也不必为逗号记账。
+fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen: u32) -> u32 {
+    let o: u32 = em(ctx, 0, "{\"code\":");
+    o = json_span(ctx, o, ptr_add(ctx, C_CODE), clen);
+    o = em(ctx, o, ",\"title\":");
+    o = json_str(ctx, o, code_title(cnum, lg(ctx)));
+    o = em(ctx, o, ",\"file\":");
+    o = json_span(ctx, o, ptr_add(ctx, C_PATH), plen);
+    o = em(ctx, o, ",\"line\":");
+    o = em_u32(ctx, o, line);
+    o = em(ctx, o, ",\"col\":");
+    o = em_u32(ctx, o, col);
+    o = em(ctx, o, ",\"message\":");
+    o = json_span(ctx, o, ptr_add(ctx, C_MSG), mlen);
+    o = em(ctx, o, ",\"what\":");
+    o = json_str(ctx, o, code_what(cnum, lg(ctx)));
+    o = em(ctx, o, ",\"why\":");
+    o = json_str(ctx, o, code_why(cnum, lg(ctx)));
+    o = em(ctx, o, ",\"fixes\":[");
+    let n: u32 = code_nfix(cnum);
+    let i: u32 = 0;
+    while i < n {
+        if i > 0 {
+            o = em_byte(ctx, o, 44);
+        }
+        o = json_str(ctx, o, code_fix(cnum, i, lg(ctx)));
+        i = i + 1;
+    }
+    o = em(ctx, o, "],\"yes\":");
+    o = json_str(ctx, o, code_yes(cnum, lg(ctx)));
+    o = em(ctx, o, ",\"no\":");
+    o = json_str(ctx, o, code_no(cnum, lg(ctx)));
+    return em(ctx, o, "}\n");
+}
+
+// ---------------------------------------------------------------- 汇总
+
+/// 汇总记一笔。**按码去重**，同一个码只占一格、条数累加。
+/// 表满（64 格）就不再记新的：码只有 E1..E23 这一段，64 格够；真满了顶多少列一个码，
+/// 不会把条数算错（总数是另外数的）。
+fn sum_add(ctx: ptr, cnum: u32) {
+    let n: u32 = load32(ctx, C_SUMN);
+    let i: u32 = 0;
+    let hit: u32 = 0;
+    while i < n {
+        if load32(ctx, C_SUMK + i * 4) == cnum {
+            store32(ctx, C_SUMV + i * 4, load32(ctx, C_SUMV + i * 4) + 1);
+            hit = 1;
+            i = n;
+        } else {
+            i = i + 1;
+        }
+    }
+    if hit == 0 && n < SUM_CAP {
+        store32(ctx, C_SUMK + n * 4, cnum);
+        store32(ctx, C_SUMV + n * 4, 1);
+        store32(ctx, C_SUMN, n + 1);
+    }
+}
+
+/// 打汇总行：`12 errors: E002 x9, E019 x2, E023 x1`。
+///
+/// **按条数降序**（并列时码号小的在前）——它回答的是"**先修哪个**"。这正是汇总比总数
+/// 多出来的那点信息：`12 条错误` 不告诉你 12 条里有 9 条是同一个原因（那种时候改一处
+/// 就消掉九条，而按出现顺序修会白改八次）。
+/// 选择排序，直接在汇总表上换 —— 表最多 64 格，而这段跑一次。
+fn sum_print(ctx: ptr, total: u32) -> u32 {
+    let n: u32 = load32(ctx, C_SUMN);
+    let i: u32 = 0;
+    while i < n {
+        let best: u32 = i;
+        let j: u32 = i + 1;
+        while j < n {
+            let vj: u32 = load32(ctx, C_SUMV + j * 4);
+            let vb: u32 = load32(ctx, C_SUMV + best * 4);
+            if vj > vb {
+                best = j;
+            } else {
+                if vj == vb && load32(ctx, C_SUMK + j * 4) < load32(ctx, C_SUMK + best * 4) {
+                    best = j;
+                }
+            }
+            j = j + 1;
+        }
+        if best != i {
+            let tk: u32 = load32(ctx, C_SUMK + i * 4);
+            let tv: u32 = load32(ctx, C_SUMV + i * 4);
+            store32(ctx, C_SUMK + i * 4, load32(ctx, C_SUMK + best * 4));
+            store32(ctx, C_SUMV + i * 4, load32(ctx, C_SUMV + best * 4));
+            store32(ctx, C_SUMK + best * 4, tk);
+            store32(ctx, C_SUMV + best * 4, tv);
+        }
+        i = i + 1;
+    }
+    let o: u32 = em_u32(ctx, 0, total);
+    let o1: u32 = em_col(ctx, o, "1;31");
+    let o2: u32 = em(ctx, o1, ui(ctx, S_SUM));
+    // 复位在**展开明细之前**：明细是要拿去比的（`E002` 与条数），整段染红会把它们压得
+    // 看不清 —— 上色只给"总数"那一下。
+    let head: u32 = em_rst(ctx, o2);
+    let k: u32 = 0;
+    let acc: u32 = head;
+    while k < n {
+        if k > 0 {
+            acc = em_byte(ctx, acc, COMMA);
+            acc = em_byte(ctx, acc, SP);
+        }
+        acc = em_code(ctx, acc, load32(ctx, C_SUMK + k * 4));
+        acc = em(ctx, acc, ui(ctx, S_SUM_X));
+        acc = em_u32(ctx, acc, load32(ctx, C_SUMV + k * 4));
+        k = k + 1;
+    }
+    return em_byte(ctx, acc, NL);
+}
+
+// ---------------------------------------------------------------- 「你是不是想写 X」
+//
+// E002 最常见的成因就是**拼错一个名字**，而通用建议（"补类型标注 / 改拼写"）帮不到
+// 具体这一个。所以这里扫一遍**本文件里已声明的名字**，给一个近似候选。
+//
+// 四条门槛，**全都在"宁可不猜"这一侧**：
+//
+//   * 距离 ≤ 2（打错一个字符、或者漏/多一个）；
+//   * 候选**必须唯一** —— 有两个一样近的就不说。**说错比不说坏得多**：用户会照着它改，
+//     而那是把一份本来能编的代码改坏；
+//   * 线索短于 3 个字符不猜（`aa` 与 `ab` 只差一个字符，猜了等于没猜）；
+//   * 候选名本身也要 ≥3 个字符（1-2 个字符的名字几乎不可能是"想写的那一个"）。
+//
+// 已知的粗糙处（如实记）：扫的是**词法形状**，不认注释与字符串 —— 注释里写一句
+// `// let util2 be zero` 会多出一个候选。影响是双向的，而**两个方向都是保守的**：
+// 噪声候选要成为建议，得**恰好唯一**地落在距离 ≤2 上（那意味着注释里那个名字与线索
+// 本来就极像）；更多时候它只是制造一个并列，于是我们不说。为这点噪声写一个词法器不值。
+
+const DECL_KW: u32 = 7;
+
+/// 会**引入一个新名字**的那几个关键字。`pub` / `use` / `impl` 故意不收：它们后面跟的
+/// 不是新名字（`impl M for S` 引入的是既有类型），收进来就是把噪声当候选。
+fn decl_kw(i: u32) -> str {
+    if i == 0 { return "fn"; }
+    if i == 1 { return "let"; }
+    if i == 2 { return "const"; }
+    if i == 3 { return "struct"; }
+    if i == 4 { return "enum"; }
+    if i == 5 { return "trait"; }
+    if i == 6 { return "capability"; }
+    return "";
+}
+
+/// `i` 处正好是一个**整词**的关键字吗？是就返回它**后面**的位置，不是返回 `0xFFFFFFFF`。
+/// 左边界也要查：`leftover` 里那个 `let` 不是 `let`。
+fn decl_kw_at(sr: ptr, srl: u32, i: u32) -> u32 {
+    if i > 0 && is_word(load8(sr, i - 1)) == true {
+        return 4294967295;
+    }
+    let k: u32 = 0;
+    while k < DECL_KW {
+        let w: str = decl_kw(k);
+        let wn: u32 = str_len(w);
+        if i + wn <= srl {
+            let same: u32 = 1;
+            let j: u32 = 0;
+            while j < wn && same == 1 {
+                if load8(sr, i + j) != str_byte(w, j) {
+                    same = 0;
+                }
+                j = j + 1;
+            }
+            if same == 1 && (i + wn == srl || is_word(load8(sr, i + wn)) == false) {
+                return i + wn;
+            }
+        }
+        k = k + 1;
+    }
+    return 4294967295;
+}
+
+/// 编辑距离，超过 `NAME_MAX` 的名字直接给 99（= "差得远"）。
+/// 两行滚动数组：第 0 行在 `row+0`、第 1 行在 `row+ROW_STRIDE`。
+fn edit_dist(a: ptr, an: u32, b: ptr, bn: u32, row: ptr) -> u32 {
+    if an > NAME_MAX || bn > NAME_MAX {
+        return 99;
+    }
+    let j: u32 = 0;
+    while j <= bn {
+        store32(row, j * 4, j);
+        j = j + 1;
+    }
+    let i: u32 = 1;
+    while i <= an {
+        store32(row, ROW_STRIDE, i);
+        let jj: u32 = 1;
+        while jj <= bn {
+            let sub: u32 = load32(row, (jj - 1) * 4) + 1;
+            if load8(a, i - 1) == load8(b, jj - 1) {
+                sub = load32(row, (jj - 1) * 4);
+            }
+            let del: u32 = load32(row, jj * 4) + 1;
+            let ins: u32 = load32(row, ROW_STRIDE + (jj - 1) * 4) + 1;
+            let m: u32 = sub;
+            if del < m {
+                m = del;
+            }
+            if ins < m {
+                m = ins;
+            }
+            store32(row, ROW_STRIDE + jj * 4, m);
+            jj = jj + 1;
+        }
+        jj = 0;
+        while jj <= bn {
+            store32(row, jj * 4, load32(row, ROW_STRIDE + jj * 4));
+            jj = jj + 1;
+        }
+        i = i + 1;
+    }
+    return load32(row, bn * 4);
+}
+
+/// 偏移在第几行（从 1 数）。
+fn line_of(sr: ptr, off: u32) -> u32 {
+    let n: u32 = 1;
+    let i: u32 = 0;
+    while i < off {
+        if load8(sr, i) == NL {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 扫本文件已声明的名字，把唯一的近似候选写进 `C_SUG` / `C_SUGN` / `C_SUGL`。
+/// 返回 1 = 有一个（且唯一）候选；0 = 不猜。
+fn sug_scan(ctx: ptr, sr: ptr, srl: u32, hp: ptr, hn: u32) -> u32 {
+    if hn < 3 || hn > NAME_MAX {
+        return 0;
+    }
+    let row: ptr = ptr_add(ctx, C_ROW);
+    let bestd: u32 = 99;
+    let besto: u32 = 0;
+    let bestn: u32 = 0;
+    let ties: u32 = 0;
+    let i: u32 = 0;
+    while i < srl {
+        let kw: u32 = decl_kw_at(sr, srl, i);
+        if kw == 4294967295 {
+            i = i + 1;
+        } else {
+            let s: u32 = skip_blank(sr, kw, srl);
+            let p: u32 = s;
+            while p < srl && is_word(load8(sr, p)) == true {
+                p = p + 1;
+            }
+            if p - s >= 3 {
+                let d: u32 = edit_dist(ptr_add(sr, s), p - s, hp, hn, row);
+                if d < bestd {
+                    bestd = d;
+                    besto = s;
+                    bestn = p - s;
+                    ties = 1;
+                } else {
+                    // **同一个名字出现两次不算并列**（不同作用域可以有同名局部变量）。
+                    // 并列的判据是"**不同的**名字一样近"，不是"匹配到两次"。
+                    if d == bestd && bytes_eq(ptr_add(sr, s), p - s,
+                                             ptr_add(sr, besto), bestn) == false {
+                        ties = ties + 1;
+                    }
+                }
+            }
+            if p > i {
+                i = p;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    if bestd > 2 || ties != 1 || bestn == 0 || bestn > SUG_CAP {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < bestn {
+        store8(ctx, C_SUG + k, load8(sr, besto + k) as u8);
+        k = k + 1;
+    }
+    store32(ctx, C_SUGN, bestn);
+    store32(ctx, C_SUGL, line_of(sr, besto));
+    return 1;
+}
+
+/// 把候选打出来。**只有 `sug_scan` 说"有一个"时才会被调到** ——
+/// 猜不出来就不出声，而不是打一句"没猜出来"（那种句子只会占地方）。
+fn h_sug(ctx: ptr, o: u32, w: u32) -> u32 {
+    let n: u32 = load32(ctx, C_SUGN);
+    if n == 0 {
+        return o;
+    }
+    o = em_gut(ctx, o, w);
+    o = em_col(ctx, o, "1;33");
+    o = em(ctx, o, ui(ctx, S_SUG));
+    o = em_byte(ctx, o, 96);
+    let i: u32 = 0;
+    while i < n {
+        o = em_byte(ctx, o, load8(ctx, C_SUG + i));
+        i = i + 1;
+    }
+    o = em_byte(ctx, o, 96);
+    o = em_rst(ctx, o);
+    o = em(ctx, o, ui(ctx, S_SUG_LINE));
+    o = em_u32(ctx, o, load32(ctx, C_SUGL));
+    return em(ctx, o, ui(ctx, S_SUG_LINE2));
+}
+
+// ---------------------------------------------------------------- E018: 手上有什么
+//
+// `use <名字>` 解析不出来时，**光说"补文件"没有用** —— 用户不知道补到哪，也不知道自己
+// 手上已经有什么。所以这里把**真实情况**说出来：
+//
+//   * `./deps` 打不开（单文件项目最常见的那种）→ 明说"这里没有 deps/"，并把第 1 层找的
+//     是什么路径写清楚。这条**不需要 getdents64**：`openat` 失败本身就是答案。
+//   * `./deps` 打得开 → 把里面**名字接近**的那几个列出来（距离 ≤2，最多 5 个）。
+//
+// **为什么不列"诊断文件所在的那个目录"**：`use <名字>` 从来不在文件旁边找东西 ——
+// 按层搜的第 1 层是**项目根**下的 `deps/<名字>/<名字>.lomt`。列文件旁边的目录会给出一个
+// 看着相关、其实无关的清单，那比不说更坏。项目根 = **当前工作目录**（启动器就是这样
+// 进来的），与 `errconfig`、`loment.conf` 用的是同一个"哪算项目根"。
+
+const CAND_CAP: u32 = 5;
+
+/// NUL 结尾字符串的长度（`getdents64` 的 `d_name` 是 NUL 结尾的，没有长度字段）。
+fn nlen(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 名字里第一个 `.` 之前有多长（后缀不算名字的一部分）。
+fn stem_n(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while i < n && go == 1 {
+        if load8(p, i) == DOT {
+            go = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+/// 列一个候选。第一个自带"最接近的有:"那句，其余各占一行 ——
+/// **不用逗号分隔**：最后一个后面会多出一个逗号，那种尾巴一看就是程序硬拼的。
+fn h_cand_one(ctx: ptr, o: u32, w: u32, first: u32, np: ptr, nl: u32) -> u32 {
+    if first == 1 {
+        o = em_gut(ctx, o, w);
+        o = em_col(ctx, o, "1");
+        o = em(ctx, o, ui(ctx, S_CANDS));
+        o = em_rst(ctx, o);
+    }
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "    ");
+    let i: u32 = 0;
+    while i < nl {
+        o = em_byte(ctx, o, load8(np, i));
+        i = i + 1;
+    }
+    return em_byte(ctx, o, NL);
+}
+
+/// 找 `./deps` 里与线索接近的名字。`dn` 是 32 KB 暂存（既当路径暂存又当 `getdents64` 缓冲）。
+/// `hp` / `hn` 是线索（指向 `C_MSG`）。
+fn h_cands(ctx: ptr, o: u32, w: u32, dn: ptr, hp: ptr, hn: u32) -> u32 {
+    let name: str = "./deps";
+    let fd: i64 = open_ro(str_ptr(name), str_len(name), dn);
+    if fd < 0 {
+        o = em_gut(ctx, o, w);
+        return em(ctx, o, ui(ctx, S_NODEPS));
+    }
+    let row: ptr = ptr_add(ctx, C_ROW);
+    let n: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let rn: i64 = syscall4(217, fd as u64, dn as u64, DENT_CAP as u64);
+        if rn <= 0 {
+            going = 0;
+        } else {
+            let total: u32 = rn as u32;
+            let off: u32 = 0;
+            while off < total {
+                let reclen: u32 = load16(dn, off + 16);
+                if reclen == 0 {
+                    off = total;
+                } else {
+                    let np: ptr = ptr_add(dn, off + 19);
+                    let nl: u32 = nlen(np);
+                    // 前导 `.` 把 `.` / `..` / 隐藏项一起排除（没有哪个模块叫 `.foo`）。
+                    if nl > 1 && load8(np, 0) != DOT && n < CAND_CAP {
+                        if edit_dist(np, stem_n(np, nl), hp, hn, row) <= 2 {
+                            n = n + 1;
+                            o = h_cand_one(ctx, o, w, n, np, nl);
+                        }
+                    }
+                    off = off + reclen;
+                }
+            }
+            if n >= CAND_CAP {
+                going = 0;
+            }
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    if n == 0 {
+        o = em_gut(ctx, o, w);
+        return em(ctx, o, ui(ctx, S_CANDS_NONE));
+    }
+    return o;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn _start() -> u32 {
@@ -1300,7 +2252,8 @@ fn _start() -> u32 {
     let arv: u64 = sys_alloc(ARENA_CAP as u64);
     let scv: u64 = sys_alloc(SCR_CAP as u64);
     let abv: u64 = sys_alloc(65536);
-    if ctxv == 0 || dgv == 0 || srv == 0 || arv == 0 || scv == 0 || abv == 0 {
+    let dnv: u64 = sys_alloc(DENT_CAP as u64);
+    if ctxv == 0 || dgv == 0 || srv == 0 || arv == 0 || scv == 0 || abv == 0 || dnv == 0 {
         return fail("lomenterr: brk failed\n");
     }
     let ctx: ptr = ctxv as ptr;
@@ -1309,22 +2262,33 @@ fn _start() -> u32 {
     let ar: ptr = arv as ptr;
     let sc: ptr = scv as ptr;
     let ab: ptr = abv as ptr;
+    let dn: ptr = dnv as ptr;
     store32(ctx, C_PREVLEN, 0);
     store32(ctx, C_SRCLEN, 0);
     store32(ctx, C_FPREVLEN, 0);
+    store32(ctx, C_TRUNC, 0);
+    store32(ctx, C_SUGN, 0);
+    store32(ctx, C_SUMN, 0);
     // 颜色**默认开**（与 `lomcli` 同一个默认值）；`--no-color` / `-C` 把它关掉，
     // 而 `parse_args` 同时把诊断文件那个参数抄进 `scr + SCR_DIAG`。
     store32(ctx, C_COLOR, 1);
+    // **语言默认英文**。写死在这里而不是靠 `cfg_load` —— 没配 errconfig 时那条路根本
+    // 不会走到，默认值也就没有第二处可写（两处迟早不同）。
+    store32(ctx, C_LANG, 0);
+    store32(ctx, C_MODE, 0);
 
     let av: u64 = parse_args(ctx, ab, sc);
+    // 语言在**用法报错之前**定下来：否则 `lomenterr` 自己用法写错时那句提示是一种语言、
+    // 而诊断是另一种，"同一份输出里两种语言"就是这么来的。
+    cfg_load(ctx, ab, sc);
     if av == 0 {
-        return fail("lomenterr: 用法: lomenterr [--no-color] <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n");
+        return fail(ui(ctx, S_USAGE));
     }
     let ap: ptr = ptr_add(sc, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, sc);
     if fd < 0 {
-        return fail("lomenterr: 打不开诊断文件\n");
+        return fail(ui(ctx, S_NOOPEN));
     }
     let dlen: u32 = strip_cr(dg, read_all(fd as u64, dg, DIAG_CAP as u64) as u32);
     syscall4(3, fd as u64, 0, 0);
@@ -1348,7 +2312,7 @@ fn _start() -> u32 {
                 // **不静默**: 解析不了就原样吐出来 —— 悄悄跳过会让"报错器什么都没说"
                 // 看起来像"没有错误"。
                 broken = broken + 1;
-                let o1: u32 = em(ctx, 0, "[lomenterr] 诊断文件里这一行不是合法 JSON, 原样输出:\n  ");
+                let o1: u32 = em(ctx, 0, ui(ctx, S_BADLINE));
                 let k: u32 = s;
                 let o2: u32 = o1;
                 while k < e {
@@ -1366,32 +2330,63 @@ fn _start() -> u32 {
                                           ctx, C_MSG, MSG_CAP);
                 let plen: u32 = str_field(js, ar, json_get(js, ar, root, "file"),
                                           ctx, C_PATH, PATH_CAP);
-                let have: u32 = src_ensure(ctx, sr, sc, plen);
-                let w: u32 = dig_w(line);
-                store32(ctx, C_TRUNC, 0);
-                let o: u32 = h_head(ctx, 0, cnum, clen);
-                let o2: u32 = h_loc(ctx, o, line, col, w, plen);
-                let o3: u32 = o2;
-                if have == 1 {
-                    o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w, mlen);
+                sum_add(ctx, cnum);
+                let mode: u32 = load32(ctx, C_MODE);
+                if mode == 1 {
+                    // 一行一条：**不读源文件**（短输出只用到码/路径/消息），
+                    // 所以 CI 里几万条诊断也不会有额外 I/O。
+                    write_all(2, ctx, rec_short(ctx, line, col, mlen, plen, clen) as u64);
                 } else {
-                    o3 = h_nosrc(ctx, o2, w, plen);
-                }
-                let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                let o5: u32 = h_card(ctx, o4, cnum, w);
-                let srl: u32 = load32(ctx, C_SRCLEN);
-                let o6: u32 = o5;
-                if have == 1 && foreign_seen(ctx, plen) == 0 {
-                    let li: u32 = sniff_lang(ctx, sr, srl, cnum, plen);
-                    if li != 4294967295 {
-                        o6 = h_foreign(ctx, o5, li, w, plen);
-                        foreign_remember(ctx, plen);
+                    if mode == 2 {
+                        write_all(2, ctx, rec_json(ctx, cnum, clen, line, col, mlen, plen) as u64);
+                    } else {
+                        let have: u32 = src_ensure(ctx, sr, sc, plen);
+                        let w: u32 = dig_w(line);
+                        store32(ctx, C_TRUNC, 0);
+                        let o: u32 = h_head(ctx, 0, cnum, clen);
+                        let o2: u32 = h_loc(ctx, o, line, col, w, plen);
+                        let o3: u32 = o2;
+                        if have == 1 {
+                            o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w, mlen);
+                        } else {
+                            o3 = h_nosrc(ctx, o2, w, plen);
+                        }
+                        let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
+                        let o5: u32 = h_card(ctx, o4, cnum, w);
+                        let srl: u32 = load32(ctx, C_SRCLEN);
+                        // 两条**码专属**的补充（只在读得到源文件时有意义）：
+                        //   E002 猜一个"你是不是想写 X"，E018 列出手上真实有的模块名。
+                        // 它们都排在卡片**之后** —— 先给通用的四段，再给这一条的专属信息。
+                        let hint: u64 = msg_hint(ctx, mlen);
+                        let hoff: u32 = (hint >> 32) as u32;
+                        let hlen: u32 = (hint % 4294967296) as u32;
+                        let o5b: u32 = o5;
+                        store32(ctx, C_SUGN, 0);
+                        if cnum == 2 && have == 1 && hint != 18446744073709551615 as u64 {
+                            if sug_scan(ctx, sr, srl,
+                                        ptr_add(ctx, C_MSG + hoff), hlen) == 1 {
+                                o5b = h_sug(ctx, o5, w);
+                            }
+                        } else {
+                            if cnum == 18 && hint != 18446744073709551615 as u64 {
+                                o5b = h_cands(ctx, o5, w, dn,
+                                              ptr_add(ctx, C_MSG + hoff), hlen);
+                            }
+                        }
+                        let o6: u32 = o5b;
+                        if have == 1 && foreign_seen(ctx, plen) == 0 {
+                            let li: u32 = sniff_lang(ctx, sr, srl, cnum, plen);
+                            if li != 4294967295 {
+                                o6 = h_foreign(ctx, o5b, li, w, plen);
+                                foreign_remember(ctx, plen);
+                            }
+                        }
+                        write_all(2, ctx, em(ctx, o6, "\n") as u64);
+                        if load32(ctx, C_TRUNC) == 1 {
+                            let cut: str = ui(ctx, S_TRUNC);
+                            write_all(2, str_ptr(cut), str_len(cut) as u64);
+                        }
                     }
-                }
-                write_all(2, ctx, em(ctx, o6, "\n") as u64);
-                if load32(ctx, C_TRUNC) == 1 {
-                    let cut: str = "[lomenterr] 这一条太长, 上面的渲染被截断了\n";
-                    write_all(2, str_ptr(cut), str_len(cut) as u64);
                 }
                 total = total + 1;
             }
@@ -1400,21 +2395,21 @@ fn _start() -> u32 {
     if broken > 0 {
         let o: u32 = em(ctx, 0, "lomenterr: ");
         let o2: u32 = em_u32(ctx, o, broken);
-        write_all(2, ctx, em(ctx, o2, " 行不是合法 JSON (诊断文件损坏, 或与本次编译器不是同一版)\n") as u64);
+        write_all(2, ctx, em(ctx, o2, ui(ctx, S_BROKEN)) as u64);
     }
     // 一条也没有 = 编译其实是好的 (调用方通常在失败时才起它, 但单独跑也要说清)。
     if total == 0 {
         if broken == 0 {
-            let ok: str = "[OK] 无诊断\n";
+            let ok: str = ui(ctx, S_OK);
             write_all(2, str_ptr(ok), str_len(ok) as u64);
             return die(0);
         }
         return die(1);
     }
-    let a: u32 = em_u32(ctx, 0, total);
-    let b: u32 = em_col(ctx, a, "1;31");
-    let c: u32 = em(ctx, b, " 条错误");
-    let d: u32 = em_rst(ctx, c);
-    write_all(2, ctx, em(ctx, d, "\n") as u64);
+    // 汇总只在**给人看**的两个模式下打：`--json` 是一行一个对象，插一行汇总进去会让
+    // 下游解析器当场坏掉 —— 那是把"给程序读"这个承诺自己破掉。
+    if load32(ctx, C_MODE) != 2 {
+        write_all(2, ctx, sum_print(ctx, total) as u64);
+    }
     return die(1);
 }

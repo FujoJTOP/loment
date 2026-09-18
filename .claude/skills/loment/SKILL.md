@@ -62,6 +62,26 @@ loment version
 **它同时管诊断那一侧**：`loment check FILE --no-color` 会把开关转交给报错器，
 关掉之后输出里一个转义字节都不剩（`loment check f.lomt | less` 就该这么用）。
 
+诊断还有两个出口，也是 `loment check FILE` 上的开关（各**顺带关色**）：
+
+- `--short` —— **一行一条**（`文件:行:列: error[码]: 消息`），给 grep 与 CI 日志；
+- `--json` —— **一行一个对象**，除了码/位置/消息还带 `title`/`what`/`why`/`fixes`/`yes`/`no`
+  （编辑器把它放进 quickfix 面板，或按码做统计）。
+
+报错器自己的文字**默认是英文**；要整个报告说中文，在**项目根**放一份 `errconfig`：
+
+```rust
+// errconfig
+module errconfig
+
+pub fn error_lang() -> str {
+    return "zh";
+}
+```
+
+值写 `"zh"`（中文）或 `"en"`（英文，也是默认），大小写随便；写别的一律**当没配**、退回默认。
+编译器给的那行 `message:` 不归它管 —— 那是编译器的话，与报错器自己的文字是两层。
+
 > ### 任务碰到"库 / 依赖"，**先去读 lompi 的指南**
 >
 > lompi 是 **Loment 库的包管理器**（管 store、锁文件、`deps/`）。下面这些事，答案全在它那份

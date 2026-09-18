@@ -563,6 +563,60 @@ def test_every_code_has_a_card_with_at_least_three_fixes():
 
 
 @test
+def test_the_english_tables_are_complete_and_pure_ascii():
+    """英文那几张表（**默认语言**）与中文那份一一对应，且**全 ASCII**。
+
+    英文是默认（`docs/182` §14），所以"只写了中文"的症状发生在**默认路径**上：
+    输出里没有标题（`error[E002]: ` 后面空着）或四段一起不见 —— 而"只有码号"的诊断
+    看起来像"这条没有更多可说的了"，比不报还坏。
+
+    四样一起钉：
+      * **键集相等** —— 加一个码只补了中文，英文默认下那条就残；
+      * **段不空** —— `what` / `why` / `yes` / `no` 都不许空串；
+      * **修法条数相等** —— `code_nfix` 只报一个数（语言不进它的键），少一条会被
+        **静默挤掉**；上界 8 也是（`FIX_STRIDE`）；
+      * **纯 ASCII** —— 这是"默认输出不再是乱码"那一半的**前提**（`docs/169` §3a：
+        936 代码页），夹一个 `→` 或 `“”` 进来，换默认语言这个改动就白做了。
+    """
+    import loment_diag
+    ruled = {loment_diag.code_num(c) for c, _p, _t, _h in loment_diag.RULES}
+    assert set(loment_diag.TITLE_EN) == ruled, (
+        f"英文标题缺: {sorted(ruled - set(loment_diag.TITLE_EN))}; "
+        f"多出来: {sorted(set(loment_diag.TITLE_EN) - ruled)}")
+    assert set(loment_diag.CARDS_EN) == ruled, (
+        f"英文卡缺: {sorted(ruled - set(loment_diag.CARDS_EN))}; "
+        f"多出来: {sorted(set(loment_diag.CARDS_EN) - ruled)}")
+    bad_n, empty, nonascii = {}, [], []
+    for c, k in loment_diag.CARDS_EN.items():
+        if len(k.fixes) != len(loment_diag.CARDS[c].fixes):
+            bad_n[c] = (len(k.fixes), len(loment_diag.CARDS[c].fixes))
+        if len(k.fixes) < 3 or len(k.fixes) > 8:
+            bad_n[c] = len(k.fixes)
+        for i, fx in enumerate(k.fixes):
+            if not fx:
+                empty.append((c, f"fix{i}"))
+            if any(ord(ch) > 127 for ch in fx):
+                nonascii.append((c, f"fix{i}"))
+        for f in ("what", "why", "yes", "no"):
+            v = getattr(k, f)
+            if not v:
+                empty.append((c, f))
+            if any(ord(ch) > 127 for ch in v):
+                nonascii.append((c, f))
+    for c, t in loment_diag.TITLE_EN.items():
+        if not t:
+            empty.append((c, "title"))
+        if any(ord(ch) > 127 for ch in t):
+            nonascii.append((c, "title"))
+    assert not bad_n, f"英文修法条数与中文不等 / 越界 (期望与中文一致且在 3..8): {bad_n}"
+    assert not empty, f"英文表里有空段: {empty}"
+    assert not nonascii, (
+        f"英文表里有非 ASCII (936 控制台上就是乱码, 默认语言换过去就白换了): {nonascii}")
+    n = sum(len(k.fixes) for k in loment_diag.CARDS_EN.values())
+    print(f"      {len(ruled)} 条英文卡与中文一一对应, 修法 {n} 条, 全 ASCII")
+
+
+@test
 def test_language_cards_cover_every_language_the_frontends_know():
     """`LANG_CARDS` 的键集必须 == `potato_from.LANGS` —— **翻译线加语言, 这里要跟上**。
 
@@ -589,6 +643,47 @@ def test_language_cards_cover_every_language_the_frontends_know():
         f"LANGS 里有而 LANG_CARDS 没有: {sorted(want - got)} —— 照现有那张卡补一张; "
         f"LANG_CARDS 里多出来的: {sorted(got - want)}")
     print(f"      {len(want)} 门语言都有卡 ({sorted(want)})")
+    # 英文那一半（`LANG_EDGE_EN` / `LANG_ABI_EN`）**同一把尺子**：键集相等、不空、全 ASCII。
+    # 这两段是"这个文件不是 Loment"时唯一的可执行建议，缺一门就是"新语言的文件报错时
+    # 只字不提怎么翻"—— 与中文侧缺一门是同一个缺口，只是它落在**默认语言**上。
+    for name, tbl in (("LANG_EDGE_EN", loment_diag.LANG_EDGE_EN),
+                      ("LANG_ABI_EN", loment_diag.LANG_ABI_EN)):
+        assert set(tbl) == want, (
+            f"{name} 缺: {sorted(want - set(tbl))}; 多出来: {sorted(set(tbl) - want)}")
+        empty = [k for k, v in tbl.items() if not v]
+        assert not empty, f"{name} 里有空段: {empty}"
+        bad = [k for k, v in tbl.items() if any(ord(ch) > 127 for ch in v)]
+        assert not bad, f"{name} 里有非 ASCII: {bad}"
+
+
+@test
+def test_ui_strings_have_both_languages():
+    """报错器的**界面字串**两门语言都有，键集相同且从 1 起连续。
+
+    这些是渲染器自己的骨架字串（标签、说明句、用法、汇总），**不在** `surface_data` 里 ——
+    lomcli 看不见它们，没必要让 CLI 的码表背这份负担。所以上面那几条表判据盖不到它们。
+    漏一条的症状是某种语言下渲染出一个**空标签**（`": 值"`），看着像渲染坏了。
+
+    直接读 `lomenterr.lomt`：`ui_en` 与 `ui_zh` 的 `if k == N { return ... }` 键集必须相等、
+    且从 1 起连续（跳号 = 加了键忘了写，或者写了一个谁都读不到的键）。
+    在源码层面就判得动，不必编一次再跑 —— 也避免了"某个键在两种语言下恰好是同一个 ASCII 串"
+    这种把判据骗过去的巧合。
+    """
+    import re
+    src = (ROOT / "loment" / "tools" / "lomenterr.lomt").read_text(encoding="utf-8")
+
+    def keys(fn: str) -> set[int]:
+        m = re.search(r"fn " + fn + r"\(k: u32\) -> str \{(.*?)\n\}", src, re.S)
+        assert m, f"找不到 {fn}"
+        return {int(x) for x in re.findall(r"if k == (\d+) \{ return ", m.group(1))}
+
+    en, zh = keys("ui_en"), keys("ui_zh")
+    assert en == zh, f"只有英文: {sorted(en - zh)}; 只有中文: {sorted(zh - en)}"
+    assert en == set(range(1, max(en) + 1)), (
+        f"界面字串键不从 1 起连续, 缺: {sorted(set(range(1, max(en) + 1)) - en)}")
+    print(f"      {len(en)} 个界面字串两门语言齐全 (1..{max(en)})")
+
+
 @test
 def test_surface_data_is_up_to_date():
     """`loment/tools/surface_data.lomt` 是**生成物**，必须与重新生成的结果逐字节相同。

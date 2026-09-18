@@ -634,6 +634,42 @@ def test_user_command_lookup_in_both_launchers():
         "cmd 启动器把用户命令的调用写进了括号块/缩进了 —— 退出码会读错"
 
 
+@test
+def test_both_launchers_forward_the_renderer_output_modes():
+    """两个启动器都要把 `--short` / `--json` 转交给**渲染器**（`docs/182` §15）。
+
+    它们是渲染器的输出模式，驱动不该看见 —— 与 `--no-color` 同一条路（也都是"位置任意"
+    的那个开关集合）。少了这条转发，"给 CI 与编辑器用的那两个模式"在包里只能两步土办法
+    拿到：先自己带 `--diag-out` 编一次、再手动起 `lomenterr` —— 而绕开这两步正是它们存在
+    的理由。
+
+    bash 侧的**行为**由 `loment_err_test` 的启动器判据端到端验（桩渲染器把自己的 argv
+    打出来，所以开关有没有到手直接看得到）。cmd 侧这里只做**静态**断言，与
+    `test_user_command_lookup_in_both_launchers` 同一条纪律 —— 这边造不出一个能跑
+    `loment-driver.exe` 的桩包（`loment_dist_test` 也只验它存在、不含 wsl，不跑它）。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    # bash: 两处参数扫描（check/ir 一处、build/run 一处）都要认，且都要转交
+    assert sh.count("--short|--json) om=$1; shift ;;") == 2, \
+        "bash 启动器不是两处参数扫描都认 --short/--json"
+    assert sh.count('"$nc $om"') == 2, "bash 启动器没把输出模式转交给 report_diags"
+    assert '"$(tool lomenterr)" $rflags "$dfile"' in sh, \
+        "renderer 的开关没有一起(word-split)传给 lomenterr"
+
+    # cmd: check 走 :scan_arg、build/run 走 :barg_loop —— 两条路都要认，且都要转交
+    assert cmd.count('if /I "%~1"=="--short" goto scan_om') == 1, "cmd: check 不认 --short"
+    assert cmd.count('if /I "%~1"=="--json" goto scan_om') == 1, "cmd: check 不认 --json"
+    assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
+    assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
+    assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
+    assert cmd.count('set "com=%~1"') == 2, "cmd: 两个分支没各自记下这个开关"
+    assert cmd.count('"%cnc% %com%"') == 3, \
+        "cmd: 三处 report_diags 调用没有都带上输出模式"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

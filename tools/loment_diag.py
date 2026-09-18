@@ -189,6 +189,43 @@ ASCII_ONE_LINER: dict[int, str] = {
 }
 
 
+#: 码 -> **英文标题**。英文是报错器的**默认**语言（`errconfig` 可切回中文，见 `docs/182` §14）。
+#:
+#: **为什么英文当默认**：`docs/169` 要 CLI 输出纯 ASCII —— 因为 Windows 控制台按 936 代码页
+#: 解 UTF-8，中文打出来是乱码，而 PE 垫片没有 `WriteConsoleW`，程序侧无从补救。诊断这条路
+#: 原先一直是中文（"反正 `loment diag` 也是中文"），于是**默认输出在中文 Windows 上是乱码**。
+#: 英文默认把这条修好了：英文标题与卡片**全 ASCII**，任何代码页下都解码一致。
+#: 中文不是被删掉而是**换到 `errconfig` 后面**（想读中文的人明确说了想读中文）。
+#:
+#: **键集必须与 `RULES` 相等**，由 `loment_tools_test` 钉着 —— 加一个码而只写了中文标题，
+#: 英文默认下那条诊断就会渲染成"只有码号、没有标题"的残件。
+TITLE_EN: dict[int, str] = {
+    1: "type mismatch",
+    2: "undeclared name",
+    3: "wrong number of arguments",
+    4: "illegal capability domain",
+    5: "conflicts with an out-of-bounds declaration",
+    6: "use after move",
+    7: "borrow conflict",
+    8: "illegal `match` / variant use",
+    9: "illegal type name",
+    10: "misused `?`",
+    11: "write into a read-only slice",
+    12: "dangling borrow",
+    13: "duplicate name",
+    14: "illegal assignment target",
+    15: "illegal field / index / address-of",
+    16: "illegal array literal",
+    17: "illegal `as` cast",
+    18: "`use <name>` does not resolve uniquely",
+    19: "syntax error (lexer / parser)",
+    20: "too many `use` in one file",
+    21: "unsupported `extern fn` signature",
+    22: "bad `choose` / `addin`",
+    23: "not implemented in this version (compiler limit)",
+}
+
+
 def code_num(code: str) -> int:
     """`"E023"` -> `23`。取不出来就是 0（调用方据此报"未知码"）。"""
     return int(code[1:]) if len(code) > 1 and code[0] == "E" and code[1:].isdigit() else 0
@@ -535,6 +572,478 @@ CARDS: dict[int, Card] = {
 }
 
 
+# ================================================================== 英文卡（默认）
+#
+# 与 `CARDS` **一一对应**：键集相等、每条修的**事项**相同、`fixes` 条数也相同，都由
+# `loment_tools_test` 钉着。放在旁边而不是把两份文字塞进同一个 `Card`，是因为：
+#
+#   * 两张表各自是**一篇完整的中文/英文**，读的时候不用在两门语言之间来回跳；
+#   * 改一处语义要同时改两处 —— 这一条**判据抓不到**，只能靠"两处相邻"来提醒。
+#     所以它们必须挨着放（隔开的并行表才是真的会漂）。
+#
+# **英文一律纯 ASCII**（判据钉着）：这不是洁癖 —— `errconfig` 把默认语言切成英文，正是为了
+# 让默认输出在 936 控制台上**不是乱码**（`docs/169` §3a）。夹一个 `…` 或 `—` 进来就把
+# 这个目的毁掉了。所以这里写 `->` 不写 `→`，写 `"` 不写 `“”`，写 `<=` 不写 `≤`。
+#
+# 三块文字的写法自律与中文那份相同（`what` 不复述消息原文、`why` 说语言规则、`fixes`
+# 每条都能照做）—— 两门语言说**同一件事**，不是两篇各自发挥的文章。
+
+CARDS_EN: dict[int, Card] = {
+    1: Card(
+        what="Two types do not line up - the return value against the declaration, an argument "
+             "against a parameter, a payload against its variant, a builtin argument, or the two "
+             "sides of an assignment.",
+        why="Loment has **no implicit numeric conversion** and no type inference: every position "
+            "must match explicitly. A `u32` value never becomes an `i64` on its own, and the "
+            "integer `1` is not the `bool` `true`.",
+        fixes=(
+            "Change one side to match the signature: read the declared return type / parameter "
+            "type and make the expression be that.",
+            "Different integer widths: write the cast out - `x as u64`, `n as i32` "
+            "(integer<->integer, integer<->bool and pointer<->integer are all allowed).",
+            "Booleans and integers are separate: write `x != 0` or `true` in a condition; do not "
+            "expect `1` to work as `true`.",
+            "Array / struct elements must all be one type: cast each element with `as`, or add a "
+            "conversion function.",
+        ),
+        yes="explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / "
+            "string / slice / array / struct / enum as types",
+        no="implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an "
+           "integer where a bool is expected",
+    ),
+    2: Card(
+        what="A name was used without being declared - a variable, a function, a type or a "
+             "constant.",
+        why="This is the one beginners hit most, and in Loment it is almost always the same "
+            "thing: **there is no type inference** - `let x = 1;` is a syntax error and you must "
+            "write `let x: u32 = 1;`. Next comes defining after use inside one module, and then a "
+            "cross-module name that needs `pub` on the declaration and `use` at the call site.",
+        fixes=(
+            "Add the type annotation: `let x: u32 = 1;` (a `let` with no type is really E019, a "
+            "syntax error, but it is easy to read as this one).",
+            "Misspelt: fix the spelling. Cross-module: put `pub` on the declaration and `use "
+            "<module>` or `use \"./x.lomt\"` at the call site.",
+            "Generic functions need their arguments to pin down `T`: `let a: u32 = 4;` then "
+            "`pick(a, b)`. Passing integer literals straight in reports this code, and that "
+            "message is misleading.",
+            "The name really does come from elsewhere: name its location with the path form "
+            "`use \"./util.lomt\"`.",
+        ),
+        yes="generics (when the call site determines T) / static trait dispatch / `pub` across "
+            "modules / both `use` forms",
+        no="type inference / implicit globals / forward references inside one module / implicit "
+           "numeric conversion",
+    ),
+    3: Card(
+        what="The number of arguments at the call site does not match the function signature.",
+        why="A function takes at most **10** parameters. A method's `self` does **not** count as "
+            "an argument. Loment has no default arguments, no variadics and no overloading - a "
+            "different name is a different function.",
+        fixes=(
+            "Count against the signature: delete the extras, supply the missing ones.",
+            "Do not count `self` in a method call (`obj.m(a)` is one argument, not two).",
+            "Want an overload? Use a different name: `parse_int` / `parse_float`. Loment resolves "
+            "by name, and one name with two different parameter lists is not allowed.",
+        ),
+        yes="up to 10 parameters; `self` on a method call is supplied by the compiler",
+        no="default arguments / variadic arguments / function overloading",
+    ),
+    4: Card(
+        what="The capability domain itself is wrong - `guard` on something undeclared, a bad "
+             "`[lo..hi]` range, or one name declared twice.",
+        why="A capability domain is the one thing Loment adds: `capability c : space[lo..hi]` "
+            "declares an **index domain** and `guard c(i);` checks that `i` falls inside it (a "
+            "literal out of range is a **compile-time** error, anything else is a run-time trap). "
+            "So the domain has to be declared first, `lo <= hi` has to hold, and one name may be "
+            "declared only once per space.",
+        fixes=(
+            "Declare it at module top level: `capability c : disk[0..4]` (`c` is the name, `disk` "
+            "is the space).",
+            "Range reversed? Swap it: `lo <= hi` is required (`[0..4]` is five values: 0,1,2,3,4).",
+            "Name already taken: rename it. One space may hold several domains, each with its own "
+            "name.",
+            "The index is a literal and out of range: change the index or widen the domain. This "
+            "check happens at compile time, not at run time.",
+        ),
+        yes="`capability` + `guard`; the `revocable` flag; compile-time checking of literal "
+            "out-of-range indexes",
+        no="**authorization** - `guard` only constrains the index to the domain, it does not check "
+           "whether the current subject holds this capability (that binding lives in the kernel)",
+    ),
+    5: Card(
+        what="A space that an `excluded` declaration **put out of bounds** was used.",
+        why="`excluded \"space: ...\"` is an **out-of-bounds declaration**: it removes a space "
+            "from what this program may touch, and it is a promise written for a security audit. "
+            "Using that space again therefore contradicts your own promise - and that is "
+            "**deliberate**, not the compiler being fussy.",
+        fixes=(
+            "Delete that `excluded` line, if the promise should not have been there in the first "
+            "place.",
+            "Declare the capability domain over a space that is not excluded.",
+            "Keep the promise and change the place that uses it - a capability domain exists "
+            "precisely to keep access inside a stated range.",
+        ),
+        yes="`excluded \"<space>: ...\"` out-of-bounds declarations; several capability domains, "
+            "each in its own space",
+        no="local exemptions (there is no \"allow it just here\"); both excluding a space and "
+           "using it",
+    ),
+    6: Card(
+        what="A value was **moved** to someone else and then used again.",
+        why="Loment's aggregate types (`struct` / `enum`) are **move** by default: passing one by "
+            "value to a function, or assigning one to another variable, hands over ownership. "
+            "Types whose fields are **all integers** are `Copy` automatically and never report "
+            "this.",
+        fixes=(
+            "Pass a reference instead: `f(&v)` or `f(&mut v)` - the most common fix.",
+            "You really need a second copy: copy the fields you need into a new variable "
+            "**before** the move, then pass the original.",
+            "Make the type `Copy`: give it only integer fields (`u32`/`i64`/`bool`...), with no "
+            "string, slice or pointer inside.",
+            "Arrange ownership: let the place that uses it last be the one that consumes it, and "
+            "use references everywhere before that.",
+        ),
+        yes="explicit `&` / `&mut`; an aggregate whose fields are all integers is `Copy` "
+            "automatically",
+        no="implicitly copying aggregates; using a value after it has been moved",
+    ),
+    7: Card(
+        what="In one call, the same variable is borrowed mutably and also borrowed, or borrowed "
+             "mutably twice.",
+        why="`&mut` is an **exclusive** borrow (the same rule as Rust): while a mutable borrow is "
+            "alive, no other borrow - not even a read-only one - may exist alongside it. This is "
+            "not about performance; the answer to \"who may change it\" has to be unique.",
+        fixes=(
+            "Keep only one kind of borrow: turn `&a, &mut a` into `&a` for both (read-only), or "
+            "into `&mut` for both.",
+            "Take the value out first: `let n: u32 = a.x;` then pass `&mut a, n`.",
+            "Split one statement into two: read first, store the result in a variable, then take "
+            "the mutable borrow.",
+            "If you must read and write the same memory, write it as three steps: read out, "
+            "compute, write back.",
+        ),
+        yes="several **read-only** borrows in one scope; one mutable borrow",
+        no="a mutable borrow alive next to any other borrow; two mutable borrows of the same "
+           "variable",
+    ),
+    8: Card(
+        what="A `match` or an enum is used wrongly: not exhaustive, a duplicate pattern, a bad "
+             "payload binding, a subject that is not an enum, or an arm written as an expression.",
+        why="`match` must be **exhaustive** (or carry a `_` arm); **an arm body is a block**, not "
+            "an expression; a variant with a payload binds a variable and one without a payload "
+            "takes no parentheses; and a **generic enum** pattern must use the **monomorphized** "
+            "name (`Result_i64_u32::Ok(v)`), not `Result::Ok(v)`.",
+        fixes=(
+            "Make the arm a block: `E::A => { return 0; }` (writing `E::A => 0,` is an E019 "
+            "syntax error).",
+            "Add a `_ => { ... }` catch-all, or fill in the remaining variants. Adding a variant "
+            "to the enum reddens this on purpose.",
+            "Generic enums take the monomorphized name: `Result_i64_u32::Ok(v)` / "
+            "`Result_i64_u32::Err(e)` (read the width off the value's type first).",
+            "The binding follows the variant: `Kind::Big(w)` binds `w`, and `Kind::Small` may not "
+            "be written `Kind::Small()`.",
+        ),
+        yes="`match` / `if let` / single-payload variants / `_` catch-all / generic enums (via the "
+            "monomorphized name)",
+        no="expression arm bodies; multi-payload variants; non-exhaustive without `_`; comparing "
+           "enums with `==` (the checker allows it but the native backend rejects it)",
+    ),
+    9: Card(
+        what="A type name collides with a base type, or an **empty** `struct`/`enum` was declared.",
+        why="`u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str` are **base type names**; a user type "
+            "taking one of them leaves no way to tell the two apart later. Empty aggregates for "
+            "the same reason: a type with no field and no variant expresses nothing, and "
+            "**rejecting it loudly beats letting it exist quietly** - it is almost always "
+            "half-written.",
+        fixes=(
+            "Rename it away from the base type: `U32Box` / `Id` / `Amount` (a name that carries "
+            "meaning is better than `U32` anyway).",
+            "Give the `struct` a field; if it is only a placeholder, declare it once it has "
+            "fields.",
+            "Give the `enum` at least one variant; an empty enum cannot even be matched on.",
+        ),
+        yes="a `struct` with any number of fields; an `enum` with any number of variants (single "
+            "payload included)",
+        no="a name that collides with a base type; an empty `struct`; an empty `enum`",
+    ),
+    10: Card(
+        what="`?` was used where the function does not return `Result`/`Option`, or somewhere "
+             "other than the binding position of a `let`.",
+        why="`?` means **return now if it failed, unwrap the payload if it worked**, so it asks "
+            "two things: the enclosing function returns `Result` (or `Option`), and `?` sits in "
+            "the binding position `let x: T = expr?;`. It is not an \"ignore the error\" marker.",
+        fixes=(
+            "Change the enclosing function's return type to `Result<..., ...>` (or `Option<...>`).",
+            "Drop `?` and `match` on both arms explicitly - pick this one when you want to handle "
+            "the error right there.",
+            "Move `?` to a binding position: `let v: u32 = f()?;` rather than `g(f()?);`.",
+        ),
+        yes="`Result` / `Option` / `?` in a binding position / explicit `match`",
+        no="`?` outside a `let` binding; `?` inside a function that does not return "
+           "`Result`/`Option`",
+    ),
+    11: Card(
+        what="Writing into a **read-only** slice, or a parameter that was not declared `mut`.",
+        why="`fn f(xs: [u32])` receives a **read-only** slice. A slice is a borrowed view, and "
+            "whether you may write through it is decided by the parameter type: to write, the "
+            "parameter must be `mut [u32]`, and the call site must pass `&mut arr` (nobody can "
+            "borrow a read-only slice as writable).",
+        fixes=(
+            "Change the parameter to `mut [u32]`.",
+            "Change the call site to `&mut arr` (it probably says `&arr` today).",
+            "Leave the original array alone: copy the slice's contents into a local array, and "
+            "decide afterwards what to do with it.",
+        ),
+        yes="both slice forms, `[T]` (read-only) and `mut [T]` (writable); both ways to pass, "
+            "`&arr` and `&mut arr`",
+        no="writing through a read-only slice; borrowing `&arr` as writable",
+    ),
+    12: Card(
+        what="A reference to a **local variable** was returned.",
+        why="A local variable stops existing when the function returns, so a reference to it is "
+            "necessarily dangling. A reference that can be returned safely can only come from a "
+            "**parameter** (or from memory the caller handed in) - this is where the lifetime "
+            "rules land in Loment.",
+        fixes=(
+            "Return the value itself, by value - the most direct fix.",
+            "Let the caller allocate: take `&mut` and write the result into memory the caller "
+            "provides.",
+            "Return information that does not depend on memory: an index, a length, whether it "
+            "matched (`bool`).",
+            "You really must return a slice: point it at a parameter rather than a local "
+            "(`fn f(xs: [u32]) -> [u32] { return xs; }`).",
+        ),
+        yes="returning a reference or slice that comes from a parameter; returning by value",
+        no="returning a reference or slice that points at a local variable",
+    ),
+    13: Card(
+        what="The same name appears twice in one scope - a function, a type, a constant, a field, "
+             "a variant or a parameter.",
+        why="`use` is a **flat namespace**: the top-level names in one unit must be unique, so "
+            "**two libraries may not both have a top-level item of the same name**. That is also "
+            "why the public names in std carry a prefix (`json_parse` / `sha256_hex`) - the ones "
+            "that do not will collide sooner or later.",
+        fixes=(
+            "Rename one of them (the least work).",
+            "Prefix the name with its owner: `json_parse` / `sha_parse` - the chance of a "
+            "collision disappears immediately.",
+            "You really need both libraries: change one call site to the path form "
+            "`use \"./x.lomt\"` and rename the imported symbol.",
+            "A duplicate struct field or enum variant: rename by meaning (`width`/`height` rather "
+            "than two `size`).",
+        ),
+        yes="any number of modules / functions / types in one unit, as long as no name repeats",
+        no="two top-level items sharing a name; two libraries exporting the same name",
+    ),
+    14: Card(
+        what="The left-hand side of an assignment is not a place that can hold something (it is "
+             "not an lvalue).",
+        why="Only a **variable, a field or an index** can be assigned to - they name a definite "
+            "piece of memory. The result of an expression (`a + b`, a function's return value) "
+            "has no address, so nothing can be stored in it.",
+        fixes=(
+            "Store the result in a variable first, then change that variable.",
+            "Write the target in a form that has a place: `arr[i]` or `s.field`.",
+            "Changing a slice element: declare the slice parameter as `mut [T]`, otherwise even "
+            "`arr[i] = x` cannot be written.",
+        ),
+        yes="assignment to a variable, a struct field, an array or slice index",
+        no="assignment to an expression or a literal (`1 = x`, `f() = x`)",
+    ),
+    15: Card(
+        what="A field or an index is used wrongly - no such field, a missing field, a duplicate "
+             "initializer, a field taken off a non-struct, an index applied to a non-array.",
+        why="A struct literal must list its fields **completely and without repeats** (there are "
+            "no defaults); `.` only applies to structs, `[]` only to arrays and slices, and "
+            "`&`/`&mut` only to arrays and slices. Two more shape rules: **a struct literal "
+            "cannot be passed as an argument directly**, and **a struct literal cannot be written "
+            "directly in a condition**.",
+        fixes=(
+            "Fill in the fields the declaration asks for (names and types both): add the missing "
+            "ones, drop the extra ones.",
+            "Bind the struct literal to a variable first: `let s: S = S { a: 1 };` then `f(s)` "
+            "(the backend rejects it written inline).",
+            "To use a field in a condition, parenthesize it: `if (s.a) { }` - otherwise `if s { }` "
+            "is disambiguated by the Rust rules.",
+            "To take a slice write `&arr` (the whole thing); `&arr[i]` is the address of one "
+            "element, not a slice.",
+        ),
+        yes="reading and writing fields; reading and writing indexes; `&arr` for a slice; struct "
+            "literals (bound to a variable first)",
+        no="a struct literal passed straight as an argument; a struct literal written in a "
+           "condition; literals with missing or extra fields",
+    ),
+    16: Card(
+        what="An array literal is wrong - it is empty, its element types differ, or its count "
+             "does not match the declared length.",
+        why="`let xs: [u32; 3] = [1, 2, 3];` - **the length is part of the type**, so the count "
+            "must be written out and match. There is no \"infer the length from the literal\", "
+            "because that would need type inference and Loment has none.",
+        fixes=(
+            "Make the count equal the declared length: a `[u32; 3]` declaration takes three.",
+            "Unify the element types: if `u32` and `i32` are mixed, cast each with `as` to one of "
+            "them.",
+            "An empty literal will not do: give it a length, or switch to a slice parameter "
+            "`[T]` and pass `&xs`.",
+            "The length has to vary: that is a slice, not an array. Declare the parameter `[T]` "
+            "and pass `&arr`.",
+        ),
+        yes="fixed-size arrays `[T; N]`; literals `[1, 2, 3]`; reading and writing indexes",
+        no="an empty literal; inferring the length from the literal; an array with mismatched "
+           "element types",
+    ),
+    17: Card(
+        what="The target type of `as` is wrong, or this direction cannot be converted at all.",
+        why="`as` performs a **bit-level** conversion only: integer<->integer, integer<->bool, "
+            "pointer<->integer. Anything else (a string to a number, a struct to a struct) is not "
+            "a conversion but a parse or a construction, and the steps have to be written out.",
+        fixes=(
+            "Change the target to a base type: `u8..u64` / `i8..i64` / `bool` / `ptr`.",
+            "Converting between two structs: write an explicit function that moves field by field "
+            "(and decide what to do about the fields that are missing).",
+            "String to number: write the parsing loop yourself (`str_byte` byte by byte, "
+            "accumulating). There is no builtin `parse`.",
+            "Number to string: follow `write_dec` (remainder plus reverse). There is no builtin "
+            "formatting either.",
+        ),
+        yes="`as` between integers, between an integer and a bool, between a pointer and an "
+            "integer",
+        no="`as` between aggregates; `as` between a string and a number (write the parse "
+           "yourself)",
+    ),
+    18: Card(
+        what="`use <name>` does not resolve - either nothing was found, or more than one thing "
+             "matched and there is no way to tell which was meant.",
+        why="The name form searches **layer by layer**: (1) the project's "
+            "`deps/<name>/<name>.lomt`, (2) the toolchain's own store, (3) the four built-in "
+            "roots (`loment/lib` -> `examples` -> `selfhost` -> `tools`). **The first two layers "
+            "take the first hit**, and uniqueness is only enforced in layer 3. So a collision "
+            "usually shows up as \"I thought that was the other one\".",
+        fixes=(
+            "Put the file where it belongs (`deps/<name>/<name>.lomt` is the canonical spot).",
+            "Rename it away from the modules in the built-in roots - several hits in layer 3 "
+            "means the name was chosen badly.",
+            "Name the location with the path form: `use \"./util.lomt\"`; the path form does not "
+            "take part in this search.",
+            "Circular import: pull the part both sides need into a third file and have both "
+            "`use` it.",
+        ),
+        yes="both `use` forms (name / path); at most 300 per file; layered search where an earlier "
+            "layer wins",
+        no="ambiguity in layer 3; circular imports; more than 300 uses (that is E020)",
+    ),
+    19: Card(
+        what="This line does not read as Loment syntax - the lexer or the parser stopped here.",
+        why="Loment's **own syntax is close to Rust but drops** a few things: single-quoted "
+            "character literals, value-less `return;`, expression-style `match` arms, and `mut` as "
+            "a binding modifier. Writing from Rust habits lands on these easily - they are not "
+            "\"not supported yet\", the language simply does not have them. (That is the native "
+            "syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python "
+            "way, which is a different layer - see `docs/188`.)",
+        fixes=(
+            "Look at the `line:col` the message gives (for symbols like `@@@`, single quotes and "
+            "`#`, check `loment syntax` first).",
+            "Make the `match` arm a block: `E::A => { return 0; }`.",
+            "Give the `return` a value: `return 0;` - Loment has no `return;`.",
+            "Give the `let` a type: `let x: u32 = 1;`. Do not write `mut` on a local: it is an "
+            "ordinary identifier, not a keyword.",
+        ),
+        yes="the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`",
+        no="single-quoted character literals; value-less `return;`; expression-style match arms; "
+           "`let mut x: T` (`mut` is not a keyword)",
+    ),
+    20: Card(
+        what="One file has more than **300** `use` statements.",
+        why="This is a **never-silently-drop** gate: the scratch area in the self-hosted mirror "
+            "was only that big, and anything past it was dropped without a word - so the same "
+            "source produced **different units** under the reference implementation and under the "
+            "self-hosted one. Both are 300 now and going over is an error: better an error than "
+            "\"a piece is missing but it looked like it compiled\".",
+        fixes=(
+            "Split the facade: `core.lomt` pulls half and `ext.lomt` pulls the other half, and "
+            "callers `use` what they need.",
+            "Import only the facades you actually use - there is no need to stuff a whole library "
+            "into one file.",
+            "There really are that many: organise them in layers (each layer `use`s a few from "
+            "the layer below) instead of one table of hundreds.",
+        ),
+        yes="at most 300 `use` per file (the path form and the name form counted together)",
+        no="more than 300 (going over is an **error**, not a truncation)",
+    ),
+    21: Card(
+        what="An `extern fn` signature goes beyond what FFI stage 1 accepts.",
+        why="Stage 1 takes only **scalars** (`i8..i64` / `u8..u64` / `bool`) and `ptr`. In Loment "
+            "`str` is **a pointer plus a length**, **not** a C string, and the two are not "
+            "interchangeable; passing structs or enums by value needs a different register "
+            "classification. Both of those **change the shape of the code at the call site**, so "
+            "this errors out rather than compiling something quietly wrong.",
+        fixes=(
+            "Use a scalar or `ptr`; if there is no return value, omit `-> T` (that makes it void).",
+            "Passing a string: build a **NUL-terminated** byte string in memory yourself and "
+            "declare the parameter `ptr` (the C side receives `char*`).",
+            "Passing a struct: pass a pointer instead, or split the fields into several scalar "
+            "parameters.",
+            "Need generics? An `extern fn` **cannot take type parameters** - wrap it in a generic "
+            "Loment function that calls the concrete one.",
+        ),
+        yes="scalar and `ptr` parameters / returns; several `--link`; the call site uses the "
+            "platform C ABI (on Linux the first six integer arguments go in rdi/rsi/rdx/rcx/r8/r9, "
+            "on Windows in rcx/rdx/r8/r9)",
+        no="`str` parameters / returns (that is a pointer plus a length, not a C string); "
+           "structs / enums / arrays **by value**; an `extern fn` with type parameters; FFI on the "
+           "PE target; `.a` archives and `.so` / `.dll` dynamic libraries",
+    ),
+    22: Card(
+        what="A switch (`choose`) or the core mode (`std`/`no_std`) is written wrongly.",
+        why="Two different things are managed here: (1) **the core mode** is a property of **the "
+            "whole program** - it may appear once and only in the root unit (nothing outside "
+            "`loment.conf` can change it); (2) **a switch** is \"code that is compiled in only "
+            "when it is on\". There can be many switches, but **one name may be written once**, "
+            "and a value may only be set after `set choose` declared it. A library may not "
+            "`choose`: to express a need, a library declares a **capability requirement** and the "
+            "project decides.",
+        fixes=(
+            "Write the core mode once, in the entry unit only: `choose std` or `choose no_std`.",
+            "Declare a switch before setting it: `set choose verbose { ... }` then `choose "
+            "verbose` (or `choose close verbose`).",
+            "The declaration lives in another unit: pull it in with `addin chooseset` in the entry "
+            "unit, and write `set choose` in that `chooseset.lomt`.",
+            "Move the `choose` out of the library into the root unit (the library side declares a "
+            "capability domain instead).",
+            "Do not nest a declaration inside another switch's body - the pre-scan cannot see it, "
+            "which turns \"is it on\" into a chicken-and-egg question.",
+        ),
+        yes="up to 500 switches per file; `addin` to carry switch settings across files (root unit "
+            "only); empty switch bodies (purely to drive compiler behaviour); capability domains "
+            "declared by a library",
+        no="the core mode written twice or written in a library; setting a value before declaring "
+           "it; two settings for one name; nested declarations; a library writing `choose` or "
+           "`addin`",
+    ),
+    23: Card(
+        what="What you wrote is syntactically and semantically right - **this version of the "
+             "compiler backend just does not do that yet**.",
+        why="The reference implementation has two backends: the Rust transpile path goes further, "
+            "and the native IR path (from M0 on) is filled in **block by block**. This message "
+            "comes from the latter, so it is **not your mistake** - read it as \"the design has "
+            "not arrived here yet\". That is also why it has a code of its own: what the user can "
+            "do here (write it another way) is completely different from \"fix that line as "
+            "suggested\".",
+        fixes=(
+            "Write it another way: a loop plus an array instead of the unsupported expression, or "
+            "one of the forms the builtins cover.",
+            "Check the schedule: the milestone table in `docs/145` shows which tier this sits in.",
+            "If there is no way around it, report it: attach this message plus the smallest file "
+            "that reproduces it (`loment ir`'s output helps too).",
+        ),
+        yes="scalar arithmetic, control flow, strings, arrays, slices, structs, enums (`match`) - "
+            "passing aggregates by value depends on the backend",
+        no="**this message itself is the \"not supported\"** - the exact scope is the milestone "
+           "table in `docs/145`, not anything on your side of the source",
+    ),
+}
+
+
 # ================================================================== 语言卡
 #
 # 与**六语言翻译线**（`docs/186` C · `docs/187` Python · `docs/188` §7.1 的
@@ -643,6 +1152,83 @@ LANG_CARDS: dict[str, LangCard] = {
         abi="能导 C ABI —— 要显式写 `extern \"C\"`（默认名字是 mangle 过的）。",
     ),
 }
+
+#: 语言卡的**英文**那一半（默认语言）。键集 == `LANG_CARDS`，由 `loment_tools_test` 钉着；
+#: 两门语言各自是完整的一段，理由与 `CARDS_EN` 上方那段相同（并行但**相邻**）。
+#:
+#: **事实与结论不许混**：`abi` 只写"这门语言导出 C ABI 要怎么做"这个**事实**，
+#: 不写"这条路通不通"。所以 CPython 那句是"CPython 不导 C ABI"（事实，有 stderr 证据），
+#: 而不是"用不了"（结论，且是错的 —— C 扩展那条路能走）。
+#: 这条纪律在英文里同样成立：翻译改的是措辞，不是判断。
+LANG_EDGE_EN: dict[str, str] = {
+    "c": "Pointer arithmetic, `union`, bitfields, macros, variadics (`...`) and jumps that come "
+         "in through `goto` are not translated. Mixing an `int` into a condition (`if (x)`) and "
+         "`&&` producing an int **need an explicit conversion** (a Loment condition accepts "
+         "`bool` only).",
+    "python": "Dynamic typing, class inheritance, exceptions, generators, decorators and closure "
+              "capture are not translated. `/` is true division (use `//` for integer division, "
+              "while Loment's `/` is integer division); `True`/`False` are subclasses of int, so "
+              "**converting them needs an explicit cast**.",
+    "rust": "Trait objects, closures, macros (`macro_rules!`), lifetime annotations and `async` "
+            "are not translated. `&str` and `String` are both \"a pointer plus a length\" and "
+            "become `str` here; the borrow checker governs Loment the same way, so that part "
+            "usually lines up.",
+    "go": "Goroutines, channels, interfaces, `defer`, multiple return values (Loment returns "
+          "one), `string`, slices, `map` and pointers are not translated. **The type comes after "
+          "the name** (`func f(a int) int`), conditions **take no parentheses**, and there is "
+          "**no `while`** (a single `for` covers all three shapes, including `for { }` for an "
+          "infinite loop). `int` has a platform width (64-bit on x86-64, so it maps to `i64`); "
+          "`/` and `%` truncate toward zero (the same as Loment). **Two places go against the "
+          "other languages, and both reasons sit in the source language**: (1) Go **has no "
+          "implicit numeric conversion**, so casts like `int(b)` are everywhere - and that lines "
+          "up exactly with Loment's `as`, so the source already spells it out and the translator "
+          "does not have to guess (C and C++ need the translator to insert them, Java and C# "
+          "insert none); (2) `i++` and `x += e` are **statements with no value** in Go, so they "
+          "are accepted as they are (`i = i + 1`), while in C, Java and C# they are expressions "
+          "with a value and those languages are rejected.",
+    "java": "Class inheritance, interfaces, generic erasure, exceptions, `String` and the "
+            "collection classes are not translated. `boolean` and `int` are separate (`&&` "
+            "produces boolean, so **no conversion is needed** - the opposite of C); `>>>` is the "
+            "unsigned right shift (Loment spells the signed and the unsigned shift differently).",
+    "csharp": "Class inheritance, interfaces, generics, LINQ, properties (`get; set;`), events, "
+              "delegates and exceptions are not translated. The three shells `using` / "
+              "`namespace` / `class` are stripped (both the brace form and the file-scoped "
+              "`namespace X;` are accepted). `bool` and `int` are separate (`&&` produces bool, "
+              "**no conversion is needed** - the opposite of C); `>>>` is the unsigned right "
+              "shift from C# 11. **`byte` is unsigned, 0..255** - the **opposite** of Java's "
+              "`byte` (-128..127, signed). **Integer widths are not tracked**: a unit that mixes "
+              "widths, like `int f(byte b) { return b; }`, comes out as Loment that reports "
+              "\"return type u8, function declares i32\" when checked, so it **fails loudly "
+              "rather than computing the wrong answer quietly** (width tracking is for the next "
+              "version).",
+    "cpp": "Classes, templates, the STL, exceptions, references, pointers and operator "
+           "overloading are not translated. Preprocessor directives (`#include` / `#define`) are "
+           "not accepted, so the corpus carries no includes, and member access like `std::cout` "
+           "is not accepted either (`::` does not even survive tokenization). **C++ has a real "
+           "`bool`** (unlike C, which needs `<stdbool.h>`), and both `int x = (a < b);` and "
+           "`if (x)` with an int **are legal** - the implicit conversions run both ways, so casts "
+           "are **needed in both directions**: the conclusion matches C while the **reason is "
+           "completely different**. The signedness of `char` is implementation-defined (signed in "
+           "g++ on x86-64, often not on ARM), so mapping it to `i8` or `u8` would compute the "
+           "wrong answer quietly on some machine - it is **rejected**.",
+}
+
+LANG_ABI_EN: dict[str, str] = {
+    "c": "The C ABI is its default export convention (the `.o` given to `--link` must be "
+         "self-contained: no relocations, no undefined symbols).",
+    "python": "**CPython does not export a C ABI** - an interface-only unit comes out as an "
+              "**empty module** (stderr carries `[skip] f: calling convention is not the C "
+              "ABI`). Real linking has to go through the C-extension route.",
+    "rust": "To export a C ABI from Rust, write `extern \"C\"` plus `#[no_mangle]` in the "
+            "source.",
+    "go": "It does **not** export a C ABI by default; write `//export` in the source to get one.",
+    "java": "**The JVM does not export a C ABI by default**; linking needs JNI or NativeAOT.",
+    "csharp": "**.NET does not export a C ABI by default**; linking needs NativeAOT or "
+              "`[UnmanagedCallersOnly]`.",
+    "cpp": "It can export a C ABI - write `extern \"C\"` explicitly (the default names are "
+           "mangled).",
+}
+
 
 #: 渲染顺序 —— **不是字典序，是有意的先后**。
 #:
@@ -798,29 +1384,63 @@ def surface_lomt() -> str:
     `code_fix` 用**平键 `c * 8 + i`**（`FIX_STRIDE = 8`）—— 按码嵌 `if` 要嵌两层，
     平键一层就够，而且生成器这边一眼看得出哪条码少了哪一档。
     """
-    kinds = (("code_title", lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[1]),
-              ("code_what", lambda c: CARDS[c].what if c in CARDS else ""),
-              ("code_why", lambda c: CARDS[c].why if c in CARDS else ""),
-              ("code_yes", lambda c: CARDS[c].yes if c in CARDS else ""),
-              ("code_no", lambda c: CARDS[c].no if c in CARDS else ""),
-              ("code_ascii", lambda c: ASCII_ONE_LINER.get(c, "")))
+    # 语言槽：**0 = 英文（默认），1 = 中文**。序号是**契约** —— 报错器按它选文字，
+    # 而"不写 `errconfig` 时是英文"由判据钉着（`loment_err_test::test_english_is_the_default`）。
+    # 所以这里不是"随便编个号"，是把 `errconfig` 的默认值固化进生成物。
+    def _pair(zh_get, en_get):
+        return lambda c, lg: (zh_get(c) if lg == 1 else en_get(c))
+
+    def _attr(tbl, c, name):
+        card = tbl.get(c)
+        return getattr(card, name) if card else ""
+
+    kinds = (
+        ("code_title", _pair(lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[1],
+                             lambda c: TITLE_EN.get(c, ""))),
+        ("code_what", _pair(lambda c: _attr(CARDS, c, "what"),
+                            lambda c: _attr(CARDS_EN, c, "what"))),
+        ("code_why", _pair(lambda c: _attr(CARDS, c, "why"),
+                           lambda c: _attr(CARDS_EN, c, "why"))),
+        ("code_yes", _pair(lambda c: _attr(CARDS, c, "yes"),
+                           lambda c: _attr(CARDS_EN, c, "yes"))),
+        ("code_no", _pair(lambda c: _attr(CARDS, c, "no"),
+                          lambda c: _attr(CARDS_EN, c, "no"))),
+    )
     codes = sorted(dict(RULES_BY_CODE))
+
+    # **两个语言槽的修法条数必须相同**，因为 `code_nfix` 只报一个数（语言不进它的键）。
+    # 这里硬失败而不是取最大值：少一条修法而生成器照常出表，症状是英文用户读到一半
+    # 少了一条 —— 静默缺一条正是本仓最反对的那种（`docs/179` §7.3）。
+    for c in codes:
+        n_zh = len(CARDS[c].fixes) if c in CARDS else 0
+        n_en = len(CARDS_EN[c].fixes) if c in CARDS_EN else 0
+        if n_zh != n_en:
+            raise SystemExit(f"loment_diag: 码 {c} 的中英修法条数不等 ({n_zh} vs {n_en})")
+
     src = [
         "// surface_data.lomt — 由 `tools/loment_diag.py --dump-surface` 生成，别手改。",
         "//",
-        "// 码 -> 文字 + 语言卡。**唯一真源是 `tools/loment_diag.py`**（RULES / CARDS /",
-        "// ASCII_ONE_LINER / LANG_CARDS），这里只是它的可读副本（`docs/176` B 那条管线：",
-        "// 数据从逻辑里拆出来，自举侧 `use` 它）。",
+        "// 码 -> 文字 + 语言卡。**唯一真源是 `tools/loment_diag.py`**（RULES / TITLE_EN /",
+        "// CARDS / CARDS_EN / ASCII_ONE_LINER / LANG_CARDS / LANG_EDGE_EN / LANG_ABI_EN），",
+        "// 这里只是它的可读副本（`docs/176` B 那条管线：数据从逻辑里拆出来，自举侧 `use` 它）。",
         "//",
         "// 为什么要生成而不是手抄第二份：`loment/tools/lomcli.lomt` 原先手抄了 24 条 `codrow`，",
         "// 与 `loment_diag.RULES` 是同一件事的两份 —— 而本仓那四个静默 bug（docs/179 7.3）",
         '// 全出自"同一份清单抄第二遍"。',
         "//",
-        "// 中文与 ASCII **不是重复**：CLI 输出必须纯 ASCII（docs/169，936 控制台下 UTF-8 中文",
-        "// 被按 GBK 解成乱码，PE 垫片没有 WriteConsoleW），诊断那侧本来就是中文。两个受众。",
+        "// **语言槽 `lang`：0 = 英文（默认），1 = 中文**。默认是英文，理由在 `docs/169` §3a：",
+        "// Windows 控制台按 936 代码页解 UTF-8，中文是乱码，而 PE 垫片没有 WriteConsoleW。",
+        "// 英文那份**全 ASCII**（由生成器硬失败 + `loment_tools_test` 两处钉着），于是",
+        "// **报错器自己那部分**在任何代码页下都解码一致。**说清楚它没修到哪一步**：编译器给的",
+        "// 消息原文仍是它自己的语言（现在是中文）—— 那是 `docs/182` §5.3 那条分工，不在这一层。",
+        "// 想读中文就写 `errconfig`（`docs/182` §14）。",
         "//",
-        "// `code_fix` 用的是**平键 `c * 8 + i`**（一条码最多 8 条修法）：按码嵌 `if` 要嵌",
-        "// 两层，平键一层就够，而且生成器这边一眼看得出哪条码少了哪一档。",
+        "// `code_ascii` 是**第三个受众**，没有语言槽：它是给 CLI 看的一行 ASCII（`loment codes`／",
+        "// `explain`），本来就只能是 ASCII，与上面两个槽不是一回事。",
+        "//",
+        "// 平键：`code_*` 是 `c * 2 + lang`，`code_fix` 是 `(c * stride + i) * 2 + lang`",
+        "// （一条码最多 8 条修法）。按码嵌 `if` 要嵌两层，平键一层就够，而且生成器这边一眼",
+        "// 看得出哪条码少了哪一档。",
         "// **码从 1 起连续编号**, 所以 `n_codes()` 也就是最后那个码 —— 两个消费者（`lomcli`",
         "// 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。",
         "",
@@ -830,24 +1450,35 @@ def surface_lomt() -> str:
         "",
     ]
     for fn, get in kinds:
-        src.append(f"pub fn {fn}(c: u32) -> str {{")
+        src.append(f"pub fn {fn}(c: u32, lang: u32) -> str {{")
+        src.append("    let k: u32 = c * 2 + lang;")
         for c in codes:
-            val = get(c)
-            if val:
-                src.append(f"    if c == {c} {{ return {_lom_str(val)}; }}")
+            for lg in (0, 1):
+                val = get(c, lg)
+                if val:
+                    src.append(f"    if k == {c * 2 + lg} {{ return {_lom_str(val)}; }}")
         src += ['    return "";', "}", ""]
+    # 一行 ASCII 摘要：**没有语言槽**（它就是"给 CLI 的那一行"，本来就只能是 ASCII）。
+    src.append("pub fn code_ascii(c: u32) -> str {")
+    for c in codes:
+        val = ASCII_ONE_LINER.get(c, "")
+        if val:
+            src.append(f"    if c == {c} {{ return {_lom_str(val)}; }}")
+    src += ['    return "";', "}", ""]
 
-    # 修法: 平键 c*8+i
+    # 修法: 平键 (c*8+i)*2+lang
     src += ["const FIX_STRIDE: u32 = 8;", "",
             "/// 第 `i` 条修法（`i` 从 0 起）。`i` 超出该码的条数就是空串。",
-            "pub fn code_fix(c: u32, i: u32) -> str {",
-            "    let k: u32 = c * FIX_STRIDE + i;"]
+            "pub fn code_fix(c: u32, i: u32, lang: u32) -> str {",
+            "    let k: u32 = (c * FIX_STRIDE + i) * 2 + lang;"]
     for c in codes:
-        fixes = CARDS[c].fixes if c in CARDS else ()
-        for i, fx in enumerate(fixes):
-            src.append(f"    if k == {c * 8 + i} {{ return {_lom_str(fx)}; }}")
+        for lg, tbl in ((0, CARDS_EN), (1, CARDS)):
+            fixes = tbl[c].fixes if c in tbl else ()
+            for i, fx in enumerate(fixes):
+                src.append(f"    if k == {(c * 8 + i) * 2 + lg} {{ return {_lom_str(fx)}; }}")
     src += ['    return "";', "}", "",
-            "/// 这个码有几条修法（0 = 表里没有这个码）。",
+            "/// 这个码有几条修法（0 = 表里没有这个码）。**语言不进键** —— 两个语言槽的条数",
+            "/// 由生成器硬失败钉成相等，所以一个数就够。",
             "pub fn code_nfix(c: u32) -> u32 {"]
     for c in codes:
         n = len(CARDS[c].fixes) if c in CARDS else 0
@@ -896,15 +1527,26 @@ def surface_lomt() -> str:
         src.append(f"    if i == {i} {{ return {_lom_str(canon)}; }}")
     src += ['    return "";', "}", ""]
 
+    # 这四条**没有语言槽**：语言名（`C++` / `Python`）与后缀、特征词在两门语言里是同一份
+    # ——它们是**事实**，不是叙述。跟着语言槽走的只有 `edge` / `abi` 那两段散文。
     for fn, get in (("lang_key", lambda lk: lk.key),
                     ("lang_name", lambda lk: lk.display),
                     ("lang_exts", lambda lk: " ".join(lk.exts)),
-                    ("lang_tokens", lambda lk: "|".join(lk.tokens)),
-                    ("lang_edge", lambda lk: lk.edge),
-                    ("lang_abi", lambda lk: lk.abi)):
+                    ("lang_tokens", lambda lk: "|".join(lk.tokens))):
         src.append(f"pub fn {fn}(i: u32) -> str {{")
         for i, key in enumerate(langs):
             src.append(f"    if i == {i} {{ return {_lom_str(get(LANG_CARDS[key]))}; }}")
+        src += ['    return "";', "}", ""]
+
+    # 语言卡的两段散文：平键 `i * 2 + lang`，与 `code_*` 同一个约定。
+    for fn, zh_get, en_get in (
+            ("lang_edge", lambda lk: lk.edge, lambda lk: LANG_EDGE_EN[lk.key]),
+            ("lang_abi", lambda lk: lk.abi, lambda lk: LANG_ABI_EN[lk.key])):
+        src.append(f"pub fn {fn}(i: u32, lang: u32) -> str {{")
+        src.append("    let k: u32 = i * 2 + lang;")
+        for i, key in enumerate(langs):
+            for lg, get in ((0, en_get), (1, zh_get)):
+                src.append(f"    if k == {i * 2 + lg} {{ return {_lom_str(get(LANG_CARDS[key]))}; }}")
         src += ['    return "";', "}", ""]
     return "\n".join(src)
 

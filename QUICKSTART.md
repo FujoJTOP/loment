@@ -209,22 +209,57 @@ When `check`, `build` or `run` fails, the launcher hands the compiler's structur
 diagnostics to `lomenterr`, which renders them — the report you actually read:
 
 ```
-error[E2]: 符号未声明
-  --> z.lomt:4:12
+error[E002]: undeclared name
+  --> z.lomt:4
   |
 4 |     return z;
-  |            ^
-  | 消息: 使用未声明的变量 z
-  | 错了什么: 用了一个没有声明的名字 —— 变量、函数、类型、常量都算。
-  | 怎么改:
-  |   1. 补类型标注：`let x: u32 = 1;`
-  |   2. 拼错了就改拼写；跨模块调用给声明加 `pub`，调用方补 `use <模块名>`
+  |     ^^^^^^^^^
+  | message: 使用未声明的变量 z
+  | what went wrong: A name was used without being declared - a variable, a function, ...
+  | why: This is the one beginners hit most, and in Loment it is almost always the same ...
+  | how to fix:
+  |   1. Add the type annotation: `let x: u32 = 1;` ...
+  |   2. Misspelt: fix the spelling. Cross-module: put `pub` on the declaration ...
+  |   3. Generic functions need their arguments to pin down `T`: ...
+  |   4. The name really does come from elsewhere: ...
+  | supported: generics (when the call site determines T) / static trait dispatch / ...
+  | not supported: type inference / implicit globals / forward references ...
 ```
 
-Two things about it: the prose is **Chinese** (so is the rest of this repository's
-writing — the English-facing counterpart is `loment codes`, one ASCII line per code), and
-colour is on by default, `-C` turns it off. `lomenterr` is also a standalone command, so
-`lomenterr diag.jsonl` renders a diagnostics file yourself if you want to.
+(`...` marks where this page trims the prose. The real output spells each one out — the
+card is meant to teach the rule, not just this one line.)
+
+Three things about it. The prose is **English by default**, and colour is on by default
+(`-C` turns it off). `lomenterr` is also a standalone command, so `lomenterr diag.jsonl`
+renders a diagnostics file yourself if you want to. The other two exits are `--short` and
+`--json`:
+
+```
+$ loment check z.lomt --short        # one grep-able line per diagnostic
+z.lomt:4: error[E002]: 使用未声明的变量 z
+$ loment check z.lomt --json         # one object per diagnostic, card included
+{"code":"E002","title":"undeclared name","file":"z.lomt","line":4,"col":0, ...
+```
+
+`--json` is what an editor or a CI job wants; both modes turn colour off on their own.
+
+One line above deserves a note: `message:` is the **compiler's** text and is still
+Chinese. The renderer's own text and the compiler's text are different layers
+(`docs/182` §5.3), and only the first one is translated here. To read the whole report in
+Chinese, drop an `errconfig` next to your sources:
+
+```rust
+// errconfig
+module errconfig
+
+pub fn error_lang() -> str {
+    return "zh";
+}
+```
+
+It is read from the project root (the directory you run `loment` in), falling back to one
+beside the toolchain; anything it cannot parse counts as "no setting", so a broken file
+gives you English rather than an error (`docs/182` §14).
 
 Compile-time only, today. Rendering a **trap** — a division by zero, a capability guard
 going out of range — from a copy of the reporter linked into your program is designed but

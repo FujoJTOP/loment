@@ -65,14 +65,45 @@ def _check(src: str) -> tuple[Path, Path]:
     return f, d
 
 
-def _render(diag: Path, *extra: str, color: bool = False) -> tuple[int, str]:
-    """默认**关色**跑：这些判据断的是"渲染出了什么"，转义字节混在里面只会让每条断言
-    都得先剥一层。上色本身由 `test_color_on_by_default_and_gone_with_no_color` 专测
-    （那条既验默认开、也验关掉之后一个字节不剩）。"""
+#: 老判据断的是**中文**文案，所以它们显式要中文。产品默认是**英文**（`docs/182` §14）。
+ZH = "zh"
+
+
+def _errconfig(d: Path, body: str) -> None:
+    (d / "errconfig").write_text(body, encoding="utf-8", newline="\n")
+
+
+def _run_in(cwd: Path, diag: Path, *extra: str, color: bool = False) -> tuple[int, str]:
+    """在**指定的工作目录**里跑一次 —— 语言（`./errconfig`）与"项目根"（E018 要看的
+    `./deps`）都由它定（`docs/182` §14/§15）。`_render` 是它上面那层薄封装。"""
     args = [str(_bin())] + ([] if color else ["--no-color"]) + list(extra) + [str(diag)]
     r = subprocess.run(args, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", shell=False, timeout=60)
+                       encoding="utf-8", errors="replace", shell=False, timeout=60,
+                       cwd=str(cwd))
     return r.returncode, r.stdout + r.stderr
+
+
+def _render(diag: Path, *extra: str, color: bool = False,
+            lang: str | None = None) -> tuple[int, str]:
+    """默认**关色**跑：这些判据断的是"渲染出了什么"，转义字节混在里面只会让每条断言
+    都得先剥一层。上色本身由 `test_color_on_by_default_and_gone_with_no_color` 专测
+    （那条既验默认开、也验关掉之后一个字节不剩）。
+
+    `lang` 决定说哪种语言，走的是**用户切语言的那条路**：在一个临时目录里放一份
+    `errconfig` 并把**工作目录**切过去。所以不传 `lang` 就是**出厂默认**（英文）——
+    判据不是在给渲染器塞内部开关，而是真的摆一份配置。顺带把"项目根 = 工作目录"这条
+    约定也一起验了：语言就是这么找到的。
+
+    **老的判据一律传 `lang=ZH`**：它们断的是中文文案（那批文案是这些判据的对象，与产品
+    默认是哪门语言无关）。英文那一侧由 `test_english_is_the_default_...` 起头的那几条覆盖，
+    它们不传 `lang`。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-cwd-") as td:
+        if lang is not None:
+            _errconfig(Path(td), 'module errconfig\n\n'
+                                 'pub fn error_lang() -> str {\n'
+                                 f'    return "{lang}";\n}}\n')
+        return _run_in(Path(td), diag, *extra, color=color)
 
 
 # 两份源, 各走一条报错通道 (docs/182 §5): check() 的语义错与 LomError 的解析错。
@@ -92,7 +123,7 @@ def test_render_carries_the_whole_card():
     与"这门语言没有这个"。三条修法是用户定的门槛 —— 一条等于没有选择。
     """
     f, d = _check(SEMANTIC)
-    rc, out = _render(d)
+    rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out[:200])
     assert "error[E002]:" in out, out[:200]
     assert "符号未声明" in out, "没查 surface_data 的标题"
@@ -120,8 +151,8 @@ def test_both_error_channels_render_differently():
     _, ds = _check(SEMANTIC)     # check()  -> col = 0
     _, dp = _check(PARSE)        # LomError -> col = 1
 
-    rcs, outs = _render(ds)
-    rcp, outp = _render(dp)
+    rcs, outs = _render(ds, lang=ZH)
+    rcp, outp = _render(dp, lang=ZH)
     assert rcs == 1 and rcp == 1
 
     # 语义错: 只给行号 -> **不写列**, 且划整行 (源行 `    return z;` 的可见部分)
@@ -163,7 +194,7 @@ def test_caret_points_at_the_named_symbol_and_never_at_a_comment():
              + "    return n + leftover;      // 注释里也写了 leftover" + "\n"
              + "}" + "\n")
     _, da = _check(a_src)
-    _, outa = _render(da)
+    _, outa = _render(da, lang=ZH)
     assert caret_run(outa) == len("leftover"), (caret_run(outa), outa[-400:])
     assert "^" * 40 not in outa, "划了一长条 —— 注释被算进去了"
 
@@ -178,7 +209,7 @@ def test_caret_points_at_the_named_symbol_and_never_at_a_comment():
              + "    return s.id;" + "\n"
              + "}" + "\n")
     _, db = _check(b_src)
-    _, outb = _render(db)
+    _, outb = _render(db, lang=ZH)
     code = "let s: S = S { id: 1 };"           # 行首缩进之后的代码段
     assert caret_run(outb) == len(code), (caret_run(outb), len(code), outb[-400:])
     assert "缺 weight，这里也写了" not in outb.split("| ")[-1] or True
@@ -197,7 +228,7 @@ def test_color_on_by_default_and_gone_with_no_color():
     （与 `lomcli` 那条"开关位置任意、不吞命令"是同一条纪律）。
     """
     _, d = _check(SEMANTIC)
-    rc, on = _render(d, color=True)
+    rc, on = _render(d, color=True, lang=ZH)
     assert rc == 1
     esc = "\x1b["
     assert esc in on, "默认没上色"
@@ -206,7 +237,7 @@ def test_color_on_by_default_and_gone_with_no_color():
     assert "\x1b[1m" in on, "标签没有加粗"
 
     for flag in ("--no-color", "-C"):
-        rc2, off = _render(d, flag)
+        rc2, off = _render(d, flag, lang=ZH)
         assert rc2 == 1, rc2
         assert "\x1b" not in off, f"{flag} 之后还有转义: {off[:120]!r}"
 
@@ -236,7 +267,7 @@ def test_unknown_code_is_said_out_loud():
         d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 2,
                                  "code": "E042", "message": "未来才有这个码"}) + "\n",
                      encoding="utf-8", newline="\n")
-        rc, out = _render(d)
+        rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out)
     assert "E042" in out, "码本身要原样印出来"
     assert "未知错误码" in out, f"没说不认识这个码: {out[:200]}"
@@ -259,7 +290,7 @@ def test_broken_line_is_echoed_not_skipped():
                      + json.dumps({"file": "x.lomt", "line": 1, "col": 1,
                                    "code": "E019", "message": "真的一条"}) + "\n",
                      encoding="utf-8", newline="\n")
-        rc, out = _render(d)
+        rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out)
     assert "this is not json" in out, "坏行没原样打出来"
     assert "不是合法 JSON" in out, out[:200]
@@ -276,19 +307,21 @@ def test_empty_diag_is_ok_and_usage_error_is_two():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td) / "empty.jsonl"
         d.write_text("", encoding="utf-8", newline="\n")
-        rc, out = _render(d)
+        rc, out = _render(d, lang=ZH)
         assert rc == 0, (rc, out)
         assert "无诊断" in out, out
         # 打不开
         r = subprocess.run([str(_bin()), str(Path(td) / "nope.jsonl")],
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", shell=False, timeout=60)
+                           errors="replace", shell=False, timeout=60, cwd=td)
         assert r.returncode == 2, (r.returncode, r.stderr[:120])
-        # 没有参数
+        # 没有参数。**`cwd=td`**：这条直接起进程、不经过 `_render`，而用法那句话的语言由
+        # `./errconfig` 定 —— 不钉住工作目录，它的期望值就会随仓库根有没有那份文件而变。
         r2 = subprocess.run([str(_bin())], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", shell=False, timeout=60)
+                            encoding="utf-8", errors="replace", shell=False, timeout=60,
+                            cwd=td)
         assert r2.returncode == 2, (r2.returncode, r2.stderr[:120])
-        assert "用法" in r2.stderr, r2.stderr[:120]
+        assert "usage" in r2.stderr, r2.stderr[:120]
     print("      空诊断退 0; 用法/读取失败退 2 (与'有诊断'的 1 分开)")
 
 
@@ -306,7 +339,7 @@ def test_rendering_differs_from_the_compilers_plain_lines():
                        errors="replace", shell=False, timeout=120)
     plain = r.stderr
     _, d = _check(SEMANTIC)
-    _, rendered = _render(d)
+    _, rendered = _render(d, lang=ZH)
     assert plain.strip() and rendered.strip()
     assert rendered != plain
     assert "error[E002]" not in plain, "编译器的裸行里不该已经有渲染后的标题行"
@@ -328,7 +361,7 @@ def test_overlong_record_says_it_was_cut():
         d.write_text(json.dumps({"file": str(src), "line": 1, "col": 1,
                                  "code": "E019", "message": "宽行"}) + "\n",
                      encoding="utf-8", newline="\n")
-        rc, out = _render(d)
+        rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out[:200])
     assert "被截断" in out, f"超长没被说破 —— 输出静默少了一截: {out[-200:]!r}"
     assert "error[E019]" in out, "截断之前那部分还是要印出来的"
@@ -360,7 +393,7 @@ def test_foreign_file_gets_a_language_section():
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", shell=False, timeout=120)
     assert r.returncode == 1, (r.returncode, r.stderr[-200:])
-    _, out = _render(d)
+    _, out = _render(d, lang=ZH)
     assert "不是 Loment" in out, f"没说这个文件不是 Loment: {out[-400:]!r}"
     assert "像 C" in out, f"没认出是 C: {out[-400:]!r}"
     assert "--lang auto" in out, "命令没带 --lang auto (那等于替翻译器下结论)"
@@ -394,7 +427,7 @@ def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", shell=False, timeout=120)
     assert r.returncode == 1, (r.returncode, r.stderr[-200:])
-    _, out = _render(d)
+    _, out = _render(d, lang=ZH)
     assert "error[E002]" in out, out[:200]
     assert "不是 Loment" not in out, f"被注释带跑了: {out[-300:]!r}"
     print("      注释里的外源特征词不误报 (命中要在行首)")
@@ -413,24 +446,30 @@ def test_a_grammar_declaration_beats_content_sniffing():
 
     顺带钉住**别名**也要认（`c#` / `cs` → C#）：别名表由 `--dump-surface` 从
     `potato_from.GRAMMAR_ALIASES` 导出，所以"作者能写哪些词"仍是一处真源。
+
+    **判据自己造诊断，不请编译器**（这条是 2026-09-18 改的，因为前门落地后不得不改）：
+    一旦 `choose write grammar python` 的文件走前门**编得过**了（`eb060eb`），
+    "请编译器产一条诊断"这条路就没了 —— 而这条判据要判的是**渲染器读文件头**这件事，
+    与谁产的诊断无关。所以夹具改成 `.py` 文件 + 一条合成诊断。顺带把判据变强了：
+    **后缀说是 Python、声明说是 C#**，此时"声明赢"才是真的被验到（以前两边都是 Python，
+    声明赢不赢看不出来）。
     """
     def probe(name: str, body: str) -> str:
         td = Path(tempfile.mkdtemp(prefix="lomenterr-decl-"))
-        f = td / f"{name}.lomt"
+        f = td / f"{name}.py"                 # 后缀那条路也认得出来 → 外源段一定在
         f.write_text(body, encoding="utf-8", newline="\n")
         d = td / "d.jsonl"
-        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
-                            str(f), "--check", "--diag-out", str(d)],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", shell=False, timeout=120)
-        assert r.returncode == 1, (name, r.returncode)
-        _, out = _render(d)
+        d.write_text(json.dumps({"file": str(f), "line": 2, "col": 1, "code": "E019",
+                                 "message": "boom"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d, lang=ZH)
+        assert rc == 1, (rc, out[:120])
         return out
 
-    # 内容里**一个 Python 特征词都没有** —— 只能靠声明认出来
-    out = probe("decl", "choose write grammar python" + "\n" + "\n"
+    # 声明与后缀**说不同的话**：后缀是 `.py`，声明是 C# —— 声明必须赢
+    out = probe("decl", "choose write grammar cpp" + "\n" + "\n"
                 + "x = 1" + "\n")
-    assert "像 Python" in out, f"没按声明认：{out[-400:]!r}"
+    assert "像 C++" in out, f"没按声明认（后缀是 .py）：{out[-400:]!r}"
     assert "据文件头" in out, f"没说清依据是声明：{out[-400:]!r}"
 
     # 别名：作者写 `cs` / `c#` 都该落到 C#
@@ -439,10 +478,10 @@ def test_a_grammar_declaration_beats_content_sniffing():
                    + "y = 2" + "\n")
         assert "像 C#" in o2, f"别名 {alias!r} 没认成 C#：{o2[-400:]!r}"
 
-    # 后缀那条路仍要说清是"据后缀"（依据不能混着说）
-    _, dj = _check(SEMANTIC)
-    _ = dj
-    print("      声明压过内容嗅探（含别名 cs/c#/C#），依据也说给用户")
+    # 没有声明时，依据仍要说清是"据后缀"（不能混着说）
+    o3 = probe("noext", "y = 2" + "\n")
+    assert "像 Python" in o3 and "据后缀" in o3, f"没说清依据是后缀：{o3[-400:]!r}"
+    print("      声明压过后缀与内容嗅探（含别名 cs/c#/C#），依据也说给用户")
 
 @test
 def test_a_malformed_declaration_is_not_honoured():
@@ -459,22 +498,27 @@ def test_a_malformed_declaration_is_not_honoured():
     "`eat_word` 本来就有边界检查"，而是**把那张表钉出来**。
 
     判据的断言刻意分成两种，免得把"正确地忽略"与"坏掉了"混成一条：
-    **畸形**的声明不许说"据文件头"；**良构**的必须说。
+    **畸形**的声明不许说"据文件头"；**良构**的必须说。而畸形那半还要**多一条**：
+    外源段必须**在场**（`不是 Loment` 要出现）—— 不然"没说据文件头"在"根本没说任何话"时
+    也成立，那这条判据就没有牙。夹具因此用 `.py` 后缀：后缀那条路保证外源段一定在，
+    于是"没说据文件头"只能是因为声明没被认。
+
+    **夹具自己造诊断**（理由见上一条判据）：前门落地后，写了声明的文件编得过，
+    "请编译器产诊断"这条路没有了 —— 而这条判据判的是渲染器**读文件头**。
     """
     def probe(body: str) -> str:
         td = Path(tempfile.mkdtemp(prefix="lomenterr-declbad-"))
-        f = td / "m.lomt"
+        f = td / "m.py"                        # 后缀把外源段钉在场
         f.write_text(body, encoding="utf-8", newline="\n")
         d = td / "d.jsonl"
-        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
-                            str(f), "--check", "--diag-out", str(d)],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", shell=False, timeout=120)
-        assert r.returncode == 1, r.returncode
-        _, out = _render(d)
+        d.write_text(json.dumps({"file": str(f), "line": 2, "col": 1, "code": "E019",
+                                 "message": "boom"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d, lang=ZH)
+        assert rc == 1, (rc, out[:120])
         return out
 
-    # **畸形**：都不许被当成声明（"据文件头"一个字都不该出现）
+    # **畸形**：都不许被当成声明（"据文件头"一个字都不该出现，而外源段要在）
     malformed = [
         "choose write grammars python",     # 第三个词拼错 —— 对端那次就是这一条
         "choose write grammar",              # 没有别名
@@ -485,6 +529,7 @@ def test_a_malformed_declaration_is_not_honoured():
     ]
     for line in malformed:
         out = probe(line + "\n" + "y = 1" + "\n")
+        assert "不是 Loment" in out, f"夹具没让外源段出现, 这条判据就没牙了: {out[-300:]!r}"
         assert "据文件头" not in out, f"畸形声明被当成了声明: {line!r}\n{out[-300:]!r}"
 
     # **第三词后面的分隔符类** —— 这一类是对端用**枚举**抓到的（手挑挑不出 `#` `.` `:`
@@ -494,6 +539,7 @@ def test_a_malformed_declaration_is_not_honoured():
     for sep in ("#", ".", ":", ",", "-", "_", "(", "!", "=", "@", "'", '"'):
         body = "choose write grammar" + sep + "python" + "\n" + "y = 1" + "\n"
         out = probe(body)
+        assert "不是 Loment" in out, f"夹具没让外源段出现: {sep!r} {out[-300:]!r}"
         assert "据文件头" not in out, (
             f"第三词后接 {sep!r} 被当成了声明: {out[-300:]!r}")
 
@@ -539,7 +585,7 @@ def test_a_superset_language_is_not_reported_as_its_subset():
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", shell=False, timeout=120)
         assert r.returncode == 1, (ext, r.returncode)
-        _, out = _render(d)
+        _, out = _render(d, lang=ZH)
         assert f"像 {want}" in out, f"{ext} 的文件被认成别的语言了: {out[-400:]!r}"
     print("      C++ 不被认成 C、C# 不被认成 Java（顺序即优先级）")
 
@@ -557,11 +603,316 @@ def test_foreign_section_is_given_once_per_file():
     rec = {"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "期望 module"}
     d.write_text(json.dumps(rec) + "\n" + json.dumps(rec) + "\n",
                  encoding="utf-8", newline="\n")
-    rc, out = _render(d)
+    rc, out = _render(d, lang=ZH)
     assert rc == 1
     assert out.count("不是 Loment") == 1, f"外源段给了不止一次: {out.count(chr(19981) + chr(26159) + chr(32) + chr(76))}"
     assert "2 条错误" in out, "两条诊断都要计数"
     print("      外源段一个文件只给一次 (两条诊断, 一次提示)")
+
+# ---------------------------------------------------------------- 语言 (§14)
+
+@test
+def test_english_is_the_default_and_the_renderers_own_text_is_ascii():
+    """**出厂默认说英文**，而且那句英文一个非 ASCII 字节都没有。
+
+    两条是一件事的两半。默认之所以从中文换成英文：Windows 控制台按 936 代码页解 UTF-8，
+    而 PE 垫片没有 `WriteConsoleW`，程序侧无从补救（`docs/169` §3a）—— 于是"默认输出"
+    在中文 Windows 上一直是乱码。换成英文才修得掉，**前提是那份英文真的全 ASCII**：
+    夹一个 `—` 或 `…` 进来，936 控制台上照样花，这个改动就白做了。
+
+    **判据自己造一条 ASCII 消息**，而不是拿编译器那条：编译器给的消息原文现在仍是中文
+    （`docs/182` §5.3，那是另一条线的事），混进来会把"报错器自己那部分是不是 ASCII"
+    偷换成"整份输出是不是 ASCII"。分开说才判得准 —— 也才诚实地说明这个改动修到了哪一步。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-lang-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": str(src), "line": 4, "col": 12, "code": "E002",
+                                 "message": "call to undeclared function z"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)                     # 不传 lang = 出厂默认
+    assert rc == 1, (rc, out[:200])
+    assert "error[E002]:" in out, out[:200]
+    assert "undeclared name" in out, f"默认没说英文: {out[:200]!r}"
+    # 四段齐全（英文侧也要，不能只有中文那份全）
+    for label in ("what went wrong:", "why:", "how to fix:", "supported:", "not supported:"):
+        assert label in out, f"英文侧说明卡少了一段 {label!r}: {out[-300:]!r}"
+    for i in (1, 2, 3):
+        assert f"  {i}. " in out, f"英文侧没有第 {i} 条修法: {out[-300:]!r}"
+    assert out.count("^") >= 1, "英语侧没有插入符"
+    bad = sorted({c for c in out if ord(c) > 127})
+    assert not bad, f"渲染器自己那部分有非 ASCII 字节 {bad!r} —— 936 控制台上就是乱码"
+    print("      默认英文, 四段齐全, 且渲染器自己那部分逐字节纯 ASCII")
+
+
+@test
+def test_errconfig_switches_the_language_and_a_bad_one_falls_back():
+    """`errconfig` 能把语言切到中文；**读不出来就退回默认**（英文），不报错。
+
+    六种输入各来一遍，判决只有两个：切了 / 没切。
+      * `"zh"` / `"ZH"` / `"Chinese"` → 中文（**本来就该大小写不敏感**：配置是手写的，
+        逼用户记住大小写换来的是"配了没生效"，而那种失败**没有任何提示**。
+        第一版只让长写法不敏感、`en`/`zh` 是逐字节比的 —— `"ZH"` 静默退回默认，
+        正是文档说 A 代码做 B。这一条留着就是那次实测）；
+      * `"en"` → 英文（显式写回默认，也是合法的）；
+      * `"klingon"` → **认不出来**，退回英文 —— 不报错、不猜；
+      * 注释里出现 `error_lang` → **不算**（配置项要写成 `error_lang(`）。
+
+    最后一条是设计的一部分而不是巧合：少了"标签后面必须紧跟 `(`"这条，一句注释就能把语言
+    悄悄改掉 —— 而"悄悄生效"正是本仓最反对的那种。
+    """
+    f, d = _check(SEMANTIC)
+    del f
+
+    def cfg(v: str) -> str:
+        return f'module e\npub fn error_lang() -> str {{\n    return "{v}";\n}}\n'
+
+    cases = [
+        (cfg("zh"), True),
+        (cfg("ZH"), True),
+        (cfg("Chinese"), True),
+        (cfg("en"), False),
+        (cfg("klingon"), False),
+        ('// error_lang is documented here\n'
+         'pub fn other() -> str {\n    return "zh";\n}\n', False),
+    ]
+    for body, want_zh in cases:
+        with tempfile.TemporaryDirectory(prefix="lomenterr-cfg-") as td:
+            _errconfig(Path(td), body)
+            rc, out = _run_in(Path(td), d)
+        assert rc == 1, (body, rc, out[:120])
+        got_zh = "符号未声明" in out
+        assert got_zh == want_zh, f"errconfig={body!r} 期望中文={want_zh} 得到 {got_zh}: {out[:200]!r}"
+    print("      errconfig: zh/ZH/Chinese 切中文, en/乱值/注释里的伪标签都退回默认")
+
+
+@test
+def test_the_toolchain_beside_errconfig_is_the_second_place_read():
+    """两份 `errconfig`：**项目那份优先，工具链旁边那份兜底**（`docs/182` §14）。
+
+    `./errconfig` 好测（`_render` 就是这么干的）；工具链旁边那份**从 `argv[0]` 推**，
+    所以要摆一个假的包布局：`<tmp>/bin/lomenterr` + `<tmp>/share/loment/errconfig`。
+
+    这条同时钉住一个容易被写反的语义：**"值认不出来" = "没配"**，于是**继续找下一份**。
+    不这么做的话，项目里写错一个字母会把用户**系统级**的那份设置悄悄作废 ——
+    用户明明配过一次、又明明刚在项目里"配"了一次，结果两份都没生效，而输出里没有任何提示。
+    这条纪律是从 `loment.conf` 抄的（"读不出来就当没配"），所以它两边是同一句。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-pkg-") as td:
+        pkg = Path(td) / "pkg"
+        (pkg / "bin").mkdir(parents=True)
+        (pkg / "share" / "loment").mkdir(parents=True)
+        exe = pkg / "bin" / _bin().name
+        shutil.copy2(_bin(), exe)                     # 保留可执行位（Linux 上要）
+        _errconfig(pkg / "share" / "loment", 'module errconfig\n'
+                                             'pub fn error_lang() -> str {\n'
+                                             '    return "zh";\n}\n')
+
+        cwd = Path(td) / "proj"
+        cwd.mkdir()
+        _, d = _check(SEMANTIC)                        # 诊断文件的 file 是绝对路径
+
+        def run() -> str:
+            r = subprocess.run([str(exe), "--no-color", str(d)],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", shell=False, timeout=60, cwd=str(cwd))
+            assert r.returncode == 1, (r.returncode, r.stderr[:120])
+            return r.stdout + r.stderr
+
+        assert "符号未声明" in run(), "工具链旁边那份没被读到"
+        # 项目那份写了个认不出来的值 → **当作没配**，落到工具链那份（中文），而不是英文
+        _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
+                        '    return "klingon";\n}\n')
+        assert "符号未声明" in run(), "认不出来的值把系统级设置作废了 (该继续找下一份)"
+        # 项目那份**有效**时必须压过工具链那份
+        _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
+                        '    return "en";\n}\n')
+        assert "undeclared name" in run(), "项目那份没有压过工具链那份"
+    print("      两份 errconfig: 项目优先、工具链兜底, 认不出来的值算'没配'")
+
+
+# ---------------------------------------------------------------- 汇总 (§15)
+
+@test
+def test_summary_groups_by_code_worst_first():
+    """结尾的汇总**按码分组，条数多的先出**，并列时码号小的在前。
+
+    这是"12 条错误"之外多出来的那点信息：12 条里有 9 条是同一个原因时，改一处就消掉九条，
+    而按出现顺序一条条修会白改八次。所以**顺序本身是被判的**（不是"反正都印出来了"）。
+
+    汇总只在**给人看**的两个模式下打（`--json` 不打，那会让下游解析器当场坏掉）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-sum-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        # 故意让"少见的码"排在文件里靠前：按出现顺序排的话 E019 会先出，这条判据就抓得到。
+        rows = [{"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "a"},
+                {"file": str(src), "line": 1, "col": 1, "code": "E002", "message": "b"},
+                {"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "c"},
+                {"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "d"}]
+        d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    tail = [ln for ln in out.strip().splitlines() if ln.strip()][-1]
+    assert tail == "4 errors: E019 x3, E002 x1", f"汇总行不对: {tail!r}"
+    print("      汇总按码分组、条数多的先出 (4 errors: E019 x3, E002 x1)")
+
+
+# ---------------------------------------------------------------- --short / --json (§15)
+
+@test
+def test_short_mode_is_one_line_per_diagnostic():
+    """`--short`: **一行一条**，`文件:行:列: error[码]: 消息`，而且**顺带关色**。
+
+    形状照抄 GCC / clang 那一族，编辑器与 CI 不用任何配置就认得。三个断言各挡一种退化：
+    * 行数 = 诊断数（多一行少一行，"一行一条"这个承诺就破了）；
+    * 一条诊断里的换行**折成空格**（不折的话一条会变两三行 —— 同一个承诺的另一种破法）；
+    * **没有转义字节**（`--short` 不带 `--no-color` 也不该上色：管道里要的是能 grep 的行）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-short-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        rows = [{"file": "a.lomt", "line": 3, "col": 7, "code": "E002", "message": "x\ny"},
+                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"}]
+        d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d, "--short", color=True)
+    assert rc == 1, (rc, out[:200])
+    lines = out.strip().splitlines()
+    assert lines[0] == "a.lomt:3:7: error[E002]: x y", f"短格式不对: {lines[0]!r}"
+    # col=0 是"编译器只给了行号"（check() 的语义错就是这样），那时不该硬编一个列出来
+    assert lines[1] == "b.lomt:9: error[E019]: z", f"没列时不该印列: {lines[1]!r}"
+    assert lines[2] == "2 errors: E002 x1, E019 x1", f"短模式不给汇总: {lines[2]!r}"
+    assert len(lines) == 3, f"一行一条: 3 行, 得到 {len(lines)} 行: {out!r}"
+    assert "\x1b" not in out, f"--short 不该上色 (管道里要能 grep): {out[:120]!r}"
+    print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总")
+
+
+@test
+def test_json_mode_carries_the_whole_card_and_parses():
+    """`--json`: **一行一个对象**（JSONL，与编译器的 `--diag-out` 同族，多了卡片字段）。
+
+    它给的是**程序**：编辑器把 `what`/`why`/`fixes` 放进 quickfix 面板，CI 按码统计。
+    所以三条都要判：
+    * **每一行都能被解析** —— 卡片正文里有 `"` 与反斜杠，不转义就是一个坏 JSON，
+      而在编辑器那边那表现为"报错器坏了"，不是"这条消息有点怪"；
+    * 卡片字段**在**且 `fixes` 是数组（≥3 条，与门槛同一份）；
+    * **没有汇总行** —— 那是"给人看"的东西，混进 JSONL 会让下游解析器当场坏掉。
+      所以带中文消息的一行也要能过（转义把非 ASCII 原样留着，JSON 允许）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-json-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        rows = [{"file": "a.lomt", "line": 3, "col": 7, "code": "E002",
+                 "message": 'has "quotes" \\ and\na newline'},
+                {"file": "b.lomt", "line": 9, "col": 2, "code": "E002", "message": "中文也行"}]
+        d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d, "--json", color=True)
+    assert rc == 1, (rc, out[:200])
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 2, f"每个诊断一行, 不该多出别的行(汇总?): {out!r}"
+    for ln in lines:
+        obj = json.loads(ln)                     # 解析不了就是坏 JSON
+        for k in ("code", "title", "file", "line", "col", "message",
+                  "what", "why", "fixes", "yes", "no"):
+            assert k in obj, f"缺字段 {k}: {ln[:120]!r}"
+        assert isinstance(obj["fixes"], list) and len(obj["fixes"]) >= 3, obj["fixes"]
+    first = json.loads(lines[0])
+    assert first["message"] == 'has "quotes" \\ and\na newline', first["message"]
+    assert first["file"] == "a.lomt" and first["line"] == 3 and first["col"] == 7
+    assert "\x1b" not in out, "--json 不该上色"
+    print("      --json: 每行可解析 + 卡片字段齐全 + 转义正确 + 不掺汇总行")
+
+
+# ---------------------------------------------------------------- 拼写建议 (§14)
+
+@test
+def test_did_you_mean_only_when_it_is_the_only_candidate():
+    """E002 的"你是不是想写 X"：**只有一个近候选时才说**。
+
+    三条门槛都判：说得出、说不准就不说（**两个一样近的并列**）、差得远也不说。
+    中段那条是本条判据的重点 —— 说错一个名字比不说坏得多：用户会**照着它改**，
+    那是把一份本来能编的代码改坏。所以"宁可不猜"必须是被动过的代码路径，不是注释里的一句话。
+    """
+    # 三个声明，各有各的用处：`leftover_count` 是唯一近候选（第 7 行），
+    # `alpha_count` / `beta_count` 互为并列（对 `gama_count` 都是差一个字符）。
+    src = ("module m\n\n"
+           "fn alpha_count() -> u32 { return 0; }\n\n"
+           "fn beta_count() -> u32 { return 0; }\n\n"
+           "fn leftover_count() -> u32 { return 0; }\n\n"
+           "fn _start() -> u32 { return 0; }\n")
+    with tempfile.TemporaryDirectory(prefix="lomenterr-sug-") as td:
+        f = Path(td) / "m.lomt"
+        f.write_text(src, encoding="utf-8", newline="\n")
+
+        def render(msg: str) -> str:
+            d = Path(td) / "d.jsonl"
+            d.write_text(json.dumps({"file": str(f), "line": 7, "col": 10, "code": "E002",
+                                     "message": msg}) + "\n",
+                         encoding="utf-8", newline="\n")
+            rc, out = _render(d)
+            assert rc == 1, (rc, out[:200])
+            return out
+
+        # 唯一近候选: `leftover_count`(第 7 行声明)
+        one = render("call to undeclared function leftove_count")
+        assert "did you mean" in one and "`leftover_count`" in one, one[-300:]
+        assert "declared at line 7" in one, f"没给出跳转线索: {one[-300:]!r}"
+        # **并列**: alpha_count 与 beta_count 都只差一个字符 → 不猜
+        tie = render("call to undeclared function gama_count")
+        assert "did you mean" not in tie, f"并列了还敢猜: {tie[-300:]!r}"
+        # 差得远: 与任何名字都不像 → 不猜
+        far = render("call to undeclared function something_else_entirely")
+        assert "did you mean" not in far, f"差得远也猜: {far[-300:]!r}"
+    print("      拼写建议: 唯一近候选才说 (并列/差得远都不说)")
+
+
+# ---------------------------------------------------------------- E018 的候选 (§15)
+
+@test
+def test_e018_lists_what_is_actually_in_deps():
+    """E018: 光说"补文件"没用 —— 要把**手上真实有的**说出来。两种地方各判一条。
+
+    * 没有 `./deps` → 明说没有，并把第 1 层找的路径写清楚。**这条不需要 `getdents64`**：
+      `openat` 失败本身就是答案；
+    * 有 `./deps` → 只列**名字接近**的（`zlib` 与 `util` 差得远，不许出现在清单里）。
+
+    工作目录就是"项目根"（`use` 的第 1 层从这里找），所以要 `_run_in` 指定 cwd ——
+    这也顺带钉住"项目根 = 工作目录"这条约定。
+
+    **线索取自 `msg_hint`**（消息里最后一个"词"），与插入符用的是同一个启发式 ——
+    所以夹具的消息要写成**编译器真会写的那种**：中文包着名字（`名字导入找不到模块 util`）。
+    写成英文自然句（`... module util for use`）时最后一个词是 `use`，
+    那会去 `deps/` 里找一个叫 `use` 的东西 —— 而这恰好说明这条判据**咬得住**那个启发式，
+    所以这里也顺手把这条依赖写在判据里，而不是让它藏在渲染器里。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-deps-") as td:
+        root = Path(td)
+        f = root / "m.lomt"
+        f.write_text("module m\n", encoding="utf-8", newline="\n")
+        d = root / "d.jsonl"
+        d.write_text(json.dumps({"file": str(f), "line": 2, "col": 1, "code": "E018",
+                                 "message": "名字导入找不到模块 util"}) + "\n",
+                     encoding="utf-8", newline="\n")
+
+        rc, out = _run_in(root, d)               # 还没有 deps/
+        assert rc == 1, (rc, out[:200])
+        assert "no `./deps` directory here" in out, f"没明说没有 deps/: {out[-300:]!r}"
+
+        for nm in ("util2", "utils", "zlib"):
+            (root / "deps" / nm).mkdir(parents=True)
+        rc, out = _run_in(root, d)
+        assert rc == 1, (rc, out[:200])
+        assert "util2" in out and "utils" in out, f"没列出接近的名字: {out[-300:]!r}"
+        assert "zlib" not in out, f"差得远的不该进清单: {out[-300:]!r}"
+    print("      E018: 没有 deps/ 就明说; 有就只列名字接近的")
+
 
 # ---------------------------------------------------------------- 包那一侧 (§6 的兜底纪律)
 
@@ -646,7 +997,21 @@ def test_launcher_renders_with_it_and_says_so_without_it():
         # 所以转交时改写成另一种是没有意义的动作。
         assert "RENDERED-BY-LOMENTERR" in got_nc and spelling in got_nc, (
             f"{spelling} 没被转交给渲染器: {got_nc!r}")
-    print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, --no-color 转交到位")
+
+    # `--short` / `--json` 走同一条转交路（`docs/182` §15）：它们也是**渲染器**的输出
+    # 模式，驱动不该看见。这里判的是**行为**（桩渲染器把自己的 argv 打出来），
+    # 因为"转发到位"不是能从代码里读出来的性质 —— cmd 侧只能静态判，
+    # 那一条在 `loment_cli_test` 里。
+    for spelling in ("--short", "--json"):
+        got_om = run(make_pkg(True), spelling)
+        assert "RENDERED-BY-LOMENTERR" in got_om and spelling in got_om, (
+            f"{spelling} 没被转交给渲染器: {got_om!r}")
+    # 两个一起给时**两个都要到**（用一个变量存一个开关就会静默丢掉另一个）
+    got_both = run(make_pkg(True), "--no-color", "--json")
+    assert "--no-color" in got_both and "--json" in got_both, (
+        f"同时给两个开关时丢了一个: {got_both!r}")
+    print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, "
+          "三个开关都转交到位")
 
 
 # ---------------------------------------------------------------- 入口
