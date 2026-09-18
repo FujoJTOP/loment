@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""loment_pytrans_test.py — **Python 翻成 Loment，跑出来的数一样**（`docs/187`）。
+"""loment_pytrans_test.py — **Python 写法 -> Loment** 的判据（`docs/187`；`docs/188` §0）。
 
-判据与 C 那门（`loment_ctrans_test.py`）**同一条** —— 用户定的：
+这是 Stage A 的第二门。判据与 C 那门（`loment_ctrans_test.py`）**同一条**：
 
-> 判据是「翻译出来的 Loment 跑出的结果 == 直接用 clang 编那份 C 跑出的结果」
+> 判据是「翻译出来的 Loment 跑出的结果 == 直接跑那份源码的结果」
 
-这一门把"直接编那份 C"换成"直接用 CPython 跑那份 Python"：
+## 2026-09-18：这一组判据**整个重排了**，因为模型变了
 
-    Python ──CPython──> main() 的返回值 ──┐
-                                          ├─> 比一比
-    Python ──potato_from──> Potato ──lomt_from --impl──> Loment ──> 退出码 ──┘
+第一版假定"翻译器要把 Python 的语义搬过来"，于是拿 CPython 当**处处**的对照组。
+按 `docs/188` §0 那是反的：**用 Python 写法写的单元是一个 Loment 程序**，
+**拼法是 Python 的、语义是 Loment 的**。
 
-**比的是数，不是文本。**
+所以语料现在按**两边一不一致**分档，判据各不相同：
 
-## 这一门与 C 那门的三处语义差，各有一条语料钉住
+| 档 | 语料 | 判据 |
+|---|---|---|
+| **同意** | `policy.py`、`blockscope.py` | 翻译出来的数 **== CPython 的数**（CPython 当对照组） |
+| **不同意** | `intdiv.py`、`loopend.py` | 翻译出来的数 **== 本语言算的**，而且**必须 ≠ CPython 的** |
+| **拒收** | `bool_as_int.py` | **前端**报错，且说得出为什么 |
 
-| 差 | 语料 |
-|---|---|
-| Python 是**函数级**作用域，Loment 的 `let` 是**块级** | `scope.py` |
-| `//` `%` Python 向下取整、Loment 向零截断 | `floordiv.py`（还比了"直译会得到什么"） |
-| `and`/`or` 返回**操作数** | `unsupported.py`（**应当被拒**，不是应当翻对） |
+第二档那两个"必须不同"是关键：少了它，那两份语料只是在摆样子，
+"我们没有迁就 Python"这句话就没被测到。
+
+**`blockscope.py` 那份语料还带着一次教训**：第一版把"Python 是函数级作用域、
+Loment 的 `let` 是块级"当成一处语义差，并为此把声明白上提到函数头。**探了一下，
+那个差根本不存在** —— 块里的 `let` 块外看得见，值也对。所以那一份现在是**同意集**的
+语料。**写下来是为了下次别再凭印象加语义差：先探。**
 
 用法: python tools/loment_pytrans_test.py    （无 CPython/WSL 时 SKIP，退出码 0）
 """
@@ -82,11 +88,12 @@ def _run(exe: Path) -> int:
 
 
 def _cpython(src: Path) -> int:
-    """CPython 跑那份源码的 `main()` —— **对照组**。"""
-    return int(subprocess.run(
+    """CPython 跑那份源码的 `main()` —— **对照组**（只在"同意集"里当判据）。"""
+    out = subprocess.run(
         [_python(), "-c",
          "import runpy,sys;m=runpy.run_path(sys.argv[1]);print(m['main']())", str(src)],
-        capture_output=True, text=True, timeout=120, shell=False).stdout.strip() or -1)
+        capture_output=True, text=True, timeout=120, shell=False).stdout.strip()
+    return int(out or -1)
 
 
 #: Loment 侧的入口：60 号系统调用 = exit。
@@ -97,195 +104,204 @@ fn _start() {
 """
 
 
-def _build_loment(td: Path, doc: dict) -> Path:
-    text, _skipped = lomt_from.emit_lomt(doc, impl=True)
-    p = td / "l_side.lomt"
+def _emit(td: Path, name: str) -> Path:
+    """`.py` -> Potato -> `lomt_from --impl` -> 一份能编的 `.lomt`。**不起任何工具链。**"""
+    doc, rep = potato_from.from_python((EX / name).read_text(encoding="utf-8"),
+                                       name, "strict")
+    assert not potato.validate(doc), (name, potato.validate(doc)[:3])
+    assert not rep.skipped, f"{name}: 转写那一步就丢了东西: {rep.skipped[:3]}"
+    # **它是 Loment**，只是写法是 Python（`docs/188` §3）
+    assert doc["language"] == "loment" and doc["grammar"] == "python", doc["language"]
+    text, _sk = lomt_from.emit_lomt(doc, impl=True)
+    p = td / (name.replace(".", "_") + ".lomt")
     p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+    return p
+
+
+def _build(td: Path, name: str) -> tuple[Path, list[str]]:
+    """返回 `(可执行文件, 检查器诊断)`。诊断非空时**没有**可执行文件。"""
+    p = _emit(td, name)
     mod = lomentc.load(p)
     deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
     errs = lomentc.check(mod, deps=deps)
-    assert not errs, f"翻译出来的 Loment 检查不过: {errs[:3]}"
+    if errs:
+        return p, errs
     blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
-    exe = td / "l_side.elf"
+    exe = td / (name.replace(".", "_") + ".elf")
     exe.write_bytes(blob)
-    return exe
+    return exe, []
 
 
 # ---------------------------------------------------------------- 期望值：独立推出来的
 #
-# **推，不是抄** —— 抄一个数会把"两边一起错成同一副样子"放过去。每一条都在这里
-# 用 Python 重写一遍那份程序的意思（**含 Python 的** `//` `%` 语义，因为那是源语言的语义）。
+# **推，不是抄** —— 抄一个数会把"两边一起错成同一副样子"放过去。
+# "不同意集"那两条按**本语言**的语义推（向零截断的 `/` `%`；`for` 的终值是 `b`）。
 
 
 def _policy_expected() -> int:
-    """`policy.py`。`level(1000)=2`、`bucket(-7,2) = -7 // 2 = -4`、累加 `0+2+4+6=12`。"""
-    a = 2
-    b = -7 // 2                       # Python 的向下取整
+    """`policy.py`（同意集）。两边一样，所以照 Python 推也对。"""
+    a = 2                     # level(1000)
+    b = 700 // 2              # bucket(700, 2) = 350
     acc = 0
-    for i in range(4):
+    for i in range(4):        # 0 + 2 + 4 + 6
         acc += i * a
-    return (a * 10 + (b + 20) + acc) % 200
+    return (a * 10 + (b + 20) + acc) % 200        # (20 + 370 + 12) % 200 = 2
 
 
-def _floordiv_expected() -> int:
-    """`floordiv.py`。四个符号组合的商与余数 —— 照 Python 的语义。"""
+def _blockscope_expected() -> int:
+    """`blockscope.py`（同意集）。
+
+    `pick(1)`：`c` 真 -> `x = 10`；`pick(0)`：`c` 假 -> `x = 20`。
+    所以 `pick(1)*10 + pick(0) = 10*10 + 20 = **120**`。
+    """
+    return 10 * 10 + 20
+
+
+def _trunc_div(a: int, b: int) -> int:
+    """**本语言**的整除：向零截断（与 CPython 的向下取整不同）。"""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def _intdiv_loment() -> int:
+    """`intdiv.py` 按**本语言**算：`/` `%` 向零截断。"""
+    q1, q2 = _trunc_div(-7, 2), _trunc_div(7, -2)
+    m1 = -7 - _trunc_div(-7, 2) * 2
+    m2 = 7 - _trunc_div(7, -2) * -2
+    return (q1 + q2 + 20) * 3 + (m1 + m2 + 20)
+
+
+def _intdiv_cpython() -> int:
+    """同一份语料**按 CPython** 算 —— 用来断言两者**不同**（否则语料没踩在缝上）。"""
     q1, q2 = -7 // 2, 7 // -2
     m1, m2 = -7 % 2, 7 % -2
     return (q1 + q2 + 20) * 3 + (m1 + m2 + 20)
 
 
-def _floordiv_naive() -> int:
-    """同一份语料**若照 Loment 的原生语义直译**会得到什么 —— 向零截断。
-
-    这一条是用来说清"那份语料真的踩在缝上"的：两个数**必须不同**，否则 `floordiv.py`
-    只是在摆样子，而 `__py_mod` / `__py_floordiv` 那对辅助函数也就没被测到。
-    """
-    def cdiv(a, b):                    # C 的向零截断
-        q = abs(a) // abs(b)
-        return q if (a < 0) == (b < 0) else -q
-
-    def cmod(a, b):
-        return a - cdiv(a, b) * b
-
-    q1, q2 = cdiv(-7, 2), cdiv(7, -2)
-    m1, m2 = cmod(-7, 2), cmod(7, -2)
-    return (q1 + q2 + 20) * 3 + (m1 + m2 + 20)
-
-
-def _scope_expected() -> int:
-    """`scope.py`。`walk(1) = 10 + (0+1+2) + 2 = 15`、`walk(0) = 20 + 3 + 2 = 25`。"""
-    def walk(c):
-        x = 10 if c else 20
-        total = 0
-        for i in range(3):
+def _loopend_loment() -> int:
+    """`loopend.py` 按**本语言**算：`for` 之后 `i` 是 `n`（降级式的直接结果）。"""
+    def walk(n):
+        total, i = 0, 0
+        while i < n:                  # `for i in range(n)` 的降级式
             total += i
-        return x + total + i           # `i` 在循环之后**还活着**（Python 的 for 目标不外逃出函数）
-    return walk(1) + walk(0)
+            i += 1
+        return total + i              # i == n
+    return (walk(3) + walk(4)) % 200  # (3+3) + (6+4) = 16
 
 
-#: 语料表：`(文件名, 期望值)`。期望值全部推出来（见上面那几条）。
-CORPUS = [
+def _loopend_cpython() -> int:
+    def walk(n):
+        total = 0
+        for i in range(n):
+            total += i
+        return total + i              # i == n-1
+    return (walk(3) + walk(4)) % 200  # (3+2) + (6+3) = 14
+
+
+#: 同意集：`(文件名, 期望退出码)`。**CPython 当对照组**。
+AGREE = [
     ("policy.py", _policy_expected()),
-    ("floordiv.py", _floordiv_expected()),
-    ("scope.py", _scope_expected()),
+    # **块里声明、块外用**：探出来两边本来就一致（见那份语料的头注）——
+    # 第一版把它当成"语义差"并为此把声明白上提到函数头，那是多余的。
+    ("blockscope.py", _blockscope_expected()),
+]
+
+#: 不同意集：`(文件名, 本语言的值, CPython 的值)`。**两个数必须不同**。
+DISAGREE = [
+    ("intdiv.py", _intdiv_loment(), _intdiv_cpython()),
+    ("loopend.py", _loopend_loment(), _loopend_cpython()),
 ]
 
 
 @test
-def test_translation_runs_same_as_cpython():
-    """**翻译出来的 Loment 跑出的结果 == 直接跑那份 Python 的结果**（`docs/187` 的判据）。
+def test_agreeing_source_matches_cpython():
+    """**同意集**：翻译出来的 Loment 跑出的数 == 直接用 CPython 跑那份 Python 的数。
 
-    三份语料各自钉住一处语义差（见文件头那张表），任一处理错都会把数改掉 ——
-    而**每一处错了都照样编得过**，这正是必须有这条判据的理由。
+    这一档里两边算得一样，所以 CPython 是个**有意义的对照组** —— 翻译器与它
+    一起错成同一副样子的可能仍在，所以再与一个**独立推出来**的期望值对一次。
     """
     if not _wsl() or not _python():
         print("      SKIP: 需要 WSL + CPython")
         return
     with tempfile.TemporaryDirectory() as t:
-        for name, want in CORPUS:
-            src = EX / name
+        for name, want in AGREE:
             td = Path(t) / name.replace(".", "_")
             td.mkdir()
-            doc, rep = potato_from.from_python(src.read_text(encoding="utf-8"),
-                                               name, "strict")
-            assert not potato.validate(doc), (name, potato.validate(doc)[:3])
-            assert not rep.skipped, f"{name}: 转写那一步就丢了东西: {rep.skipped[:3]}"
-            py_rc = _cpython(src)
-            l_rc = _run(_build_loment(td, doc))
-            assert py_rc == want, (
-                f"{name}: CPython 那边就不对: {py_rc} != {want} —— 语料或期望值错了")
+            exe, errs = _build(td, name)
+            assert not errs, f"{name}: 翻译出来的 Loment 检查不过: {errs[:3]}"
+            py_rc, l_rc = _cpython(EX / name), _run(exe)
+            assert py_rc == want, f"{name}: CPython 那边就不对: {py_rc} != {want}"
             assert l_rc == py_rc, (
-                f"{name}: **翻译出来的 Loment 与 CPython 结果不同**: {l_rc} != {py_rc}")
+                f"{name}: **翻译出来的 Loment 与 CPython 不同**: {l_rc} != {py_rc}")
             print(f"      {name}: CPython -> {py_rc}，翻译成 Loment -> {l_rc}（相等）")
 
-    # 单独一条：那份 `//` `%` 语料**必须真的踩在缝上**
-    naive = _floordiv_naive()
-    want = _floordiv_expected()
-    assert naive != want, (
-        f"floordiv.py 的直译结果是 {naive}、正确结果是 {want} —— **一样**，"
-        f"说明这份语料没踩到 `//` `%` 的符号差上，`__py_mod`/`__py_floordiv` 没被测到")
-    print(f"      floordiv.py 直译（向零截断）会得到 {naive}，"
-          f"Python 是 {want} —— 差 {abs(naive - want)}，缝真的踩到了")
+
+@test
+def test_disagreeing_source_follows_loment_not_python():
+    """**不同意集**：两边算得不一样，而**照本语言的来**（`docs/188` §0）。
+
+    这两份语料是这一门最要紧的**证伪面**：第一版在这里发辅助函数去保住 CPython 的
+    语义（`docs/187` 初稿），那是**方向反了**。现在：
+
+    * `intdiv.py` —— `//` 与 `%` 在负号上：本语言给 **62**，CPython 给 56；
+    * `loopend.py` —— `for` 循环之后循环变量：本语言给 **16**，CPython 给 14。
+
+    **两个数必须不同。** 一样的话，说明这份语料没踩在缝上，而"我们没有迁就 Python"
+    这句话就只是一个说法。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        for name, want, py_want in DISAGREE:
+            assert want != py_want, (
+                f"{name}: 本语言的 {want} 与 CPython 的 {py_want} **一样** —— "
+                f"这份语料没踩在缝上，它钉不住任何东西")
+            td = Path(t) / name.replace(".", "_")
+            td.mkdir()
+            exe, errs = _build(td, name)
+            assert not errs, f"{name}: 翻译出来的 Loment 检查不过: {errs[:3]}"
+            l_rc = _run(exe)
+            assert l_rc == want, (
+                f"{name}: 翻译出来的 Loment 给 {l_rc}，按本语言推出来是 {want}；"
+                f"（CPython 会给 {py_want} —— 拿到那个数就说明**还在迁就 Python**）")
+            if _python():
+                assert _cpython(EX / name) == py_want, f"{name}: CPython 那边也不是 {py_want}"
+            print(f"      {name}: 本语言 -> {l_rc}，CPython -> {py_want}（**不等**，对的）")
 
 
 @test
-def test_and_or_as_value_is_rejected():
-    """`and` / `or` **当值用**必须报错 —— 照翻成 `&&` 两边都编得过，只有数不一样。
+def test_bool_as_int_is_refused_by_the_front_end():
+    """**前端拒收集**：Python 的 `bool` 是 `int` 的子类，本语言的不是。
 
-    Python 的 `1 and 2` 是 `2`；Loment 的 `&&` 只能给 `bool`。所以在**条件位置**两者
-    一致（只问真假，可以翻），在**值位置**不一致（Python 可能给出任何 int，必须拒）。
+    `return a and b` 里 Python 的 `and` 返回的是**操作数**（`1 and 2` 是 `2`）——
+    照翻成 `(a != 0) && (b != 0)` 两边都编得过、**只有数不一样**。
+    按 `docs/188` §0 那条"**能表达的就转，表达不出来的就报错**"，这里报错。
+
+    同时钉住**另一半**：`if x:`（x 是 int）**要转**成 `x != 0` —— 那是"整数当条件"
+    的两种拼法，报错就过头了。
     """
-    src = (EX / "unsupported.py").read_text(encoding="utf-8")
-    doc, _rep = potato_from.from_python(src, "unsupported.py", "strict")
-    assert potato.validate(doc) == [], potato.validate(doc)[:3]
+    src = (EX / "bool_as_int.py").read_text(encoding="utf-8")
     try:
-        lomt_from.emit_lomt(doc, impl=True)
-    except lomt_from.NotRepresentable as e:
+        pytrans.translate(src)
+    except pytrans.Unsupported as e:
         msg = str(e)
-        assert "条件位置" in msg, f"报的话要说清是「只能用在条件位置」，实得: {msg}"
-        assert "操作数" in msg, f"要说出理由（Python 的 `and` 返回操作数是**值**）: {msg}"
-        print(f"      `and` 当值用报得出: {msg[-100:]}")
+        assert "操作数" in msg, f"要说清理由（Python 的 `and` 返回操作数）: {msg}"
+        assert "布尔" in msg or "bool" in msg, f"要点出是布尔当整数用: {msg}"
+        print(f"      `a and b` 当值用报得出: {msg[-90:]}")
     else:
         raise AssertionError(
-            "`a and b` 当值用却一个字都没报 —— 照翻成 `&&` 会得到 1 而 Python 给 2，"
+            "`a and b` 当值用却一个字都没报 —— 照翻会得到 1 而 Python 给 2，"
             "两边都编得过。这正是要消灭的静默")
 
-    # **条件位置要照收** —— 不然上面那条"拒"就成了"这一门根本不支持 and"
-    ok = "def f(a: int, b: int) -> int:\n    if a and b:\n        return 1\n    return 0\n"
-    d2, _r2 = potato_from.from_python(ok, "ok.py", "strict")
-    text, _s2 = lomt_from.emit_lomt(d2, impl=True)
-    assert "&&" in text, f"条件位置的 `and` 应当翻成 `&&`:\n{text}"
-    print("      条件位置的 `and` 照常翻成 `&&`")
-
-
-@test
-def test_helpers_only_when_used():
-    """`__py_mod` / `__py_floordiv` **用到了才发** —— 确定性，不留死代码。
-
-    同时钉住"发出来的恒等式是对的"：把生成的那两个函数原样抽出来单独编，
-    与 Python 的 `//` `%` 逐例比一遍（四组符号）。语料那四组之外再补上边界。
-    """
-    used = pytrans.translate((EX / "floordiv.py").read_text(encoding="utf-8"))
-    assert "__py_mod" in used and "__py_floordiv" in used, used[:300]
-    unused = pytrans.translate((EX / "scope.py").read_text(encoding="utf-8"))
-    assert "__py_mod" not in unused, f"没用到 `%` 却发了辅助函数:\n{unused[:300]}"
-    assert "__py_floordiv" not in unused, f"没用到 `//` 却发了辅助函数:\n{unused[:300]}"
-    print("      辅助函数按需发：用到 `//` `%` 的才有，没用的不发")
-
-    if not _wsl():
-        print("      SKIP: 恒等式逐例比对需要 WSL")
-        return
-    # 把两个辅助函数原样编成一个小单元（**用生成器里那份源**，不是另抄一遍 ——
-    # 另抄一遍的话测的是抄件，而生成的可能是另一份），返回值编码成 `(商, 余)` 两个数
-    prog = ("module h\n\n" + pytrans._HELPERS[pytrans._PY_MOD]
-            + pytrans._HELPERS[pytrans._PY_FLOORDIV] + """
-fn pack(a: i64, b: i64) -> i64 {
-    return (__py_floordiv(a, b) + 50) * 100 + (__py_mod(a, b) + 50);
-}
-
-fn _start() {
-    syscall4(60, (pack(P_A, P_B) % 250) as u64, 0, 0);
-}
-""")
-    with tempfile.TemporaryDirectory() as t:
-        td = Path(t)
-        for a, b in ((-7, 2), (7, -2), (-7, -2), (7, 2), (-8, 3), (8, -3)):
-            p = td / "h.lomt"
-            p.write_text(prog.replace("P_A", str(a)).replace("P_B", str(b)),
-                         encoding="utf-8", newline="\n")
-            mod = lomentc.load(p)
-            deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
-            assert not lomentc.check(mod, deps=deps), (a, b, lomentc.check(mod, deps=deps)[:3])
-            blob, _i = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
-            exe = td / "h.elf"
-            exe.write_bytes(blob)
-            got = _run(exe)
-            q, m = a // b, a % b
-            want = ((q + 50) * 100 + (m + 50)) % 250
-            assert got == want, (
-                f"({a}, {b}): Loment 的辅助函数给 {got}，Python 是 {want}"
-                f"（商 {q}、余 {m}）")
-    print("      恒等式逐例对过：6 组符号组合与 Python 全等")
+    # **另一半**：整数当条件要照收（转成 `!= 0`），不许一起拒了
+    ok = ("def f(a: int) -> int:\n"
+          "    if a:\n"
+          "        return 1\n"
+          "    return 0\n")
+    text = pytrans.translate(ok)
+    assert "a != 0" in text, f"`if a`（a 是 int）该转成 `a != 0`:\n{text}"
+    print("      整数当条件照收：`if a` -> `if a != 0`")
 
 
 def main() -> int:

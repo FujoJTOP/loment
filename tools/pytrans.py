@@ -1,66 +1,98 @@
 #!/usr/bin/env python3
-"""pytrans.py — **Python 子集 -> Loment** 翻译器（`docs/187`，Stage A 的第二门）。
+"""pytrans.py — **Python 写法 -> Loment** 的前端（`docs/187`；`docs/188` 之后的方向见下）。
 
-    Python 源码 --pytrans--> Loment 源码
+    Python 写法的源码 --pytrans--> Loment 源码
 
-## 为什么这一门比 C 那门难 —— 三处**语义**差，不是写法差
+## 它是**前端**，不是"翻译外源代码" —— 2026-09-18 改定的
 
-`docs/186` 里 C 那门只有一处真差（`int` vs `bool`）。Python 这一门有三处，而且每一处
-**错了都照样编得过**，只是结果不对：
+第一版（`docs/187` 初稿）把这里当成**语义搬运**：Python 的 `//` 是向下取整、Loment 的
+是向零截断，于是发一对辅助函数去"保住 Python 的语义"。**方向反了。**
 
-| | Python | Loment | 怎么办 |
+用户 2026-09-18 定的模型（`docs/188` §0）：**Loment 可以被多种语法编写，最终行为无异**。
+一份用 Python 写法写的单元**是一个 Loment 程序** —— 拼法是 Python 的，**语义是 Loment 的**。
+
+> **表层语法只决定拼法与形状，不决定语义。**
+
+所以这一份现在做的事，与 C 编译器把 C 读成汇编**同一个性质**：把一种拼法读成本语言。
+下面每一条"改法"都按这条判。
+
+## 一条判据管住全部：**能表达的就转，表达不出来的就报错**
+
+"不迁就 Python"不是"一律拒绝"，因为有些差异**只是拼法**：
+
+| 场合 | Python | Loment | 怎么办 |
 |---|---|---|---|
-| **`and` / `or`** | 返回**操作数**（`1 and 2 == 2`） | `&&` / `\|\|` 出 `bool` | **只在条件位置收**；当值用就报错（见下） |
-| **`//` 与 `%`** | **向下取整**（`-7 % 2 == 1`） | **向零截断**（实测 `-7 % 2 == -1`） | 发一对辅助函数 `__py_mod` / `__py_floordiv` |
-| **作用域** | **函数级**（`if` 里赋的名，外面看得见） | `let` 是**块级** | 声明**上提到函数头**（见下） |
+| `if x:`（x 是 int） | 合法（真值） | 条件只收 `bool` | **转**成 `x != 0` —— 这是"整数当条件"的两种拼法 |
+| `x = a and b` | `and` 返回**操作数**（`1 and 2 == 2`） | `&&` 出 `bool` | **报错** —— 这个意思 **Loment 表达不出来** |
+| `1 + (a < b)` | `True` 就是 `1` | `i64 + bool` 是类型错 | **报错** —— 同上，Python 的 bool **就是 int** |
+| `-7 // 2` | `-4`（向下取整） | `-3`（向零截断，实测） | **照 Loment 的来** —— `/` 是"整除"的拼法，不是"向下取整"的拼法 |
 
-第三条最不起眼、也最容易翻错：Python 里
+前两条合起来是同一件事：**Python 的 `bool` 是 `int` 的子类**，而 Loment 的 `bool`
+是独立类型。所以 `bool -> int` 一律**报错**；`int -> bool`（条件位置）**转**。
 
-    if c:
-        x = 1
-    return x        # 合法（c 为真时）
+对比 C 那一门（`docs/186`）：C 的 `&&` 出 `int`，而 `(bool) as i32` **能表达**那个意思，
+所以 C 那门要补转换。**同一处，两门结论相反，判据是同一条。**
 
-直译成 `if c { let x: i64 = 1; }` 之后再 `return x;` —— **Loment 编不过**（块外没声明）。
-所以声明的位置要按"这个名字**最外层**在那个深度被赋值"来定：最外层就是函数体的用
-`let`（可读），更深的**上提到函数头**（正确）。上提那份给零值初始化 —— 见 §语义选择。
+## 与第一版的另外两处不同
 
-**`//` 与 `%` 为什么要发辅助函数**：`-7 // 2` Python 说 `-4`、Loment 说 `-3`。这不是
-"不用负数就没事"能糊过去的：`%` 在取模、分桶、哈希里到处都是，而符号取决于输入。
-恒等式（`b != 0` 时成立）：
+* **不再上提声明。** 第一版把"最外层赋值发生在嵌套块里"的名字提到函数头 ——
+  理由是"Python 函数级、Loment 块级"。**那条理由是我写错的，而且探一下就露馅**
+  （见下）。所以现在就地 `let`。
+* **`for` 用一个明确的降级式**（见 §`for`），不再用计次变量去迁就 Python 的终值。
 
-    py_mod(a, b)      = ((a % b) + b) % b          # Loment 的 `%` 是截断的
-    py_floordiv(a, b) = (a - py_mod(a, b)) / b
+### 一处**我断言过、探过之后不成立**的差别（留着当教训）
 
-两个方向都验过（`-7/2`、`7/-2`、`-7/-2`、`7/2`，见 `loment/pytrans/floordiv.py` 的语料）。
+`docs/187` 初稿与 `docs/188` §0.1 都把"**Python 是函数级作用域、Loment 的 `let`
+是块级**"列成一处真差别。2026-09-18 一探，**它不存在**：
 
-## 一处**收得住**的差：`and` / `or` 当值用
+    fn f(c: bool) -> i32 { if c { let x: i32 = 10; } else { x = 20; } return x; }
 
-    if a and b:            # 条件位置 —— 只问真假，两边一致，收
-        ...
-    x = a and b            # 值位置 —— Python 给的是**操作数**（可能是任何 int）
-                           #            而 Loment 的 `&&` 只能给 bool。**报错，不猜。**
+* `lomentc.check` **不报错** —— 块里 `let` 的名，块外看得见；
+* 编出来跑 `f(false)` 给 **20** —— 只有一条分支声明、另一条只赋值，值也对。
 
-条件位置是**保义**的：`a and b` 同真 iff `(a != 0) && (b != 0)`，而且**短路也保住**了。
+⇒ Loment 的 `let` 在这两个形状里就是能漏到块外的，与 Python 在这一处**本来就一致**。
+
+所以第一版那个"上提"**不是方向反了，是多余**；现在就地 `let` 的结果两边本来就一样
+（`loment/pytrans/blockscope.py` 是这一条的**同意集**语料，拿 CPython 当对照）。
+
+**教训**：一处"语义差"是**探出来的**，不是**推出来的** —— 推出来的那个让我写了一版
+多余的实现，还往文档里记了一条不存在的事实。
+
+## `for` 的定义（写下来，因为它不是搬运而是定义）
+
+    for i in range(a, b):        ->   let i: i64 = a;
+        <body>                        while i < b {
+                                          <body>
+                                          i = i + 1;
+                                      }
+
+**这就是 `for i in range(…)` 在本语言里的意思。** 两个后果都写在这儿：
+
+* 循环**结束后 `i` 是 `b`**，与 CPython 的 `b - 1` **不同**（CPython 的 for 目标停在
+  最后一个取到的值）。这是那条降级式的直接结果，不是疏漏。
+* **循环体里给 `i` 赋值 → 报错。** 那条降级式在那种写法下不成立（CPython 每轮都会
+  把 `i` 重置成下一个值，而 `while` 不会）。与其悄悄给出不同的数，不如让人写 `while`。
+
+只收 `range(n)` 与 `range(a, b)`：**带步进的 `range` 一律拒绝** —— 负步进与空区间的
+边界都要单独想清楚。
 
 ## 子集
 
     模块级    NAME = <整数>            （常量, 全大写才算 —— 与 potato_from 同一条判据）
               def f(a: int, b: int) -> int: …
     语句      赋值/注解赋值/增量赋值   if/elif/else   while   for i in range(…)   return   f(…)
-    表达式    整数  名字  调用  一元 - + ~ not   二元 算术/位/比较   布尔 and/or（仅条件）
+    表达式    整数  名字  调用  一元 - + ~ not   二元 算术/位/比较/`//`/`%`   布尔 and/or
 
 **不收的一律报错**（`docs/167`）：`break` / `continue` / `lambda` / 推导式 / `try` /
 `with` / 导入 / 元组解包 / 链式比较 / `**` / `/`（真除，出浮点）/ `str`·`list`·`dict` /
 `for … else` / `while … else`。理由与 C 那门一样：**跳过 = 产出一份少算一步却照样能编的单元**。
 
-## 语义选择（不是翻译，是决定）
+## 两条**决定**（不是翻译）
 
-1. **上提的声明白零值。** Python 里"没赋过就读"会 `NameError`，Loment 拿到的是 0。
-   这是**行为差异**，不是等价翻译 —— 写下来是因为它改的是行为。
-2. **`int` 映 `i64`**，与 `potato_from.PY_TYPES` 一致。Python 的 `int` 是任意精度，
-   `i64` 是有界的 —— 溢出行为的差别**没有处理**（溢出变成回绕）。
-3. **局部变量的类型从**它**第一次赋值的右值推**（比较/布尔出 `bool`，其余 `i64`）。
-   Python 没有声明，所以要有一个"谁来定"的规则；这条是可读且确定的。
+1. **`int` 映 `i64`**，与 `potato_from.PY_TYPES` 一致。Python 的 `int` 是任意精度、
+   `i64` 有界 —— 溢出行为的差别**没有处理**（溢出变成回绕）。
+2. **局部变量的类型从它第一次赋值的右值推**（比较/布尔/`not` 出 `bool`，其余 `i64`）。
+   Python 没有声明，所以必须有一条"谁来定"的规则；这条是可读且确定的。
 
 用法:
 
@@ -79,17 +111,17 @@ from pathlib import Path
 #: 两处对不上的话，`lomt_from` 发的签名与这里发出来的对不上，而那是**静默**的。
 _TYPES = {"int": "i64", "bool": "bool", "None": "()"}
 
-#: 二元运算符 -> Loment 运算符。**`/` 与 `**` 不在**（真除出浮点、乘方没有对应）。
+#: 二元运算符 -> Loment 运算符。
+#: **`//` 与 `%` 都在**，且直接映本语言的 `/` 与 `%` —— 见文件头那条表：
+#: `//` 是"整除"的**拼法**，而本语言的整除是向零截断的（实测 `-7 % 2 == -1`）。
+#: `**` 不在（没有乘方）；`/` 不在（真除出浮点）。
 _BIN = {
-    ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.FloorDiv: None, ast.Mod: None,
+    ast.Add: "+", ast.Sub: "-", ast.Mult: "*",
+    ast.FloorDiv: "/", ast.Mod: "%",
     ast.LShift: "<<", ast.RShift: ">>", ast.BitOr: "|", ast.BitAnd: "&", ast.BitXor: "^",
 }
 _CMP = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=",
         ast.Gt: ">", ast.GtE: ">="}
-
-#: 辅助函数名。**故意长得不像用户会写的** —— 撞上了会报错，不静默改语义（见 `_emit_helpers`）。
-_PY_MOD = "__py_mod"
-_PY_FLOORDIV = "__py_floordiv"
 
 
 class Unsupported(Exception):
@@ -116,8 +148,8 @@ def _safe(name: str) -> str:
 
 
 def _ty_of_annotation(node, where: str) -> str:
-    """参数/返回注解 -> Loment 类型。没有注解**报错**（Python 不写注解就没有类型可用，
-    而 Loment 必须有 —— 猜一个宽度是把作者的意思改掉）。"""
+    """参数/返回注解 -> Loment 类型。**没有注解就报错** —— Python 不写注解就没有
+    类型可用，而 Loment 必须有；猜一个宽度是把作者的意思改掉。"""
     if node is None:
         raise Unsupported(f"{where}: 没有类型注解（Loment 必须有类型；"
                           f"写 `: int` 或 `-> int`）")
@@ -127,126 +159,31 @@ def _ty_of_annotation(node, where: str) -> str:
     return _TYPES[txt]
 
 
-class Fn:
-    """一个函数翻出来的东西 + 它用到/产生的状态。"""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        #: 本函数用到的辅助函数（`//` `%` 会往里加）。出单元头的时候按这个发。
-        self.helpers: set[str] = set()
-
-
 class Emitter:
     """一个 `def` -> 一段 Loment 源码。"""
 
-    def __init__(self, fns: dict[str, tuple[list[str], str]],
-                 consts: dict[str, str] | None = None) -> None:
-        #: 本单元所有函数的 `(参数类型表, 返回类型)`。调用点的类型靠它。
+    def __init__(self, fns: dict[str, str], consts: dict[str, str] | None = None) -> None:
+        #: 本单元所有函数的**返回类型**。调用点的类型靠它。
         self.fns = fns
-        #: 模块常量的名字 -> 类型。生成的 `pub const` 是模块级的，函数体里当名字用得到。
+        #: 模块常量的名字 -> 类型。生成的 `pub const` 是模块级的，函数体里用得到。
         self.consts: dict[str, str] = dict(consts or {})
-        #: 名字 -> 类型（`bool` / `i64`）。**推导出来的**，见文件头 §语义选择 3。
+        #: 名字 -> 类型（`bool` / `i64`）。**推导出来的**，见文件头 §决定 2。
         self.vars: dict[str, str] = {}
-        #: 上提的名字（最外层赋值发生在嵌套块里）—— 这些在函数头声明一次。
-        self.hoisted: set[str] = set()
-        self.helpers: set[str] = set()
         self.lines: list[str] = []
         self.depth = 0
-        #: `for` 的计次变量编号（`__t1`、`__t2`…）—— 每个循环一个，嵌套也不撞。
-        self.n_tmp = 0
+        self.ret = "()"
 
     # ---- 行
     def out(self, s: str) -> None:
         self.lines.append("    " * (self.depth + 1) + s)
 
     def gap(self) -> None:
+        """控制流前面留一个空行 —— 但别在开头留，也别连着留两个。"""
         if self.lines and self.lines[-1] != "" and not self.lines[-1].endswith("{"):
             self.lines.append("")
 
-    # ---- 作用域预扫：谁最外层在哪个深度被赋值
-    def _scan(self, body: list, depth: int, first: dict) -> None:
-        """走一遍函数体，记下每个名字**最外层**被赋值的**深度与那一条语句**。
-
-        深度 0（就是函数体那一层）的可以就地 `let`；更深的必须上提
-        （Python 是函数级作用域，而 Loment 的 `let` 是块级 —— 见文件头那条）。
-        **那一条语句也要留着** —— 上提时要靠它推类型（`x = (a < b)` 上提的是 `bool`，
-        照发 `let x: i64 = 0;` 就把类型改掉了）。
-        """
-        def note(n: str, st) -> None:
-            if n in self.consts:
-                raise Unsupported(
-                    f"第 {getattr(st, 'lineno', '?')} 行: 给模块常量 `{n}` 赋值"
-                    f"（Python 里那是改模块变量，而 `pub const` 改不了 —— "
-                    f"要么改名，要么把它做成函数参数）")
-            if n not in first or depth < first[n][0]:
-                first[n] = (depth, st)
-
-        for st in body:
-            if isinstance(st, ast.Assign):
-                for tg in st.targets:
-                    if isinstance(tg, ast.Name):
-                        note(tg.id, st)
-                    elif isinstance(tg, (ast.Tuple, ast.List)):
-                        raise Unsupported(
-                            f"第 {st.lineno} 行: 不支持元组/列表解包赋值"
-                            f"（拆成几条单独赋值，或用一个临时变量）")
-                self._scan_expr(st.value, note)
-            elif isinstance(st, ast.AnnAssign):
-                if not isinstance(st.target, ast.Name):
-                    raise Unsupported(f"第 {st.lineno} 行: 注解赋值的目标不是名字")
-                note(st.target.id, st)
-                self._scan_expr(st.value, note)
-            elif isinstance(st, ast.AugAssign):
-                if not isinstance(st.target, ast.Name):
-                    raise Unsupported(f"第 {st.lineno} 行: 增量赋值的目标不是名字")
-                note(st.target.id, st)
-                self._scan_expr(st.value, note)
-            elif isinstance(st, ast.For):
-                if not isinstance(st.target, ast.Name):
-                    raise Unsupported(f"第 {st.lineno} 行: `for` 的目标不是单个名字")
-                note(st.target.id, st)
-                self._scan(st.body, depth + 1, first)
-                if st.orelse:
-                    raise Unsupported(f"第 {st.lineno} 行: 不支持 `for … else`")
-            elif isinstance(st, ast.While):
-                self._scan_expr(st.test, note)
-                self._scan(st.body, depth + 1, first)
-                if st.orelse:
-                    raise Unsupported(f"第 {st.lineno} 行: 不支持 `while … else`")
-            elif isinstance(st, ast.If):
-                self._scan(st.body, depth + 1, first)
-                self._scan(st.orelse, depth + 1, first)
-            elif isinstance(st, ast.Return):
-                if st.value is not None:
-                    self._scan_expr(st.value, note)
-            elif isinstance(st, ast.Expr):
-                self._scan_expr(st.value, note)
-            elif isinstance(st, ast.Pass):
-                pass
-            else:
-                raise Unsupported(f"第 {st.lineno} 行: 不支持语句 `{type(st).__name__}`"
-                                  f"（{_stmt_name(st)}）")
-
-    def _scan_expr(self, node, note) -> None:
-        """表达式里出现的名字**只记不声明** —— 但 `for` 的目标藏在表达式之外，
-        所以这里只需要把嵌套的 `for`/推导式之类拦住。"""
-        for sub in ast.walk(node):
-            if isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                raise Unsupported(f"第 {sub.lineno} 行: 不支持推导式")
-            if isinstance(sub, ast.Lambda):
-                raise Unsupported(f"第 {sub.lineno} 行: 不支持 `lambda`")
-
-    # ---- 局部变量的类型：第一次赋值的右值说了算
-    def _decl_type(self, st) -> str:
-        if isinstance(st, ast.AnnAssign):
-            return _ty_of_annotation(st.annotation, f"第 {st.lineno} 行")
-        v = st.value
-        if isinstance(v, ast.Constant) and isinstance(v.value, bool):
-            return "bool"
-        return self.ty_of(v)
-
+    # ---- 类型：只有 `i64` / `bool` / `()` 三档
     def ty_of(self, e) -> str:
-        """表达式在 Loment 里是什么类型（`bool` / `i64` / `()`）—— **不看上下文**。"""
         if isinstance(e, ast.Constant):
             if isinstance(e.value, bool):
                 return "bool"
@@ -261,25 +198,19 @@ class Emitter:
                 raise PyError(f"第 {e.lineno} 行: 用了没赋过值的 `{e.id}`")
             return self.vars[e.id]
         if isinstance(e, ast.Call):
-            if e.func.id == _PY_MOD or e.func.id == _PY_FLOORDIV:
-                return "i64"
-            r = self.fns.get(e.func.id)
+            f = e.func
+            if not isinstance(f, ast.Name):
+                raise Unsupported(f"第 {e.lineno} 行: 只收直接函数调用")
+            r = self.fns.get(f.id)
             if r is None:
                 raise Unsupported(
-                    f"第 {e.lineno} 行: 调用了本单元没有的函数 `{e.func.id}`"
+                    f"第 {e.lineno} 行: 调用了本单元没有的函数 `{f.id}`"
                     f"（Stage A 不跨单元 —— 要调外部函数请留着 `pub extern fn` 那条路）")
-            return r[1]
+            return r
         if isinstance(e, ast.UnaryOp):
-            if isinstance(e.op, ast.Not):
-                return "bool"          # Python 的 `not` **永远**出 bool（与 `and` 不同）
-            return "i64"
+            # Python 的 `not` **永远**出 bool（与 `and`/`or` 不同），所以它可翻。
+            return "bool" if isinstance(e.op, ast.Not) else "i64"
         if isinstance(e, ast.BinOp):
-            if isinstance(e.op, ast.FloorDiv):
-                self.helpers.add(_PY_FLOORDIV)
-                return "i64"
-            if isinstance(e.op, ast.Mod):
-                self.helpers.add(_PY_MOD)
-                return "i64"
             return "i64"
         if isinstance(e, (ast.Compare, ast.BoolOp)):
             return "bool"
@@ -288,29 +219,37 @@ class Emitter:
 
     # ---- 表达式：`want` 是**这个位置要的类型**，一路显式往下传
     #
-    # **不要把它挂在实例上** —— 嵌套（`if (a and b) + 1`）时外层会串到内层，
-    # 而 `BoolOp` 那条规则正是看这个值的。传参是唯一不会串味的写法。
+    # **不要挂在实例上** —— 嵌套时外层会串到内层。
     def ex(self, e, want: str) -> str:
         got = self.ty_of(e)
         if got == "()":
             raise Unsupported(f"第 {e.lineno} 行: 这里用了一个不返回值的调用")
-        raw = self.raw(e, want)
+        raw = self.raw(e)
         if got == want:
             return raw
         if got == "i64" and want == "bool":
-            return f"{raw} != 0"        # Python 的 `if x`：非零即真
+            # `if x:` / `not x` 里 x 是整数 —— "整数当条件"的两种拼法，**转**
+            return f"{raw} != 0"
         if got == "bool" and want == "i64":
-            return f"({raw}) as i64"    # `x = (a < b)`：bool -> 0/1
+            # **不转，报错**。Python 的 `bool` 是 `int` 的子类（`True + 1 == 2`），
+            # 而 `and`/`or` 返回的是**操作数** —— 这个意思 Loment 表达不出来。
+            # 悄悄补一个 `as i64` 会让 `a and b` 变成 0/1，而 Python 给的是操作数本身。
+            raise Unsupported(
+                f"第 {e.lineno} 行: 这里要的是整数，给的是**布尔**。"
+                f"Python 的 `bool` 是 `int` 的子类（`True + 1 == 2`），而 `and`/`or` "
+                f"返回的是**操作数**（`1 and 2` 是 `2`）—— 这个意思 Loment 表达不出来。"
+                f"把意思写清楚：要 0/1 就写 `1 if c else 0`，要操作数就写成 `if`/`else`")
         raise AssertionError((got, want))
 
-    def raw(self, e, want: str) -> str:
+    def raw(self, e) -> str:
+        """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
         if isinstance(e, ast.Constant):
             if isinstance(e.value, bool):
                 return "true" if e.value else "false"
             return str(e.value)
         if isinstance(e, ast.Name):
             if e.id in self.consts:
-                return e.id          # 模块常量名照抄 —— 生成的 `pub const` 就在同一个 scope
+                return e.id          # 模块常量名照抄 —— 生成的 `pub const` 在同层
             if e.id not in self.vars:
                 raise PyError(f"第 {e.lineno} 行: 用了没赋过值的 `{e.id}`")
             return _safe(e.id)
@@ -320,24 +259,16 @@ class Emitter:
                 raise Unsupported(f"第 {e.lineno} 行: 只收直接函数调用")
             if e.keywords:
                 raise Unsupported(f"第 {e.lineno} 行: 不支持关键字实参")
-            # `__py_mod` 之类的辅助函数收 i64；用户函数按它的签名收
-            args = ", ".join(self.ex(a, "i64") for a in e.args)
-            return f"{_safe(f.id)}({args})"
+            return f"{_safe(f.id)}({', '.join(self.ex(a, 'i64') for a in e.args)})"
         if isinstance(e, ast.UnaryOp):
             if isinstance(e.op, ast.Not):
-                # Python 的 `not` **永远**出 bool，而且收任何真值。
+                # Python 的 `not` 收任何真值、永远出 bool；Loment 的 `!` 只收 bool。
                 return f"!{self.ex(e.operand, 'bool')}"
             if isinstance(e.op, (ast.USub, ast.UAdd, ast.Invert)):
                 op = {ast.USub: "-", ast.UAdd: "", ast.Invert: "~"}[type(e.op)]
                 return f"({op}{self.ex(e.operand, 'i64')})"
             raise Unsupported(f"第 {e.lineno} 行: 不支持一元 `{type(e.op).__name__}`")
         if isinstance(e, ast.BinOp):
-            if isinstance(e.op, ast.FloorDiv):
-                self.helpers.add(_PY_FLOORDIV)
-                return f"{_PY_FLOORDIV}({self.ex(e.left, 'i64')}, {self.ex(e.right, 'i64')})"
-            if isinstance(e.op, ast.Mod):
-                self.helpers.add(_PY_MOD)
-                return f"{_PY_MOD}({self.ex(e.left, 'i64')}, {self.ex(e.right, 'i64')})"
             if isinstance(e.op, ast.Pow):
                 raise Unsupported(f"第 {e.lineno} 行: 不支持 `**`"
                                   f"（Loment 没有乘方；写成一个循环或调用）")
@@ -351,7 +282,7 @@ class Emitter:
         if isinstance(e, ast.Compare):
             if len(e.ops) != 1:
                 # 链式比较在 Python 里等价于 `a<b and b<c`，中间的 `b` **只求值一次**。
-                # 照抄成 `(a<b) && (b<c)` 会把 `b` 求两次 —— `b` 是调用时结果就不一样了。
+                # 照抄成 `(a<b) && (b<c)` 会求两次 —— `b` 是调用时结果就不一样。
                 raise Unsupported(f"第 {e.lineno} 行: 不支持链式比较"
                                   f"（`a < b < c` 里中间那个只求值一次，"
                                   f"拆成 `a < b and b < c` 显式写）")
@@ -360,12 +291,9 @@ class Emitter:
                 raise Unsupported(f"第 {e.lineno} 行: 不支持比较 `{type(e.ops[0]).__name__}`")
             return f"({self.ex(e.left, 'i64')} {op} {self.ex(e.comparators[0], 'i64')})"
         if isinstance(e, ast.BoolOp):
-            if want != "bool":
-                raise Unsupported(
-                    f"第 {e.lineno} 行: `{'and' if isinstance(e.op, ast.And) else 'or'}` "
-                    f"只能用在**条件位置** —— Python 的 `and`/`or` 返回的是**操作数**"
-                    f"（`1 and 2` 是 `2`），而 Loment 的 `&&`/`||` 出 bool。"
-                    f"当值用请显式写成 `if c {{ 1 }} else {{ 0 }}` 那种意思清楚的形式")
+            # `and` / `or` -> `&&` / `||`。**不再有"只能用在条件位置"那条特判** ——
+            # 它由 `ex` 的类型规则管：条件位置（要 bool）照收，整数位置（要 i64）报错
+            # 并说清为什么。**判据在类型上，不在语法位置上**，这才是"语义听 Loment 的"。
             op = "&&" if isinstance(e.op, ast.And) else "||"
             parts = [self.ex(v, "bool") for v in e.values]
             return "(" + f" {op} ".join(parts) + ")"
@@ -381,72 +309,45 @@ class Emitter:
         if isinstance(st, ast.Assign):
             if len(st.targets) != 1 or not isinstance(st.targets[0], ast.Name):
                 raise Unsupported(f"第 {st.lineno} 行: 赋值的目标只能是单个名字")
-            self._bind(st.targets[0].id, st.value, st, st)
+            self._bind(st.targets[0].id, st.value, st)
             return
         if isinstance(st, ast.AnnAssign):
             if st.value is None:
                 raise Unsupported(f"第 {st.lineno} 行: 只注解不给值的赋值"
                                   f"（Loment 的 `let` 要初值）")
-            self._bind(st.target.id, st.value, st, st)
+            self._bind(st.target.id, st.value, st)
             return
         if isinstance(st, ast.AugAssign):
             if not isinstance(st.target, ast.Name):
                 raise Unsupported(f"第 {st.lineno} 行: 增量赋值的目标不是名字")
             n = st.target.id
             if n not in self.vars:
-                raise PyError(f"第 {st.lineno} 行: `{n}` 没赋过值就用 `{type(st.op).__name__}=`")
-            # `x += e` -> `x = x + e`（Loment 没有复合赋值）。`//=` `%=` 也要走辅助函数。
-            fake = ast.BinOp(left=ast.Name(id=n, ctx=ast.Load()),
-                             op=st.op, right=st.value)
-            fake.lineno = st.lineno
-            fake.col_offset = st.col_offset
+                raise PyError(f"第 {st.lineno} 行: `{n}` 没赋过值就用"
+                              f"`{type(st.op).__name__}=`")
+            if n in self._for_targets:
+                raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{n}` 赋值"
+                                  f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
+                                  f"不成立（CPython 每轮都会重置它）。改用 `while`")
+            # `x += e` -> `x = x + e`（Loment 没有复合赋值）
+            fake = ast.BinOp(left=ast.Name(id=n, ctx=ast.Load()), op=st.op, right=st.value)
+            fake.lineno, fake.col_offset = st.lineno, st.col_offset
             self.out(f"{_safe(n)} = {self.ex(fake, self.vars[n])};")
             return
         if isinstance(st, ast.Return):
-            self.out("return;" if st.value is None else
-                     f"return {self.ex(st.value, self.ret)};")
+            self.out("return;" if st.value is None
+                     else f"return {self.ex(st.value, self.ret)};")
             return
         if isinstance(st, ast.If):
             self.gap()
-            self.out(f"if {self.ex(st.test, 'bool')} {{")
-            self.depth += 1
-            self.stmts(st.body)
-            self.depth -= 1
-            if st.orelse:
-                if len(st.orelse) == 1 and isinstance(st.orelse[0], ast.If):
-                    # `elif` —— Loment 有 `else if`，保持那个形状（比嵌一层好读）
-                    self.out("} else if "
-                             f"{self.ex(st.orelse[0].test, 'bool')} {{")
-                    self.depth += 1
-                    self.stmts(st.orelse[0].body)
-                    self.depth -= 1
-                    rest = st.orelse[0].orelse
-                    while len(rest) == 1 and isinstance(rest[0], ast.If):
-                        self.out(f"}} else if {self.ex(rest[0].test, 'bool')} {{")
-                        self.depth += 1
-                        self.stmts(rest[0].body)
-                        self.depth -= 1
-                        rest = rest[0].orelse
-                    if rest:
-                        self.out("} else {")
-                        self.depth += 1
-                        self.stmts(rest)
-                        self.depth -= 1
-                    self.out("}")
-                else:
-                    self.out("} else {")
-                    self.depth += 1
-                    self.stmts(st.orelse)
-                    self.depth -= 1
-                    self.out("}")
-            else:
-                self.out("}")
+            self._if_chain(st)
             return
         if isinstance(st, ast.While):
             self.gap()
             self.out(f"while {self.ex(st.test, 'bool')} {{")
             self.depth += 1
+            self._for_targets |= self._loopvars(st.body)
             self.stmts(st.body)
+            self._for_targets -= self._loopvars(st.body)
             self.depth -= 1
             self.out("}")
             return
@@ -455,61 +356,83 @@ class Emitter:
             return
         if isinstance(st, ast.Expr):
             if isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
-                # 函数的**文档字符串**在 `emit_fn` 里已经被摘出来发成 `///` 了
-                # （只认第一条）。**出现在这里的**是一句散落的字符串字面量 ——
-                # 它在 Python 里什么都不做，多半是写错了，报出来比丢掉好。
+                # 函数的文档字符串已在 `emit_fn` 摘走了；散落的字符串多半是写错了。
                 raise Unsupported(f"第 {st.lineno} 行: 这里有一句散落的字符串"
-                                  f"（只有函数第一句是文档字符串；"
-                                  f"要写注释用 `#` 或 `\"\"\"` 挪到函数开头）")
+                                  f"（只有函数第一句是文档字符串；注释用 `#`）")
             if not isinstance(st.value, ast.Call):
                 raise Unsupported(f"第 {st.lineno} 行: 表达式语句只收函数调用")
-            self.out(f"{self.raw(st.value, 'i64')};")
+            self.out(f"{self.raw(st.value)};")
             return
         if isinstance(st, ast.Pass):
             return
         raise Unsupported(f"第 {st.lineno} 行: 不支持语句 `{type(st).__name__}`"
                           f"（{_stmt_name(st)}）")
 
-    def _bind(self, name: str, value, st, decl_st) -> None:
-        """赋值/声明一条。
+    def _if_chain(self, st: ast.If) -> None:
+        """`if` / `elif` / `else` —— Loment 有 `else if`，保持那个形状（比嵌一层好读）。"""
+        self.out(f"if {self.ex(st.test, 'bool')} {{")
+        self.depth += 1
+        self.stmts(st.body)
+        self.depth -= 1
+        rest = st.orelse
+        while len(rest) == 1 and isinstance(rest[0], ast.If):
+            self.out(f"}} else if {self.ex(rest[0].test, 'bool')} {{")
+            self.depth += 1
+            self.stmts(rest[0].body)
+            self.depth -= 1
+            rest = rest[0].orelse
+        if rest:
+            self.out("} else {")
+            self.depth += 1
+            self.stmts(rest)
+            self.depth -= 1
+        self.out("}")
 
-        名字**已经在 `self.vars` 里**（形参、或已上提到函数头）就是纯赋值；
-        否则这是它的第一次出现，就地 `let`（类型按右值推 —— 见文件头 §语义选择 3）。
+    def _bind(self, name: str, value, st) -> None:
+        """赋值一条。名字**已经在 `self.vars` 里**（形参或之前赋过）就是纯赋值；
+        否则这是它的第一次出现，**就地 `let`**（类型按右值推 —— 见文件头 §决定 2）。
+
+        **不往函数头上提** —— Python 是函数级作用域而 Loment 是块级，那是迁移就
+        Python 的语义（文件头那条）。就地声明之后，"`if` 里赋的名外面要用"会由
+        Loment 的检查器报出来，那是对的。
         """
         sname = _safe(name)
+        # **先看它是不是循环变量** —— 再看类型。反过来的话，已经在 `vars` 里的
+        # 循环变量会走"纯赋值"那条路，悄悄绕开这条闸门。
+        if name in self._for_targets:
+            raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{name}` 赋值"
+                              f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
+                              f"不成立（CPython 每轮都会重置它）。改用 `while`")
         if name in self.vars:
             self.out(f"{sname} = {self.ex(value, self.vars[name])};")
             return
-        ty = self._decl_type(decl_st)
+        ty = self._decl_type(st)
         self.vars[name] = ty
         self.out(f"let {sname}: {ty} = {self.ex(value, ty)};")
 
+    def _decl_type(self, st) -> str:
+        """局部变量的类型：注解优先，否则看右值（比较/布尔/`not` 出 `bool`）。"""
+        if isinstance(st, ast.AnnAssign):
+            return _ty_of_annotation(st.annotation, f"第 {st.lineno} 行")
+        return self.ty_of(st.value)
+
+    def _loopvars(self, body: list) -> set[str]:
+        """这一层里 `for` 声明的循环变量名 —— 循环体不许给它们赋值（见 §`for`）。"""
+        out: set[str] = set()
+        for st in body:
+            if isinstance(st, ast.For) and isinstance(st.target, ast.Name):
+                out.add(st.target.id)
+        return out
+
+    #: 当前**正在发射的**循环体里那些循环变量。**在 `emit_fn` 里按函数新建** ——
+    #: 别做成类属性：那是可变的共享状态，会跨函数漏。
+    _for_targets: set[str]
+
     def _for(self, st: ast.For) -> None:
-        """`for i in range(…)` -> 一个**计次变量**推着 `i` 走。
+        """`for i in range(…)` -> `let i = a; while i < b { …; i = i + 1; }`。
 
-        ```
-        let i: i64 = 0;
-        let __t1: i64 = <start>;
-        while __t1 < <stop> {
-            i = __t1;              // 循环变量每一轮从这里取
-            <body>
-            __t1 = __t1 + 1;
-        }
-        ```
-
-        **为什么不直译成 `while i < n { …; i = i + 1; }`** —— 那样循环结束时 `i` 是
-        `n`，而 Python 的 `for` 结束时 `i` 停在**最后一个取到的值**（`n-1`）。
-        `scope.py` 那份语料里 `return x + total + i` 正好把这个差值抓出来了
-        （直译给 42，Python 给 40）—— **两边都编得过，只有数不一样**，正是这一门
-        最该防的形状。计次变量推着走就没有这个差：最后一轮 `i` 取到 `stop-1` 之后
-        `__t` 才加一，而 `i` 不再被改。
-
-        **不用改名**（与 C 那门不同）：Python 的 `for` 目标**写进当前函数作用域**，
-        没有新作用域 —— 就地用那个名字就是对的。（C 的 `for (int i = …)` 相反，
-        那是新作用域，所以那边要改名外提。）
-
-        只收 `range(n)` 与 `range(a, b)`：**带步进的 `range` 一律拒绝** —— 负步进、
-        空区间的边界都是要单独想清楚的东西，先不做，别猜。
+        **这是定义，不是搬运** —— 两个后果写在文件头 §`for` 里（终值是 `b`、
+        循环体不许给 `i` 赋值）。
         """
         if not isinstance(st.target, ast.Name):
             raise Unsupported(f"第 {st.lineno} 行: `for` 的目标不是单个名字")
@@ -528,28 +451,26 @@ class Emitter:
         else:
             start, stop = self.ex(it.args[0], "i64"), self.ex(it.args[1], "i64")
         self.gap()
-        if n not in self.vars:
-            # 空区间时 `i` 一次都不被赋 —— 这里给个确定的初值（见文件头 §语义选择 1）
+        if n in self.vars:
+            self.out(f"{sname} = {start};")
+        else:
             self.vars[n] = "i64"
-            self.out(f"let {sname}: i64 = 0;")
-        self.n_tmp += 1
-        tmp = f"__t{self.n_tmp}"
-        self.out(f"let {tmp}: i64 = {start};")
-        self.out(f"while {tmp} < {stop} {{")
+            self.out(f"let {sname}: i64 = {start};")
+        self.out(f"while {sname} < {stop} {{")
         self.depth += 1
-        self.out(f"{sname} = {tmp};")
+        self._for_targets.add(n)
         self.stmts(st.body)
-        self.out(f"{tmp} = {tmp} + 1;")
+        self._for_targets.discard(n)
+        self.out(f"{sname} = {sname} + 1;")
         self.depth -= 1
         self.out("}")
 
     # ---- 整个函数
     def emit_fn(self, node: ast.FunctionDef) -> str:
         self.vars = {}
-        self.hoisted = set()
+        self._for_targets = set()
         self.lines = []
         self.depth = 0
-        self.n_tmp = 0
         self.ret = "()"
         if node.decorator_list:
             raise Unsupported(f"第 {node.lineno} 行: 不支持装饰器")
@@ -567,10 +488,8 @@ class Emitter:
             ps.append(f"{_safe(a.arg)}: {t}")
         self.ret = _ty_of_annotation(node.returns, f"第 {node.lineno} 行 返回类型")
 
-        # **文档字符串 -> Loment 的 `///` 文档注释**（`Main.lomt` 那种写法）。
-        # 不是丢掉它 —— Python 的 docstring 是 `__doc__`，而 Loment 有它自己的文档注释
-        # 位置，转过去信息不丢。**先摘掉再预扫** —— 摘下来的那句不在 `body` 里，
-        # 所以 `_scan` 不会把它当成"一条语句"。
+        # **文档字符串 -> Loment 的 `///`**（`main.lomt` 那种写法）：不是丢掉它 ——
+        # Python 的 docstring 是 `__doc__`，本语言有它自己的文档注释位置。
         body = list(node.body)
         doc_lines: list[str] = []
         if body and isinstance(body[0], ast.Expr) \
@@ -580,52 +499,25 @@ class Emitter:
                          body[0].value.value.strip().splitlines()]
             body = body[1:]
 
-        # 作用域预扫：最外层赋值在嵌套块里的名字要上提到函数头（见文件头 §语义选择）
-        first: dict = {}
-        self._scan(body, 0, first)
-        self.hoisted = {n for n, (d, _st) in first.items() if d > 0 and n not in self.vars}
-
         self.lines += [ln.rstrip() for ln in doc_lines]
         head = f"pub fn {node.name}({', '.join(ps)})"
         if self.ret != "()":
             head += f" -> {self.ret}"
         self.lines.append(head + " {")
-        # 上提的声明：**一个一行、带类型**。零初值是刻意的（见文件头 §语义选择 1）。
-        #
-        # **类型要真推**：`x = (a < b)` 上提的应该是 `bool`，照发 `let x: i64 = 0;`
-        # 就把类型改掉了（而且后面的 `x = (a < b);` 会变成 bool 赋给 i64，编不过）。
-        # 推不出来（右值里有别的新名字）就落到 `i64` —— 那是最常见的一档。
-        hoist_ty: dict[str, str] = {}
-        for n in self.hoisted:
-            try:
-                ty = self._decl_type(first[n][1])
-            except (Unsupported, PyError, AssertionError):
-                ty = "i64"
-            if ty == "()":
-                ty = "i64"
-            hoist_ty[n] = ty
-            self.vars[n] = ty
-        for n in sorted(self.hoisted):
-            zero = "false" if hoist_ty[n] == "bool" else "0"
-            self.out(f"let {_safe(n)}: {hoist_ty[n]} = {zero};")
-        if self.hoisted:
-            self.lines.append("")
         self.stmts(body)
         self.lines.append("}")
         return "\n".join(self.lines)
 
 
 def _stmt_name(st) -> str:
-    return {"Break": "Loment 没有 `break`；改写条件",
+    return {"Break": "Loment 没有 `break`；改写条件或提前 return",
             "Continue": "Loment 没有 `continue`；用一个 did 标志改写",
             "Try": "没有异常", "With": "没有上下文管理器",
             "Import": "没有模块", "ImportFrom": "没有模块",
             "Global": "没有全局变量", "Nonlocal": "没有嵌套函数",
-            "Delete": "没有 `del`",
-            "Raise": "没有异常",
+            "Delete": "没有 `del`", "Raise": "没有异常",
             "Assert": "没有 `assert`（写成 `if not c { return …; }`）",
-            "FunctionDef": "不支持嵌套函数",
-            "ClassDef": "不支持类",
+            "FunctionDef": "不支持嵌套函数", "ClassDef": "不支持类",
             "Match": "没有 `match`（写成 if/elif 链）",
             }.get(type(st).__name__, "")
 
@@ -639,48 +531,6 @@ def _expr_name(e) -> str:
             }.get(type(e).__name__, "")
 
 
-# ---------------------------------------------------------------- 辅助函数
-
-#: `//` 与 `%` 的适配层（`docs/187` §为什么）。**只在用到时发** —— 确定性，没有死代码。
-#:
-#: 恒等式（`b != 0`）：`py_mod = ((a % b) + b) % b`，`py_floordiv = (a - py_mod)/b`。
-#: `loment/pytrans/floordiv.py` 那份语料的期望值就是照这个推的，四个符号组合都验过。
-_HELPERS = {
-    _PY_MOD: """/// Python 的 `a % b`（**向下取整**）—— Loment 的 `%` 是向零截断的
-/// （实测 `-7 % 2` 在本语言里是 `-1`，Python 是 `1`）。两边符号相同时它俩一样，
-/// 所以这个包装只在**符号不同**时才起作用。
-fn __py_mod(a: i64, b: i64) -> i64 {
-    let m: i64 = a % b;
-    if m != 0 && ((m < 0) != (b < 0)) {
-        return m + b;
-    }
-    return m;
-}
-""",
-    _PY_FLOORDIV: """/// Python 的 `a // b`（**向下取整**）。用 `__py_mod` 把余数拉到 Python 那一侧，
-/// 再用本语言向零截断的 `/` 除 —— 减掉余数之后正好整除，截断与下取整结果相同。
-fn __py_floordiv(a: i64, b: i64) -> i64 {
-    return (a - __py_mod(a, b)) / b;
-}
-""",
-}
-
-
-def _emit_helpers(needed: set[str], user_names: set[str]) -> list[str]:
-    """按需发辅助函数。**撞名就报错** —— 静默改语义是最坏的一种。"""
-    out = []
-    for h in (_PY_MOD, _PY_FLOORDIV):
-        if h not in needed:
-            continue
-        if h in user_names:
-            raise Unsupported(f"辅助函数名 `{h}` 与单元里的函数撞名了 —— "
-                              f"改掉那个函数名（辅助函数是生成物，不该被用户占用）")
-        out.append(_HELPERS[h].rstrip("\n"))
-        if h == _PY_FLOORDIV:
-            needed.add(_PY_MOD)   # `__py_floordiv` 要调它 —— 但顺序上它在前，已在表里
-    return out
-
-
 # ---------------------------------------------------------------- 入口
 
 
@@ -688,7 +538,7 @@ def parse(src: str) -> tuple[list, list, str]:
     """`(函数, 常量, 模块文档字符串)`。
 
     常量是 `NAME = <整数>` 并且名字全大写（与 `potato_from` 同一条判据）。
-    模块文档字符串**收下**并原样带走 —— 它转成 `//` 注释发出去，不是丢掉。
+    模块文档字符串**收下**并原样带走 —— 转成 `//` 注释发出去，不是丢掉。
     """
     tree = ast.parse(src)
     fns, consts = [], []
@@ -726,18 +576,18 @@ def parse(src: str) -> tuple[list, list, str]:
 
 def translate(src: str, keep: set[str] | None = None,
               consts: dict[str, str] | None = None) -> str:
-    """Python 源码 -> Loment 源码（**只有常量、辅助函数与函数**，`module` 头由调用方加）。
+    """Python 写法的源码 -> Loment 源码（**只有常量与函数**，`module` 头由调用方加）。
 
     `keep` 给了就只翻这些函数；`consts` 是**调用方那边已知的模块常量**（名字 -> 类型）
-    —— `lomt_from --impl` 走这条路时，正文里只有函数（常量在 Potato 的 `consts` 里，
-    由它自己发 `pub const`），不给这张表的话函数体里一引用常量就会报"没赋过值"。
+    —— `lomt_from --impl` 走这条路时正文里只有函数，常量在 Potato 的 `consts` 里、
+    由它自己发 `pub const`；不给这张表的话函数体里一引用常量就报"没赋过值"。
     """
     fns, mod_consts, doc = parse(src)
-    sig: dict[str, tuple[list[str], str]] = {}
+    sig: dict[str, str] = {}
     for f in fns:
-        args = [_ty_of_annotation(a.annotation, f"第 {f.lineno} 行 参数 {a.arg}")
-                for a in f.args.args]
-        sig[f.name] = (args, _ty_of_annotation(f.returns, f"第 {f.lineno} 行 返回类型"))
+        sig[f.name] = _ty_of_annotation(f.returns, f"第 {f.lineno} 行 返回类型")
+        for a in f.args.args:                       # 顺带把参数注解也验一遍
+            _ty_of_annotation(a.annotation, f"第 {f.lineno} 行 参数 {a.arg}")
     seen: set[str] = set()
     for f in fns:
         if f.name in seen:
@@ -747,13 +597,6 @@ def translate(src: str, keep: set[str] | None = None,
 
     cenv = {n: "i64" for n, _v in mod_consts}
     cenv.update(consts or {})       # 调用方那侧已知的常量（见 docstring）
-    body_parts, needed = [], set()
-    for f in fns:
-        if keep is not None and f.name not in keep:
-            continue
-        em = Emitter(sig, cenv)
-        body_parts.append(em.emit_fn(f))
-        needed |= em.helpers
 
     out: list[str] = []
     if doc:
@@ -762,19 +605,17 @@ def translate(src: str, keep: set[str] | None = None,
     if mod_consts:
         out.append("// ---- 模块常量")
         out += [f"pub const {n}: i64 = {v};" for n, v in mod_consts]
-    helpers = _emit_helpers(needed, seen)
-    if helpers:
-        out.append("")
-        out.append("// ---- `//` `%` 的适配层（Python 是向下取整，本语言的 `/` `%` 是向零截断）")
-        out += helpers
-    if body_parts:
-        out.append("")
-        out += body_parts
-    return "\n\n".join(x for x in out if x.strip()) + "\n"
+    for f in fns:
+        if keep is not None and f.name not in keep:
+            continue
+        if out:
+            out.append("")
+        out.append(Emitter(sig, cenv).emit_fn(f))
+    return "\n".join(out) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="pytrans", description="Python 子集 -> Loment")
+    ap = argparse.ArgumentParser(prog="pytrans", description="Python 写法 -> Loment")
     ap.add_argument("path")
     ap.add_argument("--out", metavar="PATH")
     a = ap.parse_args(argv)
