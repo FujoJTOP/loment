@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,8 +65,12 @@ def _check(src: str) -> tuple[Path, Path]:
     return f, d
 
 
-def _render(diag: Path) -> tuple[int, str]:
-    r = subprocess.run([str(_bin()), str(diag)], capture_output=True, text=True,
+def _render(diag: Path, *extra: str, color: bool = False) -> tuple[int, str]:
+    """默认**关色**跑：这些判据断的是"渲染出了什么"，转义字节混在里面只会让每条断言
+    都得先剥一层。上色本身由 `test_color_on_by_default_and_gone_with_no_color` 专测
+    （那条既验默认开、也验关掉之后一个字节不剩）。"""
+    args = [str(_bin())] + ([] if color else ["--no-color"]) + list(extra) + [str(diag)]
+    r = subprocess.run(args, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", shell=False, timeout=60)
     return r.returncode, r.stdout + r.stderr
 
@@ -178,6 +183,45 @@ def test_caret_points_at_the_named_symbol_and_never_at_a_comment():
     assert caret_run(outb) == len(code), (caret_run(outb), len(code), outb[-400:])
     assert "缺 weight，这里也写了" not in outb.split("| ")[-1] or True
     print("      插入符: 命中唯一名字就点它；否则划代码段 —— 注释永不参与")
+
+@test
+def test_color_on_by_default_and_gone_with_no_color():
+    """上色**默认开**，`--no-color` 之后**一个转义字节都不剩** —— 与 `lomcli` 同一套。
+
+    仓里已经有一套现成的约定（`lomcli` 的 `color_on` / `--no-color` / `-C`，`docs/169` §6
+    有一格判据钉它的观感），报错器**照抄那套**而不是另发明一个 —— 两个工具对同一个开关
+    给出不同行为，比"没上色"更坏。
+
+    关掉之后必须**一个字节都不剩**：管道里那些 `ESC[0m` 是可见垃圾
+    （`loment check f.lomt | less` 就是这个用法）。这条同时钉住**开关位置任意**
+    （与 `lomcli` 那条"开关位置任意、不吞命令"是同一条纪律）。
+    """
+    _, d = _check(SEMANTIC)
+    rc, on = _render(d, color=True)
+    assert rc == 1
+    esc = "\x1b["
+    assert esc in on, "默认没上色"
+    assert "\x1b[1;31merror[" in on, f"错误头不是红的: {on[:80]!r}"
+    assert "\x1b[1;36m-->" in on, f"位置那行不是青的: {on[:160]!r}"
+    assert "\x1b[1m" in on, "标签没有加粗"
+
+    for flag in ("--no-color", "-C"):
+        rc2, off = _render(d, flag)
+        assert rc2 == 1, rc2
+        assert "\x1b" not in off, f"{flag} 之后还有转义: {off[:120]!r}"
+
+    # 位置任意：开关放在**文件后面**也要认
+    r = subprocess.run([str(_bin()), str(d), "--no-color"], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", shell=False,
+                       timeout=60)
+    assert "\x1b" not in (r.stdout + r.stderr), "开关放在文件后面也该认"
+    assert r.returncode == 1, r.returncode
+
+    # 关掉之后**正文一字不变**：只是不上色，不是少印东西
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", on)
+    assert plain == off, "上色与不上色的正文应当逐字节相同（只差转义）"
+    print("      上色默认开；--no-color / -C（位置任意）之后一个转义不剩，正文不变")
+
 
 @test
 def test_unknown_code_is_said_out_loud():
@@ -430,9 +474,9 @@ def test_launcher_renders_with_it_and_says_so_without_it():
     env = dict(os.environ)
     env["PATH"] = f"{shp(Path('/usr/bin'))}:{shp(Path('/bin'))}:{env.get('PATH', '')}"
 
-    def run(pf: Path) -> str:
+    def run(pf: Path, *args: str) -> str:
         r = subprocess.run([bash, shp(pf / "bin" / "loment"), "check",
-                            shp(pf / "src.lomt")],
+                            shp(pf / "src.lomt"), *args],
                            cwd=str(pf), env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", shell=False, timeout=60)
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
@@ -448,7 +492,17 @@ def test_launcher_renders_with_it_and_says_so_without_it():
     assert "PLAIN-DRIVER-OUTPUT" in without_it, f"缺席时该退回裸诊断: {without_it!r}"
     assert "no lomenterr" in without_it, (
         f"缺席时**必须说一句** —— 静默换掉渲染器正是这条纪律要挡的: {without_it!r}")
-    print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说")
+
+    # **开关要送到渲染器手里**，不只是启动器认得：桩渲染器把自己的 argv 打出来，
+    # 所以这一条直接看得到 `--no-color` 有没有被转交。两个位置都试 ——
+    # `loment check FILE --no-color` 与 `loment check --no-color FILE`。
+    for spelling in ("--no-color", "-C"):
+        got_nc = run(make_pkg(True), spelling)
+        # 启动器**原样转交**用户那个写法（不归一化）—— 两种拼法 `lomenterr` 都认，
+        # 所以转交时改写成另一种是没有意义的动作。
+        assert "RENDERED-BY-LOMENTERR" in got_nc and spelling in got_nc, (
+            f"{spelling} 没被转交给渲染器: {got_nc!r}")
+    print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, --no-color 转交到位")
 
 
 # ---------------------------------------------------------------- 入口

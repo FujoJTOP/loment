@@ -109,13 +109,15 @@ def build_lomenterr(force: bool = False) -> Path:
 
 
 def cmd_err(a) -> int:
-    """`loment err 诊断.jsonl` —— 把编译器吐的结构化诊断渲染给人看 (docs/182 §6)。
+    """`loment err 诊断.jsonl [--no-color]` —— 把结构化诊断渲染给人看 (docs/182 §6)。
 
     **包里的自动渲染在启动器那边** (`bin/loment` / `loment.cmd` 在 check/build/run 失败时
-    自己起 `lomenterr`), 仓库侧这个子命令是同一个程序的开发入口。
+    自己起 `lomenterr`), 仓库侧这个子命令是同一个程序的开发入口。`--no-color` 与
+    `lomcli` 那套同名同义（默认上色）；管道里要干净输出就带上它。
     """
     exe = build_lomenterr(force=a.rebuild)
-    return subprocess.run([str(exe), a.file], shell=False).returncode
+    args = [str(exe)] + (["--no-color"] if a.no_color else []) + [a.file]
+    return subprocess.run(args, shell=False).returncode
 
 
 def cmd_ir(a) -> int:
@@ -356,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
     g.set_defaults(fn=cmd_diag)
     e = sub.add_parser("err"); e.add_argument("file")
     e.add_argument("--rebuild", action="store_true", help="忽略缓存, 重编报错器")
+    e.add_argument("--no-color", action="store_true",
+                   help="不上色（与 lomcli 同一个开关；默认上色）")
     e.set_defaults(fn=cmd_err)
     i = sub.add_parser("ir"); i.add_argument("file"); i.add_argument("--objdump", action="store_true")
     i.set_defaults(fn=cmd_ir)

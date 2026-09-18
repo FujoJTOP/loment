@@ -132,9 +132,10 @@ find_lomelf() {
 # fix - docs/182 sec 6). Without it we fall back to the driver's plain lines, and SAY SO:
 # silently swapping the renderer is exactly what this contract forbids.
 report_diags() {
-    dfile=$1; derr=$2
+    dfile=$1; derr=$2; nc=${3:-}
     if [ -s "$dfile" ] && tool lomenterr >/dev/null 2>&1; then
-        "$(tool lomenterr)" "$dfile"
+        # Word-splitting on $nc is intentional: empty -> no argument at all.
+        "$(tool lomenterr)" $nc "$dfile"
         return 0
     fi
     [ -s "$derr" ] && cat "$derr" >&2
@@ -150,7 +151,8 @@ usage() {
 Loment @DISPLAY@  (@VERSION@)
   loment version              print version
   loment ir FILE              compile to LLVM IR on stdout
-  loment check FILE           check only (diagnostics on stderr, IR discarded)
+  loment check FILE [--no-color]
+                              check only (diagnostics on stderr, IR discarded)
   loment build FILE [-o OUT] [--link OBJ...]
                               compile and link; --link adds a foreign object (FFI)
   loment run FILE             compile, link and run
@@ -171,17 +173,29 @@ case "${1:-help}" in
     version|-v|--version)
         cat "$share/version" ;;
     ir|check)
-        mode=$1; [ $# -eq 2 ] || { usage >&2; exit 2; }
+        mode=$1; shift
+        [ $# -ge 1 ] || { usage >&2; exit 2; }
+        src=$1; shift
+        # The colour switch is accepted here and forwarded to the RENDERER only - the
+        # driver never sees it. Position is free (before or after the file), same as
+        # `loment-cli`'s own --no-color (`docs/169` has a case pinning that).
+        nc=
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -C|--no-color) nc=$1; shift ;;
+                *) echo "loment: unknown option $1" >&2; exit 2 ;;
+            esac
+        done
         need loment-driver loment-driver
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         rc=0
         if [ "$mode" = ir ]; then
-            "$(tool loment-driver)" "$(to_posix "$2")" --diag-out "$tmp/d.jsonl" 2>"$tmp/e.txt" || rc=$?
+            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" 2>"$tmp/e.txt" || rc=$?
         else
-            "$(tool loment-driver)" "$(to_posix "$2")" --diag-out "$tmp/d.jsonl" >/dev/null 2>"$tmp/e.txt" || rc=$?
+            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" >/dev/null 2>"$tmp/e.txt" || rc=$?
         fi
         if [ $rc -ne 0 ]; then
-            report_diags "$tmp/d.jsonl" "$tmp/e.txt"
+            report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc"
             exit 1
         fi
         [ -s "$tmp/e.txt" ] && cat "$tmp/e.txt" >&2
@@ -218,11 +232,13 @@ case "${1:-help}" in
         src=$1; shift
         out=
         links=()
+        nc=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
                 # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
+                -C|--no-color) nc=$1; shift ;;
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -232,7 +248,7 @@ case "${1:-help}" in
         rc=0
         "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" > "$tmp/a.ll" 2>"$tmp/e.txt" || rc=$?
         if [ $rc -ne 0 ]; then
-            report_diags "$tmp/d.jsonl" "$tmp/e.txt"
+            report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc"
             exit 1
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
@@ -321,16 +337,24 @@ set "cmode=c"
 rem Shared by ir and check: compile, and on failure hand the structured diagnostics (and
 rem the driver's own plain output) to :report_diags. NOTE: no parenthesised blocks around
 rem anything that reads %ERRORLEVEL% -- it expands at parse time there.
+rem
+rem The file and the colour switch are picked out of the whole command line, so that
+rem `check FILE --no-color` and `check --no-color FILE` both work -- the bash launcher
+rem accepts both too. %~2 alone would break the second spelling.
+set "csrc="
+set "cnc="
+for %%A in (%*) do call :scan_arg "%%~A"
+if not defined csrc goto usage
 set "dtmp=%TEMP%\loment-d%RANDOM%%RANDOM%"
 mkdir "%dtmp%" >nul 2>nul
 if "%cmode%"=="i" goto compile_only_ir
-"%here%loment-driver.exe" "%~2" --diag-out "%dtmp%\d.jsonl" >nul 2>"%dtmp%\e.txt"
+"%here%loment-driver.exe" "%csrc%" --diag-out "%dtmp%\d.jsonl" >nul 2>"%dtmp%\e.txt"
 goto compile_only_done
 :compile_only_ir
-"%here%loment-driver.exe" "%~2" --diag-out "%dtmp%\d.jsonl" 2>"%dtmp%\e.txt"
+"%here%loment-driver.exe" "%csrc%" --diag-out "%dtmp%\d.jsonl" 2>"%dtmp%\e.txt"
 :compile_only_done
 set "crc=%ERRORLEVEL%"
-if not "%crc%"=="0" call :report_diags "%dtmp%\d.jsonl" "%dtmp%\e.txt"
+if not "%crc%"=="0" call :report_diags "%dtmp%\d.jsonl" "%dtmp%\e.txt" "%cnc%"
 if "%crc%"=="0" if exist "%dtmp%\e.txt" type "%dtmp%\e.txt" 1>&2
 del /q "%dtmp%\d.jsonl" "%dtmp%\e.txt" >nul 2>nul
 rmdir "%dtmp%" >nul 2>nul
@@ -389,10 +413,16 @@ if "%~1"=="" goto barg_done
 if /I "%~1"=="-o" goto barg_out
 if /I "%~1"=="--out" goto barg_out
 if /I "%~1"=="--link" goto barg_link
+if /I "%~1"=="-C" goto barg_nc
+if /I "%~1"=="--no-color" goto barg_nc
 rem Unknown options are REJECTED, not ignored: silently dropping `--link` used to end in
 rem "undefined label: c_add" from the linker, which points the user at the wrong thing.
 echo loment: unknown option %~1 1>&2
 exit /b 2
+:barg_nc
+set "cnc=%~1"
+shift
+goto barg_loop
 :barg_out
 set "out=%~2"
 shift
@@ -411,7 +441,7 @@ set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
-if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc%"
 if not "%drc%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
@@ -422,7 +452,7 @@ set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
-if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc%"
 if not "%drc%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
@@ -480,7 +510,8 @@ exit /b %ERRORLEVEL%
 echo Loment @DISPLAY@  (@VERSION@)
 echo   loment version              print version
 echo   loment ir FILE              compile to LLVM IR on stdout
-echo   loment check FILE           check only (diagnostics on stderr, IR discarded)
+echo   loment check FILE [--no-color]
+                              check only (diagnostics on stderr, IR discarded)
 echo   loment build FILE [-o OUT] [--link OBJ...]
                               compile and link; --link adds a foreign object (FFI)
 echo   loment run FILE             compile, link and run
@@ -508,7 +539,24 @@ if "%rf%"=="1" echo loment: no lomenterr in this package - showing the compiler'
 exit /b 0
 
 :report_render
+if "%~3"=="" goto report_render_plain
+"%here%lomenterr.exe" %~3 "%~1"
+exit /b 0
+:report_render_plain
 "%here%lomenterr.exe" "%~1"
+exit /b 0
+
+rem %1 = one argument from the command line; sets csrc (the first non-command, non-flag
+rem word) and cnc (the colour switch). Reached only via `call` from :compile_only.
+:scan_arg
+if /I "%~1"=="ir" exit /b 0
+if /I "%~1"=="check" exit /b 0
+if /I "%~1"=="--no-color" goto scan_nc
+if /I "%~1"=="-C" goto scan_nc
+if not defined csrc set "csrc=%~1"
+exit /b 0
+:scan_nc
+set "cnc=--no-color"
 exit /b 0
 '''
 

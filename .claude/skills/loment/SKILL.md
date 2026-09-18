@@ -55,6 +55,8 @@ loment version
 | `loment doctor` / `where` / `env` / `tools` | 排查安装（缺哪个组件、装在哪） |
 
 `--no-color`（或 `loment color off`）关掉 ANSI —— 管道里要干净输出时用它。
+**它同时管诊断那一侧**：`loment check FILE --no-color` 会把开关转交给报错器，
+关掉之后输出里一个转义字节都不剩（`loment check f.lomt | less` 就该这么用）。
 
 > ### 任务碰到"库 / 依赖"，**先去读 lompi 的指南**
 >

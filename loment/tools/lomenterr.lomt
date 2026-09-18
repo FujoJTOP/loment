@@ -58,6 +58,11 @@ const C_TRUNC: u32 = 57384;     // 这一条渲染时撞到了缓冲上沿 (0/1)
 const C_TOK: u32 = 57408;       // 语言特征词的暂存 (一段 <= 60 字节)
 const C_FPREV: u32 = 57472;      // 已经给过外源提示的那个文件路径
 const C_FPREVLEN: u32 = 61568;
+const C_COLOR: u32 = 61572;      // 1 = 上色（默认开，见 §颜色）
+
+//: `scr` 里留给"扫 argv 扫出来的那个路径"的一段。open_ro 自己用 scr[0..4001]，
+//: 所以这一段必须从它后面起 —— 扫完再调 open_ro 把它抄到前面去。
+const SCR_DIAG: u32 = 4096;
 
 // 字符常量走数字, 免得每处都要 `as u8`
 const NL: u32 = 10;
@@ -126,10 +131,14 @@ fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
     return syscall4(257, (0 as u64) - 100, scr as u64, 0);
 }
 
-/// 从 `/proc/self/cmdline` 取 argv[1]: 返回 (start << 32) | len, 0 = 没有。
+/// 第 `idx` 个 argv（0 = 程序名）的 `(起点 << 32) | 长度`；0 = 没有。
 /// PE 上这条路是运行库合成的 (`lomelf.py` 的 `PE_CMDLINE`), 两边读法一致。
-fn argv1(buf: ptr, cap: u64, scr: ptr) -> u64 {
-    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"), 18, scr);
+///
+/// **每次调用都重写 `buf`** —— 所以调用方要么当场比完，要么先把要留的那段抄走。
+/// 与自举驱动的 `argv_at` 同一形状。
+fn argv_at(buf: ptr, cap: u64, scr: ptr, idx: u32) -> u64 {
+    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"),
+                          str_len("/proc/self/cmdline"), scr);
     if fd < 0 {
         return 0;
     }
@@ -138,21 +147,81 @@ fn argv1(buf: ptr, cap: u64, scr: ptr) -> u64 {
     if n <= 0 {
         return 0;
     }
-    let m: u32 = n as u32;
-    let i: u32 = 0;
-    while i < m && load8(buf, i) != 0 {
+    let i: u64 = 0;
+    let k: u32 = 0;
+    while k < idx {
+        while i < n as u64 && load8(buf, i as u32) != 0 {
+            i = i + 1;
+        }
+        if i >= n as u64 {
+            return 0;
+        }
+        i = i + 1;
+        k = k + 1;
+    }
+    let s: u64 = i;
+    while i < n as u64 && load8(buf, i as u32) != 0 {
         i = i + 1;
     }
-    i = i + 1;
-    let s: u32 = i;
-    while i < m && load8(buf, i) != 0 {
-        i = i + 1;
-    }
-    let alen: u32 = i - s;
-    if alen == 0 {
+    if i == s {
         return 0;
     }
-    return (s as u64) * 4294967296 + (alen as u64);
+    return (s << 32) | (i - s);
+}
+
+/// `p[0..n]` 是不是 `s`。
+fn arg_is(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 扫一遍 argv：认 `--no-color` / `-C`（**与 `lomcli` 同一套开关、同一个默认值**），
+/// 并把**第一个不是开关的那个参数**（诊断文件）抄进 `scr + SCR_DIAG`。
+/// 返回它的 `(SCR_DIAG << 32) | len`，0 = 没给。
+///
+/// **为什么不直接取 argv[1]**：启动器会把用户的 `--no-color` **原样**带进来，
+/// 而它在文件名前面还是后面都合法 —— 与 `lomcli` 那条"开关位置任意、且不吞命令"
+/// 是同一条纪律（`docs/169` §6 有一格判据专门钉它）。
+fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
+    let found: u32 = 0;
+    let k: u32 = 1;
+    let go: u32 = 1;
+    // **没有 `break`**（Loment 里没有这个关键字）—— 用一个"还走不走"的变量收尾。
+    while k < 64 && go == 1 {
+        let a: u64 = argv_at(ab, 65536, sc, k);
+        if a == 0 {
+            go = 0;
+        } else {
+            let p: ptr = ptr_add(ab, (a >> 32) as u32);
+            let n: u32 = (a % 4294967296) as u32;
+            if arg_is(p, n, "--no-color") == 1 || arg_is(p, n, "-C") == 1 {
+                store32(ctx, C_COLOR, 0);
+            } else {
+                if found == 0 {
+                    let i: u32 = 0;
+                    while i < n && i < 4000 {
+                        store8(sc, SCR_DIAG + i, load8(p, i) as u8);
+                        i = i + 1;
+                    }
+                    found = i;
+                }
+            }
+            k = k + 1;
+        }
+    }
+    if found == 0 {
+        return 0;
+    }
+    return (SCR_DIAG as u64) * 4294967296 + (found as u64);
 }
 
 fn strip_cr(buf: ptr, n: u32) -> u32 {
@@ -224,10 +293,43 @@ fn em_u32(ctx: ptr, o: u32, v: u32) -> u32 {
 
 /// 写一段可能**内嵌换行**的文字 (修复建议里有 `\n`)。续行补 gutter 前缀, 不然第二行
 /// 会顶到最左边、看着像另一条诊断。
+// ---------------------------------------------------------------- 颜色
+//
+// **跟着 `lomcli` 那一套走，不另发明约定**（`docs/169` §6 有一格判据钉着它的观感）：
+// `ESC [ <码> m`、**默认开**、`--no-color` / `-C` 关掉、关掉之后**一个字节都不剩**。
+//
+// 为什么可以默认开：`lomcli` 已经这么发了，两个工具的开关行为不一致才是更坏的事。
+// 管道里要干净输出就 `--no-color` —— 这和 `loment help | less` 是同一个用法。
+//
+// **不敢多做的一件**：看不出 fd 是不是终端（PE 垫片没实现 ioctl，也没有
+// `SetConsoleMode` 去开 VT），所以做不到 rustc 那种"tty 才上色"。默认开 + 显式关，
+// 是在这个约束下唯一自洽的选择。
+
+/// 往渲染缓冲里追加 `ESC [ <code> m`。关着时**一个字节都不写**（判据钉着）。
+fn em_col(ctx: ptr, o: u32, code: str) -> u32 {
+    if load32(ctx, C_COLOR) == 0 {
+        return o;
+    }
+    o = em_byte(ctx, o, 27);
+    o = em_byte(ctx, o, 91);
+    let i: u32 = 0;
+    while i < str_len(code) {
+        o = em_byte(ctx, o, str_byte(code, i));
+        i = i + 1;
+    }
+    return em_byte(ctx, o, 109);
+}
+
+fn em_rst(ctx: ptr, o: u32) -> u32 {
+    return em_col(ctx, o, "0");
+}
+
 /// gutter 前缀：`<w+1 个空格>| `。诊断正文的每一行都从它起头，视觉上挂在源码那一段下面。
 fn em_gut(ctx: ptr, o: u32, w: u32) -> u32 {
     o = em_pad(ctx, o, w + 1);
-    return em(ctx, o, "| ");
+    o = em_col(ctx, o, "1;30");
+    o = em(ctx, o, "| ");
+    return em_rst(ctx, o);
 }
 
 /// 写一段可能**内嵌换行**的文字（说明卡与语言卡里都有）。
@@ -421,6 +523,7 @@ fn src_ensure(ctx: ptr, sr: ptr, sc: ptr, plen: u32) -> u32 {
 // ---------------------------------------------------------------- 渲染
 
 fn h_head(ctx: ptr, o: u32, cnum: u32, clen: u32) -> u32 {
+    o = em_col(ctx, o, "1;31");
     o = em(ctx, o, "error[");
     let k: u32 = 0;
     while k < clen {
@@ -428,20 +531,23 @@ fn h_head(ctx: ptr, o: u32, cnum: u32, clen: u32) -> u32 {
         k = k + 1;
     }
     o = em(ctx, o, "]: ");
+    o = em_rst(ctx, o);
     // 判据是**查出来的标题空不空**, 不是"码号解出来没有" —— 解得出 42 而表里没有 42,
     // 也是一样的处境 (表是工具链自带的, 另一个版本可能多发了一个码)。
     let t: str = code_title(cnum);
     if str_len(t) == 0 {
         return em(ctx, o, "未知错误码\n");
     }
+    o = em_col(ctx, o, "1");
     o = em(ctx, o, t);
+    o = em_rst(ctx, o);
     return em(ctx, o, "\n");
 }
 
 /// 源文件读不到时也要说一句 —— 否则"没有源码那两行"看起来像渲染坏了。
 fn h_nosrc(ctx: ptr, o: u32, w: u32, plen: u32) -> u32 {
-    o = em_pad(ctx, o, w + 1);
-    o = em(ctx, o, "| (读不到源文件: ");
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "(读不到源文件: ");
     let k: u32 = 0;
     while k < plen {
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
@@ -452,6 +558,7 @@ fn h_nosrc(ctx: ptr, o: u32, w: u32, plen: u32) -> u32 {
 
 fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
     o = em_pad(ctx, o, w + 1);
+    o = em_col(ctx, o, "1;36");
     o = em(ctx, o, "--> ");
     let k: u32 = 0;
     while k < plen {
@@ -464,9 +571,13 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
     }
+    o = em_rst(ctx, o);
     o = em(ctx, o, "\n");
     o = em_pad(ctx, o, w + 1);
-    return em(ctx, o, "|\n");
+    o = em_col(ctx, o, "1;30");
+    o = em(ctx, o, "|");
+    o = em_rst(ctx, o);
+    return em(ctx, o, "\n");
 }
 
 /// 源码那两行。`col == 0` 表示**编译器只给了行号** (check() 的语义诊断都是这样):
@@ -474,8 +585,8 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
 fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen: u32) -> u32 {
     let sp: u64 = line_span(sr, srl, line);
     if sp == 18446744073709551615 as u64 {
-        o = em_pad(ctx, o, w + 1);
-        return em(ctx, o, "| (源文件里没有这一行)\n");
+        o = em_gut(ctx, o, w);
+        return em(ctx, o, "(源文件里没有这一行)\n");
     }
     let st: u32 = (sp / 4294967296) as u32;
     let ln: u32 = (sp % 4294967296) as u32;
@@ -487,15 +598,17 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen
         k = k + 1;
     }
     o = em(ctx, o, "\n");
-    o = em_pad(ctx, o, w + 1);
-    o = em(ctx, o, "| ");
+    o = em_gut(ctx, o, w);
     if col > 0 {
         let t: u32 = 1;
         while t < col {
             o = em_byte(ctx, o, SP);
             t = t + 1;
         }
-        return em(ctx, o, "^\n");
+        o = em_col(ctx, o, "1;31");
+        o = em(ctx, o, "^");
+        o = em_rst(ctx, o);
+        return em(ctx, o, "\n");
     }
     let a: u32 = first_visible(sr, st, ln);
     let b: u32 = after_visible(sr, st, ln);
@@ -531,11 +644,13 @@ fn h_snip_nocol(ctx: ptr, o: u32, sr: ptr, st: u32, a: u32, b: u32, mlen: u32) -
                 o = em_byte(ctx, o, SP);
                 t = t + 1;
             }
+            o = em_col(ctx, o, "1;31");
             let q: u32 = 0;
             while q < hn {
                 o = em_byte(ctx, o, 94);
                 q = q + 1;
             }
+            o = em_rst(ctx, o);
             return em(ctx, o, "\n");
         }
     }
@@ -544,11 +659,13 @@ fn h_snip_nocol(ctx: ptr, o: u32, sr: ptr, st: u32, a: u32, b: u32, mlen: u32) -
         o = em_byte(ctx, o, SP);
         t1 = t1 + 1;
     }
+    o = em_col(ctx, o, "1;31");
     let t2: u32 = a;
     while t2 < a + w2 {
         o = em_byte(ctx, o, 94);
         t2 = t2 + 1;
     }
+    o = em_rst(ctx, o);
     return em(ctx, o, "\n");
 }
 
@@ -657,8 +774,10 @@ fn h_msg(ctx: ptr, o: u32, off: u32, n: u32, w: u32) -> u32 {
     if a >= n {
         return o;
     }
-    o = em_pad(ctx, o, w + 1);
-    o = em(ctx, o, "| 消息: ");
+    o = em_gut(ctx, o, w);
+    o = em_col(ctx, o, "1");
+    o = em(ctx, o, "消息: ");
+    o = em_rst(ctx, o);
     let k: u32 = a;
     while k < n {
         o = em_byte(ctx, o, load8(ctx, off + k));
@@ -676,10 +795,13 @@ fn h_card(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
     if nfix == 0 {
         return h_unknown(ctx, o, w);
     }
-    o = h_sect(ctx, o, w, "错了什么", code_what(cnum));
-    o = h_sect(ctx, o, w, "为什么错", code_why(cnum));
+    o = h_sect(ctx, o, w, "错了什么", code_what(cnum), "1");
+    o = h_sect(ctx, o, w, "为什么错", code_why(cnum), "1");
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "怎么改:\n");
+    o = em_col(ctx, o, "1");
+    o = em(ctx, o, "怎么改:");
+    o = em_rst(ctx, o);
+    o = em(ctx, o, "\n");
     let i: u32 = 0;
     while i < nfix {
         o = em_gut(ctx, o, w);
@@ -690,8 +812,8 @@ fn h_card(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
         o = em(ctx, o, "\n");
         i = i + 1;
     }
-    o = h_sect(ctx, o, w, "支持", code_yes(cnum));
-    o = h_sect(ctx, o, w, "不支持", code_no(cnum));
+    o = h_sect(ctx, o, w, "支持", code_yes(cnum), "1;32");
+    o = h_sect(ctx, o, w, "不支持", code_no(cnum), "1;31");
     return o;
 }
 
@@ -704,13 +826,17 @@ fn h_unknown(ctx: ptr, o: u32, w: u32) -> u32 {
 }
 
 /// 一段"标签: 值"，值里内嵌的换行按 gutter 缩进。值为空就整段不印。
-fn h_sect(ctx: ptr, o: u32, w: u32, label: str, s: str) -> u32 {
+/// `cl` 是**标签那一小段**的颜色码 —— 值不上色（正文上色会把中文压得看不清）。
+fn h_sect(ctx: ptr, o: u32, w: u32, label: str, s: str, cl: str) -> u32 {
     if str_len(s) == 0 {
         return o;
     }
     o = em_gut(ctx, o, w);
+    o = em_col(ctx, o, cl);
     o = em(ctx, o, label);
-    o = em(ctx, o, ": ");
+    o = em(ctx, o, ":");
+    o = em_rst(ctx, o);
+    o = em(ctx, o, " ");
     o = em_wrap(ctx, o, s, w, 0);
     return em(ctx, o, "\n");
 }
@@ -910,7 +1036,10 @@ fn em_qpath(ctx: ptr, o: u32, plen: u32) -> u32 {
 /// 错的命令去试 —— 那比不说还坏。
 fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em_gut(ctx, o, w);
-    o = em(ctx, o, "这个文件看起来**不是 Loment** —— 看内容像 ");
+    o = em_col(ctx, o, "1;31");
+    o = em(ctx, o, "这个文件看起来**不是 Loment**");
+    o = em_rst(ctx, o);
+    o = em(ctx, o, " —— 看内容像 ");
     o = em(ctx, o, lang_name(li));
     o = em(ctx, o, "。它有三条路进来（都不动 Loment 内核）:\n");
 
@@ -937,8 +1066,8 @@ fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
     o = em_gut(ctx, o, w);
     o = em(ctx, o, "       —— 只在 Linux/ELF 上可用（PE 垫片没有 fork/pipe）。\n");
 
-    o = h_sect(ctx, o, w, "这门语言的边界", lang_edge(li));
-    o = h_sect(ctx, o, w, "调用约定", lang_abi(li));
+    o = h_sect(ctx, o, w, "这门语言的边界", lang_edge(li), "1");
+    o = h_sect(ctx, o, w, "调用约定", lang_abi(li), "1");
     o = em_gut(ctx, o, w);
     return em(ctx, o, "语言以 `--lang auto` 为准 —— 上面只是按内容给的提示，别拿它当结论。\n");
 }
@@ -983,12 +1112,15 @@ fn _start() -> u32 {
     store32(ctx, C_PREVLEN, 0);
     store32(ctx, C_SRCLEN, 0);
     store32(ctx, C_FPREVLEN, 0);
+    // 颜色**默认开**（与 `lomcli` 同一个默认值）；`--no-color` / `-C` 把它关掉，
+    // 而 `parse_args` 同时把诊断文件那个参数抄进 `scr + SCR_DIAG`。
+    store32(ctx, C_COLOR, 1);
 
-    let av: u64 = argv1(ab, 65536, sc);
+    let av: u64 = parse_args(ctx, ab, sc);
     if av == 0 {
-        return fail("lomenterr: 用法: lomenterr <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n");
+        return fail("lomenterr: 用法: lomenterr [--no-color] <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n");
     }
-    let ap: ptr = ptr_add(ab, (av >> 32) as u32);
+    let ap: ptr = ptr_add(sc, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, sc);
     if fd < 0 {
@@ -1080,6 +1212,9 @@ fn _start() -> u32 {
         return die(1);
     }
     let a: u32 = em_u32(ctx, 0, total);
-    write_all(2, ctx, em(ctx, a, " 条错误\n") as u64);
+    let b: u32 = em_col(ctx, a, "1;31");
+    let c: u32 = em(ctx, b, " 条错误");
+    let d: u32 = em_rst(ctx, c);
+    write_all(2, ctx, em(ctx, d, "\n") as u64);
     return die(1);
 }
