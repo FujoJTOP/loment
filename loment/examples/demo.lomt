@@ -1,6 +1,6 @@
 // loment/examples/demo.lomt — L1 Loment v0 示例
 //
-// 语法是 Rust 的严格子集 (docs/140 §4): 不发明语法, 只加"能力声明"这一层语义。
+// 原生语法是 Rust 风味 (docs/140 §4): 不发明语法, 只加"能力声明"这一层语义。
 // 转译: python tools/lomentc.py loment/examples/demo.lomt --emit-rust out.rs
 // 形式对象: --emit-potato out.json  →  python tools/potato.py validate out.json
 

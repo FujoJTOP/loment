@@ -4,15 +4,15 @@
 
 Loment is a **systems programming language**: it compiles to native x86-64 executables —
 Linux ELF and Windows PE, or a freestanding object for bare metal — with no runtime and no
-libc. Its syntax is a strict subset of Rust, and the toolchain is itself written in Loment.
+libc. Its own syntax is Rust-flavored, and the toolchain is itself written in Loment.
 
 Three things are worth knowing about it, and they are why this repository is worth a look
 now:
 
 - **It calls libraries written in other languages** — ten of them, end to end, from C and
   Rust to Python and Java.
-- **It reads source written in other languages' syntax** — C, Rust, Go, Java, Python —
-  and turns a library's source into a Loment interface unit.
+- **It can be written in six other syntaxes** — C, C++, Java, C#, Go and Python. Only the
+  spelling changes: a surface grammar decides how a file is *read*, never what it *means*.
 - **Everything is customizable** — the source suffix, the commands, the libraries, and the
   toolchain itself.
 
@@ -129,31 +129,51 @@ none skipped): C / C++ / Rust / Zig, then Go / Python / Java / JavaScript / Perl
 - No FFI on the PE target: a Windows build with a foreign object is refused rather than
   producing something that does not link.
 
-## Reading other languages' source
+## Six surface syntaxes, one language
 
-Any source syntax → a Potato form object → a L1 unit (`.lomt`) → the frozen core:
+A file's syntax is a surface. Loment's own is Rust-flavored, and the same program can also be
+written the way you already write C, C++, Java, C#, Go or Python — six in all. Declaring
+which one is meant to be a line at the top of the file, before `module`:
 
 ```
-$ python tools/potato_from.py lib.rs --json lib.potato.json
-$ python tools/lomt_from.py  lib.potato.json --out lib.lomt
-
-$ python tools/lomt_from.py  lib.rs --lang rust --out lib.lomt    # both steps at once
+choose write grammar python
 ```
 
-The language is decided by extension first (`.c`/`.h`, `.rs`, `.go`, `.java`, `.py`) and,
-for a `.lomt` file holding foreign syntax, by its content. When it cannot tell, it asks for
-`--lang` instead of guessing — a wrong guess produces a wrong interface rather than an
-error.
+Only the spelling changes. The surface grammar says how a file is *read*; the meaning is
+always Loment's. So you do not have to learn a new language to write Loment — you write the
+one you already know, and the semantics are the ones the rest of this repository specifies.
 
-**What you get** are declarations: types, constants, capabilities and function signatures.
-Every function the front end can represent becomes `pub extern fn`, so the unit can be
-`use`d and linked against an object built from the same library. Five syntaxes, ten
-criteria each (`loment_multisyntax_test`).
+Today the six are reached through their translators, and each one has a criterion that
+settles the question the only way it can be settled: **run the original, run the
+translation, compare the numbers.**
 
-**What you do not get** are function bodies. The representation layer records what exists,
-not what it computes; carrying implementations would be a structural extension of it, not
-an extra field. Whatever cannot be represented — overloads, generics, managed runtimes —
-is reported with a name and a reason, and nothing is dropped silently.
+```
+$ python tools/ctrans.py sample.c --out sample.lomt        # C  -> Loment
+$ python tools/potato_from.py Sample.go --json s.json      # Go -> form object
+$ python tools/lomt_from.py s.json --impl --out s.lomt     #    -> Loment, with bodies
+```
+
+```
+module Sample
+
+pub fn level(n: i64) -> i64 {
+    if (n < 10) { return 0; }
+    ...
+```
+
+One translator per language — `ctrans.py`, `pytrans.py`, `jtrans.py`, `cstrans.py`,
+`cpptrans.py`, `gotrans.py` — with one shared parser for the brace-and-semicolon family
+(`trans_core.py`) and one dialect table each, because what really differs between C, C++,
+Java and C# is small and worth writing down: C's `&&` yields an `int` and its conditions
+accept one, while Java's and C#'s yield a `boolean`; C# has an unsigned `byte` where Java
+has a signed one; Go has no implicit numeric conversion at all, so its `int(b)` is already
+the `as` Loment wants. What cannot be represented is reported with a name and a reason —
+nothing is dropped silently.
+
+**Not wired yet:** the compiler does not accept `choose write grammar` in a file today. The
+declaration is recorded in the form object (`docs/188-grammar-declaration.md`) and going
+through `tools/` is the path that works; what is built and tested is the translation, not
+the in-file switch.
 
 ## Loment · everything is customizable
 
@@ -243,6 +263,7 @@ what it is waiting on.
 | `docs/158-loment-freeze.md` | What is frozen, what is not, and what changing each part costs. |
 | `docs/173-loment-ffi.md` | Calling other languages' libraries: the four stages, and an honest ledger of what runs today. |
 | `docs/179-multisyntax-frontends.md` | Reading other languages' syntax into L1. |
+| `docs/188-grammar-declaration.md` | Surface grammars: the six syntaxes, what only the spelling changes, and `choose write grammar`. |
 | `docs/` | Design and measurement records, numbered by document. |
 | [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager: a library is a directory, its identity is a content hash, and its dependencies are the `use` lines in the source. |
 

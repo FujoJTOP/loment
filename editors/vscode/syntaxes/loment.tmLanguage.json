@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Loment",
   "scopeName": "source.loment",
-  "comment": "Loment L1 语法高亮 (语法是 Rust 严格子集, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译 (vscode_ext_test 会逐个编译一遍)。scope 名一律用标准 TextMate 前缀 —— 自造的根名主题不会着色。",
+  "comment": "Loment L1 语法高亮 (原生语法是 Rust 风味, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译 (vscode_ext_test 会逐个编译一遍)。scope 名一律用标准 TextMate 前缀 —— 自造的根名主题不会着色。",
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },

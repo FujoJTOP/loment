@@ -5,8 +5,8 @@
 #     it refuses to guess: `Language.find_by_alias` returns nil for a name it does not know
 #     and caches that, so `linguist-language=Loment` would not "declare it in advance" — it
 #     would drop these files out of the statistics entirely. They are attributed to Rust
-#     instead: Loment's syntax is a strict subset of Rust, so keywords, strings, comments
-#     and the resulting highlighting line up.
+#     instead: Loment's syntax overlaps Rust's, so keywords, strings, comments and the
+#     resulting highlighting line up.
 #     Loment is not yet eligible for inclusion — Linguist asks for roughly 2000 files per
 #     extension per year, spread across repositories, and does not accept very new
 #     languages. **Once it is included, change these two lines to `Loment`** — or drop them

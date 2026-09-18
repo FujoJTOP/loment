@@ -1,14 +1,18 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E23 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（原生语法是 Rust 风味 + 能力域；另有 C / C++ / Java / C# / Go / Python 六种表层语法，见 docs/188），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E23 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
 
-**Loment 是 FujoOS 自研的底层语言。** 表面语法是 **Rust 的严格子集**（`module` / `use` /
+**Loment 是 FujoOS 自研的底层语言。** 它自己的**表层语法是 Rust 风味**（`module` / `use` /
 `fn` / `let` / `if` / `while` / `for` / `match` / `enum` / `struct` / `trait` / 类型名 /
-运算符都跟 Rust 一样），只多加了**能力域**（`capability` + `guard`）这一层语义。
+运算符都与 Rust 一致），只多加了**能力域**（`capability` + `guard`）这一层语义。
 它能直接编成 **x86-64 原生可执行文件**（Linux ELF / Windows PE），**不需要 Python 运行时**。
+
+**表层语法不止一种**（`docs/188`）：同一个程序也可以用 C / C++ / Java / C# / Go / Python
+的写法写，只换拼法、不换语义。六个翻译器在 `tools/`，六条判据各比"翻译出来的跑出的数 ==
+直接跑那份源码的数"。**`choose write grammar` 还没接进编译器** —— 今天走翻译器那条路。
 
 > **本文件是自足的**：语法、内建函数、错误码、**以及最容易踩的那些坑**都在这里。
 > 不要先去别处找（除非你手上正好有源码仓库 —— 那一节在文末）。

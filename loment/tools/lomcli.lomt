@@ -1401,7 +1401,7 @@ fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
     title(mem, 1, "Loment syntax cheat-sheet");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "Surface is a strict subset of Rust plus one extra layer: capability domains.");
+    wstr(1, "Surface syntax is Rust-flavored, plus one extra layer: capability domains.");
     colr(mem, 1);
     wstr(1, "\n\n");
     termrow(mem, 1, "module", "first line `module <name>` (no semicolon)");

@@ -1,8 +1,9 @@
 # Quick start
 
-Loment is a systems programming language: a strict-subset-of-Rust syntax, native x86-64
-executables (Linux ELF, Windows PE), no runtime and no libc. The
-[README](README.md) says what it is; this page is only about getting a program to run.
+Loment is a systems programming language: its own syntax is Rust-flavored, and it can also be
+written in C, C++, Java, C#, Go or Python; it emits native x86-64 executables (Linux ELF,
+Windows PE) with no runtime and no libc. The [README](README.md) says what it is; this page
+is only about getting a program to run.
 
 **Nothing is published yet** — 0.1.4 is not finished, and there are no packages in
 [Releases](https://github.com/FujoJTOP/loment/releases) — so this starts from a checkout.
