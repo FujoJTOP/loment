@@ -280,6 +280,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                            "只收整数标量、if/while/for、四则与位运算；参数与返回都要写类型注解"),
                 "java": ("jtrans", "Unsupported CError", "tools/jtrans.py",
                          "只收整数标量、if/while/for、四则与位运算；`class` 外壳会被抹掉"),
+                "csharp": ("cstrans", "Unsupported CError", "tools/cstrans.py",
+                           "只收整数标量、if/while/for、四则与位运算；"
+                           "`using` / `namespace` / `class` 三层外壳都会被抹掉"),
             }
             if lang not in _TOOLS:
                 raise NotRepresentable(

@@ -158,6 +158,92 @@ class CError(Exception):
     """这份 C 解析不过。与 `Unsupported` 分开：一个是"没实现"，一个是"你自己写错了"。"""
 
 
+# ---------------------------------------------------------------- 外壳剥离
+#
+# Java 与 C# 的函数**不住在顶层**：它们在 `class X { … }` 里，C# 还多一层
+# `namespace N { … }`。而共享 parser 只认顶层的 `<类型> <名>(…) { … }` —— 所以分词
+# **之前**先把那两层外壳抹掉。
+#
+# **抹法是"换成等长空白"**（与 `potato_from._blank_keep_off` 同一个手法），不是把成员
+# 抽出来拼一拼：长度、行号、偏移**一字不变**，于是报错里的行号**就是源里的行号**。
+# 抽出来重排的话行号会漂，而"报错行号指到别处"正是 `docs/179` §6.5 记过的那种
+# 把人引向错方向的东西。
+
+
+def blank_keep_off(m: "re.Match[str]") -> str:
+    """换成**等长**空白，且**保留换行** —— 行号与偏移都不动。"""
+    return "".join("\n" if ch == "\n" else " " for ch in m.group())
+
+
+def match_brace(text: str, open_idx: int) -> int:
+    """`{` 的下标 -> 配对 `}` 的下标；数不配平返回 -1。
+
+    调用方**必须先把注释与字符串字面量抹掉** —— 否则 `/* } */` 或 `"}"` 会把配对算错。
+    """
+    d = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            d += 1
+        elif text[i] == "}":
+            d -= 1
+            if d == 0:
+                return i
+    return -1
+
+
+#: 扫外壳之前要抹成等长空白的东西：注释**与字符串字面量**。
+#: 只抹注释是不够的 —— `String s = "class X {";` 会让扫描把那行当成一个 `class` 头，
+#: 于是外壳从字符串里开始切，切出一份**错得看不出来**的源。（`jtrans` 原先只抹了注释。）
+_SHELL_NOISE = re.compile(r"//[^\n]*|/\*.*?\*/|\"(?:[^\"\\\n]|\\.)*\"", re.S)
+
+def strip_shells(src: str, heads: "list", line0: int = 1) -> str:
+    """抹掉 `heads` 点名的外壳，壳里的成员就成了顶层。**不动行号。**
+
+    `heads` 每项是 `(名字, 正则, 透明, 有体)`：
+
+    * **透明**（`namespace`）—— 壳里还会有壳，抹完**继续进去**找（命名空间能套）
+    * **不透明**（`class`）—— 壳里就是成员，**不再进去**：嵌套类是另一回事，留给方言表
+      的 `agg` 去拒（`docs/188` §7.1 的 Java 就是这么定的）
+    * **有体 = False** —— 这一条没有身体（C# 10 的文件级 `namespace Foo;`），
+      正则负责一路匹配到 `;`，抹成空白就行
+
+    正则应把**尾部那个 `{` 也吃进去**（`[^{;]*\\{` 这种），于是 `{` 的下标就是
+    `m.end() - 1` —— 顺带把"头与 `{` 之间夹了个 `;`"的怪写法排除掉了。
+    """
+    sniff = _SHELL_NOISE.sub(blank_keep_off, src)
+    out = list(src)
+
+    def walk(lo: int, hi: int) -> None:
+        i = lo
+        while i < hi:
+            for what, rx, transparent, braced in heads:
+                m = rx.match(sniff, i)
+                if not m:
+                    continue
+                if braced:
+                    j = m.end() - 1                      # 尾巴那个 `{`
+                    k = match_brace(sniff, j)
+                    if k < 0 or k >= hi:
+                        raise CError(f"第 {line0 + src[:m.start()].count(chr(10))} 行: "
+                                     f"`{what}` 的花括号不配平")
+                    if transparent:
+                        walk(j + 1, k)
+                else:
+                    k = m.end() - 1                      # 尾巴那个 `;`
+                for p in range(m.start(), (m.end() if not braced else j + 1)):
+                    if out[p] != "\n":
+                        out[p] = " "
+                if braced and out[k] != "\n":
+                    out[k] = " "
+                i = k + 1
+                break
+            else:
+                i += 1
+
+    walk(0, len(sniff))
+    return "".join(out)
+
+
 # ---------------------------------------------------------------- 分词
 
 _TOKEN = re.compile(r"""

@@ -602,6 +602,23 @@ LANG_CARDS: dict[str, LangCard] = {
              "`>>>` 是无符号右移（Loment 的 `>>` 分有符号/无符号两种写法）。",
         abi="**JVM 默认不导出 C ABI**；要链接得上 JNI 或 NativeAOT。",
     ),
+    "csharp": LangCard(
+        key="csharp", display="C#", exts=(".cs",),
+        # **特征词必须是 C# 独有的**：`lang_by_tokens` 按**键的字典序**逐门问、取第一个命中,
+        # 而 `csharp` 排在 `java` 前面 —— 所以这里要是写了 `public class`，一份**真 Java**
+        # 就会被报成 C#。（`using System` / `static void Main` / `string[] args` 都是
+        # C# 独有：Java 的入口是小写 `main(String[]`，而小写 `string` 在 Java 里不是类型。）
+        tokens=("using System", "static void Main", "string[] args"),
+        edge="类继承、接口、泛型、LINQ、属性（`get; set;`）、事件、委托、异常都不翻；"
+             "`using` / `namespace` / `class` 三层外壳会被抹掉（花括号形与文件级 "
+             "`namespace X;` 都收）；`bool` 与 `int` 是分开的（`&&` 出 bool，**不用补转换**，"
+             "这点与 C 相反）；`>>>` 是 C# 11 起的无符号右移。"
+             "**`byte` 是 0..255 无符号的** —— 与 Java 的 `byte`（-128..127 有符号）**相反**。"
+             "**不做整数宽度跟踪**：`int f(byte b) { return b; }` 那种混宽度的单元，"
+             "翻出来的 Loment 会在检查时报「return 类型 u8，函数声明 i32」—— "
+             "**响亮地失败，不是静默算错**（宽度跟踪是下一版的事）。",
+        abi="**.NET 默认不导出 C ABI**；要链接得上 NativeAOT 或 `[UnmanagedCallersOnly]`。",
+    ),
 }
 
 

@@ -223,14 +223,17 @@ def _block_end(text: str, open_idx: int) -> int:
     return -1
 
 
-def _java_members(body: str) -> list[tuple[str, str]]:
+def _class_members(body: str) -> list[tuple[str, str]]:
     """类体里**顶层**的成员声明 (跳过方法体、内部类那些嵌套块)。
+
+    **"类体"这个形状 Java 与 C# 是一样的** —— `class X { 字段; 方法() {} }` ——
+    所以这一份两门共用（`docs/188` §7.1 的"一份解析器 + 方言表"），不各自抄。
 
     做法是走一遍花括号配平: 深度 0 上遇到 `;` 或遇到一个完整的 `{...}` 就收一个成员。
     不这么做的话, 方法体里的局部变量会被当成字段 —— 那是**静默把声明抽错**。
 
     返回 `(归一化文本, 原文)`。**原文那一份是给 `functions[i].body` 用的**
-    （`docs/188` §3）—— 归一化把空白压掉了, 拿它当 Java 源喂给前端会丢格式；
+    （`docs/188` §3）—— 归一化把空白压掉了, 拿它当源喂给前端会丢格式；
     更要紧的是 `potato_from` 里那份 `body` 是**剥过注释**的, 直接当源用也失真。
     """
     out, cur, depth, start = [], [], 0, None
@@ -257,42 +260,68 @@ def _java_members(body: str) -> list[tuple[str, str]]:
     return [(" ".join(m.split()), m) for m in out]
 
 
-def _java_type(t: str, mode: str, known: set[str]) -> str | None:
+def _lang_type(t: str, mode: str, known: set[str], types: dict) -> str | None:
+    """一门花括号语言的类型拼法 -> Loment 类型。**表从外面传进来** ——
+    Java 与 C# 的类型集不同（`byte` 一个有符号一个无符号），形状却一样。"""
     t = re.sub(r"\s+", " ", t.strip())
     if not t:
         return None
     if t.endswith("[]"):
-        base = _java_type(t[:-2], mode, known)
-        # Java 数组是**动态长度**的 —— 与 Loment 的切片 `[T]` 同义 (不是定长 `[T; N]`)。
+        base = _lang_type(t[:-2], mode, known, types)
+        # Java/C# 数组是**动态长度**的 —— 与 Loment 的切片 `[T]` 同义 (不是定长 `[T; N]`)。
         return f"[{base}]" if base else None
     if t in known:
         return t
     if "<" in t:                       # 泛型: 元素类型被擦除, 表示层记不住
         return None
-    return JAVA_TYPES.get(t) if t in JAVA_TYPES else None
+    return types.get(t) if t in types else None
 
 
-def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
-    """Java 源码 -> 形式对象。
+class ClassLang:
+    """**"函数住在 `class X { … }` 里"这一族**的方言表（`_from_class_lang` 的入参）。
 
-    **Java 的调用约定不是 C ABI** —— JVM 方法是 JVM 的, `native` 方法走 JNI
-    (符号名还是 `Java_<类>_<方法>`, 且头两个参数是 `JNIEnv*`/`jobject`)。
-    所以这一族与 Python 一样进 `abi: "java"`, **一条都不会被发成 `extern fn`** ——
-    那不是缺陷, 是事实 (docs/173 §4: 运行时那一族走**进程桥**)。
-
-    那它有什么用: **把数据结构带过来**。类 -> `types`、`static final` 常量 -> `consts`,
-    于是 Loment 侧知道对面那块内存长什么样、桥那头交换的字节怎么解。链接型的语言
-    (C/Rust/Go) 给的是**能直接调的函数**, 运行型的给的是**数据形状 + 走桥的签名**。
+    形状是一样的（字段 / 方法 / 常量 / 枚举四种成员，同一种花括号配平），
+    真正不同的只有下面这几张表 —— 所以它们进表，不进 if（`docs/188` §7.1）。
     """
-    rep = Report(name, "java", mode)
-    doc = _blank(_ident(Path(name).stem), "java")
+
+    __slots__ = ("grammar", "types", "cls", "enum", "const", "field", "method")
+
+    def __init__(self, grammar: str, types: dict, cls, enum, const, field, method):
+        self.grammar = grammar
+        self.types = types
+        self.cls = cls
+        self.enum = enum
+        self.const = const
+        self.field = field
+        self.method = method
+
+
+def _from_class_lang(src: str, name: str, mode: str,
+                     lang: ClassLang) -> tuple[dict, Report]:
+    """**"函数住在 `class X { … }` 里"这一族**的共用引擎：Java 与 C#。
+
+    两门各自的调用约定**都不记进对象**（`docs/188` §3）：`abi` 不再由"这是什么文件"
+    推出来，只有源码**显式宣称**外部 ABI 时才记（见 Go 的 `//export`、Rust 的
+    `extern "C"`）。所以用 Java/C# 写法写的单元发出来的是 `pub fn`，就是 Loment。
+
+    那这一层还有什么用: **把数据结构带过来**。类 -> `types`、常量 -> `consts`，
+    于是 Loment 侧知道对面那块内存长什么样。链接型的语言 (C/Rust/Go) 给的是
+    **能直接调的函数**，运行型的给的是**数据形状 + 走桥的签名**。
+
+    **`field` / `method` 两张表也要传进来，不能共用** —— 修饰词集不同
+    （C# 的 `internal` / `sealed` / `partial`，Java 的 `synchronized` / `default`）。
+    共用的话一条 `internal static int F()` 匹配不上方法那条正则，于是掉进"以 `;`
+    结尾 = 字段"那一支然后被丢掉 —— **静默丢一个函数**，正是本项目最不能接受的那种。
+    """
+    rep = Report(name, lang.grammar, mode)
+    doc = _blank(_ident(Path(name).stem), lang.grammar)
     body = _C_COMMENT.sub(" ", _STR_LIT.sub('""', src))
     known: set[str] = set()
     # ---- Java 的 `enum Name { A, B, C }` —— **不是 class**, 所以上面那圈抓不到它。
     # 原先 Java 的枚举**静默消失** (与 C 那边同一个口子)。
     # 变体可以带构造实参 (`B(1)`) 与体 (`C { … }`), 这里只取**名字**: Potato 的 enums
     # 只有变体名。带参/带体的那些在下面按"保真度损失"记一笔, 不假装它们与裸变体一样。
-    for m in _JAVA_ENUM.finditer(body):
+    for m in lang.enum.finditer(body):
         ename = m.group(1)
         open_idx = body.rindex("{", m.start(), m.end())
         end = _block_end(body, open_idx)
@@ -326,7 +355,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         if lossy:
             rep.skip_field(ename, "<变体实参/枚举体>", "只取了变体名 (Potato 的 enums 没有值)")
         rep.ok += 1
-    for m in _JAVA_CLASS.finditer(body):
+    for m in lang.cls.finditer(body):
         cname = m.group(1)
         open_idx = body.rindex("{", m.start(), m.end())
         end = _block_end(body, open_idx)
@@ -335,8 +364,8 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             continue
         inner = body[open_idx + 1:end]
         fields, consts, methods = [], [], []
-        for mem, mem_raw in _java_members(inner):
-            mc = _JAVA_CONST.match(mem)
+        for mem, mem_raw in _class_members(inner):
+            mc = lang.const.match(mem)
             if mc:
                 consts.append((mc.group(1), mc.group(2), int(mc.group(3))))
                 continue
@@ -344,19 +373,19 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             # (`public native int j_native(int a);`)。按"以分号结尾 = 字段"先判的话,
             # 它们会掉进字段那一支然后被丢掉 —— 静默丢, 而且丢的恰好是**唯一那类
             # 与外部实现对接的方法**(2026-09-17 实测: Java 的 j_native 一直抽不出来)。
-            mm = _JAVA_METHOD.match(mem)
+            mm = lang.method.match(mem)
             if mm and "(" in mem and IDENT_RE.match(mm.group(2)):
                 methods.append((mm.group(1), mm.group(2), mm.group(3), mem_raw))
                 continue
             if mem.rstrip().endswith(";"):
-                mf = _JAVA_FIELD.match(mem)
+                mf = lang.field.match(mem)
                 if mf and IDENT_RE.match(mf.group(2)):
                     fields.append((mf.group(1), mf.group(2)))
         # ---- 常量 (类里先取, 因为它们的类型也会进 known 的判断)
         for ty, cn, val in consts:
             if cn in {c["name"] for c in doc["consts"]}:
                 continue
-            t = _java_type(ty, mode, known)
+            t = _lang_type(ty, mode, known, lang.types)
             if t is None or t not in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"):
                 rep.skip("const", cn, f"常量类型 {ty!r} 不是整型 (Loment 常量只收整型)")
                 continue
@@ -365,7 +394,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         # ---- 类 -> struct
         flds = []
         for fty, fname in fields:
-            t = _java_type(fty, mode, known)
+            t = _lang_type(fty, mode, known, lang.types)
             if t is None:
                 rep.skip_field(cname, fname, f"字段类型 {fty!r} 无映射")
                 continue
@@ -381,7 +410,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             if mname == cname:
                 rep.skip("fn", mname, "构造器")
                 continue
-            rt = _java_type(rty, mode, known)
+            rt = _lang_type(rty, mode, known, lang.types)
             if rt is None:
                 rep.skip("fn", mname, f"返回类型 {rty!r} 无映射")
                 continue
@@ -396,7 +425,7 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
                 if not IDENT_RE.match(pn):
                     bad = f"形参名 {pn!r} 非法"
                     break
-                t = _java_type(pt, mode, known)
+                t = _lang_type(pt, mode, known, lang.types)
                 if t is None:
                     bad = f"形参类型 {pt!r} 无映射"
                     break
@@ -416,6 +445,98 @@ def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             doc["functions"].append(ent)
             rep.ok += 1
     return _finish(doc, rep)
+
+
+# ---- 两门的方言表（`docs/188` §7.1）。**只列真正不同的东西。**
+
+JAVA_LANG = ClassLang(
+    grammar="java", types=JAVA_TYPES,
+    cls=_JAVA_CLASS, enum=_JAVA_ENUM, const=_JAVA_CONST,
+    field=_JAVA_FIELD, method=_JAVA_METHOD,
+)
+
+
+def from_java(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """Java 源码 -> 形式对象。引擎在 `_from_class_lang`，这里只是把 Java 那张表递过去。"""
+    return _from_class_lang(src, name, mode, JAVA_LANG)
+
+
+# ---------------------------------------------------------------- C#（同一族）
+#
+# 与 Java **共用** `_from_class_lang`：`class X { 字段; 方法() {} }` 这个形状一样。
+# **两处真不同**：
+#
+#   * 常量是 `const`（Java 是 `static final`）—— 见 `_CS_CONST`，C# 的 `const`
+#     **隐含 static**，所以没有 `static` 那一截；
+#   * **`byte` 是无符号的**（Java 有符号）—— 见 `CS_TYPES` 里那一行。
+#
+# `field` / `method` 两张表**必须另给**：修饰词集不同（C# 的 `internal` / `sealed` /
+# `partial`，Java 的 `synchronized` / `default`）。共用一张的话，一条
+# `internal static int F()` 匹配不上方法那条正则，就掉进"以 `;` 结尾 = 字段"那支被丢掉
+# —— **静默丢一个函数**。
+
+CS_TYPES = {
+    "sbyte": "i8",
+    # **C# 的 `byte` 是 0..255（无符号）**，Java 的 `byte` 是 -128..127（有符号）。
+    # 这是这一族里两门**唯一**没落在同一格上的类型（`JAVA_TYPES["byte"] == "i8"`）。
+    # 搞反的后果**不是报错而是静默算错**：C# 里 `byte b = 200;` 会变成 -56。
+    "byte": "u8",
+    "short": "i16", "ushort": "u16",
+    "int": "i32", "uint": "u32",
+    "long": "i64", "ulong": "u64",
+    # C# 的 `char` 是一个 UTF-16 码元 —— 16 位**无符号**整数，不是一个字符串类型
+    "char": "u16",
+    "bool": "bool",
+    # `void` 映 `"()"` —— 与 C/Java 那边**同一个口径**（发射时就没有 `-> T`）
+    "void": "()",
+    "string": "str",
+    # 浮点与十进制不在 Loment 的类型里
+    "float": None, "double": None, "decimal": None,
+    # `nint`/`nuint` 的宽度随目标变 —— 表示层记不住"多宽"，所以不映
+    "nint": None, "nuint": None,
+    "object": None, "dynamic": None, "var": None,
+}
+
+#: C# 成员声明上的修饰词。**要认得全**：认不出来的成员会被当成"既不是字段也不是方法"
+#: 而丢掉，那是静默的。收下并丢掉的那批（`public`…`sealed`）与出现就拒的那批
+#: （`abstract`…`async`）都列进来 —— 拒的那批由**翻译器**报错，这一层只负责认出形状。
+_CS_MODS = (r"(?:(?:public|private|protected|internal|static|sealed|abstract|virtual"
+            r"|override|partial|new|extern|unsafe|readonly|volatile|async)[ \t]+)*")
+
+#: **`class` 与 `struct` 都要收** —— C# 里"一坨有字段的值类型"最自然的写法是
+#: `struct`（`class` 是引用类型，`struct` 才是按值传的那个）。这一层管的是**数据形状**
+#: （对面那块内存长什么样），两种都是形状；只收 `class` 的话，一份
+#: `public struct Frame { public byte tag; }` 会**静默丢掉整个类型**。
+#:
+#: 与翻译器那一层不冲突：那边的方言表里 `struct` 在 `agg`（拒），而翻译器只看**函数**，
+#: 类型根本不经过它。两层各管各的。
+_CS_CLASS = re.compile(r"(?:^|\n)[ \t]*(?:(?:public|internal|private|protected|sealed"
+                       r"|abstract|static|partial|readonly|ref)[ \t]+)*"
+                       r"(?:class|struct)[ \t]+([A-Za-z_]\w*)[^{;]*\{")
+#: `enum` 那一圈与 Java 同形（`enum X { A, B }` 在 C/Java/C# 里长得一样）。
+_CS_ENUM = re.compile(r"(?:^|\n)[ \t]*(?:(?:public|internal|private|protected)[ \t]+)*"
+                      r"enum[ \t]+([A-Za-z_]\w*)[^{;]*\{")
+#: `const <类型> NAME = <整数>;`
+_CS_CONST = re.compile(r"^[ \t]*(?:(?:public|private|protected|internal)[ \t]+)?"
+                       r"const[ \t]+([A-Za-z_][\w.]*)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*"
+                       r"(-?\d+)[ \t]*;")
+_CS_FIELD = re.compile(r"^[ \t]*" + _CS_MODS
+                       + r"([A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*)[ \t]+"
+                       r"([A-Za-z_]\w*)[ \t]*(?:=[^;]*)?;[ \t]*$")
+_CS_METHOD = re.compile(r"^[ \t]*" + _CS_MODS
+                        + r"(?:<[^>]+>[ \t]+)?([A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*)"
+                        r"[ \t]+([A-Za-z_]\w*)[ \t]*\(([^)]*)\)")
+
+CSHARP_LANG = ClassLang(
+    grammar="csharp", types=CS_TYPES,
+    cls=_CS_CLASS, enum=_CS_ENUM, const=_CS_CONST,
+    field=_CS_FIELD, method=_CS_METHOD,
+)
+
+
+def from_csharp(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """C# 源码 -> 形式对象。引擎在 `_from_class_lang`，这里只是把 C# 那张表递过去。"""
+    return _from_class_lang(src, name, mode, CSHARP_LANG)
 
 
 # ---------------------------------------------------------------- 语法识别 (按内容)
@@ -470,6 +591,22 @@ _GO_PKG = re.compile(r"^[ \t]*package[ \t]+[A-Za-z_]\w*[ \t]*$", re.M)
 _JAVA_DEF = re.compile(r"^[ \t]*(?:public[ \t]+|final[ \t]+|abstract[ \t]+)*(?:class|interface)"
                        r"[ \t]+\w+[^\n{]*\{"
                        r"|^[ \t]*package[ \t]+[\w.]+[ \t]*;", re.M)
+#: C#：**只有两条，都挑"专有"的形状**（上面那条纪律：判据只认专有的东西）。
+#:
+#:   ① `using <大写开头>;` —— C# 的 using **指令**。Java 没有 `using`；
+#:      C++ 的 `using namespace std;`（有空格）与 `using std::cout;`（有 `::`）都不匹配；
+#:      C++ 的别名 `using Foo = …;` 有个 `=`。⇒ 专有。
+#:   ② `static … Main(string[] …)` —— C# 的入口。Java 的入口是小写 `main(String[]`，
+#:      而小写 `string` 在 Java 里根本不是类型。⇒ 专有。
+#:
+#: **`namespace` 故意不当判据** —— C++ 也有 `namespace X {`，拿它认 C# 会把一份 C++
+#: 源码判成 csharp，然后**按 C# 去翻**（静默翻错语言，比认不出坏得多）。
+#: 代价：一份**没写 using、也没有入口**的 C# 文件认不出，得用 `--lang csharp` 指明 ——
+#: `detect_lang` 本来就不假装完备，这条是"宁可认不出，不肯认错"那一侧的。
+_CS_DEF = re.compile(r"^[ \t]*using[ \t]+[A-Z][\w.]*[ \t]*;"
+                     r"|^[ \t]*(?:public[ \t]+|private[ \t]+|protected[ \t]+|internal[ \t]+)*"
+                     r"static[ \t]+(?:void|int)[ \t]+Main[ \t]*\([ \t]*string[ \t]*\[",
+                     re.M)
 _C_PRE = re.compile(r"^[ \t]*#[ \t]*(?:include|define|ifdef|ifndef|pragma|endif|elif)\b", re.M)
 #: 一行只有"类型 + 名字 + 参数表"(行尾可选 `{`) —— C 的函数定义 (K&R 之后)。
 #: 排除 `return`/`if`/`while`/`for`/`switch`/`else` 开头, 免得把语句或调用当定义。
@@ -518,6 +655,10 @@ def detect_lang(src: str) -> tuple[str, str]:
         return "rust", "有 `fn`"
     if _GO_DEF.search(body) or _GO_PKG.search(body):
         return "go", "有 `func` / `package`"
+    # **C# 要排在 Java 前面**：两门都写 `class X {`，一份 C# 源码对 `_JAVA_DEF` 也是
+    # 命中的。而 C# 那两条判据是**专有**的（见 `_CS_DEF` 的注解），所以先问它。
+    if _CS_DEF.search(body):
+        return "csharp", "有 `using <命名空间>;` 或 `static … Main(string[] …)`"
     if _JAVA_DEF.search(body):
         return "java", "有 `class` / `interface` / `package …;`"
     if _C_PRE.search(body):
@@ -1130,8 +1271,9 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
 # ---------------------------------------------------------------- CLI
 
 LANGS = {"python": from_python, "c": from_c, "rust": from_rust,
-         "go": from_go, "java": from_java}
-EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go", ".java": "java"}
+         "go": from_go, "java": from_java, "csharp": from_csharp}
+EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
+       ".java": "java", ".cs": "csharp"}
 #: `abi` 的取值域 (与 `potato.ABIS` 对齐): `c` = 平台 C ABI, 能发 `extern fn`;
 #: 其余都是**运行时那一族**, 走进程桥 (docs/173 §4)。
 

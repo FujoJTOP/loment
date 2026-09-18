@@ -35,6 +35,11 @@ Java 的函数住在 `class X { … }` 里，而共享 parser 看的是**顶层*
 **为什么是"等长空白"而不是"抽出来拼一拼"**：行号与偏移**不变**，于是报错里的
 行号就是源里的行号。（同 `potato_from._blank_keep_off` 那个手法。）
 
+**实现搬去了 `trans_core.strip_shells`** —— C# 那一门要抹 `namespace` + `class`
+**两层**，同一个手法不该抄两遍。搬过去时顺手补了一处这里原来有的洞：原先只把
+**注释**抹成空白，于是 `String s = "class X {";` 会被当成一个 `class` 头，
+外壳从字符串**里面**开始切。现在字符串字面量也一起抹。
+
 **`interface` / `enum` / 嵌套类一律拒** —— 它们不是"外壳"，是另一回事。
 
 ### ② `>>>` 是**逻辑**右移，本语言的 `>>` 是**算术**的
@@ -67,73 +72,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trans_core import (  # noqa: E402
     CError, Dialect, Unsupported, _BIN, _KW, _PRECOF, main as _main,
-    translate as _translate,
+    strip_shells, translate as _translate,
 )
 
 # ---------------------------------------------------------------- class 外壳
 
-_CLASS_HEAD = re.compile(r"(?<![\w.])(?:public\s+|final\s+|abstract\s+|strictfp\s+)*"
-                         r"class\s+([A-Za-z_]\w*)")
-#: 长度对齐地抹掉的东西 —— 注释先抹成空白，配花括号才不会数错。
-_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+#: **Java 里要抹掉的那层壳**：`class X { … }`。
+#: 尾巴那个 `{` 也吃进正则（`[^{;]*\{`），于是 `{` 的下标就是 `m.end() - 1` ——
+#: 顺带把"只有头没有体"的写法排除掉。
+_CSHELL_HEAD = re.compile(r"(?<![\w.])"
+                          r"(?:public\s+|final\s+|abstract\s+|strictfp\s+)*"
+                          r"class\s+[A-Za-z_]\w*[^{;]*\{")
 
-
-def _blank_keep_off(m: "re.Match[str]") -> str:
-    """换成**等长**空白，且**保留换行** —— 行号与偏移都不动。"""
-    return "".join("\n" if ch == "\n" else " " for ch in m.group())
-
-
-def _match_brace(text: str, open_idx: int) -> int:
-    """`{` 的下标 -> 配对 `}` 的下标；找不到返回 -1。
-
-    调用方**必须先把注释抹掉** —— 否则 `/* } */` 会把配对算错。
-    """
-    d = 0
-    for i in range(open_idx, len(text)):
-        if text[i] == "{":
-            d += 1
-        elif text[i] == "}":
-            d -= 1
-            if d == 0:
-                return i
-    return -1
+#: `(名字, 正则, 透明, 有体)` —— 四格的意思见 `trans_core.strip_shells`。
+#: **不透明**：`class` 里的嵌套类是另一回事，不进去抹，留给方言表的 `agg` 去拒。
+_JAVA_SHELLS = [("class", _CSHELL_HEAD, False, True)]
 
 
 def _unwrap(src: str) -> str:
     """抹掉 `class X … { … }` 的**外壳**，成员就成了顶层。**不动行号。**
 
-    只抹**最外层**那一个（`class` 出现在深度 0 时）—— 嵌套类是另一回事，留给
-    `agg` 去拒。`interface` / `enum` 不在这里处理：它们由方言表拒掉。
+    只抹**最外层**那一个 —— 嵌套类是另一回事，留给方言表拒。`interface` / `enum`
+    也不在这里处理：它们由 `agg` 拒。
+
+    实现搬去了 `trans_core.strip_shells`：C# 那一门要抹 `namespace` + `class` **两层**，
+    同一个手法不该抄两遍 —— 而搬过去的时候顺手补了一处 `jtrans` 原来有的洞：原来只把
+    **注释**抹成空白，于是 `String s = "class X {";` 会被当成一个 `class` 头，
+    外壳从字符串**里面**开始切。现在字符串字面量也一起抹。
     """
-    sniff = _COMMENT.sub(_blank_keep_off, src)
-    out = list(src)
-    depth = 0
-    i = 0
-    while i < len(sniff):
-        ch = sniff[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth = max(0, depth - 1)
-        elif depth == 0:
-            m = _CLASS_HEAD.match(sniff, i)
-            if m:
-                j = sniff.find("{", m.end())
-                if j < 0:
-                    raise CError(f"第 {src[:i].count(chr(10)) + 1} 行: `class` 没有体")
-                k = _match_brace(sniff, j)
-                if k < 0:
-                    raise CError(f"第 {src[:i].count(chr(10)) + 1} 行: `class` 的花括号不配平")
-                # 头（含 `{`）与尾 `}` 都换成空白 —— 里面的成员原样留下
-                for p in range(m.start(), j + 1):
-                    if out[p] != "\n":
-                        out[p] = " "
-                if out[k] != "\n":
-                    out[k] = " "
-                i = k + 1
-                continue
-        i += 1
-    return "".join(out)
+    return strip_shells(src, _JAVA_SHELLS)
 
 
 #: Java 的方言表。
