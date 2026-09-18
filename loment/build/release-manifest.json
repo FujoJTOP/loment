@@ -1122,6 +1122,10 @@
    "sha256": "1efec8c4dd98247da437fa3670cdd9b4496bb7a7a7d1a99b70d15f5b36aa3247"
   },
   {
+   "path": "loment/selfhost/interp.lomt",
+   "sha256": "32f254f9523a1fd8bee448b4af9c1667bd56a0483d233364ce013ebe9b304a51"
+  },
+  {
    "path": "loment/selfhost/ir_builtin.lomt",
    "sha256": "1beac284b4c497c59f1af43d94b9c8e1c7df077ac6aa6725c2595095e7510c59"
   },
