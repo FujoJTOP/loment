@@ -189,7 +189,9 @@ REPOS: dict[str, dict] = {
 *.lom  linguist-language=Rust
 loment/build/** linguist-generated
 """,
-        "readme": """# Loment
+        "readme": """![Loment — Programming Language, Program by Fujo](editors/loment-banner.png)
+
+# Loment
 
 Loment is a systems programming language for writing software that runs without a
 runtime. Its syntax is a strict subset of Rust, extended with **capability domains** —

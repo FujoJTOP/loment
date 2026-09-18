@@ -1,3 +1,5 @@
+![Loment — Programming Language, Program by Fujo](editors/loment-banner.png)
+
 # Loment
 
 Loment is a systems programming language for writing software that runs without a
