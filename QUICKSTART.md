@@ -159,40 +159,43 @@ library — Python, JavaScript, Java, Perl, Lua, Go — are reached through a su
 instead (`loment/lib/proc.lomt`); that is Linux/ELF only as well. What is *not* supported:
 dynamic libraries and embedding a runtime. The honest ledger is `docs/173-loment-ffi.md`.
 
-## 6. Turn a C file into a Loment interface
+## 6. Write it in the syntax you already know
 
-You do not have to write those `extern fn` declarations by hand. Point the front ends at a
-source file; the language is taken from the extension (`.c`/`.h`, `.rs`, `.go`, `.java`,
-`.py`) or, for a `.lomt` file holding foreign syntax, from the content.
+Loment can be written in six other syntaxes — C, C++, Java, C#, Go and Python. Only the
+spelling changes: the surface grammar says how a file is *read*, and the meaning is always
+Loment's. So you do not have to learn a new language to write Loment.
+
+Declaring it in the file is meant to be a line at the top, before `module`:
 
 ```
-$ python3 tools/potato_from.py add.c --json add.potato.json
-$ python3 tools/lomt_from.py add.potato.json --out add.lomt
+choose write grammar python
 ```
 
-`add.lomt` now holds the interface, and you can `use` it:
+**That is not wired into the compiler yet** — today the six are reached through their
+translators, and each has a criterion that settles it the only way it can be settled: run
+the original, run the translation, compare the numbers.
 
-```rust
-module add
-
-// ---- 外部函数 (docs/173: 声明在此, 实现在源语言那一侧, C ABI)
-pub extern fn c_add(a: i32, b: i32) -> i32;
+```
+$ python tools/ctrans.py sample.c --out sample.lomt        # C  -> Loment
+$ python tools/potato_from.py Sample.go --json s.json      # Go -> form object
+$ python tools/lomt_from.py s.json --impl --out s.lomt     #    -> Loment, with bodies
 ```
 
-(The generator writes its comments in Chinese, like most of this repository's prose. The
-declarations are the part that matters.)
+```
+module Sample
 
-Three things are worth knowing before you rely on it:
+pub fn level(n: i64) -> i64 {
+    if (n < 10) { return 0; }
+    ...
+```
 
-- **Declarations only, no function bodies.** The representation layer records what exists,
-  not what it computes, so the implementation stays in the source language and is linked in
-  as an object. Carrying bodies would be a structural change, not an extra field.
-- **When it cannot tell the language, it asks** (`--lang`) instead of guessing, because a
-  wrong guess produces a wrong interface rather than an error.
-- **Whatever it cannot represent is reported**, with a name and a reason — overloads,
-  generics, managed runtimes. Nothing is dropped silently.
+One translator per language — `ctrans.py`, `pytrans.py`, `jtrans.py`, `cstrans.py`,
+`cpptrans.py`, `gotrans.py` — with one shared parser for the brace-and-semicolon family
+(`trans_core.py`) and one dialect table each, because what really differs between C, C++,
+Java and C# is small and worth writing down. What cannot be translated is reported with a
+name and a reason; nothing is dropped silently.
 
-Details and the five per-syntax criteria: `docs/179-multisyntax-frontends.md`.
+Details: `docs/188-grammar-declaration.md`.
 
 ## 7. When it does not compile
 
