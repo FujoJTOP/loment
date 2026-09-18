@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "1eacc915c7be8b3549125cab50cd2967820578465a06ea1726c1893ba6305ad0"
+   "sha256": "a8d08cc1b705d9daba69e011ab33d924acd8754b66e7ee7ae83bcba2ae996fc7"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -79,7 +79,7 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "da62defba37d19ca26f695e19f427f03e1749d76ed1f0c4a1dcfad2b302c16ca"
+   "sha256": "25d7ad8bd5732365b8131f7e4f5b9c4e43c16e9d412af6df81ac24c50b883d3a"
   },
   {
    "path": "lompi/lompi.lomt",
@@ -675,11 +675,11 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "0d36d36679912ad1ca95e57c01cdcce22d0fe6e90024b8503c7a3a43f0edf713"
+   "sha256": "0c8d29e9874bdfad9819b76fc4f005dd323eeef27d20954db35b23f989c6664d"
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "02da7a39d9f852cad14dc560686dd35e577c2ce436c3d0a993d2c94abf0b2725"
+   "sha256": "8ad72961ca4405e7c1a01a1047001a29961e831bfa34a7023dd3c8b7a010a234"
   },
   {
    "path": "tools/loment_build.py",
@@ -691,7 +691,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "1f218bfad3901c3d6e31c873f4c3a348c6ce25a57123bf67244b9c1044035fc1"
+   "sha256": "1976b28d11b6762d555c4937bbea7d652bd9769394003f51aa83031ae3f28d02"
   },
   {
    "path": "tools/loment_boot.py",
@@ -919,7 +919,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "788d3c8cae20675b7f52dc60d742ff6949b9bedbc3c8c23a54865ec7bce765c4"
+   "sha256": "5636511fe0c51b78111f071d0d10c60cd12bf10f68825c3a35302d6fc62173b2"
   },
   {
    "path": "loment/tools/lomdoc.lomt",
@@ -1342,8 +1342,12 @@
    "sha256": "b141fdf432f087a83e39ab3a6f1b1bf229ca632e33f6bd009c183192a7465845"
   },
   {
+   "path": "docs/182-lomenterr-and-choose-switches.md",
+   "sha256": "b344dd445a80907688fe0f4e6ede850076eada821dd4fba3ff20a10e6888b229"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "b65df84da636efb2eabfa9b2a8a34ffcd21b7bf0c4c66c5ea1f89144bc9af923"
+   "sha256": "1a0cbf086f75f56b9ca6b320d501c8b617dfaafa15b96a04e80cfb6e37f4b0df"
   },
   {
    "path": "docs/manual/api/ahci.md",
