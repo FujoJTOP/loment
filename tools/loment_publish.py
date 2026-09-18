@@ -216,13 +216,15 @@ Loment is a **systems programming language**: it compiles to native x86-64 execu
 Linux ELF and Windows PE, or a freestanding object for bare metal — with no runtime and no
 libc. Its syntax is a strict subset of Rust, and the toolchain is itself written in Loment.
 
-Two things were added in the latest update, and they are why this repository is worth a
-look now:
+Three things are worth knowing about it, and they are why this repository is worth a look
+now:
 
 - **It calls libraries written in other languages** — ten of them, end to end, from C and
   Rust to Python and Java.
 - **It reads source written in other languages' syntax** — C, Rust, Go, Java, Python —
   and turns a library's source into a Loment interface unit.
+- **Everything is customizable** — the source suffix, the commands, the libraries, and the
+  toolchain itself.
 
 **[Quick start](QUICKSTART.md)** ·
 [Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
@@ -362,6 +364,22 @@ criteria each (`loment_multisyntax_test`).
 not what it computes; carrying implementations would be a structural extension of it, not
 an extra field. Whatever cannot be represented — overloads, generics, managed runtimes —
 is reported with a name and a reason, and nothing is dropped silently.
+
+## Loment · everything is customizable
+
+The language fixes as little as it can get away with. What is a matter of taste or of local
+convention is left to the project, and changing it never means forking the toolchain.
+
+| What | How |
+|---|---|
+| The source file's **suffix** | `.lomt` is only a habit. Any suffix is a L1 source — `.lom` is the one exception, because it is the L0 interface contract and is routed by suffix. A project settles the rest in `<project root>/loment.conf`: `pub fn source_ext() -> str { return ".foo"; }` |
+| The **command surface** | Put an executable named `loment-<name>` anywhere on `PATH`, and `loment <name> ...` forwards to it with the arguments and the exit code untouched. Official commands always win, so a stray `loment-version` cannot lie about the version. The same shape as `git`. |
+| **Libraries** | A library is a directory, its identity is a content hash, and its dependencies are the `use` lines in its source rather than a manifest. So two versions can coexist, and nothing is identified by a version number you have to trust. |
+| The **toolchain itself** | The compiler is written in Loment and rebuilds from a seed committed to this repository, so you can read it, change it, and check that it still reproduces itself byte for byte. |
+
+None of this needs a registry or a schema: the extension points are files on disk, so you
+can list them, diff them and put them in version control. A project's own conventions stay
+in the project.
 
 ## The language itself
 
