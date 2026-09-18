@@ -1,0 +1,374 @@
+// comefor.lomt — `comefor` / `byuse` 的 **token 层展开**（S4.1 自举侧，`docs/184` §1/§3.1/§3.2）。
+//
+// 参考侧是 `tools/loment_comefor.py`；**两边必须逐字节同产物**（`docs/158` §5），
+// 所以这一份是**镜像**，不是"另一个实现"。
+//
+// ## 它干什么
+//
+//     comefor let "reg" to { <一段 Loment 程序> }
+//     …从此 `reg` 是这个新语法…
+//     byuse "reg" done
+//
+// 展开**在 token 流上、解析之前** —— 所以 checker/codegen 从头到尾看不见 `comefor`/`byuse`。
+// 宏体由**解释器**在编译期跑（`interp.lomt` 的 `ct_call_toks`），它读 token、吐 token，
+// `fn main` 的返回值是**吃掉的 token 数**（`docs/184` §3.1）。
+//
+// ## 与参考侧的两处形态差（都是"自举这一侧不必做"的那类）
+//
+// 1. **体不用解析成 AST** —— 它本来就是一段 token，`ct_call_toks` 直接在 token 上跑。
+//    参考侧要 `Parser` 是因为它只会走 AST。
+// 2. **合成文本追加在源缓冲末尾**（见 `ct_syn` 那条注释）—— 自举侧 token 的"文本"就是
+//    `(off, len)` 指进 `unit`，所以合成的词也得**落在 `unit` 里**才读得到。
+module comefor
+
+use bytes
+use lexer
+use switches
+use interp
+
+// ---------------------------------------------------------------- 尺寸
+/// 同时最多几个方言词。
+const MAX_DIALECT: u32 = 64;
+/// 方言表一格 32 字节: `word_off|word_len|body_lo|body_hi|line|active`（后两个 4 字节空着）。
+const D_SIZE: u32 = 32;
+/// 表 + 表尾一格的条数。**数写字面量** —— 常量在表达式里没有类型（`switches.lomt`
+/// 的 `SW_BYTES = 8008` 是同一条注释的出处），`64 * 32 + 4` 会当场变成语法错。
+/// 64 * 32 + 4 = 2052
+const D_BYTES: u32 = 2052;
+/// 宏体 token 数上限（体是编译期的、很小的东西；超了报错，不写穿）。
+const BODY_CAP: u32 = 300;
+const BODY_BYTES: u32 = 12000;
+/// 合成文本池上限（`ct_syn` 往**源缓冲末尾**追加的那一段）。
+const SYN_CAP: u32 = 8192;
+/// `comefor` 层要的整块内存（表 + 体缓冲 + 语境 + 结果槽）。
+///
+/// **布局是有意排的，别随手改**：表占前 2052 字节，体缓冲**从 2056 起** ——
+/// 一开始我把体写在 128，那样它会盖住表的第 4 格往后（表是 64 * 32 + 4 = 2052 字节，
+/// `D_N` 在 2048）。**重叠不会当场炸**：方言表被体覆盖之后，找词会随机失配，
+/// 症状是"方言时灵时不灵"。所以这一段用常量摆平。
+///
+/// 2056 + 12000 + 80 + 8 = 14144
+pub const CF_BYTES: u32 = 14144;
+
+// 表内偏移
+const D_WOFF: u32 = 0;
+const D_WLEN: u32 = 4;
+const D_BLO: u32 = 8;
+const D_BHI: u32 = 12;
+const D_LINE: u32 = 16;
+const D_ON: u32 = 20;
+/// 表尾那一格放条数。64 * 32 = 2048
+const D_N: u32 = 2048;
+
+/// 体缓冲起点。**表是 2052 字节**，取到 2056 是为 8 字节对齐（token 记录按 u32 读）。
+const BODY_OFF: u32 = 2056;
+/// 语境块从体的后面开始。2056 + 12000 = 14056
+const CTX_OFF: u32 = 14056;
+/// 结果槽（`ct_call_toks` 的返回值）在语境之后。2056 + 12000 + 80 = 14136
+const RES_OFF: u32 = 14136;
+
+// 语境块**前 48 字节是解释器认的那几个字段**（`interp.lomt` 的 `CTX_*`，两边必须是同一张
+// 布局）；48 往后是 `comefor` 自己挂的"这一趟不变的那些"。
+//
+// **为什么要挂这几个：`cf_run` 只要 2 个形参。** 自举 codegen 的形参上限是 **10 槽**
+// （`test_m85_codegen_arg_arity_is_loud` 钉着），第一版 `cf_run` 写了 12 个 ——
+// 越过上限**不是报错而是生成错代码**，实测症状是驱动编自己时 SIGILL、编方言源时段错误。
+// 把不变的实参先摆进语境，函数就只剩 `(cf, d)`。
+const J_UNIT: u32 = 48;    // u64: 源文本（`ct_syn` 往它末尾追加）
+const J_HEAP: u32 = 56;    // u64: 解释器的工作堆
+const J_SRCN: u32 = 64;    // u32: 源文本长度（合成文本的起点）
+const J_I: u32 = 68;       // u32: 这次展开的方言词下标
+
+// ---------------------------------------------------------------- 小助手
+/// 把 `src` 的第 `j` 条 token 记录抄到 `dst` 的第 `o` 条。
+///
+/// **不能复用 `switches.lomt` 的 `copy_tok`**：那一个是**原地压缩**用的 ——
+/// 它读写的是**同一块**（`store32(toks, o*20+q*4, load32(toks, j*20+q*4))`）。
+/// 拿它做跨数组拷贝，源那一侧会从**目标数组**里读 —— 而展开的目标是一块刚拿到的
+/// 未初始化内存，于是抄出来**全是 0**、且末条不是 `eof`，症状是 driver 在
+/// "扫到 eof 为止"那个循环里跑飞（段错误）。实测撞到过一次。
+fn cf_copy(dst: ptr, o: u32, src: ptr, j: u32) {
+    let q: u32 = 0;
+    while q < 5 {
+        store32(dst, o * 20 + q * 4, load32(src, j * 20 + q * 4));
+        q = q + 1;
+    }
+}
+
+fn cf_kind(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20);
+}
+
+/// 第 `i` 条的某字段；`+4`=off `+8`=len `+12`=line `+16`=col。
+fn cf_f(t: ptr, i: u32, off: u32) -> u32 {
+    return load32(t, i * 20 + off);
+}
+
+/// `toks[i]` 是不是 ident 且文本是 `s`。
+fn cf_is(unit: ptr, t: ptr, i: u32, s: str) -> bool {
+    if cf_kind(t, i) != 0 {
+        return false;
+    }
+    let off: u32 = cf_f(t, i, 4);
+    let ln: u32 = cf_f(t, i, 8);
+    if ln != str_len(s) as u32 {
+        return false;
+    }
+    let q: u32 = 0;
+    while q < ln {
+        if (load8(unit, off + q) as u32) != str_byte(s, q) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// 两个**跨度**是不是同一段文本（方言词按跨度比，不建字符串）。
+fn cf_span_eq(unit: ptr, o1: u32, o2: u32, n: u32) -> bool {
+    let q: u32 = 0;
+    while q < n {
+        if load8(unit, o1 + q) != load8(unit, o2 + q) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// `unit[at]` 是 `{` 时，返回配对 `}` 的下标；**配不上返回 `nt`**（`nt` 是"非法"信号，
+/// 与 `switches.lomt` 的 `block_end` 返回 `nt-1` 不同 —— 那边是"尽力而为"，这边要报错）。
+fn cf_block_end(unit: ptr, t: ptr, at: u32, nt: u32) -> u32 {
+    let d: u32 = 1;
+    let e: u32 = at + 1;
+    while e < nt && d > 0 {
+        if cf_kind(t, e) == 3 {
+            let c: u32 = load8(unit, cf_f(t, e, 4)) as u32;
+            if c == 123 { d = d + 1; }
+            if c == 125 { d = d - 1; }
+        }
+        e = e + 1;
+    }
+    if d != 0 {
+        return nt;
+    }
+    return e - 1;
+}
+
+// ---------------------------------------------------------------- 形状判定
+/// `comefor let "…" to {` —— 五个 token 的形状。
+///
+/// **判形状而不是判词**：`comefor` 不是保留字（`docs/158` §4 第 12 条），
+/// `let comefor: u32 = 1;` 合法。与参考侧 `loment_comefor._comefor_at` 一一对应。
+fn cf_comefor_at(unit: ptr, t: ptr, nt: u32, i: u32) -> bool {
+    if i + 4 >= nt {
+        return false;
+    }
+    if !cf_is(unit, t, i, "comefor") || !cf_is(unit, t, i + 1, "let") {
+        return false;
+    }
+    if cf_kind(t, i + 2) != 2 || !cf_is(unit, t, i + 3, "to") {
+        return false;
+    }
+    return cf_kind(t, i + 4) == 3
+            && (load8(unit, cf_f(t, i + 4, 4)) as u32) == 123;
+}
+
+/// `byuse "…" done` —— 三个 token 的形状。
+fn cf_byuse_at(unit: ptr, t: ptr, nt: u32, i: u32) -> bool {
+    if i + 2 >= nt {
+        return false;
+    }
+    return cf_is(unit, t, i, "byuse") && cf_kind(t, i + 1) == 2
+            && cf_is(unit, t, i + 2, "done");
+}
+
+// ---------------------------------------------------------------- 表达
+pub fn has_comefor(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 4 < nt {
+        if cf_comefor_at(unit, t, nt, i) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 解释器的工作堆大小 —— **转出来给 driver 用**。
+///
+/// driver **不能直接 `use interp`**：Loment 的发射符号是**平的**，一 `use` 进来，
+/// `interp` 的 `skip_type`/`find_fn`/`op_code`/`E_ARITY` 就与 `codegen`/`checker` 撞名
+/// （实测一次报了七条）。所以 driver 只认 `comefor`，需要的那两样由这里转一手。
+pub fn cf_heap_bytes() -> u32 {
+    return CT_HEAP_BYTES;
+}
+
+/// 解释器的错误种类名 —— 同上，转一手（那张表在 `interp` 里，只有一份）。
+pub fn cf_err_name(c: u32) -> str {
+    return err_name(c);
+}
+
+/// 在方言表里按**跨度**找词；找不到返回 `MAX_DIALECT`（非法下标）。
+fn cf_find(unit: ptr, cf: ptr, nd: u32, wo: u32, wl: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nd {
+        if load32(cf, i * D_SIZE + D_WLEN) == wl
+                && cf_span_eq(unit, load32(cf, i * D_SIZE + D_WOFF), wo, wl) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return MAX_DIALECT;
+}
+
+/// 把一段 token 抄进体缓冲，末尾补一条 `eof`。返回体缓冲里的条数（含 eof）。
+fn cf_load_body(cf: ptr, toks: ptr, lo: u32, hi: u32) -> u32 {
+    let buf: ptr = ptr_add(cf, BODY_OFF);
+    let n: u32 = hi - lo;
+    let i: u32 = 0;
+    while i < n {
+        cf_copy(buf, i, toks, lo + i);
+        i = i + 1;
+    }
+    store32(buf, n * 20, 4);            // kind = eof
+    store32(buf, n * 20 + 4, 0);
+    store32(buf, n * 20 + 8, 0);
+    store32(buf, n * 20 + 12, 0);
+    store32(buf, n * 20 + 16, 0);
+    return n + 1;
+}
+
+/// 跑一次宏。**只有 2 个形参** —— 不变的实参由调用方先摆进语境（见 `J_*` 那条注释：
+/// 自举 codegen 的形参上限是 10 槽，越过它是**生成错代码**而不是报错）。
+///
+/// 返回**错误码**（0 = 成功，9 = 体太大）；吃掉的 token 数写进结果槽，
+/// 展开后的产物条数留在语境的 `CTX_OUTC`（调用方读它续着写）。
+fn cf_run(cf: ptr, d: u32) -> u32 {
+    let ctx: ptr = ptr_add(cf, CTX_OFF);
+    let lo: u32 = load32(cf, d * D_SIZE + D_BLO);
+    let hi: u32 = load32(cf, d * D_SIZE + D_BHI);
+    if hi - lo + 1 > BODY_CAP {
+        return 9;                       // 体太大
+    }
+    let toks: ptr = get64(ctx, CTX_TOKS) as ptr;
+    cf_load_body(cf, toks, lo, hi);
+    return ct_call_toks(get64(ctx, J_UNIT) as ptr, ptr_add(cf, BODY_OFF),
+                        get64(ctx, J_HEAP) as ptr, ctx, ptr_add(cf, RES_OFF));
+}
+
+// ---------------------------------------------------------------- 主循环
+/// 展开。返回**错误码**（0 = 成功），产物条数写进 `res[0]`。
+///
+/// `unit` 是源**文本**，`toks` 是**外层** token 表（进），`out` 是产物表，
+/// `srcn` 是源文本长度（合成文本从这儿往后追加）。
+pub fn expand_comefor(unit: ptr, toks: ptr, nt: u32, out: ptr, outcap: u32,
+                      cf: ptr, heap: ptr, srcn: u32, res: ptr) -> u32 {
+    store32(cf, D_N, 0);
+    // 语境里**这一趟不变的那几格**先摆好（`cf_run` 只有 2 个形参，见 `J_*` 那条注释）。
+    let ctx: ptr = ptr_add(cf, CTX_OFF);
+    store32(ctx, CTX_NT, nt);
+    put64(ctx, CTX_TOKS, toks as u64);
+    put64(ctx, CTX_OUT, out as u64);
+    store32(ctx, CTX_OUTCAP, outcap);
+    put64(ctx, CTX_SRC, unit as u64);
+    // 合成文本池的**上界是绝对偏移**（解释器只做一次比较，不与 `srcn` 相减）——
+    // 写成 `SYN_CAP` 的话，源文本一长，这个"预算"就永远够用，等于没有界。
+    store32(ctx, CTX_SYNCCAP, srcn + SYN_CAP);
+    put64(ctx, J_UNIT, unit as u64);
+    put64(ctx, J_HEAP, heap as u64);
+    store32(ctx, J_SRCN, srcn);
+    let nd: u32 = 0;
+    let o: u32 = 0;
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    while i < nt {
+        let k: u32 = cf_kind(toks, i);
+        // **没有 `continue`**（Loment 不收这个关键字）—— 用 `did` 一个标志走完，
+        // 只有"谁都没认领"的那一支才照抄 + 前进。`switches.lomt` 的第二遍同法。
+        let did: u32 = 0;
+        // 花括号**不改 `did`** —— 它只是记深度，token 本身照抄（`did` 留在 0，
+        // 于是落到最后那一支去）。这里设了 `did` 就会把每个括号悄悄吃掉。
+        if k == 3 {
+            let c: u32 = load8(unit, cf_f(toks, i, 4)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                depth = depth + 1;
+            } else if (c == 125 || c == 41 || c == 93) && depth > 0 {
+                depth = depth - 1;
+            }
+        }
+        if did == 0 && k == 0 {
+            if cf_comefor_at(unit, toks, nt, i) {
+                if depth != 0 {
+                    return 2;           // 定义不在顶层
+                }
+                let e: u32 = cf_block_end(unit, toks, i + 4, nt);
+                if e == nt {
+                    return 3;           // 体没闭合
+                }
+                if nd >= MAX_DIALECT {
+                    return 4;           // 方言太多了
+                }
+                // 方言词存的是**字符串字面量里的那几个字**，不含两边的引号 ——
+                // 使用处是**标识符**，它的跨度从字本身起。存整段（含引号）的话两边
+                // 永远对不上，`cf_find` 一次都命中不了：症状是"方言定义了却从不生效"，
+                // 而定义本身又确实被抹掉了 —— 看起来像"整个 comefor 没接线"。
+                // 参考侧比的是**文本**（`t.val`），所以那边天然没有这个问题。
+                store32(cf, nd * D_SIZE + D_WOFF, cf_f(toks, i + 2, 4) + 1);
+                store32(cf, nd * D_SIZE + D_WLEN, cf_f(toks, i + 2, 8) - 2);
+                store32(cf, nd * D_SIZE + D_BLO, i + 5);
+                store32(cf, nd * D_SIZE + D_BHI, e);
+                store32(cf, nd * D_SIZE + D_LINE, cf_f(toks, i, 12));
+                store32(cf, nd * D_SIZE + D_ON, 1);
+                nd = nd + 1;
+                store32(cf, D_N, nd);
+                i = e + 1;              // 定义那一段整个抹掉
+                did = 1;
+            } else if cf_byuse_at(unit, toks, nt, i) {
+                if depth != 0 {
+                    return 5;           // `byuse` 不在顶层
+                }
+                // `byuse` 后面那个词也是**字符串字面量** —— 同样掐掉引号再比。
+                let d: u32 = cf_find(unit, cf, nd, cf_f(toks, i + 1, 4) + 1,
+                                     cf_f(toks, i + 1, 8) - 2);
+                if d == MAX_DIALECT {
+                    return 6;           // 收了一个没定义的名字
+                }
+                store32(cf, d * D_SIZE + D_ON, 0);
+                i = i + 3;              // 终止那一段也整个抹掉
+                did = 1;
+            } else {
+                let w: u32 = cf_find(unit, cf, nd, cf_f(toks, i, 4), cf_f(toks, i, 8));
+                if w != MAX_DIALECT && load32(cf, w * D_SIZE + D_ON) == 1 {
+                    // 每趟变的几格：游标起点、产物写到哪、合成文本从头开始。
+                    store32(ctx, CTX_CUR, i + 1);   // 方言词之后第一个
+                    store32(ctx, CTX_OUTC, o);
+                    store32(ctx, CTX_SYNTH, srcn);  // 合成文本从源文本末尾起
+                    store32(ctx, J_I, i);
+                    let re: u32 = cf_run(cf, w);
+                    if re == 9 {
+                        return 9;               // 体太大
+                    }
+                    if re != 0 {
+                        store32(res, 0, re);
+                        return 7;               // 宏体没跑成（种类名在 res[0]）
+                    }
+                    let n: u32 = load32(ptr_add(cf, RES_OFF), 0);
+                    if n > nt - i - 1 {
+                        return 8;               // 吃多了
+                    }
+                    o = load32(ctx, CTX_OUTC);
+                    i = i + 1 + n;
+                    did = 1;
+                }
+            }
+        }
+        if did == 0 {
+            cf_copy(out, o, toks, i);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    store32(res, 0, o);
+    return 0;
+}

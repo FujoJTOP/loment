@@ -72,6 +72,7 @@ const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
 use lexer
 use codegen
 use checker
+use comefor
 
 /// 退出; 返回值只为类型完整 (syscall 之后不会回来)。
 fn die(code: u64) -> u32 {
@@ -123,26 +124,29 @@ fn fail(msg: str) -> u32 {
     return die(1);
 }
 
-/// 词法流里有没有 `comefor let "…" to {` 这个**形状**（`docs/184` §11 的临时守卫，
-/// 镜像落地时删掉）。
+/// `comefor` 展开失败了 —— 报出来并退出。
 ///
-/// **判形状而不是判词**：`comefor` 不是保留字（`docs/158` §4 第 12 条），
-/// `let comefor: u32 = 1;` 是合法的 —— 按词判会误伤。形状与参考侧
-/// `loment_comefor._comefor_at` 那五个 token 一一对应。
-fn has_comefor(src: ptr, t: ptr, nt: u32) -> u32 {
-    let i: u32 = 0;
-    let n: u32 = 20;                       // token 记录一个 20 字节
-    while i + 4 < nt {
-        if tok_is(src, t, i, "comefor")
-                && tok_is(src, t, i + 1, "let")
-                && load32(t, (i + 2) * n) == 2          // 2 = string（见 lexer.lomt 头）
-                && tok_is(src, t, i + 3, "to")
-                && tok_is(src, t, i + 4, "{") {
-            return 1;
-        }
-        i = i + 1;
+/// **码是数、话在这儿** —— 展开器只管报哪一类，说法归 driver（与 `switch_rules` 报
+/// E022 同一个分工）。
+///
+/// `re == 7`（宏体没跑成）**单独一支**：那一支要带上**解释器的种类名**
+/// （`divzero` / `oom` / …），而 `fail` 只收一个现成的 `str`，拼不出来 —— 所以直接往
+/// stderr 写三段。种类名走 `cf_err_name`（`comefor` 转出来的 `interp` 那份表），
+/// **不另抄一份**：那张表正是"两边连错误的种类都要一致"的凭据。
+fn comefor_fail(re: u32, code: u32) -> u32 {
+    if re == 7 {
+        let _a: u64 = wstr(2, "fujoc-s: comefor 的宏体没跑成: ");
+        let _b: u64 = wstr(2, cf_err_name(code));
+        let _c: u64 = wstr(2, "\n");
+        return die(1);
     }
-    return 0;
+    if re == 2 { return fail("fujoc-s: comefor 只能写在顶层 (docs/184 第 1 节)\n"); }
+    if re == 3 { return fail("fujoc-s: comefor 的体没闭合 (少一个 })\n"); }
+    if re == 4 { return fail("fujoc-s: comefor 的方言太多了 (上限 64 个)\n"); }
+    if re == 5 { return fail("fujoc-s: byuse 只能写在顶层 (与 comefor 同层)\n"); }
+    if re == 6 { return fail("fujoc-s: byuse 收的不是任何在用的方言\n"); }
+    if re == 9 { return fail("fujoc-s: comefor 的宏体太大 (上限 300 token)\n"); }
+    return fail("fujoc-s: comefor 吞掉的 token 比剩下的还多\n");
 }
 
 /// 写一个 str 到 fd (长度交给 str_len —— 手数字节数会连字符串常量的 NUL 一起写出去)。
@@ -1195,14 +1199,45 @@ fn _start() -> u32 {
     }
     let sw: ptr = swv as ptr;
     let nt: u32 = apply_switches(unit, toks2, ntl, sw);
-    // `comefor` 的展开在**自举侧还没落地**（`docs/184` §11）：参考实现已经能展开，
-    // 这边还认不得。**必须在这里明确拒绝** —— 放它过去的话，`comefor`/`byuse` 会被当成
-    // 普通的标识符"照着编过去"，产出一份**与参考侧不同**的 IR 而**不报错**，
-    // 而 `docs/158` §5 要的是两边逐字节一致。**静默不一致比一条错难查得多**
-    // （`docs/182` §1.9 那两条消费者缺口就是这个形状）。镜像落地时删掉这一段。
+    // `comefor`/`byuse` 的 token 层展开（`docs/184` §9 S4.1）。**在开关之后**，
+    // 理由与参考侧 `lomentc.load` 那条一样：关着的 `set choose` 体里写的 `comefor`
+    // 该连 token 都不剩（先展开的话它会先被认成一次**使用**）。
+    //
+    // 产物写进**第二块 token 缓冲** —— 展开会**变长**（宏体吐的比吃的多），
+    // 而 `apply_switches` 那种原地压缩只对"只删不插"成立。
     if has_comefor(unit, toks2, nt) == 1 {
-        return fail("fujoc-s: comefor 的展开在自举侧还没实现 (参考实现能展开, 这边不能) — 见 docs/184 第 11 节\n");
+        let cfv: u64 = sys_alloc(CF_BYTES as u64);       // 方言表 + 体缓冲 + 语境
+        if cfv == 0 {
+            return fail("fujoc-s: brk failed (comefor)\n");
+        }
+        // 解释器的工作堆**单独要一块**（墙 ①b）：与 codegen 的 49152B 同在一块 64 KiB
+        // 上必然相撞，撞了是 `@__loment_abort`（SIGILL，看起来像编译器崩了）。
+        let hpv: u64 = sys_alloc(cf_heap_bytes() as u64);
+        if hpv == 0 {
+            return fail("fujoc-s: brk failed (comefor heap)\n");
+        }
+        // 展开后的产物表。与源一样大 —— 宏体可以吐得比吃的多，但不会多到要再翻一倍。
+        let cfov: u64 = sys_alloc(TOKS_CAP as u64);
+        if cfov == 0 {
+            return fail("fujoc-s: brk failed (comefor out)\n");
+        }
+        let rsv: u64 = sys_alloc(64);
+        if rsv == 0 {
+            return fail("fujoc-s: brk failed (comefor res)\n");
+        }
+        let rs: ptr = rsv as ptr;
+        let re: u32 = expand_comefor(unit, toks2, nt, cfov as ptr, ntk, cfv as ptr,
+                                              hpv as ptr, len as u32, rs);
+        if re != 0 {
+            // `re` 说哪一类错；`re == 7` 时 `rs[0]` 是**解释器**的错误码（宏体没跑成）。
+            return comefor_fail(re, load32(rs, 0));
+        }
+        // 下游一律用展开后的那一份 —— 与 `apply_switches` 换掉 `nt` 是同一个做法。
+        nt = load32(rs, 0);
+        toks2 = cfov as ptr;
     }
+
+
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);

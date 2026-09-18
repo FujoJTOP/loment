@@ -260,6 +260,7 @@ fn _start() {
 | 模块 | 首行 `module <name>`（无分号） |
 | 项目模式 | `choose std` / `choose no_std`（**整个程序只写一次，只能写在入口那一份**，库不许写；不写就是 `std`）—— 见 §2.1 |
 | 开关设定 | `addin <名字>`（**只写在入口那一份**）—— 拉一个"开关设定"单元进来，见 §2.2 |
+| 自定义语法 | `comefor let "词" to { … }` … `byuse "词" done` —— **在编译期定义一个新语法**。`to` 后面那段是**一段 Loment 程序**（`fn main` 是入口，**返回值 = 吃掉的 token 数**），它用 `ct_n` / `ct_tok` / `ct_out` / `ct_syn` 读 token、吐 token。定义与终止都**只能在顶层**、不能嵌套；展开发生在**解析之前**的 token 层，所以报错/跳转仍指回你写的那一行。见 `docs/184` |
 | 导入 | **两种写法，后面都不带分号**：`use 名字`（**按层找，先命中先用**：① 项目根 `<项目>/deps/<名字>/<名字><后缀>` ② 工具链自带 `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>` ③ 内置四根 `loment/lib` → `examples` → `selfhost` → `tools`，**只有第 ③ 层要求名字唯一**）；`use "path/to/other.lomt"`（相对当前文件或工作目录，**自己目录里的伴生文件要用这个**）。`<后缀>` 默认 `.lomt`，项目可以换成自己的（§7）。单文件最多 **300 条** use。写成 `use x;` 会被解析期拒绝（§6.13） |
 | 函数 | `fn f(a: u32, b: str) -> u32 { ... }`（无返回写 `fn f()`）；**形参最多 10 个** |
 | 导出 | 跨模块可见加 `pub`：`pub fn` / `pub struct` / `pub const` |
@@ -355,6 +356,77 @@ choose verbose
 - **它本身参与编译**，所以体里给入口用的函数要 `pub`。
 - **只有入口能写 `addin`**；库或 addin 单元里写了会被拒（写了也不会生效）。
 - 开关取值会进 Potato（`switches` 字段），所以"哪些开关开着"在**不读源码**的那一侧也看得见。
+
+### 2.3 自定义语法 `comefor` / `byuse`
+
+**在编译期定义一个新语法。** 定义处那段程序由内核**跑**，它读 token、吐 token。
+下面这一份是**完整的、能编过**的例子 —— `def ANSWER = 42;` 被展开成 `const ANSWER: u32 = 42;`：
+
+```rust
+module cfdef                    // 仓库里是 loment/comefor/def_dialect.lomt
+
+comefor let "def" to {
+    /// 把字符串字面量的字节写进**宏体自己的宿主内存**，再合成一个 token。
+    fn emit_s(s: str, k: u64, line: u64, col: u64) -> u64 {
+        let n: u32 = str_len(s) as u32;
+        let p: ptr = alloc(32);
+        let i: u32 = 0;
+        while i < n {
+            store8(p, i, str_byte(s, i) as u8);
+            i = i + 1;
+        }
+        return ct_syn(k, p, n as u64, line, col);
+    }
+
+    /// 吃 `名字 = 数 ;` 四个，吐 `const 名字 : u32 = 数 ;` 七个。
+    fn main() -> u64 {
+        let buf: ptr = alloc(32);
+        ct_tok(0, buf);                         // 名字 -> buf
+        let ln: u64 = load8(buf, 12) as u64;    // 行列从源 token 上**读下来**
+        let cl: u64 = load8(buf, 16) as u64;
+        emit_s("const", 0, ln, cl);
+        ct_out(buf);                            // 名字：照抄源 token
+        emit_s(":", 3, ln, cl);                 // 3 = punct
+        emit_s("u32", 0, ln, cl);
+        ct_tok(1, buf); ct_out(buf);            // `=`
+        ct_tok(2, buf); ct_out(buf);            // `42`
+        ct_tok(3, buf); ct_out(buf);            // `;`
+        return 4;                               // 吃了 4 个
+    }
+}
+
+def ANSWER = 42;                // 从这里到 `byuse`，`def` 是语法
+
+fn main() -> u64 { return ANSWER as u64; }
+
+byuse "def" done
+```
+
+**宏体拿到什么**（`docs/184` §3.2）—— 只有这四个，别的内建**在这个语境里不可用**：
+
+| 签名 | 说明 |
+|---|---|
+| `ct_n() -> u64` | 游标起还有多少 token |
+| `ct_tok(i: u64, buf: ptr) -> u64` | 源 token 的字段写进 `buf`；越界返回 0 |
+| `ct_out(buf: ptr) -> u64` | `buf` 追加到输出流（文本**按跨度回源里查**） |
+| `ct_syn(k: u64, txt: ptr, ln: u64, line: u64, col: u64) -> u64` | 合成一个 token（文本取自**宏体自己的堆**） |
+
+记录 **20 字节**：`+0 kind`（0=ident 1=number 2=string 3=punct 4=eof）`+4 off` `+8 len`
+`+12 line` `+16 col`；用 `load8`/`store8` 读写。`off`/`len` 圈的是源里的**原始片段**
+（`"hello"` 的 len 是 7，不是 5）。
+
+**规矩**：
+
+- **定义与终止都只能在顶层**，不能嵌套；一个词不许定义两次；
+- `byuse` 后面跟的是 `comefor` 里那个名字（`comefor let "def"` → `byuse "def" done`）；
+- 展开在**解析之前**的 token 层 —— 所以 `comefor`/`byuse` 不是关键字，你甚至在别处
+  可以把 `def` 当普通标识符用（展开只在你声明的那个区间里生效）；
+- **位置是宏体的责任**：`ct_out` 吐出的 token 位置自动回到源里那一处；
+  `ct_syn` 造的新词要自己填 `line`/`col`。填不对内核**看不出来**，报错会指到别处；
+- 体里**暂时不支持 `use`** —— 帮手 `fn` 写在体里面（体是一支完整的程序）。
+
+可运行的例子：`loment/comefor/def_dialect.lomt`（它手写展开后的样子是 `def_hand.lomt`，
+判据说这两份编出的 IR **逐字节相同**）。
 
 ## 3. 内建函数（全部，没有别的）
 

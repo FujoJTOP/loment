@@ -1466,7 +1466,7 @@ fn do_keywords(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "types", "u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str mut");
     termrow(mem, 1, "patterns", "if let  _  as  self");
     termrow(mem, 1, "* capability", "capability  guard  revocable  excluded");
-    termrow(mem, 1, "* program/ABI", "choose  addin  extern  interrupt");
+    termrow(mem, 1, "* program/ABI", "choose  addin  comefor  byuse  extern  interrupt");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "capability domains are the one genuinely new thing: loment caps   .   full table: loment syntax");

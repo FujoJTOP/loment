@@ -1067,10 +1067,15 @@ def test_m85_selfhosted_driver_compiles_corpus():
         ok, skip = [], []
         # 语料 = 示例 + 自举前端 + **工具与库** (loment/tools, loment/lib)。
         # 后者是"用**自举编译器**就能造出这些工具"的判据 —— 装 LSP/格式化器不需要 Python。
+        #
+        # `loment/comefor` 是 **S4.1 那条判据的落点**（`docs/184` §9）：`def_dialect.lomt`
+        # 用自定义语法写、`def_hand.lomt` 是它手写展开后的样子 —— 两份都进语料，
+        # "自举驱动的产物与参考逐字节相同"这一条就把它们一起兜住了。
         for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
                              + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
                              + list((ROOT / "loment" / "tools").glob("*.lomt"))
-                             + list((ROOT / "loment" / "lib").glob("*.lomt"))):
+                             + list((ROOT / "loment" / "lib").glob("*.lomt"))
+                             + list((ROOT / "loment" / "comefor").glob("*.lomt"))):
             why = _unsupported(target)
             if why:
                 skip.append((target.name, why))
