@@ -14,6 +14,7 @@ look now:
 - **It reads source written in other languages' syntax** — C, Rust, Go, Java, Python —
   and turns a library's source into a Loment interface unit.
 
+**[Quick start](QUICKSTART.md)** ·
 [Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
@@ -75,6 +76,9 @@ hello from Loment
 
 Source files are `.lomt`. `_start` is the entry point, and output goes through the `write`
 system call. `loment build hello.lomt` produces a single self-contained executable.
+
+Getting from here to a running binary — from a checkout today, since nothing is published
+yet — is [QUICKSTART.md](QUICKSTART.md).
 
 ## Calling other languages' libraries
 

@@ -129,6 +129,10 @@ REPOS: dict[str, dict] = {
             # `*.lomt text eol=lf` 那条规矩照样丢。2026-09-17 第一次修漏写这一条，
             # 远端那份仍只有工具自己那段，是查"克隆出来还是 CRLF"才发现的。
             "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes", "LICENSE",
+            # 新读者走的第二份文档 (**英文**), 与 README 分工: README 说"这是什么",
+            # 它只管"怎么跑起来"。README 顶部指向它。不在 `loment_release.GLOBS` 里,
+            # 所以不进发布清单 —— 它只服务于仓库读者, 不进包。
+            "QUICKSTART.md",
             # **`scripts/` 里只有这两个是 Loment 线的** —— 别整目录收（其余是 FujoOS 的
             # 内核/ISO 构建脚本）。这两个被工具链当成**必需的启动脚本**引用：
             # `loment_seed.py:72` 的 LAUNCH_SCRIPTS 点名 `scripts/lomc.ps1`（缺了它
@@ -205,6 +209,7 @@ look now:
 - **It reads source written in other languages' syntax** — C, Rust, Go, Java, Python —
   and turns a library's source into a Loment interface unit.
 
+**[Quick start](QUICKSTART.md)** ·
 [Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
@@ -266,6 +271,9 @@ hello from Loment
 
 Source files are `.lomt`. `_start` is the entry point, and output goes through the `write`
 system call. `loment build hello.lomt` produces a single self-contained executable.
+
+Getting from here to a running binary — from a checkout today, since nothing is published
+yet — is [QUICKSTART.md](QUICKSTART.md).
 
 ## Calling other languages' libraries
 
