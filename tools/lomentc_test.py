@@ -105,7 +105,7 @@ def test_rust_output_shape():
 @test
 def test_potato_emits_used_layouts():
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v2" and doc["unit"] == "demo" and doc["language"] == "loment"
+    assert doc["potato"] == "v3" and doc["unit"] == "demo" and doc["language"] == "loment"
     # v2 的新字段 (docs/143 §3.2): 没写 `choose` 就是默认 `std` —— 对象里永远显式。
     assert doc["mode"] == "std", doc.get("mode")
     assert [r["name"] for r in doc["layouts"]] == ["Header", "Section"]
@@ -1099,15 +1099,82 @@ def test_m45_form_object_v1_covers_slices_strings_generics():
 
 
 @test
-def test_m45_every_example_exports_valid_v2():
+def test_m45_every_example_exports_a_valid_object():
     ex = ROOT / "loment" / "examples"
     names = sorted(p.stem for p in ex.glob("*.lomt"))
     assert len(names) >= 15, names
     for n in names:
         doc = _potato(n)
-        assert doc["potato"] == "v2", n
+        assert doc["potato"] == "v3", n
         assert doc["mode"] in potato.MODES, (n, doc.get("mode"))
         assert potato.validate(doc) == [], (n, potato.validate(doc))
+
+
+@test
+def test_switches_elide_code_and_land_in_potato():
+    """开关（`docs/182` §1）: **真的驱动代码裁减**, 且取值进 Potato。
+
+    这是把 `choose` 从"承诺"变成"发明"的那一步。在此之前 `mode` 被校验、进对象、被回放,
+    **没有任何一行按它分支**（`loment_build.py` 零命中、`lomelf.py` 里的 `mode` 是 POSIX 的）。
+    开关的第一个真消费方就是**代码裁减**, 它不依赖任何跨线契约。
+
+    钉七条（`docs/182` §1.8）:
+      * 开着: 体摊到顶层, 里面的东西**存在**;
+      * 关着: 体**连 token 都不进 parser** —— 体内的语义错**不报**（这才是"关掉 = 不依赖"）;
+        反过来, 引用体内才有的东西就成了未定义;
+      * 括号不配对**照报**（体可以不解析, 但结构不能塌）;
+      * 未定义的开关 / 同名两次 / 超上限 各有错;
+      * 取值进 Potato 且**按名字排序**（确定性是判据）。
+    """
+    def chk(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "m.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            try:
+                mod = lomentc.load(p)
+            except lomc.LomError as e:
+                # **开关在词法流上落定**（docs/182 §2），所以"块没闭合"是**装载期**的错,
+                # 抛出来而不是进 check() 的 errs —— 与解析器其它结构错一致。
+                return [e.msg], None
+            return lomentc.check(mod, deps=[]), json.loads(lomentc.emit_potato(mod, ROOT))
+
+    BODY = ("set choose feat {\n"
+            "    fn helper() -> u32 {\n        return 7;\n    }\n}\n")
+    CALL = "fn f() -> u32 {\n    return helper();\n}\n"
+    # 开着: helper 存在
+    errs, doc = chk("module m\n\n" + BODY + "\nchoose feat\n\n" + CALL)
+    assert not errs, errs
+    assert doc["potato"] == "v3" and doc["switches"] == [{"name": "feat", "on": True}], doc
+    # 关着: 体整个不在了 —— 引用 helper 反而成了未定义
+    errs, doc = chk("module m\n\n" + BODY + "\nchoose close feat\n\n" + CALL)
+    assert errs and "helper" in errs[0], errs
+    # 关着: 体内的**语义错不报**（体没进 parser）
+    errs, doc = chk("module m\n\nset choose feat {\n    fn helper() -> u32 {\n"
+                    "        return undefined_thing;\n    }\n}\n\nchoose close feat\n\n"
+                    "fn f() -> u32 {\n    return 1;\n}\n")
+    assert not errs, errs
+    assert doc["switches"] == [{"name": "feat", "on": False}], doc["switches"]
+    # 括号不配对: 照报
+    errs, _ = chk("module m\n\nset choose feat {\n    fn h() -> u32 {\n        return 1;\n"
+                  "}\n\nfn f() -> u32 {\n    return 1;\n}\n")
+    assert errs and "没闭合" in errs[0], errs
+    # 未定义的开关
+    errs, _ = chk("module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n")
+    assert errs and "未定义的开关" in errs[0], errs
+    # 同名两次
+    errs, _ = chk("module m\n\n" + BODY + "\nchoose feat\nchoose close feat\n\n"
+                  "fn f() -> u32 {\n    return 1;\n}\n")
+    assert errs and "写了两次" in errs[0], errs
+    # 上限: 500 条能过, 501 条报错（**绝不静默丢**）
+    def many(n):
+        return ("module m\n\n" + "".join("set choose s%d {}\n" % i for i in range(n))
+                + "\nfn f() -> u32 {\n    return 1;\n}\n")
+    errs, doc = chk(many(lomentc.MAX_CHOOSE))
+    assert not errs, errs[:2]
+    assert len(doc["switches"]) == lomentc.MAX_CHOOSE
+    errs, _ = chk(many(lomentc.MAX_CHOOSE + 1))
+    assert errs and "超过上限" in errs[0], errs
+    print("      开关: 裁减/不裁减/potato 排序/上限 %d 都对" % lomentc.MAX_CHOOSE)
 
 
 @test
@@ -1115,14 +1182,14 @@ def test_mode_follows_choose_and_defaults_to_std():
     """`mode` 就是根单元 `choose` 的那一个值, 不写则 `std` (docs/143 §3.2 / docs/175 §8)。
 
     这是 docs/175 §8 那条判据的**正向**一半: 形式对象里的 mode 必须跟着源码走。
-    反向那一半 (删掉字段 -> 校验器必须红) 在 `potato_test` 的 v2 负例里。
+    反向那一半 (删掉字段 -> 校验器必须红) 在 `potato_test` 的 v2/v3 负例里。
     """
     src = "module m\n\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n"
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "m.lomt"
         p.write_text(src, encoding="utf-8", newline="\n")
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-        assert doc["potato"] == "v2" and doc["mode"] == "no_std", doc.get("mode")
+        assert doc["potato"] == "v3" and doc["mode"] == "no_std", doc.get("mode")
     # 不写 choose -> std
     src2 = "module m\n\nfn f() -> u32 {\n    return 1;\n}\n"
     with tempfile.TemporaryDirectory() as td:

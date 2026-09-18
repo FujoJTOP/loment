@@ -25,12 +25,14 @@ TYPES = INT_TYPES + ("bool", "str", "ptr", "()")
 BUILTIN_TRAITS = {"Drop": {"drop"}}
 WIDTH = {"u8": 1, "u16": 2, "u32": 4, "u64": 8, "i8": 1, "i16": 2, "i32": 4, "i64": 8}
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45); v2 = v1 + 项目模式 (docs/143 §3.2)
+# v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45); v2 = v1 + 项目模式 (docs/143 §3.2);
+# v3 = v2 + **开关取值** (docs/182 §1)
 TOP_KEYS_V0 = {"potato", "unit", "language", "imports", "capabilities", "functions", "layouts",
                "consts", "enums", "types", "excluded"}
 TOP_KEYS_V1 = TOP_KEYS_V0 | {"traits", "impls", "generics", "instances", "guards"}
 TOP_KEYS_V2 = TOP_KEYS_V1 | {"mode"}
-VERSIONS = ("v0", "v1", "v2")
+TOP_KEYS_V3 = TOP_KEYS_V2 | {"switches"}
+VERSIONS = ("v0", "v1", "v2", "v3")
 #: `mode` 的取值 = `choose` 的两个模式名 (docs/143 §3.2)。**只有这两个** ——
 #: 拼错的模式名在编译器那边是 E022, 在对象里就是这里报错。
 MODES = ("std", "no_std")
@@ -93,24 +95,47 @@ def validate(doc: object) -> list[str]:
     if ver not in VERSIONS:
         errs.append(f"potato 版本必须是 {VERSIONS} 之一，得到 {ver!r}")
         ver = "v0"
-    top = {"v0": TOP_KEYS_V0, "v1": TOP_KEYS_V1, "v2": TOP_KEYS_V2}[ver]
+    top = {"v0": TOP_KEYS_V0, "v1": TOP_KEYS_V1, "v2": TOP_KEYS_V2, "v3": TOP_KEYS_V3}[ver]
     for k in doc:
         if k not in top:
             errs.append(f"未知顶层字段 {k!r}（{ver} 不允许扩展字段）")
-    if ver in ("v1", "v2"):
+    if ver in ("v1", "v2", "v3"):
         for k in ("traits", "impls", "generics", "instances"):
             if not isinstance(doc.get(k), list):
                 errs.append(f"{ver}: 缺字段 {k}（必须是数组，可为空）")
         g = doc.get("guards")
         if not isinstance(g, int) or isinstance(g, bool) or g < 0:
             errs.append(f"{ver}: guards 必须是非负整数，得到 {g!r}")
-    if ver == "v2":
+    if ver in ("v2", "v3"):
         # **必填** (docs/175 §8 的判据: 从对象里删掉该字段, 校验器必须红)。这就是
-        # 必须升 v2 而不是往 v1 里加字段的原因 —— 要求必填会让既有的 v1 对象全变非法,
-        # 而 v0/v1 是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
+        # 必须升版本而不是往旧版里加字段的原因 —— 要求必填会让既有的旧版对象全变非法,
+        # 而旧版是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
         m = doc.get("mode")
         if m not in MODES:
             errs.append(f"{ver}: mode 必须是 {MODES} 之一，得到 {m!r}")
+    if ver == "v3":
+        # **必填, 可为空数组** (docs/182 §1)。与 `mode` 同一条纪律: 不存在"缺这项"的形态,
+        # 所以"这份单元是在什么开关状态下编的"是**可回放**的。
+        # 用户 2026-09-17: **"开关的取值是要进 Potato 的"**。
+        sw = doc.get("switches")
+        if not isinstance(sw, list):
+            errs.append(f"{ver}: switches 必须是数组（可为空），得到 {sw!r}")
+        else:
+            seen_s: set[str] = set()
+            for j, s in enumerate(sw):
+                w = f"switches[{j}]"
+                if not isinstance(s, dict):
+                    errs.append(f"{w}: 必须是对象")
+                    continue
+                nm = s.get("name")
+                if not isinstance(nm, str) or not IDENT_RE.match(nm):
+                    errs.append(f"{w}.name 非法: {nm!r}")
+                elif nm in seen_s:
+                    errs.append(f"{w}.name 重复: {nm}")
+                else:
+                    seen_s.add(nm)
+                if not isinstance(s.get("on"), bool):
+                    errs.append(f"{w}.on 必须是布尔（开关**只能**是开或关，没有第三态）")
     unit = _req(doc, "unit", "根", errs)
     if unit is not None and (not isinstance(unit, str) or not IDENT_RE.match(unit)):
         errs.append(f"unit 必须是标识符，得到 {unit!r}")

@@ -29,8 +29,10 @@ NO_SPACE_BEFORE = {",", ";", ")", "]", "}", ":", "::", ".", ".."}
 # 这些符号后不留空格
 NO_SPACE_AFTER = {"(", "[", ".", "::", "!", ".."}
 # 顶层关键字 (用于顶层之间插空行)
+# **`choose` 原先就不在这张表里** —— 既有缺口, 直到 docs/182 加开关才暴露:
+# 没有它, `choose std` 会被揉进上一行, 而 `set choose X { … }` 更是整块贴上去。
 TOP_KW = {"module", "use", "capability", "const", "struct", "enum", "trait", "impl",
-          "fn", "excluded", "pub", "interrupt"}
+          "fn", "excluded", "pub", "interrupt", "choose", "set"}
 INDENT = "    "
 
 

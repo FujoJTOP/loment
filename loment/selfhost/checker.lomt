@@ -14,6 +14,7 @@ module checker
 // 输出: 每条错误 8 字节 (code u32 | tok u32); 返回错误条数。
 use bytes
 use lexer
+use switches
 
 const K_FN: u32 = 1;
 const K_STRUCT: u32 = 2;

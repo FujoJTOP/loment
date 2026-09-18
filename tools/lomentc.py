@@ -683,10 +683,169 @@ class Module:
     #: 项目模式 (`choose no_std` / `choose std`, docs/143 §3.2)。**不写 = `std`**,
     #: 所以 None 就是默认。它声明的是**整个程序**的运行模式, 不是某个模块的 ——
     #: 见 `check()` 里那条"依赖不许 choose"。
+    #:
+    #: **它是核心语法的硬写法**（用户 2026-09-17）: `std`/`no_std` 不走下面那套可定义的
+    #: 开关机制, 保有自己的规则（`docs/182` §1.3）。
     choose: str | None = None
-    #: 每个 `choose` 的行号。**留成列表而不是只留最后一个**: "写两次"要能报出位置,
-    #: 只存一个值的话第二条会把第一条盖掉, 判据就只剩"有没有", 说不出"重复了"。
+    #: 每个核心模式声明的行号。**留成列表而不是只留最后一个**: "两个值打架"要能报出位置。
     choose_lines: list[int] = field(default_factory=list)
+    #: **开关表**（`docs/182` §1）: `set choose <名字> {…}` 定义, `choose <名字>` /
+    #: `choose close <名字>` 取值。由 `_apply_switches` 在**词法流上**落定后挂上来 ——
+    #: 开关是**编译期**的事, 它的行不进 AST（关着的那段体连 token 都不进 parser）。
+    switches: "SwitchTable | None" = None
+
+
+# ---------------------------------------------------------------- 开关 (docs/182 §1)
+
+#: 单个文件的 `choose`（含 `set choose`）条数上限。用户 2026-09-17 定**至少 500**。
+#: 与 `use` 的 300 条上限同一种保护: 超限**报错**, **绝不静默丢** —— 静默丢在这里的
+#: 后果比丢一个 use 更坏: 开关少了一个, 那段代码凭空消失, 而报错一句都没有。
+MAX_CHOOSE = 500
+
+
+class SwitchTable:
+    """`docs/182` §1 的开关表: 名字 -> (定义行, 取值)。
+
+    **为什么开关要能和核心模式分开**: 核心模式 (`std`/`no_std`) 是**硬写法**、是核心语法;
+    开关是**可定义**的, 一个程序可以有几万个（上限见 `MAX_CHOOSE`）。两者同用一个词
+    `choose`, 但只要看**名字是不是 `std`/`no_std`** 就分得开（`docs/182` §1.3）。
+    """
+
+    def __init__(self) -> None:
+        self.defs: dict[str, int] = {}                  # 名字 -> 定义行（首次）
+        self.vals: dict[str, tuple[bool, int]] = {}     # 名字 -> (开?, 取值行)（首次）
+        #: `(名字, 重复行, 首次行)` —— **同一件事写两遍要报出来**，不是后一个盖前一个。
+        #: 与"`choose` 只能出现一次"删除之后留下的那个空档正好互补：条数放开了，
+        #: 但**同名**仍然只许一次，否则"这个开关到底开没开"就没有答案。
+        self.dup: list[tuple[str, int, int]] = []
+        self.ndup = 0                                   # 重复的额外条数（不重复计）
+
+    def state(self, name: str) -> bool:
+        """**没写就是关**。定义过但没取值, 与没定义过一样都是 `False`。"""
+        v = self.vals.get(name)
+        return v[0] if v else False
+
+    def dump(self) -> list[dict]:
+        """进 Potato 的形状（用户 2026-09-17：**开关取值要进 Potato**）。
+
+        **按名字排序**：确定性是判据（同一份源 -> 同一串字节），字典序是唯一不依赖
+        遍历顺序的排法。只收**定义过的**开关 —— 取值一个没定义的名字是错误
+        （`check()` 里报），不该悄悄进对象。
+        """
+        return [{"name": n, "on": self.state(n)} for n in sorted(self.defs)]
+
+
+def _apply_switches(toks: list, tbl: SwitchTable) -> list:
+    """在**词法流**上把开关落定（`docs/182` §2）。
+
+    **为什么要在这一层做**：关着的那段体要"**在解析之前**跳过"，而状态可能写在体的
+    **后面**：
+
+        set choose lomenterr { ... }      // 定义在前
+        choose close lomenterr            // 取值在后
+
+    在 token 流上做，那个顺序问题就消失了 —— 先扫一遍收全部取值，再扫第二遍摊开/抹掉。
+    而且这样**"关着就解析跳过"是字面为真的**：那段 token 根本没进 parser。
+
+    **花括号配对照做**（`docs/182` §2 那张表）：关着也要能挡住"少一个 `}` 把整份源
+    结构弄塌"这种错。
+
+    返回**新的** token 列表：
+      * `set choose X { 体 }` 开着 -> 换成 **体本身**（摊到顶层，那段代码从此属于模块）
+      * `set choose X { 体 }` 关着 -> **整段抹掉**
+      * `choose X` / `choose close X` / `set choose X` 的行 -> 抹掉（开关是编译期的事，
+        不进 AST；进 Potato 走 `SwitchTable.dump`）
+      * `choose std` / `choose no_std` -> **原样留着**（核心模式，parser 要读）
+    """
+    # 第一遍: 收**定义**与**取值**。这样"先定义后取值"与"先取值后定义"一个样 ——
+    # 顺序问题（取值可能写在体的后面）在 token 流上就消失了。
+    depth = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "set" \
+                and i + 2 < len(toks) and toks[i + 1].kind == "ident" \
+                and toks[i + 1].val == "choose" and toks[i + 2].kind == "ident":
+            # **`set choose X` 是定义, 不是取值** —— 漏掉这一条会把定义当"打开"，
+            # 关着的开关于是照样摊开（实测撞到：`choose close x` 之后体仍被编进去）。
+            dn = toks[i + 2]
+            if dn.val in tbl.defs:
+                tbl.dup.append((dn.val, t.line, tbl.defs[dn.val]))
+                tbl.ndup = tbl.ndup + 1
+            else:
+                tbl.defs[dn.val] = t.line
+            i = i + 2
+            continue
+        elif depth == 0 and t.kind == "ident" and t.val == "choose":
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is not None and nxt.kind == "ident" and nxt.val == "close":
+                nn = toks[i + 2] if i + 2 < len(toks) else None
+                if nn is not None and nn.kind == "ident":
+                    if nn.val in tbl.vals:
+                        tbl.dup.append((nn.val, t.line, tbl.vals[nn.val][1]))
+                        tbl.ndup = tbl.ndup + 1
+                    else:
+                        tbl.vals[nn.val] = (False, t.line)
+            elif nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+                if nxt.val in tbl.vals:
+                    tbl.dup.append((nxt.val, t.line, tbl.vals[nxt.val][1]))
+                    tbl.ndup = tbl.ndup + 1
+                else:
+                    tbl.vals[nxt.val] = (True, t.line)
+        i = i + 1
+
+    # 第二遍: 摊开或抹掉。
+    out: list = []
+    depth = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if depth == 0 and t.kind == "ident" and t.val == "set" \
+                and i + 2 < len(toks) and toks[i + 1].kind == "ident" \
+                and toks[i + 1].val == "choose" \
+                and toks[i + 2].kind == "ident":
+            sname = toks[i + 2].val
+            tbl.defs.setdefault(sname, t.line)
+            j = i + 3
+            if j >= len(toks) or toks[j].kind != "punct" or toks[j].val != "{":
+                raise LomError(t.line, t.col, "`set choose` 后面要跟一个块 `{ … }`")
+            # 找配对的 `}`
+            d = 1
+            body_start = j + 1
+            k = j + 1
+            while k < len(toks) and d > 0:
+                if toks[k].kind == "punct" and toks[k].val == "{":
+                    d += 1
+                elif toks[k].kind == "punct" and toks[k].val == "}":
+                    d -= 1
+                k += 1
+            if d != 0:
+                raise LomError(t.line, t.col, f"开关 `{sname}` 的块没闭合")
+            body_end = k - 1                      # 指向那个 `}`
+            if tbl.state(sname):
+                out.extend(toks[body_start:body_end])   # 开着: 体摊到顶层
+            # 关着: 一个 token 都不留 —— 这就是"解析跳过"
+            i = k
+            continue
+        if depth == 0 and t.kind == "ident" and t.val == "choose":
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is not None and nxt.kind == "ident" and nxt.val == "close":
+                i = i + 3                        # 吞掉 `choose close <名字>`
+                continue
+            if nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+                i = i + 2                        # 吞掉 `choose <名字>`
+                continue
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        out.append(t)
+        i = i + 1
+    return out
 
 
 # ---------------------------------------------------------------- 语法分析
@@ -2249,25 +2408,40 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if c.pub:
                 const_scope.setdefault(c.name, c.type)
 
-    # ---- 项目模式 `choose` (docs/143 §3.2)。三条规则, 全部在这里 —— 语法层只收集,
-    # 两个实现要对齐的判断就只有这一处。
+    # ---- 项目模式 `choose` 与**开关** (docs/143 §3.2 + docs/182 §1)。全部规则在这里 ——
+    # 语法层只收集, 两个实现要对齐的判断就只有这一处。
     #
-    # **为什么"至多一次 + 只在根单元"**: 它声明的是**整个程序**的不变量, 不是某个模块的。
-    # 放开成按模块声明就会掉进 Rust `#![no_std]` 那个已知的组合痛点 —— 而 Loment 的单元模型
-    # (库 = 目录、依赖 = 源码里的 use) 会掉进同一个坑。库要表达需求就**声明能力需求**
-    # (`docs/168` 的 `lib cap` 已经在算闭包, 带来源链), 不是替项目选模式。
+    # **核心模式与开关是两类东西**（`docs/182` §1.3）: `std`/`no_std` 是核心语法的硬写法,
+    # 开关是 `set choose …` 那套可定义机制。`_apply_switches` 按名字分好, 这里只判规则。
     #
-    # 用户 2026-09-17 定: 不写 = `std`; `choose std` 与不写等价(建议写但不强制)。
+    # 用户 2026-09-17 改: **`choose` 可以出现至少 500 次**（开关天然是几百个）——
+    # 原先那条"`choose` 只能出现一次"**删掉**。它要防的"声明的是整个程序的模式"这件事
+    # 现在由**核心模式**那条管（`std`/`no_std` 仍然只许一个值）。
+    # 删掉之后留下的空档由 **同名只许一次** 补上 —— 否则"这个开关到底开没开"没有答案。
     if len(mod.choose_lines) > 1:
-        errs.append(f"{mod.choose_lines[1]}: `choose` 只能出现一次 "
-                    f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式")
-    if mod.choose is not None and mod.choose not in ("std", "no_std"):
-        errs.append(f"{mod.choose_lines[0]}: 模式只能是 `std` 或 `no_std` "
-                    f"（写的是 `{mod.choose}`）")
+        errs.append(f"{mod.choose_lines[1]}: 核心模式只能声明一次 "
+                    f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式。"
+                    f"要开关请用 `set choose <名字> {{ … }}`")
     for d in deps:
         if d.choose is not None:
             errs.append(f"{d.choose_lines[0]}: 库不许 `choose`（在 `{d.name}` 里）"
                         f" —— 库该声明**能力需求**, 由项目决定模式")
+    sw = mod.switches
+    if sw is not None:
+        n = len(sw.defs) + len(sw.vals) + sw.ndup
+        if n > MAX_CHOOSE:
+            errs.append(f"1: `choose` 有 {n} 条, 超过上限 {MAX_CHOOSE} —— 开关太多会把"
+                        f"编译期的状态表撑爆; 拆成几个模块, 或改用 `addin`")
+        for name, line, first in sorted(sw.dup):
+            errs.append(f"{line}: 开关 `{name}` 写了两次（第一次在第 {first} 行）—— "
+                        f"同一件事写两遍就没有答案了; 删掉一条")
+        for name, (_on, line) in sorted(sw.vals.items()):
+            if name not in sw.defs:
+                errs.append(f"{line}: 未定义的开关 `{name}` —— 先写 "
+                            f"`set choose {name} {{ … }}` 定义它")
+        for d in deps:
+            if d.switches is not None and (d.switches.defs or d.switches.vals):
+                errs.append(f"1: 库不许 `choose`（在 `{d.name}` 里）")
 
     # ---- 单元级唯一性 (2026-09-11 补): 发射出来的符号名是**平的**。
     # 内核线按名字找入口 (`_start` / `timer_isr` / syscall 包装, 见 docs/155 §3), 所以
@@ -2993,10 +3167,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     instances += [{"kind": "type", "name": e.name, "of": e.from_generic,
                    "args": list(e.generic_args)} for e in mod.enums if e.from_generic]
     doc = {
-        # v2 = v1 + 项目模式 (docs/143 §3.2 / docs/175 §8)。**升版本而不是往 v1 加字段**:
-        # `mode` 是必填的 (删掉它校验器必须红), 而往 v1 加必填字段会让既有的 v1 对象
-        # 全变非法 —— v0/v1 是承诺过能回放的 (docs/147 §5)。v2 的新字段是 **`mode`**。
-        "potato": "v2",
+        # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
+        # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
+        # 既有的对象全变非法 —— 旧版是承诺过能回放的 (docs/147 §5)。
+        # v2 的新字段是 `mode`, **v3 的新字段是 `switches`**。
+        "potato": "v3",
         "unit": mod.name,
         "language": "loment",
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
@@ -3004,6 +3179,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 一个编译单元产出一个对象 (deps 走 `imports`), 所以这里没有"依赖的模式"
         # 那种歧义: `mod.choose` 就是根单元自己声明的那一个。
         "mode": mod.choose or "std",
+        # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
+        # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
+        # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
+        # **按名字排序**(见 `SwitchTable.dump`) —— 确定性是判据。
+        "switches": (mod.switches.dump() if mod.switches is not None else []),
         "imports": [d.name for d in (deps or [])],
         "capabilities": [
             {
@@ -4168,7 +4348,12 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 
 def load(path: Path) -> Module:
     text = path.read_text(encoding="utf-8")
-    mod = Parser(lomc.lex(text), text).parse()
+    # 开关**在词法流上**落定（`docs/182` §2）：`set choose X {…}` 开着就把体摊到顶层、
+    # 关着就整段抹掉, 那两行本身不进 AST。**这一步必须在 parse 之前** —— 顺序问题
+    # （取值可能写在体的后面）在 token 流上就消失了。
+    tbl = SwitchTable()
+    mod = Parser(_apply_switches(lomc.lex(text), tbl), text).parse()
+    mod.switches = tbl
     names = {e.name for e in mod.enums}  # M10: 预置 Option/Result
     if "Option" not in names or "Result" not in names:
         pre = Parser(lomc.lex(_PRELUDE), _PRELUDE).parse()

@@ -301,6 +301,91 @@ def test_lsp_check_mode_is_python_free():
     print("      --check: 有错 -> rc=1 且逐行 `路径:行:列: E0NN 标题`; 干净 -> rc=0 无输出")
 
 
+#: 开关体里放一个**必然报错**的调用 (E002 未定义函数), 再加上一句 `choose` 就能打开它。
+SW_OFF_SRC = ("module t\n\n"
+              "set choose verbose {\n    fn banner() -> u32 {\n"
+              "        return missing_fn();\n    }\n}\n")
+SW_ON_SRC = SW_OFF_SRC + "\nchoose verbose\n"
+
+
+@test
+def test_lsp_check_honours_switches():
+    """语言服务是"读 L1 源的东西"之一 —— **开关没落定就等于关着的那段照样被检查**。
+
+    本判据钉的是 `docs/182` §1.8 那条"裁减真生效", 但**换一个消费者测**: 同一份源,
+    开关关着 -> `--check` 必须**一声不吭** (rc=0); 加一句 `choose verbose` 打开 ->
+    必须报出体里那个未定义函数 (rc=1 且含 E002)。
+
+    **这条自带对照, 所以它是可证伪的**: 两个断言跑的是**同一个体**(只差一句 `choose`),
+    而"打开 -> E002"证明检查器**确实会**报那个调用。于是"关着 -> rc=0"只可能来自
+    **那段真被裁掉了** —— 裁减一旦失效, 两个断言里的第一个立刻红。
+
+    为什么单列一条: `lsp.lomt` 原先拿 `lex` 的原始 token 直接喂 `run_check`/`scan_syms`,
+    编译链的判据全绿**也测不到它** —— 语言服务是独立进程、独立入口。这正是
+    `docs/182` §1.9 记的那一类"被上游盖住"的缺口。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "lsp_switch_case.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+
+    def run(src: str) -> subprocess.CompletedProcess:
+        probe.write_text(src, encoding="utf-8", newline="\n")
+        return subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check",
+                               _wsl_path(probe)],
+                              capture_output=True, text=True, timeout=180, shell=False)
+
+    try:
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
+                      ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
+                      ["chmod", "+x", f"{_T}loment_lsp.bin"]):
+                subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+            off = run(SW_OFF_SRC)
+            assert off.returncode == 0 and off.stdout.strip() == "", \
+                f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
+            on = run(SW_ON_SRC)
+            assert on.returncode == 1, f"打开后应当报错, 实得 rc={on.returncode}: {on.stdout!r}"
+            assert "E002" in on.stdout, f"打开后应当报未定义函数 (E002): {on.stdout!r}"
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      --check: 关着的开关体不报错; `choose` 打开后 E002 照报 (LSP 侧裁减真生效)")
+
+
+@test
+def test_python_lsp_also_honours_switches():
+    """**Python 版语言服务是独立的一份实现，同样漏过开关** —— 这条钉它。
+
+    为什么两边都要有：`loment/tools/lsp.lomt` 与 `tools/loment_lsp.py` 是**两个**服务端
+    （前者装好后不依赖 Python，后者是 VS Code 扩展的默认后端与 `loment lsp` 的实现）。
+    修了自举那份不等于修了这份 —— 实测就是如此。
+
+    **断言按消息内容而不是 `code`**：Python 版**从来不吐 `code` 字段**
+    （`_diagnostics` 只给 `range`/`severity`/`source`/`message`），自举版才吐
+    `E0NN`。这是**两实现的既有不对齐**，从没被判据碰过 —— 本条不假装它有，
+    也不顺手掩盖：记在 `docs/182` §1.9.2 的未修清单里。
+
+    不依赖 clang/WSL：直接调 Python 版的处理函数，所以这条**永远会跑**。
+    """
+    def diags(text: str) -> list[dict]:
+        out = PY_LSP.handle({"id": 1, "method": "textDocument/didOpen",
+                             "params": {"textDocument": {"uri": "file:///sw.lomt",
+                                                         "text": text}}},
+                            {"file:///sw.lomt": text})
+        pub = [f for f in out if f.get("method") == "textDocument/publishDiagnostics"]
+        assert pub, f"didOpen 应当回一条 publishDiagnostics: {out}"
+        return pub[0]["params"]["diagnostics"]
+
+    off = diags(SW_OFF_SRC)
+    assert off == [], f"关着的开关体不该被检查, 实得 {off}"
+    on = diags(SW_ON_SRC)
+    assert any("missing_fn" in d["message"] for d in on), f"打开后应报未定义函数: {on}"
+    print("      Python 版语言服务: 关着不报错 / 打开报未定义函数 (与自举版同行为)")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

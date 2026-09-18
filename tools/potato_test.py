@@ -153,6 +153,23 @@ MUTATORS = [
                             d.__setitem__("mode", "fast")), "mode 必须是"),
     ("v2 mode 非字符串", lambda d: (d.__setitem__("potato", "v2"),
                                 d.__setitem__("mode", 1)), "mode 必须是"),
+    # v3 = v2 + **开关取值** (docs/182 §1)。用户 2026-09-17: "开关的取值是要进 Potato 的"。
+    # 同一条纪律: **必填, 可为空数组** —— 不存在"缺这项"的形态, 所以"这份单元是在什么
+    # 开关状态下编的"是可回放的, 不是"看当时的源码猜"。
+    ("v3 缺 switches", lambda d: (d.__setitem__("potato", "v3"),
+                              d.pop("switches", None)), "switches 必须是数组"),
+    ("v3 switches 不是数组", lambda d: (d.__setitem__("potato", "v3"),
+                                 d.__setitem__("switches", {})), "switches 必须是数组"),
+    ("v3 on 不是布尔", lambda d: (d.__setitem__("potato", "v3"),
+                              d.__setitem__("switches", [{"name": "a", "on": 1}])),
+     "必须是布尔"),
+    ("v3 开关名非法", lambda d: (d.__setitem__("potato", "v3"),
+                             d.__setitem__("switches", [{"name": "1x", "on": True}])),
+     "name 非法"),
+    ("v3 开关名重复", lambda d: (d.__setitem__("potato", "v3"),
+                             d.__setitem__("switches", [{"name": "a", "on": True},
+                                                        {"name": "a", "on": False}])),
+     "name 重复"),
 ]
 
 

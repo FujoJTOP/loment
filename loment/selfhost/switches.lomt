@@ -1,0 +1,271 @@
+// switches.lomt — 开关: 在**词法流**上落定 (docs/182 §1)
+//
+// 谁是消费者: **凡是读 L1 源的东西** —— 检查器 (`checker`)、驱动器 (`driver`)、
+// 文档生成器 (`lomdoc`)、格式化器 (`lomfmt`)、语言服务 (`lsp`)。
+//
+// **为什么单独一个模块**: 开关是**预处理**（解析之前的事）, 不是检查器的事。
+// 放进 `checker` 会让 `lomdoc` 这种只需要"读源码"的工具被迫拉进整个检查器
+// —— 实测撞到: 自举版 `lomdoc` 不认识 `set choose`, 于是开关体里的 `fn` 被漏掉,
+// 而参考实现走 `lomentc.load`（已摊开）会记下来, 两边对照就红了。
+//
+// **依赖只有 `bytes`**（`load32`/`store32` 在 `loment/examples/bytes.lomt` 里是 `pub fn`,
+// **不是语言内建** —— `lomentc.BUILTINS` 里没有这两个名字）。这条依赖不拉长任何链:
+// `bytes` 本来就在每条用 `lexer` 的链上（实测 `checker`/`driver`/`lomdoc` 的依赖集合
+// 加不加这一行**完全一样**）。
+//
+// 这一条是**实测撞出来的**: 本模块初版没写 `use bytes`, 注释里还写着"零依赖, 只用
+// 语言内建"—— 那句话是假的。`test_m85_checker_accepts_corpus_units` 把本文件当**单元**
+// 看（依赖 + 本文件）, 于是 `load32` 全成了"调用未定义的函数"; 参考实现单独看同一份
+// 文件**报一样的错**。构建之所以一直是绿的, 是 `checker.lomt` 的 `use bytes` 在单元
+// 层面盖住了它 —— 也就是说, 注释里的承诺从来没有被任何一条判据验证过。
+
+module switches
+
+use bytes
+
+/// 与参考实现同值 (`lomentc.MAX_CHOOSE`)。**至少 500**（用户 2026-09-17 定）。
+pub const MAX_CHOOSE: u32 = 500;
+/// 开关表每条: 名起点(u32) + 名长度(u32) + 标记(u32) + token 下标(u32)。
+/// 标记: **2 = 定义**(`set choose`), 1 = 取值"开", 0 = 取值"关"。
+/// **每个出现都记一条**（不去重）—— 重复由规则那一侧报出来, 不能在这里悄悄吃掉。
+pub const SW_SIZE: u32 = 16;
+/// 整张表的字节数, 调用方按它开缓冲。表尾多留一格放条数。
+pub const SW_BYTES: u32 = 8008;
+/// 与 `checker.lomt` 的 `E_MODE` **同值同码**（E022）。常量初始化式里没有算术 ——
+/// 写字面量（`32 - 10` 会被解析器拒掉）。
+pub const E022: u32 = 22;
+
+/// 这个 token 的文本等于字面量 `s` 吗。字符串 token 直接不匹配 —— 与
+/// `checker.lomt` 的 `chk_tok_is` 同口径, 但**不依赖它**（本模块零依赖）。
+fn sw_tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if load32(t, i * 20) == 2 {
+        return false;
+    }
+    let n: u32 = str_len(s);
+    if load32(t, i * 20 + 8) != n {
+        return false;
+    }
+    let st: u32 = load32(t, i * 20 + 4);
+    let sp: ptr = str_ptr(s);
+    let q: u32 = 0;
+    while q < n {
+        if (load8(src, st + q) as u32) != (load8(sp, q) as u32) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+fn copy_tok(toks: ptr, o: u32, j: u32) {
+    let q: u32 = 0;
+    while q < 5 {
+        store32(toks, o * 20 + q * 4, load32(toks, j * 20 + q * 4));
+        q = q + 1;
+    }
+}
+
+/// `{` 在 `at` 时, 返回配对 `}` 的下标（不配对时返回 `nt - 1`）。
+/// **花括号配对照做**是 `docs/182` §2 那张表里的一行: 关着的体可以不解析,
+/// 但结构不能塌 —— 少了 `}` 整份源的结构就错了。
+fn block_end(unit: ptr, toks: ptr, at: u32, nt: u32) -> u32 {
+    let dd: u32 = 1;
+    let e: u32 = at + 1;
+    while e < nt && dd > 0 {
+        if load32(toks, e * 20) == 3 {
+            let cc: u32 = load8(unit, load32(toks, e * 20 + 4)) as u32;
+            if cc == 123 { dd = dd + 1; }
+            if cc == 125 { dd = dd - 1; }
+        }
+        e = e + 1;
+    }
+    return e - 1;
+}
+
+/// 在开关表里按**名字**找第一个标记 != 2 的条目（= 取值）。找不到返回 2。
+pub fn sw_find(unit: ptr, toks: ptr, sw: ptr, ns: u32, idx: u32) -> u32 {
+    let st: u32 = load32(toks, idx * 20 + 4);
+    let ln: u32 = load32(toks, idx * 20 + 8);
+    let i: u32 = 0;
+    while i < ns {
+        let on: u32 = load32(sw, i * SW_SIZE + 8);
+        if on != 2 && load32(sw, i * SW_SIZE + 4) == ln {
+            let s2: u32 = load32(sw, i * SW_SIZE);
+            let q: u32 = 0;
+            let ok: u32 = 1;
+            while q < ln {
+                if (load8(unit, st + q) as u32) != (load8(unit, s2 + q) as u32) { ok = 0; }
+                q = q + 1;
+            }
+            if ok == 1 { return on; }
+        }
+        i = i + 1;
+    }
+    return 2;
+}
+
+fn sw_add(unit: ptr, toks: ptr, sw: ptr, ns: u32, idx: u32, mark: u32) -> u32 {
+    if ns >= MAX_CHOOSE { return ns; }        // 满了 —— 超限由规则那一侧报
+    store32(sw, ns * SW_SIZE, load32(toks, idx * 20 + 4));
+    store32(sw, ns * SW_SIZE + 4, load32(toks, idx * 20 + 8));
+    store32(sw, ns * SW_SIZE + 8, mark);
+    store32(sw, ns * SW_SIZE + 12, idx);      // 报错时要指到这里
+    return ns + 1;
+}
+
+/// 表里第 `i` 与第 `j` 条的名字相等吗。
+pub fn sw_same(unit: ptr, sw: ptr, i: u32, j: u32) -> u32 {
+    let li: u32 = load32(sw, i * SW_SIZE + 4);
+    if li != load32(sw, j * SW_SIZE + 4) { return 0; }
+    let si: u32 = load32(sw, i * SW_SIZE);
+    let sj: u32 = load32(sw, j * SW_SIZE);
+    let q: u32 = 0;
+    while q < li {
+        if (load8(unit, si + q) as u32) != (load8(unit, sj + q) as u32) { return 0; }
+        q = q + 1;
+    }
+    return 1;
+}
+
+/// 往诊断缓冲追加一条 E022。**与 `checker.lomt` 的 `sym_pub` 同形状**
+/// （码 u32 + token u32）—— 报错那一圈按这个形状读。
+pub fn sw_err(errs: ptr, o: u32, tok: u32) -> u32 {
+    store32(errs, o, E022);
+    store32(errs, o + 4, tok);
+    return o + 8;
+}
+
+/// 在 token 流上把开关落定，返回压缩后的 token 数。
+///
+/// 这一步是 `choose` 从"承诺"变成"发明"的地方: 在此之前它只被校验、进 Potato、被回放,
+/// **没有任何一行按它分支**。开关的第一个真消费方就是**代码裁减** —— 而且它**不依赖
+/// 任何跨线契约**（不像 `no_std` 要等 `lom/*.lom` 的 freestanding/hosted 标记）。
+///
+/// **只删不插**, 所以可以**原地压缩** `toks`, 不动缓冲布局:
+///   * `set choose X { 体 }` 开着 -> 只删 `set choose X {` 与配对的 `}`（体留下）
+///   * `set choose X { 体 }` 关着 -> 整段删掉（**这就是"解析跳过"**）
+///   * `choose X` / `choose close X` -> 删掉（编译期的事, 不进 AST）
+///   * `choose std` / `choose no_std` -> **留着**（核心模式由检查器判, docs/182 §1.3）
+///
+/// **两遍**: 先收全部取值（取值可能写在体的**后面**）, 再压缩。顺序问题在 token 流上
+/// 就消失了 —— 这正是"在装载器做"而不是"在解析器做"的理由。
+pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
+    // ---- 第一遍: 收定义与取值
+    let ns: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt {
+        let k: u32 = load32(toks, i * 20);
+        if k == 3 {
+            let c: u32 = load8(unit, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 { d = d + 1; }
+            if (c == 125 || c == 41 || c == 93) && d > 0 { d = d - 1; }
+        }
+        if d == 0 && k == 0 && sw_tok_is(unit, toks, i, "set") && i + 2 < nt
+                && sw_tok_is(unit, toks, i + 1, "choose") && load32(toks, (i + 2) * 20) == 0 {
+            // **`set choose X` 是定义, 不是取值** —— 漏掉这一条会把定义当"打开",
+            // 关着的开关于是照样摊开（参考实现那边实测撞到过）。
+            ns = sw_add(unit, toks, sw, ns, i + 2, 2);
+            i = i + 2;
+        } else if d == 0 && k == 0 && sw_tok_is(unit, toks, i, "choose") && i + 1 < nt
+                && load32(toks, (i + 1) * 20) == 0
+                && !sw_tok_is(unit, toks, i + 1, "std") && !sw_tok_is(unit, toks, i + 1, "no_std") {
+            if sw_tok_is(unit, toks, i + 1, "close") && i + 2 < nt
+                    && load32(toks, (i + 2) * 20) == 0 {
+                ns = sw_add(unit, toks, sw, ns, i + 2, 0);
+                i = i + 2;
+            } else {
+                ns = sw_add(unit, toks, sw, ns, i + 1, 1);
+                i = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+    store32(sw, MAX_CHOOSE * SW_SIZE, ns);      // 表尾一格放条数
+    // ---- 第二遍: 原地压缩（只删不插, 所以往下搬是安全的）
+    let o: u32 = 0;
+    let j: u32 = 0;
+    let d2: u32 = 0;
+    while j < nt {
+        let k2: u32 = load32(toks, j * 20);
+        if d2 == 0 && k2 == 0 && sw_tok_is(unit, toks, j, "set") && j + 3 < nt
+                && sw_tok_is(unit, toks, j + 1, "choose") && load32(toks, (j + 2) * 20) == 0
+                && load32(toks, (j + 3) * 20) == 3
+                && (load8(unit, load32(toks, (j + 3) * 20 + 4)) as u32) == 123 {
+            let e: u32 = block_end(unit, toks, j + 3, nt);
+            if sw_find(unit, toks, sw, ns, j + 2) == 1 {
+                // 开着: 体 = [j+4, e) 原样搬过来
+                let t: u32 = j + 4;
+                while t < e {
+                    copy_tok(toks, o, t);
+                    o = o + 1;
+                    t = t + 1;
+                }
+            }
+            j = e + 1;                          // 跳过配对的 `}`
+        } else if d2 == 0 && k2 == 0 && sw_tok_is(unit, toks, j, "choose") && j + 1 < nt
+                && load32(toks, (j + 1) * 20) == 0
+                && !sw_tok_is(unit, toks, j + 1, "std") && !sw_tok_is(unit, toks, j + 1, "no_std") {
+            if sw_tok_is(unit, toks, j + 1, "close") && j + 2 < nt { j = j + 3; } else { j = j + 2; }
+        } else {
+            if k2 == 3 {
+                let c2: u32 = load8(unit, load32(toks, j * 20 + 4)) as u32;
+                if c2 == 123 || c2 == 40 || c2 == 91 { d2 = d2 + 1; }
+                if (c2 == 125 || c2 == 41 || c2 == 93) && d2 > 0 { d2 = d2 - 1; }
+            }
+            copy_tok(toks, o, j);
+            o = o + 1;
+            j = j + 1;
+        }
+    }
+    return o;
+}
+
+/// 开关的**规则**（`docs/182` §1.8）。返回**条数**（不是字节偏移 —— 调用方拿它加到
+/// "共几条"上; 返回字节偏移会让那边按 8 倍去读未初始化的缓冲, 实测症状是**段错误**）。
+pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
+    let ns: u32 = load32(sw, MAX_CHOOSE * SW_SIZE);
+    let n: u32 = o;
+    // 超上限（**绝不静默丢** —— 与 `use` 的 300 条同一条纪律）
+    if ns > MAX_CHOOSE {
+        n = sw_err(errs, n, 0);
+    }
+    // 同名两次（**同类**才算: 定义+取值是正常配对）
+    let i: u32 = 0;
+    while i < ns {
+        let j: u32 = i + 1;
+        while j < ns {
+            // 定义 + 取值是正常配对, 不是重复。**同类 = 都是定义, 或都是取值** ——
+            // 不是"标记完全相等": 两个取值一个开一个关, 标记不同（1 与 0）,
+            // 但它们**才是**真重复。
+            let ki: u32 = 0;
+            if load32(sw, i * SW_SIZE + 8) == 2 { ki = 1; }
+            let kj: u32 = 0;
+            if load32(sw, j * SW_SIZE + 8) == 2 { kj = 1; }
+            if ki == kj && sw_same(unit, sw, i, j) == 1 {
+                n = sw_err(errs, n, load32(sw, j * SW_SIZE + 12));
+                j = ns;                          // 一条就够, 不重复报
+            } else {
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    // 未定义的开关: 有取值, 全表找不到定义
+    let a: u32 = 0;
+    while a < ns {
+        if load32(sw, a * SW_SIZE + 8) != 2 {
+            let b: u32 = 0;
+            let has: u32 = 0;
+            while b < ns {
+                if load32(sw, b * SW_SIZE + 8) == 2 && sw_same(unit, sw, a, b) == 1 { has = 1; }
+                b = b + 1;
+            }
+            if has == 0 {
+                n = sw_err(errs, n, load32(sw, a * SW_SIZE + 12));
+            }
+        }
+        a = a + 1;
+    }
+    return (n - o) / 8;
+}

@@ -1,0 +1,39 @@
+// switch.lomt — 开关: 让 `choose` 真的驱动代码 (docs/182 §1)
+//
+// 在这之前, `choose` 只被**校验**、进 Potato 形式对象、被**回放** ——
+// 而**没有任何一行按它分支**（`loment_build.py` 里 `mode` 零命中; 链接器里那些
+// `mode` 全是 POSIX 的 `openat(..., mode)`）。有形状没有用处的构造是承诺, 不是发明。
+//
+// 开关的第一个**真消费方**是**代码裁减**, 而且它不依赖任何跨线契约 ——
+// 不像 `no_std` 要等 `lom/*.lom` 带上 freestanding/hosted 标记（那是 docs/176 的 B0,
+// 卡在跨线冻结契约上）。
+//
+// 试这两下, 看产物怎么变:
+//
+//   loment build switch.lomt -o sw && ./sw ; echo $?     # 237 (0xED)
+//   # 把下面那行改成 `choose close verbose` 再编一次:
+//   #   产物里**没有** banner 这个函数, 而 `_start` 里那句调用会报"未定义的函数"
+//   #   —— 这就是"关掉 = 不依赖"的字面意义。
+//
+// 关着时体**连 token 都不进解析器**（词法流上就抹掉了）, 所以体内引用的东西
+// **必须存在**这条约束在关着时**不成立**。花括号配对照做 —— 体可以不解析,
+// 但结构不能塌。
+
+module switchex
+
+// 一个开关: 名字 + "打开时才编进去的代码"。
+set choose verbose {
+    fn banner() -> u32 {
+        return 0x5EED;
+    }
+}
+
+// 取值。**同名只许写一次** —— 写了两次就没有答案了, 所以那是 E022。
+// 一个程序可以有几百个开关（上限 `MAX_CHOOSE` = 500, 超限报错, 绝不静默丢）。
+choose verbose
+
+fn _start() {
+    // `banner` 只因为上面那句 `choose verbose` 才存在。
+    // 退出码取低 8 位: 0x5EED & 0xFF = 237。
+    syscall4(60, banner() as u64, 0, 0);
+}

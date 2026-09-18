@@ -62,7 +62,9 @@ fn T_VEND_KW() -> str { return "let\nreturn\nif\nelse\nwhile\nfor\nin\nmatch\nmu
 fn T_CONTROL() -> str { return "if\nwhile\nmatch\nfor\nin\nreturn\nguard\nas"; }
 fn T_TYPE_BODY() -> str { return "struct\nenum\ntrait\nmatch"; }
 fn T_BRACE_KW() -> str { return "struct\nenum\ntrait\nimpl\nfn\nif\nwhile\nfor\nmatch\nelse\ncapability"; }
-fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt"; }
+// **`choose` 原先就不在这张表里**（既有缺口, 与 `tools/lomfmt.py` 的 TOP_KW 同一处）:
+// 没有它, `choose std` 会被揉进上一行; 加开关之后 `set choose X { … }` 更是整块贴上去。
+fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset"; }
 
 // ---------------------------------------------------------------- 系统调用
 

@@ -1012,10 +1012,20 @@ fn _start() -> u32 {
         len = append_prelude(unit, len);
     }
     // 正式词法 + 发射
-    let nt: u32 = lex_cap(unit, len as u32, toks2, ntk);
-    if nt > ntk {
+    let ntl: u32 = lex_cap(unit, len as u32, toks2, ntk);
+    if ntl > ntk {
         return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
     }
+    // 开关 (`docs/182` §1): **在 token 流上落定** —— 关着的那段体连 token 都不留,
+    // 所以"解析跳过"是字面为真的, 而 `choose` 从此有了一个真消费方（在此之前它什么都不驱动）。
+    // 尺寸写字面量: 常量在表达式里没有类型 (见文件头那条), `MAX_CHOOSE * SW_SIZE + 8`
+    // 会被算成 i32。500 * 16 + 8 = 8008。
+    let swv: u64 = sys_alloc(8008);
+    if swv == 0 {
+        return fail("fujoc-s: brk failed (开关表)\n");
+    }
+    let sw: ptr = swv as ptr;
+    let nt: u32 = apply_switches(unit, toks2, ntl, sw);
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);
@@ -1053,10 +1063,14 @@ fn _start() -> u32 {
                               ptr_add(arena, chk_arena_exs()),
                               ptr_add(arena, chk_arena_env()),
                               ptr_add(arena, chk_arena_tyt()));
-    if ne != 0 {
+    // 开关的规则接在检查器之后 —— 开关表在**驱动器**手上（做装载与裁减的是它）,
+    // 与 "`choose` 第三条（库不许）落在装载器" 同一个理由（docs/176 §7.3）。
+    let nsw: u32 = switch_rules(unit, toks2, sw, errs, ne * 8);
+    let ne2: u32 = ne + nsw;
+    if ne2 != 0 {
         wstr(2, "fujoc-s: 静态检查未通过\n");
         let e: u32 = 0;
-        while e < ne && e < 64 {
+        while e < ne2 && e < 64 {
             let code: u32 = load32(errs, e * 8);
             let tk: u32 = load32(errs, e * 8 + 4);
             wstr(2, "  E");

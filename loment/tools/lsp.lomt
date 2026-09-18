@@ -17,6 +17,7 @@ module lsp
 use json
 use lexer
 use checker
+use switches
 
 // ---------------------------------------------------------------- 尺寸与布局
 
@@ -41,7 +42,11 @@ const SYM_STRIDE: u32 = 72;
 const SYM_MAX: u32 = 256;
 const OUT_OFF: u32 = 1240000;       // 出站缓冲 (BODY_OFF 起才是 body)
 const SCR_OFF: u32 = 1536000;       // 行/临时缓冲
-const MEM_CAP: u32 = 1650000;
+// 开关表 (`docs/182` §1): `switches.apply_switches` 要 `SW_BYTES` 字节的暂存。
+// **放在 mem 块末尾并显式撑大 `MEM_CAP`** —— 塞进 `SCR_OFF` 那段会和行缓冲/路径缓冲
+// 抢地方, 越界是**静默改坏**而不是报错 (本仓在这一类上栽过)。
+const SW_OFF: u32 = 1650000;        // = 旧 MEM_CAP, 表从这儿起
+const MEM_CAP: u32 = 1658008;       // SW_OFF + switches.SW_BYTES (8008)
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -348,6 +353,15 @@ fn run_check(text: ptr, toks: ptr, errs: ptr, chk: ptr) -> u32 {
                        ptr_add(chk, chk_arena_exs()),
                        ptr_add(chk, chk_arena_env()),
                        ptr_add(chk, chk_arena_tyt()));
+}
+
+/// **开关落定**（`docs/182` §1）: 把 `set choose` 的裁减做在 token 流上, 返回压缩后的条数。
+///
+/// 每个 `lex` 之后都**必须**接这一步 —— 语言服务是"读 L1 源的东西"之一, 而它此前**漏了**:
+/// 拿 `lex` 的原始 token 直接喂 `run_check`/`scan_syms`, 于是关着的开关体照样被检查
+/// (满屏假错), 体里定义的 `fn` 也会被补全与跳转当成真的。
+fn switchify(mem: ptr, text: ptr, toks: ptr, nt: u32) -> u32 {
+    return apply_switches(text, toks, nt, ptr_add(mem, SW_OFF));
 }
 
 fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
@@ -795,7 +809,8 @@ fn check_main(mem: ptr, argv: ptr, av: u64, src: ptr, toks: ptr, errs: ptr,
         return 2;
     }
     let tn: u32 = strip_in_place(src, raw as u32);
-    lex(src, tn, toks);
+    let nt: u32 = lex(src, tn, toks);
+    let nt: u32 = switchify(mem, src, toks, nt);
     let ne: u32 = run_check(src, toks, errs, chk);
     let ob: ptr = ptr_add(mem, OUT_OFF);
     let i: u32 = 0;
@@ -997,6 +1012,7 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn2, toks);
+    let nt: u32 = switchify(mem, text, toks, nt);
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
@@ -1093,6 +1109,7 @@ fn emit_syms(mem: ptr, o: u32, idx: u32, toks: ptr) -> u32 {
     let text: ptr = doc_text(mem, idx);
     let tn: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn, toks);
+    let nt: u32 = switchify(mem, text, toks, nt);
     let ns: u32 = scan_syms(mem, text, toks, nt);
     let o2: u32 = o;
     let i: u32 = 0;
@@ -1129,6 +1146,7 @@ fn on_definition(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
     let wbuf: ptr = ptr_add(mem, SCR_OFF + 5120);
     let tn: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn, toks);
+    let nt: u32 = switchify(mem, text, toks, nt);
     let ns: u32 = scan_syms(mem, text, toks, nt);
     let hit: u32 = 4294967295;
     let i: u32 = 0;

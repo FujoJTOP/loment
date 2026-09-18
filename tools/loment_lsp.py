@@ -29,7 +29,17 @@ TYPE_KEYWORDS = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "
 
 
 def _parse(text: str):
-    return lomentc.Parser(lomc.lex(text), text).parse()
+    # **开关必须在 parse 之前落定**（`docs/182` §1.9）：这里绕过了 `lomentc.load`，
+    # 不补这一步的话，带 `set choose` 的文件会被报**假错** —— 关着的那段照样被检查，
+    # 体里定义的 `fn` 还会进补全与跳转。对不含 `set`/`choose` 的源，`_apply_switches`
+    # 是一次等价拷贝，所以既有行为逐字节不变。
+    #
+    # 注：这里**不做**预置枚举注入（`load` 会补 `Option`/`Result`），所以语言服务至今
+    # 不认识这两个枚举 —— 那是**另一处**既有缺口，不在本次范围内，记在 docs/182 §1.9.2。
+    tbl = lomentc.SwitchTable()
+    mod = lomentc.Parser(lomentc._apply_switches(lomc.lex(text), tbl), text).parse()
+    mod.switches = tbl
+    return mod
 
 
 def _diagnostics(text: str, path: str) -> list[dict]:

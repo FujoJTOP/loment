@@ -14,6 +14,7 @@
 module lomdoc
 
 use lexer
+use switches
 
 const SRC_CAP: u32 = 1048576;      // 源文件
 const OUT_CAP: u32 = 2097152;      // 输出
@@ -1122,13 +1123,15 @@ fn _start() -> u32 {
     let tokv: u64 = sys_alloc((SRC_CAP as u64) * 20 + 4096);
     let argv_buf: u64 = sys_alloc(65536);
     let scrv: u64 = sys_alloc(SCR_CAP as u64);
-    if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 {
+    let swv: u64 = sys_alloc(SW_BYTES as u64);
+    if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 || swv == 0 {
         return fail("lomdoc: brk failed\n");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
     let toks: ptr = tokv as ptr;
     let scr: ptr = scrv as ptr;
+    let sw: ptr = swv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
         return fail("lomdoc: 用法: lomdoc <文件.lomt>\n");
@@ -1143,7 +1146,11 @@ fn _start() -> u32 {
     syscall4(3, fd as u64, 0, 0);
     let len: u32 = strip_cr(src, raw as u32);
     store8(src, len, 0 as u8);
-    let ntok: u32 = lex(src, len, toks);
+    // 开关 (`docs/182` §1): **读 L1 源的每一步都要先把它落定** —— 否则 `set choose X {…}`
+    // 里的声明落在 depth 1, 走查顶层的那一圈**看不见它**, 而参考实现走 `lomentc.load`
+    // （已摊开）会记下来, 两边对照就红了。实测撞到（`loment_doc_test`）。
+    let ntok0: u32 = lex(src, len, toks);
+    let ntok: u32 = apply_switches(src, toks, ntok0, sw);
     let m: u32 = render(mem, src, len, toks, ntok, ap, an);
     write_all(1, ptr_add(mem, OUT_OFF), m as u64);
     return die(0);

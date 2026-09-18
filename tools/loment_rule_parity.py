@@ -42,8 +42,12 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # (含 M13 移动 E006 与 M17 悬垂 E012)。
 # 2026-09-17 项目模式 `choose` (E022) 进语言: 检查器那两条 (至多一次 / 模式名合法)
 # 补完, **65/65**。第三条 ("库不许 choose") 是装载器规则, 不在这个数里。
+#
+# 2026-09-17 开关 (`docs/182` §1) 进语言: **69/69**。四条 —— 关着时体内不报 (裁减真生效)、
+# 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
+# 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 65
+BUDGET = 69
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -165,6 +169,19 @@ _CASES: list[tuple[str, str]] = [
     # 棘轮由驱动闸门 (`loment_p8_test` 的 neg_dep_choose) 承担, 这两条才进预算。
     ("choose-twice", "module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("choose-bad-mode", "module m\n\nchoose fast\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 开关 (docs/182 §1) -------------------------------------------------
+    # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
+    # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：
+    # 那样参考实现不报错，就不是一条合法的**负例**（这套件测的是"该报的报了没有"）。
+    ("switch-off", "module m\n\nset choose feat {\n    fn h() -> u32 {\n"
+                   "        let x: u32 = true;\n        return x;\n    }\n}\n\n"
+                   "choose close feat\n\nfn f() -> u32 {\n    return missing();\n}\n"),
+    ("switch-on", "module m\n\nset choose feat {\n    fn h() -> u32 {\n"
+                  "        return undefined_thing;\n    }\n}\n\nchoose feat\n\n"
+                  "fn f() -> u32 {\n    return 1;\n}\n"),
+    ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
+                   "fn f() -> u32 {\n    return 1;\n}\n"),
 ]
 
 

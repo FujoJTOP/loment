@@ -417,6 +417,13 @@ extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int chk_arena_bytes(void);
 extern unsigned int chk_arena_scr(void), chk_arena_ctab(void), chk_arena_nc(void);
 extern unsigned int chk_arena_exs(void), chk_arena_env(void), chk_arena_tyt(void);
+/* 开关 (docs/182 §1): 与驱动器走同一条流水线 —— lex -> apply_switches -> check_arena
+   -> switch_rules。**少了中间两步, 这套对照就测不到开关**, 而开关恰恰是这一轮
+   从"承诺"变"发明"的地方。 */
+extern unsigned int apply_switches(char *src, unsigned char *toks, unsigned int nt,
+                                   unsigned char *sw);
+extern unsigned int switch_rules(char *src, unsigned char *toks, unsigned char *sw,
+                                 unsigned char *errs, unsigned int o);
 extern unsigned int check_arena(char *src, unsigned char *toks, unsigned char *errs,
                                 unsigned char *syms, unsigned char *scr, unsigned char *ctab,
                                 unsigned char *nc, unsigned char *exs, unsigned char *env,
@@ -433,10 +440,13 @@ int main(int argc, char **argv) {
     /* arena 按单元规模定 (~100 KB), 由调用方自己开并按 chk_arena_*() 切片 ——
        与驱动器同一个口径 (不能在调用方进程里动 brk: 与 CRT 的 malloc 踩) */
     unsigned char *a = malloc(chk_arena_bytes());
-    lex(buf, (unsigned int)n, toks);
+    unsigned char *sw = malloc(8008);
+    unsigned int nt = lex(buf, (unsigned int)n, toks);
+    nt = apply_switches(buf, toks, nt, sw);
     unsigned int m = check_arena(buf, toks, errs, a,
                                  a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
                                  a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt());
+    m += switch_rules(buf, toks, sw, errs, m * 8);
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
         unsigned int code = *(unsigned int *)(errs + 8 * i);
@@ -628,11 +638,18 @@ def test_m85_checker_accepts_corpus_units():
     """M85 后半: 自举 checker 在**拼接单元**上的覆盖面 (driver 视角, docs/150)。
 
     M81 的判据是"负例集判定一致", 那是在单文件上跑; 要当"闸门"还得能**放行合法程序**。
-    这一条把覆盖面钉住: 41 个单元的拼接体 (依赖 + 本文件 + 预置枚举, 与驱动器装载的同一份)
-    里, 除两个已登记缺口外必须**一条诊断都没有**。
+    这一条把覆盖面钉住: `loment/{examples,selfhost,tools}` 里每个 `.lomt` 的**拼接单元**
+    (依赖 + 本文件 + 预置枚举, 与驱动器装载的同一份) 必须**一条诊断都没有**(已登记缺口除外)。
 
-    两个缺口都是登记过的, 且方向相反 —— 缺口清单和覆盖面一起钉: 缺口被修好时这条会
-    提醒更新清单 (而不是让它悄悄过期)。
+    缺口清单和覆盖面一起钉: 缺口被修好时这条会提醒更新清单 (而不是让它悄悄过期)。
+
+    **`loment/tools/` 是后加的**(实测赚回来一条真缺陷): 本判据原先只看 `examples` +
+    `selfhost`, 于是 `loment/tools/*.lomt` 没有判据把"单独当单元看"钉住 —— 而
+    `switches.lomt` 正好证明这类错误**只在单看时暴露**: 它初版漏了 `use bytes`
+    (`load32`/`store32` 在 `loment/examples/bytes.lomt` 里, 不是语言内建), 在
+    `checker`/`lomdoc` 的单元里被上游的 `use bytes` 盖住, 一路绿到被本判据抓住。
+    加目录前先量过: 12 份 `loment/tools/*.lomt` 在参考实现下当单元看**都是零诊断**,
+    所以这不是"放宽", 是把同一把尺子量到底。
     """
     if not _clang():
         print("      SKIP: 无 clang")
@@ -645,8 +662,8 @@ def test_m85_checker_accepts_corpus_units():
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         ok = []
-        for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
-                             + list((ROOT / "loment" / "selfhost").glob("*.lomt"))):
+        for target in sorted([t for d in ("examples", "selfhost", "tools")
+                              for t in (ROOT / "loment" / d).glob("*.lomt")]):
             unit = Path(td) / f"u_{target.stem}.lomt"
             unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
             codes, det = _loment_codes(exe, unit)
@@ -655,7 +672,8 @@ def test_m85_checker_accepts_corpus_units():
                 continue
             assert not codes, f"{target.name}: 单元上有假报 {codes} {det[:100]}"
             ok.append(target.name)
-        print(f"      checker 放行单元: {len(ok)}/{len(ok)} 无诊断 (已登记缺口 {len(gaps)} 个)")
+        print(f"      checker 放行单元: {len(ok)} 无诊断"
+              f" (另有已登记缺口 {len(gaps)} 个: {', '.join(sorted(gaps))})")
 
 
 @test
@@ -736,9 +754,14 @@ def _unit_text(target: Path) -> str:
     """
     text = ("".join(p.read_text(encoding="utf-8") + "\n" for p in _dep_paths(target))
             + target.read_text(encoding="utf-8"))
-    # 判据要用**注入前**的模块 (lomentc.load 返回值里已经有它们了, 拿它判断永远为真)
+    # 判据要用**注入前**的模块 (lomentc.load 返回值里已经有它们了, 拿它判断永远为真)。
+    # **开关也要先落定**（`docs/182` §1）—— 这里绕过了 `lomentc.load` 直接调 `Parser`,
+    # 不补这一步的话 `set choose X { … }` 会撞上解析器的"未知顶层关键字"。
+    # 实测撞到: 加 `switch.lomt` 之后 `test_m85_checker_accepts_corpus_units` 报
+    # `LomError: 25:1: 未知顶层关键字 'set'`。
     raw = target.read_text(encoding="utf-8")
-    have = {e.name for e in lomentc.Parser(lomc.lex(raw), raw).parse().enums}
+    have = {e.name for e in lomentc.Parser(
+        lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw).parse().enums}
     if "Option" not in have or "Result" not in have:
         text += "\n" + lomentc._PRELUDE
     return text
