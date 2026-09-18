@@ -97,11 +97,17 @@ def _sig_params(fn: dict) -> str:
     return ", ".join(out)
 
 
-def emit_lomt(doc: dict) -> tuple[str, list[tuple[str, str]]]:
-    """Potato 形式对象 -> (L1 接口单元源码, 跳过的项)。
+def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]]:
+    """Potato 形式对象 -> (L1 单元源码, 跳过的项)。
 
     **确定性**: 同一份对象永远出同一串字节 (所以生成物能进判据)。
     第二项是 `(名字, 原因)` —— 调用方**必须报出来** (见 `main`)。
+
+    `impl=True` (`docs/186`) 时，**带 `body` 的函数发成真实现**（`pub fn … { … }`，
+    正文由 `ctrans` 从原文翻成 Loment），没带正文的照旧发 `pub extern fn`。默认 `False`
+    —— 那才是本工具一贯的"接口单元"，而且**必须是默认**：`loment_multilang_test`
+    那类用法靠 `extern fn` 把实现在外部（编好的 `.o`）里的符号接进来，
+    发了体就变成"同一个符号定义两遍"，而那是**链接期的错**，不是这里的。
     """
     _check_representable(doc)
     if not _is_ident(doc.get("unit")):
@@ -117,6 +123,9 @@ def emit_lomt(doc: dict) -> tuple[str, list[tuple[str, str]]]:
         "",
         f"module {doc['unit']}",
     ]
+    if impl:
+        lines[1] = "// 它是**带实现的单元** (`--impl`, docs/186): 带正文的函数是真 `pub fn`，"
+        lines[2] = "// 没带正文的仍是 `extern fn` (实现在源语言那一侧, docs/173 §2)。"
 
     # ---- 能力域
     caps = doc.get("capabilities") or []
@@ -198,9 +207,14 @@ def emit_lomt(doc: dict) -> tuple[str, list[tuple[str, str]]]:
     # 先攒进 fn_lines: **一条都没发出来时不留空的分节标题** —— 一个只有标题的
     # "// ---- 外部函数" 会让读者以为下面本该有东西 (而原因是被跳过了, 那个报在 stderr)。
     fns = doc.get("functions") or []
+    #: `pub extern fn` 那一批（实现在源语言那一侧）
     fn_lines: list[str] = []
+    #: 翻了正文得到的那一批（`--impl`）。两块**各有各的标题**，空的那块不留标题。
+    impl_lines: list[str] = []
     if fns:
         names: set[str] = set()
+        #: 有正文的那批（`--impl` 要翻的）。键是名字，值是原文。
+        bodies: dict[str, str] = {}
         for f in fns:
             n = f.get("name")
             if not _is_ident(n):
@@ -216,21 +230,53 @@ def emit_lomt(doc: dict) -> tuple[str, list[tuple[str, str]]]:
                 skipped.append((n, f"调用约定不是 C ABI"
                                    + (f" (abi={abi})" if abi else " (对象里没记 ABI)")))
                 continue
+            # 正文只在 `--impl` 那条路上用。**没开 `--impl` 时它不是"被跳过的东西"** ——
+            # 接口单元本来就是"声明在此、实现在那边"，`pack_iface.lomt` 那类用法
+            # （`docs/179` §2）要的正是这个。报成 skip 会让 `loment_multilang_test` 红，
+            # 而且报的是假消息（没有任何东西被丢掉）。
+            bd = f.get("body")
+            if impl and isinstance(bd, str) and bd.strip():
+                bodies[n] = bd
             bad = [p.get("name") for p in (f.get("params") or [])
                    if not _ffi_ok(p.get("type"))]
             if not _ffi_ok(f.get("ret") or "()") or bad:
                 skipped.append((n, "签名超出 FFI 第 1 阶段 (只收标量与 ptr, docs/173 §3)"
                                    + (f"; 参数 {bad}" if bad else "")))
                 continue
+            if n in bodies:
+                continue  # 有正文的走下面那条路，一起翻
             r = f.get("ret")
             head = f"pub extern fn {n}({_sig_params(f)})"
             if r and r != "()":
                 head += f" -> {_ty(r)}"
             fn_lines.append(head + ";")
+
+        # ---- 带正文的函数：把原文拼成一份 C 再翻（`docs/186`）
+        if bodies:
+            import ctrans  # 只在 `--impl` 这条路上要它 —— 默认那条不该被它拖进来
+            externs = {n: _ty(f.get("ret") or "()")
+                       for f in fns
+                       if _is_ident(f.get("name")) and f.get("name") not in bodies
+                       and _ffi_ok(f.get("ret") or "()")}
+            try:
+                text = ctrans.translate("\n".join(bodies[n] for n in bodies),
+                                        keep=set(bodies), externs=externs)
+            except (ctrans.Unsupported, ctrans.CError) as e:
+                # **翻不过去就说清是哪个函数** —— 只说"子集外"的话，一份 C 里
+                # 十几个函数，用户不知道去改哪一个。
+                raise NotRepresentable(
+                    f"{len(bodies)} 个带正文的函数里有子集外的写法（docs/186 的 Stage A "
+                    f"只收整数标量、if/while/for、四则与位运算）: {e}")
+            impl_lines.append("// ---- 由正文翻译出来的实现 "
+                              "(docs/186: C 子集 -> Loment, tools/ctrans.py)")
+            impl_lines.append(text.rstrip("\n"))
         if fn_lines:
             lines.append("")
             lines.append("// ---- 外部函数 (docs/173: 声明在此, 实现在源语言那一侧, C ABI)")
             lines += fn_lines
+        if impl_lines:
+            lines.append("")
+            lines += impl_lines
 
     # ---- 出界声明
     for x in doc.get("excluded") or []:
@@ -249,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lang", choices=("auto", "python", "c", "rust"), default=None,
                     help="给了就先把源文件转成形式对象再发 L1")
     ap.add_argument("--mode", choices=("strict", "lenient"), default="strict")
+    ap.add_argument("--impl", action="store_true",
+                    help="对象里带 `body` 的函数发成真实现 (docs/186)；默认只发接口")
     ap.add_argument("--out", metavar="PATH")
     a = ap.parse_args(argv)
     #: 实际**认成**的那个语言 (不是 `a.lang` —— 用户多半给的是 `auto`)。
@@ -288,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         if errs:
             print(f"[ERR] 形式对象不合法: {errs[0]}", file=sys.stderr)
             return 2
-        text, skipped = emit_lomt(doc)
+        text, skipped = emit_lomt(doc, impl=a.impl)
     except NotRepresentable as e:
         print(f"[ERR] 发不出来: {e}", file=sys.stderr)
         return 1

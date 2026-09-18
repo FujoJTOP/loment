@@ -88,6 +88,9 @@ GLOBS = [
     "tools/lomt_from.py", "tools/loment_multisyntax_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
+    # C 翻成 Loment 的翻译器与它的判据 (docs/186 Stage A)。
+    "tools/ctrans.py",
+    "tools/loment_ctrans_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
@@ -132,6 +135,9 @@ GLOBS = [
     # 一份夹具进去会平白长出一页 "api/<名字>.md"。这里的文件只被 `loment_p8_test`
     # 的 token 流对照点名，**不进任何编译语料**。
     "loment/lex/*.lomt",
+    # C 翻译器的语料 (docs/186): **源码语言那一侧的普通 `.c`**，不是装着什么的 `.lomt`。
+    # 只被 `loment_ctrans_test` 读；不进任何 Loment 编译语料。
+    "loment/ctrans/*.c",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

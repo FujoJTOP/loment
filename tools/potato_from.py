@@ -769,11 +769,21 @@ def _c_type(t: str, mode: str, known: set[str]) -> str | None:
     return "ptr" if mode == "lenient" else None
 
 
+def _blank_keep_off(m: "re.Match[str]") -> str:
+    """把一段注释/预处理指令换成**等长**的空白，且**保留其中的换行**。
+
+    这是为 `functions[i].body` 服务的（`docs/186`）：抓正文要按**下标**回原文里切，
+    而下标只有在 `body` 与 `src` 逐字节等长时才有意义。原先的 `sub(" ", …)` 把一整段
+    多行注释压成一个空格 —— 长度与行号**双双失真**，那样切出来的"正文"是别处的字节。
+    """
+    return "".join("\n" if ch == "\n" else " " for ch in m.group())
+
+
 def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "c", mode)
     doc = _blank(_ident(Path(name).stem), "c")
-    body = _C_COMMENT.sub(" ", src)
-    body = re.sub(r"^[ \t]*#.*$", "", body, flags=re.M)
+    body = _C_COMMENT.sub(_blank_keep_off, src)
+    body = re.sub(r"^[ \t]*#.*$", _blank_keep_off, body, flags=re.M)
     known: set[str] = set()
     for m in _C_STRUCT.finditer(body):
         sname, inner = m.group(1), m.group(2)
@@ -863,7 +873,23 @@ def from_c(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             continue
         #: C 的函数**按定义**就是 C ABI (`_c_bare` 只收裸函数, 不含 `static` 之类),
         #: 所以这里不是猜。带结构体参数的那些会在 `lomt_from` 那侧被拒 (第 1 阶段只收标量)。
-        doc["functions"].append({"name": fn, "params": ps, "ret": ret, "abi": "c"})
+        ent: dict = {"name": fn, "params": ps, "ret": ret, "abi": "c"}
+        # ---- 正文（`docs/186`）：有体的函数把**原文**带上，没有的（声明）不带这个字段。
+        #
+        # **可选子字段**，与 `abi` 同一条先例（`docs/179` §3.1）：省略合法、给了必须认。
+        # 不认识它的消费者忽略它就是对的 —— 它们本来也只按签名用这份对象（接口单元那条路）。
+        #
+        # 存的是**整段函数原文**（签名 + 体），不是只存 `{…}`：签名那边 Potato 记的是
+        # **映射后的** Loment 类型名（`i32`），从 `i32` 反推回 C 的拼法是另一张表，
+        # 而原文本来就在手边。另一个理由更要紧 —— **原文是保真的**：`unsigned` 与
+        # `unsigned int` 在 Potato 里都是 `u32`，回推必然丢掉用户写的那个拼法。
+        if m.end() > 0 and body[m.end() - 1] == "{":
+            close = _block_end(body, m.end() - 1)
+            if close < 0:
+                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+                continue
+            ent["body"] = src[m.start():close + 1].strip()
+        doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
 

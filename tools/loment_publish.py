@@ -149,6 +149,10 @@ REPOS: dict[str, dict] = {
             "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
             "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
             "tools/fuai_contract_check.py",
+            # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，
+            # `tools/lom*` 那个 glob 收不到它 —— 而 `loment_ctrans_test` 会 import 它，
+            # 于是闭包判据当场点了名（那正是它该干的事：别靠手数）。
+            "tools/ctrans.py",
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",

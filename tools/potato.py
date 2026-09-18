@@ -286,6 +286,16 @@ def validate(doc: object) -> list[str]:
             abi = f.get("abi")
             if abi is not None and abi not in ABIS:
                 errs.append(f"{w}.abi 非法: {abi!r} (可选, 给了就必须是 {ABIS} 之一)")
+            # `body` 是**可选**字段 (`docs/186`): 这个函数的**原文**（签名 + 体），
+            # 语言就是本单元的 `language`。与 `abi` 同一条先例 —— 省略合法（声明单元
+            # 里一个函数都没有正文，那是**常态**），给了就必须是个非空字符串。
+            #
+            # **为什么是整段函数原文、不是只存 `{…}`**：签名那边 Potato 记的是**映射后的**
+            # 类型名（`i32`），从 `i32` 回推 C 的拼法是另一张表，而原文本来就在手边；
+            # 更紧的是**保真** —— `unsigned` 与 `unsigned int` 在 Potato 里都是 `u32`。
+            bd = f.get("body")
+            if bd is not None and (not isinstance(bd, str) or not bd.strip()):
+                errs.append(f"{w}.body 必须是非空字符串 (可选, 给了就是这段函数的原文)")
     elif funcs is not None:
         errs.append("functions 必须是数组")
 
