@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -275,6 +276,16 @@ def test_vscode_build_and_run_commands():
     assert "registerTaskProvider('loment'" in js, \
         "清单声明了 loment 任务，但扩展里没有注册任务提供者"
 
+    # **编辑器右上角那个 ▶**。第三方 Code Runner 也给 `.lomt` 挂了一个 ——
+    # 它的 `when` **不带语言过滤**（`config.code-runner.showRunIconInEditorTitleMenu`），
+    # 而它对 Loment 没有任何执行器，所以点下去**真的什么都不做**（2026-09-18 实测：
+    # 用户说"点了运行没反应"）。所以必须有自己的那一个，且 `when` 要钉在 loment 上。
+    run_menu = (pkg["contributes"].get("menus") or {}).get("editor/title/run") or []
+    assert any(m.get("command") == "loment.run" and "loment" in str(m.get("when", ""))
+               for m in run_menu), \
+        f"`editor/title/run` 里没有钉在 loment 上的 loment.run —— 右上角的 ▶ 会是别人的" \
+        f"（点了没反应的正是它）: {run_menu}"
+
     node = _node()
     if not node:
         print("      SKIP 分支判定: 无 node")
@@ -350,7 +361,7 @@ const ROOT = process.argv[3];
 const reg = [];
 const dis = () => ({ dispose() {} });
 const file = ROOT + '/loment/examples/user_hello.lomt';
-const SETTINGS = { enableLsp: false, toolCommand: 'loment', buildDir: 'loment/build' };
+const SETTINGS = JSON.parse(process.argv[4] || '{}');
 
 function Task(def, scope, name, source, exec, matcher) {
   this.definition = def; this.name = name; this.exec = exec; this.matcher = matcher;
@@ -363,7 +374,23 @@ const vscode = {
   },
   window: {
     activeTextEditor: { document: { uri: { fsPath: file }, languageId: 'loment' } },
-    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+    // **假得照实**：只有 `{log: true}` 建的才是 LogOutputChannel —— 普通通道**没有**
+    // error/warn/info/debug/trace 与 onDidChangeLogLevel。vscode-languageclient v10 要的
+    // 正是后者，所以这条假通道能把"建了普通通道"当场变成失败（真实现里它是一句
+    // TypeError，而且是**语言服务起来之后**才炸）。
+    createOutputChannel: (name, opts) => {
+      const isLog = !!(opts && opts.log);
+      reg.push('channel:' + name + (isLog ? ':log' : ':plain'));
+      const c = { appendLine() {}, append() {}, replace() {}, clear() {},
+                  show() {}, hide() {}, dispose() {} };
+      if (isLog) {
+        c.error = () => {}; c.warn = () => {}; c.info = () => {};
+        c.debug = () => {}; c.trace = () => {};
+        c.logLevel = 3; c.onDidChangeLogLevel = () => dis();
+      }
+      vscode.__channel = c;
+      return c;
+    },
     showWarningMessage: (m) => reg.push('warn:' + m),
     showErrorMessage: (m) => reg.push('err:' + m),
     showTextDocument: async () => ({}),
@@ -397,7 +424,8 @@ const load = Module._load;
 Module._load = function (req) {
   if (req === 'vscode') { return vscode; }
   if (req === 'vscode-languageclient/node') {
-    return { LanguageClient: class { async start() {} async stop() {} } };
+    return { LanguageClient: class { async start() { reg.push('client:start'); }
+                                     async stop() {} } };
   }
   return load.apply(this, arguments);
 };
@@ -442,7 +470,11 @@ def test_vscode_extension_activates():
     with tempfile.TemporaryDirectory() as td:
         h = Path(td) / "activate-harness.js"
         h.write_text(_ACTIVATE_HARNESS, encoding="utf-8")
-        r = subprocess.run([node, str(h), str(EXT / "src" / "extension.js"), str(ROOT)],
+        # **语言服务开着**（`enableLsp: true`）：关掉它 `startClient` 根本不跑，而这一格里
+        # 藏着真 bug —— v10 的客户端要求输出通道是 `LogOutputChannel`。
+        settings = json.dumps({"enableLsp": True, "toolCommand": "loment",
+                               "buildDir": "loment/build"})
+        r = subprocess.run([node, str(h), str(EXT / "src" / "extension.js"), str(ROOT), settings],
                            capture_output=True, text=True, shell=False)
 
     def fail(msg):
@@ -465,6 +497,17 @@ def test_vscode_extension_activates():
     assert "taskProvider:loment" in reg, fail(f"没有注册 loment 任务提供者: {sorted(reg)}")
     assert "debugFactory:loment" in reg, fail(f"没有注册 loment 调试适配器工厂: {sorted(reg)}")
 
+    # ④ **语言服务的输出通道必须是 LogOutputChannel**（`createOutputChannel(name, {log:true})`）。
+    #    `vscode-languageclient` v10 会给它挂 `onDidChangeLogLevel(...)` 并调 `.error(...)`，
+    #    普通通道这两样都没有 —— 实测症状是语言服务一起就弹两条
+    #    `TypeError: this.outputChannel.error is not a function`。判据用**假得照实**的通道
+    #    （只有 `{log:true}` 才带那几个方法），所以这一格坏了会当场红。
+    assert "channel:Loment:log" in reg, fail(
+        "输出通道不是 LogOutputChannel —— vscode-languageclient v10 要求 "
+        "`createOutputChannel('Loment', {log: true})`；注册记录里是 "
+        f"{[x for x in reg if x.startswith('channel:')] or '（压根没建）'}")
+    assert "client:start" in reg, fail(f"语言服务没起来: {sorted(reg)}")
+
     # ③ 任务提供者真给出两条任务，且「编译」是**默认生成任务**（`Ctrl+Shift+B` 靠它）
     assert got["tasks"] == 2, fail(f"应当给「编译 / 编译并运行」两条任务，给了 {got['tasks']}")
     assert got["buildGroup"] is True, fail("「编译」没有挂 TaskGroup.Build —— Ctrl+Shift+B 不会挑它")
@@ -478,6 +521,40 @@ def test_vscode_extension_activates():
     assert dap["args"] and any("loment_dap.py" in a for a in dap["args"]), fail(f"适配器命令不对: {dap}")
     print(f"      activate() 跑通：{len(reg)} 项注册、{got['tasks']} 条任务（含默认生成任务）、"
           f"调试适配器 `{dap['cmd']} …{Path(dap['args'][-1]).name}`")
+
+
+@test
+def test_vscode_registration_points_at_the_real_dir():
+    """**登记必须指向真目录** —— 它指向别处时高亮/命令/F5 整个消失，而磁盘上一切"看着在"。
+
+    2026-09-18 实测踩到的坑：侧载时把旧副本挪成 `<ident>-<ver>.old` **留在了
+    `extensions/` 里**，VS Code 扫到那个文件夹（它也有 `package.json`），把扩展登记到了
+    这个**马上要被删掉**的名字上。当时 `--doctor` 只查"有没有登记"，所以照常报 OK ——
+    这一条把那个盲点钉住。
+    """
+    ident = "fujojtop.loment"
+    dest = vscode_ext.ext_dir() / f"{ident}-0.1.0"
+    stale = {"identifier": {"id": ident}, "version": "0.1.0",
+             "location": {"$mid": 1, "path": f"/c:/x/{ident}-0.1.0.old", "scheme": "file"},
+             "relativeLocation": f"{ident}-0.1.0.old"}
+    other = {"identifier": {"id": "someone.else"},
+             "relativeLocation": "someone.else-1.0.0"}
+    entries, n = vscode_ext.fix_registration([dict(stale), dict(other)], ident, dest)
+    assert n == 1, f"应当只改 1 条，改了 {n}"
+    got = entries[0]
+    assert got["relativeLocation"] == dest.name, got
+    # URI 要**照抄 VS Code 自己写的那种**：只有 $mid/path/scheme，`/c:/...` 形状。
+    # 自己发明 `fsPath`/`external` 就不是它认的那一份了。
+    assert got["location"] == vscode_ext.vs_uri(dest), got["location"]
+    assert set(got["location"]) == {"$mid", "path", "scheme"}, got["location"]
+    assert re.match(r"^/[a-z]:/", got["location"]["path"]), got["location"]
+    assert entries[1] == other, f"别人的条目不许动: {entries[1]}"
+
+    # 盘符小写、正斜杠、顶一个 `/` —— 与 VS Code 写出来的一致
+    assert vscode_ext.vs_uri(Path("D:/Dev/Loment-DEV/x")) == {
+        "$mid": 1, "path": "/d:/Dev/Loment-DEV/x", "scheme": "file"}, \
+        vscode_ext.vs_uri(Path("D:/Dev/Loment-DEV/x"))
+    print(f"      登记修复：{ident}-0.1.0.old -> {dest.name}；别人的条目未动")
 
 
 def main(argv: list[str] | None = None) -> int:

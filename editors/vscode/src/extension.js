@@ -31,6 +31,25 @@ function cfg() {
   return vscode.workspace.getConfiguration('loment');
 }
 
+/**
+ * 扩展的输出通道 —— **必须是 `LogOutputChannel`**（`createOutputChannel(name, {log:true})`）。
+ *
+ * `vscode-languageclient` **v10** 会给 `outputChannel` 挂 `onDidChangeLogLevel(...)` 并调
+ * `outputChannel.error(...)`；普通 `OutputChannel` 这两样都没有，于是语言服务一起来就抛
+ *
+ *     TypeError: this.outputChannel.error is not a function
+ *     TypeError: this.traceOutputChannel.onDidChangeLogLevel is not a function
+ *
+ * 这个错在升级到 v10 时就有了，只是**扩展当时整个加载不起来**（另一个 bug），所以从没
+ * 露过面 —— 修好加载之后第一眼就是它。**只有 `{log:true}` 建的通道带那几个方法。**
+ */
+function out() {
+  if (!output) {
+    output = vscode.window.createOutputChannel('Loment', { log: true });
+  }
+  return output;
+}
+
 /** 工作区根 (第一个文件夹); 没有就退回当前文件的目录。 */
 function workspaceRoot(fallbackDir) {
   const folders = vscode.workspace.workspaceFolders;
@@ -195,16 +214,16 @@ async function startClient(context) {
     args = [serverPath];
     label = serverPath;
   }
-  output = vscode.window.createOutputChannel('Loment');
+  const chan = out();
   const c = new LanguageClient(
     clientName,
     'Loment',
     // v10 的 Executable 是**接口**: 用对象字面量; 默认 stdio 传输
     { run: { command, args }, debug: { command, args } },
-    { documentSelector: [{ scheme: 'file', language: 'loment' }], outputChannel: output });
+    { documentSelector: [{ scheme: 'file', language: 'loment' }], outputChannel: chan });
   context.subscriptions.push(c);
   await c.start();
-  output.appendLine(`语言服务已启动: ${label}`);
+  chan.appendLine(`语言服务已启动: ${label}`);
   return c;
 }
 
@@ -319,8 +338,7 @@ function activate(context) {
 
   const root = workspaceRoot();
   if (root) {
-    output = vscode.window.createOutputChannel('Loment');
-    output.appendLine(`Loment 扩展已激活 (工作区根: ${root})`);
+    out().appendLine(`Loment 扩展已激活 (工作区根: ${root})`);
   }
 
   // 任务提供者: 让 `Ctrl+Shift+B` 与「Tasks: Run Task」看得到「编译 / 编译并运行」
@@ -347,9 +365,7 @@ function activate(context) {
           vscode.window.showErrorMessage(`Loment: ${inv.error}`);
           return undefined;
         }
-        if (output) {
-          output.appendLine(`调试适配器: ${inv.cmd} ${inv.args.join(' ')}（${inv.how}）`);
-        }
+        out().appendLine(`调试适配器: ${inv.cmd} ${inv.args.join(' ')}（${inv.how}）`);
         return new vscode.DebugAdapterExecutable(inv.cmd, inv.args);
       },
     }));

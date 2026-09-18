@@ -290,6 +290,13 @@
           "when": "editorLangId == loment",
           "group": "loment@2"
         }
+      ],
+      "editor/title/run": [
+        {
+          "command": "loment.run",
+          "when": "editorLangId == loment",
+          "group": "navigation@0"
+        }
       ]
     }
   },

@@ -97,15 +97,30 @@ Shift+F11 跳出（`stepOut`），继续 F5。
 ## 安装 / 打包
 
 ```bash
-# 打包 (在仓库根)
+# 一条命令：重打包 + 侧载进本机 VS Code（然后 Developer: Reload Window）
+python tools/vscode_ext.py --install
+# 只想出 .vsix
 python tools/vscode_ext.py --emit loment/build/loment-vscode.vsix
-# 安装
-code --install-extension loment/build/loment-vscode.vsix --force
+# 体检已装的那一份（高亮出问题先跑这个）
+python tools/vscode_ext.py --doctor
 ```
 
 打包前需在工作区里跑一次 `npm install --omit=dev`（把 `vscode-languageclient` 装进
 `editors/vscode/node_modules`，VSIX 会把它一起打进 `extension/node_modules`）。
 `.vsix` 的字节是**确定性**的（固定时间戳），因此可以进校验和清单。
+
+`--install` **不走 `code --install-extension`**：那条路在有沙箱的环境里常常起不来
+（`Code.exe` 报"系统找不到指定的文件"，而 `cmd.exe` 正常 —— 不是权限问题）。
+它按 VS Code 自己的布局解压到 `~/.vscode/extensions/<发布者>.<名>-<版本>/`，
+并把 `extensions.json` 里的登记改到那个真目录。
+
+> **改完一定要 `Developer: Reload Window`。** 语言关联、语法、命令、调试器都注册在
+> **窗口启动时** —— 不重载就还是旧的（文件明明在、`--doctor` 也绿，看起来却"没装上"）。
+>
+> 侧载时把旧副本挪成备份**不能留在 `extensions/` 里**：那个目录下任何带 `package.json`
+> 的文件夹都会被当成一个扩展扫进去，VS Code 可能把登记落在**那个马上要删掉的名字**上，
+> 于是高亮/命令/F5 整个消失，而磁盘上一切"看着在"。`--install` 把备份挪到系统临时目录，
+> `--doctor` 会查"登记指向哪儿还在不在"。
 
 ## 无头验证（不需要 GUI）
 
