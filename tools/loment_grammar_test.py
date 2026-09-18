@@ -387,8 +387,15 @@ def test_the_scanner_agrees_with_an_independently_written_reference():
         for alias in ("py", "python", "c#", "c++", "go", "python2", "", "Python"):
             lines.add(f"choose{sep}write{sep}grammar{sep}{alias}".rstrip())
     # **每处单字符替换**：这是"覆盖想不到的写法"的那一半 —— 手挑挑不出这些。
+    #
+    # 字母表是**并集**：loment-dev-86 在第三词后面单挑了 12 种分隔符
+    # （`#` `.` `:` `,` `-` `_` `(` `!` `=` `@` `'` `"`，判据 `d763ffa`），
+    # 我这份是"每个位置 × 这些字符" —— 所以**我这份严格覆盖他那份**。
+    # 两边各钉一条时最怕的就是"覆盖不同、于是各自绿着却互不覆盖"；把字母表对齐就没有那一档。
+    # （`_` 值得点出来：它是**词字符**，`grammar_python` 两边都判"没有声明头" ✓ 一致。）
+    sep_alphabet = ("#", ".", ":", ",", "-", "_", "(", "!", "=", "@", "'", '"')
     for i in range(len(base)):
-        for ch in ("x", " ", "\t", ";", "#", "."):
+        for ch in ("x", " ", "\t", ";", *sep_alphabet):
             lines.add(base[:i] + ch + base[i + 1:])
 
     bad = []
