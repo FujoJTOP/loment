@@ -1,0 +1,26 @@
+// extblock/evil.lomt — 外部代码块的**字节保真**语料（S1，`docs/185`）
+//
+// 这份文件只用来喂**两个词法器**（`loment_p8_test` 的 token 流对照）——
+// 它证明 raw 模式两边一致。正文故意塞满"字符串字面量那条路会踩的坑"：
+// `"` 要转义、`\0` 是未知转义（会静默退化成两个字符）、非 ASCII 没有非 UTF-8 通道。
+//
+// **它不参与编译**（没有 `fn main` 要求，但也不是一支可编的单元）—— 见
+// `loment_extblock_test` 那几条判据，那才是语义侧。
+module evil
+
+command c
+foruse py
+
+let c {
+#include <stdio.h>
+const char *s = "a\"b\c\0d";
+int f(void) { return 1; }
+/* 中文注释 · 全角「」 */
+}
+
+py {
+def g(a, b):
+    return a - b
+}
+
+fn main() -> u64 { return 0; }

@@ -70,9 +70,35 @@ _PUNCT = "{}()[]:;=@,.+-*/%<>!&|^?"
 _ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
 
 
+def _starts_ext_block(toks: list, depth: int, declared: set) -> bool:
+    """这个 `{` 是不是**外部代码块**的开头（`docs/185` §3）。
+
+    两种写法：
+
+    * `let IDENT {` —— **总认**。今天 `let` 只接 `IDENT :` / `IDENT =`，`let x { … }`
+      根本解析不过，所以这个产生式是新加的、不撞任何既有语法；
+    * `IDENT {` —— 只在 `IDENT` 是**本文件声明过的语言名**（`command` / `foruse`）**且**
+      在顶层时认。`struct S {` / `fn f() -> u32 {` 的 `{` 前面也是标识符，靠"必须是语言名"
+      把它们排除掉；顶层那一条挡的是 `if c { }`（`c` 既是语言名又是变量时）。
+    """
+    if len(toks) >= 2 and toks[-1].kind == "ident" and toks[-2].kind == "ident" \
+            and toks[-2].val == "let":
+        return True
+    return (depth == 0 and bool(toks) and toks[-1].kind == "ident"
+            and toks[-1].val in declared)
+
+
 def lex(text: str) -> list[Tok]:
     toks: list[Tok] = []
     i, line, col, n = 0, 1, 1, len(text)
+    #: 花括号深度 —— 只用来判"这个 `IDENT {` 在不在顶层"（`docs/185` §3）。
+    depth = 0
+    #: 本文件**声明过**的语言名（`command c` / `foruse py`）。不带 `let` 的外部代码块
+    #: 靠它消歧：`struct S {` 的 `S` 与 `fn f() -> u32 {` 的 `u32` 也是"标识符后面跟 `{`"，
+    #: 只有"声明过的语言名"能把它们排除掉（`docs/185` §3）。
+    declared: set[str] = set()
+    #: 刚发过 `command` / `foruse` —— 下一个标识符是语言名。
+    want_lang = False
     while i < n:
         c = text[i]
         if c == "\n":
@@ -113,10 +139,37 @@ def lex(text: str) -> list[Tok]:
             continue
         m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])
         if m:
-            toks.append(Tok("ident", m.group(0), line, col, i, m.end()))
+            name = m.group(0)
+            if want_lang:
+                declared.add(name)      # `command c` / `foruse py`
+                want_lang = False
+            elif depth == 0 and name in ("command", "foruse"):
+                want_lang = True
+            toks.append(Tok("ident", name, line, col, i, m.end()))
             i, col = i + m.end(), col + m.end()
             continue
         if c in _PUNCT:
+            if c == "{" and _starts_ext_block(toks, depth, declared):
+                start = i + 1
+                j, d = start, 1
+                while j < n and d > 0:
+                    if text[j] == "{":
+                        d += 1
+                    elif text[j] == "}":
+                        d -= 1
+                    j += 1
+                if d != 0:
+                    raise LomError(line, col, "外部代码块没闭合（少一个 `}`）")
+                body = text[start:j - 1]
+                toks.append(Tok("raw", body, line, col + 1, start, j - 1 - start))
+                line += body.count("\n")
+                col = (len(body) - body.rfind("\n")) if "\n" in body else col + 1 + len(body)
+                i = j
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth = max(0, depth - 1)
             toks.append(Tok("punct", c, line, col, i, 1))
             i, col = i + 1, col + 1
             continue

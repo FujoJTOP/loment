@@ -28,7 +28,9 @@ _T = f"/tmp/loment-{os.getpid()}-"
 ROOT = Path(__file__).resolve().parent.parent
 LEXER = ROOT / "loment" / "selfhost" / "lexer.lomt"
 TESTS: list[tuple[str, object]] = []
-KIND = {"ident": 0, "number": 1, "string": 2, "punct": 3, "eof": 4}
+#: kind 编码 —— **与两个词法器同表**（`lomc.Tok.kind` / `lexer.lomt` 头那条注释）。
+#: `raw` = 外部代码块的正文（`docs/185`），走它自己的分支（见 `_python_tokens`）。
+KIND = {"ident": 0, "number": 1, "string": 2, "punct": 3, "eof": 4, "raw": 5}
 
 
 def test(fn):
@@ -110,6 +112,10 @@ def _python_tokens(src: Path) -> list[tuple[int, int, int, int, int]]:
         if t.kind == "eof":
             out.append((4, bstart, 0, t.line, t.col))
             continue
+        if t.kind == "raw":
+            # 正文就是源里的原始字节（`docs/185` §4.1），`val` 与跨度是同一份
+            out.append((5, bstart, len(t.val.encode("utf-8")), t.line, t.col))
+            continue
         if t.kind == "string":
             j = start + 1
             while j < len(text) and text[j] != '"':
@@ -128,7 +134,10 @@ def test_m79_loment_lexer_matches_python():
     files = [ROOT / "loment" / "examples" / "toolchain.lomt",
              ROOT / "loment" / "examples" / "all_loment.lomt",
              ROOT / "loment" / "examples" / "native_cap.lomt",
-             ROOT / "loment" / "selfhost" / "lexer.lomt"]
+             ROOT / "loment" / "selfhost" / "lexer.lomt",
+             # **外部代码块**（`docs/185` S1）：不加进来，raw 模式两边不一致也看不出来
+             # —— 这正是本仓反复撞到的那个形状（判据只跑它跑的那些）。
+             ROOT / "loment" / "extblock" / "evil.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build(td)
         for f in files:

@@ -194,6 +194,7 @@ tools/loment_interp.py
 tools/loment_ct_test.py
 tools/loment_comefor.py
 tools/loment_comefor_test.py
+tools/loment_extblock_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py
 tools/loment_p9_test.py
@@ -252,6 +253,7 @@ editors/vscode/src/*.js
 editors/vscode/syntaxes/*.json
 loment/ct/*.lomt
 loment/comefor/*.lomt
+loment/extblock/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

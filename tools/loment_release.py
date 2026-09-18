@@ -72,6 +72,8 @@ GLOBS = [
     "tools/loment_interp.py", "tools/loment_ct_test.py",
     # `comefor` 的 token 层展开 (S4.1, docs/184 §9): 展开器 + 判据 + 最小方言演示。
     "tools/loment_comefor.py", "tools/loment_comefor_test.py",
+    # 外部代码块的字节保真 (S1, docs/185)
+    "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py", "tools/mono_trace.py",
@@ -112,6 +114,8 @@ GLOBS = [
     "loment/ct/*.lomt",
     # `comefor` 演示对：方言源 + 手写展开源（判据要两份都在才跑得起来）。
     "loment/comefor/*.lomt",
+    # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
+    "loment/extblock/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
