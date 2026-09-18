@@ -15,19 +15,19 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "79bf79f298162e8d8bc2481087933f79cfdf3702e232c3a3ae25cdb29a8010f8"
+   "sha256": "67bd4b044ec993d97b8f5e930bdf923e8988e39163e05b3bb3f1a7acff564d9d"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "c52a296086403326f50a712fd30ac529517733f638248b6f6b6f7ed7c6a2bfcd"
+   "sha256": "8ee74b421d461437d575a8e3c3ba0f9bb5d59d0bc1e5a53d4baa2526b499af0d"
   },
   {
    "path": "tools/potato.py",
-   "sha256": "8882f3bb73572f43ae124c82afb7bfde919d910cc066a44c47e0d65f27e57a18"
+   "sha256": "d51e6176500a3d8452b38272aa785860e2ef9c4cc1a623a668d1bc14b3a8af3e"
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "224b5d139e18e134984dde9915528d8ae4a10ed7982b0665e2fbbc152346f85f"
+   "sha256": "0e04401008f8c0bb2d5e479da0d717cb769fcb21d5d03f8a589107548779ffd7"
   },
   {
    "path": "tools/potato_cross.py",
@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_lsp.py",
-   "sha256": "7183a8bfae16e116031991f5a24494b407e6a42f0ce63e8371ab08f0f60f61e9"
+   "sha256": "68c2849518f7379a56e0078182775a6553039278c9398faf8543d618d611c2b2"
   },
   {
    "path": "tools/loment_tools_test.py",
@@ -707,11 +707,11 @@
   },
   {
    "path": "tools/loment_comefor.py",
-   "sha256": "e7be7ffe3e9702f8463e71f46b8e82df2d3f5c93789e67e74cc034e50de89da3"
+   "sha256": "c4711d7660e9fb2ce1d02eb74041a6f11bac5df9fae581f34dba62fa1a7db6d9"
   },
   {
    "path": "tools/loment_comefor_test.py",
-   "sha256": "47983680c9eb6cef0cc465071276b90d044d5dcfb8d30503dbbc8624741da21e"
+   "sha256": "7f90a2458a7323daeffabe4453c218118b16db7709516351d5bab198e7efd29e"
   },
   {
    "path": "tools/loment_p7_test.py",
@@ -767,7 +767,7 @@
   },
   {
    "path": "tools/loment_fmt_test.py",
-   "sha256": "69351a975ad870ac7fc51085406334359050f7ff5bdab87e30ef8a43f6f7620d"
+   "sha256": "ca8ad7f0a2b52ee846e18cfee07780d828150f880e129bf413da4c1cc643d0d8"
   },
   {
    "path": "tools/loment_audit.py",
@@ -1427,15 +1427,15 @@
   },
   {
    "path": "docs/183-loment-library-vertical.md",
-   "sha256": "b7787e23f6294de0a8f1c5e0b4a4287dab1c1e4065653665f00aa568c18d4a1a"
+   "sha256": "4c80d60d1c9b2c3e2fb72c88517a02d79f1a816dab5a8261a1041596fda66596"
   },
   {
    "path": "docs/184-comefor-in-kernel-syntax-extension.md",
-   "sha256": "f5f1f2843bca2c3b691474973091f9a425b2111c90d3c85d4e50e06af918229b"
+   "sha256": "75aa938b2203a97339774baf9d89c83ba3b35d02d0cc423e66edca8c762e78af"
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "2f8c08b26df542ccdea8cce89d6eaffe6b7d0d73695c6c4af15ef8cce2c7fbfa"
+   "sha256": "5c1c5fb7af2acf767f9ab4bd6f8150e67c4e2d0f52d5a73009baa78a9a0eb0d2"
   },
   {
    "path": "docs/manual/api/ahci.md",
