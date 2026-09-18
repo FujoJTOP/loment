@@ -112,6 +112,8 @@ GLOBS = [
     # Go 翻成 Loment (六门里的第六门; **不共用共享核** —— 三条形状都不一样)。
     "tools/gotrans.py",
     "tools/loment_gotrans_test.py",
+    # `choose write grammar` (docs/188 §1): 读法由**声明**决定、出厂锁的取值表。
+    "tools/loment_grammar_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",

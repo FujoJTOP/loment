@@ -1369,18 +1369,104 @@ EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
 #: 其余都是**运行时那一族**, 走进程桥 (docs/173 §4)。
 
 
+# ------------------------------------------------- `choose write grammar` 声明
+#
+# `docs/188` §1：源里可以声明"这份是用哪种**写法**写的"，于是**读法由声明决定**，
+# 而不是靠嗅探（`detect_lang` 那套 `#include` / `def ` 的启发式）。兜底从"猜"变"拒绝"。
+#
+# **出厂锁**（`docs/188` §1.1）：取值表由官方给出 —— **用户不能扩展、不能覆盖、
+# 不能解锁**。所以它是一张**写死的**表，不是可配置项。
+# （与 `docs/182` §3 那个"装进本机、用户能 `chooseunlock`"的锁**不是一回事**，别混：
+# 那个至今未实现，而这个**现在就能做**，正因为它没有"本机状态"。将来可以**哈希**把它
+# 钉死 —— 那一步留给"发行版钉住工具链"时做。）
+#
+# **别名表只有一处**（与"判语法的规则只有一处"同一条纪律）：右列就是**规范名**，
+# 必须恰好是 `potato.GRAMMARS` 那个集合 —— 判据钉着（`loment_grammar_test`）。
+# 源侧宽松（`py` / `python` 都收）、对象侧只许一个拼法，否则同一份源出两串字节。
+GRAMMAR_ALIASES: dict[str, str] = {
+    "loment": "loment",
+    "c": "c",
+    "py": "python", "python": "python",
+    "java": "java",
+    "cs": "csharp", "csharp": "csharp", "c#": "csharp",
+    "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
+    "go": "go", "golang": "go",
+    "rs": "rust", "rust": "rust",
+}
+
+#: `choose write grammar <别名>`。别名那一格**不收 `;`**（`grammar python;` 也收），
+#: 但**收 `#`** —— `c#` 是个别名，把它当注释头切掉的话那个拼法就用不了了。
+_GRAMMAR_ANY = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar\b", re.M)
+_GRAMMAR_DECL = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar[ \t]+([^\s;]+)", re.M)
+#: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
+_GRAMMAR_LINE = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar[ \t]+[^\n]*", re.M)
+_MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
+
+
+def strip_grammar_decl(src: str) -> str:
+    """把声明那一行**抹成等长空白**再交给目标语言的解析器。
+
+    **不抹的话它根本解析不了**：`choose write grammar python` 不是合法的 Python
+    （也不是合法的 C / Go / …）—— 声明是**读法**，不是那份源的一部分。
+
+    抹法是等长空白（保留换行），所以**行号一字不动** —— 目标语法报的错，
+    行号仍然指回这份文件里的那一行。
+    """
+    return _GRAMMAR_LINE.sub(_blank_keep_off, src)
+
+
+def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
+    """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
+
+    必须在 `module` **之前**：它决定后面怎么读，读到了 `module` 才说就晚了。
+    只许写一次。没写就是 `("loment", None, False)` —— 源侧**可选**（`docs/188` §2）：
+    99% 的文件是 Loment，每份写一遍是噪声；而"缺 = Loment"**没有歧义**。
+    """
+    hits = list(_GRAMMAR_ANY.finditer(src))
+    if not hits:
+        return "loment", None, False
+    first = hits[0]
+    line_of = lambda i: src[:i].count("\n") + 1          # noqa: E731
+    mod = _MODULE_LINE.search(src)
+    if mod is not None and mod.start() < first.start():
+        return "loment", (f"第 {line_of(first.start())} 行: `choose write grammar` 必须在 "
+                          f"`module` **之前** —— 它决定后面怎么读，"
+                          f"读到 `module` 才说就晚了"), False
+    if len(hits) > 1:
+        return "loment", (f"第 {line_of(hits[1].start())} 行: `choose write grammar` "
+                          f"只许写一次"), False
+    m = _GRAMMAR_DECL.match(src, first.start())
+    if not m:
+        return "loment", (f"第 {line_of(first.start())} 行: `choose write grammar` "
+                          f"后面要写语法名"), False
+    word = m.group(1).strip().lower()
+    if word not in GRAMMAR_ALIASES:
+        return "loment", (
+            f"第 {line_of(first.start())} 行: `grammar {m.group(1)}` 不在出厂锁的取值表里"
+            f"—— 这张表由官方给，**不可扩展、不可覆盖**（`docs/188` §1.1）。"
+            f"可写的是：{'、'.join(sorted(GRAMMAR_ALIASES))}"), False
+    return GRAMMAR_ALIASES[word], None, True
+
+
 def resolve_lang(path: Path, lang: str = "auto") -> tuple[str, str]:
-    """`(语言, 依据)` —— **后缀优先, 内容兜底**。`transcribe` 与各工具共用这一处,
+    """`(语言, 依据)` —— **声明 > 后缀 > 内容**。`transcribe` 与各工具共用这一处,
     免得"判语法"这事在两处各写一遍(那种必然漂)。
 
-    后缀认得就信后缀(显式比猜的可靠); 认不出(`.lomt` 就在这一档)才读内容判。
+    **声明压过后缀**：后缀是命名习惯、会说谎（一份装着 Python 的 `.lomt` 正是这条要治的），
+    而声明是**作者对这份文件说的**。`--lang` 仍然最大（那是调用方当场指定）。
+    定不出来时返回 `("", 原因)`，由调用方决定怎么报。
     """
     if lang != "auto":
         return lang, "调用方指定的"
+    src = path.read_text(encoding="utf-8", errors="replace")
+    g, err, declared = read_grammar_decl(src)
+    if err:
+        return "", err
+    if declared:
+        return g, "文件头声明 `choose write grammar`"
     by_ext = EXT.get(path.suffix, "")
     if by_ext:
         return by_ext, f"后缀 {path.suffix}"
-    src = path.read_text(encoding="utf-8", errors="replace")
     return detect_lang(src)
 
 
@@ -1391,6 +1477,9 @@ def transcribe(path: Path, lang: str = "auto", mode: str = "strict"):
     "非 Loment 源语法的 `.lomt` 文件"落地的地方。
     """
     lang, why = resolve_lang(path, lang)
+    if not lang:
+        # `choose write grammar` 那一声明的毛病（位置不对 / 写两次 / 拼法不在出厂锁里）
+        raise ValueError(f"{path}: {why}")
     if lang == "loment":
         raise ValueError(
             f"{path} 是 **Loment 语法**（{why}）—— 它不该走多语法前端, "
@@ -1400,13 +1489,15 @@ def transcribe(path: Path, lang: str = "auto", mode: str = "strict"):
             f"定不出源语法（后缀 {path.suffix!r} 不在 {sorted(EXT)}，内容：{why}）"
             f"—— 用 --lang c|rust|python 指明")
     src = path.read_text(encoding="utf-8", errors="replace")
-    return LANGS[lang](src, path.name, mode)
+    # **声明要先抹掉**：`choose write grammar python` 不是合法的 Python，
+    # 交给目标解析器之前必须清掉（等长空白，行号不动）。
+    return LANGS[lang](strip_grammar_decl(src), path.name, mode)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="potato_from", description="源码 -> Potato 形式对象")
     ap.add_argument("file", nargs="?", help="源文件")
-    ap.add_argument("--lang", choices=("auto", "python", "c", "rust"), default="auto")
+    ap.add_argument("--lang", choices=("auto",) + tuple(sorted(LANGS)), default="auto")
     ap.add_argument("--mode", choices=("strict", "lenient"), default="strict")
     ap.add_argument("--json", metavar="OUT")
     ap.add_argument("--report", metavar="OUT")
