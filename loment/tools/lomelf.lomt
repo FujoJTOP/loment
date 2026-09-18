@@ -3518,6 +3518,15 @@ fn run(mem: ptr) -> u32 {
     if n == 0 {
         return fail("输入为空");
     }
+    // **读满上限 = 文件还有剩** —— `read_all` 读够 `cap` 就停，它不知道文件多长。
+    // 不检查的后果不是"少几条指令"：`.ll` 是逐行语法，截断点之后的函数定义凭空消失，
+    // 汇编出来的是一个**缺胳膊少腿、跑起来就段错误**的可执行文件。
+    // 2026-09-18 实测（docs/192）：同一份 `.ll`，这边段错误、clang 汇编完全正常 ——
+    // 责任就在这一行。与 `copy_name` 那条守卫、与驱动程序里 `MAX_USE` / `MAX_ADDIN`
+    // 的注解是同一条纪律：**超限报错退出，绝不静默丢**。
+    if n >= IN_CAP as u64 {
+        return fail("lomelf: 输入 .ll 超过 2 MiB 上限 (输入缓冲装不下; 见 docs/192)");
+    }
     let tab: ptr = ptr_add(mem, M_TAB);
     let gb: ptr = ptr_add(mem, M_GB);
     let txt: ptr = ptr_add(mem, M_TXT + 65536);
