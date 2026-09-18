@@ -109,6 +109,20 @@
         }
       }
     },
+    "taskDefinitions": [
+      {
+        "type": "loment",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`build`（编译）或 `run`（编译并运行）"
+          }
+        }
+      }
+    ],
     "commands": [
       {
         "command": "loment.build",

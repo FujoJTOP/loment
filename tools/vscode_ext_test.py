@@ -266,6 +266,14 @@ def test_vscode_build_and_run_commands():
     for k in ("loment.toolCommand", "loment.toolArgs"):
         assert k in pkg["contributes"]["configuration"]["properties"], f"缺设置 {k}"
 
+    # **`Ctrl+Shift+B` 那条路**：它只认**注册过的任务**，不认命令。少了下面这两样，
+    # 用户按 `Ctrl+Shift+B` 什么都不会发生 —— 而命令面板里那两条明明是好的。
+    tds = pkg["contributes"].get("taskDefinitions") or []
+    assert any(t.get("type") == "loment" for t in tds), \
+        f"清单里没有 loment 的 taskDefinitions（Ctrl+Shift+B 找不到它）: {tds}"
+    assert "registerTaskProvider('loment'" in js, \
+        "清单声明了 loment 任务，但扩展里没有注册任务提供者"
+
     node = _node()
     if not node:
         print("      SKIP 分支判定: 无 node")

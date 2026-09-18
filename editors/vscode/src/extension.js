@@ -108,6 +108,64 @@ function toolPath(root, ...rest) {
   return path.join(root, 'tools', ...rest);
 }
 
+/**
+ * 任务提供者 —— 让「编译 / 编译并运行」出现在 **`Ctrl+Shift+B`** 与
+ * 「Tasks: Run Task」里，而不是只能从命令面板点。
+ *
+ * ## 为什么要有它（而不是只留命令）
+ *
+ * `Ctrl+Shift+B`（运行生成任务）是 VS Code 里"编译这个项目"的**原生手势** ——
+ * 而它只认**注册过的任务**，不认命令。所以只做命令的话，用户按 F5/`Ctrl+Shift+B`
+ * 得到的是"没有用于调试 Loment 的扩展"，而不是编译。
+ *
+ * ## 它**不**解决 F5
+ *
+ * F5 在 VS Code 里**恒等于「开始调试」**，要它不弹那个框就得有一个**调试器** ——
+ * 而 Loment 现在没有：`loment dbg`（M75）只是**源码级符号化**（地址 ↔ 源行，
+ * 走 DWARF 行表），那是调试器的**地基**，不是调试器（没有进程控制/断点/单步）。
+ * 这里不做一个"看着像调试器但不能断点"的壳 —— 那正是本仓最讨厌的静默。
+ */
+class LomentTaskProvider {
+  provideTasks() {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || ed.document.languageId !== 'loment') {
+      return [];
+    }
+    const file = ed.document.uri.fsPath;
+    const root = workspaceRoot(path.dirname(file));
+    const out = [];
+    for (const [action, label] of [['build', 'Loment: 编译'], ['run', 'Loment: 编译并运行']]) {
+      const inv = invocation({
+        root,
+        file,
+        action,
+        platform: process.platform,
+        toolCommand: cfg().get('toolCommand'),
+        toolArgs: cfg().get('toolArgs'),
+        buildDir: cfg().get('buildDir'),
+      });
+      if (inv.error) {
+        continue;                     // 提供不了就不列 —— 点那条命令时会看到原因
+      }
+      const exec = new vscode.ProcessExecution(inv.cmd, inv.args, { cwd: inv.cwd });
+      const t = new vscode.Task({ type: 'loment', action }, vscode.TaskScope.Workspace, label,
+                               'loment', exec, []);
+      t.presentationOptions = { reveal: vscode.TaskRevealKind.Always,
+                                panel: vscode.TaskPanelKind.Shared };
+      if (action === 'build') {
+        // **默认生成任务** —— 这一条让 `Ctrl+Shift+B` 直接编当前文件
+        t.group = vscode.TaskGroup.Build;
+      }
+      out.push(t);
+    }
+    return out;
+  }
+
+  resolveTask() {
+    return undefined;
+  }
+}
+
 function buildOut(root, fsPath) {
   const stem = path.basename(fsPath, '.lomt');
   const dir = path.join(root, cfg().get('buildDir') || 'loment/build');
@@ -267,6 +325,10 @@ function activate(context) {
     output = vscode.window.createOutputChannel('Loment');
     output.appendLine(`Loment 扩展已激活 (工作区根: ${root})`);
   }
+
+  // 任务提供者: 让 `Ctrl+Shift+B` 与「Tasks: Run Task」看得到「编译 / 编译并运行」
+  context.subscriptions.push(
+    vscode.tasks.registerTaskProvider('loment', new LomentTaskProvider()));
 
   if (cfg().get('enableLsp') !== false) {
     startClient(context).then((c) => {
