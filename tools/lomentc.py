@@ -2554,7 +2554,16 @@ def prescan_switches(entry: Path, root: Path, proj: Path | None,
         if depth >= MAXDEPTH:
             raise LomError(1, 1, f"`addin` 嵌套超过 {MAXDEPTH} 层: {rp} —— "
                                  f"开关设定不该套这么深")
-        toks = lomc.lex(rp.read_text(encoding="utf-8"))
+        # **读法由声明决定，所以这一趟也要过前门**（`docs/188` §7.2）。
+        #
+        # **只接 `load` 是不够的** —— 预扫**自己**读一遍源。2026-09-18 实测：只接了 `load`
+        # 的时候，一份 `choose write grammar python` 的 `.lomt` 在**这一趟**被读成
+        # "未定义的开关 `write`"（`choose` 是开关关键字，`choose write` = 取开关 `write`），
+        # 而那是**命令行**上先撞到的（`lomentc --check`）—— 库那一侧的判据全绿。
+        # 这正是 `docs/182` §1.9 那张"读 L1 源的入口"清单的形状：**入口不止一处**。
+        from potato_from import front_door          # noqa: PLC0415
+
+        toks = lomc.lex(front_door(rp).source)
         # 嵌套声明在这里也要拦：预扫**只收深度 0**（与第二趟同规则），体里那份定义它
         # 本来就看不见 —— 不在这儿拦下，它会被**静默当成普通代码**。
         _reject_nested_switch_decls(toks)

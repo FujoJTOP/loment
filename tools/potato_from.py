@@ -1533,6 +1533,16 @@ class FrontUnit:
 #: 而声明说的是"它用哪种**写法**写的" —— 两件事，别混（`docs/188` §1、§2）。
 LOMENT_EXT = (".lomt", ".lom", ".lomp")
 
+#: `(路径, 语言, 模式) -> FrontUnit` 的**一趟式备忘，只存"翻出来的那一支"**。
+#:
+#: **为什么要有**：读一个源的地方**不止一处** —— `lomentc.load` 读一次，开关预扫
+#: （`prescan_switches` 里那个 `scan`）**又读一次**。2026-09-18 实测：只接了 `load`
+#: 的话，一份 `choose write grammar python` 的 `.lomt` 在**预扫**那趟被读成
+#: "未定义的开关 `write`" —— 而那是**命令行**上先撞到的（`lomentc --check`）。
+#: 两处都过前门才对，但那意味着**翻一遍的活被干两遍**；文件在一次编译里不会中途变，
+#: 所以按路径备忘是安全的。**只备忘翻译这一支** —— `loment` 那一支只是抹一行，便宜。
+_FRONT_MEMO: dict = {}
+
 
 def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
     """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
@@ -1603,6 +1613,10 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     # **别的写法**：翻成 Loment。`lomt_from` 按需 import —— 它会把各门翻译器拉进来，
     # 而这条路不是每个调用方都走得到（与 `lomt_from` 自己那条注解同一个道理）。
     import lomt_from  # noqa: PLC0415
+    _key = (str(path), lang, mode)
+    _hit = _FRONT_MEMO.get(_key)
+    if _hit is not None:
+        return _hit
     doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     if skipped:
@@ -1613,7 +1627,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             f"{path}: 用 {lang} 写法写的单元里有 {len(skipped)} 处发不出来"
             f"（前 3 处：{skipped[:3]}）—— 那一门整份是全有或全无，"
             f"翻不出来的部分不会悄悄丢掉，这里直接拒")
-    return FrontUnit(lang, text, True, path)
+    _out = FrontUnit(lang, text, True, path)
+    _FRONT_MEMO[_key] = _out
+    return _out
 
 
 def resolve_lang(path: Path, lang: str = "auto") -> tuple[str, str]:

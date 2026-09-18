@@ -495,6 +495,33 @@ def test_a_dot_lomt_is_never_sniffed_into_another_language():
     print("      `.lomt` 不嗅探（`.py` 那种才按后缀/内容走）；报的是 Loment 自己的错")
 
 
+@test
+def test_load_unit_takes_the_front_door_too_not_just_load():
+    """**唯一入口 `load_unit` 也要过前门** —— 因为**开关预扫**自己读一遍源。
+
+    2026-09-18 **命令行上撞到的**（`lomentc --check`），而编译链那一侧的判据全绿：
+
+        未定义的开关 `write` —— 先写 `set choose write { … }` 定义它
+
+    原因是 `choose` 在 Loment 里**已经是开关关键字**，`choose write` 被读成**取开关 `write`**
+    —— 而预扫（`prescan_switches` 里那个 `scan`）**自己** `read_text` 了一遍，
+    没经过前门。只接 `load` 是不够的。
+
+    ⇒ **这正是 `docs/182` §1.9 那张"读 L1 源的入口"清单的形状：入口不止一处。**
+    所以这条判据钉的是 `load_unit`（那条路**含预扫**），而不是 `load` ——
+    上一条钉的是 `load`，两条加起来才是"整条装载链都过前门"。
+    """
+    python_src = "choose write grammar python\n\ndef entry() -> int:\n    return 42\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "unit.lomt"
+        p.write_text(python_src, encoding="utf-8", newline="\n")
+        mod, deps = lomentc.load_unit(p, ROOT)      # 含预扫那一趟
+        assert [f.name for f in mod.funcs] == ["entry"], \
+            f"预扫那趟没过前门（多半是「未定义的开关 write」）: {[f.name for f in mod.funcs]}"
+    print("      `load_unit`（含**预扫**那趟）也过前门 —— 入口不止一处，两条判据各钉一个")
+
+
 def _ref_find(src: str) -> tuple[bool, str | None, int]:
     """**独立写的参照实现**：按字符走一遍，**一行正则都不用**。
 
