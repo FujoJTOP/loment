@@ -175,6 +175,9 @@ def build() -> tuple[Path, Path]:
           read_tar(tar)["bin/loment-driver"] == driver)
     check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
           "bin/loment-lomelf" in read_tar(tar))
+    # 报错器也要在包里: 启动器在 check/build/run 失败时起它 (docs/182 §6)。它缺席**不报错**
+    # (退回编译器的裸诊断并说明), 所以少了它不会有任何东西红 —— 这条就是补那个缺口的。
+    check("归档里有 lomenterr（报错器）", "bin/lomenterr" in read_tar(tar))
     return tar, zipf
 
 

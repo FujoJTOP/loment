@@ -4,6 +4,7 @@
 #   loment fmt    FILE...          # M55 格式化
 #   loment doc    FILE             # M58 API 文档
 #   loment diag   FILE             # M64 诊断分类 + 修复建议
+#   loment err    诊断.jsonl        # 报错器: 渲染编译器 --diag-out 的结构化诊断 (docs/182 §6)
 #   loment ir     FILE [--objdump] # M60 IR / 机器码
 #   loment test   FILE             # M61 内建测试框架 (test_* 函数)
 #   loment bench  FILE [--n N]     # M62 基准 (Rust 路径 vs IR 路径)
@@ -18,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -66,6 +68,54 @@ def cmd_doc(a) -> int:
 def cmd_diag(a) -> int:
     import loment_diag
     return loment_diag.main([a.file] + (["--json"] if a.json else []))
+
+
+#: 报错器的源码与**已编产物**。产物落在 `loment/build/`（与 stage1 同处）：仓库侧是开发入口，
+#: 包里那一份由 `loment_dist` 从同一条自举链出。
+ERR_SRC = ROOT / "loment" / "tools" / "lomenterr.lomt"
+ERR_EXE = ROOT / "loment" / "build" / ("lomenterr.exe" if sys.platform == "win32"
+                                       else "lomenterr.elf")
+
+
+def build_lomenterr(force: bool = False) -> Path:
+    """编 `loment/tools/lomenterr.lomt` 成本机能跑的可执行文件。**按源码内容哈希判新鲜**
+    —— 不用 mtime: Windows 上时间戳粒度粗, "改完立刻跑"会拿到旧产物, 而那正是最需要对的
+    一刻 (与 lompi「身份是内容哈希」同一条口径)。
+    """
+    import hashlib
+    import lomelf
+    key = hashlib.sha256(ERR_SRC.read_bytes()).hexdigest()
+    # 新鲜度戳**平台无关的名字** —— 从可执行名派生的话, Windows 上是 lomenterr.exe.sha、
+    # Linux 上是 lomenterr.elf.sha, `.gitignore` 就得跟着平台写两遍。
+    stamp = ERR_EXE.parent / "lomenterr.src-sha"
+    if not force and ERR_EXE.exists() and stamp.exists() \
+            and stamp.read_text(encoding="utf-8").strip() == key:
+        return ERR_EXE
+    mod, deps = lomentc.load_unit(ERR_SRC, ROOT)
+    errs = lomentc.check(mod, deps=deps)
+    if errs:
+        raise SystemExit(f"lomenterr.lomt 自己检查不过: {errs[:3]}")
+    ll = lomentc.emit_llvm(mod, ROOT, deps)
+    raw = (lomelf.compile_pe if sys.platform == "win32" else lomelf.compile_ll)(ll)[0]
+    ERR_EXE.parent.mkdir(parents=True, exist_ok=True)
+    # 临时名 + os.replace: 并行门禁里可能有另一个进程正**执行**着这份产物, 直接覆写会撞
+    # PermissionError (loment_dist 的 `_write_shared` 记着同一件事)。
+    tmp = ERR_EXE.with_name(ERR_EXE.name + f".{os.getpid()}.tmp")
+    tmp.write_bytes(raw)
+    os.replace(tmp, ERR_EXE)
+    ERR_EXE.chmod(0o755)
+    stamp.write_text(key, encoding="utf-8")
+    return ERR_EXE
+
+
+def cmd_err(a) -> int:
+    """`loment err 诊断.jsonl` —— 把编译器吐的结构化诊断渲染给人看 (docs/182 §6)。
+
+    **包里的自动渲染在启动器那边** (`bin/loment` / `loment.cmd` 在 check/build/run 失败时
+    自己起 `lomenterr`), 仓库侧这个子命令是同一个程序的开发入口。
+    """
+    exe = build_lomenterr(force=a.rebuild)
+    return subprocess.run([str(exe), a.file], shell=False).returncode
 
 
 def cmd_ir(a) -> int:
@@ -304,6 +354,9 @@ def main(argv: list[str] | None = None) -> int:
     d.set_defaults(fn=cmd_doc)
     g = sub.add_parser("diag"); g.add_argument("file"); g.add_argument("--json", action="store_true")
     g.set_defaults(fn=cmd_diag)
+    e = sub.add_parser("err"); e.add_argument("file")
+    e.add_argument("--rebuild", action="store_true", help="忽略缓存, 重编报错器")
+    e.set_defaults(fn=cmd_err)
     i = sub.add_parser("ir"); i.add_argument("file"); i.add_argument("--objdump", action="store_true")
     i.set_defaults(fn=cmd_ir)
     t = sub.add_parser("test"); t.add_argument("file"); t.set_defaults(fn=cmd_test)

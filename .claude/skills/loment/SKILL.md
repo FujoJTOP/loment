@@ -31,7 +31,7 @@ loment version
 
 | 命令 | 作用 |
 |---|---|
-| `loment check FILE` | 只检查，不产出（诊断打到 stderr） |
+| `loment check FILE` | 只检查，不产出（诊断打到 stderr —— 由报错器 `lomenterr` 渲染，**带标题、源行与修复建议**；见 §9） |
 | `loment ir FILE` | 打印 LLVM IR 到 stdout |
 | `loment build FILE [-o OUT]` | 编成可执行文件 |
 | `loment run FILE` | 编译 + 运行 |
@@ -731,6 +731,10 @@ mkdir -p deps/proc && cp <前缀>/share/loment/lib/proc.lomt deps/proc/
   `use`（不用另行声明）；导出就是 `pub`；可选的 `pkg.lomp` 里只放两个标签 ——
   `pub fn name() -> str` 与 `pub fn version() -> str`（语言没有字符串常量，所以是函数不是 `const`）；
 - `python tools/loment.py diag FILE` —— 把错误码翻译成**中文修复建议**（包内没有这个工具）；
+- `python tools/loment.py err 诊断.jsonl` —— **报错器本体**（`loment/tools/lomenterr.lomt`）：
+  把编译器 `--diag-out PATH` 吐的结构化诊断渲染成带标题/源行/插入符/建议的样子。
+  **包内也有它**，但那条路是**启动器自动起的**（`loment check/build/run` 失败时），
+  不是 `loment err` 子命令 —— 所以这里同时是它的开发入口。见 `docs/182` §6；
 - `loment/examples/` 全部示例（`tour.lomt` 是全语言导览）；`loment/selfhost/` 是
   "用 Loment 写的 Loment 编译器"；
 - 文档：`docs/143`（语言规范）· `docs/146`（能力域形式语义）· `docs/148`（工具链）·

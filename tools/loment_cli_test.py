@@ -396,9 +396,9 @@ def test_doctor_reports_missing_tools_then_green_when_present():
     rc, out, _ = _run(["doctor"] + _no_color())
     assert rc == 1, f"缺驱动时应当退 1, 实得 {rc}"
     assert "MISSING" in out
-    # 把六个名字都补上 (内容无所谓, 只要有这个文件)
+    # 把七个名字都补上 (内容无所谓, 只要有这个文件)
     for n in ("loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
-              "loment-lomelf", "loment-cli"):
+              "loment-lomelf", "loment-cli", "lomenterr"):
         p = _pkg / "bin" / (n + ".exe" if IS_WIN else n)
         if not p.exists():
             p.write_bytes(b"stub")
@@ -431,11 +431,22 @@ def test_examples_and_example_read_the_package():
 # ---------------------------------------------------------------- 参考页
 
 @test
-def test_codes_lists_all_nineteen():
+def test_codes_lists_every_code_in_the_table():
+    """`loment codes` 的每一行都必须来自 `loment_diag` 那张表 —— **一个码都不能少**。
+
+    这一条原先只扫到 E19 (写下它时表就到那儿), 于是 E20-E23 加进来时它照样绿 —— 而它的名字
+    ("all_nineteen") 正是那种会悄悄过期的硬编码。现在迭代**真源本身**: 表里有的码,
+    `loment codes` 里必须都印出来。旧实现手抄 23 条 `codrow`, 加一个码忘了改那边就是
+    "新码凭空消失", 没有任何判据会红 (docs/182 5.2)。
+    """
+    import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    for i in range(1, 20):
-        assert f"E{i} " in out or f"E{i}\n" in out, f"错误码表里没有 E{i}"
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c} " not in out]
+    assert not missing, f"错误码表里没有 E{missing}"
+    # 说明文字也要是表里那一份, 不是另写的
+    for c, desc in loment_diag.ASCII_ONE_LINER.items():
+        assert desc in out, f"E{c} 的说明不是 surface_data 里那一份: {desc!r}"
 
 
 @test
@@ -443,13 +454,16 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for spelling in ("E4", "e4", "4"):
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
-    rc, _, err = _run(["explain", "E99"] + _no_color())
-    assert rc == 2 and "E1..E23" in err, err[:120]
-    # 新增码必须**在表里也在 explain 的接受范围里** —— 两个数字各改一处, 漏一个就红
-    # (E21/E22 是 2026-09-17 加的, 原先上界是 20; E23 同日再加, 上界 22 → 23)
-    for c in ("E21", "E22", "E23"):
-        rc, out, _ = _run(["explain", c] + _no_color())
-        assert rc == 0 and c in out, (c, rc, out[:120])
+    # **上界从真源推导, 不写死**。原先这里写 "E1..E23", 于是每加一个码就得手改这个测试 ——
+    # 漏改时的症状是"判据红了但源码没错"; 而更糟的一种改法是把断言放宽, 从此再也不测边界。
+    # 真实的契约是"explain 接受到表里最后一个码为止", 那就照它测。
+    import loment_diag
+    top = max(loment_diag.ASCII_ONE_LINER)
+    rc, _, err = _run(["explain", f"E{top + 1}"] + _no_color())
+    assert rc == 2, err[:120]
+    for c in (top, top - 1, top - 2):
+        rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
+        assert rc == 0 and f"E{c}" in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 

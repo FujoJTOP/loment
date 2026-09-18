@@ -105,6 +105,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
                  "fuai_contract_check", "loment_eol", "loment_dist_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
+                 # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
+                 "loment_err_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
                  "loment_lompi_test", "lompi_sync", "loment_publish",

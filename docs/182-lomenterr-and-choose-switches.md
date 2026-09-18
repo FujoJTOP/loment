@@ -538,3 +538,72 @@ C2 落地时按那句写下来了，这里把结果记明白。）
 用户定：**三件一起做**（诊断面 + `lomenterr` + 开关面）。
 但 `CLAUDE.md` 的纪律不变：**手写一条提交 + 机械产物一条提交**（种子重生成单独一条）。
 开工顺序按依赖走：诊断 → `lomenterr` → 开关（`lomenterr` 是**第一个**开关，没有它开关面无从验证）。
+
+## 10. `lomenterr` 落地：编译期那一半（2026-09-18）
+
+**范围**：用户 2026-09-18 定"先做编译期报错器"。运行时那一半**推迟**，两个未定的事记在 §10.4。
+
+### 10.1 交了什么
+
+| 件 | 落点 |
+|---|---|
+| **报错器本体** | `loment/tools/lomenterr.lomt` —— `use json` + `use surface_data`；读 JSONL，按 `error[E0NN]: 标题 / --> 文件:行:列 / 源行 / 插入符 / 消息 / 建议` 渲染 |
+| **进包** | `loment_dist.TOOLS` 加一条。名字 **`lomenterr`（无 `loment-` 前缀）**，与 `lompi` 一样是独立命令；`loment help` 里没有它 |
+| **工具链起它** | `bin/loment` 与 `loment.cmd` 的 `ir`/`check`/`build`/`run` 四条路：驱动多给一个 `--diag-out`，失败时把 JSONL 交给它 |
+| **仓库侧入口** | `tools/loment.py` 加 `loment err 诊断.jsonl`（同一个程序的开发入口）。**`loment ir` 的输出不变** —— 自动渲染是**包**那一侧的契约 |
+| **`doctor`** | `lomcli` 的工具表加第 7 项；并且从此**按工具给"缺了会怎样"**（`tool_hint`），不再对每个组件都说同一句"build/run 会坏" —— 对报错器那句是假话 |
+| **`lomcli` 去手抄** | `docs` §5.2 那条欠账还了：24 条 `codrow` 删掉，`codes` 改读 `surface_data.code_ascii`；`explain` 的上界也不再写死 `23` |
+
+**退出码**：`0` = 无诊断 / `1` = 有诊断 / `2` = 用法或读取失败。三个分开，调用方才能分清"你的源码错了"与"报错器自己没起来"。
+
+### 10.2 三条实测出来的细节（都不是猜的）
+
+1. **未知码的判据是"查出来的标题空不空"，不是"码号解没解出来"**。第一版按 `cnum == 0` 判，
+   而一份码 `E042` 能解出数字 42、表里却没有 ⇒ 标题空着、**建议被静默丢掉**。实测的输入
+   （`{"code":"E042"}`）把这条逼出来了。现在标题/建议两边都按**返回值长度**判，
+   未知码明说"这个码不在表面数据表里"。
+2. **`n_codes()` 是条数，不是最大码**。两个消费者拿它当上界用，那只有"码从 1 起连续编号"
+   时才对。第一版 `codes` 循环写 `< n_codes()`，**E23 当场消失**（判据抓到）。
+   这条不变式现在有判据钉着（`loment_tools_test::test_code_tables_cover_the_same_codes`）。
+3. **启动器必须吞掉驱动的 stderr**：实测语义错时自举驱动**既**打裸行到 stderr **又**写 JSONL
+   （`fujoc-s: 静态检查未通过 / E2 @11 line 4: z`）—— 不吞就会把同一件事说两遍。而**装载失败**
+   （文件不存在）只打 stderr、JSONL 是空的 ⇒ 吞掉之后必须原样回吐，否则那条消息就没了。
+   四种组合都有判据（桩驱动，`loment_err_test::test_launcher_renders_with_it_and_says_so_without_it`）。
+
+**如实记的代价**：标题/建议是中文，Windows 控制台按 936 解 UTF-8 ⇒ 乱码（PE 垫片没有
+`WriteConsoleW`，程序侧无从补救，`docs/169` §3a）。诊断这条路上本来就是中文的
+（`loment diag` 与编译器的 `[ERR]` 都是），所以不做特殊处理，也**不**因此把标题换成英文
+—— 那是另一个受众的事，由 `loment codes` 走 `code_ascii` 提供。
+
+### 10.3 两侧一致（`docs/158` §5 的口径）
+
+`cmp` 实测：同一份源，参考实现与自举编出的 `lomenterr` IR **逐字节相同**（205453 字节）；
+自举产物链出来的 exe 跑出的渲染与参考侧一致。`lomcli` 加了 `use surface_data` 之后同样
+逐字节相同（编它的是 stage1，所以这条是**包**能不能编出来的直接证据）。
+
+判据：新增 `tools/loment_err_test.py`（7 条，已进门禁）；`loment_cli_test` 的两条改成
+**从真源推导**（`codes` 扫全部码并核对说明文字、`explain` 的边界从 `max(ASCII_ONE_LINER)`
+算）—— 硬编码 23 那种写法在下一个码加进来时只会静默过期。
+
+### 10.4 运行时那一半：**推迟**，卡在两处未定（不是技术上做不到）
+
+§6 的第二半（同一份源码链进程序、给 trap 渲染、`choose close lomenterr` 决定编不编）**没做**。
+可行性核过是通的 —— PE 垫片有 `GetStdHandle` / `WriteFile`（`lomelf.py:1203-1205` 的
+`PE_IMPORTS`），fd 2 有映射，inline-asm syscall 是既有 IR 构造（`lomelf.py:579-580`）。
+卡住的是两条**设计**，得先定：
+
+1. **官方开关的默认值与现语义冲突**。`choose close lomenterr` 字面上隐含"默认开"，而
+   `SwitchTable.state` 是"没写就是关"（`lomentc.py:772-775`；自举 `switches.lomt:132-152`
+   的 `sw_find` 返 2）。今天**没有**官方开关机制 —— 只有 `std`/`no_std` 被按**字面名**特判
+   （`lomentc.py:758-760`、`:826`、`:993`、`:1175` 等约六处 + 自举三处），没有表可加。
+   另一条路是随包发 `chooseset.lomt`，但**极性反了**（用户得写 `choose lomenterr` 才开），
+   而且同名两个取值本身就是 E022（`switches.lomt:287-307`）。
+2. **同一个 `__loment_abort` blob 就是内核运行时**。`docs/155:70-73` 承诺内核不需要 libc，
+   那三个 `__loment_*` 是 inline 的 ⇒ 在里面**无条件** `write(2, …)` 在内核里是错的。
+   所以带写的那一版必须**受开关控制**才编出来。
+   连锁面：这个 blob 两个实现各一份（`lomentc.py` 的 `_IR_RUNTIME` 与 `codegen.lomt:4254`
+   的 `emit_runtime`）且要逐字节一致；`__loment_abort` 有 **8 个调用点**（Python 4 + 自举 4）；
+   而**开关状态今天到不了 codegen**（`emit_llvm`/`emit_module` 从不读 `mod.switches`，
+   代码裁减只发生在装载器里）—— 那是一类**新的消费者**。
+
+⇒ 这一半要单开一轮，并且开头就得把上面两条定下来。

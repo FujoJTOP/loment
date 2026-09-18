@@ -497,6 +497,11 @@ def test_code_tables_cover_the_same_codes():
     assert ruled == ascii_, (
         f"只在 RULES 里: {sorted(ruled - ascii_)}; 只在 ASCII 表里: {sorted(ascii_ - ruled)}")
     assert 0 not in ruled, "有码解不出数字"
+    # **编码必须从 1 起连续**: `surface_data.n_codes()` 给的是**条数**, 而两个消费者
+    # (`lomcli` 的 `codes`/`explain`, 循环 1..n_codes()) 拿它当**上界**用 —— 那只有在
+    # 连续编号时才等价。留个空号(比如只有 E24 没有 E25)会让两边静默错位。
+    assert ruled == set(range(1, max(ruled) + 1)), (
+        f"码不是连续编号, 缺: {sorted(set(range(1, max(ruled) + 1)) - ruled)}")
     print(f"      两张码表键集相等 ({len(ruled)} 条: E{min(ruled)}–E{max(ruled)})")
 
 

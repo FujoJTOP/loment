@@ -8,7 +8,7 @@
 #                                                           (前两件是确定性字节, 这件不是 —— 见 docs/162)
 #   SHA256SUMS                           上面几件的 sha256
 #
-# 包里**没有 Python**: 七个可执行文件都是自举产物 (种子 → stage1 → IR → 链接), 构建与链接
+# 包里**没有 Python**: 八个可执行文件都是自举产物 (种子 → stage1 → IR → 链接), 构建与链接
 # 都不需要 clang/WSL 才能装。构建期需要 Python 的只有这个打包工具本身 (仓库工具链, 不进包)。
 #
 #   python tools/loment_dist.py --emit                        # 全部（本机原生后端，无 clang/WSL）
@@ -60,6 +60,13 @@ TOOLS: list[tuple[str, str, str]] = [
     # 命令面（help/codes/stat/grep/ls/tree/...）—— 用 Loment 自己写的 CLI 前端。
     # 为什么不在启动器里写: 启动器有两份 (bash + batch), 命令写在那边就得写两遍并保持同步。
     ("loment-cli", "loment/tools/lomcli.lomt", "."),
+    # 报错器 (docs/182 §6): 吃编译器 --diag-out 吐的 JSONL, 查 surface_data 补中文标题与
+    # 修复建议, 渲染成 "error[E0NN]: ... / --> 文件:行 / 源行 / 插入符 / 建议"。
+    # **名字没有 `loment-` 前缀**, 与 lompi 一样是个独立命令 —— 它由启动器起, 不是 `loment`
+    # 的子命令 (`loment help` 里没有它)。为什么它在包里而不是并进驱动: 两个实现的消息文本
+    # 本来就不同, 硬凑"两侧逐字节一致"只会造成假一致, 于是"渲染"归它, 驱动只吐码+位置
+    # (docs/182 §5.3)。
+    ("lomenterr", "loment/tools/lomenterr.lomt", "."),
     # lompi —— Loment 库的包管理器, **不是 Loment 官方工具**(它不编 Loment、不读源码树,
     # 是另一个命令; `loment help` 里不出现它, 见 docs/169 §2)。随包一起装, 因为它是用
     # Loment 写的、由同一条自举链编出来的。源码的**正本在开发者的工作区** (`lompi/` 这份
@@ -119,6 +126,22 @@ find_lomelf() {
     tool loment-lomelf
 }
 
+# Diagnostics. The driver writes its own plain summary to stderr AND, with `--diag-out`,
+# machine-readable records to a file. When the renderer `lomenterr` ships in this package we
+# feed it that file and let ITS output stand (it carries the title, the source line and the
+# fix - docs/182 sec 6). Without it we fall back to the driver's plain lines, and SAY SO:
+# silently swapping the renderer is exactly what this contract forbids.
+report_diags() {
+    dfile=$1; derr=$2
+    if [ -s "$dfile" ] && tool lomenterr >/dev/null 2>&1; then
+        "$(tool lomenterr)" "$dfile"
+        return 0
+    fi
+    [ -s "$derr" ] && cat "$derr" >&2
+    [ -s "$dfile" ] && echo "loment: no lomenterr in this package - showing the compiler's plain diagnostics" >&2
+    return 0
+}
+
 # NOTE: this launcher is packed as ASCII (PowerShell 5.1 reads BOM-less files as ANSI) -
 # keep every comment here in English.
 
@@ -150,10 +173,19 @@ case "${1:-help}" in
     ir|check)
         mode=$1; [ $# -eq 2 ] || { usage >&2; exit 2; }
         need loment-driver loment-driver
+        tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+        rc=0
         if [ "$mode" = ir ]; then
-            exec "$(tool loment-driver)" "$(to_posix "$2")"
+            "$(tool loment-driver)" "$(to_posix "$2")" --diag-out "$tmp/d.jsonl" 2>"$tmp/e.txt" || rc=$?
+        else
+            "$(tool loment-driver)" "$(to_posix "$2")" --diag-out "$tmp/d.jsonl" >/dev/null 2>"$tmp/e.txt" || rc=$?
         fi
-        "$(tool loment-driver)" "$(to_posix "$2")" >/dev/null ;;
+        if [ $rc -ne 0 ]; then
+            report_diags "$tmp/d.jsonl" "$tmp/e.txt"
+            exit 1
+        fi
+        [ -s "$tmp/e.txt" ] && cat "$tmp/e.txt" >&2
+        exit 0 ;;
     fmt)
         [ $# -eq 2 ] || { usage >&2; exit 2; }
         need loment-fmt loment-fmt
@@ -197,7 +229,12 @@ case "${1:-help}" in
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-        "$(tool loment-driver)" "$(to_posix "$src")" > "$tmp/a.ll" || exit 1
+        rc=0
+        "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" > "$tmp/a.ll" 2>"$tmp/e.txt" || rc=$?
+        if [ $rc -ne 0 ]; then
+            report_diags "$tmp/d.jsonl" "$tmp/e.txt"
+            exit 1
+        fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
         # link with the self-hosted lomelf - the package no longer needs clang
@@ -273,13 +310,31 @@ exit /b 0
 
 :ir
 if "%~2"=="" goto usage
-"%here%loment-driver.exe" "%~2"
-exit /b %ERRORLEVEL%
+set "cmode=i"
+goto compile_only
 
 :check
 if "%~2"=="" goto usage
-"%here%loment-driver.exe" "%~2" >nul
-exit /b %ERRORLEVEL%
+set "cmode=c"
+
+:compile_only
+rem Shared by ir and check: compile, and on failure hand the structured diagnostics (and
+rem the driver's own plain output) to :report_diags. NOTE: no parenthesised blocks around
+rem anything that reads %ERRORLEVEL% -- it expands at parse time there.
+set "dtmp=%TEMP%\loment-d%RANDOM%%RANDOM%"
+mkdir "%dtmp%" >nul 2>nul
+if "%cmode%"=="i" goto compile_only_ir
+"%here%loment-driver.exe" "%~2" --diag-out "%dtmp%\d.jsonl" >nul 2>"%dtmp%\e.txt"
+goto compile_only_done
+:compile_only_ir
+"%here%loment-driver.exe" "%~2" --diag-out "%dtmp%\d.jsonl" 2>"%dtmp%\e.txt"
+:compile_only_done
+set "crc=%ERRORLEVEL%"
+if not "%crc%"=="0" call :report_diags "%dtmp%\d.jsonl" "%dtmp%\e.txt"
+if "%crc%"=="0" if exist "%dtmp%\e.txt" type "%dtmp%\e.txt" 1>&2
+del /q "%dtmp%\d.jsonl" "%dtmp%\e.txt" >nul 2>nul
+rmdir "%dtmp%" >nul 2>nul
+exit /b %crc%
 
 :fmt
 if "%~2"=="" goto usage
@@ -354,8 +409,10 @@ if "%bmode%"=="r" goto run_go
 if "%out%"=="" set "out=%src:.lomt=%"
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
-"%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
-if not "%ERRORLEVEL%"=="0" goto fail
+"%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
+set "drc=%ERRORLEVEL%"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt"
+if not "%drc%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
 goto done
@@ -363,8 +420,10 @@ goto done
 :run_go
 set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
-"%here%loment-driver.exe" "%src%" > "%tmp%\a.ll"
-if not "%ERRORLEVEL%"=="0" goto fail
+"%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
+set "drc=%ERRORLEVEL%"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt"
+if not "%drc%"=="0" goto fail
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs%
 if not "%ERRORLEVEL%"=="0" goto fail
 "%tmp%\a.exe"
@@ -385,7 +444,7 @@ rem that as signed -- so `if errorlevel 1` reads it as success, we fall through 
 rem and print "loment: <out>.exe" while nothing was written. Proven 2026-09-15:
 rem `loment build tour.lomt -o tour` exited 0 with no tour.exe on disk.
 :fail
-del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
+del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\d.jsonl" "%tmp%\e.txt" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: failed -- nothing was produced 1>&2
 exit /b 1
@@ -431,6 +490,26 @@ echo   loment lsp                  language server over stdio
 echo   loment skill [--print]      print the AI-agent guide (path, or the whole text)
 echo   loment help [COMMAND]       all commands (the full catalog lives in loment-cli)
 exit /b 2
+
+rem ---------------------------------------------------------------- diagnostics renderer
+rem Reached only via `call`; never fallen into (every label above exits).
+rem %1 = the --diag-out JSONL, %2 = the driver's captured stderr.
+rem
+rem The driver always writes its own plain summary to stderr. When the renderer lomenterr
+rem ships in this package we feed it the records and use ITS output instead (title + source
+rem line + fix, docs/182 6). Without it we show the driver's plain lines AND say so --
+rem silently swapping the renderer is exactly what that contract forbids.
+:report_diags
+set "rf=0"
+if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
+if "%rf%"=="1" if exist "%here%lomenterr.exe" goto report_render
+if exist "%~2" type "%~2" 1>&2
+if "%rf%"=="1" echo loment: no lomenterr in this package - showing the compiler's plain diagnostics 1>&2
+exit /b 0
+
+:report_render
+"%here%lomenterr.exe" "%~1"
+exit /b 0
 '''
 
 INSTALL_SH = r'''#!/bin/sh
@@ -478,7 +557,7 @@ if [ "$uninstall" = 1 ]; then
     fi
     rm -f "$prefix/bin/loment" "$prefix/bin/loment-driver" "$prefix/bin/loment-lsp" \
           "$prefix/bin/loment-fmt" "$prefix/bin/loment-doc" "$prefix/bin/loment-lomelf" \
-          "$prefix/bin/loment-cli" \
+          "$prefix/bin/loment-cli" "$prefix/bin/lomenterr" \
           "$prefix/bin/lompi"
     rm -rf "$prefix/share/loment" "$prefix/share/lompi"
     # only what this installer created -- never ~/.claude/skills or AGENTS.md at large
@@ -1019,7 +1098,7 @@ if "%~1"=="" (
 README_MD = """# Loment {DISPLAY}
 
 版本 `{VERSION}`。这是一份**自包含**的 Loment 工具链发行包：包里**没有 Python**，也
-**不需要 clang、不需要 WSL** —— 七个可执行文件都是自举产物，`build`/`run` 用包内的
+**不需要 clang、不需要 WSL** —— 八个可执行文件都是自举产物，`build`/`run` 用包内的
 `loment-lomelf` 在本机直接出 ELF/PE。构建与安装的全部细节见仓库 `docs/162`。
 
 ## 包内容
@@ -1033,6 +1112,7 @@ README_MD = """# Loment {DISPLAY}
 | `bin/loment` | 启动器（下面那些子命令） |
 | `bin/loment-lomelf` | 链接器：把 `.ll` 变成可执行文件（`build`/`run` 用它） |
 | `bin/loment-cli` | 命令前端：`help` / `codes` / `stat` / `grep` / `ls` / `tree` / …（Loment 自己写的，`loment/tools/lomcli.lomt`） |
+| `bin/lomenterr` | 报错器：吃编译器 `--diag-out` 的 JSONL，补上标题、源行与修复建议（`loment/tools/lomenterr.lomt`，`docs/182`）。**由启动器自动调用**，不是 `loment` 的子命令 |
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，`lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi` |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |

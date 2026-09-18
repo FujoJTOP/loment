@@ -19,6 +19,7 @@ module lomcli
 
 use bytes
 use sha256
+use surface_data
 
 // ---------------------------------------------------------------- 内存布局
 // 单块 brk 内存 + 命名偏移。Loment 没有可变全局也没有 out 参数, 所以跨函数共享的状态
@@ -971,7 +972,19 @@ fn tool_name(i: u32) -> str {
     if i == 5 {
         return "loment-cli";
     }
+    if i == 6 {
+        return "lomenterr";
+    }
     return "";
+}
+
+/// 缺这个组件**具体会怎样**。**不是一句通用的"build/run 会坏"** —— 对报错器那句是假话:
+/// 它缺席只是退回编译器的裸诊断, 编译/链接照样能用 (docs/182 §6 那条"落到内置要说出来")。
+fn tool_hint(i: u32) -> str {
+    if i == 6 {
+        return "-> errors fall back to the compiler's plain lines";
+    }
+    return "-> loment build/run will not work";
 }
 
 fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
@@ -982,7 +995,7 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
     title(mem, 1, "Tools in this package");
     let i: u32 = 0;
     let ok: u32 = 0;
-    while i < 6 {
+    while i < 7 {
         let nm: str = tool_name(i);
         if tool_path(bindir, nm, p, stb) {
             wstr(1, "  ");
@@ -1052,6 +1065,8 @@ fn do_where(mem: ptr, ab: ptr, argc: u32) -> u32 {
         nm = "loment-cli";
     } else if eq_cstr(name, strlen_n(name), "lompi") {
         nm = "lompi";
+    } else if eq_cstr(name, strlen_n(name), "err") {
+        nm = "lomenterr";
     } else {
         return err2_unknown(mem, name);
     }
@@ -1071,7 +1086,7 @@ fn do_where(mem: ptr, ab: ptr, argc: u32) -> u32 {
 fn err2_unknown(mem: ptr, name: ptr) -> u32 {
     err_path(mem, "no such tool: ", name);
     gray(mem, 2);
-    wstr(2, "  driver / lsp / fmt / doc / lomelf / cli");
+    wstr(2, "  driver / lsp / fmt / doc / lomelf / cli / err");
     colr(mem, 2);
     wstr(2, "\n");
     return 2;
@@ -1101,7 +1116,7 @@ fn do_doctor(mem: ptr, ab: ptr, argc: u32) -> u32 {
     title(mem, 1, "Health check");
     let bad: u32 = 0;
     let i: u32 = 0;
-    while i < 6 {
+    while i < 7 {
         let nm: str = tool_name(i);
         if tool_path(bindir, nm, p, stb) {
             wstr(1, "  ");
@@ -1118,7 +1133,7 @@ fn do_doctor(mem: ptr, ab: ptr, argc: u32) -> u32 {
             wstr(1, nm);
             wstr(1, "  ");
             gray(mem, 1);
-            wstr(1, "-> loment build/run will not work");
+            wstr(1, tool_hint(i));
             colr(mem, 1);
             wstr(1, "\n");
             bad = bad + 1;
@@ -1195,10 +1210,24 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 // ---------------------------------------------------------------- 错误码
 
-fn codrow(mem: ptr, fd: u64, code: str, desc: str) {
+/// 一列: `  E22   <ASCII 一行说明>`。码这一列宽 5、左对齐 —— 与旧的手抄 `codrow` 同形,
+/// 只是码由数字拼出来 (表里存的是数, 见 surface_data 的注解)。
+fn codrow_n(mem: ptr, fd: u64, c: u32, desc: str) {
     wstr(fd, "  ");
     yellow(mem, fd);
-    wpad(fd, code, 5);
+    wstr(fd, "E");
+    wdec(mem, fd, c);
+    let d: u32 = 1;
+    let x: u32 = c;
+    while x >= 10 {
+        x = x / 10;
+        d = d + 1;
+    }
+    let k: u32 = 0;
+    while 1 + d + k < 5 {
+        wstr(fd, " ");
+        k = k + 1;
+    }
     colr(mem, fd);
     wstr(fd, desc);
     wstr(fd, "\n");
@@ -1222,29 +1251,18 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "\n    `E2 @13 line 4: x`  -  E2 is E002, @13 is the 13th token.");
     colr(mem, 1);
     wstr(1, "\n\n");
-    codrow(mem, 1, "E1", "type mismatch (return / payload / builtin argument)");
-    codrow(mem, 1, "E2", "something is not declared - usually a missing type annotation or a misspelt name");
-    codrow(mem, 1, "E3", "wrong number of arguments");
-    codrow(mem, 1, "E4", "capability domain problem (undeclared / out of range / duplicate)");
-    codrow(mem, 1, "E5", "used space that an `excluded` declaration put out of bounds");
-    codrow(mem, 1, "E6", "value has been moved");
-    codrow(mem, 1, "E7", "borrow conflict (mutable borrow next to a borrow / two mutable borrows)");
-    codrow(mem, 1, "E8", "match / enum (not exhaustive, duplicate pattern, bad payload binding)");
-    codrow(mem, 1, "E9", "name clashes with a base type / empty struct / empty enum");
-    codrow(mem, 1, "E10", "`?` used where there is no Result or Option");
-    codrow(mem, 1, "E11", "slice mutability (cannot write a read-only slice; the parameter needs `mut`)");
-    codrow(mem, 1, "E12", "dangling reference");
-    codrow(mem, 1, "E13", "duplicate definition / duplicate name");
-    codrow(mem, 1, "E14", "assignment target is not an lvalue");
-    codrow(mem, 1, "E15", "field or index (no such field, missing field, duplicate init, field on a non-struct)");
-    codrow(mem, 1, "E16", "array literal / length does not match the declaration");
-    codrow(mem, 1, "E17", "illegal `as` cast");
-    codrow(mem, 1, "E18", "`use <name>` does not resolve - rename it, add the file, or use the path form");
-    codrow(mem, 1, "E19", "parse error - fix that line as the `line:col` in the message says");
-    codrow(mem, 1, "E20", "more than 300 `use` in one file - split the facade");
-    codrow(mem, 1, "E21", "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only");
-    codrow(mem, 1, "E22", "bad `choose`: written twice, bad mode name, or written in a library");
-    codrow(mem, 1, "E23", "not implemented in this version - a compiler limit, not your code");
+    // **不手抄**: 表在 surface_data (由 tools/loment_diag.py --dump-surface 生成; 唯一真源
+    // 是那里的 RULES + ASCII_ONE_LINER)。这里原先抄了 23 条 `codrow`, 与那份表是同一件事的
+    // 两个副本 —— 而本仓那四个静默 bug 全出自"同一份清单抄第二遍" (docs/179 7.3)。加一个码
+    // 忘了改这里, 表现是"新码在 `loment codes` 里凭空消失", 没有任何判据会红。
+    // 码从 1 起**连续编号** (loment_diag 的 RULES 就是这么给的; 那条不变式有判据钉着,
+    // 见 loment_tools_test 的 test_code_tables_cover_the_same_codes), 所以 n_codes()
+    // 也**就是最后一个码**。
+    let c: u32 = 1;
+    while c <= n_codes() {
+        codrow_n(mem, 1, c, code_ascii(c));
+        c = c + 1;
+    }
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "loment explain E4 for one of them in detail.");
@@ -1283,8 +1301,10 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let a: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
-    if code == 0 || code > 23 {
-        return err_usage(mem, "the code must be E1..E23");
+    // 上界**问 surface_data**, 不写死 —— 写死一个数字就是又一份"同一件事的第二个副本",
+    // 下一个码加进去时它会静默变成错的 (docs/182 5.2)。
+    if code == 0 || code > n_codes() {
+        return err_usage(mem, "explain takes an error code (see `loment codes`)");
     }
     wstr(1, "\n  ");
     yellow(mem, 1);

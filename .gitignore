@@ -79,6 +79,10 @@ ahci_events.txt
 /loment/build/probe_*.lomt
 # lomc.ps1 的产物 (IR/ELF: 每次编译都会变, 按需重建)
 /loment/build/stage1.elf
+# 仓库侧报错器的开发入口 (`loment err`) 编出来的产物与新鲜度戳 (docs/182 §6);
+# Windows 上那个 .exe 已被上面的 `*.exe` 收掉。
+/loment/build/lomenterr.elf
+/loment/build/lomenterr.src-sha
 /loment/build/user_hello.ll
 /loment/build/user_hello.elf
 /loment/build/all_loment.ll
