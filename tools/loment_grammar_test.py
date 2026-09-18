@@ -240,6 +240,37 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
     print("      声明抹成等长空白、行号不动；端到端跑出 42")
 
 
+@test
+def test_the_declaration_word_order_is_the_shared_contract():
+    """**词序是与报错器共享的契约** —— 那三个词和"读到空白或 `;` 为止"。
+
+    `loment/tools/lomenterr.lomt` 的 `decl_lang` 是个**独立的 Loment 程序**：它问不到
+    `potato_from`，只能**逐词**匹配 `choose` / `write` / `grammar`，找不到就**退回嗅探**。
+    所以这条契约破了不会报错，只会**静默失配** —— 症状正是当初补 `decl_lang` 要治的那个：
+
+    > 一份 `choose write grammar python` 的 `.lomt`，**工具链知道是 Python，
+    > 而报错器一个字都不说**。工具链知道、渲染器沉默，是最坏的一种。
+
+    那边有自己的判据（`loment_err_test::test_a_grammar_declaration_beats_content_sniffing`），
+    这边有这一条 —— **两边各钉一条**，所以改哪里都会红。真正合成一处（把这几个词也
+    `--dump-surface` 出去）留给下一版；现在这样已经够"不会静默漂"。
+    """
+    assert potato_from.GRAMMAR_DECL_WORDS == ("choose", "write", "grammar"), (
+        f"词序变了：{potato_from.GRAMMAR_DECL_WORDS}。**改了它就要同时改报错器的 "
+        f"`decl_lang`**（`loment/tools/lomenterr.lomt`），否则它静默退回嗅探。")
+    # 别名那一格的边界**也是契约**：读到空白或 `;` 为止（报错器那处同一刀切法）。
+    # 下面四条把这条边界钉死 —— 尤其 `;` 那条：它同时保证 `c#` 里的 `#` **不是**注释头。
+    for src, want in (
+        ("choose write grammar python;\n", "python"),     # 分号收下（C 系语言的写法）
+        ("choose write grammar python \n", "python"),     # 行尾空白
+        ("choose write grammar c#\n", "csharp"),          # `#` 不是注释头
+        ("choose write grammar python // 说明\n", "python"),
+    ):
+        g, err, declared = potato_from.read_grammar_decl(src)
+        assert (g, err, declared) == (want, None, True), (src, g, err, declared)
+    print("      词序与别名边界（含 `;` 与 `c#`）是与报错器共享的契约，两边各钉一条")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:

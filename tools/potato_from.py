@@ -1394,12 +1394,27 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "rs": "rust", "rust": "rust",
 }
 
+#: **声明的词序**：`choose write grammar <别名>`。
+#:
+#: **这是与报错器共享的一份契约，不是随便三个词。** 报错器是个**独立的 Loment 程序**
+#: （`loment/tools/lomenterr.lomt` 的 `decl_lang`），它问不到 `potato_from`，只能**逐词匹配**
+#: 这三个词；找不到就退回嗅探。所以改这里而那边没跟上，症状是
+#: **"工具链说 python、报错器一个字不说"** —— 那正是补 `decl_lang` 要治的那个病。
+#:
+#: 两边各有一条判据钉着它（这边 `test_the_declaration_word_order_is_the_shared_contract`，
+#: 那边 `test_a_grammar_declaration_beats_content_sniffing`），所以它**不可能悄悄变**。
+#: 真正把两处合成一处的做法（把这几个词也 `--dump-surface` 出去）留给下一版：
+#: 现在两边各钉一条，已经够"不会静默漂"。
+GRAMMAR_DECL_WORDS = ("choose", "write", "grammar")
+
 #: `choose write grammar <别名>`。别名那一格**不收 `;`**（`grammar python;` 也收），
 #: 但**收 `#`** —— `c#` 是个别名，把它当注释头切掉的话那个拼法就用不了了。
-_GRAMMAR_ANY = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar\b", re.M)
-_GRAMMAR_DECL = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar[ \t]+([^\s;]+)", re.M)
+#: （"读到空白或 `;` 为止"这条也是契约的一部分 —— 报错器那边同一处也是这么切的。）
+_GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
+_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"\b", re.M)
+_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"[ \t]+([^\s;]+)", re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*choose[ \t]+write[ \t]+grammar[ \t]+[^\n]*", re.M)
+_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + r"(?:[ \t]+[^\n]*)?", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
