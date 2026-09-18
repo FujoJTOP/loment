@@ -137,6 +137,59 @@ RULES = [
 ]
 
 
+#: 每条码的**一行 ASCII 说明** —— `loment codes` / `loment explain` 用它。
+#:
+#: **为什么是 ASCII 而不是复用 `RULES` 里那份中文标题**: CLI 的输出必须**纯 ASCII**
+#: (`docs/169`; 936 控制台下 UTF-8 中文被按 GBK 解成乱码, 而 PE 垫片没有 `WriteConsoleW`,
+#: 程序侧无法补救)。所以同一件事要两种文字, 这不是重复而是**两个受众**。
+#:
+#: **键是码的数字**(1..23), 不是 `"E001"` 那种串 —— 显示成 `E1` 还是 `E022` 是**呈现层**
+#: 的事, 让它自己格式化。表里只存数, 免得又多一处字符串格式要同步。
+#:
+#: **这份表原先抄在 `loment/tools/lomcli.lomt` 里**(24 条 `codrow`), 与本表是同一件事的
+#: 两份手抄 —— 而本仓对"同一份清单抄第二遍"的判词很硬(`docs/179` §7.3 那四个静默 bug
+#: 全出自这一个原因)。2026-09-17 收拢到这里, 由 `--dump-surface` 生成给自举侧读。
+#:
+#: 与 `RULES` 的**键集必须相等**; 判据 `loment_tools_test::test_code_tables_cover_the_same_codes`。
+ASCII_ONE_LINER: dict[int, str] = {
+    1: "type mismatch (return / payload / builtin argument)",
+    2: "something is not declared - usually a missing type annotation or a misspelt name",
+    3: "wrong number of arguments",
+    4: "capability domain problem (undeclared / out of range / duplicate)",
+    5: "used space that an `excluded` declaration put out of bounds",
+    6: "value has been moved",
+    7: "borrow conflict (mutable borrow next to a borrow / two mutable borrows)",
+    8: "match / enum (not exhaustive, duplicate pattern, bad payload binding)",
+    9: "name clashes with a base type / empty struct / empty enum",
+    10: "`?` used where there is no Result or Option",
+    11: "slice mutability (cannot write a read-only slice; the parameter needs `mut`)",
+    12: "dangling reference",
+    13: "duplicate definition / duplicate name",
+    14: "assignment target is not an lvalue",
+    15: "field or index (no such field, missing field, duplicate init, field on a non-struct)",
+    16: "array literal / length does not match the declaration",
+    17: "illegal `as` cast",
+    18: "`use <name>` does not resolve - rename it, add the file, or use the path form",
+    19: "parse error - fix that line as the `line:col` in the message says",
+    20: "more than 300 `use` in one file - split the facade",
+    21: "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only",
+    22: "bad `choose`: written twice, bad mode name, or written in a library",
+    23: "not implemented in this version - a compiler limit, not your code",
+}
+
+
+def code_num(code: str) -> int:
+    """`"E023"` -> `23`。取不出来就是 0（调用方据此报"未知码"）。"""
+    return int(code[1:]) if len(code) > 1 and code[0] == "E" and code[1:].isdigit() else 0
+
+
+#: `码 -> (码, 中文标题, 中文建议)`，给 `--dump-surface` 用。**从 `RULES` 推导，不另写一份**
+#: —— 又一处"抄第二遍"的诱惑，而这份文件这一节讲的就是别抄。
+RULES_BY_CODE: dict[int, tuple[str, str, str]] = {
+    code_num(c): (c, t, h) for c, _pat, t, h in RULES
+}
+
+
 def classify(msg: str) -> tuple[str, str, str]:
     for code, pat, title, hint in RULES:
         if re.search(pat, msg):
@@ -186,12 +239,74 @@ def diagnose(errs: list[str]) -> list[dict]:
     return out
 
 
+def _lom_str(s: str) -> str:
+    """把一段文字放进 Loment 字符串字面量。**必须转义** —— 标题/建议里既有 `"`（E005 的
+    `excluded "<space>: ..."`）也有 `\\`，不转义就会把生成的文件切坏。"""
+    out = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return '"' + out + '"'
+
+
+def surface_lomt() -> str:
+    """把码表导出成自举侧/报错器能 `use` 的**纯数据**单元（`docs/176` B，`docs/182` §5.2）。
+
+    形状照抄 `win_shim_data`：一个 `module`，按**码**索引的访问器。**不做 str_concat** ——
+    运行时的 bump 堆只有 64 KiB，拼接会撞顶；这里每个访问器各自返回一个字面量，调用方逐条取。
+
+    三条访问器，对应**两个受众**（`docs/182` §5.3）:
+
+      * `code_title` / `code_hint` —— 中文，给**诊断**看（stderr，936 控制台下本就是乱码，
+        与参考实现现状一致）；
+      * `code_ascii` —— 一行 ASCII，给 **CLI** 看（`docs/169` 要求命令输出纯 ASCII）。
+
+    未知码一律返回空串：调用方据此走"未知码"分支，而不是拿到一个看起来正常的默认值。
+    """
+    kinds = (("code_title", lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[1]),
+             ("code_hint", lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[2]),
+             ("code_ascii", lambda c: ASCII_ONE_LINER.get(c, "")))
+    codes = sorted(dict(RULES_BY_CODE))
+    src = [
+        "// surface_data.lomt — 由 `tools/loment_diag.py --dump-surface` 生成，别手改。",
+        "//",
+        "// 码 -> 文字。**唯一真源是 `tools/loment_diag.py` 的 RULES + ASCII_ONE_LINER**，",
+        "// 这里只是它的可读副本（`docs/176` B 那条管线：数据从逻辑里拆出来，自举侧 use 它）。",
+        "//",
+        "// 为什么要生成而不是手抄第二份：`loment/tools/lomcli.lomt` 原先手抄了 24 条 `codrow`，",
+        "// 与 `loment_diag.RULES` 是同一件事的两份 —— 而本仓那四个静默 bug（docs/179 §7.3）",
+        '// 全出自"同一份清单抄第二遍"。',
+        "//",
+        "// 中文与 ASCII **不是重复**：CLI 输出必须纯 ASCII（docs/169，936 控制台下 UTF-8 中文",
+        "// 被按 GBK 解成乱码，PE 垫片没有 WriteConsoleW），诊断那侧本来就是中文。两个受众。",
+        "",
+        "module surface_data",
+        "",
+        f"pub fn n_codes() -> u32 {{ return {len(codes)}; }}",
+        "",
+    ]
+    for fn, get in kinds:
+        src.append(f"pub fn {fn}(c: u32) -> str {{")
+        for c in codes:
+            val = get(c)
+            if val:
+                src.append(f"    if c == {c} {{ return {_lom_str(val)}; }}")
+        src += ['    return "";', "}", ""]
+    return "\n".join(src)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_diag", description="诊断分类 + 修复建议")
-    ap.add_argument("file")
+    ap.add_argument("file", nargs="?")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--lom-root", default=None)
+    ap.add_argument("--dump-surface", metavar="PATH",
+                    help="把码表导出成 Loment 数据单元（给自举侧与报错器 use，docs/182 §5.2）")
     a = ap.parse_args(argv)
+    if a.dump_surface:
+        Path(a.dump_surface).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.dump_surface).write_text(surface_lomt(), encoding="utf-8", newline="\n")
+        print(f"[OK] {a.dump_surface} ({len(ASCII_ONE_LINER)} 条码)")
+        return 0
+    if not a.file:
+        ap.error("需要 FILE，或 --dump-surface PATH")
     root = Path(a.lom_root) if a.lom_root else ROOT
     p = Path(a.file)
     try:

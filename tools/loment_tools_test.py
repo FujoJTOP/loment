@@ -484,6 +484,43 @@ def test_m64_all_reference_messages_are_classified():
 
 
 @test
+def test_code_tables_cover_the_same_codes():
+    """`RULES`（分类）与 `ASCII_ONE_LINER`（CLI 一行式）**键集必须相等**。
+
+    这两张表是同一件事的**两个受众**（中文给人看诊断，ASCII 给 CLI —— CLI 输出必须纯 ASCII，
+    `docs/169`），所以是两份文字、**不是两份清单**。但"加一个码忘了加另一种文字"正是本仓
+    反复撞的那类静默缺口（`docs/179` §7.3），所以键集相等要有判据钉着。
+    """
+    import loment_diag
+    ruled = {loment_diag.code_num(c) for c, _p, _t, _h in loment_diag.RULES}
+    ascii_ = set(loment_diag.ASCII_ONE_LINER)
+    assert ruled == ascii_, (
+        f"只在 RULES 里: {sorted(ruled - ascii_)}; 只在 ASCII 表里: {sorted(ascii_ - ruled)}")
+    assert 0 not in ruled, "有码解不出数字"
+    print(f"      两张码表键集相等 ({len(ruled)} 条: E{min(ruled)}–E{max(ruled)})")
+
+
+@test
+def test_surface_data_is_up_to_date():
+    """`loment/tools/surface_data.lomt` 是**生成物**，必须与重新生成的结果逐字节相同。
+
+    它是 `docs/176` B 那条管线（数据从逻辑里拆出来，自举侧 `use` 它）的第一片，
+    也是 `docs/182` §5.2 消掉"同一份码表抄第二份"的落点。**能藏的前提是可复现** ——
+    判据就是那个前提（同 `loment_seed_test` 那条"种子 == 参考实现的产物"）。
+    """
+    import loment_diag
+    p = ROOT / "loment" / "tools" / "surface_data.lomt"
+    assert p.exists(), f"缺 {p} (python tools/loment_diag.py --dump-surface {p})"
+    want = loment_diag.surface_lomt()
+    got = p.read_text(encoding="utf-8")
+    assert got == want, "surface_data.lomt 过期 (重跑 --dump-surface)"
+    # 生成的**是 Loment 源码**, 所以要能编 —— 转义写错会在这里暴露
+    errs = lomentc.check(lomentc.load(p), deps=[])
+    assert not errs, errs[:3]
+    print(f"      surface_data.lomt 最新且可编译 ({len(want)}B)")
+
+
+@test
 def test_m64_structured_diagnostics_are_jsonl():
     """`--diag-out` 吐的是**一行一条 JSON**，字段齐全，且**两条报错通道都走同一条路**。
 
