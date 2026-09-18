@@ -15,19 +15,19 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "741333c6eb7abb1a735b62845c4fb92cd5ba788c5632bd44f734f878976c8c1d"
+   "sha256": "405403a0849d1e365e9819fb4945d89797f7f9401db580cb8cacf90490ec829c"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "7145893c7421d28accc1e2a05fa1720b452d9bce9eb8da1ef31551472a99fc52"
+   "sha256": "5f584f9454fb6d7fe2bd7786ec53e88178fde4383ca0956aac83b386a98442fd"
   },
   {
    "path": "tools/potato.py",
-   "sha256": "a09d6c32849cec36b40a65301e4df918c719eee98c413ff74cf0b47f163478ba"
+   "sha256": "8882f3bb73572f43ae124c82afb7bfde919d910cc066a44c47e0d65f27e57a18"
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "b70a9748f3eb8c5256d0d912056175a661ae2fc1bc7b3870b22ce408ca8cb402"
+   "sha256": "224b5d139e18e134984dde9915528d8ae4a10ed7982b0665e2fbbc152346f85f"
   },
   {
    "path": "tools/potato_cross.py",
@@ -55,7 +55,7 @@
   },
   {
    "path": "tools/lomfmt.py",
-   "sha256": "eeda6dc3681555bd8bbc24132bfccf054bb21c931a18e19409c78d23108576ed"
+   "sha256": "cf9c31941415d50ed65c977d046e2ce9733b8df35728b0c9c9a98d5037647000"
   },
   {
    "path": "tools/lomdoc.py",
@@ -679,7 +679,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "72bc8d68e80522622cc9850c4b02a2723ae04c5381783ab332e2693b2f186c46"
+   "sha256": "c99572dd80732bc6bf8cca35476bbd26b97a10dacf9bc4307992afdc72ee93ef"
   },
   {
    "path": "tools/loment_build.py",
@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_lsp.py",
-   "sha256": "aed1a80a9ba61b9a6f890f550ec4783740af9e6f997772fcc4284a63d756425b"
+   "sha256": "a37f8ce348f5ddb6afda46e60dd50447ac5688fa1bc312aa42d09a7e5e961d78"
   },
   {
    "path": "tools/loment_tools_test.py",
@@ -703,7 +703,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "993977ac785d6acef9a6cc6c73241464067748c168d25fc4b3f8c670d862e6c2"
+   "sha256": "e72c3ed070d5f74cc40eb07cc68196b0d392031bfd410bb70d9d4c35f0bc949f"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -739,7 +739,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "0af1c03711dab57a959980152761d3fefca273506a4a88b1dc2303fd0f4517f9"
+   "sha256": "64ded64af3349c0487d45c304cce6fde6e2201b7b61552fc734db2193ee7d62d"
   },
   {
    "path": "tools/loment_seed.py",
@@ -835,7 +835,7 @@
   },
   {
    "path": "tools/loment_lsp_test.py",
-   "sha256": "ee70ed31b9887e8ff9ace1064d82924ea605f16122f61089d8732240cdc09ef7"
+   "sha256": "96aa48f34090b05705650f3bbf237bdde2fe9509d5309ac52dbf475e6ec626b3"
   },
   {
    "path": "tools/loment_editors_test.py",
@@ -903,7 +903,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "3a5ada3ea8fa450ba139e1a9e30af42c4fdf69dcb656c291b5baf9437f96ad9c"
+   "sha256": "b296bca2a20c625124a6eb1ade009098722cfa430b5d89a50f314eb0432d64cf"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -923,7 +923,7 @@
   },
   {
    "path": "loment/tools/lomdoc.lomt",
-   "sha256": "91eb41f76ca5293e32292f34b058818af2b484c55b8e34e402948c2323a5fa31"
+   "sha256": "09f687acb3b67464b1e8f770c7b0f53065661f7c0427b7ae99d4f41a2dd84bcd"
   },
   {
    "path": "loment/tools/lomelf.lomt",
@@ -931,7 +931,7 @@
   },
   {
    "path": "loment/tools/lomfmt.lomt",
-   "sha256": "45a02d29048857881a53b1407896a61a992686f817e813d5d5629bc2f8cf535c"
+   "sha256": "9fafa5121a619cda4269e31a7e7c4eb65fcab1ee5c1f73ba76a37455183154b9"
   },
   {
    "path": "loment/tools/lomlib.lomt",
@@ -951,11 +951,11 @@
   },
   {
    "path": "loment/tools/lsp.lomt",
-   "sha256": "570d2a1d13c130b60cddd66fcf385418999eeb84d105b3c81d2ac316686bb72d"
+   "sha256": "8dcaa58b5a26bf0b2d272c50838ada146fa12de5ec24a75b8e4dd60646382106"
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "6fb9e9c6cd28a5959c45354790a4f2f8f8fafe486568ca898586b9ff6950d8e1"
+   "sha256": "817b7577e2132f8137ced608a98206446ecf48bd4bbfaa7b23760f127b86c6ff"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1094,6 +1094,10 @@
    "sha256": "8ce117302b1721efb39e1159f2f56c8f28b0ba958b7316ee591ebf471de117bb"
   },
   {
+   "path": "loment/examples/switch.lomt",
+   "sha256": "2cd2b2da619bf2650e812ad973bfe0b40fd8756b45caaa1f40c127ac2c72dae3"
+  },
+  {
    "path": "loment/examples/toolchain.lomt",
    "sha256": "ee5de562c2db4fd0e6369bb85ad94d082301134f54236d4f7d604d24ca579a29"
   },
@@ -1107,7 +1111,7 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "820c0a4d910bbbb41c7c28dc3e9f662ef7e5c0cf3d625b13343dc8de62256d9a"
+   "sha256": "8a3600c6c47dbff1dbcf05e0e8c4dfa2db9d0dff661a89b2085f19dc831bcaa5"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
@@ -1115,7 +1119,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "8ce98f672347e2eaa2df2c6e99adbe6aa0132e419c8ebf556d5dbdc14939684c"
+   "sha256": "f7265501df17e7d252bcf28dc9c63a94fed2ade7b313ce2bc7ae31173870b720"
   },
   {
    "path": "loment/selfhost/ir_builtin.lomt",
@@ -1164,6 +1168,10 @@
   {
    "path": "loment/selfhost/parser.lomt",
    "sha256": "37cbbf734c61205cbe585bebf9e52bce3a234cede36638e2f5154e2d5bd727d8"
+  },
+  {
+   "path": "loment/selfhost/switches.lomt",
+   "sha256": "900bd0869187d11d613e929cce90c5c5bf1e42a3132c711be9cbef8a3b9a7e8f"
   },
   {
    "path": "loment/corpus.json",
@@ -1347,7 +1355,7 @@
   },
   {
    "path": "docs/182-lomenterr-and-choose-switches.md",
-   "sha256": "4a7806e28cd075286d07c6386d8ec87ba364e4c5780f24c147315e5a6e8f83ab"
+   "sha256": "34188f46db0c4db954de1e11fa30f3e11ebd1ea87303b46d83ffb066b2576d38"
   },
   {
    "path": "docs/183-loment-library-vertical.md",
@@ -1355,7 +1363,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "2fd9ef8f0a82a21a489fa44ad5913cc7077180314aa030ea7093543dadbf3050"
+   "sha256": "f1311440f6259d7a65b72c85bf0f17204d171c9da8aea135ec1376b413d76f1a"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -1456,6 +1464,10 @@
   {
    "path": "docs/manual/api/selfcheck.md",
    "sha256": "e683876e51c30609532a955ea4ba60719ea3d0b067ec9dea949301c2c63a2e19"
+  },
+  {
+   "path": "docs/manual/api/switch.md",
+   "sha256": "20a9dbe497b878119855ef703ca516708ea02eb3f36cf1938a1e4936297b6ec3"
   },
   {
    "path": "docs/manual/api/toolchain.md",
