@@ -365,6 +365,7 @@ Loment 现在还在高频改（`lomentc.py` 两天九次），**这个阶段的�
 | **S4.0 修正二** | ✅ | arena 上界分歧；`CT_HEAP_BYTES` + `ct_run(src, n, out, heap)`（§7 墙 ①b 的出路 1）落进两侧；`loment_ct_test` 8/8 |
 | **S4.1 参考侧** | ✅ **完成** | `tools/loment_comefor.py`（token 层展开）+ 四个内建 + 最小方言演示对；`loment_comefor_test` 6/6，**核心那条是"方言源与手写展开源 IR 逐字节相同"**（`docs/184` §9 的证伪判据）；`lomc.Tok` 补 `off`/`len`；`lomentc.load` 里挂在 `_apply_switches` **之后** |
 | **S4.1 自举侧** | ✅ **完成** | `loment/selfhost/comefor.lomt`（镜像）+ `interp` 的 `ct_call_toks` 入口 + 四个 `ct_*` 内建；`loment/comefor/*.lomt` 进了 `loment_p8_test` 的语料 ⇒ 「自举驱动的产物与参考逐字节相同」那条判据把方言源一起兜住 |
+| **S4.2** | ✅ **完成**（比 §5 估的便宜得多） | §5.1：域**不需要扩展既有语义** —— 它就是内建表。判据 `test_domain_is_the_builtin_table`（`syscall4` / 开文件 写在宏体里 → 拒；`alloc` → 过），加语料 `loment/ct/nobuiltin.lomt`（**两侧**都跑）。顺手修掉一处一直存在的两边不一致：参考侧的种类名里嵌着细节（`nobuiltin:syscall4`），自举侧的码表给不出 —— 现取"种类纯粹"，名字归消息 |
 
 ### S4.1 自举侧落地时撞到的四处（都记着，别重犯）
 

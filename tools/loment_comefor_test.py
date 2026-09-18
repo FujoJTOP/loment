@@ -217,6 +217,47 @@ def test_entry_takes_no_params():
     raise AssertionError("`fn main` 带形参应当报错，实际过了")
 
 
+@test
+def test_domain_is_the_builtin_table():
+    """宏体里**表外的名字调不到** —— 这就是"编译期域"（`docs/184` §5.1，S4.2 的证伪判据）。
+
+    `docs/184` §9 给 S4.2 定的判据是"`syscall4` 写在宏体里 -> **被拒**"。这条钉它。
+
+    **域不是新加的一层**：两个解释器都只有**一张固定内建表**，表外的名字不是"被检查
+    出来"，是**根本不存在**。所以 §5 原来担心的"宏体能不能 syscall / 能不能开文件"
+    在这一版是**调不到**。
+
+    这条的价值在于**它会拦住"内建表被顺手加宽"**：哪天真让 `syscall4` 可用了，
+    这里当场红 —— 而那是**换了一个安全模型**，得有人明确决定，不能顺手带进来。
+    """
+    # 同一个体，换掉那一个名字：`alloc` 在内建表里（过），`syscall4` 不在（拒）。
+    def body(call: str) -> str:
+        return ("module dom\n"
+                "comefor let \"d\" to {\n"
+                "    fn main() -> u64 {\n"
+                f"        let x: u64 = {call};\n"
+                "        return x;\n"
+                "    }\n"
+                "}\n"
+                "d 1 ;\n"
+                "fn main() -> u64 { return 0; }\n"
+                "byuse \"d\" done\n")
+
+    ok = loment_comefor.expand(lomc.lex(body("alloc(16) as u64")), body("alloc(16) as u64"))
+    assert ok, "在表里的内建应当跑得通"
+    for call, why in (("syscall4(60, 0 as u64, 0 as u64, 0 as u64)", "起进程/退出"),
+                      ("open(1) as u64", "开文件")):
+        txt = body(call)
+        try:
+            loment_comefor.expand(lomc.lex(txt), txt)
+        except lomc.LomError as e:
+            assert "nobuiltin" in str(e), (call, e)
+            continue
+        raise AssertionError(f"{call}（{why}）不该在宏体里可用 —— 它不在内建表里，"
+                             f"而这张表**就是**编译期域（`docs/184` §5.1）")
+    print("      域 = 内建表: 表外的名字调不到（syscall / 开文件）")
+
+
 def main() -> int:
     failed: list[str] = []
     for name, fn in TESTS:

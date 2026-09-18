@@ -148,7 +148,7 @@ class Interp:
             if i < 0 or i >= len(a):
                 raise InterpError("oob", e.line)
             return a[i]
-        raise InterpError(f"unsupported:{t}", getattr(e, "line", 0))
+        raise InterpError("unsupported", getattr(e, "line", 0))
 
     def _bin(self, e, env: dict):
         op = e.op
@@ -198,7 +198,7 @@ class Interp:
             return 1 if a > b else 0
         if op == ">=":
             return 1 if a >= b else 0
-        raise InterpError(f"badop:{op}", e.line)
+        raise InterpError("badop", e.line)
 
     # ---------------------------------------------------------------- 调用
     def _call(self, e, env: dict):
@@ -212,6 +212,18 @@ class Interp:
         args = [self.ev(a, env) for a in e.args]
         return self._builtin(n, args, e.line)
 
+    #: **错误的"种类"里不带细节。**
+    #:
+    #: 原先这里是 `f"nobuiltin:{n}"`（还有 `unsupported:{t}` / `badop:{op}` /
+    #: `unsupported-stmt:{t}`）—— 名字嵌在种类里。S4.0 的语料走不到这些路径，所以
+    #: "两个解释器连错误的种类都要一致"一直是绿的。**S4.2 一钉域就撞上**：
+    #: 自举侧的 `err_name` 是一张**定长码表**（`E_NOBLTIN -> "nobuiltin"`），
+    #: 它没法在种类里塞一个名字，于是同一次失败两边给出 `nobuiltin:syscall4` 与
+    #: `nobuiltin`。
+    #:
+    #: 取"种类是纯粹的"：`docs/184` §3 那条契约说的是**种类**一致，不是消息一致；
+    #: 名字是**消息**的一部分，属于诊断层（那一层两边本来就允许不同，见 §4）。
+    #: `loment/ct/nobuiltin.lomt` 钉住这一条。
     def _builtin(self, n: str, a: list, line: int):
         if n == "alloc":
             return self._alloc(_u(a[0]))
@@ -251,7 +263,7 @@ class Interp:
         if n == "str_ptr":
             # `str` 在宿主内存里没有实体 —— 返回 0，两个实现同规则。
             return 0
-        raise InterpError(f"nobuiltin:{n}", line)
+        raise InterpError("nobuiltin", line)
 
     def call_fn(self, f, args: list):
         # **显式深度上限**，不靠 Python 的 `RecursionError` —— 那个上限是实现细节（默认 1000
@@ -327,7 +339,7 @@ class Interp:
         if t == "ExprStmt":
             self.ev(s.expr, env)
             return
-        raise InterpError(f"unsupported-stmt:{t}", getattr(s, "line", 0))
+        raise InterpError("unsupported", getattr(s, "line", 0))
 
 
 #: 循环上限 —— 两个实现同值。宏体不该长跑；跑飞了要**报出来**，不是挂着。
