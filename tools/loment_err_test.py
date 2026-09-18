@@ -487,6 +487,16 @@ def test_a_malformed_declaration_is_not_honoured():
         out = probe(line + "\n" + "y = 1" + "\n")
         assert "据文件头" not in out, f"畸形声明被当成了声明: {line!r}\n{out[-300:]!r}"
 
+    # **第三词后面的分隔符类** —— 这一类是对端用**枚举**抓到的（手挑挑不出 `#` `.` `:`
+    # 插在第三词后面）。他们那边原先用 ``，`#` 算"词边界"于是判成"头成立、别名没写"；
+    # 我这条刀要求"空白 / `;` / 行尾"，判成"根本没有声明"。**两边对同一份源说不同的话**
+    # ——两边都编得过，所以只有枚举能把它们摆到一起。现在两边同一条规矩，这里把它钉住。
+    for sep in ("#", ".", ":", ",", "-", "_", "(", "!", "=", "@", "'", '"'):
+        body = "choose write grammar" + sep + "python" + "\n" + "y = 1" + "\n"
+        out = probe(body)
+        assert "据文件头" not in out, (
+            f"第三词后接 {sep!r} 被当成了声明: {out[-300:]!r}")
+
     # **良构**：必须说"据文件头"（含允许的写法：分号收尾、别名后跟说明）
     wellformed = ["choose write grammar python",
                   "  choose	write  grammar	python",
@@ -496,7 +506,8 @@ def test_a_malformed_declaration_is_not_honoured():
         out = probe(line + "\n" + "y = 1" + "\n")
         assert "像 Python" in out and "据文件头" in out, (
             f"良构声明没被认: {line!r}\n{out[-300:]!r}")
-    print("      声明的词边界: 6 种畸形都不认，4 种良构都认（含注释里那句不认）")
+    print("      声明的词边界: 6 种畸形 + 12 种分隔符都不认；4 种良构都认"
+          "（含注释里那句不认）")
 
 @test
 def test_a_superset_language_is_not_reported_as_its_subset():
