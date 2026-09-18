@@ -742,6 +742,8 @@ def test_summary_groups_by_code_worst_first():
     而按出现顺序一条条修会白改八次。所以**顺序本身是被判的**（不是"反正都印出来了"）。
 
     汇总只在**给人看**的两个模式下打（`--json` 不打，那会让下游解析器当场坏掉）。
+    它后面还跟着 `more: loment explain ...`（`docs/191` §3 #4），所以这里**按内容找**那一行，
+    而不是"取最后一行" —— 那种取法在尾巴上加一行就会静默失准。
     """
     with tempfile.TemporaryDirectory(prefix="lomenterr-sum-") as td:
         src = Path(td) / "bad.lomt"
@@ -756,8 +758,8 @@ def test_summary_groups_by_code_worst_first():
                      encoding="utf-8", newline="\n")
         rc, out = _render(d)
     assert rc == 1, (rc, out[:200])
-    tail = [ln for ln in out.strip().splitlines() if ln.strip()][-1]
-    assert tail == "4 errors: E019 x3, E002 x1", f"汇总行不对: {tail!r}"
+    summ = [ln for ln in out.splitlines() if ln.startswith("4 errors:")]
+    assert summ == ["4 errors: E019 x3, E002 x1"], f"汇总行不对: {summ!r}"
     print("      汇总按码分组、条数多的先出 (4 errors: E019 x3, E002 x1)")
 
 
@@ -767,10 +769,12 @@ def test_summary_groups_by_code_worst_first():
 def test_short_mode_is_one_line_per_diagnostic():
     """`--short`: **一行一条**，`文件:行:列: error[码]: 消息`，而且**顺带关色**。
 
-    形状照抄 GCC / clang 那一族，编辑器与 CI 不用任何配置就认得。三个断言各挡一种退化：
-    * 行数 = 诊断数（多一行少一行，"一行一条"这个承诺就破了）；
+    形状照抄 GCC / clang 那一族，编辑器与 CI 不用任何配置就认得。四个断言各挡一种退化：
+    * **前 N 行** = N 条诊断（多一行少一行，"一行一条"这个承诺就破了）；
     * 一条诊断里的换行**折成空格**（不折的话一条会变两三行 —— 同一个承诺的另一种破法）；
-    * **没有转义字节**（`--short` 不带 `--no-color` 也不该上色：管道里要的是能 grep 的行）。
+    * **没有转义字节**（`--short` 不带 `--no-color` 也不该上色：管道里要的是能 grep 的行）；
+    * 尾巴那两行（汇总 + `more:`）**不能挤进诊断区** —— 所以这里按"前 N 行"判，
+      而不是"总共就 N 行"：断言一改，往尾巴上加东西就会红，而尾巴本来就该能加东西。
     """
     with tempfile.TemporaryDirectory(prefix="lomenterr-short-") as td:
         src = Path(td) / "bad.lomt"
@@ -787,9 +791,10 @@ def test_short_mode_is_one_line_per_diagnostic():
     # col=0 是"编译器只给了行号"（check() 的语义错就是这样），那时不该硬编一个列出来
     assert lines[1] == "b.lomt:9: error[E019]: z", f"没列时不该印列: {lines[1]!r}"
     assert lines[2] == "2 errors: E002 x1, E019 x1", f"短模式不给汇总: {lines[2]!r}"
-    assert len(lines) == 3, f"一行一条: 3 行, 得到 {len(lines)} 行: {out!r}"
+    assert lines[3] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[3]!r}"
+    assert len(lines) == 4, f"两条诊断 + 汇总 + 指针 = 4 行, 得到 {len(lines)} 行: {out!r}"
     assert "\x1b" not in out, f"--short 不该上色 (管道里要能 grep): {out[:120]!r}"
-    print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总")
+    print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总与 explain 指针")
 
 
 @test
@@ -833,44 +838,110 @@ def test_json_mode_carries_the_whole_card_and_parses():
 # ---------------------------------------------------------------- 拼写建议 (§14)
 
 @test
-def test_did_you_mean_only_when_it_is_the_only_candidate():
-    """E002 的"你是不是想写 X"：**只有一个近候选时才说**。
+def test_the_help_block_prints_the_fixed_line():
+    """**唯一**近候选时，印出**改好的那一行**（rustc 的 `help:` 就是这么做的）。
 
-    三条门槛都判：说得出、说不准就不说（**两个一样近的并列**）、差得远也不说。
-    中段那条是本条判据的重点 —— 说错一个名字比不说坏得多：用户会**照着它改**，
-    那是把一份本来能编的代码改坏。所以"宁可不猜"必须是被动过的代码路径，不是注释里的一句话。
+    这条判据在 2026-09-18 换过一次契约：原先只印一句 `did you mean X (declared at line N)`，
+    现在印出**整行改好的源码**。理由：一句"你是不是想写 X"要求人在脑子里做替换，
+    **而替换正是最容易再错一次的地方**；给一行能直接抄的，就没有第二次机会出错
+    （`docs/191` §3 #1，抄自 rustc 的 `help:` 块）。
+
+    夹具走的是**真编译器**（`lomentc --check --diag-out`），不是手写的 JSONL ——
+    手写的消息比真消息干净，会漏掉真消息尾巴上那句 `（跨模块调用需要 pub）`，
+    而那句曾经把线索带偏（见 `test_the_hint_ignores_the_compilers_trailing_note`）。
     """
-    # 三个声明，各有各的用处：`leftover_count` 是唯一近候选（第 7 行），
-    # `alpha_count` / `beta_count` 互为并列（对 `gama_count` 都是差一个字符）。
     src = ("module m\n\n"
-           "fn alpha_count() -> u32 { return 0; }\n\n"
-           "fn beta_count() -> u32 { return 0; }\n\n"
            "fn leftover_count() -> u32 { return 0; }\n\n"
-           "fn _start() -> u32 { return 0; }\n")
-    with tempfile.TemporaryDirectory(prefix="lomenterr-sug-") as td:
-        f = Path(td) / "m.lomt"
-        f.write_text(src, encoding="utf-8", newline="\n")
+           "fn _start() {\n"
+           "    let a: u32 = leftove_count();\n"
+           "}\n")
+    f, d = _check(src)
+    del f
+    rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    assert "help: a function with a similar name exists" in out, f"没给 help 块: {out[-400:]!r}"
+    # 改好的那一行：名字被换掉，而**同一行别的字一个不动**
+    assert "let a: u32 = leftover_count();" in out, f"没印出改好的那一行: {out[-400:]!r}"
+    assert "leftove_count();" not in out.split("help:")[-1], "改好的行里还是错的那个名字"
+    # 插入符点在**新**名字上，长度 = 新名字的长度
+    fixline = [ln for ln in out.splitlines() if "leftover_count();" in ln][-1]
+    caret = out.splitlines()[out.splitlines().index(fixline) + 1]
+    assert caret.count("^") == len("leftover_count"), f"插入符长度不对: {caret!r}"
+    print("      help 块: 印出改好的那一行 + 新名字下的插入符")
 
-        def render(msg: str) -> str:
-            d = Path(td) / "d.jsonl"
-            d.write_text(json.dumps({"file": str(f), "line": 7, "col": 10, "code": "E002",
-                                     "message": msg}) + "\n",
-                         encoding="utf-8", newline="\n")
-            rc, out = _render(d)
-            assert rc == 1, (rc, out[:200])
-            return out
 
-        # 唯一近候选: `leftover_count`(第 7 行声明)
-        one = render("call to undeclared function leftove_count")
-        assert "did you mean" in one and "`leftover_count`" in one, one[-300:]
-        assert "declared at line 7" in one, f"没给出跳转线索: {one[-300:]!r}"
-        # **并列**: alpha_count 与 beta_count 都只差一个字符 → 不猜
-        tie = render("call to undeclared function gama_count")
-        assert "did you mean" not in tie, f"并列了还敢猜: {tie[-300:]!r}"
-        # 差得远: 与任何名字都不像 → 不猜
-        far = render("call to undeclared function something_else_entirely")
-        assert "did you mean" not in far, f"差得远也猜: {far[-300:]!r}"
-    print("      拼写建议: 唯一近候选才说 (并列/差得远都不说)")
+@test
+def test_ties_list_candidates_with_kind_and_line():
+    """**并列**时不再闭嘴：列出来，每条带**种类**与**行号**。
+
+    这条判据也在 2026-09-18 换过契约（与上一条同一轮，方向相反）：原先并列就**什么都不说**
+    —— 那是我在没有更好的办法时的保守（说错一个名字，用户会照着它改）。抄了 Ruby 的
+    `Did you mean?` 列表与 rustc 的 "a local variable with a similar name exists" 之后
+    看清了：**闭嘴与抛硬币之间还有第三档** —— 列出来让用户挑，并说清每个候选**是什么**、
+    **在哪一行**。那既不猜，也不把"有两个可能"这个事实瞒掉。
+
+    子代理实测 8 门语言，**没有一门**为拼错给出多个候选、更没一门把候选按种类标出来
+    （`docs/191` §2 第一条）。所以这一格是照**引述里的 Ruby** 抄的，而不是照实测的那几门。
+
+    差得远的那一档仍然**什么都不说** —— 那条没变，也不该变。
+    """
+    src = ("module m\n\n"
+           "fn sum_total1() -> u32 { return 0; }\n\n"
+           "fn sum_total2() -> u32 { return 0; }\n\n"
+           "fn _start() {\n"
+           "    let a: u32 = sum_totalz();\n"
+           "}\n")
+    f, d = _check(src)
+    del f
+    rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    assert "help: names that are close:" in out, f"并列没列候选: {out[-400:]!r}"
+    assert "`sum_total1` (a function, line 3)" in out, f"候选缺种类/行号: {out[-400:]!r}"
+    assert "`sum_total2` (a function, line 5)" in out, f"候选缺种类/行号: {out[-400:]!r}"
+    # 并列时**不给**改好的那一行（指不准改哪一处，就不给一个看着像答案的东西）
+    assert "let a: u32 = sum_total1();" not in out, f"并列却给了唯一答案: {out[-400:]!r}"
+
+    # 差得远: 一个都不像 → 仍然一声不吭
+    src2 = "module m\n\nfn _start() {\n    let a: u32 = nothing_like_this_at_all();\n}\n"
+    _, d2 = _check(src2)
+    _, out2 = _render(d2)
+    assert "help:" not in out2, f"差得远也吭声: {out2[-400:]!r}"
+    print("      并列: 列候选（带种类与行号）且不给唯一答案; 差得远仍不说话")
+
+
+@test
+def test_the_hint_ignores_the_compilers_trailing_note():
+    """线索取自**源文件**，不是"消息里最后一个词" —— 这是实测逼出来的一个真 bug。
+
+    真消息长这样：`10: 调用未定义的函数 leftove_count（跨模块调用需要 pub）`。
+    原先取"最后一个长度 >= 2 的词"，取到的是 **`pub`**（括号里那句提示文字的末尾），
+    于是**插入符划到了 `pub`、拼写建议去查 `pub` 的邻居** —— 而这一条说的明明是
+    `leftove_count`。（夹具比真东西干净：手写的消息没有那条尾巴，所以它测的是一个
+    不会发生的输入。这一条判据因此改用**真诊断**。）
+
+    修法不是维护一张"消息里的噪声词"表（那是同一份清单抄第二遍，编译器改一次措辞就过期），
+    而是**拿源文件当裁判**：从消息末尾往前找第一个"在源文件里整词恰好出现一次"的词。
+    """
+    src = ("module m\n\n"
+           "fn leftover_count() -> u32 { return 0; }\n\n"
+           "fn _start() {\n"
+           "    let a: u32 = leftove_count();\n"
+           "}\n")
+    f, d = _check(src)
+    del f
+    rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    # 真消息里确实有那句尾巴（否则这条判据就没在测它）
+    assert "需要 pub" in out, f"夹具或编译器变了 —— 消息里没有那句尾巴: {out[:400]!r}"
+    # 插入符必须落在 leftove_count 上（13 个字符），不是 pub（3 个）
+    srcline = [ln for ln in out.splitlines() if "leftove_count();" in ln
+               and "help" not in ln and "let a" in ln]
+    assert srcline, f"没印出那一行: {out[:400]!r}"
+    caret = out.splitlines()[out.splitlines().index(srcline[0]) + 1]
+    assert caret.count("^") == len("leftove_count"), (
+        f"插入符没落在那个名字上（落在 pub 上就是旧 bug 回来了）: {caret!r}")
+    assert "help: a function with a similar name exists" in out, "建议也没了"
+    print("      线索取自源文件 (真诊断尾巴上的 pub 不再把插入符带偏)")
 
 
 # ---------------------------------------------------------------- E018 的候选 (§15)
@@ -886,18 +957,18 @@ def test_e018_lists_what_is_actually_in_deps():
     工作目录就是"项目根"（`use` 的第 1 层从这里找），所以要 `_run_in` 指定 cwd ——
     这也顺带钉住"项目根 = 工作目录"这条约定。
 
-    **线索取自 `msg_hint`**（消息里最后一个"词"），与插入符用的是同一个启发式 ——
-    所以夹具的消息要写成**编译器真会写的那种**：中文包着名字（`名字导入找不到模块 util`）。
-    写成英文自然句（`... module util for use`）时最后一个词是 `use`，
-    那会去 `deps/` 里找一个叫 `use` 的东西 —— 而这恰好说明这条判据**咬得住**那个启发式，
-    所以这里也顺手把这条依赖写在判据里，而不是让它藏在渲染器里。
+    **线索取自源文件**（`msg_hint`：消息里第一个"在本文件里整词恰好出现一次"的词），
+    所以夹具的源里得**真的有那一行 `use util`** —— 这也正是真实情形：那一行就是
+    E018 的现场。这一点是 2026-09-18 随 `msg_hint` 一起改的：先前"取最后一个词"时，
+    源里有没有那一行都无所谓；现在**有**才是常态、也才说得通（名字都不在文件里，
+    "它指向源里哪一处"这个问题本身就不成立）。
     """
     with tempfile.TemporaryDirectory(prefix="lomenterr-deps-") as td:
         root = Path(td)
         f = root / "m.lomt"
-        f.write_text("module m\n", encoding="utf-8", newline="\n")
+        f.write_text("module m\n\nuse util\n", encoding="utf-8", newline="\n")
         d = root / "d.jsonl"
-        d.write_text(json.dumps({"file": str(f), "line": 2, "col": 1, "code": "E018",
+        d.write_text(json.dumps({"file": str(f), "line": 3, "col": 1, "code": "E018",
                                  "message": "名字导入找不到模块 util"}) + "\n",
                      encoding="utf-8", newline="\n")
 
@@ -912,6 +983,156 @@ def test_e018_lists_what_is_actually_in_deps():
         assert "util2" in out and "utils" in out, f"没列出接近的名字: {out[-300:]!r}"
         assert "zlib" not in out, f"差得远的不该进清单: {out[-300:]!r}"
     print("      E018: 没有 deps/ 就明说; 有就只列名字接近的")
+
+
+@test
+def test_json_suggestions_are_machine_applicable():
+    """`--json` 的 `suggestions[]` 是**能直接应用**的：`replacement` + `byte_start`/`byte_end`。
+
+    抄 rustc 的 `--error-format=json` / Swift 的 fix-it / Roslyn 的 code fix 那一族：
+    编辑器的价值不在"看到一句话"，而在"**一键改对**"。所以判据不止看字段在不在 ——
+    它**真的拿那两个偏移去原文里切一刀**，切出来的必须正好是那个错名字。
+
+    **CRLF 也判**（同一件事的两半）：偏移只有是真的**文件字节**偏移才有用，而
+    `lomenterr` 早先会把源里的 CR 就地剥掉再渲染 —— 那样每个 CRLF 文件从第二行起
+    就**每行偏一个字节**，而 Windows 上 CRLF 是常态。判据在一份 CRLF 源上再切一刀，
+    就是为了钉死这一点（切出来是那个名字 = 偏移没被规范化过）。
+
+    **自己加的一条规矩**（rustc 不需要，因为它有 span）：偏移**只在那名字于本文件里
+    全局唯一时**才给 —— 位置是**推**出来的，推不准就只给名字。并列那半判这个。
+    """
+    src = ("module m\n\n"
+           "fn leftover_count() -> u32 { return 0; }\n\n"
+           "fn _start() {\n"
+           "    let a: u32 = leftove_count();\n"
+           "}\n")
+    f, d = _check(src)
+    rc, out = _run_in(d.parent, d, "--json")
+    assert rc == 1, (rc, out[:200])
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1, out
+    obj = json.loads(lines[0])
+    sugs = obj["suggestions"]
+    assert len(sugs) == 1, sugs
+    s = sugs[0]
+    assert s["kind"] == "fn" and s["line"] == 3, s
+    assert s["applicability"] == "MaybeIncorrect", s               # 猜的，就说是猜的
+    assert s["replacement"] == "leftover_count", s                 # 换成什么
+    raw = f.read_bytes()
+    assert raw[s["byte_start"]:s["byte_end"]].decode() == "leftove_count", (
+        f"偏移切出来的不是那个错名字: {raw[s['byte_start']:s['byte_end']]!r}")
+    # 真的应用一次：拿偏移切掉那一段、把 replacement 塞进去，得到的必须是**能编过的**那一行
+    applied = raw[:s["byte_start"]] + s["replacement"].encode() + raw[s["byte_end"]:]
+    assert b"leftover_count();" in applied, "应用之后那一行不是改好的样子"
+
+    # CRLF：偏移是**文件字节**偏移，不是规范化之后的
+    with tempfile.TemporaryDirectory(prefix="lomenterr-crlf-") as td:
+        g = Path(td) / "c.lomt"
+        g.write_bytes(src.replace("\n", "\r\n").encode())
+        d2 = Path(td) / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(g), "--check", "--diag-out", str(d2)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, (r.returncode, r.stderr[-200:])
+        _, out2 = _run_in(Path(td), d2, "--json")
+        raw2 = g.read_bytes()                      # 临时目录出去就没了，先读
+    s2 = json.loads([ln for ln in out2.splitlines() if ln.strip()][0])["suggestions"][0]
+    assert raw2[s2["byte_start"]:s2["byte_end"]].decode() == "leftove_count", (
+        "CRLF 文件上的偏移偏了 —— 那是把 CR 剥掉之后再算偏移的症状")
+
+    # 并列：**不给偏移**（指不准改哪一处，就不给一个能改错地方的东西）
+    src3 = ("module m\n\n"
+            "fn sum_total1() -> u32 { return 0; }\n\n"
+            "fn sum_total2() -> u32 { return 0; }\n\n"
+            "fn _start() {\n"
+            "    let a: u32 = sum_totalz();\n"
+            "}\n")
+    _, d3 = _check(src3)
+    _, out3 = _run_in(d3.parent, d3, "--json")
+    sugs3 = json.loads([ln for ln in out3.splitlines() if ln.strip()][0])["suggestions"]
+    assert len(sugs3) == 2, sugs3
+    assert all("byte_start" not in x for x in sugs3), f"并列却给了偏移: {sugs3}"
+    print("      --json 建议: 偏移能切片（含 CRLF）; 并列时不给偏移")
+
+
+@test
+def test_the_tail_points_at_loment_explain():
+    """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0308'`。
+
+    子代理实测 8 门语言：**没有一门**在给人看的输出里给出能点的文档入口（rustc 只给命令，
+    C# 的 `helpUri` 只进 SARIF）。所以照最好的那个抄，落点在最末一行。
+
+    判据多一条**别人不会写的**：那一行点到的码**必须是真的**（在 `loment_diag.RULES` 里）——
+    指针要么指向一件已经存在的东西，要么就是一句空话。`lomcli` 的 `explain` 认不认那个码，
+    由 `loment_cli_test::test_every_code_explain_speaks` 那边管（这边不重复起工具链）。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_diag  # noqa: E402
+    known = {r[0] for r in loment_diag.RULES}
+
+    with tempfile.TemporaryDirectory(prefix="lomenterr-more-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        rows = [{"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "a"},
+                {"file": str(src), "line": 1, "col": 1, "code": "E002", "message": "b"},
+                {"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "c"}]
+        d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert lines[-1].startswith("more: loment explain "), f"最后一行不是指针: {lines[-1]!r}"
+    codes = lines[-1].split("loment explain ")[1].split()
+    assert codes == ["E019", "E002"], f"指针没按汇总的次序列出出现过的码: {codes}"
+    assert all(c in known for c in codes), f"指针点了不存在的码: {codes}"
+    print("      " + lines[-1])
+
+
+@test
+def test_max_caps_and_says_how_many_were_hidden():
+    """`--max N` 卡住**渲染**条数，而**上限不许静默**：说清还剩几条。
+
+    抄 clang 的 `-ferror-limit=20`（超了打 `fatal error: too many errors emitted,
+    stopping now`）与 Go 的 10 条上限（`too many errors`）—— 两家都默认设上限，理由一样：
+    生成的代码一错就是几百条，逐条渲染几十行会把要看的东西顶出屏幕。
+    **但两家的说法都不完整**：都只说"停了"，不说"还剩几条"。这里的判据要两个都说。
+
+    三个断言，各挡一种退化：
+    * 默认 20 真的生效（造 25 条）；
+    * **汇总的数字仍然是总数** —— "渲染了几条"与"一共几条"是两回事，上限不该把汇总改小；
+    * `--max 0` = 全部（这个后门要留着：用户得能说"我就要全看"）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-max-") as td:
+        src = Path(td) / "bad.lomt"
+        src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        rows = [{"file": str(src), "line": 1, "col": 1, "code": "E002", "message": f"m{i}"}
+                for i in range(25)]
+        d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                     encoding="utf-8", newline="\n")
+
+        rc, out = _render(d)                       # 默认 20
+        assert rc == 1, (rc, out[:200])
+        assert out.count("error[E002]:") == 20, f"默认上限没生效: {out.count('error[E002]:')}"
+        assert "note: 5 more not shown (--max 0 for all)" in out, f"没说清还剩几条: {out[-300:]!r}"
+        assert "25 errors: E002 x25" in out, f"汇总该报**总数**: {out[-300:]!r}"
+
+        _, out0 = _run_in(Path(td), d, "--max", "0")
+        assert out0.count("error[E002]:") == 25, "--max 0 该看全部"
+        assert "more not shown" not in out0, "全渲染了还说不显示?"
+
+        _, out3 = _run_in(Path(td), d, "--max=3")
+        assert out3.count("error[E002]:") == 3, f"--max=N 那种拼法没认: {out3[:200]!r}"
+
+        # **`--json` 不受上限管**：上限是"别把人的屏幕顶爆"的装置，而机器出口没有屏幕 ——
+        # 那里少一条就是**静默丢数据**（下游按条数算的东西全错，而它在 stderr 上也看不到
+        # 提示，因为 JSON 模式压根不打汇总与说明）。所以机器出口**全给**。
+        _, outj = _run_in(Path(td), d, "--json", "--max", "3")
+        assert len([ln for ln in outj.splitlines() if ln.strip()]) == 25, (
+            f"--json 被上限截了 —— 那是静默丢数据: {len(outj.splitlines())} 行")
+    print("      --max: 默认 20、--max 0 全看、--max=N 也认、--json 从不截; 上限与总数都说清")
 
 
 # ---------------------------------------------------------------- 包那一侧 (§6 的兜底纪律)
@@ -1006,12 +1227,15 @@ def test_launcher_renders_with_it_and_says_so_without_it():
         got_om = run(make_pkg(True), spelling)
         assert "RENDERED-BY-LOMENTERR" in got_om and spelling in got_om, (
             f"{spelling} 没被转交给渲染器: {got_om!r}")
+    # `--max N` 是**两个词**，值也要一起送到（只转 `--max` 不转值，渲染器会把它当文件名）
+    got_mx = run(make_pkg(True), "--max", "0")
+    assert "--max" in got_mx and " 0" in got_mx, f"--max 的值没转交: {got_mx!r}"
     # 两个一起给时**两个都要到**（用一个变量存一个开关就会静默丢掉另一个）
     got_both = run(make_pkg(True), "--no-color", "--json")
     assert "--no-color" in got_both and "--json" in got_both, (
         f"同时给两个开关时丢了一个: {got_both!r}")
     print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, "
-          "三个开关都转交到位")
+          "四个开关(含 --max 的值)都转交到位")
 
 
 # ---------------------------------------------------------------- 入口

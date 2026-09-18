@@ -65,8 +65,10 @@ loment version
 诊断还有两个出口，也是 `loment check FILE` 上的开关（各**顺带关色**）：
 
 - `--short` —— **一行一条**（`文件:行:列: error[码]: 消息`），给 grep 与 CI 日志；
-- `--json` —— **一行一个对象**，除了码/位置/消息还带 `title`/`what`/`why`/`fixes`/`yes`/`no`
-  （编辑器把它放进 quickfix 面板，或按码做统计）。
+- `--json` —— **一行一个对象**，除了码/位置/消息还带 `title`/`what`/`why`/`fixes`/`yes`/`no`，
+  以及**能直接应用**的 `suggestions`（`replacement` + `byte_start`/`byte_end`）——
+  编辑器可以照着它一键改对，或按码做统计；
+- `--max N` —— 最多渲染几条（默认 20，`0` = 全部）。上限不是静默的：超了会明说还剩几条。
 
 报错器自己的文字**默认是英文**；要整个报告说中文，在**项目根**放一份 `errconfig`：
 

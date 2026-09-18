@@ -154,10 +154,11 @@ usage() {
 Loment @DISPLAY@  (@VERSION@)
   loment version              print version
   loment ir FILE              compile to LLVM IR on stdout
-  loment check FILE [--no-color] [--short|--json]
+  loment check FILE [--no-color] [--short|--json] [--max N]
                               check only (diagnostics on stderr, IR discarded)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
+                              --max N: render at most N (default 20; 0 = all)
   loment build FILE [-o OUT] [--link OBJ...]
                               compile and link; --link adds a foreign object (FFI)
   loment run FILE             compile, link and run
@@ -190,12 +191,18 @@ case "${1:-help}" in
         # forwarding the only way to get them would be to run the compiler with
         # `--diag-out` yourself and then call lomenterr on that file - a two-step shuffle
         # that makes the modes useless for CI, which is exactly who they are for.
+        # `--max N` / `--max=N` (docs/191 sec 3 #5) is the same kind of switch: it caps how
+        # many diagnostics the renderer PRINTS, so the driver must not see it either. Without
+        # forwarding it, `--max 0` (show everything) would be unreachable from the package -
+        # and that is the one spelling a user reaches for exactly when there are 300 errors.
         nc=
         om=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
+                --max) om="$om --max ${2:-}"; shift 2 ;;
+                --max=*) om="$om $1"; shift ;;
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -254,6 +261,8 @@ case "${1:-help}" in
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
+                --max) om="$om --max ${2:-}"; shift 2 ;;
+                --max=*) om="$om $1"; shift ;;
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -435,10 +444,22 @@ if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
 if /I "%~1"=="--json" goto barg_om
+if /I "%~1"=="--max" goto barg_max
+set "bs=%~1"
+if "%bs:~0,6%"=="--max=" goto barg_max_eq
 rem Unknown options are REJECTED, not ignored: silently dropping `--link` used to end in
 rem "undefined label: c_add" from the linker, which points the user at the wrong thing.
 echo loment: unknown option %~1 1>&2
 exit /b 2
+:barg_max
+set "com=%com% --max %~2"
+shift
+shift
+goto barg_loop
+:barg_max_eq
+set "com=%com% %~1"
+shift
+goto barg_loop
 :barg_nc
 set "cnc=%~1"
 shift
@@ -534,10 +555,11 @@ exit /b %ERRORLEVEL%
 echo Loment @DISPLAY@  (@VERSION@)
 echo   loment version              print version
 echo   loment ir FILE              compile to LLVM IR on stdout
-echo   loment check FILE [--no-color] [--short^|--json]
+echo   loment check FILE [--no-color] [--short^|--json] [--max N]
                               check only (diagnostics on stderr, IR discarded)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
+                              --max N: render at most N (default 20; 0 = all)
 echo   loment build FILE [-o OUT] [--link OBJ...]
                               compile and link; --link adds a foreign object (FFI)
 echo   loment run FILE             compile, link and run
@@ -575,20 +597,33 @@ exit /b 0
 rem %1 = one argument from the command line; sets csrc (the first non-command, non-flag
 rem word), cnc (the colour switch) and com (the renderer output mode). Reached only via
 rem `call` from :compile_only.
+rem
+rem This one scans the WHOLE command line with a `for`, so it cannot look ahead the way
+rem :barg_loop can. `--max N` is two words there -- remember "the next word is its value"
+rem in cskip and drop it, otherwise `--max 0` would leave `0` to be mistaken for the file.
 :scan_arg
+if not defined cskip goto scan_arg_go
+set "cskip="
+exit /b 0
+:scan_arg_go
 if /I "%~1"=="ir" exit /b 0
 if /I "%~1"=="check" exit /b 0
 if /I "%~1"=="--no-color" goto scan_nc
 if /I "%~1"=="-C" goto scan_nc
 if /I "%~1"=="--short" goto scan_om
 if /I "%~1"=="--json" goto scan_om
+if /I "%~1"=="--max" goto scan_max
+set "ss=%~1"
+if "%ss:~0,6%"=="--max=" goto scan_om
 if not defined csrc set "csrc=%~1"
 exit /b 0
 :scan_nc
 set "cnc=--no-color"
 exit /b 0
+:scan_max
+set "cskip=1"
 :scan_om
-set "com=%~1"
+set "com=%com% %~1"
 exit /b 0
 '''
 

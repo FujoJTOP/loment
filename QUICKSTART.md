@@ -241,7 +241,9 @@ $ loment check z.lomt --json         # one object per diagnostic, card included
 {"code":"E002","title":"undeclared name","file":"z.lomt","line":4,"col":0, ...
 ```
 
-`--json` is what an editor or a CI job wants; both modes turn colour off on their own.
+`--json` is what an editor or a CI job wants; both modes turn colour off on their own. There is
+also `--max N`, which caps how many are rendered (default 20, `--max 0` shows all) — a file with
+300 errors otherwise buries the first one you need to read. When it does cap, it says so:
 
 One line above deserves a note: `message:` is the **compiler's** text and is still
 Chinese. The renderer's own text and the compiler's text are different layers

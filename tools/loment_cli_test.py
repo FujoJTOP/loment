@@ -658,6 +658,10 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert sh.count('"$nc $om"') == 2, "bash 启动器没把输出模式转交给 report_diags"
     assert '"$(tool lomenterr)" $rflags "$dfile"' in sh, \
         "renderer 的开关没有一起(word-split)传给 lomenterr"
+    # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）
+    assert sh.count('--max) om="$om --max ${2:-}"; shift 2 ;;') == 2, \
+        "bash: --max <N> 没被认/没带上值"
+    assert sh.count('--max=*) om="$om $1"; shift ;;') == 2, "bash: --max=N 那个拼法没被认"
 
     # cmd: check 走 :scan_arg、build/run 走 :barg_loop —— 两条路都要认，且都要转交
     assert cmd.count('if /I "%~1"=="--short" goto scan_om') == 1, "cmd: check 不认 --short"
@@ -665,9 +669,18 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
     assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
     assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
-    assert cmd.count('set "com=%~1"') == 2, "cmd: 两个分支没各自记下这个开关"
+    # 累加式的写法出现在两处：check 那路的 `:scan_om`，与 build/run 那路的 `--max=N` 落点
+    assert cmd.count('set "com=%com% %~1"') == 2, "cmd: 没把这个开关累加进 com"
+    assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
     assert cmd.count('"%cnc% %com%"') == 3, \
         "cmd: 三处 report_diags 调用没有都带上输出模式"
+    # `--max` 在 cmd 里是**两**个词，而 check 那路是 `for` 扫全命令行 —— 必须记住
+    # "下一个词是它的值"并跳过，否则 `--max 0` 会把 `0` 当成源文件名。
+    assert cmd.count('if /I "%~1"=="--max" goto scan_max') == 1, "cmd: check 不认 --max"
+    assert ':scan_max' in cmd and 'set "cskip=1"' in cmd, "cmd: 没记住 --max 的值那一个词"
+    assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
+        "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
+    assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
 
 
 def main() -> int:
