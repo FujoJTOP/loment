@@ -560,7 +560,10 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
             p.write_text(s["src"], encoding="utf-8", newline="\n")
             note = loment_diag.foreign_note(p, ['63:25: 非法字符 "\'"'])
             assert note and "不是 Loment" in note, (s["lang"], note)
-            assert s["lang"].upper() in note, (s["lang"], note)
+            # **不锁大小写**: 语言名现在取自 `LANG_CARDS` 的显示名（`Rust` / `Python` …）——
+            # 一处真源，也是给人看的那个写法。这条要钉的是"说得出是哪门语言"，
+            # 不是"它必须写成大写的"。
+            assert s["lang"].lower() in note.lower(), (s["lang"], note)
         lp = td / "t.lomt"
         lp.write_text("module t\n\nfn f() -> u32 {\n    return 1\n}\n",
                       encoding="utf-8", newline="\n")

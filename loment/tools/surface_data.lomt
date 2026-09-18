@@ -355,10 +355,10 @@ pub fn lang_edge(i: u32) -> str {
 }
 
 pub fn lang_abi(i: u32) -> str {
-    if i == 0 { return "C ABI 是它的默认导出方式，所以接口单元 + `--link` 那条路可用。"; }
-    if i == 1 { return "默认**不**导 C ABI；要链接得在源里显式写 `//export`（按后缀推断的默认值已经删掉了）。"; }
-    if i == 2 { return "**JVM 默认不导出 C ABI** —— 只出接口单元会得到空 module；要链接得上 JNI 或 NativeAOT。"; }
+    if i == 0 { return "C ABI 是它默认的导出方式（`--link` 那份 `.o` 要自包含：不能有重定位、不能引用未定义的符号）。"; }
+    if i == 1 { return "默认**不**导 C ABI；要在源里显式写 `//export`。"; }
+    if i == 2 { return "**JVM 默认不导出 C ABI**；要链接得上 JNI 或 NativeAOT。"; }
     if i == 3 { return "**CPython 不导出 C ABI** —— 只出接口单元会得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`）。要真链接得走 C 扩展那条路。"; }
-    if i == 4 { return "Rust 能导 C ABI（`extern \"C\"` + `#[no_mangle]`），所以接口单元 + `--link` 那条路可用。"; }
+    if i == 4 { return "Rust 要导 C ABI 得在源里显式写 `extern \"C\"` + `#[no_mangle]`。"; }
     return "";
 }

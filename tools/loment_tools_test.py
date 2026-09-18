@@ -484,6 +484,36 @@ def test_m64_all_reference_messages_are_classified():
 
 
 @test
+def test_foreign_note_carries_the_language_card():
+    """`foreign_note` 那条路（外源文件 + 有错）必须把**语言卡的边界与调用约定**也带上。
+
+    **这条是被实测逼出来的**：加卡的那一版在 f-string 里插了一个从没定义过的 `NL` ——
+    而那段代码只有"外源文件 + 有错"才走到，我自己那几条判据一条都没覆盖到它，
+    是另一条门的 `loment_multisyntax_test` 先报的 `NameError`。判据的覆盖面缺口和代码的
+    缺口是同一件事的两面（docs/182 1.9 那条"消费者清单要和判据一起长"）。
+
+    顺带钉住"卡上的话真的被送出去了" —— 只断言"没崩"会漏掉"卡是拿到了但没打印"。
+    """
+    import loment_diag
+    try:                                    # 见上一条的说明：翻译线模块编不过时**可见跳过**
+        import potato_from                                          # noqa: F401
+    except Exception as e:                                     # noqa: BLE001
+        print(f"        [SKIP] import potato_from 失败，这条查不了：{e}")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "cflow.lomt"          # 名字是 .lomt、内容是 C —— 那个已知处境
+        f.write_text("#include <stdio.h>" + "\n"
+                     + "int main(void) { return 0; }" + "\n",
+                     encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(f, ["1:1: 非法字符 '#'"])
+    assert note, "外源文件没给出提示"
+    assert "不是 Loment" in note, note[:200]
+    card = loment_diag.LANG_CARDS["c"]
+    assert card.edge in note, "语言卡上的**边界**没送到"
+    assert card.abi in note, "语言卡上的**调用约定**没送到"
+    print("      foreign_note 带上了语言卡的边界与调用约定")
+
+@test
 def test_code_tables_cover_the_same_codes():
     """`RULES`（分类）与 `ASCII_ONE_LINER`（CLI 一行式）**键集必须相等**。
 
@@ -547,8 +577,11 @@ def test_language_cards_cover_every_language_the_frontends_know():
     try:
         import potato_from
     except Exception as e:                                     # noqa: BLE001
-        pytest_skip = f"(跳过: import potato_from 失败 {e})"
-        print("        " + pytest_skip)
+        # **跳过而不是红**：这不是"环境缺了东西"，而是**翻译线那个模块此刻编不过** ——
+        # 那是它自己的判据该报的（`loment_multisyntax_test` 一进来就会崩），这里再报一遍
+        # 只是把同一个故障数两遍，还会让"翻译线在制品"看起来像"报错器的卡漏了"。
+        # 但它**必须是看得见的**（下面这行会进日志），不能一声不吭地绿。
+        print(f"        [SKIP] import potato_from 失败，这条查不了语言覆盖：{e}")
         return
     want = set(potato_from.LANGS)
     got = set(loment_diag.LANG_CARDS)

@@ -561,7 +561,7 @@ class LangCard:
     exts: tuple[str, ...]        # 后缀（`potato_from.EXT` 的真源，这里只做镜像说明）
     tokens: tuple[str, ...]      # 内容特征（粗提示）
     edge: str                    # 这门语言的边界：什么翻不过去
-    abi: str                     # 调用约定那一档的**事实**（不是"这条路通不通"的结论）
+    abi: str                     # 调用约定那一档的**事实**（**不许**是"这条路通不通"的结论）
 
 
 LANG_CARDS: dict[str, LangCard] = {
@@ -570,7 +570,7 @@ LANG_CARDS: dict[str, LangCard] = {
         tokens=("#include", "int main(", "printf("),
         edge="指针算术、`union`、位域、宏、可变参数（`...`）、`goto` 进来的跳转都不翻；"
              "`int` 与条件混用（`if (x)`）、`&&` 出 int 要**补转换**（Loment 的条件只收 bool）。",
-        abi="C ABI 是它的默认导出方式，所以接口单元 + `--link` 那条路可用。",
+        abi="C ABI 是它默认的导出方式（`--link` 那份 `.o` 要自包含：不能有重定位、不能引用未定义的符号）。",
     ),
     "python": LangCard(
         key="python", display="Python", exts=(".py",),
@@ -584,7 +584,7 @@ LANG_CARDS: dict[str, LangCard] = {
         tokens=("use std::", "let mut ", "macro_rules!", "#[derive"),
         edge="trait 对象、闭包、宏（`macro_rules!`）、生命周期标注、`async` 都不翻；"
              "`&str` 与 `String` 都是“指针+长度”，翻过来是 `str`；借用检查那一套 Loment 同样管，所以这块一般能对上。",
-        abi="Rust 能导 C ABI（`extern \"C\"` + `#[no_mangle]`），所以接口单元 + `--link` 那条路可用。",
+        abi="Rust 要导 C ABI 得在源里显式写 `extern \"C\"` + `#[no_mangle]`。",
     ),
     "go": LangCard(
         key="go", display="Go", exts=(".go",),
@@ -592,7 +592,7 @@ LANG_CARDS: dict[str, LangCard] = {
         edge="goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）都不翻；"
              "**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、**没有 `while`**（只有 `for`）。"
              "`int` 有平台宽度；`/` 与 `%` 向零截断（与 Loment 同）。",
-        abi="默认**不**导 C ABI；要链接得在源里显式写 `//export`（按后缀推断的默认值已经删掉了）。",
+        abi="默认**不**导 C ABI；要在源里显式写 `//export`。",
     ),
     "java": LangCard(
         key="java", display="Java", exts=(".java",),
@@ -600,23 +600,10 @@ LANG_CARDS: dict[str, LangCard] = {
         edge="类继承、接口、泛型擦除、异常、`String`、集合类都不翻；"
              "`boolean` 与 `int` 是分开的（`&&` 出 boolean，所以**不用补转换** —— 这点与 C 相反）；"
              "`>>>` 是无符号右移（Loment 的 `>>` 分有符号/无符号两种写法）。",
-        abi="**JVM 默认不导出 C ABI** —— 只出接口单元会得到空 module；要链接得上 JNI 或 NativeAOT。",
+        abi="**JVM 默认不导出 C ABI**；要链接得上 JNI 或 NativeAOT。",
     ),
 }
 
-
-def language_gaps() -> list[str]:
-    """`potato_from.LANGS` 里有、而 `LANG_CARDS` 里没有的语言（判据用它报缺口）。
-
-    **不在这里 import `potato_from` 到模块级**：那个模块很重（它把各门翻译器都拉进来），
-    而 `loment_diag` 被 `lomentc` 依赖 —— 循环导入。所以按需 import, 并且**失败时返回空**
-    让调用方自己决定（判据里会拿到真的缺口, 不是静默通过）。
-    """
-    try:
-        import potato_from
-    except Exception:                                                # noqa: BLE001
-        return []
-    return sorted(set(potato_from.LANGS) - set(LANG_CARDS))
 
 
 
@@ -666,8 +653,11 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
         # 语言的**边界**与**调用约定**与报错器**共用同一段文字**（`LANG_CARDS`）——
         # 抄第二份必然漂, 而这两句正是用户最需要对齐的部分。
         if card:
-            head += (f"{NL}      这门语言的边界: {card.edge}"
-                     f"{NL}      调用约定: {card.abi}")
+            # 用普通拼接而不是 f-string 插值换行：f-string 的表达式段里放不了 `\n` 转义，
+            # 而插一个模块级常量就要多一处"只有这里用"的名字（上一版就是那么写的，
+            # `NL` 从没定义过，而这条路只有"外源文件 + 有错"才走到，判据没覆盖到）。
+            head += ("\n      这门语言的边界: " + card.edge
+                     + "\n      调用约定: " + card.abi)
         # **该建议 `--impl` 还是接口单元，要看接口那条路走不走得通** —— 这不是锦上添花：
         # Python 那类的 `abi` 不是 C，接口单元**一条函数都发不出来**，照默认那条命令敲会
         # 得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`，但产物看着
