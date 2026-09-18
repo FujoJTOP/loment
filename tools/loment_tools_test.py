@@ -527,9 +527,13 @@ def test_m64_structured_diagnostics_are_jsonl():
     报错器 `lomenterr` 的输入就是它（`docs/182` §5）。这条钉三件：
 
       * **一行一条**（不是一个大数组）—— 边报边写，崩在半路也已经落盘；
-      * **字段齐全** —— `lomenterr` 靠 `code`/`title`/`hint` 渲染，缺一个它就退化成打字机；
+      * **字段集与 `DIAG_FIELDS` 一致** —— 两个实现与下游报错器共用这一份形状；
       * **`check()` 的语义错与 `LomError` 的解析错都要有** —— 只测一条通道，另一条的缺口
         就是静默的。实测：加上解析那条通道之后，`LomError` 里 39/50 条从没有过错误码。
+
+    **`title`/`hint` 不在这份输出里**（`docs/182` §5.3）：编译器只报"是什么、在哪"，
+    标题与修复建议由报错器查 `surface_data` 补 —— 两个实现的消息文本本来就不同，
+    硬凑"逐字节一致"只会造出假一致。
     """
     cases = [
         # (源码, 期望的码) —— 一条走 check(), 一条走 LomError
@@ -553,7 +557,6 @@ def test_m64_structured_diagnostics_are_jsonl():
             for d in recs:
                 assert set(d) == set(lomentc.DIAG_FIELDS), (set(d), lomentc.DIAG_FIELDS)
                 assert d["code"] != "E999", d
-                assert d["hint"], d
             assert recs[0]["code"] == want, (recs[0]["code"], want)
     print("      结构化诊断: 一行一条 JSON, 字段齐全, check/LomError 两条通道都覆盖")
 

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import shutil
@@ -894,6 +895,58 @@ def test_m85_driver_checks_before_emitting():
                 assert rc == 0, f"{f.name}: 正例退出码 {rc}: {err[:200]}"
                 assert out == lomentc.emit_llvm(m, ROOT, d), f"{f.name}: 正例产物与参考不一致"
         print(f"      驱动闸门: 负例 {len(neg)}/{len(neg)} 被拒, 正例 {len(pos)}/{len(pos)} 过检")
+
+
+@test
+def test_m85_driver_emits_structured_diagnostics():
+    """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
+
+    报错器 `lomenterr` 的输入前提。这条钉四件:
+
+      * **一行一条 JSON**, 字段集与参考实现一致 (`lomentc.DIAG_FIELDS`) —— 两个实现
+        必须是**同一份形状**, 否则下游得按来源分叉;
+      * **码集与参考实现相等** —— 文本本来就不同 (参考吐整句中文, 驱动只有源码片段,
+        `docs/158` §4), 诚实的靶子是**码**不是文本;
+      * **给路径就建文件**, 无错时是**空的**而不是"不存在" —— 两边同一口径, 这样上一次
+        跑剩的旧文件不会被这一次误读成诊断;
+      * 有错时退出码**非零**。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    import loment_diag
+    src = ROOT / "loment" / "selfhost" / "neg" / "choose_twice.lomt"
+    rel = src.relative_to(ROOT).as_posix()
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocsd")
+
+        def drive(entry_rel: str, diag: Path) -> int:
+            script = (f"rm -f {_T}fd && cp {_wsl_path(elf)} {_T}fd && chmod +x {_T}fd && "
+                      f"cd {_wsl_path(ROOT)} && {_T}fd {entry_rel} --diag-out "
+                      f"{_wsl_path(diag)} > /dev/null")
+            return subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                                  capture_output=True, text=True, timeout=300,
+                                  shell=False).returncode
+
+        bad = Path(td) / "bad.jsonl"
+        assert drive(rel, bad) != 0, "有错却退了 0"
+        recs = [json.loads(x) for x in bad.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert recs, "没写出结构化诊断"
+        for d in recs:
+            assert set(d) == set(lomentc.DIAG_FIELDS), (sorted(d), list(lomentc.DIAG_FIELDS))
+            assert d["line"] > 0, d
+        got = sorted({d["code"] for d in recs})
+        m = lomentc.load(src)
+        dd = lomentc.resolve_deps(m, ROOT, src.parent, entry=src)
+        want = sorted({loment_diag.classify(e)[0] for e in lomentc.check(m, deps=dd)})
+        assert got == want, f"两侧码集不同: 自举 {got} vs 参考 {want}"
+        ok = Path(td) / "ok.jsonl"
+        assert drive("loment/selfhost/pos/ok.lomt", ok) == 0, "合法入口却退非零"
+        assert ok.exists() and ok.read_bytes() == b"", \
+            f"无错时应当是**存在且为空**的, 得到 {ok.read_bytes()[:40]!r}"
+        print(f"      驱动 --diag-out: {len(recs)} 条 {got} 与参考码集相等; 无错时空文件")
 
 
 @test

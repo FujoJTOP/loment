@@ -4191,11 +4191,17 @@ def load(path: Path) -> Module:
 # 本仓一贯反对嗅 —— `docs/179` §6 那个 `clang` 按后缀认语言的坑，症状正是"rc=0 却什么
 # 都不产出"。另开 fd 在 PE/POSIX 上语义不一致（Windows 上 fd 3 不是继承来的），路径最稳。
 #
-# **形状取既有两份的并集，不新造**：`loment_diag.py` 的 `--json`（code/title/message/hint）
-# 与自举 `lsp.lomt` 的 Diagnostic（多一个 `code`）。
+# **`title`/`hint` 不在这里**（`docs/182` §5.3）：编译器只报"是什么、在哪" ——
+# `code` + 位置 + 原文片段，**不解释**。标题与修复建议由**报错器** `lomenterr` 拿 `code`
+# 去查 `surface_data` 补。
+#
+# 为什么这么切：两个实现的**消息文本本来就不同**（参考吐整句中文，自举手里只有
+# 码 + token 索引），`docs/158` §4 记着这类分叉。硬凑"两侧 JSONL 逐字节一致"只会造出
+# 一堆假一致；诚实的靶子是**码一致 + 形状一致**。切干净之后，自举驱动**根本不需要那张表**，
+# 第三份手抄从设计上就不存在 —— 渲染本来就是报错器该干的事。
 #
 # **一行一条 JSON（JSONL）而不是一个数组**：边报边写，崩在半路也已经落盘。
-DIAG_FIELDS = ("file", "line", "col", "code", "title", "message", "hint")
+DIAG_FIELDS = ("file", "line", "col", "code", "message")
 
 
 def _leading_line(msg: str) -> int:
@@ -4210,12 +4216,14 @@ def _leading_line(msg: str) -> int:
 
 def diag_record(src: Path, line: int, col: int, msg: str) -> dict:
     """一条裸消息 -> 一条结构化诊断。**分类复用 `loment_diag.RULES`，不新造一份**
-    （两份分类表必然漂，见 `docs/179` §8.1 第 4 条那个"同一批字段被查两遍"的教训）。"""
+    （两份分类表必然漂，见 `docs/179` §8.1 第 4 条那个"同一批字段被查两遍"的教训）。
+
+    取的是 `classify()` 的**第一个返回值**（码）；标题/建议不在这里出（见上）。
+    """
     # 延迟 import：`loment_diag` 顶部就 `import lomentc`，模块级 import 会成环。
     import loment_diag
-    code, title, hint = loment_diag.classify(msg)
-    return {"file": str(src), "line": line, "col": col, "code": code,
-            "title": title, "message": msg, "hint": hint}
+    code = loment_diag.classify(msg)[0]
+    return {"file": str(src), "line": line, "col": col, "code": code, "message": msg}
 
 
 def write_diags(out: str | None, records: list[dict]) -> None:
@@ -4244,6 +4252,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
     args = ap.parse_args(argv)
+
+    # `--diag-out`: **现在就建/清空**, 不是等出错了再建 —— 与自举驱动同一口径 (docs/182 §5)。
+    # 这样上一次跑剩的旧文件不会被这一次误读 (空文件 = "这一次没有诊断"), 而路径写错
+    # 会**立刻**炸出来, 不是"编译通过所以没写文件"看不出来。
+    if args.diag_out:
+        Path(args.diag_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.diag_out).write_text("", encoding="utf-8", newline="\n")
 
     # M46: 形式对象不可关闭 —— 产出任何后端工件必须同时导出 Potato 形式对象。
     if (args.emit_rust or args.emit_llvm) and not args.emit_potato:

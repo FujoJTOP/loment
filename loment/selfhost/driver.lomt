@@ -41,6 +41,7 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [11328, 12352) 目录项缓冲 (getdents64)
 //   [12352, 13824) 子路径暂存 (<dir>/<entry>, 判是不是目录用)
 //   [13824, 14080) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
+//   [14080, 15104) --diag-out 路径 (NUL), 空 = 不吐结构化诊断 (docs/182 §5)
 const SCR_CAP: u32 = 16384;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
@@ -55,6 +56,8 @@ const VER_OFF: u32 = 10304;      // 版本名
 const DENT_OFF: u32 = 11328;     // 目录项缓冲
 const SUBP_OFF: u32 = 12352;     // 子路径暂存
 const EXT_OFF: u32 = 13824;      // 源后缀 (loment.conf)
+const DIAG_OFF: u32 = 14080;     // --diag-out 路径
+const DIAG_CAP: u32 = 1024;      // 路径上限
 const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
 const DENT_CAP: u32 = 1024;      // 目录项缓冲上限 (PE 垫片一次只回一条记录)
@@ -120,6 +123,81 @@ fn wstr(fd: u64, s: str) -> u64 {
     return write_all(fd, str_ptr(s), str_len(s) as u64);
 }
 
+/// 一个字节的低 8 位按**小写十六进制两位**写出去 (`\u00XX` 要用)。
+fn whex2(fd: u64, v: u32) -> u64 {
+    let hi: u32 = (v / 16) % 16;
+    let lo: u32 = v % 16;
+    let bh: u8 = 48 as u8;
+    if hi > 9 {
+        bh = (87 + hi) as u8;           // 10 -> 'a'
+    } else {
+        bh = (48 + hi) as u8;
+    }
+    let bl: u8 = 48 as u8;
+    if lo > 9 {
+        bl = (87 + lo) as u8;
+    } else {
+        bl = (48 + lo) as u8;
+    }
+    let t: ptr = alloc(2);
+    store8(t, 0, bh);
+    store8(t, 1, bl);
+    return write_all(fd, t, 2);
+}
+
+/// 把 `p[0..n]` 按**JSON 字符串**写出 (含两侧引号)。这是 `--diag-out` 那一路的核心:
+/// 片段是**源码原文的字节**, 里面完全可能有 `"`、反斜杠或控制字节 —— 不转义写出来的
+/// 就不是合法 JSON, 而下游 `lomenterr` 会整行解析失败 (docs/182 §5)。
+///
+/// 控制字节一律走 `\u00XX` 而**不是**替换成空格: 替换是**悄悄改内容**, 而这条链上
+/// 唯一的底气就是"报出来的东西和源码里的一致"。
+fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
+    let _q: u64 = wstr(fd, "\"");
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i) as u32;
+        if c == 34 {
+            let _a: u64 = wstr(fd, "\\\"");
+        } else if c == 92 {
+            let _b: u64 = wstr(fd, "\\\\");
+        } else if c < 32 {
+            let _c: u64 = wstr(fd, "\\u00");
+            let _d: u64 = whex2(fd, c);
+        } else {
+            let _e: u64 = write_all(fd, ptr_add(p, i), 1);
+        }
+        i = i + 1;
+    }
+    return wstr(fd, "\"");
+}
+
+/// 一条诊断 = 一行 JSON。字段集与参考实现一致 (`file/line/col/code/message`) ——
+/// **不含 `title`/`hint`**: 那两样由报错器查 `surface_data` 补, 编译器只报"是什么、在哪"
+/// (docs/182 §5.3)。两侧的 `message` 文本本来就不同 (参考是整句中文, 这里只有源码片段),
+/// 那是 `docs/158` §4 记着的既有分叉, 判据比的是**码**。
+fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
+         line: u32, code: u32, frag: ptr, fl: u32) -> u64 {
+    let _a: u64 = wstr(fd, "{\"file\":");
+    let _b: u64 = wjson_str(fd, file, fnam);
+    let _c: u64 = wstr(fd, ",\"line\":");
+    let _d: u64 = wdec(fd, scr, line);
+    // 列: 驱动器手里只有 token 索引, 没有列 —— 与参考实现 check() 那条路一样给 0
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E");
+    // 码写成**三位**(`E022` 而不是 `E22`) —— 与参考实现一致。参考的码来自
+    // `loment_diag.RULES`(唯一真源), 那里就是三位; CLI 显示成 `E22` 是**呈现层**的事。
+    // 这条是判据**第一次跑就抓出来的**: 原先这里直接 wdec, 报
+    // "自举 ['E22'] vs 参考 ['E022']" —— 同一件事两个实现给出不同的字符串。
+    if code < 10 {
+        let _p1: u64 = wstr(fd, "00");
+    } else if code < 100 {
+        let _p2: u64 = wstr(fd, "0");
+    }
+    let _f: u64 = wdec(fd, scr, code);
+    let _g: u64 = wstr(fd, "\",\"message\":");
+    let _h: u64 = wjson_str(fd, frag, fl);
+    return wstr(fd, "}\n");
+}
+
 /// u32 十进制写到 fd (诊断里要报错误码与行号; 驱动器里没有 printf)。
 /// 数字缓冲借 scr 的 [8000, 8064) (布局见 SCR_CAP 上面的表)。
 fn wdec(fd: u64, scr: ptr, v: u32) -> u64 {
@@ -152,6 +230,38 @@ fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
     }
     store8(scr, i, 0 as u8);
     return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+/// 写打开 (建/清空): `openat(AT_FDCWD, p, O_WRONLY|O_CREAT|O_TRUNC, 0644)`。
+///
+/// **必须带 mode, 所以只能走 `syscall6`** —— Linux 的 openat 是 4 参系统调用,
+/// `open_ro` 用 `syscall4` 只递得到 rdx (flags); 带 O_CREAT 时 r10 里的 mode 递不过去,
+/// 文件会被建成权限 0。
+fn open_wo(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    // O_WRONLY(1) | O_CREAT(64) | O_TRUNC(512) = 577; mode 0644 = 420
+    return syscall6(257, (0 as u64) - 100, scr as u64, 577, 420, 0);
+}
+
+/// `p[0..n]` 与字面量 `s` 相等吗 (含长度)。
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    let sp: ptr = str_ptr(s);
+    while i < n {
+        if (load8(p, i) as u32) != (load8(sp, i) as u32) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
 }
 
 /// 从 /proc/self/cmdline 取第 `idx` 个参数: 返回 (start << 32) | len, 0 = 没有。
@@ -810,6 +920,24 @@ fn _start() -> u32 {
     let scr: ptr = scrv as ptr;
     let snc: ptr = sncv as ptr;
     store32(snc, 0, 0);
+    // `--diag-out PATH` (docs/182 §5): 结构化诊断的输出路径。**必须在取 argv[0]/argv[1]
+    // 之前取** —— `argv_at` 每次都重写同一块缓冲 (`argv_buf`), 而后面的 `ap` 是指进那块
+    // 缓冲的指针; 顺序反了 `ap` 的内容会被这两次调用抹掉。
+    // 不给这个参数就是**老行为**: 只打人看的文本到 stderr, 不吐 JSONL。
+    store8(scr, DIAG_OFF, 0 as u8);
+    let a2: u64 = argv_at(argv_buf as ptr, 65536, scr, 2);
+    if a2 != 0 {
+        let p2: ptr = ptr_add(argv_buf as ptr, (a2 >> 32) as u32);
+        if streq(p2, (a2 % 4294967296) as u32, "--diag-out") == 1 {
+            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, 3);
+            if a3 != 0 {
+                let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
+                let n3: u32 = (a3 % 4294967296) as u32;
+                copy_bytes(ptr_add(scr, DIAG_OFF), 0, p3, 0, n3);
+                store8(scr, DIAG_OFF + n3, 0 as u8);
+            }
+        }
+    }
     // 工具目录: argv[0] 所在目录 (自带 store 相对它)。**先取它** —— 下一次 argv_at 会把
     // 同一块 argv_buf 重写一遍, 而后面 ap 指进 argv_buf, 顺序反了内容会被抹掉。
     let a0: u64 = argv_at(argv_buf as ptr, 65536, scr, 0);
@@ -822,10 +950,23 @@ fn _start() -> u32 {
     }
     let av: u64 = argv_at(argv_buf as ptr, 65536, scr, 1);
     if av == 0 {
-        return fail("fujoc-s: 用法: fujoc-s <入口.lomt>\n");
+        return fail("fujoc-s: 用法: fujoc-s <入口.lomt> [--diag-out PATH]\n");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
+    // 结构化诊断的输出 fd。**现在就开** (建/清空), 不是等出错了再开:
+    //   * 上一次跑剩的旧文件不会被这一次误读 (空文件 = "这一次没有诊断");
+    //   * 路径写错**立刻**炸出来, 而不是"编译通过所以没写文件"看不出来。
+    // 与参考实现的 `--diag-out` 同一口径 (两边都在给定路径时就建, 无诊断时它是空的)。
+    let dfd: i64 = 0 as i64 - 1;
+    let dn: u32 = cstr_len(ptr_add(scr, DIAG_OFF));
+    if dn > 0 {
+        let o: i64 = open_wo(ptr_add(scr, DIAG_OFF), dn, scr);
+        if o < 0 {
+            return fail("fujoc-s: --diag-out 打不开 (路径或权限)\n");
+        }
+        dfd = o;
+    }
     // 项目根: 入口文件所在目录 (名字形式的 deps/ 层相对它)
     let _p: u32 = dir_of(ap, an, ptr_add(scr, PROJ_OFF), DIR_CAP);
     // 词法缓冲按"单个文件"的大小开 (单元只 lex 一次, 见下)
@@ -933,6 +1074,13 @@ fn _start() -> u32 {
             }
             write_all(2, ptr_add(unit, st), take as u64);
             wstr(2, "\n");
+            // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
+            // 上面那份给人看 (stderr), 这份给报错器看 (一行 JSON)。
+            if dfd >= 0 {
+                let _j: u64 = wdiag(dfd as u64, scr, ap, an,
+                                    load32(toks2, tk * 20 + 12), code,
+                                    ptr_add(unit, st), take);
+            }
             e = e + 1;
         }
         return die(1);

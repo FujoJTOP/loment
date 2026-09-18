@@ -227,8 +227,31 @@ loment/tools/surface_data.lomt     (纯数据 + 访问器, 形状照抄 win_shim
 而"渲染"归报错器，本来就是它该干的事。`surface_data` 只服务两个消费者：`lomenterr`
 （中文标题/建议）与 `lomcli`（ASCII 一行式，它那 24 条手抄删掉）。
 
-**因此 §5 里 `DIAG_FIELDS` 的 `title`/`hint` 要挪走**：编译器不填它们，由 `lomenterr` 补。
-（这一步已提交的那版先带着，下一步改。）
+**因此 §5 里 `DIAG_FIELDS` 的 `title`/`hint` 已挪走**：现在是
+`("file", "line", "col", "code", "message")`，编译器不填标题/建议，由 `lomenterr` 补。
+**两个实现共用这一份形状** —— 自举驱动那边因此**根本不需要那张表**（它只吐码 + 位置 +
+源码片段），第三份手抄从设计上就不存在。
+
+### 5.4 自举驱动那一侧（已做完）
+
+`loment/selfhost/driver.lomt` 加了 `--diag-out PATH`：
+
+- **必须在取 `argv[0]`/`argv[1]` 之前解析** —— `argv_at` 每次都重写同一块 `argv_buf`，
+  而 `ap`（入口路径）是指进那块缓冲的指针，顺序反了内容会被抹掉；
+- **写打开要走 `syscall6`** —— Linux 的 `openat` 是 4 参系统调用（`dirfd, path, flags, mode`），
+  既有的 `open_ro` 用 `syscall4` 只递得到 rdx（flags）。带 `O_CREAT` 时 r10 里的 mode
+  递不过去，文件会被建成权限 0。这是本仓第一次用 `syscall6`；
+- **JSON 转义是必须的**：片段是**源码原文的字节**，里面有 `"`/反斜杠/控制字节就会写出非法
+  JSON，下游整行解析失败。控制字节走 `\u00XX` 而**不是**替换成空格 —— 替换是悄悄改内容；
+- 判据 `loment_p8_test::test_m85_driver_emits_structured_diagnostics`：字段集与参考一致、
+  **码集与参考相等**、有错退非零、无错时**存在且为空**。
+
+**途中撞到一条真实分叉，已记进 `docs/158` §4 第 12 条**：参考实现**接受关键字做标识符**
+（`fn` / `if` / `let` 都能当形参名），而**自举 checker 撞上会错位** —— 参数位置的 `fn`
+被当成"又一个函数声明"的起点，于是几十行之后报一条毫不相干的假阳性。我给形参起名 `fn`
+时踩到（`test_m85_checker_accepts_corpus_units` 报 `2@65173:",\"line\":"`，而那个 token
+与 `fn` 毫无关系）。**现在的绕法是改名**；根因的正确修法是**参考实现拒**（关键字不许做
+绑定名），那是一次语言面改动。
 
 
 ## 6. `lomenterr`
