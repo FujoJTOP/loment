@@ -79,11 +79,11 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "d81427e6eb3ed154f3c9929efb6ffb4cfb2e530c034b4354aae13ff6d334fb87"
+   "sha256": "10bfe7554ce67bf8be08797219d977cda2321a936ad936919fd18496a05f725b"
   },
   {
    "path": "tools/loment_err_test.py",
-   "sha256": "33445ba6e27bc76501709f333cdaff769f88cbf4318c81b63ab67c3c953a3aa6"
+   "sha256": "c974bdc339ffb9444914e69fb8958f9bf84d911fe69b523e82de8e9b5b5b2966"
   },
   {
    "path": "lompi/lompi.lomt",
@@ -683,7 +683,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "e5f7c461c22037a8073776dfa6207fb0b65ddf1234cbcb3bea7f3978bd7604ea"
+   "sha256": "65826aad8bfe14afb92eaa3bbe77bc3ccae197a9508cd96fb0765492ff175df1"
   },
   {
    "path": "tools/loment_build.py",
@@ -695,7 +695,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "b05fb5d5abee716618e0d64017efecdd2f406eabd1ab38dae34f3484d6e3d3a1"
+   "sha256": "af3fd25ea651b0ed1759ef23a450cd4792395b528a9ede3d00a5fdb9adc9d6ea"
   },
   {
    "path": "tools/loment_boot.py",
@@ -751,7 +751,7 @@
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "4cca38ac49c71c5903cf72d5dd4a20619950026f29311a20cb89bcbe728105db"
+   "sha256": "fa7f00bd82c5801ceea110710d79e9ed7e7891a9d5a49c2c864c05a4086c0872"
   },
   {
    "path": "tools/mono_trace.py",
@@ -975,7 +975,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "514e53aef290f79b659778cd7e49634362465fd6844b85cc4746804cac71fe3a"
+   "sha256": "40540aa0eecea54eb119615bb9bc9e62185d5d907e8a10a155d97bd729da32ae"
   },
   {
    "path": "loment/tools/lomdoc.lomt",
@@ -987,7 +987,7 @@
   },
   {
    "path": "loment/tools/lomenterr.lomt",
-   "sha256": "68150d50bace01d3213c1f26bbe705fad95491d66366438aba06bd09320c0671"
+   "sha256": "5670b50507021bb72464085ce5aad267fdf1fee2527da65468c7fa5f784bd4b0"
   },
   {
    "path": "loment/tools/lomfmt.lomt",
@@ -1015,7 +1015,7 @@
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "6804b10f75ae7cc5cf8a8736080a1f6fe37080dd2a988efd5436d987d2e35421"
+   "sha256": "045204c75e80241289e8db01dfb989628905b4765c76d6b594fd476ddbab5cf9"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1027,7 +1027,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "5100a8de5f2edd17579aeadc4b4894ceff775e439499c6d91ae7b5ff7ee3f2d1"
+   "sha256": "885e3590cb104d0e94d3ba31e44fa5e728364620c02db661a8ba6d80e39d495e"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1035,11 +1035,15 @@
   },
   {
    "path": "editors/vscode/README.md",
-   "sha256": "c5cbbf7533549462a775d96a3ed7d0b2fc3b38a3a0e47f99eee17eaecac3f732"
+   "sha256": "9b2ad7e74d3e4caa0a5d20b9344566309c53d689bb13c0f0f05cefe907e459f0"
+  },
+  {
+   "path": "editors/vscode/src/build-cmd.js",
+   "sha256": "d39a147035024600410ade3f5a5d4f638e46b0e96d6ba24f7ab328b4334b95df"
   },
   {
    "path": "editors/vscode/src/extension.js",
-   "sha256": "0ee501bb242af7cb2a41ce26d7b183b1a7b9a1480a5f717257d54da6f4759ea9"
+   "sha256": "1445d91e6b88546a90c362211978be0f73726712a06eb28d7a3f7f5229d3bff5"
   },
   {
    "path": "editors/vscode/src/server-path.js",
@@ -1539,7 +1543,7 @@
   },
   {
    "path": "docs/182-lomenterr-and-choose-switches.md",
-   "sha256": "521e18036f22f4dfc0c3ee34c544acfca044000045bf6a606b4a57c680174563"
+   "sha256": "59a6af28199a4619aee1ae0cfe46c4efeb8c7c05349c553aa1b78798b6fbbb23"
   },
   {
    "path": "docs/183-loment-library-vertical.md",
