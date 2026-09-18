@@ -445,6 +445,60 @@ def test_a_grammar_declaration_beats_content_sniffing():
     print("      声明压过内容嗅探（含别名 cs/c#/C#），依据也说给用户")
 
 @test
+def test_a_malformed_declaration_is_not_honoured():
+    """声明那一行的**词边界**要钉死：写坏了就**不许当声明**。
+
+    这一条来自对端的教训（而且是他们自己抓到的）：他们把那三个词从散落的字面量重组成
+    "从一个常量拼出来"时，`_GRAMMAR_LINE` 的尾巴漏了 `` —— 于是拼错一个字母的
+    `choose write grammars python` 会命中**前缀**、抹掉 20 个字符、留下 `s python`；
+    而 `read_grammar_decl` 那边**有** `` 所以**不报错**，坏处全落在用户那行上。
+    抓住它的**不是判据**（原有 7/7 全过），是"**重组前后对拍**"。
+
+    我这边刚把 `decl_at` 从三次写死的 `eat_word(…, "choose")` 改成**逐词循环**
+    （词序读 `surface_data`）—— **形态上与他那次是同一类改动**。所以这里不靠嘴说
+    "`eat_word` 本来就有边界检查"，而是**把那张表钉出来**。
+
+    判据的断言刻意分成两种，免得把"正确地忽略"与"坏掉了"混成一条：
+    **畸形**的声明不许说"据文件头"；**良构**的必须说。
+    """
+    def probe(body: str) -> str:
+        td = Path(tempfile.mkdtemp(prefix="lomenterr-declbad-"))
+        f = td / "m.lomt"
+        f.write_text(body, encoding="utf-8", newline="\n")
+        d = td / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(f), "--check", "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, r.returncode
+        _, out = _render(d)
+        return out
+
+    # **畸形**：都不许被当成声明（"据文件头"一个字都不该出现）
+    malformed = [
+        "choose write grammars python",     # 第三个词拼错 —— 对端那次就是这一条
+        "choose write grammar",              # 没有别名
+        "choosewrite grammar python",        # 词之间没断
+        "xchoose write grammar python",      # 行首有杂质
+        "// choose write grammar python",    # **注释里**写着 —— 最要紧的一条
+        "choose write grammar python2",      # 别名不在出厂锁里
+    ]
+    for line in malformed:
+        out = probe(line + "\n" + "y = 1" + "\n")
+        assert "据文件头" not in out, f"畸形声明被当成了声明: {line!r}\n{out[-300:]!r}"
+
+    # **良构**：必须说"据文件头"（含允许的写法：分号收尾、别名后跟说明）
+    wellformed = ["choose write grammar python",
+                  "  choose	write  grammar	python",
+                  "choose write grammar python;",
+                  "choose write grammar python // 说明"]
+    for line in wellformed:
+        out = probe(line + "\n" + "y = 1" + "\n")
+        assert "像 Python" in out and "据文件头" in out, (
+            f"良构声明没被认: {line!r}\n{out[-300:]!r}")
+    print("      声明的词边界: 6 种畸形都不认，4 种良构都认（含注释里那句不认）")
+
+@test
 def test_a_superset_language_is_not_reported_as_its_subset():
     """**C++ 不能被报成 C、C# 不能被报成 Java** —— 认语言是"逐门问、取第一个命中"，
     所以顺序**就是优先级**，而顺序写在 `loment_diag.LANG_ORDER` 里。
