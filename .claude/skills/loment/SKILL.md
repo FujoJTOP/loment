@@ -1,6 +1,6 @@
 ---
 name: loment
-description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E22 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
+description: 用 Loment 写程序时读它 —— Loment 是 FujoOS 项目自研的底层语言（Rust 的严格子集 + 能力域），装好 Loment 工具链后就能写、能检查、能编成原生可执行文件，不需要 Python。触发场景：写个 Loment 程序 / 写个 .lomt 文件 / **写个 Loment 库**（库 = 一个目录，依赖就是源码里的 `use`、不用另行声明；导出就是 `pub`；可选 `pkg.lomp` 清单，见 §9）/ 管理或排查依赖 / 用 loment 命令编译或运行 / 看懂 loment 报的 E1–E23 错误 / 查 Loment 的内建函数或语法（`loment builtins` / `loment syntax` / `loment cheat`）/ 把一段逻辑用项目自己的语言写 / Loment 的 struct、enum、match、capability、guard 怎么写 / **给项目配自己的源码后缀**（`loment.conf` 的 `source_ext`，见 §7.1）/ **注册自定义 `loment` 子命令**（`loment foo` -> PATH 上的 `loment-foo`，见 §7.2）/ 从别的语言迁到 Loment 时哪里不一样。**库与依赖的事先读 `lompi` 的指南**（`~/.claude/skills/lompi/SKILL.md`；装了包则 `<前缀>/share/lompi/skill/SKILL.md`）—— 装库、解析依赖、看本机有哪些库、`use <名字>` 解析到谁，全在那份里。Also use whenever the task is to author, read, or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the Loment toolchain installed.
 ---
 
 # Loment：写程序用的语言
@@ -48,7 +48,7 @@ loment version
 | `loment syntax` | 语法速查表 |
 | `loment builtins` | 内建函数表（全部，没有别的） |
 | `loment types` / `keywords` / `caps` | 类型表 / 关键字 / 能力域 |
-| `loment codes` / `loment explain E4` | 错误码表 E1–E22 / 单条详解 |
+| `loment codes` / `loment explain E4` | 错误码表 E1–E23 / 单条详解 |
 | `loment new NAME` | 生成一个能直接 `loment run` 的骨架 |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | 读源码（行数、函数签名、搜索、sha256、带行号打印） |
 | `loment ls` / `tree` / `examples` / `example tour` | 看目录与示例 |
@@ -363,6 +363,7 @@ E2 @13 line 4: 1
 | E20 | **一个文件的 `use` 超过 300 条** —— 门面拆小，别把整库塞进一个文件 |
 | E21 | **`extern fn` 的签名超出 FFI 第 1 阶段**（只收标量与 `ptr`）—— 见 §7.3.1 |
 | E22 | **`choose` 用法不对**（写两次 / 模式名拼错 / 库写了它）—— 见 §2.1 |
+| E23 | **这一版还没实现（编译器限制）** —— **不是你源码的错**，换个写法绕开；绕不开就报告。进度见 `docs/145` 的里程碑表 |
 
 **最常见的**：`E2` 十有八九是**漏写类型标注**（`let x = 1;` 不合法，要 `let x: u32 = 1;`）
 或用了未定义的函数名；`E3` 是调用实参个数对不上；`E19` 见 §6.1/§6.3。

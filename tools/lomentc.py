@@ -4183,9 +4183,58 @@ def load(path: Path) -> Module:
     return mod
 
 
+# ---------------------------------------------------- 结构化诊断 (docs/182 §5)
+#
+# 报错器 `lomenterr` 的输入前提：编译器要能吐**机器可读**的诊断，而不是只有人看的文本。
+#
+# **为什么另给一条路径，不混进 stderr**：stderr 上同时存在两种格式，解析方就得"嗅"；
+# 本仓一贯反对嗅 —— `docs/179` §6 那个 `clang` 按后缀认语言的坑，症状正是"rc=0 却什么
+# 都不产出"。另开 fd 在 PE/POSIX 上语义不一致（Windows 上 fd 3 不是继承来的），路径最稳。
+#
+# **形状取既有两份的并集，不新造**：`loment_diag.py` 的 `--json`（code/title/message/hint）
+# 与自举 `lsp.lomt` 的 Diagnostic（多一个 `code`）。
+#
+# **一行一条 JSON（JSONL）而不是一个数组**：边报边写，崩在半路也已经落盘。
+DIAG_FIELDS = ("file", "line", "col", "code", "title", "message", "hint")
+
+
+def _leading_line(msg: str) -> int:
+    """`check()` 的消息形如 `"12: 文本"`（**只有行，没有列**）。取不出行号就是 0。
+
+    不引 `re`：这个文件一直没用过正则，为切一个冒号引进来不值。
+    """
+    head, sep, _ = msg.partition(":")
+    head = head.strip()
+    return int(head) if sep and head.isdigit() else 0
+
+
+def diag_record(src: Path, line: int, col: int, msg: str) -> dict:
+    """一条裸消息 -> 一条结构化诊断。**分类复用 `loment_diag.RULES`，不新造一份**
+    （两份分类表必然漂，见 `docs/179` §8.1 第 4 条那个"同一批字段被查两遍"的教训）。"""
+    # 延迟 import：`loment_diag` 顶部就 `import lomentc`，模块级 import 会成环。
+    import loment_diag
+    code, title, hint = loment_diag.classify(msg)
+    return {"file": str(src), "line": line, "col": col, "code": code,
+            "title": title, "message": msg, "hint": hint}
+
+
+def write_diags(out: str | None, records: list[dict]) -> None:
+    """把诊断按一行一条 JSON 写到调用方给的路径。没给路径就什么都不做。"""
+    if not out or not records:
+        return
+    p = Path(out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8", newline="\n") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"[DIAG] {len(records)} 条 -> {out}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomentc", description="L1 Loment 编译器 v0")
     ap.add_argument("file", help=".lomt 源文件")
+    ap.add_argument("--diag-out", metavar="PATH",
+                    help="把诊断按一行一条 JSON 写到这里（供外部报错器渲染，docs/182 §5）")
     ap.add_argument("--emit-rust", metavar="PATH")
     ap.add_argument("--emit-potato", metavar="PATH")
     ap.add_argument("--emit-llvm", metavar="PATH", help="LLVM IR (native M0: 标量子集, docs/144)")
@@ -4208,12 +4257,14 @@ def main(argv: list[str] | None = None) -> int:
         mod = load(path)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
         return 1
 
     try:
         deps = resolve_deps(mod, root, path.parent, entry=path)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
         return 1
 
     errs = check(mod, deps=deps)
@@ -4221,6 +4272,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] {path}: {len(errs)} 项语义错误:", file=sys.stderr)
         for e in errs:
             print("  " + e, file=sys.stderr)
+        # `check()` 的消息带行不带列，所以要切一次前缀（见 `_leading_line`）。
+        write_diags(args.diag_out,
+                    [diag_record(path, _leading_line(e), 0, e) for e in errs])
         return 1
 
     try:
@@ -4230,6 +4284,7 @@ def main(argv: list[str] | None = None) -> int:
             if (args.emit_llvm or args.print_target == "llvm") else ""
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
         return 1
 
     if args.print_target:

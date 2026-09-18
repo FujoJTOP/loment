@@ -425,25 +425,24 @@ def test_m64_all_reference_messages_are_classified():
 
     为什么要这条: 自举 checker 与参考实现的对照判据是"码集相等", 而码是从消息**分类**
     来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E999 被丢掉),
-    缺口会**静默消失**。这里用 ast 把 lomentc.py 里所有 `errs.append(f"...")` 抽出来,
-    逐个渲染成样例消息再分类, 任何一条落到 E999 就算回归。
+    缺口会**静默消失**。这里用 ast 把 lomentc.py 里的消息模板抽出来, 逐个渲染成样例
+    消息再分类, 任何一条落到 E999 就算回归。
+
+    **2026-09-17 补第二个通道**: 原先只抽 `errs.append(...)`（`check()` 的语义错误）,
+    于是 `raise LomError(...)`（词法/解析/装载期）**一条都没被覆盖过** —— 实测 50 条里
+    39 条从来没进过分类表, 而它们恰恰是新手最先撞上的那批（`顶层只允许 …`、
+    `未知顶层关键字 …`、`pub 之后需要一项声明`、`数组长度必须为正`）。
+    判据只盯一个通道, 另一个通道的缺口就是**静默**的 —— 这正是这条判据自己要防的那种事。
     """
     import ast
     import loment_diag
     tree = ast.parse((ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8"))
     numeric = ("line", "col", "len", "lo", "hi", "value")
-    tpls: list[str] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "append" and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "errs"):
-            continue
-        if not node.args:
-            continue
-        arg = node.args[0]
+
+    def sample(arg) -> str | None:
+        """模板表达式 -> 样例消息（数值字段给 1，其余给 Foo）。"""
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            tpls.append(arg.value)
-            continue
+            return arg.value
         if isinstance(arg, ast.JoinedStr):
             parts: list[str] = []
             for v in arg.values:
@@ -452,8 +451,26 @@ def test_m64_all_reference_messages_are_classified():
                 else:
                     src = ast.unparse(v.value)
                     parts.append("1" if any(w in src for w in numeric) else "Foo")
-            tpls.append("".join(parts))
-    assert len(tpls) >= 60, f"抽取到的模板太少, 抽取逻辑可能坏了: {len(tpls)}"
+            return "".join(parts)
+        return None
+
+    tpls: list[str] = []
+    for node in ast.walk(tree):
+        # 通道一: `errs.append(消息)` —— `check()` 的语义错误
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "errs" and node.args):
+            s = sample(node.args[0])
+            if s is not None:
+                tpls.append(s)
+        # 通道二: `raise LomError(行, 列, 消息)` —— 词法/解析/装载期
+        if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and getattr(node.exc.func, "id", "") == "LomError"
+                and len(node.exc.args) >= 3):
+            s = sample(node.exc.args[2])
+            if s is not None:
+                tpls.append(s)
+    assert len(tpls) >= 100, f"抽取到的模板太少, 抽取逻辑可能坏了: {len(tpls)}"
     bad = []
     for t in tpls:
         for line in t.split("\n"):                     # 多行 f-string: 逐行判
@@ -464,6 +481,44 @@ def test_m64_all_reference_messages_are_classified():
                 bad.append(s)
     assert not bad, "未分类的参考消息模板:\n  " + "\n  ".join(sorted(set(bad)))
     print(f"      参考消息模板 {len(tpls)} 条全部有错误码")
+
+
+@test
+def test_m64_structured_diagnostics_are_jsonl():
+    """`--diag-out` 吐的是**一行一条 JSON**，字段齐全，且**两条报错通道都走同一条路**。
+
+    报错器 `lomenterr` 的输入就是它（`docs/182` §5）。这条钉三件：
+
+      * **一行一条**（不是一个大数组）—— 边报边写，崩在半路也已经落盘；
+      * **字段齐全** —— `lomenterr` 靠 `code`/`title`/`hint` 渲染，缺一个它就退化成打字机；
+      * **`check()` 的语义错与 `LomError` 的解析错都要有** —— 只测一条通道，另一条的缺口
+        就是静默的。实测：加上解析那条通道之后，`LomError` 里 39/50 条从没有过错误码。
+    """
+    cases = [
+        # (源码, 期望的码) —— 一条走 check(), 一条走 LomError
+        ("module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n", "E022"),
+        ("module m\n\nfn f() -> u32 {\n    return 1;\n}\n@@@\n", "E019"),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for i, (src, want) in enumerate(cases):
+            f = td / f"c{i}.lomt"
+            f.write_text(src, encoding="utf-8", newline="\n")
+            out = td / f"d{i}.jsonl"
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                                str(f), "--check", "--diag-out", str(out)],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", shell=False, timeout=120)
+            assert r.returncode == 1, (src, r.returncode, r.stderr[-200:])
+            lines = [x for x in out.read_text(encoding="utf-8").splitlines() if x.strip()]
+            assert lines, f"没写出诊断: {r.stderr[-200:]}"
+            recs = [json.loads(x) for x in lines]   # 一行一条，每行都是完整 JSON
+            for d in recs:
+                assert set(d) == set(lomentc.DIAG_FIELDS), (set(d), lomentc.DIAG_FIELDS)
+                assert d["code"] != "E999", d
+                assert d["hint"], d
+            assert recs[0]["code"] == want, (recs[0]["code"], want)
+    print("      结构化诊断: 一行一条 JSON, 字段齐全, check/LomError 两条通道都覆盖")
 
 
 @test
