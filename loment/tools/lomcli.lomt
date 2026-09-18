@@ -1312,6 +1312,15 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wdec(mem, 1, code);
     colr(mem, 1);
     wstr(1, "\n\n  ");
+    // **每个码都先给一行真话**：原先的长文只覆盖 8/23 个码，其余落进一个通用兜底 ——
+    // 用户敲 `loment explain E7` 拿到的是"去 `loment codes` 那张表里找"，而不是这个码
+    // 什么意思。这一行来自 surface_data（真源是 `loment_diag.ASCII_ONE_LINER`），所以
+    // "表里加了新码而 explain 说不出话"不可能再发生。CLI 必须纯 ASCII，所以给 ASCII 那一份；
+    // 中文的完整说明卡由 `loment check` 经报错器渲染（docs/182 §11）。
+    gray(mem, 1);
+    wstr(1, code_ascii(code));
+    colr(mem, 1);
+    wstr(1, "\n");
     if code == 1 {
         wstr(1, "\n  Type mismatch.");
         wstr(1, "\n");
@@ -1375,8 +1384,8 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
         wstr(1, "\n    shows up later as a bogus undefined function (E2) with no hint of the cause.");
     }
     else {
-        wstr(1, "see the table in `loment codes` - this one belongs to one of the");
-        wstr(1, "  categories listed there.");
+        wstr(1, "\n  Full card (what / why / 3+ fixes / supported vs not) is rendered by");
+        wstr(1, " `loment check` - it is in Chinese because the diagnostics are.");
     }
     wstr(1, "\n\n  ");
     gray(mem, 1);

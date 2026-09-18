@@ -55,6 +55,9 @@ const C_NUM: u32 = 57360;        // 十进制暂存 (倒着拼再正着写)
 const C_PREVLEN: u32 = 57376;
 const C_SRCLEN: u32 = 57380;
 const C_TRUNC: u32 = 57384;     // 这一条渲染时撞到了缓冲上沿 (0/1)
+const C_TOK: u32 = 57408;       // 语言特征词的暂存 (一段 <= 60 字节)
+const C_FPREV: u32 = 57472;      // 已经给过外源提示的那个文件路径
+const C_FPREVLEN: u32 = 61568;
 
 // 字符常量走数字, 免得每处都要 `as u8`
 const NL: u32 = 10;
@@ -221,14 +224,23 @@ fn em_u32(ctx: ptr, o: u32, v: u32) -> u32 {
 
 /// 写一段可能**内嵌换行**的文字 (修复建议里有 `\n`)。续行补 gutter 前缀, 不然第二行
 /// 会顶到最左边、看着像另一条诊断。
-fn em_wrapped(ctx: ptr, o: u32, s: str, w: u32) -> u32 {
+/// gutter 前缀：`<w+1 个空格>| `。诊断正文的每一行都从它起头，视觉上挂在源码那一段下面。
+fn em_gut(ctx: ptr, o: u32, w: u32) -> u32 {
+    o = em_pad(ctx, o, w + 1);
+    return em(ctx, o, "| ");
+}
+
+/// 写一段可能**内嵌换行**的文字（说明卡与语言卡里都有）。
+/// **续行补 gutter + `extra` 个空格** —— 不然第二行会顶到最左边，看着像另一条诊断；
+/// 列表项（`1. …`）还要多缩两格，续行才对得齐。
+fn em_wrap(ctx: ptr, o: u32, s: str, w: u32, extra: u32) -> u32 {
     let k: u32 = 0;
     while k < str_len(s) {
         let c: u32 = str_byte(s, k);
         if c == NL {
             o = em(ctx, o, "\n");
-            o = em_pad(ctx, o, w + 1);
-            o = em(ctx, o, "| ");
+            o = em_gut(ctx, o, w);
+            o = em_pad(ctx, o, extra);
         } else {
             o = em_byte(ctx, o, c);
         }
@@ -524,18 +536,299 @@ fn h_msg(ctx: ptr, o: u32, off: u32, n: u32, w: u32) -> u32 {
     return em(ctx, o, "\n");
 }
 
-fn h_hint(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
-    let s: str = code_hint(cnum);
-    o = em_pad(ctx, o, w + 1);
-    o = em(ctx, o, "| 建议: ");
-    if str_len(s) == 0 {
-        // **不静默**: 表里没有这个码就直说 —— 悄悄不打印建议, 看起来像"这条没有建议",
-        // 而真相是"这个码我不认识"。
-        o = em(ctx, o, "这个码不在表面数据表里 —— 工具链的版本可能不一致。");
-        return em(ctx, o, "按上面的消息原文判断; 若确属新码, 请报告。\n");
+/// 一条诊断的说明卡：错了什么 / 为什么错 / 怎么改 / 支持与不支持。
+///
+/// **判据是"查出来的文字空不空"**：表里没有这个码时四段一起缺席，由 `h_unknown` 顶上，
+/// 而不是渲染出一条"只有标题"的残件 —— 残件会让用户以为"这条没有更多可说的了"。
+fn h_card(ctx: ptr, o: u32, cnum: u32, w: u32) -> u32 {
+    let nfix: u32 = code_nfix(cnum);
+    if nfix == 0 {
+        return h_unknown(ctx, o, w);
     }
-    o = em_wrapped(ctx, o, s, w);
+    o = h_sect(ctx, o, w, "错了什么", code_what(cnum));
+    o = h_sect(ctx, o, w, "为什么错", code_why(cnum));
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "怎么改:\n");
+    let i: u32 = 0;
+    while i < nfix {
+        o = em_gut(ctx, o, w);
+        o = em(ctx, o, "  ");
+        o = em_u32(ctx, o, i + 1);
+        o = em(ctx, o, ". ");
+        o = em_wrap(ctx, o, code_fix(cnum, i), w, 2);
+        o = em(ctx, o, "\n");
+        i = i + 1;
+    }
+    o = h_sect(ctx, o, w, "支持", code_yes(cnum));
+    o = h_sect(ctx, o, w, "不支持", code_no(cnum));
+    return o;
+}
+
+/// 表里没有这个码：**明说**，并把"该用什么判断"交代清楚。
+fn h_unknown(ctx: ptr, o: u32, w: u32) -> u32 {
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "这一条没有说明卡 —— 这个码不在表面数据表里。\n");
+    o = em_gut(ctx, o, w);
+    return em(ctx, o, "工具链的版本可能不一致（旧报错器遇上新编译器）。按上面的消息原文判断；若确属新码，请报告。\n");
+}
+
+/// 一段"标签: 值"，值里内嵌的换行按 gutter 缩进。值为空就整段不印。
+fn h_sect(ctx: ptr, o: u32, w: u32, label: str, s: str) -> u32 {
+    if str_len(s) == 0 {
+        return o;
+    }
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, label);
+    o = em(ctx, o, ": ");
+    o = em_wrap(ctx, o, s, w, 0);
     return em(ctx, o, "\n");
+}
+
+// ---------------------------------------------------------------- 外源语言 (docs/188 §7.1)
+
+/// 在 `[0,hn)` 里找 `needle` 的第一次出现。**-1 = 没有**（u32 表达不了"比 0 还小"）。
+fn sub_find(hay: ptr, hn: u32, np: ptr, nn: u32) -> i64 {
+    if nn == 0 || nn > hn {
+        return 0 as i64 - 1;
+    }
+    let i: u32 = 0;
+    while i + nn <= hn {
+        let j: u32 = 0;
+        let ok: u32 = 1;
+        while j < nn && ok == 1 {
+            if load8(hay, i + j) != load8(np, j) {
+                ok = 0;
+            } else {
+                j = j + 1;
+            }
+        }
+        if ok == 1 {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 1;
+}
+
+/// `lang_tokens(i)` / `lang_exts(i)` 都是**分隔串**（`|` 与空格）。这一段抄进暂存区 ——
+/// `sub_find` 要的是指针，而源串在字面量里、没法直接切片。
+fn seg_copy(ctx: ptr, s: str, off: u32, len: u32) -> u32 {
+    let k: u32 = 0;
+    while k < len && k < 60 {
+        store8(ctx, C_TOK + k, str_byte(s, off + k) as u8);
+        k = k + 1;
+    }
+    return k;
+}
+
+/// 命中点是不是在**行首**（前面只有空白）？
+///
+/// **为什么要这一条**：特征词是给"这个文件根本不是 Loment"用的, 而注释里写一句
+/// `def ` / `use std::` 太容易了 —— 一份正经 Loment 文件只要有一条语法错, 就会
+/// 被自己的注释带成"这看起来是 Python", 然后在真正的诊断后面挂一段几百字的建议。
+/// 真实的签名行（`#include` / `def ` / `func ` / `public class` / `use std::`）**都在行首**,
+/// 所以这一条几乎不损失命中率。**`/` 不算空白** —— 正是为了把 `// def ...` 这种注释挡掉。
+fn line_lead_ok(sr: ptr, k: u32) -> u32 {
+    let i: u32 = k;
+    while i > 0 {
+        let c: u32 = load8(sr, i - 1);
+        if c == NL {
+            return 1;
+        }
+        if is_blank(c) == false {
+            return 0;
+        }
+        i = i - 1;
+    }
+    return 1;
+}
+
+/// 源里有没有出现这个语言的特征词（特征词之间用 `|` 分）。
+fn tok_hit(ctx: ptr, sr: ptr, srl: u32, toks: str) -> u32 {
+    let n: u32 = str_len(toks);
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i <= n {
+        if i == n || str_byte(toks, i) == 124 {
+            if i > s {
+                let m: u32 = seg_copy(ctx, toks, s, i - s);
+                let at: i64 = sub_find(sr, srl, ptr_add(ctx, C_TOK), m);
+                if at >= 0 && line_lead_ok(sr, at as u32) == 1 {
+                    return 1;
+                }
+            }
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 逐门语言问"内容里有没有它的特征词"。返回语言下标，`0xFFFFFFFF` = 认不出。
+fn lang_by_tokens(ctx: ptr, sr: ptr, srl: u32) -> u32 {
+    let i: u32 = 0;
+    while i < lang_count() {
+        if tok_hit(ctx, sr, srl, lang_tokens(i)) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 文件路径里的后缀区间 `(start << 32) | len`（相对 `C_PATH`）。没有 `.` 就是 u64 最大值。
+fn ext_of(ctx: ptr, plen: u32) -> u64 {
+    let i: u32 = plen;
+    while i > 0 {
+        let c: u32 = load8(ctx, C_PATH + i - 1);
+        if c == 46 {
+            return ((i - 1) as u64) * 4294967296 + (plen - (i - 1)) as u64;
+        }
+        if c == 47 || c == 92 {
+            return 18446744073709551615 as u64;
+        }
+        i = i - 1;
+    }
+    return 18446744073709551615 as u64;
+}
+
+/// 后缀命中哪门语言（`lang_exts(i)` 是空格分隔的）。没有就是 `0xFFFFFFFF`。
+fn lang_by_ext(ctx: ptr, so: u32, sl: u32) -> u32 {
+    let li: u32 = 0;
+    while li < lang_count() {
+        let exts: str = lang_exts(li);
+        let n: u32 = str_len(exts);
+        let s: u32 = 0;
+        let i: u32 = 0;
+        while i <= n {
+            if i == n || str_byte(exts, i) == 32 {
+                if i - s == sl && sl > 0 {
+                    let k: u32 = 0;
+                    let same: u32 = 1;
+                    while k < sl && same == 1 {
+                        if load8(ctx, C_PATH + so + k) != str_byte(exts, s + k) {
+                            same = 0;
+                        } else {
+                            k = k + 1;
+                        }
+                    }
+                    if same == 1 {
+                        return li;
+                    }
+                }
+                s = i + 1;
+            }
+            i = i + 1;
+        }
+        li = li + 1;
+    }
+    return 4294967295;
+}
+
+/// 这个文件看起来是哪门源语言？`0xFFFFFFFF` = 认不出（多半本来就是 Loment）。
+///
+/// **两条路，各有各的理由**:
+///   * **后缀**先看 —— 一份 `.java` 无论里面写了什么，都该按 Java 说（与
+///     `potato_from.resolve_lang` 同一条口径）；
+///   * **内容**兜底**只用在语法错上** —— 那才是"它可能根本不是 Loment"的信号。
+///     一份语法正确的 Loment 文件报语义错时按内容闻，会被注释里的一句 `import` 带跑。
+fn sniff_lang(ctx: ptr, sr: ptr, srl: u32, cnum: u32, plen: u32) -> u32 {
+    let ex: u64 = ext_of(ctx, plen);
+    if ex != 18446744073709551615 as u64 {
+        let li: u32 = lang_by_ext(ctx, (ex / 4294967296) as u32, (ex % 4294967296) as u32);
+        if li != 4294967295 {
+            return li;
+        }
+    }
+    if srl == 0 || cnum != 19 {
+        return 4294967295;
+    }
+    return lang_by_tokens(ctx, sr, srl);
+}
+
+/// 打印文件路径的**主干**（去掉后缀）—— 给 `--out <主干>.iface.lomt` 用。
+fn em_stem(ctx: ptr, o: u32, plen: u32) -> u32 {
+    let ex: u64 = ext_of(ctx, plen);
+    let n: u32 = plen;
+    if ex != 18446744073709551615 as u64 {
+        n = (ex / 4294967296) as u32;
+    }
+    let k: u32 = 0;
+    while k < n {
+        o = em_byte(ctx, o, load8(ctx, C_PATH + k));
+        k = k + 1;
+    }
+    return o;
+}
+
+/// 文件路径原样打一遍（两侧带引号，命令里能直接照抄）。
+fn em_qpath(ctx: ptr, o: u32, plen: u32) -> u32 {
+    o = em_byte(ctx, o, 34);
+    let k: u32 = 0;
+    while k < plen {
+        o = em_byte(ctx, o, load8(ctx, C_PATH + k));
+        k = k + 1;
+    }
+    return em_byte(ctx, o, 34);
+}
+
+/// 外源语言那一段：**这门语言是什么、三条进来路、它的边界、调用约定**。
+///
+/// **语言是提示不是结论**：判定权在翻译器的 `--lang auto`（它跑 `potato_from.detect_lang`），
+/// 所以命令一律带 `--lang auto`，最后一行也把这句话说明。说死一句错的语言，用户会拿着
+/// 错的命令去试 —— 那比不说还坏。
+fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "这个文件看起来**不是 Loment** —— 看内容像 ");
+    o = em(ctx, o, lang_name(li));
+    o = em(ctx, o, "。它有三条路进来（都不动 Loment 内核）:\n");
+
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "  A. 只出接口单元（实现在源语言那一侧，配外面编好的目标文件用）:\n");
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "       python tools/lomt_from.py ");
+    o = em_qpath(ctx, o, plen);
+    o = em(ctx, o, " --lang auto --out ");
+    o = em_stem(ctx, o, plen);
+    o = em(ctx, o, ".iface.lomt\n");
+
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "  B. 把正文翻成 Loment 实现:\n");
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "       python tools/lomt_from.py ");
+    o = em_qpath(ctx, o, plen);
+    o = em(ctx, o, " --lang auto --impl --out ");
+    o = em_stem(ctx, o, plen);
+    o = em(ctx, o, ".impl.lomt\n");
+
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "  C. 运行期桥（机器上有那个解释器时）: `use proc` + `proc_sh(\"…\")`\n");
+    o = em_gut(ctx, o, w);
+    o = em(ctx, o, "       —— 只在 Linux/ELF 上可用（PE 垫片没有 fork/pipe）。\n");
+
+    o = h_sect(ctx, o, w, "这门语言的边界", lang_edge(li));
+    o = h_sect(ctx, o, w, "调用约定", lang_abi(li));
+    o = em_gut(ctx, o, w);
+    return em(ctx, o, "语言以 `--lang auto` 为准 —— 上面只是按内容给的提示，别拿它当结论。\n");
+}
+
+/// 这个文件已经给过外源提示了吗（**一个文件只给一次** —— 一段几百字的建议重复 N 遍
+/// 会把真正的诊断挤没）。
+fn foreign_seen(ctx: ptr, plen: u32) -> u32 {
+    let pv: u32 = load32(ctx, C_FPREVLEN);
+    if pv == plen && bytes_eq(ptr_add(ctx, C_FPREV), pv, ptr_add(ctx, C_PATH), plen) == true {
+        return 1;
+    }
+    return 0;
+}
+
+fn foreign_remember(ctx: ptr, plen: u32) {
+    let k: u32 = 0;
+    while k < plen && k < PATH_CAP {
+        store8(ctx, C_FPREV + k, load8(ctx, C_PATH + k) as u8);
+        k = k + 1;
+    }
+    store32(ctx, C_FPREVLEN, plen);
 }
 
 // ---------------------------------------------------------------- 入口
@@ -558,6 +851,7 @@ fn _start() -> u32 {
     let ab: ptr = abv as ptr;
     store32(ctx, C_PREVLEN, 0);
     store32(ctx, C_SRCLEN, 0);
+    store32(ctx, C_FPREVLEN, 0);
 
     let av: u64 = argv1(ab, 65536, sc);
     if av == 0 {
@@ -591,8 +885,7 @@ fn _start() -> u32 {
                 // **不静默**: 解析不了就原样吐出来 —— 悄悄跳过会让"报错器什么都没说"
                 // 看起来像"没有错误"。
                 broken = broken + 1;
-                let ob: u32 = 0;
-                let o1: u32 = em(ctx, ob, "[lomenterr] 诊断文件里这一行不是合法 JSON, 原样输出:\n  ");
+                let o1: u32 = em(ctx, 0, "[lomenterr] 诊断文件里这一行不是合法 JSON, 原样输出:\n  ");
                 let k: u32 = s;
                 let o2: u32 = o1;
                 while k < e {
@@ -622,8 +915,17 @@ fn _start() -> u32 {
                     o3 = h_nosrc(ctx, o2, w, plen);
                 }
                 let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                let o5: u32 = h_hint(ctx, o4, cnum, w);
-                write_all(2, ctx, em(ctx, o5, "\n") as u64);
+                let o5: u32 = h_card(ctx, o4, cnum, w);
+                let srl: u32 = load32(ctx, C_SRCLEN);
+                let o6: u32 = o5;
+                if have == 1 && foreign_seen(ctx, plen) == 0 {
+                    let li: u32 = sniff_lang(ctx, sr, srl, cnum, plen);
+                    if li != 4294967295 {
+                        o6 = h_foreign(ctx, o5, li, w, plen);
+                        foreign_remember(ctx, plen);
+                    }
+                }
+                write_all(2, ctx, em(ctx, o6, "\n") as u64);
                 if load32(ctx, C_TRUNC) == 1 {
                     let cut: str = "[lomenterr] 这一条太长, 上面的渲染被截断了\n";
                     write_all(2, str_ptr(cut), str_len(cut) as u64);

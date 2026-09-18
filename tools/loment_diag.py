@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -193,6 +194,432 @@ def code_num(code: str) -> int:
     return int(code[1:]) if len(code) > 1 and code[0] == "E" and code[1:].isdigit() else 0
 
 
+# ================================================================== 说明卡
+#
+# `RULES` 管**分类**（哪条消息属于哪个码），这里管**解释** —— 报错器渲染的就是这五块:
+#
+#     错了什么 / 为什么错 / 怎么改（至少 3 条）/ 支持 / 不支持
+#
+# **两张表的键必须相等**（判据钉着）：加了一个码却没写卡, 报错器就会渲染出一条“只有标题”的
+# 诊断 —— 那种残件比不报还坏, 因为用户会以为“这条没有更多可说的了”。
+#
+# 写法上的三条自律（都是被实测逼出来的）:
+#   * **`what` 一句话说清“是什么”**, 不要复述消息原文（原文已经渲染在上面了）;
+#   * **`why` 说语言的规则**, 不是复述 `what`。用户看完要能自己判断**下一个**同类错;
+#   * **`fixes` 每条都是能照做的一步**, 不是“检查一下”。三条的门槛是用户定的:
+#     只给一条等于没有选择, 给三条才是“你自己按情况挑”。
+
+
+@dataclass(frozen=True)
+class Card:
+    """一个码的说明卡。字段顺序 = 渲染顺序。"""
+
+    what: str
+    why: str
+    fixes: tuple[str, ...]
+    yes: str
+    no: str
+
+
+CARDS: dict[int, Card] = {
+    1: Card(
+        what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
+        why="Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。"
+            "所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。",
+        fixes=(
+            "照签名改一侧：看函数声明的返回类型/形参类型，把表达式改成那一侧。",
+            "整型宽度不同就显式写 `as`：`x as u64`、`n as i32`（整数⇄整数、整数⇄布尔、指针⇄整数都可以）。",
+            "布尔与整数分开：条件位置写 `x != 0` 或 `true`，不要指望 `1` 能当 `true`。",
+            "数组/结构体的元素类型要统一，逐个 `as` 或加一个转换函数。",
+        ),
+        yes="显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型",
+        no="隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用",
+    ),
+    2: Card(
+        what="用了一个没有声明的名字 —— 变量、函数、类型、常量都算。",
+        why="这是**新手撞得最多**的一条，而它在 Loment 里几乎总是同一件事："
+            "**没有类型推断** —— `let x = 1;` 是语法错，必须 `let x: u32 = 1;`。"
+            "其次是**先定义后使用**（同一模块内），以及跨模块要 `pub` 导出 + `use` 导入。",
+        fixes=(
+            "补类型标注：`let x: u32 = 1;`（`let` 不带类型是 **E19 语法错**，但很容易被当成这条）。",
+            "拼错了就改拼写；跨模块调用给声明加 `pub`，调用方补 `use <模块名>` 或 `use “./x.lomt”`。",
+            "泛型函数的实参要能把 `T` 定出来：先 `let a: u32 = 4;` 再 `pick(a, b)` —— 直接传整数字面量会报这条，消息有误导。",
+            "确实是别处来的名字：用路径形式 `use “./util.lomt”` 指明位置。",
+        ),
+        yes="泛型（调用点能定出 T 时）／trait 静态派发／`pub` 跨模块／两种 `use`",
+        no="类型推断／隐式全局／同一模块内的前向引用／隐式数值转换",
+    ),
+    3: Card(
+        what="调用时给的实参个数与函数签名对不上。",
+        why="形参最多 **10 个**；方法调用的 `self` **不计入**实参；Loment 没有默认参数、没有可变参数、"
+            "也没有重载 —— 名字不同就是不同函数。",
+        fixes=(
+            "照着签名数一遍，多的删、缺的补。",
+            "方法调用别把 `self` 算进去（`obj.m(a)` 是 1 个实参，不是 2 个）。",
+            "想写重载就换个名字：`parse_int` / `parse_float` —— Loment 按名字解析，同名不同参不允许。",
+        ),
+        yes="最多 10 个形参；方法调用的 `self` 由编译器补",
+        no="默认参数／可变参数／函数重载",
+    ),
+    4: Card(
+        what="能力域本身有问题 —— 没声明就 `guard`、`[lo..hi]` 的边界不对、同名重复声明。",
+        why="能力域是 Loment 唯一“新加的东西”：`capability c : space[lo..hi]` 声明一个**索引域**，"
+            "`guard c(i);` 检查 `i` 落在域内（字面量越界是**编译期错**，其余是运行期 trap）。"
+            "所以域必须**先声明**、`lo <= hi`、同一空间同一个名字只声明一次。",
+        fixes=(
+            "在模块顶层补声明：`capability c : disk[0..4]`（`c` 是名字，`disk` 是空间名）。",
+            "边界反了就调正：必须 `lo <= hi`（`[0..4]` 是 0,1,2,3,4 五个值）。",
+            "重名就改名；同一空间可以有多个域，各用各的名字。",
+            "索引是字面量且越界：改索引或把域放大 —— 这是编译期检查，不是运行期。",
+        ),
+        yes="`capability` + `guard`；`revocable` 标；字面量越界的编译期检查",
+        no="**授权** —— `guard` 只约束索引落在域内，不检查“当前主体有没有这个能力”（主体-能力的绑定在内核侧）",
+    ),
+    5: Card(
+        what="用了一个被 `excluded` 声明**排除在外**的空间。",
+        why="`excluded “space: ...”` 是**出界声明**：它把一个空间从“本程序可以碰的”里拿掉，"
+            "是给安全审计看的一份承诺。于是再用那个空间就与自己的承诺冲突 —— 这是**故意的**，"
+            "不是编译器挑剔。",
+        fixes=(
+            "删掉那条 `excluded`（如果那份承诺本来就不该有）。",
+            "换一个没有被排除的空间来声明能力域。",
+            "保留承诺、把用到它的那处改掉 —— 能力域本来就是用来把访问收在明确范围内的。",
+        ),
+        yes="`excluded “<space>: ...”` 出界声明；多个能力域各占各的空间",
+        no="局部豁免（“只在这一处放行”做不到）；对同一个空间既排除又使用",
+    ),
+    6: Card(
+        what="一个值被**移动**给别人之后，又用它了。",
+        why="Loment 的聚合类型（`struct` / `enum`）默认是**移动**语义：按值传进函数、按值赋给另一个变量，"
+            "都相当于把所有权交出去。**全字段是整型**的类型自动按 `Copy` 处理，不会报这条。",
+        fixes=(
+            "改成传引用：`f(&v)` 或 `f(&mut v)` —— 最常用的改法。",
+            "确实要留一份：先在**移动之前**把需要的字段拷到新变量，再传。",
+            "让类型变成可 `Copy` 的：字段全用整型（`u32`/`i64`/`bool`…），去掉里面的字符串/切片/指针。",
+            "把所有权安排清楚：让它最后被用到的那一处消费，前面都用引用。",
+        ),
+        yes="显式 `&` / `&mut`；全字段整型的聚合自动 `Copy`",
+        no="隐式复制聚合；移动后再使用同一个值",
+    ),
+    7: Card(
+        what="同一个变量在同一次调用里，既被可变借用又被借用，或者被可变借用两次。",
+        why="`&mut` 是**独占**借用（与 Rust 同一套规则）：可变借用存在期间，别的借用（包括只读的）"
+            "都不能同时存在。这不是性能问题，是“谁能改它”的答案必须唯一。",
+        fixes=(
+            "只留一种借用：把 `&a, &mut a` 改成两次都用 `&a`（只读），或都改成 `&mut`。",
+            "先把值取出来再传：`let n: u32 = a.x;` 然后传 `&mut a, n`。",
+            "把一句话拆成两句：先读完、把结果存进变量，再做可变借用。",
+            "要同时读写同一块，就按“读出来 → 算 → 写回去”三段写。",
+        ),
+        yes="同一作用域里多个**只读**借用；一次可变借用",
+        no="可变借用与任何其它借用并存；同一变量的两次可变借用",
+    ),
+    8: Card(
+        what="`match` 或枚举的用法有问题：不穷尽、模式重复、载荷绑定不对、主体不是枚举、臂体写成了表达式。",
+        why="`match` 必须**穷尽**（或者有 `_` 兜底）；**臂体是块**、不是表达式；"
+            "带载荷的变体模式要绑变量、无载荷的不能带括号；"
+            "**泛型枚举**的模式要用**单态化之后**的名字（`Result_i64_u32::Ok(v)`），不是 `Result::Ok(v)`。",
+        fixes=(
+            "臂体写成块：`E::A => { return 0; }`（写成 `E::A => 0,` 是 E19 语法错）。",
+            "加一条 `_ => { ... }` 兜底，或把剩下的变体补全 —— 枚举加了变体之后这里就会红，这是故意的。",
+            "泛型枚举用单态化名：`Result_i64_u32::Ok(v)` / `Result_i64_u32::Err(e)`（先看值的类型定宽）。",
+            "载荷跟着变体走：`Kind::Big(w)` 要绑 `w`，`Kind::Small` 不能写 `Kind::Small()`。",
+        ),
+        yes="`match` / `if let` / 单载荷变体 / `_` 兜底 / 泛型枚举（用单态化名）",
+        no="臂体是表达式；多载荷变体；非穷尽且没有 `_`；`==` 直接比较枚举（checker 放行但原生后端会拒）",
+    ),
+    9: Card(
+        what="类型名与基类型重名，或者声明了一个**空**的 `struct`/`enum`。",
+        why="`u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str` 是**基类型名**，用户类型再叫这些名字，"
+            "后面就没法区分了。空聚合同理：一个字段/变体都没有的类型表达不了任何东西，"
+            "**当错误拒掉比让它悄悄存在好** —— 它多半是写了一半。",
+        fixes=(
+            "改名，别与基类型撞：`U32Box` / `Id` / `Amount`（带语义的名字比 `U32` 更该用）。",
+            "`struct` 加字段；只是“先占个位”就等有字段了再声明。",
+            "`enum` 至少给一个变体；空枚举连 `match` 都写不出来。",
+        ),
+        yes="任意多字段的 `struct`；任意多变体的 `enum`（含单载荷）",
+        no="与基类型重名；空 `struct`；空 `enum`",
+    ),
+    10: Card(
+        what="`?` 用在了不返回 `Result`/`Option` 的地方，或者不在 `let` 的绑定位置。",
+        why="`?` 的语义是“**错了就直接返回，对了就取出载荷**” —— 所以它要求两件事："
+            "当前函数返回 `Result`（或 `Option`），而且 `?` 只能出现在 `let x: T = expr?;` 的绑定位置。"
+            "它不是一个“忽略错误”的记号。",
+        fixes=(
+            "把当前函数的返回类型改成 `Result<..., ...>`（或 `Option<...>`）。",
+            "不用 `?`，显式 `match` 两个分支各写一段 —— 想在原地处理错误时用这条。",
+            "把 `?` 挪到绑定位置：`let v: u32 = f()?;` 而不是 `g(f()?);`。",
+        ),
+        yes="`Result` / `Option` / 绑定位置的 `?` / `match` 显式处理",
+        no="在非 `let` 位置用 `?`；在返回非 `Result`/`Option` 的函数里用 `?`",
+    ),
+    11: Card(
+        what="往一个**只读**切片里写，或者形参没声明 `mut`。",
+        why="`fn f(xs: [u32])` 拿到的是**只读**切片 —— 切片是“借来的视野”，能不能写由形参类型决定。"
+            "要写就得 `mut [u32]`，而调用处必须传 `&mut arr`（只读切片没人能借成可写的）。",
+        fixes=(
+            "形参改 `mut [u32]`。",
+            "调用处改 `&mut arr`（原来大概是 `&arr`）。",
+            "不改原数组：把切片内容复制到一个本地数组，改完再自己决定怎么用。",
+        ),
+        yes="`[T]`（只读）与 `mut [T]`（可写）两种切片；`&arr` / `&mut arr` 两种传法",
+        no="在只读切片上写；把 `&arr` 借成可写的",
+    ),
+    12: Card(
+        what="返回了一个指向**局部变量**的引用。",
+        why="局部变量在函数返回时就不存在了，返回给它的引用必然悬垂。所以能安全返回的引用，"
+            "只能来自**形参**（或来自调用方传进来的内存）—— 这是生命周期规则在 Loment 里的落点。",
+        fixes=(
+            "返回值本身（按值返回）—— 最直接的一条。",
+            "让调用方分配：形参收 `&mut`，把结果写进调用方给的内存。",
+            "返回不依赖内存的信息：下标、长度、是否命中（`bool`）。",
+            "确实要返回切片：让它指向形参而不是局部（`fn f(xs: [u32]) -> [u32] { return xs; }`）。",
+        ),
+        yes="返回来自形参的引用/切片；按值返回",
+        no="返回指向局部变量的引用或切片",
+    ),
+    13: Card(
+        what="同一作用域里同一个名字出现了两次 —— 函数、类型、常量、字段、变体、参数都算。",
+        why="`use` 是**平名字空间**：一个单元里的顶层名字必须唯一，所以**两个库也不能有同名顶层项**。"
+            "这也是为什么 std 里的公开名字都带前缀（`json_parse` / `sha256_hex`）——"
+            "不带的迟早会撞。",
+        fixes=(
+            "重命名其中之一（最省事）。",
+            "给名字加所属前缀：`json_parse` / `sha_parse`，撞名的可能立刻消失。",
+            "两个库确实都要用：把其中一个的调用点改成路径形式 `use “./x.lomt”` 并改名导入后的符号。",
+            "结构体字段/枚举变体重名：按语义改（`width`/`height` 而不是两个 `size`）。",
+        ),
+        yes="一个单元里任意多模块/函数/类型，只要名字不撞",
+        no="同名顶层项共存；两个库同时导出同一个名字",
+    ),
+    14: Card(
+        what="赋值左边不是一个能放东西的位置（不是左值）。",
+        why="只有**变量、字段、下标**可以被赋值 —— 它们指向一块确定的内存。"
+            "表达式的结果（`a + b`、函数返回值）没有地址，所以放不了东西。",
+        fixes=(
+            "先把结果存进变量，再改那个变量。",
+            "目标写成 `arr[i]` 或 `s.field` 这种“有位置”的形式。",
+            "想改切片元素：把切片形参声明成 `mut [T]`（否则连 `arr[i] = x` 都写不了）。",
+        ),
+        yes="变量、结构体字段、数组/切片下标赋值",
+        no="给表达式或字面量赋值（`1 = x`、`f() = x`）",
+    ),
+    15: Card(
+        what="字段或下标用错了 —— 没有这个字段、缺字段、重复初始化、对非结构体取字段、对非数组取下标。",
+        why="结构体字面量的字段要**齐全且不重复**（没有默认值这回事）；"
+            "`.` 只能用在结构体上，`[]` 只能用在数组/切片上，`&`/`&mut` 只能作用于数组或切片。"
+            "另外两条形状上的规矩：**结构体字面量不能直接当实参**，**条件位置不能直接写结构体字面量**。",
+        fixes=(
+            "照声明补齐字段（名字和类型都要对）—— 缺哪个补哪个，多哪个删哪个。",
+            "结构体字面量先落到变量：`let s: S = S { a: 1 };` 再 `f(s)`（当实参直接写会被后端拒）。",
+            "条件里要用字段：加括号 `if (s.a) { }` —— 不然 `if s { }` 的歧义按 Rust 规则消解。",
+            "取切片写 `&arr`（整块），`&arr[i]` 是取单个元素的地址，不是切片。",
+        ),
+        yes="字段读写、下标读写、`&arr` 取切片、结构体字面量（先绑变量）",
+        no="结构体字面量直接当实参；条件位置直接写结构体字面量；缺字段/多字段字面量",
+    ),
+    16: Card(
+        what="数组字面量有问题 —— 是空的、元素类型不一致、或者个数与声明长度不符。",
+        why="`let xs: [u32; 3] = [1, 2, 3];` —— **长度是类型的一部分**，所以个数必须写死对得上，"
+            "没有“按字面量长度自动推断”这回事（那需要类型推断，而 Loment 没有）。",
+        fixes=(
+            "让个数等于声明长度：声明 `[u32; 3]` 就给三个。",
+            "元素类型统一：混了 `u32` 与 `i32` 就逐个 `as` 成同一种。",
+            "空字面量不行：给个长度，或者改用切片参数 `[T]` 加 `&xs` 传进来。",
+            "长度要变：那是切片不是数组 —— 形参写 `[T]`，调用处 `&arr`。",
+        ),
+        yes="定长数组 `[T; N]`；字面量 `[1, 2, 3]`；下标读写",
+        no="空字面量；按字面量推断长度；元素类型不一致的数组",
+    ),
+    17: Card(
+        what="`as` 的目标类型不对，或者这个方向转不过去。",
+        why="`as` 只做**位级**的转换：整数⇄整数、整数⇄布尔、指针⇄整数。"
+            "别的（字符串→数字、结构体→结构体）不是“转换”而是“解析/构造”，必须写出过程来。",
+        fixes=(
+            "目标改成基类型：`u8..u64` / `i8..i64` / `bool` / `ptr`。",
+            "两个结构体之间要转：写一个显式函数，逐字段搬（顺便想清楚缺的字段怎么办）。",
+            "字符串→数字：自己写解析循环（`str_byte` 逐字节，累加），没有内建 `parse`。",
+            "整数→字符串：照 `write_dec` 的写法（取余 + 反序），也没有内建格式化。",
+        ),
+        yes="整数⇄整数、整数⇄布尔、指针⇄整数的 `as`",
+        no="聚合之间的 `as`；字符串与数字之间的 `as`（要自己写解析）",
+    ),
+    18: Card(
+        what="`use <名字>` 解析不出来 —— 要么找不到，要么命中多处不知道用哪个。",
+        why="名字形式按**层**搜：① 项目本地 `deps/<名字>/<名字>.lomt` → ② 工具链自带 store → "
+            "③ 内置四根（`loment/lib` → `examples` → `selfhost` → `tools`）。"
+            "**前两层先命中先用**，唯一性只管第 ③ 层。所以撞名的症状通常是“我以为是另一个”。",
+        fixes=(
+            "补文件到该在的位置（`deps/<名字>/<名字>.lomt` 是最正规的落点）。",
+            "改名字，别与内置根里的模块撞（第 ③ 层命中多处就是名字起坏了）。",
+            "用路径形式指明位置：`use “./util.lomt”` —— 路径形式不参与这套搜索。",
+            "循环导入：把两边都要用的部分抽成第三个文件，两边都 `use` 它。",
+        ),
+        yes="两种 `use`（名字 / 路径）；单文件最多 300 条；按层搜索 + 前缀优先",
+        no="第 ③ 层的歧义；循环导入；超过 300 条（那是 E020）",
+    ),
+    19: Card(
+        what="这一行按 Loment 的语法读不通 —— 词法期或解析期就停了。",
+        why="Loment 是 **Rust 的严格子集**，但它**去掉了**几样东西：单引号字符字面量、"
+            "无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。"
+            "照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。",
+        fixes=(
+            "按消息给的 `行:列` 看那一处（`@@@`、单引号、`#` 这类符号先查 `loment syntax`）。",
+            "`match` 臂改成块：`E::A => { return 0; }`。",
+            "`return` 补值：`return 0;`（Loment 没有 `return;`）。",
+            "`let` 补类型：`let x: u32 = 1;`；本地变量不要写 `mut`（那是普通标识符，不是关键字）。",
+        ),
+        yes="Rust 子集那套语法；`//` `/* */` 注释；`let x: T = e;`",
+        no="单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）",
+    ),
+    20: Card(
+        what="一个文件里的 `use` 超过了 **300 条**。",
+        why="这是一道**防静默丢**的闸门：自举镜像里那个暂存区原来就那么大，超出的会被悄悄丢掉，"
+            "于是同一份源码在参考实现与自举镜下**给出不同的单元**。现在两边都是 300，超限报错 ——"
+            "宁可报错也不要“少了一块但看起来编过了”。",
+        fixes=(
+            "把门面拆小：`core.lomt` 拉一半、`ext.lomt` 拉另一半，用的人按需 `use`。",
+            "只 import 真正要用的门面（不用把整个库塞进一个文件）。",
+            "确实很多：按层次组织（每一层只 `use` 下一层的几个），别做成一个几百条的表。",
+        ),
+        yes="单文件最多 300 条 `use`（路径形式 + 名字形式合起来算）",
+        no="超过 300 条（超限是**报错**，不是截断）",
+    ),
+    21: Card(
+        what="`extern fn` 的签名超出了 FFI 第 1 阶段收的那几种。",
+        why="第 1 阶段只收**标量**（`i8..i64` / `u8..u64` / `bool`）与 `ptr`。"
+            "`str` 在 Loment 里是“**指针 + 长度**”，**不是** C 字符串，两者不通用；"
+            "结构体/枚举按值传要另一套寄存器分类规则 —— 都会**改变调用点的代码形状**，"
+            "所以一律报错退出而不是静默错编。",
+        fixes=(
+            "换成标量或 `ptr`；不返回就省略 `-> T`（那样就是 void）。",
+            "要传字符串：自己在内存里拼一个 **NUL 结尾**的字节串，形参写 `ptr`（C 那边按 `char*` 收）。",
+            "要传结构体：改成传指针，或者把字段拆成几个标量参数。",
+            "需要泛型：`extern fn` **不能带类型参数** —— 在 Loment 侧包一层泛型函数，里面调具体的那条。",
+        ),
+        yes="标量与 `ptr` 的形参/返回；多个 `--link`；调用点走平台 C ABI（Linux 前六个整数实参进 rdi/rsi/rdx/rcx/r8/r9；Windows 进 rcx/rdx/r8/r9）",
+        no="`str` 形参/返回（那是“指针+长度”，不是 C 字符串）；结构体/枚举/数组**按值**；`extern fn` 带类型参数；PE 目标的 FFI；`.a` 归档与 `.so`/`.dll` 动态库",
+    ),
+    22: Card(
+        what="开关（`choose`）或核心模式（`std`/`no_std`）的写法不对。",
+        why="这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、"
+            "只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，"
+            "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
+            "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。",
+        fixes=(
+            "核心模式只写一次，而且只在入口那一份：`choose std` 或 `choose no_std`。",
+            "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。",
+            "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。",
+            "库里的 `choose` 搬到根单元去（库这一侧改成声明能力域）。",
+            "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。",
+        ),
+        yes="单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域",
+        no="核心模式写两次或写在库里；取值前没定义；同名两个取值；嵌套声明；库写 `choose` 或 `addin`",
+    ),
+    23: Card(
+        what="你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。",
+        why="参考实现有两条后端：一条 Rust 转译路径走得远，原生 IR 路径（M0 起）是**逐块补**出来的。"
+            "这条消息来自后者 —— 所以它**不是你的错**，把它当成“设计上还没到这里”看。"
+            "这也是它单独一个码的理由：用户能做的事（换个写法绕开）与“照建议改那一行”完全不同。",
+        fixes=(
+            "换个写法绕开：用循环 + 数组代替还没支持的表达式，或用内建能做的那几种形态。",
+            "查进度：`docs/145` 的里程碑表里看这一块排在哪一档。",
+            "绕不开就报告：附上这条消息 + 最小可复现的那个文件（`loment ir` 的输出也有用）。",
+        ),
+        yes="标量运算、控制流、字符串、数组、切片、结构体、枚举（`match`）—— 按值传聚合看目标后端",
+        no="**这条消息本身就是“不支持”** —— 具体范围以 `docs/145` 的里程碑表为准，不在源码那一侧",
+    ),
+}
+
+
+# ================================================================== 语言卡
+#
+# 与**六语言翻译线**（`docs/186` C · `docs/187` Python · `docs/188` §7.1 的
+# Python/Java/Go/C/C++/C#）衔接的那一半：源文件不是 Loment 时, 报错器要说清“它是什么、
+# 怎么把它弄进来、这门语言的边界在哪“。
+#
+# **键集由判据钉住 == `potato_from.LANGS`**（加一门语言就红, 提示照哪张卡写）。
+# 这是本仓那条“消费者清单要和判据一起长”（`docs/158` §5）的又一次落点:
+# 翻译线加语言而报错器不知道, 症状是“新语言的文件报错时只字不提怎么翻” —— 静默缺口。
+#
+# **特征词要挑"Loment 里不会出现"的**: `fn` / `impl` / `class ` 这类 Loment 自己也有,
+# 拿它们当特征会让一份正经 Loment 文件（注释里写一句 `import` 就够）被误判成外源。
+# 所以这里的词是**这门语言独有**的形状（`#include` / `def ` / `use std::` / `System.out`…）。
+#
+# **`tokens` 只做粗提示, 不做判定**: 真正的语言判定是翻译器的 `--lang auto`（它跑
+# `potato_from.detect_lang`）。所以渲染出来的命令**一律带 `--lang auto`**,
+# 报错器说“看内容像 X", 而不是”这就是 X“ —— 一句话说错会让用户拿着错的命令去试。
+
+
+@dataclass(frozen=True)
+class LangCard:
+    """一门源语言的卡。`key` 与 `potato_from.LANGS` 的键一致。"""
+
+    key: str
+    display: str
+    exts: tuple[str, ...]        # 后缀（`potato_from.EXT` 的真源，这里只做镜像说明）
+    tokens: tuple[str, ...]      # 内容特征（粗提示）
+    edge: str                    # 这门语言的边界：什么翻不过去
+    abi: str                     # 调用约定那一档的**事实**（不是"这条路通不通"的结论）
+
+
+LANG_CARDS: dict[str, LangCard] = {
+    "c": LangCard(
+        key="c", display="C", exts=(".c", ".h"),
+        tokens=("#include", "int main(", "printf("),
+        edge="指针算术、`union`、位域、宏、可变参数（`...`）、`goto` 进来的跳转都不翻；"
+             "`int` 与条件混用（`if (x)`）、`&&` 出 int 要**补转换**（Loment 的条件只收 bool）。",
+        abi="C ABI 是它的默认导出方式，所以接口单元 + `--link` 那条路可用。",
+    ),
+    "python": LangCard(
+        key="python", display="Python", exts=(".py",),
+        tokens=("def ", "__name__", "self."),
+        edge="动态类型、类继承、异常、生成器、装饰器、闭包捕获都不翻；"
+             "`/` 是真除法（要整除得写 `//`，而 Loment 的 `/` 是整除）；`True`/`False` 是 int 的子类，**翻过来要补转换**。",
+        abi="**CPython 不导出 C ABI** —— 只出接口单元会得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`）。要真链接得走 C 扩展那条路。",
+    ),
+    "rust": LangCard(
+        key="rust", display="Rust", exts=(".rs",),
+        tokens=("use std::", "let mut ", "macro_rules!", "#[derive"),
+        edge="trait 对象、闭包、宏（`macro_rules!`）、生命周期标注、`async` 都不翻；"
+             "`&str` 与 `String` 都是“指针+长度”，翻过来是 `str`；借用检查那一套 Loment 同样管，所以这块一般能对上。",
+        abi="Rust 能导 C ABI（`extern \"C\"` + `#[no_mangle]`），所以接口单元 + `--link` 那条路可用。",
+    ),
+    "go": LangCard(
+        key="go", display="Go", exts=(".go",),
+        tokens=("func ", "package main", "import ("),
+        edge="goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）都不翻；"
+             "**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、**没有 `while`**（只有 `for`）。"
+             "`int` 有平台宽度；`/` 与 `%` 向零截断（与 Loment 同）。",
+        abi="默认**不**导 C ABI；要链接得在源里显式写 `//export`（按后缀推断的默认值已经删掉了）。",
+    ),
+    "java": LangCard(
+        key="java", display="Java", exts=(".java",),
+        tokens=("public class", "static void main", "System.out"),
+        edge="类继承、接口、泛型擦除、异常、`String`、集合类都不翻；"
+             "`boolean` 与 `int` 是分开的（`&&` 出 boolean，所以**不用补转换** —— 这点与 C 相反）；"
+             "`>>>` 是无符号右移（Loment 的 `>>` 分有符号/无符号两种写法）。",
+        abi="**JVM 默认不导出 C ABI** —— 只出接口单元会得到空 module；要链接得上 JNI 或 NativeAOT。",
+    ),
+}
+
+
+def language_gaps() -> list[str]:
+    """`potato_from.LANGS` 里有、而 `LANG_CARDS` 里没有的语言（判据用它报缺口）。
+
+    **不在这里 import `potato_from` 到模块级**：那个模块很重（它把各门翻译器都拉进来），
+    而 `loment_diag` 被 `lomentc` 依赖 —— 循环导入。所以按需 import, 并且**失败时返回空**
+    让调用方自己决定（判据里会拿到真的缺口, 不是静默通过）。
+    """
+    try:
+        import potato_from
+    except Exception:                                                # noqa: BLE001
+        return []
+    return sorted(set(potato_from.LANGS) - set(LANG_CARDS))
+
+
+
 #: `码 -> (码, 中文标题, 中文建议)`，给 `--dump-surface` 用。**从 `RULES` 推导，不另写一份**
 #: —— 又一处"抄第二遍"的诱惑，而这份文件这一节讲的就是别抄。
 RULES_BY_CODE: dict[int, tuple[str, str, str]] = {
@@ -232,8 +659,15 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
     # 于是加了 Go/Java 之后, 一份 Go 源码的诊断提示**静默消失**(`resolve_lang` 明明
     # 认出来了)。硬编码一份"支持哪些语言"的清单, 必然在加语言时漏掉。
     if lang in potato_from.LANGS:
-        head = (f"这个文件**不是 Loment 语法**, 看内容是 **{lang.upper()}**（{why}）。"
+        card = LANG_CARDS.get(lang)
+        head = (f"这个文件**不是 Loment 语法**, 看内容是 "
+                f"**{card.display if card else lang.upper()}**（{why}）。"
                 f"别照上面那条改 —— 它的语法本来就是对的。")
+        # 语言的**边界**与**调用约定**与报错器**共用同一段文字**（`LANG_CARDS`）——
+        # 抄第二份必然漂, 而这两句正是用户最需要对齐的部分。
+        if card:
+            head += (f"{NL}      这门语言的边界: {card.edge}"
+                     f"{NL}      调用约定: {card.abi}")
         # **该建议 `--impl` 还是接口单元，要看接口那条路走不走得通** —— 这不是锦上添花：
         # Python 那类的 `abi` 不是 C，接口单元**一条函数都发不出来**，照默认那条命令敲会
         # 得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`，但产物看着
@@ -278,10 +712,21 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
 
 
 def diagnose(errs: list[str]) -> list[dict]:
+    """裸消息 -> 一条带说明卡的诊断。
+
+    **说明书那一半也从这里出**（`what/why/fixes/yes/no`）—— 报错器渲染的就是它们，而
+    `--json` 的消费者拿到的与报错器看到的是**同一份**内容。码不在卡表里时那五项缺席，
+    由调用方走"未知码"那条（**不静默**：什么都不给，看起来像"这条没有更多可说的"）。
+    """
     out = []
     for e in errs:
         code, title, hint = classify(e)
-        out.append({"code": code, "title": title, "message": e, "hint": hint})
+        card = CARDS.get(code_num(code))
+        d = {"code": code, "title": title, "message": e, "hint": hint}
+        if card:
+            d.update({"what": card.what, "why": card.why, "fixes": list(card.fixes),
+                      "yes": card.yes, "no": card.no})
+        out.append(d)
     return out
 
 
@@ -298,30 +743,45 @@ def surface_lomt() -> str:
     形状照抄 `win_shim_data`：一个 `module`，按**码**索引的访问器。**不做 str_concat** ——
     运行时的 bump 堆只有 64 KiB，拼接会撞顶；这里每个访问器各自返回一个字面量，调用方逐条取。
 
-    三条访问器，对应**两个受众**（`docs/182` §5.3）:
+    **两个受众**（`docs/182` §5.3）:
 
-      * `code_title` / `code_hint` —— 中文，给**诊断**看（stderr，936 控制台下本就是乱码，
-        与参考实现现状一致）；
+      * 中文那一组（`code_title` / `code_what` / `code_why` / `code_fix` / `code_nfix` /
+        `code_yes` / `code_no`）给**诊断**看 —— stderr，936 控制台下本就是乱码，
+        与参考实现现状一致；
       * `code_ascii` —— 一行 ASCII，给 **CLI** 看（`docs/169` 要求命令输出纯 ASCII）。
 
+    另外一整套 `lang_*` 是**语言卡**（与六语言翻译线衔接，`docs/182` §11.2）：键集 ==
+    `potato_from.LANGS`，由判据钉着。
+
     未知码一律返回空串：调用方据此走"未知码"分支，而不是拿到一个看起来正常的默认值。
+    `code_fix` 用**平键 `c * 8 + i`**（`FIX_STRIDE = 8`）—— 按码嵌 `if` 要嵌两层，
+    平键一层就够，而且生成器这边一眼看得出哪条码少了哪一档。
     """
     kinds = (("code_title", lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[1]),
-             ("code_hint", lambda c: dict(RULES_BY_CODE).get(c, ("", "", ""))[2]),
-             ("code_ascii", lambda c: ASCII_ONE_LINER.get(c, "")))
+              ("code_what", lambda c: CARDS[c].what if c in CARDS else ""),
+              ("code_why", lambda c: CARDS[c].why if c in CARDS else ""),
+              ("code_yes", lambda c: CARDS[c].yes if c in CARDS else ""),
+              ("code_no", lambda c: CARDS[c].no if c in CARDS else ""),
+              ("code_ascii", lambda c: ASCII_ONE_LINER.get(c, "")))
     codes = sorted(dict(RULES_BY_CODE))
     src = [
         "// surface_data.lomt — 由 `tools/loment_diag.py --dump-surface` 生成，别手改。",
         "//",
-        "// 码 -> 文字。**唯一真源是 `tools/loment_diag.py` 的 RULES + ASCII_ONE_LINER**，",
-        "// 这里只是它的可读副本（`docs/176` B 那条管线：数据从逻辑里拆出来，自举侧 use 它）。",
+        "// 码 -> 文字 + 语言卡。**唯一真源是 `tools/loment_diag.py`**（RULES / CARDS /",
+        "// ASCII_ONE_LINER / LANG_CARDS），这里只是它的可读副本（`docs/176` B 那条管线：",
+        "// 数据从逻辑里拆出来，自举侧 `use` 它）。",
         "//",
         "// 为什么要生成而不是手抄第二份：`loment/tools/lomcli.lomt` 原先手抄了 24 条 `codrow`，",
-        "// 与 `loment_diag.RULES` 是同一件事的两份 —— 而本仓那四个静默 bug（docs/179 §7.3）",
+        "// 与 `loment_diag.RULES` 是同一件事的两份 —— 而本仓那四个静默 bug（docs/179 7.3）",
         '// 全出自"同一份清单抄第二遍"。',
         "//",
         "// 中文与 ASCII **不是重复**：CLI 输出必须纯 ASCII（docs/169，936 控制台下 UTF-8 中文",
         "// 被按 GBK 解成乱码，PE 垫片没有 WriteConsoleW），诊断那侧本来就是中文。两个受众。",
+        "//",
+        "// `code_fix` 用的是**平键 `c * 8 + i`**（一条码最多 8 条修法）：按码嵌 `if` 要嵌",
+        "// 两层，平键一层就够，而且生成器这边一眼看得出哪条码少了哪一档。",
+        "// **码从 1 起连续编号**, 所以 `n_codes()` 也就是最后那个码 —— 两个消费者（`lomcli`",
+        "// 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。",
         "",
         "module surface_data",
         "",
@@ -334,6 +794,42 @@ def surface_lomt() -> str:
             val = get(c)
             if val:
                 src.append(f"    if c == {c} {{ return {_lom_str(val)}; }}")
+        src += ['    return "";', "}", ""]
+
+    # 修法: 平键 c*8+i
+    src += ["const FIX_STRIDE: u32 = 8;", "",
+            "/// 第 `i` 条修法（`i` 从 0 起）。`i` 超出该码的条数就是空串。",
+            "pub fn code_fix(c: u32, i: u32) -> str {",
+            "    let k: u32 = c * FIX_STRIDE + i;"]
+    for c in codes:
+        fixes = CARDS[c].fixes if c in CARDS else ()
+        for i, fx in enumerate(fixes):
+            src.append(f"    if k == {c * 8 + i} {{ return {_lom_str(fx)}; }}")
+    src += ['    return "";', "}", "",
+            "/// 这个码有几条修法（0 = 表里没有这个码）。",
+            "pub fn code_nfix(c: u32) -> u32 {"]
+    for c in codes:
+        n = len(CARDS[c].fixes) if c in CARDS else 0
+        src.append(f"    if c == {c} {{ return {n}; }}")
+    src += ["    return 0;", "}", ""]
+
+    # 语言卡（与六语言翻译线衔接的那一半，docs/188 §7.1）
+    langs = sorted(LANG_CARDS)
+    src += ["// ---------------------------------------------------------------- 语言卡",
+            "// **键集 == `potato_from.LANGS`**（判据钉着）：翻译线加一门语言而这里没跟上,",
+            '// 症状是"新语言的文件报错时只字不提怎么翻" —— 静默缺口。',
+            "",
+            f"pub fn lang_count() -> u32 {{ return {len(langs)}; }}",
+            ""]
+    for fn, get in (("lang_key", lambda lk: lk.key),
+                    ("lang_name", lambda lk: lk.display),
+                    ("lang_exts", lambda lk: " ".join(lk.exts)),
+                    ("lang_tokens", lambda lk: "|".join(lk.tokens)),
+                    ("lang_edge", lambda lk: lk.edge),
+                    ("lang_abi", lambda lk: lk.abi)):
+        src.append(f"pub fn {fn}(i: u32) -> str {{")
+        for i, key in enumerate(langs):
+            src.append(f"    if i == {i} {{ return {_lom_str(get(LANG_CARDS[key]))}; }}")
         src += ['    return "";', "}", ""]
     return "\n".join(src)
 
@@ -368,7 +864,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for d in diags:
             print(f"{d['code']} [{d['title']}] {d['message']}")
-            print(f"      建议: {d['hint']}")
+            if "what" not in d:
+                print(f"      建议: {d['hint']}")
+                continue
+            print(f"      错了什么: {d['what']}")
+            print(f"      为什么错: {d['why']}")
+            print("      怎么改:")
+            for i, fx in enumerate(d["fixes"], 1):
+                print(f"        {i}. {fx}")
+            print(f"      支持:   {d['yes']}")
+            print(f"      不支持: {d['no']}")
         if note:
             print()
             print("  ⚠ " + note)

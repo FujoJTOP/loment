@@ -78,25 +78,30 @@ PARSE = "module m\n\nfn f() -> u32 {\n    return 1;\n}\n@@@\n"
 # ---------------------------------------------------------------- 渲染
 
 @test
-def test_render_carries_title_location_source_and_hint():
-    """好路径: 标题、`--> 文件:行`、源行、插入符、建议 —— 五样都要在。
+def test_render_carries_the_whole_card():
+    """好路径: 标题、位置、源行、插入符，**加上四段说明卡**（错了什么 / 为什么错 /
+    怎么改 / 支持与不支持），而且修法**至少三条、编号成列**。
 
-    这五样就是"报错器"与"把 JSON 换个排版打出来"的区别。少一样都该红: 少了建议它就不比
-    编译器那些裸行强, 少了插入符它指不到那一列。
+    这四段就是"报错器"与"把 JSON 换个排版打出来"的区别。少一样都该红：少了"为什么错"
+    用户只学会了改这一处、学不会下一个同类错；少了"支持/不支持"就分不清"我写错了"
+    与"这门语言没有这个"。三条修法是用户定的门槛 —— 一条等于没有选择。
     """
     f, d = _check(SEMANTIC)
     rc, out = _render(d)
     assert rc == 1, (rc, out[:200])
     assert "error[E002]:" in out, out[:200]
     assert "符号未声明" in out, "没查 surface_data 的标题"
-    assert f"-->{' '}" in out.replace("--> ", "--> ") or "-->" in out, out[:200]
-    assert f":4" in out, "位置里没有行号"
+    assert "-->" in out, out[:200]
+    assert ":4" in out, "位置里没有行号"
     assert "return z;" in out, "没有把源行印出来"
     assert "^" in out, "没有插入符"
-    assert "建议:" in out, "没有修复建议"
-    assert "先声明后使用" in out, "建议不是 surface_data 里那一份"
-    print(f"      渲染完整 (5 样齐: 标题/位置/源行/插入符/建议)")
-
+    for label in ("错了什么:", "为什么错:", "怎么改:", "支持:", "不支持:"):
+        assert label in out, f"说明卡少了一段 {label!r}: {out[-300:]!r}"
+    # 修法编号成列, 且 >= 3 条 (门槛)
+    for i in (1, 2, 3):
+        assert f"  {i}. " in out, f"没有第 {i} 条修法: {out[-300:]!r}"
+    assert " 4. " in out, "这一条的卡有 4 条修法, 生成器把第 4 条丢了?"
+    print("      渲染完整: 位置 + 插入符 + 四段说明卡 + 编号修法(>=3)")
 
 @test
 def test_both_error_channels_render_differently():
@@ -144,6 +149,7 @@ def test_unknown_code_is_said_out_loud():
     assert rc == 1, (rc, out)
     assert "E042" in out, "码本身要原样印出来"
     assert "未知错误码" in out, f"没说不认识这个码: {out[:200]}"
+    assert "没有说明卡" in out, f"没交代四段为什么缺席: {out[-300:]!r}"
     assert "不在表面数据表里" in out, f"没解释为什么没有建议: {out[:200]}"
     assert "未来才有这个码" in out, "消息原文要保留"
     print("      未知码: 说出来了, 而且建议那条不是静默缺失")
@@ -236,6 +242,91 @@ def test_overlong_record_says_it_was_cut():
     assert "被截断" in out, f"超长没被说破 —— 输出静默少了一截: {out[-200:]!r}"
     assert "error[E019]" in out, "截断之前那部分还是要印出来的"
     print("      超长记录: 明说被截断, 不静默少印")
+
+# ---------------------------------------------------------------- 外源语言 (docs/188 §7.1)
+
+@test
+def test_foreign_file_gets_a_language_section():
+    """文件不是 Loment 时, 报错器要说清"它是什么 + 三条进来路 + 这门语言的边界"。
+
+    **为什么这条重要**: 这是新手第二常见的处境（拿一份 C/Java 源码叫 `.lomt` 就编）。
+    只报"非法字符 #"帮不到他 —— 他会去改那一行, 而那份源码本来是对的。
+    内容全来自 `surface_data` 的语言卡（真源是 `loment_diag.LANG_CARDS`）。
+
+    **语言是提示不是结论**：判定权在翻译器的 `--lang auto`，所以命令一律带 `--lang auto`，
+    最后一行也要把这句话说明白 —— 说死一句错的语言，用户会拿着错的命令去试。
+    """
+    c_src = ("#include <stdio.h>" + "\n"
+             + "int main(int argc, char **argv) {" + "\n"
+             + "    printf(1);" + "\n"
+             + "    return 0;" + "\n" + "}" + "\n")
+    td = Path(tempfile.mkdtemp(prefix="lomenterr-foreign-"))
+    f = td / "cflow.lomt"          # **名字是 .lomt, 内容是 C** —— 正是那个已知处境
+    f.write_text(c_src, encoding="utf-8", newline="\n")
+    d = td / "d.jsonl"
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                        str(f), "--check", "--diag-out", str(d)],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False, timeout=120)
+    assert r.returncode == 1, (r.returncode, r.stderr[-200:])
+    _, out = _render(d)
+    assert "不是 Loment" in out, f"没说这个文件不是 Loment: {out[-400:]!r}"
+    assert "像 C" in out, f"没认出是 C: {out[-400:]!r}"
+    assert "--lang auto" in out, "命令没带 --lang auto (那等于替翻译器下结论)"
+    assert "--impl" in out and ".iface.lomt" in out, "三条路没写全"
+    assert "边界" in out, "没给这门语言的边界"
+    assert "别拿它当结论" in out, "没说语言只是提示"
+    print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准")
+
+
+@test
+def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
+    """正经 Loment 文件**不会**因为注释里出现外源特征词就被判成外源。
+
+    内容兜底是给"这个文件根本不是 Loment"用的，而注释里写一句 `def ` / `use std::` 太容易了 ——
+    一份正经 Loment 文件只要有一条语法错，就会被自己的注释带成"这看起来是 Python"，
+    然后在真正的诊断后面挂一段几百字的建议。
+
+    挡它的是"**命中必须在行首**"：真实的签名行（`#include` / `def ` / `func ` /
+    `public class`）都在行首，而注释里的那个词不在。
+    """
+    src = ("module m" + "\n" + "\n"
+           + "// def foo(self) is Python, but this file is not" + "\n"
+           + "fn f() -> u32 {" + "\n"
+           + "    return z;" + "\n" + "}" + "\n")
+    td = Path(tempfile.mkdtemp(prefix="lomenterr-nofalse-"))
+    f = td / "coment.lomt"
+    f.write_text(src, encoding="utf-8", newline="\n")
+    d = td / "d.jsonl"
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                        str(f), "--check", "--diag-out", str(d)],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False, timeout=120)
+    assert r.returncode == 1, (r.returncode, r.stderr[-200:])
+    _, out = _render(d)
+    assert "error[E002]" in out, out[:200]
+    assert "不是 Loment" not in out, f"被注释带跑了: {out[-300:]!r}"
+    print("      注释里的外源特征词不误报 (命中要在行首)")
+
+@test
+def test_foreign_section_is_given_once_per_file():
+    """同一个外源文件给**一次**就够了 —— 重复 N 遍会把真正的诊断挤没。
+
+    它靠的是记住"上次给过哪个文件"。**这条要能证伪**：造两条同一文件的诊断，数出现次数。
+    """
+    td = Path(tempfile.mkdtemp(prefix="lomenterr-once-"))
+    src = td / "j.java"
+    src.write_text("public class S {" + "\n" + "    static void main() {" + "\n" + "    }" + "\n" + "}" + "\n",
+                   encoding="utf-8", newline="\n")
+    d = td / "d.jsonl"
+    rec = {"file": str(src), "line": 1, "col": 1, "code": "E019", "message": "期望 module"}
+    d.write_text(json.dumps(rec) + "\n" + json.dumps(rec) + "\n",
+                 encoding="utf-8", newline="\n")
+    rc, out = _render(d)
+    assert rc == 1
+    assert out.count("不是 Loment") == 1, f"外源段给了不止一次: {out.count(chr(19981) + chr(26159) + chr(32) + chr(76))}"
+    assert "2 条错误" in out, "两条诊断都要计数"
+    print("      外源段一个文件只给一次 (两条诊断, 一次提示)")
 
 # ---------------------------------------------------------------- 包那一侧 (§6 的兜底纪律)
 

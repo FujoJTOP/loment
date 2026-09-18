@@ -506,6 +506,57 @@ def test_code_tables_cover_the_same_codes():
 
 
 @test
+def test_every_code_has_a_card_with_at_least_three_fixes():
+    """每个码都要有一张说明卡，且**修法至少三条** —— 这是用户定的门槛。
+
+    「错了什么 / 为什么错 / 怎么改(≥3) / 支持与不支持」是报错器渲染的东西（docs/182 §11）。
+    少了卡就是渲染出一条"只有标题"的诊断，而用户会把它读成"这条没有更多可说的了"；
+    只有一条修法等于没有选择 —— 门槛定在三条，正是"你自己按情况挑"的前提。
+
+    `FIX_STRIDE` 是 8：平键 `c*8+i` 决定了**一条码最多 8 条修法**，超了就静默被挤掉，
+    所以上界也要钉（不然第 9 条会消失在生成器里，而生成器不会吭声）。
+    """
+    import loment_diag
+    ruled = {loment_diag.code_num(c) for c, _p, _t, _h in loment_diag.RULES}
+    assert set(loment_diag.CARDS) == ruled, (
+        f"只在 RULES 里(没卡): {sorted(ruled - set(loment_diag.CARDS))}; "
+        f"只在卡里: {sorted(set(loment_diag.CARDS) - ruled)}")
+    bad_n = {c: len(k.fixes) for c, k in loment_diag.CARDS.items() if len(k.fixes) < 3}
+    assert not bad_n, f"修法少于三条: {bad_n}"
+    too_many = {c: len(k.fixes) for c, k in loment_diag.CARDS.items() if len(k.fixes) > 8}
+    assert not too_many, f"修法超过 FIX_STRIDE(8), 会被静默挤掉: {too_many}"
+    empty = [c for c, k in loment_diag.CARDS.items()
+             if not (k.what and k.why and k.yes and k.no)]
+    assert not empty, f"四段里有空的: {empty}"
+    n = sum(len(k.fixes) for k in loment_diag.CARDS.values())
+    print(f"      {len(ruled)} 个码各有一张卡, 修法共 {n} 条 (每条码 >= 3)")
+
+
+@test
+def test_language_cards_cover_every_language_the_frontends_know():
+    """`LANG_CARDS` 的键集必须 == `potato_from.LANGS` —— **翻译线加语言, 这里要跟上**。
+
+    报错器在"这个文件不是 Loment"时给的那一段，内容全来自 `LANG_CARDS`（走
+    `--dump-surface` 生成给自举侧）。翻译线加一门语言而这里没跟上，症状是**新语言的文件
+    报错时只字不提怎么翻** —— 静默缺口，没有任何东西会红。
+
+    这就是 `docs/158` §5 那条"**消费者清单要和判据一起长**"：语言集是同一份清单，
+    `potato_from.LANGS` 与推送它的 `LANG_CARDS` 必须一起动。红了就照现有那张卡补一张。
+    """
+    import loment_diag
+    try:
+        import potato_from
+    except Exception as e:                                     # noqa: BLE001
+        pytest_skip = f"(跳过: import potato_from 失败 {e})"
+        print("        " + pytest_skip)
+        return
+    want = set(potato_from.LANGS)
+    got = set(loment_diag.LANG_CARDS)
+    assert got == want, (
+        f"LANGS 里有而 LANG_CARDS 没有: {sorted(want - got)} —— 照现有那张卡补一张; "
+        f"LANG_CARDS 里多出来的: {sorted(got - want)}")
+    print(f"      {len(want)} 门语言都有卡 ({sorted(want)})")
+@test
 def test_surface_data_is_up_to_date():
     """`loment/tools/surface_data.lomt` 是**生成物**，必须与重新生成的结果逐字节相同。
 

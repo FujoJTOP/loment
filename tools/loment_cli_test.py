@@ -469,6 +469,23 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
 
 
 @test
+def test_every_code_explain_speaks():
+    """`loment explain E<n>` 对**表里每一个码**都要说出一句真话。
+
+    原先的长文只覆盖 8/23 个码，其余落进一个通用兜底 —— 用户敲 `loment explain E7`
+    拿到的是"去 `loment codes` 那张表里找"，而这个码到底什么意思一个字都没有。
+    修法不是把那 15 条长文补上（那是翻译项目），而是**每个码先给一行来自真源的话**
+    （`surface_data.code_ascii`）。所以这条判据是"表里有的码，explain 里必须都有"——
+    加一个码而 explain 说不出话，它会红。
+    """
+    import loment_diag
+    for c, desc in sorted(loment_diag.ASCII_ONE_LINER.items()):
+        rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
+        assert rc == 0, (c, rc, out[:120])
+        assert desc in out, f"explain E{c} 里没有表里那一行: {out[:200]!r}"
+    print(f"      {len(loment_diag.ASCII_ONE_LINER)} 个码 explain 都说得出一句真话")
+
+@test
 def test_reference_pages_are_nonempty():
     for c in ("syntax", "builtins", "types", "keywords", "caps", "cheat", "about", "env"):
         rc, out, _ = _run([c] + _no_color())
