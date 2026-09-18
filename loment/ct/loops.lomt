@@ -1,0 +1,19 @@
+// ct/loops.lomt — 循环 + 数组下标（S4.0 语料）
+//
+// expect: OK 140
+// 期望: 0^2 + 1^2 + ... + 7^2 = 140
+module ct_loops
+
+fn main() -> u64 {
+    let xs: [u64; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    let i: u64 = 0;
+    while i < 8 {
+        xs[i] = i * i;
+        i = i + 1;
+    }
+    let s: u64 = 0;
+    for j in 0..8 {
+        s = s + xs[j];
+    }
+    return s;
+}

@@ -1,0 +1,13 @@
+// ct/mem.lomt — 宿主内存里存/取（S4.0 语料）
+//
+// expect: OK 3735928559
+// 期望: 0xDEADBEEF = 3735928559
+module ct_mem
+
+fn main() -> u64 {
+    let p: ptr = alloc(16);
+    store32(p, 0, 0xDEADBEEF);
+    let v: u64 = load32(p, 0) as u64;
+    free(p);
+    return v;
+}

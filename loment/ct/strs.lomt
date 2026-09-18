@@ -1,0 +1,12 @@
+// ct/strs.lomt — 字符串只读视图（S4.0 语料）
+//
+// expect: OK 5101
+// 期望: str_len("hello") * 1000 + 'e' = 5 * 1000 + 101 = 5101
+module ct_strs
+
+fn main() -> u64 {
+    let s: str = "hello";
+    let n: u64 = str_len(s) as u64;
+    let a: u64 = str_byte(s, 1) as u64;
+    return n * 1000 + a;
+}

@@ -1,0 +1,16 @@
+// ct/fib.lomt — 递归 + 控制流（S4.0 语料）
+//
+// expect: OK 6765
+// 期望: fib(20) = 6765
+module ct_fib
+
+fn fib(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> u64 {
+    return fib(20);
+}

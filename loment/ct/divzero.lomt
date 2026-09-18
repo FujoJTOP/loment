@@ -1,0 +1,11 @@
+// ct/divzero.lomt — 错误也要两边同种类（S4.0 语料）
+//
+// expect: ERR divzero
+// 期望: ERR divzero（**不是**崩、不是别的种类）
+module ct_divzero
+
+fn main() -> u64 {
+    let a: u64 = 10;
+    let b: u64 = 0;
+    return a / b;
+}

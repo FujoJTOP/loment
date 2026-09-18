@@ -1,0 +1,12 @@
+// ct/arith.lomt — 算术与优先级（S4.0 语料，docs/184 §9）
+//
+// expect: OK 2
+// 期望: (7 + 3) * 2 - 1 = 19, 19 % 17 = 2
+module ct_arith
+
+fn main() -> u64 {
+    let a: u64 = 7;
+    let b: u64 = 3;
+    let c: u64 = (a + b) * 2 - 1;
+    return c % 17;
+}
