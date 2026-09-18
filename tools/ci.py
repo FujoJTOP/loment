@@ -100,6 +100,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_cstrans_test",
                  # C++ 翻成 Loment: 跑出的数 == g++ 编那份 C++ 跑出的数 (docs/188 §7.1)
                  "loment_cpptrans_test",
+                 # Go 翻成 Loment: 跑出的数 == go build 那份 Go 跑出的数 (docs/188 §7.1)
+                 "loment_gotrans_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",

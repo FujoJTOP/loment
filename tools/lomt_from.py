@@ -286,6 +286,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 "cpp": ("cpptrans", "Unsupported CError", "tools/cpptrans.py",
                         "只收整数标量与 `bool`、if/while/for、四则与位运算；"
                         "预处理指令、`std::` 与成员访问都不收"),
+                "go": ("gotrans", "Unsupported GoError", "tools/gotrans.py",
+                       "只收整数标量与 `bool`、`if`/`for`、四则与位运算；"
+                       "`string` / 切片 / map / 指针 / 多返回值都不收"),
             }
             if lang not in _TOOLS:
                 raise NotRepresentable(

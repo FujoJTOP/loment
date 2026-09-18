@@ -164,6 +164,9 @@ REPOS: dict[str, dict] = {
             "tools/cstrans.py",
             # C++ -> Loment 的方言表（`docs/188` §7.1）。同上。
             "tools/cpptrans.py",
+            # Go -> Loment（`docs/188` §7.1 的第六门）。**它不共用那份共享核** ——
+            # 类型写在名字后面、条件不带括号、没有 `while`，所以自足一份。
+            "tools/gotrans.py",
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",

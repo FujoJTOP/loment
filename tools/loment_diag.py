@@ -589,9 +589,16 @@ LANG_CARDS: dict[str, LangCard] = {
     "go": LangCard(
         key="go", display="Go", exts=(".go",),
         tokens=("func ", "package main", "import ("),
-        edge="goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）都不翻；"
-             "**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、**没有 `while`**（只有 `for`）。"
-             "`int` 有平台宽度；`/` 与 `%` 向零截断（与 Loment 同）。",
+        edge="goroutine、channel、interface、`defer`、多返回值（Loment 只回一个值）、"
+             "`string`、切片、`map`、指针都不翻；"
+             "**类型写在名字后面**（`func f(a int) int`）、条件**不带括号**、"
+             "**没有 `while`**（一个 `for` 管三种形状，含 `for { }` 死循环）。"
+             "`int` 有平台宽度（x86-64 上是 64 位，所以映 `i64`）；`/` 与 `%` 向零截断（与 Loment 同）。"
+             "**两处与别的门相反、而理由都在源语言那边**：① Go **没有隐式数值转换**，"
+             "所以 `int(b)` 那种转换到处都在 —— 而它正好对上 Loment 的 `as`，"
+             "源码里已经写好了、翻译器不用猜（C / C++ 要靠翻译器补，Java / C# 一个都不补）；"
+             "② `i++` / `x += e` 在 Go 里是**语句、没有值**，所以照收（`i = i + 1`）——"
+             "而 C / Java / C# 里它们是有值的表达式，那几门拒。",
         abi="默认**不**导 C ABI；要在源里显式写 `//export`。",
     ),
     "java": LangCard(

@@ -58,11 +58,12 @@ loment/build/** linguist-generated
 *.html   text eol=lf
 *.js     text eol=lf
 *.vim    text eol=lf
-# 表层语法的**语料** (docs/188 §7.1): C / Python / Java / C# / C++ 五门的
-# `.c` / `.py` / `.java` / `.cs` / `.cpp` 都是"源码语言那一侧写出来的普通源文件",
-# 与 `.c` / `.py` 同类 —— 同一批语料不该一半 LF 一半 CRLF, 而"检出换行不漂"
-# 本来就是这个仓库的身份。
-# (`dotnet build` / `g++` 在 CRLF 上照样能编, 所以漏了不会立刻红 —— 更该钉住。)
+# 表层语法的**语料** (docs/188 §7.1): 六门的 `.c` / `.py` / `.java` / `.cs` /
+# `.cpp` / `.go` 都是"源码语言那一侧写出来的普通源文件", 与 `.c` / `.py` 同类 ——
+# 同一批语料不该一半 LF 一半 CRLF, 而"检出换行不漂"本来就是这个仓库的身份。
+# (`dotnet build` / `g++` / `go build` 在 CRLF 上照样能编, 所以漏了不会立刻红 ——
+#  更该钉住。) **Go 尤其**: 它有自动分号插入, 而插入规则是**按行**判的 ——
+#  换行风格变了语义就可能变, 所以这一条对 `.go` 是实打实的。
 *.java   text eol=lf
 *.cs     text eol=lf
 *.cpp    text eol=lf
@@ -70,6 +71,7 @@ loment/build/** linguist-generated
 *.cxx    text eol=lf
 *.hpp    text eol=lf
 *.hxx    text eol=lf
+*.go     text eol=lf
 *.fuc    text eol=lf
 *.sha256 text eol=lf
 SHA256SUMS text eol=lf

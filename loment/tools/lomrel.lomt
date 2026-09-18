@@ -230,6 +230,8 @@ tools/cstrans.py
 tools/loment_cstrans_test.py
 tools/cpptrans.py
 tools/loment_cpptrans_test.py
+tools/gotrans.py
+tools/loment_gotrans_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py
@@ -278,6 +280,7 @@ loment/pytrans/*.py
 loment/jtrans/*.java
 loment/cstrans/*.cs
 loment/cpptrans/*.cpp
+loment/gotrans/*.go
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

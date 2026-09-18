@@ -104,7 +104,10 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     doc = _blank(_ident(Path(name).stem), "go")
     # **注释要在取完 `//export` 之后再剥** —— 它本身就是一条注释。
     exported = set(_GO_EXPORT.findall(src))
-    body = _C_COMMENT.sub(" ", src)
+    # **抹注释要保长度**（`_blank_keep_off`，与 `from_c` 同一个手法）：下面取函数正文
+    # 是拿**剥离后的下标**去切**原文**，长度一变切出来的就是别处的字节。
+    # 2026-09-18 做 Go 那一门时撞到 —— 原先是 `sub(" ", src)`，整份文件的下标全错。
+    body = _C_COMMENT.sub(_blank_keep_off, src)
     known: set[str] = set()
     for m in _GO_STRUCT.finditer(body):
         sname, inner = m.group(1), m.group(2)
@@ -144,11 +147,17 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             rep.skip("fn", fn, f"返回类型 {ret!r} 无映射")
             continue
         ps, bad = [], None
+        #: **同类型可以共享名字**：`a, b int` 与 `a int, b int` 都是这一门收的写法，
+        #: 而且前者在真实 Go 里**非常常见**（原先只收后者，于是 `gcd(a, b int)` 整个函数被
+        #: 跳过 —— 2026-09-18 做 Go 那一门时撞到）。分辨办法与 `gotrans.params()` 一样：
+        #: 只有**名字**的那一段先攒着，等后面那一段 `名字 类型` 把类型带过来。
+        pending: list[str] = []
         for raw in [p.strip() for p in params.split(",") if p.strip()]:
             parts = raw.split()
+            if len(parts) == 1 and IDENT_RE.match(parts[0]):
+                pending.append(parts[0])
+                continue
             if len(parts) != 2:
-                # `a, b int` 这种分组形参、以及 `f func(int)` 那种类型参数 ——
-                # 都在这一档。报出来, 不猜。
                 bad = f"形参 {raw!r} 不是 `名字 类型` 两段"
                 break
             pn, pt = parts
@@ -159,13 +168,28 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             if t is None:
                 bad = f"形参类型 {pt!r} 无映射"
                 break
-            ps.append({"name": pn, "type": t})
+            for n in pending + [pn]:
+                ps.append({"name": n, "type": t})
+            pending = []
+        if bad is None and pending:
+            bad = f"形参 {', '.join(pending)!r} 只有名字没有类型"
         if bad:
             rep.skip("fn", fn, bad)
             continue
         ent = {"name": fn, "params": ps, "ret": rt}
         if abi is not None:                 # 只有 `//export` 过的那种才记（见上）
             ent["abi"] = abi
+        # ---- 正文（`docs/188` §3 的 `functions[i].body`）：存**整段函数原文**，
+        # 给 `lomt_from --impl` 翻成实现用。**没有它这一门就只剩接口单元** ——
+        # 而 Go 写法的单元按 §3 是 Loment，该能翻出实现来。
+        # `_GO_FN` 的尾巴就是那个 `{`，所以 `close` 由它往下配平；切开的是**原文**
+        # （注释与格式都在），靠的是上面那句"抹注释保长度"。
+        if abi is None:
+            close = _block_end(body, m.end() - 1)
+            if close < 0:
+                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+                continue
+            ent["body"] = src[m.start():close + 1].strip()
         doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
