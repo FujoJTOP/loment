@@ -819,11 +819,11 @@
   },
   {
    "path": "tools/pytrans.py",
-   "sha256": "e5c548ec17fd2f5083f314f5c7f5cf898acfa11c293b8288c2bef773ebd2c62c"
+   "sha256": "6279d1c279f1db5c0fc4b5e63a7c9b0447c3c25e0983e370941a3d5d11a82b9e"
   },
   {
    "path": "tools/loment_pytrans_test.py",
-   "sha256": "4892e925e452dbb4140aaac7f04a3b8d7e1218bab1ab345079f8de7f938af4fb"
+   "sha256": "21632125a66da7e6c1982ca14bbd8ce11802664c5f386f4460e355aa84669e46"
   },
   {
    "path": "loment/build/win_shim.bin",
@@ -1122,20 +1122,24 @@
    "sha256": "b2408f5a858e4192aca21d9a27302c16dd605666a29ce766bb6be39853f083cc"
   },
   {
-   "path": "loment/pytrans/floordiv.py",
-   "sha256": "0758e780f30d5e7deb46c5bfa050dfb78afa88b2c7665c13ebf6bca89a00861c"
+   "path": "loment/pytrans/blockscope.py",
+   "sha256": "7b10084b5173712c625cc7a73b3810d69655e36623e9ffbb9034b19f953b6327"
+  },
+  {
+   "path": "loment/pytrans/bool_as_int.py",
+   "sha256": "f73741ffe8b6f467a7caca4b8e151dbab29c7bb421eb2c610150215823b90b88"
+  },
+  {
+   "path": "loment/pytrans/intdiv.py",
+   "sha256": "293738725379e72e85ee0c6e3fb3e4498eb1588a89dd716f3bc071f482859026"
+  },
+  {
+   "path": "loment/pytrans/loopend.py",
+   "sha256": "d50e51fc1b737763544782d97ad03cd7b1c00ee0f0d7657a610cdbfd45745541"
   },
   {
    "path": "loment/pytrans/policy.py",
-   "sha256": "cd8483d54dc189f23c0af170154c87803865546e84919b6dc0fb79c4b518a9d4"
-  },
-  {
-   "path": "loment/pytrans/scope.py",
-   "sha256": "25d7b729a890417c905bcba16b7b37702db5cfeb2f8676633cd5abb87d317fcb"
-  },
-  {
-   "path": "loment/pytrans/unsupported.py",
-   "sha256": "73756cccb07a99ace12ae1b08f68b81262134a4be0c132022dbd9c6d290f0ed1"
+   "sha256": "fa018caa1d6d4ef86f78d8842d7f5c9399a69cb7d4662c847f8925e92b6728f3"
   },
   {
    "path": "loment/examples/ahci.lomt",
@@ -1527,11 +1531,11 @@
   },
   {
    "path": "docs/187-python-to-loment-translation.md",
-   "sha256": "755de905b4ca28236b03cdf9edf6c212d64bcbb7e89047c46dd8966a02791f4e"
+   "sha256": "f90a72d103f8ee047e29e906ac7f01277d0cbb3ba9374f95c7ba3c54471a817d"
   },
   {
    "path": "docs/188-grammar-declaration.md",
-   "sha256": "8a235182346fd224b22c1f0fdcc04ec2f5db51951e85b44bcfa9fde6056d29ae"
+   "sha256": "ce787ff0583e20c1ea643c66ce3ea4bc6b1f6705c8e1b5db18c9cbd6eeb4cee4"
   },
   {
    "path": "docs/manual/index.md",
