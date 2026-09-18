@@ -179,6 +179,7 @@ tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_std_test.py
 tools/loment_cli_test.py
+tools/loment_err_test.py
 lompi/*.lomt
 lompi/store/std/0.1.0/*
 lompi/store/host/0.1.0/*
@@ -218,6 +219,7 @@ tools/loment_pe_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
 tools/loment_multilang_test.py
+tools/trans_core.py
 tools/ctrans.py
 tools/loment_ctrans_test.py
 tools/pytrans.py

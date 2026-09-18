@@ -149,6 +149,8 @@ REPOS: dict[str, dict] = {
             "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
             "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
             "tools/fuai_contract_check.py",
+            # 花括号族的共享前端核（`docs/188` §7.1）。同样不以 `lom` 开头。
+            "tools/trans_core.py",
             # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，
             # `tools/lom*` 那个 glob 收不到它 —— 而 `loment_ctrans_test` 会 import 它，
             # 于是闭包判据当场点了名（那正是它该干的事：别靠手数）。

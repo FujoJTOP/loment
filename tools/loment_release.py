@@ -51,6 +51,9 @@ GLOBS = [
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
     "tools/loment_cli_test.py",
+    # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
+    # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
+    "tools/loment_err_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
     # lompi 的标准库: 随 Loment 一起装 (std 127 模块 + host, 共 137 个文件, 用户 2026-09-16)。
@@ -88,6 +91,9 @@ GLOBS = [
     "tools/lomt_from.py", "tools/loment_multisyntax_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
+    # 花括号族 (C/C++/Java/C#) 的**共享前端核** (docs/188 §7.1): 一份解析器 + 方言表。
+    # 各门只给自己那张 `Dialect`。
+    "tools/trans_core.py",
     # C 翻成 Loment 的翻译器与它的判据 (docs/186 Stage A)。
     "tools/ctrans.py",
     "tools/loment_ctrans_test.py",
