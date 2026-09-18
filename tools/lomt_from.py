@@ -225,50 +225,78 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             # **两条闸门, 缺一不可**。少发一个函数在这里是**安全的** —— Loment 没有重载,
             # 名字是精确的, 所以调用点会得到"未声明的函数"(E002) 而不是静默绑到别人身上。
             # 但**必须报出来** (见 `main`), 不能沉默。
-            abi = f.get("abi")
-            if abi != "c":
-                skipped.append((n, f"调用约定不是 C ABI"
-                                   + (f" (abi={abi})" if abi else " (对象里没记 ABI)")))
-                continue
             # 正文只在 `--impl` 那条路上用。**没开 `--impl` 时它不是"被跳过的东西"** ——
             # 接口单元本来就是"声明在此、实现在那边"，`pack_iface.lomt` 那类用法
             # （`docs/179` §2）要的正是这个。报成 skip 会让 `loment_multilang_test` 红，
             # 而且报的是假消息（没有任何东西被丢掉）。
             bd = f.get("body")
             if impl and isinstance(bd, str) and bd.strip():
+                # **有正文时 ABI 那道闸门让开**：它不是"声明一条外部函数"，而是
+                # **定义**这个函数 —— 实现就在这儿（由 `ctrans` / `pytrans` 翻出来）。
+                # `abi` 描述的是"实现在源语言那一侧"这件事，而这里已经不是那样了。
+                # 所以 `abi="python"` 的函数在 `--impl` 下能发，在默认那条路上不能。
                 bodies[n] = bd
+                continue
+            abi = f.get("abi")
+            if abi != "c":
+                skipped.append((n, f"调用约定不是 C ABI"
+                                   + (f" (abi={abi})" if abi else " (对象里没记 ABI)")))
+                continue
             bad = [p.get("name") for p in (f.get("params") or [])
                    if not _ffi_ok(p.get("type"))]
             if not _ffi_ok(f.get("ret") or "()") or bad:
                 skipped.append((n, "签名超出 FFI 第 1 阶段 (只收标量与 ptr, docs/173 §3)"
                                    + (f"; 参数 {bad}" if bad else "")))
                 continue
-            if n in bodies:
-                continue  # 有正文的走下面那条路，一起翻
             r = f.get("ret")
             head = f"pub extern fn {n}({_sig_params(f)})"
             if r and r != "()":
                 head += f" -> {_ty(r)}"
             fn_lines.append(head + ";")
 
-        # ---- 带正文的函数：把原文拼成一份 C 再翻（`docs/186`）
+        # ---- 带正文的函数：把原文拼成一份源文件再翻（`docs/186` / `docs/187`）
         if bodies:
-            import ctrans  # 只在 `--impl` 这条路上要它 —— 默认那条不该被它拖进来
-            externs = {n: _ty(f.get("ret") or "()")
-                       for f in fns
-                       if _is_ident(f.get("name")) and f.get("name") not in bodies
-                       and _ffi_ok(f.get("ret") or "()")}
-            try:
-                text = ctrans.translate("\n".join(bodies[n] for n in bodies),
-                                        keep=set(bodies), externs=externs)
-            except (ctrans.Unsupported, ctrans.CError) as e:
-                # **翻不过去就说清是哪个函数** —— 只说"子集外"的话，一份 C 里
-                # 十几个函数，用户不知道去改哪一个。
+            lang = doc.get("language")
+            if lang == "c":
+                import ctrans           # 只在 `--impl` 这条路上要它 —— 默认那条不该被它拖进来
+                mod, errs = ctrans, (ctrans.Unsupported, ctrans.CError)
+                tool, hint = "tools/ctrans.py", ("只收整数标量、if/while/for、四则与位运算")
+            elif lang == "python":
+                import pytrans
+                mod, errs = pytrans, (pytrans.Unsupported, pytrans.PyError)
+                tool, hint = "tools/pytrans.py", ("只收整数标量、if/while/for、"
+                                                  "四则与位运算；参数与返回都要写类型注解")
+            else:
                 raise NotRepresentable(
-                    f"{len(bodies)} 个带正文的函数里有子集外的写法（docs/186 的 Stage A "
-                    f"只收整数标量、if/while/for、四则与位运算）: {e}")
-            impl_lines.append("// ---- 由正文翻译出来的实现 "
-                              "(docs/186: C 子集 -> Loment, tools/ctrans.py)")
+                    f"这份对象的 language 是 {lang!r} —— 带正文的函数还没有这一门的翻译器"
+                    f"（现在有 c 与 python 两门, 见 docs/186 / docs/187）")
+            # `externs` 只有 C 那门用得上：它的 `pub extern fn` 与翻译出来的实现能共处
+            # 一个单元。Python 那门不导出 C ABI（`abi="python"` 的进不了 `extern fn`），
+            # 所以 Python 单元里的跨函数调用只认带正文的那些 —— 缺了会**响亮报错**。
+            kw: dict = {}
+            if lang == "c":
+                kw["externs"] = {n: _ty(f.get("ret") or "()")
+                                 for f in fns
+                                 if _is_ident(f.get("name")) and f.get("name") not in bodies
+                                 and _ffi_ok(f.get("ret") or "()")}
+            else:
+                # Python 那门要知道**模块常量**的名字：正文里只有函数，常量在对象的
+                # `consts` 里（`pub const` 由本函数上面那段发），不给这张表的话
+                # 函数体里一引用常量就报"没赋过值"。
+                kw["consts"] = {c["name"]: _ty(c.get("type") or "i64")
+                                for c in (doc.get("consts") or [])
+                                if _is_ident(c.get("name"))}
+            try:
+                text = mod.translate("\n".join(bodies[n] for n in bodies),
+                                     keep=set(bodies), **kw)
+            except errs as e:  # type: ignore[misc]
+                # **翻不过去就说清有多少个、以及是什么毛病** —— 只说"子集外"的话，
+                # 一份文件里十几个函数，用户不知道去改哪一个。
+                raise NotRepresentable(
+                    f"{len(bodies)} 个带正文的函数里有子集外的写法（{tool} 的 Stage A "
+                    f"{hint}）: {e}")
+            impl_lines.append(f"// ---- 由正文翻译出来的实现 "
+                              f"(docs/186: {lang} -> Loment, {tool})")
             impl_lines.append(text.rstrip("\n"))
         if fn_lines:
             lines.append("")

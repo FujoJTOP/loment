@@ -91,6 +91,9 @@ GLOBS = [
     # C 翻成 Loment 的翻译器与它的判据 (docs/186 Stage A)。
     "tools/ctrans.py",
     "tools/loment_ctrans_test.py",
+    # Python 翻成 Loment (docs/187 Stage A 的第二门)。
+    "tools/pytrans.py",
+    "tools/loment_pytrans_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
@@ -138,6 +141,8 @@ GLOBS = [
     # C 翻译器的语料 (docs/186): **源码语言那一侧的普通 `.c`**，不是装着什么的 `.lomt`。
     # 只被 `loment_ctrans_test` 读；不进任何 Loment 编译语料。
     "loment/ctrans/*.c",
+    # Python 翻译器的语料 (docs/187): 同理，是**普通 `.py`**。
+    "loment/pytrans/*.py",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

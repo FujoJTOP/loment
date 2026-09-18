@@ -220,6 +220,8 @@ tools/loment_multisyntax_test.py
 tools/loment_multilang_test.py
 tools/ctrans.py
 tools/loment_ctrans_test.py
+tools/pytrans.py
+tools/loment_pytrans_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py
@@ -264,6 +266,7 @@ loment/examples/multilang/README.md
 loment/extblock/*.lomt
 loment/lex/*.lomt
 loment/ctrans/*.c
+loment/pytrans/*.py
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

@@ -716,8 +716,15 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             #: Python 的调用约定是自己那套 (CPython C-API / 解释器), 不是平台 C ABI ——
             #: 记下来, 让下游知道它**不能**直接发 `extern fn`。要调 Python 走进程桥
             #: (`loment/lib/proc.lomt`, docs/173 §4)。
-            doc["functions"].append({"name": node.name, "params": params, "ret": ret,
-                                     "abi": "python"})
+            ent: dict = {"name": node.name, "params": params, "ret": ret, "abi": "python"}
+            # ---- 正文（`docs/186` §3 的 `functions[i].body`，Python 这一侧同一形状）。
+            # **整段函数原文**，用 `ast.get_source_segment` 取 —— 它是按源码位置切的，
+            # 与 C 那侧按下标切同一个道理：**保真**（`int` 注解与 `bool` 注解在 Potato
+            # 里可能是同一个宽度的整数，回推必然丢掉用户写的那个）。
+            seg = ast.get_source_segment(src, node)
+            if seg:
+                ent["body"] = seg
+            doc["functions"].append(ent)
             rep.ok += 1
         # 模块级常量两种写法都收。**`isupper()` 是"这是不是常量"的判据**, 放在这里
         # 而不是 `_py_const` 里 —— 模块级小写赋值是变量, 不是"没转成功的常量", 报它
