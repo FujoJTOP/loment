@@ -265,7 +265,8 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | **5** | `potato_assert` | 工具型 | ✅ **已搬**（2026-09-19）：`lomcapasserts.lomt` + `loment_capasserts_test.py`，判据 4/4（`--print` / `--emit-rust` 的落盘字节 / `--check` 三条支路 / 自举链）|
 | **6** | `loment_extblock_test` 第 1–4 条（外部代码块的字节保真与消歧） | 检查型 | ✅ **已搬**（2026-09-19）：`lomextblock.lomt` + 该判据里加的两条（7/7）—— 这一格用的词法器是**自举侧**的，所以它同时是"两个词法器同一答案"的判据 |
 | **7** | `loment_json_test`（JSON 库 vs CPython `json`） | 对**外部神谕**的 | ✅ **已搬**（2026-09-19）：`lomjsoncheck.lomt` + 该判据里加的两条（4/4）—— 第一种"神谕驱动"形态的格子 |
-| 8 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
+| **8** | `loment_std_test`（std 核 mem/num vs CPython） | 对**外部神谕**的 | ✅ **已搬**（2026-09-19）：`lomstdcheck.lomt` + 该判据里加的两条（4/4）—— 与第 7 格同形，探针那一层同样没了 |
+| 9 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
 #### 第 1 格踩到的两处（后面 43 格都会再撞，先写下来）
@@ -400,6 +401,17 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
    `(0,0)`）—— 它们的拼法由 JSON 规范定死, 这两种观察合起来正好把这条**也钉住了**。
 3. **`return;` 不合法**（`return <expr>;` 必须有值, `SKILL.md` §3 那张表里写着）——
    我照着"提前返回"的习惯写了一次, 报的是 `期望表达式，得到 ';'`。改成 `if/else` 即可。
+
+#### 第 8 格（`loment_std_test`）：**同一句话的第二次兑现**
+
+与第 7 格同形（对外部神谕、探针那一层没了），只多一条**新的坑**：
+
+**`_start` 不能 `return`。** 参考那侧的探针写成 `fn _start() { … }` 收尾不带返回
+（它末尾直接 `syscall4(60, …)`）；我照第 5/6/7 格的形状写成 `fn _start() -> u32`
+却收尾 `return 0` —— **段错误、一个字都不输出**。原因是 `_start` 是 ELF 入口，
+栈上压的是 **argc/argv**, 不是返回地址, `ret` 就跳进垃圾里。同一个坑的另一半
+（写成 `main` → lld 把入口留成 0）§第 1 格已经记过；这次是**同一件事的第三种写法**。
+已补进 `SKILL.md` §3 那张表（原先只写了"freestanding 入口"）。
 
 **其余还没搬的（同类，都不便宜）**：`loment_src`（要 git + 比写出的包字节）、
 `loment_audit`、`loment_manual`（要加载每个示例）。

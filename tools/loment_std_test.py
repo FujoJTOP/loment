@@ -199,6 +199,58 @@ def test_std_modules_match_python():
     print(f"      mem + num: {len(want.splitlines())} 项与 Python 逐字节一致")
 
 
+# ---------------------------------------------------------------- Loment 版（S1 第八格）
+
+#: Loment 版的同一件事 —— 探针已经是**仓库里的一件工具**, 不再由判据生成。
+TWIN = ROOT / "loment" / "tools" / "lomstdcheck.lomt"
+
+
+@test
+def test_std_check_matches_loment_twin():
+    """`loment/tools/lomstdcheck.lomt` 报的每一项, 与 Python 算的**逐字节相同**。
+
+    `docs/189` §3 的 S1 第八格。与上一条的区别不是"换了实现", 而是**探针那一层没了**:
+    参考那侧必须"生成探针源 -> 编出来跑"（Python 调不了 Loment 的库）, Loment 侧自己
+    就是 Loment 程序, 直接 `use mem` / `use num`。
+    """
+    if not (J._clang() and J._wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        elf = J._compile(TWIN, td, "lomstdcheck")
+        got = J._run(elf, td)
+    want = _expected()
+    assert got == want, f"std 核结果与 Python 不一致:\n  got : {got!r}\n  want: {want!r}"
+    print(f"      mem + num: {len(want.splitlines())} 项与 Python 逐字节一致（Loment 版）")
+
+
+@test
+def test_std_twin_selfhost_compiles():
+    """`lomstdcheck.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (J._clang() and J._wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [J._clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{J._T}stdcheck_s1.bin"
+        script = (f"cp {J._wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {J._wsl_path(ROOT)} && {binn} loment/tools/lomstdcheck.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomstdcheck.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomstdcheck.lomt 成功 ({len(rr.stdout)}B IR)")
+
+
 @test
 def test_std_modules_are_checkable():
     """每个 std 模块**自己**必须是合法的 L1 单元 (这条不靠 clang, 永远跑)。"""

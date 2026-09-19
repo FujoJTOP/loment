@@ -298,7 +298,7 @@ fn _start() {
 | `Kind::Big(w)` | 带载荷变体的模式，`w` 是绑定名 |
 | `fn sum_slice(xs: [u32])` | 切片参数；`&xs` 传数组当切片；`slice_len(xs)` 取长 |
 | `guard slots(slot);` | 能力域守卫（§5） |
-| `fn _start()` | **freestanding 入口**，没有 `main`；参数是空的 |
+| `fn _start()` | **freestanding 入口**，没有 `main`；参数是空的。**它不能 `return`** —— 栈上压的是 argc/argv 而不是返回地址，`ret` 回去就是跳进垃圾（现象：段错误、一个字都不输出）。收尾要 `return die(0)`（里面是 `syscall4(60, …)`），别写 `return 0` |
 | `let xs: [u32; 3] = [1, 2, 3]` | 定长数组；下标 `xs[0]` 可读可写 |
 | `for i in 0..LIMIT { … }` | 区间循环（上界**不含**） |
 | `while i < n { … }` | 循环 |

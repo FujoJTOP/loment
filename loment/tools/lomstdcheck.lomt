@@ -1,0 +1,110 @@
+// loment/tools/lomstdcheck.lomt — Loment 版「std 核的**行为**」检查
+// (docs/189 §3 的 S1 第八格；判据在 tools/loment_std_test.py)
+//
+// 判据: 本程序打出的 `<标签><值>` 串, 与判据那一侧**用 Python 算出来的**逐字节相同。
+//
+// **为什么要有这一格**: `loment_lib_test` 测的是**库系统**（身份/去重/物化/多版本共存）,
+// `loment_json_test` 测的是 json 一个模块 —— 没有一条在问"这些库里那些函数算得对不对"。
+// 库里最容易蒙混过去的就是这个: 签名在、检查过、编得出, 而**算错了**。
+//
+// **为什么对照物是 Python 而不是硬编码期望值**: 硬编码的那份也是我们自己写的, 两处一起
+// 错就看不出来了。所以期望值由判据那侧独立算（`_expected()`）。
+//
+// 与参考那侧的形状差别同第 7 格: 参考侧要**生成一份探针源**再编出来跑（Python 调不了
+// Loment 的库）, Loment 侧**不要那一层** —— 它自己就是 Loment 程序, 直接 `use mem` /
+// `use num`。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误；docs/189 §3）。
+
+module lomstdcheck
+
+use mem
+use num
+
+const STDOUT: u64 = 1;
+
+/// **`_start` 必须走退出 syscall, 不能 `return`** —— 它栈上压的是 argc/argv, 不是返回
+/// 地址, `ret` 回去就跳进垃圾里（现象是段错误、一个字都不输出; 与"写成 `main`"同一类坑,
+/// 见 docs/189 §3 第 1 格）。
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn wr(fd: u64, p: ptr, n: u32) -> i64 {
+    return syscall4(1, fd, p as u64, n as u64);
+}
+
+fn pl(s: str) -> i64 {
+    return wr(STDOUT, str_ptr(s), str_len(s));
+}
+
+/// `sc` 是 say **自己的**暂存 —— 不能拿调用方的缓冲: `say(sc, "x=", num_to_dec(b, v))`
+/// 里 say 会再写一次那个缓冲, 于是"打印某个缓冲的内容"就变成打印被覆写后的东西。
+/// 参考那侧第一版就是这么错的（探针自己的 bug, 与库无关）—— 照抄这个形状。
+fn say(sc: ptr, tag: str, v: u32) {
+    let _a: i64 = pl(tag);
+    let _b: u32 = num_to_dec(sc, v);
+    let _c: i64 = wr(STDOUT, sc, _b);
+    let _d: i64 = pl("\n");
+}
+
+fn _start() -> u32 {
+    let sc: ptr = alloc(32);
+    // ---- mem: 填 / 拷 / 比 / 找 / 重叠移动
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    mem_fill(a, 8, 65 as u8);
+    mem_copy(b, a, 8);
+    say(sc, "eq=", mem_eq(a, b, 8) as u32);
+    store8(b, 3, 66 as u8);
+    say(sc, "ne=", mem_eq(a, b, 8) as u32);
+    say(sc, "find=", mem_find(b, 8, 66 as u8) as u32);
+    say(sc, "nofind=", mem_find(b, 8, 90 as u8) as u32);
+    mem_fill(b, 8, 0 as u8);
+    say(sc, "zero=", load8(b, 7));
+    let c: ptr = alloc(16);
+    store8(c, 0, 1 as u8);
+    store8(c, 1, 2 as u8);
+    store8(c, 2, 3 as u8);
+    store8(c, 3, 4 as u8);
+    mem_move(ptr_add(c, 1), c, 4);
+    say(sc, "mv0=", load8(c, 1));
+    say(sc, "mv3=", load8(c, 4));
+    say(sc, "ne=", mem_find_ne(a, 8, 65 as u8) as u32);
+    // 小端 32 位读写: 存进去再读回来, 且按字节看
+    let w: ptr = alloc(8);
+    mem_store32(w, 0, 305419896);
+    say(sc, "l32=", mem_load32(w, 0));
+    say(sc, "b0=", load8(w, 0));
+    say(sc, "b3=", load8(w, 3));
+    // ---- num: 十进制
+    let d: ptr = alloc(32);
+    say(sc, "dec0=", num_to_dec(d, 0));
+    say(sc, "dec1=", num_dec_len(1234567));
+    let n1: u32 = num_to_dec(d, 1234567);
+    let _e: i64 = wr(STDOUT, d, n1);
+    let _f: i64 = pl("\n");
+    let n2: u32 = num_to_dec(d, 4294967295);
+    let _g: i64 = wr(STDOUT, d, n2);
+    let _h: i64 = pl("\n");
+    say(sc, "parse=", num_parse_dec(str_ptr("370x9"), 5));
+    say(sc, "span=", num_dec_span(str_ptr("370x9"), 5));
+    say(sc, "spannone=", num_dec_span(str_ptr("x9"), 2));
+    // ---- num: 十六进制
+    let h: ptr = alloc(16);
+    say(sc, "hexn=", num_to_hex(h, 48879, 4));
+    let _i: i64 = wr(STDOUT, h, 4);
+    let _j: i64 = pl("\n");
+    let _k: u32 = num_to_hex(h, 10, 4);
+    let _l: i64 = wr(STDOUT, h, 4);
+    let _m: i64 = pl("\n");
+    say(sc, "hexw=", num_to_hex(h, 305419896, 2));
+    let _n: i64 = wr(STDOUT, h, 2);
+    let _o: i64 = pl("\n");
+    say(sc, "phex=", num_parse_hex(str_ptr("beef!"), 5));
+    say(sc, "hspan=", num_hex_span(str_ptr("beef!"), 5));
+    say(sc, "hbad=", num_hex_val(33 as u8) as u32);
+    say(sc, "hup=", num_parse_hex(str_ptr("BEEF"), 4));
+    return die(0);
+}
