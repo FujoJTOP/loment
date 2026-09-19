@@ -42,8 +42,15 @@ RUST_WIDE = {"u64": "u64", "i64": "i64"}  # 其余按声明宽度取
 
 
 class LomError(Exception):
+    """带**位置**的编译错误。
+
+    `line <= 0` = **这一档指不出位置**（例如"这份源被前门拒了"，那句话里已经有
+    "第 N 行"）：这时**不编一个位置**，消息原样输出 —— 编一个 `1:1:` 是撒谎，
+    而"错要指在错的地方"这条纪律的反面就是"指到假的地方去"。
+    """
+
     def __init__(self, line: int, col: int, msg: str):
-        super().__init__(f"{line}:{col}: {msg}")
+        super().__init__(f"{line}:{col}: {msg}" if line > 0 else msg)
         self.line, self.col, self.msg = line, col, msg
 
 

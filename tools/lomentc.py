@@ -2686,10 +2686,21 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     """
     tool_dir = Path(__file__).resolve().parent
     ext = source_ext_of(path.parent, tool_dir)
-    sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
-    mod = load(path, sw=sw)
-    deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
-                        addin_paths=addin_paths)
+    from lomt_from import NotRepresentable          # noqa: PLC0415
+    from potato_from import FrontDoorRefused        # noqa: PLC0415
+    try:
+        sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
+        mod = load(path, sw=sw)
+        deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
+                            addin_paths=addin_paths)
+    except (FrontDoorRefused, NotRepresentable) as e:
+        # **前门拒了这份源**（声明非法 / 这门拼法翻不出来）。它抛的**本来就是给人看的话**，
+        # 不是给栈看的 —— 在**这一处**（读单元的**唯一入口**）翻成编译器自己的 `LomError`，
+        # 于是**八个调用点**都按既有方式报错，而不是让用户看 traceback。
+        # （`docs/182` §1.9：入口不止一处 —— 所以要拦在唯一入口上，而不是逐个调用点补。）
+        # **位置传 0**：话里已经写着"第 N 行"了（`read_grammar_decl` 报的）。
+        # 传 1:1 是**编一个位置**，而"错要指在错的地方"的反面正是"指到假的地方去"。
+        raise LomError(0, 0, str(e)) from None
     return mod, deps
 
 
@@ -4875,7 +4886,10 @@ def main(argv: list[str] | None = None) -> int:
         mod, deps = load_unit(path, root)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
-        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
+        # 位置指不出来的那一档（`line == 0`，例如"前门拒了这份源"）**不写**结构化诊断 ——
+        # 写进去就等于给它编了一个行号，而那个行号会被渲染器当真。
+        if e.line > 0:
+            write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
         return 1
 
     errs = check(mod, deps=deps)

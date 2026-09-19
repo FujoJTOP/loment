@@ -459,6 +459,49 @@ def test_lomentc_load_goes_through_the_front_door():
 
 
 @test
+def test_a_front_door_refusal_reaches_the_cli_as_an_error_not_a_traceback():
+    """前门拒的那几档，走**命令行**要**报错**，不是抛 traceback（2026-09-18 实测）。
+
+    洞在**接线**上，不在前门：`front_door` 抛得挺对（`FrontDoorRefused` /
+    `NotRepresentable`），但 `lomentc` 的两个调用点**都没人接** —— 于是上面那些
+    判据全绿（它们直接调函数），而用户在命令行上看到的是 Python 栈，
+    **一句给人看的话都到不了他眼前**。这与 `docs/182` §1.9 是同一个形状：
+    **判据钉了函数，没钉入口。**
+
+    修法拦在**唯一入口** `lomentc.load_unit`（那一处把这一支翻成编译器自己的
+    `LomError`，八个调用点于是都按既有方式报错），所以这条钉的是 **CLI 的输出**，
+    不是某一行代码。
+
+    三档各来一次（前门的两个 raise 点 + 翻译器那一支）：
+      * 别名不在出厂锁里（`FrontDoorRefused`）；
+      * 后缀不认识、内容也认不出来（同一个 raise 点，另一句话）；
+      * 拼法认得出、可这门拼法**翻不出来**（`NotRepresentable`，例：`~` —— 本语言没有）。
+    """
+    cases = [
+        ("出厂锁", "gbad.lomt",
+         "choose write grammar klingon\nmodule t\n\nfn main() -> u32 {\n    return 0;\n}\n",
+         "不在出厂锁"),
+        ("认不出来", "gunknown.zzz", "zzz ??? !!! 这不是任何一门语言\n", "都没命中"),
+        ("翻不出来", "gtilde.java",
+         "public class T {\n    public static int f(int v) {\n        return ~v;\n    }\n}\n",
+         "~"),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        for label, name, text, want in cases:
+            p = Path(t) / name
+            p.write_text(text, encoding="utf-8", newline="\n")
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                                "--check", str(p)],
+                               capture_output=True, text=True, shell=False)
+            out = (r.stdout or "") + (r.stderr or "")
+            assert r.returncode != 0, f"[{label}] 这份源该被拒，却退了 0：{out[-200:]}"
+            assert "Traceback" not in out, f"[{label}] 抛栈了 —— 话到不了用户眼前：\n{out[-400:]}"
+            assert "[ERR]" in out and name in out, f"[{label}] 没报到点上：{out[-300:]}"
+            assert want in out, f"[{label}] 话里该有 {want!r}：{out[-300:]}"
+    print("      前门拒的三档：命令行上都是 [ERR] + 原因（没有 traceback）")
+
+
+@test
 def test_a_dot_lomt_is_never_sniffed_into_another_language():
     """**`.lomt` 不嗅探** —— 一份忘了写 `module` 的 Loment 文件不许被"猜"成别的语言。
 

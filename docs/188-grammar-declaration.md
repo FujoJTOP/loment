@@ -562,6 +562,16 @@ $ lomentc --print llvm pyunit.lomt    # 真的 IR，`; entry -> i64`
 ⇒ 判据因此写成**两条**（一条钉 `load`、一条钉 `load_unit`（含预扫））——
 **一条判据盖不住多个入口**，这条与 `docs/182` §1.9 是同一个形状。
 
+**2026-09-18 又撞到一次（这回是"入口"的另一种）**：前门**拒**的那三档
+（别名不在出厂锁里 / 后缀和内容都认不出来 / 这门拼法翻不出来）在**命令行**上是
+**Python traceback** —— `front_door` 抛得挺对（`FrontDoorRefused` / `NotRepresentable`），
+但 `lomentc` 的**两个调用点都没人接**。于是**库那一侧的判据全绿**（它们直接调函数），
+而用户一句话都看不到。修法**拦在唯一入口**上：`lomentc.load_unit` 把这一支翻成编译器
+自己的 `LomError`（`lomc.py` 里 `line == 0` = "指不出位置"，那就**不编**一个位置），
+八个调用点于是都按既有方式报错。判据钉的是 **CLI 的输出**、不是某一行代码
+（`loment_grammar_test::test_a_front_door_refusal_reaches_the_cli_as_an_error_not_a_traceback`，
+三档各一次）。
+
 ### 自举侧那一半：**`grammar loment` 那一格落了**（`loment_p8_test` M87）
 
 自举侧在 **`lex` 之前、按字节**抹那一行（`driver.lomt` 的 `strip_grammar_decl`）——

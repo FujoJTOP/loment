@@ -1544,6 +1544,16 @@ LOMENT_EXT = (".lomt", ".lom", ".lomp")
 _FRONT_MEMO: dict = {}
 
 
+class FrontDoorRefused(ValueError):
+    """**前门拒了这份源**：声明非法，或这门拼法根本没认出来（`docs/188` §1）。
+
+    消息是**给人看的话**（不是栈），也**不带路径** —— 路径由调用方补（它才知道自己
+    是从哪进来的）。它是 `ValueError` 的子类，所以既有的 `except ValueError` 照收；
+    而 `lomentc.load_unit`（读单元的**唯一入口**）把这一支翻成编译器自己的 `LomError`，
+    于是八个调用点都按既有方式报错，而不是让用户看 traceback。
+    """
+
+
 def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
     """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
 
@@ -1595,14 +1605,14 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
         # Loment 的源文件：**只信声明**（缺 = Loment），**不嗅探** —— 见上面那一段
         g, err, declared = read_grammar_decl(src)
         if err:
-            raise ValueError(f"{path}: {err}")
+            raise FrontDoorRefused(err)
         if not declared or g == "loment":
             return FrontUnit("loment", strip_grammar_decl(src), False, path)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)
         if not lang:
-            raise ValueError(f"{path}: {why}")
+            raise FrontDoorRefused(why)
         if lang == "loment":
             # 读法就是 Loment：**抹掉声明那一行**（等长空白，行号不动）后原样交出去
             return FrontUnit("loment", strip_grammar_decl(src), False, path)
