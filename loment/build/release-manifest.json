@@ -3,15 +3,15 @@
  "files": [
   {
    "path": "tools/lomc.py",
-   "sha256": "c7221d4d649397a66f9777bff222ac4680a9ddf71cff0c7e53d8632ef5f9da6e"
+   "sha256": "62c08f4336d297e1b8c0d1bb4b18eb600305c81ad6a8d863d78e5fafc6bf96c3"
   },
   {
    "path": "tools/lom_audit.py",
-   "sha256": "987ba72f780cd0ace73dcc58e6a568392a3e2539f934819a4707641160db56ba"
+   "sha256": "22f752d091243f2980fe98332c11828ea786798e38ed728b8261bd95eabcf4e1"
   },
   {
    "path": "tools/lomc_test.py",
-   "sha256": "b5593cb723d7989e782c3289ba5a861e45439ccc37433a68d861b3a22bbb8bc9"
+   "sha256": "4eb2e106b4590fb3622004ca79eccffef4e29972400398692ef7265ec1086f26"
   },
   {
    "path": "tools/lomentc.py",
@@ -27,7 +27,7 @@
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "df9b9c2e3c538d048d6c09f73cb6ebf6c904cf2ab32f2611f6c15fd70cfbc170"
+   "sha256": "40e10f78c709929a697a97589d7dd60b85ccd154b9e7cb7aaa82bb090912b94d"
   },
   {
    "path": "tools/potato_cross.py",
@@ -47,7 +47,7 @@
   },
   {
    "path": "tools/potato_assert.py",
-   "sha256": "7ee1e957d0441bb9b803dbdf4d68423afd45186672a15452de97215b813709cb"
+   "sha256": "83f3f390c9f2a378d973fc23226ee0160a8b3fa6a8aceb7fde608ff318cdfc9c"
   },
   {
    "path": "tools/loment.py",
@@ -723,7 +723,7 @@
   },
   {
    "path": "tools/loment_p7_test.py",
-   "sha256": "3d9e9ec98423b2faaa859bea4f30d8543c58db1599ff511d3d9f6e5359881bd6"
+   "sha256": "e9390df4ed45d63ae925c4cf9e8020283d048fa898f3532cad27859276425963"
   },
   {
    "path": "tools/loment_p8_test.py",
@@ -903,7 +903,7 @@
   },
   {
    "path": "tools/loment_lomc_test.py",
-   "sha256": "2f9fe02f5c89744cb277f9642868867f173f23727d75bf422c866f95494ba0e5"
+   "sha256": "3be6516a04c97fa80cfa4862475ed27bc4db9a0055b4b5abb64374c2465f2071"
   },
   {
    "path": "loment/lib/json.lomt",
