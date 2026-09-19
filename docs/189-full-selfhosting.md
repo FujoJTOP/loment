@@ -211,6 +211,39 @@ VS Code 扩展**只能**是 JS/TS，没有别的选择。移除 = 放弃编辑�
 `lomc --check`、`potato_assert --check`、`lom_audit`（新助手 `_on_disk`）、`potato_test`。
 **逐条列名进 `.gitignore`，不用通配** —— 同目录里有那 22 个手写件，通配会连带忽略掉（丢源码）。
 
+### S1 开工：先把 86 个文件**分清身份**（2026-09-18 实测所得）
+
+§1 那张表把 `tools/` 的 Python 说成一块。`git ls-files` 逐个数下来，它们**不是一类**：
+
+| 身份 | 个数 | 去路 |
+|---|---|---|
+| **判据**（`*_test.py` + `ci.py`） | **44** | **S1 的正题**：每条要有 Loment 版，且与 Python 版**逐字节相同** |
+| **参考实现**（`lomentc.py` / `lomc.py` / `lomelf.py` / `potato*.py` / 各 `*trans.py` …） | **53** | **S2** 才拆；其中 **lomfmt / lomdoc / lompkg / lomc / lomrel / lomstatus 六件已经有 Loment 孪生** —— S1 的模板就是它们 |
+| 支撑（`_safepath.py` / `loment_comefor.py`） | 2 | 随宿主走 |
+
+⇒ **S1 的执行单位是"一条判据"**，而每条的做法照 §2 A 那份模板抄：
+**给这条判据的工具/检查器写一份 Loment 实现，再写一条判据把两者的
+stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pair` 是现成的样例）。
+
+**两条判据的形态要先分清**（不然 44 格会各写各的）：
+
+* **工具型**（判据在测一个 `tools/` 里的工具）→ Loment 版就是那个工具的孪生，
+  比 stdout 天然成立（`lomstatus` / `lomrel` 就是这么落的）；
+* **检查型**（判据自己就是一段检查逻辑，没有对应工具）→ Loment 版**是那一段检查
+  本身**：同一份输入、同样的报告文本。**没有工具的要先承认它是个"程序"**，
+  别硬套"孪生"两个字。
+
+**从哪一格开始**（按"不碰 git / 进程 / 编译器"排序，最便宜的先做）：
+
+| 优先 | 判据 | 为什么先它 |
+|---|---|---|
+| 1 | `loment_editors_test` 的**第 1 条**（vim 语法表 vs VS Code TextMate 不漂移） | 纯数据：读两个文本、取词、比集合 —— 不碰 git、不起进程、不调编译器 |
+| 2 | `loment_eol` | 要过 **git 进程桥**（`lib/proc.lomt` 已有），且报告文本要逐字复刻（含 10 条截断与三条修法） |
+| 3 | `loment_status` 之后的 `loment_src` / `loment_filetype` | 两者都要 git；`loment_filetype` 直接写 **HKCU 注册表**，Loment 没有那个 syscall —— 它要么留在 Python，要么改由安装器代劳 |
+
+**记账**：每落一格 → 判据绿 → 提交（手写与机械分开）→ 回本表划掉一行。
+**没划完之前，"仓库里只有 Loment"这句话不成立**（README 的 Status 已经这么写着）。
+
 **S0 不落地之前不动 S1 之后的任何一格** —— 因为 D/C 的结论会改变清单，
 先搬的东西可能白搬。
 
