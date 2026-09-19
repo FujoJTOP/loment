@@ -743,7 +743,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "8c1294160be0427e9ef43b06013c37444ddc39bc1012442fcb99d232db372cc7"
+   "sha256": "bcd59c7b7b802d3e7d9cb84be492912ec8f6295f543d6a63e0e131f4218dd014"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1048,6 +1048,10 @@
   {
    "path": "loment/tools/lomstatus.lomt",
    "sha256": "cd7ec4fb4c645be8bece0864737dfd9c1331dc9a4cb02c419c7f3b4c2bfb11fe"
+  },
+  {
+   "path": "loment/tools/lomsyscalls.lomt",
+   "sha256": "1d37647aaec1ecdeb8e1d9d812f526773fb5fae9828f03e38e3c0d2abd5a7bff"
   },
   {
    "path": "loment/tools/lsp.lomt",
@@ -1647,7 +1651,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "cca95ec7ef06118b7d8d6744f8ea450304af1ae821e27f6fcc7ea1c8c5e70759"
+   "sha256": "0b86e8a0cdb0b40a3cfd2de4729f87f398304a87b964c8103a2a90a62ace0110"
   },
   {
    "path": "docs/190-loment-debugger.md",
