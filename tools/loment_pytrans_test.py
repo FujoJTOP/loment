@@ -16,10 +16,10 @@
 | 档 | 语料 | 判据 |
 |---|---|---|
 | **同意** | `policy.py`、`blockscope.py` | 翻译出来的数 **== CPython 的数**（CPython 当对照组） |
-| **不同意** | `intdiv.py`、`loopend.py` | 翻译出来的数 **== 本语言算的**，而且**必须 ≠ CPython 的** |
+| **不同意** | `intdiv.py`、`loopend.py`、`overflow.py` | 翻译出来的数 **== 本语言算的**，而且**必须 ≠ CPython 的** |
 | **拒收** | `bool_as_int.py` | **前端**报错，且说得出为什么 |
 
-第二档那两个"必须不同"是关键：少了它，那两份语料只是在摆样子，
+第二档那几条"必须不同"是关键：少了它，那几份语料只是在摆样子，
 "我们没有迁就 Python"这句话就没被测到。
 
 **`blockscope.py` 那份语料还带着一次教训**：第一版把"Python 是函数级作用域、
@@ -198,6 +198,41 @@ def _loopend_cpython() -> int:
     return (walk(3) + walk(4)) % 200  # (3+2) + (6+3) = 14
 
 
+def _i64(x: int) -> int:
+    """**本语言的 `i64`**：超过 64 位就按二进制补码回绕。
+
+    这是**语言的定义**（`tools/pytrans.py` 文件头 §决定 1：「`int` 映 `i64` …… 溢出
+    变成回绕」），不是从实现里读出来的数 —— 判据这一侧按定义重算一遍。
+    """
+    x &= (1 << 64) - 1
+    return x - (1 << 64) if x >> 63 else x
+
+
+def _overflow_loment() -> int:
+    """`overflow.py` 按**本语言**算：`int` 的拼法就是 `i64`，连乘溢出即回绕。
+
+    `7 * 1000 ** 8 == 7e24` 超过 `2^63-1` ⇒ 回绕成 `-4420394637261275136`，
+    于是 `sign` 给 1（CPython 那边 `7e24 > 0`，给 0）—— 这一处差别把两个数分开。
+    """
+    huge = _i64(7 * 1000 ** 8)        # 回绕成负数
+    s = 1 if huge < 0 else 0
+    w = 0 - huge                      # 已确认 huge < 0
+    d = sum(int(c) for c in str(w)) % 100
+    return s * 100 + d                # 100 + 75 = 175
+
+
+def _overflow_cpython() -> int:
+    """同一份语料**按 CPython** 算 —— 用来断言两者**不同**（否则没踩在缝上）。
+
+    CPython 的 `int` 是任意精度：`7e24` 原样留着，`sign` 给 0，数位和是 7 ⇒ **7**。
+    """
+    huge = 7 * 1000 ** 8             # 任意精度，不回绕
+    s = 1 if huge < 0 else 0
+    w = huge if huge > 0 else 0 - huge
+    d = sum(int(c) for c in str(w)) % 100
+    return s * 100 + d                # 0 + 7 = 7
+
+
 #: 同意集：`(文件名, 期望退出码)`。**CPython 当对照组**。
 AGREE = [
     ("policy.py", _policy_expected()),
@@ -210,6 +245,8 @@ AGREE = [
 DISAGREE = [
     ("intdiv.py", _intdiv_loment(), _intdiv_cpython()),
     ("loopend.py", _loopend_loment(), _loopend_cpython()),
+    # **类型的宽度**那一处：`int` 的拼法是 `i64`，溢出回绕 —— 本语言 175、CPython 7。
+    ("overflow.py", _overflow_loment(), _overflow_cpython()),
 ]
 
 

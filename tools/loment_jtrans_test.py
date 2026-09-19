@@ -55,6 +55,62 @@ EX = ROOT / "loment" / "jtrans"
 #: = 18 + 27 + 28 = 73 ⇒ `2*10 + 6 + 73 = **99**`。
 WANT_RC = 2 * 10 + 6 + (6 * 3 + 27 * 1 + 14 * 2)
 
+
+def _want_bits() -> int:
+    """`Bits.java` 的期望值 —— **独立推出来的**，不是从翻译器/编译器的产物抄的。
+
+    做法：按 `Bits.java` 头注里那份规格，在 Python 里**另写一遍**同一套算术
+    （`while` / `for` / 递归 / 位运算），从头算一遍 —— 与 `tools/jtrans.py` 不共享
+    任何东西，也不读 Java 侧跑出来的退出码。
+
+    这是 `docs/186` §1 那条必需的一步：少了它，"翻译器与对照组一起错成同一副样子"
+    会被当成通过。三个数（这一份、javac 那边、翻译成 Loment 那边）互相对。
+
+    这份规格对**正数**输入而言，Python 与 Java 在 `/ % >> & | ^ <<` 上语义一致
+    （`/` 与 `%` 都向零截断、`>>` 都算术、`int` 都 32 位），所以两边该给出同一个数。
+    """
+    def popcount(v: int) -> int:
+        n, x = 0, v
+        while x != 0:
+            n += x & 1
+            x >>= 1
+        return n
+
+    def gcd(a: int, b: int) -> int:
+        while b != 0:
+            a, b = b, a % b
+        return a
+
+    def collatz(n: int) -> int:
+        if n == 1:
+            return 0
+        if n % 2 == 0:
+            return 1 + collatz(n // 2)
+        return 1 + collatz(3 * n + 1)
+
+    def fold(n: int) -> int:
+        acc = 0
+        for i in range(1, n + 1):
+            if i % 3 == 0 and i % 2 == 1:
+                acc ^= i & 15
+            elif i % 5 == 0:
+                acc |= i << 1
+            else:
+                acc += popcount(i)
+        return acc
+
+    def mix(v: int) -> int:
+        m = (v ^ 255) & 255
+        return ((m << 1) ^ v) & 255
+
+    a = popcount(0xBEEF & 65535)
+    b = gcd(1071, 462)
+    c = collatz(27)
+    d = fold(24)
+    e = mix(200)
+    return ((a * 3 + b) ^ (c & 63)) + (d ^ e)
+
+
 TESTS: list = []
 
 
@@ -94,21 +150,22 @@ def _run(exe: Path) -> int:
     return int(r.stdout.strip() or -1)
 
 
-#: **对照组那一边的入口**。Java 要一个 `main` 才能起，而要拿"数"出来得走
-#: `System.exit` —— 那是属性访问，本子集不收。所以夹具补一个 `Harness`。
-#: 与 C 那门的 `_start` 夹具同一个道理：**两边各有一个入口，比的是同一个数**。
-_HARNESS = """
-public class Harness {
-    public static void main(String[] a) {
-        System.exit(Sample.entry() % 256);
-    }
-}
-"""
+def _harness(cls: str) -> str:
+    """**对照组那一边的入口**。Java 要一个 `main` 才能起，而要拿"数"出来得走
+    `System.exit` —— 那是属性访问，本子集不收。所以夹具补一个 `Harness`。
+
+    与 C 那门的 `_start` 夹具同一个道理：**两边各有一个入口，比的是同一个数**。
+    类名参数化 —— 语料可以不止一份（`Sample` / `Bits`），而夹具的形状是同一个。
+    """
+    return ("\npublic class Harness {\n"
+            "    public static void main(String[] a) {\n"
+            f"        System.exit({cls}.entry() % 256);\n"
+            "    }\n}\n")
 
 
-def _javac_run(td: Path, src: Path) -> int:
+def _javac_run(td: Path, src: Path, cls: str = "Sample") -> int:
     """Java 侧：javac 编「语料 + 夹具」，java 跑，读退出码。"""
-    (td / "Harness.java").write_text(_HARNESS, encoding="utf-8", newline="\n")
+    (td / "Harness.java").write_text(_harness(cls), encoding="utf-8", newline="\n")
     (td / src.name).write_text(src.read_text(encoding="utf-8"),
                                encoding="utf-8", newline="\n")
     r = subprocess.run([_javac(), "-d", str(td), str(td / src.name),
@@ -176,6 +233,42 @@ def test_translation_runs_same_as_javac():
         f"**翻译出来的 Loment 与 javac 编的 Java 结果不同**: {l_rc} != {j_rc}。\n"
         f"  （两个都对不上 {WANT_RC} 的话是语料问题；只有一边对不上就是翻译翻错了）")
     print(f"      javac -> {j_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
+@test
+def test_bits_translation_runs_same_as_javac():
+    """**第二份语料** `Bits.java` —— 与上一条同一条判据，压力加在别处。
+
+    上一条（`Sample.java`）钉的是"顶层常量 + 三层 `else if`"；这一条钉的是
+    **递归**（`collatz` 调自己 —— `Emitter` 靠本单元的 `fns` 表认得出）、
+    `while` 里改形参、`for` + 复合条件、`^` `|` `<<` 三种位运算混排。
+
+    **三个数互相对**：javac 那边的退出码、翻译成 Loment 再编再跑的退出码，
+    以及 `_want_bits()` **独立**算出来的第三份数（`docs/186` §1：少了它，翻译器与
+    对照组一起错成同一副样子会被当成通过）。
+    """
+    if not _javac() or not _java() or not _wsl():
+        print("      SKIP: 需要 javac + java + WSL")
+        return
+    want = _want_bits()
+    src = EX / "Bits.java"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        doc, rep = potato_from.from_java(src.read_text(encoding="utf-8"), "Bits.java",
+                                         "strict")
+        assert not potato.validate(doc), potato.validate(doc)[:3]
+        # 与上一条同一条口径：只断言**函数**一条都没被跳（那才是"少算一步"的来源）。
+        lost = [s for s in rep.skipped if s["kind"] == "fn"]
+        assert not lost, f"转写那一步丢了函数: {lost}"
+        # **它是 Loment**，只是写法是 Java（`docs/188` §3）
+        assert doc["language"] == "loment" and doc["grammar"] == "java", doc["language"]
+        j_rc = _javac_run(td, src, "Bits")
+        l_rc = _run(_build_loment(td, doc))
+    assert j_rc == want, f"javac 那边就不对: {j_rc} != {want}（语料或期望值错了）"
+    assert l_rc == j_rc, (
+        f"**翻译出来的 Loment 与 javac 编的 Java 结果不同**: {l_rc} != {j_rc}。\n"
+        f"  （两个都对不上 {want} 的话是语料问题；只有一边对不上就是翻译翻错了）")
+    print(f"      javac -> {j_rc}，翻译成 Loment -> {l_rc}，独立期望 -> {want}（三数相等）")
 
 
 @test

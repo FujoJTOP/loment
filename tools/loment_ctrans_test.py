@@ -41,11 +41,16 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cpptrans    # noqa: E402  (共享核的四门之一, 见 test_bitwise_not_is_loud_*)
+import cstrans     # noqa: E402
+import ctrans      # noqa: E402
+import jtrans      # noqa: E402
 import lomelf      # noqa: E402
 import lomentc     # noqa: E402
 import lomt_from   # noqa: E402
 import potato      # noqa: E402
 import potato_from  # noqa: E402
+import trans_core  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "loment" / "ctrans"
@@ -99,12 +104,86 @@ def _scoping_expected() -> int:
     return (grid + shadow + precedence) % 256
 
 
+def _numeric_expected() -> int:
+    """`loment/ctrans/numeric.c` 里 `main()` 的独立算法（照 C 语义再写一遍）。
+
+    **七个函数各写一遍**，不是把 C 的结果抄过来 —— 抄的话，"翻译器与 clang 一起
+    错成同一副样子"就穿不过去了（这一份的五个子结果都得对，最后那个才对）：
+
+    * `isqrt(i * 100)` 求和（i = 1..20）= **610** —— 二进制搜索的上下界收法
+    * `digit_sum(987654)` = 9+8+7+6+5+4 = **39**
+    * `collatz_steps(27)` = **111**（那个著名的长链）
+    * `popcount_range(0, 64)` = Σ_{k<64} popcount(k) = 6·2⁵ = **192**
+    * `div_sum(50)` = Σ_{k≤50} d(k) = **207**（50 以内每个数的约数个数之和）
+
+    累起来 1159，落进 `> 800` 那支 ⇒ 1159 − 800 = 359，再 `% 256` = **103**。
+    """
+
+    def isqrt(n):
+        lo, hi, best = 0, n, 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if mid * mid <= n:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def digit_sum(n):
+        s = 0
+        while n > 0:
+            s += n % 10
+            n //= 10
+        return s
+
+    def collatz_steps(n):
+        steps = 0
+        while n != 1:
+            if n % 2 == 0:
+                n //= 2
+            else:
+                n = n * 3 + 1
+            steps += 1
+        return steps
+
+    def popcount(x):
+        c = 0
+        while x != 0:              # 只喂非负数：C 的算术右移在负数上不退位
+            c += x & 1
+            x >>= 1
+        return c
+
+    def popcount_range(lo, hi):
+        return sum(popcount(k) for k in range(lo, hi))
+
+    def divisors(n):
+        return sum(1 for d in range(1, n + 1) if n % d == 0)
+
+    def div_sum(n):
+        return sum(divisors(k) for k in range(1, n + 1))
+
+    total = sum(isqrt(i * 100) for i in range(1, 21))
+    total += digit_sum(987654)
+    total += collatz_steps(27)
+    total += popcount_range(0, 64)
+    total += div_sum(50)
+    if total > 1500:
+        total -= 1500
+    elif total > 800:
+        total -= 800
+    else:
+        total -= 400
+    return total % 256
+
+
 #: 语料表：`(文件名, 期望退出码)`。两边都真编真跑，各自的数还要与这里对一次 ——
 #: 否则"翻译器与 clang 一起错成同一副样子"会被当成通过。
 CORPUS = [
     ("sample.c", WANT_RC),
     ("coerce.c", _coerce_expected()),
     ("scoping.c", _scoping_expected()),
+    ("numeric.c", _numeric_expected()),
 ]
 
 TESTS: list = []
@@ -313,6 +392,61 @@ def test_out_of_subset_is_loud():
         print(f"      子集外报得出: {msg[:90]}…")
         return
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
+
+
+#: 四门共用 `trans_core` 的方言表 —— 共享核里的一处守卫要**四门都验**：
+#: 某一门单独"收下"它，就是漏（那正是 `~` 原先的样子）。
+_BRACE = [
+    ("C", ctrans, "int f(int v) { return ~v; }\n"),
+    ("C++", cpptrans, "int f(int v) { return ~v; }\n"),
+    ("Java", jtrans,
+     "public class T {\n    public static int f(int v) {\n        return ~v;\n    }\n}\n"),
+    ("C#", cstrans,
+     "class T {\n    static int F(int v) {\n        return ~v;\n    }\n}\n"),
+]
+
+
+@test
+def test_bitwise_not_is_loud_in_every_brace_dialect():
+    """`~` 在四门**共享核**里都要点名拒 —— 不许"前端收下、产物死在后面"。
+
+    2026-09-18 写 `loment/jtrans/Bits.java` 时撞出来的：`trans_core.unary()` 原先**收下** `~`
+    并照发 `(~v)`，而 **Loment 没有按位取反**（一元只有 `-` 与 `!`）。于是产物死在
+    **编译器**的词法那一步 —— `非法字符 '~'`，报出来还带着**生成出来那个单元**的行号，
+    用户在源码里根本找不到那一行。同一个文件里 `>>>` 却是**点名拒 + 给出路**的：
+    一个能过前端、在后面才炸的洞，形状与 `docs/167` 要消灭的那类正是同一种。
+
+    这一条钉三件（两个入口各一次 —— `docs/182` §1.9：一条判据盖不住多个入口）：
+
+      * **四门都拒**：它住在共享核 `trans_core._REJECT_NAMED` 里，某一门单独收下就是漏；
+      * **报的话点名 `~`，并给出路**：`~v` 是"与全 1 异或"，要它得**按宽度**写
+        （`v ^ -1` / `v ^ 255`）—— 不认识它的人要能照做；
+      * **报的是前端**（`Unsupported`），不是翻译完之后编译器报的词法错。
+    """
+    for label, mod, src in _BRACE:
+        try:
+            mod.translate(src)
+        except trans_core.Unsupported as e:
+            msg = str(e)
+            assert "~" in msg, f"[{label}] 要点名 `~`: {msg}"
+            assert "^ -1" in msg and "^ 255" in msg, (
+                f"[{label}] 要给出**按宽度**的两条出路（`v ^ -1` / `v ^ 255`）: {msg}")
+            assert "非法字符" not in msg, f"[{label}] 报成了编译器那条: {msg}"
+        else:
+            raise AssertionError(
+                f"[{label}] `~` 本语言没有，前端却一个字都没报 —— 产物会在后面炸")
+    # 另一处入口：**前门**（`.java` 文件 → 该交给编译器的 Loment 源）。它走的不是
+    # `translate()` 那条路，所以另钉一次 —— 症状正是从这里冒出来的（错的行号 + 词法错）。
+    with tempfile.TemporaryDirectory() as tds:
+        f = Path(tds) / "Tilde.java"
+        f.write_text(_BRACE[2][2], encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(f)
+        except lomt_from.NotRepresentable as e:
+            assert "~" in str(e) and "^ -1" in str(e), f"前门也要点名并给出路: {e}"
+        else:
+            raise AssertionError("前门把 `~` 放过去了（应当在这一步就拒）")
+    print(f"      `~` 四门共享核都点名拒 + 给出路；前门那一处也拒")
 
 
 def main() -> int:
