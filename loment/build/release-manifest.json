@@ -931,7 +931,7 @@
   },
   {
    "path": "tools/loment_editors_test.py",
-   "sha256": "51792b1c5f40850b8a829410662fd1a877fa3556b443f4775fa94e7bb9a032ba"
+   "sha256": "e344adad620dbccd2dd4718fb49012a9b341c7dccba460d0b1e726c0f6772496"
   },
   {
    "path": "editors/vim/README.md",
@@ -1052,6 +1052,10 @@
   {
    "path": "loment/tools/lomsyscalls.lomt",
    "sha256": "1d37647aaec1ecdeb8e1d9d812f526773fb5fae9828f03e38e3c0d2abd5a7bff"
+  },
+  {
+   "path": "loment/tools/lomvimgrammar.lomt",
+   "sha256": "b6d2f7445cd65435be1509dab5b58dfb5b1298294b29f375f8056e54366c6d0c"
   },
   {
    "path": "loment/tools/lsp.lomt",
@@ -1651,7 +1655,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "0b86e8a0cdb0b40a3cfd2de4729f87f398304a87b964c8103a2a90a62ace0110"
+   "sha256": "bde575b58ece479cbf9ea655c3bc3a3e474465913d6e58d82d2904798bde3997"
   },
   {
    "path": "docs/190-loment-debugger.md",
