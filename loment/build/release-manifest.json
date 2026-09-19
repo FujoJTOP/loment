@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/trans_core.py",
-   "sha256": "dd095990e32e07e8c3656c4a853736cff0486d10f8f017284de9b3656497464e"
+   "sha256": "c4969ec6d701a7626fd1b9f93cccedaa726747f6265f2fd8c484550cb662c7a2"
   },
   {
    "path": "tools/ctrans.py",
@@ -831,7 +831,7 @@
   },
   {
    "path": "tools/loment_ctrans_test.py",
-   "sha256": "75edb1ba90ad7ff1d98761113ae03b6ab00fbb0569dbf2897585588d56023948"
+   "sha256": "55e4298e673124aaab973f7863c3093b03fc080850597c488e896ac174a9b7b3"
   },
   {
    "path": "tools/pytrans.py",
@@ -839,7 +839,7 @@
   },
   {
    "path": "tools/loment_pytrans_test.py",
-   "sha256": "21632125a66da7e6c1982ca14bbd8ce11802664c5f386f4460e355aa84669e46"
+   "sha256": "9fedaa3391fd7d71eb3af613012f7d3decd5a22ccfc7f524e7fcc5db0138ed99"
   },
   {
    "path": "tools/jtrans.py",
@@ -847,7 +847,7 @@
   },
   {
    "path": "tools/loment_jtrans_test.py",
-   "sha256": "70c9de0e98e13a315c22fc23f036315b165d78a34f18b0144114c83f21653be4"
+   "sha256": "bb8ef40b4b8b9832c509aae3d86c780ba53c139dfa8ede4e9200470657b78dc2"
   },
   {
    "path": "tools/cstrans.py",
@@ -1174,6 +1174,10 @@
    "sha256": "ecfd3830171a1143f99a767f4976cb771333eb016c22d9a12d25e45b39eee3b4"
   },
   {
+   "path": "loment/ctrans/numeric.c",
+   "sha256": "12c0b1d7ee3b065a5fd9d3c21f23e25af22c12e9bbe4bc7deae097dde50db607"
+  },
+  {
    "path": "loment/ctrans/sample.c",
    "sha256": "06abccea7f3b5491313b9c4f8208b815d3d10c504a6899fad3119b463b2b91de"
   },
@@ -1202,8 +1206,16 @@
    "sha256": "d50e51fc1b737763544782d97ad03cd7b1c00ee0f0d7657a610cdbfd45745541"
   },
   {
+   "path": "loment/pytrans/overflow.py",
+   "sha256": "78a1fcf03583614d191564c8c4c5783c84e813a0a8617f851f0ab5b3571a2b4b"
+  },
+  {
    "path": "loment/pytrans/policy.py",
    "sha256": "fa018caa1d6d4ef86f78d8842d7f5c9399a69cb7d4662c847f8925e92b6728f3"
+  },
+  {
+   "path": "loment/jtrans/Bits.java",
+   "sha256": "f582e5fcda40d969332567a61f87b049823852694c6da4ee199f15fb3a05f058"
   },
   {
    "path": "loment/jtrans/Sample.java",
@@ -1627,7 +1639,7 @@
   },
   {
    "path": "docs/188-grammar-declaration.md",
-   "sha256": "61c15e8b4be12ed8899f8a4c0cf3c24a31a7db8318aa7ac3500fb4c8eae74605"
+   "sha256": "397b8d56e1c2dbce18bb2235b3e20eae7ef25e585b275274ec75b3777325e50c"
   },
   {
    "path": "docs/189-full-selfhosting.md",
