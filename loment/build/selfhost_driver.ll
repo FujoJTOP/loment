@@ -1749,6 +1749,7 @@ declare void @llvm.trap()
 @.str.cf_comefor_at.2 = private unnamed_addr constant [2 x i8] c"\74\6F"
 @.str.cf_byuse_at.0 = private unnamed_addr constant [5 x i8] c"\62\79\75\73\65"
 @.str.cf_byuse_at.1 = private unnamed_addr constant [4 x i8] c"\64\6F\6E\65"
+@.str.expand_comefor.0 = private unnamed_addr constant [3 x i8] c"\75\73\65"
 @.str.has_extblock.0 = private unnamed_addr constant [7 x i8] c"\63\6F\6D\6D\61\6E\64"
 @.str.has_extblock.1 = private unnamed_addr constant [6 x i8] c"\66\6F\72\75\73\65"
 @.str.comefor_fail.0 = private unnamed_addr constant [37 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\63\6F\6D\65\66\6F\72\20\E7\9A\84\E5\AE\8F\E4\BD\93\E6\B2\A1\E8\B7\91\E6\88\90\3A\20"
@@ -1759,7 +1760,8 @@ declare void @llvm.trap()
 @.str.comefor_fail.5 = private unnamed_addr constant [55 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\62\79\75\73\65\20\E5\8F\AA\E8\83\BD\E5\86\99\E5\9C\A8\E9\A1\B6\E5\B1\82\20\28\E4\B8\8E\20\63\6F\6D\65\66\6F\72\20\E5\90\8C\E5\B1\82\29\0A"
 @.str.comefor_fail.6 = private unnamed_addr constant [49 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\62\79\75\73\65\20\E6\94\B6\E7\9A\84\E4\B8\8D\E6\98\AF\E4\BB\BB\E4\BD\95\E5\9C\A8\E7\94\A8\E7\9A\84\E6\96\B9\E8\A8\80\0A"
 @.str.comefor_fail.7 = private unnamed_addr constant [52 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\63\6F\6D\65\66\6F\72\20\E7\9A\84\E5\AE\8F\E4\BD\93\E5\A4\AA\E5\A4\A7\20\28\E4\B8\8A\E9\99\90\20\33\30\30\20\74\6F\6B\65\6E\29\0A"
-@.str.comefor_fail.8 = private unnamed_addr constant [52 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\63\6F\6D\65\66\6F\72\20\E5\90\9E\E6\8E\89\E7\9A\84\20\74\6F\6B\65\6E\20\E6\AF\94\E5\89\A9\E4\B8\8B\E7\9A\84\E8\BF\98\E5\A4\9A\0A"
+@.str.comefor_fail.8 = private unnamed_addr constant [79 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\63\6F\6D\65\66\6F\72\20\E7\9A\84\E4\BD\93\E9\87\8C\E6\9A\82\E6\97\B6\E4\B8\8D\E6\94\AF\E6\8C\81\20\75\73\65\20\E2\80\94\E2\80\94\20\E5\B8\AE\E6\89\8B\20\66\6E\20\E5\86\99\E5\9C\A8\E4\BD\93\E9\87\8C\E9\9D\A2\0A"
+@.str.comefor_fail.9 = private unnamed_addr constant [52 x i8] c"\66\75\6A\6F\63\2D\73\3A\20\63\6F\6D\65\66\6F\72\20\E5\90\9E\E6\8E\89\E7\9A\84\20\74\6F\6B\65\6E\20\E6\AF\94\E5\89\A9\E4\B8\8B\E7\9A\84\E8\BF\98\E5\A4\9A\0A"
 @.str.wjson_str.0 = private unnamed_addr constant [1 x i8] c"\22"
 @.str.wjson_str.1 = private unnamed_addr constant [2 x i8] c"\5C\22"
 @.str.wjson_str.2 = private unnamed_addr constant [2 x i8] c"\5C\5C"
@@ -52210,6 +52212,47 @@ L18_sc_end:
   %t52 = phi i1 [ %t51, %L16_sc_rhs ], [ false, %L17_sc_short ]
   ret i1 %t52
 }
+; cf_has_ident -> u32
+define i32 @cf_has_ident(ptr %unit, ptr %t, i32 %lo, i32 %hi, { ptr, i64 } %w) {
+entry:
+  %unit.addr = alloca ptr
+  %t.addr = alloca ptr
+  %lo.addr = alloca i32
+  %hi.addr = alloca i32
+  %w.addr = alloca { ptr, i64 }
+  %i.addr = alloca i32
+  store ptr %unit, ptr %unit.addr
+  store ptr %t, ptr %t.addr
+  store i32 %lo, ptr %lo.addr
+  store i32 %hi, ptr %hi.addr
+  store { ptr, i64 } %w, ptr %w.addr
+  %t1 = load i32, ptr %lo.addr
+  store i32 %t1, ptr %i.addr
+  br label %L1_wcond
+L1_wcond:
+  %t2 = load i32, ptr %i.addr
+  %t3 = load i32, ptr %hi.addr
+  %t4 = icmp ult i32 %t2, %t3
+  br i1 %t4, label %L2_wbody, label %L3_wend
+L2_wbody:
+  %t5 = load ptr, ptr %unit.addr
+  %t6 = load ptr, ptr %t.addr
+  %t7 = load i32, ptr %i.addr
+  %t8 = load { ptr, i64 }, ptr %w.addr
+  %t9 = call i1 @cf_is(ptr %t5, ptr %t6, i32 %t7, { ptr, i64 } %t8)
+  br i1 %t9, label %L4_then, label %L5_else
+L4_then:
+  ret i32 1
+L5_else:
+  br label %L6_end
+L6_end:
+  %t10 = load i32, ptr %i.addr
+  %t11 = add i32 %t10, 1
+  store i32 %t11, ptr %i.addr
+  br label %L1_wcond
+L3_wend:
+  ret i32 0
+}
 ; cf_byuse_at -> bool
 define i1 @cf_byuse_at(ptr %unit, ptr %t, i32 %nt, i32 %i) {
 entry:
@@ -52297,9 +52340,20 @@ L4_then:
 L5_else:
   br label %L6_end
 L6_end:
-  %t10 = load i32, ptr %i.addr
-  %t11 = add i32 %t10, 1
-  store i32 %t11, ptr %i.addr
+  %t10 = load ptr, ptr %unit.addr
+  %t11 = load ptr, ptr %t.addr
+  %t12 = load i32, ptr %nt.addr
+  %t13 = load i32, ptr %i.addr
+  %t14 = call i1 @cf_byuse_at(ptr %t10, ptr %t11, i32 %t12, i32 %t13)
+  br i1 %t14, label %L7_then, label %L8_else
+L7_then:
+  ret i32 1
+L8_else:
+  br label %L9_end
+L9_end:
+  %t15 = load i32, ptr %i.addr
+  %t16 = add i32 %t15, 1
+  store i32 %t16, ptr %i.addr
   br label %L1_wcond
 L3_wend:
   ret i32 0
@@ -52726,247 +52780,263 @@ L40_then:
 L41_else:
   br label %L42_end
 L42_end:
-  %t88 = load i32, ptr %nd.addr
-  %t89 = icmp uge i32 %t88, 64
-  br i1 %t89, label %L43_then, label %L44_else
+  %t88 = load ptr, ptr %unit.addr
+  %t89 = load ptr, ptr %toks.addr
+  %t90 = load i32, ptr %i.addr
+  %t91 = add i32 %t90, 5
+  %t92 = load i32, ptr %e.addr
+  %t93 = getelementptr inbounds [3 x i8], ptr @.str.expand_comefor.0, i64 0, i64 0
+  %t94 = insertvalue { ptr, i64 } undef, ptr %t93, 0
+  %t95 = insertvalue { ptr, i64 } %t94, i64 3, 1
+  %t96 = call i32 @cf_has_ident(ptr %t88, ptr %t89, i32 %t91, i32 %t92, { ptr, i64 } %t95)
+  %t97 = icmp eq i32 %t96, 1
+  br i1 %t97, label %L43_then, label %L44_else
 L43_then:
-  ret i32 4
+  ret i32 10
 L44_else:
   br label %L45_end
 L45_end:
-  %t90 = load ptr, ptr %cf.addr
-  %t91 = load i32, ptr %nd.addr
-  %t92 = mul i32 %t91, 32
-  %t93 = add i32 %t92, 0
-  %t94 = load ptr, ptr %toks.addr
-  %t95 = load i32, ptr %i.addr
-  %t96 = add i32 %t95, 2
-  %t97 = call i32 @cf_f(ptr %t94, i32 %t96, i32 4)
-  %t98 = add i32 %t97, 1
-  call void @store32(ptr %t90, i32 %t93, i32 %t98)
-  %t99 = load ptr, ptr %cf.addr
-  %t100 = load i32, ptr %nd.addr
-  %t101 = mul i32 %t100, 32
-  %t102 = add i32 %t101, 4
-  %t103 = load ptr, ptr %toks.addr
-  %t104 = load i32, ptr %i.addr
-  %t105 = add i32 %t104, 2
-  %t106 = call i32 @cf_f(ptr %t103, i32 %t105, i32 8)
-  %t107 = sub i32 %t106, 2
-  call void @store32(ptr %t99, i32 %t102, i32 %t107)
-  %t108 = load ptr, ptr %cf.addr
-  %t109 = load i32, ptr %nd.addr
-  %t110 = mul i32 %t109, 32
-  %t111 = add i32 %t110, 8
-  %t112 = load i32, ptr %i.addr
-  %t113 = add i32 %t112, 5
-  call void @store32(ptr %t108, i32 %t111, i32 %t113)
-  %t114 = load ptr, ptr %cf.addr
-  %t115 = load i32, ptr %nd.addr
-  %t116 = mul i32 %t115, 32
-  %t117 = add i32 %t116, 12
-  %t118 = load i32, ptr %e.addr
-  call void @store32(ptr %t114, i32 %t117, i32 %t118)
-  %t119 = load ptr, ptr %cf.addr
-  %t120 = load i32, ptr %nd.addr
-  %t121 = mul i32 %t120, 32
-  %t122 = add i32 %t121, 16
-  %t123 = load ptr, ptr %toks.addr
-  %t124 = load i32, ptr %i.addr
-  %t125 = call i32 @cf_f(ptr %t123, i32 %t124, i32 12)
-  call void @store32(ptr %t119, i32 %t122, i32 %t125)
-  %t126 = load ptr, ptr %cf.addr
-  %t127 = load i32, ptr %nd.addr
-  %t128 = mul i32 %t127, 32
-  %t129 = add i32 %t128, 20
-  call void @store32(ptr %t126, i32 %t129, i32 1)
+  %t98 = load i32, ptr %nd.addr
+  %t99 = icmp uge i32 %t98, 64
+  br i1 %t99, label %L46_then, label %L47_else
+L46_then:
+  ret i32 4
+L47_else:
+  br label %L48_end
+L48_end:
+  %t100 = load ptr, ptr %cf.addr
+  %t101 = load i32, ptr %nd.addr
+  %t102 = mul i32 %t101, 32
+  %t103 = add i32 %t102, 0
+  %t104 = load ptr, ptr %toks.addr
+  %t105 = load i32, ptr %i.addr
+  %t106 = add i32 %t105, 2
+  %t107 = call i32 @cf_f(ptr %t104, i32 %t106, i32 4)
+  %t108 = add i32 %t107, 1
+  call void @store32(ptr %t100, i32 %t103, i32 %t108)
+  %t109 = load ptr, ptr %cf.addr
+  %t110 = load i32, ptr %nd.addr
+  %t111 = mul i32 %t110, 32
+  %t112 = add i32 %t111, 4
+  %t113 = load ptr, ptr %toks.addr
+  %t114 = load i32, ptr %i.addr
+  %t115 = add i32 %t114, 2
+  %t116 = call i32 @cf_f(ptr %t113, i32 %t115, i32 8)
+  %t117 = sub i32 %t116, 2
+  call void @store32(ptr %t109, i32 %t112, i32 %t117)
+  %t118 = load ptr, ptr %cf.addr
+  %t119 = load i32, ptr %nd.addr
+  %t120 = mul i32 %t119, 32
+  %t121 = add i32 %t120, 8
+  %t122 = load i32, ptr %i.addr
+  %t123 = add i32 %t122, 5
+  call void @store32(ptr %t118, i32 %t121, i32 %t123)
+  %t124 = load ptr, ptr %cf.addr
+  %t125 = load i32, ptr %nd.addr
+  %t126 = mul i32 %t125, 32
+  %t127 = add i32 %t126, 12
+  %t128 = load i32, ptr %e.addr
+  call void @store32(ptr %t124, i32 %t127, i32 %t128)
+  %t129 = load ptr, ptr %cf.addr
   %t130 = load i32, ptr %nd.addr
-  %t131 = add i32 %t130, 1
-  store i32 %t131, ptr %nd.addr
-  %t132 = load ptr, ptr %cf.addr
-  %t133 = load i32, ptr %nd.addr
-  call void @store32(ptr %t132, i32 2048, i32 %t133)
-  %t134 = load i32, ptr %e.addr
-  %t135 = add i32 %t134, 1
-  store i32 %t135, ptr %i.addr
+  %t131 = mul i32 %t130, 32
+  %t132 = add i32 %t131, 16
+  %t133 = load ptr, ptr %toks.addr
+  %t134 = load i32, ptr %i.addr
+  %t135 = call i32 @cf_f(ptr %t133, i32 %t134, i32 12)
+  call void @store32(ptr %t129, i32 %t132, i32 %t135)
+  %t136 = load ptr, ptr %cf.addr
+  %t137 = load i32, ptr %nd.addr
+  %t138 = mul i32 %t137, 32
+  %t139 = add i32 %t138, 20
+  call void @store32(ptr %t136, i32 %t139, i32 1)
+  %t140 = load i32, ptr %nd.addr
+  %t141 = add i32 %t140, 1
+  store i32 %t141, ptr %nd.addr
+  %t142 = load ptr, ptr %cf.addr
+  %t143 = load i32, ptr %nd.addr
+  call void @store32(ptr %t142, i32 2048, i32 %t143)
+  %t144 = load i32, ptr %e.addr
+  %t145 = add i32 %t144, 1
+  store i32 %t145, ptr %i.addr
   store i32 1, ptr %did.addr
   br label %L36_end
 L35_else:
-  %t136 = load ptr, ptr %unit.addr
-  %t137 = load ptr, ptr %toks.addr
-  %t138 = load i32, ptr %nt.addr
-  %t139 = load i32, ptr %i.addr
-  %t140 = call i1 @cf_byuse_at(ptr %t136, ptr %t137, i32 %t138, i32 %t139)
-  br i1 %t140, label %L46_then, label %L47_else
-L46_then:
-  %t141 = load i32, ptr %depth.addr
-  %t142 = icmp ne i32 %t141, 0
-  br i1 %t142, label %L49_then, label %L50_else
+  %t146 = load ptr, ptr %unit.addr
+  %t147 = load ptr, ptr %toks.addr
+  %t148 = load i32, ptr %nt.addr
+  %t149 = load i32, ptr %i.addr
+  %t150 = call i1 @cf_byuse_at(ptr %t146, ptr %t147, i32 %t148, i32 %t149)
+  br i1 %t150, label %L49_then, label %L50_else
 L49_then:
-  ret i32 5
-L50_else:
-  br label %L51_end
-L51_end:
-  %t143 = load ptr, ptr %unit.addr
-  %t144 = load ptr, ptr %cf.addr
-  %t145 = load i32, ptr %nd.addr
-  %t146 = load ptr, ptr %toks.addr
-  %t147 = load i32, ptr %i.addr
-  %t148 = add i32 %t147, 1
-  %t149 = call i32 @cf_f(ptr %t146, i32 %t148, i32 4)
-  %t150 = add i32 %t149, 1
-  %t151 = load ptr, ptr %toks.addr
-  %t152 = load i32, ptr %i.addr
-  %t153 = add i32 %t152, 1
-  %t154 = call i32 @cf_f(ptr %t151, i32 %t153, i32 8)
-  %t155 = sub i32 %t154, 2
-  %t156 = call i32 @cf_find(ptr %t143, ptr %t144, i32 %t145, i32 %t150, i32 %t155)
-  store i32 %t156, ptr %d.addr
-  %t157 = load i32, ptr %d.addr
-  %t158 = icmp eq i32 %t157, 64
-  br i1 %t158, label %L52_then, label %L53_else
+  %t151 = load i32, ptr %depth.addr
+  %t152 = icmp ne i32 %t151, 0
+  br i1 %t152, label %L52_then, label %L53_else
 L52_then:
-  ret i32 6
+  ret i32 5
 L53_else:
   br label %L54_end
 L54_end:
-  %t159 = load ptr, ptr %cf.addr
-  %t160 = load i32, ptr %d.addr
-  %t161 = mul i32 %t160, 32
-  %t162 = add i32 %t161, 20
-  call void @store32(ptr %t159, i32 %t162, i32 0)
-  %t163 = load i32, ptr %i.addr
-  %t164 = add i32 %t163, 3
-  store i32 %t164, ptr %i.addr
+  %t153 = load ptr, ptr %unit.addr
+  %t154 = load ptr, ptr %cf.addr
+  %t155 = load i32, ptr %nd.addr
+  %t156 = load ptr, ptr %toks.addr
+  %t157 = load i32, ptr %i.addr
+  %t158 = add i32 %t157, 1
+  %t159 = call i32 @cf_f(ptr %t156, i32 %t158, i32 4)
+  %t160 = add i32 %t159, 1
+  %t161 = load ptr, ptr %toks.addr
+  %t162 = load i32, ptr %i.addr
+  %t163 = add i32 %t162, 1
+  %t164 = call i32 @cf_f(ptr %t161, i32 %t163, i32 8)
+  %t165 = sub i32 %t164, 2
+  %t166 = call i32 @cf_find(ptr %t153, ptr %t154, i32 %t155, i32 %t160, i32 %t165)
+  store i32 %t166, ptr %d.addr
+  %t167 = load i32, ptr %d.addr
+  %t168 = icmp eq i32 %t167, 64
+  br i1 %t168, label %L55_then, label %L56_else
+L55_then:
+  ret i32 6
+L56_else:
+  br label %L57_end
+L57_end:
+  %t169 = load ptr, ptr %cf.addr
+  %t170 = load i32, ptr %d.addr
+  %t171 = mul i32 %t170, 32
+  %t172 = add i32 %t171, 20
+  call void @store32(ptr %t169, i32 %t172, i32 0)
+  %t173 = load i32, ptr %i.addr
+  %t174 = add i32 %t173, 3
+  store i32 %t174, ptr %i.addr
   store i32 1, ptr %did.addr
-  br label %L48_end
-L47_else:
-  %t165 = load ptr, ptr %unit.addr
-  %t166 = load ptr, ptr %cf.addr
-  %t167 = load i32, ptr %nd.addr
-  %t168 = load ptr, ptr %toks.addr
-  %t169 = load i32, ptr %i.addr
-  %t170 = call i32 @cf_f(ptr %t168, i32 %t169, i32 4)
-  %t171 = load ptr, ptr %toks.addr
-  %t172 = load i32, ptr %i.addr
-  %t173 = call i32 @cf_f(ptr %t171, i32 %t172, i32 8)
-  %t174 = call i32 @cf_find(ptr %t165, ptr %t166, i32 %t167, i32 %t170, i32 %t173)
-  store i32 %t174, ptr %w.addr
-  %t175 = load i32, ptr %w.addr
-  %t176 = icmp ne i32 %t175, 64
-  br i1 %t176, label %L55_sc_rhs, label %L56_sc_short
-L55_sc_rhs:
-  %t177 = load ptr, ptr %cf.addr
-  %t178 = load i32, ptr %w.addr
-  %t179 = mul i32 %t178, 32
-  %t180 = add i32 %t179, 20
-  %t181 = call i32 @load32(ptr %t177, i32 %t180)
-  %t182 = icmp eq i32 %t181, 1
-  br label %L57_sc_end
-L56_sc_short:
-  br label %L57_sc_end
-L57_sc_end:
-  %t183 = phi i1 [ %t182, %L55_sc_rhs ], [ false, %L56_sc_short ]
-  br i1 %t183, label %L58_then, label %L59_else
-L58_then:
-  %t184 = load ptr, ptr %ctx.addr
-  %t185 = load i32, ptr %i.addr
-  %t186 = add i32 %t185, 1
-  call void @store32(ptr %t184, i32 0, i32 %t186)
-  %t187 = load ptr, ptr %ctx.addr
-  %t188 = load i32, ptr %o.addr
-  call void @store32(ptr %t187, i32 24, i32 %t188)
-  %t189 = load ptr, ptr %ctx.addr
-  %t190 = load i32, ptr %srcn.addr
-  call void @store32(ptr %t189, i32 32, i32 %t190)
-  %t191 = load ptr, ptr %ctx.addr
-  %t192 = load i32, ptr %i.addr
-  call void @store32(ptr %t191, i32 68, i32 %t192)
-  %t193 = load ptr, ptr %cf.addr
-  %t194 = load i32, ptr %w.addr
-  %t195 = call i32 @cf_run(ptr %t193, i32 %t194)
-  store i32 %t195, ptr %re.addr
-  %t196 = load i32, ptr %re.addr
-  %t197 = icmp eq i32 %t196, 9
-  br i1 %t197, label %L61_then, label %L62_else
+  br label %L51_end
+L50_else:
+  %t175 = load ptr, ptr %unit.addr
+  %t176 = load ptr, ptr %cf.addr
+  %t177 = load i32, ptr %nd.addr
+  %t178 = load ptr, ptr %toks.addr
+  %t179 = load i32, ptr %i.addr
+  %t180 = call i32 @cf_f(ptr %t178, i32 %t179, i32 4)
+  %t181 = load ptr, ptr %toks.addr
+  %t182 = load i32, ptr %i.addr
+  %t183 = call i32 @cf_f(ptr %t181, i32 %t182, i32 8)
+  %t184 = call i32 @cf_find(ptr %t175, ptr %t176, i32 %t177, i32 %t180, i32 %t183)
+  store i32 %t184, ptr %w.addr
+  %t185 = load i32, ptr %w.addr
+  %t186 = icmp ne i32 %t185, 64
+  br i1 %t186, label %L58_sc_rhs, label %L59_sc_short
+L58_sc_rhs:
+  %t187 = load ptr, ptr %cf.addr
+  %t188 = load i32, ptr %w.addr
+  %t189 = mul i32 %t188, 32
+  %t190 = add i32 %t189, 20
+  %t191 = call i32 @load32(ptr %t187, i32 %t190)
+  %t192 = icmp eq i32 %t191, 1
+  br label %L60_sc_end
+L59_sc_short:
+  br label %L60_sc_end
+L60_sc_end:
+  %t193 = phi i1 [ %t192, %L58_sc_rhs ], [ false, %L59_sc_short ]
+  br i1 %t193, label %L61_then, label %L62_else
 L61_then:
-  ret i32 9
-L62_else:
-  br label %L63_end
-L63_end:
-  %t198 = load i32, ptr %re.addr
-  %t199 = icmp ne i32 %t198, 0
-  br i1 %t199, label %L64_then, label %L65_else
+  %t194 = load ptr, ptr %ctx.addr
+  %t195 = load i32, ptr %i.addr
+  %t196 = add i32 %t195, 1
+  call void @store32(ptr %t194, i32 0, i32 %t196)
+  %t197 = load ptr, ptr %ctx.addr
+  %t198 = load i32, ptr %o.addr
+  call void @store32(ptr %t197, i32 24, i32 %t198)
+  %t199 = load ptr, ptr %ctx.addr
+  %t200 = load i32, ptr %srcn.addr
+  call void @store32(ptr %t199, i32 32, i32 %t200)
+  %t201 = load ptr, ptr %ctx.addr
+  %t202 = load i32, ptr %i.addr
+  call void @store32(ptr %t201, i32 68, i32 %t202)
+  %t203 = load ptr, ptr %cf.addr
+  %t204 = load i32, ptr %w.addr
+  %t205 = call i32 @cf_run(ptr %t203, i32 %t204)
+  store i32 %t205, ptr %re.addr
+  %t206 = load i32, ptr %re.addr
+  %t207 = icmp eq i32 %t206, 9
+  br i1 %t207, label %L64_then, label %L65_else
 L64_then:
-  %t200 = load ptr, ptr %res.addr
-  %t201 = load i32, ptr %re.addr
-  call void @store32(ptr %t200, i32 0, i32 %t201)
-  ret i32 7
+  ret i32 9
 L65_else:
   br label %L66_end
 L66_end:
-  %t202 = load ptr, ptr %cf.addr
-  %t203 = zext i32 14136 to i64
-  %t204 = getelementptr inbounds i8, ptr %t202, i64 %t203
-  %t205 = call i32 @load32(ptr %t204, i32 0)
-  store i32 %t205, ptr %n.addr
-  %t206 = load i32, ptr %n.addr
-  %t207 = load i32, ptr %nt.addr
-  %t208 = load i32, ptr %i.addr
-  %t209 = sub i32 %t207, %t208
-  %t210 = sub i32 %t209, 1
-  %t211 = icmp ugt i32 %t206, %t210
-  br i1 %t211, label %L67_then, label %L68_else
+  %t208 = load i32, ptr %re.addr
+  %t209 = icmp ne i32 %t208, 0
+  br i1 %t209, label %L67_then, label %L68_else
 L67_then:
-  ret i32 8
+  %t210 = load ptr, ptr %res.addr
+  %t211 = load i32, ptr %re.addr
+  call void @store32(ptr %t210, i32 0, i32 %t211)
+  ret i32 7
 L68_else:
   br label %L69_end
 L69_end:
-  %t212 = load ptr, ptr %ctx.addr
-  %t213 = call i32 @load32(ptr %t212, i32 24)
-  store i32 %t213, ptr %o.addr
-  %t214 = load i32, ptr %i.addr
-  %t215 = add i32 %t214, 1
+  %t212 = load ptr, ptr %cf.addr
+  %t213 = zext i32 14136 to i64
+  %t214 = getelementptr inbounds i8, ptr %t212, i64 %t213
+  %t215 = call i32 @load32(ptr %t214, i32 0)
+  store i32 %t215, ptr %n.addr
   %t216 = load i32, ptr %n.addr
-  %t217 = add i32 %t215, %t216
-  store i32 %t217, ptr %i.addr
+  %t217 = load i32, ptr %nt.addr
+  %t218 = load i32, ptr %i.addr
+  %t219 = sub i32 %t217, %t218
+  %t220 = sub i32 %t219, 1
+  %t221 = icmp ugt i32 %t216, %t220
+  br i1 %t221, label %L70_then, label %L71_else
+L70_then:
+  ret i32 8
+L71_else:
+  br label %L72_end
+L72_end:
+  %t222 = load ptr, ptr %ctx.addr
+  %t223 = call i32 @load32(ptr %t222, i32 24)
+  store i32 %t223, ptr %o.addr
+  %t224 = load i32, ptr %i.addr
+  %t225 = add i32 %t224, 1
+  %t226 = load i32, ptr %n.addr
+  %t227 = add i32 %t225, %t226
+  store i32 %t227, ptr %i.addr
   store i32 1, ptr %did.addr
-  br label %L60_end
-L59_else:
-  br label %L60_end
-L60_end:
-  br label %L48_end
-L48_end:
+  br label %L63_end
+L62_else:
+  br label %L63_end
+L63_end:
+  br label %L51_end
+L51_end:
   br label %L36_end
 L36_end:
   br label %L33_end
 L32_else:
   br label %L33_end
 L33_end:
-  %t218 = load i32, ptr %did.addr
-  %t219 = icmp eq i32 %t218, 0
-  br i1 %t219, label %L70_then, label %L71_else
-L70_then:
-  %t220 = load ptr, ptr %out.addr
-  %t221 = load i32, ptr %o.addr
-  %t222 = load ptr, ptr %toks.addr
-  %t223 = load i32, ptr %i.addr
-  call void @cf_copy(ptr %t220, i32 %t221, ptr %t222, i32 %t223)
-  %t224 = load i32, ptr %o.addr
-  %t225 = add i32 %t224, 1
-  store i32 %t225, ptr %o.addr
-  %t226 = load i32, ptr %i.addr
-  %t227 = add i32 %t226, 1
-  store i32 %t227, ptr %i.addr
-  br label %L72_end
-L71_else:
-  br label %L72_end
-L72_end:
+  %t228 = load i32, ptr %did.addr
+  %t229 = icmp eq i32 %t228, 0
+  br i1 %t229, label %L73_then, label %L74_else
+L73_then:
+  %t230 = load ptr, ptr %out.addr
+  %t231 = load i32, ptr %o.addr
+  %t232 = load ptr, ptr %toks.addr
+  %t233 = load i32, ptr %i.addr
+  call void @cf_copy(ptr %t230, i32 %t231, ptr %t232, i32 %t233)
+  %t234 = load i32, ptr %o.addr
+  %t235 = add i32 %t234, 1
+  store i32 %t235, ptr %o.addr
+  %t236 = load i32, ptr %i.addr
+  %t237 = add i32 %t236, 1
+  store i32 %t237, ptr %i.addr
+  br label %L75_end
+L74_else:
+  br label %L75_end
+L75_end:
   br label %L1_wcond
 L3_wend:
-  %t228 = load ptr, ptr %res.addr
-  %t229 = load i32, ptr %o.addr
-  call void @store32(ptr %t228, i32 0, i32 %t229)
+  %t238 = load ptr, ptr %res.addr
+  %t239 = load i32, ptr %o.addr
+  call void @store32(ptr %t238, i32 0, i32 %t239)
   ret i32 0
 }
 ; die -> u32
@@ -53397,11 +53467,23 @@ L19_then:
 L20_else:
   br label %L21_end
 L21_end:
-  %t51 = getelementptr inbounds [52 x i8], ptr @.str.comefor_fail.8, i64 0, i64 0
-  %t52 = insertvalue { ptr, i64 } undef, ptr %t51, 0
-  %t53 = insertvalue { ptr, i64 } %t52, i64 52, 1
-  %t54 = call i32 @fail({ ptr, i64 } %t53)
-  ret i32 %t54
+  %t51 = load i32, ptr %re.addr
+  %t52 = icmp eq i32 %t51, 10
+  br i1 %t52, label %L22_then, label %L23_else
+L22_then:
+  %t53 = getelementptr inbounds [79 x i8], ptr @.str.comefor_fail.8, i64 0, i64 0
+  %t54 = insertvalue { ptr, i64 } undef, ptr %t53, 0
+  %t55 = insertvalue { ptr, i64 } %t54, i64 79, 1
+  %t56 = call i32 @fail({ ptr, i64 } %t55)
+  ret i32 %t56
+L23_else:
+  br label %L24_end
+L24_end:
+  %t57 = getelementptr inbounds [52 x i8], ptr @.str.comefor_fail.9, i64 0, i64 0
+  %t58 = insertvalue { ptr, i64 } undef, ptr %t57, 0
+  %t59 = insertvalue { ptr, i64 } %t58, i64 52, 1
+  %t60 = call i32 @fail({ ptr, i64 } %t59)
+  ret i32 %t60
 }
 ; wstr -> u64
 define i64 @wstr(i64 %fd, { ptr, i64 } %s) {
