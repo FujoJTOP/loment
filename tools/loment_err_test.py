@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment  # noqa: E402  (build_lomenterr: 报错器在这里编一次, 全测复用)
+import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
@@ -1236,6 +1237,234 @@ def test_launcher_renders_with_it_and_says_so_without_it():
         f"同时给两个开关时丢了一个: {got_both!r}")
     print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, "
           "四个开关(含 --max 的值)都转交到位")
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十一格）
+
+_TW = f"/tmp/loment-err-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomerrcheck.lomt"
+ERR_SRC = ROOT / "loment" / "tools" / "lomenterr.lomt"
+
+#: 语义错那条源（5 行, `return z;` 在第 4 行）与解析错那条（`@@@` 在第 6 行第 1 列）。
+_SEM_SRC = "module m\n\nfn f() -> u32 {\n    return z;\n}\n"
+_PAR_SRC = "module m\n\nfn f() -> u32 {\n    return 1;\n}\n@@@\n"
+
+#: 判据写出来、孪生读进去的那几份诊断。`{F}` 是源文件路径 —— **两侧各写自己平台能
+#: 打开的那一份**（孪生在 WSL 里跑、Python 那侧原生跑 PE）；本格的断言不碰路径。
+_JSONL = {
+    "semantic.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E002",
+                        "message": "4: 使用未声明的变量 z"}],
+    "parse.jsonl": [{"file": "{F}/par.lomt", "line": 6, "col": 1, "code": "E002",
+                     "message": "6:1: 语法错"}],
+    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E999",
+                       "message": "4: 无此码"}],
+    "broken.jsonl": [{"file": "{F}/bad.lomt", "line": 99, "col": 0, "code": "E002",
+                      "message": "99: 行号越界"}],
+    "empty.jsonl": [],
+    "two.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E002",
+                   "message": "4: a"},
+                  {"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E002",
+                   "message": "4: b"}],
+}
+
+
+def _write_fixtures(d: Path, path_of_src: str) -> None:
+    """把两份源与六份诊断写进 `d`；`{F}` 换成 `path_of_src`。"""
+    (d / "bad.lomt").write_text(_SEM_SRC, encoding="utf-8", newline="\n")
+    (d / "par.lomt").write_text(_PAR_SRC, encoding="utf-8", newline="\n")
+    for name, rows in _JSONL.items():
+        text = "".join(json.dumps({**r, "file": r["file"].replace("{F}", path_of_src)},
+                                  ensure_ascii=False) + "\n" for r in rows)
+        (d / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+def _py_report() -> str:
+    """用 **PE 版 lomenterr**（原生跑）做与孪生**同名的那 7 项**断言, 打同一份报告。
+
+    两侧跑的是**同一个源编出来的两个后端产物**（孪生那侧是 ELF、在 WSL 里）——
+    断言的是"渲染出了什么", 不是某个平台的字节。诊断里那个 `file` 路径两侧不同,
+    但下面的断言一条都不碰它（只看 `:行`、源行、标签这些）。
+    """
+    out: list[str] = []
+    ct = {"p": 0, "f": 0}
+
+    def rep(name: str, ok: bool, why: str) -> None:
+        if ok:
+            out.append(f"  PASS  {name}")
+            ct["p"] += 1
+        else:
+            out.append(f"  FAIL  {name}: {why}")
+            ct["f"] += 1
+
+    exe = _bin()
+
+    def rend(*extra: str) -> tuple[int, str]:
+        r = subprocess.run([str(exe), *extra], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=60,
+                           cwd=str(_WORK_PY))
+        return r.returncode, r.stdout + r.stderr
+
+    def allin(t: str, *frags: str) -> bool:
+        return all(f in t for f in frags)
+
+    rc1, o1 = rend("--no-color", "semantic.jsonl")
+    rep("test_render_carries_the_whole_card",
+        rc1 == 1 and allin(o1, "error[E002]:", "-->", ":4", "    return z;", "^^^^^^^^^",
+                           "message:", "what went wrong:", "why:", "how to fix:",
+                           "  1. ", "  2. ", "  3. "),
+        "说明卡缺段、没插入符、或修法没编号成列")
+
+    rc2, o2 = rend("--no-color", "parse.jsonl")
+    rep("test_both_error_channels_render_differently",
+        rc1 == 1 and ":4" in o1 and ":4:1" not in o1 and "^^^^^^^^^" in o1
+        and rc2 == 1 and ":6:1" in o2 and "| ^" in o2 and "^^^^^^^^^" not in o2,
+        "语义错划整行 / 解析错写 行:列 的形状不对")
+
+    rc3, o3 = rend("--no-color", "unknown.jsonl")
+    rep("test_unknown_code_is_said_out_loud",
+        rc3 == 1 and allin(o3, "unknown error code", "no card for this code"),
+        "未知码没说出来")
+
+    rc4, o4 = rend("--no-color", "broken.jsonl")
+    rep("test_broken_line_is_echoed_not_skipped",
+        rc4 == 1 and allin(o4, ":99", "message:", "how to fix:"),
+        "越界的行号把整条诊断丢了")
+
+    rc5a, o5a = rend("--no-color", "empty.jsonl")
+    rc5b, o5b = rend()
+    rep("test_empty_diag_is_ok_and_usage_error_is_two",
+        rc5a == 0 and "no diagnostics" in o5a and rc5b == 2 and "usage:" in o5b,
+        "空诊断该退 0 / 无参数该退 2 并打用法")
+
+    _, o6a = rend("semantic.jsonl")
+    _, o6b = rend("--no-color", "semantic.jsonl")
+    rep("test_color_on_by_default_and_gone_with_no_color",
+        "\x1b" in o6a and "\x1b" not in o6b,
+        "默认没上色, 或 --no-color 仍留转义字节")
+
+    rc7, o7 = rend("--no-color", "--short", "two.jsonl")
+    rep("test_short_mode_is_one_line_per_diagnostic",
+        rc7 == 1 and o7.count("error[E002]:") == 2 and "2 errors: E002 x2" in o7,
+        "短模式不是一条一行, 或汇总不对")
+
+    out.append(f"lomerrcheck: {ct['p']}/{ct['p'] + ct['f']} 通过")
+    return "\n".join(out) + "\n"
+
+
+def _clang() -> str | None:
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+@test
+def test_err_check_matches_loment_twin():
+    """**Loment 版**（`lomerrcheck.lomt` 驱 ELF 版报错器）与 Python 版**同名断言的报告逐字节相同**。
+
+    `docs/189` §3 的 S1 第十一格。被测的是**另一件 Loment 程序**（`lomenterr`）——
+    Python 那侧跑的是它的 **PE** 产物（原生）, 孪生那侧跑 **ELF**（WSL）。两侧断言的是
+    "渲染出了什么", 所以这条同时是"同一个源的两个后端产物渲染一致"的判据。
+
+    **诊断由判据写出来**: 参考编译器的 `--diag-out` 随 S2 消失, 而且两个实现必须看同一份输入。
+    """
+    global _WORK_PY
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        win = td / "win"
+        wsl = td / "wsl"
+        win.mkdir()
+        wsl.mkdir()
+        _write_fixtures(win, str(win).replace("\\", "/"))
+        _WORK_PY = win
+        want = _py_report()
+        # ELF 版: 同一个源, 另一个后端
+        mod = lomentc.load(ERR_SRC)
+        deps = lomentc.resolve_deps(mod, ROOT, ERR_SRC.parent, entry=ERR_SRC)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"lomenterr.lomt 自己检查不过: {errs[:2]}"
+        ll = td / "lomenterr.ll"
+        with ll.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(lomentc.emit_llvm(mod, ROOT, deps))
+        elf = td / "lomenterr.elf"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        shutil.copy(elf, wsl / "lomenterr")
+        (wsl / "lomenterr").chmod(0o755)
+        _write_fixtures(wsl, _wsl_path(wsl))
+        m2 = lomentc.load(TWIN)
+        d2 = lomentc.resolve_deps(m2, ROOT, TWIN.parent, entry=TWIN)
+        assert not lomentc.check(m2, deps=d2), "lomerrcheck.lomt 自己检查不过"
+        ll2 = td / "chk.ll"
+        with ll2.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(lomentc.emit_llvm(m2, ROOT, d2))
+        chk = td / "lomerrcheck.elf"
+        r2 = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(chk), str(ll2)],
+            capture_output=True, text=True, shell=False)
+        assert r2.returncode == 0, r2.stderr[-400:]
+        outp = td / "check.out"
+        binn = f"{_TW}chk.bin"
+        script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(wsl)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, text=True, timeout=300, shell=False)
+        got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
+    assert rr.stdout.strip() == "0", f"孪生该退 0（7 项全过）: rc={rr.stdout!r}\n{got[:300]}"
+    assert got == want, f"报告与 Python 版不同:\n  py     {want!r}\n  loment {got!r}"
+    n = len(got.strip().splitlines()) - 1
+    assert got.count("  PASS  ") == n == 7, (n, got[-120:])
+    assert "lomerrcheck: 7/7 通过" in got, got[-120:]
+    print(f"      {n} 项断言: PE 版与 ELF 版渲染一致（与 Python 版逐字节相同）")
+
+
+@test
+def test_err_twin_selfhost_compiles():
+    """`lomerrcheck.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_TW}s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomerrcheck.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomerrcheck.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomerrcheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
 # ---------------------------------------------------------------- 入口

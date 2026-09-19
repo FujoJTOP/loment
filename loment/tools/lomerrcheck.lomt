@@ -1,0 +1,344 @@
+// loment/tools/lomerrcheck.lomt — Loment 版「报错器 lomenterr 渲染」检查
+// (docs/189 §3 的 S1 第十一格；判据在 tools/loment_err_test.py)
+//
+// 判据: 对**同一批准备好的诊断**, 本程序（驱 `./lomenterr`）打印的报告, 与判据那一侧
+// 用 **Python 跑同一批断言**算出来的**逐字节相同**。
+//
+// 被测的是**另一件 Loment 程序**: `loment/tools/lomenterr.lomt` —— 本格把它编成 **ELF**
+// 在 WSL 里跑（它出厂是 PE, 判据那侧在 Windows 上原生跑那一份）。两侧断言的是**渲染出了
+// 什么**（标题/位置/源行/插入符/四段说明卡/编号修法/两条通道/未知码/越界行/空诊断/
+// 颜色/短模式）, 不是某个平台的字节。
+//
+// **诊断 JSONL 由判据写出来**（不是拿参考编译器的 `--diag-out`）—— 参考一拆那条路就没了,
+// 而且两个实现必须**看同一份输入**。`file` 那一项两侧写的是各自平台上能打开的路径,
+// 但本程序的断言不碰它（只看 `:行`、源行、标签这些）—— 所以两侧的报告仍然逐字节相同。
+//
+// 约束同第 9/10 格: ① `proc_sh` 只吃编译期字面量命令（工作目录由判据设成临时目录）;
+// ② 退出码 `r=$?; echo; echo -n "|rc=$r"` 要紧挨着取（中间夹一句裸 `echo` 会冲成 0）。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`**）。
+
+module lomerrcheck
+
+use bytes
+use proc
+
+const OUT_CAP: u32 = 262144;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn say_dec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn find_sub(hay: ptr, hn: u32, needle: str) -> u32 {
+    let nl: u32 = str_len(needle);
+    if nl == 0 || hn < nl {
+        return FAIL;
+    }
+    let i: u32 = 0;
+    while i + nl <= hn {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nl {
+            if load8(hay, i + k) != str_byte(needle, k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// 输出里有 ESC（`0x1b`）吗 —— 颜色那一格用。
+fn has_esc(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 27 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 出现次数（短模式那条要数行）。
+fn count_sub(hay: ptr, hn: u32, needle: str) -> u32 {
+    let nl: u32 = str_len(needle);
+    if nl == 0 || hn < nl {
+        return 0;
+    }
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i + nl <= hn {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nl {
+            if load8(hay, i + k) != str_byte(needle, k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 跑一条命令: `st[0]=rc`, `st[4]=载荷字节数`。
+fn run(cmd: str, out: ptr, st: ptr) -> u32 {
+    let n: i64 = proc_sh(cmd, out, OUT_CAP);
+    if n < 0 {
+        let _a: u32 = st32(st, 0, 999);
+        let _b: u32 = st32(st, 4, 0);
+        return 0;
+    }
+    let m: u32 = n as u32;
+    let pos: u32 = find_sub(out, m, "|rc=");
+    if pos == FAIL {
+        let _a: u32 = st32(st, 0, 998);
+        let _b: u32 = st32(st, 4, m);
+        return 0;
+    }
+    let rc: u32 = 0;
+    let i: u32 = pos + 4;
+    while i < m && load8(out, i) >= 48 && load8(out, i) <= 57 {
+        rc = rc * 10 + (load8(out, i) - 48);
+        i = i + 1;
+    }
+    let pe: u32 = pos;
+    let pe2: u32 = pe;
+    if pe2 > 0 && load8(out, pe2 - 1) == 10 {
+        pe2 = pe2 - 1;
+    }
+    let _c: u32 = st32(st, 0, rc);
+    let _d: u32 = st32(st, 4, pe2);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 报告
+
+fn rep(name: str, ok: u32, why: str, ct: ptr) {
+    if ok == 1 {
+        say("  PASS  ");
+        say(name);
+        say("\n");
+        let _a: u32 = st32(ct, 0, ld32(ct, 0) + 1);
+    } else {
+        say("  FAIL  ");
+        say(name);
+        say(": ");
+        say(why);
+        say("\n");
+        let _b: u32 = st32(ct, 4, ld32(ct, 4) + 1);
+    }
+}
+
+/// 输出里这些片段**都要在**（**空串 = 不要求**，方便只查一两段时占位）。
+fn has_all(p: ptr, n: u32, a: str, b: str, c: str) -> u32 {
+    if str_len(a) > 0 && find_sub(p, n, a) == FAIL {
+        return 0;
+    }
+    if str_len(b) > 0 && find_sub(p, n, b) == FAIL {
+        return 0;
+    }
+    if str_len(c) > 0 && find_sub(p, n, c) == FAIL {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let o1v: u64 = sys_alloc(OUT_CAP as u64);
+    let sv: u64 = sys_alloc(64);
+    let cv: u64 = sys_alloc(64);
+    if o1v == 0 || sv == 0 || cv == 0 {
+        return die(2);
+    }
+    let o: ptr = o1v as ptr;
+    let st: ptr = sv as ptr;
+    let ct: ptr = cv as ptr;
+
+    // ---- 1 完整的一张卡: 标题 + 位置 + 源行 + 插入符 + 四段说明 + 编号修法
+    let _a: u32 = run("./lomenterr --no-color semantic.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let n: u32 = ld32(st, 4);
+    let ok1: u32 = 0;
+    if ld32(st, 0) == 1 && n > 0 {
+        if has_all(o, n, "error[E002]:", "-->", ":4") == 1 {
+            if has_all(o, n, "    return z;", "^^^^^^^^^", "message:") == 1 {
+                if has_all(o, n, "what went wrong:", "why:", "how to fix:") == 1 {
+                    if has_all(o, n, "  1. ", "  2. ", "  3. ") == 1 {
+                        ok1 = 1;
+                    }
+                }
+            }
+        }
+    }
+    rep("test_render_carries_the_whole_card", ok1,
+        "说明卡缺段、没插入符、或修法没编号成列", ct);
+
+    // ---- 2 两条通道如实分岔: 语义错只给行号（划整行）, 解析错给 行:列（一格插入符）
+    // 语义那半: `col = 0` -> **不写列**, 划整行的可见部分
+    let sem_ok: u32 = 0;
+    if ld32(st, 0) == 1 && n > 0 {
+        if find_sub(o, n, ":4") != FAIL && count_sub(o, n, ":4:1") == 0
+                && find_sub(o, n, "^^^^^^^^^") != FAIL {
+            sem_ok = 1;
+        }
+    }
+    let _b: u32 = run("./lomenterr --no-color parse.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let n2: u32 = ld32(st, 4);
+    let par_ok: u32 = 0;
+    if ld32(st, 0) == 1 && n2 > 0 {
+        // 解析那半: 写 `:6:1`, 插入符一格, 且**不该**划整行
+        if has_all(o, n2, ":6:1", "| ^", "") == 1
+                && count_sub(o, n2, "^^^^^^^^^") == 0 {
+            par_ok = 1;
+        }
+    }
+    rep("test_both_error_channels_render_differently", sem_ok * par_ok,
+        "语义错划整行 / 解析错写 行:列 的形状不对", ct);
+
+    // ---- 3 未知码要**说出来**, 不能悄悄换个模板
+    let _c: u32 = run("./lomenterr --no-color unknown.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let n3: u32 = ld32(st, 4);
+    let ok3: u32 = 0;
+    if ld32(st, 0) == 1 && n3 > 0 {
+        ok3 = has_all(o, n3, "unknown error code", "no card for this code", "");
+    }
+    rep("test_unknown_code_is_said_out_loud", ok3, "未知码没说出来", ct);
+
+    // ---- 4 行号越界也要**照着渲染**, 不能把这条丢掉
+    let _d: u32 = run("./lomenterr --no-color broken.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let n4: u32 = ld32(st, 4);
+    let ok4: u32 = 0;
+    if ld32(st, 0) == 1 && n4 > 0 {
+        if has_all(o, n4, ":99", "message:", "how to fix:") == 1 {
+            ok4 = 1;
+        }
+    }
+    rep("test_broken_line_is_echoed_not_skipped", ok4, "越界的行号把整条诊断丢了", ct);
+
+    // ---- 5 空诊断退 0; 不给参数退 2（用法错）
+    let _e: u32 = run("./lomenterr --no-color empty.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let ok5a: u32 = 0;
+    if ld32(st, 0) == 0 && has_all(o, ld32(st, 4), "no diagnostics", "", "") == 1 {
+        ok5a = 1;
+    }
+    let _f: u32 = run("./lomenterr 2>&1; r=$?; echo; echo -n \"|rc=$r\"", o, st);
+    let ok5b: u32 = 0;
+    if ld32(st, 0) == 2 && find_sub(o, ld32(st, 4), "usage:") != FAIL {
+        ok5b = 1;
+    }
+    rep("test_empty_diag_is_ok_and_usage_error_is_two", ok5a * ok5b,
+        "空诊断该退 0 / 无参数该退 2 并打用法", ct);
+
+    // ---- 6 默认上色, `--no-color` 之后一个转义字节都不剩
+    let _g: u32 = run("./lomenterr semantic.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let ok6a: u32 = has_esc(o, ld32(st, 4));
+    let _h: u32 = run("./lomenterr --no-color semantic.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let ok6b: u32 = 1 - has_esc(o, ld32(st, 4));
+    rep("test_color_on_by_default_and_gone_with_no_color", ok6a * ok6b,
+        "默认没上色, 或 --no-color 仍留转义字节", ct);
+
+    // ---- 7 短模式: 一条诊断一行, 末尾给汇总
+    let _i: u32 = run("./lomenterr --no-color --short two.jsonl 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                      o, st);
+    let n7: u32 = ld32(st, 4);
+    let ok7: u32 = 0;
+    if ld32(st, 0) == 1 && n7 > 0 {
+        if count_sub(o, n7, "error[E002]:") == 2
+                && find_sub(o, n7, "2 errors: E002 x2") != FAIL {
+            ok7 = 1;
+        }
+    }
+    rep("test_short_mode_is_one_line_per_diagnostic", ok7,
+        "短模式不是一条一行, 或汇总不对", ct);
+
+    say("lomerrcheck: ");
+    let _p: u64 = say_dec(ld32(ct, 0));
+    say("/");
+    let _q: u64 = say_dec(ld32(ct, 0) + ld32(ct, 4));
+    say(" 通过\n");
+    if ld32(ct, 4) > 0 {
+        return die(1);
+    }
+    return die(0);
+}
