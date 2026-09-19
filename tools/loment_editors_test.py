@@ -11,13 +11,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 VIM = ROOT / "editors" / "vim"
@@ -126,6 +132,111 @@ def test_vim_highlights_lomt():
     assert got["doc"] == "lomentDocComment", got
     assert got["str"] == "lomentString", got
     print("      无头 vim: filetype=loment; fn/u32/函数名/注释/文档注释/字符串/return 各就各位")
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第三格）
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**（WSL 的 /tmp 是所有 `wsl -e` 调用共用的，
+#: 固定文件名会让并发跑门禁的两个进程互相跑对方的二进制 —— 那是错结果，不是慢）。
+_T = f"/tmp/loment-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomvimgrammar.lomt"
+
+
+def _clang() -> str | None:
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(p.resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build_twin(td: Path) -> Path:
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"lomvimgrammar.lomt 自己检查不过: {errs[:2]}"
+    ll = td / "lomvimgrammar.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    elf = td / "lomvimgrammar.elf"
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return elf
+
+
+def _run_twin(elf: Path, td: Path) -> tuple[int, str]:
+    outp = td / "twin.out"
+    binn = f"{_T}lomvim.bin"
+    script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+              f"cd {_wsl_path(ROOT)} && {binn} > {_wsl_path(outp)}; echo -n $?")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                       capture_output=True, text=True, timeout=300, shell=False)
+    out = outp.read_text(encoding="utf-8") if outp.exists() else ""
+    try:
+        rc = int(r.stdout.strip())
+    except ValueError:
+        rc = -1
+    return rc, out
+
+
+@test
+def test_vim_grammar_check_matches_loment_twin():
+    """上面那条检查，**Loment 版给出的结论与 Python 版逐字节相同**。
+
+    这是 `docs/189` §3 的 S1 第三格（**检查型** —— 判据自己就是检查逻辑，没有对应工具）。
+    Python 那一侧**成功时是一行 stdout**，失败时是 `assert` 抛异常（不是 stdout）—— 所以
+    这里比的是**成功那一趟**；失败那一档两边各写各的语气（孪生自己会说缺哪些词并退 1）。
+    另加一条**独立断言**：孪生报的两个数必须等于我从 vim 文件里**自己数**出来的词数 ——
+    只比两边相同的话，两边一起数错也会"一致"。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    # 参考侧：直接跑上面那条检查，捕获它打印的那一行
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        test_vim_syntax_keywords_match_grammar()
+    want = buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = _build_twin(td)
+        rc, got = _run_twin(elf, td)
+    assert rc == 0, f"孪生该退 0（都命中）: rc={rc}\n{got[:200]}"
+    assert got == want, f"结论与 Python 版不同:\n  py    {want!r}\n  loment {got!r}"
+
+    # 独立数一遍（不复用上面那条检查的集合）
+    kw, ty = set(), set()
+    for line in VIM_SYNTAX.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"syn keyword loment(\w+)\s+(.*)$", line)
+        if not m:
+            continue
+        g, words = m.group(1), m.group(2).split()
+        if g in ("Keyword", "Bool", "Self"):
+            kw.update(words)
+        elif g in ("Type", "Builtin"):
+            ty.update(words)
+    assert f"关键字 {len(kw)} + 类型/内建 {len(ty)} 个词" in got, (
+        f"报的个数与我独立数出来的对不上（{len(kw)} / {len(ty)}）: {got!r}")
+    print("      结论与 Python 版逐字节相同；两个数另经独立清点")
 
 
 def main() -> int:

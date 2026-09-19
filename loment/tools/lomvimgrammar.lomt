@@ -1,0 +1,366 @@
+// loment/tools/lomvimgrammar.lomt — Loment 版「vim 语法表 ⊆ VS Code 语法」检查
+// (docs/189 §3 的 S1 第三格；判据在 tools/loment_editors_test.py)
+//
+// 判据: 对**同一份仓库**、同一个 cwd, `loment_editors_test` 第 1 条（Python 那一侧）
+// **成功**时打印的那一行, 与本程序 (链成 ELF 后跑) 的 stdout 逐字节相同。
+//
+// 逐句抄 Python 那一侧:
+//   * 只认**行首**就是 `syn keyword loment<组>` 的行, 组只收五个:
+//     Keyword/Bool/Self -> 关键字桶, Type/Builtin -> 类型桶 (Todo 等一律不算);
+//   * 词按空白切, 并且**去重**（Python 那边是 `set`）;
+//   * 判据是"整词出现在 TextMate 语法源里**任意位置**"—— 边界是 `[A-Za-z0-9_]`
+//     （前后都不能是单词字符）;
+//   * 成功那一行有**六个前导空格**, 两个数都是算出来的。
+//
+// **失败那一档没有逐字复刻**: Python 那边是 `assert` 抛异常（raise）, 不是一行 stdout,
+// 没法逐字节比。本程序自己打一份**说清楚缺哪些词**的报告并退 1 —— 各写各的语气, 但都把
+// "哪些词对不上"讲出来。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误；docs/189 §3）。
+
+module lomvimgrammar
+
+// ---------------------------------------------------------------- 内存布局
+const M_SCR: u32 = 0;              // 4096: 路径 NUL 暂存
+const M_VIM: u32 = 4096;           // 64 KiB: editors/vim/syntax/loment.vim
+const M_TM: u32 = 69632;           // 64 KiB: editors/vscode/syntaxes/loment.tmLanguage.json
+const M_W: u32 = 135168;           // 词表: MAXW × 16 (桶, 起点, 长度, 备用)
+const ARENA: u64 = 145000;
+
+const VIM_CAP: u32 = 65536;
+const TM_CAP: u32 = 65536;
+const MAXW: u32 = 512;
+const W_EACH: u32 = 16;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn wdec(fd: u64, v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(fd, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(buf, 16 - n), n as u64);
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn slurp(rel: str, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(str_ptr(rel), str_len(rel), scr);
+    if fd < 0 {
+        return 4294967295;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    return got as u32;
+}
+
+// ---------------------------------------------------------------- 字节小工具
+
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn find8(p: ptr, i: u32, e: u32, b: u32) -> u32 {
+    let k: u32 = i;
+    while k < e && load8(p, k) != b {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `[A-Za-z0-9_]` —— Python 那侧词边界的两个字符类都是它。
+fn is_word(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 词表里已经有 `p[s..e]` 这个词了吗（Python 那边是 `set`）。
+fn w_has(words: ptr, n: u32, p: ptr, s: u32, e: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let o: u32 = ld32(words, i * W_EACH + 4);
+        let l: u32 = ld32(words, i * W_EACH + 8);
+        if l == e - s {
+            let same: u32 = 1;
+            let k: u32 = 0;
+            while k < l {
+                if load8(p, s + k) != load8(p, o + k) {
+                    same = 0;
+                }
+                k = k + 1;
+            }
+            if same == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 把 `p[s..e]` 收进词表（去重），返回新的个数。
+fn w_add(words: ptr, n: u32, bucket: u32, p: ptr, s: u32, e: u32) -> u32 {
+    if n >= MAXW {
+        return n;
+    }
+    if w_has(words, n, p, s, e) == 1 {
+        return n;
+    }
+    let _a: u32 = st32(words, n * W_EACH, bucket);
+    let _b: u32 = st32(words, n * W_EACH + 4, s);
+    let _c: u32 = st32(words, n * W_EACH + 8, e - s);
+    return n + 1;
+}
+
+/// `word` 作为**整词**出现在 `txt[0..n]` 里吗（前后都不能是单词字符）。
+fn word_in(txt: ptr, n: u32, p: ptr, ws: u32, wl: u32) -> u32 {
+    if wl == 0 {
+        return 0;
+    }
+    if n < wl {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i + wl <= n {
+        let same: u32 = 1;
+        let k: u32 = 0;
+        while k < wl {
+            if load8(txt, i + k) != load8(p, ws + k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            let ok_l: u32 = 1;
+            let ok_r: u32 = 1;
+            if i > 0 && is_word(load8(txt, i - 1)) == 1 {
+                ok_l = 0;
+            }
+            if i + wl < n && is_word(load8(txt, i + wl)) == 1 {
+                ok_r = 0;
+            }
+            if ok_l == 1 && ok_r == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let sv: u64 = sys_alloc(4096);
+    let vv: u64 = sys_alloc(VIM_CAP as u64);
+    let tv: u64 = sys_alloc(TM_CAP as u64);
+    let wv: u64 = sys_alloc((MAXW * W_EACH) as u64);
+    if sv == 0 || vv == 0 || tv == 0 || wv == 0 {
+        return die(2);
+    }
+    let scr: ptr = sv as ptr;
+    let vim: ptr = vv as ptr;
+    let tm: ptr = tv as ptr;
+    let words: ptr = wv as ptr;
+
+    let vlen: u32 = slurp("editors/vim/syntax/loment.vim", vim, VIM_CAP, scr);
+    if vlen > VIM_CAP {
+        say("lomvimgrammar: 读不到 vim 语法文件\n");
+        return die(2);
+    }
+    let tlen: u32 = slurp("editors/vscode/syntaxes/loment.tmLanguage.json", tm, TM_CAP, scr);
+    if tlen > TM_CAP {
+        say("lomvimgrammar: 读不到 TextMate 语法文件\n");
+        return die(2);
+    }
+
+    // 逐行: 行首 `syn keyword loment<组>` -> 组 + 词
+    let nw: u32 = 0;
+    let i: u32 = 0;
+    while i < vlen {
+        let e: u32 = find8(vim, i, vlen, 10);
+        if streq(ptr_add(vim, i), 18, "syn keyword loment") == 1 {
+            let g0: u32 = i + 18;
+            let g1: u32 = g0;
+            while g1 < e && is_word(load8(vim, g1)) == 1 {
+                g1 = g1 + 1;
+            }
+            // 组名: Keyword/Bool/Self -> 0 (关键字桶); Type/Builtin -> 1 (类型桶); 别的跳过
+            let bucket: u32 = 9;
+            if streq(ptr_add(vim, g0), g1 - g0, "Keyword") == 1 {
+                bucket = 0;
+            }
+            if streq(ptr_add(vim, g0), g1 - g0, "Bool") == 1 {
+                bucket = 0;
+            }
+            if streq(ptr_add(vim, g0), g1 - g0, "Self") == 1 {
+                bucket = 0;
+            }
+            if streq(ptr_add(vim, g0), g1 - g0, "Type") == 1 {
+                bucket = 1;
+            }
+            if streq(ptr_add(vim, g0), g1 - g0, "Builtin") == 1 {
+                bucket = 1;
+            }
+            if bucket < 2 && g1 < e && is_space(load8(vim, g1)) == 1 {
+                let w0: u32 = g1;
+                while w0 < e {
+                    while w0 < e && is_space(load8(vim, w0)) == 1 {
+                        w0 = w0 + 1;
+                    }
+                    let w1: u32 = w0;
+                    while w1 < e && is_space(load8(vim, w1)) == 0 {
+                        w1 = w1 + 1;
+                    }
+                    if w1 > w0 {
+                        nw = w_add(words, nw, bucket, vim, w0, w1);
+                    }
+                    w0 = w1;
+                }
+            }
+        }
+        i = e + 1;
+    }
+
+    // 每个词都要作为整词出现在 TextMate 语法源里
+    let miss: u32 = 0;
+    let kw: u32 = 0;
+    let ty: u32 = 0;
+    let j: u32 = 0;
+    while j < nw {
+        let bucket: u32 = ld32(words, j * W_EACH);
+        if bucket == 0 {
+            kw = kw + 1;
+        } else {
+            ty = ty + 1;
+        }
+        let wo: u32 = ld32(words, j * W_EACH + 4);
+        let wl: u32 = ld32(words, j * W_EACH + 8);
+        if word_in(tm, tlen, vim, wo, wl) == 0 {
+            miss = miss + 1;
+            say("  [缺] ");
+            let _w1: u64 = write_all(1, ptr_add(vim, wo), wl as u64);
+            say("\n");
+        }
+        j = j + 1;
+    }
+    if miss > 0 {
+        say("lomvimgrammar: ");
+        let _d1: u64 = wdec(1, miss);
+        say(" 个词在 TextMate 语法里找不到（要么语法源漏了它们, 要么 vim 侧多写了）\n");
+        return die(1);
+    }
+    say("      vim ⊆ 语法源: 关键字 ");
+    let _d2: u64 = wdec(1, kw);
+    say(" + 类型/内建 ");
+    let _d3: u64 = wdec(1, ty);
+    say(" 个词都在语法里\n");
+    return die(0);
+}
