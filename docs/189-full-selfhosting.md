@@ -263,7 +263,8 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | **3** | `loment_editors_test` 第 1 条（vim 语法表 vs TextMate 不漂移） | 检查型 | ✅ **已搬**（2026-09-18）：`lomvimgrammar.lomt` + 那条判据里加的第 3 条（3/3）|
 | ~~4~~ | `lom_spec_emit` | 工具型 | ⚠ **动工后撤回**（查清的四条见下 §第 4 格）—— 这批里最大的一格，凑不出来就不硬凑 |
 | **5** | `potato_assert` | 工具型 | ✅ **已搬**（2026-09-19）：`lomcapasserts.lomt` + `loment_capasserts_test.py`，判据 4/4（`--print` / `--emit-rust` 的落盘字节 / `--check` 三条支路 / 自举链）|
-| 6 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节）|
+| **6** | `loment_extblock_test` 第 1–4 条（外部代码块的字节保真与消歧） | 检查型 | ✅ **已搬**（2026-09-19）：`lomextblock.lomt` + 该判据里加的两条（7/7）—— 这一格用的词法器是**自举侧**的，所以它同时是"两个词法器同一答案"的判据 |
+| 7 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
 #### 第 1 格踩到的两处（后面 43 格都会再撞，先写下来）
@@ -362,6 +363,25 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 * **目录枚举照抄 `lomrel.lomt` 的 `scan_dir`**（`getdents64` 记录: `d_reclen` @16、
   `d_name` @19、按字节插入排序）。
 
+#### 第 6 格（`loment_extblock_test` 第 1–4 条）：**输入用文件交，别用字面量**
+
+这一格检的是"外部代码块正文的字节保真 + 消歧"，纯词法，没有外部进程。三处值得记：
+
+1. **被检的那段正文，正好是"字符串字面量装不下"的那段**（它带 `"` / `\` / `\0` / 非
+   ASCII）—— 所以**孪生不能把它写成 Loment 字面量**（那正是 `docs/185` 要证明的事）。
+   做法不是硬编码，是**判据把八个输入文件写出来, 孪生按固定文件名读进去**: 文件名成为
+   两个实现之间的接口, 输入同一份。
+2. **判据那一侧的期望值用 `lomc.lex`（参考词法器）算, 孪生用自举侧
+   `loment/selfhost/lexer.lomt`** —— 于是这一格顺带成了"两个词法器在外部代码块上给出
+   同一个答案"的判据。自举侧词法器**能当普通库用**（`use lexer` + `pub fn lex`），
+   token 是 20 字节记录（kind/off/len/line/col）。
+3. **"字节保真"的操作定义要写对**：不是"与某个 Python 字符串相等"（那会把"两个实现
+   都把转义解成同一个错"当成通过），而是 **raw token 的 `(off, len)` 正好被 `{` 与 `}`
+   夹住**（`src[off-1] == '{'` 且 `src[off+len] == '}'`）—— 判据的两侧都这么断言。
+
+**没搬的一档**：`test_body_round_trips_into_potato`（正文进 Potato v5 并过校验器）——
+那要自举侧的 potato 通路（§4 那根轴），本格不碰，写在孪生头注里。
+
 **其余还没搬的（同类，都不便宜）**：`loment_src`（要 git + 比写出的包字节）、
 `loment_audit`、`loment_manual`（要加载每个示例）。
 再往后就是两根**大轴**：六门翻译器的 Loment 孪生（§4.1）与自举侧的 potato 通路 ——
@@ -432,7 +452,8 @@ grammar`：读法由声明定、不由嗅探）、`potato_test`（每条校验�
 | cargo + QEMU 无头 | `ci.py` |
 
 ⇒ **S1 的真实剩余量**是丙 + 丁（十件上下）+ 戊里那两根大轴，**不是 44 格**。
-下一格按**丙**里最便宜的开（`loment_extblock_test`，纯词法，无外部进程）。
+**丙里的 `loment_extblock_test` 已搬**（见下第 6 格）；丙里还剩 `comefor` / `grammar` /
+`potato` 三件，它们要的"一件 Loment 侧的词法器/校验器"现在有了样例。
 
 **S0 不落地之前不动 S1 之后的任何一格** —— 因为 D/C 的结论会改变清单，
 先搬的东西可能白搬。

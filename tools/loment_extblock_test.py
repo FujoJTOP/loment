@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -168,6 +169,183 @@ def test_body_round_trips_into_potato():
     assert doc2["bodies"] == [], doc2["bodies"]
     assert potato.validate(doc2) == [], potato.validate(doc2)
     print(f"      Potato v5: 正文进产物（{[g[0] for g in got]}）; 无外部块 -> []")
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第六格）
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**（WSL 的 /tmp 共用，固定名会让并发门禁互相跑错）。
+_T = f"/tmp/loment-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomextblock.lomt"
+#: 四种**不该**误触发的常见构造（对应上面 `test_common_constructs_do_not_false_trigger`
+#: 那个 dict 的四项）—— 孪生报的是这个数，不是"目录里文件数减二"。
+_FALSE_CASES = ("struct.lomt", "fn.lomt", "ifc.lomt", "letbind.lomt")
+
+#: 判据写出来、孪生读进去的那八个文件（文件名是两边的接口）。
+_CASES = {
+    "let.lomt": _src("let"),
+    "bare.lomt": _src("bare"),
+    "undeclared.lomt": "module m\n\nc {\nint x = 1;\n}\n",
+    "declared.lomt": "module m\n\ncommand c\n\nc {\nint x = 1;\n}\n",
+    "struct.lomt": "module m\n\nstruct S {\n    a: u32,\n}\n",
+    "fn.lomt": "module m\n\nfn f() -> u32 {\n    return 1;\n}\n",
+    "ifc.lomt": ("module m\n\ncommand c\n\nfn g() -> u32 {\n"
+                "    let c: u32 = 1;\n    if c > 0 {\n        return c;\n    }\n"
+                "    return 0;\n}\n"),
+    "letbind.lomt": ("module m\n\nfn h() -> u32 {\n    let c: u32 = 1;\n"
+                     "    let d = 2;\n    return c + d;\n}\n"),
+}
+
+
+def _clang() -> str | None:
+    import shutil
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    import shutil
+    if not shutil.which("wsl"):
+        return False
+    try:
+        import subprocess
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build_twin(td: Path) -> Path:
+    import subprocess
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"lomextblock.lomt 自己检查不过: {errs[:2]}"
+    ll = td / "lomextblock.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    elf = td / "lomextblock.elf"
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return elf
+
+
+def _run_twin(elf: Path, td: Path, indir: Path) -> tuple[int, str]:
+    import subprocess
+    outp = td / "twin.out"
+    binn = f"{_T}lomextblock.bin"
+    script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+              f"cd {_wsl_path(ROOT)} && {binn} {_wsl_path(indir)} > {_wsl_path(outp)}; echo -n $?")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                       capture_output=True, text=True, timeout=300, shell=False)
+    out = outp.read_text(encoding="utf-8") if outp.exists() else ""
+    try:
+        rc = int(r.stdout.strip())
+    except ValueError:
+        rc = -1
+    return rc, out
+
+
+def _expected_report(indir: Path) -> str:
+    """**用参考词法器独立算一遍**孪生该打的那五行（不复用上面任何一条检查的中间值）。
+
+    这里同时也是"两个词法器在外部代码块这件事上给出同一个答案"的判据: 孪生那侧用的是
+    自举侧 `loment/selfhost/lexer.lomt`, 这一侧是 `lomc.lex`。
+    """
+    line1 = ('      字节保真: 正文 {n}B（含 " \\ \\0 非 ASCII）两种写法都逐字节相同')
+    bodies, shapes, n_shape = {}, {}, 0
+    for form in ("let", "bare"):
+        src = (indir / f"{form}.lomt").read_text(encoding="utf-8")
+        ts = lomc.lex(src)
+        raws = [t for t in ts if t.kind == "raw"]
+        assert len(raws) == 1, f"{form}: 应当恰好一个 raw token, 实得 {len(raws)}"
+        r = raws[0]
+        body = src[r.off:r.off + r.len].encode("utf-8")
+        # 保真的**操作定义**: 跨度正好被 `{` 与 `}` 夹住（不是"与某个 Python 串相等"）
+        assert src[r.off - 1] == "{" and src[r.off + r.len] == "}", (form, r.off, r.len)
+        assert any(b >= 128 for b in body), f"{form}: 正文里没有非 ASCII 字节?"
+        bodies[form] = body
+        k = next(i for i, t in enumerate(ts) if t.kind == "raw")
+        shapes[form] = [(t.kind, t.len) for t in ts[k:]]
+        n_shape = len(shapes[form])
+    assert bodies["let"] == bodies["bare"], "两种写法的正文不同"
+    assert shapes["let"] == shapes["bare"], "两种写法的 token 形状不同"
+    n = len(bodies["let"])
+    out = [line1.format(n=n), line1.format(n=n),
+           f"      {n_shape} 个 token 形状相同；正文 {n}B 相同",
+           "      消歧: 未声明不认、声明后认",
+           f"      反例: {len(_FALSE_CASES)} 种常见构造都不误触发"]
+    return "\n".join(out) + "\n"
+
+
+@test
+def test_extblock_check_matches_loment_twin():
+    """上面四条检查（用参考词法器），**Loment 版（用自举侧词法器）给出的结论逐字节相同**。
+
+    `docs/189` §3 的 S1 第六格。判据把八个输入文件写出来（文件名是两个实现的接口），
+    两边读同一份、各打各的报告比一遍。
+
+    **没比的一档**：`test_body_round_trips_into_potato` —— 那要自举侧的 potato 通路
+    （`docs/189` §4 认过的另一根大轴），孪生不搬它，这里也不比。
+    """
+    import tempfile
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        indir = td / "in"
+        indir.mkdir()
+        for name, text in _CASES.items():
+            with (indir / name).open("w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        want = _expected_report(indir)
+        elf = _build_twin(td)
+        rc, got = _run_twin(elf, td, indir)
+    assert rc == 0, f"孪生该退 0（都命中）: rc={rc}\n{got[:300]}"
+    assert got == want, f"结论与参考词法器那侧不同:\n  py     {want!r}\n  loment {got!r}"
+    # 独立期望值: 正文长度必须等于 **原文那一段** 的字节数（不经过任何词法器）
+    n_evil = len(("\n" + _EVIL).encode("utf-8"))
+    assert f"正文 {n_evil}B" in got, f"正文长度与原文对不上（原文 {n_evil}B）: {got!r}"
+    print(f"      结论与参考词法器逐字节相同；正文 {n_evil}B 另经原文独立核对")
+
+
+@test
+def test_extblock_twin_selfhost_compiles():
+    """`lomextblock.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    import subprocess
+    import tempfile
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_T}extblock_s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomextblock.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomextblock.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomextblock.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
 def main() -> int:

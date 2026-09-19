@@ -1,0 +1,404 @@
+// loment/tools/lomextblock.lomt — Loment 版「外部代码块的字节保真」检查
+// (docs/189 §3 的 S1 第六格；判据在 tools/loment_extblock_test.py)
+//
+// 判据: 给**同一个准备好的输入目录**, `loment_extblock_test.py` 里那几条检查
+// (它们用参考词法器 `lomc.lex`) 打印的那几行, 与本程序 (链成 ELF 后跑) 的 stdout
+// **逐字节相同**。本程序用的是**自举侧词法器** (`loment/selfhost/lexer.lomt`) ——
+// 所以这一格同时也是"两个词法器在外部代码块这件事上给出同一个答案"的判据。
+//
+// 输入: 目录里有八个文件（文件名固定, 由判据写出来）:
+//   let.lomt bare.lomt            —— 两种写法各一份（正文同一段 `_EVIL`）
+//   undeclared.lomt declared.lomt —— 消歧的正反两例
+//   struct.lomt fn.lomt ifc.lomt letbind.lomt —— 四种**不该**误触发的常见构造
+//
+// 逐句抄 Python 那一侧（`docs/185` §6 给 S1.0/S1.1 定的证伪判据 + §3 的消歧）:
+//   * **字节保真** = raw token 的 `(off, len)` 圈住的源字节就是正文: 前后紧邻的必须
+//     正好是 `{` 与 `}`（这是"保真"的操作定义 —— 不是"与某个 Python 字符串相等"）;
+//   * 两种写法的正文**逐字节相同**、`(kind, len)` 形状相同（不比 `off`: 那会被
+//     `command c` 那一行整体顶开, 那是消歧规则的一部分, 不是"等价"要覆盖的）;
+//   * 未声明不认、声明后认；
+//   * `struct` / `fn` / `if` / `let` 四处都不误触发。
+//
+// **没搬的一档**: `test_body_round_trips_into_potato`（正文进 Potato v5 并过校验器）
+// —— 那要自举侧的 potato 通路, 是 docs/189 §4 认过的另一根大轴, 本格不碰。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误；docs/189 §3）。
+
+module lomextblock
+
+use bytes
+use lexer
+
+// ---------------------------------------------------------------- 内存布局
+const SRC_CAP: u32 = 262144;       // 单个源文件
+const MAXTOK: u32 = 16384;
+const TOKE: u32 = 20;              // lexer 的 token 记录宽度
+const KIND_RAW: u32 = 5;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn wdec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 读一个路径（打不开返回 `FAIL`）。
+fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return FAIL;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    return got as u32;
+}
+
+/// `dir` + `"/"` + `name` 写进 `dst`, 返回长度。
+fn join(dst: ptr, dir: ptr, dlen: u32, name: ptr, nlen: u32) -> u32 {
+    let i: u32 = 0;
+    while i < dlen {
+        store8(dst, i, load8(dir, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, dlen, 47 as u8);
+    let j: u32 = 0;
+    while j < nlen {
+        store8(dst, dlen + 1 + j, load8(name, j) as u8);
+        j = j + 1;
+    }
+    return dlen + 1 + nlen;
+}
+
+// ---------------------------------------------------------------- 词法
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+/// 读 `dir/name` 并词法。返回 token 数（`FAIL` = 读不到/装不下）,
+/// 源的正文字节数写进 `sn_out`。
+fn lex_file(dir: ptr, dlen: u32, name: str, src: ptr, toks: ptr, path: ptr, scr: ptr,
+            sn_out: ptr) -> u32 {
+    let pl: u32 = join(path, dir, dlen, str_ptr(name), str_len(name));
+    let tl: u32 = slurp(path, pl, src, SRC_CAP, scr);
+    if tl > SRC_CAP {
+        return FAIL;
+    }
+    let _s: u32 = st32(sn_out, 0, tl);
+    return lex(src, tl, toks);
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn raw_idx(toks: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if ld32(toks, i * TOKE) == KIND_RAW {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+fn raw_count(toks: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n {
+        if ld32(toks, i * TOKE) == KIND_RAW {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 保真: 第 `r` 个 raw 的 `(off, len)` 必须**正好**被 `{` 与 `}` 夹住,
+/// 且里面确实有非 ASCII 字节。命中则把 (off, len, 非 ASCII 数) 写进 `f`。
+fn fid_check(src: ptr, sn: u32, toks: ptr, n: u32, f: ptr) -> u32 {
+    let r: u32 = raw_idx(toks, n);
+    if r == FAIL {
+        return 0;
+    }
+    let off: u32 = ld32(toks, r * TOKE + 4);
+    let len: u32 = ld32(toks, r * TOKE + 8);
+    if off == 0 || off + len >= sn {
+        return 0;
+    }
+    if load8(src, off - 1) != 123 || load8(src, off + len) != 125 {
+        return 0;
+    }
+    let k: u32 = 0;
+    let nb: u32 = 0;
+    while k < len {
+        if load8(src, off + k) >= 128 {
+            nb = nb + 1;
+        }
+        k = k + 1;
+    }
+    if nb == 0 {
+        return 0;
+    }
+    let _a: u32 = st32(f, 0, off);
+    let _b: u32 = st32(f, 4, len);
+    let _c: u32 = st32(f, 8, nb);
+    return 1;
+}
+
+fn same_bytes(a: ptr, ao: u32, b: ptr, bo: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 从第一个 raw 起, 两个 token 流的 `(kind, len)` 必须逐一相同。
+fn shape_eq(ta: ptr, na: u32, tb: ptr, nb: u32) -> u32 {
+    let ra: u32 = raw_idx(ta, na);
+    let rb: u32 = raw_idx(tb, nb);
+    if ra == FAIL || rb == FAIL {
+        return 0;
+    }
+    if na < ra || nb < rb || na - ra != nb - rb {
+        return 0;
+    }
+    let i: u32 = 0;
+    let m: u32 = na - ra;
+    while i < m {
+        if ld32(ta, (ra + i) * TOKE) != ld32(tb, (rb + i) * TOKE) {
+            return 0;
+        }
+        if ld32(ta, (ra + i) * TOKE + 8) != ld32(tb, (rb + i) * TOKE + 8) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let av: u64 = sys_alloc(8192);
+    let dv: u64 = sys_alloc(8192);
+    let s1v: u64 = sys_alloc(SRC_CAP as u64);
+    let s2v: u64 = sys_alloc(SRC_CAP as u64);
+    let t1v: u64 = sys_alloc((MAXTOK * TOKE) as u64);
+    let t2v: u64 = sys_alloc((MAXTOK * TOKE) as u64);
+    let fv: u64 = sys_alloc(64);
+    let gv: u64 = sys_alloc(64);
+    let scv: u64 = sys_alloc(8192);
+    let pv: u64 = sys_alloc(8192);
+    let nv: u64 = sys_alloc(64);
+    if av == 0 || dv == 0 || s1v == 0 || s2v == 0 || t1v == 0 || t2v == 0
+            || fv == 0 || gv == 0 || scv == 0 || pv == 0 || nv == 0 {
+        return die(2);
+    }
+    let ab: ptr = av as ptr;
+    let dir: ptr = dv as ptr;
+    let src1: ptr = s1v as ptr;
+    let src2: ptr = s2v as ptr;
+    let tok1: ptr = t1v as ptr;
+    let tok2: ptr = t2v as ptr;
+    let f: ptr = fv as ptr;
+    let g: ptr = gv as ptr;
+    let scr: ptr = scv as ptr;
+    let path: ptr = pv as ptr;
+    let sn: ptr = nv as ptr;
+
+    // ---- argv[1] = 输入目录（先拷进 scr 补 NUL 再 openat：别直接传字面量指针）
+    let a1o: u32 = 0;
+    let a1n: u32 = 0;
+    let argc: u32 = 0;
+    let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
+    if afd >= 0 {
+        let an: u64 = read_all(afd as u64, ab, 8192);
+        let _c0: i64 = syscall4(3, afd as u64, 0, 0);
+        let i: u32 = 0;
+        let start: u32 = 0;
+        while i < (an as u32) {
+            if load8(ab, i) == 0 {
+                if argc == 1 {
+                    a1o = start;
+                    a1n = i - start;
+                }
+                argc = argc + 1;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if a1n == 0 || a1n > 4000 {
+        say("lomextblock: 用法: lomextblock <输入目录>\n");
+        return die(2);
+    }
+    let j: u32 = 0;
+    while j < a1n {
+        store8(dir, j, load8(ab, a1o + j) as u8);
+        j = j + 1;
+    }
+
+    // ---- 1) 字节保真: 两种写法各一份, 正文逐字节相同
+    let n1: u32 = lex_file(dir, a1n, "let.lomt", src1, tok1, path, scr, sn);
+    let fl: u32 = 0;
+    if n1 != FAIL {
+        fl = fid_check(src1, ld32(sn, 0), tok1, n1, f);
+    }
+    let n2: u32 = lex_file(dir, a1n, "bare.lomt", src2, tok2, path, scr, sn);
+    let fb: u32 = 0;
+    if n2 != FAIL {
+        fb = fid_check(src2, ld32(sn, 0), tok2, n2, g);
+    }
+    if fl == 0 || fb == 0 {
+        say("lomextblock: 正文没被 `{`/`}` 正好夹住, 或没有非 ASCII 字节\n");
+        return die(1);
+    }
+    let l1: u32 = ld32(f, 4);
+    let l2: u32 = ld32(g, 4);
+    if l1 != l2 || same_bytes(src1, ld32(f, 0), src2, ld32(g, 0), l1) == 0 {
+        say("lomextblock: 两种写法的正文不同\n");
+        return die(1);
+    }
+    // Python 那一侧这条**在 for 循环里**, 所以打两遍 —— 照抄
+    say("      字节保真: 正文 ");
+    let _p1: u64 = wdec(l1);
+    say("B（含 \" \\ \\0 非 ASCII）两种写法都逐字节相同\n");
+    say("      字节保真: 正文 ");
+    let _p2: u64 = wdec(l1);
+    say("B（含 \" \\ \\0 非 ASCII）两种写法都逐字节相同\n");
+
+    // ---- 2) 两种写法等价（从 raw 起的 (kind, len) 形状）
+    if shape_eq(tok1, n1, tok2, n2) == 0 {
+        say("lomextblock: 两种写法的 token 形状不同\n");
+        return die(1);
+    }
+    let ra: u32 = raw_idx(tok1, n1);
+    say("      ");
+    let _p3: u64 = wdec(n1 - ra);
+    say(" 个 token 形状相同；正文 ");
+    let _p4: u64 = wdec(l1);
+    say("B 相同\n");
+
+    // ---- 3) 消歧: 未声明不认、声明后认
+    let n3: u32 = lex_file(dir, a1n, "undeclared.lomt", src1, tok1, path, scr, sn);
+    if n3 == FAIL || raw_count(tok1, n3) != 0 {
+        say("lomextblock: 没声明过 `c`，`c {` 却被当成了外部块\n");
+        return die(1);
+    }
+    let n4: u32 = lex_file(dir, a1n, "declared.lomt", src1, tok1, path, scr, sn);
+    if n4 == FAIL || raw_count(tok1, n4) != 1 {
+        say("lomextblock: 声明过 `c` 之后, `c {` 不是外部块\n");
+        return die(1);
+    }
+    say("      消歧: 未声明不认、声明后认\n");
+
+    // ---- 4) 四种常见构造都不误触发
+    let cases: u32 = 4;
+    let n5: u32 = lex_file(dir, a1n, "struct.lomt", src1, tok1, path, scr, sn);
+    if n5 == FAIL || raw_count(tok1, n5) != 0 {
+        say("lomextblock: `struct S {` 被当成了外部块\n");
+        return die(1);
+    }
+    let n6: u32 = lex_file(dir, a1n, "fn.lomt", src1, tok1, path, scr, sn);
+    if n6 == FAIL || raw_count(tok1, n6) != 0 {
+        say("lomextblock: `fn f() -> u32 {` 被当成了外部块\n");
+        return die(1);
+    }
+    let n7: u32 = lex_file(dir, a1n, "ifc.lomt", src1, tok1, path, scr, sn);
+    if n7 == FAIL || raw_count(tok1, n7) != 0 {
+        say("lomextblock: 函数体里的 `if c > 0 {` 被当成了外部块\n");
+        return die(1);
+    }
+    let n8: u32 = lex_file(dir, a1n, "letbind.lomt", src1, tok1, path, scr, sn);
+    if n8 == FAIL || raw_count(tok1, n8) != 0 {
+        say("lomextblock: `let c: u32 = 1;` 那一行被当成了外部块\n");
+        return die(1);
+    }
+    say("      反例: ");
+    let _p5: u64 = wdec(cases);
+    say(" 种常见构造都不误触发\n");
+    return die(0);
+}
