@@ -378,6 +378,62 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 **记账**：每落一格 → 判据绿 → 提交（手写与机械分开）→ 回本表划掉一行。
 **没划完之前，"仓库里只有 Loment"这句话不成立**（README 的 Status 已经这么写着）。
 
+### S1 的**逐件身份表**（2026-09-19 实测，47 份全读过）
+
+§S1 开工那一节说判据"44 个"。`git ls-files 'tools/*_test.py'` + `ci.py` 逐个数下来是
+**46 + 1**：多出来的是 `loment_seed_test` 与 `loment_p9_test`（前一轮漏点了）。四十几格
+不是四十几件事 —— 按"这件在 S2 之后还有没有对象"分下来，**近四分之一根本不用搬**。
+
+#### 甲、随 S2 消失（9 件）—— **不写 Loment 版**
+
+`loment_doc_test`、`loment_fmt_test`、`loment_pkg_test`、`loment_lomc_test`、
+`loment_rel_test`、`loment_status_test`、`loment_lsp_test`、`loment_ct_test`、
+`loment_seed_test`（另有 `loment_p8_test` 的 M79 一条同型）。
+
+共同的判据形态：**左边是 Python 参考实现的进程内调用（或它发射的 IR/产物），右边是
+Loment 孪生，逐字节比**。参考一拆，左边**没有对象了** —— 它们是迁移期的脚手架，
+不是对真实行为的判据。
+
+⇒ 两点要记住：
+1. **前六个（doc / fmt / pkg / lomc / rel / status）正是 §221 说"已有 Loment 孪生"的那六件**
+   —— **孪生留下，比孪生的那条判据随 S2 走**。别把"已搬"理解成"这一格做完了"：那六件
+   是 S2 完成后**要删**的判据，不是要搬的。
+2. `loment_lib_test` / `loment_elf_test` / `loment_pe_test` 里**各夹着一条**这种腿
+   （"自举 vs 参考"）；拆掉那一条腿，主体照活。
+
+#### 乙、换人（2 件）—— 与 `docs/189` 对 `loment_filetype` 的结论一致
+
+`loment_filetype_test`（要写 HKCU 注册表）、`loment_sign_test`（Authenticode + openssl）。
+Loment 没有这个能力面，不是"贵"，是**不该由它做**。
+
+#### 丙、活，且**不依赖第三方神谕/外部进程**（最容易的一批）
+
+`loment_extblock_test`（外部代码块正文的字节保真，纯词法）、`loment_comefor_test`
+（自定义语法展开：展开源 vs 手写展开源 IR 逐字节）、`loment_grammar_test`（`choose write
+grammar`：读法由声明定、不由嗅探）、`potato_test`（每条校验规则都有反例被拒）。
+这四件的检查逻辑是**纯逻辑或纯 IR 对拍**，缺的只是"一件 Loment 侧的词法器/校验器"。
+
+#### 丁、活，要外部神谕但**只比 stdout**（驱动器型，走 `proc.lomt`）
+
+`loment_json_test`（CPython 的 `json`）、`loment_std_test`（CPython 算核函数）、
+`loment_lib_test`（库系统，纯计算为主）、`lomc_test`（编出并跑 Loment 可执行文件）、
+`loment_err_test`（诊断 JSON -> 编 ELF）、`loment_cli_test`（CLI 二进制本身，
+**明说不比 Python**）。
+
+#### 戊、活但很贵（都卡在**已认过的两轴**上，不是新的坑）
+
+| 卡在什么 | 哪些 |
+|---|---|
+| 翻译器建树（§4.1 那根轴） | 六门 `*trans_test` 与 `loment_multisyntax_test` |
+| 自举侧 potato 通路（参考实现里 `emit_potato` 实测 **1478 行**） | `potato_test` 的上游、`lomentc_test`（最大一格，1641 行） |
+| 完整原生后端 + clang/WSL + 跨语言链接 | `loment_elf_test` / `loment_pe_test` / `loment_ffi_test` |
+| 真会话 / 真 LSP + WSL / node | `loment_dap_test` / `vscode_ext_test` |
+| 归档确定性字节（DEFLATE/gzip 见上表）+ install.sh + PowerShell 5.1 | `loment_dist_test` |
+| cargo + QEMU 无头 | `ci.py` |
+
+⇒ **S1 的真实剩余量**是丙 + 丁（十件上下）+ 戊里那两根大轴，**不是 44 格**。
+下一格按**丙**里最便宜的开（`loment_extblock_test`，纯词法，无外部进程）。
+
 **S0 不落地之前不动 S1 之后的任何一格** —— 因为 D/C 的结论会改变清单，
 先搬的东西可能白搬。
 
