@@ -261,7 +261,9 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | **1** | `loment_eol` | 工具型 | ✅ **已搬**（2026-09-18）：`loment/tools/lomeol.lomt` + `tools/loment_eol_test.py`，判据 3/3 |
 | **2** | `loment_syscalls` | 工具型 | ✅ **已搬**（2026-09-18）：`lomsyscalls.lomt` + `loment_syscalls_test.py`，判据 3/3（`--check` 与 `--emit PATH` 两趟）|
 | **3** | `loment_editors_test` 第 1 条（vim 语法表 vs TextMate 不漂移） | 检查型 | ✅ **已搬**（2026-09-18）：`lomvimgrammar.lomt` + 那条判据里加的第 3 条（3/3）|
-| 4 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节）|
+| ~~4~~ | `lom_spec_emit` | 工具型 | ⚠ **动工后撤回**（查清的四条见下 §第 4 格）—— 这批里最大的一格，凑不出来就不硬凑 |
+| **5** | `potato_assert` | 工具型 | ✅ **已搬**（2026-09-19）：`lomcapasserts.lomt` + `loment_capasserts_test.py`，判据 4/4（`--print` / `--emit-rust` 的落盘字节 / `--check` 三条支路 / 自举链）|
+| 6 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
 #### 第 1 格踩到的两处（后面 43 格都会再撞，先写下来）
@@ -322,8 +324,46 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
    逗号、`primitives` 段结尾**总是** `],`、param 里每个键**都**带逗号（`note` 最后不带）；
    结尾一个换行。
 
-**其余还没搬的（同类，都不便宜）**：`potato_assert`（要 JSON 解析 + 目录枚举）、
-`loment_src`（要 git + 比写出的包字节）、`loment_audit`、`loment_manual`（要加载每个示例）。
+#### 第 5 格（`potato_assert`）：**"比写出的字节"抓到的是参考实现的宿主依赖**
+
+这一格 157 行，比前四格厚（要 JSON 解析 + 目录枚举），踩到五处：
+
+1. **别靠传递依赖，把 `use` 写全。** 孪生要 `load16`（在 `loment/lib/bytes.lomt`）。我
+   只写了 `use json`，而 `json.lomt` 自己 `use bytes` —— 平名字空间下**检查器照样放行**
+   （名字从依赖里可见）。但那是**隐式**的：探针程序里同样一段代码就报
+   "调用未定义的函数 load16（跨模块调用需要 pub）"。**用谁就写谁的 `use`。**
+2. **后缀要当后缀比。** `is_potato` 我一开始写成"名字长度 == 12 且整名等于
+   `.potato.json`" —— 把后缀字面量的长度当成了整名长度。语料里 `ahci.potato.json` 有
+   16 个字节，于是**一个文件都收不到**，报的是"没有形式对象"（离真正的原因很远）。
+   抓它的是那份最小探针（单独打印 `getdents64` 回来的原始记录），不是编译错误。
+3. **自举侧一张形参表只有 10 槽。** `row_add` 我写了 12 个形参：参考实现照编不误，
+   **种子上 11 个以上就 `panic(10)`** —— 退出码 132、**一个字都不输出**（比"报错指错地方"
+   更狠的一档: 连话都不说）。判据第 4 条（自举链）抓到的。改法是把 12 个标量换成
+   **一个 10 个字描述符的指针**（形参降到 3 个）。上限本身 `SKILL.md` 早有
+   （"形参最多 10 个"），**没写的是失败形态** —— 已补进那一行。
+4. **"比写出的字节"不是形式主义: 它抓到参考实现随宿主换行。** `potato_assert.py` 的
+   `write_text(want, encoding="utf-8")` **没给 `newline="\n"`**（另外两个生成器
+   `loment_syscalls.py` / `lom_spec_emit.py` 一直都有）—— Windows 上产物是 CRLF、
+   Linux 上 LF，也就是**同一个形式对象集的产物随宿主变**，与 §3.0 S3 的判据
+   （"生成是确定的"）直接冲突。`--check` 看不见它（`read_text()` 的通用换行会把 CRLF
+   折回 LF，同机自洽）；只有把两边写出的字节摆在一起才现形。**已在参考实现那一侧修掉**
+   （改的是参考实现, 不是孪生 —— 孪生那侧本来就是 LF）。
+5. **`--check` 的两条消息里带一个路径，那是平台不是工具。** `Path.relative_to` 给的是
+   **本机**分隔符（Windows `\` / WSL `/`）—— 同一份 Python 换个平台换个分隔符。判据只在
+   这两条消息上折成 `/`，并且**先把归一的合法性钉死**：`--print` 的内容里一个反斜杠都
+   没有（那条断言就在同一格里），所以替换只可能碰到路径分隔符。
+
+另外两件是**这一格实现了、别格可以直接抄**的：
+
+* **JSON 用 `loment/lib/json.lomt`，不要手搓扫描器。** 它是给 LSP 写的，`json_get` /
+  `json_str_into` / `json_as_u32` 正好够（`loment_json_test` 已经钉过它）。
+  它**没搬的部分**是 `potato.validate()` —— 那是对**形式对象自身**的校验（`potato.py`
+  的另一件事），在合法语料上一个字都不输出，判据比不出差别；这一档孪生不复制，写在头注里。
+* **目录枚举照抄 `lomrel.lomt` 的 `scan_dir`**（`getdents64` 记录: `d_reclen` @16、
+  `d_name` @19、按字节插入排序）。
+
+**其余还没搬的（同类，都不便宜）**：`loment_src`（要 git + 比写出的包字节）、
+`loment_audit`、`loment_manual`（要加载每个示例）。
 再往后就是两根**大轴**：六门翻译器的 Loment 孪生（§4.1）与自举侧的 potato 通路 ——
 那两根不动，S2（拆参考实现）就动不了。
 

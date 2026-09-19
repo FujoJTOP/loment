@@ -1,0 +1,806 @@
+// loment/tools/lomcapasserts.lomt — Loment 版 Potato 形式对象 -> 内核断言表
+// (docs/189 §3 的 S1 第五格；判据在 tools/loment_capasserts_test.py)
+//
+// 判据: 同一份仓库、同一个 cwd, 本程序 (链成 ELF 后跑) 与 `tools/potato_assert.py` 的
+// stdout / stderr / 退出码**逐字节相同**, 且 `--emit-rust PATH` 写出的字节也相同。
+//
+// 逐句抄 Python 那一侧:
+//   * **读哪些**: `sorted(OBJ_DIR.glob("*.potato.json"))` —— 目录枚举 + 按**文件名**
+//     排序（全都在同一个目录下, 所以整条路径排序就等于文件名排序）;
+//   * A1–A4: a1 = 名字空间非空 && hi >= lo / a2 = guards >= 0 / a3 = 空间不在
+//     AI_SPACES / a4 = revocable;
+//   * 生成文本**逐字节**照抄: 两句中文注释 + 空行 + struct + `// N 条` + 每行 `},` +
+//     自检函数, 行尾一个 `\n`;
+//   * 三个开关的**优先级**与 Python 一致: `--print` > `--check` > `--emit-rust`;
+//   * 退出码: 0 一致 / 1 有差异 / 2 用法错误。
+//
+// **没搬的两处**（写在这里, 免得以后当成孪生漏了）:
+//   1. `potato.validate()` —— 那是**形式对象自身**的校验器（`tools/potato.py` 的另一件事）,
+//      在合法语料上它一个字都不输出, 判据比不出差别；非法对象那一档孪生不复制。
+//   2. argparse 的用法文本 —— 一条英文用法块, 逐字复刻没有意义。带**别的**参数时本程序
+//      明说没搬（不静默当成某一路跑）。
+//
+// `--check` 的 SKIP / ERR 两条消息里带一个**路径**。分隔符是**运行平台**的产物, 不是工具
+// 行为（同一份 Python 在 Windows 上是 `\`、在 WSL 里是 `/`）; 孪生跑在 Linux 上, 所以那边
+// 是 `/`。判据只在这两条消息上做分隔符归一, 并先用"`--print` 的内容里一个反斜杠都没有"
+// 把归一的**安全性**钉死 —— 于是那次替换只可能碰到路径分隔符。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误; docs/189 §3）。
+
+module lomcapasserts
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 内存布局
+const DELIM_CAP: u32 = 32768;      // 目录缓冲 (getdents64)
+const MAXF: u32 = 128;             // loment/build 下的 .potato.json 个数上限
+const NAMEE: u32 = 64;             // 每个文件名一格 (含 NUL)
+const TXT_CAP: u32 = 131072;       // 单个 .potato.json 原文 (最大 44 KB)
+const ARENA_CAP: u32 = 262144;     // JSON DOM: 每节点 24 B, 最大一棵约 2100 节点
+const POOL_CAP: u32 = 65536;       // 行里的字符串 (unit / name / space)
+const MAXROW: u32 = 4096;
+const ROWE: u32 = 40;              // 每行 10 个 u32
+const OUT_CAP: u32 = 262144;
+
+//: 行标志位。
+const F_REV: u32 = 1;
+const F_A1: u32 = 2;
+const F_A2: u32 = 4;               // guards >= 0 恒真（u32 无负数; 见 potato.validate）
+const F_A3: u32 = 8;
+const F_A4: u32 = 16;
+const F_OK: u32 = 30;              // a1|a2|a3|a4
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn say_err(s: str) -> u64 {
+    return write_all(2, str_ptr(s), str_len(s) as u64);
+}
+
+fn wdec(fd: u64, v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(fd, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(buf, 16 - n), n as u64);
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+/// 写打开 (建/清空): O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644 = 420 —— 走 syscall6。
+fn open_wo(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall6(257, (0 as u64) - 100, scr as u64, 577, 420, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 读一个仓库相对路径。**打不开返回 `MISSING`**（空文件与"没有"是两回事: --check 里
+/// 一个进 SKIP, 一个进 ERR）。
+fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return 4294967295;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    return got as u32;
+}
+
+// ---------------------------------------------------------------- 字节小工具
+
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn cp_bytes(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 目录枚举
+
+/// NUL 结尾的字节串长度（不含 NUL）。
+fn slen(p: ptr) -> u32 {
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        if load8(p, i) == 0 {
+            go = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+/// `name` 是 `*.potato.json` 吗（`glob("*.potato.json")` 那一侧）。**比的是后缀**,
+/// 不是"整名等于后缀" —— `ahci.potato.json` 有 16 个字节。
+fn is_potato(p: ptr, n: u32) -> u32 {
+    if n < 12 {
+        return 0;
+    }
+    if streq(ptr_add(p, n - 12), 12, ".potato.json") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 把 `loment/build/` 下的 `*.potato.json` 收进名字表（每格 NAMEE 字节, 含 NUL）。
+fn scan_dir(dent: ptr, names: ptr, scr: ptr) -> u32 {
+    let dfd: i64 = open_ro(str_ptr("loment/build"), str_len("loment/build"), scr);
+    if dfd < 0 {
+        return 0;
+    }
+    let n: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let rn: i64 = syscall4(217, dfd as u64, dent as u64, DELIM_CAP as u64);
+        if rn <= 0 {
+            go = 0;
+        } else {
+            let m: u32 = rn as u32;
+            let e: u32 = 0;
+            while e < m {
+                let rl: u32 = load16(dent, e + 16);
+                if rl == 0 {
+                    e = m;
+                } else {
+                    let nm: u32 = e + 19;
+                    let nl: u32 = slen(ptr_add(dent, nm));
+                    if is_potato(ptr_add(dent, nm), nl) == 1 && n < MAXF && nl < NAMEE {
+                        let _c: u32 = cp_bytes(names, n * NAMEE, dent, nm, nl);
+                        store8(names, n * NAMEE + nl, 0 as u8);
+                        n = n + 1;
+                    }
+                    e = e + rl;
+                }
+            }
+        }
+    }
+    let _cl: i64 = syscall4(3, dfd as u64, 0, 0);
+    return n;
+}
+
+/// 名字表第 `idx` 格排在 `tmp` 之后吗（逐字节; 名字是 ASCII, 所以这就是 `sorted()` 的序）。
+fn name_gt(names: ptr, idx: u32, tmp: ptr) -> u32 {
+    let i: u32 = 0;
+    let go: u32 = 1;
+    let r: u32 = 0;
+    while go == 1 {
+        let ca: u32 = load8(names, idx * NAMEE + i);
+        let cb: u32 = load8(tmp, i);
+        if ca != cb {
+            if ca > cb {
+                r = 1;
+            }
+            go = 0;
+        } else {
+            if ca == 0 {
+                go = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+fn sort_names(names: ptr, n: u32, tmp: ptr) -> u32 {
+    let a: u32 = 1;
+    while a < n {
+        let _c0: u32 = cp_bytes(tmp, 0, names, a * NAMEE, NAMEE);
+        let j: u32 = a;
+        let go: u32 = 1;
+        while j > 0 && go == 1 {
+            if name_gt(names, j - 1, tmp) == 1 {
+                let _c1: u32 = cp_bytes(names, j * NAMEE, names, (j - 1) * NAMEE, NAMEE);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        let _c2: u32 = cp_bytes(names, j * NAMEE, tmp, 0, NAMEE);
+        a = a + 1;
+    }
+    return 0;
+}
+
+/// `loment/build/<名字>` 写进 `dst`, 返回长度。
+fn build_path(dst: ptr, name: ptr) -> u32 {
+    let o: u32 = 0;
+    let pre: str = "loment/build/";
+    let pn: u32 = str_len(pre);
+    let i: u32 = 0;
+    while i < pn {
+        store8(dst, o + i, str_byte(pre, i) as u8);
+        i = i + 1;
+    }
+    o = o + pn;
+    let j: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let c: u32 = load8(name, j);
+        if c == 0 {
+            go = 0;
+        } else {
+            store8(dst, o + j, c as u8);
+            j = j + 1;
+        }
+    }
+    return o + j;
+}
+
+// ---------------------------------------------------------------- A1–A4
+
+/// 空间名在 `AI_SPACES = {"ai","model","llm","net_llm","infer"}` 里吗。
+fn space_is_ai(pool: ptr, so: u32, sl: u32) -> u32 {
+    if streq(ptr_add(pool, so), sl, "ai") == 1 {
+        return 1;
+    }
+    if streq(ptr_add(pool, so), sl, "model") == 1 {
+        return 1;
+    }
+    if streq(ptr_add(pool, so), sl, "llm") == 1 {
+        return 1;
+    }
+    if streq(ptr_add(pool, so), sl, "net_llm") == 1 {
+        return 1;
+    }
+    if streq(ptr_add(pool, so), sl, "infer") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `n` 是拿得到的节点吗（`json_get` 没命中就是 4294967295）。
+fn is_node(n: u32) -> u32 {
+    if n == 4294967295 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 对象里按键取值。**先看它是不是对象** —— 不是就当作"没有"（Python 那边 `doc.get`
+/// 只在 dict 上成立, 别的情形它会抛异常; 语料里全是对象, 这一档孪生不复制）。
+fn obj_get(js: ptr, arena: ptr, obj: u32, key: str) -> u32 {
+    if is_node(obj) == 0 {
+        return 4294967295;
+    }
+    if json_nkind(arena, obj) != 1 {
+        return 4294967295;
+    }
+    return json_get(js, arena, obj, key);
+}
+
+/// 字符串节点 -> 字符串池, 返回写进去的长度（节点不是字符串就写 0 个字节）。
+fn put_node_str(js: ptr, arena: ptr, n: u32, pool: ptr, poff: u32) -> u32 {
+    if is_node(n) == 0 {
+        return 0;
+    }
+    if json_nkind(arena, n) != 3 {
+        return 0;
+    }
+    return json_str_into(js, arena, n, ptr_add(pool, poff), POOL_CAP - poff);
+}
+
+fn node_u32(js: ptr, arena: ptr, n: u32) -> u32 {
+    if is_node(n) == 0 {
+        return 0;
+    }
+    if json_nkind(arena, n) != 4 {
+        return 0;
+    }
+    return json_as_u32(js, arena, n);
+}
+
+/// 行描述符: 10 个 u32（unit 起点/长度, name 起点/长度, space 起点/长度, lo, hi, guards,
+/// flags）—— **不是 12 个形参**: 自举侧一张形参表只有 10 槽（`loment/selfhost/codegen.lomt`
+/// 里"上限 10 是实参类型槽列表的宽度"），11 个以上调用点会 `panic(10)`（rc 132, 静音）。
+fn row_add(rows: ptr, idx: u32, d: ptr) -> u32 {
+    if idx >= MAXROW {
+        return idx;
+    }
+    let b: u32 = idx * ROWE;
+    let k: u32 = 0;
+    while k < 10 {
+        let _s: u32 = st32(rows, b + k * 4, ld32(d, k * 4));
+        k = k + 1;
+    }
+    return idx + 1;
+}
+
+/// 一个形式对象 -> 行（顺序: 能力按对象里的次序）。
+fn rows_of_doc(rows: ptr, nrows: u32, pool: ptr, poff: u32, txt: ptr, arena: ptr, tlen: u32,
+               desc: ptr) -> u32 {
+    let root: u32 = json_parse(txt, tlen, arena);
+    if is_node(root) == 0 {
+        return nrows;
+    }
+    let un: u32 = obj_get(txt, arena, root, "unit");
+    let ulen: u32 = put_node_str(txt, arena, un, pool, poff);
+    let uoff: u32 = poff;
+    let poff2: u32 = poff + ulen;
+
+    let gn: u32 = obj_get(txt, arena, root, "guards");
+    let guards: u32 = node_u32(txt, arena, gn);
+
+    let caps: u32 = obj_get(txt, arena, root, "capabilities");
+    let nr: u32 = nrows;
+    let po: u32 = poff2;
+    if is_node(caps) == 1 && json_nkind(arena, caps) == 2 {
+        let c: u32 = json_first_child(arena, caps);
+        let go: u32 = 1;
+        while go == 1 {
+            if c == 0 {
+                go = 0;
+            } else {
+                let nmn: u32 = obj_get(txt, arena, c, "name");
+                let nlen: u32 = put_node_str(txt, arena, nmn, pool, po);
+                let noff: u32 = po;
+                po = po + nlen;
+
+                let dom: u32 = obj_get(txt, arena, c, "domain");
+                let spn: u32 = obj_get(txt, arena, dom, "space");
+                let slen: u32 = put_node_str(txt, arena, spn, pool, po);
+                let soff: u32 = po;
+                po = po + slen;
+
+                let lo: u32 = node_u32(txt, arena, obj_get(txt, arena, dom, "lo"));
+                let hi: u32 = node_u32(txt, arena, obj_get(txt, arena, dom, "hi"));
+                let rn: u32 = obj_get(txt, arena, c, "revocable");
+                let rev: u32 = 0;
+                if is_node(rn) == 1 && json_nkind(arena, rn) == 5 {
+                    rev = 1;
+                }
+
+                let flags: u32 = F_A2;
+                let flags2: u32 = flags + (rev * F_REV) + (rev * F_A4);
+                let a1: u32 = 0;
+                if slen > 0 && hi >= lo {
+                    a1 = 1;
+                }
+                let a3: u32 = 1 - space_is_ai(pool, soff, slen);
+                let flags3: u32 = flags2 + (a1 * F_A1) + (a3 * F_A3);
+                let _d0: u32 = st32(desc, 0, uoff);
+                let _d1: u32 = st32(desc, 4, ulen);
+                let _d2: u32 = st32(desc, 8, noff);
+                let _d3: u32 = st32(desc, 12, nlen);
+                let _d4: u32 = st32(desc, 16, soff);
+                let _d5: u32 = st32(desc, 20, slen);
+                let _d6: u32 = st32(desc, 24, lo);
+                let _d7: u32 = st32(desc, 28, hi);
+                let _d8: u32 = st32(desc, 32, guards);
+                let _d9: u32 = st32(desc, 36, flags3);
+                nr = row_add(rows, nr, desc);
+                c = json_sibling(arena, c);
+            }
+        }
+    }
+    return nr;
+}
+
+/// `loment/build/` 下所有形式对象 -> 行表, 返回行数。
+fn scan(rows: ptr, pool: ptr, txt: ptr, arena: ptr, path: ptr, names: ptr, n: u32, scr: ptr,
+        desc: ptr) -> u32 {
+    let nrows: u32 = 0;
+    let poff: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let pl: u32 = build_path(path, ptr_add(names, i * NAMEE));
+        let tl: u32 = slurp(path, pl, txt, TXT_CAP, scr);
+        if tl <= TXT_CAP {
+            nrows = rows_of_doc(rows, nrows, pool, poff, txt, arena, tl, desc);
+            let j: u32 = poff;
+            let go: u32 = 1;
+            while j < POOL_CAP && go == 1 {
+                if load8(pool, j) == 0 {
+                    go = 0;
+                } else {
+                    j = j + 1;
+                }
+            }
+            poff = j + 1;
+        }
+        i = i + 1;
+    }
+    return nrows;
+}
+
+// ---------------------------------------------------------------- 生成
+
+fn put(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn put_span(out: ptr, o: u32, p: ptr, s: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, load8(p, s + i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn put_dec(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 0 {
+        store8(out, o, 48 as u8);
+        return o + 1;
+    }
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(tmp, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, load8(tmp, 16 - n + i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn put_rs_bool(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 0 {
+        return put(out, o, "false");
+    }
+    return put(out, o, "true");
+}
+
+/// 与 `emit_rust()` 逐字节相同（Python 那边是 `"\n".join(lines)`，末元素是空串 —— 等价于
+/// 每行各带一个 `\n`）。
+fn emit(out: ptr, rows: ptr, nrows: u32, pool: ptr) -> u32 {
+    let o: u32 = 0;
+    o = put(out, o, "// 由 tools/potato_assert.py 从 loment/build/*.potato.json 生成 —— 请勿手改。\n");
+    o = put(out, o, "// 断言绑定: A1 域封闭 / A2 审计站点 / A3 模型缺席 / A4 可撤销 (docs/147 §4)。\n");
+    o = put(out, o, "\n");
+    o = put(out, o, "#[derive(Clone, Copy)]\n");
+    o = put(out, o, "pub struct CapAssert {\n");
+    o = put(out, o, "    pub unit: &'static str,\n");
+    o = put(out, o, "    pub name: &'static str,\n");
+    o = put(out, o, "    pub space: &'static str,\n");
+    o = put(out, o, "    pub lo: u64,\n");
+    o = put(out, o, "    pub hi: u64,\n");
+    o = put(out, o, "    pub revocable: bool,\n");
+    o = put(out, o, "    pub guards: u64,\n");
+    o = put(out, o, "    pub a1: bool,\n");
+    o = put(out, o, "    pub a2: bool,\n");
+    o = put(out, o, "    pub a3: bool,\n");
+    o = put(out, o, "    pub a4: bool,\n");
+    o = put(out, o, "}\n");
+    o = put(out, o, "\n");
+    o = put(out, o, "pub static CAP_ASSERTS: &[CapAssert] = &[  // ");
+    o = put_dec(out, o, nrows);
+    o = put(out, o, " 条\n");
+    let i: u32 = 0;
+    while i < nrows {
+        let b: u32 = i * ROWE;
+        let f: u32 = ld32(rows, b + 36);
+        o = put(out, o, "    CapAssert { unit: \"");
+        o = put_span(out, o, pool, ld32(rows, b), ld32(rows, b + 4));
+        o = put(out, o, "\", name: \"");
+        o = put_span(out, o, pool, ld32(rows, b + 8), ld32(rows, b + 12));
+        o = put(out, o, "\", space: \"");
+        o = put_span(out, o, pool, ld32(rows, b + 16), ld32(rows, b + 20));
+        o = put(out, o, "\", lo: ");
+        o = put_dec(out, o, ld32(rows, b + 24));
+        o = put(out, o, ", hi: ");
+        o = put_dec(out, o, ld32(rows, b + 28));
+        o = put(out, o, ", revocable: ");
+        o = put_rs_bool(out, o, f % 2);
+        o = put(out, o, ", guards: ");
+        o = put_dec(out, o, ld32(rows, b + 32));
+        o = put(out, o, ", a1: ");
+        o = put_rs_bool(out, o, (f / F_A1) % 2);
+        o = put(out, o, ", a2: ");
+        o = put_rs_bool(out, o, (f / F_A2) % 2);
+        o = put(out, o, ", a3: ");
+        o = put_rs_bool(out, o, (f / F_A3) % 2);
+        o = put(out, o, ", a4: ");
+        o = put_rs_bool(out, o, (f / F_A4) % 2);
+        o = put(out, o, " },\n");
+        i = i + 1;
+    }
+    o = put(out, o, "];\n");
+    o = put(out, o, "\n");
+    o = put(out, o, "/// 内核启动自检: 返回 (检查数, 失败数); 断言 failed == 0 (P7 接入)。\n");
+    o = put(out, o, "pub fn assert_a1_a4() -> (u64, u64) {\n");
+    o = put(out, o, "    let mut checked = 0u64;\n");
+    o = put(out, o, "    let mut failed = 0u64;\n");
+    o = put(out, o, "    for c in CAP_ASSERTS {\n");
+    o = put(out, o, "        checked += 1;\n");
+    o = put(out, o, "        if !(c.a1 && c.a2 && c.a3 && c.a4) {\n");
+    o = put(out, o, "            failed += 1;\n");
+    o = put(out, o, "        }\n");
+    o = put(out, o, "    }\n");
+    o = put(out, o, "    (checked, failed)\n");
+    o = put(out, o, "}\n");
+    return o;
+}
+
+/// A1–A4 有任一不成立的行数（Python 那侧 `bad`）。先把 revocable 那一位（bit 0）摘掉,
+/// 剩下四位正好是 `F_OK`。
+fn count_bad(rows: ptr, nrows: u32) -> u32 {
+    let bad: u32 = 0;
+    let i: u32 = 0;
+    while i < nrows {
+        let f: u32 = ld32(rows, i * ROWE + 36);
+        if (f / 2) * 2 != F_OK {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
+/// 两段字节一样吗。
+fn same_bytes(a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
+    if an != bn {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < an {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let dv: u64 = sys_alloc(DELIM_CAP as u64);
+    let nv: u64 = sys_alloc((MAXF * NAMEE) as u64);
+    let tv: u64 = sys_alloc(TXT_CAP as u64);
+    let av: u64 = sys_alloc(ARENA_CAP as u64);
+    let pv: u64 = sys_alloc(POOL_CAP as u64);
+    let rv: u64 = sys_alloc((MAXROW * ROWE) as u64);
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let cv: u64 = sys_alloc(TXT_CAP as u64);     // --check 时读回产物
+    let scv: u64 = sys_alloc(8192);
+    let abv: u64 = sys_alloc(8192);
+    let pthv: u64 = sys_alloc(4096);
+    let tmpv: u64 = sys_alloc(NAMEE as u64);
+    let dsv: u64 = sys_alloc(64);               // 行描述符 (10 个 u32 + 余量)
+    if dv == 0 || nv == 0 || tv == 0 || av == 0 || pv == 0 || rv == 0 || ov == 0
+            || cv == 0 || scv == 0 || abv == 0 || pthv == 0 || tmpv == 0 || dsv == 0 {
+        return die(2);
+    }
+    let dent: ptr = dv as ptr;
+    let names: ptr = nv as ptr;
+    let txt: ptr = tv as ptr;
+    let arena: ptr = av as ptr;
+    let pool: ptr = pv as ptr;
+    let rows: ptr = rv as ptr;
+    let out: ptr = ov as ptr;
+    let cur: ptr = cv as ptr;
+    let scr: ptr = scv as ptr;
+    let ab: ptr = abv as ptr;
+    let path: ptr = pthv as ptr;
+    let tmp: ptr = tmpv as ptr;
+    let desc: ptr = dsv as ptr;
+
+    // ---- 参数（argv 来自 /proc/self/cmdline；先拷进 scr 补 NUL 再 openat）
+    let a1o: u32 = 0;
+    let a1n: u32 = 0;
+    let a2o: u32 = 0;
+    let a2n: u32 = 0;
+    let argc: u32 = 0;
+    let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
+    if afd >= 0 {
+        let an: u64 = read_all(afd as u64, ab, 8192);
+        let _c0: i64 = syscall4(3, afd as u64, 0, 0);
+        let i: u32 = 0;
+        let start: u32 = 0;
+        while i < (an as u32) {
+            if load8(ab, i) == 0 {
+                if argc == 1 {
+                    a1o = start;
+                    a1n = i - start;
+                }
+                if argc == 2 {
+                    a2o = start;
+                    a2n = i - start;
+                }
+                argc = argc + 1;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+    }
+    let want_print: u32 = 0;
+    let want_check: u32 = 0;
+    let want_emit: u32 = 0;
+    let eo: u32 = 0;
+    let en: u32 = 0;
+    if argc >= 2 {
+        if streq(ptr_add(ab, a1o), a1n, "--print") == 1 {
+            want_print = 1;
+        }
+        if streq(ptr_add(ab, a1o), a1n, "--check") == 1 {
+            want_check = 1;
+        }
+        if streq(ptr_add(ab, a1o), a1n, "--emit-rust") == 1 {
+            want_emit = 1;
+            eo = a2o;
+            en = a2n;
+        }
+        if a1n > 12 && streq(ptr_add(ab, a1o), 12, "--emit-rust=") == 1 {
+            want_emit = 1;
+            eo = a1o + 12;
+            en = a1n - 12;
+        }
+    }
+
+    // ---- 读语料（Python: parse_args 之后先 load_objects, 空就是用法错误）
+    let nf: u32 = scan_dir(dent, names, scr);
+    sort_names(names, nf, tmp);
+    if nf == 0 {
+        say_err("[ERR] 没有形式对象 (先运行 lomentc --emit-potato)\n");
+        return die(2);
+    }
+    let nrows: u32 = scan(rows, pool, txt, arena, path, names, nf, scr, desc);
+    let olen: u32 = emit(out, rows, nrows, pool);
+    let bad: u32 = count_bad(rows, nrows);
+
+    if want_print == 1 {
+        let _w: u64 = write_all(1, out, olen as u64);
+        return die(0);
+    }
+    if want_check == 1 {
+        let clen: u32 = slurp(str_ptr("loment/build/cap_asserts.rs"),
+                               str_len("loment/build/cap_asserts.rs"), cur, TXT_CAP, scr);
+        if clen == 4294967295 {
+            say("[SKIP] loment/build/cap_asserts.rs 未生成 (按需生成: --emit-rust)\n");
+            if bad > 0 {
+                return die(1);
+            }
+            return die(0);
+        }
+        if same_bytes(cur, clen, out, olen) == 0 {
+            say_err("[ERR] loment/build/cap_asserts.rs 与形式对象不一致\n");
+            return die(1);
+        }
+        say("[OK] cap_asserts.rs 一致 (");
+        let _d1: u64 = wdec(1, nrows);
+        say(" 条, 失败 ");
+        let _d2: u64 = wdec(1, bad);
+        say(")\n");
+        if bad > 0 {
+            return die(1);
+        }
+        return die(0);
+    }
+    if want_emit == 1 {
+        if en == 0 {
+            say_err("[ERR] 需要 --emit-rust / --check / --print\n");
+            return die(2);
+        }
+        let fd: i64 = open_wo(ptr_add(ab, eo), en, scr);
+        if fd < 0 {
+            say_err("[ERR] 打不开输出路径\n");
+            return die(2);
+        }
+        let _w2: u64 = write_all(fd as u64, out, olen as u64);
+        let _c2: i64 = syscall4(3, fd as u64, 0, 0);
+        say("[OK] ");
+        let _p: u64 = write_all(1, ptr_add(ab, eo), en as u64);
+        say(" (");
+        let _d3: u64 = wdec(1, nrows);
+        say(" 条断言, A1-A4 失败 ");
+        let _d4: u64 = wdec(1, bad);
+        say(")\n");
+        if bad > 0 {
+            return die(1);
+        }
+        return die(0);
+    }
+    say_err("[ERR] 需要 --emit-rust / --check / --print\n");
+    return die(2);
+}

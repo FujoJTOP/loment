@@ -146,7 +146,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[OK] cap_asserts.rs 一致 ({len(rs)} 条, 失败 {bad})")
         return 1 if bad else 0
     if a.emit_rust:
-        Path(a.emit_rust).write_text(want, encoding="utf-8")
+        # `newline="\n"` **必须有**（另外两个生成器 `loment_syscalls.py` / `lom_spec_emit.py`
+        # 一直都有）：不给它, `write_text` 走平台的文本模式 —— Windows 上产物是 CRLF, Linux
+        # 上是 LF, 于是"同一个形式对象集生成的产物"**随宿主变**。那与 S3 的判据
+        # （`docs/189` §3：「生成是确定的」）直接冲突。这里看不见是因为 `--check` 用
+        # `read_text()` 读回来（通用换行会把 CRLF 折回 LF）, 于是同一台机器上自洽,
+        # 只有把两边写出的字节摆在一起才看得见（判据 `loment_capasserts_test` 就这么做的）。
+        Path(a.emit_rust).write_text(want, encoding="utf-8", newline="\n")
         print(f"[OK] {a.emit_rust} ({len(rs)} 条断言, A1-A4 失败 {bad})")
         return 1 if bad else 0
     print("[ERR] 需要 --emit-rust / --check / --print", file=sys.stderr)
