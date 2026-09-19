@@ -75,7 +75,7 @@
   },
   {
    "path": "tools/loment_std_test.py",
-   "sha256": "672015373e37888c5900eebd388ff292d2c3ad9167a14f69d2f4497cd9000bb8"
+   "sha256": "b1f5f87e3596028853aa767c7ec0fc9257a5cdf00eb0d1d1edd39f81a77bfed7"
   },
   {
    "path": "tools/loment_cli_test.py",
@@ -1062,6 +1062,10 @@
    "sha256": "cd7ec4fb4c645be8bece0864737dfd9c1331dc9a4cb02c419c7f3b4c2bfb11fe"
   },
   {
+   "path": "loment/tools/lomstdcheck.lomt",
+   "sha256": "cc97863f5eeedcd4efd295b862b3f5d814885512b9c74283822928b43d437bc2"
+  },
+  {
    "path": "loment/tools/lomsyscalls.lomt",
    "sha256": "1d37647aaec1ecdeb8e1d9d812f526773fb5fae9828f03e38e3c0d2abd5a7bff"
   },
@@ -1667,7 +1671,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "11d5b71e1fb3f3f26baa75918180f78d2b42d4414e046dfa0ff0227ebaf96ad7"
+   "sha256": "61e009de42359245210ec7cb4f1fba9d43cbbf734e32e07979cbf3edae085c37"
   },
   {
    "path": "docs/190-loment-debugger.md",
