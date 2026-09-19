@@ -66,6 +66,8 @@ const C_MODNAME: u32 = 56;
 const C_MODLEN: u32 = 60;
 const C_OLEN: u32 = 64;
 const C_TOPMETA: u32 = 68;   // 顶层 meta 体占用的入口条数 (枚举成员 meta 在它之后)
+const C_HASMETA: u32 = 72;   // 顶层 meta 块**见过**没有 (0/1)。`C_TOPMETA` 兼不了: 空的
+                             // `meta { }` 也是 0 —— 那样"第二个 meta 块"就检不出来。
 
 // 表 stride
 const S_CONST: u32 = 24;    // name_off name_len type neg lo hi
@@ -661,6 +663,54 @@ fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
     return pool_put(mem, tmp, o);
 }
 
+/// 池里两个 (off, len) 是同一段字节吗。**池不去重**（`pool_put` 只管追加）, 所以
+/// 同名键在池里有两份、offset 不同 —— 只能比字节。
+fn same_key(mem: ptr, off: u32, len: u32, key: u64) -> u32 {
+    if len != pk_len(key) {
+        return 0;
+    }
+    let p: ptr = pool_at(mem, off);
+    let q: ptr = pool_at(mem, pk_off(key));
+    let i: u32 = 0;
+    while i < len {
+        if load8(p, i) != load8(q, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `base..now` 这一段里, **同一层**已经有同名键了吗。
+/// 一层 = 两次 `MK_OPEN`/`MK_CLOSE` 之间: 用深度计数把嵌套块的键排除掉。
+fn meta_dup_at(mem: ptr, base: u32, now: u32, key: u64) -> u32 {
+    let t: ptr = ptr_add(mem, M_META);
+    let depth: u32 = 0;
+    let i: u32 = base;
+    while i < now {
+        let kind: u32 = load32(t, i * S_META);
+        if kind == MK_OPEN {
+            if depth == 0
+                    && same_key(mem, load32(t, i * S_META + 4), load32(t, i * S_META + 8),
+                                key) == 1 {
+                return 1;
+            }
+            depth = depth + 1;
+        }
+        if kind == MK_CLOSE {
+            depth = depth - 1;
+        }
+        if depth == 0 && (kind == MK_STR || kind == MK_INT) {
+            if same_key(mem, load32(t, i * S_META + 4), load32(t, i * S_META + 8),
+                        key) == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn meta_add(mem: ptr, kind: u32, key: u64, sv: u64, iv: u64) {
     let i: u32 = load32(mem, M_CELL + C_NMETA);
     let t: ptr = ptr_add(mem, M_META);
@@ -676,6 +726,7 @@ fn meta_add(mem: ptr, kind: u32, key: u64, sv: u64, iv: u64) {
 }
 
 fn p_meta_body(mem: ptr, src: ptr, toks: ptr) -> u32 {
+    let base: u32 = load32(mem, M_CELL + C_NMETA);
     let going: u32 = 1;
     while going == 1 {
         if at_punct(src, toks, cur(mem), 125) == 1 {
@@ -686,6 +737,12 @@ fn p_meta_body(mem: ptr, src: ptr, toks: ptr) -> u32 {
                 key = p_string(mem, src, toks);
             } else {
                 key = p_ident(mem, src, toks);
+            }
+            // **同一层**里键不许重（参考实现: `meta 键 <k> 重复`）。判据是
+            // `lomc_test.py::test_meta_duplicate_key_rejected` —— 本程序原先放行。
+            if meta_dup_at(mem, base, load32(mem, M_CELL + C_NMETA), key) == 1 {
+                errml(mem, "meta 键重复");
+                return 1;
             }
             if at_punct(src, toks, cur(mem), 123) == 1 {
                 adv(mem);
@@ -1017,6 +1074,12 @@ fn parse_module(mem: ptr, src: ptr, toks: ptr) -> u32 {
             } else if tk_word(src, toks, cur(mem), "param") == 1 {
                 r = p_param(mem, src, toks);
             } else if tk_word(src, toks, cur(mem), "meta") == 1 {
+                // 顶层只许有一个 `meta` 块（参考实现: `meta 块重复`）—— 用 C_HASMETA 记
+                // "见过", 不能拿 C_TOPMETA 兼: 空的 `meta { }` 也是 0。
+                if load32(mem, M_CELL + C_HASMETA) != 0 {
+                    errml(mem, "meta 块重复");
+                    return 1;
+                }
                 adv(mem);
                 if p_need(mem, src, toks, 123) == 0 {
                     return 1;
@@ -1028,6 +1091,7 @@ fn parse_module(mem: ptr, src: ptr, toks: ptr) -> u32 {
                     return 1;
                 }
                 store32(mem, M_CELL + C_TOPMETA, load32(mem, M_CELL + C_NMETA));
+                store32(mem, M_CELL + C_HASMETA, 1);
                 r = 0;
             } else {
                 errml(mem, "未知顶层关键字");
@@ -2255,6 +2319,7 @@ fn _start() -> u32 {
     store32(mem, M_CELL + C_NERR, 0);
     store32(mem, M_CELL + C_NNAME, 0);
     store32(mem, M_CELL + C_TOPMETA, 0);
+    store32(mem, M_CELL + C_HASMETA, 0);
     errc(mem);
     let srcv: u64 = sys_alloc(SRC_CAP as u64);
     let ab: u64 = sys_alloc(65536);

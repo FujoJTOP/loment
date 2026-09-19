@@ -1,0 +1,566 @@
+// loment/tools/lomccheck.lomt — Loment 版「L0 编译器自检」(docs/141 §6 验收 / docs/189 §3 S1 第九格)
+//
+// 判据 (tools/lomc_test.py): 本程序跑的那几项检查, 与判据那一侧**用 Python 的 lomc**
+// 跑同样名字的检查所打印的报告**逐字节相同**。
+//
+// 被测对象是**另一件 Loment 程序**: `loment/tools/lomc.lomt`（L0 编译器, 参考实现在
+// `tools/lomc.py`）。所以这一格同时是"两个 L0 编译器在这些性质上给出同一个答案"的判据。
+//
+// 与参考那侧的形状差别: 参考侧是**进程内**调 `lomc.load/check`（能直接摸 `mod.records`
+// 那些对象）; 本程序只能走 `lomc.lomt` 的**命令面**（`--print json` + 退出码）,
+// 再从那份 JSON 里取值 —— 所以判据那侧也得按同一套"看产物"的规则算期望。
+//
+// ---------------------------------------------------------------- 两处硬约束
+//
+// ① **命令必须是编译期字面量**。`proc_sh(cmd: str, …)` 收的是 `str`, 而语言里
+//    **没有 ptr -> str 的构造**（内建只有 `str_len/eq/concat/byte/ptr`）。所以命令行
+//    里的路径只能是**相对字面量** —— 判据把工作目录设成一个**每次一份**的临时目录,
+//    里面放好 `lomc`（被测二进制）与各个 `.lom` 输入。于是并发跑门禁的两个进程
+//    各在自己的目录里, 不会互相跑对方的东西。
+//
+// ② **退出码要自己带回来**。`proc_sh` 只看 stdout（`loment/lib/proc.lomt` 头注写明）,
+//    所以在命令行尾巴挂 `r=$?; echo; echo -n "|rc=$r"`, 再从缓冲末尾往回找 `|rc=`。
+//    （与 `lomeol.lomt` 把 git 退出码带回来是同一条纪律。）
+//
+//    **`$?` 要紧挨着被量的那句话取。** 我先写的是 `…; echo; echo -n "|rc=$?"` ——
+//    中间那句裸 `echo` 把 `$?` **冲成 0**, 于是 15 条命令的退出码**全是 0**、
+//    正例凑巧期望 0 才没露馅, 负例（期望非 0）**全红**。现在的写法先存进 `r` 再回显。
+//
+// ---------------------------------------------------------------- 与参考的差别（写在这儿免得当成漏搬）
+//
+// * **措辞**：`lomc.lomt` 的诊断比参考**简**（例: 重复枚举值那边参考是
+//   `E.b 与 .a 同值 1（枚举值必须唯一）`, Loment 版是 `枚举值重复`）。所以本程序按
+//   **类别**断言（"重复值" 收 `重复` 或 `同值` 两种说法）, 不照抄某一边的句子。
+// * **没搬的六项**：生成确定性 / fuc 格式串锚定 fuic.py / 生成常量锚定 kernel /
+//   `--check` 漂移 / spec.json（要 LinuxFUAI）/ fujr 字节往返（要 sdk 的 .run 基准）——
+//   它们要么测的是 Python 发射器本身, 要么依赖本机缺位的对照物。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`** —— 栈上是
+// argc/argv, 不是返回地址。两条都见 docs/189 §3）。
+
+module lomccheck
+
+use bytes
+use json
+use proc
+
+const OUT_CAP: u32 = 262144;
+const ARENA_CAP: u32 = 262144;
+const STR_CAP: u32 = 8192;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn say_dec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `hay[0..hn]` 里第一次出现 `needle` 的偏移（没有给 `FAIL`）。
+fn find_sub(hay: ptr, hn: u32, needle: str) -> u32 {
+    let nl: u32 = str_len(needle);
+    if nl == 0 || hn < nl {
+        return FAIL;
+    }
+    let i: u32 = 0;
+    while i + nl <= hn {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nl {
+            if load8(hay, i + k) != str_byte(needle, k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+// ---------------------------------------------------------------- 跑 lomc
+
+/// 跑一条命令, 把退出码与"载荷长度"写进 `st`（`st[0]=rc`, `st[4]=载荷字节数`）。
+/// 载荷 = 输出里 `|rc=` 标记**之前**的内容（去掉紧邻的那个换行）。
+fn run(cmd: str, out: ptr, st: ptr) -> u32 {
+    let n: i64 = proc_sh(cmd, out, OUT_CAP);
+    if n < 0 {
+        let _a: u32 = st32(st, 0, 999);
+        let _b: u32 = st32(st, 4, 0);
+        return 0;
+    }
+    let m: u32 = n as u32;
+    // 从末尾往回找 `|rc=`：标记在最后, 所以从头找第一次出现即可（命令尾巴只挂一次）
+    let pos: u32 = find_sub(out, m, "|rc=");
+    if pos == FAIL {
+        let _a: u32 = st32(st, 0, 998);
+        let _b: u32 = st32(st, 4, m);
+        return 0;
+    }
+    let rc: u32 = 0;
+    let i: u32 = pos + 4;
+    while i < m && load8(out, i) >= 48 && load8(out, i) <= 57 {
+        rc = rc * 10 + (load8(out, i) - 48);
+        i = i + 1;
+    }
+    let pe: u32 = pos;
+    let pe2: u32 = pe;
+    if pe2 > 0 && load8(out, pe2 - 1) == 10 {
+        pe2 = pe2 - 1;
+    }
+    let _c: u32 = st32(st, 0, rc);
+    let _d: u32 = st32(st, 4, pe2);
+    return 0;
+}
+
+/// 跑一趟并把载荷当 JSON 解析（rc != 0 或解析失败都给 `FAIL`）。
+fn load_json(cmd: str, out: ptr, arena: ptr, st: ptr) -> u32 {
+    let _r: u32 = run(cmd, out, st);
+    if ld32(st, 0) != 0 {
+        return FAIL;
+    }
+    let pl: u32 = ld32(st, 4);
+    if pl == 0 {
+        return FAIL;
+    }
+    return json_parse(out, pl, arena);
+}
+
+// ---------------------------------------------------------------- JSON 取值
+
+fn jget(js: ptr, arena: ptr, o: u32, k: str) -> u32 {
+    if o == FAIL || json_nkind(arena, o) != 1 {
+        return FAIL;
+    }
+    return json_get(js, arena, o, k);
+}
+
+fn jget2(js: ptr, arena: ptr, o: u32, k1: str, k2: str) -> u32 {
+    return jget(js, arena, jget(js, arena, o, k1), k2);
+}
+
+/// 数组元素个数（不是数组给 `FAIL`）。
+fn jlen(arena: ptr, n: u32) -> u32 {
+    if n == FAIL || json_nkind(arena, n) != 2 {
+        return FAIL;
+    }
+    let c: u32 = json_first_child(arena, n);
+    let k: u32 = 0;
+    while c != 0 {
+        k = k + 1;
+        c = json_sibling(arena, c);
+    }
+    return k;
+}
+
+fn jelem(arena: ptr, arr: u32, idx: u32) -> u32 {
+    if arr == FAIL || json_nkind(arena, arr) != 2 {
+        return FAIL;
+    }
+    let c: u32 = json_first_child(arena, arr);
+    let i: u32 = 0;
+    while i < idx && c != 0 {
+        c = json_sibling(arena, c);
+        i = i + 1;
+    }
+    if c == 0 {
+        return FAIL;
+    }
+    return c;
+}
+
+fn ju32(js: ptr, arena: ptr, n: u32) -> u32 {
+    if n == FAIL || json_nkind(arena, n) != 4 {
+        return FAIL;
+    }
+    return json_as_u32(js, arena, n);
+}
+
+/// 解码后的字符串等于字面量吗（节点不是字符串给 0）。
+fn jstr_eq(js: ptr, arena: ptr, n: u32, lit: str, buf: ptr) -> u32 {
+    if n == FAIL || json_nkind(arena, n) != 3 {
+        return 0;
+    }
+    let m: u32 = json_str_into(js, arena, n, buf, STR_CAP);
+    return streq(buf, m, lit);
+}
+
+/// 解码后的字符串里含 `needle` 吗。
+fn jstr_has(js: ptr, arena: ptr, n: u32, needle: str, buf: ptr) -> u32 {
+    if n == FAIL || json_nkind(arena, n) != 3 {
+        return 0;
+    }
+    let m: u32 = json_str_into(js, arena, n, buf, STR_CAP);
+    if find_sub(buf, m, needle) == FAIL {
+        return 0;
+    }
+    return 1;
+}
+
+/// 在 `arr` 里找 `obj[k]` 解出来等于 `name` 的那一项（给节点下标, 没有给 `FAIL`）。
+fn jfind(js: ptr, arena: ptr, arr: u32, k: str, name: str, buf: ptr) -> u32 {
+    let n: u32 = jlen(arena, arr);
+    if n == FAIL {
+        return FAIL;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let e: u32 = jelem(arena, arr, i);
+        if jstr_eq(js, arena, jget(js, arena, e, k), name, buf) == 1 {
+            return e;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// L0 标量类型的字节宽（`lomc` 的 `TYPES` 里那些; 不在表里给 0）。
+fn tw(p: ptr, n: u32) -> u32 {
+    if streq(p, n, "u8") == 1 || streq(p, n, "i8") == 1 {
+        return 1;
+    }
+    if streq(p, n, "u16") == 1 || streq(p, n, "i16") == 1 {
+        return 2;
+    }
+    if streq(p, n, "u32") == 1 || streq(p, n, "i32") == 1 {
+        return 4;
+    }
+    if streq(p, n, "u64") == 1 || streq(p, n, "i64") == 1 {
+        return 8;
+    }
+    return 0;
+}
+
+/// 一个 record 的字段**无空洞**: 按 offset 依次铺满 `size`(packed) 或含对齐。
+/// 这里只做 `packed` 那一档（fuc / fujr 都是 packed）: 每个字段的 offset 等于前面积累。
+fn packed_contiguous(js: ptr, arena: ptr, rec: u32, buf: ptr) -> u32 {
+    let fields: u32 = jget(js, arena, rec, "fields");
+    let n: u32 = jlen(arena, fields);
+    if n == FAIL {
+        return 0;
+    }
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let f: u32 = jelem(arena, fields, i);
+        let off: u32 = ju32(js, arena, jget(js, arena, f, "offset"));
+        if off != cur {
+            return 0;
+        }
+        let tn: u32 = jget(js, arena, f, "type");
+        if tn == FAIL || json_nkind(arena, tn) != 3 {
+            return 0;
+        }
+        let tl: u32 = json_str_into(js, arena, tn, buf, STR_CAP);
+        let w: u32 = tw(buf, tl);
+        if w == 0 {
+            return 0;
+        }
+        cur = cur + w;
+        i = i + 1;
+    }
+    let size: u32 = ju32(js, arena, jget(js, arena, rec, "size"));
+    if cur != size {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 报告
+
+fn rep(name: str, ok: u32, why: str, ct: ptr) {
+    if ok == 1 {
+        say("  PASS  ");
+        say(name);
+        say("\n");
+        let _a: u32 = st32(ct, 0, ld32(ct, 0) + 1);
+    } else {
+        say("  FAIL  ");
+        say(name);
+        say(": ");
+        say(why);
+        say("\n");
+        let _b: u32 = st32(ct, 4, ld32(ct, 4) + 1);
+    }
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let av: u64 = sys_alloc(ARENA_CAP as u64);
+    let bv: u64 = sys_alloc(STR_CAP as u64);
+    let sv: u64 = sys_alloc(64);
+    let cv: u64 = sys_alloc(64);
+    if ov == 0 || av == 0 || bv == 0 || sv == 0 || cv == 0 {
+        return die(2);
+    }
+    let out: ptr = ov as ptr;
+    let arena: ptr = av as ptr;
+    let buf: ptr = bv as ptr;
+    let st: ptr = sv as ptr;
+    let ct: ptr = cv as ptr;
+
+    // ---- 1 正例: 两份真 schema 都要干净解析
+    let r1: u32 = load_json("./lomc fuai.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok1: u32 = 0;
+    if r1 != FAIL && jstr_eq(out, arena, jget(out, arena, r1, "module"), "fuai", buf) == 1 {
+        ok1 = 1;
+    }
+    let r2: u32 = load_json("./lomc fuc.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok2: u32 = 0;
+    if r2 != FAIL && jstr_eq(out, arena, jget(out, arena, r2, "module"), "fuc", buf) == 1 {
+        ok2 = 1;
+    }
+    rep("test_real_schemas_parse_clean", ok1 * ok2, "fuai / fuc 没干净解析", ct);
+
+    // ---- 2 fuai: 一个 Opcode 枚举 + 46 个变体 + 2 个部署参数
+    let r3: u32 = load_json("./lomc fuai.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok3: u32 = 0;
+    if r3 != FAIL {
+        let enums: u32 = jget(out, arena, r3, "enums");
+        if jlen(arena, enums) == 1 {
+            let e0: u32 = jelem(arena, enums, 0);
+            if jstr_eq(out, arena, jget(out, arena, e0, "name"), "Opcode", buf) == 1 {
+                if jlen(arena, jget(out, arena, e0, "variants")) == 46 {
+                    if jlen(arena, jget(out, arena, r3, "params")) == 2 {
+                        ok3 = 1;
+                    }
+                }
+            }
+        }
+    }
+    rep("test_fuai_covers_all_primitives", ok3, "Opcode 变体数或参数数不对", ct);
+
+    // ---- 3 fuc: Header 48 / Node 64, 且 Node 字段无空洞（packed）
+    let r4: u32 = load_json("./lomc fuc.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok4: u32 = 0;
+    if r4 != FAIL {
+        let recs: u32 = jget(out, arena, r4, "records");
+        let hdr: u32 = jfind(out, arena, recs, "name", "Header", buf);
+        let nod: u32 = jfind(out, arena, recs, "name", "Node", buf);
+        if hdr != FAIL && nod != FAIL {
+            if ju32(out, arena, jget(out, arena, hdr, "size")) == 48 {
+                if ju32(out, arena, jget(out, arena, nod, "size")) == 64 {
+                    ok4 = packed_contiguous(out, arena, nod, buf);
+                }
+            }
+        }
+    }
+    rep("test_fuc_layout_is_64_and_48", ok4, "Header/Node 大小或字段有空洞", ct);
+
+    // ---- 4–10 负例: 六类语义错 + 两类解析错, 必须**被拒**(rc != 0) 且说得出口
+    let _q1: u32 = run("./lomc bad_dup_enum.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n1a: u32 = ld32(st, 4);
+    let d1: u32 = 0;
+    if ld32(st, 0) != 0 && n1a > 0 {
+        if find_sub(out, n1a, "重复") != FAIL || find_sub(out, n1a, "同值") != FAIL {
+            d1 = 1;
+        }
+    }
+    rep("test_duplicate_enum_value_rejected", d1, "重复枚举值没被拒（或没说明）", ct);
+
+    let _q2: u32 = run("./lomc bad_oor.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n2a: u32 = ld32(st, 4);
+    let d2: u32 = 0;
+    if ld32(st, 0) != 0 && n2a > 0 && find_sub(out, n2a, "超出") != FAIL {
+        d2 = 1;
+    }
+    rep("test_enum_value_out_of_range_rejected", d2, "越界枚举值没被拒", ct);
+
+    let _q3: u32 = run("./lomc bad_overlap.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n3a: u32 = ld32(st, 4);
+    let d3: u32 = 0;
+    if ld32(st, 0) != 0 && n3a > 0 && find_sub(out, n3a, "重叠") != FAIL {
+        d3 = 1;
+    }
+    rep("test_overlapping_fields_rejected", d3, "字段重叠没被拒", ct);
+
+    let _q4: u32 = run("./lomc bad_overrun.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n4a: u32 = ld32(st, 4);
+    let d4: u32 = 0;
+    if ld32(st, 0) != 0 && n4a > 0 && find_sub(out, n4a, "越过") != FAIL {
+        d4 = 1;
+    }
+    rep("test_field_overrun_rejected", d4, "字段越过 size 没被拒", ct);
+
+    let _q5: u32 = run("./lomc bad_dupname.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n5a: u32 = ld32(st, 4);
+    let d5: u32 = 0;
+    if ld32(st, 0) != 0 && n5a > 0 && find_sub(out, n5a, "重复") != FAIL {
+        d5 = 1;
+    }
+    rep("test_duplicate_top_level_name_rejected", d5, "顶层名字重复没被拒", ct);
+
+    let _q6: u32 = run("./lomc bad_unknown.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n6a: u32 = ld32(st, 4);
+    let d6: u32 = 0;
+    if ld32(st, 0) != 0 && n6a > 0 && find_sub(out, n6a, "未知字段类型") != FAIL {
+        d6 = 1;
+    }
+    rep("test_unknown_type_rejected_at_parse", d6, "u24 没被拒", ct);
+
+    let _q7: u32 = run("./lomc bad_nomodule.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n7a: u32 = ld32(st, 4);
+    let d7: u32 = 0;
+    if ld32(st, 0) != 0 && n7a > 0 && find_sub(out, n7a, "module") != FAIL {
+        d7 = 1;
+    }
+    rep("test_missing_module_rejected", d7, "缺 module 没被拒", ct);
+
+    // ---- 11 meta: 解析出来且能嵌层
+    let r5: u32 = load_json("./lomc meta.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok5: u32 = 0;
+    if r5 != FAIL {
+        let meta: u32 = jget(out, arena, r5, "meta");
+        if jstr_eq(out, arena, jget(out, arena, meta, "title"), "t", buf) == 1 {
+            let layers: u32 = jget(out, arena, meta, "layers");
+            if jstr_eq(out, arena, jget(out, arena, layers, "host-ext"), "h", buf) == 1 {
+                ok5 = 1;
+            }
+        }
+    }
+    rep("test_meta_parses_and_nests", ok5, "meta 没解析出来或没嵌层", ct);
+
+    // ---- 12 meta 重复键要被拒
+    let _q8: u32 = run("./lomc bad_metadup.lom --print json 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                       out, st);
+    let n8a: u32 = ld32(st, 4);
+    let d8: u32 = 0;
+    if ld32(st, 0) != 0 && n8a > 0 && find_sub(out, n8a, "重复") != FAIL {
+        d8 = 1;
+    }
+    rep("test_meta_duplicate_key_rejected", d8, "meta 重复键没被拒", ct);
+
+    // ---- 13 部署参数的 note 要从源里带出来
+    let r6: u32 = load_json("./lomc fuai.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok6: u32 = 0;
+    if r6 != FAIL {
+        let ps: u32 = jget(out, arena, r6, "params");
+        let lo: u32 = jfind(out, arena, ps, "name", "tau_low_default", buf);
+        let hi: u32 = jfind(out, arena, ps, "name", "tau_high_default", buf);
+        if lo != FAIL && hi != FAIL {
+            if jstr_eq(out, arena, jget(out, arena, lo, "note"), "一致", buf) == 1 {
+                ok6 = jstr_has(out, arena, jget(out, arena, hi, "note"), "非接口差异", buf);
+            }
+        }
+    }
+    rep("test_param_note_parsed", ok6, "两个部署参数的 note 不对", ct);
+
+    // ---- 14 fujr 的 Header 64 / Section 32
+    let r7: u32 = load_json("./lomc fujr.lom --print json; r=$?; echo; echo -n \"|rc=$r\"",
+                            out, arena, st);
+    let ok7: u32 = 0;
+    if r7 != FAIL {
+        let recs2: u32 = jget(out, arena, r7, "records");
+        let h: u32 = jfind(out, arena, recs2, "name", "Header", buf);
+        let s: u32 = jfind(out, arena, recs2, "name", "Section", buf);
+        if h != FAIL && s != FAIL {
+            if ju32(out, arena, jget(out, arena, h, "size")) == 64 {
+                if ju32(out, arena, jget(out, arena, s, "size")) == 32 {
+                    ok7 = 1;
+                }
+            }
+        }
+    }
+    rep("test_fujr_schema_layout", ok7, "fujr 的 Header/Section 大小不对", ct);
+
+    say("lomccheck: ");
+    let _p: u64 = say_dec(ld32(ct, 0));
+    say("/");
+    let _q: u64 = say_dec(ld32(ct, 0) + ld32(ct, 4));
+    say(" 通过\n");
+    if ld32(ct, 4) > 0 {
+        return die(1);
+    }
+    return die(0);
+}
