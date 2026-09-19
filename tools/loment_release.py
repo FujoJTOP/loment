@@ -38,8 +38,14 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # `declare` 且逐字节一致; `lomelf` 能读外部 ELF 目标文件并**按 C ABI 传参**链接, 于是 Loment
 # 程序真的调到了 C / C++ / Rust 的库; 运行期那一族 (Python / JS / Java) 走新加的进程桥
 # `loment/lib/proc.lomt`。见 docs/174。
-RELEASE = "0.1.4-pre2"
-RELEASE_NAME = "0.1.4 Pre2"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-09-18 升到 **0.1.4**（正式版，用户定的）：pre 系列到此为止。
+# **边界如实记一句**：这一版发的是**能用的工具链**（自举、运行期无 Python、无 libc），
+# 而"仓库里只有 Loment"那个里程碑**还没到** —— 参考实现（`tools/lomentc.py` 等）与
+# Python 判据仍在仓里，六门表层语法的翻译器也还没有 Loment 孪生（`docs/189`）。
+# 那句话的对外版本写在 README 的 `## Status`（与 `tools/loment_publish.py` 里那份
+# 逐字同源）—— **改版本号时一起改**，`loment_publish` 的判据会核。
+RELEASE = "0.1.4"
+RELEASE_NAME = "0.1.4"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

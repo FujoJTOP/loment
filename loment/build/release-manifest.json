@@ -1,5 +1,5 @@
 {
- "release": "0.1.4-pre2",
+ "release": "0.1.4",
  "files": [
   {
    "path": "tools/lomc.py",
@@ -679,7 +679,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "ffa314ed973dbac62cc33ff81c8ec31fe4311a6c20bb870ad5699bc9efa84d58"
+   "sha256": "54656e68f4f777709e1e51e6f8fccffce334a84c5f92c752c998dcdaf04a8753"
   },
   {
    "path": "tools/loment_diag.py",
@@ -1039,7 +1039,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "bf52c0d79bb8aec259859d4d7971670a63bf01bfeab3791e122d71678d3ba064"
+   "sha256": "cb917a2f783903e5444d4ef23f0fdac8bae5392f157b78c88ddad4b997bdaf45"
   },
   {
    "path": "loment/tools/lomstatus.lomt",

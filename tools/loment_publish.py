@@ -229,9 +229,14 @@ same program can be written in six more: C, C++, Java, C#, Go or Python.
 
 ## Status
 
-`0.1.4-pre2`, a pre-release; prebuilt toolchains are not published yet. The language surface
-is frozen — `docs/158-loment-freeze.md` says what changing it costs — but the implementation
-is not.
+`0.1.4`; prebuilt toolchains are not published yet. The toolchain is **self-hosted**: it
+compiles and runs with no Python and no libc at run time. **Not yet finished**: the
+*development-side* self-hosting is incomplete (`docs/189`) — the reference implementation
+(`tools/lomentc.py` and friends) and the Python test suites are still in the repository, and
+the six surface-syntax translators have no Loment twins yet. So this release ships the
+language and the toolchain, **not** the "repository contains only Loment" milestone. The
+language surface is frozen — `docs/158-loment-freeze.md` says what changing it costs — and
+the implementation is not.
 
 ## A first program
 
