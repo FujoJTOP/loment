@@ -476,11 +476,20 @@ grammar`：读法由声明定、不由嗅探）、`potato_test`（每条校验�
 | 卡在什么 | 哪些 |
 |---|---|
 | 翻译器建树（§4.1 那根轴） | 六门 `*trans_test` 与 `loment_multisyntax_test` |
-| 自举侧 potato 通路（参考实现里 `emit_potato` 实测 **1478 行**） | `potato_test` 的上游、`lomentc_test`（最大一格，1641 行） |
+| 自举侧 potato 通路（参考实现里 `emit_potato` 实测 **115 行**，`potato.validate` **533 行**） | `potato_test` 的上游、`lomentc_test`（判据本身 1641 行，是最大的一格） |
 | 完整原生后端 + clang/WSL + 跨语言链接 | `loment_elf_test` / `loment_pe_test` / `loment_ffi_test` |
 | 真会话 / 真 LSP + WSL / node | `loment_dap_test` / `vscode_ext_test` |
 | 归档确定性字节（DEFLATE/gzip 见上表）+ install.sh + PowerShell 5.1 | `loment_dist_test` |
 | cargo + QEMU 无头 | `ci.py` |
+
+> **更正（2026-09-19 实测）**：`emit_potato` 先前在本表里记成 **1478 行**，那是**量错了**
+> —— 量函数长度的脚本拿 `l.startswith(' '*indent)` 找函数结束，而 `indent` 为 0 时
+> `' '*0` 是空串、`startswith('')` **恒真**，于是循环不截断、一直量到文件末尾
+> （4953−3476=1477）。真值是 **115 行**。
+>
+> 但**分量不在发射器上**：它坐在 `load_unit`(30) + `check`(328) + `prepare`(87) 之上，
+> 真正要搬的是**前端**（与 §4.1 同一根轴）。同一次量的还有 `potato.validate` **533 行**
+> —— 那才是 `potato_test` 那一格的大头（先前那条"纯逻辑就便宜"的归类要按这个数看）。
 
 ⇒ **S1 的真实剩余量**是丙 + 丁（十件上下）+ 戊里那两根大轴，**不是 44 格**。
 **丙里的 `loment_extblock_test` 已搬**（第 6 格）、**丁里的 `loment_json_test` 已搬**
