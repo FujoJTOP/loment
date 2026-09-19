@@ -264,7 +264,8 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | ~~4~~ | `lom_spec_emit` | 工具型 | ⚠ **动工后撤回**（查清的四条见下 §第 4 格）—— 这批里最大的一格，凑不出来就不硬凑 |
 | **5** | `potato_assert` | 工具型 | ✅ **已搬**（2026-09-19）：`lomcapasserts.lomt` + `loment_capasserts_test.py`，判据 4/4（`--print` / `--emit-rust` 的落盘字节 / `--check` 三条支路 / 自举链）|
 | **6** | `loment_extblock_test` 第 1–4 条（外部代码块的字节保真与消歧） | 检查型 | ✅ **已搬**（2026-09-19）：`lomextblock.lomt` + 该判据里加的两条（7/7）—— 这一格用的词法器是**自举侧**的，所以它同时是"两个词法器同一答案"的判据 |
-| 7 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
+| **7** | `loment_json_test`（JSON 库 vs CPython `json`） | 对**外部神谕**的 | ✅ **已搬**（2026-09-19）：`lomjsoncheck.lomt` + 该判据里加的两条（4/4）—— 第一种"神谕驱动"形态的格子 |
+| 8 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
 #### 第 1 格踩到的两处（后面 43 格都会再撞，先写下来）
@@ -382,6 +383,24 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 **没搬的一档**：`test_body_round_trips_into_potato`（正文进 Potato v5 并过校验器）——
 那要自举侧的 potato 通路（§4 那根轴），本格不碰，写在孪生头注里。
 
+#### 第 7 格（`loment_json_test`）：**搬到 Loment 侧反而更短** —— 探针那一层没了
+
+这一格是 §2 点名的第三种形态（**对外部神谕的**）的第一格：对照物是 **CPython 的 `json`**，
+神谕不搬，Loment 侧出观察、判据那侧用神谕出期望，比 stdout。三处值得记：
+
+1. **参考实现那侧要"生成一份探针源 -> 编出来跑", 而 Loment 侧不需要那一层。**
+   原因很直接: Python 调不了 Loment 的库, 只能把被测逻辑写成一份 `.lomt` 再编;
+   而 **Loment 程序自己就能 `use json`** —— 于是这一格从"三件套"缩成"一个程序"。
+   ⇒ **丙/丁里凡是"编一个探针来测某个库"的判据, 搬到 Loment 侧都会变短。**
+2. **观察要覆盖库的**两条路**, 不然另一条会悄悄漂。** `json.lomt` 取字符串有两条路:
+   `json_str_into`（解码, 含 `\uXXXX` 与代理对）与 `json_raw_off/len`（原文区间）。
+   只测其中一条, 另一条坏了照样绿。所以规则写成: **str 取解码后的、num 取原文区间**、
+   obj/arr 空串。
+   *例外*: `true` / `false` / `null` **没有原文区间**（`j_parse_lit` 建节点时给的是
+   `(0,0)`）—— 它们的拼法由 JSON 规范定死, 这两种观察合起来正好把这条**也钉住了**。
+3. **`return;` 不合法**（`return <expr>;` 必须有值, `SKILL.md` §3 那张表里写着）——
+   我照着"提前返回"的习惯写了一次, 报的是 `期望表达式，得到 ';'`。改成 `if/else` 即可。
+
 **其余还没搬的（同类，都不便宜）**：`loment_src`（要 git + 比写出的包字节）、
 `loment_audit`、`loment_manual`（要加载每个示例）。
 再往后就是两根**大轴**：六门翻译器的 Loment 孪生（§4.1）与自举侧的 potato 通路 ——
@@ -452,8 +471,17 @@ grammar`：读法由声明定、不由嗅探）、`potato_test`（每条校验�
 | cargo + QEMU 无头 | `ci.py` |
 
 ⇒ **S1 的真实剩余量**是丙 + 丁（十件上下）+ 戊里那两根大轴，**不是 44 格**。
-**丙里的 `loment_extblock_test` 已搬**（见下第 6 格）；丙里还剩 `comefor` / `grammar` /
-`potato` 三件，它们要的"一件 Loment 侧的词法器/校验器"现在有了样例。
+**丙里的 `loment_extblock_test` 已搬**（第 6 格）、**丁里的 `loment_json_test` 已搬**
+（第 7 格）。丙里还剩 `comefor` / `grammar` / `potato` 三件（后者的校验器实测 **533 行**，
+不是"纯逻辑就便宜"），丁里还剩 `std` / `lib` / `lomc_test` / `err` / `cli`。
+
+**一条对后面几格都成立的约束**（2026-09-19 实测）：**WSL 里没有 clang**（只有 `sh`）。
+所以一个跑在 WSL 的 Loment 程序**不能自己编别的 Loment 程序**（今天的编/链都在 Windows
+侧的 clang.exe 上做, 再把 ELF 拷进 WSL 跑）。Loment 侧要编东西有两条现成的路:
+① `loment/build/genesis`（**`bootstrap.sh` 就是靠它做到"不需要 clang"的**, 已提交）;
+② `/mnt/c/Program Files/LLVM/bin/clang.exe`（`bootstrap.sh` 里的退路, 也在用）。
+⇒ 判据如果只是"比 stdout", 就仍然走"宿主编、WSL 跑"（第 5/6/7 格都这么落）;
+只有当**Loment 侧自己要编东西**时, 才需要 ①/②。
 
 **S0 不落地之前不动 S1 之后的任何一格** —— 因为 D/C 的结论会改变清单，
 先搬的东西可能白搬。

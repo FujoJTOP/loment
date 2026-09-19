@@ -358,6 +358,148 @@ fn _start() {{
     assert got == want, f"\n  got : {got!r}\n  want: {want!r}"
 
 
+# ---------------------------------------------------------------- Loment 版（S1 第七格）
+
+TWIN = ROOT / "loment" / "tools" / "lomjsoncheck.lomt"
+
+#: 观测点 —— **两侧同一份清单**（孪生那边逐条写死, 这边是同一套路径）。
+_OBS: dict[int, list[tuple[str, list[str]]]] = {
+    0: [("params.textDocument.uri", ["params", "textDocument", "uri"]),
+        ("params.textDocument.text", ["params", "textDocument", "text"])],
+    1: [("a", ["a"]), ("b.c", ["b", "c"]), ("b.d", ["b", "d"])],
+    2: [("u", ["u"])],
+    3: [("k", ["k"])],
+    4: [("nested", ["nested"]), ("nested.deep", ["nested", "deep"]),
+        ("nested.deep.leaf", ["nested", "deep", "leaf"])],
+    5: [("method", ["method"]), ("params.text", ["params", "text"])],
+}
+#: payload 1 里 `a` 的元素个数（孪生那边是 `while i < 6`）。
+_A_LEN = 6
+
+
+def _kind_of(v: object) -> int:
+    """与 `json.lomt` 的 kind 同表: 1 obj / 2 arr / 3 str / 4 num / 5 true / 6 false / 7 null。
+
+    **`bool` 要在 `int` 前面判** —— Python 里 `isinstance(True, int)` 是 True。
+    """
+    if isinstance(v, dict):
+        return 1
+    if isinstance(v, list):
+        return 2
+    if isinstance(v, str):
+        return 3
+    if isinstance(v, bool):
+        return 5 if v else 6
+    if v is None:
+        return 7
+    if isinstance(v, int):
+        return 4
+    raise AssertionError(f"没见过的 JSON 值类型: {type(v)}")
+
+
+def _text_of(v: object) -> str:
+    """与孪生 `node_text` 同一套规则: str 取解码后的、num 取原文、三种字面量取规范拼法。"""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, int):
+        return str(v)
+    return ""          # obj / arr
+
+
+def _expected_json_report() -> str:
+    """用 CPython `json` 独立算一遍孪生该打的报告（**不复用探针那条路**）。"""
+    out: list[str] = []
+    for i, p in enumerate(PAYLOADS):
+        d = json.loads(p)
+        out.append(f"P{i} root_kind {_kind_of(d)}")
+        for label, path in _OBS[i]:
+            v: object = d
+            for k in path:
+                v = v[k]           # type: ignore[index]
+            out.append(f"  {label} {_kind_of(v)} {_text_of(v)}")
+            if label == "a":
+                for j in range(_A_LEN):
+                    e = v[j]       # type: ignore[index]
+                    out.append(f"  a{j} {_kind_of(e)} {_text_of(e)}")
+    obj = {"jsonrpc": "2.0", "id": 7,
+           "result": {"ok": True, "n": 42, "s": 'a"b\n中\tz', "arr": [1, 2]}}
+    out.append("EMIT " + json.dumps(obj, ensure_ascii=False))
+    return "\n".join(out) + "\n"
+
+
+@test
+def test_json_check_matches_loment_twin():
+    """**Loment 版**（直接 `use json`, 不经探针）与 CPython `json` 的观察**逐字节相同**。
+
+    `docs/189` §3 的 S1 第七格。这一格顺带说明一件事: 参考实现那侧要**生成一份探针源**
+    再编出来跑（Python 调不了 Loment 的库）, 而 Loment 侧**不要那一层** —— 它自己就是
+    Loment 程序, 直接调 `loment/lib/json.lomt`。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    import lomentc
+    want = _expected_json_report()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        mod = lomentc.load(TWIN)
+        deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"lomjsoncheck.lomt 自己检查不过: {errs[:3]}"
+        ll = td / "lomjsoncheck.ll"
+        with ll.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(lomentc.emit_llvm(mod, ROOT, deps))
+        elf = td / "lomjsoncheck.elf"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        got = td / "twin.out"
+        binn = f"{_T}jsoncheck.bin"
+        script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} > {_wsl_path(got)}; echo -n $?")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, text=True, timeout=300, shell=False)
+        assert rr.stdout.strip() == "0", f"孪生退出码 {rr.stdout!r}"
+        # 按**原始字节**读: read_text 会把 \r\n 归一成 \n, 那样解码出的 CR 就看不出来了
+        out = got.read_bytes().decode("utf-8")
+    assert out == want, f"不一致:\n  got : {out!r}\n  want: {want!r}"
+    # 独立期望值: 解码侧那几个"字符串字面量装不下"的字节, 一个都不能少
+    assert "\r" in out and "\t" in out and "中" in out and "\U0001f600" in out, repr(out[-200:])
+    print(f"      {len(PAYLOADS)} 个 payload + 生成侧: 与 CPython json 逐字节相同")
+
+
+@test
+def test_json_twin_selfhost_compiles():
+    """`lomjsoncheck.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_T}jsoncheck_s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomjsoncheck.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomjsoncheck.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomjsoncheck.lomt 成功 ({len(rr.stdout)}B IR)")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

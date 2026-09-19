@@ -1,0 +1,279 @@
+// loment/tools/lomjsoncheck.lomt — Loment 版「JSON 库与 CPython 的 json 行为一致」检查
+// (docs/189 §3 的 S1 第七格；判据在 tools/loment_json_test.py)
+//
+// 判据: 对**同一批 payload**, 本程序（直接 `use json` —— 它自己就是一个 Loment 程序,
+// 不必再生成探针）打印的观察结果, 与判据那一侧用 CPython `json` 算出来的**逐字节相同**。
+//
+// **为什么这一格比看上去短**: 参考实现那侧要比 json.lomt 的行为, 只能**生成一份探针源**
+// 再编出来跑（Python 调不了 Loment 的库）。Loment 侧不需要这一层 —— 直接调。
+// 于是这一格同时也把这些覆盖搬到了"没有探针"的形态上:
+//   嵌套对象/数组、空对象/空数组、字符串转义 (\r \n \t \\ \")、\uXXXX 与代理对、
+//   整数/负数/大数、true/false/null、"值里含 \"method\" 字面量"不会被误当成键。
+//
+// 观察的形式（两侧同一套规则）:
+//   每个观测点一行 `<标签> <kind> <文本>`:
+//     kind = 1 obj / 2 arr / 3 str / 4 num / 5 true / 6 false / 7 null（与 json.lomt 同表）;
+//     文本 = str 取**解码后**的字节, num/true/false/null 取**原文区间**, obj/arr 空串。
+//     —— 解码与原文都看, 是因为这两件在 json.lomt 里是两条路（`json_str_into` vs
+//     `json_raw_off/len`）, 只测一条会让另一条悄悄漂。
+//   生成侧一行 `EMIT <json.dumps(ensure_ascii=False) 的结果>`。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误；docs/189 §3）。
+
+module lomjsoncheck
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 内存布局
+const ARENA_CAP: u32 = 65536;      // DOM（每个节点 24 B）
+const OUT_CAP: u32 = 65536;        // 生成侧
+const STR_CAP: u32 = 8192;         // 解码一个字符串
+
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn put_bytes(p: ptr, n: u32) -> u64 {
+    return write_all(1, p, n as u64);
+}
+
+fn wdec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn say_dec(v: u32) -> u64 {
+    return wdec(v);
+}
+
+// ---------------------------------------------------------------- 取值
+
+/// 一层一层往下取（`json_get` 没命中给 FAIL）。**先看它是不是对象** —— 不是就当作没有。
+fn get1(js: ptr, arena: ptr, o: u32, k1: str) -> u32 {
+    if o == FAIL || json_nkind(arena, o) != 1 {
+        return FAIL;
+    }
+    return json_get(js, arena, o, k1);
+}
+
+fn get2(js: ptr, arena: ptr, o: u32, k1: str, k2: str) -> u32 {
+    return get1(js, arena, get1(js, arena, o, k1), k2);
+}
+
+fn get3(js: ptr, arena: ptr, o: u32, k1: str, k2: str, k3: str) -> u32 {
+    return get1(js, arena, get2(js, arena, o, k1, k2), k3);
+}
+
+/// 数组第 `idx` 个元素（越界给 FAIL）。
+fn elem(arena: ptr, arr: u32, idx: u32) -> u32 {
+    if arr == FAIL || json_nkind(arena, arr) != 2 {
+        return FAIL;
+    }
+    let c: u32 = json_first_child(arena, arr);
+    let i: u32 = 0;
+    while i < idx && c != 0 {
+        c = json_sibling(arena, c);
+        i = i + 1;
+    }
+    if c == 0 {
+        return FAIL;
+    }
+    return c;
+}
+
+/// 节点的"文本"（两侧同一套规则）:
+///   str  -> **解码后**的字节（`json_str_into`）
+///   num  -> **原文区间**（`json_raw_off/len`）
+///   true/false/null -> 规范拼法（json.lomt 对这三种**不存原文区间**: `j_parse_lit`
+///                       建节点时给的是 (0,0) —— 它们的拼法由 JSON 规范定死, 没有歧义）
+///   obj/arr -> 空串
+fn node_text(js: ptr, arena: ptr, n: u32, buf: ptr) {
+    let k: u32 = json_nkind(arena, n);
+    if k == 3 {
+        let m: u32 = json_str_into(js, arena, n, buf, STR_CAP);
+        let _w: u64 = put_bytes(buf, m);
+    }
+    if k == 4 {
+        let ro: u32 = json_raw_off(arena, n);
+        let rl: u32 = json_raw_len(arena, n);
+        let _w: u64 = write_all(1, ptr_add(js, ro), rl as u64);
+    }
+    if k == 5 {
+        say("true");
+    }
+    if k == 6 {
+        say("false");
+    }
+    if k == 7 {
+        say("null");
+    }
+}
+
+/// 一个观测点一行: `  <标签> <kind> <文本>`。
+fn obs(js: ptr, arena: ptr, n: u32, label: str, buf: ptr) {
+    say("  ");
+    say(label);
+    say(" ");
+    if n == FAIL {
+        say("0 -\n");
+    } else {
+        let _d: u64 = wdec(json_nkind(arena, n));
+        say(" ");
+        node_text(js, arena, n, buf);
+        say("\n");
+    }
+}
+
+/// 下标标签: `a` + 十进制（写成 `<前缀>0` 这种, 两侧同一套）。
+fn label_idx(prefix: str, i: u32) -> u64 {
+    say(prefix);
+    return wdec(i);
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let av: u64 = sys_alloc(ARENA_CAP as u64);
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let bv: u64 = sys_alloc(STR_CAP as u64);
+    if av == 0 || ov == 0 || bv == 0 {
+        return die(2);
+    }
+    let arena: ptr = av as ptr;
+    let out: ptr = ov as ptr;
+    let buf: ptr = bv as ptr;
+
+    // ---- 0: didOpen 的真实形状 —— 文档文本里有 \r\n 与转义引号
+    let p0: str = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///x.lomt\",\"text\":\"fn f() {\\r\\n    let s: str = \\\"hi\\\\n\\\";\\r\\n}\\r\\n\"}}}";
+    let r0: u32 = json_parse(str_ptr(p0), str_len(p0), arena);
+    say("P0 root_kind ");
+    let _a: u64 = wdec(json_nkind(arena, r0));
+    say("\n");
+    obs(str_ptr(p0), arena, get3(str_ptr(p0), arena, r0, "params", "textDocument", "uri"),
+        "params.textDocument.uri", buf);
+    obs(str_ptr(p0), arena, get3(str_ptr(p0), arena, r0, "params", "textDocument", "text"),
+        "params.textDocument.text", buf);
+
+    // ---- 1: 数组/空容器/布尔/null/负数/大数
+    let p1: str = "{\"a\":[true,false,null,0,-5,123456789],\"b\":{\"c\":{},\"d\":[]}}";
+    let r1: u32 = json_parse(str_ptr(p1), str_len(p1), arena);
+    say("P1 root_kind ");
+    let _b: u64 = wdec(json_nkind(arena, r1));
+    say("\n");
+    obs(str_ptr(p1), arena, get1(str_ptr(p1), arena, r1, "a"), "a", buf);
+    let arr: u32 = get1(str_ptr(p1), arena, r1, "a");
+    let i: u32 = 0;
+    while i < 6 {
+        say("  ");
+        let _l: u64 = label_idx("a", i);
+        say(" ");
+        let n: u32 = elem(arena, arr, i);
+        if n == FAIL {
+            say("0 -\n");
+        } else {
+            let _d: u64 = wdec(json_nkind(arena, n));
+            say(" ");
+            node_text(str_ptr(p1), arena, n, buf);
+            say("\n");
+        }
+        i = i + 1;
+    }
+    obs(str_ptr(p1), arena, get2(str_ptr(p1), arena, r1, "b", "c"), "b.c", buf);
+    obs(str_ptr(p1), arena, get2(str_ptr(p1), arena, r1, "b", "d"), "b.d", buf);
+
+    // ---- 2: \uXXXX (BMP) 与代理对 (emoji)
+    let p2: str = "{\"u\":\"\\u4e2d\\u6587 \\ud83d\\ude00 x\"}";
+    let r2: u32 = json_parse(str_ptr(p2), str_len(p2), arena);
+    say("P2 root_kind ");
+    let _c: u64 = wdec(json_nkind(arena, r2));
+    say("\n");
+    obs(str_ptr(p2), arena, get1(str_ptr(p2), arena, r2, "u"), "u", buf);
+
+    // ---- 3: 各种转义
+    let p3: str = "{\"k\":\"line1\\nline2\\ttab\\\\slash\\\"q\"}";
+    let r3: u32 = json_parse(str_ptr(p3), str_len(p3), arena);
+    say("P3 root_kind ");
+    let _d2: u64 = wdec(json_nkind(arena, r3));
+    say("\n");
+    obs(str_ptr(p3), arena, get1(str_ptr(p3), arena, r3, "k"), "k", buf);
+
+    // ---- 4: 两层嵌套
+    let p4: str = "{\"nested\":{\"deep\":{\"leaf\":\"v\"}}}";
+    let r4: u32 = json_parse(str_ptr(p4), str_len(p4), arena);
+    say("P4 root_kind ");
+    let _e: u64 = wdec(json_nkind(arena, r4));
+    say("\n");
+    obs(str_ptr(p4), arena, get1(str_ptr(p4), arena, r4, "nested"), "nested", buf);
+    obs(str_ptr(p4), arena, get2(str_ptr(p4), arena, r4, "nested", "deep"), "nested.deep", buf);
+    obs(str_ptr(p4), arena, get3(str_ptr(p4), arena, r4, "nested", "deep", "leaf"),
+        "nested.deep.leaf", buf);
+
+    // ---- 5: 值里含 "method" 字面量: 解析器不能被它骗到
+    let p5: str = "{\"method\":\"x\",\"params\":{\"text\":\"\\\"method\\\": \\\"fake\\\"\"}}";
+    let r5: u32 = json_parse(str_ptr(p5), str_len(p5), arena);
+    say("P5 root_kind ");
+    let _f: u64 = wdec(json_nkind(arena, r5));
+    say("\n");
+    obs(str_ptr(p5), arena, get1(str_ptr(p5), arena, r5, "method"), "method", buf);
+    obs(str_ptr(p5), arena, get2(str_ptr(p5), arena, r5, "params", "text"), "params.text", buf);
+
+    // ---- 生成侧: 与 json.dumps(ensure_ascii=False) 对齐
+    let o: u32 = 0;
+    o = json_emit_lit(out, o, "{\"jsonrpc\": \"2.0\", \"id\": ");
+    o = json_emit_u32(out, o, 7);
+    o = json_emit_lit(out, o, ", \"result\": {\"ok\": true, \"n\": ");
+    o = json_emit_u32(out, o, 42);
+    o = json_emit_lit(out, o, ", \"s\": ");
+    let raw: str = "a\"b\n中\tz";
+    o = json_emit_str(out, o, str_ptr(raw), str_len(raw));
+    o = json_emit_lit(out, o, ", \"arr\": [1, 2]}}");
+    say("EMIT ");
+    let _w2: u64 = put_bytes(out, o);
+    say("\n");
+    return die(0);
+}
