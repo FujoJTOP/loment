@@ -259,8 +259,9 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | 优先 | 判据 | 形态 | 状态 |
 |---|---|---|---|
 | **1** | `loment_eol` | 工具型 | ✅ **已搬**（2026-09-18）：`loment/tools/lomeol.lomt` + `tools/loment_eol_test.py`，判据 3/3 |
-| 2 | `loment_editors_test` 第 1 条（vim 语法表 vs TextMate 不漂移） | 检查型 | 待做（**先要把检查抽成程序** —— 那一步会让 Python 多一个文件）|
-| 3 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节）|
+| **2** | `loment_syscalls` | 工具型 | ✅ **已搬**（2026-09-18）：`lomsyscalls.lomt` + `loment_syscalls_test.py`，判据 3/3（`--check` 与 `--emit PATH` 两趟）|
+| 3 | `loment_editors_test` 第 1 条（vim 语法表 vs TextMate 不漂移） | 检查型 | 待做（**先要把检查抽成程序** —— 那一步会让 Python 多一个文件）|
+| 4 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
 #### 第 1 格踩到的两处（后面 43 格都会再撞，先写下来）
@@ -276,6 +277,15 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 3. 另外两处小的：`const` 只收整数字面量（命令串不能做 `const`，得内联）；
    语言只有 `load8`/`store8`，32 位读写要自己拼（`ld32`/`st32`）。
    两者陷阱清单里都写着，我各踩了一次 —— **写之前先读 §6 那一节**。
+
+#### 第 2 格（`loment_syscalls`）踩到的一处
+
+**别绕开自己的 `open_ro` 助手去直接 openat 字面量指针。** 驱动里 `argv_at` 是先
+`open_ro(str_ptr("/proc/self/cmdline"), str_len(...), scr)` —— 它把路径**拷进 scratch 补
+NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0)`，结果 openat
+失败、`argc = 0`，两条配对判据一起红，而**报出来的话是"需要 --emit 或 --check"** ——
+指的完全不是真正的原因（这正是本仓反复讲的"错要指在错的地方"，我自己造了一次）。
+**照抄同行的调用姿势比自己拼参数便宜。**
 
 **记账**：每落一格 → 判据绿 → 提交（手写与机械分开）→ 回本表划掉一行。
 **没划完之前，"仓库里只有 Loment"这句话不成立**（README 的 Status 已经这么写着）。

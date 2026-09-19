@@ -1,0 +1,524 @@
+// loment/tools/lomsyscalls.lomt — Loment 版 FUAI 系统调用层生成器 (docs/149 / docs/189 S1 第二格)
+//
+// 判据 (tools/loment_syscalls_test.py): 同一份仓库、同一个 cwd, 本程序 (链成 ELF 后跑) 与
+// `tools/loment_syscalls.py` 的 stdout / stderr / 退出码**逐字节相同**, 且 `--emit` 写出的
+// 文件字节也相同。
+//
+// 覆盖 `--check` 与 `--emit PATH` 两趟。**argparse 的用法文本没有复刻**（一条英文用法块，
+// 逐字复刻没有意义）—— 带别的参数时本程序**明说**没搬，不静默当成 `--check` 跑。
+//
+// 与 Python 版的对应（逐句抄，含怪癖）：
+//   * 头部那两句是**字面量**，包括"46 个" —— Python 那边也是写死的，照抄（不一样就红了）；
+//   * 每个原语一段 `pub fn fuai_<名>(...) { return syscall6(<十进制>, ...); }`，段间空一行；
+//   * 结尾 `.rstrip() + "\n"` —— 最后那个空行被吃掉；
+//   * **只在 `enum Opcode` 块里收原语**：`lom/fuai.lom` 里还有 `params` 段，同样是
+//     "两空格 + 名字 = 数字" 的形状，不划范围就会把参数当原语收进来；
+//   * 内核覆盖率：在 `kernel/src/syscall.rs` 里找 `0x<4 位十六进制>` + 空白* + `=>`，
+//     **不分大小写**（Python 那侧是 `re.I`）。
+//
+// 入口是 `fn _start()` 不是 `main`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误、
+// 一个字都不输出；见 docs/189 §3）。
+
+module lomsyscalls
+
+// ---------------------------------------------------------------- 内存布局
+const M_ARGV: u32 = 0;             // 8192（/proc/self/cmdline）
+const M_FUAI: u32 = 8192;          // 512 KiB: lom/fuai.lom
+const M_OUT: u32 = 532480;         // 512 KiB: 生成的文本
+const M_CUR: u32 = 1056768;        // 256 KiB: 已提交的产物（--check 用）
+const M_SYS: u32 = 1318912;        // 512 KiB: kernel/src/syscall.rs
+const M_NAME: u32 = 1843200;       // 每原语 (名字在 out 里的起点, 长度) 两个 u32
+const M_VAL: u32 = 1847296;        // 每原语一个 u32 值；末尾一格放"数到了几个"
+const M_SCR: u32 = 1847808;        // 路径 NUL 暂存 (4096)
+const ARENA: u64 = 1852000;
+
+const FUAI_CAP: u32 = 524288;
+const OUT_CAP: u32 = 524288;
+const CUR_CAP: u32 = 262144;
+const SYS_CAP: u32 = 524288;
+const MAXOP: u32 = 64;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn wdec(fd: u64, v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(fd, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(buf, 16 - n), n as u64);
+}
+
+/// 小写四位十六进制（Python 那侧是 `f"{code:04x}"`）。
+fn whex4(fd: u64, v: u32) -> u64 {
+    let buf: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < 4 {
+        let d: u32 = (v >> ((3 - i) * 4)) % 16;
+        if d < 10 {
+            store8(buf, i, (48 + d) as u8);
+        } else {
+            store8(buf, i, (87 + d) as u8);
+        }
+        i = i + 1;
+    }
+    return write_all(fd, buf, 4);
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+/// 写打开 (建/清空): O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644 = 420 —— 必须走 syscall6。
+fn open_wo(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall6(257, (0 as u64) - 100, scr as u64, 577, 420, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 读一个仓库相对路径的文件。**打开失败返回 `MISSING`**（不是 0 —— 空文件与"没有"
+/// 在 Python 那边是两回事：一个进"不一致"，一个进"缺失"）。
+fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return 4294967295;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    return got as u32;
+}
+
+// ---------------------------------------------------------------- 字节小工具
+
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn find8(p: ptr, i: u32, e: u32, b: u32) -> u32 {
+    let k: u32 = i;
+    while k < e && load8(p, k) != b {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+fn hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return 10 + c - 97;
+    }
+    if c >= 65 && c <= 70 {
+        return 10 + c - 65;
+    }
+    return 99;
+}
+
+/// `[A-Za-z0-9_]`。
+fn is_word(c: u32) -> u32 {
+    if is_digit(c) == 1 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 生成
+
+fn put(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn put_span(out: ptr, o: u32, p: ptr, s: u32, e: u32) -> u32 {
+    let i: u32 = s;
+    while i < e {
+        store8(out, o + (i - s), load8(p, i) as u8);
+        i = i + 1;
+    }
+    return o + (e - s);
+}
+
+/// 无符号十进制（Python 那侧 `f"{code}"` 是十进制，不是十六进制）。
+fn put_dec(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 0 {
+        store8(out, o, 48 as u8);
+        return o + 1;
+    }
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(tmp, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, load8(tmp, 16 - n + i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+/// 生成整个文本，返回长度；原语数写进 `vals[MAXOP]`。
+/// 名字记在 `names`（每原语两个 u32：在 out 里的起点与长度），值记在 `vals`。
+fn emit(out: ptr, fuai: ptr, flen: u32, names: ptr, vals: ptr) -> u32 {
+    let o: u32 = 0;
+    o = put(out, o, "// 由 tools/loment_syscalls.py 从 lom/fuai.lom 生成 —— 请勿手改。\n");
+    o = put(out, o, "// 46 个 FUAI 原语的 Loment 包装: syscall6(opcode, a0, a1, a2, a3, a4)。\n");
+    o = put(out, o, "\nmodule fuai_syscalls\n");
+    let cnt: u32 = 0;
+    let in_blk: u32 = 0;
+    let i: u32 = 0;
+    while i < flen {
+        let e: u32 = find8(fuai, i, flen, 10);
+        if in_blk == 0 {
+            // 进块：行首 `enum Opcode`
+            if streq(ptr_add(fuai, i), 11, "enum Opcode") == 1 {
+                in_blk = 1;
+            }
+        } else {
+            // 出块：行首（第 0 列）就是 `}`
+            if load8(fuai, i) == 125 {
+                in_blk = 0;
+            } else if load8(fuai, i) == 32 && i + 2 < e && load8(fuai, i + 1) == 32
+                    && is_word(load8(fuai, i + 2)) == 1 {
+                let a: u32 = i + 2;
+                let b: u32 = a;
+                while b < e && is_word(load8(fuai, b)) == 1 {
+                    b = b + 1;
+                }
+                let k: u32 = b;
+                while k < e && is_space(load8(fuai, k)) == 1 {
+                    k = k + 1;
+                }
+                if k < e && load8(fuai, k) == 61 {
+                    k = k + 1;
+                    while k < e && is_space(load8(fuai, k)) == 1 {
+                        k = k + 1;
+                    }
+                    let d0: u32 = k;
+                    let val: u32 = 0;
+                    while k < e && is_digit(load8(fuai, k)) == 1 {
+                        val = val * 10 + (load8(fuai, k) - 48);
+                        k = k + 1;
+                    }
+                    if k > d0 && cnt < MAXOP {
+                        o = put(out, o, "\npub fn fuai_");
+                        let nstart: u32 = o;
+                        o = put_span(out, o, fuai, a, b);
+                        let _s1: u32 = st32(names, cnt * 8, nstart);
+                        let _s2: u32 = st32(names, cnt * 8 + 4, b - a);
+                        let _s3: u32 = st32(vals, cnt * 4, val);
+                        o = put(out, o, "(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {\n    return syscall6(");
+                        o = put_dec(out, o, val);
+                        o = put(out, o, ", a0, a1, a2, a3, a4);\n}\n");
+                        cnt = cnt + 1;
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    let _s4: u32 = st32(vals, MAXOP * 4, cnt);
+    return o;
+}
+
+/// `src[0..n]` 里有 `0x<4 位十六进制 v>` + 空白* + `=>` 吗（与 Python 的 `re.I` 同义）。
+fn kernel_has(src: ptr, n: u32, v: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i + 6 < n {
+        if load8(src, i) == 48 && load8(src, i + 1) == 120 {
+            let a: u32 = hexval(load8(src, i + 2));
+            let b: u32 = hexval(load8(src, i + 3));
+            let c: u32 = hexval(load8(src, i + 4));
+            let d: u32 = hexval(load8(src, i + 5));
+            if a < 16 && b < 16 && c < 16 && d < 16 {
+                if (((a * 16 + b) * 16 + c) * 16 + d) == v {
+                    let k: u32 = i + 6;
+                    while k < n && is_space(load8(src, k)) == 1 {
+                        k = k + 1;
+                    }
+                    if k + 1 < n && load8(src, k) == 61 && load8(src, k + 1) == 62 {
+                        return 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let fv: u64 = sys_alloc(FUAI_CAP as u64);
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let cv: u64 = sys_alloc(CUR_CAP as u64);
+    let sv: u64 = sys_alloc(SYS_CAP as u64);
+    let nv: u64 = sys_alloc((MAXOP * 8) as u64);
+    let vv: u64 = sys_alloc((MAXOP * 4 + 16) as u64);
+    let scv: u64 = sys_alloc(8192);
+    if fv == 0 || ov == 0 || cv == 0 || sv == 0 || nv == 0 || vv == 0 || scv == 0 {
+        return die(2);
+    }
+    let fuai: ptr = fv as ptr;
+    let out: ptr = ov as ptr;
+    let cur: ptr = cv as ptr;
+    let sysrc: ptr = sv as ptr;
+    let names: ptr = nv as ptr;
+    let vals: ptr = vv as ptr;
+    let scr: ptr = scv as ptr;
+
+    let flen: u32 = slurp(str_ptr("lom/fuai.lom"), str_len("lom/fuai.lom"), fuai, FUAI_CAP, scr);
+    if flen > FUAI_CAP {
+        return die(2);
+    }
+    let olen: u32 = emit(out, fuai, flen, names, vals);
+    // Python 那侧 `"\n".join(out).rstrip() + "\n"`
+    let k: u32 = olen;
+    while k > 0 && is_space(load8(out, k - 1)) == 1 {
+        k = k - 1;
+    }
+    store8(out, k, 10 as u8);
+    let want_len: u32 = k + 1;
+    let cnt: u32 = ld32(vals, MAXOP * 4);
+
+    // ---- 参数（argv 来自 /proc/self/cmdline；一块缓冲读一次就够，它到进程结束都活着）
+    let av: u64 = sys_alloc(8192);
+    if av == 0 {
+        return die(2);
+    }
+    let ab: ptr = av as ptr;
+    let a1o: u32 = 0;
+    let a1n: u32 = 0;
+    let a2o: u32 = 0;
+    let a2n: u32 = 0;
+    let argc: u32 = 0;
+    // 路径先拷进 scr 补 NUL  再 openat —— 与驱动里 `argv_at` 同一个写法（别直接传字面量指针）。
+    let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
+    if afd >= 0 {
+        let an: u64 = read_all(afd as u64, ab, 8192);
+        let _c0: i64 = syscall4(3, afd as u64, 0, 0);
+        let i: u32 = 0;
+        let start: u32 = 0;
+        while i < (an as u32) {
+            if load8(ab, i) == 0 {
+                if argc == 1 {
+                    a1o = start;
+                    a1n = i - start;
+                }
+                if argc == 2 {
+                    a2o = start;
+                    a2n = i - start;
+                }
+                argc = argc + 1;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+    }
+    if argc < 2 {
+        say("[ERR] 需要 --emit 或 --check\n");
+        return die(2);
+    }
+    let is_check: u32 = streq(ptr_add(ab, a1o), a1n, "--check");
+    let is_emit: u32 = streq(ptr_add(ab, a1o), a1n, "--emit");
+
+    if is_emit == 1 {
+        if a2n == 0 {
+            say("[ERR] 需要 --emit 或 --check\n");
+            return die(2);
+        }
+        let fd: i64 = open_wo(ptr_add(ab, a2o), a2n, scr);
+        if fd < 0 {
+            say("[ERR] 打不开输出路径\n");
+            return die(2);
+        }
+        let _w: u64 = write_all(fd as u64, out, want_len as u64);
+        let _c2: i64 = syscall4(3, fd as u64, 0, 0);
+        say("[OK] ");
+        let _p: u64 = write_all(1, ptr_add(ab, a2o), a2n as u64);
+        say(" (");
+        let _d1: u64 = wdec(1, cnt);
+        say(" 个包装函数)\n");
+        return die(0);
+    }
+    if is_check == 0 {
+        say("[ERR] 这一版只搬了 --check 与 --emit PATH\n");
+        return die(2);
+    }
+
+    // ---- --check
+    let clen: u32 = slurp(str_ptr("loment/build/fuai_syscalls.lomt"),
+                           str_len("loment/build/fuai_syscalls.lomt"), cur, CUR_CAP, scr);
+    if clen > CUR_CAP {
+        say("[ERR] loment/build/fuai_syscalls.lomt 缺失 (运行 --emit)\n");
+        return die(1);
+    }
+    let same: u32 = 1;
+    if clen != want_len {
+        same = 0;
+    } else {
+        let i: u32 = 0;
+        while i < want_len {
+            if load8(cur, i) != load8(out, i) {
+                same = 0;
+            }
+            i = i + 1;
+        }
+    }
+    if same == 0 {
+        say("[ERR] loment/build/fuai_syscalls.lomt 与 lom/fuai.lom 不一致\n");
+        return die(1);
+    }
+    let slen: u32 = slurp(str_ptr("kernel/src/syscall.rs"), str_len("kernel/src/syscall.rs"),
+                          sysrc, SYS_CAP, scr);
+    let miss: u32 = 0;
+    let j: u32 = 0;
+    while j < cnt {
+        let val: u32 = ld32(vals, j * 4);
+        if kernel_has(sysrc, slen, val) == 0 {
+            miss = miss + 1;
+            say("  [NOTE] ");
+            let no: u32 = ld32(names, j * 8);
+            let nl: u32 = ld32(names, j * 8 + 4);
+            let _n1: u64 = write_all(1, ptr_add(out, no), nl as u64);
+            say(" (0x");
+            let _h: u64 = whex4(1, val);
+            say(") 未在 kernel/src/syscall.rs 找到 (host-ext?)\n");
+        }
+        j = j + 1;
+    }
+    say("[OK] fuai_syscalls.lomt 一致 (");
+    let _d2: u64 = wdec(1, cnt);
+    say(" 个原语); 内核 dispatch 覆盖 ");
+    let _d3: u64 = wdec(1, cnt - miss);
+    say("/");
+    let _d4: u64 = wdec(1, cnt);
+    say("\n");
+    return die(0);
+}
