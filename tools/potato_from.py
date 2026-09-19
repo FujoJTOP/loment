@@ -189,7 +189,9 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             if close < 0:
                 rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
                 continue
-            ent["body"] = src[m.start():close + 1].strip()
+            raw = src[m.start():close + 1]
+            ent["body"] = raw.strip()
+            ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)
@@ -247,7 +249,7 @@ def _block_end(text: str, open_idx: int) -> int:
     return -1
 
 
-def _class_members(body: str) -> list[tuple[str, str]]:
+def _class_members(body: str) -> list[tuple[str, str, int]]:
     """类体里**顶层**的成员声明 (跳过方法体、内部类那些嵌套块)。
 
     **"类体"这个形状 Java 与 C# 是一样的** —— `class X { 字段; 方法() {} }` ——
@@ -256,11 +258,15 @@ def _class_members(body: str) -> list[tuple[str, str]]:
     做法是走一遍花括号配平: 深度 0 上遇到 `;` 或遇到一个完整的 `{...}` 就收一个成员。
     不这么做的话, 方法体里的局部变量会被当成字段 —— 那是**静默把声明抽错**。
 
-    返回 `(归一化文本, 原文)`。**原文那一份是给 `functions[i].body` 用的**
-    （`docs/188` §3）—— 归一化把空白压掉了, 拿它当源喂给前端会丢格式；
-    更要紧的是 `potato_from` 里那份 `body` 是**剥过注释**的, 直接当源用也失真。
+    返回 `(归一化文本, 原文, 原文在入参里的起始下标)`。**原文那一份是给
+    `functions[i].body` 用的**（`docs/188` §3）—— 归一化把空白压掉了, 拿它当源喂给
+    前端会丢格式；更要紧的是 `potato_from` 里那份 `body` 是**剥过注释**的, 直接当源用
+    也失真。**下标那一个**是给 `functions[i].body_line` 用的（见 `_body_at`）：正文的
+    行号只能从"它在原文里从哪开始"倒推，而成员是**顺序切**出来的（一个成员的原文
+    恰好是 `body[起始下标:下一个成员的起始下标]`），所以记下起点就够了。
     """
-    out, cur, depth, start = [], [], 0, None
+    out: list[tuple[str, int]] = []
+    cur, depth, start, begin = [], 0, None, 0
     i = 0
     while i < len(body):
         c = body[i]
@@ -272,16 +278,16 @@ def _class_members(body: str) -> list[tuple[str, str]]:
             depth -= 1
             if depth == 0 and start is not None:
                 cur.append(body[start:i + 1])
-                out.append("".join(cur))
-                cur, start = [], None
+                out.append(("".join(cur), begin))
+                cur, start, begin = [], None, i + 1
         elif c == ";" and depth == 0:
             cur.append(c)
-            out.append("".join(cur))
-            cur = []
+            out.append(("".join(cur), begin))
+            cur, begin = [], i + 1
         elif depth == 0:
             cur.append(c)
         i += 1
-    return [(" ".join(m.split()), m) for m in out]
+    return [(" ".join(m.split()), m, off) for m, off in out]
 
 
 def _lang_type(t: str, mode: str, known: set[str], types: dict) -> str | None:
@@ -339,7 +345,12 @@ def _from_class_lang(src: str, name: str, mode: str,
     """
     rep = Report(name, lang.grammar, mode)
     doc = _blank(_ident(Path(name).stem), lang.grammar)
-    body = _C_COMMENT.sub(" ", _STR_LIT.sub('""', src))
+    # **抹注释要保长度**（`_blank_keep_off`，与 `from_c` / `from_go` 同一个手法）：
+    # 方法正文的**行号**要拿剥离后的下标回原文里数（`functions[i].body_line`），
+    # 而一段多行注释被 `sub(" ", …)` 压成一个空格时行号会**整体上移** ——
+    # 报出来的行号就又指到别处了，正是这条修复本身要消灭的那种错。
+    # （`_STR_LIT` 那一层改的是行**内**的长度，不动换行，所以行号不受它影响。）
+    body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub('""', src))
     known: set[str] = set()
     # ---- Java 的 `enum Name { A, B, C }` —— **不是 class**, 所以上面那圈抓不到它。
     # 原先 Java 的枚举**静默消失** (与 C 那边同一个口子)。
@@ -388,7 +399,7 @@ def _from_class_lang(src: str, name: str, mode: str,
             continue
         inner = body[open_idx + 1:end]
         fields, consts, methods = [], [], []
-        for mem, mem_raw in _class_members(inner):
+        for mem, mem_raw, mem_off in _class_members(inner):
             mc = lang.const.match(mem)
             if mc:
                 consts.append((mc.group(1), mc.group(2), int(mc.group(3))))
@@ -399,7 +410,8 @@ def _from_class_lang(src: str, name: str, mode: str,
             # 与外部实现对接的方法**(2026-09-17 实测: Java 的 j_native 一直抽不出来)。
             mm = lang.method.match(mem)
             if mm and "(" in mem and IDENT_RE.match(mm.group(2)):
-                methods.append((mm.group(1), mm.group(2), mm.group(3), mem_raw))
+                methods.append((mm.group(1), mm.group(2), mm.group(3), mem_raw,
+                                mem_off))
                 continue
             if mem.rstrip().endswith(";"):
                 mf = lang.field.match(mem)
@@ -430,7 +442,7 @@ def _from_class_lang(src: str, name: str, mode: str,
         else:
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
-        for rty, mname, params, mem_raw in methods:
+        for rty, mname, params, mem_raw, mem_off in methods:
             if mname == cname:
                 rep.skip("fn", mname, "构造器")
                 continue
@@ -466,6 +478,10 @@ def _from_class_lang(src: str, name: str, mode: str,
             ent: dict = {"name": mname, "params": ps, "ret": rt}
             if mem_raw.strip():
                 ent["body"] = mem_raw.strip()
+                # `mem_off` 是**在 `inner` 里**的下标，`inner` 从 `body` 的
+                # `open_idx + 1` 开始；而 `body` 是等长抹出来的 ⇒ 它的下标就是
+                # 原文的下标（见上面那句"抹注释要保长度"）。
+                ent["body_line"] = _body_at(src, open_idx + 1 + mem_off, mem_raw)
             doc["functions"].append(ent)
             rep.ok += 1
     return _finish(doc, rep)
@@ -951,6 +967,9 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             seg = ast.get_source_segment(src, node)
             if seg:
                 ent["body"] = seg
+                # `get_source_segment` 是从节点的**起始位置**切的（`def` 那一行的
+                # `col_offset` 处），所以这一段正文的首行就是 `node.lineno`。
+                ent["body_line"] = node.lineno
             doc["functions"].append(ent)
             rep.ok += 1
         # 模块级常量两种写法都收。**`isupper()` 是"这是不是常量"的判据**, 放在这里
@@ -1019,6 +1038,25 @@ def _blank_keep_off(m: "re.Match[str]") -> str:
     多行注释压成一个空格 —— 长度与行号**双双失真**，那样切出来的"正文"是别处的字节。
     """
     return "".join("\n" if ch == "\n" else " " for ch in m.group())
+
+
+def _body_line(src: str, off: int) -> int:
+    """`src` 里下标 `off` 落在第几行（1 起）。**这是 `functions[i].body_line`**
+    （见 `_body_at`）。
+
+    只在"**下标 == 原文下标**"时才准 —— 所以取正文那几处的 `src` 都是**等长**抹出来的
+    （`_blank_keep_off`）。抹长度一变，这里算出来的行号就指到别处去了，而那正是要治的病。
+    """
+    return src.count("\n", 0, off) + 1
+
+
+def _body_at(src: str, start: int, raw: str) -> int:
+    """一段正文（`raw`，取自 `src[start:]` 的一个切片）**去空白后**的首行。
+
+    正文存的是 `raw.strip()` —— 领头那些空白**不在这段正文里**，所以行号要往前
+    挪过它们（多行注释被抹成空行时，这一截里可能真的夹着换行）。
+    """
+    return _body_line(src, start + (len(raw) - len(raw.lstrip())))
 
 
 #: **C++ 的类型表**。与 C 那张**只差 `char` 那一格**（其余同名同义，所以从 C 复制）：
@@ -1154,7 +1192,9 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
             if close < 0:
                 rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
                 continue
-            ent["body"] = src[m.start():close + 1].strip()
+            raw = src[m.start():close + 1]
+            ent["body"] = raw.strip()
+            ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
     return _finish(doc, rep)

@@ -87,6 +87,69 @@ def _ffi_ok(t: object) -> bool:
     return isinstance(t, str) and t in _FFI_SCALARS
 
 
+#: **一门一张表** —— 加一门只加一行，别在 `emit_lomt` 里长成一条 if 链。
+#: 每项: 模块名 · 它的 "子集外" 异常类 · 工具路径 · 给用户的子集提示。
+#: 放在模块级（不是 `emit_lomt` 里）是为了让判据也能读到它 —— 判据要拿同一张表去调
+#: 那一门的翻译器（`loment_multisyntax_test`），表抄第二遍必然漂。
+_TOOLS = {
+    "c": ("ctrans", "Unsupported CError", "tools/ctrans.py",
+          "只收整数标量、if/while/for、四则与位运算"),
+    "python": ("pytrans", "Unsupported PyError", "tools/pytrans.py",
+               "只收整数标量、if/while/for、四则与位运算；参数与返回都要写类型注解"),
+    "java": ("jtrans", "Unsupported CError", "tools/jtrans.py",
+             "只收整数标量、if/while/for、四则与位运算；`class` 外壳会被抹掉"),
+    "csharp": ("cstrans", "Unsupported CError", "tools/cstrans.py",
+               "只收整数标量、if/while/for、四则与位运算；"
+               "`using` / `namespace` / `class` 三层外壳都会被抹掉"),
+    "cpp": ("cpptrans", "Unsupported CError", "tools/cpptrans.py",
+            "只收整数标量与 `bool`、if/while/for、四则与位运算；"
+            "预处理指令、`std::` 与成员访问都不收"),
+    "go": ("gotrans", "Unsupported GoError", "tools/gotrans.py",
+           "只收整数标量与 `bool`、`if`/`for`、四则与位运算；"
+           "`string` / 切片 / map / 指针 / 多返回值都不收"),
+}
+
+
+def _join_bodies(bodies: dict[str, str], at: dict[str, int]) -> str:
+    """把各函数正文拼成**一份源**，让每一段都落在它**在原文里的那一行**。
+
+    **为什么不能直接 `"\\n".join`**：翻译器报的 `第 N 行` 数的是**它拿到的那串文本**的
+    行号。裸拼的话 N 是"按函数体"算的 —— 十几个函数拼起来之后与文件完全对不上，
+    用户在源码里按那个行号**找不到东西**（`docs/179` §6.5：错要指在错的地方）。
+
+    **做法是垫空行**（`at` 就是 `functions[i].body_line`），与 `trans_core.strip_shells`
+    抹外壳用的是同一条纪律 —— 那一处是"换成**等长**空白"，这里没有"抹掉"可言，
+    所以是"补上**缺的那些换行**"。两条都是**让行号与原文一致**，而不是让报错改写行号：
+    诊断那一侧（`trans_core` 里几十处 `第 {…} 行`）一行都不用动。
+
+    **正文本身一字不动**：`body` 是 `potato_from` 按原文切下来的，`test_body_is_byte_faithful`
+    钉着它逐字节保真；垫空行只发生在这份**拼出来的**源里。而翻译器的产物是走语法树的
+    （`Emitter` 从 AST 出行），空行不进产物 —— 所以 `--impl` 发出来的 `.lomt` **一个字节都不变**。
+
+    没带 `body_line` 的对象（手写的、或 v≤6 的旧对象）退回**裸拼**：宁可还是老样子，
+    也不能凭空编一个位置出来。
+    """
+    parts: list[str] = []
+    cur = 1                                   # 下一个字符会落在第几行
+    for n, b in bodies.items():
+        want = at.get(n)
+        if want is None:
+            if parts:
+                parts.append("\n")
+                cur += 1
+        elif want > cur:
+            parts.append("\n" * (want - cur))
+            cur = want
+        else:
+            # 位置撞了/倒回去了（写坏的对象）。**至少隔开一行** —— 两段正文并到同一行
+            # 会让它们粘成一个语法上不成立的东西，那比行号不准更坏。
+            parts.append("\n")
+            cur += 1
+        parts.append(b)
+        cur += b.count("\n")
+    return "".join(parts)
+
+
 def _sig_params(fn: dict) -> str:
     out = []
     for p in fn.get("params") or []:
@@ -215,6 +278,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
         names: set[str] = set()
         #: 有正文的那批（`--impl` 要翻的）。键是名字，值是原文。
         bodies: dict[str, str] = {}
+        #: 各正文**在原文里的起始行**（`functions[i].body_line`，可选）。拼源时按它垫空行，
+        #: 于是翻译器报的行号就是源里的行号 —— 见 `_join_bodies`。
+        body_at: dict[str, int] = {}
         for f in fns:
             n = f.get("name")
             if not _is_ident(n):
@@ -234,6 +300,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 # **有正文时 ABI 那道闸门让开**：它不是"声明一条外部函数"，而是
                 # **定义**这个函数 —— 实现就在这儿（由 `ctrans` / `pytrans` 翻出来）。
                 bodies[n] = bd
+                ln = f.get("body_line")
+                if isinstance(ln, int) and not isinstance(ln, bool) and ln >= 1:
+                    body_at[n] = ln
                 continue
             abi = f.get("abi")
             # **`abi` 缺席 = 这是个 Loment 函数**（`docs/188` §3）。
@@ -271,25 +340,7 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             lang = doc.get("grammar") or "loment"
             if lang == "loment" and doc.get("language") in ("c", "python", "java", "go", "rust"):
                 lang = doc["language"]      # 旧对象（v≤5）还是按 language 记的
-            # **一门一张表** —— 加一门只加一行，别在这里长成一条 if 链。
-            # 每项: 模块名 · 它的 "子集外" 异常类 · 工具路径 · 给用户的子集提示。
-            _TOOLS = {
-                "c": ("ctrans", "Unsupported CError", "tools/ctrans.py",
-                      "只收整数标量、if/while/for、四则与位运算"),
-                "python": ("pytrans", "Unsupported PyError", "tools/pytrans.py",
-                           "只收整数标量、if/while/for、四则与位运算；参数与返回都要写类型注解"),
-                "java": ("jtrans", "Unsupported CError", "tools/jtrans.py",
-                         "只收整数标量、if/while/for、四则与位运算；`class` 外壳会被抹掉"),
-                "csharp": ("cstrans", "Unsupported CError", "tools/cstrans.py",
-                           "只收整数标量、if/while/for、四则与位运算；"
-                           "`using` / `namespace` / `class` 三层外壳都会被抹掉"),
-                "cpp": ("cpptrans", "Unsupported CError", "tools/cpptrans.py",
-                        "只收整数标量与 `bool`、if/while/for、四则与位运算；"
-                        "预处理指令、`std::` 与成员访问都不收"),
-                "go": ("gotrans", "Unsupported GoError", "tools/gotrans.py",
-                       "只收整数标量与 `bool`、`if`/`for`、四则与位运算；"
-                       "`string` / 切片 / map / 指针 / 多返回值都不收"),
-            }
+            # **一门一张表**（模块级的 `_TOOLS`）—— 加一门只加一行，别在这里长成 if 链。
             if lang not in _TOOLS:
                 raise NotRepresentable(
                     f"这份对象的 grammar 是 {lang!r} —— 带正文的函数还没有这一门的翻译器"
@@ -314,7 +365,9 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                                 for c in (doc.get("consts") or [])
                                 if _is_ident(c.get("name"))}
             try:
-                text = mod.translate("\n".join(bodies[n] for n in bodies),
+                # **拼出来的源的行号 == 原文的行号**（见 `_join_bodies`）—— 翻译器
+                # 报的 `第 N 行` 因此直接就是用户能在源码里找到的那一行。
+                text = mod.translate(_join_bodies(bodies, body_at),
                                      keep=set(bodies), **kw)
             except errs as e:  # type: ignore[misc]
                 # **翻不过去就说清有多少个、以及是什么毛病** —— 只说"子集外"的话，

@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import json
 import shutil
@@ -914,6 +915,113 @@ def test_multisyntax_corpus_projects_all_check():
 for _spec in SYNTAXES:
     for _name, _fn in _mk(_spec):
         TESTS.append((_name, _fn))
+
+
+#: 报行号那条用的夹具：六门各一份，**前面还有一段正文**，失败的那一处落在后面 ——
+#: 拼接的偏移只有这样才看得出来（单函数、第一段正文从第 1 行起时，"函数体内的行号"
+#: 常常正好等于"文件里的行号"，那种夹具即使病灶还在也照样绿）。
+#: 后两份是缺陷报告里那个**最小复现**（`~` 在第 3 行）与它的多行注释变体，
+#: 照抄下来让文档里那两句话机器可验。
+_LINE_MARK = "nope"
+_LINE_CASES = [
+    ("c", "x.c",
+     "int a(int x) { return x + 1; }\n\nint b(int v) {\n    return nope(v);\n}\n"),
+    ("cpp", "x.cpp",
+     "int a(int x) { return x + 1; }\n\nint b(int v) {\n    return nope(v);\n}\n"),
+    ("java", "T.java",
+     "public class T {\n    public static int a(int x) { return x + 1; }\n\n"
+     "    public static int b(int v) {\n        return nope(v);\n    }\n}\n"),
+    ("csharp", "T.cs",
+     "public class T {\n    public static int a(int x) { return x + 1; }\n\n"
+     "    public static int b(int v) {\n        return nope(v);\n    }\n}\n"),
+    ("python", "x.py",
+     "def a(x: int) -> int:\n    return x + 1\n\ndef b(v: int) -> int:\n    return nope(v)\n"),
+    ("go", "x.go",
+     "package main\n\nfunc a(x int) int {\n    return x + 1\n}\n\n"
+     "func b(v int) int {\n    return nope(v)\n}\n"),
+    ("java", "Tilde.java",
+     "public class T {\n    public static int f(int v) {\n        return ~v;\n    }\n}\n"),
+    # 类壳那一族（Java/C#）的正文**要按剥离后的下标回原文里数行号**，所以剥注释
+    # 必须**保长度**：`sub(" ", …)` 会把一段多行注释压成一个空格，于是后面所有行
+    # **整体上移** —— 报出来的行号指到别处（这一门原先正是这么写的）。
+    # 共用引擎同一条路，所以只留 Java 这一份。
+    ("java", "Comment.java",
+     "public class C {\n    /* 一段\n       跨行注释 */\n\n"
+     "    public static int f(int v) {\n        return ~v;\n    }\n}\n"),
+]
+
+
+@test
+def test_subset_error_line_is_the_file_line():
+    """子集外的写法报的行号必须是**文件里的行号**，不是"函数体内"的行号。
+
+    走前门编译一份别的写法时，`lomt_from.emit_lomt` 把各函数正文拼成**一份源**再交给
+    翻译器，而 `trans_core` 那几十处 `第 {n} 行` 数的是**它拿到的那串文本**的行号。
+    原先裸拼（`"\\n".join`）—— 同一个文件里十几个函数，拼起来与文件完全对不上，
+    用户在源码里按那个行号**找不到东西**（`docs/179` §6.5：错要指在错的地方）。
+    实测：`~` 在文件第 3 行，报出来是"第 2 行"。
+
+    **两个入口各验一次**（`docs/182` §1.9：一条判据盖不住多个入口）：
+
+      * **前门**（`potato_from.front_door`）—— 偏移就是在拼接那一步丢的，这里是**主**症状；
+      * **`translate()`** —— 直接拿**整份源**翻的那条路。它本来就对，这一条钉住它
+        **保持**对：修前门时最省事的错法（改成"一个函数翻一次再拼"）正是从这一处漏出去。
+
+    期望的行号**从源里推**（那一处标记落在第几行），不写死一个数 —— 写死的话
+    夹具一改就成了"两边都错成一样"，那正是这条缺陷原先能躺着的原因。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for lang, fname, src in _LINE_CASES:
+            mark = "~" if "~" in src else _LINE_MARK
+            want = next(i + 1 for i, ln in enumerate(src.splitlines()) if mark in ln)
+            # 夹具自证**能分辨两种读法**：函数体内的行号与文件里的行号必须不同，
+            # 否则这条判据测的是一个"两种读法都对"的输入（等于没测）。
+            doc, _ = potato_from.LANGS[lang](src, fname, "strict")
+            fn = next(f for f in doc["functions"] if mark in (f.get("body") or ""))
+            rel = want - fn["body_line"] + 1
+            assert rel != want, (f"[{lang}] 夹具分辨不出两种读法（rel==want=={want}）")
+            # 入口 2：`translate()` 拿整份源
+            mod = importlib.import_module(lomt_from._TOOLS[lang][0])
+            errs = tuple(getattr(mod, e) for e in lomt_from._TOOLS[lang][1].split())
+            try:
+                mod.translate(src)
+            except errs as e:            # type: ignore[misc]
+                assert f"第 {want} 行" in str(e), (
+                    f"[{lang}/translate] 期望第 {want} 行（体内的说法是第 {rel} 行）: {e}")
+            else:
+                raise AssertionError(f"[{lang}] 子集外的写法一个字都没报")
+            # 入口 1：**前门**（potato_from -> lomt_from --impl）
+            p = td / fname
+            p.write_text(src, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                assert f"第 {want} 行" in str(e), (
+                    f"[{lang}/前门] 期望第 {want} 行（体内的说法是第 {rel} 行）: {e}")
+            else:
+                raise AssertionError(f"[{lang}] 前门把子集外的写法放过去了")
+    print(f"      {len(_LINE_CASES)} 份源：前门与 translate() 报的都是文件里的行号")
+
+
+@test
+def test_body_line_does_not_leak_into_the_emitted_unit():
+    """`body_line` 是**给诊断用的**定位信息，**不进产物**。
+
+    `--impl` 发出来的 `.lomt` 是给别人看、也给别人编的源码。垫空行如果漏进产物，
+    它就不只是"多几个空行"：`docs/176` 那类逐字节比对会当场红，而且同一份源
+    在不同的函数顺序下会出不同的字节。这一条钉住"产物只由**语义**决定"。
+    """
+    src = (ROOT / "loment" / "jtrans" / "Bits.java").read_text(encoding="utf-8")
+    doc, _ = potato_from.from_java(src, "Bits.java", "strict")
+    assert all(f.get("body_line") for f in doc["functions"]), "夹具没带上 body_line"
+    with_line, _ = lomt_from.emit_lomt(doc, impl=True)
+    # 把定位信息摘掉：产物**一个字节都不该变**（拼接那一步只影响报错里的行号）
+    stripped = {**doc, "functions": [{k: v for k, v in f.items() if k != "body_line"}
+                                     for f in doc["functions"]]}
+    without, _ = lomt_from.emit_lomt(stripped, impl=True)
+    assert with_line == without, "body_line 漏进产物了"
+    print("      --impl 的单元与 body_line 无关（垫空行只影响报错里的行号）")
 
 
 def main(argv: list[str] | None = None) -> int:

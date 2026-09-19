@@ -325,6 +325,16 @@ def validate(doc: object) -> list[str]:
             bd = f.get("body")
             if bd is not None and (not isinstance(bd, str) or not bd.strip()):
                 errs.append(f"{w}.body 必须是非空字符串 (可选, 给了就是这段函数的原文)")
+            # `body_line` 是**可选**字段 (`docs/186` §3)：`body` 那段原文在**源文件**里的
+            # 起始行。与 `abi`/`body` 同一条先例 —— 省略合法（不认识它的消费者忽略它就是
+            # 对的，它们本来也不报行号）。给了就必须是个 >=1 的整数，**且必须与 `body`
+            # 配对**：一个"指不到任何正文的位置"不表示任何东西，留着只会让人以为有正文。
+            ln = f.get("body_line")
+            if ln is not None:
+                if not isinstance(ln, int) or isinstance(ln, bool) or ln < 1:
+                    errs.append(f"{w}.body_line 必须是 >=1 的整数 (可选, 与 body 配对): {ln!r}")
+                elif bd is None:
+                    errs.append(f"{w}.body_line 给了却没有 body —— 它指的是那段正文的位置")
     elif funcs is not None:
         errs.append("functions 必须是数组")
 
