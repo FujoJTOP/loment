@@ -116,6 +116,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 调试器 (docs/190): 无头 DAP 往返 —— 断点命中源行、单步按行走、落不上的要说
                  "loment_dap_test",
                  "fuai_contract_check", "loment_eol", "loment_dist_test",
+                 # S1 第一格 (docs/189 §3): `lomeol.lomt` 与 `loment_eol.py` 逐字节相同
+                 "loment_eol_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",

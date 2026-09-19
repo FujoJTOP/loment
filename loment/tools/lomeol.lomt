@@ -1,0 +1,333 @@
+// loment/tools/lomeol.lomt — Loment 版行尾门禁 (docs/161 / docs/189 S1 第一格)
+//
+// 判据 (tools/loment_eol_test.py): 对**同一个仓库**, 本程序 (链成 ELF 后跑, cwd = 仓库根)
+// 与 `tools/loment_eol.py` 的 stdout / stderr / 退出码**逐字节相同**。
+//
+// 搬的是**无参数那一趟**(门禁模式): 0 = 一致 / 1 = 有 CRLF / 2 = 无法判定。
+// **`--fix` 没有搬** —— 那一路要写盘, 而这一格的契约是"只读 + 打印"; 判据也只比无参那一趟。
+// 带参数调用会**明说**没搬(不静默当成无参跑 —— "静默"正是本仓反复要消灭的东西)。
+//
+// 报告文本**逐字复刻** Python 版, 连它那句 `python tools/loment_eol.py --fix` 也照抄 ——
+// 那是给用户的修法指引, 在参考实现拆掉(S2)之前两边必须一样, 所以**不在这里改口径**。
+//
+// git 的退出码: `proc_sh` 不看子进程退出码 (`loment/lib/proc.lomt` 头注写明),
+// 所以命令行尾巴上挂一句 `echo -n "rc=$?"` 把它带回来 —— 与 Python 版那个
+// `if rc != 0: return None`(→ SKIP, 退 2)是同一条判据。
+
+module lomeol
+
+use proc
+
+// ---------------------------------------------------------------- 内存布局
+// 偏移全是手算的字面量 (L1 的 const 只收整数字面量, 不能是表达式 —— 与 lomstatus 同)。
+// 缓冲从 brk 要, 不用语言自带的 64 KiB bump 堆 (git 的输出可能上 MiB)。
+
+const M_ARGV: u32 = 0;             // 8192
+const M_GIT: u32 = 8192;           // 2 MiB: `git ls-files --eol -z` 的原始字节
+const M_BAD: u32 = 2105344;        // 命中路径表 (MAXBAD × 8 字节: 起点, 长度)
+const ARENA: u64 = 2140000;
+
+const GIT_CAP: u32 = 2097152;
+const MAXBAD: u32 = 4096;
+const SHOWN: u32 = 10;
+const TOKMAX: u32 = 16;            // 每行的空格分隔段上限 (实测头部只有 3–5 段)
+
+//: Python 版里 `_git(...)` 那一条, 尾巴上挂 `rc=$?` 把退出码带回来。
+//: **不是 `const`** —— L1 的 `const` 初值只收整数字面量（陷阱清单第 11 条）。
+
+// ---------------------------------------------------------------- 内核
+
+/// 向内核抬 program break 拿 n 字节; 返回块首 (0 = 失败)。
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+/// 退出; 返回值只为类型完整。
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+/// write 可以短写, 循环写干净。
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+/// 写一个 str 到 fd 1 (长度交给 str_len —— 手数字节数会把 NUL 一起写出去)。
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+/// 一个 u32 的十进制, 写出去 (报告里的件数与 `[CRLF]` 的计数要用)。
+fn wdec(fd: u64, v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(fd, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(buf, 16 - n), n as u64);
+}
+
+// ---------------------------------------------------------------- 字节小工具
+
+/// `p[0..n]` 与字面量 `s` 相等吗 (含长度) —— 与自举 driver 的 `streq` 同一件事。
+/// `str_eq` 收的是两个 str, 这里要拿**缓冲区里的一段**去比, 所以自己写。
+fn streq(p: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 在 `p[s..e]` 里找子串 `needle` 吗 (Python 的 `needle in text`)。
+fn has(p: ptr, s: u32, e: u32, needle: str) -> u32 {
+    let m: u32 = str_len(needle);
+    if m == 0 {
+        return 0;
+    }
+    if e - s < m {
+        return 0;
+    }
+    let i: u32 = s;
+    while i + m <= e {
+        if streq(ptr_add(p, i), m, needle) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 从 `p` 的 `i` 起找下一个字节 `b` (到 `e` 为止); 找不到返回 `e`。
+fn find8(p: ptr, i: u32, e: u32, b: u32) -> u32 {
+    let k: u32 = i;
+    while k < e && load8(p, k) != b {
+        k = k + 1;
+    }
+    return k;
+}
+
+/// 32 位小端读写。**语言只有 `load8`/`store8`**（内建表里没有 32 位的），自举侧
+/// 那些 `load32` 也是各自拼的 —— 所以这里自己来，不引 `bytes` 进来。
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 主流程
+
+/// `/proc/self/cmdline` 里的 NUL 个数 = 参数个数。> 1 = 带了参数 (这一版没搬)。
+fn argc_gt1() -> u32 {
+    let fd: i64 = syscall6(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0, 0, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let buf: ptr = alloc(4096);
+    let n: i64 = syscall4(0, fd as u64, buf as u64, 4096);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let nul: u32 = 0;
+    let i: u32 = 0;
+    while i < (n as u32) {
+        if load8(buf, i) == 0 {
+            nul = nul + 1;
+        }
+        i = i + 1;
+    }
+    return nul;
+}
+
+/// 入口。**freestanding ELF 的入口是 `_start`**（不是 `main`）—— 写成 `main` 的话
+/// lld 找不到入口、把入口留成 0，程序一跑就段错误、一个字都不输出（踩过）。
+fn _start() -> u32 {
+    if argc_gt1() > 1 {
+        say("lomeol: 这一版只搬了无参那一趟 (门禁模式)。\n");
+        say("  `--fix` 还没搬 —— 那一路要写盘, 见 docs/189 §3 的 S1 表。\n");
+        return die(2);
+    }
+    let gv: u64 = sys_alloc(GIT_CAP as u64);
+    if gv == 0 {
+        return die(2);
+    }
+    let bv: u64 = sys_alloc((MAXBAD * 8) as u64);
+    if bv == 0 {
+        return die(2);
+    }
+    let g: ptr = gv as ptr;
+    let bad: ptr = bv as ptr;
+
+    let n: i64 = proc_sh("git ls-files --eol --cached --others --exclude-standard -z; echo -n \"rc=$?\"", g, GIT_CAP);
+    if n < 0 {
+        // 起不来 = 与 Python 版"不在 git 工作树"同一档 (退 2)。
+        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        return die(2);
+    }
+    let total: u32 = n as u32;
+
+    // 尾巴上的 `rc=N`: 从末尾往回找 '=' (61)。找不到 = 不可能, 但按 SKIP 报, 不硬猜。
+    let k: u32 = total;
+    while k > 0 && load8(g, k - 1) != 61 {
+        k = k - 1;
+    }
+    if k == 0 {
+        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        return die(2);
+    }
+    let rc: u32 = 0;
+    let j: u32 = k;
+    while j < total && load8(g, j) >= 48 && load8(g, j) <= 57 {
+        rc = rc * 10 + (load8(g, j) - 48);
+        j = j + 1;
+    }
+    if rc != 0 {
+        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        return die(2);
+    }
+
+    // 记录区 = 最后一个 NUL 之前 (空输出时就是空的)。
+    let last: u32 = 0;
+    let i2: u32 = 0;
+    while i2 < total {
+        if load8(g, i2) == 0 {
+            last = i2;
+        }
+        i2 = i2 + 1;
+    }
+
+    // 逐条记录: `<头部>\t<路径>\0`。头部空格分段: [0]=索引态 [1]=工作区态 [2..]=属性。
+    let cnt: u32 = 0;
+    let s: u32 = 0;
+    let tok: [u32; 32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    while s < last {
+        let e: u32 = find8(g, s, last, 0);
+        if e > s {
+            let t: u32 = find8(g, s, e, 9);          // 第一处 TAB 切头/路径
+            let p0: u32 = t + 1;
+            let pl: u32 = 0;
+            if e > p0 {
+                pl = e - p0;
+            }
+            if t < e {
+                // 头部按空格分段
+                let nt: u32 = 0;
+                let c: u32 = s;
+                while c < t && nt < TOKMAX {
+                    while c < t && load8(g, c) == 32 {
+                        c = c + 1;
+                    }
+                    let a: u32 = c;
+                    while c < t && load8(g, c) != 32 {
+                        c = c + 1;
+                    }
+                    if c > a {
+                        tok[nt * 2] = a;
+                        tok[nt * 2 + 1] = c - a;
+                        nt = nt + 1;
+                    }
+                }
+                if nt >= 2 {
+                    let woff: u32 = tok[2];
+                    let wlen: u32 = tok[3];
+                    let is_crlf: u32 = 0;
+                    if streq(ptr_add(g, woff), wlen, "w/crlf") == 1 {
+                        is_crlf = 1;
+                    }
+                    if streq(ptr_add(g, woff), wlen, "w/mixed") == 1 {
+                        is_crlf = 1;
+                    }
+                    // 属性段 = 第 3 段起 (到头部末尾那一整段就够了 —— 找子串与空格无关)
+                    let a0: u32 = t;
+                    if nt >= 3 {
+                        a0 = tok[4];
+                    }
+                    if is_crlf == 1 && has(g, a0, t, "eol=lf") == 1 {
+                        if cnt < MAXBAD {
+                            let _s1: u32 = st32(bad, cnt * 8, p0);
+                            let _s2: u32 = st32(bad, cnt * 8 + 4, pl);
+                            cnt = cnt + 1;
+                        }
+                    }
+                }
+            }
+        }
+        s = e + 1;
+    }
+
+    if cnt == 0 {
+        say("loment_eol: 行尾一致 (eol=lf 声明的已跟踪文件全部 LF)\n");
+        return die(0);
+    }
+    let show: u32 = cnt;
+    if show > SHOWN {
+        show = SHOWN;
+    }
+    let r: u32 = 0;
+    while r < show {
+        say("[CRLF] ");
+        let po: u32 = ld32(bad, r * 8);
+        let pn: u32 = ld32(bad, r * 8 + 4);
+        write_all(1, ptr_add(g, po), pn as u64);
+        say("\n");
+        r = r + 1;
+    }
+    say("loment_eol: ");
+    let _d1: u64 = wdec(1, cnt);
+    say(" 件工作区不是 LF");
+    if cnt > SHOWN {
+        say("，另有 ");
+        let _d2: u64 = wdec(1, cnt - SHOWN);
+        say(" 件");
+    }
+    say("\n");
+    say("  这是**检出/包装**问题, 不是逻辑: 换行不进 git 的内容比较 (git diff 对纯 CRLF 改动可以给出空 diff), 也没有任何命令会去改写这些字节。\n");
+    say("  修: python tools/loment_eol.py --fix   (未跟踪的新文件按行尾直接归一)\n");
+    say("  等价手工 (已跟踪文件):\n");
+    say("    git rm --cached <文件> && git checkout HEAD -- <文件>\n");
+    say("    整目录: git rm -r --cached <目录> && git checkout HEAD -- <目录>\n");
+    say("  根因若在生成器: 写仓库内工件要用 newline='\\n' (见 lomfmt/lomdoc/loment_status)。\n");
+    return die(1);
+}
