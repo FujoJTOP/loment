@@ -23,9 +23,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC_PATH = os.path.join(ROOT, "ui", "fui_spec.json")
 
 # L0 单源: .fuc 布局来自 lom/fuc.lom (docs/141) — 生成物 lom/build/fuc.py。
+# **生成物不在索引里**（`docs/189` §3.0 的 S3 决定）：缺了就现场生成一次，
+# 在就原样用 —— 所以这句的代价只付一次，而且只在真缺的时候付。
 import importlib.util as _ilu
 
-_fuc_spec = _ilu.spec_from_file_location("lom_fuc_gen", os.path.join(ROOT, "lom", "build", "fuc.py"))
+_fuc_py = os.path.join(ROOT, "lom", "build", "fuc.py")
+if not os.path.exists(_fuc_py):
+    import lomc
+    lomc.ensure_python(os.path.join(ROOT, "lom", "fuc.lom"), _fuc_py)
+
+_fuc_spec = _ilu.spec_from_file_location("lom_fuc_gen", _fuc_py)
 _fuc = _ilu.module_from_spec(_fuc_spec)
 _fuc_spec.loader.exec_module(_fuc)
 MAGIC = _fuc.MAGIC

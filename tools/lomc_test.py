@@ -161,7 +161,14 @@ def test_generated_fuc_consts_match_kernel():
 
 
 @test
-def test_check_detects_drift_and_missing():
+def test_check_detects_drift_and_tolerates_missing():
+    """`--check` 的两半：**漂移要检出**，而**产物不在**不算漂移。
+
+    这条原先钉的是旧不变式（"提交的副本 == 生成器此刻会生成的"），最后一句断言
+    **缺失 ⇒ 退 1**。`docs/189` §3.0 的 S3 决定把交付物**移出索引**之后，「文件不在」
+    是**仓库的默认状态**（新克隆就是这样）—— **对默认状态报错是错的**，所以那一句
+    的期望跟着变（改成 0）。不变式的新说法是：**生成是确定的 + 漂移检得出来**。
+    """
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "gen.rs"
         buf = io.StringIO()
@@ -171,7 +178,7 @@ def test_check_detects_drift_and_missing():
             out.write_text("// corrupted\n", encoding="utf-8")
             assert lomc.main([str(LOM_FUC), "--emit-rust", str(out), "--check"]) == 1
             out.unlink()
-            assert lomc.main([str(LOM_FUC), "--emit-rust", str(out), "--check"]) == 1
+            assert lomc.main([str(LOM_FUC), "--emit-rust", str(out), "--check"]) == 0
 
 
 @test
@@ -237,7 +244,10 @@ def test_fujr_byte_roundtrip():
     """用生成结构重打包既有 .run, 必须与原文件逐字节一致。"""
     import importlib.util as ilu
 
-    spec = ilu.spec_from_file_location("t_fujr", ROOT / "lom" / "build" / "fujr.py")
+    fujr_py = ROOT / "lom" / "build" / "fujr.py"
+    # S3 之后**产物不在索引里**（docs/189 §3.0）：缺了就现场生成一份再用。
+    lomc.ensure_python(ROOT / "lom" / "fujr.lom", fujr_py)
+    spec = ilu.spec_from_file_location("t_fujr", fujr_py)
     F = ilu.module_from_spec(spec)
     spec.loader.exec_module(F)
     src = ROOT / "sdk" / "build" / "m31_res.run"

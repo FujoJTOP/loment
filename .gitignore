@@ -103,3 +103,33 @@ ahci_events.txt
 # 会话交接件 (整段对话正文, 绝不进仓库)
 /.claude/HANDOFF.md
 /.claude/transcript-extract.txt
+
+# ---------------------------------------------------------------------------
+# `lomc` / `lomentc` 的**交付物** —— 不再提交, 按需生成 (docs/189 §3.0 的 S3 决定)。
+# 谁要谁生成: 运行时加载器走 `lomc.ensure_python`, 判据走 `--emit-*`, `lom_audit --emit` 一次补齐。
+# **逐条列名, 不用通配**: 同目录里还有**手写**的 .rs/.c (测试驱动 / 验证壳),
+# 通配会把它们一起忽略 —— 那是丢源码, 不是去产物。
+
+/lom/build/fuai.h
+/lom/build/fuai.py
+/lom/build/fuai.rs
+/lom/build/fuc.h
+/lom/build/fuc.py
+/lom/build/fuc.rs
+/lom/build/fujr.h
+/lom/build/fujr.py
+/lom/build/fujr.rs
+/loment/build/cap_asserts.rs
+/loment/build/demo.rs
+/loment/build/native.rs
+/loment/build/native_agg.rs
+/loment/build/native_bits.rs
+/loment/build/native_cap.rs
+/loment/build/native_gen.rs
+/loment/build/native_mem.rs
+/loment/build/native_mut.rs
+/loment/build/native_raii.rs
+/loment/build/native_res.rs
+/loment/build/native_slice.rs
+/loment/build/native_str.rs
+/loment/build/native_trait.rs

@@ -366,8 +366,10 @@ def test_m50_assert_table_matches_objects():
     for r in rs:
         assert r["a1"] and r["a2"] and r["a3"] and r["a4"], r
     dest = ROOT / "loment" / "build" / "cap_asserts.rs"
-    assert dest.exists(), "cap_asserts.rs 缺失"
-    assert dest.read_text(encoding="utf-8") == potato_assert.emit_rust(objs)
+    # S3 之后产物**不在索引里**（`docs/189` §3.0）：不在盘上是**默认状态**，不是缺陷 ——
+    # 要钉的是"盘上那份（如果有）与生成结果一致"，也就是**漂移检得出来**。
+    if dest.exists():
+        assert dest.read_text(encoding="utf-8") == potato_assert.emit_rust(objs)
 
 
 def main() -> int:

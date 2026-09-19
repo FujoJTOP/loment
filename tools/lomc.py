@@ -710,6 +710,33 @@ def load(path: Path) -> Module:
     return Parser(lex(text), text).parse()
 
 
+def ensure(lom_path, out_path, kind: str = "python") -> Path:
+    """**按需生成**一份交付物（`lom/<x>.lom` -> `lom/build/<x>.<ext>`）。
+
+    `docs/189` §3.0 的 S3 决定：交付物**不再提交进索引**，改成"谁要谁生成"。
+    用它的是两个**运行时加载器**（`tools/fuic.py` / `tools/fujopack.py`）和判据 ——
+    它们原先直接读那个**提交在仓里**的生成物，文件不在时（新克隆就是）当场崩。
+
+    **能省的只做一次**：文件在就原样返回（决定 (a) 那条代价）。生成器就是本模块；
+    S2 之后换成 `loment/tools/lomc.lomt`（同一件事的 Loment 实现）。
+    """
+    lom_path, out_path = Path(lom_path), Path(out_path)   # 调用方多半手上是 str
+    if out_path.exists():
+        return out_path
+    mod = load(lom_path)
+    errs = check(mod)
+    if errs:
+        raise LomError(0, 0, f"{lom_path}: {len(errs)} 项语义错误: {errs[0]}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(EMITTERS[kind](mod), encoding="utf-8", newline="\n")
+    return out_path
+
+
+def ensure_python(lom_path, out_path) -> Path:
+    """`ensure` 的 Python 那一档（两个运行时加载器用的）。"""
+    return ensure(lom_path, out_path, "python")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomc", description="L0 接口层编译器 (.lom)")
     ap.add_argument("file", help="输入的 .lom 文件")
@@ -758,7 +785,9 @@ def main(argv: list[str] | None = None) -> int:
         p = Path(dest)
         if args.check:
             if not p.exists():
-                diffs.append(f"{dest}: 缺失（应生成 {len(want)}B）")
+                # S3 之后**产物不在索引里**（`docs/189` §3.0）：「文件不在」是仓库的
+                # **默认状态**（新克隆就是这样），不是漂移 —— 所以只提示，不算差异。
+                print(f"[SKIP] {dest}: 未生成（按需生成；--emit-* 可补）")
             elif p.read_text(encoding="utf-8") != want:
                 got = p.read_text(encoding="utf-8")
                 diffs.append(f"{dest}: 与生成结果不一致（磁盘 {len(got)}B / 生成 {len(want)}B）")

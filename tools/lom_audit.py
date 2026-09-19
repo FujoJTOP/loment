@@ -121,9 +121,9 @@ def audit_fuai(diffs: list[str]) -> tuple[int, int]:
 
     want_spec = _lse.emit(mod)
     for t in _lse.TARGETS:
-        if not t.exists():
-            diffs.append(f"[fuai/gen  ] {t.name} 缺失")
-        elif t.read_text(encoding="utf-8") != want_spec:
+        if not _on_disk(t):
+            continue
+        if t.read_text(encoding="utf-8") != want_spec:
             diffs.append(f"[fuai/gen  ] {t.relative_to(ROOT)} 与 .lom 生成结果不一致 (重新生成)")
 
     # --- (b) .lom <-> syscall.rs dispatch
@@ -228,13 +228,24 @@ def generated_wants() -> list[tuple[Path, str]]:
     return out
 
 
+def _on_disk(path: Path) -> bool:
+    """S3（`docs/189` §3.0）之后**产物不在索引里**：「文件不在」是**仓库的默认状态**
+    （新克隆就是这样），**不是**缺陷 —— 审计里只剩"在盘上但与生成结果不一致"才算漂移。
+    `lom_audit --emit` 能把这些产物一次补齐。
+
+    这一句是**整片改动**的那个判断：以前"提交的副本 == 生成器此刻会生成的"，
+    现在"**生成是确定的** + **漂移检得出来**"。
+    """
+    return path.exists()
+
+
 def audit_generated(diffs: list[str]) -> int:
     """所有登记生成物必须与 .lom 生成结果逐字节一致。"""
     names = {path: lom.name for lom, _k, path in GENERATED}
     for path, want in generated_wants():
-        if not path.exists():
-            diffs.append(f"[gen        ] {path.relative_to(ROOT)} 缺失")
-        elif path.read_text(encoding="utf-8") != want:
+        if not _on_disk(path):
+            continue
+        if path.read_text(encoding="utf-8") != want:
             diffs.append(f"[gen        ] {path.relative_to(ROOT)} 与 {names[path]} 生成结果不一致")
     return len(GENERATED)
 
@@ -327,9 +338,9 @@ def syscalls_want() -> tuple[Path, str]:
 def audit_l1(diffs: list[str]) -> None:
     """L1 产物必须与 .lomt 转译结果一致 (docs/143)。"""
     for path, want in transpile_wants():
-        if not path.exists():
-            diffs.append(f"[l1         ] {path.relative_to(ROOT)} 缺失")
-        elif path.read_text(encoding="utf-8") != want:
+        if not _on_disk(path):
+            continue
+        if path.read_text(encoding="utf-8") != want:
             diffs.append(f"[l1         ] {path.relative_to(ROOT)} 与 .lomt 转译结果不一致")
 
     # M45/M46: 每个示例必须有一份通过独立校验器的形式对象 (缺失/过期 = 门禁失败)
@@ -348,16 +359,12 @@ def audit_l1(diffs: list[str]) -> None:
 
     # M50: A1–A4 断言表必须与形式对象一致
     cap, want_cap = cap_asserts_want()
-    if not cap.exists():
-        diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 缺失 (M50 断言绑定)")
-    elif cap.read_text(encoding="utf-8") != want_cap:
+    if _on_disk(cap) and cap.read_text(encoding="utf-8") != want_cap:
         diffs.append(f"[l1         ] {cap.relative_to(ROOT)} 与形式对象不一致 (M50)")
 
     # M72: 系统调用层必须由 lom/fuai.lom 单源生成
     syscalls, want_sys = syscalls_want()
-    if not syscalls.exists():
-        diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 缺失 (M72)")
-    elif syscalls.read_text(encoding="utf-8") != want_sys:
+    if _on_disk(syscalls) and syscalls.read_text(encoding="utf-8") != want_sys:
         diffs.append(f"[l1         ] {syscalls.relative_to(ROOT)} 与 lom/fuai.lom 不一致 (M72)")
 
     # M79/M80/M81/M82: 自举 lexer/parser/checker/codegen 的形式对象必须与源码一致

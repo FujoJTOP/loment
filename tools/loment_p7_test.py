@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomc  # noqa: E402
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -112,8 +113,10 @@ int main(void) {
         out = _run(_build_ir_c(EX / "fuc_node.lomt", drv, td, "fucnode"))
     n, hexs = out.split()
     assert n == "64"
+    # S3 之后**产物不在索引里**（`docs/189` §3.0）：缺了就现场生成一份再用。
+    lomc.ensure_python(ROOT / "lom" / "fuc.lom", ROOT / "lom" / "build" / "fuc.py")
     sys.path.insert(0, str(ROOT / "lom" / "build"))
-    import fuc  # 由 lomc 从 lom/fuc.lom 生成
+    import fuc  # 由 lomc 从 lom/fuc.lom 按需生成
     want = fuc.NODE_STRUCT.pack(7, 3, 0, 0, 100, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                 0, 0, 0, 0x11223344, 0, 0, 0, 0, 0, 0).hex()
     assert hexs == want, f"Loment {hexs[:32]}... != lom/fuc.lom {want[:32]}..."

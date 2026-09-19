@@ -19,12 +19,17 @@ import sys
 from _safepath import safe_open
 
 # L0 单源: FUJR 布局来自 lom/fujr.lom (docs/141) — 生成物 lom/build/fujr.py。
+# **生成物不在索引里**（`docs/189` §3.0 的 S3 决定）：缺了就现场生成一次，
+# 在就原样用 —— 所以这句的代价只付一次，而且只在真缺的时候付。
 import importlib.util as _ilu
 import os as _os
 
-_FUJR_GEN = _os.path.join(
-    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "lom", "build", "fujr.py"
-)
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_FUJR_GEN = _os.path.join(_ROOT, "lom", "build", "fujr.py")
+if not _os.path.exists(_FUJR_GEN):
+    import lomc
+    lomc.ensure_python(_os.path.join(_ROOT, "lom", "fujr.lom"), _FUJR_GEN)
+
 _spec = _ilu.spec_from_file_location("lom_fujr_gen", _FUJR_GEN)
 _fujr = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_fujr)

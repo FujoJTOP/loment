@@ -136,8 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.check:
         dest = ROOT / "loment" / "build" / "cap_asserts.rs"
         if not dest.exists():
-            print(f"[ERR] {dest.relative_to(ROOT)} 缺失 (运行 --emit-rust)", file=sys.stderr)
-            return 1
+            # S3 之后**产物不在索引里**（`docs/189` §3.0）：「文件不在」是仓库的
+            # **默认状态**，不是漂移 —— 提示一下，按需生成的路是 `--emit-rust`。
+            print(f"[SKIP] {dest.relative_to(ROOT)} 未生成 (按需生成: --emit-rust)")
+            return 1 if bad else 0
         if dest.read_text(encoding="utf-8") != want:
             print(f"[ERR] {dest.relative_to(ROOT)} 与形式对象不一致", file=sys.stderr)
             return 1

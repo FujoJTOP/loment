@@ -201,14 +201,31 @@ def test_loment_lomc_check_and_errors():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         elf = _build(td)
-        # 1) 与磁盘产物对账 (lom/build 里的 12 个文件, 仓库相对路径)
-        for f in LOMS:
-            stem = Path(f).stem
-            args = [f, "--check"]
-            for t in TARGETS:
-                args += [f"--emit-{t}", f"lom/build/{stem}.{EXT[t]}"]
-            _pair(elf, td, f"c_{stem}", args, args)
-        # 2) 漂移检出: 往一份副本里改一个字节
+        # 1) **生成是确定的**: 同一份 `.lom` 生成两遍 -> 逐字节相同。
+        #    这一档原先比的是"盘上那份**提交好的**副本 == 生成器此刻会生成的"；
+        #    交付物**移出索引**之后（`docs/189` §3.0）盘上不再有副本 —— 于是不变式
+        #    换成文档里写的那两半：**生成是确定的** + **漂移检得出来**（第 2 条）。
+        gen1 = ROOT / "loment" / "build" / "lomc_gen_tmp1"
+        gen2 = ROOT / "loment" / "build" / "lomc_gen_tmp2"
+        rel1, rel2 = (d.relative_to(ROOT).as_posix() for d in (gen1, gen2))
+        gen1.mkdir(parents=True, exist_ok=True)
+        gen2.mkdir(parents=True, exist_ok=True)
+        try:
+            for f in LOMS:
+                stem = Path(f).stem
+                for t in TARGETS:
+                    ext = EXT[t]
+                    for tag, rel in (("1", rel1), ("2", rel2)):
+                        args = [f, f"--emit-{t}", f"{rel}/{stem}.{ext}"]
+                        _pair(elf, td, f"g{tag}_{stem}_{t}", args, args)
+                    a = (gen1 / f"{stem}.{ext}").read_bytes()
+                    b = (gen2 / f"{stem}.{ext}").read_bytes()
+                    assert a == b, (f"`{f}` 的 {t} 产物两次生成不一致 "
+                                    f"({len(a)}B / {len(b)}B) —— 生成必须是确定的")
+        finally:
+            shutil.rmtree(gen1, ignore_errors=True)
+            shutil.rmtree(gen2, ignore_errors=True)
+        # 2) **漂移检得出来**: 先现场生成一份, 再改一个字节, `--check` 必须红
         bad_dir = ROOT / "loment" / "build" / "lomc_bad_tmp"
         bad_dir.mkdir(parents=True, exist_ok=True)
         relbad = bad_dir.relative_to(ROOT).as_posix()
@@ -216,19 +233,22 @@ def test_loment_lomc_check_and_errors():
             n = 0
             for f in LOMS:
                 stem = Path(f).stem
+                for t in TARGETS:
+                    dest = bad_dir / f"{stem}.{EXT[t]}"
+                    emit = [f, f"--emit-{t}", f"{relbad}/{stem}.{EXT[t]}"]
+                    _pair(elf, td, f"p_{stem}_{t}", emit, emit)   # 先把它生成出来
+                    data = dest.read_text(encoding="utf-8")
+                    if t == "json":
+                        data = data.replace("v0", "v1", 1)        # 改一个字节级差异
+                    else:
+                        data = data + "// drift\n"
+                    dest.write_text(data, encoding="utf-8", newline="\n")
                 args = [f, "--check"]
                 for t in TARGETS:
-                    dest = ROOT / relbad / f"{stem}.{EXT[t]}"
-                    data = (ROOT / "lom" / "build" / f"{stem}.{EXT[t]}").read_text(encoding="utf-8")
-                    if t == "json":
-                        data = data.replace("v0", "v1", 1)   # 改一个字节级差异
-                    else:
-                        data = data.replace("\n", "\n", 1) + "// drift\n"
-                    dest.write_text(data, encoding="utf-8", newline="\n")
                     args += [f"--emit-{t}", f"{relbad}/{stem}.{EXT[t]}"]
                 _pair(elf, td, f"d_{stem}", args, args)
                 n += 1
-            print(f"      {len(LOMS)} 个 .lom 的 --check 对账 + {n} 个漂移检出: 退出码/stdout 一致")
+            print(f"      {len(LOMS)} 个 .lom: 生成两遍逐字节相同 + {n} 份漂移都被检出")
         finally:
             shutil.rmtree(bad_dir, ignore_errors=True)
         # 3) 语义错误 (枚举值重复 + const 越界)
