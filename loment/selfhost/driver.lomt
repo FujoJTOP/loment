@@ -176,6 +176,9 @@ fn comefor_fail(re: u32, code: u32) -> u32 {
     if re == 5 { return fail("fujoc-s: byuse 只能写在顶层 (与 comefor 同层)\n"); }
     if re == 6 { return fail("fujoc-s: byuse 收的不是任何在用的方言\n"); }
     if re == 9 { return fail("fujoc-s: comefor 的宏体太大 (上限 300 token)\n"); }
+    if re == 10 {
+        return fail("fujoc-s: comefor 的体里暂时不支持 use —— 帮手 fn 写在体里面\n");
+    }
     return fail("fujoc-s: comefor 吞掉的 token 比剩下的还多\n");
 }
 

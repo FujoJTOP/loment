@@ -12,7 +12,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -290,6 +293,228 @@ def test_potato_v4_carries_dialects():
     assert doc2["dialects"] == [], doc2["dialects"]
     assert potato.validate(doc2) == [], potato.validate(doc2)
     print(f"      Potato v4: 方言进产物（{names[0]}, body {len(body)}B）; 无方言 -> []")
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十格）
+
+#: WSL 侧临时路径前缀 —— **每个进程一份**（WSL 的 /tmp 共用，固定名会让并发门禁互相跑错）。
+_T = f"/tmp/loment-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomcomefor.lomt"
+DRIVER = ROOT / "loment" / "selfhost" / "driver.lomt"
+
+#: 判据写出来、孪生按**相对字面路径**读的那些输入（文件名是两个实现的接口）。
+#: `deps/myhelper/` 是**给体里那句 `use` 制造一个能解析的目标** —— 早前用内建的
+#: `use bytes` 时，导入解析会先失败（临时目录里到不了内建根），于是真正要测的那条
+#: 守卫（体里不许 `use`）**根本轮不到**，报出来的是"名字导入找不到或有歧义"。
+_CASES = {
+    "shape_not_word.lomt": (
+        "module shape_not_word\n"
+        "fn byuse() -> u32 { return 7; }\n"
+        "fn to() -> u32 { return 1; }\n"
+        "fn done() -> u32 { return 2; }\n"
+        "fn comefor(a: u32) -> u32 { return a; }\n"
+        "fn main() -> u64 {\n"
+        "    let comefor: u32 = 3;\n"
+        "    return (byuse() + to() + done() + comefor(4) + comefor) as u64;\n"
+        "}\n"),
+    "bad_body_use.lomt": (
+        "module body_use\n"
+        "comefor let \"x\" to {\n"
+        "    use myhelper\n"
+        "    fn main() -> u64 { return 0; }\n"
+        "}\n"
+        "byuse \"x\" done\n"),
+    "bad_unknown_byuse.lomt": (
+        "module byuse_unknown\nfn main() -> u64 { return 0; }\nbyuse \"nope\" done\n"),
+    "bad_overconsume.lomt": (
+        "module overconsume\n"
+        "comefor let \"x\" to {\n    fn main() -> u64 { return 99; }\n}\n"
+        "x 1;\nbyuse \"x\" done\n"),
+    "bad_not_top.lomt": (
+        "module nested_def\n"
+        "fn helper() -> u64 {\n"
+        "    comefor let \"x\" to {\n        fn main() -> u64 { return 0; }\n    }\n"
+        "    return 1;\n}\n"
+        "byuse \"x\" done\n"),
+    "bad_entry_params.lomt": (
+        "module param_entry\n"
+        "comefor let \"x\" to {\n    fn main(n: u64) -> u64 { return n; }\n}\n"
+        "x 1 ;\nfn main() -> u64 { return 0; }\nbyuse \"x\" done\n"),
+}
+
+
+def _py_report() -> str:
+    """用 **Python 的 `loment_comefor`** 跑与孪生**同名的那 7 项**检查, 打同一份报告。
+
+    孪生只能走驱动的命令面（退出码 + 诊断），所以这一侧也按"看产物"的规则算。
+    **负例大多只判"被拒 + 有一句诊断"**（`use` / `byuse` / `顶层` 三条另收关键词）：
+    两侧的措辞本来就不同（参考: "`byuse 'nope'` 收的不是任何在用的方言" / 自举:
+    "byuse 收的不是任何在用的方言"）—— 把措辞变成判据是错的, 两个方向都错。
+    """
+    out: list[str] = []
+    ct = {"p": 0, "f": 0}
+
+    def rep(name: str, ok: bool, why: str) -> None:
+        if ok:
+            out.append(f"  PASS  {name}")
+            ct["p"] += 1
+        else:
+            out.append(f"  FAIL  {name}: {why}")
+            ct["f"] += 1
+
+    ok1 = False
+    try:
+        ok1 = _ir(CF / "def_dialect.lomt") == _ir(CF / "def_hand.lomt")
+    except Exception:  # noqa: BLE001
+        ok1 = False
+    rep("test_minimal_dialect_expands_to_handwritten", ok1,
+        "方言源与手写源的 IR 不同（或至少一份没编出来）")
+
+    ok2 = False
+    try:
+        m2, d2 = lomentc.load_unit(_WORK / "shape_not_word.lomt", ROOT)
+        ok2 = lomentc.check(m2, deps=d2) == []
+    except Exception:  # noqa: BLE001
+        ok2 = False
+    rep("test_comefor_is_shape_not_reserved_word", ok2, "四个词当标识符用就编不过")
+
+    def rejected(rel: str, kw: str) -> bool:
+        txt = (_WORK / rel).read_text(encoding="utf-8")
+        try:
+            loment_comefor.expand(lomc.lex(txt), txt)
+        except lomc.LomError as e:
+            return (kw in str(e)) if kw else True
+        except Exception:  # noqa: BLE001
+            return True          # 别的异常也算"被拒"（只是形状不同）
+        return False
+
+    rep("test_body_rejects_use", rejected("bad_body_use.lomt", "use"), "体里的 use 没被拒")
+    rep("test_byuse_unknown_name_is_rejected",
+        rejected("bad_unknown_byuse.lomt", "byuse"), "byuse 收错名字没被拒")
+    rep("test_overconsumption_is_rejected",
+        rejected("bad_overconsume.lomt", ""), "宏体多吃没被拒")
+    rep("test_definition_must_be_top_level",
+        rejected("bad_not_top.lomt", "顶层"), "块里的定义没被拒")
+    rep("test_entry_takes_no_params",
+        rejected("bad_entry_params.lomt", ""), "main 带形参没被拒")
+
+    out.append(f"lomcomefor: {ct['p']}/{ct['p'] + ct['f']} 通过")
+    return "\n".join(out) + "\n"
+
+
+def _clang() -> str | None:
+    import shutil
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    import shutil
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build(src: Path, td: Path, name: str) -> Path:
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{src.name} 自己检查不过: {errs[:2]}"
+    ll = td / f"{name}.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    elf = td / f"{name}.elf"
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return elf
+
+
+@test
+def test_comefor_check_matches_loment_twin():
+    """**Loment 版**（`lomcomefor.lomt` 驱自举驱动）与 Python 版**同名检查的报告逐字节相同**。
+
+    `docs/189` §3 的 S1 第十格。被测的是**另一件 Loment 程序**（自举侧的展开器），
+    所以这一格同时是"两个展开器在这些性质上给出同一个答案"的判据 —— 而它**当场抓到
+    两处真差距**（`byuse` 收错名字静默通过、体里的 `use` 没被拒），已在同一笔改动里
+    补上（`loment/selfhost/comefor.lomt` + `driver.lomt` 的新错码 10）。
+    """
+    global _WORK
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    import shutil
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        _WORK = td / "work"
+        _WORK.mkdir()
+        for f in ("def_dialect.lomt", "def_hand.lomt"):
+            shutil.copy(CF / f, _WORK / f)
+        for name, text in _CASES.items():
+            with (_WORK / name).open("w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        (_WORK / "deps" / "myhelper").mkdir(parents=True)
+        with (_WORK / "deps" / "myhelper" / "myhelper.lomt").open(
+                "w", encoding="utf-8", newline="\n") as f:
+            f.write("module myhelper\npub fn forty() -> u32 { return 40; }\n")
+        want = _py_report()
+        drv = _build(DRIVER, td, "comefor_driver")
+        chk = _build(TWIN, td, "lomcomefor")
+        shutil.copy(drv, _WORK / "driver")
+        (_WORK / "driver").chmod(0o755)
+        outp = td / "check.out"
+        binn = f"{_T}lomcomefor.bin"
+        script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(_WORK)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
+        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=300, shell=False)
+        got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
+    assert r.stdout.strip() == "0", f"孪生该退 0（7 项全过）: rc={r.stdout!r}\n{got[:300]}"
+    assert got == want, f"报告与 Python 版不同:\n  py     {want!r}\n  loment {got!r}"
+    n = len(got.strip().splitlines()) - 1
+    assert got.count("  PASS  ") == n == 7, (n, got[-120:])
+    assert "lomcomefor: 7/7 通过" in got, got[-120:]
+    print(f"      {n} 项检查: 与 Python 版逐字节相同（含刚补上的两处守卫）")
+
+
+@test
+def test_comefor_twin_selfhost_compiles():
+    """`lomcomefor.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_T}lomcomefor_s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomcomefor.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomcomefor.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomcomefor.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
 def main() -> int:

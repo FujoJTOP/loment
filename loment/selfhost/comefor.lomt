@@ -174,6 +174,20 @@ fn cf_comefor_at(unit: ptr, t: ptr, nt: u32, i: u32) -> bool {
             && (load8(unit, cf_f(t, i + 4, 4)) as u32) == 123;
 }
 
+/// `[lo, hi)` 里有没有一个**标识符** token 的文本等于 `w`（体里查 `use` 用）。
+/// `cf_is` 已经限定了 `kind == 0`（标识符）—— 所以字符串字面量里的 "use" 不算,
+/// 与参考侧的 `_is_ident` 同义。
+fn cf_has_ident(unit: ptr, t: ptr, lo: u32, hi: u32, w: str) -> u32 {
+    let i: u32 = lo;
+    while i < hi {
+        if cf_is(unit, t, i, w) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// `byuse "…" done` —— 三个 token 的形状。
 fn cf_byuse_at(unit: ptr, t: ptr, nt: u32, i: u32) -> bool {
     if i + 2 >= nt {
@@ -188,6 +202,13 @@ pub fn has_comefor(unit: ptr, t: ptr, nt: u32) -> u32 {
     let i: u32 = 0;
     while i + 4 < nt {
         if cf_comefor_at(unit, t, nt, i) {
+            return 1;
+        }
+        // **`byuse` 也算**（名字没改，语义是"这一份要不要过展开器"）。只看 `comefor`
+        // 的话，只有 `byuse` 的文件整趟展开都不跑 —— 于是"收一个没定义过的方言"那条
+        // 守卫**根本走不到**（参考侧是在展开里判的，`docs/184` §11）。实测:
+        // `byuse "nope" done` 在那之前**静默通过**（退出码 0），`lomc_test`/本格抓到的。
+        if cf_byuse_at(unit, t, nt, i) {
             return 1;
         }
         i = i + 1;
@@ -305,6 +326,14 @@ pub fn expand_comefor(unit: ptr, toks: ptr, nt: u32, out: ptr, outcap: u32,
                 let e: u32 = cf_block_end(unit, toks, i + 4, nt);
                 if e == nt {
                     return 3;           // 体没闭合
+                }
+                // **体里不许有 `use`**（`docs/184` §11）：体是一支自足的程序, 帮手写在
+                // 它里面; `use` 要的是**文件级**的依赖解析（相对路径 + 开关表）, 嵌在一段
+                // 体里没有显然的语义。参考侧在 `_body_module` 里拒（`tools/loment_comefor.py`）
+                // —— 自举侧原先**没有这一条**: 体里的 `use` 会一路走到后面, 报成"名字导入
+                // 找不到或有歧义"那种**指不到点子**的错（格 10 的判据抓到的）。
+                if cf_has_ident(unit, toks, i + 5, e, "use") == 1 {
+                    return 10;
                 }
                 if nd >= MAX_DIALECT {
                     return 4;           // 方言太多了

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import shutil
 import subprocess
@@ -241,15 +242,16 @@ def test_lomelf_reports_unsupported_instead_of_miscompiling():
 
 @test
 def test_lomelf_selfhost_reports_oversized_input():
-    """自举镜像: 输入超过 2 MiB 要**报错退出**, 不是截断成一个跑起来就崩的二进制 (docs/192)。
+    """自举镜像: 输入超过输入缓冲上限要**报错退出**, 不是截断成一个跑起来就崩的二进制 (docs/192)。
 
     与上面那条"不支持的要报错"同一个家族 —— **不是"能不能编", 是"编不出来时说不说"**。
 
-    自举镜像的输入缓冲是**固定 2 MiB**（`lomelf.lomt` 的 `IN_CAP`，布局算出来的：
-    `M_IN` 起、`M_TXT` 接，两者之差就是它），而 `read_all` **读满就返回**。不加守卫的话
-    超限的 `.ll` 被**悄悄截断** —— `.ll` 是逐行语法，截断点之后的函数定义凭空消失，
-    汇编出来的是一个缺胳膊少腿、跑起来就段错误的可执行文件。2026-09-18 实测：
-    同一份 `.ll`，这边段错误、clang 汇编完全正常。
+    自举镜像的输入缓冲是**固定大小**（`lomelf.lomt` 的 `IN_CAP`，布局算出来的：
+    `M_IN` 起、`M_TXT` 接，两者之差就是它 —— 所以**上限从源码里读**：2026-09-19 它从
+    2 MiB 抬到 4 MiB（`docs/192` §2），把旧数钉死的话这条会跟着红），而 `read_all`
+    **读满就返回**。不加守卫的话超限的 `.ll` 被**悄悄截断** —— `.ll` 是逐行语法，截断点
+    之后的函数定义凭空消失，汇编出来的是一个缺胳膊少腿、跑起来就段错误的可执行文件。
+    2026-09-18 实测：同一份 `.ll`，这边段错误、clang 汇编完全正常。
 
     **参考侧没有这个上限**（`lomelf.py` 整个读进来）—— 所以这条只钉自举镜像那一格。
     """
@@ -260,18 +262,22 @@ def test_lomelf_selfhost_reports_oversized_input():
     seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        # 仓库里最大的那一份 `.ll` + 注释填充撑过 2 MiB（注释不动语义, 本判据只看"拒不拒"）
+        m = re.search(r"const IN_CAP: u32 = (\d+);",
+                      (ROOT / "loment" / "tools" / "lomelf.lomt").read_text(encoding="utf-8"))
+        assert m, "在 lomelf.lomt 里找不到 `const IN_CAP: u32 = <数>;`"
+        cap = int(m.group(1))
+        # 仓库里最大的那一份 `.ll` + 注释填充撑过上限（注释不动语义, 本判据只看"拒不拒"）
         big = td / "big.ll"
         pad = "; " + "x" * 78 + "\n"
-        need = 2 * 1024 * 1024 - seed.stat().st_size
+        need = cap - seed.stat().st_size
         big.write_text(pad * (need // len(pad) + 2) + seed.read_text(encoding="utf-8"),
                        encoding="utf-8", newline="\n")
-        assert big.stat().st_size > 2 * 1024 * 1024, "填充没撑过 2 MiB (判据自己坏了)"
+        assert big.stat().st_size > cap, f"填充没撑过 {cap} (判据自己坏了)"
         rc, err = _mirror_run(mir, _wsl_path(big), "/tmp/lomelf_oversized.probe")
-        assert rc != 0, (f"{big.stat().st_size} B 的输入被接受了 (rc={rc}) —— "
+        assert rc != 0, (f"{big.stat().st_size} B 的输入被接受了 (rc={rc}, 上限 {cap}) —— "
                          f"截断是静默的, 产出的二进制跑起来才会崩")
-        assert "2 MiB" in err or "上限" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
-        print(f"      超限 {big.stat().st_size} B 的 .ll 被拒, 且指出了是 2 MiB 上限")
+        assert "上限" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
+        print(f"      超限 {big.stat().st_size} B 的 .ll 被拒（上限 {cap} B, 从源码读的）")
 
 
 @test

@@ -1,0 +1,275 @@
+// loment/tools/lomcomefor.lomt — Loment 版「comefor / byuse 展开」检查
+// (docs/189 §3 的 S1 第十格；判据在 tools/loment_comefor_test.py)
+//
+// 判据: 对**同一批准备好的输入**, 本程序（驱自举驱动 `./driver`）打印的报告, 与判据那一侧
+// 用 **Python 的 `loment_comefor`** 跑同名检查算出来的**逐字节相同**。
+//
+// 被测的是**另一件 Loment 程序**: `loment/selfhost/driver.lomt`（+ `comefor.lomt`）——
+// 参考实现在 `tools/loment_comefor.py`。所以这一格同时是"两个展开器在这些性质上给出
+// 同一个答案"的判据 —— 而它**当场抓到两处真差距**（见下）。
+//
+// ---------------------------------------------------------------- 与第 9 格同一套约束
+//
+// ① **命令只能是编译期字面量**（`proc_sh(cmd: str, …)`, 而语言没有 ptr -> str）。
+//    所以输入都在**相对字面路径**上: 判据把工作目录设成每次一份的临时目录。
+// ② **退出码自己带回来**: 尾巴挂 `r=$?; echo; echo -n "|rc=$r"`（`$?` 要紧挨着被量的那句,
+//    中间夹一句裸 `echo` 会把它冲成 0 —— 第 9 格踩过）。
+//
+// ---------------------------------------------------------------- 这一格抓到的两处差距
+//
+// `loment/selfhost/comefor.lomt`（自举侧）原先:
+//   1. **`byuse` 收一个没定义过的名字是静默通过的**（退出码 0）—— 因为 `has_comefor`
+//      只看 `comefor`, 只有 `byuse` 的文件整趟展开都不跑, 那条守卫根本走不到。
+//   2. **体里的 `use` 没被拒** —— 参考侧在 `_body_module` 里拒, 自举侧会一路走到后面,
+//      报成"名字导入找不到或有歧义"那种指不到点子的错。
+// 两处都在同一笔改动里补上了（`has_comefor` 也认 `byuse`; 体里查 `use` 返回新错码 10）。
+//
+// **没搬的两条**（写在头注里, 免得当成漏了）:
+//   * `no_comefor_is_identity`（展开器不改无 comefor 文件的 token 流）—— 那是**词法层**
+//     的判据（要 `use comefor` 的 token 级 API + 逐 token 比对）, 本格只走命令面;
+//   * `domain_is_the_builtin_table`（宏体里表外的名字调不到）—— 同上, 要 token 级。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`**）。
+
+module lomcomefor
+
+use bytes
+use proc
+
+const OUT_CAP: u32 = 262144;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+fn say_dec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+/// `hay[0..hn]` 里出现 `needle` 的偏移（没有给 `FAIL`）。
+fn find_sub(hay: ptr, hn: u32, needle: str) -> u32 {
+    let nl: u32 = str_len(needle);
+    if nl == 0 || hn < nl {
+        return FAIL;
+    }
+    let i: u32 = 0;
+    while i + nl <= hn {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nl {
+            if load8(hay, i + k) != str_byte(needle, k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+fn same_bytes(a: ptr, b: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 跑一条命令: `st[0]=rc`, `st[4]=载荷字节数`（`|rc=` 标记之前那一段, 去掉紧邻的换行）。
+fn run(cmd: str, out: ptr, st: ptr) -> u32 {
+    let n: i64 = proc_sh(cmd, out, OUT_CAP);
+    if n < 0 {
+        let _a: u32 = st32(st, 0, 999);
+        let _b: u32 = st32(st, 4, 0);
+        return 0;
+    }
+    let m: u32 = n as u32;
+    let pos: u32 = find_sub(out, m, "|rc=");
+    if pos == FAIL {
+        let _a: u32 = st32(st, 0, 998);
+        let _b: u32 = st32(st, 4, m);
+        return 0;
+    }
+    let rc: u32 = 0;
+    let i: u32 = pos + 4;
+    while i < m && load8(out, i) >= 48 && load8(out, i) <= 57 {
+        rc = rc * 10 + (load8(out, i) - 48);
+        i = i + 1;
+    }
+    let pe: u32 = pos;
+    let pe2: u32 = pe;
+    if pe2 > 0 && load8(out, pe2 - 1) == 10 {
+        pe2 = pe2 - 1;
+    }
+    let _c: u32 = st32(st, 0, rc);
+    let _d: u32 = st32(st, 4, pe2);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 报告
+
+fn rep(name: str, ok: u32, why: str, ct: ptr) {
+    if ok == 1 {
+        say("  PASS  ");
+        say(name);
+        say("\n");
+        let _a: u32 = st32(ct, 0, ld32(ct, 0) + 1);
+    } else {
+        say("  FAIL  ");
+        say(name);
+        say(": ");
+        say(why);
+        say("\n");
+        let _b: u32 = st32(ct, 4, ld32(ct, 4) + 1);
+    }
+}
+
+/// 被拒了吗（非零退出 **且** 有一句诊断）—— 两侧共同的**类别**判据。
+fn rejected(cmd: str, out: ptr, st: ptr, kw: str) -> u32 {
+    let _r: u32 = run(cmd, out, st);
+    if ld32(st, 0) == 0 {
+        return 0;
+    }
+    let n: u32 = ld32(st, 4);
+    if n == 0 {
+        return 0;
+    }
+    if str_len(kw) == 0 {
+        return 1;
+    }
+    if find_sub(out, n, kw) == FAIL {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let o1v: u64 = sys_alloc(OUT_CAP as u64);
+    let o2v: u64 = sys_alloc(OUT_CAP as u64);
+    let sv: u64 = sys_alloc(64);
+    let cv: u64 = sys_alloc(64);
+    if o1v == 0 || o2v == 0 || sv == 0 || cv == 0 {
+        return die(2);
+    }
+    let o1: ptr = o1v as ptr;
+    let o2: ptr = o2v as ptr;
+    let st: ptr = sv as ptr;
+    let ct: ptr = cv as ptr;
+
+    // ---- 1 核心: 方言源与手写源编出的 IR **逐字节相同**（docs/184 §9 的证伪判据）
+    let _a: u32 = run("./driver def_dialect.lomt; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
+    let rc1: u32 = ld32(st, 0);
+    let n1: u32 = ld32(st, 4);
+    let _b: u32 = run("./driver def_hand.lomt; r=$?; echo; echo -n \"|rc=$r\"", o2, st);
+    let rc2: u32 = ld32(st, 0);
+    let n2: u32 = ld32(st, 4);
+    let ok1: u32 = 0;
+    if rc1 == 0 && rc2 == 0 && n1 > 0 && n1 == n2 && same_bytes(o1, o2, n1) == 1 {
+        ok1 = 1;
+    }
+    rep("test_minimal_dialect_expands_to_handwritten", ok1,
+        "方言源与手写源的 IR 不同（或至少一份没编出来）", ct);
+
+    // ---- 2 `comefor`/`byuse`/`done`/`to` 都不是保留字: 当标识符用照样编得过
+    let _c: u32 = run("./driver shape_not_word.lomt; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
+    let ok2: u32 = 0;
+    if ld32(st, 0) == 0 && ld32(st, 4) > 0 {
+        ok2 = 1;
+    }
+    rep("test_comefor_is_shape_not_reserved_word", ok2, "四个词当标识符用就编不过", ct);
+
+    // ---- 3–7 负例: 五类错都要**被拒**
+    let ok3: u32 = rejected("./driver bad_body_use.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                             o1, st, "use");
+    rep("test_body_rejects_use", ok3, "体里的 use 没被拒", ct);
+    let ok4: u32 = rejected("./driver bad_unknown_byuse.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                             o1, st, "byuse");
+    rep("test_byuse_unknown_name_is_rejected", ok4, "byuse 收错名字没被拒", ct);
+    let ok5: u32 = rejected("./driver bad_overconsume.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                             o1, st, "");
+    rep("test_overconsumption_is_rejected", ok5, "宏体多吃没被拒", ct);
+    let ok6: u32 = rejected("./driver bad_not_top.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                             o1, st, "顶层");
+    rep("test_definition_must_be_top_level", ok6, "块里的定义没被拒", ct);
+    let ok7: u32 = rejected("./driver bad_entry_params.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+                             o1, st, "");
+    rep("test_entry_takes_no_params", ok7, "main 带形参没被拒", ct);
+
+    say("lomcomefor: ");
+    let _p: u64 = say_dec(ld32(ct, 0));
+    say("/");
+    let _q: u64 = say_dec(ld32(ct, 0) + ld32(ct, 4));
+    say(" 通过\n");
+    if ld32(ct, 4) > 0 {
+        return die(1);
+    }
+    return die(0);
+}

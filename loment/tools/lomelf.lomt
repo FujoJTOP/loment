@@ -41,17 +41,24 @@ const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝�
 
 // ---------------------------------------------------------------- 内存布局
 
+// ---- 2026-09-19: 输入缓冲从 2 MiB 抬到 4 MiB（`docs/192` 记的那条待办）
+//
+// 起因不是猜的: **自举种子自己长过了 2 MiB**（`loment/build/selfhost_driver.ll`,
+// 上一版余量只剩 1377 B —— 那次给 comefor 补两处守卫就顶出去了）。种子必须喂给 lomelf
+// （`bootstrap.sh` 的 1/4 步），所以这条上限就是**种子的上限**。抬法是把布局整体重排:
+// 输入 / 代码 / 输出三块各给 4 MiB（输入装得下种子, 代码与输出按同比例给, 免得
+// "输入收下了、产物却装不下"那种一半的失败）。表区与全局数据不动。
 const M_ARGV: u32 = 0;             // 8192
-const M_IN: u32 = 8192;            // 2 MiB 输入 .ll 文本
-const M_TXT: u32 = 2105344;        // 2 MiB 代码缓冲
-const M_OUT: u32 = 4202496;        // 2 MiB 输出 ELF
-const M_GB: u32 = 6291456;         // 1 MiB 全局数据
-const M_TAB: u32 = 7340032;        // 2 MiB 表区
-const M_OBJ: u32 = 9437184;        // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
-const ARENA: u64 = 13631488;
+const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本
+const M_TXT: u32 = 4202496;        // 4 MiB 代码缓冲
+const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
+const M_GB: u32 = 12591104;        // 1 MiB 全局数据
+const M_TAB: u32 = 13639680;       // 2 MiB 表区
+const M_OBJ: u32 = 15728640;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+const ARENA: u64 = 19922944;
 
-const IN_CAP: u32 = 2097152;
-const OUT_CAP: u32 = 2097152;
+const IN_CAP: u32 = 4194304;
+const OUT_CAP: u32 = 4194304;
 const GB_CAP: u32 = 1048576;
 const OBJ_CAP: u32 = 4194304;
 
@@ -3525,7 +3532,7 @@ fn run(mem: ptr) -> u32 {
     // 责任就在这一行。与 `copy_name` 那条守卫、与驱动程序里 `MAX_USE` / `MAX_ADDIN`
     // 的注解是同一条纪律：**超限报错退出，绝不静默丢**。
     if n >= IN_CAP as u64 {
-        return fail("lomelf: 输入 .ll 超过 2 MiB 上限 (输入缓冲装不下; 见 docs/192)");
+        return fail("lomelf: 输入 .ll 超过输入缓冲上限 (装不下; 见 docs/192)");
     }
     let tab: ptr = ptr_add(mem, M_TAB);
     let gb: ptr = ptr_add(mem, M_GB);
