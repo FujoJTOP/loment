@@ -110,9 +110,12 @@ _TOOLS = {
     # **这一门与前六门不同类**（`docs/197`）：前六门是别人已有的语言，子集线是**碰上的**；
     # 这一门是我们自己发明的，子集线是**画出来的** —— 所以下面的"不收"是设计，不是缺口。
     "natural": ("nltrans", "Unsupported NaturalError", "tools/nltrans.py",
-                "动词起头的句子：`say` / `talk to the machine` / `paint` / `let be` / "
-                "`set to` / `when` / `while` / `for from to` / `give back`；"
-                "这一版不收 `use`、结构体、枚举、切片、match"),
+                "动词起头的句子，声明也如是：`say` / `talk to the machine` / `paint` / "
+                "`let be` / `set to` / `when`（含 `looks like` 看形状）/ `while` / "
+                "`for from to` / `give back` / `guard the … space at`；声明是 "
+                "`a … has`（结构体）/ `a … is either`（枚举）/ `a … can`（trait）/ "
+                "`a … can be a …`（impl）/ `a <空间> space called`（能力域）/ `use` / "
+                "`someone else wrote`（C ABI）/ `leave out`"),
 }
 
 

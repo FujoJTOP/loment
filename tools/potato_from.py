@@ -1433,11 +1433,56 @@ def from_natural(src: str, name: str, mode: str = "strict") -> tuple[dict, Repor
     unit = _ident(prog.unit or Path(name).stem)
     doc = _blank(unit, "natural")
     rep = Report(name, "natural", mode)
+
+    #: **对象里只放 `lomt_from` 真正会发的东西**（`docs/197` §5）：
+    #: `module` / 能力域 / 常量 / `excluded` / 函数。其余（`choose` / `use` / 结构体 /
+    #: 枚举 / trait / impl）**不能进对象** —— 不是漏了，是 `lomt_from._check_representable`
+    #: 明确拒收（`imports` / `types` / `enums` / `traits` / `impls` 非空就报"L1 那侧的
+    #: 对应形状还没接上"）。它们**由 `translate` 自己发**，走的也是同一条正文管道。
+    if prog.mode_decl is not None:
+        doc["mode"] = "no_std" if prog.mode_decl.text.endswith("no_std") else "std"
     for c in prog.consts:
+        if not c.pub:
+            continue                      # 私有常量不进对象，由翻译器自己发（见下）
         doc["consts"].append({"name": c.name, "type": c.ty, "value": c.value})
         rep.ok += 1
+    for cname, space, lo, hi, rev, _line in prog.caps:
+        doc["capabilities"].append({
+            "name": cname, "domain": {"space": space, "lo": lo, "hi": hi},
+            "revocable": rev})
+        rep.ok += 1
+    for what, _line in prog.excluded:
+        doc["excluded"].append(what)
+
+    #: **声明也走 `functions` 这条管道** —— 它是一节里唯一能把"行号对齐"做对的地方
+    #: （`lomt_from._join_bodies` 按 `body_line` 垫空行）。名字是合成的，正文是那段
+    #: 声明的**原文**；`translate` 读到它就知道那是什么（它按第一个词分派）。
+    #: 不这么做的话，两条路会把行号算成两个数 —— 而"错要指在错的地方"是本仓的纪律。
+    carriers: list[tuple[int, dict]] = []
+    for i, d in enumerate(prog.uses):
+        carriers.append((d.line, _carrier(f"use_{i}", d.text, d.line)))
+    if prog.mode_decl is not None:
+        carriers.append((prog.mode_decl.line,
+                         _carrier("choose", prog.mode_decl.text, prog.mode_decl.line)))
+    for st in prog.structs:
+        carriers.append((st.line, _carrier(f"struct_{st.name}", st.text, st.line)))
+    for en in prog.enums:
+        carriers.append((en.line, _carrier(f"enum_{en.name}", en.text, en.line)))
+    for tr in prog.traits:
+        carriers.append((tr.line, _carrier(f"trait_{tr.name}", tr.text, tr.line)))
+    for im in prog.impls:
+        carriers.append((im.line,
+                         _carrier(f"impl_{im.trait}_{im.target}", im.text, im.line)))
+    for c in prog.consts:
+        if c.pub:
+            continue
+        # 私有常量：原文那句 `remember … , only here`（翻译器读到它才发 `const`）
+        carriers.append((c.line, _carrier(f"const_{c.name}",
+                                          _remember_text(src, c.name), c.line)))
+
+    entries: list[tuple[int, dict]] = list(carriers)
     for f in prog.fns:
-        doc["functions"].append({
+        entries.append((f.line, {
             "name": f.name,
             "params": [{"name": n, "type": t} for n, t in f.params],
             "ret": f.ret,
@@ -1445,9 +1490,42 @@ def from_natural(src: str, name: str, mode: str = "strict") -> tuple[dict, Repor
             # 它自带函数头 —— `lomt_from` 是拿它重翻一遍，不是拿它当"块"。
             "body": f.body,
             "body_line": f.line,
-        })
+        }))
         rep.ok += 1
+    for f in prog.externs:
+        # **无正文 + `abi: "c"`** —— `emit_lomt` 那条路正是为这个形状写的（`docs/173`）：
+        # 有正文的走 `--impl`，没有正文而 `abi` 是 C ABI 的发 `pub extern fn`。
+        # 签名超出 FFI 第 1 阶段时 `emit_lomt` 会把它记进 `skipped`，`front_door`
+        # 随即**响亮地拒**（不会发出一份少了声明的单元）。
+        entries.append((f.line, {
+            "name": f.name,
+            "params": [{"name": n, "type": t} for n, t in f.params],
+            "ret": f.ret,
+            "abi": "c",
+        }))
+        rep.ok += 1
+    # **按行号排序**：`_join_bodies` 是"按给定的顺序垫空行"的，顺序错了后面的
+    # 每一段行号都会漂（而它垫的是**往前**，所以逆序会让后来的段挤到同一行上）。
+    for _line, ent in sorted(entries, key=lambda kv: kv[0]):
+        doc["functions"].append(ent)
     return _finish(doc, rep)
+
+
+def _carrier(name: str, text: str, line: int) -> dict:
+    """一条**只带原文**的"函数"条目 —— 声明借它走正文那条管道（见上面的注解）。"""
+    return {"name": f"__nl_{name}", "params": [], "ret": "()",
+            "body": text, "body_line": line}
+
+
+def _remember_text(src: str, name: str) -> str:
+    """把一条 `remember …` 的原文从句柄里取回来（私有常量那条路要用它）。
+
+    只在**整行**匹配时返回那一行；匹配不上就退回一个**读得出来的**最小句子 ——
+    宁可退化成"能重读到类型"的那一句，也不要凭空编一段原文。
+    """
+    m = re.search(rf"^[ \t]*remember[ \t]+{re.escape(name)}[ \t]+as[ \t]+[0-9]+[^\n]*$",
+                  src, re.M)
+    return m.group(0).strip() if m else f"remember {name} as 0, only here"
 
 
 def front_errors(lang: str) -> tuple:

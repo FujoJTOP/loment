@@ -16,43 +16,83 @@
 ## 形状：**一个动词起头的句子 = 一条语句**
 
 自然语言的骨架是"动词 + 宾语"，所以这一门的语法就是这句话的实现：
+**语句以换行为界**（自然语言里没有分号），块用 `end` 收尾（缩进只是给人看的）。
 
-| 句子 | 意思 |
+### 顶层（声明）
+
+| 句子 | 落成的 Loment |
 |---|---|
-| `program tour` | 模块名（第一句，必须有） |
-| `remember LIMIT as 3` | 常量 |
-| `to add with a as a whole number and b as a whole number giving a whole number` … `end` | 函数 |
-| `let n be 5` / `let n be 5 as a byte` | 变量 |
-| `let fb be a buffer of 1024 bytes` | 分配 |
-| `set n to 6` | 赋值 |
-| `when n is above 3` … `otherwise` … `end` | 条件 |
-| `while n is above 0` … `end` | 循环 |
-| `for i from 0 to 10` … `end` | 计数循环 |
-| `give back n times 2` | 返回 |
-| `do f of 3` | 只要副作用的一次调用 |
-| **`say "hi"`** | 把一段文本写到标准输出 |
-| **`say the number n`** | 把一个数写成十进制再输出 |
-| **`talk to the machine 60 with n, 0, 0`** | 裸 syscall：`syscall4(n, a, b, c)` |
-| **`paint 255 at 0 in fb`** | 往缓冲区里写一个字节：`store8(fb, 0, 255 as u8)` |
+| `program tour` | `module tour`（第一句，必须有） |
+| `use json` / `use "pack.lomt"` | `use json` / `use "pack.lomt"` |
+| `the standard library is not available` | `choose no_std` |
+| `remember LIMIT as 3` | `pub const LIMIT: i64 = 3;` |
+| `a Point has x as a whole number and y as a whole number` | `pub struct Point { x: i64, y: i64 }` |
+| `a Kind is either Small or Big carrying a whole number` | `pub enum Kind { Small, Big(u32) }` |
+| `a Sizer can size giving a count` | `pub trait Sizer { fn size(self) -> u32; }` |
+| `a Point can be a Sizer` … `end` | `impl Sizer for Point { … }` |
+| `a disk space called slots covers 0 to 4, and it can be taken back` | `capability slots : disk[0..4] revocable` |
+| `leave out "the network"` | `excluded "the network"` |
+| `someone else wrote read_at with fd as a 32-bit count giving a whole number` | `pub extern fn read_at(fd: u32) -> i64;` |
+| `to add with a as a whole number and b as a whole number giving a whole number` … `end` | `pub fn add(a: i64, b: i64) -> i64 { … }` |
 
-加粗那四句是用户点名的那几个动词（`say` / `talk` / `paint`）。
+声明末尾写 `, only here` 就去掉 `pub`（`remember` 除外，见 §边界）。
+
+### 语句
+
+| 句子 | 落成的 Loment |
+|---|---|
+| `let n be 5` / `let b be 200 as a byte` | `let n: i64 = 5;` / `let b: u8 = 200;` |
+| `let fb be a buffer of 1024 bytes` | `let fb: ptr = alloc(1024);` |
+| `set n to 6` / `set item 0 of xs to 9` | `n = 6;` / `xs[0] = 9;` |
+| `say "hi"` / `say the number n` | 写标准输出（文本 / 十进制数） |
+| `talk to the machine 60 with n, 0, 0` | `syscall4(n, a, b, c)` |
+| `paint 255 at 0 in fb` | `store8(fb, 0, 255 as u8)` |
+| `do f of 3` | `f(3);` |
+| `give back n times 2` | `return (n * 2);` |
+| `when n is above 3` … `otherwise when …` … `otherwise` … `end` | `if … { } else if … { } else { }` |
+| `while n is above 0` … `end` | `while … { }` |
+| `for i from 0 to 10` … `end` | `for i in 0..10 { }`（上界**不含**） |
+| `when k looks like a Kind that is Big carrying w` … `end` | `match k { Kind::Big(w) => { … } }`；**只写一条且没有 `when anything else` 就是 `if let`** |
+| `when anything else` … `end` | `_ => { … }`（match 的通配臂） |
+| `guard the slots space at 2` | `guard slots(2);` |
+
+### 值
+
+| 写法 | 落成的 Loment | | 写法 | 落成的 Loment |
+|---|---|---|---|---|
+| `a Point with x as 1 and y as 2` | `Point { x: 1, y: 2 }` | | `the x of p` | `p.x` |
+| `a Kind that is Big carrying 5` | `Kind::Big(5)` | | `the list 1, 2, 3` | `[1, 2, 3]` |
+| `item 0 of xs` | `xs[0]` | | `the length of xs` | `slice_len(xs)` |
+| `the run of xs` | `&xs` | | `the changeable run of xs` | `&mut xs` |
+| `ask p for size` | `p.size()` | | `<e> unless it failed` | `<e>?` |
+| `something carrying x` | `Option::Some(x)` | | `nothing to carry` | `Option::None` |
+| `a success carrying x` | `Result::Ok(x)` | | `a failure carrying x` | `Result::Err(x)` |
+| `f of a, b`（调用） | `f(a, b)` | | 没有实参就直接写名字 | `f()` |
+
+### 类型短语
+
+| 自然语言 | Loment | | 自然语言 | Loment |
+|---|---|---|---|---|
+| `a whole number` / `a 32-bit whole number` | `i64` / `i32` | | `a byte` | `u8` |
+| `a count` / `a 64-bit count` | `u32` / `u64` | | `a truth` | `bool` |
+| `text` / `a buffer` | `str` / `ptr` | | `nothing` | `()` |
+| `a list of 3 whole numbers` | `[i64; 3]` | | `a run of whole numbers` | `[i64]` |
+| `a changeable run of whole numbers` | `mut [i64]` | | `a Point`（结构体/枚举名） | `Point` |
+| `maybe a whole number` | `Option<i64>` | | `a whole number or a failure of text` | `Result<i64, str>` |
+
+`a` / `an` 可省；`i64` / `u8` 这些**直接写也收**（要跟别人说同一件事时，缩写省事）。
 
 ## 三条**不是翻译、是决定**的东西
 
-1. **语句以换行为界**（`end` 收块）—— 自然语言里没有分号。所以词法器要产出换行记号，
-   并让"行尾是运算符/逗号"的那些行**续行**（见 `_CONTINUE`）。
-2. **`say` 分两句**：`say <文本>` 与 `say the number <数>`。不合并成一句是因为
-   合并就要**猜表达式的类型**，而本语言（与 Loment 一样）**没有类型推断** ——
-   猜错的表现是"把一段文本按数去打"，那种错两边都编得过。分开写是**让作者说清楚**。
-3. **`let` 的类型是"查"出来的，不是"推"出来的**（`Parser.type_of`）。查得到的有四类：
-   句子里写了的 `as <类型>`；字面量；**声明过的名字**（模块常量、形参、前面的 `let`）；
-   以及**运算符的定则**（比较与 `and`/`or` 出 `bool`、其余同型则同型）。
-   查不到就**报错**，不是"默认按 i64 算"—— 后者会把一个真的类型错推后到别处炸。
-
-   **唯一故意不查的是"调用"**（`let c be label of 8` 要写 `as a whole number`）：
-   那要读**另一个函数的声明**，而读出来的是一条**事实**、不是一个**法则** ——
-   别人改了那个函数的返回类型，这一句就该跟着变，而变了之后**两边都编得过**。
-   运算符那几条不一样：对每个程序它们都只有一个答案。
+1. **`say` 分两句**（`say <文本>` / `say the number <数>`）。合并就要**猜表达式的类型**，
+   而猜错的表现是"把一段文本按数去打"，那种错**两边都编得过**。
+2. **类型是"查"出来的，不是"推"出来的**（`Parser.type_of`）。查得到的是：句子里写的
+   `as <类型>`、字面量、**声明过的名字**（常量/形参/前面的 `let`）、**运算符的定则**
+   （比较与 `and`/`or` 出 `truth`、同型则同型）、**被调函数的声明**、**结构体字段**、
+   **方法声明**、**容器的元素类型**。够不着就**报错**，不默认按 i64 算 ——
+   后者会把一个真的类型错推后到别处炸。
+3. **续行只认"不可能当名字"的那些词**（`_CONTINUE`）。多收一个比少收一个坏：
+   少收是"合法的一句读不通"（响亮），多收是"两句悄悄变一句"（见下面那条踩出来的）。
 
 ## 一处**踩出来的坑**（写进代码里的理由）
 
@@ -67,6 +107,17 @@
 `v = -12345` 给 12345），所以辅助函数走"带类型的零"这条路，而不去碰字面量运算。
 **这条不是绕过一个翻译器的限制，是绕过一个编译器的 bug** —— 两边都编得过、只有一边
 算错，是本项目的红线；上面那个复现留给工具链那一侧（见 `docs/197` §7）。
+
+## 这一版**不收**的（每条都有理由，不是没做）
+
+* **`Option` / `Result` 的模式**（`when x looks like …` 用在它们身上）——
+  **这是语言层面的边界，不是这一门的**：判据把写出来的名字与**单态化名**比
+  （`Option::Some` 对 `Option_u32::Some`），而那是编译器的内部拼法。它们的**类型、
+  构造、`?`** 都收。
+* **`addin`**（开关设定单元）与 **`comefor` / `byuse`**（在源码里定义新语法）——
+  前者是构建期的东西，后者**本身**就是在定义一门语法；两者都没有可判的语料。
+* **`break` / `continue`**：Loment 没有这两个词（实测 `使用未声明的变量 break`）。
+* **`for` 遍历切片**：Loment 的 `for` **只有**区间那一种（实测 `for x in xs` 过不了）。
 
 用法:
 
@@ -93,7 +144,7 @@ class NaturalError(Exception):
 
 
 class Unsupported(Exception):
-    """**读得通、翻不出来** —— 子集外。消息里必须点名是哪一处、以及为什么不收。"""
+    """**读得通、翻不出来** —— 子集外（含语言层面的边界）。消息里必须点名是哪一处。"""
 
 
 # ---------------------------------------------------------------- 词法
@@ -126,12 +177,13 @@ _TYPE_WORDS = {
 #: `<N>-bit whole number` / `<N>-bit count` 的两种基名。
 _TYPE_BASE = {"whole number": "i", "count": "u"}
 
-#: Loment 的类型名**直接写也行**（要跟别人说同一件事时，缩写比绕口的短语省事）。
+#: Loment 的类型名**直接写也行**。
 _TYPE_DIRECT = {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
                 "bool", "str", "ptr", "()"}
 
 #: 内建函数（`.claude/skills/loment/SKILL.md` §3 那张表，**全部，没有别的**）。
-#: 收进来的用处只有一条：**调用点报错时能分清"你名字写错了"与"这一版不收"**。
+#: 收进来的用处只有一条：**调用点报错时能分清"你名字写错了"与"这一版不收"**，
+#: 外加让 `let n be load8 of buf, 0` 这种句子查得到类型。
 _BUILTINS = {
     "str_len": "u32", "str_byte": "u32", "str_eq": "bool", "str_concat": "str",
     "str_ptr": "ptr", "alloc": "ptr", "free": "u32", "load8": "u32",
@@ -139,6 +191,29 @@ _BUILTINS = {
     "panic": "u32", "atomic_add": "u32", "get_bits": "u8", "set_bits": "u8",
     "inb": "u32", "outb": "u32", "syscall4": "i64", "syscall6": "i64",
 }
+
+#: **保留词**。它们进了语法之后就不能再当名字用 —— 一份 `let has be 3` 会让解析器
+#: 在很远的地方报一句看不懂的错。在这里**点名拒**，是 `docs/179` §6.5 那条
+#: "错要指在错的地方"的直接兑现。
+_RESERVED = {
+    # **运算符**（当名字用会读错）
+    "and", "or", "not", "is", "as", "plus", "minus", "times", "over", "modulo",
+    "shifted",
+    # **语句/声明的骨架词**（它们出现在"下一个记号决定这一句是什么"的位置）
+    "program", "use", "remember", "to", "with", "giving", "let", "be", "set",
+    "say", "the", "talk", "paint", "give", "do", "when", "otherwise", "while",
+    "for", "from", "end", "if",
+    # **值的头一个词**（`item 0 of xs` / `ask p for size` / `something carrying x` …）——
+    # 一个叫 `item` 的变量会让 `say item` 走进那条支
+    "item", "ask", "something", "nothing", "success", "failure",
+}
+#: **故意不在表里的那些**（它们是词，但**可以**当名字）：
+#: * `a` / `an` —— 类型短语里的冠词**可省**，而"省略"这件事正是它们能当名字的原因。
+#:   第一版就是在这里踩的（`let x be a` 里那个 `a` 是形参名，见 `_CONTINUE` 的注解）；
+#:   把 `a` 收进保留词表会把一份完全正常的 `to add with a as … and b as …` 顶掉。
+#: * `list` / `run` / `length` / `changeable` —— 它们只在 `the` 后面才有词义，
+#:   别处就是个普通名字（`to run giving …` 是本仓语料里的真函数）。
+#: * `revocable` / `available` / `standard` / `library` / `made` —— 同上。
 
 #: **行尾是这些词/符号时，换行不算句界**（一句话写到下一行是常态：函数头、
 #: 参数表、算式都可能换行）。
@@ -156,6 +231,15 @@ _BUILTINS = {
 _CONTINUE = set(_SYMBOL_OPS) | {"(", ",", "the", "be", "as", "of", "with",
                                 "in", "from", "to", "giving"}
 _CONTINUE |= {w for op in _WORD_OPS for w in op.split()}
+#: v2 新加的**声明**词（它们都不可能当名字，见 `_RESERVED`）—— 声明写不下要能换行。
+#: 只收**声明头**上那几个（它们写在行尾时下一行多半还是这一句）。
+#: `called` / `keeps` / `any` / `someone` / `else` / `wrote` **故意不收** ——
+#: 它们是普通英文词，当名字用完全正常（`let other be called` 就是一份真语料），
+#: 收了会把两句悄悄粘成一句。
+_CONTINUE |= {"has", "either", "carrying", "can", "space", "covers"}
+
+#: 声明末尾那个"只给自己看"的后缀。与 `pub` 相反 —— 见 `docs/197` §2。
+_KEEP = (",", "only", "here")
 
 
 class Tok:
@@ -237,7 +321,7 @@ def tokenize(src: str) -> list[Tok]:
             out.append(Tok("sym", two, line, i))
             i += 2
             continue
-        if ch in "+-*/%&|^!<>(),.{};":
+        if ch in "+-*/%&|^!<>(),.[];":
             out.append(Tok("sym", ch, line, i))
             i += 1
             continue
@@ -260,28 +344,84 @@ def tokenize(src: str) -> list[Tok]:
 # ---------------------------------------------------------------- 语法树
 
 class Fn:
-    """一个函数：名字、形参、返回类型、**原文**（`body`）、原文里的起始行。"""
+    """一个函数：名字、泛型形参、形参、返回类型、**原文**、原文里的起始行、语句。"""
 
-    __slots__ = ("name", "params", "ret", "body", "line", "stmts")
+    __slots__ = ("name", "params", "ret", "body", "line", "stmts", "generics", "pub")
 
     def __init__(self, name: str, params: list[tuple[str, str]], ret: str,
-                 body: str, line: int, stmts: list):
+                 body: str, line: int, stmts: list,
+                 generics: tuple[str, ...] = (), pub: bool = True):
         self.name, self.params, self.ret = name, params, ret
         self.body, self.line, self.stmts = body, line, stmts
+        self.generics, self.pub = generics, pub
 
 
 class Const:
-    __slots__ = ("name", "ty", "value", "line")
+    __slots__ = ("name", "ty", "value", "line", "pub")
 
-    def __init__(self, name: str, ty: str, value: int, line: int):
-        self.name, self.ty, self.value, self.line = name, ty, value, line
+    def __init__(self, name: str, ty: str, value: int, line: int, pub: bool = True):
+        self.name, self.ty, self.value, self.line, self.pub = name, ty, value, line, pub
+
+
+class Struct:
+    __slots__ = ("name", "fields", "line", "pub", "generics", "text")
+
+    def __init__(self, name, fields, line, pub, generics, text):
+        self.name, self.fields = name, fields
+        self.line, self.pub, self.generics, self.text = line, pub, generics, text
+
+
+class Enum:
+    __slots__ = ("name", "variants", "line", "pub", "generics", "text")
+
+    def __init__(self, name, variants, line, pub, generics, text):
+        self.name, self.variants = name, variants
+        self.line, self.pub, self.generics, self.text = line, pub, generics, text
+
+
+class Trait:
+    __slots__ = ("name", "method", "ret", "line", "pub", "text")
+
+    def __init__(self, name, method, ret, line, pub, text):
+        self.name, self.method, self.ret = name, method, ret
+        self.line, self.pub, self.text = line, pub, text
+
+
+class Impl:
+    __slots__ = ("target", "trait", "methods", "line", "text")
+
+    def __init__(self, target, trait, methods, line, text):
+        self.target, self.trait, self.methods = target, trait, methods
+        self.line, self.text = line, text
+
+
+class Decl:
+    """**只带原文与位置**的那一类声明（`use` / `choose`）—— 给 `potato_from` 造载体用。"""
+
+    __slots__ = ("name", "text", "line")
+
+    def __init__(self, name: str, text: str, line: int):
+        self.name, self.text, self.line = name, text, line
 
 
 class Program:
-    __slots__ = ("unit", "consts", "fns")
+    __slots__ = ("unit", "uses", "mode", "mode_decl", "consts", "structs", "enums",
+                 "traits", "impls", "caps", "excluded", "fns", "externs")
 
-    def __init__(self, unit: str, consts: list[Const], fns: list[Fn]):
-        self.unit, self.consts, self.fns = unit, consts, fns
+    def __init__(self):
+        self.unit = ""
+        self.uses: list[Decl] = []
+        self.mode = ""                      # "" | "std" | "no_std"
+        self.mode_decl: Decl | None = None
+        self.consts: list[Const] = []
+        self.structs: list[Struct] = []
+        self.enums: list[Enum] = []
+        self.traits: list[Trait] = []
+        self.impls: list[Impl] = []
+        self.caps: list[tuple] = []         # (名字, 空间, lo, hi, revocable, 行)
+        self.excluded: list[tuple[str, int]] = []
+        self.fns: list[Fn] = []
+        self.externs: list[Fn] = []         # 无正文的 `pub extern fn`
 
 
 # ---------------------------------------------------------------- 解析器
@@ -303,12 +443,21 @@ class Parser:
         #: **已知名字的类型**：模块常量（`consts` 那份表 / 本文件里的 `remember`）、
         #: 形参、已经读过的 `let`。它只服务一件事：`let v be n` 里那个 `n` 的
         #: 类型是**查出来的**，不是猜的。
-        #:
-        #: 常量要从外面喂进来（`lomt_from` 走 `translate` 时手上只有**函数正文**，
-        #: 常量在对象里）—— 这正是 `translate` 那个 `consts` 形参的用处，
-        #: 与 `pytrans` 收它是同一个理由。
         self.tenv: dict[str, str] = dict(consts or {})
         self.const_names: set[str] = set(consts or {})
+        #: 结构体/枚举/泛型形参/方法 —— 三张表，`type_of` 靠它们把"查"做全。
+        self.structs: dict[str, dict[str, str]] = {}      # 名字 -> {字段: 类型}
+        self.variants: dict[str, dict[str, bool]] = {}    # 名字 -> {变体: 有没有载荷}
+        self.gparams: set[str] = set()                    # 当前函数/类型的泛型形参
+        #: **"这一个表达式里不许把 `of` 读成调用"**。`item <下标> of <东西>` 与
+        #: `set item <下标> of <东西> to …` 里，下标后面**紧跟一个 `of`**，而
+        #: 冠词那一层分不出"这是我的 `of`"还是"这是调用的 `of`" ——
+        #: `item i of xs` 会被读成 `i(xs)`。所以这两处**把下标那一层的调用识别关掉**，
+        #: 需要嵌套调用时用括号（括号会把它打开，因为括号是显式的）。
+        self.no_call_of = False
+        #: `choose std` / `choose no_std` 那一格（`the standard library is [not] available`）
+        self.mode = ""
+        self.methods: dict[tuple[str, str], str] = {}     # (类型, 方法) -> 返回类型
 
     # ---- 记号流的小工具
 
@@ -360,6 +509,16 @@ class Parser:
     def err(self, msg: str) -> None:
         raise NaturalError(f"第 {self.cur().line} 行: {msg}")
 
+    def ident(self, what: str) -> str:
+        """读一个**名字** —— 保留词在这里点名拒（见 `_RESERVED`）。"""
+        t = self.cur()
+        if t.kind != "id":
+            self.err(f"{what}要写名字，这里得到 `{t.text}`")
+        if t.text in _RESERVED:
+            self.err(f"`{t.text}` 是这一门的词，不能当{what}（`docs/197` 的语法表）")
+        self.i += 1
+        return t.text
+
     def end_sentence(self) -> None:
         if self.cur().kind == "nl":
             self.i += 1
@@ -369,51 +528,121 @@ class Parser:
         self.err(f"这一句到这里该断了，却还有 `{self.cur().text}`"
                  f"（自然语言写法**一句一行**，没有分号）")
 
+    def _at_eof(self) -> bool:
+        return self.cur().kind == "nl" and self.i >= len(self.t) - 1
+
+    def keep_suffix(self) -> bool:
+        """读声明末尾可选的 `, only here`。**读到了就返回 `True`**（= 不导出）。
+
+        它是"私有"那一档；不写就是 `pub`。写成一句话而不是一个符号，是因为
+        自然语言里"这条只有这里看得见"本来就是一句话，而不是一个修饰符。
+        """
+        save = self.i
+        if self.at(",") and self.word_at(1, "only") and self.word_at(2, "here"):
+            for _ in range(3):
+                self.i += 1
+            return True
+        self.i = save
+        return False
+
     # ---- 程序
 
     def program(self, need_program: bool) -> Program:
-        unit, consts, fns = "", [], []
-        seen_program = False
+        prog = Program()
         while not self._at_eof():
             if self.cur().kind == "nl":
                 self.i += 1
                 continue
-            if self.at("program"):
-                if seen_program:
-                    self.err("`program` 只能写一次")
-                self.i += 1
-                name = self.cur()
-                if name.kind != "id":
-                    self.err("`program` 后面要写模块名")
-                unit, seen_program = name.text, True
-                self.i += 1
-            elif self.at("remember"):
-                consts.append(self.constant())
-            elif self.at("to"):
-                fns.append(self.function())
+            # 顶层的两类：`to …` 与各种声明。**都以"这句的第一个词"分派。**
+            if self.at("to"):
+                prog.fns.append(self.function())
                 continue                      # `function` 自己吃掉了句尾
+            if self.at("program"):
+                self.need("program")
+                prog.unit = self.ident("模块名")
             elif self.at("use"):
-                self.err("`use` 这一版还不收 —— 见 `docs/197` §边界"
-                         "（翻译器只出函数，导入要由调用方声明）")
+                prog.uses.append(self.use_clause())
+            elif self.at("the") and self.word_at(1, "standard") and self.word_at(2, "library"):
+                prog.mode_decl = self.mode_clause()
+                prog.mode = self.mode
+            elif self.at("remember"):
+                prog.consts.append(self.constant())
+            elif self.at("a"):
+                self.declaration(prog)
+                continue                      # 声明自己吃掉了句尾
+            elif self.at("leave"):
+                prog.excluded.append(self.excluded_clause())
+            elif self.at("someone"):
+                prog.externs.append(self.extern_decl())
+            elif self.at("guard", "set", "let", "say", "talk", "paint", "when",
+                         "while", "for", "give", "do", "ask", "item", "run"):
+                self.err(f"`{self.cur().text}` 是**语句**，只能写在函数体里")
             else:
                 self.err(f"顶层不认识的句子 `{self.cur().text}`"
-                         f"（顶层只有 `program` / `remember` / `to`）")
+                         f"（顶层只有 `program` / `use` / `remember` / `to` / "
+                         f"`a …` 声明 / `leave out` / `someone else wrote`）")
             self.end_sentence()
-        if need_program and not seen_program:
+        if need_program and not prog.unit:
             raise NaturalError("第一句必须是 `program <模块名>` —— 没有它这一份就不知"
                                "道自己叫什么（`docs/197` §2）")
-        return Program(unit, consts, fns)
+        return prog
 
-    def _at_eof(self) -> bool:
-        return self.cur().kind == "nl" and self.i >= len(self.t) - 1
+    def use_clause(self) -> Decl:
+        line = self.cur().line
+        self.need("use")
+        t = self.cur()
+        if t.kind == "str":
+            self.i += 1
+            text = f"use {t.text}"
+        else:
+            name = self.ident("要引入的东西")
+            text = f"use {name}"
+        return Decl("use", text, line)
+
+    def mode_clause(self) -> Decl:
+        """`the standard library is [not] available` -> `choose std` / `choose no_std`。"""
+        line = self.cur().line
+        line_start = self.cur().pos
+        self.need("the")
+        self.need("standard")
+        self.need("library")
+        self.need("is", "这一句是 `the standard library is [not] available`")
+        neg = self.eat("not")
+        self.need("available", "这一句是 `the standard library is [not] available`")
+        # **`text` 存的是原文那一句，不是 `choose …`** —— 载体要用它
+        # （`from_natural` 把声明的**原文**放进正文管道，`translate` 回头再读一遍）。
+        # `choose no_std` 那一串是 `emit` 从 `prog.mode` 现算的，这里不留副本。
+        self.mode = "no_std" if neg else "std"
+        return Decl("choose", self.src[line_start:self.cur().pos].strip(), line)
+
+    def excluded_clause(self) -> tuple[str, int]:
+        line = self.cur().line
+        self.need("leave")
+        self.need("out", "这一句是 `leave out \"<什么>\"`")
+        t = self.cur()
+        if t.kind != "str":
+            self.err("`leave out` 后面要写一个带引号的名字")
+        self.i += 1
+        # **去掉引号**：`excluded` 那一侧（`emit_lomt`）会自己加 —— 带引号地交过去
+        # 会发出 `excluded ""the network""`（实测）。
+        return t.text[1:-1], line
+
+    def extern_decl(self) -> Fn:
+        """`someone else wrote <名字> with … giving …` -> `pub extern fn …;`（`docs/173`）。"""
+        start = self.cur()
+        self.need("someone")
+        self.need("else")
+        self.need("wrote", "这一句是 `someone else wrote <名字> with … giving …`")
+        name = self.ident("外部函数名")
+        params, ret = self.signature()
+        self.keep_suffix()
+        return Fn(name, params, ret, self.src[start.pos:self.cur().pos].strip(),
+                  start.line, [], (), True)
 
     def constant(self) -> Const:
         line = self.cur().line
         self.need("remember")
-        name = self.cur()
-        if name.kind != "id":
-            self.err("`remember` 后面要写常量名（**全大写**是习惯）")
-        self.i += 1
+        name = self.ident("常量名")
         self.need("as", "自然语言写法里常量是 `remember 名字 as 值`")
         ty = "i64"
         if self.word_at(0, "a") or self.word_at(0, "an"):
@@ -428,39 +657,210 @@ class Parser:
             self.err("常量只能是整数字面量（`docs/188` §7.1 那条边界："
                      "L1 常量只收整型）")
         self.i += 1
-        i = int(val.text, 0)
-        if ty.startswith("u") and i < 0:      # pragma: no cover - 词法器不出负数
+        n = int(val.text, 0)
+        if ty.startswith("u") and n < 0:      # pragma: no cover - 词法器不出负数
             raise Unsupported(f"第 {line} 行: 常量 {val.text} 是负的，装不进 {ty}")
+        pub = not self.keep_suffix()
         # 常量进类型环境 —— 后面的函数体里 `let e be LIMIT times 10` 要查得到它
-        self.tenv[name.text] = ty
-        self.const_names.add(name.text)
-        return Const(name.text, ty, i, line)
+        self.tenv[name] = ty
+        self.const_names.add(name)
+        return Const(name, ty, n, line, pub)
+
+    # ---- `a …` 那族声明：结构体 / 枚举 / trait / impl / 能力域
+
+    def declaration(self, prog: Program) -> None:
+        """读一条以 `a` 开头的顶层声明。**第一个词是 `a`，第二个词才分派。**"""
+        start = self.cur()
+        self.need("a")
+        first = self.cur()
+        if first.kind != "id":
+            self.err("`a` 后面要写一个名字（结构体 / 枚举 / trait / impl / 能力域）")
+        # 形态一：`a <空间> space called <名字> covers lo to hi`（能力域）
+        if self.word_at(1, "space") and self.word_at(2, "called"):
+            self.capability(prog, start)
+            return
+        self.i += 1
+        name = first.text
+        if name in _RESERVED:
+            self.err(f"`{name}` 是这一门的词，不能当类型的名字")
+        # `a Point for any T has …` / `a Point has …`
+        generics = self.generics_clause()
+        if self.at("has"):
+            self.struct_decl(prog, name, generics, start)
+            return
+        if self.at("is"):
+            self.enum_decl(prog, name, generics, start)
+            return
+        if self.at("can"):
+            if self.word_at(1, "be"):         # `a Point can be a Sizer` -> impl
+                self.impl_decl(prog, name, start)
+                return
+            self.trait_decl(prog, name, start)
+            return
+        self.err(f"`a {name}` 后面要写 `has`（结构体）/ `is either`（枚举）/ "
+                 f"`can`（trait）/ `can be`（impl）—— `docs/197` §2 那张表")
+
+    def generics_clause(self) -> tuple[str, ...]:
+        """`for any T` / `for any T and U` -> 泛型形参表。读不到就是没有。"""
+        out: list[str] = []
+        if not (self.at("for") and self.word_at(1, "any")):
+            return ()
+        while self.at("for") and self.word_at(1, "any"):
+            self.i += 2
+            out.append(self.ident("泛型形参名"))
+            if not self.eat("and"):
+                break
+        self.gparams |= set(out)
+        return tuple(out)
+
+    def struct_decl(self, prog: Program, name: str, generics: tuple[str, ...],
+                    start: Tok) -> None:
+        self.need("has")
+        fields = [self.field_decl()]
+        while self.eat("and"):
+            fields.append(self.field_decl())
+        pub = not self.keep_suffix()
+        self.structs[name] = dict(fields)
+        self.gparams -= set(generics)
+        prog.structs.append(Struct(name, fields, start.line, pub, generics,
+                                   self.src[start.pos:self.cur().pos].strip()))
+
+    def field_decl(self) -> tuple[str, str]:
+        fname = self.ident("字段名")
+        self.need("as", "字段要写成 `名字 as <类型>`")
+        ty = self.type_phrase()
+        if ty is None:
+            self.err("认不出这个类型短语（`docs/197` §2 那张表）")
+        return fname, ty
+
+    def enum_decl(self, prog: Program, name: str, generics: tuple[str, ...],
+                  start: Tok) -> None:
+        self.need("is")
+        self.need("either", "枚举是 `a <名字> is either <甲> or <乙> carrying <类型>`")
+        variants: list[tuple[str, str | None]] = [self.variant_decl()]
+        while self.eat("or"):
+            variants.append(self.variant_decl())
+        pub = not self.keep_suffix()
+        self.variants[name] = {v: (p is not None) for v, p in variants}
+        self.gparams -= set(generics)
+        prog.enums.append(Enum(name, variants, start.line, pub, generics,
+                               self.src[start.pos:self.cur().pos].strip()))
+
+    def variant_decl(self) -> tuple[str, str | None]:
+        vname = self.ident("变体的名字")
+        payload = None
+        if self.at("carrying"):
+            self.i += 1
+            payload = self.type_phrase()
+            if payload is None:
+                self.err("`carrying` 后面要写载荷的类型")
+        return vname, payload
+
+    def trait_decl(self, prog: Program, name: str, start: Tok) -> None:
+        self.need("can")
+        method = self.ident("方法名")
+        ret = "()"
+        if self.at("giving"):
+            self.i += 1
+            ret = self.type_phrase()
+            if ret is None:
+                self.err("`giving` 后面要写返回类型")
+        pub = not self.keep_suffix()
+        self.methods[(name, method)] = ret
+        prog.traits.append(Trait(name, method, ret, start.line, pub,
+                                 self.src[start.pos:self.cur().pos].strip()))
+
+    def impl_decl(self, prog: Program, target: str, start: Tok) -> None:
+        self.need("can")
+        self.need("be")
+        self.need("a")
+        trait = self.ident("trait 的名字")
+        self.end_sentence()
+        methods: list[Fn] = []
+        while True:
+            if self._at_eof():
+                raise NaturalError("这份源到这里就断了 —— 有一个块没有 `end` 收尾")
+            if self.cur().kind == "nl":
+                self.i += 1
+                continue
+            if self.at("end"):
+                break
+            if not self.at("to"):
+                self.err(f"impl 里只写方法（`to <名字> giving …`），"
+                         f"这里是 `{self.cur().text}`")
+            methods.append(self.function(in_impl=True, self_type=target))
+        self.need("end", f"`a {target} can be a {trait}` 那一块要用 `end` 收尾")
+        for m in methods:
+            # 方法进"方法表"，`ask p for size` 才查得到返回类型
+            self.methods[(target, m.name)] = m.ret
+        prog.impls.append(Impl(target, trait, methods, start.line,
+                               self.src[start.pos:self.cur().pos].strip()))
+
+    def capability(self, prog: Program, start: Tok) -> None:
+        space = self.ident("能力域的空间名")
+        self.need("space")
+        self.need("called", "能力域是 `a <空间> space called <名字> covers lo to hi`")
+        name = self.ident("能力域的名字")
+        self.need("covers")
+        lo = self.int_literal("能力域的下界")
+        self.need("to")
+        hi = self.int_literal("能力域的上界")
+        revocable = False
+        if self.at(","):
+            self.i += 1
+            self.need("and")
+            self.need("it")
+            self.need("can", "能力域的可回收是 `, and it can be taken back`")
+            self.need("be")
+            self.need("taken")
+            self.need("back")
+            revocable = True
+        prog.caps.append((name, space, lo, hi, revocable, start.line))
+
+    def int_literal(self, what: str) -> int:
+        t = self.cur()
+        if t.kind != "num":
+            self.err(f"{what}要写整数")
+        self.i += 1
+        return int(t.text, 0)
 
     # ---- 函数
 
-    def function(self) -> Fn:
+    def function(self, in_impl: bool = False, self_type: str | None = None) -> Fn:
         start = self.cur()
         # 类型环境**按函数清**（常量那几条留着）—— 上一支的形参不许漏到这一支
         self.tenv = {k: v for k, v in self.tenv.items() if k in self.const_names}
         self.need("to")
-        name = self.cur()
-        if name.kind != "id":
-            self.err("`to` 后面要写函数名")
-        self.i += 1
+        name = self.ident("函数名")
+        generics = self.generics_clause()
+        params, ret = self.signature(with_self=in_impl)
+        if self_type is not None:
+            # `self` 的类型就是 impl 的目标 —— `the x of self` 因此查得到字段
+            self.tenv["self"] = self_type
+        pub = not self.keep_suffix()
+        if generics:
+            self.gparams -= set(generics)
+        self.end_sentence()
+        body = self.block({"end"})
+        self.need("end", f"函数 `{name}` 要用 `end` 收尾")
+        text = self.src[start.pos:self.cur().pos].strip()
+        return Fn(name, params, ret, text, start.line, body, generics, pub)
+
+    def signature(self, with_self: bool = False) -> tuple[list[tuple[str, str]], str]:
+        """读 `with <形参> and … giving <类型>`。形参表与返回类型都可省。"""
         params: list[tuple[str, str]] = []
+        if with_self:
+            params.append(("self", "self"))
         if self.at("with"):
             self.i += 1
             while True:
-                pname = self.cur()
-                if pname.kind != "id":
-                    self.err("形参要写成 `名字 as <类型>`")
-                self.i += 1
+                pname = self.ident("形参名")
                 self.need("as", "形参**必须**写类型 —— 这一门没有类型推断")
                 ty = self.type_phrase()
                 if ty is None:
-                    self.err("认不出这个类型短语（`docs/197` §3 那张表）")
-                params.append((pname.text, ty))
-                self.tenv[pname.text] = ty
+                    self.err("认不出这个类型短语（`docs/197` §2 那张表）")
+                params.append((pname, ty))
+                self.tenv[pname] = ty
                 if not self.eat("and"):
                     break
         ret = "()"
@@ -470,20 +870,38 @@ class Parser:
             if r is None:
                 self.err("`giving` 后面要写返回类型；不返回值就整句不写 `giving`")
             ret = r
-        self.end_sentence()
-        body = self.block({"end"})
-        self.need("end", f"函数 `{name.text}` 要用 `end` 收尾")
-        text = self.src[start.pos:self.cur().pos].strip()
-        return Fn(name.text, params, ret, text, start.line, body)
+        return params, ret
+
+    # ---- 类型短语
 
     def type_phrase(self) -> str | None:
-        """读一个类型短语（`a` / `an` 可省）。读不出来返回 `None`，**不动下标**。"""
+        """读一个类型短语。读不出来返回 `None`，**不动下标**。
+
+        两条复合形（都是**后缀**，所以放在原子那一层之外）：
+        `a whole number or a failure of text` -> `Result<i64, str>`。
+        """
+        save = self.i
+        ty = self.type_atom()
+        if ty is None:
+            self.i = save
+            return None
+        if self.at("or") and self.word_at(1, "a") and self.word_at(2, "failure") \
+                and self.word_at(3, "of"):
+            self.i += 4
+            e = self.type_atom()
+            if e is None:
+                self.i = save
+                return None
+            return f"Result<{ty}, {e}>"
+        return ty
+
+    def type_atom(self) -> str | None:
         save = self.i
         if self.at("a") or self.at("an"):
             if self.peek().kind == "id":
                 self.i += 1
         t = self.cur()
-        if t.kind == "num":                   # `<N>-bit whole number` / `<N>-bit count`
+        if t.kind == "num":                   # `<N>-bit whole number` / `-bit count`
             if self.peek().kind == "sym" and self.peek().text == "-" \
                     and self.word_at(2, "bit"):
                 n = t.text
@@ -498,26 +916,83 @@ class Parser:
                     return base + n
             self.i = save
             return None
-        if t.kind == "id":
-            if t.text in _TYPE_DIRECT:
+        if t.kind != "id":
+            self.i = save
+            return None
+        # ---- 容器：`a list of 3 whole numbers` / `a run of whole numbers`
+        if t.text == "list" and self.word_at(1, "of"):
+            self.i += 2
+            n = self.cur()
+            if n.kind != "num":
+                self.i = save
+                return None
+            self.i += 1
+            inner = self.type_atom()
+            if inner is None:
+                self.i = save
+                return None
+            return f"[{inner}; {n.text}]"
+        if t.text in ("run", "changeable") :
+            mut = t.text == "changeable"
+            if mut:
+                if not self.word_at(1, "run"):
+                    self.i = save
+                    return None
+                self.i += 2
+            else:
                 self.i += 1
-                return t.text
-            # **两个词的那几条要先看**（`whole number` / `whole number` 是一条），
-            # 而且**两个记号都必须是词** —— 这一格是踩出来的：第一版写成
-            # `" ".join(x.text for x in self.t[i:i+2] if x.kind == "id")`，
-            # 那个 `if` 会**跳过换行**，于是 `giving a truth` 里那个**单词**的
-            # `truth` 被当成"两个词"，`self.i += 2` 顺手把**句尾的换行**一起吃了 ——
-            # 下一句的 `give` 于是落在"这一句还没断"的位置上，报的是一句
-            # 指不到点子的"该断了却还有 `give`"。
-            nxt = self.peek(1)
-            if nxt.kind == "id":
-                two = f"{t.text} {nxt.text}"
-                if two in _TYPE_WORDS:
-                    self.i += 2
-                    return _TYPE_WORDS[two]
-            if t.text in _TYPE_WORDS:         # `text` / `byte` / `truth` / `buffer`
-                self.i += 1
-                return _TYPE_WORDS[t.text]
+            self.need("of", "切片是 `a run of <类型>`")
+            inner = self.type_atom()
+            if inner is None:
+                self.i = save
+                return None
+            return f"mut [{inner}]" if mut else f"[{inner}]"
+        if t.text == "maybe":
+            self.i += 1
+            inner = self.type_atom()
+            if inner is None:
+                self.i = save
+                return None
+            return f"Option<{inner}>"
+        # ---- 标量 / 泛型形参 / 名字
+        # **两个词的短语要先看**（`whole number` 是一条），而且两个记号都必须是词
+        # —— 这一格是踩出来的：第一版写的生成式会**跳过换行**，于是单词的
+        # `truth` 被当成"两个词"，`self.i += 2` 顺手把**句尾的换行**一起吃了，
+        # 下一句的 `give` 于是落在"这一句还没断"的位置上，报一句指不到点子的错。
+        # **复数也收**：自然语言里 `a list of 3 whole numbers` 是常态，
+        # 只收单数会让最自然的那种写法读不通。
+        two = None
+        nxt = self.peek(1)
+        if nxt.kind == "id":
+            for cand in (f"{t.text} {nxt.text}",
+                         f"{t.text} {nxt.text[:-1]}" if nxt.text.endswith("s") else ""):
+                if cand in _TYPE_WORDS:
+                    two = cand
+                    break
+        if two is not None:
+            self.i += 2
+            return _TYPE_WORDS[two]
+        if t.text in _TYPE_WORDS:
+            self.i += 1
+            return _TYPE_WORDS[t.text]
+        if t.text in _TYPE_DIRECT:
+            self.i += 1
+            return t.text
+        if t.text in self.gparams:            # 泛型形参：原样带过去
+            self.i += 1
+            return t.text
+        if t.text in self.structs or t.text in self.variants:
+            self.i += 1
+            return t.text
+        if not self.strict_types and t.text not in _RESERVED:
+            # **第一遍对类型名宽松**：那一遍是为了收"结构体/枚举/方法"三张表，
+            # 而表里的东西**可能写在用它的函数后面**（Loment 自己不在乎先后 ——
+            # 实测把结构体写在用它之后照样编得过）。不宽松的话
+            # `to f with k as a Kind …` 后面才声明 `a Kind is either …` 会在第一遍
+            # 就炸，而那一份**完全合法**。第二遍拿着表照旧严格 —— 真拼错的名字在
+            # 那里报（`strict_types` 那一支）。
+            self.i += 1
+            return t.text
         self.i = save
         return None
 
@@ -532,9 +1007,35 @@ class Parser:
                 self.i += 1
                 continue
             if self.at(*stops):
-                return out
+                return self._merge(out)
             out.append(self.sentence())
             self.end_sentence()
+
+    def _merge(self, out: list) -> list:
+        """**把相邻的"看形状"那几句合成一个 `match`**（`docs/197` §2 的 `when … looks like`）。
+
+        合并的判据是**主语那串记号逐字相同** —— 存的是记号而不是渲染出来的字符串，
+        所以不必假设两个表达式"长得一样就等价"。
+
+        合成之后：**一条臂且没有 `when anything else`** 就是 `if let`；
+        两条以上（或带了兜底）才是 `match`。这一条是这一门的**决定**，不是 Loment 的。
+        """
+        merged: list = []
+        for s in out:
+            if s[0] == "pat" and merged and merged[-1][0] == "patgroup" \
+                    and merged[-1][1] == s[1]:
+                merged[-1][3].append(s)
+                continue
+            if s[0] == "pat":
+                # 臂表**先用 list**（要就地长），收尾再冻回 tuple —— 与这一门别处的
+                # 语法树同一个形状，只有这一格需要一次原地追加。
+                merged.append(["patgroup", s[1], s[2], [s], s[5]])
+                continue
+            if s[0] == "catchall" and merged and merged[-1][0] == "patgroup":
+                merged[-1][3].append(s)
+                continue
+            merged.append(s)
+        return [tuple(m) if m and m[0] == "patgroup" else m for m in merged]
 
     def sentence(self) -> tuple:
         t = self.cur()
@@ -555,7 +1056,15 @@ class Parser:
             return self.give_back()
         if w == "do":
             self.i += 1
+            if self.cur().kind == "id" and self.cur().text in (
+                    "let", "set", "say", "talk", "paint", "give", "when", "while",
+                    "for", "guard", "do"):
+                self.err(f"`do` 后面要写一个**表达式**（它的用处是「调用一个返回值的"
+                         f"函数、只为副作用」）；`{self.cur().text}` 本身就是一句，"
+                         f"直接写就行")
             return ("do", self.expr(), t.line)
+        if w == "guard":
+            return self.guard()
         if w == "when":
             return self.when()
         if w == "while":
@@ -567,7 +1076,7 @@ class Parser:
             return ("while", cond, body, t.line)
         if w == "for":
             return self.forloop()
-        if w in ("to", "program", "remember"):
+        if w in ("to", "program", "remember", "use", "leave", "someone") or w == "a":
             self.err(f"`{w}` 是**顶层**的句子，不能写在函数体里")
         if w == "end":
             self.err("多了一个 `end`")
@@ -580,47 +1089,60 @@ class Parser:
     def let(self) -> tuple:
         line = self.cur().line
         self.need("let")
-        name = self.cur()
-        if name.kind != "id":
-            self.err("`let` 后面要写变量名")
-        self.i += 1
+        name = self.ident("变量名")
         self.need("be", "自然语言写法里变量是 `let 名字 be 值`")
         # `let fb be a buffer of 1024 bytes` —— 分配是**另一种**东西（不是"值"）
         if self.word_at(0, "a") and self.word_at(1, "buffer") and self.word_at(2, "of"):
             self.i += 3
             n = self.expr()
             self.need("bytes", "写成 `let 名字 be a buffer of <字节数> bytes`")
-            self.tenv[name.text] = "ptr"
-            return ("letbuf", name.text, n, line)
+            self.tenv[name] = "ptr"
+            return ("letbuf", name, n, line)
         e = self.expr()
         if e[0] == "cast":                    # `let b be 200 as a byte`
-            self.tenv[name.text] = e[2]
-            return ("let", name.text, e[1], e[2], line)
-        ty = self.type_of(e)
+            self.tenv[name] = e[2]
+            return ("let", name, e[1], e[2], line)
+        # `?` 是**后缀**（`e_postfix` 已经把它收成一个 `try` 节点），所以这一格里
+        # 不是"再看一眼 `unless`"，而是"看顶上是不是那个节点"。**必须在 `let` 这一层
+        # 认出来**：Loment 的检查器明说 `?` 只能出现在 let 绑定的右半边
+        # （`? 只能用于 let 绑定`），所以它发成自己的语句形状，不能混进别处。
+        is_try = False
+        if self.at("unless"):                 # `<表达式> unless it failed` -> `<表达式>?`
+            # **放在这一层、不放 `e_postfix`**：`?` 只允许出现在 let 的右半边
+            # （检查器那句话就是"只能用于 let 绑定"），而 `e_postfix` 同时也是
+            # **实参**那一层用的 —— 放那儿的话 `find of x unless it failed` 会读成
+            # `find((x?))`（实测），`?` 落到了实参上。
+            self.i += 1
+            self.need("it", "`?` 传播写成 `<表达式> unless it failed`")
+            self.need("failed")
+            is_try = True
+        # 带 `?` 时 `let` 收到的类型是**拆开之后**的那一个（`type_of` 里那条法则）
+        ty = self.type_of(("try", e) if is_try else e)
         if ty == "()" and self.strict_types:
             # 调用了一个**不返回值**的函数。不拦的话会发出 `let x: () = f();` ——
-            # 而那要到编译那一刻才炸，且报的是"类型 `()`"，与作者写下的那句话
-            # 隔着一层。这里拦得住，因为声明表就在手上。
-            self.err(f"`{name.text}` 右边那个调用**不返回值**（`giving` 那一句没写）"
+            # 而那要到编译那一刻才炸，报的是"类型 `()`"，与作者写下的那句话隔着一层。
+            self.err(f"`{name}` 右边那个调用**不返回值**（`giving` 那一句没写）"
                      f"—— 它不能拿来当一个值")
         if ty is None and not self.strict_types:
-            # 第一遍：声明表还没收齐，先放过（`self.tenv[name]` 记成"不知道"，
-            # 后面靠它的 `let` 也只会在第二遍里被报出来）
-            return ("let", name.text, e, "i64", line)
+            # 第一遍：声明表还没收齐，先放过（后面靠它的 `let` 也只会在第二遍里被报出来）
+            self.tenv[name] = "i64"
+            return ("let", name, e, "i64", line)
         if ty is None:
             self.err(
-                f"说不出 `{name.text}` 是什么类型 —— 补一句 `as a whole number` 之类。\n"
+                f"说不出 `{name}` 是什么类型 —— 补一句 `as a whole number` 之类。\n"
                 f"  （`docs/197` §3：类型是**查**出来的，不是推出来的 —— 字面量、"
-                f"声明过的名字、以及**运算符的定则**都查得到；**调用**查不到，"
-                f"因为那要读另一个函数的声明，而读错了属于「两边都编得过」的那类错）")
-        self.tenv[name.text] = ty
-        return ("let", name.text, e, ty, line)
+                f"声明过的名字、运算符的定则、被调函数的声明、结构体字段、方法、"
+                f"容器的元素都查得到；查不到就**报错**，不默认。" )
+        self.tenv[name] = ty
+        return ("lettry", name, e, ty, line) if is_try else ("let", name, e, ty, line)
 
-    #: **运算符的定则**（成对出现的类型 -> 结果类型）。这里只放**所有语言都同意**的
-    #: 那几条：比较出真理值、`and`/`or` 出真理值、其余同型则同型。它是**语言法则**
-    #: （对每个程序只有一个答案），与"读另一个函数的返回类型"不是一回事 —— 后者是
-    #: **事实**，而事实会变（改了别的函数、这一句就该跟着变），错的那一边照样编得过。
     def type_of(self, e: tuple) -> str | None:
+        """**查**出一个表达式的类型；查不到返回 `None`（由调用方报错）。
+
+        **只查，不推**：每一条答案都写在别处（字面量自己、名字的声明、函数声明、
+        结构体字段、方法声明、容器的元素），而**那些声明就是那些答案**。
+        这里没有"猜一个再用"的分支 —— 猜错的表现是"两边都编得过"。
+        """
         k = e[0]
         if k == "num":
             return "i64"
@@ -645,21 +1167,75 @@ class Parser:
             l, r = self.type_of(e[2]), self.type_of(e[3])
             return l if (l is not None and l == r) else None
         if k == "call":
-            # **查被调函数的声明**（内建表 / 外部声明 / 本文件那几张 `to … giving`）。
-            # 这仍然是"查"，不是"推"：答案写在别处，而**那个声明就是那个答案**。
+            # **查被调函数的声明**（内建表 / 外部声明 / 本文件那几张 `to … giving`）
             return self.calls.get(e[1])
-        # 取字段：这一版没有结构体，够不到
+        if k == "try":
+            # `e?` 的类型是**拆开之后**的那一个 —— `Result<i64, i64>` -> `i64`。
+            # 它是 `?` 这个运算符自己的法则（对每个程序只有一个答案），不是"推"。
+            inner = self.type_of(e[1])
+            if inner and (inner.startswith("Result<") or inner.startswith("Option<")):
+                return inner.split("<", 1)[1].rsplit(">", 1)[0].split(",")[0].strip()
+            return None
+        if k == "field":
+            # `the x of p`：查 `p` 的类型那张结构体表
+            base = self.type_of(e[1])
+            if base is None:
+                return None
+            return self.structs.get(base, {}).get(e[2])
+        if k == "index":
+            # `item 0 of xs`：容器里那一个的类型
+            base = self.type_of(e[1])
+            if base and base.startswith("[") and base.endswith("]"):
+                return base[1:-1].split(";")[0].strip().removeprefix("mut ")
+            return None
+        if k == "method":
+            base = self.type_of(e[1])
+            if base is None:
+                return None
+            return self.methods.get((base, e[2]))
+        if k == "ctor":                       # 结构体字面量：类型就是它自己
+            return e[1]
+        if k == "evariant":                   # 枚举构造：类型是那个枚举
+            return e[1]
+        if k == "opt":                        # `something carrying x` / `nothing to carry`
+            return None
+        if k == "list":
+            # 列表字面量：**长度与元素类型都写在字面量自己身上**（查，不是推）。
+            # 元素对不上就查不出来（`[1, "a"]`）—— 那正是该报错的地方。
+            if not e[1]:
+                return None
+            ts = {self.type_of(x) for x in e[1]}
+            if len(ts) != 1 or None in ts:
+                return None
+            return f"[{ts.pop()}; {len(e[1])}]"
+        if k == "slice":                      # `the run of xs` -> 切片
+            base = self.type_of(e[1])
+            if base is None:
+                return None
+            # `&xs` 要的是**元素那一层**的切片：`[i64; 3]` -> `[i64]`，
+            # 而本来就是切片的 `[i64]` **还是** `[i64]`（不是再套一层 —— 第一版写的
+            # `f"[{base}]"` 会给出 `[[i64]]`，那是一份编不过的源）。
+            if base.startswith("mut "):
+                base = base[4:]
+            if base.startswith("[") and base.endswith("]"):
+                inner = base[1:-1]
+                return f"[{inner.split(';')[0].strip()}]"
+            return f"[{base}]"
         return None
 
     def set(self) -> tuple:
         line = self.cur().line
         self.need("set")
-        name = self.cur()
-        if name.kind != "id":
-            self.err("`set` 后面要写变量名")
-        self.i += 1
+        if self.at("item"):                   # `set item 0 of xs to 9`
+            self.i += 1
+            idx = self.without_calls(self.expr)
+            self.need("of", "改一个格是 `set item <下标> of <东西> to <值>`")
+            base = self.expr()
+            self.need("to")
+            return ("setindex", base, idx, self.expr(), line)
+        name = self.ident("变量名")
         self.need("to", "自然语言写法里赋值是 `set 名字 to 值`")
-        return ("set", name.text, self.expr(), line)
+        return ("set", name, self.expr(), line)
 
     def say(self) -> tuple:
         line = self.cur().line
@@ -706,10 +1282,44 @@ class Parser:
         self.need("back", "返回是 `give back <表达式>`")
         return ("ret", self.expr(), line)
 
+    def guard(self) -> tuple:
+        line = self.cur().line
+        self.need("guard")
+        self.need("the")
+        name = self.ident("能力域的名字")
+        self.need("space")
+        self.need("at", "守卫是 `guard the <能力域> space at <下标>`")
+        return ("guard", name, self.expr(), line)
+
     def when(self) -> tuple:
+        """三种 `when`：条件、**看形状**（一条 match 臂）、兜底。
+
+        它们在**同一个词**上，因为自然语言里就是同一个词（"当……的时候"）。
+        靠紧跟其后的词分开：`looks like`（看形状）、`anything else`（兜底）、其余是条件。
+
+        看形状那条返回的是**一条臂**，不是一整个 match —— 相邻的同类臂由 `_merge`
+        合成一个 `match`（合并的判据是**主语那串记号逐字相同**）。
+        """
         line = self.cur().line
         self.need("when")
-        arms = [(self.expr(), None)]
+        if self.at("anything"):
+            self.i += 1
+            self.need("else", "兜底那一臂写 `when anything else`")
+            self.end_sentence()
+            body = self.block({"end"})
+            self.need_end("when")
+            return ("catchall", body, line)
+        i0 = self.i
+        subj = self.expr()
+        if self.at("looks") and self.word_at(1, "like"):
+            key = tuple(t.text for t in self.t[i0:self.i])
+            self.i += 2
+            pat = self.pattern()
+            self.end_sentence()
+            body = self.block({"end"})
+            self.need_end("when")
+            return ("pat", key, subj, pat, body, line)
+        arms: list = [(subj, None)]
         self.end_sentence()
         arms[0] = (arms[0][0], self.block({"otherwise", "end"}))
         else_body = None
@@ -730,10 +1340,7 @@ class Parser:
     def forloop(self) -> tuple:
         line = self.cur().line
         self.need("for")
-        name = self.cur()
-        if name.kind != "id":
-            self.err("`for` 后面要写循环变量的名字")
-        self.i += 1
+        name = self.ident("循环变量的名字")
         self.need("from", "这一句是 `for <名字> from <下界> to <上界>`（上界**不含**）")
         lo = self.expr()
         self.need("to")
@@ -741,7 +1348,7 @@ class Parser:
         self.end_sentence()
         body = self.block({"end"})
         self.need_end("for")
-        return ("for", name.text, lo, hi, body, line)
+        return ("for", name, lo, hi, body, line)
 
     # ---- 表达式（优先级同 Loment / Rust）
 
@@ -827,13 +1434,57 @@ class Parser:
 
     def e_postfix(self):
         e = self.primary()
-        while self.at("as"):
+        while True:
+            if self.at("as"):
+                self.i += 1
+                ty = self.type_phrase()
+                if ty is None:
+                    self.err("`as` 后面要写类型（`docs/197` §2 那张表）")
+                e = ("cast", e, ty)
+                continue
+            return e
+
+    def pattern(self) -> tuple:
+        """一个**形状**（match 的臂 / `if let` 的左半边）。
+
+        只收两种：`a <枚举> that is <变体> [carrying <名字>]` 与 `_`（写 `anything else`）。
+        **`Option` / `Result` 收不了** —— 见文件头 §边界：判据比的是**单态化名**，
+        而那是编译器的内部拼法，源里写不出来。
+        """
+        if self.at("anything"):
             self.i += 1
-            ty = self.type_phrase()
-            if ty is None:
-                self.err("`as` 后面要写类型（`docs/197` §3 那张表）")
-            e = ("cast", e, ty)
-        return e
+            self.need("else", "兜底那一臂写 `when anything else`")
+            return ("any",)
+        self.need("a")
+        t = self.cur()
+        if t.kind != "id":
+            self.err("形状要写 `a <枚举> that is <变体> [carrying <名字>]`")
+        if t.text in ("Option", "Result"):
+            raise Unsupported(
+                f"第 {t.line} 行: **`Option` / `Result` 的形状这一版收不了** —— "
+                f"不是这一门的限制：判据拿写出来的名字与**单态化名**比"
+                f"（`Option::Some` 对 `Option_u32::Some`），而后者是编译器的内部拼法，"
+                f"源里写不出来（实测；`docs/197` §边界）。它们的**类型、构造、`?`** 都收。")
+        # 第一遍（收表那一遍）**只读不判**：表还没收齐，而且声明可以写在用它的
+        # 地方**后面**（Loment 不在乎先后，实测）。真判据在第二遍那一支。
+        lenient = not self.strict_types
+        if not lenient and t.text not in self.variants:
+            self.err(f"`{t.text}` 不是一个已知的枚举（形状只能看枚举，"
+                     f"`docs/197` §2）")
+        self.i += 1
+        self.need("that")
+        self.need("is", "形状是 `a <枚举> that is <变体> [carrying <名字>]`")
+        vname = self.ident("变体的名字")
+        known = self.variants.get(t.text, {})
+        if not lenient and vname not in known:
+            self.err(f"`{t.text}` 没有 `{vname}` 这个变体（有：{sorted(known)}）")
+        bind = None
+        if self.at("carrying"):
+            self.i += 1
+            bind = self.ident("绑定的名字")
+        elif not lenient and known.get(vname):
+            self.err(f"`{vname}` 带载荷 —— 要写成 `… carrying <名字>` 把值接住")
+        return ("pat", t.text, vname, bind)
 
     def primary(self):
         t = self.cur()
@@ -845,28 +1496,60 @@ class Parser:
             return ("str", t.text)
         if t.kind == "sym" and t.text == "(":
             self.i += 1
+            keep = self.no_call_of
+            self.no_call_of = False           # 括号是**显式**的：里面照旧认调用
             e = self.expr()
+            self.no_call_of = keep
             self.need(")", "括号没关上")
             return e
+        if t.kind == "sym" and t.text == "[":
+            # 方括号也收 —— 自然语言那一侧是 `the list …`，这一格是给"从 Lement 抄过来"
+            # 的人留的近路（两者发出来一模一样）
+            return self.list_literal("[", "]")
         if t.kind == "id" and t.text in ("true", "false"):
             self.i += 1
             return ("bool", t.text)
+        if t.kind == "id" and t.text == "item":       # `item 0 of xs`
+            self.i += 1
+            idx = self.without_calls(self.expr)
+            self.need("of", "取一格是 `item <下标> of <东西>`")
+            return ("index", self.e_postfix(), idx)
         if t.kind == "id" and t.text == "the":
+            return self.the_clause()
+        if t.kind == "id" and t.text == "ask":        # `ask p for size`
             self.i += 1
-            f = self.cur()
-            if f.kind != "id":
-                self.err("`the` 后面要写字段名（`the <字段> of <东西>`）")
-            self.i += 1
-            self.need("of", "取字段是 `the <字段> of <东西>`")
             base = self.e_postfix()
-            return ("field", base, f.text)
+            self.need("for", "方法是 `ask <东西> for <方法>`")
+            m = self.ident("方法名")
+            return ("method", base, m)
+        if t.kind == "id" and t.text == "nothing":    # `nothing to carry` -> None
+            self.i += 1
+            self.need("to", "`Option` 的空写 `nothing to carry`")
+            self.need("carry")
+            return ("simple", "Option::None")
+        if t.kind == "id" and t.text == "something":  # `something carrying x`
+            self.i += 1
+            self.need("carrying", "`Option` 有的写 `something carrying <值>`")
+            return ("wrapped", "Option::Some", self.e_cmp())
+        if t.kind == "id" and t.text in ("a", "an") and self._starts_a_literal():
+            # `a` / `an` 是**冠词**，而冠词也可以省 —— 所以只有在"后面那个词是个已知的
+            # **类型名**"时才当它是字面量的开头。不加这一道的话，一个**参数名叫 `a`**
+            # 的函数会在 `when a is above b` 上被读成"一个结构体字面量"，而那个错
+            # 会落在很远的地方（第一版第二次踩同一个坑：`a` 当名字是合法的）。
+            return self.a_clause()
         if t.kind == "id":
             self.i += 1
-            if self.at("of"):                 # `f of a, b`
+            no_of, self.no_call_of = self.no_call_of, False
+            if self.at("of") and not no_of:   # `f of a, b`
                 self.i += 1
-                args = [self.expr()]
+                # **实参只读到"后缀"那一层**（不是 `expr()`）：`total of p plus score of k`
+                # 要读成 `total(p) + score(k)`，而不是 `total(p + score(k))`。
+                # 中文/英文的自然读法就是前者 —— "p 的总和"是一个整体，"加上"才是运算。
+                # 想传一个算式进去就加括号（`f of (a plus b)`），与 `the x of p plus 1`
+                # 那条取字段的规矩**是同一个**（字段的底盘也是 `e_postfix`）。
+                args = [self.e_postfix()]
                 while self.eat(","):
-                    args.append(self.expr())
+                    args.append(self.e_postfix())
                 return ("call", t.text, args, t.line)
             # **没有实参的调用就写名字本身**（`say the number run`）——
             # 自然语言里不会为了一个空参数表再加一层壳。分辨靠**声明表**：
@@ -876,6 +1559,128 @@ class Parser:
                 return ("call", t.text, [], t.line)
             return ("name", t.text, t.line)
         self.err(f"这里要写一个值，得到 `{t.text}`")
+
+    def without_calls(self, sub):
+        """在**这一层**关掉"把 `of` 读成调用"（见 `no_call_of` 的注解）。"""
+        keep = self.no_call_of
+        self.no_call_of = True
+        try:
+            return sub()
+        finally:
+            self.no_call_of = keep
+
+    def list_literal(self, open_tok: str, close_tok: str) -> tuple:
+        self.need(open_tok)
+        items = [self.expr()]
+        while self.eat(","):
+            items.append(self.expr())
+        self.need(close_tok, "列表没关上")
+        return ("list", items)
+
+    def the_clause(self) -> tuple:
+        """`the …` 那一族的**五种**：列表 / 切片 / 切片（可改） / 长度 / 取字段。"""
+        self.need("the")
+        if self.at("list"):
+            self.i += 1
+            return self.list_literal_after()
+        if self.at("run") and self.word_at(1, "of"):
+            self.i += 2
+            return ("slice", self.e_postfix(), False)
+        if self.at("changeable") and self.word_at(1, "run") and self.word_at(2, "of"):
+            self.i += 3
+            return ("slice", self.e_postfix(), True)
+        if self.at("length") and self.word_at(1, "of"):
+            self.i += 2
+            return ("call", "slice_len", [self.e_postfix()], self.cur().line)
+        f = self.cur()
+        if f.kind != "id":
+            self.err("`the` 后面要写字段名（`the <字段> of <东西>`）")
+        self.i += 1
+        self.need("of", "取字段是 `the <字段> of <东西>`")
+        return ("field", self.e_postfix(), f.text)
+
+    def list_literal_after(self) -> tuple:
+        """`the list 1, 2, 3` —— 已经吃过 `the list`。"""
+        items = [self.expr()]
+        while self.eat(","):
+            items.append(self.expr())
+        return ("list", items)
+
+    def a_clause(self) -> tuple:
+        """`a …` 开头的值：结构体字面量、枚举构造、`Result` 的两个构造。
+
+        它与顶层那族声明**同一个冠词**，靠**第二个词**分开：值这边后面跟的是
+        `with`（结构体）或 `that is`（枚举）。
+        """
+        t = self.cur()
+        line = t.line
+        self.i += 1
+        nxt = self.cur()
+        if nxt.kind != "id":
+            self.err("`a` 后面要写类型的名字")
+        if nxt.text == "success" and self.word_at(1, "carrying"):
+            self.i += 2
+            return ("wrapped", "Result::Ok", self.e_cmp())
+        if nxt.text == "failure" and self.word_at(1, "carrying"):
+            self.i += 2
+            return ("wrapped", "Result::Err", self.e_cmp())
+        name = nxt.text
+        if name in ("Option", "Result"):
+            raise Unsupported(
+                f"第 {line} 行: `Option` / `Result` 用**那两句专门的写法**："
+                f"`something carrying <值>` / `nothing to carry` / "
+                f"`a success carrying <值>` / `a failure carrying <值>`")
+        self.i += 1
+        if self.at("with"):                   # 结构体字面量
+            if name not in self.structs:
+                self.err(f"`{name}` 不是一个已知的结构体（`docs/197` §2）")
+            self.i += 1
+            fields = [self.named_value()]
+            while self.eat("and"):
+                fields.append(self.named_value())
+            known = self.structs[name]
+            for fname, _ in fields:
+                if fname not in known:
+                    self.err(f"`{name}` 没有 `{fname}` 这个字段"
+                             f"（有：{sorted(known)}）")
+            return ("ctor", name, fields)
+        if self.at("that") and self.word_at(1, "is"):
+            if name not in self.variants:
+                self.err(f"`{name}` 不是一个已知的枚举（`docs/197` §2）")
+            self.i += 2
+            vname = self.ident("变体的名字")
+            if vname not in self.variants[name]:
+                self.err(f"`{name}` 没有 `{vname}` 这个变体"
+                         f"（有：{sorted(self.variants[name])}）")
+            payload = None
+            if self.at("carrying"):
+                self.i += 1
+                payload = self.e_cmp()          # 同上：载荷那一格也不是 `and` 的地盘
+            elif self.variants[name][vname]:
+                self.err(f"`{vname}` 带载荷 —— 要写成 `… carrying <值>`")
+            return ("evariant", name, vname, payload)
+        self.err(f"`a {name}` 后面要写 `with`（结构体字面量）或 `that is`（枚举构造）")
+
+    def _starts_a_literal(self) -> bool:
+        """`a` 后面那个词是不是一个**已知的类型名**（结构体 / 枚举 / `Result` 的两种）。"""
+        nxt = self.peek(1)
+        if nxt.kind != "id":
+            return False
+        return nxt.text in self.structs or nxt.text in self.variants             or nxt.text in ("success", "failure")
+
+    def named_value(self) -> tuple[str, tuple]:
+        """结构体字面量里的一个字段。
+
+        **值只读到"比较"那一层为止** —— 因为 `and` 在这一格是**分隔符**
+        （`with x as 1 and y as 2`），不再是"与"。读到 `expr()` 的话，
+        `x as 4 and y as 5` 里那个 `4` 会把 `and y` 一起吃成 `(4 && y)`，
+        再撞上 `as` 报一句指不到点子的错（实测）。
+        **想在字段值里写 `and` / `or` 就加括号** —— 括号那一支走的是 `expr()`，
+        运算符照旧。
+        """
+        fname = self.ident("字段名")
+        self.need("as", "结构体字面量是 `a <类型> with <字段> as <值>`")
+        return fname, self.e_cmp()
 
 
 # ---------------------------------------------------------------- 发射
@@ -922,10 +1727,9 @@ _IND = "    "
 
 
 class Emitter:
-    def __init__(self, rets: dict[str, str], consts: dict[str, str], path: str):
-        self.rets, self.consts, self.path = rets, consts, path
+    def __init__(self, path: str = "translate"):
+        self.path = path
         self.used_write_num = False
-        self.cur_fn = ""
 
     # ---- 表达式
 
@@ -933,22 +1737,41 @@ class Emitter:
         k = e[0]
         if k == "num":
             return e[1]
-        if k == "str":
-            return e[1]
-        if k == "bool":
+        if k in ("str", "bool"):
             return e[1]
         if k == "name":
             return e[1]
+        if k == "simple":                     # `nothing to carry` -> Option::None
+            return e[1]
+        if k == "wrapped":                    # `something carrying x` -> Option::Some(x)
+            return f"{e[1]}({self.ex(e[2])})"
         if k == "bin":
             return f"({self.ex(e[2])} {e[1]} {self.ex(e[3])})"
         if k == "un":
             return f"({e[1]}{self.ex(e[2])})"
         if k == "cast":
             return f"({self.ex(e[1])} as {e[2]})"
+        if k == "try":
+            return f"({self.ex(e[1])}?)"
         if k == "field":
             return f"({self.ex(e[1])}.{e[2]})"
+        if k == "index":
+            return f"({self.ex(e[1])}[{self.ex(e[2])}])"
+        if k == "method":
+            return f"{self.ex(e[1])}.{e[2]}()"
         if k == "call":
             return f"{e[1]}({', '.join(self.ex(a) for a in e[2])})"
+        if k == "list":
+            return "[" + ", ".join(self.ex(a) for a in e[1]) + "]"
+        if k == "slice":
+            return f"(&{'mut ' if e[2] else ''}{self.ex(e[1])})"
+        if k == "ctor":
+            inner = ", ".join(f"{n}: {self.ex(v)}" for n, v in e[2])
+            return f"{e[1]} {{ {inner} }}"
+        if k == "evariant":
+            if e[3] is None:
+                return f"{e[1]}::{e[2]}"
+            return f"{e[1]}::{e[2]}({self.ex(e[3])})"
         raise AssertionError(f"发射器不认识这个节点 {k!r}")  # pragma: no cover
 
     # ---- 语句
@@ -960,14 +1783,22 @@ class Emitter:
             k = s[0]
             if k == "let":
                 out.append(f"{pad}let {s[1]}: {s[3]} = {self.ex(s[2])};")
+            elif k == "lettry":
+                # `let x: T = e?;` —— **`?` 只能是 let 的右半边**（检查器那一句话
+                # 就是"只能用于 let 绑定"），所以这一格单独一种语句，不能混进 `let`。
+                out.append(f"{pad}let {s[1]}: {s[3]} = {self.ex(s[2])}?;")
             elif k == "letbuf":
                 out.append(f"{pad}let {s[1]}: ptr = alloc({self.ex(s[2])});")
             elif k == "set":
                 out.append(f"{pad}{s[1]} = {self.ex(s[2])};")
+            elif k == "setindex":
+                out.append(f"{pad}{self.ex(s[1])}[{self.ex(s[2])}] = {self.ex(s[3])};")
             elif k == "ret":
                 out.append(f"{pad}return {self.ex(s[1])};")
             elif k == "do":
                 out.append(f"{pad}{self.ex(s[1])};")
+            elif k == "guard":
+                out.append(f"{pad}guard {s[1]}({self.ex(s[2])});")
             elif k == "say":
                 v = self.ex(s[1])
                 out.append(f"{pad}syscall4(1, 1, str_ptr({v}) as u64, "
@@ -1008,20 +1839,92 @@ class Emitter:
                     out.append(f"{pad}}} else {{")
                     out += self.stmts(s[2], depth + 1)
                 out.append(f"{pad}}}")
+            elif k == "patgroup":
+                out += self.patgroup(s, depth)
             else:  # pragma: no cover - 解析器只会产出上面那些
                 raise AssertionError(f"发射器不认识这个语句 {k!r}")
         return out
 
-    def fn(self, f: Fn) -> str:
-        self.cur_fn = f.name
-        sig = ", ".join(f"{n}: {t}" for n, t in f.params)
-        head = f"pub fn {f.name}({sig})"
+    def patgroup(self, s: tuple, depth: int) -> list[str]:
+        """**看形状那几句** -> `match` 或 `if let`（`docs/197` §2 的那条决定）。"""
+        pad = _IND * depth
+        subj, arms = self.ex(s[2]), s[3]
+        pats = [a for a in arms if a[0] == "pat"]
+        catch = [a for a in arms if a[0] == "catchall"]
+        lone = len(arms) == 1 and arms[0][0] == "pat"
+        if lone and not catch:
+            p = pats[0]
+            out = [f"{pad}if let {self.pat(p[3])} = {subj} {{"]
+            out += self.stmts(p[4], depth + 1)
+            out.append(f"{pad}}}")
+            return out
+        out = [f"{pad}match {subj} {{"]
+        for a in arms:
+            if a[0] == "catchall":
+                # `("catchall", body, line)` —— 正文在**第一格**（第二格才是行号；
+                # 写成 `a[2]` 会把一个整数当语句表传下去，实测报"int 不可迭代"）
+                out.append(f"{pad}{_IND}_ => {{")
+                out += self.stmts(a[1], depth + 2)
+            else:
+                out.append(f"{pad}{_IND}{self.pat(a[3])} => {{")
+                out += self.stmts(a[4], depth + 2)
+            out.append(f"{pad}{_IND}}}")
+        out.append(f"{pad}}}")
+        return out
+
+    def pat(self, p: tuple) -> str:
+        if p[0] == "any":
+            return "_"
+        _, ty, var, bind = p
+        return f"{ty}::{var}" if bind is None else f"{ty}::{var}({bind})"
+
+    # ---- 声明
+
+    def vis(self, pub: bool) -> str:
+        return "pub " if pub else ""
+
+    def gpar(self, generics: tuple[str, ...]) -> str:
+        return f"<{', '.join(generics)}>" if generics else ""
+
+    def struct(self, st: Struct) -> str:
+        return (f"{self.vis(st.pub)}struct {st.name}{self.gpar(st.generics)} {{\n"
+                + "".join(f"{_IND}{n}: {t},\n" for n, t in st.fields) + "}")
+
+    def enum(self, en: Enum) -> str:
+        arms = "".join(f"{_IND}{v}" + (f"({p})" if p else "") + ",\n"
+                       for v, p in en.variants)
+        return f"{self.vis(en.pub)}enum {en.name}{self.gpar(en.generics)} {{\n{arms}}}"
+
+    def trait(self, tr: Trait) -> str:
+        sig = f"fn {tr.method}(self)"
+        if tr.ret != "()":
+            sig += f" -> {tr.ret}"
+        sig += ";"
+        return f"{self.vis(tr.pub)}trait {tr.name} {{\n{_IND}{sig}\n}}"
+
+    def impl(self, im: Impl) -> str:
+        body = []
+        for m in im.methods:
+            body.append(self.fn(m, pub=False, inner=True))
+        return (f"impl {im.trait} for {im.target} {{\n"
+                + "\n\n".join(_indent(b, 1) for b in body) + "\n}")
+
+    def fn(self, f: Fn, pub: bool = True, inner: bool = False) -> str:
+        sig = []
+        for n, t in f.params:
+            sig.append(n if n == "self" else f"{n}: {t}")
+        head = f"{self.vis(pub)}fn {f.name}{self.gpar(f.generics)}({', '.join(sig)})"
         if f.ret != "()":
             head += f" -> {f.ret}"
-        body = self.stmts(f.stmts, 1)
+        body = self.stmts(f.stmts, 1 if not inner else 1)
         if not body:
             return head + " {\n}"
         return head + " {\n" + "\n".join(body) + "\n}"
+
+
+def _indent(text: str, n: int) -> str:
+    pad = _IND * n
+    return "\n".join(pad + ln if ln.strip() else ln for ln in text.split("\n"))
 
 
 # ---------------------------------------------------------------- 入口
@@ -1037,34 +1940,45 @@ def parse_program(src: str, need_program: bool = True,
     ## 为什么**读两遍**
 
     第一遍只为收"函数名 -> 返回类型"这张表，第二遍拿它把类型查全。两遍用的**同一份
-    记号流**（第一遍只读不动它），差别只在 `strict_types`：
-    `let a be sum_to of LIMIT` 在第一遍时 `sum_to` 的返回类型还不知道，第二遍就知道了。
+    记号流**（第一遍只读不动），差别只在 `strict_types`。
 
     不多读这一遍的话，每个"let 一个调用结果"都得写成
-    `let a be (sum_to of LIMIT) as a whole number` —— 而**少写就报错**，报的还是
-    "调用定不了类型"。那条路是把成本转嫁给用户，而这里**读两遍就够了**。
+    `let a be (sum_to of LIMIT) as a whole number` —— 而少写就报错。那条路是
+    **把成本转嫁给用户**，而这里读两遍就够了。
     """
     toks = tokenize(src)
     seed = dict(externs or {})
-    first = Parser(toks, src, consts=consts, calls=seed,
-                   strict_types=False).program(need_program)
+    p1 = Parser(toks, src, consts=consts, calls=seed, strict_types=False)
+    first = p1.program(need_program)
     calls = dict(seed)
-    calls.update({f.name: f.ret for f in first.fns})
-    return Parser(toks, src, consts=consts, calls=calls).program(need_program)
+    for f in first.fns + first.externs:
+        if f.ret in f.generics:
+            # **泛型函数的返回类型查不出来** —— `largest<T>(a: T, b: T) -> T` 的 `T`
+            # 不是一个类型，它是"调用点当场定的那个"。放进表里的话
+            # `let m be largest of 1, 2` 会发成 `let m: T = …;`，那是一份编不过的源。
+            # 所以**不放进表**：查不到就让作者写 `as`（与"查不到就报错"同一条纪律）。
+            continue
+        calls[f.name] = f.ret
+    # 第一遍已经把三张"类型表"收全了（结构体字段 / 变体 / 方法），第二遍直接继承 ——
+    # 不必再扫一遍：那三张表只由**声明**决定，而声明在两遍里一模一样。
+    p2 = Parser(toks, src, consts=consts, calls=calls)
+    p2.structs, p2.variants, p2.methods = p1.structs, p1.variants, p1.methods
+    return p2.program(need_program)
 
 
 def _check_names(prog: Program) -> None:
-    """**点名**两种写错：`set` 一个没声明过的名字、调用一个不存在的函数。
+    """**点名**三种写错：`set` 一个没声明过的名字、调用一个不存在的函数、
+    用了一个不存在的能力域。
 
     分成两步（先把全部名字收齐再查）是因为单遍扫会把"先用在先、声明在后"判成错的
     —— 那种假红比不查还坏。
     """
-    fns = {f.name for f in prog.fns}
+    fns = {f.name for f in prog.fns} | {f.name for f in prog.externs}
     builtin = set(_BUILTINS)
     for f in prog.fns:
         declared = {n for n, _ in f.params}
         for s in _walk(f.stmts):
-            if s[0] in ("let", "letbuf"):
+            if s[0] in ("let", "letbuf", "lettry"):
                 declared.add(s[1])
         for s in _walk(f.stmts):
             if s[0] == "set" and s[1] not in declared:
@@ -1074,13 +1988,16 @@ def _check_names(prog: Program) -> None:
                     f"第 {s[-1]} 行: `set {s[1]} to …`，可 `{s[1]}` 在这个函数里"
                     f"**没有声明过**（`let` 一句都没有）—— 名字写错了，"
                     f"或者这一条该是 `let`")
-        for name, line in _calls(f.stmts):
-            if name in fns or name in builtin or name == "nl_write_num":
-                continue
-            raise Unsupported(
-                f"第 {line} 行: 调用 `{name}` —— 这一份里没有这个函数"
-                f"（内建表见 `.claude/skills/loment/SKILL.md` §3；"
-                f"这一版不收 `use`，所以外部函数也调不到）")
+            # **能力域的名字这里查不了**：那份声明不进这段正文（它归 Potato 对象的
+            # `capabilities`，由 `emit_lomt` 发），所以 `translate` 手上的文本里
+            # **根本没有** `a <空间> space called …` 那一句。名字写错的后果由编译器
+            # 那一侧接（E4「未声明的能力域」），**报得一样准** —— 这里不必再造一份
+            # 半截的判据（半截的判据会把"名字对但声明在别处"判成错）。
+        # **"调用了不存在的函数"这一格故意不查**。查过一版，撤掉了：
+        # `use "别的.lomt"` 引进来的函数**在这段正文里看不见**（`use` 那一句和那份
+        # 库都不在这个单元里），于是每一个跨单元的调用都会被判成错的 ——
+        # 那是**假红**，而假红比不查还坏（`docs/197` §5 那条纪律的反面教材）。
+        # 真判据在编译器那一侧：E2「未定义的函数」，报得准，而且它看得见整棵依赖树。
 
 
 def _walk(body: list):
@@ -1091,6 +2008,9 @@ def _walk(body: list):
                 yield from _walk(arm)
             if s[2] is not None:
                 yield from _walk(s[2])
+        elif s[0] == "patgroup":
+            for a in s[3]:
+                yield from _walk(a[4] if a[0] == "pat" else a[1])
         elif s[0] == "while":
             yield from _walk(s[2])
         elif s[0] == "for":
@@ -1108,15 +2028,23 @@ def _calls(body: list):
 
 def _exprs(s: tuple):
     k = s[0]
-    if k in ("let", "set"):
+    if k in ("let", "lettry"):
         yield s[2], s[-1]
     elif k == "letbuf":
         yield s[2], s[3]
+    elif k == "set":
+        yield s[2], s[-1]
+    elif k == "setindex":
+        yield s[1], s[4]
+        yield s[2], s[4]
+        yield s[3], s[4]
     elif k in ("ret", "do", "say"):
         yield s[1], s[-1]
     elif k == "saynum":
         yield s[1], s[2]
-    elif k in ("talk",):
+    elif k == "guard":
+        yield s[2], s[3]
+    elif k == "talk":
         for e in s[1:5]:
             yield e, s[5]
     elif k == "paint":
@@ -1130,6 +2058,8 @@ def _exprs(s: tuple):
     elif k == "when":
         for c, _arm in s[1]:
             yield c, s[3]
+    elif k == "patgroup":
+        yield s[2], s[4]
 
 
 def _calls_in_expr(e: tuple, line: int):
@@ -1141,36 +2071,67 @@ def _calls_in_expr(e: tuple, line: int):
     elif k == "bin":
         yield from _calls_in_expr(e[2], line)
         yield from _calls_in_expr(e[3], line)
-    elif k in ("un", "cast"):
-        yield from _calls_in_expr(e[-1] if k == "un" else e[1], line)
+    elif k == "un":
+        yield from _calls_in_expr(e[2], line)
+    elif k == "cast":
+        yield from _calls_in_expr(e[1], line)
+    elif k == "try":
+        yield from _calls_in_expr(e[1], line)
     elif k == "field":
         yield from _calls_in_expr(e[1], line)
+    elif k == "index":
+        yield from _calls_in_expr(e[1], line)
+        yield from _calls_in_expr(e[2], line)
+    elif k == "method":
+        yield from _calls_in_expr(e[1], line)
+    elif k == "wrapped":
+        yield from _calls_in_expr(e[2], line)
+    elif k == "list":
+        for a in e[1]:
+            yield from _calls_in_expr(a, line)
+    elif k == "slice":
+        yield from _calls_in_expr(e[1], line)
+    elif k == "ctor":
+        for _n, v in e[2]:
+            yield from _calls_in_expr(v, line)
+    elif k == "evariant" and e[3] is not None:
+        yield from _calls_in_expr(e[3], line)
 
 
-def translate(src: str, keep: set[str] | None = None,
-              externs: dict[str, str] | None = None,
-              consts: dict[str, str] | None = None) -> str:
-    """自然语言源码 -> Loment 源码（**只有函数**，`module` 头由调用方加）。
+def emit(prog: Program, keep_out: bool = True) -> str:
+    """程序 -> Loment 源码。
 
-    * `keep` 给了就只翻这些函数 —— 与 `ctrans` / `gotrans` 同一个约定（`lomt_from`
-      按它把"要实现的"与"留作 `extern` 的"分开）。
-    * `consts` 是模块常量表（`name -> 类型`），由调用方给。这一门**不需要**它来定类型
-      （`let` 的类型是写出来的），收下来只为了与另外几门**同一个签名**。
+    **只发"这一层该发的"**：`module` / 能力域 / 常量 / `excluded` 由 `lomt_from` 发
+    （走 Potato 对象），这里发的是**剩下的全部** —— `choose` / `use` / 结构体 / 枚举 /
+    trait / impl / 函数。
+
+    **顺序是定死的**（不是源码顺序）：`choose` -> `use` -> 结构体 -> 枚举 -> trait ->
+    impl -> 函数。Loment 对声明的先后**没有要求**（实测：结构体写在用它的函数之后照样过），
+    所以这里按"读起来顺"排，而不是按作者写的顺序 —— 产物要能与人手写的那份**逐字节**比，
+    那个"手写的样子"就是按类聚在一起的。
     """
-    prog = parse_program(src, need_program=False, consts=consts,
-                          externs=externs)
-    _check_names(prog)
-    rets = {f.name: f.ret for f in prog.fns}
-    if externs:
-        rets.update(externs)
-    seen: set[str] = set()
+    em = Emitter()
+    out: list[str] = []
+    if prog.mode:
+        out.append(f"choose {prog.mode}")
+    for u in prog.uses:
+        out.append(u.text)
+    for st in prog.structs:
+        out.append(em.struct(st))
+    for en in prog.enums:
+        out.append(em.enum(en))
+    for tr in prog.traits:
+        out.append(em.trait(tr))
+    for im in prog.impls:
+        out.append(em.impl(im))
+    # **私有常量走这里，公开的走 Potato 对象**（`emit_lomt` 只发 `pub const`）。
+    # 分成两条路不是拼凑：公开那条要进对象（下游读得到），私有那条不必 ——
+    # 而"只有这里看得见"这件事**只有我这一层知道**，`emit_lomt` 没有这个信息。
+    for c in prog.consts:
+        if not c.pub:
+            out.append(f"const {c.name}: {c.ty} = {c.value};")
     for f in prog.fns:
-        if f.name in seen:
-            raise Unsupported(f"第 {f.line} 行: 函数 `{f.name}` 重名"
-                              f"（Loment 没有重载，名字必须精确）")
-        seen.add(f.name)
-    em = Emitter(rets, consts or {}, "translate")
-    out = [em.fn(f) for f in prog.fns if keep is None or f.name in keep]
+        out.append(em.fn(f, pub=f.pub))
     text = "\n\n".join(out)
     if text:
         text += "\n"
@@ -1181,10 +2142,32 @@ def translate(src: str, keep: set[str] | None = None,
     return text
 
 
+def translate(src: str, keep: set[str] | None = None,
+              externs: dict[str, str] | None = None,
+              consts: dict[str, str] | None = None) -> str:
+    """自然语言源码 -> Loment 源码。
+
+    **`keep` 在这一门没有用武之地**（与另外六门不同）：这里的 `src` 是**整份源**的
+    正文，每一支都带实现，所以没有"要实现的"与"留作 `extern` 的"要分。
+    它留在签名里是为了与 `ctrans` / `gotrans` **同一个形状**（`lomt_from` 按同一张
+    表调它们）。
+    """
+    prog = parse_program(src, need_program=False, consts=consts, externs=externs)
+    _check_names(prog)
+    seen: set[str] = set()
+    for f in prog.fns:
+        if f.name in seen:
+            raise Unsupported(f"第 {f.line} 行: 函数 `{f.name}` 重名"
+                              f"（Loment 没有重载，名字必须精确）")
+        seen.add(f.name)
+    return emit(prog)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="nltrans",
-        description="自然语言写法 -> Loment (docs/197)。出的是**函数**，module 头由调用方加。")
+        description="自然语言写法 -> Loment (docs/197)。出的是**声明与函数**，"
+                    "module / 能力域 / 常量 / excluded 由 lomt_from 发。")
     ap.add_argument("path", help="自然语言写法的源 (.nl)")
     ap.add_argument("--out", metavar="PATH", help="写到文件（默认 stdout）")
     a = ap.parse_args(argv)

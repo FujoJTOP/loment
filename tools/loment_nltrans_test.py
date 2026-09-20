@@ -59,6 +59,20 @@ EX = ROOT / "loment" / "nltrans"
 #:                                            47
 WANT_RC = (1 + 2) + 6 + 1 + 7 + (3 * 10)
 
+#: `Surface.nl` / `Surface.lomt` 那一对（完整面）的期望值。**推出来的**：
+#:   第一行 `total(p) + score(k) + pick(k) + summed + big`
+#:     p = Point{x:4, y:5}  -> total = 9
+#:     k = Kind::Big(3)     -> score = 3*2 = 6；pick = 3
+#:     xs 先 [0,0,0] 再设成 [1,2,3]，然后 `fill` 把第 0 格改成 99 -> [99,2,3]
+#:     summed = 99+2+3 = 104；big = max(8, 3) = 8
+#:     => 9 + 6 + 3 + 104 + 8 = **130**
+#:   第二行 `s + g + SECRET + take(xs)`
+#:     s = p.size() = 4+5 = 9；g = guarded(2) = 2；SECRET = 7；take = 99
+#:     => 9 + 2 + 7 + 99 = **117**
+WANT_SURFACE_OUT = "surface 130 117\n"
+#: 退出码走**库函数**那条路：`triple(big)` = 8*3 = **24**（`use` 进来的那份库真的被用到了）
+WANT_SURFACE_RC = 8 * 3
+
 
 TESTS: list = []
 
@@ -315,10 +329,15 @@ def test_out_of_subset_is_loud_and_points_at_the_line():
     （实测那边报的是第 2 行，而那一句在文件第 3 行）。
     """
     cases = [
-        ("program p\n\nuse json\n", "还不收"),
+        # `use` 这一版收了；顶层不认识的句子照旧要报
+        ("program p\n\nlet x be 1\n", "只能写在函数体里"),
+        ("program p\n\nthe switches come from extra\n", "顶层不认识的句子"),
         ("program p\n\nto f with a as a myst\n    give back a\nend\n", "类型短语"),
+        # **"调用了不存在的函数"这一格故意不查**（见 `docs/197` §5）：
+        # `use "别的.lomt"` 引进来的函数在这段正文里看不见，查了就是**假红**。
+        # 真判据在编译器那一侧（E2「未定义的函数」），所以这一份**一个字都不报**。
         ("program p\n\nto f giving a whole number\n"
-         "    give back nope of 1\nend\n", "没有这个函数"),
+         "    give back nope of 1\nend\n", None),
         ("program p\n\nto f\n    set x to 1\nend\n", "没有声明过"),
         ("program p\n\nto f\n    talk to the machine 60 with 1, 2\nend\n", "三个"),
         ("program p\n\nto f\n    let x be a plus b\nend\n", "说不出"),
@@ -334,9 +353,11 @@ def test_out_of_subset_is_loud_and_points_at_the_line():
         try:
             nltrans.translate(src)
         except (nltrans.Unsupported, nltrans.NaturalError) as e:
+            assert want is not None, f"这一份本该**收下**，却被拒了：{e}"
             assert want in str(e), f"要点名 `{want}`：{e}"
         else:
-            raise AssertionError(f"{src!r} 在子集外，却一个字都没报（该点 `{want}`）")
+            assert want is None, (
+                f"{src!r} 在子集外，却一个字都没报（该点 `{want}`）")
     print(f"      {len(cases)} 档子集外各报各的，都点到了点子上")
 
 
@@ -419,6 +440,261 @@ def test_a_dot_nl_file_is_read_by_extension():
     assert "natural" in loment_diag.LANG_EDGE_EN
     assert "natural" in loment_diag.LANG_ABI_EN
     print("      后缀表 / LANGS / _TOOLS / 语言卡 四处对齐")
+
+
+@test
+def test_the_surface_program_runs_to_the_derived_numbers():
+    """**完整面的那一份**（`Surface.nl`）：真编真跑，两个数都对上。
+
+    它就是"这一门到底能写多少东西"的答卷 —— 一篇里同时用到了结构体、枚举、
+    trait/impl（`ask p for size`）、泛型、`match` 与 `if let`、能力域与守卫、
+    数组与切片、`use` 引进来的库函数、`only here` 的私有常量、`choose no_std`。
+
+    期望值是**推出来的**（见 `WANT_SURFACE_OUT` / `WANT_SURFACE_RC`）。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL 来跑 ELF")
+        return
+    exe, dump = _build(EX / "Surface.nl")
+    rc, out = _run_elf(exe)
+    assert out == WANT_SURFACE_OUT, f"标准输出不对: {out!r}" + dump
+    assert rc == WANT_SURFACE_RC, f"退出码 {rc} != 推出的 {WANT_SURFACE_RC}" + dump
+    print(f"      Surface.nl -> {rc}，标准输出 {out!r}（与推导一致）")
+
+
+@test
+def test_the_surface_twin_is_byte_identical_and_runs_by_itself():
+    """`Surface.lomt` 是 `Surface.nl` 的**同源 Loment 写法**，两条一起钉。
+
+    ① 逐字节相同（`docs/188` §7.1.1 那条原话）；② 它**自己**也跑到同一对数字 ——
+    没有 ② 的话，① 退化成"比两份文本"。
+    """
+    got = potato_from.front_door(EX / "Surface.nl").source
+    want = (EX / "Surface.lomt").read_bytes().decode("utf-8")
+    assert got == want, "两种拼法翻出来的 Loment 不同（`docs/188` §7.1.1）"
+    if not _wsl():
+        print("      SKIP: 需要 WSL 来跑 ELF（逐字节那半已过）")
+        return
+    exe, dump = _build(EX / "Surface.lomt")
+    rc, out = _run_elf(exe)
+    assert (rc, out) == (WANT_SURFACE_RC, WANT_SURFACE_OUT), (rc, out) + dump
+    print(f"      逐字节相同（{len(want.encode())} 字节），且孪生自己跑到 {rc}")
+
+
+@test
+def test_every_declaration_shape_lowers_onto_the_right_loment():
+    """**声明的自然说法 -> Loment 构造**：一条一格，逐字比对。
+
+    这一条钉的是"**拼法与形状**"那一层 —— 每一句自然语言落到哪个 Loment 写法上。
+    它比"跑出正确的数"更细：数对得上容许很多拼法漂移，而这里比的是**同一串字节**。
+    """
+    t = nltrans.translate(
+        "program p\n"
+        "\n"
+        "the standard library is not available\n"
+        "\n"
+        "use json\n"
+        "\n"
+        "remember K as 3\n"
+        "remember HIDDEN as 9, only here\n"
+        "\n"
+        "a Pair for any T has left as a T and right as a T\n"
+        "a Kind is either Small or Big carrying a count\n"
+        "a Sizer can size giving a count\n"
+        "a Pair can be a Sizer\n"
+        "    to size giving a count\n"
+        "        give back 1\n"
+        "    end\n"
+        "end\n"
+        "\n"
+        "a disk space called slots covers 0 to 4, and it can be taken back\n"
+        "leave out \"the network\"\n"
+        "someone else wrote read_at with fd as a count giving a whole number\n")
+    for want in ("choose no_std",
+                 "use json",
+                 "const HIDDEN: i64 = 9;",
+                 "pub struct Pair<T> {\n    left: T,\n    right: T,\n}",
+                 "pub enum Kind {\n    Small,\n    Big(u32),\n}",
+                 "pub trait Sizer {\n    fn size(self) -> u32;\n}",
+                 "impl Sizer for Pair {\n    fn size(self) -> u32 {\n"
+                 "        return 1;\n    }\n}"):
+        assert want in t, f"少了这一段：{want!r}\n{t}"
+    print("      choose / use / 结构体 / 枚举 / trait / impl 逐字对上")
+
+
+@test
+def test_match_and_if_let_are_told_apart_by_the_number_of_arms():
+    """**看形状那几句 → `match` 还是 `if let`**，由**臂的条数**决定（`docs/197` §2）。
+
+    一条臂、没有兜底 ⇒ `if let`；两条以上（或带 `when anything else`）⇒ `match`。
+    合并的判据是**主语那串记号逐字相同** —— 所以两条主语不同的形状句**不该**并起来。
+    """
+    # 两条臂 -> match（且臂之间**不夹**别的东西，顺序照写）
+    m = nltrans.translate(
+        "to f with k as a Kind giving a whole number\n"
+        "    when k looks like a Kind that is Big carrying w\n"
+        "        give back w\n"
+        "    end\n"
+        "    when k looks like a Kind that is Small\n"
+        "        give back 0\n"
+        "    end\n"
+        "end\n"
+        "a Kind is either Small or Big carrying a whole number\n")
+    assert "match k {" in m and "Kind::Big(w) => {" in m and "Kind::Small => {" in m, m
+    assert "if let" not in m, m
+    # 一条臂 + 兜底 -> match，且兜底是 `_`
+    m2 = nltrans.translate(
+        "to f with k as a Kind giving a whole number\n"
+        "    when k looks like a Kind that is Big carrying w\n"
+        "        give back w\n"
+        "    end\n"
+        "    when anything else\n"
+        "        give back 0\n"
+        "    end\n"
+        "end\n"
+        "a Kind is either Small or Big carrying a whole number\n")
+    assert "match k {" in m2 and "_ => {" in m2, m2
+    # 一条臂、没有兜底 -> if let
+    m3 = nltrans.translate(
+        "to f with k as a Kind giving a whole number\n"
+        "    when k looks like a Kind that is Big carrying w\n"
+        "        give back w\n"
+        "    end\n"
+        "    give back 0\n"
+        "end\n"
+        "a Kind is either Small or Big carrying a whole number\n")
+    assert "if let Kind::Big(w) = k {" in m3, m3
+    assert "match" not in m3, m3
+    print("      一条臂 -> if let；两条/带兜底 -> match")
+
+
+@test
+def test_the_values_and_the_containers_lower_onto_their_forms():
+    """**值那一半**：结构体字面量 / 枚举构造 / 取字段 / 取一格 / 切片 / 长度 / 方法 / `?`。"""
+    t = nltrans.translate(
+        "a Point has x as a whole number and y as a whole number\n"
+        "a Kind is either Small or Big carrying a whole number\n"
+        "a Sizer can size giving a whole number\n"
+        "a Point can be a Sizer\n"
+        "    to size giving a whole number\n"
+        "        give back the x of self\n"
+        "    end\n"
+        "end\n"
+        "\n"
+        "to f with xs as a run of whole numbers and p as a Point giving a whole number\n"
+        "    let a be a Point with x as 1 and y as 2\n"
+        "    let b be a Kind that is Big carrying 3\n"
+        "    let c be a Kind that is Small\n"
+        "    let d be the list 1, 2, 3\n"
+        "    let e be item 1 of xs\n"
+        "    let g be the length of xs\n"
+        "    let h be ask p for size\n"
+        "    let i be the run of xs\n"
+        "    let j be the changeable run of xs\n"
+        "    give back the x of a plus e plus g plus h\n"
+        "end\n")
+    for want in ("let a: Point = Point { x: 1, y: 2 };",
+                 "let b: Kind = Kind::Big(3);",
+                 "let c: Kind = Kind::Small;",
+                 "let d: [i64; 3] = [1, 2, 3];",
+                 "let e: i64 = (xs[1]);",
+                 "let g: u32 = slice_len(xs);",
+                 "let h: i64 = p.size();",
+                 "let i: [i64] = (&xs);",
+                 "let j: [i64] = (&mut xs);",
+                 "return ((((a.x) + e) + g) + h);"):
+        assert want in t, f"少了这一段：{want!r}\n{t}"
+    print("      结构体 / 枚举 / 列表 / 下标 / 切片 / 长度 / 方法 逐字对上")
+
+
+@test
+def test_optional_and_result_are_types_values_and_question_mark_only():
+    """**`Option` / `Result` 收三样，不收第四样** —— 第四样是**语言层面**的边界。
+
+    收：类型（`maybe <T>` / `<T> or a failure of <E>`）、构造、`?`（`unless it failed`）。
+    不收：**形状**。判据拿写出来的名字与**单态化名**比（`Option::Some` 对
+    `Option_u32::Some`），而后者是编译器的内部拼法 —— 源里根本写不出来（实测）。
+    """
+    t = nltrans.translate(
+        "to maybe_one with x as a whole number giving maybe a whole number\n"
+        "    when x is above 10\n"
+        "        give back nothing to carry\n"
+        "    end\n"
+        "    give back something carrying x plus 1\n"
+        "end\n"
+        "\n"
+        "to find with x as a whole number "
+        "giving a whole number or a failure of a whole number\n"
+        "    when x is above 10\n"
+        "        give back a failure carrying x\n"
+        "    end\n"
+        "    give back a success carrying x plus 1\n"
+        "end\n"
+        "\n"
+        "to prop with x as a whole number "
+        "giving a whole number or a failure of a whole number\n"
+        "    let y be find of x unless it failed\n"
+        "    give back a success carrying y\n"
+        "end\n")
+    assert "pub fn maybe_one(x: i64) -> Option<i64> {" in t, t
+    assert "return Option::None;" in t, t
+    assert "return Option::Some((x + 1));" in t, t
+    assert "pub fn find(x: i64) -> Result<i64, i64> {" in t, t
+    assert "return Result::Err(x);" in t, t
+    assert "pub fn prop(x: i64) -> Result<i64, i64> {" in t, t
+    # `?` 拆开之后 `y` 是 **i64**（不是 `Result<…>`），而 `?` 只写在 let 的右半边
+    assert "let y: i64 = find(x)?;" in t, t
+    assert "return Result::Ok(y);" in t, t
+    # 形状那一格**响亮地拒**，并且说清是语言层面的
+    try:
+        nltrans.translate("to f with x as maybe a whole number giving a whole number\n"
+                          "    when x looks like a Option that is Some carrying v\n"
+                          "        give back v\n"
+                          "    end\n"
+                          "    give back 0\n"
+                          "end\n")
+    except (nltrans.Unsupported, nltrans.NaturalError) as e:
+        assert "单态化" in str(e) or "Option" in str(e), e
+    else:
+        raise AssertionError("`Option` 的形状这一版收不了，却一个字都没报")
+    print("      Option/Result 的类型、构造、`?` 都收；形状响亮地拒（语言层面）")
+
+
+@test
+def test_the_generic_return_type_is_not_looked_up():
+    """**泛型函数的返回类型查不出来** —— 所以 `let m be largest of a, b` 要写 `as`。
+
+    `largest<T>(a: T, b: T) -> T` 的 `T` 不是一个类型，它是"调用点当场定的那个"。
+    放进声明表的话会发出 `let m: T = …;`，那是**一份编不过的源**；所以它**不进表**，
+    查不到就让作者写 `as`（与"查不到就报错"同一条纪律）。
+    """
+    try:
+        nltrans.translate(
+            "to largest for any T with a as a T and b as a T giving a T\n"
+            "    give back a\n"
+            "end\n"
+            "to f giving a whole number\n"
+            "    let m be largest of 1, 2\n"
+            "    give back m\n"
+            "end\n")
+    except (nltrans.Unsupported, nltrans.NaturalError) as e:
+        assert "说不出" in str(e), e
+    else:
+        raise AssertionError("泛型返回类型被当成具体类型查出来了 —— 那会发出一份编不过的源")
+    # 补一句 `as`（并且给调用点一份**声明过类型**的实参）就成立
+    ok = nltrans.translate(
+        "to largest for any T with a as a T and b as a T giving a T\n"
+        "    give back a\n"
+        "end\n"
+        "to f giving a whole number\n"
+        "    let x be 1\n"
+        "    let y be 2\n"
+        "    let m be (largest of x, y) as a whole number\n"
+        "    give back m\n"
+        "end\n")
+    assert "pub fn largest<T>(a: T, b: T) -> T {" in ok, ok
+    assert "let m: i64 = largest(x, y);" in ok, ok
+    print("      泛型返回不进声明表；补 `as` 之后照常翻出来")
 
 
 def main() -> int:

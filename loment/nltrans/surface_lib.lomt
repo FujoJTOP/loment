@@ -1,0 +1,7 @@
+module surface_lib
+
+// 一个普通的 Loment 库单元，给 `Surface.nl` 用 `use` 引进来。
+
+pub fn triple(x: i64) -> i64 {
+    return x * 3;
+}

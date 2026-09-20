@@ -1,0 +1,148 @@
+// 由 tools/lomt_from.py 从 Potato 形式对象生成 —— 请勿手改。
+// 它是**带实现的单元** (`--impl`, docs/186): 带正文的函数是真 `pub fn`，
+// 没带正文的仍是 `extern fn` (实现在源语言那一侧, docs/173 §2)。
+// 源对象: unit=surface language=loment potato=v6
+
+module surface
+
+// ---- 能力域 (docs/146)
+capability slots : disk[0..4] revocable
+
+// ---- 常量
+pub const LIMIT: i64 = 3;
+
+// ---- 由正文翻译出来的实现 (docs/186: natural -> Loment, tools/nltrans.py)
+fn nl_write_num(fd: u64, v: i64) {
+    let buf: ptr = alloc(24);
+    let start: u32 = 0;
+    let x: u64 = 0;
+    let zero: i64 = 0;
+    if v < zero {
+        store8(buf, 0, 45 as u8);
+        start = 1;
+        x = (zero - v) as u64;
+    } else {
+        x = v as u64;
+    }
+    let n: u32 = start;
+    if x == 0 {
+        store8(buf, n, 48 as u8);
+        n = n + 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + ((x % 10) as u32)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < (n - start) / 2 {
+        let lo: u8 = load8(buf, start + i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, start + i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+
+choose no_std
+
+use "surface_lib.lomt"
+
+pub struct Point {
+    x: i64,
+    y: i64,
+}
+
+pub enum Kind {
+    Small,
+    Big(i64),
+}
+
+pub trait Sizer {
+    fn size(self) -> i64;
+}
+
+impl Sizer for Point {
+    fn size(self) -> i64 {
+        return ((self.x) + (self.y));
+    }
+}
+
+const SECRET: i64 = 7;
+
+pub fn largest<T>(a: T, b: T) -> T {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+pub fn total(e: Point) -> i64 {
+    return ((e.x) + (e.y));
+}
+
+pub fn score(k: Kind) -> i64 {
+    match k {
+        Kind::Big(w) => {
+            return (w * 2);
+        }
+        Kind::Small => {
+            return 1;
+        }
+    }
+}
+
+pub fn pick(k: Kind) -> i64 {
+    if let Kind::Big(w) = k {
+        return w;
+    }
+    return 0;
+}
+
+pub fn sum_all(xs: [i64]) -> i64 {
+    let acc: i64 = 0;
+    let i: i64 = 0;
+    while (i < slice_len(xs)) {
+        acc = (acc + (xs[i]));
+        i = (i + 1);
+    }
+    return acc;
+}
+
+pub fn take(a: [i64; 3]) -> i64 {
+    return (a[0]);
+}
+
+pub fn fill(xs: mut [i64]) {
+    xs[0] = 99;
+}
+
+pub fn guarded(slot: i64) -> i64 {
+    guard slots(slot);
+    return slot;
+}
+
+pub fn _start() {
+    let p: Point = Point { x: 4, y: 5 };
+    let k: Kind = Kind::Big(3);
+    let xs: [i64; 3] = [0, 0, 0];
+    xs[0] = 1;
+    xs[1] = 2;
+    xs[2] = 3;
+    fill((&mut xs));
+    let summed: i64 = sum_all((&xs));
+    let eight: i64 = 8;
+    let three: i64 = 3;
+    let big: i64 = largest(eight, three);
+    let s: i64 = p.size();
+    let g: i64 = guarded(2);
+    syscall4(1, 1, str_ptr("surface ") as u64, str_len("surface ") as u64);
+    nl_write_num(1, ((((total(p) + score(k)) + pick(k)) + summed) + big) as i64);
+    syscall4(1, 1, str_ptr(" ") as u64, str_len(" ") as u64);
+    nl_write_num(1, (((s + g) + SECRET) + take(xs)) as i64);
+    syscall4(1, 1, str_ptr("\n") as u64, str_len("\n") as u64);
+    syscall4(60 as u64, triple(big) as u64, 0 as u64, 0 as u64);
+}
+
+excluded "the network"
