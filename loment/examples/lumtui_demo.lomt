@@ -1,0 +1,198 @@
+module lumtui_demo
+
+// lumtui_demo.lomt — LumtUI 走一遍全程: 建文档 -> 布局 -> 绘制 -> 把帧缓冲打成 ASCII。
+//
+// 这是**能直接跑**的那一份: 不读任何字体文件, 文字走内置的 5×7 点阵 (与
+// `kernel/src/graphics.rs` 的 `FONT` 同一份数据), 所以输出确定、与机器无关。
+// 这也就算是 LumtUI 的 "hello world"。
+//
+// 要**任意字体**的那一份在 `tools/loment_lumtui_test.py` 里: 它读一台真机器上的
+// 系统 TTF, 与 FreeType 的度量逐条对。
+//
+// 输出: 一块 96×36 的帧缓冲按亮度打成的 ASCII (暗 -> 亮 ` .:-=+*#%@`),
+// 外加几行摘要 (.fuc 字节数 / 节点数 / 校验 / 焦点数 / 命中)。
+//
+// 走的路: `lumtui_doc`(建) -> `lumtui_doc_emit`(.fuc 字节) -> `lumtui_layout`(绝对像素)
+// -> `lumtui_paint`(像素)。**中间那一步是刻意的** —— 布局与绘制吃的是载入侧那份,
+// 于是它们与内核读同一份二进制时的语义完全一致。
+
+use lumtui
+use lumtui_doc
+use lumtui_layout
+use lumtui_paint
+use num
+
+const W: u32 = 96;
+const H: u32 = 36;
+
+fn wr(fd: u64, p: ptr, n: u32) -> i64 {
+    return syscall4(1, fd, p as u64, n as u64);
+}
+
+fn wstr(s: str) {
+    let _a: i64 = wr(1, str_ptr(s), str_len(s));
+}
+
+fn say(sc: ptr, tag: str, v: u32) {
+    let _a: i64 = wr(1, str_ptr(tag), str_len(tag));
+    let _b: u32 = num_to_dec(sc, v);
+    let _c: i64 = wr(1, sc, _b);
+    let _d: i64 = wr(1, str_ptr("\n"), 1);
+}
+
+/// 亮度 -> 一个字符。ASCII 只有 10 档, 够了 (这是"看形状", 不是"看颜色")。
+fn ramp(l: u32) -> str {
+    if l > 230 {
+        return "@";
+    }
+    if l > 200 {
+        return "%";
+    }
+    if l > 170 {
+        return "#";
+    }
+    if l > 140 {
+        return "*";
+    }
+    if l > 110 {
+        return "+";
+    }
+    if l > 80 {
+        return "=";
+    }
+    if l > 55 {
+        return "-";
+    }
+    if l > 32 {
+        return ":";
+    }
+    if l > 14 {
+        return ".";
+    }
+    return " ";
+}
+
+fn dump(fb: ptr, w: u32, h: u32) {
+    let y: u32 = 0;
+    while y < h {
+        let x: u32 = 0;
+        while x < w {
+            wstr(ramp(lumtui_luma(lumtui_fb_px(fb, w, x, y))));
+            x = x + 1;
+        }
+        wstr("\n");
+        y = y + 1;
+    }
+}
+
+/// 搭一个界面: 透明的 surface 根, 里面一张居中的卡片 —— 标题 / 一排按钮 / 状态条。
+fn build(d: ptr) -> u32 {
+    let surf: u32 = lumtui_doc_add(d, LUMTUI_K_SURFACE, 1);
+    let card: u32 = lumtui_doc_add(d, LUMTUI_K_CARD, 2);
+    let title: u32 = lumtui_doc_add(d, LUMTUI_K_TEXT, 3);
+    let row: u32 = lumtui_doc_add(d, LUMTUI_K_ROW, 4);
+    let b1: u32 = lumtui_doc_add(d, LUMTUI_K_BUTTON, 5);
+    let b2: u32 = lumtui_doc_add(d, LUMTUI_K_BUTTON, 6);
+    let chip: u32 = lumtui_doc_add(d, LUMTUI_K_CHIP, 7);
+    let bar: u32 = lumtui_doc_add(d, LUMTUI_K_PROGRESS, 8);
+    let _a: u32 = lumtui_doc_add_child(d, surf, card);
+    let _b: u32 = lumtui_doc_add_child(d, card, title);
+    let _c: u32 = lumtui_doc_add_child(d, card, row);
+    let _e: u32 = lumtui_doc_add_child(d, card, bar);
+    let _f: u32 = lumtui_doc_add_child(d, row, b1);
+    let _g: u32 = lumtui_doc_add_child(d, row, b2);
+    let _h: u32 = lumtui_doc_add_child(d, row, chip);
+
+    // 根: 不画东西, 只负责"把卡片摆中间"
+    lumtui_set_size(d, surf, LUMTUI_M_FILL, 0, LUMTUI_M_FILL, 0);
+    lumtui_set_justify(d, surf, LUMTUI_A_CENTER);
+    lumtui_set_align(d, surf, LUMTUI_A_CENTER);
+
+    lumtui_set_bg(d, card, lumtui_pack_rgba(30, 36, 44, 255));
+    lumtui_set_radius(d, card, 3);
+    lumtui_set_pad(d, card, 4, 3, 4, 3);
+    lumtui_set_gap(d, card, 2);
+    lumtui_set_size(d, card, LUMTUI_M_FIXED, 80, LUMTUI_M_FIXED, 30);
+    lumtui_set_align(d, card, LUMTUI_A_CENTER);
+
+    lumtui_set_text(d, title, "LumtUI");
+    lumtui_set_size(d, title, LUMTUI_M_GROW, 1, LUMTUI_M_FIXED, 8);
+    lumtui_set_font_px(d, title, 7);
+    lumtui_set_fg(d, title, lumtui_pack_rgba(230, 237, 243, 255));
+
+    lumtui_set_gap(d, row, 2);
+    lumtui_set_size(d, row, LUMTUI_M_GROW, 1, LUMTUI_M_FIXED, 8);
+    lumtui_set_align(d, row, LUMTUI_A_STRETCH);
+
+    lumtui_set_text(d, b1, "Run");
+    lumtui_set_font_px(d, b1, 7);
+    lumtui_set_bg(d, b1, lumtui_pack_rgba(76, 141, 246, 255));
+    lumtui_set_radius(d, b1, 2);
+    lumtui_set_size(d, b1, LUMTUI_M_FIXED, 20, LUMTUI_M_GROW, 1);
+    lumtui_set_justify(d, b1, LUMTUI_A_CENTER);
+    lumtui_set_align(d, b1, LUMTUI_A_CENTER);
+
+    lumtui_set_text(d, b2, "Stop");
+    lumtui_set_font_px(d, b2, 7);
+    lumtui_set_bg(d, b2, lumtui_pack_rgba(58, 66, 78, 255));
+    lumtui_set_radius(d, b2, 2);
+    lumtui_set_size(d, b2, LUMTUI_M_FIXED, 26, LUMTUI_M_GROW, 1);
+    lumtui_set_justify(d, b2, LUMTUI_A_CENTER);
+    lumtui_set_align(d, b2, LUMTUI_A_CENTER);
+
+    lumtui_set_text(d, chip, "v1");
+    lumtui_set_font_px(d, chip, 7);
+    lumtui_set_bg(d, chip, lumtui_pack_rgba(50, 58, 70, 255));
+    lumtui_set_radius(d, chip, 4);
+    lumtui_set_size(d, chip, LUMTUI_M_FIXED, 18, LUMTUI_M_GROW, 1);
+    lumtui_set_justify(d, chip, LUMTUI_A_CENTER);
+    lumtui_set_align(d, chip, LUMTUI_A_CENTER);
+
+    lumtui_set_bg(d, bar, lumtui_pack_rgba(76, 141, 246, 255));
+    lumtui_set_fg(d, bar, lumtui_pack_rgba(20, 24, 30, 255));
+    lumtui_set_radius(d, bar, 1);
+    lumtui_set_size(d, bar, LUMTUI_M_FIXED, 24, LUMTUI_M_FIXED, 3);
+
+    // 设计令牌: 颜色与度量同表 (与 `.fus` 那两个 kind 一致)
+    let _t1: u32 = lumtui_token(d, "accent", 0, lumtui_pack_rgba(76, 141, 246, 255));
+    let _t2: u32 = lumtui_token(d, "gap.md", 1, 6);
+    return surf;
+}
+
+fn _start() {
+    let sc: ptr = alloc(32);
+    let arena: ptr = alloc(lumtui_arena_bytes());
+    let d: ptr = lumtui_doc_init(arena, W, H);
+    let _root: u32 = build(d);
+
+    let cap: u32 = lumtui_emit_bytes(d);
+    let blob: ptr = alloc(cap);
+    let n: u32 = lumtui_doc_emit(d, blob, cap);
+    let nodec: u32 = lumtui_fuc_count(blob);
+    let rects: ptr = alloc(nodec * LUMTUI_RECT_BYTES);
+    let _laid: u32 = lumtui_layout(blob, rects, 0, 0, W, H);
+
+    // 没有字体文件 -> 走内置点阵 (ctx 的 fd/f 给空指针)
+    let nil: ptr = 0 as ptr;
+    let fb: ptr = alloc(W * H * 4);
+    lumtui_fb_clear(fb, W, H, lumtui_pack_rgba(10, 13, 17, 255));
+    let ctx: ptr = alloc(LUMTUI_CTX_BYTES);
+    let bmp: ptr = alloc(lumtui_ctx_bmp_bytes());
+    let box: ptr = alloc(16);
+    let _e: ptr = lumtui_ctx_new(ctx, nil, nil, nil, bmp, box);
+    let _p: u32 = lumtui_paint_doc(fb, W, H, blob, rects, ctx);
+
+    // 焦点落在第一个按钮上 -> 描一圈焦点环
+    let f0: u32 = lumtui_focus_at(blob, 0);
+    lumtui_paint_focus(fb, W, H, rects, f0, lumtui_pack_rgba(255, 214, 102, 255));
+
+    say(sc, "fuc_bytes=", n);
+    say(sc, "nodes=", nodec);
+    say(sc, "valid=", lumtui_fuc_valid(blob, n) as u32);
+    say(sc, "focus_n=", lumtui_focus_count(blob));
+    say(sc, "card.w=", lumtui_rect_w(ptr_add(rects, 1 * LUMTUI_RECT_BYTES)));
+    say(sc, "btn.x=", lumtui_rect_x(ptr_add(rects, 4 * LUMTUI_RECT_BYTES)));
+    say(sc, "hit_btn=", lumtui_hit_test(blob, rects, 20, 18));
+    dump(fb, W, H);
+    syscall4(60, 0, 0, 0);
+}

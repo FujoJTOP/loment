@@ -56,6 +56,9 @@ GLOBS = [
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
+    # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
+    "tools/loment_lumtui_test.py",
     "tools/loment_cli_test.py",
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
@@ -122,6 +125,10 @@ GLOBS = [
     # Go 翻成 Loment (六门里的第六门; **不共用共享核** —— 三条形状都不一样)。
     "tools/gotrans.py",
     "tools/loment_gotrans_test.py",
+    # Loment 的**自然语言写法** (docs/197)。与上面六门**不同类**: 那六门是别人已有的
+    # 语言, 这一门是我们自己发明的 —— 所以它没有共享核, 也不共用那份"方言表"。
+    "tools/nltrans.py",
+    "tools/loment_nltrans_test.py",
     # Potato 形式对象 -> L1 接口单元 (docs/179): 发射那一半的 Loment 版
     # (与 `lompotc` 那条**前端**是一对 —— 合起来才是 `from_c -> emit_lomt` 整条路)。
     "tools/loment_lomtfrom_test.py",
@@ -185,6 +192,9 @@ GLOBS = [
     "loment/cstrans/*.cs",
     "loment/cpptrans/*.cpp",
     "loment/gotrans/*.go",
+    # 自然语言写法的语料与它的**同源 Loment 孪生** (docs/197): 两份**必须是同一个
+    # 程序**的两种拼法 —— 判据比的是"翻出来的 Loment 逐字节相同", 所以两份都得在。
+    "loment/nltrans/*.nl", "loment/nltrans/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

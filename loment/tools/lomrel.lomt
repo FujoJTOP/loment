@@ -178,6 +178,7 @@ tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_std_test.py
+tools/loment_lumtui_test.py
 tools/loment_cli_test.py
 tools/loment_err_test.py
 lompi/*.lomt
@@ -234,6 +235,8 @@ tools/cpptrans.py
 tools/loment_cpptrans_test.py
 tools/gotrans.py
 tools/loment_gotrans_test.py
+tools/nltrans.py
+tools/loment_nltrans_test.py
 tools/loment_lomtfrom_test.py
 tools/loment_trans_test.py
 tools/loment_grammar_test.py
@@ -286,6 +289,8 @@ loment/jtrans/*.java
 loment/cstrans/*.cs
 loment/cpptrans/*.cpp
 loment/gotrans/*.go
+loment/nltrans/*.nl
+loment/nltrans/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

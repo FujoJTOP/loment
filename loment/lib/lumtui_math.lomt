@@ -1,0 +1,386 @@
+choose write grammar python
+
+# lumtui_math.lomt —— LumtUI 的标量计算核, **用 Python 写法写的 Loment**。
+#
+# 后缀 `.lomt` 说的是"这是 Loment 的文件"(docs/188 §2); 文件头那一行声明的是
+# **读法**。按 docs/188 §0: 用 Python 写法写的单元**是一个 Loment 程序** ——
+# 拼法是 Python 的, 语义是 Loment 的。`lomentc.load` 的前门在**进程内**把它翻成
+# Loment 再往下走, 所以别处 `use lumtui_math` 与 `use` 一个原生模块没有区别。
+#
+# ## 为什么这一块是它、而不是整个 LumtUI
+#
+# Python 表层语法今天的**正文**子集只收 `int` / `bool` 两种类型 (见
+# `tools/pytrans.py` 的 `_TYPES`), 而且不收指针、切片、结构体、下标、字段访问、
+# 字符串字面量, 也不能调本单元以外的函数。于是 LumtUI 里**只有**这一类"纯标量、
+# 无状态、不碰内存"的算术能落在这门拼法里 —— 别的部分 (文档模型、字体、光栅化)
+# 必须有指针, 只能在 Loment 原生拼法里写。边界与最小复现记在 `docs/196` §4。
+#
+# 顺带说清一条**代价**: 本单元的类型是 `i64`, 而库的别处按 `u32` 算。深没对上就是
+# 类型错 (E1), 所以每个调用点都要写 `as`。这不是本单元的取舍, 是这条子集的宽度
+# 决定的 —— 它把 "只收 int" 变成了调用方的负担。
+#
+# ## 定点的约定
+#
+# 小数一律 16.16 定点: 一个 `int` 的低 16 位是小数。`lumtui_fp_one()` 就是 1.0。
+# 除法按本语言的整除 (向零截断), **不是** CPython 的向下取整 —— 这一条由
+# `loment_pytrans_test` 那条"必须与 CPython 不同"的判据管着。
+
+#: 16.16 定点的分母。
+LUMTUI_FP_ONE = 65536
+#: 小数位数。
+LUMTUI_FP_BITS = 16
+#: FNV-1a 的 32 位初值 (当作 i64 用, 回绕由调用方按 32 位取)。
+LUMTUI_FNV_BASIS = 2166136261
+LUMTUI_FNV_PRIME = 16777619
+
+
+def lumtui_fp_one() -> int:
+    """1.0 的定点表示 (65536)。"""
+    return LUMTUI_FP_ONE
+
+
+def lumtui_fp_from_int(v: int) -> int:
+    """整数 -> 定点。"""
+    return v * LUMTUI_FP_ONE
+
+
+def lumtui_fp_to_int(v: int) -> int:
+    """定点 -> 整数, **四舍五入**(不是截断): 加上半个单位再整除。"""
+    if v < 0:
+        return (v - LUMTUI_FP_ONE // 2) // LUMTUI_FP_ONE
+    return (v + LUMTUI_FP_ONE // 2) // LUMTUI_FP_ONE
+
+
+def lumtui_fp_mul(a: int, b: int) -> int:
+    """定点乘法。中间积用 i64 装得下 (两个 16.16 的积最多 48 位)。"""
+    return (a * b) // LUMTUI_FP_ONE
+
+
+def lumtui_fp_div(a: int, b: int) -> int:
+    """定点除法。`b` 是 0 时返回 0 —— 布局里"除以零个子节点"是常事。"""
+    if b == 0:
+        return 0
+    return (a * LUMTUI_FP_ONE) // b
+
+
+def lumtui_clamp(v: int, lo: int, hi: int) -> int:
+    """夹到 [lo, hi]。`lo > hi` 时按 `lo` 收 —— 不返回区间外的数。"""
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+
+def lumtui_clamp255(v: int) -> int:
+    """颜色通道用的那一档。"""
+    return lumtui_clamp(v, 0, 255)
+
+
+def lumtui_lerp(a: int, b: int, t: int) -> int:
+    """线性插值, `t` 是定点 [0, 1]。"""
+    return a + lumtui_fp_mul(b - a, t)
+
+
+def lumtui_clamp01(t: int) -> int:
+    """把定点进度夹到 [0, 1]。"""
+    return lumtui_clamp(t, 0, LUMTUI_FP_ONE)
+
+
+# ---------------------------------------------------------------- 缓动
+#
+# 都收定点进度 t (0 = 起点, 65536 = 终点), 返回定点进度。**超出 [0,1] 不夹** ——
+# back/elastic 那两族本来就要冲出区间, 夹了就没了 (调用方要夹自己夹)。
+
+
+def lumtui_ease_linear(t: int) -> int:
+    """线性。"""
+    return t
+
+
+def lumtui_ease_quad_in(t: int) -> int:
+    """二次进 (慢起)。"""
+    return lumtui_fp_mul(t, t)
+
+
+def lumtui_ease_quad_out(t: int) -> int:
+    """二次出 (慢收)。`1 - (1-t)^2`。"""
+    u = LUMTUI_FP_ONE - t
+    return LUMTUI_FP_ONE - lumtui_fp_mul(u, u)
+
+
+def lumtui_ease_cubic_in(t: int) -> int:
+    """三次进。"""
+    return lumtui_fp_mul(lumtui_fp_mul(t, t), t)
+
+
+def lumtui_ease_cubic_out(t: int) -> int:
+    """三次出。`1 - (1-t)^3`。"""
+    u = LUMTUI_FP_ONE - t
+    return LUMTUI_FP_ONE - lumtui_fp_mul(lumtui_fp_mul(u, u), u)
+
+
+def lumtui_ease_smooth(t: int) -> int:
+    """平滑步 (smoothstep): `t*t*(3-2t)`。GUI 里最常用的那一条。"""
+    inner = 3 * LUMTUI_FP_ONE - 2 * t
+    return lumtui_fp_mul(lumtui_fp_mul(t, t), inner)
+
+
+def lumtui_ease_back_out(t: int) -> int:
+    """回弹出: 越过终点再退回来。overshoot 常量 1.70158 的 16.16 近似。"""
+    c = 111516
+    u = t - LUMTUI_FP_ONE
+    uu = lumtui_fp_mul(u, u)
+    inner = lumtui_fp_mul((c + LUMTUI_FP_ONE), u) + c
+    return LUMTUI_FP_ONE + lumtui_fp_mul(uu, inner)
+
+
+def lumtui_ease_bounce_out(t: int) -> int:
+    """弹跳出。按四段抛物线的经典写法, 常量按 7.5625 / 2.75 的定点近似。"""
+    n = 495616          # 7.5625
+    d = 180224          # 2.75
+    if t < 58003:        # 1/2.75
+        return lumtui_fp_mul(n, lumtui_fp_mul(t, t))
+    if t < 137608:       # 2/2.75
+        u = t - 87005    # 1.5/2.75
+        return lumtui_fp_mul(n, lumtui_fp_mul(u, u)) + 49152
+    if t < 176134:       # 2.5/2.75
+        u = t - 156672   # 2.25/2.75
+        return lumtui_fp_mul(n, lumtui_fp_mul(u, u)) + 57344
+    u = t - 163840       # 2.625/2.75
+    return lumtui_fp_mul(n, lumtui_fp_mul(u, u)) + 63488
+
+
+# ---------------------------------------------------------------- 整数三角
+#
+# GUI 里要的是"转一小圈", 不是数学库。用 Bhaskara I 那条抛物线近似:
+#
+#     sin(x) ~ 4x(180-x) / (40500 - x(180-x))     x 是角度
+#
+# 半圆内最大误差 ~0.0016, 对小图标/弧线足够, 而且**没有表、没有浮点**。
+
+
+def lumtui_sin_deg(deg: int) -> int:
+    """角度 (0..360) -> 定点正弦 [-65536, 65536]。"""
+    d = deg % 360
+    if d < 0:
+        d = d + 360
+    sign = 1
+    if d > 180:
+        d = d - 180
+        sign = -1
+    num = 4 * d * (180 - d)
+    den = 40500 - d * (180 - d)
+    if den == 0:
+        return 0
+    return sign * (num * LUMTUI_FP_ONE) // den
+
+
+def lumtui_cos_deg(deg: int) -> int:
+    """角度 -> 定点余弦 (正弦移 90 度)。"""
+    return lumtui_sin_deg(deg + 90)
+
+
+def lumtui_sqrt(v: int) -> int:
+    """整数平方根 (牛顿迭代) —— 距离、半径、圆角要用。负数返回 0。"""
+    if v <= 0:
+        return 0
+    x = v
+    y = (x + 1) // 2
+    while y < x:
+        x = y
+        y = (x + v // x) // 2
+    return x
+
+
+def lumtui_dist2(dx: int, dy: int) -> int:
+    """两点距离的**平方** (省一次开方, 比较大小够用)。"""
+    return dx * dx + dy * dy
+
+
+def lumtui_dist(dx: int, dy: int) -> int:
+    """两点整数距离 (向下取整)。"""
+    return lumtui_sqrt(lumtui_dist2(dx, dy))
+
+
+def lumtui_hit(x: int, y: int, rx: int, ry: int, rw: int, rh: int) -> bool:
+    """点在矩形内 (左上闭、右下开)。布局那一边的命中测试要它。"""
+    if x < rx:
+        return False
+    if y < ry:
+        return False
+    if x - rx >= rw:
+        return False
+    if y - ry >= rh:
+        return False
+    return True
+
+
+def lumtui_hit_round(x: int, y: int, rx: int, ry: int, rw: int, rh: int, r: int) -> bool:
+    """圆角矩形的命中测试: 先按矩形粗筛, 再看四个角是不是落在圆外。"""
+    if not lumtui_hit(x, y, rx, ry, rw, rh):
+        return False
+    if r <= 0:
+        return True
+    if r * 2 > rw or r * 2 > rh:
+        return True
+    rr = r
+    lx = x - rx
+    ly = y - ry
+    if lx >= rr and lx < rw - rr:
+        return True
+    if ly >= rr and ly < rh - rr:
+        return True
+    cx = rw - rr - 1
+    cy = rh - rr - 1
+    if lx < rr:
+        cx = rr
+    if ly < rr:
+        cy = rr
+    return lumtui_dist2(lx - cx, ly - cy) <= rr * rr
+
+
+# ---------------------------------------------------------------- 颜色 (AARRGGBB)
+
+
+def lumtui_rgba(r: int, g: int, b: int, a: int) -> int:
+    """四个通道 -> 一个 32 位值 (AARRGGBB)。与 `lom/fuc.lom` 的 `bg`/`fg` 同一形状。"""
+    return (lumtui_clamp255(a) * 16777216) + (lumtui_clamp255(r) * 65536) \
+        + (lumtui_clamp255(g) * 256) + lumtui_clamp255(b)
+
+
+def lumtui_rgb(r: int, g: int, b: int) -> int:
+    """不透明的那一档 (alpha = 255)。"""
+    return lumtui_rgba(r, g, b, 255)
+
+
+def lumtui_col_a(c: int) -> int:
+    """alpha 通道。"""
+    return (c // 16777216) % 256
+
+
+def lumtui_col_r(c: int) -> int:
+    """红通道。"""
+    return (c // 65536) % 256
+
+
+def lumtui_col_g(c: int) -> int:
+    """绿通道。"""
+    return (c // 256) % 256
+
+
+def lumtui_col_b(c: int) -> int:
+    """蓝通道。"""
+    return c % 256
+
+
+def lumtui_col_with_a(c: int, a: int) -> int:
+    """换掉 alpha, 其余不动 —— "给一个 token 颜色加透明度"的常用动作。"""
+    return (lumtui_clamp255(a) * 16777216) + (c % 16777216)
+
+
+def lumtui_col_scale_a(c: int, num: int, den: int) -> int:
+    """把 alpha 按 `num/den` 缩放 (不变色)。做淡入淡出、浮层遮罩用。"""
+    if den == 0:
+        return c
+    a = (lumtui_col_a(c) * num) // den
+    return lumtui_col_with_a(c, a)
+
+
+def lumtui_col_lerp(c0: int, c1: int, t: int) -> int:
+    """两个颜色按定点 t 插值 (逐通道)。"""
+    a = lumtui_lerp(lumtui_col_a(c0), lumtui_col_a(c1), t)
+    r = lumtui_lerp(lumtui_col_r(c0), lumtui_col_r(c1), t)
+    g = lumtui_lerp(lumtui_col_g(c0), lumtui_col_g(c1), t)
+    b = lumtui_lerp(lumtui_col_b(c0), lumtui_col_b(c1), t)
+    return lumtui_rgba(r, g, b, a)
+
+
+def lumtui_col_luma(c: int) -> int:
+    """亮度 (0.299R + 0.587G + 0.114B), 定点常量按 0.1% 精度取。
+    决定"这个底色上该写黑字还是白字"时用它。"""
+    return (lumtui_col_r(c) * 306 + lumtui_col_g(c) * 601 + lumtui_col_b(c) * 117) // 1024
+
+
+def lumtui_ink_on(bg: int) -> int:
+    """底色上可读的前景: 亮底给黑, 暗底给白。**都带满 alpha** (0xFF000000 / 0xFFFFFFFF)
+    —— 写成 `0x00FFFFFF` 那种值会在混合那一步被整片丢掉。"""
+    if lumtui_col_luma(bg) > 140:
+        return 4278190080
+    return 4294967295
+
+
+def lumtui_blend(dst: int, src: int, alpha: int) -> int:
+    """把 src 以 alpha [0,255] 混到 dst 上 —— 光栅化那几个混合点全走这里。"""
+    if alpha == 0:
+        return dst
+    if alpha >= 255:
+        return src
+    inv = 255 - alpha
+    r = (lumtui_col_r(src) * alpha + lumtui_col_r(dst) * inv) // 255
+    g = (lumtui_col_g(src) * alpha + lumtui_col_g(dst) * inv) // 255
+    b = (lumtui_col_b(src) * alpha + lumtui_col_b(dst) * inv) // 255
+    a = lumtui_col_a(dst)
+    return lumtui_rgba(r, g, b, a)
+
+
+def lumtui_over(dst: int, src: int) -> int:
+    """src **按自己的 alpha** 叠在 dst 上 (compositing 的 source-over)。"""
+    return lumtui_blend(dst, src, lumtui_col_a(src))
+
+
+# ---------------------------------------------------------------- 布局算术
+
+
+def lumtui_percent_of(total: int, pct: int) -> int:
+    """`total` 的百分之 `pct` (truncating)。"""
+    return (total * pct) // 100
+
+
+def lumtui_grow_share(space: int, want: int, total_want: int) -> int:
+    """flex 分配: 主轴剩 `space` 给所有 grow 子节点, 这一个要 `want`, 大家共要
+    `total_want`。`total_want` 为 0 时按 0 (不给"除零"留口子)。"""
+    if total_want <= 0:
+        return 0
+    if want <= 0:
+        return 0
+    return (space * want) // total_want
+
+
+def lumtui_round_div(a: int, b: int) -> int:
+    """四舍五入的整除 —— 布局里"把余数分掉"靠它。"""
+    if b == 0:
+        return 0
+    if a < 0:
+        return (a - b // 2) // b
+    return (a + b // 2) // b
+
+
+def lumtui_snap(v: int, grid: int) -> int:
+    """把坐标对齐到 `grid` 的整数倍 (字体基线/图标栅格要用)。"""
+    if grid <= 0:
+        return v
+    return lumtui_round_div(v, grid) * grid
+
+
+# ---------------------------------------------------------------- 校验和
+
+
+def lumtui_fnv1a_step(h: int, byte: int) -> int:
+    """FNV-1a 走一个字节。与 `tools/fuic.py` / `fuc.rs` 同一算法, 且要求调用方
+    按 32 位取模 —— 这里**主动**截到 32 位, 于是不必靠回绕。"""
+    return ((h ^ (byte % 256)) * LUMTUI_FNV_PRIME) % 4294967296
+
+
+def lumtui_fnv1a_str(s: int, n: int) -> int:
+    """`n` 个字节的 FNV-1a —— 收的是**一个数**, 所以这一门里只能算"从 0 起
+    长度为 n 的全零串"。真字节块那一份在 `lumtui.lomt` (收 ptr)。
+    **留着它是为了记下这个形状**: 同一件事在两种拼法下的可达面不一样。"""
+    h = LUMTUI_FNV_BASIS
+    i = 0
+    while i < n:
+        h = lumtui_fnv1a_step(h, s)
+        if s > 0:
+            s = s - 1
+        i = i + 1
+    return h

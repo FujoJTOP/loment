@@ -1,0 +1,522 @@
+module lumtui_paint
+
+// lumtui_paint.lomt — 把布局好的文档画进一块 **ARGB32 帧缓冲**。
+//
+// 这一块对应内核里 `paint` 那一层的职责, 但它**不碰硬件**: 帧缓冲是调用方给的
+// 一段内存 (`w * h * 4` 字节, 每像素一个小端 u32, 形如 `0xAARRGGBB` —— 与
+// `lom/fuc.lom` 的 `bg`/`fg` 同一形状)。要贴到屏幕上, 由调用方把这块内存交给
+// 它自己的显示路径。
+//
+// ## 颜色与不透明度
+//
+// `bg`/`fg` 都是 AARRGGBB; 节点的 `opacity` 会**再乘进 alpha** 一次 —— 于是"整块
+// 卡片淡到 60%"不用去改每一个颜色。`0` 号不透明度按 255 处理 (与 `fuc.rs` 一致)。
+//
+// ## 文字
+//
+// 两条腿, 与 `lumtui_font.lomt` 一致: 给了字体就现解轮廓 + 光栅化; 没给就用内置
+// 5×7 点阵。文字在节点内容盒里按 `align`(交叉轴) 与 `justify`(主轴) 摆 —— 与布局
+// 那套对齐词是同一张表, 于是"布局怎么摆的, 字就怎么摆"。
+//
+// ## 画顺序
+//
+// 摊平是 **BFS**, 父在子前 —— 顺着下标画下去天然就是**从后往前**叠加, 不需要
+// 单独收集绘制列表。
+//
+// ## 一处刻意的重复 (值得记一笔)
+//
+// 颜色拆通道 (`lumtui_ca`/`cr`/`cg`/`cb`) 与亮度 (`lumtui_luma`) 在
+// `lumtui_math.lomt` 里**也有一份** (`lumtui_col_*`)。不是偷懒, 是那条边界逼的:
+// `lumtui_math.lomt` 是 Python 写法, 它的函数一律收 `i64`, 而这一层从头到尾是
+// `u32` —— 每次调用都要 `as`, 而 `as` 在热路径上是**每个像素一次**。所以这一份
+// 按 u32 重写。名字也只好跟着改 (平名字空间里 `lumtui_ink_on` 只能存在一份)。
+// 这条代价记在 `docs/196` §4。
+
+use lumtui
+use lumtui_doc
+use lumtui_font
+
+// ---------------------------------------------------------------- 颜色
+
+pub fn lumtui_ca(c: u32) -> u32 { return (c / 16777216) % 256; }
+pub fn lumtui_cr(c: u32) -> u32 { return (c / 65536) % 256; }
+pub fn lumtui_cg(c: u32) -> u32 { return (c / 256) % 256; }
+pub fn lumtui_cb(c: u32) -> u32 { return c % 256; }
+
+pub fn lumtui_pack_rgba(r: u32, g: u32, b: u32, a: u32) -> u32 {
+    return (a % 256) * 16777216 + (r % 256) * 65536 + (g % 256) * 256 + (b % 256);
+}
+
+/// 换掉 alpha (别的通道不动)。
+pub fn lumtui_with_a(c: u32, a: u32) -> u32 {
+    return (a % 256) * 16777216 + (c % 16777216);
+}
+
+/// 按 `num/den` 缩 alpha。
+pub fn lumtui_scale_a(c: u32, num: u32, den: u32) -> u32 {
+    if den == 0 {
+        return c;
+    }
+    return lumtui_with_a(c, (lumtui_ca(c) * num) / den);
+}
+
+/// 亮度 (0.299R + 0.587G + 0.114B, 定点常量按 0.1% 精度取)。
+pub fn lumtui_luma(c: u32) -> u32 {
+    return (lumtui_cr(c) * 306 + lumtui_cg(c) * 601 + lumtui_cb(c) * 117) / 1024;
+}
+
+/// 底色上能读的前景: 亮底给黑, 暗底给白。**两个都带满 alpha** ——
+/// 写成 `0x00FFFFFF` 那种"看起来是白"的值, 到混合那一步会因为它 alpha 是 0
+/// 而被整片丢掉 (实测症状: 按钮上的字一个都不出来, 而背景、圆角、焦点环都对)。
+pub fn lumtui_ink_for(bg: u32) -> u32 {
+    if lumtui_luma(bg) > 140 {
+        return 4278190080;
+    }
+    return 4294967295;
+}
+
+// ---------------------------------------------------------------- 像素
+
+pub fn lumtui_fb_px(fb: ptr, w: u32, x: u32, y: u32) -> u32 {
+    return lumtui_ld32(fb, (y * w + x) * 4);
+}
+
+pub fn lumtui_fb_put(fb: ptr, w: u32, x: u32, y: u32, c: u32) {
+    lumtui_st32(fb, (y * w + x) * 4, c);
+}
+
+/// source-over: 把 `src` 按 `alpha` [0,255] 混到 `dst` 上。
+pub fn lumtui_mix(dst: u32, src: u32, alpha: u32) -> u32 {
+    if alpha == 0 {
+        return dst;
+    }
+    if alpha >= 255 {
+        return src;
+    }
+    let inv: u32 = 255 - alpha;
+    let r: u32 = (lumtui_cr(src) * alpha + lumtui_cr(dst) * inv) / 255;
+    let g: u32 = (lumtui_cg(src) * alpha + lumtui_cg(dst) * inv) / 255;
+    let b: u32 = (lumtui_cb(src) * alpha + lumtui_cb(dst) * inv) / 255;
+    return lumtui_pack_rgba(r, g, b, lumtui_ca(dst));
+}
+
+/// 一个像素按颜色自己的 alpha 混进去。
+pub fn lumtui_blend_px(fb: ptr, w: u32, x: u32, y: u32, c: u32) -> u32 {
+    let a: u32 = lumtui_ca(c);
+    if a == 0 {
+        return 0;
+    }
+    lumtui_fb_put(fb, w, x, y, lumtui_mix(lumtui_fb_px(fb, w, x, y), c, a));
+    return 1;
+}
+
+/// 实心矩形。**不分配** —— 裁剪那几步全是局部量 (`alloc` 在每帧的重绘里会耗光
+/// 64 KiB 的 bump 堆, 而那是"画得越多越早死"的形状)。
+pub fn lumtui_fill_rect(fb: ptr, fw: u32, fh: u32, x: u32, y: u32, rw: u32, rh: u32, c: u32) -> u32 {
+    if lumtui_ca(c) == 0 || rw == 0 || rh == 0 {
+        return 0;
+    }
+    if x >= fw || y >= fh {
+        return 0;
+    }
+    let xe: u32 = x + rw;
+    let ye: u32 = y + rh;
+    let x1: u32 = xe;
+    let y1: u32 = ye;
+    if x1 > fw {
+        x1 = fw;
+    }
+    if y1 > fh {
+        y1 = fh;
+    }
+    let yy: u32 = y;
+    while yy < y1 {
+        let xx: u32 = x;
+        while xx < x1 {
+            let _b: u32 = lumtui_blend_px(fb, fw, xx, yy, c);
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return 1;
+}
+
+/// 圆角矩形。角的判定与 `lumtui_math.lomt` 的 `lumtui_hit_round` 是**同一条**,
+/// 于是"看得见的形状"与"点得中的形状"是一个 —— 两处各算一遍必然漂。
+pub fn lumtui_fill_round(fb: ptr, fw: u32, fh: u32, x: u32, y: u32, rw: u32, rh: u32,
+                         r: u32, c: u32) -> u32 {
+    if lumtui_ca(c) == 0 || rw == 0 || rh == 0 {
+        return 0;
+    }
+    if r == 0 || r * 2 > rw || r * 2 > rh {
+        return lumtui_fill_rect(fb, fw, fh, x, y, rw, rh, c);
+    }
+    if x >= fw || y >= fh {
+        return 0;
+    }
+    let x1: u32 = x + rw;
+    let y1: u32 = y + rh;
+    if x1 > fw {
+        x1 = fw;
+    }
+    if y1 > fh {
+        y1 = fh;
+    }
+    let yy: u32 = y;
+    while yy < y1 {
+        let xx: u32 = x;
+        while xx < x1 {
+            if lumtui_round_in(xx - x, yy - y, rw, rh, r) {
+                let _b: u32 = lumtui_blend_px(fb, fw, xx, yy, c);
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return 1;
+}
+
+/// 点在圆角矩形里吗 (坐标相对左上角)。
+pub fn lumtui_round_in(lx: u32, ly: u32, rw: u32, rh: u32, r: u32) -> bool {
+    if lx >= rw || ly >= rh {
+        return false;
+    }
+    if lx >= r && lx < rw - r {
+        return true;
+    }
+    if ly >= r && ly < rh - r {
+        return true;
+    }
+    let cx: u32 = r;
+    let cy: u32 = r;
+    if lx >= rw - r {
+        cx = rw - r - 1;
+    }
+    if ly >= rh - r {
+        cy = rh - r - 1;
+    }
+    let dx: u32 = lumtui_absdiff(lx, cx);
+    let dy: u32 = lumtui_absdiff(ly, cy);
+    return dx * dx + dy * dy <= r * r;
+}
+
+pub fn lumtui_absdiff(a: u32, b: u32) -> u32 {
+    if a > b {
+        return a - b;
+    }
+    return b - a;
+}
+
+/// 一块 8 位覆盖位图按单色混上去。`cw`/`ch` 是要画的尺寸, 位图按 `cw` 一行。
+pub fn lumtui_blit_cov(fb: ptr, fw: u32, fh: u32, x: u32, y: u32,
+                       cov: ptr, cw: u32, ch: u32, color: u32) -> u32 {
+    let ca: u32 = lumtui_ca(color);
+    if ca == 0 {
+        return 0;
+    }
+    let yy: u32 = 0;
+    while yy < ch && y + yy < fh {
+        let xx: u32 = 0;
+        while xx < cw && x + xx < fw {
+            let a: u32 = load8(cov, yy * cw + xx);
+            if a > 0 {
+                let px: u32 = x + xx;
+                let py: u32 = y + yy;
+                lumtui_fb_put(fb, fw, px, py,
+                              lumtui_mix(lumtui_fb_px(fb, fw, px, py), color, (a * ca) / 255));
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    return 1;
+}
+
+/// 把整块帧缓冲填成一个颜色 (**不做混合** —— 这是"清屏", 不是"画一层")。
+pub fn lumtui_fb_clear(fb: ptr, fw: u32, fh: u32, c: u32) {
+    let i: u32 = 0;
+    while i < fw * fh {
+        lumtui_st32(fb, i * 4, c);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 字体上下文
+
+// 一份跨函数共享的"用哪个字体画"的记录。指针塞不进 u32, 所以每个占两格 u32。
+pub const LUMTUI_CTX_BYTES: u32 = 48;
+pub const PC_FD: u32 = 0;
+pub const PC_F: u32 = 8;
+pub const PC_SC: u32 = 16;
+pub const PC_USE: u32 = 24;
+pub const PC_BMP: u32 = 32;
+pub const PC_OUT: u32 = 40;
+
+/// 填一个画字上下文。`fd` 是字体文件字节, `f` 是 `lumtui_font_load` 填过的 80 字节,
+/// `sc` 是 `lumtui_font_scratch_bytes()` 那么大的一块, `bmp`/`out` 是字形暂存。
+/// `fd == 0` 表示"没有字体", 那就走内置点阵。
+pub fn lumtui_ctx_new(c: ptr, fd: ptr, f: ptr, sc: ptr, bmp: ptr, out: ptr) -> ptr {
+    lumtui_st64(c, PC_FD, fd as u64);
+    lumtui_st64(c, PC_F, f as u64);
+    lumtui_st64(c, PC_SC, sc as u64);
+    lumtui_st64(c, PC_BMP, bmp as u64);
+    lumtui_st64(c, PC_OUT, out as u64);
+    lumtui_st32(c, PC_USE, 0);
+    if (fd as u64) != 0 && (f as u64) != 0 && (sc as u64) != 0 {
+        lumtui_st32(c, PC_USE, 1);
+    }
+    return c;
+}
+
+pub fn lumtui_ctx_fd(c: ptr) -> ptr { return lumtui_ld64(c, PC_FD) as ptr; }
+pub fn lumtui_ctx_f(c: ptr) -> ptr { return lumtui_ld64(c, PC_F) as ptr; }
+pub fn lumtui_ctx_sc(c: ptr) -> ptr { return lumtui_ld64(c, PC_SC) as ptr; }
+pub fn lumtui_ctx_bmp(c: ptr) -> ptr { return lumtui_ld64(c, PC_BMP) as ptr; }
+pub fn lumtui_ctx_out(c: ptr) -> ptr { return lumtui_ld64(c, PC_OUT) as ptr; }
+pub fn lumtui_ctx_use(c: ptr) -> u32 { return lumtui_ld32(c, PC_USE); }
+
+/// 字形暂存要多大 —— 64×64 覆盖位图 (64px 以内的字号都够)。
+pub fn lumtui_ctx_bmp_bytes() -> u32 {
+    return 4096;
+}
+
+// ---- 两条腿共用的"行高 / 升部"
+
+pub fn lumtui_line_h(c: ptr, size: u32) -> u32 {
+    if lumtui_ctx_use(c) == 0 {
+        return lumtui_fb_line_h(size);
+    }
+    return lumtui_font_line_h_px(lumtui_ctx_f(c), size);
+}
+
+pub fn lumtui_ascent(c: ptr, size: u32) -> u32 {
+    if lumtui_ctx_use(c) == 0 {
+        return lumtui_fb_scale(size) * 8;
+    }
+    return lumtui_font_ascent_px(lumtui_ctx_f(c), size);
+}
+
+pub fn lumtui_advance(c: ptr, cp: u32, size: u32) -> u32 {
+    if lumtui_ctx_use(c) == 0 {
+        return lumtui_fb_advance(size);
+    }
+    return lumtui_font_advance_px(lumtui_ctx_fd(c), lumtui_ctx_f(c), cp, size);
+}
+
+// ---------------------------------------------------------------- 画一个字符
+
+/// 把一个码点画在 `(pen_x, pen_y)` 上, `pen_y` 是**基线**。返回步进宽度
+/// (没画出来也给步进 —— 空的字符照样占位, 否则字距会随字形有无而变)。
+pub fn lumtui_paint_glyph(fb: ptr, fw: u32, fh: u32, pen_x: u32, pen_y: u32,
+                          cp: u32, size: u32, color: u32, c: ptr) -> u32 {
+    let bmp: ptr = lumtui_ctx_bmp(c);
+    let out: ptr = lumtui_ctx_out(c);
+    let adv: u32 = lumtui_advance(c, cp, size);
+    let ok: u32 = 0;
+    if lumtui_ctx_use(c) == 1 {
+        ok = lumtui_font_render(lumtui_ctx_fd(c), lumtui_ctx_f(c), cp, size,
+                                lumtui_ctx_sc(c), bmp, 64, 64, out);
+    } else {
+        ok = lumtui_fb_render(cp, size, bmp, 64, 64, out);
+    }
+    if ok == 0 {
+        return adv;
+    }
+    let w: u32 = lumtui_ld32(out, 8);
+    let h: u32 = lumtui_ld32(out, 12);
+    if w == 0 || h == 0 {
+        return adv;
+    }
+    // 字形盒相对**笔位**的左上角。两条腿的约定不一样, 这里对齐:
+    //   * 字体那一路: 位图原点本来就是基线左端, 所以直接用解出来的 (x, y), y 是负的;
+    //   * 点阵那一路: 位图是从上往下写的, 没有"基线以上"这回事 —— 于是把原点
+    //     当作字形的**底边**, 往上抬 7 个方块。不这么抬的话, 基线在上一行、
+    //     字形落在下一行 (实测就是这个症状: 标题跑到按钮那一行去了)。
+    let bx: i64 = 0;
+    let by: i64 = 0;
+    if lumtui_ctx_use(c) == 1 {
+        bx = (lumtui_ld32(out, 0) as i32) as i64;
+        by = (lumtui_ld32(out, 4) as i32) as i64;
+    } else {
+        by = 0 - ((lumtui_fb_scale(size) * 7) as i64);
+    }
+    let px: i64 = (pen_x as i64) + bx;
+    let py: i64 = (pen_y as i64) + by;
+    let cutx: u32 = 0;
+    let cuty: u32 = 0;
+    let dx: u32 = 0;
+    let dy: u32 = 0;
+    if px < 0 {
+        cutx = (0 - px) as u32;
+    } else {
+        dx = px as u32;
+    }
+    if py < 0 {
+        cuty = (0 - py) as u32;
+    } else {
+        dy = py as u32;
+    }
+    if cutx >= w || cuty >= h {
+        return adv;
+    }
+    if dx >= fw || dy >= fh {
+        return adv;
+    }
+    let vw: u32 = w - cutx;
+    let vh: u32 = h - cuty;
+    if dx + vw > fw {
+        vw = fw - dx;
+    }
+    if dy + vh > fh {
+        vh = fh - dy;
+    }
+    lumtui_blit_cov(fb, fw, fh, dx, dy, ptr_add(bmp, cuty * w + cutx), vw, vh, color);
+    return adv;
+}
+
+/// 一段字节串的宽度 (`(ptr, len)` 形式 —— 字符串表里的文字就是这种形状)。
+pub fn lumtui_str_width(sp: ptr, n: u32, size: u32, c: ptr) -> u32 {
+    let w: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        w = w + lumtui_advance(c, load8(sp, i), size);
+        i = i + 1;
+    }
+    return w;
+}
+
+/// 按 `(ptr, len)` 画一串字节。
+pub fn lumtui_paint_str(fb: ptr, fw: u32, fh: u32, x: u32, y: u32,
+                        sp: ptr, n: u32, size: u32, color: u32, c: ptr) -> u32 {
+    let pen: u32 = x;
+    let i: u32 = 0;
+    while i < n {
+        pen = pen + lumtui_paint_glyph(fb, fw, fh, pen, y, load8(sp, i), size, color, c);
+        i = i + 1;
+    }
+    return pen - x;
+}
+
+/// 一段 `str` (按字节当码点)。返回总宽度。
+pub fn lumtui_paint_text(fb: ptr, fw: u32, fh: u32, x: u32, y: u32,
+                         s: str, size: u32, color: u32, c: ptr) -> u32 {
+    let n: u32 = str_len(s);
+    let pen: u32 = x;
+    let i: u32 = 0;
+    while i < n {
+        pen = pen + lumtui_paint_glyph(fb, fw, fh, pen, y, str_byte(s, i), size, color, c);
+        i = i + 1;
+    }
+    return pen - x;
+}
+
+// ---------------------------------------------------------------- 画一个节点
+
+/// 前景: 节点写了就用它, 没写就看底色决定黑/白。
+pub fn lumtui_ink_pick(fg: u32, bg: u32) -> u32 {
+    if lumtui_ca(fg) > 0 {
+        return fg;
+    }
+    return lumtui_ink_for(bg);
+}
+
+pub fn lumtui_align_off(align: u32, avail: u32, size: u32) -> u32 {
+    if size >= avail {
+        return 0;
+    }
+    let slack: u32 = avail - size;
+    if align == LUMTUI_A_CENTER {
+        return slack / 2;
+    }
+    if align == LUMTUI_A_END {
+        return slack;
+    }
+    return 0;
+}
+
+/// 画一个节点: 背景 (圆角) + 文字。`i` 是**平铺下标**, `rects` 是布局那一步的产物。
+/// 返回画了几件事 (0 = 什么都没画)。
+pub fn lumtui_paint_node(fb: ptr, fw: u32, fh: u32, b: ptr, rects: ptr, i: u32, c: ptr) -> u32 {
+    if lumtui_flag_set(lumtui_fuc_flags(b, i), 0) {
+        return 0;                        // bit 0 = LUMTUI_F_HIDDEN
+    }
+    let r: ptr = ptr_add(rects, i * LUMTUI_RECT_BYTES);
+    let x: u32 = lumtui_rect_x(r);
+    let y: u32 = lumtui_rect_y(r);
+    let w: u32 = lumtui_rect_w(r);
+    let h: u32 = lumtui_rect_h(r);
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let op: u32 = lumtui_fuc_opacity(b, i);
+    let bg: u32 = lumtui_scale_a(lumtui_fuc_bg(b, i), op, 255);
+    let d: u32 = 0;
+    if lumtui_ca(bg) > 0 {
+        lumtui_fill_round(fb, fw, fh, x, y, w, h, lumtui_fuc_radius(b, i), bg);
+        d = 1;
+    }
+    let tid: u32 = lumtui_fuc_text_id(b, i);
+    if tid == 0 {
+        return d;
+    }
+    if lumtui_kind_has_text(lumtui_fuc_kind(b, i)) == false {
+        return d;
+    }
+    let sl: u32 = lumtui_fuc_str_len(b, tid);
+    if sl == 0 {
+        return d;
+    }
+    let sp: ptr = lumtui_fuc_str_ptr(b, tid);
+    let size: u32 = lumtui_fuc_font_px(b, i);
+    let tw: u32 = lumtui_str_width(sp, sl, size, c);
+    let th: u32 = lumtui_line_h(c, size);
+    // 内容盒: 节点矩形去掉内边距, 再按 align/justify 把这一行摆进去
+    let pl: u32 = lumtui_fuc_pad_l(b, i);
+    let pt: u32 = lumtui_fuc_pad_t(b, i);
+    let pr: u32 = lumtui_fuc_pad_r(b, i);
+    let pb: u32 = lumtui_fuc_pad_b(b, i);
+    let cw: u32 = 0;
+    let chh: u32 = 0;
+    if w > pl + pr {
+        cw = w - pl - pr;
+    }
+    if h > pt + pb {
+        chh = h - pt - pb;
+    }
+    let tx: u32 = x + pl + lumtui_align_off(lumtui_fuc_justify(b, i), cw, tw);
+    let ty: u32 = y + pt + lumtui_align_off(lumtui_fuc_align(b, i), chh, th) + lumtui_ascent(c, size);
+    let fg: u32 = lumtui_scale_a(lumtui_ink_pick(lumtui_fuc_fg(b, i), bg), op, 255);
+    let _tw2: u32 = lumtui_paint_str(fb, fw, fh, tx, ty, sp, sl, size, fg, c);
+    return d + 1;
+}
+
+/// 顺着平铺序把每个节点画一遍 (BFS = 从后往前)。
+pub fn lumtui_paint_doc(fb: ptr, fw: u32, fh: u32, b: ptr, rects: ptr, c: ptr) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let i: u32 = 0;
+    while i < n {
+        lumtui_paint_node(fb, fw, fh, b, rects, i, c);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 焦点环: 在某个节点的矩形边描一圈 (焦点从 `lumtui_focus_next` 来)。
+pub fn lumtui_paint_focus(fb: ptr, fw: u32, fh: u32, rects: ptr, idx: u32, color: u32) -> u32 {
+    if idx == 4294967295 {
+        return 0;
+    }
+    let r: ptr = ptr_add(rects, idx * LUMTUI_RECT_BYTES);
+    let x: u32 = lumtui_rect_x(r);
+    let y: u32 = lumtui_rect_y(r);
+    let w: u32 = lumtui_rect_w(r);
+    let h: u32 = lumtui_rect_h(r);
+    if w < 3 || h < 3 {
+        return 0;
+    }
+    let _a: u32 = lumtui_fill_rect(fb, fw, fh, x, y, w, 1, color);
+    let _b: u32 = lumtui_fill_rect(fb, fw, fh, x, y + h - 1, w, 1, color);
+    let _c: u32 = lumtui_fill_rect(fb, fw, fh, x, y, 1, h, color);
+    let _d: u32 = lumtui_fill_rect(fb, fw, fh, x + w - 1, y, 1, h, color);
+    return 1;
+}

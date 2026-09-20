@@ -860,8 +860,21 @@ def _run_driver(elf: Path, relpath: str, td: str, name: str) -> str:
     return text
 
 
-#: 语料里"参考实现的 IR 后端发不出来"的文件 (非目标), 按名字跳过。
+#: 语料里**不在这条判据目标内**的文件, 按原因跳过。
 def _unsupported(target: Path) -> str | None:
+    # **声明的读法不是 Loment 的**: 自举侧**按定义**收不了 —— 只认 `grammar loment`
+    # 这一种拼法（六门翻译器还没有 Loment 孪生，`docs/188` §4.1）。驱动自己报的话就是
+    # "这份源的 `choose write grammar` 自举侧收不了 … 请用参考实现编译"。
+    #
+    # 这一条**不是把判据放宽**: 判据的目标是"自举编译器能造出语料里那些 `.lomt` 的
+    # 产物"，而一份**声明了别的读法**的源是它能力之外的东西 —— 与下面那条
+    # "参考实现的 IR 后端发不出来"是同一形状 (目标之外, 不是因为编错了)。
+    # 等翻译器有了 Loment 孪生，这个分支自然不再命中: 那时驱动会接受它。
+    import potato_from  # noqa: PLC0415
+    g, _err, declared = potato_from.read_grammar_decl(
+        target.read_text(encoding="utf-8", errors="replace"))
+    if declared and g != "loment":
+        return f"声明的读法是 {g}（自举侧只收 loment，docs/188 §4.1）"
     mod = lomentc.load(target)
     deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
     try:

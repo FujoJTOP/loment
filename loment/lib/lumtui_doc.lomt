@@ -1,0 +1,982 @@
+module lumtui_doc
+
+// lumtui_doc.lomt — 界面文档: 建、树、序列化成 `.fuc`、校验回读。
+//
+// **这一块合并了 FUI 的两半**:
+//   * 建与序列化 = `tools/fuic.py` 干的活 (界面文档 -> 内核可载入的字节);
+//   * 校验与读取 = `kernel/src/fui/fuc.rs` 干的活 (magic/version/边界/FNV 四道检查)。
+// 记录布局**不重述**, 逐字节照 `lom/fuc.lom` (那是 L0 单一真源):
+//   文件 = header(48B) | nodes(64B×n) | strings | tokens | body_fnv(u32)
+//   strings = [u32 count][ (u16 len, bytes)... ]        (0 号恒为空串)
+//   tokens  = [ (u16 len, name, u8 kind, u32 value)... ]
+//
+// ## 两个模型, 别混
+//
+//   * **建** (句柄): `lumtui_doc_add` 返回的句柄是**创建序**, 与树的形状无关。
+//     改属性一律走句柄。
+//   * **载** (平铺): `lumtui_doc_emit` 把树按 **BFS** 摊平写出去, `first_child`
+//     写的是**摊平后**的下标。回读那一侧 (`lumtui_fuc_*`) 一律用平铺下标。
+//
+// 布局与绘制都吃**平铺**那一侧 —— 于是它们与内核那份只读视图是同一个语义,
+// 不必为"可写"再造一套。这也是 FUI 那条分界 (编译期文档 vs 载入期视图) 的照搬。
+//
+// ## 内存
+//
+// 一律由调用方给 arena: `alloc(lumtui_arena_bytes())`, 或者一块 `brk` 来的空间。
+// 本库**不自己分配** (仓库约定: 内存由调用方管)。读那一侧 (`lumtui_fuc_*`) 不要
+// arena —— 它就在调用方给的那段字节上零拷贝地看。
+
+use lumtui
+
+// ---------------------------------------------------------------- 容量与分区
+//
+// 分区尺寸都是编译期常量, 于是所有偏移都能直接算出来。
+
+pub const LUMTUI_MAX_NODES: u32 = 256;
+pub const LUMTUI_MAX_DEPTH: u32 = 16;
+pub const LUMTUI_MAX_STRINGS: u32 = 64;
+pub const LUMTUI_MAX_STRBLOB: u32 = 2048;
+pub const LUMTUI_MAX_TOKENS: u32 = 32;
+pub const LUMTUI_TOK_NAME_MAX: u32 = 32;
+pub const LUMTUI_TOK_SLOT: u32 = 39;
+
+pub const LUMTUI_HEADER_SIZE: u32 = 48;
+pub const LUMTUI_NODE_SIZE: u32 = 64;
+/// `0x43495546` —— "FUIC" 的小端读法, 照抄 `lom/fuc.lom` 的 `MAGIC`。
+pub const LUMTUI_MAGIC: u32 = 1128879430;
+pub const LUMTUI_VERSION: u32 = 1;
+
+// header 字段偏移 —— 与 kernel/src/fui/fuc_gen.rs 的 HEADER_*_OFF 一一对应。
+pub const LUMTUI_H_MAGIC: u32 = 0;
+pub const LUMTUI_H_VERSION: u32 = 4;
+pub const LUMTUI_H_FLAGS: u32 = 6;
+pub const LUMTUI_H_NODE_COUNT: u32 = 8;
+pub const LUMTUI_H_NODE_OFF: u32 = 12;
+pub const LUMTUI_H_STR_OFF: u32 = 16;
+pub const LUMTUI_H_STR_LEN: u32 = 20;
+pub const LUMTUI_H_TOK_OFF: u32 = 24;
+pub const LUMTUI_H_TOK_COUNT: u32 = 28;
+pub const LUMTUI_H_ANIM_OFF: u32 = 32;
+pub const LUMTUI_H_ANIM_COUNT: u32 = 36;
+pub const LUMTUI_H_DOC_W: u32 = 40;
+pub const LUMTUI_H_DOC_H: u32 = 42;
+pub const LUMTUI_H_ROOT: u32 = 44;
+pub const LUMTUI_H_RESERVED: u32 = 46;
+
+// node 字段偏移 —— 与 fuc_gen.rs 的 NODE_*_OFF 一一对应。
+pub const LUMTUI_N_KIND: u32 = 0;
+pub const LUMTUI_N_ID: u32 = 2;
+pub const LUMTUI_N_FLAGS: u32 = 4;
+pub const LUMTUI_N_CHILDREN: u32 = 6;
+pub const LUMTUI_N_X: u32 = 8;
+pub const LUMTUI_N_Y: u32 = 10;
+pub const LUMTUI_N_W_MODE: u32 = 12;
+pub const LUMTUI_N_W_VAL: u32 = 14;
+pub const LUMTUI_N_H_MODE: u32 = 16;
+pub const LUMTUI_N_H_VAL: u32 = 18;
+pub const LUMTUI_N_PAD_L: u32 = 20;
+pub const LUMTUI_N_PAD_T: u32 = 22;
+pub const LUMTUI_N_PAD_R: u32 = 24;
+pub const LUMTUI_N_PAD_B: u32 = 26;
+pub const LUMTUI_N_GAP: u32 = 28;
+pub const LUMTUI_N_RADIUS: u32 = 30;
+pub const LUMTUI_N_ELEV: u32 = 32;
+pub const LUMTUI_N_ALIGN: u32 = 34;
+pub const LUMTUI_N_JUSTIFY: u32 = 36;
+pub const LUMTUI_N_SIZE: u32 = 38;
+pub const LUMTUI_N_BG: u32 = 40;
+pub const LUMTUI_N_FG: u32 = 44;
+pub const LUMTUI_N_TEXT_ID: u32 = 48;
+pub const LUMTUI_N_TONE: u32 = 52;
+pub const LUMTUI_N_OPACITY: u32 = 54;
+pub const LUMTUI_N_FIRST_CHILD: u32 = 56;
+pub const LUMTUI_N_EXTRA: u32 = 60;
+
+// arena 分区起点 (逐段相加得来, 改容量就要重算这一段)。
+pub const LUMTUI_OFF_HEADER: u32 = 0;       // 48
+pub const LUMTUI_OFF_NODES: u32 = 48;       // 16384
+pub const LUMTUI_OFF_CHILD: u32 = 16432;    // 512
+pub const LUMTUI_OFF_SIB: u32 = 16944;      // 512
+pub const LUMTUI_OFF_QUEUE: u32 = 17456;    // 512
+pub const LUMTUI_OFF_QDEPTH: u32 = 17968;   // 512
+pub const LUMTUI_OFF_SIDX: u32 = 18480;     // 512
+pub const LUMTUI_OFF_SBLOB: u32 = 18992;    // 2048
+pub const LUMTUI_OFF_TOK: u32 = 21040;      // 1248
+pub const LUMTUI_OFF_CTX: u32 = 22288;      // 32
+pub const LUMTUI_ARENA_BYTES: u32 = 22320;
+
+// ctx 里那几个计数器。
+pub const LUMTUI_CTX_STRN: u32 = 0;
+pub const LUMTUI_CTX_BLOBN: u32 = 4;
+pub const LUMTUI_CTX_TOKN: u32 = 8;
+pub const LUMTUI_CTX_NODEN: u32 = 12;
+pub const LUMTUI_CTX_W: u32 = 16;
+pub const LUMTUI_CTX_H: u32 = 20;
+
+/// 节点没写字号时用的像素数。
+pub fn lumtui_default_px() -> u32 {
+    return 14;
+}
+
+pub fn lumtui_arena_bytes() -> u32 {
+    return LUMTUI_ARENA_BYTES;
+}
+
+// ---------------------------------------------------------------- 小工具
+//
+// `lumtui_ld16` / `lumtui_st16` / `lumtui_ld32` / `lumtui_st32` / `lumtui_fnv1a`
+// 都在 `lumtui.lomt` 里 —— 单元的发射符号是**平的**, 同一份小工具在两个模块各写
+// 一份会被检查器按重名拦住 (这是对的: 它挡的是"两条 define @x"那种非法 IR)。
+
+pub fn lumtui_off_nodes(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_NODES);
+}
+
+pub fn lumtui_off_child(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_CHILD);
+}
+
+pub fn lumtui_off_sib(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_SIB);
+}
+
+pub fn lumtui_off_queue(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_QUEUE);
+}
+
+pub fn lumtui_off_qdepth(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_QDEPTH);
+}
+
+pub fn lumtui_off_sidx(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_SIDX);
+}
+
+pub fn lumtui_off_sblob(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_SBLOB);
+}
+
+pub fn lumtui_off_tok(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_TOK);
+}
+
+pub fn lumtui_off_ctx(d: ptr) -> ptr {
+    return ptr_add(d, LUMTUI_OFF_CTX);
+}
+
+pub fn lumtui_ctx_get(d: ptr, off: u32) -> u32 {
+    return lumtui_ld32(lumtui_off_ctx(d), off);
+}
+
+pub fn lumtui_ctx_put(d: ptr, off: u32, v: u32) {
+    lumtui_st32(lumtui_off_ctx(d), off, v);
+}
+
+/// 句柄 `i` 的 64 字节记录在哪。
+pub fn lumtui_nrec(d: ptr, i: u32) -> ptr {
+    return ptr_add(lumtui_off_nodes(d), i * LUMTUI_NODE_SIZE);
+}
+
+// ---------------------------------------------------------------- 建
+
+/// 清空并初始化一块 arena。`w`/`h` 是**设计尺寸** (会进 header 的 doc_w/doc_h)。
+pub fn lumtui_doc_init(a: ptr, w: u32, h: u32) -> ptr {
+    let i: u32 = 0;
+    while i < 64 {
+        store8(a, i, 0 as u8);
+        i = i + 1;
+    }
+    lumtui_ctx_put(a, LUMTUI_CTX_STRN, 1);
+    lumtui_ctx_put(a, LUMTUI_CTX_BLOBN, 0);
+    lumtui_ctx_put(a, LUMTUI_CTX_TOKN, 0);
+    lumtui_ctx_put(a, LUMTUI_CTX_NODEN, 0);
+    lumtui_ctx_put(a, LUMTUI_CTX_W, w);
+    lumtui_ctx_put(a, LUMTUI_CTX_H, h);
+    // 0 号字符串恒为空串 —— 于是 `text_id == 0` 就是"没有文本", 而不是
+    // "取到表里第一个串"。`tools/fuic.py` 那条 `strings = {"": 0}` 说的就是这个坑。
+    lumtui_st32(lumtui_off_sidx(a), 0, 0);
+    lumtui_st32(lumtui_off_sidx(a), 4, 0);
+    return a;
+}
+
+/// 加一个节点, 返回**句柄** (创建序)。满了返回 4294967295。
+///
+/// 新记录是清零的, 但 `w_mode`/`h_mode` 都是 `LUMTUI_M_GROW` —— 刻意的默认:
+/// 容器里"什么都不写"的子节点该撑满, 而不是塌成 0×0。
+pub fn lumtui_doc_add(d: ptr, kind: u32, id: u32) -> u32 {
+    let n: u32 = lumtui_ctx_get(d, LUMTUI_CTX_NODEN);
+    if n >= LUMTUI_MAX_NODES {
+        return 4294967295;
+    }
+    let r: ptr = lumtui_nrec(d, n);
+    let i: u32 = 0;
+    while i < LUMTUI_NODE_SIZE {
+        store8(r, i, 0 as u8);
+        i = i + 1;
+    }
+    lumtui_st16(r, LUMTUI_N_KIND, kind);
+    lumtui_st16(r, LUMTUI_N_ID, id);
+    lumtui_st16(r, LUMTUI_N_W_MODE, LUMTUI_M_GROW);
+    lumtui_st16(r, LUMTUI_N_W_VAL, 1);
+    lumtui_st16(r, LUMTUI_N_H_MODE, LUMTUI_M_GROW);
+    lumtui_st16(r, LUMTUI_N_H_VAL, 1);
+    lumtui_st16(r, LUMTUI_N_OPACITY, 255);
+    lumtui_st16(lumtui_off_child(d), n * 2, 65535);
+    lumtui_st16(lumtui_off_sib(d), n * 2, 65535);
+    lumtui_ctx_put(d, LUMTUI_CTX_NODEN, n + 1);
+    return n;
+}
+
+pub fn lumtui_node_count(d: ptr) -> u32 {
+    return lumtui_ctx_get(d, LUMTUI_CTX_NODEN);
+}
+
+pub fn lumtui_node_kind(d: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_nrec(d, i), LUMTUI_N_KIND);
+}
+
+/// 谁把 `i` 挂上了 —— 线性扫一遍子表 (节点数 ≤256, 够用)。
+pub fn lumtui_parent_of(d: ptr, i: u32) -> u32 {
+    let p: u32 = 0;
+    while p < lumtui_ctx_get(d, LUMTUI_CTX_NODEN) {
+        let cur: u32 = lumtui_ld16(lumtui_off_child(d), p * 2);
+        let grd: u32 = 0;
+        while cur != 65535 && grd < LUMTUI_MAX_NODES {
+            if cur == i {
+                return p;
+            }
+            cur = lumtui_ld16(lumtui_off_sib(d), cur * 2);
+            grd = grd + 1;
+        }
+        p = p + 1;
+    }
+    return 65535;
+}
+
+/// `up` 是 `start` 的祖先吗 (顺着"给谁当了孩子"往上走)?
+pub fn lumtui_is_ancestor(d: ptr, up: u32, start: u32) -> u32 {
+    let cur: u32 = start;
+    let grd: u32 = 0;
+    while grd < LUMTUI_MAX_NODES {
+        let p: u32 = lumtui_parent_of(d, cur);
+        if p == 65535 {
+            return 0;
+        }
+        if p == up {
+            return 1;
+        }
+        cur = p;
+        grd = grd + 1;
+    }
+    return 1;
+}
+
+/// 把 `child` 挂到 `parent` 子表的尾上。成环会被拒 (返回 0)。
+///
+/// 成环必须**响亮地拒**, 不能放着 —— 环会让 BFS 停不下来, 那是死循环不是报错。
+pub fn lumtui_doc_add_child(d: ptr, parent: u32, child: u32) -> u32 {
+    if parent == child {
+        return 0;
+    }
+    if lumtui_is_ancestor(d, parent, child) == 1 {
+        return 0;
+    }
+    if lumtui_parent_of(d, child) != 65535 {
+        return 0;
+    }
+    let h: u32 = lumtui_ld16(lumtui_off_child(d), parent * 2);
+    if h == 65535 {
+        lumtui_st16(lumtui_off_child(d), parent * 2, child);
+        return 1;
+    }
+    let cur: u32 = h;
+    let grd: u32 = 0;
+    while grd < LUMTUI_MAX_NODES {
+        let nx: u32 = lumtui_ld16(lumtui_off_sib(d), cur * 2);
+        if nx == 65535 {
+            lumtui_st16(lumtui_off_sib(d), cur * 2, child);
+            return 1;
+        }
+        cur = nx;
+        grd = grd + 1;
+    }
+    return 0;
+}
+
+/// 子表有几个 (顺着兄弟链数)。
+pub fn lumtui_child_count(d: ptr, i: u32) -> u32 {
+    let c: u32 = 0;
+    let cur: u32 = lumtui_ld16(lumtui_off_child(d), i * 2);
+    let grd: u32 = 0;
+    while cur != 65535 && grd < LUMTUI_MAX_NODES {
+        c = c + 1;
+        cur = lumtui_ld16(lumtui_off_sib(d), cur * 2);
+        grd = grd + 1;
+    }
+    return c;
+}
+
+/// 第 `k` 个孩子的句柄 (从 0 数); 越界给 65535。
+pub fn lumtui_child_at(d: ptr, i: u32, k: u32) -> u32 {
+    let cur: u32 = lumtui_ld16(lumtui_off_child(d), i * 2);
+    let j: u32 = 0;
+    let grd: u32 = 0;
+    while cur != 65535 && grd < LUMTUI_MAX_NODES {
+        if j == k {
+            return cur;
+        }
+        cur = lumtui_ld16(lumtui_off_sib(d), cur * 2);
+        j = j + 1;
+        grd = grd + 1;
+    }
+    return 65535;
+}
+
+// ---------------------------------------------------------------- 设属性
+//
+// 薄薄一层写记录。句柄越界 = 静默不写 —— 读侧一律给默认值, 与 `fuc.rs`
+// "越界读取一律返回默认值 (不 panic)" 是同一种态度。
+
+pub fn lumtui_set_bg(d: ptr, i: u32, c: u32) {
+    lumtui_st32(lumtui_nrec(d, i), LUMTUI_N_BG, c);
+}
+
+pub fn lumtui_set_fg(d: ptr, i: u32, c: u32) {
+    lumtui_st32(lumtui_nrec(d, i), LUMTUI_N_FG, c);
+}
+
+pub fn lumtui_set_pos(d: ptr, i: u32, x: u32, y: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_X, x);
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_Y, y);
+}
+
+pub fn lumtui_set_size(d: ptr, i: u32, wm: u32, wv: u32, hm: u32, hv: u32) {
+    let p: ptr = lumtui_nrec(d, i);
+    lumtui_st16(p, LUMTUI_N_W_MODE, wm);
+    lumtui_st16(p, LUMTUI_N_W_VAL, wv);
+    lumtui_st16(p, LUMTUI_N_H_MODE, hm);
+    lumtui_st16(p, LUMTUI_N_H_VAL, hv);
+}
+
+pub fn lumtui_set_pad(d: ptr, i: u32, l: u32, t: u32, r: u32, b: u32) {
+    let p: ptr = lumtui_nrec(d, i);
+    lumtui_st16(p, LUMTUI_N_PAD_L, l);
+    lumtui_st16(p, LUMTUI_N_PAD_T, t);
+    lumtui_st16(p, LUMTUI_N_PAD_R, r);
+    lumtui_st16(p, LUMTUI_N_PAD_B, b);
+}
+
+pub fn lumtui_set_gap(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_GAP, v);
+}
+
+pub fn lumtui_set_radius(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_RADIUS, v);
+}
+
+pub fn lumtui_set_elev(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_ELEV, v);
+}
+
+pub fn lumtui_set_align(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_ALIGN, v);
+}
+
+pub fn lumtui_set_justify(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_JUSTIFY, v);
+}
+
+/// 字号 (像素)。0 表示"继承" —— 读侧按 `lumtui_default_px()` 兜底。
+pub fn lumtui_set_font_px(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_SIZE, v);
+}
+
+pub fn lumtui_set_tone(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_TONE, v);
+}
+
+pub fn lumtui_set_opacity(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_OPACITY, v);
+}
+
+pub fn lumtui_set_flags(d: ptr, i: u32, v: u32) {
+    lumtui_st16(lumtui_nrec(d, i), LUMTUI_N_FLAGS, v);
+}
+
+pub fn lumtui_set_extra(d: ptr, i: u32, v: u32) {
+    lumtui_st32(lumtui_nrec(d, i), LUMTUI_N_EXTRA, v);
+}
+
+// ---------------------------------------------------------------- 字符串表
+
+pub fn lumtui_str_count(d: ptr) -> u32 {
+    return lumtui_ctx_get(d, LUMTUI_CTX_STRN);
+}
+
+pub fn lumtui_str_off(d: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_off_sidx(d), i * 8);
+}
+
+pub fn lumtui_str_len(d: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_off_sidx(d), i * 8 + 4);
+}
+
+/// 字符串 `i` 的字节在 arena 里的地址。
+pub fn lumtui_str_ptr(d: ptr, i: u32) -> ptr {
+    return ptr_add(lumtui_off_sblob(d), lumtui_str_off(d, i));
+}
+
+/// 第 `i` 个串与 `s` 逐字节相同?
+pub fn lumtui_str_is(d: ptr, i: u32, s: str) -> bool {
+    let n: u32 = lumtui_str_len(d, i);
+    if n != str_len(s) {
+        return false;
+    }
+    let p: ptr = lumtui_str_ptr(d, i);
+    let k: u32 = 0;
+    while k < n {
+        if load8(p, k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// 把 `s` 放进字符串表, 返回**下标** (已有就复用)。空串恒为 0。
+///
+/// 表满 / 字节池满 -> 返回 0 (="没有文本"), **不是** 4294967295:
+/// `.fuc` 里"放不下"与"没有文本"本来就是同一个值, 这里不造一个假的区别。
+pub fn lumtui_intern(d: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = lumtui_str_count(d);
+    let i: u32 = 1;
+    while i < c {
+        if lumtui_str_is(d, i, s) {
+            return i;
+        }
+        i = i + 1;
+    }
+    if c >= LUMTUI_MAX_STRINGS {
+        return 0;
+    }
+    let used: u32 = lumtui_ctx_get(d, LUMTUI_CTX_BLOBN);
+    if used + n > LUMTUI_MAX_STRBLOB {
+        return 0;
+    }
+    let blob: ptr = ptr_add(lumtui_off_sblob(d), used);
+    let k: u32 = 0;
+    while k < n {
+        store8(blob, k, str_byte(s, k) as u8);
+        k = k + 1;
+    }
+    lumtui_st32(lumtui_off_sidx(d), c * 8, used);
+    lumtui_st32(lumtui_off_sidx(d), c * 8 + 4, n);
+    lumtui_ctx_put(d, LUMTUI_CTX_BLOBN, used + n);
+    lumtui_ctx_put(d, LUMTUI_CTX_STRN, c + 1);
+    return c;
+}
+
+/// 给节点挂一段文字 (与 `fuc` 的 `text_id` 同一个语义)。
+pub fn lumtui_set_text(d: ptr, i: u32, s: str) {
+    let t: u32 = lumtui_intern(d, s);
+    lumtui_st32(lumtui_nrec(d, i), LUMTUI_N_TEXT_ID, t);
+}
+
+// ---------------------------------------------------------------- 令牌
+
+pub fn lumtui_tok_count(d: ptr) -> u32 {
+    return lumtui_ctx_get(d, LUMTUI_CTX_TOKN);
+}
+
+pub fn lumtui_tok_slot(d: ptr, i: u32) -> ptr {
+    return ptr_add(lumtui_off_tok(d), i * LUMTUI_TOK_SLOT);
+}
+
+pub fn lumtui_tok_len(d: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_tok_slot(d, i), 0);
+}
+
+pub fn lumtui_tok_name(d: ptr, i: u32) -> ptr {
+    return ptr_add(lumtui_tok_slot(d, i), 2);
+}
+
+pub fn lumtui_tok_kind(d: ptr, i: u32) -> u32 {
+    return load8(lumtui_tok_slot(d, i), 34);
+}
+
+pub fn lumtui_tok_value(d: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_tok_slot(d, i), 35);
+}
+
+pub fn lumtui_tok_same(d: ptr, i: u32, name: str, n: u32) -> bool {
+    if lumtui_tok_len(d, i) != n {
+        return false;
+    }
+    let p: ptr = lumtui_tok_name(d, i);
+    let k: u32 = 0;
+    while k < n {
+        if load8(p, k) != str_byte(name, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// 加一个令牌。`kind` 0 = 颜色, 1 = 数字 (与 `fuic.py` 的 `.fus` 口径一致)。
+/// 重名 -> 覆盖旧值并返回旧下标; 装不下 -> 4294967295。
+pub fn lumtui_token(d: ptr, name: str, kind: u32, value: u32) -> u32 {
+    let n: u32 = str_len(name);
+    if n > LUMTUI_TOK_NAME_MAX {
+        return 4294967295;
+    }
+    let c: u32 = lumtui_tok_count(d);
+    let i: u32 = 0;
+    while i < c {
+        if lumtui_tok_same(d, i, name, n) {
+            let s: ptr = lumtui_tok_slot(d, i);
+            store8(s, 34, kind as u8);
+            lumtui_st32(s, 35, value);
+            return i;
+        }
+        i = i + 1;
+    }
+    if c >= LUMTUI_MAX_TOKENS {
+        return 4294967295;
+    }
+    let s: ptr = lumtui_tok_slot(d, c);
+    let k: u32 = 0;
+    while k < LUMTUI_TOK_SLOT {
+        store8(s, k, 0 as u8);
+        k = k + 1;
+    }
+    lumtui_st16(s, 0, n);
+    k = 0;
+    while k < n {
+        store8(s, 2 + k, str_byte(name, k) as u8);
+        k = k + 1;
+    }
+    store8(s, 34, kind as u8);
+    lumtui_st32(s, 35, value);
+    lumtui_ctx_put(d, LUMTUI_CTX_TOKN, c + 1);
+    return c;
+}
+
+/// 按名字找令牌下标; 没有给 4294967295。主题色解析走这里。
+pub fn lumtui_tok_find(d: ptr, name: str) -> u32 {
+    let n: u32 = str_len(name);
+    let c: u32 = lumtui_tok_count(d);
+    let i: u32 = 0;
+    while i < c {
+        if lumtui_tok_same(d, i, name, n) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+pub fn lumtui_tok_color(d: ptr, name: str, fallback: u32) -> u32 {
+    let i: u32 = lumtui_tok_find(d, name);
+    if i == 4294967295 {
+        return fallback;
+    }
+    return lumtui_tok_value(d, i);
+}
+
+// ---------------------------------------------------------------- 序列化
+
+pub fn lumtui_strtab_bytes(d: ptr) -> u32 {
+    let o: u32 = 4;
+    let i: u32 = 0;
+    while i < lumtui_str_count(d) {
+        o = o + 2 + lumtui_str_len(d, i);
+        i = i + 1;
+    }
+    return o;
+}
+
+pub fn lumtui_toktab_bytes(d: ptr) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < lumtui_tok_count(d) {
+        o = o + 7 + lumtui_tok_len(d, i);
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 序列化后要几个字节 (`lumtui_doc_emit` 需要这么大的输出缓冲)。
+pub fn lumtui_emit_bytes(d: ptr) -> u32 {
+    let n: u32 = lumtui_ctx_get(d, LUMTUI_CTX_NODEN);
+    return LUMTUI_HEADER_SIZE + n * LUMTUI_NODE_SIZE + lumtui_strtab_bytes(d)
+        + lumtui_toktab_bytes(d) + 4;
+}
+
+/// 树按 BFS 摊平写进 `out`。返回写出的字节数; 超过 `cap` 或超过深度上限返回 0
+/// —— 宁可拒绝, 也不截断着写 (截断出来的字节串能过 FNV 却少一半节点, 那最坏)。
+pub fn lumtui_doc_emit(d: ptr, out: ptr, cap: u32) -> u32 {
+    let n: u32 = lumtui_ctx_get(d, LUMTUI_CTX_NODEN);
+    if n == 0 {
+        return 0;
+    }
+    let q: ptr = lumtui_off_queue(d);
+    let qd: ptr = lumtui_off_qdepth(d);
+    lumtui_st16(q, 0, 0);
+    lumtui_st16(qd, 0, 1);
+    let head: u32 = 0;
+    let tail: u32 = 1;
+    while head < tail {
+        let node: u32 = lumtui_ld16(q, head * 2);
+        let dep: u32 = lumtui_ld16(qd, head * 2);
+        if dep > LUMTUI_MAX_DEPTH {
+            return 0;
+        }
+        let ch: u32 = lumtui_ld16(lumtui_off_child(d), node * 2);
+        let grd: u32 = 0;
+        while ch != 65535 && grd < LUMTUI_MAX_NODES {
+            if tail >= LUMTUI_MAX_NODES {
+                return 0;
+            }
+            lumtui_st16(q, tail * 2, ch);
+            lumtui_st16(qd, tail * 2, dep + 1);
+            tail = tail + 1;
+            ch = lumtui_ld16(lumtui_off_sib(d), ch * 2);
+            grd = grd + 1;
+        }
+        head = head + 1;
+    }
+    let str_off: u32 = LUMTUI_HEADER_SIZE + n * LUMTUI_NODE_SIZE;
+    let str_len: u32 = lumtui_strtab_bytes(d);
+    let tok_off: u32 = str_off + str_len;
+    let tok_len: u32 = lumtui_toktab_bytes(d);
+    let total: u32 = tok_off + tok_len + 4;
+    if total > cap {
+        return 0;
+    }
+    // ---- 节点: 按 BFS 序写。`first_child` 换成**摊平后**的下标 (0 = 没孩子)。
+    let i: u32 = 0;
+    while i < n {
+        let src: u32 = lumtui_ld16(q, i * 2);
+        let sp: ptr = lumtui_nrec(d, src);
+        let dp: ptr = ptr_add(out, LUMTUI_HEADER_SIZE + i * LUMTUI_NODE_SIZE);
+        let k: u32 = 0;
+        while k < LUMTUI_NODE_SIZE {
+            store8(dp, k, load8(sp, k) as u8);
+            k = k + 1;
+        }
+        let cnt: u32 = lumtui_child_count(d, src);
+        let fc: u32 = 0;
+        if cnt > 0 {
+            fc = lumtui_bfs_index(q, n, lumtui_ld16(lumtui_off_child(d), src * 2));
+        }
+        lumtui_st16(dp, LUMTUI_N_CHILDREN, cnt);
+        lumtui_st32(dp, LUMTUI_N_FIRST_CHILD, fc);
+        i = i + 1;
+    }
+    // ---- 头
+    lumtui_st32(out, LUMTUI_H_MAGIC, LUMTUI_MAGIC);
+    lumtui_st16(out, LUMTUI_H_VERSION, LUMTUI_VERSION);
+    lumtui_st16(out, LUMTUI_H_FLAGS, 0);
+    lumtui_st32(out, LUMTUI_H_NODE_COUNT, n);
+    lumtui_st32(out, LUMTUI_H_NODE_OFF, LUMTUI_HEADER_SIZE);
+    lumtui_st32(out, LUMTUI_H_STR_OFF, str_off);
+    lumtui_st32(out, LUMTUI_H_STR_LEN, str_len);
+    lumtui_st32(out, LUMTUI_H_TOK_OFF, tok_off);
+    lumtui_st32(out, LUMTUI_H_TOK_COUNT, lumtui_tok_count(d));
+    lumtui_st32(out, LUMTUI_H_ANIM_OFF, 0);
+    lumtui_st32(out, LUMTUI_H_ANIM_COUNT, 0);
+    lumtui_st16(out, LUMTUI_H_DOC_W, lumtui_ctx_get(d, LUMTUI_CTX_W));
+    lumtui_st16(out, LUMTUI_H_DOC_H, lumtui_ctx_get(d, LUMTUI_CTX_H));
+    lumtui_st16(out, LUMTUI_H_ROOT, 0);
+    lumtui_st16(out, LUMTUI_H_RESERVED, 0);
+    // ---- 字符串表 (计数 + 逐条)
+    lumtui_st32(out, str_off, lumtui_str_count(d));
+    lumtui_str_blob_copy(d, out, str_off);
+    // ---- 令牌表
+    lumtui_tok_blob_copy(d, out, tok_off);
+    // ---- 尾: 前面所有字节的 FNV-1a
+    lumtui_st32(out, total - 4, lumtui_fnv1a(out, total - 4));
+    return total;
+}
+
+/// 字符串表体 (不含 4 字节计数) 拷进 `out + base`; 返回拷了几个字节。
+pub fn lumtui_str_blob_copy(d: ptr, out: ptr, base: u32) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < lumtui_str_count(d) {
+        let sl: u32 = lumtui_str_len(d, i);
+        lumtui_st16(out, base + 4 + o, sl);
+        let sp: ptr = lumtui_str_ptr(d, i);
+        let k: u32 = 0;
+        while k < sl {
+            store8(out, base + 6 + o + k, load8(sp, k) as u8);
+            k = k + 1;
+        }
+        o = o + 2 + sl;
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 令牌表体拷进 `out + base`; 返回拷了几个字节。
+pub fn lumtui_tok_blob_copy(d: ptr, out: ptr, base: u32) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < lumtui_tok_count(d) {
+        let tl: u32 = lumtui_tok_len(d, i);
+        lumtui_st16(out, base + o, tl);
+        let tp: ptr = lumtui_tok_name(d, i);
+        let k: u32 = 0;
+        while k < tl {
+            store8(out, base + 2 + o + k, load8(tp, k) as u8);
+            k = k + 1;
+        }
+        store8(out, base + 2 + tl + o, lumtui_tok_kind(d, i) as u8);
+        lumtui_st32(out, base + 3 + tl + o, lumtui_tok_value(d, i));
+        o = o + 7 + tl;
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 句柄在 BFS 序里排第几 —— `first_child` 要从句柄换成摊平下标。
+pub fn lumtui_bfs_index(q: ptr, n: u32, handle: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if lumtui_ld16(q, i * 2) == handle {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 回读
+//
+// 与 `kernel/src/fui/fuc.rs::load` 同一条: magic / version / 边界 / FNV 四道,
+// 哪一道不过就是一个 `false`。**零拷贝** —— 下面的访问器都是从 `b` 现算的,
+// 不需要 arena, 也不写 `b` 一个字节。
+
+pub fn lumtui_fuc_valid(b: ptr, n: u32) -> bool {
+    if n < 56 {
+        return false;
+    }
+    if lumtui_ld32(b, LUMTUI_H_MAGIC) != LUMTUI_MAGIC {
+        return false;
+    }
+    if lumtui_ld16(b, LUMTUI_H_VERSION) != LUMTUI_VERSION {
+        return false;
+    }
+    let nc: u32 = lumtui_ld32(b, LUMTUI_H_NODE_COUNT);
+    if nc > LUMTUI_MAX_NODES {
+        return false;
+    }
+    let node_off: u32 = lumtui_ld32(b, LUMTUI_H_NODE_OFF);
+    let str_off: u32 = lumtui_ld32(b, LUMTUI_H_STR_OFF);
+    let str_len: u32 = lumtui_ld32(b, LUMTUI_H_STR_LEN);
+    let tok_off: u32 = lumtui_ld32(b, LUMTUI_H_TOK_OFF);
+    if node_off + nc * LUMTUI_NODE_SIZE > n {
+        return false;
+    }
+    if str_off + str_len > n {
+        return false;
+    }
+    if tok_off > n - 4 {
+        return false;
+    }
+    return lumtui_fnv1a(b, n - 4) == lumtui_ld32(b, n - 4);
+}
+
+pub fn lumtui_fuc_nodes(b: ptr) -> ptr {
+    return ptr_add(b, lumtui_ld32(b, LUMTUI_H_NODE_OFF));
+}
+
+pub fn lumtui_fuc_nrec(b: ptr, i: u32) -> ptr {
+    return ptr_add(lumtui_fuc_nodes(b), i * LUMTUI_NODE_SIZE);
+}
+
+pub fn lumtui_fuc_count(b: ptr) -> u32 {
+    return lumtui_ld32(b, LUMTUI_H_NODE_COUNT);
+}
+
+pub fn lumtui_fuc_doc_w(b: ptr) -> u32 {
+    return lumtui_ld16(b, LUMTUI_H_DOC_W);
+}
+
+pub fn lumtui_fuc_doc_h(b: ptr) -> u32 {
+    return lumtui_ld16(b, LUMTUI_H_DOC_H);
+}
+
+pub fn lumtui_fuc_kind(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_KIND);
+}
+
+pub fn lumtui_fuc_id(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_ID);
+}
+
+pub fn lumtui_fuc_flags(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_FLAGS);
+}
+
+pub fn lumtui_fuc_children(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_CHILDREN);
+}
+
+pub fn lumtui_fuc_x(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_X);
+}
+
+pub fn lumtui_fuc_y(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_Y);
+}
+
+pub fn lumtui_fuc_w_mode(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_W_MODE);
+}
+
+pub fn lumtui_fuc_w_val(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_W_VAL);
+}
+
+pub fn lumtui_fuc_h_mode(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_H_MODE);
+}
+
+pub fn lumtui_fuc_h_val(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_H_VAL);
+}
+
+pub fn lumtui_fuc_pad_l(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_PAD_L);
+}
+
+pub fn lumtui_fuc_pad_t(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_PAD_T);
+}
+
+pub fn lumtui_fuc_pad_r(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_PAD_R);
+}
+
+pub fn lumtui_fuc_pad_b(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_PAD_B);
+}
+
+pub fn lumtui_fuc_gap(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_GAP);
+}
+
+pub fn lumtui_fuc_radius(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_RADIUS);
+}
+
+pub fn lumtui_fuc_elev(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_ELEV);
+}
+
+pub fn lumtui_fuc_align(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_ALIGN);
+}
+
+pub fn lumtui_fuc_justify(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_JUSTIFY);
+}
+
+/// 字号。0 是"没写" -> 默认像素数。
+pub fn lumtui_fuc_font_px(b: ptr, i: u32) -> u32 {
+    let v: u32 = lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_SIZE);
+    if v == 0 {
+        return lumtui_default_px();
+    }
+    return v;
+}
+
+pub fn lumtui_fuc_bg(b: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_fuc_nrec(b, i), LUMTUI_N_BG);
+}
+
+pub fn lumtui_fuc_fg(b: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_fuc_nrec(b, i), LUMTUI_N_FG);
+}
+
+pub fn lumtui_fuc_text_id(b: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_fuc_nrec(b, i), LUMTUI_N_TEXT_ID);
+}
+
+pub fn lumtui_fuc_tone(b: ptr, i: u32) -> u32 {
+    return lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_TONE);
+}
+
+/// 不透明度: 0 当成 255 (与 `fuc.rs::Node::opacity` 同一条 —— 没写 = 不透明)。
+pub fn lumtui_fuc_opacity(b: ptr, i: u32) -> u32 {
+    let v: u32 = lumtui_ld16(lumtui_fuc_nrec(b, i), LUMTUI_N_OPACITY);
+    if v == 0 {
+        return 255;
+    }
+    return v;
+}
+
+pub fn lumtui_fuc_first_child(b: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_fuc_nrec(b, i), LUMTUI_N_FIRST_CHILD);
+}
+
+pub fn lumtui_fuc_extra(b: ptr, i: u32) -> u32 {
+    return lumtui_ld32(lumtui_fuc_nrec(b, i), LUMTUI_N_EXTRA);
+}
+
+// ---- 载入侧的字符串表
+
+pub fn lumtui_fuc_str_count(b: ptr) -> u32 {
+    return lumtui_ld32(b, lumtui_ld32(b, LUMTUI_H_STR_OFF));
+}
+
+/// 字符串 `idx` 的**绝对地址**。找不到给空串的地址 (与 `fuc.rs::str_at` 同一条)。
+pub fn lumtui_fuc_str_ptr(b: ptr, idx: u32) -> ptr {
+    let base: u32 = lumtui_ld32(b, LUMTUI_H_STR_OFF);
+    let total: u32 = lumtui_ld32(b, LUMTUI_H_STR_LEN);
+    let o: u32 = 4;
+    let i: u32 = 0;
+    let n: u32 = lumtui_fuc_str_count(b);
+    while i < n {
+        if o + 2 > total {
+            return ptr_add(b, base + 6);
+        }
+        let l: u32 = lumtui_ld16(b, base + o);
+        if i == idx {
+            return ptr_add(b, base + o + 2);
+        }
+        o = o + 2 + l;
+        i = i + 1;
+    }
+    return ptr_add(b, base + 6);
+}
+
+pub fn lumtui_fuc_str_len(b: ptr, idx: u32) -> u32 {
+    let base: u32 = lumtui_ld32(b, LUMTUI_H_STR_OFF);
+    let total: u32 = lumtui_ld32(b, LUMTUI_H_STR_LEN);
+    let o: u32 = 4;
+    let i: u32 = 0;
+    let n: u32 = lumtui_fuc_str_count(b);
+    while i < n {
+        if o + 2 > total {
+            return 0;
+        }
+        let l: u32 = lumtui_ld16(b, base + o);
+        if i == idx {
+            return l;
+        }
+        o = o + 2 + l;
+        i = i + 1;
+    }
+    return 0;
+}
+
+pub fn lumtui_fuc_tok_count(b: ptr) -> u32 {
+    return lumtui_ld32(b, LUMTUI_H_TOK_COUNT);
+}

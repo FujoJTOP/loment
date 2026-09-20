@@ -1,0 +1,361 @@
+module lumtui
+
+// lumtui.lomt — LumtUI 的词汇表 (控件 / 旗标 / 尺寸模式 / 对齐 / 锚点 / 色调)。
+//
+// **LumtUI 是什么**: Loment 的 GUI 库。它合并了 FujoOS 那条 UI 线 (FUI) 的三块 ——
+//   * `lom/fuc.lom`  的**二进制布局** (48B 头 + 64B 节点 + 字符串表 + 令牌表);
+//   * `tools/fuic.py` 的**编译**那一步 (界面文档 -> 内核可载入的字节);
+//   * `kernel/src/fui/fuc.rs` 的**读**那一边 (校验 + 零拷贝节点视图)。
+// 再加上 FUI 当年缺的一块: **任意字体** (`lumtui_font.lomt` 直接解析 TTF/OTF)。
+//
+// **与 FUI 的分界 (写清楚, 免得两边对不上)**:
+//   * **记录布局**照抄 `lom/fuc.lom` —— 那是 L0 单一真源, 本库 `use` 它、不重述它。
+//     判据 `loment_lumtui_test` 拿 `lomc` 从 `lom/fuc.lom` 生成的 `NODE_STRUCT`
+//     与本库打包出来的字节**逐字节**比。
+//   * **下面这张词汇表 (kind / flags / mode / align / anchor / tone 的编号) 是本库
+//     自己的**。FUI 的那份在 `ui/fui_spec.json` —— 它**不在本仓**(那是 FujoOS 侧的
+//     资产)。所以本库**不声称**能与内核已有的 `.fuc` 互读: 两个方向都按下面这张表
+//     解释。要对账就得把 `ui/fui_spec.json` 拿过来, 那件事留给判据里那条 SKIP。
+//
+// 命名: `use` 是平名字空间, 所以本库每个顶层名字都带 `lumtui_` / `LUMTUI_` 前缀。
+
+// ---------------------------------------------------------------- 版本
+
+pub fn lumtui_version() -> str {
+    return "0.1.0";
+}
+
+pub fn lumtui_name() -> str {
+    return "LumtUI";
+}
+
+// ---------------------------------------------------------------- 控件 (kind, u16)
+
+// 容器: 有子布局语义。集合与 `kernel/src/fui/fuc.rs` 的 `is_container` 一致。
+pub const LUMTUI_K_SURFACE: u32 = 1;
+pub const LUMTUI_K_WINDOW: u32 = 2;
+pub const LUMTUI_K_CARD: u32 = 3;
+pub const LUMTUI_K_PANEL: u32 = 4;
+pub const LUMTUI_K_ROW: u32 = 5;
+pub const LUMTUI_K_COL: u32 = 6;
+pub const LUMTUI_K_STACK: u32 = 7;
+pub const LUMTUI_K_ABS: u32 = 8;
+pub const LUMTUI_K_LIST: u32 = 9;
+pub const LUMTUI_K_TABS: u32 = 10;
+pub const LUMTUI_K_TAB: u32 = 11;
+pub const LUMTUI_K_ITEM: u32 = 12;
+
+// 叶子: 不参与子布局。
+pub const LUMTUI_K_TEXT: u32 = 13;
+pub const LUMTUI_K_BUTTON: u32 = 14;
+pub const LUMTUI_K_TOGGLE: u32 = 15;
+pub const LUMTUI_K_SLIDER: u32 = 16;
+pub const LUMTUI_K_CHIP: u32 = 17;
+pub const LUMTUI_K_ICON: u32 = 18;
+pub const LUMTUI_K_IMAGE: u32 = 19;
+pub const LUMTUI_K_INPUT: u32 = 20;
+pub const LUMTUI_K_PROGRESS: u32 = 21;
+pub const LUMTUI_K_DIVIDER: u32 = 22;
+pub const LUMTUI_K_SPACER: u32 = 23;
+pub const LUMTUI_K_BADGE: u32 = 24;
+pub const LUMTUI_K_TOOLTIP: u32 = 25;
+pub const LUMTUI_K_OVERLAY: u32 = 26;
+
+pub const LUMTUI_KIND_COUNT: u32 = 27;
+
+/// 容器? 与 `fuc.rs::Node::is_container` 同一集合 (多两个本库新增的)。
+pub fn lumtui_kind_is_container(kind: u32) -> bool {
+    if kind == LUMTUI_K_SURFACE {
+        return true;
+    }
+    if kind == LUMTUI_K_WINDOW {
+        return true;
+    }
+    if kind == LUMTUI_K_CARD {
+        return true;
+    }
+    if kind == LUMTUI_K_PANEL {
+        return true;
+    }
+    if kind == LUMTUI_K_ROW {
+        return true;
+    }
+    if kind == LUMTUI_K_COL {
+        return true;
+    }
+    if kind == LUMTUI_K_STACK {
+        return true;
+    }
+    if kind == LUMTUI_K_ABS {
+        return true;
+    }
+    if kind == LUMTUI_K_LIST {
+        return true;
+    }
+    if kind == LUMTUI_K_TABS {
+        return true;
+    }
+    if kind == LUMTUI_K_TAB {
+        return true;
+    }
+    if kind == LUMTUI_K_ITEM {
+        return true;
+    }
+    if kind == LUMTUI_K_OVERLAY {
+        return true;
+    }
+    return false;
+}
+
+/// 主轴水平? `row` 与 `tabs` —— 与 `fuc.rs::Node::is_row` 一致。
+pub fn lumtui_kind_is_row(kind: u32) -> bool {
+    if kind == LUMTUI_K_ROW {
+        return true;
+    }
+    if kind == LUMTUI_K_TABS {
+        return true;
+    }
+    return false;
+}
+
+/// 可聚焦 (键盘 Tab 顺序)? 与 `fuc.rs::Node::focusable` 同一集合。
+/// **不含** `flags` 那一档 (禁用要另查 `lumtui_flags_disabled`) —— 上一个参数就少一层。
+pub fn lumtui_kind_is_focusable(kind: u32) -> bool {
+    if kind == LUMTUI_K_BUTTON {
+        return true;
+    }
+    if kind == LUMTUI_K_TOGGLE {
+        return true;
+    }
+    if kind == LUMTUI_K_SLIDER {
+        return true;
+    }
+    if kind == LUMTUI_K_TAB {
+        return true;
+    }
+    if kind == LUMTUI_K_CHIP {
+        return true;
+    }
+    if kind == LUMTUI_K_ITEM {
+        return true;
+    }
+    if kind == LUMTUI_K_INPUT {
+        return true;
+    }
+    return false;
+}
+
+/// 画得出文字的那种 (有 `text_id` 语义的)。
+pub fn lumtui_kind_has_text(kind: u32) -> bool {
+    if kind == LUMTUI_K_TEXT {
+        return true;
+    }
+    if kind == LUMTUI_K_BUTTON {
+        return true;
+    }
+    if kind == LUMTUI_K_TOGGLE {
+        return true;
+    }
+    if kind == LUMTUI_K_CHIP {
+        return true;
+    }
+    if kind == LUMTUI_K_TAB {
+        return true;
+    }
+    if kind == LUMTUI_K_ITEM {
+        return true;
+    }
+    if kind == LUMTUI_K_INPUT {
+        return true;
+    }
+    if kind == LUMTUI_K_BADGE {
+        return true;
+    }
+    if kind == LUMTUI_K_TOOLTIP {
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 旗标 (u16 位)
+
+pub const LUMTUI_F_HIDDEN: u32 = 1;
+pub const LUMTUI_F_DISABLED: u32 = 2;
+pub const LUMTUI_F_CLIP: u32 = 4;
+pub const LUMTUI_F_SCROLL: u32 = 8;
+pub const LUMTUI_F_BOLD: u32 = 16;
+pub const LUMTUI_F_ABS: u32 = 32;
+pub const LUMTUI_F_WRAP: u32 = 64;
+pub const LUMTUI_F_ELLIPSIS: u32 = 128;
+
+/// 锚点住在旗标的高 4 位 (与 `tools/fuic.py` 的 `flags |= anchor << 8` 同一位形)。
+pub const LUMTUI_ANCHOR_SHIFT: u32 = 8;
+pub const LUMTUI_ANCHOR_MASK: u32 = 3840;
+
+// 锚点 (0..4) —— 与 `fuc.rs` 的注释 `0=tl 1=tr 2=bl 3=br 4=c` 一致。
+pub const LUMTUI_ANCHOR_TL: u32 = 0;
+pub const LUMTUI_ANCHOR_TR: u32 = 1;
+pub const LUMTUI_ANCHOR_BL: u32 = 2;
+pub const LUMTUI_ANCHOR_BR: u32 = 3;
+pub const LUMTUI_ANCHOR_C: u32 = 4;
+
+pub fn lumtui_flags_with_anchor(flags: u32, anchor: u32) -> u32 {
+    return (flags & 61695) + ((anchor & 15) * 256);
+}
+
+pub fn lumtui_flags_anchor(flags: u32) -> u32 {
+    return (flags / 256) & 15;
+}
+
+/// `2^bit` —— `const` 的初值只能是整数字面量, 指数只好在运行期算。
+pub fn lumtui_pow2(bit: u32) -> u32 {
+    let v: u32 = 1;
+    let i: u32 = 0;
+    while i < bit {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 某一位立着没有。`bit` 是**序号** (0 起) —— 传 `LUMTUI_F_DISABLED` 那种掩码是另一件事。
+pub fn lumtui_flag_set(flags: u32, bit: u32) -> bool {
+    return (flags / lumtui_pow2(bit)) % 2 == 1;
+}
+
+pub fn lumtui_flags_disabled(flags: u32) -> bool {
+    return (flags / LUMTUI_F_DISABLED) % 2 == 1;
+}
+
+pub fn lumtui_flags_hidden(flags: u32) -> bool {
+    return (flags / LUMTUI_F_HIDDEN) % 2 == 1;
+}
+
+// ---------------------------------------------------------------- 尺寸模式 (u16)
+
+pub const LUMTUI_M_FIXED: u32 = 0;
+pub const LUMTUI_M_PERCENT: u32 = 1;
+pub const LUMTUI_M_GROW: u32 = 2;
+pub const LUMTUI_M_FILL: u32 = 3;
+
+// ---------------------------------------------------------------- 对齐 (u16)
+
+// 主轴 (justify) 与交叉轴 (align) 共用这一张表 —— 与 `fuic.py` 的 `ALIGNS` 同用一处。
+pub const LUMTUI_A_START: u32 = 0;
+pub const LUMTUI_A_CENTER: u32 = 1;
+pub const LUMTUI_A_END: u32 = 2;
+pub const LUMTUI_A_STRETCH: u32 = 3;
+pub const LUMTUI_A_SPACE_BETWEEN: u32 = 4;
+pub const LUMTUI_A_SPACE_AROUND: u32 = 5;
+
+// ---------------------------------------------------------------- 色调 (u16)
+
+pub const LUMTUI_T_TEXT: u32 = 0;
+pub const LUMTUI_T_MUTED: u32 = 1;
+pub const LUMTUI_T_ACCENT: u32 = 2;
+pub const LUMTUI_T_SUCCESS: u32 = 3;
+pub const LUMTUI_T_WARNING: u32 = 4;
+pub const LUMTUI_T_DANGER: u32 = 5;
+pub const LUMTUI_T_INFO: u32 = 6;
+pub const LUMTUI_T_BORDER: u32 = 7;
+pub const LUMTUI_T_OVERLAY: u32 = 8;
+pub const LUMTUI_TONE_COUNT: u32 = 9;
+
+pub fn lumtui_tone_count() -> u32 {
+    return 9;
+}
+
+// ---------------------------------------------------------------- 编解码小工具
+
+/// u16 小端写出 —— `bytes.lomt` 做的是同一件事, 但那是 `examples/` 里的演示件,
+/// 库**不依赖示例** (层次反过来就错了)。所以这里自己有一份。
+pub fn lumtui_st16(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, (v / 256) as u8);
+}
+
+pub fn lumtui_st32(p: ptr, off: u32, v: u32) {
+    lumtui_st16(p, off, v % 65536);
+    lumtui_st16(p, off + 2, v / 65536);
+}
+
+pub fn lumtui_ld16(p: ptr, off: u32) -> u32 {
+    return load8(p, off) + load8(p, off + 1) * 256;
+}
+
+pub fn lumtui_ld32(p: ptr, off: u32) -> u32 {
+    return lumtui_ld16(p, off) + lumtui_ld16(p, off + 2) * 65536;
+}
+
+/// FNV-1a —— 与 `tools/fuic.py` / `kernel/src/fui/fuc.rs` 同族 (32 位, 回绕)。
+/// `lumtui_math.lomt` 里有一份标量版; 这一份收 `(ptr, len)`, 因为校验时手上就是字节块。
+pub fn lumtui_fnv1a(p: ptr, n: u32) -> u32 {
+    let h: u32 = 2166136261;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ load8(p, i)) * 16777619;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// 64 位小端读写。存指针用 (`ptr as u64` / `u64 as ptr`) ——
+/// 库里跨函数共享一份"上下文"时, 指针塞不进 u32 那一格。
+pub fn lumtui_st64(p: ptr, off: u32, v: u64) {
+    lumtui_st32(p, off, (v % 4294967296) as u32);
+    lumtui_st32(p, off + 4, (v / 4294967296) as u32);
+}
+
+pub fn lumtui_ld64(p: ptr, off: u32) -> u64 {
+    return (lumtui_ld32(p, off) as u64) + (lumtui_ld32(p, off + 4) as u64) * 4294967296;
+}
+
+// ---------------------------------------------------------------- 几何
+
+/// 矩形按 `(x, y, w, h)` 平铺在一块内存的 4 个 u32 上 —— 与库别处同一形状,
+/// 这样布局那一边不用造 struct (原生后端对"按值传聚合"支持不全)。
+pub const LUMTUI_RECT_X: u32 = 0;
+pub const LUMTUI_RECT_Y: u32 = 4;
+pub const LUMTUI_RECT_W: u32 = 8;
+pub const LUMTUI_RECT_H: u32 = 12;
+pub const LUMTUI_RECT_BYTES: u32 = 16;
+
+pub fn lumtui_rect_set(r: ptr, x: u32, y: u32, w: u32, h: u32) {
+    lumtui_st32(r, LUMTUI_RECT_X, x);
+    lumtui_st32(r, LUMTUI_RECT_Y, y);
+    lumtui_st32(r, LUMTUI_RECT_W, w);
+    lumtui_st32(r, LUMTUI_RECT_H, h);
+}
+
+pub fn lumtui_rect_x(r: ptr) -> u32 {
+    return lumtui_ld32(r, LUMTUI_RECT_X);
+}
+
+pub fn lumtui_rect_y(r: ptr) -> u32 {
+    return lumtui_ld32(r, LUMTUI_RECT_Y);
+}
+
+pub fn lumtui_rect_w(r: ptr) -> u32 {
+    return lumtui_ld32(r, LUMTUI_RECT_W);
+}
+
+pub fn lumtui_rect_h(r: ptr) -> u32 {
+    return lumtui_ld32(r, LUMTUI_RECT_H);
+}
+
+/// 点在矩形内? (左上闭, 右下开)
+pub fn lumtui_rect_contains(r: ptr, px: u32, py: u32) -> bool {
+    if px < lumtui_rect_x(r) {
+        return false;
+    }
+    if py < lumtui_rect_y(r) {
+        return false;
+    }
+    if px - lumtui_rect_x(r) >= lumtui_rect_w(r) {
+        return false;
+    }
+    if py - lumtui_rect_y(r) >= lumtui_rect_h(r) {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,1192 @@
+module lumtui_font
+
+// lumtui_font.lomt — **任意字体**: 直接读 SFNT (TTF), 自己做光栅化。
+//
+// FUI 当年只有一份写死的 5×7 点阵 (`kernel/src/graphics.rs` 的 `FONT`)。LumtUI 把
+// 那一条补上: 调用方把**一整个字体文件**交给 `lumtui_font_load`, 之后要什么字号都行,
+// 字形轮廓是真从文件里解出来的。兜底那一份仍然是那套 5×7 点阵 (来源见文末), 所以
+// "一个字体文件都没有"时画出来的字, 与 FujoOS 界面上的字**是同一套**。
+//
+// ## 读的是文件的哪几段
+//
+//   sfnt        —— 偏移表 + 表目录 (**大端**)
+//   head        —— `unitsPerEm`, `indexToLocFormat`
+//   hhea        —— `ascender`, `descender`, `numberOfHMetrics`
+//   maxp        —— `numGlyphs`
+//   hmtx        —— 每个字形的步进宽度
+//   cmap        —— 码点 -> 字形号 (format 4 与 format 12)
+//   loca / glyf —— 轮廓 (二次贝塞尔, 含复合字形)
+//
+// ## 渲染是什么算法 (写清楚, 因为它不是"每像素打几个点猜")
+//
+// **扫描线覆盖率**:
+//   * 所有坐标先缩放到 **1/16 像素** 定点 (中间量走 i64, 免得溢出);
+//   * 每一行分 **8 条子扫描线**, 每条求它与所有边的交点 x 与方向, 按 x 插排;
+//   * 按 **nonzero 绕数** 判定哪几段在里面 —— 空洞 ('o' 的内圈) 因此是对的,
+//     而奇偶规则在自交轮廓上会画错;
+//   * 每一段按 1/16 像素的**精确分数**累进那一行的覆盖累加器;
+//   * 一行跑完, `alpha = acc * 255 / 128` (128 = 8 条子线 × 16 个单位)。
+// 所以它是抗锯齿的; 与 FreeType 的差别只在**提示 (hinting)** —— 本库完全不做提示。
+//
+// ## 三条边界 (说清楚, 免得当它是万能)
+//
+//   1. **CFF / `OTTO` 容器不支持**: 那种字体没有 `glyf`/`loca`, 轮廓在 `CFF ` 表里,
+//      是三次贝塞尔 —— 那是另一套解码器。`lumtui_font_load` 会**拒绝**它 (返回 0),
+//      不是静默画空。
+//   2. **不做 hinting, 不做 kerning**: 步进就是 `hmtx` 的值, 字距就是两个步进之和。
+//      要 kerning 得读 `GPOS`, 那是另一个量级的活。
+//   3. **不做复杂文种整形**: 一个码点一个字形, 不做连字、不做 RTL。"一个字符对应
+//      多个字形"那种表达不了; 中日韩的字形**能画** (只要 cmap 里有)。
+//
+// ## 内存
+//
+// 字体文件本身和 scratch 都由**调用方给** —— 库里不分配。中间那几张表都放 scratch,
+// 偏移见下面的 `LUMTUI_S_*`; 一次性要 `lumtui_font_scratch_bytes()`。
+
+use lumtui
+
+// ---------------------------------------------------------------- 字体记录 (调用方给 80 字节)
+
+pub const LUMTUI_FONT_BYTES: u32 = 80;
+pub const FF_VER: u32 = 0;
+pub const FF_UPEM: u32 = 4;
+pub const FF_ASC: u32 = 8;
+pub const FF_DESC: u32 = 12;
+pub const FF_NHM: u32 = 16;
+pub const FF_NGLY: u32 = 20;
+pub const FF_ILOC: u32 = 24;
+pub const FF_LEN: u32 = 28;
+pub const FF_HEAD: u32 = 32;
+pub const FF_HHEA: u32 = 36;
+pub const FF_MAXP: u32 = 40;
+pub const FF_HMTX: u32 = 44;
+pub const FF_CMAP: u32 = 48;
+pub const FF_LOCA: u32 = 52;
+pub const FF_GLYF: u32 = 56;
+pub const FF_CMAPFMT: u32 = 60;
+pub const FF_CMAPSUB: u32 = 64;
+pub const FF_GLYLEN: u32 = 68;
+pub const FF_LOCALEN: u32 = 72;
+
+// ---------------------------------------------------------------- scratch 布局
+
+pub const LUMTUI_S_RANGE: u32 = 0;
+pub const LUMTUI_S_BBOX: u32 = 8;
+pub const LUMTUI_S_RAST: u32 = 24;
+pub const LUMTUI_S_NPTS: u32 = 40;
+pub const LUMTUI_S_NCON: u32 = 44;
+pub const LUMTUI_S_NCROSS: u32 = 48;
+pub const LUMTUI_S_RAWX: u32 = 64;
+pub const LUMTUI_S_RAWY: u32 = 2112;
+pub const LUMTUI_S_RAWON: u32 = 4160;
+pub const LUMTUI_S_POLYX: u32 = 4672;
+pub const LUMTUI_S_POLYY: u32 = 8768;
+pub const LUMTUI_S_CEND: u32 = 12864;
+pub const LUMTUI_S_CROSSX: u32 = 12992;
+pub const LUMTUI_S_CROSSD: u32 = 17088;
+pub const LUMTUI_S_ROWACC: u32 = 21184;
+
+pub const LUMTUI_MAX_RAW_PTS: u32 = 512;
+pub const LUMTUI_MAX_POLY_PTS: u32 = 1024;
+pub const LUMTUI_MAX_CONTOURS: u32 = 64;
+pub const LUMTUI_MAX_CROSS: u32 = 1024;
+pub const LUMTUI_MAX_COMPONENTS: u32 = 16;
+pub const LUMTUI_MAX_COMPOSITE_DEPTH: u32 = 4;
+pub const LUMTUI_SUBSCAN: u32 = 8;
+pub const LUMTUI_Q: u32 = 16;
+pub const LUMTUI_FONT_SCRATCH: u32 = 23232;
+
+pub fn lumtui_font_scratch_bytes() -> u32 {
+    return LUMTUI_FONT_SCRATCH;
+}
+
+pub fn lumtui_font_bytes() -> u32 {
+    return LUMTUI_FONT_BYTES;
+}
+
+pub fn lumtui_ld8(p: ptr, i: u32) -> u32 {
+    return load8(p, i);
+}
+
+pub fn lumtui_sp(sc: ptr, off: u32) -> ptr {
+    return ptr_add(sc, off);
+}
+
+// ---------------------------------------------------------------- 大端读 (SFNT 全是大端)
+
+pub fn lumtui_be16(p: ptr, off: u32) -> u32 {
+    return load8(p, off) * 256 + load8(p, off + 1);
+}
+
+/// 有符号 16 位 -> i64。
+pub fn lumtui_bei16(p: ptr, off: u32) -> i64 {
+    let v: u32 = lumtui_be16(p, off);
+    if v >= 32768 {
+        return (v as i64) - 65536;
+    }
+    return v as i64;
+}
+
+pub fn lumtui_bei8(p: ptr, off: u32) -> i64 {
+    let v: u32 = load8(p, off);
+    if v >= 128 {
+        return (v as i64) - 256;
+    }
+    return v as i64;
+}
+
+pub fn lumtui_be32(p: ptr, off: u32) -> u32 {
+    return lumtui_be16(p, off) * 65536 + lumtui_be16(p, off + 2);
+}
+
+// ---------------------------------------------------------------- 表目录
+
+/// 标签写成一个大端 u32 —— `'head'` 就是 1751474532。找不到返回 0。
+pub fn lumtui_font_find(fd: ptr, tag: u32) -> u32 {
+    let n: u32 = lumtui_be16(fd, 4);
+    let i: u32 = 0;
+    while i < n {
+        let rec: u32 = 12 + i * 16;
+        if lumtui_be32(fd, rec) == tag {
+            return rec;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 四个 ASCII 字符 -> 一个标签。**用字符串算, 不写手算的常量** ——
+/// `'glyf'` 的大端 u32 是 1735162214, 手算过一次就算错过 (写成 1735811442),
+/// 而那个错误的表现是"表找不到", 看不出是常量写错。
+pub fn lumtui_tag_of(s: str) -> u32 {
+    return str_byte(s, 0) * 16777216 + str_byte(s, 1) * 65536
+        + str_byte(s, 2) * 256 + str_byte(s, 3);
+}
+
+pub fn lumtui_tag_head() -> u32 { return lumtui_tag_of("head"); }
+pub fn lumtui_tag_hhea() -> u32 { return lumtui_tag_of("hhea"); }
+pub fn lumtui_tag_maxp() -> u32 { return lumtui_tag_of("maxp"); }
+pub fn lumtui_tag_hmtx() -> u32 { return lumtui_tag_of("hmtx"); }
+pub fn lumtui_tag_cmap() -> u32 { return lumtui_tag_of("cmap"); }
+pub fn lumtui_tag_loca() -> u32 { return lumtui_tag_of("loca"); }
+pub fn lumtui_tag_glyf() -> u32 { return lumtui_tag_of("glyf"); }
+
+// ---------------------------------------------------------------- 载入
+
+/// 解析字体容器, 把各表的位置填进 `f` (80 字节)。**不用 arena** —— 只看 `fd`。
+/// 返回 1 = 能读, 0 = 读不了 (不是 SFNT / 缺表 / CFF 轮廓)。
+pub fn lumtui_font_load(fd: ptr, n: u32, f: ptr) -> u32 {
+    if n < 12 {
+        return 0;
+    }
+    let ver: u32 = lumtui_be32(fd, 0);
+    if ver == 1330926671 {
+        return 0;                       // 'OTTO' —— CFF 轮廓, 见文件头边界 1
+    }
+    if ver != 65536 && ver != 1953654133 {
+        return 0;                       // 0x00010000 / 'true' 之外的一律不认
+    }
+    lumtui_st32(f, FF_VER, ver);
+    lumtui_st32(f, FF_LEN, n);
+    let th: u32 = lumtui_font_find(fd, lumtui_tag_head());
+    let ta: u32 = lumtui_font_find(fd, lumtui_tag_hhea());
+    let tm: u32 = lumtui_font_find(fd, lumtui_tag_maxp());
+    let tx: u32 = lumtui_font_find(fd, lumtui_tag_hmtx());
+    let tc: u32 = lumtui_font_find(fd, lumtui_tag_cmap());
+    let tl: u32 = lumtui_font_find(fd, lumtui_tag_loca());
+    let tg: u32 = lumtui_font_find(fd, lumtui_tag_glyf());
+    if th == 0 || ta == 0 || tm == 0 || tx == 0 || tc == 0 || tl == 0 || tg == 0 {
+        return 0;
+    }
+    let hoff: u32 = lumtui_be32(fd, th + 8);
+    let aoff: u32 = lumtui_be32(fd, ta + 8);
+    let moff: u32 = lumtui_be32(fd, tm + 8);
+    lumtui_st32(f, FF_HEAD, hoff);
+    lumtui_st32(f, FF_HHEA, aoff);
+    lumtui_st32(f, FF_MAXP, moff);
+    lumtui_st32(f, FF_HMTX, lumtui_be32(fd, tx + 8));
+    lumtui_st32(f, FF_CMAP, lumtui_be32(fd, tc + 8));
+    lumtui_st32(f, FF_LOCA, lumtui_be32(fd, tl + 8));
+    lumtui_st32(f, FF_GLYF, lumtui_be32(fd, tg + 8));
+    lumtui_st32(f, FF_GLYLEN, lumtui_be32(fd, tg + 12));
+    lumtui_st32(f, FF_LOCALEN, lumtui_be32(fd, tl + 12));
+    lumtui_st32(f, FF_UPEM, lumtui_be16(fd, hoff + 18));
+    lumtui_st32(f, FF_ILOC, lumtui_be16(fd, hoff + 50));
+    // 升部/降部**按有符号存**(降部是负数) —— 读那一侧按 i32 补码解释。
+    lumtui_st32(f, FF_ASC, (lumtui_bei16(fd, aoff + 4) as i32) as u32);
+    lumtui_st32(f, FF_DESC, (lumtui_bei16(fd, aoff + 6) as i32) as u32);
+    lumtui_st32(f, FF_NHM, lumtui_be16(fd, aoff + 34));
+    lumtui_st32(f, FF_NGLY, lumtui_be16(fd, moff + 4));
+    if lumtui_ld32(f, FF_UPEM) == 0 {
+        return 0;
+    }
+    if lumtui_ld32(f, FF_NGLY) == 0 {
+        return 0;
+    }
+    return lumtui_pick_cmap(fd, lumtui_ld32(f, FF_CMAP), f);
+}
+
+/// 在 cmap 里挑一张子表: **format 12 优先, 其次 format 4**。
+/// 12 覆盖全部码点, 4 只到 BMP —— 有 12 就用 12。
+pub fn lumtui_pick_cmap(fd: ptr, coff: u32, f: ptr) -> u32 {
+    let n: u32 = lumtui_be16(fd, coff + 2);
+    let i: u32 = 0;
+    let best4: u32 = 4294967295;
+    while i < n {
+        let sub: u32 = coff + lumtui_be32(fd, coff + 4 + i * 8 + 4);
+        let fmt: u32 = lumtui_be16(fd, sub);
+        if fmt == 12 {
+            lumtui_st32(f, FF_CMAPFMT, 12);
+            lumtui_st32(f, FF_CMAPSUB, sub);
+            return 1;
+        }
+        if fmt == 4 && best4 == 4294967295 {
+            best4 = sub;
+        }
+        i = i + 1;
+    }
+    if best4 != 4294967295 {
+        lumtui_st32(f, FF_CMAPFMT, 4);
+        lumtui_st32(f, FF_CMAPSUB, best4);
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 度量
+
+pub fn lumtui_font_upem(f: ptr) -> u32 {
+    return lumtui_ld32(f, FF_UPEM);
+}
+
+pub fn lumtui_font_ascent_px(f: ptr, size: u32) -> u32 {
+    return lumtui_scaled_u((lumtui_ld32(f, FF_ASC) as i32) as i64, size, lumtui_ld32(f, FF_UPEM));
+}
+
+/// 降部的**长度** (降部在文件里是负数, 这里给正值)。
+pub fn lumtui_font_descent_px(f: ptr, size: u32) -> u32 {
+    let d: i64 = (lumtui_ld32(f, FF_DESC) as i32) as i64;
+    if d < 0 {
+        d = 0 - d;
+    }
+    return lumtui_scaled_u(d, size, lumtui_ld32(f, FF_UPEM));
+}
+
+/// 行高: 升 + 降。**不含行距** —— 行距是排版那一层的事。
+pub fn lumtui_font_line_h_px(f: ptr, size: u32) -> u32 {
+    return lumtui_font_ascent_px(f, size) + lumtui_font_descent_px(f, size);
+}
+
+/// 字体单位下的一个数 -> 像素, 四舍五入 (负数按绝对值处理, 符号在外面管)。
+pub fn lumtui_scaled_u(v: i64, size: u32, upem: u32) -> u32 {
+    if upem == 0 {
+        return 0;
+    }
+    if v < 0 {
+        return 0;
+    }
+    let hi: i64 = v * (size as i64);
+    return ((hi + (upem as i64) / 2) / (upem as i64)) as u32;
+}
+
+/// 码点 -> 字形号 (0 = `.notdef`, 也就等于"这个字体里没有它")。
+pub fn lumtui_font_glyph(fd: ptr, f: ptr, cp: u32) -> u32 {
+    if lumtui_ld32(f, FF_CMAPFMT) == 12 {
+        return lumtui_cmap12(fd, lumtui_ld32(f, FF_CMAPSUB), cp);
+    }
+    return lumtui_cmap4(fd, lumtui_ld32(f, FF_CMAPSUB), cp);
+}
+
+/// format 4: 分段查表。段数通常 <128, 线性扫足够。
+pub fn lumtui_cmap4(fd: ptr, sub: u32, cp: u32) -> u32 {
+    if cp > 65535 {
+        return 0;
+    }
+    let segx2: u32 = lumtui_be16(fd, sub + 6);
+    let segs: u32 = segx2 / 2;
+    let end_o: u32 = sub + 14;
+    let start_o: u32 = end_o + segx2 + 2;
+    let delta_o: u32 = start_o + segx2;
+    let range_o: u32 = delta_o + segx2;
+    let i: u32 = 0;
+    while i < segs {
+        if cp <= lumtui_be16(fd, end_o + i * 2) {
+            let s: u32 = lumtui_be16(fd, start_o + i * 2);
+            if cp < s {
+                return 0;
+            }
+            let delta: u32 = lumtui_be16(fd, delta_o + i * 2);
+            let ro: u32 = lumtui_be16(fd, range_o + i * 2);
+            if ro == 0 {
+                return (cp + delta) % 65536;
+            }
+            let g: u32 = lumtui_be16(fd, range_o + i * 2 + ro + (cp - s) * 2);
+            if g == 0 {
+                return 0;
+            }
+            return (g + delta) % 65536;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// format 12: 分组二分查找 (组按 startCharCode 升序)。
+pub fn lumtui_cmap12(fd: ptr, sub: u32, cp: u32) -> u32 {
+    let n: u32 = lumtui_be32(fd, sub + 12);
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        let g: u32 = sub + 16 + mid * 12;
+        let sc: u32 = lumtui_be32(fd, g);
+        let ec: u32 = lumtui_be32(fd, g + 4);
+        if cp < sc {
+            hi = mid;
+        } else if cp > ec {
+            lo = mid + 1;
+        } else {
+            return lumtui_be32(fd, g + 8) + (cp - sc);
+        }
+    }
+    return 0;
+}
+
+/// 字形在**字体单位**下的步进 —— 判据拿它跟 FreeType 对, 所以**不缩放**。
+pub fn lumtui_font_advance_units(fd: ptr, f: ptr, gi: u32) -> u32 {
+    let nhm: u32 = lumtui_ld32(f, FF_NHM);
+    if nhm == 0 {
+        return 0;
+    }
+    let g: u32 = gi;
+    if g >= nhm {
+        g = nhm - 1;
+    }
+    return lumtui_be16(fd, lumtui_ld32(f, FF_HMTX) + g * 4);
+}
+
+/// 一个码点在像素下的步进。
+pub fn lumtui_font_advance_px(fd: ptr, f: ptr, cp: u32, size: u32) -> u32 {
+    let gi: u32 = lumtui_font_glyph(fd, f, cp);
+    return lumtui_scaled_u(lumtui_font_advance_units(fd, f, gi) as i64, size, lumtui_ld32(f, FF_UPEM));
+}
+
+/// 一段字节串的宽度 (逐字节当码点看 —— ASCII 足够, 见文件头边界 3)。
+pub fn lumtui_font_measure(fd: ptr, f: ptr, s: str, size: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let w: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        w = w + lumtui_font_advance_px(fd, f, str_byte(s, i), size);
+        i = i + 1;
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 字形轮廓
+
+pub fn lumtui_loca(fd: ptr, f: ptr, gi: u32) -> u32 {
+    let base: u32 = lumtui_ld32(f, FF_LOCA);
+    if lumtui_ld32(f, FF_ILOC) == 0 {
+        return lumtui_be16(fd, base + gi * 2) * 2;
+    }
+    return lumtui_be32(fd, base + gi * 4);
+}
+
+/// 一个字形在 `glyf` 里的 (起点, 长度) 写进 `outp`。长度 0 = 空字形 (例如空格)。
+pub fn lumtui_glyph_range(fd: ptr, f: ptr, gi: u32, outp: ptr) -> u32 {
+    if gi >= lumtui_ld32(f, FF_NGLY) {
+        return 0;
+    }
+    let g: u32 = lumtui_loca(fd, f, gi);
+    let nx: u32 = lumtui_loca(fd, f, gi + 1);
+    if nx <= g {
+        return 0;
+    }
+    lumtui_st32(outp, 0, lumtui_ld32(f, FF_GLYF) + g);
+    lumtui_st32(outp, 4, nx - g);
+    return 1;
+}
+
+/// 把字形摊成**折线** (二次贝塞尔按 8 段拉直), 结果累加进 scratch 的 POLY 区。
+/// 返回折线总点数; 0 = 空字形 / 解不出来。
+///
+/// `dx`/`dy` 是 1/16 像素的平移, `sx16`/`sy16` 是 16.16 的缩放 (复合字形的分量变换)。
+/// 递归时把变换一路带下去, 于是**嵌套复合字形**自然成立 —— 分量的点直接追加到同一条
+/// 折线上, 不需要为每一层再开一块缓冲。
+pub fn lumtui_glyph_poly(fd: ptr, f: ptr, gi: u32, size: u32, sc: ptr,
+                         dx: i64, dy: i64, sx16: i64, sy16: i64, depth: u32) -> u32 {
+    if depth > LUMTUI_MAX_COMPOSITE_DEPTH {
+        return 0;
+    }
+    // **只有最外层才清空折线缓冲。** 复合字形的分量是**追加**到同一条折线上的,
+    // 内层清一次就把外层已经解好的点抹掉了。反过来, 最外层不清就变成"每个字形都
+    // 接着上一个字形往后写" —— 那个症状是包围盒越画越大 (实测: 一串数字全报同一个
+    // 22×25, 因为到第二个字的时候缓冲里已经不止一个字形了)。
+    if depth == 0 {
+        lumtui_st32(sc, LUMTUI_S_NPTS, 0);
+        lumtui_st32(sc, LUMTUI_S_NCON, 0);
+    }
+    let rg: ptr = lumtui_sp(sc, LUMTUI_S_RANGE);
+    if lumtui_glyph_range(fd, f, gi, rg) == 0 {
+        return 0;
+    }
+    let g: u32 = lumtui_ld32(rg, 0);
+    let nc: i64 = lumtui_bei16(fd, g);
+    if nc == 0 {
+        return 0;
+    }
+    if nc < 0 {
+        return lumtui_poly_composite(fd, f, g, size, sc, dx, dy, sx16, sy16, depth);
+    }
+    return lumtui_poly_simple(fd, f, g, size, sc, dx, dy, sx16, sy16, nc);
+}
+
+/// 复合字形: 逐个分量递归, 变换叠加后把点追加到同一条折线上。
+pub fn lumtui_poly_composite(fd: ptr, f: ptr, g: u32, size: u32, sc: ptr,
+                             dx: i64, dy: i64, sx16: i64, sy16: i64, depth: u32) -> u32 {
+    let p: u32 = g + 10;
+    let k: u32 = 0;
+    while k < LUMTUI_MAX_COMPONENTS {
+        let flags: u32 = lumtui_be16(fd, p);
+        let sub: u32 = lumtui_be16(fd, p + 2);
+        p = p + 4;
+        let a1: i64 = 0;
+        let a2: i64 = 0;
+        if flags % 2 == 1 {
+            a1 = lumtui_bei16(fd, p);
+            a2 = lumtui_bei16(fd, p + 2);
+            p = p + 4;
+        } else {
+            a1 = lumtui_bei8(fd, p);
+            a2 = lumtui_bei8(fd, p + 1);
+            p = p + 2;
+        }
+        let fsx: i64 = 65536;
+        let fsy: i64 = 65536;
+        if (flags / 8) % 2 == 1 {
+            fsx = lumtui_f2dot14(fd, p);
+            fsy = fsx;
+            p = p + 2;
+        }
+        if (flags / 64) % 2 == 1 {
+            fsx = lumtui_f2dot14(fd, p);
+            fsy = lumtui_f2dot14(fd, p + 2);
+            p = p + 4;
+        }
+        if (flags / 128) % 2 == 1 {
+            fsx = lumtui_f2dot14(fd, p);
+            fsy = lumtui_f2dot14(fd, p + 6);
+            p = p + 8;
+        }
+        // 参数是"按 XY 偏移"还是"按点号对齐": 只支持前者 (后者要先把上一个分量的
+        // 某一点找出来, 那是另一套语义)。不是 XY 的一律跳过 —— 不静默画错东西。
+        //
+        // **分量偏移是"字体单位", 不是"1/16 像素"** —— 它得和点走同一条缩放。
+        // 少这一步的症状很显眼但不容易想到: 偏移被当成 1/16 像素, 于是整个分量
+        // 被推到十几倍远的地方 ('eacute' 的尖音符跑到字身右边去了), 而单看
+        // "解出来没报错"是看不出来的 —— 判据里那条包围盒比 FreeType 大 40% 才是。
+        if (flags / 2) % 2 == 1 {
+            let upem: u32 = lumtui_ld32(f, FF_UPEM);
+            let ox: i64 = lumtui_mul16(lumtui_scale16(a1, size, upem), sx16);
+            // **`dy` 要减, 不是加。** `dy` 走的是**图像**坐标 (y 向下), 而分量偏移
+            // 是**字体**坐标 (y 向上) —— 往上挪一个字高, 在图像坐标里是**更小**的 y。
+            // 漏了这一次取负的症状很挑字形: 'eacute' 的尖音符偏移恰好是 (243, 0),
+            // dy 为 0, 于是**看着完全正常**; 只有 'Aring' 那种 dy 非零的
+            // (263) 才会把圈画到 A 的**里面**去 —— 判据里那一条"高 23 vs 28"就是它。
+            let oy: i64 = lumtui_mul16(lumtui_scale16(a2, size, upem), sy16);
+            let _r: u32 = lumtui_glyph_poly(fd, f, sub, size, sc, dx + ox, dy - oy,
+                                            lumtui_mul16(fsx, sx16),
+                                            lumtui_mul16(fsy, sy16), depth + 1);
+        }
+        if (flags / 32) % 2 == 0 {
+            return lumtui_ld32(sc, LUMTUI_S_NPTS);
+        }
+        k = k + 1;
+    }
+    return lumtui_ld32(sc, LUMTUI_S_NPTS);
+}
+
+pub fn lumtui_f2dot14(fd: ptr, off: u32) -> i64 {
+    return lumtui_bei16(fd, off) * 4;
+}
+
+/// 16.16 定点相乘 (中间量走 i64)。
+pub fn lumtui_mul16(a: i64, b: i64) -> i64 {
+    return (a * b) / 65536;
+}
+
+/// 简单字形: 解出点 -> 摊成折线。
+pub fn lumtui_poly_simple(fd: ptr, f: ptr, g: u32, size: u32, sc: ptr,
+                          dx: i64, dy: i64, sx16: i64, sy16: i64, nc: i64) -> u32 {
+    if nc > 64 {
+        return 0;
+    }
+    let ncont: u32 = nc as u32;
+    let np: u32 = lumtui_be16(fd, g + 10 + (ncont - 1) * 2) + 1;
+    if np == 0 || np > LUMTUI_MAX_RAW_PTS {
+        return 0;
+    }
+    let p0: u32 = g + 10 + ncont * 2;
+    let il: u32 = lumtui_be16(fd, p0);
+    let fp: u32 = p0 + 2 + il;
+
+    // ---- 旗标 (带 repeat)。bit0 = 在曲线上, bit1 = x 短, bit2 = y 短,
+    //      bit3 = 重复, bit4/5 是"短坐标的正负"。
+    let flagp: ptr = lumtui_sp(sc, LUMTUI_S_RAWON);
+    let p: u32 = fp;
+    let i: u32 = 0;
+    while i < np {
+        let fl: u32 = load8(fd, p);
+        p = p + 1;
+        let rpt: u32 = 0;
+        if (fl / 8) % 2 == 1 {
+            rpt = load8(fd, p);
+            p = p + 1;
+        }
+        store8(flagp, i, fl as u8);
+        let j: u32 = 0;
+        while j < rpt && i + 1 < np {
+            i = i + 1;
+            store8(flagp, i, fl as u8);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    // ---- x 增量
+    let x: i64 = 0;
+    let q: u32 = p;
+    i = 0;
+    while i < np {
+        x = x + lumtui_coord_delta(fd, q, 2, 16, flagp, i);
+        q = lumtui_coord_advance(fd, q, 2, 16, flagp, i);
+        lumtui_st32(lumtui_sp(sc, LUMTUI_S_RAWX), i * 4, (x as i32) as u32);
+        i = i + 1;
+    }
+    // ---- y 增量 (字体里 y 向上, 缩放那一步再翻成图像坐标)
+    let y: i64 = 0;
+    i = 0;
+    while i < np {
+        y = y + lumtui_coord_delta(fd, q, 4, 32, flagp, i);
+        q = lumtui_coord_advance(fd, q, 4, 32, flagp, i);
+        lumtui_st32(lumtui_sp(sc, LUMTUI_S_RAWY), i * 4, (y as i32) as u32);
+        i = i + 1;
+    }
+    // ---- 逐轮廓摊平
+    let c: u32 = 0;
+    let startpt: u32 = 0;
+    while c < ncont {
+        let e: u32 = lumtui_be16(fd, g + 10 + c * 2);
+        lumtui_flatten_contour(sc, startpt, e, size, f, dx, dy, sx16, sy16);
+        startpt = e + 1;
+        c = c + 1;
+    }
+    return lumtui_ld32(sc, LUMTUI_S_NPTS);
+}
+
+/// 一个坐标分量的增量。
+///
+/// `shortbit` 是 glyf 那条"这个分量是 1 字节"的位 (x 是 2, y 是 4),
+/// `samebit` 是"与上一个相同、或短且为正"的位 (x 是 16, y 是 32)。
+/// **这两个位不是"平方"关系** —— 一开始按 `shortbit*shortbit` 取过一次, 症状是
+/// y 全解错、包围盒高到几百像素, 而 x 看着还是对的 (因为 2*2 恰好等于 4)。
+pub fn lumtui_coord_delta(fd: ptr, p: u32, shortbit: u32, samebit: u32, flagp: ptr, i: u32) -> i64 {
+    let fl: u32 = load8(flagp, i);
+    if (fl / shortbit) % 2 == 1 {
+        let v: u32 = load8(fd, p);
+        if (fl / samebit) % 2 == 1 {
+            return v as i64;
+        }
+        return 0 - (v as i64);
+    }
+    if (fl / samebit) % 2 == 1 {
+        return 0;
+    }
+    return lumtui_bei16(fd, p);
+}
+
+pub fn lumtui_coord_advance(fd: ptr, p: u32, shortbit: u32, samebit: u32, flagp: ptr, i: u32) -> u32 {
+    let fl: u32 = load8(flagp, i);
+    if (fl / shortbit) % 2 == 1 {
+        return p + 1;
+    }
+    if (fl / samebit) % 2 == 1 {
+        return p;
+    }
+    return p + 2;
+}
+
+/// 一条轮廓: 把二次贝塞尔摊成折线, 追加到 POLY 区。**隐式闭合** (最后连回起点)。
+pub fn lumtui_flatten_contour(sc: ptr, s: u32, e: u32, size: u32, f: ptr,
+                              dx: i64, dy: i64, sx16: i64, sy16: i64) -> u32 {
+    let npts: u32 = e - s + 1;
+    if npts == 0 || e < s {
+        return 0;
+    }
+    let fx: u32 = lumtui_first_on(sc, s, e);
+    let curx0: i64 = lumtui_pt_x(sc, f, fx, size, dx, sx16);
+    let cury0: i64 = lumtui_pt_y(sc, f, fx, size, dy, sy16);
+    let curx: i64 = curx0;
+    let cury: i64 = cury0;
+    lumtui_poly_add(sc, curx0, cury0);
+    let k: u32 = 1;
+    while k <= npts {
+        let idx: u32 = lumtui_wrap(s, e, s + k);
+        let nx: u32 = lumtui_wrap(s, e, s + k + 1);
+        if lumtui_on(sc, idx) == 1 {
+            let px: i64 = lumtui_pt_x(sc, f, idx, size, dx, sx16);
+            let py: i64 = lumtui_pt_y(sc, f, idx, size, dy, sy16);
+            lumtui_poly_add(sc, px, py);
+            curx = px;
+            cury = py;
+            k = k + 1;
+        } else {
+            let ccx: i64 = lumtui_pt_x(sc, f, idx, size, dx, sx16);
+            let ccy: i64 = lumtui_pt_y(sc, f, idx, size, dy, sy16);
+            let ex: i64 = 0;
+            let ey: i64 = 0;
+            if lumtui_on(sc, nx) == 1 {
+                ex = lumtui_pt_x(sc, f, nx, size, dx, sx16);
+                ey = lumtui_pt_y(sc, f, nx, size, dy, sy16);
+                k = k + 2;
+            } else {
+                ex = (ccx + lumtui_pt_x(sc, f, nx, size, dx, sx16)) / 2;
+                ey = (ccy + lumtui_pt_y(sc, f, nx, size, dy, sy16)) / 2;
+                k = k + 1;
+            }
+            lumtui_quad_add(sc, curx, cury, ccx, ccy, ex, ey);
+            curx = ex;
+            cury = ey;
+        }
+    }
+    lumtui_end_contour(sc);
+    return 1;
+}
+
+/// `s + k` 在 [s, e] 里绕圈 —— 轮廓是闭的。
+pub fn lumtui_wrap(s: u32, e: u32, i: u32) -> u32 {
+    let span: u32 = e - s + 1;
+    return s + ((i - s) % span);
+}
+
+/// 这个点在曲线上吗 —— **取 bit 0, 不是比 `== 1`**。
+///
+/// 旗标字节还带着别的位 (x/y 短、同前一个、重复), 所以"在曲线上"的点拿到的值
+/// 常常是 17 / 35 / 51 而不是 1。按 `== 1` 判过一次, 症状是**整条轮廓被当成全由
+/// 控制点组成** —— 于是每个字形都被拉成一圈圆滑的曲线: 'N' 的斜笔整条消失
+/// (包围盒还对、墨迹只有 0.68 倍), 而 'A' 因为它的在曲线点恰好旗标就是 1 而
+/// **看着完全正常** —— 那才是这条 bug 藏得住的原因。
+pub fn lumtui_on(sc: ptr, i: u32) -> u32 {
+    return load8(lumtui_sp(sc, LUMTUI_S_RAWON), i) % 2;
+}
+
+/// 轮廓里第一个"在曲线上"的点; 全是控制点就给 `s`。
+pub fn lumtui_first_on(sc: ptr, s: u32, e: u32) -> u32 {
+    let i: u32 = s;
+    while i <= e {
+        if lumtui_on(sc, i) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+/// 原始点 -> 1/16 像素的 x。
+pub fn lumtui_pt_x(sc: ptr, f: ptr, i: u32, size: u32, dx: i64, sx16: i64) -> i64 {
+    let raw: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_RAWX), i * 4) as i32) as i64;
+    return lumtui_mul16(lumtui_scale16(raw, size, lumtui_ld32(f, FF_UPEM)), sx16) + dx;
+}
+
+/// 原始点 -> 1/16 像素的 y。**这里翻转**: 字体 y 向上, 图像 y 向下。
+pub fn lumtui_pt_y(sc: ptr, f: ptr, i: u32, size: u32, dy: i64, sy16: i64) -> i64 {
+    let raw: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_RAWY), i * 4) as i32) as i64;
+    return lumtui_mul16(0 - lumtui_scale16(raw, size, lumtui_ld32(f, FF_UPEM)), sy16) + dy;
+}
+
+/// 原始点 -> 1/16 像素定点。i64 算, 免得 `p * size * 16` 在 32 位上溢出。
+pub fn lumtui_scale16(p: i64, size: u32, upem: u32) -> i64 {
+    if upem == 0 {
+        return 0;
+    }
+    return (p * (size as i64) * (LUMTUI_Q as i64)) / (upem as i64);
+}
+
+pub fn lumtui_poly_add(sc: ptr, x: i64, y: i64) -> u32 {
+    let n: u32 = lumtui_ld32(sc, LUMTUI_S_NPTS);
+    if n >= LUMTUI_MAX_POLY_PTS {
+        return 0;
+    }
+    lumtui_st32(lumtui_sp(sc, LUMTUI_S_POLYX), n * 4, (x as i32) as u32);
+    lumtui_st32(lumtui_sp(sc, LUMTUI_S_POLYY), n * 4, (y as i32) as u32);
+    lumtui_st32(sc, LUMTUI_S_NPTS, n + 1);
+    return 1;
+}
+
+pub fn lumtui_end_contour(sc: ptr) -> u32 {
+    let c: u32 = lumtui_ld32(sc, LUMTUI_S_NCON);
+    if c >= LUMTUI_MAX_CONTOURS {
+        return 0;
+    }
+    lumtui_st16(lumtui_sp(sc, LUMTUI_S_CEND), c * 2, lumtui_ld32(sc, LUMTUI_S_NPTS));
+    lumtui_st32(sc, LUMTUI_S_NCON, c + 1);
+    return c;
+}
+
+/// 二次贝塞尔 (起点已知) 摊成 8 段直线。
+pub fn lumtui_quad_add(sc: ptr, x0: i64, y0: i64, cx: i64, cy: i64, x1: i64, y1: i64) -> u32 {
+    let k: u32 = 1;
+    while k <= 8 {
+        let t: i64 = k as i64;
+        let mt: i64 = 8 - t;
+        let x: i64 = (mt * mt * x0 + 2 * mt * t * cx + t * t * x1) / 64;
+        let y: i64 = (mt * mt * y0 + 2 * mt * t * cy + t * t * y1) / 64;
+        lumtui_poly_add(sc, x, y);
+        k = k + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 光栅化
+
+/// 折线的包围盒 (1/16 像素) 写进 `out` 的 4 个 i32。
+pub fn lumtui_poly_bbox(sc: ptr, n: u32, out: ptr) -> u32 {
+    let x0: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYX), 0) as i32) as i64;
+    let y0: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYY), 0) as i32) as i64;
+    let x1: i64 = x0;
+    let y1: i64 = y0;
+    let i: u32 = 1;
+    while i < n {
+        let x: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYX), i * 4) as i32) as i64;
+        let y: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYY), i * 4) as i32) as i64;
+        if x < x0 { x0 = x; }
+        if y < y0 { y0 = y; }
+        if x > x1 { x1 = x; }
+        if y > y1 { y1 = y; }
+        i = i + 1;
+    }
+    lumtui_st32(out, 0, (x0 as i32) as u32);
+    lumtui_st32(out, 4, (y0 as i32) as u32);
+    lumtui_st32(out, 8, (x1 as i32) as u32);
+    lumtui_st32(out, 12, (y1 as i32) as u32);
+    return 1;
+}
+
+/// 折线 -> `bw × bh` 的 8 位覆盖位图。`ox`/`oy` 是位图左上角在 1/16 像素坐标里的位置
+/// (也就是包围盒的像素左下取整那一对)。返回画进去的像素个数。
+pub fn lumtui_poly_raster(sc: ptr, bmp: ptr, bw: u32, bh: u32, ox: i64, oy: i64) -> u32 {
+    let n: u32 = lumtui_ld32(sc, LUMTUI_S_NPTS);
+    let ncon: u32 = lumtui_ld32(sc, LUMTUI_S_NCON);
+    if n < 3 || ncon == 0 {
+        return 0;
+    }
+    let inked: u32 = 0;
+    let r: u32 = 0;
+    while r < bh {
+        let z: u32 = 0;
+        while z < bw {
+            lumtui_st32(lumtui_sp(sc, LUMTUI_S_ROWACC), z * 4, 0);
+            z = z + 1;
+        }
+        let s: u32 = 0;
+        while s < LUMTUI_SUBSCAN {
+            // 第 r 行第 s 条子扫描线的 y (1/16 像素, 位图坐标系)
+            let ys: i64 = (r * LUMTUI_Q + s * 2 + 1) as i64;
+            let ncross: u32 = lumtui_crossings(sc, ys + oy, ncon);
+            inked = inked + lumtui_fill_row(sc, ncross, bw, ox);
+            s = s + 1;
+        }
+        let c: u32 = 0;
+        while c < bw {
+            let acc: u32 = lumtui_ld32(lumtui_sp(sc, LUMTUI_S_ROWACC), c * 4);
+            let a: u32 = (acc * 255) / 128;
+            let v: u32 = 255;
+            if a < 255 {
+                v = a;
+            }
+            store8(bmp, r * bw + c, v as u8);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return inked;
+}
+
+/// 收集所有边与 `ys` 的交点, 按 x 升序排好, 返回交点个数。
+pub fn lumtui_crossings(sc: ptr, ys: i64, ncon: u32) -> u32 {
+    let cx: ptr = lumtui_sp(sc, LUMTUI_S_CROSSX);
+    let cd: ptr = lumtui_sp(sc, LUMTUI_S_CROSSD);
+    let cnt: u32 = 0;
+    let c: u32 = 0;
+    let start: u32 = 0;
+    while c < ncon {
+        let e: u32 = lumtui_ld16(lumtui_sp(sc, LUMTUI_S_CEND), c * 2);
+        let npts: u32 = e - start;
+        let k: u32 = 0;
+        while k < npts {
+            cnt = lumtui_edge_cross(sc, cx, cd, cnt, start + k, start + ((k + 1) % npts), ys);
+            k = k + 1;
+        }
+        start = e;
+        c = c + 1;
+    }
+    lumtui_sort_cross(cx, cd, cnt);
+    lumtui_st32(sc, LUMTUI_S_NCROSS, cnt);
+    return cnt;
+}
+
+/// 一条边与 `ys` 的交点。半开区间 (`lo <= ys < hi`) —— 这样顶点只算一次, 不双计。
+pub fn lumtui_edge_cross(sc: ptr, cx: ptr, cd: ptr, cnt: u32, i0: u32, i1: u32, ys: i64) -> u32 {
+    if cnt >= LUMTUI_MAX_CROSS {
+        return cnt;
+    }
+    let x0: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYX), i0 * 4) as i32) as i64;
+    let y0: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYY), i0 * 4) as i32) as i64;
+    let x1: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYX), i1 * 4) as i32) as i64;
+    let y1: i64 = (lumtui_ld32(lumtui_sp(sc, LUMTUI_S_POLYY), i1 * 4) as i32) as i64;
+    if y0 == y1 {
+        return cnt;
+    }
+    let lo: i64 = y0;
+    let hi: i64 = y1;
+    if y0 > y1 {
+        lo = y1;
+        hi = y0;
+    }
+    if ys < lo || ys >= hi {
+        return cnt;
+    }
+    let x: i64 = x0 + ((ys - y0) * (x1 - x0)) / (y1 - y0);
+    let d: i64 = 1;
+    if y1 < y0 {
+        // **不写 `d = 0 - 1`** —— 两个字面量相减时, 自举驱动的产物与参考不一致
+        // (它把常量定成 i32, 参考按上下文定成 i64; 实测 `sub i32 0, 1` vs
+        // `sub i64 0, 1`)。拆成两步就一致: 减法的**左操作数是个 i64 变量**时
+        // 两边都按 i64 推。最小复现与这一整类记在 `docs/196` §4.10。
+        d = 0;
+        d = d - 1;
+    }
+    lumtui_st32(cx, cnt * 4, (x as i32) as u32);
+    lumtui_st32(cd, cnt * 4, (d as i32) as u32);
+    return cnt + 1;
+}
+
+/// 交点按 x 插排 (一个字形最多几百个交点, 插排够用且不要额外缓冲)。
+pub fn lumtui_sort_cross(cx: ptr, cd: ptr, n: u32) -> u32 {
+    let i: u32 = 1;
+    while i < n {
+        let x: u32 = lumtui_ld32(cx, i * 4);
+        let d: u32 = lumtui_ld32(cd, i * 4);
+        let j: u32 = i;
+        let stop: u32 = 0;
+        while j > 0 && stop == 0 {
+            let px: u32 = lumtui_ld32(cx, (j - 1) * 4);
+            if (px as i32) <= (x as i32) {
+                stop = 1;
+            } else {
+                lumtui_st32(cx, j * 4, px);
+                lumtui_st32(cd, j * 4, lumtui_ld32(cd, (j - 1) * 4));
+                j = j - 1;
+            }
+        }
+        lumtui_st32(cx, j * 4, x);
+        lumtui_st32(cd, j * 4, d);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 一条子扫描线的交点 -> nonzero 绕数 -> 把内部那些段按**精确的 1/16 像素分数**
+/// 累进这一行的覆盖累加器。
+/// `ox` 是**位图左上角的 x** (1/16 像素) —— 交点 x 是笔位坐标, 要减掉它才落到位图里。
+pub fn lumtui_fill_row(sc: ptr, ncross: u32, bw: u32, ox: i64) -> u32 {
+    let cx: ptr = lumtui_sp(sc, LUMTUI_S_CROSSX);
+    let cd: ptr = lumtui_sp(sc, LUMTUI_S_CROSSD);
+    let wind: i64 = 0;
+    let prev: i64 = 0;
+    let i: u32 = 0;
+    let inked: u32 = 0;
+    while i < ncross {
+        let x: i64 = (lumtui_ld32(cx, i * 4) as i32) as i64;
+        if wind != 0 {
+            inked = inked + lumtui_span_add(sc, bw, prev - ox, x - ox);
+        }
+        wind = wind + ((lumtui_ld32(cd, i * 4) as i32) as i64);
+        prev = x;
+        i = i + 1;
+    }
+    return inked;
+}
+
+/// 把 [xa, xb) (1/16 像素, 位图坐标) 加进这一行的累加器。返回覆盖到的像素个数。
+pub fn lumtui_span_add(sc: ptr, bw: u32, xa: i64, xb: i64) -> u32 {
+    if xb <= xa {
+        return 0;
+    }
+    let lim: i64 = (bw * LUMTUI_Q) as i64;
+    let lo: i64 = 0;
+    if xa > 0 {
+        lo = xa;
+    }
+    let hi: i64 = lim;
+    if xb < lim {
+        hi = xb;
+    }
+    if hi <= lo {
+        return 0;
+    }
+    let acc: ptr = lumtui_sp(sc, LUMTUI_S_ROWACC);
+    let pa: u32 = (lo / LUMTUI_Q as i64) as u32;
+    let pb: u32 = ((hi - 1) / LUMTUI_Q as i64) as u32;
+    if pa == pb {
+        lumtui_acc_add(acc, pa, (hi - lo) as u32);
+        return 1;
+    }
+    let first: i64 = ((pa as i64) + 1) * LUMTUI_Q as i64;
+    lumtui_acc_add(acc, pa, (first - lo) as u32);
+    let n: u32 = 1;
+    let q: u32 = pa + 1;
+    while q < pb {
+        lumtui_acc_add(acc, q, LUMTUI_Q);
+        q = q + 1;
+    }
+    let last: i64 = hi - (pb as i64) * LUMTUI_Q as i64;
+    if last > 0 {
+        lumtui_acc_add(acc, pb, last as u32);
+    }
+    return n + (pb - pa - 1) + 1;
+}
+
+pub fn lumtui_acc_add(acc: ptr, p: u32, v: u32) {
+    lumtui_st32(acc, p * 4, lumtui_ld32(acc, p * 4) + v);
+}
+
+// ---------------------------------------------------------------- 带符号取整
+
+pub fn lumtui_floordiv(a: i64, b: i64) -> i64 {
+    if a >= 0 {
+        return a / b;
+    }
+    // **拆成带类型的局部量, 不写成一个大表达式** —— 自举驱动给"复合表达式右边那个
+    // 整数字面量"定 i32 (参考定 i64), 于是 `X - 1` 里 X 是**变量**时两边一致、
+    // X 是**中间结果**时不一致。最小复现见 `docs/196` §4.10。
+    let na: i64 = 0 - a;
+    let s: i64 = na + b;
+    let t: i64 = s - 1;
+    return 0 - (t / b);
+}
+
+pub fn lumtui_ceildiv(a: i64, b: i64) -> i64 {
+    return 0 - lumtui_floordiv(0 - a, b);
+}
+
+// ---------------------------------------------------------------- 一步到位: 码点 -> 位图
+
+/// 一个码点在某个字号下的位图。`bmp` 至少 `bw * bh` 字节;
+/// `out` 收 4 个 u32 `(x, y, w, h)` —— (x,y) 是**相对笔位** (基线左端) 的左上角,
+/// 负数以 i32 补码给出, 调用方按 i32 解释。
+/// 返回 1 = 画了, 0 = 这个字体里没有它 / 解不出来。
+pub fn lumtui_font_render(fd: ptr, f: ptr, cp: u32, size: u32, sc: ptr,
+                          bmp: ptr, bw: u32, bh: u32, out: ptr) -> u32 {
+    let gi: u32 = lumtui_font_glyph(fd, f, cp);
+    if gi == 0 {
+        return 0;
+    }
+    return lumtui_font_render_gi(fd, f, gi, size, sc, bmp, bw, bh, out);
+}
+
+pub fn lumtui_font_render_gi(fd: ptr, f: ptr, gi: u32, size: u32, sc: ptr,
+                             bmp: ptr, bw: u32, bh: u32, out: ptr) -> u32 {
+    lumtui_st32(out, 8, 0);
+    lumtui_st32(out, 12, 0);
+    if lumtui_glyph_poly(fd, f, gi, size, sc, 0, 0, 65536, 65536, 0) == 0 {
+        return 0;
+    }
+    let n: u32 = lumtui_ld32(sc, LUMTUI_S_NPTS);
+    let bb: ptr = lumtui_sp(sc, LUMTUI_S_BBOX);
+    lumtui_poly_bbox(sc, n, bb);
+    let x0: i64 = (lumtui_ld32(bb, 0) as i32) as i64;
+    let y0: i64 = (lumtui_ld32(bb, 4) as i32) as i64;
+    let x1: i64 = (lumtui_ld32(bb, 8) as i32) as i64;
+    let y1: i64 = (lumtui_ld32(bb, 12) as i32) as i64;
+    let bx: i64 = lumtui_floordiv(x0, LUMTUI_Q as i64);
+    let by: i64 = lumtui_floordiv(y0, LUMTUI_Q as i64);
+    let ex: i64 = lumtui_ceildiv(x1, LUMTUI_Q as i64);
+    let ey: i64 = lumtui_ceildiv(y1, LUMTUI_Q as i64);
+    let w: u32 = (ex - bx) as u32;
+    let h: u32 = (ey - by) as u32;
+    lumtui_st32(out, 0, (bx as i32) as u32);
+    lumtui_st32(out, 4, (by as i32) as u32);
+    lumtui_st32(out, 8, w);
+    lumtui_st32(out, 12, h);
+    if w == 0 || h == 0 || w > bw || h > bh {
+        return 1;
+    }
+    let _ink: u32 = lumtui_poly_raster(sc, bmp, w, h, bx * LUMTUI_Q as i64, by * LUMTUI_Q as i64);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 文本
+
+/// 一串 ASCII 文本的宽度。没有字体时用兜底点阵那把尺子。
+pub fn lumtui_text_width(fd: ptr, f: ptr, s: str, size: u32, use_font: u32) -> u32 {
+    if use_font == 1 {
+        return lumtui_font_measure(fd, f, s, size);
+    }
+    return str_len(s) * lumtui_fb_advance(size);
+}
+
+/// 兜底点阵的方块大小: 字号 7 对应 1 倍 (与内核那份 5×7 一致)。
+pub fn lumtui_fb_scale(size: u32) -> u32 {
+    if size < 7 {
+        return 1;
+    }
+    return size / 7;
+}
+
+pub fn lumtui_fb_advance(size: u32) -> u32 {
+    return lumtui_fb_scale(size) * 6;
+}
+
+pub fn lumtui_fb_line_h(size: u32) -> u32 {
+    return lumtui_fb_scale(size) * 8;
+}
+
+/// 兜底点阵画一个字符。`bmp` 是 `6sc × 8sc` 的 8 位覆盖图 (0 或 255)。
+pub fn lumtui_fb_render(cp: u32, size: u32, bmp: ptr, bw: u32, bh: u32, out: ptr) -> u32 {
+    let gl: i64 = lumtui_fb_glyph(cp);
+    let sc: u32 = lumtui_fb_scale(size);
+    let w: u32 = sc * 6;
+    let h: u32 = sc * 8;
+    lumtui_st32(out, 0, 0);
+    lumtui_st32(out, 4, 0);
+    lumtui_st32(out, 8, w);
+    lumtui_st32(out, 12, h);
+    if gl == 0 {
+        return 0;
+    }
+    // **步长用 `w` (这一行有几个像素), 不是调用方给的 `bw`** —— 位图是按 `w × h`
+    // 只写满左上角那一块, 混叠那一侧 (`lumtui_blit_cov`) 也是按 `w` 走的。
+    // 两处不一致过一次, 症状很难认: 背景/圆角/焦点环全对, 只有字变成稀稀拉拉几笔
+    // (按 64 写、按 6 读)。
+    let i: u32 = 0;
+    while i < w * h {
+        store8(bmp, i, 0 as u8);
+        i = i + 1;
+    }
+    let r: u32 = 0;
+    while r < 7 {
+        // `gl` 是 i64 (字形位打包用 56 位), 取出一行之后**显式窄回 u32** ——
+        // 少了这个 `as`, 参考检查器放行、而自举那一侧按"表达式类型 i64"拒
+        // (`loment_std_test` / `loment_p8_test` 三条一起红, 根因都是这一行)。
+        let bits: u32 = ((gl / lumtui_pow64(r * 8)) % 256) as u32;
+        let c: u32 = 0;
+        while c < 5 {
+            // **bit 4 是最左列** —— 与内核那条镜像修复 `1 << (4 - bb)` 同一个约定。
+            if (bits / lumtui_pow2u(4 - c)) % 2 == 1 {
+                lumtui_fb_block(bmp, w, w, sc, c * sc, r * sc);
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return 1;
+}
+
+/// `2^n` (u32)。`const` 的初值只能是整数字面量, 指数只好在运行期算。
+pub fn lumtui_pow2u(n: u32) -> u32 {
+    let v: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+/// `2^n` 的 i64 版 —— 兜底字形的位在 56 位以内。
+pub fn lumtui_pow64(n: u32) -> i64 {
+    let v: i64 = 1;
+    let i: u32 = 0;
+    while i < n {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 在覆盖图上填一个 `sc × sc` 的实心方块。
+pub fn lumtui_fb_block(bmp: ptr, stride: u32, w: u32, sc: u32, bx: u32, by: u32) -> u32 {
+    let y: u32 = 0;
+    while y < sc {
+        let x: u32 = 0;
+        while x < sc {
+            if bx + x < w {
+                store8(bmp, (by + y) * stride + bx + x, 255 as u8);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 兜底点阵字形表
+//
+// 数据来源: `kernel/src/graphics.rs` 的 `FONT` (5×7, "FUJOS 2026" 子集)。**不是手抄** ——
+// 由一段脚本从那份 Rust 常量转出来, 于是两边的字形逐位相同。
+
+/// 内置兜底字体: 5×7 点阵, 与 `kernel/src/graphics.rs` 的 `FONT` 是**同一份**
+/// —— 于是没有字体文件时, LumtUI 画出来的字和 FujoOS 界面上的字是同一套。
+/// 返回值: 7 行 × 8 位打包, 第 r 行在 bits `8r..8r+4`, **bit 4 是最左列**
+/// (与内核那条镜像修复 `1 << (4 - bb)` 同一个约定)。0 = 没有这个字形。
+pub fn lumtui_fb_glyph(cp: u32) -> i64 {
+    if cp == 65 { return 4803839837409550; }
+    if cp == 66 { return 8463014517870878; }
+    if cp == 67 { return 3959410360586510; }
+    if cp == 68 { return 8463014299767070; }
+    if cp == 69 { return 8743385687920671; }
+    if cp == 70 { return 4521261037260831; }
+    if cp == 71 { return 4240889749704719; }
+    if cp == 72 { return 4803839837409553; }
+    if cp == 73 { return 3945064967701518; }
+    if cp == 74 { return 3959345683431687; }
+    if cp == 75 { return 4804952116695569; }
+    if cp == 76 { return 8743385453039632; }
+    if cp == 77 { return 4803839669902097; }
+    if cp == 78 { return 4803848260096273; }
+    if cp == 79 { return 3959414672396558; }
+    if cp == 80 { return 4521261037326622; }
+    if cp == 81 { return 3679056387182862; }
+    if cp == 82 { return 4804952217162014; }
+    if cp == 83 { return 8445353343848463; }
+    if cp == 84 { return 1130315200594975; }
+    if cp == 85 { return 3959414672396561; }
+    if cp == 86 { return 1136968323895569; }
+    if cp == 87 { return 2837930059043089; }
+    if cp == 88 { return 4803809319194897; }
+    if cp == 89 { return 1130315200991505; }
+    if cp == 90 { return 8743350891053343; }
+    if cp == 48 { return 3959449099374862; }
+    if cp == 49 { return 3945064967703556; }
+    if cp == 50 { return 8734537584546062; }
+    if cp == 51 { return 8445353342861598; }
+    if cp == 52 { return 565282423309826; }
+    if cp == 53 { return 8445353612283935; }
+    if cp == 54 { return 3959414890434574; }
+    if cp == 55 { return 2260630333686047; }
+    if cp == 56 { return 3959414622064910; }
+    if cp == 57 { return 3941753733320974; }
+    if cp == 45 { return 520093696; }
+    if cp == 46 { return 3390893860061184; }
+    if cp == 118 { return 17348755456; }
+    if cp == 91 { return 3949480261453838; }
+    if cp == 60 { return 17592455136256; }
+    if cp == 95 { return 8725724278030336; }
+    if cp == 63 { return 1125917120336142; }
+    if cp == 58 { return 13245679930368; }
+    if cp >= 97 && cp <= 122 {
+        return lumtui_fb_glyph(cp - 32);
+    }
+    return 0;
+}

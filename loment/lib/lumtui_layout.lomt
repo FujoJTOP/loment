@@ -1,0 +1,432 @@
+module lumtui_layout
+
+// lumtui_layout.lomt — 布局引擎: 把"设计尺寸"算成**绝对像素**。
+//
+// 输入是**载入侧**那份 (平铺的 `.fuc` 字节), 输出是调用方给的一张 rects 数组 ——
+// 每个节点 16 字节 `(x, y, w, h)` 各一个 u32, 与 `lumtui.lomt` 的 `lumtui_rect_*`
+// 同一形状。**本模块不写 `b`**: 载入的那份是只读视图, 这一点与内核那份一致。
+//
+// ## 一条前向扫描就够
+//
+// 摊平是 **BFS** 的, 所以父节点一定排在孩子前面, 而且一个父节点的孩子在摊平数组里
+// **连续** (BFS 出队时把子节点整段追加)。于是:
+//   处理到第 i 个节点时, 它的矩形**已经被父节点写好了** (根那一个由调用方给),
+//   这一步只需要"算出自己的内容盒 + 把盒分给孩子们"。
+// 不需要递归 (原生后端上少一层风险), 也不会重复访问。
+//
+// ## 尺寸语义 (与 `tools/fuic.py` 的 `MODES` 对齐)
+//
+//   * `FIXED`   —— 就是那个像素数;
+//   * `PERCENT` —— 内容盒的百分之几;
+//   * `GROW`    —— **主轴**按权重分剩余的弹性空间; **交叉轴**当"填满"用
+//                  (这就是 fui 里"容器的子节点默认填满列宽"那条);
+//   * `FILL`    —— 直接吃满该轴的可用空间。
+//
+// ## 不做什么 (说清楚, 免得当它是万能)
+//
+//   * 不换行 (没有 wrap): 一行放不下就按比例缩, 不折到下一行;
+//   * 不做基线对齐: 交叉轴上只有 start/center/end/stretch 四种;
+//   * 不做 min/max 约束: `.fuc` 的节点记录里没有这两格 —— 要加就得先动 L0,
+//     而 L0 是跨线契约 (CLAUDE.md 有专门一条)。
+
+use lumtui
+use lumtui_doc
+
+/// 一整套布局。`rects` 至少 `count * 16` 字节; 返回算过的节点数。
+///
+/// 根那一个的矩形**由调用方给** —— `.fuc` 的 `doc_w/doc_h` 是设计尺寸, 而实际画到
+/// 哪儿是调用方的事(窗口可缩放)。根自己的尺寸模式在这里不生效。
+pub fn lumtui_layout(b: ptr, rects: ptr, x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    if n == 0 {
+        return 0;
+    }
+    lumtui_rect_set(rects, x, y, w, h);
+    let i: u32 = 0;
+    while i < n {
+        lumtui_layout_children(b, rects, i);
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 内容盒
+
+pub fn lumtui_rp(rects: ptr, i: u32) -> ptr {
+    return ptr_add(rects, i * LUMTUI_RECT_BYTES);
+}
+
+pub fn lumtui_content_x(b: ptr, rects: ptr, i: u32) -> u32 {
+    return lumtui_rect_x(lumtui_rp(rects, i)) + lumtui_fuc_pad_l(b, i);
+}
+
+pub fn lumtui_content_y(b: ptr, rects: ptr, i: u32) -> u32 {
+    return lumtui_rect_y(lumtui_rp(rects, i)) + lumtui_fuc_pad_t(b, i);
+}
+
+pub fn lumtui_content_w(b: ptr, rects: ptr, i: u32) -> u32 {
+    let tw: u32 = lumtui_rect_w(lumtui_rp(rects, i));
+    let cut: u32 = lumtui_fuc_pad_l(b, i) + lumtui_fuc_pad_r(b, i);
+    if cut >= tw {
+        return 0;
+    }
+    return tw - cut;
+}
+
+pub fn lumtui_content_h(b: ptr, rects: ptr, i: u32) -> u32 {
+    let th: u32 = lumtui_rect_h(lumtui_rp(rects, i));
+    let cut: u32 = lumtui_fuc_pad_t(b, i) + lumtui_fuc_pad_b(b, i);
+    if cut >= th {
+        return 0;
+    }
+    return th - cut;
+}
+
+// ---------------------------------------------------------------- 尺寸解析
+
+/// 单轴的尺寸解析。`GROW` 在这一步给 0 —— 它的大小由分配那一步定。
+/// 乘法先除后乘, 免得 `avail * val` 在 u32 上溢出。
+pub fn lumtui_size_of(mode: u32, val: u32, avail: u32) -> u32 {
+    if mode == LUMTUI_M_FIXED {
+        return val;
+    }
+    if mode == LUMTUI_M_PERCENT {
+        return (avail / 100) * val + ((avail % 100) * val) / 100;
+    }
+    if mode == LUMTUI_M_FILL {
+        return avail;
+    }
+    return 0;
+}
+
+/// 交叉轴: `GROW` 当成"填满" (见文件头那条尺寸语义)。
+pub fn lumtui_cross_of(mode: u32, val: u32, avail: u32) -> u32 {
+    if mode == LUMTUI_M_GROW {
+        return avail;
+    }
+    return lumtui_size_of(mode, val, avail);
+}
+
+/// 弹性权重: 权重写 0 也当 1 —— `.fuc` 里 `grow` 的惯例是"val 写几就占几份",
+/// 而写成 0 的人意思是"给我一份", 不是"我一点都不占"。
+pub fn lumtui_weight(val: u32) -> u32 {
+    if val == 0 {
+        return 1;
+    }
+    return val;
+}
+
+/// 按权重分 `space`。先除后乘 + 余数也按权重分摊, 避免 u32 溢出。
+pub fn lumtui_share(space: u32, weight: u32, total: u32) -> u32 {
+    if total == 0 {
+        return 0;
+    }
+    return (space / total) * weight + ((space % total) * weight) / total;
+}
+
+/// 交叉轴上按对齐规则定位置 (stretch 在尺寸那一步已经吃满了, 到这里 slack 就是 0)。
+pub fn lumtui_cross_pos(align: u32, avail: u32, size: u32) -> u32 {
+    if size >= avail {
+        return 0;
+    }
+    let slack: u32 = avail - size;
+    if align == LUMTUI_A_CENTER {
+        return slack / 2;
+    }
+    if align == LUMTUI_A_END {
+        return slack;
+    }
+    return 0;
+}
+
+/// 让一个偏移不把一个盒子推出内容盒 (`.fuc` 里 x/y 是 u16, 没有负数可用)。
+pub fn lumtui_clamp_off(off: u32, avail: u32, size: u32) -> u32 {
+    if size >= avail {
+        return 0;
+    }
+    if off > avail - size {
+        return avail - size;
+    }
+    return off;
+}
+
+// ---------------------------------------------------------------- 分给孩子
+
+/// 把第 `i` 个节点的内容盒分给它的孩子们。不是容器 / 没有孩子 -> 什么都不做。
+pub fn lumtui_layout_children(b: ptr, rects: ptr, i: u32) -> u32 {
+    let cnt: u32 = lumtui_fuc_children(b, i);
+    if cnt == 0 {
+        return 0;
+    }
+    if lumtui_kind_is_container(lumtui_fuc_kind(b, i)) == false {
+        return 0;
+    }
+    let cx: u32 = lumtui_content_x(b, rects, i);
+    let cy: u32 = lumtui_content_y(b, rects, i);
+    let cw: u32 = lumtui_content_w(b, rects, i);
+    let ch: u32 = lumtui_content_h(b, rects, i);
+    let kind: u32 = lumtui_fuc_kind(b, i);
+    if kind == LUMTUI_K_ABS || kind == LUMTUI_K_STACK || kind == LUMTUI_K_OVERLAY {
+        return lumtui_place_free(b, rects, i, cx, cy, cw, ch);
+    }
+    return lumtui_place_flex(b, rects, i, cx, cy, cw, ch);
+}
+
+/// `abs` / `stack` / `overlay`: 孩子自己带坐标, 尺寸按内容盒解析。
+pub fn lumtui_place_free(b: ptr, rects: ptr, i: u32, cx: u32, cy: u32, cw: u32, ch: u32) -> u32 {
+    let cnt: u32 = lumtui_fuc_children(b, i);
+    let k: u32 = 0;
+    while k < cnt {
+        let c: u32 = lumtui_fuc_first_child(b, i) + k;
+        let w: u32 = lumtui_cross_of(lumtui_fuc_w_mode(b, c), lumtui_fuc_w_val(b, c), cw);
+        let h: u32 = lumtui_cross_of(lumtui_fuc_h_mode(b, c), lumtui_fuc_h_val(b, c), ch);
+        let px: u32 = cx + lumtui_clamp_off(lumtui_fuc_x(b, c), cw, w);
+        let py: u32 = cy + lumtui_clamp_off(lumtui_fuc_y(b, c), ch, h);
+        lumtui_rect_set(lumtui_rp(rects, c), px, py, w, h);
+        k = k + 1;
+    }
+    return cnt;
+}
+
+/// `row` / `col` / 其余容器: 主轴排布 + 弹性分配 + 对齐。
+pub fn lumtui_place_flex(b: ptr, rects: ptr, i: u32, cx: u32, cy: u32, cw: u32, ch: u32) -> u32 {
+    let cnt: u32 = lumtui_fuc_children(b, i);
+    let gap: u32 = lumtui_fuc_gap(b, i);
+    let is_row: u32 = 0;
+    if lumtui_kind_is_row(lumtui_fuc_kind(b, i)) {
+        is_row = 1;
+    }
+    let main_avail: u32 = cw;
+    let cross_avail: u32 = ch;
+    if is_row == 0 {
+        main_avail = ch;
+        cross_avail = cw;
+    }
+
+    // ---- 第一遍: 固定长度之和 / 弹性权重之和 / 交叉轴需要的最大尺寸
+    let fixed_main: u32 = 0;
+    let grow_sum: u32 = 0;
+    let k: u32 = 0;
+    while k < cnt {
+        let c: u32 = lumtui_fuc_first_child(b, i) + k;
+        let mm: u32 = lumtui_main_mode(b, c, is_row);
+        if mm == LUMTUI_M_GROW {
+            grow_sum = grow_sum + lumtui_weight(lumtui_main_val(b, c, is_row));
+        } else {
+            fixed_main = fixed_main + lumtui_size_of(mm, lumtui_main_val(b, c, is_row), main_avail);
+        }
+        k = k + 1;
+    }
+    let gaps: u32 = 0;
+    if cnt > 1 {
+        gaps = gap * (cnt - 1);
+    }
+    let used: u32 = fixed_main + gaps;
+    let slack: u32 = 0;
+    if used < main_avail {
+        slack = main_avail - used;
+    }
+    let grow_space: u32 = 0;
+    if grow_sum > 0 {
+        grow_space = slack;
+    }
+
+    // ---- 剩下来怎么分: 有弹性成员时弹性吃掉全部 slack; 否则按 justify 分配
+    let extra: u32 = slack;
+    if grow_sum > 0 {
+        extra = 0;
+    }
+    let start_off: u32 = 0;
+    let extra_per_gap: u32 = 0;
+    let just: u32 = lumtui_fuc_justify(b, i);
+    if just == LUMTUI_A_CENTER {
+        start_off = extra / 2;
+    }
+    if just == LUMTUI_A_END {
+        start_off = extra;
+    }
+    if just == LUMTUI_A_SPACE_BETWEEN {
+        if cnt > 1 {
+            extra_per_gap = extra / (cnt - 1);
+        }
+    }
+    if just == LUMTUI_A_SPACE_AROUND {
+        if cnt > 0 {
+            start_off = extra / (cnt * 2);
+            extra_per_gap = extra / cnt;
+        }
+    }
+
+    // ---- 第二遍: 一个一个摆
+    let pos: u32 = start_off;
+    let k2: u32 = 0;
+    while k2 < cnt {
+        let c: u32 = lumtui_fuc_first_child(b, i) + k2;
+        let mm: u32 = lumtui_main_mode(b, c, is_row);
+        let mv: u32 = lumtui_main_val(b, c, is_row);
+        let cm: u32 = lumtui_cross_mode(b, c, is_row);
+        let cv: u32 = lumtui_cross_val(b, c, is_row);
+        let msize: u32 = lumtui_size_of(mm, mv, main_avail);
+        if mm == LUMTUI_M_GROW {
+            msize = lumtui_share(grow_space, lumtui_weight(mv), grow_sum);
+        }
+        let csize: u32 = lumtui_cross_of(cm, cv, cross_avail);
+        let cpos: u32 = lumtui_cross_pos(lumtui_fuc_align(b, c), cross_avail, csize);
+        let rx: u32 = cx + cpos;
+        let ry: u32 = cy + pos;
+        let rw: u32 = csize;
+        let rh: u32 = msize;
+        if is_row == 1 {
+            rx = cx + pos;
+            ry = cy + cpos;
+            rw = msize;
+            rh = csize;
+        }
+        lumtui_rect_set(lumtui_rp(rects, c), rx, ry, rw, rh);
+        pos = pos + msize + gap + extra_per_gap;
+        k2 = k2 + 1;
+    }
+    return cnt;
+}
+
+// ---- 主轴/交叉轴取记录里的哪两个字段: row 用 w 当主轴, col 用 h 当主轴
+
+pub fn lumtui_main_mode(b: ptr, c: u32, is_row: u32) -> u32 {
+    if is_row == 1 {
+        return lumtui_fuc_w_mode(b, c);
+    }
+    return lumtui_fuc_h_mode(b, c);
+}
+
+pub fn lumtui_main_val(b: ptr, c: u32, is_row: u32) -> u32 {
+    if is_row == 1 {
+        return lumtui_fuc_w_val(b, c);
+    }
+    return lumtui_fuc_h_val(b, c);
+}
+
+pub fn lumtui_cross_mode(b: ptr, c: u32, is_row: u32) -> u32 {
+    if is_row == 1 {
+        return lumtui_fuc_h_mode(b, c);
+    }
+    return lumtui_fuc_w_mode(b, c);
+}
+
+pub fn lumtui_cross_val(b: ptr, c: u32, is_row: u32) -> u32 {
+    if is_row == 1 {
+        return lumtui_fuc_h_val(b, c);
+    }
+    return lumtui_fuc_w_val(b, c);
+}
+
+// ---------------------------------------------------------------- 命中与焦点
+
+/// 最深的命中节点 (点不在任何节点里 -> 4294967295)。
+/// 摊平是 BFS 序, 祖先一定在下标小的位置 —— 于是从小到大扫, 每命中一个就换掉答案,
+/// 最后留下的就是最深的那个。
+pub fn lumtui_hit_test(b: ptr, rects: ptr, px: u32, py: u32) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let best: u32 = 4294967295;
+    let best_depth: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if lumtui_rect_contains(lumtui_rp(rects, i), px, py) {
+            let d: u32 = lumtui_depth_of(b, i);
+            if best == 4294967295 || d >= best_depth {
+                best = i;
+                best_depth = d;
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// 节点在第几层 (根是 0)。
+pub fn lumtui_depth_of(b: ptr, idx: u32) -> u32 {
+    let d: u32 = 0;
+    let cur: u32 = idx;
+    let g: u32 = 0;
+    while g < 64 {
+        let p: u32 = lumtui_parent_index(b, cur);
+        if p == 4294967295 {
+            return d;
+        }
+        cur = p;
+        d = d + 1;
+        g = g + 1;
+    }
+    return d;
+}
+
+/// 摊平序里谁是 `idx` 的父。
+pub fn lumtui_parent_index(b: ptr, idx: u32) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let i: u32 = 0;
+    while i < n {
+        let cnt: u32 = lumtui_fuc_children(b, i);
+        if cnt > 0 {
+            let fc: u32 = lumtui_fuc_first_child(b, i);
+            if idx >= fc && idx < fc + cnt {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 这个节点能不能被 Tab 到 (可聚焦的 kind 且没被禁用)。位 1 = `LUMTUI_F_DISABLED`。
+pub fn lumtui_focusable(b: ptr, i: u32) -> bool {
+    if lumtui_kind_is_focusable(lumtui_fuc_kind(b, i)) == false {
+        return false;
+    }
+    return lumtui_flag_set(lumtui_fuc_flags(b, i), 1) == false;
+}
+
+/// 可聚焦的节点一共几个 (Tab 序的长度)。
+pub fn lumtui_focus_count(b: ptr) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if lumtui_focusable(b, i) {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// Tab 序里第 `k` 个可聚焦节点 (摊平序 = 阅读序 = fui 的 Tab 序)。
+pub fn lumtui_focus_at(b: ptr, k: u32) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if lumtui_focusable(b, i) {
+            if c == k {
+                return i;
+            }
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+/// 从 `cur` 往后找下一个可聚焦节点, 到头回绕到第一个。
+pub fn lumtui_focus_next(b: ptr, cur: u32) -> u32 {
+    let n: u32 = lumtui_fuc_count(b);
+    let i: u32 = 0;
+    if cur != 4294967295 {
+        i = cur + 1;
+    }
+    while i < n {
+        if lumtui_focusable(b, i) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return lumtui_focus_at(b, 0);
+}
