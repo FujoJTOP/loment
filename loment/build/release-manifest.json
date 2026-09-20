@@ -27,7 +27,7 @@
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "40e10f78c709929a697a97589d7dd60b85ccd154b9e7cb7aaa82bb090912b94d"
+   "sha256": "59763cf773e326913eb2f51538248548730fc3d07b5b97ef740773f4ccb1df76"
   },
   {
    "path": "tools/potato_cross.py",
@@ -1074,6 +1074,10 @@
    "sha256": "7b77024b7fff6061d71c172cac743020ce4d73ee74bdc118e7cb99f5a948829f"
   },
   {
+   "path": "loment/tools/lompotato.lomt",
+   "sha256": "10c3d0f9577f70059793bc39f27eb692bb3be0aa609bc388154b8152465aef7a"
+  },
+  {
    "path": "loment/tools/lomrel.lomt",
    "sha256": "cb917a2f783903e5444d4ef23f0fdac8bae5392f157b78c88ddad4b997bdaf45"
   },
@@ -1691,7 +1695,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "ba92b31c765a0a487206d9bc69b714e758dabe3b9d119c6cb36457ba2093f1f4"
+   "sha256": "17dd0f777b64e50728dc1891c932c980737aaafa354fa560dc989c5e353357d6"
   },
   {
    "path": "docs/190-loment-debugger.md",
