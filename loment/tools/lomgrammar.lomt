@@ -1,0 +1,328 @@
+// loment/tools/lomgrammar.lomt — Loment 版「`choose write grammar` 声明扫描」（`docs/188`）
+// (docs/189 §3 的 S1 第十三格；判据在 tools/loment_grammar_test.py)
+//
+// 判据: 对**同一批枚举出来的候选行**, 本程序扫出来的 (找到没有 / 别名是什么 / 第几行)
+// 与判据那一侧**独立写的参照实现** (`_ref_find`, 按字符走、一行正则都不用) **逐字节相同**。
+//
+// 它是**只管"找"那一层**: 有没有声明头、别名是什么、第几行 —— **不管**
+// "必须在 `module` 之前 / 只许写一次 / 别名在不在出厂锁里"。分层是必要的, 不然拿
+// "融合了三条规矩的结果"去比"只管找的结果", 对拍会满屏**假分歧**（`loment_grammar_test`
+// 的 `_ref_find` 头注里写着这段推理）。
+//
+// 输入是判据写出来的 `cases.txt` (cwd 里, 相对路径 —— `proc_sh` 只吃编译期字面量,
+// 而本程序根本不调外部进程)。每条一行, 用 `\\` / `\n` / `\t` 转义, 所以
+// 多行 case 也只占一行 —— 两侧因此看的是**同一份输入**。
+//
+// 规则（与报错器 `decl_at` 同一刀）: 行首可跳空白 → `choose` ␣ `write` ␣ `grammar`
+// （三个**空白分隔**的词）→ 第三个词后面只能是 **空白 / `;` / 行尾** → 别名是
+// **跳过空白之后**到空白/`;`/行尾为止的一串；跳完空白就撞上 `;` 或行尾 ⇒ **有头没别名**。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`**）。
+
+module lomgrammar
+
+use bytes
+
+const IN_CAP: u32 = 262144;
+const LINE_CAP: u32 = 8192;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+/// 响一声再退 1 —— 与其它工具同形 (`fail` 不是内建, 每个工具自己带一份)。
+fn fail(msg: str) -> u32 {
+    let _a: u64 = write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn say_dec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+/// 只读打开一个**字面量**名字 (内核要 C 串, 所以先拷进 scr 再补 NUL)。
+fn open_lit(name: str, scr: ptr) -> i64 {
+    let n: u32 = str_len(name);
+    let i: u32 = 0;
+    while i < n {
+        store8(scr, i, str_byte(name, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, n, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+// ---------------------------------------------------------------- 扫描
+
+/// 空白吗 (空格 / 制表) —— 与参照实现同一刀。
+fn is_ws(c: u32) -> u32 {
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 分隔符吗 (`;` 也算) —— "词后面只能是**空白 / `;` / 行尾**" 里的那个集合。
+fn is_break(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 59 {
+        return 1;
+    }
+    return 0;
+}
+
+fn skip_ws(src: ptr, i: u32, le: u32) -> u32 {
+    let j: u32 = i;
+    while j < le && is_ws(load8(src, j)) == 1 {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `w` 在 `[i, le)` 处**整词**匹配吗 (超出行尾算不匹配 —— 与 Python 的切片语义同)。
+fn word_at(src: ptr, i: u32, le: u32, w: str) -> u32 {
+    let n: u32 = str_len(w);
+    if i + n > le {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < n {
+        if load8(src, i + k) != str_byte(w, k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// 吃掉一个词: 匹配 + 后面必须是 空白/`;`/行尾 + (`need_ws` 时) 后面**必须有空白**。
+/// 返回**跳过空白之后**的位置; 不匹配返回 FAIL。这个词起点不可能在 0 之后又返回 0
+/// (need_ws 要求 j > i), 所以 FAIL 与合法返回值不会撞。
+fn word_step(src: ptr, i: u32, le: u32, w: str, need_ws: u32) -> u32 {
+    if word_at(src, i, le, w) == 0 {
+        return FAIL;
+    }
+    let j: u32 = i + str_len(w);
+    if j < le && is_break(load8(src, j)) == 0 {
+        return FAIL;
+    }
+    let k: u32 = skip_ws(src, j, le);
+    if need_ws == 1 && k == j {
+        return FAIL;
+    }
+    return k;
+}
+
+/// 在 `src[0..n)` 里找声明。返回 1 = 找到了。
+/// `outp`: `[0]` = 找到没有, `[4]` = 行号, `[8]` = 别名长度, 别名写进 `[12..)`。
+fn find_decl(src: ptr, n: u32, outp: ptr) -> u32 {
+    let line: u32 = 1;
+    let ls: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let le: u32 = ls;
+        while le < n && load8(src, le) != 10 {
+            le = le + 1;
+        }
+        let i0: u32 = skip_ws(src, ls, le);
+        let a: u32 = word_step(src, i0, le, "choose", 1);
+        let b: u32 = 0;
+        if a != FAIL {
+            b = word_step(src, a, le, "write", 1);
+        }
+        let c: u32 = 0;
+        if b != FAIL {
+            c = word_step(src, b, le, "grammar", 0);
+        }
+        if a != FAIL && b != FAIL && c != FAIL {
+            let _f: u32 = st32(outp, 0, 1);
+            let _l: u32 = st32(outp, 4, line);
+            // 跳完空白就撞上 `;` 或行尾 ⇒ 有头没别名
+            if c >= le || load8(src, c) == 59 {
+                let _z: u32 = st32(outp, 8, 0);
+                return 1;
+            }
+            let j: u32 = c;
+            while j < le && is_break(load8(src, j)) == 0 {
+                j = j + 1;
+            }
+            let k: u32 = 0;
+            while c + k < j {
+                store8(outp, 12 + k, load8(src, c + k) as u8);
+                k = k + 1;
+            }
+            let _z2: u32 = st32(outp, 8, k);
+            return 1;
+        }
+        if le >= n {
+            going = 0;
+        } else {
+            ls = le + 1;
+            line = line + 1;
+        }
+    }
+    let _f: u32 = st32(outp, 0, 0);
+    let _l: u32 = st32(outp, 4, 0);
+    let _z: u32 = st32(outp, 8, 0);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 入口
+
+/// 把 `case.txt` 里的一行 (转义形式) 解开进 `dst`, 末尾补 `\n` (判据那侧跑的是
+/// `ln + "\n"`)。返回写进 dst 的字节数。
+fn unescape(src: ptr, ls: u32, le: u32, dst: ptr) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = ls;
+    while i < le {
+        let ch: u32 = load8(src, i);
+        if ch == 92 && i + 1 < le {
+            let e: u32 = load8(src, i + 1);
+            if e == 110 {
+                store8(dst, o, 10 as u8);
+                o = o + 1;
+                i = i + 2;
+            } else if e == 116 {
+                store8(dst, o, 9 as u8);
+                o = o + 1;
+                i = i + 2;
+            } else {
+                store8(dst, o, 92 as u8);
+                o = o + 1;
+                i = i + 2;
+            }
+        } else {
+            store8(dst, o, ch as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    store8(dst, o, 10 as u8);
+    return o + 1;
+}
+
+fn _start() -> u32 {
+    let iv: u64 = sys_alloc(IN_CAP as u64);
+    let lv: u64 = sys_alloc(LINE_CAP as u64);
+    let ov: u64 = sys_alloc(128);
+    let sv: u64 = sys_alloc(64);
+    if iv == 0 || lv == 0 || ov == 0 || sv == 0 {
+        return die(2);
+    }
+    let src: ptr = iv as ptr;
+    let ln: ptr = lv as ptr;
+    let out: ptr = ov as ptr;
+    let scr: ptr = sv as ptr;
+    let fd: i64 = open_lit("cases.txt", scr);
+    if fd < 0 {
+        return fail("lomgrammar: 打不开 cases.txt\n");
+    }
+    let tot: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let r: i64 = syscall4(0, fd as u64, ptr_add(src, tot) as u64,
+                              (IN_CAP - tot) as u64);
+        if r <= 0 {
+            going = 0;
+        } else {
+            tot = tot + (r as u32);
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+
+    let idx: u32 = 0;
+    let ls: u32 = 0;
+    let more: u32 = 1;
+    while more == 1 {
+        let le: u32 = ls;
+        while le < tot && load8(src, le) != 10 {
+            le = le + 1;
+        }
+        if le == ls && le >= tot {
+            more = 0;          // 末尾换行之后的空尾: 不算一条 case
+        } else {
+            let n: u32 = unescape(src, ls, le, ln);
+            let _f: u32 = find_decl(ln, n, out);
+            let _1: u64 = say_dec(idx);
+            let _2: u64 = say("\t");
+            let _3: u64 = say_dec(ld32(out, 0));
+            let _4: u64 = say("\t");
+            let _5: u64 = say_dec(ld32(out, 4));
+            let _6: u64 = say("\t");
+            let al: u32 = ld32(out, 8);
+            if al > 0 {
+                let _7: u64 = write_all(1, ptr_add(out, 12), al as u64);
+            }
+            let _8: u64 = say("\n");
+            idx = idx + 1;
+            if le >= tot {
+                more = 0;
+            } else {
+                ls = le + 1;
+            }
+        }
+    }
+    let _a: u64 = say("lomgrammar: ");
+    let _b: u64 = say_dec(idx);
+    let _c: u64 = say(" 条\n");
+    return die(0);
+}

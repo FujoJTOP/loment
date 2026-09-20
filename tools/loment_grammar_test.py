@@ -29,6 +29,8 @@
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -615,30 +617,11 @@ def _ref_find(src: str) -> tuple[bool, str | None, int]:
     return False, None, 0
 
 
-@test
-def test_the_scanner_agrees_with_an_independently_written_reference():
-    """**扫一批输入，与一个独立写的参照实现逐条对拍** —— 这是"重组是保义的吗"的答法。
+def _grammar_case_set() -> set[str]:
+    """候选行的**枚举** —— 抽出来给两条判据共用。
 
-    loment-dev-86 那句话说到点子上：**"改实现"的证据标准比"写实现"高** ——
-    写的时候你只要证明新东西对，改的时候你要证明新旧**一样**，而"原有判据全过"
-    恰恰是最容易骗人的那种证据（它们覆盖的是**行为**，不是**改动**）。
-
-    这条就是那个标准的落地：不动手挑几条，而是**枚举**一批（原样 / 分隔符 / **每处
-    单字符替换** / 别名各种拼法 / 前缀杂质 / 两次声明），拿**按字符走**写的参照实现与
-    正则实现逐条比。手挑的表只能覆盖"想得到的写法"；枚举能覆盖到想不到的那些。
-
-    **它当场抓到了两件真东西**：
-
-    1. 参照自己写错过一处（`w[3:]` 应为 `w[len("grammar"):]`）—— 对拍**不保证谁对**，
-       它保证**分歧会浮出来**；
-    2. `choose write grammar#python` 这种"头后面贴着非空白非 `;`"的写法，
-       **我的扫描器与报错器 `decl_at` 说不同的话**（我认成"有头没别名"→报错，
-       它认成"没有声明"→退回嗅探）。于是把边界从 `\\b` 收紧成 **空白/`;`/行尾**
-       —— 两边现在同一条规矩。
-
-    **同时钉住最要命的那半**：参照说"根本没有声明"的行，`strip_grammar_decl` **一个字
-    都不许动** —— 漏边界那次正是这里出的错（把 `choose write grammars python` 切成了
-    `                    s python`，而预扫**不报错**，坏处全落在用户那行上）。
+    两侧各枚举一遍必然漂：加一档只会落在其中一边，于是"覆盖不同、各自绿着却互不覆盖"。
+    同一条纪律在 `_ref_find` 的字母表那段也写着（那是与 loment-dev-86 那份对齐）。
     """
     base = "choose write grammar python"
     lines: set[str] = {base, "  " + base, "\t" + base, "x" + base, "#" + base,
@@ -666,6 +649,40 @@ def test_the_scanner_agrees_with_an_independently_written_reference():
     for i in range(len(base)):
         for ch in ("x", " ", "\t", ";", *sep_alphabet):
             lines.add(base[:i] + ch + base[i + 1:])
+    return lines
+
+
+def _grammar_cases() -> list[str]:
+    """排好序的候选行 —— **判据写 `cases.txt` 的顺序也就是报告的顺序**，两侧同此一份。"""
+    return sorted(_grammar_case_set())
+
+
+@test
+def test_the_scanner_agrees_with_an_independently_written_reference():
+    """**扫一批输入，与一个独立写的参照实现逐条对拍** —— 这是"重组是保义的吗"的答法。
+
+    loment-dev-86 那句话说到点子上：**"改实现"的证据标准比"写实现"高** ——
+    写的时候你只要证明新东西对，改的时候你要证明新旧**一样**，而"原有判据全过"
+    恰恰是最容易骗人的那种证据（它们覆盖的是**行为**，不是**改动**）。
+
+    这条就是那个标准的落地：不动手挑几条，而是**枚举**一批（原样 / 分隔符 / **每处
+    单字符替换** / 别名各种拼法 / 前缀杂质 / 两次声明），拿**按字符走**写的参照实现与
+    正则实现逐条比。手挑的表只能覆盖"想得到的写法"；枚举能覆盖到想不到的那些。
+
+    **它当场抓到了两件真东西**：
+
+    1. 参照自己写错过一处（`w[3:]` 应为 `w[len("grammar"):]`）—— 对拍**不保证谁对**，
+       它保证**分歧会浮出来**；
+    2. `choose write grammar#python` 这种"头后面贴着非空白非 `;`"的写法，
+       **我的扫描器与报错器 `decl_at` 说不同的话**（我认成"有头没别名"→报错，
+       它认成"没有声明"→退回嗅探）。于是把边界从 `\\b` 收紧成 **空白/`;`/行尾**
+       —— 两边现在同一条规矩。
+
+    **同时钉住最要命的那半**：参照说"根本没有声明"的行，`strip_grammar_decl` **一个字
+    都不许动** —— 漏边界那次正是这里出的错（把 `choose write grammars python` 切成了
+    `                    s python`，而预扫**不报错**，坏处全落在用户那行上）。
+    """
+    lines = _grammar_case_set()
 
     bad = []
     for ln in sorted(lines):
@@ -686,6 +703,164 @@ def test_the_scanner_agrees_with_an_independently_written_reference():
         f"{len(lines)} 条里 {len(bad)} 条与参照对不上（前 5 条）：\n"
         + "\n".join(f"  {ln!r}\n    find_decl={m}\n    参照={r}" for ln, m, r in bad[:5]))
     print(f"      枚举 {len(lines)} 条，与独立写的参照逐条一致（含行号）；且无声明头时一个字未动")
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十三格）
+
+_TW = f"/tmp/loment-grammar-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomgrammar.lomt"
+
+
+def _clang() -> str | None:
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build_elf(src: Path, out: Path) -> Path:
+    """仓库自己的前端发射 + clang 链成静态 ELF（走的是判据那一路, 不是自举链）。"""
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{src.name} 自己检查不过: {errs[:2]}"
+    ll = out.with_suffix(".ll")
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(out), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return out
+
+
+def _escape_case(ln: str) -> str:
+    """一条候选行 -> `cases.txt` 里的一行（`\\` / 换行 / 制表转义, 反斜杠先转）。
+
+    多行 case（`base + "\\n" + base`）因此只占**一行** —— 两侧看的是同一份输入。
+    """
+    return ln.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+
+
+def _write_cases(d: Path) -> None:
+    (d / "cases.txt").write_text("".join(_escape_case(c) + "\n" for c in _grammar_cases()),
+                                 encoding="utf-8", newline="\n")
+
+
+def _grammar_report() -> str:
+    """判据这一侧的报告：每个 case 拿**独立写的参照实现** `_ref_find` 算一遍。
+
+    格式与孪生逐字相同：`序号 TAB 找到没有 TAB 行号 TAB 别名`（别名可以为空）。
+    """
+    out: list[str] = []
+    for i, ln in enumerate(_grammar_cases()):
+        found, lang, line = _ref_find(ln + "\n")
+        out.append(f"{i}\t{1 if found else 0}\t{line}\t{lang or ''}")
+    out.append(f"lomgrammar: {len(_grammar_cases())} 条")
+    return "\n".join(out) + "\n"
+
+
+def _grammar_divergence(got: str, want: str) -> str:
+    """第一处分歧 —— 连带把**参考实现**的答案打出来, 好判"是 Loment 错还是参照错"。
+
+    对拍**不保证谁对**, 它保证分歧会浮出来（`_ref_find` 头注里那句）；所以诊断里
+    三方的答案要一起给, 不然看的人只能在两个数之间猜。
+    """
+    g, w = got.split("\n"), want.split("\n")
+    n = max(len(g), len(w))
+    for i in range(n):
+        a = g[i] if i < len(g) else "<缺>"
+        b = w[i] if i < len(w) else "<缺>"
+        if a != b:
+            cases = _grammar_cases()
+            if i < len(cases):
+                ln = cases[i]
+                return (f"第 {i} 条 ({ln!r}):\n"
+                        f"    loment = {a!r}\n"
+                        f"    参照   = {b!r}\n"
+                        f"    find_decl(参考实现) = {potato_from.find_decl(ln + chr(10))!r}")
+            return f"第 {i} 行: loment={a!r} 参照={b!r}"
+    return "(逐字节相同?)"
+
+
+@test
+def test_grammar_scanner_twin_matches_the_independent_reference():
+    """**Loment 版**（`lomgrammar.lomt`）与判据那一侧的独立参照 `_ref_find` **逐字节相同**。
+
+    `docs/189` §3 的 S1 第十三格（丙类）。同一批枚举 → 判据写成 `cases.txt`（转义后每条一行）
+    → 孪生在 WSL 里读它、扫一遍、打出 `序号/找到没有/行号/别名`。
+
+    这一格钉的是**声明扫描**那一层（"找"），不是"必须在 module 之前 / 只许写一次 /
+    别名在不在出厂锁里"那一层 —— 分层之后才有对拍的**对象**（`_ref_find` 头注）。
+
+    它是 `docs/189` §4.1 那根轴（六门翻译器的 Loment 孪生）要用的第一块砖:
+    自举侧现在只收 `choose write grammar loment`（`driver.lomt` 的守卫）, 而扫描这一层
+    可以先独立对拍到位。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    want = _grammar_report()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        _write_cases(td)
+        chk = _build_elf(TWIN, td / "lomgrammar.elf")
+        outp = td / "check.out"
+        binn = f"{_TW}chk.bin"
+        script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(td)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, text=True, timeout=300, shell=False)
+        got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
+    assert rr.stdout.strip() == "0", f"孪生该退 0: rc={rr.stdout!r}\n{got[:400]}"
+    assert got == want, "报告与独立参照不同 —— " + _grammar_divergence(got, want)
+    n = len(_grammar_cases())
+    assert got.count("\n") == n + 1, (got.count("\n"), n)
+    assert f"lomgrammar: {n} 条" in got, got[-120:]
+    print(f"      {n} 条候选行: Loment 扫描器与独立写的参照逐条一致（含行号与别名）")
+
+
+@test
+def test_grammar_twin_selfhost_compiles():
+    """`lomgrammar.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_TW}s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomgrammar.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomgrammar.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomgrammar.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
 def main() -> int:
