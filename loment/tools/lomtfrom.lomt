@@ -1,0 +1,997 @@
+// loment/tools/lomtfrom.lomt — Loment 版「Potato 形式对象 -> L1 接口单元」（docs/179）
+// (docs/189 §3 的 S1 第十七格；判据在 tools/loment_lomtfrom_test.py)
+//
+// 判据: 同一份形式对象喂本程序与 `tools/lomt_from.py::emit_lomt(doc)`（**默认那条路**），
+// 产出的 `.lomt` 源码**逐字节相同**；跳过项按 (名字, 类别) 逐条相同；发不出来时
+// **退出码相同**（1）。
+//
+// **这一版只走 `impl=False`**（"接口单元"那条路）: 函数一律 `pub extern fn`。
+// `--impl`（把带正文的函数交给 `ctrans`/`pytrans` 翻成真实现）要的是**整条语法树那条路**
+// （`trans_core` + 六门方言）—— 那是 §4.1 里另一根轴，本文件不碰。同理不做 `--lang`
+// （先转写再发射）与 `--out`：那是 CLI 的皮，不是发射器本身。
+//
+// 与 `lomt_from.py` 的**刻意偏离**（写在最显眼处）:
+//   1. **只报类别，不报文案**。Python 的错误消息里插了 `repr()`（`得到 {lo!r}/{hi!r}`），
+//      Loment 侧复现不了 —— 判据比的是**退出码 + 类别**（`err <kind>` / `skip <name> <kind>`），
+//      文案那半留在 Python 侧（与第 15 格 `lompotato` 同一条纪律）。
+//   2. 不做 `potato.validate` 那道前置校验（那是第 15 格的事，本程序只发射）。
+//   3. `params` 不是数组时 Python 会抛 `AttributeError`（整屏栈）—— 上游那份也没兜；
+//      本程序当空表处理。合法对象里到不了这一支。
+//
+// 用法: `lomtfrom <obj.potato.json>` —— 源码打到 stdout；stderr 打 `skip`/`err` 行。
+
+module lomtfrom
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 尺寸
+const IN_CAP: u32 = 131072;        // 输入 JSON
+const ARENA_CAP: u32 = 262144;     // JSON 结点 arena
+const OUT_CAP: u32 = 131072;       // 输出的 .lomt 源码
+const SMAX: u32 = 64;              // 去重表上限（一个 struct/enum/functions 的成员数）
+const SW: u32 = 136;               // 去重表一条: len 4 + 名字 132
+
+// ---------------------------------------------------------------- 内存布局
+const M_IN: u32 = 0;               // IN_CAP          -> 131072
+const M_ARENA: u32 = 131072;       // ARENA_CAP       -> 393216
+const M_OUT: u32 = 393216;         // OUT_CAP         -> 524288
+const M_SB: u32 = 524288;          // 4096            -> 528384
+const M_SB2: u32 = 528384;         // 4096            -> 532480
+const M_SB3: u32 = 532480;         // 4096            -> 536576
+const M_NUM: u32 = 536576;         // 32              -> 536608  （整数解码）
+const M_SEEN: u32 = 536608;        // 8 + SMAX*136    -> 545344  （去重表）
+const M_ARG: u32 = 545344;         // 2048            -> 547392
+const M_CAP: u32 = 548352;
+
+// 整数解码结果: [0]=负号 [4]=数字起点(在输入里) [8]=数字长度
+const N_NEG: u32 = 0;
+const N_OFF: u32 = 4;
+const N_LEN: u32 = 8;
+
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let tot: u64 = 0;
+    let going: u64 = 1;
+    while going == 1 {
+        let r: i64 = syscall4(0, fd, (buf as u64) + tot, cap - tot);
+        if r <= 0 {
+            going = 0;
+        } else {
+            tot = tot + (r as u64);
+            if tot >= cap {
+                going = 0;
+            }
+        }
+    }
+    return tot;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let done: u64 = 0;
+    while done < n {
+        let r: i64 = syscall4(1, fd, (p as u64) + done, n - done);
+        if r <= 0 {
+            return done;
+        }
+        done = done + (r as u64);
+    }
+    return done;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// 一行 `skip <名字> <类别>`（stderr）。**跳过必须出声** —— 沉默就等于让用户以为
+/// "那个函数本来就不在那儿"（上游 `main` 里那段注释）。
+fn skipline(name: ptr, nl: u32, kind: str) -> u64 {
+    let _a: u64 = wstr(2, "skip ");
+    let _b: u64 = write_all(2, name, nl as u64);
+    let _c: u64 = wstr(2, " ");
+    let _d: u64 = wstr(2, kind);
+    return wstr(2, "\n");
+}
+
+fn errat(kind: str, code: u64) -> u32 {
+    let _a: u64 = wstr(2, "err ");
+    let _b: u64 = wstr(2, kind);
+    let _c: u64 = wstr(2, "\n");
+    return die(code);
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn is_d(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_id0(c: u32) -> u32 {
+    if c == 95 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_w(c: u32) -> u32 {
+    if is_id0(c) == 1 || is_d(c) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `potato.IDENT_RE = ^[A-Za-z_][A-Za-z0-9_]*$`，Python 那边用的是 `match`，
+/// 但正则自带 `$` ⇒ 等价于全匹配。
+fn ident_ok(p: ptr, l: u32) -> u32 {
+    if l == 0 {
+        return 0;
+    }
+    if is_id0(load8(p, 0)) == 0 {
+        return 0;
+    }
+    let i: u32 = 1;
+    while i < l {
+        if is_w(load8(p, i)) == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_lit(p: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, off + i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn copy_n(dst: ptr, dof: u32, src: ptr, sof: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, dof + i, load8(src, sof + i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 去重表
+//
+// Python 那边每个 struct/enum 用一个新的 `seen` 集合、`functions` 用一个 `names`
+// 集合。这里是一张表 + `seen_reset`。
+
+fn seen_reset(mem: ptr) -> u32 {
+    return st32(ptr_add(mem, M_SEEN), 0, 0);
+}
+
+fn seen_has(mem: ptr, p: ptr, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_SEEN);
+    let n: u32 = ld32(b, 0);
+    let k: u32 = 0;
+    while k < n {
+        if ld32(b, 8 + k * SW) == l {
+            let i: u32 = 0;
+            let same: u32 = 1;
+            while i < l {
+                if load8(b, 12 + k * SW + i) != load8(p, i) {
+                    same = 0;
+                }
+                i = i + 1;
+            }
+            if same == 1 {
+                return 1;
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn seen_add(mem: ptr, p: ptr, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_SEEN);
+    let n: u32 = ld32(b, 0);
+    if n >= SMAX {
+        return 1;
+    }
+    let _a: u32 = st32(b, 8 + n * SW, l);
+    let i: u32 = 0;
+    while i < l {
+        store8(b, 12 + n * SW + i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    let _b: u32 = st32(b, 0, n + 1);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 输出拼接
+
+/// 追加字面量，返回新的输出长度。
+fn app(mem: ptr, o: u32, s: str) -> u32 {
+    let d: ptr = ptr_add(mem, M_OUT);
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(d, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn appn(mem: ptr, o: u32, p: ptr, off: u32, l: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_OUT);
+    let _c: u32 = copy_n(d, o, p, off, l);
+    return o + l;
+}
+
+/// 把一个 JSON 值按 Python `str()` 打进输出。`None` / `True` / `False` 那几个字面量
+/// 也要照抄 —— 它们出现在头部那行的 `language` / `potato` 位置上。
+fn app_pystr(mem: ptr, o: u32, js: ptr, arena: ptr, v: u32, sb: ptr) -> u32 {
+    if v == FAIL {
+        return app(mem, o, "None");
+    }
+    let k: u32 = json_nkind(arena, v);
+    if k == 7 {
+        return app(mem, o, "None");
+    }
+    if k == 5 {
+        return app(mem, o, "True");
+    }
+    if k == 6 {
+        return app(mem, o, "False");
+    }
+    if k == 3 {
+        let l: u32 = json_str_into(js, arena, v, sb, 4096);
+        return appn(mem, o, sb, 0, l);
+    }
+    if k == 4 {
+        let off: u32 = json_raw_off(arena, v);
+        let len: u32 = json_raw_len(arena, v);
+        return appn(mem, o, js, off, len);
+    }
+    // 数组/对象: Python 会打一份 `repr` —— 合法对象里到不了这一支
+    if k == 2 {
+        return app(mem, o, "<list>");
+    }
+    return app(mem, o, "<dict>");
+}
+
+// ---------------------------------------------------------------- 取对象字段
+//
+// `json_get` 的键是**字面量**（编译期就知道）。⚠ 两个哨兵不一样:
+// `json_first_child`/`json_sibling` 的链尾是 **0**，而 `json_get` 缺键是 `FAIL`。
+
+fn fld(mem: ptr, js: ptr, arena: ptr, obj: u32, key: str) -> u32 {
+    if obj == FAIL {
+        return FAIL;
+    }
+    if json_nkind(arena, obj) != 1 {
+        return FAIL;
+    }
+    return json_get(js, arena, obj, key);
+}
+
+/// 这个键是字符串吗。是则把**解码后**的字节写进 `buf` 返回长度；否则 `FAIL`。
+fn sval(js: ptr, arena: ptr, obj: u32, key: str, buf: ptr, cap: u32) -> u32 {
+    if obj == FAIL {
+        return FAIL;
+    }
+    if json_nkind(arena, obj) != 1 {
+        return FAIL;
+    }
+    let v: u32 = json_get(js, arena, obj, key);
+    if v == FAIL {
+        return FAIL;
+    }
+    if json_nkind(arena, v) != 3 {
+        return FAIL;
+    }
+    return json_str_into(js, arena, v, buf, cap);
+}
+
+/// 数字结点的原文是 `-?\d+` 吗（Python 的 `json.loads` 只在那种形态下给 `int`）。
+/// 是则把 (负号, 数字起点, 数字长度) 写进 `outp` 返回 1；否则 0。
+fn num_raw(js: ptr, arena: ptr, n: u32, outp: ptr) -> u32 {
+    let _a: u32 = st32(outp, N_NEG, 0);
+    let _b: u32 = st32(outp, N_OFF, 0);
+    let _c: u32 = st32(outp, N_LEN, 0);
+    if n == FAIL {
+        return 0;
+    }
+    if json_nkind(arena, n) != 4 {
+        return 0;
+    }
+    let off: u32 = json_raw_off(arena, n);
+    let len: u32 = json_raw_len(arena, n);
+    let i: u32 = off;
+    let neg: u32 = 0;
+    if len > 0 && load8(js, off) == 45 {
+        neg = 1;
+        i = off + 1;
+    }
+    let ds: u32 = i;
+    let de: u32 = off + len;
+    let j: u32 = i;
+    while j < de {
+        if is_d(load8(js, j)) == 0 {
+            return 0;
+        }
+        j = j + 1;
+    }
+    if de == ds {
+        return 0;
+    }
+    let _d: u32 = st32(outp, N_NEG, neg);
+    let _e: u32 = st32(outp, N_OFF, ds);
+    let _f: u32 = st32(outp, N_LEN, de - ds);
+    return 1;
+}
+
+/// `doc.get(key)` 在 Python 里是不是**真值**（`if doc.get(k):` 那一套）。
+fn truthy(js: ptr, arena: ptr, v: u32) -> u32 {
+    if v == FAIL {
+        return 0;
+    }
+    let k: u32 = json_nkind(arena, v);
+    if k == 7 || k == 6 {
+        return 0;
+    }
+    if k == 5 {
+        return 1;
+    }
+    if k == 4 {
+        let off: u32 = json_raw_off(arena, v);
+        let len: u32 = json_raw_len(arena, v);
+        if len == 1 && load8(js, off) == 48 {
+            return 0;                   // `0` 是假的
+        }
+        return 1;
+    }
+    if k == 3 {
+        let off2: u32 = json_raw_off(arena, v);
+        let len2: u32 = json_raw_len(arena, v);
+        if len2 == 0 {
+            return 0;                   // `""` 是假的
+        }
+        return 1;
+    }
+    if json_first_child(arena, v) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `_ffi_ok`: FFI 第 1 阶段收的签名面（docs/173 §3）。
+fn ffi_ok(mem: ptr, v: u32, arena: ptr, js: ptr) -> u32 {
+    if v == FAIL {
+        return 0;
+    }
+    if json_nkind(arena, v) != 3 {
+        return 0;
+    }
+    let l: u32 = json_str_into(js, arena, v, ptr_add(mem, M_SB3), 4096);
+    let p: ptr = ptr_add(mem, M_SB3);
+    if l == 2 && eq_lit(p, 0, "u8") == 1 {
+        return 1;
+    }
+    if l == 2 && eq_lit(p, 0, "i8") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "u16") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "i16") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "u32") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "i32") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "u64") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "i64") == 1 {
+        return 1;
+    }
+    if l == 4 && eq_lit(p, 0, "bool") == 1 {
+        return 1;
+    }
+    if l == 3 && eq_lit(p, 0, "ptr") == 1 {
+        return 1;
+    }
+    if l == 2 && eq_lit(p, 0, "()") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 发射
+
+/// 副作用式的"报错退出"：把类别写到 stderr 并退出 1。
+fn bad(kind: str) -> u32 {
+    return errat(kind, 1);
+}
+
+/// 参数表那一段（`{名字}: {类型}` 用 ", " 连）—— `_sig_params`。
+fn emit_params(mem: ptr, o: u32, js: ptr, arena: ptr, f: u32) -> u32 {
+    let ps: u32 = fld(mem, js, arena, f, "params");
+    if ps == FAIL || json_nkind(arena, ps) != 2 {
+        return o;
+    }
+    let sb: ptr = ptr_add(mem, M_SB);
+    let sb2: ptr = ptr_add(mem, M_SB2);
+    let first: u32 = 1;
+    let p: u32 = json_first_child(arena, ps);
+    while p != 0 {
+        let nl: u32 = sval(js, arena, p, "name", sb, 4096);
+        if nl == FAIL {
+            let _b: u32 = bad("param");
+            return FAIL;
+        }
+        let _c: u32 = copy_n(sb2, 0, sb, 0, nl);
+        if ident_ok(sb2, nl) == 0 {
+            let _d: u32 = bad("param");
+            return FAIL;
+        }
+        let tl: u32 = sval(js, arena, p, "type", sb, 4096);
+        if tl == FAIL || tl == 0 {
+            let _e: u32 = bad("param");
+            return FAIL;
+        }
+        let _f: u32 = copy_n(ptr_add(mem, M_SB3), 0, sb, 0, tl);
+        if first == 0 {
+            o = app(mem, o, ", ");
+        }
+        first = 0;
+        o = appn(mem, o, sb2, 0, nl);
+        o = app(mem, o, ": ");
+        o = appn(mem, o, ptr_add(mem, M_SB3), 0, tl);
+        p = json_sibling(arena, p);
+    }
+    return o;
+}
+
+/// 函数那一节。返回新的输出长度（出错时**已经退出**，返回 `FAIL` 只是让调用方停手）。
+fn emit_fns(mem: ptr, o: u32, js: ptr, arena: ptr, fns: u32) -> u32 {
+    let sb: ptr = ptr_add(mem, M_SB);
+    let sb2: ptr = ptr_add(mem, M_SB2);
+    let _r: u32 = seen_reset(mem);
+    let started: u32 = 0;
+    let f: u32 = json_first_child(arena, fns);
+    while f != 0 {
+        let nl: u32 = sval(js, arena, f, "name", sb, 4096);
+        if nl == FAIL {
+            let _b: u32 = bad("fn-name");
+            return FAIL;
+        }
+        let _c: u32 = copy_n(sb2, 0, sb, 0, nl);
+        if ident_ok(sb2, nl) == 0 {
+            let _d: u32 = bad("fn-name");
+            return FAIL;
+        }
+        if seen_has(mem, sb2, nl) == 1 {
+            let _e: u32 = bad("fn-dup");
+            return FAIL;
+        }
+        let _g: u32 = seen_add(mem, sb2, nl);
+        // ---- `abi` 缺席 = 这是个 Loment 函数（docs/188 §3）
+        let av: u32 = fld(mem, js, arena, f, "abi");
+        if av == FAIL || json_nkind(arena, av) == 7 {
+            let _h: u64 = skipline(sb2, nl, "loment-no-body");
+            f = json_sibling(arena, f);
+        } else {
+            let isc: u32 = 0;
+            if json_nkind(arena, av) == 3 {
+                let cl: u32 = json_str_into(js, arena, av, ptr_add(mem, M_SB3), 4096);
+                if cl == 1 && eq_lit(ptr_add(mem, M_SB3), 0, "c") == 1 {
+                    isc = 1;
+                }
+            }
+            if isc == 0 {
+                let _i: u64 = skipline(sb2, nl, "abi");
+                f = json_sibling(arena, f);
+            } else {
+                // ---- FFI 第 1 阶段那道闸门（签名面）
+                let rv: u32 = fld(mem, js, arena, f, "ret");
+                let rts: u32 = 1;
+                if rv != FAIL {
+                    if json_nkind(arena, rv) == 3 {
+                        let rl: u32 = json_str_into(js, arena, rv, ptr_add(mem, M_SB3), 4096);
+                        if rl == 0 {
+                            rts = 1;        // `"" or "()"` ⇒ "()"
+                        } else {
+                            rts = ffi_ok(mem, rv, arena, js);
+                        }
+                    } else if json_nkind(arena, rv) == 4 {
+                        let off: u32 = json_raw_off(arena, rv);
+                        if json_raw_len(arena, rv) == 1 && load8(js, off) == 48 {
+                            rts = 1;        // `0 or "()"` ⇒ "()"
+                        } else {
+                            rts = 0;
+                        }
+                    } else if json_nkind(arena, rv) == 7 {
+                        rts = 1;            // `None or "()"` ⇒ "()"
+                    } else if json_nkind(arena, rv) == 6 {
+                        rts = 1;            // `False or "()"` ⇒ "()"
+                    } else {
+                        rts = 0;            // `True` / 数组 / 对象: 真值 ⇒ `_ffi_ok(它)` = 假
+                    }
+                }
+                let ps: u32 = fld(mem, js, arena, f, "params");
+                let pok: u32 = 1;
+                if ps != FAIL && json_nkind(arena, ps) == 2 {
+                    let p: u32 = json_first_child(arena, ps);
+                    while p != 0 {
+                        if ffi_ok(mem, fld(mem, js, arena, p, "type"), arena, js) == 0 {
+                            pok = 0;
+                        }
+                        p = json_sibling(arena, p);
+                    }
+                }
+                if rts == 0 || pok == 0 {
+                    let _j: u64 = skipline(sb2, nl, "ffi");
+                    f = json_sibling(arena, f);
+                } else {
+                    if started == 0 {
+                        o = app(mem, o, "\n// ---- 外部函数 (docs/173: 声明在此, 实现在源语言那一侧, C ABI)\n");
+                        started = 1;
+                    }
+                    o = app(mem, o, "pub extern fn ");
+                    o = appn(mem, o, sb2, 0, nl);
+                    o = app(mem, o, "(");
+                    o = emit_params(mem, o, js, arena, f);
+                    if o == FAIL {
+                        return FAIL;
+                    }
+                    o = app(mem, o, ")");
+                    if rv != FAIL {
+                        if json_nkind(arena, rv) == 3 {
+                            let rl2: u32 = json_str_into(js, arena, rv,
+                                                         ptr_add(mem, M_SB3), 4096);
+                            if rl2 > 0 {
+                                if eq_lit(ptr_add(mem, M_SB3), 0, "()") == 0 {
+                                    o = app(mem, o, " -> ");
+                                    o = appn(mem, o, ptr_add(mem, M_SB3), 0, rl2);
+                                }
+                            }
+                        }
+                    }
+                    o = app(mem, o, ";\n");
+                    f = json_sibling(arena, f);
+                }
+            }
+        }
+    }
+    return o;
+}
+
+fn emit(mem: ptr, js: ptr, arena: ptr, doc: u32) -> u32 {
+    let sb: ptr = ptr_add(mem, M_SB);
+    let sb2: ptr = ptr_add(mem, M_SB2);
+    let sb3: ptr = ptr_add(mem, M_SB3);
+    let num: ptr = ptr_add(mem, M_NUM);
+    // ---- 表示面之外的那几个键: 非空就报错（`_check_representable`）
+    let k1: u32 = fld(mem, js, arena, doc, "traits");
+    if truthy(js, arena, k1) == 1 {
+        return bad("traits");
+    }
+    let k2: u32 = fld(mem, js, arena, doc, "impls");
+    if truthy(js, arena, k2) == 1 {
+        return bad("impls");
+    }
+    let k3: u32 = fld(mem, js, arena, doc, "generics");
+    if truthy(js, arena, k3) == 1 {
+        return bad("generics");
+    }
+    let k4: u32 = fld(mem, js, arena, doc, "instances");
+    if truthy(js, arena, k4) == 1 {
+        return bad("instances");
+    }
+    let k5: u32 = fld(mem, js, arena, doc, "layouts");
+    if truthy(js, arena, k5) == 1 {
+        return bad("layouts");
+    }
+    let k6: u32 = fld(mem, js, arena, doc, "imports");
+    if truthy(js, arena, k6) == 1 {
+        return bad("imports");
+    }
+    // ---- unit 必须是标识符
+    let ul: u32 = sval(js, arena, doc, "unit", sb, 4096);
+    if ul == FAIL {
+        return bad("unit");
+    }
+    let _uc: u32 = copy_n(sb2, 0, sb, 0, ul);
+    if ident_ok(sb2, ul) == 0 {
+        return bad("unit");
+    }
+    let o: u32 = 0;
+    o = app(mem, o, "// 由 tools/lomt_from.py 从 Potato 形式对象生成 —— 请勿手改。\n");
+    o = app(mem, o, "// 它是**接口单元**: 函数是 `extern fn` (实现在源语言那一侧,\n");
+    o = app(mem, o, "// 调用点走平台 C ABI, docs/173 §2)。\n");
+    o = app(mem, o, "// 源对象: unit=");
+    o = appn(mem, o, sb2, 0, ul);
+    o = app(mem, o, " language=");
+    o = app_pystr(mem, o, js, arena, fld(mem, js, arena, doc, "language"), sb);
+    o = app(mem, o, " potato=");
+    o = app_pystr(mem, o, js, arena, fld(mem, js, arena, doc, "potato"), sb);
+    o = app(mem, o, "\n\nmodule ");
+    o = appn(mem, o, sb2, 0, ul);
+    o = app(mem, o, "\n");
+    // ---- 能力域
+    let caps: u32 = fld(mem, js, arena, doc, "capabilities");
+    if caps != FAIL && json_nkind(arena, caps) == 2 {
+        let c0: u32 = json_first_child(arena, caps);
+        if c0 != 0 {
+            o = app(mem, o, "\n// ---- 能力域 (docs/146)\n");
+        }
+        let c: u32 = c0;
+        while c != 0 {
+            let nl: u32 = sval(js, arena, c, "name", sb, 4096);
+            if nl == FAIL {
+                return bad("cap-name");
+            }
+            let _k: u32 = copy_n(sb2, 0, sb, 0, nl);
+            if ident_ok(sb2, nl) == 0 {
+                return bad("cap-name");
+            }
+            let dom: u32 = fld(mem, js, arena, c, "domain");
+            let lo: u32 = num_raw(js, arena, fld(mem, js, arena, dom, "lo"), num);
+            let olo: u32 = ld32(num, N_OFF);
+            let llo: u32 = ld32(num, N_LEN);
+            let nlo: u32 = ld32(num, N_NEG);
+            let hi: u32 = num_raw(js, arena, fld(mem, js, arena, dom, "hi"), num);
+            let ohi: u32 = ld32(num, N_OFF);
+            let lhi: u32 = ld32(num, N_LEN);
+            let nhi: u32 = ld32(num, N_NEG);
+            if lo == 0 || hi == 0 {
+                return bad("cap-dom");
+            }
+            let sl: u32 = sval(js, arena, dom, "space", sb, 4096);
+            if sl == FAIL {
+                return bad("cap-space");
+            }
+            let _k2: u32 = copy_n(sb3, 0, sb, 0, sl);
+            if ident_ok(sb3, sl) == 0 {
+                return bad("cap-space");
+            }
+            let rv: u32 = truthy(js, arena, fld(mem, js, arena, c, "revocable"));
+            o = app(mem, o, "capability ");
+            o = appn(mem, o, sb2, 0, nl);
+            o = app(mem, o, " : ");
+            o = appn(mem, o, sb3, 0, sl);
+            o = app(mem, o, "[");
+            if nlo == 1 {
+                o = app(mem, o, "-");
+            }
+            o = appn(mem, o, js, olo, llo);
+            o = app(mem, o, "..");
+            if nhi == 1 {
+                o = app(mem, o, "-");
+            }
+            o = appn(mem, o, js, ohi, lhi);
+            o = app(mem, o, "]");
+            if rv == 1 {
+                o = app(mem, o, " revocable");
+            }
+            o = app(mem, o, "\n");
+            c = json_sibling(arena, c);
+        }
+    }
+    // ---- 常量
+    let consts: u32 = fld(mem, js, arena, doc, "consts");
+    if consts != FAIL && json_nkind(arena, consts) == 2 {
+        let c0: u32 = json_first_child(arena, consts);
+        if c0 != 0 {
+            o = app(mem, o, "\n// ---- 常量\n");
+        }
+        let c: u32 = c0;
+        while c != 0 {
+            let nl: u32 = sval(js, arena, c, "name", sb, 4096);
+            if nl == FAIL {
+                return bad("const-name");
+            }
+            let _k: u32 = copy_n(sb2, 0, sb, 0, nl);
+            if ident_ok(sb2, nl) == 0 {
+                return bad("const-name");
+            }
+            if num_raw(js, arena, fld(mem, js, arena, c, "value"), num) == 0 {
+                return bad("const-value");
+            }
+            let voff: u32 = ld32(num, N_OFF);
+            let vlen: u32 = ld32(num, N_LEN);
+            let vneg: u32 = ld32(num, N_NEG);
+            let tl: u32 = sval(js, arena, c, "type", sb, 4096);
+            if tl == FAIL || tl == 0 {
+                return bad("type");
+            }
+            let _k2: u32 = copy_n(sb3, 0, sb, 0, tl);
+            o = app(mem, o, "pub const ");
+            o = appn(mem, o, sb2, 0, nl);
+            o = app(mem, o, ": ");
+            o = appn(mem, o, sb3, 0, tl);
+            o = app(mem, o, " = ");
+            if vneg == 1 {
+                o = app(mem, o, "-");
+            }
+            o = appn(mem, o, js, voff, vlen);
+            o = app(mem, o, ";\n");
+            c = json_sibling(arena, c);
+        }
+    }
+    // ---- 结构体
+    let types: u32 = fld(mem, js, arena, doc, "types");
+    if types != FAIL && json_nkind(arena, types) == 2 {
+        let s: u32 = json_first_child(arena, types);
+        while s != 0 {
+            let nl: u32 = sval(js, arena, s, "name", sb, 4096);
+            if nl == FAIL {
+                return bad("struct-name");
+            }
+            let _k: u32 = copy_n(sb2, 0, sb, 0, nl);
+            if ident_ok(sb2, nl) == 0 {
+                return bad("struct-name");
+            }
+            let fs: u32 = fld(mem, js, arena, s, "fields");
+            if fs == FAIL || json_nkind(arena, fs) != 2 {
+                return bad("struct-empty");
+            }
+            let fc: u32 = json_first_child(arena, fs);
+            if fc == 0 {
+                return bad("struct-empty");
+            }
+            o = app(mem, o, "\npub struct ");
+            o = appn(mem, o, sb2, 0, nl);
+            o = app(mem, o, " {\n");
+            let _sr: u32 = seen_reset(mem);
+            let f: u32 = fc;
+            while f != 0 {
+                let fnl: u32 = sval(js, arena, f, "name", sb, 4096);
+                if fnl == FAIL {
+                    return bad("struct-field");
+                }
+                let _k2: u32 = copy_n(sb3, 0, sb, 0, fnl);
+                if ident_ok(sb3, fnl) == 0 {
+                    return bad("struct-field");
+                }
+                if seen_has(mem, sb3, fnl) == 1 {
+                    return bad("struct-dup");
+                }
+                let _k3: u32 = seen_add(mem, sb3, fnl);
+                let ftl: u32 = sval(js, arena, f, "type", sb, 4096);
+                if ftl == FAIL || ftl == 0 {
+                    return bad("type");
+                }
+                o = app(mem, o, "    ");
+                o = appn(mem, o, sb3, 0, fnl);
+                o = app(mem, o, ": ");
+                o = appn(mem, o, sb, 0, ftl);
+                o = app(mem, o, ",\n");
+                f = json_sibling(arena, f);
+            }
+            o = app(mem, o, "}\n");
+            s = json_sibling(arena, s);
+        }
+    }
+    // ---- 枚举（变体的载荷在 `payloads` 那张**对象**里，键是变体名）
+    let enums: u32 = fld(mem, js, arena, doc, "enums");
+    if enums != FAIL && json_nkind(arena, enums) == 2 {
+        let e: u32 = json_first_child(arena, enums);
+        while e != 0 {
+            let nl: u32 = sval(js, arena, e, "name", sb, 4096);
+            if nl == FAIL {
+                return bad("enum-name");
+            }
+            let _k: u32 = copy_n(sb2, 0, sb, 0, nl);
+            if ident_ok(sb2, nl) == 0 {
+                return bad("enum-name");
+            }
+            let vs: u32 = fld(mem, js, arena, e, "variants");
+            if vs == FAIL || json_nkind(arena, vs) != 2 {
+                return bad("enum-empty");
+            }
+            let vc: u32 = json_first_child(arena, vs);
+            if vc == 0 {
+                return bad("enum-empty");
+            }
+            let pay: u32 = fld(mem, js, arena, e, "payloads");
+            o = app(mem, o, "\npub enum ");
+            o = appn(mem, o, sb2, 0, nl);
+            o = app(mem, o, " {\n");
+            let _sr: u32 = seen_reset(mem);
+            let v: u32 = vc;
+            while v != 0 {
+                // ⚠ 枚举变体是**裸字符串**（`{"variants": ["A", "B"]}`），不是带 `name`
+                // 字段的对象 —— 拿对象那套读会每个变体报一条假错（第 15 格同一条）。
+                if json_nkind(arena, v) != 3 {
+                    return bad("enum-variant");
+                }
+                let vnl: u32 = json_str_into(js, arena, v, sb, 4096);
+                if vnl == 0 {
+                    return bad("enum-variant");
+                }
+                let _k2: u32 = copy_n(sb3, 0, sb, 0, vnl);
+                if ident_ok(sb3, vnl) == 0 {
+                    return bad("enum-variant");
+                }
+                if seen_has(mem, sb3, vnl) == 1 {
+                    return bad("enum-dup");
+                }
+                let _k3: u32 = seen_add(mem, sb3, vnl);
+                let pt: u32 = pay_lookup(js, arena, pay, sb3, vnl, sb);
+                o = app(mem, o, "    ");
+                o = appn(mem, o, sb3, 0, vnl);
+                if pt != FAIL && pt != 0 {
+                    o = app(mem, o, "(");
+                    o = appn(mem, o, sb, 0, pt);
+                    o = app(mem, o, ")");
+                }
+                o = app(mem, o, ",\n");
+                v = json_sibling(arena, v);
+            }
+            o = app(mem, o, "}\n");
+            e = json_sibling(arena, e);
+        }
+    }
+    // ---- 函数（一律 extern: 实现在源语言那一侧）
+    let fns: u32 = fld(mem, js, arena, doc, "functions");
+    if fns != FAIL && json_nkind(arena, fns) == 2 {
+        let f0: u32 = json_first_child(arena, fns);
+        if f0 != 0 {
+            let fo: u32 = emit_fns(mem, o, js, arena, fns);
+            if fo == FAIL {
+                return 1;
+            }
+            o = fo;
+        }
+    }
+    // ---- 出界声明
+    let exc: u32 = fld(mem, js, arena, doc, "excluded");
+    if exc != FAIL && json_nkind(arena, exc) == 2 {
+        let x: u32 = json_first_child(arena, exc);
+        while x != 0 {
+            if json_nkind(arena, x) != 3 {
+                return bad("excluded");
+            }
+            let xl: u32 = json_str_into(js, arena, x, sb, 4096);
+            if xl == 0 {
+                return bad("excluded");
+            }
+            let _k: u32 = copy_n(sb2, 0, sb, 0, xl);
+            o = app(mem, o, "\nexcluded \"");
+            o = appn(mem, o, sb2, 0, xl);
+            o = app(mem, o, "\"\n");
+            x = json_sibling(arena, x);
+        }
+    }
+    return o;
+}
+
+/// `payloads.get(variant)` —— 那张对象的键是变体名（**动态**，所以不能走 `json_get`
+/// 的字面量键）。命中把类型写进 `sb` 返回长度；没有/不是字符串返回 `FAIL`。
+fn pay_lookup(js: ptr, arena: ptr, pay: u32, vname: ptr, vnl: u32, sb: ptr) -> u32 {
+    if pay == FAIL || json_nkind(arena, pay) != 1 {
+        return FAIL;
+    }
+    let m: u32 = json_first_child(arena, pay);
+    while m != 0 {
+        let kn: u32 = json_member_key(arena, m);
+        let sbl: u32 = json_str_into(js, arena, kn, sb, 4096);
+        if sbl == vnl {
+            let i: u32 = 0;
+            let same: u32 = 1;
+            while i < vnl {
+                if load8(sb, i) != load8(vname, i) {
+                    same = 0;
+                }
+                i = i + 1;
+            }
+            if same == 1 {
+                let vv: u32 = json_member_val(arena, m);
+                if json_nkind(arena, vv) != 3 {
+                    return FAIL;
+                }
+                return json_str_into(js, arena, vv, sb, 4096);
+            }
+        }
+        m = json_sibling(arena, m);
+    }
+    return FAIL;
+}
+
+/// argv 第 k 项（从 0 数）的偏移；返回长度。
+fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let s: u32 = 0;
+    let found: u32 = 0;
+    let ln: u32 = 0;
+    while i < tot {
+        if load8(buf, i) == 0 {
+            if idx == k && found == 0 {
+                let _a: u32 = st32(outp, 0, s);
+                ln = i - s;
+                found = 1;
+            }
+            idx = idx + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
+
+fn _start() -> u32 {
+    let mv: i64 = syscall4(12, 0, 0, 0);
+    if mv <= 0 {
+        return errat("brk", 2);
+    }
+    let mem: ptr = mv as ptr;
+    let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        return errat("argv", 2);
+    }
+    let cb: ptr = ptr_add(mem, M_ARG);
+    let n: u64 = read_all(fd as u64, cb, 2048);
+    syscall4(3, fd as u64, 0, 0);
+    let tot: u32 = n as u32;
+    let ap: ptr = ptr_add(mem, M_NUM);
+    let l1: u32 = arg_at(cb, tot, 1, ap);
+    let o1: u32 = ld32(ap, 0);
+    if l1 == 0 {
+        return errat("usage", 2);
+    }
+    let pp: ptr = ptr_add(cb, o1);
+    store8(pp, l1, 0 as u8);
+    let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
+    if jf < 0 {
+        return errat("read", 2);
+    }
+    let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_IN), IN_CAP as u64);
+    syscall4(3, jf as u64, 0, 0);
+    let doc: u32 = json_parse(ptr_add(mem, M_IN), srcn as u32, ptr_add(mem, M_ARENA));
+    if doc == FAIL {
+        return errat("json", 2);
+    }
+    let o: u32 = emit(mem, ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), doc);
+    let _w: u64 = write_all(1, ptr_add(mem, M_OUT), o as u64);
+    return die(0);
+}
