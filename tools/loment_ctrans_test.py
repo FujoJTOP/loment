@@ -1052,6 +1052,164 @@ def test_lompotc_twin_matches_from_rust():
               f"产出的对象逐字节相同，跳过项与字段损失也逐条对上")
 
 
+#: Python 那一门（`--python`）自己带的输入。上游坐在 CPython 的 `ast` 上，读的是
+#: `tree.body` 那一层 —— 所以这些钉的是**顶层构造的形状**：缩进怎么算归属、
+#: 正文切到哪儿、注解怎么映、常量怎么折。
+_PY_BATTERY = {
+    # ---- 基本：函数 / 类 / 常量三样各自的形状
+    "py_three": "def py_add(a: int, b: int) -> int:\n    return a + b\n\n"
+                "def py_plain(x: int) -> int:\n    return x * 2\n\n"
+                "def py_big(x: bytes) -> int:\n    return 0\n",
+    "py_class": "class P:\n    x: int\n    y: int\n    def g(self) -> int:\n"
+                "        return 0\n",
+    "py_class_empty": "class P:\n    def g(self) -> int:\n        return 0\n",
+    "py_class_val": "class P:\n    x: int = 5\n    z: bool\n",
+    "py_class_unmapped": "class P:\n    x: float\n    y: bytes\n",
+    "py_class_oneline": "class C: x: int\n",
+    # 一行写完**且**字段无映射：`S type C` 与 `F C x` 两条都要出（少一条就是静默）
+    "py_class_oneline_unmapped": "class C: x: float\n",
+    "py_class_if": "class C:\n    x: int\n    if True:\n        y: int\n",
+    "py_class_else": "class C:\n    x: int\n    if False:\n        pass\n"
+                     "    else:\n        z: int\n",
+
+    # ---- 返回注解 / 形参注解：没有就是**无映射**，整条跳过
+    "py_no_ret": "def f(x: int):\n    return 0\n",
+    "py_no_param_ann": "def f(x) -> int:\n    return 0\n",
+    "py_ret_none": "def f(x: int) -> None:\n    pass\n",
+    "py_unmapped_param": "def f(x: float) -> int:\n    return 0\n",
+    "py_types": "def f(s: str, b: bytes, t: bool) -> bytes:\n    return b\n",
+    "py_paren_ann": "def f(x: (int)) -> (int):\n    return x\n",
+    "py_string_ann": 'def f(x: "int") -> int:\n    return x\n',
+    "py_dict_ann": "def f(a: dict[str, int]) -> int:\n    return 0\n",
+
+    # ---- 形参表的几个写法
+    "py_multiline_sig": "def f(a: int,\n      b: bool) -> int:\n    return 0\n",
+    "py_kwonly": "def f(a: int, *, b: int = 3) -> int:\n    return 0\n",
+    "py_vararg": "def f(a: int, *rest: int) -> int:\n    return 0\n",
+    "py_kwarg": "def f(a: int, **kw: int) -> int:\n    return 0\n",
+    "py_posonly": "def f(a: int, /, b: int) -> int:\n    return 0\n",
+    "py_annot_eq": "def f(a: int = 1 == 1) -> int:\n    return a\n",
+    "py_async": "async def f(x: int) -> int:\n    return 0\n",
+
+    # ---- 正文切到哪儿：空行、行尾注释、正文之后的注释都不算；跨度里的注释保留
+    "py_oneline_def": "def f(x: int) -> int: return x\n",
+    "py_trail_comment": "def f(x: int) -> int:\n    return x  # note\n",
+    "py_tail_comment": "def f(x: int) -> int:\n    return x\n# tail\n",
+    "py_blank_inner": "def f(x: int) -> int:\n    a = 1\n\n    return a\n",
+    "py_blank_after": "def f(x: int) -> int:\n    return x\n\n\n",
+    "py_docstring": 'def f(x: int) -> int:\n    """Doc."""\n    return x\n',
+    "py_lead_comment": "def f(x: int) -> int:\n    # lead\n    return x\n",
+    "py_decorator": "@deco\ndef f(x: int) -> int:\n    return x\n",
+    "py_nested": "def f(x: int) -> int:\n    def g() -> int:\n        return 1\n"
+                 "    return g()\n",
+    "py_deep": "def f(x: int) -> int:\n    if x > 0:\n        return x\n"
+               "    return 0 - x\n",
+
+    # ---- 模块级字符串里那些"看着像代码"的行：不带着串状态跨行走就会当成真代码
+    "py_str_def": 'X = """\ndef fake() -> int:\n    return 1\n"""\n',
+    "py_str_class": 'X = """\nclass Fake:\n    a: int\n"""\n',
+
+    # ---- 常量：四种字面量 + 折叠 + 三种"上游也不收"的形状
+    "py_consts": "MAX = 8\nMIN: int = -5\nN = 1 << 4\nlow = 3\nBAD = 'x'\n",
+    "py_const_hex": "A = 0x1f\nB = 0b101\nC = 0o17\nD = 1_000\nE = 2 * 3 + 4\n",
+    "py_const_floor": "A = 0 - 7 // 2\nB = 0 - 7 % 2\nC = 7 % 0 - 2\n",
+    "py_const_chain": "A = B = 1\n",
+    "py_const_annot_only": "MAX: int\n",
+    "py_const_bool_annot": "X: bool = 1\n",
+    "py_const_ifexpr": "X = 1 if True else 0\n",
+    "py_tuple_target": "A, B = 1, 2\n",
+
+    # ---- 边角
+    "py_empty": "",
+    "py_only_comment": "# nothing\n",
+    "py_crlf": "def f(x: int) -> int:\r\n    return x\r\n",
+}
+
+
+def _py_notes(rep) -> list[str]:
+    return sorted([f"S {x['kind']} {x['name']}" for x in rep.skipped]
+                  + [f"F {x['owner']} {x['field']}" for x in rep.field_notes])
+
+
+@test
+def test_lompotc_twin_matches_from_python():
+    """**Python 那一门也进了同一份孪生**（S1 第十九格，§4.1 那根轴的最后一块）。
+
+    上游 `potato_from.from_python` 坐在 CPython 的 `ast` 上 —— 这是这一族里唯一
+    **不安在轻量解析上**的一门。但上游真正读的只有 `tree.body` 那一层：模块级的
+    `def` / `class` / `NAME = <整数>`，函数体**一个字符都不解析**（`get_source_segment`
+    就是按位置切原文）。所以孪生那边是**一台按缩进的顶层扫描器 + 一台很小的整数折叠器**，
+    不是把 Python 解析器写一遍。
+
+    覆盖面：`loment/pytrans/` 六份语料 + 多语法语料里 python 那一份（第 16 格那批
+    前端电池是按语言分的、python 的夹具在多语法那边，直接引过来，不另抄一份）
+    + `_PY_BATTERY`。比 JSON **逐字节**，并比**跳过项与字段损失**。
+
+    **一处已知的子集外**：一行多条语句（`A = 1; B = 2`）。上游按 `;` 切开、两条都收，
+    这里不做 —— 但**会出声**（`S const A`），不静默丢。下一条判据钉着"出声"这一半。
+    """
+    import loment_multisyntax_test as MS  # noqa: E402
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "pytrans").glob("*.py")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases.append(("multisyntax.py", MS.PY_SRC))
+        cases += [(k + ".py", v) for k, v in sorted(_PY_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="")
+            want, rep = potato_from.from_python(src, name, "strict")
+            wobj = json.dumps(want, ensure_ascii=False)
+            wnotes = _py_notes(rep)
+            r = subprocess.run([str(exe), "--python", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            gnotes = sorted(re.findall(r"(?m)^[SF] \S+ \S+$", r.stderr))
+            if r.returncode != 0 or r.stdout != wobj or gnotes != wnotes:
+                i = 0
+                n = min(len(r.stdout), len(wobj))
+                while i < n and r.stdout[i] == wobj[i]:
+                    i += 1
+                bad.append((name, r.returncode, wobj[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80], wnotes, gnotes))
+        assert not bad, (
+            f"{len(bad)}/{len(cases)} 份与 from_python 不同（前 2）:\n"
+            + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}\n"
+                         f"    笔记 py={wn} tw={gn}"
+                         for n, rc, w, g, wn, gn in bad[:2]))
+        print(f"      {len(cases)} 份 Python：Loment 前端与 `potato_from.from_python` "
+              f"产出的对象逐字节相同，跳过项与字段损失也逐条对上")
+
+
+@test
+def test_lompotc_python_out_of_subset_is_loud():
+    """这一门**不做**的那一处（一行多条语句）必须**出声**。
+
+    `A = 1; B = 2` 上游按 `;` 切开收成两条常量，这一门一条都不收。**不收可以，但得说**
+    —— 静默跳过在这条链上的意思是"产物少两条常量，而报告一个字都没有"，那是最坏的一档
+    （`docs/167` 那条：跳过 = 产出一份少算一步却照样能编的单元）。
+
+    与 `_BATTERY` 里那两条"沉默跳过"的判据同一族：**判的是有没有声音，不是有没有收**。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        fp = td / "semi.py"
+        fp.write_text("A = 1; B = 2\n", encoding="utf-8", newline="")
+        r = subprocess.run([str(exe), "--python", str(fp)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           shell=False, timeout=120)
+        assert r.returncode == 0, f"rc={r.returncode}"
+        assert "\"consts\": []" in r.stdout, "一行多条语句不该悄悄收进去一条"
+        assert re.search(r"(?m)^S const A$", r.stderr), \
+            f"一行多条语句既没说出来也没收：stderr={r.stderr!r}"
+        print("      一行多条语句：不收，但报 `S const A`（不静默）")
+
+
 @test
 def test_lompotc_twin_selfhost_compiles():
     """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""

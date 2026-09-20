@@ -42,13 +42,19 @@
 // 而且只有 `extern "C"` 才记 ABI。它**抹注释会改长度**（把 `//` 到行尾**删掉**，不是抹平
 // —— 与 C/Java/Go 都不同；`/* */` 反而**不抹**），而且这一门**不带正文**。
 //
-// 差 `from_python`（坐在 `ast` 上，不是轻量解析那一派）与发射那一半（`lomt_from`）。
+// **Python**（`--python`，mode 7）是第四条支路，也是这一族里唯一**不安在轻量解析上**的：
+// 上游 `potato_from.from_python` 坐在 CPython 的 `ast` 上。但真正要的比一个 Python 解析器
+// 小得多 —— 上游只读 `tree.body` 那一层，函数体一个字符都不解析（`ast.get_source_segment`
+// 就是按位置切原文）。所以这里是一台**按缩进的顶层扫描器** + 一台很小的整数折叠器
+// （只有常量那一步要真算值）。四条与别门不同的地方写在 `build_python` 那一段的开头。
+//
+// 差发射那一半（`lomt_from`）。
 //
 // **Go**（`--go`，mode 5）是第三条支路: 类型写在**名字后面**、条件不带括号、没有
 // `while`；`struct` 的体**不是**花括号配平出来的（到第一个以 `}` 起头的行为止），
 // 形参有**分组写法** `func gcd(a, b int)`，`//export` 才记 `abi: "c"` 且不带正文。
 //
-// 用法: `lompotc [--cpp|--java|--csharp|--go|--rust] <src>` —— 对象打到 stdout（紧凑那种）。
+// 用法: `lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>` —— 对象打到 stdout（紧凑那种）。
 
 module lompotc
 
@@ -99,7 +105,9 @@ const M_RSV: u32 = 1074048;        // 32               -> 1074080  （整数字�
 const M_RSL: u32 = 1074080;        // 16               -> 1074096  （字段类型长度）
 const M_RSD: u32 = 1074096;        // 64               -> 1074160  （u64 十进制暂存）
 const M_SB: u32 = 1074160;         // 4096             -> 1078256  （Rust: 名字暂存）
-const M_CAP: u32 = 1078272;
+// ---- Python（第七门）那一半要的几块：行扫描的状态格 + 形参/字段表
+const M_PY: u32 = 1078272;         // 4096             -> 1082368
+const M_CAP: u32 = 1082368;
 
 // 扫描结果格（find_struct / find_enum / find_fn 共用）
 const R_NO: u32 = 0;               // 名字起点
@@ -5001,6 +5009,1300 @@ fn build_rust(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     return o12;
 }
 
+// ================================================================ Python（第七门）
+//
+// `--python`（mode 7）对着 `potato_from.from_python(src, name, "strict")` 移植。
+//
+// **这一门与前面六门形状不一样**：上游坐在 CPython 的 `ast` 上，不是轻量解析那一派。
+// 但真正要的东西**比一个 Python 解析器小得多** —— 上游只读 `tree.body` 那一层：
+//
+//   * 模块级 `def` / `async def`  -> 一条函数（形参注解 + 返回注解 + **整段原文**）
+//   * 模块级 `class`             -> 一个类型（**直接**类体里的注解字段）
+//   * 模块级 `NAME = <整数表达式>` -> 一条常量（`NAME.isupper()` 才算）
+//
+// 函数体**一个字符都不解析**（上游的 `ast.get_source_segment` 就是按位置切原文），所以
+// 这一门不需要表达式语法 —— 只有常量那一步要**真把整数算出来**（上游 `_py_int_literal`）。
+//
+// 于是要的是一台**按缩进的顶层扫描器** + 一台很小的整数折叠器。三条要写下来：
+//
+//   1. **行的归属靠三条**：行首在多行串里 / 这一行没有代码（空行或纯注释）/ 缩进 > 上一层。
+//      第一条不可省 —— 模块级的 `"""…"""` 里写着看着像 `def` 的东西，不带着串状态跨行
+//      走，就会把它当成一个函数（**实测**：那正是"字面量里藏代码"的形状）。
+//   2. **正文回原文切，切到"最后一条语句的末尾"**。`def` 之后的空行、行尾注释、正文
+//      之后的注释**都不算**（上游 `end_lineno` 落在最后一条语句上）——实测
+//      `def f(x: int) -> int:\n    return x  # note` 的正文是 `…return x`。
+//      **跨度内部的空行与注释是保留的**。所以这一门**不抹注释**，与 Rust 那一门
+//      （抹注释且改长度）正好相反。
+//   3. **`body_line` = `def` 那一行的行号**（1 起）。装饰器不算 —— `@deco` 下面那行的
+//      `def` 才是（实测 `node.lineno` 就是 `def` 那一行）。
+//
+// **刻意偏离**（与文件头那三条并列）：常量折叠用 `i64`。上游是任意精度 —— `1 << 62`
+// 两边都行，**超出 `i64` 的**（如 `1 << 63`）这里折不出来，会**报一条跳过**而不是发一个
+// 绕回去的数。**报出来**是有意的：静默发个错的数比丢一条常量严重得多。
+
+/// `py_line` 扫一行，结果写进这几格
+const PY_NEXT: u32 = 0;            // 下一行的起点
+const PY_IND: u32 = 4;             // 缩进
+const PY_CE: u32 = 8;              // 代码末端
+const PY_STR: u32 = 12;            // 出这行时的串状态（0 / 1 `'` / 2 `"` / 3 `'''` / 4 `"""`）
+const PY_FL: u32 = 16;             // 1 = 这行没代码 / 2 = 这行起始处在多行串里
+const PY_FC: u32 = 20;             // 第一个代码字符的下标（0 = 没有）
+/// 顶层构造那一行扫出来的
+const PY_NO: u32 = 24;             // 名字起点
+const PY_NL: u32 = 28;             // 名字长度
+const PY_RET: u32 = 32;            // 返回类型 id（0 = 没有/无映射）
+const PY_CNT: u32 = 36;            // 表里几条
+const PY_COLON: u32 = 40;          // 签名里那个收尾冒号的位置
+const PY_OK: u32 = 48;             // 解析/折叠的成功标志
+const PY_CUR: u32 = 52;            // 折叠器的游标
+const PY_END: u32 = 56;            // 折叠器的边界
+const PY_OPL: u32 = 60;            // 上读到的运算符几个字节
+/// `py_block` 的结果
+const PB_END: u32 = 64;            // 块结束（下一行的起点）
+const PB_LAST: u32 = 68;           // 最后一行有代码的行首
+const PB_CE: u32 = 72;             // 那一行的代码末端
+const PB_FL: u32 = 76;             // 1 = 块里一行代码都没有
+/// 形参 / 字段共用的表（64 条 × 12）
+const PY_TAB: u32 = 512;
+const PT_NO: u32 = 0;
+const PT_NL: u32 = 4;
+const PT_TY: u32 = 8;
+const PY_TMAX: u32 = 64;
+
+fn pym(mem: ptr) -> ptr {
+    return ptr_add(mem, M_PY);
+}
+
+fn py_c(mem: ptr) -> u32 {
+    return ld32(pym(mem), PY_CUR);
+}
+
+fn py_e(mem: ptr) -> u32 {
+    return ld32(pym(mem), PY_END);
+}
+
+/// 折叠器的游标往后跳空白。
+fn py_sw(mem: ptr, src: ptr) -> u32 {
+    let e: u32 = py_e(mem);
+    let k: u32 = py_c(mem);
+    while k < e {
+        let c: u32 = load8(src, k);
+        if c != 32 && c != 9 && c != 13 {
+            // ⚠ **要写回游标**：只返回不写回的话，调用方（`py_num` / `py_primary` 那一族）
+            // 重新从旧游标起步，撞上那个空格就判成"数字段到此为止" ——
+            // 症状是**只有带前导空格的常量折不出来**（`MAX = 8` 丢、`MIN: int = -5` 留）。
+            let _a: u32 = st32(pym(mem), PY_CUR, k);
+            return k;
+        }
+        k = k + 1;
+    }
+    let _b: u32 = st32(pym(mem), PY_CUR, e);
+    return e;
+}
+
+/// 类型 id -> 发出去的类型名（`potato_from.PY_TYPES` 那五条）。
+fn py_tname(id: u32) -> str {
+    if id == 1 {
+        return "i64";
+    }
+    if id == 2 {
+        return "bool";
+    }
+    if id == 3 {
+        return "str";
+    }
+    if id == 4 {
+        return "ptr";
+    }
+    return "()";
+}
+
+/// `\n` 分隔的词表里有 `[a, l)` 这个词吗。
+fn py_word_in(list: str, p: ptr, a: u32, l: u32) -> u32 {
+    let lp: ptr = str_ptr(list);
+    let n: u32 = str_len(list);
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i <= n {
+        if i == n || load8(lp, i) == 10 {
+            if l > 0 && i - s == l && same_n(lp, s, p, a, l) == 1 {
+                return 1;
+            }
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// Python 的关键字 —— **类体里 `else:` 那种行不是注解字段**。
+fn py_is_kw(p: ptr, a: u32, l: u32) -> u32 {
+    // ⚠ 一条**单行**字面量：本语言相邻字面量**不拼接**
+    let kws: str = "\nif\nelse\nelif\nwhile\nfor\nreturn\npass\nclass\ndef\nimport\nfrom\ntry\nexcept\nfinally\nwith\nas\nglobal\nnonlocal\nassert\ndel\nraise\nyield\nlambda\nbreak\ncontinue\nnot\nand\nor\nis\nin\nTrue\nFalse\nNone\nasync\nawait\nmatch\ncase\n";
+    return py_word_in(kws, p, a, l);
+}
+
+/// `str.isupper()` 的 ASCII 口径：**至少有一个带大小写的字符**，且没有小写。
+/// `_1` 是假（一个带大小写的都没有）、`MAX_1` 是真 —— 与 Python 那边同口径。
+fn py_isupper(p: ptr, a: u32, l: u32) -> u32 {
+    let cased: u32 = 0;
+    let i: u32 = 0;
+    while i < l {
+        let c: u32 = load8(p, a + i);
+        if c >= 97 && c <= 122 {
+            return 0;
+        }
+        if c >= 65 && c <= 90 {
+            cased = 1;
+        }
+        i = i + 1;
+    }
+    return cased;
+}
+
+/// `[j, e)` 里往后跳空白（空格 / 制表 / 回车）。
+fn py_ws(p: ptr, j: u32, e: u32) -> u32 {
+    let i: u32 = j;
+    while i < e {
+        let c: u32 = load8(p, i);
+        // **换行也算空白** —— 多行形参表 `def f(a: int,\n      b: bool)` 里那一段跨行
+        if c != 32 && c != 9 && c != 13 && c != 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return e;
+}
+
+/// 从 `k` 起，如果那里是字符串或注释就跳到它之后；否则原样返回 `k`。
+/// 三引号串跨行；单引号串到行尾为止（Python 的单引号串不跨行）。
+fn py_skip_atom(src: ptr, n: u32, k: u32) -> u32 {
+    if k >= n {
+        return k;
+    }
+    let c: u32 = load8(src, k);
+    if c == 35 {
+        let j: u32 = k;
+        while j < n && load8(src, j) != 10 {
+            j = j + 1;
+        }
+        return j;
+    }
+    if c != 39 && c != 34 {
+        return k;
+    }
+    let tq: u32 = 0;
+    if k + 2 < n && load8(src, k + 1) == c && load8(src, k + 2) == c {
+        tq = 1;
+    }
+    let j: u32 = k + 1;
+    if tq == 1 {
+        j = k + 3;
+    }
+    while j < n {
+        let d: u32 = load8(src, j);
+        if d == 92 {
+            j = j + 2;
+        } else {
+            if d == c {
+                if tq == 0 {
+                    return j + 1;
+                }
+                if j + 2 < n && load8(src, j + 1) == c && load8(src, j + 2) == c {
+                    return j + 3;
+                }
+                j = j + 1;
+            } else {
+                if d == 10 && tq == 0 {
+                    return j;
+                }
+                j = j + 1;
+            }
+        }
+    }
+    return n;
+}
+
+/// 扫一行（`i` 是行首的字节下标）。**串状态要跨行带着走** —— 这是模块级 `"""…"""`
+/// 里那些假 `def` 的唯一防线。
+fn py_line(mem: ptr, src: ptr, n: u32, i: u32, instr: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let j: u32 = i;
+    while j < n && load8(src, j) != 10 {
+        j = j + 1;
+    }
+    let st: u32 = instr;
+    let ce: u32 = i;
+    let fc: u32 = 0;
+    // ⚠ `fc == 0` **不能**当"还没有代码字符"的哨兵 —— 行首那个位置就是 0，
+    // 于是第一个字符写下 fc = 0 之后，下一个字符又把它改掉，`fc` 一路漂到行尾。
+    // 症状：`ind` 变成 1（在 def 那一行上），顶层那一支整支进不去，**一条函数都发不出来**。
+    let seen: u32 = 0;
+    let k: u32 = i;
+    if instr != 0 {
+        fc = i;                                    // 行首就在串里 —— 缩进没有意义
+        seen = 1;
+    }
+    while k < j {
+        let c: u32 = load8(src, k);
+        if st != 0 {
+            if c == 92 {
+                k = k + 2;
+                if k > j {
+                    k = j;
+                }
+            } else {
+                let q: u32 = 39;
+                if st == 2 || st == 4 {
+                    q = 34;
+                }
+                if c == q {
+                    if (st == 3 || st == 4) && k + 2 < j && load8(src, k + 1) == q
+                            && load8(src, k + 2) == q {
+                        st = 0;
+                        k = k + 3;
+                    } else {
+                        if st == 1 || st == 2 {
+                            st = 0;
+                        }
+                        k = k + 1;
+                    }
+                } else {
+                    k = k + 1;
+                }
+            }
+            ce = k;
+            if ce > j {
+                ce = j;
+            }
+        } else {
+            if c == 35 {
+                k = j;                                 // 注释：这行到此为止
+            } else {
+                if c == 32 || c == 9 || c == 13 {
+                    k = k + 1;                             // ⚠ 前导空白**不算代码** ——
+                } else {                                   //    这里先判空白，`fc` 才落得对
+                    if seen == 0 {
+                        fc = k;
+                        seen = 1;
+                    }
+                    if c == 39 || c == 34 {
+                        if k + 2 < j && load8(src, k + 1) == c && load8(src, k + 2) == c {
+                            if c == 39 {
+                                st = 3;
+                            } else {
+                                st = 4;
+                            }
+                            k = k + 3;
+                        } else {
+                            if c == 39 {
+                                st = 1;
+                            } else {
+                                st = 2;
+                            }
+                            k = k + 1;
+                        }
+                        ce = k;
+                    } else {
+                        ce = k + 1;
+                        k = k + 1;
+                    }
+                }
+            }
+        }
+    }
+    let fl: u32 = 0;
+    if ce == i {
+        fl = 1;                                    // 这行没有代码
+    }
+    if instr != 0 {
+        fl = fl | 2;
+    }
+    let ind: u32 = 0;
+    if seen == 1 && instr == 0 {
+        ind = fc - i;
+    }
+    let _1: u32 = st32(py, PY_NEXT, j + 1);
+    let _2: u32 = st32(py, PY_IND, ind);
+    let _3: u32 = st32(py, PY_CE, ce);
+    let _4: u32 = st32(py, PY_STR, st);
+    let _5: u32 = st32(py, PY_FL, fl);
+    let _6: u32 = st32(py, PY_FC, fc);
+    return 1;
+}
+
+/// 读一个标识符，把 (起点, 长度) 写进 `outp`，返回末端；读不到返回 `FAIL`。
+fn py_ident(p: ptr, j: u32, e: u32, outp: ptr) -> u32 {
+    if j >= e || is_w(load8(p, j)) == 0 {
+        return FAIL;
+    }
+    let k: u32 = j;
+    while k < e && is_w(load8(p, k)) == 1 {
+        k = k + 1;
+    }
+    let _a: u32 = st32(outp, 0, j);
+    let _b: u32 = st32(outp, 4, k - j);
+    return k;
+}
+
+/// 从 `op`（一个开括号）配平到它的闭括号，返回闭括号的下标（`FAIL` = 不配平）。
+fn py_balanced(p: ptr, op: u32, e: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = op;
+    while k < e {
+        let r: u32 = py_skip_atom(p, e, k);
+        if r != k {
+            k = r;
+        } else {
+            let c: u32 = load8(p, k);
+            if c == 40 || c == 91 || c == 123 {
+                d = d + 1;
+            }
+            if c == 41 || c == 93 || c == 125 {
+                d = d - 1;
+                if d == 0 {
+                    return k;
+                }
+            }
+            k = k + 1;
+        }
+    }
+    return FAIL;
+}
+
+/// `[a, b)` 里**深度 0** 上的第一个 `c`（跳过字符串与注释）；没有返回 `b`。
+/// `stop_eq` = 1 时 `==` / `!=` / `<=` / `>=` 里那个 `=` 不算。
+fn py_find_top(src: ptr, a: u32, b: u32, c: u32, stop_eq: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = a;
+    while k < b {
+        let r: u32 = py_skip_atom(src, b, k);
+        if r != k {
+            k = r;
+        } else {
+            let ch: u32 = load8(src, k);
+            if ch == 40 || ch == 91 || ch == 123 {
+                d = d + 1;
+            }
+            if ch == 41 || ch == 93 || ch == 125 {
+                d = d - 1;
+            }
+            if d == 0 && ch == c {
+                let hit: u32 = 1;
+                if stop_eq == 1 && c == 61 {
+                    let nx: u32 = 0;
+                    if k + 1 < b {
+                        nx = load8(src, k + 1);
+                    }
+                    let pv: u32 = 0;
+                    if k > a {
+                        pv = load8(src, k - 1);
+                    }
+                    if nx == 61 || pv == 33 || pv == 60 || pv == 62 {
+                        hit = 0;
+                    }
+                }
+                if hit == 1 {
+                    return k;
+                }
+            }
+            k = k + 1;
+        }
+    }
+    return b;
+}
+
+/// 注解文本 -> 类型 id（0 = 无映射）。**口径与 `ast.unparse` 对齐**：先剥成对的外括号、
+/// 再抹掉所有空白，然后逐字比那五个词。实测 `(int)` 上游也判成 `int`（`unparse` 丢括号）。
+/// ⚠ 第 4 个参数是**长度**不是终点（`p_ws` 那几个是 (起点, 终点)，两族别混）。
+fn py_type_id(mem: ptr, p: ptr, a: u32, l: u32) -> u32 {
+    let s: u32 = a;
+    let e: u32 = a + l;
+    let going: u32 = 1;
+    while going == 1 {
+        let j: u32 = py_ws(p, s, e);
+        if j < e && e - 1 > j && load8(p, j) == 40 && load8(p, e - 1) == 41
+                && py_balanced(p, j, e) == e - 1 {
+            s = j + 1;
+            e = e - 1;
+        } else {
+            going = 0;
+        }
+    }
+    let t: ptr = ptr_add(mem, M_TXT);
+    let n: u32 = 0;
+    let i: u32 = s;
+    while i < e {
+        let c: u32 = load8(p, i);
+        if c != 32 && c != 9 && c != 13 {
+            store8(t, n, c as u8);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    if n == 3 && load8(t, 0) == 105 && load8(t, 1) == 110 && load8(t, 2) == 116 {
+        return 1;
+    }
+    if n == 4 && load8(t, 0) == 98 && load8(t, 1) == 111 && load8(t, 2) == 111
+            && load8(t, 3) == 108 {
+        return 2;
+    }
+    if n == 3 && load8(t, 0) == 115 && load8(t, 1) == 116 && load8(t, 2) == 114 {
+        return 3;
+    }
+    if n == 5 && load8(t, 0) == 98 && load8(t, 1) == 121 && load8(t, 2) == 116
+            && load8(t, 3) == 101 && load8(t, 4) == 115 {
+        return 4;
+    }
+    if n == 4 && load8(t, 0) == 78 && load8(t, 1) == 111 && load8(t, 2) == 110
+            && load8(t, 3) == 101 {
+        return 5;
+    }
+    return 0;
+}
+
+/// 块（`i0` 那一行下面的部分）。归属三条：行首在多行串里 / 没有代码 / 缩进 > `ind0`。
+/// 结果写进 `PB_*`。
+fn py_block(mem: ptr, src: ptr, n: u32, i0: u32, ind0: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let _s: u32 = py_line(mem, src, n, i0, 0);
+    let i: u32 = ld32(py, PY_NEXT);
+    let instr: u32 = ld32(py, PY_STR);
+    let last: u32 = FAIL;
+    let cend: u32 = 0;
+    let going: u32 = 1;
+    while i < n && going == 1 {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let fl: u32 = ld32(py, PY_FL);
+        let ind: u32 = ld32(py, PY_IND);
+        if (fl & 2) != 0 || (fl & 1) != 0 || ind > ind0 {
+            if (fl & 1) == 0 {
+                last = i;
+                cend = ld32(py, PY_CE);
+            }
+            i = ld32(py, PY_NEXT);
+        } else {
+            going = 0;
+        }
+    }
+    let _1: u32 = st32(py, PB_END, i);
+    let _2: u32 = st32(py, PB_LAST, last);
+    let _3: u32 = st32(py, PB_CE, cend);
+    let f: u32 = 0;
+    if last == FAIL {
+        f = 1;
+    }
+    let _4: u32 = st32(py, PB_FL, f);
+    return 1;
+}
+
+// ---- 整数折叠（上游 `_py_int_literal`）
+//
+// 只收九个二元运算符（`_PY_FOLD_OPS`）—— **`~` 不在**（上游只认 `+`/`-` 两个一元），
+// **`/` 与 `**` 也不在**（一个出浮点、一个没有）。精度按 Python 的来：`//` **向下取整**、
+// `%` 的符号跟**除数**走、`>>` 是算术右移（本语言的 `>>` 也是算术的，这一条两边一致）。
+
+fn py_oplen(mem: ptr, v: u32) -> u32 {
+    return st32(pym(mem), PY_OPL, v);
+}
+
+/// 游标处的二元运算符编号（0 = 不是）。1 `|` 2 `^` 3 `&` 4 `<<` 5 `>>`
+/// 6 `+` 7 `-` 8 `*` 9 `//` 10 `%`。
+fn py_bop(mem: ptr, src: ptr, k: u32) -> u32 {
+    let e: u32 = py_e(mem);
+    if k >= e {
+        return 0;
+    }
+    let c1: u32 = load8(src, k);
+    let c2: u32 = 0;
+    if k + 1 < e {
+        c2 = load8(src, k + 1);
+    }
+    if c1 == 124 && c2 != 124 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 1;
+    }
+    if c1 == 94 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 2;
+    }
+    if c1 == 38 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 3;
+    }
+    if c1 == 60 && c2 == 60 {
+        let _a: u32 = py_oplen(mem, 2);
+        return 4;
+    }
+    if c1 == 62 && c2 == 62 {
+        let _a: u32 = py_oplen(mem, 2);
+        return 5;
+    }
+    if c1 == 43 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 6;
+    }
+    if c1 == 45 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 7;
+    }
+    if c1 == 42 && c2 != 42 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 8;
+    }
+    if c1 == 47 && c2 == 47 {
+        let _a: u32 = py_oplen(mem, 2);
+        return 9;
+    }
+    if c1 == 37 {
+        let _a: u32 = py_oplen(mem, 1);
+        return 10;
+    }
+    return 0;
+}
+
+fn py_prec(op: u32) -> u32 {
+    if op == 1 {
+        return 1;
+    }
+    if op == 2 {
+        return 2;
+    }
+    if op == 3 {
+        return 3;
+    }
+    if op == 4 || op == 5 {
+        return 4;
+    }
+    if op == 6 || op == 7 {
+        return 5;
+    }
+    if op == 8 || op == 9 || op == 10 {
+        return 6;
+    }
+    return 0;
+}
+
+fn py_fail(mem: ptr) -> i64 {
+    let _a: u32 = st32(pym(mem), PY_OK, 0);
+    return 0;
+}
+
+/// 一个十进制/十六进制/八进制/二进制的整数字面量（`_` 分隔符在两数位之间合法）。
+fn py_num(mem: ptr, src: ptr) -> i64 {
+    let py: ptr = pym(mem);
+    let e: u32 = py_e(mem);
+    let k: u32 = py_c(mem);
+    let base: u32 = 10;
+    let i: u32 = k;
+    if load8(src, i) == 48 && i + 1 < e {
+        let d: u32 = load8(src, i + 1);
+        if d == 120 || d == 88 {
+            base = 16;
+            i = i + 2;
+        }
+        if d == 111 || d == 79 {
+            base = 8;
+            i = i + 2;
+        }
+        if d == 98 || d == 66 {
+            base = 2;
+            i = i + 2;
+        }
+    }
+    let v: i64 = 0;
+    let any: u32 = 0;
+    let going: u32 = 1;
+    while i < e && going == 1 {
+        let c: u32 = load8(src, i);
+        if c == 95 {
+            i = i + 1;
+        } else {
+            let dg: u32 = py_digit(c);
+            if dg >= base {
+                going = 0;                              // 数字段到此为止（**停在这儿**）
+            } else {
+                v = v * (base as i64) + (dg as i64);
+                any = 1;
+                i = i + 1;
+            }
+        }
+    }
+    if any == 0 {
+        return py_fail(mem);
+    }
+    let _s: u32 = st32(py, PY_CUR, i);
+    return v;
+}
+
+fn py_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 122 {
+        return c - 97 + 10;
+    }
+    if c >= 65 && c <= 90 {
+        return c - 65 + 10;
+    }
+    return 99;
+}
+
+/// 一个原子：括号表达式或整数字面量。
+fn py_primary(mem: ptr, src: ptr) -> i64 {
+    let e: u32 = py_e(mem);
+    let k: u32 = py_sw(mem, src);
+    if k >= e {
+        return py_fail(mem);
+    }
+    let c: u32 = load8(src, k);
+    if c == 40 {
+        let _s: u32 = st32(pym(mem), PY_CUR, k + 1);
+        let v: i64 = py_bexpr(mem, src, 1);
+        let j: u32 = py_sw(mem, src);
+        if j >= e || load8(src, j) != 41 {
+            return py_fail(mem);
+        }
+        let _s2: u32 = st32(pym(mem), PY_CUR, j + 1);
+        return v;
+    }
+    if c >= 48 && c <= 57 {
+        return py_num(mem, src);
+    }
+    return py_fail(mem);
+}
+
+/// 一元 `+` / `-`。**`~` 不在**（上游那个折叠器只认这两个）。
+fn py_uexpr(mem: ptr, src: ptr) -> i64 {
+    let e: u32 = py_e(mem);
+    let k: u32 = py_sw(mem, src);
+    if k >= e {
+        return py_fail(mem);
+    }
+    let c: u32 = load8(src, k);
+    if c == 43 {
+        let _s: u32 = st32(pym(mem), PY_CUR, k + 1);
+        return py_uexpr(mem, src);
+    }
+    if c == 45 {
+        let _s: u32 = st32(pym(mem), PY_CUR, k + 1);
+        let v: i64 = py_uexpr(mem, src);
+        if ld32(pym(mem), PY_OK) == 0 {
+            return 0;
+        }
+        return 0 - v;
+    }
+    return py_primary(mem, src);
+}
+
+/// 优先级爬升。`minp` 是这一层能收的最低优先级。
+fn py_bexpr(mem: ptr, src: ptr, minp: u32) -> i64 {
+    let left: i64 = py_uexpr(mem, src);
+    if ld32(pym(mem), PY_OK) == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let k: u32 = py_sw(mem, src);
+        let op: u32 = py_bop(mem, src, k);
+        let pr: u32 = py_prec(op);
+        if op == 0 || pr < minp {
+            let _s: u32 = st32(pym(mem), PY_CUR, k);
+            return left;
+        }
+        let _s2: u32 = st32(pym(mem), PY_CUR, k + ld32(pym(mem), PY_OPL));
+        let right: i64 = py_bexpr(mem, src, pr + 1);
+        if ld32(pym(mem), PY_OK) == 0 {
+            return 0;
+        }
+        left = py_apply(mem, op, left, right);
+        if ld32(pym(mem), PY_OK) == 0 {
+            return 0;
+        }
+    }
+    return left;
+}
+
+/// 算一步。**溢出与除零都算"折不出来"** —— 上游是任意精度，这里只有 `i64`，
+/// 与其发一个绕回去的数，不如报一条跳过（文件头那条偏离）。
+fn py_apply(mem: ptr, op: u32, a: i64, b: i64) -> i64 {
+    if op == 1 {
+        return a | b;
+    }
+    if op == 2 {
+        return a ^ b;
+    }
+    if op == 3 {
+        return a & b;
+    }
+    if op == 4 {
+        if b < 0 || b > 62 {
+            return py_fail(mem);
+        }
+        let sh: i64 = b;
+        let r: i64 = a << sh;
+        if (r >> sh) != a {
+            return py_fail(mem);                        // 左移溢出
+        }
+        return r;
+    }
+    if op == 5 {
+        if b < 0 || b > 63 {
+            return py_fail(mem);
+        }
+        let sh: i64 = b;
+        return a >> sh;
+    }
+    if op == 6 {
+        let r: i64 = a + b;
+        if (b > 0 && r < a) || (b < 0 && r > a) {
+            return py_fail(mem);
+        }
+        return r;
+    }
+    if op == 7 {
+        let r: i64 = a - b;
+        if (b < 0 && r < a) || (b > 0 && r > a) {
+            return py_fail(mem);
+        }
+        return r;
+    }
+    if op == 8 {
+        if a == 0 || b == 0 {
+            return 0;
+        }
+        let r: i64 = a * b;
+        if (r / b) != a {
+            return py_fail(mem);
+        }
+        return r;
+    }
+    if b == 0 {
+        return py_fail(mem);
+    }
+    // Python 的 `//` **向下取整**、`%` 的符号**跟除数走** —— 而本语言的 `/` 向零截断、
+    // `%` 跟被除数走（实测 `-7 % 2 == -1`）。所以这里要自己纠一次。
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    let negr: u32 = 0;
+    if r < 0 {
+        negr = 1;
+    }
+    let negb: u32 = 0;
+    if b < 0 {
+        negb = 1;
+    }
+    let qf: i64 = q;
+    if r != 0 && negr != negb {
+        qf = q - 1;
+    }
+    if op == 9 {
+        return qf;
+    }
+    return a - qf * b;
+}
+
+/// `[a, b)` 折成一个整数；折不出来返回 0 并把 `PY_OK` 置 0。
+fn py_fold(mem: ptr, src: ptr, a: u32, b: u32) -> i64 {
+    let py: ptr = pym(mem);
+    let _1: u32 = st32(py, PY_CUR, a);
+    let _2: u32 = st32(py, PY_END, b);
+    let _3: u32 = st32(py, PY_OK, 1);
+    let _4: u32 = st32(py, PY_OPL, 1);
+    let v: i64 = py_bexpr(mem, src, 1);
+    if ld32(py, PY_OK) == 0 {
+        return 0;
+    }
+    if py_sw(mem, src) != b {
+        let _f: u32 = st32(py, PY_OK, 0);
+        return 0;
+    }
+    return v;
+}
+
+/// `def` / `async def` 那一行吗？是就把**名字的起点**返回（`FAIL` = 不是）。
+fn py_def_head(src: ptr, a: u32, ce: u32) -> u32 {
+    let k: u32 = a;
+    if ce >= a + 6 && load8(src, a) == 97 && load8(src, a + 1) == 115
+            && load8(src, a + 2) == 121 && load8(src, a + 3) == 110
+            && load8(src, a + 4) == 99 && is_w(load8(src, a + 5)) == 0 {
+        k = py_ws(src, a + 5, ce);
+    }
+    if k + 4 > ce {
+        return FAIL;
+    }
+    if load8(src, k) != 100 || load8(src, k + 1) != 101 || load8(src, k + 2) != 102
+            || is_w(load8(src, k + 3)) == 1 {
+        return FAIL;
+    }
+    return py_ws(src, k + 3, ce);
+}
+
+/// `class` 那一行吗？是就把名字的起点返回。
+fn py_class_head(src: ptr, a: u32, ce: u32) -> u32 {
+    if a + 6 > ce {
+        return FAIL;
+    }
+    if load8(src, a) != 99 || load8(src, a + 1) != 108 || load8(src, a + 2) != 97
+            || load8(src, a + 3) != 115 || load8(src, a + 4) != 115
+            || is_w(load8(src, a + 5)) == 1 {
+        return FAIL;
+    }
+    return py_ws(src, a + 5, ce);
+}
+
+/// 形参表 `[a, b)`（`(` 与 `)` 之间）填进 `PY_TAB`。返回条数；**`FAIL` = 整个函数要跳**。
+///
+/// 上游跳这几种：变参（`*args` / `**kw`）、位置参数（`/` 之前那些）、以及**没有注解**的
+/// 形参（`_py_type(None)` 在 strict 下是 `None`）。中间的裸 `*` 只是个分界符，照收。
+fn py_params(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let cnt: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        let j: u32 = py_find_top(src, i, b, 44, 0);
+        let s: u32 = py_ws(src, i, j);
+        if s < j {
+            let c: u32 = load8(src, s);
+            if c == 42 {
+                let t: u32 = py_ws(src, s + 1, j);
+                if t < j {
+                    return FAIL;                       // `*args` 或 `**kw`
+                }
+            } else {
+                if c == 47 && py_ws(src, s + 1, j) >= j {
+                    return FAIL;                       // `/` 位置参数标记
+                } else {
+                    let np: ptr = ptr_add(mem, M_R + 96);
+                    let ne: u32 = py_ident(src, s, j, np);
+                    if ne == FAIL {
+                        return FAIL;
+                    }
+                    let t2: u32 = py_ws(src, ne, j);
+                    if t2 >= j || load8(src, t2) != 58 {
+                        return FAIL;                   // 没有注解
+                    }
+                    let u: u32 = py_ws(src, t2 + 1, j);
+                    let eqp: u32 = py_find_top(src, u, j, 61, 1);
+                    let ty: u32 = py_type_id(mem, src, u, eqp - u);
+                    if ty == 0 {
+                        return FAIL;
+                    }
+                    if cnt >= PY_TMAX {
+                        return FAIL;
+                    }
+                    let no: u32 = ld32(np, 0);
+                    let nl: u32 = ld32(np, 4);
+                    let _1: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_NO, no);
+                    let _2: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_NL, nl);
+                    let _3: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_TY, ty);
+                    cnt = cnt + 1;
+                }
+            }
+        }
+        i = j + 1;
+    }
+    return cnt;
+}
+
+/// `def NAME ( 形参 ) -> 返回 :` —— 成功把名字/返回/形参写进 `M_PY`（`PY_OK` = 1）。
+fn py_signature(mem: ptr, src: ptr, n: u32, j: u32, ce: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let np: ptr = ptr_add(mem, M_R + 96);
+    let ne: u32 = py_ident(src, j, ce, np);
+    if ne == FAIL {
+        return 0;
+    }
+    let _1: u32 = st32(py, PY_NO, ld32(np, 0));
+    let _2: u32 = st32(py, PY_NL, ld32(np, 4));
+    let k: u32 = py_ws(src, ne, ce);
+    if k >= ce || load8(src, k) != 40 {
+        return 0;
+    }
+    let close: u32 = py_balanced(src, k, n);      // `(` 配平到它的 `)`
+    if close == FAIL {
+        return 0;
+    }
+    let cnt: u32 = py_params(mem, src, k + 1, close);
+    if cnt == FAIL {
+        return 0;
+    }
+    let ret: u32 = 0;
+    let le: u32 = line_end(src, n, close + 1);
+    let t: u32 = py_ws(src, close + 1, le);
+    let colon: u32 = 0;
+    if t + 1 < le && load8(src, t) == 45 && load8(src, t + 1) == 62 {
+        let ra: u32 = py_ws(src, t + 2, le);
+        colon = py_find_top(src, ra, le, 58, 0);
+        if colon == le {
+            return 0;                                  // 没有那个收尾的冒号
+        }
+        ret = py_type_id(mem, src, ra, colon - ra);
+        if ret == 0 {
+            return 0;                                  // 返回注解无映射
+        }
+    } else {
+        // **没有 `->` 就是没有返回注解** —— 上游 `_py_type(None)` 在 strict 下是 `None`，
+        // 整条函数跳过。`-> None` 是另一回事（那是显式的 `()`）。
+        return 0;
+    }
+    let _c0: u32 = st32(py, PY_COLON, colon);
+    let _3: u32 = st32(py, PY_RET, ret);
+    let _4: u32 = st32(py, PY_CNT, cnt);
+    let _5: u32 = st32(py, PY_OK, 1);
+    return 1;
+}
+
+/// `off` 那一行的行尾（`\n` 的位置，或 `n`）。
+fn line_end(src: ptr, n: u32, off: u32) -> u32 {
+    let j: u32 = off;
+    while j < n && load8(src, j) != 10 {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `PY_TAB` 里的条目发成 JSON 数组。
+fn py_emit_tab(mem: ptr, src: ptr, out: ptr, o: u32) -> u32 {
+    let t: ptr = ptr_add(mem, M_PY + PY_TAB);
+    let cnt: u32 = ld32(pym(mem), PY_CNT);
+    let i: u32 = 0;
+    while i < cnt {
+        if i > 0 {
+            o = jl(out, o, ", ");
+        }
+        o = jl(out, o, "{\"name\": ");
+        o = jq(out, o, src, ld32(t, i * 12 + PT_NO), ld32(t, i * 12 + PT_NL));
+        o = jl(out, o, ", \"type\": \"");
+        o = jl(out, o, py_tname(ld32(t, i * 12 + PT_TY)));
+        o = jl(out, o, "\"}");
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 函数的那个数组。三条扫描共用一台机器：**只认缩进 0 上的行**。
+fn py_emit_functions(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let i: u32 = 0;
+    let instr: u32 = 0;
+    let first: u32 = 1;
+    while i < n {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let fl: u32 = ld32(py, PY_FL);
+        if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+            let ce: u32 = ld32(py, PY_CE);
+            let j: u32 = py_def_head(src, ld32(py, PY_FC), ce);
+            if j != FAIL {
+                if py_signature(mem, src, n, j, ce) == 1 {
+                    // 一行写完的 `def f(x: int) -> int: return x` —— **正文就在那一行上**，
+                    // 不能去下面找块（下面已经是下一个顶层构造了）。判据是"冒号后面还有代码"。
+                    let tail: u32 = py_ws(src, ld32(py, PY_COLON) + 1, ce);
+                    let be: u32 = ld32(py, PB_CE);
+                    let bfl: u32 = ld32(py, PB_FL);
+                    if tail < ce {
+                        be = ce;
+                        bfl = 0;
+                    } else {
+                        let _b: u32 = py_block(mem, src, n, i, 0);
+                        be = ld32(py, PB_CE);
+                        bfl = ld32(py, PB_FL);
+                    }
+                    if bfl == 0 && be > i {
+                        if first == 0 {
+                            o = jl(out, o, ", ");
+                        }
+                        first = 0;
+                        o = jl(out, o, "{\"name\": ");
+                        o = jq(out, o, src, ld32(py, PY_NO), ld32(py, PY_NL));
+                        o = jl(out, o, ", \"params\": [");
+                        o = py_emit_tab(mem, src, out, o);
+                        o = jl(out, o, "], \"ret\": \"");
+                        o = jl(out, o, py_tname(ld32(py, PY_RET)));
+                        o = jl(out, o, "\", \"body\": ");
+                        o = jq(out, o, src, i, be - i);
+                        o = jl(out, o, ", \"body_line\": ");
+                        o = jint(out, o, 0, line_of(src, i));
+                        o = jl(out, o, "}");
+                    }
+                } else {
+                    if ld32(py, PY_NL) > 0 {
+                        let _s: u64 = say2("fn", ptr_add(src, ld32(py, PY_NO)),
+                                           ld32(py, PY_NL));
+                    }
+                }
+            }
+        }
+        i = nxt;
+    }
+    return o;
+}
+
+/// 常量那个数组（`MAX = 8` / `MIN: int = -5` / `N = 1 << 4` / `MAX: int`）。
+fn py_emit_consts(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let i: u32 = 0;
+    let instr: u32 = 0;
+    let first: u32 = 1;
+    while i < n {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let fl: u32 = ld32(py, PY_FL);
+        if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+            let ce: u32 = ld32(py, PY_CE);
+            let np: ptr = ptr_add(mem, M_R + 96);
+            let ne: u32 = py_ident(src, ld32(py, PY_FC), ce, np);
+            if ne != FAIL {
+                let no: u32 = ld32(np, 0);
+                let nl: u32 = ld32(np, 4);
+                if py_isupper(src, no, nl) == 1 && py_is_kw(src, no, nl) == 0 {
+                    let t: u32 = py_ws(src, ne, ce);
+                    let tgt: u32 = 0;                  // 0 = 不是赋值 / 1 = 有值 / 2 = 只注解
+                    let va: u32 = 0;
+                    let vb: u32 = 0;
+                    let ann: u32 = 0;                  // 0 = 没有注解 / 1 = 有且是整型 / 2 = 有且不是
+                    if t < ce && load8(src, t) == 61 {
+                        if t + 1 < ce && load8(src, t + 1) == 61 {
+                            tgt = 0;                   // `NAME == …` 是比较
+                        } else {
+                            tgt = 1;
+                            va = t + 1;
+                            vb = ce;
+                        }
+                    } else {
+                        if t < ce && load8(src, t) == 58 {
+                            let u: u32 = py_ws(src, t + 1, ce);
+                            let eqp: u32 = py_find_top(src, u, ce, 61, 1);
+                            let ty: u32 = py_type_id(mem, src, u, eqp - u);
+                            ann = 2;
+                            if ty == 1 {
+                                ann = 1;
+                            }
+                            if eqp < ce {
+                                tgt = 1;
+                                va = eqp + 1;
+                                vb = ce;
+                            } else {
+                                tgt = 2;                   // 只注解不给值
+                            }
+                        }
+                    }
+                    if tgt == 1 && py_find_top(src, va, vb, 59, 0) < vb {
+                        tgt = 3;                           // 一行多条语句：不静默丢
+                    }
+                    if tgt != 0 {
+                        let ok: u32 = 0;
+                        let v: i64 = 0;
+                        if tgt == 1 && py_find_top(src, va, vb, 61, 1) < vb {
+                            ok = 9;                        // 链式赋值 `A = B = 1`：上游两边都不收
+                        } else {
+                            if tgt == 1 {
+                                v = py_fold(mem, src, va, vb);
+                                if ld32(py, PY_OK) == 1 {
+                                    ok = 1;
+                                }
+                            }
+                        }
+                        if ok == 1 && ann == 2 {
+                            ok = 2;                        // 注解不是整型
+                        }
+                        if ok == 9 {
+                            // 链式赋值：上游 `len(targets) != 1` 直接不看 —— 既不收也不报
+                        }
+                        if ok == 1 {
+                            let neg: u32 = 0;
+                            let m: u64 = v as u64;
+                            if v < 0 {
+                                neg = 1;
+                                m = (0 as u64) - (v as u64);
+                            }
+                            let hi: u32 = (m / 4294967296) as u32;
+                            let lo: u32 = (m % 4294967296) as u32;
+                            if first == 0 {
+                                o = jl(out, o, ", ");
+                            }
+                            first = 0;
+                            o = jl(out, o, "{\"name\": ");
+                            o = jq(out, o, src, no, nl);
+                            o = jl(out, o, ", \"type\": \"i64\", \"value\": ");
+                            o = ju64(mem, out, o, neg, hi, lo);
+                            o = jl(out, o, "}");
+                        } else {
+                            if ok != 9 {
+                                let _s: u64 = say2("const", ptr_add(src, no), nl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = nxt;
+    }
+    return o;
+}
+
+/// 类型那个数组（模块级 `class` 的**直接**类体里那些注解字段）。
+fn py_emit_types(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let i: u32 = 0;
+    let instr: u32 = 0;
+    let first: u32 = 1;
+    while i < n {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let fl: u32 = ld32(py, PY_FL);
+        if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+            let ce: u32 = ld32(py, PY_CE);
+            let j: u32 = py_class_head(src, ld32(py, PY_FC), ce);
+            if j != FAIL {
+                let np: ptr = ptr_add(mem, M_R + 96);
+                let ne: u32 = py_ident(src, j, ce, np);
+                if ne != FAIL {
+                    let no: u32 = ld32(np, 0);
+                    let nl: u32 = ld32(np, 4);
+                    // ⚠ 类名也要进 `PY_NO/PY_NL` —— 字段那条路（`F <宿主> <字段>`）从那儿取宿主，
+                    //    不存的话宿主是空的（症状：`F  x`，看着像少了一栏）
+                    let _pn: u32 = st32(py, PY_NO, no);
+                    let _pl: u32 = st32(py, PY_NL, nl);
+                    let colon: u32 = py_find_top(src, ne, ce, 58, 0);
+                    if colon < ce {
+                        let _c: u32 = st32(py, PY_CNT, 0);
+                        // 一行写完整 (`class C: x: int`) 就那一行当类体；否则从下一行起。
+                        let tail: u32 = py_ws(src, colon + 1, ce);
+                        let bind: u32 = 0;
+                        if tail < ce {
+                            py_field_line(mem, src, tail, ce);
+                        } else {
+                            let k: u32 = ld32(py, PY_NEXT);
+                            let ins2: u32 = ld32(py, PY_STR);
+                            let stop: u32 = 0;
+                            while k < n && stop == 0 {
+                                let _r2: u32 = py_line(mem, src, n, k, ins2);
+                                ins2 = ld32(py, PY_STR);
+                                let f2: u32 = ld32(py, PY_FL);
+                                if (f2 & 2) == 0 && (f2 & 1) == 0 {
+                                    bind = ld32(py, PY_IND);
+                                    stop = 1;
+                                } else {
+                                    k = ld32(py, PY_NEXT);
+                                }
+                            }
+                            let going: u32 = 1;
+                            while k < n && going == 1 {
+                                let _r3: u32 = py_line(mem, src, n, k, ins2);
+                                ins2 = ld32(py, PY_STR);
+                                let f3: u32 = ld32(py, PY_FL);
+                                let ind: u32 = ld32(py, PY_IND);
+                                if (f3 & 2) != 0 || (f3 & 1) != 0 {
+                                    k = ld32(py, PY_NEXT);
+                                } else {
+                                    if ind == bind {
+                                        py_field_line(mem, src, ld32(py, PY_FC),
+                                                      ld32(py, PY_CE));
+                                        k = ld32(py, PY_NEXT);
+                                    } else {
+                                        if ind > bind {
+                                            k = ld32(py, PY_NEXT);
+                                        } else {
+                                            going = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let cnt: u32 = ld32(py, PY_CNT);
+                        if cnt == 0 {
+                            // 一条字段都没收（**一行写完那种也算**）—— 上游 `if not fields`
+                            // 就在这处报。原先这里还挂着"只有多行类体才报"，于是
+                            // `class C: x: float` 少了一条 `S type C`（静默地少）。
+                            let _s: u64 = say2("type", ptr_add(src, no), nl);
+                        } else {
+                            if first == 0 {
+                                o = jl(out, o, ", ");
+                            }
+                            first = 0;
+                            o = jl(out, o, "{\"name\": ");
+                            o = jq(out, o, src, no, nl);
+                            o = jl(out, o, ", \"fields\": [");
+                            o = py_emit_tab(mem, src, out, o);
+                            o = jl(out, o, "]}");
+                        }
+                    }
+                }
+            }
+        }
+        i = nxt;
+    }
+    return o;
+}
+
+/// 类体里的一行是不是 `NAME : TYPE [= 值]`；是就往表里加一条（或报一条字段损失）。
+fn py_field_line(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
+    let py: ptr = pym(mem);
+    let s: u32 = py_ws(src, a, b);
+    if s >= b {
+        return 0;
+    }
+    let np: ptr = ptr_add(mem, M_R + 96);
+    let ne: u32 = py_ident(src, s, b, np);
+    if ne == FAIL {
+        return 0;
+    }
+    let no: u32 = ld32(np, 0);
+    let nl: u32 = ld32(np, 4);
+    if py_is_kw(src, no, nl) == 1 {
+        return 0;
+    }
+    let t: u32 = py_ws(src, ne, b);
+    if t >= b || load8(src, t) != 58 {
+        return 0;
+    }
+    let u: u32 = py_ws(src, t + 1, b);
+    let eqp: u32 = py_find_top(src, u, b, 61, 1);
+    let ty: u32 = py_type_id(mem, src, u, eqp - u);
+    if ty == 0 {
+        let _s: u64 = sayf(src, ld32(pym(mem), PY_NO), ld32(pym(mem), PY_NL),
+                           src, no, nl);
+        return 0;
+    }
+    let cnt: u32 = ld32(py, PY_CNT);
+    if cnt >= PY_TMAX {
+        return 0;
+    }
+    let _1: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_NO, no);
+    let _2: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_NL, nl);
+    let _3: u32 = st32(ptr_add(mem, M_PY + PY_TAB), cnt * 12 + PT_TY, ty);
+    let _4: u32 = st32(py, PY_CNT, cnt + 1);
+    return 1;
+}
+
+/// Python 那一门的主干（`from_python`）。这一门**不抹注释**（正文是原文照切）。
+fn build_python(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SRC);
+    let n: u32 = srcn;
+    let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
+    let _m: u32 = st32(ptr_add(mem, M_SC), 8, 7);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let o1: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
+    let un: u32 = unit_name(mem, argp, al);
+    let idb: ptr = ptr_add(mem, M_IDENT);
+    let o2: u32 = jq(out, o1, idb, 0, un);
+    let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"python\"");
+    let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o5: u32 = py_emit_functions(mem, src, n, out, o4);
+    let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
+    let o7: u32 = py_emit_consts(mem, src, n, out, o6);
+    let o8: u32 = jl(out, o7, "], \"enums\": [], \"types\": [");
+    let o9: u32 = py_emit_types(mem, src, n, out, o8);
+    let o10: u32 = jl(out, o9, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    return o10;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
@@ -5085,7 +6387,7 @@ fn _start() -> u32 {
     let l1: u32 = arg_at(cb, tot, 1, ap);
     let o1: u32 = ld32(ap, 0);
     if l1 == 0 {
-        return fail("lompotc: usage: lompotc [--cpp|--java|--csharp] <src>\n");
+        return fail("lompotc: usage: lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>\n");
     }
     let mode: u32 = 1;
     let a1: ptr = ptr_add(cb, o1);
@@ -5094,7 +6396,7 @@ fn _start() -> u32 {
         let lc: u32 = arg_at(cb, tot, 2, ap);
         let oc: u32 = ld32(ap, 0);
         if lc == 0 {
-            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp] <src>\n");
+            return fail("lompotc: usage: lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>\n");
         }
         l1 = lc;
         o1 = oc;
@@ -5105,7 +6407,7 @@ fn _start() -> u32 {
         let lr: u32 = arg_at(cb, tot, 2, ap);
         let orr: u32 = ld32(ap, 0);
         if lr == 0 {
-            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go|--rust] <src>
+            return fail("lompotc: usage: lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>
 ");
         }
         l1 = lr;
@@ -5117,12 +6419,23 @@ fn _start() -> u32 {
         let lg: u32 = arg_at(cb, tot, 2, ap);
         let og: u32 = ld32(ap, 0);
         if lg == 0 {
-            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go|--rust] <src>
+            return fail("lompotc: usage: lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>
 ");
         }
         l1 = lg;
         o1 = og;
         a1 = ptr_add(cb, og);
+    }
+    if l1 == 8 && eq(a1, 0, "--python") == 1 {
+        mode = 7;
+        let lp: u32 = arg_at(cb, tot, 2, ap);
+        let op: u32 = ld32(ap, 0);
+        if lp == 0 {
+            return fail("lompotc: usage: lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>\n");
+        }
+        l1 = lp;
+        o1 = op;
+        a1 = ptr_add(cb, op);
     }
     if l1 == 6 && eq(a1, 0, "--java") == 1 {
         mode = 3;
@@ -5156,7 +6469,9 @@ fn _start() -> u32 {
     let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
     syscall4(3, jf as u64, 0, 0);
     let o: u32 = 0;
-    if mode == 6 {
+    if mode == 7 {
+        o = build_python(mem, srcn as u32, pp, l1);
+    } else if mode == 6 {
         o = build_rust(mem, srcn as u32, pp, l1);
     } else if mode == 5 {
         o = build_go(mem, srcn as u32, pp, l1);
