@@ -341,6 +341,36 @@ def test_bool_as_int_is_refused_by_the_front_end():
     print("      整数当条件照收：`if a` -> `if a != 0`")
 
 
+@test
+def test_unary_invert_is_refused_by_the_front_end():
+    """**前端拒收集**：`~` 在本语言里没有对应的一元运算符。
+
+    原先 `raw()` 把 `ast.Invert` 直接映成 `"~"`，而 Loment 的一元运算符只有 `-` 与 `!`
+    —— **产出一份编不过的源**，而报出来的那个错指向**生成出来的那一份**（`docs/198` §1）。
+    这一条钉住"点名拒、且说得出为什么"。
+
+    **另一半也要钉**：`-a` 与 `+a` 照旧收（那两处本语言有一元运算符）——
+    否则"把 `~` 拒了"很容易顺手把一元那一族一起拒掉。
+    """
+    src = (EX / "unary_invert.py").read_text(encoding="utf-8")
+    try:
+        pytrans.translate(src)
+    except pytrans.Unsupported as e:
+        msg = str(e)
+        assert "宽度" in msg or "i32" in msg, f"要说清：{msg}"
+        print(f"      `~a` 报得出: {msg[-80:]}")
+    else:
+        raise AssertionError(
+            "`~a` 却一个字都没报 —— 发出来的 `( ~a )` 过不了本语言的词法器。"
+            "这正是要消灭的「能过前端、后面必炸」")
+
+    ok = ("def f(a: int) -> int:\n"
+          "    return -a + +a\n")
+    text = pytrans.translate(ok)
+    assert "(-a)" in text and "(a)" in text, f"`-a` / `+a` 该照收:\n{text}"
+    print("      一元 `-` / `+` 照收")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:

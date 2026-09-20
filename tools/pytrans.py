@@ -3,14 +3,15 @@
 
     Python 写法的源码 --pytrans--> Loment 源码
 
-## ⚠️ 这一份里有两条**已上报未修**的缺陷（`docs/198`）
+## ⚠️ 这一份里还有一条**已上报未修**的缺陷（`docs/198`）
 
-写 LumtUI 那条线（`docs/196`）时撞到的，都带最小复现，**动这一份之前先看那一条**：
+写 LumtUI 那条线（`docs/196`）时撞到的，带最小复现，**动这一份之前先看那一条**：
 
-* **`~` 发出来过不了词法**（`docs/198` §1）—— `raw()` 把 `ast.Invert` 映射成 `"~"`，
-  而 Loment 的词法器没有这个字符。现在会**发出一份编不过的源**。
 * **内建"当值用"与"当语句用"给两个答案**（`docs/198` §3）—— `ty_of()` 查 `self.fns`
   那道"Stage A 不跨单元"的闸，`raw()` 不查。于是一道闸按调用写在哪个位置给出两种判决。
+
+（同一批上报里的 `~` 那条**已经修了**：现在点名拒，与 `**` / `/` 同一条纪律 ——
+见下面「子集」那节与 `loment/pytrans/unary_invert.py`。）
 
 ## 它是**前端**，不是"翻译外源代码" —— 2026-09-18 改定的
 
@@ -90,13 +91,16 @@
     模块级    NAME = <整数>            （常量, 全大写才算 —— 与 potato_from 同一条判据）
               def f(a: int, b: int) -> int: …
     语句      赋值/注解赋值/增量赋值   if/elif/else   while   for i in range(…)   return   f(…)
-    表达式    整数  名字  调用  一元 - + ~ not   二元 算术/位/比较/`//`/`%`   布尔 and/or
+    表达式    整数  名字  调用  一元 - + not   二元 算术/位/比较/`//`/`%`   布尔 and/or
 
-> **`~` 那一格今天是假的**：它映射成 `"~"`，而 Loment 没有这个字符 —— 发出来的源
-> 过不了词法。要么按宽度展开成 `x ^ -1`，要么像 `**`/`/` 那样拒。见 `docs/198` §1。
+> **`~` 不在**（`docs/198` §1）：本语言的一元运算符只有 `-` 与 `!`，而 `~v` 是
+> "与全 1 异或" —— **按宽度**分别写作 `v ^ -1`（i32）或 `v ^ 255`（u8）。
+> 这台翻译器**不做整数宽度跟踪**，所以它替不了你选，只能点名拒。
+> 与 `>>>`（逻辑右移）同一条：**先不收，除非有语料逼它**。
 
 **不收的一律报错**（`docs/167`）：`break` / `continue` / `lambda` / 推导式 / `try` /
-`with` / 导入 / 元组解包 / 链式比较 / `**` / `/`（真除，出浮点）/ `str`·`list`·`dict` /
+`with` / 导入 / 元组解包 / 链式比较 / `**` / `/`（真除，出浮点）/ `~`（按位取反，
+按宽度写 `^ -1`）/ `str`·`list`·`dict` /
 `for … else` / `while … else`。理由与 C 那门一样：**跳过 = 产出一份少算一步却照样能编的单元**。
 
 ## 两条**决定**（不是翻译）
@@ -276,8 +280,17 @@ class Emitter:
             if isinstance(e.op, ast.Not):
                 # Python 的 `not` 收任何真值、永远出 bool；Loment 的 `!` 只收 bool。
                 return f"!{self.ex(e.operand, 'bool')}"
-            if isinstance(e.op, (ast.USub, ast.UAdd, ast.Invert)):
-                op = {ast.USub: "-", ast.UAdd: "", ast.Invert: "~"}[type(e.op)]
+            if isinstance(e.op, ast.Invert):
+                # **点名拒**（`docs/198` §1）。它本可以转 —— `~v` 就是"与全 1 异或" ——
+                # 但那是**按宽度**的（i32 上是 `v ^ -1`、u8 上是 `v ^ 255`），而这台
+                # 翻译器不做宽度跟踪，替不了作者选。原先直接映成 `"~"`，而本语言的词法器
+                # 没有那个字符 —— **发出来的源编不过**，而且报的错指向生成出来的那一份。
+                raise Unsupported(
+                    f"第 {e.lineno} 行: 不支持按位取反 `~`（本语言的一元运算符只有 `-` 与 "
+                    f"`!`；`~v` 是“与全 1 异或”，要它得**按宽度**写 `v ^ -1`（i32）或 "
+                    f"`v ^ 255`（u8）—— 翻译器不做宽度跟踪，所以不替你选）")
+            if isinstance(e.op, (ast.USub, ast.UAdd)):
+                op = {ast.USub: "-", ast.UAdd: ""}[type(e.op)]
                 return f"({op}{self.ex(e.operand, 'i64')})"
             raise Unsupported(f"第 {e.lineno} 行: 不支持一元 `{type(e.op).__name__}`")
         if isinstance(e, ast.BinOp):

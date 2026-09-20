@@ -5152,7 +5152,10 @@ fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
             o3 = app(buf, o2, "-");
         }
         if c == UN_INV {
-            o3 = app(buf, o2, "~");
+            // **跟着上游拒**：本语言的一元运算符只有 `-` 与 `!`，`~v` 得按宽度写成
+            // `v ^ -1` / `v ^ 255`，而这一族不做宽度跟踪 —— 见 `docs/198` §1。
+            let _u: u32 = pye_uns(mem);
+            return o;
         }
         let o4: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 7, buf, o3);
         return app(buf, o4, ")");

@@ -314,8 +314,10 @@ _PY_BATTERY = {
     "py_cmps": "def f(a: int, b: int) -> int:\n    if a < b:\n        return 1\n"
                "    if a <= b:\n        return 2\n    if a != b:\n        return 3\n"
                "    return 0\n",
-    "py_unary": "def f(a: int) -> int:\n    x = -a\n    y = ~a\n    z = +a\n"
-                "    return x + y + z\n",
+    "py_unary": "def f(a: int) -> int:\n    x = -a\n    z = +a\n"
+                "    return x + z\n",
+    # `~` 本语言没有对应的一元运算符 —— 上游点名拒，孪生跟着拒（`docs/198` §1）
+    "py_invert": "def f(a: int) -> int:\n    return ~a\n",
     "py_bits": "def f(a: int, b: int) -> int:\n"
                "    return (a & b) | (a ^ b) | (a << 1) | (b >> 1)\n",
     "py_hex": "def f() -> int:\n    return 0x1f + 0b101 + 0o17 + 1_000\n",
