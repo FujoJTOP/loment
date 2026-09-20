@@ -24,14 +24,22 @@
 // —— **命中就是命中，哪怕是 `None`**，后面的指针分支不再走。混了的话 `char *` 在 C++ 下
 // 会掉进指针分支被判成 `str`，而这正是那一格要拦住的猜测。
 //
-// **方言**: `lompotc --java <src>` 是 Java —— 上游 `_from_class_lang` 是"函数住在
-// `class X { … }` 里"那一族的共用引擎（Java / C#），与 C 那套**不是同一批扫描器**:
-// 类体要按花括号**配平切成员**（深度 0 上遇 `;` 或一段完整的 `{…}` 收一个，末尾不成段的丢掉），
-// 类型另一张表（`char` 是**16 位无符号** ⇒ `u16`；装箱类型与 `float`/`double` 显式无映射），
-// 而且**字符串字面量先换成 `""`、抹注释在后**（那一层会**改长度** ⇒ 走 `M_SRC2` 两级）。
-// 差 C# 那一半（只差四张正则与一张类型表）与 `from_python` / `from_rust` / `from_go`。
+// **方言**: `lompotc --java <src>` / `--csharp <src>` —— 上游 `_from_class_lang` 是
+// "函数住在 `class X { … }` 里"那一族的**共用引擎**（Java / C#），与 C 那套**不是同一批
+// 扫描器**: 类体要按花括号**配平切成员**（深度 0 上遇 `;` 或一段完整的 `{…}` 收一个，
+// 末尾不成段的丢掉），类型另一张表（`char` 是**16 位无符号** ⇒ `u16`；装箱类型与
+// `float`/`double` 显式无映射），而且**字符串字面量先换成 `""`、抹注释在后**
+// （那一层会**改长度** ⇒ 走 `M_SRC2` 两级）。
 //
-// 用法: `lompotc [--cpp|--java] <src>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那种）。
+// 两门共用一个引擎、差异只在方言表（`docs/188` §7.1）—— 由 `mode`（3=Java / 4=C#）
+// 分派。**四处真不同**: 声明形状（C# 多收 `struct`，且修饰词是**一整张反复的表**，连
+// `public` 都在里面）、常量（C# 是 `const`，**隐含 static**）、成员修饰词表（C# 多
+// `internal`/`sealed`/`partial`/`async` 那十六个）、类型表（**`byte` 是两门唯一没落在
+// 同一格上的**：C# 无符号 ⇒ `u8`、Java 有符号 ⇒ `i8`；`String`/`boolean` 只有 Java 有）。
+//
+// 差 `from_python` / `from_rust` / `from_go` 与发射那一半（`lomt_from`）。
+//
+// 用法: `lompotc [--cpp|--java|--csharp] <src>` —— 对象打到 stdout（紧凑那种）。
 
 module lompotc
 
@@ -1785,9 +1793,11 @@ fn jm_word(p: ptr, i: u32, n: u32, kw: str) -> u32 {
     return skip_ht(p, i + kl, n);
 }
 
-/// 修饰词表。`which`: 0 = 常量那一个（`public|private|protected` **至多一个**），
-/// 1 = 方法那八个（可重复），2 = 字段那七个（可重复）。返回修饰词之后的第一个下标。
-fn jmods(p: ptr, i: u32, n: u32, which: u32) -> u32 {
+/// 成员声明上的修饰词表。`which`: 0 = 常量那一个（**至多一个**），1 = 方法，2 = 字段。
+/// **两张表必须分开**（`docs/188` §7.1）：C# 的 `internal` / `sealed` / `partial` 不在
+/// Java 那张里 —— 共用一张的话一条 `internal static int F()` 匹配不上方法那条正则，
+/// 就掉进"以 `;` 结尾 = 字段"那一支被丢掉（**静默丢一个函数**）。
+fn jmods(p: ptr, i: u32, n: u32, which: u32, mode: u32) -> u32 {
     let j: u32 = i;
     if which == 0 {
         let a: u32 = jm_word(p, j, n, "public");
@@ -1802,6 +1812,12 @@ fn jmods(p: ptr, i: u32, n: u32, which: u32) -> u32 {
         if c != FAIL {
             return c;
         }
+        if mode == 4 {
+            let d: u32 = jm_word(p, j, n, "internal");
+            if d != FAIL {
+                return d;
+            }
+        }
         return j;
     }
     let going: u32 = 1;
@@ -1813,13 +1829,56 @@ fn jmods(p: ptr, i: u32, n: u32, which: u32) -> u32 {
         if nx == FAIL {
             nx = jm_word(p, j, n, "protected");
         }
+        if mode == 4 {
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "internal");
+            }
+        }
         if nx == FAIL {
             nx = jm_word(p, j, n, "static");
         }
-        if nx == FAIL {
+        // `final` **只在 Java 那张表里**（`_CS_MODS` 没有它）—— 不挡的话
+        // `static final int K = 5;` 在 C# 下会被吃成"修饰词 static final + 字段 K"，
+        // 而上游那边它落在"无映射、丢掉"。
+        if nx == FAIL && mode != 4 {
             nx = jm_word(p, j, n, "final");
         }
-        if which == 1 {
+        if mode == 4 {
+            // C# 那十六张（`_CS_MODS`）
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "sealed");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "abstract");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "virtual");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "override");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "partial");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "new");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "extern");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "unsafe");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "readonly");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "volatile");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "async");
+            }
+        } else if which == 1 {
             if nx == FAIL {
                 nx = jm_word(p, j, n, "abstract");
             }
@@ -1858,43 +1917,100 @@ fn jm_public(p: ptr, i: u32, n: u32) -> u32 {
     return a;
 }
 
-/// `(?:final[ \t]+|abstract[ \t]+)*`（kind=0）或 `(?:final[ \t]+|static[ \t]+)*`（kind=1）。
-fn jm_declmods(p: ptr, i: u32, n: u32, kind: u32) -> u32 {
-    let j: u32 = i;
-    let going: u32 = 1;
-    while going == 1 {
-        let nx: u32 = jm_word(p, j, n, "final");
-        if nx == FAIL && kind == 0 {
-            nx = jm_word(p, j, n, "abstract");
-        }
-        if nx == FAIL && kind == 1 {
-            nx = jm_word(p, j, n, "static");
-        }
-        if nx == FAIL {
-            going = 0;
-        } else {
-            j = nx;
-        }
+/// C# 那两类声明的前缀试一次：`public|internal|private|protected` 加上
+/// `sealed|abstract|static|partial|readonly|ref`（**只有 class/struct 那一支**）。
+/// 上游 `_CS_CLASS` / `_CS_ENUM` 写成"一整张反复的表、连 `public` 都在表里"，
+/// 与 Java 那个"可选 `public` + 反复的 final/abstract"**不同形** —— 所以另写一支。
+fn jcs_decl1(p: ptr, j: u32, n: u32, kind: u32) -> u32 {
+    let nx: u32 = jm_word(p, j, n, "public");
+    if nx == FAIL {
+        nx = jm_word(p, j, n, "internal");
     }
-    return j;
+    if nx == FAIL {
+        nx = jm_word(p, j, n, "private");
+    }
+    if nx == FAIL {
+        nx = jm_word(p, j, n, "protected");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "sealed");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "abstract");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "static");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "partial");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "readonly");
+    }
+    if nx == FAIL && kind == 0 {
+        nx = jm_word(p, j, n, "ref");
+    }
+    return nx;
 }
 
-/// 类/枚举那条声明：`(?:^|\n)[ \t]*(?:public[ \t]+)?(?:MOD[ \t]+)*class|enum[ \t]+NAME[^{;]*\{`
-/// （Java 的 `_JAVA_CLASS` / `_JAVA_ENUM`）。`kind`: 0 = class, 1 = enum。
+/// 类/枚举声明前面那串修饰词（Java 与 C# 的表不同 —— `docs/188` §7.1）。
+fn jdecl_mods(p: ptr, i: u32, n: u32, kind: u32, mode: u32) -> u32 {
+    let j: u32 = i;
+    if mode == 4 {
+        let going: u32 = 1;
+        while going == 1 {
+            let nx: u32 = jcs_decl1(p, j, n, kind);
+            if nx == FAIL {
+                going = 0;
+            } else {
+                j = nx;
+            }
+        }
+        return j;
+    }
+    let j1: u32 = jm_public(p, j, n);
+    let going2: u32 = 1;
+    while going2 == 1 {
+        let nx: u32 = jm_word(p, j1, n, "final");
+        if nx == FAIL && kind == 0 {
+            nx = jm_word(p, j1, n, "abstract");
+        }
+        if nx == FAIL && kind == 1 {
+            nx = jm_word(p, j1, n, "static");
+        }
+        if nx == FAIL {
+            going2 = 0;
+        } else {
+            j1 = nx;
+        }
+    }
+    return j1;
+}
+
+/// 类/枚举那条声明：`(?:^|\n)[ \t]*(?:MOD[ \t]+)*(class|enum)[ \t]+NAME[^{;]*\{`
+/// （Java 的 `_JAVA_CLASS` / `_JAVA_ENUM`；C# 那边多收一个 `struct`）。
+/// `kind`: 0 = class/struct, 1 = enum。
 /// 命中写 `J_OB`（那个 `{`）/`J_CE`（配对的 `}`，不配平时 `FAIL`）/`J_NO`,`J_NL`（名字）。
-fn find_jdecl(body: ptr, n: u32, from: u32, r: ptr, kind: u32) -> u32 {
+fn find_jdecl(body: ptr, n: u32, from: u32, r: ptr, kind: u32, mode: u32) -> u32 {
     let i: u32 = from;
     while i < n {
         if i == 0 || load8(body, i - 1) == 10 {
             let j0: u32 = skip_ht(body, i, n);
-            let j1: u32 = jm_public(body, j0, n);
-            let j2: u32 = jm_declmods(body, j1, n, kind);
+            let j2: u32 = jdecl_mods(body, j0, n, kind, mode);
             let kl: u32 = 0;
             let hit: u32 = 0;
             if kind == 0 {
                 if j2 + 5 <= n && eq(body, j2, "class") == 1 {
                     kl = 5;
                     hit = 1;
+                }
+                // C# 的"一坨有字段的值类型"最自然的写法是 `struct`（只收 class 的话，
+                // 一份 `public struct Frame { public byte tag; }` 会**静默丢掉整个类型**）
+                if mode == 4 {
+                    if j2 + 6 <= n && eq(body, j2, "struct") == 1 {
+                        kl = 6;
+                        hit = 1;
+                    }
                 }
             } else {
                 if j2 + 4 <= n && eq(body, j2, "enum") == 1 {
@@ -2025,15 +2141,23 @@ fn jtype(p: ptr, i: u32, n: u32) -> u32 {
 
 /// `_JAVA_CONST`：`^[ \t]*(?:(?:public|private|protected)[ \t]+)?static[ \t]+final[ \t]+`
 /// `([A-Za-z_][\w.]*)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(-?\d+)[ \t]*;`
-fn jm_const(mem: ptr, p: ptr, l: u32) -> u32 {
+/// C# 那边是 `_CS_CONST`：`const` **隐含 static**，所以没有 `static` 那一截；
+/// 可选修饰词里多一个 `internal`。
+fn jm_const(mem: ptr, p: ptr, l: u32, mode: u32) -> u32 {
     let jr: ptr = ptr_add(mem, M_JS);
     let i0: u32 = skip_ht(p, 0, l);
-    let i1: u32 = jmods(p, i0, l, 0);
+    let i1: u32 = jmods(p, i0, l, 0, mode);
     let a: u32 = jm_word(p, i1, l, "static");
+    if a == FAIL && mode == 4 {
+        a = i1;
+    }
     if a == FAIL {
         return 0;
     }
-    let b: u32 = jm_word(p, a, l, "final");
+    let b: u32 = jm_word(p, a, l, "const");
+    if b == FAIL && mode != 4 {
+        b = jm_word(p, a, l, "final");
+    }
     if b == FAIL {
         return 0;
     }
@@ -2089,10 +2213,10 @@ fn jm_const(mem: ptr, p: ptr, l: u32) -> u32 {
 
 /// `_JAVA_METHOD`：`^[ \t]*((?:public|private|protected|static|final|abstract|native|`
 /// `synchronized|default)[ \t]+)*(?:<[^>]+>[ \t]+)?` 类型 `[ \t]+` 名字 `[ \t]*\(([^)]*)\)`
-fn jm_method(mem: ptr, p: ptr, l: u32) -> u32 {
+fn jm_method(mem: ptr, p: ptr, l: u32, mode: u32) -> u32 {
     let jr: ptr = ptr_add(mem, M_JS);
     let i0: u32 = skip_ht(p, 0, l);
-    let i1: u32 = jmods(p, i0, l, 1);
+    let i1: u32 = jmods(p, i0, l, 1, mode);
     let g: u32 = i1;
     if g < l && load8(p, g) == 60 {
         let k: u32 = g + 1;
@@ -2146,10 +2270,10 @@ fn jm_method(mem: ptr, p: ptr, l: u32) -> u32 {
 }
 
 /// `_JAVA_FIELD`：修饰词 + 类型 + 名字 + `(?:=[^;]*)?;`，**整条到底**（`$`）。
-fn jm_field(mem: ptr, p: ptr, l: u32) -> u32 {
+fn jm_field(mem: ptr, p: ptr, l: u32, mode: u32) -> u32 {
     let jr: ptr = ptr_add(mem, M_JS);
     let i0: u32 = skip_ht(p, 0, l);
-    let i1: u32 = jmods(p, i0, l, 2);
+    let i1: u32 = jmods(p, i0, l, 2, mode);
     let ts: u32 = i1;
     let te: u32 = jtype(p, ts, l);
     if te == FAIL {
@@ -2194,17 +2318,17 @@ fn jm_field(mem: ptr, p: ptr, l: u32) -> u32 {
 /// 判一个成员是哪一类（`_from_class_lang` 那个顺序：**常量 -> 方法 -> 字段**）。
 /// 方法必须在字段之前 —— 抽象/native 方法以 `;` 结尾却带参数表，先判字段就会把它们丢掉。
 /// 返回 1=常量, 2=方法, 3=字段, 0=不收。
-fn jclassify(mem: ptr, body: ptr, s: u32, e: u32, norm: ptr) -> u32 {
+fn jclassify(mem: ptr, body: ptr, s: u32, e: u32, norm: ptr, mode: u32) -> u32 {
     let l: u32 = norm_of(body, s, e, norm);
-    if jm_const(mem, norm, l) == 1 {
+    if jm_const(mem, norm, l, mode) == 1 {
         return 1;
     }
-    if jm_method(mem, norm, l) == 1 {
+    if jm_method(mem, norm, l, mode) == 1 {
         return 2;
     }
     if l > 0 {
         if load8(norm, l - 1) == 59 {
-            if jm_field(mem, norm, l) == 1 {
+            if jm_field(mem, norm, l, mode) == 1 {
                 return 3;
             }
         }
@@ -2212,12 +2336,38 @@ fn jclassify(mem: ptr, body: ptr, s: u32, e: u32, norm: ptr) -> u32 {
     return 0;
 }
 
-/// Java 那张类型表（`JAVA_TYPES`）。命中写进 `d` 返回长度；无映射返回 0。
+/// Java / C# 那张类型表（`JAVA_TYPES` / `CS_TYPES`）。命中写进 `d` 返回长度；无映射返回 0。
 /// **`float`/`double` 与装箱类型（`Integer`/`Object`…）故意不在这张表里** —— 上游给的是
 /// 显式 `None`：装箱类型**可以为 null**，映成 `i32` 就把"可能没有值"丢了。
-fn jtable(d: ptr, s: ptr, m: u32) -> u32 {
+///
+/// ⚠ **两门唯一没落在同一格上的是 `byte`**：Java 有符号（`i8`）、C# 无符号（`u8`）。
+/// 搞反的后果**不是报错而是静默算错**（C# 里 `byte b = 200;` 会变成 -56）。
+fn jtable(d: ptr, s: ptr, m: u32, mode: u32) -> u32 {
     if m == 4 && eq(s, 0, "byte") == 1 {
+        if mode == 4 {
+            return put_lit(d, "u8");
+        }
         return put_lit(d, "i8");
+    }
+    if mode == 4 {
+        if m == 5 && eq(s, 0, "sbyte") == 1 {
+            return put_lit(d, "i8");
+        }
+        if m == 6 && eq(s, 0, "ushort") == 1 {
+            return put_lit(d, "u16");
+        }
+        if m == 4 && eq(s, 0, "uint") == 1 {
+            return put_lit(d, "u32");
+        }
+        if m == 5 && eq(s, 0, "ulong") == 1 {
+            return put_lit(d, "u64");
+        }
+        if m == 4 && eq(s, 0, "bool") == 1 {
+            return put_lit(d, "bool");
+        }
+        if m == 6 && eq(s, 0, "string") == 1 {
+            return put_lit(d, "str");
+        }
     }
     if m == 5 && eq(s, 0, "short") == 1 {
         return put_lit(d, "i16");
@@ -2235,17 +2385,21 @@ fn jtable(d: ptr, s: ptr, m: u32) -> u32 {
         // Java 的 `char` 是 **16 位无符号**（不是 C 的 8 位）
         return put_lit(d, "u16");
     }
-    if m == 7 && eq(s, 0, "boolean") == 1 {
-        return put_lit(d, "bool");
-    }
-    if m == 6 && eq(s, 0, "String") == 1 {
-        return put_lit(d, "str");
+    // `boolean` / `String` **只有 Java 那张表里有**（C# 写 `bool` / `string`）——
+    // 不挡的话 C# 的 `String x;` 会被这一支接下判成 `str`，而上游那边是"无映射"。
+    if mode != 4 {
+        if m == 7 && eq(s, 0, "boolean") == 1 {
+            return put_lit(d, "bool");
+        }
+        if m == 6 && eq(s, 0, "String") == 1 {
+            return put_lit(d, "str");
+        }
     }
     return 0;
 }
 
 /// `_lang_type` 里**不是数组**的那一半：known -> `<` 泛型 -> 查表。
-fn jl_atom(mem: ptr, t: ptr, tl: u32) -> u32 {
+fn jl_atom(mem: ptr, t: ptr, tl: u32, mode: u32) -> u32 {
     let d: ptr = ptr_add(mem, M_TYPE);
     if known_find(mem, t, 0, tl) == 1 {
         let _c: u32 = copy_n(d, 0, t, 0, tl);
@@ -2254,12 +2408,12 @@ fn jl_atom(mem: ptr, t: ptr, tl: u32) -> u32 {
     if find_ch(t, 0, tl, 60) != FAIL {
         return 0;
     }
-    return jtable(d, t, tl);
+    return jtable(d, t, tl, mode);
 }
 
 /// `_lang_type`: 归一化空白 -> `[]` 递归 -> known -> `<` 泛型 -> 查表。
 /// 命中把类型名写进 `M_TYPE` 返回长度；无映射返回 0。递归改循环（`[]` 只往后剥）。
-fn jl_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+fn jl_type(mem: ptr, p: ptr, off: u32, l: u32, mode: u32) -> u32 {
     let t: ptr = ptr_add(mem, M_JT);
     let tl: u32 = norm_of(p, off, off + l, t);
     let k: u32 = 0;
@@ -2270,7 +2424,7 @@ fn jl_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
     if tl == 0 {
         return 0;
     }
-    let base: u32 = jl_atom(mem, t, tl);
+    let base: u32 = jl_atom(mem, t, tl, mode);
     if base == 0 {
         return 0;
     }
@@ -2292,7 +2446,7 @@ fn jl_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
 }
 
 /// 参数表里每一段是不是 `类型 名字`（返回 1 = 全好）。逐段判、**不发射**。
-fn jparams_ok(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
+fn jparams_ok(mem: ptr, p: ptr, a: u32, b: u32, mode: u32) -> u32 {
     let sp0: ptr = ptr_add(mem, M_JS + J_SP0);
     let q: u32 = a;
     while q <= b {
@@ -2312,7 +2466,7 @@ fn jparams_ok(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
             if is_ident(p, ns, nl) == 0 {
                 return 0;
             }
-            if jl_type(mem, p, s2, ns - s2) == 0 {
+            if jl_type(mem, p, s2, ns - s2, mode) == 0 {
                 return 0;
             }
         }
@@ -2326,7 +2480,7 @@ fn jparams_ok(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
 }
 
 /// 逐条参数发 `{"name": .., "type": ..}`（调用方已确认都合法）。
-fn jparams_emit(mem: ptr, out: ptr, o: u32, p: ptr, a: u32, b: u32) -> u32 {
+fn jparams_emit(mem: ptr, out: ptr, o: u32, p: ptr, a: u32, b: u32, mode: u32) -> u32 {
     let sp0: ptr = ptr_add(mem, M_JS + J_SP0);
     let first: u32 = 1;
     let q: u32 = a;
@@ -2341,7 +2495,7 @@ fn jparams_emit(mem: ptr, out: ptr, o: u32, p: ptr, a: u32, b: u32) -> u32 {
         if e2 > s2 {
             let nl: u32 = last_tok(p, s2, e2, sp0);
             let ns: u32 = ld32(sp0, 0);
-            let tt: u32 = jl_type(mem, p, s2, ns - s2);
+            let tt: u32 = jl_type(mem, p, s2, ns - s2, mode);
             if first == 0 {
                 o = jl(out, o, ", ");
             }
@@ -2439,12 +2593,12 @@ fn jenum_variants(mem: ptr, body: ptr, a: u32, b: u32) -> u32 {
 }
 
 /// 枚举那一圈对 `known` 的贡献（上游在**类那一圈之前**做，且只有"有变体"的那些进 known）。
-fn jenum_known(mem: ptr) -> u32 {
+fn jenum_known(mem: ptr, mode: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
     let n: u32 = ld32(ptr_add(mem, M_SC), 0);
     let jr: ptr = ptr_add(mem, M_JS);
     let i: u32 = 0;
-    while find_jdecl(body, n, i, jr, 1) == 1 {
+    while find_jdecl(body, n, i, jr, 1, mode) == 1 {
         let ob: u32 = ld32(jr, J_OB);
         let ce: u32 = ld32(jr, J_CE);
         i = ob + 1;
@@ -2458,7 +2612,7 @@ fn jenum_known(mem: ptr) -> u32 {
 }
 
 /// 一个类体的成员里有几个字段能进对象（映射不上的不算）。判的时候用**当前** known。
-fn jfld_count(mem: ptr, body: ptr, ob: u32, ce: u32, norm: ptr) -> u32 {
+fn jfld_count(mem: ptr, body: ptr, ob: u32, ce: u32, norm: ptr, mode: u32) -> u32 {
     let cnt: u32 = class_members(mem, body, ob, ce);
     let jr: ptr = ptr_add(mem, M_JS);
     let got: u32 = 0;
@@ -2466,8 +2620,8 @@ fn jfld_count(mem: ptr, body: ptr, ob: u32, ce: u32, norm: ptr) -> u32 {
     while k < cnt {
         let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
         let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
-        if jclassify(mem, body, ms, me, norm) == 3 {
-            if jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL)) != 0 {
+        if jclassify(mem, body, ms, me, norm, mode) == 3 {
+            if jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL), mode) != 0 {
                 got = got + 1;
             }
         }
@@ -2477,16 +2631,16 @@ fn jfld_count(mem: ptr, body: ptr, ob: u32, ce: u32, norm: ptr) -> u32 {
 }
 
 /// 类里的方法 -> `functions`。`known` 按上游的增量顺序走：枚举先、每进一个类先补它的名字。
-fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
+fn j_emit_functions(mem: ptr, out: ptr, o: u32, mode: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
     let n: u32 = ld32(ptr_add(mem, M_SC), 0);
     let jr: ptr = ptr_add(mem, M_JS);
     let norm: ptr = ptr_add(mem, M_NORM);
     let _rst: u32 = known_reset(mem);
-    let _ek: u32 = jenum_known(mem);
+    let _ek: u32 = jenum_known(mem, mode);
     let first: u32 = 1;
     let i: u32 = 0;
-    while find_jdecl(body, n, i, jr, 0) == 1 {
+    while find_jdecl(body, n, i, jr, 0, mode) == 1 {
         let ob: u32 = ld32(jr, J_OB);
         let ce: u32 = ld32(jr, J_CE);
         let cns: u32 = ld32(jr, J_NO);
@@ -2494,14 +2648,14 @@ fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
         i = ob + 1;
         if ce != FAIL {
             let cnt: u32 = class_members(mem, body, ob + 1, ce);
-            if jfld_count(mem, body, ob + 1, ce, norm) > 0 {
+            if jfld_count(mem, body, ob + 1, ce, norm, mode) > 0 {
                 let _ka: u32 = known_add(mem, ptr_add(body, cns), cnl);
             }
             let k: u32 = 0;
             while k < cnt {
                 let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
                 let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
-                if jclassify(mem, body, ms, me, norm) == 2 {
+                if jclassify(mem, body, ms, me, norm, mode) == 2 {
                     let mnl: u32 = ld32(jr, J_NL2);
                     let mns: u32 = ld32(jr, J_NS);
                     let ctor: u32 = 0;
@@ -2511,10 +2665,10 @@ fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
                         }
                     }
                     if ctor == 0 {
-                        let rtl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                        let rtl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL), mode);
                         if rtl != 0 {
                             let _sv: u32 = copy_n(ptr_add(mem, M_TXT), 0, ptr_add(mem, M_TYPE), 0, rtl);
-                            if jparams_ok(mem, norm, ld32(jr, J_PS), ld32(jr, J_PL)) == 1 {
+                            if jparams_ok(mem, norm, ld32(jr, J_PS), ld32(jr, J_PL), mode) == 1 {
                                 if first == 0 {
                                     o = jl(out, o, ", ");
                                 }
@@ -2522,7 +2676,7 @@ fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
                                 o = jl(out, o, "{\"name\": ");
                                 o = jq(out, o, norm, mns, mnl);
                                 o = jl(out, o, ", \"params\": [");
-                                o = jparams_emit(mem, out, o, norm, ld32(jr, J_PS), ld32(jr, J_PL));
+                                o = jparams_emit(mem, out, o, norm, ld32(jr, J_PS), ld32(jr, J_PL), mode);
                                 o = jl(out, o, "], \"ret\": ");
                                 o = jq(out, o, ptr_add(mem, M_TXT), 0, rtl);
                                 let lead: u32 = 0;
@@ -2558,14 +2712,14 @@ fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
 }
 
 /// 类里的常量 -> `consts`（同名只发一次；类型必须是整型）。
-fn j_emit_consts(mem: ptr, out: ptr, o: u32) -> u32 {
+fn j_emit_consts(mem: ptr, out: ptr, o: u32, mode: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
     let n: u32 = ld32(ptr_add(mem, M_SC), 0);
     let jr: ptr = ptr_add(mem, M_JS);
     let norm: ptr = ptr_add(mem, M_NORM);
     let first: u32 = 1;
     let i: u32 = 0;
-    while find_jdecl(body, n, i, jr, 0) == 1 {
+    while find_jdecl(body, n, i, jr, 0, mode) == 1 {
         let ob: u32 = ld32(jr, J_OB);
         let ce: u32 = ld32(jr, J_CE);
         i = ob + 1;
@@ -2575,11 +2729,11 @@ fn j_emit_consts(mem: ptr, out: ptr, o: u32) -> u32 {
             while k < cnt {
                 let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
                 let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
-                if jclassify(mem, body, ms, me, norm) == 1 {
+                if jclassify(mem, body, ms, me, norm, mode) == 1 {
                     let ns: u32 = ld32(jr, J_NS);
                     let nl: u32 = ld32(jr, J_NL2);
                     if const_seen(mem, norm, ns, nl) == 0 {
-                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL), mode);
                         if tl != 0 {
                             if is_int_type(mem, tl) == 1 {
                                 if first == 0 {
@@ -2620,13 +2774,13 @@ fn j_emit_consts(mem: ptr, out: ptr, o: u32) -> u32 {
 }
 
 /// Java 的 `enum Name { A, B, C }` -> `enums`（**不是 class**，类那一圈抓不到它）。
-fn j_emit_enums(mem: ptr, out: ptr, o: u32) -> u32 {
+fn j_emit_enums(mem: ptr, out: ptr, o: u32, mode: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
     let n: u32 = ld32(ptr_add(mem, M_SC), 0);
     let jr: ptr = ptr_add(mem, M_JS);
     let first: u32 = 1;
     let i: u32 = 0;
-    while find_jdecl(body, n, i, jr, 1) == 1 {
+    while find_jdecl(body, n, i, jr, 1, mode) == 1 {
         let ob: u32 = ld32(jr, J_OB);
         let ce: u32 = ld32(jr, J_CE);
         i = ob + 1;
@@ -2657,23 +2811,23 @@ fn j_emit_enums(mem: ptr, out: ptr, o: u32) -> u32 {
 }
 
 /// 类 -> `types`（字段全映射不上的那些类**整类丢掉**，与上游同）。
-fn j_emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
+fn j_emit_types(mem: ptr, out: ptr, o: u32, mode: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
     let n: u32 = ld32(ptr_add(mem, M_SC), 0);
     let jr: ptr = ptr_add(mem, M_JS);
     let norm: ptr = ptr_add(mem, M_NORM);
     let _rst: u32 = known_reset(mem);
-    let _ek: u32 = jenum_known(mem);
+    let _ek: u32 = jenum_known(mem, mode);
     let first: u32 = 1;
     let i: u32 = 0;
-    while find_jdecl(body, n, i, jr, 0) == 1 {
+    while find_jdecl(body, n, i, jr, 0, mode) == 1 {
         let ob: u32 = ld32(jr, J_OB);
         let ce: u32 = ld32(jr, J_CE);
         let cns: u32 = ld32(jr, J_NO);
         let cnl: u32 = ld32(jr, J_NL);
         i = ob + 1;
         if ce != FAIL {
-            if jfld_count(mem, body, ob + 1, ce, norm) > 0 {
+            if jfld_count(mem, body, ob + 1, ce, norm, mode) > 0 {
                 let cnt: u32 = class_members(mem, body, ob + 1, ce);
                 if first == 0 {
                     o = jl(out, o, ", ");
@@ -2687,8 +2841,8 @@ fn j_emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
                 while k < cnt {
                     let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
                     let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
-                    if jclassify(mem, body, ms, me, norm) == 3 {
-                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                    if jclassify(mem, body, ms, me, norm, mode) == 3 {
+                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL), mode);
                         if tl != 0 {
                             if fst2 == 0 {
                                 o = jl(out, o, ", ");
@@ -2712,7 +2866,7 @@ fn j_emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
 }
 
 /// Java 那一门的主干（`_from_class_lang`）。
-fn build_java(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+fn build_class(mem: ptr, srcn: u32, argp: ptr, al: u32, mode: u32) -> u32 {
     let src: ptr = ptr_add(mem, M_SRC);
     let src2: ptr = ptr_add(mem, M_SRC2);
     let body: ptr = ptr_add(mem, M_BODY);
@@ -2721,22 +2875,27 @@ fn build_java(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let _b: u32 = blank_noise(src2, n2, body, 0);
     let _n: u32 = st32(ptr_add(mem, M_SC), 0, n2);
     let _sl: u32 = st32(ptr_add(mem, M_SC), 16, srcn);
-    let _m: u32 = st32(ptr_add(mem, M_SC), 8, 3);
+    let _m: u32 = st32(ptr_add(mem, M_SC), 8, mode);
     let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
     let out: ptr = ptr_add(mem, M_OUT);
     let o1: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
     let un: u32 = unit_name(mem, argp, al);
     let idb: ptr = ptr_add(mem, M_IDENT);
     let o2: u32 = jq(out, o1, idb, 0, un);
-    let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"java\"");
+    let o3: u32 = o2;
+    if mode == 4 {
+        o3 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"csharp\"");
+    } else {
+        o3 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"java\"");
+    }
     let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
-    let o5: u32 = j_emit_functions(mem, out, o4);
+    let o5: u32 = j_emit_functions(mem, out, o4, mode);
     let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
-    let o7: u32 = j_emit_consts(mem, out, o6);
+    let o7: u32 = j_emit_consts(mem, out, o6, mode);
     let o8: u32 = jl(out, o7, "], \"enums\": [");
-    let o9: u32 = j_emit_enums(mem, out, o8);
+    let o9: u32 = j_emit_enums(mem, out, o8, mode);
     let o10: u32 = jl(out, o9, "], \"types\": [");
-    let o11: u32 = j_emit_types(mem, out, o10);
+    let o11: u32 = j_emit_types(mem, out, o10, mode);
     let o12: u32 = jl(out, o11, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
     return o12;
 }
@@ -2825,10 +2984,21 @@ fn _start() -> u32 {
     let l1: u32 = arg_at(cb, tot, 1, ap);
     let o1: u32 = ld32(ap, 0);
     if l1 == 0 {
-        return fail("lompotc: usage: lompotc [--cpp|--java] <src>\n");
+        return fail("lompotc: usage: lompotc [--cpp|--java|--csharp] <src>\n");
     }
     let mode: u32 = 1;
     let a1: ptr = ptr_add(cb, o1);
+    if l1 == 8 && eq(a1, 0, "--csharp") == 1 {
+        mode = 4;
+        let lc: u32 = arg_at(cb, tot, 2, ap);
+        let oc: u32 = ld32(ap, 0);
+        if lc == 0 {
+            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp] <src>\n");
+        }
+        l1 = lc;
+        o1 = oc;
+        a1 = ptr_add(cb, oc);
+    }
     if l1 == 6 && eq(a1, 0, "--java") == 1 {
         mode = 3;
         let lj: u32 = arg_at(cb, tot, 2, ap);
@@ -2861,8 +3031,8 @@ fn _start() -> u32 {
     let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
     syscall4(3, jf as u64, 0, 0);
     let o: u32 = 0;
-    if mode == 3 {
-        o = build_java(mem, srcn as u32, pp, l1);
+    if mode == 3 || mode == 4 {
+        o = build_class(mem, srcn as u32, pp, l1, mode);
     } else {
         o = build(mem, srcn as u32, pp, l1);
     }

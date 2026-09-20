@@ -724,6 +724,104 @@ def test_lompotc_twin_matches_from_java():
               f"产出的对象逐字节相同")
 
 
+#: C# 那一门（与 Java **同一份引擎**，只是方言表不同）自己带的输入。每一份钉住
+#: **两门真正不同的那一处**：`const` 对 `static final`、`struct` 也在形状里、
+#: 修饰词表那一张（`internal` / `sealed` / `partial` / `async` …），以及 **`byte` 的符号性**。
+_CS_BATTERY = {
+    # ---- 形状：class / struct / namespace / Allman
+    "cs_class": "public class A {\n    public int x;\n}\n",
+    "cs_struct": "public struct Frame {\n    public byte tag;\n}\n",
+    "cs_struct_mods": "internal readonly struct P {\n    public int x;\n}\n",
+    "cs_struct_empty": "public struct S { }\n",
+    "cs_static_class": "public static class A {\n    public const int K = 1;\n}\n",
+    "cs_namespace_allman": ("using System;\n\nnamespace LomentDemo\n{\n"
+                            "    public class A\n    {\n        public int x;\n    }\n}\n"),
+    "cs_interface_ignored": "public interface I {\n    int F();\n}\n",
+    "cs_nested_struct": ("public struct Outer\n{\n"
+                         "    public struct Inner { public int x; }\n"
+                         "    public int y;\n}\n"),
+    # ---- 类型表：这一族里**唯一**没落在同一格上的是 `byte`
+    "cs_byte_unsigned": "class A {\n    public byte b;\n    public sbyte s;\n}\n",
+    "cs_numeric": ("class A {\n    public ushort a;\n    public uint b;\n"
+                   "    public ulong c;\n    public short d;\n    public long e;\n}\n"),
+    "cs_bool_string_char": ("class A {\n    public bool a;\n    public string b;\n"
+                            "    public char c;\n}\n"),
+    "cs_javawords": "class A {\n    public String s;\n    public boolean b;\n}\n",
+    "cs_generic_field": "class A {\n    public List<int> xs;\n}\n",
+    "cs_readonly_field": "class A {\n    private readonly int x;\n}\n",
+    # ---- 常量：C# 是 `const`（隐含 static），没有 `static final` 那一截
+    "cs_const": "class A {\n    public const int K = 5;\n}\n",
+    "cs_const_internal": "class A {\n    internal const long K = -3;\n}\n",
+    "cs_const_no_mod": "class A {\n    const int K = 7;\n}\n",
+    "cs_static_final_is_not_const": "class A {\n    static final int K = 5;\n}\n",
+    "cs_const_string": "class A {\n    public const string S = \"x\";\n}\n",
+    "cs_const_expr": "class A {\n    public const int K = 1 + 2;\n}\n",
+    # ---- 方法/字段的修饰词表（认不出来 = **静默丢一个函数**）
+    "cs_internal_method": "class A {\n    internal static int F() { return 1; }\n}\n",
+    "cs_sealed_override": "class A {\n    public sealed override int F() { return 1; }\n}\n",
+    "cs_async": "class A {\n    public async int F() { return 1; }\n}\n",
+    "cs_virtual_void": "class A {\n    public virtual void F() { }\n}\n",
+    "cs_ctor": "class A {\n    public A() { }\n    public int f() { return 1; }\n}\n",
+    "cs_expr_body": "class A {\n    public int F() => 1;\n}\n",
+    "cs_multi_declarator": "class A {\n    public int a, b;\n}\n",
+    "cs_attribute": "class A {\n    [Obsolete]\n    public int x;\n}\n",
+    "cs_generic_method": "class A {\n    public T Get<T>(int a) { return a; }\n}\n",
+    # ---- 枚举（与 Java 同形）
+    "cs_enum": "class A {\n    public enum E { X, Y }\n    private E e;\n}\n",
+    "cs_struct_enum": "struct S {\n    enum E { A }\n    private E v;\n}\n",
+}
+
+
+@test
+def test_lompotc_twin_matches_from_csharp():
+    """**C# 那一门也在同一份孪生里**（`lompotc --csharp`）。
+
+    上游 `from_csharp` 与 `from_java` **共用** `_from_class_lang`（`docs/188` §7.1 的
+    "一份解析器 + 方言表"），差异只有四张正则与一张类型表：
+
+      * 声明形状：C# 多收 `struct`（`public struct Frame { public byte tag; }` ——
+        只收 `class` 的话整个类型**静默消失**），而且修饰词是**一整张反复的表**
+        （连 `public` 都在表里），与 Java 那个"可选 `public` + 反复的 final/abstract"不同形；
+      * 常量：C# 是 `const`（**隐含 static**），Java 是 `static final`；
+      * 成员修饰词表：C# 的 `internal` / `sealed` / `partial` / `async` 不在 Java 那张里
+        —— 共用一张的话一条 `internal static int F()` 会掉进"以 `;` 结尾 = 字段"那支
+        被丢掉（**静默丢一个函数**）；
+      * 类型表：**`byte` 是两门唯一没落在同一格上的**（C# 无符号 ⇒ `u8`，Java 有符号
+        ⇒ `i8`）；另外 C# 有 `sbyte`/`ushort`/`uint`/`ulong`/`string`，而 Java 的
+        `String`/`boolean` 在 C# 里**不该**映射。
+
+    覆盖面：`loment/cstrans/` 三份语料 + `_CS_BATTERY`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "cstrans").glob("*.cs")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".cs", v) for k, v in sorted(_CS_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want = json.dumps(potato_from.from_csharp(src, name, "strict")[0],
+                              ensure_ascii=False)
+            r = subprocess.run([str(exe), "--csharp", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            if r.returncode != 0 or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份与 from_csharp 不同（前 2）:\n"
+                         + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
+                                      for n, rc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 C#：Loment 前端与 `potato_from.from_csharp` "
+              f"产出的对象逐字节相同")
+
+
 @test
 def test_lompotc_twin_selfhost_compiles():
     """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""
