@@ -48,6 +48,7 @@ import cstrans  # noqa: E402
 import ctrans  # noqa: E402
 import jtrans  # noqa: E402
 import lomelf  # noqa: E402
+import pytrans  # noqa: E402  (Python 那一门的上游)
 import lomentc  # noqa: E402
 import loment_ctrans_test as T  # noqa: E402  (第 16 格那四张前端电池)
 import trans_core  # noqa: E402
@@ -261,6 +262,223 @@ def test_lomtrans_twin_matches_translate_csharp():
     常量标志词（Java 是 `final`）—— 混了的话常量声明会被当成函数体里的一条语句。
     """
     _diff("csharp", cstrans.CSHARP, ".cs", [x for x in _EXTRA if x[2] is cstrans.CSHARP])
+
+
+#: Python 那一门（`--lang python`）自己带的输入。**这一门的机器与前四门不一样** ——
+#: 前四门吃花括号与分号，这台吃换行与缩进，所以要钉的是**块怎么划、缩进怎么算**。
+_PY_BATTERY = {
+    # ---- 基本形状
+    "py_basic": "def f(a: int, b: int) -> int:\n    return a + b\n",
+    "py_assign": "def f(a: int) -> int:\n    x = a * 2\n    return x\n",
+    "py_call": "def g(a: int) -> int:\n    return a + 1\n\n"
+               "def f(a: int) -> int:\n    return g(a) + g(a * 2)\n",
+    "py_pass": "def f() -> int:\n    pass\n",
+
+    # ---- 文档字符串：模块那一条发 `//`、函数那一条发 `///`，而且**在函数头之前**
+    "py_fn_doc": 'def f(a: int) -> int:\n'
+                 '    """Line one.\n\n    Line two.\n    """\n    return a\n',
+    "py_mod_doc": '"""Module doc.\n\nMore.\n"""\n\nX = 3\n\n'
+                  'def f(a: int) -> int:\n    return a + X\n',
+    "py_doc_empty_line": 'def f() -> int:\n    """a\n\nb\n"""\n    return 1\n',
+
+    # ---- 常量（模块级全大写）
+    "py_const": "X = 3\n\ndef f(a: int) -> int:\n    return a + X\n",
+    "py_const_neg": "NEG = -7\n\ndef f(a: int) -> int:\n    return a + NEG\n",
+    "py_const_lower": "x = 3\n",
+    "py_const_bad": "X = 's'\n",
+
+    # ---- 块：if / elif / else / while / for（含嵌套）
+    "py_if": "def f(x: int) -> int:\n    if x < 0:\n        return 0 - 1\n"
+             "    return 0\n",
+    "py_if_chain": "def f(x: int) -> int:\n    if x < 0:\n        return 0 - 1\n"
+                   "    elif x == 0:\n        return 0\n    else:\n        return 1\n",
+    "py_if_nested": "def f(a: int, b: int) -> int:\n    if a > 0:\n"
+                    "        if b > 0:\n            return 1\n        return 2\n"
+                    "    return 0\n",
+    "py_while": "def f(n: int) -> int:\n    s = 0\n    while n > 0:\n"
+                "        s = s + n\n        n = n - 1\n    return s\n",
+    "py_for1": "def f(n: int) -> int:\n    s = 0\n    for i in range(4):\n"
+               "        s = s + i\n    return s\n",
+    "py_for2": "def f(a: int, b: int) -> int:\n    s = 0\n    for i in range(a, b):\n"
+               "        s = s + i\n    return s\n",
+    "py_for_reassigns_outer":
+        "def f(n: int) -> int:\n    i = 9\n    for i in range(n):\n"
+        "        pass\n    return i\n",
+
+    # ---- 表达式：两个方向的 bool/int、n 元 and/or、一元、位运算、比较、十六进制
+    "py_bool_cond": "def f(a: int, b: int) -> int:\n    if a and b:\n        return 1\n"
+                    "    if a or b:\n        return 2\n    return 0\n",
+    "py_and3": "def f(a: int, b: int, c: int) -> int:\n"
+               "    if a and b and c:\n        return 1\n    return 0\n",
+    "py_not": "def f(a: int) -> int:\n    if not a:\n        return 1\n    return 0\n",
+    "py_cmps": "def f(a: int, b: int) -> int:\n    if a < b:\n        return 1\n"
+               "    if a <= b:\n        return 2\n    if a != b:\n        return 3\n"
+               "    return 0\n",
+    "py_unary": "def f(a: int) -> int:\n    x = -a\n    y = ~a\n    z = +a\n"
+                "    return x + y + z\n",
+    "py_bits": "def f(a: int, b: int) -> int:\n"
+               "    return (a & b) | (a ^ b) | (a << 1) | (b >> 1)\n",
+    "py_hex": "def f() -> int:\n    return 0x1f + 0b101 + 0o17 + 1_000\n",
+    "py_aug": "def f(a: int, n: int) -> int:\n    acc = 0\n    for i in range(n):\n"
+              "        acc += i * a\n    return acc\n",
+    "py_bool_var": "def f(a: int, b: int) -> int:\n    x = a < b\n    return 0\n",
+    "py_bool_ret": "def f(a: int, b: int) -> bool:\n    return a < b\n",
+    "py_none_ret": "def f(a: int) -> None:\n    pass\n",
+    "py_ann_assign": "def f(a: int) -> int:\n    x: int = a\n    y: bool = a > 0\n"
+                     "    return x\n",
+
+    # ---- 保留字加后缀
+    "py_reserved": "def f(module: int) -> int:\n    match = module\n    return match\n",
+
+    # ---- 缩进与换行的边角
+    "py_crlf": "def f(a: int) -> int:\r\n    return a\r\n",
+    "py_blank_lines": "def f(a: int) -> int:\n\n    x = a\n\n\n    return x\n",
+    "py_comment_lines": "def f(a: int) -> int:\n    # lead\n    return a\n",
+    "py_trailing_comment": "def f(a: int) -> int:\n    return a  # note\n",
+    "py_empty": "",
+    "py_comment_only": "# nothing\n",
+
+    # ---- 拒收（退出码 1）与解析不过（退出码 2）
+    "py_bool_as_int": "def f(a: int, b: int) -> int:\n    return a and b\n",
+    "py_chain_cmp": "def f(a: int, b: int, c: int) -> int:\n"
+                    "    if a < b < c:\n        return 1\n    return 0\n",
+    "py_pow": "def f(a: int) -> int:\n    return a ** 2\n",
+    "py_truediv": "def f(a: int) -> int:\n    return a / 2\n",
+    "py_break": "def f(a: int) -> int:\n    while a > 0:\n        break\n    return 0\n",
+    "py_no_annot": "def f(a) -> int:\n    return a\n",
+    "py_no_ret": "def f(a: int):\n    return a\n",
+    "py_default": "def f(a: int = 3) -> int:\n    return a\n",
+    "py_vararg": "def f(a: int, *rest: int) -> int:\n    return a\n",
+    "py_kwonly": "def f(a: int, *, b: int) -> int:\n    return a\n",
+    "py_posonly": "def f(a: int, /, b: int) -> int:\n    return a\n",
+    "py_decorator": "@deco\ndef f(a: int) -> int:\n    return a\n",
+    "py_float": "def f(a: int) -> int:\n    return a + 1.5\n",
+    "py_module_stmt": "x = 3\n",
+    "py_import": "import os\n\ndef f(a: int) -> int:\n    return a\n",
+    "py_stray_str": 'def f(a: int) -> int:\n    return a\n\n"stray"\n',
+    "py_for_var_assign": "def f(n: int) -> int:\n    for i in range(n):\n"
+                         "        i = 5\n    return 0\n",
+    "py_while_for_var": "def f(n: int) -> int:\n    while n > 0:\n"
+                        "        for i in range(2):\n            i = 9\n"
+                        "        n = n - 1\n    return 0\n",
+    "py_undeclared": "def f(a: int) -> int:\n    return zz\n",
+    "py_async": "async def f(a: int) -> int:\n    return a\n",
+    "py_class": "class C:\n    pass\n",
+}
+
+
+def _py_want(src: str, keep=None, consts=None) -> tuple[str, int]:
+    """上游那两档错 -> (文本, 退出码)。与 `_EXTRA` 那条路同一个口径。"""
+    try:
+        return pytrans.translate(src, keep=keep, consts=consts), 0
+    except pytrans.Unsupported:
+        return "", 1
+    except (pytrans.PyError, SyntaxError):
+        return "", 2
+
+
+@test
+def test_lomtrans_twin_matches_pytrans():
+    """**Python 那一门的翻译器也有了 Loment 版**（S1 第二十格）。
+
+    前四门（C / C++ / Java / C#）是"花括号 + 分号"那一族，共用一台词法器与一台递归下降；
+    Python 是**换行 + 缩进**，所以孪生那边是**另写的一套**：一台会造 INDENT / DEDENT 的
+    词法器、一台吃缩进的递归下降、一个独立的发射器。
+
+    覆盖面：`loment/pytrans/` 六份语料 + `_PY_BATTERY`。比 **stdout 逐字节 + 退出码**
+    （1 = 子集外 / 2 = 解析不过）。
+
+    **一处已知的子集外**：一行多条语句（`x = 1; y = 2`）。上游按 `;` 切开、两边都收，
+    这里不做 —— 但**会出声**（退出码 1，不是不声不响地少发一条语句）。下一条判据钉着它。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "pytrans").glob("*.py")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".py", v) for k, v in sorted(_PY_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="")
+            want, wrc = _py_want(src)
+            r = subprocess.run([str(exe), "--lang", "python", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            if r.returncode != wrc or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, wrc, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (
+            f"{len(bad)}/{len(cases)} 份与 pytrans 不同（前 2）:\n"
+            + "\n".join(f"  {n}: rc={rc}/{wrc}\n    py={w!r}\n    tw={g!r}"
+                         for n, rc, wrc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 Python：Loment 版与 `pytrans.translate` "
+              f"产出的源码逐字节相同，退出码也一致")
+
+
+@test
+def test_lomtrans_python_keeps_and_consts():
+    """`--keep` 与 `--const` 在 Python 那一门也要对得上。
+
+    `--const` 在这门是**另一回事**：上游 `cenv` 是"模块常量 + 调用方给的"两张表合成
+    （`dict.update` 的语义，**同名的以调用方为准**）—— 而模块常量本身照旧要发成
+    `pub const`。这一条语料逼不出来，所以单独钉一条。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases = [
+            ("keep", "def a(x: int) -> int:\n    return x\n\n"
+                     "def b(y: int) -> int:\n    return y + 1\n", {"a"}, None),
+            ("const_ext", "def f(a: int) -> int:\n    return a + K\n", None, {"K"}),
+            ("const_override", "K = 1\n\ndef f(a: int) -> int:\n    return a\n",
+             None, {"K"}),
+        ]
+        bad = []
+        for name, src, keep, consts in cases:
+            fp = td / (name + ".py")
+            fp.write_text(src, encoding="utf-8", newline="")
+            cargs = {k: "i64" for k in consts} if consts else None
+            want, wrc = _py_want(src, keep=keep, consts=cargs)
+            argv = [str(exe), "--lang", "python", str(fp)]
+            if keep:
+                argv += ["--keep", ",".join(sorted(keep))]
+            if cargs:
+                argv += ["--const", ",".join(f"{k}:{v}" for k, v in sorted(cargs.items()))]
+            r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", shell=False, timeout=120)
+            if r.returncode != wrc or r.stdout != want:
+                bad.append((name, r.returncode, wrc, want, r.stdout))
+        assert not bad, ("\n".join(f"  {n}: rc={rc}/{wrc}\n    py={w!r}\n    tw={g!r}"
+                                    for n, rc, wrc, w, g in bad))
+        print(f"      {len(cases)} 份：`--keep` 与 `--const` 与上游一致")
+
+
+@test
+def test_lomtrans_python_out_of_subset_is_loud():
+    """这一门**不做**的那一处（一行多条语句）必须**出声**。
+
+    `x = 1; y = 2` 上游按 `;` 切开收成两条语句，这一门一条都不收。**不收可以，但得说**
+    —— 静默少发一条语句，产物照样编得过，只是少算一步（`docs/167` 那条）。
+    判的是**有没有声音**，不是有没有收。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        fp = td / "semi.py"
+        fp.write_text("def f(a: int) -> int:\n    x = 1; y = 2\n    return x\n",
+                      encoding="utf-8", newline="")
+        r = subprocess.run([str(exe), "--lang", "python", str(fp)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           shell=False, timeout=120)
+        assert r.returncode == 1, f"rc={r.returncode}（该报子集外）"
+        assert r.stdout == "", f"一行多条语句不该悄悄发出去一半：{r.stdout!r}"
+        print("      一行多条语句：不收，报子集外（退出码 1），不静默")
 
 
 @test

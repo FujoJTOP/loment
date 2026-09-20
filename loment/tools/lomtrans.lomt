@@ -30,7 +30,7 @@
 //      先分清"是读错了还是发错了"。
 //   3. 名字表/节点表容量固定（超了**报错**，不静默丢）。
 //
-// 用法: `lomtrans --lang <c|cpp|java|csharp> [--keep a,b] [--extern f:i32] [--const K:i32] <src>`
+// 用法: `lomtrans --lang <c|cpp|java|csharp|python> [--keep a,b] [--extern f:i32] [--const K:i32] <src>`
 
 module lomtrans
 
@@ -64,7 +64,6 @@ const M_KP: u32 = 1406976;         // FNMAX*12    -> 1413120 （`--keep` 表）
 const M_EX: u32 = 1413120;         // FNMAX*16    -> 1421312 （`--extern` 表）
 const M_EXN: u32 = 1421312;        // 16384       -> 1437696 （外部名/常量名的池子）
 const M_EB: u32 = 1437696;         // 65536       -> 1503232 （拼一行的暂存）
-const M_CAP: u32 = 1503232;
 
 // 记号一条
 const TK_OFF: u32 = 0;             // 文本起点（M_SCR 里）
@@ -80,6 +79,7 @@ const ND_C: u32 = 12;
 const ND_D: u32 = 16;
 const ND_E: u32 = 20;
 const ND_LINE: u32 = 24;
+const ND_F: u32 = 28;             // 第八个字（Python 的 `for` 要放体的条数）
 
 const NK_LIT: u32 = 1;
 const NK_VAR: u32 = 2;
@@ -99,6 +99,7 @@ const DL_C: u32 = 0;
 const DL_CPP: u32 = 1;
 const DL_JAVA: u32 = 2;
 const DL_CS: u32 = 3;
+const DL_PY: u32 = 4;              // Python（换行 + 缩进那一门）
 
 const NONE: u32 = 0;               // "没有这个孩子"（节点下标从 1 起）
 const FAIL: u32 = 4294967295;
@@ -303,6 +304,7 @@ const SEG_CONST_WORDS: u32 = 7;
 const SEG_LKW: u32 = 8;            // **Loment 自己的保留字**（`safe()` 查这个）
 const SEG_SAFE: u32 = 9;           // 撞上保留字时加的后缀（每门不同）
 const SEG_INTDEF: u32 = 10;        // 补转换时用的整数类型名（四门都是 `i32`）
+const SEG_PYSAFE: u32 = 11;        // Python 那一门撞上保留字时加的后缀（`_py`）
 
 /// 把一段 NUL 分隔的词表拼进 `M_WORD`（`o` 是写入位置），返回新位置。
 fn put_words(mem: ptr, o: u32, words: str) -> u32 {
@@ -396,6 +398,17 @@ fn seg_reset(mem: ptr) -> u32 {
 /// 字面量逐条对齐，加一门只加一段）。
 fn init_dialect(mem: ptr, lang: u32) -> u32 {
     let _r: u32 = seg_reset(mem);
+    if lang == DL_PY {
+        // Python 那一门只要两张表：**撞上本语言保留字时加什么后缀**，以及
+        // 判"这个词是不是保留字"。别的段（类型拼法、语句关键字…）它一概不用 ——
+        // 它那台解析器是另写的（换行 + 缩进），与花括号那一族不共用。
+        let _9: u32 = seg_put(mem, SEG_LKW, "module\nuse\nfn\nlet\nif\nelse\nwhile\nreturn\npub\nextern\nconst\nstruct\nenum\ncapability\nguard\nexcluded\nrevocable\ntrait\nimpl\nmatch\nas\ntrue\nfalse\nmut\naddin\nchoose\ncommand\nforuse\ncomefor\nbyuse\nstd\ndispatch\nself");
+        let _10: u32 = seg_put(mem, SEG_PYSAFE, "_py");
+        let _11: u32 = seg_put(mem, SEG_INTDEF, "i64");
+        let _b1: u32 = st32(pst(mem), E_I2B, 1);
+        let _b2: u32 = st32(pst(mem), E_B2I, 0);
+        return 0;
+    }
     if lang == DL_C {
         let _1: u32 = seg_put(mem, SEG_TYPES, "int=i32\nunsigned=u32\nunsigned int=u32\nsigned=i32\nsigned int=i32\nlong=i64\nlong int=i64\nunsigned long=u64\nunsigned long int=u64\nvoid=()");
         let _2: u32 = seg_put(mem, SEG_TYPE_WORDS, "int\nunsigned\nsigned\nlong\nvoid");
@@ -1223,6 +1236,7 @@ fn node_new(mem: ptr, kind: u32, line: u32) -> u32 {
     let _e: u32 = st32(nd, idx * 32 + ND_D, 0);
     let _f: u32 = st32(nd, idx * 32 + ND_E, 0);
     let _g: u32 = st32(nd, idx * 32 + ND_LINE, line);
+    let _j: u32 = st32(nd, idx * 32 + ND_F, 0);
     let _h: u32 = st32(ptr_add(mem, M_TMP), 20, idx);
     return idx;
 }
@@ -2617,11 +2631,16 @@ fn cli_pairs(mem: ptr, vp: ptr, vl: u32, is_const: u32) -> u32 {
                 let cp: u32 = find_ch(vp, a, b, 58);
                 if is_const == 1 {
                     let ne: u32 = b - a;
+                    let cty: u32 = 7;              // 不带 `:类型` 时按 `i64`（上游模块常量就是 i64）
                     if cp != FAIL {
                         ne = cp - a;
+                        cty = ty_id(ptr_add(vp, cp + 1), b - cp - 1);
+                        if cty == 0 {
+                            return 0;
+                        }
                     }
                     let co: u32 = aux_put(mem, vp, a, ne);
-                    let _ca: u32 = const_add(mem, co, ne);
+                    let _ca: u32 = const_add(mem, co, ne, cty);
                 } else {
                     if cp == FAIL {
                         return 0;
@@ -2676,7 +2695,7 @@ fn const_find(mem: ptr, a: u32, l: u32) -> u32 {
     return 0;
 }
 
-fn const_add(mem: ptr, a: u32, l: u32) -> u32 {
+fn const_add(mem: ptr, a: u32, l: u32, ty: u32) -> u32 {
     let st: ptr = ptr_add(mem, M_TMP);
     let n: u32 = ld32(st, E_CN);
     if n >= VMAX - 1 {
@@ -2685,6 +2704,7 @@ fn const_add(mem: ptr, a: u32, l: u32) -> u32 {
     let r: ptr = ptr_add(mem, M_CN);
     let _1: u32 = st32(r, n * 12, a);
     let _2: u32 = st32(r, n * 12 + 4, l);
+    let _3: u32 = st32(r, n * 12 + 8, ty);
     return st32(st, E_CN, n + 1);
 }
 
@@ -3273,6 +3293,2666 @@ fn emit_unit(mem: ptr, ustart: u32, ucnt: u32) -> u32 {
     return 1;
 }
 
+// ================================================================ Python（第五门）
+//
+// `--lang python` 对着 `tools/pytrans.py` 移植 —— **语法树 -> Loment 源码**那一条路
+// （与 `lompotc --python` 不是一回事：那一半是"源 -> Potato 对象"）。
+//
+// **这一门的机器与前四门不一样**：C / C++ / Java / C# 那几个是"花括号 + 分号"，
+// 解析器一套；Python 是**换行 + 缩进**，块由空白决定。所以这里是一台**自己的**词法器
+// （带 INDENT / DEDENT）与一台**自己的**递归下降。
+//
+// 与 `pytrans.py` 的关系：那边坐在 CPython 的 `ast` 上，这边自己读源码。三条口径要
+// 逐条对齐（写在下面各处注解里）：
+//
+//   * **数字一律按十进制发**（`raw(Constant int)` 是 `str(e.value)`）—— 与 C 那几门
+//     "原文照抄"不同：`0x1f` 这里要发成 `31`。
+//   * **`for i in range(a, b)` 是一条定义**（`pytrans` 文件头 §`for`）：降级成
+//     `let i: i64 = a; while i < b { …; i = i + 1; }`，**两个后果都照做** ——
+//     循环走完 `i` 是 `b`（不是 `b-1`），且**循环体里给 `i` 赋值要报错**
+//     （那条降级式在那种写法下不成立）。`while` 的体里直接声明的 `for` 变量也一并
+//     进那张"不许赋值"的表，与上游 `_loopvars` 逐字对齐。
+//   * **`bool` 与 `int`**：`bool -> int` **不转、报错**（Python 的 `bool` 是 `int` 的
+//     子类、`and`/`or` 返回**操作数**，那个意思本语言表达不出来）；`int -> bool`
+//     在条件位置**转**成 `x != 0`。与 C 那门"两个方向都补"正好相反，判据是同一条。
+//
+// **刻意偏离**（与那几门同样的三条）：只报类别不报文案（退出码 1 = 子集外 /
+// 2 = 解析不过）、名字表与节点表容量固定（超了报错不静默丢）。
+//
+// ⚠ 参数下标的口径在本文件里不统一，**用之前先看签名那行**：`(a, b)` 是**半开区间**、
+// `(a, l)` 是**起点+长度**。上一次混了这两个，症状是每条注解都"无映射"。
+
+// ---------------------------------------------------------------- Python 那一门的状态
+//
+// 都放在 `M_TMP + 1000` 之后（li 那两张表到 +828，发射器那几格在 840..900）。
+const PY_TOKS: u32 = 1000;         // 词法器: 记号数
+const PY_ERR: u32 = 1004;          // 0 好 / 1 子集外 / 2 解析不过
+const PY_ERRLN: u32 = 1008;        // 出错的行号
+const PY_LSTK: u32 = 1012;         // 缩进栈（32 层 × 4）
+const PY_LCNT: u32 = 1140;         // 缩进栈的深度（栈顶下标）
+const PY_PI: u32 = 1144;           // 解析器游标（第几个记号）
+const PY_CN: u32 = 1148;           // 常量表条数
+const PY_VN: u32 = 1152;           // 变量表条数
+const PY_FTN: u32 = 1156;          // "循环变量"表条数
+const PY_SAV: u32 = 1160;          // 它的存/取点（`while` 那一支用）
+const PY_LINE: u32 = 1164;         // 当前记号的行号
+const PY_MDOC: u32 = 1168;         // 模块文档字符串（在 `M_PS` 里的 off/len）
+const PY_MDL: u32 = 1172;
+const PY_MPS: u32 = 1176;          // `M_PS` 的游标
+const PY_MCN: u32 = 1180;          // **模块级**常量的条数（调用方给的不发 `pub const`）
+
+/// 常量 / 变量共用的表: (名字 off, 名字 len, 类型 id)
+const M_PC: u32 = 1503232;         // 128*20 = 2560 -> 1505792   常量表（带值）
+const M_PV: u32 = 1505792;         // 128*12 = 1536 -> 1507328   变量表
+const M_PF: u32 = 1507328;         // 64*8   = 512  -> 1507840   循环变量表
+const M_PS: u32 = 1507840;         // 16384         -> 1524224   解出来的文档字符串
+const M_RS: u32 = 1524224;         // 1024          -> 1525248   Python 解析器的暂存格
+const M_CAP: u32 = 1525248;
+
+const CT_NO: u32 = 0;
+const CT_NL: u32 = 4;
+const CT_TY: u32 = 8;
+
+// 记号种类（前三个与前四门同号，后三个是这一门独有）
+const PT_ID: u32 = 1;
+const PT_NUM: u32 = 2;
+const PT_OP: u32 = 3;
+const PT_NL: u32 = 4;              // 逻辑行结束
+const PT_IND: u32 = 5;             // 缩进加深
+const PT_DED: u32 = 6;             // 缩进回到上一层
+const PT_STR: u32 = 7;             // 字符串字面量（只有文档字符串用得上）
+
+fn pyt(mem: ptr) -> ptr {
+    return ptr_add(mem, M_TOK);
+}
+
+fn pt_kind(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(ptr_add(mem, M_TMP), PY_TOKS) {
+        return 0;
+    }
+    return ld32(pyt(mem), k * 16 + 8);
+}
+
+fn pt_off(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(ptr_add(mem, M_TMP), PY_TOKS) {
+        return 0;
+    }
+    return ld32(pyt(mem), k * 16 + 0);
+}
+
+fn pt_len(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(ptr_add(mem, M_TMP), PY_TOKS) {
+        return 0;
+    }
+    return ld32(pyt(mem), k * 16 + 4);
+}
+
+fn pt_line(mem: ptr, k: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), PY_TOKS);
+    if n == 0 {
+        return 1;
+    }
+    if k >= n {
+        return ld32(pyt(mem), (n - 1) * 16 + 12);
+    }
+    return ld32(pyt(mem), k * 16 + 12);
+}
+
+/// 词法出错（都是"这份 Python 本身有问题"那一类）。
+fn pt_err(mem: ptr, line: u32) -> u32 {
+    let _a: u32 = st32(ptr_add(mem, M_TMP), PY_ERR, 2);
+    let _b: u32 = st32(ptr_add(mem, M_TMP), PY_ERRLN, line);
+    return 0;
+}
+
+/// 子集外出错（"没实现"那一类）。
+fn pt_uns(mem: ptr, line: u32) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), PY_ERR) == 0 {
+        let _a: u32 = st32(ptr_add(mem, M_TMP), PY_ERR, 1);
+        let _b: u32 = st32(ptr_add(mem, M_TMP), PY_ERRLN, line);
+    }
+    return 0;
+}
+
+fn pt_put(mem: ptr, kind: u32, off: u32, ln: u32, line: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let k: u32 = ld32(st, PY_TOKS);
+    if k >= 16000 {
+        let _e: u32 = pt_err(mem, line);
+        return 0;
+    }
+    let _1: u32 = st32(pyt(mem), k * 16 + 0, off);
+    let _2: u32 = st32(pyt(mem), k * 16 + 4, ln);
+    let _3: u32 = st32(pyt(mem), k * 16 + 8, kind);
+    let _4: u32 = st32(pyt(mem), k * 16 + 12, line);
+    let _5: u32 = st32(st, PY_TOKS, k + 1);
+    return 1;
+}
+
+/// 缩进 = 前导空白的**宽度**（制表按 8 对齐算 —— Python 的口径；语料是纯空格）。
+fn pt_indent(src: ptr, i: u32, j: u32) -> u32 {
+    let w: u32 = 0;
+    let k: u32 = i;
+    while k < j {
+        let c: u32 = load8(src, k);
+        if c == 32 {
+            w = w + 1;
+        } else {
+            if c == 9 {
+                w = (w / 8) * 8 + 8;
+            } else {
+                return w;
+            }
+        }
+        k = k + 1;
+    }
+    return w;
+}
+
+fn pt_is_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+fn pt_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 97 + 10;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 65 + 10;
+    }
+    return 99;
+}
+
+/// 一个数字字面量的**值**（`0x1f` / `0o17` / `0b101` / `1_000` / 十进制）。
+/// 词法器把它放进记号的 `off` 那一格 —— 这一门发的是十进制值，不是原文
+/// （上游 `raw` 就是 `str(e.value)`，与 C 那几门照抄原文不同）。
+fn pt_number(src: ptr, i: u32, j: u32) -> u32 {
+    let base: u32 = 10;
+    let k: u32 = i;
+    if load8(src, k) == 48 && k + 1 < j {
+        let d: u32 = load8(src, k + 1);
+        if d == 120 || d == 88 {
+            base = 16;
+            k = k + 2;
+        }
+        if d == 111 || d == 79 {
+            base = 8;
+            k = k + 2;
+        }
+        if d == 98 || d == 66 {
+            base = 2;
+            k = k + 2;
+        }
+    }
+    let v: u32 = 0;
+    while k < j {
+        let c: u32 = load8(src, k);
+        if c != 95 {
+            let dg: u32 = pt_hexval(c);
+            if dg >= base {
+                return v;
+            }
+            v = v * base + dg;
+        }
+        k = k + 1;
+    }
+    return v;
+}
+
+/// 一个字符串字面量（含引号）扫到哪儿结束；返回**闭引号之后**的下标。
+/// 三引号跨行；单引号串到行尾为止。
+fn pt_str_end(src: ptr, n: u32, q: u32, k: u32) -> u32 {
+    let tq: u32 = 0;
+    if k + 2 < n && load8(src, k + 1) == q && load8(src, k + 2) == q {
+        tq = 1;
+    }
+    let j: u32 = k + 1;
+    if tq == 1 {
+        j = k + 3;
+    }
+    while j < n {
+        let d: u32 = load8(src, j);
+        if d == 92 {
+            j = j + 2;
+        } else {
+            if d == q {
+                if tq == 0 {
+                    return j + 1;
+                }
+                if j + 2 < n && load8(src, j + 1) == q && load8(src, j + 2) == q {
+                    return j + 3;
+                }
+                j = j + 1;
+            } else {
+                if d == 10 && tq == 0 {
+                    return j;
+                }
+                j = j + 1;
+            }
+        }
+    }
+    return n;
+}
+
+/// 词法器。与上游 `ast` 的差别只有一处要记：**这里自己造 INDENT / DEDENT**
+/// （`ast` 把缩进做进树里，我们没有树）。
+///
+/// 缩进只在**逻辑行**的首个记号处比：空行与纯注释行不算（Python 也这么定）。
+/// 括号里换行不算逻辑行结束（隐式续行）。
+fn py_lex(mem: ptr, src: ptr, n: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _z1: u32 = st32(st, PY_TOKS, 0);
+    let _z2: u32 = st32(st, PY_ERR, 0);
+    let _z3: u32 = st32(st, PY_LCNT, 0);
+    let i: u32 = 0;
+    let line: u32 = 1;
+    let depth: u32 = 0;                        // 括号深度（>0 时不结束逻辑行）
+    let at_start: u32 = 1;                     // 这一行的首个记号还没出现
+    let first: u32 = 1;                        // 整个文件的第一行
+    while i < n {
+        if at_start == 1 {
+            let j: u32 = i;
+            while j < n && load8(src, j) != 10 {
+                j = j + 1;
+            }
+            let k: u32 = pt_indent(src, i, j);
+            let c: u32 = 0;
+            if i + k < j {
+                c = load8(src, i + k);
+            }
+            if c == 0 || c == 35 {
+                // 空行或纯注释行: 不动缩进栈
+                i = j + 1;
+                if j < n {
+                    line = line + 1;
+                }
+            } else {
+                let ind: u32 = k;
+                if first == 1 && ind != 0 {
+                    let _e: u32 = pt_err(mem, line);
+                    return 0;
+                }
+                first = 0;
+                let top: u32 = ld32(st, PY_LCNT);
+                let cur: u32 = ld32(st, PY_LSTK + top * 4);
+                if ind > cur {
+                    if top >= 30 {
+                        let _e: u32 = pt_err(mem, line);
+                        return 0;
+                    }
+                    let _p: u32 = st32(st, PY_LCNT, top + 1);
+                    let _q: u32 = st32(st, PY_LSTK + (top + 1) * 4, ind);
+                    let _t: u32 = pt_put(mem, PT_IND, 0, 0, line);
+                } else {
+                    if ind < cur {
+                        // ⚠ 先看"要不要弹"，**再看栈空没空** —— 反过来的话，最后一层
+                        // 弹到栈底（0）时会被当成"缩进不合法"报出来：
+                        // 两个函数之间那一下必然弹到 0，于是**多函数模块一条都发不出来**。
+                        let going: u32 = 1;
+                        while going == 1 {
+                            let t2: u32 = ld32(st, PY_LCNT);
+                            if ld32(st, PY_LSTK + t2 * 4) > ind {
+                                if t2 == 0 {
+                                    let _e: u32 = pt_err(mem, line);
+                                    return 0;
+                                }
+                                let _p: u32 = st32(st, PY_LCNT, t2 - 1);
+                                let _t: u32 = pt_put(mem, PT_DED, 0, 0, line);
+                            } else {
+                                going = 0;
+                            }
+                        }
+                        if ld32(st, PY_LSTK + ld32(st, PY_LCNT) * 4) != ind {
+                            let _e: u32 = pt_err(mem, line);
+                            return 0;
+                        }
+                    }
+                }
+                i = i + ind;
+                at_start = 0;
+            }
+        } else {
+            let c: u32 = load8(src, i);
+            if c == 32 || c == 9 || c == 13 {
+                i = i + 1;
+            } else {
+                if c == 10 {
+                    if depth > 0 {
+                        i = i + 1;
+                        line = line + 1;
+                    } else {
+                        let _t: u32 = pt_put(mem, PT_NL, 0, 0, line);
+                        i = i + 1;
+                        line = line + 1;
+                        at_start = 1;
+                    }
+                } else {
+                    if c == 35 {
+                        while i < n && load8(src, i) != 10 {
+                            i = i + 1;
+                        }
+                    } else {
+                        if c == 92 && i + 1 < n && load8(src, i + 1) == 10 {
+                            i = i + 2;             // 显式续行
+                            line = line + 1;
+                        } else {
+                            if is_id0(c) == 1 {
+                                // 名字；`r"…"` / `f"…"` 那种前缀串也在这里认出
+                                let j: u32 = i;
+                                while j < n && is_w(load8(src, j)) == 1 {
+                                    j = j + 1;
+                                }
+                                let pre: u32 = j - i;
+                                let q: u32 = 0;
+                                if j < n {
+                                    q = load8(src, j);
+                                }
+                                if (q == 34 || q == 39) && pre <= 2 {
+                                    if pre == 1 && (c == 114 || c == 82) {
+                                        let e: u32 = pt_str_end(src, n, q, j);
+                                        let _t: u32 = pt_put(mem, PT_STR, i, e - i, line);
+                                        i = e;
+                                    } else {
+                                        if pre == 0 {
+                                            let e: u32 = pt_str_end(src, n, q, j);
+                                            let _t: u32 = pt_put(mem, PT_STR, i, e - i, line);
+                                            i = e;
+                                        } else {
+                                            // `f` / `b` / `u` 前缀: 本子集不收（早拒比晚拒好）
+                                            let _u: u32 = pt_uns(mem, line);
+                                            return 0;
+                                        }
+                                    }
+                                } else {
+                                    let _t: u32 = pt_put(mem, PT_ID, i, j - i, line);
+                                    i = j;
+                                }
+                            } else {
+                                if pt_is_digit(c) == 1 {
+                                    let j: u32 = i;
+                                    while j < n && (is_w(load8(src, j)) == 1
+                                                    || load8(src, j) == 46) {
+                                        j = j + 1;
+                                    }
+                                    if find_ch(src, i, j, 46) != FAIL {
+                                        let _u: u32 = pt_uns(mem, line);   // 浮点
+                                        return 0;
+                                    }
+                                    let v: u32 = pt_number(src, i, j);
+                                    let _t: u32 = pt_put(mem, PT_NUM, v, 0, line);
+                                    i = j;
+                                } else {
+                                    if c == 34 || c == 39 {
+                                        let e: u32 = pt_str_end(src, n, c, i);
+                                        let _t: u32 = pt_put(mem, PT_STR, i, e - i, line);
+                                        i = e;
+                                    } else {
+                                        let l: u32 = py_op_len(src, i, n);
+                                        if l == 0 {
+                                            let _e: u32 = pt_err(mem, line);
+                                            return 0;
+                                        }
+                                        if l == 1 && load8(src, i) == 40 {
+                                            depth = depth + 1;
+                                        }
+                                        if l == 1 && load8(src, i) == 41 {
+                                            if depth > 0 {
+                                                depth = depth - 1;
+                                            }
+                                        }
+                                        if l == 1 && (load8(src, i) == 91
+                                                      || load8(src, i) == 123) {
+                                            depth = depth + 1;
+                                        }
+                                        if l == 1 && (load8(src, i) == 93
+                                                      || load8(src, i) == 125) {
+                                            if depth > 0 {
+                                                depth = depth - 1;
+                                            }
+                                        }
+                                        let _t: u32 = pt_put(mem, PT_OP, i, l, line);
+                                        i = i + l;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 收尾: 补一个逻辑行结束，再把缩进栈弹空
+    if ld32(st, PY_TOKS) > 0 && pt_kind(mem, ld32(st, PY_TOKS) - 1) != PT_NL {
+        let _t: u32 = pt_put(mem, PT_NL, 0, 0, line);
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let t2: u32 = ld32(st, PY_LCNT);
+        if t2 == 0 {
+            going = 0;
+        } else {
+            let _p: u32 = st32(st, PY_LCNT, t2 - 1);
+            let _t: u32 = pt_put(mem, PT_DED, 0, 0, line);
+        }
+    }
+    let _t: u32 = pt_put(mem, 0, 0, 0, line);
+    return 1;
+}
+
+/// Python 这一门的运算符长度（最长优先）。**只收子集里的那些** —— 其余交给上游
+/// 那套"点名拒"的老规矩：能一眼看出是哪个词就报哪个词。
+fn py_op_len(src: ptr, i: u32, n: u32) -> u32 {
+    if i + 1 < n {
+        let a: u32 = load8(src, i);
+        let b: u32 = load8(src, i + 1);
+        let two: u32 = 0;
+        if (a == 42 && b == 42) || (a == 47 && b == 47) {
+            two = 1;                                   // `**` `//`
+        }
+        if (a == 60 && b == 60) || (a == 62 && b == 62) {
+            two = 1;                                   // `<<` `>>`
+        }
+        if (a == 60 && b == 61) || (a == 62 && b == 61) {
+            two = 1;                                   // `<=` `>=`
+        }
+        if (a == 61 && b == 61) || (a == 33 && b == 61) {
+            two = 1;                                   // `==` `!=`
+        }
+        if (a == 43 && b == 61) || (a == 45 && b == 61) {
+            two = 1;                                   // `+=` `-=`
+        }
+        if (a == 42 && b == 61) || (a == 47 && b == 61) {
+            two = 1;                                   // `*=` `/=`
+        }
+        if (a == 37 && b == 61) || (a == 38 && b == 61) {
+            two = 1;                                   // `%=` `&=`
+        }
+        if (a == 124 && b == 61) || (a == 94 && b == 61) {
+            two = 1;                                   // `|=` `^=`
+        }
+        if a == 45 && b == 62 {
+            two = 1;                                   // `->`（漏了它 = 每条注解都读不出来）
+        }
+        if two == 1 {
+            return 2;
+        }
+    }
+    let c: u32 = load8(src, i);
+    if c == 43 || c == 45 || c == 42 || c == 47 || c == 37 || c == 38 || c == 124
+            || c == 94 || c == 126 || c == 60 || c == 62 || c == 40 || c == 41
+            || c == 91 || c == 93 || c == 123 || c == 125 || c == 44 || c == 58
+            || c == 46 || c == 61 || c == 59 || c == 64 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 解析
+//
+// 一台**自己的**递归下降 —— 前四门那台吃的是花括号与分号，这台吃换行与缩进。
+// 语法树仍用同一张节点表（`M_NODE`），只有两处是新加的：
+//   * `NK_PFOR` —— Python 的 `for i in range(a, b)`，形状与 C 那门不同
+//     （**不改名外提**：上游用的是同一个 `_safe` 名字）
+//   * `NK_DOC`  —— 文档字符串（上游把它转成 `///` 注释发出去，**带走不是丢掉**）
+// 另加一个 `NK_PASS`（什么都不发）。`NK_UN` 多两个编号：3 = `~`、4 = 一元 `+`。
+
+const NK_PFOR: u32 = 13;
+const NK_DOC: u32 = 14;
+const NK_PASS: u32 = 15;
+const NK_BOOL: u32 = 16;           // `and` / `or` —— **n 元**（`a and b and c` 是一个节点）
+
+const UN_SUB: u32 = 1;             // 一元 `-`
+const UN_NOT: u32 = 2;             // `not`
+const UN_INV: u32 = 3;             // `~`
+const UN_POS: u32 = 4;             // 一元 `+`
+
+fn pp(st: ptr, c: u32) -> u32 {
+    return st32(ptr_add(st, 0), 0, 0);
+}
+
+fn pp_i(mem: ptr) -> u32 {
+    return ld32(ptr_add(mem, M_TMP), PY_PI);
+}
+
+fn pp_err(mem: ptr) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), PY_ERR) == 0 {
+        let _a: u32 = st32(ptr_add(mem, M_TMP), PY_ERR, 2);
+        let _b: u32 = st32(ptr_add(mem, M_TMP), PY_ERRLN,
+                           pt_line(mem, ld32(ptr_add(mem, M_TMP), PY_PI)));
+    }
+    return 0;
+}
+
+/// 子集外 —— **只在还没有错的时候写**（第一个错才是根因）。
+fn pp_uns(mem: ptr) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), PY_ERR) == 0 {
+        let _a: u32 = st32(ptr_add(mem, M_TMP), PY_ERR, 1);
+        let _b: u32 = st32(ptr_add(mem, M_TMP), PY_ERRLN,
+                           pt_line(mem, ld32(ptr_add(mem, M_TMP), PY_PI)));
+    }
+    return 0;
+}
+
+/// 第 `k` 个记号（从游标数）是文本 `text` 吗。
+fn pp_at(mem: ptr, src: ptr, text: str, k: u32) -> u32 {
+    let j: u32 = ld32(ptr_add(mem, M_TMP), PY_PI) + k;
+    let l: u32 = pt_len(mem, j);
+    if l != str_len(text) {
+        return 0;
+    }
+    return eq(src, pt_off(mem, j), text);
+}
+
+fn pp_is(mem: ptr, src: ptr, text: str) -> u32 {
+    return pp_at(mem, src, text, 0);
+}
+
+fn pp_next(mem: ptr) -> u32 {
+    return st32(ptr_add(mem, M_TMP), PY_PI, ld32(ptr_add(mem, M_TMP), PY_PI) + 1);
+}
+
+/// 吃一个文本记号；不在就报"解析不过"。
+fn pp_want(mem: ptr, src: ptr, text: str) -> u32 {
+    if pp_at(mem, src, text, 0) == 0 {
+        return pp_err(mem);
+    }
+    let _n: u32 = pp_next(mem);
+    return 1;
+}
+
+fn pp_kind(mem: ptr, k: u32) -> u32 {
+    return pt_kind(mem, ld32(ptr_add(mem, M_TMP), PY_PI) + k);
+}
+
+fn pp_off(mem: ptr, k: u32) -> u32 {
+    return pt_off(mem, ld32(ptr_add(mem, M_TMP), PY_PI) + k);
+}
+
+/// 吃一个名字（`outp` 收 (off, len)）；不是名字就报错。
+fn pp_id(mem: ptr, outp: ptr) -> u32 {
+    if pp_kind(mem, 0) != PT_ID {
+        let _e: u32 = pp_err(mem);
+        return 0;
+    }
+    let _a: u32 = st32(outp, 0, pp_off(mem, 0));
+    let _b: u32 = st32(outp, 4, pt_len(mem, ld32(ptr_add(mem, M_TMP), PY_PI)));
+    let _n: u32 = pp_next(mem);
+    return 1;
+}
+
+/// 注解 -> 类型 id。**只收 `int` / `bool` / `None`**（上游 `_TYPES` 那三条），
+/// 别的与"没有注解"一样都是**子集外**（`_ty_of_annotation` 两条都抛）。
+fn pp_type(mem: ptr, src: ptr) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI);
+    let o: u32 = pt_off(mem, k);
+    let l: u32 = pt_len(mem, k);
+    if pt_kind(mem, k) != PT_ID {
+        let _u: u32 = pp_uns(mem);
+        return 0;
+    }
+    if l == 3 && eq(src, o, "int") == 1 {
+        let _n: u32 = pp_next(mem);
+        return 7;                                  // `i64`
+    }
+    if l == 4 && eq(src, o, "bool") == 1 {
+        let _n: u32 = pp_next(mem);
+        return 9;
+    }
+    if l == 4 && eq(src, o, "None") == 1 {
+        let _n: u32 = pp_next(mem);
+        return 10;                                 // `()`
+    }
+    let _u: u32 = pp_uns(mem);
+    return 0;
+}
+
+/// 一个字符串字面量 -> 解出来的文本写进 `M_PS` 的游标处，返回 (off, len)；
+/// 失败返回 0。`frac` 收两格。
+///
+/// **要解转义**：`ast.Constant.value` 是解过的，而上游拿它去 `strip().splitlines()`。
+/// `r"…"` 那种原始串不解（前缀 `r`/`R` 时跳过反斜杠处理）。
+fn pp_str(mem: ptr, src: ptr, frac: ptr) -> u32 {
+    if pp_kind(mem, 0) != PT_STR {
+        let _e: u32 = pp_err(mem);
+        return 0;
+    }
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI);
+    let o: u32 = pt_off(mem, k);
+    let l: u32 = pt_len(mem, k);
+    let raw: u32 = 0;
+    if l >= 2 && (load8(src, o) == 114 || load8(src, o) == 82)
+            && (load8(src, o + 1) == 34 || load8(src, o + 1) == 39) {
+        raw = 1;
+        o = o + 1;
+        l = l - 1;
+    }
+    let q: u32 = load8(src, o);
+    // ⚠ 引号**占几个字节**（1 或 3），不是"0 或 3 的标记" —— 第一版写成
+    // `o + 1 + tq` / `o + l - 1 - tq`，三引号那两处**各偏一格**，于是正文的首字符被吃掉
+    //（`" + ' + "a" + BS + "nb" + ' + "` 解出来是 `" + BS + "nb`，少了个 `a`）。
+    let ql: u32 = 1;
+    if l >= 6 && load8(src, o + 1) == q && load8(src, o + 2) == q {
+        ql = 3;
+    }
+    let b: u32 = o + ql;
+    let e: u32 = o + l - ql;
+    let st: ptr = ptr_add(mem, M_TMP);
+    let c: u32 = ld32(st, PY_MPS);
+    let i: u32 = b;
+    let out: u32 = c;
+    while i < e {
+        let ch: u32 = load8(src, i);
+        if ch == 92 && raw == 0 && i + 1 < e {
+            let d: u32 = load8(src, i + 1);
+            let put: u32 = 0;
+            let adv: u32 = 2;
+            if d == 110 {
+                put = 10;
+            }
+            if d == 116 {
+                put = 9;
+            }
+            if d == 114 {
+                put = 13;
+            }
+            if d == 48 {
+                put = 0;
+            }
+            if d == 92 {
+                put = 92;
+            }
+            if d == 34 {
+                put = 34;
+            }
+            if d == 39 {
+                put = 39;
+            }
+            if put == 0 {
+                store8(ptr_add(mem, M_PS), out, 92 as u8);
+                out = out + 1;
+                put = d;
+            }
+            store8(ptr_add(mem, M_PS), out, put as u8);
+            out = out + 1;
+            i = i + adv;
+        } else {
+            store8(ptr_add(mem, M_PS), out, ch as u8);
+            out = out + 1;
+            i = i + 1;
+        }
+    }
+    let _s: u32 = st32(st, PY_MPS, out);
+    let _a: u32 = st32(frac, 0, c);
+    let _b: u32 = st32(frac, 4, out - c);
+    let _n: u32 = pp_next(mem);
+    return 1;
+}
+
+/// 一个逻辑行结束（`PT_NL`）。**上游没有这一层** —— 换行不生成节点，
+/// 所以"吞掉行尾"这件事在这里是显式的，漏一处就是把下一条语句读进这一条里。
+fn pp_end(mem: ptr, src: ptr) -> u32 {
+    if pp_is(mem, src, ";") == 1 {
+        // 一行多条语句（`x = 1; y = 2`）—— 行结束的位置来了个 `;`。
+        // **不收，但出声**：静默少一条语句是最坏的那一档。
+        let _u: u32 = pp_uns(mem);
+        return 0;
+    }
+    if pp_kind(mem, 0) != PT_NL {
+        return pp_err(mem);
+    }
+    let _n: u32 = pp_next(mem);
+    return 1;
+}
+
+/// `:` NL IND … DED —— `outp` 收 (start, count)。
+fn pp_block(mem: ptr, src: ptr, outp: ptr) -> u32 {
+    if pp_want(mem, src, ":") == 0 {
+        return 0;
+    }
+    if pp_end(mem, src) == 0 {
+        return 0;
+    }
+    if pp_kind(mem, 0) != PT_IND {
+        return pp_err(mem);
+    }
+    let _n: u32 = pp_next(mem);
+    if li_enter(mem) == FAIL {
+        return pp_err(mem);
+    }
+    let a0: u32 = li_here(mem);
+    let cnt: u32 = 0;
+    let first: u32 = 1;
+    let going: u32 = 1;
+    while going == 1 {
+        if pp_kind(mem, 0) == PT_DED {
+            going = 0;
+        } else {
+            if pp_kind(mem, 0) == 0 {
+                going = 0;
+            } else {
+                if first == 1 && pp_kind(mem, 0) == PT_STR {
+                    // 函数的第一条是字符串 -> 文档字符串（**只认第一条**，
+                    // 与 `ast` 那条 `body[0]` 一样；后面再出现就是"散落的字符串"）
+                    let frac: ptr = ptr_add(mem, M_RS + 216);
+                    if pp_str(mem, src, frac) == 0 {
+                        return 0;
+                    }
+                    if pp_end(mem, src) == 0 {
+                        return 0;
+                    }
+                    let d: u32 = node_new(mem, NK_DOC, 0);
+                    let _d1: u32 = nd_set(mem, d, ND_A, ld32(frac, 0));
+                    let _d2: u32 = nd_set(mem, d, ND_B, ld32(frac, 4));
+                    let _p0: u32 = li_push(mem, d);
+                    cnt = cnt + 1;
+                    first = 0;
+                } else {
+                    first = 0;
+                    let s: u32 = pp_stmt(mem, src);
+                    if s == 0 {
+                        return 0;
+                    }
+                    let _p: u32 = li_push(mem, s);
+                    cnt = cnt + 1;
+                }
+            }
+        }
+    }
+    let _lv: u32 = li_leave(mem);
+    if pp_kind(mem, 0) == PT_DED {
+        let _n2: u32 = pp_next(mem);
+    }
+    let _a: u32 = st32(outp, 0, a0);
+    let _b: u32 = st32(outp, 4, cnt);
+    return 1;
+}
+
+// ---- 表达式（优先级由低到高，与 Python 一致）
+
+fn pp_expr(mem: ptr, src: ptr) -> u32 {
+    return pp_or(mem, src);
+}
+
+fn pp_or(mem: ptr, src: ptr) -> u32 {
+    let first: u32 = pp_and(mem, src);
+    if first == 0 {
+        return 0;
+    }
+    if pp_is(mem, src, "or") == 0 {
+        return first;
+    }
+    return pp_boolop(mem, src, 18, first);
+}
+
+fn pp_and(mem: ptr, src: ptr) -> u32 {
+    let first: u32 = pp_not(mem, src);
+    if first == 0 {
+        return 0;
+    }
+    if pp_is(mem, src, "and") == 0 {
+        return first;
+    }
+    return pp_boolop(mem, src, 17, first);
+}
+
+/// `and` / `or` 收成**一个 n 元节点** —— 上游那个 `BoolOp` 是 `values` 列表，
+/// 发出来是 `(a && b && c)`；写成左结合的二叉树会多出两层括号（逐字节就不一样了）。
+fn pp_boolop(mem: ptr, src: ptr, code: u32, first: u32) -> u32 {
+    if li_enter(mem) == FAIL {
+        return pp_err(mem);
+    }
+    let a0: u32 = li_here(mem);
+    let _p: u32 = li_push(mem, first);
+    let n: u32 = 1;
+    let going: u32 = 1;
+    while going == 1 {
+        let hit: u32 = 0;
+        if code == 17 && pp_is(mem, src, "and") == 1 {
+            hit = 1;
+        }
+        if code == 18 && pp_is(mem, src, "or") == 1 {
+            hit = 1;
+        }
+        if hit == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_not(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            let _p2: u32 = li_push(mem, r);
+            n = n + 1;
+        }
+    }
+    let _lv: u32 = li_leave(mem);
+    let x: u32 = node_new(mem, NK_BOOL, 0);
+    let _a: u32 = nd_set(mem, x, ND_A, code);
+    let _b: u32 = nd_set(mem, x, ND_B, a0);
+    let _c: u32 = nd_set(mem, x, ND_C, n);
+    return x;
+}
+
+fn pp_not(mem: ptr, src: ptr) -> u32 {
+    if pp_is(mem, src, "not") == 1 {
+        let _n: u32 = pp_next(mem);
+        let e: u32 = pp_not(mem, src);
+        if e == 0 {
+            return 0;
+        }
+        let x: u32 = node_new(mem, NK_UN, 0);
+        let _a: u32 = nd_set(mem, x, ND_A, UN_NOT);
+        let _b: u32 = nd_set(mem, x, ND_B, e);
+        return x;
+    }
+    return pp_cmp(mem, src);
+}
+
+/// 比较。**只收单比较** —— 链式比较（`a < b < c`）里中间那个只求值一次，
+/// 拆成两句会求两次，上游因此点名拒（`len(e.ops) != 1`）。
+fn pp_cmp(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_bor(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let c: u32 = pp_cmpop(mem, src);
+    if c == 0 {
+        return left;
+    }
+    let _n: u32 = pp_next(mem);
+    let r: u32 = pp_bor(mem, src);
+    if r == 0 {
+        return 0;
+    }
+    let x: u32 = node_new(mem, NK_BIN, 0);
+    let _a: u32 = nd_set(mem, x, ND_A, c);
+    let _b: u32 = nd_set(mem, x, ND_B, left);
+    let _c: u32 = nd_set(mem, x, ND_C, r);
+    if pp_cmpop(mem, src) != 0 {
+        let _u: u32 = pp_uns(mem);                 // 链式比较
+        return 0;
+    }
+    return x;
+}
+
+/// 比较运算符的编号（0 = 不是）。链式那一处也靠它判。
+fn pp_cmpop(mem: ptr, src: ptr) -> u32 {
+    if pp_is(mem, src, "==") == 1 {
+        return 12;
+    }
+    if pp_is(mem, src, "!=") == 1 {
+        return 13;
+    }
+    if pp_is(mem, src, "<=") == 1 {
+        return 10;
+    }
+    if pp_is(mem, src, ">=") == 1 {
+        return 11;
+    }
+    if pp_is(mem, src, "<") == 1 {
+        return 8;
+    }
+    if pp_is(mem, src, ">") == 1 {
+        return 9;
+    }
+    if pp_is(mem, src, "=") == 1 {
+        // `x = 1` 走到这里说明它出现在表达式位置（`a = b = 1` 那种）—— 上游的
+        // `ast` 把它当两条赋值，这里只有单目标，所以**报子集外**，不是解析不过。
+        let _u: u32 = pp_uns(mem);
+        return 0;
+    }
+    return 0;
+}
+
+fn pp_bor(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_bxor(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        if pp_is(mem, src, "|") == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_bxor(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, 16, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_bxor(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_band(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        if pp_is(mem, src, "^") == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_band(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, 15, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_band(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_shift(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        if pp_is(mem, src, "&") == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_shift(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, 14, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_shift(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_arith(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = 0;
+        if pp_is(mem, src, "<<") == 1 {
+            c = 6;
+        }
+        if pp_is(mem, src, ">>") == 1 {
+            c = 7;
+        }
+        if c == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_arith(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, c, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_arith(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_term(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = 0;
+        if pp_is(mem, src, "+") == 1 {
+            c = 4;
+        }
+        if pp_is(mem, src, "-") == 1 {
+            c = 5;
+        }
+        if c == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_term(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, c, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_term(mem: ptr, src: ptr) -> u32 {
+    let left: u32 = pp_unary(mem, src);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let c: u32 = 0;
+        if pp_is(mem, src, "**") == 1 {
+            let _u: u32 = pp_uns(mem);             // 本语言没有乘方
+            return 0;
+        }
+        if pp_is(mem, src, "/") == 1 {
+            let _u: u32 = pp_uns(mem);             // 真除出浮点
+            return 0;
+        }
+        if pp_is(mem, src, "*") == 1 {
+            c = 1;
+        }
+        if pp_is(mem, src, "//") == 1 {
+            c = 2;                                 // `//` **就是**本语言的整除（拼法不同）
+        }
+        if pp_is(mem, src, "%") == 1 {
+            c = 3;
+        }
+        if c == 0 {
+            going = 0;
+        } else {
+            let _n: u32 = pp_next(mem);
+            let r: u32 = pp_unary(mem, src);
+            if r == 0 {
+                return 0;
+            }
+            left = pp_mk(mem, c, left, r);
+        }
+    }
+    return left;
+}
+
+fn pp_mk(mem: ptr, c: u32, l: u32, r: u32) -> u32 {
+    let x: u32 = node_new(mem, NK_BIN, 0);
+    let _a: u32 = nd_set(mem, x, ND_A, c);
+    let _b: u32 = nd_set(mem, x, ND_B, l);
+    let _c: u32 = nd_set(mem, x, ND_C, r);
+    return x;
+}
+
+fn pp_unary(mem: ptr, src: ptr) -> u32 {
+    let c: u32 = 0;
+    if pp_is(mem, src, "-") == 1 {
+        c = UN_SUB;
+    }
+    if pp_is(mem, src, "+") == 1 {
+        c = UN_POS;
+    }
+    if pp_is(mem, src, "~") == 1 {
+        c = UN_INV;
+    }
+    if c != 0 {
+        let _n: u32 = pp_next(mem);
+        let e: u32 = pp_unary(mem, src);
+        if e == 0 {
+            return 0;
+        }
+        let x: u32 = node_new(mem, NK_UN, 0);
+        let _a: u32 = nd_set(mem, x, ND_A, c);
+        let _b: u32 = nd_set(mem, x, ND_B, e);
+        return x;
+    }
+    return pp_primary(mem, src);
+}
+
+fn pp_primary(mem: ptr, src: ptr) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI);
+    let kind: u32 = pt_kind(mem, k);
+    let line: u32 = pt_line(mem, k);
+    if kind == PT_NUM {
+        let x: u32 = node_new(mem, NK_LIT, line);
+        let _a: u32 = nd_set(mem, x, ND_A, pt_off(mem, k));
+        let _n: u32 = pp_next(mem);
+        return x;
+    }
+    if kind == PT_ID {
+        let o: u32 = pt_off(mem, k);
+        let l: u32 = pt_len(mem, k);
+        if (l == 4 && eq(src, o, "True") == 1) || (l == 5 && eq(src, o, "False") == 1) {
+            let x: u32 = node_new(mem, NK_LIT, line);
+            let b: u32 = 0;
+            if l == 4 {
+                b = 1;
+            }
+            let _a: u32 = nd_set(mem, x, ND_A, b);
+            let _b: u32 = nd_set(mem, x, ND_B, 1);
+            let _n: u32 = pp_next(mem);
+            return x;
+        }
+        if l == 4 && eq(src, o, "None") == 1 {
+            let _u: u32 = pp_uns(mem);
+            return 0;
+        }
+        if pp_type_word(mem, src) == 1 {
+            let _u: u32 = pp_uns(mem);          // `int` / `bool` 当值用
+            return 0;
+        }
+        let _n: u32 = pp_next(mem);
+        if pp_is(mem, src, "(") == 1 {
+            let _n2: u32 = pp_next(mem);
+            if li_enter(mem) == FAIL {
+                return pp_err(mem);
+            }
+            let a0: u32 = li_here(mem);
+            let an: u32 = 0;
+            if pp_is(mem, src, ")") == 0 {
+                let e: u32 = pp_expr(mem, src);
+                if e == 0 {
+                    return 0;
+                }
+                let _p: u32 = li_push(mem, e);
+                an = 1;
+                while pp_is(mem, src, ",") == 1 {
+                    let _n3: u32 = pp_next(mem);
+                    let e2: u32 = pp_expr(mem, src);
+                    if e2 == 0 {
+                        return 0;
+                    }
+                    let _p2: u32 = li_push(mem, e2);
+                    an = an + 1;
+                }
+            }
+            let _lv: u32 = li_leave(mem);
+            if pp_want(mem, src, ")") == 0 {
+                return 0;
+            }
+            let x: u32 = node_new(mem, NK_CALL, line);
+            let _a: u32 = nd_set(mem, x, ND_A, o);
+            let _b: u32 = nd_set(mem, x, ND_B, l);
+            let _c: u32 = nd_set(mem, x, ND_C, a0);
+            let _d: u32 = nd_set(mem, x, ND_D, an);
+            return x;
+        }
+        let x: u32 = node_new(mem, NK_VAR, line);
+        let _a: u32 = nd_set(mem, x, ND_A, o);
+        let _b: u32 = nd_set(mem, x, ND_B, l);
+        return x;
+    }
+    if kind == PT_OP && pp_is(mem, src, "(") == 1 {
+        let _n: u32 = pp_next(mem);
+        let e: u32 = pp_expr(mem, src);
+        if e == 0 {
+            return 0;
+        }
+        if pp_want(mem, src, ")") == 0 {
+            return 0;
+        }
+        return e;
+    }
+    if kind == PT_STR {
+        let _u: u32 = pp_uns(mem);              // 散落的字符串 / f-string 之外的字面量
+        return 0;
+    }
+    let _e: u32 = pp_err(mem);
+    return 0;
+}
+
+/// 当前记号是 `int` / `bool` / `None` 这三个类型词吗（它们在值的位置上不收）。
+fn pp_type_word(mem: ptr, src: ptr) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI);
+    if pt_kind(mem, k) != PT_ID {
+        return 0;
+    }
+    let o: u32 = pt_off(mem, k);
+    let l: u32 = pt_len(mem, k);
+    if l == 3 && eq(src, o, "int") == 1 {
+        return 1;
+    }
+    if l == 4 && eq(src, o, "bool") == 1 {
+        return 1;
+    }
+    if l == 4 && eq(src, o, "None") == 1 {
+        return 1;
+    }
+    if l == 6 && eq(src, o, "False") == 1 {
+        return 0;
+    }
+    if l == 5 && eq(src, o, "range") == 1 {
+        return 0;
+    }
+    return 0;
+}
+
+// ---- 语句
+
+fn pp_stmt(mem: ptr, src: ptr) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI);
+    let line: u32 = pt_line(mem, k);
+    let kind: u32 = pt_kind(mem, k);
+    if kind == PT_ID {
+        let o: u32 = pt_off(mem, k);
+        let l: u32 = pt_len(mem, k);
+        if l == 2 && eq(src, o, "if") == 1 {
+            return pp_if(mem, src);
+        }
+        if l == 5 && eq(src, o, "while") == 1 {
+            let _n: u32 = pp_next(mem);
+            let cond: u32 = pp_expr(mem, src);
+            if cond == 0 {
+                return 0;
+            }
+            let _b: u32 = pp_block(mem, src, ptr_add(mem, M_RS + 160));
+            if ld32(ptr_add(mem, M_TMP), PY_ERR) != 0 {
+                return 0;
+            }
+            let x: u32 = node_new(mem, NK_WHILE, line);
+            let _a: u32 = nd_set(mem, x, ND_A, cond);
+            let _bb: u32 = nd_set(mem, x, ND_B, ld32(ptr_add(mem, M_RS + 160), 0));
+            let _c: u32 = nd_set(mem, x, ND_C, ld32(ptr_add(mem, M_RS + 160), 4));
+            return x;
+        }
+        if l == 3 && eq(src, o, "for") == 1 {
+            return pp_for(mem, src);
+        }
+        if l == 6 && eq(src, o, "return") == 1 {
+            let _n: u32 = pp_next(mem);
+            let x: u32 = node_new(mem, NK_RETURN, line);
+            if pp_kind(mem, 0) == PT_NL {
+                let _e: u32 = pp_end(mem, src);
+                return x;
+            }
+            let e: u32 = pp_expr(mem, src);
+            if e == 0 {
+                return 0;
+            }
+            let _e2: u32 = pp_end(mem, src);
+            let _a: u32 = nd_set(mem, x, ND_A, e);
+            return x;
+        }
+        if l == 4 && eq(src, o, "pass") == 1 {
+            let _n: u32 = pp_next(mem);
+            let _e: u32 = pp_end(mem, src);
+            return node_new(mem, NK_PASS, line);
+        }
+        if is_kw_word(src, o, l) == 1 {
+            let _u: u32 = pp_uns(mem);          // `break` / `import` / `class` 那些
+            return 0;
+        }
+        // 赋值 / 增量赋值 / 表达式语句
+        let t1: u32 = pp_kind(mem, 1);
+        let is_aug: u32 = 0;
+        if t1 == PT_OP {
+            let o1: u32 = pp_off(mem, 1);
+            if pt_len(mem, ld32(ptr_add(mem, M_TMP), PY_PI) + 1) == 2
+                    && load8(src, o1 + 1) == 61 {
+                is_aug = 1;                     // `+=` 那一族
+            }
+        }
+        if t1 == PT_OP && pp_at(mem, src, "=", 1) == 1 {
+            let _n: u32 = pp_next(mem);
+            let _w: u32 = pp_next(mem);
+            let e: u32 = pp_expr(mem, src);
+            if e == 0 {
+                return 0;
+            }
+            let _e2: u32 = pp_end(mem, src);
+            let x: u32 = node_new(mem, NK_ASSIGN, line);
+            let _a: u32 = nd_set(mem, x, ND_A, o);
+            let _b: u32 = nd_set(mem, x, ND_B, l);
+            let _c: u32 = nd_set(mem, x, ND_C, e);
+            return x;
+        }
+        if is_aug == 1 {
+            return pp_aug(mem, src, o, l, line);
+        }
+        if t1 == PT_OP && pp_at(mem, src, ":", 1) == 1 {
+            // 注解赋值 `x: int = e`；只注解不给值上游直接收(`Loment 的 let 要初值`)
+            let _n: u32 = pp_next(mem);
+            let _w: u32 = pp_next(mem);
+            let ty: u32 = pp_type(mem, src);
+            if ty == 0 {
+                return 0;
+            }
+            if pp_want(mem, src, "=") == 0 {
+                let _u: u32 = pp_uns(mem);
+                return 0;
+            }
+            let e: u32 = pp_expr(mem, src);
+            if e == 0 {
+                return 0;
+            }
+            let _e2: u32 = pp_end(mem, src);
+            let x: u32 = node_new(mem, NK_DECL, line);
+            let _a: u32 = nd_set(mem, x, ND_A, ty);
+            let _c: u32 = nd_set(mem, x, ND_C, o);
+            let _d: u32 = nd_set(mem, x, ND_D, l);
+            let _e: u32 = nd_set(mem, x, ND_E, e + 1);
+            return x;
+        }
+    }
+    // 表达式语句：只收调用
+    let e: u32 = pp_expr(mem, src);
+    if e == 0 {
+        return 0;
+    }
+    let _e2: u32 = pp_end(mem, src);
+    if nd_get(mem, e, ND_KIND) != NK_CALL {
+        let _u: u32 = pp_uns(mem);
+        return 0;
+    }
+    let x: u32 = node_new(mem, NK_EXPR, line);
+    let _a: u32 = nd_set(mem, x, ND_A, e);
+    return x;
+}
+
+/// 语句位置上的关键字（上游 `_stmt_name` 那张表点名拒的那些）。
+fn is_kw_word(src: ptr, o: u32, l: u32) -> u32 {
+    if l == 5 && eq(src, o, "break") == 1 {
+        return 1;
+    }
+    if l == 8 && eq(src, o, "continue") == 1 {
+        return 1;
+    }
+    if l == 3 && eq(src, o, "try") == 1 {
+        return 1;
+    }
+    if l == 4 && eq(src, o, "with") == 1 {
+        return 1;
+    }
+    if l == 6 && eq(src, o, "import") == 1 {
+        return 1;
+    }
+    if l == 4 && eq(src, o, "from") == 1 {
+        return 1;
+    }
+    if l == 6 && eq(src, o, "global") == 1 {
+        return 1;
+    }
+    if l == 8 && eq(src, o, "nonlocal") == 1 {
+        return 1;
+    }
+    if l == 3 && eq(src, o, "del") == 1 {
+        return 1;
+    }
+    if l == 5 && eq(src, o, "raise") == 1 {
+        return 1;
+    }
+    if l == 6 && eq(src, o, "assert") == 1 {
+        return 1;
+    }
+    if l == 5 && eq(src, o, "class") == 1 {
+        return 1;
+    }
+    if l == 5 && eq(src, o, "async") == 1 {
+        return 1;
+    }
+    if l == 5 && eq(src, o, "lambda") == 1 {
+        return 1;
+    }
+    if l == 5 && eq(src, o, "yield") == 1 {
+        return 1;
+    }
+    if l == 7 && eq(src, o, "elif") == 1 {
+        return 1;
+    }
+    if l == 4 && eq(src, o, "else") == 1 {
+        return 1;
+    }
+    if l == 6 && eq(src, o, "except") == 1 {
+        return 1;
+    }
+    if l == 7 && eq(src, o, "finally") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn pp_aug(mem: ptr, src: ptr, o: u32, l: u32, line: u32) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), PY_PI) + 1;
+    let c: u32 = load8(src, pt_off(mem, k));
+    let code: u32 = 0;
+    if c == 43 {
+        code = 4;
+    }
+    if c == 45 {
+        code = 5;
+    }
+    if c == 42 {
+        code = 1;
+    }
+    if c == 47 {
+        code = 2;
+    }
+    if c == 37 {
+        code = 3;
+    }
+    if c == 38 {
+        code = 14;
+    }
+    if c == 124 {
+        code = 16;
+    }
+    if c == 94 {
+        code = 15;
+    }
+    if code == 0 {
+        let _e: u32 = pp_err(mem);
+        return 0;
+    }
+    let _n: u32 = pp_next(mem);
+    let _w: u32 = pp_next(mem);
+    let e: u32 = pp_expr(mem, src);
+    if e == 0 {
+        return 0;
+    }
+    let _e2: u32 = pp_end(mem, src);
+    let v: u32 = node_new(mem, NK_VAR, line);
+    let _a: u32 = nd_set(mem, v, ND_A, o);
+    let _b: u32 = nd_set(mem, v, ND_B, l);
+    let b: u32 = pp_mk(mem, code, v, e);
+    let x: u32 = node_new(mem, NK_ASSIGN, line);
+    let _c: u32 = nd_set(mem, x, ND_A, o);
+    let _d: u32 = nd_set(mem, x, ND_B, l);
+    let _f: u32 = nd_set(mem, x, ND_C, b);
+    return x;
+}
+
+fn pp_if(mem: ptr, src: ptr) -> u32 {
+    let line: u32 = pt_line(mem, ld32(ptr_add(mem, M_TMP), PY_PI));
+    let _n: u32 = pp_next(mem);
+    let cond: u32 = pp_expr(mem, src);
+    if cond == 0 {
+        return 0;
+    }
+    if pp_block(mem, src, ptr_add(mem, M_RS + 160)) == 0 {
+        return 0;
+    }
+    let ts: u32 = ld32(ptr_add(mem, M_RS + 160), 0);
+    let tn: u32 = ld32(ptr_add(mem, M_RS + 160), 4);
+    let es: u32 = 0;
+    let en: u32 = FAIL;
+    if pp_is(mem, src, "elif") == 1 {
+        // `elif` 就是"else 里再嵌一个 if" —— 上游那棵树也是这个形状，
+        // 发射时 `_if_chain` 会把它摊回 `} else if`
+        let sub: u32 = pp_if(mem, src);
+        if sub == 0 {
+            return 0;
+        }
+        let _e: u32 = li_enter(mem);
+        if _e == FAIL {
+            return pp_err(mem);
+        }
+        let a0: u32 = li_here(mem);
+        let _p: u32 = li_push(mem, sub);
+        let _lv: u32 = li_leave(mem);
+        es = a0;
+        en = 1;
+    } else {
+        if pp_is(mem, src, "else") == 1 {
+            let _n2: u32 = pp_next(mem);
+            if pp_block(mem, src, ptr_add(mem, M_RS + 160)) == 0 {
+                return 0;
+            }
+            es = ld32(ptr_add(mem, M_RS + 160), 0);
+            en = ld32(ptr_add(mem, M_RS + 160), 4);
+        }
+    }
+    let x: u32 = node_new(mem, NK_IF, line);
+    let _a: u32 = nd_set(mem, x, ND_A, cond);
+    let _b: u32 = nd_set(mem, x, ND_B, ts);
+    let _c: u32 = nd_set(mem, x, ND_C, tn);
+    let _d: u32 = nd_set(mem, x, ND_D, es);
+    let _e2: u32 = nd_set(mem, x, ND_E, en);
+    return x;
+}
+
+/// `for NAME in range(...)` —— **降级是定义，不是搬运**（`pytrans` 文件头 §`for`）。
+fn pp_for(mem: ptr, src: ptr) -> u32 {
+    let line: u32 = pt_line(mem, ld32(ptr_add(mem, M_TMP), PY_PI));
+    let _n: u32 = pp_next(mem);
+    let np: ptr = ptr_add(mem, M_RS + 96);
+    if pp_id(mem, np) == 0 {
+        return 0;
+    }
+    let no: u32 = ld32(np, 0);
+    let nl: u32 = ld32(np, 4);
+    if pp_want(mem, src, "in") == 0 {
+        return 0;
+    }
+    if pp_is(mem, src, "range") == 0 {
+        let _u: u32 = pp_uns(mem);              // `for` 只收 `range(…)`
+        return 0;
+    }
+    let _n2: u32 = pp_next(mem);
+    if pp_want(mem, src, "(") == 0 {
+        return 0;
+    }
+    let a1: u32 = pp_expr(mem, src);
+    if a1 == 0 {
+        return 0;
+    }
+    let a2: u32 = 0;
+    let two: u32 = 0;
+    if pp_is(mem, src, ",") == 1 {
+        let _n3: u32 = pp_next(mem);
+        let b: u32 = pp_expr(mem, src);
+        if b == 0 {
+            return 0;
+        }
+        a2 = b;
+        two = 1;
+        if pp_is(mem, src, ",") == 1 {
+            let _u: u32 = pp_uns(mem);          // 带步进的 `range` 先不做
+            return 0;
+        }
+    }
+    if pp_want(mem, src, ")") == 0 {
+        return 0;
+    }
+    let start: u32 = 0;
+    let stop: u32 = a1;
+    if two == 1 {
+        start = a1;
+        stop = a2;
+    } else {
+        start = node_new(mem, NK_LIT, line);
+        let _a: u32 = nd_set(mem, start, ND_A, 0);
+    }
+    if pp_block(mem, src, ptr_add(mem, M_RS + 160)) == 0 {
+        return 0;
+    }
+    let x: u32 = node_new(mem, NK_PFOR, line);
+    let _a3: u32 = nd_set(mem, x, ND_A, no);
+    let _b3: u32 = nd_set(mem, x, ND_B, nl);
+    let _c3: u32 = nd_set(mem, x, ND_C, start);
+    let _d3: u32 = nd_set(mem, x, ND_D, stop);
+    let _e3: u32 = nd_set(mem, x, ND_E, ld32(ptr_add(mem, M_RS + 160), 0));
+    let _f3: u32 = nd_set(mem, x, ND_F, ld32(ptr_add(mem, M_RS + 160), 4));
+    return x;
+}
+
+// ---------------------------------------------------------------- 发射
+//
+// 与 `pytrans.Emitter` 逐条对齐。**行那套机器与前面几门共用**（`line_put` / `gap` /
+// `line_lit` / `line_put0`），但**表达式与语句那一层是另写的** —— 规则不一样：
+//   * `bool -> int` 不转、报错（前四门里 C/C++ 是转的）
+//   * `and` / `or` 是**n 元**的（`a and b and c` 上游是一个 BoolOp 三个值，
+//     发成 `(a && b && c)`；写成左结合的二叉树会多出两层括号）
+//   * `for` 不改名外提，且**循环体里给循环变量赋值要报错**
+//   * 类型只有三档：`i64` / `bool` / `()`，局部变量的类型**从右值推**
+
+const PY_EERR: u32 = 1188;         // 发射期的错: 0 好 / 1 子集外 / 2 解析不过
+
+fn pye_uns(mem: ptr) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), PY_EERR) == 0 {
+        let _a: u32 = st32(ptr_add(mem, M_TMP), PY_EERR, 1);
+    }
+    return 0;
+}
+
+/// 名字没赋过值 —— 上游抛的是 `PyError`（**解析不过**那一类，退出码 2）。
+fn pye_pyerr(mem: ptr) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), PY_EERR) == 0 {
+        let _a: u32 = st32(ptr_add(mem, M_TMP), PY_EERR, 2);
+    }
+    return 0;
+}
+
+// ---- 三张表：常量 / 变量 / "循环变量"
+
+fn pye_var_find(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), PY_VN);
+    let r: ptr = ptr_add(mem, M_PV);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 12 + CT_NL) == l
+                && same_n(s, ld32(r, i * 12 + CT_NO), s, a, l) == 1 {
+            return ld32(r, i * 12 + CT_TY);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pye_var_set(mem: ptr, a: u32, l: u32, ty: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, PY_VN);
+    let r: ptr = ptr_add(mem, M_PV);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 12 + CT_NL) == l
+                && same_n(s, ld32(r, i * 12 + CT_NO), s, a, l) == 1 {
+            let _t: u32 = st32(r, i * 12 + CT_TY, ty);
+            return 1;
+        }
+        i = i + 1;
+    }
+    if n >= 127 {
+        let _e: u32 = pye_uns(mem);
+        return 0;
+    }
+    let _1: u32 = st32(r, n * 12 + CT_NO, a);
+    let _2: u32 = st32(r, n * 12 + CT_NL, l);
+    let _3: u32 = st32(r, n * 12 + CT_TY, ty);
+    let _4: u32 = st32(st, PY_VN, n + 1);
+    return 1;
+}
+
+/// 常量表：模块级那些 + 调用方给的（`--const K:i32`）。
+/// **后写的赢** —— 上游 `cenv = {模块常量: i64}` 再 `.update(consts)`（调用方那侧），
+/// 同名的以调用方为准。查第一个的话那条规矩就反了。
+fn pye_const_find(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), PY_CN);
+    let r: ptr = ptr_add(mem, M_PC);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let res: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 20 + 4) == l
+                && same_n(s, ld32(r, i * 20), s, a, l) == 1 {
+            res = ld32(r, i * 20 + 8);
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+fn pye_const_add(mem: ptr, a: u32, l: u32, ty: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, PY_CN);
+    if n >= 127 {
+        let _e: u32 = pye_uns(mem);
+        return 0;
+    }
+    let r: ptr = ptr_add(mem, M_PC);
+    let _1: u32 = st32(r, n * 20 + CT_NO, a);
+    let _2: u32 = st32(r, n * 20 + CT_NL, l);
+    let _3: u32 = st32(r, n * 20 + CT_TY, ty);
+    let _4: u32 = st32(r, n * 20 + 12, 0);
+    let _5: u32 = st32(r, n * 20 + 16, 0);
+    let _6: u32 = st32(st, PY_CN, n + 1);
+    return 1;
+}
+
+fn pye_ft_has(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), PY_FTN);
+    let r: ptr = ptr_add(mem, M_PF);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 8 + 4) == l && same_n(s, ld32(r, i * 8), s, a, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pye_ft_add(mem: ptr, a: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, PY_FTN);
+    if n >= 60 {
+        let _e: u32 = pye_uns(mem);
+        return 0;
+    }
+    let r: ptr = ptr_add(mem, M_PF);
+    let _1: u32 = st32(r, n * 8, a);
+    let _2: u32 = st32(r, n * 8 + 4, l);
+    let _3: u32 = st32(st, PY_FTN, n + 1);
+    return 1;
+}
+
+/// `set -= set` 的删法（上游是集合差集，**不管原来有几条都删干净**）。
+fn pye_ft_trim(mem: ptr, from: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, PY_FTN);
+    let r: ptr = ptr_add(mem, M_PF);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let k: u32 = from;
+    let out: u32 = from;
+    while k < n {
+        let o: u32 = ld32(r, k * 8);
+        let l: u32 = ld32(r, k * 8 + 4);
+        let dup: u32 = 0;
+        let j: u32 = from;
+        while j < out {
+            if ld32(r, j * 8 + 4) == l && same_n(s, ld32(r, j * 8), s, o, l) == 1 {
+                dup = 1;
+            }
+            j = j + 1;
+        }
+        if dup == 0 {
+            let _1: u32 = st32(r, out * 8, o);
+            let _2: u32 = st32(r, out * 8 + 4, l);
+            out = out + 1;
+        }
+        k = k + 1;
+    }
+    return st32(st, PY_FTN, out);
+}
+
+/// `_safe(name)` —— 撞上本语言保留字加 `_py`。
+fn pye_safe(mem: ptr, o: u32, l: u32, dst: ptr) -> u32 {
+    let _c: u32 = copy_n(dst, 0, ptr_add(mem, M_SCR), o, l);
+    if word_has(mem, SEG_LKW, ptr_add(mem, M_SCR), o, l) == 1 {
+        let sfx: ptr = ptr_add(mem, M_TMP + 960);
+        let sl: u32 = seg_word(mem, SEG_PYSAFE, sfx);
+        let _c2: u32 = copy_n(dst, l, sfx, 0, sl);
+        return l + sl;
+    }
+    return l;
+}
+
+// ---- 类型：只有三档
+
+fn pye_ty_of(mem: ptr, e: u32) -> u32 {
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_LIT {
+        if nd_get(mem, e, ND_B) == 1 {
+            return 9;
+        }
+        return 7;
+    }
+    if k == NK_VAR {
+        let o: u32 = nd_get(mem, e, ND_A);
+        let l: u32 = nd_get(mem, e, ND_B);
+        let c: u32 = pye_const_find(mem, o, l);
+        if c != 0 {
+            return c;
+        }
+        let v: u32 = pye_var_find(mem, o, l);
+        if v != 0 {
+            return v;
+        }
+        let _e: u32 = pye_pyerr(mem);              // 用了没赋过值的
+        return 0;
+    }
+    if k == NK_CALL {
+        let r: u32 = fn_ret(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        if r == FAIL {
+            let _e: u32 = pye_uns(mem);            // 本单元没有的函数
+            return 0;
+        }
+        return r;
+    }
+    if k == NK_UN {
+        if nd_get(mem, e, ND_A) == UN_NOT {
+            return 9;
+        }
+        return 7;
+    }
+    if k == NK_BIN {
+        if bin_isbool(nd_get(mem, e, ND_A)) == 1 {
+            return 9;
+        }
+        return 7;
+    }
+    if k == NK_BOOL {
+        return 9;
+    }
+    let _e: u32 = pye_uns(mem);
+    return 0;
+}
+
+/// 表达式在**它自己的类型**下的写法（括号一律加上）。
+fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
+    let s: ptr = ptr_add(mem, M_SCR);
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_LIT {
+        if nd_get(mem, e, ND_B) == 1 {
+            if nd_get(mem, e, ND_A) == 0 {
+                return app(buf, o, "false");
+            }
+            return app(buf, o, "true");
+        }
+        return appu(mem, buf, o, nd_get(mem, e, ND_A));
+    }
+    if k == NK_VAR {
+        let vo: u32 = nd_get(mem, e, ND_A);
+        let vl: u32 = nd_get(mem, e, ND_B);
+        if pye_const_find(mem, vo, vl) != 0 {
+            return appn(buf, o, s, vo, vl);        // 模块常量名照抄
+        }
+        if pye_var_find(mem, vo, vl) == 0 {
+            let _e: u32 = pye_pyerr(mem);
+            return o;
+        }
+        let t: ptr = ptr_add(mem, M_TMP + 1400);
+        let n: u32 = pye_safe(mem, vo, vl, t);
+        return appn(buf, o, t, 0, n);
+    }
+    if k == NK_CALL {
+        let o1: u32 = 0;
+        let t: ptr = ptr_add(mem, M_TMP + 1400);
+        let n: u32 = pye_safe(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), t);
+        let o2: u32 = appn(buf, o, t, 0, n);
+        let o3: u32 = app(buf, o2, "(");
+        let as: u32 = nd_get(mem, e, ND_C);
+        let an: u32 = nd_get(mem, e, ND_D);
+        let i: u32 = 0;
+        let cur: u32 = o3;
+        while i < an {
+            if i > 0 {
+                cur = app(buf, cur, ", ");
+            }
+            cur = pye_ex(mem, li_get(mem, as + i), 7, buf, cur);
+            i = i + 1;
+        }
+        return app(buf, cur, ")");
+    }
+    if k == NK_UN {
+        let c: u32 = nd_get(mem, e, ND_A);
+        if c == UN_NOT {
+            // Python 的 `not` **永远**出 bool（与 `and`/`or` 不同），所以它收任何真值、
+            // 出 `!`（本语言的 `!` 只收 bool）—— 操作数按**条件**那一侧写。
+            let o2: u32 = app(buf, o, "!");
+            return pye_ex(mem, nd_get(mem, e, ND_B), 9, buf, o2);
+        }
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = o2;
+        if c == UN_SUB {
+            o3 = app(buf, o2, "-");
+        }
+        if c == UN_INV {
+            o3 = app(buf, o2, "~");
+        }
+        let o4: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 7, buf, o3);
+        return app(buf, o4, ")");
+    }
+    if k == NK_BIN {
+        let c: u32 = nd_get(mem, e, ND_A);
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 7, buf, o2);
+        let o4: u32 = app(buf, o3, " ");
+        let o5: u32 = app(buf, o4, bin_text(c));
+        let o6: u32 = app(buf, o5, " ");
+        let o7: u32 = pye_ex(mem, nd_get(mem, e, ND_C), 7, buf, o6);
+        return app(buf, o7, ")");
+    }
+    if k == NK_BOOL {
+        // **n 元**：`a and b and c` 是**一个** BoolOp 三个值，发成 `(a && b && c)`。
+        // 写成左结合的二叉树会多出两层括号 —— 上游那棵树不是那个形状。
+        let c: u32 = nd_get(mem, e, ND_A);
+        let as: u32 = nd_get(mem, e, ND_B);
+        let an: u32 = nd_get(mem, e, ND_C);
+        let o2: u32 = app(buf, o, "(");
+        let i: u32 = 0;
+        let cur: u32 = o2;
+        while i < an {
+            if i > 0 {
+                if c == 17 {
+                    cur = app(buf, cur, " && ");
+                } else {
+                    cur = app(buf, cur, " || ");
+                }
+            }
+            cur = pye_ex(mem, li_get(mem, as + i), 9, buf, cur);
+            i = i + 1;
+        }
+        return app(buf, cur, ")");
+    }
+    let _e: u32 = pye_uns(mem);
+    return o;
+}
+
+fn pye_ex(mem: ptr, e: u32, want: u32, buf: ptr, o: u32) -> u32 {
+    let got: u32 = pye_ty_of(mem, e);
+    if got == 0 {
+        return o;
+    }
+    if got == 10 {
+        let _e: u32 = pye_uns(mem);                // 这里用了个不返回值的调用
+        return o;
+    }
+    if got == want {
+        return pye_raw(mem, e, buf, o);
+    }
+    if got == 7 && want == 9 {
+        let o2: u32 = pye_raw(mem, e, buf, o);
+        return app(buf, o2, " != 0");              // `if x:`：整数当条件的两种拼法
+    }
+    // `bool -> int`：**不转，报错**。Python 的 `bool` 是 `int` 的子类
+    // （`True + 1 == 2`），而 `and`/`or` 返回的是**操作数** —— 这个意思本语言
+    // 表达不出来。悄悄补 `as i64` 会让 `a and b` 变成 0/1，与 Python 给的数不同。
+    let _e: u32 = pye_uns(mem);
+    return o;
+}
+
+// ---- 语句
+
+fn pye_stmts(mem: ptr, start: u32, cnt: u32, depth: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cnt {
+        let _r: u32 = pye_stmt(mem, li_get(mem, start + i), depth);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `_loopvars(body)` —— 这一层里**直接**声明的那几个 `for` 变量名。
+fn pye_loopvars(mem: ptr, start: u32, cnt: u32) -> u32 {
+    let from: u32 = ld32(ptr_add(mem, M_TMP), PY_FTN);
+    let i: u32 = 0;
+    while i < cnt {
+        let n: u32 = li_get(mem, start + i);
+        if nd_get(mem, n, ND_KIND) == NK_PFOR {
+            let _a: u32 = pye_ft_add(mem, nd_get(mem, n, ND_A), nd_get(mem, n, ND_B));
+        }
+        i = i + 1;
+    }
+    return from;
+}
+
+fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let k: u32 = nd_get(mem, s, ND_KIND);
+    if k == NK_PASS {
+        return 1;
+    }
+    if k == NK_DOC {
+        return 1;                                  // 函数头那边已经发过了
+    }
+    if k == NK_ASSIGN {
+        return pye_bind(mem, s, depth, 0);
+    }
+    if k == NK_DECL {
+        return pye_bind(mem, s, depth, 1);
+    }
+    if k == NK_RETURN {
+        let e: u32 = nd_get(mem, s, ND_A);
+        if e == 0 {
+            return line_lit(mem, "return;", depth, 0);
+        }
+        let o: u32 = app(eb, 0, "return ");
+        let o2: u32 = pye_ex(mem, e, ld32(py, E_RET), eb, o);
+        let o3: u32 = app(eb, o2, ";");
+        return line_put(mem, o3, depth, 0);
+    }
+    if k == NK_IF {
+        gap(mem);
+        return pye_if_chain(mem, s, depth);
+    }
+    if k == NK_WHILE {
+        gap(mem);
+        let o: u32 = app(eb, 0, "while ");
+        let o2: u32 = pye_ex(mem, nd_get(mem, s, ND_A), 9, eb, o);
+        let o3: u32 = app(eb, o2, " {");
+        let _l: u32 = line_put(mem, o3, depth, 1);
+        let bs: u32 = nd_get(mem, s, ND_B);
+        let bn: u32 = nd_get(mem, s, ND_C);
+        let from: u32 = pye_loopvars(mem, bs, bn);
+        let _b: u32 = pye_stmts(mem, bs, bn, depth + 1);
+        let _t: u32 = pye_ft_trim(mem, from);
+        return line_lit(mem, "}", depth, 0);
+    }
+    if k == NK_PFOR {
+        return pye_for(mem, s, depth);
+    }
+    if k == NK_EXPR {
+        let c: u32 = nd_get(mem, s, ND_A);
+        if nd_get(mem, c, ND_KIND) != NK_CALL {
+            let _e: u32 = pye_uns(mem);
+            return 0;
+        }
+        let o: u32 = pye_raw(mem, c, eb, 0);
+        let o2: u32 = app(eb, o, ";");
+        return line_put(mem, o2, depth, 0);
+    }
+    let _e: u32 = pye_uns(mem);
+    return 0;
+}
+
+/// 赋值一条。`is_ann` = 1 时类型来自注解（`NK_DECL` 的 `ND_A`），
+/// 否则**从右值推**（上游 `_decl_type` 那两档）。
+fn pye_bind(mem: ptr, s: u32, depth: u32, is_ann: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let no: u32 = nd_get(mem, s, ND_A);
+    let nl: u32 = nd_get(mem, s, ND_B);
+    let e: u32 = nd_get(mem, s, ND_C);
+    if is_ann == 1 {
+        // `NK_DECL` 的布局与 `NK_ASSIGN` 不同（A 是类型、名字在 C/D）——
+        // 第一版照抄了 A/B，症状是注解赋值整条报"用了没赋过值的名字"
+        no = nd_get(mem, s, ND_C);
+        nl = nd_get(mem, s, ND_D);
+        e = nd_get(mem, s, ND_E) - 1;
+    }
+    // 循环体里给循环变量赋值 —— 那条降级式在这种写法下不成立，上游点名拒
+    if pye_ft_has(mem, no, nl) == 1 {
+        let _u: u32 = pye_uns(mem);
+        return 0;
+    }
+    let tname: ptr = ptr_add(mem, M_TMP + 1200);
+    let tn: u32 = pye_safe(mem, no, nl, tname);
+    let have: u32 = pye_var_find(mem, no, nl);
+    if have != 0 {
+        let o: u32 = appn(eb, 0, tname, 0, tn);
+        let o2: u32 = app(eb, o, " = ");
+        let o3: u32 = pye_ex(mem, e, have, eb, o2);
+        let o4: u32 = app(eb, o3, ";");
+        return line_put(mem, o4, depth, 0);
+    }
+    let ty: u32 = 7;
+    if is_ann == 1 {
+        ty = nd_get(mem, s, ND_A);
+    } else {
+        ty = pye_ty_of(mem, e);
+        if ty == 0 {
+            return 0;
+        }
+    }
+    let _v: u32 = pye_var_set(mem, no, nl, ty);
+    let o: u32 = app(eb, 0, "let ");
+    let o2: u32 = appn(eb, o, tname, 0, tn);
+    let o3: u32 = app(eb, o2, ": ");
+    let o4: u32 = app(eb, o3, ty_text(ty));
+    let o5: u32 = app(eb, o4, " = ");
+    let o6: u32 = pye_ex(mem, e, ty, eb, o5);
+    let o7: u32 = app(eb, o6, ";");
+    return line_put(mem, o7, depth, 0);
+}
+
+fn pye_if_chain(mem: ptr, s: u32, depth: u32) -> u32 {
+    let eb: ptr = ptr_add(mem, M_EB);
+    let o: u32 = app(eb, 0, "if ");
+    let o2: u32 = pye_ex(mem, nd_get(mem, s, ND_A), 9, eb, o);
+    let o3: u32 = app(eb, o2, " {");
+    let _l: u32 = line_put(mem, o3, depth, 1);
+    let _b: u32 = pye_stmts(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
+    let cur: u32 = s;
+    let going: u32 = 1;
+    while going == 1 {
+        let es: u32 = nd_get(mem, cur, ND_D);
+        let en: u32 = nd_get(mem, cur, ND_E);
+        if en != 1 {
+            going = 0;
+        } else {
+            let sub: u32 = li_get(mem, es);
+            if nd_get(mem, sub, ND_KIND) != NK_IF {
+                going = 0;
+            } else {
+                let o4: u32 = app(eb, 0, "} else if ");
+                let o5: u32 = pye_ex(mem, nd_get(mem, sub, ND_A), 9, eb, o4);
+                let o6: u32 = app(eb, o5, " {");
+                let _l2: u32 = line_put(mem, o6, depth, 1);
+                let _b2: u32 = pye_stmts(mem, nd_get(mem, sub, ND_B),
+                                         nd_get(mem, sub, ND_C), depth + 1);
+                cur = sub;
+            }
+        }
+    }
+    let es2: u32 = nd_get(mem, cur, ND_D);
+    let en2: u32 = nd_get(mem, cur, ND_E);
+    if en2 != FAIL {
+        let _l3: u32 = line_lit(mem, "} else {", depth, 1);
+        let _b3: u32 = pye_stmts(mem, es2, en2, depth + 1);
+    }
+    return line_lit(mem, "}", depth, 0);
+}
+
+/// `for i in range(a, b)` -> `let i: i64 = a; while i < b { …; i = i + 1; }`。
+/// **这是定义，不是搬运**（`pytrans` 文件头 §`for`）。
+fn pye_for(mem: ptr, s: u32, depth: u32) -> u32 {
+    let eb: ptr = ptr_add(mem, M_EB);
+    let no: u32 = nd_get(mem, s, ND_A);
+    let nl: u32 = nd_get(mem, s, ND_B);
+    gap(mem);
+    let t: ptr = ptr_add(mem, M_TMP + 1200);
+    let tn: u32 = pye_safe(mem, no, nl, t);
+    let have: u32 = pye_var_find(mem, no, nl);
+    let o: u32 = 0;
+    if have == 0 {
+        let _v: u32 = pye_var_set(mem, no, nl, 7);
+        let o1: u32 = app(eb, 0, "let ");
+        let o2: u32 = appn(eb, o1, t, 0, tn);
+        let o3: u32 = app(eb, o2, ": i64 = ");
+        let o4: u32 = pye_ex(mem, nd_get(mem, s, ND_C), 7, eb, o3);
+        o = app(eb, o4, ";");
+    } else {
+        let o1: u32 = appn(eb, 0, t, 0, tn);
+        let o2: u32 = app(eb, o1, " = ");
+        let o3: u32 = pye_ex(mem, nd_get(mem, s, ND_C), 7, eb, o2);
+        o = app(eb, o3, ";");
+    }
+    let _l: u32 = line_put(mem, o, depth, 0);
+    // `while i < b {` 是**字面模板**（上游就是这么拼的）—— 走 `pye_ex` 发一个比较
+    // 节点的话会多出一对括号（`while (i < b) {`），逐字节就不一样了。
+    let tn3: u32 = pye_safe(mem, no, nl, ptr_add(mem, M_TMP + 1400));
+    let o5: u32 = app(eb, 0, "while ");
+    let o6: u32 = appn(eb, o5, ptr_add(mem, M_TMP + 1400), 0, tn3);
+    let o7: u32 = app(eb, o6, " < ");
+    let o8: u32 = pye_ex(mem, nd_get(mem, s, ND_D), 7, eb, o7);
+    let o9: u32 = app(eb, o8, " {");
+    let _l2: u32 = line_put(mem, o9, depth, 1);
+    let _ft: u32 = pye_ft_add(mem, no, nl);
+    let _b: u32 = pye_stmts(mem, nd_get(mem, s, ND_E), nd_get(mem, s, ND_F), depth + 1);
+    let _d: u32 = pye_ft_discard(mem, no, nl);
+    // 体里可能写过这块暂存 —— **重新算一遍**名字（`+1200` 是语句那一层的，会互相盖）
+    let tn2: u32 = pye_safe(mem, no, nl, t);
+    let o8: u32 = appn(eb, 0, t, 0, tn2);
+    let o9: u32 = app(eb, o8, " = ");
+    let o10: u32 = appn(eb, o9, t, 0, tn2);
+    let o11: u32 = app(eb, o10, " + 1;");
+    let _l3: u32 = line_put(mem, o11, depth + 1, 0);
+    return line_lit(mem, "}", depth, 0);
+}
+
+/// `set.discard(x)` —— 删掉**第一个**匹配的（上游那个 `_for_targets.discard`）。
+fn pye_ft_discard(mem: ptr, a: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, PY_FTN);
+    let r: ptr = ptr_add(mem, M_PF);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    let going: u32 = 1;
+    while i < n && going == 1 {
+        if ld32(r, i * 8 + 4) == l && same_n(s, ld32(r, i * 8), s, a, l) == 1 {
+            let j: u32 = i;
+            while j + 1 < n {
+                let _1: u32 = st32(r, j * 8, ld32(r, (j + 1) * 8));
+                let _2: u32 = st32(r, j * 8 + 4, ld32(r, (j + 1) * 8 + 4));
+                j = j + 1;
+            }
+            let _t: u32 = st32(st, PY_FTN, n - 1);
+            going = 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 一个函数。`body` 的第一条可能是 `NK_DOC`（上游把它发成 `///`）。
+fn pye_emit_fn(mem: ptr, f: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let _1: u32 = st32(st, PY_VN, 0);
+    let _2: u32 = st32(st, PY_FTN, 0);
+    let _3: u32 = st32(st, E_RET, fn_get(mem, f, 0));
+    let _4: u32 = st32(st, E_ANY, 0);
+    let _5: u32 = st32(st, E_NL2, 0);
+    let _6: u32 = st32(st, E_BR, 0);
+    let bs: u32 = fn_get(mem, f, 6);
+    let bn: u32 = fn_get(mem, f, 7);
+    let b0: u32 = 0;
+    let bcnt: u32 = bn;
+    // **文档字符串先发**（上游也是这个顺序），而且它拼行用的就是 `M_EB` ——
+    // 放在函数头之后发的话，头的前半截会被它盖掉（症状：`pub fn` 变成一截乱码）
+    if bn > 0 {
+        let firstn: u32 = li_get(mem, bs);
+        if nd_get(mem, firstn, ND_KIND) == NK_DOC {
+            let _d: u32 = pye_doc(mem, firstn);
+            b0 = 1;
+            bcnt = bn - 1;
+        }
+    }
+    let p0: u32 = fn_get(mem, f, 4);
+    let pn: u32 = fn_get(mem, f, 5);
+    let o: u32 = app(eb, 0, "pub fn ");
+    let o2: u32 = appn(eb, o, ptr_add(mem, M_SCR), fn_get(mem, f, 2), fn_get(mem, f, 3));
+    let o3: u32 = app(eb, o2, "(");
+    let i: u32 = 0;
+    let cur: u32 = o3;
+    while i < pn {
+        let no: u32 = li_get(mem, p0 + i * 3);
+        let nl: u32 = li_get(mem, p0 + i * 3 + 1);
+        let ty: u32 = li_get(mem, p0 + i * 3 + 2);
+        let _v: u32 = pye_var_set(mem, no, nl, ty);
+        if i > 0 {
+            cur = app(eb, cur, ", ");
+        }
+        let t: ptr = ptr_add(mem, M_TMP + 1200);
+        let tn: u32 = pye_safe(mem, no, nl, t);
+        cur = appn(eb, cur, t, 0, tn);
+        cur = app(eb, cur, ": ");
+        cur = app(eb, cur, ty_text(ty));
+        i = i + 1;
+    }
+    let o4: u32 = app(eb, cur, ")");
+    let o5: u32 = 0;
+    if fn_get(mem, f, 0) != 10 {
+        o5 = app(eb, o4, " -> ");
+        o5 = app(eb, o5, ty_text(fn_get(mem, f, 0)));
+    } else {
+        o5 = o4;
+    }
+    let o6: u32 = app(eb, o5, " {");
+    let _l1: u32 = line_put_ni(mem, o6, 1);
+    let _b: u32 = pye_stmts(mem, bs + b0, bcnt, 0);
+    return line_put0(mem, "}");
+}
+
+/// 函数文档字符串 -> `///` 那几行（上游是 `["/// " + ln …]` 再**整行 rstrip**）。
+/// 注意：空行发出来是 `///`（`"/// ".rstrip()`），不是 `/// `。
+fn pye_doc(mem: ptr, n: u32) -> u32 {
+    let o: u32 = nd_get(mem, n, ND_A);
+    let l: u32 = nd_get(mem, n, ND_B);
+    let p: ptr = ptr_add(mem, M_PS);
+    let a: u32 = py_triml(p, o, o + l);
+    let b: u32 = py_trimr(p, a, o + l);
+    if a == b {
+        return 1;                                  // 空白串 -> 一行都没有
+    }
+    let i: u32 = a;
+    while i <= b {
+        if i == b || load8(p, i) == 10 {
+            let k: u32 = i;
+            while k > a && load8(p, k - 1) != 10 {
+                k = k - 1;
+            }
+            let eb: ptr = ptr_add(mem, M_EB);
+            let o2: u32 = app(eb, 0, "/// ");          // o2 是**末端**（= 4）
+            let o3: u32 = appn(eb, o2, p, k, i - k);
+            let o4: u32 = py_trimr(eb, 0, o3);          // 整行从 0 起裁
+            let _l2: u32 = line_raw(mem, eb, o4);
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `[a, b)` 掐掉两端空白（`strip()` 的口径：空格 / 制表 / 回车 / 换行）。
+fn py_triml(p: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(p, i);
+        if c != 32 && c != 9 && c != 13 && c != 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return b;
+}
+
+fn py_trimr(p: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = b;
+    while i > a {
+        let c: u32 = load8(p, i - 1);
+        if c != 32 && c != 9 && c != 13 && c != 10 {
+            return i;
+        }
+        i = i - 1;
+    }
+    return a;
+}
+
+/// 一行**原样**（不缩进）—— 文档字符串那几行走这条。
+fn line_raw(mem: ptr, buf: ptr, n: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let c0: u32 = appn(out, ld32(st, E_OUT), buf, 0, n);
+    let c1: u32 = app(out, c0, "\n");
+    let _a: u32 = st32(st, E_OUT, c1);
+    let _b: u32 = st32(st, E_ANY, 1);
+    let _c: u32 = st32(st, E_NL2, 0);
+    let _d: u32 = st32(st, E_BR, 0);
+    return c1;
+}
+
+// ---------------------------------------------------------------- 模块那一层与整份翻译
+//
+// 与上游 `parse()` + `translate()` 对齐：
+//   * 模块级的**第一条**若是字符串 -> 模块文档字符串（转成 `//` 注释**带走**）
+//   * 其余只收 `def` 与**全大写**的 `NAME = <整数字面量>`，别的点名拒
+//
+// 输出是**一串块**拼起来的（`"\n".join(out) + "\n"`）：文档那块、常量那块（前面还有
+// 一行 `// ---- 模块常量`）、每个函数一块，块之间插一个空元素 —— 所以块与块之间
+// **是空行**，而常量那一块内部**不是**。这里按"每个元素逐行发、块间多补一个换行"来做。
+
+/// `def NAME ( 形参 ) -> 返回 :` 那一整条 —— 返回函数表下标（0 = 失败）。
+/// `str.isupper()` 的 ASCII 口径（与 `lompotc` 那一份同口径：**至少一个带大小写的
+/// 字符**，且没有小写 —— `_1` 是假、`MAX_1` 是真）。
+fn py_isupper(p: ptr, a: u32, l: u32) -> u32 {
+    let cased: u32 = 0;
+    let i: u32 = 0;
+    while i < l {
+        let c: u32 = load8(p, a + i);
+        if c >= 97 && c <= 122 {
+            return 0;
+        }
+        if c >= 65 && c <= 90 {
+            cased = 1;
+        }
+        i = i + 1;
+    }
+    return cased;
+}
+
+fn py_def(mem: ptr, src: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    if pp_want(mem, src, "def") == 0 {
+        return 0;
+    }
+    let np: ptr = ptr_add(mem, M_RS + 96);
+    if pp_id(mem, np) == 0 {
+        return 0;
+    }
+    let no: u32 = ld32(np, 0);
+    let nl: u32 = ld32(np, 4);
+    if pp_want(mem, src, "(") == 0 {
+        return 0;
+    }
+    if li_enter(mem) == FAIL {
+        return pp_err(mem);
+    }
+    let p0: u32 = li_here(mem);
+    let pn: u32 = 0;
+    if pp_is(mem, src, ")") == 0 {
+        let going: u32 = 1;
+        while going == 1 {
+            // 变参 / 位置参数标记 / keyword-only 标记 —— 上游四条各自点名拒
+            if pp_is(mem, src, "*") == 1 || pp_is(mem, src, "**") == 1
+                    || pp_is(mem, src, "/") == 1 {
+                let _u: u32 = pp_uns(mem);
+                return 0;
+            }
+            if pp_kind(mem, 0) != PT_ID {
+                let _e: u32 = pp_err(mem);
+                return 0;
+            }
+            let q: ptr = ptr_add(mem, M_RS + 112);
+            if pp_id(mem, q) == 0 {
+                return 0;
+            }
+            if pp_is(mem, src, ":") == 0 {
+                let _u: u32 = pp_uns(mem);         // 没有注解（上游是 `Unsupported`）
+                return 0;
+            }
+            let _n0: u32 = pp_next(mem);
+            let ty: u32 = pp_type(mem, src);
+            if ty == 0 {
+                return 0;
+            }
+            if pp_is(mem, src, "=") == 1 {
+                let _u: u32 = pp_uns(mem);         // 默认参数
+                return 0;
+            }
+            let _1: u32 = li_push(mem, ld32(q, 0));
+            let _2: u32 = li_push(mem, ld32(q, 4));
+            let _3: u32 = li_push(mem, ty);
+            pn = pn + 1;
+            if pp_is(mem, src, ",") == 1 {
+                let _n: u32 = pp_next(mem);
+                if pp_is(mem, src, ")") == 1 {
+                    going = 0;                     // 尾逗号
+                }
+            } else {
+                going = 0;
+            }
+        }
+    }
+    let _lv: u32 = li_leave(mem);
+    if pp_want(mem, src, ")") == 0 {
+        return 0;
+    }
+    let ret: u32 = 0;
+    if pp_is(mem, src, "->") == 1 {
+        let _n: u32 = pp_next(mem);
+        ret = pp_type(mem, src);
+        if ret == 0 {
+            return 0;
+        }
+    } else {
+        let _u: u32 = pp_uns(mem);                 // 没有返回注解
+        return 0;
+    }
+    let _b: u32 = pp_block(mem, src, ptr_add(mem, M_RS + 176));
+    if ld32(st, PY_ERR) != 0 {
+        return 0;
+    }
+    let f: u32 = fn_new(mem);
+    if f == FAIL {
+        return pp_err(mem);
+    }
+    let _a1: u32 = fn_set(mem, f, 0, ret);
+    let _a2: u32 = fn_set(mem, f, 2, no);
+    let _a3: u32 = fn_set(mem, f, 3, nl);
+    let _a4: u32 = fn_set(mem, f, 4, p0);
+    let _a5: u32 = fn_set(mem, f, 5, pn);
+    let _a6: u32 = fn_set(mem, f, 6, ld32(ptr_add(mem, M_RS + 176), 0));
+    let _a7: u32 = fn_set(mem, f, 7, ld32(ptr_add(mem, M_RS + 176), 4));
+    return f;
+}
+
+/// 模块那一层。`outp` 收 (函数表起点, 条数)；模块文档在 `PY_MDOC/PY_MDL`，常量在 `M_PC`。
+fn py_module(mem: ptr, src: ptr, n: u32, outp: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _d0: u32 = st32(st, PY_MDOC, 0);
+    let _d1: u32 = st32(st, PY_MDL, 0);
+    let _c0: u32 = st32(st, PY_CN, 0);
+    let _c1: u32 = st32(st, PY_MCN, 0);
+    let _p0: u32 = st32(st, PY_MPS, 0);
+    let _i0: u32 = st32(st, PY_PI, 0);
+    let _v0: u32 = st32(st, PY_VN, 0);
+    let _f0: u32 = st32(st, PY_FTN, 0);
+    let _e0: u32 = st32(st, PY_EERR, 0);
+    if li_enter(mem) == FAIL {
+        return pp_err(mem);
+    }
+    let a0: u32 = li_here(mem);
+    let cnt: u32 = 0;
+    let seen: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let kind: u32 = pp_kind(mem, 0);
+        if kind == 0 {
+            going = 0;
+        } else {
+            if kind == PT_NL || kind == PT_DED {
+                let _x: u32 = pp_next(mem);
+            } else {
+                if kind == PT_STR {
+                    if seen == 1 {
+                        let _u: u32 = pp_uns(mem);     // 散落的字符串
+                        return 0;
+                    }
+                    let frac: ptr = ptr_add(mem, M_RS + 200);
+                    if pp_str(mem, src, frac) == 0 {
+                        return 0;
+                    }
+                    let _a: u32 = st32(st, PY_MDOC, ld32(frac, 0));
+                    let _b: u32 = st32(st, PY_MDL, ld32(frac, 4));
+                    if pp_end(mem, src) == 0 {
+                        return 0;
+                    }
+                    seen = 1;
+                } else {
+                    if kind == PT_ID && pp_is(mem, src, "def") == 1 {
+                        let f: u32 = py_def(mem, src);
+                        if f == 0 {
+                            return 0;
+                        }
+                        let _q: u32 = li_push(mem, f);
+                        cnt = cnt + 1;
+                        seen = 1;
+                    } else {
+                        if kind == PT_ID && ld32(st, PY_CN) == ld32(st, PY_MCN)
+                                && py_const(mem, src) == 1 {
+                            seen = 1;
+                        } else {
+                            let _u: u32 = pp_uns(mem);
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 模块末尾那一串 DED 已经吃掉了；收尾
+    let _lv: u32 = li_leave(mem);
+    let _a2: u32 = st32(outp, 0, a0);
+    let _b2: u32 = st32(outp, 4, cnt);
+    return 1;
+}
+
+/// 一条全大写常量：`NAME = <整数字面量>` / `NAME = -<整数字面量>`。收下返回 1。
+fn py_const(mem: ptr, src: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let k: u32 = ld32(st, PY_PI);
+    let o: u32 = pt_off(mem, k);
+    let l: u32 = pt_len(mem, k);
+    if py_isupper(src, o, l) == 0 {
+        return 0;                                  // 小写的是变量，不是"没转成功的常量"
+    }
+    if pp_at(mem, src, "=", 1) == 0 {
+        return 0;
+    }
+    let _n: u32 = pp_next(mem);
+    let _w: u32 = pp_next(mem);
+    let neg: u32 = 0;
+    if pp_is(mem, src, "-") == 1 {
+        neg = 1;
+        let _n2: u32 = pp_next(mem);
+    }
+    if pp_kind(mem, 0) != PT_NUM {
+        let _u: u32 = pp_uns(mem);                 // 值不是整数字面量
+        return 0;
+    }
+    let v: u32 = pp_off(mem, 0);
+    let _vn: u32 = pp_next(mem);
+    if pp_end(mem, src) == 0 {
+        return 0;
+    }
+    let n: u32 = ld32(st, PY_CN);
+    let r: ptr = ptr_add(mem, M_PC);
+    let _1: u32 = st32(r, n * 20 + 0, o);
+    let _2: u32 = st32(r, n * 20 + 4, l);
+    let _3: u32 = st32(r, n * 20 + 8, 7);          // 类型一律 `i64`
+    let _4: u32 = st32(r, n * 20 + 12, v);
+    let _5: u32 = st32(r, n * 20 + 16, neg);
+    let _6: u32 = st32(st, PY_CN, n + 1);
+    let _7: u32 = st32(st, PY_MCN, n + 1);
+    return 1;
+}
+
+/// `translate()` —— 整份发出去。
+fn py_translate(mem: ptr, src: ptr, n: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _1: u32 = st32(st, E_OUT, 0);
+    let _2: u32 = st32(st, E_ANY, 0);
+    let _3: u32 = st32(st, E_NL2, 0);
+    let _4: u32 = st32(st, E_BR, 0);
+    let _5: u32 = st32(st, PY_EERR, 0);
+    if py_lex(mem, src, n) == 0 {
+        return 0;
+    }
+    if ld32(st, PY_ERR) != 0 {
+        return 0;
+    }
+    let up: ptr = ptr_add(mem, M_RS + 220);
+    if py_module(mem, src, n, up) == 0 {
+        return 0;
+    }
+    let ustart: u32 = ld32(up, 0);
+    let ucnt: u32 = ld32(up, 4);
+    // 调用方那侧给的常量（`--const K:i32`）接在模块常量**后面** ——
+    // 上游 `cenv.update(consts)` 是"后写的赢"，而查表也是后写的赢。
+    let q: u32 = 0;
+    while q < ld32(st, E_CN) {
+        let cn: ptr = ptr_add(mem, M_CN);
+        let _ca: u32 = pye_const_add(mem, ld32(cn, q * 12), ld32(cn, q * 12 + 4),
+                                     ld32(cn, q * 12 + 8));
+        q = q + 1;
+    }
+    // 重名（Loment 没有重载，名字必须精确）
+    let i: u32 = 0;
+    while i < ucnt {
+        let f: u32 = li_get(mem, ustart + i);
+        let j: u32 = i + 1;
+        while j < ucnt {
+            let g: u32 = li_get(mem, ustart + j);
+            if fn_get(mem, f, 3) == fn_get(mem, g, 3)
+                    && same_n(ptr_add(mem, M_SCR), fn_get(mem, f, 2),
+                              ptr_add(mem, M_SCR), fn_get(mem, g, 2),
+                              fn_get(mem, f, 3)) == 1 {
+                let _u: u32 = pye_uns(mem);
+                return 0;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let out: ptr = ptr_add(mem, M_OUT);
+    let blocks: u32 = 0;
+    // ---- 模块文档字符串 -> `//` 注释那一块
+    if ld32(st, PY_MDL) > 0 {
+        let cur: u32 = py_doc_block(mem, out, 0, ld32(st, PY_MDOC), ld32(st, PY_MDL));
+        let _e: u32 = st32(st, E_OUT, cur);
+        blocks = blocks + 1;
+    }
+    // ---- 常量那一块（`// ---- 模块常量` 一行 + 每条一行）
+    if ld32(st, PY_MCN) > 0 {
+        // **常量那一块前面不加空行** —— 上游是 `out.append("// ---- 模块常量")`
+        // 直接接在文档那块后面（空元素只在**函数**那块前面加）。加错了就差一个空行。
+        let cur: u32 = ld32(st, E_OUT);
+        cur = app(out, cur, "// ---- 模块常量\n");
+        let r: ptr = ptr_add(mem, M_PC);
+        let c: u32 = 0;
+        while c < ld32(st, PY_MCN) {
+            cur = app(out, cur, "pub const ");
+            cur = appn(out, cur, ptr_add(mem, M_SCR), ld32(r, c * 20 + 0),
+                       ld32(r, c * 20 + 4));
+            cur = app(out, cur, ": i64 = ");
+            if ld32(r, c * 20 + 16) == 1 {
+                cur = app(out, cur, "-");
+            }
+            cur = appu(mem, out, cur, ld32(r, c * 20 + 12));
+            cur = app(out, cur, ";\n");
+            c = c + 1;
+        }
+        let _e: u32 = st32(st, E_OUT, cur);
+        blocks = blocks + 1;
+    }
+    // ---- 每个函数一块
+    let k: u32 = 0;
+    while k < ucnt {
+        let f: u32 = li_get(mem, ustart + k);
+        let has_keep: u32 = 0;
+        if ld32(st, E_KN) > 0 {
+            has_keep = 1;
+        }
+        if has_keep == 0 || keep_has(mem, fn_get(mem, f, 2), fn_get(mem, f, 3)) == 1 {
+            if blocks > 0 {
+                let c: u32 = app(out, ld32(st, E_OUT), "\n");
+                let _z: u32 = st32(st, E_OUT, c);
+            }
+            let _r: u32 = pye_emit_fn(mem, f);
+            blocks = blocks + 1;
+        }
+        k = k + 1;
+    }
+    if blocks == 0 {
+        // 一块都没有 -> 上游是 `"\n".join([]) + "\n"` = 一个换行
+        let c: u32 = app(out, ld32(st, E_OUT), "\n");
+        let _z: u32 = st32(st, E_OUT, c);
+    }
+    return 1;
+}
+
+/// 文档字符串那一块（`"\n".join("// " + ln for ln in doc.strip().splitlines())`）。
+/// **不 rstrip 行尾** —— 上游那一处没有 rstrip（函数文档字符串那处才有）。
+fn py_doc_block(mem: ptr, out: ptr, o: u32, off: u32, l: u32) -> u32 {
+    let p: ptr = ptr_add(mem, M_PS);
+    let a: u32 = py_triml(p, off, off + l);
+    let b: u32 = py_trimr(p, a, off + l);
+    let i: u32 = a;
+    let cur: u32 = o;
+    if a == b {
+        return o;                                  // 空白串 -> 一行都没有
+    }
+    while i <= b {
+        if i == b || load8(p, i) == 10 {
+            let k: u32 = i;
+            while k > a && load8(p, k - 1) != 10 {
+                k = k - 1;
+            }
+            cur = app(out, cur, "// ");
+            cur = appn(out, cur, p, k, i - k);
+            cur = app(out, cur, "\n");
+        }
+        i = i + 1;
+    }
+    return cur;
+}
+
 // ---------------------------------------------------------------- 语法树转写（`--ast`）
 //
 // 开发期对拍用：把语法树打成一串 S 表达式，与 Python 那边的同一份转写逐字节比
@@ -3529,6 +6209,9 @@ fn lang_of(p: ptr, l: u32) -> u32 {
     if l == 6 && eq(p, 0, "csharp") == 1 {
         return DL_CS + 1;
     }
+    if l == 6 && eq(p, 0, "python") == 1 {
+        return DL_PY + 1;
+    }
     return 0;
 }
 
@@ -3668,6 +6351,21 @@ fn _start() -> u32 {
     if pre == 1 {
         let o: u32 = appn(out, 0, body, 0, n);
         let _w: u64 = write_all(1, out, o as u64);
+        return die(0);
+    }
+    if lang == DL_PY {
+        // Python 那一门**不走** `tokenize` / `p_unit` / `emit_unit` —— 它的词法器
+        // 要造 INDENT/DEDENT、它的解析器吃换行与缩进，是另写的一套。
+        let _t: u32 = py_translate(mem, body, n);
+        let e1: u32 = ld32(pst(mem), PY_ERR);
+        let e2: u32 = ld32(pst(mem), PY_EERR);
+        if e1 != 0 || e2 != 0 {
+            if e1 == 1 || e2 == 1 {
+                return errout("unsupported", 1);
+            }
+            return errout("cerror", 2);
+        }
+        let _w: u64 = write_all(1, out, ld32(pst(mem), E_OUT) as u64);
         return die(0);
     }
     let cnt: u32 = tokenize(mem, body, n);
