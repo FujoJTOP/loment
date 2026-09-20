@@ -11,11 +11,20 @@ from __future__ import annotations
 import copy
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import potato  # noqa: E402
+
+# `lomentc` / `lomelf` **只**用来把孪生编出来（S1 第十五格）—— **判合法与否一次都不经过
+# 编译器**：上面那条 `test_validator_does_not_import_compiler` 扫的是 `potato.py` 自己，
+# 那条纪律照旧。这里多出来的两个 import 只是为了把 `lompotato.lomt` 链成可执行文件。
+import lomentc  # noqa: E402
+import lomelf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
@@ -370,6 +379,121 @@ def test_m50_assert_table_matches_objects():
     # 要钉的是"盘上那份（如果有）与生成结果一致"，也就是**漂移检得出来**。
     if dest.exists():
         assert dest.read_text(encoding="utf-8") == potato_assert.emit_rust(objs)
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十五格）
+
+TWIN = ROOT / "loment" / "tools" / "lompotato.lomt"
+
+
+def _twin_exe(td: Path) -> Path:
+    """把 `lompotato.lomt` 链成可执行文件（走仓库自己的原生后端，不经 clang）。
+
+    它只吃 JSON、只用 open/read/write/brk/exit 五个系统调用，所以能在本机**原生**跑 ——
+    不必进 WSL（与 `loment_lib_test` 的孪生同一条路）。
+    """
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"lompotato.lomt 自己检查不过: {errs[:2]}"
+    ir = lomentc.emit_llvm(mod, ROOT, deps)
+    exe = td / ("lompotato.exe" if sys.platform == "win32" else "lompotato")
+    exe.write_bytes((lomelf.compile_pe(ir) if sys.platform == "win32"
+                     else lomelf.compile_ll(ir))[0])
+    exe.chmod(0o755)
+    return exe
+
+
+def _cases() -> list[tuple[str, dict]]:
+    """判据这一侧的那批对象 —— **两条判据共用一份**（各写一遍必然漂）。
+
+    * 合法: `fixture` / v0 / v2（两个 mode）/ 仓库里**已提交**的形式对象 / 冻结样本；
+    * 非法: `MUTATORS` 那 51 条（每条钉一条规则）。
+    """
+    out: list[tuple[str, dict]] = [("fixture", fixture())]
+    for name, mut, _ in MUTATORS:
+        d = fixture()
+        mut(d)
+        out.append((name, d))
+    d0 = fixture()
+    for k in ("traits", "impls", "generics", "instances", "guards"):
+        d0.pop(k)
+    d0["potato"] = "v0"
+    d0["functions"] = d0["functions"][:1]
+    out.append(("v0", d0))
+    for m in potato.MODES:
+        dv = fixture()
+        dv["potato"] = "v2"
+        dv["mode"] = m
+        out.append((f"v2-{m}", dv))
+    for p in sorted((ROOT / "loment" / "build").glob("*.potato.json")):
+        out.append((p.name, json.loads(p.read_text(encoding="utf-8"))))
+    lg = ROOT / "loment" / "build" / "legacy" / "demo.v0.json"
+    if lg.exists():
+        out.append(("legacy/demo.v0.json", json.loads(lg.read_text(encoding="utf-8"))))
+    return out
+
+
+@test
+def test_lompotato_twin_matches_python():
+    """**Loment 版校验器与 Python 版判决逐条一致**（S1 第十五格，丙类最后一件）。
+
+    同一份对象喂两边：`potato.validate` 给 (接受 / 拒绝 + 错误条数)，孪生给
+    `ok` / `err N` —— **stdout 逐字节相同 + 退出码相同**。
+
+    **比到这里就够了，不要比文案**：`potato.validate` 的每条错误里都插了 Python 值的
+    `repr()`（`得到 {ver!r}` 这种），Loment 侧复现不了。文案那半由下面的 `MUTATORS` 表钉着
+    （每条反例钉一个错误片段）—— 那一层是**规则**的判据，这一层是**两份实现一致**的判据。
+
+    **两侧都不经过编译器**：`lompotato.lomt` 只吃 JSON，M47 的独立性照旧。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases = _cases()
+        bad = []
+        for i, (name, obj) in enumerate(cases):
+            fp = td / f"c{i:03d}.json"
+            fp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8",
+                          newline="\n")
+            errs = potato.validate(obj)
+            want_rc = 0 if not errs else 1
+            want_out = "ok\n" if not errs else f"err {len(errs)}\n"
+            r = subprocess.run([str(exe), str(fp)], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", shell=False, timeout=120)
+            if (r.returncode, r.stdout) != (want_rc, want_out):
+                bad.append((name, want_rc, want_out.strip(), r.returncode,
+                            r.stdout.strip(), r.stderr.strip()[:80], errs[:2]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份判决不一致（前 3）:\n"
+                         + "\n".join(f"  {n}: py=({a},{b!r}) 孪生=({c},{d!r}) {e} pyerrs={f}"
+                                     for n, a, b, c, d, e, f in bad[:3]))
+        n_ok = sum(1 for _, o in cases if not potato.validate(o))
+        print(f"      {len(cases)} 份对象（{n_ok} 合法 / {len(cases) - n_ok} 非法）："
+              f"判决与错误条数逐条一致")
+
+
+@test
+def test_lompotato_twin_selfhost_compiles():
+    """`lompotato.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。
+
+    没有 clang 时跳过 —— stage1 要靠 clang 链一次。
+    """
+    clang = shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+    if not (clang and Path(clang).exists()):
+        print("      SKIP: 无 clang")
+        return
+    import loment_dist  # noqa: E402
+    stage1 = loment_dist.build_stage1()
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    want = lomentc.emit_llvm(mod, ROOT, deps)
+    r = subprocess.run([str(stage1), TWIN.relative_to(ROOT).as_posix()], cwd=str(ROOT),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False, timeout=600)
+    assert r.returncode == 0, f"stage1 编译 lompotato.lomt 失败: {r.stderr[-400:]}"
+    got = r.stdout.replace("\r\n", "\n")
+    assert got == want, f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)"
+    print(f"      种子自举链编译 lompotato.lomt 成功，且 IR 与参考逐字节相同 ({len(want)}B)")
 
 
 def main() -> int:

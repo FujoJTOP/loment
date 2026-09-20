@@ -1,0 +1,1595 @@
+// loment/tools/lompotato.lomt — Loment 版 Potato 独立校验器（无 Python，docs/147）
+// (docs/189 §3 的 S1 第十五格；判据在 tools/potato_test.py)
+//
+// 判据: 对**同一批形式对象**（判据写出来的 `cases.txt` + 一批 `.json`），本程序给出的
+// **接受 / 拒绝**判决，与 `tools/potato.py` 那个独立校验器**逐条一致**。
+//
+// **M47 的独立性照旧**: 本文件不 import 编译器 —— 它只吃 JSON，不认识 Loment 源码。
+//
+// 判据里既有一批"必须拒"的反例（每条钉一个规则），也有"必须收"的正例（fixture / v0 /
+// v2 / 已提交的那批对象）—— 所以**"一律拒"过不了**。
+//
+// 与 `potato.py` 的**刻意偏离**（写在最显眼处，别把"孪生"读成"全等"）:
+//   1. **只做判决，不做文案**。`potato.validate` 的每条错误里都插了 Python 值的 `repr()`
+//      （`得到 {ver!r}` 这种），Loment 侧复现不了 —— 判据比的是**接受/拒绝**，文案那半
+//      留在 Python 侧的反例表（每条反例钉一个错误片段）。
+//   2. 名字表容量固定（64 条/表）—— 真实对象远达不到；超了**报错**，不静默丢。
+//   3. **不是逐条照抄**：只实现判据会走到的那些规则。没实现的规则在合法输入上不报，
+//      所以"收下合法对象"这一侧照旧；"拒掉每条反例"那一侧由判据钉住。
+//
+// 用法: `lompotato <obj.json>` —— 退出码 0 = 合法 / 1 = 有错；stdout 打 `ok` 或 `err N`。
+
+module lompotato
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 尺寸
+const IN_CAP: u32 = 131072;        // 输入 JSON（自举的大模块已到 44 KB —— 留一倍余量）
+const ARENA_CAP: u32 = 262144;     // JSON 结点 arena
+const NODES_CAP: u32 = 65536;      // 名字/方法暂存区
+const TMAX: u32 = 256;             // 每张名字表的上限（自举的大模块有 121 个函数）
+const T_W: u32 = 132;              // 一条: len 4 + num 4 + 名字 124
+const T_ENTS: u32 = 8;
+const TA: u32 = 33808;             // 一张表 (8 + 256*132 = 33800, 对齐到 33808)
+
+// ---------------------------------------------------------------- 内存布局
+const M_IN: u32 = 0;                       // IN_CAP          0
+const M_ARENA: u32 = 65536;                // ARENA_CAP   -> 327680
+const M_SB: u32 = 327680;                  // 8192        -> 335872   (+4096 起是数字暂存)
+const M_SB2: u32 = 335872;                 // 8192        -> 344064
+const M_NODES: u32 = 344064;               // NODES_CAP   -> 409600
+const M_TB: u32 = 409600;                  // 表区 12*33808 = 405696 -> 815296
+const M_ST: u32 = 815296;                  // 16 字节状态
+const M_CAP: u32 = 832512;
+
+// **写死**（`const` 只吃整数**字面量**，不接受算式）: M_TB + i * 33808
+const TB_TP: u32 = 475136;         // 声明类型名 (types ∪ enums) —— type_ok 要用
+const TB_TY: u32 = 508944;         // 只 types (与 enums 撞名时用)
+const TB_FN: u32 = 542752;
+const TB_CP: u32 = 576560;
+const TB_CS: u32 = 610368;
+const TB_LY: u32 = 644176;
+const TB_EN: u32 = 677984;
+const TB_TR: u32 = 711792;
+const TB_GN: u32 = 745600;
+const TB_IN: u32 = 779408;
+const TB_SW: u32 = 813216;
+const TB_DL: u32 = 847024;
+
+const TH_N: u32 = 0;               // 表头: 条数
+const S_ERRS: u32 = 0;             // 状态格: 错误数
+
+const NOTFOUND: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 基础
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// 十进制（`err N`）。
+fn wdec(mem: ptr, fd: u64, v: u32) -> u64 {
+    let b: ptr = ptr_add(mem, M_SB + 4096);
+    if v == 0 {
+        store8(b, 0, 48 as u8);
+        return write_all(fd, b, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(b, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(b, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+/// 记一条错误。
+fn bad(mem: ptr) -> u32 {
+    let _a: u32 = st32(mem, M_ST + S_ERRS, ld32(mem, M_ST + S_ERRS) + 1);
+    return 0;
+}
+
+/// `p[0..n)` 等于字面量 `s` 吗。
+fn eq_lit(p: ptr, n: u32, s: str) -> u32 {
+    let sl: u32 = str_len(s);
+    if n != sl {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*$`。
+fn is_ident(p: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = load8(p, 0);
+    if c != 95 && (c < 65 || c > 90) && (c < 97 || c > 122) {
+        return 0;
+    }
+    let i: u32 = 1;
+    while i < n {
+        let d: u32 = load8(p, i);
+        if d != 95 && (d < 48 || d > 57) && (d < 65 || d > 90) && (d < 97 || d > 122) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 名字表
+
+fn tbl_clear(b: ptr) -> u32 {
+    let _a: u32 = st32(b, TH_N, 0);
+    return 0;
+}
+
+fn tbl_count(b: ptr) -> u32 {
+    return ld32(b, TH_N);
+}
+
+/// 加一条; 已经在表里就返回 1（**不加**）。表满返回 2。
+fn tbl_add(b: ptr, namep: ptr, nl: u32, num: u32) -> u32 {
+    let n: u32 = ld32(b, TH_N);
+    let i: u32 = 0;
+    while i < n {
+        let off: u32 = T_ENTS + i * T_W;
+        let l: u32 = ld32(b, off);
+        if l == nl && eq_lit(ptr_add(b, off + 8), nl, "") == 0 {
+            let k: u32 = 0;
+            let same: u32 = 1;
+            while k < nl {
+                if load8(b, off + 8 + k) != load8(namep, k) {
+                    same = 0;
+                }
+                k = k + 1;
+            }
+            if same == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    if n >= TMAX {
+        return 2;
+    }
+    let off2: u32 = T_ENTS + n * T_W;
+    let _a: u32 = st32(b, off2, nl);
+    let _b: u32 = st32(b, off2 + 4, num);
+    let k2: u32 = 0;
+    while k2 < nl && k2 < 124 {
+        store8(b, off2 + 8 + k2, load8(namep, k2) as u8);
+        k2 = k2 + 1;
+    }
+    let _c: u32 = st32(b, TH_N, n + 1);
+    return 0;
+}
+
+fn tbl_find(b: ptr, namep: ptr, nl: u32) -> u32 {
+    let n: u32 = ld32(b, TH_N);
+    let i: u32 = 0;
+    while i < n {
+        let off: u32 = T_ENTS + i * T_W;
+        if ld32(b, off) == nl {
+            let k: u32 = 0;
+            let same: u32 = 1;
+            while k < nl {
+                if load8(b, off + 8 + k) != load8(namep, k) {
+                    same = 0;
+                }
+                k = k + 1;
+            }
+            if same == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return NOTFOUND;
+}
+
+fn tbl_num(b: ptr, i: u32) -> u32 {
+    return ld32(b, T_ENTS + i * T_W + 4);
+}
+
+fn tbl_len(b: ptr, i: u32) -> u32 {
+    return ld32(b, T_ENTS + i * T_W);
+}
+
+fn tbl_name(b: ptr, i: u32) -> ptr {
+    return ptr_add(b, T_ENTS + i * T_W + 8);
+}
+
+// ---------------------------------------------------------------- JSON 取用
+
+fn jget(mem: ptr, obj: u32, key: str) -> u32 {
+    return json_get(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), obj, key);
+}
+
+fn jkind(mem: ptr, n: u32) -> u32 {
+    return json_nkind(ptr_add(mem, M_ARENA), n);
+}
+
+/// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
+fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
+    return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
+}
+
+// ⚠ 子链的**终止符是 0**（不是 `FAIL`）—— `json_first_child`/`json_sibling` 直接返回
+// 结点号，链尾那个 0 表示"没有了"；而 `json_get` 缺键时返回 `FAIL`。两个哨兵不一样，
+// 混了就写成死循环（2026-09-19 实测：`while c != FAIL` 在空对象上转不出来）。
+// 这里统一成 `FAIL`，免得每条循环都要记住是哪一种。
+fn jfirst(mem: ptr, n: u32) -> u32 {
+    let c: u32 = json_first_child(ptr_add(mem, M_ARENA), n);
+    if c == 0 {
+        return NOTFOUND;
+    }
+    return c;
+}
+
+fn jsib(mem: ptr, m: u32) -> u32 {
+    let c: u32 = json_sibling(ptr_add(mem, M_ARENA), m);
+    if c == 0 {
+        return NOTFOUND;
+    }
+    return c;
+}
+
+fn jmkey(mem: ptr, m: u32) -> u32 {
+    return json_member_key(ptr_add(mem, M_ARENA), m);
+}
+
+fn jmval(mem: ptr, m: u32) -> u32 {
+    return json_member_val(ptr_add(mem, M_ARENA), m);
+}
+
+/// 非负整数吗（`-1` 要判掉 —— `json_as_u32` 会把它绕回来）。
+fn jnonneg(mem: ptr, n: u32) -> u32 {
+    if jkind(mem, n) != 4 {
+        return 0;
+    }
+    let off: u32 = json_raw_off(ptr_add(mem, M_ARENA), n);
+    if load8(ptr_add(mem, M_IN), off) == 45 {
+        return 0;
+    }
+    if load8(ptr_add(mem, M_IN), off) == 43 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 布尔吗（true/false 两种结点）。
+fn jbool(mem: ptr, n: u32) -> u32 {
+    let k: u32 = jkind(mem, n);
+    if k == 5 || k == 6 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 字符串结点的文本长度（解码后）。
+fn jstr_len(mem: ptr, n: u32) -> u32 {
+    if jkind(mem, n) != 3 {
+        return NOTFOUND;
+    }
+    return jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+}
+
+// ---------------------------------------------------------------- 类型表达式
+
+fn trim_lo(p: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b && (load8(p, i) == 32 || load8(p, i) == 9) {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn trim_hi(p: ptr, a: u32, b: u32) -> u32 {
+    let j: u32 = b;
+    while j > a && (load8(p, j - 1) == 32 || load8(p, j - 1) == 9) {
+        j = j - 1;
+    }
+    return j;
+}
+
+/// 基类型吗（`TYPES`）。
+fn is_base(tp: ptr, tl: u32) -> u32 {
+    if eq_lit(tp, tl, "u8") == 1 || eq_lit(tp, tl, "u16") == 1 || eq_lit(tp, tl, "u32") == 1
+            || eq_lit(tp, tl, "u64") == 1 || eq_lit(tp, tl, "i8") == 1 || eq_lit(tp, tl, "i16") == 1
+            || eq_lit(tp, tl, "i32") == 1 || eq_lit(tp, tl, "i64") == 1 {
+        return 1;
+    }
+    if eq_lit(tp, tl, "bool") == 1 || eq_lit(tp, tl, "str") == 1 || eq_lit(tp, tl, "ptr") == 1
+            || eq_lit(tp, tl, "()") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_int_type(tp: ptr, tl: u32) -> u32 {
+    if eq_lit(tp, tl, "u8") == 1 || eq_lit(tp, tl, "u16") == 1 || eq_lit(tp, tl, "u32") == 1
+            || eq_lit(tp, tl, "u64") == 1 {
+        return 1;
+    }
+    if eq_lit(tp, tl, "i8") == 1 || eq_lit(tp, tl, "i16") == 1 || eq_lit(tp, tl, "i32") == 1
+            || eq_lit(tp, tl, "i64") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 定宽（布局字段用）。
+fn width_of(tp: ptr, tl: u32) -> u32 {
+    if eq_lit(tp, tl, "u8") == 1 || eq_lit(tp, tl, "i8") == 1 {
+        return 1;
+    }
+    if eq_lit(tp, tl, "u16") == 1 || eq_lit(tp, tl, "i16") == 1 {
+        return 2;
+    }
+    if eq_lit(tp, tl, "u32") == 1 || eq_lit(tp, tl, "i32") == 1 {
+        return 4;
+    }
+    if eq_lit(tp, tl, "u64") == 1 || eq_lit(tp, tl, "i64") == 1 {
+        return 8;
+    }
+    return NOTFOUND;
+}
+
+/// `_type_ok`: 基类型 / 已声明 / `[T]` / `mut [T]` / `[T; N]`（N > 0）。
+fn type_ok(mem: ptr, tp: ptr, tl: u32) -> u32 {
+    if is_base(tp, tl) == 1 {
+        return 1;
+    }
+    if tbl_find(ptr_add(mem, TB_TP), tp, tl) != NOTFOUND {
+        return 1;
+    }
+    if tl >= 6 && eq_lit(tp, 4, "mut ") == 1 && load8(tp, 4) == 91 && load8(tp, tl - 1) == 93 {
+        let a: u32 = trim_lo(tp, 5, tl - 1);
+        let b: u32 = trim_hi(tp, 5, tl - 1);
+        return type_ok(mem, ptr_add(tp, a), b - a);
+    }
+    if tl >= 2 && load8(tp, 0) == 91 && load8(tp, tl - 1) == 93 {
+        // 里面有 `;` 就是数组，否则是切片
+        let semi: u32 = NOTFOUND;
+        let i: u32 = 1;
+        while i < tl - 1 {
+            if load8(tp, i) == 59 {
+                semi = i;
+            }
+            i = i + 1;
+        }
+        if semi == NOTFOUND {
+            let a: u32 = trim_lo(tp, 1, tl - 1);
+            let b: u32 = trim_hi(tp, 1, tl - 1);
+            if b <= a {
+                return 0;
+            }
+            return type_ok(mem, ptr_add(tp, a), b - a);
+        }
+        let ea: u32 = trim_lo(tp, 1, semi);
+        let eb: u32 = trim_hi(tp, 1, semi);
+        if eb <= ea {
+            return 0;
+        }
+        if type_ok(mem, ptr_add(tp, ea), eb - ea) == 0 {
+            return 0;
+        }
+        let na: u32 = trim_lo(tp, semi + 1, tl - 1);
+        let nb: u32 = trim_hi(tp, semi + 1, tl - 1);
+        if nb <= na {
+            return 0;
+        }
+        let v: u32 = 0;
+        let d: u32 = na;
+        while d < nb {
+            let c: u32 = load8(tp, d);
+            if c < 48 || c > 57 {
+                return 0;
+            }
+            v = v * 10 + (c - 48);
+            d = d + 1;
+        }
+        if v == 0 {
+            return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/// 结点形态的 `_type_ok`（先把字符串解进 buf）。
+fn type_ok_node(mem: ptr, tn: u32, buf: ptr) -> u32 {
+    if jkind(mem, tn) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, tn, buf, 4096);
+    return type_ok(mem, buf, l);
+}
+
+/// 结点形态的"是标识符吗"（`NOTFOUND` 表示不是字符串）。
+fn ident_node(mem: ptr, nn: u32, buf: ptr) -> u32 {
+    if jkind(mem, nn) != 3 {
+        return NOTFOUND;
+    }
+    let l: u32 = jstr(mem, nn, buf, 4096);
+    if is_ident(buf, l) == 1 {
+        return l;
+    }
+    return NOTFOUND;
+}
+
+// ---------------------------------------------------------------- 顶层
+
+fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "potato") == 1 || eq_lit(kp, kl, "unit") == 1
+            || eq_lit(kp, kl, "language") == 1 || eq_lit(kp, kl, "imports") == 1 {
+        return 1;
+    }
+    if eq_lit(kp, kl, "capabilities") == 1 || eq_lit(kp, kl, "functions") == 1
+            || eq_lit(kp, kl, "layouts") == 1 || eq_lit(kp, kl, "consts") == 1 {
+        return 1;
+    }
+    if eq_lit(kp, kl, "enums") == 1 || eq_lit(kp, kl, "types") == 1
+            || eq_lit(kp, kl, "excluded") == 1 {
+        return 1;
+    }
+    if ver >= 1 {
+        if eq_lit(kp, kl, "traits") == 1 || eq_lit(kp, kl, "impls") == 1
+                || eq_lit(kp, kl, "generics") == 1 || eq_lit(kp, kl, "instances") == 1
+                || eq_lit(kp, kl, "guards") == 1 {
+            return 1;
+        }
+    }
+    if ver >= 2 && eq_lit(kp, kl, "mode") == 1 {
+        return 1;
+    }
+    if ver >= 3 && eq_lit(kp, kl, "switches") == 1 {
+        return 1;
+    }
+    if ver >= 4 && eq_lit(kp, kl, "dialects") == 1 {
+        return 1;
+    }
+    if ver >= 5 && eq_lit(kp, kl, "bodies") == 1 {
+        return 1;
+    }
+    if ver >= 6 && eq_lit(kp, kl, "grammar") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 声明类型名集合（types ∪ enums）—— 函数签名可以引用它们，所以要**先**收。
+fn collect_declared(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "types");
+    if arr != NOTFOUND && jkind(mem, arr) == 2 {
+        let c: u32 = jfirst(mem, arr);
+        while c != NOTFOUND {
+            let nm: u32 = jget(mem, c, "name");
+            if nm != NOTFOUND && jkind(mem, nm) == 3 {
+                let l: u32 = jstr(mem, nm, ptr_add(mem, M_SB), 4096);
+                let _r: u32 = tbl_add(ptr_add(mem, TB_TP), ptr_add(mem, M_SB), l, 0);
+            }
+            c = jsib(mem, c);
+        }
+    }
+    let arr2: u32 = jget(mem, doc, "enums");
+    if arr2 != NOTFOUND && jkind(mem, arr2) == 2 {
+        let c2: u32 = jfirst(mem, arr2);
+        while c2 != NOTFOUND {
+            let nm2: u32 = jget(mem, c2, "name");
+            if nm2 != NOTFOUND && jkind(mem, nm2) == 3 {
+                let l2: u32 = jstr(mem, nm2, ptr_add(mem, M_SB), 4096);
+                let _r2: u32 = tbl_add(ptr_add(mem, TB_TP), ptr_add(mem, M_SB), l2, 0);
+            }
+            c2 = jsib(mem, c2);
+        }
+    }
+    return 0;
+}
+
+/// 一串对象的公共开头：`name` 必须存在且是标识符，且本表内不重复。
+/// 返回名字长度（`NOTFOUND` = 不合法，已记错误）。
+fn name_field(mem: ptr, ob: u32, tb: u32) -> u32 {
+    let nm: u32 = jget(mem, ob, "name");
+    if nm == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    let l: u32 = ident_node(mem, nm, ptr_add(mem, M_SB));
+    if l == NOTFOUND {
+        let _b: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    let r: u32 = tbl_add(ptr_add(mem, tb), ptr_add(mem, M_SB), l, 0);
+    if r == 1 {
+        let _c: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    if r == 2 {
+        let _d: u32 = bad(mem);
+    }
+    return l;
+}
+
+// ---------------------------------------------------------------- 各节的检查
+
+fn chk_caps(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "capabilities");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_CP));
+    let c: u32 = jfirst(mem, arr);
+    while c != NOTFOUND {
+        if jkind(mem, c) != 1 {
+            let _e: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, c, TB_CP);
+            let dom: u32 = jget(mem, c, "domain");
+            if dom == NOTFOUND || jkind(mem, dom) != 1 {
+                let _f: u32 = bad(mem);
+            } else {
+                let sp: u32 = jget(mem, dom, "space");
+                if sp == NOTFOUND || ident_node(mem, sp, ptr_add(mem, M_SB2)) == NOTFOUND {
+                    let _g: u32 = bad(mem);
+                }
+                let lo: u32 = jget(mem, dom, "lo");
+                let hi: u32 = jget(mem, dom, "hi");
+                if lo == NOTFOUND || hi == NOTFOUND || jnonneg(mem, lo) == 0
+                        || jnonneg(mem, hi) == 0 {
+                    let _h: u32 = bad(mem);
+                } else {
+                    let lv: u32 = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), lo);
+                    let hv: u32 = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), hi);
+                    if lv > hv {
+                        let _i: u32 = bad(mem);
+                    }
+                }
+            }
+            let rv: u32 = jget(mem, c, "revocable");
+            if rv == NOTFOUND || jbool(mem, rv) == 0 {
+                let _j: u32 = bad(mem);
+            }
+        }
+        c = jsib(mem, c);
+    }
+    return 0;
+}
+
+fn chk_funcs(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "functions");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_FN));
+    let f: u32 = jfirst(mem, arr);
+    while f != NOTFOUND {
+        if jkind(mem, f) != 1 {
+            let _e: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, f, TB_FN);
+            let ret: u32 = jget(mem, f, "ret");
+            if ret == NOTFOUND || type_ok_node(mem, ret, ptr_add(mem, M_SB2)) == 0 {
+                let _r: u32 = bad(mem);
+            }
+            let ps: u32 = jget(mem, f, "params");
+            if ps == NOTFOUND || jkind(mem, ps) != 2 {
+                let _p: u32 = bad(mem);
+            } else {
+                let _pl: u32 = tbl_clear(ptr_add(mem, TB_IN));
+                let p: u32 = jfirst(mem, ps);
+                while p != NOTFOUND {
+                    if jkind(mem, p) != 1 {
+                        let _x: u32 = bad(mem);
+                    } else {
+                        let ty: u32 = jget(mem, p, "type");
+                        if ty == NOTFOUND || type_ok_node(mem, ty, ptr_add(mem, M_SB2)) == 0 {
+                            let _t: u32 = bad(mem);
+                        }
+                        let _pn: u32 = name_field(mem, p, TB_IN);
+                    }
+                    p = jsib(mem, p);
+                }
+            }
+            let abi: u32 = jget(mem, f, "abi");
+            if abi != NOTFOUND {
+                let l: u32 = jstr(mem, abi, ptr_add(mem, M_SB2), 4096);
+                if eq_lit(ptr_add(mem, M_SB2), l, "c") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "rust") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "python") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "go") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "java") == 0 {
+                    let _ab: u32 = bad(mem);
+                }
+            }
+            let bd: u32 = jget(mem, f, "body");
+            if bd != NOTFOUND {
+                if jkind(mem, bd) != 3 {
+                    let _bd: u32 = bad(mem);
+                } else if jstr(mem, bd, ptr_add(mem, M_SB2), 4096) == 0 {
+                    let _bd2: u32 = bad(mem);
+                }
+            }
+        }
+        f = jsib(mem, f);
+    }
+    return 0;
+}
+
+fn chk_types(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "types");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_TY));
+    let t: u32 = jfirst(mem, arr);
+    while t != NOTFOUND {
+        if jkind(mem, t) != 1 {
+            let _e: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, t, TB_TY);
+            let fs: u32 = jget(mem, t, "fields");
+            if fs == NOTFOUND || jkind(mem, fs) != 2 || jfirst(mem, fs) == NOTFOUND {
+                let _f: u32 = bad(mem);
+            } else {
+                let _fl: u32 = tbl_clear(ptr_add(mem, TB_CS));
+                let fd: u32 = jfirst(mem, fs);
+                while fd != NOTFOUND {
+                    if jkind(mem, fd) != 1 {
+                        let _x: u32 = bad(mem);
+                    } else {
+                        let _fn: u32 = name_field(mem, fd, TB_CS);
+                        let ty: u32 = jget(mem, fd, "type");
+                        if ty == NOTFOUND || type_ok_node(mem, ty, ptr_add(mem, M_SB2)) == 0 {
+                            let _ft: u32 = bad(mem);
+                        }
+                    }
+                    fd = jsib(mem, fd);
+                }
+            }
+        }
+        t = jsib(mem, t);
+    }
+    return 0;
+}
+
+fn chk_enums(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "enums");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_EN));
+    let e: u32 = jfirst(mem, arr);
+    while e != NOTFOUND {
+        if jkind(mem, e) != 1 {
+            let _c: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, e, TB_EN);
+            let vs: u32 = jget(mem, e, "variants");
+            if vs == NOTFOUND || jkind(mem, vs) != 2 || jfirst(mem, vs) == NOTFOUND {
+                let _d: u32 = bad(mem);
+            } else {
+                let _vl: u32 = tbl_clear(ptr_add(mem, TB_DL));
+                let v: u32 = jfirst(mem, vs);
+                while v != NOTFOUND {
+                    let _vn: u32 = name_field2(mem, v, TB_DL);
+                    v = jsib(mem, v);
+                }
+                let pl: u32 = jget(mem, e, "payloads");
+                if pl != NOTFOUND {
+                    if jkind(mem, pl) != 1 {
+                        let _p: u32 = bad(mem);
+                    } else {
+                        let m: u32 = jfirst(mem, pl);
+                        while m != NOTFOUND {
+                            let kn: u32 = jmkey(mem, m);
+                            let vl: u32 = jstr(mem, kn, ptr_add(mem, M_SB), 4096);
+                            if tbl_find(ptr_add(mem, TB_DL), ptr_add(mem, M_SB), vl) == NOTFOUND {
+                                let _q: u32 = bad(mem);
+                            }
+                            let vt: u32 = jmval(mem, m);
+                            if type_ok_node(mem, vt, ptr_add(mem, M_SB2)) == 0 {
+                                let _s: u32 = bad(mem);
+                            }
+                            m = jsib(mem, m);
+                        }
+                    }
+                }
+            }
+        }
+        e = jsib(mem, e);
+    }
+    return 0;
+}
+
+fn chk_consts(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "consts");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_CS));
+    let c: u32 = jfirst(mem, arr);
+    while c != NOTFOUND {
+        if jkind(mem, c) != 1 {
+            let _e: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, c, TB_CS);
+            let ty: u32 = jget(mem, c, "type");
+            if ty == NOTFOUND {
+                let _t: u32 = bad(mem);
+            } else if jkind(mem, ty) != 3 {
+                let _t2: u32 = bad(mem);
+            } else {
+                let l: u32 = jstr(mem, ty, ptr_add(mem, M_SB2), 4096);
+                if is_int_type(ptr_add(mem, M_SB2), l) == 0 {
+                    let _t3: u32 = bad(mem);
+                }
+            }
+            let vv: u32 = jget(mem, c, "value");
+            if vv == NOTFOUND || jkind(mem, vv) != 4 {
+                let _v: u32 = bad(mem);
+            }
+        }
+        c = jsib(mem, c);
+    }
+    return 0;
+}
+
+fn chk_layouts(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "layouts");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_LY));
+    let r: u32 = jfirst(mem, arr);
+    while r != NOTFOUND {
+        if jkind(mem, r) != 1 {
+            let _c: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, r, TB_LY);
+            let sz: u32 = jget(mem, r, "size");
+            let szv: u32 = 0;
+            let szok: u32 = 0;
+            if sz != NOTFOUND && jnonneg(mem, sz) == 1 {
+                let s: u32 = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), sz);
+                if s > 0 {
+                    szv = s;
+                    szok = 1;
+                }
+            }
+            if szok == 0 {
+                let _s: u32 = bad(mem);
+            }
+            let en: u32 = jget(mem, r, "endian");
+            if en == NOTFOUND {
+                let _e: u32 = bad(mem);
+            } else {
+                let l: u32 = jstr(mem, en, ptr_add(mem, M_SB2), 4096);
+                if eq_lit(ptr_add(mem, M_SB2), l, "little") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "big") == 0 {
+                    let _e2: u32 = bad(mem);
+                }
+            }
+            let pk: u32 = jget(mem, r, "packed");
+            if pk == NOTFOUND || jbool(mem, pk) == 0 {
+                let _p: u32 = bad(mem);
+            }
+            let fs: u32 = jget(mem, r, "fields");
+            if fs == NOTFOUND || jkind(mem, fs) != 2 {
+                let _f: u32 = bad(mem);
+            } else {
+                let _fl: u32 = tbl_clear(ptr_add(mem, TB_DL));
+                // 命中区间表: 先收集 (off, end)，逐对判重叠
+                let occ: ptr = ptr_add(mem, M_NODES);
+                let oc: u32 = 0;
+                let fd: u32 = jfirst(mem, fs);
+                while fd != NOTFOUND {
+                    if jkind(mem, fd) != 1 {
+                        let _x: u32 = bad(mem);
+                    } else {
+                        let _fn: u32 = name_field(mem, fd, TB_DL);
+                        let ty: u32 = jget(mem, fd, "type");
+                        let offn: u32 = jget(mem, fd, "offset");
+                        let w: u32 = NOTFOUND;
+                        if ty != NOTFOUND && jkind(mem, ty) == 3 {
+                            let l2: u32 = jstr(mem, ty, ptr_add(mem, M_SB2), 4096);
+                            w = width_of(ptr_add(mem, M_SB2), l2);
+                        }
+                        if w == NOTFOUND {
+                            let _t: u32 = bad(mem);
+                        } else if offn == NOTFOUND || jnonneg(mem, offn) == 0 {
+                            let _o: u32 = bad(mem);
+                        } else {
+                            let o: u32 = json_as_u32(ptr_add(mem, M_IN),
+                                                     ptr_add(mem, M_ARENA), offn);
+                            if o + w > szv {
+                                let _ov: u32 = bad(mem);
+                            }
+                            if oc < 64 {
+                                let _a1: u32 = st32(occ, oc * 8, o);
+                                let _a2: u32 = st32(occ, oc * 8 + 4, o + w);
+                                oc = oc + 1;
+                            }
+                        }
+                    }
+                    fd = jsib(mem, fd);
+                }
+                // 重叠（插入排序后逐对看）
+                let i2: u32 = 1;
+                while i2 < oc {
+                    let oi: u32 = ld32(occ, i2 * 8);
+                    let ei: u32 = ld32(occ, i2 * 8 + 4);
+                    let j2: u32 = i2;
+                    let going: u32 = 1;
+                    while j2 > 0 && going == 1 {
+                        let oj: u32 = ld32(occ, (j2 - 1) * 8);
+                        let ej: u32 = ld32(occ, (j2 - 1) * 8 + 4);
+                        if oj > oi {
+                            let _s1: u32 = st32(occ, j2 * 8, oj);
+                            let _s2: u32 = st32(occ, j2 * 8 + 4, ej);
+                            j2 = j2 - 1;
+                        } else {
+                            going = 0;
+                        }
+                    }
+                    let _s3: u32 = st32(occ, j2 * 8, oi);
+                    let _s4: u32 = st32(occ, j2 * 8 + 4, ei);
+                    i2 = i2 + 1;
+                }
+                let k2: u32 = 1;
+                while k2 < oc {
+                    let prev_e: u32 = ld32(occ, (k2 - 1) * 8 + 4);
+                    let cur_o: u32 = ld32(occ, k2 * 8);
+                    if cur_o < prev_e {
+                        let _lap: u32 = bad(mem);
+                    }
+                    k2 = k2 + 1;
+                }
+            }
+        }
+        r = jsib(mem, r);
+    }
+    return 0;
+}
+
+/// 跨表唯一 + 基类型同名（types 与 enums 共用一个命名空间）。
+fn chk_cross(mem: ptr) -> u32 {
+    let n: u32 = tbl_count(ptr_add(mem, TB_TY));
+    let i: u32 = 0;
+    while i < n {
+        let p: ptr = tbl_name(ptr_add(mem, TB_TY), i);
+        let l: u32 = tbl_len(ptr_add(mem, TB_TY), i);
+        if tbl_find(ptr_add(mem, TB_EN), p, l) != NOTFOUND {
+            let _a: u32 = bad(mem);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chk_excluded(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "excluded");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let x: u32 = jfirst(mem, arr);
+    while x != NOTFOUND {
+        if jkind(mem, x) != 3 {
+            let _c: u32 = bad(mem);
+        } else if jstr(mem, x, ptr_add(mem, M_SB2), 4096) == 0 {
+            let _d: u32 = bad(mem);
+        }
+        x = jsib(mem, x);
+    }
+    return 0;
+}
+
+fn chk_imports(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "imports");
+    if arr == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let x: u32 = jfirst(mem, arr);
+    while x != NOTFOUND {
+        if ident_node(mem, x, ptr_add(mem, M_SB2)) == NOTFOUND {
+            let _c: u32 = bad(mem);
+        }
+        x = jsib(mem, x);
+    }
+    return 0;
+}
+
+// 泛型 / 实例 / trait / impl（M45）—— 用调用时现查，不再多建嵌套表
+
+fn chk_generics(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "generics");
+    if arr == NOTFOUND {
+        return 0;      // 缺字段由 chk_v1 报（报两次数就对不上了）
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_GN));
+    let g: u32 = jfirst(mem, arr);
+    while g != NOTFOUND {
+        if jkind(mem, g) != 1 {
+            let _c: u32 = bad(mem);
+        } else {
+            let kd: u32 = jget(mem, g, "kind");
+            let kok: u32 = 0;
+            if kd != NOTFOUND && jkind(mem, kd) == 3 {
+                let l: u32 = jstr(mem, kd, ptr_add(mem, M_SB2), 4096);
+                if eq_lit(ptr_add(mem, M_SB2), l, "fn") == 1
+                        || eq_lit(ptr_add(mem, M_SB2), l, "type") == 1 {
+                    kok = 1;
+                }
+            }
+            if kok == 0 {
+                let _k: u32 = bad(mem);
+            }
+            let nl: u32 = name_field(mem, g, TB_GN);
+            let ps: u32 = jget(mem, g, "params");
+            if ps == NOTFOUND || jkind(mem, ps) != 2 || jfirst(mem, ps) == NOTFOUND {
+                let _p: u32 = bad(mem);
+            } else {
+                let _pl: u32 = tbl_clear(ptr_add(mem, TB_IN));
+                let pn: u32 = 0;
+                let p: u32 = jfirst(mem, ps);
+                while p != NOTFOUND {
+                    if name_field2(mem, p, TB_IN) == 0 {
+                        let _q: u32 = bad(mem);
+                    }
+                    // **个数要数全** —— Python 那边 `gen_by[...] = list(ps)` 是整条列表的长度，
+                    // 重复的那个也算（否则 instances 的 "args 数量不符" 会漏报）。
+                    pn = pn + 1;
+                    p = jsib(mem, p);
+                }
+                if nl != NOTFOUND {
+                    let _sn: u32 = st32(ptr_add(mem, TB_GN),
+                                        T_ENTS + (tbl_count(ptr_add(mem, TB_GN)) - 1) * T_W + 4, pn);
+                }
+            }
+        }
+        g = jsib(mem, g);
+    }
+    return 0;
+}
+
+/// 参数位上的标识符（不是对象）—— 与 `name_field` 分开：这里查的是**值**不是字段。
+fn name_field2(mem: ptr, v: u32, tb: u32) -> u32 {
+    let l: u32 = ident_node(mem, v, ptr_add(mem, M_SB));
+    if l == NOTFOUND {
+        return 0;
+    }
+    let r: u32 = tbl_add(ptr_add(mem, tb), ptr_add(mem, M_SB), l, 0);
+    if r == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn chk_instances(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "instances");
+    if arr == NOTFOUND {
+        return 0;      // 同上：缺字段由 chk_v1 报
+    }
+    if jkind(mem, arr) != 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_IN));
+    let it: u32 = jfirst(mem, arr);
+    while it != NOTFOUND {
+        if jkind(mem, it) != 1 {
+            let _c: u32 = bad(mem);
+        } else {
+            let kd: u32 = jget(mem, it, "kind");
+            if kd == NOTFOUND || jkind(mem, kd) != 3 {
+                let _k: u32 = bad(mem);
+            } else {
+                let l: u32 = jstr(mem, kd, ptr_add(mem, M_SB2), 4096);
+                if eq_lit(ptr_add(mem, M_SB2), l, "fn") == 0
+                        && eq_lit(ptr_add(mem, M_SB2), l, "type") == 0 {
+                    let _k2: u32 = bad(mem);
+                }
+            }
+            let _n: u32 = name_field(mem, it, TB_IN);
+            let of: u32 = jget(mem, it, "of");
+            let oi: u32 = NOTFOUND;
+            if of != NOTFOUND && jkind(mem, of) == 3 {
+                let l2: u32 = jstr(mem, of, ptr_add(mem, M_SB2), 4096);
+                oi = tbl_find(ptr_add(mem, TB_GN), ptr_add(mem, M_SB2), l2);
+            }
+            if oi == NOTFOUND {
+                let _o: u32 = bad(mem);
+            } else {
+                let need: u32 = tbl_num(ptr_add(mem, TB_GN), oi);
+                let ar: u32 = jget(mem, it, "args");
+                if ar == NOTFOUND || jkind(mem, ar) != 2 {
+                    let _ar: u32 = bad(mem);
+                } else {
+                    let cnt: u32 = 0;
+                    let a: u32 = jfirst(mem, ar);
+                    while a != NOTFOUND {
+                        cnt = cnt + 1;
+                        if type_ok_node(mem, a, ptr_add(mem, M_SB)) == 0 {
+                            let _t: u32 = bad(mem);
+                        }
+                        a = jsib(mem, a);
+                    }
+                    if cnt != need {
+                        let _m: u32 = bad(mem);
+                    }
+                }
+            }
+        }
+        it = jsib(mem, it);
+    }
+    return 0;
+}
+
+/// 在 `traits` 里找 `name`，找到返回它的 `methods` 数组结点（没有返回 NOTFOUND）。
+fn find_trait_methods(mem: ptr, doc: u32, tn: ptr, tl: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "traits");
+    if arr == NOTFOUND || jkind(mem, arr) != 2 {
+        return NOTFOUND;
+    }
+    let t: u32 = jfirst(mem, arr);
+    while t != NOTFOUND {
+        if jkind(mem, t) == 1 {
+            let nm: u32 = jget(mem, t, "name");
+            if nm != NOTFOUND && jkind(mem, nm) == 3 {
+                // ⚠ 解码目标**不能**是 M_SB —— `tn` 就指着 M_SB，那样会把要比对的名字盖掉
+                // （2026-09-19 踩到：impls 的 trait 名对不上，合法对象被判非法）。
+                let l: u32 = jstr(mem, nm, ptr_add(mem, M_NODES + 12288), 4096);
+                if l == tl {
+                    let k: u32 = 0;
+                    let same: u32 = 1;
+                    while k < tl {
+                        if load8(ptr_add(mem, M_NODES + 12288), k) != load8(tn, k) {
+                            same = 0;
+                        }
+                        k = k + 1;
+                    }
+                    if same == 1 {
+                        return jget(mem, t, "methods");
+                    }
+                }
+            }
+        }
+        t = jsib(mem, t);
+    }
+    return NOTFOUND;
+}
+
+fn chk_traits_impls(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "traits");
+    if arr == NOTFOUND {
+        return 0;      // 同上：缺字段由 chk_v1 报
+    }
+    if jkind(mem, arr) != 2 {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_TR));
+    let t: u32 = jfirst(mem, arr);
+    while t != NOTFOUND {
+        if jkind(mem, t) != 1 {
+            let _c: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, t, TB_TR);
+            let ms: u32 = jget(mem, t, "methods");
+            if ms == NOTFOUND || jkind(mem, ms) != 2 || jfirst(mem, ms) == NOTFOUND {
+                let _m: u32 = bad(mem);
+            } else {
+                let _ml: u32 = tbl_clear(ptr_add(mem, TB_DL));
+                let m: u32 = jfirst(mem, ms);
+                while m != NOTFOUND {
+                    let _x: u32 = name_field2(mem, m, TB_DL);
+                    m = jsib(mem, m);
+                }
+            }
+        }
+        t = jsib(mem, t);
+    }
+    let ims: u32 = jget(mem, doc, "impls");
+    if ims == NOTFOUND || jkind(mem, ims) != 2 {
+        let _a2: u32 = bad(mem);
+        return 0;
+    }
+    let im: u32 = jfirst(mem, ims);
+    while im != NOTFOUND {
+        if jkind(mem, im) != 1 {
+            let _c2: u32 = bad(mem);
+        } else {
+            let tr: u32 = jget(mem, im, "trait");
+            let tok: u32 = 0;
+            // ⚠ trait 名要**单独一块**：下面 `name_field2` 会把 M_SB 用掉（impl 的方法名），
+            // 共用就会把这块盖掉（2026-09-19 踩到：两个 impl 各报一条假错）。
+            let tname: ptr = ptr_add(mem, M_NODES + 16384);
+            let tlen: u32 = 0;
+            if tr != NOTFOUND && jkind(mem, tr) == 3 {
+                tlen = jstr(mem, tr, tname, 4096);
+                if tbl_find(ptr_add(mem, TB_TR), tname, tlen) != NOTFOUND {
+                    tok = 1;
+                }
+                if eq_lit(tname, tlen, "Drop") == 1 {
+                    tok = 1;
+                }
+            }
+            if tok == 0 {
+                let _t1: u32 = bad(mem);
+            }
+            let fy: u32 = jget(mem, im, "for");
+            if fy == NOTFOUND || type_ok_node(mem, fy, ptr_add(mem, M_SB2)) == 0 {
+                let _t2: u32 = bad(mem);
+            }
+            let ms2: u32 = jget(mem, im, "methods");
+            if ms2 == NOTFOUND || jkind(mem, ms2) != 2 || jfirst(mem, ms2) == NOTFOUND {
+                let _t3: u32 = bad(mem);
+            } else {
+                let _ml2: u32 = tbl_clear(ptr_add(mem, TB_IN));
+                let m2: u32 = jfirst(mem, ms2);
+                while m2 != NOTFOUND {
+                    let ok2: u32 = name_field2(mem, m2, TB_IN);
+                    if ok2 == 0 {
+                        let _t4: u32 = bad(mem);
+                    } else if tok == 1 {
+                        // 必须在 trait 里声明过
+                        if eq_lit(tname, tlen, "Drop") == 1 {
+                            let l3: u32 = jstr(mem, m2, ptr_add(mem, M_SB2), 4096);
+                            if eq_lit(ptr_add(mem, M_SB2), l3, "drop") == 0 {
+                                let _t5: u32 = bad(mem);
+                            }
+                        } else {
+                            // **现查** trait 自己的 methods 数组 —— 不能借 TB_DL:
+                            // 那张表在 trait 循环结束时只剩**最后一个** trait 的方法。
+                            let tms: u32 = find_trait_methods(mem, doc, tname, tlen);
+                            let l4: u32 = jstr(mem, m2, ptr_add(mem, M_SB2), 4096);
+                            if trait_has_method(mem, tms, ptr_add(mem, M_SB2), l4) == 0 {
+                                let _t6: u32 = bad(mem);
+                            }
+                        }
+                    }
+                    m2 = jsib(mem, m2);
+                }
+            }
+        }
+        im = jsib(mem, im);
+    }
+    return 0;
+}
+
+/// `methods` 数组里有 `mn` 吗。
+fn trait_has_method(mem: ptr, ms: u32, mn: ptr, ml: u32) -> u32 {
+    if ms == NOTFOUND || jkind(mem, ms) != 2 {
+        return 0;
+    }
+    let m: u32 = jfirst(mem, ms);
+    while m != NOTFOUND {
+        if jkind(mem, m) == 3 {
+            let l: u32 = jstr(mem, m, ptr_add(mem, M_SB2 + 4096), 4096);
+            if l == ml && eq_lit(ptr_add(mem, M_SB2 + 4096), ml, "") == 0 {
+                let k: u32 = 0;
+                let same: u32 = 1;
+                while k < ml {
+                    if load8(ptr_add(mem, M_SB2 + 4096), k) != load8(mn, k) {
+                        same = 0;
+                    }
+                    k = k + 1;
+                }
+                if same == 1 {
+                    return 1;
+                }
+            }
+        }
+        m = jsib(mem, m);
+    }
+    return 0;
+}
+
+fn chk_switches(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "switches");
+    if arr == NOTFOUND || jkind(mem, arr) != 2 {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_SW));
+    let s: u32 = jfirst(mem, arr);
+    while s != NOTFOUND {
+        if jkind(mem, s) != 1 {
+            let _b: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, s, TB_SW);
+            let on: u32 = jget(mem, s, "on");
+            if on == NOTFOUND || jbool(mem, on) == 0 {
+                let _c: u32 = bad(mem);
+            }
+        }
+        s = jsib(mem, s);
+    }
+    return 0;
+}
+
+fn chk_dialects(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "dialects");
+    if arr == NOTFOUND || jkind(mem, arr) != 2 {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let _cl: u32 = tbl_clear(ptr_add(mem, TB_DL));
+    let d: u32 = jfirst(mem, arr);
+    while d != NOTFOUND {
+        if jkind(mem, d) != 1 {
+            let _b: u32 = bad(mem);
+        } else {
+            let _n: u32 = name_field(mem, d, TB_DL);
+            let bd: u32 = jget(mem, d, "body");
+            if bd == NOTFOUND || jkind(mem, bd) != 3 {
+                let _c: u32 = bad(mem);
+            }
+        }
+        d = jsib(mem, d);
+    }
+    return 0;
+}
+
+fn chk_bodies(mem: ptr, doc: u32) -> u32 {
+    let arr: u32 = jget(mem, doc, "bodies");
+    if arr == NOTFOUND || jkind(mem, arr) != 2 {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let b: u32 = jfirst(mem, arr);
+    while b != NOTFOUND {
+        if jkind(mem, b) != 1 {
+            let _b: u32 = bad(mem);
+        } else {
+            let lg: u32 = jget(mem, b, "lang");
+            if lg == NOTFOUND || ident_node(mem, lg, ptr_add(mem, M_SB)) == NOTFOUND {
+                let _c: u32 = bad(mem);
+            }
+            let bd: u32 = jget(mem, b, "body");
+            if bd == NOTFOUND || jkind(mem, bd) != 3 {
+                let _d: u32 = bad(mem);
+            }
+        }
+        b = jsib(mem, b);
+    }
+    return 0;
+}
+
+/// v1+ 那几个必填数组 + `guards`。
+fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
+    if jget(mem, doc, "traits") == NOTFOUND {
+        let _e: u32 = bad(mem);
+    }
+    if jget(mem, doc, "impls") == NOTFOUND {
+        let _e2: u32 = bad(mem);
+    }
+    if jget(mem, doc, "generics") == NOTFOUND {
+        let _e3: u32 = bad(mem);
+    }
+    if jget(mem, doc, "instances") == NOTFOUND {
+        let _e4: u32 = bad(mem);
+    }
+    let g: u32 = jget(mem, doc, "guards");
+    if g == NOTFOUND || jnonneg(mem, g) == 0 {
+        let _g: u32 = bad(mem);
+    }
+    if ver >= 2 {
+        let m: u32 = jget(mem, doc, "mode");
+        let ok: u32 = 0;
+        if m != NOTFOUND && jkind(mem, m) == 3 {
+            let l: u32 = jstr(mem, m, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), l, "std") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l, "no_std") == 1 {
+                ok = 1;
+            }
+        }
+        if ok == 0 {
+            let _m: u32 = bad(mem);
+        }
+    }
+    if ver >= 6 {
+        let gr: u32 = jget(mem, doc, "grammar");
+        let gok: u32 = 0;
+        if gr != NOTFOUND && jkind(mem, gr) == 3 {
+            let l2: u32 = jstr(mem, gr, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), l2, "loment") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "c") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "python") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "java") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "go") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "rust") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "csharp") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "cpp") == 1 {
+                gok = 1;
+            }
+        }
+        if gok == 0 {
+            let _g3: u32 = bad(mem);
+        }
+    }
+    return 0;
+}
+
+fn lit(s: str, dst: ptr) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn validate(mem: ptr, tot: u32) -> u32 {
+    let doc: u32 = json_parse(ptr_add(mem, M_IN), tot, ptr_add(mem, M_ARENA));
+    if doc == NOTFOUND {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(mem, doc) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    // 版本
+    let pv: u32 = jget(mem, doc, "potato");
+    let ver: u32 = NOTFOUND;
+    if pv != NOTFOUND && jkind(mem, pv) == 3 {
+        let l: u32 = jstr(mem, pv, ptr_add(mem, M_SB), 4096);
+        let t: ptr = ptr_add(mem, M_SB);
+        if eq_lit(t, l, "v0") == 1 {
+            ver = 0;
+        }
+        if eq_lit(t, l, "v1") == 1 {
+            ver = 1;
+        }
+        if eq_lit(t, l, "v2") == 1 {
+            ver = 2;
+        }
+        if eq_lit(t, l, "v3") == 1 {
+            ver = 3;
+        }
+        if eq_lit(t, l, "v4") == 1 {
+            ver = 4;
+        }
+        if eq_lit(t, l, "v5") == 1 {
+            ver = 5;
+        }
+        if eq_lit(t, l, "v6") == 1 {
+            ver = 6;
+        }
+    }
+    if ver == NOTFOUND {
+        let _c: u32 = bad(mem);
+        ver = 0;                       // 与 Python 同：按 v0 的键集继续查
+    }
+    // 顶层未知字段
+    let m: u32 = jfirst(mem, doc);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        if is_top_key(ver, ptr_add(mem, M_SB2), kl) == 0 {
+            let _d: u32 = bad(mem);
+        }
+        m = jsib(mem, m);
+    }
+    if ver >= 1 {
+        let _t_v1: u64 = wstr(2, " <v1> ");
+        chk_v1(mem, doc, ver);
+    }
+    // 根上的三个
+    let un: u32 = jget(mem, doc, "unit");
+    if un == NOTFOUND || ident_node(mem, un, ptr_add(mem, M_SB2)) == NOTFOUND {
+        let _e: u32 = bad(mem);
+    }
+    if jget(mem, doc, "language") == NOTFOUND {
+        let _f: u32 = bad(mem);
+    }
+    collect_declared(mem, doc);
+    chk_imports(mem, doc);
+    chk_caps(mem, doc);
+    chk_funcs(mem, doc);
+    chk_layouts(mem, doc);
+    chk_enums(mem, doc);
+    chk_consts(mem, doc);
+    chk_types(mem, doc);
+    chk_cross(mem);
+    chk_excluded(mem, doc);
+    if ver >= 1 {
+        chk_generics(mem, doc);
+        chk_instances(mem, doc);
+        chk_traits_impls(mem, doc);
+    }
+    if ver >= 3 {
+        chk_switches(mem, doc);
+    }
+    if ver >= 4 {
+        chk_dialects(mem, doc);
+    }
+    if ver >= 5 {
+        chk_bodies(mem, doc);
+    }
+    return 0;
+}
+
+fn _start() -> u32 {
+    let mv: u64 = sys_alloc(M_CAP as u64);
+    if mv == 0 {
+        return die(2);
+    }
+    let mem: ptr = mv as ptr;
+    let _z0: u32 = st32(mem, M_ST + S_ERRS, 0);
+    // argv[1]
+    let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        let _a: u64 = wstr(2, "lompotato: 读不到 argv\n");
+        return die(2);
+    }
+    let cb: ptr = ptr_add(mem, M_NODES + 4096);
+    let n: u64 = read_all(fd as u64, cb, 2048);
+    syscall4(3, fd as u64, 0, 0);
+    let tot: u32 = n as u32;
+    let ap: ptr = ptr_add(mem, M_ST + 8);
+    let l1: u32 = arg_at(cb, tot, 1, ap);
+    let o1: u32 = ld32(ap, 0);
+    if l1 == 0 {
+        let _b: u64 = wstr(2, "lompotato: usage: lompotato <obj.json>\n");
+        return die(2);
+    }
+    let pp: ptr = ptr_add(cb, o1);
+    store8(pp, l1, 0 as u8);
+    let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
+    if jf < 0 {
+        let _c: u64 = wstr(2, "lompotato: 打不开对象文件\n");
+        return die(2);
+    }
+    let jn: u64 = read_all(jf as u64, ptr_add(mem, M_IN), IN_CAP as u64);
+    syscall4(3, jf as u64, 0, 0);
+    let _v: u32 = validate(mem, jn as u32);
+    let e: u32 = ld32(mem, M_ST + S_ERRS);
+    if e == 0 {
+        let _o: u64 = wstr(1, "ok\n");
+        return die(0);
+    }
+    let _p: u64 = wstr(1, "err ");
+    let _q: u64 = wdec(mem, 1, e);
+    let _r: u64 = wstr(1, "\n");
+    return die(1);
+}
+
+/// argv 第 k 项 (从 0 数) 的偏移; 长度返回。
+fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let s: u32 = 0;
+    let found: u32 = 0;
+    let ln: u32 = 0;
+    while i < tot {
+        if load8(buf, i) == 0 {
+            if idx == k && found == 0 {
+                let _a: u32 = st32(outp, 0, s);
+                ln = i - s;
+                found = 1;
+            }
+            idx = idx + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
