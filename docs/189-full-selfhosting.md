@@ -270,6 +270,7 @@ stdout / stderr / 退出码逐字节比一遍**（`loment_status_test` 的 `_pai
 | **10** | `loment_comefor_test` 前 7 条（自定义语法展开） | 工具型 | ✅ **已搬**（2026-09-19）：`lomcomefor.lomt` + 该判据里加的两条（12/12）—— 又是"被测的是另一件 Loment 程序"，又**抓到两处真差距** |
 | **11** | `loment_err_test` 的 7 条（报错器渲染） | 工具型 | ✅ **已搬**（2026-09-19）：`lomerrcheck.lomt` + 该判据里加的两条（31/31）—— 同一个源的**两个后端产物**（PE 原生 / ELF in WSL）渲染一致 |
 | **13** | `loment_grammar_test` 的对拍那条（`choose write grammar` 扫描） | 检查型 | ✅ **已搬**（2026-09-19）：`lomgrammar.lomt` + 该判据里加的两条（17/17）—— 469 条枚举候选, 与**独立写的参照**逐条一致（含行号与别名）|
+| **12** | `loment_cli_test` 的 23 条（自举 CLI 前端本身） | 驱动器型 | ✅ **已搬**（2026-09-19）：`lomclicheck.lomt` + 该判据里加的两条（36/36）—— 又**抓到一条死判据**（中文断言 vs 纯 ASCII 文案），并踩到 bump 堆的 64 KiB 上限 |
 | 12 | `loment_src` | 工具型 | 待做（同样要 git，但输出是一个**包**：比 stdout 不够，还要比写出的字节；zip 那件事见下）|
 | ✗ | `loment_filetype` | 工具型 | 直接写 **HKCU 注册表** —— Loment 没有那个 syscall。要么留在 Python，要么改由安装器代劳（这一格**不是**搬，是**换人**）|
 
@@ -526,6 +527,34 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 （`driver.lomt` 的守卫，任务 #4），而"找"这一层现在已经有一条 469 条的判据钉着 ——
 将来把守卫放宽成六门时，这一层不用重新证明。
 
+#### 第 12 格（`loment_cli_test`）：**驱动器型里最难的一格，四处都得记**
+
+被测的还是**另一件 Loment 程序**（`lomcli.lomt`，Python 那侧跑 PE、孪生那侧跑 ELF），
+但它比第 9/10/11 格都难 —— 那一件的命令面有 39 条、每条的断言形状都不一样：
+
+1. ⚠ **`alloc` 只有 64 KiB，而且不回收**（`SKILL.md` 的 `alloc(n)` 那一行写着）。
+   孪生一开始是"一条命令一次 `proc_sh`"—— 而 `proc_sh` 每条 `alloc(PROC_WS)` = **4 KiB**，
+   40 来条就是 **160 KiB**。症状最先不是崩，是**前面几条断言读到被踩坏的缓冲**
+   （`hash` / `cat` 两条假红），再往后才是 `Illegal instruction`（panic，rc 132）。
+   **修法**：判据写一个 `run_all.sh`（夹具, 与第 13 格的 `cases.txt` 同路数），每条命令
+   前后打 `@@名字 退出码` 标记，孪生**一次** `proc_sh` 拿全部输出、再按标记切段。
+   ⇒ 凡是"要跑十几条外部命令"的格子，先按 4 KiB × 条数 算一遍堆。
+2. **抓到一条死判据**：`test_every_catalog_command_is_actually_dispatchable` 断言的是
+   **中文** `未知命令`，而 CLI 的文案早就改成纯 ASCII 了（它自己的判据
+   `test_every_command_outputs_pure_ascii` 就是那么要求的）—— 于是那条**永远为真**，
+   目录里真列一条敲不动的命令它也不会红。判据与孪生**两边一起**改成 `unknown command`。
+3. **`doctor` / `where` 是按 `argv[0]` 那个目录找工具的**，不是按 cwd。所以
+   "红的那棵树"必须用**它自己的**那份二进制去跑 —— 拿另一棵树的二进制，体检会读到
+   错的组件表（实测：`p_red` 里一个桩都没有，却报 all green）。孪生那侧的
+   `cd ../p_red && ./bin/loment-cli doctor` 是自然对的。
+4. **两侧不能共用一棵可变的夹具树**：`new hello` 会往 `newdir/` 里落一个文件，
+   先跑的那侧一落，后跑的那侧的 `new` 就变成"已存在"（实测踩到）。现在两侧各一棵。
+
+**断言必须与平台无关**，否则两侧报告不可能逐字节相同：绝对路径一处都不比
+（`example nope` 的报错里带着它、`examples`/`env` 打的是从 `argv[0]` 推出来的目录），
+只比退出码 / 相对路径回显 / 行号 / 计数 / 子串。期望值（sha256、字节数、行数、错误码表）
+由判据拿 **CPython 当神谕**算出来写成夹具。
+
 **其余还没搬的（同类，都不便宜）**：`loment_src`（要 git + 比写出的包字节）、
 `loment_audit`、`loment_manual`（要加载每个示例）。
 再往后就是两根**大轴**：六门翻译器的 Loment 孪生（§4.1）与自举侧的 potato 通路 ——
@@ -608,8 +637,8 @@ grammar`：读法由声明定、不由嗅探）、`potato_test`（每条校验�
 **丙里的 `loment_extblock_test` 已搬**（第 6 格）、**丁里的 `loment_json_test`（第 7 格）/
 `loment_std_test`（第 8 格）/ `lomc_test`（第 9 格）已搬**。
 丙里还剩 `comefor`（第 10 格）/ `grammar`（第 13 格）/ `potato`（校验器实测 **533 行**，
-不是"纯逻辑就便宜"，是本表里最贵的一条），丁里还剩 `lib` / `cli`（`std` / `lomc_test` /
-`err` 已在第 8/9/11 格搬掉）。
+不是"纯逻辑就便宜"，是本表里最贵的一条），丁里只剩 **`lib`** 一件
+（`std` / `lomc_test` / `err` / `cli` 已在第 8/9/11/12 格搬掉）。
 
 ⚠ **`lib` 那一格比看上去贵**（2026-09-19 读过 `lomlib.lomt` 之后更正）：孪生现在只做
 `id`，而它的 `ident_of` 递归**只把沿路一层的数据留在 `M_DEP` 里**——子层的 hex 会被下一条边

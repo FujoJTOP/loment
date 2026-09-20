@@ -1,0 +1,867 @@
+// loment/tools/lomclicheck.lomt — Loment 版「自举 CLI 前端」检查
+// (docs/189 §3 的 S1 第十二格；判据在 tools/loment_cli_test.py)
+//
+// 判据: 对**同一份摆好的包布局**, 本程序（驱 `./bin/loment-cli`）打印的报告, 与判据那一侧
+// 用 Python 跑**同名断言**算出来的**逐字节相同**。
+//
+// 被测的是**另一件 Loment 程序**: `loment/tools/lomcli.lomt` —— 本格把它编成 **ELF**
+// 在 WSL 里跑（它出厂是 PE, 判据那侧在 Windows 上原生跑那一份）。
+//
+// **断言必须与平台无关**, 否则两侧报告不可能逐字节相同。所以只断言这几类:
+//   * 退出码;
+//   * 相对路径回显（`fx/y.lomt` 这类 —— 原样进原样出）、行号、计数;
+//   * 子串。**绝对路径一概不比**（`example nope` 的报错里带着它、`examples`/`env`
+//     打的是从 argv[0] 推出来的目录 —— 两平台必然不同, 只断言 `tour.lomt` 这种成分）。
+//
+// ⚠ **为什么整批命令走一个 shell 脚本, 而不是一条一条 `proc_sh`**（2026-09-19 踩到的）:
+// `proc_sh` 每条命令 `alloc(PROC_WS)` = 4 KiB, 而语言的 `alloc` 是**只有 64 KiB 的 bump 堆**、
+// **不回收**。这一格要跑 40 来条命令 —— 直接调就是 160 KiB, 当场把堆顶穿: 先表现为
+// 前面几条断言读到被踩坏的缓冲（hash / cat 假红）, 再表现为 `Illegal instruction`（panic）。
+// 所以判据写一个 `run_all.sh`（**夹具**, 与第 13 格的 `cases.txt` 同路数）: 每条命令前后打
+// `@@名字 退出码` 标记, 本程序**一次** `proc_sh` 拿到全部输出, 再按标记切段。
+//
+// 约束同前几格: ① `proc_sh` 只吃编译期字面量命令（cwd 由判据设成包目录）;
+// ② 标记里的退出码由脚本用 `rc=$?` 紧挨着取（中间夹一句裸 `echo` 会冲成 0）;
+// ③ 报错的命令在脚本里用 `2>&1` 合流（`proc_sh` 只收 stdout）。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`**）。
+
+module lomclicheck
+
+use bytes
+use proc
+
+const OUT_CAP: u32 = 262144;
+const FBUF: u32 = 16384;
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(1, str_ptr(s), str_len(s) as u64);
+}
+
+/// 响一声再退 1 —— 与其它工具同形 (`fail` 不是内建, 每个工具自己带一份)。
+fn fail(msg: str) -> u32 {
+    let _a: u64 = write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn say_dec(v: u32) -> u64 {
+    let buf: ptr = alloc(16);
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return write_all(1, buf, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(1, ptr_add(buf, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+/// 只读打开一个字面量名字, 读进 `buf`（`scr` 是给 NUL 结尾路径用的暂存）。
+fn read_lit(name: str, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let nl: u32 = str_len(name);
+    let i: u32 = 0;
+    while i < nl && i < 400 {
+        store8(scr, i, str_byte(name, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let tot: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let r: i64 = syscall4(0, fd as u64, ptr_add(buf, tot) as u64, (cap - tot) as u64);
+        if r <= 0 {
+            going = 0;
+        } else {
+            tot = tot + (r as u32);
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    return tot;
+}
+
+// ---------------------------------------------------------------- 搜索
+
+/// `needle` 在 `hay[0..hn)` 里第一次出现的位置; 没有返回 FAIL。
+fn find_b(hay: ptr, hn: u32, nee: ptr, nn: u32) -> u32 {
+    if nn == 0 || hn < nn {
+        return FAIL;
+    }
+    let i: u32 = 0;
+    while i + nn <= hn {
+        let k: u32 = 0;
+        let same: u32 = 1;
+        while k < nn {
+            if load8(hay, i + k) != load8(nee, k) {
+                same = 0;
+            }
+            k = k + 1;
+        }
+        if same == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+fn has_b(hay: ptr, hn: u32, nee: ptr, nn: u32) -> u32 {
+    if find_b(hay, hn, nee, nn) == FAIL {
+        return 0;
+    }
+    return 1;
+}
+
+fn has(p: ptr, n: u32, s: str) -> u32 {
+    return has_b(p, n, str_ptr(s), str_len(s));
+}
+
+fn sw(p: ptr, n: u32, s: str) -> u32 {
+    let nn: u32 = str_len(s);
+    if n < nn {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < nn {
+        if load8(p, k) != str_byte(s, k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// `p[off..off+len(s))` 等于 `s` 吗。
+fn eq_at(p: ptr, off: u32, s: str) -> u32 {
+    let nn: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < nn {
+        if load8(p, off + k) != str_byte(s, k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// 两段字节完全相同吗（判据写出来的期望值就是拿它比的）。
+fn buf_eq(a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
+    if an != bn {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < an {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn gt(a: u32, b: u32) -> u32 {
+    if a > b {
+        return 1;
+    }
+    return 0;
+}
+
+fn is0(a: u32) -> u32 {
+    if a == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn eqv(a: u32, b: u32) -> u32 {
+    if a == b {
+        return 1;
+    }
+    return 0;
+}
+
+/// 输出里有 ESC（`0x1b`）吗。
+fn has_esc(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 27 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `\n` 的个数（行数 = 它 + 1）。
+fn nl_count(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n {
+        if load8(p, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 第一个非空白的字节（`cat` 的行号那一列）。
+fn first_ch(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c != 32 && c != 9 && c != 10 {
+            return c;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 名字字符（词边界用）: 字母 / 数字 / `_` —— 与 Python 的 `\b` 同一集合。
+fn is_namish(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    if c == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `count` / `tokens` 那种 `  名字  数字` 的行: 找**首词等于 `key`** 的那一行, 返回数字。
+/// 行里必须恰好是"词 + 空白 + 数字到行尾"（与判据那侧的正则同一条）。
+fn num_of(p: ptr, n: u32, key: str) -> u32 {
+    let kl: u32 = str_len(key);
+    let ls: u32 = 0;
+    while ls < n {
+        let le: u32 = ls;
+        while le < n && load8(p, le) != 10 {
+            le = le + 1;
+        }
+        let a: u32 = ls;
+        while a < le && (load8(p, a) == 32 || load8(p, a) == 9) {
+            a = a + 1;
+        }
+        let b: u32 = a;
+        while b < le && load8(p, b) != 32 && load8(p, b) != 9 {
+            b = b + 1;
+        }
+        let hit: u32 = eqv(b - a, kl) * eq_at(p, a, key);
+        if hit == 1 && b < le {
+            let r: u32 = b;
+            while r < le && (load8(p, r) == 32 || load8(p, r) == 9) {
+                r = r + 1;
+            }
+            let v: u32 = 0;
+            let d: u32 = r;
+            let good: u32 = 1;
+            while d < le {
+                let c: u32 = load8(p, d);
+                if c < 48 || c > 57 {
+                    good = 0;
+                } else {
+                    v = v * 10 + (c - 48);
+                }
+                d = d + 1;
+            }
+            if good == 1 && d > r {
+                return v;
+            }
+        }
+        ls = le + 1;
+    }
+    return FAIL;
+}
+
+// ---------------------------------------------------------------- 切段
+
+/// 从 `@@名字 退出码` 那一行切出这一段: `sp[0]=rc`, `sp[4]=载荷起点`, `sp[8]=载荷长度`。
+/// 返回 1 = 找到了这一段。载荷到**下一个 `\n@@`** 为止。
+fn sect(o: ptr, n: u32, name: str, sp: ptr) -> u32 {
+    let nl: u32 = str_len(name);
+    let i: u32 = 0;
+    while i + nl + 3 <= n {
+        if load8(o, i) == 64 && load8(o, i + 1) == 64 && eq_at(o, i + 2, name) == 1
+                && load8(o, i + 2 + nl) == 32 {
+            let d: u32 = i + 2 + nl + 1;
+            let rc: u32 = 0;
+            while d < n && load8(o, d) >= 48 && load8(o, d) <= 57 {
+                rc = rc * 10 + (load8(o, d) - 48);
+                d = d + 1;
+            }
+            let ps: u32 = d;
+            while ps < n && load8(o, ps) != 10 {
+                ps = ps + 1;
+            }
+            if ps < n {
+                ps = ps + 1;
+            }
+            let pe: u32 = ps;
+            let stop: u32 = 0;
+            while pe < n && stop == 0 {
+                if load8(o, pe) == 10 && pe + 2 < n && load8(o, pe + 1) == 64
+                        && load8(o, pe + 2) == 64 {
+                    stop = 1;
+                } else {
+                    pe = pe + 1;
+                }
+            }
+            let _a: u32 = st32(sp, 0, rc);
+            let _b: u32 = st32(sp, 4, ps);
+            let _c: u32 = st32(sp, 8, pe - ps);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 这一段的载荷。
+fn pay(o: ptr, sp: ptr) -> ptr {
+    return ptr_add(o, ld32(sp, 4));
+}
+
+fn plen(sp: ptr) -> u32 {
+    return ld32(sp, 8);
+}
+
+fn prc(sp: ptr) -> u32 {
+    return ld32(sp, 0);
+}
+
+/// 这一段里有 `s` 吗（空串 = 不要求, 方便只查一两段时占位）。
+fn phas(o: ptr, sp: ptr, s: str) -> u32 {
+    if str_len(s) == 0 {
+        return 1;
+    }
+    return has_b(pay(o, sp), plen(sp), str_ptr(s), str_len(s));
+}
+
+// ---------------------------------------------------------------- 报告
+
+fn rep(name: str, ok: u32, why: str, ct: ptr) {
+    if ok == 1 {
+        say("  PASS  ");
+        say(name);
+        say("\n");
+        let _a: u32 = st32(ct, 0, ld32(ct, 0) + 1);
+    } else {
+        say("  FAIL  ");
+        say(name);
+        say(": ");
+        say(why);
+        say("\n");
+        let _b: u32 = st32(ct, 4, ld32(ct, 4) + 1);
+    }
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let sv: u64 = sys_alloc(64);
+    let cv: u64 = sys_alloc(64);
+    let fv: u64 = sys_alloc(FBUF as u64);
+    let pv: u64 = sys_alloc(64);
+    let rv: u64 = sys_alloc(4096);
+    if ov == 0 || sv == 0 || cv == 0 || fv == 0 || pv == 0 || rv == 0 {
+        return die(2);
+    }
+    let o: ptr = ov as ptr;
+    let st: ptr = sv as ptr;
+    let ct: ptr = cv as ptr;
+    let fx: ptr = fv as ptr;
+    let sp: ptr = pv as ptr;
+    let scr: ptr = rv as ptr;
+
+    // 一次跑完整批命令（见头注: 每条一次 `proc_sh` 会把只有 64 KiB 的 bump 堆顶穿）
+    let n: i64 = proc_sh("sh run_all.sh; r=$?; echo; echo -n \"|rc=$r\"", o, OUT_CAP);
+    if n < 0 {
+        return fail("lomclicheck: 起不动 run_all.sh\n");
+    }
+    let dn: u32 = n as u32;
+
+    // ---- 1 目录至少 30 条, 且该有的都在
+    let ok1: u32 = 0;
+    let c_ok: u32 = sect(o, dn, "commands", sp);
+    if c_ok == 1 && prc(sp) == 0 && nl_count(pay(o, sp), plen(sp)) + 1 >= 30 {
+        if phas(o, sp, "help") == 1 && phas(o, sp, "codes") == 1
+                && phas(o, sp, "explain") == 1 && phas(o, sp, "syntax") == 1 {
+            if phas(o, sp, "builtins") == 1 && phas(o, sp, "stat") == 1
+                    && phas(o, sp, "grep") == 1 && phas(o, sp, "hash") == 1 {
+                if phas(o, sp, "ls") == 1 && phas(o, sp, "tree") == 1
+                        && phas(o, sp, "new") == 1 && phas(o, sp, "examples") == 1 {
+                    if phas(o, sp, "doctor") == 1 && phas(o, sp, "color") == 1 {
+                        ok1 = 1;
+                    }
+                }
+            }
+        }
+    }
+    rep("test_catalog_has_at_least_thirty_commands", ok1,
+        "命令少于 30 条, 或该有的名字不在目录里", ct);
+
+    // ---- 2 `help` 总览必须提到目录里的**每一个**名字（按词, 不是子串）
+    let h_ok: u32 = sect(o, dn, "help", st);
+    let ok2: u32 = 0;
+    if c_ok == 1 && h_ok == 1 && prc(st) == 0 {
+        ok2 = 1;
+        let cn: u32 = plen(sp);
+        let cp: ptr = pay(o, sp);
+        let hp: ptr = pay(o, st);
+        let hn: u32 = plen(st);
+        let ls: u32 = 0;
+        while ls < cn {
+            let le: u32 = ls;
+            while le < cn && load8(cp, le) != 10 {
+                le = le + 1;
+            }
+            if le > ls {
+                let nm: u32 = le - ls;
+                let j: u32 = 0;
+                let hit: u32 = 0;
+                while j + nm <= hn && hit == 0 {
+                    let same: u32 = 1;
+                    let t: u32 = 0;
+                    while t < nm {
+                        if load8(hp, j + t) != load8(cp, ls + t) {
+                            same = 0;
+                        }
+                        t = t + 1;
+                    }
+                    if same == 1 {
+                        let pre: u32 = 0;
+                        if j > 0 {
+                            pre = is_namish(load8(hp, j - 1));
+                        }
+                        let post: u32 = 0;
+                        if j + nm < hn {
+                            post = is_namish(load8(hp, j + nm));
+                        }
+                        if pre == 0 && post == 0 {
+                            hit = 1;
+                        }
+                    }
+                    j = j + 1;
+                }
+                if hit == 0 {
+                    ok2 = 0;
+                }
+            }
+            ls = le + 1;
+        }
+    }
+    rep("test_help_mentions_every_command", ok2,
+        "help 里没提到目录里的某些名字", ct);
+
+    // ---- 3 目录里列出来的每一条都要真能敲
+    //
+    // ⚠ 这一条原先在 Python 那侧断言的是**中文** `未知命令` —— 而 CLI 的文案早就改成纯
+    // ASCII 了（它自己的判据 `test_every_command_outputs_pure_ascii` 就是那么要求的），
+    // 于是那条断言**永远为真**、成了一条死判据（2026-09-19 写本格时发现）。这里断言的是
+    // CLI 真会说出来的那一句 `unknown command`；判据那侧同一处也照此收紧。
+    let ok3: u32 = 0;
+    if sect(o, dn, "allcmds", st) == 1 {
+        if find_b(pay(o, st), plen(st), str_ptr("unknown command"), 15) == FAIL
+                && phas(o, st, "== ") == 1 {
+            ok3 = 1;
+        }
+    }
+    rep("test_every_catalog_command_is_actually_dispatchable", ok3,
+        "目录里列了但敲不了 (敲出 unknown command)", ct);
+
+    // ---- 4 单条命令的帮助页
+    let ok4: u32 = 0;
+    if sect(o, dn, "hgrep", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "PAT") == 1 && phas(o, st, "FILE") == 1 {
+            ok4 = 1;
+        }
+    }
+    rep("test_help_page_for_one_command", ok4, "help grep 没给出 PAT/FILE 的形状", ct);
+
+    // ---- 5 未知命令: 退 2, 说清楚是哪一个
+    let ok5: u32 = 0;
+    if sect(o, dn, "frob", st) == 1 && prc(st) == 2 {
+        if phas(o, st, "unknown command") == 1 && phas(o, st, "frobnicate") == 1 {
+            ok5 = 1;
+        }
+    }
+    rep("test_unknown_command_is_an_error", ok5, "未知命令没退 2, 或没说出命令名", ct);
+
+    // ---- 6 默认上色, `--no-color` 之后一个转义字节都不剩
+    let a1: u32 = 0;
+    let a2: u32 = 0;
+    if sect(o, dn, "about", st) == 1 {
+        a1 = has_esc(pay(o, st), plen(st));
+    }
+    if sect(o, dn, "aboutn", st) == 1 {
+        a2 = 1 - has_esc(pay(o, st), plen(st));
+    }
+    rep("test_color_on_by_default_and_off_with_flag", a1 * a2,
+        "默认没上色, 或 --no-color 仍留转义字节", ct);
+
+    // ---- 7 全局开关位置任意, **不吃掉命令位**
+    let ok7: u32 = 0;
+    if sect(o, dn, "stat", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "Source statistics") == 1 && phas(o, st, "fx/y.lomt") == 1 {
+            ok7 = 1;
+        }
+    }
+    rep("test_color_flag_anywhere_in_argv_does_not_eat_the_command", ok7,
+        "`--no-color stat F` 里的 stat 没被当成命令", ct);
+
+    // ---- 8 sha256 对 **CPython hashlib**（判据写出来的期望值）
+    let wh: u32 = read_lit("want_hash.txt", fx, FBUF, scr);
+    let ok8: u32 = 0;
+    if sect(o, dn, "hash", st) == 1 && prc(st) == 0 && wh == 65 && plen(st) == 64 {
+        if buf_eq(pay(o, st), 64, fx, 64) == 1 {
+            ok8 = 1;
+        }
+    }
+    rep("test_hash_matches_hashlib", ok8, "sha256 与 hashlib 算出来的不一样", ct);
+
+    // ---- 9 字节数/行数对 **Python 自己数的**
+    let ws: u32 = read_lit("want_stat.txt", fx, FBUF, scr);
+    let ok9: u32 = 0;
+    if sect(o, dn, "stat", st) == 1 && prc(st) == 0 && ws > 0 {
+        let e1: u32 = 0;
+        while e1 < ws && load8(fx, e1) != 10 {
+            e1 = e1 + 1;
+        }
+        let e2: u32 = e1 + 1;
+        while e2 < ws && load8(fx, e2) != 10 {
+            e2 = e2 + 1;
+        }
+        if has_b(pay(o, st), plen(st), fx, e1) == 1
+                && has_b(pay(o, st), plen(st), ptr_add(fx, e1 + 1), e2 - e1 - 1) == 1 {
+            ok9 = 1;
+        }
+    }
+    rep("test_stat_counts_match_what_python_counts", ok9,
+        "字节数或行数与 Python 数的不一致", ct);
+
+    // ---- 10 `cat` 带行号, 5 行
+    let ok10: u32 = 0;
+    if sect(o, dn, "cat", st) == 1 && prc(st) == 0 {
+        if nl_count(pay(o, st), plen(st)) == 4 && first_ch(pay(o, st), plen(st)) == 49 {
+            ok10 = 1;
+        }
+    }
+    rep("test_cat_prints_numbered_lines", ok10, "cat 没带行号, 或行数不是 5", ct);
+
+    // ---- 11 grep 的行号与三种退出码
+    let g1: u32 = 0;
+    if sect(o, dn, "grep", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "2:") == 1 && phas(o, st, "4:") == 1
+                && phas(o, st, "1:") == 0 && phas(o, st, "3:") == 0 {
+            g1 = 1;
+        }
+    }
+    let g2: u32 = 0;
+    if sect(o, dn, "grepn", st) == 1 && prc(st) == 1 {
+        g2 = 1;
+    }
+    let g3: u32 = 0;
+    if sect(o, dn, "grepm", st) == 1 && prc(st) == 2 {
+        g3 = 1;
+    }
+    rep("test_grep_line_numbers_and_exit_codes", g1 * g2 * g3,
+        "grep 的行号 / 三种退出码 (0/1/2) 不对", ct);
+
+    // ---- 12 count 与 fns
+    let c2: u32 = 0;
+    if sect(o, dn, "count", st) == 1 && prc(st) == 0 {
+        if num_of(pay(o, st), plen(st), "fn") == 2
+                && num_of(pay(o, st), plen(st), "struct") == 1
+                && num_of(pay(o, st), plen(st), "enum") == 1 {
+            c2 = 1;
+        }
+    }
+    let f2: u32 = 0;
+    if sect(o, dn, "fns", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "fn one() -> u32") == 1 && phas(o, st, "fn two(a: u32) -> u32") == 1 {
+            f2 = 1;
+        }
+    }
+    rep("test_count_and_fns_on_a_known_file", c2 * f2,
+        "count 的 fn/struct/enum 计数, 或 fns 的签名不对", ct);
+
+    // ---- 13 tokens 认出字符串与注释
+    let ok13: u32 = 0;
+    if sect(o, dn, "tokens", st) == 1 && prc(st) == 0 {
+        let kw: u32 = num_of(pay(o, st), plen(st), "keywords");
+        if num_of(pay(o, st), plen(st), "strings") == 1
+                && num_of(pay(o, st), plen(st), "comments") == 1
+                && kw != FAIL && kw >= 4 {
+            ok13 = 1;
+        }
+    }
+    rep("test_tokens_picks_up_strings_and_comments", ok13,
+        "tokens 的 strings/comments/keywords 不对", ct);
+
+    // ---- 14 缺文件是干净的错误, 不是崩
+    let ok14: u32 = 0;
+    if sect(o, dn, "catm", st) == 1 && prc(st) == 1 && phas(o, st, "cannot open") == 1 {
+        ok14 = 1;
+    }
+    rep("test_missing_file_is_a_clean_error_not_a_crash", ok14,
+        "缺文件没退 1, 或没说 cannot open", ct);
+
+    // ---- 15 `ls` / `tree` 标目录、`tree` 缩进体现层级
+    let l_ok: u32 = 0;
+    if sect(o, dn, "ls", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "sub/") == 1 && phas(o, st, "a.lomt") == 1
+                && find_b(pay(o, st), plen(st), str_ptr("sub\n"), 4) == FAIL {
+            l_ok = 1;
+        }
+    }
+    let t_ok: u32 = 0;
+    if sect(o, dn, "tree", st) == 1 && prc(st) == 0 {
+        if phas(o, st, "deep/") == 1 && phas(o, st, "f.lomt") == 1
+                && phas(o, st, "\n      f.lomt") == 1 {
+            t_ok = 1;
+        }
+    }
+    rep("test_ls_and_tree_mark_directories", l_ok * t_ok,
+        "ls 没给目录加 / , 或 tree 没体现层级", ct);
+
+    // ---- 16 `new`: 写出骨架 + 拒绝覆盖（覆盖那条用 sha256 证明"一个字没动"）
+    let nw1: u32 = 0;
+    if sect(o, dn, "newh", st) == 1 && prc(st) == 0 && phas(o, st, "wrote hello.lomt") == 1 {
+        nw1 = 1;
+    }
+    let nw2: u32 = 0;
+    if sect(o, dn, "lsnew", st) == 1 {
+        nw2 = phas(o, st, "hello.lomt");
+    }
+    let nw3: u32 = 0;
+    if sect(o, dn, "newhi", st) == 1 && prc(st) == 1 {
+        nw3 = 1;
+    }
+    let w2: u32 = read_lit("want_hi_hash.txt", fx, FBUF, scr);
+    let nw4: u32 = 0;
+    if sect(o, dn, "hashhi", st) == 1 && prc(st) == 0 && w2 == 65 && plen(st) == 64 {
+        if buf_eq(pay(o, st), 64, fx, 64) == 1 {
+            nw4 = 1;
+        }
+    }
+    rep("test_new_writes_a_skeleton_and_refuses_to_overwrite", nw1 * nw2 * nw3 * nw4,
+        "new 没写出骨架, 或已存在时被覆盖/没退 1", ct);
+
+    // ---- 17 `version` 读的是包里的 share/loment/version
+    let ok17: u32 = 0;
+    if sect(o, dn, "ver", st) == 1 && prc(st) == 0 {
+        if sw(pay(o, st), plen(st), "Loment 0.1.4 Pre2") == 1 && phas(o, st, "commit 0123456") == 1 {
+            ok17 = 1;
+        }
+    }
+    rep("test_version_reads_share_version", ok17, "version 没读到包里的那一份", ct);
+
+    // ---- 18 `codes` 把错误码表**一条不漏**地印出来（表由判据从真源写出来）
+    let wc: u32 = read_lit("codes.txt", fx, FBUF, scr);
+    let ok18: u32 = 0;
+    if sect(o, dn, "codes", st) == 1 && prc(st) == 0 && wc > 0 {
+        ok18 = 1;
+        let cp2: ptr = pay(o, st);
+        let cn2: u32 = plen(st);
+        let ls2: u32 = 0;
+        while ls2 < wc {
+            let le2: u32 = ls2;
+            while le2 < wc && load8(fx, le2) != 10 {
+                le2 = le2 + 1;
+            }
+            if le2 > ls2 {
+                let spc: u32 = ls2;
+                while spc < le2 && load8(fx, spc) != 32 {
+                    spc = spc + 1;
+                }
+                if has_b(cp2, cn2, ptr_add(fx, ls2), spc - ls2) == 0 {
+                    ok18 = 0;
+                }
+                if spc + 1 < le2 && has_b(cp2, cn2, ptr_add(fx, spc + 1), le2 - spc - 1) == 0 {
+                    ok18 = 0;
+                }
+            }
+            ls2 = le2 + 1;
+        }
+    }
+    rep("test_codes_lists_every_code_in_the_table", ok18,
+        "错误码表里有码没被 codes 印出来, 或说明不是真源那一份", ct);
+
+    // ---- 19 `explain` 认三种拼法; 越界与缺参退 2
+    let e_ok: u32 = 0;
+    if sect(o, dn, "ex4", st) == 1 && prc(st) == 0 && phas(o, st, "Capability domain") == 1 {
+        if sect(o, dn, "exe4", st) == 1 && prc(st) == 0 && phas(o, st, "Capability domain") == 1 {
+            if sect(o, dn, "ex4b", st) == 1 && prc(st) == 0
+                    && phas(o, st, "Capability domain") == 1 {
+                e_ok = 1;
+            }
+        }
+    }
+    let e_hi: u32 = 0;
+    if sect(o, dn, "ex99", st) == 1 && prc(st) == 2 {
+        e_hi = 1;
+    }
+    let e_no: u32 = 0;
+    if sect(o, dn, "exno", st) == 1 && prc(st) == 2 {
+        e_no = 1;
+    }
+    rep("test_explain_accepts_three_spellings_and_rejects_junk", e_ok * e_hi * e_no,
+        "explain 的三种拼法 / 越界码 / 缺参 有一处不对", ct);
+
+    // ---- 20 参考页都不空（纯长度 —— 页面里有绝对路径, 所以只比长度不比内容）
+    let pg: u32 = 1;
+    if sect(o, dn, "pgsyntax", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgbuiltins", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgtypes", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgkeywords", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgcaps", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgcheat", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgabout", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    if sect(o, dn, "pgenv", st) == 1 {
+        pg = pg * is0(prc(st)) * gt(plen(st), 60);
+    } else {
+        pg = 0;
+    }
+    rep("test_reference_pages_are_nonempty", pg, "有参考页空着或退码不为 0", ct);
+
+    // ---- 21 `where` 解出工具路径; 不存在的名字退 2
+    let w_ok: u32 = 0;
+    if sect(o, dn, "whered", st) == 1 && prc(st) == 0 && phas(o, st, "loment-driver") == 1 {
+        w_ok = 1;
+    }
+    let w_no: u32 = 0;
+    if sect(o, dn, "wheren", st) == 1 && prc(st) == 2 && phas(o, st, "no such tool") == 1 {
+        w_no = 1;
+    }
+    rep("test_where_resolves_and_reports_the_expected_path", w_ok * w_no,
+        "where 没解出 loment-driver, 或不存在时没退 2", ct);
+
+    // ---- 22 `examples` / `example <名>` 读的是包里的那一份
+    let ex1: u32 = 0;
+    if sect(o, dn, "exam", st) == 1 && prc(st) == 0 && phas(o, st, "tour.lomt") == 1 {
+        ex1 = 1;
+    }
+    let ex2: u32 = 0;
+    if sect(o, dn, "examt", st) == 1 && prc(st) == 0 && phas(o, st, "module tour") == 1 {
+        ex2 = 1;
+    }
+    let ex3: u32 = 0;
+    if sect(o, dn, "examn", st) == 1 && prc(st) == 1 && phas(o, st, "no such example") == 1 {
+        ex3 = 1;
+    }
+    rep("test_examples_and_example_read_the_package", ex1 * ex2 * ex3,
+        "examples/example 没读到包里那一份, 或不存在时没退 1", ct);
+
+    // ---- 23 体检有**分辨力**: 缺组件时红且退 1, 组件齐了就绿且退 0
+    let d1: u32 = 0;
+    if sect(o, dn, "docr", st) == 1 && prc(st) == 1 && phas(o, st, "MISSING") == 1 {
+        d1 = 1;
+    }
+    let d2: u32 = 0;
+    if sect(o, dn, "docg", st) == 1 && prc(st) == 0 && phas(o, st, "all green") == 1 {
+        d2 = 1;
+    }
+    rep("test_doctor_reports_missing_tools_then_green_when_present", d1 * d2,
+        "缺组件时没红/组件齐了没绿", ct);
+
+    say("lomclicheck: ");
+    let _q1: u64 = say_dec(ld32(ct, 0));
+    say("/");
+    let _q2: u64 = say_dec(ld32(ct, 0) + ld32(ct, 4));
+    say(" 通过\n");
+    if ld32(ct, 4) > 0 {
+        return die(1);
+    }
+    return die(0);
+}

@@ -162,11 +162,16 @@ def test_every_catalog_command_is_actually_dispatchable():
 
     这条是写 lib/pkg 时踩出来的: 它们当时列在目录里, 但发行包根本没有这两条
     (库系统在仓库侧, 而且是 Python), 敲下去只会得到"未知命令"。
+
+    ⚠ **它此前是一条死判据**（2026-09-19 写 S1 第十二格时发现）：断言串一直写着**中文**
+    `未知命令`，而 CLI 的文案早就改成纯 ASCII 了 —— 它自己的判据
+    `test_every_command_outputs_pure_ascii` 就是那么要求的。所以这条**永远为真**，
+    目录里真列一条敲不动的命令它也不会红。现在按 CLI 真会说出的那句断言。
     """
     bad = []
     for n in _names():
         rc, _, err = _run([n] + _no_color())
-        if "未知命令" in err:
+        if "unknown command" in err:
             bad.append(n)
     assert not bad, f"目录里列了但敲不了: {bad}"
 
@@ -681,6 +686,445 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
     assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十二格）
+
+_TW = f"/tmp/loment-cli-{os.getpid()}-"
+TWIN = ROOT / "loment" / "tools" / "lomclicheck.lomt"
+
+#: 摆出来的包布局里那几份可以逐字节复用的东西（两侧各写一份，内容同）。
+_VER_TXT = ("Loment 0.1.4 Pre2 (0.1.4-pre2), commit 0123456\nbuild 2026-09-15\n")
+_TOUR = "module tour\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n"
+_Y_SRC = "one\nalpha\ntwo\nalpha\nthree\n"
+_C_SRC = ("module x\n\nstruct S {\n    a: u32,\n}\n\nenum E {\n    A,\n}\n\n"
+          "fn one() -> u32 {\n    return 1;\n}\n\n"
+          "pub fn two(a: u32) -> u32 {\n    return a;\n}\n")
+_T_SRC = ('module x\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n'
+          '    return 1;\n}\n')
+_HI_SRC = "module hi\n"
+_STUBS = ("loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
+          "loment-lomelf", "loment-cli", "lomenterr")
+
+
+def _w(p: Path, text: str) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8", newline="\n")
+
+
+#: 孪生要跑的那一整批命令 —— **一个脚本一次跑完**, 每条前后打 `@@名字 退出码` 标记。
+#:
+#: 为什么不一条一条给孪生调: `proc_sh` 每条 `alloc(PROC_WS)`=4 KiB, 而语言的 `alloc` 是
+#: **只有 64 KiB、不回收**的 bump 堆 —— 40 来条命令当场把堆顶穿（先读到被踩坏的缓冲、
+#: 再 `Illegal instruction`）。夹具与第 13 格的 `cases.txt` 同路数, 断言仍然全在 Loment 侧。
+#:
+#: `rc=$?` 必须**紧挨着**取（中间夹一句裸 `echo` 会冲成 0）。
+_RUN_ALL = """\
+C=./bin/loment-cli
+r() { nm="$1"; shift; out=$("$@" 2>&1); rc=$?; printf '\\n@@%s %s\\n' "$nm" "$rc"; printf '%s' "$out"; }
+r commands $C commands
+r help $C --no-color help
+r allcmds sh allcmds.sh
+r hgrep $C --no-color help grep
+r frob $C frobnicate --no-color
+r about $C about
+r aboutn $C --no-color about
+r stat $C --no-color stat fx/y.lomt
+r hash $C hash fx/y.lomt
+r cat $C --no-color cat fx/y.lomt
+r grep $C --no-color grep alpha fx/x.lomt
+r grepn $C --no-color grep nope fx/x.lomt
+r grepm $C --no-color grep onlypat
+r count $C --no-color count fx/c.lomt
+r fns $C --no-color fns fx/c.lomt
+r tokens $C --no-color tokens fx/t.lomt
+r catm $C --no-color cat /definitely/not/here.lomt
+r ls $C --no-color ls d
+r tree $C --no-color tree d
+r ver $C version
+r codes $C --no-color codes
+r ex4 $C --no-color explain E4
+r exe4 $C --no-color explain e4
+r ex4b $C --no-color explain 4
+r ex99 $C --no-color explain E99
+r exno $C --no-color explain
+r pgsyntax $C --no-color syntax
+r pgbuiltins $C --no-color builtins
+r pgtypes $C --no-color types
+r pgkeywords $C --no-color keywords
+r pgcaps $C --no-color caps
+r pgcheat $C --no-color cheat
+r pgabout $C --no-color about
+r pgenv $C --no-color env
+r whered $C where driver
+r wheren $C --no-color where nosuchtool
+r exam $C --no-color examples
+r examt $C example tour
+r examn $C --no-color example nope
+r docg $C --no-color doctor
+( cd newdir && r newh ../bin/loment-cli --no-color new hello )
+r lsnew $C --no-color ls newdir
+( cd newdir && r newhi ../bin/loment-cli --no-color new hi )
+r hashhi $C hash newdir/hi.lomt
+cd ../p_red
+r docr ./bin/loment-cli --no-color doctor
+exit 0
+"""
+
+
+def _cli_pkg(root: Path, exe: Path, name: str, stubs: bool, linux: bool = False) -> Path:
+    """一个包布局: `bin/loment-cli`(CLI 靠 argv[0] 自定位) + `share/loment/version`。
+
+    `stubs=False` 的那个（`p_red`）用来验体检**有分辨力** —— 缺组件时它必须红。
+    `linux=True` 是给孪生那棵树用的: 拷进去的是 **ELF**, 所以文件名的后缀按**目标平台**
+    定（不是按跑判据的这个平台）—— CLI 找 `loment-<名>` 时带不带 `.exe` 由**它自己**
+    编成哪个后端决定。
+    """
+    pkg = root / name
+    win = not linux
+    dst = pkg / "bin" / ("loment-cli.exe" if win else "loment-cli")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    shutil.copy(exe, dst)
+    dst.chmod(0o755)
+    _w(pkg / "share" / "loment" / "version", _VER_TXT)
+    _w(pkg / "share" / "loment" / "examples" / "tour.lomt", _TOUR)
+    if stubs:
+        for n in _STUBS:
+            p = pkg / "bin" / (n + ".exe" if win else n)
+            if not p.exists():
+                p.write_bytes(b"stub")
+    return pkg
+
+
+def _cli_fixtures(root: Path) -> None:
+    """输入文件与**期望值**, 全写进 CLI 的 cwd 里（命令用的是相对路径）。
+
+    期望值全是拿 **CPython 当神谕**算出来的（hashlib / 自己数行 / 从真源抄错误码表）。
+    """
+    _w(root / "fx" / "y.lomt", _Y_SRC)
+    _w(root / "fx" / "x.lomt", _Y_SRC)
+    _w(root / "fx" / "c.lomt", _C_SRC)
+    _w(root / "fx" / "t.lomt", _T_SRC)
+    _w(root / "d" / "sub" / "deep" / "f.lomt", "module f\n")
+    _w(root / "d" / "a.lomt", "module a\n")
+    _w(root / "newdir" / "hi.lomt", _HI_SRC)
+    # 目录: 每条命令都要能敲得动 —— 用 shell 脚本扫一遍（WSL 里有 sh）
+    _w(root / "allcmds.sh",
+       "for n in $(./bin/loment-cli commands); do ./bin/loment-cli \"$n\" --no-color 2>&1; "
+       "echo \"== $n\"; done\nexit 0\n")
+    _w(root / "run_all.sh", _RUN_ALL)
+    yraw = (root / "fx" / "y.lomt").read_bytes()
+    _w(root / "want_hash.txt", hashlib.sha256(yraw).hexdigest() + "\n")
+    _w(root / "want_hi_hash.txt", hashlib.sha256(_HI_SRC.encode()).hexdigest() + "\n")
+    lines = yraw.decode().split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
+    import loment_diag  # noqa: E402
+    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住
+    assert max(loment_diag.ASCII_ONE_LINER) < 99, "错误码表到 99 了, 换一个表外的码"
+    _w(root / "codes.txt", "".join(f"E{c} {d}\n"
+                                   for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
+
+
+def _cli_py_report(pkg: Path, red: Path) -> str:
+    """用 **PE 版 CLI**（Windows 原生）做与孪生**同名的那 23 项**断言, 打同一份报告。
+
+    `pkg` 是组件齐的那一棵（孪生的 cwd），`red` 是缺组件的那一棵（体检那一条要用）。
+    **断言全部与平台无关**（退出码 / 相对路径回显 / 行号 / 计数 / 子串）—— 两侧跑的
+    是两个后端产物, 绝对路径必然不同。
+    """
+    out: list[str] = []
+    ct = {"p": 0, "f": 0}
+    exe_def = pkg / "bin" / ("loment-cli.exe" if IS_WIN else "loment-cli")
+
+    def rep(name: str, ok: bool, why: str) -> None:
+        if ok:
+            out.append(f"  PASS  {name}")
+            ct["p"] += 1
+        else:
+            out.append(f"  FAIL  {name}: {why}")
+            ct["f"] += 1
+
+    def run(args: list[str], cwd: Path | None = None, merge: bool = False,
+            exe: Path | None = None) -> tuple[int, str]:
+        # `exe` 要跟 `cwd` 同属一棵树: CLI 靠 **argv[0]** 自定位（`doctor` / `where` 就是
+        # 按它那个目录找工具的）—— 拿另一棵树的二进制去跑会读到错的组件表。
+        r = subprocess.run([str(exe or exe_def), *args], cwd=str(cwd or pkg),
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=180)
+        return r.returncode, r.stdout + (r.stderr if merge else "")
+
+    def names() -> list[str]:
+        return [x for x in run(["commands"])[1].splitlines() if x.strip()]
+
+    # 1
+    ns = names()
+    must = ("help", "codes", "explain", "syntax", "builtins", "stat", "grep", "hash",
+            "ls", "tree", "new", "examples", "doctor", "color")
+    rep("test_catalog_has_at_least_thirty_commands",
+        len(ns) >= CATALOG_FLOOR and all(m in ns for m in must),
+        "命令少于 30 条, 或该有的名字不在目录里")
+    # 2
+    rc, helptxt = run(["--no-color", "help"])
+    miss = [n for n in ns if not re.search(rf"\b{re.escape(n)}\b", helptxt)]
+    rep("test_help_mentions_every_command", rc == 0 and not miss,
+        "help 里没提到目录里的某些名字")
+    # 3 —— 与孪生同一句断言（原先那条断言的是**中文** `未知命令`, 而 CLI 早就改成纯 ASCII 了,
+    #      于是它**永远为真**、是一条死判据; 2026-09-19 写本格时发现, 连同孪生一起收紧）
+    blob = ""
+    for n in ns:
+        _rc, t = run([n, "--no-color"], merge=True)
+        blob += t + f"== {n}\n"
+    rep("test_every_catalog_command_is_actually_dispatchable",
+        "unknown command" not in blob and "== " in blob,
+        "目录里列了但敲不了 (敲出 unknown command)")
+    # 4
+    rc4, o4 = run(["--no-color", "help", "grep"])
+    rep("test_help_page_for_one_command", rc4 == 0 and "PAT" in o4 and "FILE" in o4,
+        "help grep 没给出 PAT/FILE 的形状")
+    # 5
+    rc5, o5 = run(["frobnicate", "--no-color"], merge=True)
+    rep("test_unknown_command_is_an_error",
+        rc5 == 2 and "unknown command" in o5 and "frobnicate" in o5,
+        "未知命令没退 2, 或没说出命令名")
+    # 6
+    _, on = run(["about"])
+    _, off = run(["--no-color", "about"])
+    rep("test_color_on_by_default_and_off_with_flag",
+        "\x1b" in on and "\x1b" not in off, "默认没上色, 或 --no-color 仍留转义字节")
+    # 7
+    rc7, o7 = run(["--no-color", "stat", "fx/y.lomt"])
+    rep("test_color_flag_anywhere_in_argv_does_not_eat_the_command",
+        rc7 == 0 and "Source statistics" in o7 and "fx/y.lomt" in o7,
+        "`--no-color stat F` 里的 stat 没被当成命令")
+    # 8
+    want_hash = (pkg / "want_hash.txt").read_text(encoding="utf-8").strip()
+    _rc, oh = run(["hash", "fx/y.lomt"])
+    rep("test_hash_matches_hashlib", oh.strip() == want_hash,
+        "sha256 与 hashlib 算出来的不一样")
+    # 9
+    want_stat = (pkg / "want_stat.txt").read_text(encoding="utf-8").split()
+    _rc, o9 = run(["--no-color", "stat", "fx/y.lomt"])
+    rep("test_stat_counts_match_what_python_counts",
+        want_stat[0] in o9 and want_stat[1] in o9, "字节数或行数与 Python 数的不一致")
+    # 10
+    rc10, o10 = run(["--no-color", "cat", "fx/y.lomt"])
+    rep("test_cat_prints_numbered_lines",
+        rc10 == 0 and len(o10.splitlines()) == 5 and o10.splitlines()[0].strip().startswith("1"),
+        "cat 没带行号, 或行数不是 5")
+    # 11
+    rc11, o11 = run(["--no-color", "grep", "alpha", "fx/x.lomt"])
+    g1 = rc11 == 0 and [int(x.split(":")[0]) for x in o11.splitlines()] == [2, 4]
+    g2 = run(["--no-color", "grep", "nope", "fx/x.lomt"])[0] == 1
+    g3 = run(["--no-color", "grep", "onlypat"])[0] == 2
+    rep("test_grep_line_numbers_and_exit_codes", g1 and g2 and g3,
+        "grep 的行号 / 三种退出码 (0/1/2) 不对")
+    # 12
+    rc12, o12 = run(["--no-color", "count", "fx/c.lomt"])
+    got12 = dict(re.findall(r"^\s*(\S+)\s+(\d+)\s*$", o12, re.M))
+    c_ok = rc12 == 0 and got12.get("fn") == "2" and got12.get("struct") == "1" \
+        and got12.get("enum") == "1"
+    rc13, o13 = run(["--no-color", "fns", "fx/c.lomt"])
+    f_ok = rc13 == 0 and "fn one() -> u32" in o13 and "fn two(a: u32) -> u32" in o13
+    rep("test_count_and_fns_on_a_known_file", c_ok and f_ok,
+        "count 的 fn/struct/enum 计数, 或 fns 的签名不对")
+    # 13
+    rc14, o14 = run(["--no-color", "tokens", "fx/t.lomt"])
+    got14 = dict(re.findall(r"^\s*(\S+)\s+(\d+)\s*$", o14, re.M))
+    rep("test_tokens_picks_up_strings_and_comments",
+        rc14 == 0 and got14.get("strings") == "1" and got14.get("comments") == "1"
+        and int(got14.get("keywords", 0)) >= 4,
+        "tokens 的 strings/comments/keywords 不对")
+    # 14
+    rc15, o15 = run(["--no-color", "cat", "/definitely/not/here.lomt"], merge=True)
+    rep("test_missing_file_is_a_clean_error_not_a_crash",
+        rc15 == 1 and "cannot open" in o15, "缺文件没退 1, 或没说 cannot open")
+    # 15
+    rc16, o16 = run(["--no-color", "ls", "d"])
+    l_ok = rc16 == 0 and "sub/" in o16 and "a.lomt" in o16 and "sub\n" not in o16
+    rc17, o17 = run(["--no-color", "tree", "d"])
+    t_ok = rc17 == 0 and "deep/" in o17 and "f.lomt" in o17 and "\n      f.lomt" in o17
+    rep("test_ls_and_tree_mark_directories", l_ok and t_ok,
+        "ls 没给目录加 / , 或 tree 没体现层级")
+    # 16
+    nw = pkg
+    rc18, o18 = run(["--no-color", "new", "hello"], cwd=nw / "newdir")
+    nw1 = rc18 == 0 and "wrote hello.lomt" in o18
+    nw2 = "hello.lomt" in run(["--no-color", "ls", "newdir"])[1]
+    rc19, _o19 = run(["--no-color", "new", "hi"], cwd=nw / "newdir", merge=True)
+    nw3 = rc19 == 1
+    want_hi = (nw / "want_hi_hash.txt").read_text(encoding="utf-8").strip()
+    nw4 = run(["hash", "newdir/hi.lomt"])[1].strip() == want_hi
+    rep("test_new_writes_a_skeleton_and_refuses_to_overwrite", nw1 and nw2 and nw3 and nw4,
+        "new 没写出骨架, 或已存在时被覆盖/没退 1")
+    # 17
+    rc20, o20 = run(["version"])
+    rep("test_version_reads_share_version",
+        rc20 == 0 and o20.startswith("Loment 0.1.4 Pre2") and "commit 0123456" in o20,
+        "version 没读到包里的那一份")
+    # 18
+    rc21, o21 = run(["--no-color", "codes"])
+    rows = [x for x in (nw / "codes.txt").read_text(encoding="utf-8").splitlines() if x]
+    bad = [r for r in rows if r.split(" ", 1)[0] not in o21 or r.split(" ", 1)[1] not in o21]
+    rep("test_codes_lists_every_code_in_the_table", rc21 == 0 and not bad,
+        "错误码表里有码没被 codes 印出来, 或说明不是真源那一份")
+    # 19
+    e_ok = all(run(["--no-color", "explain", s])[1].find("Capability domain") >= 0
+               and run(["--no-color", "explain", s])[0] == 0
+               for s in ("E4", "e4", "4"))
+    e_hi = run(["--no-color", "explain", "E99"])[0] == 2
+    e_no = run(["--no-color", "explain"])[0] == 2
+    rep("test_explain_accepts_three_spellings_and_rejects_junk", e_ok and e_hi and e_no,
+        "explain 的三种拼法 / 越界码 / 缺参 有一处不对")
+    # 20
+    pg = all(run(["--no-color", c])[0] == 0 and len(run(["--no-color", c])[1].strip()) > 60
+             for c in ("syntax", "builtins", "types", "keywords", "caps", "cheat",
+                       "about", "env"))
+    rep("test_reference_pages_are_nonempty", pg, "有参考页空着或退码不为 0")
+    # 21
+    rc22, o22 = run(["where", "driver"])
+    w_ok = rc22 == 0 and "loment-driver" in o22
+    rc23, o23 = run(["--no-color", "where", "nosuchtool"], merge=True)
+    w_no = rc23 == 2 and "no such tool" in o23
+    rep("test_where_resolves_and_reports_the_expected_path", w_ok and w_no,
+        "where 没解出 loment-driver, 或不存在时没退 2")
+    # 22
+    rc24, o24 = run(["--no-color", "examples"])
+    ex1 = rc24 == 0 and "tour.lomt" in o24
+    rc25, o25 = run(["example", "tour"])
+    ex2 = rc25 == 0 and "module tour" in o25
+    rc26, o26 = run(["--no-color", "example", "nope"], merge=True)
+    ex3 = rc26 == 1 and "no such example" in o26
+    rep("test_examples_and_example_read_the_package", ex1 and ex2 and ex3,
+        "examples/example 没读到包里那一份, 或不存在时没退 1")
+    # 23
+    red_exe = red / "bin" / ("loment-cli.exe" if IS_WIN else "loment-cli")
+    rc27, o27 = run(["--no-color", "doctor"], cwd=red, exe=red_exe)
+    d1 = rc27 == 1 and "MISSING" in o27
+    rc28, o28 = run(["--no-color", "doctor"])
+    d2 = rc28 == 0 and "all green" in o28
+    rep("test_doctor_reports_missing_tools_then_green_when_present", d1 and d2,
+        "缺组件时没红/组件齐了没绿")
+
+    out.append(f"lomclicheck: {ct['p']}/{ct['p'] + ct['f']} 通过")
+    return "\n".join(out) + "\n"
+
+
+def _clang() -> str | None:
+    p = shutil.which("clang")
+    if p:
+        return p
+    fb = r"C:\Program Files\LLVM\bin\clang.exe"
+    return fb if Path(fb).exists() else None
+
+
+def _wsl() -> bool:
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _build_elf_for(src: Path, dst: Path) -> Path:
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{src.name} 自己检查不过: {errs[:2]}"
+    ll = dst.with_suffix(".ll")
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(dst), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return dst
+
+
+@test
+def test_cli_check_matches_loment_twin():
+    """**Loment 版**（`lomclicheck.lomt` 驱 ELF 版 CLI）与 Python 版**同名断言的报告逐字节相同**。
+
+    `docs/189` §3 的 S1 第十二格（丁类）。被测的是**另一件 Loment 程序**（`lomcli.lomt`）——
+    Python 那侧跑它的 **PE**（Windows 原生）, 孪生那侧跑 **ELF**（WSL）。
+
+    两侧断言的全是**与平台无关**的东西（退出码 / 相对路径回显 / 行号 / 计数 / 子串）——
+    `example nope` 的报错里带着绝对路径、`examples`/`env` 打的是从 `argv[0]` 推出来的目录,
+    两平台必然不同, 所以一处都不比。期望值（sha256 / 字节数 / 行数 / 错误码表）由判据拿
+    **CPython 当神谕**算出来写成夹具。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        # **两侧各一棵树**: `new hello` 会往 `newdir/` 里落一个文件, 共用一棵的话先跑的那侧
+        # 就把夹具改掉了, 后跑的那侧 `new` 变成"已存在"（2026-09-19 实测踩到）。
+        root_py = td / "py"
+        root_py.mkdir()
+        exe = _build()
+        green_py = _cli_pkg(root_py, exe, "p_green", stubs=True)
+        red_py = _cli_pkg(root_py, exe, "p_red", stubs=False)
+        _cli_fixtures(green_py)
+        want = _cli_py_report(green_py, red_py)
+        # ELF 版: 同一个源, 另一个后端
+        root_w = td / "wsl"
+        root_w.mkdir()
+        _build_elf_for(SRC, td / "loment-cli.elf")
+        green = _cli_pkg(root_w, td / "loment-cli.elf", "p_green", stubs=True, linux=True)
+        red = _cli_pkg(root_w, td / "loment-cli.elf", "p_red", stubs=False, linux=True)
+        _cli_fixtures(green)
+        # 交错的那一步: 孪生自己也要能编 + 跑
+        chk = _build_elf_for(TWIN, td / "lomclicheck.elf")
+        outp = td / "check.out"
+        binn = f"{_TW}chk.bin"
+        script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(green)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, text=True, timeout=600, shell=False)
+        got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
+    assert rr.stdout.strip() == "0", f"孪生该退 0: rc={rr.stdout!r}\n{got[:400]}"
+    assert got == want, f"报告与 Python 版不同:\n  py     {want!r}\n  loment {got!r}"
+    n = len(got.strip().splitlines()) - 1
+    assert got.count("  PASS  ") == n == 23, (n, got[-200:])
+    print(f"      {n} 项断言: PE 版与 ELF 版 CLI 同一份报告（与 Python 版逐字节相同）")
+
+
+@test
+def test_cli_twin_selfhost_compiles():
+    """`lomclicheck.lomt` 必须能走**种子自举链**编译（无 Python 参与编译器本身）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
+    assert seed.exists(), "缺自举种子"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        s1 = td / "stage1"
+        r = subprocess.run(
+            [_clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+             "-static", "-fuse-ld=lld", "-o", str(s1), str(seed)],
+            capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        binn = f"{_TW}s1.bin"
+        script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
+                  f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomclicheck.lomt")
+        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                            capture_output=True, timeout=600, shell=False)
+        assert rr.returncode == 0, f"stage1 编译 lomclicheck.lomt 失败: {rr.stderr[-300:]}"
+        assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
+    print(f"      种子自举链编译 lomclicheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
 def main() -> int:
