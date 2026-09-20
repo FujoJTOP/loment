@@ -487,6 +487,21 @@ _BATTERY = {
 }
 
 
+#: C++ 那一侧的小输入。**与 C 那张表只差 `char` 那三个与 `long long` 两条**：
+#: C++ 的 `char` 符号性实现定义，所以**不映**（让它出声）；`long long` 那两条 C 没有。
+_CPP_BATTERY = {
+    "cpp_char_undef": "char f(char c) { return c; }\n",
+    "cpp_char_ptr_undef": "const char *s(void) { return 0; }\n",
+    "cpp_longlong": "long long f(long long n) { return n; }\n",
+    "cpp_ull": "unsigned long long f() { return 1; }\n",
+    "cpp_signed_unsigned_char": "signed char a(signed char c) { return c; }\nunsigned char b() { return 2; }\n",
+    "cpp_void_ptr": "void *raw(void) { return 0; }\n",
+    "cpp_struct": "struct P { long long a; int b; };\nint f(struct P p) { return p.b; }\n",
+    "cpp_enum": "enum E { A, B };\nint f() { return A; }\n",
+    "cpp_undef_char_param": "int f(char c) { return 1; }\n",
+}
+
+
 def _twin_exe(td: Path) -> Path:
     """把 `lompotc.lomt` 链成可执行文件（走仓库自己的原生后端，不经 clang）。
 
@@ -544,6 +559,48 @@ def test_lompotc_twin_matches_from_c():
                          + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
                                       for n, rc, w, g in bad[:2]))
         print(f"      {len(cases)} 份 C：Loment 前端与 `potato_from.from_c` "
+              f"产出的对象逐字节相同")
+
+
+@test
+def test_lompotc_twin_matches_from_cpp():
+    """**C++ 那一门也在同一份孪生里**（`lompotc --cpp`）。
+
+    上游两门是同一个引擎（`_from_c(..., grammar, types)`），差异只有**类型表**那一张：
+    C++ 把 `char` / `char *` / `const char *` 映成**无映射**（`char` 的符号性在 C++ 里是
+    实现定义的，表示层不该猜），另外多认 `long long` / `unsigned long long`。
+    所以这一条同时钉住"**命中但无映射**"与"命中且有效"必须分开报 ——
+    两者混了的话，`char` 会被后面的指针分支接走判成 `str`，而那正是那一格要拦住的猜测。
+
+    覆盖面：`loment/cpptrans/` 的语料 + `_CPP_BATTERY`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "cpptrans").glob("*.cpp")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".cpp", v) for k, v in sorted(_CPP_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want = json.dumps(potato_from.from_cpp(src, name, "strict")[0],
+                              ensure_ascii=False)
+            r = subprocess.run([str(exe), "--cpp", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            if r.returncode != 0 or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份与 from_cpp 不同（前 2）:\n"
+                         + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
+                                      for n, rc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 C++：Loment 前端与 `potato_from.from_cpp` "
               f"产出的对象逐字节相同")
 
 

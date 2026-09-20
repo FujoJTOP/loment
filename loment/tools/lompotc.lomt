@@ -15,7 +15,16 @@
 //      扫描器, 语义按那四条逐条对齐（含 `_C_FN` 那两处惰性量词）。
 //   3. 实体上限 64 / 字段上限 32 / 枚举成员上限 64 —— 语料远达不到; 超了**报错**, 不静默丢。
 //
-// 用法: `lompotc <src.c>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那一种）。
+// **方言**: `lompotc <src>` 是 C；`lompotc --cpp <src>` 是 C++。两门共用同一个引擎
+// （上游也是 —— `_from_c(..., grammar, types)`），差异只有**类型表**那一张：
+//   * C   —— `char`/`char *`/`const char *` 都映（`i8` / `str` / `str`）
+//   * C++ —— 这三个**明确不映**（`char` 的符号性在 C++ 里是实现定义的，表示层不该猜），
+//            另外多认 `long long` / `unsigned long long`
+// 之所以要分"C 是命中且有效"与"C++ 是命中但无映射"：上游是 `if t in types: return types[t]`
+// —— **命中就是命中，哪怕是 `None`**，后面的指针分支不再走。混了的话 `char *` 在 C++ 下
+// 会掉进指针分支被判成 `str`，而这正是那一格要拦住的猜测。
+//
+// 用法: `lompotc [--cpp] <src>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那一种）。
 
 module lompotc
 
@@ -45,8 +54,13 @@ const M_TXT: u32 = 793600;         // 512              -> 794112   （拼出来�
 const M_TXT2: u32 = 794112;        // 512              -> 794624   （参数名的副本）
 const M_R: u32 = 794624;           // 128              -> 794752   （扫描结果格）
 const M_CNST: u32 = 794752;        // 8192             -> 802944   （已发出的 const 名）
-const M_SC: u32 = 802944;          // 64               -> 803008   （标量: [0]=源长度）
-const M_CAP: u32 = 804864;
+const M_SC: u32 = 802944;          // 64               -> 803008
+// 标量: [0]=源长度  [8]=模式(1=C / 2=C++)
+// ⚠ **argv 缓冲要单独一块**（原先是 M_CAP-2048 —— 那正好压在 M_SC 上：
+// 读一次 cmdline 就把"源长度"与"模式"盖掉，症状是长文件名下 unit 名多出几个下划线、
+// 或者干脆打不开源文件。2026-09-20 在 C++ 那一门撞到）。
+const M_ARG: u32 = 803008;         // 2048             -> 805056
+const M_CAP: u32 = 805888;
 
 // 扫描结果格（find_struct / find_enum / find_fn 共用）
 const R_NO: u32 = 0;               // 名字起点
@@ -535,8 +549,9 @@ fn find_fn(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
 
 // ---------------------------------------------------------------- 类型映射
 
-/// C 的类型表 `C_TYPES`。命中就把结果写进 `M_TYPE` 并返回长度。
-fn table(d: ptr, s: u32, m: u32) -> u32 {
+/// C 系的类型表。**命中就把结果写进 `M_TYPE` 并返回长度；命中但这一门不映返回 `FAIL`；
+/// 没命中返回 0。**（哨兵不能用 `2` —— `i8`/`u8` 的长度**就是 2**。）
+fn table(d: ptr, s: u32, m: u32, mode: u32) -> u32 {
     if m == 7 && eq(d, s, "uint8_t") == 1 {
         return put_lit(d, "u8");
     }
@@ -589,10 +604,19 @@ fn table(d: ptr, s: u32, m: u32) -> u32 {
         return put_lit(d, "i32");
     }
     if m == 4 && eq(d, s, "char") == 1 {
+        if mode == 2 {
+            return FAIL;              // C++: 符号性实现定义 —— 不猜
+        }
         return put_lit(d, "i8");
     }
     if m == 4 && eq(d, s, "long") == 1 {
         return put_lit(d, "i64");
+    }
+    if mode == 2 && m == 9 && eq(d, s, "long long") == 1 {
+        return put_lit(d, "i64");
+    }
+    if mode == 2 && m == 18 && eq(d, s, "unsigned long long") == 1 {
+        return put_lit(d, "u64");
     }
     if m == 6 && eq(d, s, "size_t") == 1 {
         return put_lit(d, "u64");
@@ -610,9 +634,15 @@ fn table(d: ptr, s: u32, m: u32) -> u32 {
         return put_lit(d, "()");
     }
     if m == 6 && eq(d, s, "char *") == 1 {
+        if mode == 2 {
+            return FAIL;
+        }
         return put_lit(d, "str");
     }
     if m == 12 && eq(d, s, "const char *") == 1 {
+        if mode == 2 {
+            return FAIL;
+        }
         return put_lit(d, "str");
     }
     if m == 6 && eq(d, s, "void *") == 1 {
@@ -752,7 +782,11 @@ fn ctype(mem: ptr, tp: ptr, tl: u32) -> u32 {
     if m > 5 && eq(d, s, "enum ") == 1 {
         return put_lit(d, "i32");
     }
-    let r: u32 = table(d, s, m);
+    let mode: u32 = ld32(ptr_add(mem, M_SC), 8);
+    let r: u32 = table(d, s, m, mode);
+    if r == FAIL {
+        return 0;                     // 命中但**这一门不映**（C++ 的 `char` 那三个）
+    }
     if r > 0 {
         return r;
     }
@@ -1607,7 +1641,14 @@ fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let un: u32 = unit_name(mem, argp, al);
     let idb: ptr = ptr_add(mem, M_IDENT);
     let o3: u32 = jq(out, o2, idb, 0, un);
-    let o4: u32 = jl(out, o3, ", \"language\": \"loment\", \"grammar\": \"c\", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o3b: u32 = jl(out, o3, ", \"language\": \"loment\", \"grammar\": ");
+    let o3c: u32 = o3b;
+    if ld32(ptr_add(mem, M_SC), 8) == 2 {
+        o3c = jl(out, o3b, "\"cpp\"");
+    } else {
+        o3c = jl(out, o3b, "\"c\"");
+    }
+    let o4: u32 = jl(out, o3c, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
     let o5: u32 = emit_functions(mem, out, o4);
     let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
     let o7: u32 = emit_enum_kind(mem, out, o6, 0);
@@ -1653,7 +1694,7 @@ fn _start() -> u32 {
     if fd < 0 {
         return fail("lompotc: 读不到 argv\n");
     }
-    let cb: ptr = ptr_add(mem, M_CAP - 2048);
+    let cb: ptr = ptr_add(mem, M_ARG);
     let n: u64 = read_all(fd as u64, cb, 2048);
     syscall4(3, fd as u64, 0, 0);
     let tot: u32 = n as u32;
@@ -1661,9 +1702,23 @@ fn _start() -> u32 {
     let l1: u32 = arg_at(cb, tot, 1, ap);
     let o1: u32 = ld32(ap, 0);
     if l1 == 0 {
-        return fail("lompotc: usage: lompotc <src.c>\n");
+        return fail("lompotc: usage: lompotc [--cpp] <src>\n");
     }
-    let pp: ptr = ptr_add(cb, o1);
+    let mode: u32 = 1;
+    let a1: ptr = ptr_add(cb, o1);
+    if l1 == 5 && eq(a1, 0, "--cpp") == 1 {
+        mode = 2;
+        let l2: u32 = arg_at(cb, tot, 2, ap);
+        let o2: u32 = ld32(ap, 0);
+        if l2 == 0 {
+            return fail("lompotc: usage: lompotc [--cpp] <src>\n");
+        }
+        l1 = l2;
+        o1 = o2;
+        a1 = ptr_add(cb, o2);
+    }
+    let _md: u32 = st32(ptr_add(mem, M_SC), 8, mode);
+    let pp: ptr = a1;
     store8(pp, l1, 0 as u8);
     let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
     if jf < 0 {
