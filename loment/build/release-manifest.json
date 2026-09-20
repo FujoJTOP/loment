@@ -839,11 +839,11 @@
   },
   {
    "path": "tools/pytrans.py",
-   "sha256": "aab1821faa31c1f854e20daf89c459969563b19fc923dcc8019e9761b032867a"
+   "sha256": "5fc2e5b51b994b9afb6b9eedd76acfb8cf613e7d02d78989484a3fad30f69228"
   },
   {
    "path": "tools/loment_pytrans_test.py",
-   "sha256": "9fedaa3391fd7d71eb3af613012f7d3decd5a22ccfc7f524e7fcc5db0138ed99"
+   "sha256": "c9d7dc25f6a8e99d38d2248bd24a46315aaab20f9f35cc1a250f398a75600425"
   },
   {
    "path": "tools/jtrans.py",
@@ -891,7 +891,7 @@
   },
   {
    "path": "tools/loment_trans_test.py",
-   "sha256": "c8139d5292b09a51455f82b9706b546239137e3e8f98c720b6d62b67dc27976e"
+   "sha256": "a0efcfc78990f3dfe133eeb86755a3448124da59008c942b9e4086f7db8b9014"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1147,7 +1147,7 @@
   },
   {
    "path": "loment/tools/lomtrans.lomt",
-   "sha256": "f5d45334619348becce8a6e8de58c00db4d3edfe55debae6ed343b489725ddb8"
+   "sha256": "ae06354603f2acce936ee154a4e5ad85037ceba287844fa0b5ca3a9bbf4b3d50"
   },
   {
    "path": "loment/tools/lomvimgrammar.lomt",
@@ -1320,6 +1320,10 @@
   {
    "path": "loment/pytrans/policy.py",
    "sha256": "fa018caa1d6d4ef86f78d8842d7f5c9399a69cb7d4662c847f8925e92b6728f3"
+  },
+  {
+   "path": "loment/pytrans/unary_invert.py",
+   "sha256": "efa847badf359ed2f053f205545484403d076ebb38caef2cea41b3b1e1f0e842"
   },
   {
    "path": "loment/jtrans/Bits.java",
