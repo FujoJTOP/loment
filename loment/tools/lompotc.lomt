@@ -37,9 +37,14 @@
 // `internal`/`sealed`/`partial`/`async` 那十六个）、类型表（**`byte` 是两门唯一没落在
 // 同一格上的**：C# 无符号 ⇒ `u8`、Java 有符号 ⇒ `i8`；`String`/`boolean` 只有 Java 有）。
 //
-// 差 `from_python` / `from_rust` / `from_go` 与发射那一半（`lomt_from`）。
+// 差 `from_rust`（还是轻量解析那一派）与 `from_python`（坐在 `ast` 上，不是）
+// 以及发射那一半（`lomt_from`）。
 //
-// 用法: `lompotc [--cpp|--java|--csharp] <src>` —— 对象打到 stdout（紧凑那种）。
+// **Go**（`--go`，mode 5）是第三条支路: 类型写在**名字后面**、条件不带括号、没有
+// `while`；`struct` 的体**不是**花括号配平出来的（到第一个以 `}` 起头的行为止），
+// 形参有**分组写法** `func gcd(a, b int)`，`//export` 才记 `abi: "c"` 且不带正文。
+//
+// 用法: `lompotc [--cpp|--java|--csharp|--go] <src>` —— 对象打到 stdout（紧凑那种）。
 
 module lompotc
 
@@ -113,6 +118,9 @@ const J_VL: u32 = 52;
 const J_VN: u32 = 56;              // 分类结果的负号
 const J_K: u32 = 60;               // jl_type 的临时（数组层数）
 const J_SP0: u32 = 64;             // last_tok 的 scratch
+const J_MS: u32 = 68;              // Go: 整段起点（行首，上游 m.start()）
+const J_RS: u32 = 72;              // Go: 返回类型起点/长度
+const J_RL: u32 = 76;
 
 const FAIL: u32 = 4294967295;
 
@@ -2900,6 +2908,626 @@ fn build_class(mem: ptr, srcn: u32, argp: ptr, al: u32, mode: u32) -> u32 {
     return o12;
 }
 
+// ================================================================ Go（第五门）
+//
+// `potato_from.from_go` —— **类型写在名字后面、条件不带括号、没有 `while`**。
+// 与 C / Java-C# 那两套都不是一批扫描器，但它是**正则派**的（不像 Python 那一门要 `ast`）：
+// `_GO_STRUCT` / `_GO_FN` / `_GO_EXPORT` 三条，逐个对齐。
+//
+// 三处与别门不同、必须照抄的：
+//   * `struct` 的体**不是**花括号配平出来的 —— `_GO_STRUCT` 写的是 `(.∗?)^[ \t]*\}`：
+//     到**第一个以 `}` 起头的行**为止（嵌套 struct 会被截在里层那个 `}` 上，上游如此）。
+//   * 形参有**分组写法** `func gcd(a, b int)`（Go 里极常见）：只有名字的那一段先攒着，
+//     等后面 `名字 类型` 那一段把类型带过来；**攒到最后还没等到** ⇒ 拒（不静默丢）。
+//   * `//export` 是**源码里显式宣称的 C ABI**（`docs/188` §3）—— 只有那种才记 `abi: "c"`，
+//     而且只有**没记 abi** 的才带正文（`--impl` 那条路用）。
+//
+// 差 `from_rust` 与 `from_python`（后者坐在 `ast` 上，不是轻量解析那一派）。
+
+/// `_GO_EXPORT = ^[ \t]*//[ \t]*export[ \t]+([A-Za-z_]\w*)` 里有 `name` 吗。
+/// **要在原文上找**（那本身就是一条注释，抹掉就没了）—— 上游也是先在 `src` 上收一遍。
+fn go_exported(src: ptr, n: u32, namep: ptr, nameo: u32, nl: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if i == 0 || load8(src, i - 1) == 10 {
+            let j: u32 = skip_ht(src, i, n);
+            if j + 1 < n && load8(src, j) == 47 && load8(src, j + 1) == 47 {
+                let k: u32 = skip_ht(src, j + 2, n);
+                if k + 6 <= n && eq(src, k, "export") == 1 {
+                    if k + 6 < n && is_ht(load8(src, k + 6)) == 1 {
+                        let w: u32 = skip_ht(src, k + 6, n);
+                        if w < n && is_id0(load8(src, w)) == 1 {
+                            let we: u32 = w + 1;
+                            while we < n && is_w(load8(src, we)) == 1 {
+                                we = we + 1;
+                            }
+                            if we - w == nl && same_n(src, w, namep, nameo, nl) == 1 {
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// Go 那张类型表（`GO_TYPES`）。**`int`/`uint` 是平台相关的**，这里按本仓唯一支持的
+/// 目标（x86-64）读 —— `int` ⇒ `i64`（与 C 那边 `int -> i32` 不同，是**语言规定不同**，
+/// 不是为了整齐）。`float*` / `complex*` 不在表里 ⇒ 无映射。
+fn go_table(d: ptr, s: ptr, m: u32) -> u32 {
+    if m == 3 && eq(s, 0, "int") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 4 && eq(s, 0, "int8") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 5 && eq(s, 0, "int16") == 1 {
+        return put_lit(d, "i16");
+    }
+    if m == 5 && eq(s, 0, "int32") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 5 && eq(s, 0, "int64") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 4 && eq(s, 0, "uint") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 5 && eq(s, 0, "uint8") == 1 {
+        return put_lit(d, "u8");
+    }
+    if m == 6 && eq(s, 0, "uint16") == 1 {
+        return put_lit(d, "u16");
+    }
+    if m == 6 && eq(s, 0, "uint32") == 1 {
+        return put_lit(d, "u32");
+    }
+    if m == 6 && eq(s, 0, "uint64") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 4 && eq(s, 0, "byte") == 1 {
+        return put_lit(d, "u8");
+    }
+    if m == 4 && eq(s, 0, "rune") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 4 && eq(s, 0, "bool") == 1 {
+        return put_lit(d, "bool");
+    }
+    if m == 7 && eq(s, 0, "uintptr") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 6 && eq(s, 0, "string") == 1 {
+        return put_lit(d, "str");
+    }
+    return 0;
+}
+
+/// `_go_type`: 归一化空白 -> `()`（空）-> `[]` / 变参无映射 -> 尾部 `*` -> known -> 表。
+/// 命中把类型名写进 `M_TYPE` 返回长度；无映射返回 0（`()` **是**有效映射）。
+fn go_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let t: ptr = ptr_add(mem, M_JT);
+    let d: ptr = ptr_add(mem, M_TYPE);
+    let tl: u32 = norm_of(p, off, off + l, t);
+    if tl == 0 {
+        return put_lit(d, "()");
+    }
+    if tl >= 2 && load8(t, 0) == 91 && load8(t, 1) == 93 {
+        return 0;                       // 切片是 (ptr,len,cap) 三个字 —— 不猜成 ptr
+    }
+    if tl >= 3 && load8(t, 0) == 46 && load8(t, 1) == 46 && load8(t, 2) == 46 {
+        return 0;                       // `...T` 变参
+    }
+    // 上游还多一条 `t.endswith("...T")` —— 原样照抄（那是另一种写法的变参）
+    if tl >= 4 && load8(t, tl - 4) == 46 && load8(t, tl - 3) == 46
+            && load8(t, tl - 2) == 46 && load8(t, tl - 1) == 84 {
+        return 0;
+    }
+    let n: u32 = 0;
+    let tl2: u32 = tl;
+    while tl2 > 0 && load8(t, tl2 - 1) == 42 {
+        tl2 = norm_of(t, 0, tl2 - 1, t);
+        n = n + 1;
+    }
+    if n > 0 {
+        return put_lit(d, "ptr");       // `*T` 一律 ptr（Go 没有别的指针形态好用）
+    }
+    if known_find(mem, t, 0, tl2) == 1 {
+        let _c: u32 = copy_n(d, 0, t, 0, tl2);
+        return tl2;
+    }
+    return go_table(d, t, tl2);
+}
+
+/// `^[ \t]*type[ \t]+NAME[ \t]+struct[ \t]*\{` + 到**第一个以 `}` 起头的行**。
+/// 命中写 `J_OB`（那个 `{`）/`J_CE`（那个 `}` 行的 `}` 下标）/`J_NO`,`J_NL`（名字）。
+fn find_gostruct(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || load8(body, i - 1) == 10 {
+            let j0: u32 = skip_ht(body, i, n);
+            if j0 + 4 <= n && eq(body, j0, "type") == 1 {
+                if j0 + 4 < n && is_ht(load8(body, j0 + 4)) == 1 {
+                    let ns: u32 = skip_ht(body, j0 + 4, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let s1: u32 = skip_ht(body, ne, n);
+                        if s1 + 6 <= n && eq(body, s1, "struct") == 1 {
+                            let ob: u32 = skip_ht(body, s1 + 6, n);
+                            if ob < n && load8(body, ob) == 123 {
+                                // `^` 的位置是"行首"：0 或者紧跟一个换行之后的那一格。
+                                // `ob + 1` **不是**行首（它前面是 `{`）——所以从 ob+1 起
+                                // 找"前一个字节是换行"的位置，与 `(.*?)^[ \t]*\}` 同义。
+                                let close: u32 = FAIL;
+                                let q: u32 = ob + 1;
+                                while q <= n {
+                                    if q > 0 && load8(body, q - 1) == 10 {
+                                        let z: u32 = skip_ht(body, q, n);
+                                        if z < n && load8(body, z) == 125 {
+                                            close = z;
+                                            q = n + 1;
+                                        }
+                                    }
+                                    if q <= n {
+                                        q = q + 1;
+                                    }
+                                }
+                                if close != FAIL {
+                                    let _a: u32 = st32(r, J_OB, ob);
+                                    let _b: u32 = st32(r, J_CE, close);
+                                    let _c: u32 = st32(r, J_NO, ns);
+                                    let _d: u32 = st32(r, J_NL, ne - ns);
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `_GO_FN = ^[ \t]*func[ \t]+NAME[ \t]*\(([^)]*)\)[ \t]*([^{;\n]*?)[ \t]*\{`。
+/// 命中写 `J_MS`（**行首**，上游 `m.start()` 就在那里）/`J_OB`（那个 `{`）/
+/// `J_NO`,`J_NL`（名字）/`J_PS`,`J_PL`（形参表）/`J_RS`,`J_RL`（返回类型，可空）。
+fn find_gofn(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || load8(body, i - 1) == 10 {
+            let j0: u32 = skip_ht(body, i, n);
+            if j0 + 4 <= n && eq(body, j0, "func") == 1 {
+                if j0 + 4 < n && is_ht(load8(body, j0 + 4)) == 1 {
+                    let ns: u32 = skip_ht(body, j0 + 4, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let ps: u32 = skip_ht(body, ne, n);
+                        if ps < n && load8(body, ps) == 40 {
+                            let pe: u32 = ps + 1;
+                            while pe < n && load8(body, pe) != 41 {
+                                pe = pe + 1;
+                            }
+                            if pe < n {
+                                // 返回类型那一段：`[ \t]*` 之后的**惰性**量词，不含
+                                // `{` / `;` / 换行 —— 所以它必然与 `{` 同行。
+                                let rs: u32 = skip_ht(body, pe + 1, n);
+                                let rz: u32 = rs;
+                                while rz < n && load8(body, rz) != 123
+                                        && load8(body, rz) != 59 && load8(body, rz) != 10 {
+                                    rz = rz + 1;
+                                }
+                                if rz < n && load8(body, rz) == 123 {
+                                    let re2: u32 = trim_end(body, rs, rz);
+                                    let _a: u32 = st32(r, J_MS, i);
+                                    let _b: u32 = st32(r, J_OB, rz);
+                                    let _c: u32 = st32(r, J_NO, ns);
+                                    let _d: u32 = st32(r, J_NL, ne - ns);
+                                    let _e: u32 = st32(r, J_PS, ps + 1);
+                                    let _f: u32 = st32(r, J_PL, pe);
+                                    let _g: u32 = st32(r, J_RS, rs);
+                                    let _h: u32 = st32(r, J_RL, re2 - rs);
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 一行按空白切成 token（Go 的结构体字段与形参都按这个切）。写进 `M_CMEM`
+/// （第 k 个: 偏移在 `12k`、长度在 `12k+4`），返回条数（最多 16）。
+fn go_toks(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
+    let tbl: ptr = ptr_add(mem, M_CMEM);
+    let cnt: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        if is_sp(load8(p, i)) == 1 {
+            i = i + 1;
+        } else {
+            let s0: u32 = i;
+            while i < b && is_sp(load8(p, i)) == 0 {
+                i = i + 1;
+            }
+            if cnt < 16 {
+                let _a: u32 = st32(tbl, cnt * 12, s0);
+                let _b: u32 = st32(tbl, cnt * 12 + 4, i - s0);
+            }
+            cnt = cnt + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 发一个 Go 形参。**"是不是第一个"记在 `M_SC + 32`** —— 分组写法要连着发好几个，
+/// 那个状态得跨调用（与 C 那侧 `emit_params` 里那个 `first` 同一个意思，只是搬进了格子）。
+fn go_param1(mem: ptr, out: ptr, o: u32, p: ptr, off: u32, l: u32, tl: u32) -> u32 {
+    if ld32(ptr_add(mem, M_SC), 32) == 0 {
+        o = jl(out, o, ", ");
+    }
+    let _f: u32 = st32(ptr_add(mem, M_SC), 32, 0);
+    o = jl(out, o, "{\"name\": ");
+    o = jq(out, o, p, off, l);
+    o = jl(out, o, ", \"type\": ");
+    o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+    o = jl(out, o, "}");
+    return o;
+}
+
+/// Go 的形参表是不是好的（`a, b int` 那种分组写法要**攒着**等类型）。返回 1 = 好。
+/// **逐段判、不发射**。
+fn goparams_ok(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
+    let pend: ptr = ptr_add(mem, M_CMEM + 512);   // 攒着的名字: (off, len)
+    let np: u32 = 0;
+    let q: u32 = a;
+    while q <= b {
+        let seg: u32 = find_ch(p, q, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = skip_sp(p, q, se);
+        let e2: u32 = trim_end(p, s2, se);
+        if e2 > s2 {
+            let nt: u32 = go_toks(mem, p, s2, e2);
+            if nt == 1 {
+                if is_ident(p, s2, e2 - s2) == 0 {
+                    return 0;
+                }
+                if np < NMAX {
+                    let _a: u32 = st32(pend, np * 12, s2);
+                    let _b: u32 = st32(pend, np * 12 + 4, e2 - s2);
+                }
+                np = np + 1;
+            } else {
+                if nt != 2 {
+                    return 0;
+                }
+                let tno: u32 = ld32(ptr_add(mem, M_CMEM), 0);
+                let tnl: u32 = ld32(ptr_add(mem, M_CMEM), 4);
+                if is_ident(p, tno, tnl) == 0 {
+                    return 0;
+                }
+                let pso: u32 = ld32(ptr_add(mem, M_CMEM), 12);
+                let psl: u32 = ld32(ptr_add(mem, M_CMEM), 16);
+                if go_type(mem, p, pso, psl) == 0 {
+                    return 0;
+                }
+                np = 0;
+            }
+        }
+        if seg == FAIL {
+            q = b + 1;
+        } else {
+            q = seg + 1;
+        }
+    }
+    if np > 0 {
+        return 0;                       // 只有名字、没等到类型 —— 报出来
+    }
+    return 1;
+}
+
+/// 逐条发 Go 的形参（分组写法在这儿展开：一个类型带前面攒下的那几个名字）。
+fn goparams_emit(mem: ptr, out: ptr, o: u32, p: ptr, a: u32, b: u32) -> u32 {
+    let pend: ptr = ptr_add(mem, M_CMEM + 512);
+    let np: u32 = 0;
+    let _f0: u32 = st32(ptr_add(mem, M_SC), 32, 1);   // "是不是第一个"（1 = 是）
+    let q: u32 = a;
+    while q <= b {
+        let seg: u32 = find_ch(p, q, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = skip_sp(p, q, se);
+        let e2: u32 = trim_end(p, s2, se);
+        if e2 > s2 {
+            let nt: u32 = go_toks(mem, p, s2, e2);
+            if nt == 1 {
+                if np < NMAX {
+                    let _a: u32 = st32(pend, np * 12, s2);
+                    let _b: u32 = st32(pend, np * 12 + 4, e2 - s2);
+                }
+                np = np + 1;
+            } else {
+                if nt == 2 {
+                    let tno: u32 = ld32(ptr_add(mem, M_CMEM), 0);
+                    let tnl: u32 = ld32(ptr_add(mem, M_CMEM), 4);
+                    let pso: u32 = ld32(ptr_add(mem, M_CMEM), 12);
+                    let psl: u32 = ld32(ptr_add(mem, M_CMEM), 16);
+                    let tl: u32 = go_type(mem, p, pso, psl);
+                    // `for n in pending + [pn]` —— **攒着的**与**这一段自己的名字**一起发
+                    // （漏掉后者的话，`func f(n int)` 这种最常见的写法一个形参都不发）
+                    let k: u32 = 0;
+                    while k < np {
+                        o = go_param1(mem, out, o, p, ld32(pend, k * 12),
+                                      ld32(pend, k * 12 + 4), tl);
+                        k = k + 1;
+                    }
+                    o = go_param1(mem, out, o, p, tno, tnl, tl);
+                    np = 0;
+                }
+            }
+        }
+        if seg == FAIL {
+            q = b + 1;
+        } else {
+            q = seg + 1;
+        }
+    }
+    return o;
+}
+
+/// `_go_type(" ".join(parts[1:]))` —— 从 `a` 到 `b` 的 token 用单个空格连起来再查表。
+fn go_type_sp(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_TXT);
+    let o: u32 = 0;
+    let i: u32 = a;
+    let cnt: u32 = 0;
+    while i < b {
+        if is_sp(load8(p, i)) == 1 {
+            i = i + 1;
+        } else {
+            let s0: u32 = i;
+            while i < b && is_sp(load8(p, i)) == 0 {
+                i = i + 1;
+            }
+            if cnt > 0 {
+                store8(d, o, 32 as u8);
+                o = o + 1;
+            }
+            let q: u32 = s0;
+            while q < i {
+                store8(d, o, load8(p, q) as u8);
+                o = o + 1;
+                q = q + 1;
+            }
+            cnt = cnt + 1;
+        }
+    }
+    return go_type(mem, d, 0, o);
+}
+
+/// 一段 struct 体里有几个字段能进对象（逐行切；空行 / 单 token 行 / 名字不合法的都不算）。
+fn go_fld_count(mem: ptr, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let got: u32 = 0;
+    let ls: u32 = a;
+    while ls <= b {
+        let le: u32 = ls;
+        while le < b && load8(body, le) != 10 {
+            le = le + 1;
+        }
+        let s2: u32 = skip_sp(body, ls, le);
+        let e2: u32 = trim_end(body, s2, le);
+        if e2 > s2 {
+            let nt: u32 = go_toks(mem, body, s2, e2);
+            if nt >= 2 {
+                let fno: u32 = ld32(ptr_add(mem, M_CMEM), 0);
+                let fnl: u32 = ld32(ptr_add(mem, M_CMEM), 4);
+                if is_ident(body, fno, fnl) == 1 {
+                    let ts: u32 = ld32(ptr_add(mem, M_CMEM), 12);
+                    if go_type_sp(mem, body, ts, e2) != 0 {
+                        got = got + 1;
+                    }
+                }
+            }
+        }
+        ls = le + 1;
+    }
+    return got;
+}
+
+/// Go 的 `type X struct` 那一圈：把**有字段**的那些名字填进 `known`
+/// （上游那一圈就在函数那一圈**之前**，所以先声明后引用是通的）。
+fn go_struct_known(mem: ptr) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let i: u32 = 0;
+    while find_gostruct(body, n, i, r) == 1 {
+        let ce: u32 = ld32(r, J_CE);
+        i = ce + 1;
+        if go_fld_count(mem, ld32(r, J_OB) + 1, ce) > 0 {
+            let _k: u32 = known_add(mem, ptr_add(body, ld32(r, J_NO)), ld32(r, J_NL));
+        }
+    }
+    return 0;
+}
+
+/// 函数 -> `functions`（`//export` 过的记 `abi: "c"` 且**不带正文**）。
+fn go_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let src: ptr = ptr_add(mem, M_SRC);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let srcn: u32 = ld32(ptr_add(mem, M_SC), 16);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let _sk: u32 = go_struct_known(mem);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_gofn(body, n, i, r) == 1 {
+        let ms: u32 = ld32(r, J_MS);
+        let ob: u32 = ld32(r, J_OB);
+        let ns: u32 = ld32(r, J_NO);
+        let nl: u32 = ld32(r, J_NL);
+        i = ob + 1;
+        let exported: u32 = go_exported(src, srcn, body, ns, nl);
+        // 多返回值：Potato 是单返回
+        let multi: u32 = 0;
+        if ld32(r, J_RL) > 0 {
+            if load8(body, ld32(r, J_RS)) == 40 {
+                multi = 1;
+            }
+        }
+        if multi == 0 {
+            let rtl: u32 = go_type(mem, body, ld32(r, J_RS), ld32(r, J_RL));
+            if rtl != 0 {
+                let _sv: u32 = copy_n(ptr_add(mem, M_TXT), 0, ptr_add(mem, M_TYPE), 0, rtl);
+                if goparams_ok(mem, body, ld32(r, J_PS), ld32(r, J_PL)) == 1 {
+                    if first == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    first = 0;
+                    o = jl(out, o, "{\"name\": ");
+                    o = jq(out, o, body, ns, nl);
+                    o = jl(out, o, ", \"params\": [");
+                    o = goparams_emit(mem, out, o, body, ld32(r, J_PS), ld32(r, J_PL));
+                    o = jl(out, o, "], \"ret\": ");
+                    o = jq(out, o, ptr_add(mem, M_TXT), 0, rtl);
+                    if exported == 1 {
+                        o = jl(out, o, ", \"abi\": \"c\"");
+                    } else {
+                        let close: u32 = block_end(body, ob, n);
+                        if close != FAIL {
+                            let lead: u32 = 0;
+                            let q: u32 = ms;
+                            while q < close + 1 && is_sp(load8(src, q)) == 1 {
+                                lead = lead + 1;
+                                q = q + 1;
+                            }
+                            let bs: u32 = ms + lead;
+                            let be: u32 = trim_end(src, bs, close + 1);
+                            if be > bs {
+                                o = jl(out, o, ", \"body\": ");
+                                o = jq(out, o, src, bs, be - bs);
+                                o = jl(out, o, ", \"body_line\": ");
+                                o = jint(out, o, 0, line_at_chars(src, srcn,
+                                                                  chars_n(src, ms) + lead));
+                            }
+                        }
+                    }
+                    o = jl(out, o, "}");
+                }
+            }
+        }
+    }
+    return o;
+}
+
+/// `type X struct` -> `types`（字段全映射不上的那些**整块丢掉**，与上游同）。
+fn go_emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_gostruct(body, n, i, r) == 1 {
+        let ob: u32 = ld32(r, J_OB);
+        let ce: u32 = ld32(r, J_CE);
+        let cns: u32 = ld32(r, J_NO);
+        let cnl: u32 = ld32(r, J_NL);
+        i = ce + 1;
+        if go_fld_count(mem, ob + 1, ce) > 0 {
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, body, cns, cnl);
+            o = jl(out, o, ", \"fields\": [");
+            let fst2: u32 = 1;
+            let ls: u32 = ob + 1;
+            while ls <= ce {
+                let le: u32 = ls;
+                while le < ce && load8(body, le) != 10 {
+                    le = le + 1;
+                }
+                let s2: u32 = skip_sp(body, ls, le);
+                let e2: u32 = trim_end(body, s2, le);
+                if e2 > s2 {
+                    let nt: u32 = go_toks(mem, body, s2, e2);
+                    if nt >= 2 {
+                        let fno: u32 = ld32(ptr_add(mem, M_CMEM), 0);
+                        let fnl: u32 = ld32(ptr_add(mem, M_CMEM), 4);
+                        if is_ident(body, fno, fnl) == 1 {
+                            let ts: u32 = ld32(ptr_add(mem, M_CMEM), 12);
+                            let tl: u32 = go_type_sp(mem, body, ts, e2);
+                            if tl != 0 {
+                                if fst2 == 0 {
+                                    o = jl(out, o, ", ");
+                                }
+                                fst2 = 0;
+                                o = jl(out, o, "{\"name\": ");
+                                o = jq(out, o, body, fno, fnl);
+                                o = jl(out, o, ", \"type\": ");
+                                o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+                                o = jl(out, o, "}");
+                            }
+                        }
+                    }
+                }
+                ls = le + 1;
+            }
+            o = jl(out, o, "]}");
+            let _ka: u32 = known_add(mem, ptr_add(body, cns), cnl);
+        }
+    }
+    return o;
+}
+
+/// Go 那一门的主干（`from_go`）。抹注释**不保不住长度**：Go 没有 `#` 指令也没有
+/// 那一层字面量替换，`blank_noise` 是等长的 —— 所以 `body` 与 `src` 的下标通用，
+/// 而正文与行号都取**原文**（上游也是 `src[m.start():…]`）。
+fn build_go(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SRC);
+    let body: ptr = ptr_add(mem, M_BODY);
+    let _b: u32 = blank_noise(src, srcn, body, 0);
+    let _n: u32 = st32(ptr_add(mem, M_SC), 0, srcn);
+    let _sl: u32 = st32(ptr_add(mem, M_SC), 16, srcn);
+    let _m: u32 = st32(ptr_add(mem, M_SC), 8, 5);
+    let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let o1: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
+    let un: u32 = unit_name(mem, argp, al);
+    let idb: ptr = ptr_add(mem, M_IDENT);
+    let o2: u32 = jq(out, o1, idb, 0, un);
+    let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"go\"");
+    let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o5: u32 = go_emit_functions(mem, out, o4);
+    let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [], \"enums\": [], \"types\": [");
+    let o7: u32 = go_emit_types(mem, out, o6);
+    let o8: u32 = jl(out, o7, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    return o8;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
@@ -2999,6 +3627,18 @@ fn _start() -> u32 {
         o1 = oc;
         a1 = ptr_add(cb, oc);
     }
+    if l1 == 4 && eq(a1, 0, "--go") == 1 {
+        mode = 5;
+        let lg: u32 = arg_at(cb, tot, 2, ap);
+        let og: u32 = ld32(ap, 0);
+        if lg == 0 {
+            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go] <src>
+");
+        }
+        l1 = lg;
+        o1 = og;
+        a1 = ptr_add(cb, og);
+    }
     if l1 == 6 && eq(a1, 0, "--java") == 1 {
         mode = 3;
         let lj: u32 = arg_at(cb, tot, 2, ap);
@@ -3031,7 +3671,9 @@ fn _start() -> u32 {
     let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
     syscall4(3, jf as u64, 0, 0);
     let o: u32 = 0;
-    if mode == 3 || mode == 4 {
+    if mode == 5 {
+        o = build_go(mem, srcn as u32, pp, l1);
+    } else if mode == 3 || mode == 4 {
         o = build_class(mem, srcn as u32, pp, l1, mode);
     } else {
         o = build(mem, srcn as u32, pp, l1);

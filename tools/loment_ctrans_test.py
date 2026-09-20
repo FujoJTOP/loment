@@ -822,6 +822,99 @@ def test_lompotc_twin_matches_from_csharp():
               f"产出的对象逐字节相同")
 
 
+#: Go 那一门自己带的输入。上游是**正则派**（`_GO_STRUCT` / `_GO_FN` / `_GO_EXPORT`），
+#: 每一份钉住一条与别门不同的规则 —— 尤其是 `struct` 的体**不是**花括号配平出来的、
+#: 形参的**分组写法**、以及 `//export` 才记 `abi` 且**不带正文**。
+_GO_BATTERY = {
+    # ---- 函数：形状、返回类型、正文与行号
+    "go_simple": "package main\n\nfunc f(n int) int {\n\treturn n\n}\n",
+    "go_noret": "package main\n\nfunc f() {\n}\n",
+    "go_noparam": "package main\n\nfunc f() int {\n\treturn 1\n}\n",
+    "go_ptr_ret": "package main\n\nfunc f(p *int) *int {\n\treturn p\n}\n",
+    "go_slice_ret": "package main\n\nfunc f() []int {\n\treturn nil\n}\n",
+    "go_multi_ret": "package main\n\nfunc f() (int, error) {\n\treturn 0, nil\n}\n",
+    "go_named_ret": "package main\n\nfunc f() (n int) {\n\treturn 1\n}\n",
+    "go_variadic": "package main\n\nfunc f(xs ...int) {\n}\n",
+    "go_receiver": "package main\n\ntype T struct {\n\tx int\n}\n\nfunc (t T) M() int {\n\treturn t.x\n}\n",
+    "go_allman_brace": "package main\n\nfunc f() int\n{\n\treturn 1\n}\n",
+    "go_bad_param": "package main\n\nfunc f(x func(int) int) {\n}\n",
+    # ---- 形参：**分组写法**（Go 里极常见）
+    "go_group": "package main\n\nfunc f(a, b int) int {\n\treturn a\n}\n",
+    "go_group_mixed": ("package main\n\nfunc f(a, b int, c string, d bool) int {\n"
+                        "\treturn a\n}\n"),
+    "go_group_only_names": "package main\n\nfunc f(a, b) {\n}\n",
+    "go_group_unknown": "package main\n\nfunc f(a, b float64) int {\n\treturn 0\n}\n",
+    "go_known_type_param": ("package main\n\ntype P struct {\n\tx int\n}\n\n"
+                            "func f(p P) int {\n\treturn p.x\n}\n"),
+    # ---- `//export`：**源码显式宣称的 C ABI**，记 abi 且**不带正文**
+    "go_export": "package main\n\n//export add\nfunc add(a, b int) int {\n\treturn a\n}\n",
+    "go_export_other": "package main\n\n//export other\nfunc add(a int) int {\n\treturn a\n}\n",
+    "go_export_prefix": "package main\n\n//export adder\nfunc add(a int) int {\n\treturn a\n}\n",
+    # ---- struct：体的终点是**第一个以 `}` 起头的行**（不是配平）
+    "go_struct": "package main\n\ntype P struct {\n\tx int\n\ty bool\n}\n",
+    "go_struct_one_line": "package main\n\ntype P struct {\n\tx int\n}\n",
+    "go_struct_same_line": "package main\n\ntype P struct { x int }\n",
+    "go_struct_empty": "package main\n\ntype P struct {\n}\n",
+    "go_struct_unmapped": "package main\n\ntype P struct {\n\tf float64\n}\n",
+    "go_struct_partial": "package main\n\ntype P struct {\n\tx int\n\tf float64\n\ts string\n}\n",
+    "go_struct_ptr_slice": "package main\n\ntype P struct {\n\tp *int\n\txs []int\n}\n",
+    "go_struct_comment": "package main\n\ntype P struct {\n\t// 注释行不算字段\n\tx int\n}\n",
+    "go_struct_nested": ("package main\n\ntype P struct {\n\tInner struct {\n\t\ty int\n\t}\n"
+                          "\tx int\n}\n"),
+    "go_struct_unknown_ref": "package main\n\ntype P struct {\n\tinner Q\n}\n",
+    "go_alias_ignored": "package main\n\ntype X = int\n\nfunc f(x X) X {\n\treturn x\n}\n",
+    "go_cjk_comment": ("package main\n\n/* 中文注释，函数在下面 */\n"
+                        "func f(n int) int {\n\treturn n\n}\n"),
+}
+
+
+@test
+def test_lompotc_twin_matches_from_go():
+    """**Go 那一门也在同一份孪生里**（`lompotc --go`）。
+
+    上游 `from_go` 也是**轻量解析那一派**（三条正则），但与 C/C++/Java/C# 都不同：
+    类型写在**名字后面**、条件不带括号、没有 `while`。三处必须照抄的：
+
+      * `struct` 的体**不是**花括号配平出来的 —— `(.∗?)^[ \t]*\\}` 到**第一个以 `}`
+        起头的行**为止（所以 `type P struct { x int }` 一行写完的那种**根本不匹配**，
+        而嵌套 struct 会被截在里层那个 `}` 上）；
+      * 形参的**分组写法** `func gcd(a, b int)`（Go 里极常见）：只有名字的那一段先攒着，
+        等后面 `名字 类型` 那一段把类型带过来；攒到最后还没等到 ⇒ 拒；
+      * `//export` 是**源码里显式宣称的 C ABI**（`docs/188` §3）—— 只有那种才记
+        `abi: "c"`，而且只有**没记 abi** 的才带正文（`--impl` 那条路用）。
+
+    覆盖面：`loment/gotrans/` 的语料 + `_GO_BATTERY`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "gotrans").glob("*.go")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".go", v) for k, v in sorted(_GO_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want = json.dumps(potato_from.from_go(src, name, "strict")[0],
+                              ensure_ascii=False)
+            r = subprocess.run([str(exe), "--go", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            if r.returncode != 0 or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份与 from_go 不同（前 2）:\n"
+                         + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
+                                      for n, rc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 Go：Loment 前端与 `potato_from.from_go` "
+              f"产出的对象逐字节相同")
+
+
 @test
 def test_lompotc_twin_selfhost_compiles():
     """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""
