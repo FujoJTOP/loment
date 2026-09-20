@@ -135,6 +135,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_err_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
+                 # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、
+                 # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
+                 "loment_lumtui_test",
                  "loment_lompi_test", "lompi_sync", "loment_publish",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
