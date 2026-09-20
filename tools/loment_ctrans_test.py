@@ -33,6 +33,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -447,6 +449,123 @@ def test_bitwise_not_is_loud_in_every_brace_dialect():
         else:
             raise AssertionError("前门把 `~` 放过去了（应当在这一步就拒）")
     print(f"      `~` 四门共享核都点名拒 + 给出路；前门那一处也拒")
+
+
+
+# ---------------------------------------------------------------- Loment 版（S1 第十六格）
+
+TWIN = ROOT / "loment" / "tools" / "lompotc.lomt"
+
+#: 判据自己带的那批小输入 —— 每一份钉住一条**扫描规则**（语料那五份没覆盖到的那些）：
+#: struct（含一行写完、多字段、字段是数组、字段是另一个 struct）、enum（不带值 / 带值 /
+#: 带负值）、修饰词（`static` / `inline` / `const` 形参）、指针与 `void *`、`size_t`/`uint32_t`
+#: 这类别名、全局变量（跳过）、预处理指令、注释（抹成等长空白）、只有声明的函数、
+#: 跨行的签名、`(void)`、空单元、花括号不配平、`unsigned` / `signed` 单独写。
+_BATTERY = {
+    "struct": "struct P { int a; int b; };\nint f(struct P p) { return p.a; }\n",
+    "struct_line": "struct P { int a; int b; };\n",
+    "struct_arr": "struct B { unsigned char data[64]; int n; };\n",
+    "struct_multi": "struct A { int x; };\nstruct B { struct A a; int y; };\n",
+    "enum_plain": "enum Color { RED, GREEN, BLUE };\nint f() { return RED; }\n",
+    "enum_val": "enum E { A = 3, B, C = 7 };\nint g() { return A; }\n",
+    "enum_neg": "enum E { X = -1, Y };\n",
+    "modifiers": "static int s(int a) { return a; }\ninline int i(int a) { return a; }\n",
+    "const_param": "int f(const int v) { return v; }\n",
+    "pointers": "char *name(void) { return 0; }\nvoid *raw(void) { return 0; }\n",
+    "typedef_std": "uint32_t f(size_t n) { return n; }\n",
+    "global_var": "int g = 3;\nint f() { return 1; }\n",
+    "preproc": "#include <stdio.h>\n#define X 1\nint f() { return X; }\n",
+    "comments": "// leading\nint f(int a) {\n    /* mid */ return a; // tail\n}\n",
+    "decl_only": "int helper(int x);\nint use(int x) { return helper(x); }\n",
+    "multiline_sig": "int f(\n    int a,\n    int b\n) {\n    return a;\n}\n",
+    "void_param": "int f(void) { return 1; }\n",
+    "empty_unit": "// nothing here\n",
+    "incomplete": "int f(int a) {\n    return a;\n",
+    "unsigned_variants": "unsigned f() { return 1; }\nunsigned int g() { return 2; }\nlong h() { return 3; }\n",
+    "keyword_like": "int if_like(int a) { return a; }\n",
+    "nested_braces": "int f(int a) { if (a) { return 1; } return 0; }\n",
+}
+
+
+def _twin_exe(td: Path) -> Path:
+    """把 `lompotc.lomt` 链成可执行文件（走仓库自己的原生后端，不经 clang）。
+
+    它只吃源码、只用 open/read/write/brk/exit 五个系统调用，所以能在本机**原生**跑。
+    """
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"lompotc.lomt 自己检查不过: {errs[:2]}"
+    ir = lomentc.emit_llvm(mod, ROOT, deps)
+    exe = td / ("lompotc.exe" if os.name == "nt" else "lompotc")
+    exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt" else lomelf.compile_ll(ir))[0])
+    exe.chmod(0o755)
+    return exe
+
+
+@test
+def test_lompotc_twin_matches_from_c():
+    """**C 前端有了 Loment 版**（S1 第十六格，§4.1 那根轴的第一半）。
+
+    同一份 C 源喂两边：`potato_from.from_c` 与 `lompotc.lomt`（链成可执行文件后跑），
+    比的是**产出的 Potato JSON 逐字节相同**。
+
+    **这一格比的是文本，不是数** —— 与这个文件上面那条"比数"的判据分工不同：
+    那条问"翻出来的程序跑出什么"，这条问"前端把源读成了什么"。两者都要有：
+    文本一致而数不对 = 后面的发射器错了；数对而文本不同 = 前端在自作主张。
+
+    覆盖面：`loment/ctrans/` 五份语料 + `_BATTERY` 那 22 份小输入。
+    **只有前端那一半**：`lomt_from`（Potato -> Loment 源）还没有 Loment 版，
+    所以这一格不碰它；`lompotc.lomt` 的文件头写着同一句话。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted(EX.glob("*.c")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".c", v) for k, v in sorted(_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want = json.dumps(potato_from.from_c(src, name, "strict")[0],
+                              ensure_ascii=False)
+            r = subprocess.run([str(exe), str(fp)], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", shell=False, timeout=120)
+            if r.returncode != 0 or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份与 from_c 不同（前 2）:\n"
+                         + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
+                                      for n, rc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 C：Loment 前端与 `potato_from.from_c` "
+              f"产出的对象逐字节相同")
+
+
+@test
+def test_lompotc_twin_selfhost_compiles():
+    """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 无 clang")
+        return
+    import loment_dist  # noqa: E402
+    stage1 = loment_dist.build_stage1()
+    mod = lomentc.load(TWIN)
+    deps = lomentc.resolve_deps(mod, ROOT, TWIN.parent, entry=TWIN)
+    want = lomentc.emit_llvm(mod, ROOT, deps)
+    r = subprocess.run([str(stage1), TWIN.relative_to(ROOT).as_posix()], cwd=str(ROOT),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False, timeout=600)
+    assert r.returncode == 0, f"stage1 编译 lompotc.lomt 失败: {r.stderr[-400:]}"
+    got = r.stdout.replace("\r\n", "\n")
+    assert got == want, f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)"
+    print(f"      种子自举链编译 lompotc.lomt 成功，且 IR 与参考逐字节相同 ({len(want)}B)")
 
 
 def main() -> int:

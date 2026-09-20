@@ -1,0 +1,1677 @@
+// loment/tools/lompotc.lomt — Loment 版「C 写法 -> 形式对象」前端（docs/186 / 188）
+//
+// 判据: 同一份 C 源喂本程序与 `tools/potato_from.py::from_c`, 产出的 **Potato JSON
+// 逐字节相同**（判据加在 tools/loment_ctrans_test.py）。这是 §4.1 那根轴（六门翻译器）
+// 的 **C 前端**那一半 —— 建树 + 类型映射 + 正文保真; 发射那一半（Potato -> Loment 源）
+// 在 `lomt_from.py` 里, 还没有 Loment 版。
+//
+// **这不是移植 `ctrans`**（那是 `trans_core` 的语法树那条路）—— 判据走的是
+// `potato_from.from_c -> lomt_from.emit_lomt` 这条链, 所以这一半要对着 `from_c` 移植。
+//
+// 与 `potato_from.py` 的**刻意偏离**（写在最显眼处）:
+//   1. **只吐对象，不吐报告**。`Report`（skipped / field_notes / validate_errors）判据不比,
+//      本程序就不产出它 —— 但**跳过的判定照做**: 该丢的实体一条都不能进对象。
+//   2. 上游用的是**正则**（`_C_STRUCT` / `_C_FIELD` / `_C_ENUM` / `_C_FN`），这里是手写的
+//      扫描器, 语义按那四条逐条对齐（含 `_C_FN` 那两处惰性量词）。
+//   3. 实体上限 64 / 字段上限 32 / 枚举成员上限 64 —— 语料远达不到; 超了**报错**, 不静默丢。
+//
+// 用法: `lompotc <src.c>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那一种）。
+
+module lompotc
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 尺寸
+const IN_CAP: u32 = 131072;        // 源
+const OUT_CAP: u32 = 524288;       // JSON 输出
+const NMAX: u32 = 64;              // 实体/名字上限
+const NW: u32 = 72;                // known 表一条
+const FMAX: u32 = 32;              // 一个 struct 的字段上限
+const FW: u32 = 24;                // 字段一条: name(off,len) + type(off,len) + arr(off,len)
+const MMAX: u32 = 64;              // 一个 enum 的成员上限
+const MW: u32 = 12;                // 成员一条: name(off,len) + value
+
+// ---------------------------------------------------------------- 内存布局
+const M_SRC: u32 = 0;              // IN_CAP      -> 131072
+const M_BODY: u32 = 131072;        // IN_CAP      -> 262144   （抹注释后的等长副本）
+const M_OUT: u32 = 262144;         // OUT_CAP     -> 786432
+const M_NAMES: u32 = 786432;       // NMAX*72 = 4608   -> 791040   （known: struct 名）
+const M_FLD: u32 = 791040;         // FMAX*24 = 768    -> 791808   （当前 struct 的字段）
+const M_MEMB: u32 = 791808;        // MMAX*12 = 768    -> 792576   （当前 enum 的成员）
+const M_IDENT: u32 = 792576;       // 512              -> 793088   （ident 暂存）
+const M_TYPE: u32 = 793088;        // 512              -> 793600   （类型映射暂存）
+const M_TXT: u32 = 793600;         // 512              -> 794112   （拼出来的类型串）
+const M_TXT2: u32 = 794112;        // 512              -> 794624   （参数名的副本）
+const M_R: u32 = 794624;           // 128              -> 794752   （扫描结果格）
+const M_CNST: u32 = 794752;        // 8192             -> 802944   （已发出的 const 名）
+const M_SC: u32 = 802944;          // 64               -> 803008   （标量: [0]=源长度）
+const M_CAP: u32 = 804864;
+
+// 扫描结果格（find_struct / find_enum / find_fn 共用）
+const R_NO: u32 = 0;               // 名字起点
+const R_NL: u32 = 4;               // 名字长度
+const R_IS: u32 = 8;               // 内容/参数起点
+const R_IE: u32 = 12;              // 内容/参数终点
+const R_MS: u32 = 16;              // 整段起点
+const R_ME: u32 = 20;              // 整段终点（`;` 或 `{` 之后）
+const R_BR: u32 = 24;              // 尾部是不是 `{`
+const R_RO: u32 = 28;              // 返回类型起点
+const R_RL: u32 = 32;              // 返回类型长度
+const R_TMP: u32 = 36;             // 杂项
+
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 基础
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn fail(msg: str) -> u32 {
+    let _a: u64 = write_all(2, str_ptr(msg), str_len(msg) as u64);
+    return die(1);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 字符类
+
+fn is_w(c: u32) -> u32 {
+    if c == 95 {
+        return 1;
+    }
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_id0(c: u32) -> u32 {
+    if c == 95 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_d(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `\s`（含换行）。
+fn is_sp(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 10 || c == 13 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `[ \t]`。
+fn is_ht(c: u32) -> u32 {
+    if c == 32 || c == 9 {
+        return 1;
+    }
+    return 0;
+}
+
+fn skip_sp(p: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    while j < n && is_sp(load8(p, j)) == 1 {
+        j = j + 1;
+    }
+    return j;
+}
+
+fn skip_ht(p: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    while j < n && is_ht(load8(p, j)) == 1 {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `p[off..off+len(s))` 等于字面量 `s` 吗。
+fn eq(p: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, off + i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `p[a..b)` 里有 c 吗。
+fn has_ch(p: ptr, a: u32, b: u32, c: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        if load8(p, i) == c {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn find_ch(p: ptr, a: u32, b: u32, c: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        if load8(p, i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// 子串（字面量）在 `p[a..b)` 里吗。
+fn has_sub(p: ptr, a: u32, b: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if n == 0 {
+        return 0;
+    }
+    let i: u32 = a;
+    while i + n <= b {
+        if eq(p, i, s) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 把字面量写进 `dst`（补 NUL），返回长度。
+fn put_lit(dst: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+fn copy_n(dst: ptr, dof: u32, src: ptr, sof: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, dof + i, load8(src, sof + i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*$`
+fn is_ident(p: ptr, off: u32, n: u32) -> u32 {
+    if n == 0 || is_id0(load8(p, off)) == 0 {
+        return 0;
+    }
+    let i: u32 = 1;
+    while i < n {
+        if is_w(load8(p, off + i)) == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 抹注释
+
+/// `//…` / `/*…*/` 与行首的 `#…` 抹成**等长**空白（保留换行）。长度一字不变 ——
+/// `body` 的下标要能直接回**原文**切正文（`functions[i].body` 是原文那一段）。
+fn blank_noise(src: ptr, n: u32, dst: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(src, i) as u8);
+        i = i + 1;
+    }
+    // 行首 `#` 指令（`^[ \t]*#.*$`, re.M）
+    let ln: u32 = 0;
+    let bol: u32 = 1;
+    while ln < n {
+        if bol == 1 {
+            let j: u32 = skip_ht(src, ln, n);
+            if j < n && load8(src, j) == 35 {
+                let k: u32 = j;
+                while k < n && load8(src, k) != 10 {
+                    store8(dst, k, 32 as u8);
+                    k = k + 1;
+                }
+                ln = k;
+            } else {
+                bol = 0;
+            }
+        }
+        if ln < n && load8(src, ln) == 10 {
+            bol = 1;
+        }
+        ln = ln + 1;
+    }
+    // `//…`（到行尾）与 `/*…*/`
+    let i2: u32 = 0;
+    while i2 < n {
+        let c2: u32 = load8(src, i2);
+        if c2 == 47 && i2 + 1 < n && load8(src, i2 + 1) == 47 {
+            let k2: u32 = i2;
+            while k2 < n && load8(src, k2) != 10 {
+                store8(dst, k2, 32 as u8);
+                k2 = k2 + 1;
+            }
+            i2 = k2;
+        } else if c2 == 47 && i2 + 1 < n && load8(src, i2 + 1) == 42 {
+            let k3: u32 = i2 + 2;
+            let done: u32 = 0;
+            while k3 < n && done == 0 {
+                if load8(src, k3) == 42 && k3 + 1 < n && load8(src, k3 + 1) == 47 {
+                    done = 1;
+                } else {
+                    k3 = k3 + 1;
+                }
+            }
+            let e: u32 = n;
+            if done == 1 {
+                e = k3 + 2;
+            }
+            let m: u32 = i2;
+            while m < e {
+                if load8(src, m) != 10 {
+                    store8(dst, m, 32 as u8);
+                }
+                m = m + 1;
+            }
+            i2 = e;
+        } else {
+            i2 = i2 + 1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 扫描器
+// 三条都往结果格 `r` 里写: R_NO/R_NL 名字, R_IS/R_IE 内容(或参数), R_MS/R_ME 整段,
+// R_BR 尾部是不是 `{`, R_RO/R_RL 返回类型（只有 find_fn）。
+
+/// `\bstruct\s+([A-Za-z_]\w*)\s*\{([^}]*)\}`（re.S），从 `from` 起找第一条。
+fn find_struct(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i + 7 < n {
+        if load8(body, i) == 115 && eq(body, i, "struct") == 1 {
+            let pre: u32 = 1;
+            if i > 0 && is_w(load8(body, i - 1)) == 1 {
+                pre = 0;
+            }
+            let post: u32 = 1;
+            if is_w(load8(body, i + 6)) == 1 {
+                post = 0;
+            }
+            if pre == 1 && post == 1 {
+                let j: u32 = i + 6;
+                let k: u32 = skip_sp(body, j, n);
+                if k > j && k < n && is_id0(load8(body, k)) == 1 {
+                    let e: u32 = k;
+                    while e < n && is_w(load8(body, e)) == 1 {
+                        e = e + 1;
+                    }
+                    let b: u32 = skip_sp(body, e, n);
+                    if b < n && load8(body, b) == 123 {
+                        let z: u32 = find_ch(body, b + 1, n, 125);
+                        if z != FAIL {
+                            let _a: u32 = st32(r, R_NO, k);
+                            let _b: u32 = st32(r, R_NL, e - k);
+                            let _c: u32 = st32(r, R_IS, b + 1);
+                            let _d: u32 = st32(r, R_IE, z);
+                            let _f: u32 = st32(r, R_MS, i);
+                            let _g: u32 = st32(r, R_ME, z + 1);
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `\benum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}` —— 形状与 `find_struct` 同。
+fn find_enum(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i + 5 < n {
+        if load8(body, i) == 101 && eq(body, i, "enum") == 1 {
+            let pre: u32 = 1;
+            if i > 0 && is_w(load8(body, i - 1)) == 1 {
+                pre = 0;
+            }
+            let post: u32 = 1;
+            if is_w(load8(body, i + 4)) == 1 {
+                post = 0;
+            }
+            if pre == 1 && post == 1 {
+                let j: u32 = i + 4;
+                let k: u32 = skip_sp(body, j, n);
+                if k > j && k < n && is_id0(load8(body, k)) == 1 {
+                    let e: u32 = k;
+                    while e < n && is_w(load8(body, e)) == 1 {
+                        e = e + 1;
+                    }
+                    let b: u32 = skip_sp(body, e, n);
+                    if b < n && load8(body, b) == 123 {
+                        let z: u32 = find_ch(body, b + 1, n, 125);
+                        if z != FAIL {
+                            let _a: u32 = st32(r, R_NO, k);
+                            let _b: u32 = st32(r, R_NL, e - k);
+                            let _c: u32 = st32(r, R_IS, b + 1);
+                            let _d: u32 = st32(r, R_IE, z);
+                            let _f: u32 = st32(r, R_MS, i);
+                            let _g: u32 = st32(r, R_ME, z + 1);
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `^[ \t]*(?:static\s+|inline\s+|const\s+)*([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)
+///  \s*\(([^;{)]*)\)\s*[;{]`（re.M）。两处惰性量词这样落:
+///   * `group1` 短、`\s+` 紧跟 ⇒ **掐掉尾部空白后，最后一个标识符就是名字**;
+///   * `\s*` 在 `[;{]` 之前 ⇒ `)` 之后可以跨**换行**。
+fn find_fn(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i > 0 && load8(body, i - 1) != 10 {
+            i = i + 1;
+        } else {
+            let t1: u32 = skip_ht(body, i, n);
+            // 修饰词 `(static\s+|inline\s+|const\s+)*`
+            let m: u32 = t1;
+            let going: u32 = 1;
+            while going == 1 {
+                if eq(body, m, "static") == 1 && m + 6 < n && is_sp(load8(body, m + 6)) == 1 {
+                    m = skip_sp(body, m + 6, n);
+                } else if eq(body, m, "inline") == 1 && m + 6 < n
+                        && is_sp(load8(body, m + 6)) == 1 {
+                    m = skip_sp(body, m + 6, n);
+                } else if eq(body, m, "const") == 1 && m + 5 < n
+                        && is_sp(load8(body, m + 5)) == 1 {
+                    m = skip_sp(body, m + 5, n);
+                } else {
+                    going = 0;
+                }
+            }
+            // `[\w \t\*]+` 吃到 `(`
+            let k: u32 = m;
+            while k < n && (is_w(load8(body, k)) == 1 || load8(body, k) == 32
+                            || load8(body, k) == 9 || load8(body, k) == 42) {
+                k = k + 1;
+            }
+            if k < n && load8(body, k) == 40 && k > m {
+                let e: u32 = k;
+                while e > m && (load8(body, e - 1) == 32 || load8(body, e - 1) == 9) {
+                    e = e - 1;
+                }
+                let ns: u32 = e;
+                while ns > m && is_w(load8(body, ns - 1)) == 1 {
+                    ns = ns - 1;
+                }
+                if ns > m && ns < e && is_id0(load8(body, ns)) == 1 {
+                    let g1: u32 = ns;
+                    while g1 > m && (load8(body, g1 - 1) == 32 || load8(body, g1 - 1) == 9) {
+                        g1 = g1 - 1;
+                    }
+                    if g1 > m && is_id0(load8(body, m)) == 1 && g1 < ns {
+                        let q: u32 = k + 1;
+                        let bad: u32 = 0;
+                        while q < n && load8(body, q) != 41 {
+                            let cc: u32 = load8(body, q);
+                            if cc == 59 || cc == 123 {
+                                bad = 1;
+                            }
+                            q = q + 1;
+                        }
+                        if bad == 0 && q < n && load8(body, q) == 41 {
+                            let z: u32 = skip_sp(body, q + 1, n);
+                            if z < n && (load8(body, z) == 59 || load8(body, z) == 123) {
+                                let br: u32 = 0;
+                                if load8(body, z) == 123 {
+                                    br = 1;
+                                }
+                                let _a: u32 = st32(r, R_RO, m);
+                                let _b: u32 = st32(r, R_RL, g1 - m);
+                                let _c: u32 = st32(r, R_NO, ns);
+                                let _d: u32 = st32(r, R_NL, e - ns);
+                                let _f: u32 = st32(r, R_IS, k + 1);
+                                let _g: u32 = st32(r, R_IE, q);
+                                let _h: u32 = st32(r, R_MS, i);
+                                let _j: u32 = st32(r, R_ME, z + 1);
+                                let _l: u32 = st32(r, R_BR, br);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 类型映射
+
+/// C 的类型表 `C_TYPES`。命中就把结果写进 `M_TYPE` 并返回长度。
+fn table(d: ptr, s: u32, m: u32) -> u32 {
+    if m == 7 && eq(d, s, "uint8_t") == 1 {
+        return put_lit(d, "u8");
+    }
+    if m == 8 && eq(d, s, "uint16_t") == 1 {
+        return put_lit(d, "u16");
+    }
+    if m == 8 && eq(d, s, "uint32_t") == 1 {
+        return put_lit(d, "u32");
+    }
+    if m == 8 && eq(d, s, "uint64_t") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 6 && eq(d, s, "int8_t") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 7 && eq(d, s, "int16_t") == 1 {
+        return put_lit(d, "i16");
+    }
+    if m == 7 && eq(d, s, "int32_t") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 7 && eq(d, s, "int64_t") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 13 && eq(d, s, "unsigned char") == 1 {
+        return put_lit(d, "u8");
+    }
+    if m == 14 && eq(d, s, "unsigned short") == 1 {
+        return put_lit(d, "u16");
+    }
+    if m == 12 && eq(d, s, "unsigned int") == 1 {
+        return put_lit(d, "u32");
+    }
+    if m == 13 && eq(d, s, "unsigned long") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 11 && eq(d, s, "signed char") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 5 && eq(d, s, "short") == 1 {
+        return put_lit(d, "i16");
+    }
+    if m == 3 && eq(d, s, "int") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 8 && eq(d, s, "unsigned") == 1 {
+        return put_lit(d, "u32");
+    }
+    if m == 6 && eq(d, s, "signed") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 4 && eq(d, s, "char") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 4 && eq(d, s, "long") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 6 && eq(d, s, "size_t") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 7 && eq(d, s, "ssize_t") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 4 && eq(d, s, "bool") == 1 {
+        return put_lit(d, "bool");
+    }
+    if m == 5 && eq(d, s, "_Bool") == 1 {
+        return put_lit(d, "bool");
+    }
+    if m == 4 && eq(d, s, "void") == 1 {
+        return put_lit(d, "()");
+    }
+    if m == 6 && eq(d, s, "char *") == 1 {
+        return put_lit(d, "str");
+    }
+    if m == 12 && eq(d, s, "const char *") == 1 {
+        return put_lit(d, "str");
+    }
+    if m == 6 && eq(d, s, "void *") == 1 {
+        return put_lit(d, "ptr");
+    }
+    if m == 9 && eq(d, s, "uintptr_t") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 8 && eq(d, s, "intptr_t") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 2 && eq(d, s, "u8") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "u16") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "u32") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "u64") == 1 {
+        return m;
+    }
+    if m == 2 && eq(d, s, "i8") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "i16") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "i32") == 1 {
+        return m;
+    }
+    if m == 3 && eq(d, s, "i64") == 1 {
+        return m;
+    }
+    return 0;
+}
+
+fn known_reset(mem: ptr) -> u32 {
+    return st32(ptr_add(mem, M_NAMES), 0, 0);
+}
+
+fn known_add(mem: ptr, p: ptr, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_NAMES);
+    let n: u32 = ld32(b, 0);
+    if n >= NMAX {
+        return 1;                 // 表满: 报出去, 不静默丢
+    }
+    let _a: u32 = st32(b, 4 + n * NW, l);
+    let i: u32 = 0;
+    while i < l {
+        store8(b, 4 + n * NW + 4 + i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    let _b: u32 = st32(b, 0, n + 1);
+    return 0;
+}
+
+fn known_find(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_NAMES);
+    let n: u32 = ld32(b, 0);
+    let k: u32 = 0;
+    while k < n {
+        if ld32(b, 4 + k * NW) == l {
+            let i: u32 = 0;
+            let same: u32 = 1;
+            while i < l {
+                if load8(b, 4 + k * NW + 4 + i) != load8(p, off + i) {
+                    same = 0;
+                }
+                i = i + 1;
+            }
+            if same == 1 {
+                return 1;
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// `_c_type`: 归一化空白 -> 剥前置限定词 -> `[]`->` *` -> `enum X`->`i32` -> 查表 ->
+/// `T *` -> 已声明的 struct 名。命中写进 `M_TYPE` 返回长度; 无映射返回 0。
+fn ctype(mem: ptr, tp: ptr, tl: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_TYPE);
+    let a: u32 = 0;
+    let b: u32 = tl;
+    while a < b && is_sp(load8(tp, a)) == 1 {
+        a = a + 1;
+    }
+    while b > a && is_sp(load8(tp, b - 1)) == 1 {
+        b = b - 1;
+    }
+    let o: u32 = 0;
+    let sp: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(tp, i);
+        if is_sp(c) == 1 {
+            sp = 1;
+        } else {
+            if sp == 1 && o > 0 {
+                store8(d, o, 32 as u8);
+                o = o + 1;
+            }
+            sp = 0;
+            store8(d, o, c as u8);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    store8(d, o, 0 as u8);
+    // 剥前置限定词（可反复）
+    let s: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        going = 0;
+        if o - s > 6 && eq(d, s, "const ") == 1 {
+            s = s + 6;
+            going = 1;
+        } else if o - s > 9 && eq(d, s, "volatile ") == 1 {
+            s = s + 9;
+            going = 1;
+        } else if o - s > 7 && eq(d, s, "static ") == 1 {
+            s = s + 7;
+            going = 1;
+        } else if o - s > 9 && eq(d, s, "register ") == 1 {
+            s = s + 9;
+            going = 1;
+        }
+    }
+    let m: u32 = o - s;
+    if m >= 2 && load8(d, s + m - 2) == 91 && load8(d, s + m - 1) == 93 {
+        store8(d, s + m - 2, 32 as u8);
+        store8(d, s + m - 1, 42 as u8);
+    }
+    if m > 5 && eq(d, s, "enum ") == 1 {
+        return put_lit(d, "i32");
+    }
+    let r: u32 = table(d, s, m);
+    if r > 0 {
+        return r;
+    }
+    if m >= 1 && load8(d, s + m - 1) == 42 {
+        let base: ptr = ptr_add(d, s);
+        let bl: u32 = m - 1;
+        let bb: u32 = bl;
+        while bb > 0 && is_sp(load8(base, bb - 1)) == 1 {
+            bb = bb - 1;
+        }
+        if bb == 4 && eq(base, 0, "char") == 1 {
+            return put_lit(d, "str");
+        }
+        return put_lit(d, "ptr");
+    }
+    if known_find(mem, d, s, m) == 1 {
+        let k: u32 = 0;
+        while k < m {
+            store8(d, k, load8(d, s + k) as u8);
+            k = k + 1;
+        }
+        store8(d, m, 0 as u8);
+        return m;
+    }
+    return 0;
+}
+
+/// `_ident`: 非 `[A-Za-z0-9_]` 换 `_`; 首字符不合法就前置 `_`; 过不了 IDENT_RE 用 `fb`。
+/// 写进 `M_IDENT`，返回长度。
+fn ident_of(mem: ptr, p: ptr, off: u32, ln: u32, fb: str) -> u32 {
+    let d: ptr = ptr_add(mem, M_IDENT);
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < ln && o < 500 {
+        let c: u32 = load8(p, off + i);
+        if is_w(c) == 1 {
+            store8(d, o, c as u8);
+        } else {
+            store8(d, o, 95 as u8);
+        }
+        o = o + 1;
+        i = i + 1;
+    }
+    if o == 0 || is_id0(load8(d, 0)) == 0 {
+        let k: u32 = o;
+        while k > 0 {
+            store8(d, k, load8(d, k - 1) as u8);
+            k = k - 1;
+        }
+        store8(d, 0, 95 as u8);
+        o = o + 1;
+    }
+    if is_ident(d, 0, o) == 0 {
+        return put_lit(d, fb);
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- JSON 发射
+
+fn jl(out: ptr, o: u32, s: str) -> u32 {
+    return json_emit_lit(out, o, s);
+}
+
+fn jq(out: ptr, o: u32, p: ptr, off: u32, n: u32) -> u32 {
+    return json_emit_str(out, o, ptr_add(p, off), n);
+}
+
+/// 原样拷进输出（已经在一个 JSON 串里时用；类型名与数字里不会有要转义的字符）。
+fn jraw(out: ptr, o: u32, p: ptr, off: u32, n: u32) -> u32 {
+    let _c: u32 = copy_n(out, o, p, off, n);
+    return o + n;
+}
+
+/// 带符号的整数（`consts[].value` 可以是负的）。
+fn jint(out: ptr, o: u32, neg: u32, v: u32) -> u32 {
+    if neg == 1 {
+        store8(out, o, 45 as u8);
+        o = o + 1;
+    }
+    return json_emit_u32(out, o, v);
+}
+
+/// `{` 配对（`_block_end`）。注意调用方已经先把注释字符串抹掉了。
+fn block_end(p: ptr, open: u32, n: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = open;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 123 {
+            d = d + 1;
+        } else if c == 125 {
+            d = d - 1;
+            if d == 0 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// `off` 落在第几行（1 起）—— `body_line` 那一步，数的是**原文**里的换行。
+fn line_of(p: ptr, off: u32) -> u32 {
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < off {
+        if load8(p, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------- 字段扫描
+
+fn fld_no(i: u32) -> u32 {
+    return M_FLD + i * FW;
+}
+
+/// `_C_FIELD = ([^;{}]+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;` 的 finditer。
+/// 命中的字段记进 `M_FLD`（名字 + **原始**类型文本），返回条数。
+fn scan_fields(mem: ptr, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let cnt: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        // 从 i 起找 `;`（`{` `}` 在字符类之外 —— 撞上就是这一位起不可能匹配）
+        let semi: u32 = FAIL;
+        let blk: u32 = 0;
+        let k: u32 = i;
+        while k < b && semi == FAIL && blk == 0 {
+            let c: u32 = load8(body, k);
+            if c == 123 || c == 125 {
+                blk = 1;
+            } else if c == 59 {
+                semi = k;
+            }
+            k = k + 1;
+        }
+        if semi == FAIL {
+            i = i + 1;
+        } else {
+            // [i, semi) 里切出 名字 + 类型
+            let e: u32 = semi;
+            while e > i && is_sp(load8(body, e - 1)) == 1 {
+                e = e - 1;
+            }
+            // 可选的 `[ N ]`
+            let arr: u32 = 0;
+            let arrl: u32 = 0;
+            if e > i && load8(body, e - 1) == 93 {
+                let lb: u32 = find_ch(body, i, e - 1, 91);
+                if lb != FAIL {
+                    let ok: u32 = 1;
+                    let t: u32 = lb + 1;
+                    let digits: u32 = 0;
+                    while t < e - 1 {
+                        let c: u32 = load8(body, t);
+                        if is_sp(c) == 1 {
+                            t = t + 1;
+                        } else if is_d(c) == 1 {
+                            digits = digits + 1;
+                            t = t + 1;
+                        } else {
+                            ok = 0;
+                            t = t + 1;
+                        }
+                    }
+                    if ok == 1 && digits > 0 {
+                        arr = lb + 1;
+                        arrl = (e - 1) - (lb + 1);
+                        e = lb;
+                        while e > i && is_sp(load8(body, e - 1)) == 1 {
+                            e = e - 1;
+                        }
+                    }
+                }
+            }
+            // 名字 = 尾部那段标识符
+            let ns: u32 = e;
+            while ns > i && is_w(load8(body, ns - 1)) == 1 {
+                ns = ns - 1;
+            }
+            let okn: u32 = 0;
+            if ns < e && is_id0(load8(body, ns)) == 1 {
+                okn = 1;
+            }
+            if okn == 0 {
+                i = semi + 1;
+            } else {
+                // group1
+                let te: u32 = ns;
+                while te > i && is_sp(load8(body, te - 1)) == 1 {
+                    te = te - 1;
+                }
+                let nw: u32 = e - ns;
+                // 名字是保留字的那几条不算字段
+                let skipw: u32 = 0;
+                if (nw == 2 && eq(body, ns, "if") == 1) || (nw == 5 && eq(body, ns, "while") == 1)
+                        || (nw == 3 && eq(body, ns, "for") == 1)
+                        || (nw == 6 && eq(body, ns, "return") == 1) {
+                    skipw = 1;
+                }
+                if skipw == 0 && te > i && cnt < FMAX {
+                    let _a: u32 = st32(ptr_add(mem, M_FLD), cnt * FW, ns);
+                    let _b: u32 = st32(ptr_add(mem, M_FLD), cnt * FW + 4, nw);
+                    let _c: u32 = st32(ptr_add(mem, M_FLD), cnt * FW + 8, i);
+                    let _d: u32 = st32(ptr_add(mem, M_FLD), cnt * FW + 12, te - i);
+                    let _e: u32 = st32(ptr_add(mem, M_FLD), cnt * FW + 16, arr);
+                    let _f: u32 = st32(ptr_add(mem, M_FLD), cnt * FW + 20, arrl);
+                    cnt = cnt + 1;
+                }
+                i = semi + 1;
+            }
+        }
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 函数扫描与发射
+
+// ---------------------------------------------------------------- 参数切分
+
+/// 参数/字段里**最后一个 token**（名字）。起点写进 `outp`，返回长度。
+fn last_tok(p: ptr, a: u32, b: u32, outp: ptr) -> u32 {
+    let k: u32 = a;
+    let ts: u32 = 0;
+    let tl: u32 = 0;
+    while k < b {
+        let c: u32 = load8(p, k);
+        if is_sp(c) == 1 {
+            k = k + 1;
+        } else if c == 42 {
+            ts = k;
+            tl = 1;
+            k = k + 1;
+        } else {
+            let s0: u32 = k;
+            while k < b && is_sp(load8(p, k)) == 0 && load8(p, k) != 42 {
+                k = k + 1;
+            }
+            ts = s0;
+            tl = k - s0;
+        }
+    }
+    let _a: u32 = st32(outp, 0, ts);
+    return tl;
+}
+
+/// 名字之前那些 token 用**单个空格**连起来（`" ".join(parts[:-1])`，`*` 自成一 token）。
+/// 结果写进 `dst`，返回长度。
+fn type_text(p: ptr, a: u32, b: u32, dst: ptr) -> u32 {
+    let k: u32 = a;
+    let o: u32 = 0;
+    let cnt: u32 = 0;
+    while k < b && o < 400 {
+        let c: u32 = load8(p, k);
+        if is_sp(c) == 1 {
+            k = k + 1;
+        } else if c == 42 {
+            if cnt > 0 {
+                store8(dst, o, 32 as u8);
+                o = o + 1;
+            }
+            store8(dst, o, 42 as u8);
+            o = o + 1;
+            cnt = cnt + 1;
+            k = k + 1;
+        } else {
+            let s0: u32 = k;
+            while k < b && is_sp(load8(p, k)) == 0 && load8(p, k) != 42 {
+                k = k + 1;
+            }
+            if cnt > 0 {
+                store8(dst, o, 32 as u8);
+                o = o + 1;
+            }
+            let q: u32 = s0;
+            while q < k {
+                store8(dst, o, load8(p, q) as u8);
+                o = o + 1;
+                q = q + 1;
+            }
+            cnt = cnt + 1;
+        }
+    }
+    // 掐掉**最后一个 token**（连同它前面那个空格）
+    let cut: u32 = o;
+    while cut > 0 && load8(dst, cut - 1) != 32 {
+        cut = cut - 1;
+    }
+    if cut > 0 {
+        cut = cut - 1;
+    }
+    return cut;
+}
+
+/// `f[j]` 那段参数是不是坏的（`_C_FUNCTION` 那一步的跳过条件）。
+/// 返回 1 = 好，0 = 这条函数要跳过。
+fn params_ok(mem: ptr, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = p;
+        while s2 < se && is_sp(load8(body, s2)) == 1 {
+            s2 = s2 + 1;
+        }
+        let e2: u32 = se;
+        while e2 > s2 && is_sp(load8(body, e2 - 1)) == 1 {
+            e2 = e2 - 1;
+        }
+        if e2 > s2 {
+            let isv: u32 = 0;
+            if e2 - s2 == 4 && eq(body, s2, "void") == 1 {
+                isv = 1;
+            }
+            if isv == 0 {
+                let sp0: ptr = ptr_add(mem, M_R + 40);
+                let nln: u32 = last_tok(body, s2, e2, sp0);
+                let tbuf: ptr = ptr_add(mem, M_TXT);
+                let to: u32 = type_text(body, s2, e2, tbuf);
+                if nln == 0 || to == 0 {
+                    return 0;
+                }
+                if ctype(mem, tbuf, to) == 0 {
+                    return 0;
+                }
+            }
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return 1;
+}
+
+/// 逐条参数发 `{"name": .., "type": ..}`。调用方已确认过都合法。
+fn emit_params(mem: ptr, out: ptr, o: u32, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let first: u32 = 1;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = p;
+        while s2 < se && is_sp(load8(body, s2)) == 1 {
+            s2 = s2 + 1;
+        }
+        let e2: u32 = se;
+        while e2 > s2 && is_sp(load8(body, e2 - 1)) == 1 {
+            e2 = e2 - 1;
+        }
+        if e2 > s2 {
+            let isv: u32 = 0;
+            if e2 - s2 == 4 && eq(body, s2, "void") == 1 {
+                isv = 1;
+            }
+            if isv == 0 {
+                let sp0: ptr = ptr_add(mem, M_R + 40);
+                let nln: u32 = last_tok(body, s2, e2, sp0);
+                let nsp: u32 = ld32(sp0, 0);
+                let tbuf: ptr = ptr_add(mem, M_TXT);
+                let to: u32 = type_text(body, s2, e2, tbuf);
+                let nl: u32 = ident_of(mem, body, nsp, nln, "ax");
+                let idb: ptr = ptr_add(mem, M_IDENT);
+                let _sv: u32 = copy_n(ptr_add(mem, M_TXT2), 0, idb, 0, nl);
+                if first == 0 {
+                    o = jl(out, o, ", ");
+                }
+                first = 0;
+                o = jl(out, o, "{\"name\": ");
+                o = jq(out, o, ptr_add(mem, M_TXT2), 0, nl);
+                o = jl(out, o, ", \"type\": ");
+                let tl: u32 = ctype(mem, tbuf, to);
+                o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+                o = jl(out, o, "}");
+            }
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return o;
+}
+
+/// 一条函数能不能收（收的条件全在这儿判，**发之前**判完）。
+fn fn_ok(mem: ptr, r: ptr) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let no: u32 = ld32(r, R_NO);
+    let nl: u32 = ld32(r, R_NL);
+    if (nl == 2 && eq(body, no, "if") == 1) || (nl == 5 && eq(body, no, "while") == 1)
+            || (nl == 3 && eq(body, no, "for") == 1)
+            || (nl == 6 && eq(body, no, "switch") == 1)
+            || (nl == 6 && eq(body, no, "return") == 1)
+            || (nl == 6 && eq(body, no, "sizeof") == 1)
+            || (nl == 2 && eq(body, no, "do") == 1) || (nl == 4 && eq(body, no, "else") == 1) {
+        return 0;
+    }
+    // 返回类型的**最后一个 token** 不能是关键字
+    let ro: u32 = ld32(r, R_RO);
+    let rl: u32 = ld32(r, R_RL);
+    let ls: u32 = ro + rl;
+    while ls > ro && is_sp(load8(body, ls - 1)) == 1 {
+        ls = ls - 1;
+    }
+    let ws: u32 = ls;
+    while ws > ro && is_sp(load8(body, ws - 1)) == 0 {
+        ws = ws - 1;
+    }
+    let wl: u32 = ls - ws;
+    if (wl == 2 && eq(body, ws, "if") == 1) || (wl == 5 && eq(body, ws, "while") == 1)
+            || (wl == 3 && eq(body, ws, "for") == 1)
+            || (wl == 6 && eq(body, ws, "switch") == 1)
+            || (wl == 6 && eq(body, ws, "return") == 1)
+            || (wl == 6 && eq(body, ws, "sizeof") == 1)
+            || (wl == 2 && eq(body, ws, "do") == 1) || (wl == 4 && eq(body, ws, "else") == 1) {
+        return 0;
+    }
+    if ctype(mem, ptr_add(body, ro), rl) == 0 {
+        return 0;
+    }
+    let is: u32 = ld32(r, R_IS);
+    let ie: u32 = ld32(r, R_IE);
+    if has_sub(body, is, ie, "...") == 1 {
+        return 0;
+    }
+    if params_ok(mem, is, ie) == 0 {
+        return 0;
+    }
+    if ld32(r, R_BR) == 1 {
+        if block_end(body, ld32(r, R_ME) - 1, ld32(ptr_add(mem, M_SC), 0)) == FAIL {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn emit_one_fn(mem: ptr, out: ptr, o: u32, r: ptr) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let src: ptr = ptr_add(mem, M_SRC);
+    o = jl(out, o, "{\"name\": ");
+    o = jq(out, o, body, ld32(r, R_NO), ld32(r, R_NL));
+    o = jl(out, o, ", \"params\": [");
+    o = emit_params(mem, out, o, ld32(r, R_IS), ld32(r, R_IE));
+    o = jl(out, o, "], \"ret\": ");
+    let rl: u32 = ctype(mem, ptr_add(body, ld32(r, R_RO)), ld32(r, R_RL));
+    o = jq(out, o, ptr_add(mem, M_TYPE), 0, rl);
+    if ld32(r, R_BR) == 1 {
+        let close: u32 = block_end(body, ld32(r, R_ME) - 1, ld32(ptr_add(mem, M_SC), 0));
+        let ms: u32 = ld32(r, R_MS);
+        // 正文要回**原文**切（`body` 是等长抹过的，下标通用）
+        let bl: u32 = close + 1 - ms;
+        let lead: u32 = 0;
+        let k: u32 = 0;
+        while k < bl && is_sp(load8(src, ms + k)) == 1 {
+            lead = lead + 1;
+            k = k + 1;
+        }
+        let tl: u32 = bl - lead;
+        let te: u32 = bl;
+        while te > lead && is_sp(load8(src, ms + te - 1)) == 1 {
+            te = te - 1;
+        }
+        let fin: u32 = te - lead;
+        o = jl(out, o, ", \"body\": ");
+        o = jq(out, o, src, ms + lead, fin);
+        o = jl(out, o, ", \"body_line\": ");
+        o = jint(out, o, 0, line_of(src, ms + lead));
+    }
+    o = jl(out, o, "}");
+    return o;
+}
+
+/// `body` 的长度在 `M_R + 4500`（`build` 里先放一次）。
+fn emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_R);
+    let i: u32 = 0;
+    let first: u32 = 1;
+    while find_fn(body, n, i, r) == 1 {
+        i = ld32(r, R_ME);
+        if fn_ok(mem, r) == 1 {
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            // `jint` 返回的是新 offset，上面那一处要接住
+            let _save: u32 = st32(ptr_add(mem, M_R), R_TMP + 4, o);
+            o = emit_one_fn(mem, out, o, r);
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 常量与枚举
+
+/// `enum` 的成员表填进 `M_MEMB`，返回条数。
+fn enum_members(mem: ptr, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let cnt: u32 = 0;
+    let nv: u32 = 0;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = p;
+        while s2 < se && is_sp(load8(body, s2)) == 1 {
+            s2 = s2 + 1;
+        }
+        let e2: u32 = se;
+        while e2 > s2 && is_sp(load8(body, e2 - 1)) == 1 {
+            e2 = e2 - 1;
+        }
+        if e2 > s2 {
+            let eqp: u32 = find_ch(body, s2, e2, 61);
+            let ok: u32 = 1;
+            let ns: u32 = s2;
+            let ne: u32 = e2;
+            if eqp != FAIL {
+                ns = s2;
+                ne = eqp;
+                while ne > ns && is_sp(load8(body, ne - 1)) == 1 {
+                    ne = ne - 1;
+                }
+                // 值必须是 `-?\d+`
+                let vs: u32 = eqp + 1;
+                while vs < e2 && is_sp(load8(body, vs)) == 1 {
+                    vs = vs + 1;
+                }
+                let neg: u32 = 0;
+                if vs < e2 && load8(body, vs) == 45 {
+                    neg = 1;
+                    vs = vs + 1;
+                }
+                let v: u32 = 0;
+                let dg: u32 = 0;
+                let t: u32 = vs;
+                while t < e2 {
+                    let c: u32 = load8(body, t);
+                    if is_d(c) == 1 {
+                        v = v * 10 + (c - 48);
+                        dg = dg + 1;
+                    } else {
+                        ok = 0;
+                    }
+                    t = t + 1;
+                }
+                if dg == 0 {
+                    ok = 0;
+                }
+                if ok == 1 {
+                    // **存两补**：`-1` 要发成 `-1`，而且下一个成员是 `0`（不是 `2`）
+                    if neg == 1 {
+                        nv = (0 as u32) - v;
+                    } else {
+                        nv = v;
+                    }
+                }
+            }
+            if is_ident(body, ns, ne - ns) == 0 {
+                ok = 0;
+            }
+            if ok == 1 && cnt < MMAX {
+                let _a: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW, ns);
+                let _b: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW + 4, ne - ns);
+                let _c: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW + 8, nv);
+                cnt = cnt + 1;
+                nv = nv + 1;
+            }
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 成员值是不是"正好等于下标"。
+fn members_are_index(mem: ptr, cnt: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cnt {
+        if ld32(ptr_add(mem, M_MEMB), i * MW + 8) != i {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 这个名字在**已经发出去的 consts** 里吗（`vn in {c["name"] ...}`）。
+fn const_seen(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_CNST);
+    let n: u32 = ld32(b, 0);
+    let k: u32 = 0;
+    while k < n {
+        if ld32(b, 8 + k * NW) == l {
+            let i: u32 = 0;
+            let same: u32 = 1;
+            while i < l {
+                if load8(b, 8 + k * NW + 4 + i) != load8(p, off + i) {
+                    same = 0;
+                }
+                i = i + 1;
+            }
+            if same == 1 {
+                return 1;
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn const_mark(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let b: ptr = ptr_add(mem, M_CNST);
+    let n: u32 = ld32(b, 0);
+    if n >= 100 {
+        return 1;
+    }
+    let _a: u32 = st32(b, 8 + n * NW, l);
+    let i: u32 = 0;
+    while i < l {
+        store8(b, 8 + n * NW + 4 + i, load8(p, off + i) as u8);
+        i = i + 1;
+    }
+    let _b: u32 = st32(b, 0, n + 1);
+    return 0;
+}
+
+/// `which` = 0 发 `consts`，1 发 `enums`。
+fn emit_enum_kind(mem: ptr, out: ptr, o: u32, which: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_R);
+    let i: u32 = 0;
+    let first: u32 = 1;
+    while find_enum(body, n, i, r) == 1 {
+        i = ld32(r, R_ME);
+        let cnt: u32 = enum_members(mem, ld32(r, R_IS), ld32(r, R_IE));
+        if cnt > 0 {
+            let is_idx: u32 = members_are_index(mem, cnt);
+            if which == 1 && is_idx == 1 {
+                if first == 0 {
+                    o = jl(out, o, ", ");
+                }
+                first = 0;
+                o = jl(out, o, "{\"name\": ");
+                o = jq(out, o, body, ld32(r, R_NO), ld32(r, R_NL));
+                o = jl(out, o, ", \"variants\": [");
+                let k: u32 = 0;
+                while k < cnt {
+                    if k > 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    let b2: ptr = ptr_add(mem, M_MEMB);
+                    o = jq(out, o, body, ld32(b2, k * MW), ld32(b2, k * MW + 4));
+                    k = k + 1;
+                }
+                o = jl(out, o, "]}");
+            } else if which == 0 && is_idx == 0 {
+                let k2: u32 = 0;
+                while k2 < cnt {
+                    let b3: ptr = ptr_add(mem, M_MEMB);
+                    let no: u32 = ld32(b3, k2 * MW);
+                    let nl: u32 = ld32(b3, k2 * MW + 4);
+                    if const_seen(mem, body, no, nl) == 0 {
+                        if first == 0 {
+                            o = jl(out, o, ", ");
+                        }
+                        first = 0;
+                        o = jl(out, o, "{\"name\": ");
+                        o = jq(out, o, body, no, nl);
+                        o = jl(out, o, ", \"type\": \"i32\", \"value\": ");
+                        let v: u32 = ld32(b3, k2 * MW + 8);
+                        let neg: u32 = 0;
+                        if v > 2147483647 {
+                            neg = 1;
+                            v = 4294967296 - v;
+                        }
+                        o = jint(out, o, neg, v);
+                        o = jl(out, o, "}");
+                        let _m: u32 = const_mark(mem, body, no, nl);
+                    }
+                    k2 = k2 + 1;
+                }
+            }
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- struct -> types
+
+/// 一个 struct 有几个字段能进对象（映射不上 / 保留字名的不算）。
+fn count_added(mem: ptr, a: u32, b: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let cnt: u32 = scan_fields(mem, a, b);
+    let got: u32 = 0;
+    let k: u32 = 0;
+    while k < cnt {
+        let f: ptr = ptr_add(mem, M_FLD);
+        let to: u32 = ld32(f, k * FW + 8);
+        let tl: u32 = ld32(f, k * FW + 12);
+        if ctype(mem, ptr_add(body, to), tl) > 0 {
+            got = got + 1;
+        }
+        k = k + 1;
+    }
+    return got;
+}
+
+fn emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_R);
+    let i: u32 = 0;
+    let first: u32 = 1;
+    while find_struct(body, n, i, r) == 1 {
+        i = ld32(r, R_ME);
+        let no: u32 = ld32(r, R_NO);
+        let nl: u32 = ld32(r, R_NL);
+        let cnt: u32 = scan_fields(mem, ld32(r, R_IS), ld32(r, R_IE));
+        // 先数一遍"能进几个"，>0 才算这个 type（上行同）
+        let got: u32 = 0;
+        let k: u32 = 0;
+        while k < cnt {
+            let f: ptr = ptr_add(mem, M_FLD);
+            if ctype(mem, ptr_add(body, ld32(f, k * FW + 8)), ld32(f, k * FW + 12)) > 0 {
+                got = got + 1;
+            }
+            k = k + 1;
+        }
+        if got > 0 {
+            let _kk: u32 = known_add(mem, ptr_add(body, no), nl);
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, body, no, nl);
+            o = jl(out, o, ", \"fields\": [");
+            let firstf: u32 = 1;
+            let j: u32 = 0;
+            while j < cnt {
+                let f2: ptr = ptr_add(mem, M_FLD);
+                let fno: u32 = ld32(f2, j * FW);
+                let fnl: u32 = ld32(f2, j * FW + 4);
+                let to: u32 = ld32(f2, j * FW + 8);
+                let tl: u32 = ld32(f2, j * FW + 12);
+                let mp: u32 = ctype(mem, ptr_add(body, to), tl);
+                if mp > 0 {
+                    if firstf == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    firstf = 0;
+                    o = jl(out, o, "{\"name\": ");
+                    o = jq(out, o, body, fno, fnl);
+                    o = jl(out, o, ", \"type\": ");
+                    // `[T; N]`：映射结果外面再套一层
+                    let aa: u32 = ld32(f2, j * FW + 16);
+                    let al2: u32 = ld32(f2, j * FW + 20);
+                    if aa > 0 {
+                        o = jl(out, o, "\"[");
+                        o = jraw(out, o, ptr_add(mem, M_TYPE), 0, mp);
+                        o = jl(out, o, "; ");
+                        let sa: u32 = aa;
+                        while sa < aa + al2 && is_sp(load8(body, sa)) == 1 {
+                            sa = sa + 1;
+                        }
+                        let sb: u32 = aa + al2;
+                        while sb > sa && is_sp(load8(body, sb - 1)) == 1 {
+                            sb = sb - 1;
+                        }
+                        o = jraw(out, o, body, sa, sb - sa);
+                        o = jl(out, o, "]\"");
+                    } else {
+                        o = jq(out, o, ptr_add(mem, M_TYPE), 0, mp);
+                    }
+                    o = jl(out, o, "}");
+                }
+                j = j + 1;
+            }
+            o = jl(out, o, "]}");
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 单元名
+
+/// `_ident(Path(name).stem)` —— argv 里的路径取 basename，再去掉最后一个后缀。
+fn unit_name(mem: ptr, argp: ptr, al: u32) -> u32 {
+    let base: u32 = 0;
+    let i: u32 = 0;
+    while i < al {
+        if load8(argp, i) == 47 || load8(argp, i) == 92 {
+            base = i + 1;
+        }
+        i = i + 1;
+    }
+    let stem: u32 = al - base;
+    let d: u32 = 0;
+    while d < stem {
+        if load8(argp, base + d) == 46 {
+            stem = d;
+        }
+        d = d + 1;
+    }
+    return ident_of(mem, argp, base, stem, "unit");
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let _b: u32 = blank_noise(ptr_add(mem, M_SRC), srcn, body);
+    let _n: u32 = st32(ptr_add(mem, M_SC), 0, srcn);
+    let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
+    let r: ptr = ptr_add(mem, M_R);
+    // known: 先按出现顺序过一遍 struct（**增量**加，与上游同）
+    let _rst: u32 = known_reset(mem);
+    let i: u32 = 0;
+    while find_struct(body, srcn, i, r) == 1 {
+        i = ld32(r, R_ME);
+        if count_added(mem, ld32(r, R_IS), ld32(r, R_IE)) > 0 {
+            let _k: u32 = known_add(mem, ptr_add(body, ld32(r, R_NO)), ld32(r, R_NL));
+        }
+    }
+    let out: ptr = ptr_add(mem, M_OUT);
+    let o: u32 = 0;
+    let o2: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
+    let un: u32 = unit_name(mem, argp, al);
+    let idb: ptr = ptr_add(mem, M_IDENT);
+    let o3: u32 = jq(out, o2, idb, 0, un);
+    let o4: u32 = jl(out, o3, ", \"language\": \"loment\", \"grammar\": \"c\", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o5: u32 = emit_functions(mem, out, o4);
+    let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
+    let o7: u32 = emit_enum_kind(mem, out, o6, 0);
+    let o8: u32 = jl(out, o7, "], \"enums\": [");
+    let o9: u32 = emit_enum_kind(mem, out, o8, 1);
+    let o10: u32 = jl(out, o9, "], \"types\": [");
+    let _rst2: u32 = known_reset(mem);
+    let o11: u32 = emit_types(mem, out, o10);
+    let o12: u32 = jl(out, o11, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    return o12;
+}
+
+/// argv 第 k 项（从 0 数）的偏移；返回长度。
+fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let s: u32 = 0;
+    let found: u32 = 0;
+    let ln: u32 = 0;
+    while i < tot {
+        if load8(buf, i) == 0 {
+            if idx == k && found == 0 {
+                let _a: u32 = st32(outp, 0, s);
+                ln = i - s;
+                found = 1;
+            }
+            idx = idx + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
+
+fn _start() -> u32 {
+    let mv: u64 = sys_alloc(M_CAP as u64);
+    if mv == 0 {
+        return fail("lompotc: brk 失败\n");
+    }
+    let mem: ptr = mv as ptr;
+    // argv[1]
+    let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        return fail("lompotc: 读不到 argv\n");
+    }
+    let cb: ptr = ptr_add(mem, M_CAP - 2048);
+    let n: u64 = read_all(fd as u64, cb, 2048);
+    syscall4(3, fd as u64, 0, 0);
+    let tot: u32 = n as u32;
+    let ap: ptr = ptr_add(mem, M_R + 64);
+    let l1: u32 = arg_at(cb, tot, 1, ap);
+    let o1: u32 = ld32(ap, 0);
+    if l1 == 0 {
+        return fail("lompotc: usage: lompotc <src.c>\n");
+    }
+    let pp: ptr = ptr_add(cb, o1);
+    store8(pp, l1, 0 as u8);
+    let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
+    if jf < 0 {
+        return fail("lompotc: 打不开源文件\n");
+    }
+    let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
+    syscall4(3, jf as u64, 0, 0);
+    let o: u32 = build(mem, srcn as u32, pp, l1);
+    let _w: u64 = write_all(1, ptr_add(mem, M_OUT), o as u64);
+    return die(0);
+}
