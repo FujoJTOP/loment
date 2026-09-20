@@ -23,6 +23,7 @@
 - [bytes](api/bytes.md)
 - [demo](api/demo.md)
 - [fuc_node](api/fuc_node.md)
+- [lumtui_demo](api/lumtui_demo.md)
 - [mathutil](api/mathutil.md)
 - [native](api/native.md)
 - [native_agg](api/native_agg.md)

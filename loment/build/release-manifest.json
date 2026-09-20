@@ -78,6 +78,10 @@
    "sha256": "b1f5f87e3596028853aa767c7ec0fc9257a5cdf00eb0d1d1edd39f81a77bfed7"
   },
   {
+   "path": "tools/loment_lumtui_test.py",
+   "sha256": "4a99107aedaae8a0dc782c8ab186d5db0593d731c8d367b253c2bbca1b2c3ac8"
+  },
+  {
    "path": "tools/loment_cli_test.py",
    "sha256": "8cdb38c640ddfa11e27484254d8d029bbb0b894cabc545c1a3cbc0b0366dad83"
   },
@@ -727,7 +731,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "885746619b5a00ab46f38224732c7f16d87a084b9986ab1298e2c2cf33979be6"
+   "sha256": "7cfee5fca96543289818f7d5cede8fb9f43423e97b7e5e9fe688537cde0ad5d8"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -918,6 +922,30 @@
    "sha256": "c2555fd7b2473730251fc8c952b10b6547eb022d4704adb8aabc6302e9dcc8ec"
   },
   {
+   "path": "loment/lib/lumtui.lomt",
+   "sha256": "bb2aad0f76edaae6976ea2ddaae8fa4268252a3819eaad28f957bd9c23883f78"
+  },
+  {
+   "path": "loment/lib/lumtui_doc.lomt",
+   "sha256": "7f86ecf96fbcd2dc4558877ee3facc2b42f4be05184e39ad1bbae95aa411bbbe"
+  },
+  {
+   "path": "loment/lib/lumtui_font.lomt",
+   "sha256": "d5214acb03dcc9fa41885ad43f97f4b6a078a8374ab6266e9e9c6c2d2958e2d6"
+  },
+  {
+   "path": "loment/lib/lumtui_layout.lomt",
+   "sha256": "242150a86849667caba7a498ed60cac245ff513e9798ea71fa2217e3cd28edfe"
+  },
+  {
+   "path": "loment/lib/lumtui_math.lomt",
+   "sha256": "cf62519f238b0c98f743435a55f95efa99a560a86e5fd3626a1e3766d6d9305a"
+  },
+  {
+   "path": "loment/lib/lumtui_paint.lomt",
+   "sha256": "370f9eb75b1cb412707034c596a34bafc358262ae1ff36b0c1fdfe168fe2ee35"
+  },
+  {
    "path": "loment/lib/mem.lomt",
    "sha256": "a8e048d913a2a5a4ecf98ad315fd6d674be68bf606a0d22df7774af33e6bc612"
   },
@@ -1091,7 +1119,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "a81b16e90aeeb8efb8b9b0ef185ddc644992634abfebc048b934a89239e845b0"
+   "sha256": "2cae1ede7b99ebf4e9d95d8da088350c9b580b2f16f509d7cf970cc81d3de263"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1344,6 +1372,10 @@
   {
    "path": "loment/examples/fuc_node.lomt",
    "sha256": "0cf1ff77713275021658b67085ee03ce31f651a778ddd4e031ee24d027e09593"
+  },
+  {
+   "path": "loment/examples/lumtui_demo.lomt",
+   "sha256": "d711b8c17b9ab6e9b7ee948dafdd3e960a506ca614a6d97020682593d0a8e70e"
   },
   {
    "path": "loment/examples/mathutil.lomt",
@@ -1730,8 +1762,12 @@
    "sha256": "df9166a9f11db9ffc35775adb34e7eb2abee41192ae0fcbb9ac5d766909b88fa"
   },
   {
+   "path": "docs/196-lumtui.md",
+   "sha256": "d5a08cae17d0919de63c9e9c61baed97dc0c6fe12590ef7526524b9869701700"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "3623832a3e3d19772f7669c084952e3b59981644049734de47bc74a6b8715f01"
+   "sha256": "396e9972e75800190f371eeb888b2c7785a5110a2440fabbb73d16eece0ed246"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -1760,6 +1796,10 @@
   {
    "path": "docs/manual/api/fuc_node.md",
    "sha256": "637c7fd6c9ca249791843d08c8d07ac868a80311dd0ac5f813b49556b5150601"
+  },
+  {
+   "path": "docs/manual/api/lumtui_demo.md",
+   "sha256": "ef1fd743babb65b4a25946ce0e4d3118a8d97abd81c36b5cc4f15f4e5ff33f64"
   },
   {
    "path": "docs/manual/api/mathutil.md",
