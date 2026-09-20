@@ -604,6 +604,126 @@ def test_lompotc_twin_matches_from_cpp():
               f"产出的对象逐字节相同")
 
 
+#: Java 那一门（`_from_class_lang`）自己带的输入。每一份钉住一条**类体切分**或
+#: **方言表**的规则 —— 语料那三份是"真程序"，这些小输入是"规则的边界"。
+_JAVA_BATTERY = {
+    # ---- 类体切分：成员只收**深度 0** 上成段的那些
+    "cls_field": ("class A {\n    public int x;\n    private String s;\n}\n"),
+    "cls_no_field": ("class A {\n    public int f() { return 1; }\n}\n"),
+    "cls_field_unknown": "class A {\n    private Foo f;\n}\n",
+    "cls_inner_class": ("class A {\n    class B {\n        public int x;\n    }\n}\n"),
+    "cls_two": ("class A {\n    public int x;\n}\nclass B {\n    public int y;\n}\n"),
+    "cls_nested_brace_field": "class A {\n    public int[] xs = {1, 2, 3};\n}\n",
+    "cls_annot": ("class A {\n    @Override\n    public int f() { return 1; }\n}\n"),
+    "cls_unbalanced": "class A {\n    public int x;\n",
+    "cls_trailing_junk": "class A {\n    public int x;\n    \n",
+    "cls_pkg_import": ("package p;\n\nimport java.util.List;\n\n"
+                       "public class A {\n    public int x;\n}\n"),
+    "cls_interface_ignored": "public interface I {\n    int f();\n}\n",
+    "cls_abstract": "public abstract class A {\n    public int x;\n}\n",
+    "cls_final": "public final class A {\n    public int x;\n}\n",
+    "cls_final_static_mods": "class A {\n    static final class B {\n        public int x;\n    }\n}\n",
+    # ---- 类型表
+    "ty_scalars": ("class A {\n    public boolean b;\n    public char c;\n    public byte y;\n"
+                   "    public short s;\n    public long l;\n    public int i;\n}\n"),
+    "ty_arrays": "class A {\n    public int[] xs;\n    public String[][] names;\n}\n",
+    "ty_generic_field": ("class A {\n    public List<String> xs;\n"
+                         "    public Map<String, int> m;\n}\n"),
+    "ty_boxed_field": "class A {\n    public Integer n;\n    public double d;\n}\n",
+    "ty_unknown_field": "class A {\n    public int ok;\n    public Foo bad;\n}\n",
+    "ty_mods": ("class A {\n    private transient int t;\n"
+                "    private volatile boolean v;\n    public static int k;\n}\n"),
+    "ty_loment_names": "class A {\n    public u32 x;\n    public i64 y;\n}\n",
+    # ---- 常量
+    "k_plain": "class A {\n    public static final int K = 7;\n}\n",
+    "k_neg": "class A {\n    static final int K = -12;\n}\n",
+    "k_zeros": "class A {\n    private static final long Z = 0000;\n}\n",
+    "k_big": "class A {\n    static final long B = 4294967296;\n}\n",
+    "k_str": "class A {\n    static final String S = \"hi\";\n}\n",
+    "k_dup": ("class A {\n    static final int K = 1;\n}\n"
+              "class B {\n    static final int K = 2;\n}\n"),
+    "k_char_const": "class A {\n    static final char C = 65;\n}\n",
+    "k_void_const": "class A {\n    static final void V = 1;\n}\n",
+    # ---- 方法
+    "m_native_semi": ("class A {\n    public native int j_native(int a);\n"
+                      "    public int x;\n}\n"),
+    "m_abstract_semi": "class A {\n    public abstract int f();\n}\n",
+    "m_ctor": ("class A {\n    public A(int v) { }\n    public int f() { return 1; }\n}\n"),
+    "m_overload_ctor": "class A {\n    A() { }\n}\n",
+    "m_void": "class A {\n    public synchronized void f() { }\n    static void g() { }\n}\n",
+    "m_multi_param": ("class A {\n    public int f(int a, String b, char c) { return a; }\n}\n"),
+    "m_bad_param": "class A {\n    public int f(int) { return 1; }\n}\n",
+    "m_final_param": "class A {\n    public int f(final int x) { return x; }\n}\n",
+    "m_generic_method": "class A {\n    public <T> T get() { return 0; }\n}\n",
+    "m_generic_ret": "class A {\n    public List<String> get() { return 0; }\n}\n",
+    "m_array_ret": "class A {\n    public int[] f(int[] a) { return a; }\n}\n",
+    "m_bad_ret": "class A {\n    public double f() { return 1; }\n}\n",
+    # ---- 字符串字面量与注释：抹它们的**顺序**（先换字面量、后抹注释）
+    "s_strlit": ("class A {\n    public int f() {\n"
+                 "        String s = \"a{b}c;\";\n        return 1;\n    }\n}\n"),
+    "s_cmt_brace": ("class A {\n    // } 这一段里的花括号不该配平\n"
+                    "    public int f() { /* { */ return 1; }\n}\n"),
+    "s_cmt_cjk": ("/* 中文注释，方法在下面 */\nclass A {\n"
+                  "    public int f(int a) {\n        return a;\n    }\n}\n"),
+    "s_strlit_cjk": ("class A {\n    public int f() {\n"
+                     "        String s = \"中文\";\n        return 1;\n    }\n}\n"),
+    # ---- 枚举
+    "e_plain": "class A {\n    public enum St { ON, OFF }\n    private St s;\n}\n",
+    "e_ctor_args": "class A {\n    enum E { A(1), B(2), C { void f() {} } }\n}\n",
+    "e_empty": "class A {\n    enum E { }\n}\n",
+    "e_after_class": "class A {\n    private St s;\n}\nenum St { ON }\n",
+    "e_public_static": ("class A {\n    public static enum E { X, Y }\n}\n"),
+    "e_trailing_comma": "class A {\n    enum E { A, B, }\n}\n",
+}
+
+
+@test
+def test_lompotc_twin_matches_from_java():
+    """**Java 那一门也有 Loment 版了**（`lompotc --java`，S1 第十六格的续）。
+
+    上游 `_from_class_lang` 是"函数住在 `class X { … }` 里"这一族的共用引擎：
+    类体按花括号**配平切成员**（深度 0 上遇 `;` 或一段完整的 `{…}` 收一个），
+    成员按 **常量 -> 方法 -> 字段** 的顺序判（方法在前是硬要求：抽象/native 方法
+    以 `;` 结尾却带参数表，反过来判就会把它们**静默丢掉**），类型走另一张表。
+
+    两处**不能想当然**的地方，这一条各钉一份：
+      * `body_line` —— 上游 `_body_at` 用的是**剥过字面量的 body** 的**字符**下标，
+        数的却是**原文**里的换行；`jtrans/*.java` 里有中文，字节与字符口径差着
+        每个多字节字符多出来的字节，`s_cmt_cjk` / `s_strlit_cjk` 就是钉这个的。
+      * `_STR_LIT` 先于 `_C_COMMENT`（字面量换成 `""` 会**改长度**），`s_strlit` 钉它。
+
+    覆盖面：`loment/jtrans/` 三份语料 + `_JAVA_BATTERY`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "loment" / "jtrans").glob("*.java")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".java", v) for k, v in sorted(_JAVA_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want = json.dumps(potato_from.from_java(src, name, "strict")[0],
+                              ensure_ascii=False)
+            r = subprocess.run([str(exe), "--java", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            if r.returncode != 0 or r.stdout != want:
+                i = 0
+                n = min(len(r.stdout), len(want))
+                while i < n and r.stdout[i] == want[i]:
+                    i += 1
+                bad.append((name, r.returncode, want[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80]))
+        assert not bad, (f"{len(bad)}/{len(cases)} 份与 from_java 不同（前 2）:\n"
+                         + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}"
+                                      for n, rc, w, g in bad[:2]))
+        print(f"      {len(cases)} 份 Java：Loment 前端与 `potato_from.from_java` "
+              f"产出的对象逐字节相同")
+
+
 @test
 def test_lompotc_twin_selfhost_compiles():
     """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""

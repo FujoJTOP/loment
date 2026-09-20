@@ -1,9 +1,9 @@
-// loment/tools/lompotc.lomt — Loment 版「C 写法 -> 形式对象」前端（docs/186 / 188）
+// loment/tools/lompotc.lomt — Loment 版「花括号写法 -> 形式对象」前端（docs/186 / 188）
 //
-// 判据: 同一份 C 源喂本程序与 `tools/potato_from.py::from_c`, 产出的 **Potato JSON
-// 逐字节相同**（判据加在 tools/loment_ctrans_test.py）。这是 §4.1 那根轴（六门翻译器）
-// 的 **C 前端**那一半 —— 建树 + 类型映射 + 正文保真; 发射那一半（Potato -> Loment 源）
-// 在 `lomt_from.py` 里, 还没有 Loment 版。
+// 判据: 同一份源喂本程序与 `tools/potato_from.py::from_c`（或 `from_cpp` / `from_java`），
+// 产出的 **Potato JSON 逐字节相同**（判据加在 tools/loment_ctrans_test.py）。这是 §4.1
+// 那根轴（六门翻译器）的**前端**那一半 —— 建树 + 类型映射 + 正文保真; 发射那一半
+// （Potato -> Loment 源）在 `lomt_from.py` 里, 还没有 Loment 版。
 //
 // **这不是移植 `ctrans`**（那是 `trans_core` 的语法树那条路）—— 判据走的是
 // `potato_from.from_c -> lomt_from.emit_lomt` 这条链, 所以这一半要对着 `from_c` 移植。
@@ -24,7 +24,14 @@
 // —— **命中就是命中，哪怕是 `None`**，后面的指针分支不再走。混了的话 `char *` 在 C++ 下
 // 会掉进指针分支被判成 `str`，而这正是那一格要拦住的猜测。
 //
-// 用法: `lompotc [--cpp] <src>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那一种）。
+// **方言**: `lompotc --java <src>` 是 Java —— 上游 `_from_class_lang` 是"函数住在
+// `class X { … }` 里"那一族的共用引擎（Java / C#），与 C 那套**不是同一批扫描器**:
+// 类体要按花括号**配平切成员**（深度 0 上遇 `;` 或一段完整的 `{…}` 收一个，末尾不成段的丢掉），
+// 类型另一张表（`char` 是**16 位无符号** ⇒ `u16`；装箱类型与 `float`/`double` 显式无映射），
+// 而且**字符串字面量先换成 `""`、抹注释在后**（那一层会**改长度** ⇒ 走 `M_SRC2` 两级）。
+// 差 C# 那一半（只差四张正则与一张类型表）与 `from_python` / `from_rust` / `from_go`。
+//
+// 用法: `lompotc [--cpp|--java] <src>` —— 对象打到 stdout（紧凑、ensure_ascii=False 那种）。
 
 module lompotc
 
@@ -40,6 +47,8 @@ const FMAX: u32 = 32;              // 一个 struct 的字段上限
 const FW: u32 = 24;                // 字段一条: name(off,len) + type(off,len) + arr(off,len)
 const MMAX: u32 = 64;              // 一个 enum 的成员上限
 const MW: u32 = 12;                // 成员一条: name(off,len) + value
+const CMAX: u32 = 128;             // 一个类体的成员上限（Java 那一门）
+const CW: u32 = 12;                // 类体成员一条: start, end, off(在类体里)
 
 // ---------------------------------------------------------------- 内存布局
 const M_SRC: u32 = 0;              // IN_CAP      -> 131072
@@ -60,7 +69,13 @@ const M_SC: u32 = 802944;          // 64               -> 803008
 // 读一次 cmdline 就把"源长度"与"模式"盖掉，症状是长文件名下 unit 名多出几个下划线、
 // 或者干脆打不开源文件。2026-09-20 在 C++ 那一门撞到）。
 const M_ARG: u32 = 803008;         // 2048             -> 805056
-const M_CAP: u32 = 805888;
+// ---- Java（`_from_class_lang`）那一半要的几块
+const M_SRC2: u32 = 805888;        // IN_CAP           -> 936960   （字面量换成 "" 的副本）
+const M_NORM: u32 = 936960;        // IN_CAP           -> 1068032  （当前成员的归一化文本）
+const M_CMEM: u32 = 1068032;       // CMAX*12          -> 1069568  （一个类体的成员表）
+const M_JS: u32 = 1069568;         // 128              -> 1069696  （Java 扫描/分类结果格）
+const M_JT: u32 = 1069696;         // 4096             -> 1073792  （类型文本暂存）
+const M_CAP: u32 = 1073920;
 
 // 扫描结果格（find_struct / find_enum / find_fn 共用）
 const R_NO: u32 = 0;               // 名字起点
@@ -73,6 +88,23 @@ const R_BR: u32 = 24;              // 尾部是不是 `{`
 const R_RO: u32 = 28;              // 返回类型起点
 const R_RL: u32 = 32;              // 返回类型长度
 const R_TMP: u32 = 36;             // 杂项
+
+// Java 那一门的扫描/分类结果格（M_JS 里）
+const J_OB: u32 = 0;               // 类体那个 `{` 的下标
+const J_CE: u32 = 4;               // 配对的 `}`；FAIL = 不配平
+const J_NO: u32 = 8;               // 类/枚举名（在 `body` 里）
+const J_NL: u32 = 12;
+const J_TS: u32 = 24;              // 分类结果: 类型 token（在 norm 里）
+const J_TL: u32 = 28;
+const J_NS: u32 = 32;              // 分类结果: 名字
+const J_NL2: u32 = 36;
+const J_PS: u32 = 40;              // 分类结果: 参数表
+const J_PL: u32 = 44;
+const J_VS: u32 = 48;              // 分类结果: 常量值的数字段
+const J_VL: u32 = 52;
+const J_VN: u32 = 56;              // 分类结果的负号
+const J_K: u32 = 60;               // jl_type 的临时（数组层数）
+const J_SP0: u32 = 64;             // last_tok 的 scratch
 
 const FAIL: u32 = 4294967295;
 
@@ -306,33 +338,38 @@ fn is_ident(p: ptr, off: u32, n: u32) -> u32 {
 
 /// `//…` / `/*…*/` 与行首的 `#…` 抹成**等长**空白（保留换行）。长度一字不变 ——
 /// `body` 的下标要能直接回**原文**切正文（`functions[i].body` 是原文那一段）。
-fn blank_noise(src: ptr, n: u32, dst: ptr) -> u32 {
+///
+/// `hashp` = 1 才抹 `#` 指令：那是 C 的预处理，**Java 没有**（`_from_class_lang`
+/// 只走 `_C_COMMENT` 那一条）。两门共用一个函数，但这一处不能共用。
+fn blank_noise(src: ptr, n: u32, dst: ptr, hashp: u32) -> u32 {
     let i: u32 = 0;
     while i < n {
         store8(dst, i, load8(src, i) as u8);
         i = i + 1;
     }
     // 行首 `#` 指令（`^[ \t]*#.*$`, re.M）
-    let ln: u32 = 0;
-    let bol: u32 = 1;
-    while ln < n {
-        if bol == 1 {
-            let j: u32 = skip_ht(src, ln, n);
-            if j < n && load8(src, j) == 35 {
-                let k: u32 = j;
-                while k < n && load8(src, k) != 10 {
-                    store8(dst, k, 32 as u8);
-                    k = k + 1;
+    if hashp == 1 {
+        let ln: u32 = 0;
+        let bol: u32 = 1;
+        while ln < n {
+            if bol == 1 {
+                let j: u32 = skip_ht(src, ln, n);
+                if j < n && load8(src, j) == 35 {
+                    let k: u32 = j;
+                    while k < n && load8(src, k) != 10 {
+                        store8(dst, k, 32 as u8);
+                        k = k + 1;
+                    }
+                    ln = k;
+                } else {
+                    bol = 0;
                 }
-                ln = k;
-            } else {
-                bol = 0;
             }
+            if ln < n && load8(src, ln) == 10 {
+                bol = 1;
+            }
+            ln = ln + 1;
         }
-        if ln < n && load8(src, ln) == 10 {
-            bol = 1;
-        }
-        ln = ln + 1;
     }
     // `//…`（到行尾）与 `/*…*/`
     let i2: u32 = 0;
@@ -902,6 +939,39 @@ fn line_of(p: ptr, off: u32) -> u32 {
     return c;
 }
 
+/// `p[0, n)` 里有几个**字符**（UTF-8 续接字节不算一个字符）。
+/// 上游拿的是 Python 字符串的**字符**下标，而这里的缓冲是**字节** ——
+/// 文件里有中文（`jtrans/*.java` 的注释就是）时两者差着"每个多字节字符多出来的字节"。
+fn chars_n(p: ptr, n: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if (load8(p, i) & 192) != 128 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// `src.count("\n", 0, off) + 1`，`off` 是**字符**下标（`_body_line` 的口径）。
+fn line_at_chars(p: ptr, n: u32, off: u32) -> u32 {
+    let c: u32 = 1;
+    let sc: u32 = 0;
+    let i: u32 = 0;
+    while i < n && sc < off {
+        let b: u32 = load8(p, i);
+        if b == 10 {
+            c = c + 1;
+        }
+        if (b & 192) != 128 {
+            sc = sc + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
 // ---------------------------------------------------------------- 字段扫描
 
 fn fld_no(i: u32) -> u32 {
@@ -1268,7 +1338,10 @@ fn emit_one_fn(mem: ptr, out: ptr, o: u32, r: ptr) -> u32 {
         o = jl(out, o, ", \"body\": ");
         o = jq(out, o, src, ms + lead, fin);
         o = jl(out, o, ", \"body_line\": ");
-        o = jint(out, o, 0, line_of(src, ms + lead));
+        // 数的是**原文**里的换行，下标却是 Python 的**字符**口径（`_body_at`）。
+        // `body` 与 `src` 等长（抹注释不长度），所以同一个字节下标两边通用。
+        o = jint(out, o, 0, line_at_chars(src, ld32(ptr_add(mem, M_SC), 0),
+                                          chars_n(src, ms) + lead));
     }
     o = jl(out, o, "}");
     return o;
@@ -1618,11 +1691,1061 @@ fn unit_name(mem: ptr, argp: ptr, al: u32) -> u32 {
     return ident_of(mem, argp, base, stem, "unit");
 }
 
+// ================================================================ Java（第三门）
+//
+// `_from_class_lang` —— "函数住在 `class X { … }` 里"那一族的共用引擎（Java / C#）。
+// 与 C 那套**不是同一批扫描器**：类体要按花括号配平切成员（深度 0 上遇 `;` 或一段完整的
+// `{…}` 收一个），类型表另一张，而且**字符串字面量先换成 `""`**（上游 `_STR_LIT.sub('""')`
+// 在前、抹注释在后）—— 那一层会**改长度**，所以这一段用 `M_SRC2 → M_BODY` 两级。
+// 对象的样子（`_blank` 那个固定键序）与 C 同一份，发射骨架照旧。
+//
+// 已接的是 Java（`--java`）。C# 只差四张正则与一张类型表，等有对照语料（`loment/cstrans/`）
+// 再接 —— 现在接就是**没有对照组**的一格。
+
+/// `_STR_LIT = "(?:[^"\\\n]|\\.)*"` 换成 `""`（**长度会变**，但不跨行 ⇒ 行号不动）。
+/// 上游靠"行号不受影响"这条（见 `_from_class_lang` 里那段注解）用 `body` 的下标回
+/// `src` 数行号，本实现照同一口径。
+fn strip_str(src: ptr, n: u32, dst: ptr) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        let c: u32 = load8(src, i);
+        if c == 34 {
+            let j: u32 = i + 1;
+            let close: u32 = FAIL;
+            let going: u32 = 1;
+            while j < n && going == 1 {
+                let cj: u32 = load8(src, j);
+                if cj == 34 {
+                    close = j;
+                    going = 0;
+                } else if cj == 10 {
+                    going = 0;
+                } else if cj == 92 && j + 1 < n && load8(src, j + 1) != 10 {
+                    j = j + 2;
+                } else if cj == 92 {
+                    going = 0;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if close != FAIL {
+                store8(dst, o, 34 as u8);
+                store8(dst, o + 1, 34 as u8);
+                o = o + 2;
+                i = close + 1;
+            } else {
+                store8(dst, o, 34 as u8);
+                o = o + 1;
+                i = i + 1;
+            }
+        } else {
+            store8(dst, o, c as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+/// 掐掉尾部空白，返回新终点。
+fn trim_end(p: ptr, a: u32, b: u32) -> u32 {
+    let e: u32 = b;
+    while e > a && is_sp(load8(p, e - 1)) == 1 {
+        e = e - 1;
+    }
+    return e;
+}
+
+/// 两段字节相等吗（不同缓冲、不同起点；`body` 里的类名与 `norm` 里的方法名要比）。
+fn same_n(p: ptr, a: u32, q: ptr, b: u32, l: u32) -> u32 {
+    let i: u32 = 0;
+    while i < l {
+        if load8(p, a + i) != load8(q, b + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `kw` + `[ \t]+`（**只收空格/制表**：上游这些地方写的是 `[ \t]+`，换行不算）。
+/// 命中返回词后第一个下标；不命中返回 `FAIL`。
+fn jm_word(p: ptr, i: u32, n: u32, kw: str) -> u32 {
+    let kl: u32 = str_len(kw);
+    if i + kl >= n {
+        return FAIL;
+    }
+    if eq(p, i, kw) == 0 {
+        return FAIL;
+    }
+    if is_ht(load8(p, i + kl)) == 0 {
+        return FAIL;
+    }
+    return skip_ht(p, i + kl, n);
+}
+
+/// 修饰词表。`which`: 0 = 常量那一个（`public|private|protected` **至多一个**），
+/// 1 = 方法那八个（可重复），2 = 字段那七个（可重复）。返回修饰词之后的第一个下标。
+fn jmods(p: ptr, i: u32, n: u32, which: u32) -> u32 {
+    let j: u32 = i;
+    if which == 0 {
+        let a: u32 = jm_word(p, j, n, "public");
+        if a != FAIL {
+            return a;
+        }
+        let b: u32 = jm_word(p, j, n, "private");
+        if b != FAIL {
+            return b;
+        }
+        let c: u32 = jm_word(p, j, n, "protected");
+        if c != FAIL {
+            return c;
+        }
+        return j;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let nx: u32 = jm_word(p, j, n, "public");
+        if nx == FAIL {
+            nx = jm_word(p, j, n, "private");
+        }
+        if nx == FAIL {
+            nx = jm_word(p, j, n, "protected");
+        }
+        if nx == FAIL {
+            nx = jm_word(p, j, n, "static");
+        }
+        if nx == FAIL {
+            nx = jm_word(p, j, n, "final");
+        }
+        if which == 1 {
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "abstract");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "native");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "synchronized");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "default");
+            }
+        } else {
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "transient");
+            }
+            if nx == FAIL {
+                nx = jm_word(p, j, n, "volatile");
+            }
+        }
+        if nx == FAIL {
+            going = 0;
+        } else {
+            j = nx;
+        }
+    }
+    return j;
+}
+
+/// 可选 `public[ \t]+`。
+fn jm_public(p: ptr, i: u32, n: u32) -> u32 {
+    let a: u32 = jm_word(p, i, n, "public");
+    if a == FAIL {
+        return i;
+    }
+    return a;
+}
+
+/// `(?:final[ \t]+|abstract[ \t]+)*`（kind=0）或 `(?:final[ \t]+|static[ \t]+)*`（kind=1）。
+fn jm_declmods(p: ptr, i: u32, n: u32, kind: u32) -> u32 {
+    let j: u32 = i;
+    let going: u32 = 1;
+    while going == 1 {
+        let nx: u32 = jm_word(p, j, n, "final");
+        if nx == FAIL && kind == 0 {
+            nx = jm_word(p, j, n, "abstract");
+        }
+        if nx == FAIL && kind == 1 {
+            nx = jm_word(p, j, n, "static");
+        }
+        if nx == FAIL {
+            going = 0;
+        } else {
+            j = nx;
+        }
+    }
+    return j;
+}
+
+/// 类/枚举那条声明：`(?:^|\n)[ \t]*(?:public[ \t]+)?(?:MOD[ \t]+)*class|enum[ \t]+NAME[^{;]*\{`
+/// （Java 的 `_JAVA_CLASS` / `_JAVA_ENUM`）。`kind`: 0 = class, 1 = enum。
+/// 命中写 `J_OB`（那个 `{`）/`J_CE`（配对的 `}`，不配平时 `FAIL`）/`J_NO`,`J_NL`（名字）。
+fn find_jdecl(body: ptr, n: u32, from: u32, r: ptr, kind: u32) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || load8(body, i - 1) == 10 {
+            let j0: u32 = skip_ht(body, i, n);
+            let j1: u32 = jm_public(body, j0, n);
+            let j2: u32 = jm_declmods(body, j1, n, kind);
+            let kl: u32 = 0;
+            let hit: u32 = 0;
+            if kind == 0 {
+                if j2 + 5 <= n && eq(body, j2, "class") == 1 {
+                    kl = 5;
+                    hit = 1;
+                }
+            } else {
+                if j2 + 4 <= n && eq(body, j2, "enum") == 1 {
+                    kl = 4;
+                    hit = 1;
+                }
+            }
+            if hit == 1 {
+                let t: u32 = j2 + kl;
+                if t < n && is_ht(load8(body, t)) == 1 {
+                    let k: u32 = skip_ht(body, t, n);
+                    if k > t && k < n && is_id0(load8(body, k)) == 1 {
+                        let e: u32 = k;
+                        while e < n && is_w(load8(body, e)) == 1 {
+                            e = e + 1;
+                        }
+                        let z: u32 = e;
+                        while z < n && load8(body, z) != 123 && load8(body, z) != 59 {
+                            z = z + 1;
+                        }
+                        if z < n && load8(body, z) == 123 {
+                            let _a: u32 = st32(r, J_OB, z);
+                            let _b: u32 = st32(r, J_NO, k);
+                            let _c: u32 = st32(r, J_NL, e - k);
+                            let _d: u32 = st32(r, J_CE, block_end(body, z, n));
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `_class_members(inner)`：类体里**顶层**的成员（深度 0 上遇 `;` 或一段完整的 `{…}` 收一个）。
+/// 成员记进 `M_CMEM`: (start, end, off)。**末尾不成段的那些丢掉**（上游也不收）。
+fn class_members(mem: ptr, body: ptr, a: u32, b: u32) -> u32 {
+    let tbl: ptr = ptr_add(mem, M_CMEM);
+    let cnt: u32 = 0;
+    let depth: u32 = 0;
+    let start: u32 = FAIL;
+    let begin: u32 = a;
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(body, i);
+        if c == 123 {
+            depth = depth + 1;
+            if depth == 1 {
+                start = i;
+            }
+        } else if c == 125 {
+            depth = depth - 1;
+            if depth == 0 && start != FAIL {
+                if cnt < CMAX {
+                    let _a: u32 = st32(tbl, cnt * CW, begin);
+                    let _b: u32 = st32(tbl, cnt * CW + 4, i + 1);
+                    let _c: u32 = st32(tbl, cnt * CW + 8, begin - a);
+                }
+                cnt = cnt + 1;
+                start = FAIL;
+                begin = i + 1;
+            }
+        } else if c == 59 && depth == 0 {
+            if cnt < CMAX {
+                let _d: u32 = st32(tbl, cnt * CW, begin);
+                let _e: u32 = st32(tbl, cnt * CW + 4, i + 1);
+                let _f: u32 = st32(tbl, cnt * CW + 8, begin - a);
+            }
+            cnt = cnt + 1;
+            begin = i + 1;
+        }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+/// `" ".join(text.split())`（写进 `dst`；原地归一化也安全 —— `o` 只会落后于 `i`）。
+fn norm_of(p: ptr, a: u32, b: u32, dst: ptr) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        if is_sp(load8(p, i)) == 1 {
+            i = i + 1;
+        } else {
+            if o > 0 {
+                store8(dst, o, 32 as u8);
+                o = o + 1;
+            }
+            while i < b && is_sp(load8(p, i)) == 0 {
+                store8(dst, o, load8(p, i) as u8);
+                o = o + 1;
+                i = i + 1;
+            }
+        }
+    }
+    return o;
+}
+
+/// 类型 token: `[A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*`。返回终点下标（配不上返回 `FAIL`）。
+/// `<…>` 配不上 `>` 时**停在 `<` 之前** —— 上游那一支是可选的，退回去之后后面必然配不上，
+/// 由调用方那一处自然失败，不是这里提前判死。
+fn jtype(p: ptr, i: u32, n: u32) -> u32 {
+    if i >= n || is_id0(load8(p, i)) == 0 {
+        return FAIL;
+    }
+    let j: u32 = i + 1;
+    while j < n && (is_w(load8(p, j)) == 1 || load8(p, j) == 46) {
+        j = j + 1;
+    }
+    if j < n && load8(p, j) == 60 {
+        let k: u32 = j + 1;
+        let went: u32 = 0;
+        while k < n && load8(p, k) != 62 {
+            k = k + 1;
+            went = 1;
+        }
+        if k < n && went == 1 {
+            j = k + 1;
+        }
+    }
+    while j + 1 < n && load8(p, j) == 91 && load8(p, j + 1) == 93 {
+        j = j + 2;
+    }
+    return j;
+}
+
+/// `_JAVA_CONST`：`^[ \t]*(?:(?:public|private|protected)[ \t]+)?static[ \t]+final[ \t]+`
+/// `([A-Za-z_][\w.]*)[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*(-?\d+)[ \t]*;`
+fn jm_const(mem: ptr, p: ptr, l: u32) -> u32 {
+    let jr: ptr = ptr_add(mem, M_JS);
+    let i0: u32 = skip_ht(p, 0, l);
+    let i1: u32 = jmods(p, i0, l, 0);
+    let a: u32 = jm_word(p, i1, l, "static");
+    if a == FAIL {
+        return 0;
+    }
+    let b: u32 = jm_word(p, a, l, "final");
+    if b == FAIL {
+        return 0;
+    }
+    if b >= l || is_id0(load8(p, b)) == 0 {
+        return 0;
+    }
+    let te: u32 = b + 1;
+    while te < l && (is_w(load8(p, te)) == 1 || load8(p, te) == 46) {
+        te = te + 1;
+    }
+    if te >= l || is_ht(load8(p, te)) == 0 {
+        return 0;
+    }
+    let ns: u32 = skip_ht(p, te, l);
+    if ns >= l || is_id0(load8(p, ns)) == 0 {
+        return 0;
+    }
+    let ne: u32 = ns + 1;
+    while ne < l && is_w(load8(p, ne)) == 1 {
+        ne = ne + 1;
+    }
+    let eqp: u32 = skip_ht(p, ne, l);
+    if eqp >= l || load8(p, eqp) != 61 {
+        return 0;
+    }
+    let vs: u32 = skip_ht(p, eqp + 1, l);
+    let neg: u32 = 0;
+    let vs2: u32 = vs;
+    if vs2 < l && load8(p, vs2) == 45 {
+        neg = 1;
+        vs = vs2 + 1;
+    }
+    let de: u32 = vs;
+    while de < l && is_d(load8(p, de)) == 1 {
+        de = de + 1;
+    }
+    if de == vs {
+        return 0;
+    }
+    let sc: u32 = skip_ht(p, de, l);
+    if sc >= l || load8(p, sc) != 59 {
+        return 0;
+    }
+    let _a: u32 = st32(jr, J_TS, b);
+    let _b: u32 = st32(jr, J_TL, te - b);
+    let _c: u32 = st32(jr, J_NS, ns);
+    let _d: u32 = st32(jr, J_NL2, ne - ns);
+    let _e: u32 = st32(jr, J_VS, vs);
+    let _f: u32 = st32(jr, J_VL, de - vs);
+    let _g: u32 = st32(jr, J_VN, neg);
+    return 1;
+}
+
+/// `_JAVA_METHOD`：`^[ \t]*((?:public|private|protected|static|final|abstract|native|`
+/// `synchronized|default)[ \t]+)*(?:<[^>]+>[ \t]+)?` 类型 `[ \t]+` 名字 `[ \t]*\(([^)]*)\)`
+fn jm_method(mem: ptr, p: ptr, l: u32) -> u32 {
+    let jr: ptr = ptr_add(mem, M_JS);
+    let i0: u32 = skip_ht(p, 0, l);
+    let i1: u32 = jmods(p, i0, l, 1);
+    let g: u32 = i1;
+    if g < l && load8(p, g) == 60 {
+        let k: u32 = g + 1;
+        let went: u32 = 0;
+        while k < l && load8(p, k) != 62 {
+            k = k + 1;
+            went = 1;
+        }
+        if k < l && went == 1 && k + 1 < l && is_ht(load8(p, k + 1)) == 1 {
+            g = skip_ht(p, k + 1, l);
+        } else {
+            return 0;
+        }
+    }
+    let ts: u32 = g;
+    let te: u32 = jtype(p, g, l);
+    if te == FAIL {
+        return 0;
+    }
+    if te >= l || is_ht(load8(p, te)) == 0 {
+        return 0;
+    }
+    let ns: u32 = skip_ht(p, te, l);
+    if ns >= l || is_id0(load8(p, ns)) == 0 {
+        return 0;
+    }
+    let ne: u32 = ns + 1;
+    while ne < l && is_w(load8(p, ne)) == 1 {
+        ne = ne + 1;
+    }
+    let ps: u32 = skip_ht(p, ne, l);
+    if ps >= l || load8(p, ps) != 40 {
+        return 0;
+    }
+    let pe: u32 = ps + 1;
+    while pe < l && load8(p, pe) != 41 {
+        pe = pe + 1;
+    }
+    if pe >= l {
+        return 0;
+    }
+    let _a: u32 = st32(jr, J_TS, ts);
+    let _b: u32 = st32(jr, J_TL, te - ts);
+    let _c: u32 = st32(jr, J_NS, ns);
+    let _d: u32 = st32(jr, J_NL2, ne - ns);
+    // `J_PS`/`J_PL` 是**参数表那一段的起止下标**（`[J_PS, J_PL)`，与 C 那套 `params_ok`
+    // 同一个口径：`b` 是终点不是长度）。空参数表时 `J_PS > J_PL` ⇒ 走一遍不发射。
+    let _e: u32 = st32(jr, J_PS, ps + 1);
+    let _f: u32 = st32(jr, J_PL, pe);
+    return 1;
+}
+
+/// `_JAVA_FIELD`：修饰词 + 类型 + 名字 + `(?:=[^;]*)?;`，**整条到底**（`$`）。
+fn jm_field(mem: ptr, p: ptr, l: u32) -> u32 {
+    let jr: ptr = ptr_add(mem, M_JS);
+    let i0: u32 = skip_ht(p, 0, l);
+    let i1: u32 = jmods(p, i0, l, 2);
+    let ts: u32 = i1;
+    let te: u32 = jtype(p, ts, l);
+    if te == FAIL {
+        return 0;
+    }
+    if te >= l || is_ht(load8(p, te)) == 0 {
+        return 0;
+    }
+    let ns: u32 = skip_ht(p, te, l);
+    if ns >= l || is_id0(load8(p, ns)) == 0 {
+        return 0;
+    }
+    let ne: u32 = ns + 1;
+    while ne < l && is_w(load8(p, ne)) == 1 {
+        ne = ne + 1;
+    }
+    let j2: u32 = skip_ht(p, ne, l);
+    let sc: u32 = j2;
+    if j2 < l && load8(p, j2) == 61 {
+        let k: u32 = j2 + 1;
+        while k < l && load8(p, k) != 59 {
+            k = k + 1;
+        }
+        if k >= l {
+            return 0;
+        }
+        sc = k;
+    }
+    if sc >= l || load8(p, sc) != 59 {
+        return 0;
+    }
+    if trim_end(p, sc + 1, l) != sc + 1 {
+        return 0;
+    }
+    let _a: u32 = st32(jr, J_TS, ts);
+    let _b: u32 = st32(jr, J_TL, te - ts);
+    let _c: u32 = st32(jr, J_NS, ns);
+    let _d: u32 = st32(jr, J_NL2, ne - ns);
+    return 1;
+}
+
+/// 判一个成员是哪一类（`_from_class_lang` 那个顺序：**常量 -> 方法 -> 字段**）。
+/// 方法必须在字段之前 —— 抽象/native 方法以 `;` 结尾却带参数表，先判字段就会把它们丢掉。
+/// 返回 1=常量, 2=方法, 3=字段, 0=不收。
+fn jclassify(mem: ptr, body: ptr, s: u32, e: u32, norm: ptr) -> u32 {
+    let l: u32 = norm_of(body, s, e, norm);
+    if jm_const(mem, norm, l) == 1 {
+        return 1;
+    }
+    if jm_method(mem, norm, l) == 1 {
+        return 2;
+    }
+    if l > 0 {
+        if load8(norm, l - 1) == 59 {
+            if jm_field(mem, norm, l) == 1 {
+                return 3;
+            }
+        }
+    }
+    return 0;
+}
+
+/// Java 那张类型表（`JAVA_TYPES`）。命中写进 `d` 返回长度；无映射返回 0。
+/// **`float`/`double` 与装箱类型（`Integer`/`Object`…）故意不在这张表里** —— 上游给的是
+/// 显式 `None`：装箱类型**可以为 null**，映成 `i32` 就把"可能没有值"丢了。
+fn jtable(d: ptr, s: ptr, m: u32) -> u32 {
+    if m == 4 && eq(s, 0, "byte") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 5 && eq(s, 0, "short") == 1 {
+        return put_lit(d, "i16");
+    }
+    if m == 3 && eq(s, 0, "int") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 4 && eq(s, 0, "long") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 4 && eq(s, 0, "void") == 1 {
+        return put_lit(d, "()");
+    }
+    if m == 4 && eq(s, 0, "char") == 1 {
+        // Java 的 `char` 是 **16 位无符号**（不是 C 的 8 位）
+        return put_lit(d, "u16");
+    }
+    if m == 7 && eq(s, 0, "boolean") == 1 {
+        return put_lit(d, "bool");
+    }
+    if m == 6 && eq(s, 0, "String") == 1 {
+        return put_lit(d, "str");
+    }
+    return 0;
+}
+
+/// `_lang_type` 里**不是数组**的那一半：known -> `<` 泛型 -> 查表。
+fn jl_atom(mem: ptr, t: ptr, tl: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_TYPE);
+    if known_find(mem, t, 0, tl) == 1 {
+        let _c: u32 = copy_n(d, 0, t, 0, tl);
+        return tl;
+    }
+    if find_ch(t, 0, tl, 60) != FAIL {
+        return 0;
+    }
+    return jtable(d, t, tl);
+}
+
+/// `_lang_type`: 归一化空白 -> `[]` 递归 -> known -> `<` 泛型 -> 查表。
+/// 命中把类型名写进 `M_TYPE` 返回长度；无映射返回 0。递归改循环（`[]` 只往后剥）。
+fn jl_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let t: ptr = ptr_add(mem, M_JT);
+    let tl: u32 = norm_of(p, off, off + l, t);
+    let k: u32 = 0;
+    while tl >= 2 && load8(t, tl - 2) == 91 && load8(t, tl - 1) == 93 {
+        k = k + 1;
+        tl = norm_of(t, 0, tl - 2, t);
+    }
+    if tl == 0 {
+        return 0;
+    }
+    let base: u32 = jl_atom(mem, t, tl);
+    if base == 0 {
+        return 0;
+    }
+    let d: ptr = ptr_add(mem, M_TYPE);
+    let bl: u32 = base;
+    let j: u32 = 0;
+    while j < k {
+        let z: u32 = bl + 2 * j;
+        let q: u32 = z;
+        while q > 0 {
+            store8(d, q, load8(d, q - 1) as u8);
+            q = q - 1;
+        }
+        store8(d, 0, 91 as u8);
+        store8(d, z + 1, 93 as u8);
+        j = j + 1;
+    }
+    return bl + 2 * k;
+}
+
+/// 参数表里每一段是不是 `类型 名字`（返回 1 = 全好）。逐段判、**不发射**。
+fn jparams_ok(mem: ptr, p: ptr, a: u32, b: u32) -> u32 {
+    let sp0: ptr = ptr_add(mem, M_JS + J_SP0);
+    let q: u32 = a;
+    while q <= b {
+        let seg: u32 = find_ch(p, q, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = skip_sp(p, q, se);
+        let e2: u32 = trim_end(p, s2, se);
+        if e2 > s2 {
+            let nl: u32 = last_tok(p, s2, e2, sp0);
+            let ns: u32 = ld32(sp0, 0);
+            if ns <= s2 {
+                return 0;
+            }
+            if is_ident(p, ns, nl) == 0 {
+                return 0;
+            }
+            if jl_type(mem, p, s2, ns - s2) == 0 {
+                return 0;
+            }
+        }
+        if seg == FAIL {
+            q = b + 1;
+        } else {
+            q = seg + 1;
+        }
+    }
+    return 1;
+}
+
+/// 逐条参数发 `{"name": .., "type": ..}`（调用方已确认都合法）。
+fn jparams_emit(mem: ptr, out: ptr, o: u32, p: ptr, a: u32, b: u32) -> u32 {
+    let sp0: ptr = ptr_add(mem, M_JS + J_SP0);
+    let first: u32 = 1;
+    let q: u32 = a;
+    while q <= b {
+        let seg: u32 = find_ch(p, q, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = skip_sp(p, q, se);
+        let e2: u32 = trim_end(p, s2, se);
+        if e2 > s2 {
+            let nl: u32 = last_tok(p, s2, e2, sp0);
+            let ns: u32 = ld32(sp0, 0);
+            let tt: u32 = jl_type(mem, p, s2, ns - s2);
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, p, ns, nl);
+            o = jl(out, o, ", \"type\": ");
+            o = jq(out, o, ptr_add(mem, M_TYPE), 0, tt);
+            o = jl(out, o, "}");
+        }
+        if seg == FAIL {
+            q = b + 1;
+        } else {
+            q = seg + 1;
+        }
+    }
+    return o;
+}
+
+/// 常量类型必须是整型（`t not in ("i8", …)`）。判的是 `M_TYPE` 里那 `tl` 个字节。
+fn is_int_type(mem: ptr, tl: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_TYPE);
+    if tl == 2 && eq(d, 0, "u8") == 1 {
+        return 1;
+    }
+    if tl == 2 && eq(d, 0, "i8") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "u16") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i16") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "u32") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i32") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "u64") == 1 {
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i64") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `inner.split(",")` 那一步的每个变体名。记进 `M_MEMB`: (off, len)；返回条数。
+/// 变体可以带构造实参（`B(1)`）与体（`C { … }`）—— 只取名字，与上游同。
+fn jenum_variants(mem: ptr, body: ptr, a: u32, b: u32) -> u32 {
+    let cnt: u32 = 0;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = skip_sp(body, p, se);
+        let e2: u32 = trim_end(body, s2, se);
+        if e2 > s2 {
+            // 第一段非空白 = `raw.strip().split()[0]`
+            let e3: u32 = s2;
+            while e3 < e2 && is_sp(load8(body, e3)) == 0 {
+                e3 = e3 + 1;
+            }
+            // 再 `.split("(")[0].split("{")[0].strip()`
+            let e4: u32 = e3;
+            let k1: u32 = find_ch(body, s2, e3, 40);
+            if k1 != FAIL {
+                e4 = k1;
+            }
+            let k2: u32 = find_ch(body, s2, e4, 123);
+            if k2 != FAIL {
+                e4 = k2;
+            }
+            let s5: u32 = skip_sp(body, s2, e4);
+            let e5: u32 = trim_end(body, s5, e4);
+            if e5 > s5 && is_ident(body, s5, e5 - s5) == 1 && cnt < MMAX {
+                let _a: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW, s5);
+                let _b: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW + 4, e5 - s5);
+                let _c: u32 = st32(ptr_add(mem, M_MEMB), cnt * MW + 8, 0);
+                cnt = cnt + 1;
+            }
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return cnt;
+}
+
+/// 枚举那一圈对 `known` 的贡献（上游在**类那一圈之前**做，且只有"有变体"的那些进 known）。
+fn jenum_known(mem: ptr) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let i: u32 = 0;
+    while find_jdecl(body, n, i, jr, 1) == 1 {
+        let ob: u32 = ld32(jr, J_OB);
+        let ce: u32 = ld32(jr, J_CE);
+        i = ob + 1;
+        if ce != FAIL {
+            if jenum_variants(mem, body, ob + 1, ce) > 0 {
+                let _k: u32 = known_add(mem, ptr_add(body, ld32(jr, J_NO)), ld32(jr, J_NL));
+            }
+        }
+    }
+    return 0;
+}
+
+/// 一个类体的成员里有几个字段能进对象（映射不上的不算）。判的时候用**当前** known。
+fn jfld_count(mem: ptr, body: ptr, ob: u32, ce: u32, norm: ptr) -> u32 {
+    let cnt: u32 = class_members(mem, body, ob, ce);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let got: u32 = 0;
+    let k: u32 = 0;
+    while k < cnt {
+        let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
+        let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
+        if jclassify(mem, body, ms, me, norm) == 3 {
+            if jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL)) != 0 {
+                got = got + 1;
+            }
+        }
+        k = k + 1;
+    }
+    return got;
+}
+
+/// 类里的方法 -> `functions`。`known` 按上游的增量顺序走：枚举先、每进一个类先补它的名字。
+fn j_emit_functions(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let norm: ptr = ptr_add(mem, M_NORM);
+    let _rst: u32 = known_reset(mem);
+    let _ek: u32 = jenum_known(mem);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_jdecl(body, n, i, jr, 0) == 1 {
+        let ob: u32 = ld32(jr, J_OB);
+        let ce: u32 = ld32(jr, J_CE);
+        let cns: u32 = ld32(jr, J_NO);
+        let cnl: u32 = ld32(jr, J_NL);
+        i = ob + 1;
+        if ce != FAIL {
+            let cnt: u32 = class_members(mem, body, ob + 1, ce);
+            if jfld_count(mem, body, ob + 1, ce, norm) > 0 {
+                let _ka: u32 = known_add(mem, ptr_add(body, cns), cnl);
+            }
+            let k: u32 = 0;
+            while k < cnt {
+                let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
+                let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
+                if jclassify(mem, body, ms, me, norm) == 2 {
+                    let mnl: u32 = ld32(jr, J_NL2);
+                    let mns: u32 = ld32(jr, J_NS);
+                    let ctor: u32 = 0;
+                    if mnl == cnl {
+                        if same_n(norm, mns, body, cns, cnl) == 1 {
+                            ctor = 1;
+                        }
+                    }
+                    if ctor == 0 {
+                        let rtl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                        if rtl != 0 {
+                            let _sv: u32 = copy_n(ptr_add(mem, M_TXT), 0, ptr_add(mem, M_TYPE), 0, rtl);
+                            if jparams_ok(mem, norm, ld32(jr, J_PS), ld32(jr, J_PL)) == 1 {
+                                if first == 0 {
+                                    o = jl(out, o, ", ");
+                                }
+                                first = 0;
+                                o = jl(out, o, "{\"name\": ");
+                                o = jq(out, o, norm, mns, mnl);
+                                o = jl(out, o, ", \"params\": [");
+                                o = jparams_emit(mem, out, o, norm, ld32(jr, J_PS), ld32(jr, J_PL));
+                                o = jl(out, o, "], \"ret\": ");
+                                o = jq(out, o, ptr_add(mem, M_TXT), 0, rtl);
+                                let lead: u32 = 0;
+                                let q: u32 = ms;
+                                while q < me && is_sp(load8(body, q)) == 1 {
+                                    lead = lead + 1;
+                                    q = q + 1;
+                                }
+                                let bs: u32 = ms + lead;
+                                let be: u32 = trim_end(body, bs, me);
+                                if be > bs {
+                                    o = jl(out, o, ", \"body\": ");
+                                    o = jq(out, o, body, bs, be - bs);
+                                    o = jl(out, o, ", \"body_line\": ");
+                                    // 上游 `_body_at(src, open_idx+1+mem_off, mem_raw)`：
+                                    // 那个下标是**剥过字面量的 body** 的（Python 的**字符**口径），
+                                    // 数的却是**原文 src** 里的换行。两件事各归各，这里照抄。
+                                    o = jint(out, o, 0,
+                                             line_at_chars(ptr_add(mem, M_SRC),
+                                                           ld32(ptr_add(mem, M_SC), 16),
+                                                           chars_n(ptr_add(mem, M_SRC2), ms) + lead));
+                                }
+                                o = jl(out, o, "}");
+                            }
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return o;
+}
+
+/// 类里的常量 -> `consts`（同名只发一次；类型必须是整型）。
+fn j_emit_consts(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let norm: ptr = ptr_add(mem, M_NORM);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_jdecl(body, n, i, jr, 0) == 1 {
+        let ob: u32 = ld32(jr, J_OB);
+        let ce: u32 = ld32(jr, J_CE);
+        i = ob + 1;
+        if ce != FAIL {
+            let cnt: u32 = class_members(mem, body, ob + 1, ce);
+            let k: u32 = 0;
+            while k < cnt {
+                let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
+                let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
+                if jclassify(mem, body, ms, me, norm) == 1 {
+                    let ns: u32 = ld32(jr, J_NS);
+                    let nl: u32 = ld32(jr, J_NL2);
+                    if const_seen(mem, norm, ns, nl) == 0 {
+                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                        if tl != 0 {
+                            if is_int_type(mem, tl) == 1 {
+                                if first == 0 {
+                                    o = jl(out, o, ", ");
+                                }
+                                first = 0;
+                                o = jl(out, o, "{\"name\": ");
+                                o = jq(out, o, norm, ns, nl);
+                                o = jl(out, o, ", \"type\": ");
+                                o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+                                o = jl(out, o, ", \"value\": ");
+                                let vs: u32 = ld32(jr, J_VS);
+                                let vl: u32 = ld32(jr, J_VL);
+                                let neg: u32 = ld32(jr, J_VN);
+                                let z0: u32 = vs;
+                                while z0 < vs + vl && load8(norm, z0) == 48 {
+                                    z0 = z0 + 1;
+                                }
+                                if z0 == vs + vl {
+                                    o = jl(out, o, "0");
+                                } else {
+                                    if neg == 1 {
+                                        o = jl(out, o, "-");
+                                    }
+                                    o = jraw(out, o, norm, z0, vs + vl - z0);
+                                }
+                                o = jl(out, o, "}");
+                                let _m: u32 = const_mark(mem, norm, ns, nl);
+                            }
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return o;
+}
+
+/// Java 的 `enum Name { A, B, C }` -> `enums`（**不是 class**，类那一圈抓不到它）。
+fn j_emit_enums(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_jdecl(body, n, i, jr, 1) == 1 {
+        let ob: u32 = ld32(jr, J_OB);
+        let ce: u32 = ld32(jr, J_CE);
+        i = ob + 1;
+        if ce != FAIL {
+            let cnt: u32 = jenum_variants(mem, body, ob + 1, ce);
+            if cnt > 0 {
+                if first == 0 {
+                    o = jl(out, o, ", ");
+                }
+                first = 0;
+                o = jl(out, o, "{\"name\": ");
+                o = jq(out, o, body, ld32(jr, J_NO), ld32(jr, J_NL));
+                o = jl(out, o, ", \"variants\": [");
+                let k: u32 = 0;
+                while k < cnt {
+                    if k > 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    o = jq(out, o, body, ld32(ptr_add(mem, M_MEMB), k * MW),
+                           ld32(ptr_add(mem, M_MEMB), k * MW + 4));
+                    k = k + 1;
+                }
+                o = jl(out, o, "]}");
+            }
+        }
+    }
+    return o;
+}
+
+/// 类 -> `types`（字段全映射不上的那些类**整类丢掉**，与上游同）。
+fn j_emit_types(mem: ptr, out: ptr, o: u32) -> u32 {
+    let body: ptr = ptr_add(mem, M_BODY);
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let jr: ptr = ptr_add(mem, M_JS);
+    let norm: ptr = ptr_add(mem, M_NORM);
+    let _rst: u32 = known_reset(mem);
+    let _ek: u32 = jenum_known(mem);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_jdecl(body, n, i, jr, 0) == 1 {
+        let ob: u32 = ld32(jr, J_OB);
+        let ce: u32 = ld32(jr, J_CE);
+        let cns: u32 = ld32(jr, J_NO);
+        let cnl: u32 = ld32(jr, J_NL);
+        i = ob + 1;
+        if ce != FAIL {
+            if jfld_count(mem, body, ob + 1, ce, norm) > 0 {
+                let cnt: u32 = class_members(mem, body, ob + 1, ce);
+                if first == 0 {
+                    o = jl(out, o, ", ");
+                }
+                first = 0;
+                o = jl(out, o, "{\"name\": ");
+                o = jq(out, o, body, cns, cnl);
+                o = jl(out, o, ", \"fields\": [");
+                let fst2: u32 = 1;
+                let k: u32 = 0;
+                while k < cnt {
+                    let ms: u32 = ld32(ptr_add(mem, M_CMEM), k * CW);
+                    let me: u32 = ld32(ptr_add(mem, M_CMEM), k * CW + 4);
+                    if jclassify(mem, body, ms, me, norm) == 3 {
+                        let tl: u32 = jl_type(mem, norm, ld32(jr, J_TS), ld32(jr, J_TL));
+                        if tl != 0 {
+                            if fst2 == 0 {
+                                o = jl(out, o, ", ");
+                            }
+                            fst2 = 0;
+                            o = jl(out, o, "{\"name\": ");
+                            o = jq(out, o, norm, ld32(jr, J_NS), ld32(jr, J_NL2));
+                            o = jl(out, o, ", \"type\": ");
+                            o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+                            o = jl(out, o, "}");
+                        }
+                    }
+                    k = k + 1;
+                }
+                o = jl(out, o, "]}");
+                let _ka: u32 = known_add(mem, ptr_add(body, cns), cnl);
+            }
+        }
+    }
+    return o;
+}
+
+/// Java 那一门的主干（`_from_class_lang`）。
+fn build_java(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SRC);
+    let src2: ptr = ptr_add(mem, M_SRC2);
+    let body: ptr = ptr_add(mem, M_BODY);
+    // ① `_STR_LIT.sub('""')`（长度变）② 再抹注释（等长）
+    let n2: u32 = strip_str(src, srcn, src2);
+    let _b: u32 = blank_noise(src2, n2, body, 0);
+    let _n: u32 = st32(ptr_add(mem, M_SC), 0, n2);
+    let _sl: u32 = st32(ptr_add(mem, M_SC), 16, srcn);
+    let _m: u32 = st32(ptr_add(mem, M_SC), 8, 3);
+    let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let o1: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
+    let un: u32 = unit_name(mem, argp, al);
+    let idb: ptr = ptr_add(mem, M_IDENT);
+    let o2: u32 = jq(out, o1, idb, 0, un);
+    let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"java\"");
+    let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o5: u32 = j_emit_functions(mem, out, o4);
+    let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
+    let o7: u32 = j_emit_consts(mem, out, o6);
+    let o8: u32 = jl(out, o7, "], \"enums\": [");
+    let o9: u32 = j_emit_enums(mem, out, o8);
+    let o10: u32 = jl(out, o9, "], \"types\": [");
+    let o11: u32 = j_emit_types(mem, out, o10);
+    let o12: u32 = jl(out, o11, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    return o12;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let body: ptr = ptr_add(mem, M_BODY);
-    let _b: u32 = blank_noise(ptr_add(mem, M_SRC), srcn, body);
+    let _b: u32 = blank_noise(ptr_add(mem, M_SRC), srcn, body, 1);
     let _n: u32 = st32(ptr_add(mem, M_SC), 0, srcn);
     let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
     let r: ptr = ptr_add(mem, M_R);
@@ -1702,16 +2825,27 @@ fn _start() -> u32 {
     let l1: u32 = arg_at(cb, tot, 1, ap);
     let o1: u32 = ld32(ap, 0);
     if l1 == 0 {
-        return fail("lompotc: usage: lompotc [--cpp] <src>\n");
+        return fail("lompotc: usage: lompotc [--cpp|--java] <src>\n");
     }
     let mode: u32 = 1;
     let a1: ptr = ptr_add(cb, o1);
+    if l1 == 6 && eq(a1, 0, "--java") == 1 {
+        mode = 3;
+        let lj: u32 = arg_at(cb, tot, 2, ap);
+        let oj: u32 = ld32(ap, 0);
+        if lj == 0 {
+            return fail("lompotc: usage: lompotc [--cpp|--java] <src>\n");
+        }
+        l1 = lj;
+        o1 = oj;
+        a1 = ptr_add(cb, oj);
+    }
     if l1 == 5 && eq(a1, 0, "--cpp") == 1 {
         mode = 2;
         let l2: u32 = arg_at(cb, tot, 2, ap);
         let o2: u32 = ld32(ap, 0);
         if l2 == 0 {
-            return fail("lompotc: usage: lompotc [--cpp] <src>\n");
+            return fail("lompotc: usage: lompotc [--cpp|--java] <src>\n");
         }
         l1 = l2;
         o1 = o2;
@@ -1726,7 +2860,12 @@ fn _start() -> u32 {
     }
     let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
     syscall4(3, jf as u64, 0, 0);
-    let o: u32 = build(mem, srcn as u32, pp, l1);
+    let o: u32 = 0;
+    if mode == 3 {
+        o = build_java(mem, srcn as u32, pp, l1);
+    } else {
+        o = build(mem, srcn as u32, pp, l1);
+    }
     let _w: u64 = write_all(1, ptr_add(mem, M_OUT), o as u64);
     return die(0);
 }
