@@ -235,6 +235,7 @@ tools/loment_cpptrans_test.py
 tools/gotrans.py
 tools/loment_gotrans_test.py
 tools/loment_lomtfrom_test.py
+tools/loment_trans_test.py
 tools/loment_grammar_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py

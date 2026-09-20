@@ -1,0 +1,3718 @@
+// loment/tools/lomtrans.lomt — Loment 版「花括号族写法 -> Loment」翻译器
+// （`docs/186` Stage A / `docs/188` §7.1 的"一份解析器 + 方言表"；判据在
+// tools/loment_trans_test.py）
+//
+// 上游是 `tools/trans_core.py`（解析器 + 语法树 + 发射器）+ 四张方言表
+// （`ctrans.py` / `cpptrans.py` / `jtrans.py` / `cstrans.py`）。**一份解析器 + 方言表**
+// 是那一族的架构（C / C++ / Java / C# 形状相同，差别全进表）：本文件照搬这个形状 ——
+// 一个扫描器、一个递归下降、一个发射器，四门的差异是**一张词表加几个开关**。
+//
+// 四门共用的一张最要紧的表：`bool` 与 `int`
+//
+//                `&&` 出什么   `if (x)` 收什么   补不补转换
+//     C / C++    int           标量即可          **两个方向都补**
+//     Java / C#  boolean       只收 boolean      **一个都不补**
+//
+// 同一处的差，按"能表达的就转、表达不出来的就报错"那条判据，两族结论相反。
+//
+// **三条不是翻译、是决定的东西**（上游文件头那条）：
+//   1. `int x;`（只声明不给值）补**零值** —— C 读未初始化变量是未定义行为。
+//   2. `for (int i = …)` 的循环变量**改名外提** —— Loment 没有裸块。
+//   3. `static` / `inline` / `const` **收下并丢掉**（标量子集里丢 `const` 是保义的）。
+//
+// 与 `trans_core.py` 的**刻意偏离**（写在最显眼处，别把"孪生"读成"全等"）:
+//   1. **只报类别，不报文案**。Python 的报错消息里插了源文本与 `repr()`，Loment 侧
+//      复现不了 —— 判据比的是**成功时的产物逐字节相同 + 失败时的退出码相同**
+//      （与第 15 格 `lompotato`、第 17 格 `lomtfrom` 同一条纪律）。退出码沿用上游：
+//      0 = 成功 / 1 = 子集外（`Unsupported`）/ 2 = 解析不过（`CError`）。
+//   2. `--tokens` / `--pre` / `--ast` 三个**调试**开关（判据不用）：分词结果、
+//      预处理后的源、语法树的 S 表达式，各打一份出来对拍 —— 翻译器出问题时
+//      先分清"是读错了还是发错了"。
+//   3. 名字表/节点表容量固定（超了**报错**，不静默丢）。
+//
+// 用法: `lomtrans --lang <c|cpp|java|csharp> [--keep a,b] [--extern f:i32] [--const K:i32] <src>`
+
+module lomtrans
+
+use bytes
+
+// ---------------------------------------------------------------- 尺寸
+const IN_CAP: u32 = 131072;        // 源
+const OUT_CAP: u32 = 262144;       // 发射出来的 Loment 源码
+const TMAX: u32 = 16384;           // 记号上限
+const NMAX: u32 = 4096;            // 语法树节点上限
+const LMAX: u32 = 16384;           // 列表项（参数表/语句块）上限
+const VMAX: u32 = 256;             // 变量/参数/常量表上限
+const FNMAX: u32 = 512;            // 函数上限
+
+// ---------------------------------------------------------------- 内存布局
+const M_SRC: u32 = 0;              // IN_CAP      -> 131072
+const M_SCR: u32 = 131072;         // IN_CAP      -> 262144  （预处理/分词的工作副本）
+const M_OUT: u32 = 262144;         // OUT_CAP     -> 524288
+const M_TOK: u32 = 524288;         // TMAX*16     -> 786432  （每记号: kind, off, len, line）
+const M_NODE: u32 = 786432;        // NMAX*32     -> 917504  （语法树节点: 8 个字）
+const M_LIST: u32 = 917504;        // LMAX*4      -> 983040  （列表项: 节点下标）
+const M_WORD: u32 = 983040;        // 32768       -> 1015808 （方言词表 blob: NUL 分隔）
+const M_NAME: u32 = 1015808;       // 65536       -> 1081344 （变量名/类型暂存）
+const M_TMP: u32 = 1081344;        // 262144      -> 1343488 （拼字符串的暂存）
+const M_FN: u32 = 1343488;         // FNMAX*32    -> 1359872 （函数表）
+const M_ARG: u32 = 1359872;        // 4096        -> 1363968 （argv）
+const M_VAR: u32 = 1364992;        // VMAX*24     -> 1371136 （变量表）
+const M_VB: u32 = 1371136;         // VMAX*128    -> 1403904 （发出去的变量名）
+const M_CN: u32 = 1403904;         // VMAX*12     -> 1406976 （常量表）
+const M_KP: u32 = 1406976;         // FNMAX*12    -> 1413120 （`--keep` 表）
+const M_EX: u32 = 1413120;         // FNMAX*16    -> 1421312 （`--extern` 表）
+const M_EXN: u32 = 1421312;        // 16384       -> 1437696 （外部名/常量名的池子）
+const M_EB: u32 = 1437696;         // 65536       -> 1503232 （拼一行的暂存）
+const M_CAP: u32 = 1503232;
+
+// 记号一条
+const TK_OFF: u32 = 0;             // 文本起点（M_SCR 里）
+const TK_LEN: u32 = 4;
+const TK_KIND: u32 = 8;            // 1 = id, 2 = num, 3 = op
+const TK_LINE: u32 = 12;
+
+// 节点一条（8 个字）
+const ND_KIND: u32 = 0;
+const ND_A: u32 = 4;
+const ND_B: u32 = 8;
+const ND_C: u32 = 12;
+const ND_D: u32 = 16;
+const ND_E: u32 = 20;
+const ND_LINE: u32 = 24;
+
+const NK_LIT: u32 = 1;
+const NK_VAR: u32 = 2;
+const NK_CALL: u32 = 3;
+const NK_UN: u32 = 4;
+const NK_BIN: u32 = 5;
+const NK_DECL: u32 = 6;
+const NK_ASSIGN: u32 = 7;
+const NK_RETURN: u32 = 8;
+const NK_IF: u32 = 9;
+const NK_WHILE: u32 = 10;
+const NK_FOR: u32 = 11;
+const NK_EXPR: u32 = 12;
+
+// 方言号
+const DL_C: u32 = 0;
+const DL_CPP: u32 = 1;
+const DL_JAVA: u32 = 2;
+const DL_CS: u32 = 3;
+
+const NONE: u32 = 0;               // "没有这个孩子"（节点下标从 1 起）
+const FAIL: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 系统调用
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let tot: u64 = 0;
+    let going: u64 = 1;
+    while going == 1 {
+        let r: i64 = syscall4(0, fd, (buf as u64) + tot, cap - tot);
+        if r <= 0 {
+            going = 0;
+        } else {
+            tot = tot + (r as u64);
+            if tot >= cap {
+                going = 0;
+            }
+        }
+    }
+    return tot;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let done: u64 = 0;
+    while done < n {
+        let r: i64 = syscall4(1, fd, (p as u64) + done, n - done);
+        if r <= 0 {
+            return done;
+        }
+        done = done + (r as u64);
+    }
+    return done;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// 报错退出：只报**类别**（文案复现不了，见文件头）＋退出码。
+fn errout(kind: str, code: u64) -> u32 {
+    let _a: u64 = wstr(2, "err ");
+    let _b: u64 = wstr(2, kind);
+    let _c: u64 = wstr(2, "\n");
+    return die(code);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn is_d(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_id0(c: u32) -> u32 {
+    if c == 95 {
+        return 1;
+    }
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_w(c: u32) -> u32 {
+    if is_id0(c) == 1 || is_d(c) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_sp(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 10 || c == 13 {
+        return 1;
+    }
+    return 0;
+}
+
+fn skip_sp(p: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b && is_sp(load8(p, i)) == 1 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn eq(p: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, off + i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn same_n(p: ptr, a: u32, q: ptr, b: u32, l: u32) -> u32 {
+    let i: u32 = 0;
+    while i < l {
+        if load8(p, a + i) != load8(q, b + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn copy_n(dst: ptr, dof: u32, src: ptr, sof: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, dof + i, load8(src, sof + i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn find_ch(p: ptr, a: u32, b: u32, c: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        if load8(p, i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// 一个十六进制/十进制的数值字面量（`int(t, 0)` 的口径，`trans_core.tokens` 只把
+/// 字面量原样收着，值在这一步算）。
+fn num_val(p: ptr, off: u32, l: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 10;
+    let i: u32 = off;
+    if l >= 2 && load8(p, off) == 48 && (load8(p, off + 1) == 120 || load8(p, off + 1) == 88) {
+        b = 16;
+        i = off + 2;
+    }
+    while i < off + l {
+        let c: u32 = load8(p, i);
+        let dv: u32 = 0;
+        if c >= 48 && c <= 57 {
+            dv = c - 48;
+        } else {
+            if c >= 97 && c <= 102 {
+                dv = c - 97 + 10;
+            } else {
+                if c >= 65 && c <= 70 {
+                    dv = c - 65 + 10;
+                }
+            }
+        }
+        v = v * b + dv;
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 方言词表
+//
+// 上游那几张 `frozenset` **一门一份**，这里做成"一门一段 NUL 分隔的词"（数据，不是
+// 代码）—— 与 Python 那几段字面量逐条对齐，加一门只加一段。
+//
+// 段头: `[0]=节点数`，随后 8 段，每段 `(起点, 长度)` 记在 M_WORD 的头 8*8 字节上。
+// 段落编号见下（与 Dialect 的字段一一对应）。
+
+const SEG_TYPES: u32 = 0;          // "源拼法=Loment" 对（见下）
+const SEG_TYPE_WORDS: u32 = 1;
+const SEG_SPEC_WORDS: u32 = 2;
+const SEG_LINKAGE: u32 = 3;
+const SEG_BAD_SPEC: u32 = 4;
+const SEG_AGG: u32 = 5;
+const SEG_KW: u32 = 6;
+const SEG_CONST_WORDS: u32 = 7;
+const SEG_LKW: u32 = 8;            // **Loment 自己的保留字**（`safe()` 查这个）
+const SEG_SAFE: u32 = 9;           // 撞上保留字时加的后缀（每门不同）
+const SEG_INTDEF: u32 = 10;        // 补转换时用的整数类型名（四门都是 `i32`）
+
+/// 把一段 NUL 分隔的词表拼进 `M_WORD`（`o` 是写入位置），返回新位置。
+fn put_words(mem: ptr, o: u32, words: str) -> u32 {
+    let d: ptr = ptr_add(mem, M_WORD);
+    let n: u32 = str_len(words);
+    let _c: u32 = copy_n(d, o, str_ptr(words), 0, n);
+    return o + n;
+}
+
+/// 词表 blob 里第 `seg` 段有没有词 `w` —— `[a, a + l)` 是它的字节。
+/// ⚠ 第 4、5 个参数是 **(偏移, 长度)**，不是 (起点, 终点)：2026-09-20 写成后者时，
+/// `[a, b)` 在 `a > b` 处会绕成一个巨大的数、循环一次都不跑 ⇒ **除偏移为 0 的那一处
+/// 外全都查不到**（第一处 spec 恰好偏移为 0，所以"第一个函数总是好的" —— 最难查的那种）。
+fn word_has(mem: ptr, seg: u32, p: ptr, a: u32, l: u32) -> u32 {
+    let st: u32 = ld32(ptr_add(mem, M_WORD), seg * 8);
+    let sl: u32 = ld32(ptr_add(mem, M_WORD), seg * 8 + 4);
+    let d: ptr = ptr_add(mem, M_WORD);
+    let i: u32 = st;
+    while i + l <= st + sl {
+        if load8(d, i + l) == 0 {
+            if l == 0 || same_n(d, i, p, a, l) == 1 {
+                return 1;
+            }
+        }
+        while i < st + sl && load8(d, i) != 0 {
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `types` 那一张：把 `[a, b)` 这段拼法查成 Loment 类型（写进 `out`，返回长度；
+/// 不在表里返回 0 —— 调用方报"类型不在子集里"）。
+fn type_of(mem: ptr, p: ptr, a: u32, b: u32, out: ptr) -> u32 {
+    let st: u32 = ld32(ptr_add(mem, M_WORD), SEG_TYPES * 8);
+    let sl: u32 = ld32(ptr_add(mem, M_WORD), SEG_TYPES * 8 + 4);
+    let d: ptr = ptr_add(mem, M_WORD);
+    let i: u32 = st;
+    let l: u32 = b - a;
+    while i < st + sl {
+        let k: u32 = i;
+        while k < st + sl && load8(d, k) != 0 {
+            k = k + 1;
+        }
+        // `拼法=类型`（等号分隔）
+        let eqp: u32 = find_ch(d, i, k, 61);
+        if eqp != FAIL && l == eqp - i && same_n(d, i, p, a, l) == 1 {
+            let tl: u32 = k - (eqp + 1);
+            let _c: u32 = copy_n(out, 0, d, eqp + 1, tl);
+            return tl;
+        }
+        i = k + 1;
+    }
+    return 0;
+}
+
+
+/// 把一段 `\n` 分隔的词表追加进 `M_WORD` 的第 `seg` 段（NUL 分隔），并把
+/// (起点, 长度) 记进段表。段表在头 128 字节（16 段），游标在 `+192`，词从 `+256` 起。
+fn seg_put(mem: ptr, seg: u32, blob: str) -> u32 {
+    let d: ptr = ptr_add(mem, M_WORD);
+    let o: u32 = ld32(d, 192);
+    let s0: u32 = o;
+    let n: u32 = str_len(blob);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(blob, i);
+        if c == 10 {
+            store8(d, o, 0 as u8);
+            o = o + 1;
+        } else {
+            store8(d, o, c as u8);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    store8(d, o, 0 as u8);
+    o = o + 1;
+    let _a: u32 = st32(d, seg * 8, s0);
+    let _b: u32 = st32(d, seg * 8 + 4, o - s0);
+    let _c: u32 = st32(d, 192, o);
+    return o;
+}
+
+fn seg_reset(mem: ptr) -> u32 {
+    return st32(ptr_add(mem, M_WORD), 192, 256);
+}
+
+/// 一门一张表：把四门的词表填进 `M_WORD`（**数据，不是代码** —— 与上游那几段
+/// 字面量逐条对齐，加一门只加一段）。
+fn init_dialect(mem: ptr, lang: u32) -> u32 {
+    let _r: u32 = seg_reset(mem);
+    if lang == DL_C {
+        let _1: u32 = seg_put(mem, SEG_TYPES, "int=i32\nunsigned=u32\nunsigned int=u32\nsigned=i32\nsigned int=i32\nlong=i64\nlong int=i64\nunsigned long=u64\nunsigned long int=u64\nvoid=()");
+        let _2: u32 = seg_put(mem, SEG_TYPE_WORDS, "int\nunsigned\nsigned\nlong\nvoid");
+        let _3: u32 = seg_put(mem, SEG_SPEC_WORDS, "int\nunsigned\nsigned\nlong\nvoid\nstatic\nconst\nextern\nregister\nvolatile\ntypedef\nstruct\nenum\nunion\nchar\nshort\nfloat\ndouble\ninline\n_Bool\nbool");
+        let _4: u32 = seg_put(mem, SEG_LINKAGE, "static\ninline\nconst");
+        let _5: u32 = seg_put(mem, SEG_BAD_SPEC, "extern\nregister\nvolatile\ntypedef");
+        let _6: u32 = seg_put(mem, SEG_AGG, "struct\nenum\nunion");
+        let _7: u32 = seg_put(mem, SEG_KW, "if\nelse\nwhile\nfor\nreturn\nbreak\ncontinue\ndo\nswitch\ncase\ndefault\ngoto\nsizeof");
+        let _8: u32 = seg_put(mem, SEG_CONST_WORDS, "");
+        let _9: u32 = seg_put(mem, SEG_LKW, "module\nuse\nfn\nlet\nif\nelse\nwhile\nreturn\npub\nextern\nconst\nstruct\nenum\ncapability\nguard\nexcluded\nrevocable\ntrait\nimpl\nmatch\nas\ntrue\nfalse\nmut\naddin\nchoose\ncommand\nforuse\ncomefor\nbyuse\nstd\ndispatch\nself");
+        let _10: u32 = seg_put(mem, SEG_SAFE, "_c");
+        let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
+        let _b1: u32 = st32(pst(mem), E_I2B, 1);
+        let _b2: u32 = st32(pst(mem), E_B2I, 1);
+        return 0;
+    }
+    if lang == DL_CPP {
+        let _1: u32 = seg_put(mem, SEG_TYPES, "int=i32\nunsigned=u32\nunsigned int=u32\nsigned=i32\nsigned int=i32\nshort=i16\nshort int=i16\nunsigned short=u16\nunsigned short int=u16\nlong=i64\nlong int=i64\nunsigned long=u64\nunsigned long int=u64\nlong long=i64\nlong long int=i64\nunsigned long long=u64\nunsigned long long int=u64\nsigned char=i8\nunsigned char=u8\nbool=bool\nvoid=()");
+        let _2: u32 = seg_put(mem, SEG_TYPE_WORDS, "int\nunsigned\nsigned\nshort\nlong\nbool\nvoid");
+        let _3: u32 = seg_put(mem, SEG_SPEC_WORDS, "int\nunsigned\nsigned\nshort\nlong\nbool\nvoid\nstatic\ninline\nconst\nextern\nregister\nvolatile\ntypedef\nconstexpr\nmutable\nthread_local\nexplicit\nfriend\nvirtual\noverride\nfinal\nchar\nwchar_t\nchar8_t\nchar16_t\nchar32_t\nfloat\ndouble\nsize_t\nssize_t\nint8_t\nint16_t\nint32_t\nint64_t\nuint8_t\nuint16_t\nuint32_t\nuint64_t\nptrdiff_t\nauto\nclass\nstruct\nunion\nenum\nnamespace\ntemplate\ntypename");
+        let _4: u32 = seg_put(mem, SEG_LINKAGE, "static\ninline\nconst");
+        let _5: u32 = seg_put(mem, SEG_BAD_SPEC, "extern\nregister\nvolatile\ntypedef\nconstexpr\nmutable\nthread_local\nexplicit\nfriend\nvirtual\noverride\nfinal");
+        let _6: u32 = seg_put(mem, SEG_AGG, "class\nstruct\nunion\nenum\nnamespace\ntemplate\ntypename");
+        let _7: u32 = seg_put(mem, SEG_KW, "if\nelse\nwhile\nfor\nreturn\nbreak\ncontinue\ndo\nswitch\ncase\ndefault\ngoto\nsizeof\nnew\ndelete\nthis\nnullptr\nusing\nnamespace\ntemplate\ntypename\npublic\nprivate\nprotected\nvirtual\noverride\nfinal\nfriend\noperator\ntry\ncatch\nthrow\nauto\nexplicit\nmutable\nconstexpr\nthread_local\nnoexcept\ntypeid\nstatic_cast\ndynamic_cast\nreinterpret_cast\nconst_cast\nclass\nstruct\nunion\nenum");
+        let _8: u32 = seg_put(mem, SEG_CONST_WORDS, "");
+        let _9: u32 = seg_put(mem, SEG_LKW, "module\nuse\nfn\nlet\nif\nelse\nwhile\nreturn\npub\nextern\nconst\nstruct\nenum\ncapability\nguard\nexcluded\nrevocable\ntrait\nimpl\nmatch\nas\ntrue\nfalse\nmut\naddin\nchoose\ncommand\nforuse\ncomefor\nbyuse\nstd\ndispatch\nself");
+        let _10: u32 = seg_put(mem, SEG_SAFE, "_cpp");
+        let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
+        let _b1: u32 = st32(pst(mem), E_I2B, 1);
+        let _b2: u32 = st32(pst(mem), E_B2I, 1);
+        return 0;
+    }
+    if lang == DL_JAVA {
+        let _1: u32 = seg_put(mem, SEG_TYPES, "int=i32\nlong=i64\nshort=i16\nbyte=i8\nchar=u16\nboolean=bool\nvoid=()");
+        let _2: u32 = seg_put(mem, SEG_TYPE_WORDS, "int\nlong\nshort\nbyte\nchar\nboolean\nvoid");
+        let _3: u32 = seg_put(mem, SEG_SPEC_WORDS, "int\nlong\nshort\nbyte\nchar\nboolean\nvoid\npublic\nprivate\nprotected\nstatic\nfinal\nsynchronized\nabstract\nnative\ntransient\nvolatile\nstrictfp\npackage\nimport\nfloat\ndouble\nString\nObject\nvar");
+        let _4: u32 = seg_put(mem, SEG_LINKAGE, "public\nprivate\nprotected\nstatic\nfinal\nsynchronized\nabstract");
+        let _5: u32 = seg_put(mem, SEG_BAD_SPEC, "native\ntransient\nvolatile\nstrictfp\npackage\nimport");
+        let _6: u32 = seg_put(mem, SEG_AGG, "enum\ninterface\nrecord\nclass\nextends\nimplements");
+        let _7: u32 = seg_put(mem, SEG_KW, "if\nelse\nwhile\nfor\nreturn\nbreak\ncontinue\ndo\nswitch\ncase\ndefault\ngoto\nsizeof\nnew\nthis\nsuper\nthrow\nthrows\ntry\ncatch\nfinally\ninstanceof\nassert\nyield\nvar\npackage\nimport\nextends\nimplements\nsynchronized");
+        let _8: u32 = seg_put(mem, SEG_CONST_WORDS, "final");
+        let _9: u32 = seg_put(mem, SEG_LKW, "module\nuse\nfn\nlet\nif\nelse\nwhile\nreturn\npub\nextern\nconst\nstruct\nenum\ncapability\nguard\nexcluded\nrevocable\ntrait\nimpl\nmatch\nas\ntrue\nfalse\nmut\naddin\nchoose\ncommand\nforuse\ncomefor\nbyuse\nstd\ndispatch\nself");
+        let _10: u32 = seg_put(mem, SEG_SAFE, "_j");
+        let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
+        let _b1: u32 = st32(pst(mem), E_I2B, 0);
+        let _b2: u32 = st32(pst(mem), E_B2I, 0);
+        return 0;
+    }
+    let _1: u32 = seg_put(mem, SEG_TYPES, "sbyte=i8\nbyte=u8\nshort=i16\nushort=u16\nint=i32\nuint=u32\nlong=i64\nulong=u64\nchar=u16\nbool=bool\nvoid=()");
+    let _2: u32 = seg_put(mem, SEG_TYPE_WORDS, "sbyte\nbyte\nshort\nushort\nint\nuint\nlong\nulong\nchar\nbool\nvoid");
+    let _3: u32 = seg_put(mem, SEG_SPEC_WORDS, "sbyte\nbyte\nshort\nushort\nint\nuint\nlong\nulong\nchar\nbool\nvoid\npublic\nprivate\nprotected\ninternal\nstatic\nsealed\nconst\nabstract\nvirtual\noverride\npartial\nunsafe\nreadonly\nvolatile\nextern\nref\nout\nin\nparams\nthis\nbase\ndelegate\nevent\noperator\nasync\nfixed\nstackalloc\nstring\nobject\ndecimal\nfloat\ndouble\nnint\nnuint\nvar\ndynamic\nclass\nstruct\ninterface\nrecord\nenum\nnamespace");
+    let _4: u32 = seg_put(mem, SEG_LINKAGE, "public\nprivate\nprotected\ninternal\nstatic\nsealed\nconst");
+    let _5: u32 = seg_put(mem, SEG_BAD_SPEC, "abstract\nvirtual\noverride\npartial\nunsafe\nreadonly\nvolatile\nextern\nref\nout\nin\nparams\nthis\nbase\ndelegate\nevent\noperator\nasync\nfixed\nstackalloc");
+    let _6: u32 = seg_put(mem, SEG_AGG, "class\nstruct\ninterface\nrecord\nenum\nnamespace");
+    let _7: u32 = seg_put(mem, SEG_KW, "if\nelse\nwhile\nfor\nreturn\nbreak\ncontinue\ndo\nswitch\ncase\ndefault\ngoto\nsizeof\nnew\nthis\nbase\nthrow\ntry\ncatch\nfinally\nforeach\nlock\nusing\nchecked\nunchecked\nunsafe\nfixed\nstackalloc\ntypeof\nnameof\nis\nas\nawait\nasync\nyield\ndelegate\nevent\noperator\nin\nout\nref\nparams\nvar");
+    let _8: u32 = seg_put(mem, SEG_CONST_WORDS, "const");
+    let _9: u32 = seg_put(mem, SEG_LKW, "module\nuse\nfn\nlet\nif\nelse\nwhile\nreturn\npub\nextern\nconst\nstruct\nenum\ncapability\nguard\nexcluded\nrevocable\ntrait\nimpl\nmatch\nas\ntrue\nfalse\nmut\naddin\nchoose\ncommand\nforuse\ncomefor\nbyuse\nstd\ndispatch\nself");
+    let _10: u32 = seg_put(mem, SEG_SAFE, "_cs");
+    let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
+    let _b1: u32 = st32(pst(mem), E_I2B, 0);
+    let _b2: u32 = st32(pst(mem), E_B2I, 0);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 外壳剥离
+//
+// Java 与 C# 的函数不住在顶层：它们在 `class X { … }` 里，C# 还多一层 `namespace`。
+// 共享解析器只认顶层 —— 所以分词**之前**先把那两层壳抹掉。
+//
+// **抹法是"换成等长空白"**（长度、行号、偏移一字不动）—— 报错里的行号就是源里的行号。
+
+fn skip_ht(p: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b && (load8(p, i) == 32 || load8(p, i) == 9) {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 词 + `\s+`（上游 `(?:public\s+|…)` 那一格）。命中返回词后位置，否则 `FAIL`。
+fn w_sp(p: ptr, i: u32, n: u32, w: str) -> u32 {
+    let wl: u32 = str_len(w);
+    if i + wl <= n && eq(p, i, w) == 1 {
+        if i + wl < n && is_sp(load8(p, i + wl)) == 1 {
+            return skip_sp(p, i + wl, n);
+        }
+    }
+    return FAIL;
+}
+
+/// 词 + `[ \t]+`（C# 的 `using` 那两条用的是这个，不是 `\s+`）。
+fn w_sp_tab(p: ptr, i: u32, n: u32, w: str) -> u32 {
+    let wl: u32 = str_len(w);
+    if i + wl <= n && eq(p, i, w) == 1 {
+        if i + wl < n && (load8(p, i + wl) == 32 || load8(p, i + wl) == 9) {
+            return skip_ht(p, i + wl, n);
+        }
+    }
+    return FAIL;
+}
+
+/// C# 壳头那一串修饰词 `_MOD`。
+fn cs_mods(p: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let going: u32 = 1;
+    while going == 1 {
+        let nx: u32 = w_sp(p, j, n, "public");
+        if nx != FAIL {
+            j = nx;
+        } else {
+            let a: u32 = w_sp(p, j, n, "private");
+            if a != FAIL {
+                j = a;
+            } else {
+                let b: u32 = w_sp(p, j, n, "protected");
+                if b != FAIL {
+                    j = b;
+                } else {
+                    let c: u32 = w_sp(p, j, n, "internal");
+                    if c != FAIL {
+                        j = c;
+                    } else {
+                        let d: u32 = w_sp(p, j, n, "static");
+                        if d != FAIL {
+                            j = d;
+                        } else {
+                            let e: u32 = w_sp(p, j, n, "sealed");
+                            if e != FAIL {
+                                j = e;
+                            } else {
+                                going = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return j;
+}
+
+/// Java class 头那一串 `(?:public\s+|final\s+|abstract\s+|strictfp\s+)*`。
+fn java_mods(p: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let going: u32 = 1;
+    while going == 1 {
+        let a: u32 = w_sp(p, j, n, "public");
+        if a != FAIL {
+            j = a;
+        } else {
+            let b: u32 = w_sp(p, j, n, "final");
+            if b != FAIL {
+                j = b;
+            } else {
+                let c: u32 = w_sp(p, j, n, "abstract");
+                if c != FAIL {
+                    j = c;
+                } else {
+                    let d: u32 = w_sp(p, j, n, "strictfp");
+                    if d != FAIL {
+                        j = d;
+                    } else {
+                        going = 0;
+                    }
+                }
+            }
+        }
+    }
+    return j;
+}
+
+/// `(?<![\w.])` —— 前面那个字符既不是词字符也不是 `.`。
+fn boundary_ok(p: ptr, i: u32) -> u32 {
+    if i == 0 {
+        return 1;
+    }
+    let c: u32 = load8(p, i - 1);
+    if is_w(c) == 1 || c == 46 {
+        return 0;
+    }
+    return 1;
+}
+
+/// `[^{;]*\{` —— 命中把 `{` 的下标写进 `outp` 返回 1。
+fn to_brace(p: ptr, i: u32, n: u32, outp: ptr) -> u32 {
+    let j: u32 = i;
+    while j < n && load8(p, j) != 123 && load8(p, j) != 59 {
+        j = j + 1;
+    }
+    if j < n && load8(p, j) == 123 {
+        let _a: u32 = st32(outp, 0, j);
+        return 1;
+    }
+    return 0;
+}
+
+/// `[A-Za-z_]\w*`（`dotted` = 0）或 `[A-Za-z_][\w.]*`（`dotted` = 1）之后的位置。
+fn scan_name(p: ptr, i: u32, n: u32, dotted: u32) -> u32 {
+    if i >= n || is_id0(load8(p, i)) == 0 {
+        return FAIL;
+    }
+    let e: u32 = i + 1;
+    while e < n && (is_w(load8(p, e)) == 1 || (dotted == 1 && load8(p, e) == 46)) {
+        e = e + 1;
+    }
+    return e;
+}
+
+/// Java 的 `_CSHELL_HEAD`。
+fn java_class_head(p: ptr, n: u32, i: u32, outp: ptr) -> u32 {
+    let j: u32 = java_mods(p, i, n);
+    let k: u32 = w_sp(p, j, n, "class");
+    if k == FAIL {
+        return 0;
+    }
+    let ke: u32 = scan_name(p, k, n, 0);
+    if ke == FAIL {
+        return 0;
+    }
+    return to_brace(p, ke, n, outp);
+}
+
+/// C# 的 `_CS_CLASS_HEAD`。
+fn cs_class_head(p: ptr, n: u32, i: u32, outp: ptr) -> u32 {
+    let j: u32 = cs_mods(p, i, n);
+    let k: u32 = w_sp(p, j, n, "class");
+    if k == FAIL {
+        return 0;
+    }
+    let ke: u32 = scan_name(p, k, n, 0);
+    if ke == FAIL {
+        return 0;
+    }
+    return to_brace(p, ke, n, outp);
+}
+
+/// C# 的 `_CS_NS_DECL`（`;` 收尾，`kind` = 1）与 `_CS_NS_HEAD`（`{` 收尾，`kind` = 2）。
+fn cs_ns_head(p: ptr, n: u32, i: u32, kind: u32, outp: ptr) -> u32 {
+    let g: u32 = w_sp(p, i, n, "global");
+    let j0: u32 = i;
+    if g != FAIL {
+        j0 = g;
+    }
+    let j: u32 = cs_mods(p, j0, n);
+    let nsp: u32 = w_sp(p, j, n, "namespace");
+    if nsp == FAIL {
+        return 0;
+    }
+    let ne: u32 = scan_name(p, nsp, n, 1);
+    if ne == FAIL {
+        return 0;
+    }
+    let t: u32 = skip_sp(p, ne, n);
+    if t >= n {
+        return 0;
+    }
+    if kind == 1 && load8(p, t) == 59 {
+        let _a: u32 = st32(outp, 0, t);
+        return 1;
+    }
+    if kind == 2 && load8(p, t) == 123 {
+        let _a: u32 = st32(outp, 0, t);
+        return 1;
+    }
+    return 0;
+}
+
+/// C# 的 `_CS_USING`。
+fn cs_using(p: ptr, n: u32, i: u32, outp: ptr) -> u32 {
+    let k: u32 = w_sp_tab(p, i, n, "using");
+    if k == FAIL {
+        return 0;
+    }
+    let s1: u32 = w_sp_tab(p, k, n, "static");
+    let k3: u32 = k;
+    if s1 != FAIL {
+        k3 = s1;
+    }
+    let e0: u32 = k3;
+    if k3 < n && is_id0(load8(p, k3)) == 1 {
+        let ke: u32 = scan_name(p, k3, n, 0);
+        let e1: u32 = skip_ht(p, ke, n);
+        if e1 < n && load8(p, e1) == 61 {
+            e0 = skip_ht(p, e1 + 1, n);
+        }
+    }
+    let ne: u32 = scan_name(p, e0, n, 1);
+    if ne == FAIL {
+        return 0;
+    }
+    let sc: u32 = skip_ht(p, ne, n);
+    if sc < n && load8(p, sc) == 59 {
+        let _a: u32 = st32(outp, 0, sc);
+        return 1;
+    }
+    return 0;
+}
+
+/// 一门的头表里第 `k` 条匹配吗。命中写 `[0]` = 尾巴那个 `{`/`;` 的下标、
+/// `[4]` = 1（有体）写进 `outp`，返回 1。**头表的顺序与上游逐条对齐**。
+fn head_hit(p: ptr, n: u32, i: u32, lang: u32, k: u32, outp: ptr) -> u32 {
+    if boundary_ok(p, i) == 0 {
+        return 0;
+    }
+    let r: u32 = 0;
+    if lang == DL_JAVA {
+        if k != 0 {
+            return 0;
+        }
+        r = java_class_head(p, n, i, outp);
+    } else {
+        if k == 0 {
+            r = cs_using(p, n, i, outp);
+        } else {
+            if k == 1 {
+                r = cs_ns_head(p, n, i, 1, outp);
+            } else {
+                if k == 2 {
+                    r = cs_ns_head(p, n, i, 2, outp);
+                } else {
+                    r = cs_class_head(p, n, i, outp);
+                }
+            }
+        }
+    }
+    if r == 1 {
+        let braced: u32 = 1;
+        if lang == DL_CS && (k == 0 || k == 1) {
+            braced = 0;
+        }
+        let _b: u32 = st32(outp, 4, braced);
+    }
+    return r;
+}
+
+/// 这一条头是不是**透明**壳（抹完继续进去找）—— 只有 C# 的 `namespace X {`。
+fn head_transparent(lang: u32, k: u32) -> u32 {
+    if lang == DL_CS && k == 2 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `{` 配对（`trans_core.match_brace`）。
+fn match_brace(p: ptr, open: u32, n: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = open;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 123 {
+            d = d + 1;
+        } else {
+            if c == 125 {
+                d = d - 1;
+                if d == 0 {
+                    return i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// `strip_shells`：按门的头表抹壳。返回 0 = 好；1 = 花括号不配平（调用方报解析错）。
+fn strip_shells(mem: ptr, sniff: ptr, n: u32, lang: u32, out: ptr) -> u32 {
+    let r: ptr = ptr_add(mem, M_TMP);
+    let nh: u32 = 1;
+    if lang == DL_CS {
+        nh = 4;
+    }
+    return walk_shells(mem, sniff, n, 0, n, lang, nh, out, r);
+}
+
+/// `trans_core.strip_shells` 那个 `walk` 的逐行翻译
+/// （Python 的 `for … else` 用 `hit` 标记落，`break` 就是"这一格已经处理完"）。
+fn walk_shells(mem: ptr, sniff: ptr, n: u32, lo: u32, hi: u32, lang: u32, nh: u32,
+               out: ptr, r: ptr) -> u32 {
+    let i: u32 = lo;
+    while i < hi {
+        let hit: u32 = 0;
+        let k: u32 = 0;
+        while k < nh && hit == 0 {
+            if head_hit(sniff, n, i, lang, k, r) == 1 {
+                hit = 1;
+            } else {
+                k = k + 1;
+            }
+        }
+        if hit == 0 {
+            i = i + 1;
+        } else {
+            let j: u32 = ld32(r, 0);            // 尾巴那个 `{` 或 `;`
+            let braced: u32 = ld32(r, 4);
+            let endk: u32 = j;
+            if braced == 1 {
+                let kk: u32 = match_brace(sniff, j, n);
+                if kk == FAIL {
+                    return 1;
+                }
+                if kk >= hi {
+                    return 1;
+                }
+                endk = kk;
+                if head_transparent(lang, k) == 1 {
+                    let _w: u32 = walk_shells(mem, sniff, n, j + 1, kk, lang, nh, out, r);
+                }
+            }
+            // 抹 [i, m.end())：有体的是到 `{` 为止，没体的是到 `;` 为止 —— 两个都是 j+1
+            let pe: u32 = j + 1;
+            let p: u32 = i;
+            while p < pe {
+                if load8(out, p) != 10 {
+                    store8(out, p, 32 as u8);
+                }
+                p = p + 1;
+            }
+            if braced == 1 && load8(out, endk) != 10 {
+                store8(out, endk, 32 as u8);
+            }
+            i = endk + 1;
+        }
+    }
+    return 0;
+}
+
+/// 扫壳之前要把**注释与字符串字面量**也抹成等长空白（`_SHELL_NOISE`）——
+/// 只抹注释是不够的：`String s = "class X {";` 会让扫描把那行当一个 `class` 头，
+/// 外壳从字符串**里面**开始切。
+fn shell_noise(src: ptr, n: u32, dst: ptr) -> u32 {
+    let _c: u32 = copy_n(dst, 0, src, 0, n);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(src, i);
+        if c == 47 && i + 1 < n && load8(src, i + 1) == 47 {
+            while i < n && load8(src, i) != 10 {
+                store8(dst, i, 32 as u8);
+                i = i + 1;
+            }
+        } else {
+            if c == 47 && i + 1 < n && load8(src, i + 1) == 42 {
+                let k: u32 = i + 2;
+                let done: u32 = 0;
+                while k < n && done == 0 {
+                    if load8(src, k) == 42 && k + 1 < n && load8(src, k + 1) == 47 {
+                        done = 1;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                let e: u32 = n;
+                if done == 1 {
+                    e = k + 2;
+                }
+                let m: u32 = i;
+                while m < e {
+                    if load8(src, m) != 10 {
+                        store8(dst, m, 32 as u8);
+                    }
+                    m = m + 1;
+                }
+                i = e;
+            } else {
+                if c == 34 {
+                    let j: u32 = i + 1;
+                    let close: u32 = FAIL;
+                    let going: u32 = 1;
+                    while j < n && going == 1 {
+                        let cj: u32 = load8(src, j);
+                        if cj == 34 {
+                            close = j;
+                            going = 0;
+                        } else {
+                            if cj == 10 {
+                                going = 0;
+                            } else {
+                                if cj == 92 && j + 1 < n && load8(src, j + 1) != 10 {
+                                    j = j + 2;
+                                } else {
+                                    if cj == 92 {
+                                        going = 0;
+                                    } else {
+                                        j = j + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if close != FAIL {
+                        let m: u32 = i;
+                        while m <= close {
+                            if load8(src, m) != 10 {
+                                store8(dst, m, 32 as u8);
+                            }
+                            m = m + 1;
+                        }
+                        i = close + 1;
+                    } else {
+                        i = i + 1;
+                    }
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+
+// ---------------------------------------------------------------- 输出拼接（调试与发射共用）
+
+fn app(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let _c: u32 = copy_n(out, o, str_ptr(s), 0, n);
+    return o + n;
+}
+
+fn appn(out: ptr, o: u32, p: ptr, off: u32, l: u32) -> u32 {
+    let _c: u32 = copy_n(out, o, p, off, l);
+    return o + l;
+}
+
+/// 十进制无符号（暂存在 `M_TMP + 32`）。
+fn appu(mem: ptr, out: ptr, o: u32, v: u32) -> u32 {
+    let buf: ptr = ptr_add(mem, M_TMP + 32);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, ((x % 10) + 48) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let k: u32 = 0;
+    while k < n {
+        store8(out, o + k, load8(buf, n - 1 - k) as u8);
+        k = k + 1;
+    }
+    return o + n;
+}
+
+// ---------------------------------------------------------------- 分词
+
+fn is_hex(c: u32) -> u32 {
+    if is_d(c) == 1 {
+        return 1;
+    }
+    if c >= 97 && c <= 102 {
+        return 1;
+    }
+    if c >= 65 && c <= 70 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 点名拒掉的复合赋值（`_REJECT_OP`）——**必须整条认出来**再拒：漏一个的后果是它被
+/// 切成两半（`+=` 变成 `+` `=`），报出来的错指的不是真正的原因。
+fn reject_op(p: ptr, off: u32, l: u32) -> u32 {
+    if l == 2 {
+        if eq(p, off, "+=") == 1 || eq(p, off, "-=") == 1 || eq(p, off, "*=") == 1
+                || eq(p, off, "/=") == 1 || eq(p, off, "%=") == 1
+                || eq(p, off, "&=") == 1 || eq(p, off, "|=") == 1
+                || eq(p, off, "^=") == 1 {
+            return 1;
+        }
+    }
+    if l == 3 {
+        if eq(p, off, "<<=") == 1 || eq(p, off, ">>=") == 1 {
+            return 1;
+        }
+    }
+    if l == 4 && eq(p, off, ">>>=") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 点名拒掉、理由要单独说的（`_REJECT_NAMED`）：`...` / `++` / `--` / `>>>` / `~`。
+fn reject_named(p: ptr, off: u32, l: u32) -> u32 {
+    if l == 3 {
+        if eq(p, off, "...") == 1 || eq(p, off, ">>>") == 1 {
+            return 1;
+        }
+    }
+    if l == 2 {
+        if eq(p, off, "++") == 1 || eq(p, off, "--") == 1 {
+            return 1;
+        }
+    }
+    if l == 1 && eq(p, off, "~") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 多字符运算符的**最长优先**表（`_TOKEN` 里 `op` 那一支的顺序）。
+/// 命中把长度写进 `outp` 返回 1；不是多字符运算符返回 0。
+fn op_len(p: ptr, i: u32, n: u32, outp: ptr) -> u32 {
+    if i + 4 <= n && eq(p, i, ">>>=") == 1 {
+        let _a: u32 = st32(outp, 0, 4);
+        return 1;
+    }
+    if i + 3 <= n {
+        if eq(p, i, ">>>") == 1 || eq(p, i, "<<=") == 1 || eq(p, i, ">>=") == 1
+                || eq(p, i, "...") == 1 {
+            let _a: u32 = st32(outp, 0, 3);
+            return 1;
+        }
+    }
+    if i + 2 <= n {
+        if eq(p, i, "+=") == 1 || eq(p, i, "-=") == 1 || eq(p, i, "*=") == 1
+                || eq(p, i, "/=") == 1 || eq(p, i, "%=") == 1
+                || eq(p, i, "&=") == 1 || eq(p, i, "|=") == 1 || eq(p, i, "^=") == 1
+                || eq(p, i, "<<") == 1 || eq(p, i, ">>") == 1 || eq(p, i, "<=") == 1
+                || eq(p, i, ">=") == 1 || eq(p, i, "==") == 1 || eq(p, i, "!=") == 1
+                || eq(p, i, "&&") == 1 || eq(p, i, "||") == 1 || eq(p, i, "++") == 1
+                || eq(p, i, "--") == 1 {
+            let _a: u32 = st32(outp, 0, 2);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// 单字符运算符那一支（`[-+*/%&|^~!<>=();,{}\[\]?:#]`）。
+fn is_op1(c: u32) -> u32 {
+    if c == 45 || c == 43 || c == 42 || c == 47 || c == 37 {
+        return 1;
+    }
+    if c == 38 || c == 124 || c == 94 || c == 126 || c == 33 {
+        return 1;
+    }
+    if c == 60 || c == 62 || c == 61 {
+        return 1;
+    }
+    if c == 40 || c == 41 || c == 59 || c == 44 || c == 123 || c == 125 {
+        return 1;
+    }
+    if c == 91 || c == 93 || c == 63 || c == 58 || c == 35 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `trans_core.tokens`。错误写进 `M_TMP + 8`：0 = 好，1 = 子集外，2 = 认不出的字符。
+/// 返回记号数。
+fn tokenize(mem: ptr, src: ptr, n: u32) -> u32 {
+    let tk: ptr = ptr_add(mem, M_TOK);
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _e0: u32 = st32(st, 8, 0);
+    let _l0: u32 = st32(st, 12, 1);
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(src, i);
+        let line: u32 = ld32(st, 12);
+        if is_sp(c) == 1 {
+            let j: u32 = i;
+            while j < n && is_sp(load8(src, j)) == 1 {
+                if load8(src, j) == 10 {
+                    let _l: u32 = st32(st, 12, ld32(st, 12) + 1);
+                }
+                j = j + 1;
+            }
+            i = j;
+        } else {
+            if c == 47 && i + 1 < n && load8(src, i + 1) == 47 {
+                let j: u32 = i;
+                while j < n && load8(src, j) != 10 {
+                    j = j + 1;
+                }
+                i = j;
+            } else {
+                if c == 47 && i + 1 < n && load8(src, i + 1) == 42 {
+                    let j: u32 = i + 2;
+                    let done: u32 = 0;
+                    while j < n && done == 0 {
+                        if load8(src, j) == 42 && j + 1 < n && load8(src, j + 1) == 47 {
+                            done = 1;
+                        } else {
+                            if load8(src, j) == 10 {
+                                let _l: u32 = st32(st, 12, ld32(st, 12) + 1);
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    if done == 1 {
+                        i = j + 2;
+                    } else {
+                        i = n;
+                    }
+                } else {
+                    if is_id0(c) == 1 {
+                        let j: u32 = i + 1;
+                        while j < n && is_w(load8(src, j)) == 1 {
+                            j = j + 1;
+                        }
+                        if cnt < TMAX {
+                            let _a: u32 = st32(tk, cnt * 16 + TK_OFF, i);
+                            let _b: u32 = st32(tk, cnt * 16 + TK_LEN, j - i);
+                            let _c: u32 = st32(tk, cnt * 16 + TK_KIND, 1);
+                            let _d: u32 = st32(tk, cnt * 16 + TK_LINE, line);
+                        }
+                        cnt = cnt + 1;
+                        i = j;
+                    } else {
+                        if is_d(c) == 1 && c == 48 && i + 1 < n
+                                && (load8(src, i + 1) == 120 || load8(src, i + 1) == 88)
+                                && i + 2 < n && is_hex(load8(src, i + 2)) == 1 {
+                            let j: u32 = i + 2;
+                            while j < n && is_hex(load8(src, j)) == 1 {
+                                j = j + 1;
+                            }
+                            if cnt < TMAX {
+                                let _a: u32 = st32(tk, cnt * 16 + TK_OFF, i);
+                                let _b: u32 = st32(tk, cnt * 16 + TK_LEN, j - i);
+                                let _c: u32 = st32(tk, cnt * 16 + TK_KIND, 2);
+                                let _d: u32 = st32(tk, cnt * 16 + TK_LINE, line);
+                            }
+                            cnt = cnt + 1;
+                            i = j;
+                        } else {
+                            if is_d(c) == 1 {
+                                let j: u32 = i;
+                                while j < n && is_d(load8(src, j)) == 1 {
+                                    j = j + 1;
+                                }
+                                if cnt < TMAX {
+                                    let _a: u32 = st32(tk, cnt * 16 + TK_OFF, i);
+                                    let _b: u32 = st32(tk, cnt * 16 + TK_LEN, j - i);
+                                    let _c: u32 = st32(tk, cnt * 16 + TK_KIND, 2);
+                                    let _d: u32 = st32(tk, cnt * 16 + TK_LINE, line);
+                                }
+                                cnt = cnt + 1;
+                                i = j;
+                            } else {
+                                let op: u32 = op_len(src, i, n, ptr_add(st, 16));
+                                let l: u32 = 1;
+                                if op == 1 {
+                                    l = ld32(st, 16);
+                                } else {
+                                    if is_op1(c) == 0 {
+                                        let _e: u32 = st32(st, 8, 2);
+                                        return cnt;
+                                    }
+                                }
+                                if reject_named(src, i, l) == 1 {
+                                    let _e: u32 = st32(st, 8, 1);
+                                    return cnt;
+                                }
+                                if reject_op(src, i, l) == 1 {
+                                    let _e: u32 = st32(st, 8, 1);
+                                    return cnt;
+                                }
+                                if cnt < TMAX {
+                                    let _a: u32 = st32(tk, cnt * 16 + TK_OFF, i);
+                                    let _b: u32 = st32(tk, cnt * 16 + TK_LEN, l);
+                                    let _c: u32 = st32(tk, cnt * 16 + TK_KIND, 3);
+                                    let _d: u32 = st32(tk, cnt * 16 + TK_LINE, line);
+                                }
+                                cnt = cnt + 1;
+                                i = i + l;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return cnt;
+}
+
+/// `--tokens`：每个记号一行 `kind text line`（开发期对拍用，判据不看不比）。
+fn dump_tokens(mem: ptr, src: ptr, cnt: u32, out: ptr) -> u32 {
+    let tk: ptr = ptr_add(mem, M_TOK);
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < cnt {
+        let k: u32 = ld32(tk, i * 16 + TK_KIND);
+        if k == 1 {
+            o = app(out, o, "id ");
+        } else {
+            if k == 2 {
+                o = app(out, o, "num ");
+            } else {
+                o = app(out, o, "op ");
+            }
+        }
+        o = appn(out, o, src, ld32(tk, i * 16 + TK_OFF), ld32(tk, i * 16 + TK_LEN));
+        o = app(out, o, " ");
+        o = appu(mem, out, o, ld32(tk, i * 16 + TK_LINE));
+        o = app(out, o, "\n");
+        i = i + 1;
+    }
+    return o;
+}
+
+
+// ---------------------------------------------------------------- 语法树
+//
+// 上游那一串 `class Lit/Var/Call/…` 是 Python 对象；本语言没有和类型，所以是一张
+// **定长节点表**（8 个字一条）＋一张**列表区**＋一张**函数表**。
+//
+// 列表区**按递归深度分段**（每层 256 项，最多 16 层）：解析是递归下降，
+// 内层列表（调用的实参）会在外层列表（语句块）还没收尾时就先写进去 ——
+// 共用一个游标的话外层会**把内层的项也算进来**。分段之后每层各写各的，
+// 而"段内下标"与"绝对下标"是同一个线性映射（`d*256 + j`），发射器不用知道深度。
+
+fn node_new(mem: ptr, kind: u32, line: u32) -> u32 {
+    let nd: ptr = ptr_add(mem, M_NODE);
+    let k: u32 = ld32(ptr_add(mem, M_TMP), 20);
+    if k >= NMAX - 1 {
+        return 0;
+    }
+    let idx: u32 = k + 1;
+    let _a: u32 = st32(nd, idx * 32 + ND_KIND, kind);
+    let _b: u32 = st32(nd, idx * 32 + ND_A, 0);
+    let _c: u32 = st32(nd, idx * 32 + ND_B, 0);
+    let _d: u32 = st32(nd, idx * 32 + ND_C, 0);
+    let _e: u32 = st32(nd, idx * 32 + ND_D, 0);
+    let _f: u32 = st32(nd, idx * 32 + ND_E, 0);
+    let _g: u32 = st32(nd, idx * 32 + ND_LINE, line);
+    let _h: u32 = st32(ptr_add(mem, M_TMP), 20, idx);
+    return idx;
+}
+
+fn nd_set(mem: ptr, n: u32, w: u32, v: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    return st32(ptr_add(mem, M_NODE), n * 32 + w, v);
+}
+
+fn nd_get(mem: ptr, n: u32, w: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    return ld32(ptr_add(mem, M_NODE), n * 32 + w);
+}
+
+/// 列表区的分配（`M_TMP` 里的几格）:
+///   +36 当前深度（0 = 最外）   +44 **单调的区号计数器**（永不重用）
+///   +512 + d*4  第 d 层的**区号**    +768 + d*4  第 d 层的**游标**
+///
+/// 两个坑都在这里: ① 每层的区号最初直接用"深度"，于是内层列表写进外层还没收尾的
+/// 那一区（调用的实参挤进语句块）；② 改成按深度分区之后，**同一个深度的两处列表
+/// 会重用同一区** —— 每个函数的体都在同一深度，于是先建的函数体被后建的盖掉
+/// （症状：所有函数都指向**最后一个**函数的体）。现在区号单调递增、**永不重用**：
+/// 一个列表写完就不再被碰，谁引用它都对。
+fn li_depth(mem: ptr) -> u32 {
+    return ld32(ptr_add(mem, M_TMP), 36);
+}
+
+fn li_enter(mem: ptr) -> u32 {
+    let d: u32 = li_depth(mem);
+    if d >= 15 {
+        return FAIL;
+    }
+    let r: u32 = ld32(ptr_add(mem, M_TMP), 44) + 1;
+    if r >= 255 {
+        return FAIL;
+    }
+    let _a: u32 = st32(ptr_add(mem, M_TMP), 44, r);
+    let _b: u32 = st32(ptr_add(mem, M_TMP), 36, d + 1);
+    let _c: u32 = st32(ptr_add(mem, M_TMP), 512 + (d + 1) * 4, r);
+    let _e: u32 = st32(ptr_add(mem, M_TMP), 768 + (d + 1) * 4, 0);
+    return d + 1;
+}
+
+fn li_leave(mem: ptr) -> u32 {
+    let d: u32 = li_depth(mem);
+    if d == 0 {
+        return FAIL;
+    }
+    return st32(ptr_add(mem, M_TMP), 36, d - 1);
+}
+
+/// 当前区里这个列表的**起始下标**（区号 * 64 + 区内游标）。
+fn li_here(mem: ptr) -> u32 {
+    let d: u32 = li_depth(mem);
+    let r: u32 = ld32(ptr_add(mem, M_TMP), 512 + d * 4);
+    let j: u32 = ld32(ptr_add(mem, M_TMP), 768 + d * 4);
+    return r * 64 + j;
+}
+
+fn li_push(mem: ptr, v: u32) -> u32 {
+    let d: u32 = li_depth(mem);
+    let r: u32 = ld32(ptr_add(mem, M_TMP), 512 + d * 4);
+    let j: u32 = ld32(ptr_add(mem, M_TMP), 768 + d * 4);
+    if j >= 64 {
+        return FAIL;
+    }
+    let _a: u32 = st32(ptr_add(mem, M_LIST), (r * 64 + j) * 4, v);
+    let _b: u32 = st32(ptr_add(mem, M_TMP), 768 + d * 4, j + 1);
+    return r * 64 + j;
+}
+
+fn li_get(mem: ptr, i: u32) -> u32 {
+    return ld32(ptr_add(mem, M_LIST), i * 4);
+}
+
+/// 函数表（`Fn` 那一条）: ty(off,len) name(off,len) params(start,count)
+/// body(start,count) line —— 8 个格，32 字节。
+fn fn_new(mem: ptr) -> u32 {
+    let k: u32 = ld32(ptr_add(mem, M_TMP), 40);
+    if k >= FNMAX - 1 {
+        return FAIL;
+    }
+    let idx: u32 = k + 1;
+    let _a: u32 = st32(ptr_add(mem, M_TMP), 40, idx);
+    let i: u32 = 0;
+    while i < 8 {
+        let _b: u32 = st32(ptr_add(mem, M_FN), idx * 32 + i * 4, 0);
+        i = i + 1;
+    }
+    return idx;
+}
+
+fn fn_set(mem: ptr, f: u32, i: u32, v: u32) -> u32 {
+    return st32(ptr_add(mem, M_FN), f * 32 + i * 4, v);
+}
+
+fn fn_get(mem: ptr, f: u32, i: u32) -> u32 {
+    return ld32(ptr_add(mem, M_FN), f * 32 + i * 4);
+}
+
+// ---------------------------------------------------------------- 解析
+//
+// 解析器状态格（都在 `M_TMP` 里）:
+//   +256 记号下标   +260 记号数   +264 方言号   +268 错误码（0 好 / 1 子集外 / 2 解析不过）
+//   +272 错误行     +276 spec 起点记号          +320/324 ident 结果
+//   +328/332 spec 的名字                        +336 spec 的行号
+//   +400/404 暂存 1（then） +408/412 暂存 2（else） +416/420 暂存 3（for 体）
+//   +432/436 暂存 4（函数体）
+
+const PS_I: u32 = 256;
+const PS_N: u32 = 260;
+const PS_ERR: u32 = 268;
+const PS_SPEC0: u32 = 276;
+
+fn pst(mem: ptr) -> ptr {
+    return ptr_add(mem, M_TMP);
+}
+
+/// 记号文本的 (off, len)（越界给空串 —— Python 的 `peek` 越界给 `("eof","",最后一行)`）。
+fn tk_off(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(pst(mem), PS_N) {
+        return 0;
+    }
+    return ld32(ptr_add(mem, M_TOK), k * 16 + TK_OFF);
+}
+
+fn tk_len(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(pst(mem), PS_N) {
+        return 0;
+    }
+    return ld32(ptr_add(mem, M_TOK), k * 16 + TK_LEN);
+}
+
+fn tk_kind(mem: ptr, k: u32) -> u32 {
+    if k >= ld32(pst(mem), PS_N) {
+        return 0;
+    }
+    return ld32(ptr_add(mem, M_TOK), k * 16 + TK_KIND);
+}
+
+fn tk_line(mem: ptr, k: u32) -> u32 {
+    let n: u32 = ld32(pst(mem), PS_N);
+    if n == 0 {
+        return 1;
+    }
+    if k >= n {
+        return ld32(ptr_add(mem, M_TOK), (n - 1) * 16 + TK_LINE);
+    }
+    return ld32(ptr_add(mem, M_TOK), k * 16 + TK_LINE);
+}
+
+/// `self.peek(k)[1] == text`
+fn p_at(mem: ptr, src: ptr, text: str, k: u32) -> u32 {
+    let j: u32 = ld32(pst(mem), PS_I) + k;
+    let l: u32 = tk_len(mem, j);
+    if l != str_len(text) {
+        return 0;
+    }
+    return eq(src, tk_off(mem, j), text);
+}
+
+/// 出错的两种（上游 `Unsupported` = 退出 1 / `CError` = 退出 2）。只记码与行号。
+fn perr(mem: ptr, code: u32) -> u32 {
+    let _a: u32 = st32(pst(mem), PS_ERR, code);
+    let _b: u32 = st32(pst(mem), 272, tk_line(mem, ld32(pst(mem), PS_I)));
+    return 0;
+}
+
+fn p_want(mem: ptr, src: ptr, text: str) -> u32 {
+    if p_at(mem, src, text, 0) == 0 {
+        return perr(mem, 2);
+    }
+    let _a: u32 = st32(pst(mem), PS_I, ld32(pst(mem), PS_I) + 1);
+    return 1;
+}
+
+/// `self.ident()` —— 命中把 (off, len) 写进 `+320/+324`，返回长度；否则 0。
+fn p_ident(mem: ptr, src: ptr) -> u32 {
+    let st: ptr = pst(mem);
+    let j: u32 = ld32(st, PS_I);
+    if tk_kind(mem, j) != 1 {
+        let _e: u32 = perr(mem, 2);
+        return 0;
+    }
+    let l: u32 = tk_len(mem, j);
+    let _a: u32 = st32(st, 320, tk_off(mem, j));
+    let _b: u32 = st32(st, 324, l);
+    let _c: u32 = st32(st, PS_I, j + 1);
+    return l;
+}
+
+/// 刚吃掉的那段词里有没有"常量标志词"（上游 `d.const_words & self.last_spec`）。
+fn spec_has_const(mem: ptr, src: ptr, from: u32, to: u32) -> u32 {
+    let i: u32 = from;
+    while i < to {
+        let o: u32 = ld32(ptr_add(mem, M_TOK), i * 16 + TK_OFF);
+        let l: u32 = ld32(ptr_add(mem, M_TOK), i * 16 + TK_LEN);
+        if word_has(mem, SEG_CONST_WORDS, src, o, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 类型名 -> **类型 id**。这一族的类型是**有限的一小撮**（十个），所以树里存 id 而不是
+/// 串 —— 串存起来要一块池子，而池子的偏移与"源里的偏移"是两码事，打印时必然要分缓冲。
+fn ty_id(p: ptr, l: u32) -> u32 {
+    if l == 2 && eq(p, 0, "i8") == 1 {
+        return 1;
+    }
+    if l == 2 && eq(p, 0, "u8") == 1 {
+        return 2;
+    }
+    if l == 3 && eq(p, 0, "i16") == 1 {
+        return 3;
+    }
+    if l == 3 && eq(p, 0, "u16") == 1 {
+        return 4;
+    }
+    if l == 3 && eq(p, 0, "i32") == 1 {
+        return 5;
+    }
+    if l == 3 && eq(p, 0, "u32") == 1 {
+        return 6;
+    }
+    if l == 3 && eq(p, 0, "i64") == 1 {
+        return 7;
+    }
+    if l == 3 && eq(p, 0, "u64") == 1 {
+        return 8;
+    }
+    if l == 4 && eq(p, 0, "bool") == 1 {
+        return 9;
+    }
+    if l == 2 && eq(p, 0, "()") == 1 {
+        return 10;
+    }
+    return 0;
+}
+
+fn ty_text(id: u32) -> str {
+    if id == 1 {
+        return "i8";
+    }
+    if id == 2 {
+        return "u8";
+    }
+    if id == 3 {
+        return "i16";
+    }
+    if id == 4 {
+        return "u16";
+    }
+    if id == 5 {
+        return "i32";
+    }
+    if id == 6 {
+        return "u32";
+    }
+    if id == 7 {
+        return "i64";
+    }
+    if id == 8 {
+        return "u64";
+    }
+    if id == 9 {
+        return "bool";
+    }
+    return "()";
+}
+
+/// `Parser.spec()` —— 命中：类型写进 `M_NAME`（off/len），名字写进 `+328/+332`，
+/// 行号写进 `+336`，返回 1。
+fn p_spec(mem: ptr, src: ptr, lang: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let _a: u32 = st32(st, PS_SPEC0, ld32(st, PS_I));
+    let raw: ptr = ptr_add(mem, M_NAME + 512);
+    let rl: u32 = 0;
+    let words: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let j: u32 = ld32(st, PS_I);
+        if tk_kind(mem, j) != 1 {
+            going = 0;
+        } else {
+            let o: u32 = tk_off(mem, j);
+            let l: u32 = tk_len(mem, j);
+            if word_has(mem, SEG_SPEC_WORDS, src, o, l) == 0 {
+                going = 0;
+            } else {
+                if word_has(mem, SEG_BAD_SPEC, src, o, l) == 1 {
+                    let _e: u32 = perr(mem, 1);
+                    return 0;
+                }
+                if word_has(mem, SEG_LINKAGE, src, o, l) == 1 {
+                    let _i: u32 = st32(st, PS_I, j + 1);
+                } else {
+                    if word_has(mem, SEG_AGG, src, o, l) == 1 {
+                        let _e: u32 = perr(mem, 1);
+                        return 0;
+                    }
+                    if words > 0 {
+                        store8(raw, rl, 32 as u8);
+                        rl = rl + 1;
+                    }
+                    let _c: u32 = copy_n(raw, rl, src, o, l);
+                    rl = rl + l;
+                    words = words + 1;
+                    let _i2: u32 = st32(st, PS_I, j + 1);
+                }
+            }
+        }
+    }
+    if words == 0 {
+        let _e: u32 = perr(mem, 2);
+        return 0;
+    }
+    let line: u32 = tk_line(mem, ld32(st, PS_SPEC0));
+    let tl: u32 = type_of(mem, raw, 0, rl, ptr_add(mem, M_NAME));
+    if tl == 0 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let tid: u32 = ty_id(ptr_add(mem, M_NAME), tl);
+    if tid == 0 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let _t: u32 = st32(st, 344, tid);
+    let nl: u32 = p_ident(mem, src);
+    if nl == 0 {
+        return 0;
+    }
+    if p_at(mem, src, "*", 0) == 1 || p_at(mem, src, "[", 0) == 1 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let _b: u32 = st32(st, 328, ld32(st, 320));
+    let _c: u32 = st32(st, 332, ld32(st, 324));
+    let _d: u32 = st32(st, 336, line);
+    return 1;
+}
+
+/// 二元运算符的编号（`_BIN` 那张表）—— 0 = 不是二元运算符。
+fn bin_of(p: ptr, off: u32, l: u32) -> u32 {
+    if l == 1 {
+        if eq(p, off, "*") == 1 {
+            return 1;
+        }
+        if eq(p, off, "/") == 1 {
+            return 2;
+        }
+        if eq(p, off, "%") == 1 {
+            return 3;
+        }
+        if eq(p, off, "+") == 1 {
+            return 4;
+        }
+        if eq(p, off, "-") == 1 {
+            return 5;
+        }
+        if eq(p, off, "<") == 1 {
+            return 8;
+        }
+        if eq(p, off, ">") == 1 {
+            return 9;
+        }
+        if eq(p, off, "&") == 1 {
+            return 14;
+        }
+        if eq(p, off, "^") == 1 {
+            return 15;
+        }
+        if eq(p, off, "|") == 1 {
+            return 16;
+        }
+        return 0;
+    }
+    if l == 2 {
+        if eq(p, off, "<<") == 1 {
+            return 6;
+        }
+        if eq(p, off, ">>") == 1 {
+            return 7;
+        }
+        if eq(p, off, "<=") == 1 {
+            return 10;
+        }
+        if eq(p, off, ">=") == 1 {
+            return 11;
+        }
+        if eq(p, off, "==") == 1 {
+            return 12;
+        }
+        if eq(p, off, "!=") == 1 {
+            return 13;
+        }
+        if eq(p, off, "&&") == 1 {
+            return 17;
+        }
+        if eq(p, off, "||") == 1 {
+            return 18;
+        }
+    }
+    return 0;
+}
+
+/// `_PRECOF`：低到高 1..10。
+fn precof_of(c: u32) -> u32 {
+    if c >= 1 && c <= 3 {
+        return 10;
+    }
+    if c == 4 || c == 5 {
+        return 9;
+    }
+    if c == 6 || c == 7 {
+        return 8;
+    }
+    if c >= 8 && c <= 11 {
+        return 7;
+    }
+    if c == 12 || c == 13 {
+        return 6;
+    }
+    if c == 14 {
+        return 5;
+    }
+    if c == 15 {
+        return 4;
+    }
+    if c == 16 {
+        return 3;
+    }
+    if c == 17 {
+        return 2;
+    }
+    return 1;
+}
+
+/// 操作数按什么算（`_BIN` 中间那格）：`&&`/`||` 是 bool，其余是 int（1 = bool）。
+fn bin_want(c: u32) -> u32 {
+    if c == 17 || c == 18 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 结果是不是 bool（`_BIN` 第三格）。
+fn bin_isbool(c: u32) -> u32 {
+    if c >= 8 && c <= 13 {
+        return 1;
+    }
+    if c == 17 || c == 18 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 发出去的运算符文本（这一族与 Loment 同名）。
+fn bin_text(c: u32) -> str {
+    if c == 1 {
+        return "*";
+    }
+    if c == 2 {
+        return "/";
+    }
+    if c == 3 {
+        return "%";
+    }
+    if c == 4 {
+        return "+";
+    }
+    if c == 5 {
+        return "-";
+    }
+    if c == 6 {
+        return "<<";
+    }
+    if c == 7 {
+        return ">>";
+    }
+    if c == 8 {
+        return "<";
+    }
+    if c == 9 {
+        return ">";
+    }
+    if c == 10 {
+        return "<=";
+    }
+    if c == 11 {
+        return ">=";
+    }
+    if c == 12 {
+        return "==";
+    }
+    if c == 13 {
+        return "!=";
+    }
+    if c == 14 {
+        return "&";
+    }
+    if c == 15 {
+        return "^";
+    }
+    if c == 16 {
+        return "|";
+    }
+    if c == 17 {
+        return "&&";
+    }
+    return "||";
+}
+
+/// `Parser.binary(minp)`。
+fn p_binary(mem: ptr, src: ptr, lang: u32, minp: u32) -> u32 {
+    let left: u32 = p_unary(mem, src, lang);
+    if left == 0 {
+        return 0;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let st: ptr = pst(mem);
+        let j: u32 = ld32(st, PS_I);
+        let o: u32 = tk_off(mem, j);
+        let l: u32 = tk_len(mem, j);
+        let k: u32 = tk_kind(mem, j);
+        // 赋值/三元**点名**拒（别掉进"期望 `;`"那种指不到点子的报错里）
+        if k == 3 {
+            if l == 1 && (eq(src, o, "?") == 1 || eq(src, o, "=") == 1) {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            if l == 2 && (eq(src, o, "+=") == 1 || eq(src, o, "-=") == 1
+                          || eq(src, o, "*=") == 1 || eq(src, o, "/=") == 1
+                          || eq(src, o, "%=") == 1 || eq(src, o, "&=") == 1
+                          || eq(src, o, "|=") == 1 || eq(src, o, "^=") == 1) {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+        }
+        let c: u32 = 0;
+        if k == 3 {
+            c = bin_of(src, o, l);
+        }
+        if c == 0 {
+            return left;
+        }
+        if precof_of(c) < minp {
+            return left;
+        }
+        let _i: u32 = st32(st, PS_I, j + 1);
+        let right: u32 = p_binary(mem, src, lang, precof_of(c) + 1);
+        if right == 0 {
+            return 0;
+        }
+        let n: u32 = node_new(mem, NK_BIN, tk_line(mem, j));
+        if n == 0 {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+        let _a: u32 = nd_set(mem, n, ND_A, c);
+        let _b: u32 = nd_set(mem, n, ND_B, left);
+        let _c: u32 = nd_set(mem, n, ND_C, right);
+        left = n;
+    }
+    return left;
+}
+
+/// `Parser.unary()`。`~` 已经在分词那一步被点名拒掉了（不在这里）。
+fn p_unary(mem: ptr, src: ptr, lang: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let j: u32 = ld32(st, PS_I);
+    let o: u32 = tk_off(mem, j);
+    let l: u32 = tk_len(mem, j);
+    if tk_kind(mem, j) == 3 {
+        if l == 1 && (eq(src, o, "-") == 1 || eq(src, o, "!") == 1) {
+            let _i: u32 = st32(st, PS_I, j + 1);
+            let e: u32 = p_unary(mem, src, lang);
+            if e == 0 {
+                return 0;
+            }
+            let n: u32 = node_new(mem, NK_UN, tk_line(mem, j));
+            if n == 0 {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            let op: u32 = 1;
+            if eq(src, o, "!") == 1 {
+                op = 2;
+            }
+            let _a: u32 = nd_set(mem, n, ND_A, op);
+            let _b: u32 = nd_set(mem, n, ND_B, e);
+            return n;
+        }
+        if l == 1 && (eq(src, o, "+") == 1 || eq(src, o, "*") == 1
+                      || eq(src, o, "&") == 1) {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+    }
+    return p_primary(mem, src, lang);
+}
+
+fn p_primary(mem: ptr, src: ptr, lang: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let j: u32 = ld32(st, PS_I);
+    let o: u32 = tk_off(mem, j);
+    let l: u32 = tk_len(mem, j);
+    let k: u32 = tk_kind(mem, j);
+    let line: u32 = tk_line(mem, j);
+    if k == 3 && l == 1 && eq(src, o, "(") == 1 {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        let e: u32 = p_expr(mem, src, lang);
+        if e == 0 {
+            return 0;
+        }
+        if p_want(mem, src, ")") == 0 {
+            return 0;
+        }
+        return e;
+    }
+    if k == 2 {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        let n: u32 = node_new(mem, NK_LIT, line);
+        let _a: u32 = nd_set(mem, n, ND_A, num_val(src, o, l));
+        return n;
+    }
+    if k == 1 && (eq(src, o, "true") == 1 || eq(src, o, "false") == 1) {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        let n: u32 = node_new(mem, NK_LIT, line);
+        let bv: u32 = 0;
+        if eq(src, o, "true") == 1 {
+            bv = 1;
+        }
+        let _a: u32 = nd_set(mem, n, ND_A, bv);
+        let _b: u32 = nd_set(mem, n, ND_B, 1);
+        return n;
+    }
+    if k == 1 {
+        if word_has(mem, SEG_KW, src, o, l) == 1 {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+        let _i: u32 = st32(st, PS_I, j + 1);
+        if p_at(mem, src, ".", 0) == 1 {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+        if p_at(mem, src, "(", 0) == 1 {
+            let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+            if li_enter(mem) == FAIL {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            let a0: u32 = li_here(mem);
+            let an: u32 = 0;
+            if p_at(mem, src, ")", 0) == 0 {
+                let e1: u32 = p_expr(mem, src, lang);
+                if e1 == 0 {
+                    return 0;
+                }
+                let _p: u32 = li_push(mem, e1);
+                an = 1;
+                while p_at(mem, src, ",", 0) == 1 {
+                    let _c1: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                    let e2: u32 = p_expr(mem, src, lang);
+                    if e2 == 0 {
+                        return 0;
+                    }
+                    let _p2: u32 = li_push(mem, e2);
+                    an = an + 1;
+                }
+            }
+            let _lv: u32 = li_leave(mem);
+            if p_want(mem, src, ")") == 0 {
+                return 0;
+            }
+            let n: u32 = node_new(mem, NK_CALL, line);
+            let _a: u32 = nd_set(mem, n, ND_A, o);
+            let _b: u32 = nd_set(mem, n, ND_B, l);
+            let _c: u32 = nd_set(mem, n, ND_C, a0);
+            let _d: u32 = nd_set(mem, n, ND_D, an);
+            return n;
+        }
+        let n: u32 = node_new(mem, NK_VAR, line);
+        let _a: u32 = nd_set(mem, n, ND_A, o);
+        let _b: u32 = nd_set(mem, n, ND_B, l);
+        return n;
+    }
+    let _e: u32 = perr(mem, 2);
+    return 0;
+}
+
+fn p_expr(mem: ptr, src: ptr, lang: u32) -> u32 {
+    return p_binary(mem, src, lang, 1);
+}
+
+/// `Parser.block_or_stmt()` —— 结果 (start, count) 写进 `outp`。
+fn p_block_or_stmt(mem: ptr, src: ptr, lang: u32, outp: ptr) -> u32 {
+    if p_at(mem, src, "{", 0) == 1 {
+        return p_block(mem, src, lang, outp);
+    }
+    if li_enter(mem) == FAIL {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let a0: u32 = li_here(mem);
+    let s: u32 = p_stmt(mem, src, lang);
+    if s == 0 {
+        return 0;
+    }
+    let _p: u32 = li_push(mem, s);
+    let _lv: u32 = li_leave(mem);
+    let _a: u32 = st32(outp, 0, a0);
+    let _b: u32 = st32(outp, 4, 1);
+    return 1;
+}
+
+/// `Parser.block()` —— 结果 (start, count) 写进 `outp`。
+fn p_block(mem: ptr, src: ptr, lang: u32, outp: ptr) -> u32 {
+    let st: ptr = pst(mem);
+    if p_want(mem, src, "{") == 0 {
+        return 0;
+    }
+    if li_enter(mem) == FAIL {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let a0: u32 = li_here(mem);
+    let cnt: u32 = 0;
+    while p_at(mem, src, "}", 0) == 0 {
+        if tk_kind(mem, ld32(st, PS_I)) == 0 {
+            let _e: u32 = perr(mem, 2);
+            return 0;
+        }
+        let s: u32 = p_stmt(mem, src, lang);
+        if s == 0 {
+            return 0;
+        }
+        let _p: u32 = li_push(mem, s);
+        cnt = cnt + 1;
+    }
+    let _lv: u32 = li_leave(mem);
+    if p_want(mem, src, "}") == 0 {
+        return 0;
+    }
+    let _a: u32 = st32(outp, 0, a0);
+    let _b: u32 = st32(outp, 4, cnt);
+    return 1;
+}
+
+fn p_stmt(mem: ptr, src: ptr, lang: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let j: u32 = ld32(st, PS_I);
+    let o: u32 = tk_off(mem, j);
+    let l: u32 = tk_len(mem, j);
+    let line: u32 = tk_line(mem, j);
+    if p_at(mem, src, "{", 0) == 1 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    if l == 2 && eq(src, o, "if") == 1 {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        if p_want(mem, src, "(") == 0 {
+            return 0;
+        }
+        let cond: u32 = p_expr(mem, src, lang);
+        if cond == 0 {
+            return 0;
+        }
+        if p_want(mem, src, ")") == 0 {
+            return 0;
+        }
+        if p_block_or_stmt(mem, src, lang, ptr_add(st, 400)) == 0 {
+            return 0;
+        }
+        // ⚠ 一拿到就抄进局部：`then`/`else` 里**还能再嵌 if**，而嵌套那个会用同一批
+        // 暂存格 —— 读得晚一步就读到内层的了（症状：外层 then 里套的是内层的语句）。
+        let ts: u32 = ld32(st, 400);
+        let tn: u32 = ld32(st, 404);
+        let es: u32 = 0;
+        let en: u32 = FAIL;
+        if p_at(mem, src, "else", 0) == 1 {
+            let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+            if p_block_or_stmt(mem, src, lang, ptr_add(st, 408)) == 0 {
+                return 0;
+            }
+            es = ld32(st, 408);
+            en = ld32(st, 412);
+        }
+        let n: u32 = node_new(mem, NK_IF, line);
+        let _a: u32 = nd_set(mem, n, ND_A, cond);
+        let _b: u32 = nd_set(mem, n, ND_B, ts);
+        let _c: u32 = nd_set(mem, n, ND_C, tn);
+        let _d: u32 = nd_set(mem, n, ND_D, es);
+        let _e: u32 = nd_set(mem, n, ND_E, en);
+        return n;
+    }
+    if l == 5 && eq(src, o, "while") == 1 {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        if p_want(mem, src, "(") == 0 {
+            return 0;
+        }
+        let cond: u32 = p_expr(mem, src, lang);
+        if cond == 0 {
+            return 0;
+        }
+        if p_want(mem, src, ")") == 0 {
+            return 0;
+        }
+        if p_block_or_stmt(mem, src, lang, ptr_add(st, 400)) == 0 {
+            return 0;
+        }
+        let ws: u32 = ld32(st, 400);
+        let wn: u32 = ld32(st, 404);
+        let n: u32 = node_new(mem, NK_WHILE, line);
+        let _a: u32 = nd_set(mem, n, ND_A, cond);
+        let _b: u32 = nd_set(mem, n, ND_B, ws);
+        let _c: u32 = nd_set(mem, n, ND_C, wn);
+        return n;
+    }
+    if l == 3 && eq(src, o, "for") == 1 {
+        return p_for(mem, src, lang);
+    }
+    if (l == 2 && eq(src, o, "do") == 1) || (l == 6 && eq(src, o, "switch") == 1)
+            || (l == 4 && eq(src, o, "goto") == 1) || (l == 4 && eq(src, o, "case") == 1)
+            || (l == 7 && eq(src, o, "default") == 1) {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    if l == 5 && eq(src, o, "break") == 1 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    if l == 8 && eq(src, o, "continue") == 1 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    if l == 6 && eq(src, o, "return") == 1 {
+        let _i: u32 = st32(st, PS_I, j + 1);
+        let n: u32 = node_new(mem, NK_RETURN, line);
+        if p_at(mem, src, ";", 0) == 1 {
+            let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+            return n;
+        }
+        let e: u32 = p_expr(mem, src, lang);
+        if e == 0 {
+            return 0;
+        }
+        if p_want(mem, src, ";") == 0 {
+            return 0;
+        }
+        let _a: u32 = nd_set(mem, n, ND_A, e);
+        return n;
+    }
+    return p_simple(mem, src, lang, 1);
+}
+
+/// `Parser.simple(semi)`。
+fn p_simple(mem: ptr, src: ptr, lang: u32, semi: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let j: u32 = ld32(st, PS_I);
+    let o: u32 = tk_off(mem, j);
+    let l: u32 = tk_len(mem, j);
+    let line: u32 = tk_line(mem, j);
+    if tk_kind(mem, j) == 1 && word_has(mem, SEG_SPEC_WORDS, src, o, l) == 1 {
+        if p_spec(mem, src, lang) == 0 {
+            return 0;
+        }
+        let tid: u32 = ld32(st, 344);
+        let nmo: u32 = ld32(st, 328);
+        let nml: u32 = ld32(st, 332);
+        let ln2: u32 = ld32(st, 336);
+        if p_at(mem, src, ";", 0) == 1 {
+            let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+            let n: u32 = node_new(mem, NK_DECL, ln2);
+            let _a: u32 = nd_set(mem, n, ND_A, tid);
+            let _c: u32 = nd_set(mem, n, ND_C, nmo);
+            let _d: u32 = nd_set(mem, n, ND_D, nml);
+            return n;
+        }
+        if p_want(mem, src, "=") == 0 {
+            return 0;
+        }
+        let e: u32 = p_expr(mem, src, lang);
+        if e == 0 {
+            return 0;
+        }
+        if semi == 1 {
+            if p_want(mem, src, ";") == 0 {
+                return 0;
+            }
+        }
+        let n2: u32 = node_new(mem, NK_DECL, ln2);
+        let _a: u32 = nd_set(mem, n2, ND_A, tid);
+        let _c: u32 = nd_set(mem, n2, ND_C, nmo);
+        let _d: u32 = nd_set(mem, n2, ND_D, nml);
+        let _e: u32 = nd_set(mem, n2, ND_E, e + 1);      // `+1`：0 表示"没有初值"
+        return n2;
+    }
+    if tk_kind(mem, j) != 1 {
+        let _e: u32 = perr(mem, 2);
+        return 0;
+    }
+    if word_has(mem, SEG_KW, src, o, l) == 1 {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let nl: u32 = p_ident(mem, src);
+    if nl == 0 {
+        return 0;
+    }
+    let nmo: u32 = ld32(st, 320);
+    let nml: u32 = ld32(st, 324);
+    if p_at(mem, src, "=", 0) == 1 {
+        let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+        let e: u32 = p_expr(mem, src, lang);
+        if e == 0 {
+            return 0;
+        }
+        if semi == 1 {
+            if p_want(mem, src, ";") == 0 {
+                return 0;
+            }
+        }
+        let n: u32 = node_new(mem, NK_ASSIGN, line);
+        let _a: u32 = nd_set(mem, n, ND_A, nmo);
+        let _b: u32 = nd_set(mem, n, ND_B, nml);
+        let _c: u32 = nd_set(mem, n, ND_C, e);
+        return n;
+    }
+    if p_at(mem, src, "(", 0) == 1 {
+        let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+        if li_enter(mem) == FAIL {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+        let a0: u32 = li_here(mem);
+        let an: u32 = 0;
+        if p_at(mem, src, ")", 0) == 0 {
+            let e1: u32 = p_expr(mem, src, lang);
+            if e1 == 0 {
+                return 0;
+            }
+            let _p: u32 = li_push(mem, e1);
+            an = 1;
+            while p_at(mem, src, ",", 0) == 1 {
+                let _c1: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                let e2: u32 = p_expr(mem, src, lang);
+                if e2 == 0 {
+                    return 0;
+                }
+                let _p2: u32 = li_push(mem, e2);
+                an = an + 1;
+            }
+        }
+        let _lv: u32 = li_leave(mem);
+        if p_want(mem, src, ")") == 0 {
+            return 0;
+        }
+        if semi == 1 {
+            if p_want(mem, src, ";") == 0 {
+                return 0;
+            }
+        }
+        let cn: u32 = node_new(mem, NK_CALL, line);
+        let _a: u32 = nd_set(mem, cn, ND_A, nmo);
+        let _b: u32 = nd_set(mem, cn, ND_B, nml);
+        let _c: u32 = nd_set(mem, cn, ND_C, a0);
+        let _d: u32 = nd_set(mem, cn, ND_D, an);
+        let n: u32 = node_new(mem, NK_EXPR, line);
+        let _e: u32 = nd_set(mem, n, ND_A, cn);
+        return n;
+    }
+    let _e: u32 = perr(mem, 2);
+    return 0;
+}
+
+fn p_for(mem: ptr, src: ptr, lang: u32) -> u32 {
+    let st: ptr = pst(mem);
+    let line: u32 = tk_line(mem, ld32(st, PS_I));
+    let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+    if p_want(mem, src, "(") == 0 {
+        return 0;
+    }
+    let init: u32 = 0;
+    if p_at(mem, src, ";", 0) == 1 {
+        let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+    } else {
+        init = p_simple(mem, src, lang, 1);
+        if init == 0 {
+            return 0;
+        }
+    }
+    let cond: u32 = 0;
+    if p_at(mem, src, ";", 0) == 0 {
+        cond = p_expr(mem, src, lang);
+        if cond == 0 {
+            return 0;
+        }
+    }
+    if p_want(mem, src, ";") == 0 {
+        return 0;
+    }
+    let step: u32 = 0;
+    if p_at(mem, src, ")", 0) == 0 {
+        step = p_simple(mem, src, lang, 0);
+        if step == 0 {
+            return 0;
+        }
+    }
+    if p_want(mem, src, ")") == 0 {
+        return 0;
+    }
+    if p_block_or_stmt(mem, src, lang, ptr_add(st, 416)) == 0 {
+        return 0;
+    }
+    let bs: u32 = ld32(st, 416);
+    let bn: u32 = ld32(st, 420);
+    let n: u32 = node_new(mem, NK_FOR, line);
+    let _a: u32 = nd_set(mem, n, ND_A, init);
+    let _b: u32 = nd_set(mem, n, ND_B, cond);
+    let _c: u32 = nd_set(mem, n, ND_C, step);
+    let _d: u32 = nd_set(mem, n, ND_D, bs);
+    let _e: u32 = nd_set(mem, n, ND_E, bn);
+    return n;
+}
+
+/// `Parser.unit()` —— 函数表写进 `M_LIST`，`outp` 收 (start, count)；返回 1/0。
+fn p_unit(mem: ptr, src: ptr, lang: u32, outp: ptr) -> u32 {
+    let st: ptr = pst(mem);
+    if li_enter(mem) == FAIL {
+        let _e: u32 = perr(mem, 1);
+        return 0;
+    }
+    let a0: u32 = li_here(mem);
+    let cnt: u32 = 0;
+    while tk_kind(mem, ld32(st, PS_I)) != 0 {
+        if p_at(mem, src, "#", 0) == 1 {
+            let _e: u32 = perr(mem, 1);
+            return 0;
+        }
+        if p_spec(mem, src, lang) == 0 {
+            return 0;
+        }
+        let tid: u32 = ld32(st, 344);
+        let nmo: u32 = ld32(st, 328);
+        let nml: u32 = ld32(st, 332);
+        let line: u32 = ld32(st, 336);
+        let spec0: u32 = ld32(st, PS_SPEC0);
+        if p_at(mem, src, "(", 0) == 0 {
+            if spec_has_const(mem, src, spec0, ld32(st, PS_I)) == 1
+                    && p_at(mem, src, "=", 0) == 1 {
+                let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                if p_at(mem, src, "-", 0) == 1 && tk_kind(mem, ld32(st, PS_I) + 1) == 2 {
+                    let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                }
+                if tk_kind(mem, ld32(st, PS_I)) != 2 {
+                    let _e: u32 = perr(mem, 1);
+                    return 0;
+                }
+                let _i3: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                if p_want(mem, src, ";") == 0 {
+                    return 0;
+                }
+            } else {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+        } else {
+            let _i: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+            if li_enter(mem) == FAIL {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            let p0: u32 = li_here(mem);
+            let pn: u32 = 0;
+            if p_at(mem, src, ")", 0) == 0 {
+                if p_at(mem, src, "void", 0) == 1 && p_at(mem, src, ")", 1) == 1 {
+                    let _i2: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                } else {
+                    if p_spec(mem, src, lang) == 0 {
+                        return 0;
+                    }
+                    let _q1: u32 = li_push(mem, ld32(st, 344));
+                    let _q3: u32 = li_push(mem, ld32(st, 328));
+                    let _q4: u32 = li_push(mem, ld32(st, 332));
+                    pn = 1;
+                    while p_at(mem, src, ",", 0) == 1 {
+                        let _c1: u32 = st32(st, PS_I, ld32(st, PS_I) + 1);
+                        if p_spec(mem, src, lang) == 0 {
+                            return 0;
+                        }
+                        let _q5: u32 = li_push(mem, ld32(st, 344));
+                        let _q7: u32 = li_push(mem, ld32(st, 328));
+                        let _q8: u32 = li_push(mem, ld32(st, 332));
+                        pn = pn + 1;
+                    }
+                }
+            }
+            let _lv: u32 = li_leave(mem);
+            if p_want(mem, src, ")") == 0 {
+                return 0;
+            }
+            if p_at(mem, src, ";", 0) == 1 {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            // **函数体要另起一层**：形参刚在上一层（depth 2）写完，`li_enter` 会把那一层的
+            // 游标清零 —— 直接进 `p_block` 的话，**第一条语句会盖掉第一个形参**
+            //（症状：每个函数第一个形参的类型/名字都变成别的东西，其余都对）。
+            let _be: u32 = li_enter(mem);
+            if _be == FAIL {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            if p_block(mem, src, lang, ptr_add(st, 432)) == 0 {
+                return 0;
+            }
+            let bs: u32 = ld32(st, 432);
+            let bn: u32 = ld32(st, 436);
+            let _bl: u32 = li_leave(mem);
+            let f: u32 = fn_new(mem);
+            if f == FAIL {
+                let _e: u32 = perr(mem, 1);
+                return 0;
+            }
+            let _a: u32 = fn_set(mem, f, 0, tid);
+            let _b: u32 = fn_set(mem, f, 1, 0);
+            let _c: u32 = fn_set(mem, f, 2, nmo);
+            let _d: u32 = fn_set(mem, f, 3, nml);
+            let _e2: u32 = fn_set(mem, f, 4, p0);
+            let _f: u32 = fn_set(mem, f, 5, pn);
+            let _g: u32 = fn_set(mem, f, 6, bs);
+            let _h: u32 = fn_set(mem, f, 7, bn);
+            let _i3: u32 = li_push(mem, f);
+            cnt = cnt + 1;
+        }
+    }
+    let _lv2: u32 = li_leave(mem);
+    let _a2: u32 = st32(outp, 0, a0);
+    let _b2: u32 = st32(outp, 4, cnt);
+    return 1;
+}
+
+
+// ---------------------------------------------------------------- 发射（语法树 -> Loment 源码）
+//
+// 上游是 `trans_core.translate` + `Emitter`。**四门的差别全在方言表**：
+// `safe_suffix`、两个 `coerce_*` 开关、`int_default` —— 这里照搬，一个 `if <语言>`
+// 都不写（与解析那一半同一条纪律）。
+//
+// 上游文件头那三条"不是翻译、是决定"的东西，这一半是它们的落点：
+//   1. `int x;`（没给初值）补**零值** —— C 读未初始化变量是未定义行为。
+//   2. `for (int i = …)` 的循环变量**改名外提** —— Loment 没有裸块。
+//   3. `static` / `inline` / `const` 收下并丢掉（标量子集里丢 `const` 是保义的）。
+//
+// **表达式走一块临时缓冲**（`M_EB`），一行拼完再整体抄进输出 —— 上游是
+// `lines: list[str]` 再 `"\n".join`，这里不能那样存，就"拼一行、抄一行"。
+// 递归一律用**单调的下标**传下去（`raw(e, buf, o) -> 新末端`），不靠栈。
+
+const W_INT: u32 = 0;              // 这个上下文要"整数"
+const W_BOOL: u32 = 1;             // 这个上下文要"条件"
+const TY_VOID_ID: u32 = 10;        // `()` 的类型 id（见 `ty_id`）
+const E_VN: u32 = 840;             // 变量表条数
+const E_CN: u32 = 844;             // 常量表条数
+const E_KN: u32 = 848;             // `--keep` 表条数
+const E_ANY: u32 = 852;            // 这个函数已经发过行
+const E_NL2: u32 = 856;            // 最后一行是空行
+const E_BR: u32 = 860;             // 最后一行以 `{` 收尾
+const E_OUT: u32 = 864;            // 输出的末端下标
+const E_VBC: u32 = 868;            // 变量名池（`M_VB`）的游标
+const E_FN_N: u32 = 872;           // `fresh()` 的计数器（每个函数归零）
+const E_I2B: u32 = 876;            // 方言开关: 整数 -> 条件
+const E_B2I: u32 = 880;            // 方言开关: 条件 -> 整数
+const E_ERR: u32 = 884;            // 发射期的"子集外"（上游那条 `Unsupported`）
+const E_RET: u32 = 888;            // 正在发的那个函数的返回类型 id
+const E_NC: u32 = 892;             // 外部名池（`M_EXN`）的游标
+const E_AC: u32 = 900;             // 辅助名池（`M_SCR` 高处）的游标
+const E_EXN: u32 = 896;            // 外部函数表条数
+
+const VAR_N: u32 = 0;              // 记录（24 字节）: 源名 off/len、发出名 off/len、
+const VAR_L: u32 = 4;              //   声明时的类型 id、**墓碑**（1 = 已删）
+const VAR_O: u32 = 8;
+const VAR_OL: u32 = 12;
+const VAR_TY: u32 = 16;
+const VAR_DEAD: u32 = 20;
+
+fn em_fail(mem: ptr) -> u32 {
+    return st32(ptr_add(mem, M_TMP), E_ERR, 1);
+}
+
+fn em_ok(mem: ptr) -> u32 {
+    if ld32(ptr_add(mem, M_TMP), E_ERR) == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---- 变量表（上游的 `self.vars` / `self.varty` / `self.consts` 三张）
+
+fn var_n(mem: ptr) -> u32 {
+    return ld32(ptr_add(mem, M_TMP), E_VN);
+}
+
+/// 按**源里的名字**查（返回下标 +1；0 = 没有）。墓碑跳过 —— 与上游
+/// `del self.vars[name]` 等价（那边是真删，这里标记）。
+fn var_find(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = var_n(mem);
+    let r: ptr = ptr_add(mem, M_VAR);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 24 + VAR_DEAD) == 0 && ld32(r, i * 24 + VAR_L) == l
+                && same_n(s, ld32(r, i * 24 + VAR_N), s, a, l) == 1 {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 声明（或重新声明）一个名字 —— 上游是 `self.vars[name] = …`，
+/// **已在表里就原地改，不在才追加**（追加的话重复声明会留下两条，查到的是旧那条）。
+fn var_decl(mem: ptr, a: u32, l: u32, oo: u32, ol: u32, ty: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let k: u32 = var_find(mem, a, l);
+    if k > 0 {
+        let _a: u32 = var_set(mem, k, oo, ol, ty);
+        return k;
+    }
+    let n: u32 = var_n(mem);
+    if n >= VMAX - 1 {
+        let _e: u32 = em_fail(mem);
+        return 0;
+    }
+    let r: ptr = ptr_add(mem, M_VAR);
+    let _1: u32 = st32(r, n * 24 + VAR_N, a);
+    let _2: u32 = st32(r, n * 24 + VAR_L, l);
+    let _3: u32 = st32(r, n * 24 + VAR_O, oo);
+    let _4: u32 = st32(r, n * 24 + VAR_OL, ol);
+    let _5: u32 = st32(r, n * 24 + VAR_TY, ty);
+    let _6: u32 = st32(r, n * 24 + VAR_DEAD, 0);
+    let _7: u32 = st32(st, E_VN, n + 1);
+    return n + 1;
+}
+
+fn var_set(mem: ptr, k: u32, oo: u32, ol: u32, ty: u32) -> u32 {
+    let r: ptr = ptr_add(mem, M_VAR);
+    let _1: u32 = st32(r, (k - 1) * 24 + VAR_O, oo);
+    let _2: u32 = st32(r, (k - 1) * 24 + VAR_OL, ol);
+    let _3: u32 = st32(r, (k - 1) * 24 + VAR_TY, ty);
+    let _4: u32 = st32(r, (k - 1) * 24 + VAR_DEAD, 0);
+    return k;
+}
+
+/// 上游 `del self.vars[name]` —— 记个墓碑（不能改条数：循环体里声明过别的名字，
+/// 那条记录就在它后面）。
+fn var_kill(mem: ptr, k: u32) -> u32 {
+    return st32(ptr_add(mem, M_VAR), (k - 1) * 24 + VAR_DEAD, 1);
+}
+
+fn var_oo(mem: ptr, k: u32) -> u32 {
+    return ld32(ptr_add(mem, M_VAR), (k - 1) * 24 + VAR_O);
+}
+
+fn var_ol(mem: ptr, k: u32) -> u32 {
+    return ld32(ptr_add(mem, M_VAR), (k - 1) * 24 + VAR_OL);
+}
+
+fn var_ty(mem: ptr, k: u32) -> u32 {
+    return ld32(ptr_add(mem, M_VAR), (k - 1) * 24 + VAR_TY);
+}
+
+/// 上游 `want_of(ty)` —— 一个声明出来的类型在这个发射器眼里是"整数场合"还是
+/// "布尔场合"。**所有"右边赋给左边"的地方都走它**（`Decl` / `Assign` / `Return` /
+/// `for` 的初值）。
+fn want_of(tid: u32) -> u32 {
+    if tid == 9 {
+        return W_BOOL;
+    }
+    return W_INT;
+}
+
+/// 段里的**第一个**词写到 `dst`，返回长度。
+fn seg_word(mem: ptr, seg: u32, dst: ptr) -> u32 {
+    let d: ptr = ptr_add(mem, M_WORD);
+    let s0: u32 = ld32(d, seg * 8);
+    let sl: u32 = ld32(d, seg * 8 + 4);
+    let k: u32 = s0;
+    while k < s0 + sl && load8(d, k) != 0 {
+        k = k + 1;
+    }
+    let _c: u32 = copy_n(dst, 0, d, s0, k - s0);
+    return k - s0;
+}
+
+/// `d.safe(name)` —— 撞上 Loment 保留字就加**这一门的**后缀。写进 `dst`，返回长度。
+fn safe_name(mem: ptr, o: u32, l: u32, dst: ptr) -> u32 {
+    let _c: u32 = copy_n(dst, 0, ptr_add(mem, M_SCR), o, l);
+    if word_has(mem, SEG_LKW, ptr_add(mem, M_SCR), o, l) == 1 {
+        let sfx: ptr = ptr_add(mem, M_TMP + 960);
+        let sl: u32 = seg_word(mem, SEG_SAFE, sfx);
+        let _c2: u32 = copy_n(dst, l, sfx, 0, sl);
+        return l + sl;
+    }
+    return l;
+}
+
+fn vb_taken(mem: ptr, o: u32, l: u32) -> u32 {
+    let n: u32 = var_n(mem);
+    let r: ptr = ptr_add(mem, M_VAR);
+    let d: ptr = ptr_add(mem, M_VB);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 24 + VAR_DEAD) == 0 && ld32(r, i * 24 + VAR_OL) == l
+                && same_n(d, ld32(r, i * 24 + VAR_O), d, o, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 上游 `Emitter.fresh(base)` —— `safe(base) + "__" + n`，且不能撞上已有的名字。
+/// **游标不动到不撞为止**：名字写进 `M_VB` 的游标处，返回长度（起点 = 调用前的游标）。
+fn fresh(mem: ptr, o: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let dst: ptr = ptr_add(mem, M_VB);
+    let o0: u32 = ld32(st, E_VBC);
+    let ln: u32 = 0;
+    let tries: u32 = 0;
+    while ln == 0 && tries < 4096 {
+        tries = tries + 1;
+        let n: u32 = ld32(st, E_FN_N) + 1;
+        let _a: u32 = st32(st, E_FN_N, n);
+        let p1: u32 = safe_name(mem, o, l, ptr_add(dst, o0));
+        let p2: u32 = app(dst, o0 + p1, "__");
+        let p3: u32 = appu(mem, dst, p2, n);
+        let t: u32 = p3 - o0;
+        if vb_taken(mem, o0, t) == 0 {
+            ln = t;
+        }
+    }
+    let _b: u32 = st32(st, E_VBC, o0 + ln);
+    return ln;
+}
+
+// ---- 常量表与外部函数表（`--const K:i32` / `--extern f:i32`）
+
+/// `--keep` / `--const` 的名字池 —— 在 `M_SCR` 的高处。查名字的两个函数都拿
+/// `M_SCR` 当基准比，所以这两张表的名字**必须**也住在那儿（外部函数表不一样：
+/// 那边的键来自调用点，两边是各自的池子）。
+const M_AUX: u32 = 122880;
+const AUX_CAP: u32 = 8192;
+
+fn aux_put(mem: ptr, p: ptr, o: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let c: u32 = ld32(st, E_AC);
+    if c + l + 1 >= AUX_CAP {
+        let _e: u32 = em_fail(mem);
+        return 0;
+    }
+    let _c1: u32 = copy_n(ptr_add(mem, M_SCR), M_AUX + c, p, o, l);
+    let _c2: u32 = st32(st, E_AC, c + l + 1);
+    return M_AUX + c;
+}
+
+/// `--extern a:i32,b:()` / `--const K:i32,L` 这种**逗号分隔的列表**。
+/// `is_const` = 1 走常量表（`K` 不带 `:` 也收，类型对常量表没用）；
+/// 否则走外部函数表（**必须**带 `:`，返回类型是调用点要认的东西）。
+fn cli_pairs(mem: ptr, vp: ptr, vl: u32, is_const: u32) -> u32 {
+    let i: u32 = 0;
+    let s0: u32 = 0;
+    while i <= vl {
+        if i == vl || load8(vp, i) == 44 {
+            let a: u32 = s0;
+            let b: u32 = i;
+            while a < b && is_sp(load8(vp, a)) == 1 {
+                a = a + 1;
+            }
+            while b > a && is_sp(load8(vp, b - 1)) == 1 {
+                b = b - 1;
+            }
+            if b > a {
+                let cp: u32 = find_ch(vp, a, b, 58);
+                if is_const == 1 {
+                    let ne: u32 = b - a;
+                    if cp != FAIL {
+                        ne = cp - a;
+                    }
+                    let co: u32 = aux_put(mem, vp, a, ne);
+                    let _ca: u32 = const_add(mem, co, ne);
+                } else {
+                    if cp == FAIL {
+                        return 0;
+                    }
+                    let tid: u32 = ty_id(ptr_add(vp, cp + 1), b - cp - 1);
+                    if tid == 0 {
+                        return 0;
+                    }
+                    let eo: u32 = exn_put(mem, vp, a, cp - a);
+                    let nf: u32 = fn_new(mem);
+                    if nf == FAIL {
+                        return 0;
+                    }
+                    let _f1: u32 = fn_set(mem, nf, 0, tid);
+                    let _f2: u32 = fn_set(mem, nf, 1, 1);
+                    let _f3: u32 = fn_set(mem, nf, 2, eo);
+                    let _f4: u32 = fn_set(mem, nf, 3, cp - a);
+                    let _en: u32 = st32(ptr_add(mem, M_TMP), E_EXN,
+                                        ld32(ptr_add(mem, M_TMP), E_EXN) + 1);
+                }
+            }
+            s0 = i + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn exn_put(mem: ptr, p: ptr, o: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let c: u32 = ld32(st, E_NC);
+    if c + l + 1 >= 16000 {
+        let _e: u32 = em_fail(mem);
+        return 0;
+    }
+    let _c1: u32 = copy_n(ptr_add(mem, M_EXN), c, p, o, l);
+    let _c2: u32 = st32(st, E_NC, c + l + 1);
+    return c;
+}
+
+fn const_find(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), E_CN);
+    let r: ptr = ptr_add(mem, M_CN);
+    let d: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 12 + 4) == l && same_n(d, ld32(r, i * 12), d, a, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn const_add(mem: ptr, a: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, E_CN);
+    if n >= VMAX - 1 {
+        return 0;
+    }
+    let r: ptr = ptr_add(mem, M_CN);
+    let _1: u32 = st32(r, n * 12, a);
+    let _2: u32 = st32(r, n * 12 + 4, l);
+    return st32(st, E_CN, n + 1);
+}
+
+/// 一个名字的返回类型 id（`() ` = 10）。**外部表优先** —— 上游是先收本单元的函数、
+/// 再 `rets.update(externs)`，所以同名的外部函数赢。
+fn fn_ret(mem: ptr, o: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let d: ptr = ptr_add(mem, M_EXN);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let n: u32 = ld32(st, 40);
+    // 先过外部表 —— 上游是先收本单元的、再 `rets.update(externs)`，同名的**外部赢**。
+    // 第 1 格当"这是外部条目"的标记（本单元的条目那边恒为 0）。
+    let res: u32 = FAIL;
+    let k: u32 = 1;
+    while k <= n {
+        if fn_get(mem, k, 1) == 1 && fn_get(mem, k, 3) == l
+                && same_n(d, fn_get(mem, k, 2), s, o, l) == 1 {
+            res = fn_get(mem, k, 0);
+        }
+        k = k + 1;
+    }
+    if res != FAIL {
+        return res;
+    }
+    let k2: u32 = 1;
+    while k2 <= n {
+        if fn_get(mem, k2, 1) == 0 && fn_get(mem, k2, 3) == l
+                && same_n(s, fn_get(mem, k2, 2), s, o, l) == 1 {
+            res = fn_get(mem, k2, 0);
+        }
+        k2 = k2 + 1;
+    }
+    return res;
+}
+
+fn keep_has(mem: ptr, a: u32, l: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_TMP), E_KN);
+    let r: ptr = ptr_add(mem, M_KP);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = 0;
+    while i < n {
+        if ld32(r, i * 12 + 4) == l && same_n(s, ld32(r, i * 12), s, a, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn keep_add(mem: ptr, a: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let n: u32 = ld32(st, E_KN);
+    if n >= FNMAX - 1 {
+        return 0;
+    }
+    let r: ptr = ptr_add(mem, M_KP);
+    let _1: u32 = st32(r, n * 12, a);
+    let _2: u32 = st32(r, n * 12 + 4, l);
+    return st32(st, E_KN, n + 1);
+}
+
+// ---- 类型（`ty_of`）
+
+/// 表达式**自己**的类型: 0 = 整数, 1 = 条件, 2 = 不返回值, 3 = 说不上来（报错）。
+fn ty_of(mem: ptr, e: u32) -> u32 {
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_LIT {
+        if nd_get(mem, e, ND_B) == 1 {
+            return W_BOOL;
+        }
+        return W_INT;
+    }
+    if k == NK_VAR {
+        let f: u32 = var_find(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        if f > 0 && var_ty(mem, f) == 9 {
+            return W_BOOL;
+        }
+        return W_INT;
+    }
+    if k == NK_CALL {
+        let r: u32 = fn_ret(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        if r == FAIL {
+            return 3;
+        }
+        if r == 10 {
+            return TY_VOID_ID;
+        }
+        return W_INT;
+    }
+    if k == NK_UN {
+        if nd_get(mem, e, ND_A) == 2 {
+            return W_BOOL;
+        }
+        return W_INT;
+    }
+    if k == NK_BIN {
+        if bin_isbool(nd_get(mem, e, ND_A)) == 1 {
+            return W_BOOL;
+        }
+        return W_INT;
+    }
+    return 3;
+}
+
+/// 表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。
+/// 结果从 `o` 处往下写进 `buf`，返回新的末端。
+fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
+    let s: ptr = ptr_add(mem, M_SCR);
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_LIT {
+        if nd_get(mem, e, ND_B) == 1 {
+            if nd_get(mem, e, ND_A) == 0 {
+                return app(buf, o, "false");
+            }
+            return app(buf, o, "true");
+        }
+        return appu(mem, buf, o, nd_get(mem, e, ND_A));
+    }
+    if k == NK_VAR {
+        let vo: u32 = nd_get(mem, e, ND_A);
+        let vl: u32 = nd_get(mem, e, ND_B);
+        // 上游先看常量名（照抄）、再看变量 —— 顶层常量声明在解析时被跳过，
+        // 名字对不上的话就是 `lomt_from` 那一步没收它。
+        if const_find(mem, vo, vl) == 1 {
+            return appn(buf, o, s, vo, vl);
+        }
+        let f: u32 = var_find(mem, vo, vl);
+        if f > 0 {
+            return appn(buf, o, ptr_add(mem, M_VB), var_oo(mem, f), var_ol(mem, f));
+        }
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    if k == NK_CALL {
+        let o2: u32 = appn(buf, o, s, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        let o3: u32 = app(buf, o2, "(");
+        let ao: u32 = nd_get(mem, e, ND_C);
+        let an: u32 = nd_get(mem, e, ND_D);
+        let i: u32 = 0;
+        let cur: u32 = o3;
+        while i < an {
+            if i > 0 {
+                cur = app(buf, cur, ", ");
+            }
+            cur = ex_want(mem, li_get(mem, ao + i), W_INT, buf, cur);
+            i = i + 1;
+        }
+        return app(buf, cur, ")");
+    }
+    if k == NK_UN {
+        if nd_get(mem, e, ND_A) == 2 {
+            // Loment 的 `!` 只收 bool，而 C 的 `!x` 收 int —— 直接写成 `x == 0`
+            let o2: u32 = app(buf, o, "(");
+            let o3: u32 = ex_want(mem, nd_get(mem, e, ND_B), W_INT, buf, o2);
+            return app(buf, o3, " == 0)");
+        }
+        let o2: u32 = app(buf, o, "(-");
+        let o3: u32 = ex_want(mem, nd_get(mem, e, ND_B), W_INT, buf, o2);
+        return app(buf, o3, ")");
+    }
+    if k == NK_BIN {
+        let c: u32 = nd_get(mem, e, ND_A);
+        let w: u32 = bin_want(c);
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = ex_want(mem, nd_get(mem, e, ND_B), w, buf, o2);
+        let o4: u32 = app(buf, o3, " ");
+        let o5: u32 = app(buf, o4, bin_text(c));
+        let o6: u32 = app(buf, o5, " ");
+        let o7: u32 = ex_want(mem, nd_get(mem, e, ND_C), w, buf, o6);
+        return app(buf, o7, ")");
+    }
+    let _e: u32 = em_fail(mem);
+    return o;
+}
+
+/// 表达式，**在 `want` 这个上下文里**的写法（必要时补转换）。
+///
+/// **两条转换要不要补，是方言表说了算** —— 这是这一族里最会咬人的一格：
+/// C / C++ 的 `&&` 出 `int`、`if (x)` 收标量，两个方向都要补；Java / C# 的 `&&`
+/// 出 `boolean`、条件只收 `boolean`，**一个都不用**。同一处的差别，按"能表达的就转、
+/// 表达不出来的就报错"那条判据，两族结论相反。
+fn ex_want(mem: ptr, e: u32, want: u32, buf: ptr, o: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let got: u32 = ty_of(mem, e);
+    if got == TY_VOID_ID || got == 3 {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    if got == want {
+        return raw_ex(mem, e, buf, o);
+    }
+    if got == W_INT {
+        if ld32(st, E_I2B) == 0 {
+            let _e: u32 = em_fail(mem);
+            return o;
+        }
+        let o2: u32 = raw_ex(mem, e, buf, o);
+        return app(buf, o2, " != 0");          // `if (x)`：非零即真
+    }
+    if ld32(st, E_B2I) == 0 {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    let o2: u32 = app(buf, o, "(");
+    let o3: u32 = raw_ex(mem, e, buf, o2);
+    let o4: u32 = app(buf, o3, ") as ");
+    let t: ptr = ptr_add(mem, M_TMP + 960);
+    let tl: u32 = seg_word(mem, SEG_INTDEF, t);
+    return appn(buf, o4, t, 0, tl);
+}
+
+// ---- 行（上游的 `lines` / `out` / `gap`）
+
+/// 把 `M_EB` 的 `[0, n)` 当成一行发出去（缩进 `depth + 1` 层）。
+/// `br` = 这一行以 `{` 收尾（`gap` 要看这个）。
+fn line_put(mem: ptr, n: u32, depth: u32, br: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let cur: u32 = ld32(st, E_OUT);
+    let i: u32 = 0;
+    let c0: u32 = cur;
+    while i < depth + 1 {
+        c0 = app(out, c0, "    ");
+        i = i + 1;
+    }
+    let c1: u32 = appn(out, c0, ptr_add(mem, M_EB), 0, n);
+    let c2: u32 = app(out, c1, "\n");
+    let _a: u32 = st32(st, E_OUT, c2);
+    let _b: u32 = st32(st, E_ANY, 1);
+    let _c: u32 = st32(st, E_NL2, 0);
+    let _d: u32 = st32(st, E_BR, br);
+    return c2;
+}
+
+/// **不缩进**的一行（内容在 `M_EB`）—— 只有**函数头**用它：上游是
+/// `lines.append(head + " {")`，那头一行不缩进。
+fn line_put_ni(mem: ptr, n: u32, br: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let c0: u32 = appn(out, ld32(st, E_OUT), ptr_add(mem, M_EB), 0, n);
+    let c1: u32 = app(out, c0, "
+");
+    let _a: u32 = st32(st, E_OUT, c1);
+    let _b: u32 = st32(st, E_ANY, 1);
+    let _c: u32 = st32(st, E_NL2, 0);
+    let _d: u32 = st32(st, E_BR, br);
+    return c1;
+}
+
+/// 一行字面量（缩进 `depth + 1` 层）—— `}` / `} else {` 这类收尾行用。
+fn line_lit(mem: ptr, s: str, depth: u32, br: u32) -> u32 {
+    return line_put(mem, app(ptr_add(mem, M_EB), 0, s), depth, br);
+}
+
+/// **不缩进**的一行 —— 只有函数收尾那个 `}` 用它（上游是 `lines.append("}")`）。
+fn line_put0(mem: ptr, s: str) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let c0: u32 = app(out, ld32(st, E_OUT), s);
+    let c1: u32 = app(out, c0, "\n");
+    let _a: u32 = st32(st, E_OUT, c1);
+    let _b: u32 = st32(st, E_ANY, 1);
+    let _c: u32 = st32(st, E_NL2, 0);
+    let _d: u32 = st32(st, E_BR, 0);
+    return c1;
+}
+
+/// 控制流前面留一个空行 —— **但别在开头留**（`{` 后面直接一个空行很难看），
+/// 也别连着留两个。
+fn gap(mem: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    if ld32(st, E_ANY) == 0 || ld32(st, E_NL2) == 1 || ld32(st, E_BR) == 1 {
+        return 0;
+    }
+    let c: u32 = app(ptr_add(mem, M_OUT), ld32(st, E_OUT), "\n");
+    let _a: u32 = st32(st, E_OUT, c);
+    let _b: u32 = st32(st, E_NL2, 1);
+    let _c: u32 = st32(st, E_BR, 0);
+    return 1;
+}
+
+// ---- 语句
+
+fn stmts(mem: ptr, start: u32, cnt: u32, depth: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cnt {
+        let _r: u32 = emit_stmt(mem, li_get(mem, start + i), depth);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let k: u32 = nd_get(mem, s, ND_KIND);
+    if k == NK_DECL {
+        let tid: u32 = nd_get(mem, s, ND_A);
+        if tid == 10 {
+            let _e: u32 = em_fail(mem);      // 上游: 不能声明 `void` 变量
+            return 0;
+        }
+        let no: u32 = nd_get(mem, s, ND_C);
+        let nl: u32 = nd_get(mem, s, ND_D);
+        let o0: u32 = ld32(st, E_VBC);
+        let ln: u32 = safe_name(mem, no, nl, ptr_add(ptr_add(mem, M_VB), o0));
+        let _s0: u32 = st32(st, E_VBC, o0 + ln);
+        let _vd: u32 = var_decl(mem, no, nl, o0, ln, tid);
+        let o: u32 = app(eb, 0, "let ");
+        let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
+        let o3: u32 = app(eb, o2, ": ");
+        let o4: u32 = app(eb, o3, ty_text(tid));
+        let o5: u32 = app(eb, o4, " = ");
+        let e: u32 = nd_get(mem, s, ND_E);
+        let o6: u32 = 0;
+        if e == 0 {
+            // 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
+            o6 = app(eb, o5, "0");
+        } else {
+            o6 = ex_want(mem, e - 1, want_of(tid), eb, o5);
+        }
+        let o7: u32 = app(eb, o6, ";");
+        return line_put(mem, o7, depth, 0);
+    }
+    if k == NK_ASSIGN {
+        let f: u32 = var_find(mem, nd_get(mem, s, ND_A), nd_get(mem, s, ND_B));
+        if f == 0 {
+            let _e: u32 = em_fail(mem);      // 赋值给没声明过的
+            return 0;
+        }
+        let o: u32 = appn(eb, 0, ptr_add(mem, M_VB), var_oo(mem, f), var_ol(mem, f));
+        let o2: u32 = app(eb, o, " = ");
+        let o3: u32 = ex_want(mem, nd_get(mem, s, ND_C), want_of(var_ty(mem, f)), eb, o2);
+        let o4: u32 = app(eb, o3, ";");
+        return line_put(mem, o4, depth, 0);
+    }
+    if k == NK_RETURN {
+        let e: u32 = nd_get(mem, s, ND_A);
+        if e == 0 {
+            return line_put(mem, app(eb, 0, "return;"), depth, 0);
+        }
+        // **要的是这个函数声明的返回类型，不是写死的 `int`。**
+        // `bool positive(int x) { return x > 0; }` 里那个 `x > 0` 本来就是条件，
+        // 写死"整数"会把它补成 `(x > 0) as i32` —— 而函数声明的是 `-> bool`，
+        // 那是本语言的类型错。
+        let o: u32 = app(eb, 0, "return ");
+        let o2: u32 = ex_want(mem, e, want_of(ld32(st, E_RET)), eb, o);
+        let o3: u32 = app(eb, o2, ";");
+        return line_put(mem, o3, depth, 0);
+    }
+    if k == NK_IF {
+        gap(mem);
+        let o: u32 = app(eb, 0, "if ");
+        let o2: u32 = ex_want(mem, nd_get(mem, s, ND_A), W_BOOL, eb, o);
+        let o3: u32 = app(eb, o2, " {");
+        let _l1: u32 = line_put(mem, o3, depth, 1);
+        let _t: u32 = stmts(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
+        if nd_get(mem, s, ND_E) == FAIL {
+            return line_lit(mem, "}", depth, 0);
+        }
+        let _l2: u32 = line_lit(mem, "} else {", depth, 1);   // 以 `{` 收尾 —— `gap` 看这个
+        let _e2: u32 = stmts(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
+        return line_lit(mem, "}", depth, 0);
+    }
+    if k == NK_WHILE {
+        gap(mem);
+        let o: u32 = app(eb, 0, "while ");
+        let o2: u32 = ex_want(mem, nd_get(mem, s, ND_A), W_BOOL, eb, o);
+        let o3: u32 = app(eb, o2, " {");
+        let _l1: u32 = line_put(mem, o3, depth, 1);
+        let _b: u32 = stmts(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
+        return line_lit(mem, "}", depth, 0);
+    }
+    if k == NK_FOR {
+        return emit_for(mem, s, depth);
+    }
+    if k == NK_EXPR {
+        let c: u32 = nd_get(mem, s, ND_A);
+        if nd_get(mem, c, ND_KIND) != NK_CALL {
+            let _e: u32 = em_fail(mem);      // 表达式语句只收函数调用
+            return 0;
+        }
+        let o: u32 = raw_ex(mem, c, eb, 0);
+        let o2: u32 = app(eb, o, ";");
+        return line_put(mem, o2, depth, 0);
+    }
+    let _e: u32 = em_fail(mem);
+    return 0;
+}
+
+/// `for (init; cond; step) body` -> `init; while cond { body; step; }`。
+///
+/// **Loment 没有裸块**，所以 `for (int i = …)` 里那个 `i` 不能靠一层 `{ }` 圈住 ——
+/// 只能改名外提（见文件头 §语义选择 2）。改名是安全的：C 的 for 作用域本来就在
+/// 循环结束处结束，外面看不到它。
+///
+/// 初值是**声明**时改名；初值是**赋值**（`for (i = 3; …)`）时原地发出，名字不动 ——
+/// 那种写法用的是外面的变量，本来就该影响外面。
+fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    gap(mem);
+    let init: u32 = nd_get(mem, s, ND_A);
+    let vno: u32 = 0;
+    let vnl: u32 = 0;
+    let sv_k: u32 = 0;
+    let sv_oo: u32 = 0;
+    let sv_ol: u32 = 0;
+    let sv_ty: u32 = 0;
+    let is_decl: u32 = 0;
+    if init != 0 && nd_get(mem, init, ND_KIND) == NK_DECL {
+        is_decl = 1;
+        let tid: u32 = nd_get(mem, init, ND_A);
+        if tid == 10 {
+            let _e: u32 = em_fail(mem);
+            return 0;
+        }
+        vno = nd_get(mem, init, ND_C);
+        vnl = nd_get(mem, init, ND_D);
+        // 老的那条先记下来（`fresh` 是在它还占着名字的时候问的 —— 与上游同序）
+        sv_k = var_find(mem, vno, vnl);
+        if sv_k > 0 {
+            sv_oo = var_oo(mem, sv_k);
+            sv_ol = var_ol(mem, sv_k);
+            sv_ty = var_ty(mem, sv_k);
+        }
+        let o0: u32 = ld32(st, E_VBC);
+        let ln: u32 = fresh(mem, vno, vnl);
+        let _vd: u32 = var_decl(mem, vno, vnl, o0, ln, tid);
+        let o: u32 = app(eb, 0, "let ");
+        let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
+        let o3: u32 = app(eb, o2, ": ");
+        let o4: u32 = app(eb, o3, ty_text(tid));
+        let o5: u32 = app(eb, o4, " = ");
+        let ie: u32 = nd_get(mem, init, ND_E);
+        let o6: u32 = 0;
+        if ie == 0 {
+            o6 = app(eb, o5, "0");
+        } else {
+            o6 = ex_want(mem, ie - 1, want_of(tid), eb, o5);
+        }
+        let o7: u32 = app(eb, o6, ";");
+        let _l: u32 = line_put(mem, o7, depth, 0);
+    } else {
+        if init != 0 {
+            let _r: u32 = emit_stmt(mem, init, depth);
+        }
+    }
+    let cond: u32 = nd_get(mem, s, ND_B);
+    let o: u32 = app(eb, 0, "while ");
+    let o2: u32 = 0;
+    if cond == 0 {
+        o2 = app(eb, o, "true");
+    } else {
+        o2 = ex_want(mem, cond, W_BOOL, eb, o);
+    }
+    let o3: u32 = app(eb, o2, " {");
+    let _l2: u32 = line_put(mem, o3, depth, 1);
+    let _b: u32 = stmts(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
+    let step: u32 = nd_get(mem, s, ND_C);
+    if step != 0 {
+        let _r: u32 = emit_stmt(mem, step, depth + 1);   // 步进在体**之后**
+    }
+    let _l3: u32 = line_lit(mem, "}", depth, 0);
+    // 循环结束：那个名字的作用域也结束（C 的 for 语义）。有遮蔽就把外层的还回去。
+    if is_decl == 1 {
+        let k: u32 = var_find(mem, vno, vnl);
+        if k > 0 {
+            if sv_k == 0 {
+                let _d: u32 = var_kill(mem, k);
+            } else {
+                let _r2: u32 = var_set(mem, k, sv_oo, sv_ol, sv_ty);
+            }
+        }
+    }
+    return 1;
+}
+
+/// 一个函数一份 `Emitter`：表归零、名字池归零、`fresh` 计数归零，然后发一行头、
+/// 发体、再发收尾的 `}`。
+fn emit_fn(mem: ptr, f: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let _1: u32 = st32(st, E_VN, 0);
+    let _2: u32 = st32(st, E_VBC, 0);
+    let _3: u32 = st32(st, E_FN_N, 0);
+    let _4: u32 = st32(st, E_ANY, 0);
+    let _5: u32 = st32(st, E_NL2, 0);
+    let _6: u32 = st32(st, E_BR, 0);
+    let _7: u32 = st32(st, E_RET, fn_get(mem, f, 0));
+    let p0: u32 = fn_get(mem, f, 4);
+    let pn: u32 = fn_get(mem, f, 5);
+    let i: u32 = 0;
+    while i < pn {
+        let t: u32 = li_get(mem, p0 + i * 3);
+        let no: u32 = li_get(mem, p0 + i * 3 + 1);
+        let nl: u32 = li_get(mem, p0 + i * 3 + 2);
+        let o0: u32 = ld32(st, E_VBC);
+        let ln: u32 = safe_name(mem, no, nl, ptr_add(ptr_add(mem, M_VB), o0));
+        let _s0: u32 = st32(st, E_VBC, o0 + ln);
+        let _vd: u32 = var_decl(mem, no, nl, o0, ln, t);
+        i = i + 1;
+    }
+    let o: u32 = app(eb, 0, "pub fn ");
+    let o2: u32 = appn(eb, o, ptr_add(mem, M_SCR), fn_get(mem, f, 2), fn_get(mem, f, 3));
+    let o3: u32 = app(eb, o2, "(");
+    let j: u32 = 0;
+    let cur: u32 = o3;
+    while j < pn {
+        if j > 0 {
+            cur = app(eb, cur, ", ");
+        }
+        let k: u32 = var_find(mem, li_get(mem, p0 + j * 3 + 1), li_get(mem, p0 + j * 3 + 2));
+        cur = appn(eb, cur, ptr_add(mem, M_VB), var_oo(mem, k), var_ol(mem, k));
+        cur = app(eb, cur, ": ");
+        cur = app(eb, cur, ty_text(li_get(mem, p0 + j * 3)));
+        j = j + 1;
+    }
+    let o4: u32 = app(eb, cur, ")");
+    let o5: u32 = 0;
+    if fn_get(mem, f, 0) != 10 {
+        o5 = app(eb, o4, " -> ");
+        o5 = app(eb, o5, ty_text(fn_get(mem, f, 0)));
+    } else {
+        o5 = o4;
+    }
+    let o6: u32 = app(eb, o5, " {");
+    let _l1: u32 = line_put_ni(mem, o6, 1);
+    let _b: u32 = stmts(mem, fn_get(mem, f, 6), fn_get(mem, f, 7), 0);
+    let _l2: u32 = line_put0(mem, "}");
+    return 1;
+}
+
+/// `translate()` —— 整份源发出去。返回 1（成功了）；失败时 `E_ERR` 是 1。
+///
+/// 顺序与上游一字不差：先 `unit()`（有语法错就先报语法错）、再查重名、
+/// 再按 `keep` 过滤、最后逐个函数发射。
+fn emit_unit(mem: ptr, ustart: u32, ucnt: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _a: u32 = st32(st, E_OUT, 0);
+    let _b: u32 = st32(st, E_NL2, 0);
+    let _c: u32 = st32(st, E_BR, 0);
+    // 重名（Loment 没有重载，名字必须精确）
+    let i: u32 = 0;
+    while i < ucnt {
+        let f: u32 = li_get(mem, ustart + i);
+        let j: u32 = i + 1;
+        while j < ucnt {
+            let g: u32 = li_get(mem, ustart + j);
+            if fn_get(mem, f, 3) == fn_get(mem, g, 3)
+                    && same_n(ptr_add(mem, M_SCR), fn_get(mem, f, 2),
+                              ptr_add(mem, M_SCR), fn_get(mem, g, 2),
+                              fn_get(mem, f, 3)) == 1 {
+                let _e: u32 = em_fail(mem);
+                return 0;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let has_keep: u32 = 0;
+    if ld32(st, E_KN) > 0 {
+        has_keep = 1;
+    }
+    let nseen: u32 = 0;
+    let k: u32 = 0;
+    while k < ucnt {
+        let f: u32 = li_get(mem, ustart + k);
+        if has_keep == 1 && keep_has(mem, fn_get(mem, f, 2), fn_get(mem, f, 3)) == 0 {
+            k = k + 1;
+        } else {
+            if nseen > 0 {
+                let c: u32 = app(ptr_add(mem, M_OUT), ld32(st, E_OUT), "\n");
+                let _z1: u32 = st32(st, E_OUT, c);
+                let _z2: u32 = st32(st, E_NL2, 1);
+            }
+            let _r: u32 = emit_fn(mem, f);
+            nseen = nseen + 1;
+            k = k + 1;
+        }
+    }
+    if nseen == 0 {
+        let c: u32 = app(ptr_add(mem, M_OUT), ld32(st, E_OUT), "\n");
+        let _z: u32 = st32(st, E_OUT, c);
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 语法树转写（`--ast`）
+//
+// 开发期对拍用：把语法树打成一串 S 表达式，与 Python 那边的同一份转写逐字节比
+// —— 翻译器出了问题，先分清"是读错了还是发错了"。判据不用它。
+
+fn dump_list(mem: ptr, src: ptr, start: u32, cnt: u32, out: ptr, o: u32) -> u32 {
+    let i: u32 = 0;
+    o = app(out, o, "[");
+    while i < cnt {
+        if i > 0 {
+            o = app(out, o, " ");
+        }
+        o = dump_stmt(mem, src, li_get(mem, start + i), out, o);
+        i = i + 1;
+    }
+    return app(out, o, "]");
+}
+
+fn dump_stmt(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+    let k: u32 = nd_get(mem, n, ND_KIND);
+    if k == NK_LIT {
+        let b: u32 = nd_get(mem, n, ND_B);
+        if b == 1 {
+            if nd_get(mem, n, ND_A) == 1 {
+                return app(out, o, "(Lit #t)");
+            }
+            return app(out, o, "(Lit #f)");
+        }
+        o = app(out, o, "(Lit ");
+        o = appu(mem, out, o, nd_get(mem, n, ND_A));
+        return app(out, o, ")");
+    }
+    if k == NK_VAR {
+        o = app(out, o, "(Var ");
+        o = appn(out, o, src, nd_get(mem, n, ND_A), nd_get(mem, n, ND_B));
+        return app(out, o, ")");
+    }
+    if k == NK_CALL {
+        o = app(out, o, "(Call ");
+        o = appn(out, o, src, nd_get(mem, n, ND_A), nd_get(mem, n, ND_B));
+        let cnt: u32 = nd_get(mem, n, ND_D);
+        let a: u32 = nd_get(mem, n, ND_C);
+        let i: u32 = 0;
+        while i < cnt {
+            o = app(out, o, " ");
+            o = dump_expr(mem, src, li_get(mem, a + i), out, o);
+            i = i + 1;
+        }
+        return app(out, o, ")");
+    }
+    if k == NK_UN {
+        o = app(out, o, "(Un ");
+        if nd_get(mem, n, ND_A) == 2 {
+            o = app(out, o, "!");
+        } else {
+            o = app(out, o, "-");
+        }
+        o = app(out, o, " ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_B), out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_BIN {
+        o = app(out, o, "(Bin ");
+        o = app(out, o, bin_text(nd_get(mem, n, ND_A)));
+        o = app(out, o, " ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_B), out, o);
+        o = app(out, o, " ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_C), out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_DECL {
+        o = app(out, o, "(Decl ");
+        o = app(out, o, ty_text(nd_get(mem, n, ND_A)));
+        o = app(out, o, " ");
+        o = appn(out, o, src, nd_get(mem, n, ND_C), nd_get(mem, n, ND_D));
+        o = app(out, o, " ");
+        let iv: u32 = nd_get(mem, n, ND_E);
+        if iv == 0 {
+            return app(out, o, "_)");
+        }
+        o = dump_expr(mem, src, iv - 1, out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_ASSIGN {
+        o = app(out, o, "(Assign ");
+        o = appn(out, o, src, nd_get(mem, n, ND_A), nd_get(mem, n, ND_B));
+        o = app(out, o, " ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_C), out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_RETURN {
+        o = app(out, o, "(Return ");
+        let e: u32 = nd_get(mem, n, ND_A);
+        if e == 0 {
+            return app(out, o, "_)");
+        }
+        o = dump_expr(mem, src, e, out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_IF {
+        o = app(out, o, "(If ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_A), out, o);
+        o = app(out, o, " ");
+        o = dump_list(mem, src, nd_get(mem, n, ND_B), nd_get(mem, n, ND_C), out, o);
+        o = app(out, o, " ");
+        let en: u32 = nd_get(mem, n, ND_E);
+        if en == FAIL {
+            o = app(out, o, "_");
+        } else {
+            o = dump_list(mem, src, nd_get(mem, n, ND_D), en, out, o);
+        }
+        return app(out, o, ")");
+    }
+    if k == NK_WHILE {
+        o = app(out, o, "(While ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_A), out, o);
+        o = app(out, o, " ");
+        o = dump_list(mem, src, nd_get(mem, n, ND_B), nd_get(mem, n, ND_C), out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_FOR {
+        o = app(out, o, "(For ");
+        let a: u32 = nd_get(mem, n, ND_A);
+        if a == 0 {
+            o = app(out, o, "_");
+        } else {
+            o = dump_stmt(mem, src, a, out, o);
+        }
+        o = app(out, o, " ");
+        let b: u32 = nd_get(mem, n, ND_B);
+        if b == 0 {
+            o = app(out, o, "_");
+        } else {
+            o = dump_expr(mem, src, b, out, o);
+        }
+        o = app(out, o, " ");
+        let c: u32 = nd_get(mem, n, ND_C);
+        if c == 0 {
+            o = app(out, o, "_");
+        } else {
+            o = dump_stmt(mem, src, c, out, o);
+        }
+        o = app(out, o, " ");
+        o = dump_list(mem, src, nd_get(mem, n, ND_D), nd_get(mem, n, ND_E), out, o);
+        return app(out, o, ")");
+    }
+    if k == NK_EXPR {
+        o = app(out, o, "(Expr ");
+        o = dump_expr(mem, src, nd_get(mem, n, ND_A), out, o);
+        return app(out, o, ")");
+    }
+    return app(out, o, "(?)");
+}
+
+fn dump_expr(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+    return dump_stmt(mem, src, n, out, o);
+}
+
+/// 整个单元：每个函数一行。
+fn dump_unit(mem: ptr, src: ptr, start: u32, cnt: u32, out: ptr) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < cnt {
+        let f: u32 = li_get(mem, start + i);
+        o = app(out, o, "(Fn ");
+        o = app(out, o, ty_text(fn_get(mem, f, 0)));
+        o = app(out, o, " ");
+        o = appn(out, o, src, fn_get(mem, f, 2), fn_get(mem, f, 3));
+        o = app(out, o, " [");
+        let pn: u32 = fn_get(mem, f, 5);
+        let p0: u32 = fn_get(mem, f, 4);
+        let j: u32 = 0;
+        while j < pn {
+            if j > 0 {
+                o = app(out, o, " ");
+            }
+            o = app(out, o, "(");
+            o = app(out, o, ty_text(li_get(mem, p0 + j * 3)));
+            o = app(out, o, " ");
+            o = appn(out, o, src, li_get(mem, p0 + j * 3 + 1), li_get(mem, p0 + j * 3 + 2));
+            o = app(out, o, ")");
+            j = j + 1;
+        }
+        o = app(out, o, "] ");
+        o = dump_list(mem, src, fn_get(mem, f, 6), fn_get(mem, f, 7), out, o);
+        o = app(out, o, ")\n");
+        i = i + 1;
+    }
+    return o;
+}
+
+
+// ---------------------------------------------------------------- 入口
+
+/// argv 第 k 项（从 0 数）的偏移；返回长度。
+fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let s: u32 = 0;
+    let found: u32 = 0;
+    let ln: u32 = 0;
+    while i < tot {
+        if load8(buf, i) == 0 {
+            if idx == k && found == 0 {
+                let _a: u32 = st32(outp, 0, s);
+                ln = i - s;
+                found = 1;
+            }
+            idx = idx + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
+
+/// 一个 argv 参数是不是 `lit`。
+fn arg_is(cb: ptr, tot: u32, k: u32, lit: str) -> u32 {
+    let ap: ptr = ptr_add(cb, M_TMP + 96);
+    let l: u32 = arg_at(cb, tot, k, ap);
+    if l == 0 {
+        return 0;
+    }
+    let o: u32 = ld32(ap, 0);
+    if l != str_len(lit) {
+        return 0;
+    }
+    return eq(cb, o, lit);
+}
+
+/// 参数的文本（写进 `M_TMP + 64`，返回长度）—— 给 `--lang c` 这种"值在下一个参数"
+/// 与 `--k=v` 两种写法用。
+fn arg_val(cb: ptr, tot: u32, k: u32, out: ptr) -> u32 {
+    let ap: ptr = ptr_add(cb, M_TMP + 96);
+    let l: u32 = arg_at(cb, tot, k, ap);
+    if l == 0 {
+        return 0;
+    }
+    let o: u32 = ld32(ap, 0);
+    let _c: u32 = copy_n(out, 0, cb, o, l);
+    return l;
+}
+
+fn lang_of(p: ptr, l: u32) -> u32 {
+    if l == 1 && eq(p, 0, "c") == 1 {
+        return DL_C + 1;
+    }
+    if l == 3 && eq(p, 0, "cpp") == 1 {
+        return DL_CPP + 1;
+    }
+    if l == 4 && eq(p, 0, "java") == 1 {
+        return DL_JAVA + 1;
+    }
+    if l == 6 && eq(p, 0, "csharp") == 1 {
+        return DL_CS + 1;
+    }
+    return 0;
+}
+
+fn _start() -> u32 {
+    let mv: i64 = syscall4(12, 0, 0, 0);
+    if mv <= 0 {
+        return die(2);
+    }
+    let mem: ptr = mv as ptr;
+    let _z1: u32 = st32(ptr_add(mem, M_TMP), E_CN, 0);
+    let _z2: u32 = st32(ptr_add(mem, M_TMP), E_KN, 0);
+    let _z3: u32 = st32(ptr_add(mem, M_TMP), E_EXN, 0);
+    let _z4: u32 = st32(ptr_add(mem, M_TMP), E_ERR, 0);
+    let _z5: u32 = st32(ptr_add(mem, M_TMP), E_OUT, 0);
+    let _z6: u32 = st32(ptr_add(mem, M_TMP), E_NC, 0);
+    let _z7: u32 = st32(ptr_add(mem, M_TMP), E_AC, 0);
+    let cb: ptr = ptr_add(mem, M_ARG);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        return die(2);
+    }
+    let tot: u32 = read_all(fd as u64, cb, 4096) as u32;
+    syscall4(3, fd as u64, 0, 0);
+    let vp: ptr = ptr_add(mem, M_TMP + 64);
+    let lang: u32 = 0;
+    let toks: u32 = 0;
+    let pre: u32 = 0;
+    let ast: u32 = 0;
+    let pathk: u32 = 0;
+    let k: u32 = 1;
+    let argc: u32 = 0;
+    let q: u32 = 0;
+    while q < tot {
+        if load8(cb, q) == 0 {
+            argc = argc + 1;
+        }
+        q = q + 1;
+    }
+    while k < argc {
+        if arg_is(cb, tot, k, "--lang") == 1 {
+            let l: u32 = arg_val(cb, tot, k + 1, vp);
+            let d: u32 = lang_of(vp, l);
+            if d == 0 {
+                return die(2);
+            }
+            lang = d - 1;
+            k = k + 2;
+        } else {
+            if arg_is(cb, tot, k, "--tokens") == 1 {
+                toks = 1;
+                k = k + 1;
+            } else {
+                if arg_is(cb, tot, k, "--ast") == 1 {
+                    ast = 1;
+                    k = k + 1;
+                } else {
+                    if arg_is(cb, tot, k, "--pre") == 1 {
+                        pre = 1;
+                        k = k + 1;
+                    } else {
+                        if arg_is(cb, tot, k, "--keep") == 1 {
+                            let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                            let i: u32 = 0;
+                            let s0: u32 = 0;
+                            while i <= vl {
+                                if i == vl || load8(vp, i) == 44 {
+                                    let a: u32 = s0;
+                                    let b: u32 = i;
+                                    while a < b && is_sp(load8(vp, a)) == 1 {
+                                        a = a + 1;
+                                    }
+                                    while b > a && is_sp(load8(vp, b - 1)) == 1 {
+                                        b = b - 1;
+                                    }
+                                    if b > a {
+                                        let ao: u32 = aux_put(mem, vp, a, b - a);
+                                        let _ka: u32 = keep_add(mem, ao, b - a);
+                                    }
+                                    s0 = i + 1;
+                                }
+                                i = i + 1;
+                            }
+                            k = k + 2;
+                        } else {
+                            if arg_is(cb, tot, k, "--extern") == 1 {
+                                let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                                if cli_pairs(mem, vp, vl, 0) == 0 {
+                                    return die(2);
+                                }
+                                k = k + 2;
+                            } else {
+                                if arg_is(cb, tot, k, "--const") == 1 {
+                                    let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                                    if cli_pairs(mem, vp, vl, 1) == 0 {
+                                        return die(2);
+                                    }
+                                    k = k + 2;
+                                } else {
+                                    pathk = k;
+                                    k = k + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if pathk == 0 {
+        return die(2);
+    }
+    let _i: u32 = init_dialect(mem, lang);
+    let pl: u32 = arg_val(cb, tot, pathk, ptr_add(mem, M_SRC));
+    let pp: ptr = ptr_add(mem, M_SRC);
+    store8(pp, pl, 0 as u8);
+    let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
+    if jf < 0 {
+        return die(2);
+    }
+    let n: u32 = read_all(jf as u64, ptr_add(mem, M_SCR), IN_CAP as u64) as u32;
+    syscall4(3, jf as u64, 0, 0);
+    if n > M_AUX {
+        return die(2);
+    }
+    // 预处理：Java/C# 抹 `class` / `namespace` 外壳（等长，不动行号）
+    let body: ptr = ptr_add(mem, M_SCR);
+    if lang == DL_JAVA || lang == DL_CS {
+        let sn: ptr = ptr_add(mem, M_SRC);
+        let _c1: u32 = copy_n(sn, 0, body, 0, n);
+        let _c2: u32 = shell_noise(body, n, sn);
+        let e: u32 = strip_shells(mem, sn, n, lang, body);
+        if e == 1 {
+            return errout("unbalanced", 2);
+        }
+    }
+    let out: ptr = ptr_add(mem, M_OUT);
+    if pre == 1 {
+        let o: u32 = appn(out, 0, body, 0, n);
+        let _w: u64 = write_all(1, out, o as u64);
+        return die(0);
+    }
+    let cnt: u32 = tokenize(mem, body, n);
+    let ec: u32 = ld32(ptr_add(mem, M_TMP), 8);
+    if ec == 1 {
+        return errout("unsupported", 1);
+    }
+    if ec == 2 {
+        return errout("cerror", 2);
+    }
+    if toks == 1 {
+        let o: u32 = dump_tokens(mem, body, cnt, out);
+        let _w: u64 = write_all(1, out, o as u64);
+        return die(0);
+    }
+    // 解析（`--ast` 就停在这儿；发射那条路接着用同一棵树）
+    let st: ptr = ptr_add(mem, M_TMP);
+    let _n1: u32 = st32(st, PS_N, cnt);
+    let _i1: u32 = st32(st, PS_I, 0);
+    let _e1: u32 = st32(st, PS_ERR, 0);
+    let _c1: u32 = st32(st, 20, 0);          // 节点游标
+    let _c2: u32 = st32(st, 36, 0);          // 列表深度
+    // 函数游标的起点不是 0 —— `--extern` 收进来的那些**已经占住 1..n 了**，
+    // 在这儿抹成 0 的话它们会被第一个真函数整个盖掉（症状：外部函数的返回类型
+    // 静默失效，调用点按本单元的看法走）。
+    let _c3: u32 = st32(st, 40, ld32(st, E_EXN));   // 函数游标
+    let _c4: u32 = st32(st, 512, 0);         // 第 0 层游标
+    if p_unit(mem, body, lang, ptr_add(st, 440)) == 0 {
+        let e: u32 = ld32(st, PS_ERR);
+        if e == 1 {
+            return errout("unsupported", 1);
+        }
+        return errout("cerror", 2);
+    }
+    if ast == 1 {
+        let o: u32 = dump_unit(mem, body, ld32(st, 440), ld32(st, 444), out);
+        let _w: u64 = write_all(1, out, o as u64);
+        return die(0);
+    }
+    // 默认那条路: 发射（上游 `translate`）。`--keep` / `--extern` / `--const`
+    // 已经在前面的参数那一轮收好了。
+    let _em: u32 = emit_unit(mem, ld32(st, 440), ld32(st, 444));
+    if em_ok(mem) == 0 {
+        return errout("unsupported", 1);
+    }
+    let _w2: u64 = write_all(1, out, ld32(st, E_OUT) as u64);
+    return die(0);
+}

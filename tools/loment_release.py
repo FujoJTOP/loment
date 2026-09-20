@@ -125,6 +125,9 @@ GLOBS = [
     # Potato 形式对象 -> L1 接口单元 (docs/179): 发射那一半的 Loment 版
     # (与 `lompotc` 那条**前端**是一对 —— 合起来才是 `from_c -> emit_lomt` 整条路)。
     "tools/loment_lomtfrom_test.py",
+    # 花括号族语法树 -> Loment 源码 (docs/186/189 第十八格): `trans_core` 那一半
+    # (语料/电池从 `loment_ctrans_test` 引, 所以没有自己的数据文件)。
+    "tools/loment_trans_test.py",
     # `choose write grammar` (docs/188 §1): 读法由**声明**决定、出厂锁的取值表。
     "tools/loment_grammar_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
