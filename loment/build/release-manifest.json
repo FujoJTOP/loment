@@ -831,7 +831,7 @@
   },
   {
    "path": "tools/loment_ctrans_test.py",
-   "sha256": "8ba89f7bb451d76edd5a2404d7874fe9acf898a6e54c84d240272c7e6daa3dfb"
+   "sha256": "502b0782ec690a91d7785941c57ad705c37296766d7a9f1459ce9052e51b201a"
   },
   {
    "path": "tools/pytrans.py",
@@ -1079,7 +1079,7 @@
   },
   {
    "path": "loment/tools/lompotc.lomt",
-   "sha256": "7b3bf73133dc16950f5e63a53031d281696412f750b7cddf72e866150cc619a8"
+   "sha256": "52c7de795a3c486fe2561d1c93136dbf8c68e3a68f1deb6db3bae4dc3f49e599"
   },
   {
    "path": "loment/tools/lomrel.lomt",
@@ -1699,7 +1699,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "6a0a427d8670b8974fa540065343553e421afc51a900085ff79391168f481ba1"
+   "sha256": "79b620847957e83182e4c08f06bc00ff16d11a69f784b69c357598f02ca02452"
   },
   {
    "path": "docs/190-loment-debugger.md",
