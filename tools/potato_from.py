@@ -699,6 +699,16 @@ _C_STRUCT_MARK = re.compile(r"^[ \t]*(?:typedef[ \t]+)?struct[ \t]+\w*[^{]*\{[^}
                             r"\b[A-Za-z_]\w*[ \t]+[A-Za-z_]\w*[ \t]*;", re.M | re.S)
 
 
+#: 自然语言写法（`docs/197`）的**内容判据**：**两条一起要**。
+#:
+#: 一条就够吗？不够，而且方向是**认不出比认错好**：这一门的句子全是日常英文词
+#: （`set` / `and` / `is` / `say`），单看某一个词会与别的语言的注释/标识符撞上。
+#: `program <名字>` **整行**加 `give back` 一起出，才是这一门独有的签名 ——
+#: 与 C# 那两条（`using <大写>;` / `static … Main(string[] …)`）同一条纪律。
+_NL_PROGRAM = re.compile(r"^[ \t]*program[ \t]+[A-Za-z_]\w*[ \t]*$", re.M)
+_NL_GIVE = re.compile(r"\bgive back\b")
+
+
 def detect_lang(src: str) -> tuple[str, str]:
     """按**内容**判断源语法。返回 `(语言, 依据)`; 认不出返回 `("", 原因)`。
 
@@ -710,6 +720,11 @@ def detect_lang(src: str) -> tuple[str, str]:
         return "loment", "以 `module <名字>` 开头"
     if _LOMENT_OWN.search(body):
         return "loment", "有 `capability` / `guard` / `excluded` —— Loment 独有"
+    # **自然语言写法排在很前面**：它的两条判据是**整行 `program <名字>` + `give back`**,
+    # 一起出才算命中（见上面的注解）。排前面是因为它下面那几门的兜底判据偏松
+    # （`_C_FNDEF` / `_C_ONELINE` 那种形状匹配），而这一门的两条是**专有**的。
+    if _NL_PROGRAM.search(body) and _NL_GIVE.search(body):
+        return "natural", "有整行 `program <名字>` 与 `give back` —— 自然语言写法独有"
     if _PY_DEF.search(body):
         return "python", "有 `def` / `class` / `import`"
     if _RS_FN.search(body):
@@ -1397,14 +1412,70 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     return _finish(doc, rep)
 
 
+# ------------------------------------------------- 自然语言写法（docs/197）
+
+def from_natural(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
+    """**自然语言写法 -> Potato 形式对象**（`docs/197`）。
+
+    这一门与另外六门有一处**结构上的不同**，值得写下来：那六门是"别人的语言"，
+    所以它们先被拆成"声明 + 正文"，正文再交给各自的翻译器；这一门**自己就是 Loment**，
+    所以它的正文是**原样存下来的整段函数**（`to … end`），由 `nltrans.translate` 回头
+    再读一遍。这一层看着多余，其实不能省 —— 它是"**正文逐字节保真**"那条判据的落点：
+    `--impl` 走的是 `body`，而 `body` 就是原文的切片，一个字节都不动。
+
+    **读不通就抛**（`nltrans.NaturalError`），不往 `rep.skipped` 里塞 —— 那种塞法会让
+    `emit_lomt` 发出一份"没有函数的单元"而**照样绿**，正是本仓最不能接受的那类失败。
+    翻成响亮的话由 `front_door` 那一层做（与 `docs/188` §7.2 那条"前门拒的三档不许是
+    traceback"同一个位置）。
+    """
+    import nltrans  # 懒加载：`potato_from` 被很多地方 import，翻译器不是每条路都要
+    prog = nltrans.parse_program(src)
+    unit = _ident(prog.unit or Path(name).stem)
+    doc = _blank(unit, "natural")
+    rep = Report(name, "natural", mode)
+    for c in prog.consts:
+        doc["consts"].append({"name": c.name, "type": c.ty, "value": c.value})
+        rep.ok += 1
+    for f in prog.fns:
+        doc["functions"].append({
+            "name": f.name,
+            "params": [{"name": n, "type": t} for n, t in f.params],
+            "ret": f.ret,
+            # 正文 = **整段函数原文**（`to …` 一路到 `end`）。与 `from_go` 那条一样，
+            # 它自带函数头 —— `lomt_from` 是拿它重翻一遍，不是拿它当"块"。
+            "body": f.body,
+            "body_line": f.line,
+        })
+        rep.ok += 1
+    return _finish(doc, rep)
+
+
+def front_errors(lang: str) -> tuple:
+    """**前门该替哪一门接住它自己的异常。**
+
+    别的几门读不通时会抛各家的异常，而 `front_door` 那一条路会一路冒到命令行上变成
+    traceback（`docs/188` §7.2 治过一次同样的病）。这一门自己就声明清楚了：
+    "写法不对"（`NaturalError`）与"子集外"（`Unsupported`）都该被翻成
+    `lomt_from.NotRepresentable` —— 那句"这份单元表示不出来"正是它们的语义。
+    """
+    if lang == "natural":
+        import nltrans  # noqa: PLC0415
+        return (nltrans.NaturalError, nltrans.Unsupported)
+    return ()
+
+
 # ---------------------------------------------------------------- CLI
 
 LANGS = {"python": from_python, "c": from_c, "rust": from_rust,
-         "go": from_go, "java": from_java, "csharp": from_csharp, "cpp": from_cpp}
+         "go": from_go, "java": from_java, "csharp": from_csharp, "cpp": from_cpp,
+         "natural": from_natural}
 #: 后缀 -> 语言。**一个语言可以有好几个后缀**（`.cc`/`.cxx` 都是 C++ 的常见写法）。
+#: `.nl` 只给 `natural` 一个人（`docs/197 §2`）—— 那一门没有"现成的后缀"可借，
+#: 所以按它自己的名字定一个。
 EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
        ".java": "java", ".cs": "csharp",
-       ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp"}
+       ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+       ".nl": "natural"}
 #: `abi` 的取值域 (与 `potato.ABIS` 对齐): `c` = 平台 C ABI, 能发 `extern fn`;
 #: 其余都是**运行时那一族**, 走进程桥 (docs/173 §4)。
 
@@ -1432,6 +1503,12 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
     "go": "go", "golang": "go",
     "rs": "rust", "rust": "rust",
+    # 自然语言写法（`docs/197`）。**规范名是 `natural`，不是 `lument`** ——
+    # 那是刻意选的：`loment` 与 `lument` 只差一个字母，而 `grammar loment` 是**合法**
+    # 的（= 原生写法）。把近邻词当规范名，代价是"少打一个字母就静默换成另一种读法"，
+    # 而这正是这一门最不该有的失败。`lument` 仍收（它是这次设计的委托名），
+    # 但不进对象 —— 对象侧只许 `potato.GRAMMARS` 里那几个。
+    "nl": "natural", "natural": "natural", "lument": "natural",
 }
 
 #: **声明的词序**：`choose write grammar <别名>`。
@@ -1667,7 +1744,12 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     _hit = _FRONT_MEMO.get(_key)
     if _hit is not None:
         return _hit
-    doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+    try:
+        doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+    except front_errors(lang) as e:
+        # 写法读不通 —— 与"翻不出来"一样响亮地拒，**不给一份少算一步的单元**
+        # （见 `front_errors` 的注解）。
+        raise lomt_from.NotRepresentable(f"{path}: 这份源读不通 —— {e}")
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     if skipped:
         # **子集外的东西发不出来** —— 必须响亮，不能给一份"少算一步却照样能编"的单元。

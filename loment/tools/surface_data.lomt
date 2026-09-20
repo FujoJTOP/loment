@@ -521,7 +521,7 @@ pub fn code_nfix(c: u32) -> u32 {
 // **键集 == `potato_from.LANGS`**（判据钉着）：翻译线加一门语言而这里没跟上,
 // 症状是"新语言的文件报错时只字不提怎么翻" —— 静默缺口。
 
-pub fn lang_count() -> u32 { return 7; }
+pub fn lang_count() -> u32 { return 8; }
 
 pub fn decl_word_count() -> u32 { return 3; }
 
@@ -533,7 +533,7 @@ pub fn decl_word(i: u32) -> str {
     return "";
 }
 
-pub fn alias_count() -> u32 { return 16; }
+pub fn alias_count() -> u32 { return 19; }
 
 /// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。
 pub fn alias_word(i: u32) -> str {
@@ -549,10 +549,13 @@ pub fn alias_word(i: u32) -> str {
     if i == 9 { return "golang"; }
     if i == 10 { return "java"; }
     if i == 11 { return "loment"; }
-    if i == 12 { return "py"; }
-    if i == 13 { return "python"; }
-    if i == 14 { return "rs"; }
-    if i == 15 { return "rust"; }
+    if i == 12 { return "lument"; }
+    if i == 13 { return "natural"; }
+    if i == 14 { return "nl"; }
+    if i == 15 { return "py"; }
+    if i == 16 { return "python"; }
+    if i == 17 { return "rs"; }
+    if i == 18 { return "rust"; }
     return "";
 }
 
@@ -570,10 +573,13 @@ pub fn alias_lang(i: u32) -> str {
     if i == 9 { return "go"; }
     if i == 10 { return "java"; }
     if i == 11 { return "loment"; }
-    if i == 12 { return "python"; }
-    if i == 13 { return "python"; }
-    if i == 14 { return "rust"; }
-    if i == 15 { return "rust"; }
+    if i == 12 { return "natural"; }
+    if i == 13 { return "natural"; }
+    if i == 14 { return "natural"; }
+    if i == 15 { return "python"; }
+    if i == 16 { return "python"; }
+    if i == 17 { return "rust"; }
+    if i == 18 { return "rust"; }
     return "";
 }
 
@@ -585,6 +591,7 @@ pub fn lang_key(i: u32) -> str {
     if i == 4 { return "go"; }
     if i == 5 { return "rust"; }
     if i == 6 { return "python"; }
+    if i == 7 { return "natural"; }
     return "";
 }
 
@@ -596,6 +603,7 @@ pub fn lang_name(i: u32) -> str {
     if i == 4 { return "Go"; }
     if i == 5 { return "Rust"; }
     if i == 6 { return "Python"; }
+    if i == 7 { return "Loment 自然语言写法"; }
     return "";
 }
 
@@ -607,6 +615,7 @@ pub fn lang_exts(i: u32) -> str {
     if i == 4 { return ".go"; }
     if i == 5 { return ".rs"; }
     if i == 6 { return ".py"; }
+    if i == 7 { return ".nl"; }
     return "";
 }
 
@@ -618,6 +627,7 @@ pub fn lang_tokens(i: u32) -> str {
     if i == 4 { return "func |package main|import ("; }
     if i == 5 { return "use std::|let mut |macro_rules!|#[derive"; }
     if i == 6 { return "def |__name__|self."; }
+    if i == 7 { return "program |give back|say "; }
     return "";
 }
 
@@ -637,6 +647,8 @@ pub fn lang_edge(i: u32, lang: u32) -> str {
     if k == 11 { return "trait 对象、闭包、宏（`macro_rules!`）、生命周期标注、`async` 都不翻；`&str` 与 `String` 都是“指针+长度”，翻过来是 `str`；借用检查那一套 Loment 同样管，所以这块一般能对上。"; }
     if k == 12 { return "Dynamic typing, class inheritance, exceptions, generators, decorators and closure capture are not translated. `/` is true division (use `//` for integer division, while Loment's `/` is integer division); `True`/`False` are subclasses of int, so **converting them needs an explicit cast**."; }
     if k == 13 { return "动态类型、类继承、异常、生成器、装饰器、闭包捕获都不翻；`/` 是真除法（要整除得写 `//`，而 Loment 的 `/` 是整除）；`True`/`False` 是 int 的子类，**翻过来要补转换**。"; }
+    if k == 14 { return "This one is **not somebody else's language** - it is Loment's own natural-language surface (`docs/197`), so the boundary below is **drawn**, not encountered. Sentences start with a verb: `say` / `say the number` / `talk to the machine <nr> with a, b, c` (= `syscall4`) / `paint <value> at <index> in <buffer>` (= `store8`) / `let ... be ...` / `set ... to ...` / `when` ... `otherwise` ... `end` / `while` / `for <name> from <lo> to <hi>` / `give back`. Operators have both a word form (`plus` / `times` / `is above` / `and` ...) and a symbol form. **Not accepted in this version**: `use`, structs, enums, `match`, slices, `ptr` arithmetic, function pointers - all rejected loudly at parse time. A `let` gets its type from the sentence's `as <type>` or from the literal itself (number -> `i64`, text -> `str`, `true`/`false` -> `bool`); anything else is an error, never a default. The text and numeric variants of `say` are **two sentences**, because merging them would mean guessing a type."; }
+    if k == 15 { return "这一门**不是别人的语言**，是 Loment 自己的自然语言写法（`docs/197`）——所以下面的边界是**画出来的**，不是碰上的。动词起头的句子：`say` / `say the number` / `talk to the machine <号> with a, b, c`（= `syscall4`）/ `paint <值> at <下标> in <缓冲>`（= `store8`）/ `let … be …` / `set … to …` / `when` … `otherwise` … `end` / `while` / `for <名> from <下界> to <上界>` / `give back`。运算符有词形（`plus` / `times` / `is above` / `and` …）与符号形两种拼法。**这一版不收**：`use`、结构体、枚举、`match`、切片、`ptr` 算术、函数指针（都在解析那一步响亮地拒）。**`let` 的类型只有两条来路**：句子里的 `as <类型>`，或者字面量自己（数 -> `i64`、文本 -> `str`、`true`/`false` -> `bool`）—— 够不着就报错，**不默认**。`say` 的文本变体与数值变体是**两句**，因为合并就要猜类型。"; }
     return "";
 }
 
@@ -656,5 +668,7 @@ pub fn lang_abi(i: u32, lang: u32) -> str {
     if k == 11 { return "Rust 要导 C ABI 得在源里显式写 `extern \"C\"` + `#[no_mangle]`。"; }
     if k == 12 { return "**CPython does not export a C ABI** - an interface-only unit comes out as an **empty module** (stderr carries `[skip] f: calling convention is not the C ABI`). Real linking has to go through the C-extension route."; }
     if k == 13 { return "**CPython 不导出 C ABI** —— 只出接口单元会得到一个**空 module**（stderr 上有 `[skip] f: 调用约定不是 C ABI`）。要真链接得走 C 扩展那条路。"; }
+    if k == 14 { return "**It is Loment** (`language: \"loment\"`), not foreign code, so exporting a C ABI works the same way as for any other Loment function: `pub` plus whatever the source-language side agrees on - there is nothing extra to write."; }
+    if k == 15 { return "**它是 Loment**（`language: \"loment\"`），不是外国货 —— 导 C ABI 与其他 Loment 函数一样：`pub` 加上源语言那一侧的约定，不额外要多写什么。"; }
     return "";
 }

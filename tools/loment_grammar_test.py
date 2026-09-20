@@ -67,6 +67,11 @@ LOCKED_ALIASES = {
     "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
     "go": "go", "golang": "go",
     "rs": "rust", "rust": "rust",
+    # `docs/197` 加的那一门 —— **这一笔就是"改锁"**。
+    # 规范名是 `natural` 而不是 `lument`：后者与 `loment` 只差一个字母，而
+    # `grammar loment` 是合法的（= 原生写法）。近邻词当规范名，代价是
+    # "少打一个字母就静默换成另一种读法"，而那正是这一门最不该有的失败。
+    "nl": "natural", "natural": "natural", "lument": "natural",
 }
 
 

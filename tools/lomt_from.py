@@ -107,6 +107,12 @@ _TOOLS = {
     "go": ("gotrans", "Unsupported GoError", "tools/gotrans.py",
            "只收整数标量与 `bool`、`if`/`for`、四则与位运算；"
            "`string` / 切片 / map / 指针 / 多返回值都不收"),
+    # **这一门与前六门不同类**（`docs/197`）：前六门是别人已有的语言，子集线是**碰上的**；
+    # 这一门是我们自己发明的，子集线是**画出来的** —— 所以下面的"不收"是设计，不是缺口。
+    "natural": ("nltrans", "Unsupported NaturalError", "tools/nltrans.py",
+                "动词起头的句子：`say` / `talk to the machine` / `paint` / `let be` / "
+                "`set to` / `when` / `while` / `for from to` / `give back`；"
+                "这一版不收 `use`、结构体、枚举、切片、match"),
 }
 
 

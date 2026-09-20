@@ -64,7 +64,12 @@ ABIS = ("c", "rust", "python", "go", "java")
 #:
 #: 源里可以写别名（`py` / `python`），但**进对象的只有这里这几个规范名** ——
 #: 否则同一份源出两串字节，判据当场红。
-GRAMMARS = ("loment", "c", "python", "java", "go", "rust", "csharp", "cpp")
+#: `natural` = **Loment 自己的自然语言写法**（`docs/197`）。它与前六门**不同类** ——
+#: 那六门是别人已有的语言，这一门是**我们自己发明的**，所以子集线是**画出来的**，
+#: 不是**碰上的**。之所以仍记在这里，是因为它守的规矩一模一样：
+#: **只让拼法与形状，不让语义**（`docs/188` §0）。
+GRAMMARS = ("loment", "c", "python", "java", "go", "rust", "csharp", "cpp",
+            "natural")
 
 
 def _is_array_type(t: object) -> bool:

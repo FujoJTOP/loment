@@ -102,6 +102,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_cpptrans_test",
                  # Go 翻成 Loment: 跑出的数 == go build 那份 Go 跑出的数 (docs/188 §7.1)
                  "loment_gotrans_test",
+                 # 自然语言写法 (docs/197): 同一个程序的两种拼法 -> **逐字节同一份** Loment,
+                 # 而且翻出来的那一份真编真跑, 跑出的数 == 独立推出来的期望值
+                 "loment_nltrans_test",
                  # Potato 形式对象 -> L1 接口单元 (docs/179) 的 Loment 版 (发射那一半)
                  "loment_lomtfrom_test",
                  # 花括号族语法树 -> Loment 源码 (docs/186/189 第十八格) 的 Loment 版

@@ -1151,6 +1151,25 @@ LANG_CARDS: dict[str, LangCard] = {
              "映 `i8` / `u8` 都会在某台机器上悄悄算错，所以**拒**。",
         abi="能导 C ABI —— 要显式写 `extern \"C\"`（默认名字是 mangle 过的）。",
     ),
+    "natural": LangCard(
+        key="natural", display="Loment 自然语言写法", exts=(".nl",),
+        # 特征词要**两条一起**才是这一门的签名（`potato_from._NL_PROGRAM` + `_NL_GIVE`）：
+        # 单看某一个词会与别的语言的注释/标识符撞上。
+        tokens=("program ", "give back", "say "),
+        edge="这一门**不是别人的语言**，是 Loment 自己的自然语言写法（`docs/197`）——"
+             "所以下面的边界是**画出来的**，不是碰上的。动词起头的句子："
+             "`say` / `say the number` / `talk to the machine <号> with a, b, c`（= `syscall4`）/ "
+             "`paint <值> at <下标> in <缓冲>`（= `store8`）/ `let … be …` / `set … to …` / "
+             "`when` … `otherwise` … `end` / `while` / `for <名> from <下界> to <上界>` / "
+             "`give back`。运算符有词形（`plus` / `times` / `is above` / `and` …）与符号形两种拼法。"
+             "**这一版不收**：`use`、结构体、枚举、`match`、切片、`ptr` 算术、函数指针"
+             "（都在解析那一步响亮地拒）。"
+             "**`let` 的类型只有两条来路**：句子里的 `as <类型>`，或者字面量自己"
+             "（数 -> `i64`、文本 -> `str`、`true`/`false` -> `bool`）—— 够不着就报错，"
+             "**不默认**。`say` 的文本变体与数值变体是**两句**，因为合并就要猜类型。",
+        abi="**它是 Loment**（`language: \"loment\"`），不是外国货 —— 导 C ABI 与其他 Loment "
+            "函数一样：`pub` 加上源语言那一侧的约定，不额外要多写什么。",
+    ),
 }
 
 #: 语言卡的**英文**那一半（默认语言）。键集 == `LANG_CARDS`，由 `loment_tools_test` 钉着；
@@ -1211,6 +1230,20 @@ LANG_EDGE_EN: dict[str, str] = {
            "completely different**. The signedness of `char` is implementation-defined (signed in "
            "g++ on x86-64, often not on ARM), so mapping it to `i8` or `u8` would compute the "
            "wrong answer quietly on some machine - it is **rejected**.",
+    "natural": "This one is **not somebody else's language** - it is Loment's own "
+               "natural-language surface (`docs/197`), so the boundary below is **drawn**, not "
+               "encountered. Sentences start with a verb: `say` / `say the number` / "
+               "`talk to the machine <nr> with a, b, c` (= `syscall4`) / `paint <value> at "
+               "<index> in <buffer>` (= `store8`) / `let ... be ...` / `set ... to ...` / "
+               "`when` ... `otherwise` ... `end` / `while` / `for <name> from <lo> to <hi>` / "
+               "`give back`. Operators have both a word form (`plus` / `times` / `is above` / "
+               "`and` ...) and a symbol form. **Not accepted in this version**: `use`, structs, "
+               "enums, `match`, slices, `ptr` arithmetic, function pointers - all rejected "
+               "loudly at parse time. A `let` gets its type from the sentence's `as <type>` or "
+               "from the literal itself (number -> `i64`, text -> `str`, `true`/`false` -> "
+               "`bool`); anything else is an error, never a default. The text and numeric "
+               "variants of `say` are **two sentences**, because merging them would mean "
+               "guessing a type.",
 }
 
 LANG_ABI_EN: dict[str, str] = {
@@ -1227,6 +1260,9 @@ LANG_ABI_EN: dict[str, str] = {
               "`[UnmanagedCallersOnly]`.",
     "cpp": "It can export a C ABI - write `extern \"C\"` explicitly (the default names are "
            "mangled).",
+    "natural": "**It is Loment** (`language: \"loment\"`), not foreign code, so exporting a C "
+               "ABI works the same way as for any other Loment function: `pub` plus whatever "
+               "the source-language side agrees on - there is nothing extra to write.",
 }
 
 
