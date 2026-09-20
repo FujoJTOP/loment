@@ -875,7 +875,7 @@
   },
   {
    "path": "tools/loment_grammar_test.py",
-   "sha256": "464099815896dcf3fd0fcbcfb243506f8b7ad9ce3f9bbf0d4d3437adc2a31344"
+   "sha256": "af58eb44aa3beb0f362666ce127530dcfce23cac6e4fb88de2b4862705ecaf8c"
   },
   {
    "path": "loment/build/win_shim.bin",
@@ -1052,6 +1052,10 @@
   {
    "path": "loment/tools/lomfmt.lomt",
    "sha256": "8bf8702bfda7ceb52b159b58e262cad1bc34ca6e1b347ed13b3f493185d23b48"
+  },
+  {
+   "path": "loment/tools/lomgrammar.lomt",
+   "sha256": "2c41c9b9fedce03ae0c22cd84eb1b249915f257485902dd9d028bc427373739c"
   },
   {
    "path": "loment/tools/lomjsoncheck.lomt",
@@ -1683,7 +1687,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "d76ccac37b0e5172784eb8eb4bd744674f13742ed45189bf6536d1f0c140be00"
+   "sha256": "a3144596820710c94aa06a8b0b829725eeb57d800b6ec77dfb365dc858af8245"
   },
   {
    "path": "docs/190-loment-debugger.md",
