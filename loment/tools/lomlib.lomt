@@ -4,10 +4,13 @@
 // 同一棵包树喂本程序 (链成 PE/ELF 后跑) 与 `lomlib.py id <dir>`, **stdout 逐字节相同 + 退出码相同**。
 //
 // 覆盖面 —— **与 Python 版不对称的部分写在最显眼处, 别把"孪生"读成"全等"**:
-//   有: `id`  —— 实例身份 (判据 2 的递归哈希: H(名字 ⊕ 排序文件 ⊕ 排序边))
-//       `dbg` —— 把折叠的分量 (名字/文件/边) 打出来, **只给调试用**, 不进判据
-//   无: `tree` / `cap` / `check` / `materialize`
-//       (`materialize` 要按 token 改写源码, 是另一件事, 见 docs/168 §4.2。)
+//   有: `id`   —— 实例身份 (判据 2 的递归哈希: H(名字 ⊕ 排序文件 ⊕ 排序边))
+//       `tree` —— 实例树 (去重后): 每条边 `-> 名字 版本 [身份前 8 位]`, 重复的标
+//                "同一实例, 已见", 末尾 `[OK] n 个实例` + 多版本那条 `[NOTE]`
+//       `dbg`  —— 把折叠的分量 (名字/文件/边) 打出来, **只给调试用**, 不进判据
+//   无: `cap` / `check` / `materialize`
+//       (`check` 要按 token 判"引用了一个有多个来源的名字", `materialize` 要按 token
+//       改写源码 —— 两件都是另一件事, 见 docs/168 §4.2。)
 //
 // 刻意偏离 (与 lompkg.lomt 同一路数, 见 docs/159 §4b 的记法):
 //   1. Python 的 `Path.resolve()` 解析符号链接并绝对化; 本版只做词法拼接。无符号链接的树上等价。
@@ -45,11 +48,24 @@ const M_IDX: u32 = 73728;       // FMAX * 8      文件索引 (off,len)
 const M_DIRB: u32 = 73984;         // DIRBUF
 const M_RBUF: u32 = 82176;          // RBUF
 const M_FBUF: u32 = 98560;            // FBUF
-const M_TMP: u32 = 114944;             // 8192 事务缓冲
+const M_TMP: u32 = 114944;             // 8192 事务缓冲 (8 * PATHW)
+// M_TMP 里的格子（8 个 PATHW）: *2 文件路径 / *3 清单路径 / *4 sha 的 NUL 垫 /
+// *5 `note_multi` 的索引 / *6 `is_dir` 的 stat / *7 `wdec`+`wsp` 的十进制与缩进暂存。
+// ⚠ **别在这儿用 `alloc`** —— 它是**只有 64 KiB 的 bump 堆**，本程序已经把 256 KiB 的
+// 静态区都 brk 出来了；2026-09-19 实测：`tree` 的打印路上用 `alloc`，
+// 输出全对、**函数返回时**才崩（ELF 上 rc=132 SIGILL，PE 上 0xC0000005）。
 const M_DEP: u32 = 123136;              // MAXD * DEPTHSZ
 const M_CELL: u32 = 196864;
 const M_CB: u32 = 196928;   // 标量格
-const M_CAP: u32 = 205120;
+// `tree` 要的两张表（`id` 用不上 —— 它只算一次身份、不留图）:
+//   M_SEEN  见过的身份 (去重表; 条数写 C_SEENN)  —— "同一实例, 已见" 与 `[OK] n 个实例`
+//   M_CNT   实例名 -> 份数 (条数写 C_CNTN)       —— `[NOTE] 同名多实例`
+// **从 201024 起** —— [M_CB, M_CB+4096) 是 **argv 缓冲**（`read_all(cb, 4096)`），
+// 而 `dirp` 就指着里面那一段。2026-09-19 踩到：把 M_SEEN 摆回 M_CB（196928），
+// 第一次 `seen_add` 就把命令行的头 64 字节盖掉 —— 身份随即全错、版本永远读不到。
+const M_SEEN: u32 = 201024;
+const M_CNT: u32 = 205120;
+const M_CAP: u32 = 262144;
 
 // 每层内偏移
 const S_SHA: u32 = 0;
@@ -69,6 +85,21 @@ const C_FILES: u32 = 0;
 const C_POOL: u32 = 4;
 const C_QT: u32 = 8;
 const C_TMPV: u32 = 12;
+const C_SEENN: u32 = 24;     // 去重表里已登记的身份数
+const C_CNTN: u32 = 28;      // 名册里的名字数
+
+// `tree` 用的表
+const NMAX: u32 = 64;        // 见过的实例数上限
+const CNTSZ: u32 = 136;      // 名册一条: name 128 + nl 4 + cnt 4
+const C_NL: u32 = 128;
+const C_CNT: u32 = 132;
+// 每层的空闲尾巴 (S_EOFF 结束于 4480, 每层 4608)。
+// **别往 S_INFO 里塞** —— 它的 224..288 是 sha_final 的 64 字节摘要格，跨过尾巴伸进
+// S_EDG 头 32 字节（2026-09-19 踩到：把版本放在 +200 正好被那份摘要盖掉，版本永远是空的）。
+const S_DUP: u32 = 4480;     // EMAX 个字节: 这条边指向的是不是"已见的同一实例"
+const S_VER: u32 = 4496;     // 96 字节: 版本标签（够长；不进 sha）
+const S_VL: u32 = 4592;      // 版本长度
+const S_LEC: u32 = 4596;     // 这层的边数（共用标量格会被子层踩掉，得存一份）
 
 const S_IFDIR: u32 = 16384;
 const NOTFOUND: u32 = 4294967295;
@@ -551,7 +582,11 @@ fn scan_edges(mem: ptr, buf: ptr, tot: u32, ed: ptr, eo: ptr) {
         while e < tot && load8(buf, e) != 10 {
             e = e + 1;
         }
-        if e > s + 5 && load8(buf, s) == 117 && load8(buf, s + 1) == 115
+        // 门槛是 `e > s + 4`（"use " 四个字符之后**至少还要有一个**）—— 2026-09-19 写成
+        // `e > s + 5` 时，`use b` 这种**单字符依赖名**正好 5 个字符，整条被静默丢掉：
+        // 环、菱形、多版本这些夹具用的是两字符以上的名字，所以一直没暴露；判据新加的
+        // 环夹具（`a` use `b`）当场抓住（`docs/189` 第 14 格）。
+        if e > s + 4 && load8(buf, s) == 117 && load8(buf, s + 1) == 115
                 && load8(buf, s + 2) == 101
                 && (load8(buf, s + 3) == 32 || load8(buf, s + 3) == 9) {
             let k: u32 = s + 4;
@@ -621,7 +656,8 @@ fn ident_of(mem: ptr, dirp: ptr, depth: u32) -> u32 {
     // 名字: 清单优先, 否则用目录名
     let lp: ptr = ptr_add(mem, M_TMP + PATHW * 3);
     let nl: u32 = 0;
-    if find_lomp(mem, dirp, lp) == 1 {
+    let hasm: u32 = find_lomp(mem, dirp, lp);
+    if hasm == 1 {
         nl = scan_label(lp, "name", inf, ptr_add(mem, M_FBUF));
     }
     if nl == 0 {
@@ -642,6 +678,21 @@ fn ident_of(mem: ptr, dirp: ptr, depth: u32) -> u32 {
     } else {
         store32(inf, I_NL, nl);
     }
+    // 版本: 清单里的 `fn version` 说了算, 没有就 `0.0.0`（与 Python 的 `_read_manifest` 同）。
+    // **不进 sha** —— 版本是标签, 不是身份的一部分（`docs/168` 判据 2）。
+    let vl: u32 = 0;
+    if hasm == 1 {
+        vl = scan_label(lp, "version", ptr_add(mem, base + S_VER), ptr_add(mem, M_FBUF));
+    }
+    if vl == 0 {
+        store8(mem, base + S_VER, 48 as u8);
+        store8(mem, base + S_VER + 1, 46 as u8);
+        store8(mem, base + S_VER + 2, 48 as u8);
+        store8(mem, base + S_VER + 3, 46 as u8);
+        store8(mem, base + S_VER + 4, 48 as u8);
+        vl = 5;
+    }
+    store32(mem, base + S_VL, vl);
     if on_stack(mem, inf, load32(inf, I_NL), depth) == 1 {
         return 4;
     }
@@ -649,6 +700,9 @@ fn ident_of(mem: ptr, dirp: ptr, depth: u32) -> u32 {
     let ed: ptr = ptr_add(mem, base + S_EDG);
     let eo: ptr = ptr_add(mem, base + S_EOFF);
     collect_edges(mem, dirp, ed, eo);
+    // 边数留一份: 那个共用格会被**子层**的 collect_edges 踩掉，而 `tree` 打完这一层
+    // 还要回来读它（2026-09-19 踩到：回调后读到的是最后一个叶子层的 0，边一条都不打）。
+    store32(mem, base + S_LEC, load32(mem, M_CELL + C_TMPV + 4));
     sort_files(mem);
     let s: ptr = ptr_add(mem, base + S_SHA);
     sha_init(s);
@@ -740,6 +794,224 @@ fn ident_of(mem: ptr, dirp: ptr, depth: u32) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- 实例树（tree）
+
+/// 十进制（`tree` 的 `[OK] n 个实例` 与 `[NOTE] name xN` 要它）。
+fn wdec(mem: ptr, fd: u64, v: u32) -> u64 {
+    let b: ptr = ptr_add(mem, M_TMP + PATHW * 7);
+    if v == 0 {
+        store8(b, 0, 48 as u8);
+        return write_all(fd, b, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(b, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(b, 16 - n), n as u64);
+}
+
+/// 打 n 个空格（缩进）。
+fn wsp(mem: ptr, n: u32) -> u64 {
+    let b: ptr = ptr_add(mem, M_TMP + PATHW * 7);
+    let i: u32 = 0;
+    while i < n && i < 64 {
+        store8(b, i, 32 as u8);
+        i = i + 1;
+    }
+    return write_all(1, b, i as u64);
+}
+
+/// 这一层的版本号。
+fn wver(mem: ptr, lvl: u32) -> u64 {
+    let base: u32 = M_DEP + lvl * DEPTHSZ;
+    return wmem(1, ptr_add(mem, base + S_VER), load32(mem, base + S_VL));
+}
+
+/// 见过这个身份吗 —— 见过返回 1；没见过就登记下来返回 0。
+/// 这张表就是 `[OK] n 个实例` 的 n（去重后的实例数），也是"同一实例, 已见"的判据。
+fn seen_add(mem: ptr, hex: ptr) -> u32 {
+    let n: u32 = load32(mem, M_CELL + C_SEENN);
+    let i: u32 = 0;
+    while i < n {
+        if beq(ptr_add(mem, M_SEEN), i * 64, 64, hex, 0, 64) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    if n < NMAX {
+        cpy(ptr_add(mem, M_SEEN), n * 64, hex, 0, 64);
+        store32(mem, M_CELL + C_SEENN, n + 1);
+    }
+    return 0;
+}
+
+/// 名册里找这个名字；返回下标，没有返回 FAIL。
+fn cnt_find(mem: ptr, namep: ptr, nl: u32) -> u32 {
+    let n: u32 = load32(mem, M_CELL + C_CNTN);
+    let i: u32 = 0;
+    while i < n {
+        if load32(ptr_add(mem, M_CNT), i * CNTSZ + C_NL) == nl
+                && beq(ptr_add(mem, M_CNT), i * CNTSZ, nl, namep, 0, nl) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return NOTFOUND;
+}
+
+/// 记一份实例名（多版本时同一个名字会 >1）。
+fn cnt_bump(mem: ptr, namep: ptr, nl: u32) {
+    let i: u32 = cnt_find(mem, namep, nl);
+    if i == NOTFOUND {
+        let n: u32 = load32(mem, M_CELL + C_CNTN);
+        if n < NMAX {
+            cpy(ptr_add(mem, M_CNT), n * CNTSZ, namep, 0, nl);
+            store32(ptr_add(mem, M_CNT), n * CNTSZ + C_NL, nl);
+            store32(ptr_add(mem, M_CNT), n * CNTSZ + C_CNT, 1);
+            store32(mem, M_CELL + C_CNTN, n + 1);
+        }
+    } else {
+        let c: u32 = load32(ptr_add(mem, M_CNT), i * CNTSZ + C_CNT);
+        store32(ptr_add(mem, M_CNT), i * CNTSZ + C_CNT, c + 1);
+    }
+}
+
+/// 第 `e` 条边指向的孩子目录，拼进**第 `lvl+1` 层自己那一格**。
+/// 与 `ident_of` 里那段是同一份 —— 这里之所以单独成函数，是因为第二趟展开时
+/// 那一格已经被上一条边踩掉了，**得能重算**。
+fn child_dir(mem: ptr, ed: ptr, eo: ptr, e: u32, dirp: ptr, lvl: u32) -> ptr {
+    let eo2: u32 = load32(eo, e * 8);
+    let el: u32 = load32(eo, e * 8 + 4);
+    let cdir: ptr = ptr_add(mem, M_DEP + (lvl + 1) * DEPTHSZ + S_DIR);
+    let _a: u32 = cpz(cdir, dirp);
+    let _b: u32 = join(cdir, dirp, str_ptr("deps"), 4);
+    let cl: u32 = slen(cdir);
+    store8(cdir, cl, 47 as u8);
+    cpy(cdir, cl + 1, ptr_add(ed, eo2), 0, el);
+    store8(cdir, cl + 1 + el, 0 as u8);
+    return cdir;
+}
+
+/// 递归打一棵实例树。返回 0 = OK; 3/4/5 同 `ident_of`。
+///
+/// 形状与 Python 的 `_tree_lines` **逐字同**：一条边一行，**打完这一行就展开它**，
+/// 再打下一行 —— 不是"先把边列全再逐条展开"（2026-09-19 按后一种写，输出顺序整段错位）。
+fn tree_walk(mem: ptr, dirp: ptr, lvl: u32, pfx: u32) -> u32 {
+    let rc: u32 = ident_of(mem, dirp, lvl);
+    if rc != 0 {
+        return rc;
+    }
+    let base: u32 = M_DEP + lvl * DEPTHSZ;
+    let inf: ptr = ptr_add(mem, base + S_INFO);
+    let nml: u32 = load32(inf, I_NL);
+    // **只有根**打自己的那一行: 子节点只出现在父亲的边行里（与 Python 的 `_tree_lines` 同）
+    if lvl == 0 {
+        let _s0: u64 = wsp(mem, pfx);
+        let _s1: u64 = wmem(1, inf, nml);
+        let _s2: u64 = wstr(1, " ");
+        let _s3: u64 = wver(mem, lvl);
+        let _s4: u64 = wstr(1, " [");
+        let _s5: u64 = wmem(1, ptr_add(inf, I_HEX), 8);
+        let _s6: u64 = wstr(1, "]\n");
+        // Python: `seen = {r.ident}` —— 根在走孩子**之前**就登记了
+        let _me: u32 = seen_add(mem, ptr_add(inf, I_HEX));
+    }
+    cnt_bump(mem, inf, nml);
+    let ed: ptr = ptr_add(mem, base + S_EDG);
+    let eo: ptr = ptr_add(mem, base + S_EOFF);
+    let ec: u32 = load32(mem, base + S_LEC);
+    let e: u32 = 0;
+    while e < ec {
+        let cdir: ptr = child_dir(mem, ed, eo, e, dirp, lvl);
+        let rc2: u32 = ident_of(mem, cdir, lvl + 1);
+        if rc2 != 0 {
+            return rc2;
+        }
+        let cinf: ptr = ptr_add(mem, M_DEP + (lvl + 1) * DEPTHSZ + S_INFO);
+        let dup: u32 = seen_add(mem, ptr_add(cinf, I_HEX));
+        let eo2: u32 = load32(eo, e * 8);
+        let el: u32 = load32(eo, e * 8 + 4);
+        let _a: u64 = wsp(mem, pfx + 2);
+        let _b: u64 = wmem(1, ptr_add(ed, eo2), el);
+        let _c: u64 = wstr(1, " -> ");
+        let _d: u64 = wmem(1, cinf, load32(cinf, I_NL));
+        let _f: u64 = wstr(1, " ");
+        let _g: u64 = wver(mem, lvl + 1);
+        let _h: u64 = wstr(1, " [");
+        let _i: u64 = wmem(1, ptr_add(cinf, I_HEX), 8);
+        let _j: u64 = wstr(1, "]");
+        if dup == 1 {
+            let _m: u64 = wstr(1, "  (同一实例, 已见)");
+        }
+        let _k: u64 = wstr(1, "\n");
+        e = e + 1;
+        if dup == 0 {
+            let rc3: u32 = tree_walk(mem, cdir, lvl + 1, pfx + 2);
+            if rc3 != 0 {
+                return rc3;
+            }
+        }
+    }
+    return 0;
+}
+
+/// `[NOTE] 同名多实例: a x2, b x3`（按名字排序 —— 与 Python 的 `sorted(multi.items())` 同）。
+fn note_multi(mem: ptr) -> u32 {
+    let cn: u32 = load32(mem, M_CELL + C_CNTN);
+    let idx: ptr = ptr_add(mem, M_TMP + PATHW * 5);
+    let m: u32 = 0;
+    let i: u32 = 0;
+    while i < cn {
+        if load32(ptr_add(mem, M_CNT), i * CNTSZ + C_CNT) > 1 {
+            store32(idx, m * 4, i);
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    if m == 0 {
+        return 0;
+    }
+    // 按名字冒泡（与边那张表同一套写法）
+    let a: u32 = 1;
+    while a < m {
+        let oi: u32 = load32(idx, a * 4);
+        let j: u32 = a;
+        let going: u32 = 1;
+        while j > 0 && going == 1 {
+            let oj: u32 = load32(idx, (j - 1) * 4);
+            let nl_i: u32 = load32(ptr_add(mem, M_CNT), oi * CNTSZ + C_NL);
+            let nl_j: u32 = load32(ptr_add(mem, M_CNT), oj * CNTSZ + C_NL);
+            if blt(ptr_add(mem, M_CNT), oi * CNTSZ, nl_i,
+                   ptr_add(mem, M_CNT), oj * CNTSZ, nl_j) == 1 {
+                store32(idx, j * 4, oj);
+                j = j - 1;
+            } else {
+                going = 0;
+            }
+        }
+        store32(idx, j * 4, oi);
+        a = a + 1;
+    }
+    let _p: u64 = wstr(1, "[NOTE] 同名多实例: ");
+    let k: u32 = 0;
+    while k < m {
+        let oi2: u32 = load32(idx, k * 4);
+        if k > 0 {
+            let _c: u64 = wstr(1, ", ");
+        }
+        let np: ptr = ptr_add(mem, M_CNT);
+        let _n: u64 = wmem(1, ptr_add(np, oi2 * CNTSZ), load32(np, oi2 * CNTSZ + C_NL));
+        let _x: u64 = wstr(1, " x");
+        let _v: u64 = wdec(mem, 1, load32(np, oi2 * CNTSZ + C_CNT));
+        k = k + 1;
+    }
+    let _n2: u64 = wstr(1, "\n");
+    return 0;
+}
+
 // ---------------------------------------------------------------- 入口
 
 /// argv 第 k 项 (从 0 数) 的偏移与长度 (切 /proc/self/cmdline 的 NUL 分隔)。
@@ -787,11 +1059,32 @@ fn _start() -> u32 {
         return fail("lomlib: usage: lomlib id DIR\n");
     }
     let is_dbg: u32 = beq(cb, o1, l1, str_ptr("dbg"), 0, 3);
-    if beq(cb, o1, l1, str_ptr("id"), 0, 2) == 0 && is_dbg == 0 {
+    let is_tree: u32 = beq(cb, o1, l1, str_ptr("tree"), 0, 4);
+    if beq(cb, o1, l1, str_ptr("id"), 0, 2) == 0 && is_dbg == 0 && is_tree == 0 {
         return fail("lomlib: usage: lomlib id DIR\n");
     }
     let dirp: ptr = ptr_add(cb, o2);
     store8(dirp, l2, 0 as u8);
+    if is_tree == 1 {
+        store32(mem, M_CELL + C_SEENN, 0);
+        store32(mem, M_CELL + C_CNTN, 0);
+        let trc: u32 = tree_walk(mem, dirp, 0, 0);
+        if trc == 4 {
+            return fail("lomlib: 依赖环\n");
+        }
+        if trc == 5 {
+            return fail("lomlib: 依赖找不到\n");
+        }
+        if trc != 0 {
+            return fail("lomlib: 解析失败\n");
+        }
+        let _o1: u64 = wstr(1, "[OK] ");
+        let _o2: u64 = wdec(mem, 1, load32(mem, M_CELL + C_SEENN));
+        let _o3: u64 = wstr(1, " 个实例\n");
+        note_multi(mem);
+        syscall4(60, 0, 0, 0);
+        return 0;
+    }
     if is_dbg == 1 {
         walk_own(mem, dirp);
         sort_files(mem);

@@ -503,39 +503,54 @@ def test_dependency_start_is_reported_once_and_correctly():
         raise AssertionError("依赖带 _start 却物化成功了")
 
 
+def _twin_exe(td: Path) -> Path:
+    """把 `lomlib.lomt` 链成可执行文件 (走仓库自己的原生后端, 不经 clang)。"""
+    twin = ROOT / "loment" / "tools" / "lomlib.lomt"
+    mod = lomentc.load(twin)
+    deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"lomlib.lomt 自己检查不过: {errs[:2]}"
+    ir = lomentc.emit_llvm(mod, ROOT, deps)
+    exe = td / ("lomlib-twin.exe" if os.name == "nt" else "lomlib-twin")
+    exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt"
+                     else lomelf.compile_ll(ir))[0])
+    exe.chmod(0o755)
+    return exe
+
+
+def _pair(exe: Path, cmd: str, arg: str, label: str) -> None:
+    """`lomlib.py <cmd> <arg>` 与孪生同一趟: **stdout 逐字节相同 + 退出码相同**。
+
+    只比 stdout 不比 stderr: 错误文案里含各自的绝对路径, 不可能逐字节相同
+    （与 `loment_pkg_test` 同法 —— 两侧都非零那一条由调用方自己断言）。
+    """
+    buf, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+        py_rc = lomlib.main([cmd, str(arg)])
+    got = subprocess.run([str(exe), cmd, str(Path(arg).resolve())],
+                         capture_output=True, text=True, shell=False, timeout=300)
+    assert (py_rc, buf.getvalue()) == (got.returncode, got.stdout), (
+        f"[{label}/{cmd}] 不一致: rc py={py_rc} el={got.returncode} | "
+        f"py={buf.getvalue()!r} | el={got.stdout!r} | err={got.stderr[-200:]!r}")
+
+
 @test
 def test_loment_lomlib_matches_python():
     """孪生判据: 同一棵树, `loment/tools/lomlib.lomt`(链成可执行文件后跑) 与 `tools/lomlib.py`
-    的 **stdout 逐字节相同 + 退出码相同**。
+    的 **stdout 逐字节相同 + 退出码相同** —— `id`（递归哈希）。
 
-    **覆盖面不对称, 别读成全等**: 孪生只做 `id`(递归哈希) —— `tree` / `cap` / `check` /
-    `materialize` 都还没有 Loment 版 (lomlib.lomt 的文件头写着同一句话)。
+    **覆盖面不对称, 别读成全等**: 孪生做 `id` / `tree`; `cap` / `check` / `materialize`
+    还没有 Loment 版 (lomlib.lomt 的文件头写着同一句话)。
     只比 stdout 不比 stderr: 错误文案里含各自的绝对路径, 不可能逐字节相同 (与 loment_pkg_test 同法)。
     """
-    twin = ROOT / "loment" / "tools" / "lomlib.lomt"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        # 1) 把孪生链成可执行文件 (走仓库自己的原生后端, 不经 clang)
-        mod = lomentc.load(twin)
-        deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
-        errs = lomentc.check(mod, deps=deps)
-        assert not errs, f"lomlib.lomt 自己检查不过: {errs[:2]}"
-        ir = lomentc.emit_llvm(mod, ROOT, deps)
-        exe = td / "lomlib-twin"
-        exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt"
-                         else lomelf.compile_ll(ir))[0])
-        # 2) 两棵树: 菱形去重 + 同名多版本
+        exe = _twin_exe(td)
+        # 两棵树: 菱形去重 + 同名多版本
         for label, root in (("菱形", build_tree(td / "t1")),
                             ("多版本", build_tree(td / "t2", v2_for_mid2=True))):
-            buf, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
-                py_rc = lomlib.main(["id", str(root)])
-            got = subprocess.run([str(exe), "id", str(root.resolve())],
-                                 capture_output=True, text=True, shell=False, timeout=120)
-            assert (py_rc, buf.getvalue()) == (got.returncode, got.stdout), (
-                f"[{label}] 不一致: rc py={py_rc} el={got.returncode} | "
-                f"py={buf.getvalue()!r} | el={got.stdout!r} | err={got.stderr[-120:]!r}")
-        # 3) 依赖找不到: 两边都必须非零
+            _pair(exe, "id", root, label)
+        # 依赖找不到: 两边都必须非零
         broken = td / "broken"
         w(broken, "app/app.lomt", """module app
 
@@ -551,6 +566,79 @@ fn _start() {
         got = subprocess.run([str(exe), "id", str((broken / "app").resolve())],
                              capture_output=True, text=True, shell=False, timeout=120)
         assert py_rc != 0 and got.returncode != 0, (py_rc, got.returncode)
+
+
+@test
+def test_loment_lomlib_tree_matches_python():
+    """**`tree` 也有 Loment 版了**（S1 第 14 格）—— 同一棵树两侧逐字节相同 + 退出码相同。
+
+    这一条钉的是**库系统那个视图**：去重后的实例树、每条边的 `-> 名字 版本 [身份前 8 位]`、
+    重复实例的 `(同一实例, 已见)`、`[OK] n 个实例`、以及多版本那条 `[NOTE] 同名多实例`。
+    它比 `id` 宽：`id` 只比一个哈希，这里比的是**整棵图的形状**。
+
+    四棵树：菱形（去重）/ 多版本（同名两实例）/ 环（两边都非零）/ 包内多文件（`use "util.lomt"`）。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        for label, root in (("菱形", build_tree(td / "t1")),
+                            ("多版本", build_tree(td / "t2", v2_for_mid2=True))):
+            _pair(exe, "tree", root, label)
+        # 包内多文件: `use "util.lomt"` —— 物化时保留相对结构，树里也该看得见
+        ml = td / "ml"
+        w(ml, "lib/lib.lomt",
+          'module lib\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
+          "    return add(x, x);\n}\n")
+        w(ml, "lib/util.lomt",
+          "module util\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
+        w(ml, "app/app.lomt",
+          "module app\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
+          "    syscall4(60, v as u64, 0, 0);\n}\n")
+        shutil.copytree(ml / "lib", ml / "app" / "deps" / "lib")
+        _pair(exe, "tree", ml / "app", "包内多文件")
+        # 环 / 依赖找不到: 两边都必须非零（文案各写各的，所以只比退出码）
+        cyc = td / "cyc"
+        w(cyc, "a/a.lomt", "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        w(cyc, "a/deps/b/b.lomt", "module b\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
+        w(cyc, "a/deps/b/deps/a/a.lomt",
+          "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        broken = td / "broken"
+        w(broken, "app/app.lomt", "module app\n\nuse nope\n\nfn _start() {\n"
+          "    syscall4(60, 0, 0, 0);\n}\n")
+        for label, d in (("环", cyc / "a"), ("依赖找不到", broken / "app")):
+            buf, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                py_rc = lomlib.main(["tree", str(d)])
+            got = subprocess.run([str(exe), "tree", str(d.resolve())],
+                                 capture_output=True, text=True, shell=False, timeout=120)
+            assert py_rc != 0 and got.returncode != 0, (label, py_rc, got.returncode)
+
+
+@test
+def test_lomlib_twin_selfhost_compiles():
+    """`lomlib.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。
+
+    前一条只保证"镜能吃下这份源"；**逐字节相同**才保证自举链里那个 `tree` 与判据这一侧
+    跑的是同一份代码（`docs/158` §5 的规矩）。没有 clang 时跳过 —— stage1 要靠 clang 链一次。
+    """
+    clang = shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+    if not (clang and Path(clang).exists()):
+        print("      SKIP: 无 clang")
+        return
+    import loment_dist  # noqa: E402
+    twin = ROOT / "loment" / "tools" / "lomlib.lomt"
+    stage1 = loment_dist.build_stage1()
+    mod = lomentc.load(twin)
+    deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
+    want = lomentc.emit_llvm(mod, ROOT, deps)
+    r = subprocess.run([str(stage1), twin.relative_to(ROOT).as_posix()],
+                       cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", shell=False, timeout=600)
+    assert r.returncode == 0, f"stage1 编译 lomlib.lomt 失败: {r.stderr[-400:]}"
+    # 参考经 Python stdout 出去时会被 Windows 文本模式翻成 CRLF，镜直接 write 是 LF
+    got = r.stdout.replace("\r\n", "\n")
+    assert got == want, f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)"
+    print(f"      种子自举链编译 lomlib.lomt 成功，且 IR 与参考逐字节相同 ({len(want)}B)")
 
 
 def main() -> int:
