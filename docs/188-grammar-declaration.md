@@ -100,6 +100,13 @@ choose write grammar python
 - **拼法可以有别名**（`grammar py` / `grammar python` 都收），但**规范名进对象** ——
   源侧宽松、对象侧只许一个拼法，否则同一份源出两串字节，判据当场红。
 
+> ⚠️ **已上报的缺口（`docs/198` §2）：这一节列了"写错"的四种样子，漏了第三种最容易犯的
+> —— 关键词本身写错。** 实测：`choose language python` / `choose grammar python` /
+> `grammar python` / `choose write grammars python` **四种都不报错**，`read_grammar_decl`
+> 一律返回 `declared=False`，于是文件被当 Loment 读，用户看到的是
+> `未知顶层关键字 'def'` 之类**指向别处**的错。而本节下面那条"兜底从'猜'变**拒绝**"
+> 正是为这种情况写的 —— 现在它既不猜也不拒，是**换了一个猜法**。
+
 ### 1.1 `lock` 是**出厂**锁，不是 `docs/182` §3 那个"装进本机"
 
 这两件事共用一个词，**必须分开**，否则实现的人一定会混：

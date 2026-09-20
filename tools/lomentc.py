@@ -2706,6 +2706,13 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
 
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
           deps: list[Module] | None = None) -> list[str]:
+    # ⚠️ **已上报的缺口 (`docs/198` §4): 依赖模块的正文不查。**
+    # 只把 `deps` 的**导出符号**入表 (M12: 仅 pub 可见), 正文不验 —— 于是
+    # `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**,
+    # 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的
+    # 程序 check 都是绿的。最小复现六行, 在 `docs/198` §4。
+    # 今天唯一抓得住它的是"把库文件自己当入口"那种形状 (`loment_std_test`
+    # 的 `test_std_modules_are_checkable`) —— 给库写判据的人只能先靠这个。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
     funcs = dict(ext_funcs or {})
