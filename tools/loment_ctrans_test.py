@@ -915,6 +915,143 @@ def test_lompotc_twin_matches_from_go():
               f"产出的对象逐字节相同")
 
 
+#: Rust 那一门自己带的输入。上游 `from_rust` 是**第三条支路**：类型写在名字后面、
+#: 结构体字段按**逗号**切、常量要**真算值**（`int(t, 0)` 的口径 + 类型范围）、
+#: 而且只有 `extern "C"` 才算 C ABI。每一份钉一条规则或一个**跳过**（跳过要出声）。
+_RUST_BATTERY = {
+    # ---- 结构体（逗号切；`pub` 要剥掉；`#` 行与没有 `:` 的段落丢掉）
+    "rs_struct_pub": "pub struct Pt {\n    pub x: i32,\n    pub y: i32,\n}\n",
+    "rs_struct_plain": "struct S { a: u32, b: bool }\n",
+    "rs_struct_attr": "struct S {\n    #[cfg(x)]\n    a: u32,\n}\n",
+    "rs_struct_nocolon": "struct S { a, b: u32 }\n",
+    "rs_struct_unmapped": "struct S { x: f32, y: u32 }\n",
+    "rs_struct_all_unmapped": "struct S { x: f32 }\n",
+    "rs_struct_unknown_ref": "struct S { x: T }\n",
+    "rs_struct_known_ref": "struct A { x: u32 }\nstruct B { a: A }\n",
+    "rs_struct_lifetime_str": "struct S<'a> { x: &'a str }\n",
+    "rs_struct_ref_field": "struct S<'a> { x: &'a u32 }\n",
+    "rs_struct_slice": "struct S<'a> { x: &'a [u8] }\n",
+    "rs_struct_mut_slice": "struct S<'a> { x: &'a mut [u8] }\n",
+    "rs_struct_array": "struct S { x: [u8; 4] }\n",
+    "rs_struct_array_const": "struct S { x: [u8; N] }\n",
+    "rs_struct_nested_array": "struct S { x: [[u8; 4]; 2] }\n",
+    "rs_struct_ptr": "struct S { x: *const u8, y: *mut u32 }\n",
+    "rs_struct_ref_array": "struct S { x: &[u8; 4] }\n",
+    "rs_struct_boxed": "struct S { x: Box<u32> }\n",
+    "rs_struct_usize": "struct S { x: usize, y: isize, z: () }\n",
+    # ---- 枚举（带载荷的整块跳过；带判别值的变体不算变体）
+    "rs_enum_plain": "enum E { A, B, C }\n",
+    "rs_enum_payload": "enum E { A(u8), B }\n",
+    "rs_enum_struct_variant": "enum E { A { x: u32 } }\n",
+    "rs_enum_disc": "enum E { A = 1, B = 2 }\n",
+    "rs_enum_empty": "enum E {}\n",
+    "rs_enum_known": "enum E { A }\nstruct S { e: E }\n",
+    # ---- 常量（base 0 的规矩 + 类型范围）
+    "rs_const_ok": "pub const X: u32 = 5;\n",
+    "rs_const_crate": "pub(crate) const X: i64 = 5;\n",
+    "rs_const_hex": "pub const X: u32 = 0xFF;\n",
+    "rs_const_bin": "pub const X: u32 = 0b1010;\n",
+    "rs_const_oct": "pub const X: u32 = 0o17;\n",
+    "rs_const_underscore": "const X: u32 = 1_000;\n",
+    "rs_const_suffix": "const X: u32 = 8u32;\n",
+    "rs_const_suffix_usize": "const X: usize = 8usize;\n",
+    "rs_const_neg": "const X: i32 = -5;\n",
+    "rs_const_i64_min": "const X: i64 = -9223372036854775808;\n",
+    "rs_const_u64_max": "const X: u64 = 18446744073709551615;\n",
+    "rs_const_overflow": "const X: u64 = 18446744073709551616;\n",
+    "rs_const_leading_zero": "const X: u32 = 010;\n",
+    "rs_const_expr": "const X: u32 = 1 << 3;\n",
+    "rs_const_bad_type": "const X: bool = 1;\n",
+    "rs_const_float_type": "const X: f32 = 1;\n",
+    "rs_const_bad_name": "const 1X: u32 = 1;\n",
+    "rs_const_u8_max": "const X: u8 = 255;\n",
+    "rs_const_u8_over": "const X: u8 = 256;\n",
+    "rs_const_i8_min": "const X: i8 = -128;\n",
+    "rs_const_i8_under": "const X: i8 = -129;\n",
+    "rs_const_array_type": "const X: [u8; 4] = 1;\n",
+    # ---- 函数
+    "rs_fn_plain": "fn f(x: i32) -> i32 { x }\n",
+    "rs_fn_pub": "pub fn f() {}\n",
+    "rs_fn_extern_c": "pub extern \"C\" fn f(a: i32, b: i32) -> i32 { a }\n",
+    "rs_fn_extern_other": "extern \"system\" fn f() {}\n",
+    "rs_fn_unsafe": "unsafe fn f(x: u32) -> u32 { x }\n",
+    "rs_fn_async": "async fn f() {}\n",
+    "rs_fn_const": "const fn f() -> u32 { 0 }\n",
+    "rs_fn_generic": "fn f<T>(x: T) -> T { x }\n",
+    "rs_fn_mut_param": "fn f(mut x: u32) -> u32 { x }\n",
+    "rs_fn_self_ref": "impl S { fn m(&self) -> u32 { 0 } }\n",
+    "rs_fn_self_val": "impl S { fn m(self) -> u32 { 0 } }\n",
+    "rs_fn_bad_param": "fn f(x) -> u32 { 0 }\n",
+    "rs_fn_bad_ret": "fn f() -> f32 { 0 }\n",
+    "rs_fn_no_ret": "fn f() {}\n",
+    "rs_fn_slice_param": "fn f(b: &[u8], n: usize) -> u16 { 0 }\n",
+    "rs_fn_ptr_param": "fn f(p: *const u8) -> *mut u32 { p }\n",
+    "rs_fn_allman": "fn f(x: i32) -> i32\n{\n    x\n}\n",
+    "rs_fn_known_type": "struct A { x: u32 }\nfn f(a: A) -> u32 { a.x }\n",
+    "rs_fn_indented": "    fn f() {}\n",
+    # ---- 注释：**抹 `//` 会改长度**，`/* */` 不抹
+    "rs_cmt_line": "// fn gone() {}\nfn f() {}\n",
+    "rs_cmt_inline": "fn f() {} // 尾巴\n",
+    "rs_cmt_block_kept": "/* struct S { x: u32 } */\n",
+    "rs_cmt_in_string": "fn f() { let s = \"// not a comment\"; }\n",
+}
+
+
+@test
+def test_lompotc_twin_matches_from_rust():
+    """**Rust 那一门也进了同一份孪生**（`lompotc --rust`）。
+
+    上游 `from_rust` 是**第三条支路**（既不是 C 那套、也不是类体那套），三处必须照抄：
+
+      * **抹注释会改长度** —— `re.sub(r"//[^\\n]*", "", src)` 是**删掉**，不是抹成等长空白
+        （与 C/Java/Go 三门都不同）；`/* */` 反而**不抹**。Rust 这一门**不带正文**，
+        所以不需要"回原文的下标"那套。
+      * **类型拼法自成一套**（`_rs_type`）：先去生命周期，再按 `&mut [T]` / `&[T]` /
+        `&str` / `&T` / `*const T` / `[T; N]` / `[T]` 的顺序剥，最后查表与 `known`
+        —— **顺序就是语义**（`&[u8; 4]` 内层是 `u8; 4`，不以 `[` 开头 ⇒ 无映射）。
+      * **常量要真算值**：`int(t, 0)` 的 base-0 规矩（十进制不许前导零、认
+        `0x`/`0b`/`0o`、符号写在前缀之前、后缀只剥一次）+ 类型范围。
+
+    覆盖面：`kernel/src/*.rs`（**真 Rust 核代码**，6 份）+ `_RUST_BATTERY`（70 份）。
+    除了对象逐字节，这一条还比**跳过项**（`S <类别> <名字>`）与**字段损失**
+    （`F <宿主> <字段>`）—— 上游那个 `Report` 的信息量在这儿，不比就等于放着
+    "静默丢掉"没人管。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _twin_exe(td)
+        cases: list[tuple[str, str]] = []
+        for f in sorted((ROOT / "kernel" / "src").glob("*.rs")):
+            cases.append((f.name, f.read_text(encoding="utf-8")))
+        cases += [(k + ".rs", v) for k, v in sorted(_RUST_BATTERY.items())]
+        bad = []
+        for name, src in cases:
+            fp = td / name
+            fp.write_text(src, encoding="utf-8", newline="\n")
+            want, rep = potato_from.from_rust(src, name, "strict")
+            wobj = json.dumps(want, ensure_ascii=False)
+            wnotes = sorted([f"S {s['kind']} {s['name']}" for s in rep.skipped]
+                            + [f"F {f['owner']} {f['field']}" for f in rep.field_notes])
+            r = subprocess.run([str(exe), "--rust", str(fp)], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+            gnotes = sorted(re.findall(r"(?m)^[SF] \S+ \S+$", r.stderr))
+            if r.returncode != 0 or r.stdout != wobj or gnotes != wnotes:
+                i = 0
+                n = min(len(r.stdout), len(wobj))
+                while i < n and r.stdout[i] == wobj[i]:
+                    i += 1
+                bad.append((name, r.returncode, wobj[max(0, i - 60):i + 80],
+                            r.stdout[max(0, i - 60):i + 80], wnotes, gnotes))
+        assert not bad, (
+            f"{len(bad)}/{len(cases)} 份与 from_rust 不同（前 2）:\n"
+            + "\n".join(f"  {n}: rc={rc}\n    py={w!r}\n    tw={g!r}\n"
+                         f"    笔记 py={wn} tw={gn}"
+                         for n, rc, w, g, wn, gn in bad[:2]))
+        print(f"      {len(cases)} 份 Rust：Loment 前端与 `potato_from.from_rust` "
+              f"产出的对象逐字节相同，跳过项与字段损失也逐条对上")
+
+
 @test
 def test_lompotc_twin_selfhost_compiles():
     """`lompotc.lomt` 必须能走**种子自举链**编译，且产出的 IR 与参考实现**逐字节相同**。"""

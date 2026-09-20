@@ -37,14 +37,18 @@
 // `internal`/`sealed`/`partial`/`async` 那十六个）、类型表（**`byte` 是两门唯一没落在
 // 同一格上的**：C# 无符号 ⇒ `u8`、Java 有符号 ⇒ `i8`；`String`/`boolean` 只有 Java 有）。
 //
-// 差 `from_rust`（还是轻量解析那一派）与 `from_python`（坐在 `ast` 上，不是）
-// 以及发射那一半（`lomt_from`）。
+// **Rust**（`--rust`，mode 6）是第三条支路：类型写在名字**后面**（`x: i32`）、结构体字段
+// 按**逗号**切、常量是 `const X: T = V;`（**要真算值**：`int(t, 0)` 的口径 + 类型范围）、
+// 而且只有 `extern "C"` 才记 ABI。它**抹注释会改长度**（把 `//` 到行尾**删掉**，不是抹平
+// —— 与 C/Java/Go 都不同；`/* */` 反而**不抹**），而且这一门**不带正文**。
+//
+// 差 `from_python`（坐在 `ast` 上，不是轻量解析那一派）与发射那一半（`lomt_from`）。
 //
 // **Go**（`--go`，mode 5）是第三条支路: 类型写在**名字后面**、条件不带括号、没有
 // `while`；`struct` 的体**不是**花括号配平出来的（到第一个以 `}` 起头的行为止），
 // 形参有**分组写法** `func gcd(a, b int)`，`//export` 才记 `abi: "c"` 且不带正文。
 //
-// 用法: `lompotc [--cpp|--java|--csharp|--go] <src>` —— 对象打到 stdout（紧凑那种）。
+// 用法: `lompotc [--cpp|--java|--csharp|--go|--rust] <src>` —— 对象打到 stdout（紧凑那种）。
 
 module lompotc
 
@@ -88,7 +92,14 @@ const M_NORM: u32 = 936960;        // IN_CAP           -> 1068032  （当前成�
 const M_CMEM: u32 = 1068032;       // CMAX*12          -> 1069568  （一个类体的成员表）
 const M_JS: u32 = 1069568;         // 128              -> 1069696  （Java 扫描/分类结果格）
 const M_JT: u32 = 1069696;         // 4096             -> 1073792  （类型文本暂存）
-const M_CAP: u32 = 1073920;
+// ---- Rust（第六门）那一半要的几块
+const M_RSN: u32 = 1073792;        // 192              -> 1073984  （`[T; N]` 的 N 文本；+64 起放字段名长度）
+const M_RSK: u32 = 1073984;        // 64               -> 1074048  （壳栈 4×12）
+const M_RSV: u32 = 1074048;        // 32               -> 1074080  （整数字面量解码 4 格）
+const M_RSL: u32 = 1074080;        // 16               -> 1074096  （字段类型长度）
+const M_RSD: u32 = 1074096;        // 64               -> 1074160  （u64 十进制暂存）
+const M_SB: u32 = 1074160;         // 4096             -> 1078256  （Rust: 名字暂存）
+const M_CAP: u32 = 1078272;
 
 // 扫描结果格（find_struct / find_enum / find_fn 共用）
 const R_NO: u32 = 0;               // 名字起点
@@ -3528,6 +3539,1468 @@ fn build_go(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     return o8;
 }
 
+// ================================================================ Rust（第六门）
+//
+// `potato_from.from_rust` —— **第三条支路**（既不是 C 那套、也不是类体那套）：
+// 类型写在名字**后面**（`x: i32`）、结构体字段按**逗号**切、常量是 `const X: T = V;`、
+// 函数是 `fn f(a: i32) -> i32 {`，而且只有 `extern "C"` 才记 ABI。
+//
+// 三处与别门不同、必须照抄的：
+//   * **抹注释会改长度**：上游是 `re.sub(r"//[^\n]*", "", src)` —— 把注释**删掉**，
+//     不是抹成等长空白（与 C/Java/Go 三门都不同）。所以走 `M_SRC2 → M_BODY` 两级，
+//     而且**不产出 `body`/`body_line`**（Rust 这一门本来就不带正文 —— 见 `from_rust`
+//     里那个 `ent` 只有 name/params/ret[+abi] 三个半键）。
+//     顺带一条：**`/* */` 不抹**（上游只抹 `//`），`//` 出现在字符串里也照抹。
+//   * **类型拼法自成一套**（`_rs_type`）：先去掉生命周期，再按 `&mut [T]` / `&[T]` /
+//     `&str` / `&T`（strict 下无映射）/ `*const T` / `[T; N]` / `[T]` 的顺序剥，
+//     最后查 `RS_TYPES` 与 `known`。**顺序就是语义** —— `&[u8; 4]` 走 `&[`…`]` 那一支
+//     之后内层是 `u8; 4`，它不以 `[` 开头 ⇒ 无映射（照抄，别自作主张）。
+//   * **常量要真算值**：`_rs_int_literal` 用的是 Python `int(t, 0)` —— base 0 的规矩
+//     照抄（十进制不许有前导零、认 `0x`/`0b`/`0o`、符号写在前缀**之前**、后缀只剥一次），
+//     算完还要按类型查范围（`_RS_INT_RANGE`），超了**跳过并报出来**。
+
+/// Go 那边的 `J_MS` 之后还有空位，Rust 这几格另开一段（`M_JS` 是 128 字节）。
+const RJ_IS: u32 = 80;             // struct/enum 体内起点
+const RJ_IE: u32 = 84;             // 体内终点
+const RJ_ME: u32 = 88;             // 配对 `}` 之后
+const RJ_AB: u32 = 92;             // ABI 串起点/长度
+const RJ_AL: u32 = 96;
+const RJ_HA: u32 = 100;            // 命中 `extern "…"` = 1
+const RJ_PS: u32 = 104;            // 形参表起点/终点
+const RJ_PE: u32 = 108;
+const RJ_RS: u32 = 112;            // 返回类型起点/长度
+const RJ_RL: u32 = 116;
+const RJ_CS: u32 = 120;            // 常量值文本起点/长度
+const RJ_CL: u32 = 124;
+
+/// `re.sub(r"//[^\n]*", "", src)` —— 抹到行尾（**不含换行本身**）。
+fn strip_lc(src: ptr, n: u32, dst: ptr) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < n {
+        if load8(src, i) == 47 && i + 1 < n && load8(src, i + 1) == 47 {
+            while i < n && load8(src, i) != 10 {
+                i = i + 1;
+            }
+        } else {
+            store8(dst, o, load8(src, i) as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+/// 掐掉头部空白（`str.strip()` 的那一半）。
+fn trim_start(p: ptr, a: u32, b: u32) -> u32 {
+    let s: u32 = a;
+    while s < b && is_sp(load8(p, s)) == 1 {
+        s = s + 1;
+    }
+    return s;
+}
+
+/// `re.sub(r"&'\w+\s*", "&", t)` —— 去掉生命周期（`&'a ` -> `&`）。
+fn rs_strip_life(p: ptr, n: u32, dst: ptr) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 38 && i + 2 < n && load8(p, i + 1) == 39
+                && is_w(load8(p, i + 2)) == 1 {
+            let e: u32 = i + 2;
+            while e < n && is_w(load8(p, e)) == 1 {
+                e = e + 1;
+            }
+            store8(dst, o, 38 as u8);
+            o = o + 1;
+            i = skip_sp(p, e, n);
+        } else {
+            store8(dst, o, load8(p, i) as u8);
+            o = o + 1;
+            i = i + 1;
+        }
+    }
+    return o;
+}
+
+/// 原地归一化 `p[a..b)`（压空白）—— `norm_of` 的下标版。
+fn rs_norm(p: ptr, a: u32, b: u32) -> u32 {
+    let o: u32 = 0;
+    let i: u32 = a;
+    while i < b {
+        if is_sp(load8(p, i)) == 1 {
+            i = i + 1;
+        } else {
+            if o > 0 {
+                store8(p, o, 32 as u8);
+                o = o + 1;
+            }
+            while i < b && is_sp(load8(p, i)) == 0 {
+                store8(p, o, load8(p, i) as u8);
+                o = o + 1;
+                i = i + 1;
+            }
+        }
+    }
+    return o;
+}
+
+/// `RS_TYPES` 那张表。命中写进 `d` 返回长度；无映射返回 0。
+fn rs_table(d: ptr, s: ptr, m: u32) -> u32 {
+    if m == 2 && eq(s, 0, "u8") == 1 {
+        return put_lit(d, "u8");
+    }
+    if m == 2 && eq(s, 0, "i8") == 1 {
+        return put_lit(d, "i8");
+    }
+    if m == 3 && eq(s, 0, "u16") == 1 {
+        return put_lit(d, "u16");
+    }
+    if m == 3 && eq(s, 0, "i16") == 1 {
+        return put_lit(d, "i16");
+    }
+    if m == 3 && eq(s, 0, "u32") == 1 {
+        return put_lit(d, "u32");
+    }
+    if m == 3 && eq(s, 0, "i32") == 1 {
+        return put_lit(d, "i32");
+    }
+    if m == 3 && eq(s, 0, "u64") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 3 && eq(s, 0, "i64") == 1 {
+        return put_lit(d, "i64");
+    }
+    if m == 4 && eq(s, 0, "bool") == 1 {
+        return put_lit(d, "bool");
+    }
+    if m == 2 && eq(s, 0, "()") == 1 {
+        return put_lit(d, "()");
+    }
+    if m == 5 && eq(s, 0, "usize") == 1 {
+        return put_lit(d, "u64");
+    }
+    if m == 5 && eq(s, 0, "isize") == 1 {
+        return put_lit(d, "i64");
+    }
+    return 0;
+}
+
+/// `t[a..b)` 里**最后一个** `;` 的下标；没有返回 `FAIL`。
+fn rs_last_semi(t: ptr, a: u32, b: u32) -> u32 {
+    let r: u32 = FAIL;
+    let i: u32 = a;
+    while i < b {
+        if load8(t, i) == 59 {
+            r = i;
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+/// `_rs_type`。命中把类型名写进 `M_TYPE` 返回长度；无映射返回 0。
+///
+/// 那一串分支是**剥壳**（`&mut [T]` / `&[T]` / `[T]` / `[T; N]`），剥到不能再剥再查表，
+/// 再**由内向外**拼回去。递归改循环：壳最多 4 层，每层记进 `M_RSK`
+/// （kind + `[T; N]` 那个 N 的文本偏移/长度，N 的字节存在 `M_RSN`）。
+fn rs_type(mem: ptr, p: ptr, off: u32, l: u32) -> u32 {
+    let t: ptr = ptr_add(mem, M_JT);
+    let np: ptr = ptr_add(mem, M_RSN);
+    let sk: ptr = ptr_add(mem, M_RSK);
+    let d: ptr = ptr_add(mem, M_TYPE);
+    let a: u32 = trim_start(p, off, off + l);
+    let b: u32 = trim_end(p, a, off + l);
+    let _c0: u32 = copy_n(t, 0, p, a, b - a);
+    let tl: u32 = rs_strip_life(t, b - a, t);
+    let depth: u32 = 0;
+    let bad: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        going = 0;
+        if tl >= 7 && load8(t, 0) == 38 && eq(t, 1, "mut [") == 1
+                && load8(t, tl - 1) == 93 {
+            if depth < 4 {
+                let _s: u32 = st32(sk, depth * 12, 1);
+                let _s2: u32 = st32(sk, depth * 12 + 4, 0);
+                let _s3: u32 = st32(sk, depth * 12 + 8, 0);
+                depth = depth + 1;
+                tl = rs_norm(t, 6, tl - 1);
+                going = 1;
+            } else {
+                bad = 1;
+            }
+        }
+        if going == 0 && bad == 0 && tl >= 3 && load8(t, 0) == 38 && load8(t, 1) == 91
+                && load8(t, tl - 1) == 93 {
+            if depth < 4 {
+                let _s: u32 = st32(sk, depth * 12, 2);
+                let _s2: u32 = st32(sk, depth * 12 + 4, 0);
+                let _s3: u32 = st32(sk, depth * 12 + 8, 0);
+                depth = depth + 1;
+                tl = rs_norm(t, 2, tl - 1);
+                going = 1;
+            } else {
+                bad = 1;
+            }
+        }
+        if going == 0 && bad == 0 && tl >= 2 && load8(t, 0) == 91
+                && load8(t, tl - 1) == 93 {
+            let sc: u32 = rs_last_semi(t, 1, tl - 1);
+            let okn: u32 = 1;
+            let ns: u32 = 0;
+            let ne: u32 = 0;
+            if sc != FAIL {
+                ns = trim_start(t, sc + 1, tl - 1);
+                ne = trim_end(t, ns, tl - 1);
+                if ne == ns {
+                    okn = 0;
+                }
+                let q: u32 = ns;
+                while q < ne {
+                    if is_d(load8(t, q)) == 0 {
+                        okn = 0;
+                    }
+                    q = q + 1;
+                }
+            }
+            if depth >= 4 {
+                bad = 1;
+            } else {
+                if sc != FAIL && okn == 0 {
+                    bad = 1;
+                } else {
+                    if sc != FAIL {
+                        // `[T; N]`
+                        let _s: u32 = st32(sk, depth * 12, 3);
+                        let _s2: u32 = st32(sk, depth * 12 + 4, depth * 32);
+                        let _s3: u32 = st32(sk, depth * 12 + 8, ne - ns);
+                        let _s4: u32 = copy_n(np, depth * 32, t, ns, ne - ns);
+                        depth = depth + 1;
+                        tl = rs_norm(t, 1, sc);
+                    } else {
+                        let _s: u32 = st32(sk, depth * 12, 2);
+                        let _s2: u32 = st32(sk, depth * 12 + 4, 0);
+                        let _s3: u32 = st32(sk, depth * 12 + 8, 0);
+                        depth = depth + 1;
+                        tl = rs_norm(t, 1, tl - 1);
+                    }
+                    going = 1;
+                }
+            }
+        }
+        if bad == 1 {
+            going = 0;
+        }
+    }
+    if bad == 1 {
+        return 0;
+    }
+    // ---- 基础那一段（`_rs_type` 剩下的分支，**顺序照抄**）
+    let base: u32 = 0;
+    if tl == 4 && eq(t, 0, "&str") == 1 {
+        base = put_lit(d, "str");
+    } else {
+        if tl == 3 && eq(t, 0, "str") == 1 {
+            base = put_lit(d, "str");
+        } else {
+            if tl >= 1 && load8(t, 0) == 38 {
+                return 0;               // `&mut T` / `&T`：strict 下无映射
+            }
+            if tl >= 7 && eq(t, 0, "*const ") == 1 {
+                base = put_lit(d, "ptr");
+            } else {
+                if tl >= 5 && eq(t, 0, "*mut ") == 1 {
+                    base = put_lit(d, "ptr");
+                } else {
+                    if known_find(mem, t, 0, tl) == 1 {
+                        let _k: u32 = copy_n(d, 0, t, 0, tl);
+                        base = tl;
+                    } else {
+                        base = rs_table(d, t, tl);
+                    }
+                }
+            }
+        }
+    }
+    if base == 0 {
+        return 0;
+    }
+    // ---- 由内向外拼回（栈顶 = 最内层）
+    let bl: u32 = base;
+    let j: u32 = depth;
+    while j > 0 {
+        let k: u32 = ld32(sk, (j - 1) * 12);
+        let no: u32 = ld32(sk, (j - 1) * 12 + 4);
+        let nl2: u32 = ld32(sk, (j - 1) * 12 + 8);
+        if k == 1 {
+            bl = ins_front(d, bl, "mut [", 5);
+        } else {
+            bl = ins_front(d, bl, "[", 1);
+        }
+        if k == 3 {
+            store8(d, bl, 59 as u8);
+            bl = bl + 1;
+            store8(d, bl, 32 as u8);
+            bl = bl + 1;
+            let _p2: u32 = copy_n(d, bl, np, no, nl2);
+            bl = bl + nl2;
+        }
+        store8(d, bl, 93 as u8);
+        bl = bl + 1;
+        j = j - 1;
+    }
+    return bl;
+}
+
+/// 把字面量 `s` 插到 `d[0..bl)` 之前（整体右移），返回新长度。
+fn ins_front(d: ptr, bl: u32, s: str, sl: u32) -> u32 {
+    let z: u32 = bl;
+    while z > 0 {
+        store8(d, z + sl - 1, load8(d, z - 1) as u8);
+        z = z - 1;
+    }
+    let _c: u32 = copy_n(d, 0, str_ptr(s), 0, sl);
+    return bl + sl;
+}
+
+/// `\b(?:pub\s+)?` 那一截：命中返回 `pub` 之后的位置，否则原样返回。
+fn rs_opt_pub(body: ptr, i: u32, n: u32) -> u32 {
+    if i + 3 <= n && eq(body, i, "pub") == 1 {
+        let j: u32 = i + 3;
+        if j < n && is_sp(load8(body, j)) == 1 {
+            return skip_sp(body, j, n);
+        }
+    }
+    return i;
+}
+
+/// `_RS_STRUCT = \b(?:pub\s+)?struct\s+([A-Za-z_]\w*)\s*\{([^}]*)\}`（re.S）。
+/// 命中写 `RJ_IS`/`RJ_IE`（体内，不含 `}`）/`RJ_ME`（`}` 之后）+ 名字。
+fn find_rsstruct(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || is_w(load8(body, i - 1)) == 0 {
+            let j0: u32 = rs_opt_pub(body, i, n);
+            if j0 + 6 <= n && eq(body, j0, "struct") == 1 {
+                let j1: u32 = j0 + 6;
+                if j1 < n && is_sp(load8(body, j1)) == 1 {
+                    let ns: u32 = skip_sp(body, j1, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let ob: u32 = skip_sp(body, ne, n);
+                        if ob < n && load8(body, ob) == 123 {
+                            let cl: u32 = find_ch(body, ob + 1, n, 125);
+                            if cl != FAIL {
+                                let _a: u32 = st32(r, J_NO, ns);
+                                let _b: u32 = st32(r, J_NL, ne - ns);
+                                let _c: u32 = st32(r, RJ_IS, ob + 1);
+                                let _d: u32 = st32(r, RJ_IE, cl);
+                                let _e: u32 = st32(r, RJ_ME, cl + 1);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `_RS_ENUM` —— 形状与 `find_rsstruct` 同。
+fn find_rsenum(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || is_w(load8(body, i - 1)) == 0 {
+            let j0: u32 = rs_opt_pub(body, i, n);
+            if j0 + 4 <= n && eq(body, j0, "enum") == 1 {
+                let j1: u32 = j0 + 4;
+                if j1 < n && is_sp(load8(body, j1)) == 1 {
+                    let ns: u32 = skip_sp(body, j1, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let ob: u32 = skip_sp(body, ne, n);
+                        if ob < n && load8(body, ob) == 123 {
+                            let cl: u32 = find_ch(body, ob + 1, n, 125);
+                            if cl != FAIL {
+                                let _a: u32 = st32(r, J_NO, ns);
+                                let _b: u32 = st32(r, J_NL, ne - ns);
+                                let _c: u32 = st32(r, RJ_IS, ob + 1);
+                                let _d: u32 = st32(r, RJ_IE, cl);
+                                let _e: u32 = st32(r, RJ_ME, cl + 1);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `^[ \t]*(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?` 那一截（`_RS_CONST` 的前缀）。
+fn rs_const_pub(body: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let going: u32 = 1;
+    while going == 1 {
+        if j + 3 <= n && eq(body, j, "pub") == 1 {
+            let k: u32 = j + 3;
+            if k < n && load8(body, k) == 40 {
+                let cl: u32 = find_ch(body, k + 1, n, 41);
+                if cl == FAIL {
+                    going = 0;
+                } else {
+                    if cl + 1 >= n || is_ht(load8(body, cl + 1)) == 0 {
+                        going = 0;
+                    } else {
+                        j = skip_ht(body, cl + 1, n);
+                    }
+                }
+            } else {
+                if k < n && is_ht(load8(body, k)) == 1 {
+                    j = skip_ht(body, k, n);
+                } else {
+                    going = 0;
+                }
+            }
+        } else {
+            going = 0;
+        }
+    }
+    return j;
+}
+
+/// `_RS_CONST = ^[ \t]*(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?const[ \t]+NAME[ \t]*:[ \t]*`
+///              `([^=;]+?)[ \t]*=[ \t]*([^;]+);`（re.M）。
+/// 命中写名字 / `J_TS`,`J_TL`（类型文本）/ `RJ_CS`,`RJ_CL`（值文本）。
+fn find_rsconst(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || load8(body, i - 1) == 10 {
+            let j0: u32 = skip_ht(body, i, n);
+            let j2: u32 = rs_const_pub(body, j0, n);
+            if j2 + 5 <= n && eq(body, j2, "const") == 1 {
+                let j3: u32 = j2 + 5;
+                if j3 < n && is_ht(load8(body, j3)) == 1 {
+                    let ns: u32 = skip_ht(body, j3, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let c1: u32 = skip_ht(body, ne, n);
+                        if c1 < n && load8(body, c1) == 58 {
+                            let ts: u32 = skip_ht(body, c1 + 1, n);
+                            let te0: u32 = ts;
+                            while te0 < n && load8(body, te0) != 59
+                                    && load8(body, te0) != 61 {
+                                te0 = te0 + 1;
+                            }
+                            let te: u32 = trim_end(body, ts, te0);
+                            if te0 < n && load8(body, te0) == 61 && te < te0 {
+                                let vs: u32 = skip_ht(body, te0 + 1, n);
+                                let ve0: u32 = vs;
+                                while ve0 < n && load8(body, ve0) != 59 {
+                                    ve0 = ve0 + 1;
+                                }
+                                let ve: u32 = trim_end(body, vs, ve0);
+                                if ve0 < n && ve > vs {
+                                    let _a: u32 = st32(r, J_NO, ns);
+                                    let _b: u32 = st32(r, J_NL, ne - ns);
+                                    let _c: u32 = st32(r, J_TS, ts);
+                                    let _d: u32 = st32(r, J_TL, te - ts);
+                                    let _e: u32 = st32(r, RJ_CS, vs);
+                                    let _f: u32 = st32(r, RJ_CL, ve - vs);
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `(?:pub\s+)` / `(?:const\s+)` / … 那一截：命中返回词后位置，否则原样返回。
+fn rs_mod(body: ptr, i: u32, n: u32, kw: str) -> u32 {
+    let kl: u32 = str_len(kw);
+    if i + kl <= n && eq(body, i, kw) == 1 {
+        let j: u32 = i + kl;
+        if j < n && is_sp(load8(body, j)) == 1 {
+            return skip_sp(body, j, n);
+        }
+    }
+    return i;
+}
+
+/// `(?:extern\s+"([^"]*)"\s+)?` —— 命中把 ABI 串的位置写进 `RJ_AB`/`RJ_AL`（`RJ_HA`=1），
+/// 返回之后的位置；不命中返回原位置（`RJ_HA`=0）。
+fn rs_extern(body: ptr, i: u32, n: u32, r: ptr) -> u32 {
+    let _z: u32 = st32(r, RJ_HA, 0);
+    let j: u32 = rs_mod(body, i, n, "extern");
+    if j == i {
+        return i;
+    }
+    if j < n && load8(body, j) == 34 {
+        let cl: u32 = find_ch(body, j + 1, n, 34);
+        if cl != FAIL {
+            let k: u32 = cl + 1;
+            if k < n && is_sp(load8(body, k)) == 1 {
+                let _a: u32 = st32(r, RJ_AB, j + 1);
+                let _b: u32 = st32(r, RJ_AL, cl - j - 1);
+                let _c: u32 = st32(r, RJ_HA, 1);
+                return skip_sp(body, k, n);
+            }
+        }
+    }
+    return i;
+}
+
+/// `_RS_FN`。命中写名字 / `RJ_PS`,`RJ_PE`（形参表）/ `RJ_RS`,`RJ_RL`（返回类型，可空）/
+/// `RJ_AB`,`RJ_AL`,`RJ_HA`（ABI，可空）/ `J_VS`（1 = 有泛型段）。
+fn find_rsfn(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if i == 0 || load8(body, i - 1) == 10 {
+            let _z: u32 = st32(r, RJ_HA, 0);
+            let j0: u32 = skip_ht(body, i, n);
+            let j1: u32 = rs_mod(body, j0, n, "pub");
+            let j2: u32 = rs_mod(body, j1, n, "const");
+            let j3: u32 = rs_mod(body, j2, n, "unsafe");
+            let j4: u32 = rs_mod(body, j3, n, "async");
+            let j6: u32 = rs_extern(body, j4, n, r);
+            if j6 + 2 <= n && eq(body, j6, "fn") == 1 {
+                let j7: u32 = j6 + 2;
+                if j7 < n && is_sp(load8(body, j7)) == 1 {
+                    let ns: u32 = skip_sp(body, j7, n);
+                    if ns < n && is_id0(load8(body, ns)) == 1 {
+                        let ne: u32 = ns + 1;
+                        while ne < n && is_w(load8(body, ne)) == 1 {
+                            ne = ne + 1;
+                        }
+                        let g1: u32 = skip_sp(body, ne, n);
+                        let hasg: u32 = 0;
+                        let g2: u32 = g1;
+                        if g1 < n && load8(body, g1) == 60 {
+                            let ge: u32 = find_ch(body, g1 + 1, n, 62);
+                            if ge != FAIL {
+                                hasg = 1;
+                                g2 = ge + 1;
+                            }
+                        }
+                        let ps: u32 = skip_sp(body, g2, n);
+                        if ps < n && load8(body, ps) == 40 {
+                            let pe: u32 = ps + 1;
+                            while pe < n && load8(body, pe) != 41 {
+                                pe = pe + 1;
+                            }
+                            if pe < n {
+                                let rs0: u32 = skip_sp(body, pe + 1, n);
+                                let got: u32 = 0;
+                                let rts: u32 = 0;
+                                let rtl: u32 = 0;
+                                let ob: u32 = 0;
+                                if rs0 + 1 < n && load8(body, rs0) == 45
+                                        && load8(body, rs0 + 1) == 62 {
+                                    let k: u32 = skip_sp(body, rs0 + 2, n);
+                                    let ke: u32 = k;
+                                    while ke < n && load8(body, ke) != 123 {
+                                        ke = ke + 1;
+                                    }
+                                    let te2: u32 = trim_end(body, k, ke);
+                                    let o2: u32 = skip_sp(body, te2, n);
+                                    if ke < n && load8(body, ke) == 123 && o2 == ke {
+                                        got = 1;
+                                        rts = k;
+                                        rtl = te2 - k;
+                                        ob = ke;
+                                    }
+                                } else {
+                                    if rs0 < n && load8(body, rs0) == 123 {
+                                        got = 1;
+                                        rts = rs0;
+                                        rtl = 0;
+                                        ob = rs0;
+                                    }
+                                }
+                                if got == 1 {
+                                    let _a: u32 = st32(r, J_NO, ns);
+                                    let _b: u32 = st32(r, J_NL, ne - ns);
+                                    let _c: u32 = st32(r, RJ_PS, ps + 1);
+                                    let _d: u32 = st32(r, RJ_PE, pe);
+                                    let _e: u32 = st32(r, RJ_RS, rts);
+                                    let _f: u32 = st32(r, RJ_RL, rtl);
+                                    let _g: u32 = st32(r, J_VS, hasg);
+                                    let _h: u32 = st32(r, RJ_ME, ob);
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 剥一次 Rust 整型后缀（`u8`/`i128`/`usize`…）—— 上游是 `(?:u|i)(?:8|16|32|64|128|size)$`。
+fn rs_strip_suffix(b: ptr, n: u32) -> u32 {
+    if n >= 5 {
+        let c: u32 = load8(b, n - 5);
+        if (c == 117 || c == 105) && eq(b, n - 4, "size") == 1 {
+            return n - 5;
+        }
+    }
+    if n >= 4 {
+        let c: u32 = load8(b, n - 4);
+        if (c == 117 || c == 105) && eq(b, n - 3, "128") == 1 {
+            return n - 4;
+        }
+    }
+    if n >= 3 {
+        let c: u32 = load8(b, n - 3);
+        if c == 117 || c == 105 {
+            if eq(b, n - 2, "16") == 1 || eq(b, n - 2, "32") == 1
+                    || eq(b, n - 2, "64") == 1 {
+                return n - 3;
+            }
+        }
+    }
+    if n >= 2 {
+        let c: u32 = load8(b, n - 2);
+        if (c == 117 || c == 105) && load8(b, n - 1) == 56 {
+            return n - 2;
+        }
+    }
+    return n;
+}
+
+/// `_rs_int_literal`：Rust 整数字面量 -> (负号, 值低位, 值高位, 太大)。命中返回 1。
+///
+/// Python 那边是 `int(t.replace("_","")[去后缀], 0)` —— **base 0 的规矩照抄**：
+/// 十进制不许有前导零、认 `0x`/`0b`/`0o`、符号写在前缀**之前**、后缀只剥一次。
+/// 超过 64 位不假装会算（`太大` 那个标记让范围判定**拒掉**，与 Python 的
+/// "超出范围"同一个结果）。
+fn rs_int_lit(mem: ptr, p: ptr, off: u32, l: u32, outp: ptr) -> u32 {
+    let b: ptr = ptr_add(mem, M_JT);
+    let _z0: u32 = st32(outp, 0, 0);
+    let _z1: u32 = st32(outp, 4, 0);
+    let _z2: u32 = st32(outp, 8, 0);
+    let _z3: u32 = st32(outp, 12, 0);
+    let a: u32 = trim_start(p, off, off + l);
+    let e: u32 = trim_end(p, a, off + l);
+    let o: u32 = 0;
+    let i: u32 = a;
+    while i < e {
+        if load8(p, i) != 95 {
+            store8(b, o, load8(p, i) as u8);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    let o2: u32 = rs_strip_suffix(b, o);
+    if o2 == 0 {
+        return 0;
+    }
+    let neg: u32 = 0;
+    let s: u32 = 0;
+    if load8(b, 0) == 43 || load8(b, 0) == 45 {
+        if load8(b, 0) == 45 {
+            neg = 1;
+        }
+        s = 1;
+    }
+    if o2 <= s {
+        return 0;
+    }
+    let radix: u32 = 10;
+    let ds: u32 = s;
+    let de: u32 = o2;
+    if s + 2 <= o2 && load8(b, s) == 48 {
+        let c1: u32 = load8(b, s + 1);
+        if c1 == 120 || c1 == 88 {
+            radix = 16;
+            ds = s + 2;
+        } else {
+            if c1 == 98 || c1 == 66 {
+                radix = 2;
+                ds = s + 2;
+            } else {
+                if c1 == 111 || c1 == 79 {
+                    radix = 8;
+                    ds = s + 2;
+                }
+            }
+        }
+    }
+    if ds >= de {
+        return 0;
+    }
+    if radix == 10 && de - ds > 1 && load8(b, ds) == 48 {
+        return 0;                       // base 0 不认前导零
+    }
+    let lo: u32 = 0;
+    let hi: u32 = 0;
+    let huge: u32 = 0;
+    let k: u32 = ds;
+    while k < de {
+        let c: u32 = load8(b, k);
+        let dv: u32 = 99;
+        if c >= 48 && c <= 57 {
+            dv = c - 48;
+        } else {
+            if c >= 97 && c <= 122 {
+                dv = c - 97 + 10;
+            } else {
+                if c >= 65 && c <= 90 {
+                    dv = c - 65 + 10;
+                }
+            }
+        }
+        if dv >= radix {
+            return 0;
+        }
+        let nl: u64 = (lo as u64) * (radix as u64) + (dv as u64);
+        let ncarry: u32 = (nl / 4294967296) as u32;
+        lo = (nl % 4294967296) as u32;
+        let nh: u64 = (hi as u64) * (radix as u64) + (ncarry as u64);
+        if nh > 4294967295 {
+            huge = 1;
+        }
+        hi = (nh % 4294967296) as u32;
+        k = k + 1;
+    }
+    let _a: u32 = st32(outp, 0, neg);
+    let _b: u32 = st32(outp, 4, lo);
+    let _c: u32 = st32(outp, 8, hi);
+    let _d: u32 = st32(outp, 12, huge);
+    return 1;
+}
+
+/// 常量值在类型 `t`（已在 `M_TYPE`，长度 `tl`）的范围里吗（`_RS_INT_RANGE`）。
+/// `neg`/`lo`/`hi`/`huge` 由 `rs_int_lit` 给。
+fn rs_in_range(mem: ptr, tl: u32, neg: u32, lo: u32, hi: u32, huge: u32) -> u32 {
+    let d: ptr = ptr_add(mem, M_TYPE);
+    if huge == 1 {
+        return 0;                       // 超 64 位：每个类型都装不下（与 Python 同结果）
+    }
+    if tl == 2 && eq(d, 0, "u8") == 1 {
+        if neg == 1 || hi > 0 || lo > 255 {
+            return 0;
+        }
+        return 1;
+    }
+    if tl == 2 && eq(d, 0, "i8") == 1 {
+        if hi > 0 {
+            return 0;
+        }
+        if neg == 1 {
+            if lo <= 128 {
+                return 1;
+            }
+            return 0;
+        }
+        if lo <= 127 {
+            return 1;
+        }
+        return 0;
+    }
+    if tl == 3 && eq(d, 0, "u16") == 1 {
+        if neg == 1 || hi > 0 || lo > 65535 {
+            return 0;
+        }
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i16") == 1 {
+        if hi > 0 {
+            return 0;
+        }
+        if neg == 1 {
+            if lo <= 32768 {
+                return 1;
+            }
+            return 0;
+        }
+        if lo <= 32767 {
+            return 1;
+        }
+        return 0;
+    }
+    if tl == 3 && eq(d, 0, "u32") == 1 {
+        if neg == 1 || hi > 0 {
+            return 0;
+        }
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i32") == 1 {
+        if hi > 0 {
+            return 0;
+        }
+        if neg == 1 {
+            if lo <= 2147483648 {
+                return 1;
+            }
+            return 0;
+        }
+        if lo <= 2147483647 {
+            return 1;
+        }
+        return 0;
+    }
+    if tl == 3 && eq(d, 0, "u64") == 1 {
+        if neg == 1 {
+            return 0;
+        }
+        return 1;
+    }
+    if tl == 3 && eq(d, 0, "i64") == 1 {
+        // 正: M <= 2^63-1 ⇒ hi <= 0x7FFFFFFF
+        // 负: M <= 2^63   ⇒ hi <= 0x7FFFFFFF || (hi == 0x80000000 && lo == 0)
+        if neg == 0 {
+            if hi <= 2147483647 {
+                return 1;
+            }
+            return 0;
+        }
+        if hi <= 2147483647 {
+            return 1;
+        }
+        if hi == 2147483648 && lo == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+
+/// `^(?:pub(?:\s*\([^)]*\))?\s+)+` —— 把结构体字段名里那串 `pub` 剥掉（上游是
+/// `re.sub(...)` 再 `strip()`）。**不剥的话 `IDENT_RE` 判假，整个字段静默消失**
+/// （上游 2026-09-17 撞到过：`pub struct Pt { pub x: i32 }` 抽出来 0 个字段）。
+fn rs_fld_name(body: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = trim_start(body, a, b);
+    let going: u32 = 1;
+    while going == 1 {
+        if i + 3 <= b && eq(body, i, "pub") == 1 {
+            let k: u32 = i + 3;
+            if k < b && load8(body, k) == 40 {
+                let cl: u32 = find_ch(body, k + 1, b, 41);
+                if cl == FAIL {
+                    going = 0;
+                } else {
+                    let k2: u32 = skip_sp(body, cl + 1, b);
+                    if k2 <= cl + 1 || k2 >= b {
+                        going = 0;
+                    } else {
+                        i = k2;
+                    }
+                }
+            } else {
+                if k < b && is_sp(load8(body, k)) == 1 {
+                    i = skip_sp(body, k, b);
+                } else {
+                    going = 0;
+                }
+            }
+        } else {
+            going = 0;
+        }
+    }
+    return trim_start(body, i, b);
+}
+
+/// 结构体字段那一段（逗号分出来的一段）**能不能收**。能则把名字写进 `M_SB`
+/// （长度写进 `M_RSN + 64`）、类型映射写进 `M_TYPE`，返回 1。
+fn rs_fld_parse(mem: ptr, body: ptr, s2: u32, e2: u32) -> u32 {
+    let sb: ptr = ptr_add(mem, M_SB);
+    if e2 <= s2 {
+        return 0;
+    }
+    if load8(body, s2) == 35 {
+        return 0;                       // `#…` 行
+    }
+    let c1: u32 = find_ch(body, s2, e2, 58);
+    if c1 == FAIL {
+        return 0;                       // 没有 `:`
+    }
+    let n0: u32 = rs_fld_name(body, s2, c1);
+    let n1: u32 = trim_end(body, n0, c1);
+    if n1 <= n0 {
+        return 0;
+    }
+    let _c: u32 = copy_n(sb, 0, body, n0, n1 - n0);
+    if is_ident(sb, 0, n1 - n0) == 0 {
+        return 0;
+    }
+    let t0: u32 = trim_start(body, c1 + 1, e2);
+    let tl: u32 = rs_type(mem, body, t0, e2 - t0);
+    if tl == 0 {
+        return 2;                       // 名字行、类型无映射 —— 调用方要**出声**
+    }
+    let _l: u32 = st32(ptr_add(mem, M_RSN + 64), 0, n1 - n0);
+    let _l2: u32 = st32(ptr_add(mem, M_RSL), 0, tl);
+    return 1;
+}
+
+/// 一段 `inner` 里有几个字段能进对象（`from_rust` 里 struct 那一圈）。
+fn rs_fld_count(mem: ptr, body: ptr, a: u32, b: u32) -> u32 {
+    let got: u32 = 0;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = trim_start(body, p, se);
+        let e2: u32 = trim_end(body, s2, se);
+        if e2 > s2 && rs_fld_parse(mem, body, s2, e2) == 1 {
+            got = got + 1;
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return got;
+}
+
+/// 枚举体里有几个变体名（带载荷的整块不收 —— 上游 `if "(" in inner or "{" in inner`
+/// 直接 skip 整个 enum）。
+fn rs_var_count(body: ptr, a: u32, b: u32) -> u32 {
+    if find_ch(body, a, b, 40) != FAIL {
+        return 0;
+    }
+    if find_ch(body, a, b, 123) != FAIL {
+        return 0;
+    }
+    let cnt: u32 = 0;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = trim_start(body, p, se);
+        let e2: u32 = trim_end(body, s2, se);
+        if e2 > s2 && is_ident(body, s2, e2 - s2) == 1 {
+            cnt = cnt + 1;
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return cnt;
+}
+
+/// `known` 那一圈：struct（有字段的）+ enum（有变体的）—— 上游那两圈都排在常量/函数
+/// **之前**（所以"先声明后引用"是通的；反向不通，与 Java 那一门同一处 caveat）。
+fn rs_known(mem: ptr, body: ptr, withenums: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let i: u32 = 0;
+    while find_rsstruct(body, n, i, r) == 1 {
+        i = ld32(r, RJ_ME);
+        if rs_fld_count(mem, body, ld32(r, RJ_IS), ld32(r, RJ_IE)) > 0 {
+            let _k: u32 = known_add(mem, ptr_add(body, ld32(r, J_NO)), ld32(r, J_NL));
+        }
+    }
+    // ⚠ 枚举进 known 的**时机**：上游那一圈排在 struct 圈**之后**，所以
+    // "struct 的字段引用一个 enum" 在 struct 圈里查不到（字段被丢、要出声）。
+    // 而常量/函数那两圈排在枚举之后 ⇒ 它们看得到枚举名。这一格**由参数决定**
+    // （types 那一遍传 0，其余传 1）—— 少了这一分，`enum E { A } struct S { e: E }`
+    // 会多出一个字段来。
+    if withenums == 0 {
+        return 0;
+    }
+    let j: u32 = 0;
+    while find_rsenum(body, n, j, r) == 1 {
+        j = ld32(r, RJ_ME);
+        if rs_var_count(body, ld32(r, RJ_IS), ld32(r, RJ_IE)) > 0 {
+            let _k2: u32 = known_add(mem, ptr_add(body, ld32(r, J_NO)), ld32(r, J_NL));
+        }
+    }
+    return 0;
+}
+
+/// 子串在不在（字面量）。
+fn rs_has_sub(body: ptr, a: u32, b: u32, s: str) -> u32 {
+    let sl: u32 = str_len(s);
+    if sl == 0 {
+        return 0;
+    }
+    let i: u32 = a;
+    while i + sl <= b {
+        let j: u32 = 0;
+        let same: u32 = 1;
+        while j < sl {
+            if load8(body, i + j) != str_byte(s, j) {
+                same = 0;
+            }
+            j = j + 1;
+        }
+        if same == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 形参表每一节：`名字: 类型`（名字允许 `mut ` 前缀）。返回 1 = 全好。逐段判、不发射。
+fn rs_params_ok(mem: ptr, body: ptr, a: u32, b: u32) -> u32 {
+    let sb: ptr = ptr_add(mem, M_SB);
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = trim_start(body, p, se);
+        let e2: u32 = trim_end(body, s2, se);
+        if e2 > s2 {
+            let c1: u32 = find_ch(body, s2, e2, 58);
+            if c1 == FAIL {
+                return 0;
+            }
+            let m0: u32 = trim_start(body, s2, c1);
+            let m0e: u32 = trim_end(body, m0, c1);
+            let n0: u32 = m0;
+            if m0e - m0 >= 4 && eq(body, m0, "mut ") == 1 {
+                n0 = trim_start(body, m0 + 4, c1);
+            }
+            let n1: u32 = trim_end(body, n0, c1);
+            if n1 <= n0 {
+                return 0;
+            }
+            let _c: u32 = copy_n(sb, 0, body, n0, n1 - n0);
+            if is_ident(sb, 0, n1 - n0) == 0 {
+                return 0;
+            }
+            let t0: u32 = trim_start(body, c1 + 1, e2);
+            if rs_type(mem, body, t0, e2 - t0) == 0 {
+                return 0;
+            }
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return 1;
+}
+
+/// 逐条发形参（`名字: 类型` 以 ", " 连）。调用方已确认都合法。
+fn rs_params_emit(mem: ptr, out: ptr, o: u32, body: ptr, a: u32, b: u32) -> u32 {
+    let sb: ptr = ptr_add(mem, M_SB);
+    let first: u32 = 1;
+    let p: u32 = a;
+    while p <= b {
+        let seg: u32 = find_ch(body, p, b, 44);
+        let se: u32 = b;
+        if seg != FAIL {
+            se = seg;
+        }
+        let s2: u32 = trim_start(body, p, se);
+        let e2: u32 = trim_end(body, s2, se);
+        if e2 > s2 {
+            let c1: u32 = find_ch(body, s2, e2, 58);
+            let m0: u32 = trim_start(body, s2, c1);
+            let m0e: u32 = trim_end(body, m0, c1);
+            let n0: u32 = m0;
+            if m0e - m0 >= 4 && eq(body, m0, "mut ") == 1 {
+                n0 = trim_start(body, m0 + 4, c1);
+            }
+            let n1: u32 = trim_end(body, n0, c1);
+            let _c: u32 = copy_n(sb, 0, body, n0, n1 - n0);
+            let t0: u32 = trim_start(body, c1 + 1, e2);
+            let tl: u32 = rs_type(mem, body, t0, e2 - t0);
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, sb, 0, n1 - n0);
+            o = jl(out, o, ", \"type\": ");
+            o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+            o = jl(out, o, "}");
+        }
+        if seg == FAIL {
+            p = b + 1;
+        } else {
+            p = seg + 1;
+        }
+    }
+    return o;
+}
+
+/// 无符号 64 位十进制（常量值可以到 `u64` 那个量级）。`hi == 0` 时退回 `jint`。
+fn ju64(mem: ptr, out: ptr, o: u32, neg: u32, hi: u32, lo: u32) -> u32 {
+    if hi == 0 {
+        return jint(out, o, neg, lo);
+    }
+    let tmp: ptr = ptr_add(mem, M_RSD);
+    let n: u32 = 0;
+    let h: u32 = hi;
+    let l: u32 = lo;
+    while h > 0 || l > 0 {
+        let cur: u64 = (h as u64) * 4294967296 + (l as u64);
+        let q: u64 = cur / 10;
+        let dg: u32 = (cur % 10) as u32;
+        store8(tmp, n, (dg + 48) as u8);
+        h = (q / 4294967296) as u32;
+        l = (q % 4294967296) as u32;
+        n = n + 1;
+    }
+    if neg == 1 {
+        store8(out, o, 45 as u8);
+        o = o + 1;
+    }
+    let k: u32 = 0;
+    while k < n {
+        store8(out, o + k, load8(tmp, n - 1 - k) as u8);
+        k = k + 1;
+    }
+    return o + n;
+}
+
+/// `"self" in params.split(",")[0].strip()` —— 只看**第一段**。
+fn first_param_has_self(body: ptr, a: u32, b: u32) -> u32 {
+    let seg: u32 = find_ch(body, a, b, 44);
+    let se: u32 = b;
+    if seg != FAIL {
+        se = seg;
+    }
+    let s2: u32 = trim_start(body, a, se);
+    let e2: u32 = trim_end(body, s2, se);
+    return rs_has_sub(body, s2, e2, "self");
+}
+
+/// 函数 -> `functions`（只有 `extern "C"` 才记 `abi`）。
+fn rs_emit_functions(mem: ptr, body: ptr, out: ptr, o: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let _k: u32 = rs_known(mem, body, 1);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_rsfn(body, n, i, r) == 1 {
+        i = ld32(r, RJ_ME);
+        let ns: u32 = ld32(r, J_NO);
+        let nl: u32 = ld32(r, J_NL);
+        let ps: u32 = ld32(r, RJ_PS);
+        let pe: u32 = ld32(r, RJ_PE);
+        let hasg: u32 = ld32(r, J_VS);
+        let isc: u32 = 0;
+        if ld32(r, RJ_HA) == 1 {
+            if ld32(r, RJ_AL) == 1 && load8(body, ld32(r, RJ_AB)) == 67 {
+                isc = 1;
+            }
+        }
+        let skipit: u32 = 0;
+        if hasg == 1 {
+            skipit = 1;
+        }
+        if rs_has_sub(body, ps, pe, "...") == 1 {
+            skipit = 1;
+        }
+        if first_param_has_self(body, ps, pe) == 1 {
+            skipit = 1;
+        }
+        if skipit == 1 {
+            let _n: u64 = say2("fn", ptr_add(body, ns), nl);
+        }
+        if skipit == 0 {
+            if rs_params_ok(mem, body, ps, pe) == 0 {
+                let _n: u64 = say2("fn", ptr_add(body, ns), nl);
+            }
+            if rs_params_ok(mem, body, ps, pe) == 1 {
+                let rts: u32 = ld32(r, RJ_RS);
+                let rtl: u32 = ld32(r, RJ_RL);
+                let okr: u32 = 1;
+                let rl2: u32 = 0;
+                if rtl > 0 {
+                    rl2 = rs_type(mem, body, rts, rtl);
+                    if rl2 == 0 {
+                        okr = 0;
+                    }
+                } else {
+                    rl2 = put_lit(ptr_add(mem, M_TYPE), "()");
+                }
+                if okr == 0 {
+                    let _n: u64 = say2("fn", ptr_add(body, ns), nl);
+                }
+                if okr == 1 {
+                    let _sv: u32 = copy_n(ptr_add(mem, M_TXT), 0,
+                                          ptr_add(mem, M_TYPE), 0, rl2);
+                    if first == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    first = 0;
+                    o = jl(out, o, "{\"name\": ");
+                    o = jq(out, o, body, ns, nl);
+                    o = jl(out, o, ", \"params\": [");
+                    o = rs_params_emit(mem, out, o, body, ps, pe);
+                    o = jl(out, o, "], \"ret\": ");
+                    o = jq(out, o, ptr_add(mem, M_TXT), 0, rl2);
+                    if isc == 1 {
+                        o = jl(out, o, ", \"abi\": \"c\"");
+                    }
+                    o = jl(out, o, "}");
+                }
+            }
+        }
+    }
+    return o;
+}
+
+/// 常量 -> `consts`（值要真算：`int(t, 0)` 的口径 + 类型范围）。
+fn rs_emit_consts(mem: ptr, body: ptr, out: ptr, o: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let cc: ptr = ptr_add(mem, M_RSV);
+    let _rst: u32 = known_reset(mem);
+    let _k: u32 = rs_known(mem, body, 1);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_rsconst(body, n, i, r) == 1 {
+        i = ld32(r, RJ_CS) + ld32(r, RJ_CL);
+        let ns: u32 = ld32(r, J_NO);
+        let nl: u32 = ld32(r, J_NL);
+        let okc: u32 = rs_int_lit(mem, body, ld32(r, RJ_CS), ld32(r, RJ_CL), cc);
+        if okc == 0 {
+            let _n: u64 = say2("const", ptr_add(body, ns), nl);
+        }
+        if okc == 1 {
+            let tl: u32 = rs_type(mem, body, ld32(r, J_TS), ld32(r, J_TL));
+            if tl == 0 {
+                let _n2: u64 = say2("const", ptr_add(body, ns), nl);
+            }
+            if tl != 0 {
+                let neg: u32 = ld32(cc, 0);
+                let lo: u32 = ld32(cc, 4);
+                let hi: u32 = ld32(cc, 8);
+                let huge: u32 = ld32(cc, 12);
+                if rs_in_range(mem, tl, neg, lo, hi, huge) == 0 {
+                    let _n3: u64 = say2("const", ptr_add(body, ns), nl);
+                }
+                if rs_in_range(mem, tl, neg, lo, hi, huge) == 1 {
+                    let _sv: u32 = copy_n(ptr_add(mem, M_TXT), 0,
+                                          ptr_add(mem, M_TYPE), 0, tl);
+                    if first == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    first = 0;
+                    o = jl(out, o, "{\"name\": ");
+                    o = jq(out, o, body, ns, nl);
+                    o = jl(out, o, ", \"type\": ");
+                    o = jq(out, o, ptr_add(mem, M_TXT), 0, tl);
+                    o = jl(out, o, ", \"value\": ");
+                    o = ju64(mem, out, o, neg, hi, lo);
+                    o = jl(out, o, "}");
+                }
+            }
+        }
+    }
+    return o;
+}
+
+/// 枚举 -> `enums`（带载荷的整块跳过）。
+fn rs_emit_enums(mem: ptr, body: ptr, out: ptr, o: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let _k: u32 = rs_known(mem, body, 1);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_rsenum(body, n, i, r) == 1 {
+        let a: u32 = ld32(r, RJ_IS);
+        let b: u32 = ld32(r, RJ_IE);
+        i = ld32(r, RJ_ME);
+        if rs_var_count(body, a, b) == 0 {
+            let _n: u64 = say2("type", ptr_add(body, ld32(r, J_NO)), ld32(r, J_NL));
+        }
+        if rs_var_count(body, a, b) > 0 {
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, body, ld32(r, J_NO), ld32(r, J_NL));
+            o = jl(out, o, ", \"variants\": [");
+            let fst2: u32 = 1;
+            let p: u32 = a;
+            while p <= b {
+                let seg: u32 = find_ch(body, p, b, 44);
+                let se: u32 = b;
+                if seg != FAIL {
+                    se = seg;
+                }
+                let s2: u32 = trim_start(body, p, se);
+                let e2: u32 = trim_end(body, s2, se);
+                if e2 > s2 && is_ident(body, s2, e2 - s2) == 1 {
+                    if fst2 == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    fst2 = 0;
+                    o = jq(out, o, body, s2, e2 - s2);
+                }
+                if seg == FAIL {
+                    p = b + 1;
+                } else {
+                    p = seg + 1;
+                }
+            }
+            o = jl(out, o, "]}");
+        }
+    }
+    return o;
+}
+
+/// 结构体 -> `types`（字段全映射不上的整块丢掉）。
+fn rs_emit_types(mem: ptr, body: ptr, out: ptr, o: u32) -> u32 {
+    let n: u32 = ld32(ptr_add(mem, M_SC), 0);
+    let r: ptr = ptr_add(mem, M_JS);
+    let _rst: u32 = known_reset(mem);
+    let _k: u32 = rs_known(mem, body, 0);
+    let first: u32 = 1;
+    let i: u32 = 0;
+    while find_rsstruct(body, n, i, r) == 1 {
+        let a: u32 = ld32(r, RJ_IS);
+        let b: u32 = ld32(r, RJ_IE);
+        let cns: u32 = ld32(r, J_NO);
+        let cnl: u32 = ld32(r, J_NL);
+        i = ld32(r, RJ_ME);
+        let nf: u32 = rs_fld_count(mem, body, a, b);
+        let emitting: u32 = 0;
+        if nf == 0 {
+            let _n: u64 = say2("type", ptr_add(body, cns), cnl);
+        } else {
+            emitting = 1;
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = jl(out, o, "{\"name\": ");
+            o = jq(out, o, body, cns, cnl);
+            o = jl(out, o, ", \"fields\": [");
+        }
+        // 字段那一遍：**笔记照发**（哪怕这个 struct 整块不发），发的时候顺手拼 JSON
+        let fst2: u32 = 1;
+        let p: u32 = a;
+        while p <= b {
+            let seg: u32 = find_ch(body, p, b, 44);
+            let se: u32 = b;
+            if seg != FAIL {
+                se = seg;
+            }
+            let s2: u32 = trim_start(body, p, se);
+            let e2: u32 = trim_end(body, s2, se);
+            if e2 > s2 {
+                let k: u32 = rs_fld_parse(mem, body, s2, e2);
+                if k == 2 {
+                    let c1: u32 = find_ch(body, s2, e2, 58);
+                    let n0: u32 = rs_fld_name(body, s2, c1);
+                    let n1: u32 = trim_end(body, n0, c1);
+                    let _n: u64 = sayf(body, cns, cnl, body, n0, n1 - n0);
+                }
+                if k == 1 && emitting == 1 {
+                    let fl: u32 = ld32(ptr_add(mem, M_RSN + 64), 0);
+                    let tl: u32 = ld32(ptr_add(mem, M_RSL), 0);
+                    if fst2 == 0 {
+                        o = jl(out, o, ", ");
+                    }
+                    fst2 = 0;
+                    o = jl(out, o, "{\"name\": ");
+                    o = jq(out, o, ptr_add(mem, M_SB), 0, fl);
+                    o = jl(out, o, ", \"type\": ");
+                    o = jq(out, o, ptr_add(mem, M_TYPE), 0, tl);
+                    o = jl(out, o, "}");
+                }
+            }
+            if seg == FAIL {
+                p = b + 1;
+            } else {
+                p = seg + 1;
+            }
+        }
+        if emitting == 1 {
+            o = jl(out, o, "]}");
+        }
+    }
+    return o;
+}
+
+/// 跳过项/字段损失要**出声**（上游那个 `Report` 就是干这个的）——
+/// 判据按 (类别, 名字) 排序后逐条比，所以这里只报**类别与名字**，不报文案
+/// （文案里插了 Python 的 `repr()`，复现不了 —— 与第 15 格同一条纪律）。
+fn say2(kind: str, name: ptr, nl: u32) -> u64 {
+    let _a: u64 = wstr(2, "S ");
+    let _b: u64 = wstr(2, kind);
+    let _c: u64 = wstr(2, " ");
+    let _d: u64 = write_all(2, name, nl as u64);
+    return wstr(2, "
+");
+}
+
+fn sayf(owner: ptr, oof: u32, ol: u32, field: ptr, fo: u32, fl: u32) -> u64 {
+    let _a: u64 = wstr(2, "F ");
+    let _b: u64 = write_all(2, ptr_add(owner, oof), ol as u64);
+    let _c: u64 = wstr(2, " ");
+    let _d: u64 = write_all(2, ptr_add(field, fo), fl as u64);
+    return wstr(2, "
+");
+}
+
+/// Rust 那一门的主干（`from_rust`）。抹注释**会改长度**（删掉，不是抹平），所以扫描
+/// 全在 `M_SRC2` 上做；这一门**不带正文**，因此不需要回原文的下标。
+fn build_rust(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SRC);
+    let body: ptr = ptr_add(mem, M_SRC2);
+    let n2: u32 = strip_lc(src, srcn, body);
+    let _n: u32 = st32(ptr_add(mem, M_SC), 0, n2);
+    let _m: u32 = st32(ptr_add(mem, M_SC), 8, 6);
+    let _c: u32 = st32(ptr_add(mem, M_CNST), 0, 0);
+    let out: ptr = ptr_add(mem, M_OUT);
+    let o1: u32 = jl(out, 0, "{\"potato\": \"v6\", \"unit\": ");
+    let un: u32 = unit_name(mem, argp, al);
+    let idb: ptr = ptr_add(mem, M_IDENT);
+    let o2: u32 = jq(out, o1, idb, 0, un);
+    let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"rust\"");
+    let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
+    let o5: u32 = rs_emit_functions(mem, body, out, o4);
+    let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
+    let o7: u32 = rs_emit_consts(mem, body, out, o6);
+    let o8: u32 = jl(out, o7, "], \"enums\": [");
+    let o9: u32 = rs_emit_enums(mem, body, out, o8);
+    let o10: u32 = jl(out, o9, "], \"types\": [");
+    let o11: u32 = rs_emit_types(mem, body, out, o10);
+    let o12: u32 = jl(out, o11, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    return o12;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn build(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
@@ -3627,12 +5100,24 @@ fn _start() -> u32 {
         o1 = oc;
         a1 = ptr_add(cb, oc);
     }
+    if l1 == 6 && eq(a1, 0, "--rust") == 1 {
+        mode = 6;
+        let lr: u32 = arg_at(cb, tot, 2, ap);
+        let orr: u32 = ld32(ap, 0);
+        if lr == 0 {
+            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go|--rust] <src>
+");
+        }
+        l1 = lr;
+        o1 = orr;
+        a1 = ptr_add(cb, orr);
+    }
     if l1 == 4 && eq(a1, 0, "--go") == 1 {
         mode = 5;
         let lg: u32 = arg_at(cb, tot, 2, ap);
         let og: u32 = ld32(ap, 0);
         if lg == 0 {
-            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go] <src>
+            return fail("lompotc: usage: lompotc [--cpp|--java|--csharp|--go|--rust] <src>
 ");
         }
         l1 = lg;
@@ -3671,7 +5156,9 @@ fn _start() -> u32 {
     let srcn: u64 = read_all(jf as u64, ptr_add(mem, M_SRC), IN_CAP as u64);
     syscall4(3, jf as u64, 0, 0);
     let o: u32 = 0;
-    if mode == 5 {
+    if mode == 6 {
+        o = build_rust(mem, srcn as u32, pp, l1);
+    } else if mode == 5 {
         o = build_go(mem, srcn as u32, pp, l1);
     } else if mode == 3 || mode == 4 {
         o = build_class(mem, srcn as u32, pp, l1, mode);
