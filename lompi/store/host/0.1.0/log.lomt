@@ -15,7 +15,8 @@
 module log
 
 use "io.lomt"
-use std
+use numfmt
+use out
 
 /// 退出码约定 (与工具链一致)。
 pub const LOG_OK: u64 = 0;

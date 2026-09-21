@@ -244,7 +244,7 @@ pub fn bi_fill_fd(fd: i64, buf: ptr, cap: u64) -> i64 {
 
 // ---------------------------------------------------------------- 自检
 
-fn sc(d: ptr, s: str) -> u32 {
+fn bi_sc(d: ptr, s: str) -> u32 {
     let n: u32 = str_len(s);
     let i: u32 = 0;
     while i < n {
@@ -259,7 +259,7 @@ fn test_bufio_line_lf() -> bool {
     let b: ptr = alloc(16);
     let oo: ptr = alloc(4);
     let ol: ptr = alloc(4);
-    let n: u32 = sc(b, "ab\ncd");
+    let n: u32 = bi_sc(b, "ab\ncd");
     let p1: u32 = bi_line_next(b, n, 0, oo, ol);
     let ok1: bool = p1 == 3 && mem_load32(oo, 0) == 0 && mem_load32(ol, 0) == 2;
     let p2: u32 = bi_line_next(b, n, p1, oo, ol);
@@ -300,7 +300,7 @@ fn test_bufio_line_last_without_newline() -> bool {
     let b: ptr = alloc(16);
     let oo: ptr = alloc(4);
     let ol: ptr = alloc(4);
-    let n: u32 = sc(b, "abc");
+    let n: u32 = bi_sc(b, "abc");
     return bi_line_next(b, n, 0, oo, ol) == 3 && mem_load32(ol, 0) == 3;
 }
 
@@ -309,13 +309,13 @@ fn test_bufio_line_empty_lines_are_lines() -> bool {
     let b: ptr = alloc(16);
     let oo: ptr = alloc(4);
     let ol: ptr = alloc(4);
-    let n: u32 = sc(b, "\n\n");
+    let n: u32 = bi_sc(b, "\n\n");
     let p1: u32 = bi_line_next(b, n, 0, oo, ol);
     let ok1: bool = mem_load32(ol, 0) == 0 && p1 == 1;
     let p2: u32 = bi_line_next(b, n, p1, oo, ol);
     let ok2: bool = mem_load32(ol, 0) == 0 && p2 == 2;
     let c: ptr = alloc(16);
-    let m: u32 = sc(c, "a\n\nb");
+    let m: u32 = bi_sc(c, "a\n\nb");
     let l1: u32 = bi_line_count(c, m);
     let l2: u32 = bi_line_at(c, m, 1, oo, ol);
     // 第 1 行是空行 "": 起点 2 长度 0, 它**之后**的位置是 3。
@@ -334,9 +334,9 @@ fn test_bufio_line_empty_input() -> bool {
 fn test_bufio_line_count_wc_l_style() -> bool {
     // 末尾 LF 不多算一行; 中间空行照算。这几条也顺手把 bi_line_count 与逐次 next 对齐。
     let b: ptr = alloc(16);
-    let n: u32 = sc(b, "a\nb\nc\n");
-    let m: u32 = sc(b, "a\nb\nc");
-    let e: u32 = sc(b, "x");
+    let n: u32 = bi_sc(b, "a\nb\nc\n");
+    let m: u32 = bi_sc(b, "a\nb\nc");
+    let e: u32 = bi_sc(b, "x");
     return bi_line_count(b, n) == 3 && bi_line_count(b, m) == 3 && bi_line_count(b, e) == 1;
 }
 
@@ -361,7 +361,7 @@ fn test_bufio_line_at_nth() -> bool {
     let b: ptr = alloc(16);
     let oo: ptr = alloc(4);
     let ol: ptr = alloc(4);
-    let n: u32 = sc(b, "aa\nbbb\nc");
+    let n: u32 = bi_sc(b, "aa\nbbb\nc");
     let p: u32 = bi_line_at(b, n, 1, oo, ol);
     let ok1: bool = mem_load32(oo, 0) == 3 && mem_load32(ol, 0) == 3 && p == 7;
     let p2: u32 = bi_line_at(b, n, 2, oo, ol);
@@ -373,7 +373,7 @@ fn test_bufio_line_at_out_of_range_is_no() -> bool {
     let b: ptr = alloc(16);
     let oo: ptr = alloc(4);
     let ol: ptr = alloc(4);
-    let n: u32 = sc(b, "aa\nbb");
+    let n: u32 = bi_sc(b, "aa\nbb");
     return bi_line_at(b, n, 2, oo, ol) == BI_NO && mem_load32(ol, 0) == 0
         && bi_line_at(b, n, 99, oo, ol) == BI_NO;
 }
@@ -418,7 +418,7 @@ fn test_bufio_ring_write_read_roundtrip() -> bool {
     let src: ptr = alloc(16);
     let out: ptr = alloc(16);
     bi_ring_init(ws, 32);
-    let n: u32 = sc(src, "hello");
+    let n: u32 = bi_sc(src, "hello");
     let w: u32 = bi_ring_write(ws, src, n);
     let ok1: bool = w == 5 && bi_ring_len(ws) == 5 && bi_ring_free(ws) == 27;
     let r: u32 = bi_ring_read(ws, out, 5);
@@ -435,13 +435,13 @@ fn test_bufio_ring_wraparound_order() -> bool {
     let src: ptr = alloc(16);
     let out: ptr = alloc(16);
     bi_ring_init(ws, 8);
-    sc(src, "abcdefgh");
+    bi_sc(src, "abcdefgh");
     let w1: u32 = bi_ring_write(ws, src, 8);
     let r1: u32 = bi_ring_read(ws, out, 5);
     let ok1: bool = w1 == 8 && r1 == 5 && mem_eq(out, 0, src, 0, 5)
         && bi_ring_len(ws) == 3 && bi_ring_free(ws) == 5;
     let src2: ptr = alloc(8);
-    sc(src2, "XY");
+    bi_sc(src2, "XY");
     let w2: u32 = bi_ring_write(ws, src2, 2);
     let r2: u32 = bi_ring_read(ws, out, 8);
     let ok2: bool = w2 == 2 && r2 == 5 && load8(out, 0) == 102 && load8(out, 1) == 103
@@ -455,7 +455,7 @@ fn test_bufio_ring_write_beyond_capacity_truncates() -> bool {
     let src: ptr = alloc(32);
     let out: ptr = alloc(32);
     bi_ring_init(ws, 4);
-    let n: u32 = sc(src, "abcdefg");
+    let n: u32 = bi_sc(src, "abcdefg");
     let w: u32 = bi_ring_write(ws, src, n);
     let ok1: bool = w == 4 && bi_ring_len(ws) == 4 && bi_ring_free(ws) == 0;
     let w2: u32 = bi_ring_write(ws, src, n);
@@ -488,7 +488,7 @@ fn test_bufio_ring_read_partial() -> bool {
     let src: ptr = alloc(16);
     let out: ptr = alloc(16);
     bi_ring_init(ws, 16);
-    sc(src, "abc");
+    bi_sc(src, "abc");
     bi_ring_write(ws, src, 3);
     let r: u32 = bi_ring_read(ws, out, 10);
     return r == 3 && load8(out, 2) == 99 && bi_ring_len(ws) == 0 && bi_ring_free(ws) == 16;

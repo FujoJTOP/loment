@@ -140,6 +140,30 @@
 且**标记语法尚未定** —— 不替对方猜。**`choose` 本身不依赖 B0**：模式名只进 checker 与
 Potato 形式对象，还没有任何一条 L0 原语按模式分叉。
 
+**2026-09-20 的一条（装载规则：包内模块按名字可达 + 归属，E018）** —— 走的是 E018 那条路
+（**装载器**规则, 不是检查器规则），所以 `_CASES` 与 `BUDGET` **不动** —— 套件喂的是自包含
+单文件源码, 结构上装不下"解析一个导入名"（`docs/143` 那一段的处理方式）。详细记账
+见 `docs/199`。要点：
+
+- **第 1 条（改规范）**：`docs/143` §2 的"模块导入"那一行重写 —— 四层变六层, 并写明
+  **"②内置四根"与"③自带库"的先后看导入方住在哪边**。码仍走 **E018**（码只增不改）。
+- **第 2 条（判据）**：由参考实现的 `lomentc_test` 承担 4 条
+  （`test_name_import_reaches_a_module_inside_a_package` /
+  `..._package_module_ambiguous_is_rejected` /
+  `test_store_modules_resolve_by_name_in_this_checkout` /
+  `test_store_packages_do_not_shadow_the_built_in_roots` /
+  `test_std_package_is_one_unit_without_name_collisions`），
+  自举侧的棘轮是 `loment_lompi_test` 的两条新驱动闸门
+  （`test_selfhost_reaches_a_module_inside_a_package` /
+  `..._in_the_dev_checkout_store`，都逐字节比 IR）。
+- **第 3 条（两个实现同一次提交）**：`tools/lomentc.py` 的 `resolve_name` / `store_roots` /
+  `_pkg_module_hits` / `_in_store_root` 与 `loment/selfhost/driver.lomt` 的
+  `resolve_use_name` / `store_base` / `try_pkg_module` / `subdir_at` / `in_store_path`
+  一起改；自举驱动的暂存布局（`SCR_CAP` 与各 `*_OFF`）跟着重排 —— 那一块**改了偏移必须
+  所有用点一起改**。
+- **第 4 条（静态门禁）**：`ci.py --static-only` 全绿（除 `lompi_sync` 的 store 那一组,
+  见 `docs/199` §6 —— 那是**知会 lompi 线**的事, 不是本仓的回归）。
+
 ## 6. 一致性套件（"0.1.4 Alpha"指的就是这套东西全绿）
 
 ```bash

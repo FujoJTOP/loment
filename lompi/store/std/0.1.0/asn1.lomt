@@ -633,7 +633,7 @@ pub fn der_seq_find(d: ptr, so: u32, n: u32, i: u32, tag_num: u32) -> u32 {
 
 // ---------------------------------------------------------------- 自检
 
-fn hv(c: u32) -> u32 {
+fn a_hv(c: u32) -> u32 {
     if c >= 48 && c <= 57 {
         return c - 48;
     }
@@ -643,12 +643,12 @@ fn hv(c: u32) -> u32 {
     return c - 55;
 }
 
-fn hx(out: ptr, s: str) -> u32 {
+fn a_hx(out: ptr, s: str) -> u32 {
     let n: u32 = str_len(s);
     let k: u32 = 0;
     while k < n / 2 {
-        let hi: u32 = hv(str_byte(s, k * 2));
-        let lo: u32 = hv(str_byte(s, k * 2 + 1));
+        let hi: u32 = a_hv(str_byte(s, k * 2));
+        let lo: u32 = a_hv(str_byte(s, k * 2 + 1));
         store8(out, k, ((hi << 4) | lo) as u8);
         k = k + 1;
     }
@@ -658,17 +658,17 @@ fn hx(out: ptr, s: str) -> u32 {
 fn test_der_integer_forms() -> bool {
     let ok: ptr = alloc(8);
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "020100"); // INTEGER 0
+    let na: u32 = a_hx(a, "020100"); // INTEGER 0
     let ok1: bool = der_int_u64(a, 0, na, 0, ok) == 0 && mem_load32(ok, 0) == 1
         && der_validate(a, 0, na);
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "02017f"); // 127
+    let nb: u32 = a_hx(b, "02017f"); // 127
     let ok2: bool = der_int_u64(b, 0, nb, 0, ok) == 127;
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "02020080"); // 128 —— 必须补一个 00 才不会变成负数
+    let nc: u32 = a_hx(c, "02020080"); // 128 —— 必须补一个 00 才不会变成负数
     let ok3: bool = der_int_u64(c, 0, nc, 0, ok) == 128 && mem_load32(ok, 0) == 1;
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "020180"); // -128
+    let ne: u32 = a_hx(e, "020180"); // -128
     // **先取再判**: ok 是复用的一块内存, 上一次调用留下的 1 会骗过下一个断言
     let ev: u64 = der_int_u64(e, 0, ne, 0, ok);
     let ok4: bool = der_int_is_negative(e, 0, ne, 0) && mem_load32(ok, 0) == 0 && ev == 0;
@@ -679,16 +679,16 @@ fn test_der_integer_negative_roundtrip() -> bool {
     let ok: ptr = alloc(8);
     let zero: i64 = 0;
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "020180");
+    let na: u32 = a_hx(a, "020180");
     let ok1: bool = der_int_i64(a, 0, na, 0, ok) == (zero - 128) && mem_load32(ok, 0) == 1;
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "0202ff7f"); // -129
+    let nb: u32 = a_hx(b, "0202ff7f"); // -129
     let ok2: bool = der_int_i64(b, 0, nb, 0, ok) == (zero - 129);
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "0201ff"); // -1
+    let nc: u32 = a_hx(c, "0201ff"); // -1
     let ok3: bool = der_int_i64(c, 0, nc, 0, ok) == (zero - 1);
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "0201fe"); // -2
+    let ne: u32 = a_hx(e, "0201fe"); // -2
     let ok4: bool = der_int_i64(e, 0, ne, 0, ok) == (zero - 2);
     return ok1 && ok2 && ok3 && ok4;
 }
@@ -697,11 +697,11 @@ fn test_der_rejects_non_minimal_integer() -> bool {
     // 02 02 00 7F 是 BER 允许的 127 (多带了一个 00), DER 必须拒 ——
     // 不拒的话同一个数有两种编码, 签名就没意义了。
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "0202007f");
+    let na: u32 = a_hx(a, "0202007f");
     let ok1: bool = der_int_len(a, 0, na, 0) == DER_ERR && der_validate(a, 0, na) == false;
     // 02 02 FF 80 是 -128 的多余写法
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "0202ff80");
+    let nb: u32 = a_hx(b, "0202ff80");
     let ok2: bool = der_int_len(b, 0, nb, 0) == DER_ERR;
     return ok1 && ok2;
 }
@@ -709,11 +709,11 @@ fn test_der_rejects_non_minimal_integer() -> bool {
 fn test_der_rejects_non_minimal_length() -> bool {
     // 04 81 05 ... : 5 个字节该用短式写, 用长式是 BER 写法, DER 拒。
     let a: ptr = alloc(32);
-    let na: u32 = hx(a, "0481056162636465");
+    let na: u32 = a_hx(a, "0481056162636465");
     let ok1: bool = der_value_len(a, 0, na, 0) == DER_ERR && der_validate(a, 0, na) == false;
     // 04 81 80 ... : 长度 128 用长式是对的, 要能过
     let b: ptr = alloc(256);
-    let nb: u32 = hx(b, "048180");
+    let nb: u32 = a_hx(b, "048180");
     let k: u32 = 0;
     while k < 128 {
         store8(b, 3 + k, 170 as u8);
@@ -726,24 +726,24 @@ fn test_der_rejects_non_minimal_length() -> bool {
 fn test_der_rejects_indefinite_length() -> bool {
     // 30 80 ... 00 00 是 BER 的不定长 SEQUENCE, DER 一律拒。
     let a: ptr = alloc(32);
-    let na: u32 = hx(a, "308002010000");
+    let na: u32 = a_hx(a, "308002010000");
     return der_value_len(a, 0, na, 0) == DER_ERR && der_validate(a, 0, na) == false;
 }
 
 fn test_der_boolean_and_null() -> bool {
     let ok: ptr = alloc(8);
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "0101ff");
+    let na: u32 = a_hx(a, "0101ff");
     let ok1: bool = der_bool(a, 0, na, 0, ok) && mem_load32(ok, 0) == 1;
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "010100");
+    let nb: u32 = a_hx(b, "010100");
     let ok2: bool = der_bool(b, 0, nb, 0, ok) == false && mem_load32(ok, 0) == 1;
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "0500");
+    let nc: u32 = a_hx(c, "0500");
     let ok3: bool = der_is_null(c, 0, nc, 0) && der_validate(c, 0, nc);
     // BOOLEAN 长度不是 1 就是非法的
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "0102ffff");
+    let ne: u32 = a_hx(e, "0102ffff");
     let ok4: bool = der_bool(e, 0, ne, 0, ok) == false && mem_load32(ok, 0) == 0;
     return ok1 && ok2 && ok3 && ok4;
 }
@@ -751,7 +751,7 @@ fn test_der_boolean_and_null() -> bool {
 fn test_der_octet_string() -> bool {
     let out: ptr = alloc(32);
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "0403616263");
+    let na: u32 = a_hx(a, "0403616263");
     let L: u32 = der_bytes(a, 0, na, 0, out, 0);
     let want: str = "abc";
     return L == 3 && mem_eq(out, 0, str_ptr(want), 0, 3) && der_validate(a, 0, na);
@@ -760,21 +760,21 @@ fn test_der_octet_string() -> bool {
 fn test_der_bitstring_unused_bits() -> bool {
     let o: ptr = alloc(16);
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "030200ff"); // 0 个未用位, 载荷 FF
+    let na: u32 = a_hx(a, "030200ff"); // 0 个未用位, 载荷 FF
     let ok1: bool = der_bitstring_unused(a, 0, na, 0) == 0 && der_validate(a, 0, na);
     // 7 个未用位, 载荷 0x80 —— 低 7 位确实是 0, 合法
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "03020780");
+    let nb: u32 = a_hx(b, "03020780");
     let ok2: bool = der_bitstring_unused(b, 0, nb, 0) == 7 && der_validate(b, 0, nb);
     let bl: u32 = der_bytes(b, 0, nb, 0, o, 0);
     let ok3: bool = bl == 1 && load8(o, 0) == 128;
     // 低 unused 位非 0 -> DER 违规 (BER 允许, DER 不许)
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "030207ff");
+    let nc: u32 = a_hx(c, "030207ff");
     let ok4: bool = der_bytes(c, 0, nc, 0, o, 0) == DER_ERR && der_validate(c, 0, nc) == false;
     // 未用位数 > 7 是编码错
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "030208ff");
+    let ne: u32 = a_hx(e, "030208ff");
     let ok5: bool = der_bitstring_unused(e, 0, ne, 0) == DER_ERR;
     return ok1 && ok2 && ok3 && ok4 && ok5;
 }
@@ -806,7 +806,7 @@ fn test_der_sequence() -> bool {
     // SEQUENCE { INTEGER 1, BOOLEAN true } = 30 06 02 01 01 01 01 FF
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "30060201010101ff");
+    let n: u32 = a_hx(d, "30060201010101ff");
     let ok1: bool = der_validate(d, 0, n) && der_seq_len(d, 0, n, 0) == 2;
     let e0: u32 = der_seq_at(d, 0, n, 0, 0);
     let ok2: bool = der_int_u64(d, 0, n, e0, ok) == 1;
@@ -814,14 +814,14 @@ fn test_der_sequence() -> bool {
     let ok3: bool = der_bool(d, 0, n, e1, ok) && mem_load32(ok, 0) == 1;
     // 空的 SEQUENCE 也合法
     let e: ptr = alloc(8);
-    let ne: u32 = hx(e, "3000");
+    let ne: u32 = a_hx(e, "3000");
     return ok1 && ok2 && ok3 && der_validate(e, 0, ne) && der_seq_first(e, 0, ne, 0) == DER_NO;
 }
 
 fn test_der_sequence_find_by_tag() -> bool {
     // SEQUENCE { NULL, OCTET STRING "hi" } —— 按标签号找跳过 NULL
     let d: ptr = alloc(32);
-    let n: u32 = hx(d, "3006050004026869");
+    let n: u32 = a_hx(d, "3006050004026869");
     let ok1: bool = der_validate(d, 0, n) && der_seq_len(d, 0, n, 0) == 2;
     let oc: u32 = der_seq_find(d, 0, n, 0, DER_OCTETSTRING);
     let ok2: bool = der_is_universal(der_tag_at(d, 0, n, oc), DER_OCTETSTRING);
@@ -835,7 +835,7 @@ fn test_der_oid_sha256_with_rsa() -> bool {
     // 06 09 2A 86 48 86 F7 0D 01 01 0B = 1.2.840.113549.1.1.11
     let d: ptr = alloc(32);
     let out: ptr = alloc(64);
-    let n: u32 = hx(d, "06092a864886f70d01010b");
+    let n: u32 = a_hx(d, "06092a864886f70d01010b");
     let L: u32 = der_oid_text(d, 0, n, 0, out, 0);
     let want: str = "1.2.840.113549.1.1.11"; // 21 个字符
     return der_validate(d, 0, n) && L == 21 && mem_eq(out, 0, str_ptr(want), 0, 21);
@@ -845,7 +845,7 @@ fn test_der_oid_two_digit_first_byte() -> bool {
     // 2.5.4.3 -> 06 03 55 04 03  (55 = 40*2 + 5)
     let d: ptr = alloc(16);
     let out: ptr = alloc(32);
-    let n: u32 = hx(d, "0603550403");
+    let n: u32 = a_hx(d, "0603550403");
     let L: u32 = der_oid_text(d, 0, n, 0, out, 0);
     let want: str = "2.5.4.3";
     return L == 7 && mem_eq(out, 0, str_ptr(want), 0, 7);
@@ -855,7 +855,7 @@ fn test_der_oid_common_name() -> bool {
     // 1.2.840.113549.1.9.1 (emailAddress)
     let d: ptr = alloc(32);
     let out: ptr = alloc(64);
-    let n: u32 = hx(d, "06092a864886f70d010901");
+    let n: u32 = a_hx(d, "06092a864886f70d010901");
     let L: u32 = der_oid_text(d, 0, n, 0, out, 0);
     let want: str = "1.2.840.113549.1.9.1";
     return L == 20 && mem_eq(out, 0, str_ptr(want), 0, 19);
@@ -865,7 +865,7 @@ fn test_der_oid_rejects_truncated_base128() -> bool {
     // 最后一个数没有收尾字节 (最高位一直是 1) —— 编码残缺
     let d: ptr = alloc(16);
     let out: ptr = alloc(32);
-    let n: u32 = hx(d, "06032a86f7"); // 2a 86 f7: f7 的最高位是 1, 没有收尾
+    let n: u32 = a_hx(d, "06032a86f7"); // 2a 86 f7: f7 的最高位是 1, 没有收尾
     return der_oid_text(d, 0, n, 0, out, 0) == DER_ERR;
 }
 
@@ -873,7 +873,7 @@ fn test_der_nested_sequence() -> bool {
     // SEQUENCE { SEQUENCE { INTEGER 5 }, INTEGER 6 }
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "30083003020105020106");
+    let n: u32 = a_hx(d, "30083003020105020106");
     let ok1: bool = der_validate(d, 0, n) && der_seq_len(d, 0, n, 0) == 2;
     let inner: u32 = der_seq_at(d, 0, n, 0, 0);
     let ok2: bool = der_seq_len(d, 0, n, inner) == 1;
@@ -888,18 +888,18 @@ fn test_der_rejects_bad_inner_length() -> bool {
     // 30 07 02 01 01 : 说好里面 7 字节, 实际只有 3 —— 长度写错最典型的形态。
     // 这一条不能只看"外面的长度够不够", **必须真的走完里面那些 TLV** 才能发现。
     let d: ptr = alloc(16);
-    let n: u32 = hx(d, "3007020101");
+    let n: u32 = a_hx(d, "3007020101");
     return der_validate(d, 0, n) == false;
 }
 
 fn test_der_rejects_trailing_and_truncated() -> bool {
     // 元素后面多出字节
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "05000500");
+    let na: u32 = a_hx(a, "05000500");
     let ok1: bool = der_validate(a, 0, na) == false;
     // 长度说 3 个字节, 只给了 2
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "04036162");
+    let nb: u32 = a_hx(b, "04036162");
     let ok2: bool = der_validate(b, 0, nb) == false;
     // 空缓冲
     let c: ptr = alloc(8);
@@ -910,7 +910,7 @@ fn test_der_rejects_trailing_and_truncated() -> bool {
 fn test_der_rejects_high_tag() -> bool {
     // 1F 起的"高位标签"本层不支持 —— 要支持得引入任意长标签号, X.509 里用不到。
     let d: ptr = alloc(16);
-    let n: u32 = hx(d, "1f8103ff0000");
+    let n: u32 = a_hx(d, "1f8103ff0000");
     return der_tag_at(d, 0, n, 0) == DER_ERR && der_validate(d, 0, n) == false;
 }
 
@@ -965,7 +965,7 @@ fn test_der_realish_certificate_skeleton() -> bool {
     let d: ptr = alloc(64);
     let out: ptr = alloc(64);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "30143003020102300b06092a864886f70d01010b3000");
+    let n: u32 = a_hx(d, "30143003020102300b06092a864886f70d01010b3000");
     let ok1: bool = der_validate(d, 0, n) && der_seq_len(d, 0, n, 0) == 3;
     let alg: u32 = der_seq_at(d, 0, n, 0, 1);
     let oid: u32 = der_seq_first(d, 0, n, alg);

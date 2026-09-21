@@ -482,7 +482,7 @@ pub fn ra_to_dec(r: ptr, places: u32, out: ptr, oo: u32) -> u32 {
 // ---------------------------------------------------------------- 自检
 
 /// 造一个分数并断言它最优。
-fn mk(r: ptr, num: i64, den: i64) -> bool {
+fn ra_mk(r: ptr, num: i64, den: i64) -> bool {
     return ra_set(r, num, den) == RA_OK;
 }
 
@@ -492,14 +492,14 @@ fn eq2(r: ptr, num: i64, den: i64) -> bool {
 
 fn test_rational_set_reduces() -> bool {
     let r: ptr = alloc(16);
-    return mk(r, 4, 8) && eq2(r, 1, 2) && mk(r, 6, 3) && eq2(r, 2, 1)
-        && mk(r, 0, 5) && eq2(r, 0, 1);
+    return ra_mk(r, 4, 8) && eq2(r, 1, 2) && ra_mk(r, 6, 3) && eq2(r, 2, 1)
+        && ra_mk(r, 0, 5) && eq2(r, 0, 1);
 }
 
 fn test_rational_negative_normalizes() -> bool {
     // 分母恒正: 1/-2 要规整成 -1/2。
     let r: ptr = alloc(16);
-    return mk(r, 1, -2) && eq2(r, -1, 2) && mk(r, -6, -4) && eq2(r, 3, 2);
+    return ra_mk(r, 1, -2) && eq2(r, -1, 2) && ra_mk(r, -6, -4) && eq2(r, 3, 2);
 }
 
 fn test_rational_zero_denominator_is_err() -> bool {
@@ -513,8 +513,8 @@ fn test_rational_add_halves() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 1, 2);
-    mk(b, 1, 3);
+    ra_mk(a, 1, 2);
+    ra_mk(b, 1, 3);
     let r: u32 = ra_add(a, b, sc, o);
     return r == RA_OK && eq2(o, 5, 6);
 }
@@ -524,8 +524,8 @@ fn test_rational_add_negative() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 1, 2);
-    mk(b, -3, 4);
+    ra_mk(a, 1, 2);
+    ra_mk(b, -3, 4);
     let r: u32 = ra_add(a, b, sc, o);
     return r == RA_OK && eq2(o, -1, 4);
 }
@@ -535,8 +535,8 @@ fn test_rational_sub() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 3, 4);
-    mk(b, 1, 4);
+    ra_mk(a, 3, 4);
+    ra_mk(b, 1, 4);
     let r: u32 = ra_sub(a, b, sc, o);
     return r == RA_OK && eq2(o, 1, 2);
 }
@@ -547,8 +547,8 @@ fn test_rational_mul_cross_reduces() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 2, 3);
-    mk(b, 3, 2);
+    ra_mk(a, 2, 3);
+    ra_mk(b, 3, 2);
     let r: u32 = ra_mul(a, b, sc, o);
     return r == RA_OK && eq2(o, 1, 1);
 }
@@ -558,8 +558,8 @@ fn test_rational_mul_fraction() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 2, 3);
-    mk(b, 9, 4);
+    ra_mk(a, 2, 3);
+    ra_mk(b, 9, 4);
     let r: u32 = ra_mul(a, b, sc, o);
     return r == RA_OK && eq2(o, 3, 2);
 }
@@ -569,12 +569,12 @@ fn test_rational_div() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 1, 2);
-    mk(b, 1, 4);
+    ra_mk(a, 1, 2);
+    ra_mk(b, 1, 4);
     let r: u32 = ra_div(a, b, sc, o);
     let ok1: bool = r == RA_OK && eq2(o, 2, 1);
     // 除以负数 -> 分母翻正
-    mk(b, -2, 3);
+    ra_mk(b, -2, 3);
     let r2: u32 = ra_div(a, b, sc, o);
     return ok1 && r2 == RA_OK && eq2(o, -3, 4);
 }
@@ -584,19 +584,19 @@ fn test_rational_div_by_zero_is_err() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 1, 2);
-    mk(b, 0, 5);
+    ra_mk(a, 1, 2);
+    ra_mk(b, 0, 5);
     return ra_div(a, b, sc, o) == RA_ERR;
 }
 
 fn test_rational_cmp_three_state() -> bool {
     let a: ptr = alloc(16);
     let b: ptr = alloc(16);
-    mk(a, 1, 2);
-    mk(b, 1, 3);
+    ra_mk(a, 1, 2);
+    ra_mk(b, 1, 3);
     let lt: bool = ra_cmp(b, a) == RA_CMP_LT;
     let gt: bool = ra_cmp(a, b) == RA_CMP_GT;
-    mk(b, 2, 4); // 等于 a
+    ra_mk(b, 2, 4); // 等于 a
     let eq: bool = ra_cmp(a, b) == RA_CMP_EQ;
     return lt && gt && eq;
 }
@@ -605,9 +605,9 @@ fn test_rational_cmp_zero_and_sign() -> bool {
     let z: ptr = alloc(16);
     let p: ptr = alloc(16);
     let n: ptr = alloc(16);
-    mk(z, 0, 7);
-    mk(p, 1, 100);
-    mk(n, -1, 100);
+    ra_mk(z, 0, 7);
+    ra_mk(p, 1, 100);
+    ra_mk(n, -1, 100);
     // 0 与负数: 0 更大 (这一条第一版会写错 —— 用符号位直接比会把 0 当正数)。
     return ra_cmp(z, p) == RA_CMP_LT && ra_cmp(z, n) == RA_CMP_GT
         && ra_cmp(n, p) == RA_CMP_LT && ra_cmp(z, z) == RA_CMP_EQ;
@@ -618,12 +618,12 @@ fn test_rational_cmp_exact_large() -> bool {
     let a: ptr = alloc(16);
     let b: ptr = alloc(16);
     // a = 3000000000/4000000000 = 3/4; b = 2999999999/4000000000
-    mk(a, 3000000000, 4000000000);
-    mk(b, 2999999999, 4000000000);
+    ra_mk(a, 3000000000, 4000000000);
+    ra_mk(b, 2999999999, 4000000000);
     let ok1: bool = ra_cmp(a, b) == RA_CMP_GT;
     // 分母拉到 10^18 量级: a*b 的交叉乘是 10^36, 非 128 位不可。
-    mk(a, 1000000000000000000, 3000000000000000000); // 1/3
-    mk(b, 999999999999999999, 3000000000000000000);  // 略小
+    ra_mk(a, 1000000000000000000, 3000000000000000000); // 1/3
+    ra_mk(b, 999999999999999999, 3000000000000000000);  // 略小
     let ok2: bool = ra_cmp(a, b) == RA_CMP_GT;
     return ok1 && ok2 && eq2(a, 1, 3);
 }
@@ -632,11 +632,11 @@ fn test_rational_to_dec_thirds() -> bool {
     // 1/3 -> "0.333333"; 2/3 -> "0.666667" (四舍五入要对)。
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
-    mk(r, 1, 3);
+    ra_mk(r, 1, 3);
     let n1: u32 = ra_to_dec(r, 6, out, 0);
     let w1: str = "0.333333";
     let ok1: bool = n1 == 8 && mem_eq(out, 0, str_ptr(w1), 0, 8);
-    mk(r, 2, 3);
+    ra_mk(r, 2, 3);
     let n2: u32 = ra_to_dec(r, 6, out, 0);
     let w2: str = "0.666667";
     return ok1 && n2 == 8 && mem_eq(out, 0, str_ptr(w2), 0, 8);
@@ -646,12 +646,12 @@ fn test_rational_to_dec_rounds_half_away() -> bool {
     // 5/8 = 0.625 -> 两位 "0.63" (half away from zero, 不是 banker's)。
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
-    mk(r, 5, 8);
+    ra_mk(r, 5, 8);
     let n1: u32 = ra_to_dec(r, 2, out, 0);
     let w1: str = "0.63";
     let ok1: bool = n1 == 4 && mem_eq(out, 0, str_ptr(w1), 0, 4);
     // 3/8 = 0.375 -> "0.38"
-    mk(r, 3, 8);
+    ra_mk(r, 3, 8);
     let n2: u32 = ra_to_dec(r, 2, out, 0);
     let w2: str = "0.38";
     return ok1 && n2 == 4 && mem_eq(out, 0, str_ptr(w2), 0, 4);
@@ -662,19 +662,19 @@ fn test_rational_to_dec_integer_part() -> bool {
     // 前面几条拿被覆盖后的内容去比 (第一版就是这么写的, 三条里两条假红)。
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
-    mk(r, 7, 2); // 3.5
+    ra_mk(r, 7, 2); // 3.5
     let n: u32 = ra_to_dec(r, 1, out, 0);
     let w: str = "3.5";
     let ok1: bool = n == 3 && mem_eq(out, 0, str_ptr(w), 0, 3);
     // 带进位跨过整数部分的: 249/250 = 0.996 -> 两位 "1.00"
     let r2: ptr = alloc(16);
-    mk(r2, 249, 250);
+    ra_mk(r2, 249, 250);
     let n2: u32 = ra_to_dec(r2, 2, out, 0);
     let w2: str = "1.00";
     let ok2: bool = n2 == 4 && mem_eq(out, 0, str_ptr(w2), 0, 4);
     // 199/100 = 1.99 -> 一位 "2.0" (整数进位)
     let r3: ptr = alloc(16);
-    mk(r3, 199, 100);
+    ra_mk(r3, 199, 100);
     let n3: u32 = ra_to_dec(r3, 1, out, 0);
     let w3: str = "2.0";
     let ok3: bool = n3 == 3 && mem_eq(out, 0, str_ptr(w3), 0, 3);
@@ -684,7 +684,7 @@ fn test_rational_to_dec_integer_part() -> bool {
 fn test_rational_to_dec_negative() -> bool {
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
-    mk(r, -1, 2);
+    ra_mk(r, -1, 2);
     let n: u32 = ra_to_dec(r, 3, out, 0);
     let w: str = "-0.500";
     return n == 6 && mem_eq(out, 0, str_ptr(w), 0, 6);
@@ -693,7 +693,7 @@ fn test_rational_to_dec_negative() -> bool {
 fn test_rational_to_dec_rejects_bad_places() -> bool {
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
-    mk(r, 1, 3);
+    ra_mk(r, 1, 3);
     return ra_to_dec(r, 0, out, 0) == RA_ERR && ra_to_dec(r, 19, out, 0) == RA_ERR;
 }
 
@@ -701,7 +701,7 @@ fn test_rational_to_dec_respects_offset() -> bool {
     let r: ptr = alloc(16);
     let out: ptr = alloc(64);
     store8(out, 0, 88 as u8); // 偏移前放个 'X' 当哨兵
-    mk(r, 1, 4);
+    ra_mk(r, 1, 4);
     let n: u32 = ra_to_dec(r, 2, out, 1);
     let w: str = "X0.25";
     return n == 4 && mem_eq(out, 0, str_ptr(w), 0, 5);
@@ -713,8 +713,8 @@ fn test_rational_mul_overflow_is_err() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 9223372036854775807, 1);
-    mk(b, 9223372036854775807, 1);
+    ra_mk(a, 9223372036854775807, 1);
+    ra_mk(b, 9223372036854775807, 1);
     return ra_mul(a, b, sc, o) == RA_ERR;
 }
 
@@ -723,8 +723,8 @@ fn test_rational_add_overflow_is_err() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 9223372036854775807, 3);
-    mk(b, 9223372036854775807, 5);
+    ra_mk(a, 9223372036854775807, 3);
+    ra_mk(b, 9223372036854775807, 5);
     // num = MAX*5 + MAX*3 = 8*MAX -> 溢出
     return ra_add(a, b, sc, o) == RA_ERR;
 }
@@ -748,11 +748,11 @@ fn test_rational_sub_to_zero() -> bool {
     let b: ptr = alloc(16);
     let o: ptr = alloc(16);
     let sc: ptr = alloc(32);
-    mk(a, 1, 2);
-    mk(b, 1, 2);
+    ra_mk(a, 1, 2);
+    ra_mk(b, 1, 2);
     let ok1: bool = ra_sub(a, b, sc, o) == RA_OK && eq2(o, 0, 1);
-    mk(a, 0, 1);
-    mk(b, 1, 2);
+    ra_mk(a, 0, 1);
+    ra_mk(b, 1, 2);
     let ok2: bool = ra_sub(a, b, sc, o) == RA_OK && eq2(o, -1, 2);
     // 边界: MAX/1 - 0 = MAX 必须成功。
     let ok3: bool = ra_sub_i64(9223372036854775807, 0, o) == RA_OK

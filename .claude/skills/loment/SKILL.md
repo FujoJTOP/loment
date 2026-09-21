@@ -487,7 +487,9 @@ byuse "def" done
 
 ## 3. 内建函数（全部，没有别的）
 
-**没有标准库**：没有 `String` / `Vec` / `HashMap`、没有 I/O 封装、没有字符串格式化。
+**语言内建的只有下表这些**：没有 `String` / `Vec` / `HashMap` 这类内建类型，没有 I/O 封装，
+没有字符串格式化。**但工具链自带一层标准库**（`lompi/store/`，随包装好，不用装）——
+`use vec` / `use map` / `use fs` 各取一个模块，见本节末尾的 §3.1。
 
 | 签名 | 说明 |
 |---|---|
@@ -515,6 +517,36 @@ byuse "def" done
 **Windows PE 目标只实现了 8 个**：`read`(0) / `write`(1) / `close`(3) / `brk`(12) / `exit`(60) /
 `getdents64`(217) / `openat`(257) / `newfstatat`(262)，**其余号返回 -1（静默失败）** ——
 要跨平台跑就按这 8 个来。`/proc/self/cmdline` 在 PE 上由运行库合成，argv 读法两边一致。
+
+### 3.1 工具链自带的标准库（按模块取）
+
+装在工具链前缀的 `share/lompi/store/` 下（源码仓库里就是 `lompi/store/`），
+**名字形式一条 use 取一个模块**：
+
+```rust
+module myapp
+
+use vec            // 动态数组 (u32 元素, 调用方持缓冲)
+use numfmt         // 十进制/十六进制格式化
+
+fn _start() {
+    syscall4(60, 0, 0, 0);
+}
+```
+
+| 包 | 里面大概有什么 | 例子 |
+|---|---|---|
+| `std` | 127 个**可移植**模块 (一个 syscall 都不发): 容器、文本、大整数、浮点、哈希与校验、压缩、位运算 | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` |
+| `host` | 宿主侧 (要 syscall): 文件、目录、argv、stat、日志 | `fs` `io` `dir` `argv` `stat` `log` |
+
+- **`use std` 也能用**，但把 127 个模块拖进**同一个单元** —— 单元的发射符号是平的
+  （顶层名字全单元唯一），于是又慢（自举编译器上按模块数超线性涨）又容易被同名撞。
+  **按模块取**，别写门面。
+- 只有名字形式能这样取；`store` 是**目录树**，不要按路径去够它。
+- `mem` / `num` / `proc` / `sha256` / `json` 这几个名字**两边都有**：`use mem` 拿到的是
+  **工具链核心库**那份（`loment/lib/`），不是 `std` 包里那份。要 std 的那份就 `use std`
+  或者换用别名的模块。
+- 标准库文件里的 `test_*` 是各模块的自检函数，可以是源码的一部分，不额外收费。
 
 ## 4. 错误码怎么读
 

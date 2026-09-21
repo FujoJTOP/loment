@@ -525,6 +525,108 @@ def test_name_import_ambiguous_is_rejected():
 
 
 @test
+def test_name_import_reaches_a_module_inside_a_package():
+    """名字形式要能命中**包内模块**, 不只是与包同名那个入口 (2026-09-20)。
+
+    包是一个目录, 里面除了入口还有别的模块 (`std/vec.lomt`、`host/fs.lomt`)。只认入口
+    的话, 整包只能被"拖进同一个单元"那一种方式消费 —— 而单元的发射符号是**平的**, 模块
+    一多就撞名, 且代价按模块数超线性涨。这两件事一起把 std 挡在门外。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        pkg = proj / "deps" / "geom"
+        pkg.mkdir(parents=True)
+        (pkg / "geom.lomt").write_text("module geom\nuse \"area.lomt\"\n"
+                                       "pub fn g_area(w: u32, h: u32) -> u32 { return ar(w, h); }\n",
+                                       encoding="utf-8")
+        (pkg / "area.lomt").write_text("module area\npub fn ar(w: u32, h: u32) -> u32 "
+                                       "{ return w * h; }\n", encoding="utf-8")
+        assert lomentc.resolve_name("area", ROOT, proj) == pkg / "area.lomt"
+        # 入口那条路没被新层挤掉: `use geom` 仍然命中 `<包>/<包>.lomt`
+        assert lomentc.resolve_name("geom", ROOT, proj) == pkg / "geom.lomt"
+        mod = parse("module m\nuse area\nfn f() -> u32 { return ar(3, 4); }\n")
+        deps = lomentc.resolve_deps(mod, ROOT, proj, entry=proj / "x.lomt")
+        assert [x.name for x in deps] == ["area"]
+
+
+@test
+def test_name_import_package_module_ambiguous_is_rejected():
+    """两个包里都有同名模块 -> **报错, 不许取先搜到的那个**。与第 3 层同一条理由:
+    搜索顺序一旦变成隐藏语义, 换台机器就换了个模块。"""
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        for name in ("geom", "extra"):
+            d = proj / "deps" / name
+            d.mkdir(parents=True)
+            (d / "area.lomt").write_text(f"module area\npub fn ar() -> u32 {{ return {len(name)}; }}\n",
+                                        encoding="utf-8")
+        try:
+            lomentc.resolve_name("area", ROOT, proj)
+        except lomc.LomError as ex:
+            assert "名字导入有歧义" in ex.msg and "geom" in ex.msg and "extra" in ex.msg, ex.msg
+        else:
+            raise AssertionError("包内模块重名应报歧义")
+
+
+@test
+def test_store_modules_resolve_by_name_in_this_checkout():
+    """**本仓也是一个 store 消费者**: `lompi/store` 就在仓里, 装出来的前缀才是
+    `share/lompi/store`。没有 `<仓根>/lompi/store` 这一条, 在本仓写 `use vec` 一律 E018 ——
+    而"本仓能不能用 std"正是它要回答的问题。"""
+    store = ROOT / "lompi" / "store"
+    assert store.is_dir(), f"仓里没有 {store.relative_to(ROOT)}"
+    assert lomentc.resolve_name("vec", ROOT) == store / "std" / "0.1.0" / "vec.lomt"
+    assert lomentc.resolve_name("std", ROOT) == store / "std" / "0.1.0" / "std.lomt"
+    assert lomentc.resolve_name("fs", ROOT) == store / "host" / "0.1.0" / "fs.lomt"
+    assert lomentc.store_roots(ROOT, None) == [store]
+
+
+@test
+def test_store_packages_do_not_shadow_the_built_in_roots():
+    """商店里的**包内模块**不许盖住编译器自己的源码。
+
+    这不是假想的: 加包内模块那一层时真撞上了 —— `store/std/0.1.0/interp.lomt` 把
+    `loment/selfhost/interp.lomt` 顶掉, 驱动当场编不过 (`CT_HEAP_BYTES` 未解析)。
+    四根是编译器自己的源码, 商店里的包是随包发行的库; 后者是**私有名字空间**, 排序上
+    必须让位。项目本地 `deps/` 不在此列 —— 那是使用者显式装的, 先于工具链的一切。
+    """
+    assert lomentc.resolve_name("interp", ROOT) == ROOT / "loment" / "selfhost" / "interp.lomt"
+    assert lomentc.resolve_name("mem", ROOT) == ROOT / "loment" / "lib" / "mem.lomt"
+    # 商店里确实**存在**同名的包内模块 —— 否则这条判据是空的 (它在测空气)
+    assert (ROOT / "lompi" / "store" / "std" / "0.1.0" / "interp.lomt").exists(), \
+        "商店里没有 interp.lomt, 这条判据就测不到遮蔽"
+    assert (ROOT / "lompi" / "store" / "std" / "0.1.0" / "mem.lomt").exists()
+
+
+@test
+def test_std_package_is_one_unit_without_name_collisions():
+    """v. std 的**整包门面必须是一份能装进一个单元**的源码。
+
+    单元的发射符号是平的 (`docs/158` §2), 所以包内任意两个模块的同名顶层声明都是硬错。
+    这条把"std 现在装得下"钉住 —— 它同时是给后来人看的棘轮: 往 std 里加模块时撞名,
+    门禁当场红, 而不是等到某个用户 `use std` 才发现。
+
+    **只在参考实现这一侧跑**: 自举侧装载同一份语料要按模块数超线性涨 (实测 n=64 已 187 秒,
+    128 个模块是几十分钟量级), 拿它当判据会把门禁变成等待。两个实现对"重名要拒"这条**规则**
+    的等价性由 `loment_p8_test` 的 `neg_across` 与 `loment_rule_parity` 管; 这里管的是**语料**。
+    """
+    mod, deps = lomentc.load_unit(ROOT / "lompi" / "store" / "std" / "0.1.0" / "std.lomt", ROOT)
+    seen: dict[str, str] = {}
+    dups: list[str] = []
+    for m in [*deps, mod]:
+        decls = ([(f.name, "函数") for f in m.funcs] + [(s.name, "结构体") for s in m.structs]
+                 + [(e.name, "枚举") for e in m.enums if not e.from_prelude]
+                 + [(c.name, "常量") for c in m.consts])
+        for nm, kind in decls:
+            if nm in seen and seen[nm] != m.name:
+                dups.append(f"{kind} {nm}: {seen[nm]} <-> {m.name}")
+            else:
+                seen.setdefault(nm, m.name)
+    assert not dups, "std 门面装不进一个单元 —— 平名字撞了:\n  " + "\n  ".join(dups)
+    assert len(deps) + 1 > 100, f"std 只装进来 {len(deps)+1} 个模块, 门面是不是被改小了"
+
+
+@test
 def test_name_and_path_import_are_equivalent():
     """两种写法装载出**同一串依赖**(名字形式只是路径形式的一层解析)。"""
     src = 'module m\nuse mathutil\nfn f() -> u32 { return double(2); }\n'

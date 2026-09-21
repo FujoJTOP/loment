@@ -71,6 +71,7 @@ grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).
 
 | | |
 |---|---|
+| **A standard library, imported one module at a time** | `lompi/store/` ships with the toolchain: `std` (127 modules — vectors, maps, text, big integers, floats, hashing, compression) and `host` (files, argv, directories). `use vec`, `use map`, `use fs`. The package facade `use std` also works, but pulls all 127 modules into one unit — emitted symbols are flat, so that is slow and collision-prone. Prefer per-module. |
 | **Can be written in six other syntaxes** | C, C++, Java, C#, Go, Python. Only the spelling changes; the meaning is always Loment's — it is a syntax, not a semantics, and each front end says so on its first line. Declaring it in the file (`choose write grammar`) is not wired into the compiler yet; the translators are. [docs/188](docs/188-grammar-declaration.md) · [docs/179](docs/179-multisyntax-frontends.md) |
 | **A project mode, not a crate attribute** | `choose std` or `choose no_std`, at most once, in the root unit. "Hosted or freestanding" becomes a property of the whole program — the compiler can refuse a half-hosted one, and a form object can carry the setting. [docs/180](docs/180-std-core.md) |
 | **Reports errors from a separate program** | The compiler emits structured diagnostics; `lomenterr` adds the title, the location and how to fix it, so the compiler carries no message table of its own. [docs/182](docs/182-lomenterr-and-choose-switches.md) |
@@ -95,6 +96,7 @@ grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).
 | `loment/selfhost/` | The compiler. It is written in Loment. |
 | `loment/tools/` | CLI, formatter, documentation generator, language server, linker, error reporter — and the Loment-side criteria that mirror `tools/`. |
 | `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc`; plus `lumtui`, a terminal UI library ([docs/196](docs/196-lumtui.md)). |
+| `lompi/store/` | The standard library, shipped with the toolchain: `std` (127 modules) and `host` (syscalls, files, argv, directories). One `use` per module — `use vec`, `use map`, `use fs`. |
 | `loment/examples/` | 30 example programs. |
 | `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
 | `lompi/` | The package manager, written in Loment. |

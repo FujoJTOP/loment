@@ -33,17 +33,19 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 // 小暂存的布局 (改了偏移必须所有用点一起改 —— 它们写在同一块内存上):
 //   [0, 4000)      NUL 路径 (open_ro 要 C 串)
 //   [4096, 6496)   use 清单 (MAX_USE 条, 每条 8 字节: 起点 + 长度)
-//   [6496, 8192)   候选路径暂存 (resolve_use_name / fix_rel)
-//   [8192, 8256)   wdec 的数字缓冲
-//   [8256, 9280)   项目根: 入口文件所在目录 (NUL)  ← 名字形式的 deps/ 层相对它
-//   [9280, 10304)  工具目录: argv[0] 所在目录 (NUL) ← 自带 store 相对它
-//   [10304, 11328) 版本名: store 里列出的那个子目录 (NUL)
-//   [11328, 12352) 目录项缓冲 (getdents64)
-//   [12352, 13824) 子路径暂存 (<dir>/<entry>, 判是不是目录用)
-//   [13824, 14080) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
-//   [14080, 15104) --diag-out 路径 (NUL), 空 = 不吐结构化诊断 (docs/182 §5)
-//   [15104, 17504) addin 清单 (MAX_ADDIN 条, 每条 8 字节: 起点 + 长度)
-const SCR_CAP: u32 = 17504;
+//   [6496, 11520)  候选路径暂存 (resolve_use_name / fix_rel / try_pkg_module)
+//   [11520, 11584) wdec 的数字缓冲
+//   [11584, 12608) 项目根: 入口文件所在目录 (NUL)  ← 名字形式的 deps/ 层相对它
+//   [12608, 13632) 工具目录: argv[0] 所在目录 (NUL) ← 自带 store 相对它
+//   [13632, 14656) 版本名: store 里列出的那个子目录 (NUL)
+//   [14656, 15680) 包名: 遍历包的子目录时那一个 (NUL)
+//   [15680, 17728) 库根前缀: deps 目录 / store 根 (NUL) ← try_pkg_module 的 base
+//   [17728, 18752) 目录项缓冲 (getdents64)
+//   [18752, 20224) 子路径暂存 (<dir>/<entry>, 判是不是目录用)
+//   [20224, 20480) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
+//   [20480, 21504) --diag-out 路径 (NUL), 空 = 不吐结构化诊断 (docs/182 §5)
+//   [21504, 23904) addin 清单 (MAX_ADDIN 条, 每条 8 字节: 起点 + 长度)
+const SCR_CAP: u32 = 23904;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
 //: 无上限: 同一份源码两个实现给出不同的单元 (2026-09-16 发现)。抬到 300 是让 std 那种
@@ -54,14 +56,16 @@ const MAX_USE: u32 = 300;
 const MAX_ADDIN: u32 = 300;
 const USE_OFF: u32 = 4096;       // use 清单起点
 const NAMTMP_OFF: u32 = 6496;    // 候选路径暂存起点
-const PROJ_OFF: u32 = 8256;      // 项目根
-const TOOLDIR_OFF: u32 = 9280;   // 工具目录
-const VER_OFF: u32 = 10304;      // 版本名
-const ADDIN_OFF: u32 = 15104;    // addin 清单起点
-const DENT_OFF: u32 = 11328;     // 目录项缓冲
-const SUBP_OFF: u32 = 12352;     // 子路径暂存
-const EXT_OFF: u32 = 13824;      // 源后缀 (loment.conf)
-const DIAG_OFF: u32 = 14080;     // --diag-out 路径
+const PROJ_OFF: u32 = 11584;     // 项目根
+const TOOLDIR_OFF: u32 = 12608;  // 工具目录
+const VER_OFF: u32 = 13632;      // 版本名
+const PKG_OFF: u32 = 14656;      // 包名 (遍历包目录时那一个)
+const BASE_OFF: u32 = 15680;     // 库根前缀 (deps 目录 / store 根)
+const DENT_OFF: u32 = 17728;     // 目录项缓冲
+const SUBP_OFF: u32 = 18752;     // 子路径暂存
+const EXT_OFF: u32 = 20224;      // 源后缀 (loment.conf)
+const DIAG_OFF: u32 = 20480;     // --diag-out 路径
+const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const DIAG_CAP: u32 = 1024;      // 路径上限
 const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
@@ -649,6 +653,61 @@ fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     return n;
 }
 
+/// `<dirp>` 的**第 idx 个**子目录, 名字 NUL 结尾写进 dst, 返回长度; 0 = 没有第 idx 个。
+///
+/// 与 `subdirs_of` 同一条"是不是目录"判据 (openat(O_DIRECTORY) 试, 不看 d_type, 见那边
+/// 的注解), 差别只在"要第几个" —— 包内模块那一层要**遍历**包目录, 而 `subdirs_of` 只交出
+/// 第一个名字。每次调用重开一次目录: 包与版本各只有个位数, 简单比快重要 (Loment 没有迭代器)。
+/// 找到就**立刻关 fd 返回**, 不为了数总数扫到底 —— 调用方是靠"第 idx 个是 0 长度"停的。
+fn subdir_at(dirp: ptr, dl: u32, idx: u32, dst: ptr, cap: u32, scr: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < dl && i < DIR_CAP - 1 {
+        store8(scr, i, load8(dirp, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 65536);
+    if fd < 0 {
+        return 0;
+    }
+    let dent: ptr = ptr_add(scr, DENT_OFF);
+    let n: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let rn: i64 = syscall4(217, fd as u64, dent as u64, DENT_CAP as u64);
+        if rn <= 0 {
+            go = 0;
+        } else {
+            let m: u32 = rn as u32;
+            let e: u32 = 0;
+            while e < m {
+                let rl: u32 = load16(dent, e + 16);
+                if rl == 0 {
+                    e = m;
+                } else {
+                    let nm: u32 = e + 19;
+                    if load8(dent, nm) != 46 && is_dir_at(dirp, dl, dent, nm, scr) == 1 {
+                        if n == idx {
+                            let j: u32 = 0;
+                            while j < 200 && j < cap - 1 && load8(dent, nm + j) != 0 {
+                                store8(dst, j, load8(dent, nm + j) as u8);
+                                j = j + 1;
+                            }
+                            store8(dst, j, 0 as u8);
+                            syscall4(3, fd as u64, 0, 0);
+                            return j;
+                        }
+                        n = n + 1;
+                    }
+                    e = e + rl;
+                }
+            }
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    return 0;
+}
+
 /// `<dir>/<名字>` 是个目录吗 —— 拼进子路径暂存, 再 openat(O_DIRECTORY) 试一下。
 /// 名字从目录项缓冲里现取 (`dent + nm`, NUL 结尾), 所以不用先拷出来。
 fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
@@ -686,15 +745,30 @@ fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr
     return open_two(d, tmp, scr);
 }
 
-/// `<名字>` 是否在**工具链自带的库**里: `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`。
-/// 版本那一层**只允许一个** (与参考实现同规则: 编译器不做版本选择); 多个就报错退出。
-/// 命中写进 tmp 并返回长度; 0 = 没这个包。
-fn try_store(td: ptr, tn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
+/// 库根前缀 (store 根 / 项目 deps 目录), 写进 dst 返回长度:
+///   `dev == 1` -> `lompi/store`                    **开发 checkout**: store 就在仓里
+///   `dev == 0` -> `<工具目录>/../share/lompi/store`  装出来的前缀 (发布包的形状)
+///
+/// 与参考实现的 `lomentc.store_roots` 是同一对候选, **同一顺序**。仓里的 store 不摆
+/// `share/` 那一层 —— 那一层是打包时拷出来的; 没有前一条, 在本仓写 `use vec` 一律
+/// "找不到或有歧义"。
+fn store_base(td: ptr, tn: u32, dev: u32, dst: ptr) -> u32 {
+    if dev == 1 {
+        return catl(dst, 0, "lompi/store");
+    }
     let d: u32 = 0;
     if tn > 0 {
-        d = cat(tmp, d, td, tn);
+        d = cat(dst, d, td, tn);
     }
-    d = catl(tmp, d, "/../share/lompi/store/");
+    return catl(dst, d, "/../share/lompi/store");
+}
+
+/// `<名字>` 是否在**工具链自带的库**里: `<store 根>/<名字>/<版本>/<名字>.lomt`。
+/// 版本那一层**只允许一个** (与参考实现同规则: 编译器不做版本选择); 多个就报错退出。
+/// 命中写进 tmp 并返回长度; 0 = 没这个包。
+fn try_store(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
+    let d: u32 = store_base(td, tn, dev, tmp);
+    d = catl(tmp, d, "/");
     d = cat(tmp, d, ptr_add(src, off), len);
     store8(tmp, d, 0 as u8);
     let verd: ptr = ptr_add(scr, VER_OFF);
@@ -718,28 +792,181 @@ fn try_store(td: ptr, tn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr)
     return open_two(d, tmp, scr);
 }
 
+/// `<名字>.lomt` 是不是**某个包里的模块** —— 遍历库根下每一个包各试一次。
+///
+/// 为什么要有这一层 (2026-09-20): 包是一个目录, 里面除了与包同名的那个入口还有别的模块
+/// (`std/vec.lomt`、`host/fs.lomt`)。只认入口的话, 整包只能被"全拖进同一个单元"那一种
+/// 方式消费 —— 而单元的发射符号是**平的**, 模块一多就撞名 (`std` 实测 11 处 E13), 代价
+/// 也按模块数超线性涨 (实测 n=64 已 187 秒)。按模块取是唯一实用的路。
+///
+///   `versioned == 1`: `<base>/<包>/<版本>/<名字>`   (store 的形状)
+///   `versioned == 0`: `<base>/<包>/<名字>`          (项目 deps 的形状)
+///
+/// 多版本包**跳过** —— 那是包入口那一层报的事, 这里再报一次等于同一件事说两遍。
+/// 命中写进 dst 返回长度; 0 = 一个包都没有; **多个包都有 -> 返回 0** (由调用方报
+/// "找不到或有歧义")。与参考实现同规矩: "先搜到哪个"不能变成隐藏语义。
+fn try_pkg_module(base: ptr, bl: u32, versioned: u32, src: ptr, off: u32, len: u32,
+                  tmp: ptr, dst: ptr, scr: ptr) -> u32 {
+    let pkgn: ptr = ptr_add(scr, PKG_OFF);
+    let hits: u32 = 0;
+    let hit: u32 = 0;
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let nl: u32 = subdir_at(base, bl, i, pkgn, 200, scr);
+        if nl == 0 {
+            go = 0;
+        } else {
+            let d: u32 = 0;
+            d = cat(tmp, d, base, bl);
+            d = catl(tmp, d, "/");
+            d = cat(tmp, d, pkgn, nl);
+            let ok: u32 = 0;
+            if versioned == 1 {
+                let verd: ptr = ptr_add(scr, VER_OFF);
+                let nv: u32 = subdirs_of(tmp, d, verd, scr);
+                if nv == 1 {
+                    d = catl(tmp, d, "/");
+                    d = cat(tmp, d, verd, cstr_len(verd));
+                    ok = 1;
+                }
+            } else {
+                ok = 1;
+            }
+            if ok == 1 {
+                d = catl(tmp, d, "/");
+                d = cat(tmp, d, ptr_add(src, off), len);
+                let rl: u32 = open_two(d, tmp, scr);
+                if rl > 0 {
+                    if hits == 0 {
+                        hit = cat(dst, 0, tmp, rl);
+                    }
+                    hits = hits + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    if hits > 1 {
+        // 与参考实现同规矩: "先搜到哪个"不能变成隐藏语义。这里**硬失败**而不是
+        // 返回 0 往下落 —— 往下落的话可能被内置四根里同名的一份接住, 那就成了
+        // 静默用错模块 (比报错难查得多)。
+        let m1: str = "fujoc-s: 名字导入有歧义: ";
+        let m2: str = " —— 多个包里都有这个模块, 编译器不猜用哪一个 (改名或清掉多余那份)\n";
+        write_all(2, str_ptr(m1), str_len(m1) as u64);
+        write_all(2, ptr_add(src, off), len as u64);
+        write_all(2, str_ptr(m2), str_len(m2) as u64);
+        die(1);
+    }
+    if hits == 0 {
+        return 0;
+    }
+    return hit;
+}
+
+/// `pre` 是不是 `p` 的前缀。
+fn bprefix(p: ptr, n: u32, pre: ptr, pl: u32) -> u32 {
+    if pl > n {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < pl {
+        if load8(p, i) != load8(pre, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 这个文件**是不是住在商店的包里** —— 见 `lomentc._in_store_root` 与 `resolve_use_name`
+/// 的 §归属。两条候选前缀就是 `store_base` 拼出来的那两个, 所以与解析出来的路径同前缀。
+fn in_store_path(cpath: ptr, cn: u32, td: ptr, tn: u32, scr: ptr) -> u32 {
+    let base: ptr = ptr_add(scr, BASE_OFF);
+    let bl: u32 = store_base(td, tn, 0, base);
+    if bprefix(cpath, cn, base, bl) == 1 {
+        return 1;
+    }
+    let bl2: u32 = store_base(td, tn, 1, base);
+    return bprefix(cpath, cn, base, bl2);
+}
+
+/// 商店那两层, 一个商店根: 先包入口, 再包内模块。命中写进 dst 返回长度。
+fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
+                    tmp: ptr, dst: ptr, scr: ptr) -> u32 {
+    let r: u32 = try_store(td, tn, dev, src, off, len, tmp, scr);
+    if r > 0 {
+        return cat(dst, 0, tmp, r);
+    }
+    let base: ptr = ptr_add(scr, BASE_OFF);
+    let bl: u32 = store_base(td, tn, dev, base);
+    return try_pkg_module(base, bl, 1, src, off, len, tmp, dst, scr);
+}
+
 /// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
 /// **按层搜, 先命中先用** (与 `lomentc.resolve_name` 同规则):
-///   1. `<项目根>/deps/<名字>/<名字>.lomt`  项目本地
-///   2. `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`  随包自带
-///   3. 内置四根 `<根>/<名字>.lomt` —— **这一层命中必须唯一**
+///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口)
+///   1b. `<项目根>/deps/<包>/<名字>.lomt`     **项目本地的包内模块**
+///   2.  内置四根 `<根>/<名字>.lomt` —— **这一层命中必须唯一**
+///   3.  `<store>/<名字>/<版本>/<名字>.lomt`  随包自带 (包入口)
+///   3b. `<store>/<包>/<版本>/<名字>.lomt`    **随包自带的包内模块**
+///
+/// **商店那两层排在四根之后 (2026-09-20)**: 四根是**编译器自己的源码**
+/// (`loment/selfhost/interp.lomt` 就在其中), 而商店里的包是**随包发行的库** —— 包的内部
+/// 模块是包的私有名字空间, 让它盖住编译器自己的模块是灾难 (加这一层时真撞上了:
+/// `store/std/0.1.0/interp.lomt` 把 `loment/selfhost/interp.lomt` 顶掉, 驱动直接编不过)。
+/// 项目本地的 `deps/` 不在此列 —— 那是使用者**显式装的**, 理应先于工具链自带的任何东西。
+///
+/// §归属 (2026-09-20): **第 2 层与第 3 层谁在前面, 看导入方自己住在哪边。** 这不是设计
+/// 出来的, 是加包内模块那一层时撞出来的 —— 两个方向都撞得上真东西:
+///   * 商店放前面 -> `loment/selfhost/comefor.lomt` 的 `use interp` 拿到 std 那份,
+///     而那份没有 `CT_HEAP_BYTES`, 驱动直接编不过;
+///   * 四根放前面 -> `store/host/0.1.0/stat.lomt` 的 `use mem` 拿到 `loment/lib/mem.lomt`,
+///     而那份没有 `mem_load64`, host 包编不过。
+/// 所以规矩是"**在谁的库里, 先用谁的名字**"(`ins` = 导入方住在商店里)。用户项目走的是
+/// "先四根"那条 —— 与加这一层之前**完全一致**, 这一层没有改动任何既有的解析结果。
+///
+/// `store` 有两个候选, 按序先命中先用 (见 `store_base`): 装出来的前缀 `share/lompi/store`,
+/// 再开发 checkout 的 `lompi/store`。
 /// 只解析 `.lomt` —— 名字形式是 L1 模块用的, L0 布局走路径形式。
-fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
+fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) -> u32 {
     // 候选写进 tmp, **不能写 dst**: 为了判歧义要试完 4 个根, 而后面那些试写会把
     // 已经命中的那个覆盖掉 (踩过: examples 命中 29 字节, 又被 tools 的 26 字节盖住,
     // 于是 load_file 拿到 "loment/tools/mathutil.lomt" + 上一轮残尾 "omt")。
     let tmp: ptr = ptr_add(scr, NAMTMP_OFF);
-    // 前面两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
-    let r1: u32 = try_deps(ptr_add(scr, PROJ_OFF), cstr_len(ptr_add(scr, PROJ_OFF)),
-                           src, off, len, tmp, scr);
+    let proj: ptr = ptr_add(scr, PROJ_OFF);
+    let pn: u32 = cstr_len(proj);
+    let td: ptr = ptr_add(scr, TOOLDIR_OFF);
+    let tn: u32 = cstr_len(td);
+    // 库根前缀 (deps 目录 / store 根) 写进一段**不与 tmp 重叠**的暂存: try_pkg_module
+    // 一边读 base 一边往 tmp 里拼候选路径, 两者不能是同一块。
+    let base: ptr = ptr_add(scr, BASE_OFF);
+    // 项目本地两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
+    let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
     if r1 > 0 {
         return cat(dst, 0, tmp, r1);
     }
-    let r2: u32 = try_store(ptr_add(scr, TOOLDIR_OFF), cstr_len(ptr_add(scr, TOOLDIR_OFF)),
-                            src, off, len, tmp, scr);
-    if r2 > 0 {
-        return cat(dst, 0, tmp, r2);
+    let bl1: u32 = 0;
+    if pn > 0 {
+        bl1 = cat(base, 0, proj, pn);
     }
+    bl1 = catl(base, bl1, "/deps");
+    let r1b: u32 = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
+    if r1b > 0 {
+        return r1b;
+    }
+    // 导入方住在商店里: 商店两层提到四根前面 (§归属)。
+    if ins == 1 {
+        let s0: u32 = try_store_layers(td, tn, 0, src, off, len, tmp, dst, scr);
+        if s0 > 0 {
+            return s0;
+        }
+        let s1: u32 = try_store_layers(td, tn, 1, src, off, len, tmp, dst, scr);
+        if s1 > 0 {
+            return s1;
+        }
+    }
+    // 内置四根: 这一层要**数命中数**才敢返回 (唯一才算命中)。
     let hits: u32 = 0;
     let hit_len: u32 = 0;
     let r: u32 = 0;
@@ -774,10 +1001,24 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
         }
         r = r + 1;
     }
-    if hits != 1 {
-        return 0;
+    if hits > 1 {
+        return 0;      // 四根里重名: 交给调用方报"找不到或有歧义", **不许**落到商店去
     }
-    return hit_len;
+    if hits == 1 {
+        return hit_len;
+    }
+    // 默认 (导入方不在商店里): 商店两层垫在四根后面。
+    if ins != 1 {
+        let s0: u32 = try_store_layers(td, tn, 0, src, off, len, tmp, dst, scr);
+        if s0 > 0 {
+            return s0;
+        }
+        let s1: u32 = try_store_layers(td, tn, 1, src, off, len, tmp, dst, scr);
+        if s1 > 0 {
+            return s1;
+        }
+    }
+    return 0;
 }
 
 /// 这个 `use` 的路径是不是 `.lomt`。
@@ -951,7 +1192,7 @@ fn resolve_addin_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
     if r > 0 {
         return cat(dst, 0, tmp, r);
     }
-    return resolve_use_name(src, off, len, dst, scr);
+    return resolve_use_name(src, off, len, dst, scr, 0);
 }
 
 /// `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。违规就**硬报错**。
@@ -1063,6 +1304,12 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     let addins: ptr = ptr_add(scr, ADDIN_OFF);
     let nu: u32 = 0;
     let na: u32 = 0;
+    // **归属** (与参考实现 `lomentc.resolve_name` 的 §归属 同一条): 本文件住在商店的包里
+    // 时, 名字形式先在商店里找、再找内置四根; 其余文件反过来。两个方向都撞得上真东西
+    // (`store/std/mem.lomt` vs `loment/lib/mem.lomt`, `store/std/interp.lomt` vs
+    // `loment/selfhost/interp.lomt`) —— 见 `resolve_use_name` 的注解。
+    let ctd: ptr = ptr_add(scr, TOOLDIR_OFF);
+    let ins: u32 = in_store_path(path, n, ctd, cstr_len(ctd), scr);
     let i: u32 = 0;
     // 两种写法都收进来, 统一成"确切的 (起点, 长度)"再递归:
     //   字符串形式 `use b` -> 剥掉引号
@@ -1145,7 +1392,8 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
                 store32(uses, nu * 8 + 4, ul - 2);
                 nu = nu + 1;
             } else if k == 0 {
-                let rl: u32 = resolve_use_name(slot, up, ul, ptr_add(slot, rbase + nu * 64), scr);
+                let rl: u32 = resolve_use_name(slot, up, ul, ptr_add(slot, rbase + nu * 64),
+                                               scr, ins);
                 if rl == 0 {
                     // 同"打不开": 报出来之后**硬失败**, 不带着缺依赖的单元继续编
                     let msg: str = "fujoc-s: 名字导入找不到或有歧义: ";

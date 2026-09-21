@@ -446,7 +446,7 @@ pub fn ud_render_bytes(abuf: ptr, ast: ptr, an: u32, bbuf: ptr, bst: ptr, bn: u3
 /// 自检用 —— 真实调用方该用 `line.lomt` / `split.lomt`。
 /// (**第一版忘了写 st[0]=0**, 把"行尾"当成了"行首", 于是每一行都往前错一格,
 /// 除了一条以外的 diff 自检全红 —— 脚手架写错比算法写错更难看出来。)
-fn mk(text: str, st: ptr) -> u32 {
+fn ud_mk(text: str, st: ptr) -> u32 {
     let n: u32 = str_len(text);
     mem_store32(st, 0, 0);
     if n == 0 {
@@ -473,8 +473,8 @@ fn mk(text: str, st: ptr) -> u32 {
 fn run(a: str, b: str, ctx: u32, out: ptr) -> u32 {
     let ast: ptr = alloc(128);
     let bst: ptr = alloc(128);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(2048);
     let ops: ptr = alloc(512);
     let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, ops, 512);
@@ -484,7 +484,7 @@ fn run(a: str, b: str, ctx: u32, out: ptr) -> u32 {
     return ud_render(ops, nops, str_ptr(a), ast, na, str_ptr(b), bst, nb, ctx, sc, out, 0);
 }
 
-fn eqn(out: ptr, n: u32, want: str) -> bool {
+fn ud_eqn(out: ptr, n: u32, want: str) -> bool {
     if n != str_len(want) {
         return false;
     }
@@ -514,8 +514,8 @@ fn test_udiff_lcs_known() -> bool {
     let b: str = "B\nD\nC\nA\nB\nA\n";
     let ast: ptr = alloc(64);
     let bst: ptr = alloc(64);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(1024);
     return na == 7 && nb == 6 && ud_lcs_len(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 4;
 }
@@ -524,8 +524,8 @@ fn test_udiff_identical() -> bool {
     let a: str = "x\ny\nz\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let n: u32 = mk(a, ast);
-    let nb: u32 = mk(a, bst);
+    let n: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(a, bst);
     let sc: ptr = alloc(1024);
     return n == 3 && nb == 3 && ud_lcs_len(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc) == n
         && ud_similar_permille(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc) == 1000;
@@ -535,8 +535,8 @@ fn test_udiff_script_all_equal() -> bool {
     let a: str = "one\ntwo\nthree\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let n: u32 = mk(a, ast);
-    let nb: u32 = mk(a, bst);
+    let n: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(a, bst);
     let sc: ptr = alloc(1024);
     let out: ptr = alloc(256);
     let nops: u32 = ud_script(str_ptr(a), ast, n, str_ptr(a), bst, nb, sc, out, 256);
@@ -547,20 +547,20 @@ fn test_udiff_line_split_convention() -> bool {
     // 切行约定本身要单独钉一条 —— 上面好几条自检都建在它上面, 它错了会一起红。
     let a: str = "a\nb\n";
     let ast: ptr = alloc(32);
-    let ok1: bool = mk(a, ast) == 2 && d_off(ast, 0) == 0 && d_off(ast, 1) == 2
+    let ok1: bool = ud_mk(a, ast) == 2 && d_off(ast, 0) == 0 && d_off(ast, 1) == 2
         && d_len(ast, 0) == 2 && d_len(ast, 1) == 2;
     // 末尾没有换行符: 最后一行靠"总长"收边
     let b: str = "a\nb";
     let bst: ptr = alloc(32);
-    let ok2: bool = mk(b, bst) == 2 && d_len(bst, 1) == 1;
+    let ok2: bool = ud_mk(b, bst) == 2 && d_len(bst, 1) == 1;
     // 空文档是 0 行
     let c: str = "";
     let cst: ptr = alloc(32);
-    let ok3: bool = mk(c, cst) == 0;
+    let ok3: bool = ud_mk(c, cst) == 0;
     // 中间的空行也是一行
     let e: str = "a\n\nb\n";
     let est: ptr = alloc(32);
-    let ok4: bool = mk(e, est) == 3 && d_len(est, 1) == 1;
+    let ok4: bool = ud_mk(e, est) == 3 && d_len(est, 1) == 1;
     return ok1 && ok2 && ok3 && ok4;
 }
 
@@ -570,8 +570,8 @@ fn test_udiff_script_all_different() -> bool {
     let b: str = "c\nd\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(1024);
     let out: ptr = alloc(256);
     let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, out, 256);
@@ -596,8 +596,8 @@ fn test_udiff_script_reconstruction_invariant() -> bool {
     let b: str = "keep1\nkeep2\nnew\nkeep3\nkeep4\n";
     let ast: ptr = alloc(64);
     let bst: ptr = alloc(64);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(2048);
     let out: ptr = alloc(256);
     let nops: u32 = ud_script(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc, out, 256);
@@ -634,49 +634,49 @@ fn test_udiff_script_reconstruction_invariant() -> bool {
 fn test_udiff_render_basic() -> bool {
     let out: ptr = alloc(1024);
     let n: u32 = run("one\ntwo\nthree\n", "one\nTWO\nthree\n", 3, out);
-    return eqn(out, n, "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n");
+    return ud_eqn(out, n, "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n");
 }
 
 fn test_udiff_render_insert_only() -> bool {
     let out: ptr = alloc(1024);
     let n: u32 = run("a\nb\n", "a\nNEW\nb\n", 3, out);
-    return eqn(out, n, "@@ -1,2 +1,3 @@\n a\n+NEW\n b\n");
+    return ud_eqn(out, n, "@@ -1,2 +1,3 @@\n a\n+NEW\n b\n");
 }
 
 fn test_udiff_render_delete_only() -> bool {
     let out: ptr = alloc(1024);
     let n: u32 = run("a\ngone\nb\n", "a\nb\n", 3, out);
-    return eqn(out, n, "@@ -1,3 +1,2 @@\n a\n-gone\n b\n");
+    return ud_eqn(out, n, "@@ -1,3 +1,2 @@\n a\n-gone\n b\n");
 }
 
 fn test_udiff_render_empty_to_something() -> bool {
     // 空文件 -> 一行: 起点是 `-1,0` 而不是 `-0,0` —— 统一 diff 的老规矩。
     let out: ptr = alloc(1024);
     let n: u32 = run("", "x\n", 3, out);
-    return eqn(out, n, "@@ -1,0 +1,1 @@\n+x\n");
+    return ud_eqn(out, n, "@@ -1,0 +1,1 @@\n+x\n");
 }
 
 fn test_udiff_render_line_without_newline() -> bool {
     // 原文最后一行没有换行符: 渲染要**补**一个, 否则后面挤上来。
     let out: ptr = alloc(1024);
     let n: u32 = run("a\nb", "a\nc", 3, out);
-    return eqn(out, n, "@@ -1,2 +1,2 @@\n a\n-b\n+c\n");
+    return ud_eqn(out, n, "@@ -1,2 +1,2 @@\n a\n-b\n+c\n");
 }
 
 fn test_udiff_render_pure_delete_all() -> bool {
     let out: ptr = alloc(1024);
     let n: u32 = run("x\ny\n", "", 3, out);
-    return eqn(out, n, "@@ -1,2 +1,0 @@\n-x\n-y\n");
+    return ud_eqn(out, n, "@@ -1,2 +1,0 @@\n-x\n-y\n");
 }
 
 fn test_udiff_render_blank_lines() -> bool {
     // 空行也是行: "a\n\nb\n" 是 3 行, 中间那个是空的 —— 切行和比较都不能把它吃掉。
     let a: str = "a\n\nb\n";
     let ast: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
+    let na: u32 = ud_mk(a, ast);
     let sc: ptr = alloc(1024);
     let bst: ptr = alloc(32);
-    let nb: u32 = mk(a, bst);
+    let nb: u32 = ud_mk(a, bst);
     return na == 3 && nb == 3 && ud_lcs_len(str_ptr(a), ast, na, str_ptr(a), bst, nb, sc) == 3
         && d_len(ast, 1) == 1;
 }
@@ -709,7 +709,7 @@ fn test_udiff_ctx_zero_is_all_changed() -> bool {
     // ctx=0: 不留上下文, 只打改动的行 —— 头里那两个行数就是纯改动数。
     let out: ptr = alloc(1024);
     let n: u32 = run("a\nb\nc\n", "a\nX\nc\n", 0, out);
-    return eqn(out, n, "@@ -2,1 +2,1 @@\n-b\n+X\n");
+    return ud_eqn(out, n, "@@ -2,1 +2,1 @@\n-b\n+X\n");
 }
 
 fn test_udiff_similar_permille() -> bool {
@@ -717,8 +717,8 @@ fn test_udiff_similar_permille() -> bool {
     let b: str = "a\nb\nd\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(1024);
     // LCS = 2 -> 2000*2/6 = 666
     return ud_similar_permille(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 666;
@@ -729,8 +729,8 @@ fn test_udiff_similar_disjoint_is_zero() -> bool {
     let b: str = "3\n4\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(1024);
     return ud_similar_permille(str_ptr(a), ast, na, str_ptr(b), bst, nb, sc) == 0;
 }
@@ -739,8 +739,8 @@ fn test_udiff_scratch_accounting() -> bool {
     let a: str = "a\nb\nc\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(a, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(a, bst);
     let out: ptr = alloc(256);
     let big: ptr = alloc(4096);
     let ok1: bool = ud_script(str_ptr(a), ast, na, str_ptr(a), bst, nb, big, out, 256) != UD_ERR;
@@ -753,7 +753,7 @@ fn test_udiff_rejects_small_output_buffer() -> bool {
     let a: str = "a\nb\n";
     let ast: ptr = alloc(32);
     let bst: ptr = alloc(32);
-    let na: u32 = mk(a, ast);
+    let na: u32 = ud_mk(a, ast);
     let sc: ptr = alloc(1024);
     let tiny: ptr = alloc(8);
     return ud_script(str_ptr(a), ast, na, str_ptr(a), bst, na, sc, tiny, 8) == UD_ERR;
@@ -765,8 +765,8 @@ fn test_udiff_many_line_one_change() -> bool {
     let b: str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nCHANGED\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n";
     let ast: ptr = alloc(128);
     let bst: ptr = alloc(128);
-    let na: u32 = mk(a, ast);
-    let nb: u32 = mk(b, bst);
+    let na: u32 = ud_mk(a, ast);
+    let nb: u32 = ud_mk(b, bst);
     let sc: ptr = alloc(2048);
     let ops: ptr = alloc(512);
     let ok1: bool = na == 20 && nb == 20 && ud_fits(na, nb, 2048)

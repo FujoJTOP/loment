@@ -565,6 +565,65 @@ def test_selfhost_resolves_a_package_from_project_deps():
         assert r.stdout == _ref_ir(hi), "自举镜与参考实现的 IR 不一致"
 
 
+#: 直接命中**包内模块**的入口: 包里那个与包不同名的模块按名字取 (2026-09-20)。
+USE_AREA = ('module hi\n\nuse area\n\nfn main() -> u32 {\n    return ar(3 as u32, 4 as u32);\n}\n')
+
+
+@test
+def test_selfhost_reaches_a_module_inside_a_package():
+    """名字形式要能命中**包内模块** (`deps/geom/area.lomt`), 不只是包入口。
+
+    这是让 std 真正可用的那一层: 只认入口的话, 整包只能被"全拖进同一个单元"那一种方式
+    消费, 而单元的发射符号是平的、编译代价还按模块数超线性涨 —— 128 个模块两样都过不去。
+    与参考实现逐字节比 IR (用 `vec`/`io` 那类无分歧的语料, 见下一条的说明)。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        _write_pkg(proj / "deps" / "geom", "geom")
+        hi = proj / "hi.lomt"
+        hi.write_bytes(USE_AREA.encode())
+        r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
+        assert r.returncode == 0, \
+            f"包内模块没解析出来: {r.stderr.decode('utf-8', 'replace')[-300:]}"
+        assert b"define" in r.stdout, r.stdout[:200]
+        assert r.stdout == _ref_ir(hi), "包内模块: 自举镜与参考实现的 IR 不一致"
+
+
+@test
+def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
+    """开发 checkout 的商店 (`<CWD>/lompi/store`, 发布包里是 `share/lompi/store`)。
+
+    仓里的 store 不摆 `share/` 那一层 —— 那条路只有装出来的前缀才有。没有这一条,
+    在本仓写 `use vec` 一律"找不到或有歧义", 而"本仓能不能用 std"正是它要回答的问题。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        pkg = proj / "lompi" / "store" / "geom" / "0.1.0"
+        pkg.mkdir(parents=True)
+        (pkg / "area.lomt").write_bytes(PKG_AREA.encode())
+        (pkg / "geom.lomt").write_bytes(PKG_ENTRY.format(n="geom").encode())
+        hi = proj / "hi.lomt"
+        hi.write_bytes(USE_AREA.encode())
+        r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
+        assert r.returncode == 0, \
+            f"开发 checkout 的商店那层没解析出来: {r.stderr.decode('utf-8', 'replace')[-300:]}"
+        # 参考实现那一侧**锚点是 `root` 参数**（仓内跑时是仓根），自举镜那一侧是 **CWD** ——
+        # 仓内两者同一个目录，这个夹具刻意把它们都指到 `proj`，否则量的是"两个锚点不同"
+        # 而不是"这层解析不成立"（第一次就是拿 `_ref_ir` 比，比出来的是锚点差异）。
+        mod = lomentc.load(hi)
+        want = lomentc.emit_llvm(mod, proj,
+                                 lomentc.resolve_deps(mod, proj, hi.parent, entry=hi)).encode()
+        assert r.stdout == want, "商店包内模块: 自举镜与参考实现的 IR 不一致"
+
+
 @test
 def test_selfhost_resolves_from_the_toolchains_own_store():
     """名字形式第 2 层: `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`。

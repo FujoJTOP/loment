@@ -202,7 +202,7 @@ pub fn hxd_ascii_needed(n: u32) -> u32 {
 
 // ---------------------------------------------------------------- 自检
 
-fn eqn(out: ptr, n: u32, want: str) -> bool {
+fn xd_eqn(out: ptr, n: u32, want: str) -> bool {
     if n != str_len(want) {
         return false;
     }
@@ -221,7 +221,7 @@ fn test_hexdump_line_one_byte() -> bool {
     let out: ptr = alloc(128);
     put(d, "A");
     let n: u32 = hxd_line(d, 0, 1, 0, out, 0) - 0;
-    return n == 63 && eqn(out, n, "00000000  41                                                |A|");
+    return n == 63 && xd_eqn(out, n, "00000000  41                                                |A|");
 }
 
 fn test_hexdump_line_full_sixteen() -> bool {
@@ -231,7 +231,7 @@ fn test_hexdump_line_full_sixteen() -> bool {
     put(d, "0123456789ABCDEF");
     let n: u32 = hxd_line(d, 0, 16, 0, out, 0);
     return n == 78
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
 }
 
 fn test_hexdump_line_fifteen_pads_hex_area() -> bool {
@@ -241,7 +241,7 @@ fn test_hexdump_line_fifteen_pads_hex_area() -> bool {
     put(d, "0123456789abcde");
     let n: u32 = hxd_line(d, 0, 15, 0, out, 0);
     return n == 77
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|");
 }
 
 fn test_hexdump_line_high_and_control_are_dots() -> bool {
@@ -259,7 +259,7 @@ fn test_hexdump_line_high_and_control_are_dots() -> bool {
     put(((d as u64) + 8) as ptr, "hi!");
     let n: u32 = hxd_line(d, 0, 11, 0, out, 0);
     return n == 73
-        && eqn(out, n, "00000000  00 1f 20 41 7e 7f 80 ff  68 69 21                 |.. A~...hi!|");
+        && xd_eqn(out, n, "00000000  00 1f 20 41 7e 7f 80 ff  68 69 21                 |.. A~...hi!|");
 }
 
 fn test_hexdump_ascii_boundary_chars() -> bool {
@@ -267,13 +267,13 @@ fn test_hexdump_ascii_boundary_chars() -> bool {
     let d: ptr = alloc(16);
     let out: ptr = alloc(128);
     store8(d, 0, 31 as u8);
-    let a: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  1f                                                |.|");
+    let a: bool = xd_eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  1f                                                |.|");
     store8(d, 0, 32 as u8);
-    let b: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  20                                                | |");
+    let b: bool = xd_eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  20                                                | |");
     store8(d, 0, 126 as u8);
-    let c: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7e                                                |~|");
+    let c: bool = xd_eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7e                                                |~|");
     store8(d, 0, 127 as u8);
-    let e: bool = eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7f                                                |.|");
+    let e: bool = xd_eqn(out, hxd_line(d, 0, 1, 0, out, 0), "00000000  7f                                                |.|");
     return a && b && c && e;
 }
 
@@ -282,7 +282,7 @@ fn test_hexdump_dump_empty_is_trailer_only() -> bool {
     let out: ptr = alloc(64);
     let d: ptr = alloc(16);
     let n: u32 = hxd_dump(d, 0, 0, out, 0);
-    return n == 9 && eqn(out, n, "00000000\n");
+    return n == 9 && xd_eqn(out, n, "00000000\n");
 }
 
 fn test_hexdump_dump_one_byte() -> bool {
@@ -290,7 +290,7 @@ fn test_hexdump_dump_one_byte() -> bool {
     let d: ptr = alloc(16);
     put(d, "A");
     let n: u32 = hxd_dump(d, 0, 1, out, 0);
-    return n == 73 && eqn(out, n, "00000000  41                                                |A|\n00000001\n");
+    return n == 73 && xd_eqn(out, n, "00000000  41                                                |A|\n00000001\n");
 }
 
 fn test_hexdump_dump_sixteen_final_offset() -> bool {
@@ -299,7 +299,7 @@ fn test_hexdump_dump_sixteen_final_offset() -> bool {
     put(d, "0123456789ABCDEF");
     let n: u32 = hxd_dump(d, 0, 16, out, 0);
     return n == 88
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010\n");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010\n");
 }
 
 fn test_hexdump_dump_seventeen_two_rows() -> bool {
@@ -309,7 +309,7 @@ fn test_hexdump_dump_seventeen_two_rows() -> bool {
     put(d, "0123456789ABCDEFZ");
     let n: u32 = hxd_dump(d, 0, 17, out, 0);
     return n == 152
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010  5a                                                |Z|\n00000011\n");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|\n00000010  5a                                                |Z|\n00000011\n");
 }
 
 fn test_hexdump_dump_fifteen_uses_lowercase_hex() -> bool {
@@ -318,7 +318,7 @@ fn test_hexdump_dump_fifteen_uses_lowercase_hex() -> bool {
     put(d, "0123456789abcde");
     let n: u32 = hxd_dump(d, 0, 15, out, 0);
     return n == 87
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|\n0000000f\n");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65     |0123456789abcde|\n0000000f\n");
 }
 
 fn test_hexdump_bar_column_is_fixed() -> bool {
@@ -344,7 +344,7 @@ fn test_hexdump_offset_is_eight_digits() -> bool {
     store8(d, 0, 65 as u8);
     let n1: u32 = hxd_line(d, 0, 1, 16, out, 0);
     let ok1: bool = n1 == 63 && load8(out, 0) == 48 && load8(out, 6) == 49 && load8(out, 7) == 48
-        && eqn(out, n1, "00000010  41                                                |A|");
+        && xd_eqn(out, n1, "00000010  41                                                |A|");
     let n2: u32 = hxd_line(d, 0, 1, 4294967295, out, 0);
     return ok1 && n2 == 63 && load8(out, 0) == 102 && load8(out, 7) == 102;
 }
@@ -380,7 +380,7 @@ fn test_hexdump_line_caps_at_sixteen() -> bool {
     put(d, "0123456789ABCDEFZYXW");
     let n: u32 = hxd_line(d, 0, 20, 0, out, 0);
     return n == 78
-        && eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
+        && xd_eqn(out, n, "00000000  30 31 32 33 34 35 36 37  38 39 41 42 43 44 45 46  |0123456789ABCDEF|");
 }
 
 fn test_hexdump_no_cr_only_lf() -> bool {

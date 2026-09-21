@@ -2380,6 +2380,10 @@ LOCAL_DEPS = "deps"
 #: 有它, 装在用户机器上 (没有仓库、也没有 `deps/`) 时 `use std` 才命中得了 ——
 #: 用户 2026-09-16 定: "像 python/java 那样, 简单方便"。
 TOOLCHAIN_STORE = ("share", "lompi", "store")
+#: **开发 checkout** 里 store 的位置 —— `<仓根>/lompi/store`。发布包把它拷到
+#: `share/lompi/store` 去, 所以那条路 (`TOOLCHAIN_STORE`) 才是给装出来的前缀用的;
+#: 这一条是给"在本仓里编译"用的 (见 `store_roots`)。
+STORE_IN_REPO = Path("lompi") / "store"
 #: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算)。
 #: **超限报错, 绝不静默丢** —— 自举镜的暂存区原先按 8 条布局, 超出的直接丢掉, 而参考
 #: 实现无上限: 同一份源码两个实现给出**不同的单元** (2026-09-16 发现, 语料里没有超过
@@ -2461,22 +2465,154 @@ def _store_pick(store: Path, name: str, ext: str) -> Path | None:
     return pkg / vers[0] / f"{name}{ext}"
 
 
+def _pkg_module_hits(base: Path | None, name: str, exts: tuple[str, ...],
+                     versioned: bool) -> list[Path]:
+    """`<名字><后缀>` 作为**包内模块**的候选: 遍历 `<base>/*/` 下每一个包。
+
+    包有两种布局, 由 `versioned` 选一种 (与 `deps/` 和 store 各自的形状对齐):
+
+      * `versioned=False` —— `<base>/<包>/<名字><后缀>` (项目本地 `deps/`, lompi 落点)
+      * `versioned=True`  —— `<base>/<包>/<版本>/<名字><后缀>` (随包 store)
+
+    **为什么要这一层**: 包是"一个目录", 目录里除了与包同名的那个入口模块, 还有别的模块
+    (`std/vec.lomt`、`host/fs.lomt`)。没有这一层, 包内模块**只有一个入口够得着** ——
+    而那个入口把整包拖进同一个单元, 于是 128 个模块挤在**平的**发射符号空间里 (冲突)
+    且编译代价按模块数的超线性涨 (实测自举侧 n=64 已 187 秒)。按模块取是唯一实用的路。
+
+    多版本包**跳过**: 那是包入口那一层报的事 (编译器不做版本选择), 这里再报一次只会
+    把同一件事说两遍。
+    """
+    if base is None or not base.is_dir():
+        return []
+    hits: list[Path] = []
+    for pkg in sorted(p for p in base.iterdir() if p.is_dir()):
+        d = pkg
+        if versioned:
+            vers = sorted(v for v in pkg.iterdir() if v.is_dir())
+            if len(vers) != 1:
+                continue
+            d = vers[0]
+        for e in exts:
+            if (d / f"{name}{e}").exists():
+                hits.append(d / f"{name}{e}")
+                break
+    return hits
+
+
+def store_roots(root: Path, tool_dir: Path | None) -> list[Path]:
+    """随包自带 store 的候选根, **按序** (第一个有命中的赢, 与层内"先命中先用"同规矩):
+
+      1. `<工具目录>/../share/lompi/store` —— **装出来的前缀**。`bin/loment` 旁边就是
+         `share/lompi/store/`, 这是发布包的形状 (`loment_dist.STORE_DIR`)。
+      2. `<仓根>/lompi/store` —— **开发 checkout**。仓里 store 直接在 `lompi/` 下, 不摆
+         `share/` 那一层 —— 那一层是打包时拷出来的。没有这一条, 在本仓里写 `use vec`
+         一律 E018, 而"本仓能不能用 std"正是加它要回答的问题。
+
+    两条都**必须存在**才进候选 (不存在就跳过), 所以发布包里第 2 条自然落空。
+    """
+    out: list[Path] = []
+    if tool_dir is not None:
+        out.append(tool_dir.parent.joinpath(*TOOLCHAIN_STORE))
+    out.append(root / STORE_IN_REPO)
+    seen: set[Path] = set()
+    uniq: list[Path] = []
+    for d in out:
+        try:
+            k = d.resolve()
+        except OSError:
+            continue
+        if k in seen or not d.is_dir():
+            continue
+        seen.add(k)
+        uniq.append(d)
+    return uniq
+
+
+def _in_store_root(importer: Path | None, stores: list[Path]) -> bool:
+    """导入方这个文件**是不是住在商店的包里**。见 `resolve_name` 的 §归属。"""
+    if importer is None:
+        return False
+    try:
+        p = Path(importer).resolve()
+    except OSError:
+        return False
+    for s in stores:
+        try:
+            p.relative_to(s.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
 def resolve_name(name: str, root: Path, proj: Path | None = None,
-                 tool_dir: Path | None = None, ext: str = DEFAULT_L1_EXT) -> Path:
+                 tool_dir: Path | None = None, ext: str = DEFAULT_L1_EXT,
+                 importer: Path | None = None) -> Path:
     """`use <名字>` -> 真实文件。**按层搜, 先命中先用** (像 PYTHONPATH):
 
       1. `<项目根>/deps/<名字>/<名字><后缀>`  —— 项目本地 (lompi materialize 的落点)
-      2. `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字><后缀>`  —— 随包自带
-      3. 内置四根 `<仓根>/<根>/<名字><后缀>`  —— **这一层命中必须唯一**
+      1b. `<项目根>/deps/<包>/<名字><后缀>`   —— 项目本地的**包内模块**
+      2. 内置四根 `<仓根>/<根>/<名字><后缀>`  —— **这一层命中必须唯一**
+      3. `<store>/<名字>/<版本>/<名字><后缀>`  —— 随包自带 (`store_roots`: 前缀的
+         `share/lompi/store`, 或开发 checkout 的 `<仓根>/lompi/store`)
+      3b. `<store>/<包>/<版本>/<名字><后缀>`   —— 随包自带的**包内模块**
+
+    **§归属 (2026-09-20): 第 2 层与第 3 层谁在前面, 看导入方自己住在哪边。**
+
+    这是加包内模块那一层时撞出来的, 不是设计的: 商店里同时存在 `mem.lomt`(std 包) 与
+    `loment/lib/mem.lomt`(工具链自带), `interp.lomt`(std 包) 与
+    `loment/selfhost/interp.lomt`(编译器源码)。**两个方向都撞**:
+
+      * 商店放前面 -> `loment/selfhost/comefor.lomt` 的 `use interp` 拿到 std 那份,
+        而那份没有 `CT_HEAP_BYTES`, 驱动直接编不过;
+      * 四根放前面 -> `store/host/0.1.0/stat.lomt` 的 `use mem` 拿到 `loment/lib/mem.lomt`,
+        而那份没有 `mem_load64`, host 包编不过。
+
+    所以规矩是**"在谁的库里, 先用谁的名字"**: 商店里的文件先在商店里找, 其余文件先在
+    四根里找。两边各自内部自洽, 而"用户项目里的 `use`"走的是"先四根"那条 (与加这一层
+    之前**完全一致** —— 这一层没有改动任何既有解析结果, 它只补上了原先够不着的那些名字)。
+
+    1b/3b 这两层**命中多处必须报错**, 理由与第 2 层同 —— 两个包里都有 `<名字>.lomt` 时
+    "先搜到哪个"不能变成隐藏语义。
 
     后缀来自 `loment.conf`（`source_ext_of`），默认 `.lomt`；每层都按 `_ext_chain` 的顺序
     试（自定义后缀优先，再兜默认），所以项目换后缀不会把工具链自带的模块弄丢。
-
-    唯一性只管第 3 层, 而且"找不到"要四层全空才报。这样: 项目本地有 `deps/std`、仓库里
-    也有 `lib/std` 时不会假报歧义 (前两层先命中就停), 而仓库自己的四根仍保留"名字不许
-    重"那条纪律 —— 它抓的是**作者写错**, 不是使用者选错。
     """
     exts = _ext_chain(ext)
+    stores = store_roots(root, tool_dir)
+
+    def in_store() -> Path | None:
+        for store in stores:
+            for e in exts:
+                f = _store_pick(store, name, e)
+                if f is not None:
+                    if not f.exists():
+                        raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}{e}: {f}")
+                    return f
+        for store in stores:
+            h = _pkg_module_hits(store, name, exts, versioned=True)
+            if len(h) == 1:
+                return h[0]
+            if len(h) > 1:
+                rel = ", ".join(x.as_posix() for x in h)
+                raise LomError(1, 1, f"名字导入有歧义 {name}: 自带的库里多个包含这个模块 —— "
+                                     f"命中 {rel} 多处")
+        return None
+
+    def in_roots() -> Path | None:
+        hits = [root / rel / f"{name}{e}" for rel in NAME_ROOTS for e in exts
+                if (root / rel / f"{name}{e}").exists()]
+        # 同一个根里 `.foo` 与 `.lomt` 都在时**只算一次命中** —— 兜底那条不该把"唯一性"
+        # 顶成假歧义 (那是"这份源码该用哪个后缀"的问题, 跟"两个根里都有"是两回事)。
+        uniq: dict[Path, Path] = {}
+        for h in hits:
+            uniq.setdefault(h.parent, h)
+        hits = sorted(uniq.values())
+        if len(hits) > 1:
+            rel = ", ".join(str(h.relative_to(root)).replace("\\", "/") for h in hits)
+            raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
+        return hits[0] if hits else None
+
     if proj is not None:
         d = proj / LOCAL_DEPS / name
         if d.is_dir():
@@ -2485,31 +2621,22 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
                     return d / f"{name}{e}"
             raise LomError(1, 1, f"依赖 {name} 里没有同名模块 {name}{ext} —— "
                                  f"`use <名字>` 指的是**包内与包同名的那个模块**")
-    if tool_dir is not None:
-        store = tool_dir.parent.joinpath(*TOOLCHAIN_STORE)
-        for e in exts:
-            f = _store_pick(store, name, e)
-            if f is not None:
-                if not f.exists():
-                    raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}{e}: {f}")
-                return f
-    hits = [root / rel / f"{name}{e}" for rel in NAME_ROOTS for e in exts
-            if (root / rel / f"{name}{e}").exists()]
-    # 同一个根里 `.foo` 与 `.lomt` 都在时**只算一次命中** —— 兜底那条不该把"唯一性"顶成
-    # 假歧义 (那是"这份源码该用哪个后缀"的问题, 跟"两个根里都有这个名字"是两回事)。
-    uniq: dict[Path, Path] = {}
-    for h in hits:
-        uniq.setdefault(h.parent, h)
-    hits = sorted(uniq.values())
-    if not hits:
-        where = (f"项目本地 {proj / LOCAL_DEPS}、工具链自带的库、以及内置根 "
-                 f"{', '.join(NAME_ROOTS)}" if proj is not None
-                 else f"内置根 {', '.join(NAME_ROOTS)}")
-        raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}{ext}")
-    if len(hits) > 1:
-        rel = ", ".join(str(h.relative_to(root)).replace("\\", "/") for h in hits)
-        raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
-    return hits[0]
+        pk = _pkg_module_hits(proj / LOCAL_DEPS, name, exts, versioned=False)
+        if len(pk) == 1:
+            return pk[0]
+        if len(pk) > 1:
+            rel = ", ".join(str(h.relative_to(proj)).replace("\\", "/") for h in pk)
+            raise LomError(1, 1, f"名字导入有歧义 {name}: 项目本地有多个包含这个模块 —— "
+                                 f"命中 {rel} 多处")
+    order = ((in_store, in_roots) if _in_store_root(importer, stores) else (in_roots, in_store))
+    for pick in order:
+        got = pick()
+        if got is not None:
+            return got
+    where = (f"项目本地 {proj / LOCAL_DEPS} (含包内模块)、内置根 {', '.join(NAME_ROOTS)}、"
+             f"以及工具链自带的库 (含包内模块)" if proj is not None
+             else f"内置根 {', '.join(NAME_ROOTS)} 与工具链自带的库")
+    raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}{ext}")
 
 
 def prescan_switches(entry: Path, root: Path, proj: Path | None,
@@ -2639,7 +2766,7 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
         # `is_addin` 跟着走 —— 它决定 `check()` 里那份模块算"库"还是算"开关设定"。
         paths: list[tuple[str, bool]] = (
             [(p, False) for p in m.imports]
-            + [(str(resolve_name(n, root, proj, tool_dir, ext)), False)
+            + [(str(resolve_name(n, root, proj, tool_dir, ext, importer=cur_base)), False)
                for n in m.name_imports])
         if depth == 0 and addin_paths:
             # `addin` 目标**只在根单元这一层**展开：`addin` 是根单元专属语法，库里的

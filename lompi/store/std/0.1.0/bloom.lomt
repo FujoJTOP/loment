@@ -13,7 +13,7 @@
 //   [4..8]  k      每个元素置几个位
 //   位数组: 偏移 8 起, 按字节打包。**低位在前** —— 位 i 在字节 i/8 的第 (i%8) 位
 //           (与 std/bitset.lomt 同一约定, 这里自带三行读写是因为 bitset 的接口不带偏移)。
-// 装 nbits 位要 8 + ceil(nbits/8) 字节 —— 用 bl_bytes。k 不影响大小, 只影响行为。
+// 装 nbits 位要 8 + ceil(nbits/8) 字节 —— 用 bm_bytes。k 不影响大小, 只影响行为。
 //
 // k 个哈希从**两个** 64 位哈希派生: idx_i = (h1 + i*h2) mod nbits, i = 0..k-1。
 // 这是 Kirsch-Mitzenmacher 的双哈希方案 —— 它证明了这样构造出的 k 个哈希, 其误判率
@@ -35,7 +35,7 @@ use "hash.lomt"
 pub const BL_HDR: u32 = 8;
 
 /// 装 nbits 位 (k 个哈希) 要多少字节。k 在这里只是为了让签名读起来完整。
-pub fn bl_bytes(nbits: u32, k: u32) -> u32 {
+pub fn bm_bytes(nbits: u32, k: u32) -> u32 {
     let nb: u32 = (nbits + 7) / 8;
     return BL_HDR + nb;
 }
@@ -164,13 +164,13 @@ pub fn bl_clear(ws: ptr) {
 
 fn test_bl_bytes_layout() -> bool {
     // 8 + ceil(nbits/8); k 不改变大小。
-    return bl_bytes(0, 4) == 8 && bl_bytes(8, 4) == 9 && bl_bytes(9, 4) == 10
-        && bl_bytes(10240, 7) == 8 + 1280 && bl_bytes(10240, 1) == bl_bytes(10240, 7);
+    return bm_bytes(0, 4) == 8 && bm_bytes(8, 4) == 9 && bm_bytes(9, 4) == 10
+        && bm_bytes(10240, 7) == 8 + 1280 && bm_bytes(10240, 1) == bm_bytes(10240, 7);
 }
 
 fn test_bl_empty_reports_nothing() -> bool {
     // 空过滤器对任何元素都必须说"不在" (一条也不能置位)。
-    let ws: ptr = alloc(bl_bytes(1024, 4));
+    let ws: ptr = alloc(bm_bytes(1024, 4));
     bl_init(ws, 1024, 4);
     return bl_test(ws, 0) == false && bl_test(ws, 1) == false
         && bl_test(ws, 123456789) == false && bl_count(ws) == 0
@@ -178,7 +178,7 @@ fn test_bl_empty_reports_nothing() -> bool {
 }
 
 fn test_bl_add_then_test() -> bool {
-    let ws: ptr = alloc(bl_bytes(1024, 4));
+    let ws: ptr = alloc(bm_bytes(1024, 4));
     bl_init(ws, 1024, 4);
     bl_add(ws, 42);
     bl_add(ws, 7);
@@ -187,7 +187,7 @@ fn test_bl_add_then_test() -> bool {
 
 fn test_bl_no_false_negatives() -> bool {
     // 布隆的**硬保证**: 加进去的元素永远不会被报成"不在"。这条不成立整个结构就没意义。
-    let ws: ptr = alloc(bl_bytes(16384, 7));
+    let ws: ptr = alloc(bm_bytes(16384, 7));
     bl_init(ws, 16384, 7);
     let i: u64 = 0;
     while i < 1000 {
@@ -207,7 +207,7 @@ fn test_bl_no_false_negatives() -> bool {
 
 fn test_bl_zero_key_and_duplicates() -> bool {
     // 元素 0 与"空"要分得开; 重复加入同一个元素不能出错也不能改变结果。
-    let ws: ptr = alloc(bl_bytes(1024, 5));
+    let ws: ptr = alloc(bm_bytes(1024, 5));
     bl_init(ws, 1024, 5);
     bl_add(ws, 0);
     bl_add(ws, 0);
@@ -217,30 +217,30 @@ fn test_bl_zero_key_and_duplicates() -> bool {
 
 fn test_bl_deterministic() -> bool {
     // 同一个元素每次置的位必须一样 (哈希里混了运行期状态就会在这里挂)。
-    let a: ptr = alloc(bl_bytes(2048, 6));
-    let b: ptr = alloc(bl_bytes(2048, 6));
+    let a: ptr = alloc(bm_bytes(2048, 6));
+    let b: ptr = alloc(bm_bytes(2048, 6));
     bl_init(a, 2048, 6);
     bl_init(b, 2048, 6);
     bl_add(a, 999983);
     bl_add(b, 999983);
-    return mem_eq(a, 0, b, 0, bl_bytes(2048, 6)) && bl_test(a, 999983)
+    return mem_eq(a, 0, b, 0, bm_bytes(2048, 6)) && bl_test(a, 999983)
         && bl_test(b, 999983);
 }
 
 fn test_bl_distinct_elements_set_distinct_bits() -> bool {
     // 不同元素不能置成同一组位 (哈希退化成常数会在这里挂)。
-    let a: ptr = alloc(bl_bytes(4096, 4));
-    let b: ptr = alloc(bl_bytes(4096, 4));
+    let a: ptr = alloc(bm_bytes(4096, 4));
+    let b: ptr = alloc(bm_bytes(4096, 4));
     bl_init(a, 4096, 4);
     bl_init(b, 4096, 4);
     bl_add(a, 111);
     bl_add(b, 222);
-    return mem_eq(a, 0, b, 0, bl_bytes(4096, 4)) == false;
+    return mem_eq(a, 0, b, 0, bm_bytes(4096, 4)) == false;
 }
 
 fn test_bl_k_one_sets_one_bit_per_add() -> bool {
     // k=1 时每个**新**元素只增加一个置位 (除非撞上已置的位)。
-    let ws: ptr = alloc(bl_bytes(4096, 1));
+    let ws: ptr = alloc(bm_bytes(4096, 1));
     bl_init(ws, 4096, 1);
     bl_add(ws, 1);
     let c1: u32 = bl_count(ws);
@@ -252,7 +252,7 @@ fn test_bl_k_one_sets_one_bit_per_add() -> bool {
 fn test_bl_fill_ratio_matches_theory() -> bool {
     // 插入 1000 个, k=7, m=10240。理论置位比例 = 1 - e^(-kn/m) ≈ 49.5%。
     // 落在这个带上才说明 k 个哈希确实在散开 (而不是反复打同一批位)。
-    let ws: ptr = alloc(bl_bytes(10240, 7));
+    let ws: ptr = alloc(bm_bytes(10240, 7));
     bl_init(ws, 10240, 7);
     let i: u64 = 0;
     while i < 1000 {
@@ -268,7 +268,7 @@ fn test_bl_false_positive_rate() -> bool {
     // k=7, m=10240, n=1000 -> 理论 p ≈ 0.73%, 即查 2000 个不在集合里的元素, 期望约 15 个误判。
     // 断言 <5% (100 个) —— 既抓"哈希坏了导致误判爆表", 也抓"过滤器退化成恒真"。
     // 下界 >=1 是为了防止把 bl_test 写成恒假 (那样误判率会是 0, 假绿)。
-    let ws: ptr = alloc(bl_bytes(10240, 7));
+    let ws: ptr = alloc(bm_bytes(10240, 7));
     bl_init(ws, 10240, 7);
     let i: u64 = 0;
     while i < 1000 {
@@ -300,7 +300,7 @@ fn test_bl_false_positive_rate() -> bool {
 fn test_bl_fill_ratio_grows_then_saturates() -> bool {
     // 注意: bl_fill_ratio 是**百分比**整数, 稀疏时会被截断成 0 (512 位里置 3 位 = 0%)。
     // 所以"有没有置位"要看 bl_count, 比例只在够满时才有分辨力。
-    let ws: ptr = alloc(bl_bytes(512, 3));
+    let ws: ptr = alloc(bm_bytes(512, 3));
     bl_init(ws, 512, 3);
     let r0: u32 = bl_fill_ratio(ws);
     let c0: u32 = bl_count(ws);
@@ -317,7 +317,7 @@ fn test_bl_fill_ratio_grows_then_saturates() -> bool {
 
 fn test_bl_data_strings() -> bool {
     // 任意字节串也要能用 (元素不一定是 u64)。
-    let ws: ptr = alloc(bl_bytes(4096, 4));
+    let ws: ptr = alloc(bm_bytes(4096, 4));
     bl_init(ws, 4096, 4);
     bl_add_data(ws, str_ptr("apple"), 0, str_len("apple"));
     bl_add_data(ws, str_ptr("banana"), 0, str_len("banana"));
@@ -329,7 +329,7 @@ fn test_bl_data_strings() -> bool {
 }
 
 fn test_bl_clear() -> bool {
-    let ws: ptr = alloc(bl_bytes(1024, 5));
+    let ws: ptr = alloc(bm_bytes(1024, 5));
     bl_init(ws, 1024, 5);
     bl_add(ws, 31415);
     bl_clear(ws);
@@ -339,8 +339,8 @@ fn test_bl_clear() -> bool {
 
 fn test_bl_zero_params_inert() -> bool {
     // nbits=0 或 k=0: 任何查询都说"不在", 且不越界。
-    let a: ptr = alloc(bl_bytes(0, 4));
-    let b: ptr = alloc(bl_bytes(64, 0));
+    let a: ptr = alloc(bm_bytes(0, 4));
+    let b: ptr = alloc(bm_bytes(64, 0));
     bl_init(a, 0, 4);
     bl_init(b, 64, 0);
     bl_add(a, 1);
@@ -352,8 +352,8 @@ fn test_bl_zero_params_inert() -> bool {
 fn test_bl_more_bits_fewer_false_positives() -> bool {
     // 同样的插入量, 位数组大 10 倍, 误判必须**严格更少**。
     // 这是"位数组换精度"这个权衡的直接验证。
-    let small: ptr = alloc(bl_bytes(1024, 5));
-    let big: ptr = alloc(bl_bytes(10240, 5));
+    let small: ptr = alloc(bm_bytes(1024, 5));
+    let big: ptr = alloc(bm_bytes(10240, 5));
     bl_init(small, 1024, 5);
     bl_init(big, 10240, 5);
     let i: u64 = 0;

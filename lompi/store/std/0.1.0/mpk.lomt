@@ -664,7 +664,7 @@ pub fn mpk_map_get(d: ptr, so: u32, n: u32, i: u32, key: str, key_out: ptr) -> u
 
 // ---------------------------------------------------------------- 自检
 
-fn hv(c: u32) -> u32 {
+fn m_hv(c: u32) -> u32 {
     if c >= 48 && c <= 57 {
         return c - 48;
     }
@@ -675,12 +675,12 @@ fn hv(c: u32) -> u32 {
 }
 
 /// 把十六进制字面量解成字节写进 out, 返回字节数。自检里写向量比一串 store8 清楚得多。
-fn hx(out: ptr, s: str) -> u32 {
+fn m_hx(out: ptr, s: str) -> u32 {
     let n: u32 = str_len(s);
     let k: u32 = 0;
     while k < n / 2 {
-        let hi: u32 = hv(str_byte(s, k * 2));
-        let lo: u32 = hv(str_byte(s, k * 2 + 1));
+        let hi: u32 = m_hv(str_byte(s, k * 2));
+        let lo: u32 = m_hv(str_byte(s, k * 2 + 1));
         store8(out, k, ((hi << 4) | lo) as u8);
         k = k + 1;
     }
@@ -690,7 +690,7 @@ fn hx(out: ptr, s: str) -> u32 {
 fn test_mpk_fixint_and_small() -> bool {
     let d: ptr = alloc(64);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "007fcc80");
+    let n: u32 = m_hx(d, "007fcc80");
     let a: u64 = mpk_u64(d, 0, n, 0, ok);
     let oka: bool = a == 0 && mem_load32(ok, 0) == 1;
     let b: u64 = mpk_u64(d, 0, n, 1, ok);
@@ -702,7 +702,7 @@ fn test_mpk_fixint_and_small() -> bool {
 fn test_mpk_uint_widths() -> bool {
     let d: ptr = alloc(64);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "cd0100ce00010000cfffffffffffffffff");
+    let n: u32 = m_hx(d, "cd0100ce00010000cfffffffffffffffff");
     let a: u64 = mpk_u64(d, 0, n, 0, ok);
     let ok1: bool = a == 256 && mem_load32(ok, 0) == 1;
     let b: u64 = mpk_u64(d, 0, n, 3, ok);
@@ -715,7 +715,7 @@ fn test_mpk_negative_fixint() -> bool {
     // 0xff 是负 fixint = -1; 0xe0 = -32
     let d: ptr = alloc(64);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "ffe0");
+    let n: u32 = m_hx(d, "ffe0");
     let zero: i64 = 0;
     let a: i64 = mpk_i64(d, 0, n, 0, ok);
     let ok1: bool = a == (zero - 1) && mem_load32(ok, 0) == 1;
@@ -728,7 +728,7 @@ fn test_mpk_int_widths() -> bool {
     let ok: ptr = alloc(8);
     let zero: i64 = 0;
     // d0 80 = int8 -128; d1 ff7f = int16 -129; d3 <i64min>
-    let n: u32 = hx(d, "d080d1ff7fd38000000000000000");
+    let n: u32 = m_hx(d, "d080d1ff7fd38000000000000000");
     let a: i64 = mpk_i64(d, 0, n, 0, ok);
     let ok1: bool = a == (zero - 128) && mem_load32(ok, 0) == 1;
     let b: i64 = mpk_i64(d, 0, n, 2, ok);
@@ -743,10 +743,10 @@ fn test_mpk_int32_sign_extension() -> bool {
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
     let zero: i64 = 0;
-    let n: u32 = hx(d, "d2ffffffff");
+    let n: u32 = m_hx(d, "d2ffffffff");
     let a: i64 = mpk_i64(d, 0, n, 0, ok);
     let ok1: bool = a == (zero - 1) && mem_load32(ok, 0) == 1;
-    let n2: u32 = hx(d, "d27fffffff");
+    let n2: u32 = m_hx(d, "d27fffffff");
     let b: i64 = mpk_i64(d, 0, n2, 0, ok);
     return ok1 && b == 2147483647;
 }
@@ -754,7 +754,7 @@ fn test_mpk_int32_sign_extension() -> bool {
 fn test_mpk_u64_rejects_negative() -> bool {
     let d: ptr = alloc(8);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "ff");
+    let n: u32 = m_hx(d, "ff");
     mpk_u64(d, 0, n, 0, ok);
     return mem_load32(ok, 0) == 0;
 }
@@ -762,7 +762,7 @@ fn test_mpk_u64_rejects_negative() -> bool {
 fn test_mpk_nil_bool() -> bool {
     let d: ptr = alloc(8);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "c0c2c3");
+    let n: u32 = m_hx(d, "c0c2c3");
     let a: bool = mpk_is_nil(d, 0, n, 0);
     let f: bool = mpk_bool(d, 0, n, 1, ok);
     let okf: bool = f == false && mem_load32(ok, 0) == 1;
@@ -775,11 +775,11 @@ fn test_mpk_float64_bits() -> bool {
     // cb 3ff0000000000000 = 1.0
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "cb3ff0000000000000");
+    let n: u32 = m_hx(d, "cb3ff0000000000000");
     let v: u64 = mpk_f64bits(d, 0, n, 0, ok);
     let ok1: bool = mem_load32(ok, 0) == 1 && v == 4607182418800017408;
     // 0.1 是最能暴露"字节序搞错"的那个值
-    let n2: u32 = hx(d, "cb3fb999999999999a");
+    let n2: u32 = m_hx(d, "cb3fb999999999999a");
     let v2: u64 = mpk_f64bits(d, 0, n2, 0, ok);
     return ok1 && v2 == 4591870180066957722;
 }
@@ -787,7 +787,7 @@ fn test_mpk_float64_bits() -> bool {
 fn test_mpk_float32_bits() -> bool {
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "ca3f800000");
+    let n: u32 = m_hx(d, "ca3f800000");
     let v: u32 = mpk_f32bits(d, 0, n, 0, ok);
     let ok1: bool = mem_load32(ok, 0) == 1 && v == 1065353216;
     // float32 **不**冒充 float64
@@ -799,7 +799,7 @@ fn test_mpk_fixstr() -> bool {
     let d: ptr = alloc(32);
     let out: ptr = alloc(32);
     // a5 "hello"
-    let n: u32 = hx(d, "a568656c6c6f");
+    let n: u32 = m_hx(d, "a568656c6c6f");
     let L: u32 = mpk_str(d, 0, n, 0, out, 0);
     let want: str = "hello";
     return L == 5 && mem_eq(out, 0, str_ptr(want), 0, 5)
@@ -810,11 +810,11 @@ fn test_mpk_str8_and_empty() -> bool {
     let d: ptr = alloc(64);
     let out: ptr = alloc(64);
     // d9 05 "world"
-    let n: u32 = hx(d, "d905776f726c64");
+    let n: u32 = m_hx(d, "d905776f726c64");
     let L: u32 = mpk_str(d, 0, n, 0, out, 0);
     let ok1: bool = L == 5 && mem_eq(out, 0, str_ptr("world"), 0, 5);
     // a0 空字符串
-    let n2: u32 = hx(d, "a0");
+    let n2: u32 = m_hx(d, "a0");
     return ok1 && mpk_str(d, 0, n2, 0, out, 0) == 0;
 }
 
@@ -822,7 +822,7 @@ fn test_mpk_bin() -> bool {
     // c4 03 01 02 03  —— 二进制和字符串一样取, 但类型不同
     let d: ptr = alloc(16);
     let out: ptr = alloc(16);
-    let n: u32 = hx(d, "c403010203");
+    let n: u32 = m_hx(d, "c403010203");
     let L: u32 = mpk_str(d, 0, n, 0, out, 0);
     let ok1: bool = L == 3 && load8(out, 0) == 1 && load8(out, 2) == 3;
     let ok2: bool = mpk_type_at(d, 0, n, 0) == MPK_BIN;
@@ -833,7 +833,7 @@ fn test_mpk_array() -> bool {
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
     // 93 01 02 03  —— 三个元素
-    let n: u32 = hx(d, "93010203");
+    let n: u32 = m_hx(d, "93010203");
     let ok1: bool = mpk_type_at(d, 0, n, 0) == MPK_ARR && mpk_arr_len(d, 0, n, 0) == 3;
     let e1: u32 = mpk_arr_at(d, 0, n, 0, 1);
     let v: u64 = mpk_u64(d, 0, n, e1, ok);
@@ -845,7 +845,7 @@ fn test_mpk_array_nested_and_skip() -> bool {
     let d: ptr = alloc(64);
     let ok: ptr = alloc(8);
     // 92 81 a1 6b 05 90   ——  [ {"k":5}, [] ]
-    let n: u32 = hx(d, "9281a16b0590");
+    let n: u32 = m_hx(d, "9281a16b0590");
     let ok1: bool = mpk_validate(d, 0, n) && mpk_arr_len(d, 0, n, 0) == 2;
     let e0: u32 = mpk_arr_first(d, 0, n, 0);
     let key: ptr = alloc(8);
@@ -862,7 +862,7 @@ fn test_mpk_map_string_keys() -> bool {
     let key: ptr = alloc(8);
     let ok: ptr = alloc(8);
     // 82 a1 61 01 a1 62 02  ——  {"a":1,"b":2}
-    let n: u32 = hx(d, "82a16101a16202");
+    let n: u32 = m_hx(d, "82a16101a16202");
     let ok1: bool = mpk_type_at(d, 0, n, 0) == MPK_MAP && mpk_validate(d, 0, n);
     let vb: u32 = mpk_map_get(d, 0, n, 0, "b", key);
     let v: u64 = mpk_u64(d, 0, n, vb, ok);
@@ -878,7 +878,7 @@ fn test_mpk_map_integer_keys() -> bool {
     let d: ptr = alloc(64);
     let key: ptr = alloc(8);
     // 81 01 a3 6f 6e 65 —— {1: "one"}
-    let n: u32 = hx(d, "8101a36f6e65");
+    let n: u32 = m_hx(d, "8101a36f6e65");
     let ok1: bool = mpk_validate(d, 0, n);
     let k: u32 = mpk_map_first(d, 0, n, 0, key);
     let ok2: bool = mem_load32(key, 0) == 1 && mpk_type_at(d, 0, n, 1) == MPK_UINT;
@@ -891,7 +891,7 @@ fn test_mpk_ext8() -> bool {
     let d: ptr = alloc(32);
     let out: ptr = alloc(16);
     let t: ptr = alloc(8);
-    let n: u32 = hx(d, "c7047f01020304");
+    let n: u32 = m_hx(d, "c7047f01020304");
     let L: u32 = mpk_ext(d, 0, n, 0, out, 0, t);
     return L == 4 && mem_load32(t, 0) == 127 && load8(out, 0) == 1 && load8(out, 3) == 4
         && mpk_validate(d, 0, n);
@@ -901,23 +901,23 @@ fn test_mpk_fixext_widths() -> bool {
     // fixext1/2/4/8/16 的载荷长度来自**标记本身**, 没有长度字段 ——
     // 表写错的话 4/8/16 会互相串。
     //
-    // 这里每个向量用**独立缓冲**: 共用一个的话, 后面的 hx 会把前面的覆盖掉,
+    // 这里每个向量用**独立缓冲**: 共用一个的话, 后面的 m_hx 会把前面的覆盖掉,
     // 于是最后那句 validate 验的其实是最后一个向量 (写这条注释是因为我先踩了)。
     let d: ptr = alloc(64);
     let out: ptr = alloc(32);
     let t: ptr = alloc(8);
-    let a: u32 = hx(d, "d4ff01");
+    let a: u32 = m_hx(d, "d4ff01");
     let ok1: bool = mpk_ext(d, 0, a, 0, out, 0, t) == 1 && mem_load32(t, 0) == 255
         && mpk_validate(d, 0, a);
-    let b: u32 = hx(d, "d5ff0102");
+    let b: u32 = m_hx(d, "d5ff0102");
     let ok2: bool = mpk_ext(d, 0, b, 0, out, 0, t) == 2 && mpk_validate(d, 0, b);
-    let c: u32 = hx(d, "d6ff01020304");
+    let c: u32 = m_hx(d, "d6ff01020304");
     let ok3: bool = mpk_ext(d, 0, c, 0, out, 0, t) == 4 && load8(out, 3) == 4
         && mpk_validate(d, 0, c);
-    let e: u32 = hx(d, "d7ff0102030405060708");
+    let e: u32 = m_hx(d, "d7ff0102030405060708");
     let ok4: bool = mpk_ext(d, 0, e, 0, out, 0, t) == 8 && load8(out, 7) == 8
         && mpk_validate(d, 0, e);
-    let f: u32 = hx(d, "d8ff0102030405060708090a0b0c0d0e0f10");
+    let f: u32 = m_hx(d, "d8ff0102030405060708090a0b0c0d0e0f10");
     let ok5: bool = mpk_ext(d, 0, f, 0, out, 0, t) == 16 && load8(out, 15) == 16
         && mpk_validate(d, 0, f);
     return ok1 && ok2 && ok3 && ok4 && ok5;
@@ -926,13 +926,13 @@ fn test_mpk_fixext_widths() -> bool {
 fn test_mpk_validate_rejects_truncated() -> bool {
     let d: ptr = alloc(32);
     // cd 01   —— uint16 只有 1 个字节
-    let a: u32 = hx(d, "cd01");
+    let a: u32 = m_hx(d, "cd01");
     let ok1: bool = mpk_validate(d, 0, a) == false;
     // a5 68 69  —— fixstr 说 5 字节, 只给 2
-    let b: u32 = hx(d, "a56869");
+    let b: u32 = m_hx(d, "a56869");
     let ok2: bool = mpk_validate(d, 0, b) == false;
     // 92 01  —— 数组说 2 个元素, 只有 1 个
-    let c: u32 = hx(d, "9201");
+    let c: u32 = m_hx(d, "9201");
     let ok3: bool = mpk_validate(d, 0, c) == false;
     return ok1 && ok2 && ok3;
 }
@@ -940,23 +940,23 @@ fn test_mpk_validate_rejects_truncated() -> bool {
 fn test_mpk_validate_rejects_trailing_and_unknown() -> bool {
     let d: ptr = alloc(32);
     // 00 00 —— 两个值连着, 不是"一个值"
-    let a: u32 = hx(d, "0000");
+    let a: u32 = m_hx(d, "0000");
     let ok1: bool = mpk_validate(d, 0, a) == false;
     // c1 是 msgpack 里**唯一**保留不用的标记
-    let b: u32 = hx(d, "c1");
+    let b: u32 = m_hx(d, "c1");
     let ok2: bool = mpk_validate(d, 0, b) == false;
     return ok1 && ok2;
 }
 
 fn test_mpk_head_len() -> bool {
     let d: ptr = alloc(32);
-    let a: u32 = hx(d, "00");
+    let a: u32 = m_hx(d, "00");
     let ok1: bool = mpk_head_len(d, 0, a, 0) == 1;
-    let b: u32 = hx(d, "cd0100");
+    let b: u32 = m_hx(d, "cd0100");
     let ok2: bool = mpk_head_len(d, 0, b, 0) == 3;
-    let c: u32 = hx(d, "cb0000000000000000");
+    let c: u32 = m_hx(d, "cb0000000000000000");
     let ok3: bool = mpk_head_len(d, 0, c, 0) == 9;
-    let e: u32 = hx(d, "da0003");
+    let e: u32 = m_hx(d, "da0003");
     let ok4: bool = mpk_head_len(d, 0, e, 0) == 3;
     return ok1 && ok2 && ok3 && ok4;
 }
@@ -988,7 +988,7 @@ fn test_mpk_realistic_document() -> bool {
     let key: ptr = alloc(8);
     let out: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "84a2696407a47461677392a161a162a26f6bc3a5726174696fcb3fb999999999999a");
+    let n: u32 = m_hx(d, "84a2696407a47461677392a161a162a26f6bc3a5726174696fcb3fb999999999999a");
     let ok1: bool = mpk_validate(d, 0, n);
     let id: u32 = mpk_map_get(d, 0, n, 0, "id", key);
     let v: u64 = mpk_u64(d, 0, n, id, ok);
