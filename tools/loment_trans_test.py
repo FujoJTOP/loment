@@ -142,6 +142,9 @@ _EXTRA: list[tuple[str, str, object, str, dict]] = [
     # ---- 重名（Loment 没有重载）
     ("dup_fn", "int f(int x) { return x; }\nint f(int y) { return y; }\n",
      ctrans.C, ".c", {}),
+
+    # ---- 裸 `return`（不带值）：本语言的 `()` 函数没有提前退出，点名拒
+    ("void_early_return", "void f(int x) { if (x) { return; } }\n", ctrans.C, ".c", {}),
 ]
 
 
@@ -364,6 +367,8 @@ _PY_BATTERY = {
                         "        for i in range(2):\n            i = 9\n"
                         "        n = n - 1\n    return 0\n",
     "py_undeclared": "def f(a: int) -> int:\n    return zz\n",
+    # 裸 `return`（不带值）—— 本语言的 `()` 函数没有提前退出
+    "py_bare_return": "def f(a: int) -> int:\n    if a > 0:\n        return a\n    return\n",
     "py_async": "async def f(a: int) -> int:\n    return a\n",
     "py_class": "class C:\n    pass\n",
 }

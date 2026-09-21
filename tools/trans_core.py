@@ -904,7 +904,14 @@ class Emitter:
             return
         if isinstance(s, Return):
             if s.e is None:
-                self.out("return;", depth)
+                # **点名拒**：本语言的 `()` 函数**没有提前退出**这回事（`return;` 不是
+                # 合法构造 —— 参考实现报 `E19 期望表达式，得到 ';'`）。原先照发 `return;`，
+                # 于是**产出一份编不过的源**，而报出来的错指向生成出来的那一份。
+                # 与 `~` / `>>>` 同一条纪律：**能表达的就转，表达不出来的就报错**。
+                raise Unsupported(
+                    f"第 {s.line} 行: 不支持 `return;`（不带值那种）。本语言的 `()` 函数"
+                    f"**没有提前退出**——它跑到末尾就结束。把它改写成 `if`/`else` 让末尾成为"
+                    f"唯一出口，或者把函数改成有返回值并用 `return 0;`")
             else:
                 # **要的是这个函数声明的返回类型，不是写死的 `int`。**
                 # `bool positive(int x) { return x > 0; }` 里那个 `x > 0` 本来就是

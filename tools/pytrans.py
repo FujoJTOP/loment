@@ -359,8 +359,14 @@ class Emitter:
             self.out(f"{_safe(n)} = {self.ex(fake, self.vars[n])};")
             return
         if isinstance(st, ast.Return):
-            self.out("return;" if st.value is None
-                     else f"return {self.ex(st.value, self.ret)};")
+            if st.value is None:
+                # 与 `~`、`**`、`/` 同一条：本语言的 `()` 函数**没有提前退出**
+                # （`return;` 不是合法构造，参考实现报 `E19 期望表达式，得到 ';'`）。
+                raise Unsupported(
+                    f"第 {st.lineno} 行: 不支持不带值的 `return`。本语言的 `()` 函数"
+                    f"**没有提前退出**——它跑到末尾就结束。把它改写成 `if`/`else` 让末尾成为"
+                    f"唯一出口，或者把函数改成有返回值并用 `return 0`")
+            self.out(f"return {self.ex(st.value, self.ret)};")
             return
         if isinstance(st, ast.If):
             self.gap()

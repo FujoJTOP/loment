@@ -3044,7 +3044,9 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
     if k == NK_RETURN {
         let e: u32 = nd_get(mem, s, ND_A);
         if e == 0 {
-            return line_put(mem, app(eb, 0, "return;"), depth, 0);
+            // 裸 `return` —— 本语言的 `()` 函数没有提前退出（上游点名拒，见 `trans_core`）
+            let _e: u32 = em_fail(mem);
+            return 0;
         }
         // **要的是这个函数声明的返回类型，不是写死的 `int`。**
         // `bool positive(int x) { return x > 0; }` 里那个 `x > 0` 本来就是条件，
@@ -5263,7 +5265,9 @@ fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
     if k == NK_RETURN {
         let e: u32 = nd_get(mem, s, ND_A);
         if e == 0 {
-            return line_lit(mem, "return;", depth, 0);
+            // 同上：不带值的 `return` 本语言没有对应写法
+            let _u: u32 = pye_uns(mem);
+            return 0;
         }
         let o: u32 = app(eb, 0, "return ");
         let o2: u32 = pye_ex(mem, e, ld32(py, E_RET), eb, o);
