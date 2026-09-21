@@ -71,6 +71,39 @@ def test_audit_claims_match_ci():
         assert isinstance(args, list), f"{cid} 的 argv 必须是 list"
 
 
+@test
+def test_every_test_file_is_in_the_static_gate():
+    """**登记进发布清单 ≠ 接进门禁** —— 两处都要登记，这里钉住第二处。
+
+    `ci.py` 的 `STATIC_CHECKS` 是**硬编码的一个元组**（不扫目录），所以新加一份
+    `tools/*_test.py` 却漏改那里时，那份判据**随包发得出去、门禁从来不跑它** ——
+    而"整轮门禁跑过、我这边全绿"那句话在当时是**不成立**的（跑的是"我自己跑那条判据"）。
+
+    与"发布 `GLOBS` 漏了就是静默隐形"**同一个形状**，只是换了一层：
+    清单管"发不发得出去"，门禁管"跑不跑"。两处都登记，而这一条钉住两者一致。
+
+    两个方向都钉（任一侧漂了都算失败）：
+
+      * 有 `tools/<名>_test.py` 却不在 `STATIC_CHECKS` 里 -> **门禁从来不跑它**
+      * `STATIC_CHECKS` 里的名字没有对应的 `tools/<名>.py` -> 门禁跑了个不存在的
+
+    这是 2026-09-20 另一个会话（LumtUI 那条线）加自己那份判据时实测撞到的 ——
+    它登记了清单、没登记门禁，而两边都没有判据管这件事。
+    """
+    import ci
+
+    tools = Path(__file__).resolve().parent
+    have = {q.stem for q in tools.glob("*_test.py")}
+    static = set(ci.STATIC_CHECKS)
+    never_run = sorted(have - static)
+    assert not never_run, (
+        f"这些判据在 tools/ 里、也多半在发布清单里，但**门禁从来不跑**（`ci.py` 的 "
+        f"STATIC_CHECKS 是硬编码的元组）：{never_run}")
+    ghost = sorted(n for n in static if not (tools / f"{n}.py").exists())
+    assert not ghost, f"门禁里这些名字没有对应的工具文件：{ghost}"
+    print(f"      门禁登记处与文件一致：{len(have)} 份判据全在 STATIC_CHECKS 里")
+
+
 # ---------------------------------------------------------------- M55 格式化
 
 @test
