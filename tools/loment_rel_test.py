@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import contextlib
 import io
@@ -194,6 +195,42 @@ def test_lomrel_checksums_same_bytes():
         finally:
             (ROOT / out_rel).unlink(missing_ok=True)
     print("      --checksums: 清单字节 + 输出行一致")
+
+
+@test
+def test_seed_fits_lomrel_normalization_buffer():
+    """清单里最大的工件要装得进 `lomrel` 的**归一化副本** —— 越界是**静默**的，所以要有判据。
+
+    2026-09-20 实测（`docs/200` §6）：`lomrel` 的 `M_NORM` 是固定的 2 MiB，而清单里有
+    **比它大的工件**（自举种子）。越界写进紧挨着的 `M_CUR`（已装载的清单）——
+    症状不是"这个文件的哈希错"，是**它之后每一条都对不上**：486 条里从种子那一条起
+    226 条全红，而两边的**写**（`--emit`）还是逐字节相同的，所以看上去像"清单过期"。
+
+    与 `loment_genesis_test::test_seed_fits_lomelf_input_buffer` 同一个形状：
+    从 `lomrel.lomt` 里**读**上限，不另抄一份，并把余量打出来。
+    """
+    src = SRC.read_text(encoding="utf-8")
+    m = re.search(r"const NORM_CAP: u32 = (\d+);", src)
+    assert m, f"在 {SRC.name} 里找不到 `const NORM_CAP: u32 = <数>;`"
+    cap = int(m.group(1))
+    worst, worst_sz = "", 0
+    for p in _manifest_paths():
+        f = ROOT / p
+        if f.is_file() and f.stat().st_size > worst_sz:
+            worst, worst_sz = p, f.stat().st_size
+    assert worst_sz < cap, (
+        f"清单里最大的工件 {worst}（{worst_sz} B）超过 lomrel 的归一化上限 {cap} B。"
+        f"**越界不报错**，会写坏已装载的清单（症状是「后面每一条都对不上」）—— "
+        f"抬 `M_NORM` / `NORM_CAP` / `M_CUR` / `ARENA`，见 docs/200 §6")
+    print(f"      最大工件 {worst} {worst_sz} B / 归一化上限 {cap} B, 余量 {cap - worst_sz}")
+
+
+def _manifest_paths() -> list[str]:
+    """清单里点名的相对路径（**从清单里读**，与 `lomrel` 看的是同一份数据）。"""
+    import json  # noqa: PLC0415
+    d = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    files = d["files"] if isinstance(d, dict) and "files" in d else d
+    return [f["path"] for f in files] if isinstance(files, list) else list(files)
 
 
 @test

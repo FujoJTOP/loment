@@ -1,0 +1,1593 @@
+// loment/selfhost/potato.lomt — 自举侧的 **Potato v5 形式对象**发射 (docs/189 S1)
+//
+// 对照面是 `tools/lomentc.py::emit_potato`(3610 行起): 同一份源, 参考实现发的对象与这里
+// 发的必须**逐字节相同**(`tools/loment_potato_emit_test.py`)。判据不是"长得差不多" ——
+// 形式对象是**跨线契约的那一侧**(docs/147 承诺过旧版可回放), 差一个字节就是两个对象。
+//
+// ## 它读什么
+//
+// **读 token 流与开关表**, 不读源码、不重新解析。这有三条理由:
+//
+//   * 走到这里时单元**已经检查过了**(`check_arena` 返回 0 条诊断), 所以"顶层 `fn` 就是
+//     一个函数声明"这件事是检查器担保的, 不需要再判一次;
+//   * 参考实现的 `emit_potato` 也是**在 AST 上取格**, 不是重新扫源; 两边要对齐的
+//     "什么叫一个声明"就只有**深度 0**这一条;
+//   * 检查器的符号表(`chk_arena_syms`)里**没有**这一格要的锚点 —— 它按需重扫
+//     (aux 只记 `(`/`{` 的下标), 而 `generics` 要的类型形参在名字与 `{` 之间。既然
+//     两边都要回 token 流, 就**只回 token 流**, 免得维护两套声明视图。
+//
+// ## 边界: 子集之外**点名拒绝**, 绝不静默发错
+//
+// 这一格先做"单文件、非泛型、无 trait/impl"的那一片, 六条边界各有各的理由:
+//
+//   1. **`use` 来的依赖**(`imports`)—— 驱动器手上的单元是"根 + 依赖 + 预置枚举"**拼在
+//      一个** token 流里, 而 Potato 那些格**只描述根单元**(参考实现的 `mod` 是根)。
+//      分界线是第二个顶层 `module`。发得出依赖的**名字**, 但 `functions`/`enums` 那些格
+//      会**多收依赖的声明** —— 静默的错, 比拒绝坏。
+//   2. **自写的泛型形参**(`generics`/`instances`)—— 这两格在参考实现里是**一对**:
+//      声明了 `<T>` 的, 单态化出来的那些实例要列在 `instances` 里。单态化(参考侧的
+//      `prepare`)还没搬进来, 所以这里发不出 `instances` 的真值。**预置枚举除外** ——
+//      它们由驱动器注入 (docs/189 的 M10 那条), 一定带 `<T>`, 而且正是 `generics` 里
+//      唯一必然存在的两条。
+//   3. **`trait` / `impl`** —— 参考实现的 `traits`/`impls` 收的是**原始视图**(trait 名 +
+//      方法名; impl 的 trait / 接受者 / 方法名)。检查器只把 impl 方法压成 `K_METHOD`,
+//      trait 名与接受者名都不留, 所以要发就得把这两类声明**整块**重扫一遍。
+//   4. **`layout` / L0**(`layouts`)—— 它来自 `use "xxx.lom"` 那种 L0 装载。自举侧这一格
+//      还没有 (第 1 条把带 `use` 的单元整个挡住了)。
+//   5. **外部代码块**(`bodies`, docs/185)—— 驱动器**在检查之前**就拒了, 走不到这里。
+//   6. **方言**(`dialects`, comefor / byuse)—— 由**驱动器**拒: 那时它手上才有
+//      "这次展开过没有" (`has_comefor` 的返回值); 走到这里 token 流已经不含那两类词了。
+//
+// 拒绝是**打到 stderr 的一句话 + 返回 0**, 由驱动器翻成退出码 1 —— 与"超限报错,
+// 绝不静默丢"是同一处纪律(那个词用在 `MAX_USE` / `MAX_CHOOSE` 上)。
+//
+// ## 与参考实现对齐时**最容易漏的三处**
+//
+//   * `unit` 是源里的 **`module` 名**, 不是文件名: `switch.lomt` 的 unit 是 `switchex`。
+//   * `functions` **不含 `extern fn`** —— 参考实现把它收在 `mod.externs` 里, 与本体函数
+//     分开; 而检查器两种都登记成 `K_FN`, 所以"名字前面两位是不是 `extern`"是这一格
+//     唯一的判据。
+//   * 枚举/结构体体里的分隔符 **`,` 与 `;` 都算**, 而 `<...>` / `[...]` / `(...)` 里的
+//     逗号**不算** —— 否则 `Result<T, E>` 会被数成两个变体。
+module potato
+
+use bytes
+use switches
+
+/// 无符号里当"哨兵"用。token 下标从 0 起, 这个值不可能撞上 (与 `switches.SW_NONE` 同形)。
+const PT_NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 输出原语
+//
+// 游标**显式回传**(不是状态块): 这个文件里每一处写都很短, 显式回传比"mem 里存一格"
+// 少一层间接, 调用点也能一眼看出顺序。返回值就是"新游标"。
+
+fn pt_ind(out: ptr, o: u32, n: u32) -> u32 {
+    let k: u32 = 0;
+    while k < n * 2 {
+        store8(out, o, 32 as u8);
+        o = o + 1;
+        k = k + 1;
+    }
+    return o;
+}
+
+fn pt_str(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o, str_byte(s, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+fn pt_mem(out: ptr, o: u32, src: ptr, off: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o, load8(src, off + i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 十进制。**不用暂存**: 先倒着写进输出缓冲再**原地反转**。
+/// 这个文件只拿得到两个缓冲(输出 / 单元), 而那些 `const` 偏移是**全局**的
+/// (别的模块也用那块 mem), 不能借 —— 借了就与 `wdec` / codegen 的 `scratch_buf` 抢。
+///
+/// 参数是 **u64** 而不是 u32: `const` 的值可以是 u64(参考实现那边的库里就有
+/// `14695981039346656037` 这种), 按 u32 累加会**发出一个回绕过的数**而一声不响。
+fn pt_dec(out: ptr, o: u32, v: u64) -> u32 {
+    let st: u32 = o;
+    let x: u64 = v;
+    if x == 0 {
+        store8(out, o, 48 as u8);
+        return o + 1;
+    }
+    while x > 0 {
+        // 中间量**显式落成一个 u32 局部**: `(48 + (x % 10) as u32) as u8` 这种写法两个实现
+        // 推出的类型不一样（参考实现按左操作数算成 i32, 自举 codegen 记成 i64, 于是发
+        // `trunc i64 %t19 to i8` 而 `%t19` 是 `add i32` —— 自相矛盾的 IR）。落一个具名
+        // 局部两边就都没得猜了。实测这一处是自举定点（bootstrap 2/4）唯一的分歧点。
+        let dg: u32 = (x % 10) as u32;
+        store8(out, o, (48 + dg) as u8);
+        o = o + 1;
+        x = x / 10;
+    }
+    let n: u32 = o - st;
+    let i: u32 = 0;
+    while i < n / 2 {
+        let a: u32 = load8(out, st + i) as u32;
+        let b: u32 = load8(out, st + n - 1 - i) as u32;
+        store8(out, st + i, b as u8);
+        store8(out, st + n - 1 - i, a as u8);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn pt_hex1(out: ptr, o: u32, v: u32) -> u32 {
+    if v < 10 {
+        store8(out, o, (48 + v) as u8);
+    } else {
+        store8(out, o, (97 + v - 10) as u8);
+    }
+    return o + 1;
+}
+
+/// `\u00XX` —— `json.dumps` 对 < 0x20 的其余控制字符就是**十六进制小写**两位。
+fn pt_uesc(out: ptr, o: u32, c: u32) -> u32 {
+    o = pt_str(out, o, "\\u00");
+    o = pt_hex1(out, o, c / 16);
+    return pt_hex1(out, o, c % 16);
+}
+
+/// `src[off..off+n]` 按 **JSON 字符串**写出(含两侧引号)。
+///
+/// 转义面与 `json.dumps(ensure_ascii=False)` 一致: `"` `\` `\b` `\f` `\n` `\r` `\t` 与
+/// 其余 `< 0x20` 走 `\u00XX`; **>= 0x80 的字节原样过** (ensure_ascii=False 就是不做这件事)。
+/// 标识符/类型名走这条路是恒等变换(词法器只收 ASCII 字母数字下划线), 但**不能省**:
+/// `excluded` 的字符串是**任意字节**。
+fn pt_q(out: ptr, o: u32, src: ptr, off: u32, n: u32) -> u32 {
+    store8(out, o, 34 as u8);
+    o = o + 1;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(src, off + i) as u32;
+        if c == 34 {
+            o = pt_str(out, o, "\\\"");
+        } else if c == 92 {
+            o = pt_str(out, o, "\\\\");
+        } else if c == 8 {
+            o = pt_str(out, o, "\\b");
+        } else if c == 12 {
+            o = pt_str(out, o, "\\f");
+        } else if c == 10 {
+            o = pt_str(out, o, "\\n");
+        } else if c == 13 {
+            o = pt_str(out, o, "\\r");
+        } else if c == 9 {
+            o = pt_str(out, o, "\\t");
+        } else if c < 32 {
+            o = pt_uesc(out, o, c);
+        } else {
+            store8(out, o, c as u8);
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    store8(out, o, 34 as u8);
+    return o + 1;
+}
+
+/// 字面量(本文件自己写的那几个: `v5` / `loment` / `std` / `type` …)。
+fn pt_qs(out: ptr, o: u32, s: str) -> u32 {
+    store8(out, o, 34 as u8);
+    o = o + 1;
+    o = pt_str(out, o, s);
+    store8(out, o, 34 as u8);
+    return o + 1;
+}
+
+fn pt_bool(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 0 {
+        return pt_str(out, o, "false");
+    }
+    return pt_str(out, o, "true");
+}
+
+// ---- JSON 骨架: 四个动作凑出 `json.dumps(indent=2)` 的形状。
+//
+// 缩进是 **2*层**, 层号自己数。四个动作分别是: 键 / 数组开头 / 数组元素行首 / 数组收尾。
+// 空数组写 `[]`(与 Python 一致), 所以 `pt_aopen` 与 `pt_acls` 都**要条数**。
+
+fn pt_key(out: ptr, o: u32, lv: u32, k: str) -> u32 {
+    o = pt_ind(out, o, lv);
+    o = pt_qs(out, o, k);
+    return pt_str(out, o, ": ");
+}
+
+fn pt_aopen(out: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 {
+        return pt_str(out, o, "[]");
+    }
+    return pt_str(out, o, "[\n");
+}
+
+/// 数组第 `ix` 个元素的**行首**(非首元素先补 `,\n`)。
+fn pt_aelm(out: ptr, o: u32, lv: u32, ix: u32) -> u32 {
+    if ix > 0 {
+        o = pt_str(out, o, ",\n");
+    }
+    return pt_ind(out, o, lv);
+}
+
+/// 数组收尾 —— 闭括号与**键**同层(`lv` 是键那一层的层号)。空数组不写。
+fn pt_acls(out: ptr, o: u32, lv: u32, n: u32) -> u32 {
+    if n == 0 {
+        return o;
+    }
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, lv);
+    return pt_str(out, o, "]");
+}
+
+// ---------------------------------------------------------------- token 工具
+//
+// 单元里到处都是 `"fn"` / `"impl"` / `"module"` 这类**字符串**(关键字表、本文件自己的
+// 字面量), 只比原文会把它们当成声明。参考实现没有这个坑, 因为它的 parser 用
+// (kind, val) 一起判 —— 自举这边把那条纪律收进 `pt_tis`: **字符串 token 一律不匹配**。
+
+fn pt_kind(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20);
+}
+
+fn pt_off(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 4);
+}
+
+/// token 的字节长度。**字符串 token 含两侧引号** —— 这是自举词法器的口径, 与参考侧
+/// `Tok.val`(**不含**引号)不同。要字符串的内容就自己 `+1 / -2`。
+fn pt_tlen(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 8);
+}
+
+fn pt_tis(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if load32(t, i * 20) == 2 {
+        return false;
+    }
+    let n: u32 = str_len(s);
+    if load32(t, i * 20 + 8) != n {
+        return false;
+    }
+    let off: u32 = load32(t, i * 20 + 4);
+    let k: u32 = 0;
+    while k < n {
+        if (load8(src, off + k) as u32) != (str_byte(s, k) as u32) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// `src[off..off+n]` 里有字节 `c` 吗(只用于那条"字符串里有转义就拒绝"的判据)。
+fn pt_has_byte(src: ptr, off: u32, n: u32, c: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if (load8(src, off + i) as u32) == c {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 拒绝出口
+
+/// 说一句话到 stderr 并返回 0。**返回 0 就是"没发出东西"**, 由调用方翻成退出码 1。
+fn pt_wfail(msg: str) -> u32 {
+    let _w: i64 = syscall4(1, 2, str_ptr(msg) as u64, str_len(msg) as u64);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 单元的形状
+
+/// 根单元在 token 流里的**结束**位置(不含)。
+///
+/// 驱动器手上的单元是"根 + 依赖 + 预置枚举"**拼在一起的一个** token 流, 而 Potato 的
+/// 那些格**只描述根单元**。分界线就是**第二个顶层 `module`**: 参考实现里每份源都有自己的
+/// `module`, 驱动器没有别的办法把"根"标出来。
+///
+/// 第二个 `module` 是**预置块**(`append_prelude` 注入的那段, 名字就是 `__prelude`)时,
+/// 边界落在它身上; 是别的名字(真依赖)或者还有第三个 —— 返回 `PT_NONE`, 调用方拒绝。
+fn pt_root_end(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let seen: u32 = 0;
+    let r: u32 = nt;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "module") {
+            if seen == 0 {
+                seen = 1;
+            } else if seen == 1 {
+                if !pt_tis(unit, t, i + 1, "__prelude") {
+                    return PT_NONE;
+                }
+                r = i;
+                seen = 2;
+            } else {
+                return PT_NONE;
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+/// 子集之外的构造 —— 返回**给用户看的一句话**(空串 = 在子集里)。
+///
+/// **只扫根单元那一半**(`[0, r1)`): 预置枚举自己就带 `<T>`, 拿它当"用户写了泛型"会把
+/// 每一个单元都拒掉。
+fn pt_refuse(unit: ptr, t: ptr, r1: u32) -> u32 {
+    if !pt_tis(unit, t, 0, "module") {
+        let _w0: u32 = pt_wfail("fujoc-s: --emit-potato: 单元不以 `module` 开头 (参考实现的前门也是这一条)\n");
+        return 1;
+    }
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < r1 && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 {
+            if pt_tis(unit, t, i, "trait") || pt_tis(unit, t, i, "impl") {
+                let _w1: u32 = pt_wfail("fujoc-s: --emit-potato: 这个单元有 trait/impl —— `traits`/`impls` 两格 (原始视图) 还没进自举侧 (docs/189 S1)\n");
+                return 1;
+            }
+            if pt_tis(unit, t, i, "use") {
+                let _w2: u32 = pt_wfail("fujoc-s: --emit-potato: 这个单元有 `use` —— `imports` 那一格 + L0 布局 (`layouts`) 还没进自举侧\n");
+                return 1;
+            }
+            if (pt_tis(unit, t, i, "fn") || pt_tis(unit, t, i, "struct")
+                    || pt_tis(unit, t, i, "enum")) && pt_tis(unit, t, i + 2, "<") {
+                let _w3: u32 = pt_wfail("fujoc-s: --emit-potato: 这个单元有自写的泛型形参 —— `generics` 与 `instances` 在参考实现里是一对, 而单态化还没进自举侧\n");
+                return 1;
+            }
+            // 泛型**类型**的用法 (`Result<u32, u32>`): 单态化会把它改写成具体名
+            // (`Result_u32_u32`), 签名那一格跟着变, 而 `instances` 也要多一格 ——
+            // 两件事都在自举侧之外。**自写的泛型声明上面那条已经拒了**, 所以走到这里
+            // 还能出现的泛型名只有预置的 Option/Result。
+            // ⚠ 不能拿"标识符后面跟 `<`"当判据: `a < b` 到处都是。这条只认这两个名字 ——
+            // 而它们在这个子集里**一定是**泛型的(非泛型的 `Option<…>` 本身就不是合法源)。
+            if (pt_tis(unit, t, i, "Option") || pt_tis(unit, t, i, "Result"))
+                    && pt_tis(unit, t, i + 1, "<") {
+                let _w4: u32 = pt_wfail("fujoc-s: --emit-potato: 这个单元用了泛型类型 (`Option<…>` / `Result<…>`) —— 单态化会把签名里的名字改写成 `Result_u32_u32` 那种具体名, `instances` 也要跟着写; 还没进自举侧\n");
+                return 1;
+            }
+            // `excluded` 的字符串里有反斜杠: 自举词法器**不替我们解转义**(参考实现解),
+            // 照抄出去就是两个实现的字节不一样 —— 与其发错, 不如点名。
+            if pt_tis(unit, t, i, "excluded") && pt_kind(t, i + 1) == 2 {
+                if pt_has_byte(unit, pt_off(t, i + 1) + 1, pt_tlen(t, i + 1) - 2, 92) == 1 {
+                    let _w5: u32 = pt_wfail("fujoc-s: --emit-potato: `excluded` 的字符串里有 `\\` 转义 —— 自举词法器不解转义, 这一格还没做到\n");
+                    return 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 数字与配对
+
+/// 整数 token → 十进制。参考实现的对象里 `0x10` 也是 `16`(`int_lit` 先解成 int)。
+///
+/// 前面可以有 `-`(`int_lit` 允许): 那不是 u32 表示得出来的数, 所以**分开写**负号与数值
+/// —— 直接按 u32 累加会发出 4294967295 这种数, 而参考实现发的是 `-1`。
+fn pt_num(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    let neg: u32 = 0;
+    if pt_tis(src, t, j, "-") {
+        neg = 1;
+        j = j + 1;
+    }
+    let st: u32 = pt_off(t, j);
+    let ln: u32 = pt_tlen(t, j);
+    let hex: u32 = 0;
+    let k: u32 = 0;
+    if ln > 2 && load8(src, st) == 48
+            && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88) {
+        hex = 1;
+        k = 2;
+    }
+    let v: u64 = 0;
+    while k < ln {
+        let c: u32 = load8(src, st + k) as u32;
+        let dg: u32 = 0;
+        if c >= 48 && c <= 57 {
+            dg = c - 48;
+        } else if c >= 97 && c <= 102 {
+            dg = c - 97 + 10;
+        } else if c >= 65 && c <= 70 {
+            dg = c - 65 + 10;
+        }
+        if hex == 1 {
+            v = v * 16 + (dg as u64);
+        } else {
+            v = v * 10 + (dg as u64);
+        }
+        k = k + 1;
+    }
+    if neg == 1 {
+        store8(out, o, 45 as u8);
+        o = o + 1;
+    }
+    return pt_dec(out, o, v);
+}
+
+/// 这个数字 token 的**量级**超过 u64 吗(1 = 超了)。
+///
+/// 参考实现的 `int_lit` 是**任意精度**(Python 的 int), 而这里只到 u64 —— 超了就得
+/// 点名, 不能发一个回绕过的数(`std/num.lomt` 里 `4294967296` 那种 u32 装不下的值
+/// **是真实存在的**, 实测就是这么撞出来的)。
+///
+/// **只比原文不解值**: 去掉 `-` 与 `0x` 前缀、跳过前导零之后 ① 位数多的一定更大;
+/// ② 位数相同的按字节与上限逐位比(同位数时字典序 == 数值序, 十六进制统一小写)。
+fn pt_num_ovf(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i;
+    if pt_tis(src, t, j, "-") {
+        j = j + 1;   // 负号不看: 判的是**量级**
+    }
+    let st: u32 = pt_off(t, j);
+    let ln: u32 = pt_tlen(t, j);
+    let hex: u32 = 0;
+    let b: u32 = 0;
+    if ln > 2 && load8(src, st) == 48
+            && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88) {
+        hex = 1;
+        b = 2;
+    }
+    while b + 1 < ln && load8(src, st + b) == 48 {
+        b = b + 1;
+    }
+    let nd: u32 = ln - b;
+    let lim: u32 = 20;
+    let cap: str = "18446744073709551615";
+    if hex == 1 {
+        lim = 16;
+        cap = "ffffffffffffffff";
+    }
+    if nd > lim {
+        return 1;
+    }
+    if nd < lim {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < lim {
+        let c: u32 = load8(src, st + b + k) as u32;
+        if c >= 65 && c <= 70 {
+            c = c + 32;
+        }
+        let q: u32 = str_byte(cap, k) as u32;
+        if c > q {
+            return 1;
+        }
+        if c < q {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// `i` 指向 `lo` 时, 返回配对的 `hi` 的下标(不配对时停在 eof 附近 —— 调用方靠
+/// `pt_kind != 4` 兜住; 走到这里时单元已经检查过了, 括号是配平的)。
+fn pt_match(src: ptr, t: ptr, i: u32, lo: str, hi: str) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while pt_kind(t, j) != 4 {
+        if pt_tis(src, t, j, lo) {
+            d = d + 1;
+        }
+        if pt_tis(src, t, j, hi) {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+// ---------------------------------------------------------------- 计数
+//
+// 每一格都要先知道条数才能写 `[]` 还是 `[\n`, 所以计数与发射各走一遍 token 流。
+// 计数都很短(深度 0 扫一遍), 换来的是"发到一半才发现要回退"这种形状不会出现。
+
+/// 深度 0 上某个关键字 token 的个数。`{` `}` `(` `)` `[` `]` 计深度。
+///
+/// 深度 0 就是"顶层": 走到这里时单元已经检查过, 而且 trait/impl/外部代码块都在
+/// `pt_refuse` 里拒掉了, 所以顶层 `fn`/`struct`/`enum`/`const`/`capability`/`excluded`
+/// 与各自的声明是**一一对应**的。函数体里的词不计数, 全靠这个深度。
+fn pt_cnt_kw0(unit: ptr, t: ptr, nt: u32, kw: str) -> u32 {
+    let n: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, kw) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 这个深度 0 的 `fn` 是不是**本体函数**(不是外部函数声明)。
+///
+/// 参考实现的 `functions` 收的是 `mod.funcs`, 而 `extern fn` 另走 `mod.externs`
+/// (`docs/173`) —— 裸机那几个门面里 `pub extern fn` 一片, 混进去就是两个对象。
+/// 形状是固定的: 名字前面一位是 `fn`, 再前面一位就是修饰词。**`interrupt fn` 要算本体**
+/// (它进的是 `mod.funcs`), 所以只认 `extern`。
+fn pt_is_body_fn(unit: ptr, t: ptr, i: u32) -> u32 {
+    if i < 2 {
+        return 1;
+    }
+    if pt_tis(unit, t, i - 2, "extern") {
+        return 0;
+    }
+    return 1;
+}
+
+/// 本体函数个数(深度 0 的 `fn`, 减掉 `extern fn`)。
+fn pt_cnt_fn(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "fn") {
+            if pt_is_body_fn(unit, t, i + 1) == 1 {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 枚举/结构体声明体 `{...}` 里"名字位置"的个数。
+///
+/// 状态机与检查器的 `chk_sfield_exists` 同形: **`, ` 与 `;` 都是分隔符**, 而
+/// `<...>` / `[...]` / `(...)` 里的逗号不是 —— 否则 `Result<T, E>` 会被数成两个变体。
+fn pt_cnt_names(unit: ptr, t: ptr, brc: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let n: u32 = 0;
+    while pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            n = n + 1;
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// 带载荷的变体个数(参考实现只在这时候才写 `payloads` 这个键)。
+fn pt_cnt_pay(unit: ptr, t: ptr, brc: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let n: u32 = 0;
+    while pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            if pt_tis(unit, t, j + 1, "(") {
+                n = n + 1;
+            }
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// `guards`: 参考实现数的是 `_count_guards` —— **函数体里**的 `guard` 语句, 递归走
+/// if/while/for/match 的体。token 流上就是"`guard` 后面跟一个名字再跟 `(`":
+/// `let guard: u32` 那种(名字后面是 `:`)不算, 而 guard 语句的 `(` 是形状的一部分。
+///
+/// 不数整个单元而是数 `[0, r1)`: 预置块里没有语句, 这不是必需 —— 是为了与"根单元
+/// 才是被描述的那一个"这条口径一致。
+fn pt_cnt_guards(unit: ptr, t: ptr, r1: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < r1 && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "guard")
+                && pt_kind(t, i + 1) == 0 && pt_tis(unit, t, i + 2, "(") {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 类型形参个数: `Name < A , B >` 里逗号个数 + 1。
+fn pt_cnt_tps(unit: ptr, t: ptr, lt: u32, gt: u32) -> u32 {
+    let n: u32 = 1;
+    let j: u32 = lt + 1;
+    while j < gt {
+        if pt_tis(unit, t, j, ",") {
+            n = n + 1;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// `types` 的条数: 顶层 `struct`, **减掉带 `<T>` 的那种**。
+///
+/// 为什么减: 参考实现的对象取的是**单态化之后**的 `mod.structs` —— `prepare` 把声明了
+/// 形参的那一类**换成**实例化出来的具体副本(名字形如 `Pair_u32`), 原件不再留在表里。
+/// 所以"带 `<T>` 的声明"**不是** `types` 里的一格, 而是 `generics` 里的一格(见
+/// `pt_generics`)。预置枚举正是靠这条从 `enums` 里消失的 —— 它们的形参就是 `<T>`,
+/// 而 `prepare` 一定会被它们触发(它那条"没有泛型就早退"的判据看的就是这个)。
+fn pt_cnt_types(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "struct") && !pt_tis(unit, t, i + 2, "<") {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `enums` 的条数 —— 与 `pt_cnt_types` 同一个理由(单态化之后的那张表)。
+fn pt_cnt_enums(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "enum") && !pt_tis(unit, t, i + 2, "<") {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 数字那一格的第二条拒绝: 量级超过 u64 的字面量。
+///
+/// 与 `pt_refuse` 分开是因为 `pt_num_ovf` 定义在它后面(本语言"先定义后使用")——
+/// 两条都由 `potato_emit` 顺次调用。
+fn pt_refuse_num(unit: ptr, t: ptr, r1: u32) -> u32 {
+    let i: u32 = 0;
+    while i < r1 && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 1 && pt_num_ovf(unit, t, i) == 1 {
+            let _w: u32 = pt_wfail("fujoc-s: --emit-potato: 有个整数常量的量级超过 u64 —— 参考实现的 `int_lit` 是任意精度, 这一格只到 u64; 与其发一个回绕过的数, 不如点名 (docs/189 S1)\n");
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 类型渲染
+
+/// 渲一个类型, 返回 `(下一个 token 下标 << 32) | 新游标`。
+///
+/// 形状与 `lomentc.Parser.type_name` **逐字符**同形 —— 它不是"抄原文": 原文里的
+/// `[u8;16]` / `Pair<u32,u32>` 到了对象里是 `[u8; 16]` / `Pair<u32, u32>`
+/// (分号/逗号后**恰好**一个空格, 数组长度**规范化成十进制**)。抄原文在语料上就会红。
+///
+/// 两个返回值打成一个 u64: 语言的函数没有元组, 而这是本文件里唯一需要"同时回传
+/// 游标与 token 位置"的地方(递归渲染必须知道吃到哪了)。参考实现里也有这个形状
+/// (`declare` 返回 `(n << 32) | o`)。
+fn pt_ty(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u64 {
+    let j: u32 = i;
+    if pt_tis(src, t, j, "mut") && pt_tis(src, t, j + 1, "[") {
+        o = pt_str(out, o, "mut [");
+        let r0: u64 = pt_ty(out, o, src, t, j + 2);
+        o = (r0 % 4294967296) as u32;
+        j = (r0 / 4294967296) as u32;
+        o = pt_str(out, o, "]");
+        // 递归回来时 `j` 停在 `]` 上 —— **要吃掉它**, 否则调用方以为下一个形参就在这儿
+        // (实测症状: `fill(xs: mut [u32], v: u32)` 的第二个形参名字变成 `]`、类型是空串)。
+        j = j + 1;
+        return (j as u64) * 4294967296 + (o as u64);
+    }
+    if pt_tis(src, t, j, "[") {
+        o = pt_str(out, o, "[");
+        let r1: u64 = pt_ty(out, o, src, t, j + 1);
+        o = (r1 % 4294967296) as u32;
+        j = (r1 / 4294967296) as u32;
+        if pt_tis(src, t, j, ";") {
+            o = pt_str(out, o, "; ");
+            o = pt_num(out, o, src, t, j + 1);
+            j = j + 2;
+        }
+        o = pt_str(out, o, "]");
+        j = j + 1;   // 同上: 吃掉 `]`
+        return (j as u64) * 4294967296 + (o as u64);
+    }
+    o = pt_mem(out, o, src, pt_off(t, j), pt_tlen(t, j));
+    j = j + 1;
+    if pt_tis(src, t, j, "<") {
+        o = pt_str(out, o, "<");
+        j = j + 1;
+        while !pt_tis(src, t, j, ">") && pt_kind(t, j) != 4 {
+            let r2: u64 = pt_ty(out, o, src, t, j);
+            o = (r2 % 4294967296) as u32;
+            j = (r2 / 4294967296) as u32;
+            if pt_tis(src, t, j, ",") {
+                o = pt_str(out, o, ", ");
+                j = j + 1;
+            }
+        }
+        j = j + 1;
+        o = pt_str(out, o, ">");
+    }
+    return (j as u64) * 4294967296 + (o as u64);
+}
+
+/// 类型那一格 —— 值是一个**字符串**(上面渲染出来的那个), 所以引号加在**这一层**,
+/// 不在 `pt_ty` 里: 嵌套的类型(`[u8; 16]` / `Pair<u32>`)的里层不该再带引号。
+fn pt_tyq(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u64 {
+    o = pt_str(out, o, "\"");
+    let r: u64 = pt_ty(out, o, src, t, i);
+    o = (r % 4294967296) as u32;
+    o = pt_str(out, o, "\"");
+    return ((r / 4294967296) as u64) * 4294967296 + (o as u64);
+}
+
+/// 类型形参名表 —— **字符串数组**(不是 `functions[].params` 那种对象数组)。
+fn pt_names(out: ptr, o: u32, src: ptr, t: ptr, lt: u32, n: u32) -> u32 {
+    let j: u32 = lt + 1;
+    let i: u32 = 0;
+    while i < n {
+        o = pt_aelm(out, o, 4, i);
+        o = pt_q(out, o, src, pt_off(t, j), pt_tlen(t, j));
+        j = j + 1;
+        if pt_tis(src, t, j, ",") {
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 开关
+//
+// 开关表(`switches.lomt`)每条 16 字节: 名起点 | 名长 | 标记 | token 下标。标记
+// **2 = 定义**(`set choose`), 1 = 取值"开", 0 = 取值"关"; **每个出现各一条, 不去重**。
+//
+// 参考实现是 `[{"name": n, "on": self.state(n)} for n in sorted(self.defs)]`:
+// **按名字排序**(确定性是判据 —— 同一份源必须给同一串字节), 只收**定义过**的开关。
+
+/// 名字序: 0 = a 在 b 前, 1 = 相等, 2 = a 在 b 后。按字节比, 短的在前(与 Python 的
+/// `sorted` 在 ASCII 上逐码点比同一结果)。
+fn pt_sw_cmp(unit: ptr, sw: ptr, a: u32, b: u32) -> u32 {
+    let la: u32 = load32(sw, a * SW_SIZE + 4);
+    let lb: u32 = load32(sw, b * SW_SIZE + 4);
+    let oa: u32 = load32(sw, a * SW_SIZE);
+    let ob: u32 = load32(sw, b * SW_SIZE);
+    let n: u32 = la;
+    if lb < n {
+        n = lb;
+    }
+    let k: u32 = 0;
+    while k < n {
+        let ca: u32 = load8(unit, oa + k) as u32;
+        let cb: u32 = load8(unit, ob + k) as u32;
+        if ca < cb {
+            return 0;
+        }
+        if ca > cb {
+            return 2;
+        }
+        k = k + 1;
+    }
+    if la < lb {
+        return 0;
+    }
+    if la > lb {
+        return 2;
+    }
+    return 1;
+}
+
+/// 第 `i` 条**定义**是不是同名里最靠前的那一条(去重)。
+/// 重复定义本身是 E022 —— 走到这里不会发生, 但去重仍按参考实现的口径(第一条算),
+/// 免得"同一个名字发两次"这种**表面绿、对象非法**的东西出去。
+fn pt_def_first(unit: ptr, sw: ptr, i: u32) -> u32 {
+    let j: u32 = 0;
+    while j < i {
+        if load32(sw, j * SW_SIZE + 8) == 2 && pt_sw_cmp(unit, sw, j, i) == 1 {
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// 一个开关开没开: **第一个取值**说了算 (`state()` 只记首次, 之后只记重复);
+/// **没写就是关**。
+fn pt_sw_state(unit: ptr, sw: ptr, ns: u32, idx: u32) -> u32 {
+    let i: u32 = 0;
+    while i < ns {
+        if load32(sw, i * SW_SIZE + 8) != 2 && pt_sw_cmp(unit, sw, i, idx) == 1 {
+            return load32(sw, i * SW_SIZE + 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pt_cnt_defs(unit: ptr, sw: ptr) -> u32 {
+    let ns: u32 = load32(sw, MAX_CHOOSE * SW_SIZE);
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < ns {
+        if load32(sw, i * SW_SIZE + 8) == 2 && pt_def_first(unit, sw, i) == 1 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 排序用**后继扫描**: 每一轮找"比上一轮那条大"的最小者。语言里没有数组, 拿不到
+/// "排好序的索引表"; 这条是 O(n^2), 但 n 是**开关个数**(常是个位数)。
+fn pt_switches(out: ptr, o: u32, unit: ptr, sw: ptr, n: u32) -> u32 {
+    let ns: u32 = load32(sw, MAX_CHOOSE * SW_SIZE);
+    let prev: u32 = 0;
+    let have: u32 = 0;
+    let ix: u32 = 0;
+    let stop: u32 = 0;
+    while stop == 0 {
+        let best: u32 = PT_NONE;
+        let i: u32 = 0;
+        while i < ns {
+            if load32(sw, i * SW_SIZE + 8) == 2 && pt_def_first(unit, sw, i) == 1 {
+                let ok: u32 = 0;
+                if have == 0 {
+                    ok = 1;
+                } else if pt_sw_cmp(unit, sw, i, prev) == 2 {
+                    ok = 1;
+                }
+                if ok == 1 {
+                    if best == PT_NONE || pt_sw_cmp(unit, sw, i, best) == 0 {
+                        best = i;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        if best == PT_NONE {
+            stop = 1;
+        } else {
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, load32(sw, best * SW_SIZE),
+                     load32(sw, best * SW_SIZE + 4));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "on");
+            o = pt_bool(out, o, pt_sw_state(unit, sw, ns, best));
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+            prev = best;
+            have = 1;
+        }
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 声明的体
+
+/// 枚举的变体名(字符串数组)。
+fn pt_variants(out: ptr, o: u32, unit: ptr, t: ptr, brc: u32, n: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let ix: u32 = 0;
+    while pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            o = pt_aelm(out, o, 4, ix);
+            o = pt_q(out, o, unit, pt_off(t, j), pt_tlen(t, j));
+            ix = ix + 1;
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return o;
+}
+
+/// 带载荷的变体 —— 一个 **JSON 对象**(`{"Circle": "u32"}`), 顺序 = 变体顺序。
+/// 一个都没有时**整个键都不写**(参考实现是 `**({"payloads": …} if e.payloads else {})`),
+/// 所以调用方先看 `pt_cnt_pay`。
+fn pt_payloads(out: ptr, o: u32, unit: ptr, t: ptr, brc: u32, lv: u32, n: u32) -> u32 {
+    o = pt_str(out, o, "{\n");
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let ix: u32 = 0;
+    while pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            if pt_tis(unit, t, j + 1, "(") {
+                o = pt_aelm(out, o, lv + 1, ix);
+                o = pt_q(out, o, unit, pt_off(t, j), pt_tlen(t, j));
+                o = pt_str(out, o, ": ");
+                let rp: u64 = pt_tyq(out, o, unit, t, j + 2);
+                o = (rp % 4294967296) as u32;
+                ix = ix + 1;
+            }
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, lv);
+    return pt_str(out, o, "}");
+}
+
+/// 结构体的字段 —— 对象数组(`{"name": …, "type": …}`), 顺序 = 声明顺序。
+/// `lv` 是**字段对象**那一层的层号。
+fn pt_fields(out: ptr, o: u32, unit: ptr, t: ptr, brc: u32, lv: u32, n: u32) -> u32 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let ix: u32 = 0;
+    while pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            o = pt_aelm(out, o, lv, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, lv + 1, "name");
+            o = pt_q(out, o, unit, pt_off(t, j), pt_tlen(t, j));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, lv + 1, "type");
+            // 字段的形状是定长的: 名字 `:` 类型
+            let rf: u64 = pt_tyq(out, o, unit, t, j + 2);
+            o = (rf % 4294967296) as u32;
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, lv);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return o;
+}
+
+/// 形参个数: `(` 到配对的 `)` 之间第 0 层的逗号数 + 1(空表是 0)。
+/// **不**拿检查器符号表里的 `argc`: 那一格是给"实参个数比对"用的, 而这一格要的是
+/// "声明里写了几个", 两件事在 `self` 那种形参上会分家。
+fn pt_cnt_params(unit: ptr, t: ptr, lp: u32) -> u32 {
+    if pt_tis(unit, t, lp + 1, ")") {
+        return 0;
+    }
+    let n: u32 = 1;
+    let j: u32 = lp + 1;
+    let d: u32 = 0;
+    while pt_kind(t, j) != 4 && !(pt_tis(unit, t, j, ")") && d == 0) {
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && pt_tis(unit, t, j, ",") {
+            n = n + 1;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// 形参表 —— 对象数组, 元素在**第 4 层**(`functions` 的元素在第 2 层, 键在第 3 层)。
+fn pt_params(out: ptr, o: u32, unit: ptr, t: ptr, lp: u32, n: u32) -> u32 {
+    let j: u32 = lp + 1;
+    let i: u32 = 0;
+    while i < n {
+        o = pt_aelm(out, o, 4, i);
+        o = pt_str(out, o, "{\n");
+        o = pt_key(out, o, 5, "name");
+        o = pt_q(out, o, unit, pt_off(t, j), pt_tlen(t, j));
+        o = pt_str(out, o, ",\n");
+        o = pt_key(out, o, 5, "type");
+        if pt_tis(unit, t, j + 1, ":") {
+            let rq: u64 = pt_tyq(out, o, unit, t, j + 2);
+            o = (rq % 4294967296) as u32;
+            j = (rq / 4294967296) as u32;
+        } else {
+            // `self` 单独一个: 参考实现给的是 `Param("self", "")` —— 名字在, 类型是空串。
+            // **不写字面量空串**(那会生成一个零长全局), 直接把两个引号字符打出去。
+            store8(out, o, 34 as u8);
+            store8(out, o + 1, 34 as u8);
+            o = o + 2;
+            j = j + 1;
+        }
+        o = pt_str(out, o, "\n");
+        o = pt_ind(out, o, 4);
+        o = pt_str(out, o, "}");
+        if pt_tis(unit, t, j, ",") {
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// 返回类型: `)` 后面有 `->` 就有, 否则是 `()`。
+/// (`lomentc.Parser.parse_fn`: 后面是 `{` 或 `;` 就是无返回。外部函数没有函数体 ——
+/// 而外部函数**本来就不进 `functions`**, 所以这里只会撞到 `{`。)
+fn pt_ret(out: ptr, o: u32, unit: ptr, t: ptr, lp: u32) -> u32 {
+    let rp: u32 = pt_match(unit, t, lp, "(", ")");
+    let j: u32 = rp + 1;
+    if pt_tis(unit, t, j, "-") && pt_tis(unit, t, j + 1, ">") {
+        let rr: u64 = pt_tyq(out, o, unit, t, j + 2);
+        return (rr % 4294967296) as u32;
+    }
+    return pt_str(out, o, "\"()\"");
+}
+
+// ---------------------------------------------------------------- 各格
+
+/// 核心模式 (`docs/143` §3.2)。
+///
+/// 开关在 token 流上**已经落定过**(`apply_switches`): `choose std` / `choose no_std`
+/// 是**留着**的, 其余的开关声明已被那张表吃掉。所以这里只认这两个词 —— 与参考实现
+/// "看名字是不是 std/no_std" 是同一条判据。没写就是 `std`(`mod.choose or "std"`)。
+fn pt_mode(out: ptr, o: u32, unit: ptr, t: ptr, r1: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < r1 && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "std") || pt_tis(unit, t, i + 1, "no_std")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    return pt_qs(out, o, "std");
+}
+
+/// `capabilities`。形状是**定长**的(检查器也是照这个形状读的):
+/// `capability NAME : SPACE [ LO .. HI ] (revocable)?`
+/// 即 NAME=i+1, `:`=i+2, SPACE=i+3, `[`=i+4, LO=i+5, `..`=i+6,i+7, HI=i+8, `]`=i+9,
+/// `revocable`=i+10(可选)。lo/hi 是**解出来的数**(参考实现 `int_lit()`), 所以走 `pt_num`。
+fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "capability") {
+            let rev: u32 = 0;
+            if pt_tis(unit, t, i + 10, "revocable") {
+                rev = 1;
+            }
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "domain");
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 4, "space");
+            o = pt_q(out, o, unit, pt_off(t, i + 3), pt_tlen(t, i + 3));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 4, "lo");
+            o = pt_num(out, o, unit, t, i + 5);
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 4, "hi");
+            o = pt_num(out, o, unit, t, i + 8);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 3);
+            o = pt_str(out, o, "},\n");
+            o = pt_key(out, o, 3, "revocable");
+            o = pt_bool(out, o, rev);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `excluded`(元素是字符串的数组)。
+///
+/// 自举词法器的字符串 token **含两侧引号**, 而参考实现的 `mod.excluded` 是**里面的
+/// 内容** —— 所以切 `+1 / -2`。里面有 `\` 的单元在 `pt_refuse` 就被挡住了。
+fn pt_excluded(out: ptr, o: u32, unit: ptr, t: ptr, r1: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let i: u32 = 0;
+    while i < r1 && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "excluded") && pt_kind(t, i + 1) == 2 {
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_q(out, o, unit, pt_off(t, i + 1) + 1, pt_tlen(t, i + 1) - 2);
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `consts`: 形状是 `const NAME : TYPE = VALUE ;`, 所以名字后面第 2 位起就是类型。
+/// 值走 `pt_num`(参考实现的对象里它是**数**, 不是原文)。
+fn pt_consts(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "const") {
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "type");
+            let rc: u64 = pt_tyq(out, o, unit, t, i + 3);
+            o = (rc % 4294967296) as u32;
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "value");
+            // 类型后面是 `=`, 值在它后面(`int_lit` 允许前面有 `-`)
+            o = pt_num(out, o, unit, t, (rc / 4294967296) as u32 + 1);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `enums`。**顺序 = 声明的先后**(参考实现的 `mod.enums` 就是这个序: 根单元的枚举在前,
+/// 预置的 Option/Result 由驱动器 append 在**末尾**)。
+fn pt_enums(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "enum") && !pt_tis(unit, t, i + 2, "<") {
+            // 名字后面可能是 `<T, E>` 再是 `{`
+            let mut_j: u32 = i + 2;
+            while !pt_tis(unit, t, mut_j, "{") && pt_kind(t, mut_j) != 4 {
+                mut_j = mut_j + 1;
+            }
+            let brc: u32 = mut_j;
+            let nv: u32 = pt_cnt_names(unit, t, brc);
+            let np: u32 = pt_cnt_pay(unit, t, brc);
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "variants");
+            o = pt_aopen(out, o, nv);
+            o = pt_variants(out, o, unit, t, brc, nv);
+            o = pt_acls(out, o, 3, nv);
+            if np > 0 {
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "payloads");
+                o = pt_payloads(out, o, unit, t, brc, 3, np);
+            }
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `types`(结构体)。字段是**对象数组**, 元素在第 4 层。
+fn pt_types(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "struct") && !pt_tis(unit, t, i + 2, "<") {
+            let mut_j: u32 = i + 2;
+            while !pt_tis(unit, t, mut_j, "{") && pt_kind(t, mut_j) != 4 {
+                mut_j = mut_j + 1;
+            }
+            let brc: u32 = mut_j;
+            let nf: u32 = pt_cnt_names(unit, t, brc);
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "fields");
+            o = pt_aopen(out, o, nf);
+            o = pt_fields(out, o, unit, t, brc, 4, nf);
+            o = pt_acls(out, o, 3, nf);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `functions`。名字在 `fn` 后面一位, 形参表从它后面那个 `(` 起 —— 泛型函数是
+/// `fn f<T>(…)`, 所以 `(` 的位置要**扫**出来(参考实现的 `chk_find_paren` 也是这么做的)。
+/// 自写的泛型在 `pt_refuse` 被挡住, 所以这里撞到的 `<` 只可能来自……没有。留着这个扫描
+/// 是因为"顺着 token 找下一个 `(`"比"假设它就在下一位"少一条隐藏前提。
+fn pt_functions(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "fn") && pt_is_body_fn(unit, t, i + 1) == 1 {
+            let mut_j: u32 = i + 2;
+            while !pt_tis(unit, t, mut_j, "(") && pt_kind(t, mut_j) != 4 {
+                mut_j = mut_j + 1;
+            }
+            let lp: u32 = mut_j;
+            let np: u32 = pt_cnt_params(unit, t, lp);
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "params");
+            o = pt_aopen(out, o, np);
+            o = pt_params(out, o, unit, t, lp, np);
+            o = pt_acls(out, o, 3, np);
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "ret");
+            o = pt_ret(out, o, unit, t, lp);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+/// `generics` 的条数 —— 与 `pt_generics` 同一个条件(带 `<` 的 `enum`)。
+/// 计数与发射各走一遍是这一格的统一做法(见前面"计数"那一节)。
+fn pt_cnt_gen(unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "enum") && pt_tis(unit, t, i + 2, "<") {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `generics`。参考实现是 `[fn 的] + [struct 的] + [enum 的]` —— 前两类被 `pt_refuse`
+/// 拒掉了, 所以这里只剩**枚举**那一类: 也就是预置的 Option/Result(它们一定带 `<T>`,
+/// 而 `pt_refuse` 不看预置块)。
+fn pt_generics(out: ptr, o: u32, unit: ptr, t: ptr, nt: u32, n: u32) -> u32 {
+    let ix: u32 = 0;
+    let d: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "enum") && pt_tis(unit, t, i + 2, "<") {
+            let gt: u32 = pt_match(unit, t, i + 2, "<", ">");
+            let np: u32 = pt_cnt_tps(unit, t, i + 2, gt);
+            o = pt_aelm(out, o, 2, ix);
+            o = pt_str(out, o, "{\n");
+            o = pt_key(out, o, 3, "kind");
+            o = pt_qs(out, o, "type");
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "name");
+            o = pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+            o = pt_str(out, o, ",\n");
+            o = pt_key(out, o, 3, "params");
+            o = pt_aopen(out, o, np);
+            o = pt_names(out, o, unit, t, i + 2, np);
+            o = pt_acls(out, o, 3, np);
+            o = pt_str(out, o, "\n");
+            o = pt_ind(out, o, 2);
+            o = pt_str(out, o, "}");
+            ix = ix + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- 入口
+
+/// 发一个单元的 Potato v5 对象, 返回写出的字节数。**0 = 拒绝** —— 话已经打到 stderr,
+/// 调用方据此以 1 退出(与那些"超限报错, 绝不静默丢"的判据同一种形状)。
+///
+/// 键的顺序与参考实现**逐字对齐**(`emit_potato` 那个字面量 dict 的顺序): 对象是拿
+/// 字节比的, 顺序也在比较面里。
+pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
+    let r1: u32 = pt_root_end(unit, t, nt);
+    if r1 == PT_NONE {
+        return pt_wfail("fujoc-s: --emit-potato: 这个单元 `use` 了别的单元 —— 那些格 (`imports` / 依赖的声明) 还没进自举侧; 单文件单元可以 (docs/189 S1)\n");
+    }
+    // 两条拒绝都是"自己把话打了 + 返回 1" —— 话在函数里就打出去了, 这里只把它翻成
+    // "没发出东西"(返回 0)。**空串不当哨兵**: 那会生成一个零长的字符串全局
+    // (`[0 x i8] c""`), 而它正是那个把 genesis 链接器绊倒的东西(见文件末那条注释)。
+    if pt_refuse(unit, t, r1) == 1 {
+        return 0;
+    }
+    if pt_refuse_num(unit, t, r1) == 1 {
+        return 0;
+    }
+    let nfn: u32 = pt_cnt_fn(unit, t, nt);
+    let nst: u32 = pt_cnt_types(unit, t, nt);
+    let nen: u32 = pt_cnt_enums(unit, t, nt);
+    let nco: u32 = pt_cnt_kw0(unit, t, nt, "const");
+    let ncp: u32 = pt_cnt_kw0(unit, t, nt, "capability");
+    let nex: u32 = pt_cnt_kw0(unit, t, nt, "excluded");
+    let ndf: u32 = pt_cnt_defs(unit, sw);
+    let ngu: u32 = pt_cnt_guards(unit, t, r1);
+    let ngi: u32 = pt_cnt_gen(unit, t, nt);
+    let o: u32 = 0;
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 1, "potato");
+    o = pt_qs(out, o, "v5");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "unit");
+    o = pt_q(out, o, unit, pt_off(t, 1), pt_tlen(t, 1));
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "language");
+    o = pt_qs(out, o, "loment");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "mode");
+    o = pt_mode(out, o, unit, t, r1);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "switches");
+    o = pt_aopen(out, o, ndf);
+    o = pt_switches(out, o, unit, sw, ndf);
+    o = pt_acls(out, o, 1, ndf);
+    o = pt_str(out, o, ",\n");
+    // 三格恒空, 且**每一条都在别处被挡过**(不是"没实现所以写空"):
+    //   dialects —— 驱动器在 comefor 展开过之后就不让走这条路
+    //   bodies   —— 外部代码块在检查**之前**就被驱动器拒了
+    //   imports  —— 带 `use` 的单元在 `pt_root_end` 就拒了
+    o = pt_key(out, o, 1, "dialects");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "bodies");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "imports");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "capabilities");
+    o = pt_aopen(out, o, ncp);
+    o = pt_caps(out, o, unit, t, nt, ncp);
+    o = pt_acls(out, o, 1, ncp);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "functions");
+    o = pt_aopen(out, o, nfn);
+    o = pt_functions(out, o, unit, t, nt, nfn);
+    o = pt_acls(out, o, 1, nfn);
+    o = pt_str(out, o, ",\n");
+    // layouts: 来自 L0 装载 (`use "xxx.lom"`) —— 第 1 条边界把它连同 `use` 一起挡了
+    o = pt_key(out, o, 1, "layouts");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "consts");
+    o = pt_aopen(out, o, nco);
+    o = pt_consts(out, o, unit, t, nt, nco);
+    o = pt_acls(out, o, 1, nco);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "enums");
+    o = pt_aopen(out, o, nen);
+    o = pt_enums(out, o, unit, t, nt, nen);
+    o = pt_acls(out, o, 1, nen);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "types");
+    o = pt_aopen(out, o, nst);
+    o = pt_types(out, o, unit, t, nt, nst);
+    o = pt_acls(out, o, 1, nst);
+    o = pt_str(out, o, ",\n");
+    // traits / impls: `pt_refuse` 挡住了带这两类声明的单元
+    o = pt_key(out, o, 1, "traits");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "impls");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "generics");
+    o = pt_aopen(out, o, ngi);
+    o = pt_generics(out, o, unit, t, nt, ngi);
+    o = pt_acls(out, o, 1, ngi);
+    o = pt_str(out, o, ",\n");
+    // instances: 单态化实例 —— 自写的泛型被拒, 所以恒空(理由与拒绝那条同一处)
+    o = pt_key(out, o, 1, "instances");
+    o = pt_str(out, o, "[]");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "guards");
+    o = pt_dec(out, o, ngu as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 1, "excluded");
+    o = pt_aopen(out, o, nex);
+    o = pt_excluded(out, o, unit, t, r1, nex);
+    o = pt_acls(out, o, 1, nex);
+    o = pt_str(out, o, "\n");
+    o = pt_str(out, o, "}");
+    return pt_str(out, o, "\n");
+}

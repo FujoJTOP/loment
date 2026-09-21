@@ -89,6 +89,65 @@ def test_seed_fits_lomelf_input_buffer():
     print(f"      种子 {got} B / lomelf 输入上限 {cap} B, 余量 {cap - got} B")
 
 
+def _seed_table_counts() -> dict[str, int]:
+    """按 `lomelf.lomt` 的**表模型**数种子 `.ll` 要用掉多少格。
+
+    三张表都是"单调 bump + 越界踩下一张"，所以要数的正是各自的**入表次数**：
+
+    * **全局表** —— 每条 `@x = ` 一条（`gadd` 一次）。参考实现给**每个字符串字面量站点**
+      发一个 `.str.<函数>.<序号>` 全局、不按内容去重，所以"多几十个字面量"就是"多几十条"。
+    * **标签表** —— 全局 + `declare` + `define` + 基本块名（`lbl_add` 的四类调用点）。
+    * **回填表** —— 每次 `call` / `br` 一条，**加上"每个函数里引用到的全局"各一条**
+      （`em_mov_abs`；槽表按函数去重，所以同一个全局在一个函数里多次引用只算一次）。
+      这个模型用旧上限验过：旧上限 16384 下 HEAD 的种子算出来 13634（**过**），
+      而 2026-09-20 那版种子算出来 15686（**当场顶破**）—— 与实际行为一致。
+    """
+    s = loment_genesis.SEED.read_text(encoding="utf-8")
+    globals_ = len(re.findall(r"(?m)^@[-A-Za-z0-9_.]+\s*=", s))
+    decls = len(re.findall(r"(?m)^declare", s))
+    defines = len(re.findall(r"(?m)^define", s))
+    blocks = len(re.findall(r"(?m)^[-A-Za-z0-9_.]+:", s))
+    calls = len(re.findall(r"(?m)^\s*(?:%\S+ = )?call ", s))
+    brs = len(re.findall(r"(?m)^\s*br ", s))
+    fix = 0
+    for m in re.finditer(r"(?ms)^define[^\n]*@([-A-Za-z0-9_.]+)\(.*?\n\}", s):
+        body = m.group(0)
+        refs = set(re.findall(r"@[-A-Za-z0-9_.]+", body))
+        refs.discard("@" + m.group(1))
+        targets = set(re.findall(r"call [^\n]*?@([-A-Za-z0-9_.]+)\(", body))
+        fix += len({r for r in refs if r[1:] not in targets})
+    return {"globals": globals_, "labels": globals_ + decls + defines + blocks,
+            "fixup": calls + brs + fix}
+
+
+@test
+def test_seed_fits_lomelf_table_caps():
+    """种子的**三张表**都要装得进 `lomelf` 的容量 —— 越界是**静默**的，所以要有判据。
+
+    2026-09-20 实测（`docs/200`）：`lomelf.lomt` 的零碎表都是**单调 bump、没有边界检查**，
+    越界就踩进下一张表。那次是**全局表**先满（1801 → 2086，上限 2048）—— 报出来的却是
+    `lomelf: 未定义的标签: `（空白标签名），因为全局表写进了**标签表**。抬了全局表之后
+    又当场撞上**回填表**（上限 16384）。两处都抬了，并且各 `*_add` 都补了守卫。
+
+    这条判据的作用是**把余量变成看得见的预算**：与 `test_seed_fits_lomelf_input_buffer`
+    同一个形状（从 `lomelf.lomt` 里**读**上限，不另抄一份）。
+    """
+    src = LOMELF.read_text(encoding="utf-8")
+    caps = {}
+    for name in ("TB_G_MAX", "TB_LBL_MAX", "TB_FIX_MAX"):
+        m = re.search(rf"const {name}: u32 = (\d+);", src)
+        assert m, f"在 {LOMELF.name} 里找不到 `const {name}: u32 = <数>;`"
+        caps[name] = int(m.group(1))
+    got = _seed_table_counts()
+    pairs = [("globals", "TB_G_MAX", "全局表"), ("labels", "TB_LBL_MAX", "标签表"),
+             ("fixup", "TB_FIX_MAX", "回填表")]
+    for key, cap, label in pairs:
+        assert got[key] < caps[cap], (
+            f"种子的{label}要 {got[key]} 条，超过 {cap}={caps[cap]}（超 {got[key] - caps[cap]}）。"
+            f"**越界不报错**（单调 bump，会写进下一张表）—— 抬 `{cap}`，见 docs/200")
+        print(f"      {label} {got[key]} / {caps[cap]}, 余量 {caps[cap] - got[key]}")
+
+
 @test
 def test_bootstrap_needs_no_clang():
     """把 clang 从 PATH 拿掉, `sh loment/bootstrap.sh` 仍要跑通四条证明。"""

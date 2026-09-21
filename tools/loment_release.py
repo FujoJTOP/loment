@@ -135,6 +135,9 @@ GLOBS = [
     # 花括号族语法树 -> Loment 源码 (docs/186/189 第十八格): `trans_core` 那一半
     # (语料/电池从 `loment_ctrans_test` 引, 所以没有自己的数据文件)。
     "tools/loment_trans_test.py",
+    # 自举侧的 Potato v5 发射 (docs/189 第十九格): 语料是现成的 `loment/examples/*.lomt`
+    # 与 `lompi/store/**` / `loment/lib/**`, 没有自己的数据文件。
+    "tools/loment_potato_emit_test.py",
     # `choose write grammar` (docs/188 §1): 读法由**声明**决定、出厂锁的取值表。
     "tools/loment_grammar_test.py",
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）

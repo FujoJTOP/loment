@@ -53,9 +53,9 @@ const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本
 const M_TXT: u32 = 4202496;        // 4 MiB 代码缓冲
 const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
 const M_GB: u32 = 12591104;        // 1 MiB 全局数据
-const M_TAB: u32 = 13639680;       // 2 MiB 表区
-const M_OBJ: u32 = 15728640;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
-const ARENA: u64 = 19922944;
+const M_TAB: u32 = 13639680;       // 4 MiB 表区
+const M_OBJ: u32 = 17833984;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+const ARENA: u64 = 22028288;
 
 const IN_CAP: u32 = 4194304;
 const OUT_CAP: u32 = 4194304;
@@ -93,7 +93,23 @@ const C_NFREL: u32 = 104;          // 外部目标文件里的重定位条数 (d
 const C_NOBJ: u32 = 108;           // 已摆好的外部对象个数
 
 // 表起址 (相对 M_TAB); 格区 256 字节
-const TB_G: u32 = 256;             // 全局表 stride 32 × 2048
+//
+// ---- 2026-09-20: 全局表从 2048 抬到 4096（`docs/200` 记的那条墙）
+//
+// 与上面那条输入缓冲**同一个病**: 种子又长过了一格, 这次撞的是全局表。参考实现给每一条
+// 字符串字面量发一个 `.str.<函数>.<序号>` 全局（**不按内容去重**），所以"驱动链里多几十个
+// 字符串字面量"就等于"全局表多几十条"。种子一旦超过 2048 条, `gadd` 那里**没有任何边界
+// 检查**（它是单调 bump）—— 第 2049 条起直接写进**标签表**里, 症状不是报错, 是
+// `lomelf: 未定义的标签: `（标签表被改坏, 查出来是个空名字）。
+//
+// 抬法是**整条表区往后挪**: 全局表 +65536（= 32 × 2048）, 回填表再 +458752
+// （= 28 × 16384 —— 加完守卫之后它当场说出来自己是第二张满的, 见 `docs/200` §2）。
+// 两张表都给完之后, 表尾最后一个偏移从 1785608 涨到 2244360, 于是**表区跟着从 2 MiB
+// 抬到 4 MiB**, `M_OBJ` / `ARENA` 依次后移（与 `docs/192` §2 抬输入缓冲同一条式子）。
+// `TB_G_MAX` 是给判据读的（`loment_genesis_test::test_seed_fits_lomelf_table_caps`）——
+// 与 `IN_CAP` 那条同一种"把余量变成看得见的预算"。
+const TB_G_MAX: u32 = 4096;        // 全局表条数上限（判据按它数种子里的 `@x = `）
+const TB_G: u32 = 256;             // 全局表 stride 32 × TB_G_MAX
 const G_NOFF: u32 = 0;
 const G_NLEN: u32 = 4;
 const G_TOFF: u32 = 8;
@@ -103,14 +119,23 @@ const G_DOFF: u32 = 20;
 const G_ADDR: u32 = 24;
 const G_ZERO: u32 = 28;
 
-const TB_LBL: u32 = 65792;          // 标签表 stride 24 × 16384: (函数名, 块名, 地址)
+// 每张表的**容量**单独一个常量: ① 表满时要报错（下面各 `*_add` 的守卫）; ②
+// `loment_genesis_test::test_seed_fits_lomelf_table_caps` 按它数种子 —— **不另抄一份数**,
+// 与 `IN_CAP` / `test_m85_codegen_table_capacity` 同一条纪律。
+const TB_LBL_MAX: u32 = 16384;     // 标签表条数
+const TB_FIX_MAX: u32 = 32768;     // 回填表条数
+const TB_SLOT_MAX: u32 = 32768;    // 槽表条数（每函数清）
+const TB_ALLOC_MAX: u32 = 8192;    // alloca 表条数（每函数清）
+const TB_PHI_MAX: u32 = 512;       // phi 表条数（每函数清）
+
+const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 16384: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
 const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
 const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 459008;        // 回填表 stride 28 × 16384
+const TB_FIX: u32 = 524544;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
@@ -118,38 +143,38 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 917760;       // 槽表 stride 16 × 32768 (每函数清)
+const TB_SLOT: u32 = 1442048;       // 槽表 stride 16 × 32768 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 1442048;     // alloca 表 stride 16 × 8192 (每函数清)
+const TB_ALLOC: u32 = 1966336;     // alloca 表 stride 16 × 8192 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 1573120;       // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 2097408;       // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 1573504;       // phi 表 stride 16 × 512 (每函数清)
-const TB_IDATA: u32 = 1581696;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
+const TB_PHI: u32 = 2097792;       // phi 表 stride 16 × 512 (每函数清)
+const TB_IDATA: u32 = 2105984;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
 const PH_ILEN: u32 = 12;
 
 // 外部函数表 (docs/173): `declare` 出来的符号名, 偏移指向**输入文本** (与标签表同基)。
-const TB_EXT: u32 = 1587200;       // stride 8 × 4096: (起点, 长度)
+const TB_EXT: u32 = 2111488;       // stride 8 × 4096: (起点, 长度)
 const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
 
 // 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
-const TB_OBJ: u32 = 1588000;       // stride 8 × 256
+const TB_OBJ: u32 = 2112288;       // stride 8 × 256
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
 
 // 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
 // —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
-const TB_FREL: u32 = 1589000;      // stride 32 × 4096
+const TB_FREL: u32 = 2113288;      // stride 32 × 4096
 const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
 const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
 const F2_OFF: u32 = 8;             // r_offset (节内偏移)
@@ -723,6 +748,12 @@ fn setcell(tab: ptr, off: u32, v: u32) {
 
 fn lbl_add(tab: ptr, noff: u32, nlen: u32, boff: u32, blen: u32, addr: u32) {
     let k: u32 = cell(tab, C_NLBL);
+    // 表满 = **响亮地退出**, 不是往下写。这几张表都是**单调 bump**, 一旦越过自己的容量
+    // 就踩进下一张表 —— 症状离现场很远（2026-09-20 实测: 全局表越界 38 条, 报出来的是
+    // "未定义的标签: "，空白名字, 因为标签表被写坏了)。与 `IN_CAP` 那条守卫同一个纪律。
+    if k >= TB_LBL_MAX {
+        let _f: u32 = fail("标签表满了 — 抬高 TB_LBL 的容量 (loment/tools/lomelf.lomt 的 TB_LBL_MAX)");
+    }
     let base: u32 = TB_LBL + k * 24;
     store32(tab, base + L_NOFF, noff);
     store32(tab, base + L_NLEN, nlen);
@@ -748,6 +779,9 @@ fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32
 
 fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32, boff: u32, blen: u32) {
     let k: u32 = cell(tab, C_NFIX);
+    if k >= TB_FIX_MAX {
+        let _f: u32 = fail("回填表满了 — 抬高 TB_FIX 的容量 (loment/tools/lomelf.lomt 的 TB_FIX_MAX)");
+    }
     let base: u32 = TB_FIX + k * 28;
     store32(tab, base + F_SITE, site);
     store32(tab, base + F_KIND, kind);
@@ -780,6 +814,9 @@ fn slot_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
 
 fn slot_put(tab: ptr, noff: u32, nlen: u32, off: u32) {
     let k: u32 = cell(tab, C_NSLOT);
+    if k >= TB_SLOT_MAX {
+        let _f: u32 = fail("槽表满了 — 抬高 TB_SLOT 的容量 (loment/tools/lomelf.lomt 的 TB_SLOT_MAX)");
+    }
     let base: u32 = TB_SLOT + k * 16;
     store32(tab, base + S_NOFF, noff);
     store32(tab, base + S_NLEN, nlen);
@@ -802,6 +839,9 @@ fn alloc_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
 
 fn alloc_put(tab: ptr, noff: u32, nlen: u32, off: u32, size: u32) {
     let k: u32 = cell(tab, C_NALLOC);
+    if k >= TB_ALLOC_MAX {
+        let _f: u32 = fail("alloca 表满了 (单个函数) — 抬高 TB_ALLOC 的容量 (loment/tools/lomelf.lomt 的 TB_ALLOC_MAX)");
+    }
     let base: u32 = TB_ALLOC + k * 16;
     store32(tab, base + A_NOFF, noff);
     store32(tab, base + A_NLEN, nlen);
@@ -1379,6 +1419,9 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
         setcell(tab, C_GB, doff + sz);
     }
     let gi: u32 = cell(tab, C_NG);
+    if gi >= TB_G_MAX {
+        let _f: u32 = fail("全局表满了 — 抬高 TB_G 的容量 (loment/tools/lomelf.lomt 的 TB_G_MAX)");
+    }
     let gbase: u32 = TB_G + gi * 32;
     store32(tab, gbase + G_NOFF, noff);
     store32(tab, gbase + G_NLEN, nlen);
@@ -2143,6 +2186,9 @@ fn plan_frame(tab: ptr, t: ptr, fs: u32, fe: u32) {
             let dd2: u32 = skip_sp(t, dd + 1, le);
             if lit_at(t, dd2, le, "phi ") == 1 {
                 let k: u32 = cell(tab, C_NPHI);
+                if k >= TB_PHI_MAX {
+                    let _f: u32 = fail("phi 表满了 (单个函数) — 抬高 TB_PHI 的容量 (loment/tools/lomelf.lomt 的 TB_PHI_MAX)");
+                }
                 let pb: u32 = TB_PHI + k * 16;
                 store32(tab, pb + PH_BOFF, cbo);
                 store32(tab, pb + PH_BLEN, cbl);

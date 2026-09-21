@@ -109,6 +109,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_lomtfrom_test",
                  # 花括号族语法树 -> Loment 源码 (docs/186/189 第十八格) 的 Loment 版
                  "loment_trans_test",
+                 # 自举侧的 Potato v5 发射 (docs/189 第十九格): `stage1 --emit-potato`
+                 # 与 `lomentc.emit_potato` **逐字节**比, 子集外点名拒绝
+                 "loment_potato_emit_test",
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",

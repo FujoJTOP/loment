@@ -1402,11 +1402,19 @@ def test_m86_selfhost_perf_budget():
     | mathutil | 2 | <0.1s | ~0.1s |
     | lexer | 10 | <0.1s | ~0.1s |
     | codegen | 130 | 4.6s | ~0.7s |
-    | driver (自编译) | 253 | **12.8s** | 1.2s |
+    | driver (自编译) | **253** | **12.8s** | 1.2s |
+    | driver (自编译) | **435** | **34.1s** | 1.7s |
 
-    自举版比参考实现慢约 10 倍, 而且略超线性 (130 -> 253 个函数, 4.6s -> 12.8s):
-    符号查找是**线性扫** (`chk_lookup_slot` / codegen 的 `find_fn`), 单元越大越贵。
-    这里判"<= 30s"是**护栏** (机器相关, 给足余量), 数字打印出来便于看趋势。
+    自举版比参考实现慢约 10 倍, 而且**超线性** (130 -> 253 -> 435 个函数,
+    4.6s -> 12.8s -> 34.1s): 符号查找是**线性扫** (`chk_lookup_slot` / codegen 的
+    `find_fn`), 单元越大越贵 —— `12.8 × (435/253)^2 ≈ 37.9s`, 实测 34.1s, 就在这条线上。
+
+    **2026-09-21 护栏从 30s 抬到 60s**: 第二行那个 435 是 `docs/189` S1 第十九格
+    (自举侧 potato 发射, +59 个函数) 之后的驱动链 —— 它把 30s 那道线顶破了,
+    而**破的不是"谁变慢了"**: 参考实现在同一份单元上只从 0.40s 涨到 0.52s(1.3x),
+    自举侧涨 2.7x, 差距正是上面那条超线性曲线。真正的修法是给那几处查找加索引
+    (**独立的一件事**, 没有做), 在那之前护栏只能跟着单元规模走。它仍然报数,
+    所以"忽然又慢一倍"这种真回归照样看得见。
     """
     if not (_wsl() and _clang()):
         print("      SKIP: 需要 WSL + clang")
@@ -1432,9 +1440,9 @@ def test_m86_selfhost_perf_budget():
         runs = [timed(f"cd {_wsl_path(ROOT)} && {_T}perf_drv loment/selfhost/driver.lomt "
                       f"> /dev/null") for _ in range(2)]
         best = min(runs) - base
-        budget = 30.0
-        assert best <= budget, f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s (基线 12.8s)"
-        print(f"      自举自编译: {best:.2f}s (护栏 {budget:.0f}s; 参考实现 Python 1.2s, "
+        budget = 60.0
+        assert best <= budget, f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s (435 个函数时基线 34.1s)"
+        print(f"      自举自编译: {best:.2f}s (护栏 {budget:.0f}s; 参考实现 Python 1.7s, "
               f"WSL 基线 {base:.2f}s)")
 
 

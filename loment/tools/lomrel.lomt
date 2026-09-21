@@ -24,11 +24,18 @@ const M_OUT: u32 = 5013504;        // 1 MiB 输出
 const M_SHA: u32 = 6062592;        // 1024 sha 状态
 const M_DIG: u32 = 6063616;        // 32 摘要
 const M_HEX: u32 = 6063648;        // 64 hex
-const M_NORM: u32 = 6063744;       // 2 MiB 归一化副本
-const M_CUR: u32 = 8159744;        // 1 MiB 现有 manifest
-const ARENA: u64 = 9400000;
+// ---- 2026-09-20: 归一化副本从 2 MiB 抬到 4 MiB（`docs/200` §5）
+//
+// 起因与 `lomelf` 那两处**同一个病**: 自举种子长过了这一格。原先这里只给 2 MiB，
+// 而清单里**有比它大的工件**（种子本身）—— 越界就写进紧挨着的 `M_CUR`（已装载的清单），
+// 于是症状是"从种子那一条起后面全对不上"，指不到现场。
+// 抬法: `NORM_CAP` 跟 `IN_CAP` **同值**（读得进来的就得归一化得了），`M_CUR` /
+// `ARENA` 依次后移。
+const M_NORM: u32 = 6063744;       // 4 MiB 归一化副本
+const M_CUR: u32 = 10258048;       // 1 MiB 现有 manifest
+const ARENA: u64 = 11534336;
 
-const NORM_CAP: u32 = 2097152;
+const NORM_CAP: u32 = 4194304;
 const CUR_CAP: u32 = 1048576;
 
 const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
@@ -239,6 +246,7 @@ tools/nltrans.py
 tools/loment_nltrans_test.py
 tools/loment_lomtfrom_test.py
 tools/loment_trans_test.py
+tools/loment_potato_emit_test.py
 tools/loment_grammar_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
@@ -556,6 +564,17 @@ fn sha_of_file(mem: ptr, rel: ptr, rl: u32, hexout: ptr) -> u32 {
     let n: u64 = read_all(fd as u64, file, IN_CAP as u64);
     close_fd(fd);
     let m: u32 = n as u32;
+    // **归一化副本装不下就报错退出**（`docs/200` §5）。这一格原先没有这条：
+    // `M_NORM` 只有 2 MiB，而喂进来的工件里**有比它大的**（自举种子），于是通用换行那一段
+    // 直接写进紧挨着的 `M_CUR`（已装载的清单）—— 症状不是这个文件的哈希错，是
+    // **它之后每一条都对不上**（清单被改坏了，而报出来的是"工件变了"）。
+    // 2026-09-20 实测：种子长到 2.32 MiB 之后，486 条里从种子那一条起 226 条全红。
+    if m > NORM_CAP {
+        wstr(2, "[ERR] 工件超过归一化缓冲 (NORM_CAP) —— 抬高 M_NORM / NORM_CAP / M_CUR / ARENA: ");
+        write_all(2, rel, rl as u64);
+        wstr(2, "\n");
+        return 1;
+    }
     if has_nul(file, m) == 1 || utf8_ok(file, m) == 0 {
         sha_init(sha);
         sha_update(sha, file, m);

@@ -77,6 +77,10 @@ use lexer
 use codegen
 use checker
 use comefor
+// `--emit-potato`(`docs/189` S1): 形式对象是**另一条出口**, 与 IR 平行 —— 它**不经过**
+// codegen (参考实现的 `emit_potato` 也不经过 IR 后端), 所以聚合类型那种"后端编不了"的
+// 单元照样发得出对象。
+use potato
 
 /// 退出; 返回值只为类型完整 (syscall 之后不会回来)。
 fn die(code: u64) -> u32 {
@@ -1480,11 +1484,17 @@ fn _start() -> u32 {
     // 之前取** —— `argv_at` 每次都重写同一块缓冲 (`argv_buf`), 而后面的 `ap` 是指进那块
     // 缓冲的指针; 顺序反了 `ap` 的内容会被这两次调用抹掉。
     // 不给这个参数就是**老行为**: 只打人看的文本到 stderr, 不吐 JSONL。
+    //
+    // `--emit-potato` (docs/189 S1) 与它同一个槽位。两者的区别是"要不要再多一个参数":
+    // `--diag-out` 后面跟路径, 这个不跟 —— 对象直接写 stdout (与 IR 同一条出口次序:
+    // **一个单元一份产物**)。
     store8(scr, DIAG_OFF, 0 as u8);
+    let pmode: u32 = 0;
     let a2: u64 = argv_at(argv_buf as ptr, 65536, scr, 2);
     if a2 != 0 {
         let p2: ptr = ptr_add(argv_buf as ptr, (a2 >> 32) as u32);
-        if streq(p2, (a2 % 4294967296) as u32, "--diag-out") == 1 {
+        let n2: u32 = (a2 % 4294967296) as u32;
+        if streq(p2, n2, "--diag-out") == 1 {
             let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, 3);
             if a3 != 0 {
                 let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
@@ -1492,6 +1502,8 @@ fn _start() -> u32 {
                 copy_bytes(ptr_add(scr, DIAG_OFF), 0, p3, 0, n3);
                 store8(scr, DIAG_OFF + n3, 0 as u8);
             }
+        } else if streq(p2, n2, "--emit-potato") == 1 {
+            pmode = 1;
         }
     }
     // 工具目录: argv[0] 所在目录 (自带 store 相对它)。**先取它** —— 下一次 argv_at 会把
@@ -1506,7 +1518,7 @@ fn _start() -> u32 {
     }
     let av: u64 = argv_at(argv_buf as ptr, 65536, scr, 1);
     if av == 0 {
-        return fail("fujoc-s: 用法: fujoc-s <入口.lomt> [--diag-out PATH]\n");
+        return fail("fujoc-s: 用法: fujoc-s <入口.lomt> [--diag-out PATH | --emit-potato]\n");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
@@ -1588,7 +1600,9 @@ fn _start() -> u32 {
     //
     // 产物写进**第二块 token 缓冲** —— 展开会**变长**（宏体吐的比吃的多），
     // 而 `apply_switches` 那种原地压缩只对"只删不插"成立。
+    let cf_used: u32 = 0;
     if has_comefor(unit, toks2, nt) == 1 {
+        cf_used = 1;
         let cfv: u64 = sys_alloc(CF_BYTES as u64);       // 方言表 + 体缓冲 + 语境
         if cfv == 0 {
             return fail("fujoc-s: brk failed (comefor)\n");
@@ -1698,6 +1712,25 @@ fn _start() -> u32 {
             e = e + 1;
         }
         return die(1);
+    }
+    // `--emit-potato` (`docs/189` S1): 发**形式对象**(Potato v5)而不是 IR。
+    //
+    // **在 codegen 之前** —— 参考实现的 `emit_potato` 也不经过 IR 后端, 所以"聚合类型
+    // 按值传"那种后端编不了的单元照样发得出对象(那正是 M45 把形式对象做成**出口**的理由:
+    // 它是**独立于后端**的那一份视图)。放在 codegen 之后就没有这个性质了。
+    //
+    // 方言那一格由**这里**拒: token 流上 `comefor`/`byuse` 已经被展开吃掉了, 走到这里
+    // 再也看不出"这次展开过没有" —— 而这一层手上正好有那个答案。
+    if pmode == 1 {
+        if cf_used == 1 {
+            return fail("fujoc-s: --emit-potato: 这个单元用了 comefor/byuse —— `dialects` 那一格还没进自举侧 (docs/189 S1)\n");
+        }
+        let pn: u32 = potato_emit(unit, toks2, nt, sw, ir);
+        if pn == 0 {
+            return die(1);
+        }
+        write_all(1, ir, pn as u64);
+        return die(0);
     }
     // codegen 的状态块也从 brk 拿: 那几张表按**单元规模**定 (函数表 4600 格), 整块
     // 500 KB 上下, 放不进语言自带的 64 KiB bump 堆 (checker 的 arena 早就是这条路)。

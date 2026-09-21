@@ -576,7 +576,7 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 | 轴 | Python 侧 | Loment 侧**已有** | 还缺什么 |
 |---|---|---|---|
 | 六门翻译器（§4.1） | **5697 行**（`potato_from` 1790 + `lomt_from` 481 + `trans_core` 1079 + 六门方言表 2347） | **0** | **整根** —— 要在 Loment 里重新做一个前端（词法 + 递归下降 + 类型 + 发射） |
-| 自举侧 potato 通路 | `emit_potato` **115 行**，但它坐在 `load_unit` + `check` + **`prepare`（单态化）**之上 | 前端已有 **12687 行 Loment**（`loment/selfhost/` 18 个文件：lexer / parser / checker / codegen） | 自举镜里的**模块→Potato 视图** + **单态化**（`grep tparam/generic` 只有 13 处，没有 `prepare`）；自举侧**一行 potato 发射都没有**（`driver.lomt` 里那两处只是注释） |
+| 自举侧 potato 通路 | `emit_potato` **115 行**，但它坐在 `load_unit` + `check` + **`prepare`（单态化）**之上 | 前端已有 **12687 行 Loment**（`loment/selfhost/` 18 个文件：lexer / parser / checker / codegen）+ **第一半**（第 21 格，2026-09-20）：`loment/selfhost/potato.lomt` 的 `potato_emit` + `driver --emit-potato` | **第二半**：**单态化**（`prepare`）与 `instances`、`generics` 的 fn/struct 那两类、`traits`/`impls` 原始视图、`layouts`、依赖名（`imports`）—— 判据里那 13 份"点名拒绝"就是待办清单 |
 
 ⇒ **两根轴都不是"再搬一格"**：第一根要在 Loment 里重建一个**前端**；第二根要在自举镜里补出
 **单态化**与那份视图。按 §4.1 的判断（"翻译器要建树 … 这一格的代价要认"）与这次数出来的
@@ -892,6 +892,70 @@ S2、S4 依次被上一级门住（各自的前置写在 §3 那张表里）。
 
 **一处已知的子集外**：一行多条语句（`x = 1; y = 2`）**不收但出声**（退出码 1）——
 静默少发一条语句照样编得过，只是少算一步。
+
+#### 第 21 格（自举侧 potato 通路）：**先划出边界，再一格一格填**
+
+§4.1 那两根轴里，这一根是**另一半**（前一根是六门翻译器的孪生）。它问的不是"把源翻成
+Loment"，而是"**把检查过的单元发成 Potato v5 形式对象**"—— 对照面是
+`tools/lomentc.py::emit_potato`（115 行）。
+
+自举侧原先**一行 potato 发射都没有**（`driver.lomt` 里那两处只是注释）。这一格落地的是
+它的**第一半**：`loment/selfhost/potato.lomt`（`potato_emit`）+ `driver.lomt` 的
+`--emit-potato` + 判据 `tools/loment_potato_emit_test.py`（4/4）：
+
+* **27 份单元的形式对象与参考实现逐字节相同**（19 份 `loment/examples` + 8 份跨目录：
+  `lompi/store/std` 的 `num`/`hash`/`f64bits`、`loment/lib` 的 `num`/`mem`、
+  `loment/selfhost/ir_*`、`loment/tools/lomsyscalls`）；
+* **13 份子集外的单元各自点名拒绝**（退出码 1 + 话里出现那条轴的名字），
+  并且有一条判据钉住"`loment/examples` 下每一份要么覆盖、要么拒绝、要么跳过" ——
+  **新加一份示例不做决定就红**。
+
+**它读什么**：token 流与开关表，**不读源码、不重新解析**。走到这里时单元已经检查过了，
+所以"顶层 `fn` 就是一个函数声明"由检查器担保；而检查器的符号表里没有这一格要的锚点
+（`generics` 要的类型形参在名字与 `{` 之间，它按需重扫），于是索性**只回 token 流**。
+
+**拒绝的六条**（每一条都是"静默发错 vs 点名拒绝"的取舍，选了后者）：
+
+| 轴 | 为什么这一半不做 |
+|---|---|
+| `use` 来的依赖（`imports`） | 驱动器手上的单元是"根 + 依赖 + 预置枚举"**拼在一个** token 流里，而 Potato 那些格**只描述根单元**；分界线是第二个顶层 `module`（= 注入的 `__prelude`） |
+| 自写的泛型形参 | `generics` 与 `instances` 在参考实现里是**一对**，而单态化（`prepare`）还没搬进来 |
+| 泛型**类型**的用法（`Option<…>`） | 同上：`prepare` 会把签名里的名字改写成 `Result_u32_u32` 那种具体名 |
+| `trait` / `impl` | `traits`/`impls` 收的是**原始视图**（trait 名 + 方法名；impl 的 trait/接受者/方法名），检查器只把 impl 方法压成 `K_METHOD` |
+| L0 布局（`layouts`） | 来自 `use "xxx.lom"` 那种装载，被第一条一起挡住了 |
+| 方言（`dialects`） | 由**驱动器**拒 —— token 流上 `comefor` 已被展开吃掉，只有那一层还知道"这次展开过没有" |
+
+37. ⚠ **`prepare()` 会把带形参的声明从表里**换掉**。第一版把 `enums` 写成"单元里所有
+    `enum`"，于是预置的 `Option`/`Result` 一起发了出去 —— 而参考实现那边它们是
+    **`generics` 里的一格、不是 `enums` 里的一格**（`prepare` 把声明了形参的那一类换成
+    实例化出来的具体副本）。**判据没红在这里**是因为它先红了别处；真正的教训是
+    "对象里每一格都要问一句：`prepare` 前后它是不是同一张表"。
+38. ⚠ **`let x: i64 = <返回 u32 的函数>()` 发得出非法 IR，而 Python 链接器不挑**。
+    `pt_wfail` 返回 `u32`，我写成 `let _w: i64 = pt_wfail(...)` —— 参考实现发
+    `store i64 %t11, ptr %_w0.addr` 而 `%t11` 是 i32，**clang 当场拒**（`loment_genesis_test`
+    的 bootstrap 那一步抓到）。同一份种子喂 `loment_dist._lomelf_link`（Python 那边）
+    **照样链得出可执行文件** —— 于是"我的判据全绿"与"种子是坏的"可以同时成立。
+    **这是门禁里真跑到 clang 那一步的价值**：`build_stage1()` 走的是宽松的 Python 链接器，
+    只有一个真正过 clang 的环节才看得见。
+39. **`(48 + (x % 10) as u32) as u8` 两个实现推的不是同一个类型**。参考实现按左操作数
+    算成 i32，自举 codegen 记成 i64 —— 发出来是 `trunc i64 %t19 to i8`，而 `%t19` 是
+    `add i32`（**自相矛盾的 IR**）。这是自举定点（bootstrap 2/4）唯一的分歧点。
+    修法是**把中间量落成一个具名局部**（`let dg: u32 = (x % 10) as u32;`），不是去改
+    codegen —— 但**那处 codegen 的类型推断值得单开一件**（自相矛盾的 IR 迟早会以别的形状
+    再出现）。
+40. ⚠ **`""` 会生成一个零长全局**（`[0 x i8] c""`）。这一格原先用 `""` 当"没拒绝"的哨兵，
+    改成"**打话 + 返回 1**"（函数自己把话打出去），顺带把"空串当哨兵"这个形状去掉了 ——
+    零长全局落在数据布局的边界上，`lomelf` 那边不值得为它冒险。
+
+**这一格顺带把 `lomelf` 的两张表顶破了**（这是它真正的"额外收获"）：种子一长，
+第 1/4 步就报 `lomelf: 未定义的标签: `（**空白标签名**）。查下来是 `lomelf.lomt` 的
+**全局表**（上限 2048，种子 1801 → 2086）与**回填表**（上限 16384，种子 15686）——
+两张都是"单调 bump、没有边界检查"，越界就踩下一张表，所以报出来的错离现场很远。
+修法、六条守卫与预算判据写在 `docs/200`。**这一处与 `docs/192` 的输入缓冲是同一种病第二次发作**。
+
+**还缺什么**（第二半）：单态化（`prepare`）与 `instances`、`generics` 的 fn/struct 那两类、
+`traits`/`impls` 的原始视图、`layouts`、依赖的名字（`imports`）。判据里那 13 份"点名拒绝"
+就是这第二半的**待办清单**。
 
 #### 同族的两处（**能过翻译器、过不了后面的层**）
 
