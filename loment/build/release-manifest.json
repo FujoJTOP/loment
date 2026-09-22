@@ -1775,11 +1775,11 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "686514c79c1731575e74afaf26d19af589c0453ce22a960b7cd1c99b9f378b9b"
+   "sha256": "c19a0176791d01cba827ab660d615abac038c315c223c372ece52637f7fdc684"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
-   "sha256": "6c22621fb8bb7959453acf771648e60c6b1b5005667f5a2dc22dba4fd4bbd0bc"
+   "sha256": "3b5296fffb0cb43e9c84035da53ad20bca8027d4e548e6f6892892008fd47952"
   },
   {
    "path": "docs/177-ffi-complete.md",
@@ -1831,7 +1831,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "4ce8bb672cfc8690cfb2bd6adc27ff471b91ade575105f341925b031d49a62c3"
+   "sha256": "8f0f13aefd73c3476f4d0b771dda59c3ee66252f3900d95295b5b5f2ca90122f"
   },
   {
    "path": "docs/190-loment-debugger.md",
