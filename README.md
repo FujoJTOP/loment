@@ -32,6 +32,8 @@ the repository on purpose, and "the repository contains only Loment" is not yet 
 The language surface is frozen — [docs/158](docs/158-loment-freeze.md) says what changing it
 costs — and the implementation is not.
 
+![The bootstrap: the committed seed is cooked into a stage1 by the genesis assembler; stage1 must reproduce the seed byte for byte; stage2 to stage3 reaches a fixed point; the two stages agree on a foreign entry file](editors/loment-bootstrap.png)
+
 ## A first program
 
 ```rust
@@ -52,6 +54,8 @@ hello from Loment
 `_start` is the entry point, because there is no runtime to call one for you, and output goes
 through the `write` system call, because there is no `printf`. [QUICKSTART.md](QUICKSTART.md)
 takes it from here — sources, toolchain, and the first four rows below.
+
+![How a program is built: hello.lomt goes to loment-driver, which checks it and emits LLVM IR; loment-lomelf, the repository's own linker, turns that into an 8 KB static executable](editors/loment-pipeline.png)
 
 ## What it is for
 
@@ -77,6 +81,11 @@ grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).
 | **A project mode, not a crate attribute** | `choose std` or `choose no_std`, at most once, in the root unit. "Hosted or freestanding" becomes a property of the whole program — the compiler can refuse a half-hosted one, and a form object can carry the setting. [docs/180](docs/180-std-core.md) |
 | **Reports errors from a separate program** | The compiler emits structured diagnostics; `lomenterr` adds the title, the location and how to fix it, so the compiler carries no message table of its own. [docs/182](docs/182-lomenterr-and-choose-switches.md) |
 | **Everything is customizable** | The source suffix, the command surface (`loment-<name>` on `PATH`; official commands always win), the libraries (a directory whose identity is a content hash), and the toolchain itself. No registry — the extension points are files on disk. |
+
+That last row, in full — the report you actually read when a line does not compile. The
+compiler emitted a code and a position; everything below `message:` came from `lomenterr`:
+
+![loment check rendering an E002 undeclared-name diagnostic: the code, the source line with a caret, then message, what went wrong, why, four numbered fixes, and what is and is not supported](editors/loment-diagnostic.png)
 
 ## Documentation
 
