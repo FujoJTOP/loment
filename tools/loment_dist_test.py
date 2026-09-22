@@ -53,11 +53,23 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def wsl(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(["wsl", "-e", *args], capture_output=True, text=True,
+    """在**这套命令自己的平台**上跑它们。
+
+    `rm` / `sh` / `test` / 装出来的 `loment` 本来就是 Linux 的东西：Windows 上得借 WSL，
+    而**本机就是 Linux 时借 WSL 是假借** —— 那些命令本来就在手边，CI 上更是直接
+    `FileNotFoundError: 'wsl'`（2026-09-22 把门禁搬上 Linux runner 时撞到，露出来的是
+    `install.sh 端到端` 那条）。所以这里按平台分流，**不是跳过** —— 换到 Linux 之后这些
+    判据反而跑的是原生那条路（在 Linux 上验 `install.sh` 正是该做的事）。
+    """
+    argv = list(args) if sys.platform != "win32" else ["wsl", "-e", *args]
+    return subprocess.run(argv, capture_output=True, text=True,
                           shell=False, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def wsl_path(p: Path) -> str:
+    """给上面那些命令用的路径。本机就是 Linux 时**原样返回** —— 没有盘符要翻。"""
+    if sys.platform != "win32":
+        return str(p.resolve())
     s = str(p.resolve()).replace("\\", "/")
     return "/mnt/" + s[0].lower() + s[2:]
 

@@ -755,7 +755,7 @@
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "1a06a607f79c61e568ec8e447484925afd63a6f5090db8cac95a5317a7367758"
+   "sha256": "354590932f753590313dd96873de0eb38e02649ea6ace048d734a5b0fe2c6981"
   },
   {
    "path": "tools/loment_dap.py",
@@ -1019,7 +1019,7 @@
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "bbfe9b0a986a346e7fc0a3fda51b36f3b345ef5b909207acc4a15e30387942b3"
+   "sha256": "af8a5b67c8148889d1373a8ec6c1b919269ab171ca8f55679706b32beec22492"
   },
   {
    "path": "tools/loment_sign.py",
