@@ -699,7 +699,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "6db4cc5e11ee50bad385d3b3291c2987f0f4420aa88f9639da8d98de04bd08ce"
+   "sha256": "1fe59326acd2f65eecd3b13d37f131129a2172c76e37ab5300a4b09bedba3cfc"
   },
   {
    "path": "tools/loment_boot.py",
