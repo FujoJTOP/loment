@@ -1,0 +1,27 @@
+# 静态门禁的**基线** —— 这份清单上的红项是**已知的**（不判失败）；清单之外的**新红**判失败。
+#
+# 纪律（与 `PARSE_KNOWN_GAPS` / `M85_KNOWN_GAPS` 那两道棘轮同一个形状）：
+#
+#   * **只许变短**：哪一条修好了，就在**同一个 PR 里**把它从本文件删掉 —— 门禁会在
+#     job summary 里点名提醒（"基线里已经绿了的"那一行）。不删不判失败，但会一直提醒。
+#   * **加条目要写清理由，并且实测过**：基线是**量出来**的，不是猜的
+#     （理由见 `CONTRIBUTING.md` 门禁那一节与 `docs/189`）。条目分两类，
+#     加的时候在下面标一下：`环境`（runner 上缺东西 / 姊妹仓不在树里）与
+#     `仓库`（真的还没做完，是待修的红）。
+#   * 本文件**不进发布清单**：`.github/**` 不在 `loment_release.GLOBS` 里，
+#     所以动它不会让清单过期。
+#
+# 量于 2026-09-22，`main@61f6289` 那一轮（run 35785011534）实测 10 条：
+# 4 条是"缺 LinuxFUAI 姊妹检出"（与本机同源），其余是 Linux 可移植性（正在逐条修）。
+#
+# 格式：每行一个检查名（`:: [static] <名字> … FAIL` 里的那个名字）；`#` 起头是注释。
+fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
+lom_audit                    # 环境：同上（要读对方的 C 头）
+lomc_test                    # 环境：同上（发布副本一致性那两条）
+potato_cross                 # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
+loment_dist_test             # 仓库：Linux 可移植性（安装脚本 / 可执行位那一类，正在修）
+loment_lomtfrom_test         # 仓库：Linux 可移植性
+loment_multisyntax_projects_test  # 仓库：新落的判据，runner 上 2/3（正在修）
+loment_trans_test            # 仓库：Linux 可移植性
+potato_test                  # 仓库：Linux 可移植性（孪生二进制段错误那条）
+vscode_ext_test              # 仓库：Linux 可移植性
