@@ -43,13 +43,13 @@ end
 
 to _start
     let p be a Point with x as 4 and y as 5
-    let xs be the list 1, 2, 3
+    let xs be [1, 2, 3]
     say "score "
     say the number score of a Kind that is Big carrying LIMIT
     say " size "
-    say the number ask p for size
+    say the number the size of p
     paint 42 at 0 in the changeable run of xs
-    talk to the machine 60 with item 0 of xs, 0, 0
+    talk to the machine 60 with the item 0 of xs, 0, 0
 end
 ```
 
@@ -67,6 +67,55 @@ end
 | 报错的性质 | "这一版还没做" | "**这一版不收**"（是设计，不是缺口） |
 
 **⇒ 它是第一个"从零画子集"的样本**，所以文档要把每一条线**为什么画在那里**写清楚。
+
+### 1.1 2026-09-22：砍掉"过度复杂"那一层（用户点出）
+
+用户这一天的原话是 **「自然语法存在过度复杂的问题」**。先量了，再动手 ——
+量出来的三处，与它们的根因：
+
+| 量出来的 | 数 | 根因 |
+|---|---|---|
+| **每个运算符两种写法** | 15 个运算符 × 2 | 词形（`plus`）与符号形（`+`）**都收** |
+| **类型短语比它要替换的东西更长** | `a whole number`(14 字符) 对 `i64`(3)；共 12 种 | 给每个类型都造了一个英文短语 |
+| **"取一个东西"有五种壳** | `the x of p` / `ask p for size` / `item 0 of xs` / `the length of xs` / `the run of xs` | 一个 Loment 构造配一个句子 |
+
+**根因一句话**：我做的是**与 Loment 表面的一一对应**，于是这一门是"Loment 的复杂度
+**加上**一层句子开销"。而自然语言绑定只有在**严格更小**时才划算 —— 我把它做成了平行的一套。
+那一串标识符冲突（`a`、`and`、`called`）不是运气差，是这个设计的**症状**：它拿了
+三十几个普通英文词当结构，于是普通名字一路撞上去。
+
+**砍法（用户选的是"去重、不减能力"）**：
+
+1. **一个运算符只有一个写法** —— 留词形，符号形点名拒；位运算（`&` `|` `^`）
+   没有自然语言说法，所以**只有符号**（它们也只有一个写法）。
+2. **类型只留 6 个英文基名**，其余一律照 Loment 写（`i32` / `[i64; 3]` / `[i64]` /
+   `mut [i64]` / `Option<i64>` / `Result<i64, str>`）。12 种 → 6 种。
+3. **"取一个东西"收成一条规则** `the <什么> of <东西>` —— 字段、方法、下标、长度、
+   切片五格同壳；数组那一族（字面量、切片、定长）照 Loment 写，于是这条规则**没有例外**。
+
+**一处刻意的例外**（写在第 2 条的下面）：那 6 个的 Loment 拼法**同时收**，
+因为**编译器报错时印的就是它们**（`return 类型 u8，函数声明 i32`）——
+得能把读到的那句话原样写回去。这是"两种写法"里唯一一处，理由是**可读回**，不是方便。
+
+**能力一条没减**：`Surface.nl` 那一篇（结构体 / 枚举 / trait / impl / 泛型 / match 与
+if let / 能力域 / `use` / 数组切片 / Option·Result / `?`）**改前改后翻出来的 Loment
+逐字节相同** —— 砍掉的是**表面**，不是能力。这一条本身就说明砍对了地方。
+
+**改前改后（实测）**：
+
+| | 改前 | 改后 |
+|---|---|---|
+| **要认的拼法（合计）** | **46** | **22** |
+| 符号运算符 | 19 | 3（只剩位运算） |
+| 类型短语 | 12 | 6 |
+| "取一个东西"的壳 | 5 | 1 |
+| 续行词 `_CONTINUE` | 54 | 38 |
+| 保留词 `_RESERVED` | 39 | 36 |
+| 翻译器 | 2196 行 | 2183 行 |
+
+**最后一行要如实说**：**翻译器的行数几乎没动**。因为砍掉的是"多出来的那条路"，
+而每一条路本身只有几行；它从来不是"复杂"的量。**要认的拼法才是** ——
+46 → 22 是这一轮的账，而保留词只降 3 个（那些词现在是**唯一**写法，删不得）。
 
 ## 2. 语法表（完整面）
 
@@ -113,42 +162,59 @@ end
 
 ### 2.3 值
 
+**"取一个东西"只有一种形状：`the <什么> of <东西>`。** 取字段、取方法、取一格、
+取长度、取切片**五格同一个壳**（`<什么>` 是字段名 / 方法名 / `item` / `length` / `run`，
+由名字自己说了算）：
+
 | 写法 | 落成的 Loment | | 写法 | 落成的 Loment |
 |---|---|---|---|---|
-| `a Point with x as 1 and y as 2` | `Point { x: 1, y: 2 }` | | `the x of p` | `p.x` |
-| `a Kind that is Big carrying 5` | `Kind::Big(5)` | | `the list 1, 2, 3` | `[1, 2, 3]` |
-| `item 0 of xs` | `xs[0]` | | `the length of xs` | `slice_len(xs)` |
+| `the x of p`（字段） | `p.x` | | `the size of p`（方法） | `p.size()` |
+| `the item 0 of xs` | `xs[0]` | | `the length of xs` | `slice_len(xs)` |
 | `the run of xs` | `&xs` | | `the changeable run of xs` | `&mut xs` |
-| `ask p for size` | `p.size()` | | `f of a, b`（调用） | `f(a, b)` |
+
+其余的值：
+
+| 写法 | 落成的 Loment | | 写法 | 落成的 Loment |
+|---|---|---|---|---|
+| `a Point with x as 1 and y as 2` | `Point { x: 1, y: 2 }` | | `[1, 2, 3]`（数组字面量） | `[1, 2, 3]` |
+| `a Kind that is Big carrying 5` | `Kind::Big(5)` | | `f of a, b`（调用） | `f(a, b)` |
 | `something carrying x` | `Option::Some(x)` | | `nothing to carry` | `Option::None` |
 | `a success carrying x` | `Result::Ok(x)` | | `a failure carrying x` | `Result::Err(x)` |
 
 **没有实参的调用就写名字本身**（`say the number run` → `run()`）。
+**数组那一族照 Loment 写**（字面量 `[1, 2, 3]`、切片 `[i64]`、定长 `[i64; 3]`）——
+它们不是"取一个东西"，所以 `the … of …` 那条规则没有例外。
 
-### 2.4 类型短语
+### 2.4 类型：**6 个英文基名 + 其余照 Loment 写**
 
-| 自然语言 | Loment | | 自然语言 | Loment |
+| 自然语言（6 个） | Loment | | 直接写 | Loment |
 |---|---|---|---|---|
-| `a whole number` / `a 32-bit whole number` | `i64` / `i32` | | `a byte` | `u8` |
-| `a count` / `a 64-bit count` | `u32` / `u64` | | `a truth` | `bool` |
-| `text` / `a buffer` | `str` / `ptr` | | `nothing` | `()` |
-| `a list of 3 whole numbers` | `[i64; 3]` | | `a run of whole numbers` | `[i64]` |
-| `a changeable run of whole numbers` | `mut [i64]` | | `a Point`（结构体/枚举名） | `Point` |
-| `maybe a whole number` | `Option<i64>` | | `a whole number or a failure of text` | `Result<i64, str>` |
+| `a whole number` | `i64` | | `i32` / `u64` / `i8` … | 同名 |
+| `a count` | `u32` | | `[i64; 3]` | 定长数组 |
+| `a byte` | `u8` | | `[i64]` | 切片 |
+| `a truth` | `bool` | | `mut [i64]` | 可改切片 |
+| `text` | `str` | | `Option<i64>` / `Result<i64, str>` | 同名 |
+| `a buffer` | `ptr` | | `Point`（结构体/枚举名） | 同名 |
 
-`a` / `an` 可省；`i64` / `u8` 这些**直接写也收**；复数也收（`whole numbers`）。
+`a` / `an` 可省；复数也收（`whole numbers`）。
 
-### 2.5 运算符：词形与符号形是**同一件事**
+上面那六个的 Loment 拼法（`i64` / `u32` / `u8` / `bool` / `str` / `ptr`）**同时收** ——
+**唯一的一处"两种写法"**，理由不是"方便"，而是**编译器报错时印的就是它们**
+（`return 类型 u8，函数声明 i32`）：得能把读到的那句话原样写回去。
 
-| 词形 | 符号形 | | 词形 | 符号形 |
+### 2.5 运算符：**一个运算符只有一个写法**
+
+| 词形（唯一写法） | Loment | | 词形（唯一写法） | Loment |
 |---|---|---|---|---|
 | `plus` / `minus` | `+` / `-` | | `is` | `==` |
 | `times` / `over` / `modulo` | `*` / `/` / `%` | | `is not` | `!=` |
 | `and` / `or` / `not` | `&&` / `\|\|` / `!` | | `is above` / `is below` | `>` / `<` |
 | `shifted left by` / `shifted right by` | `<<` / `>>` | | `is at least` / `is at most` | `>=` / `<=` |
+| `&` `\|` `^`（**只有符号**） | 位运算 | | 一元 `minus 5` / `not ok` | `(-5)` / `(!ok)` |
 
-位运算（`&` `\|` `^` `<<` `>>`）**只有符号形** —— 自然语言里没有它们的说法，
-硬造一个词反而是发明黑话。判据钉着**词形与符号形翻出来逐字节相同**。
+位运算**只有符号形** —— 自然语言里没有它们的说法，硬造一个词反而是发明黑话。
+**其余每一个都只留词形**：`a + b` 不再收（它是"少学一半"的地方，也是"这一门比 Loment
+简单"这句话的唯一凭据）。判据钉着**符号形点名拒**。
 
 ## 3. 五条**不是翻译、是决定**的东西
 

@@ -1162,13 +1162,20 @@ LANG_CARDS: dict[str, LangCard] = {
              "所以下面的边界是**画出来的**，不是碰上的。动词起头的句子："
              "`say` / `say the number` / `talk to the machine <号> with a, b, c`（= `syscall4`）/ "
              "`paint <值> at <下标> in <缓冲>`（= `store8`）/ `let … be …` / `set … to …` / "
-             "`when` … `otherwise` … `end` / `while` / `for <名> from <下界> to <上界>` / "
-             "`give back`。运算符有词形（`plus` / `times` / `is above` / `and` …）与符号形两种拼法。"
-             "**这一版不收**：`use`、结构体、枚举、`match`、切片、`ptr` 算术、函数指针"
-             "（都在解析那一步响亮地拒）。"
-             "**`let` 的类型只有两条来路**：句子里的 `as <类型>`，或者字面量自己"
-             "（数 -> `i64`、文本 -> `str`、`true`/`false` -> `bool`）—— 够不着就报错，"
-             "**不默认**。`say` 的文本变体与数值变体是**两句**，因为合并就要猜类型。",
+             "`when` … `otherwise` … `end`（含 `when x looks like …` 看形状）/ `while` / "
+             "`for <名> from <下界> to <上界>` / `give back` / `guard the <能力域> space at …`。"
+             "声明是 `a <名> has …`（结构体）/ `a <名> is either …`（枚举）/ `a <名> can …`"
+             "（trait）/ `a <名> can be a …`（impl）/ `a <空间> space called …`（能力域）/ "
+             "`use` / `someone else wrote …`（C ABI）/ `leave out`。"
+             "**一个运算符只有一个写法**（`plus` / `is above` / `and` …；符号形不再收），"
+             "位运算（`&` `|` `^`）相反 —— 只有符号。**类型只留 6 个英文基名**"
+             "（`whole number` / `count` / `byte` / `truth` / `text` / `buffer`），"
+             "其余照 Loment 写（`i32` / `[i64; 3]` / `[i64]` / `mut [i64]` / `Option<i64>` / "
+             "`Result<i64, str>`）。**取一个东西只有一种形状**：`the <什么> of <东西>`。"
+             "**这一版不收**：`addin`、`comefor` / `byuse`、结构体的模式、对 `Option`/`Result`"
+             "取形状（判据比的是单态化名，语言层面写不出来）、`break` / `continue`、`for` 遍历切片。"
+             "**`let` 的类型是查出来的**（字面量 / 声明过的名字 / 运算符定则 / 被调函数的声明 / "
+             "结构体字段 / 方法 / 容器元素），查不到就报错，**不默认**。",
         abi="**它是 Loment**（`language: \"loment\"`），不是外国货 —— 导 C ABI 与其他 Loment "
             "函数一样：`pub` 加上源语言那一侧的约定，不额外要多写什么。",
     ),

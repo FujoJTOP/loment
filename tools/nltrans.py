@@ -159,11 +159,22 @@ _WORD_OPS = {
     "shifted left by": "<<", "shifted right by": ">>",
 }
 
-#: 符号形的运算符（一个记号就是一个 token）。
-_SYMBOL_OPS = {"+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>",
-               "==", "!=", "<", "<=", ">", ">=", "&&", "||", "!"}
+#: 符号形的运算符 —— **只剩位运算那一族**。
+#:
+#: 它们**没有**自然语言说法（"按位与"是黑话，不是人话），所以符号是它们**唯一**的
+#: 写法；其余每一个运算符都只留**词形**（`plus` / `is above` / `shifted left by` …）。
+#:
+#: ## 为什么必须"一个运算符一种写法"
+#:
+#: 2026-09-22 用户点出这一门**过度复杂**，量出来的头一条就是它：15 个运算符
+#: **每个都有两种写法**（`plus` 与 `+`、`is above` 与 `>` …）—— 学一遍不够，得学两遍，
+#: 而两遍说的是同一件事。**第二种写法一分钱不值**：它只是把"这一门比 Loment 简单"
+#: 这件事抹掉。指认一个运算符，必须只有一个答案。
+_SYMBOL_OPS = {"&", "|", "^"}
 
-#: 自然语言的类型短语 -> Loment 类型。`a` / `an` 可省。
+#: **6 个英文基名**（类型短语的全部）。其余类型一律照 Loment 写（见 `type_phrase`）。
+#:
+#: `a` / `an` 可省；复数也收（`whole numbers`）。
 _TYPE_WORDS = {
     "whole number": "i64",
     "count": "u32",
@@ -171,13 +182,11 @@ _TYPE_WORDS = {
     "truth": "bool",
     "text": "str",
     "buffer": "ptr",
-    "nothing": "()",
 }
 
-#: `<N>-bit whole number` / `<N>-bit count` 的两种基名。
-_TYPE_BASE = {"whole number": "i", "count": "u"}
-
-#: Loment 的类型名**直接写也行**。
+#: 上面那六个的 Loment 拼法，以及其余全部直接写的类型名。
+#: **这一张表的用处只有"合法吗"**（`type_atom` 拿它把"认得的类型名"与"随便一个标识符"
+#: 分开）；真正的拼法是原样带过去，不翻译。
 _TYPE_DIRECT = {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
                 "bool", "str", "ptr", "()"}
 
@@ -202,10 +211,11 @@ _RESERVED = {
     # **语句/声明的骨架词**（它们出现在"下一个记号决定这一句是什么"的位置）
     "program", "use", "remember", "to", "with", "giving", "let", "be", "set",
     "say", "the", "talk", "paint", "give", "do", "when", "otherwise", "while",
-    "for", "from", "end", "if",
-    # **值的头一个词**（`item 0 of xs` / `ask p for size` / `something carrying x` …）——
-    # 一个叫 `item` 的变量会让 `say item` 走进那条支
-    "item", "ask", "something", "nothing", "success", "failure",
+    "for", "from", "end",
+    # **值的头一个词**：一个叫 `something` 的变量会让 `say something` 走进那条支。
+    # `the … of …` 那一族的词（`item` / `length` / `run` / `list`）**不收** ——
+    # 它们只在 `the` 后面有词义，别处就是普通名字。
+    "something", "nothing", "success", "failure",
 }
 #: **故意不在表里的那些**（它们是词，但**可以**当名字）：
 #: * `a` / `an` —— 类型短语里的冠词**可省**，而"省略"这件事正是它们能当名字的原因。
@@ -652,12 +662,15 @@ class Parser:
             if ty is None:
                 self.i = save
                 ty = "i64"
+        neg = self.eat("minus")
         val = self.cur()
         if val.kind != "num":
             self.err("常量只能是整数字面量（`docs/188` §7.1 那条边界："
-                     "L1 常量只收整型）")
+                     "L1 常量只收整型）；要负数就写 `minus 7`")
         self.i += 1
         n = int(val.text, 0)
+        if neg:
+            n = -n
         if ty.startswith("u") and n < 0:      # pragma: no cover - 词法器不出负数
             raise Unsupported(f"第 {line} 行: 常量 {val.text} 是负的，装不进 {ty}")
         pub = not self.keep_suffix()
@@ -877,22 +890,26 @@ class Parser:
     def type_phrase(self) -> str | None:
         """读一个类型短语。读不出来返回 `None`，**不动下标**。
 
-        两条复合形（都是**后缀**，所以放在原子那一层之外）：
-        `a whole number or a failure of text` -> `Result<i64, str>`。
+        ## 每个类型只有一个拼法（用户 2026-09-22 那条"过度复杂"的第二处）
+
+        原来有 **12 种**短语，而复合的那些比 Loment 自己的写法**更长**：
+        `a list of 3 whole numbers`（26 字符）对 `[i64; 3]`（7 字符），
+        `a whole number or a failure of text`（36）对 `Result<i64, str>`（16）——
+        **纯亏**：多学一套话，写出来还更长。现在只剩两类：
+
+        1. **6 个英文基名**（`whole number` / `count` / `byte` / `truth` / `text` /
+           `buffer`）—— 短、常用、读起来是人话；
+        2. **其余一律照 Loment 写**：`i32` / `u64` / `[i64; 3]` / `[i64]` /
+           `mut [i64]` / `Option<i64>` / `Result<i64, str>` / 结构体名 / 泛型形参名。
+
+        **唯一的例外**：第 1 类那六个的 Loment 拼法（`i64` / `u32` / `u8` / `bool` /
+        `str` / `ptr`）**同时收**。理由不是"多一种写法方便"，而是**编译器报错时印的
+        就是它们**（`return 类型 u8，函数声明 i32`）—— 得能把读到的那句话原样写回去。
         """
         save = self.i
         ty = self.type_atom()
         if ty is None:
             self.i = save
-            return None
-        if self.at("or") and self.word_at(1, "a") and self.word_at(2, "failure") \
-                and self.word_at(3, "of"):
-            self.i += 4
-            e = self.type_atom()
-            if e is None:
-                self.i = save
-                return None
-            return f"Result<{ty}, {e}>"
         return ty
 
     def type_atom(self) -> str | None:
@@ -901,98 +918,72 @@ class Parser:
             if self.peek().kind == "id":
                 self.i += 1
         t = self.cur()
-        if t.kind == "num":                   # `<N>-bit whole number` / `-bit count`
-            if self.peek().kind == "sym" and self.peek().text == "-" \
-                    and self.word_at(2, "bit"):
-                n = t.text
-                self.i += 3
-                words = []
-                for _ in range(2):
-                    if self.cur().kind == "id":
-                        words.append(self.cur().text)
-                        self.i += 1
-                base = _TYPE_BASE.get(" ".join(words))
-                if base and n in ("8", "16", "32", "64"):
-                    return base + n
-            self.i = save
-            return None
-        if t.kind != "id":
-            self.i = save
-            return None
-        # ---- 容器：`a list of 3 whole numbers` / `a run of whole numbers`
-        if t.text == "list" and self.word_at(1, "of"):
-            self.i += 2
-            n = self.cur()
-            if n.kind != "num":
-                self.i = save
-                return None
+        if t.kind == "id" and t.text == "mut" and self.peek().kind == "sym"                 and self.peek().text == "[":
             self.i += 1
             inner = self.type_atom()
-            if inner is None:
-                self.i = save
-                return None
-            return f"[{inner}; {n.text}]"
-        if t.text in ("run", "changeable") :
-            mut = t.text == "changeable"
-            if mut:
-                if not self.word_at(1, "run"):
+            if inner is None or not (inner.startswith("[") and inner.endswith("]")):
+                self.err("`mut` 后面要写切片：`mut [i64]` 那样")
+            return f"mut {inner}"
+        if t.kind == "id":
+            # **两个词的基名要先看**，而且两个记号都必须是词 —— 这一格是踩出来的：
+            # 第一版写的生成式会**跳过换行**，于是单词的 `truth` 被当成"两个词"、
+            # `self.i += 2` 顺手把**句尾的换行**一起吃了，下一句的 `give` 于是落在
+            # "这一句还没断"的位置上，报一句指不到点子的错。
+            nxt = self.peek(1)
+            two = None
+            if nxt.kind == "id":
+                for cand in (f"{t.text} {nxt.text}",
+                             f"{t.text} {nxt.text[:-1]}"
+                             if nxt.text.endswith("s") else ""):
+                    if cand in _TYPE_WORDS:
+                        two = cand
+                        break
+            if two is not None:
+                self.i += 2
+                return _TYPE_WORDS[two]
+            if t.text in _TYPE_WORDS:
+                self.i += 1
+                return _TYPE_WORDS[t.text]
+            # ---- 名字这一类：`i32` / `T` / `Point` / `Option<i64>` / `Result<i64, str>`
+            name = t.text
+            self.i += 1
+            if self.at("<"):                  # 泛型实参
+                self.i += 1
+                args = [self.type_phrase()]
+                while self.eat(","):
+                    args.append(self.type_phrase())
+                if None in args:
                     self.i = save
                     return None
-                self.i += 2
-            else:
+                if not self.at(">"):
+                    self.err("泛型类型没关上 —— 写成 `Option<i64>` 那样")
                 self.i += 1
-            self.need("of", "切片是 `a run of <类型>`")
-            inner = self.type_atom()
+                return f"{name}<{', '.join(args)}>"
+            if (name in _TYPE_DIRECT or name in self.gparams
+                    or name in self.structs or name in self.variants
+                    or not self.strict_types):
+                return name
+            self.i = save
+            return None
+        if t.kind == "sym" and t.text == "[":
+            self.i += 1
+            inner = self.type_phrase()
             if inner is None:
                 self.i = save
                 return None
-            return f"mut [{inner}]" if mut else f"[{inner}]"
-        if t.text == "maybe":
+            if self.eat(";"):                 # 定长数组
+                n = self.cur()
+                if n.kind != "num":
+                    self.err("定长数组要写长度：`[i64; 3]` 那样")
+                self.i += 1
+                if not self.at("]"):
+                    self.err("定长数组没关上 —— 写成 `[i64; 3]` 那样")
+                self.i += 1
+                return f"[{inner}; {n.text}]"
+            if not self.at("]"):
+                self.err("切片没关上 —— 写成 `[i64]` 那样")
             self.i += 1
-            inner = self.type_atom()
-            if inner is None:
-                self.i = save
-                return None
-            return f"Option<{inner}>"
-        # ---- 标量 / 泛型形参 / 名字
-        # **两个词的短语要先看**（`whole number` 是一条），而且两个记号都必须是词
-        # —— 这一格是踩出来的：第一版写的生成式会**跳过换行**，于是单词的
-        # `truth` 被当成"两个词"，`self.i += 2` 顺手把**句尾的换行**一起吃了，
-        # 下一句的 `give` 于是落在"这一句还没断"的位置上，报一句指不到点子的错。
-        # **复数也收**：自然语言里 `a list of 3 whole numbers` 是常态，
-        # 只收单数会让最自然的那种写法读不通。
-        two = None
-        nxt = self.peek(1)
-        if nxt.kind == "id":
-            for cand in (f"{t.text} {nxt.text}",
-                         f"{t.text} {nxt.text[:-1]}" if nxt.text.endswith("s") else ""):
-                if cand in _TYPE_WORDS:
-                    two = cand
-                    break
-        if two is not None:
-            self.i += 2
-            return _TYPE_WORDS[two]
-        if t.text in _TYPE_WORDS:
-            self.i += 1
-            return _TYPE_WORDS[t.text]
-        if t.text in _TYPE_DIRECT:
-            self.i += 1
-            return t.text
-        if t.text in self.gparams:            # 泛型形参：原样带过去
-            self.i += 1
-            return t.text
-        if t.text in self.structs or t.text in self.variants:
-            self.i += 1
-            return t.text
-        if not self.strict_types and t.text not in _RESERVED:
-            # **第一遍对类型名宽松**：那一遍是为了收"结构体/枚举/方法"三张表，
-            # 而表里的东西**可能写在用它的函数后面**（Loment 自己不在乎先后 ——
-            # 实测把结构体写在用它之后照样编得过）。不宽松的话
-            # `to f with k as a Kind …` 后面才声明 `a Kind is either …` 会在第一遍
-            # 就炸，而那一份**完全合法**。第二遍拿着表照旧严格 —— 真拼错的名字在
-            # 那里报（`strict_types` 那一支）。
-            self.i += 1
-            return t.text
+            return f"[{inner}]"
         self.i = save
         return None
 
@@ -1226,10 +1217,13 @@ class Parser:
     def set(self) -> tuple:
         line = self.cur().line
         self.need("set")
-        if self.at("item"):                   # `set item 0 of xs to 9`
-            self.i += 1
+        if self.at("the") and self.word_at(1, "item"):
+            # `set the item 0 of xs to 9` —— **与取值同一形状**（`the <什么> of <东西>`），
+            # 只是前面多了个 `set … to …`。左值不再另立一种写法。
+            self.need("the")
+            self.need("item")
             idx = self.without_calls(self.expr)
-            self.need("of", "改一个格是 `set item <下标> of <东西> to <值>`")
+            self.need("of", "改一个格是 `set the item <下标> of <东西> to <值>`")
             base = self.expr()
             self.need("to")
             return ("setindex", base, idx, self.expr(), line)
@@ -1356,20 +1350,14 @@ class Parser:
         return self.e_or()
 
     def e_or(self):
-        return self._bin(self.e_and, ("||",), ("or",))
+        return self._bin(self.e_and, (), ("or",))
 
     def e_and(self):
-        return self._bin(self.e_cmp, ("&&",), ("and",))
+        return self._bin(self.e_cmp, (), ("and",))
 
     def e_cmp(self):
         l = self.e_bitor()
         while True:
-            if self.cur().kind == "sym" and self.cur().text in ("==", "!=", "<",
-                                                                "<=", ">", ">="):
-                op = self.cur().text
-                self.i += 1
-                l = ("bin", op, l, self.e_bitor())
-                continue
             w = self.eat_word("is not", "is above", "is below", "is at least",
                               "is at most", "is")
             if w is None:
@@ -1388,22 +1376,16 @@ class Parser:
     def e_shift(self):
         l = self.e_add()
         while True:
-            if self.cur().kind == "sym" and self.cur().text in ("<<", ">>"):
-                op = self.cur().text
-                self.i += 1
-                l = ("bin", op, l, self.e_add())
-                continue
             w = self.eat_word("shifted left by", "shifted right by")
             if w is None:
                 return l
             l = ("bin", _WORD_OPS[w], l, self.e_add())
 
     def e_add(self):
-        return self._bin(self.e_mul, ("+", "-"), ("plus", "minus"))
+        return self._bin(self.e_mul, (), ("plus", "minus"))
 
     def e_mul(self):
-        return self._bin(self.e_unary, ("*", "/", "%"),
-                         ("times", "over", "modulo"))
+        return self._bin(self.e_unary, (), ("times", "over", "modulo"))
 
     def _bin(self, sub, syms: tuple, words: tuple = ()):
         l = sub()
@@ -1421,12 +1403,12 @@ class Parser:
             return l
 
     def e_unary(self):
-        if self.cur().kind == "sym" and self.cur().text == "-":
+        # 一元那两个也用**词**：`minus 5` / `not ok`。符号 `-` / `!` 不再收 ——
+        # 与二元那十几个同一条纪律（一个运算符一个写法），而 `-` 作为**前缀**尤其
+        # 容易与"减号"混着读。
+        if self.at("minus"):
             self.i += 1
             return ("un", "-", self.e_unary())
-        if self.cur().kind == "sym" and self.cur().text == "!":
-            self.i += 1
-            return ("un", "!", self.e_unary())
         if self.at("not"):
             self.i += 1
             return ("un", "!", self.e_unary())
@@ -1516,12 +1498,6 @@ class Parser:
             return ("index", self.e_postfix(), idx)
         if t.kind == "id" and t.text == "the":
             return self.the_clause()
-        if t.kind == "id" and t.text == "ask":        # `ask p for size`
-            self.i += 1
-            base = self.e_postfix()
-            self.need("for", "方法是 `ask <东西> for <方法>`")
-            m = self.ident("方法名")
-            return ("method", base, m)
         if t.kind == "id" and t.text == "nothing":    # `nothing to carry` -> None
             self.i += 1
             self.need("to", "`Option` 的空写 `nothing to carry`")
@@ -1578,33 +1554,44 @@ class Parser:
         return ("list", items)
 
     def the_clause(self) -> tuple:
-        """`the …` 那一族的**五种**：列表 / 切片 / 切片（可改） / 长度 / 取字段。"""
+        """`the <什么> of <东西>` —— **"取一个东西"只有这一种形状**。
+
+        原来有五种形状各写各的（`the x of p` 取字段、`ask p for size` 取方法、
+        `item 0 of xs` 取下标、`the length of xs`、`the run of xs`），用户
+        2026-09-22 那条"过度复杂"的第三处就是它：**同一件事五种壳**。
+        现在**一条规则**：取什么都是 `the <什么> of <东西>`，`<什么>` 是字段名、
+        是方法名、还是 `item` / `length` / `run` 那三个固定的词，**由名字自己说了算**
+        （方法那格靠声明表认；认不出就当字段，写错了 Loment 会报 E15「无此字段」）。
+
+        列表字面量**不走这里** —— 它与切片、定长数组同族，一律照 Loment 写
+        （`[1, 2, 3]`），于是这一条规则没有例外。
+        """
+        line = self.cur().line
         self.need("the")
-        if self.at("list"):
+        if self.at("item"):                   # `the item 0 of xs`
             self.i += 1
-            return self.list_literal_after()
-        if self.at("run") and self.word_at(1, "of"):
+            idx = self.without_calls(self.expr)
+            self.need("of", "取一格是 `the item <下标> of <东西>`")
+            return ("index", self.e_postfix(), idx)
+        if self.at("length") and self.word_at(1, "of"):
             self.i += 2
-            return ("slice", self.e_postfix(), False)
+            return ("call", "slice_len", [self.e_postfix()], line)
         if self.at("changeable") and self.word_at(1, "run") and self.word_at(2, "of"):
             self.i += 3
             return ("slice", self.e_postfix(), True)
-        if self.at("length") and self.word_at(1, "of"):
+        if self.at("run") and self.word_at(1, "of"):
             self.i += 2
-            return ("call", "slice_len", [self.e_postfix()], self.cur().line)
+            return ("slice", self.e_postfix(), False)
         f = self.cur()
         if f.kind != "id":
-            self.err("`the` 后面要写字段名（`the <字段> of <东西>`）")
+            self.err("`the` 后面要写取什么（字段名 / 方法名 / `item` / `length` / `run`）")
         self.i += 1
-        self.need("of", "取字段是 `the <字段> of <东西>`")
-        return ("field", self.e_postfix(), f.text)
-
-    def list_literal_after(self) -> tuple:
-        """`the list 1, 2, 3` —— 已经吃过 `the list`。"""
-        items = [self.expr()]
-        while self.eat(","):
-            items.append(self.expr())
-        return ("list", items)
+        self.need("of", "取东西是 `the <什么> of <东西>` —— 字段、方法、下标都这一条")
+        base = self.e_postfix()
+        t = self.type_of(base)
+        if t is not None and (t, f.text) in self.methods:
+            return ("method", base, f.text)
+        return ("field", base, f.text)
 
     def a_clause(self) -> tuple:
         """`a …` 开头的值：结构体字面量、枚举构造、`Result` 的两个构造。

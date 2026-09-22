@@ -268,97 +268,46 @@ def test_the_verbs_land_on_the_builtins_they_name():
 
 
 @test
-def test_word_operators_and_symbol_operators_are_the_same_token():
-    """**词形与符号形是同一件事**（`plus` ≡ `+`，`is above` ≡ `>`）。
+def test_each_operator_has_exactly_one_spelling():
+    """**一个运算符只有一个写法**（用户 2026-09-22 那条"过度复杂"的头一条）。
 
-    这是"拼法可以有别名"那条纪律在**运算符**上的落实。两边翻出来必须**逐字节相同**，
-    否则同一句话就有了两种意思。
+    原来 15 个运算符**每个都有两种写法**（`plus` 与 `+`、`is above` 与 `>` …）——
+    学一遍不够、得学两遍，而两遍说的是同一件事。现在只留**词形**；
+    符号那一族只剩位运算（`&` `|` `^`：它们没有自然语言说法）。
+
+    这一条钉的比"两种写法翻出来一样"更强：**不是"也收"，是"只有一种"**。
     """
-    words = nltrans.translate(
-        "to f with a as a whole number and b as a whole number giving a whole number\n"
-        "    when a is above b and a is not 0\n"
-        "        give back a times 2 plus b minus 1\n"
-        "    end\n"
-        "    give back a modulo b over 2\n"
-        "end\n")
-    syms = nltrans.translate(
-        "to f with a as a whole number and b as a whole number giving a whole number\n"
-        "    when a > b && a != 0\n"
-        "        give back a * 2 + b - 1\n"
-        "    end\n"
-        "    give back a % b / 2\n"
-        "end\n")
-    assert words == syms, f"词形与符号形翻出来不同:\n{words}\n---\n{syms}"
-    print("      词形与符号形：同一句话、同一串字节")
-
-
-@test
-def test_a_call_with_no_arguments_is_just_its_name():
-    """**没有实参的调用就写名字本身**（`say the number run`）。
-
-    分辨靠**声明表**（两遍读出来的）：名字是个函数、又不是局部量 ⇒ 它是调用。
-    这一条同时钉住"局部量优先"，否则一个与函数同名的变量会被悄悄改成调用。
-    """
-    t = nltrans.translate(
-        "to called giving a whole number\n"
-        "    give back 42\n"
-        "end\n"
-        "to f giving a whole number\n"
-        "    let other be called\n"
-        "    give back other plus called\n"
-        "end\n"
-        "to g giving a whole number\n"
-        "    let called be 7\n"
-        "    give back called\n"
-        "end\n")
-    # `called` 是函数 ⇒ 两处都是**调用**（`let` 的类型也是从声明表查出来的）
-    assert "let other: i64 = called();" in t, t
-    assert "return (other + called());" in t, t
-    # 而在 `g` 里 `called` 被一个局部量遮住 ⇒ 那两句是**变量**（局部量优先）
-    assert "let called: i64 = 7;" in t, t
-    assert "return called;" in t, t
-    print("      无参调用写名字；与局部量同名时以局部量为准")
-
-
-@test
-def test_out_of_subset_is_loud_and_points_at_the_line():
-    """**读得通但这一版不翻**的，一条都不许沉默过去，而且**行号要指回原文件**。
-
-    最后两例是 `docs/188` §7.2 那条老账：正文是**拼起来**再交给翻译器的，拼接不带
-    行偏移的话，报的行号是"按函数体"算的 —— 用户在源码里按它**找不到东西**
-    （实测那边报的是第 2 行，而那一句在文件第 3 行）。
-    """
-    cases = [
-        # `use` 这一版收了；顶层不认识的句子照旧要报
-        ("program p\n\nlet x be 1\n", "只能写在函数体里"),
-        ("program p\n\nthe switches come from extra\n", "顶层不认识的句子"),
-        ("program p\n\nto f with a as a myst\n    give back a\nend\n", "类型短语"),
-        # **"调用了不存在的函数"这一格故意不查**（见 `docs/197` §5）：
-        # `use "别的.lomt"` 引进来的函数在这段正文里看不见，查了就是**假红**。
-        # 真判据在编译器那一侧（E2「未定义的函数」），所以这一份**一个字都不报**。
-        ("program p\n\nto f giving a whole number\n"
-         "    give back nope of 1\nend\n", None),
-        ("program p\n\nto f\n    set x to 1\nend\n", "没有声明过"),
-        ("program p\n\nto f\n    talk to the machine 60 with 1, 2\nend\n", "三个"),
-        ("program p\n\nto f\n    let x be a plus b\nend\n", "说不出"),
-        # 调用一个 `giving` 没写的函数：**读得通、却不是一个值** —— 拦在这里，
-        # 不让它变成"编译到一半报类型 `()`"那种隔着一层的错
-        ("program p\n\nto g\nend\n\nto f\n    let x be g\nend\n", "不返回值"),
-        ("program p\n\nto f\n    when 1\nend\n", "end"),
-        ("program p\n\nto f\n    give back 1\n", "没有 `end`"),
-        ("program p\n\nto f\n    match x\nend\n", "不认识的句子"),
-        ("program p\n\nto f\n    to g\n    end\nend\n", "顶层"),
-    ]
-    for src, want in cases:
+    t = nltrans.translate("""
+to f with a as a whole number and b as a whole number giving a whole number
+    when a is above b and a is not 0
+        give back a times 2 plus b minus 1
+    end
+    give back a modulo b over 2
+end
+""")
+    assert "((a > b) && (a != 0))" in t, t
+    assert "(((a * 2) + b) - 1)" in t, t
+    # 位运算那一族**只有符号**（没有词形），所以它们照旧收
+    bits = nltrans.translate("""
+to g with a as a whole number and b as a whole number giving a whole number
+    give back a & b | (a ^ b)
+end
+""")
+    assert "((a & b) | (a ^ b))" in bits, bits
+    # **符号形的算术/比较不再收** —— 每一格都要报，不能悄悄收下
+    for bad in ("a + b", "a > b", "a == b", "a && b", "a << b", "a - b", "a * b"):
         try:
-            nltrans.translate(src)
-        except (nltrans.Unsupported, nltrans.NaturalError) as e:
-            assert want is not None, f"这一份本该**收下**，却被拒了：{e}"
-            assert want in str(e), f"要点名 `{want}`：{e}"
+            nltrans.translate(f"""
+to h with a as a whole number and b as a whole number giving a whole number
+    give back {bad}
+end
+""")
+        except (nltrans.Unsupported, nltrans.NaturalError):
+            pass
         else:
-            assert want is None, (
-                f"{src!r} 在子集外，却一个字都没报（该点 `{want}`）")
-    print(f"      {len(cases)} 档子集外各报各的，都点到了点子上")
+            raise AssertionError(f"`{bad}` 被收下了 —— 一个运算符只许一个写法")
+    print("      15 个运算符各只留词形；符号形点名拒；位运算仍只有符号")
+
 
 
 @test
@@ -570,29 +519,35 @@ def test_match_and_if_let_are_told_apart_by_the_number_of_arms():
 
 @test
 def test_the_values_and_the_containers_lower_onto_their_forms():
-    """**值那一半**：结构体字面量 / 枚举构造 / 取字段 / 取一格 / 切片 / 长度 / 方法 / `?`。"""
-    t = nltrans.translate(
-        "a Point has x as a whole number and y as a whole number\n"
-        "a Kind is either Small or Big carrying a whole number\n"
-        "a Sizer can size giving a whole number\n"
-        "a Point can be a Sizer\n"
-        "    to size giving a whole number\n"
-        "        give back the x of self\n"
-        "    end\n"
-        "end\n"
-        "\n"
-        "to f with xs as a run of whole numbers and p as a Point giving a whole number\n"
-        "    let a be a Point with x as 1 and y as 2\n"
-        "    let b be a Kind that is Big carrying 3\n"
-        "    let c be a Kind that is Small\n"
-        "    let d be the list 1, 2, 3\n"
-        "    let e be item 1 of xs\n"
-        "    let g be the length of xs\n"
-        "    let h be ask p for size\n"
-        "    let i be the run of xs\n"
-        "    let j be the changeable run of xs\n"
-        "    give back the x of a plus e plus g plus h\n"
-        "end\n")
+    """**值那一半**：结构体字面量 / 枚举构造 / 取东西 / 切片 / 长度 / 方法。
+
+    "**取一个东西只有一种形状**"（`the <什么> of <东西>`）在这一条里逐格钉住：
+    字段、方法、下标、长度、切片**五格同一个壳**；数组那一族（字面量、切片、定长）
+    照 Loment 写（`[1, 2, 3]` / `[i64]` / `[i64; 3]`），所以那条规则没有例外。
+    """
+    t = nltrans.translate("""
+a Point has x as a whole number and y as a whole number
+a Kind is either Small or Big carrying a whole number
+a Sizer can size giving a whole number
+a Point can be a Sizer
+    to size giving a whole number
+        give back the x of self
+    end
+end
+
+to f with xs as [i64] and p as a Point giving a whole number
+    let a be a Point with x as 1 and y as 2
+    let b be a Kind that is Big carrying 3
+    let c be a Kind that is Small
+    let d be [1, 2, 3]
+    let e be the item 1 of xs
+    let g be the length of xs
+    let h be the size of p
+    let i be the run of xs
+    let j be the changeable run of xs
+    give back the x of a plus e plus g plus h
+end
+""")
     for want in ("let a: Point = Point { x: 1, y: 2 };",
                  "let b: Kind = Kind::Big(3);",
                  "let c: Kind = Kind::Small;",
@@ -603,20 +558,87 @@ def test_the_values_and_the_containers_lower_onto_their_forms():
                  "let i: [i64] = (&xs);",
                  "let j: [i64] = (&mut xs);",
                  "return ((((a.x) + e) + g) + h);"):
-        assert want in t, f"少了这一段：{want!r}\n{t}"
-    print("      结构体 / 枚举 / 列表 / 下标 / 切片 / 长度 / 方法 逐字对上")
+        assert want in t, f"少了这一段：{want!r} —— 全文：{t}"
+    print("      结构体 / 枚举 / 数组 / 取东西五格同壳 / 切片 逐字对上")
 
+
+@test
+def test_a_call_with_no_arguments_is_just_its_name():
+    """**没有实参的调用就写名字本身**（`say the number run`）。
+
+    分辨靠**声明表**（两遍读出来的）：名字是个函数、又不是局部量 ⇒ 它是调用。
+    这一条同时钉住"局部量优先"，否则一个与函数同名的变量会被悄悄改成调用。
+    """
+    t = nltrans.translate(
+        "to called giving a whole number\n"
+        "    give back 42\n"
+        "end\n"
+        "to f giving a whole number\n"
+        "    let other be called\n"
+        "    give back other plus called\n"
+        "end\n"
+        "to g giving a whole number\n"
+        "    let called be 7\n"
+        "    give back called\n"
+        "end\n")
+    # `called` 是函数 ⇒ 两处都是**调用**（`let` 的类型也是从声明表查出来的）
+    assert "let other: i64 = called();" in t, t
+    assert "return (other + called());" in t, t
+    # 而在 `g` 里 `called` 被一个局部量遮住 ⇒ 那两句是**变量**（局部量优先）
+    assert "let called: i64 = 7;" in t, t
+    assert "return called;" in t, t
+    print("      无参调用写名字；与局部量同名时以局部量为准")
+
+@test
+def test_out_of_subset_is_loud_and_points_at_the_line():
+    """**读得通但这一版不翻**的，一条都不许沉默过去，而且**行号要指回原文件**。
+
+    最后两例是 `docs/188` §7.2 那条老账：正文是**拼起来**再交给翻译器的，拼接不带
+    行偏移的话，报的行号是"按函数体"算的 —— 用户在源码里按它**找不到东西**
+    （实测那边报的是第 2 行，而那一句在文件第 3 行）。
+    """
+    cases = [
+        # `use` 这一版收了；顶层不认识的句子照旧要报
+        ("program p\n\nlet x be 1\n", "只能写在函数体里"),
+        ("program p\n\nthe switches come from extra\n", "顶层不认识的句子"),
+        ("program p\n\nto f with a as a myst\n    give back a\nend\n", "类型短语"),
+        # **"调用了不存在的函数"这一格故意不查**（见 `docs/197` §5）：
+        # `use "别的.lomt"` 引进来的函数在这段正文里看不见，查了就是**假红**。
+        # 真判据在编译器那一侧（E2「未定义的函数」），所以这一份**一个字都不报**。
+        ("program p\n\nto f giving a whole number\n"
+         "    give back nope of 1\nend\n", None),
+        ("program p\n\nto f\n    set x to 1\nend\n", "没有声明过"),
+        ("program p\n\nto f\n    talk to the machine 60 with 1, 2\nend\n", "三个"),
+        ("program p\n\nto f\n    let x be a plus b\nend\n", "说不出"),
+        # 调用一个 `giving` 没写的函数：**读得通、却不是一个值** —— 拦在这里，
+        # 不让它变成"编译到一半报类型 `()`"那种隔着一层的错
+        ("program p\n\nto g\nend\n\nto f\n    let x be g\nend\n", "不返回值"),
+        ("program p\n\nto f\n    when 1\nend\n", "end"),
+        ("program p\n\nto f\n    give back 1\n", "没有 `end`"),
+        ("program p\n\nto f\n    match x\nend\n", "不认识的句子"),
+        ("program p\n\nto f\n    to g\n    end\nend\n", "顶层"),
+    ]
+    for src, want in cases:
+        try:
+            nltrans.translate(src)
+        except (nltrans.Unsupported, nltrans.NaturalError) as e:
+            assert want is not None, f"这一份本该**收下**，却被拒了：{e}"
+            assert want in str(e), f"要点名 `{want}`：{e}"
+        else:
+            assert want is None, (
+                f"{src!r} 在子集外，却一个字都没报（该点 `{want}`）")
+    print(f"      {len(cases)} 档子集外各报各的，都点到了点子上")
 
 @test
 def test_optional_and_result_are_types_values_and_question_mark_only():
     """**`Option` / `Result` 收三样，不收第四样** —— 第四样是**语言层面**的边界。
 
-    收：类型（`maybe <T>` / `<T> or a failure of <E>`）、构造、`?`（`unless it failed`）。
+    收：类型（`Option<i64>` / `Result<i64, i64>`）、构造、`?`（`unless it failed`）。
     不收：**形状**。判据拿写出来的名字与**单态化名**比（`Option::Some` 对
     `Option_u32::Some`），而后者是编译器的内部拼法 —— 源里根本写不出来（实测）。
     """
     t = nltrans.translate(
-        "to maybe_one with x as a whole number giving maybe a whole number\n"
+        "to maybe_one with x as a whole number giving Option<i64>\n"
         "    when x is above 10\n"
         "        give back nothing to carry\n"
         "    end\n"
@@ -624,7 +646,7 @@ def test_optional_and_result_are_types_values_and_question_mark_only():
         "end\n"
         "\n"
         "to find with x as a whole number "
-        "giving a whole number or a failure of a whole number\n"
+        "giving Result<i64, i64>\n"
         "    when x is above 10\n"
         "        give back a failure carrying x\n"
         "    end\n"
@@ -632,7 +654,7 @@ def test_optional_and_result_are_types_values_and_question_mark_only():
         "end\n"
         "\n"
         "to prop with x as a whole number "
-        "giving a whole number or a failure of a whole number\n"
+        "giving Result<i64, i64>\n"
         "    let y be find of x unless it failed\n"
         "    give back a success carrying y\n"
         "end\n")
@@ -647,7 +669,7 @@ def test_optional_and_result_are_types_values_and_question_mark_only():
     assert "return Result::Ok(y);" in t, t
     # 形状那一格**响亮地拒**，并且说清是语言层面的
     try:
-        nltrans.translate("to f with x as maybe a whole number giving a whole number\n"
+        nltrans.translate("to f with x as Option<i64> giving a whole number\n"
                           "    when x looks like a Option that is Some carrying v\n"
                           "        give back v\n"
                           "    end\n"
