@@ -1657,6 +1657,73 @@ def test_m85_driver_gate_on_probe_cases():
         print('      字符串字面量 "extern": 不误判 (判的是 token kind, 不是文本)')
 
 
+@test
+def test_m85_entry_load_distinguishes_empty_file_from_directory():
+    """issue #52: 空文件、目录、路径不对, 三句话必须分得开。
+
+    `load_file` 读到 0 字节时原先一律说「路径对吗?」。空文件与目录都走那一条,
+    读者被指去查一条没问题的路径。缺文件本来就是另一句（「打不开」）, 这条不许被换掉。
+    只有注释的文件与空文件一样「没有可编译的源」, 但字节数不是 0, 仍然应当被接受
+    (issue 里点名的邻居; 不是 #45 的格式化行为)。
+    """
+    clang = _clang()
+    native = sys.platform.startswith("linux")
+    if not clang or not (native or _wsl()):
+        print("      SKIP: 需要 clang, 以及本机 Linux 或 WSL")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_empty")
+        work = Path(td)
+
+        def run(p: Path, name: str) -> tuple[int, str]:
+            if native:
+                elf.chmod(0o755)
+                r = subprocess.run([str(elf), str(p)], cwd=str(ROOT),
+                                   capture_output=True, shell=False)
+                err = r.stderr.decode("utf-8", "replace")
+                return r.returncode, err
+            # 绝对路径交给 WSL 里跑的驱动前要转成 /mnt/<drive>/…, 否则反斜杠会被
+            # bash 吃掉 (与本文件其它传绝对路径的判据同一条约定)
+            rc, _out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
+            return rc, err
+
+        empty = work / "zero.lomt"
+        empty.write_bytes(b"")
+        rc, err = run(empty, "empty")
+        assert rc == 1, f"空文件应当退 1, 得到 {rc}: {err[:300]}"
+        assert "空文件" in err, f"空文件没说自己是空的: {err[:300]}"
+        assert "路径对吗" not in err, f"空文件仍被说成路径问题: {err[:300]}"
+        assert "目录" not in err, f"空文件被说成目录: {err[:300]}"
+
+        rc, err = run(work, "dir")
+        assert rc == 1, f"目录应当退 1, 得到 {rc}: {err[:300]}"
+        assert "目录" in err, f"目录没说自己是目录: {err[:300]}"
+        assert "路径对吗" not in err, f"目录仍被说成路径问题: {err[:300]}"
+        assert "空文件" not in err, f"目录被说成空文件: {err[:300]}"
+
+        missing = work / "no-such-entry.lomt"
+        rc, err = run(missing, "missing")
+        assert rc == 1, f"缺文件应当退 1, 得到 {rc}: {err[:300]}"
+        assert "打不开" in err, f"缺文件不再报「打不开」: {err[:300]}"
+        assert "空文件" not in err and "目录" not in err, (
+            f"缺文件被说成空文件或目录: {err[:300]}")
+
+        comment = work / "comment.lomt"
+        comment.write_text("// only a comment\n", encoding="utf-8", newline="\n")
+        rc, err = run(comment, "comment")
+        assert rc == 0, f"只有注释的文件应当被接受, 得到 {rc}: {err[:300]}"
+        assert "空文件" not in err and "路径对吗" not in err, err[:300]
+
+        real = work / "one.lomt"
+        real.write_text("module m\n\nfn f() -> u32 {\n    return 1;\n}\n",
+                        encoding="utf-8", newline="\n")
+        rc, err = run(real, "real")
+        assert rc == 0, f"非空源文件不该被入口装载拒绝: {rc}: {err[:300]}"
+        print("      入口装载: 空文件 / 目录 / 缺路径 三句话分开, 注释文件仍接受")
+
+
 def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:
     """按"该文件需要哪些尚未实现的后端特性"给待补文件分类 (M82 工作list)。"""
     import re

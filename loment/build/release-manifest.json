@@ -731,7 +731,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "c1715667f7538098ea5b627221c7898499f61dbdbcbe504f17f37158978393ce"
+   "sha256": "0f455d05ac730a7a4bb6e5459162c211d44410ee589480fc05327aaf2dea77bd"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "756cf51abcfcad3fcc8d98b139ea72f38ca948cc0a4d192da0b6993a4adbff54"
+   "sha256": "50bb6ff7028e279a3a32143f9c920e9ca1cd180ff41b5880b118464086537f44"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1527,7 +1527,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "55b60a501c0071111b1825aa5f61ecff9482d3a78e10401bf431ded614aa5408"
+   "sha256": "7b1452c097df64270d4294ca908a8b4d92953902ad7f26d695b3ffd397168348"
   },
   {
    "path": "loment/selfhost/interp.lomt",
