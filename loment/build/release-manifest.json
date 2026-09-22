@@ -1011,7 +1011,7 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "9a470e34e194cf5b6c5ac89571b21b9f9f60cb88747d669d1069d8316f066af1"
+   "sha256": "76b663ace9cdeeeed4eeaeed166390be12979a110f0c455d28ec51f2c6e84ebe"
   },
   {
    "path": "tools/loment_dist_test.py",
