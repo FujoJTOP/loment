@@ -54,6 +54,9 @@ COVERED = (
     "native_str.lomt",
     "native_trait.lomt",        # trait + 两个 impl —— `traits`/`impls` 的原始视图 +
                                 # impl 方法的 `self`（改名 `__self` + 填接受者类型）
+    # ---- 泛型**函数**的单态化（`instances` 那一格 + 函数表被替换）
+    "all_loment.lomt",          # `max_of_u32` —— 实例名 = 基名 + 实参类型
+    "tour.lomt",                # 同上；同时带着 `Entry`/`Kind` 两张大表
     "selfcheck.lomt",
     "switch.lomt",              # 开关取值要进对象: `switches` 那一格
     "toolchain.lomt",
@@ -70,10 +73,13 @@ COVERED = (
 #: 每一条都对应 `loment/selfhost/potato.lomt` 头上写的那几条边界。
 REFUSED = {
     "demo.lomt": "L0 布局",     # `use "lom/fujr.lom"` —— `layouts` 要读 L0, 自举侧不装载
-    "all_loment.lomt": "自写的泛型形参",
-    "native_gen.lomt": "自写的泛型形参",
-    "tour.lomt": "自写的泛型形参",
+    "native_gen.lomt": "泛型**类型**的声明",   # M7 那一半（类型串收集 + 批量实例化）
     "native_res.lomt": "用了泛型类型",
+    # 链式泛型（泛型函数体里再调泛型函数）。参考实现靠 **8 轮迭代** —— 它会走*实例*的体，
+    # 那时 `T` 已经换成 `u32`，于是实例名是 `pick_u32`。自举侧只走**单元本体**（一趟），
+    # 看到的实参类型还是 `T`，会造出 `pick_T` —— 发得出去、逐字节**不一样**，
+    # 属于"静默的错"。这一条钉住"那种情况必须**点名拒绝**，不许发个错壳出去"。
+    "native_chain.lomt": "链式泛型",
 }
 
 #: 连**检查**都还没过的（与这一格无关，但必须有一格，否则"没做决定"那条判据会把它当成漏网）。

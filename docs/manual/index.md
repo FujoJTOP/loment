@@ -30,6 +30,7 @@
 - [native_bits](api/native_bits.md)
 - [native_brk](api/native_brk.md)
 - [native_cap](api/native_cap.md)
+- [native_chain](api/native_chain.md)
 - [native_concat](api/native_concat.md)
 - [native_entry](api/native_entry.md)
 - [native_gen](api/native_gen.md)

@@ -180,11 +180,9 @@ case "${1:-help}" in
         cat "$share/version" ;;
     ir|check)
         mode=$1; shift
-        [ $# -ge 1 ] || { usage >&2; exit 2; }
-        src=$1; shift
-        # The colour switch is accepted here and forwarded to the RENDERER only - the
-        # driver never sees it. Position is free (before or after the file), same as
-        # `loment-cli`'s own --no-color (`docs/169` has a case pinning that).
+    # The colour switch is accepted here and forwarded to the RENDERER only - the
+    # driver never sees it. Position is free (before or after the file), same as
+    # `loment-cli`'s own --no-color (`docs/169` has a case pinning that).
         #
         # `--short` / `--json` (docs/182 sec 15) take the same route for the same reason:
         # they are RENDERER output modes, so the driver must not see them. Without this
@@ -195,6 +193,7 @@ case "${1:-help}" in
         # many diagnostics the renderer PRINTS, so the driver must not see it either. Without
         # forwarding it, `--max 0` (show everything) would be unreachable from the package -
         # and that is the one spelling a user reaches for exactly when there are 300 errors.
+        src=
         nc=
         om=
         while [ $# -gt 0 ]; do
@@ -203,9 +202,15 @@ case "${1:-help}" in
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
                 --max=*) om="$om $1"; shift ;;
-                *) echo "loment: unknown option $1" >&2; exit 2 ;;
+                -*) echo "loment: unknown option $1" >&2; exit 2 ;;
+                *) [ -z "$src" ] || {
+                       echo "loment: check accepts exactly one input file" >&2
+                       exit 2
+                   }
+                   src=$1; shift ;;
             esac
         done
+        [ -n "$src" ] || { usage >&2; exit 2; }
         need loment-driver loment-driver
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         rc=0
@@ -598,7 +603,7 @@ exit /b 0
 "%here%lomenterr.exe" "%~1"
 exit /b 0
 
-rem %1 = one argument from the command line; sets csrc (the first non-command, non-flag
+rem %1 = one argument from the command line; sets csrc (the only non-command, non-flag
 rem word), cnc (the colour switch) and com (the renderer output mode). Reached only via
 rem `call` from :compile_only.
 rem
@@ -626,7 +631,12 @@ rem tells "an option I do not know" apart from "the source file" -- and an optio
 rem silently ignored is the same lesson :barg_loop records for `--link` below, and what
 rem bash's two scans already do (`*) unknown option ... exit 2`).
 if "%ss:~0,1%"=="-" goto scan_bad
-if not defined csrc set "csrc=%~1"
+if defined csrc goto scan_extra
+set "csrc=%~1"
+exit /b 0
+:scan_extra
+echo loment: check accepts exactly one input file 1>&2
+set "cbad=1"
 exit /b 0
 :scan_bad
 echo loment: unknown option %~1 1>&2
