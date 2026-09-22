@@ -1589,6 +1589,21 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "nl": "natural", "natural": "natural", "lument": "natural",
 }
 
+#: **读法就是原生语法的那几个规范名。**
+#:
+#: `loment` 是显然的那一个。**`rust` 也在这里** —— 用户 2026-09-22 的裁定：
+#: **「rust 语法是 Loment 基础语法，不需要翻译」**。本语言的原生拼法本来就是 Rust 风味
+#: （`CLAUDE.md` 那条"不发明语法、规避 LLM 零语料"买到的就是它），所以
+#: `choose write grammar rust` 说的是"**按基础语法读这份 Loment**"，
+#: 而不是"把一份外国 Rust 模块抽成接口"。
+#:
+#: **一处刻意的不对称，要说清**（`docs/188` §2 那条分工）：**后缀** `.rs` 与
+#: **`--lang rust`** 照旧走 `from_rust`（`docs/179` 抽接口那条路 —— `kernel/src/*.rs`
+#: 与 `lompotc --rust` 那条孪生判据都靠它）。两者不冲突：**后缀说"这是哪个语言的文件"，
+#: 声明说"这份 Loment 用哪种写法"**。于是 `.lomt` 里写 `grammar rust` 是原生读法，
+#: 而一份 `.rs` 仍然是"Rust 的文件，抽它的接口"。
+NATIVE_GRAMMARS = ("loment", "rust")
+
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
 #: **这是与报错器共享的一份契约，不是随便三个词。** 报错器是个**独立的 Loment 程序**
@@ -1754,7 +1769,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
 
     按 `resolve_lang` 的次序（**声明 > 后缀 > 内容**）定读法，然后分两条路：
 
-    * **`loment`（含没写声明）** —— 它就是 Loment。把声明那一行**抹成等长空白**再交出去。
+    * **原生拼法（`loment` / `rust`，含没写声明）** —— 它就是 Loment。把声明那一行
+      **抹成等长空白**再交出去。`rust` 在这一支里是因为**它是基础语法的一种拼法**，
+      不需要翻译器 —— 见 `NATIVE_GRAMMARS` 的注解（用户 2026-09-22 的裁定）。
     * **别的写法** —— 那份源按 `docs/188` §0 **仍然是 Loment**，只是拼法不同。所以走
       `potato_from` + `lomt_from --impl` **翻成 Loment 源码**再交出去。
       **全程在本进程里算，不拉起 python / java / …** —— 那是用户定的死要求
@@ -1801,7 +1818,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
         g, err, declared = read_grammar_decl(src)
         if err:
             raise FrontDoorRefused(err)
-        if not declared or g == "loment":
+        if not declared or g in NATIVE_GRAMMARS:
+            # `rust` 与 `loment` 都落这一支：**它就是基础语法**（见 `NATIVE_GRAMMARS`
+            # 的注解）—— 不经过任何翻译器，抹掉声明那一行原样交出去。
             return FrontUnit("loment", strip_grammar_decl(src), False, path)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:

@@ -144,7 +144,10 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_lompi_test", "lompi_sync", "loment_publish",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
-                 "loment_multisyntax_test")
+                 "loment_multisyntax_test",
+                 # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
+                 # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
+                 "loment_multisyntax_projects_test")
 
 
 #: **不能与别的检查同时跑**的那几条 —— 它们**写仓库里的共享位置**。
