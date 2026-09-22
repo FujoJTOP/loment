@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_potato_emit_test.py",
-   "sha256": "ad5c6763ced98faed901718efec4c5e0788a194fc29d85621f4cc53d1dc72a8c"
+   "sha256": "a3f0dd08983edb2d0348585ec59bc4ca7a248fa478ef41c29ec5b70b8808d65c"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "50bb6ff7028e279a3a32143f9c920e9ca1cd180ff41b5880b118464086537f44"
+   "sha256": "d625442e543dbcff99b195b8ef39bd02cc2caee367b3105c3d0105aeb94366f8"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1583,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "3b39502b74aeb77785c4d05151d585964401316d0154d61066fa01390fa4adee"
+   "sha256": "72b222160e8cd7f40108ac3e69761b76b697f40b09f9277c43c38dafb6af4a24"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1839,7 +1839,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "ce51fa6f85213b58df095389cdccd3ceaff472d5685a4d6d2279f269938252de"
+   "sha256": "c04f1b3dc5b8b9b7d7185919a40e33473728ddbd4db8f8d20352c7e08110d95e"
   },
   {
    "path": "docs/190-loment-debugger.md",
@@ -1879,7 +1879,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "1a59c8f33eb8998881ec83c67c41b435086d428f5cd27fa3af93a6578d7a4735"
+   "sha256": "1a1689caf5e1cbe280894534bad7a153b1b4b69af5d91734ffa1459fc010d2df"
   },
   {
    "path": "docs/manual/index.md",
