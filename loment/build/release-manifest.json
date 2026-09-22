@@ -1583,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "630a99137bf7da11369726ce21d97a0d05de287889f931399f215a3ddf112a05"
+   "sha256": "3b39502b74aeb77785c4d05151d585964401316d0154d61066fa01390fa4adee"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1876,6 +1876,10 @@
   {
    "path": "docs/201-doors-and-registries.md",
    "sha256": "728f845cf9095bbf367ccdb8f1c861cfa9525465c30681fc1a291c59f05181a4"
+  },
+  {
+   "path": "docs/202-loment-014-release-gate.md",
+   "sha256": "1a59c8f33eb8998881ec83c67c41b435086d428f5cd27fa3af93a6578d7a4735"
   },
   {
    "path": "docs/manual/index.md",
