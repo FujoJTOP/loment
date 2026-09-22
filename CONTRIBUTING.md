@@ -4,7 +4,38 @@ Loment is early. `0.1.4` is not published as a package — you build the toolcha
 checkout ([QUICKSTART.md](QUICKSTART.md)) — and the implementation changes quickly on purpose
 ([README](README.md#status) says which parts are frozen and which are not).
 
-Two things are worth knowing before you spend time here: one closed door, and one wide open one.
+Three things are worth knowing before you spend time here: who writes this, one closed door, and
+one wide open one.
+
+## People and AI agents build this together
+
+Loment is written by humans and by AI agents in the same repositories, often in the same commit.
+That is deliberate, not something tolerated — this repository ships agent instructions
+([CLAUDE.md](CLAUDE.md), [AGENTS.md](AGENTS.md)) and the language guide is written for an agent to
+read first. Three things follow.
+
+**Your patch may be reviewed by an AI, and that review counts.** Automated review is part of the
+process here rather than a second-class opinion: it can close a pull request on its own, and it is
+what watches the closed door below. "A person would have let it through" is therefore not a
+defence, because a person may never look.
+
+**You are responsible for what your tools produce.** An agent editing this tree is your agent, and
+what it commits is your patch. The accidents this document warns about — a rewrite that spans
+`lom/`, a generator's output edited by hand, a criterion widened to turn green — are exactly the
+ones an agent makes quickly, confidently and in bulk. Read the diff before you send it; the check
+for the door below is one command and it takes a second.
+
+**Do not send code you have no right to send.** Nothing copied from a source whose licence you
+cannot comply with, nothing confidential or leaked, nothing malicious. This is a legal
+requirement, not a matter of taste, and it is a live risk with AI tools in particular: they
+reproduce material from their training data without marking it, so a patch can carry someone
+else's terms with no sign that it does. If you cannot say where a piece came from and under what
+licence, do not send it. If you are unsure, say so in the pull request rather than staying quiet —
+an open question is workable, a hidden one is not.
+
+**A patch that breaks this document is not accepted, whoever or whatever wrote it.** The rules
+below apply the same way to a change typed by hand and one produced by an agent: the closed door,
+the generated files, the criteria.
 
 ## Do not change anything under `lom/`
 
