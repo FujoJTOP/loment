@@ -875,6 +875,12 @@ fn share_dir(mem: ptr, ab: ptr, dst: ptr) -> u32 {
 fn read_arg(mem: ptr, ab: ptr, k: u32) -> u32 {
     let path: ptr = ptr_add(mem, M_P1);
     arg_copy(mem, ab, k, path);
+    let stb: ptr = ptr_add(mem, M_STB);
+    let mode: u32 = stat_mode(path, stb);
+    if mode == S_IFDIR {
+        err_path(mem, "not a file: ", path);
+        return NOTFOUND;
+    }
     let n: u32 = slurp(path, ptr_add(mem, M_FILE), FILE_CAP);
     if n == NOTFOUND {
         err_path(mem, "cannot open ", path);
