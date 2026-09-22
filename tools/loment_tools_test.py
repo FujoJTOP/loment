@@ -933,6 +933,11 @@ def test_arg_helpers_do_not_rebase_cb():
     bad = []
     for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
         t = p.read_text(encoding="utf-8")
+        # **先剥注释、但保留换行** —— 这一条解释的就是那个写成错的写法，注释里必然带着它，
+        # 不剥就自己报自己（第一版就踩了）；用换行顶替是为了行号仍然指向源码。
+        # 与 `loment_cli_test` 剥注释同一写法。
+        t = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), t, flags=re.S)
+        t = re.sub(r"//[^\n]*", "", t)
         for m in re.finditer(r"ptr_add\(cb,\s*[A-Z][A-Z0-9_]*\b", t):
             # 注意**不能**写成 `[^()]*` 通配: `ptr_add(cb, o1)` 是合法的 ——
             # `o1` 是 cmdline 内的相对偏移，本来就该从 `cb` 加。要抓的是
