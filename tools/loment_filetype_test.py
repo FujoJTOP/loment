@@ -40,6 +40,9 @@ def _dry_run() -> dict:
 @test
 def test_plan_covers_both_extensions():
     """计划里两个扩展名都要有: 默认值/两处 OpenWithProgids/类型名/图标/带 "%1" 的打开命令。"""
+    if sys.platform != "win32":
+        print("      SKIP: 非 Windows —— 登记的是 HKCU 注册表，别的平台没有对应物")
+        return
     data = _dry_run()
     ops = data["ops"]
     for ext, (progid, friendly, mime) in FT.EXT_MAP.items():
