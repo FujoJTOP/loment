@@ -126,22 +126,30 @@ jobs:
         run: |
           set +e
           echo "### 地址布局 / 内核"
+          echo "（上一轮已排除的两类：关 ASLR 与放大栈都没有改变结果）"
           echo "randomize_va_space: $(cat /proc/sys/kernel/randomize_va_space)"
           uname -a
           echo "cpu: $(nproc)"
           echo
           echo "### 控制组：直接跑（预期红 —— 孪生 rc=-11）"
-          timeout 600 python3 tools/potato_test.py 2>&1 | tail -12
+          timeout 600 python3 tools/potato_test.py 2>&1 | tail -8
           echo
-          echo "### 段错误地址（关键：>4G 指向指针截断；低位则是别的 bug）"
-          sudo dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -6 \
+          echo "### 段错误地址（dmesg 那一行还带着出错指令的 ip）"
+          sudo dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -4 \
             || echo "（dmesg 拿不到：kernel.dmesg_restrict）"
           echo
-          echo "### 关掉 ASLR 再跑（若通过 => 与地址布局有关）"
-          timeout 600 setarch "$(uname -m)" -R python3 tools/potato_test.py 2>&1 | tail -6
-          echo
-          echo "### 放大栈再跑（若通过 => 与栈有关）"
-          timeout 600 bash -c 'ulimit -s unlimited; python3 tools/potato_test.py' 2>&1 | tail -6
+          echo "### gdb 跟着子进程抓现场：出错指令 + 周围的指令 + 寄存器里的坏地址"
+          echo "### （固定 ip 说明同一个代码点拿到坏参数；rdi/rsi 就是那个参数）"
+          sudo apt-get install -y -qq gdb
+          timeout 900 gdb -batch -q \
+            -ex "set follow-fork-mode child" \
+            -ex "set detach-on-fork off" \
+            -ex "set confirm off" \
+            -ex run \
+            -ex "info registers rip rax rbx rcx rdx rsi rdi rbp rsp" \
+            -ex "x/10i \$rip-16" \
+            -ex "bt" \
+            --args python3 tools/potato_test.py 2>&1 | tail -70
 
       # 用法 1/3: 跑整道门禁（或只跑几条）。红项留给下一步汇总，不让它把 job 弄挂。
       - name: 跑静态门禁
