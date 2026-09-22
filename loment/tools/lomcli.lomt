@@ -834,14 +834,40 @@ fn arg_copy(mem: ptr, ab: ptr, k: u32, dst: ptr) -> u32 {
     return n;
 }
 
-// <bindir>/../share/loment/ 写进 dst
+/// `X/bin/` -> `X/`；`bin/` -> 空（即"当前目录"）；没有分隔符 -> 空。
+///
+/// **为什么需要它**: 分享目录原先写成 `<bindir>/../share/loment/` —— 同一个目录，但
+/// `loment env`、`loment examples`、`loment example` 把它**当路径打给用户看**，于是屏幕上
+/// 出现 `.../bin/../share/loment/examples/`。归一化在这里做一次，三个命令的输出一起正。
+fn dir_up(src: ptr, dst: ptr) -> u32 {
+    let n: u32 = strlen_n(src);
+    let e: u32 = n;
+    while e > 0 && (load8(src, e - 1) == 47 || load8(src, e - 1) == 92) {
+        e = e - 1;
+    }
+    let cut: u32 = 0;
+    let i: u32 = 0;
+    while i < e {
+        let c: u32 = load8(src, i);
+        if c == 47 || c == 92 {
+            cut = i + 1;
+        }
+        i = i + 1;
+    }
+    put_n(dst, src, cut);
+    return cut;
+}
+
+// <pkg>/share/loment/ 写进 dst
 fn share_dir(mem: ptr, ab: ptr, dst: ptr) -> u32 {
     let b: ptr = ptr_add(mem, M_TMP);
     let o: u32 = arg_at(mem, ab, 0);
     self_dir(ptr_add(ab, o), b);
-    let bn: u32 = strlen_n(b);
-    put_n(dst, b, bn);
-    put(ptr_add(dst, bn), "../share/loment/");
+    // 归一化: 取 bindir 的上一级，而不是拼一个 `..` 让用户去读它。
+    // 直接写进 dst —— 不能再要一块暂存: 调用方可能正拿着 M_P1..P3 里的某一块
+    // (`do_env` 就把 M_P3 当 bindir 传进来), 在 share_dir 里动它们会把它擦掉。
+    let dn: u32 = dir_up(b, dst);
+    put(ptr_add(dst, dn), "share/loment/");
     return strlen_n(dst);
 }
 
@@ -952,7 +978,12 @@ fn do_about(mem: ptr, ab: ptr, argc: u32) -> u32 {
     return 0;
 }
 
-// 包内应当就位的工具
+// 包内应当就位的工具。**几个**只有这一处说，循环上界、`present: n / N` 的分母、以及
+// "缺一个就退 1"的门槛都从它来 —— 原先分母与门槛各写死一个 `6`，而 `tool_name` 有 7 项，
+// 于是**缺一个组件仍报绿且退 0**（`ok` 为 6 时 `6 < 6` 是假）。加工具时漏改任何一处，
+// 症状都是"这条检查没有分辨力"，而当时没有任何判据会红。
+const TOOL_N: u32 = 7;
+
 fn tool_name(i: u32) -> str {
     if i == 0 {
         return "loment-driver";
@@ -995,7 +1026,7 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
     title(mem, 1, "Tools in this package");
     let i: u32 = 0;
     let ok: u32 = 0;
-    while i < 7 {
+    while i < TOOL_N {
         let nm: str = tool_name(i);
         if tool_path(bindir, nm, p, stb) {
             wstr(1, "  ");
@@ -1029,10 +1060,11 @@ fn do_tools(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wdec(mem, 1, ok);
     colr(mem, 1);
     gray(mem, 1);
-    wstr(1, " / 6");
+    wstr(1, " / ");
+    wdec(mem, 1, TOOL_N);
     colr(mem, 1);
     wstr(1, "\n\n");
-    if ok < 6 {
+    if ok < TOOL_N {
         return 1;
     }
     return 0;

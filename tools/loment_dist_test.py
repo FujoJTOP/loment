@@ -100,6 +100,14 @@ def test_layout() -> None:
     check("version 文件带显示名与标识符",
           loment_dist.DISPLAY in ver and VER in ver, ver.splitlines()[0] if ver else "")
 
+    # issue #32: loment.cmd 的 usage 块每行都必须带 echo
+    cmd_body = loment_dist._subst(loment_dist.LAUNCHER_CMD)
+    usage_part = cmd_body.split(":usage", 1)[1].split("exit /b", 1)[0]
+    usage_lines = [ln.strip() for ln in usage_part.splitlines() if ln.strip()]
+    check("loment.cmd usage 块所有非空行均以 echo 开头",
+          all(ln.startswith("echo") for ln in usage_lines),
+          str([ln for ln in usage_lines if not ln.startswith("echo")]))
+
 
 # ------------------------------------------------------------------ 2/3. 归档
 
@@ -332,6 +340,14 @@ def test_windows_installer(zipf: Path) -> None:
                         shell=False, encoding="utf-8", errors="replace", timeout=180)
     check("装完后 `loment version` 能跑",
           r2.returncode == 0 and loment_dist.DISPLAY in (r2.stdout or ""), (r2.stdout or "")[:120])
+
+    # issue #32: loment.cmd 无参数打出用法, 退出 2, 且 stderr 无批处理执行错误
+    r_usage = subprocess.run(["cmd", "/c", str(cmd)], capture_output=True, text=True,
+                             shell=False, encoding="utf-8", errors="replace", timeout=180)
+    check("装完后 `loment` (无参数) 打出用法且 stderr 为空 (退出 2)",
+          r_usage.returncode == 2 and not (r_usage.stderr or "").strip() and
+          "check only" in (r_usage.stdout or "") and "--short:" in (r_usage.stdout or ""),
+          (r_usage.stderr or "")[:120])
 
     # 与 sh 启动器那条对称: `loment help build` 的详细页必须走得到 (两份启动器都要转参数)
     r2b = subprocess.run(["cmd", "/c", str(cmd), "help", "build"], capture_output=True, text=True,

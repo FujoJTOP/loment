@@ -115,12 +115,7 @@ fn pt_dec(out: ptr, o: u32, v: u64) -> u32 {
         return o + 1;
     }
     while x > 0 {
-        // 中间量**显式落成一个 u32 局部**: `(48 + (x % 10) as u32) as u8` 这种写法两个实现
-        // 推出的类型不一样（参考实现按左操作数算成 i32, 自举 codegen 记成 i64, 于是发
-        // `trunc i64 %t19 to i8` 而 `%t19` 是 `add i32` —— 自相矛盾的 IR）。落一个具名
-        // 局部两边就都没得猜了。实测这一处是自举定点（bootstrap 2/4）唯一的分歧点。
-        let dg: u32 = (x % 10) as u32;
-        store8(out, o, (48 + dg) as u8);
+        store8(out, o, (48 + (x % 10) as u32) as u8);
         o = o + 1;
         x = x / 10;
     }
