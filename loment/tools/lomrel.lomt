@@ -228,6 +228,7 @@ tools/loment_elf_test.py
 tools/loment_pe_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
+tools/loment_multisyntax_projects_test.py
 tools/loment_multilang_test.py
 tools/trans_core.py
 tools/ctrans.py

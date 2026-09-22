@@ -1,0 +1,184 @@
+choose write grammar c
+
+/* algo.lomt —— 用 **C 语法**写的 Loment 模块（docs/188 的 `choose write grammar`）。
+ *
+ * 后缀 `.lomt` 说的是"这是 Loment 的文件"，`choose write grammar c` 说的是"用 C 的
+ * 拼法读它"。语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**。
+ *
+ * 这一份是纯整数算法的集合：每个函数都钉住一类写法（嵌套循环、递归、提前 return、
+ * 位运算、互调用），`entry()` 把它们的结果并成一个数交给宿主。
+ */
+
+/* 辗转相除：`while` 里改形参，两个变量互相赋值 */
+int gcd(int a, int b) {
+    while (b != 0) {
+        int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+int lcm(int a, int b) {
+    return a / gcd(a, b) * b;
+}
+
+/* 整数平方根：二分搜索，上界收法要小心（用 mid = (lo+hi+1)/2 才不卡死）。
+ *
+ * **探测式写 `mid * mid <= n` 是错的** —— n 一过 8.6 万，首个 `mid` 就让 `mid * mid`
+ * 溢出有符号 32 位，那是 C 里的 UB：clang -O1 恰好给出数学上正确的 1000，而 Loment 给的是
+ * **回绕**语义下的 458753（`& 255` 后是 1）。两边都对"自己没定义的那件事"做了不同的选择，
+ * 判据于是**不可比**。改成 `mid <= n / mid`：**除法不溢出**，两边逐位相同。
+ * 这是这份语料自己撞出来的，见 README「三方对不上」那一节。 */
+int isqrt(int n) {
+    int lo = 0;
+    int hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (mid <= n / mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
+}
+
+/* 模幂：递归 + 平方，逐位吃指数 */
+int powmod(int base, int exp, int mod) {
+    if (exp == 0) {
+        return 1 % mod;
+    }
+    if (exp % 2 == 1) {
+        return (base * powmod(base, exp - 1, mod)) % mod;
+    }
+    int half = powmod(base, exp / 2, mod);
+    return (half * half) % mod;
+}
+
+/* 数位和：`while` + 取余整除 */
+int digit_sum(int n) {
+    int x = n;
+    int s = 0;
+    while (x > 0) {
+        s = s + x % 10;
+        x = x / 10;
+    }
+    return s;
+}
+
+/* 数位数：do-while 在子集外，用"至少一位"的写法顶 */
+int digit_count(int n) {
+    if (n == 0) {
+        return 1;
+    }
+    int x = n;
+    int c = 0;
+    while (x > 0) {
+        c = c + 1;
+        x = x / 10;
+    }
+    return c;
+}
+
+/* 回文数：先反转再比 —— 反转用累积乘法，避免数组 */
+int reverse_int(int n) {
+    int x = n;
+    int r = 0;
+    while (x > 0) {
+        r = r * 10 + x % 10;
+        x = x / 10;
+    }
+    return r;
+}
+
+/* 考拉兹步数：递归 */
+int collatz_steps(int n) {
+    if (n <= 1) {
+        return 0;
+    }
+    if (n % 2 == 0) {
+        return 1 + collatz_steps(n / 2);
+    }
+    return 1 + collatz_steps(3 * n + 1);
+}
+
+/* 置位数：Kernighan 那一招 */
+int popcount(int v) {
+    int n = v;
+    int c = 0;
+    while (n != 0) {
+        n = n & (n - 1);
+        c = c + 1;
+    }
+    return c;
+}
+
+/* 8 位反转 */
+int reverse_bits8(int v) {
+    int n = v & 255;
+    int r = 0;
+    int i = 0;
+    while (i < 8) {
+        r = (r << 1) | (n & 1);
+        n = n >> 1;
+        i = i + 1;
+    }
+    return r;
+}
+
+/* 素数个数（试除法）：双层循环 + 提前 return */
+int is_prime(int n) {
+    if (n < 2) {
+        return 0;
+    }
+    int d = 2;
+    while (d * d <= n) {
+        if (n % d == 0) {
+            return 0;
+        }
+        d = d + 1;
+    }
+    return 1;
+}
+
+int count_primes(int limit) {
+    int c = 0;
+    int i = 2;
+    while (i <= limit) {
+        c = c + is_prime(i);
+        i = i + 1;
+    }
+    return c;
+}
+
+/* 三角数之和：1+2+...+n，用公式而不是循环（钉住"跨函数调用 + 除法"） */
+int triangular(int n) {
+    return n * (n + 1) / 2;
+}
+
+/* 两个数之间的"距离"：位异或后数 1 */
+int hamming(int a, int b) {
+    return popcount(a ^ b);
+}
+
+/* 宿主调的入口：把上面每个函数的结果折成一个数。
+ *
+ * 每一步都参与，所以**任何一个算法错了都会让退出码变** —— 这是这条判据的前提，
+ * 不是顺手写的。 */
+int entry() {
+    int g = gcd(1071, 462);            /* 21 */
+    int l = lcm(21, 6);                /* 42 */
+    int s = isqrt(1000000);            /* 1000 */
+    int p = powmod(3, 13, 1000);       /* 3^13 = 1594323 -> % 1000 = 323 */
+    int d = digit_sum(987654);         /* 39 */
+    int n = digit_count(1000000);      /* 7 */
+    int r = reverse_int(12345);        /* 54321 */
+    int c = collatz_steps(27);         /* 111 */
+    int b = popcount(255);             /* 8 */
+    int v = reverse_bits8(1);          /* 128 */
+    int pr = count_primes(100);        /* 25 */
+    int t = triangular(20);            /* 210 */
+    int h = hamming(7, 1);             /* 2 */
+    return (g + l + s % 100 + p % 100 + d + n + r % 100 + c + b + v / 8 + pr + t / 10 + h) % 256;
+}

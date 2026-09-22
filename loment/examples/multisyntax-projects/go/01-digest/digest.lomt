@@ -1,0 +1,264 @@
+choose write grammar go
+
+package main
+
+/* digest.lomt —— 用 **Go 语法**写的 Loment 模块（docs/188 的 `choose write grammar go`）。
+ *
+ * 后缀 `.lomt` 说的是"这是一份 Loment 的源"，首行那句说的是"用 Go 的拼法读它"。
+ * 语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**。
+ *
+ * 主题：**一条确定性的伪随机字节流 + 几样经典校验和与位运算**。先用一个小 LCG 把
+ * 种子摊成一串 16 位状态，再在这些状态上算字节和、异或折叠、CRC-8、Fletcher-8、
+ * 位反转、置位数……`entry()` 把它们折成一个数交给宿主。
+ *
+ * ## 这一门唯一"一个转换都不用补、也不用猜"的地方
+ *
+ * Go **没有隐式数值转换**：`int8` 不会自动变成 `int32`，所以 Go 源码里本来就到处写
+ * `int32(x)`。而那个写法**正好**是 Loment 的 `as`（`gotrans` 一字不差地搬过去）。
+ * 六门里只有 Go 是"源码里已经把转换写好了"的那一门 —— 既不用像 C/C++ 那样去**猜**
+ * 哪里该补，也没有 C#/Java 那种"两边都收"的模糊面。
+ *
+ * ## 为什么用 `int32` 而不是 `int`
+ *
+ * Go 的 `int` 宽度**随平台**（x86-64 上是 64 位）。这份语料要"算出的数与 Loment 逐位
+ * 相同"，所以每一处都写死 `int32` —— 与 Loment 的 `i32` 同宽，没有平台歧义。
+ *
+ * ## 为什么不回绕也对
+ *
+ * LCG 恒有 `state < 65536`、乘子 25173：`state*25173 < 65536*25173 < 2^31`，加常数
+ * 13849 之后仍在正区间 —— **全程没有一次超过 int32**。所以这里没有 c/01-algo 的
+ * `isqrt` 那种"两边对溢出做了不同选择、判据于是不可比"的坑。
+ */
+
+// lcg_next —— 一步线性同余。状态恒在 [0, 65535]，见文件头"为什么不回绕也对"。
+func lcg_next(state int32) int32 {
+	return (state*25173 + 13849) % 65536
+}
+
+// lcg_bytesum —— 从 seed 走 n 步，把每步的低字节加起来。
+// 钉住：`for cond` 形式的循环 + 跨函数调用 + 把"状态"当参数一路传（本子集没有全局变量）
+// + **`+=` 复合赋值**（Go 里它是**语句**、没有值，所以能直接搬 —— 见文件头）。
+func lcg_bytesum(seed int32, n int32) int32 {
+	var s int32 = seed
+	var acc int32 = 0
+	var i int32 = 0
+	for i < n {
+		s = lcg_next(s)
+		acc += s % 256
+		i = i + 1
+	}
+	return acc
+}
+
+// lcg_xorfold —— 同上，但用异或折叠。钉住：`^=` 复合赋值 + `^` 与 `%` 混在同一个表达式里。
+func lcg_xorfold(seed int32, n int32) int32 {
+	var s int32 = seed
+	var acc int32 = 0
+	var i int32 = 0
+	for i < n {
+		s = lcg_next(s)
+		acc ^= s % 256
+		i = i + 1
+	}
+	return acc
+}
+
+// mix16 —— 把 16 位值搅一搅（xorshift 风味）。钉住：多次移位 / 异或 / 乘法，
+// 每一步都用 `& 65535` 把结果压回 16 位（所以乘 31 也顶不出 int32）。
+func mix16(x int32) int32 {
+	var y int32 = x & 65535
+	y = (y ^ (y << 5)) & 65535
+	y = (y ^ (y >> 7)) & 65535
+	y = (y * 31) & 65535
+	y = (y ^ (y << 3)) & 65535
+	return y
+}
+
+// crc8_step —— CRC-8（多项式 0x07）的一步。钉住：内层 8 次循环 + `if/else` 两分支 +
+// 括号里一串位运算；`crc` 与 `b` 都先 `& 255` 压回一字节。
+func crc8_step(crc int32, b int32) int32 {
+	var c int32 = crc & 255
+	var d int32 = b & 255
+	c = c ^ d
+	var i int32 = 0
+	for i < 8 {
+		if (c & 128) != 0 {
+			c = ((c << 1) ^ 7) & 255
+		} else {
+			c = (c << 1) & 255
+		}
+		i = i + 1
+	}
+	return c
+}
+
+// crc8_stream —— 把 crc8_step 套在生成流上：**嵌套循环**（外层 n 步，内层在
+// crc8_step 里的 8 步），每个 16 位状态的低、高两个字节各喂一次。
+func crc8_stream(seed int32, n int32) int32 {
+	var s int32 = seed
+	var c int32 = 0
+	var i int32 = 0
+	for i < n {
+		s = lcg_next(s)
+		c = crc8_step(c, s & 255)
+		c = crc8_step(c, (s >> 8) & 255)
+		i = i + 1
+	}
+	return c
+}
+
+// fletcher8 —— Fletcher 校验的字节版：两个模 255 的累加和拼成一个 16 位值。
+// 钉住：一个循环里**同时**推两个累加变量（`b` 依赖 `a` 的当轮值）。
+func fletcher8(seed int32, n int32) int32 {
+	var s int32 = seed
+	var a int32 = 0
+	var b int32 = 0
+	var i int32 = 0
+	for i < n {
+		s = lcg_next(s)
+		a = (a + (s & 255)) % 255
+		b = (b + a) % 255
+		i = i + 1
+	}
+	return (b << 8) | a
+}
+
+// bit_reverse16 —— 16 位镜像。钉住：**三截 `for`**（`for i := … ; … ; i++`，
+// 翻译器会把 `i` 外提改名）+ 定次数循环 + 边移边或（没有数组）。
+func bit_reverse16(x int32) int32 {
+	var n int32 = x & 65535
+	var r int32 = 0
+	for i := int32(0); i < 16; i++ {
+		r = ((r << 1) | (n & 1)) & 65535
+		n = n >> 1
+	}
+	return r
+}
+
+// count_bits —— Kernighan 那一招：`n & (n-1)` 每次清掉最低的一个 1。
+// 钉住：循环条件是"值不为零"（`for n != 0`）。
+func count_bits(x int32) int32 {
+	var n int32 = x & 65535
+	var c int32 = 0
+	for n != 0 {
+		n = n & (n - 1)
+		c = c + 1
+	}
+	return c
+}
+
+// gray_code —— `x ^ (x >> 1)`。钉住：纯表达式，不循环。
+func gray_code(x int32) int32 {
+	var n int32 = x & 65535
+	return n ^ (n >> 1)
+}
+
+// hamming16 —— 两个 16 位数之间的汉明距离：异或后数 1。钉住：两个函数之间的一次调用。
+func hamming16(a int32, b int32) int32 {
+	return count_bits((a ^ b) & 65535)
+}
+
+// fold_recursive —— 反复 mix16，共 k 轮。钉住：**递归** + 两条**提前 return**。
+func fold_recursive(x int32, k int32) int32 {
+	if k <= 0 {
+		return x & 65535
+	}
+	if x == 0 {
+		return 0
+	}
+	return fold_recursive(mix16(x), k-1)
+}
+
+// gcd —— 辗转相除，顺带把负数取正。钉住：`while` 里两个变量互相赋值。
+func gcd(a int32, b int32) int32 {
+	var x int32 = a
+	var y int32 = b
+	if x < 0 {
+		x = -x
+	}
+	if y < 0 {
+		y = -y
+	}
+	for y != 0 {
+		var t int32 = x % y
+		x = y
+		y = t
+	}
+	return x
+}
+
+// seed_of —— 把三个数揉成一个 16 位种子：先取两次 gcd，再 mix16。
+// 钉住：一个函数里串起两个别的函数（gcd 与 mix16）。
+func seed_of(a int32, b int32, c int32) int32 {
+	var g int32 = gcd(a, b)
+	var h int32 = gcd(g+1, c)
+	return mix16(g+h+a+b+c) & 65535
+}
+
+// hex_digit_sum —— 十六进制各位数字之和。钉住：`>> 4` 与 `& 15` 配对的取位循环。
+func hex_digit_sum(x int32) int32 {
+	var n int32 = x & 65535
+	var s int32 = 0
+	for n > 0 {
+		s = s + (n & 15)
+		n = n >> 4
+	}
+	return s
+}
+
+// is_prime —— 试除法，返回 **bool**。钉住：返回类型是 `bool`，用 `n/d` 探上界
+// （**除法不溢出** —— 这一条是 c/01-algo 用一次 UB 换来的教训）。
+func is_prime(n int32) bool {
+	if n < 2 {
+		return false
+	}
+	var d int32 = 2
+	for d <= n/d {
+		if n%d == 0 {
+			return false
+		}
+		d = d + 1
+	}
+	return true
+}
+
+// count_primes —— 数 [2, limit] 里的素数。钉住：外层循环里 **bool 只当条件**用
+// （Go 的 bool 与整数不是一回事，不能相加，所以写成 `if`）。
+func count_primes(limit int32) int32 {
+	var c int32 = 0
+	var i int32 = 2
+	for i <= limit {
+		if is_prime(i) {
+			c = c + 1
+		}
+		i = i + 1
+	}
+	return c
+}
+
+// sum_squares —— 1^2+…+n^2 的闭式。钉住：纯表达式里除法与乘法的结合
+// （`n*(n+1)*(2n+1)/6`），不循环。
+func sum_squares(n int32) int32 {
+	return n * (n + 1) * (2*n + 1) / 6
+}
+
+// entry —— 宿主调的入口：把上面每个函数的结果折成一个数交给宿主。
+// 每一步都参与，所以**任何一个算法错了退出码就变** —— 这是那条判据的前提，不是顺手写的。
+func entry() int32 {
+	var seed int32 = seed_of(6, 28, 496)
+	var bs int32 = lcg_bytesum(seed, 40)
+	var xf int32 = lcg_xorfold(seed, 40)
+	var mx int32 = mix16(seed)
+	var cr int32 = crc8_stream(seed, 20)
+	var fl int32 = fletcher8(seed, 20)
+	var br int32 = bit_reverse16(seed)
+	var cb int32 = count_bits(seed)
+	var gc int32 = gray_code(seed)
+	var hm int32 = hamming16(seed, mx)
+	var fr int32 = fold_recursive(seed, 6)
+	var hx int32 = hex_digit_sum(seed)
+	var pc int32 = count_primes(30)
+	var ss int32 = sum_squares(10)
+	var total int32 = bs + xf + mx + cr + fl + br + cb + gc + hm + fr + hx + pc + ss
+	return total % 256
+}
