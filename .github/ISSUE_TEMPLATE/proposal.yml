@@ -1,0 +1,35 @@
+name: Proposal or criticism
+description: An idea, a disagreement, or a case that Loment is wrong about something.
+title: "[idea] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        [CONTRIBUTING.md](https://github.com/FujoJTOP/loment/blob/main/CONTRIBUTING.md) says
+        everything outside `lom/` is open, criticism included. This is the place for it — the
+        strongest version of your case is the most useful version.
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would change
+      description: The change itself, stated plainly enough that someone could disagree with it.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why the current thing is wrong
+      description: |
+        What it breaks, what it costs, or what it makes impossible. If it is a matter of taste,
+        say so — that is a real reason, just a different kind of argument.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried, or what would have to be true
+      description: |
+        Optional. A patch, a measurement, or the condition under which your proposal would stop
+        being necessary.
+    validations:
+      required: false
