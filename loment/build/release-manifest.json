@@ -1043,7 +1043,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "236a04951b0177ea7121d7e99f61f1a2c60a39bb63aa57ac68a299105c8fae08"
+   "sha256": "74c5dc4f35359fd2cab969cb6645947fb24d8ecdda03d51f783e21969ed6dd8c"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1575,7 +1575,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "228d2849c552beff965986684c50f3e550e6b562de003ef2a509b53e2ee642c1"
+   "sha256": "6c90e2cbe7bfb841e052c556a7e7d4212bf859b9639c4702e0523d6fa1fd74d0"
   },
   {
    "path": "loment/selfhost/switches.lomt",
