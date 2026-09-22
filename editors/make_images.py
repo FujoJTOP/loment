@@ -67,6 +67,68 @@ def save(img, w, h, path):
     print("wrote", path)
 
 
+# ---------------------------------------------------------------- 标题图
+
+def banner():
+    """标题图: 图标 + 三行白字 + 一层很淡的代码底纹。
+
+    底纹只放**代码片段**, 不放任何"说法" (不写 no libc / 几个语法 之类) ——
+    那些是会随 0.1.4 的计划变的断言, 钉进一张图里就等着过期。所以它只是装饰,
+    压得很低 (离背景只差十几个色阶), 亮暗主题下都不抢字。
+    """
+    W, H = 1040, 280
+    img = canvas(W, H).convert("RGBA")
+
+    # 右边一栏代码, 左端渐隐 —— 看得见是代码, 但整栏都在文字区右侧
+    code = [
+        "module hello",
+        "fn _start() {",
+        '    let s: str = "hello\\n";',
+        "    syscall4(1, 1, str_ptr(s) as u64);",
+        "    syscall4(60, 0, 0, 0);",
+        "}",
+        "capability blk : disk[0..4]",
+        "guard blk(i);",
+        "pub extern fn c_add(a: i32, b: i32) -> i32;",
+    ]
+    tex = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tex)
+    f_code = font(MONO, 14)
+    y = 28
+    for line in code:
+        td.text((648 * S, y * S), line, font=f_code, fill=(104, 126, 212))
+        y += 27
+
+    mask = Image.new("L", (W * S, H * S), 0)
+    md = ImageDraw.Draw(mask)
+    for x in range(W * S):                      # 横向 ramp: 左边全透明, 右边全不透明
+        t = min(1.0, max(0.0, (x / S - 596) / 150))
+        md.line([(x, 0), (x, H * S)], fill=int(255 * t))
+    tex.putalpha(mask)
+    img = Image.alpha_composite(img, tex)
+
+    glow = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse(
+        [(34 * S, 30 * S), (222 * S, 218 * S)], fill=(84, 115, 227, 74))
+    img = Image.alpha_composite(img, glow.filter(ImageFilter.GaussianBlur(23 * S)))
+
+    icon = Image.open("editors/loment.ico")
+    icon.size = (256, 256)
+    icon = icon.convert("RGBA").resize((168 * S, 168 * S), Image.LANCZOS)
+    img.paste(icon, (44 * S, 50 * S), icon)
+    d = ImageDraw.Draw(img)
+
+    # 文字块左侧那道竖条
+    d.rounded_rectangle([242 * S, 64 * S, 247 * S, 202 * S], radius=2 * S, fill=ACCENT)
+
+    X = 268
+    txt(d, (X, 100), "Loment", font(UIB, 72), WHITE, anchor="lm")
+    txt(d, (X + 2, 156), "Programming Language", font(UI, 28), (236, 240, 255), anchor="lm")
+    txt(d, (X + 2, 191), "Program by Fujo", font(UI, 21), (186, 199, 238), anchor="lm")
+
+    save(img.convert("RGB"), W, H, "editors/loment-banner.png")
+
+
 # ---------------------------------------------------------------- 管线图
 
 def pipeline():
@@ -228,6 +290,7 @@ def diagnostic():
 
 
 if __name__ == "__main__":
+    banner()
     pipeline()
     bootstrap()
     diagnostic()
