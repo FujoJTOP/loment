@@ -755,7 +755,7 @@
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "1a06a607f79c61e568ec8e447484925afd63a6f5090db8cac95a5317a7367758"
+   "sha256": "354590932f753590313dd96873de0eb38e02649ea6ace048d734a5b0fe2c6981"
   },
   {
    "path": "tools/loment_dap.py",
