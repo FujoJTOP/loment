@@ -1067,7 +1067,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "5b2e9476492ae6266926bb6d9625cc7631e3d034683aa956972e0a6175ffb105"
+   "sha256": "f7e3438ee8a91a864d899ac3c63c0cda6684d5722788aec7608900ed433766aa"
   },
   {
    "path": "loment/tools/lomclicheck.lomt",
