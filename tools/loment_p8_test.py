@@ -1677,32 +1677,34 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_empty")
         work = Path(td)
 
-        def run(src: str, name: str) -> tuple[int, str]:
+        def run(p: Path, name: str) -> tuple[int, str]:
             if native:
                 elf.chmod(0o755)
-                r = subprocess.run([str(elf), src], cwd=str(ROOT),
+                r = subprocess.run([str(elf), str(p)], cwd=str(ROOT),
                                    capture_output=True, shell=False)
                 err = r.stderr.decode("utf-8", "replace")
                 return r.returncode, err
-            rc, _out, err = _run_driver_raw(elf, src, td, name)
+            # 绝对路径交给 WSL 里跑的驱动前要转成 /mnt/<drive>/…, 否则反斜杠会被
+            # bash 吃掉 (与本文件其它传绝对路径的判据同一条约定)
+            rc, _out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
             return rc, err
 
         empty = work / "zero.lomt"
         empty.write_bytes(b"")
-        rc, err = run(str(empty), "empty")
+        rc, err = run(empty, "empty")
         assert rc == 1, f"空文件应当退 1, 得到 {rc}: {err[:300]}"
         assert "空文件" in err, f"空文件没说自己是空的: {err[:300]}"
         assert "路径对吗" not in err, f"空文件仍被说成路径问题: {err[:300]}"
         assert "目录" not in err, f"空文件被说成目录: {err[:300]}"
 
-        rc, err = run(str(work), "dir")
+        rc, err = run(work, "dir")
         assert rc == 1, f"目录应当退 1, 得到 {rc}: {err[:300]}"
         assert "目录" in err, f"目录没说自己是目录: {err[:300]}"
         assert "路径对吗" not in err, f"目录仍被说成路径问题: {err[:300]}"
         assert "空文件" not in err, f"目录被说成空文件: {err[:300]}"
 
         missing = work / "no-such-entry.lomt"
-        rc, err = run(str(missing), "missing")
+        rc, err = run(missing, "missing")
         assert rc == 1, f"缺文件应当退 1, 得到 {rc}: {err[:300]}"
         assert "打不开" in err, f"缺文件不再报「打不开」: {err[:300]}"
         assert "空文件" not in err and "目录" not in err, (
@@ -1710,14 +1712,14 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
 
         comment = work / "comment.lomt"
         comment.write_text("// only a comment\n", encoding="utf-8", newline="\n")
-        rc, err = run(str(comment), "comment")
+        rc, err = run(comment, "comment")
         assert rc == 0, f"只有注释的文件应当被接受, 得到 {rc}: {err[:300]}"
         assert "空文件" not in err and "路径对吗" not in err, err[:300]
 
         real = work / "one.lomt"
         real.write_text("module m\n\nfn f() -> u32 {\n    return 1;\n}\n",
                         encoding="utf-8", newline="\n")
-        rc, err = run(str(real), "real")
+        rc, err = run(real, "real")
         assert rc == 0, f"非空源文件不该被入口装载拒绝: {rc}: {err[:300]}"
         print("      入口装载: 空文件 / 目录 / 缺路径 三句话分开, 注释文件仍接受")
 
