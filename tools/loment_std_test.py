@@ -173,8 +173,8 @@ def _expected() -> str:
 @test
 def test_std_modules_match_python():
     """std 核的 mem / num 两模块: Loment 算的和 Python 算的**逐字节相同**。"""
-    if not J._clang():
-        print("      SKIP: 无 clang")
+    if not (J._clang() and J._wsl()):
+        print("      SKIP: 无 clang/WSL")
         return
     probe = ROOT / "loment" / "build" / "std_probe.lomt"
     probe.parent.mkdir(parents=True, exist_ok=True)
