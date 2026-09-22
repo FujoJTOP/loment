@@ -13,6 +13,7 @@ Python.
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
+[Contributing](CONTRIBUTING.md) ·
 [Issues](https://github.com/FujoJTOP/loment/issues)
 
 ## Status
