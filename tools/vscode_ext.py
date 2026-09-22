@@ -190,12 +190,17 @@ def ident_and_version() -> tuple[str, str]:
 def vs_uri(path: Path) -> dict:
     """VS Code 在 `extensions.json` 里写的那个 URI 字面量。
 
-    **形状照抄它自己写出来的**：只有 `$mid` / `path` / `scheme` 三个键，盘符小写、
-    正斜杠、前面顶一个 `/`（`/c:/Users/...`）。别自己发明 `fsPath` / `external` 那几样
-    —— 那是更早的写法的残留，VS Code 认的是 `path`。
+    **形状照抄它自己写出来的**：只有 `$mid` / `path` / `scheme` 三个键，正斜杠；
+    Windows 上盘符小写并顶一个 `/`（`C:/Users/...` → `/c:/Users/...`）。别自己发明
+    `fsPath` / `external` 那几样 —— 那是更早的写法的残留，VS Code 认的是 `path`。
+
+    "顶一个 `/`" 只对**盘符路径**成立：别的平台上路径本来就是 `/` 开头，再加一个就成了
+    `//home/...`（2026-09-22 在 CI 的 Linux runner 上露出来的）。
     """
     s = str(path).replace("\\", "/")
-    return {"$mid": 1, "path": f"/{s[0].lower()}{s[1:]}", "scheme": "file"}
+    if len(s) > 1 and s[1] == ":":
+        s = f"/{s[0].lower()}{s[1:]}"
+    return {"$mid": 1, "path": s, "scheme": "file"}
 
 
 def fix_registration(entries: list, ident: str, dest: Path) -> tuple[list, int]:
