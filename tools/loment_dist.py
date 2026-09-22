@@ -556,12 +556,12 @@ echo Loment @DISPLAY@  (@VERSION@)
 echo   loment version              print version
 echo   loment ir FILE              compile to LLVM IR on stdout
 echo   loment check FILE [--no-color] [--short^|--json] [--max N]
-                              check only (diagnostics on stderr, IR discarded)
-                              --short: one grep-able line per diagnostic
-                              --json:  one object per diagnostic (for editors and CI)
-                              --max N: render at most N (default 20; 0 = all)
+echo                               check only (diagnostics on stderr, IR discarded)
+echo                               --short: one grep-able line per diagnostic
+echo                               --json:  one object per diagnostic (for editors and CI)
+echo                               --max N: render at most N (default 20; 0 = all)
 echo   loment build FILE [-o OUT] [--link OBJ...]
-                              compile and link; --link adds a foreign object (FFI)
+echo                               compile and link; --link adds a foreign object (FFI)
 echo   loment run FILE             compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
