@@ -1,9 +1,9 @@
 <!-- translated-from: docs/169-loment-cli.md -->
-<!-- source-sha256: 19e532c8eae4e836a0ad7235b0a6cd4dec83e31774cbf4c046f021401f1dfb55 -->
+<!-- source-sha256: 0174f8f05104f99ba549acd310c884279da686af3f639ef5f001687c768cf853 -->
 
 # 169 · The Loment CLI: command surface and look and feel
 
-> Version `0.1.4-pre2` (display name **Loment 0.1.4 Pre2**)
+> Version `0.1.4` (display name **Loment 0.1.4**)
 > · Implementation `loment/tools/lomcli.lomt` (**written in Loment itself**) · Criteria `tools/loment_cli_test.py`
 > · Upstream: `docs/148` (toolchain), `docs/162` (release package), `docs/159` (dropping Python from the bootstrap)
 

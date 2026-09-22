@@ -61,9 +61,9 @@ safe.
 loment version
 ```
 
-You get something like `Loment 0.1.4 Pre2 (0.1.4-pre2), commit <short>`. **The commit is what
-counts**: different checkouts can do different things (this file describes the 0.1.4-pre2
-generation; older packages print `0.1.4 Alpha` / `0.1.4 Alpha2.3`).
+You get something like `Loment 0.1.4 (0.1.4), commit <short>`. **The commit is what
+counts**: different checkouts can do different things (this file describes the 0.1.4
+generation; older packages print `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`).
 
 **There are 38 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
 `loment help <command>` documents one. The ones used most:
