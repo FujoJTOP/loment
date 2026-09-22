@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "046eee6be3575de4b9b086ccff4b5a14e3982332392606e190b1e800a673c00e"
+   "sha256": "38820fc7064fddb43c63e9f631e1b7b0bdf46c5240af827c2b84e1e8f0ce890c"
   },
   {
    "path": "tools/loment_err_test.py",
@@ -1011,11 +1011,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "0058b82073c01d9b659499820c91b8afe512b98a3f0a85525a985b08a762c653"
+   "sha256": "9a470e34e194cf5b6c5ac89571b21b9f9f60cb88747d669d1069d8316f066af1"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "a4a65f750a8beb9b27b7b0a4a23122fe8817feca6ca900feb6cd737c424d61ec"
+   "sha256": "4329d70ebde7eadfb117f0b3a96eff13189c242a0091c6ea0db88a39cf7ec086"
   },
   {
    "path": "tools/loment_sign.py",
