@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_potato_emit_test.py",
-   "sha256": "e7edd890a860edce8f514f191851b196b12e8e95e36e9b98a07a1505200d0604"
+   "sha256": "ad5c6763ced98faed901718efec4c5e0788a194fc29d85621f4cc53d1dc72a8c"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "002e0aa5e640a4f0b4a179e5067d9129d92d854d4ec0437e72dc0cbb9a915046"
+   "sha256": "756cf51abcfcad3fcc8d98b139ea72f38ca948cc0a4d192da0b6993a4adbff54"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1458,6 +1458,10 @@
    "sha256": "47891a6cb1957df00729a356f3898446fa34bb034cc27e0bcfe36af3cc87009c"
   },
   {
+   "path": "loment/examples/native_gen_sig.lomt",
+   "sha256": "39c7d65432d2f1eb2d9f802b1a55f42cde4d18dbd157db887f86848f171c29fd"
+  },
+  {
    "path": "loment/examples/native_match_full.lomt",
    "sha256": "c7cad3030483fe2fb35eebbd287961d3f7241c1339b2e2c99386c6cb9a316e63"
   },
@@ -1579,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "6c90e2cbe7bfb841e052c556a7e7d4212bf859b9639c4702e0523d6fa1fd74d0"
+   "sha256": "630a99137bf7da11369726ce21d97a0d05de287889f931399f215a3ddf112a05"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1835,7 +1839,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "8f0f13aefd73c3476f4d0b771dda59c3ee66252f3900d95295b5b5f2ca90122f"
+   "sha256": "ce51fa6f85213b58df095389cdccd3ceaff472d5685a4d6d2279f269938252de"
   },
   {
    "path": "docs/190-loment-debugger.md",
@@ -1871,7 +1875,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "354ecd44a932603df9242b3071e9111cb839ccc9fd7a0efbe9f313c58e54c52a"
+   "sha256": "882ec5cce8181860ca77eda76f014193a0a5f1e0c84bec5c1efe59092a2843f5"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -1944,6 +1948,10 @@
   {
    "path": "docs/manual/api/native_gen.md",
    "sha256": "83f281e3d534b234a94781c01e4e178d28c092c19a73876986572cd4aacf9ba5"
+  },
+  {
+   "path": "docs/manual/api/native_gen_sig.md",
+   "sha256": "09e3aef32c67dc30a5a2306e42114417c85cae003971a1df4556e3b7db8f6d90"
   },
   {
    "path": "docs/manual/api/native_match_full.md",

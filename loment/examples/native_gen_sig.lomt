@@ -1,0 +1,19 @@
+// loment/examples/native_gen_sig.lomt —— 泛型**结构体**的实例化（docs/189 S1 第 21 格 M7）
+//
+// `native_gen.lomt` 里的结构体用法要读字段（`p.a`），而"字段访问当实参"还在拒绝轴上 ——
+// 所以**结构体实例**那一格（`types[]` + 字段替换）由这份语料钉住：只声明、只构造、不读字段。
+//
+// 两份实例（`Box<i32>` / `Box<u32>`）是**故意的**：参考实现按**串排序**决定实例的创建顺序
+// （`Box<i32>` < `Box<u32>`），而 `types[]` 里实例的先后就是创建顺序 —— 少一个排序就会
+// 在这份语料上分叉。
+module native_gen_sig
+
+struct Box<T> {
+    v: T,
+}
+
+fn make() -> u32 {
+    let b: Box<u32> = Box { v: 7 };
+    let c: Box<i32> = Box { v: 0 - 3 };
+    return 3;
+}

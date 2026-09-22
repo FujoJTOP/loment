@@ -34,6 +34,7 @@
 - [native_concat](api/native_concat.md)
 - [native_entry](api/native_entry.md)
 - [native_gen](api/native_gen.md)
+- [native_gen_sig](api/native_gen_sig.md)
 - [native_match_full](api/native_match_full.md)
 - [native_mem](api/native_mem.md)
 - [native_mut](api/native_mut.md)
