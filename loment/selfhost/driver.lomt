@@ -320,6 +320,40 @@ fn open_wo(p: ptr, n: u32, scr: ptr) -> i64 {
     return syscall6(257, (0 as u64) - 100, scr as u64, 577, 420, 0);
 }
 
+/// 入口路径的种类, 只看 `st_mode`。
+///
+/// 返回: 1 = 目录, 2 = 普通文件, 0 = 不存在 / 打不开 / 其它类型。
+/// `S_IFMT` = 61440, `S_IFDIR` = 16384, `S_IFREG` = 32768, 与 `lomcli.lomt` 同一对常数。
+///
+/// **不能问 `st_size`**: PE 垫片的 `newfstatat` 只填 `st_mode`, `st_size` 恒为 0
+/// (lomcli 头注)。空不空要等 `load_file` 把字节数读出来再判。
+///
+/// stat 缓冲借 scr 的 use 清单区 (`USE_OFF`): 这一步在 `load_file` 之前, 那块还没被
+/// 清单占用, `load_file` 自己会重写它。路径暂存仍是 scr 的前 4000 字节 (与 `open_ro` 同槽)。
+/// flags 必须显式 0 —— `syscall4` 递不到 r10, 残留的 flags 会让 `newfstatat` 不跟随
+/// 符号链接或直接失败, 所以走 `syscall6` (与 `open_wo` 同一个理由)。
+fn entry_kind(p: ptr, n: u32, scr: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    let stb: ptr = ptr_add(scr, USE_OFF);
+    let r: i64 = syscall6(262, (0 as u64) - 100, scr as u64, stb as u64, 0, 0);
+    if r < 0 {
+        return 0;
+    }
+    let mode: u32 = load32(stb, 24) & 61440;
+    if mode == 16384 {
+        return 1;
+    }
+    if mode == 32768 {
+        return 2;
+    }
+    return 0;
+}
+
 /// `p[0..n]` 与字面量 `s` 相等吗 (含长度)。
 fn streq(p: ptr, n: u32, s: str) -> u32 {
     if n != str_len(s) {
@@ -1555,8 +1589,18 @@ fn _start() -> u32 {
                                       cstr_len(ptr_add(scr, TOOLDIR_OFF)),
                                       ptr_add(scr, EXT_OFF), scr, unit, toks);
     }
+    // 空文件与目录以前都落在下面那句「路径对吗?」上 (issue #52): 读到 0 字节就被说成
+    // 路径错了。目录在 open 时就能认出来; 普通文件读到 0 字节才是空文件。
+    // 真正打不开的路径仍由 `load_file` 报「打不开」, 不进这里。
+    let ek: u32 = entry_kind(ap, an, scr);
+    if ek == 1 {
+        return fail("fujoc-s: 入口是目录, 不是源文件\n");
+    }
     let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks, 0);
     if len == 0 {
+        if ek == 2 {
+            return fail("fujoc-s: 入口是空文件 (里面没有源码)\n");
+        }
         return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");
     }
     // 单元的词法缓冲: 按**实测密度**估 —— 仓库 184 个文件合计 4.81 字节/token, 最密的
