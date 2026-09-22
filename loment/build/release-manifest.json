@@ -1019,7 +1019,7 @@
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "bbfe9b0a986a346e7fc0a3fda51b36f3b345ef5b909207acc4a15e30387942b3"
+   "sha256": "af8a5b67c8148889d1373a8ec6c1b919269ab171ca8f55679706b32beec22492"
   },
   {
    "path": "tools/loment_sign.py",
