@@ -60,6 +60,8 @@ COVERED = (
                                 # 枚举实例 + 签名里的改名 + `generics` 那三组
     "native_gen_sig.lomt",      # M7: 泛型 struct 的实例化（`Box_i32` / `Box_u32`）+ 字段替换,
                                 # **两份实例**用来钉住"按串排序"（不排就会分叉）
+    "demo.lomt",                # M-L0: `use "lom/fujr.lom"` —— `layouts` 那一格要**读那个 L0 文件**
+                                # 并解析它的 `record`（Header/Section；字段按偏移排）
     "tour.lomt",                # 同上；同时带着 `Entry`/`Kind` 两张大表
     "selfcheck.lomt",
     "switch.lomt",              # 开关取值要进对象: `switches` 那一格
@@ -76,7 +78,6 @@ COVERED = (
 #: **点名拒绝**的那些（文件 -> 拒绝话里必须出现的那个轴的名字）。
 #: 每一条都对应 `loment/selfhost/potato.lomt` 头上写的那几条边界。
 REFUSED = {
-    "demo.lomt": "L0 布局",     # `use "lom/fujr.lom"` —— `layouts` 要读 L0, 自举侧不装载
     # 链式泛型（泛型函数体里再调泛型函数）。参考实现靠 **8 轮迭代** —— 它会走*实例*的体，
     # 那时 `T` 已经换成 `u32`，于是实例名是 `pick_u32`。自举侧只走**单元本体**（一趟），
     # 看到的实参类型还是 `T`，会造出 `pick_T` —— 发得出去、逐字节**不一样**，
