@@ -307,6 +307,20 @@ lom/*.lom
 docs/*.md
 docs/manual/*.md
 docs/manual/api/*.md
+tools/_safepath.py
+tools/fuai_contract_check.py
+tools/fuic.py
+tools/fujopack.py
+tools/lom_spec_emit.py
+tools/loment_bootstrap.py
+tools/loment_capasserts_test.py
+tools/loment_eol_test.py
+tools/loment_ffi_test.py
+tools/loment_i18n_test.py
+tools/loment_probe.py
+tools/loment_release.py
+tools/loment_status.py
+tools/loment_syscalls_test.py
 ";
 }
 

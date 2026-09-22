@@ -216,6 +216,16 @@ GLOBS = [
     "docs/*.md",
     "docs/manual/*.md",
     "docs/manual/api/*.md",
+    # 工具与判据**自己**也要在清单里 —— `loment_tools_test::test_every_tool_is_in_the_release_manifest`
+    # 钉住"被跟踪的 `tools/*.py` 一个都不能少"。这一组就是那条判据第一次跑出来的缺项（14 个，
+    # 其中 5 个是判据）：它们有的在门禁里跑、有的被别的工具的判据点名，却都不在清单上。
+    # **`docs/i18n/` 不在此列** —— 那是译者向工件，`docs/i18n/glossary.md` §1 明写不随包发。
+    "tools/_safepath.py", "tools/fuai_contract_check.py", "tools/fuic.py",
+    "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
+    "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
+    "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
+    "tools/loment_syscalls_test.py",
 ]
 
 
