@@ -54,8 +54,12 @@ COVERED = (
     "native_str.lomt",
     "native_trait.lomt",        # trait + 两个 impl —— `traits`/`impls` 的原始视图 +
                                 # impl 方法的 `self`（改名 `__self` + 填接受者类型）
-    # ---- 泛型**函数**的单态化（`instances` 那一格 + 函数表被替换）
+    # ---- 泛型**函数/类型**的单态化（`instances` 那一格 + 函数表被替换）
     "all_loment.lomt",          # `max_of_u32` —— 实例名 = 基名 + 实参类型
+    "native_res.lomt",          # M7: 预置 `Result<T, E>` 的实例化（`Result_u32_u32`）——
+                                # 枚举实例 + 签名里的改名 + `generics` 那三组
+    "native_gen_sig.lomt",      # M7: 泛型 struct 的实例化（`Box_i32` / `Box_u32`）+ 字段替换,
+                                # **两份实例**用来钉住"按串排序"（不排就会分叉）
     "tour.lomt",                # 同上；同时带着 `Entry`/`Kind` 两张大表
     "selfcheck.lomt",
     "switch.lomt",              # 开关取值要进对象: `switches` 那一格
@@ -73,13 +77,15 @@ COVERED = (
 #: 每一条都对应 `loment/selfhost/potato.lomt` 头上写的那几条边界。
 REFUSED = {
     "demo.lomt": "L0 布局",     # `use "lom/fujr.lom"` —— `layouts` 要读 L0, 自举侧不装载
-    "native_gen.lomt": "泛型**类型**的声明",   # M7 那一半（类型串收集 + 批量实例化）
-    "native_res.lomt": "用了泛型类型",
     # 链式泛型（泛型函数体里再调泛型函数）。参考实现靠 **8 轮迭代** —— 它会走*实例*的体，
     # 那时 `T` 已经换成 `u32`，于是实例名是 `pick_u32`。自举侧只走**单元本体**（一趟），
     # 看到的实参类型还是 `T`，会造出 `pick_T` —— 发得出去、逐字节**不一样**，
     # 属于"静默的错"。这一条钉住"那种情况必须**点名拒绝**，不许发个错壳出去"。
     "native_chain.lomt": "链式泛型",
+    # `p.a` 那种**字段访问当泛型实参**：参考实现按字段类型推（`p.a` → `u32`），自举侧的实参
+    # 推断只认"标识符"与 `x as T`。**不能**拿标识符自己的声明类型顶替 —— 那会得出
+    # `max_Pair<u32>` 这种实例名（发得出去但是错的）。所以点名拒。
+    "native_gen.lomt": "字段访问",
 }
 
 #: 连**检查**都还没过的（与这一格无关，但必须有一格，否则"没做决定"那条判据会把它当成漏网）。
