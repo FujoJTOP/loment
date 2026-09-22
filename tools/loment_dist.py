@@ -1384,7 +1384,13 @@ def build_stage1() -> Path:
     STAGE.mkdir(parents=True, exist_ok=True)
     tgt = _host_target()
     stage1 = STAGE / ("stage1.exe" if tgt == "pe" else "stage1.elf")
-    return _write_shared(stage1, _lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
+    p = _write_shared(stage1, _lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
+    # Linux 那支出来的是 ELF, 而 `emit_ir` **马上要执行它** —— 没有可执行位就是
+    # `PermissionError: [Errno 13]`。Windows 那支是 PE, 而 PE 的执行不看这一位, 所以
+    # 本机一直没暴露 (2026-09-22 把门禁搬上 CI, 第一条红就是它)。
+    if tgt == "elf":
+        p.chmod(0o755)
+    return p
 
 
 def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
