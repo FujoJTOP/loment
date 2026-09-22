@@ -75,7 +75,7 @@
   },
   {
    "path": "tools/loment_std_test.py",
-   "sha256": "b1f5f87e3596028853aa767c7ec0fc9257a5cdf00eb0d1d1edd39f81a77bfed7"
+   "sha256": "2aeecd241b7288e6270e30120fd795dbacea4cd58a9c860c75eb99da1d44125d"
   },
   {
    "path": "tools/loment_lumtui_test.py",
@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_grammar_test.py",
-   "sha256": "b7344a3ec1e3cd333ff887591d017156422d2945efaf232184fd1dd635027c8f"
+   "sha256": "1266dea66f48e72340475a6a1dfe8f30ef9b4891ff65b0eff4391f9284c69005"
   },
   {
    "path": "loment/build/win_shim.bin",
@@ -1003,7 +1003,7 @@
   },
   {
    "path": "tools/loment_filetype_test.py",
-   "sha256": "75cb622a281d35c0e7f953d4f62ad690431a732f91e9f801386e628b27e3415d"
+   "sha256": "b893aa0fd21fc9d95e3ca21ddaffc5db5bef9949267afa7b86450889ac27dd7f"
   },
   {
    "path": "tools/loment_eol.py",
