@@ -19,9 +19,7 @@ fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
 lom_audit                    # 环境：同上（要读对方的 C 头）
 lomc_test                    # 环境：同上（发布副本一致性那两条）
 potato_cross                 # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
-loment_dist_test             # 仓库：Linux 可移植性（安装脚本 / 可执行位那一类，正在修）
 loment_lomtfrom_test         # 仓库：Linux 可移植性
 loment_multisyntax_projects_test  # 仓库：新落的判据，runner 上 2/3（正在修）
 loment_trans_test            # 仓库：Linux 可移植性
 potato_test                  # 仓库：Linux 可移植性（孪生二进制段错误那条）
-vscode_ext_test              # 仓库：Linux 可移植性
