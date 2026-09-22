@@ -30,3 +30,20 @@ fn bool_cast(c: bool) -> u32 {
 fn use_in_call(v: u32) -> u8 {
     return take8(v as u8);
 }
+
+// `as T` 的左操作数是**括号里的二元表达式**, 而某个操作数自己还带一次 `as` ——
+// 这条正是自举 codegen 把中间量记成 i64 的那个形状 (docs/189 第 39 条):
+// `%t = add i32 48, ..` 之后必须跟 `trunc i32 %t to i8`, 不是 `trunc i64`。
+fn cast_of_sum(x: u64) -> u8 {
+    return (48 + (x % 10) as u32) as u8;
+}
+
+// 带 `as` 的操作数在**左侧**: `operand_bin_type` 取第一个操作数的那条路。
+fn cast_of_sum_left(x: u64) -> u8 {
+    return ((x % 10) as u32 + 48) as u8;
+}
+
+// 括号里的左操作数是字面量 (推不出类型), 于是落到"顶层运算符右侧的操作数"那条路。
+fn cast_of_nested_bin(b: u32) -> u8 {
+    return ((48 + b) / 2) as u8;
+}
