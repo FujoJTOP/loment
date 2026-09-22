@@ -141,14 +141,29 @@ state is a change nobody can merge.
 **This applies to a person's submission and an agent's alike.** There is no lighter track for
 either: the point of a gate is that the answer does not depend on who is asked.
 
-**Where the gate stands right now (2026-09-22).** The workflow is new and the gate is **not
-all-green on a clean checkout**. The first measured run on a GitHub runner was 62 criteria, 43
-green and 19 red — and the reds were not missing tools. Four of them need the companion repository
-`LinuxFUAI/`, a private checkout that is not part of this one; the rest are Linux portability
-problems being worked through one at a time, and the set is platform-dependent (a Windows checkout
-is red in different places). So **today the bar is not "green". It is "you did not add a red, and
-you said which reds you saw."** When the red set reaches zero this paragraph goes away and green
-becomes the bar.
+**Where the gate stands right now (2026-09-22).** The gate is **not all-green on a clean
+checkout**. The first measured run on a GitHub runner was 62 criteria, 43 green and 19 red — and
+the reds were not missing tools. Four of them need the companion repository `LinuxFUAI/`, a private
+checkout that is not part of this one; the rest are Linux portability problems being worked through
+one at a time, and the set is platform-dependent (a Windows checkout is red in different places).
+So **today the bar is not "green". It is "you did not add a red, and you said which reds you saw."**
+When the red set reaches zero this paragraph goes away and green becomes the bar.
+
+**The gate enforces exactly that, from `.github/gate-baseline.txt`.** That file is the **measured**
+list of known reds. The workflow fails when a criterion is red that is **not** on the list, and it
+says nothing about the ones that are. Two rules come with it:
+
+- **A new red is re-run on its own before it counts.** A criterion that fails only in a parallel
+  run is usually another checkout writing to the same tree (see below), so the job re-runs each
+  candidate on its own and only fails on the ones that are still red. Flakes are reported in the
+  job summary and do not fail the job — a gate that cries wolf gets ignored.
+- **The list only ever shrinks.** When you fix a red, delete its line in the same pull request. The
+  job summary names any entry that has gone green, so a stale list is visible rather than silent.
+
+Adding a line to that list is allowed, but it is a claim: say in the pull request **why** that red
+is not yours, and mark it `环境` (the runner lacks something, or the companion checkout is absent)
+or `仓库` (it is genuinely unfinished work). A list entry nobody justified is how a gate turns back
+into a decoration.
 
 If a suite fails, run that suite on its own before believing it — a criterion that fails only in
 a parallel run is usually another checkout writing to the same tree.

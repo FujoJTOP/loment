@@ -18,8 +18,17 @@
 #   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
 #     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
 #   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
-#   * 这一版**故意不让红项把 job 弄挂**：它还不是门，一个"第一天就全红"的必需检查
-#     不是安全网，是噪音。
+#
+# ## 它现在是**门**，判据是"不新增红"
+#
+# 全绿还不是现状（实测 10 条已知红），所以判据不是"全绿"而是**"不新增红"**：
+# 基线（`.github/gate-baseline.txt`，**实测**出来的那份清单）上的红不判失败，
+# **清单之外的**红判失败。这就是"必需检查"能挂上来而不变成噪音的原因。
+#
+# 两处细节:
+#   * **新红先单跑一遍再判**：并行轮里的红有一部分只是撞上了别的套件在写同一棵树
+#     （`CONTRIBUTING.md` 记过）。单跑还是红才算数 —— 误报的门会被人忽略。
+#   * **基线只许变短**：哪一条修好了就在同一个 PR 里删掉它，否则 summary 会一直提醒。
 
 name: gate
 
@@ -173,7 +182,7 @@ jobs:
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
           echo "绿 $pass / 红 $fail / 共 $((pass + fail))"
           {
-            echo "## 静态门禁（测量轮）"
+            echo "## 静态门禁 —— 测量"
             echo ""
             echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链自述见日志）"
             echo ""
@@ -188,9 +197,82 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 真门那一半：对照基线，**只对新红报红**。
+      - name: 对照基线（只对新红报红）
+        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+        run: |
+          set +e
+          if [ ! -f .github/gate-baseline.txt ]; then
+            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
+            exit 1
+          fi
+          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
+          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
+          comm -13 base.txt red.txt > new_red.txt
+          comm -23 base.txt red.txt > gone.txt
+          : > confirmed.txt
+          : > flaked.txt
+          while read -r name; do
+            [ -z "$name" ] && continue
+            echo "=== 新红复跑（单跑）: $name ==="
+            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
+            rc=$?
+            tail -4 "re_$name.log"
+            if [ $rc -eq 0 ]; then
+              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
+              echo "$name" >> flaked.txt
+            else
+              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
+              echo "$name" >> confirmed.txt
+            fi
+          done < new_red.txt
+          n_red=$(wc -l < red.txt | tr -d ' ')
+          n_base=$(wc -l < base.txt | tr -d ' ')
+          n_bad=$(wc -l < confirmed.txt | tr -d ' ')
+          n_flake=$(wc -l < flaked.txt | tr -d ' ')
+          n_gone=$(wc -l < gone.txt | tr -d ' ')
+          {
+            echo "## 对照基线（判据：不新增红）"
+            echo ""
+            echo "本轮红 **$n_red** · 基线 **$n_base** · 新红 **$n_bad** · 并行假红 $n_flake · 基线已过期 $n_gone"
+            echo ""
+            if [ "$n_bad" -gt 0 ]; then
+              echo "### 新红（这一笔引入的）"
+              echo '```'
+              cat confirmed.txt
+              echo '```'
+            fi
+            if [ "$n_flake" -gt 0 ]; then
+              echo "### 并行假红（单跑绿 —— **不**判失败）"
+              echo '```'
+              cat flaked.txt
+              echo '```'
+            fi
+            if [ "$n_gone" -gt 0 ]; then
+              echo "### 基线该变短了"
+              echo '这几条已经绿了，请在**同一个 PR 里**从 `.github/gate-baseline.txt` 删掉：'
+              echo '```'
+              cat gone.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n_bad" -gt 0 ]; then
+            echo "::error::门禁：新红 $n_bad 条 —— $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+          echo "门禁：没有新红（基线里 $n_gone 条已过期，见 job summary）"
+
       - uses: actions/upload-artifact@v4
         if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
         with:
           name: gate-log
-          path: gate.out
+          path: |
+            gate.out
+            red.txt
+            base.txt
+            new_red.txt
+            confirmed.txt
+            flaked.txt
+            gone.txt
+            re_*.log
           if-no-files-found: warn
