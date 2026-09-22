@@ -775,6 +775,27 @@ def test_both_launchers_reject_unknown_options():
     assert 'set "cbad="' in cmd and "if defined cbad exit /b 2" in cmd,         "cmd: :scan_arg 的拒绝没有从 :compile_only 传出去"
 
 
+@test
+def test_both_launchers_reject_extra_check_files():
+    """`check` must not silently compile only the first of multiple input files."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    # Bash parses the file and renderer switches in one pass, so both file positions remain valid.
+    assert 'src=' in sh
+    assert 'check accepts exactly one input file' in sh
+    assert '*) [ -z "$src" ] || {' in sh
+    assert '-*) echo "loment: unknown option $1" >&2; exit 2 ;;' in sh
+    assert '[ -n "$src" ] || { usage >&2; exit 2; }' in sh
+
+    # The batch launcher scans the complete command line and must reject a second positional word.
+    assert 'if defined csrc goto scan_extra' in cmd
+    assert ':scan_extra' in cmd
+    assert 'echo loment: check accepts exactly one input file 1>&2' in cmd
+    assert 'if defined cbad exit /b 2' in cmd
+
+
 # ---------------------------------------------------------------- Loment 版（S1 第十二格）
 
 _TW = f"/tmp/loment-cli-{os.getpid()}-"
