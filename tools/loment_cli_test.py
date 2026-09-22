@@ -259,6 +259,13 @@ def test_color_flag_anywhere_in_argv_does_not_eat_the_command():
 # ---------------------------------------------------------------- 真算出来的东西
 
 @test
+def test_hash_rejects_directory():
+    f = _pkg / "share" / "loment" / "examples"
+    rc, out, err = _run(["hash", str(f)] + _no_color())
+    assert rc != 0, f"hash on directory should fail, got rc={rc}, out={out}"
+    assert "not a file" in err, f"expected 'not a file' in stderr, got: {err}"
+
+
 def test_hash_matches_hashlib():
     f = _pkg / "share" / "loment" / "examples" / "tour.lomt"
     rc, out, _ = _run(["hash", str(f)])
