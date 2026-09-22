@@ -832,6 +832,68 @@ def test_m81_builtin_tables_match():
     print(f"      内建名表 {len(mine)} 个一致 (含单列的 slice_len)")
 
 
+@test
+def test_tool_memory_layout_stays_inside_cap():
+    """**每个 `loment/tools/` 工具的"内存布局"要落在它自己声明的 `M_CAP` 之内。**
+
+    为什么需要一条判据盯着它: 那套布局是**手工维持**的 —— `const` 只吃整数字面量，
+    所以 `TB_*` 这些表偏移只能一个个写死（见 `lompotato.lomt` 布局块里那句注释）。
+    "加一张表忘了抬 `M_CAP`"、"改基址时算错一格"都会**静默**越界，而越界的写
+    **在 Windows 上看不出来**: 堆有余量、把它吞了；Linux 上 `brk` 区域之外没有映射，
+    直接 SIGSEGV。
+
+    这不是假设 —— 2026-09-22 把门禁搬上 Linux runner 时，`lompotato` 的 `TB_DL`
+    正是这么崩的: 那一组表偏移整体偏高 65536（从 475136 起而不是从 409600 起），
+    最后一张落在 **847024 > M_CAP 832512**。于是 `enums` 里只要有一个非空的
+    `variants`（那是**唯一**会用到 `TB_DL` 的路径）就段错误 —— 而同一份判据在
+    Windows 上一直是绿的。
+
+    查两件事:
+
+    1. 每个 `M_X` 落在 `M_CAP` 内；有配对的 `X_CAP` 时，`M_X + X_CAP` 也要在界内；
+    2. 名字表 `TB_*` **等距**（间距 == `TA`）、起点是表区起点 `M_TB`、且**最后一张
+       表的末尾**也在界内。
+    """
+    pat = re.compile(r"^const\s+([A-Z][A-Z0-9_]*)\s*:\s*u32\s*=\s*(\d+)\s*;", re.M)
+    bad: list[str] = []
+    checked = 0
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        c = {m.group(1): int(m.group(2))
+             for m in pat.finditer(p.read_text(encoding="utf-8"))}
+        cap = c.get("M_CAP")
+        if cap is None:
+            continue
+        checked += 1
+        for name, off in sorted(c.items()):
+            if not name.startswith("M_") or name == "M_CAP":
+                continue
+            if off >= cap:
+                bad.append(f"{p.name}: {name} = {off} 已在 M_CAP = {cap} 之外")
+            size = c.get(name[2:] + "_CAP")
+            if size is not None and off + size > cap:
+                bad.append(f"{p.name}: {name} + {name[2:]}_CAP = "
+                           f"{off}+{size} = {off + size} 超出 M_CAP = {cap}")
+        tbs = sorted(v for k, v in c.items() if k.startswith("TB_"))
+        if tbs:
+            ta = c.get("TA")
+            if not ta:
+                bad.append(f"{p.name}: 有 TB_* 却没有 TA（表尺寸）")
+            else:
+                gaps = sorted({b - a for a, b in zip(tbs, tbs[1:])})
+                if gaps != [ta]:
+                    bad.append(f"{p.name}: TB_* 不等距: 间距 {gaps} != TA = {ta}")
+                if tbs[-1] + ta > cap:
+                    bad.append(f"{p.name}: 最后一张表 {tbs[-1]} + TA = "
+                               f"{tbs[-1] + ta} 超出 M_CAP = {cap}")
+                m_tb = c.get("M_TB")
+                if m_tb is not None and tbs[0] != m_tb:
+                    bad.append(f"{p.name}: 第一张表 {tbs[0]} 不在表区起点 "
+                               f"M_TB = {m_tb}")
+    assert not bad, ("工具的内存布局越界（Linux 上段错误、Windows 上看不出来）:\n  "
+                     + "\n  ".join(bad))
+    print(f"      {checked} 个工具的内存布局都在各自的 M_CAP 之内")
+
+
 # ---------------------------------------------------------------- M65/M66 构建
 
 @test
