@@ -1,14 +1,19 @@
-# 静态门禁 —— 目前是**测量/诊断轮**，还没设成必需检查
+# 门禁 —— 两个 job，性质不同：
 #
-# 已经跑通过一轮: 62 条 43 PASS / 19 FAIL，整轮 6m23s（artifact 里有原始日志）。
-# **还没设必需检查的理由**: 19 条红里 15 条是"本机全绿、runner 上红"的 Linux
-# 可移植性问题 —— 而环境自述已经排除"缺命令"（clang / llvm-objdump / rustc /
-# qemu / java / node / vim / go 全在，只缺 nvim）。基线必须**实测**，否则接上
-# 必需检查的第一天就是 19 条红的噪音。
+#   * `lom-door`：**硬失败**的禁区检查（CONTRIBUTING「Do not change anything under
+#     `lom/`」）。几十秒，只读 API 列文件名，不 checkout 别人的代码。
+#   * `static`：**测量/诊断轮**，还没设成必需检查，故意不挂。
+#
+# 先说不挂的那一个的理由（那一轮 `STATIC_CHECKS` 是 62 条，此后只多不少，所以这里不写死条数）:
+# 43 PASS / 19 FAIL，整轮 6m23s（artifact 里有原始日志）。
+# 19 条红里 15 条是"本机全绿、runner 上红"的 Linux 可移植性问题 —— 而环境自述已经排除
+# "缺命令"（clang / llvm-objdump / rustc / qemu / java / node / vim / go 全在，只缺 nvim）。
+# 基线必须**实测**（`gate-baseline.txt` 就是实测出来的），否则接上必需检查的第一天
+# 就是 19 条红的噪音。
 #
 # 三种用法:
-#   1) 自动: PR 与 push 到 main → 跑整道静态门禁（62 条）→ 红项进 job summary、
-#      原始日志进 artifact；
+#   1) 自动: PR 与 push 到 main → `lom-door` 先跑；`static` 跑整道静态门禁 → 红项进
+#      job summary、原始日志进 artifact、**新红**让 job 挂（与基线比，见最后一步）；
 #   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
 #      输出**。为什么需要这条: `bash tools/ci.py:203` 每条只留**最后一行**，那不够
 #      定位病因（第一轮的 artifact 就是这么被它限制住的）；
@@ -18,8 +23,10 @@
 #   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
 #     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
 #   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
-#   * 这一版**故意不让红项把 job 弄挂**：它还不是门，一个"第一天就全红"的必需检查
-#     不是安全网，是噪音。
+#     （`lom-door` 这个 job **不改** `lom/` 里的任何东西，它只读文件名。）
+#   * `static` **只对"新红"失败**：与 `gate-baseline.txt` 逐条比，红集里的老面孔不挂
+#     job，多出一个名字才挂。理由同上 —— 一个"第一天就全红"的必需检查是噪音；
+#     一个"永远 success"的测量轮不是安全网。基线是实测出来的，不是猜的。
 
 name: gate
 
@@ -46,6 +53,79 @@ permissions:
   contents: read
 
 jobs:
+  # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
+  #
+  # **为什么要有这个 job**: 那一条把机制描述成"自动检测并关闭"，而 2026-09-22 查过 ——
+  # 仓里此前**没有任何东西**做这件事（`origin/main` 上只有这一个 workflow，`/rulesets`
+  # 返回空，branch protection 里没有路径规则也没有必需检查）。一条写在文档里、没有
+  # 实现的规矩，是最坏的一种：它让**外面**的贡献者以为会被拦下，实际不会。
+  # 这个 job 就是那句话可验证的那一半 —— **检测**。剩下的一半（关闭 PR、三次禁言）
+  # 需要仓库设置或一个 org 级 App，不是这个文件能单方面做到的，所以 CONTRIBUTING
+  # 的措辞也改成说实话。
+  #
+  # **为什么不 checkout**: 这个 job 骑在**别人的**补丁上跑，而它要的只是一串**文件名**。
+  # 一个字节都不取进工作区，就没有"未审代码被执行"的面。也正因如此它**不需要**
+  # `pull_request_target`（那个事件为了拿写权限会带来真实的注入风险）—— 只读 token
+  # 就够读文件列表。
+  lom-door:
+    name: lom/ 禁区
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: 检出 `lom/**` 的改动
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -uo pipefail
+          err=$(mktemp)
+          files=""
+          rc=0
+          if [ "$EVENT" = "pull_request" ]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err") || rc=$?
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+          else
+            # 新分支的首次 push（`before` 是全零）—— 退回看这一个提交自己动了什么
+            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+          fi
+          # **列不出来就按失败算**（fail closed）。`gh` 拿不到文件列表时 `files` 是空串，
+          # 下面的 `grep` 于是找不到 `lom/` 而**放行** —— 那是这个 job 最坏的失败形状:
+          # 一个 token 权限不对或 API 抽风就能让门**静默失效**，而它正是为此存在的。
+          if [ "$rc" != 0 ]; then
+            echo "::error::列改动文件失败 —— 门禁无法判定，按失败处理（不静默放行）"
+            cat "$err"
+            exit 1
+          fi
+          n=$(printf '%s\n' "$files" | grep -c . || true)
+          bad=$(printf '%s\n' "$files" | grep -E '^lom/' || true)
+          if [ -z "$bad" ]; then
+            echo "lom/ 禁区: 无改动（比对了 $n 个文件）"
+            exit 0
+          fi
+          {
+            echo "## `lom/` 禁区：这次改动碰了 L0 接口层"
+            echo ""
+            echo "接口对面那一半在**另一个仓库**里，从本仓单方面看不出改坏没改坏 ——"
+            echo "所以这里不评审，只拦下。想让接口变，去开 issue，那不是一个补丁。"
+            echo ""
+            echo '```'
+            echo "$bad"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$bad" | while read -r f; do
+            echo "::error file=$f::改了 L0 接口层（lom/ 禁区）—— 见 CONTRIBUTING.md"
+          done
+          exit 1
+
   static:
     name: ci.py --static-only
     runs-on: ubuntu-latest
@@ -165,7 +245,7 @@ jobs:
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
           echo "绿 $pass / 红 $fail / 共 $((pass + fail))"
           {
-            echo "## 静态门禁（测量轮）"
+            echo "## 静态门禁"
             echo ""
             echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链自述见日志）"
             echo ""
@@ -179,6 +259,53 @@ jobs:
             grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # **这一步才是"门"**。那条测量轮实测是 43 绿 / 19 红，如果拿"全绿"当门，
+      # 第一天就要为 19 条与本次改动无关的红（缺 `LinuxFUAI`、Linux 可移植性）埋单 ——
+      # 那不是安全网，是噪音，而且**噪音会把真信号淹掉**（本仓最讨厌的那种失败）。
+      #
+      # 所以判据是**红集比对**：与 `.github/gate-baseline.txt` 逐条比，**多出一个没见过的
+      # 红名字**才挂。基线是 2026-09-22 在 `origin/main` 上**实测**出来的（workflow_dispatch
+      # 那轮的 artifact），不是猜的 —— "绿集只能实测"这条纪律对红集同样成立。
+      #
+      # 基线**不会自动更新**：它是一次**要人签字的编辑**，和 `lom/` 的冻结、发布清单的
+      # 条目一样。改它就是在说"这条红我认了"，那该是一件看得见的事。
+      - name: 与基线比（新红即失败）
+        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+        run: |
+          set -uo pipefail
+          BASE=.github/gate-baseline.txt
+          grep ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > /tmp/now.txt || true
+          grep -v '^[[:space:]]*#' "$BASE" 2>/dev/null | sed '/^[[:space:]]*$/d;s/[[:space:]]*$//' \
+            | sort -u > /tmp/base.txt || : > /tmp/base.txt
+          new=$(comm -13 /tmp/base.txt /tmp/now.txt)
+          fixed=$(comm -23 /tmp/base.txt /tmp/now.txt)
+          echo "基线 $(wc -l < /tmp/base.txt) 条 / 本轮 $(wc -l < /tmp/now.txt) 条"
+          {
+            echo ""
+            echo "### 与基线比"
+            echo ""
+            echo "基线 **$(wc -l < /tmp/base.txt)** 条 · 本轮 **$(wc -l < /tmp/now.txt)** 条"
+            echo ""
+            echo "**新增的红**（这一栏非空 = 这个 job 挂）"
+            echo '```'
+            [ -n "$new" ] && echo "$new" || echo "（无）"
+            echo '```'
+            echo "**基线里已经修好的**（该更新基线了）"
+            echo '```'
+            [ -n "$fixed" ] && echo "$fixed" || echo "（无）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$fixed" ]; then
+            echo "::notice::基线里这些红已经修好，请从 .github/gate-baseline.txt 删掉："
+            echo "$fixed"
+          fi
+          if [ -n "$new" ]; then
+            echo "::error::本轮出现了基线之外的新红 —— 见 job summary 的『新增的红』一栏"
+            echo "$new"
+            exit 1
+          fi
+          echo "无新红。"
 
       - uses: actions/upload-artifact@v4
         if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}

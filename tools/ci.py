@@ -133,6 +133,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # S1 第五格 (docs/189 §3): `lomcapasserts.lomt` 与 `potato_assert.py` 逐字节
                  # 相同（含 `--emit-rust` 的**落盘字节** —— 那一条抓到参考实现随宿主换行的问题）
                  "loment_capasserts_test",
+                 # 英文版的翻译戳 (docs/i18n/glossary.md §2): 中文源一改, 戳过期就红。
+                 # **体例里点名了这条判据的名字, 而文件此前不存在** —— 写在文档里、没人执行。
+                 "loment_i18n_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",

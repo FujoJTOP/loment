@@ -60,11 +60,22 @@ broke it.
 
 So:
 
-- **A pull request that modifies anything under `lom/` is detected automatically and closed
-  without review.** Not personal — there is no way to evaluate the change from inside this
-  repository alone, because the half it would break is not here.
-- **Three of those, and you will no longer be able to open pull requests against any Loment
-  repository.** The detection does not need a human to agree with it.
+- **A pull request that modifies anything under `lom/` is detected automatically.** Every pull
+  request runs a job named `lom/ 禁区` (`.github/workflows/gate.yml`, job `lom-door`). It reads the
+  pull request's changed-file list and **fails** if anything under `lom/` is in it. No human has to
+  agree with it, and there is no review that overrides it — there is no way to evaluate the change
+  from inside this repository alone, because the half it would break is not here.
+- **Make that check required and it is a hard door**, because a failing required check cannot be
+  merged. Turning it into one is a repository setting rather than a file in this tree; if you find
+  it is not enforced when you open a pull request, say so in an issue — a door that is described
+  but not enforced is worse than no door, and that is exactly the state this section was in until
+  2026-09-22.
+
+> Correction, 2026-09-22: this section used to say such a pull request would be **closed without
+> review**, and that three of them would **stop you opening pull requests at all**. Neither was
+> implemented anywhere in this repository, so neither should have been promised. What is written
+> above is what the tree actually does. Closing and banning need repository settings or an app on
+> the organisation; if those are added, they will be described here.
 
 It is easy to hit by accident: a search-and-replace across the tree, a formatter pointed at the
 repository root, a script that rewrites every `.lom` file. Both of those suffixes are in use
@@ -147,8 +158,18 @@ green and 19 red — and the reds were not missing tools. Four of them need the 
 `LinuxFUAI/`, a private checkout that is not part of this one; the rest are Linux portability
 problems being worked through one at a time, and the set is platform-dependent (a Windows checkout
 is red in different places). So **today the bar is not "green". It is "you did not add a red, and
-you said which reds you saw."** When the red set reaches zero this paragraph goes away and green
-becomes the bar.
+you said which reds you saw."**
+
+**That bar is now enforced rather than asked for.** `.github/gate-baseline.txt` lists the reds the
+tree is allowed to have; the workflow compares the run against it and **fails when a red name
+appears that is not in that file**. The baseline was measured, not guessed — it is one real run on
+`main`, captured whole. It never updates itself: editing it is a signed statement that a particular
+red is accepted, and that is the point — an accepted red should be a visible edit, not a silent
+drift. Once the list is empty the bar is simply green and the file can be deleted.
+
+If a run turns up a red that **is** in the baseline, that still counts as a new red for you if your
+change is what put it there — the baseline names the criteria, not the causes. When the red set
+reaches zero this paragraph goes away and green becomes the bar.
 
 If a suite fails, run that suite on its own before believing it — a criterion that fails only in
 a parallel run is usually another checkout writing to the same tree.
