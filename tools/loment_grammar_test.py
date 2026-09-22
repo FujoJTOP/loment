@@ -235,7 +235,7 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "l.elf"
         exe.write_bytes(blob)
-        if not subprocess.run(["wsl", "-e", "true"], capture_output=True).returncode == 0:
+        if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
         s = str(exe.resolve()).replace("\\", "/")
@@ -458,7 +458,7 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "l.elf"
         exe.write_bytes(blob)
-        if subprocess.run(["wsl", "-e", "true"], capture_output=True).returncode != 0:
+        if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
         s = str(exe.resolve()).replace("\\", "/")
