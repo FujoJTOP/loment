@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "c80ab49fbcac1c660a800a20b5804c6da3c5077fcd922d8c5ff07f283fe44fbf"
+   "sha256": "b5a2bb480a3814360529894ac54cbec4be18316d3f7ffe9442e2fab6c8cd6a18"
   },
   {
    "path": "tools/loment_build.py",
@@ -879,11 +879,11 @@
   },
   {
    "path": "tools/nltrans.py",
-   "sha256": "f7ced1710d09e7e2e86a837ec666b823150aa468bb5b95b122f430fac1724d13"
+   "sha256": "92d384bbcb1fcb086fda964f1961d72030bc3d4934eee04462b1c0567ae596ca"
   },
   {
    "path": "tools/loment_nltrans_test.py",
-   "sha256": "695398f8e3ba0e393fdc18e92281e75a63ce4000024dc76459fa97d6dac799e6"
+   "sha256": "75bcd463501c06ecf4706a47663f92aeea5558537e4ca87a3b81bcd7cb314d78"
   },
   {
    "path": "tools/loment_lomtfrom_test.py",
@@ -1046,12 +1046,12 @@
    "sha256": "e25531bf48a7d5cef994119fb783f1c26f358b71609f152d62fa9fbd91ec17e6"
   },
   {
-   "path": "loment/build/genesis/lomelf-linux-x64.elf",
-   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
-  },
-  {
    "path": "loment/build/genesis/SHA256SUMS",
    "sha256": "93cea7e9cc2b282f17fb127e9f0d31793fbcaf4d2160ed30958c27b6d61860ca"
+  },
+  {
+   "path": "loment/build/genesis/lomelf-linux-x64.elf",
+   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
   },
   {
    "path": "loment/tools/lomc.lomt",
@@ -1163,7 +1163,7 @@
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "a97c86f6665986d0735a61cfdd1f3b4801ea6bc1425a4e5de80461e1bd818b60"
+   "sha256": "7dcf5acdcbbe4b4634a674b5c1646632edc3c1d41ee02aa94926bb02358393d8"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1366,20 +1366,20 @@
    "sha256": "0d713f33e625e189f89b4fd9ccca7f4b441e2f5f8208a2b285713b3ffa017988"
   },
   {
-   "path": "loment/nltrans/Surface.nl",
-   "sha256": "f004fd5706272bf60a7e0b06eff4f9b6b76048323ae4db4dd64fb113aeb55efe"
-  },
-  {
-   "path": "loment/nltrans/Sample.lomt",
-   "sha256": "7ba9820eb13e263f332a7e1cb2dde21ec2304daabdbcceafe93f93d42e371c17"
-  },
-  {
    "path": "loment/nltrans/Surface.lomt",
    "sha256": "16420d92dc35c23afb17aae8a5b441eb11d93b7e1cc739a182e05e2b51c15d57"
   },
   {
+   "path": "loment/nltrans/Surface.nl",
+   "sha256": "40257b190b805d1c02cc00b63569afdebb001913c28ee1a4e134086627dc69c0"
+  },
+  {
    "path": "loment/nltrans/surface_lib.lomt",
    "sha256": "1ef9f8f13d825e34464b6cf2676580f2798b02bec0219a4dbab1943877a6a3ab"
+  },
+  {
+   "path": "loment/nltrans/Sample.lomt",
+   "sha256": "7ba9820eb13e263f332a7e1cb2dde21ec2304daabdbcceafe93f93d42e371c17"
   },
   {
    "path": "loment/examples/ahci.lomt",
@@ -1807,7 +1807,7 @@
   },
   {
    "path": "docs/197-natural-grammar.md",
-   "sha256": "773d429d121a4c55afb56e68dfecbe9af928713c01e3e8b28081508f9388d8dd"
+   "sha256": "007cc34e7a2d88bfdffe4b48f80fcd4ee73bead832aea8a78b617c0608d4b598"
   },
   {
    "path": "docs/198-surface-syntax-defects.md",
