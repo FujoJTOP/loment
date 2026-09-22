@@ -1,31 +1,42 @@
-# 静态门禁 —— 第一步：测量（这一版**还不是门**）
+# 静态门禁 —— 目前是**测量/诊断轮**，还没设成必需检查
 #
-# 为什么先测量: 绿集必须在 GitHub 的 runner 上**实测**出来。本机那几类固有红里，
-# 一部分是 Windows/WSL 与"姊妹仓 LinuxFUAI/ 不在树里"造成的 —— 到了 ubuntu runner
-# 上，哪些消失、哪些换成别的原因，只有跑一次才知道。**猜一份基线写进必需检查，
-# 等于把假信号变成门。**
+# 已经跑通过一轮: 62 条 43 PASS / 19 FAIL，整轮 6m23s（artifact 里有原始日志）。
+# **还没设必需检查的理由**: 19 条红里 15 条是"本机全绿、runner 上红"的 Linux
+# 可移植性问题 —— 而环境自述已经排除"缺命令"（clang / llvm-objdump / rustc /
+# qemu / java / node / vim / go 全在，只缺 nvim）。基线必须**实测**，否则接上
+# 必需检查的第一天就是 19 条红的噪音。
 #
-# 所以这一版只做三件事:
-#   1) 把 62 条全量跑一遍（`python tools/ci.py --static-only`），结果留档成 artifact；
-#   2) 先打一份**环境自述**，让后面每一条红都能归因到"仓库的问题"还是"少了某个命令"；
-#   3) 把红项名字写进 job summary。
+# 三种用法:
+#   1) 自动: PR 与 push 到 main → 跑整道静态门禁（62 条）→ 红项进 job summary、
+#      原始日志进 artifact；
+#   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
+#      输出**。为什么需要这条: `bash tools/ci.py:203` 每条只留**最后一行**，那不够
+#      定位病因（第一轮的 artifact 就是这么被它限制住的）；
+#   3) 手动给 `only`（逗号分隔的子串）→ 走 ci.py 只跑那几条，用来快速确认"修好了"。
 #
-# 下一步（绿集确定后）: 把结果变成**必需检查** + 与一份实测基线比对（只对"新红"报红）。
-# 那时候自动合并才会真的"等它" —— 现在的状态是: 无 CI、无必需检查，所以开了自动合并
-# 就是**立刻合**，没有东西可等。
-#
-# 三条设计约束（都来自仓库自己的纪律）:
+# 三条边界（都来自仓库自己的纪律）:
 #   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
-#     会让发布清单过期。所以比对/汇总逻辑写在 workflow 里，不落成脚本。
-#   * **不碰 lom/**、不改任何判据 —— 这一步只观察。
-#   * **故意不让红项把 job 弄挂**（`|| true`）—— 它还不是门；一个"第一天就全红"的
-#     必需检查不是安全网，是噪音。
+#     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
+#   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
+#   * 这一版**故意不让红项把 job 弄挂**：它还不是门，一个"第一天就全红"的必需检查
+#     不是安全网，是噪音。
 
 name: gate
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: '只跑这一个套件（模块名，如 loment_tools_test），打全量输出。留空 = 跑整道门禁'
+        required: false
+        default: ''
+      only:
+        description: '走 ci.py 只跑名字含这些子串的几条（逗号分隔）。留空 = 全部'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -41,7 +52,7 @@ jobs:
       # 装门禁要的外部命令。名单是实测出来的
       # （`grep -rho 'which("...")' tools/*.py`）: clang 45 处，还有
       # llvm-objdump/nm/ar、qemu-system-x86_64/qemu-aarch64、rustc、java、go、vim、node。
-      # 少哪一样，对应那几条就会红成"找不到命令" —— 那不是仓库的回归。
+      # 第一轮的环境自述证明这套已经够（只缺不需要的 nvim），所以后面再红就不是环境了。
       - name: 装工具链
         run: |
           sudo apt-get update -qq
@@ -70,15 +81,32 @@ jobs:
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 
-      - name: 全量跑静态门禁
+      # 用法 2: 单跑一个套件，全量输出（定位病因用）。
+      - name: 单跑 ${{ github.event.inputs.suite }}
+        if: ${{ github.event.inputs.suite != '' }}
         run: |
-          # `|| true`: 红项留给下一步汇总，这一版不让它把 job 弄挂（见文件头）。
-          python3 tools/ci.py --static-only > gate.out 2>&1 || true
+          echo "=== python3 tools/${{ github.event.inputs.suite }}.py ==="
+          set +e
+          python3 "tools/${{ github.event.inputs.suite }}.py" 2>&1 | tail -250
+          echo "（上面只有尾部 250 行；完整输出见该 step 的日志）"
+
+      # 用法 1/3: 跑整道门禁（或只跑几条）。红项留给下一步汇总，不让它把 job 弄挂。
+      - name: 跑静态门禁
+        if: ${{ github.event.inputs.suite == '' }}
+        run: |
+          if [ -n "${{ github.event.inputs.only }}" ]; then
+            args=""
+            IFS=',' read -ra parts <<< "${{ github.event.inputs.only }}"
+            for p in "${parts[@]}"; do args="$args --only-static $p"; done
+            python3 tools/ci.py --static-only $args > gate.out 2>&1 || true
+          else
+            python3 tools/ci.py --static-only > gate.out 2>&1 || true
+          fi
           echo "--- 尾 40 行 ---"
           tail -40 gate.out
 
       - name: 汇总
-        if: always()
+        if: ${{ always() && github.event.inputs.suite == '' }}
         run: |
           pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
@@ -100,7 +128,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && github.event.inputs.suite == '' }}
         with:
           name: gate-log
           path: gate.out
