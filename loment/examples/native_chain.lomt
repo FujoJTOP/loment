@@ -1,0 +1,17 @@
+// 链式泛型（泛型函数体里再调泛型函数）—— `loment_potato_emit_test` 的 `REFUSED` 钉子。
+// 参考实现靠 8 轮迭代（走**实例**的体）把 `T` 换成具体类型；自举侧只走单元本体，
+// 会把实参类型当成 `T` 造出错的实例名，所以**点名拒绝**（细则见 docs/189 S1 第 21 格）。
+module native_chain
+
+fn pick<T>(a: T, b: T) -> T {
+    return a;
+}
+
+fn outer<T>(a: T, b: T) -> T {
+    return pick(a, b);
+}
+
+fn main() -> u32 {
+    let x: u32 = outer(1 as u32, 2 as u32);
+    return x;
+}
