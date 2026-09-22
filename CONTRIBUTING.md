@@ -25,6 +25,18 @@ what it commits is your patch. The accidents this document warns about — a rew
 ones an agent makes quickly, confidently and in bulk. Read the diff before you send it; the check
 for the door below is one command and it takes a second.
 
+**Say that a pull request came from an agent.** If an agent wrote the patch — or wrote it and you
+only skimmed it — mark the pull request as such: an `ai-generated` label, or a line at the top of
+the description naming the tool. This is not a stigma and it does not change whether the patch is
+accepted; it changes what review can rely on. A person answers a question in the thread. A batch of
+agent pull requests may have nobody behind it who will read a follow-up, and a reviewer who assumes
+otherwise waits for an answer that is not coming.
+
+Two failures are worth expecting from a robot in particular, and neither looks like a wrong line: a
+criterion widened until it passes (already above), and its twin — **a check that stops running while
+its suite still reports green**. Both read as success, so say what wrote the patch, and read its
+diff on that assumption.
+
 **Do not send code you have no right to send.** Nothing copied from a source whose licence you
 cannot comply with, nothing confidential or leaked, nothing malicious. This is a legal
 requirement, not a matter of taste, and it is a live risk with AI tools in particular: they
@@ -98,12 +110,15 @@ the toolchain (`loment skill --print`).
 
 ## Run the gate before you open a pull request
 
-**There is no CI in this repository.** No workflow runs on your pull request, so nothing checks
-your change for you except you:
+The gate is one command, and it is the same one for everyone:
 
 ```
-python tools/ci.py --static-only      # about three minutes, no QEMU
+python tools/ci.py --static-only      # the static gate, no QEMU
 ```
+
+It takes several minutes — 6–8 on a four-core machine, longer under load — because five of the
+criteria are heavy and are only trustworthy when they run **alone**. On a Windows checkout those
+five go through WSL; on Linux they run natively.
 
 The full gate adds the bare-metal targets and needs QEMU:
 
@@ -111,12 +126,33 @@ The full gate adds the bare-metal targets and needs QEMU:
 python tools/ci.py
 ```
 
-**A few criteria are red when this repository is checked out on its own.** They need a companion
-checkout that is not part of it (`LinuxFUAI/`) or a copy of the library store that lives outside
-the repository. Those are expected. What matters is not adding to them.
+**And the same gate now runs on the pull request itself.** `.github/workflows/gate.yml` runs
+exactly the static gate on every pull request and on every push to `main`. So a submission that
+arrives with no gate result is incomplete: say in the description **what you ran** (CI, the command
+above, or a single suite) and **what came out** — green N / red M — and for each red say whether it
+is one of the known ones below or something you introduced. A change whose gate result nobody can
+state is a change nobody can merge.
+
+**This applies to a person's submission and an agent's alike.** There is no lighter track for
+either: the point of a gate is that the answer does not depend on who is asked.
+
+**Where the gate stands right now (2026-09-22).** The workflow is new and the gate is **not
+all-green on a clean checkout**. The first measured run on a GitHub runner was 62 criteria, 43
+green and 19 red — and the reds were not missing tools. Four of them need the companion repository
+`LinuxFUAI/`, a private checkout that is not part of this one; the rest are Linux portability
+problems being worked through one at a time, and the set is platform-dependent (a Windows checkout
+is red in different places). So **today the bar is not "green". It is "you did not add a red, and
+you said which reds you saw."** When the red set reaches zero this paragraph goes away and green
+becomes the bar.
 
 If a suite fails, run that suite on its own before believing it — a criterion that fails only in
 a parallel run is usually another checkout writing to the same tree.
+
+And when the thing under test is a binary you just produced, suspect the **file mode** before the
+logic. This repository tracks 688 files and every one of them is mode `100644`, so a produced ELF
+has no exec bit — and a checkout on Windows will not tell you, because the local artifact there is
+a PE and PE execution ignores that bit entirely. That is not hypothetical: it is what the first red
+on the first CI run turned out to be.
 
 ## House rules for a change
 
