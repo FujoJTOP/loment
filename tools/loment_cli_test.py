@@ -413,6 +413,40 @@ def test_doctor_reports_missing_tools_then_green_when_present():
 
 
 @test
+def test_tools_counts_and_threshold_agree():
+    """`loment tools` 的分母与门槛必须是和工具清单**同一个数**。
+
+    原先分母印的是写死的 `" / 6"`、门槛写的是 `ok < 6`，而 `tool_name` 有 7 项 —— 于是
+    缺一个组件时 `ok` 为 6，`6 < 6` 是假: **报绿且退 0**。这条检查因此没有分辨力，而当时
+    没有任何判据会红。这里两头都测: 齐了要 `n / n` 且退 0，缺一个要报出 `n-1 / n` 且退 1。
+    """
+    names = ["loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
+             "loment-lomelf", "loment-cli", "lomenterr"]
+    bindir = _pkg / "bin"
+    added: list[Path] = []
+    for n in names:
+        p = bindir / (n + ".exe" if IS_WIN else n)
+        if not p.exists():
+            p.write_bytes(b"stub")
+            added.append(p)
+    victim = bindir / ("lomenterr.exe" if IS_WIN else "lomenterr")
+    saved = victim.read_bytes()
+    try:
+        rc, out, _ = _run(["tools"] + _no_color())
+        assert rc == 0, f"组件齐了应当退 0, 实得 {rc}: {out[:200]}"
+        assert f"present: {len(names)} / {len(names)}" in out, out[:200]
+        victim.unlink()
+        rc, out, _ = _run(["tools"] + _no_color())
+        assert f"present: {len(names) - 1} / {len(names)}" in out, out[:200]
+        assert rc == 1, f"缺一个组件必须退 1 (分母与门槛要一致), 实得 {rc}: {out[:200]}"
+    finally:
+        # 这个假包全测共用: 动过就放回去, 别让下一条判据看到我的痕迹
+        victim.write_bytes(saved)
+        for p in added:
+            p.unlink(missing_ok=True)
+
+
+@test
 def test_where_resolves_and_reports_the_expected_path():
     rc, out, _ = _run(["where", "driver"])
     assert rc == 0, rc
@@ -431,6 +465,22 @@ def test_examples_and_example_read_the_package():
     assert rc == 0 and "module tour" in out, out[:200]
     rc, _, err = _run(["example", "nope"] + _no_color())
     assert rc == 1 and "no such example" in err, err[:200]
+
+
+@test
+def test_share_paths_are_normalized():
+    """`loment env` / `loment examples` 打的是**给用户读的路径** —— 里面不该有 `..`。
+
+    `share_dir` 原先拼的是 `<bindir>/../share/loment/`，同一个目录，但屏幕上出现
+    `.../bin/../share/loment/examples/`：能打开，却是让读者自己去归一化。三个命令
+    (`env` / `examples` / `example` 的错误路径) 共用这个字符串，所以在这里一起钉住。
+    """
+    for cmd in (["env"], ["examples"]):
+        rc, out, _ = _run(cmd + _no_color())
+        assert rc == 0, (cmd, rc)
+        bad = [ln for ln in out.splitlines() if ".." in ln]
+        assert not bad, f"{cmd} 打出了未归一化的路径: {bad}"
+        assert "share/loment/" in out.replace("\\", "/"), (cmd, out[:200])
 
 
 # ---------------------------------------------------------------- 参考页
