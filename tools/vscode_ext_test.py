@@ -581,11 +581,18 @@ def test_vscode_registration_points_at_the_real_dir():
     assert n == 1, f"应当只改 1 条，改了 {n}"
     got = entries[0]
     assert got["relativeLocation"] == dest.name, got
-    # URI 要**照抄 VS Code 自己写的那种**：只有 $mid/path/scheme，`/c:/...` 形状。
-    # 自己发明 `fsPath`/`external` 就不是它认的那一份了。
+    # URI 要**照抄 VS Code 自己写的那种**：只有 $mid/path/scheme，正斜杠（Windows 上
+    # 盘符小写并顶一个 `/`，即 `/c:/...`）。自己发明 `fsPath`/`external` 就不是它认的
+    # 那一份了。
     assert got["location"] == vscode_ext.vs_uri(dest), got["location"]
     assert set(got["location"]) == {"$mid", "path", "scheme"}, got["location"]
-    assert re.match(r"^/[a-z]:/", got["location"]["path"]), got["location"]
+    if sys.platform == "win32":
+        assert re.match(r"^/[a-z]:/", got["location"]["path"]), got["location"]
+    else:
+        # 别的平台上**就是这个绝对路径本身，不许再顶一个斜杠** —— `//home/...`
+        # 写进 `extensions.json` 就是一条坏登记（2026-09-22 在 CI 的 Linux runner 上
+        # 露出来的那个 bug，修它是 `vs_uri` 那一笔，这条断言把结果钉住）。
+        assert got["location"]["path"] == dest.as_posix(), got["location"]
     assert entries[1] == other, f"别人的条目不许动: {entries[1]}"
 
     # 盘符小写、正斜杠、顶一个 `/` —— 与 VS Code 写出来的一致
