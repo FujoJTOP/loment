@@ -639,7 +639,9 @@ def test_selfhost_resolves_from_the_toolchains_own_store():
         root = Path(td)
         tool = root / "tool"
         (tool / "bin").mkdir(parents=True)
-        shutil.copyfile(s, tool / "bin" / s.name)
+        # `copy` 而不是 `copyfile`: 后者**不复制权限位**, stage1 的可执行位会在这一步丢掉,
+        # 而下面要直接跑它（Linux 上就是 PermissionError；2026-09-22 CI 上撞到）。
+        shutil.copy(s, tool / "bin" / s.name)
         _write_pkg(tool / "share" / "lompi" / "store" / "geom" / "0.1.0", "geom")
         proj = root / "proj"
         proj.mkdir()

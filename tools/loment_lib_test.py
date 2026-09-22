@@ -134,6 +134,7 @@ def compile_and_run(entry: Path, td: Path) -> str:
     exe = td / "app.exe"
     blob = lomelf.compile_pe(ir)[0] if os.name == "nt" else lomelf.compile_ll(ir)[0]
     exe.write_bytes(blob)
+    exe.chmod(0o755)          # 跑之前要有可执行位：ELF 认这一位，PE 不看它
     r = subprocess.run([str(exe)], capture_output=True, text=True, shell=False, timeout=60)
     assert r.returncode == 0, f"跑挂了 rc={r.returncode} err={r.stderr[-200:]}"
     return r.stdout.strip()
@@ -466,6 +467,7 @@ def test_multi_file_package_survives_materialize():
         ir = lomentc.emit_llvm(mod, ROOT, deps)
         exe = td / "mf.exe"
         exe.write_bytes((lomelf.compile_pe(ir) if os.name == "nt" else lomelf.compile_ll(ir))[0])
+        exe.chmod(0o755)
         r = subprocess.run([str(exe)], capture_output=True, text=True, shell=False, timeout=60)
         assert r.returncode == 42, f"退出码应当是 21+21=42, 实际 {r.returncode}"
 

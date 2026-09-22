@@ -262,6 +262,13 @@ def test_install_sh(tar: Path) -> None:
 # ------------------------------------------------------------------ 6. Windows 安装脚本
 
 def test_windows_installer(zipf: Path) -> None:
+    if sys.platform != "win32":
+        # 这一条验的是 install.ps1 / install.cmd 那套 Windows 安装脚本。runner 上**有
+        # PowerShell**（所以原先那道 `if not ps` 守卫拦不住），但没有 `cmd` —— 会走到
+        # 一半才炸 `FileNotFoundError: 'cmd'`。按本文件对 Windows 专属判据的既有写法
+        # 整条跳过，并写明这一半在 CI 上**不覆盖**。
+        print("      SKIP: 非 Windows —— Windows 安装脚本在 CI 上不覆盖（要覆盖得用 Windows runner）")
+        return
     work = loment_dist.STAGE / "it-win"
     if work.exists():
         shutil.rmtree(work)
