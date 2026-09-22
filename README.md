@@ -2,6 +2,8 @@
 
 # Loment
 
+[![gate](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml/badge.svg)](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml)
+
 Loment is a **systems programming language**. It compiles to native x86-64 executables —
 Linux ELF, Windows PE, or a freestanding object for bare metal — with no runtime and no
 libc. The toolchain is itself written in Loment and needs no Python to run. Its own syntax
