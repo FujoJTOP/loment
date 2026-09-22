@@ -322,9 +322,18 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             # 转出一个**空 module**。现在 `potato_from` 只记**源码显式宣称**的 ABI
             # （`extern "C"` / `//export`），所以缺席有确定的意思：它是 Loment。
             if abi is None:
-                skipped.append((n, "这是个 Loment 函数但对象里没带正文 —— "
-                                   "接口单元里没有它的实现。带正文的加 `--impl` 翻出来"
-                                   "（docs/186 / docs/187）"))
+                # **这句话要分两种情形说** —— 旧版只有一句"带正文的加 `--impl` 翻出来"，
+                # 而 `front_door` **就是**用 `impl=True` 调的（`potato_from.front_door`）：
+                # 已经把 `--impl` 加上的人，看到的却是"你再把它加上"。一句**指反了的**话。
+                # 真的原因是前者：这条路（`docs/179` 抽接口）**根本没抓正文**，
+                # 而这一门也未必有翻译器（`_TOOLS` 里没有就得先有孪生，`docs/189` §4.1）。
+                why = ("这是个 Loment 函数但对象里没带正文 —— 接口单元里没有它的实现。"
+                       if not impl else
+                       "对象里没有这个函数的正文（已经是 `--impl` 这条路了）—— "
+                       "这份对象的 grammar 是抽接口那条路读出来的，它只记声明、不抓正文"
+                       "（`docs/179` §2）；要么换 `choose write grammar` 那条前门，"
+                       "要么这一门还没有带正文的翻译器（`docs/188` §7.1）")
+                skipped.append((n, why))
                 continue
             if abi != "c":
                 skipped.append((n, f"调用约定不是 C ABI (abi={abi})"))

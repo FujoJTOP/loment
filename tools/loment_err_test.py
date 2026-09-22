@@ -1138,6 +1138,73 @@ def test_max_caps_and_says_how_many_were_hidden():
 
 # ---------------------------------------------------------------- 包那一侧 (§6 的兜底纪律)
 
+#: 启动器判据的**桩包**: 真启动器(`loment_dist.LAUNCHER_SH`) + 桩驱动 + 源文件。
+#: 桩驱动一跑就打 `PLAIN-DRIVER-OUTPUT`, 于是"驱动到底有没有被起"在这些判据里是**可观察的**
+#: —— 参数被启动器静默吞掉时, 缺的正是这一行。
+_LAUNCHER_STUB_DRIVER = ("#!/bin/sh\n"
+                         "out=\n"
+                         "while [ $# -gt 0 ]; do\n"
+                         "  case \"$1\" in --diag-out) shift; out=$1 ;; esac\n"
+                         "  shift\n"
+                         "done\n"
+                         "printf '%s\\n' "
+                         "'{\"file\":\"x.lomt\",\"line\":1,\"col\":1,\"code\":\"E019\","
+                         "\"message\":\"boom\"}' > \"$out\"\n"
+                         "echo PLAIN-DRIVER-OUTPUT >&2\n"
+                         "exit 1\n")
+
+
+def _shp(p: Path) -> str:
+    """Windows 路径 -> bash 打得开的形状（启动器是 POSIX 脚本, 跑在 bash 里）。"""
+    s = str(p).replace("\\", "/")
+    return f"/{s[0].lower()}{s[2:]}" if len(s) > 2 and s[1] == ":" else s
+
+
+def _launcher_pkg(with_err: bool) -> Path:
+    """摆一个包布局: `bin/loment` 取的是**真的**那份启动器, 驱动是桩。"""
+    import loment_dist  # noqa: E402
+
+    t = Path(tempfile.mkdtemp(prefix="lomenterr-launcher-"))
+    pf = t / "pf"
+    (pf / "bin").mkdir(parents=True)
+    (pf / "share" / "loment").mkdir(parents=True)
+    (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
+    (pf / "bin" / "loment-driver").write_text(_LAUNCHER_STUB_DRIVER, encoding="utf-8",
+                                              newline="\n")
+    (pf / "bin" / "loment").write_text(
+        loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
+    if with_err:
+        (pf / "bin" / "lomenterr").write_text(
+            "#!/bin/sh\necho RENDERED-BY-LOMENTERR \"$@\"\n",
+            encoding="utf-8", newline="\n")
+    for p in (pf / "bin").iterdir():
+        p.chmod(0o755)
+    (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    # 第二份源: 给"一个 check 只吃一个文件"那条判据用。
+    (pf / "other.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    return pf
+
+
+_LAUNCHER_ENV = dict(os.environ)
+_LAUNCHER_ENV["PATH"] = (f"{_shp(Path('/usr/bin'))}:{_shp(Path('/bin'))}:"
+                         f"{_LAUNCHER_ENV.get('PATH', '')}")
+
+
+def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
+                  file_first: bool = True):
+    """跑**真启动器**。`file_first=False` 把开关放在文件名前面 —— 两种位置都得能跑。
+
+    这个 `file_first` 是补出来的: 那条注释一直写着"两个位置都试", 而这里的跑法**只有**
+    文件在前那一种 (见 `test_launcher_takes_exactly_one_input_file` 的 docstring)。
+    """
+    sp = _shp(pf / "src.lomt")
+    argv = [bash, _shp(pf / "bin" / "loment"), cmd]
+    argv += [sp, *args] if file_first else [*args, sp]
+    return subprocess.run(argv, cwd=str(pf), env=_LAUNCHER_ENV, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", shell=False,
+                          timeout=60)
+
+
 @test
 def test_launcher_renders_with_it_and_says_so_without_it():
     """启动器: 有 lomenterr 就用它; 没有就**退回内置并把话说出来**。
@@ -1146,61 +1213,18 @@ def test_launcher_renders_with_it_and_says_so_without_it():
     东西"这个错就没有判据 (docs/182 §6/§8)。桩驱动同时吐 stderr(裸行) 与 `--diag-out`(JSONL),
     与两个真实现的形状一致。
     """
-    sys.path.insert(0, str(ROOT / "tools"))
-    import loment_dist  # noqa: E402
     bash = shutil.which("bash")
     if not bash:
         print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
         return
 
-    def shp(p: Path) -> str:
-        s = str(p).replace("\\", "/")
-        return f"/{s[0].lower()}{s[2:]}" if len(s) > 2 and s[1] == ":" else s
-
-    stub_driver = ("#!/bin/sh\n"
-                   "out=\n"
-                   "while [ $# -gt 0 ]; do\n"
-                   "  case \"$1\" in --diag-out) shift; out=$1 ;; esac\n"
-                   "  shift\n"
-                   "done\n"
-                   "printf '%s\\n' "
-                   "'{\"file\":\"x.lomt\",\"line\":1,\"col\":1,\"code\":\"E019\","
-                   "\"message\":\"boom\"}' > \"$out\"\n"
-                   "echo PLAIN-DRIVER-OUTPUT >&2\n"
-                   "exit 1\n")
-
-    def make_pkg(with_err: bool) -> Path:
-        t = Path(tempfile.mkdtemp(prefix="lomenterr-launcher-"))
-        pf = t / "pf"
-        (pf / "bin").mkdir(parents=True)
-        (pf / "share" / "loment").mkdir(parents=True)
-        (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
-        (pf / "bin" / "loment-driver").write_text(stub_driver, encoding="utf-8",
-                                                  newline="\n")
-        (pf / "bin" / "loment").write_text(
-            loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
-        if with_err:
-            (pf / "bin" / "lomenterr").write_text(
-                "#!/bin/sh\necho RENDERED-BY-LOMENTERR \"$@\"\n",
-                encoding="utf-8", newline="\n")
-        for p in (pf / "bin").iterdir():
-            p.chmod(0o755)
-        (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
-        return pf
-
-    env = dict(os.environ)
-    env["PATH"] = f"{shp(Path('/usr/bin'))}:{shp(Path('/bin'))}:{env.get('PATH', '')}"
-
-    def run(pf: Path, *args: str) -> str:
-        r = subprocess.run([bash, shp(pf / "bin" / "loment"), "check",
-                            shp(pf / "src.lomt"), *args],
-                           cwd=str(pf), env=env, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", shell=False, timeout=60)
+    def run(pf: Path, *args: str, file_first: bool = True) -> str:
+        r = _launcher_run(bash, pf, list(args), file_first=file_first)
         assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
         return r.stdout + r.stderr
 
-    with_it = run(make_pkg(True))
-    without_it = run(make_pkg(False))
+    with_it = run(_launcher_pkg(True))
+    without_it = run(_launcher_pkg(False))
 
     assert "RENDERED-BY-LOMENTERR" in with_it, f"在场时没起它: {with_it!r}"
     assert "PLAIN-DRIVER-OUTPUT" not in with_it, (
@@ -1214,29 +1238,74 @@ def test_launcher_renders_with_it_and_says_so_without_it():
     # 所以这一条直接看得到 `--no-color` 有没有被转交。两个位置都试 ——
     # `loment check FILE --no-color` 与 `loment check --no-color FILE`。
     for spelling in ("--no-color", "-C"):
-        got_nc = run(make_pkg(True), spelling)
-        # 启动器**原样转交**用户那个写法（不归一化）—— 两种拼法 `lomenterr` 都认，
-        # 所以转交时改写成另一种是没有意义的动作。
-        assert "RENDERED-BY-LOMENTERR" in got_nc and spelling in got_nc, (
-            f"{spelling} 没被转交给渲染器: {got_nc!r}")
+        for file_first in (True, False):
+            got_nc = run(_launcher_pkg(True), spelling, file_first=file_first)
+            # 启动器**原样转交**用户那个写法（不归一化）—— 两种拼法 `lomenterr` 都认，
+            # 所以转交时改写是没有意义的动作。
+            where = "文件在后" if file_first else "开关在后"
+            assert "RENDERED-BY-LOMENTERR" in got_nc and spelling in got_nc, (
+                f"{spelling} ({where}) 没被转交给渲染器: {got_nc!r}")
 
     # `--short` / `--json` 走同一条转交路（`docs/182` §15）：它们也是**渲染器**的输出
     # 模式，驱动不该看见。这里判的是**行为**（桩渲染器把自己的 argv 打出来），
     # 因为"转发到位"不是能从代码里读出来的性质 —— cmd 侧只能静态判，
     # 那一条在 `loment_cli_test` 里。
     for spelling in ("--short", "--json"):
-        got_om = run(make_pkg(True), spelling)
+        got_om = run(_launcher_pkg(True), spelling)
         assert "RENDERED-BY-LOMENTERR" in got_om and spelling in got_om, (
             f"{spelling} 没被转交给渲染器: {got_om!r}")
     # `--max N` 是**两个词**，值也要一起送到（只转 `--max` 不转值，渲染器会把它当文件名）
-    got_mx = run(make_pkg(True), "--max", "0")
+    got_mx = run(_launcher_pkg(True), "--max", "0")
     assert "--max" in got_mx and " 0" in got_mx, f"--max 的值没转交: {got_mx!r}"
     # 两个一起给时**两个都要到**（用一个变量存一个开关就会静默丢掉另一个）
-    got_both = run(make_pkg(True), "--no-color", "--json")
+    got_both = run(_launcher_pkg(True), "--no-color", "--json")
     assert "--no-color" in got_both and "--json" in got_both, (
         f"同时给两个开关时丢了一个: {got_both!r}")
     print("      启动器: 在场则渲染(且不吃裸行), 缺席则退回并明说, "
           "四个开关(含 --max 的值)都转交到位")
+
+
+@test
+def test_launcher_takes_exactly_one_input_file():
+    """`check`/`ir` 只吃**一个**文件: 多给的那个要**报错退 2**, 不能静默只查第一个。
+
+    issue #55 的形状: `loment check ok.lomt bad.lomt --short` 在 cmd 侧**退 0 且只查了第一个**
+    —— 而 `loment check *.lomt` 正是 shell 里最自然的写法, 于是一条 CI 步骤报"干净"而错的文件
+    根本没被看。bash 侧当时报的是 `unknown option bad.lomt`（响, 但话不对）。
+
+    **为什么必须是行为判据**: `*)` 那条分支在启动器源码里**一直就有**, 源码里有它、
+    却没有一条判据证明它走得到 —— #55 就是那么活下来的。同理, `check --no-color FILE`
+    这个位置也一直没有判据: 上面那条判据的注释写着"两个位置都试", 而它当时只跑了
+    `check FILE --no-color`（同一个形状: 注释声称的覆盖面大于代码的覆盖面）。桩驱动一跑就打
+    `PLAIN-DRIVER-OUTPUT`, 所以"驱动根本没被起"和"驱动被起了"在这里都是可观察的。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+
+    # 不带渲染器的包: 驱动那行裸诊断就是"驱动有没有被起"的**唯一**信号
+    # （带渲染器时它被有意吞掉, 见上面那条判据）。
+    pf = _launcher_pkg(False)
+
+    # 开关在前: 驱动必须被起 —— `check --no-color FILE` 修好之前这一条走不到驱动
+    r = _launcher_run(bash, pf, ["--no-color"], file_first=False)
+    assert r.returncode == 1 and "PLAIN-DRIVER-OUTPUT" in (r.stdout + r.stderr), (
+        f"`check --no-color FILE` 没走到驱动: rc={r.returncode} {r.stdout}{r.stderr}")
+
+    # 两个文件: 退 2、说出理由、**而且驱动没被起**（起了就是既查了又不承认）
+    for cmd in ("check", "ir"):
+        r2 = _launcher_run(bash, pf, [_shp(pf / "other.lomt")], cmd=cmd)
+        blob = r2.stdout + r2.stderr
+        assert r2.returncode == 2, (
+            f"`{cmd}` 两个文件该退 2, 实得 {r2.returncode}: {blob!r}")
+        assert f"{cmd} accepts exactly one input file" in blob, (
+            f"`{cmd}` 的拒绝没说清理由, 也没说出用户敲的那个命令名: {blob!r}")
+        assert "PLAIN-DRIVER-OUTPUT" not in blob, (
+            f"`{cmd}` 拒绝了却还是把驱动起了 —— 那就是既查了又不承认: {blob!r}")
+
+    print("      启动器: 开关在文件名前也能到驱动; 第二个文件被拒(退 2, 驱动没起), "
+          "且拒绝里说的是用户敲的那个命令名")
 
 
 # ---------------------------------------------------------------- Loment 版（S1 第十一格）

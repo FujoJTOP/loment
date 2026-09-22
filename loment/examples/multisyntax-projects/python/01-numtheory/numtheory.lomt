@@ -1,0 +1,305 @@
+choose write grammar python
+
+# numtheory.lomt —— 用 **Python 的拼法**写的 Loment 模块（docs/188 的 `choose write grammar`）。
+#
+# 后缀 `.lomt` 说的是"这是 Loment 的文件"，`choose write grammar python` 说的是"用 Python 的
+# 拼法读它"。语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**。
+#
+# 这一份是一个**整数数论工具箱**：二十多个函数围着同一个主题（整数的整除结构、数位、位模式），
+# 彼此调用，`entry()` 把每个函数的结果折成一个数交给宿主。
+#
+# ## 这一门最要紧的一条纪律：`//` 与 `%` 只用**非负**操作数
+#
+#   Python  `-7 // 2 == -4`   `-7 % 2 == 1`    （**向下取整**）
+#   Loment  `-7 /  2 == -3`   `-7 %  2 == -1`   （**向零截断**）
+#
+# 两边在负号上**不一样**（`loment/pytrans/intdiv.py` 是那条"不同意集"）。所以这份语料刻意走
+# **同意集**：每一个 `/`、`//`、`%` 的两个操作数都保证非负。非负时"向下取整"与"向零截断"
+# 是同一件事，于是 **CPython 可以当对照组** —— 判据才有意义。
+#
+# 整数宽度也是同意集的一部分：Python 的 `int` 无限精度，而这一门的 `int` 映 **i64**（回绕）。
+# 所以每个中间值都刻意留得远小于 2^63，两边都不会溢出。见 README「期望值怎么推出来的」。
+
+#: 模幂 / 模乘共用的模数。非负、小，保证 `base * x` 之类的中间值离 i64 的上界差着十几个数量级。
+MODULUS = 1000
+
+#: 模幂的底数与指数 —— 抽成常量是为了钉住"模块常量在函数体里当名字用"这一条。
+BASE = 3
+EXPONENT = 13
+
+
+def gcd(a: int, b: int) -> int:
+    """辗转相除。`while` 里同时改两个局部量，一个 `%` 一个赋值互相接棒。
+
+    参数非负（本文件的纪律），所以 `%` 两边一致。
+    """
+    x = a
+    y = b
+    while y != 0:
+        t = x % y
+        x = y
+        y = t
+    return x
+
+
+def lcm(a: int, b: int) -> int:
+    """最小公倍数 = 两数之积 / 最大公约数。**跨函数调用** + 一次整除。
+
+    先除后乘，中间值不放大。参数非负 ⇒ 两边一致。
+    """
+    return a // gcd(a, b) * b
+
+
+def isqrt(n: int) -> int:
+    """整数平方根：二分搜索，找最大的 `r` 使 `r * r <= n`。
+
+    探测写 `mid * mid <= n` 是**溢出**的坑（C 那一门踩过，见上级 README）——
+    这一门 `int` 是 i64，`mid * mid` 要到 2^31 才顶得动，这里够不着；但改成
+    `mid <= n // mid` 是**不放大中间值**的写法，两边都稳。**除法不溢出。**
+    """
+    lo = 0
+    hi = n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if mid <= n // mid:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def powmod(base: int, exp: int, mod: int) -> int:
+    """模幂：**递归** + 平方，逐位吃指数。两条提前 `return` 各挡一种情形。
+
+    `exp` 非负 ⇒ `exp % 2` / `exp // 2` 两边一致。
+    """
+    if exp == 0:
+        return 1 % mod
+    if exp % 2 == 1:
+        return base * powmod(base, exp - 1, mod) % mod
+    half = powmod(base, exp // 2, mod)
+    return half * half % mod
+
+
+def mulmod(a: int, b: int, mod: int) -> int:
+    """模乘：**加倍—相加**，逐位吃 `b`，全程不放大中间值。
+
+    与 `(a * b) % mod` 同义，但即使 `a * b` 顶穿 i64 也照样对 —— 它把乘法拆成
+    "看最低位、累加、翻倍"三步，每步先取模。位运算（`% 2`、`// 2`）与循环混用。
+    """
+    result = 0
+    x = a % mod
+    y = b
+    while y > 0:
+        if y % 2 == 1:
+            result = (result + x) % mod
+        x = x * 2 % mod
+        y = y // 2
+    return result
+
+
+def mod_inverse(a: int, mod: int) -> int:
+    """模逆：最小的 `i`（`1 <= i < mod`）使 `a * i % mod == 1`；没有就返回 0。
+
+    用**穷举**而不是扩展欧几里得 —— 扩展欧几里得会把系数弄成负数，而负数上的
+    `%` 两边不一样（本文件刻意走同意集）。穷举全程非负，对照有意义。
+    `mod` 小（这里 97），`x * i` 远不会溢出。
+    """
+    x = a % mod
+    i = 1
+    while i < mod:
+        if x * i % mod == 1:
+            return i
+        i = i + 1
+    return 0
+
+
+def is_prime(n: int) -> int:
+    """试除法判素：`while` + **内层提前 `return`**。返回 1/0（不是 bool —— 这一门
+    的 `bool` 不是 `int` 的子类，返回类型写的是 `int`）。"""
+    if n < 2:
+        return 0
+    d = 2
+    while d * d <= n:
+        if n % d == 0:
+            return 0
+        d = d + 1
+    return 1
+
+
+def count_primes(limit: int) -> int:
+    """`2..limit` 里的素数个数。**外层循环里调 `is_prime`** —— 把它的 0/1 当整数累加，
+    这一门 `return` 的是 int，所以这里合法。"""
+    c = 0
+    i = 2
+    while i <= limit:
+        c = c + is_prime(i)
+        i = i + 1
+    return c
+
+
+def smallest_factor(n: int) -> int:
+    """最小的真因子；`n` 本身是素数（或 `n < 2`）时返回 `n`。
+
+    探测写 `d <= n // d` 而不是 `d * d <= n`：**除法不放大中间值**。
+    """
+    if n < 2:
+        return n
+    d = 2
+    while d <= n // d:
+        if n % d == 0:
+            return d
+        d = d + 1
+    return n
+
+
+def phi(n: int) -> int:
+    """欧拉函数 φ(n)：**嵌套 while** —— 外层扫因子，内层把这个因子的幂吃干净。
+
+    `result - result // p` 是"乘上 (1 - 1/p)"的整数写法，全程非负。
+    """
+    result = n
+    x = n
+    p = 2
+    while p <= x:
+        if x % p == 0:
+            result = result - result // p
+            while x % p == 0:
+                x = x // p
+        p = p + 1
+    return result
+
+
+def divisor_sum(n: int) -> int:
+    """n 的所有正因子之和。用 `for i in range(1, n + 1)`——这一门的 `for` 降级成
+    `while`（见 pytrans 文件头 §`for`），循环里给 `i` 赋值会被点名拒，这里没有。"""
+    s = 0
+    for i in range(1, n + 1):
+        if n % i == 0:
+            s = s + i
+    return s
+
+
+def divisor_count(n: int) -> int:
+    """n 的正因子个数。与 `divisor_sum` 同一副骨架，钉的是"计数那一支"。"""
+    c = 0
+    for i in range(1, n + 1):
+        if n % i == 0:
+            c = c + 1
+    return c
+
+
+def popcount(v: int) -> int:
+    """二进制里 1 的位数：Kernighan 那一招 `n & (n - 1)` 每轮清掉最低的那个 1。"""
+    n = v
+    c = 0
+    while n != 0:
+        n = n & (n - 1)
+        c = c + 1
+    return c
+
+
+def parity(v: int) -> int:
+    """奇偶校验位：把每一位折进一个异或累加器，返回 0/1。"""
+    r = 0
+    n = v
+    while n > 0:
+        r = r ^ (n & 1)
+        n = n >> 1
+    return r
+
+
+def reverse_bits8(v: int) -> int:
+    """低 8 位的**位序反转**：移位与按位或拼在一个表达式里，固定 8 轮。"""
+    n = v & 255
+    r = 0
+    i = 0
+    while i < 8:
+        r = (r << 1) | (n & 1)
+        n = n >> 1
+        i = i + 1
+    return r
+
+
+def digit_sum(n: int) -> int:
+    """十进制数位和：`% 10` 取末位、`// 10` 砍掉末位。"""
+    s = 0
+    x = n
+    while x > 0:
+        s = s + x % 10
+        x = x // 10
+    return s
+
+
+def digit_reverse(n: int) -> int:
+    """十进制数位反转：累积乘法（`r * 10 + 末位`），不借数组。"""
+    x = n
+    r = 0
+    while x > 0:
+        r = r * 10 + x % 10
+        x = x // 10
+    return r
+
+
+def digital_root(n: int) -> int:
+    """数根：反复求数位和直到只剩一位。**自递归**，末尾只有一条出口。"""
+    if n < 10:
+        return n
+    return digital_root(digit_sum(n))
+
+
+def is_palindromic(n: int) -> int:
+    """回文数判：先反转再比。**跨函数调用** `digit_reverse`，两处提前 `return`。"""
+    if n < 10:
+        return 1
+    if digit_reverse(n) == n:
+        return 1
+    return 0
+
+
+def collatz_len(n: int) -> int:
+    """考拉兹步数：单函数**自递归**，两条分支各一次调用。"""
+    if n <= 1:
+        return 0
+    if n % 2 == 0:
+        return 1 + collatz_len(n // 2)
+    return 1 + collatz_len(3 * n + 1)
+
+
+def triangular(n: int) -> int:
+    """三角数 `1 + 2 + ... + n`：用公式而不是循环，钉"纯表达式里的除法"。
+
+    先乘后除，`n * (n + 1)` 一定是偶数，所以整除无余。参数非负 ⇒ 两边一致。
+    """
+    return n * (n + 1) // 2
+
+
+def entry() -> int:
+    """宿主调的入口：把上面每一个函数的结果折成一个数。
+
+    **每一步都参与**最后的取余 —— 任一算法错了，退出码就变。这是这条判据的前提，
+    不是顺手写的。输入都是刻意挑过的小数（见 README）。"""
+    g = gcd(1071, 462)
+    l = lcm(21, 6)
+    s = isqrt(1000000)
+    p = powmod(BASE, EXPONENT, MODULUS)
+    mm = mulmod(12345, 6789, MODULUS)
+    mi = mod_inverse(3, 97)
+    pr = count_primes(100)
+    sf = smallest_factor(91)
+    ph = phi(36)
+    ds = divisor_sum(28)
+    dc = divisor_count(36)
+    pc = popcount(255)
+    pa = parity(182)
+    rb = reverse_bits8(1)
+    dr = digital_root(9875)
+    dg = digit_sum(987654)
+    dv = digit_reverse(12345)
+    ip = is_palindromic(12321)
+    cl = collatz_len(27)
+    tr = triangular(20)
+    total = (g + l + s % 100 + p % 100 + mm % 100 + mi + pr + sf + ph
+             + ds % 100 + dc + pc + pa + rb // 8 + dr + dg + dv % 100
+             + ip + cl + tr // 10)
+    return total % 256

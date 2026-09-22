@@ -235,7 +235,7 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "l.elf"
         exe.write_bytes(blob)
-        if not subprocess.run(["wsl", "-e", "true"], capture_output=True).returncode == 0:
+        if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
         s = str(exe.resolve()).replace("\\", "/")
@@ -350,6 +350,79 @@ def test_front_door_handles_the_loment_half_without_the_parser():
 
 
 @test
+def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
+    """**`choose write grammar rust` = 基础语法的一种拼法**（用户 2026-09-22 的裁定）：
+
+    > rust 语法是 Loment 基础语法，不需要翻译
+
+    ## 改之前的样子（这条判据治的就是它）
+
+    `rust` 在**两处**都登记着 —— 出厂锁 `GRAMMAR_ALIASES` 的右列（== `potato.GRAMMARS`）
+    与 `front_door` 的 `LANGS`。于是**源码里能写、对象也合法**，可 `lomt_from._TOOLS` 里
+    **没有 rust 这一门**（`from_rust` 是 `docs/179` 抽接口那条路：只记声明、**不抓正文**）。
+    结果：
+
+    * 前门把这份源交给 `from_rust` → 对象里一个 `body` 都没有 → `emit_lomt(impl=True)`
+      逐个跳过 → `NotRepresentable`，**文件被拒**；
+    * 而那句跳过理由还劝人「带正文的加 `--impl` 翻出来」—— 前门**已经**用的 `impl=True`。
+      一条登记在锁里的写法，**没有任何一份源编得过去，报的话还指反**。
+
+    ## 钉三件
+
+    1. **声明为 rust 与没写声明是同一支**：`translated=False`、产物里没有生成器包头、
+       正文一字不动。这同时排除"它被 `from_rust` 读过"—— 那条路的产物是**生成**的
+       （包头 `// 由 tools/lomt_from.py 从 Potato 形式对象生成`）。
+    2. **命令行上真编得出 IR**（`docs/188` §7.2 那条教训：**入口不止一处**，
+       库那侧全绿而命令行上抛栈）—— 而且看的是 `.ll` 里真有那个函数，不只是没报错。
+    3. **`.rs` 那条路没被一起改掉**：后缀说"这是 Rust 的文件"照旧走 `from_rust` 抽接口。
+       **声明与后缀分工不同**（`docs/188` §2）—— 少了这一条，下一次"顺手统一"
+       就会把接口那条路悄悄换成原生读法，而 `kernel/src/*.rs` 与 `lompotc --rust`
+       的孪生判据全靠它。对照面是 `resolve_lang`（**前端工具**的入口，它照旧按后缀说话）。
+    """
+    body = "module m\n\npub fn f(x: i32) -> i32 {\n    return x * 3;\n}\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "a.lomt"
+        a.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
+        fa = potato_from.front_door(a)
+        assert (fa.grammar, fa.translated) == ("loment", False), (fa.grammar, fa.translated)
+        assert "从 Potato 形式对象生成" not in fa.source, "它被当外国模块翻过了"
+        assert fa.source.endswith(body), "正文没原样留着"
+        assert fa.source[:len(fa.source) - len(body)].strip() == "", "声明那一行该抹成空白"
+        assert len(fa.source) == len("choose write grammar rust\n" + body), "抹声明必须等长"
+
+        # 对照面：**另一个单元**（同内容、不写声明）。两个实现一起错时"自举 == 参考"
+        # 照样绿（`docs/182` §1.9），所以比的得是这份源自己。
+        b = td / "b.lomt"
+        b.write_text(body, encoding="utf-8", newline="\n")
+        assert potato_from.front_door(b).source == body, "没声明那份被动过了"
+
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            "--print", "llvm", str(a)],
+                           capture_output=True, text=True, shell=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"`grammar rust` 该编得过：{out[-300:]}"
+        assert "Traceback" not in out, f"抛栈了 —— 话到不了用户眼前：\n{out[-400:]}"
+        assert "define " in out and "@f(" in out, f"IR 里没有那个函数：{out[-300:]}"
+
+        rs = td / "x.rs"
+        rs.write_text("pub fn g(a: i32) -> i32 { a + 1 }\n", encoding="utf-8", newline="\n")
+        assert potato_from.resolve_lang(rs)[0] == "rust", "`.rs` 的后缀读法被改掉了"
+        assert potato_from.LANGS["rust"] is potato_from.from_rust, "`.rs` 那条路被换掉了"
+        assert "rust" not in lomt_from._TOOLS, (
+            "`rust` 出现在 `_TOOLS` 里了 —— 它是**基础语法**，不该有翻译器"
+            "（用户 2026-09-22 的裁定）")
+
+        # `NATIVE_GRAMMARS` 是**出厂锁里的一个子集**（原生读法的那几个）—— 它不该冒出
+        # `potato.GRAMMARS` 之外的名字，否则"源里能写"与"对象里合法"就分家了。
+        assert "loment" in potato_from.NATIVE_GRAMMARS
+        assert set(potato_from.NATIVE_GRAMMARS) <= set(potato.GRAMMARS), (
+            f"{potato_from.NATIVE_GRAMMARS} 里有不在 `potato.GRAMMARS` 里的名字 —— "
+            f"那个名字写不进对象，源侧与对象侧就分家了")
+    print("      `grammar rust`：原生读法、命令行上真编出 IR（`.rs` 那条接口路不受影响）")
+
+
+@test
 def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
     """**读法是别的写法时，前门把它翻成 Loment —— 在本进程里算，不拉起那个语言。**
 
@@ -385,7 +458,7 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "l.elf"
         exe.write_bytes(blob)
-        if subprocess.run(["wsl", "-e", "true"], capture_output=True).returncode != 0:
+        if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
         s = str(exe.resolve()).replace("\\", "/")

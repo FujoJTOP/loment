@@ -1,0 +1,325 @@
+choose write grammar cpp
+
+/* eca.lomt —— 用 **C++ 语法** 写的 Loment 模块（docs/188 的 `choose write grammar`）。
+ *
+ * 后缀 `.lomt` 说的是"这是 Loment 的文件"，`choose write grammar cpp` 说的是"用 C++ 的
+ * 拼法读它"。语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**。
+ *
+ * 主题：**一维初等元胞自动机（Elementary Cellular Automata）工具箱**。
+ *
+ * 一条 32 格的二进制带子塞在一个 `unsigned int` 里（bit i = 第 i 格）。
+ * 元胞自动机的每一步，看每个格子的左邻/自身/右邻三位，按"规则号"的哪一位
+ * 决定下一代这一格是 0 还是 1 —— 于是整套东西都是**位运算 + 循环 + 递归**。
+ *
+ * 这一份钉住的写法（对应 README 的函数表）：
+ *   * **位运算**：`&` `|` `^` `<<` `>>`，移位量是变量（`mask << i`）；
+ *   * **嵌套循环**：`weighted_mass` 是 `for` 套 `for`；
+ *   * **递归**：`evolve_rec` 自己调自己；
+ *   * **提前 return**：`rule_lookup` / `put_bit` / `is_symmetric` / `highest_bit`；
+ *   * **跨函数调用**：`step` 里一次调用就串起 `bit_at` / `apply_rule` / `put_bit`；
+ *   * **`bool` 返回 + `true`/`false`**：`bit_on` / `is_symmetric`（C++ 有独立的布尔类型）；
+ *   * **变宽整数**：带子与掩码用 `unsigned int` —— 移位与回绕都是**定义好的**。
+ *
+ * 子集外的一律没写：没有全局变量、没有指针/数组/结构体/字符串、没有 `#include`、
+ * 没有 `switch` / `break` / `continue` / 三元（见 README「绕过的子集限制」）。
+ */
+
+/* ---- 位操作：一条带子上读一格 / 写一格 ------------------------------ */
+
+/* 读第 i 格。移位量是**变量**，不是常量 —— 钉住 `>>` 的右边可以是运行时值。 */
+int bit_at(unsigned int row, int i) {
+    return (row >> i) & 1;
+}
+
+/* 读第 i 格，但**按布尔交出去** —— C++ 有独立的 `bool`，这里返回 `true`/`false`
+ * （不是 `1`/`0`：`bool t = 1;` 在本语言里是类型错）。 */
+bool bit_on(unsigned int row, int i) {
+    if (bit_at(row, i) == 1) {
+        return true;
+    }
+    return false;
+}
+
+/* 把第 i 格写成 v：v 非零就置位、否则清位。
+ *
+ * 置位用 `row | mask`、清位用 `row - mask`（那一位本来就是 1，减掉正好落下）——
+ * 子集里没有 `~`，所以不能用 `row & ~mask` 的写法（见 README）。
+ * 掩码在 `unsigned int` 上左移：`1 << 31` 在有符号上是 UB，这里不会有。 */
+unsigned int put_bit(unsigned int row, int i, int v) {
+    unsigned int mask = 1;
+    mask = mask << i;
+    if (v != 0) {
+        return row | mask;
+    }
+    if ((row & mask) != 0) {
+        return row - mask;
+    }
+    return row;
+}
+
+/* ---- 规则表：规则号是一个 0..255 的字节，三邻位的下标取出其中一位 ---- */
+
+/* 从规则号里取第 idx 位。**两层提前 return**：下标越界直接给 0（不用抛错、不用数组）。 */
+int rule_lookup(int rule, int idx) {
+    if (idx < 0) {
+        return 0;
+    }
+    if (idx > 7) {
+        return 0;
+    }
+    return (rule >> idx) & 1;
+}
+
+/* 左邻/自身/右邻三位拼成 0..7 的下标（`l*4 + c*2 + r`），再查规则表。
+ * 这是"元胞自动机"这个词的全部内容 —— 一个 8 项的查表。 */
+int apply_rule(int rule, int left, int center, int right) {
+    int idx = left * 4 + center * 2 + right;
+    return rule_lookup(rule, idx);
+}
+
+/* ---- 演化：一代 / 多代 ------------------------------ */
+
+/* 走一代。固定宽度 32、**零边界**（带子两头之外当作 0 —— 于是左右邻居要单独夹一下）。
+ * 一个循环里串起三个函数：`bit_at` 取邻位、`apply_rule` 查表、`put_bit` 落位。 */
+unsigned int step(unsigned int row, int rule) {
+    unsigned int next = 0;
+    int i = 0;
+    while (i < 32) {
+        int left = 0;
+        int right = 0;
+        if (i > 0) {
+            left = bit_at(row, i - 1);
+        }
+        if (i < 31) {
+            right = bit_at(row, i + 1);
+        }
+        int center = bit_at(row, i);
+        int v = apply_rule(rule, left, center, right);
+        if (v != 0) {
+            next = put_bit(next, i, 1);
+        }
+        i = i + 1;
+    }
+    return next;
+}
+
+/* 迭代版：走 steps 代。 */
+unsigned int evolve(int rule, unsigned int row, int steps) {
+    unsigned int cur = row;
+    int s = 0;
+    while (s < steps) {
+        cur = step(cur, rule);
+        s = s + 1;
+    }
+    return cur;
+}
+
+/* 递归版：与 `evolve` 同义，但**自己调自己**（steps 减到 0 就是出口）。
+ * 两个版本并存是刻意的 —— 它们必须给出同一个带子，否则 entry() 的结果就变了。 */
+unsigned int evolve_rec(int rule, unsigned int row, int steps) {
+    if (steps <= 0) {
+        return row;
+    }
+    return evolve_rec(rule, step(row, rule), steps - 1);
+}
+
+/* ---- 量一量这条带子 ------------------------------ */
+
+/* 置位数：Kernighan 那一招 `n & (n - 1)`，每次消掉最低的那个 1。 */
+int popcount(unsigned int v) {
+    unsigned int n = v;
+    int c = 0;
+    while (n != 0) {
+        n = n & (n - 1);
+        c = c + 1;
+    }
+    return c;
+}
+
+/* 奇偶位：逐位异或折起来，结果是 0 或 1（也能看成 popcount 的最低位）。
+ * 全程在 `unsigned int` 上做，不跟有符号混。 */
+int parity(unsigned int v) {
+    unsigned int n = v;
+    unsigned int p = 0;
+    while (n != 0) {
+        p = p ^ (n & 1);
+        n = n >> 1;
+    }
+    return p;
+}
+
+/* 相邻格不同的次数（"这条带子有多碎"），只看低 width 位。 */
+int transitions(unsigned int row, int width) {
+    int c = 0;
+    int i = 0;
+    while (i + 1 < width) {
+        if (bit_at(row, i) != bit_at(row, i + 1)) {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/* 演化过程中的"碎裂总量"：一层循环走代、里面 `transitions` 自己还有一层 ——
+ * 这是**跨函数的嵌套循环**。 */
+int count_changes(int rule, unsigned int row, int steps) {
+    int total = 0;
+    unsigned int cur = row;
+    int s = 0;
+    while (s < steps) {
+        total = total + transitions(cur, 32);
+        cur = step(cur, rule);
+        s = s + 1;
+    }
+    return total;
+}
+
+/* 带子的"加权质量"：每一代把第 i 格的 1 记成 (i+1) 分。
+ * 这里是**字面意义的 `for` 套 `for`** —— 外层走代、内层扫格。
+ * 位置越靠右权重越大，所以这个量对带子的**形状**（而不只是 1 的个数）敏感。 */
+int weighted_mass(int rule, unsigned int row, int steps) {
+    int acc = 0;
+    unsigned int cur = row;
+    for (int g = 0; g < steps; g = g + 1) {
+        for (int i = 0; i < 32; i = i + 1) {
+            acc = acc + bit_at(cur, i) * (i + 1);
+        }
+        cur = step(cur, rule);
+    }
+    return acc;
+}
+
+/* 最长的一段连续 1。 */
+int longest_run(unsigned int row, int width) {
+    int best = 0;
+    int cur = 0;
+    int i = 0;
+    while (i < width) {
+        if (bit_at(row, i) == 1) {
+            cur = cur + 1;
+            if (cur > best) {
+                best = cur;
+            }
+        } else {
+            cur = 0;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/* 有几段连续的 1（`in_run` 就是子集没有 `continue` 时的替身）。 */
+int run_count(unsigned int row, int width) {
+    int runs = 0;
+    int in_run = 0;
+    int i = 0;
+    while (i < width) {
+        if (bit_at(row, i) == 1) {
+            if (in_run == 0) {
+                runs = runs + 1;
+                in_run = 1;
+            }
+        } else {
+            in_run = 0;
+        }
+        i = i + 1;
+    }
+    return runs;
+}
+
+/* 把低 width 位整个翻过来（`<<1` 与 `|最低位` 一步走）。 */
+unsigned int reverse_bits(unsigned int v, int width) {
+    unsigned int out = 0;
+    int i = 0;
+    while (i < width) {
+        out = out << 1;
+        out = out | (v & 1);
+        v = v >> 1;
+        i = i + 1;
+    }
+    return out;
+}
+
+/* 在低 width 位里左右对称吗？**循环里提前 return false**，全过就 return true。 */
+bool is_symmetric(unsigned int row, int width) {
+    int i = 0;
+    while (i < width) {
+        int j = width - 1 - i;
+        if (bit_at(row, i) != bit_at(row, j)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/* 最高位 1 的下标；全 0 时给 -1（**提前 return**，也是负数的来源）。 */
+int highest_bit(unsigned int v) {
+    if (v == 0) {
+        return -1;
+    }
+    int p = 0;
+    unsigned int n = v;
+    while (n > 1) {
+        n = n >> 1;
+        p = p + 1;
+    }
+    return p;
+}
+
+/* 格雷码：`v ^ (v >> 1)`。 */
+unsigned int gray_code(unsigned int v) {
+    return v ^ (v >> 1);
+}
+
+/* ---- 造种子带子 ------------------------------ */
+
+/* 只有第 i 格是 1。 */
+unsigned int single_seed(int i) {
+    unsigned int r = 0;
+    return put_bit(r, i, 1);
+}
+
+/* 低 n 格全是 1。用循环一位一位置 —— 不走 `(1 << n) - 1` 那条路：
+ * `1 << 31` 在有符号上是 UB，这里不给它这个机会。 */
+unsigned int block_seed(int n) {
+    unsigned int r = 0;
+    int i = 0;
+    while (i < n) {
+        r = put_bit(r, i, 1);
+        i = i + 1;
+    }
+    return r;
+}
+
+/* ---- 宿主调的入口 ------------------------------ */
+
+/* 把上面每个函数的结果折成一个数。**每一步都参与**，所以任一算法错了退出码就变
+ * （这是这条判据的前提，不是顺手写的）。期望值与推导见 README。 */
+int entry() {
+    unsigned int center = single_seed(16);        /* 1 << 16 = 65536 */
+    unsigned int block = block_seed(12);          /* 低 12 位全 1 = 4095 */
+    unsigned int p90 = evolve(90, center, 8);     /* 规则 90，迭代 8 代 */
+    unsigned int p30 = evolve_rec(30, center, 6); /* 规则 30，递归 6 代 */
+    bool on = bit_on(center, 16);                 /* true */
+    int pc = popcount(p90);                       /* 2 */
+    int pa = parity(p30);                         /* 1 */
+    int tr = count_changes(90, block, 5);         /* 19 */
+    int wm = weighted_mass(30, block, 4);         /* 176 */
+    int lr = longest_run(block, 12);              /* 12 */
+    int rc = run_count(p30, 32);                  /* 4 */
+    unsigned int rev = reverse_bits(block, 12);   /* 4095 -> 低 12 位反向 */
+    int hb = highest_bit(block);                  /* 11 */
+    int gray = gray_code(block) % 255;            /* 4095^2047 = 2048 -> 2048%255 = 8 */
+    bool sym = is_symmetric(block, 12);           /* true */
+    int bonus = 0;
+    if (on) {
+        bonus = bonus + 20;
+    }
+    if (sym) {
+        bonus = bonus + 40;
+    }
+    int rl = rev & 15;                            /* 12 位反向后的低 4 位 = 15 */
+    return (pc + pa + tr + wm + lr + rc + rl + hb + gray + bonus) % 256;
+}

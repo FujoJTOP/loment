@@ -102,6 +102,10 @@ GLOBS = [
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
     # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。
     "tools/lomt_from.py", "tools/loment_multisyntax_test.py",
+    # 六门表层语法各一个**大型项目** (`examples/multisyntax-projects/`): 前门翻出来的
+    # Loment 跑出的数 == 对照组 == 独立期望值。**那批语料本身不进清单** —— 它要靠
+    # `tools/` 才能跑，而 `tools/` 不随包发（与 `docs/179` §8 同一个理由）。
+    "tools/loment_multisyntax_projects_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
     # 花括号族 (C/C++/Java/C#) 的**共享前端核** (docs/188 §7.1): 一份解析器 + 方言表。
