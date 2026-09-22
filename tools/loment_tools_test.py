@@ -65,7 +65,17 @@ def test_audit_claims_match_ci():
     assert not missing, f"审计包引用了不在 ci.py 静态门禁里的工具: {missing}"
     ids = [c[0] for c in loment_audit.CLAIMS]
     assert len(ids) == len(set(ids)), "主张编号重复"
-    assert len(loment_audit.CLAIMS) >= 10, "主张条数回退 (少于 10 条)"
+    # **条数要与 `docs/160` §1 那张表逐行对齐**（2026-09-22 第三方复核发现的现状：
+    # 工具 24 条 / 表 20 行 / 标题说 23 / `docs/202` 与 `docs/145` 说 18 —— 四个数各说各话。
+    # 原因是这里原先只钉 `>= 10` 这个**下限**：C21–C24 加进工具时表格没跟，没有任何东西会红。
+    # 现在钉**相等**：加一条主张必须同时加一行表；表里多一行而工具里没有，也红。
+    kit = (ROOT / "docs" / "160-loment-audit-kit.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\|\s*(C\d+)\s*\|", kit, re.M)
+    assert rows == ids, (
+        "docs/160 §1 的表与 loment_audit.CLAIMS 对不上:\n"
+        f"  表  : {rows}\n"
+        f"  工具: {ids}\n"
+        "（加/删一条主张要同时改那张表 —— 见 docs/160 §1 顶上那段与 §2 第 11 条）")
     # 每条的 argv 必须显式写出模式 (默认无参的判据要写 [], 需要模式的两条写 --check)
     for cid, _, tool, args in loment_audit.CLAIMS:
         assert isinstance(args, list), f"{cid} 的 argv 必须是 list"
