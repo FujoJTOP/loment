@@ -233,6 +233,12 @@ what you expected, and what happened instead
 Issues are in English. A report with a runnable reproduction is worth more than a well-argued one
 without.
 
+## One free thing we would ask for
+
+**Star the repository.** It costs nothing and takes one click, and for a project with no marketing
+that number is what decides whether the next person ever finds it. If Loment is useful to you —
+or you only want it to keep going — that is the whole ask. Thank you.
+
 ## Licence
 
 MIT ([LICENSE](LICENSE)). Contributions are accepted under it.
