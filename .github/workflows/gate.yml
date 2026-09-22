@@ -46,6 +46,79 @@ permissions:
   contents: read
 
 jobs:
+  # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
+  #
+  # **为什么要有这个 job**: 那一条把机制描述成"自动检测并关闭"，而 2026-09-22 查过 ——
+  # 仓里此前**没有任何东西**做这件事（`origin/main` 上只有这一个 workflow，`/rulesets`
+  # 返回空，branch protection 里没有路径规则也没有必需检查）。一条写在文档里、没有
+  # 实现的规矩，是最坏的一种：它让**外面**的贡献者以为会被拦下，实际不会。
+  # 这个 job 就是那句话可验证的那一半 —— **检测**。剩下的一半（关闭 PR、三次禁言）
+  # 需要仓库设置或一个 org 级 App，不是这个文件能单方面做到的，所以 CONTRIBUTING
+  # 的措辞也改成说实话。
+  #
+  # **为什么不 checkout**: 这个 job 骑在**别人的**补丁上跑，而它要的只是一串**文件名**。
+  # 一个字节都不取进工作区，就没有"未审代码被执行"的面。也正因如此它**不需要**
+  # `pull_request_target`（那个事件为了拿写权限会带来真实的注入风险）—— 只读 token
+  # 就够读文件列表。
+  lom-door:
+    name: lom/ 禁区
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: 检出 `lom/**` 的改动
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -uo pipefail
+          err=$(mktemp)
+          files=""
+          rc=0
+          if [ "$EVENT" = "pull_request" ]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err") || rc=$?
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+          else
+            # 新分支的首次 push（`before` 是全零）—— 退回看这一个提交自己动了什么
+            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+          fi
+          # **列不出来就按失败算**（fail closed）。`gh` 拿不到文件列表时 `files` 是空串，
+          # 下面的 `grep` 于是找不到 `lom/` 而**放行** —— 那是这个 job 最坏的失败形状:
+          # 一个 token 权限不对或 API 抽风就能让门**静默失效**，而它正是为此存在的。
+          if [ "$rc" != 0 ]; then
+            echo "::error::列改动文件失败 —— 门禁无法判定，按失败处理（不静默放行）"
+            cat "$err"
+            exit 1
+          fi
+          n=$(printf '%s\n' "$files" | grep -c . || true)
+          bad=$(printf '%s\n' "$files" | grep -E '^lom/' || true)
+          if [ -z "$bad" ]; then
+            echo "lom/ 禁区: 无改动（比对了 $n 个文件）"
+            exit 0
+          fi
+          {
+            echo "## \`lom/\` 禁区：这次改动碰了 L0 接口层"
+            echo ""
+            echo "接口对面那一半在**另一个仓库**里，从本仓单方面看不出改坏没改坏 ——"
+            echo "所以这里不评审，只拦下。想让接口变，去开 issue，那不是一个补丁。"
+            echo ""
+            echo '```'
+            echo "$bad"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$bad" | while read -r f; do
+            echo "::error file=$f::改了 L0 接口层（lom/ 禁区）—— 见 CONTRIBUTING.md"
+          done
+          exit 1
+
   static:
     name: ci.py --static-only
     runs-on: ubuntu-latest
