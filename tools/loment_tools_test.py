@@ -894,6 +894,54 @@ def test_tool_memory_layout_stays_inside_cap():
     print(f"      {checked} 个工具的内存布局都在各自的 M_CAP 之内")
 
 
+@test
+def test_tool_reserves_its_memory():
+    """**问过堆顶的工具，必须把堆扩到够再用它。**
+
+    `lomtfrom` / `lomtrans` 原来是 `brk(0)` 拿当前堆顶当基址、却**没有**让内核把堆扩到
+    `M_CAP`，于是 `[mem, mem + M_CAP)` 里多数页根本没被映射 —— 第一次写到上面那一段就是
+    SIGSEGV（`lomtfrom` 连读 argv 都够远）。Windows 上看不出来: PE 的 .bss/堆区 committed
+    得大；而判据在本机跑的就是 PE（2026-09-22 把门禁搬上 Linux runner 才现形）。
+
+    家族里其余 24 个工具都扩了（`sys_alloc` 或第二个 `brk`），只有这两个忘了。所以这一条查的
+    是"**凡是问过堆顶的，都要有扩堆**"。
+    """
+    bad = []
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        t = p.read_text(encoding="utf-8")
+        if "syscall4(12, 0, 0, 0)" not in t:
+            continue
+        if "fn sys_alloc" in t or "syscall4(12, (cur" in t:
+            continue
+        bad.append(p.name)
+    assert not bad, ("这些工具问了堆顶却没把堆扩到够（Linux 上段错误、Windows 上看不出来）: "
+                     + ", ".join(bad))
+    print("      问过堆顶的工具都把堆扩到够了")
+
+
+@test
+def test_arg_helpers_do_not_rebase_cb():
+    """**`cb` 已经是绝对指针，不许再当基址加偏移。**
+
+    `lomtrans` 的 `arg_is` / `arg_val` 里写着 `ptr_add(cb, M_TMP + 96)` —— 而
+    `cb = ptr_add(mem, M_ARG)`，于是那个地址落到 `mem + 2441312`，越过 `M_CAP`
+    （1525248）约 90 万字节。`arg_is` 每轮参数循环都调 ⇒ **有参数就 SIGSEGV、无参数不崩**。
+
+    正确写法要从 `cb` 往下减，而那个相对偏移是负数、`u32` 写不出来 —— 这正是它当初被写反的
+    原因。按 `arg_at` 自己的约定，暂存格应当由调用方从 `mem` 算好传进来。
+    """
+    bad = []
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        t = p.read_text(encoding="utf-8")
+        for m in re.finditer(r"ptr_add\(cb,\s*[A-Z][A-Z0-9_]*\b", t):
+            # 注意**不能**写成 `[^()]*` 通配: `ptr_add(cb, o1)` 是合法的 ——
+            # `o1` 是 cmdline 内的相对偏移，本来就该从 `cb` 加。要抓的是
+            # "把 `M_*` 这类**以 mem 为基准**的常量又加到 `cb` 上"。
+            bad.append(f"{p.name}:{t[:m.start()].count(chr(10)) + 1}  {m.group(0)}")
+    assert not bad, ("把 cb（已经是绝对指针）又当基址用了:\n  " + "\n  ".join(bad))
+    print("      没有把 cb 再当基址的写法")
+
+
 # ---------------------------------------------------------------- M65/M66 构建
 
 @test
