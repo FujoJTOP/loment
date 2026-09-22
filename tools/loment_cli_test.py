@@ -264,8 +264,12 @@ def test_hash_rejects_directory():
     rc, out, err = _run(["hash", str(f)] + _no_color())
     assert rc != 0, f"hash on directory should fail, got rc={rc}, out={out}"
     assert "not a file" in err, f"expected 'not a file' in stderr, got: {err}"
+    # 只查 rc 与 stderr 不够: 旧行为是**先打印 sha256 空串再退 0** —— 用一个合法输入的
+    # 合法摘要回答了另一个问题 (#54)。所以这里要钉住"什么都没打印"。
+    assert out.strip() == "", f"目录参数下不该打印摘要, 实得: {out!r}"
 
 
+@test
 def test_hash_matches_hashlib():
     f = _pkg / "share" / "loment" / "examples" / "tour.lomt"
     rc, out, _ = _run(["hash", str(f)])
