@@ -356,6 +356,21 @@ def test_windows_installer(zipf: Path) -> None:
           r2b.returncode == 0 and "Compile and link to an executable" in (r2b.stdout or ""),
           (r2b.stdout or r2b.stderr or "")[:140])
 
+    # issue #13: 未知开关要被**拒绝**，不能当成源文件、也不能静默忽略。
+    # `--diag-out` 是**驱动**的开关（docs/182 §5），`loment check` 上并没有这一条 ——
+    # 所以这里要的不是"支持它"，而是"别装作支持"：原先它会落到 :scan_arg 里
+    # "第一个非开关词就是源文件"那一支，于是被无声吞掉（bash 侧同形状退 2）。
+    stray = work / "should_not_exist.jsonl"
+    ex_src = pfx / "share/loment/examples/user_hello.lomt"
+    r_unknown = subprocess.run(
+        ["cmd", "/c", str(cmd), "check", str(ex_src), "--diag-out", str(stray)],
+        capture_output=True, text=True, shell=False, encoding="utf-8",
+        errors="replace", timeout=180)
+    check("装完后 `loment check FILE --diag-out P` 被拒 (未知开关, 退 2, 不写文件)",
+          r_unknown.returncode == 2 and "unknown option" in (r_unknown.stderr or "")
+          and not stray.exists(),
+          f"rc={r_unknown.returncode} err={(r_unknown.stderr or '')[:90]}")
+
     # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义
     ex = pfx / "share/loment/examples/user_hello.lomt"
     r3 = subprocess.run(["cmd", "/c", str(cmd), "run", str(ex)], capture_output=True, text=True,
