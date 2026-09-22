@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not do what the documentation says it does.
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Four things make a report actionable here, and [CONTRIBUTING.md](https://github.com/FujoJTOP/loment/blob/main/CONTRIBUTING.md)
+        asks for the same four. Issues are in English.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Which toolchain, and where it came from. `loment version` prints the commit — include that
+        line, because a checkout may be dozens of commits ahead of an installed package, and the
+        two behave differently on purpose.
+      placeholder: |
+        Loment 0.1.4 (0.1.4), commit d80ab09
+        Windows 11 / WSL Ubuntu / Linux
+        built from a checkout / the in-repo dist / an installed package
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One paragraph. What did you expect, and what made you look twice?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro
+      description: |
+        The smallest file, and the exact commands. A report with a runnable reproduction is worth
+        more than a well-argued one without.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected / Actual
+      description: |
+        What you expected, and what happened instead. Paste the output rather than describing it —
+        diagnostics from this toolchain are structured, and the exact wording matters.
+    validations:
+      required: true
