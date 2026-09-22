@@ -576,7 +576,7 @@ NUL** 再 openat。我图省事写成 `syscall4(257, AT_FDCWD, str_ptr("…"), 0
 | 轴 | Python 侧 | Loment 侧**已有** | 还缺什么 |
 |---|---|---|---|
 | 六门翻译器（§4.1） | **5697 行**（`potato_from` 1790 + `lomt_from` 481 + `trans_core` 1079 + 六门方言表 2347） | **0** | **整根** —— 要在 Loment 里重新做一个前端（词法 + 递归下降 + 类型 + 发射） |
-| 自举侧 potato 通路 | `emit_potato` **115 行**，但它坐在 `load_unit` + `check` + **`prepare`（单态化）**之上 | 前端已有 **12687 行 Loment**（`loment/selfhost/` 18 个文件：lexer / parser / checker / codegen）+ **第一半**（第 21 格，2026-09-20）：`loment/selfhost/potato.lomt` 的 `potato_emit` + `driver --emit-potato` | **第二半**：**单态化**（`prepare`）与 `instances`、`generics` 的 fn/struct 那两类、`traits`/`impls` 原始视图、`layouts`、依赖名（`imports`）—— 判据里那 13 份"点名拒绝"就是待办清单 |
+| 自举侧 potato 通路 | `emit_potato` **115 行**，但它坐在 `load_unit` + `check` + **`prepare`（单态化）**之上 | 前端已有 **12687 行 Loment**（`loment/selfhost/` 18 个文件：lexer / parser / checker / codegen）+ **第一半**（第 21 格，2026-09-20）：`loment/selfhost/potato.lomt` 的 `potato_emit` + `driver --emit-potato` | **第二轮**（2026-09-21）：`imports`（依赖名 + 根/依赖分界，**依赖在前**）、`traits`/`impls` 原始视图、impl 方法的 `__self` 改写 —— 覆盖 19 → 24 份示例。**还缺**：单态化（`prepare` / `instances` / `generics` 的 fn·struct 两类）与 `layouts` |
 
 ⇒ **两根轴都不是"再搬一格"**：第一根要在 Loment 里重建一个**前端**；第二根要在自举镜里补出
 **单态化**与那份视图。按 §4.1 的判断（"翻译器要建树 … 这一格的代价要认"）与这次数出来的
@@ -899,14 +899,15 @@ S2、S4 依次被上一级门住（各自的前置写在 §3 那张表里）。
 Loment"，而是"**把检查过的单元发成 Potato v5 形式对象**"—— 对照面是
 `tools/lomentc.py::emit_potato`（115 行）。
 
-自举侧原先**一行 potato 发射都没有**（`driver.lomt` 里那两处只是注释）。这一格落地的是
-它的**第一半**：`loment/selfhost/potato.lomt`（`potato_emit`）+ `driver.lomt` 的
-`--emit-potato` + 判据 `tools/loment_potato_emit_test.py`（4/4）：
+自举侧原先**一行 potato 发射都没有**（`driver.lomt` 里那两处只是注释）。这一格分两轮落地：
+`loment/selfhost/potato.lomt`（`potato_emit`）+ `driver.lomt` 的 `--emit-potato` +
+判据 `tools/loment_potato_emit_test.py`（4/4）：
 
-* **27 份单元的形式对象与参考实现逐字节相同**（19 份 `loment/examples` + 8 份跨目录：
-  `lompi/store/std` 的 `num`/`hash`/`f64bits`、`loment/lib` 的 `num`/`mem`、
-  `loment/selfhost/ir_*`、`loment/tools/lomsyscalls`）；
-* **13 份子集外的单元各自点名拒绝**（退出码 1 + 话里出现那条轴的名字），
+* **37 份单元的形式对象与参考实现逐字节相同**（`loment/examples` 里 24 份覆盖
+  + 13 份跨目录：`lompi/store/std` 的 `num`/`hash`/`f64bits`/`text`、`lompi/store/host`
+  的 `fs`、`loment/lib` 的 `num`/`mem`/`lumtui`、`loment/selfhost/ir_*`、
+  `loment/tools/lomsyscalls`/`lomcli`、`loment/examples/addin/main`）；
+* **8 份子集外的单元各自点名拒绝**（退出码 1 + 话里出现那条轴的名字），
   并且有一条判据钉住"`loment/examples` 下每一份要么覆盖、要么拒绝、要么跳过" ——
   **新加一份示例不做决定就红**。
 
@@ -914,15 +915,16 @@ Loment"，而是"**把检查过的单元发成 Potato v5 形式对象**"—— �
 所以"顶层 `fn` 就是一个函数声明"由检查器担保；而检查器的符号表里没有这一格要的锚点
 （`generics` 要的类型形参在名字与 `{` 之间，它按需重扫），于是索性**只回 token 流**。
 
-**拒绝的六条**（每一条都是"静默发错 vs 点名拒绝"的取舍，选了后者）：
+**依赖与根的分界**（第二轮做掉的，也是这一格最大的一块覆盖）：`imports` 那一格与
+"哪些格只描述根"是同一件事的两面。第 41 条记了实测出来的顺序。
 
-| 轴 | 为什么这一半不做 |
+**还拒绝的三条**（每一条都是"静默发错 vs 点名拒绝"的取舍，选了后者）：
+
+| 轴 | 为什么还不行 |
 |---|---|
-| `use` 来的依赖（`imports`） | 驱动器手上的单元是"根 + 依赖 + 预置枚举"**拼在一个** token 流里，而 Potato 那些格**只描述根单元**；分界线是第二个顶层 `module`（= 注入的 `__prelude`） |
-| 自写的泛型形参 | `generics` 与 `instances` 在参考实现里是**一对**，而单态化（`prepare`）还没搬进来 |
+| 自写的泛型声明（含**依赖里的**） | `generics` 与 `instances` 在参考实现里是**一对**，而单态化（`prepare`）还没搬进来 |
 | 泛型**类型**的用法（`Option<…>`） | 同上：`prepare` 会把签名里的名字改写成 `Result_u32_u32` 那种具体名 |
-| `trait` / `impl` | `traits`/`impls` 收的是**原始视图**（trait 名 + 方法名；impl 的 trait/接受者/方法名），检查器只把 impl 方法压成 `K_METHOD` |
-| L0 布局（`layouts`） | 来自 `use "xxx.lom"` 那种装载，被第一条一起挡住了 |
+| L0 布局（`layouts`） | 来自 `use "xxx.lom"` 那种装载；自举侧不装载 L0 |
 | 方言（`dialects`） | 由**驱动器**拒 —— token 流上 `comefor` 已被展开吃掉，只有那一层还知道"这次展开过没有" |
 
 37. ⚠ **`prepare()` 会把带形参的声明从表里**换掉**。第一版把 `enums` 写成"单元里所有
@@ -953,9 +955,47 @@ Loment"，而是"**把检查过的单元发成 Potato v5 形式对象**"—— �
 两张都是"单调 bump、没有边界检查"，越界就踩下一张表，所以报出来的错离现场很远。
 修法、六条守卫与预算判据写在 `docs/200`。**这一处与 `docs/192` 的输入缓冲是同一种病第二次发作**。
 
-**还缺什么**（第二半）：单态化（`prepare`）与 `instances`、`generics` 的 fn/struct 那两类、
-`traits`/`impls` 的原始视图、`layouts`、依赖的名字（`imports`）。判据里那 13 份"点名拒绝"
-就是这第二半的**待办清单**。
+**第二轮做掉的三块**（2026-09-21，覆盖从 19 份示例涨到 24 份）：
+
+41. ⚠ **依赖在单元里的位置是"在前"，不是"在后"** —— 这是这一轮最该先量的一件事。
+    `driver.lomt` 里两处注释**互相矛盾**（文件头说"依赖按先序拼进单元"，函数上写
+    "顺序=依赖在前"）。实测是**后者**：单元 = `依赖1 依赖2 … 根 预置块?`，
+    证据是同一份源喂两个实现，IR 里**被依赖者的函数排在根前面**
+    （`lomentc.resolve_deps` 说的"被依赖者在前"是同一件事）。
+    ⇒ 于是"根在哪" = **最后一个 `module` 标记**（它是 `__prelude` 时取前一个），
+    `unit` 取的是**根**那个名字（不是第 1 个 token —— 那是第一个依赖的名字）。
+    **教训**：同一份源上两个不一致的注释，**当判据用的那个数**（这里是 IR 的函数顺序）
+    才作数。
+42. **`imports` 是"依赖的传递闭包"，顺序也要一样**。`lumtui_demo.lomt` 写 5 条 `use`，
+    对象里却是 **6** 个依赖名（`lumtui_font` 是被 `lumtui_layout` 拉进来的）——
+    顺序 = 先序。判据里专门留了这一份，因为它同时钉住"名字对"与"顺序对"。
+43. ⚠ **检查一个字符串 token 的后缀，别忘了它含闭合引号**。`use "lom/fujr.lom"`
+    的判别我第一版从 `off + len - 4` 起比 `.lom` —— 那 4 个字节是 `.lom"`，于是
+    **永远不相等**：`demo.lomt` 的 L0 布局没被挡住，两边算出了**两份不同的对象**
+    （我这边 `layouts: []`，参考那边 2 条 record）而**判据当时还没覆盖它**。
+    修法是从 `off + len - 5` 起比。（与第 33/34 条同一族：**这类函数的边界值要用一个
+    真语料反查一遍**，不能靠读代码推。）
+44. **impl 方法的 `self` 在对象里是 `__self` + 接受者类型**。`parse_impl` 把第一个形参
+    改名成 `__self` 并把类型填成 `for` 后面那个类型（`Small`）——
+    而**顶层**函数里的裸 `self`（`fn f(self)`）仍是 `Param("self", "")`。
+    两条路长得很像，判据靠 `native_trait.lomt` 把前者钉住。
+45. **impl 的方法也算 `functions`，名字是改过名的 `接受者_方法`**（`parse` 在收 impl 时
+    就 `f.name = f"{im.type}_{f.name}"`，位置就在 impl 那一处）。所以"哪些 `fn` 算函数"
+    是三档：顶层那一层算、**impl 块里那一层算**、`trait` 块里的**不算**（那是签名，
+    只进 `traits[].methods`）。
+
+**还缺什么**：单态化（`prepare`）—— 也就是 `instances` 与 `generics` 的 fn/struct 两类
+（第 37 条那条"`prepare` 前后是不是同一张表"要在这一轮兑现），以及 L0 布局（`layouts`）。
+判据里那 8 份"点名拒绝"就是待办清单。
+
+46. **仓库级 sweep 是这一轮最值的一道工序**：判据的语料是枚举的（`COVERED` +
+`EXTRA_COVERED` + 一条"examples 下每份都要有说法"），而**子目录里的语料不在那条 glob 里**
+（`loment/examples/addin/main.lomt` 就是）。把它扫出来的那道 sweep 做的是同一件事、
+只是语料换成"仓里所有 `.lomt`"：**先量一遍，再决定往判据里钉哪几份**。
+它这次抓到的是**参照面自己搭错了**（`_want` 用 `load()` 而不是 `load_unit()`，
+于是 `switches` 那一格少了 `addin` 拉进来的定义）—— 判据绿着，因为它没覆盖那份语料。
+**两遍的口径必须一致**：`_want` 现在直接调 `lomentc.load_unit`（CLI 唯一入口），
+不是自己拼 `load` + `resolve_deps`。
 
 #### 同族的两处（**能过翻译器、过不了后面的层**）
 

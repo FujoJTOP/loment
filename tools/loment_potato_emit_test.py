@@ -52,25 +52,28 @@ COVERED = (
     "native_mut.lomt",          # `mut [u32]` / `[u32]` 形参 —— 类型渲染的边界
     "native_slice.lomt",
     "native_str.lomt",
+    "native_trait.lomt",        # trait + 两个 impl —— `traits`/`impls` 的原始视图 +
+                                # impl 方法的 `self`（改名 `__self` + 填接受者类型）
     "selfcheck.lomt",
     "switch.lomt",              # 开关取值要进对象: `switches` 那一格
     "toolchain.lomt",
     "user_hello.lomt",
+    # ---- 带 `use` 的（`imports` 那一格 + **根/依赖的边界**）
+    "ahci.lomt",                # 一个依赖
+    "allocator.lomt",           # 一个依赖 + const
+    "fuc_node.lomt",            # 一个依赖
+    "lumtui_demo.lomt",         # 五个 `use` —— 依赖的**传递闭包**共 6 份（`lumtui_font`
+                                # 是被 `lumtui_layout` 拉进来的），顺序也要对上
 )
 
 #: **点名拒绝**的那些（文件 -> 拒绝话里必须出现的那个轴的名字）。
 #: 每一条都对应 `loment/selfhost/potato.lomt` 头上写的那几条边界。
 REFUSED = {
-    "ahci.lomt": "`use`",
-    "all_loment.lomt": "`use`",
-    "allocator.lomt": "`use`",
-    "demo.lomt": "`use`",
-    "fuc_node.lomt": "`use`",
-    "lumtui_demo.lomt": "`use`",
+    "demo.lomt": "L0 布局",     # `use "lom/fujr.lom"` —— `layouts` 要读 L0, 自举侧不装载
+    "all_loment.lomt": "自写的泛型形参",
     "native_gen.lomt": "自写的泛型形参",
     "tour.lomt": "自写的泛型形参",
     "native_res.lomt": "用了泛型类型",
-    "native_trait.lomt": "trait/impl",
 }
 
 #: 连**检查**都还没过的（与这一格无关，但必须有一格，否则"没做决定"那条判据会把它当成漏网）。
@@ -93,6 +96,15 @@ EXTRA_COVERED = (
     "loment/selfhost/ir_mem.lomt",
     "loment/selfhost/ir_for.lomt",
     "loment/tools/lomsyscalls.lomt",
+    # ---- 带依赖的库与工具（`imports` 那一格在真实规模上的样子）
+    "lompi/store/host/0.1.0/fs.lomt",       # 一个依赖
+    "lompi/store/std/0.1.0/text.lomt",      # 两个依赖 —— `imports` 的顺序要按依赖序
+    "loment/tools/lomcli.lomt",             # 三个依赖、31 KB 的对象（这一格最大的语料）
+    "loment/lib/lumtui.lomt",               # 11 KB、一大批 const 与 struct
+    # `addin` 拉进来的开关设定：这一份是**仓库级 sweep 抓出来的**——
+    # 参考实现走 `load_unit`（带开关预扫）时 `switches` 里有 addin 那条定义，
+    # 而直接 `load()` 只有根自己那份。它钉住"这一格是**整个程序**的表"。
+    "loment/examples/addin/main.lomt",
 )
 
 #: 语料之外单独点的拒绝轴：`comefor` 与外部代码块都由**驱动器**拒（那不是这一格的判断，
@@ -130,9 +142,19 @@ def _run(stage1: Path, rel: str) -> subprocess.CompletedProcess:
 
 
 def _want(rel: str) -> str:
-    p = ROOT / rel
-    mod = lomentc.load(p)
-    return lomentc.emit_potato(mod, ROOT, [])
+    """参考实现给这份源发的对象 —— **走 CLI 那一个入口**（`lomentc.load_unit`）。
+
+    两处不这么走就会**算的是另一件事**：
+
+    * `load_unit` 里带**开关预扫**（`prescan_switches`）。直接 `load()` 的话
+      `mod.switches` 只有**根自己那份**，而 `addin` 拉进来的开关设定不在里面 ——
+      `loment/ examples/addin/main.lomt` 就是这么被扫出来的（参考 `[]`、
+      自举侧有那条定义，两边"都算出了对象"却不是一个）。
+    * `lom_root` 是 `--lom-root` 的默认值（**仓根**，不是 `loment/`）：`use "lom/fujr.lom"`
+      那种 L0 布局是相对仓根找的，传错了会让 `layouts` 那一格静静地变成空表。
+    """
+    mod, deps = lomentc.load_unit(ROOT / rel, ROOT)
+    return lomentc.emit_potato(mod, ROOT, deps)
 
 
 @test
