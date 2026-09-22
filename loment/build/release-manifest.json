@@ -1583,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "630a99137bf7da11369726ce21d97a0d05de287889f931399f215a3ddf112a05"
+   "sha256": "3b39502b74aeb77785c4d05151d585964401316d0154d61066fa01390fa4adee"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1872,6 +1872,10 @@
   {
    "path": "docs/200-lomelf-table-caps.md",
    "sha256": "7957c649b22973372fde4cd82ff2145cff074c53424ac69a7ccba84aa2c912a2"
+  },
+  {
+   "path": "docs/202-loment-014-release-gate.md",
+   "sha256": "1a59c8f33eb8998881ec83c67c41b435086d428f5cd27fa3af93a6578d7a4735"
   },
   {
    "path": "docs/manual/index.md",
