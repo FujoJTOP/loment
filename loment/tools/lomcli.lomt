@@ -1442,7 +1442,7 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "str_len", "str_len(s: str) -> u32   byte length");
     termrow(mem, 1, "str_byte", "str_byte(s: str, i: u32) -> u32   the i-th byte");
     termrow(mem, 1, "str_eq", "str_eq(a: str, b: str) -> bool   content comparison");
-    termrow(mem, 1, "str_cat", "str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
+    termrow(mem, 1, "str_concat", " str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
     termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
     termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
     termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
