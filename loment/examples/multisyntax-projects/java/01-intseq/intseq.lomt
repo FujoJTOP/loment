@@ -1,0 +1,326 @@
+choose write grammar java
+
+/*
+ * intseq.lomt —— 用 **Java 语法**写的 Loment 模块（docs/188 的 `choose write grammar`）。
+ *
+ * 后缀 `.lomt` 说的是"这是 Loment 的文件"，`choose write grammar java` 说的是"用 Java 的
+ * 拼法读它"。语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**。
+ *
+ * 这一份的整份是一个 `class` 外壳 —— 那一层会被翻译器**抹成等长空白**（行号不动），
+ * 里面的 `static` 方法于是成了顶层函数。类名 `IntSeq` 在这个语境里只是外壳的名字。
+ *
+ * 它是"整数序列与数论"的一个工具箱：每个方法钉住一类写法（`while`/`for`、嵌套循环、
+ * 递归、提前 `return`、位运算、跨方法调用），`entry()` 把它们的结果**逐项相加**后取模
+ * 成一个数交给宿主。**每一步都参与**，所以任一算法错了退出码就变。
+ *
+ * 子集画的线（写作时避开的东西，见 README）：
+ *   * **无字段/全局量** —— 全部用局部量；连 `static final` 常量都省了。
+ *   * **无数组** —— 累积量一律用标量（除法/取余拆位、双累加器交换）。
+ *   * **无 `switch` / `break` / `continue`** —— 分支一律 `if` / `else if` / `else` 链。
+ *   * **无 `~` / `>>>`** —— 按位取反要写成 `v ^ 掩码`；`>>>` 是逻辑右移、本语言的 `>>`
+ *     是算术的，所以只用 `>>`（两边一致）。
+ *   * **无字符串** —— 本语言没有字符串值。
+ *
+ * 整数**不许溢出**：Java 与 Loment 都是 32 位回绕，万一一处溢出，两边虽仍一致，
+ * 但"数学上应为多少"就对不上了（C 那门踩过，见上级 README）。所以每个中间量都
+ * 控制在 `2^31-1` 以内，`isqrt` / `isPrime` 用**除法**而不是乘法探测上界。
+ */
+
+public class IntSeq {
+
+    /**
+     * 辗转相除：`while` 里改形参，两个变量互相赋值。
+     * 钉住"形参可写"与"同一函数里的交换"。
+     */
+    public static int gcd(int a, int b) {
+        while (b != 0) {
+            int t = a % b;
+            a = b;
+            b = t;
+        }
+        return a;
+    }
+
+    /**
+     * 最小公倍数：**跨方法调用** gcd，先除后乘以免中间量过大。
+     */
+    public static int lcm(int a, int b) {
+        return a / gcd(a, b) * b;
+    }
+
+    /**
+     * 整数平方根：二分搜索：`while` + `if`/`else`。
+     *
+     * 上界收法用 `mid = (lo + hi + 1) / 2` 才不卡死；
+     * **探测式写 `mid * mid <= n` 会溢出**（n 过 8.6 万，首个 `mid` 就让乘积超出 32 位）——
+     * 改成 `mid <= n / mid`：**除法不溢出**，两边逐位相同。这是学 C 那门踩坑的成果。
+     */
+    public static int isqrt(int n) {
+        int lo = 0;
+        int hi = n;
+        while (lo < hi) {
+            int mid = (lo + hi + 1) / 2;
+            if (mid <= n / mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return lo;
+    }
+
+    /**
+     * 模幂：**递归 + 平方**，两层提前 `return`。逐位吃指数。
+     * 中间量 `base * (…%mod)` 与 `half * half` 都小于 `mod*mod`，故 `mod` 取 1000 时无溢出。
+     */
+    public static int powMod(int base, int exp, int mod) {
+        if (exp == 0) {
+            return 1 % mod;
+        }
+        if (exp % 2 == 1) {
+            return (base * powMod(base, exp - 1, mod)) % mod;
+        }
+        int half = powMod(base, exp / 2, mod);
+        return (half * half) % mod;
+    }
+
+    /**
+     * 斐波那契：`for` 循环 + **双累加器交换**（子集无数组，只好这样滚）。
+     * 返回 `fib(n)`，这里 `fib(0) = 0`、`fib(1) = 1`。
+     */
+    public static int fib(int n) {
+        int a = 0;
+        int b = 1;
+        for (int i = 0; i < n; i = i + 1) {
+            int t = a + b;
+            a = b;
+            b = t;
+        }
+        return a;
+    }
+
+    /**
+     * 阶乘：**单函数自递归**，底部提前 `return`。
+     */
+    public static int factorial(int n) {
+        if (n <= 1) {
+            return 1;
+        }
+        return n * factorial(n - 1);
+    }
+
+    /**
+     * 二项式系数 C(n, k)：`for` 循环，**改形参** `k`（对称化简）后逐项乘除。
+     * 每一步 `r * (n - k + i) / i` 都整除，故结果精确、且中间量远小于 32 位上限。
+     */
+    public static int binomial(int n, int k) {
+        if (k < 0 || k > n) {
+            return 0;
+        }
+        if (k > n - k) {
+            k = n - k;
+        }
+        int r = 1;
+        for (int i = 1; i <= k; i = i + 1) {
+            r = r * (n - k + i) / i;
+        }
+        return r;
+    }
+
+    /**
+     * 数位和：`while` + 取余整除。
+     */
+    public static int digitSum(int n) {
+        int x = n;
+        int s = 0;
+        while (x > 0) {
+            s = s + x % 10;
+            x = x / 10;
+        }
+        return s;
+    }
+
+    /**
+     * 数根：反复求数位和直到落进 `0..9`。
+     * 这是**真·嵌套循环**：外层 `while` 重算，内层 `while` 数位和。
+     */
+    public static int digitRoot(int n) {
+        int x = n;
+        while (x >= 10) {
+            int s = 0;
+            int y = x;
+            while (y > 0) {
+                s = s + y % 10;
+                y = y / 10;
+            }
+            x = s;
+        }
+        return x;
+    }
+
+    /**
+     * 反转整数：累积乘法（子集无数组、无字符串）。
+     */
+    public static int reverseInt(int n) {
+        int x = n;
+        int r = 0;
+        while (x > 0) {
+            r = r * 10 + x % 10;
+            x = x / 10;
+        }
+        return r;
+    }
+
+    /**
+     * 回文数判定：**跨方法调用** reverseInt + 提前 `return`；返回 `1`/`0`（当整数用）。
+     */
+    public static int isPalindrome(int n) {
+        if (n < 0) {
+            return 0;
+        }
+        if (reverseInt(n) == n) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * 置位数：Kernighan 那一招 `n & (n - 1)` 每次抹掉最低的那个 1。
+     */
+    public static int popcount(int v) {
+        int n = v;
+        int c = 0;
+        while (n != 0) {
+            n = n & (n - 1);
+            c = c + 1;
+        }
+        return c;
+    }
+
+    /**
+     * 尾零个数：**位运算与循环条件混用**。`40 = 0b101000` → 3。
+     * 注意 `(n & 1) == 0` 要加括号：Java 里 `==` 比 `&` 结合得紧。
+     */
+    public static int trailingZeros(int v) {
+        if (v == 0) {
+            return 32;
+        }
+        int n = v;
+        int c = 0;
+        while ((n & 1) == 0) {
+            n = n >> 1;
+            c = c + 1;
+        }
+        return c;
+    }
+
+    /**
+     * 格雷码：`n ^ (n >> 1)` —— 纯位运算表达式，不循环。`>>` 是算术右移，两边一致。
+     */
+    public static int gray(int n) {
+        return n ^ (n >> 1);
+    }
+
+    /**
+     * 素数判定（试除法）：提前 `return`；上界用 `d <= n / d`（**除法不溢出**）。
+     */
+    public static int isPrime(int n) {
+        if (n < 2) {
+            return 0;
+        }
+        int d = 2;
+        while (d <= n / d) {
+            if (n % d == 0) {
+                return 0;
+            }
+            d = d + 1;
+        }
+        return 1;
+    }
+
+    /**
+     * 素数计数：`for` 外层 + **跨方法调用** isPrime；把 `1`/`0` 当整数累加。
+     */
+    public static int countPrimes(int limit) {
+        int c = 0;
+        for (int i = 2; i <= limit; i = i + 1) {
+            c = c + isPrime(i);
+        }
+        return c;
+    }
+
+    /**
+     * 互素有序对数：统计 `[1, limit]×[1, limit]` 里 `gcd(i, j) == 1` 的对数。
+     * 这是这份语料里**唯一一处显式的双层嵌套循环**（外层 `i`、内层 `j`），
+     * 内层每次调 gcd —— 嵌套循环、跨方法调用、计数累加三样一起钉。
+     */
+    public static int coprimePairs(int limit) {
+        int c = 0;
+        for (int i = 1; i <= limit; i = i + 1) {
+            for (int j = 1; j <= limit; j = j + 1) {
+                if (gcd(i, j) == 1) {
+                    c = c + 1;
+                }
+            }
+        }
+        return c;
+    }
+
+    /**
+     * 考拉兹步数：单函数**自递归**，两条分支各一次调用。
+     */
+    public static int collatzSteps(int n) {
+        if (n <= 1) {
+            return 0;
+        }
+        if (n % 2 == 0) {
+            return 1 + collatzSteps(n / 2);
+        }
+        return 1 + collatzSteps(3 * n + 1);
+    }
+
+    /**
+     * 三角数：`1 + 2 + … + n`，用公式而不是循环（钉"纯表达式 + 除法与乘法结合"）。
+     */
+    public static int triangular(int n) {
+        return n * (n + 1) / 2;
+    }
+
+    /**
+     * 两个数之间的"距离"：异或后数 1 —— 两个函数之间的一次调用。
+     */
+    public static int hamming(int a, int b) {
+        return popcount(a ^ b);
+    }
+
+    /**
+     * 宿主调的入口：把上面每个方法的结果**逐项相加**后取模成一个数。
+     *
+     * 每一项都参与 —— 任一算法错了，和都会变、退出码也就跟着变。这是判据的前提，
+     * 不是顺手写的。期望值的推导见 README。
+     */
+    public static int entry() {
+        int g = gcd(1071, 462);          /* 21 */
+        int l = lcm(21, 6);              /* 42 */
+        int s = isqrt(1000000);          /* 1000 */
+        int pm = powMod(7, 13, 1000);    /* 407 */
+        int fb = fib(20);                /* 6765 */
+        int fa = factorial(10);          /* 3628800 */
+        int bc = binomial(20, 10);       /* 184756 */
+        int ds = digitSum(987654);       /* 39 */
+        int dr = digitRoot(987654);      /* 3 */
+        int rv = reverseInt(12345);      /* 54321 */
+        int pa = isPalindrome(12321);    /* 1 */
+        int pc = popcount(255);          /* 8 */
+        int tz = trailingZeros(40);      /* 3 */
+        int gr = gray(10);               /* 15 */
+        int pr = countPrimes(100);       /* 25 */
+        int cp = coprimePairs(10);       /* 63 */
+        int co = collatzSteps(27);       /* 111 */
+        int tr = triangular(20);         /* 210 */
+        int hm = hamming(7, 1);          /* 2 */
+        int total = g + l + s + pm + fb + fa + bc + ds + dr + rv + pa
+                + pc + tz + gr + pr + cp + co + tr + hm;   /* 3876592 */
+        return total % 256;                                  /* 240 */
+    }
+}

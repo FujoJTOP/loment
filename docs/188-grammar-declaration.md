@@ -667,6 +667,69 @@ genesis 汇编 -> rc=139 (段错误)        clang 汇编 -> rc=0, 产物 3172 B 
 **顺序**（定死了，别反）：先在 `lomentc` 定下"前门怎么分派"，再照到自举侧 ——
 反过来做，种子会先被一条还没定型的规则位移一次。
 
+## 7.3 `grammar rust` 是**基础语法的另一种拼法**（2026-09-22）
+
+用户 2026-09-22 的裁定，一句话：
+
+> **rust 语法是 Loment 基础语法，不需要翻译**
+
+### 7.3.1 改之前：一个**登记在锁里、却没有任何一份源编得过去**的名字
+
+`rust` 在**两处**都登记着 —— 出厂锁 `GRAMMAR_ALIASES` 的右列（== `potato.GRAMMARS`）
+与 `LANGS`。于是**源码里能写、对象也合法**。可 `lomt_from._TOOLS` 里**没有 rust 这一门**
+（`from_rust` 是 §7.1 之外的另一条路：`docs/179` 抽接口，**只记声明、不抓正文**）。后果：
+
+| 步骤 | 发生什么 |
+|---|---|
+| 前门把这份源交给 `from_rust` | 对象里一个 `body` 都没有 |
+| `emit_lomt(impl=True)` | 逐个跳过每一个函数 |
+| 前门 | `NotRepresentable` —— **文件被拒** |
+
+而那句跳过理由**还指反了**：它劝人「带正文的加 `--impl` 翻出来」，而前门**已经**用的
+`impl=True`（`LomtError` 那一侧也一样：`lomentc` 上根本没有 `--impl` 这个开关）。
+一条登记在锁里的写法，没有任何一份源编得过去，报的话还指反 —— 两处都补了（见下）。
+
+### 7.3.2 改了什么
+
+| 落点 | 改了什么 |
+|---|---|
+| `potato_from.NATIVE_GRAMMARS` | **新增**：读法就是原生语法的那些规范名（`loment` / `rust`）。`front_door` 的**声明**那一支按它分派 |
+| `lomt_from.emit_lomt` 的跳过理由 | **分两种情形说**：已经是 `--impl` 那条路时，话改成"这份对象是抽接口那条路读的，它只记声明、不抓正文（`docs/179` §2）"—— 不再劝人加一个已经加上的开关 |
+| `loment/selfhost/driver.lomt` 的 `strip_grammar_decl` | **收第二种拼法**：`nat = streq(…, "loment") + streq(…, "rust")`。自举侧收它的**理由与收 `loment` 是同一条**：抹掉那一行交给原生 lexer/parser，**没有翻译器参与** —— 所以 §7.2 那句"别的拼法要等翻译器的 Loment 孪生"**对它不成立** |
+| `loment/selfhost/grammar_decl/rust.lomt` | **新增语料**：与 `plain` / `decl` **同一个模块名**，所以三份产物必须**逐字节相同** |
+| `loment_grammar_test`（+1 条） | 声明为 rust == 没写声明（同一条路、字节级）；**命令行上真编出 IR**；`.rs` 那条接口路**没被一起改掉**；`NATIVE_GRAMMARS ⊆ potato.GRAMMARS` |
+| `loment_p8_test` M87 | 原生拼法**两个都验**（`loment` / `rust`），产物都与不带声明那份逐字节相同 |
+
+### 7.3.3 一处**刻意保留的不对称**：声明 vs 后缀
+
+**后缀 `.rs` 与 `--lang rust` 照旧走 `from_rust`**（抽接口那条路 —— `kernel/src/*.rs`
+与 `lompotc --rust` 那条孪生判据都靠它）。两者不冲突，因为**分工不同**（§2 自己那条）：
+
+* **后缀**说"这是**哪个语言的文件**" → `.rs` 是 Rust 的文件 → 抽它的接口；
+* **声明**说"这份 **Loment** 用哪种**写法**" → `grammar rust` 是基础语法的拼法 → 原生读。
+
+判据把这一条**也钉住了**（`test_declared_rust_is_the_base_syntax_not_a_foreign_module`
+第 3 件）：少了它，下一次"顺手统一"就会把接口那条路悄悄换成原生读法，而那是
+`lomt_audit` / `fuai_contract_check` 的对照面。
+
+### 7.3.4 六门**各一个大型项目**（语料 `loment/examples/multisyntax-projects/`）
+
+同一轮里落了六门表层语法各一个**带正文、能真跑**的项目 —— 与 §8 那批"抽接口"的语料
+是两件事（那批只测"抽得对不对"，这批测"**算得对不对**"）。判据
+`loment_multisyntax_projects_test`，问的是**三方相等**：
+
+```
+那份源 ──真实工具链（clang/g++/javac/go/CPython/rustc）──> rc_control ─┐
+那份源 ──前门翻成 Loment──> lomelf ──> ELF ──WSL 跑──> rc_loment ──────┼─ 三者相等
+项目 README 里独立推出来的期望值（`EXPECTED: <数>`）───────────────────┘
+```
+
+**少了哪一方都有一种错穿不过去**，而且**实测过一次三方不一致**：`c/01-algo` 的
+`isqrt` 写了 `mid * mid <= n`，n 过 8.6 万时有符号溢出（C 里是 UB）——
+`clang -O1` 给 1000、本语言给 458753（**回绕**语义）、独立推的又是 1000。
+**三方里有两方相等不能说明什么**；改成语料里不留溢出（`mid <= n / mid`）之后三方一致。
+这一条与"每门配一个独立推出来的期望值"是同一件事的两面。
+
 ## 8. 未定 / 待复核
 
 - **`choose write grammar` 的编译器那一半落了**（§7.2，`loment_grammar_test` 14/14）——

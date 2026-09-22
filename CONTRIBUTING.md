@@ -104,6 +104,11 @@ Either path in [QUICKSTART.md](QUICKSTART.md) works: the Python tools in `tools/
 the packaged toolchain on `PATH`, `loment version` tells you which commit you are on — quote that
 in anything you report.
 
+**LLVM 19 or newer is required.** The IR the toolchain emits uses the `#dbg_declare` record form,
+which older clangs do not know; on clang 18 the `--debug` criteria fail with
+`error: expected instruction opcode`, and nothing is wrong with your change. (Ubuntu 24.04 ships
+clang 18, which is why the CI workflow installs LLVM 19 explicitly.)
+
 Before writing much Loment, read `.claude/skills/loment/SKILL.md`. It is the language guide —
 syntax, builtins, the E001–E023 codes, and the traps that cost the most time — and it ships with
 the toolchain (`loment skill --print`).

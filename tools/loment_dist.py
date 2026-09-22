@@ -180,9 +180,9 @@ case "${1:-help}" in
         cat "$share/version" ;;
     ir|check)
         mode=$1; shift
-    # The colour switch is accepted here and forwarded to the RENDERER only - the
-    # driver never sees it. Position is free (before or after the file), same as
-    # `loment-cli`'s own --no-color (`docs/169` has a case pinning that).
+        # The colour switch is accepted here and forwarded to the RENDERER only - the
+        # driver never sees it. Position is free (before or after the file), same as
+        # `loment-cli`'s own --no-color (`docs/169` has a case pinning that).
         #
         # `--short` / `--json` (docs/182 sec 15) take the same route for the same reason:
         # they are RENDERER output modes, so the driver must not see them. Without this
@@ -204,7 +204,7 @@ case "${1:-help}" in
                 --max=*) om="$om $1"; shift ;;
                 -*) echo "loment: unknown option $1" >&2; exit 2 ;;
                 *) [ -z "$src" ] || {
-                       echo "loment: check accepts exactly one input file" >&2
+                       echo "loment: $mode accepts exactly one input file" >&2
                        exit 2
                    }
                    src=$1; shift ;;
@@ -635,7 +635,10 @@ if defined csrc goto scan_extra
 set "csrc=%~1"
 exit /b 0
 :scan_extra
-echo loment: check accepts exactly one input file 1>&2
+rem Say the command the user actually typed, the same way bash interpolates `$mode`
+rem (`ir` shares this whole scan with `check`, so a fixed word here would be wrong for one
+rem of them). cmode is set by :ir / :check before :compile_only.
+if "%cmode%"=="i" (echo loment: ir accepts exactly one input file 1>&2) else (echo loment: check accepts exactly one input file 1>&2)
 set "cbad=1"
 exit /b 0
 :scan_bad

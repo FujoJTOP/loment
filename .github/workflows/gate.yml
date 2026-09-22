@@ -52,22 +52,31 @@ jobs:
       # 装门禁要的外部命令。名单是实测出来的
       # （`grep -rho 'which("...")' tools/*.py`）: clang 45 处，还有
       # llvm-objdump/nm/ar、qemu-system-x86_64/qemu-aarch64、rustc、java、go、vim、node。
-      # 第一轮的环境自述证明这套已经够（只缺不需要的 nvim），所以后面再红就不是环境了。
+      # 第一轮的环境自述证明**命令清单**已经够（只缺不需要的 nvim）—— 但**版本**不够:
+      # 见下面 LLVM 那一段。
       - name: 装工具链
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            clang lld llvm \
             qemu-system-x86 qemu-user \
             golang-go default-jdk \
             nodejs npm vim
-          # Ubuntu 上 llvm-* 常只有带版本号的名字，而门禁按不带版本号的名字找。
-          for t in llvm-objdump llvm-nm llvm-ar; do
-            if ! command -v "$t" >/dev/null 2>&1; then
-              s="$(ls /usr/bin/$t-* 2>/dev/null | sort -V | tail -1 || true)"
-              if [ -n "$s" ]; then sudo ln -sf "$s" "/usr/bin/$t"; fi
+          # 仓里发出的 IR 用 `#dbg_declare` —— 那是 **LLVM 19** 起的调试记录语法。
+          # ubuntu-24.04 自带的 clang 是 **18**，于是在 `--debug` 那几条判据上报
+          # `error: expected instruction opcode`（`loment_p7_test` 的符号化器、
+          # `loment_tools_test` 的 m59 三条）。本机能过是因为本机 LLVM 是 22。
+          # 版本下限写在 CONTRIBUTING「Getting a toolchain」。
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          # 让不带版本号的名字指向 19（/usr/local/bin 在 PATH 里排在 /usr/bin 前面）。
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
+            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
+              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
             fi
           done
+          clang --version | head -1
+          llvm-objdump --version | head -1
 
       # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是这个 runner 上没有那个命令。
       - name: 环境自述
@@ -75,6 +84,8 @@ jobs:
           echo "runner: $(uname -a)"
           echo "python: $(python3 -V)"
           echo "cpu: $(nproc)"
+          echo "clang: $(clang --version | head -1)"
+          echo "llvm-objdump: $(llvm-objdump --version | head -1)"
           for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
                    qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
                    python3 git sh; do
