@@ -368,7 +368,11 @@ rem accepts both too. %~2 alone would break the second spelling.
 set "csrc="
 set "cnc="
 set "com="
+set "cbad="
 for %%A in (%*) do call :scan_arg "%%~A"
+rem :scan_arg runs inside a `for ... do call`, so it cannot end the script itself: it
+rem records the bad option and this is where the run stops with the same status bash uses.
+if defined cbad exit /b 2
 if not defined csrc goto usage
 set "dtmp=%TEMP%\loment-d%RANDOM%%RANDOM%"
 mkdir "%dtmp%" >nul 2>nul
@@ -615,7 +619,18 @@ if /I "%~1"=="--json" goto scan_om
 if /I "%~1"=="--max" goto scan_max
 set "ss=%~1"
 if "%ss:~0,6%"=="--max=" goto scan_om
+rem An option that is not one of the above is REJECTED, not taken for the source file.
+rem This path scans the WHOLE command line (both `check FILE --no-color` and
+rem `check --no-color FILE` have to work), so the leading dash is the only thing that
+rem tells "an option I do not know" apart from "the source file" -- and an option that is
+rem silently ignored is the same lesson :barg_loop records for `--link` below, and what
+rem bash's two scans already do (`*) unknown option ... exit 2`).
+if "%ss:~0,1%"=="-" goto scan_bad
 if not defined csrc set "csrc=%~1"
+exit /b 0
+:scan_bad
+echo loment: unknown option %~1 1>&2
+set "cbad=1"
 exit /b 0
 :scan_nc
 set "cnc=--no-color"

@@ -738,6 +738,32 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
 
 
+@test
+def test_both_launchers_reject_unknown_options():
+    """未知开关必须**报错并退 2** —— 不能当成源文件，也不能静默忽略。
+
+    这一课仓库已经学过一次：`:barg_loop` 那儿留着注释说，静默丢掉 `--link` 曾让链接器报出
+    `undefined label: c_add`，把用户指到错的地方。但那条纪律只落在 **cmd 的 build/run 路**
+    上：cmd 的 `:scan_arg`（check/ir 路）与两条扫描都**没有判据钉着**，于是
+    `loment check x.lomt --diag-out p` 在 Windows 上被无声吞掉（issue #13 报的就是它；
+    bash 侧同一形状会 `unknown option` + 退 2）。四条路这里一起钉。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    # bash: 两条参数扫描各有一处拒绝 (check/ir 一处、build/run 一处)
+    assert sh.count('*) echo "loment: unknown option $1" >&2; exit 2 ;;') == 2,         "bash 启动器不是两条扫描都拒绝未知开关"
+    # cmd: build/run 的 :barg_loop 与 check/ir 的 :scan_arg 各有一处
+    assert cmd.count('echo loment: unknown option %~1 1>&2') == 2,         "cmd 启动器不是两条扫描都拒绝未知开关"
+    assert ':scan_bad' in cmd, "cmd: check/ir 路缺拒绝的落点"
+    # 限定"以 - 开头"：check/ir 那路扫的是**整条命令行**，源文件名也在里面，
+    # 不限定的话要么漏掉 --diag-out，要么把 x.lomt 当成未知开关。
+    assert 'if "%ss:~0,1%"=="-" goto scan_bad' in cmd, "cmd: 拒绝没有限定在 - 开头的词"
+    # `for ... do call` 里 `exit /b` 出不了脚本，所以要为它留一个停下的地方
+    assert 'set "cbad="' in cmd and "if defined cbad exit /b 2" in cmd,         "cmd: :scan_arg 的拒绝没有从 :compile_only 传出去"
+
+
 # ---------------------------------------------------------------- Loment 版（S1 第十二格）
 
 _TW = f"/tmp/loment-cli-{os.getpid()}-"
