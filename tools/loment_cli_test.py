@@ -777,14 +777,23 @@ def test_both_launchers_reject_unknown_options():
 
 @test
 def test_both_launchers_reject_extra_check_files():
-    """`check` must not silently compile only the first of multiple input files."""
+    """`check` must not silently compile only the first of multiple input files.
+
+    **静态**那一半 —— bash 侧的**行为**由 `loment_err_test` 的
+    `test_launcher_refuses_a_second_input_file` 端到端验（真启动器 + 桩驱动，所以
+    "驱动有没有被起"直接看得到）。两边分着写是这仓的老规矩：cmd 一个包都造不出来
+    （`loment_dist_test` 只验它存在、不含 wsl、不跑它），所以它只有静态那半。
+
+    拒绝里说的是**用户敲的那个命令名**（`ir` 与 `check` 共用这段扫描）：bash 走
+    `$mode`，cmd 走 `cmode`。
+    """
     sys.path.insert(0, str(ROOT / "tools"))
     import loment_dist  # noqa: E402
     sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
 
     # Bash parses the file and renderer switches in one pass, so both file positions remain valid.
     assert 'src=' in sh
-    assert 'check accepts exactly one input file' in sh
+    assert '$mode accepts exactly one input file' in sh
     assert '*) [ -z "$src" ] || {' in sh
     assert '-*) echo "loment: unknown option $1" >&2; exit 2 ;;' in sh
     assert '[ -n "$src" ] || { usage >&2; exit 2; }' in sh
@@ -792,7 +801,9 @@ def test_both_launchers_reject_extra_check_files():
     # The batch launcher scans the complete command line and must reject a second positional word.
     assert 'if defined csrc goto scan_extra' in cmd
     assert ':scan_extra' in cmd
+    assert 'echo loment: ir accepts exactly one input file 1>&2' in cmd
     assert 'echo loment: check accepts exactly one input file 1>&2' in cmd
+    assert 'if "%cmode%"=="i"' in cmd, "cmd: 拒绝里没按 cmode 说出用户敲的那个命令名"
     assert 'if defined cbad exit /b 2' in cmd
 
 
