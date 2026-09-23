@@ -692,15 +692,17 @@ class Module:
     #: 发出一条没有函数体的 define (非法 IR), 所以要分开。
     externs: list[Func] = field(default_factory=list)
     excluded: list[str] = field(default_factory=list)
-    #: 项目模式 (`choose no_std` / `choose std`, docs/143 §3.2)。**不写 = `std`**,
-    #: 所以 None 就是默认。它声明的是**整个程序**的运行模式, 不是某个模块的 ——
-    #: 见 `check()` 里那条"依赖不许 choose"。
+    #: **核心模式**的取值，按**维**记（`docs/175` §3.0 / §3.4）：`{"mode": "no_std"}`
+    #: 或 `{"gc": "gc_auto"}`。某一维不写 = 那一维的默认档（`CORE_DEFAULTS`）——
+    #: 所以"缺这一维"与"显式写了默认值"**语义上一样**，但**报错上不一样**：
+    #: 同一维写两次要报（在 `check()` 里，语法层只收集）。
     #:
-    #: **它是核心语法的硬写法**（用户 2026-09-17）: `std`/`no_std` 不走下面那套可定义的
-    #: 开关机制, 保有自己的规则（`docs/182` §1.3）。
-    choose: str | None = None
-    #: 每个核心模式声明的行号。**留成列表而不是只留最后一个**: "两个值打架"要能报出位置。
-    choose_lines: list[int] = field(default_factory=list)
+    #: **它是核心语法的硬写法**（用户 2026-09-17）：这几维都不走下面那套**可定义**的
+    #: 开关机制，保有自己的规则（`docs/182` §1.3）。
+    chooses: dict[str, str] = field(default_factory=dict)
+    #: 每一维**写在第几行**（`(维, 取值, 行)`）。**留成列表而不是只留最后一个**：
+    #: "这一维写了两次"要能报出第一次在哪一行、写的是什么。
+    choose_lines: list[tuple[str, str, int]] = field(default_factory=list)
     #: **开关表**（`docs/182` §1）: `set choose <名字> {…}` 定义, `choose <名字>` /
     #: `choose close <名字>` 取值。由 `_apply_switches` 在**词法流上**落定后挂上来 ——
     #: 开关是**编译期**的事, 它的行不进 AST（关着的那段体连 token 都不进 parser）。
@@ -758,6 +760,44 @@ MAX_ADDIN = 300
 #: 是同一个形状 —— 那次修的是**条数**，**深度**没跟着修。这一轮补齐：**两边同值，
 #: 超限一律报错**。实测仓库里最深是 7（`lompi/lpi_test.lomt`），离静默截断只差一个 `use`。
 MAXDEPTH = 8
+
+
+#: **核心模式的维**（`docs/175` §3.0 / §3.4）。它与可定义的开关**不是一类东西**
+#: （`docs/182` §1.3）：核心模式是**核心语法的硬写法**、由编译器检查、进 Potato；
+#: 开关是用户可定义的，几万个也行。
+#:
+#: 所有维共用一条规矩：**每一维整个程序恰好一个取值，而且只有根单元能定**。
+#: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
+#: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
+#:
+#: 今天两维：
+#:   * `mode` —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
+#:   * `gc`   —— `gc_manual` / `gc_auto`：回收由程序做还是由运行期做（`docs/175` §3.4）。
+CORE_DIMS: dict[str, tuple[str, ...]] = {
+    "mode": ("std", "no_std"),
+    "gc": ("gc_manual", "gc_auto"),
+}
+#: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
+CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
+#: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
+CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
+#: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
+CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual"}
+#: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
+#: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
+CORE_DIM_ZH = {
+    "mode": "运行模式（`std` / `no_std`）",
+    "gc": "回收档（`gc_manual` / `gc_auto`）",
+}
+#: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
+#: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
+CORE_CONFLICTS = {
+    ("no_std", "gc_auto"): (
+        "自动回收要一个**运行期**，而 `no_std` 的定义是"
+        "「只能用核那一层」—— 两者放在一起等于要求**核里带一个收集器**，"
+        "那不是「核保持小」。这一档**先划窄**：真有人要，再按 `docs/175` §4 那条"
+        "「能独立校验」的路子把它开成一个**受约束的子集**"),
+}
 
 
 class SwitchTable:
@@ -831,7 +871,7 @@ def _collect_switches(toks: list, tbl: SwitchTable) -> None:
                         tbl.ndup = tbl.ndup + 1
                     else:
                         tbl.vals[nn.val] = (False, t.line)
-            elif nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+            elif nxt is not None and nxt.kind == "ident" and nxt.val not in CORE_WORDS:
                 if nxt.val in tbl.vals:
                     tbl.dup.append((nxt.val, t.line, tbl.vals[nxt.val][1]))
                     tbl.ndup = tbl.ndup + 1
@@ -875,7 +915,7 @@ def _reject_nested_switch_decls(toks: list) -> None:
                 raise LomError(t.line, t.col, "开关声明不许写在另一个开关体里"
                                                "（`set choose`）—— 预扫看不见它，"
                                                "它算不算数取决于外层开关开没开")
-            if t.val == "choose" and is_ident and nxt.val not in ("std", "no_std"):
+            if t.val == "choose" and is_ident and nxt.val not in CORE_WORDS:
                 raise LomError(t.line, t.col, "开关取值不许写在另一个开关体里"
                                                "（`choose`）—— 同上")
             if t.val == "addin" and is_ident:
@@ -998,7 +1038,7 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
             if nxt is not None and nxt.kind == "ident" and nxt.val == "close":
                 i = i + 3                        # 吞掉 `choose close <名字>`
                 continue
-            if nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+            if nxt is not None and nxt.kind == "ident" and nxt.val not in CORE_WORDS:
                 i = i + 2                        # 吞掉 `choose <名字>`
                 continue
         if depth == 0 and t.kind == "ident" and t.val == "addin":
@@ -1177,14 +1217,17 @@ class Parser:
                 lang = self.next().val
                 r = self.next()
                 mod.ext_blocks.append(ExtBlock(lang, r.val, r.line))
-            elif t.val == "choose":  # docs/143 §3.2: 项目模式
+            elif t.val == "choose":  # docs/143 §3.2 + docs/175 §3.4: 核心模式
                 line = t.line
                 self.next()
-                mode = self.expect("ident", None, "（模式名：std 或 no_std）")
+                w = self.expect("ident", None,
+                                "（核心模式的取值：std / no_std / gc_manual / gc_auto）")
                 # **记录每个出现位置, 判定放到 check()** —— 与 `extern` 的重名同一条路数:
                 # 语法层只收集, 规则集中在一处, 两个实现要对齐的也就只有那一处。
-                mod.choose = mode.val
-                mod.choose_lines.append(line)
+                # 值属于**哪一维**由 `CORE_DIM_OF` 查 —— 加一维不必再动这两行。
+                # （非核心的词在 `_apply_switches` 那一趟就被吞掉了, 到不了这里。）
+                mod.chooses[CORE_DIM_OF[w.val]] = w.val
+                mod.choose_lines.append((CORE_DIM_OF[w.val], w.val, line))
             elif t.val == "extern":  # docs/173: 外部函数声明
                 self.next()
                 f = self.parse_fn(extern=True)
@@ -2869,34 +2912,58 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if c.pub:
                 const_scope.setdefault(c.name, c.type)
 
-    # ---- 项目模式 `choose` 与**开关** (docs/143 §3.2 + docs/182 §1)。全部规则在这里 ——
-    # 语法层只收集, 两个实现要对齐的判断就只有这一处。
+    # ---- 核心模式 `choose` 与**开关** (docs/143 §3.2 + docs/182 §1 + docs/175 §3.4)。
+    # 全部规则在这里 —— 语法层只收集, 两个实现要对齐的判断就只有这一处。
     #
-    # **核心模式与开关是两类东西**（`docs/182` §1.3）: `std`/`no_std` 是核心语法的硬写法,
+    # **核心模式与开关是两类东西**（`docs/182` §1.3）: 核心模式是核心语法的硬写法,
     # 开关是 `set choose …` 那套可定义机制。`_apply_switches` 按名字分好, 这里只判规则。
     #
     # 用户 2026-09-17 改: **`choose` 可以出现至少 500 次**（开关天然是几百个）——
-    # 原先那条"`choose` 只能出现一次"**删掉**。它要防的"声明的是整个程序的模式"这件事
-    # 现在由**核心模式**那条管（`std`/`no_std` 仍然只许一个值）。
+    # 原先那条"`choose` 只能出现一次"**删掉**。它要防的"声明的是整个程序"这件事
+    # 现在由**核心模式**那条管。
     # 删掉之后留下的空档由 **同名只许一次** 补上 —— 否则"这个开关到底开没开"没有答案。
-    if len(mod.choose_lines) > 1:
-        errs.append(f"{mod.choose_lines[1]}: 核心模式只能声明一次 "
-                    f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式。"
-                    f"要开关请用 `set choose <名字> {{ … }}`")
+    #
+    # **按维**判"恰好一次"（`docs/175` §3.0）：从 2026-09-23 起核心模式**不止一维**
+    # （`mode` + `gc`），所以"只能声明一次"这条要**逐维**说 —— 两维各一份是合法的，
+    # 同一维写两次（不管是同一个值还是两个值）都没有答案，都要报。
+    per_dim: dict[str, list[tuple[str, int]]] = {}
+    for dim, word, line in mod.choose_lines:
+        per_dim.setdefault(dim, []).append((word, line))
+    for dim, ws in sorted(per_dim.items()):
+        if len(ws) > 1:
+            (w0, l0), (w1, l1) = ws[0], ws[1]
+            errs.append(f"{l1}: 核心模式这一维只能声明一次 —— "
+                        f"{CORE_DIM_ZH[dim]}（第一次在第 {l0} 行，写的是 `{w0}`；"
+                        f"这一行写的是 `{w1}`）。它声明的是**整个程序**的这一维。"
+                        f"要开关请用 `set choose <名字> {{ … }}`")
+    # **互相冲突的取值**（`docs/175` §3.4 ⚠）：`no_std` + `gc_auto` **暂时**报错。
+    # 看的是**生效值**（显式写的，或那一维的默认档）—— 因为冲突说的是"这个程序最后
+    # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
+    # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
+    _eff = dict(CORE_DEFAULTS)
+    _eff.update(mod.chooses)
+    _pair = (_eff["mode"], _eff["gc"])
+    _why = CORE_CONFLICTS.get(_pair)
+    if _why:
+        _ln = next((l for d0, _w, l in mod.choose_lines if d0 == "gc"), 1)
+        errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
             # "库不许"对它**不适用**（`chooseset.lomt` 还常常以 `addin <自己>` 开头）。
-            # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的运行模式，
+            # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的取值，
             # addin 单元里写了就是**静默无效**，必须报出来（静默才是敌人）。
-            if d.choose is not None:
-                errs.append(f"{d.choose_lines[0]}: `addin` 单元不许声明核心模式"
-                            f"（在 `{d.name}` 里）—— `std`/`no_std` 是整个程序的运行模式，"
-                            f"只有根单元能定")
+            if d.chooses:
+                dim0, word0, line0 = d.choose_lines[0]
+                errs.append(f"{line0}: `addin` 单元不许声明核心模式"
+                            f"（在 `{d.name}` 里，`{word0}`）—— "
+                            f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
-        if d.choose is not None:
-            errs.append(f"{d.choose_lines[0]}: 库不许 `choose`（在 `{d.name}` 里）"
-                        f" —— 库该声明**能力需求**, 由项目决定模式")
+        if d.chooses:
+            dim0, word0, line0 = d.choose_lines[0]
+            errs.append(f"{line0}: 库不许 `choose`（在 `{d.name}` 里，`{word0}`）"
+                        f" —— 库该声明**能力需求**, 由项目决定{CORE_DIM_ZH[dim0]}")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
             errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
@@ -3709,7 +3776,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 发（那一档的产出方是它）。加 `boundary` 时才发现 —— v7 让 v6 的 `grammar` 一起
         # 变成必填, 而这里没发它, 编译器的**自检当场就红**。所以这一版把 v6 也接了上来:
         # 前门早就知道答案（`FrontUnit.grammar`），只是没人把它带进来。
-        "potato": "v7",
+        # v8 = v7 + **回收档** `gc`（`docs/175` §3.4）：`gc_manual` / `gc_auto`。
+        # 与 `mode` 同级同形 —— 一个字符串取值、**必填**、只有根单元能定，所以
+        # "这个产物是在哪一档下编的"是**不读源码可判**的。
+        "potato": "v8",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -3720,8 +3790,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
         # 所以对象里永远是显式的两值之一, 不存在"缺这项"的形态。
         # 一个编译单元产出一个对象 (deps 走 `imports`), 所以这里没有"依赖的模式"
-        # 那种歧义: `mod.choose` 就是根单元自己声明的那一个。
-        "mode": mod.choose or "std",
+        # 那种歧义: 根单元自己声明的那一个就是它。
+        "mode": mod.chooses.get("mode", CORE_DEFAULTS["mode"]),
+        # **回收档**（`docs/175` §3.4）：`gc_manual` / `gc_auto`。与 `mode` 同一条纪律 ——
+        # **必填**（删掉它校验器必须红），所以"这个产物放弃了确定性没有"是**可判**的。
+        "gc": mod.chooses.get("gc", CORE_DEFAULTS["gc"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
