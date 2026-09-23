@@ -20,8 +20,10 @@ Python.
 
 ## Status
 
-`0.1.4`. Nothing is published as a package yet — you build the toolchain from a checkout
-([QUICKSTART.md](QUICKSTART.md)).
+`0.1.4`. **Pre-release packages are published** — the
+[Loment 0.1.4 Pre](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4-pre) release carries a
+Linux `tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip. You can
+also build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)).
 
 The toolchain is **self-hosted at run time**: it compiles and runs with no Python and no
 libc. The **development side is not**, and closing that gap is what 0.1.4 is for
