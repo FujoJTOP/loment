@@ -18,19 +18,17 @@
 //
 // ## 边界: 子集之外**点名拒绝**, 绝不静默发错
 //
-// 现在覆盖的是"依赖 + 根 + 预置块"、trait/impl、**泛型的单态化**(M6 函数 + M7 类型)、
-// `layouts`(读 `lom/*.lom` 并解析它的 `record`)、以及全部标量视图那一大片；
-// **还拒**的是**三件事**，各有各的理由：
+// 现在覆盖的是"依赖 + 根 + 预置块"、trait/impl、**泛型的单态化**(M6 函数 + M7 类型，
+// **M6 跑到不动点**)、`layouts`(读 `lom/*.lom` 并解析它的 `record`)、以及全部标量视图
+// 那一大片；**还拒**的是**两件事**，各有各的理由：
 //
 //   1. **外部代码块 / 方言**(`bodies` / `dialects`)—— 由**驱动器**拒: 外部代码块在检查
 //      **之前**就被它拒了; 而方言那一格只有它知道"这次 `comefor` 展开过没有"(走到这里
 //      token 流上那两类词已经没了)。
-//   2. **链式泛型**(泛型函数体里再调泛型函数)—— 参考实现靠 **8 轮迭代**走*实例*的体,
-//      这里只走单元本体一趟, 会把实参类型当成 `T` 造出错的实例名(`pick_T`)。见 `pt_mono_body`。
-//   3. **嵌套泛型实参**(`Outer<Inner<u32>>`)—— **M7 只做一轮**且只收**裸类型名**实参;
+//   2. **嵌套泛型实参**(`Outer<Inner<u32>>`)—— **M7 只做一轮**且只收**裸类型名**实参;
 //      参考实现那 8 轮才削得干净。定不出来就点名拒(`pt_tmap_build`)。
 //
-// **已闭合的两条**（列在这里，免得有人照旧清单去查）：
+// **已闭合的三条**（列在这里，免得有人照旧清单去查）：
 //
 //   * **`layout` / L0**(`layouts`)—— 2026-09-22 做掉（`pt_l0_*` + `pt_layouts`），
 //     `use "lom/fujr.lom"` 的 `demo.lomt` 已进覆盖。
@@ -38,6 +36,15 @@
 //     按**字段**类型推；泛型 struct 的字段类型**就是那个类型形参**时，换成**声明处写的
 //     实参** —— 那一段 token 本来就在单元里，**指回去即可**（不造新串，省掉一整套暂存）。
 //     `p[0]` / `f(x)` 仍然不定、点名拒。
+//   * **链式泛型**(泛型函数体里再调泛型函数)—— 2026-09-23 做掉。原先只走单元本体一趟，
+//     会把实参类型当成 `T` 造出 `pick_T` 那种**发得出去但是错的**实例名，所以点名拒。
+//     现在与参考实现（`prepare` 的 M6）**同构**：走单元里的**非泛型**声明，再逐轮走
+//     **新建实例的体**（形参类型按实参换掉），跑到不动点 —— `pick_u32` 就是这么推出来的。
+//     顺序也要对上：参考实现"每轮过一遍池子、只走没走过的"＝这里"每轮走上一轮新建的"，
+//     而实例的创建顺序是逐字节判据的一部分。见 `pt_mono_all` / `pt_mono_inst`。
+//     ⚠ 顺带补上的一格：`K as T` 的 K **原先只认标识符**（kind 0），于是 `1 as u32`
+//     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `main` 正是
+//     那么写的，只是它以前排在 `REFUSED` 里，碰不到。
 //
 // 关于泛型那两个**不在**上面的清单里(M6/M7 已经落地): `generics`(声明那一格) +
 // `instances`(实例那一格) + 签名/字段/载荷里的**改名**(`Pair<u32>` → `Pair_u32`)。
@@ -2344,7 +2351,12 @@ fn pt_field_arg_ty(sc: ptr, unit: ptr, t: ptr, hi: u32, obj_tok: u32, fld_tok: u
 /// `p[0]` / `f(x)` 仍然不定（返回 0），由 `pt_mono_call` 点名拒。
 fn pt_arg_ty(sc: ptr, unit: ptr, t: ptr, i: u32, hi: u32) -> u64 {
     let j: u32 = i;
-    if pt_kind(t, j) == 0 && pt_kind(t, j + 1) == 0 && pt_tis(unit, t, j + 1, "as") {
+    // `K as T`：K 只要求"个值" —— **字面量也算**（`outer(1 as u32, 2 as u32)` 那种形状）。
+    // 参考实现按表达式的类型推，不管操作数是标识符还是字面量；这一格原先只认 kind 0，
+    // 于是 `1 as u32` 落到"实参形态超出这一节"上 —— 直到 R4 这一轮才撞出来
+    // （`native_chain.lomt` 的 `main` 就是那么写的，而它以前排在 `REFUSED` 里，碰不到）。
+    if (pt_kind(t, j) == 0 || pt_kind(t, j) == 1) && pt_kind(t, j + 1) == 0
+            && pt_tis(unit, t, j + 1, "as") {
         let ts: u32 = j + 2;
         let te: u32 = pt_ty_end(unit, t, ts, hi);
         return (ts as u64) * 4294967296 + (te as u64);
@@ -2656,8 +2668,7 @@ fn pt_targs(sc: ptr, unit: ptr, t: ptr, nt: u32, decl: u32, ntp: u32, narg: u32)
 }
 
 /// 走一个函数体：维护局部变量表，遇到泛型调用就建实例。返回 1 = 拒绝。
-fn pt_mono_body(sc: ptr, unit: ptr, t: ptr, nt: u32, brc: u32, body_end: u32,
-                in_gen: u32) -> u32 {
+fn pt_mono_body(sc: ptr, unit: ptr, t: ptr, nt: u32, brc: u32, body_end: u32) -> u32 {
     let d: u32 = 1;                    // 函数体那一层
     let j: u32 = brc + 1;
     while j < body_end && pt_kind(t, j) != 4 {
@@ -2679,13 +2690,6 @@ fn pt_mono_body(sc: ptr, unit: ptr, t: ptr, nt: u32, brc: u32, body_end: u32,
             } else if pt_kind(t, j + 1) == 3 && pt_tis(unit, t, j + 1, "(") {
                 let decl: u32 = pt_gfn_find(sc, unit, t, j);
                 if decl != PT_NONE {
-                    // **泛型函数体里再调泛型函数**（链式单态化）没做：参考实现靠 8 轮
-                    // 迭代（它会走**实例**的体，那时 T 已经被换成具体类型），而这里只走
-                    // 单元本体、看到的实参类型还是 `T` —— 会造出 `min_T` 这种**错的**实例名。
-                    // 静默的错比拒绝坏，所以点名拒。
-                    if in_gen == 1 {
-                        return 2;
-                    }
                     // 实参个数：`(` 到配对的 `)` 之间顶层逗号 + 1
                     let rp: u32 = pt_match(unit, t, j + 1, "(", ")");
                     let narg: u32 = pt_cnt_params(unit, t, j + 1);
@@ -2702,43 +2706,162 @@ fn pt_mono_body(sc: ptr, unit: ptr, t: ptr, nt: u32, brc: u32, body_end: u32,
     return 0;
 }
 
-/// 走单元里**每个函数体**（根与依赖都走 —— 参考实现单态化的是整个程序）。
+/// 走单元里的**非泛型函数体**，以及**实例的体**，跑到**不动点**。
+///
+/// 与参考实现（`tools/lomentc.py` 的 `prepare`，M6 那半）同构。它的形状是：
+///
+///     for _ in range(8):
+///         pool = [所有函数] + [已建的实例]
+///         for f in pool: if f 有类型形参 or 走过: continue; 走它的体
+///         if 这轮没建出新实例: break
+///
+/// **两点都是关键**，缺一条链式泛型就走不出来：
+///
+///   * **泛型声明本身不走进**（对应 `f.tparams` 那条）—— 走它只会看到还没换掉的 `T`，
+///     于是造出 `pick_T` 那种**发得出去但是错的**实例名；
+///   * **实例的体要走进**，而且形参类型要按实参**换掉**（`a: T` → `u32`）——
+///     `return pick(a, b);` 里的 `pick_u32` 就是这一步才推得出来的。
+///
+/// 顺序：第 0 轮走单元里的非泛型声明，之后每轮走**上一轮新建的**实例。这与参考实现
+/// "每轮过一遍池子、只走没走过的"是同一件事，所以实例的**创建顺序**也对得上 ——
+/// 而那个顺序是逐字节判据的一部分（`instances` 那一格的输出顺序）。
 fn pt_mono_all(sc: ptr, unit: ptr, t: ptr, nt: u32) -> u32 {
+    // 第 0 轮：单元里的**非泛型**函数体
     let i: u32 = 0;
     while i < nt && pt_kind(t, i) != 4 {
         if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "fn") {
             let lp: u32 = pt_find_ch(unit, t, i + 1, nt, "(");
             let brc: u32 = pt_find_ch(unit, t, i + 1, nt, "{");
             let be: u32 = pt_match(unit, t, brc, "{", "}");
-            // 形参进局部表（`self` 那种由 impl 那条路管，这里不碰）
-            let n: u32 = load32(sc, PT_EN);
-            let _n0: u32 = n;
-            let j: u32 = lp + 1;
-            let d: u32 = 1;
-            while j < brc && pt_kind(t, j) != 4 {
-                if pt_kind(t, j) == 0 && pt_tis(unit, t, j + 1, ":") {
-                    let ts: u32 = j + 2;
-                    let te: u32 = pt_ty_end(unit, t, ts, nt);
-                    pt_env_put(sc, j, ts, te, d);
-                    j = te;
-                }
-                j = j + 1;
-            }
             let is_gen: u32 = 0;
             if pt_tis(unit, t, i + 2, "<") {
                 is_gen = 1;
             }
-            let mrc: u32 = pt_mono_body(sc, unit, t, nt, brc, be, is_gen);
-            if mrc != 0 {
-                if mrc == 2 { return 2; }
-                return 1;
+            if is_gen == 0 {
+                let mrc: u32 = pt_mono_one(sc, unit, t, nt, lp, brc, be, 0, 0);
+                if mrc != 0 {
+                    return mrc;
+                }
             }
-            store32(sc, PT_EN, 0);        // 每个函数一张新表（与参考实现同口径）
             i = be;
         }
         i = i + 1;
     }
+    // 之后每轮走上一轮**新建的**实例，直到不动点
+    let cur: u32 = 0;
+    let round: u32 = 0;
+    while round < 8 {
+        let n: u32 = load32(sc, PT_N);
+        if cur >= n {
+            round = 8;                     // 不动点（这个文件没有 `break`）
+        } else {
+            let k: u32 = cur;
+            while k < n {
+                let irc: u32 = pt_mono_inst(sc, unit, t, nt, k);
+                if irc != 0 {
+                    return irc;
+                }
+                k = k + 1;
+            }
+            cur = n;
+            round = round + 1;
+        }
+    }
     return 0;
+}
+
+/// 走**一个**函数体：形参先进局部表（`self` 那条路由 impl 那条路管，这里不碰），再走体。
+/// `lt` 非 0 表示**这是实例**：形参类型是**裸类型形参**的要换成该实例的实参类型。
+fn pt_mono_one(sc: ptr, unit: ptr, t: ptr, nt: u32, lp: u32, brc: u32, be: u32,
+               lt: u32, ioff: u32) -> u32 {
+    let _n0: u32 = load32(sc, PT_EN);
+    let j: u32 = lp + 1;
+    let d: u32 = 1;
+    while j < brc && pt_kind(t, j) != 4 {
+        if pt_kind(t, j) == 0 && pt_tis(unit, t, j + 1, ":") {
+            let ts: u32 = j + 2;
+            let te: u32 = pt_ty_end(unit, t, ts, nt);
+            let r: u64 = pt_subst_ts(sc, unit, t, lt, ioff, ts, te);
+            if r == 0 {
+                return 2;                  // 换不出来：点名拒（宁拒勿猜）
+            }
+            pt_env_put(sc, j, (r / 4294967296) as u32, (r % 4294967296) as u32, d);
+            j = te;
+        }
+        j = j + 1;
+    }
+    let mrc: u32 = pt_mono_body(sc, unit, t, nt, brc, be);
+    if mrc != 0 {
+        return 1;
+    }
+    store32(sc, PT_EN, 0);                 // 每个函数一张新表（与参考实现同口径）
+    return 0;
+}
+
+/// 第 `k` 条实例的实参表里第 `a` 个实参的类型区间。`ioff` 就是 `PE_IOFF`（字节下标）。
+fn pt_inst_arg(sc: ptr, ioff: u32, a: u32) -> u64 {
+    let ts: u32 = load32(sc, PT_ATAB + ioff + a * 8);
+    let te: u32 = load32(sc, PT_ATAB + ioff + a * 8 + 4);
+    return (ts as u64) * 4294967296 + (te as u64);
+}
+
+/// 声明的 `<`（`lt`）之后第几个类型形参叫 `p_tok`；不是形参返回 `PT_NONE`。
+/// 与 `pt_tp_index` 同一件事，只是手上直接有那个 `<`（实例表里存的就是它）。
+fn pt_tp_index_at(unit: ptr, t: ptr, lt: u32, p_tok: u32) -> u32 {
+    let gt: u32 = pt_match(unit, t, lt, "<", ">");
+    let j: u32 = lt + 1;
+    let k: u32 = 0;
+    while j < gt && pt_kind(t, j) != 4 {
+        if pt_kind(t, j) == 0 && pt_same(unit, t, j, p_tok) == 1 {
+            return k;
+        }
+        if pt_tis(unit, t, j, ",") {
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+/// 形参类型的**替换**：`lt == 0` 表示不是实例（原样返回）；是实例时，类型若**恰好**是一个
+/// 类型形参，就换成对应实参的区间。类型里**提到**了类型形参而不是裸的（如 `p: Pair<T>`）
+/// → 返回 0，由调用方**点名拒** —— 那种要把整段换一遍，不是这一格做的（宁拒勿猜）。
+fn pt_subst_ts(sc: ptr, unit: ptr, t: ptr, lt: u32, ioff: u32, ts: u32, te: u32) -> u64 {
+    let raw: u64 = (ts as u64) * 4294967296 + (te as u64);
+    if lt == 0 {
+        return raw;
+    }
+    if te == ts + 1 && pt_kind(t, ts) == 0 {
+        let k: u32 = pt_tp_index_at(unit, t, lt, ts);
+        if k != PT_NONE {
+            return pt_inst_arg(sc, ioff, k);
+        }
+        return raw;                        // 具体类型名（如 `u32`），原样
+    }
+    let j: u32 = ts;
+    while j < te && pt_kind(t, j) != 4 {
+        if pt_kind(t, j) == 0 && pt_tp_index_at(unit, t, lt, j) != PT_NONE {
+            return 0;
+        }
+        j = j + 1;
+    }
+    return raw;
+}
+
+/// 走第 `k` 条实例的体。实例表里存着三样正好够用的东西：声明的**名字 token**（`PE_DECL`）、
+/// 它的 `<`（`PE_LT`）、实参表下标（`PE_IOFF`）。
+fn pt_mono_inst(sc: ptr, unit: ptr, t: ptr, nt: u32, k: u32) -> u32 {
+    let e: u32 = PT_TAB + k * 32;
+    let nm: u32 = load32(sc, e + PE_DECL);
+    let lt: u32 = load32(sc, e + PE_LT);
+    let ioff: u32 = load32(sc, e + PE_IOFF);
+    let lp: u32 = pt_find_ch(unit, t, nm + 1, nt, "(");
+    let brc: u32 = pt_find_ch(unit, t, nm + 1, nt, "{");
+    if lp == PT_NONE || brc == PT_NONE {
+        return 1;
+    }
+    let be: u32 = pt_match(unit, t, brc, "{", "}");
+    return pt_mono_one(sc, unit, t, nt, lp, brc, be, lt, ioff);
 }
 
 /// 名字池里的一段按 **JSON 字符串**写出（实例名都是标识符+数字+下划线，无需转义）。
@@ -4150,10 +4273,10 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     if load32(sc, PT_NG) > 0 {
         let mrc: u32 = pt_mono_all(sc, unit, t, nt);
         if mrc == 2 {
-            return pt_wfail("fujoc-s: --emit-potato: 链式泛型 —— 泛型**函数体里**再调泛型函数 (参考实现靠 8 轮迭代走**实例**的体, 这里只走单元本体, 会把实参类型当成 `T` 造出错的实例名); 没做\n");
+            return pt_wfail("fujoc-s: --emit-potato: 实例的形参类型换不出来 (形参类型里**提到**了类型形参而不是裸的 —— 比如 `p: Pair<T>`; 这一格只换裸类型形参 `a: T`)\n");
         }
         if mrc == 1 {
-            return pt_wfail("fujoc-s: --emit-potato: 泛型调用点的实参形态超出这一节 (只收标识符与 `x as T`; `p.a` 那种字段访问还没做)\n");
+            return pt_wfail("fujoc-s: --emit-potato: 泛型调用点的实参形态超出这一节 (只收标识符、`x as T`、以及 `p.a` 字段访问; `p[0]` / `f(x)` 还没做)\n");
         }
     }
     // ---- 单态化（M7）：收类型串 → 建映射表（实例名）。**也在计数之前** —— 实例要追加进
