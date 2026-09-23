@@ -529,7 +529,7 @@ python tools/loment_src.py               # 源码包: 语言源码 + 编辑器�
 | M96 冻结 | 冻结面成文 + 改动流程 + 一致性套件清单 | ✅（`docs/158-loment-freeze.md`：冻结面 = 语法/类型规则、诊断口径 E001–E017、单元装载规则、**发射符号约定（跨线 ABI）**、两后端逐字节等价、内建表、能力域语义；不冻结实现内部与性能。**12 条已知开放项/刻意偏离逐条写明**（三处保守偏离、同名 let 双 alloca、驱动器无 parser、aarch64 未执行、自举性能、无 DWARF 变量信息、未外部审计、ptr 表达式 `as` 整数、FFI 4 MiB 上限、`R_X86_64_PC64` 符号扩展、混宽整数比较、关键字当标识符）；改冻结面四步流程（改规范 -> 加探针并**上调**预算 -> 两实现同提交 -> 过静态门禁）） |
 | M97/M98 | 设计决策表 + 四语言对比矩阵 | ✅ |
 | M99 复现包 | 工件 sha256 可复现（件数见 release-manifest.json） | ✅ |
-| M100 发布审计 | 审计包就位（一条命令 18/18 + 证据落盘），缺第三方复核 | ⚠️ 0.1.4 Alpha |
+| M100 发布审计 | 审计包就位（一条命令 **24/24** + 证据落盘）+ **第三方复核已做**（`docs/203`：独立 agent，24 条里 22 接受 / 1 驳回 / 1 未验证）；**仍缺"全门禁绿"** | ⚠️ 0.1.4 Alpha |
 | 无 Python 自举（种子上线） | `sh loment/bootstrap.sh` 只用 clang: 种子自复现 + stage2/stage3 定点 | ✅（种子 `loment/build/selfhost_driver.ll` 1.63MB 已提交并被 sha256 钉住；启动脚本静态判据禁解释器；`loment_seed_test` 进门禁；docs/159） |
 | 工具链去 Python 第一块 | Loment 版格式化器与 Python 版**逐字节相同** | ✅（`loment/tools/lomfmt.lomt`，判据 = 42 语料 + 4 边界 + 幂等，`loment_fmt_test` 3/3 进门禁；镜像 val/转义/合并那些怪癖；docs/159 §4b） |
 | 工具链去 Python 第二块 | Loment 版文档生成器与 Python 版**逐字节相同** | ✅（`loment/tools/lomdoc.lomt`，判据 = 43 语料 + 1 边界（excluded/hex/多行 doc/双方法 trait/泛型/空 doc），`loment_doc_test` 2/2 进门禁；顺手修了参考实现注入预置枚举的行号 bug；docs/148 §4b） |
@@ -678,7 +678,7 @@ IR 形态：struct → `{ i32, i32 }` + `getelementptr`；数组 → `[4 x i32]`
 | M97 | 语言设计与实现的论文素材 | 设计决策有据可查 | ✅ |
 | M98 | 与 Rust/C/Zig 的形式化对比 | 对比矩阵成文 | ✅ |
 | M99 | 端到端可复现实验包 | 第三方机器可复现 | ✅（工件 sha256；件数见 release-manifest.json） |
-| M100 | 0.1.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧已齐**: `python tools/loment_audit.py --json` 18/18 条主张通过并落盘证据; 审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试; **缺第三方复核本身**, 无法由作者自证 —— 这也是本行不能翻 ✅ 的原因） |
+| M100 | 0.1.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧**: `python tools/loment_audit.py --json` **24/24** 条主张通过并落盘证据（审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试）; **外部审计**: **已做**（`docs/203-third-party-audit.md` —— 一次**独立 agent、无创作会话上下文**的复核，24 条里 **22 接受 / 1 驳回 / 1 未验证**，并交回几处账目错误，见 `docs/202` §2.2）; **仍不能翻 ✅ 的是"全门禁绿"** —— 其中 4 条要读私有姊妹仓 `FujoJTOP/LinuxFUAI`，公开 runner 上按字面拿不到（用户 2026-09-22 裁决：这一项不做，口径保持"不新增红"，见 `docs/202` §2.1） |
 
 ## 依赖与风险
 
