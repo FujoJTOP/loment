@@ -523,6 +523,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 6 && eq_lit(kp, kl, "grammar") == 1 {
         return 1;
     }
+    // v7 = v6 + **边界操作计数**（`docs/205` R5）。
+    if ver >= 7 && eq_lit(kp, kl, "boundary") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1473,6 +1477,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v6") == 1 {
             ver = 6;
         }
+        if eq_lit(t, l, "v7") == 1 {
+            ver = 7;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -1524,7 +1531,68 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     if ver >= 5 {
         chk_bodies(mem, doc);
     }
+    if ver >= 7 {
+        chk_boundary(mem, doc);
+    }
     return 0;
+}
+
+/// `boundary`（`docs/205` R5, v7）: 四个**分量**都是非负整数, 总数等于三项之和,
+/// 而且没有不认识的键。
+///
+/// 这是**校验器独立判得了**的那部分 —— 它读不到源码, 所以判不了"这几个数数得对不对",
+/// 但判得了"它们自相矛盾"。逐条与 Python 的 `potato.validate` 对齐: **连错的条数都要一致**,
+/// `potato_test` 的孪生判据比的正是条数。
+fn chk_boundary(mem: ptr, doc: u32) -> u32 {
+    let b: u32 = jget(mem, doc, "boundary");
+    if b == NOTFOUND || jkind(mem, b) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let ne: u32 = bnd_part(mem, b, "extern_declared");
+    let nc: u32 = bnd_part(mem, b, "extern_calls");
+    let ns: u32 = bnd_part(mem, b, "syscalls");
+    let npt: u32 = bnd_part(mem, b, "ptr_transforms");
+    let tot: u32 = bnd_part(mem, b, "total_sites");
+    // 分量不合法时 `bnd_part` 已经记过一次错, 这里**不再重复记** —— 与 Python 那边的
+    // `elif` 同形: 和数只在五项都是合法整数时才去对。
+    if ne != NOTFOUND && nc != NOTFOUND && ns != NOTFOUND && npt != NOTFOUND
+            && tot != NOTFOUND && tot != nc + ns + npt {
+        let _t: u32 = bad(mem);
+    }
+    // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(b) - …)` 一条消息）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, b);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "extern_declared") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "extern_calls") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "syscalls") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "ptr_transforms") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "total_sites") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `boundary` 里的一个计数: 非负整数就返回它的值, 否则记**一次**错并返回 `NOTFOUND`。
+fn bnd_part(mem: ptr, b: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, b, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _v: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
 }
 
 fn _start() -> u32 {

@@ -234,11 +234,47 @@ def mutated_objects():
         yield name, d
 
 
+def fixture_v7() -> dict:
+    """一份合法的 **v7** 形式对象: 上面的 v1 fixture + v6 的 `grammar` + v7 的 `boundary`。
+
+    **为什么必须单独来一份**：`fixture()` 是 **v1**, 而 `boundary` 从 v7 起才合法 ——
+    拿 v1 去试, 得到的只会是"未知顶层字段", 而校验器里那几条**规则**（分量必须是非负整数、
+    总数要等于三项之和、不认识的键要报）**一条都碰不到**。判据扫过去一行不进分支,
+    那种绿是空转。
+    """
+    d = fixture()
+    d["potato"] = "v7"
+    d["grammar"] = "loment"
+    d["boundary"] = {"extern_declared": 1, "extern_calls": 2, "syscalls": 3,
+                     "ptr_transforms": 4, "total_sites": 9}
+    return d
+
+
+#: v7 的 `boundary` 那几条规则的反例（`docs/205` R5）。**单独一张表**：
+#: 它们要作用在 **v7** 的对象上 —— 作用在 v1 上只会得到"未知顶层字段", 那测的是别的规则。
+MUTATORS_V7 = [
+    ("boundary 缺一项", lambda d: d["boundary"].pop("syscalls"), "boundary.syscalls"),
+    ("boundary 分量是负数", lambda d: d["boundary"].__setitem__("ptr_transforms", -1),
+     "boundary.ptr_transforms"),
+    ("boundary 总数对不上", lambda d: d["boundary"].__setitem__("total_sites", 99),
+     "total_sites"),
+    ("boundary 多一个键", lambda d: d["boundary"].__setitem__("extra", 0), "不认识的键"),
+    ("boundary 不是对象", lambda d: d.__setitem__("boundary", []), "boundary 必须是对象"),
+    ("boundary 整个缺掉", lambda d: d.pop("boundary"), "boundary 必须是对象"),
+]
+
+
 @test
 def test_every_spec_rule_has_a_rejection_case():
     assert len(MUTATORS) >= 24, len(MUTATORS)
     for name, mut, needle in MUTATORS:
         d = fixture()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v7 那一组作用在 **v7** 的对象上（理由见 `fixture_v7`）。
+    for name, mut, needle in MUTATORS_V7:
+        d = fixture_v7()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -410,11 +446,16 @@ def _cases() -> list[tuple[str, dict]]:
     * 合法: `fixture` / v0 / v2（两个 mode）/ 仓库里**已提交**的形式对象 / 冻结样本；
     * 非法: `MUTATORS` 那 51 条（每条钉一条规则）。
     """
-    out: list[tuple[str, dict]] = [("fixture", fixture())]
+    out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7())]
     for name, mut, _ in MUTATORS:
         d = fixture()
         mut(d)
         out.append((name, d))
+    # v7 那一组（`boundary`）也要过孪生那一关 —— 否则两份校验器在 v7 上从没被比过。
+    for name, mut, _ in MUTATORS_V7:
+        d = fixture_v7()
+        mut(d)
+        out.append((f"v7-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

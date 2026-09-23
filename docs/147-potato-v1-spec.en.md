@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: d05f3e22e5dc9de960c11f34a6c82b7599d85ee8299403b17b9d12a803bdd68c -->
+<!-- source-sha256: 1763a5752b34c87d96c8b62740f5a453682e87e8888d5f4ab0df47965a656f76 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -87,10 +87,44 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0`/`v1`/**`v2`**, and an unknown version =
-  illegal;
-  (see **`docs/178`** for `v2` — v1 + a required `mode`, i.e. "is this program std or no_std". The current
-  compiler **emits v2**; v0/v1 remain legal as before.)
+- the object carries its own version number; the validator accepts `v0` … **`v7`**, and an unknown version =
+  illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
+  required field to an old version would turn every existing object illegal, and the old versions are
+  **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
+
+  | Version | Field added | Specified in |
+  |---|---|---|
+  | `v0` | (baseline) | `docs/142` |
+  | `v1` | `generics` · `instances` · `traits` · `impls` · `guards` | §1 of this document |
+  | `v2` | `mode` | `docs/178` |
+  | `v3` | `switches` | `docs/182` §1 |
+  | `v4` | `dialects` | `docs/184` §9 |
+  | `v5` | `bodies` | `docs/185` §7 ① |
+  | `v6` | `grammar` | `docs/188` §2 |
+  | `v7` | `boundary` | `docs/205` R5 |
+
+  The ladder **accumulates**: `v7` requires the fields of every version below it.
+
+- **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine
+  calls (`syscall4`/`syscall6`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
+  the unit itself declared `extern fn`. **The measure is lexical**: it only asks whether a name is called,
+  never what type it has or whether it is really dangerous — which is exactly what `docs/204` R5 asks for
+  ("greppable, countable, auditable"). The shape is five non-negative integers
+  `{extern_declared, extern_calls, syscalls, ptr_transforms, total_sites}`, and `total_sites` must equal the
+  sum of the last three. **That rule is the part the validator can judge on its own**: it cannot read source,
+  so it cannot tell whether the numbers were counted correctly — but it can tell when they contradict each
+  other. `loment stat` reports **the same numbers** (that copy is checked against the reference
+  implementation's real lexer). The list of builtins
+  (`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
+  there because this validator must not import the compiler (M47), and "which builtins cross the boundary" is
+  precisely what an auditor needs.
+
+- **`v6` used to be emitted only by `tools/potato_from.py`** (whose output is *translated* units). The main
+  compiler only picked `grammar` up **when `v7` was added**: the ladder accumulates, and it had been emitting
+  `v5` all along, so the bump ran straight into its own **self-check** for a missing `grammar`. Worth
+  recording — it shows the accumulation is itself guarded by a criterion: **miss one rung and the compiler's
+  own self-check goes red.**
+
 - `python tools/potato.py replay FILE...` replays validation according to the version the object carries, and
   `--expect-version` can assert a version;
 - the frozen sample `loment/build/legacy/demo.v0.json` is a real v0 object produced by the compiler before P5,

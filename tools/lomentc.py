@@ -3607,6 +3607,52 @@ def _count_guards(mod: Module) -> int:
     return sum(walk(f.body) for f in mod.funcs)
 
 
+def _count_boundary(mod: Module) -> dict:
+    """`docs/205` R5: 一份单元里的**边界操作**有几个 —— 形式对象自描述, 不读源码就能答。
+
+    数的是"越过语言保证的每一步": 机调用 (`syscall4`/`syscall6`)、裸指针变换
+    (`ptr_add`/`ptr_sub`/`str_ptr`)、以及调用本单元 `extern fn` 声明过的名字。
+
+    **口径是词法的** —— `docs/204` R5 那一格要的正是"可 grep、可计数、可审计"。
+    所以只看"这个名字被调用了没有", 不看类型, 也不判断它是不是真的危险
+    （**边界可见 ≠ 边界正确**, 后半句是人的事）。两条细节:
+
+    * `fn NAME(` 是**声明**不是调用 —— 谁定义了一个叫 `ptr_add` 的函数, 不该凭空
+      多出一次"越界";
+    * 方法调用 `x.NAME(...)` **算**（词法上它与 `NAME(...)` 同形）, 所以一并收。
+
+    它和 `loment stat` 报的是**同一组数**（`loment_cli_test` 拿 `lomc.lex` 独立对过）,
+    所以那份清单 `potato.BOUNDARY_BUILTINS` 是两边的**单一真源**。
+    """
+    import dataclasses as _dc
+
+    import potato as _potato
+
+    #: 走过的每一个"被调用的名字"。用**通用** dataclass 遍历, 而不是手写一张节点表 ——
+    #: 手写的那种漏一个节点类型就少算几个, 而要等自举侧逐字节比对才看得出来。
+    names: list[str] = []
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)):
+            names.append(x.name)
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    ext = [f.name for f in mod.externs]
+    n_extc = sum(names.count(nm) for nm in ext)
+    n_sys = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
+    n_ptr = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    return {"extern_declared": len(ext), "extern_calls": n_extc, "syscalls": n_sys,
+            "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
+
+
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
@@ -3653,9 +3699,24 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v4 = v3 + **方言**（`docs/184` §9 S4.3）。与 `mode`/`switches` 同一条纪律：
         # **必填、可为空数组** —— 不存在"缺这项"的形态。带上 `body` 是为了让产物
         # **自解释**：只记名字的话，读的人知道"用了方言 `def`"却不知道 `def` 是什么。
-        "potato": "v5",
+        # v5 = v4 + **外部代码块**（`docs/185` §7 ①）；
+        # v6 = v5 + **表层语法声明** `grammar`（`docs/188` §2）；
+        # v7 = v6 + **边界操作计数** `boundary`（`docs/205` R5）: 一份单元越过语言保证的
+        # 那些调用点有几个。**与 `guards` 同级同形**（一个自描述的对象），理由也一样 ——
+        # 审计要能**不读源码**就回答"这个单元的信任边界有多大"。
+        #
+        # ⚠ **v6 挂在 v7 之前从没被主编译器发过**：`grammar` 原先只有 `tools/potato_from.py`
+        # 发（那一档的产出方是它）。加 `boundary` 时才发现 —— v7 让 v6 的 `grammar` 一起
+        # 变成必填, 而这里没发它, 编译器的**自检当场就红**。所以这一版把 v6 也接了上来:
+        # 前门早就知道答案（`FrontUnit.grammar`），只是没人把它带进来。
+        "potato": "v7",
         "unit": mod.name,
         "language": "loment",
+        # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
+        # `language` 说"这份东西**是**什么"（用别的写法写的, **它仍然是 `loment`**）,
+        # `grammar` 说"用什么**写法**写的"。原生写法（含 `rust` 拼法、含没写声明）
+        # 一律是 `loment`。
+        "grammar": getattr(mod, "grammar", "loment"),
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
         # 所以对象里永远是显式的两值之一, 不存在"缺这项"的形态。
         # 一个编译单元产出一个对象 (deps 走 `imports`), 所以这里没有"依赖的模式"
@@ -3711,6 +3772,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),
+        "boundary": _count_boundary(mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
@@ -4898,6 +4960,11 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias
+    # **表层语法**（`docs/188` §2）挂在模块上，供 Potato v6 用。前门已经算出来了
+    # （`front_door` 的 `FrontUnit.grammar`：原生写法一律是 `loment`，`rust` 也是
+    # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
+    # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
+    mod.grammar = _fu.grammar
     mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。

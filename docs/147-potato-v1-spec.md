@@ -74,9 +74,40 @@ v0（docs/142）只覆盖标量/数组/struct/枚举/布局/能力域。P3/P4 �
 
 ## 5. 版本化与回放（M51）
 
-- 对象自带版本号；校验器接受 `v0`/`v1`/**`v2`**，未知版本 = 非法；
-  （`v2` 见 **`docs/178`** —— v1 + 必填 `mode`，即"这个程序是 std 还是 no_std"。
-  当前编译器**发 v2**；v0/v1 照旧合法。）
+- 对象自带版本号；校验器接受 `v0` … **`v7`**，未知版本 = 非法。
+  **版本是"字段集合"的台阶，只往上加** —— 往旧版加必填字段会让既有对象全变非法，而旧版
+  是**承诺过能回放**的（本节的最后一条），所以每加一个必填字段就升一版：
+
+  | 版本 | 加的字段 | 出处 |
+  |---|---|---|
+  | `v0` | （基线） | `docs/142` |
+  | `v1` | `generics` · `instances` · `traits` · `impls` · `guards` | §1 本文 |
+  | `v2` | `mode` | `docs/178` |
+  | `v3` | `switches` | `docs/182` §1 |
+  | `v4` | `dialects` | `docs/184` §9 |
+  | `v5` | `bodies` | `docs/185` §7 ① |
+  | `v6` | `grammar` | `docs/188` §2 |
+  | `v7` | `boundary` | `docs/205` R5 |
+
+  台阶是**累积**的：`v7` 要求它下面每一版的字段都在。
+
+- **`boundary`（v7）**：一份单元里越过语言保证的那些**调用点**有几个 —— 机调用
+  （`syscall4`/`syscall6`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
+  `extern fn` 声明过的名字。**口径是词法的**：只看"这个名字被调用了没有"，不判类型、
+  不判危险 —— `docs/204` R5 那一格要的正是"可 grep、可计数、可审计"。
+  形状是五个非负整数 `{extern_declared, extern_calls, syscalls, ptr_transforms,
+  total_sites}`，其中 `total_sites` 必须等于后三项之和。**那一条是校验器独立判得了的**：
+  它读不到源码，所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾"。
+  `loment stat` 报的是**同一组数**（那份由参考实现真正的词法器独立对过）。
+  那份内建清单（`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`）住在
+  `tools/potato.py` 的 `BOUNDARY_BUILTINS` —— 放在那儿是因为这个校验器按 M47
+  **不许 import 编译器**，而"哪些内建越界"恰恰是审计要用的东西。
+
+- **`v6` 曾经只有 `tools/potato_from.py` 在发**（那一档的产出方是"翻译出来的单元"）。
+  主编译器是**加 `v7` 的时候才把 `grammar` 一起接上**的：台阶累积，而它此前一直发 `v5`，
+  一升就撞上"缺 `grammar`"的**自检**。记一笔 —— 它说明"台阶累积"这件事本身有条判据守着：
+  **漏接一版，编译器自己的自检当场就红**。
+
 - `python tools/potato.py replay FILE...` 按对象自带版本回放校验，`--expect-version` 可断言版本；
 - 冻结样本 `loment/build/legacy/demo.v0.json` 是 P5 之前编译器产出的真实 v0 对象，
   由 `potato_test` 持续回放 —— 旧对象不会因为新版本发布而失效。

@@ -729,6 +729,91 @@ fn pt_cnt_guards(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+/// 两个 token 的**文本**相不相同（都是 ident 才有意义; 字符串 token 直接说不相同）。
+fn pt_tok_eq(src: ptr, t: ptr, a: u32, b: u32) -> bool {
+    if load32(t, a * 20) == 2 || load32(t, b * 20) == 2 {
+        return false;
+    }
+    let n: u32 = load32(t, a * 20 + 8);
+    if n != load32(t, b * 20 + 8) {
+        return false;
+    }
+    let oa: u32 = load32(t, a * 20 + 4);
+    let ob: u32 = load32(t, b * 20 + 4);
+    let k: u32 = 0;
+    while k < n {
+        if load8(src, oa + k) != load8(src, ob + k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// 数"名字是第 `nm` 个 token 的那个标识符被**调用**了几次"（`docs/205` R5 的口径）。
+///
+/// 两条与参考实现逐字对齐的规则:
+///   * 下一个 token 是 `(` —— 空白与注释在词法流上本来就不在, 所以不必跳;
+///   * **上一个 token 不是 `fn`** —— `fn NAME(` 是**声明**, 不是调用。少了这一条,
+///     谁定义了一个叫 `ptr_add` 的函数就会凭空多出一次"越界"。
+///     `i == lo` 时前面没有本单元的 token, 照数（参考实现走的是根模块, 同理）。
+fn pt_cnt_boundary_named(unit: ptr, t: ptr, lo: u32, hi: u32, nm: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tok_eq(unit, t, i, nm) && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 数**固定名字**的调用点（`syscall4` / `ptr_add` …）—— 名字是字面量, 不进 token 表。
+fn pt_cnt_boundary_call(unit: ptr, t: ptr, lo: u32, hi: u32, name: str) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, name) && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `extern fn NAME` 的**声明数**（每一条都算, 同名写两次就是两条 —— 与参考实现的
+/// `len(mod.externs)` 同一个口径）。
+fn pt_cnt_boundary_extdecls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i + 2 < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "extern")
+                && pt_tis(unit, t, i + 1, "fn") && pt_kind(t, i + 2) == 0 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `extern fn NAME` 的**调用点**数: 每声明一次, 就按那个名字数一遍它的调用点。
+/// 于是"同名声明两次"会数两遍 —— 与参考实现的 `sum(count(nm) for nm in externs)` 一致。
+fn pt_cnt_boundary_extcalls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i + 2 < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "extern")
+                && pt_tis(unit, t, i + 1, "fn") && pt_kind(t, i + 2) == 0 {
+            n = n + pt_cnt_boundary_named(unit, t, lo, hi, i + 2);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 /// 类型形参个数: `Name < A , B >` 里逗号个数 + 1。
 fn pt_cnt_tps(unit: ptr, t: ptr, lt: u32, gt: u32) -> u32 {
     let n: u32 = 1;
@@ -4009,6 +4094,16 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let nex: u32 = pt_cnt_kw0(unit, t, lo, hi, "excluded");
     let ndf: u32 = pt_cnt_defs(unit, sw);
     let ngu: u32 = pt_cnt_guards(unit, t, lo, hi);
+    // `boundary`（`docs/205` R5）: 越过语言保证的那些调用点。**口径是词法的** ——
+    // 数的就是"这个名字被调用了没有", 不判类型、不判危险。与参考实现的 `_count_boundary`
+    // 是同一组数（`loment_cli_test` 另拿参考实现的**真词法器**对过 `loment stat` 那一份）。
+    let nbd_sys: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "syscall4")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6");
+    let nbd_ptr: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "ptr_add")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "ptr_sub")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "str_ptr");
+    let nbd_ed: u32 = pt_cnt_boundary_extdecls(unit, t, lo, hi);
+    let nbd_ec: u32 = pt_cnt_boundary_extcalls(unit, t, lo, hi);
     // `generics` 是三段拼的（参考实现: `[fn 的] + [struct 的] + [enum 的]`），
     // 最后再加上**预置块**里的枚举（Option/Result）。
     let ngf: u32 = pt_cnt_gen_kw(unit, t, lo, hi, "fn");
@@ -4022,7 +4117,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let o: u32 = 0;
     o = pt_str(out, o, "{\n");
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v5");
+    o = pt_qs(out, o, "v7");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -4030,6 +4125,14 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_q(out, o, unit, pt_off(t, lo + 1), pt_tlen(t, lo + 1));
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "language");
+    o = pt_qs(out, o, "loment");
+    o = pt_str(out, o, ",\n");
+    // **表层语法**（`docs/188` §2）。这里**恒为 `loment`**: 自举侧的前门只抹掉
+    // `choose write grammar loment` 那一行, 别的写法它**点名拒绝**（`EXTRA_REFUSED` 里
+    // 那份 `lumtui_math.lomt` 就是钉这个的）—— 所以它能收下的每一份单元, 写法都是
+    // `loment`。**这不是猜的**: 哪天真让它收下别门写法, 参考实现会发那一门的名字,
+    // 逐字节比对当场红。
+    o = pt_key(out, o, 1, "grammar");
     o = pt_qs(out, o, "loment");
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "mode");
@@ -4116,6 +4219,28 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "guards");
     o = pt_dec(out, o, ngu as u64);
+    o = pt_str(out, o, ",\n");
+    // 与 `guards` 同级同形: 一个自描述的对象。**必填**（`docs/205` R5）——
+    // 一个"缺席的计数"和一个"零"在读者眼里长得一样, 而那是两件事。
+    o = pt_key(out, o, 1, "boundary");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "extern_declared");
+    o = pt_dec(out, o, nbd_ed as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "extern_calls");
+    o = pt_dec(out, o, nbd_ec as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "syscalls");
+    o = pt_dec(out, o, nbd_sys as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "ptr_transforms");
+    o = pt_dec(out, o, nbd_ptr as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "total_sites");
+    o = pt_dec(out, o, (nbd_ec + nbd_sys + nbd_ptr) as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "excluded");
     o = pt_aopen(out, o, nex);
