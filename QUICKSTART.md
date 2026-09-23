@@ -5,8 +5,23 @@ written in C, C++, Java, C#, Go or Python; it emits native x86-64 executables (L
 Windows PE) with no runtime and no libc. The [README](README.md) says what it is; this page
 is only about getting a program to run.
 
-**Nothing is published yet** — 0.1.4 is not finished, and there are no packages in
-[Releases](https://github.com/FujoJTOP/loment/releases) — so this starts from a checkout.
+## 0. Get it
+
+**0.1.4 is packaged** — download it from
+[Releases](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4):
+
+| Platform | File | How |
+|---|---|---|
+| Linux / WSL | `loment-0.1.4-linux-x64.tar.gz` | unpack → `sh install.sh` |
+| Windows | `loment-0.1.4-windows-x64.zip` | unpack → `powershell -File install.ps1` |
+| Windows | `loment-0.1.4-windows-x64-setup.exe` | **double-click** |
+
+You get the `loment` command, `lompi`, and the language server. Compiling and running needs
+**no Python, no clang and no WSL** — the package is native binaries plus the standard library,
+and the installer checks `SHA256SUMS` before it writes anything. Then jump to
+[§3](#3-with-loment-on-your-path).
+
+**Or work from a checkout** — needed if you want to change the language itself:
 
 ```
 $ git clone https://github.com/FujoJTOP/loment.git
@@ -74,9 +89,9 @@ the checks:
 $ sh loment/bootstrap.sh hello.lomt > hello.ll
 ```
 
-To get the packaged toolchain (the `loment` command, `lompi`, the language server), build
-the distribution and install it. Python is needed for this one step and for nothing after
-it — the package contains no Python:
+To get the packaged toolchain (the `loment` command, `lompi`, the language server) you can
+either download it ([§0](#0-get-it)) or build the distribution yourself. Python is needed for
+the build step and for nothing after it — the package contains no Python:
 
 ```
 $ python tools/loment_dist.py --emit
