@@ -3672,6 +3672,22 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                    "args": list(s.generic_args)} for s in mod.structs if s.from_generic]
     instances += [{"kind": "type", "name": e.name, "of": e.from_generic,
                    "args": list(e.generic_args)} for e in mod.enums if e.from_generic]
+    # 实例名必须是**标识符**（`docs/147` §2「命名层」）。命名规则覆盖不到的形状 ——
+    # 数组/切片/指针当泛型实参（`Box<[u32]>` 会拼成 `Box_[u32]`）—— 在这里**点名拒**。
+    #
+    # ⚠ **为什么不在 `prepare` 里拒**：`check()` 内部也调 `prepare()`（M6 单态化那一步），
+    # 在那儿抛会把**检查器**也变成拒绝方 —— 那是**语言面**的改动（冻结面四条：改规范 +
+    # 加一致性套件负例 + 两个实现同一次提交 + 过门禁），而这一格还没到那一步。
+    # 放在**发射器**里，检查器的行为一个字节都不动（`Box<[u32]>` 仍旧 check 得过 ——
+    # 它出界的是**形式对象**那一层）。
+    for it in instances:
+        if not it["name"].isidentifier():
+            raise LomError(1, 1,
+                           f"泛型实参的形状这一格不收: {it['args']!r}（实例名拼成 {it['name']!r}，"
+                           "不是标识符）—— 收的是基类型名与嵌套泛型。数组/切片/指针当泛型实参"
+                           "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
+                           "而且**后端**（`native M23`：struct 字段暂只支持标量）先把它们挡住了 "
+                           "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让

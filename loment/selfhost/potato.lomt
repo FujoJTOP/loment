@@ -4328,7 +4328,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     }
     pt_sort_pool(sc);
     if pt_tmap_build(sc, unit, t, nt) == 1 {
-        return pt_wfail("fujoc-s: --emit-potato: 泛型实参里有这一格不收的形状 —— 收的是基类型名、以及**嵌套泛型**（`Outer<Inner<u32>>`，命名见 docs/147); 数组/切片/指针当实参（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）还没做\n");
+        return pt_wfail("fujoc-s: --emit-potato: 泛型实参的形状这一格不收 —— 收的是基类型名与嵌套泛型（`Outer<Inner<u32>>`，命名见 docs/147 §2「命名层」); 数组/切片/指针当实参（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，而且**后端**（`native M23`: struct 字段暂只支持标量）先把它们挡住了 —— 所以现在没有东西需要那个名字\n");
     }
     // ---- M-L0: `layouts`（要读文件 —— 解析不了、或超了 64 KiB 读缓冲, 都**点名拒**）
     if pt_lay_check(sc, unit, t, lo, hi) == 1 {

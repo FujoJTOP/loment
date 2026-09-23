@@ -138,6 +138,11 @@ EXTRA_REFUSED = {
     # `choose write grammar python` 那种源：自举侧的前门本来就收不了（docs/188 §7.1），
     # 与这一格无关，但"收不了"也要看得见。
     "loment/lib/lumtui_math.lomt": "grammar",
+    # **数组/切片当泛型实参**（`Box<[u32]>`）—— 与"两边都拒"那一类同形。2026-09-23 查它的顺序
+    # 值得记：**先问这东西能不能存在，再吵它叫什么** —— 它**没有名字规则**（`Box_[u32]` 不是
+    # 标识符），但更前面的是**后端 M23**（struct 字段暂只支持标量）挡着，`Box<ptr>` 就证明了
+    # 这条：名字没问题，IR 照样拒。两个实现现在都**点名拒**。
+    "loment/examples/arg_shape/main.lomt": "泛型实参的形状",
 }
 
 TESTS: list = []
@@ -278,6 +283,35 @@ def test_nested_instance_name_follows_the_rule():
     want = {"Inner_u32": ["u32"], "Outer_Inner__u32": ["Inner_u32"]}
     assert got == want, f"嵌套实例名/实参不符规则：{got}（应为 {want}）"
     print("      嵌套实例名：Outer<Inner<u32>> -> Outer_Inner__u32（与两实参的 …_u32 不撞）")
+
+
+@test
+def test_non_scalar_generic_arg_refused_by_name():
+    """**数组/切片当泛型实参**（`Box<[u32]>`）：两个实现都**点名拒**，且参考侧**不再是内部错误**。
+
+    这条钉两件事：
+
+    1. **参考侧给的是有名字的拒绝**，不是"形式对象自检失败"那种崩（2026-09-23 之前它是后者：
+    名字拼成 `Box_[u32]`、被它自己的校验器拒掉）。**内部错误是工具在说自己坏了** —— 修法
+    是让它把话说清，不是让人去读自检输出。
+    2. **理由里带着真正的卡点**：后端 `native M23`（struct 字段暂只支持标量）。顺序很重要 ——
+    **先问这东西能不能存在，再争它叫什么**：`Box<ptr>` 是证据（名字完全没问题，IR 照样拒）。
+    """
+    rel = "loment/examples/arg_shape/main.lomt"
+    p = ROOT / rel
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    assert not lomentc.check(mod, deps=deps), "夹具本身要能过检查 —— 出界的是形式对象那一层"
+    got = None
+    try:
+        lomentc.emit_potato(mod, ROOT, deps)
+    except Exception as e:  # noqa: BLE001
+        got = str(e)
+    assert got is not None, "参考实现居然发出来了？那这一格要重判"
+    assert "形状" in got, f"参考侧的拒绝话里没有那个轴：{got[:200]}"
+    assert "自检失败" not in got, f"参考侧又退回**内部错误**了（该是点名拒）：{got[:200]}"
+    assert "M23" in got, f"拒绝话里该带上真正的卡点（后端 M23）：{got[:200]}"
+    print("      Box<[u32]>：参考侧与自举侧都**点名拒**（真正卡点是后端 M23，不是命名）")
 
 
 @test
