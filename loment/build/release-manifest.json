@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "2450d9599f6db61c9ef224e0a077dc3f4d921dc0ccca32e7f14a76deea36387a"
+   "sha256": "0cc9f9e3a2a2870553a5133e9d0419c12ce90056b377fc82a2e817475e43b19c"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_potato_emit_test.py",
-   "sha256": "f5ddeaab4e27777e24e0c12ed271e745e55b1632ae359061f381fa3c607c9f95"
+   "sha256": "afe90c4b262e301d24bed3e904fa4772e7656de6978f2fb58e2e8c00304274d4"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "efe2450759f7d2487975e6e40effd1e92affc71ff473b75aeb667f96e0298324"
+   "sha256": "dda318d1b0fc8f714ab92b0f4e51e44f03844c4ff431d448b721cfec1b9fa7d5"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1583,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "f48fb60797aea61bf9f13537c7a50482c32f05c0b40d3f83e6c0be89bff73a04"
+   "sha256": "e82d04fc289a274258bc044e4974e4eaf7cabf4a70ba1919db9c3a2c96f7621b"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1663,7 +1663,7 @@
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "620a99f5470177ed6570411bdbbd2a0b6913c95bc1d4626fba6e7d003b0f170d"
+   "sha256": "d6d0fb42d60ca5f8eb442afd84d87d562a19f63220f613fac5e5fbf3a7773f09"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
@@ -1839,7 +1839,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "eb4f60694a094822b8ad1c95e3e4a97b5398da11ebc45338648a21aca500d450"
+   "sha256": "3c9a4444e69eae5d961fdfe0c1f646863538a37fda6c90c8e3c79dd44649077f"
   },
   {
    "path": "docs/190-loment-debugger.md",
@@ -1891,7 +1891,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "1830e8229f0b3fe941aee028157c294b9cf5fca61a53ea167973016a57f0ca7b"
+   "sha256": "002d4b7897b653ce947faa5867d87c32d453933e7b3c07f1d5f184353b37f657"
   },
   {
    "path": "docs/manual/index.md",
