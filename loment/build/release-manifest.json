@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "7c79f2dec77c73ac484c257dffca5ecb8ebcab9174a98573f4121519d3678769"
+   "sha256": "63d12efc464490e2b5a6e273eb739424a34ff9c13fd230a845c82cd0c5495e7e"
   },
   {
    "path": "tools/loment_err_test.py",
@@ -1071,7 +1071,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "9e6b5ffa10ffff9a238bc6d58452182063eab2797b2bc0cf4e30bb64722375e0"
+   "sha256": "4e93aa8d52444f11cbe81161b389340a88f5efa7216bad4bcb453692f73b34dc"
   },
   {
    "path": "loment/tools/lomclicheck.lomt",
@@ -1283,7 +1283,7 @@
   },
   {
    "path": "loment/lex/boundary.lomt",
-   "sha256": "c55720fa91454dcdce34320968addb32b05f381d686cd2b0b01f5062478680a3"
+   "sha256": "dd516632c1b39b1ee2c476c6ed2f595357e49e4e564ed69cffeaa1090982abd8"
   },
   {
    "path": "loment/lex/multiline_str.lomt",
