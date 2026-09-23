@@ -259,6 +259,11 @@ what you expected, and what happened instead
 Issues are in English. A report with a runnable reproduction is worth more than a well-argued one
 without.
 
+**If you are not sure it is a bug** — you want to know whether something is meant to work that
+way, or you do not know where to start — ask on
+[Discord](https://discord.gg/rGw7NRNU) instead. Questions are as welcome there as reports are
+here.
+
 ## One free thing we would ask for
 
 **Star the repository.** It costs nothing and takes one click, and for a project with no marketing

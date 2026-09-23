@@ -1726,6 +1726,23 @@ def test_extern_takes_no_body_and_no_type_parameters():
         raise AssertionError("外部函数带类型参数应当被拒（单态化要看得到源码）")
 
 
+@test
+def test_boundary_builtins_are_real_builtins():
+    """`potato.BOUNDARY_BUILTINS` 必须是编译器内建表的一个**子集**。
+
+    **Why** (`docs/205` R5): 那份清单划的是"越过语言保证的那几个内建"这条边界 ——
+    它的价值全在"可 grep、可计数、可审计"上。而它必须是 `potato.py` 里**自己的一份**,
+    因为那个文件按 M47 **不许 import 编译器**（独立性就是它存在的理由）。两份因此
+    可能悄悄漂: 内建改了名、被删掉了 —— 数出来的数会变成 0, 而**没有任何东西会报**。
+    这条判据就是那个"会报"。
+    **How to apply**: 它钉的是"表里没有编译器不认识的名字"。反过来的那一半 ——
+    **新加了一个同样危险的内建而没进表** —— 这条**测不到**, 那一步要人来判。
+    """
+    missing = [b for b in potato.BOUNDARY_BUILTINS if b not in lomentc.BUILTINS]
+    assert not missing, f"BOUNDARY_BUILTINS 里有编译器不认识的名字: {missing}"
+    assert potato.BOUNDARY_BUILTINS, "边界内建表空了 —— 那这条判据就没在干活"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

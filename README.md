@@ -17,7 +17,8 @@ Python.
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
 [Contributing](CONTRIBUTING.md) ·
-[Issues](https://github.com/FujoJTOP/loment/issues)
+[Issues](https://github.com/FujoJTOP/loment/issues) ·
+[Discord](https://discord.gg/rGw7NRNU)
 
 The release has a Linux `tar.gz`, a Windows `zip` and a Windows installer — installing and
 running needs **no Python, no clang and no WSL**. `loment run hello.lomt` and you are done.
@@ -120,7 +121,7 @@ compiler emitted a code and a position; everything below `message:` came from `l
 | `loment/tools/` | CLI, formatter, documentation generator, language server, linker, error reporter — and the Loment-side criteria that mirror `tools/`. |
 | `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc`; plus `lumtui`, a terminal UI library ([docs/196](docs/196-lumtui.md)). |
 | `lompi/store/` | The standard library, shipped with the toolchain: `std` (127 modules) and `host` (syscalls, files, argv, directories). One `use` per module — `use vec`, `use map`, `use fs`. |
-| `loment/examples/` | 30 example programs. |
+| `loment/examples/` | 32 example programs. |
 | `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
 | `lompi/` | The package manager, written in Loment. |
 | `editors/` | Editor support: VS Code and Vim. |
@@ -139,9 +140,10 @@ what keep the claims on this page honest.
 
 ## Getting help and contributing
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues) — questions are as welcome as
-bug reports. Loment is developed in this repository; the working conventions, including how a
-change is checked before it lands, are in `AGENTS.md`.
+Ask in an [issue](https://github.com/FujoJTOP/loment/issues) or on
+[Discord](https://discord.gg/rGw7NRNU) — questions are as welcome as bug reports. Loment is
+developed in this repository; the working conventions, including how a change is checked
+before it lands, are in `AGENTS.md`.
 
 ## License
 
