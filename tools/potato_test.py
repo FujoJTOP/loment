@@ -250,6 +250,30 @@ def fixture_v7() -> dict:
     return d
 
 
+def fixture_v8() -> dict:
+    """一份合法的 **v8** 形式对象: v7 的再 + v8 的 `gc`（`docs/175` §3.4）。
+
+    与 `fixture_v7` 同一个理由单独来一份：`gc` 从 v8 起才合法 —— 拿 v7 去试只会得到
+    "未知顶层字段"，校验器里那几条规则（档名必须是那两个之一、"两档不能同时选"）
+    **一条都碰不到**。
+    """
+    d = fixture_v7()
+    d["potato"] = "v8"
+    d["gc"] = "gc_manual"
+    return d
+
+
+#: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
+MUTATORS_V8 = [
+    ("gc 缺这一项", lambda d: d.pop("gc"), "gc 必须是"),
+    ("gc 档名拼错", lambda d: d.__setitem__("gc", "gc_nope"), "gc 必须是"),
+    ("gc 不是字符串", lambda d: d.__setitem__("gc", 3), "gc 必须是"),
+    # **两档不能同时选** —— 这一条是校验器**独立判得了**的（两个取值都在对象里）。
+    ("no_std + gc_auto", lambda d: (d.__setitem__("mode", "no_std"),
+                                    d.__setitem__("gc", "gc_auto")), "不能同时选"),
+]
+
+
 #: v7 的 `boundary` 那几条规则的反例（`docs/205` R5）。**单独一张表**：
 #: 它们要作用在 **v7** 的对象上 —— 作用在 v1 上只会得到"未知顶层字段", 那测的是别的规则。
 MUTATORS_V7 = [
@@ -275,6 +299,12 @@ def test_every_spec_rule_has_a_rejection_case():
     # v7 那一组作用在 **v7** 的对象上（理由见 `fixture_v7`）。
     for name, mut, needle in MUTATORS_V7:
         d = fixture_v7()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v8 那一组同理（`gc`）。
+    for name, mut, needle in MUTATORS_V8:
+        d = fixture_v8()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -446,7 +476,8 @@ def _cases() -> list[tuple[str, dict]]:
     * 合法: `fixture` / v0 / v2（两个 mode）/ 仓库里**已提交**的形式对象 / 冻结样本；
     * 非法: `MUTATORS` 那 51 条（每条钉一条规则）。
     """
-    out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7())]
+    out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
+                                   ("v8", fixture_v8())]
     for name, mut, _ in MUTATORS:
         d = fixture()
         mut(d)
@@ -456,6 +487,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v7()
         mut(d)
         out.append((f"v7-{name}", d))
+    # v8 那一组（`gc`）同理。
+    for name, mut, _ in MUTATORS_V8:
+        d = fixture_v8()
+        mut(d)
+        out.append((f"v8-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

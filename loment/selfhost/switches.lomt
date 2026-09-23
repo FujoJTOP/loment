@@ -69,8 +69,7 @@ fn nested_decl_at(unit: ptr, toks: ptr, nt: u32) -> u32 {
                 return i;
             }
             if sw_tok_is(unit, toks, i, "choose") && load32(toks, (i + 1) * 20) == 0
-                    && !sw_tok_is(unit, toks, i + 1, "std")
-                    && !sw_tok_is(unit, toks, i + 1, "no_std") {
+                    && !sw_is_core(unit, toks, i + 1) {
                 return i;
             }
             if sw_tok_is(unit, toks, i, "addin") && load32(toks, (i + 1) * 20) == 0 {
@@ -102,6 +101,29 @@ fn sw_tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
         q = q + 1;
     }
     return true;
+}
+
+/// 这个 token 是不是**核心模式**的取值（`docs/175` §3.0）。
+///
+/// 核心模式是**核心语法的硬写法**，与可定义的开关**不是一类东西**（`docs/182` §1.3），
+/// 分开它们只看**名字** —— 而"名字"这张表在参考实现那边是 `CORE_WORDS`。
+///
+/// **加一维就只动这一个函数**：改之前 `std`/`no_std` 在这份文件里裸写了三遍，
+/// 那种写法加第二维必漏（`docs/175` §3.4 的 `gc` 就是第二维）。
+pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
+    if sw_tok_is(unit, toks, k, "std") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "no_std") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "gc_manual") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "gc_auto") {
+        return true;
+    }
+    return false;
 }
 
 fn copy_tok(toks: ptr, o: u32, j: u32) {
@@ -218,7 +240,7 @@ pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
             i = i + 2;
         } else if d == 0 && k == 0 && sw_tok_is(unit, toks, i, "choose") && i + 1 < nt
                 && load32(toks, (i + 1) * 20) == 0
-                && !sw_tok_is(unit, toks, i + 1, "std") && !sw_tok_is(unit, toks, i + 1, "no_std") {
+                && !sw_is_core(unit, toks, i + 1) {
             if sw_tok_is(unit, toks, i + 1, "close") && i + 2 < nt
                     && load32(toks, (i + 2) * 20) == 0 {
                 ns = sw_add(unit, toks, sw, ns, i + 2, 0);
@@ -254,7 +276,7 @@ pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
             j = e + 1;                          // 跳过配对的 `}`
         } else if d2 == 0 && k2 == 0 && sw_tok_is(unit, toks, j, "choose") && j + 1 < nt
                 && load32(toks, (j + 1) * 20) == 0
-                && !sw_tok_is(unit, toks, j + 1, "std") && !sw_tok_is(unit, toks, j + 1, "no_std") {
+                && !sw_is_core(unit, toks, j + 1) {
             if sw_tok_is(unit, toks, j + 1, "close") && j + 2 < nt { j = j + 3; } else { j = j + 2; }
         } else {
             if k2 == 3 {

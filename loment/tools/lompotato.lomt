@@ -277,6 +277,21 @@ fn jkind(mem: ptr, n: u32) -> u32 {
     return json_nkind(ptr_add(mem, M_ARENA), n);
 }
 
+/// `doc[key]` 是不是**恰好**那个字符串（缺项 / 不是字符串 -> 0）。
+/// 用来判"两档不能同时选"（`docs/175` §3.4 ⚠）—— 那两个取值都在对象里，
+/// 所以校验器不必读源码就能判。
+fn jstr_field_is(mem: ptr, doc: u32, key: str, s: str) -> u32 {
+    let n: u32 = jget(mem, doc, key);
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 4096);
+    if eq_lit(ptr_add(mem, M_SB2), l, s) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
 /// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
 fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
     return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
@@ -525,6 +540,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     }
     // v7 = v6 + **边界操作计数**（`docs/205` R5）。
     if ver >= 7 && eq_lit(kp, kl, "boundary") == 1 {
+        return 1;
+    }
+    // v8 = v7 + **回收档**（`docs/175` §3.4）：`gc_manual` / `gc_auto`。
+    if ver >= 8 && eq_lit(kp, kl, "gc") == 1 {
         return 1;
     }
     return 0;
@@ -1404,6 +1423,28 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _m: u32 = bad(mem);
         }
     }
+    if ver >= 8 {
+        // **必填**（`docs/175` §3.4）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
+        let gc: u32 = jget(mem, doc, "gc");
+        let gok: u32 = 0;
+        if gc != NOTFOUND && jkind(mem, gc) == 3 {
+            let lg: u32 = jstr(mem, gc, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lg, "gc_manual") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1 {
+                gok = 1;
+            }
+        }
+        if gok == 0 {
+            let _g8: u32 = bad(mem);
+        }
+        // **两档不能同时选**（`docs/175` §3.4 ⚠）：两个取值都在对象里，所以这一条
+        // 是校验器**独立判得了**的 —— 不需要读源码。于是"自称既 no_std 又 gc_auto"
+        // 是一件**能被外部判非法**的事，而不是"只有编译器知道"。
+        if gok == 1 && jstr_field_is(mem, doc, "mode", "no_std") == 1
+                && jstr_field_is(mem, doc, "gc", "gc_auto") == 1 {
+            let _c8: u32 = bad(mem);
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1479,6 +1520,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v7") == 1 {
             ver = 7;
+        }
+        if eq_lit(t, l, "v8") == 1 {
+            ver = 8;
         }
     }
     if ver == NOTFOUND {

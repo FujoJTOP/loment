@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 1763a5752b34c87d96c8b62740f5a453682e87e8888d5f4ab0df47965a656f76 -->
+<!-- source-sha256: 5da8800c1c4dcf634db7ca2ed2374524267826b9d2d20910a66dfebff4926c2e -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -102,8 +102,20 @@ formal object and reconciles byte for byte".
   | `v5` | `bodies` | `docs/185` §7 ① |
   | `v6` | `grammar` | `docs/188` §2 |
   | `v7` | `boundary` | `docs/205` R5 |
+  | `v8` | `gc` | `docs/175` §3.4 |
 
-  The ladder **accumulates**: `v7` requires the fields of every version below it.
+  The ladder **accumulates**: `v8` requires the fields of every version below it.
+
+- **`gc` (v8)**: one of two **collection tiers** — `gc_manual` (the program reclaims
+  explicitly) or `gc_auto` (the runtime reclaims). **Same level and shape as `mode`**: a string
+  value, **required**, settable only in the root unit. So "which tier this artifact was built in"
+  — and whether it **gave up determinism** — is decidable without reading the source, which is
+  exactly what `docs/175` §3.4 asks for.
+  The validator also rules on **mutual exclusion on its own**: `mode=no_std` together with
+  `gc=gc_auto` is illegal — both values are in the object, so no source is needed. Why they
+  conflict is in `docs/175` §3.4 ⚠: automatic collection needs a runtime, and `no_std` means
+  "only the core layer".
+
 
 - **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine
   calls (`syscall4`/`syscall6`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
