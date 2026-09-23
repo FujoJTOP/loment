@@ -294,6 +294,6 @@ not `E::A => 0,`. `loment cheat` lists these first, in the order they bite.
 | [README](README.md) | What the language is, and the repository layout. |
 | `.claude/skills/loment/SKILL.md` | The language guide. Read this one. |
 | `docs/manual/` | The specifications, plus a page per example. |
-| `loment/examples/` | 28 example programs; `loment example NAME` prints one. |
+| `loment/examples/` | 32 example programs; `loment example NAME` prints one. |
 | `docs/158-loment-freeze.md` | What is frozen, and what changing it costs. |
 | [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |

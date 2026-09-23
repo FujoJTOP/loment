@@ -10,6 +10,10 @@
 # 的裸机入口 (M32 验证集), 按设计不终止, 不进这个判据 —— 它属于"能不能编出来", 不属于
 # "跑出来一样"。
 #
+# **例子集里每一份都要有去处** (docs/205 R6): `CORPUS` 里的是真跑的, `NOT_RUN` 里的是
+# 跑不了的 —— 后者每一条都带一个**当场能核**的理由 (下面 `test_not_run_reasons_hold`
+# 会真的去链一次、真的编一次), 不是一句注释。"漏掉一个"因此不是一种可能。
+#
 # 已知边界 (与 lomelf.py 头注同源, 逐条记账):
 #   * 调用约定是我们自己的 (实参走栈), **不是 System V** —— 原生产物 v0 不给 C 调;
 #   * 结构体动态下标 GEP / 间接调用 / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
@@ -40,12 +44,64 @@ import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: 真跑的一批: 有 `_start`、会终止、原生后端支持 —— 两条路各编一个, 比 stdout 与退出码。
 CORPUS = [
     "loment/examples/user_hello.lomt",
     "loment/examples/bootprobe.lomt",
     "loment/examples/selfcheck.lomt",
     "loment/examples/all_loment.lomt",
+    "loment/examples/tour.lomt",
+    "loment/examples/native_match_full.lomt",
+    "loment/examples/switch.lomt",
+    "loment/examples/lumtui_demo.lomt",
 ]
+
+#: 跑不了的一批, 键 = 文件名主干, 值 = (类别, 理由)。**类别决定判据怎么核这条理由** ——
+#: `test_not_run_reasons_hold` 会对每一类**真做一遍**那件事, 断言它失败得跟你说的一样。
+#: 所以这三段文字不是笔记, 是每次门禁都重新成立一次的事实。
+_NO_ENTRY = (
+    "no-entry",
+    "没有 `_start` —— 它给别的判据当**库**用（入口由 C 驱动 / QEMU / 逐字节 IR 对照提供），"
+    "不是能自己跑起来的程序",
+)
+_IR_GAP = (
+    "ir-gap",
+    "IR 后端缺口: `inb` 还没实现（M20 只在 Rust 那条路上）—— 挡住它的是**后端**, 不是入口",
+)
+_NONTERM = (
+    "nonterm",
+    "有 `_start` 但**设计上不终止**（`while true` 的裸机入口, M32 验证集）: 跑它只能等到超时, "
+    "而超时不是一条判据",
+)
+
+NOT_RUN: dict[str, tuple[str, str]] = {
+    # 22 份: 定义函数、由调用方给入口（p7 的 C 驱动 / p9 的交叉编译 / p8 的 IR 对照）。
+    **{n: _NO_ENTRY for n in (
+        "ahci", "allocator", "bytes", "demo", "fuc_node", "mathutil", "native",
+        "native_agg", "native_bits", "native_brk", "native_cap", "native_chain",
+        "native_concat", "native_gen", "native_gen_sig", "native_mem", "native_mut",
+        "native_res", "native_slice", "native_str", "native_trait", "toolchain")},
+    "native_raii": _IR_GAP,
+    "native_entry": _NONTERM,
+}
+
+#: 自举镜像 (`loment/tools/lomelf.lomt`) **还链不了**的那几份 —— 键是 CORPUS 里的主干名,
+#: 值 = (现象, 为什么)。镜像语料 = CORPUS 减去这张表。
+#:
+#: 这不是"放宽判据": `test_lomelf_selfhost_matches_reference` 会拿这条表**反向核**一遍 ——
+#: 表里每一份都必须**仍然链不过**。哪天它链过了, 判据红, 逼你把它挪回语料。
+#: 表只许变短。
+MIRROR_GAP: dict[str, tuple[str, str]] = {
+    "tour": ("SIGILL (rc=132)",
+             "镜像在**模块级 `i64` 全局**上崩掉（元素类型 64 位 + 初值不是 zeroinitializer）——"
+             "`@__loment_caps` 正是那个形状。参考实现链得过, 所以这是镜像的缺口, 不是 IR 的问题。"
+             "见 **issue #102**"),
+    "native_match_full": ("回填表满了 (rc=1)",
+                          "镜像的回填表容量上限 (TB_FIX_MAX=32768)。它是**点名拒**的, "
+                          "参考实现没有这个上限 —— 属容量, 不属缺陷"),
+}
+
 TESTS: list[tuple[str, object]] = []
 
 
@@ -216,6 +272,76 @@ def test_lomelf_matches_clang_behavior():
 
 
 @test
+def test_every_example_is_decided():
+    """`loment/examples/*.lomt` 里**每一份**都得有去处: 要么在 CORPUS 里真跑, 要么在
+    NOT_RUN 里带一个理由 —— 没有第三种状态 (docs/205 R6)。
+
+    **Why**: R6 的判据是"包里的示例每一个都进判据"。在这条之前只有 4 份被跑过,
+    另外的**没有任何东西看着** —— 新加一份示例, 谁也不会发现它没被覆盖。
+    文档里那个"N example programs"的数字更是从来没人核过: 2026-09-23 实测,
+    README 写 30、QUICKSTART 写 28、盘上是 32, 三个数字互不相同。
+
+    **How to apply**: 加一份示例就**必须**在这里挑一边。挑 NOT_RUN 要写清理由,
+    而理由会被 `test_not_run_reasons_hold` 当场核实。
+    """
+    names = sorted(p.stem for p in (ROOT / "loment" / "examples").glob("*.lomt"))
+    ran = sorted(Path(r).stem for r in CORPUS)
+    both = sorted(set(ran) & set(NOT_RUN))
+    assert not both, f"CORPUS 与 NOT_RUN 两边都有: {both}"
+    undecided = sorted(set(names) - set(ran) - set(NOT_RUN))
+    assert not undecided, f"没人管的示例 (编排漏了): {undecided}"
+    stale = sorted((set(ran) | set(NOT_RUN)) - set(names))
+    assert not stale, f"台账里多了已经不存在的文件: {stale}"
+    empty = [k for k, (_kind, why) in NOT_RUN.items() if not why.strip()]
+    assert not empty, f"理由为空: {empty}"
+
+    # 文档里的数字要**说得对**, 不是"看起来合理" —— 这就是 R6 说的"不能静默腐烂"。
+    for doc in ("README.md", "QUICKSTART.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        hits = re.findall(r"(\d+) example programs", text)
+        assert hits, f"{doc} 里找不到 'N example programs' 这句话"
+        wrong = [h for h in hits if int(h) != len(names)]
+        assert not wrong, (f"{doc} 写的是 {wrong} 份, 盘上是 {len(names)} 份"
+                           " —— 数字不会自己跟上, 它得有人改")
+    print(f"      {len(names)} 份示例: {len(ran)} 份真跑 + {len(NOT_RUN)} 份带理由")
+
+
+@test
+def test_not_run_reasons_hold():
+    """`NOT_RUN` 里的理由**当场成立** —— 真去链一次、真去编一次, 不是信那句话。
+
+    **Why**: 一份"跑不了"的台账最容易退化成一句没人核过的注释: 后端补齐了、入口加上了、
+    `while true` 改成会返回了 —— 台账自己不会知道, 而它照样读起来是对的。
+    这里按**类别**把理由跑一遍: `no-entry` 要真被链接器以"没有 _start"拒掉,
+    `ir-gap` 要真编不出来, `nonterm` 要源码里真是 `while true`。理由不成立 = 判据红。
+    """
+    td = Path(tempfile.mkdtemp())
+    for name, (kind, _why) in sorted(NOT_RUN.items()):
+        src = ROOT / "loment" / "examples" / f"{name}.lomt"
+        if kind == "nonterm":
+            text = src.read_text(encoding="utf-8")
+            assert "while true" in text, f"{name}: 说是设计上不终止, 源码里却没有 while true"
+            continue
+        try:
+            ll, got = _ref_ir(src, td), None
+        except Exception as e:  # noqa: BLE001
+            ll, got = None, f"{type(e).__name__}: {e}"
+        if kind == "ir-gap":
+            assert got is not None and "IR 后端" in got, (
+                f"{name}: 记的是后端缺口, 实际却编过去了 ({got})")
+            continue
+        assert got is None, f"{name}: 记的是没有入口, 实际连 IR 都编不出来 ({got})"
+        try:
+            lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            refused = None
+        except Exception as e:  # noqa: BLE001
+            refused = f"{type(e).__name__}: {e}"
+        assert refused and "没有 _start" in refused, (
+            f"{name}: 记的是没有 _start 入口, 链接器给的却是: {refused}")
+    print(f"      {len(NOT_RUN)} 条理由都当场核过")
+
+
+@test
 def test_lomelf_reports_unsupported_instead_of_miscompiling():
     """不支持的东西必须**报错退出**, 不许静默编出一个错的 ELF。"""
     bad = [
@@ -347,6 +473,11 @@ def test_lomelf_selfhost_matches_reference():
     这条是"编译一个 Loment 程序不需要 clang"真正落脚的地方 —— 参考实现 (Python) 只是
     这格的规格书, 能替用户干活的是自举侧那份。链条里 clang 只出现在"种子 -> stage1"
     一步 (genesis, docs/167 §5 记账)。
+
+    语料是 `CORPUS` 减去 `MIRROR_GAP`（镜像还链不了的那两份, 各带理由）。
+    把语料从 4 份放宽到"能跑的每一份"时, 这条**立刻抓到两个缺口** —— 一个是容量上限
+    （点名拒的）, 一个是崩（issue #102）。`MIRROR_GAP` 的执行方式是**只许变短**:
+    表里每一份每轮都要**真的再链一次**, 链过了就红。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -354,9 +485,10 @@ def test_lomelf_selfhost_matches_reference():
     mir = _mirror()
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        # 语料: 参考 IR -> 镜像编 -> 与参考的字节比
+        # 语料: 参考 IR -> 镜像编 -> 与参考的字节比。`MIRROR_GAP` 里的先跳过,
+        # 下面那段会**反向**核它们 —— 说链不过的, 必须真的还链不过。
         total = 0
-        for rel in CORPUS:
+        for rel in [r for r in CORPUS if Path(r).stem not in MIRROR_GAP]:
             srcl = ROOT / rel
             ll = _ref_ir(srcl, td)
             want, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
@@ -374,7 +506,31 @@ def test_lomelf_selfhost_matches_reference():
                 llrepo.unlink(missing_ok=True)
             assert nat == want, f"[{srcl.stem}] 镜像产物与参考不同 ({len(nat)}B vs {len(want)}B)"
             total += 1
-    print(f"      {total} 个程序: 自举镜像与参考逐字节相同")
+
+        # 反向核: MIRROR_GAP 里说"链不过"的, **必须真的还链不过**。哪天链过了, 判据红,
+        # 逼你把它挪回语料 —— 这就是这张表"只许变短"的执行方式。
+        gone = []
+        for stem, (seen, why) in sorted(MIRROR_GAP.items()):
+            src = ROOT / "loment" / "examples" / f"{stem}.lomt"
+            if not src.exists():
+                gone.append(f"{stem}: 文件不在了")
+                continue
+            ll = _ref_ir(src, td)
+            llrepo = ROOT / "loment" / "build" / f"_gap_{stem}.ll"
+            elfrepo = ROOT / "loment" / "build" / f"_gap_{stem}.elf"
+            try:
+                llrepo.write_bytes(ll.read_bytes())
+                rc, _err = _mirror_run(mir, f"loment/build/_gap_{stem}.ll",
+                                       f"loment/build/_gap_{stem}.elf")
+            finally:
+                elfrepo.unlink(missing_ok=True)
+                llrepo.unlink(missing_ok=True)
+            if rc == 0:
+                gone.append(f"{stem}: 镜像**已经链得过**了 (记的是 {seen}, {why[:40]}…)")
+        assert not gone, ("MIRROR_GAP 该变短了 —— 这几份现在能链, 把它们挪回语料: "
+                          + " / ".join(gone))
+    print(f"      {total} 个程序: 自举镜像与参考逐字节相同; "
+          f"另有 {len(MIRROR_GAP)} 份记在 MIRROR_GAP 里, 已反向核实仍然链不过")
 
 
 @test
