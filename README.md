@@ -17,7 +17,8 @@ Python.
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
 [Contributing](CONTRIBUTING.md) ·
-[Issues](https://github.com/FujoJTOP/loment/issues)
+[Issues](https://github.com/FujoJTOP/loment/issues) ·
+[Discord](https://discord.gg/rGw7NRNU)
 
 The release has a Linux `tar.gz`, a Windows `zip` and a Windows installer — installing and
 running needs **no Python, no clang and no WSL**. `loment run hello.lomt` and you are done.
@@ -139,9 +140,10 @@ what keep the claims on this page honest.
 
 ## Getting help and contributing
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues) — questions are as welcome as
-bug reports. Loment is developed in this repository; the working conventions, including how a
-change is checked before it lands, are in `AGENTS.md`.
+Ask in an [issue](https://github.com/FujoJTOP/loment/issues) or on
+[Discord](https://discord.gg/rGw7NRNU) — questions are as welcome as bug reports. Loment is
+developed in this repository; the working conventions, including how a change is checked
+before it lands, are in `AGENTS.md`.
 
 ## License
 
