@@ -1890,6 +1890,10 @@
    "sha256": "4614995177becaba014cbbd5cbe54d3c157da8217a40eb2621be5ed5450da538"
   },
   {
+   "path": "docs/205-loment-015-alpha1-target.md",
+   "sha256": "905854936429fde94c99d1533063aed67f9876e847704c3269df0a952f86c2b7"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "882ec5cce8181860ca77eda76f014193a0a5f1e0c84bec5c1efe59092a2843f5"
   },
