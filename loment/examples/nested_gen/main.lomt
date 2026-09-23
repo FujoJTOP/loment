@@ -1,0 +1,40 @@
+// loment/examples/nested_gen/main.lomt —— **嵌套泛型实参**（`Outer<Inner<u32>>`）。
+//
+// 它钉的是一件**两边都没有**的事（2026-09-23 实测，三种形状试下来结论一样）：
+//
+//   * **参考实现**到这一格会发出一个**非法标识符** —— 实例名按 `base + "_" + args` 拼成
+//     `Outer_Inner<u32>`（`<` `>` 还留在名字里），然后被它**自己的**形式对象自检拒掉：
+//
+//         types[1].name 非法: 'Outer_Inner<u32>'
+//         instances[0].of 不是已声明的泛型: 'Inner'
+//
+//   * **自举侧**是**点名拒**（一个有名字的拒绝 + 退出码 1）。
+//
+// ⇒ 所以这一格**不是**"自举侧还差一轮"（`docs/205` 原先那么写，2026-09-23 更正）：那 8 轮
+// 迭代削的是**链式**（走*实例*的体），嵌套**类型**实参参考实现自己也过不去 —— 只是失败
+// 方式不同：**参考侧是内部错误，自举侧是有名字的拒绝**。
+//
+// 要真支持它，得先定**嵌套实例怎么命名**：`Outer_Inner_u32` 会与两实参的
+// `Outer<Inner, u32>` 撞名，所以需要一个分隔约定 —— 那是**格式层**的改动，两个实现 +
+// 形式对象校验器 + `docs/147` 要一起动，不是这一格自己说了算的。
+//
+// 放在 `examples/` 的**子目录**里是有意的：那一层的 `*.lomt` 被 `lom_audit` /
+// `loment_p9_test` / `loment_manual` / `loment_fmt_test` 等按**单层 glob** 扫，而这份源
+// **参考实现编不出来**，放进那一层会把它们一起弄红。`loment_potato_emit_test` 的
+// `EXTRA_REFUSED` 点名要它，另有一条判据钉住"参考侧也过不去"。
+
+module nested_gen
+
+struct Inner<T> {
+    v: T,
+}
+
+struct Outer<T> {
+    i: T,
+}
+
+fn make() -> u32 {
+    let a: Inner<u32> = Inner { v: 7 };
+    let b: Outer<Inner<u32>> = Outer { i: a };
+    return b.i.v;
+}
