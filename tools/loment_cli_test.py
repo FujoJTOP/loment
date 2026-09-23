@@ -25,6 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
+import lomc  # noqa: E402  (边界操作那条判据的**独立**尺子: 参考实现真正的词法器)
+import potato  # noqa: E402  (边界内建那份清单的**单一真源**: potato.BOUNDARY_BUILTINS)
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomcli.lomt"
@@ -289,6 +291,81 @@ def test_stat_counts_match_what_python_counts():
     nums = [int(m) for m in re.findall(r"\b(\d+)\s*$", out, re.M)]
     assert str(len(raw)) in out, f"字节数不对: {out}"
     assert str(len(lines)) in out, f"行数不对 (Python 数出 {len(lines)}): {out}"
+
+
+def _boundary_counts(text: str) -> dict[str, int]:
+    """**独立**数一遍边界操作 —— 走参考实现真正的词法器 (`lomc.lex`), 不用字节扫描。
+
+    被验的那份 (`lomcli.lomt` 里的 `cnt_calls`) 是它自己手写的字节扫描器; 这里走的是
+    编译器那条路。两边的算法不同, 数出来的东西必须一样 —— 这条判据的意义就在这里。
+    """
+    toks = [t for t in lomc.lex(text) if t.kind != "eof"]
+
+    def calls(name: str) -> int:
+        return sum(1 for i, t in enumerate(toks)
+                   if t.kind == "ident" and t.val == name
+                   and i + 1 < len(toks) and toks[i + 1].kind == "punct"
+                   and toks[i + 1].val == "(")
+
+    externs: list[str] = []
+    i = 0
+    while i + 2 < len(toks):
+        if (toks[i].kind == "ident" and toks[i].val == "extern"
+                and toks[i + 1].kind == "ident" and toks[i + 1].val == "fn"
+                and toks[i + 2].kind == "ident"):
+            externs.append(toks[i + 2].val)
+            i += 3
+            continue
+        i += 1
+    syscalls = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
+    ptrs = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    extc = sum(calls(nm) - 1 for nm in externs)
+    return {"extern fn declared": len(externs), "extern call sites": extc,
+            "syscalls": syscalls, "raw ptr transforms": ptrs,
+            "total sites": extc + syscalls + ptrs}
+
+
+@test
+def test_stat_boundary_counts_match_the_lexer():
+    """`stat` 的「边界操作」这几行, 必须与**词法器**数出来的**逐项**相等。
+
+    **Why** (`docs/205` R5): `unsafe` 在 Loment 里**不是关键字**, 所以这条边界不是语法
+    划的, 是由**名字**划的 —— "越过语言保证的那几个内建"加上"本单元自己声明的 `extern fn`"。
+    它的全部价值在"可 grep、可计数、可审计"上, 所以**数错了就等于没有**。
+    **How to apply**: 语料是仓库里**全部**示例, 不是一份。一份只能证明那条路走得通,
+    证明不了边界: 注释里出现的名字、字符串里的名字、`extern fn` 声明处自己那个 `(`,
+    都是要**不数**或**减掉**的。
+    """
+    srcs = sorted((ROOT / "loment" / "examples").glob("*.lomt"))
+    assert len(srcs) >= 30, f"示例集变小了: {len(srcs)}"
+    bad: list[str] = []
+    for f in srcs:
+        rc, out, err = _run(["stat", str(f)] + _no_color())
+        if rc != 0:
+            bad.append(f"{f.name}: stat rc={rc} {err.strip()[:60]}")
+            continue
+        for key, exp in _boundary_counts(f.read_text(encoding="utf-8")).items():
+            m = re.search(rf"{re.escape(key)}\s*(\d+)\s*$", out, re.M)
+            if not m:
+                bad.append(f"{f.name}: 输出里没有 `{key}`")
+            elif int(m.group(1)) != exp:
+                bad.append(f"{f.name}: {key} 报 {m.group(1)}, 词法器数出 {exp}")
+    assert not bad, "边界操作数与词法器不一致: " + " / ".join(bad[:6])
+
+    # 夹具: 五个数**写死**。语料只证明"跑得通", 夹具才证明"数得对" ——
+    # 边缘 (注释里的名字、字符串里的名字、以它开头的长名字、声明处那个 `(`)
+    # 全在 `loment/lex/boundary.lomt` 里, 而它在语料里一次都碰不到。
+    fix = ROOT / "loment" / "lex" / "boundary.lomt"
+    pinned = {"extern fn declared": 2, "extern call sites": 3, "syscalls": 3,
+              "raw ptr transforms": 4, "total sites": 10}
+    got_o = _boundary_counts(fix.read_text(encoding="utf-8"))
+    assert got_o == pinned, f"夹具自己的期望值漂了: 词法器数出 {got_o}, 写的是 {pinned}"
+    rc, out, err = _run(["stat", str(fix)] + _no_color())
+    assert rc == 0, f"词法夹具 stat rc={rc}: {err.strip()[:80]}"
+    for key, exp in pinned.items():
+        m = re.search(rf"{re.escape(key)}\s*(\d+)\s*$", out, re.M)
+        assert m and int(m.group(1)) == exp, (
+            f"夹具 ({fix.name}): {key} 报 {m.group(1) if m else '缺'}, 期望 {exp}")
 
 
 @test

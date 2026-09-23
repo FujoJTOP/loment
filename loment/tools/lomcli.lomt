@@ -1660,6 +1660,96 @@ fn do_cat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- 边界操作 (`docs/205` R5)
+
+/// 跳过空白与注释。**词的边界只由 token 决定**, 与两个 token 之间隔了什么无关 ——
+/// 少了这一步, `f /* c */ (` 在字节扫描与真词法器那里就是两个答案。
+fn skip_trivia(p: ptr, n: u32, i: u32) -> u32 {
+    let k: u32 = i;
+    let go: u32 = 1;
+    while go == 1 && k < n {
+        let c: u32 = load8(p, k);
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            k = k + 1;
+        } else if c == 47 && k + 1 < n && load8(p, k + 1) == 47 {
+            while k < n && load8(p, k) != 10 {
+                k = k + 1;
+            }
+        } else if c == 47 && k + 1 < n && load8(p, k + 1) == 42 {
+            k = k + 2;
+            while k + 1 < n && !(load8(p, k) == 42 && load8(p, k + 1) == 47) {
+                k = k + 1;
+            }
+            if k + 1 < n {
+                k = k + 2;
+            } else {
+                k = n;
+            }
+        } else {
+            go = 0;
+        }
+    }
+    return k;
+}
+
+fn eq_rng(a: ptr, b: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// (q, m) 这个名字被**调用**了几次: 该标识符之后 (跳过空白/注释) 紧跟 `(`。
+///
+/// 数的是**词法**事实 —— 不看它是不是真的函数、是不是真的越界。`docs/204` R5 要的
+/// 就是这个: "可 grep、可计数、可审计"。**边界可见 ≠ 边界正确**, 那后半句是人的事。
+fn cnt_calls(p: ptr, n: u32, q: ptr, m: u32) -> u32 {
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let ch: u32 = load8(p, i);
+        if alpha(ch) {
+            let s: u32 = i;
+            while i < n && (alpha(load8(p, i)) || digit(load8(p, i))) {
+                i = i + 1;
+            }
+            let l: u32 = i - s;
+            if l == m && eq_rng(ptr_add(p, s), q, m) {
+                let j: u32 = skip_trivia(p, n, i);
+                if j < n && load8(p, j) == 40 {
+                    c = c + 1;
+                }
+            }
+        } else if ch == 34 {
+            i = i + 1;
+            while i < n && load8(p, i) != 34 {
+                if load8(p, i) == 92 && i + 1 < n {
+                    i = i + 1;
+                }
+                i = i + 1;
+            }
+            i = i + 1;
+        } else if ch == 47 && i + 1 < n && load8(p, i + 1) == 47 {
+            while i < n && load8(p, i) != 10 {
+                i = i + 1;
+            }
+        } else if ch == 47 && i + 1 < n && load8(p, i + 1) == 42 {
+            i = i + 2;
+            while i + 1 < n && !(load8(p, i) == 42 && load8(p, i + 1) == 47) {
+                i = i + 1;
+            }
+            i = i + 2;
+        } else {
+            i = i + 1;
+        }
+    }
+    return c;
+}
+
 fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if argc < 3 {
         return err_usage(mem, "stat needs a file name");
@@ -1709,6 +1799,76 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     kv(mem, 1, "blank", blanks);
     kv(mem, 1, "non-blank", lines - blanks);
     kv(mem, 1, "longest line", maxl);
+
+    // ---- 边界操作 (`docs/205` R5) -------------------------------------------------
+    // "越过语言保证的每一步, 都在**词法上**显式、且可计数"。`unsafe` 不是关键字
+    // (R5 的裁决是"抄意图, 形态要定"), 所以这条边界由下面这几族**名字**划出来 ——
+    // 于是它可 grep、可计数、可审计: 一个工程可以规定"裸指针只许出现在这三个文件"。
+    // 数的全是**写出来了没有**, 不是"危不危险" —— 后者要类型, 那是编译器的事。
+    let n_sys: u32 = cnt_calls(p, n, str_ptr("syscall4"), str_len("syscall4"))
+                   + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"));
+    let n_ptr: u32 = cnt_calls(p, n, str_ptr("ptr_add"), str_len("ptr_add"))
+                   + cnt_calls(p, n, str_ptr("ptr_sub"), str_len("ptr_sub"))
+                   + cnt_calls(p, n, str_ptr("str_ptr"), str_len("str_ptr"));
+    // 第三族不行: `extern fn` 的名字是**本单元自己声明的** (`docs/173`), 没有固定清单,
+    // 所以一边数声明、一边对每个声明过的名字数调用点。声明处那个 `(` 也被数进去过, 减掉。
+    let n_extd: u32 = 0;
+    let n_extc: u32 = 0;
+    let i2: u32 = 0;
+    while i2 < n {
+        let ch: u32 = load8(p, i2);
+        if alpha(ch) {
+            let s: u32 = i2;
+            while i2 < n && (alpha(load8(p, i2)) || digit(load8(p, i2))) {
+                i2 = i2 + 1;
+            }
+            if eq_cstr(ptr_add(p, s), i2 - s, "extern") {
+                let k: u32 = skip_trivia(p, n, i2);
+                if k + 2 <= n && starts_with(ptr_add(p, k), n - k, "fn")
+                        && (k + 2 >= n || (!alpha(load8(p, k + 2)) && !digit(load8(p, k + 2)))) {
+                    let q: u32 = skip_trivia(p, n, k + 2);
+                    let nl: u32 = 0;
+                    while q + nl < n && (alpha(load8(p, q + nl)) || digit(load8(p, q + nl))) {
+                        nl = nl + 1;
+                    }
+                    if nl > 0 {
+                        n_extd = n_extd + 1;
+                        let t: u32 = cnt_calls(p, n, ptr_add(p, q), nl);
+                        if t > 0 {
+                            n_extc = n_extc + t - 1;
+                        }
+                    }
+                }
+            }
+        } else if ch == 34 {
+            i2 = i2 + 1;
+            while i2 < n && load8(p, i2) != 34 {
+                if load8(p, i2) == 92 && i2 + 1 < n {
+                    i2 = i2 + 1;
+                }
+                i2 = i2 + 1;
+            }
+            i2 = i2 + 1;
+        } else if ch == 47 && i2 + 1 < n && load8(p, i2 + 1) == 47 {
+            while i2 < n && load8(p, i2) != 10 {
+                i2 = i2 + 1;
+            }
+        } else if ch == 47 && i2 + 1 < n && load8(p, i2 + 1) == 42 {
+            i2 = i2 + 2;
+            while i2 + 1 < n && !(load8(p, i2) == 42 && load8(p, i2 + 1) == 47) {
+                i2 = i2 + 1;
+            }
+            i2 = i2 + 2;
+        } else {
+            i2 = i2 + 1;
+        }
+    }
+    title(mem, 1, "Boundary operations");
+    kv(mem, 1, "extern fn declared", n_extd);
+    kv(mem, 1, "extern call sites", n_extc);
+    kv(mem, 1, "syscalls", n_sys);
+    kv(mem, 1, "raw ptr transforms", n_ptr);
+    kv(mem, 1, "total sites", n_extc + n_sys + n_ptr);
     return 0;
 }
 
