@@ -19,11 +19,11 @@
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "9e4009bacd73b6ff5ec1d3b725072497c11ddc542f31a9f2cdd81aa79ab4ed18"
+   "sha256": "997f9644280ba8eb7c569e8e30b3d8be48bf1a6327341de2fa0f31a4252554dc"
   },
   {
    "path": "tools/potato.py",
-   "sha256": "b5b9b050e280ab0f55063e9862cd711b3c47a43554d852f3b6483f3b5feb8bdd"
+   "sha256": "cec034e8de3cd2965044b28f4e0ebaa081184d7f65ace195fb841838230d5500"
   },
   {
    "path": "tools/potato_test.py",
@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_cli_test.py",
-   "sha256": "1525c49e1bf007da848a58c9ce8f3060d50fc6954071ca2ceab6841d12f61b52"
+   "sha256": "7c79f2dec77c73ac484c257dffca5ecb8ebcab9174a98573f4121519d3678769"
   },
   {
    "path": "tools/loment_err_test.py",
@@ -1071,7 +1071,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "604e26371af0aa6d867f4b82546b1ff8d811336c3346f1f8bfaaa77aa8fd2704"
+   "sha256": "9e6b5ffa10ffff9a238bc6d58452182063eab2797b2bc0cf4e30bb64722375e0"
   },
   {
    "path": "loment/tools/lomclicheck.lomt",
@@ -1280,6 +1280,10 @@
   {
    "path": "loment/extblock/evil.lomt",
    "sha256": "ede5ad41df1181563f86697ade8e7be25e210f30577a77718f2b58d7ceaa4f2b"
+  },
+  {
+   "path": "loment/lex/boundary.lomt",
+   "sha256": "c55720fa91454dcdce34320968addb32b05f381d686cd2b0b01f5062478680a3"
   },
   {
    "path": "loment/lex/multiline_str.lomt",
