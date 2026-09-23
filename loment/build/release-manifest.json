@@ -1879,7 +1879,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "f33b6d392002b20b226a265f0033cd7d957f967daf6ce79c7eebbd2c239bf182"
+   "sha256": "7b5f93fb0456bed0227bf76ad494d0b6becaa42a57f27b2df72a3fe1c1140ef5"
   },
   {
    "path": "docs/203-third-party-audit.md",
@@ -1891,7 +1891,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "905854936429fde94c99d1533063aed67f9876e847704c3269df0a952f86c2b7"
+   "sha256": "02980cc57fa419eadff6ba8ca3b522803850209110a748fd457e95ded09d0cfa"
   },
   {
    "path": "docs/manual/index.md",
