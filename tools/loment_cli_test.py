@@ -302,10 +302,14 @@ def _boundary_counts(text: str) -> dict[str, int]:
     toks = [t for t in lomc.lex(text) if t.kind != "eof"]
 
     def calls(name: str) -> int:
+        # `fn NAME(` 是**声明**, 不是调用 —— 少了这一条, 谁定义了一个叫 `ptr_add`
+        # 的函数, 就会凭空多出一次"越界"。
         return sum(1 for i, t in enumerate(toks)
                    if t.kind == "ident" and t.val == name
                    and i + 1 < len(toks) and toks[i + 1].kind == "punct"
-                   and toks[i + 1].val == "(")
+                   and toks[i + 1].val == "("
+                   and not (i > 0 and toks[i - 1].kind == "ident"
+                            and toks[i - 1].val == "fn"))
 
     externs: list[str] = []
     i = 0
@@ -319,7 +323,7 @@ def _boundary_counts(text: str) -> dict[str, int]:
         i += 1
     syscalls = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
     ptrs = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
-    extc = sum(calls(nm) - 1 for nm in externs)
+    extc = sum(calls(nm) for nm in externs)
     return {"extern fn declared": len(externs), "extern call sites": extc,
             "syscalls": syscalls, "raw ptr transforms": ptrs,
             "total sites": extc + syscalls + ptrs}

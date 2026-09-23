@@ -21,13 +21,18 @@
 //   * 本段的 `write` / `read` / `syscall4` —— 它们在注释里;
 //   * 下面那行字符串里的 `read(` —— 它是文本, 不是调用;
 //   * `write_all` —— 名字以 `write` 开头, 但不是 `write`;
-//   * `extern fn write(...)` 声明处自己那个 `(` —— 它是声明, 要在调用点里减掉。
+//   * 每一个 `fn NAME(` —— 那都是**声明**, 不是调用 (下面自己定义了一个 `ptr_add`)。
 //
 // **该被数到的一条古怪的**: 名字与 `(` 之间隔了一个块注释, 仍然算一次调用 ——
 // 词的边界**只由 token 决定**, 与两个 token 之间隔了什么无关。
 
 extern fn write(fd: i32, buf: ptr, n: u32) -> i32;
 extern fn read(fd: i32, buf: ptr, n: u32) -> i32;
+
+// 自己定义一个与内建同名的函数: 那个 `ptr_add(` 是**声明**, 不该被数成越界。
+fn ptr_add(p: ptr) -> ptr {
+    return p;
+}
 
 fn demo(p: ptr) -> u32 {
     let a: u32 = write(1, p, 4);
