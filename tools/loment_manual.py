@@ -22,7 +22,10 @@ EX = ROOT / "loment" / "examples"
 SPECS = ["docs/141-l0-lom-spec.md", "docs/142-potato-v0.md", "docs/143-l1-loment-v0.md",
          "docs/144-loment-native-backend.md", "docs/146-loment-capability-semantics.md",
          "docs/147-potato-v1-spec.md", "docs/148-loment-toolchain.md",
-         "docs/149-loment-kernel-integration.md", "docs/150-loment-selfhost.md"]
+         "docs/149-loment-kernel-integration.md", "docs/150-loment-selfhost.md",
+         # 借用/所有权的边界 (docs/205 R1): 哪些能证、哪些不证。**放在规范那一栏**是
+         # 有意的 —— 它讲的是实现的界, 而读者问"这段能不能编过"时, 它就是规范性的答案。
+         "docs/206-loment-ownership-boundary.md"]
 
 
 def compiler_version() -> str:

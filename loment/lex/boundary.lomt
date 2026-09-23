@@ -1,0 +1,52 @@
+// loment/lex/boundary.lomt —— 「边界操作」计数的**词法**夹具 (`docs/205` R5)
+//
+// **它不在 `loment/examples/` 里**: 那个目录按定义是公开 API (每份都会长出一页手册),
+// 而这一份是**夹具** —— 满是有意为之的错形状, 编译不过, 也不该编过。
+//
+// 只被 `tools/loment_cli_test.py::test_stat_boundary_counts_match_the_lexer` 喂给
+// `loment stat`, 再由**参考实现真正的词法器** (`lomc.lex`) 独立数一遍做对照。
+//
+// **为什么需要它**: 仓库里那 32 份示例中 `extern fn` 一次都没出现 (实测: 声明 0 处、
+// 调用 0 处), 于是"extern 那一族"是**空跑**的 —— 判据扫过去, 一行都没进过那个分支。
+// 这一份把那一族连同它的**边缘**一起写进来。
+//
+// 期望值 (`docs/205` R5 的五个数), 逐条写下来:
+//
+//   extern fn declared   2      (write / read)
+//   extern call sites    3      (write 2 处, read 1 处)
+//   syscalls             3      (syscall4 两处, syscall6 一处)
+//   raw ptr transforms   4      (ptr_add 1, ptr_sub 1, str_ptr 2)
+//
+// **不该被数到的**, 每条都是有意写进来的:
+//   * 本段的 `write` / `read` / `syscall4` —— 它们在注释里;
+//   * 下面那行字符串里的 `read(` —— 它是文本, 不是调用;
+//   * `write_all` —— 名字以 `write` 开头, 但不是 `write`;
+//   * 每一个 `fn NAME(` —— 那都是**声明**, 不是调用 (下面自己定义了一个 `ptr_add`)。
+//
+// **该被数到的一条古怪的**: 名字与 `(` 之间隔了一个块注释, 仍然算一次调用 ——
+// 词的边界**只由 token 决定**, 与两个 token 之间隔了什么无关。
+
+extern fn write(fd: i32, buf: ptr, n: u32) -> i32;
+extern fn read(fd: i32, buf: ptr, n: u32) -> i32;
+
+// 自己定义一个与内建同名的函数: 那个 `ptr_add(` 是**声明**, 不该被数成越界。
+fn ptr_add(p: ptr) -> ptr {
+    return p;
+}
+
+fn demo(p: ptr) -> u32 {
+    let a: u32 = write(1, p, 4);
+    let b: u32 = write /* 隔了注释也还是同一个 token 序列 */ (1, p, 4);
+    let s: str = "read(0, p, 4) 只是文本, 不算调用";
+    let c: u32 = read(0, p, 4);
+    let d: u32 = write_all(p, 4);
+    let e: u32 = syscall4(1, 1, 0, 0);
+    let f: u32 = syscall4(60, 0, 0, 0);
+    /* 块注释也从计数里整段跳过 */
+    let g: u32 = syscall6(0, 0, 0, 0, 0, 0);
+    let h: ptr = ptr_add(p, 8);
+    let i: ptr = ptr_sub(p, 8);
+    let j: ptr = str_ptr(s);
+    let k: ptr = str_ptr(s);
+    return a + b + c + d + e + f + g;
+}
