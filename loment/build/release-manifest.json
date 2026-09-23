@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "478ecf8de42bceeb26941529210a5ecb1256a0c74a17d0a7d41bb184513a8484"
+   "sha256": "2450d9599f6db61c9ef224e0a077dc3f4d921dc0ccca32e7f14a76deea36387a"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_potato_emit_test.py",
-   "sha256": "d3c1487eb40f93d5a5903cd35e64fd7ffe50e8f9781595028a023c2a656a6d09"
+   "sha256": "f5ddeaab4e27777e24e0c12ed271e745e55b1632ae359061f381fa3c607c9f95"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "917f8bddf669cf0af41660d472759fe9242cf15291f78a1bfa1a3f0d910446db"
+   "sha256": "efe2450759f7d2487975e6e40effd1e92affc71ff473b75aeb667f96e0298324"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1583,7 +1583,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "245071ad2aeefde1ecb1117bc725cc48027ec2ac46307d9f0b68e1eeb5cf7a2f"
+   "sha256": "f48fb60797aea61bf9f13537c7a50482c32f05c0b40d3f83e6c0be89bff73a04"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1663,7 +1663,7 @@
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "d05f3e22e5dc9de960c11f34a6c82b7599d85ee8299403b17b9d12a803bdd68c"
+   "sha256": "620a99f5470177ed6570411bdbbd2a0b6913c95bc1d4626fba6e7d003b0f170d"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
@@ -1839,7 +1839,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "a228966d467e25a99d2975f6850e407e61ad299db61750b84a942c7e5f585e50"
+   "sha256": "eb4f60694a094822b8ad1c95e3e4a97b5398da11ebc45338648a21aca500d450"
   },
   {
    "path": "docs/190-loment-debugger.md",
@@ -1879,7 +1879,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "562c9a95d39c58147e9d4e7bd4ebdf9c2655f25fe967f62ab2bb5745bd1e530e"
+   "sha256": "1e54bce025d9357fb5e31505116254d5f7d904871313ac59572ebe03b4b2a384"
   },
   {
    "path": "docs/203-third-party-audit.md",
@@ -1891,7 +1891,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "61014d3b0cc1cbcdb0f6217cc2964a60f6aa8d828f7bcf5f4369f5f1a2cd300c"
+   "sha256": "1830e8229f0b3fe941aee028157c294b9cf5fca61a53ea167973016a57f0ca7b"
   },
   {
    "path": "docs/manual/index.md",
