@@ -743,7 +743,7 @@
   },
   {
    "path": "tools/loment_manual.py",
-   "sha256": "e1d7296bee027ed178bcf7e398cf176381a4da67de4e55d134e95458607a76a2"
+   "sha256": "41afd9f8493be713eb62a63672e0c20f6dc983d7f9cb0c05635dd6ff70d315a9"
   },
   {
    "path": "tools/ci.py",
@@ -807,7 +807,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "d28544f567e45c4668e6f51c24fc273aa9d49d7c59973c9fe6fb20787e4aca4d"
+   "sha256": "dae29945c2f4ccbd19445c286b3d73b4e0ce8cf92012c3ab309308ef5ffdcd1c"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1019,7 +1019,7 @@
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "af8a5b67c8148889d1373a8ec6c1b919269ab171ca8f55679706b32beec22492"
+   "sha256": "623dcfa85d90f6d89302f7f60c78ba5b825db96be69efe29504c1249b9053107"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1894,8 +1894,12 @@
    "sha256": "905854936429fde94c99d1533063aed67f9876e847704c3269df0a952f86c2b7"
   },
   {
+   "path": "docs/206-loment-ownership-boundary.md",
+   "sha256": "53d457eaaf7ec425113b2ba22dfeacb99bf5366c5096af96710b7d2fe4ed021c"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "882ec5cce8181860ca77eda76f014193a0a5f1e0c84bec5c1efe59092a2843f5"
+   "sha256": "96cc4e4f494011c407fb527b229e76fbc51e1ee1586bdbdf930e6f6648398722"
   },
   {
    "path": "docs/manual/api/ahci.md",
