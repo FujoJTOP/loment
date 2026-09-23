@@ -167,13 +167,17 @@ Potato 形式对象，还没有任何一条 L0 原语按模式分叉。
 ## 6. 一致性套件（"0.1.4 Alpha"指的就是这套东西全绿）
 
 ```bash
-python tools/loment_rule_parity.py    # 65/65 等价 + 假阳性/漂移 0 (棘轮预算 65)
-python tools/loment_p8_test.py        # 16/16: 54/54 零诊断 + 54/54 逐字节 + 定点 + 驱动闸门
-python tools/lomentc_test.py          # 参考实现 106/106 (含其 API 形状断言)
-python tools/loment_tools_test.py     # 18/18: 诊断分类/内建表/增量缓存…
-python tools/loment_ir_diff.py --all  # 40 个目标逐字节一致 (定位工具)
+python tools/loment_rule_parity.py    # 等价 + 假阳性/漂移 0 (棘轮预算由它自己打印, 只升不降)
+python tools/loment_p8_test.py        # 零诊断 + 逐字节 + 定点 + 驱动闸门 (条数由它自己打印)
+python tools/lomentc_test.py          # 参考实现全绿 (含其 API 形状断言)
+python tools/loment_tools_test.py     # 诊断分类/内建表/增量缓存…
+python tools/loment_ir_diff.py --all  # 全部目标逐字节一致 (定位工具)
 python tools/loment_status.py --check # 状态矩阵与 docs/145 一致
 python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由它打印)
+
+> ⚠ **这一块原先每条都写着一个分母**（65/16/106/18/40），2026-09-22 第三方复核实测
+> **全部都过期了**（真值是 69/20/121/30/…）。理由与 `docs/160` §1 那条一样：**复述一个
+> 会变的数就是制造第二份真相**。现在就写不变量，分母以工具自己打印的尾行为准。
 ```
 
 发布快照：`git tag v0.1.3.4-alpha`（annotated，打在 `Fujoos-FujoLang-DEV` 上并已推送 origin；
