@@ -1715,7 +1715,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "4dffaba743186f4bda8fc6e07af0062e4d2c12501d742e849d9e40ed02ec8a2b"
+   "sha256": "6a64e1d0d54033d146595b353633fa38018b789a770f6e57ec9b54e7a0023ebe"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -1879,7 +1879,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "4f65a6d15d569ed581820fd4c4eb056189dacc6079d87e9357997502721b435b"
+   "sha256": "f33b6d392002b20b226a265f0033cd7d957f967daf6ce79c7eebbd2c239bf182"
   },
   {
    "path": "docs/203-third-party-audit.md",
