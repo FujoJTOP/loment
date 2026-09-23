@@ -19,19 +19,25 @@
 // ## 边界: 子集之外**点名拒绝**, 绝不静默发错
 //
 // 现在覆盖的是"依赖 + 根 + 预置块"、trait/impl、**泛型的单态化**(M6 函数 + M7 类型)、
-// 以及全部标量视图那一大片；**还拒**的是四件事，各有各的理由：
+// `layouts`(读 `lom/*.lom` 并解析它的 `record`)、以及全部标量视图那一大片；
+// **还拒**的是**三件事**，各有各的理由：
 //
-//   1. **`layout` / L0**(`layouts`)—— 它来自 `use "xxx.lom"` 那种 L0 装载。参考实现会把它
-//      读成 `layouts` 那几格, 自举侧不装载 L0 —— 与其发一张空表, 不如点名。
-//   2. **外部代码块 / 方言**(`bodies` / `dialects`)—— 由**驱动器**拒: 外部代码块在检查
+//   1. **外部代码块 / 方言**(`bodies` / `dialects`)—— 由**驱动器**拒: 外部代码块在检查
 //      **之前**就被它拒了; 而方言那一格只有它知道"这次 `comefor` 展开过没有"(走到这里
 //      token 流上那两类词已经没了)。
-//   3. **链式泛型**(泛型函数体里再调泛型函数)—— 参考实现靠 **8 轮迭代**走*实例*的体,
-//      这里只走单元本体一趟, 会把实参类型当成 `T` 造出错的实例名。见 `pt_mono_body`。
-//   4. **泛型实参是字段访问**(`max(p.a, p.b)`)—— 参考实现按**字段**类型推, 这里的实参推断
-//      只认"标识符"与 `x as T`。**不能**拿标识符自己的声明类型顶替(那会得出
-//      `max_Pair<u32>` 那种实例名), 所以定不出来就点名拒。见 `pt_arg_ty`。
-//      另外 **M7 只做一轮**且只收**裸类型名**实参 —— 嵌套泛型同样点名拒(`pt_tmap_build`)。
+//   2. **链式泛型**(泛型函数体里再调泛型函数)—— 参考实现靠 **8 轮迭代**走*实例*的体,
+//      这里只走单元本体一趟, 会把实参类型当成 `T` 造出错的实例名(`pick_T`)。见 `pt_mono_body`。
+//   3. **嵌套泛型实参**(`Outer<Inner<u32>>`)—— **M7 只做一轮**且只收**裸类型名**实参;
+//      参考实现那 8 轮才削得干净。定不出来就点名拒(`pt_tmap_build`)。
+//
+// **已闭合的两条**（列在这里，免得有人照旧清单去查）：
+//
+//   * **`layout` / L0**(`layouts`)—— 2026-09-22 做掉（`pt_l0_*` + `pt_layouts`），
+//     `use "lom/fujr.lom"` 的 `demo.lomt` 已进覆盖。
+//   * **泛型实参是字段访问**(`max(p.a, p.b)`)—— 2026-09-23 做掉（`pt_field_arg_ty`）：
+//     按**字段**类型推；泛型 struct 的字段类型**就是那个类型形参**时，换成**声明处写的
+//     实参** —— 那一段 token 本来就在单元里，**指回去即可**（不造新串，省掉一整套暂存）。
+//     `p[0]` / `f(x)` 仍然不定、点名拒。
 //
 // 关于泛型那两个**不在**上面的清单里(M6/M7 已经落地): `generics`(声明那一格) +
 // `instances`(实例那一格) + 签名/字段/载荷里的**改名**(`Pair<u32>` → `Pair_u32`)。
@@ -2168,8 +2174,174 @@ fn pt_env_pop(sc: ptr, d: u32) {
     store32(sc, PT_EN, n);
 }
 
+/// 找一个**类型声明**（`struct` / `enum`）的下标（指向 `struct`/`enum` 那个词），
+/// 名字与 `name_tok` 相同的**第一个**；找不到 `PT_NONE`。只扫**深度 0**。
+///
+/// 与 `pt_find_gtype` 的区别：那个在**名字池**里比对（它服务于"建实例名"那条路，
+/// 手上是池里的键），这个直接比单元里的 token —— 字段访问那条路手上只有 token，
+/// 而且**不要求声明是泛型的**（`struct S { a: u32 }` 也要能找到）。
+fn pt_tdecl_find(unit: ptr, t: ptr, lo: u32, hi: u32, name_tok: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && k == 0 && pt_kind(t, i + 1) == 0
+                && (pt_tis(unit, t, i, "struct") || pt_tis(unit, t, i, "enum"))
+                && pt_same(unit, t, i + 1, name_tok) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return PT_NONE;
+}
+
+/// 声明体（`{`…`}`）里名为 `fld_tok` 的字段的**类型 token 区间**；找不到返回 0。
+///
+/// 形状与 `pt_fields` 同：字段是**定长**的 `名字 : 类型`，`,` 与 `;` 都在第 0 层分隔。
+/// `at_name` 那格的作用是**别把类型里同名的标识符当字段名**（`a: T` 里的 `T`）。
+fn pt_field_ts(unit: ptr, t: ptr, brc: u32, hi: u32, fld_tok: u32) -> u64 {
+    let j: u32 = brc + 1;
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    while j < hi && pt_kind(t, j) != 4 && !pt_tis(unit, t, j, "}") {
+        if at_name == 1 && pt_kind(t, j) == 0 {
+            if pt_same(unit, t, j, fld_tok) == 1 {
+                let ts: u32 = j + 2;
+                let te: u32 = pt_ty_end(unit, t, ts, hi);
+                if te > ts {
+                    return (ts as u64) * 4294967296 + (te as u64);
+                }
+                return 0;
+            }
+            at_name = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && (pt_tis(unit, t, j, ",") || pt_tis(unit, t, j, ";")) {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 声明 `struct Pair<T, U>` 里名为 `p_tok` 的类型形参的**序号**（从 0 起）；
+/// 不是它的形参（或声明没有 `<…>`）返回 `PT_NONE`。
+fn pt_tp_index(unit: ptr, t: ptr, decl: u32, hi: u32, p_tok: u32) -> u32 {
+    let lt: u32 = pt_find_ch(unit, t, decl + 1, hi, "<");
+    if lt == PT_NONE {
+        return PT_NONE;
+    }
+    let gt: u32 = pt_match(unit, t, lt, "<", ">");
+    let j: u32 = lt + 1;
+    let d: u32 = 0;
+    let k: u32 = 0;
+    while j < gt && pt_kind(t, j) != 4 {
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 {
+            if pt_kind(t, j) == 0 && pt_same(unit, t, j, p_tok) == 1 {
+                return k;
+            }
+            if pt_tis(unit, t, j, ",") {
+                k = k + 1;
+            }
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+/// 写在**声明处**的类型 `Name<A, B>` 里第 `k` 个类型实参的 token 区间；没有返回 0。
+fn pt_arg_ts(unit: ptr, t: ptr, lt: u32, hi: u32, k: u32) -> u64 {
+    let gt: u32 = pt_match(unit, t, lt, "<", ">");
+    let j: u32 = lt + 1;
+    let d: u32 = 0;
+    let c: u32 = 0;
+    while j < gt && pt_kind(t, j) != 4 {
+        if d == 0 && c == k {
+            let te: u32 = pt_ty_end(unit, t, j, gt);
+            if te > j {
+                return (j as u64) * 4294967296 + (te as u64);
+            }
+            return 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")
+                || pt_tis(unit, t, j, ")")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && pt_tis(unit, t, j, ",") {
+            c = c + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// `p.a` —— **字段访问当泛型实参**。参考实现按**字段的类型**推（`p.a` → `u32`），
+/// 这一条与它同口径；推不出来返回 0，由 `pt_mono_call` 点名拒。
+///
+/// 泛型 struct 的字段类型若**就是**那个类型形参（`struct Pair<T> { a: T }`），要换成
+/// **声明处写的实参**（`let p: Pair<u32>` 里那个 `u32`）。这里**不造新 token** ——
+/// 直接把区间指回单元里那一段就够了：改名走的是"渲完查表"，而那段 token 本来就在单元里
+/// （这是这一格省掉一整套临时串的关窍）。
+fn pt_field_arg_ty(sc: ptr, unit: ptr, t: ptr, hi: u32, obj_tok: u32, fld_tok: u32) -> u64 {
+    let ty: u64 = pt_env_get(sc, unit, t, obj_tok);
+    if ty == 0 {
+        return 0;
+    }
+    let ts: u32 = (ty / 4294967296) as u32;
+    if pt_kind(t, ts) != 0 {
+        return 0;
+    }
+    let decl: u32 = pt_tdecl_find(unit, t, 0, hi, ts);
+    if decl == PT_NONE {
+        return 0;
+    }
+    let brc: u32 = pt_find_ch(unit, t, decl + 1, hi, "{");
+    if brc == PT_NONE {
+        return 0;
+    }
+    let fty: u64 = pt_field_ts(unit, t, brc, hi, fld_tok);
+    if fty == 0 {
+        return 0;
+    }
+    let fs: u32 = (fty / 4294967296) as u32;
+    let fe: u32 = (fty % 4294967296) as u32;
+    if pt_kind(t, fs) == 0 && fe == fs + 1 && pt_tis(unit, t, ts + 1, "<") {
+        let k: u32 = pt_tp_index(unit, t, decl, hi, fs);
+        if k != PT_NONE {
+            return pt_arg_ts(unit, t, ts + 1, hi, k);
+        }
+    }
+    return fty;
+}
+
 /// 一个实参的**类型 token 区间**（`(起点 << 32) | 终点`），定不出来就是 0。
-/// 只收两种形态：标识符（查局部表）与 `x as T`（取 `as` 后面那个类型）。
+/// 收三种形态：标识符（查局部表）、`x as T`（取 `as` 后面那个类型）、
+/// 以及 `p.a`（**字段访问**，取字段的类型 —— 见 `pt_field_arg_ty`）。
+/// `p[0]` / `f(x)` 仍然不定（返回 0），由 `pt_mono_call` 点名拒。
 fn pt_arg_ty(sc: ptr, unit: ptr, t: ptr, i: u32, hi: u32) -> u64 {
     let j: u32 = i;
     if pt_kind(t, j) == 0 && pt_kind(t, j + 1) == 0 && pt_tis(unit, t, j + 1, "as") {
@@ -2177,13 +2349,17 @@ fn pt_arg_ty(sc: ptr, unit: ptr, t: ptr, i: u32, hi: u32) -> u64 {
         let te: u32 = pt_ty_end(unit, t, ts, hi);
         return (ts as u64) * 4294967296 + (te as u64);
     }
-    // ⚠ 只认"标识符**后面就是分隔符**"那一种。`p.a` / `p[0]` / `f(x)` 的**下一个 token
-    // 不是分隔符**，而这三种的"类型"不能拿标识符自己的声明类型顶替 —— 顶替出来的实例名
-    // 会是 `max_Pair<u32>` 那种（参考实现按**字段**类型推成 `u32`，于是它叫 `max_u32`）。
-    // 定不出来就返回 0，由 `pt_mono_call` **点名拒**。
+    // ⚠ 标识符**后面不是分隔符**时不能拿它自己的声明类型顶替 —— 顶替出来的实例名会是
+    // `max_Pair<u32>` 那种（参考实现按**字段**类型推成 `u32`，于是它叫 `max_u32`）。
+    // 所以 `p.a` 走 `pt_field_arg_ty` 单独推；`p[0]` / `f(x)` 仍然定不出来、点名拒。
+    if pt_kind(t, j) == 0 && pt_kind(t, j + 1) != 0 && pt_tis(unit, t, j + 1, ".") {
+        if pt_kind(t, j + 2) == 0 {
+            return pt_field_arg_ty(sc, unit, t, hi, j, j + 2);
+        }
+        return 0;
+    }
     if pt_kind(t, j) == 0 && pt_kind(t, j + 1) != 0
-            && !pt_tis(unit, t, j + 1, ".") && !pt_tis(unit, t, j + 1, "[")
-            && !pt_tis(unit, t, j + 1, "(") {
+            && !pt_tis(unit, t, j + 1, "[") && !pt_tis(unit, t, j + 1, "(") {
         return pt_env_get(sc, unit, t, j);
     }
     return 0;
