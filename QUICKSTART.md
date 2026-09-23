@@ -297,3 +297,4 @@ not `E::A => 0,`. `loment cheat` lists these first, in the order they bite.
 | `loment/examples/` | 28 example programs; `loment example NAME` prints one. |
 | `docs/158-loment-freeze.md` | What is frozen, and what changing it costs. |
 | [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |
+| [Discord](https://discord.gg/rGw7NRNU) | Where to ask, and where to say what broke. |
