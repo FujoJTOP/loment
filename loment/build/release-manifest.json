@@ -1015,7 +1015,7 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "2d8464bd0618726411cef46984ccaccb8246a6cd9fba4b4d630f448862f4402b"
+   "sha256": "3811c3fa45e229c3ada0290089fe35b06b130fbd8e10af5c82e44419dde2664b"
   },
   {
    "path": "tools/loment_dist_test.py",
@@ -1715,7 +1715,7 @@
   },
   {
    "path": "docs/158-loment-freeze.md",
-   "sha256": "03a2468c1a8ea3340e4cb81d04224e76cf6192ee5935456b175ad82cafb2925d"
+   "sha256": "3e546001540c05b2cf3216e5813543aae72e670007483636230afee5be3e1b89"
   },
   {
    "path": "docs/159-loment-seed-bootstrap.md",
@@ -1731,7 +1731,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "c204e25b40a0d515d01f01b615517872ed1bda346ec526b7c550bc8949320687"
+   "sha256": "f0a3a764b2b9f30036cc7c3bbad3e0a3f6d34a46c12284a8b2eb173a029bd7fd"
   },
   {
    "path": "docs/163-loment-signing.md",
@@ -1755,15 +1755,15 @@
   },
   {
    "path": "docs/169-loment-cli.en.md",
-   "sha256": "ddb89720ab64bc6ad87153c737ee4559624d695cfdcba2f51a0586553d4f68e6"
+   "sha256": "c57b73db9ec2d2ffe43ec933ad756716b6b710f3d38f535b99a7820d28b39d9f"
   },
   {
    "path": "docs/169-loment-cli.md",
-   "sha256": "19e532c8eae4e836a0ad7235b0a6cd4dec83e31774cbf4c046f021401f1dfb55"
+   "sha256": "0174f8f05104f99ba549acd310c884279da686af3f639ef5f001687c768cf853"
   },
   {
    "path": "docs/170-loment-lompi-bundling.md",
-   "sha256": "eb35d41056f3a79085f55bac508b98e9b9de8f6fe2b4a37870814f7fe1cea5f8"
+   "sha256": "d2dd4c81a07bc51c628768e9b856774735e66ae0d047b585e54032e8e12b3ea1"
   },
   {
    "path": "docs/171-loment-publish-outlets.md",
@@ -1783,11 +1783,11 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "c19a0176791d01cba827ab660d615abac038c315c223c372ece52637f7fdc684"
+   "sha256": "d1bb3e333b4dd85639a0341d82d72407bdb669f0a81627c96b4968bbf8e7ff67"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
-   "sha256": "3b5296fffb0cb43e9c84035da53ad20bca8027d4e548e6f6892892008fd47952"
+   "sha256": "3ae3094db703c11f205c13b845ad94ec5f1cae43604f155007f061d5254889aa"
   },
   {
    "path": "docs/177-ffi-complete.md",
@@ -1839,7 +1839,7 @@
   },
   {
    "path": "docs/189-full-selfhosting.md",
-   "sha256": "c04f1b3dc5b8b9b7d7185919a40e33473728ddbd4db8f8d20352c7e08110d95e"
+   "sha256": "1420e87e680d4babcaab9a2fc69a264a94dac2cfeb3bb3f3b8d41aa268ea880e"
   },
   {
    "path": "docs/190-loment-debugger.md",
@@ -1879,7 +1879,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "1a1689caf5e1cbe280894534bad7a153b1b4b69af5d91734ffa1459fc010d2df"
+   "sha256": "7fd295d8c2cbcf202608626a415f9473c45fdb7d6f49e53ed6499219accca50c"
   },
   {
    "path": "docs/manual/index.md",
