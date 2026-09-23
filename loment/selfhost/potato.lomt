@@ -19,20 +19,17 @@
 // ## 边界: 子集之外**点名拒绝**, 绝不静默发错
 //
 // 现在覆盖的是"依赖 + 根 + 预置块"、trait/impl、**泛型的单态化**(M6 函数 + M7 类型，
-// **M6 跑到不动点**)、`layouts`(读 `lom/*.lom` 并解析它的 `record`)、以及全部标量视图
-// 那一大片；**还拒**的是**两件事**，各有各的理由：
+// **M6 跑到不动点**、**M7 支持嵌套实参**)、`layouts`(读 `lom/*.lom` 并解析它的 `record`)、
+// 以及全部标量视图那一大片；**还拒**的是**一件事**：
 //
 //   1. **外部代码块 / 方言**(`bodies` / `dialects`)—— 由**驱动器**拒: 外部代码块在检查
 //      **之前**就被它拒了; 而方言那一格只有它知道"这次 `comefor` 展开过没有"(走到这里
 //      token 流上那两类词已经没了)。
-//   2. **嵌套泛型实参**(`Outer<Inner<u32>>`)—— M7 只收**裸类型名**实参, 定不出来就点名拒
-//      (`pt_tmap_build`)。⚠ **这一条不是"自举侧差一轮"**（2026-09-23 补夹具时实测更正）:
-//      **参考实现自己也发不出来** —— 它把实例名拼成 `Outer_Inner<u32>`（不是合法标识符），
-//      然后被它**自己的**形式对象自检拒掉。要支持得先定**嵌套实例怎么命名**
-//      (`Outer_Inner_u32` 会与两实参的 `Outer<Inner, u32>` 撞名), 那是格式层的改动 ——
-//      所以这条**不挂在"自举侧还差什么"上**, 挂在"格式层要不要定义嵌套实例名"上。
 //
-// **已闭合的三条**（列在这里，免得有人照旧清单去查）：
+// （曾经还有第二档「泛型类型实例化的实参不是裸类型名」—— **2026-09-23 收掉了**，
+//   见下面"已闭合"的第四条。）
+//
+// **已闭合的四条**（列在这里，免得有人照旧清单去查）：
 //
 //   * **`layout` / L0**(`layouts`)—— 2026-09-22 做掉（`pt_l0_*` + `pt_layouts`），
 //     `use "lom/fujr.lom"` 的 `demo.lomt` 已进覆盖。
@@ -49,6 +46,15 @@
 //     ⚠ 顺带补上的一格：`K as T` 的 K **原先只认标识符**（kind 0），于是 `1 as u32`
 //     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `main` 正是
 //     那么写的，只是它以前排在 `REFUSED` 里，碰不到。
+//   * **嵌套泛型实参**(`Outer<Inner<u32>>`)—— 2026-09-23 做掉。**规则先定，代码后写**：
+//     `docs/147` §2「命名层」定下"**分隔的长度 = 嵌套深度**"（`Outer_Inner__u32`），
+//     这样它与**两实参**的 `Outer<Inner, u32>`（`Outer_Inner_u32`）不撞名。三个实现点：
+//     `pt_tname` 按深度给分隔（旧写法是"`<` 与 `,` 一律换一个 `_`"，嵌套会拼出
+//     `Outer_Inner_u32>`）、`pt_key_args_simple` 放行 `<`/`>`、`pt_inst_tk` 写 `instances[].args`
+//     时**查表改名**（`Inner<u32>` → `Inner_u32` —— 形式对象要求实参是合法类型串）。
+//     ⚠ 定规则**之前**，**参考实现自己也发不出来**：它拼的 `Outer_Inner<u32>` 不是标识符，
+//     被它**自己的**校验器拒掉（三种形状崩法一样）。所以那一格当时**不是**"自举侧差一轮"，
+//     是**格式没定义**。夹具 `loment/examples/nested_gen/main.lomt` 现在在**覆盖**里。
 //
 // 关于泛型那两个**不在**上面的清单里(M6/M7 已经落地): `generics`(声明那一格) +
 // `instances`(实例那一格) + 签名/字段/载荷里的**改名**(`Pair<u32>` → `Pair_u32`)。
@@ -3028,6 +3034,12 @@ fn pt_key_args_simple(sc: ptr, ko: u32, kl: u32) -> u32 {
         if c == 95 || c == 32 || c == 44 {
             ok = 1;
         }
+        // **嵌套**（`Outer<Inner<u32>>`）2026-09-23 起收：`pt_tname` 按深度给分隔，
+        // 而实参如果是泛型实例，写出去之前会**查表改名**（见 `pt_inst_tk` 那处）。
+        // 别的形状（`[u8; 4]` / `[T]` / `*mut T` 那类）仍然由下面那几个字符挡住。
+        if c == 60 || c == 62 {
+            ok = 1;
+        }
         if ok == 0 {
             return 0;
         }
@@ -3081,17 +3093,38 @@ fn pt_tname(sc: ptr, i: u32) -> u32 {
     let no: u32 = PT_TPOOL + i * PT_TSTRIDE + 4 + kl;
     let p: u32 = 0;
     let j: u32 = 0;
-    while j < kl - 1 {
+    let d: u32 = 0;                   // 嵌套深度：`<` 进一层、`>` 出一层
+    while j < kl {
         let c: u32 = load8(sc, ko + j) as u32;
+        // 分隔是 **d 个下划线**（d = 进这一层之后的深度）—— 这就是 `docs/147` 那条命名规则：
+        //   Box<u32>            -> Box_u32            （d=1）
+        //   Outer<Inner<u32>>   -> Outer_Inner__u32   （里层 d=2）
+        //   Outer<Inner, u32>   -> Outer_Inner_u32    （两个实参，**不与上面撞名**）
+        // 旧写法是"`<` 与 `,` 一律换成一个 `_`"，对嵌套会拼出 `Outer_Inner_u32>` ——
+        // 那个 `>` 让名字不是标识符（参考实现也栽在同一处，见 `docs/147` §实例命名）。
         if c == 60 {
-            store8(sc, no + 4 + p, 95 as u8);
-            p = p + 1;
+            d = d + 1;
+            let k: u32 = 0;
+            while k < d {
+                store8(sc, no + 4 + p, 95 as u8);
+                p = p + 1;
+                k = k + 1;
+            }
+        } else if c == 62 {
+            if d > 0 {
+                d = d - 1;
+            }
         } else if c == 44 {
-            store8(sc, no + 4 + p, 95 as u8);
-            p = p + 1;
-            j = j + 1;
+            let k: u32 = 0;
+            while k < d {
+                store8(sc, no + 4 + p, 95 as u8);
+                p = p + 1;
+                k = k + 1;
+            }
+        } else if c == 32 {
+            // 空格丢掉（参考实现那边是 `", ".join`，分隔由自己拼，与空格无关）
         } else {
-            store8(sc, no + 4 + p, load8(sc, ko + j) as u8);
+            store8(sc, no + 4 + p, c as u8);
             p = p + 1;
         }
         j = j + 1;
@@ -3677,12 +3710,17 @@ fn pt_inst_tk(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, ntu: u32,
                 let al: u32 = (aa % 4294967296) as u32;
                 o = pt_aelm(out, o, 4, a);
                 o = pt_str(out, o, "\"");
+                let ast: u32 = o;                 // 实参文本的起点（查表要用）
                 let q: u32 = 0;
                 while q < al {
                     store8(out, o, load8(sc, ko + ao + q) as u8);
                     o = o + 1;
                     q = q + 1;
                 }
+                // 实参本身若是**泛型实例**（`Inner<u32>`），要写成它的**实例名**
+                // （`Inner_u32`）—— 形式对象要求 `instances[].args` 是合法类型串。
+                // 非泛型的实参（`u32`）查不到名字，原样留着（`pt_map_slice` 只认配了名字的条目）。
+                o = pt_map_slice(sc, out, ast, o);
                 o = pt_str(out, o, "\"");
                 a = a + 1;
             }
@@ -4290,7 +4328,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     }
     pt_sort_pool(sc);
     if pt_tmap_build(sc, unit, t, nt) == 1 {
-        return pt_wfail("fujoc-s: --emit-potato: 泛型类型实例化的实参不是裸类型名 —— 嵌套泛型 (`Outer<Inner<u32>>`) 这一格点名拒。⚠ **这一条不挂在自举侧头上**（2026-09-23 实测更正）: 参考实现自己也发不出来, 它会把实例名拼成非法的 `Outer_Inner<u32>` 然后被自己的形式对象自检拒掉; 要支持得先定嵌套实例怎么命名（`Outer_Inner_u32` 会与两实参的 `Outer<Inner, u32>` 撞名）—— 那是格式层的改动\n");
+        return pt_wfail("fujoc-s: --emit-potato: 泛型实参里有这一格不收的形状 —— 收的是基类型名、以及**嵌套泛型**（`Outer<Inner<u32>>`，命名见 docs/147); 数组/切片/指针当实参（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）还没做\n");
     }
     // ---- M-L0: `layouts`（要读文件 —— 解析不了、或超了 64 KiB 读缓冲, 都**点名拒**）
     if pt_lay_check(sc, unit, t, lo, hi) == 1 {

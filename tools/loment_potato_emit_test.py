@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -122,6 +123,11 @@ EXTRA_COVERED = (
     # 参考实现走 `load_unit`（带开关预扫）时 `switches` 里有 addin 那条定义，
     # 而直接 `load()` 只有根自己那份。它钉住"这一格是**整个程序**的表"。
     "loment/examples/addin/main.lomt",
+    # **嵌套泛型实参**（`Outer<Inner<u32>>`）—— 2026-09-23 起**支持**（`docs/147` §实例命名
+    # 定义了嵌套实例名：`Outer_Inner__u32`，里层用两个下划线）。这一份是那次改动的钉子：
+    # 它同时钉住**名字的规则**（`test_nested_instance_name_follows_the_rule`）与
+    # **逐字节**（这一份进 `COVERED` 就自动比）。
+    "loment/examples/nested_gen/main.lomt",
 )
 
 #: 语料之外单独点的拒绝轴：`comefor` 与外部代码块都由**驱动器**拒（那不是这一格的判断，
@@ -132,11 +138,6 @@ EXTRA_REFUSED = {
     # `choose write grammar python` 那种源：自举侧的前门本来就收不了（docs/188 §7.1），
     # 与这一格无关，但"收不了"也要看得见。
     "loment/lib/lumtui_math.lomt": "grammar",
-    # **嵌套泛型实参**（`Outer<Inner<u32>>`）。这一条是 2026-09-23 补的**夹具**，
-    # 补的时候发现的事比夹具本身重要：**两边都没有** —— 参考实现发出一个非法实例名
-    # （`Outer_Inner<u32>`）然后被它自己的自检拒掉，自举侧是点名拒。
-    # 下一条判据（`test_nested_generic_is_refused_by_both`）钉住"参考侧也过不去"那一半。
-    "loment/examples/nested_gen/main.lomt": "嵌套泛型",
 }
 
 TESTS: list = []
@@ -259,34 +260,24 @@ def test_out_of_subset_is_refused_by_name():
 
 
 @test
-def test_nested_generic_is_refused_by_both():
-    """**嵌套泛型实参**（`Outer<Inner<u32>>`）：**两边都过不去**，只是失败方式不同。
+def test_nested_instance_name_follows_the_rule():
+    """**嵌套泛型实参**（`Outer<Inner<u32>>`）：实例名按 `docs/147` §「实例命名」——
+    **分隔的长度 = 嵌套深度**（一层 `_`、两层 `__`）。
 
-    这一条钉的是"**这不是自举侧的单方面缺口**"。`docs/205` 原先把它记成"参考实现那 8 轮
-    迭代才削得干净" —— 2026-09-23 补夹具时实测更正：那 8 轮削的是**链式**（走*实例*的体），
-    嵌套**类型实参**参考实现自己也发不出来 —— 它拼出的实例名 `Outer_Inner<u32>` **不是合法
-    标识符**，于是被它**自己的**形式对象自检拒掉（`types[1].name 非法`）。
+    这条判据 2026-09-23 之前叫 `test_nested_generic_is_refused_by_both`，钉的是"**两边都
+    发不出来**"：参考实现按旧规则把名字拼成 `Outer_Inner<u32>`（`<` `>` 还在里面，**不是
+    标识符**），被它**自己的**形式对象自检拒掉。`docs/147` 定了命名规则之后两边都能发了，
+    判据随之从"两边都拒"改成"**名字按规则**"。
 
-    三种形状试下来崩法一样（局部 + 字面量 / 只要类型注解 / 非泛型 struct 的字段），
-    所以不是夹具挑得怪。要往前走，先得定**嵌套实例怎么命名**（`Outer_Inner_u32` 会与两实参
-    的 `Outer<Inner, u32>` 撞名，所以需要一个分隔约定）—— 那是**格式层**的改动，
-    两个实现 + 形式对象校验器 + `docs/147` 要一起动。
+    ⚠ 钉在**名字**上、不是"能跑就行"：`Outer_Inner__u32`（一个嵌套实参）与
+    `Outer<Inner, u32>` → `Outer_Inner_u32`（两个实参）**不能撞名**，这条就是那道线 ——
+    只写"发得出来"的话，撞名了也看不出来。
     """
-    p = EX / "nested_gen" / "main.lomt"
-    mod = lomentc.load(p)
-    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
-    assert not lomentc.check(mod, deps=deps), "夹具本身要能过检查 —— 它只出界在形式上"
-    got = None
-    try:
-        m2, d2 = lomentc.prepare(mod, deps)
-        lomentc.emit_potato(m2, ROOT, d2)
-    except Exception as e:  # noqa: BLE001
-        got = str(e)
-    assert got is not None, (
-        "参考实现**也**发不出嵌套泛型的形式对象 —— 它现在能发了？那这一格要重判"
-        "（自举侧就不该再拒，得改成逐字节对上）")
-    assert "非法" in got, f"参考侧的失败方式变了（不再是自检拒非法名）：{got[:200]}"
-    print("      嵌套泛型：参考侧发非法实例名被自检拒 / 自举侧点名拒（**两边都不支持**）")
+    d = json.loads(_want("loment/examples/nested_gen/main.lomt"))
+    got = {i["name"]: i["args"] for i in d["instances"] if i["kind"] == "type"}
+    want = {"Inner_u32": ["u32"], "Outer_Inner__u32": ["Inner_u32"]}
+    assert got == want, f"嵌套实例名/实参不符规则：{got}（应为 {want}）"
+    print("      嵌套实例名：Outer<Inner<u32>> -> Outer_Inner__u32（与两实参的 …_u32 不撞）")
 
 
 @test

@@ -15,7 +15,7 @@ v0（docs/142）只覆盖标量/数组/struct/枚举/布局/能力域。P3/P4 �
 | 新增字段 | 来自 | 说明 |
 |---|---|---|
 | `generics` | `fn f<T>` / `struct S<T>` / `enum E<T>` | 泛型声明（单态化前的本单元视图，含预置 `Option`/`Result`） |
-| `instances` | 单态化 | `{kind, name, of, args}` —— 哪个泛型以哪些实参被实例化 |
+| `instances` | 单态化 | `{kind, name, of, args}` —— 哪个泛型以哪些实参被实例化（**名字怎么拼见 §2 命名层**） |
 | `traits` | `trait T { fn m(self) -> R; }` | trait 及其方法名 |
 | `impls` | `impl T for X` | 实现关系（方法名为 trait 中声明的名字，不含 `X_` 前缀混淆） |
 | `guards` | `guard cap(idx)` | 本单元的审计站点数（A2 断言的输入） |
@@ -43,6 +43,31 @@ v0（docs/142）只覆盖标量/数组/struct/枚举/布局/能力域。P3/P4 �
 - `traits`/`impls`：trait 名唯一、方法非空且唯一；`impl.trait` 必须是已声明 trait 或内建
   `Drop`（方法集 `{drop}`）；`impl.for` 必须是合法类型；impl 方法必须出现在 trait 声明中；
 - `guards`：非负整数。
+
+**命名层**（**生产者义务**，校验器不查 —— 理由见下）：
+
+`instances[].name` 由**类型表达式**构造，规则是 **分隔的长度 = 嵌套深度**：
+
+* `Base` 与它的实参之间放 **depth 个下划线**（最外层 1 个，往里每层 +1）；
+* `,` 在同一层用**同长度**的分隔；类型表达式里的空格丢掉。
+
+```
+Box<u32>                 -> Box_u32
+Outer<Inner<u32>>        -> Outer_Inner__u32
+Outer<Inner, u32>        -> Outer_Inner_u32
+Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
+```
+
+**规则存在的理由只有一个：不撞名。** `Outer<Inner<u32>>`（一个嵌套实参）与
+`Outer<Inner, u32>`（两个实参）必须产出**不同**的名字 —— 1 个与 2 个下划线把它们分开。
+（2026-09-23 之前没有这条规则，两边都按 `base + "_" + "_".join(args)` 拼，于是嵌套会拼出
+`Outer_Inner<u32>`：`<` `>` 还在名字里，**不是标识符**，被校验器拒掉。那天同时给它定了规则、
+两个实现一起改、并补了夹具 `loment/examples/nested_gen/main.lomt`。）
+
+⚠ **校验器查不了这条**：对象里的 `args` 是**改过名之后**的形式（`["Inner_u32"]`），而名字里
+嵌的是改名前那一段（`Inner__u32`）—— 从 `(kind, of, args)` 反推不出名字。所以它是**生产者的
+义务**，由"两个实现逐字节相同"那条判据钉住（`loment_potato_emit_test` 的
+`test_nested_instance_name_follows_the_rule` 另钉一遍**规则本身**），**不是**由校验器钉。
 
 反例完备性由 `tools/potato_test.py` 的 33 条变异保证：规范里每一条规则至少有一条反例被拒。
 
