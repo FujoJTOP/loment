@@ -1886,6 +1886,10 @@
    "sha256": "35c15169951a4755c0bae26bff4c16df60c589ebdcfee4ebf2491e860f6c8e51"
   },
   {
+   "path": "docs/204-language-merits.md",
+   "sha256": "4614995177becaba014cbbd5cbe54d3c157da8217a40eb2621be5ed5450da538"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "882ec5cce8181860ca77eda76f014193a0a5f1e0c84bec5c1efe59092a2843f5"
   },
