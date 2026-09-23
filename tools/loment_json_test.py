@@ -223,7 +223,10 @@ def test_json_library_matches_python():
     want: list[str] = []
     for i, p in enumerate(PAYLOADS):
         want.append(f"--payload {i}")
-        want.append(f"root_kind={json.loads(p) and 1}")
+        # **用 `_kind_of`, 不要写 `json.loads(p) and 1`** —— 后者对任何非空 JSON 恒等于 1,
+        # 于是这一条只断言"根非空", 而 docstring 说的是"根节点类型"（2026-09-22 第三方复核
+        # 抓到）。`_kind_of` 与 `json.lomt` 的 kind 同表, 就在本文件 380 行。
+        want.append(f"root_kind={_kind_of(json.loads(p))}")
     want.append("--emit")
     want.append(json.dumps({"jsonrpc": "2.0", "id": 7,
                             "result": {"ok": True, "n": 42, "s": 'a"b\n中\tz',

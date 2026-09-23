@@ -32,6 +32,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ICON = ROOT / "editors" / "loment.ico"
 
+
+def _plain_file(p: Path) -> bool:
+    """`p.is_file()`，但把 `OSError` 当成"不是文件"。
+
+    为什么要包一层：这台机器上 VS Code 那条候选路径
+    （`…\\Microsoft VS Code\\Code.exe`）的 `is_file()` 会**抛** `OSError`
+    （WinError 649, 装入点），而不是返回 `False` —— 于是 `loment_filetype_test`
+    是**崩**，不是 SKIP（2026-09-22 第三方复核实测）。本仓别的判据在缺工具时
+    `print SKIP`，这里对齐。**这不是掩盖**：那条路径确实用不了，返回 False 是正确判断。
+    """
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
 #: 扩展名 -> (ProgID, 显示名, MIME)。改这里就同时改了注册表计划与文档。
 EXT_MAP: dict[str, tuple[str, str, str]] = {
     ".lomt": ("Loment.Source", "Loment 源文件", "text/x-loment"),
@@ -64,9 +79,9 @@ def _candidates() -> list[Path]:
 def find_editor(explicit: str | None) -> Path | None:
     if explicit:
         p = Path(explicit)
-        return p if p.is_file() else None
+        return p if _plain_file(p) else None
     for p in _candidates():
-        if p.is_file():
+        if _plain_file(p):
             return p
     return None
 
@@ -178,8 +193,8 @@ def status() -> int:
         icon = _read(f"Software\\Classes\\{progid}\\DefaultIcon", "")
         choice = _read("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"
                        f"\\FileExts\\{ext}\\UserChoice", "ProgId")
-        ok_editor = bool(cmd) and Path(cmd.split('"')[1]).is_file() if '"' in (cmd or "") \
-            else False
+        ok_editor = bool(cmd) and _plain_file(Path(cmd.split('"')[1])) \
+            if '"' in (cmd or "") else False
         rows.append({"ext": ext, "progid": progid, "friendly": friendly,
                      "registered": cur == progid, "openwith": owp is not None,
                      "command": cmd, "has_command": bool(cmd),
