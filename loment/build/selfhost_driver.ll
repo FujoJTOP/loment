@@ -9346,36 +9346,46 @@ entry:
   store i32 %at, ptr %at.addr
   store i32 %end, ptr %end.addr
   %t1 = load ptr, ptr %s.addr
-  %t2 = load ptr, ptr %src.addr
-  %t3 = load ptr, ptr %toks.addr
-  %t4 = load i32, ptr %at.addr
-  %t5 = load i32, ptr %end.addr
-  %t6 = call i32 @l2_ok(ptr %t1, ptr %t2, ptr %t3, i32 %t4, i32 %t5)
-  %t7 = icmp eq i32 %t6, 0
-  br i1 %t7, label %L1_then, label %L2_else
-L1_then:
+  %t2 = call i32 @load32(ptr %t1, i32 572)
+  %t3 = icmp eq i32 %t2, 0
+  br i1 %t3, label %L2_sc_short, label %L1_sc_rhs
+L1_sc_rhs:
+  %t4 = load ptr, ptr %s.addr
+  %t5 = load ptr, ptr %src.addr
+  %t6 = load ptr, ptr %toks.addr
+  %t7 = load i32, ptr %at.addr
+  %t8 = load i32, ptr %end.addr
+  %t9 = call i32 @l2_ok(ptr %t4, ptr %t5, ptr %t6, i32 %t7, i32 %t8)
+  %t10 = icmp eq i32 %t9, 0
+  br label %L3_sc_end
+L2_sc_short:
+  br label %L3_sc_end
+L3_sc_end:
+  %t11 = phi i1 [ %t10, %L1_sc_rhs ], [ true, %L2_sc_short ]
+  br i1 %t11, label %L4_then, label %L5_else
+L4_then:
   ret i32 0
-L2_else:
-  br label %L3_end
-L3_end:
-  %t8 = load ptr, ptr %s.addr
-  %t9 = load ptr, ptr %out.addr
-  %t10 = getelementptr inbounds [2 x i8], ptr @.str.epoch_open.0, i64 0, i64 0
-  %t11 = insertvalue { ptr, i64 } undef, ptr %t10, 0
-  %t12 = insertvalue { ptr, i64 } %t11, i64 2, 1
-  %t13 = call i32 @emit_str(ptr %t8, ptr %t9, { ptr, i64 } %t12)
-  %t14 = load ptr, ptr %s.addr
-  %t15 = load ptr, ptr %out.addr
-  %t16 = call i32 @new_temp(ptr %t14, ptr %t15)
-  store i32 %t16, ptr %sv.addr
-  %t17 = load ptr, ptr %s.addr
-  %t18 = load ptr, ptr %out.addr
-  %t19 = getelementptr inbounds [31 x i8], ptr @.str.epoch_open.1, i64 0, i64 0
-  %t20 = insertvalue { ptr, i64 } undef, ptr %t19, 0
-  %t21 = insertvalue { ptr, i64 } %t20, i64 31, 1
-  %t22 = call i32 @emit_str(ptr %t17, ptr %t18, { ptr, i64 } %t21)
-  %t23 = load i32, ptr %sv.addr
-  ret i32 %t23
+L5_else:
+  br label %L6_end
+L6_end:
+  %t12 = load ptr, ptr %s.addr
+  %t13 = load ptr, ptr %out.addr
+  %t14 = getelementptr inbounds [2 x i8], ptr @.str.epoch_open.0, i64 0, i64 0
+  %t15 = insertvalue { ptr, i64 } undef, ptr %t14, 0
+  %t16 = insertvalue { ptr, i64 } %t15, i64 2, 1
+  %t17 = call i32 @emit_str(ptr %t12, ptr %t13, { ptr, i64 } %t16)
+  %t18 = load ptr, ptr %s.addr
+  %t19 = load ptr, ptr %out.addr
+  %t20 = call i32 @new_temp(ptr %t18, ptr %t19)
+  store i32 %t20, ptr %sv.addr
+  %t21 = load ptr, ptr %s.addr
+  %t22 = load ptr, ptr %out.addr
+  %t23 = getelementptr inbounds [31 x i8], ptr @.str.epoch_open.1, i64 0, i64 0
+  %t24 = insertvalue { ptr, i64 } undef, ptr %t23, 0
+  %t25 = insertvalue { ptr, i64 } %t24, i64 31, 1
+  %t26 = call i32 @emit_str(ptr %t21, ptr %t22, { ptr, i64 } %t25)
+  %t27 = load i32, ptr %sv.addr
+  ret i32 %t27
 }
 ; enum_base -> u32
 define i32 @enum_base(i32 %i) {
