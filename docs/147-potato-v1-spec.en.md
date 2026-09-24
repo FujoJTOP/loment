@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 7b7648728fcdabaea7be00dd01a66582230062538c557c0979da06fa7a8f561b -->
+<!-- source-sha256: 39e34348872c2d3b75f08396ea03a0b9d1bc0d994249ad13799f1d14c5a73c54 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -21,7 +21,7 @@ them:
 | New field | Comes from | Notes |
 |---|---|---|
 | `generics` | `fn f<T>` / `struct S<T>` / `enum E<T>` | generic declarations (this unit's view before monomorphisation, including the predefined `Option`/`Result`) |
-| `instances` | monomorphisation | `{kind, name, of, args}` — which generic is instantiated with which arguments |
+| `instances` | monomorphisation | `{kind, name, of, args}` — which generic is instantiated with which arguments (**how the name is spelled: see the naming layer in §2**) |
 | `traits` | `trait T { fn m(self) -> R; }` | traits and their method names |
 | `impls` | `impl T for X` | implementation relations (the method name is the name declared in the trait, without the `X_` prefix muddle) |
 | `guards` | `guard cap(idx)` | the number of audit sites in this unit (the input of the A2 assertion) |
@@ -53,6 +53,51 @@ only fixed-width integers, with `offset + width ≤ size` and non-overlapping in
   the builtin `Drop` (method set `{drop}`); `impl.for` must be a legal type; an impl method must appear in the
   trait declaration;
 - `guards`: a non-negative integer.
+
+**The naming layer** (a **producer obligation** — the validator does not check it; why, see below):
+
+`instances[].name` is built from the **type expression**, by the rule **the length of the separator = the
+nesting depth**:
+
+* between `Base` and its arguments, put **depth underscores** (1 at the outermost level, +1 for each level
+  further in);
+* a `,` at the same level uses a separator of the **same length**; spaces in the type expression are dropped.
+
+```
+Box<u32>                 -> Box_u32
+Outer<Inner<u32>>        -> Outer_Inner__u32
+Outer<Inner, u32>        -> Outer_Inner_u32
+Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
+```
+
+**The rule exists for exactly one reason: to not collide.** `Outer<Inner<u32>>` (one nested argument) and
+`Outer<Inner, u32>` (two arguments) must produce **different** names — 1 underscore versus 2 separates them.
+(Before 2026-09-23 there was no such rule; both sides spelled it `base + "_" + "_".join(args)`, so nesting
+produced `Outer_Inner<u32>`: the `<` and `>` were still inside the name, it **was not an identifier**, and the
+validator rejected it. That day the rule was written down, both implementations were changed together, and a
+fixture was added — `loment/examples/nested_gen/main.lomt`.)
+
+⚠ **The validator cannot check this**: the `args` in the object are the **post-rename** form
+(`["Inner_u32"]`), while the name embeds the pre-rename piece (`Inner__u32`) — the name cannot be
+reconstructed from `(kind, of, args)`. So it is a **producer obligation**, pinned by the "the two
+implementations are byte-identical" criterion (`loment_potato_emit_test`'s
+`test_nested_instance_name_follows_the_rule` pins **the rule itself** as well), **not** by the validator.
+
+**Which arguments get into that name.** Only two: a **base type name** (an identifier) and a **nested
+generic** (recursively). Other shapes — `Box<[u8; 4]>` / `Box<[u32]>` / `Box<mut [u32]>` / `Box<*mut u8>` —
+**have no naming rule**: spelled by the rule above they produce `Box_[u32]`, which is not an identifier.
+
+⚠ **But before arguing about the name, look at the step after it: the real block is further back, not in the
+name.** The backend `native M23` (**struct fields only support scalars for now**) stops that whole family
+first — **`Box<ptr>` is the best evidence**: its name is perfectly fine (`Box_ptr`), and the IR step rejects
+it anyway (`struct Box_ptr 字段类型 ptr 暂只支持标量`). And **nowhere** in the tree is it written that way
+(measured 2026-09-23: every `grep` hit was a `<<` shift or a comment).
+
+⇒ The current handling is an **explicit rejection** — both implementations give a **named** refusal rather
+than an internal error (before 2026-09-23 the reference side crashed the way "the formal object failed its own
+self-check" does: the name came out `Box_[u32]` and its own validator caught it). **Taking it in means taking
+M23 in first** (let struct fields support non-scalars), and only then extending the naming rule along the same
+line.
 
 Counterexample completeness is guaranteed by the 33 mutations in `tools/potato_test.py`: every single rule in
 the spec has at least one counterexample that is rejected.

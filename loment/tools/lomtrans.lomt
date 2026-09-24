@@ -6177,8 +6177,7 @@ fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
 }
 
 /// 一个 argv 参数是不是 `lit`。
-fn arg_is(cb: ptr, tot: u32, k: u32, lit: str) -> u32 {
-    let ap: ptr = ptr_add(cb, M_TMP + 96);
+fn arg_is(cb: ptr, tot: u32, k: u32, lit: str, ap: ptr) -> u32 {
     let l: u32 = arg_at(cb, tot, k, ap);
     if l == 0 {
         return 0;
@@ -6192,8 +6191,7 @@ fn arg_is(cb: ptr, tot: u32, k: u32, lit: str) -> u32 {
 
 /// 参数的文本（写进 `M_TMP + 64`，返回长度）—— 给 `--lang c` 这种"值在下一个参数"
 /// 与 `--k=v` 两种写法用。
-fn arg_val(cb: ptr, tot: u32, k: u32, out: ptr) -> u32 {
-    let ap: ptr = ptr_add(cb, M_TMP + 96);
+fn arg_val(cb: ptr, tot: u32, k: u32, out: ptr, ap: ptr) -> u32 {
     let l: u32 = arg_at(cb, tot, k, ap);
     if l == 0 {
         return 0;
@@ -6223,11 +6221,20 @@ fn lang_of(p: ptr, l: u32) -> u32 {
 }
 
 fn _start() -> u32 {
-    let mv: i64 = syscall4(12, 0, 0, 0);
-    if mv <= 0 {
+    // **先把堆扩到够，再拿它当基址** —— 与家族里其余工具一致。原来只 `brk(0)` 就开始把
+    // `[mem, mem + M_CAP)` 当自己的内存用，而那一带多数页根本没被映射，Linux 上第一次写
+    // 就是 SIGSEGV（Windows 上因为 PE 的 .bss/堆区 committed 得大而看不出来）。
+    // 详述与家族扫描见 `lomtfrom.lomt` 同一处、
+    // `loment_tools_test::test_tool_reserves_its_memory`。
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
         return die(2);
     }
-    let mem: ptr = mv as ptr;
+    let got: i64 = syscall4(12, (cur as u64) + M_CAP as u64, 0, 0);
+    if got < 0 {
+        return die(2);
+    }
+    let mem: ptr = cur as ptr;
     let _z1: u32 = st32(ptr_add(mem, M_TMP), E_CN, 0);
     let _z2: u32 = st32(ptr_add(mem, M_TMP), E_KN, 0);
     let _z3: u32 = st32(ptr_add(mem, M_TMP), E_EXN, 0);
@@ -6243,6 +6250,12 @@ fn _start() -> u32 {
     let tot: u32 = read_all(fd as u64, cb, 4096) as u32;
     syscall4(3, fd as u64, 0, 0);
     let vp: ptr = ptr_add(mem, M_TMP + 64);
+    // 参数检查用的暂存格。它**必须从 `mem` 算** —— 曾经写成 `ptr_add(cb, M_TMP + 96)`，
+    // 而 `cb` 已经是 `mem + M_ARG`，于是那个地址落到 `mem + 2441312`：越过 `M_CAP`
+    // （1525248）约 90 万字节。任何参数都会走到 `arg_is`，所以**有参数就 SIGSEGV、
+    // 无参数不崩**。正确写法要从 `cb` 往下减，而那个相对偏移是负数、`u32` 写不出来 ——
+    // 所以按 `arg_at` 自己的约定，把格子交给调用方算。
+    let sap: ptr = ptr_add(mem, M_TMP + 96);
     let lang: u32 = 0;
     let toks: u32 = 0;
     let pre: u32 = 0;
@@ -6258,8 +6271,8 @@ fn _start() -> u32 {
         q = q + 1;
     }
     while k < argc {
-        if arg_is(cb, tot, k, "--lang") == 1 {
-            let l: u32 = arg_val(cb, tot, k + 1, vp);
+        if arg_is(cb, tot, k, "--lang", sap) == 1 {
+            let l: u32 = arg_val(cb, tot, k + 1, vp, sap);
             let d: u32 = lang_of(vp, l);
             if d == 0 {
                 return die(2);
@@ -6267,20 +6280,20 @@ fn _start() -> u32 {
             lang = d - 1;
             k = k + 2;
         } else {
-            if arg_is(cb, tot, k, "--tokens") == 1 {
+            if arg_is(cb, tot, k, "--tokens", sap) == 1 {
                 toks = 1;
                 k = k + 1;
             } else {
-                if arg_is(cb, tot, k, "--ast") == 1 {
+                if arg_is(cb, tot, k, "--ast", sap) == 1 {
                     ast = 1;
                     k = k + 1;
                 } else {
-                    if arg_is(cb, tot, k, "--pre") == 1 {
+                    if arg_is(cb, tot, k, "--pre", sap) == 1 {
                         pre = 1;
                         k = k + 1;
                     } else {
-                        if arg_is(cb, tot, k, "--keep") == 1 {
-                            let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                        if arg_is(cb, tot, k, "--keep", sap) == 1 {
+                            let vl: u32 = arg_val(cb, tot, k + 1, vp, sap);
                             let i: u32 = 0;
                             let s0: u32 = 0;
                             while i <= vl {
@@ -6303,15 +6316,15 @@ fn _start() -> u32 {
                             }
                             k = k + 2;
                         } else {
-                            if arg_is(cb, tot, k, "--extern") == 1 {
-                                let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                            if arg_is(cb, tot, k, "--extern", sap) == 1 {
+                                let vl: u32 = arg_val(cb, tot, k + 1, vp, sap);
                                 if cli_pairs(mem, vp, vl, 0) == 0 {
                                     return die(2);
                                 }
                                 k = k + 2;
                             } else {
-                                if arg_is(cb, tot, k, "--const") == 1 {
-                                    let vl: u32 = arg_val(cb, tot, k + 1, vp);
+                                if arg_is(cb, tot, k, "--const", sap) == 1 {
+                                    let vl: u32 = arg_val(cb, tot, k + 1, vp, sap);
                                     if cli_pairs(mem, vp, vl, 1) == 0 {
                                         return die(2);
                                     }
@@ -6331,7 +6344,7 @@ fn _start() -> u32 {
         return die(2);
     }
     let _i: u32 = init_dialect(mem, lang);
-    let pl: u32 = arg_val(cb, tot, pathk, ptr_add(mem, M_SRC));
+    let pl: u32 = arg_val(cb, tot, pathk, ptr_add(mem, M_SRC), sap);
     let pp: ptr = ptr_add(mem, M_SRC);
     store8(pp, pl, 0 as u8);
     let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);

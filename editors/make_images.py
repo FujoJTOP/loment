@@ -1,16 +1,22 @@
-"""生成 README 里的示意图 (banner 之外那三张)。
+"""生成仓里那几张图。
 
-配色与 `loment-banner.png` 同一套 —— 深蓝底 + 白字, 亮色/暗色主题下都读得清。
-2 倍超采样再缩回, 免得字边发木。
+配色同一套 —— 深蓝底 + 白字, 亮色/暗色主题下都读得清。2 倍超采样再缩回,
+免得字边发木。确定性: 没有随机数、没有时间戳, 重跑逐字节相同。
 
     python editors/make_images.py
 
 产物:
+    editors/loment-banner.png        README 顶部标题图
     editors/loment-pipeline.png      一个程序是怎么编出来的
     editors/loment-bootstrap.png     自举: 种子 -> stage1 -> stage2 -> stage3
     editors/loment-diagnostic.png    报错器渲染的一张说明卡 (真实输出)
+    editors/loment-social.png        GitHub 社交预览卡 (1280x640)
+    editors/loment-discord.png       Discord 服务器图标 (512x512, 按圆显示)
+
+前四张进 README; 后两张不进 —— 它们上传到各自平台的设置里 (GitHub 的 Social preview,
+Discord 的服务器设置), 留在仓里是为了**有源可重生成**。
 """
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageFilter
 
 S = 2                                   # 超采样
 BG_TOP = (13, 17, 40)
@@ -361,9 +367,65 @@ def social():
     save(img.convert("RGB"), W, H, "editors/loment-social.png")
 
 
+# ---------------------------------------------------------------- Discord 图标
+
+def discord():
+    """Discord 服务器图标 (512x512)。
+
+    两条约束决定它长什么样, 都不是审美:
+
+    * **显示成圆形** —— Discord 把图标按圆裁。所以**从一开始就按圆设计**, 而不是拿
+      一张方的去让它切掉四角;
+    * **实际尺寸极小** —— 成员列表里 32px 上下。所以**一个字母都不放**: 那个尺寸上
+      字只会糊成一团。标记只在够大的地方放字 (banner / 社交卡)。
+
+    **底是自己画的圆, 不是把现成图标裁成圆**: 那个图标是圆角**方**, 裁圆之后它的四条
+    直边会在圆内留下接缝。所以圆另画, 只用它里面的那个 L —— 按"白"取出来, 放到圆心上。
+    """
+    W = H = 512
+    PAD = 14                                     # 圆与画布之间留一点, 免得贴边
+    box = [PAD * S, PAD * S, (W - PAD) * S, (H - PAD) * S]
+
+    disc = Image.new("L", (W * S, H * S), 0)
+    ImageDraw.Draw(disc).ellipse(box, fill=255)
+
+    grad = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad)
+    for y in range(H * S):                        # 上浅下深, 与图标的蓝同族
+        t = y / (H * S - 1)
+        gd.line([(0, y), (W * S, y)],
+                fill=tuple(round(a + (b - a) * t) for a, b in zip((124, 152, 255), (68, 96, 210)))
+                + (255,))
+    grad.putalpha(disc)
+    img = Image.alpha_composite(Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0)), grad)
+
+    icon = Image.open("editors/loment.ico")       # 只借它的 L, 不借它的底
+    icon.size = (256, 256)
+    # 阈值要高: 图标自己有一层很淡的内高光, 卡低了会在 L 的包围盒里留下几点杂点,
+    # 而它们会跟着 L 一起放大。中值再滤一道, 把 1px 的孤立点清掉。
+    white = icon.convert("RGBA").convert("L").point(lambda v: 255 if v > 250 else 0)
+    white = white.filter(ImageFilter.MedianFilter(3))
+    white = white.crop(white.getbbox())
+
+    target = int(W * S * 0.50)                    # 字标占盘面的一半 —— 32px 上要读得出
+    k = min(target / white.width, target / white.height)
+    lw, lh = round(white.width * k), round(white.height * k)
+    L = white.resize((lw, lh), Image.LANCZOS)
+    img.paste(Image.new("RGBA", (lw, lh), (255, 255, 255, 255)),
+              ((W * S - lw) // 2, (H * S - lh) // 2), L)
+
+    # 一道细环: Discord 的底色跟着主题走 (深/浅/自定义), 环给徽章一条边界
+    d = ImageDraw.Draw(img)
+    d.ellipse([4 * S, 4 * S, (W - 4) * S, (H - 4) * S], outline=(158, 182, 255, 235),
+              width=5 * S)
+
+    save(img, W, H, "editors/loment-discord.png")
+
+
 if __name__ == "__main__":
     banner()
     pipeline()
     bootstrap()
     diagnostic()
     social()
+    discord()

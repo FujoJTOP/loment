@@ -1846,6 +1846,27 @@ def _generic_parts(t: str) -> tuple[str, list[str]]:
     return base.strip(), args
 
 
+def _mangle_name(t: str, depth: int = 0) -> str:
+    """泛型类型 -> **实例名**（规则见 `docs/147` §「实例命名」）。
+
+    `_` 连接基名与它的实参；**嵌套层用更长的分隔**（第 `depth` 层用 `depth + 1` 个下划线）。
+    于是：
+
+        Box<u32>              -> Box_u32            （一层，与原规则一致）
+        Outer<Inner<u32>>     -> Outer_Inner__u32   （里层用两个）
+        Outer<Inner, u32>     -> Outer_Inner_u32    （两个实参，**不与上面撞名**）
+        Wrap<Outer<Inner<u32>>> -> Wrap_Outer__Inner___u32
+
+    旧规则是 `base + "_" + "_".join(args)`，对嵌套会拼出 `Outer_Inner<u32>` —— 那**不是
+    标识符**，于是被形式对象自检拒掉（2026-09-23 补夹具时撞到）。
+    """
+    if not _is_generic_type(t):
+        return t.strip()
+    base, args = _generic_parts(t)
+    sep = "_" * (depth + 1)
+    return base + sep + sep.join(_mangle_name(a, depth + 1) for a in args)
+
+
 def _replace_type(t: str, mapping: dict[str, str]) -> str:
     """按映射重写类型串 (含泛型实参递归); mapping 可含 "Pair<u32>" -> "Pair_u32"。"""
     if t in mapping:
@@ -2045,11 +2066,17 @@ def _rewrite_types(mods, mapping: dict[str, str]) -> None:
             f.ret = _replace_type(f.ret, mapping)
             for p in f.params:
                 p.type = _replace_type(p.type, mapping)
+            # 实例自己的**实参**也要改写：嵌套时它是 `Inner<u32>`，而形式对象要求
+            # `instances[].args` 是**合法类型串**（`_type_ok` 不认泛型语法）——
+            # 所以它得写成那个实例的名字 `Inner_u32`（2026-09-23 加嵌套支持时撞到）。
+            f.generic_args = [_replace_type(a, mapping) for a in f.generic_args]
             walk_stmts(f.body)
         for s in m.structs:
             s.fields = [(fn, _replace_type(ft, mapping)) for fn, ft in s.fields]
+            s.generic_args = [_replace_type(a, mapping) for a in s.generic_args]
         for e in m.enums:
             e.payloads = {v: _replace_type(pt, mapping) for v, pt in e.payloads.items()}
+            e.generic_args = [_replace_type(a, mapping) for a in e.generic_args]
 
 
 def _fix_generic_literals(mods, bases: set[str]) -> None:
@@ -2206,7 +2233,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                 break
             for ref in refs:
                 base, args = _generic_parts(ref)
-                name = base + "_" + "_".join(args)
+                name = _mangle_name(ref)
                 made[ref] = name
                 mp = {t: a for t, a in zip(gs.get(base, ge.get(base)).tparams, args)} if (
                     base in gs or base in ge) else None
@@ -3921,6 +3948,22 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                    "args": list(s.generic_args)} for s in mod.structs if s.from_generic]
     instances += [{"kind": "type", "name": e.name, "of": e.from_generic,
                    "args": list(e.generic_args)} for e in mod.enums if e.from_generic]
+    # 实例名必须是**标识符**（`docs/147` §2「命名层」）。命名规则覆盖不到的形状 ——
+    # 数组/切片/指针当泛型实参（`Box<[u32]>` 会拼成 `Box_[u32]`）—— 在这里**点名拒**。
+    #
+    # ⚠ **为什么不在 `prepare` 里拒**：`check()` 内部也调 `prepare()`（M6 单态化那一步），
+    # 在那儿抛会把**检查器**也变成拒绝方 —— 那是**语言面**的改动（冻结面四条：改规范 +
+    # 加一致性套件负例 + 两个实现同一次提交 + 过门禁），而这一格还没到那一步。
+    # 放在**发射器**里，检查器的行为一个字节都不动（`Box<[u32]>` 仍旧 check 得过 ——
+    # 它出界的是**形式对象**那一层）。
+    for it in instances:
+        if not it["name"].isidentifier():
+            raise LomError(1, 1,
+                           f"泛型实参的形状这一格不收: {it['args']!r}（实例名拼成 {it['name']!r}，"
+                           "不是标识符）—— 收的是基类型名与嵌套泛型。数组/切片/指针当泛型实参"
+                           "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
+                           "而且**后端**（`native M23`：struct 字段暂只支持标量）先把它们挡住了 "
+                           "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
