@@ -31,7 +31,10 @@ change is clean. CONTRIBUTING.md says where the gate stands today and what the b
 - [ ] Generated files are in their **own commit**, whose message says it is only generated
       output: `loment/build/selfhost_driver.ll`, `loment/build/release-manifest.json`,
       `loment/build/SHA256SUMS`, `loment/tools/surface_data.lomt`, `docs/manual/`.
-- [ ] If I touched a file the release manifest covers, I regenerated it.
+- [ ] If I touched a file the release manifest covers, I regenerated it — **or** I left it to the
+      `manifest` workflow, which recomputes it and pushes a `[生成物] …` commit onto this branch.
+      (It cannot do that for a fork pull request whose head touched `tools/`, or one without
+      "Allow edits by maintainers": there, it is on me.)
 - [ ] I did not widen a criterion to make it pass.
 - [ ] Anything a reader would need in order to believe this is in `docs/`, not only in this
       description.
