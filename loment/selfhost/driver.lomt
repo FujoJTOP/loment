@@ -1282,6 +1282,22 @@ fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
                 && load32(toks, (i + 1) * 20) == 0 && tok_is(src, toks, i + 1, "close") {
             i = i + 3;
         } else if k == 0 && tok_is(src, toks, i, "choose") {
+            // **核心模式不许**（`docs/175` §3.0 / `docs/143` §3.2）：addin 单元拉的是一份
+            // **开关设定**，而核心模式声明的是**整个程序**的取值 —— 只有根单元能定。
+            // 参考实现一直报这一条（"`addin` 单元不许声明核心模式"），而这里原先
+            // **一律放行** —— 也就是说两边行为本来就不一样。加 `gc` 维之前它只影响
+            // `std`/`no_std`（没人往 addin 单元里写），加完之后这一维**正是**会被写进去的
+            // 东西，所以这一轮补上，不让分叉被放大。
+            if sw_is_core(src, toks, i + 1) {
+                // **报文里不逐个列核心模式的取值**：原先列的是
+                // `(std / no_std / gc_manual / gc_auto —— …)`，加 `runtime` 那一维时
+                // 它必然漏（而且不会有人注意到）。理由本身与维数无关，就只说理由。
+                let mc2: str = "fujoc-s: addin 拉进来的单元不许写核心模式 (它们声明的是整个程序的取值, 只有根单元能定): ";
+                write_all(2, str_ptr(mc2), str_len(mc2) as u64);
+                write_all(2, path, n as u64);
+                write_all(2, str_ptr("\n"), 1);
+                die(1);
+            }
             i = i + 2;
         } else {
             die_chooseset(path, n);

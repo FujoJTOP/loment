@@ -123,6 +123,161 @@ define internal void @__loment_abort() {
 declare void @llvm.trap()
 '''
 
+#: **分配器**（`docs/175` §3.4 的 `gc_manual`）。
+#:
+#: 它**单独一个常量**，因为它**有自己的全局**（`@__loment_heap` / `@__loment_off` /
+#: `@__loment_freehead`）。而「发运行期」与「发全局」若是两个独立条件，就会有一个
+#: 程序发出 `__loment_alloc` 却没有任何全局可引用 —— **实测**：一份只用整数除法
+#: （于是 `@__loment_` 出现、运行期被发出）而不用 `alloc` 的单元，编译期直接报
+#: `use of undefined value '@__loment_freehead'`。分配器与它的全局**同进同出**。
+_IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
+;
+; 这里以前是**纯 bump**（`@__loment_off` 只涨不落），而 `free` 是个**占位** ——
+; 写它编得过、跑起来什么都不发生。`docs/175` §3.4 把那种形状点名叫「**允诺却不兑现**」，
+; 所以这一版把它兑现：**bump + 地址序空闲链表**。
+;
+; 块的形状（8 字节头，8 字节对齐）：
+;   +0  i32  size   —— 这一块的**总长**（含头）
+;   +4  i32  next   —— 下一块**空闲**块的偏移；0 = 链尾（所以偏移 0 永远不是块）
+; 载荷从 +8 开始。整个 arena 是 `@__loment_heap`，偏移从 0 起算。
+;
+; 三条规则，各有它要挡的东西：
+;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
+;     不拆的话一次大分配会把整个链表吃光。
+;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
+;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
+;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
+;     bump 前沿照样一路涨到 OOM。
+;
+; **还没做的**（下一层）：物理相邻的两块不合并（coalesce）。非 LIFO 的碎片化因此还在，
+; 而且它是收集器那一层的活（`docs/175` §3.4 的 `gc_auto`）。
+define internal ptr @__loment_alloc(i32 %size) {
+entry:
+  %need0 = add i32 %size, 15
+  %need = and i32 %need0, -8
+  %head = load i32, ptr @__loment_freehead
+  br label %floop
+floop:
+  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
+  %fend = icmp eq i32 %cur, 0
+  br i1 %fend, label %bump, label %fit
+fit:
+  %hp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %cur
+  %bsz = load i32, ptr %hp
+  %big = icmp uge i32 %bsz, %need
+  br i1 %big, label %take, label %fnext
+fnext:
+  %n4 = add i32 %cur, 4
+  %npp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %n4
+  %nxt = load i32, ptr %npp
+  br label %floop
+take:
+  %slack = sub i32 %bsz, %need
+  %cansplit = icmp uge i32 %slack, 16
+  %t4 = add i32 %cur, 4
+  %tpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4
+  %rest = load i32, ptr %tpp
+  br i1 %cansplit, label %split, label %nosplit
+split:
+  %so = add i32 %cur, %need
+  %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
+  store i32 %slack, ptr %spp
+  %so4 = add i32 %so, 4
+  %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
+  store i32 %rest, ptr %spp4
+  br label %relink
+nosplit:
+  br label %relink
+relink:
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+  br i1 %ishead, label %sethead, label %setprev
+sethead:
+  store i32 %newhead, ptr @__loment_freehead
+  br label %taken
+setprev:
+  %p4 = add i32 %prev, 4
+  %ppp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %p4
+  store i32 %newhead, ptr %ppp
+  br label %taken
+taken:
+  store i32 %need, ptr %hp
+  %ko = add i32 %cur, 8
+  %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ko
+  ret ptr %kp
+bump:
+  %off = load i32, ptr @__loment_off
+  %nxtoff = add i32 %off, %need
+  %fits = icmp ule i32 %nxtoff, 65536
+  br i1 %fits, label %bok, label %boom
+boom:
+  call void @__loment_abort()
+  unreachable
+bok:
+  store i32 %nxtoff, ptr @__loment_off
+  %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %off
+  store i32 %need, ptr %wp
+  %w4 = add i32 %off, 4
+  %wp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %w4
+  store i32 0, ptr %wp4
+  %bo = add i32 %off, 8
+  %bp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %bo
+  ret ptr %bp
+}
+
+define internal void @__loment_free(ptr %p) {
+entry:
+  %base = ptrtoint ptr @__loment_heap to i64
+  %pi = ptrtoint ptr %p to i64
+  %d64 = sub i64 %pi, %base
+  %d32 = trunc i64 %d64 to i32
+  %hi = sub i32 %d32, 8
+  %hp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %hi
+  %sz = load i32, ptr %hp
+  %hend = add i32 %hi, %sz
+  %off = load i32, ptr @__loment_off
+  %istail = icmp eq i32 %hend, %off
+  br i1 %istail, label %rewind, label %link
+rewind:
+  store i32 %hi, ptr @__loment_off
+  ret void
+link:
+  %head = load i32, ptr @__loment_freehead
+  br label %lloop
+lloop:
+  %cur = phi i32 [ %head, %link ], [ %nxt, %lcont ]
+  %prev = phi i32 [ 0, %link ], [ %cur, %lcont ]
+  %lend = icmp eq i32 %cur, 0
+  %after = icmp ugt i32 %cur, %hi
+  %stop = or i1 %lend, %after
+  br i1 %stop, label %ins, label %lcont
+lcont:
+  %l4 = add i32 %cur, 4
+  %lpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %l4
+  %nxt = load i32, ptr %lpp
+  br label %lloop
+ins:
+  %i4 = add i32 %hi, 4
+  %ipp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %i4
+  store i32 %cur, ptr %ipp
+  %ishead2 = icmp eq i32 %prev, 0
+  br i1 %ishead2, label %sethead, label %setprev
+sethead:
+  store i32 %hi, ptr @__loment_freehead
+  ret void
+setprev:
+  %q4 = add i32 %prev, 4
+  %qpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %q4
+  store i32 %hi, ptr %qpp
+  ret void
+}
+
+@__loment_heap = internal global [65536 x i8] zeroinitializer
+@__loment_off = internal global i32 8
+@__loment_freehead = internal global i32 0
+'''
+
 _RUST_RUNTIME = '''
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -692,15 +847,17 @@ class Module:
     #: 发出一条没有函数体的 define (非法 IR), 所以要分开。
     externs: list[Func] = field(default_factory=list)
     excluded: list[str] = field(default_factory=list)
-    #: 项目模式 (`choose no_std` / `choose std`, docs/143 §3.2)。**不写 = `std`**,
-    #: 所以 None 就是默认。它声明的是**整个程序**的运行模式, 不是某个模块的 ——
-    #: 见 `check()` 里那条"依赖不许 choose"。
+    #: **核心模式**的取值，按**维**记（`docs/175` §3.0 / §3.4）：`{"mode": "no_std"}`
+    #: 或 `{"gc": "gc_auto"}`。某一维不写 = 那一维的默认档（`CORE_DEFAULTS`）——
+    #: 所以"缺这一维"与"显式写了默认值"**语义上一样**，但**报错上不一样**：
+    #: 同一维写两次要报（在 `check()` 里，语法层只收集）。
     #:
-    #: **它是核心语法的硬写法**（用户 2026-09-17）: `std`/`no_std` 不走下面那套可定义的
-    #: 开关机制, 保有自己的规则（`docs/182` §1.3）。
-    choose: str | None = None
-    #: 每个核心模式声明的行号。**留成列表而不是只留最后一个**: "两个值打架"要能报出位置。
-    choose_lines: list[int] = field(default_factory=list)
+    #: **它是核心语法的硬写法**（用户 2026-09-17）：这几维都不走下面那套**可定义**的
+    #: 开关机制，保有自己的规则（`docs/182` §1.3）。
+    chooses: dict[str, str] = field(default_factory=dict)
+    #: 每一维**写在第几行**（`(维, 取值, 行)`）。**留成列表而不是只留最后一个**：
+    #: "这一维写了两次"要能报出第一次在哪一行、写的是什么。
+    choose_lines: list[tuple[str, str, int]] = field(default_factory=list)
     #: **开关表**（`docs/182` §1）: `set choose <名字> {…}` 定义, `choose <名字>` /
     #: `choose close <名字>` 取值。由 `_apply_switches` 在**词法流上**落定后挂上来 ——
     #: 开关是**编译期**的事, 它的行不进 AST（关着的那段体连 token 都不进 parser）。
@@ -758,6 +915,77 @@ MAX_ADDIN = 300
 #: 是同一个形状 —— 那次修的是**条数**，**深度**没跟着修。这一轮补齐：**两边同值，
 #: 超限一律报错**。实测仓库里最深是 7（`lompi/lpi_test.lomt`），离静默截断只差一个 `use`。
 MAXDEPTH = 8
+
+
+#: **核心模式的维**（`docs/175` §3.0 / §3.4）。它与可定义的开关**不是一类东西**
+#: （`docs/182` §1.3）：核心模式是**核心语法的硬写法**、由编译器检查、进 Potato；
+#: 开关是用户可定义的，几万个也行。
+#:
+#: 所有维共用一条规矩：**每一维整个程序恰好一个取值，而且只有根单元能定**。
+#: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
+#: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
+#:
+#: 今天三维：
+#:   * `mode`    —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
+#:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
+#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）。
+#:
+#: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
+#: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
+#: 改这一维的定义。它今天装的就是 `gc_auto` 要的那个运行期。
+CORE_DIMS: dict[str, tuple[str, ...]] = {
+    "mode": ("std", "no_std"),
+    # `gc_auto_alpha` = **混合档**（用户 2026-09-23 定，`docs/175` §3.4.1）：
+    # 静态内存管理 + 动态回收，**不存在任何冻结全部业务的阶段**，且自适应。
+    # 名字带 `alpha` 是**明说的**：这一档在动，用它的项目认这一点。
+    "gc": ("gc_manual", "gc_auto", "gc_auto_alpha"),
+    # 用户 2026-09-23：「运行期是海量工程必经之路，我们不得不利用 `choose` 开关
+    # 启动/关闭 runtime」。**默认是关的** —— 默认档不许改变任何现有程序的行为。
+    "runtime": ("runtime", "no_runtime"),
+}
+#: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
+#: 而两个实现比的是字节，所以它不能是集合迭代顺序。
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime")
+#: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
+CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
+#: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
+CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
+#: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
+CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime"}
+#: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
+#: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
+CORE_DIM_ZH = {
+    "mode": "运行模式（`std` / `no_std`）",
+    "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
+    "runtime": "运行期（`runtime` / `no_runtime`）",
+}
+#: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
+#: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
+CORE_CONFLICTS = {
+    ("no_std", "gc_auto"): (
+        "自动回收要一个**运行期**，而 `no_std` 的定义是"
+        "「只能用核那一层」—— 两者放在一起等于要求**核里带一个收集器**，"
+        "那不是「核保持小」。这一档**先划窄**：真有人要，再按 `docs/175` §4 那条"
+        "「能独立校验」的路子把它开成一个**受约束的子集**"),
+    # `gc_auto_alpha` 比 `gc_auto` 更依赖运行期（它要自适应、要策略池），所以同一条冲突
+    # 对它**只强不弱** —— 它一样不能与 `no_std` 并存。
+    ("no_std", "gc_auto_alpha"): (
+        "混合档（`gc_auto_alpha`）比 `gc_auto` **更依赖运行期**（它要自适应、要有策略池），"
+        "而 `no_std` 的定义是「只能用核那一层」—— 同一条冲突，对它只强不弱"),
+    # `runtime` 一进语言，上面那两条冲突就**说得更直白**了：自动回收要的就是那个运行期，
+    # 而 `no_runtime` 是明说不要它。所以这一对不是"暂时划窄"，是**定义上就矛盾**。
+    # 注意 `gc_manual` **不与 `no_runtime` 冲突** —— "要运行期、但内存我自己管"是一条
+    # 必须能表达的档（线程／宿主服务在，收集器不在）。
+    ("gc_auto", "no_runtime"): (
+        "自动回收**要的就是那个运行期**（根表、收集点、收集器本身都住在里面），"
+        "而 `no_runtime` 是明说产物里不要运行期 —— 这一对是**定义上就矛盾**，"
+        "不是暂时划窄。要手动回收请写 `choose gc_manual`；"
+        "要运行期就把它开着（`choose runtime`），两者不冲突"),
+    ("gc_auto_alpha", "no_runtime"): (
+        "混合档（`gc_auto_alpha`）**更依赖运行期**（它要自适应、要策略池，"
+        "还要放编译期算不出来的那部分），"
+        "而 `no_runtime` 是明说产物里不要运行期 —— 同一条冲突，对它只强不弱"),
+}
 
 
 class SwitchTable:
@@ -831,7 +1059,7 @@ def _collect_switches(toks: list, tbl: SwitchTable) -> None:
                         tbl.ndup = tbl.ndup + 1
                     else:
                         tbl.vals[nn.val] = (False, t.line)
-            elif nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+            elif nxt is not None and nxt.kind == "ident" and nxt.val not in CORE_WORDS:
                 if nxt.val in tbl.vals:
                     tbl.dup.append((nxt.val, t.line, tbl.vals[nxt.val][1]))
                     tbl.ndup = tbl.ndup + 1
@@ -875,7 +1103,7 @@ def _reject_nested_switch_decls(toks: list) -> None:
                 raise LomError(t.line, t.col, "开关声明不许写在另一个开关体里"
                                                "（`set choose`）—— 预扫看不见它，"
                                                "它算不算数取决于外层开关开没开")
-            if t.val == "choose" and is_ident and nxt.val not in ("std", "no_std"):
+            if t.val == "choose" and is_ident and nxt.val not in CORE_WORDS:
                 raise LomError(t.line, t.col, "开关取值不许写在另一个开关体里"
                                                "（`choose`）—— 同上")
             if t.val == "addin" and is_ident:
@@ -998,7 +1226,7 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
             if nxt is not None and nxt.kind == "ident" and nxt.val == "close":
                 i = i + 3                        # 吞掉 `choose close <名字>`
                 continue
-            if nxt is not None and nxt.kind == "ident" and nxt.val not in ("std", "no_std"):
+            if nxt is not None and nxt.kind == "ident" and nxt.val not in CORE_WORDS:
                 i = i + 2                        # 吞掉 `choose <名字>`
                 continue
         if depth == 0 and t.kind == "ident" and t.val == "addin":
@@ -1177,14 +1405,17 @@ class Parser:
                 lang = self.next().val
                 r = self.next()
                 mod.ext_blocks.append(ExtBlock(lang, r.val, r.line))
-            elif t.val == "choose":  # docs/143 §3.2: 项目模式
+            elif t.val == "choose":  # docs/143 §3.2 + docs/175 §3.4: 核心模式
                 line = t.line
                 self.next()
-                mode = self.expect("ident", None, "（模式名：std 或 no_std）")
+                w = self.expect("ident", None,
+                                "（核心模式的取值：std / no_std / gc_manual / gc_auto）")
                 # **记录每个出现位置, 判定放到 check()** —— 与 `extern` 的重名同一条路数:
                 # 语法层只收集, 规则集中在一处, 两个实现要对齐的也就只有那一处。
-                mod.choose = mode.val
-                mod.choose_lines.append(line)
+                # 值属于**哪一维**由 `CORE_DIM_OF` 查 —— 加一维不必再动这两行。
+                # （非核心的词在 `_apply_switches` 那一趟就被吞掉了, 到不了这里。）
+                mod.chooses[CORE_DIM_OF[w.val]] = w.val
+                mod.choose_lines.append((CORE_DIM_OF[w.val], w.val, line))
             elif t.val == "extern":  # docs/173: 外部函数声明
                 self.next()
                 f = self.parse_fn(extern=True)
@@ -2896,34 +3127,64 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if c.pub:
                 const_scope.setdefault(c.name, c.type)
 
-    # ---- 项目模式 `choose` 与**开关** (docs/143 §3.2 + docs/182 §1)。全部规则在这里 ——
-    # 语法层只收集, 两个实现要对齐的判断就只有这一处。
+    # ---- 核心模式 `choose` 与**开关** (docs/143 §3.2 + docs/182 §1 + docs/175 §3.4)。
+    # 全部规则在这里 —— 语法层只收集, 两个实现要对齐的判断就只有这一处。
     #
-    # **核心模式与开关是两类东西**（`docs/182` §1.3）: `std`/`no_std` 是核心语法的硬写法,
+    # **核心模式与开关是两类东西**（`docs/182` §1.3）: 核心模式是核心语法的硬写法,
     # 开关是 `set choose …` 那套可定义机制。`_apply_switches` 按名字分好, 这里只判规则。
     #
     # 用户 2026-09-17 改: **`choose` 可以出现至少 500 次**（开关天然是几百个）——
-    # 原先那条"`choose` 只能出现一次"**删掉**。它要防的"声明的是整个程序的模式"这件事
-    # 现在由**核心模式**那条管（`std`/`no_std` 仍然只许一个值）。
+    # 原先那条"`choose` 只能出现一次"**删掉**。它要防的"声明的是整个程序"这件事
+    # 现在由**核心模式**那条管。
     # 删掉之后留下的空档由 **同名只许一次** 补上 —— 否则"这个开关到底开没开"没有答案。
-    if len(mod.choose_lines) > 1:
-        errs.append(f"{mod.choose_lines[1]}: 核心模式只能声明一次 "
-                    f"（第一次在第 {mod.choose_lines[0]} 行）—— 它声明的是**整个程序**的模式。"
-                    f"要开关请用 `set choose <名字> {{ … }}`")
+    #
+    # **按维**判"恰好一次"（`docs/175` §3.0）：从 2026-09-23 起核心模式**不止一维**
+    # （`mode` + `gc`），所以"只能声明一次"这条要**逐维**说 —— 两维各一份是合法的，
+    # 同一维写两次（不管是同一个值还是两个值）都没有答案，都要报。
+    per_dim: dict[str, list[tuple[str, int]]] = {}
+    for dim, word, line in mod.choose_lines:
+        per_dim.setdefault(dim, []).append((word, line))
+    for dim, ws in sorted(per_dim.items()):
+        if len(ws) > 1:
+            (w0, l0), (w1, l1) = ws[0], ws[1]
+            errs.append(f"{l1}: 核心模式这一维只能声明一次 —— "
+                        f"{CORE_DIM_ZH[dim]}（第一次在第 {l0} 行，写的是 `{w0}`；"
+                        f"这一行写的是 `{w1}`）。它声明的是**整个程序**的这一维。"
+                        f"要开关请用 `set choose <名字> {{ … }}`")
+    # **互相冲突的取值**（`docs/175` §3.4 ⚠）：`no_std` + `gc_auto` **暂时**报错。
+    # 看的是**生效值**（显式写的，或那一维的默认档）—— 因为冲突说的是"这个程序最后
+    # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
+    # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
+    _eff = dict(CORE_DEFAULTS)
+    _eff.update(mod.chooses)
+    # **两两查**（不是写死 `(mode, gc)` 那一对）：加一维时这一段一行都不用动。
+    # 先后由 `CORE_DIM_ORDER` 定 —— 报错文本要比字节，不能靠 dict/set 的迭代顺序。
+    _vals = [_eff[d] for d in CORE_DIM_ORDER]
+    for _i in range(len(_vals)):
+        for _j in range(_i + 1, len(_vals)):
+            _pair = (_vals[_i], _vals[_j])
+            _why = CORE_CONFLICTS.get(_pair)
+            if _why:
+                _ln = next((l for _d, _w, l in reversed(mod.choose_lines)
+                            if _w in _pair), 1)
+                errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
             # "库不许"对它**不适用**（`chooseset.lomt` 还常常以 `addin <自己>` 开头）。
-            # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的运行模式，
+            # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的取值，
             # addin 单元里写了就是**静默无效**，必须报出来（静默才是敌人）。
-            if d.choose is not None:
-                errs.append(f"{d.choose_lines[0]}: `addin` 单元不许声明核心模式"
-                            f"（在 `{d.name}` 里）—— `std`/`no_std` 是整个程序的运行模式，"
-                            f"只有根单元能定")
+            if d.chooses:
+                dim0, word0, line0 = d.choose_lines[0]
+                errs.append(f"{line0}: `addin` 单元不许声明核心模式"
+                            f"（在 `{d.name}` 里，`{word0}`）—— "
+                            f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
-        if d.choose is not None:
-            errs.append(f"{d.choose_lines[0]}: 库不许 `choose`（在 `{d.name}` 里）"
-                        f" —— 库该声明**能力需求**, 由项目决定模式")
+        if d.chooses:
+            dim0, word0, line0 = d.choose_lines[0]
+            errs.append(f"{line0}: 库不许 `choose`（在 `{d.name}` 里，`{word0}`）"
+                        f" —— 库该声明**能力需求**, 由项目决定{CORE_DIM_ZH[dim0]}")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
             errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
@@ -3634,6 +3895,52 @@ def _count_guards(mod: Module) -> int:
     return sum(walk(f.body) for f in mod.funcs)
 
 
+def _count_boundary(mod: Module) -> dict:
+    """`docs/205` R5: 一份单元里的**边界操作**有几个 —— 形式对象自描述, 不读源码就能答。
+
+    数的是"越过语言保证的每一步": 机调用 (`syscall4`/`syscall6`)、裸指针变换
+    (`ptr_add`/`ptr_sub`/`str_ptr`)、以及调用本单元 `extern fn` 声明过的名字。
+
+    **口径是词法的** —— `docs/204` R5 那一格要的正是"可 grep、可计数、可审计"。
+    所以只看"这个名字被调用了没有", 不看类型, 也不判断它是不是真的危险
+    （**边界可见 ≠ 边界正确**, 后半句是人的事）。两条细节:
+
+    * `fn NAME(` 是**声明**不是调用 —— 谁定义了一个叫 `ptr_add` 的函数, 不该凭空
+      多出一次"越界";
+    * 方法调用 `x.NAME(...)` **算**（词法上它与 `NAME(...)` 同形）, 所以一并收。
+
+    它和 `loment stat` 报的是**同一组数**（`loment_cli_test` 拿 `lomc.lex` 独立对过）,
+    所以那份清单 `potato.BOUNDARY_BUILTINS` 是两边的**单一真源**。
+    """
+    import dataclasses as _dc
+
+    import potato as _potato
+
+    #: 走过的每一个"被调用的名字"。用**通用** dataclass 遍历, 而不是手写一张节点表 ——
+    #: 手写的那种漏一个节点类型就少算几个, 而要等自举侧逐字节比对才看得出来。
+    names: list[str] = []
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)):
+            names.append(x.name)
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    ext = [f.name for f in mod.externs]
+    n_extc = sum(names.count(nm) for nm in ext)
+    n_sys = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
+    n_ptr = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    return {"extern_declared": len(ext), "extern_calls": n_extc, "syscalls": n_sys,
+            "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
+
+
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
@@ -3696,14 +4003,40 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v4 = v3 + **方言**（`docs/184` §9 S4.3）。与 `mode`/`switches` 同一条纪律：
         # **必填、可为空数组** —— 不存在"缺这项"的形态。带上 `body` 是为了让产物
         # **自解释**：只记名字的话，读的人知道"用了方言 `def`"却不知道 `def` 是什么。
-        "potato": "v5",
+        # v5 = v4 + **外部代码块**（`docs/185` §7 ①）；
+        # v6 = v5 + **表层语法声明** `grammar`（`docs/188` §2）；
+        # v7 = v6 + **边界操作计数** `boundary`（`docs/205` R5）: 一份单元越过语言保证的
+        # 那些调用点有几个。**与 `guards` 同级同形**（一个自描述的对象），理由也一样 ——
+        # 审计要能**不读源码**就回答"这个单元的信任边界有多大"。
+        #
+        # ⚠ **v6 挂在 v7 之前从没被主编译器发过**：`grammar` 原先只有 `tools/potato_from.py`
+        # 发（那一档的产出方是它）。加 `boundary` 时才发现 —— v7 让 v6 的 `grammar` 一起
+        # 变成必填, 而这里没发它, 编译器的**自检当场就红**。所以这一版把 v6 也接了上来:
+        # 前门早就知道答案（`FrontUnit.grammar`），只是没人把它带进来。
+        # v8 = v7 + **回收档** `gc`（`docs/175` §3.4）：`gc_manual` / `gc_auto`。
+        # v9 = v8 + **运行期** `runtime`（`docs/175` §3.6）：`runtime` / `no_runtime`。
+        # 与 `mode` 同级同形 —— 一个字符串取值、**必填**、只有根单元能定，所以
+        # "这个产物是在哪一档下编的"是**不读源码可判**的。
+        "potato": "v9",
         "unit": mod.name,
         "language": "loment",
+        # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
+        # `language` 说"这份东西**是**什么"（用别的写法写的, **它仍然是 `loment`**）,
+        # `grammar` 说"用什么**写法**写的"。原生写法（含 `rust` 拼法、含没写声明）
+        # 一律是 `loment`。
+        "grammar": getattr(mod, "grammar", "loment"),
         # 整个程序的运行模式 (docs/143 §3.2)。**默认 std** —— 没写 `choose` 就是它,
         # 所以对象里永远是显式的两值之一, 不存在"缺这项"的形态。
         # 一个编译单元产出一个对象 (deps 走 `imports`), 所以这里没有"依赖的模式"
-        # 那种歧义: `mod.choose` 就是根单元自己声明的那一个。
-        "mode": mod.choose or "std",
+        # 那种歧义: 根单元自己声明的那一个就是它。
+        "mode": mod.chooses.get("mode", CORE_DEFAULTS["mode"]),
+        # **回收档**（`docs/175` §3.4）：`gc_manual` / `gc_auto`。与 `mode` 同一条纪律 ——
+        # **必填**（删掉它校验器必须红），所以"这个产物放弃了确定性没有"是**可判**的。
+        "gc": mod.chooses.get("gc", CORE_DEFAULTS["gc"]),
+        # **运行期在不在**（`docs/175` §3.6）。取值只说"有没有"、不说"里面装了什么"——
+        # 装的东西会随年份长（今天是收集器，明天可能是线程、宿主服务），钉进值名里
+        # 就等于两年后加一项能力要回头改这一维的定义。
+        "runtime": mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -3754,6 +4087,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),
+        "boundary": _count_boundary(mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
@@ -4281,24 +4615,15 @@ class _Ir:
 
     # -- 内建 (M1/M2)
     def alloc_ir(self, size_var: str) -> str:
-        """bump 堆分配 `size_var` 字节, 返回指针 (alloc 与 str_concat 共用, M15/M2)。"""
-        off = self.t()
-        self.w(f"{off} = load i32, ptr @__loment_off")
-        nxt = self.t()
-        self.w(f"{nxt} = add i32 {off}, {size_var}")
-        ok = self.t()
-        self.w(f"{ok} = icmp ule i32 {nxt}, 65536")
-        aok, aovf = self.l("aok"), self.l("aovf")
-        self.w(f"br i1 {ok}, label %{aok}, label %{aovf}")
-        self.terminated = True
-        self.label(aovf)
-        self.w("call void @__loment_abort()")
-        self.w("unreachable")
-        self.terminated = True
-        self.label(aok)
-        self.w(f"store i32 {nxt}, ptr @__loment_off")
+        """分配 `size_var` 字节, 返回指针 (alloc 与 str_concat 共用, M15/M2)。
+
+        走运行期的 `__loment_alloc`（bump + 地址序空闲链表 + 拆分 + 前沿回退）——
+        **不再是内联的纯 bump**：`free` 兑现之后，分配与回收必须是同一份状态的读写者，
+        而"只涨不落的前沿 + 什么都不做的 free"正是 `docs/175` §3.4 点名的那个形状
+        （**允诺却不兑现**）。
+        """
         p = self.t()
-        self.w(f"{p} = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 {off}")
+        self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
         return p
 
     def builtin(self, e: Call) -> tuple[str, str]:
@@ -4307,7 +4632,8 @@ class _Ir:
             _, sz = self.expr(e.args[0], "u32")
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
-            self.expr(e.args[0], "ptr")
+            _, p = self.expr(e.args[0], "ptr")
+            self.w(f"call void @__loment_free(ptr {p})")
             return "u32", "0"
         if e.name == "load8":
             _, pv = self.expr(e.args[0], "ptr")
@@ -4877,10 +5203,13 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             f"@__loment_caps = internal constant [{len(mod.caps)} x {{ i64, i64, i64, i64 }}] [{rows}]"
         )
         out.append("")
-    if "@__loment_heap" in text_all:  # M15
-        out.append("@__loment_heap = internal global [65536 x i8] zeroinitializer")
-        out.append("@__loment_off = internal global i32 0")
-        out.append("")
+    # **分配器与它的全局同进同出**（`docs/175` §3.4）：`alloc`/`free` 现在是对运行期的
+    # **调用**，堆全局不再出现在**单元体**里 —— 判据必须落在"分配器被引用了没有"上，
+    # 而不是"堆那个符号出现过没有"。两者分开判会漏发（实测：`free` 一用就报
+    # "未定义的标签"；而只用整数除法、不用 alloc 的单元会反过来——发出分配器却没有全局）。
+    _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
+    if _needs_heap:
+        out.append(_IR_HEAP)
     out += globals_
     if globals_:
         out.append("")
@@ -4941,6 +5270,11 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias
+    # **表层语法**（`docs/188` §2）挂在模块上，供 Potato v6 用。前门已经算出来了
+    # （`front_door` 的 `FrontUnit.grammar`：原生写法一律是 `loment`，`rust` 也是
+    # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
+    # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
+    mod.grammar = _fu.grammar
     mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。

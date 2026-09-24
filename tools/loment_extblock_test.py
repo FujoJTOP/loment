@@ -154,7 +154,8 @@ def test_body_round_trips_into_potato():
     mod, deps = lomentc.load_unit(ROOT / "loment" / "extblock" / "evil.lomt", ROOT)
     assert lomentc.check(mod, deps=deps) == [], "外部块不该让 check 报错（它没什么可查的）"
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v5", doc["potato"]
+    # **不钉死版本号**（理由同 `loment_comefor_test` 那一处）：要的是"发的是当前那一版"。
+    assert doc["potato"] == potato.VERSIONS[-1], doc["potato"]
     got = [(b["lang"], b["body"]) for b in doc["bodies"]]
     assert [g[0] for g in got] == ["c", "py"], f"语言名或顺序不对: {[g[0] for g in got]}"
     for lang, body in got:
