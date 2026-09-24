@@ -65,7 +65,17 @@ def test_audit_claims_match_ci():
     assert not missing, f"审计包引用了不在 ci.py 静态门禁里的工具: {missing}"
     ids = [c[0] for c in loment_audit.CLAIMS]
     assert len(ids) == len(set(ids)), "主张编号重复"
-    assert len(loment_audit.CLAIMS) >= 10, "主张条数回退 (少于 10 条)"
+    # **条数要与 `docs/160` §1 那张表逐行对齐**（2026-09-22 第三方复核发现的现状：
+    # 工具 24 条 / 表 20 行 / 标题说 23 / `docs/202` 与 `docs/145` 说 18 —— 四个数各说各话。
+    # 原因是这里原先只钉 `>= 10` 这个**下限**：C21–C24 加进工具时表格没跟，没有任何东西会红。
+    # 现在钉**相等**：加一条主张必须同时加一行表；表里多一行而工具里没有，也红。
+    kit = (ROOT / "docs" / "160-loment-audit-kit.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\|\s*(C\d+)\s*\|", kit, re.M)
+    assert rows == ids, (
+        "docs/160 §1 的表与 loment_audit.CLAIMS 对不上:\n"
+        f"  表  : {rows}\n"
+        f"  工具: {ids}\n"
+        "（加/删一条主张要同时改那张表 —— 见 docs/160 §1 顶上那段与 §2 第 11 条）")
     # 每条的 argv 必须显式写出模式 (默认无参的判据要写 [], 需要模式的两条写 --check)
     for cid, _, tool, args in loment_audit.CLAIMS:
         assert isinstance(args, list), f"{cid} 的 argv 必须是 list"
@@ -102,6 +112,57 @@ def test_every_test_file_is_in_the_static_gate():
     ghost = sorted(n for n in static if not (tools / f"{n}.py").exists())
     assert not ghost, f"门禁里这些名字没有对应的工具文件：{ghost}"
     print(f"      门禁登记处与文件一致：{len(have)} 份判据全在 STATIC_CHECKS 里")
+
+
+@test
+def test_every_tool_is_in_the_release_manifest():
+    """**第三处登记**：发布清单（`loment_release.GLOBS`）。
+
+    上一节钉的是"接没接进门禁"，这一条钉"进没进发布清单"—— 两处都要登记，而**两个
+    方向都会静默出错**（2026-09-22 加这条之前，两边都没有判据管）：
+
+      * 被跟踪的 `tools/*.py` 不在 `GLOBS` 里 -> 它在仓里、在门禁里**跑**，却**不在
+        发布清单上**。清单是"这一版发了什么、每一份的 sha256 是什么"那本账
+        （`loment/build/release-manifest.json`，不是发行包的打包清单 —— 发行包由
+        `loment_dist` 按自己的 `payload()` 装，里面**根本没有 `tools/`**）。**账上没有
+        它的后果不是发不出去，而是它变了没人会知道** —— 这正是 `docs/188` §7.1
+        加一门表层语法那张表里标着"**没有任何判据会抓**"的那一格
+        （`loment-dev-86` 那次是人工看出来的）。
+      * `GLOBS` 里某一条 glob 一个文件都匹配不到 -> 陈旧条目（`docs/152` 记过一次：
+        旧树的 `docs/14*.md` 一类被搬过来后成了**五个指向不存在文件**的项）。
+
+    实测（这条判据第一次跑）：13 个 `tools/*.py` 不在清单里，其中 4 个是判据 ——
+    `loment_capasserts_test` / `loment_eol_test` / `loment_ffi_test` / `loment_syscalls_test`，
+    它们都在 `ci.py` 的 `STATIC_CHECKS` 里跑，却不在清单上。
+
+    **`docs/i18n/` 故意不管**：那是译者向的工件，`docs/i18n/glossary.md` §1 明写它
+    "sits outside every release GLOB … and is not shipped"。这一格的"没进清单"
+    **是设计**，不是漏 —— 别照这条判据去"修"它。
+    """
+    import loment_release
+
+    tracked = subprocess.run(["git", "ls-files", "tools/*.py"], cwd=str(ROOT),
+                             capture_output=True, text=True, shell=False)
+    assert tracked.returncode == 0, f"git ls-files 失败: {tracked.stderr[:200]}"
+    have = {q.strip() for q in tracked.stdout.splitlines() if q.strip()}
+
+    covered: set[str] = set()
+    dead: list[str] = []
+    for g in loment_release.GLOBS:
+        hits = {p.relative_to(ROOT).as_posix() for p in ROOT.glob(g) if p.is_file()}
+        if not hits:
+            dead.append(g)
+        covered |= hits
+
+    missing = sorted(have - covered)
+    assert not missing, (
+        f"这些被跟踪的 `tools/*.py` 不在 `loment_release.GLOBS` 里 —— 发布账本上"
+        f"没有它们，于是它们变了也不会有人知道（`--check` 照样绿）：{missing}。"
+        f"加进 GLOBS，并**与 `loment/tools/lomrel.lomt` 的 `globs_text()` 插入同一位置**"
+        f"（两份逐条同序，否则 `loment_rel_test` 红）。")
+    assert not dead, (
+        f"`loment_release.GLOBS` 里这些条目一个文件都匹配不到（陈旧条目）：{dead}")
+    print(f"      发布清单覆盖：{len(have)} 个 tools/*.py 一件不少，{len(loment_release.GLOBS)} 条 glob 无空转")
 
 
 # ---------------------------------------------------------------- M55 格式化

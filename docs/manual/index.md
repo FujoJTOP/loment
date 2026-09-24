@@ -13,6 +13,7 @@
 - [148-loment-toolchain.md](../148-loment-toolchain.md)
 - [149-loment-kernel-integration.md](../149-loment-kernel-integration.md)
 - [150-loment-selfhost.md](../150-loment-selfhost.md)
+- [206-loment-ownership-boundary.md](../206-loment-ownership-boundary.md)
 
 ## 示例 API
 

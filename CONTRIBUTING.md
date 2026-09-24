@@ -60,11 +60,22 @@ broke it.
 
 So:
 
-- **A pull request that modifies anything under `lom/` is detected automatically and closed
-  without review.** Not personal — there is no way to evaluate the change from inside this
-  repository alone, because the half it would break is not here.
-- **Three of those, and you will no longer be able to open pull requests against any Loment
-  repository.** The detection does not need a human to agree with it.
+- **A pull request that modifies anything under `lom/` is detected automatically.** Every pull
+  request runs a job named `lom/ 禁区` (`.github/workflows/gate.yml`, job `lom-door`). It reads the
+  pull request's changed-file list and **fails** if anything under `lom/` is in it. No human has to
+  agree with it, and there is no review that overrides it — there is no way to evaluate the change
+  from inside this repository alone, because the half it would break is not here.
+- **Make that check required and it is a hard door**, because a failing required check cannot be
+  merged. Turning it into one is a repository setting rather than a file in this tree; if you find
+  it is not enforced when you open a pull request, say so in an issue — a door that is described
+  but not enforced is worse than no door, and that is exactly the state this section was in until
+  2026-09-22.
+
+> Correction, 2026-09-22: this section used to say such a pull request would be **closed without
+> review**, and that three of them would **stop you opening pull requests at all**. Neither was
+> implemented anywhere in this repository, so neither should have been promised. What is written
+> above is what the tree actually does. Closing and banning need repository settings or an app on
+> the organisation; if those are added, they will be described here.
 
 It is easy to hit by accident: a search-and-replace across the tree, a formatter pointed at the
 repository root, a script that rewrites every `.lom` file. Both of those suffixes are in use
@@ -141,14 +152,29 @@ state is a change nobody can merge.
 **This applies to a person's submission and an agent's alike.** There is no lighter track for
 either: the point of a gate is that the answer does not depend on who is asked.
 
-**Where the gate stands right now (2026-09-22).** The workflow is new and the gate is **not
-all-green on a clean checkout**. The first measured run on a GitHub runner was 62 criteria, 43
-green and 19 red — and the reds were not missing tools. Four of them need the companion repository
-`LinuxFUAI/`, a private checkout that is not part of this one; the rest are Linux portability
-problems being worked through one at a time, and the set is platform-dependent (a Windows checkout
-is red in different places). So **today the bar is not "green". It is "you did not add a red, and
-you said which reds you saw."** When the red set reaches zero this paragraph goes away and green
-becomes the bar.
+**Where the gate stands right now (2026-09-22).** The gate is **not all-green on a clean
+checkout**. The first measured run on a GitHub runner was 62 criteria, 43 green and 19 red — and
+the reds were not missing tools. Four of them need the companion repository `LinuxFUAI/`, a private
+checkout that is not part of this one; the rest are Linux portability problems being worked through
+one at a time, and the set is platform-dependent (a Windows checkout is red in different places).
+So **today the bar is not "green". It is "you did not add a red, and you said which reds you saw."**
+When the red set reaches zero this paragraph goes away and green becomes the bar.
+
+**The gate enforces exactly that, from `.github/gate-baseline.txt`.** That file is the **measured**
+list of known reds. The workflow fails when a criterion is red that is **not** on the list, and it
+says nothing about the ones that are. Two rules come with it:
+
+- **A new red is re-run on its own before it counts.** A criterion that fails only in a parallel
+  run is usually another checkout writing to the same tree (see below), so the job re-runs each
+  candidate on its own and only fails on the ones that are still red. Flakes are reported in the
+  job summary and do not fail the job — a gate that cries wolf gets ignored.
+- **The list only ever shrinks.** When you fix a red, delete its line in the same pull request. The
+  job summary names any entry that has gone green, so a stale list is visible rather than silent.
+
+Adding a line to that list is allowed, but it is a claim: say in the pull request **why** that red
+is not yours, and mark it `环境` (the runner lacks something, or the companion checkout is absent)
+or `仓库` (it is genuinely unfinished work). A list entry nobody justified is how a gate turns back
+into a decoration.
 
 If a suite fails, run that suite on its own before believing it — a criterion that fails only in
 a parallel run is usually another checkout writing to the same tree.
@@ -232,6 +258,17 @@ what you expected, and what happened instead
 
 Issues are in English. A report with a runnable reproduction is worth more than a well-argued one
 without.
+
+**If you are not sure it is a bug** — you want to know whether something is meant to work that
+way, or you do not know where to start — ask on
+[Discord](https://discord.gg/rGw7NRNU) instead. Questions are as welcome there as reports are
+here.
+
+## One free thing we would ask for
+
+**Star the repository.** It costs nothing and takes one click, and for a project with no marketing
+that number is what decides whether the next person ever finds it. If Loment is useful to you —
+or you only want it to keep going — that is the whole ask. Thank you.
 
 ## Licence
 

@@ -53,11 +53,23 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def wsl(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(["wsl", "-e", *args], capture_output=True, text=True,
+    """在**这套命令自己的平台**上跑它们。
+
+    `rm` / `sh` / `test` / 装出来的 `loment` 本来就是 Linux 的东西：Windows 上得借 WSL，
+    而**本机就是 Linux 时借 WSL 是假借** —— 那些命令本来就在手边，CI 上更是直接
+    `FileNotFoundError: 'wsl'`（2026-09-22 把门禁搬上 Linux runner 时撞到，露出来的是
+    `install.sh 端到端` 那条）。所以这里按平台分流，**不是跳过** —— 换到 Linux 之后这些
+    判据反而跑的是原生那条路（在 Linux 上验 `install.sh` 正是该做的事）。
+    """
+    argv = list(args) if sys.platform != "win32" else ["wsl", "-e", *args]
+    return subprocess.run(argv, capture_output=True, text=True,
                           shell=False, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def wsl_path(p: Path) -> str:
+    """给上面那些命令用的路径。本机就是 Linux 时**原样返回** —— 没有盘符要翻。"""
+    if sys.platform != "win32":
+        return str(p.resolve())
     s = str(p.resolve()).replace("\\", "/")
     return "/mnt/" + s[0].lower() + s[2:]
 
@@ -560,12 +572,27 @@ def test_skill_example_sync() -> None:
     check("skill §1 能过 check (不是一段装饰性代码)", not errs, errs[0] if errs else "")
 
 
-def test_skill_samples_compile() -> None:
-    """skill 里**每个** ```rust 样例都必须是能过前端的真代码。
+#: 哪些文档里的 ```rust 块进判据 —— **给读者抄的那些**, 不是设计记录。
+#: `SKILL.md` 是"只装了包、没有仓库"的 agent 唯一的参考; README 与 QUICKSTART 是
+#: 新读者照着敲的两份。
+#:
+#: **`docs/*.md` 故意不在里面**: 它们是设计/测量记录, 里面多的是**片段**
+#: (半句语法、故意写错的对照), 不是能独立编译的单元 —— 把它们全拉进来, 只会得到
+#: 一屏 `<!-- no-compile -->` 标记, 那种"跳过"是没有信息的。
+#:
+#: **`docs/manual/` 也不在**: 它的示例页**就是从 `loment/examples/*.lomt` 生成出来的**
+#: (`tools/loment_manual.py:44-52` 逐个示例 `lomdoc.render`), 所以那些"代码块"由
+#: `loment_p9_test` 与 `loment_elf_test` 覆盖 —— 在这里再扫一遍是重复, 不是覆盖。
+DOC_SAMPLES = [loment_dist.SKILL, "README.md", "QUICKSTART.md"]
 
-    **Why**: 指南是"只装了包、没有仓库"的 agent 看到的唯一参考。样例错一个字符,
-    他就卡在那里, 而且没有任何东西能告诉他哪边错了 —— 2026-09-15 实测过一次
-    (`tour` 里漏了个 `;`, 指南还自称"和仓库里那份是同一份")。
+
+def test_docs_samples_compile() -> None:
+    """给读者抄的那几份文档里, **每个** ```rust 样例都必须是能过前端的真代码。
+
+    **Why**: 这些样例是读者照着敲的东西 —— 错一个字符, 他就卡在那里, 而且没有任何东西
+    能告诉他哪边错了。2026-09-15 实测过一次 (`tour` 里漏了个 `;`, 指南还自称"和仓库里
+    那份是同一份")。**原先这条只扫 SKILL.md 一份**, 于是 README 与 QUICKSTART 里那几块
+    **没有任何东西看着** (docs/205 R6) —— 2026-09-23 把它一般化成 `DOC_SAMPLES`。
     **How to apply**: 有两种片段要跳过, 都在围栏前一行加 `<!-- no-compile -->`:
 
     1. **故意写错**的片段 (展示"这样会报 E22"之类);
@@ -574,25 +601,29 @@ def test_skill_samples_compile() -> None:
        并指到仓库里真能跑的那一对 (`loment/examples/addin/`) —— 否则"跳过"就成了
        悄悄放宽。
 
-    只对 `rust` 围栏生效; 别的语言围栏不在扫描范围内。
+    只对 `rust` 围栏生效; 别的语言围栏不在扫描范围内。每份文档**各自**要有非零命中:
+    抽不到样例的那一份是"判据对它在空转", 而不是"它恰好没有代码"。
     """
-    sk = (ROOT / loment_dist.SKILL).read_text(encoding="utf-8")
-    td = Path(tempfile.mkdtemp(prefix="lom_skill_"))
-    n = 0
-    for i, m in enumerate(re.finditer(r"```rust\n(.*?)```", sk, re.S)):
-        before = sk[max(0, m.start() - 80):m.start()]
-        if "no-compile" in before:
-            continue
-        src = td / f"sample{i}.lomt"
-        src.write_text(m.group(1), encoding="utf-8", newline="\n")
-        try:
-            mod = lomentc.load(src)
-            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=src))
-        except lomentc.LomError as e:
-            errs = [str(e)]
-        n += 1
-        check(f"skill 样例 #{i} 过前端", not errs, errs[0] if errs else "")
-    check("skill 里找到了 rust 样例 (判据没空转)", n > 0, "一块都没扫到")
+    td = Path(tempfile.mkdtemp(prefix="lom_doc_sample_"))
+    total = 0
+    for doc in DOC_SAMPLES:
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        n = 0
+        for i, m in enumerate(re.finditer(r"```rust\n(.*?)```", text, re.S)):
+            if "no-compile" in text[max(0, m.start() - 80):m.start()]:
+                continue
+            src = td / f"{Path(doc).stem}_{i}.lomt"
+            src.write_text(m.group(1), encoding="utf-8", newline="\n")
+            try:
+                mod = lomentc.load(src)
+                errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=src))
+            except lomentc.LomError as e:
+                errs = [str(e)]
+            n += 1
+            check(f"{doc} 的 rust 样例 #{i} 过前端", not errs, errs[0] if errs else "")
+        check(f"{doc} 里扫到了 rust 样例 (判据没对这份空转)", n > 0, "一块都没扫到")
+        total += n
+    print(f"      {len(DOC_SAMPLES)} 份文档共 {total} 块 rust 样例全过前端")
 
 
 def main() -> int:
@@ -600,7 +631,7 @@ def main() -> int:
     for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),
-                     ("skill 样例都能编", test_skill_samples_compile)):
+                     ("读者文档里的样例都能编", test_docs_samples_compile)):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

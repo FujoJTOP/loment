@@ -2,32 +2,46 @@
 
 # Loment
 
+[![gate](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml/badge.svg)](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml)
+
 Loment is a **systems programming language**. It compiles to native x86-64 executables —
 Linux ELF, Windows PE, or a freestanding object for bare metal — with no runtime and no
 libc. The toolchain is itself written in Loment and needs no Python to run. Its own syntax
 is Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go or
 Python.
 
-**[Quick start](QUICKSTART.md)** ·
+**[Download 0.1.4](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4)** ·
+[Quick start](QUICKSTART.md) ·
 [Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
 [Contributing](CONTRIBUTING.md) ·
-[Issues](https://github.com/FujoJTOP/loment/issues)
+[Issues](https://github.com/FujoJTOP/loment/issues) ·
+[Discord](https://discord.gg/rGw7NRNU)
+
+The release has a Linux `tar.gz`, a Windows `zip` and a Windows installer — installing and
+running needs **no Python, no clang and no WSL**. `loment run hello.lomt` and you are done.
 
 ## Status
 
-`0.1.4`. Nothing is published as a package yet — you build the toolchain from a checkout
-([QUICKSTART.md](QUICKSTART.md)).
+`0.1.4`. **It ships as a package** — the
+[Loment 0.1.4](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4) release carries a Linux
+`tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip. You can also
+build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)). What 0.1.4 does **not**
+include yet is listed honestly in [docs/202](docs/202-loment-014-release-gate.md).
 
 The toolchain is **self-hosted at run time**: it compiles and runs with no Python and no
-libc. The **development side is not**, and closing that gap is what 0.1.4 is for
-([docs/189](docs/189-full-selfhosting.md)): `tools/` still holds the reference
-implementation (`tools/lomentc.py` and friends) and the Python test suites. The work is done
-one criterion at a time — each Python criterion gains a Loment twin, and the two must agree
-byte for byte before the Python side can be retired. Until that finishes, both copies are in
-the repository on purpose, and "the repository contains only Loment" is not yet true.
+libc. The **development side is not**, and 0.1.4 shipped before that gap closed:
+`tools/` still holds the reference implementation (`tools/lomentc.py` and friends) and the
+Python test suites ([docs/189](docs/189-full-selfhosting.md)). The work is done one criterion
+at a time — each Python criterion gains a Loment twin, and the two must agree byte for byte
+before the Python side can be retired. Until that finishes, both copies are in the repository
+on purpose, and "the repository contains only Loment" is not yet true.
+
+What 0.1.4 does and does not include is listed item by item, and was audited, in
+[docs/202](docs/202-loment-014-release-gate.md) — including the three items still open
+(a hosted layer, two GC tiers, full self-hosting).
 
 The language surface is frozen — [docs/158](docs/158-loment-freeze.md) says what changing it
 costs — and the implementation is not.
@@ -107,11 +121,11 @@ compiler emitted a code and a position; everything below `message:` came from `l
 | `loment/tools/` | CLI, formatter, documentation generator, language server, linker, error reporter — and the Loment-side criteria that mirror `tools/`. |
 | `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc`; plus `lumtui`, a terminal UI library ([docs/196](docs/196-lumtui.md)). |
 | `lompi/store/` | The standard library, shipped with the toolchain: `std` (127 modules) and `host` (syscalls, files, argv, directories). One `use` per module — `use vec`, `use map`, `use fs`. |
-| `loment/examples/` | 30 example programs. |
+| `loment/examples/` | 32 example programs. |
 | `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
 | `lompi/` | The package manager, written in Loment. |
 | `editors/` | Editor support: VS Code and Vim. |
-| `tools/` | The reference implementation and the Python test suites. This is what 0.1.4 removes — see Status. |
+| `tools/` | The reference implementation and the Python test suites. Full self-hosting is what removes them — see Status. |
 | `docs/` | Design and measurement records. |
 
 ## How this is built
@@ -126,9 +140,10 @@ what keep the claims on this page honest.
 
 ## Getting help and contributing
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues) — questions are as welcome as
-bug reports. Loment is developed in this repository; the working conventions, including how a
-change is checked before it lands, are in `AGENTS.md`.
+Ask in an [issue](https://github.com/FujoJTOP/loment/issues) or on
+[Discord](https://discord.gg/rGw7NRNU) — questions are as welcome as bug reports. Loment is
+developed in this repository; the working conventions, including how a change is checked
+before it lands, are in `AGENTS.md`.
 
 ## License
 

@@ -106,11 +106,11 @@
 | M97 | 语言设计与实现的论文素材 | 设计决策有据可查 | ✅ | 完成 |
 | M98 | 与 Rust/C/Zig 的形式化对比 | 对比矩阵成文 | ✅ | 完成 |
 | M99 | 端到端可复现实验包 | 第三方机器可复现 | ✅（工件 sha256；件数见 release-manifest.json） | 完成 |
-| M100 | 0.1.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧已齐**: `python tools/loment_audit.py --json` 18/18 条主张通过并落盘证据; 审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试; **缺第三方复核本身**, 无法由作者自证 —— 这也是本行不能翻 ✅ 的原因） | 未达 |
+| M100 | 0.1.4 Alpha 发布与审计 | 全门禁绿 + 外部审计 | ⚠️ 未达（**门禁侧**: `python tools/loment_audit.py --json` **24/24** 条主张通过并落盘证据（审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试）; **外部审计**: **已做**（`docs/203-third-party-audit.md` —— 一次**独立 agent、无创作会话上下文**的复核，24 条里 **22 接受 / 1 驳回 / 1 未验证**，并交回几处账目错误，见 `docs/202` §2.2）; **仍不能翻 ✅ 的是"全门禁绿"** —— 其中 4 条要读私有姊妹仓 `FujoJTOP/LinuxFUAI`，公开 runner 上按字面拿不到（用户 2026-09-22 裁决：这一项不做，口径保持"不新增红"，见 `docs/202` §2.1） | 未达 |
 
 ## 剩余工作（按依赖）
 
 - **M39** 与 `kernel/src/capability.rs` 域模型对齐 —— 未开始（内核侧改动，P7）—— **2026-09-15 复核：不是内核真缺，是判据工具的解析口径过期**。双向 diff 的 F-K / K-F / 字段差**全是 0**，只有 2 条 `WIRE` 红，且两条都是假阳性：W64c 之后域表已从静态初值**搬进 arena**（`kernel/src/capability.rs:72` 的 `dom()` 读 `seg(OFF_DOM)`），改由 `replay_init()` 在启动时填满 `DOM_MAX` 行（`main.rs:424` 调用；0 号=系统域 `revocable=false`，1..4=`revocable=true`）。而 `tools/loment_caps_diff.py` 仍在找 `static mut DOM: [Domain; DOM_MAX] = […]` 的**编译期初值** → 解析到 0 行 → 报「行数 0 != DOM_MAX 5」与「形式侧有 revocable=true 但内核域表无」。所以既不改形式侧（形式侧没多声明），也不排 C 段（内核侧没缺东西）—— **要修的是 compat 侧的判据工具**（改解析 `replay_init()`，或加一条运行期探针读真表），修完再按 T3 那半句进 `parallel_gate`；**在那之前别把它当红的门禁接进去**，那等于把一条假红钉成门禁。
 - **M56** LSP（补全/跳转/诊断） —— ✅ 部分（**宿主已就位**：`editors/vscode/` VS Code 扩展已装，`vscode_ext_test` 5/5 无头验收含完整 LSP 往返；编辑器内人工点验待做）
 - **M92** 跨平台目标（aarch64） —— ✅ 部分（交叉编译通过；无模拟器执行）
-- **M100** 0.1.4 Alpha 发布与审计 —— ⚠️ 未达（**门禁侧已齐**: `python tools/loment_audit.py --json` 18/18 条主张通过并落盘证据; 审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试; **缺第三方复核本身**, 无法由作者自证 —— 这也是本行不能翻 ✅ 的原因）
+- **M100** 0.1.4 Alpha 发布与审计 —— ⚠️ 未达（**门禁侧**: `python tools/loment_audit.py --json` **24/24** 条主张通过并落盘证据（审计包 `docs/160-loment-audit-kit.md` 含主张/不主张/复核步骤/对抗性尝试）; **外部审计**: **已做**（`docs/203-third-party-audit.md` —— 一次**独立 agent、无创作会话上下文**的复核，24 条里 **22 接受 / 1 驳回 / 1 未验证**，并交回几处账目错误，见 `docs/202` §2.2）; **仍不能翻 ✅ 的是"全门禁绿"** —— 其中 4 条要读私有姊妹仓 `FujoJTOP/LinuxFUAI`，公开 runner 上按字面拿不到（用户 2026-09-22 裁决：这一项不做，口径保持"不新增红"，见 `docs/202` §2.1）

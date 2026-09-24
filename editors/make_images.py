@@ -1,16 +1,22 @@
-"""生成 README 里的示意图 (banner 之外那三张)。
+"""生成仓里那几张图。
 
-配色与 `loment-banner.png` 同一套 —— 深蓝底 + 白字, 亮色/暗色主题下都读得清。
-2 倍超采样再缩回, 免得字边发木。
+配色同一套 —— 深蓝底 + 白字, 亮色/暗色主题下都读得清。2 倍超采样再缩回,
+免得字边发木。确定性: 没有随机数、没有时间戳, 重跑逐字节相同。
 
     python editors/make_images.py
 
 产物:
+    editors/loment-banner.png        README 顶部标题图
     editors/loment-pipeline.png      一个程序是怎么编出来的
     editors/loment-bootstrap.png     自举: 种子 -> stage1 -> stage2 -> stage3
     editors/loment-diagnostic.png    报错器渲染的一张说明卡 (真实输出)
+    editors/loment-social.png        GitHub 社交预览卡 (1280x640)
+    editors/loment-discord.png       Discord 服务器图标 (512x512, 按圆显示)
+
+前四张进 README; 后两张不进 —— 它们上传到各自平台的设置里 (GitHub 的 Social preview,
+Discord 的服务器设置), 留在仓里是为了**有源可重生成**。
 """
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageFilter
 
 S = 2                                   # 超采样
 BG_TOP = (13, 17, 40)
@@ -289,8 +295,137 @@ def diagnostic():
     save(img, W, H, "editors/loment-diagnostic.png")
 
 
+# ---------------------------------------------------------------- 社交预览卡
+
+def social():
+    """GitHub 的社交预览图 (1280x640)。
+
+    与其他几张分工不同: 这张**先被缩到拇指大**才被看到 (时间线、聊天卡片),
+    所以构图按"缩略图可读"来: 居中、字少字大、负空间给足。元素都放**四角与边缘** ——
+    各平台裁切比例不一样, 中间那点必须留得住。
+
+    底是平的 (不铺渐变/纹理), 中间打一层极淡的光, 元素另算 —— 就是用户要的
+    "空白背景带元素丰富"。同样**不放任何会过期的说法** (理由见 banner 那段)。
+
+    **它不进 README**, 也不由仓库自己生效: GitHub 把社交预览图存在仓库**设置**里,
+    没有 API (`gh repo edit` 没这个开关, REST 也没有)。改法只有两步:
+    Settings -> General -> Social preview -> Edit -> Upload an image。
+    所以这张图留在仓里, 是为了**有源可重生成**, 不是因为它在页面上出现。
+    """
+    W, H = 1280, 640
+    img = Image.new("RGB", (W * S, H * S), BG_TOP).convert("RGBA")
+    d = ImageDraw.Draw(img)
+
+    for r, a in ((560, 30), (380, 26), (220, 22)):      # 中间一层极淡的光
+        light = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+        ImageDraw.Draw(light).ellipse(
+            [((W / 2 - r) * S, (300 - r * 0.62) * S),
+             ((W / 2 + r) * S, (300 + r * 0.62) * S)], fill=(64, 88, 190, a))
+        img = Image.alpha_composite(img, light.filter(ImageFilter.GaussianBlur(40 * S)))
+    d = ImageDraw.Draw(img)
+    for gx in range(40, W, 34):                          # 点阵
+        for gy in range(34, H, 34):
+            d.ellipse([gx * S, gy * S, (gx + 2) * S, (gy + 2) * S], fill=(30, 40, 84))
+
+    # 四角的代码碎片 (装饰)。左右各自**对齐到同一条内边距线**, 免得撞上角括号
+    # 或者被画布边缘切掉 —— 缩略图上最先露馅的就是被切了一半的字。
+    frags = [                                            # (边, y, 文字, 字号)
+        ("l", 32, "module hello", 16), ("r", 32, "fn _start() {", 16),
+        ("l", 152, "guard blk(i);", 15), ("r", 156, "let x: u32 = 1;", 15),
+        ("l", 448, 'use "./util.lomt"', 15), ("r", 452, "match k { .. }", 15),
+        ("l", 552, "capability blk : disk[0..4]", 15), ("r", 556, "pub extern fn c_add(a: i32)", 15),
+    ]
+    for side, y, s, sz in frags:
+        f = font(MONO, sz)
+        if side == "l":
+            d.text((88 * S, y * S), s, font=f, fill=(58, 74, 146), anchor="la")
+        else:
+            d.text(((W - 88) * S, y * S), s, font=f, fill=(58, 74, 146), anchor="ra")
+
+    for cx, cy, sx, sy in ((46, 46, 1, 1), (W - 46, 46, -1, 1),
+                           (46, H - 46, 1, -1), (W - 46, H - 46, -1, -1)):
+        d.line([(cx * S, cy * S), ((cx + 30 * sx) * S, cy * S)], fill=(70, 92, 170), width=2 * S)
+        d.line([(cx * S, cy * S), (cx * S, (cy + 30 * sy) * S)], fill=(70, 92, 170), width=2 * S)
+
+    glow = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse([(548 * S, 84 * S), (732 * S, 268 * S)],
+                                 fill=(84, 115, 227, 96))
+    img = Image.alpha_composite(img, glow.filter(ImageFilter.GaussianBlur(30 * S)))
+    icon = Image.open("editors/loment.ico")
+    icon.size = (256, 256)
+    icon = icon.convert("RGBA").resize((176 * S, 176 * S), Image.LANCZOS)
+    img.paste(icon, (552 * S, 88 * S), icon)
+    d = ImageDraw.Draw(img)
+
+    txt(d, (W / 2, 344), "Loment", font(UIB, 104), WHITE, anchor="mm")
+    d.rounded_rectangle([(W / 2 - 44) * S, 404 * S, (W / 2 + 44) * S, 407 * S],
+                        radius=2 * S, fill=ACCENT)
+    txt(d, (W / 2, 442), "Programming Language", font(UI, 33), (232, 238, 255), anchor="mm")
+    txt(d, (W / 2, 486), "Program by Fujo", font(UI, 24), (176, 190, 228), anchor="mm")
+    txt(d, (W / 2, 566), "github.com/FujoJTOP/loment", font(MONO, 22), (120, 138, 190), anchor="mm")
+
+    save(img.convert("RGB"), W, H, "editors/loment-social.png")
+
+
+# ---------------------------------------------------------------- Discord 图标
+
+def discord():
+    """Discord 服务器图标 (512x512)。
+
+    两条约束决定它长什么样, 都不是审美:
+
+    * **显示成圆形** —— Discord 把图标按圆裁。所以**从一开始就按圆设计**, 而不是拿
+      一张方的去让它切掉四角;
+    * **实际尺寸极小** —— 成员列表里 32px 上下。所以**一个字母都不放**: 那个尺寸上
+      字只会糊成一团。标记只在够大的地方放字 (banner / 社交卡)。
+
+    **底是自己画的圆, 不是把现成图标裁成圆**: 那个图标是圆角**方**, 裁圆之后它的四条
+    直边会在圆内留下接缝。所以圆另画, 只用它里面的那个 L —— 按"白"取出来, 放到圆心上。
+    """
+    W = H = 512
+    PAD = 14                                     # 圆与画布之间留一点, 免得贴边
+    box = [PAD * S, PAD * S, (W - PAD) * S, (H - PAD) * S]
+
+    disc = Image.new("L", (W * S, H * S), 0)
+    ImageDraw.Draw(disc).ellipse(box, fill=255)
+
+    grad = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad)
+    for y in range(H * S):                        # 上浅下深, 与图标的蓝同族
+        t = y / (H * S - 1)
+        gd.line([(0, y), (W * S, y)],
+                fill=tuple(round(a + (b - a) * t) for a, b in zip((124, 152, 255), (68, 96, 210)))
+                + (255,))
+    grad.putalpha(disc)
+    img = Image.alpha_composite(Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0)), grad)
+
+    icon = Image.open("editors/loment.ico")       # 只借它的 L, 不借它的底
+    icon.size = (256, 256)
+    # 阈值要高: 图标自己有一层很淡的内高光, 卡低了会在 L 的包围盒里留下几点杂点,
+    # 而它们会跟着 L 一起放大。中值再滤一道, 把 1px 的孤立点清掉。
+    white = icon.convert("RGBA").convert("L").point(lambda v: 255 if v > 250 else 0)
+    white = white.filter(ImageFilter.MedianFilter(3))
+    white = white.crop(white.getbbox())
+
+    target = int(W * S * 0.50)                    # 字标占盘面的一半 —— 32px 上要读得出
+    k = min(target / white.width, target / white.height)
+    lw, lh = round(white.width * k), round(white.height * k)
+    L = white.resize((lw, lh), Image.LANCZOS)
+    img.paste(Image.new("RGBA", (lw, lh), (255, 255, 255, 255)),
+              ((W * S - lw) // 2, (H * S - lh) // 2), L)
+
+    # 一道细环: Discord 的底色跟着主题走 (深/浅/自定义), 环给徽章一条边界
+    d = ImageDraw.Draw(img)
+    d.ellipse([4 * S, 4 * S, (W - 4) * S, (H - 4) * S], outline=(158, 182, 255, 235),
+              width=5 * S)
+
+    save(img, W, H, "editors/loment-discord.png")
+
+
 if __name__ == "__main__":
     banner()
     pipeline()
     bootstrap()
     diagnostic()
+    social()
+    discord()
