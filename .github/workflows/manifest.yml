@@ -1,0 +1,116 @@
+# 生成物自动重算 —— **CI 的树就是那次提交本身，而开发者的树不是**
+#
+# ## 它修的是什么
+#
+# 本仓有一类红**不是缺陷，是排队现象**：`docs/*.md`、`tools/*.py`、`loment/tools/*.lomt`
+# 都在 `loment_release.GLOBS` 里，所以**任何一次碰它们的提交都会让清单过期** ——
+# 于是每个人都得记得"提交前重生成"。忘了就是一条 `loment_release` 红，
+# 而那条红**没有信息量**（它只说"你忘了跑一条命令"）。
+#
+# 更要紧的是那条**老病**：`--emit` 是**按工作树 glob** 的，所以开发者在脏树上重生成，
+# 会把**别人未提交的改动**的哈希烤进清单 —— 那份清单一旦提交，在 HEAD 上对所有人红。
+# 这一条在 `docs/201` 与并发会话那几轮里反复出现过。
+#
+# **CI 的树没有这个问题**：它 `checkout` 的就是那一个 commit，树是干净的、唯一的。
+# 所以"在 CI 上算清单"不只是省事 —— **它比在开发者机器上算更准**。
+#
+# ## 三条设计决定（都写在这里，因为它们都不是显然的）
+#
+# 1. **只在分支上跑，不在 `main` 上跑**（`branches-ignore: [main]`）。
+#    `main` 只收 PR 合并，而每个 PR 分支都被本 workflow 修过 ⇒ `main` 自然是对的。
+#    反过来，往 `main` 直接推 bot 提交会撞分支保护，那是一条**假失败**。
+#    真要在 `main` 上跑，用 `workflow_dispatch` 手动点。
+#
+# 2. **不重算自举种子**（`loment/selfhost_driver.ll`）。它在 GLOBS 里，但它要跑整条
+#    自举链，代价与"生成物"这个词不相称；而且**它有自己的判据**（`loment_seed_test`），
+#    清单重算**掩不住**它。清单描述的是"这个 commit 的树"，种子过期是**另一条红**，
+#    两者不互相掩盖 —— 子序列是：谁改了源、谁重算种子；下一次 push 本 workflow
+#    再把清单对齐。
+#
+# 3. **只提交"生成物白名单"里的路径，别的一律拒绝**（下面那个 guard）。
+#    如果 `--emit` 动了白名单之外的文件，说明**那条命令坏了**，那时应该**红**，
+#    而不是把一个来历不明的改动当作"生成物"提交上去。
+#
+# ## 边界
+#
+# * **不改任何判据、不碰 `lom/`** —— 它只是把一条机械命令放进 CI。
+# * **fork 的 PR 推不回来**（`GITHUB_TOKEN` 只读），而 `push` 事件本来也不会为 fork 触发 ——
+#   所以那种 PR 仍然走"自己重算"那条老路，这里不假装覆盖了它。
+# * **不新增 `tools/*.py`** —— 与 `gate.yml` 同一条理由（`GLOBS` 是显式清单），
+#   所以逻辑全在这个文件里。
+
+name: manifest
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+# 同一个分支上串行 —— 两次并发重算会互相覆盖，而且会产生一条推不上去的提交
+concurrency:
+  group: manifest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  emit:
+    # **回环守卫**：本 workflow 自己推的那一笔不再触发它自己。
+    # 用 `GITHUB_TOKEN` 推时 actor 就是 `github-actions[bot]`，所以这一条足够。
+    # 刻意**不用** `[skip ci]`：那样连 `gate` 也会被跳过，而**我们要 `gate` 去验这一笔**
+    # （它跑完 `loment_release --check`，正是对重算结果的独立复核）。
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 依赖顺序：手册是从 `docs/` 生成的，而 `docs/manual/**` 在 GLOBS 里 ⇒ 先手册后清单。
+      - name: 重算生成物
+        run: |
+          set -e
+          python tools/loment_manual.py --emit docs/manual
+          python tools/loment_release.py --emit
+          python tools/loment_release.py --checksums loment/build/SHA256SUMS
+          echo "--- 重算之后工作树里动了什么 ---"
+          git status --porcelain
+
+      # **白名单守卫**：`--emit` 只许动这三处。动了别处 = 命令坏了 = 该红，不该提交。
+      #
+      # 看的是 `git diff HEAD`（**已跟踪**文件的改动），**不看未跟踪文件** ——
+      # 生成物本来就是跟踪着的；而未跟踪的东西可能是 checkout 之后的残留，
+      # 拿它判"命令坏了"是**假红**。（本机测试时立刻踩到过这一个。）
+      #
+      # 别用 `awk '{print $2}'`：重命名条目长成 `R  old -> new`，那样取到旧路径、守卫会**漏判**。
+      # 这里用 `cut -c4-`，重命名会得到 `old -> new`，前缀匹配不上 ⇒ 判越界 ⇒ **红** ——
+      # 那个方向是对的（宁可炸，不可把来路不明的东西当生成物提交）。
+      - name: 白名单守卫（只许动生成物）
+        run: |
+          set -e
+          stray=$(git diff HEAD --name-only | cut -c1- \
+            | grep -v -E '^(loment/build/release-manifest\.json|loment/build/SHA256SUMS|docs/manual/)' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着 --emit 坏了："
+            echo "$stray"
+            exit 1
+          fi
+          echo "只动了允许的那几处。"
+
+      - name: 变了就单独提交一笔（消息写明"只有生成物"）
+        run: |
+          set -e
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "生成物本来就是最新的 —— 什么都不做。"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 点名 add，不用 `git add -A`（本仓纪律：提交要能一眼看清收了什么）
+          git add loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual
+          git commit -m "[生成物] 只有生成物：发布清单 + SHA256SUMS + 手册（CI 自动重算）"
+          git push
