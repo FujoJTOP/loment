@@ -1430,7 +1430,8 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
         if gc != NOTFOUND && jkind(mem, gc) == 3 {
             let lg: u32 = jstr(mem, gc, ptr_add(mem, M_SB), 4096);
             if eq_lit(ptr_add(mem, M_SB), lg, "gc_manual") == 1
-                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1 {
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1 {
                 gok = 1;
             }
         }
@@ -1441,7 +1442,8 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
         // 是校验器**独立判得了**的 —— 不需要读源码。于是"自称既 no_std 又 gc_auto"
         // 是一件**能被外部判非法**的事，而不是"只有编译器知道"。
         if gok == 1 && jstr_field_is(mem, doc, "mode", "no_std") == 1
-                && jstr_field_is(mem, doc, "gc", "gc_auto") == 1 {
+                && (jstr_field_is(mem, doc, "gc", "gc_auto") == 1
+                    || jstr_field_is(mem, doc, "gc", "gc_auto_alpha") == 1) {
             let _c8: u32 = bad(mem);
         }
     }

@@ -47,7 +47,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 72
+BUDGET = 73
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -182,6 +182,9 @@ _CASES: list[tuple[str, str]] = [
     ("choose-gc-twice", "module m\n\nchoose gc_auto\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("choose-gc-two-values", "module m\n\nchoose gc_manual\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("choose-no-std-gc-auto", "module m\n\nchoose no_std\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 混合档（`gc_auto_alpha`）同一条冲突，**只强不弱** —— 它比 `gc_auto`
+    # 更依赖运行期（要自适应、要策略池）。
+    ("choose-no-std-gc-alpha", "module m\n\nchoose no_std\nchoose gc_auto_alpha\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：

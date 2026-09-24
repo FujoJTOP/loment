@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "fe7e420cf9ef5cbd8ceb31d3fe924beee8c79e8843adbda8fcd4914c38f787f4"
+   "sha256": "8244d6a8b3bafaf4a9c0c8951ccf5563f11ab1b75dd6a1b44e612102dda47026"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -23,7 +23,7 @@
   },
   {
    "path": "tools/potato.py",
-   "sha256": "e91099fa9e5d12d9a8fcb70966f0471b4e676903c42768ff4ca5c1b250bffb99"
+   "sha256": "e0a547977a7ba37e39517176c73075bfc88b107f9d65ca7bd12c62bfec8d0737"
   },
   {
    "path": "tools/potato_test.py",
@@ -775,7 +775,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "61d6b85ced4d8ebfd1c52466579f83ea5fcea6cac7c27193ca7e661f50b8b44c"
+   "sha256": "5787e8a2cf80bc17958265f3c7c630af175382bbf9c8476198e30fbaa3a8571e"
   },
   {
    "path": "tools/loment_seed.py",
@@ -807,7 +807,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "dae29945c2f4ccbd19445c286b3d73b4e0ce8cf92012c3ab309308ef5ffdcd1c"
+   "sha256": "33fbe565752bb7bf6ec5efc8e3ad22bca1bcc73e3bf52723f67a82e5c1211b71"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "589e9072c1a79a6ca898a903ca563a0aacf86ea235604e696ffc0970af6b592b"
+   "sha256": "604dafdeddfcf355dc45afeac8f05864aadcaeaae1382aeb35c63c87d87fb693"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1127,7 +1127,7 @@
   },
   {
    "path": "loment/tools/lompotato.lomt",
-   "sha256": "97c93d9ebec3efe3ea01dc61b78b1b8e71871303047acb87fc56f8d5475a8093"
+   "sha256": "49da1b6353fcbd8148353b50858a22355275164add4fca98f927194da1434e2f"
   },
   {
    "path": "loment/tools/lompotc.lomt",
@@ -1519,11 +1519,11 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "9d28a5596beb5587e0049b4a6b22ec69534abd11e5298884a8d7727ad6262d60"
+   "sha256": "aba4af19b86d60f9526addfed4c143448d939061ec07f0ffcab80d84094ab42c"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "edb794218975de3af69f206766eff0a2de6848396135ba4da39418c9fd71d9d6"
+   "sha256": "ede880e9feec25a0b41fa4628ff8e16672aa5f62512a98f09484d6e639f676d6"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1587,11 +1587,11 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "ff2e1c83871a178f35074d1b8c8d654ce08117b0d922f99fabbaf946503bb6a3"
+   "sha256": "2b7870a6cd00ecb358765ec5808d795e9cf5d1df58cfbbf3131f2ea02cec4bfb"
   },
   {
    "path": "loment/selfhost/switches.lomt",
-   "sha256": "5c11731ddf8a7056f205d9d2ff5c2d9a34be30146c5f57f9d5784b7b50e6d93f"
+   "sha256": "63bbc878403a0c5e0bf8e24b177080c8586bacb5f539f41e2eb5912bf69ea137"
   },
   {
    "path": "loment/corpus.json",
@@ -1663,11 +1663,11 @@
   },
   {
    "path": "docs/147-potato-v1-spec.en.md",
-   "sha256": "945378e5f8531f1c9c4cfbcd8972e16876a0f09782e09dc917131872ebb5ef3e"
+   "sha256": "7c56dca6ce4d7251c831f541c54f7de5e7592dd8ec25ca84cc53b143b26dc633"
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "5da8800c1c4dcf634db7ca2ed2374524267826b9d2d20910a66dfebff4926c2e"
+   "sha256": "7b7648728fcdabaea7be00dd01a66582230062538c557c0979da06fa7a8f561b"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
@@ -1787,7 +1787,7 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "57a6e3ccf8b875ebbd911a47bea30a9bccb632f40bbdf080286ecdc32ca71b3b"
+   "sha256": "4cba1dfc0468517749a17393d7b6f91dd0bb4759f0d26b8d8d9b70c86745a4bd"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
@@ -1883,7 +1883,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "3f64cfeb75cbe8c3e022619432835ceb5592dc4e8e7fc780d92d98030eaa1e6d"
+   "sha256": "5265809e3ce36c85bcda5de7b956d9d0aa2e5e430c22b474a5625a00f29a6ec2"
   },
   {
    "path": "docs/203-third-party-audit.md",
@@ -1903,7 +1903,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "92c31bb3428696cd534dd95d88f71c407b71c791bdc4f8cac7a6bd0ab71440b9"
+   "sha256": "49e1b3f5c916bcd7d62ecb17281de438c23b464b8888f1a7628f2f0a2f1ebe44"
   },
   {
    "path": "docs/manual/api/ahci.md",

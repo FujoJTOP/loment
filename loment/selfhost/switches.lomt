@@ -123,6 +123,9 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "gc_auto") {
         return true;
     }
+    if sw_tok_is(unit, toks, k, "gc_auto_alpha") {
+        return true;
+    }
     return false;
 }
 

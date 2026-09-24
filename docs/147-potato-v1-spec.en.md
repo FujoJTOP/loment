@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 5da8800c1c4dcf634db7ca2ed2374524267826b9d2d20910a66dfebff4926c2e -->
+<!-- source-sha256: 7b7648728fcdabaea7be00dd01a66582230062538c557c0979da06fa7a8f561b -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -106,8 +106,11 @@ formal object and reconciles byte for byte".
 
   The ladder **accumulates**: `v8` requires the fields of every version below it.
 
-- **`gc` (v8)**: one of two **collection tiers** — `gc_manual` (the program reclaims
-  explicitly) or `gc_auto` (the runtime reclaims). **Same level and shape as `mode`**: a string
+- **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
+  `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory
+  management plus dynamic collection, with no phase that freezes all business logic,
+  adaptive and strategy-pooled — `docs/175` §3.4.1; the `alpha` in the name is **said out
+  loud**, and a project that uses it accepts that). **Same level and shape as `mode`**: a string
   value, **required**, settable only in the root unit. So "which tier this artifact was built in"
   — and whether it **gave up determinism** — is decidable without reading the source, which is
   exactly what `docs/175` §3.4 asks for.

@@ -930,7 +930,10 @@ MAXDEPTH = 8
 #:   * `gc`   —— `gc_manual` / `gc_auto`：回收由程序做还是由运行期做（`docs/175` §3.4）。
 CORE_DIMS: dict[str, tuple[str, ...]] = {
     "mode": ("std", "no_std"),
-    "gc": ("gc_manual", "gc_auto"),
+    # `gc_auto_alpha` = **混合档**（用户 2026-09-23 定，`docs/175` §3.4.1）：
+    # 静态内存管理 + 动态回收，**不存在任何冻结全部业务的阶段**，且自适应。
+    # 名字带 `alpha` 是**明说的**：这一档在动，用它的项目认这一点。
+    "gc": ("gc_manual", "gc_auto", "gc_auto_alpha"),
 }
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
@@ -942,7 +945,7 @@ CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual"}
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
     "mode": "运行模式（`std` / `no_std`）",
-    "gc": "回收档（`gc_manual` / `gc_auto`）",
+    "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -952,6 +955,11 @@ CORE_CONFLICTS = {
         "「只能用核那一层」—— 两者放在一起等于要求**核里带一个收集器**，"
         "那不是「核保持小」。这一档**先划窄**：真有人要，再按 `docs/175` §4 那条"
         "「能独立校验」的路子把它开成一个**受约束的子集**"),
+    # `gc_auto_alpha` 比 `gc_auto` 更依赖运行期（它要自适应、要策略池），所以同一条冲突
+    # 对它**只强不弱** —— 它一样不能与 `no_std` 并存。
+    ("no_std", "gc_auto_alpha"): (
+        "混合档（`gc_auto_alpha`）比 `gc_auto` **更依赖运行期**（它要自适应、要有策略池），"
+        "而 `no_std` 的定义是「只能用核那一层」—— 同一条冲突，对它只强不弱"),
 }
 
 

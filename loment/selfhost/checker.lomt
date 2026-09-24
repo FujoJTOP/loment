@@ -345,7 +345,8 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "std") || chk_tok_is(src, t, k, "no_std") {
         return 0;
     }
-    if chk_tok_is(src, t, k, "gc_manual") || chk_tok_is(src, t, k, "gc_auto") {
+    if chk_tok_is(src, t, k, "gc_manual") || chk_tok_is(src, t, k, "gc_auto")
+            || chk_tok_is(src, t, k, "gc_auto_alpha") {
         return 1;
     }
     return 2;
@@ -365,6 +366,9 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     }
     if chk_tok_is(src, t, k, "gc_auto") {
         return 2;
+    }
+    if chk_tok_is(src, t, k, "gc_auto_alpha") {
+        return 3;
     }
     return 0;
 }
@@ -2936,7 +2940,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if v_gc != 0 {
         eff_gc = v_gc;
     }
-    if eff_mode == 2 && eff_gc == 2 {
+    if eff_mode == 2 && eff_gc >= 2 {
         o = sym_pub(src, t, out, o, E_MODE, ch_line);
     }
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)

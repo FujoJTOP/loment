@@ -91,7 +91,7 @@ MODES = ("std", "no_std")
 #: `gc_manual` = 回收由程序显式做；`gc_auto` = 运行期负责回收。
 #: 后者**放弃了"确定性"这条差异点**（`docs/140`），而这件事**记在对象里** ——
 #: 于是"这个产物放弃了确定性"是**不读源码可判**的。
-GCS = ("gc_manual", "gc_auto")
+GCS = ("gc_manual", "gc_auto", "gc_auto_alpha")
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)
@@ -308,7 +308,7 @@ def validate(doc: object) -> list[str]:
         # **两档不能同时选**（`docs/175` §3.4 ⚠）：这一条校验器**独立判得了** ——
         # 两个取值都在对象里, 不需要读源码。于是"自称既 no_std 又 gc_auto"是一件
         # **能被外部判非法**的事, 而不是"只有编译器知道"。
-        if doc.get("mode") == "no_std" and g == "gc_auto":
+        if doc.get("mode") == "no_std" and g in ("gc_auto", "gc_auto_alpha"):
             errs.append("mode=no_std 与 gc=gc_auto 不能同时选 —— 自动回收要一个运行期，"
                         "而 no_std 的定义是「只能用核那一层」（docs/175 §3.4）")
 
