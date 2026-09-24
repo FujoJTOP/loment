@@ -1119,9 +1119,13 @@ fn epoch_close(s: ptr, out: ptr, sv: u32) -> u32 {
     return emit_str(s, out, ", ptr @__loment_off\n");
 }
 
-/// 纪元开：记下前沿，回它的 temp 号（0 = 这一格没通过认证，什么都不发）。
+/// 纪元开：记下前沿，回它的 temp 号（0 = 这一格没开纪元，什么都不发）。
+///
+/// **档位门在这儿**（与 `emit_l0_buf` 同一个口径）：`l2_ok` 只判规则，判不出档 ——
+/// 参考侧靠"`s.l2` 只在 alpha 那一趟填"把门关上，自举侧就得自己看 572。
+/// 少了这一句，`gc_manual` 下孪生也会开纪元（**实测**：`test_m89` 的 manual 变体抓到的）。
 fn epoch_open(s: ptr, out: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
-    if l2_ok(s, src, toks, at, end) == 0 {
+    if load32(s, 572) == 0 || l2_ok(s, src, toks, at, end) == 0 {
         return 0;
     }
     emit_str(s, out, "  ");
