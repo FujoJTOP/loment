@@ -960,11 +960,23 @@ fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
 }
 
 fn _start() -> u32 {
-    let mv: i64 = syscall4(12, 0, 0, 0);
-    if mv <= 0 {
+    // **先把堆扩到够，再拿它当基址。** 这里原来只 `brk(0)` 问了一下当前堆顶就当内存用 ——
+    // 于是 `[mem, mem + M_CAP)` 里绝大多数页**根本没被映射**，第一次碰到上面那一段
+    // （`M_ARG` 在 545344 处，读 argv 就够远了）就是 SIGSEGV。
+    //
+    // Windows 上一直看不出来: PE 那边的 .bss/堆区 committed 得很大，写进去也不炸 ——
+    // 而判据在本机跑的就是 PE。Linux 上没有这份余量（2026-09-22 把门禁搬上 CI 才现形）。
+    // 家族里其余 24 个工具都扩了（`sys_alloc` 或第二个 `brk`），只有 lomtfrom/lomtrans 忘了。
+    // 判据: `loment_tools_test::test_tool_reserves_its_memory`。
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
         return errat("brk", 2);
     }
-    let mem: ptr = mv as ptr;
+    let got: i64 = syscall4(12, (cur as u64) + M_CAP as u64, 0, 0);
+    if got < 0 {
+        return errat("brk", 2);
+    }
+    let mem: ptr = cur as ptr;
     let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
     if fd < 0 {
         return errat("argv", 2);

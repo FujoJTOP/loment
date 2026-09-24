@@ -43,19 +43,27 @@ const M_TB: u32 = 409600;                  // 表区 12*33808 = 405696 -> 815296
 const M_ST: u32 = 815296;                  // 16 字节状态
 const M_CAP: u32 = 832512;
 
-// **写死**（`const` 只吃整数**字面量**，不接受算式）: M_TB + i * 33808
-const TB_TP: u32 = 475136;         // 声明类型名 (types ∪ enums) —— type_ok 要用
-const TB_TY: u32 = 508944;         // 只 types (与 enums 撞名时用)
-const TB_FN: u32 = 542752;
-const TB_CP: u32 = 576560;
-const TB_CS: u32 = 610368;
-const TB_LY: u32 = 644176;
-const TB_EN: u32 = 677984;
-const TB_TR: u32 = 711792;
-const TB_GN: u32 = 745600;
-const TB_IN: u32 = 779408;
-const TB_SW: u32 = 813216;
-const TB_DL: u32 = 847024;
+// **写死**（`const` 只吃整数**字面量**，不接受算式）: `TB_i = M_TB + i * TA`
+//
+// ⚠ 这一组**必须**与上面那个公式逐项相等。它们曾经整体偏高 65536（从 475136 起、
+// 而不是从 409600 起），于是最后一张表落到 847024 —— **既出了表区
+// （`M_ST` = 815296），也出了 `sys_alloc` 分配的内存（`M_CAP` = 832512）**。
+// 写它就是写到那块内存之外：Linux 上 brk 区域之外没有映射，直接 SIGSEGV；
+// 而 Windows 的堆有余量、把它吞了 —— 所以本机判据一直是绿的（2026-09-22 把门禁
+// 搬上 Linux runner 才现形）。这一组末项 + `TA` 正好等于 `M_ST`。
+// 判据: `loment_tools_test::test_tool_memory_layout_stays_inside_cap`。
+const TB_TP: u32 = 409600;         // 声明类型名 (types ∪ enums) —— type_ok 要用
+const TB_TY: u32 = 443408;         // 只 types (与 enums 撞名时用)
+const TB_FN: u32 = 477216;
+const TB_CP: u32 = 511024;
+const TB_CS: u32 = 544832;
+const TB_LY: u32 = 578640;
+const TB_EN: u32 = 612448;
+const TB_TR: u32 = 646256;
+const TB_GN: u32 = 680064;
+const TB_IN: u32 = 713872;
+const TB_SW: u32 = 747680;
+const TB_DL: u32 = 781488;
 
 const TH_N: u32 = 0;               // 表头: 条数
 const S_ERRS: u32 = 0;             // 状态格: 错误数
