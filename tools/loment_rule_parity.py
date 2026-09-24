@@ -47,7 +47,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 69
+BUDGET = 76
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -175,6 +175,24 @@ _CASES: list[tuple[str, str]] = [
     # 棘轮由驱动闸门 (`loment_p8_test` 的 neg_dep_choose) 承担, 这两条才进预算。
     ("choose-twice", "module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("choose-bad-mode", "module m\n\nchoose fast\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 核心模式的**维**（`docs/175` §3.0 / §3.4, 2026-09-23 加 `gc`）--------
+    # "只能声明一次"从"总共一次"改成**按维**一次 —— 所以这三条各钉一边：
+    # 同一维写两次（同值 / 两值）都得报，而**两维各一份是合法的**（不在套件里，
+    # 它在 `lomentc_test` 的正例那边）。第四条是两档冲突。
+    ("choose-gc-twice", "module m\n\nchoose gc_auto\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-gc-two-values", "module m\n\nchoose gc_manual\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-no-std-gc-auto", "module m\n\nchoose no_std\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 混合档（`gc_auto_alpha`）同一条冲突，**只强不弱** —— 它比 `gc_auto`
+    # 更依赖运行期（要自适应、要策略池）。
+    ("choose-no-std-gc-alpha", "module m\n\nchoose no_std\nchoose gc_auto_alpha\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 第三维 `runtime`（`docs/175` §3.6）---------------------------------
+    # 与 `gc` 完全同一套：按维一次、取值只有两个、与自动回收**定义上矛盾**。
+    ("choose-runtime-twice", "module m\n\nchoose runtime\nchoose runtime\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-runtime-two-values", "module m\n\nchoose runtime\nchoose no_runtime\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **有一条不冲突的配对必须记着**：`runtime` + `gc_manual` = "要运行期、但内存
+    # 我自己管" —— 它是合法档，**不该**报错。套件只收负例，所以这里放的是该报的
+    # 那一对；合法的那一对由 `potato_test` 的 `v9-runtime-on` 合法样本守着。
+    ("choose-no-runtime-gc-auto", "module m\n\nchoose no_runtime\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：

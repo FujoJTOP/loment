@@ -285,6 +285,21 @@ fn jkind(mem: ptr, n: u32) -> u32 {
     return json_nkind(ptr_add(mem, M_ARENA), n);
 }
 
+/// `doc[key]` 是不是**恰好**那个字符串（缺项 / 不是字符串 -> 0）。
+/// 用来判"两档不能同时选"（`docs/175` §3.4 ⚠）—— 那两个取值都在对象里，
+/// 所以校验器不必读源码就能判。
+fn jstr_field_is(mem: ptr, doc: u32, key: str, s: str) -> u32 {
+    let n: u32 = jget(mem, doc, key);
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 4096);
+    if eq_lit(ptr_add(mem, M_SB2), l, s) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
 /// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
 fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
     return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
@@ -529,6 +544,18 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
         return 1;
     }
     if ver >= 6 && eq_lit(kp, kl, "grammar") == 1 {
+        return 1;
+    }
+    // v7 = v6 + **边界操作计数**（`docs/205` R5）。
+    if ver >= 7 && eq_lit(kp, kl, "boundary") == 1 {
+        return 1;
+    }
+    // v8 = v7 + **回收档**（`docs/175` §3.4）：`gc_manual` / `gc_auto`。
+    if ver >= 8 && eq_lit(kp, kl, "gc") == 1 {
+        return 1;
+    }
+    // v9 = v8 + **运行期在不在**（`docs/175` §3.6）：`runtime` / `no_runtime`。
+    if ver >= 9 && eq_lit(kp, kl, "runtime") == 1 {
         return 1;
     }
     return 0;
@@ -1408,6 +1435,56 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _m: u32 = bad(mem);
         }
     }
+    if ver >= 8 {
+        // **必填**（`docs/175` §3.4）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
+        let gc: u32 = jget(mem, doc, "gc");
+        let gok: u32 = 0;
+        if gc != NOTFOUND && jkind(mem, gc) == 3 {
+            let lg: u32 = jstr(mem, gc, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lg, "gc_manual") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1 {
+                gok = 1;
+            }
+        }
+        if gok == 0 {
+            let _g8: u32 = bad(mem);
+        }
+        // **两档不能同时选**（`docs/175` §3.4 ⚠）：两个取值都在对象里，所以这一条
+        // 是校验器**独立判得了**的 —— 不需要读源码。于是"自称既 no_std 又 gc_auto"
+        // 是一件**能被外部判非法**的事，而不是"只有编译器知道"。
+        if gok == 1 && jstr_field_is(mem, doc, "mode", "no_std") == 1
+                && (jstr_field_is(mem, doc, "gc", "gc_auto") == 1
+                    || jstr_field_is(mem, doc, "gc", "gc_auto_alpha") == 1) {
+            let _c8: u32 = bad(mem);
+        }
+    }
+    if ver >= 9 {
+        // **必填**（`docs/175` §3.6）—— 与 `mode` / `gc` 同一条纪律：不存在"缺这项"的形态。
+        // 于是"这个产物里有没有运行期"是**不读源码可判**的。
+        let rt: u32 = jget(mem, doc, "runtime");
+        let rok: u32 = 0;
+        if rt != NOTFOUND && jkind(mem, rt) == 3 {
+            let lr: u32 = jstr(mem, rt, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lr, "runtime") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lr, "no_runtime") == 1 {
+                rok = 1;
+            }
+        }
+        if rok == 0 {
+            let _r9: u32 = bad(mem);
+        }
+        // **定义上矛盾**（`docs/175` §3.6）：自动回收要的就是那个运行期。两个取值都在
+        // 对象里，所以这一条校验器**独立判得了**。`gc_manual` **不**在这一条里 ——
+        // "不要运行期、手动回收"是合法档。
+        // 与 Python 那份**同口径**：只在取值合法且等于 `no_runtime` 时再判一次 ——
+        // 否则 `rok == 0` 那一条已经报过，再报就是**级联**（两份比的正是错误条数）。
+        if rok == 1 && jstr_field_is(mem, doc, "runtime", "no_runtime") == 1
+                && (jstr_field_is(mem, doc, "gc", "gc_auto") == 1
+                    || jstr_field_is(mem, doc, "gc", "gc_auto_alpha") == 1) {
+            let _c9: u32 = bad(mem);
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1481,6 +1558,15 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v6") == 1 {
             ver = 6;
         }
+        if eq_lit(t, l, "v7") == 1 {
+            ver = 7;
+        }
+        if eq_lit(t, l, "v8") == 1 {
+            ver = 8;
+        }
+        if eq_lit(t, l, "v9") == 1 {
+            ver = 9;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -1532,7 +1618,68 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     if ver >= 5 {
         chk_bodies(mem, doc);
     }
+    if ver >= 7 {
+        chk_boundary(mem, doc);
+    }
     return 0;
+}
+
+/// `boundary`（`docs/205` R5, v7）: 四个**分量**都是非负整数, 总数等于三项之和,
+/// 而且没有不认识的键。
+///
+/// 这是**校验器独立判得了**的那部分 —— 它读不到源码, 所以判不了"这几个数数得对不对",
+/// 但判得了"它们自相矛盾"。逐条与 Python 的 `potato.validate` 对齐: **连错的条数都要一致**,
+/// `potato_test` 的孪生判据比的正是条数。
+fn chk_boundary(mem: ptr, doc: u32) -> u32 {
+    let b: u32 = jget(mem, doc, "boundary");
+    if b == NOTFOUND || jkind(mem, b) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let ne: u32 = bnd_part(mem, b, "extern_declared");
+    let nc: u32 = bnd_part(mem, b, "extern_calls");
+    let ns: u32 = bnd_part(mem, b, "syscalls");
+    let npt: u32 = bnd_part(mem, b, "ptr_transforms");
+    let tot: u32 = bnd_part(mem, b, "total_sites");
+    // 分量不合法时 `bnd_part` 已经记过一次错, 这里**不再重复记** —— 与 Python 那边的
+    // `elif` 同形: 和数只在五项都是合法整数时才去对。
+    if ne != NOTFOUND && nc != NOTFOUND && ns != NOTFOUND && npt != NOTFOUND
+            && tot != NOTFOUND && tot != nc + ns + npt {
+        let _t: u32 = bad(mem);
+    }
+    // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(b) - …)` 一条消息）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, b);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "extern_declared") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "extern_calls") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "syscalls") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "ptr_transforms") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "total_sites") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `boundary` 里的一个计数: 非负整数就返回它的值, 否则记**一次**错并返回 `NOTFOUND`。
+fn bnd_part(mem: ptr, b: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, b, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _v: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
 }
 
 fn _start() -> u32 {

@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: d6d0fb42d60ca5f8eb442afd84d87d562a19f63220f613fac5e5fbf3a7773f09 -->
+<!-- source-sha256: 25fb7c052db171a0091efbb9d2b2885ab7261a846c9175aa8936336f1dca0cc8 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -132,10 +132,72 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0`/`v1`/**`v2`**, and an unknown version =
-  illegal;
-  (see **`docs/178`** for `v2` — v1 + a required `mode`, i.e. "is this program std or no_std". The current
-  compiler **emits v2**; v0/v1 remain legal as before.)
+- the object carries its own version number; the validator accepts `v0` … **`v9`**, and an unknown version =
+  illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
+  required field to an old version would turn every existing object illegal, and the old versions are
+  **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
+
+  | Version | Field added | Specified in |
+  |---|---|---|
+  | `v0` | (baseline) | `docs/142` |
+  | `v1` | `generics` · `instances` · `traits` · `impls` · `guards` | §1 of this document |
+  | `v2` | `mode` | `docs/178` |
+  | `v3` | `switches` | `docs/182` §1 |
+  | `v4` | `dialects` | `docs/184` §9 |
+  | `v5` | `bodies` | `docs/185` §7 ① |
+  | `v6` | `grammar` | `docs/188` §2 |
+  | `v7` | `boundary` | `docs/205` R5 |
+  | `v8` | `gc` | `docs/175` §3.4 |
+  | `v9` | `runtime` | `docs/175` §3.6 |
+
+  The ladder **accumulates**: `v9` requires the fields of every version below it.
+
+- **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
+  `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory
+  management plus dynamic collection, with no phase that freezes all business logic,
+  adaptive and strategy-pooled — `docs/175` §3.4.1; the `alpha` in the name is **said out
+  loud**, and a project that uses it accepts that). **Same level and shape as `mode`**: a string
+  value, **required**, settable only in the root unit. So "which tier this artifact was built in"
+  — and whether it **gave up determinism** — is decidable without reading the source, which is
+  exactly what `docs/175` §3.4 asks for.
+  The validator also rules on **mutual exclusion on its own**: `mode=no_std` together with
+  `gc=gc_auto` is illegal — both values are in the object, so no source is needed. Why they
+  conflict is in `docs/175` §3.4 ⚠: automatic collection needs a runtime, and `no_std` means
+  "only the core layer".
+
+- **`runtime` (v9)**: **whether the artifact carries a runtime** — `runtime` or `no_runtime`
+  (the default). Same level and shape as `mode` / `gc`: a string value, **required**, settable
+  only in the root unit, so "does this artifact ship a runtime" is decidable without reading
+  the source. The value **deliberately says only "whether", not "what is inside"** (today it is
+  the collector `gc_auto` needs; tomorrow it may be threads and host services) — pinning the
+  contents into the value name would mean rewriting this dimension's definition the next time a
+  capability is added. The one rule the validator **rules on by itself**: `runtime=no_runtime`
+  together with `gc=gc_auto` (including `alpha`) is illegal — automatic collection is exactly
+  what wants that runtime, so the two contradict by definition. **`gc_manual` is not part of
+  that rule**: `runtime` + `gc_manual` ("I want a runtime, but I manage memory myself") is a
+  legitimate tier and must not be refused. See `docs/175` §3.6.
+
+
+- **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine
+  calls (`syscall4`/`syscall6`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
+  the unit itself declared `extern fn`. **The measure is lexical**: it only asks whether a name is called,
+  never what type it has or whether it is really dangerous — which is exactly what `docs/204` R5 asks for
+  ("greppable, countable, auditable"). The shape is five non-negative integers
+  `{extern_declared, extern_calls, syscalls, ptr_transforms, total_sites}`, and `total_sites` must equal the
+  sum of the last three. **That rule is the part the validator can judge on its own**: it cannot read source,
+  so it cannot tell whether the numbers were counted correctly — but it can tell when they contradict each
+  other. `loment stat` reports **the same numbers** (that copy is checked against the reference
+  implementation's real lexer). The list of builtins
+  (`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
+  there because this validator must not import the compiler (M47), and "which builtins cross the boundary" is
+  precisely what an auditor needs.
+
+- **`v6` used to be emitted only by `tools/potato_from.py`** (whose output is *translated* units). The main
+  compiler only picked `grammar` up **when `v7` was added**: the ladder accumulates, and it had been emitting
+  `v5` all along, so the bump ran straight into its own **self-check** for a missing `grammar`. Worth
+  recording — it shows the accumulation is itself guarded by a criterion: **miss one rung and the compiler's
+  own self-check goes red.**
+
 - `python tools/potato.py replay FILE...` replays validation according to the version the object carries, and
   `--expect-version` can assert a version;
 - the frozen sample `loment/build/legacy/demo.v0.json` is a real v0 object produced by the compiler before P5,
