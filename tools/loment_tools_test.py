@@ -893,6 +893,121 @@ def test_m81_builtin_tables_match():
     print(f"      内建名表 {len(mine)} 个一致 (含单列的 slice_len)")
 
 
+@test
+def test_tool_memory_layout_stays_inside_cap():
+    """**每个 `loment/tools/` 工具的"内存布局"要落在它自己声明的 `M_CAP` 之内。**
+
+    为什么需要一条判据盯着它: 那套布局是**手工维持**的 —— `const` 只吃整数字面量，
+    所以 `TB_*` 这些表偏移只能一个个写死（见 `lompotato.lomt` 布局块里那句注释）。
+    "加一张表忘了抬 `M_CAP`"、"改基址时算错一格"都会**静默**越界，而越界的写
+    **在 Windows 上看不出来**: 堆有余量、把它吞了；Linux 上 `brk` 区域之外没有映射，
+    直接 SIGSEGV。
+
+    这不是假设 —— 2026-09-22 把门禁搬上 Linux runner 时，`lompotato` 的 `TB_DL`
+    正是这么崩的: 那一组表偏移整体偏高 65536（从 475136 起而不是从 409600 起），
+    最后一张落在 **847024 > M_CAP 832512**。于是 `enums` 里只要有一个非空的
+    `variants`（那是**唯一**会用到 `TB_DL` 的路径）就段错误 —— 而同一份判据在
+    Windows 上一直是绿的。
+
+    查两件事:
+
+    1. 每个 `M_X` 落在 `M_CAP` 内；有配对的 `X_CAP` 时，`M_X + X_CAP` 也要在界内；
+    2. 名字表 `TB_*` **等距**（间距 == `TA`）、起点是表区起点 `M_TB`、且**最后一张
+       表的末尾**也在界内。
+    """
+    pat = re.compile(r"^const\s+([A-Z][A-Z0-9_]*)\s*:\s*u32\s*=\s*(\d+)\s*;", re.M)
+    bad: list[str] = []
+    checked = 0
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        c = {m.group(1): int(m.group(2))
+             for m in pat.finditer(p.read_text(encoding="utf-8"))}
+        cap = c.get("M_CAP")
+        if cap is None:
+            continue
+        checked += 1
+        for name, off in sorted(c.items()):
+            if not name.startswith("M_") or name == "M_CAP":
+                continue
+            if off >= cap:
+                bad.append(f"{p.name}: {name} = {off} 已在 M_CAP = {cap} 之外")
+            size = c.get(name[2:] + "_CAP")
+            if size is not None and off + size > cap:
+                bad.append(f"{p.name}: {name} + {name[2:]}_CAP = "
+                           f"{off}+{size} = {off + size} 超出 M_CAP = {cap}")
+        tbs = sorted(v for k, v in c.items() if k.startswith("TB_"))
+        if tbs:
+            ta = c.get("TA")
+            if not ta:
+                bad.append(f"{p.name}: 有 TB_* 却没有 TA（表尺寸）")
+            else:
+                gaps = sorted({b - a for a, b in zip(tbs, tbs[1:])})
+                if gaps != [ta]:
+                    bad.append(f"{p.name}: TB_* 不等距: 间距 {gaps} != TA = {ta}")
+                if tbs[-1] + ta > cap:
+                    bad.append(f"{p.name}: 最后一张表 {tbs[-1]} + TA = "
+                               f"{tbs[-1] + ta} 超出 M_CAP = {cap}")
+                m_tb = c.get("M_TB")
+                if m_tb is not None and tbs[0] != m_tb:
+                    bad.append(f"{p.name}: 第一张表 {tbs[0]} 不在表区起点 "
+                               f"M_TB = {m_tb}")
+    assert not bad, ("工具的内存布局越界（Linux 上段错误、Windows 上看不出来）:\n  "
+                     + "\n  ".join(bad))
+    print(f"      {checked} 个工具的内存布局都在各自的 M_CAP 之内")
+
+
+@test
+def test_tool_reserves_its_memory():
+    """**问过堆顶的工具，必须把堆扩到够再用它。**
+
+    `lomtfrom` / `lomtrans` 原来是 `brk(0)` 拿当前堆顶当基址、却**没有**让内核把堆扩到
+    `M_CAP`，于是 `[mem, mem + M_CAP)` 里多数页根本没被映射 —— 第一次写到上面那一段就是
+    SIGSEGV（`lomtfrom` 连读 argv 都够远）。Windows 上看不出来: PE 的 .bss/堆区 committed
+    得大；而判据在本机跑的就是 PE（2026-09-22 把门禁搬上 Linux runner 才现形）。
+
+    家族里其余 24 个工具都扩了（`sys_alloc` 或第二个 `brk`），只有这两个忘了。所以这一条查的
+    是"**凡是问过堆顶的，都要有扩堆**"。
+    """
+    bad = []
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        t = p.read_text(encoding="utf-8")
+        if "syscall4(12, 0, 0, 0)" not in t:
+            continue
+        if "fn sys_alloc" in t or "syscall4(12, (cur" in t:
+            continue
+        bad.append(p.name)
+    assert not bad, ("这些工具问了堆顶却没把堆扩到够（Linux 上段错误、Windows 上看不出来）: "
+                     + ", ".join(bad))
+    print("      问过堆顶的工具都把堆扩到够了")
+
+
+@test
+def test_arg_helpers_do_not_rebase_cb():
+    """**`cb` 已经是绝对指针，不许再当基址加偏移。**
+
+    `lomtrans` 的 `arg_is` / `arg_val` 里写着 `ptr_add(cb, M_TMP + 96)` —— 而
+    `cb = ptr_add(mem, M_ARG)`，于是那个地址落到 `mem + 2441312`，越过 `M_CAP`
+    （1525248）约 90 万字节。`arg_is` 每轮参数循环都调 ⇒ **有参数就 SIGSEGV、无参数不崩**。
+
+    正确写法要从 `cb` 往下减，而那个相对偏移是负数、`u32` 写不出来 —— 这正是它当初被写反的
+    原因。按 `arg_at` 自己的约定，暂存格应当由调用方从 `mem` 算好传进来。
+    """
+    bad = []
+    for p in sorted((ROOT / "loment" / "tools").glob("*.lomt")):
+        t = p.read_text(encoding="utf-8")
+        # **先剥注释、但保留换行** —— 这一条解释的就是那个写成错的写法，注释里必然带着它，
+        # 不剥就自己报自己（第一版就踩了）；用换行顶替是为了行号仍然指向源码。
+        # 与 `loment_cli_test` 剥注释同一写法。
+        t = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), t, flags=re.S)
+        t = re.sub(r"//[^\n]*", "", t)
+        for m in re.finditer(r"ptr_add\(cb,\s*[A-Z][A-Z0-9_]*\b", t):
+            # 注意**不能**写成 `[^()]*` 通配: `ptr_add(cb, o1)` 是合法的 ——
+            # `o1` 是 cmdline 内的相对偏移，本来就该从 `cb` 加。要抓的是
+            # "把 `M_*` 这类**以 mem 为基准**的常量又加到 `cb` 上"。
+            bad.append(f"{p.name}:{t[:m.start()].count(chr(10)) + 1}  {m.group(0)}")
+    assert not bad, ("把 cb（已经是绝对指针）又当基址用了:\n  " + "\n  ".join(bad))
+    print("      没有把 cb 再当基址的写法")
+
+
 # ---------------------------------------------------------------- M65/M66 构建
 
 @test
