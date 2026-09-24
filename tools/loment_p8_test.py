@@ -753,6 +753,42 @@ def test_m88_l0_alpha_pair_is_byte_identical():
     assert ".buf" not in outs["manual"], "gc_manual 那一份不该有提升的缓冲"
 
 
+@test
+def test_m89_l2_epoch_is_byte_identical():
+    """L2（**块纪元**，`docs/210` §2）：那一份真值表源，在**两个实现**上逐字节一致。
+
+    这一条是 L2 的镜像那一半 —— 规则定义在 token 流上，两个实现各写一份实现，
+    所以"逐字节"不是形式：`l2_ok` 与 `_l2_ok` 的判断差一格，产物就整段不同。
+
+    **源只有一份**（`lomentc_test.L2_EPOCH_SRC`，那边同时钉逐格的真值表）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in (("alpha", lomentc_test.L2_ALPHA_SRC),
+                         ("manual", lomentc_test.L2_MANUAL_SRC)):
+            target = Path(td) / f"gc_l2_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"gc_l2_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转：alpha 那一份必须**真的**多出前沿的存取（每开一格多一条读、一条写）
+    assert outs["alpha"].count("@__loment_off") > outs["manual"].count("@__loment_off"), \
+        "alpha 那一份没有多出前沿的存取 —— 这条判据在空转"
+
+
 def _dep_paths(target: Path) -> list[Path]:
     """按 lomentc.resolve_deps 的规则取依赖文件 (被依赖者在前), 并与参考实现的模块名序列核对。
 

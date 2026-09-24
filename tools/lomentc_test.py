@@ -1973,6 +1973,293 @@ def test_l0_safe_set_is_exactly_the_deref_only_ptr_arg0_builtins():
         assert b not in known, f"{b} 不是内建，不该在 L0 名单里"
 
 
+#: L2 判据用的那一份源：**逐字同源，只差 `choose` 那一行**（与 `L0_PAIR_SRC` 同一条纪律）。
+#: 每个函数一格 —— 该开纪元的与**不该开**的放在同一份里，"少开一格"与"多开一格"都会被同一条
+#: 判据抓住。`loment_p8_test` 的孪生判据**复用这一份**（`import lomentc_test`）。
+L2_EPOCH_SRC = """module gc_l2_epoch
+@@CHOOSE@@
+choose runtime
+
+fn ld(a: ptr, b: u32) -> u32 {
+    return load8(a, b);
+}
+
+fn f_pos(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_escape(n: u32, keep: ptr) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        keep = p;
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    return s + load8(keep, 0);
+}
+
+fn f_strcat(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let a: str = str_concat("x", "y");
+        s = s + str_len(a) + n;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_for(n: u32) -> u32 {
+    let s: u32 = 0;
+    for i in 0..100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 2);
+        s = s + load8(p, 0);
+    }
+    return s;
+}
+
+fn f_free(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        s = s + load8(p, 0);
+        free(p);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_l0() -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(64);
+        store8(p, 0, 3);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_inline(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        s = s + load8(alloc(n), 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_call(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        s = s + ld(p, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_bodyret(n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        return load8(p, 0);
+    }
+    return 0;
+}
+
+fn f_rettp(n: u32, c: u32) -> ptr {
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        if i == c {
+            return p;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn f_nested(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let q: ptr = alloc(n);
+        store8(q, 0, 1);
+        let j: u32 = 0;
+        while j < 4 {
+            let p: ptr = alloc(n);
+            store8(p, 0, 2);
+            s = s + load8(p, 0);
+            j = j + 1;
+        }
+        s = s + load8(q, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_two(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 3);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < 100 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 4);
+        s = s + load8(p, 0);
+        j = j + 1;
+    }
+    return s;
+}
+
+fn f_after(n: u32) -> u32 {
+    let q: ptr = alloc(n);
+    let s: u32 = load8(q, 0);
+    let i: u32 = 0;
+    while i < 4 {
+        let q: ptr = alloc(n);
+        store8(q, 0, 3);
+        s = s + load8(q, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_multi(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let p: ptr = alloc(n);
+        let r: ptr = alloc(n);
+        store8(p, 0, 3);
+        store8(r, 0, 5);
+        s = s + load8(p, 0) + load8(r, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_both(n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 {
+        let a: ptr = alloc(64);
+        let b: ptr = alloc(n);
+        store8(a, 0, 1);
+        store8(b, 0, 2);
+        s = s + load8(a, 0) + load8(b, 0);
+        i = i + 1;
+    }
+    return s;
+}
+"""
+
+L2_ALPHA_SRC = L2_EPOCH_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+L2_MANUAL_SRC = L2_EPOCH_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+
+#: 每个函数里**按出现顺序**数到的循环，各自的"能不能在末尾批量归还"。每一格的"为什么"：
+#: `f_escape` 把指针赋给体外 / `f_strcat` 有 `str_concat` / `f_free` 体内有 `free` /
+#: `f_l0` 尺寸是字面量（L0 已经提到栈上，没什么可归还）/ `f_inline` 是认不出来的分配（整格
+#: 取消）/ `f_call` 把它交给了用户函数 / `f_rettp` 从体内 `return p` / `f_two` 的第一格被
+#: **后面那个同名循环**挡掉（诚实的保守，见 §7）。
+#: `f_bodyret` 是**终止**那一格：体在 `return` 处结束 —— 仍然开纪元，只是那条路不回退。
+#: `f_after` 是**只查体之后**那一格：体之前的同名使用不算逃逸。
+L2_WANT = {
+    "f_pos": [True],
+    "f_escape": [False],
+    "f_strcat": [False],
+    "f_for": [True],
+    "f_free": [False],
+    "f_l0": [False],
+    "f_inline": [False],
+    "f_call": [False],
+    "f_bodyret": [True],
+    "f_rettp": [False],
+    "f_nested": [True, True],
+    "f_two": [False, True],
+    "f_after": [True],
+    "f_multi": [True],
+    "f_both": [True],
+}
+
+
+def _l2_flags(src: str) -> dict[str, list[bool]]:
+    mod = parse(src)
+    errs_ = lomentc.check(mod)
+    assert not errs_, errs_[:2]
+    out: dict[str, list[bool]] = {}
+    for f in mod.funcs:
+
+        def walk(stmts: list, acc: list) -> None:
+            for s in stmts:
+                if isinstance(s, (lomentc.While, lomentc.For)):
+                    acc.append(s.l2)
+                    walk(s.body, acc)
+                elif isinstance(s, lomentc.If):
+                    walk(s.then, acc)
+                    walk(s.otherwise, acc)
+
+        acc: list = []
+        walk(f.body, acc)
+        if acc:
+            out[f.name] = acc
+    return out
+
+
+@test
+def test_l2_block_epoch_rule():
+    """`gc_auto_alpha` 的 **L2**：**编译器自己推断的块纪元** —— 循环体末尾把分配器前沿退回
+    去，整段一次性不存在（"回收时间而不是对象"）。
+
+    **判据在这里是"逐格的真值表"**，两个方向都是钩子：哪一格该开而没开（规则太窄）会红，
+    哪一格不该开却开了（规则太松 —— 那是**记错账**，会悬空指针）也会红。
+
+    **形式与 `docs/210` 原稿不同，而且更激进**：原稿要求手写 `epoch { … }`（那要动冻结面、
+    加关键字）。这里把那条假设**拿掉** —— 纪元边界由编译器从**块结构 + 逃逸**推出来：
+    函数体与循环体本来就是块，只要"体内分配的指针一处都不出体"，体末就能整段退回。
+    **零新语法**，而且是宣言里那句"编译器和运行时共同预测对象生命周期"的字面形态。
+
+    **规则定义在 token 流上**（与 L0 同一个理由，见 `_l0_promotable`）—— 两个实现共用同一份
+    判断，`loment_p8_test::test_m89_l2_epoch_is_byte_identical` 逐字节核。
+
+    **静态这一条只钉"决定"**；"前沿真的退回去了"由 `loment_elf_test` 那条**动态**判据钉
+    （同一份程序：`gc_manual` 耗尽、`gc_auto_alpha` 跑通）。
+    """
+    assert _l2_flags(L2_ALPHA_SRC) == L2_WANT, f"alpha: {_l2_flags(L2_ALPHA_SRC)}"
+    manual = _l2_flags(L2_MANUAL_SRC)
+    assert set(manual) == set(L2_WANT), f"manual 少了函数的循环: {sorted(set(L2_WANT) - set(manual))}"
+    assert all(not any(v) for v in manual.values()), f"`gc_manual` 下不许开纪元: {manual}"
+    # 两份源只差那一行
+    assert L2_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
+        L2_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

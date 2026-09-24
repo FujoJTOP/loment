@@ -273,6 +273,60 @@ def test_free_really_reclaims():
     print(f"      带 free 跑通 (rc={got[0]})；不带 free 耗尽 (rc={got[1]}) —— 回收是真的")
 
 
+@test
+def test_gc_l2_epoch_bounds_the_heap():
+    """L2 **真的发生**：同一份程序，`gc_manual` 耗尽 / `gc_auto_alpha` 跑通（`docs/210` §5）。
+
+    **Why**：`docs/210` §4.4 说 L2 是"唯一**不扫描**的批量回收"，而它买的是栈纪律 ——
+    循环体末尾把前沿退回去，**整段一次性不存在**。这件事只有跑起来才看得见：
+    静态判据（`lomentc_test::test_l2_block_epoch_rule`）只能钉"编译器决定了开纪元"。
+
+    **How to apply**：两只程序**逐字同源**，只差 `choose` 那一行 —— 循环体里每次分配
+    **动态尺寸**的一块（所以 L0 不接：它只提字面量），累计 40000 × 64 B ≈ 2.56 MB，
+    而 arena 只有 64 KiB。
+      * 不带（默认 `gc_manual`）→ **必然耗尽**（实测 rc = 132，abort）—— 这一半是**证伪**：
+        它保证上面那一半不是"反正都跑得通"；
+      * `gc_auto_alpha` → **跑完**（rc = 7 = 循环真的转满了 40000 圈）。
+
+    **峰值只有一个块**，所以"跑得通"这件事只能是回退换来的。这条也是**端到端**的：
+    IR 过的是**自举镜像链接器**（`lomelf.compile_ll`），即包内那一只，不是 clang。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcl2\n%s\nfn _start() {\n"
+            "    let n: u32 = 64;\n"
+            "    let i: u32 = 0;\n"
+            "    let s: u32 = 0;\n"
+            "    while i < 40000 {\n"
+            "        let p: ptr = alloc(n);\n"
+            "        store8(p, 0, 1);\n"
+            "        s = s + load8(p, 0);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if s == 40000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("alpha", "choose gc_auto_alpha\nchoose runtime"),
+                        ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, tag, td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[0]}（期望 7）。"
+        "要么前沿没回退（纪元那条 store 没发或发错地方），要么回退把还活着的内存也退了")
+    assert got[1] != 7, (
+        f"**默认档那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出 L2："
+        "arena 没被耗尽，说明它比 64 KiB 大得多，或者那些分配根本没落到 arena 上")
+    print(f"      alpha 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 块纪元是真的")
+
+
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
