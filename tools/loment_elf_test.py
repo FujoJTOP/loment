@@ -221,6 +221,58 @@ def _mirror() -> Path:
     return mir
 
 
+@test
+def test_free_really_reclaims():
+    """`free` **真的归还**（`docs/175` §3.4 的 `gc_manual`）—— 判据是**一对**程序。
+
+    **Why**：在这一版之前 `free` 是**占位** —— `alloc` 是纯 bump（只涨不落），写 `free`
+    编得过、检查得过，跑起来**什么都不发生**（`SKILL.md` 的内建表自己就写着"占位"）。
+    于是"**总量超过 arena 但峰值很小**"的程序会耗尽 —— 而语言**早就允诺**了 `free`。
+    这正是本仓反复认过的那种形状：**允诺却不兑现**（`docs/188` 的"宁拒勿猜"、
+    `docs/175` §3.4 点名的就是它）。
+
+    **How to apply**：两只程序**逐字同源**，只差 `free(p);` 那一行 ——
+      * 带 `free`   → 跑完，退出码 = `2000 × 7 % 256 = 176`；
+      * 不带 `free` → **必须崩**（arena 耗尽 → abort）。这一半是**证伪**：
+        它保证上面那一半不是"反正都跑得通"。少了它，这条判据对"什么都没改"也是绿的。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcfree\n\nfn _start() {\n"
+            "    let i: u32 = 0;\n"
+            "    let sum: u32 = 0;\n"
+            "    while i < 2000 {\n"
+            "        let p: ptr = alloc(64);\n"
+            "        store8(p, 0, 7);\n"
+            "        let v: u32 = load8(p, 0);\n"
+            "        sum = sum + v;\n"
+            "        %s"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, (sum %% 256) as u64, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, extra in (("free", "free(p);\n        "), ("nofree", "")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % extra, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, tag, td, timeout=20)[0])
+    # 2000 次 × 64 B ≈ 144 KB **总量**，而**峰值**只有一个块 —— 64 KiB 的 arena 装得下
+    # 的只有峰值，所以"跑得通"这件事只能是回收换来的。
+    assert got[0] == 176, (
+        f"带 `free` 的那只没跑通：退出码 {got[0]}（期望 176 = 2000×7%256）。"
+        "要么分配器没归还，要么回收把已分配的内存还回去了 —— 两种都要查")
+    assert got[1] != 176, (
+        f"**不带 `free` 的那只也跑通了**（退出码 {got[1]}）—— 那说明这条判据测不出回收："
+        "arena 没被耗尽，说明它比 64 KiB 大，或者 `free` 那一半根本不是回收在起作用")
+    print(f"      带 free 跑通 (rc={got[0]})；不带 free 耗尽 (rc={got[1]}) —— 回收是真的")
+
+
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
