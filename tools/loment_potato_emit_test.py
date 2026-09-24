@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,11 @@ COVERED = (
                                 # 枚举实例 + 签名里的改名 + `generics` 那三组
     "native_gen_sig.lomt",      # M7: 泛型 struct 的实例化（`Box_i32` / `Box_u32`）+ 字段替换,
                                 # **两份实例**用来钉住"按串排序"（不排就会分叉）
+    "native_gen.lomt",          # **字段访问当泛型实参**（`max(p.a, p.b)`）—— 参考实现按
+                                # **字段**类型推（`p.a` → `u32`，于是实例名 `max_u32`），
+                                # 这一格 2026-09-23 起也这么推（`pt_field_arg_ty`）。
+                                # 泛型 struct 的字段类型**就是那个类型形参**时要换成**声明处
+                                # 写的实参** —— 那一段 token 本来就在单元里，指回去即可。
     "demo.lomt",                # M-L0: `use "lom/fujr.lom"` —— `layouts` 那一格要**读那个 L0 文件**
                                 # 并解析它的 `record`（Header/Section；字段按偏移排）
     "tour.lomt",                # 同上；同时带着 `Entry`/`Kind` 两张大表
@@ -70,6 +76,10 @@ COVERED = (
     # ---- 带 `use` 的（`imports` 那一格 + **根/依赖的边界**）
     "ahci.lomt",                # 一个依赖
     "allocator.lomt",           # 一个依赖 + const
+    "native_chain.lomt",        # **链式泛型**（泛型函数体里再调泛型函数）—— 2026-09-23 起
+                                # 不拒了：`outer<T>` 的实例 `outer_u32` 的体里那句
+                                # `pick(a, b)` 推得出 `pick_u32`（M6 改成跑到**不动点**，
+                                # 与参考实现那 8 轮同构）。实例的**创建顺序**也要对上。
     "fuc_node.lomt",            # 一个依赖
     "lumtui_demo.lomt",         # 五个 `use` —— 依赖的**传递闭包**共 6 份（`lumtui_font`
                                 # 是被 `lumtui_layout` 拉进来的），顺序也要对上
@@ -77,17 +87,12 @@ COVERED = (
 
 #: **点名拒绝**的那些（文件 -> 拒绝话里必须出现的那个轴的名字）。
 #: 每一条都对应 `loment/selfhost/potato.lomt` 头上写的那几条边界。
-REFUSED = {
-    # 链式泛型（泛型函数体里再调泛型函数）。参考实现靠 **8 轮迭代** —— 它会走*实例*的体，
-    # 那时 `T` 已经换成 `u32`，于是实例名是 `pick_u32`。自举侧只走**单元本体**（一趟），
-    # 看到的实参类型还是 `T`，会造出 `pick_T` —— 发得出去、逐字节**不一样**，
-    # 属于"静默的错"。这一条钉住"那种情况必须**点名拒绝**，不许发个错壳出去"。
-    "native_chain.lomt": "链式泛型",
-    # `p.a` 那种**字段访问当泛型实参**：参考实现按字段类型推（`p.a` → `u32`），自举侧的实参
-    # 推断只认"标识符"与 `x as T`。**不能**拿标识符自己的声明类型顶替 —— 那会得出
-    # `max_Pair<u32>` 这种实例名（发得出去但是错的）。所以点名拒。
-    "native_gen.lomt": "字段访问",
-}
+#:
+#: **2026-09-23 起这里是空的** —— 原来唯一那条是 `native_chain.lomt`（链式泛型）。
+#: 它现在**不拒了**：自举侧的 M6 改成了**跑到不动点**（走单元里的非泛型声明，再逐轮走
+#: 新建**实例的体**，形参类型按实参换掉），于是 `outer_u32` 的体里那句 `pick(a, b)`
+#: 推得出 `pick_u32` —— 与参考实现那 8 轮同构。它进了 `COVERED`，逐字节相同。
+REFUSED: dict[str, str] = {}
 
 #: 连**检查**都还没过的（与这一格无关，但必须有一格，否则"没做决定"那条判据会把它当成漏网）。
 SKIPPED = {
@@ -118,6 +123,11 @@ EXTRA_COVERED = (
     # 参考实现走 `load_unit`（带开关预扫）时 `switches` 里有 addin 那条定义，
     # 而直接 `load()` 只有根自己那份。它钉住"这一格是**整个程序**的表"。
     "loment/examples/addin/main.lomt",
+    # **嵌套泛型实参**（`Outer<Inner<u32>>`）—— 2026-09-23 起**支持**（`docs/147` §实例命名
+    # 定义了嵌套实例名：`Outer_Inner__u32`，里层用两个下划线）。这一份是那次改动的钉子：
+    # 它同时钉住**名字的规则**（`test_nested_instance_name_follows_the_rule`）与
+    # **逐字节**（这一份进 `COVERED` 就自动比）。
+    "loment/examples/nested_gen/main.lomt",
 )
 
 #: 语料之外单独点的拒绝轴：`comefor` 与外部代码块都由**驱动器**拒（那不是这一格的判断，
@@ -128,6 +138,11 @@ EXTRA_REFUSED = {
     # `choose write grammar python` 那种源：自举侧的前门本来就收不了（docs/188 §7.1），
     # 与这一格无关，但"收不了"也要看得见。
     "loment/lib/lumtui_math.lomt": "grammar",
+    # **数组/切片当泛型实参**（`Box<[u32]>`）—— 与"两边都拒"那一类同形。2026-09-23 查它的顺序
+    # 值得记：**先问这东西能不能存在，再吵它叫什么** —— 它**没有名字规则**（`Box_[u32]` 不是
+    # 标识符），但更前面的是**后端 M23**（struct 字段暂只支持标量）挡着，`Box<ptr>` 就证明了
+    # 这条：名字没问题，IR 照样拒。两个实现现在都**点名拒**。
+    "loment/examples/arg_shape/main.lomt": "泛型实参的形状",
 }
 
 TESTS: list = []
@@ -247,6 +262,56 @@ def test_out_of_subset_is_refused_by_name():
         assert axis in r.stderr, f"{rel}: 拒绝话里没有轴 {axis!r}：{r.stderr[-200:]!r}"
         n += 1
     print(f"      {n} 份子集外的单元各自点名拒绝（没有一个静默发出去）")
+
+
+@test
+def test_nested_instance_name_follows_the_rule():
+    """**嵌套泛型实参**（`Outer<Inner<u32>>`）：实例名按 `docs/147` §「实例命名」——
+    **分隔的长度 = 嵌套深度**（一层 `_`、两层 `__`）。
+
+    这条判据 2026-09-23 之前叫 `test_nested_generic_is_refused_by_both`，钉的是"**两边都
+    发不出来**"：参考实现按旧规则把名字拼成 `Outer_Inner<u32>`（`<` `>` 还在里面，**不是
+    标识符**），被它**自己的**形式对象自检拒掉。`docs/147` 定了命名规则之后两边都能发了，
+    判据随之从"两边都拒"改成"**名字按规则**"。
+
+    ⚠ 钉在**名字**上、不是"能跑就行"：`Outer_Inner__u32`（一个嵌套实参）与
+    `Outer<Inner, u32>` → `Outer_Inner_u32`（两个实参）**不能撞名**，这条就是那道线 ——
+    只写"发得出来"的话，撞名了也看不出来。
+    """
+    d = json.loads(_want("loment/examples/nested_gen/main.lomt"))
+    got = {i["name"]: i["args"] for i in d["instances"] if i["kind"] == "type"}
+    want = {"Inner_u32": ["u32"], "Outer_Inner__u32": ["Inner_u32"]}
+    assert got == want, f"嵌套实例名/实参不符规则：{got}（应为 {want}）"
+    print("      嵌套实例名：Outer<Inner<u32>> -> Outer_Inner__u32（与两实参的 …_u32 不撞）")
+
+
+@test
+def test_non_scalar_generic_arg_refused_by_name():
+    """**数组/切片当泛型实参**（`Box<[u32]>`）：两个实现都**点名拒**，且参考侧**不再是内部错误**。
+
+    这条钉两件事：
+
+    1. **参考侧给的是有名字的拒绝**，不是"形式对象自检失败"那种崩（2026-09-23 之前它是后者：
+    名字拼成 `Box_[u32]`、被它自己的校验器拒掉）。**内部错误是工具在说自己坏了** —— 修法
+    是让它把话说清，不是让人去读自检输出。
+    2. **理由里带着真正的卡点**：后端 `native M23`（struct 字段暂只支持标量）。顺序很重要 ——
+    **先问这东西能不能存在，再争它叫什么**：`Box<ptr>` 是证据（名字完全没问题，IR 照样拒）。
+    """
+    rel = "loment/examples/arg_shape/main.lomt"
+    p = ROOT / rel
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    assert not lomentc.check(mod, deps=deps), "夹具本身要能过检查 —— 出界的是形式对象那一层"
+    got = None
+    try:
+        lomentc.emit_potato(mod, ROOT, deps)
+    except Exception as e:  # noqa: BLE001
+        got = str(e)
+    assert got is not None, "参考实现居然发出来了？那这一格要重判"
+    assert "形状" in got, f"参考侧的拒绝话里没有那个轴：{got[:200]}"
+    assert "自检失败" not in got, f"参考侧又退回**内部错误**了（该是点名拒）：{got[:200]}"
+    assert "M23" in got, f"拒绝话里该带上真正的卡点（后端 M23）：{got[:200]}"
+    print("      Box<[u32]>：参考侧与自举侧都**点名拒**（真正卡点是后端 M23，不是命名）")
 
 
 @test

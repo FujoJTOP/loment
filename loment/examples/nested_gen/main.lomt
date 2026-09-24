@@ -1,0 +1,31 @@
+// loment/examples/nested_gen/main.lomt —— **嵌套泛型实参**（`Outer<Inner<u32>>`）。
+//
+// 2026-09-23 起**支持**：实例名按 `docs/147` §2「命名层」—— **分隔的长度 = 嵌套深度**，
+// 于是 `Outer<Inner<u32>>` -> `Outer_Inner__u32`（里层两个下划线），与**两实参**的
+// `Outer<Inner, u32>` -> `Outer_Inner_u32` 不撞名。
+//
+// 这份夹具的来历值得记：它**先是**用来钉"两边都发不出来"的 —— 那时两边都按
+// `base + "_" + "_".join(args)` 拼，嵌套会拼出 `Outer_Inner<u32>`（`<` `>` 还在名字里，
+// **不是标识符**），被形式对象校验器拒掉（参考实现也一样，三种形状崩法相同）。
+// 定了规则之后，两个实现一起改，`loment_potato_emit_test` 里的 `EXTRA_REFUSED` 那条
+// 换成 `EXTRA_COVERED` —— 也就是说它现在是**逐字节判据的语料**，不再是一个"拒绝"的钉子。
+//
+// 放在 `examples/` 的**子目录**里是有意的：那一层的 `*.lomt` 被 `lom_audit` /
+// `loment_p9_test` / `loment_manual` / `loment_fmt_test` 按**单层 glob** 扫，
+// 子目录不进它们的语料（这几条判据在自己的语料上各管一件事，不必被这一份撑大）。
+
+module nested_gen
+
+struct Inner<T> {
+    v: T,
+}
+
+struct Outer<T> {
+    i: T,
+}
+
+fn make() -> u32 {
+    let a: Inner<u32> = Inner { v: 7 };
+    let b: Outer<Inner<u32>> = Outer { i: a };
+    return b.i.v;
+}
