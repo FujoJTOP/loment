@@ -1039,7 +1039,13 @@ fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
             return 0;
         }
         if tok_is(src, toks, k, "free") {
-            return 0;   // 体内不许 free: 前沿在体内只增不减, 末尾一条无条件写回才对
+            // 体内不许 free: 前沿在体内只增不减, 末尾一条无条件写回才对。
+            // **证明**（管的范围比体内那一层调用大 —— 被调函数里也能 free）:
+            //   ① 能把前沿往下的只有 __loment_free, 它只在"释放的块正好顶到前沿"时才往下;
+            //   ② 顶到前沿的块, 要么是体内分配的(那要把它交给别人, 第 4 条已经挡住),
+            //      要么是体外分配的 —— 而它不可能跨过 sv(跨过就与体内那些块重叠了)。
+            // 于是末尾 off 必然 >= sv。而取 min 要 select, 自举镜像链接器没有 select。
+            return 0;
         }
         if tok_is(src, toks, k, "alloc") {
             nalloc = nalloc + 1;
