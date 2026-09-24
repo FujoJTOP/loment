@@ -4151,6 +4151,83 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     raise LomError(1, 1, f"native 后端不支持类型 {t!r}")
 
 
+#: **L0**（`docs/210` §2）里唯一允许"碰到指针"的方式：`load*` / `store*` 的**首参**。
+#: 它们读/写**透过**这个指针 —— 既不把它存到别处、也不返回它，所以指针**不外逃**。
+#: 任何别的用法（传参、返回、赋给别的变量、存进聚合、`free`）一律取消资格。
+_L0_SAFE_BUILTINS = frozenset((
+    "load8", "load16", "load32", "load64",
+    "store8", "store16", "store32", "store64"))
+
+
+def _l0_promotable(f: Func) -> dict[str, int]:
+    """`gc_auto_alpha` 的 **L0**：哪些 `alloc(<常量>)` 可以**提升到栈**。回 `{变量名: 字节数}`。
+
+    **判据**（刻意纯语法 —— 自举侧按 token 判**同一套**规则，见 `loment/selfhost/codegen.lomt`）：
+
+    1. 形状是 `let NAME: ptr = alloc(<整数字面量>)` —— 尺寸必须是**常量**；
+    2. `NAME` 在整个函数里**只被 `let` 声明一次**，且**不是形参**（否则会撞上遮蔽）；
+    3. 其余每一处 `NAME` 都只出现在 `_L0_SAFE_BUILTINS` 那个调用的**首参**位置；
+    4. `NAME` **从不被赋值**。
+
+    **为什么不需要"块内受限"**：提升后的缓冲是**入口块的一条 alloca**，活满整个函数调用 ——
+    所以函数内**任何**位置的读都安全，而函数外的读根本不存在（它是局部名）。
+    先前的稿子多要了一条"块内受限"，而那条约束**买不到任何东西**，只是让规则更难镜像。
+    """
+    params = {p.name for p in f.params}
+    cand: dict[str, int] = {}
+    nlet: dict[str, int] = {}
+    bad: set[str] = set()
+    asgn: set[str] = set()
+
+    def rw(e, safe: bool = False) -> None:
+        if e is None or isinstance(e, (int, bool, str)):
+            return
+        if isinstance(e, Ident):
+            if not safe:
+                bad.add(e.name)
+            return
+        if isinstance(e, Let):
+            nlet[e.name] = nlet.get(e.name, 0) + 1
+            a = e.expr
+            if (e.type == "ptr" and isinstance(a, Call) and a.name == "alloc"
+                    and len(a.args) == 1 and isinstance(a.args[0], IntLit)):
+                cand[e.name] = a.args[0].value
+            rw(e.expr)
+            return
+        if isinstance(e, Assign) and isinstance(e.target, Ident):
+            asgn.add(e.target.name)     # 重新绑定：那一处**不是使用**，而且直接取消资格
+            rw(e.expr)
+            return
+        if isinstance(e, Call):
+            # 这一支要**先于**下面那条通用分支拦下：只有它需要"首参"这个位置信息。
+            for k, a in enumerate(e.args):
+                rw(a, k == 0 and e.name in _L0_SAFE_BUILTINS)
+            return
+        if isinstance(e, (list, tuple)):
+            for x in e:
+                rw(x)
+            return
+        if hasattr(e, "__dataclass_fields__"):
+            # 其余语句/表达式**一律保守**：递归进去，且每一处都**不是**"安全位置"。
+            # 这样加法器不必逐个列出 Bin/Un/Index/StructLit/If/While/Match/… ——
+            # **漏列一个就是静默放宽**，而那正是这条判据最怕的事。
+            for name in e.__dataclass_fields__:
+                rw(getattr(e, name, None))
+            return
+
+    for s in f.body:
+        rw(s)
+
+    out: dict[str, int] = {}
+    for name, size in cand.items():
+        if size <= 0 or name in params or nlet.get(name, 0) != 1:
+            continue
+        if name in asgn or name in bad:
+            continue
+        out[name] = size
+    return out
+
+
 def _collect_locals(f: Func, enums: dict | None = None,
                     funcs: dict | None = None,
                     structs: dict | None = None) -> list[tuple[str, str, int]]:
@@ -4215,7 +4292,8 @@ class _Ir:
                  structs: dict | None = None, enums: dict | None = None,
                  coverage: bool = False, cov_counter: list | None = None,
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                 dbg_meta: list | None = None, dbg_types: dict | None = None):
+                 dbg_meta: list | None = None, dbg_types: dict | None = None,
+                 gc_alpha: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -4231,9 +4309,28 @@ class _Ir:
         self.dbg_scope = dbg_scope                  # M59: 本函数的 DISubprogram
         self.dbg_lines = dbg_lines if dbg_lines is not None else {}
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
+        #: **L0 提升表**（`docs/210` §2，只在 `gc_auto_alpha` 下非空）：`{局部名: 字节数}`。
+        #: 其余档**一行都不动** —— 默认档不许改变任何现有程序的产物（`docs/175` §3.4 五条之一）。
+        self.l0: dict[str, int] = _l0_promotable(f) if gc_alpha else {}
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
+
+    def locals_prologue(self, f: Func, enums: dict, funcs: dict, structs: dict) -> None:
+        """入口块的局部 alloca。**L0 提升的缓冲也在这一遍里发**（`docs/210` §2）。
+
+        （两处调用点原先各抄了一遍这段循环 —— 加 L0 之后它要动两处，收成一个方法。）
+        """
+        for name, ty, ln in _collect_locals(f, enums, funcs, structs):
+            self.w(f"%{name}.addr = alloca {self.ll(ty)}")
+            self.vars[name] = (ty, f"%{name}.addr")
+            self.dbg_declare(name, ty, f"%{name}.addr", ln)
+            n = self.l0.get(name)
+            if n:
+                # 缓冲的类型是 **`[K x i64]`**，不是 `[N x i8]`：单条数组类型两个链接器都吃
+                # （`ty_size` 认 `[...]`），而且**天然 8 字节对齐** —— 与 `__loment_alloc`
+                # 返回的地址同对齐，于是 `store64` 那条默认对齐假设成立（`[N x i8]` 只对齐 1）。
+                self.w(f"%{name}.buf = alloca [{(n + 7) // 8} x i64]")
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -4928,6 +5025,13 @@ class _Ir:
         if isinstance(s, Let):
             if s.expr is None:  # M9: 未初始化 (alloca 已在入口块)
                 return
+            if s.name in self.l0:
+                # **L0**（`docs/210` §2 / `gc_auto_alpha`）：这条 `alloc` 已经**提到栈上**了 ——
+                # 不调分配器，只把那条 alloca 的地址存进局部槽。
+                # 这里不必再看右式的形状：`_l0_promotable` 只把 `let NAME: ptr = alloc(<常量>)`
+                # 收进表里，所以进到这里就一定是那个形状。
+                self.w(f"store ptr %{s.name}.buf, ptr {self.vars[s.name][1]}")
+                return
             _, v = self.expr(s.expr, s.type)
             self.w(f"store {self.ll(s.type)} {v}, ptr {self.vars[s.name][1]}")
             return
@@ -5027,10 +5131,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                  dbg_meta: list | None = None, dbg_types: dict | None = None
+                  dbg_meta: list | None = None, dbg_types: dict | None = None,
+                  gc_alpha: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta, dbg_types)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -5038,10 +5143,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.out.append("entry:")
         ir.cur_label = "entry"
         ir.cov_hit()
-        for name, ty, ln in _collect_locals(f, enums, funcs, structs):
-            ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
-            ir.vars[name] = (ty, f"%{name}.addr")
-            ir.dbg_declare(name, ty, f"%{name}.addr", ln)
+        ir.locals_prologue(f, enums, funcs, structs)
         ir.block(f.body)
         if not ir.terminated:
             ir.w("ret void")
@@ -5059,10 +5161,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.vars[p.name] = (p.type, f"%{p.name}.addr")
     for j, p in enumerate(f.params):  # M59: 形参也声明, arg 从 1 起 (DWARF 约定)
         ir.dbg_declare(p.name, p.type, f"%{p.name}.addr", f.line, j + 1)
-    for name, ty, ln in _collect_locals(f, enums, funcs, structs):
-        ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
-        ir.vars[name] = (ty, f"%{name}.addr")
-        ir.dbg_declare(name, ty, f"%{name}.addr", ln)
+    ir.locals_prologue(f, enums, funcs, structs)
     for p in f.params:
         ir.w(f"store {ir.ll(p.type)} %{p.name}, ptr %{p.name}.addr")
     ir.block(f.body)
@@ -5125,6 +5224,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             ps = ", ".join(_ll_type(p.type, structs, enums) for p in x.params)
             globals_.append(f"declare {_ll_type(x.ret, structs, enums)} @{x.name}({ps})")
     cov_counter = [0] if coverage else None
+    # **L0 只在这一档下开**（`docs/210` §2）：`gc_manual`（默认）与 `gc_auto` 都**一行不动**。
+    # 取的是**根单元**的取值 —— 与 Potato 里那个 `gc` 字段同一个来源。
+    gc_alpha = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto_alpha"
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -5173,7 +5275,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
-                                    dbg_types if debug else None)
+                                    dbg_types if debug else None, gc_alpha)
             globals_ += g
             body.append(text)
     text_all = "\n".join(body)
