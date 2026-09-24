@@ -78,7 +78,11 @@ TOP_KEYS_V7 = TOP_KEYS_V6 | {"boundary"}
 # "这个产物是在哪一档下编的"（以及它**有没有放弃确定性**）是**不读源码可判**的 ——
 # 这正是 `docs/175` §3.4 要的那一条。
 TOP_KEYS_V8 = TOP_KEYS_V7 | {"gc"}
-VERSIONS = ("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")
+# v9 = v8 + **运行期** `runtime` (`docs/175` §3.6): `runtime` / `no_runtime`。
+# 取值**刻意只说"有没有"**，不说"里面装了什么" —— 装的东西会随年份长，钉进值名里
+# 就等于两年后加一项能力要回头改这一维的定义。它今天装的就是 `gc_auto` 要的运行期。
+TOP_KEYS_V9 = TOP_KEYS_V8 | {"runtime"}
+VERSIONS = ("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9")
 #: `boundary` 的四个**分量**键。**口径是词法的**（`docs/204` R5: "可 grep、可计数、
 #: 可审计"）: 只看"这个名字被调用了没有", 不判类型、不判危险 —— 那是编译器的事。
 BOUNDARY_KEYS = ("extern_declared", "extern_calls", "syscalls", "ptr_transforms")
@@ -92,6 +96,9 @@ MODES = ("std", "no_std")
 #: 后者**放弃了"确定性"这条差异点**（`docs/140`），而这件事**记在对象里** ——
 #: 于是"这个产物放弃了确定性"是**不读源码可判**的。
 GCS = ("gc_manual", "gc_auto", "gc_auto_alpha")
+#: `runtime` 的取值 = **产物里有没有运行期**（`docs/175` §3.6）。只有这两个 ——
+#: 它是一个**存在开关**，不是"运行期里装了什么清单"（那个会随年份长）。
+RUNTIMES = ("runtime", "no_runtime")
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)
@@ -167,25 +174,26 @@ def validate(doc: object) -> list[str]:
         errs.append(f"potato 版本必须是 {VERSIONS} 之一，得到 {ver!r}")
         ver = "v0"
     top = {"v0": TOP_KEYS_V0, "v1": TOP_KEYS_V1, "v2": TOP_KEYS_V2, "v3": TOP_KEYS_V3,
-           "v4": TOP_KEYS_V4, "v5": TOP_KEYS_V5, "v6": TOP_KEYS_V6, "v7": TOP_KEYS_V7, "v8": TOP_KEYS_V8}[ver]
+           "v4": TOP_KEYS_V4, "v5": TOP_KEYS_V5, "v6": TOP_KEYS_V6, "v7": TOP_KEYS_V7,
+           "v8": TOP_KEYS_V8, "v9": TOP_KEYS_V9}[ver]
     for k in doc:
         if k not in top:
             errs.append(f"未知顶层字段 {k!r}（{ver} 不允许扩展字段）")
-    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"):
+    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"):
         for k in ("traits", "impls", "generics", "instances"):
             if not isinstance(doc.get(k), list):
                 errs.append(f"{ver}: 缺字段 {k}（必须是数组，可为空）")
         g = doc.get("guards")
         if not isinstance(g, int) or isinstance(g, bool) or g < 0:
             errs.append(f"{ver}: guards 必须是非负整数，得到 {g!r}")
-    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8"):
+    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"):
         # **必填** (docs/175 §8 的判据: 从对象里删掉该字段, 校验器必须红)。这就是
         # 必须升版本而不是往旧版里加字段的原因 —— 要求必填会让既有的旧版对象全变非法,
         # 而旧版是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
         m = doc.get("mode")
         if m not in MODES:
             errs.append(f"{ver}: mode 必须是 {MODES} 之一，得到 {m!r}")
-    if ver in ("v3", "v4", "v5", "v6", "v7", "v8"):
+    if ver in ("v3", "v4", "v5", "v6", "v7", "v8", "v9"):
         # **必填, 可为空数组** (docs/182 §1)。与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这份单元是在什么开关状态下编的"是**可回放**的。
         # 用户 2026-09-17: **"开关的取值是要进 Potato 的"**。
@@ -208,7 +216,7 @@ def validate(doc: object) -> list[str]:
                     seen_s.add(nm)
                 if not isinstance(s.get("on"), bool):
                     errs.append(f"{w}.on 必须是布尔（开关**只能**是开或关，没有第三态）")
-    if ver in ("v4", "v5", "v6", "v7", "v8"):
+    if ver in ("v4", "v5", "v6", "v7", "v8", "v9"):
         # **必填, 可为空数组**（`docs/184` §9 S4.3）。同 `mode`/`switches` 那条纪律：
         # 不存在"缺这项"的形态 —— 于是"这份产物用了哪些自定义语法"是**可回放**的。
         #
@@ -234,7 +242,7 @@ def validate(doc: object) -> list[str]:
                     seen_d.add(nm)
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（定义处那段程序的源文本）")
-    if ver in ("v5", "v6", "v7", "v8"):
+    if ver in ("v5", "v6", "v7", "v8", "v9"):
         # **必填, 可为空数组** —— 同 `mode`/`switches`/`dialects` 那条纪律。
         #
         # **按源里的顺序, 不按名字排**: 与 `dialects` 不同 —— 方言是个**集合**（名字唯一），
@@ -253,7 +261,7 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{w}.lang 非法: {nm!r}")
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（块里的原始正文）")
-    if ver in ("v6", "v7", "v8"):
+    if ver in ("v6", "v7", "v8", "v9"):
         # **必填**（`docs/188` §2）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么它必须必填**：`docs/179` §3.1 说**可选**的前提是"不认识它的消费者
@@ -266,7 +274,7 @@ def validate(doc: object) -> list[str]:
         if g not in GRAMMARS:
             errs.append(f"v6: grammar 必须是 {GRAMMARS} 之一，得到 {g!r}"
                         f"（**写法名**，不是语言名；见 docs/188）")
-    if ver in ("v7", "v8"):
+    if ver in ("v7", "v8", "v9"):
         # **必填**（`docs/205` R5）—— 与 `mode` / `guards` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么不是可选的**：`boundary` 的全部价值在"可 grep、可计数、可审计"。
@@ -311,6 +319,19 @@ def validate(doc: object) -> list[str]:
         if doc.get("mode") == "no_std" and g in ("gc_auto", "gc_auto_alpha"):
             errs.append("mode=no_std 与 gc=gc_auto 不能同时选 —— 自动回收要一个运行期，"
                         "而 no_std 的定义是「只能用核那一层」（docs/175 §3.4）")
+
+    if ver == "v9":
+        # **必填**（`docs/175` §3.6）—— 与 `mode` / `gc` 同一条纪律：不存在"缺这项"的形态。
+        # 于是"这个产物里有没有运行期"是**不读源码可判**的。
+        rt = doc.get("runtime")
+        if rt not in RUNTIMES:
+            errs.append(f"{ver}: runtime 必须是 {RUNTIMES} 之一，得到 {rt!r}")
+        # **两条冲突，校验器独立判得了**（两个取值都在对象里，不需要读源码）：
+        # 自动回收要的就是那个运行期，与 `no_runtime` 定义上矛盾。
+        # 注意 `gc_manual` **不冲突** —— "要运行期、但内存我自己管"是合法档。
+        if rt == "no_runtime" and doc.get("gc") in ("gc_auto", "gc_auto_alpha"):
+            errs.append("runtime=no_runtime 与 gc=gc_auto 不能同时选 —— 自动回收要的就是"
+                        "那个运行期，两者定义上矛盾（docs/175 §3.6）")
 
     unit = _req(doc, "unit", "根", errs)
     if unit is not None and (not isinstance(unit, str) or not IDENT_RE.match(unit)):

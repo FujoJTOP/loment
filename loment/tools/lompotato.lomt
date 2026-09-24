@@ -554,6 +554,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 8 && eq_lit(kp, kl, "gc") == 1 {
         return 1;
     }
+    // v9 = v8 + **运行期在不在**（`docs/175` §3.6）：`runtime` / `no_runtime`。
+    if ver >= 9 && eq_lit(kp, kl, "runtime") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1455,6 +1459,32 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _c8: u32 = bad(mem);
         }
     }
+    if ver >= 9 {
+        // **必填**（`docs/175` §3.6）—— 与 `mode` / `gc` 同一条纪律：不存在"缺这项"的形态。
+        // 于是"这个产物里有没有运行期"是**不读源码可判**的。
+        let rt: u32 = jget(mem, doc, "runtime");
+        let rok: u32 = 0;
+        if rt != NOTFOUND && jkind(mem, rt) == 3 {
+            let lr: u32 = jstr(mem, rt, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lr, "runtime") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lr, "no_runtime") == 1 {
+                rok = 1;
+            }
+        }
+        if rok == 0 {
+            let _r9: u32 = bad(mem);
+        }
+        // **定义上矛盾**（`docs/175` §3.6）：自动回收要的就是那个运行期。两个取值都在
+        // 对象里，所以这一条校验器**独立判得了**。`gc_manual` **不**在这一条里 ——
+        // "不要运行期、手动回收"是合法档。
+        // 与 Python 那份**同口径**：只在取值合法且等于 `no_runtime` 时再判一次 ——
+        // 否则 `rok == 0` 那一条已经报过，再报就是**级联**（两份比的正是错误条数）。
+        if rok == 1 && jstr_field_is(mem, doc, "runtime", "no_runtime") == 1
+                && (jstr_field_is(mem, doc, "gc", "gc_auto") == 1
+                    || jstr_field_is(mem, doc, "gc", "gc_auto_alpha") == 1) {
+            let _c9: u32 = bad(mem);
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1533,6 +1563,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v8") == 1 {
             ver = 8;
+        }
+        if eq_lit(t, l, "v9") == 1 {
+            ver = 9;
         }
     }
     if ver == NOTFOUND {

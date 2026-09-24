@@ -145,9 +145,12 @@ RULES = [
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
              r"依赖嵌套超过",
      "`choose` / `addin` 用法不对",
-     "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`）声明的是**整个程序**的取值，"
+     "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`、"
+     "`runtime`/`no_runtime`）声明的是**整个程序**的取值，"
      "所以**每一维**只能出现一次、只能在**根单元**，而且有些档**不能同时选**"
-     "（`no_std` + `gc_auto` —— 自动回收要一个运行期，`docs/175` §3.4）。"
+     "（`no_std` + `gc_auto` 要往核里塞收集器；`no_runtime` + `gc_auto` 是定义上矛盾"
+     "—— `docs/175` §3.4 / §3.6）。**`runtime` + `gc_manual` 是合法档**："
+     "要运行期、但内存自己管。"
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"
      "而且取值前要先用 `set choose` 定义。库不许 `choose` —— 库要表达需要就**声明能力需求**"

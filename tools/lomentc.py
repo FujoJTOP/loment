@@ -925,27 +925,39 @@ MAXDEPTH = 8
 #: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
 #: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
 #:
-#: 今天两维：
-#:   * `mode` —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
-#:   * `gc`   —— `gc_manual` / `gc_auto`：回收由程序做还是由运行期做（`docs/175` §3.4）。
+#: 今天三维：
+#:   * `mode`    —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
+#:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
+#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）。
+#:
+#: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
+#: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
+#: 改这一维的定义。它今天装的就是 `gc_auto` 要的那个运行期。
 CORE_DIMS: dict[str, tuple[str, ...]] = {
     "mode": ("std", "no_std"),
     # `gc_auto_alpha` = **混合档**（用户 2026-09-23 定，`docs/175` §3.4.1）：
     # 静态内存管理 + 动态回收，**不存在任何冻结全部业务的阶段**，且自适应。
     # 名字带 `alpha` 是**明说的**：这一档在动，用它的项目认这一点。
     "gc": ("gc_manual", "gc_auto", "gc_auto_alpha"),
+    # 用户 2026-09-23：「运行期是海量工程必经之路，我们不得不利用 `choose` 开关
+    # 启动/关闭 runtime」。**默认是关的** —— 默认档不许改变任何现有程序的行为。
+    "runtime": ("runtime", "no_runtime"),
 }
+#: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
+#: 而两个实现比的是字节，所以它不能是集合迭代顺序。
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
-CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual"}
+CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
     "mode": "运行模式（`std` / `no_std`）",
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
+    "runtime": "运行期（`runtime` / `no_runtime`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -960,6 +972,19 @@ CORE_CONFLICTS = {
     ("no_std", "gc_auto_alpha"): (
         "混合档（`gc_auto_alpha`）比 `gc_auto` **更依赖运行期**（它要自适应、要有策略池），"
         "而 `no_std` 的定义是「只能用核那一层」—— 同一条冲突，对它只强不弱"),
+    # `runtime` 一进语言，上面那两条冲突就**说得更直白**了：自动回收要的就是那个运行期，
+    # 而 `no_runtime` 是明说不要它。所以这一对不是"暂时划窄"，是**定义上就矛盾**。
+    # 注意 `gc_manual` **不与 `no_runtime` 冲突** —— "要运行期、但内存我自己管"是一条
+    # 必须能表达的档（线程／宿主服务在，收集器不在）。
+    ("gc_auto", "no_runtime"): (
+        "自动回收**要的就是那个运行期**（根表、收集点、收集器本身都住在里面），"
+        "而 `no_runtime` 是明说产物里不要运行期 —— 这一对是**定义上就矛盾**，"
+        "不是暂时划窄。要手动回收请写 `choose gc_manual`；"
+        "要运行期就把它开着（`choose runtime`），两者不冲突"),
+    ("gc_auto_alpha", "no_runtime"): (
+        "混合档（`gc_auto_alpha`）**更依赖运行期**（它要自适应、要策略池，"
+        "还要放编译期算不出来的那部分），"
+        "而 `no_runtime` 是明说产物里不要运行期 —— 同一条冲突，对它只强不弱"),
 }
 
 
@@ -3132,11 +3157,17 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
     _eff = dict(CORE_DEFAULTS)
     _eff.update(mod.chooses)
-    _pair = (_eff["mode"], _eff["gc"])
-    _why = CORE_CONFLICTS.get(_pair)
-    if _why:
-        _ln = next((l for d0, _w, l in mod.choose_lines if d0 == "gc"), 1)
-        errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
+    # **两两查**（不是写死 `(mode, gc)` 那一对）：加一维时这一段一行都不用动。
+    # 先后由 `CORE_DIM_ORDER` 定 —— 报错文本要比字节，不能靠 dict/set 的迭代顺序。
+    _vals = [_eff[d] for d in CORE_DIM_ORDER]
+    for _i in range(len(_vals)):
+        for _j in range(_i + 1, len(_vals)):
+            _pair = (_vals[_i], _vals[_j])
+            _why = CORE_CONFLICTS.get(_pair)
+            if _why:
+                _ln = next((l for _d, _w, l in reversed(mod.choose_lines)
+                            if _w in _pair), 1)
+                errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
 
     for d in deps:
         if d.from_addin:
@@ -3983,9 +4014,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 变成必填, 而这里没发它, 编译器的**自检当场就红**。所以这一版把 v6 也接了上来:
         # 前门早就知道答案（`FrontUnit.grammar`），只是没人把它带进来。
         # v8 = v7 + **回收档** `gc`（`docs/175` §3.4）：`gc_manual` / `gc_auto`。
+        # v9 = v8 + **运行期** `runtime`（`docs/175` §3.6）：`runtime` / `no_runtime`。
         # 与 `mode` 同级同形 —— 一个字符串取值、**必填**、只有根单元能定，所以
         # "这个产物是在哪一档下编的"是**不读源码可判**的。
-        "potato": "v8",
+        "potato": "v9",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4001,6 +4033,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **回收档**（`docs/175` §3.4）：`gc_manual` / `gc_auto`。与 `mode` 同一条纪律 ——
         # **必填**（删掉它校验器必须红），所以"这个产物放弃了确定性没有"是**可判**的。
         "gc": mod.chooses.get("gc", CORE_DEFAULTS["gc"]),
+        # **运行期在不在**（`docs/175` §3.6）。取值只说"有没有"、不说"里面装了什么"——
+        # 装的东西会随年份长（今天是收集器，明天可能是线程、宿主服务），钉进值名里
+        # 就等于两年后加一项能力要回头改这一维的定义。
+        "runtime": mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。

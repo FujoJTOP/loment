@@ -349,7 +349,24 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
             || chk_tok_is(src, t, k, "gc_auto_alpha") {
         return 1;
     }
-    return 2;
+    if chk_tok_is(src, t, k, "runtime") || chk_tok_is(src, t, k, "no_runtime") {
+        return 2;
+    }
+    return 3;
+}
+
+/// 两维里**较后**出现的那个行号（0 = 那一维没写过）。报冲突时的锚点。
+fn later_line(a: u32, b: u32) -> u32 {
+    if a == 0 {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    if a > b {
+        return a;
+    }
+    return b;
 }
 
 /// 取值在**它那一维**里的序号（1 起）。0 = 不认识。
@@ -369,6 +386,12 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     }
     if chk_tok_is(src, t, k, "gc_auto_alpha") {
         return 3;
+    }
+    if chk_tok_is(src, t, k, "runtime") {
+        return 1;
+    }
+    if chk_tok_is(src, t, k, "no_runtime") {
+        return 2;
     }
     return 0;
 }
@@ -2744,11 +2767,19 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // 存在栈上而不是 arena 里: 它只在这一遍的循环里用, 没有跨调用要留的东西。
     let nch_mode: u32 = 0;
     let nch_gc: u32 = 0;
+    let nch_rt: u32 = 0;
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
-    let v_gc: u32 = 0;          // 1 = gc_manual, 2 = gc_auto
-    let ch_line: u32 = 0;       // 最后一条核心模式的行号（报冲突时锚在它上面）
+    let v_gc: u32 = 0;          // 1 = gc_manual, 2 = gc_auto, 3 = gc_auto_alpha
+    let v_rt: u32 = 0;          // 1 = runtime, 2 = no_runtime
+    // 每一维**最后一次**出现的行号（0 = 这一维从没写过）。报冲突时锚在**这两维里较后**
+    // 的那一行上 —— 与参考实现"取 choose_lines 里最后一个命中的"同口径。原先只有一个
+    // 共享的 `ch_line`，第三维一进来它就不够了：写齐三维时它指的是**最后一条**，
+    // 而冲突那两维未必是它。
+    let ln_mode: u32 = 0;
+    let ln_gc: u32 = 0;
+    let ln_rt: u32 = 0;
     // 名表清理: 逐声明复用同一块暂存, 每次用都要"清零条数" —— 但 chk_* 系列用
     // 显式计数 (c) 而不是查找长度, 所以只需不读旧值即可, 无需 memclr。
     // ---- 第零遍: 先把**类型名**收齐再查签名。
@@ -2905,7 +2936,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if dim == 0 {
                 nch_mode = nch_mode + 1;
                 v_mode = chk_core_val(src, t, i + 1);
-                ch_line = i;
+                ln_mode = i;
                 if nch_mode > 1 {
                     // **按维**判重复: 参考实现也是逐维说的 —— 两维各一份是合法的。
                     // 锚在第二次出现的那一行上 (第一次的行号写进消息里)。
@@ -2914,8 +2945,15 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             } else if dim == 1 {
                 nch_gc = nch_gc + 1;
                 v_gc = chk_core_val(src, t, i + 1);
-                ch_line = i;
+                ln_gc = i;
                 if nch_gc > 1 {
+                    o = sym_pub(src, t, out, o, E_MODE, i);
+                }
+            } else if dim == 2 {
+                nch_rt = nch_rt + 1;
+                v_rt = chk_core_val(src, t, i + 1);
+                ln_rt = i;
+                if nch_rt > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
             } else {
@@ -2940,8 +2978,19 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if v_gc != 0 {
         eff_gc = v_gc;
     }
+    let eff_rt: u32 = 2;            // 2 = no_runtime（默认档）
+    if v_rt != 0 {
+        eff_rt = v_rt;
+    }
+    // **两两查**，顺序照参考实现的 `CORE_DIM_ORDER`（mode, gc, runtime）走 —— 门禁比的是
+    // 码集、不比文本，但顺序仍照抄：将来真去比文本时，这里不该是第一个要改的地方。
+    // 锚点 = 这两维里**较后**写的那一行（某维没写就是另一维那行）。
     if eff_mode == 2 && eff_gc >= 2 {
-        o = sym_pub(src, t, out, o, E_MODE, ch_line);
+        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_mode, ln_gc));
+    }
+    // (mode, runtime) 那一对今天没有冲突 —— 留个位置说明它被想过，不是漏了。
+    if eff_gc >= 2 && eff_rt == 2 {
+        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
     }
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
     o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);

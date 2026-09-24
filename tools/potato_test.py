@@ -111,7 +111,7 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v9"), "版本"),
+    ("version", lambda d: d.__setitem__("potato", "v10"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -263,6 +263,19 @@ def fixture_v8() -> dict:
     return d
 
 
+def fixture_v9() -> dict:
+    """一份合法的 **v9** 形式对象: v8 的再 + v9 的 `runtime`（`docs/175` §3.6）。
+
+    与 `fixture_v7` / `fixture_v8` 同一个理由单独来一份：`runtime` 从 v9 起才合法 ——
+    拿 v8 去试只会得到"未知顶层字段"，校验器里那几条规则（取值必须是那两个之一、
+    `no_runtime` 不能与自动回收并存）**一条都碰不到**。
+    """
+    d = fixture_v8()
+    d["potato"] = "v9"
+    d["runtime"] = "no_runtime"
+    return d
+
+
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
     ("gc 缺这一项", lambda d: d.pop("gc"), "gc 必须是"),
@@ -271,6 +284,20 @@ MUTATORS_V8 = [
     # **两档不能同时选** —— 这一条是校验器**独立判得了**的（两个取值都在对象里）。
     ("no_std + gc_auto", lambda d: (d.__setitem__("mode", "no_std"),
                                     d.__setitem__("gc", "gc_auto")), "不能同时选"),
+]
+
+
+#: v9 的 `runtime` 那几条规则的反例（`docs/175` §3.6）。作用在 **v9** 的对象上。
+MUTATORS_V9 = [
+    ("runtime 缺这一项", lambda d: d.pop("runtime"), "runtime 必须是"),
+    ("runtime 取值拼错", lambda d: d.__setitem__("runtime", "runtime_nope"),
+     "runtime 必须是"),
+    ("runtime 不是字符串", lambda d: d.__setitem__("runtime", 1), "runtime 必须是"),
+    # **定义上矛盾** —— 校验器独立判得了（两个取值都在对象里）。
+    ("no_runtime + gc_auto", lambda d: (d.__setitem__("runtime", "no_runtime"),
+                                        d.__setitem__("gc", "gc_auto")), "不能同时选"),
+    # 反面：`gc_manual` **不**与 `no_runtime` 冲突 —— 这一条钉住"别把这一对也拒了"。
+    # 它**不该**报错，所以放进 `_cases()` 当合法样本（见那里），不在这张反例表里。
 ]
 
 
@@ -305,6 +332,12 @@ def test_every_spec_rule_has_a_rejection_case():
     # v8 那一组同理（`gc`）。
     for name, mut, needle in MUTATORS_V8:
         d = fixture_v8()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v9 那一组同理（`runtime`）。
+    for name, mut, needle in MUTATORS_V9:
+        d = fixture_v9()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -477,7 +510,13 @@ def _cases() -> list[tuple[str, dict]]:
     * 非法: `MUTATORS` 那 51 条（每条钉一条规则）。
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
-                                   ("v8", fixture_v8())]
+                                   ("v8", fixture_v8()), ("v9", fixture_v9())]
+    # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
+    # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
+    # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
+    _ok = fixture_v9()
+    _ok["runtime"] = "runtime"
+    out.append(("v9-runtime-on", _ok))
     for name, mut, _ in MUTATORS:
         d = fixture()
         mut(d)
@@ -492,6 +531,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v8()
         mut(d)
         out.append((f"v8-{name}", d))
+    # v9 那一组（`runtime`）同理。
+    for name, mut, _ in MUTATORS_V9:
+        d = fixture_v9()
+        mut(d)
+        out.append((f"v9-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)
