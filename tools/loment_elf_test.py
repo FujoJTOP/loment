@@ -586,6 +586,47 @@ def test_lomelf_selfhost_matches_reference():
 
 
 @test
+def test_both_linkers_agree_on_a_negative_immediate():
+    """**负立即数**: 操作数的跨度要含 `-`。
+
+    LLVM IR 的立即数允许负号（`gc_manual` 的分配器里那句 `and i32 %need0, -8` 是第一处），
+    而镜像里的操作数是拿"词"量出来的 —— 那一刻它不认 `-`，于是 `-8` 被量成**长度 0**：
+    常量物化读到空串，**镜像发 `0`、参考发 `-8`**。
+
+    这条**不依赖分配器**（它哪天不再用负立即数，这条照样在）：把一份语料里的某个正常量
+    **取负**，两份链接器仍必须逐字节相同。替换点**找不到就红** —— 免得例句改过之后
+    这条静默地什么也没测。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir(ROOT / "loment" / "examples" / "user_hello.lomt", td)
+        text = ll.read_text(encoding="utf-8")
+        old = "(i64 1, i64 %t1, i64 %t4, i64 %t8)"
+        assert text.count(old) == 1, f"夹具漂了: user_hello 的 IR 里那个实参串出现 {text.count(old)} 次"
+        neg = td / "_neg.ll"
+        neg.write_text(text.replace(old, "(i64 -1, i64 %t1, i64 %t4, i64 %t8)"),
+                       encoding="utf-8")
+        want, _info = lomelf.compile_ll(neg.read_text(encoding="utf-8"))
+        llrepo = ROOT / "loment" / "build" / "_neg_imm.ll"
+        elfrepo = ROOT / "loment" / "build" / "_neg_imm.elf"
+        try:
+            llrepo.write_bytes(neg.read_bytes())
+            rc, err = _mirror_run(mir, "loment/build/_neg_imm.ll", "loment/build/_neg_imm.elf")
+            assert rc == 0, f"镜像退出 {rc}: {err[-200:]}"
+            nat = elfrepo.read_bytes()
+        finally:
+            elfrepo.unlink(missing_ok=True)
+            llrepo.unlink(missing_ok=True)
+        assert nat == want, (f"负立即数: 镜像与参考不同 ({len(nat)}B vs {len(want)}B) —— "
+                             f"量操作数跨度时把 `-` 丢了?")
+    print("      负立即数: 两份链接器逐字节相同")
+
+
+@test
 def test_lomelf_rebuilds_the_compiler_without_clang():
     """**重建不需要 clang**: lomelf(种子) -> 一个能用的 Loment 编译器, 且它自编译
     `driver.lomt` 的产物**与种子逐字节相同**（定点成立）。整条链没有 clang 参与。
