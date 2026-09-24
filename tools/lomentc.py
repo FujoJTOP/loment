@@ -533,6 +533,12 @@ class For:
     hi: object
     body: list
     line: int
+    #: 循环体的 **token 跨度**（半开）与"末尾能不能批量归还"（`docs/210` §2 的 L2）。
+    #: 跨度由解析器记（它是唯一同时握着 token 流与 AST 的地方）；`l2` 由 `parse()` 末尾
+    #: 那一趟填 —— 与 `Func.l0` 同一个理由：**规则定义在 token 流上**（见 `_l0_promotable`）。
+    tok_at: int = 0
+    tok_end: int = 0
+    l2: bool = False
 
 
 @dataclass
@@ -608,6 +614,10 @@ class While:
     cond: object
     body: list
     line: int
+    #: 同 `For.tok_at/tok_end/l2`。
+    tok_at: int = 0
+    tok_end: int = 0
+    l2: bool = False
 
 
 @dataclass
@@ -1449,6 +1459,7 @@ class Parser:
         if mod.chooses.get("gc") == "gc_auto_alpha":
             for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
                 f.l0 = _l0_promotable(f, self.toks)
+                _l2_loop_epochs(f, self.toks)   # L2 在 L0 之后（它要读 f.l0）
         return mod
 
     def parse_struct(self) -> Struct:
@@ -1669,7 +1680,10 @@ class Parser:
             self.no_struct += 1
             cond = self.parse_expr()
             self.no_struct -= 1
-            return While(cond, self.parse_block(), t.line)
+            at = self.i + 1                  # '{' 之后 —— 与自举侧同一个起点
+            w = While(cond, self.parse_block(), t.line)
+            w.tok_at, w.tok_end = at, self.i - 1
+            return w
         if t.val == "for":
             self.next()
             var = self.ident("循环变量")
@@ -1680,7 +1694,10 @@ class Parser:
             self.expect("punct", ".")
             hi = self.parse_expr()
             self.no_struct -= 1
-            return For(var, lo, hi, self.parse_block(), t.line)
+            at = self.i + 1                  # '{' 之后
+            fl = For(var, lo, hi, self.parse_block(), t.line)
+            fl.tok_at, fl.tok_end = at, self.i - 1
+            return fl
         if t.val == "match":
             self.next()
             self.no_struct += 1
@@ -4283,6 +4300,120 @@ def _int_lit(v: str) -> int:
         return 0
 
 
+def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int]) -> bool:
+    """循环体能不能在末尾**批量归还**（`docs/210` §2 的 **L2**）。**规则也定义在 token 流上。**
+
+    这是"回收时间而不是对象"今天能落地的那一半：**体的末尾把分配器的前沿退回去**，
+    整段一次性不存在 —— 不扫描、不逐个释放、不用链表。代价写在规则里：
+
+    1. 体内**至少有一个** `alloc`（否则没什么可归还的，发了只是白费两条指令）；
+    2. 体内**不许有 `str_concat`** —— 它的落点也是堆，而 `str` 的逃逸在这里看不见
+       （`str_ptr` 会把里面的指针变成一个整数交出去）。这是这一层今天的边界；
+    3. 体内**每一个** `alloc` 都必须长成 `let NAME: ptr = alloc(...)`（尺寸随便 ——
+       这一层不要求常量，那是 L0 的事）。**不满足就整格取消**：认不出来的分配无从证明它不出体；
+    4. 那些 `NAME` 在**本函数体内、循环体之外**一处都不许出现（出现即当作"出体了"）；
+    5. 在体内，`NAME` 只许出现在它的声明处，或**恰好作为** `load8`/`store8`/`atomic_add`
+       的整个第一个实参。**被重新赋值、被返回、被存进别处、被传参 —— 一律取消。**
+
+    **`L0` 已经提到栈上的名字豁免第 4、5 条**：它根本不碰 arena，既不需要这次归还，
+    也不该因为它挡掉旁边那些真在堆上的分配（`l0` 就是本函数那张表）。
+
+    **这条规则的价钱是"整体取消"**：体内**一个**分配出体，整个体这一格就不能归还 ——
+    不是只废掉那一个。这是**用表达力换零成本**（`docs/210` §4.4），不是缺陷：
+    要更细的粒度就得看生命周期，那是 L1/L3 的活。
+    """
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    def safe_callee(i: int) -> bool:
+        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
+                and not word(i - 1, ".") and not word(i - 1, ":"))
+
+    nalloc = 0
+    for k in range(at, end):
+        if word(k, "str_concat"):
+            return False
+        if word(k, "free"):
+            # 体内不许 `free`：**前沿在体内只增不减**，末尾那一条无条件写回才对。
+            # **这件事要证明，因为它管的范围比体内那一层调用大**（被调函数里也能 `free`）：
+            #   ① 能把前沿往**下**的只有 `__loment_free`，而它**只在"释放的那块正好顶到
+            #      前沿"时才往下**；
+            #   ② 顶到前沿的那块，要么是**体内分配的** —— 那要把它**交给**别人（被调函数 /
+            #      另一个变量 / 返回 / 派生指针），第 4 条已经把它挡掉了；要么是**体外分配的**
+            #      —— 而它**不可能跨过 `sv`**（跨过就与体内那些块重叠了，而分配器不给出
+            #      重叠的块）。
+            #   于是体末尾 `off` 必然 >= `sv`，写回 `sv` 就是回退。
+            # **而 `min` 要 `select`，自举镜像链接器 `lomelf.py` 的 `lower` 里没有 `select`**
+            # （而包内链接器就是它）—— 所以这一条既是设计，也是那道硬约束逼出来的形态。
+            return False
+        if word(k, "alloc"):
+            nalloc += 1
+    if nalloc == 0:
+        return False
+
+    ncand = 0
+    nlive = 0                              # 真在 arena 上的那几个（L0 提到栈上的不算）
+    for d in range(at, end):
+        nm = d + 1
+        if not (word(d, "let") and not word(d - 1, "if") and nm + 5 < end
+                and ident(nm) and word(nm + 1, ":") and word(nm + 2, "ptr")
+                and word(nm + 3, "=") and word(nm + 4, "alloc") and word(nm + 5, "(")):
+            continue
+        ncand += 1
+        name = toks[nm].val
+        if name in l0:
+            continue                       # 已经在栈上：既不欠这次归还，也不挡别人
+        nlive += 1
+        ndecl = 0
+        for k in range(at, end):
+            if ident(k) and toks[k].val == name:
+                if k == nm:
+                    ndecl += 1
+                elif word(k - 1, "let"):
+                    return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
+                elif word(k + 1, "="):
+                    return False           # 重新赋值
+                elif not (word(k - 1, "(") and safe_callee(k - 2)
+                          and (word(k + 1, ",") or word(k + 1, ")"))):
+                    return False
+        if ndecl != 1:
+            return False
+        # **只查体之后** [end, fend)：体**之前**不可能用到体里声明的那个名字（作用域），
+        # 所以那里出现同名不构成逃逸。这一条把"同函数里另一个循环也叫 p"的行数减半，
+        # 但减不完 —— 见 §7：真正的解法是作用域解析，而那是 L1 的活。
+        for k in range(end, fend):
+            if ident(k) and toks[k].val == name:
+                return False               # 出体了
+    if nlive == 0:
+        return False                       # 体内的分配都提到栈上了 -> 没什么可归还的
+    return nalloc == ncand                 # 有认不出来的分配 -> 整格取消
+
+
+def _l2_loop_epochs(f: Func, toks: list) -> None:
+    """把 `f` 里每个 `while`/`for` 的 `l2` 填上（`docs/210` §2 的 L2）。"""
+    def walk(stmts: list) -> None:
+        for s in stmts:
+            if isinstance(s, While):
+                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0)
+                walk(s.body)
+            elif isinstance(s, For):
+                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0)
+                walk(s.body)
+            elif isinstance(s, If):
+                walk(s.then)
+                walk(s.otherwise)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    walk(b)
+
+    walk(f.body)
+
+
 def _collect_locals(f: Func, enums: dict | None = None,
                     funcs: dict | None = None,
                     structs: dict | None = None) -> list[tuple[str, str, int]]:
@@ -4488,6 +4619,33 @@ class _Ir:
         if not self.terminated:
             self.w(f"br label %{name}")
         self.terminated = True
+
+    # -- L2：块纪元的开与关（`docs/210` §2）
+    def epoch_open(self, s) -> str | None:
+        """循环体入口记下**分配器前沿**（`@__loment_off`）。回 None = 这一格没通过认证。
+
+        值就是一条 SSA 指令，不需要 alloca —— 循环体那块标签**支配**体内的一切，
+        自然也支配回边之前那个位置。
+        """
+        if not s.l2:
+            return None
+        v = self.t()
+        self.w(f"{v} = load i32, ptr @__loment_off")
+        return v
+
+    def epoch_close(self, s, sv: str | None) -> None:
+        """循环体末尾**批量归还**：把前沿写回入口那一刻的值。整段一次性不存在，不扫描。
+
+        **一条 `store` 就够**，因为规则（`_l2_ok`）要求体内**没有 `free`** —— 于是前沿在体内
+        **只增不减**，末尾那个值必然 `>= sv`，写回即回退。（若体内能 `free`，这里就得取
+        `min` —— 而 `min` 要 `select`，**自举镜像链接器不支持 `select`**（`lomelf.py` 的
+        `lower` 里没有它），而包内链接器就是它。所以这一条既是设计也是**约束**。）
+
+        体已经终止（`return`/`break`）时不发：那条路少归还一次，**不错**。
+        """
+        if sv is None or self.terminated:
+            return
+        self.w(f"store i32 {sv}, ptr @__loment_off")
 
     def type_scope(self) -> dict[str, str]:
         return {k: v[0] for k, v in self.vars.items()}
@@ -5118,7 +5276,9 @@ class _Ir:
             self.w(f"br i1 {c}, label %{body_l}, label %{end_l}")
             self.terminated = True
             self.label(body_l)
+            sv = self.epoch_open(s)
             self.block(s.body)
+            self.epoch_close(s, sv)
             self.jump(cond_l)
             self.label(end_l)
             return
@@ -5137,7 +5297,9 @@ class _Ir:
             self.w(f"br i1 {r}, label %{body_l}, label %{end_l}")
             self.terminated = True
             self.label(body_l)
+            sv = self.epoch_open(s)
             self.block(s.body)
+            self.epoch_close(s, sv)
             _, cur = self.expr(Ident(s.var, s.line), ty)
             nxt = self.t()
             self.w(f"{nxt} = add {it} {cur}, 1")

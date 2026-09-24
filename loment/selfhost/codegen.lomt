@@ -1014,6 +1014,132 @@ fn l0_store(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     return 1;
 }
 
+// ---------------------------------------------------------------- L2 块纪元 (docs/210 §2)
+
+/// 循环体能不能在末尾**批量归还**（把分配器前沿退回去）—— 与 `lomentc._l2_ok` 同一套规则。
+///
+/// "回收时间而不是对象"今天能落地的那一半：体结束时整段一次性不存在 —— 不扫描、不逐个
+/// 释放、不用链表。**规则也定义在 token 流上**（理由见 `l0_size`）：`at`/`end` 是循环体的
+/// token 跨度（半开），函数体的跨度取状态块里的 564/568。
+///
+/// 1. 体内**至少有一个** `alloc`；2. 体内**不许有 `str_concat`**（它落在堆上，而 `str` 的
+/// 逃逸这里看不见）；3. 体内**每一个** `alloc` 都要长成 `let NAME: ptr = alloc(...)`
+/// （尺寸随便 —— 常量是 L0 的事），认不出来就整格取消；4. 那些 `NAME` 在**循环体之后**的
+/// 函数体内一处都不许出现；5. 体内只许出现在声明处或**恰好作为** `l0_safe_callee` 的整个
+/// 第一个实参。
+///
+/// **L0 已经提到栈上的名字豁免 4、5**（它不碰 arena）。**代价是"整体取消"**：体内一个分配
+/// 出体，整格就不能归还 —— 用表达力换零成本（`docs/210` §4.4），不是缺陷。
+fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
+    let fend: u32 = load32(s, 568);
+    let nalloc: u32 = 0;
+    let k: u32 = at;
+    while k < end {
+        if tok_is(src, toks, k, "str_concat") {
+            return 0;
+        }
+        if tok_is(src, toks, k, "free") {
+            // 体内不许 free: 前沿在体内只增不减, 末尾一条无条件写回才对。
+            // **证明**（管的范围比体内那一层调用大 —— 被调函数里也能 free）:
+            //   ① 能把前沿往下的只有 __loment_free, 它只在"释放的块正好顶到前沿"时才往下;
+            //   ② 顶到前沿的块, 要么是体内分配的(那要把它交给别人, 第 4 条已经挡住),
+            //      要么是体外分配的 —— 而它不可能跨过 sv(跨过就与体内那些块重叠了)。
+            // 于是末尾 off 必然 >= sv。而取 min 要 select, 自举镜像链接器没有 select。
+            return 0;
+        }
+        if tok_is(src, toks, k, "alloc") {
+            nalloc = nalloc + 1;
+        }
+        k = k + 1;
+    }
+    if nalloc == 0 {
+        return 0;
+    }
+    let ncand: u32 = 0;
+    let nlive: u32 = 0;
+    let d: u32 = at;
+    while d < end {
+        let nm: u32 = d + 1;
+        if tok_is(src, toks, d, "let") && !tok_is(src, toks, d - 1, "if") && nm + 5 < end
+                && tok_kind(toks, nm) == 0 && tok_is(src, toks, nm + 1, ":")
+                && tok_is(src, toks, nm + 2, "ptr") && tok_is(src, toks, nm + 3, "=")
+                && tok_is(src, toks, nm + 4, "alloc") && tok_is(src, toks, nm + 5, "(") {
+            ncand = ncand + 1;
+            if l0_size(s, src, toks, nm) == 0 {   // 提到栈上的豁免（它不欠这次归还）
+                nlive = nlive + 1;
+                let ndecl: u32 = 0;
+                let p: u32 = at;
+                while p < end {
+                    if tok_kind(toks, p) == 0 && tok_eq(src, toks, p, nm) {
+                        if p == nm {
+                            ndecl = ndecl + 1;
+                        } else if tok_is(src, toks, p - 1, "let") {
+                            return 0;             // 体内第二处声明（遮蔽）
+                        } else if tok_is(src, toks, p + 1, "=") {
+                            return 0;             // 重新赋值
+                        } else if !(p >= 2 && tok_is(src, toks, p - 1, "(")
+                                && l0_safe_callee(src, toks, p - 2)
+                                && (tok_is(src, toks, p + 1, ",")
+                                    || tok_is(src, toks, p + 1, ")"))) {
+                            return 0;
+                        }
+                    }
+                    p = p + 1;
+                }
+                if ndecl != 1 {
+                    return 0;
+                }
+                // **只查体之后** —— 体之前不可能用到体里声明的那个名字（作用域）
+                let q: u32 = end;
+                while q < fend {
+                    if tok_kind(toks, q) == 0 && tok_eq(src, toks, q, nm) {
+                        return 0;                 // 出体了
+                    }
+                    q = q + 1;
+                }
+            }
+        }
+        d = d + 1;
+    }
+    if nlive == 0 {
+        return 0;                                 // 分配都提到栈上了 -> 没什么可归还的
+    }
+    if nalloc == ncand {
+        return 1;                                 // 有认不出来的分配 -> 整格取消
+    }
+    return 0;
+}
+
+/// 纪元关：把前沿写回入口那一刻的值（`sv` = 入口记下的 temp 号；0 = 这一格没开纪元）。
+///
+/// **一条 `store` 就够** —— 规则（`l2_ok`）要求体内没有 `free`，于是前沿在体内**只增不减**，
+/// 末尾那个值必然 >= `sv`。若体内能 `free`，这里就得取 `min`，而 `min` 要 `select`，
+/// **自举镜像链接器不支持 `select`**（`lomelf.py` 的 `lower` 里没有它）—— 包内链接器就是它。
+/// 体已经终止（`return`/`break`）时不发：那条路少归还一次，**不错**。
+fn epoch_close(s: ptr, out: ptr, sv: u32) -> u32 {
+    if sv == 0 || load32(s, 476) != 0 {
+        return 0;
+    }
+    emit_str(s, out, "  store i32 %t");
+    emit_dec(s, out, sv);
+    return emit_str(s, out, ", ptr @__loment_off\n");
+}
+
+/// 纪元开：记下前沿，回它的 temp 号（0 = 这一格没开纪元，什么都不发）。
+///
+/// **档位门在这儿**（与 `emit_l0_buf` 同一个口径）：`l2_ok` 只判规则，判不出档 ——
+/// 参考侧靠"`s.l2` 只在 alpha 那一趟填"把门关上，自举侧就得自己看 572。
+/// 少了这一句，`gc_manual` 下孪生也会开纪元（**实测**：`test_m89` 的 manual 变体抓到的）。
+fn epoch_open(s: ptr, out: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
+    if load32(s, 572) == 0 || l2_ok(s, src, toks, at, end) == 0 {
+        return 0;
+    }
+    emit_str(s, out, "  ");
+    let sv: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr @__loment_off\n");
+    return sv;
+}
+
 // ---------------------------------------------------------------- 枚举表 (M25/M26)
 
 /// 枚举表项基址: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
@@ -3733,9 +3859,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 476, 1);
         lab_def(s, out, w + 1, "fbody");
         let k: u32 = he + 1;                       // '{' 之后
+        let fsv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, k - 1) - 1);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
+        epoch_close(s, out, fsv);
         load_var(s, out, src, toks, var_tok, 0);
         emit_str(s, out, "  ");
         let nx: u32 = new_temp(s, out);
@@ -3770,9 +3898,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 476, 1);
         lab_def(s, out, w + 1, "wbody");
         let m: u32 = e4 + 1;   // '{' 之后的第一条语句
+        let wsv: u32 = epoch_open(s, out, src, toks, m, skip_block(src, toks, m - 1) - 1);
         while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
             m = stmt(s, out, src, toks, m, ret);
         }
+        epoch_close(s, out, wsv);
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
         return m + 1;

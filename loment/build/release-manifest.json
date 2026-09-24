@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "822ff17d1af17ae5092f70f128f1d07e010e5fbedaa2ffa5d10b9a3b1928b914"
+   "sha256": "d034ecf23742482d4a53ac7af21c47631d5e6192867edeab8a531b67ba3d1bb7"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "6f281acbbf21a9e264e370f688d4f7a2ee059ff34da437687caa3cd01057f235"
+   "sha256": "980cf355734ab030165cb076873213e9d9a249c4ca0b4f0db1f2f017a99b127e"
   },
   {
    "path": "tools/potato.py",
@@ -731,7 +731,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "05b7bfbcc3ebbb2c8bb3cf997b3301102c3869e348f4cfd63b9145e109786c0e"
+   "sha256": "d6318aef8c58e2cd2a917ddc5ea06db79706601b1c12fea6f061f695be8f933a"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -807,7 +807,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "f64befeb078308107f8c9fd3d85a1d209bb06bdf0380a785acbeabda7b1a3ff1"
+   "sha256": "9ca74b9ed47b93f2d60318704305bfb409d53e32aa281a031d77e565b4d19675"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "296df399aae260c06fa829643a276657e694ea7b21bebc3fcf4a1075c4509713"
+   "sha256": "5d563e702b2bd65cacafdb0ce6401f75eb3f078ecb11fe2c707e9588317b0595"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1523,7 +1523,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "ce583d3fec5662a77e94bb71ebfb0f02cdf87a05e2979f8ffa93bb396d30e5ee"
+   "sha256": "d2c5d8933a42e11e97e7597d05e5dffb6bfd4d166d420968ae66e132e97c046a"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1895,7 +1895,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "e58ad6b7118ac8de84573b7d2006c673cf1874ea5f718917acda3323d2d643bf"
+   "sha256": "e264e1bdeefc4fe4da8077245dc3ac568c263ffe6b2421fd9a378f194ea38966"
   },
   {
    "path": "docs/206-loment-ownership-boundary.md",
@@ -1915,11 +1915,11 @@
   },
   {
    "path": "docs/210-loment-gc-design.md",
-   "sha256": "a60234a1d64e3e91ea2e173e51648be307c676355c18e5db34ece604a34b40b1"
+   "sha256": "c32a33138b6434ec83bc1ba7023cfe9773a81bca366b276fe9f78712013b947c"
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "800596b06a379605910106f99a2e8ab974b4c1442d0157b9b445cdce99e07d6e"
+   "sha256": "e3224259c9fa309e2e596337cdde0967656f3582be7726aea0e52d19f942e0ea"
   },
   {
    "path": "docs/manual/api/ahci.md",
