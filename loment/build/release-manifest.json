@@ -1050,12 +1050,12 @@
    "sha256": "5d04f78313910ae78d106fad76fd3602bb1d5e1ff6dcc136e9883fb33ff482ab"
   },
   {
-   "path": "loment/build/genesis/lomelf-linux-x64.elf",
-   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
-  },
-  {
    "path": "loment/build/genesis/SHA256SUMS",
    "sha256": "93cea7e9cc2b282f17fb127e9f0d31793fbcaf4d2160ed30958c27b6d61860ca"
+  },
+  {
+   "path": "loment/build/genesis/lomelf-linux-x64.elf",
+   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
   },
   {
    "path": "loment/tools/lomc.lomt",
