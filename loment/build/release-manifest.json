@@ -1902,6 +1902,10 @@
    "sha256": "53d457eaaf7ec425113b2ba22dfeacb99bf5366c5096af96710b7d2fe4ed021c"
   },
   {
+   "path": "docs/210-loment-gc-design.md",
+   "sha256": "520ab3e8e348ec4b7191ac07b19df7bc2cfc09216f1e253afd3b0a53c8b75a10"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "ad9b152f0ccb4b3514f565e8a630441ec82ecb19ea6d6ac6034aecabe8924da6"
   },
