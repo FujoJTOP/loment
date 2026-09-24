@@ -199,25 +199,41 @@ together.
 ### Generated files get their own commit
 
 Several tracked files are produced from others: the self-host seed
-(`loment/build/selfhost_driver.ll`), `loment/build/release-manifest.json`,
-`loment/build/SHA256SUMS`, `docs/manual/`. Put them in a **separate commit whose message says it
-is only generated output**, so a reviewer can look at the hand-written change by itself. The seed
-has been 93% of a diff's lines — which is precisely the problem that separation solves.
+(`loment/build/selfhost_driver.ll`), `loment/tools/surface_data.lomt`,
+`loment/build/release-manifest.json`, `loment/build/SHA256SUMS`, `docs/manual/`. Put them in a
+**separate commit whose message says it is only generated output**, so a reviewer can look at the
+hand-written change by itself. The seed has been 93% of a diff's lines — which is precisely the
+problem that separation solves.
 
-If you touch a file the release manifest covers, regenerate it. The list is
-`loment_release.GLOBS` and includes `tools/*.py`, `loment/tools/*.lomt`, `loment/lib/*.lomt` and
-`docs/*.md`:
+**You normally do not have to produce them yourself** (since 2026-09-24). The `manifest` workflow
+recomputes all five on every push to a branch — in the order their inputs require — and pushes the
+result back as a `[生成物] …` commit of its own. Let it, even when you could run the commands:
+it works on a clean checkout of exactly one commit, which is what the manifest *describes*, while
+a regeneration on your machine globs your **working tree** and will happily bake in whatever a
+concurrent session has left uncommitted.
+
+Do it by hand in three cases only:
+
+* a **fork** pull request whose head touched `tools/`, or one that was opened without "Allow edits
+  by maintainers" — the workflow will not run an untrusted generator with a write token;
+* you want to see the result before you push;
+* the workflow is down.
+
+`loment_release.GLOBS` is the list of inputs; it includes `tools/*.py`, `loment/tools/*.lomt`,
+`loment/lib/*.lomt` and `docs/*.md`. **The order below is required** — each command feeds a file
+that the ones after it hash:
 
 ```
+python tools/loment_seed.py --emit
+python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
+python tools/loment_manual.py --emit docs/manual
 python tools/loment_release.py --emit
 python tools/loment_release.py --checksums loment/build/SHA256SUMS
 ```
 
-The seed is regenerated, never hand-merged:
-
-```
-python tools/loment_seed.py --emit
-```
+The seed is regenerated, never hand-merged — and note that `--emit` is not `--bootstrap`: the
+first re-derives the file from the reference implementation (seconds, no clang), the second runs
+the whole no-Python bootstrap chain, and that chain is what `loment_seed_test` verifies.
 
 ### Do not widen a criterion to make it pass
 
