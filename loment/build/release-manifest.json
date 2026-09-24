@@ -1902,6 +1902,18 @@
    "sha256": "53d457eaaf7ec425113b2ba22dfeacb99bf5366c5096af96710b7d2fe4ed021c"
   },
   {
+   "path": "docs/207-inverse-reclamation.md",
+   "sha256": "06e49f9eb4e8f8d505dccf5b45c6b3143e483f28e0290d8b364c144d9e79173b"
+  },
+  {
+   "path": "docs/208-declared-unobservability.md",
+   "sha256": "60acce8c05183b338db27d78d5db96f828f51773cbbe7894c75abdc983067487"
+  },
+  {
+   "path": "docs/209-memory-three-accounts.md",
+   "sha256": "374333c94a80e9f5e67e89f6f65fc1f9b02f56a635d8c6b1276b9a1c46a22781"
+  },
+  {
    "path": "docs/210-loment-gc-design.md",
    "sha256": "520ab3e8e348ec4b7191ac07b19df7bc2cfc09216f1e253afd3b0a53c8b75a10"
   },
