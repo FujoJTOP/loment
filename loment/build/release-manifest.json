@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "b5a2bb480a3814360529894ac54cbec4be18316d3f7ffe9442e2fab6c8cd6a18"
+   "sha256": "f8542157fc3d2f9daffe60be23ad77b3e7c0e81c9795dd8d5bc94539dfa194cd"
   },
   {
    "path": "tools/loment_build.py",
@@ -1663,7 +1663,7 @@
   },
   {
    "path": "docs/147-potato-v1-spec.en.md",
-   "sha256": "22b7eda42f1d56194b691128678030f08090fbe47af7af340f561c904896bdcf"
+   "sha256": "fe69f4bba3822a5c094d54debbc0cace597dfbdc3631ae9dd46b1acf9f8f3aab"
   },
   {
    "path": "docs/147-potato-v1-spec.md",
@@ -1903,7 +1903,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "96cc4e4f494011c407fb527b229e76fbc51e1ee1586bdbdf930e6f6648398722"
+   "sha256": "8fd9d4b600d6c8ebacc5ba7c1d0254513d0a61482bc7740a12a8a0ab08314f52"
   },
   {
    "path": "docs/manual/api/ahci.md",
