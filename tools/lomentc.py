@@ -635,6 +635,15 @@ class Func:
     from_generic: str = ""       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
     extern: bool = False         # docs/173: 外部函数声明 (只有签名, 由链接进来的目标文件提供)
+    #: **L0 静态提升**（`docs/210` §2 / `gc_auto_alpha`）：`{局部名: 提升到栈的字节数}`。
+    #: 由**解析器**在 `parse()` 末尾填（见 `_l0_promotable`：规则定义在 token 流上，
+    #: 而解析器是唯一同时握着 token 流与函数体跨度的地方）。其它档一律为空 dict。
+    l0: dict = field(default_factory=dict)
+    #: 函数体的 **token 跨度**（半开，`[tok_at, tok_end)`）—— L0 分析要它。
+    #: 单态化克隆走 `deepcopy`，两个数跟着走 —— **这是对的**：规则看的是表面 token，
+    #: 于是泛型参数写成 `T` 的函数在单态化成 `ptr` 之后**仍然不提升**（自举侧同判）。
+    tok_at: int = 0
+    tok_end: int = 0
 
 
 def _rename_self(stmts: list) -> None:
@@ -1433,6 +1442,13 @@ class Parser:
                 mod.funcs.append(f)
             else:
                 raise LomError(t.line, t.col, f"未知顶层关键字 {t.val!r}")
+        # **L0 静态提升**（`docs/210` §2 / `gc_auto_alpha`）：判据定义在 **token 流**上
+        # （理由见 `_l0_promotable` 的 docstring），所以只能在这里做 —— 解析器是唯一
+        # 同时握着 token 流（`self.toks`）与每个函数体跨度（`f.tok_at/tok_end`）的地方。
+        # 只在 alpha 档算：其它档 `f.l0` 恒空，产物逐字节不变（`docs/175` §3.4 五条之一）。
+        if mod.chooses.get("gc") == "gc_auto_alpha":
+            for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
+                f.l0 = _l0_promotable(f, self.toks)
         return mod
 
     def parse_struct(self) -> Struct:
@@ -1579,8 +1595,11 @@ class Parser:
             f = Func(name, params, ret, [], kw.line, False, tparams)
             f.extern = True
             return f
+        body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
         body = self.parse_block()
-        return Func(name, params, ret, body, kw.line, False, tparams)
+        f = Func(name, params, ret, body, kw.line, False, tparams)
+        f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
+        return f
 
     def parse_block(self) -> list:
         self.expect("punct", "{")
@@ -4151,6 +4170,119 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     raise LomError(1, 1, f"native 后端不支持类型 {t!r}")
 
 
+#: **L0**（`docs/210` §2）里唯一允许"碰到指针"的方式：把指针作为**整个第一个实参**
+#: 交给一个**只解引用它**的内建。
+#:
+#: **这份名单只有一个来源：`BUILTINS` 里 `ptr` 出现在首参的那几个。** 逐个说清为什么：
+#:
+#: | 首参是 `ptr` 的内建 | 算不算 | 为什么 |
+#: |---|---|---|
+#: | `load8` / `store8` / `atomic_add` | **算** | 内联降级，**只解引用** —— 不把指针存到别处、不产生派生的指针值 |
+#: | `free` | 不算 | 它把块**还回去**；栈上的缓冲还给分配器是灾难 |
+#: | `ptr_add` / `ptr_sub` | 不算 | 它们**产生一个派生的指针值**，而那个值会流到哪儿这里看不见 |
+#:
+#: **`load16/32/64`、`store16/32/64` 不在名单里 —— 它们根本不是内建**（在
+#: `loment/examples/bytes.lomt` 里，用 `load8`/`store8` 拼出来的 pub 函数）。把它们当"安全的"
+#: 是**不成立的**：那是一次**跨函数调用**，`p` 进了别人的栈帧，而"那个函数不会把 p 存起来"
+#: 编译器并不知道（用户自己写一个同名函数就能推翻它）。**这是 L0 今天最窄的一处**，
+#: 见 `docs/210` §7：要放宽就得做**跨函数的 deref-only 参数分析**。
+#:
+#: `loment_genesis_test` 有一条判据钉住"这张表 == 上表"：内建表里**新加一个首参是 ptr 的
+#: 内建**时，那条判据会红，逼你在这里表态（而不是让它悄悄漏掉一个新内建）。
+_L0_SAFE_BUILTINS = frozenset(("load8", "store8", "atomic_add"))
+
+#: 上表**故意排除**的首参为 `ptr` 的内建（每条都要有理由，见上）。判据拿它做完整性检查。
+_L0_PTR_ARG0_UNSAFE = frozenset(("free", "ptr_add", "ptr_sub"))
+
+
+def _l0_promotable(f: Func, toks: list) -> dict[str, int]:
+    """`gc_auto_alpha` 的 **L0**：哪些 `alloc(<常量>)` 可以**提升到栈**。回 `{变量名: 字节数}`。
+
+    **规则定义在 token 流上，不在 AST 上 —— 这是有意的**，也是它与自举侧
+    （`loment/selfhost/codegen.lomt` 的 `l0_size`）能逐字节一致的原因：token 流是两边
+    **唯一都完整持有的**表示。AST 走法有两个自举侧补不平的洞：
+
+    * 有几处"名字"**不在表达式位置上** —— `for x in …` 的 `x`、`match P::V(x)` 里的 `V`/`x`、
+      被调函数名、struct 字面量的字段名。在 AST 里它们是**字符串**，递归遍历看不见它们，
+      于是 AST 侧会**多**提升；而自举侧扫 token，看见的是一个无法归类的名字；
+    * 反过来，AST 里有些节点根本不递归下去（例如以字段名为键的 dict），
+      于是 AST 侧会**少**看见使用 —— "漏列一处就是静默放宽"。
+
+    规则（候选形状只有一个：`let NAME: ptr = alloc(<整数字面量>);`）：
+
+    1. `NAME` 不是形参；
+    2. 在本函数体内，`NAME` 这个**标识符 token** 只出现在两种位置 ——
+       (a) **恰好一处**紧跟 `let` 之后（就是那条声明本身）；
+       (b) 其余每一处都紧跟 `(`，而那个 `(` 紧跟 `_L0_SAFE_BUILTINS` 里的名字，
+           且 `NAME` 后面紧跟 `,` 或 `)`（即**恰好是整个第一个实参**）；
+    3. 尺寸字面量（按 u32 回绕）> 0。
+
+    (b) 等价于"只被读/写透过、从不外逃"：没被存进别处、没被传参、没被返回、没被重新赋值。
+    提升后的缓冲是**入口块的一条 alloca**，活满整个函数调用，所以**不需要**"引用不出块"
+    那条约束（先前的稿子多要了它，而它买不到任何东西，只是让规则更难镜像）。
+
+    `if let` 已被解析器反糖成 `match`，所以它的绑定名在这里既不是声明、也不是使用 ——
+    它落在 (b) 之外，**取消资格**（自举侧看见的是 `(` 后面一个不认识的调用名，同判）。
+    """
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    def safe_callee(i: int) -> bool:
+        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
+                and not word(i - 1, ".") and not word(i - 1, ":"))
+
+    at, end = f.tok_at, f.tok_end
+    params = {p.name for p in f.params}
+    out: dict[str, int] = {}
+
+    d = at
+    while d < end:
+        nm = d + 1                                  # 候选只能长成 `let NAME : ptr = alloc ( <num> ) ;`
+        if not (word(d, "let") and not word(d - 1, "if") and nm + 8 < end
+                and ident(nm) and word(nm + 1, ":") and word(nm + 2, "ptr")
+                and word(nm + 3, "=") and word(nm + 4, "alloc") and word(nm + 5, "(")
+                and toks[nm + 6].kind == "number" and word(nm + 7, ")") and word(nm + 8, ";")):
+            d += 1
+            continue
+        name = toks[nm].val
+        size = _int_lit(toks[nm + 6].val) & 0xFFFFFFFF     # 与自举侧的 u32 回绕同值
+        d += 1
+        if name in params or size == 0 or name in out:
+            continue
+        ok, ndecl = True, 0
+        k = at
+        while k < end:
+            if ident(k) and toks[k].val == name:
+                if k == nm:
+                    ndecl += 1
+                elif word(k - 1, "let"):
+                    ok = False                      # 第二处声明（遮蔽）
+                elif word(k + 1, "="):
+                    ok = False                      # 重新赋值
+                elif not (word(k - 1, "(") and safe_callee(k - 2)
+                          and (word(k + 1, ",") or word(k + 1, ")"))):
+                    ok = False                      # 其余任何用法：外逃
+                if not ok:
+                    break
+            k += 1
+        if ok and ndecl == 1:
+            out[name] = size
+    return out
+
+
+def _int_lit(v: str) -> int:
+    """token 原文 -> 整数（`0x`/`0X` 前缀十六进制，否则十进制）。**与自举侧 `tok_int` 同表。**"""
+    try:
+        return int(v, 16) if v[:2].lower() == "0x" else int(v)
+    except ValueError:
+        return 0
+
+
 def _collect_locals(f: Func, enums: dict | None = None,
                     funcs: dict | None = None,
                     structs: dict | None = None) -> list[tuple[str, str, int]]:
@@ -4215,7 +4347,8 @@ class _Ir:
                  structs: dict | None = None, enums: dict | None = None,
                  coverage: bool = False, cov_counter: list | None = None,
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                 dbg_meta: list | None = None, dbg_types: dict | None = None):
+                 dbg_meta: list | None = None, dbg_types: dict | None = None,
+                 gc_alpha: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -4231,9 +4364,28 @@ class _Ir:
         self.dbg_scope = dbg_scope                  # M59: 本函数的 DISubprogram
         self.dbg_lines = dbg_lines if dbg_lines is not None else {}
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
+        #: **L0 提升表**（`docs/210` §2，只在 `gc_auto_alpha` 下非空）：`{局部名: 字节数}`。
+        #: 其余档**一行都不动** —— 默认档不许改变任何现有程序的产物（`docs/175` §3.4 五条之一）。
+        self.l0: dict[str, int] = f.l0 if gc_alpha else {}
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
+
+    def locals_prologue(self, f: Func, enums: dict, funcs: dict, structs: dict) -> None:
+        """入口块的局部 alloca。**L0 提升的缓冲也在这一遍里发**（`docs/210` §2）。
+
+        （两处调用点原先各抄了一遍这段循环 —— 加 L0 之后它要动两处，收成一个方法。）
+        """
+        for name, ty, ln in _collect_locals(f, enums, funcs, structs):
+            self.w(f"%{name}.addr = alloca {self.ll(ty)}")
+            self.vars[name] = (ty, f"%{name}.addr")
+            self.dbg_declare(name, ty, f"%{name}.addr", ln)
+            n = self.l0.get(name)
+            if n:
+                # 缓冲的类型是 **`[K x i64]`**，不是 `[N x i8]`：单条数组类型两个链接器都吃
+                # （`ty_size` 认 `[...]`），而且**天然 8 字节对齐** —— 与 `__loment_alloc`
+                # 返回的地址同对齐，于是 `store64` 那条默认对齐假设成立（`[N x i8]` 只对齐 1）。
+                self.w(f"%{name}.buf = alloca [{(n + 7) // 8} x i64]")
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -4928,6 +5080,13 @@ class _Ir:
         if isinstance(s, Let):
             if s.expr is None:  # M9: 未初始化 (alloca 已在入口块)
                 return
+            if s.name in self.l0:
+                # **L0**（`docs/210` §2 / `gc_auto_alpha`）：这条 `alloc` 已经**提到栈上**了 ——
+                # 不调分配器，只把那条 alloca 的地址存进局部槽。
+                # 这里不必再看右式的形状：`_l0_promotable` 只把 `let NAME: ptr = alloc(<常量>)`
+                # 收进表里，所以进到这里就一定是那个形状。
+                self.w(f"store ptr %{s.name}.buf, ptr {self.vars[s.name][1]}")
+                return
             _, v = self.expr(s.expr, s.type)
             self.w(f"store {self.ll(s.type)} {v}, ptr {self.vars[s.name][1]}")
             return
@@ -5027,10 +5186,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
-                  dbg_meta: list | None = None, dbg_types: dict | None = None
+                  dbg_meta: list | None = None, dbg_types: dict | None = None,
+                  gc_alpha: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta, dbg_types)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -5038,10 +5198,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.out.append("entry:")
         ir.cur_label = "entry"
         ir.cov_hit()
-        for name, ty, ln in _collect_locals(f, enums, funcs, structs):
-            ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
-            ir.vars[name] = (ty, f"%{name}.addr")
-            ir.dbg_declare(name, ty, f"%{name}.addr", ln)
+        ir.locals_prologue(f, enums, funcs, structs)
         ir.block(f.body)
         if not ir.terminated:
             ir.w("ret void")
@@ -5059,10 +5216,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.vars[p.name] = (p.type, f"%{p.name}.addr")
     for j, p in enumerate(f.params):  # M59: 形参也声明, arg 从 1 起 (DWARF 约定)
         ir.dbg_declare(p.name, p.type, f"%{p.name}.addr", f.line, j + 1)
-    for name, ty, ln in _collect_locals(f, enums, funcs, structs):
-        ir.w(f"%{name}.addr = alloca {ir.ll(ty)}")
-        ir.vars[name] = (ty, f"%{name}.addr")
-        ir.dbg_declare(name, ty, f"%{name}.addr", ln)
+    ir.locals_prologue(f, enums, funcs, structs)
     for p in f.params:
         ir.w(f"store {ir.ll(p.type)} %{p.name}, ptr %{p.name}.addr")
     ir.block(f.body)
@@ -5125,6 +5279,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             ps = ", ".join(_ll_type(p.type, structs, enums) for p in x.params)
             globals_.append(f"declare {_ll_type(x.ret, structs, enums)} @{x.name}({ps})")
     cov_counter = [0] if coverage else None
+    # **L0 只在这一档下开**（`docs/210` §2）：`gc_manual`（默认）与 `gc_auto` 都**一行不动**。
+    # 取的是**根单元**的取值 —— 与 Potato 里那个 `gc` 字段同一个来源。
+    gc_alpha = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto_alpha"
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -5173,7 +5330,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
-                                    dbg_types if debug else None)
+                                    dbg_types if debug else None, gc_alpha)
             globals_ += g
             body.append(text)
     text_all = "\n".join(body)

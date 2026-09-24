@@ -715,6 +715,44 @@ def test_m82_loment_codegen_byte_identical():
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
 
 
+@test
+def test_m88_l0_alpha_pair_is_byte_identical():
+    """L0（`docs/210` §2）那一对程序，在**两个实现**上逐字节一致。
+
+    **源只有一份** —— 就是 `lomentc_test.L0_PAIR_SRC`（那边同时钉参考侧的逐格提升表）。
+    各抄一份必然漂，而这一条的全部意义就是"两个实现看的是同一份程序"。
+
+    这一对里有**提升的与不该提升的**（`lomentc_test.L0_WANT` 逐格说明了理由），所以它盖住的
+    不只是"提升真的发生了"，还有"不该提升的地方也没提升" —— 例如 `load16/32/64`、
+    `store16/32/64` 是 `bytes.lomt` 的库函数（不是内建），拿它们碰指针的站点**不许**提升。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402  （源只有一份：L0 那一对是那边的常量）
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in (("alpha", lomentc_test.L0_ALPHA_SRC),
+                         ("manual", lomentc_test.L0_MANUAL_SRC)):
+            target = Path(td) / f"gc_l0_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"gc_l0_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转：alpha 那一份必须**真的**有提升的缓冲，manual 那一份必须一个都没有
+    assert ".buf" in outs["alpha"], "alpha 那一份里没有提升的缓冲 —— 这条判据在空转"
+    assert ".buf" not in outs["manual"], "gc_manual 那一份不该有提升的缓冲"
+
+
 def _dep_paths(target: Path) -> list[Path]:
     """按 lomentc.resolve_deps 的规则取依赖文件 (被依赖者在前), 并与参考实现的模块名序列核对。
 

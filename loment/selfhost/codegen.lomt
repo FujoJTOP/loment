@@ -17,6 +17,7 @@ module codegen
 //         实参类型 720+(层)*4 (16 层) 十进制数字缓冲 672..704 函数计数 640  struct 表 1024..6144
 //         函数表 CG_FN+i*12 (CG_MAXFN 个) fk 表 CG_FK+i*8 当前函数参数表 CG_CUR..
 //         枚举表 CG_ENUM+i*80 (CG_MAXENUM 个) 局部表 CG_LOCAL.. (4 KiB) 每函数形参类型 CG_PARAM+i*80
+//         564/568 = 当前函数体的 token 跨度 (L0 分析用), 572 = 本单元是不是 `gc_auto_alpha`
 //
 // **容量**: 每函数 100 字节 (12+8+80)。这几张表**按单元的规模**定, 所以整块不再放进
 // 语言自带的 64 KiB bump 堆 —— 由驱动器从 `brk` 拿 `cg_arena_bytes()` 再传进来
@@ -898,6 +899,119 @@ fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
         return emit_syn(s, out, (nm - 2147483648) / 16777216, nm % 16777216);
     }
     return emit_name_tok(s, out, src, toks, nm);
+}
+
+// ---------------------------------------------------------------- L0 静态提升 (docs/210 §2)
+
+/// `load8` / `store8` / `atomic_add` —— **唯一三个"首参是 `ptr`、且只解引用它"的内建**。
+/// 名单的来源与排除理由在 `tools/lomentc.py` 的 `_L0_SAFE_BUILTINS`（那里有一张逐条说清的
+/// 表）。**`load16/32/64`、`store16/32/64` 不在里面** —— 它们不是内建，是
+/// `loment/examples/bytes.lomt` 里用 `load8`/`store8` 拼出来的 pub 函数：调用它们
+/// 等于**把指针交给别人的栈帧**，而"那个函数不会把 p 存起来"编译器并不知道
+/// （用户自己写一个同名函数就能推翻它）。这是 L0 今天最窄的一处，见 `docs/210` §7。
+fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
+    if i == 0 || tok_kind(toks, i) != 0 {
+        return false;
+    }
+    if tok_is(src, toks, i - 1, ".") || tok_is(src, toks, i - 1, ":") {
+        return false;   // 限定名不是内建
+    }
+    return tok_is(src, toks, i, "load8") || tok_is(src, toks, i, "store8")
+        || tok_is(src, toks, i, "atomic_add");
+}
+
+/// L0 提升的字节数（0 = 不提升）。`nm` 是那个局部**名字的 token 下标**。
+///
+/// **与 `lomentc._l0_promotable` 同一套规则** —— 规则定义在 **token 流**上，不是 AST 上；
+/// 理由在那边 docstring 里（AST 走法有两个自举侧补不平的洞：不在表达式位置上的名字，
+/// 和根本不递归下去的节点）。token 流是两边**唯一都完整持有的**表示，所以规则写在这儿。
+///
+/// 规则（候选形状只有 `let NAME: ptr = alloc(<整数字面量>);`，共 10 个 token）：
+///
+/// 1. `NAME` 不是形参（否则会撞上遮蔽）；
+/// 2. 本函数体内 `NAME` 这个**标识符 token** 只出现在两种位置 ——
+///    (a) **恰好一处**紧跟 `let` 之后（就是 `nm` 自己那条声明）；
+///    (b) 其余每一处都紧跟 `(`，而那个 `(` 紧跟一个 `l0_safe_callee` 的名字，
+///        且 `NAME` 后面紧跟 `,` 或 `)`（即**恰好是整个第一个实参**）；
+/// 3. 尺寸（按 u32 回绕）> 0。
+///
+/// (b) 等价于"只被读/写透过、从不外逃"；提升后的缓冲是**入口块的一条 alloca**，
+/// 活满整个函数调用，所以**不需要**"引用不出块"那条约束。
+fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let at: u32 = load32(s, 564);
+    let end: u32 = load32(s, 568);
+    let q: u32 = 0;
+    while q < load32(s, 12) {                       // 形参同名 -> 不提升
+        if tok_eq(src, toks, load32(s, CG_CUR + q * 8), nm) {
+            return 0;
+        }
+        q = q + 1;
+    }
+    if nm < at || nm < 2 || nm + 8 >= end {         // 候选形状 (就在 nm 自己身上)
+        return 0;                                   // nm<2 是防御: 形状要往回看两格
+    }
+    if !(tok_is(src, toks, nm - 1, "let") && !tok_is(src, toks, nm - 2, "if")
+            && tok_is(src, toks, nm + 1, ":") && tok_is(src, toks, nm + 2, "ptr")
+            && tok_is(src, toks, nm + 3, "=") && tok_is(src, toks, nm + 4, "alloc")
+            && tok_is(src, toks, nm + 5, "(") && tok_kind(toks, nm + 6) == 1
+            && tok_is(src, toks, nm + 7, ")") && tok_is(src, toks, nm + 8, ";")) {
+        return 0;
+    }
+    let k: u32 = at;
+    while k < end {
+        if k != nm && tok_kind(toks, k) == 0 && tok_eq(src, toks, k, nm) {
+            if tok_is(src, toks, k - 1, "let") {
+                return 0;                           // 第二处声明 (遮蔽)
+            }
+            if tok_is(src, toks, k + 1, "=") {
+                return 0;                           // 重新赋值
+            }
+            if !(k >= 2 && tok_is(src, toks, k - 1, "(")
+                    && l0_safe_callee(src, toks, k - 2)
+                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+                return 0;                           // 其余任何用法: 外逃
+            }
+        }
+        k = k + 1;
+    }
+    return tok_int(src, toks, nm + 6);
+}
+
+/// 入口块的 L0 缓冲 alloca（紧跟 `.addr` 之后发，与 `lomentc.locals_prologue` 同序）。
+/// 类型是 **`[K x i64]`** 而不是 `[N x i8]`：单条数组类型两个链接器都吃，而且**天然 8 字节
+/// 对齐** —— 与 `__loment_alloc` 返回的地址同对齐，于是 `store64` 那条默认对齐假设成立。
+fn emit_l0_buf(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if load32(s, 572) == 0 || nm >= 2147483648 {    // 非 alpha 档 / 合成名 -> 不碰
+        return 0;
+    }
+    let n: u32 = l0_size(s, src, toks, nm);
+    if n == 0 {
+        return 0;
+    }
+    emit_str(s, out, "  %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".buf = alloca [");
+    emit_dec(s, out, (n + 7) / 8);
+    return emit_str(s, out, " x i64]\n");
+}
+
+/// 这条 `let` 是不是 L0 提升的那一条 —— 是就发
+/// `store ptr %NAME.buf, ptr %NAME.addr` 并回 1（调用方据此跳过整条语句）。
+/// 形状由 `l0_size` 认死（10 个 token），所以返回 1 时语句正好到 `j + 9` 的 `;` 为止。
+fn l0_store(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    if load32(s, 572) == 0 {
+        return 0;
+    }
+    let nm: u32 = j + 1;
+    if l0_size(s, src, toks, nm) == 0 {
+        return 0;
+    }
+    emit_str(s, out, "  store ptr %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".buf, ptr %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".addr\n");
+    return 1;
 }
 
 // ---------------------------------------------------------------- 枚举表 (M25/M26)
@@ -2826,7 +2940,10 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     store32(s, 552, ret);        // 当前函数返回类型 token (match 臂体里 return 用)
     store32(s, 524, 0);          // 字符串全局序号随函数复位
     let body_at: u32 = find_body(src, toks, lp);
-    let nl: u32 = collect_locals(s, src, toks, body_at, skip_block(src, toks, body_at - 1));
+    let body_end: u32 = skip_block(src, toks, body_at - 1);
+    store32(s, 564, body_at);   // L0 分析要函数体的 token 跨度 (两处前导段与 stmt 都用)
+    store32(s, 568, body_end);
+    let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
         emit_str(s, out, "; ");
         emit_tok(s, out, src, toks, base + 1);
@@ -2841,6 +2958,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             emit_str(s, out, ".addr = alloca ");
             emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bi * 8 + 4));
             emit_str(s, out, "\n");
+            emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             bi = bi + 1;
         }
         let jj: u32 = find_body(src, toks, lp);
@@ -2911,6 +3029,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bl * 8 + 4));
         pop_subst(s, sl);
         emit_str(s, out, "\n");
+        emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
         bl = bl + 1;
     }
     let c: u32 = 0;
@@ -3387,6 +3506,12 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     }
     if tok_is(src, toks, j, "let") {
         let name: u32 = j + 1;
+        // **L0**（`docs/210` §2 / `gc_auto_alpha`）：这条 `alloc` 已经提到入口块的栈上了 ——
+        // 不调分配器，只把缓冲地址存进局部槽（镜像 `lomentc._Ir.stmt` 的 `Let` 分支）。
+        // 形状由 `l0_size` 认死（10 个 token），所以返回 1 时整条语句正好到 `j + 9`。
+        if l0_store(s, out, src, toks, j) == 1 {
+            return j + 10;
+        }
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
         // M9: `let x: T = e?;` -> 临时绑定 + match (Err 早退); 替换表由 emit_try_let 自己管
@@ -4432,16 +4557,23 @@ fn contains_ident(src: ptr, toks: ptr, text: str) -> u32 {
     return 0;
 }
 
-fn runtime_needed(src: ptr, toks: ptr) -> u32 {
+fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_kind(toks, i) == 3 && (tok_is(src, toks, i, "/") || tok_is(src, toks, i, "%")) {
             return 1;
         }
+        let hit: u32 = 0;
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")
                 || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "str_concat")
                 || tok_is(src, toks, i, "free")
                 || tok_is(src, toks, i, "guard")) {
+            hit = 1;
+        }
+        if hit == 1 && tok_is(src, toks, i, "alloc") && alloc_is_promoted(s, src, toks, i) == 1 {
+            hit = 0;   // L0 把它提到栈上了: 这条 alloc 不引用运行期
+        }
+        if hit == 1 {
             return 1;
         }
         i = i + 1;
@@ -4450,12 +4582,23 @@ fn runtime_needed(src: ptr, toks: ptr) -> u32 {
 }
 
 /// 预扫描: `alloc` 用到 bump 堆全局 (`@__loment_heap`/`@__loment_off`)。
-fn heap_needed(src: ptr, toks: ptr) -> u32 {
+///
+/// **被 L0 提升掉的那条不算** —— 参考实现是按**发射出来的文本**判的
+/// （`"@__loment_alloc" in text_all`），提到栈上的 `alloc` 不产生任何对分配器的引用；
+/// 少判这一步，孪生会在全提升的程序上多带一份运行期 + 分配器（实测：逐字节判据立刻红）。
+fn heap_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
+        let hit: u32 = 0;
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc")
                 || tok_is(src, toks, i, "str_concat")     // str_concat 也拼到堆上
                 || tok_is(src, toks, i, "free")) {        // 回收也要读那份状态
+            hit = 1;
+        }
+        if hit == 1 && tok_is(src, toks, i, "alloc") && alloc_is_promoted(s, src, toks, i) == 1 {
+            hit = 0;
+        }
+        if hit == 1 {
             return 1;
         }
         i = i + 1;
@@ -4463,10 +4606,84 @@ fn heap_needed(src: ptr, toks: ptr) -> u32 {
     return 0;
 }
 
+/// 签名里的形参名是否等于 `nm`（**前 16 个** —— 与 `emit_fn` 填 `CG_CUR` 的口径一致，
+/// 于是与 `l0_size` 的形参判定同宽）。循环形状照抄 `emit_fn` 开头那一段。
+fn param_named(src: ptr, toks: ptr, lp: u32, rp: u32, nm: u32) -> bool {
+    let i: u32 = lp + 1;
+    let k: u32 = 0;
+    while i < rp && k < 16 {
+        if tok_eq(src, toks, i, nm) {
+            return true;
+        }
+        k = k + 1;
+        i = skip_type(src, toks, i + 2);
+        if tok_is(src, toks, i, ",") {
+            i = i + 1;
+        }
+    }
+    return false;
+}
+
+/// 预扫描里那条问题：**这个 `alloc` 是不是被 L0 提到栈上的那一条**。
+///
+/// 它比 `l0_size` 多要一样东西 —— **外层函数的体跨度**（预扫描时 `emit_fn` 还没跑过，
+/// 564/568 还不是当前函数的值）。所以要往回找最近的那个 `fn`：函数体里不可能再出现 `fn`
+/// 记号（`trait`/`extern` 只有签名、不成体；字符串与 raw token 都不算记号），
+/// 所以最近的那个就是外层。找不到、或它的体不含这个 `alloc` 时**保守当"没提升"** ——
+/// 那个方向只会多带分配器，不会少带。
+fn alloc_is_promoted(s: ptr, src: ptr, toks: ptr, a: u32) -> u32 {
+    if load32(s, 572) == 0 || a < 4 {
+        return 0;
+    }
+    let f: u32 = 0;
+    let t: u32 = a;
+    while f == 0 && t > 0 {
+        if tok_is(src, toks, t, "fn") {
+            f = t;
+        }
+        t = t - 1;
+    }
+    if f == 0 {
+        return 0;
+    }
+    let lp: u32 = find_paren(src, toks, f + 2);
+    let at: u32 = find_body(src, toks, lp);
+    let end: u32 = skip_block(src, toks, at - 1);
+    if !(at <= a && a < end) {
+        return 0;
+    }
+    let nm: u32 = a - 4;                       // `let NAME : ptr = alloc` -> NAME 在 alloc 前 4 格
+    if param_named(src, toks, lp, skip_parens(src, toks, lp), nm) {
+        return 0;
+    }
+    store32(s, 564, at);
+    store32(s, 568, end);
+    if l0_size(s, src, toks, nm) == 0 {
+        return 0;
+    }
+    return 1;
+}
+
 /// 状态块要多大 —— 驱动器按这个数从 `brk` 开一块传进来 (`emit_module` 的第 4 个参数)。
 /// **不再从语言自带的 64 KiB bump 堆开**: 那几张表按单元规模定, 放大后远超 64 KiB。
 pub fn cg_arena_bytes() -> u32 {
     return CG_BYTES;
+}
+
+/// 本单元是不是 `gc_auto_alpha` 档（`docs/210` §2）。
+///
+/// **codegen 不知道档位** —— 档位是检查器的活。但 `emit_module` 手上有整条 token 流，
+/// 而核心模式只由**根单元**声明，所以扫那一行就够了。非根单元声明核心模式会被检查器拒 ——
+/// 那是前提，不是这里的假设（真正的驱动在 `emit_module` 之前就跑过检查器）。
+fn gc_alpha_tier(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "gc_auto_alpha") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 /// 主入口: 写完整 IR (子集), 返回长度; **返回 0 = 单元的规模超过表容量** (驱动器据此报错)。
@@ -4478,8 +4695,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 476, 0);   // terminated
     store32(s, 480, 0);   // label 计数
     store32(s, 484, 0);   // 局部数
-    store32(s, 512, runtime_needed(src, toks));
-    store32(s, 516, heap_needed(src, toks));
+    store32(s, 572, gc_alpha_tier(src, toks));   // L0 只在 `gc_auto_alpha` 档上跑
+    // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
+    store32(s, 512, runtime_needed(s, src, toks));
+    store32(s, 516, heap_needed(s, src, toks));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;

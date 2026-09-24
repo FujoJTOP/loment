@@ -1743,6 +1743,236 @@ def test_boundary_builtins_are_real_builtins():
     assert potato.BOUNDARY_BUILTINS, "边界内建表空了 —— 那这条判据就没在干活"
 
 
+# ---------------------------------------------------------------- L0（docs/210 §2）
+
+#: L0 判据用的那一对程序：**逐字同源，只差 `choose` 那一行**（`docs/210` §5 第二行）。
+#: 一个函数一格 —— 提升的与**不该提升的**放在同一份里，所以"少提升一格"和"多提升一格"
+#: 都会被同一条判据抓住。
+#:
+#: **`loment_p8_test` 的孪生判据复用这一对源**（`import lomentc_test`）—— 两个实现比的是
+#: 同一份程序，各抄一份必然漂。
+L0_PAIR_SRC = """module gc_l0_pair
+@@CHOOSE@@
+choose runtime
+
+const SZ: u32 = 64;
+
+enum E { A(u32), B }
+
+fn consume(y: ptr) -> u32 {
+    return load8(y, 0);
+}
+
+fn f_pos() -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    store8(p, 1, 9);
+    return load8(p, 0);
+}
+
+fn f_alias(x: ptr) -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    return consume(p) + load8(x, 0);
+}
+
+fn f_assign(q: ptr) -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    p = q;
+    return load8(p, 0);
+}
+
+fn f_ret() -> ptr {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    return p;
+}
+
+fn f_dyn(n: u32) -> u32 {
+    let p: ptr = alloc(n);
+    store8(p, 0, 7);
+    return load8(p, 0);
+}
+
+fn f_shadow() -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    if load8(p, 0) == 7 {
+        let p: ptr = alloc(16);
+        store8(p, 0, 9);
+    }
+    return load8(p, 0);
+}
+
+fn f_const_size() -> u32 {
+    let p: ptr = alloc(SZ);
+    store8(p, 0, 7);
+    return load8(p, 0);
+}
+
+fn f_derived() -> u32 {
+    let p: ptr = alloc(64);
+    store8(ptr_add(p, 4), 0, 7);
+    return load8(p, 0);
+}
+
+fn f_hex() -> u32 {
+    let p: ptr = alloc(0x40);
+    store8(p, 0, 7);
+    return load8(p, 0);
+}
+
+fn f_round() -> u32 {
+    let p: ptr = alloc(20);
+    store8(p, 0, 7);
+    return load8(p, 0);
+}
+
+fn f_freed() -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    let v: u32 = load8(p, 0);
+    free(p);
+    return v;
+}
+
+fn f_atomic() -> u32 {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    atomic_add(p, 1);
+    return load8(p, 0);
+}
+
+fn f_iflet(o: E) -> u32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7);
+    let r: u32 = load8(p, 0);
+    if let E::A(p) = o {
+        r = r + p;
+    }
+    return r;
+}
+
+fn f_partial(x: ptr) -> u32 {
+    let p: ptr = alloc(64);
+    let q: ptr = alloc(32);
+    store8(p, 0, 7);
+    store8(q, 0, 9);
+    return load8(p, 0) + consume(q) + load8(x, 0);
+}
+"""
+
+L0_ALPHA_SRC = L0_PAIR_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+L0_MANUAL_SRC = L0_PAIR_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+
+#: 每个函数的**提升表**（不进表 = 一个都不提升）。每一格的"为什么"对着源码里的那一行：
+#: 出块的、重新赋值的、返回的、尺寸不是字面量的、被遮蔽的、派生指针的、`free` 过的、
+#: `if let` 绑定同名的，全在"一个都不提升"那一栏 —— 而 `f_hex`（十六进制仍是字面量）、
+#: `f_round`（20 -> 3×i64）、`f_atomic`（第三个只解引用的内建）在提升那一栏。
+L0_WANT = {
+    "f_pos": {"p": 64},
+    "f_alias": {},
+    "f_assign": {},
+    "f_ret": {},
+    "f_dyn": {},
+    "f_shadow": {},
+    "f_const_size": {},
+    "f_derived": {},
+    "f_hex": {"p": 64},
+    "f_round": {"p": 20},
+    "f_freed": {},
+    "f_atomic": {"p": 8},
+    "f_iflet": {},
+    "f_partial": {"p": 64},
+}
+
+#: 那一对程序里的 `alloc` 站点总数、以及 alpha 档**留下不动的**那几个 —— 两个数都写死，
+#: 于是"少提升一格"（alpha 数变大）与"多提升一格"（alpha 数变小）都会红。
+L0_ALLOC_SITES = 16
+L0_ALPHA_ALLOC_LEFT = 11
+
+
+def _l0_emit(src: str) -> tuple[dict[str, dict[str, int]], str]:
+    """编译一份源，回 (每个函数的提升表, IR)。"""
+    mod = parse(src)
+    errs_ = lomentc.check(mod)
+    assert not errs_, errs_[:2]
+    table = {f.name: f.l0 for f in mod.funcs if f.l0}
+    return table, lomentc.emit_llvm(mod, ROOT)
+
+
+@test
+def test_l0_rule_pair():
+    """`gc_auto_alpha` 的 **L0**：一对只差 `choose` 一行的程序，逐格钉住提升表（`docs/210` §2）。
+
+    **这一条同时是"L0 真的发生"和"L0 没被夸大"**（`docs/210` §5 的第二、三行）：
+    逐格的表钉住"哪一格该提、哪一格不该提"，而 `alloc` 调用点的两个数钉住"提了就要少一次
+    调用" —— **把提升关掉而保留计数**（表还在、IR 里却还是 `call @__loment_alloc`）会让
+    alpha 那一格涨到 16，红；**把计数改成 0** 而实际照提会让 `L0_ALPHA_ALLOC_LEFT` 对不上，
+    也红。两个方向都有钩子，所以这不是一条"顺手报个绿"的判据。
+    """
+    alpha_tbl, alpha_ll = _l0_emit(L0_ALPHA_SRC)
+    manual_tbl, manual_ll = _l0_emit(L0_MANUAL_SRC)
+
+    assert alpha_tbl == {k: v for k, v in L0_WANT.items() if v}, f"alpha 提升表: {alpha_tbl}"
+    assert manual_tbl == {}, f"`gc_manual` 下不许有任何提升，得到 {manual_tbl}"
+
+    a_calls = alpha_ll.count("call ptr @__loment_alloc")
+    m_calls = manual_ll.count("call ptr @__loment_alloc")
+    assert m_calls == L0_ALLOC_SITES, f"`gc_manual` 的分配点应恒为 {L0_ALLOC_SITES}，得到 {m_calls}"
+    assert a_calls == L0_ALPHA_ALLOC_LEFT, f"alpha 的分配点应为 {L0_ALPHA_ALLOC_LEFT}，得到 {a_calls}"
+    # 两个数都非平凡：不然"全都提升"与"一个都不提升"都能让上面两条同时成立
+    assert 0 < L0_ALPHA_ALLOC_LEFT < L0_ALLOC_SITES, "这一对里两种走向都要有"
+    # 缓冲的 `[... x i64]` 计数（每格两行：alloca + store）钉住"尺寸取整"没被改坏
+    assert alpha_ll.count(".buf") == 2 * sum(1 for v in L0_WANT.values() if v), alpha_ll.count(".buf")
+    assert ".buf" not in manual_ll
+    # 两份源**只差那一行** —— 不然"差别来自档位"这个说法就不成立
+    assert L0_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
+        L0_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+@test
+def test_l0_param_shadow_is_not_promoted():
+    """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。
+
+    `_collect_locals` 把与形参同名局部**排除**在 alloca 之外（`seen = params`），所以那条
+    `let p` 写的是**形参的槽**；若把它提升，`%p.buf` 这条 alloca 根本不会被发射，
+    IR 里就出现一个未定义的值。这条判据只钉参考侧（自举侧在这个形状上本来就与参考不一致 ——
+    `collect_locals` 不排形参，是**另一条既有的**缺口，不归 L0 管）。
+    """
+    src = ("module m\nchoose gc_auto_alpha\nchoose runtime\n\n"
+           "fn f(p: ptr) -> u32 {\n    let p: ptr = alloc(64);\n"
+           "    store8(p, 0, 7);\n    return load8(p, 0);\n}\n")
+    tbl, ll = _l0_emit(src)
+    assert tbl == {}, f"形参同名不该提升，得到 {tbl}"
+    assert ".buf" not in ll
+
+
+@test
+def test_l0_safe_set_is_exactly_the_deref_only_ptr_arg0_builtins():
+    """`_L0_SAFE_BUILTINS` 必须**恰好**是"首参是 `ptr` 且只解引用它"的那几个内建。
+
+    这条钉的是 `test_boundary_builtins_are_real_builtins` 自己承认**测不到的那一半**：
+    那份判据只管"表里的名字编译器认识"，**新加一个同样危险的内建而没人过问**它抓不住。
+    这里反过来：内建表里**每一个**首参为 `ptr` 的内建，都必须落在"算"或"不算"这两张表之一，
+    而"不算"那一张要逐条给出理由（见 `tools/lomentc.py` 里那张表）—— **加了新内建就红**。
+
+    **Why**: `load16/32/64`、`store16/32/64` 曾经被误当成安全名单（它们**不是**内建，是
+    `loment/examples/bytes.lomt` 里用 `load8`/`store8` 拼的 pub 函数）—— 那会把一个指针
+    交给别人的栈帧，而"那个函数不会把 p 存起来"编译器并不知道。
+    """
+    ptr0 = {b for b, (ps, _) in lomentc.BUILTINS.items() if ps and ps[0] == "ptr"}
+    known = lomentc._L0_SAFE_BUILTINS | lomentc._L0_PTR_ARG0_UNSAFE
+    assert ptr0 == known, f"首参是 ptr 的内建少了或多了: 表里 {ptr0 ^ known}"
+    # 想真被"审"过：安全那一张必须非空且真的只是解引用的那几个
+    assert lomentc._L0_SAFE_BUILTINS == {"load8", "store8", "atomic_add"}
+    # `load16/32/64`/`store16/32/64` **不许**出现在任何一张里 —— 它们根本不是内建
+    for b in ("load16", "load32", "load64", "store16", "store32", "store64"):
+        assert b not in lomentc.BUILTINS, f"{b} 怎么成了内建？名单要重判"
+        assert b not in known, f"{b} 不是内建，不该在 L0 名单里"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:
