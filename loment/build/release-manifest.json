@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "fd007923ab8319fabdcc1ca7010fc4b1295f891630d491c646939b57d3323436"
+   "sha256": "15ab6b1db03c56e07fbaedf366ce7c4acb0b961760c24cab6b1e088c07a509bd"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -23,11 +23,11 @@
   },
   {
    "path": "tools/potato.py",
-   "sha256": "e0a547977a7ba37e39517176c73075bfc88b107f9d65ca7bd12c62bfec8d0737"
+   "sha256": "bf2553bd952c20f592f4bcef5c285f3fb1c399b58b4a11d13ca5f811f14d7429"
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "6d317bfa66c0ded1d6a3d78c02b032338ab034399049a69cceca1c27e02f125e"
+   "sha256": "c0920a5e12d02f3b0814ebb64a15e566f6725369eaa1bacc7fc703287a24fe5c"
   },
   {
    "path": "tools/potato_cross.py",
@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "d5ef31d0f4dbb1710dbf1afd4a51005fa28125428371640ecf689750739855c0"
+   "sha256": "3c64e63a779c48cdad3ee49d931fcb802a3a48a46d9055043e3d76dd43f32b9e"
   },
   {
    "path": "tools/loment_build.py",
@@ -775,7 +775,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "5787e8a2cf80bc17958265f3c7c630af175382bbf9c8476198e30fbaa3a8571e"
+   "sha256": "3917575523eb343aec43a3da8ed8b96c8a9691b245c87d2f3cbe6013b0bb385e"
   },
   {
    "path": "tools/loment_seed.py",
@@ -1047,7 +1047,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "83af1f2c452e70abe0b5b64fb2f446df656fed0dc517b3d5782f2d6df9cde681"
+   "sha256": "5d04f78313910ae78d106fad76fd3602bb1d5e1ff6dcc136e9883fb33ff482ab"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
@@ -1127,7 +1127,7 @@
   },
   {
    "path": "loment/tools/lompotato.lomt",
-   "sha256": "e8b8c11f1fd0aa60d42535afd14d96e7d8f9f8cc4c930690f0ab9541189635e1"
+   "sha256": "0f3d6b8cb66973d9055e035dd05781036909e9d328166724ee6cf303ff95233c"
   },
   {
    "path": "loment/tools/lompotc.lomt",
@@ -1519,7 +1519,7 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "aba4af19b86d60f9526addfed4c143448d939061ec07f0ffcab80d84094ab42c"
+   "sha256": "9898c0947433c0405225b3ed99095afec47d1f8a1d16f7c96575018778e92525"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
@@ -1531,7 +1531,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "3e81a53ded7dba09d237de9a38152c96f8998f4f9b506cdcc429a4366b62e139"
+   "sha256": "c7f058b48cfe6823f6db4d58ead7ca41c159c930523b3572f2ddeb9018f64022"
   },
   {
    "path": "loment/selfhost/interp.lomt",
@@ -1587,11 +1587,11 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "bda2096631851e5188f68ee83560a69252acacc3634dc402705f75e67834d01a"
+   "sha256": "97572143b13a6026dca62e88df200277e7ca564bb6c4e2d65c1d5c091df39336"
   },
   {
    "path": "loment/selfhost/switches.lomt",
-   "sha256": "63bbc878403a0c5e0bf8e24b177080c8586bacb5f539f41e2eb5912bf69ea137"
+   "sha256": "80dbe9b3c6767b00289c0f0c4fce19cc6684e0d7eaea56267314cdb1229bddd6"
   },
   {
    "path": "loment/corpus.json",
@@ -1663,11 +1663,11 @@
   },
   {
    "path": "docs/147-potato-v1-spec.en.md",
-   "sha256": "d1c0af24569f592991bf2ca226fa58397c3ed27444854a988860e08dfca468e1"
+   "sha256": "6ab28abdad8b32444a074391052f8770b054b02194417bd5853c53b261ae6c79"
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "39e34348872c2d3b75f08396ea03a0b9d1bc0d994249ad13799f1d14c5a73c54"
+   "sha256": "25fb7c052db171a0091efbb9d2b2885ab7261a846c9175aa8936336f1dca0cc8"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
@@ -1787,7 +1787,7 @@
   },
   {
    "path": "docs/175-loment-014-direction.md",
-   "sha256": "4cba1dfc0468517749a17393d7b6f91dd0bb4759f0d26b8d8d9b70c86745a4bd"
+   "sha256": "bcfc1f81c3d26606c13b3a061c02a63e2d9e6844011b7ba033e0b5903f99de59"
   },
   {
    "path": "docs/176-frozen-surface-cost.md",
@@ -1883,7 +1883,7 @@
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
-   "sha256": "00bed0b13789538c810e3f4ced4a7a475e7298abbe0e0983aa566c91965cf77d"
+   "sha256": "f139f9ce04590443f5896e58a16fbdc01f70a49e72c19d2bd6e277be557df10b"
   },
   {
    "path": "docs/203-third-party-audit.md",
@@ -1903,7 +1903,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "20ae621031167e64304e5116668a8d81cb67348217e3ce44bef013ab1ba2d5a8"
+   "sha256": "ad9b152f0ccb4b3514f565e8a630441ec82ecb19ea6d6ac6034aecabe8924da6"
   },
   {
    "path": "docs/manual/api/ahci.md",
