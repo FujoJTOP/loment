@@ -719,11 +719,11 @@
   },
   {
    "path": "tools/loment_comefor_test.py",
-   "sha256": "28cb41f81eb9fc653b4ea1b022ece74c8c99556ebe138b46cb509d47db3653bb"
+   "sha256": "744f3134c03d4110e40e31c18df905e695e914d0536722925a6e42d194dd5517"
   },
   {
    "path": "tools/loment_extblock_test.py",
-   "sha256": "0740f9dc6986dbc6e1a55dd2346f20e7740e75be5c2bd03fe8458ca322285a66"
+   "sha256": "59f74543e9189a49650d7771599b520e682ae7f1296aac1f86b0c3bf7379abaf"
   },
   {
    "path": "tools/loment_p7_test.py",
