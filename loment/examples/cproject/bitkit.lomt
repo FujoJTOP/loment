@@ -1,0 +1,121 @@
+/*
+ * bitkit —— 位运算工具箱。**用 C 拼法写的 Loment**（docs/188 §0）。
+ *
+ * 一份纯计算、无 I/O 的库：观测面是 main() 的退出码。
+ * 选它是因为位运算是 C 这一族的主场，而且能把子集的表达式面铺满：
+ * 掩码 / 移位 / 宽窄混用 / 有符号与无符号相撞 / 循环里的形参改写。
+ *
+ * **整份单元只有一种整型（`unsigned int`）** —— 不是风格选择，是必须：
+ * 子集里**没有跨类型的隐式转换、也没有显式转换**（探针实测，见 docs/NNN）。
+ */
+
+choose write grammar c
+
+/* ---- 位计数 ---- */
+
+unsigned int popcount(unsigned int x) {
+    unsigned int c = 0;
+    while (x != 0) {
+        c = c + (x & 1);
+        x = x >> 1;
+    }
+    return c;
+}
+
+/* 前导零：从最高位往下扫。 */
+unsigned int clz32(unsigned int x) {
+    unsigned int n = 0;
+    unsigned int top = 1;
+    top = top << 31;
+    while (n < 32) {
+        if ((x & top) != 0) {
+            return n;
+        }
+        top = top >> 1;
+        n = n + 1;
+    }
+    return 32;
+}
+
+/* 位反转（32 位）。 */
+unsigned int reverse32(unsigned int x) {
+    unsigned int r = 0;
+    unsigned int i = 0;
+    while (i < 32) {
+        r = r << 1;
+        r = r | (x & 1);
+        x = x >> 1;
+        i = i + 1;
+    }
+    return r;
+}
+
+/* ---- 旋转 ---- */
+
+unsigned int rotl32(unsigned int x, unsigned int n) {
+    unsigned int k = n & 31;
+    if (k == 0) {
+        return x;
+    }
+    return (x << k) | (x >> (32 - k));
+}
+
+unsigned int rotr32(unsigned int x, unsigned int n) {
+    unsigned int k = n & 31;
+    if (k == 0) {
+        return x;
+    }
+    return (x >> k) | (x << (32 - k));
+}
+
+/* ---- 字段抽取 ---- */
+
+/* 取 [lo+width-1:lo] 这一段。 */
+unsigned int fieldw(unsigned int w, unsigned int lo, unsigned int width) {
+    unsigned int m = 1;
+    m = m << width;
+    m = m - 1;
+    return (w >> lo) & m;
+}
+
+/* ---- CRC-32（按位，镜像多项式 0xEDB88320） ---- */
+
+unsigned int crc32_byte(unsigned int crc, unsigned int b) {
+    unsigned int c = crc ^ b;
+    unsigned int i = 0;
+    while (i < 8) {
+        if ((c & 1) != 0) {
+            c = (c >> 1) ^ 3988292384;
+        } else {
+            c = c >> 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/* 对一段定长合成数据求 CRC —— 数据由 seed 推出来，不读任何外部输入。 */
+unsigned int crc32_of_seq(unsigned int seed, unsigned int n) {
+    unsigned int crc = 4294967295;
+    unsigned int i = 0;
+    unsigned int b = seed;
+    while (i < n) {
+        b = (b * 1103515245 + 12345) & 255;
+        crc = crc32_byte(crc, b);
+        i = i + 1;
+    }
+    return crc ^ 4294967295;
+}
+
+/* ---- varint（LEB128） ---- */
+
+unsigned int varint_len(unsigned int v) {
+    unsigned int n = 1;
+    while (v >= 128) {
+        v = v >> 7;
+        n = n + 1;
+    }
+    return n;
+}
+
+/* ---- 汇总 ---- */
