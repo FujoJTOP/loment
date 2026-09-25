@@ -12,7 +12,7 @@ Python.
 
 **[Download 0.1.4](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4)** ·
 [Quick start](QUICKSTART.md) ·
-[Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
+[Project site](https://fujojtop.github.io/loment-site/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·

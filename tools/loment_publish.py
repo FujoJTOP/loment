@@ -189,7 +189,7 @@ REPOS: dict[str, dict] = {
         "visibility": "public",
         "description": "Loment — a systems programming language with a Rust-subset syntax "
                        "and capability domains; compiles to native binaries with no runtime",
-        "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/",
+        "homepage": "https://fujojtop.github.io/loment-site/",
         "topics": ["programming-language", "compiler", "rust", "self-hosted",
                    "systems-programming", "capability-security", "no-std"],
         #: 写进仓库根的 `.gitattributes`（与 README 同一种做法：发布工具直出，不靠手敲）。
@@ -225,7 +225,7 @@ libc, and the toolchain is itself written in Loment. Its own syntax is Rust-flav
 same program can be written in six more: C, C++, Java, C#, Go or Python.
 
 **[Quick start](QUICKSTART.md)** ·
-[Project site](https://fujojtop.github.io/FujoOSwebsite/loment/) ·
+[Project site](https://fujojtop.github.io/loment-site/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
