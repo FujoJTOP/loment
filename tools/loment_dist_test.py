@@ -319,6 +319,18 @@ def test_windows_installer(zipf: Path) -> None:
     else:
         print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
 
+    # 先把**静态形状**钉住 —— 这条跨平台, 门禁 (ubuntu) 跑得到。
+    # 下面那条真跑只在 Windows 上做, 而 CI 里没有 Windows runner, 所以只靠它的话
+    # 这个缺陷在 CI 里谁都拦不住。不变量: 拉脚本的那条命令**必须给路径**,
+    # 不能是裸文件名 (裸名会让 cmd 去搜 PATH/当前目录, 而不是包自己解开的地方)。
+    launched = next(l for l in loment_dist.iexpress_sed(Path("t.exe"), Path("."),
+                                                       ["install.cmd"]).splitlines()
+                    if l.startswith("AppLaunched=")).split("=", 1)[1]
+    toks = [t.strip('"') for t in launched.split() if t.strip('"').endswith("install.cmd")]
+    check("AppLaunched 给脚本带路径, 不是裸文件名 (裸名会去搜 PATH, 解包目录搜不到)",
+          bool(toks) and all(("\\" in t or "/" in t) for t in toks),
+          f"AppLaunched={launched!r}")
+
     # ★ 自解压包要**真跑一遍**, 不是"是 PE 就过"。
     #   2026-09-25 用户报"双击 setup.exe 什么都没发生": wextract 解完包按 `AppLaunched`
     #   拉起安装脚本, 而当时那条命令用**裸文件名**调 `install.cmd` —— cmd 的"搜索当前目录"
