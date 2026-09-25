@@ -181,6 +181,10 @@ GLOBS = [
     "loment/examples/multilang/02-python/*.lomt",
     "loment/examples/multilang/03-java/*.lomt",
     "loment/examples/multilang/README.md",
+    # 一份**纯 Loment 项目**, 叶子单元用 C 拼法写 (docs/211)。与 multilang 同类 —— 也是
+    # **一个目录**, 所以同样要逐条列 (单层的 `loment/examples/*.lomt` 收不到子目录)。
+    "loment/examples/cproject/*.lomt",
+    "loment/examples/cproject/README.md",
     # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
     "loment/extblock/*.lomt",
     # **词法**语料: 只有词法器才看得见的形状。**故意不放进 `loment/examples/`** ——

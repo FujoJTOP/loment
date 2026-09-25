@@ -1,0 +1,88 @@
+// main.lomt —— 纯 Loment 项目的宿主单元。
+//
+// 两个叶子单元（`bitkit.lomt` / `numkit.lomt`）是**用 C 拼法写的 Loment**
+// （文件头 `choose write grammar c`）。这一份是**原生写法** —— 不是风格选择，
+// 是唯一能跑的拆法：C 写法的单元**不能 `use`、不能调别的单元**（实测：写进去的
+// `use` 静默消失，跨单元调用报"调用了本单元没有的函数"）。
+//
+// 于是分工是：**叶子用 C 写法算，接线（use / 跨单元 / 类型转换 / 输出）归宿主。**
+// 跨类型转换在这门语言里只能在原生侧写（`as`）—— C 写法里既没有隐式转换
+// 也没有 `(T)x`，两个口径不同的整型根本碰不到一起。
+module cproj
+
+use "bitkit.lomt"
+use "numkit.lomt"
+
+/// 把十进制写进缓冲（反着填再翻过来）。返回位数。
+fn dec(dst: ptr, v: u32) -> u32 {
+    if v == 0 {
+        store8(dst, 0, 48 as u8);
+        return 1;
+    }
+    let tmp: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(tmp, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let q: u32 = 0;
+    while q < n {
+        store8(dst, q, load8(tmp, n - 1 - q) as u8);
+        q = q + 1;
+    }
+    return n;
+}
+
+/// 往缓冲里写一段字面量。
+fn put(dst: ptr, o: u32, s: str) -> u32 {
+    let i: u32 = 0;
+    while i < str_len(s) {
+        store8(dst, o, str_byte(s, i) as u8);
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+/// bitkit 那一半的校验和（**与 `bitkit.lomt` 里那个 main 逐项相同**）。
+fn bits() -> u32 {
+    let acc: u32 = 0;
+    acc = acc + popcount(4294967295);
+    acc = acc + clz32(1);
+    acc = acc + (reverse32(1) & 255);
+    acc = acc + (rotl32(305419896, 8) & 255);
+    acc = acc + (rotr32(305419896, 8) & 255);
+    acc = acc + fieldw(2863311530, 8, 8);
+    acc = acc + (crc32_of_seq(1, 16) & 255);
+    acc = acc + varint_len(300000);
+    return acc;
+}
+
+/// numkit 那一半的校验和。**跨类型的那一步在这里**：numkit 返 `i32`，宿主用 `u32`。
+fn nums() -> u32 {
+    let acc: i32 = 0;
+    acc = acc + gcd(48, 18);
+    acc = acc + modpow(3, 13, 1000);
+    acc = acc + collatz(27);
+    acc = acc + digit_sum(987654);
+    acc = acc + isqrt(40000);
+    acc = acc + prime_count(100);
+    acc = acc + (sort4_packed(4, 3, 2, 1) % 100);
+    acc = acc + fizz_class(15);
+    acc = acc + truthy(5, 0);
+    acc = acc + double_sum(10);
+    return acc as u32;
+}
+
+fn _start() {
+    let out: ptr = alloc(64);
+    let total: u32 = bits() + nums();
+    let o: u32 = put(out, 0, "bits=533 nums=917 total=");
+    o = o + dec(ptr_add(out, o), total);
+    store8(out, o, 10 as u8);
+    o = o + 1;
+    syscall4(1, 1 as u64, out as u64, o as u64);
+    syscall4(60, (total & 255) as u64, 0, 0);
+}
