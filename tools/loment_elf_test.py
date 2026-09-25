@@ -327,6 +327,134 @@ def test_gc_l2_epoch_bounds_the_heap():
     print(f"      alpha 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 块纪元是真的")
 
 
+#: 只测一件事的 IR：`%j = phi [.., %i]` 与 `%i = phi [.., %i2]` 是**同一前驱上的一对**，
+#: `%j` 因此每次回边取 `%i` 的**旧值**。转 3 圈后 `%j` 必须是 2。
+_PHI_PAIR_IR = '''define i32 @_start() {
+entry:
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %i2, %body ]
+  %j = phi i32 [ 100, %entry ], [ %i, %body ]
+  %d = icmp uge i32 %i, 3
+  br i1 %d, label %out, label %body
+body:
+  %i2 = add i32 %i, 1
+  br label %loop
+out:
+  %c = zext i32 %j to i64
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %c, i64 0, i64 0)
+  ret i32 0
+}
+'''
+
+
+@test
+def test_mirror_phi_is_simultaneous():
+    """镜像的 **phi 是同时赋值的**（LLVM 语义），不是"按声明顺序读一个写一个"。
+
+    **Why**：同一前驱上的多个 phi 必须**一起**生效。最典型的形状是链表遍历里的那一对
+    —— `%cur = phi [.., %nxt]` 与 `%prev = phi [.., %cur]`。一趟顺序写时，先写 `%cur`
+    再读 `%cur` 给 `%prev`，`%prev` 拿到的就成了 `%nxt`。
+
+    实测（2026-09-25）：这一条把 `__loment_free` 的空闲链表插入变成**每次都插在头部**
+    —— 链表恒为 1 个节点，`free` 过的块再也取不回来；`gc_auto` 的收集器因此回收不掉，
+    arena 一路涨到 OOM。**两个实现都错**（`tools/lomelf.py` 与 `loment/tools/lomelf.lomt`），
+    而 `loment_p8_test` 一直绿 —— 它比的是**文本**，phi 的语义不在文本里。
+
+    **How to apply**：这份 IR 只测这一件事（3 圈后 `%j` 该得 **2**；顺序写会得 **3**）。
+    两半都要：
+      * **跑出来的值**：参考实现编出来的产物得 2；
+      * **两边的字节**：同一份 IR 过自举镜像，与参考逐字节相同 —— 少了这半，
+        `loment/tools/lomelf.lomt` 退回一趟写也照样绿（那正是它当时的状态）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    want_elf, _info = lomelf.compile_ll(_PHI_PAIR_IR)
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        nat = td / "phipair.native"
+        nat.write_bytes(want_elf)
+        rc, _out = _run_bin(nat, "phipair", td, timeout=20)
+    assert rc == 2, (
+        f"phi 不是同时赋值：`%j` 得 {rc}（期望 2；顺序写会得 3）。"
+        "查 `_emit_phis_then` / `emit_phis` 是不是走了一趟（因果链见 docstring）")
+    if not _clang():
+        print("      参考侧: phi 同时赋值 (得 2)；自举侧: 无 clang, 跳过字节比对")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_phipair.ll"
+    elfrepo = ROOT / "loment" / "build" / "_phipair.elf"
+    try:
+        llrepo.write_text(_PHI_PAIR_IR, encoding="utf-8", newline="\n")
+        rcm, err = _mirror_run(mir, "loment/build/_phipair.ll", "loment/build/_phipair.elf")
+        assert rcm == 0, f"镜像退出 {rcm}: {err[-200:]}"
+        natm = elfrepo.read_bytes()
+    finally:
+        elfrepo.unlink(missing_ok=True)
+        llrepo.unlink(missing_ok=True)
+    assert natm == want_elf, (
+        f"phi 的两份实现不同 ({len(natm)}B vs {len(want_elf)}B) —— "
+        "自举侧多半还是有 phi 就一趟写")
+    print("      phi 同时赋值: 参考得 2, 自举侧逐字节相同")
+
+
+@test
+def test_gc_manual_free_list_recycles():
+    """`gc_manual` 的**空闲链表真的被复用**（不只是前沿回退）—— 判据是**一对**程序。
+
+    **Why**：`test_free_really_reclaims` 测的是**前沿回退**（LIFO：分配—释放—再分配，
+    被释放的那块正好顶着前沿）。那条在**空闲链表**整条坏掉时照样绿 —— 链表只在
+    "放掉的块**不是**栈顶"时才起作用。
+
+    **How to apply**：循环里同时握两个块 —— `cur` 是新分配的（**它就是栈顶**），
+    `prev` 是上一圈那个；`free(prev)` 时 `cur` 还活着，于是**回退永远不触发**
+    （回退要求被释放的块顶着前沿），回收只能来自链表复用。
+      * 带 `free`   → 跑完，退出码 7（`s == 12000`：每圈读到的都是 3）；
+      * 不带 `free` → **必须崩**（rc = 132，arena 耗尽）。这一半是**证伪**：
+        它保证"跑通"不是"反正都跑得通"。
+
+    实测（2026-09-25）：这条在 phi 修好之前是 **rc = 132** —— 那时的链表恒为 1 个节点。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module gclist\nchoose gc_manual\n\nfn _start() {\n"
+            "    let prev: ptr = alloc(64);\n"
+            "    store8(prev, 0, 3);\n"
+            "    let i: u32 = 0;\n"
+            "    let s: u32 = 0;\n"
+            "    while i < 4000 {\n"
+            "        let cur: ptr = alloc(64);\n"
+            "        store8(cur, 0, 3);\n"
+            "        %s"
+            "        s = s + load8(prev, 0);\n"
+            "        prev = cur;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if s == 12000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, extra in (("free", "free(prev);\n        "), ("nofree", "")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % extra, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"list_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"带 `free` 的那只没跑通：退出码 {got[0]}（期望 7）。"
+        "峰值只有两块、总量 4000×72 B ≈ 288 KB —— 跑不通就说明链表没复用"
+        "（回退在这儿帮不上忙：被释放的块从来不是栈顶）")
+    assert got[1] != 7, (
+        f"**不带 `free` 的那只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出链表复用："
+        "arena 没被耗尽，说明它比 288 KB 大得多")
+    print(f"      带 free 跑通 (rc={got[0]})；不带 free 耗尽 (rc={got[1]}) —— 链表复用是真的")
+
+
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
