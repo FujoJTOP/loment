@@ -342,15 +342,14 @@ fn copy_bytes(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
     }
 }
 
-/// 名字比较 —— Python 的 `sorted(Path)` 在 Windows 上按 **normcase (小写)** 比,
-/// 所以这里也把 ASCII 大写折成小写 (判据跑在 Windows 的 Python 上; docs/167 记这条)。
-fn fold(c: u32) -> u32 {
-    if c >= 65 && c <= 90 {
-        return c + 32;
-    }
-    return c;
-}
-
+/// 名字比较 —— **纯字节序**（大写比小写小），与平台无关。
+///
+/// 这里曾经把 ASCII 大写折成小写，为的是对上"Windows 上 `sorted(Path)` 按 normcase 比"
+/// 那套语义 —— 代价是**清单次序取决于在哪台机器上跑**：`SHA256SUMS` 与
+/// `lomelf-linux-x64.elf` 谁在前，Windows 与 Linux 正好相反。于是本机重算的清单与 CI
+/// 重算的永远不一致 ⇒ CI 每次推一笔 `[生成物]` ⇒ 那笔机器人推送把必需检查挂成
+/// `action_required` ⇒ PR 永远 BLOCKED。参考侧（`tools/loment_release.py` 的 `build`）
+/// 与本文件**两边一起**改成字节序，这条差异就没了。
 fn cmp_bytes(p: ptr, ao: u32, al: u32, q: ptr, bo: u32, bl: u32) -> u32 {
     let n: u32 = al;
     if bl < n {
@@ -358,8 +357,8 @@ fn cmp_bytes(p: ptr, ao: u32, al: u32, q: ptr, bo: u32, bl: u32) -> u32 {
     }
     let i: u32 = 0;
     while i < n {
-        let x: u32 = fold(load8(p, ao + i));
-        let y: u32 = fold(load8(q, bo + i));
+        let x: u32 = load8(p, ao + i);
+        let y: u32 = load8(q, bo + i);
         if x < y {
             return 0;
         }

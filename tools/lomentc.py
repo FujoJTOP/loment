@@ -4135,6 +4135,220 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     return text
 
 
+#: **自动回收**（`choose gc_auto`）那一段运行期 —— 与 `_IR_HEAP` **分开一段**，
+#: 因为它只在 `gc_auto` 档追加，于是另外两档的产物**逐字节不变**（`docs/175` §3.4 之一）。
+#:
+#: 三条设计，每条对着市面自动 GC 的一个优点（"优点的集合"该抄哪几条、不抄哪几条，
+#: 逐条写在 `docs/210` §2.4；**沉默不是理由**）：
+#:
+#: * **精确根**：根不是"把整个栈当字节扫"猜出来的，而是**编译器发的槽表** ——
+#:   `@__loment_roots` 里存的是**槽的地址**，值在槽里。类型静态 ⇒ 编译器知道哪些
+#:   局部/形参里有指针（`ptr`、`str`（`{ptr,i64}`，第一格是指针）、切片（同形）；
+#:   struct 与枚举的字段在本后端**只装标量**，所以不必递归进聚合）。代价是每个
+#:   "持有指针的函数"在入口 push、在每个 `return` 前 pop。
+#: * **标记-清扫**（不搬移）：块无类型（`alloc(N)`），所以块内**保守**扫 ——
+#:   每个 8 字节字当候选指针；**根是精确的**。
+#: * **标记位另开一张表**（`@__loment_mark`，按块头偏移 >> 3 索引）。曾经想借块头的
+#:   `next` 那一格（分配出去的块 `next` 恒为 0），**实测踩坑**：清标记那一趟会把
+#:   空闲链表的 `next` 全抹掉 —— 链断了，`free` 过的块再也取不回来。
+#: * **四趟遍历一律从偏移 8 起**：`@__loment_off` 的初值就是 8，偏移 0..7 不是块。
+#:   从 0 起会读到 `size = 0`，而 `i += 0` 是个**死循环**（实测：那次的探针直接超时）。
+#: * **清扫前先清空 `@__loment_freehead`**：不然"本来就在链上的块"会被再 `free` 一次
+#:   （双重插入，链就毁了）。
+#:
+#: 触发：编译器在**每个 `alloc` 调用点**先喊一声 `@__loment_maybe_collect(请求字节数)`，
+#: 它按**累计请求量**记 —— 过了 32 KiB 就收一次并清零。**不是按前沿**：前沿在有活块的
+#: 时候根本不会回落（`free` 只在"释放的块顶到前沿"时退），按它判会让每次分配都收一次
+#: （实测：40000 次循环跑成超时）。按分配量记是 O(1)、可预期，也是主流那几家的做法。
+_IR_GC = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
+@__loment_roots = internal global [1024 x i64] zeroinitializer
+@__loment_rootn = internal global i32 0
+@__loment_gcbytes = internal global i32 0
+@__loment_mark = internal global [8192 x i32] zeroinitializer
+
+; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
+; （分配器那句注释：偏移 0 永远不是块）。从 0 起会读到 size=0，`i += 0` 就是死循环
+; —— 实测：那次 40000 圈的探针直接跑到超时，成因就在这一行。
+define internal i32 @__loment_markp(i32 %p) {
+entry:
+  %o0 = load i32, ptr @__loment_off
+  %lo = icmp ult i32 %p, 8
+  %hi = icmp uge i32 %p, %o0
+  %bad = or i1 %lo, %hi
+  br i1 %bad, label %no, label %scan
+scan:
+  %i = phi i32 [ 8, %entry ], [ %ex, %cont ]
+  %o1 = load i32, ptr @__loment_off
+  %done = icmp uge i32 %i, %o1
+  br i1 %done, label %no, label %blk
+blk:
+  %szp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %i
+  %sz = load i32, ptr %szp
+  %ex = add i32 %i, %sz
+  %ge = icmp uge i32 %p, %i
+  %lt = icmp ult i32 %p, %ex
+  %hit = and i1 %ge, %lt
+  br i1 %hit, label %found, label %cont
+cont:
+  br label %scan
+found:
+  %midx = lshr i32 %i, 3
+  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %midx
+  %old = load i32, ptr %mp
+  %was = icmp eq i32 %old, 1
+  store i32 1, ptr %mp
+  br i1 %was, label %no, label %yes
+yes:
+  ret i32 1
+no:
+  ret i32 0
+}
+
+define internal void @__loment_collect() {
+entry:
+  br label %cl
+cl:
+  %ci = phi i32 [ 8, %entry ], [ %cex, %clc ]
+  %co = load i32, ptr @__loment_off
+  %cd = icmp uge i32 %ci, %co
+  br i1 %cd, label %roots, label %clb
+clb:
+  %cidx = lshr i32 %ci, 3
+  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
+  store i32 0, ptr %cmp
+  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
+  %csz = load i32, ptr %csp
+  %cex = add i32 %ci, %csz
+  br label %clc
+clc:
+  br label %cl
+roots:
+  br label %rl
+rl:
+  %rk = phi i32 [ 0, %roots ], [ %rk2, %rlc ]
+  %rn = load i32, ptr @__loment_rootn
+  %rd = icmp uge i32 %rk, %rn
+  br i1 %rd, label %prop, label %rb
+rb:
+  %rs = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 %rk
+  %rsv = load i64, ptr %rs
+  %rsp = inttoptr i64 %rsv to ptr
+  %rval = load i64, ptr %rsp
+  %rbase = ptrtoint ptr @__loment_heap to i64
+  %rdo = sub i64 %rval, %rbase
+  %rin = icmp ult i64 %rdo, 65536
+  br i1 %rin, label %rmk, label %rlc
+rmk:
+  %rd32 = trunc i64 %rdo to i32
+  %rr = call i32 @__loment_markp(i32 %rd32)
+  br label %rlc
+rlc:
+  %rk2 = add i32 %rk, 1
+  br label %rl
+prop:
+  br label %pl
+pl:
+  %ch = phi i32 [ 1, %prop ], [ %acc, %pw ]
+  %zero = icmp eq i32 %ch, 0
+  br i1 %zero, label %sweep, label %pw
+pw:
+  %wi = phi i32 [ 8, %pl ], [ %we, %wlc ]
+  %acc = phi i32 [ 0, %pl ], [ %acc2, %wlc ]
+  %wo = load i32, ptr @__loment_off
+  %wd = icmp uge i32 %wi, %wo
+  br i1 %wd, label %pl, label %wb
+wb:
+  %wszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
+  %wsz = load i32, ptr %wszp
+  %widx = lshr i32 %wi, 3
+  %wmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %widx
+  %wmk = load i32, ptr %wmp
+  %wsm = icmp eq i32 %wmk, 1
+  br i1 %wsm, label %ws, label %wn2
+ws:
+  %wsstart = add i32 %wi, 8
+  %wsend = add i32 %wi, %wsz
+  br label %wl
+wl:
+  %wj = phi i32 [ %wsstart, %ws ], [ %wj2, %wlc2 ]
+  %wacc = phi i32 [ %acc, %ws ], [ %wacc2, %wlc2 ]
+  %wjd = icmp uge i32 %wj, %wsend
+  br i1 %wjd, label %wn, label %wx
+wx:
+  %wjp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wj
+  %wv = load i64, ptr %wjp
+  %wb2 = ptrtoint ptr @__loment_heap to i64
+  %wdo = sub i64 %wv, %wb2
+  %win = icmp ult i64 %wdo, 65536
+  br i1 %win, label %wmk2, label %wlc2
+wmk2:
+  %wd32 = trunc i64 %wdo to i32
+  %wr = call i32 @__loment_markp(i32 %wd32)
+  br label %wlc2
+wlc2:
+  %wacc2 = phi i32 [ %wacc, %wx ], [ %wr, %wmk2 ]
+  %wj2 = add i32 %wj, 8
+  br label %wl
+wn:
+  %wex = add i32 %wi, %wsz
+  br label %wlc
+wn2:
+  %wey = add i32 %wi, %wsz
+  br label %wlc
+wlc:
+  %we = phi i32 [ %wex, %wn ], [ %wey, %wn2 ]
+  %acc2 = phi i32 [ %wacc, %wn ], [ %acc, %wn2 ]
+  br label %pw
+; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
+; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
+; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
+sweep:
+  store i32 0, ptr @__loment_freehead
+  br label %sl
+sl:
+  %si = phi i32 [ 8, %sweep ], [ %sex, %slc ]
+  %so = load i32, ptr @__loment_off
+  %sd = icmp uge i32 %si, %so
+  br i1 %sd, label %done, label %sb
+sb:
+  %sszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %si
+  %ssz = load i32, ptr %sszp
+  %sidx = lshr i32 %si, 3
+  %smp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %sidx
+  %smk = load i32, ptr %smp
+  %smsm = icmp eq i32 %smk, 1
+  br i1 %smsm, label %keep, label %kill
+keep:
+  br label %slc
+kill:
+  %k8 = add i32 %si, 8
+  %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
+  call void @__loment_free(ptr %kp)
+  br label %slc
+slc:
+  %sex = add i32 %si, %ssz
+  br label %sl
+done:
+  ret void
+}
+
+define internal void @__loment_maybe_collect(i32 %sz) {
+entry:
+  %b = load i32, ptr @__loment_gcbytes
+  %b2 = add i32 %b, %sz
+  store i32 %b2, ptr @__loment_gcbytes
+  %big = icmp ugt i32 %b2, 32768
+  br i1 %big, label %go, label %out
+go:
+  store i32 0, ptr @__loment_gcbytes
+  call void @__loment_collect()
+  br label %out
+out:
+  ret void
+}
+'''
+
+
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
 
 IR_TYPES = {
@@ -4479,7 +4693,7 @@ class _Ir:
                  coverage: bool = False, cov_counter: list | None = None,
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
                  dbg_meta: list | None = None, dbg_types: dict | None = None,
-                 gc_alpha: bool = False):
+                 gc_alpha: bool = False, gc_auto: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -4498,6 +4712,10 @@ class _Ir:
         #: **L0 提升表**（`docs/210` §2，只在 `gc_auto_alpha` 下非空）：`{局部名: 字节数}`。
         #: 其余档**一行都不动** —— 默认档不许改变任何现有程序的产物（`docs/175` §3.4 五条之一）。
         self.l0: dict[str, int] = f.l0 if gc_alpha else {}
+        #: **`gc_auto`**（`docs/210` §2.1 的"自动"那一档）：本帧要不要 push 根表、多少格。
+        #: 与 `gc_alpha` **互斥**（两档不同时成立），所以下面那些挂点不会互相打架。
+        self.gc_auto = gc_auto
+        self.rootk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
@@ -4649,6 +4867,65 @@ class _Ir:
 
     def type_scope(self) -> dict[str, str]:
         return {k: v[0] for k, v in self.vars.items()}
+
+    # -- gc_auto：精确根（`docs/210` §4.2）+ 自动收集的挂点
+    @staticmethod
+    def _root_ty(t: str) -> bool:
+        """哪些类型算"槽里有指针"：`ptr` / `str`（`{ptr,i64}`）/ 切片（同形）。
+
+        **`struct` 与枚举的字段在本后端只装标量**（`_ll_type` 拒绝别的），所以不必递归进聚合 ——
+        那条限制在这里变成一条好处。
+        """
+        return t == "ptr" or t == "str" or _is_slice(t)
+
+    def roots_push(self, f: Func) -> None:
+        """`gc_auto`：把本帧"持有指针的槽"登记进根表。
+
+        **槽的顺序必须与自举侧同序**（形参在前、局部按声明序）—— 那是逐字节判据的一部分。
+        表满（1024 格，递归深了才可能）**点名拒**，不静默写穿。
+        """
+        if not self.gc_auto:
+            return
+        self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
+        if self.rootk == 0:
+            return
+        n0 = self.t()
+        self.w(f"{n0} = load i32, ptr @__loment_rootn")
+        i = 0
+        for name, (ty, slot) in self.vars.items():
+            if not self._root_ty(ty):
+                continue
+            idx = self.t()
+            self.w(f"{idx} = add i32 {n0}, {i}")
+            gp = self.t()
+            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 {idx}")
+            v = self.t()
+            self.w(f"{v} = ptrtoint ptr {slot} to i64")
+            self.w(f"store i64 {v}, ptr {gp}")
+            i += 1
+        n1 = self.t()
+        self.w(f"{n1} = add i32 {n0}, {self.rootk}")
+        self.w(f"store i32 {n1}, ptr @__loment_rootn")
+        ov = self.t()
+        self.w(f"{ov} = icmp ugt i32 {n1}, 1024")
+        ok, bad = self.l("rok"), self.l("rovf")
+        self.w(f"br i1 {ov}, label %{bad}, label %{ok}")
+        self.terminated = True
+        self.label(bad)
+        self.w("call void @__loment_abort()")
+        self.w("unreachable")
+        self.terminated = True
+        self.label(ok)
+
+    def roots_pop(self) -> None:
+        """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
+        if not self.gc_auto or self.rootk == 0:
+            return
+        n = self.t()
+        self.w(f"{n} = load i32, ptr @__loment_rootn")
+        m = self.t()
+        self.w(f"{m} = sub i32 {n}, {self.rootk}")
+        self.w(f"store i32 {m}, ptr @__loment_rootn")
 
     # -- 表达式 -> (loment 类型, 值)
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
@@ -4940,6 +5217,10 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
+            if self.gc_auto:
+                # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
+                # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
+                self.w(f"call void @__loment_maybe_collect(i32 {sz})")
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")
@@ -5335,6 +5616,7 @@ class _Ir:
             return
         if isinstance(s, Return):
             _, v = self.expr(s.expr, self.f.ret)
+            self.roots_pop()   # gc_auto：离开本帧前把根表游标退回去
             self.w(f"ret {self.ll(self.f.ret)} {v}")
             self.terminated = True
             return
@@ -5349,10 +5631,10 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   coverage: bool = False, cov_counter: list | None = None,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
                   dbg_meta: list | None = None, dbg_types: dict | None = None,
-                  gc_alpha: bool = False
+                  gc_alpha: bool = False, gc_auto: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -5361,8 +5643,10 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.cur_label = "entry"
         ir.cov_hit()
         ir.locals_prologue(f, enums, funcs, structs)
+        ir.roots_push(f)
         ir.block(f.body)
         if not ir.terminated:
+            ir.roots_pop()
             ir.w("ret void")
         ir.out.append("}")
         return ir.globals, "\n".join(ir.out)
@@ -5381,9 +5665,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     ir.locals_prologue(f, enums, funcs, structs)
     for p in f.params:
         ir.w(f"store {ir.ll(p.type)} %{p.name}, ptr %{p.name}.addr")
+    ir.roots_push(f)
     ir.block(f.body)
     if not ir.terminated:
         if f.ret == "()":
+            ir.roots_pop()
             ir.w("ret void")
         else:
             ir.w("unreachable")  # ponytail: 语言不强制全路径 return (docs/144 §3)
@@ -5444,6 +5730,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **L0 只在这一档下开**（`docs/210` §2）：`gc_manual`（默认）与 `gc_auto` 都**一行不动**。
     # 取的是**根单元**的取值 —— 与 Potato 里那个 `gc` 字段同一个来源。
     gc_alpha = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto_alpha"
+    # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
+    # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
+    gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -5492,7 +5781,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
-                                    dbg_types if debug else None, gc_alpha)
+                                    dbg_types if debug else None, gc_alpha, gc_auto)
             globals_ += g
             body.append(text)
     text_all = "\n".join(body)
@@ -5529,6 +5818,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
     if _needs_heap:
         out.append(_IR_HEAP)
+        if gc_auto:
+            # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
+            # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
+            out.append(_IR_GC)
     out += globals_
     if globals_:
         out.append("")

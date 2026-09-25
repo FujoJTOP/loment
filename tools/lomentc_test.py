@@ -2260,6 +2260,93 @@ def test_l2_block_epoch_rule():
         L2_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+#: `gc_auto`（`docs/210` §2.1 的"自动"那一档）那一段。**源只有一份** —— 这条静态判据与
+#: 字节一致判据（`loment_p8_test::test_m90_gc_auto_collector_is_byte_identical`）都读它。
+#:
+#: 挑这几行的用意：`hold` 有**形参** `ptr`、`_start` 有**局部** `ptr`（`a` 与循环里的 `t`），
+#: 于是根表那一半在两个函数里都真的发出来 —— 只测一个函数的话，"形参算不算根"这格是空的。
+GC_AUTO_SRC = """module gc_auto_t
+@@CHOOSE@@
+choose runtime
+
+fn hold(p: ptr) -> u32 {
+    return load8(p, 0);
+}
+
+fn _start() {
+    let a: ptr = alloc(8);
+    store8(a, 0, 5);
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 64 {
+        let t: ptr = alloc(16);
+        store8(t, 0, 1);
+        s = s + load8(t, 0);
+        i = i + 1;
+    }
+    if hold(a) == 5 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+GC_AUTO_AUTO_SRC = GC_AUTO_SRC.replace("@@CHOOSE@@", "choose gc_auto")
+GC_AUTO_MANUAL_SRC = GC_AUTO_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+GC_AUTO_ALPHA_SRC = GC_AUTO_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+
+
+def _gc_emit(src: str) -> str:
+    mod = parse(src)
+    errs_ = lomentc.check(mod)
+    assert not errs_, errs_[:2]
+    return lomentc.emit_llvm(mod, ROOT)
+
+
+@test
+def test_gc_auto_collector_text():
+    """`choose gc_auto` 的收集器**只在这一档**追加（`docs/210` §2.1）—— 三档的文本。
+
+    **Why**：`gc_auto` 到落地之前是**空承诺** —— 选它编得过，产物里却没有收集器；
+    而"有收集器"这件事在静态上就是几条**可数**的痕迹，钉住它们比跑起来便宜得多，
+    也能挡住最阴的那种错：收集器发了、**挂点没挂**（产物里有 `__loment_collect`，
+    却从来没被调用过 —— 跑起来像没事，直到 arena 耗尽）。
+
+    **How to apply**：这一条只核"痕迹在不在、在几处"。**"真的回收了吗"是动态判据的活**
+    （`loment_elf_test::test_gc_auto_collects_while_manual_exhausts`）——
+    静态判据对"收集器是空函数"照样绿，两者缺一不可。
+    """
+    auto = _gc_emit(GC_AUTO_AUTO_SRC)
+    manual = _gc_emit(GC_AUTO_MANUAL_SRC)
+    alpha = _gc_emit(GC_AUTO_ALPHA_SRC)
+    marks = (("分配量计数", "@__loment_gcbytes"),
+             ("标记位表", "@__loment_mark"),
+             ("根表", "@__loment_roots"),
+             ("根表游标", "@__loment_rootn"),
+             ("标记函数", "@__loment_markp"),
+             ("收集器", "@__loment_collect"),
+             ("触发入口", "@__loment_maybe_collect"))
+    for what, sym in marks:
+        assert sym in auto, f"`gc_auto` 的产物里没有{what}（{sym}）"
+        assert sym not in manual, f"`gc_manual` 的产物里不该有{what}（{sym}）—— 默认档不许变"
+        assert sym not in alpha, f"`gc_auto_alpha` 的产物里不该有{what}（{sym}）—— 档位串了"
+    # **挂点**：每个 `alloc` 站点前面正好一条（本程序两个函数各一处）
+    assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
+        ("触发点该正好两处（每个 `alloc` 站点之前一条），得到 "
+         f"{auto.count('call void @__loment_maybe_collect(i32 ')} —— "
+         "发了收集器却没挂点，正是这条判据要挡的那种错")
+    # **根表登记**：三个指针槽 —— `hold` 的形参 p，`_start` 的 a 与 t。
+    # 用 `.addr to i64` 数（`__loment_free` 里也有一条 `ptrtoint ptr %p`，那是参数转型，
+    # 按 `ptrtoint ptr %` 数会把它算进来 —— 计数要挑只属于这一件事的形状）。
+    # 少了形参那一个，说明"形参也算根"这格是空的。
+    assert auto.count(".addr to i64") == 3, \
+        f"根表该登记三格（形参 p + 局部 a、t），得到 {auto.count('.addr to i64')}"
+    for slot in ("%p.addr to i64", "%a.addr to i64", "%t.addr to i64"):
+        assert slot in auto, f"根表漏了 {slot}（形参/局部/循环内局部各一格）"
+    # L0/L2 只在 alpha 档 —— 这两条同时挡住"档位串了"的另一半
+    assert ".buf" not in auto, "`gc_auto` 不该有 L0 缓冲（L0 只在 alpha 档）"
+    assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

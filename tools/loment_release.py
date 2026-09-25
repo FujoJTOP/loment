@@ -247,9 +247,18 @@ def sha(p: Path) -> str:
 
 
 def build() -> dict:
+    """清单的次序**按 posix 路径的字节序**，与平台无关。
+
+    **为什么不能就用 `sorted(glob(...))`**：那排的是 `Path` 对象，而 `Path` 的比较在
+    Windows 上按**大小写折叠**、在 POSIX 上按字节 —— 同一个目录能排出两种次序（实测：
+    `loment/build/genesis/` 下 `SHA256SUMS` 与 `lomelf-linux-x64.elf` 谁在前，
+    两种平台正好相反）。后果不是"好不好看"：**本机重算的清单与 CI 重算的永远不一致**
+    ⇒ CI 每次都推一笔 `[生成物]` ⇒ 那笔机器人推送会把必需检查挂成 `action_required`
+    ⇒ PR **永远**卡在 BLOCKED。**每个 PR 白付十几分钟 + 一次人工放行。**
+    """
     files = []
     for g in GLOBS:
-        for p in sorted(ROOT.glob(g)):
+        for p in sorted(ROOT.glob(g), key=lambda q: q.as_posix()):
             if p.is_file():
                 files.append({"path": p.relative_to(ROOT).as_posix(), "sha256": sha(p)})
     return {"release": RELEASE, "files": files}

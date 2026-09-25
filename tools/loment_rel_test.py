@@ -7,14 +7,19 @@
 #   3. `--checksums PATH`: 写出的清单逐字节相同 (路径不同则比内容), stdout 除路径外相同;
 #   4. `lomrel.lomt` 必须能走**种子自举链**编译 (无 Python 参与编译器本身)。
 #
-# 平台口径 (重要): Python 的 `sorted(Path)` 在 **Windows 上按 normcase 小写比**, 在 Linux 上
-# 按字节比 —— 同一个 glob 两边顺序会不同。本工具镜像是 **Windows** 的语义 (判据跑在本机
-# Windows Python 上, 用进程内 _py 而不是 WSL 的 python3); 跨平台清单顺序差异见 lomrel.lomt 头注。
+# 平台口径 (重要): 清单次序**必须与平台无关** —— 两边都按 **posix 路径的字节序**排。
+# `sorted(Path)` 不能直接用: 它在 Windows 上按 normcase 小写比、在 Linux 上按字节比,
+# 同一个 glob 会排出两种次序 (实测: `loment/build/genesis/` 下 `SHA256SUMS` 与
+# `lomelf-linux-x64.elf` 谁在前, 两种平台正好相反)。次序不一致不是"好不好看":
+# 本机重算的清单与 CI 重算的永远对不上 ⇒ CI 每次推一笔 `[生成物]` ⇒ 那笔机器人推送把
+# 必需检查挂成 `action_required` ⇒ PR 永远 BLOCKED。参考侧见 `loment_release.build`
+# 的注释, 自举侧见 `lomrel.lomt` 的 `cmp_bytes`。
 #
 # 运行: python tools/loment_rel_test.py   (无 clang/WSL 时 SKIP, 退出码 0)
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -133,6 +138,34 @@ def _pair(elf: Path, td: Path, name: str, args: list[str]) -> None:
 
 
 # ---------------------------------------------------------------- 用例
+
+@test
+def test_manifest_order_is_platform_independent():
+    """清单的次序**每个 glob 组内按 posix 路径的字节序** —— 不是"哪个平台顺手就哪个"。
+
+    **Why**：次序不一致的代价不是好看：**本机重算的清单与 CI 重算的永远对不上**，
+    CI 就会每次都推一笔 `[生成物]`，而机器人推送会把必需检查挂成 `action_required`
+    ⇒ PR 永远 BLOCKED（`docs/` 里记着这条坑，2026-09-25 又踩了一次）。
+
+    **How to apply**：按 `GLOBS` 把清单**分组**，逐组核"组内是字节序"（组与组之间是
+    `GLOBS` 的手写序，那是刻意的，不核）。期望值在这儿**独立算**（`sorted(key=str)`）
+    而不是调 `build()` —— 调它就成了同义反复。旧写法（`sorted(Path)` 在 Windows 上按
+    normcase 折叠）会让 `loment/build/genesis/lomelf-linux-x64.elf` 排在
+    `.../SHA256SUMS` 前面，这条当场红（实测两种次序确实相反）。
+    """
+    doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    got = [x["path"] for x in doc["files"]]
+    pos = 0
+    for g in loment_release.GLOBS:
+        want = sorted(p.relative_to(ROOT).as_posix()
+                      for p in ROOT.glob(g) if p.is_file())
+        chunk = got[pos:pos + len(want)]
+        assert chunk == want, (
+            f"`{g}` 这一组在清单里的次序不是字节序（多半是 `sorted(Path)` 的平台语义"
+            f"漏了回来）：\n  清单 {chunk[:6]}\n  字节序 {want[:6]}")
+        pos += len(want)
+    assert pos == len(got), f"清单条目数 {len(got)} 与 GLOBS 展开的 {pos} 对不上"
+
 
 @test
 def test_lomrel_matches_python():
