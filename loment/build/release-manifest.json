@@ -683,7 +683,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "2dca48855f44c913f71e16e410c9c34f31711c66a3de6198705f7ee9ad8de9b5"
+   "sha256": "5690d0cfa4cbc6d6b66234c6a9ef1c051915f62b13208a31d6927303fc5a0ee5"
   },
   {
    "path": "tools/loment_diag.py",
