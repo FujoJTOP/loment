@@ -615,7 +615,11 @@ int main(int argc, char **argv) {
     if (fread(buf, 1, (size_t)n, f) != (size_t)n) return 2;
     buf[n] = 0;
     unsigned char *toks = malloc(20 * ((size_t)n + 16));
-    char *out = malloc((size_t)n * 8 + 8192);
+    /* 余量 65536 而不是 8192（`driver.lomt` 的 `IR_CAP` 注释记的是"上界 8*单元 + 8192"）：
+       `gc_auto` 给**每一份**产物恒加约 5.2 KB 的收集器文本，小单元下 8192 就不够了 ——
+       实测症状是**夹具自己段错误**（0xC0000005），看起来像孪生崩了，其实是我把缓冲写穿。
+       真驱动那边是 `IR_CAP = 16 MB`，本来就够；这里给足余量，免得夹具比真东西还紧。 */
+    char *out = malloc((size_t)n * 8 + 65536);
     /* 状态块按单元规模定 (~500 KB), 不能压在语言堆上 —— 与驱动同一个口径 */
     unsigned char *st = malloc(cg_arena_bytes());
     lex(buf, (unsigned int)n, toks);
@@ -787,6 +791,47 @@ def test_m89_l2_epoch_is_byte_identical():
     # 不许空转：alpha 那一份必须**真的**多出前沿的存取（每开一格多一条读、一条写）
     assert outs["alpha"].count("@__loment_off") > outs["manual"].count("@__loment_off"), \
         "alpha 那一份没有多出前沿的存取 —— 这条判据在空转"
+
+
+@test
+def test_m90_gc_auto_collector_is_byte_identical():
+    """`gc_auto` 的收集器（`docs/210` §2.1）：同一份源，**两个实现**逐字节一致。
+
+    这一条是收集器那一半的镜像判据，也是最难"蒙对"的一条：
+      * 收集器本体是**五百多行 IR**（四个遍历 + 根表 + 触发），自举侧那份是脚本从
+        `lomentc._IR_GC` 生成的（不手抄），文本那一半靠生成保证；
+      * 但**挂点是手写的**：根表登记每格吃掉三条 temp，`alloc` 站点那句要插在
+        表达式求值之后 —— temp 编号错一位，整段产物全错。所以这条判据真正钉的是
+        "挂点在**哪**、按**什么顺序**"。
+
+    **源只有一份**（`lomentc_test.GC_AUTO_SRC`，那边同时钉静态痕迹）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in (("auto", lomentc_test.GC_AUTO_AUTO_SRC),
+                         ("manual", lomentc_test.GC_AUTO_MANUAL_SRC)):
+            target = Path(td) / f"gc_auto_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"gc_auto_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转：auto 那一份必须真的带收集器与挂点，manual 一份都不许沾
+    assert "@__loment_collect" in outs["auto"], "auto 那一份里没有收集器 —— 这条判据在空转"
+    assert "call void @__loment_maybe_collect" in outs["auto"], "auto 那一份里没有挂点"
+    assert "@__loment_collect" not in outs["manual"], "manual 那一份不该有收集器"
 
 
 def _dep_paths(target: Path) -> list[Path]:
