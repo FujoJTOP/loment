@@ -1562,6 +1562,42 @@ def _tar_gz(prefix: str, files: dict[str, tuple[bytes, int]]) -> bytes:
     return gzip.compress(raw.getvalue(), mtime=0)
 
 
+#: wextract 解完包后在**解包目录**里拉起的命令。脚本必须给**绝对路径**。
+#:
+#: 裸名 `install.cmd` 会失败: cmd 的"搜索当前目录"被环境变量
+#: `NoDefaultCurrentDirectoryInExePath` 关掉时 (开发工具/加固环境常设这个 —— 本仓
+#: 的 agent 进程里就是 1), `cmd /c install.cmd` 找不到刚解出来的脚本, 报一句就走,
+#: 自解压包于是"解了包、什么都没发生"。2026-09-25 用户报障即此。
+#: `%CD%` 是 cmd 的运行时变量 (打包时 iexpress **不会**替换它), 展开后就是解包目录。
+APP_LAUNCHED = 'cmd.exe /c "%CD%\\install.cmd"'
+
+
+def iexpress_sed(target: Path, src: Path, files: list[str]) -> str:
+    """IExpress 的 SED 文本。
+
+    `[Options]` 里那九条字符串 (InstallPrompt / DisplayLicense / FinishMessage /
+    TargetName / FriendlyName / AppLaunched / PostInstallCmd / AdminQuietInstCmd /
+    UserQuietInstCmd) 在生成的 exe 里是**一张按顺序排的字符串表** —— 中间插一条或
+    调换位置, wextract 就会按错的索引读表, 包整个不工作 (且**没有任何报错**)。
+    所以这段的**行序不要动**。
+
+    单独抽出来是为了让 `loment_dist_test` 能用**同一份 SED** 打一个极小载荷的包
+    来真跑 —— 见那里的 `wextract 真跑一遍` 判据。
+    """
+    strings = "".join(f'FILE{i}="{n}"\n' for i, n in enumerate(files))
+    refs = "".join(f"%FILE{i}%=\n" for i in range(len(files)))
+    return (
+        "[Version]\nClass=IEXPRESS\nSEDVersion=3\n[Options]\nPackagePurpose=InstallApp\n"
+        "ShowInstallProgramWindow=1\nHideExtractAnimation=1\nUseLongFileName=1\n"
+        "InsideCompressed=0\nCAB_FixedSize=0\nCAB_ResvCodeSigning=0\nRebootMode=N\n"
+        "InstallPrompt=\nDisplayLicense=\nFinishMessage=\n"
+        f"TargetName={target.resolve()}\nFriendlyName=Loment {DISPLAY} Setup\n"
+        f"AppLaunched={APP_LAUNCHED}\nPostInstallCmd=<None>\n"
+        "AdminQuietInstCmd=\nUserQuietInstCmd=\nSourceFiles=SourceFiles\n"
+        "[Strings]\n" + strings +
+        f"[SourceFiles]\nSourceFiles0={src.resolve()}\\\n[SourceFiles0]\n" + refs)
+
+
 def emit_exe(zip_bytes: bytes, target: Path) -> bool:
     """iexpress (Windows 自带) 打自解压安装包: payload.zip + install.ps1 + install.cmd。"""
     src = STAGE / "exe-payload"
@@ -1571,21 +1607,10 @@ def emit_exe(zip_bytes: bytes, target: Path) -> bool:
     (src / "payload.zip").write_bytes(zip_bytes)
     (src / "install.ps1").write_bytes(_crlf(_subst(INSTALL_PS1)).encode("ascii"))
     (src / "install.cmd").write_bytes(_crlf(_subst(INSTALL_CMD)).encode("ascii"))
-    names = sorted(p.name for p in src.iterdir())
-    strings = "".join(f'FILE{i}="{n}"\n' for i, n in enumerate(names))
-    refs = "".join(f"%FILE{i}%=\n" for i in range(len(names)))
+    names = sorted(p.name for p in src.iterdir())   # 注意: 在写 loment.sed **之前**
     sed = src / "loment.sed"
-    sed.write_text(
-        "[Version]\nClass=IEXPRESS\nSEDVersion=3\n[Options]\nPackagePurpose=InstallApp\n"
-        "ShowInstallProgramWindow=1\nHideExtractAnimation=1\nUseLongFileName=1\n"
-        "InsideCompressed=0\nCAB_FixedSize=0\nCAB_ResvCodeSigning=0\nRebootMode=N\n"
-        "InstallPrompt=\nDisplayLicense=\nFinishMessage=\n"
-        f"TargetName={target.resolve()}\nFriendlyName=Loment {DISPLAY} Setup\n"
-        "AppLaunched=cmd.exe /c install.cmd\nPostInstallCmd=<None>\n"
-        "AdminQuietInstCmd=\nUserQuietInstCmd=\nSourceFiles=SourceFiles\n"
-        "[Strings]\n" + strings +
-        f"[SourceFiles]\nSourceFiles0={src.resolve()}\\\n[SourceFiles0]\n" + refs,
-        encoding="ascii", newline="\r\n")
+    sed.write_text(iexpress_sed(target, src, names),
+                   encoding="ascii", newline="\r\n")
     ie = shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"
     if not Path(ie).exists():
         print("  [setup.exe] SKIP: iexpress 不存在")
