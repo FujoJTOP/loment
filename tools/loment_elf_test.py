@@ -455,6 +455,61 @@ def test_gc_manual_free_list_recycles():
     print(f"      带 free 跑通 (rc={got[0]})；不带 free 耗尽 (rc={got[1]}) —— 链表复用是真的")
 
 
+@test
+def test_gc_auto_collects_while_manual_exhausts():
+    """`choose gc_auto` 的收集器**真的回收**（`docs/210` §2.1）—— 判据是**一对**程序。
+
+    **Why**：静态判据能钉住"收集器发了、挂点挂了"，却对"收集器是个空函数"照样绿。
+    这一条是那一半：跑起来看。
+
+    **How to apply**：两只程序**逐字同源**，只差 `choose` 那一行。循环里每圈漏掉一块
+    64 字节、只留 `a` 一块活到末尾（末尾 `load8(a, 0) == 5` 就是"活块没被误回收"的
+    守门）。总量 20000×72 B ≈ 1.4 MB，而 arena 只有 64 KiB：
+      * `gc_auto` → **跑完**（rc = 7）；
+      * `gc_manual` → **必然耗尽**（rc = 132，abort）。这一半是**证伪**：arena 没被
+        撑爆就说明它比 1.4 MB 大得多，那这条判据什么也没测。
+
+    **端到端**：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+
+    ⚠ **这条判据的边界**（别当成"收集器万能"）：触发按**分配量**（32 KiB）记，
+    而 arena 是 64 KiB —— 所以**活集超过约 32 KB 的程序今天照样会耗尽**。
+    这是明写的限制（`docs/210` §7），不是本判据能证的东西。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcauto\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let a: ptr = alloc(8);\n"
+            "    store8(a, 0, 5);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 20000 {\n"
+            "        let t: ptr = alloc(64);\n"
+            "        store8(t, 0, 1);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if load8(a, 0) == 5 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"auto_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。要么收集器没被调用，"
+        "要么它没真的回收（标记/清扫/前沿回退任一处坏了），要么它把活块也收了")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出回收："
+        "arena 没被耗尽，说明它比 1.4 MB 大得多")
+    print(f"      auto 跑通 (rc={got[0]}，1.4 MB 请求过 64 KiB arena)；"
+          f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
+
+
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
