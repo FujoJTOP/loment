@@ -1015,11 +1015,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "3811c3fa45e229c3ada0290089fe35b06b130fbd8e10af5c82e44419dde2664b"
+   "sha256": "a3728297ddb80f713c6a86aff0c544376a211ebcf7a671a9a03c95998aacc4f5"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "623dcfa85d90f6d89302f7f60c78ba5b825db96be69efe29504c1249b9053107"
+   "sha256": "4c6e4df531391f27daae22d54b43baeba7bd7db8d7108c6eb44ff5e3b2df448b"
   },
   {
    "path": "tools/loment_sign.py",

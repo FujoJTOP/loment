@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -317,6 +318,65 @@ def test_windows_installer(zipf: Path) -> None:
               f"head={head!r} size={exe.stat().st_size}")
     else:
         print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
+
+    # 先把**静态形状**钉住 —— 这条跨平台, 门禁 (ubuntu) 跑得到。
+    # 下面那条真跑只在 Windows 上做, 而 CI 里没有 Windows runner, 所以只靠它的话
+    # 这个缺陷在 CI 里谁都拦不住。不变量: 拉脚本的那条命令**必须给路径**,
+    # 不能是裸文件名 (裸名会让 cmd 去搜 PATH/当前目录, 而不是包自己解开的地方)。
+    launched = next(l for l in loment_dist.iexpress_sed(Path("t.exe"), Path("."),
+                                                       ["install.cmd"]).splitlines()
+                    if l.startswith("AppLaunched=")).split("=", 1)[1]
+    toks = [t.strip('"') for t in launched.split() if t.strip('"').endswith("install.cmd")]
+    check("AppLaunched 给脚本带路径, 不是裸文件名 (裸名会去搜 PATH, 解包目录搜不到)",
+          bool(toks) and all(("\\" in t or "/" in t) for t in toks),
+          f"AppLaunched={launched!r}")
+
+    # ★ 自解压包要**真跑一遍**, 不是"是 PE 就过"。
+    #   2026-09-25 用户报"双击 setup.exe 什么都没发生": wextract 解完包按 `AppLaunched`
+    #   拉起安装脚本, 而当时那条命令用**裸文件名**调 `install.cmd` —— cmd 的"搜索当前目录"
+    #   被环境变量 `NoDefaultCurrentDirectoryInExePath` 关掉时 (开发工具/加固环境常设,
+    #   本仓 agent 进程里就是 1), 脚本找不到, 包解完就静默退出。旧判据只查"是 PE 且非空",
+    #   所以它能一路发到用户手上。
+    #
+    #   用 `iexpress_sed` (就是正式件用的那份 SED, 含同一条 `AppLaunched`) 打一个**极小
+    #   载荷**的包再跑它: 载荷写什么与这个缺陷无关 (缺陷在"怎么拉起脚本"), 而拿真载荷跑
+    #   会写用户的 PATH 与注册表 —— 判据不能那么干。
+    #   `NoDefaultCurrentDirectoryInExePath` **必须显式设上**: 不设的话正常机器上怎么都绿,
+    #   这条判据就永远测不到东西。
+    ie = shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"
+    if os.name != "nt" or not Path(ie).exists():
+        print("  SKIP  wextract 真跑一遍 (非 Windows / 没有 iexpress)")
+    else:
+        run_dir = loment_dist.STAGE / "exe-run"
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        run_dir.mkdir(parents=True)
+        landed = run_dir / "landed.txt"
+        if not str(landed).isascii():
+            # install.cmd 是 ASCII 脚本 (docs/157 §3.4), 塞不进非 ASCII 路径
+            print("  SKIP  wextract 真跑一遍 (临时目录路径含非 ASCII)")
+        else:
+            (run_dir / "install.cmd").write_bytes(
+                b"@echo off\r\necho landed > \"" + str(landed).encode("ascii") + b"\"\r\n")
+            files = sorted(p.name for p in run_dir.iterdir())
+            sed = run_dir / "run.sed"
+            built = run_dir / "run-setup.exe"
+            sed.write_text(loment_dist.iexpress_sed(built, run_dir, files),
+                           encoding="ascii", newline="\r\n")
+            subprocess.run([ie, "/N", str(sed)], capture_output=True, cwd=str(run_dir),
+                           timeout=180)
+            if not built.exists():
+                check("自解压包能打出 (iexpress)", False, "iexpress 没产出 exe")
+            else:
+                # wextract 拉起 cmd 是异步的 —— 等哨兵, 不等进程退出
+                subprocess.run([str(built)], capture_output=True, timeout=180,
+                               env=dict(os.environ, NoDefaultCurrentDirectoryInExePath="1"))
+                for _ in range(40):
+                    if landed.exists():
+                        break
+                    time.sleep(0.25)
+                check("自解压包解完包后真把安装脚本跑起来 (裸名调用会静默丢失)",
+                      landed.exists(), "wextract 没执行 install.cmd (landed.txt 没出现)")
 
     # ★ 用户最可能走的那一步: 解压 zip -> 双击 / 运行 install.cmd。
     #   它曾只认自解压布局 (去找 payload.zip), 在 zip 布局里必然失败 —— 2026-09-12 用户报障。
