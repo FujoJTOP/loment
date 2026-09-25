@@ -3021,13 +3021,26 @@ fn next_label(t: ptr, from: u32, le: u32) -> u64 {
 }
 
 /// 给目标块的每个 phi 写入来自**当前块**的入边值。
+///
+/// **两趟，不是一趟。** LLVM 的 phi 是**同时**赋值：同一前驱上的若干 phi 按
+/// "读旧值、写新值"一次完成。一趟顺序写会当场自我覆盖 —— 最典型的是
+/// `%cur = phi [.., %nxt]` 与 `%prev = phi [.., %cur]` 这一对（链表遍历的标准写法）：
+/// 先写 `%cur` 再读 `%cur` 给 `%prev`，`%prev` 拿到的是 `%nxt`。
+///
+/// 实测（2026-09-25）：这一条让 `__loment_free` 的插入**每步都以为走到了链尾**，
+/// 于是每次都插在头部 —— 空闲链表恒为 1 个节点，`gc_auto` 因此回收不掉、arena 涨到 OOM。
+/// 所以这一趟暂存不是优化，是语义。
+///
+/// 暂存用 `push`/`pop`（各 1 字节），不占帧 —— 栈本来就是现成的暂存区，
+/// 而 pop 反序正好把顺序还原。参考侧 `tools/lomelf.py` 同一形态，
+/// 两边的产物才逐字节相同。
 fn emit_phis(tab: ptr, out: ptr, c: u32, t: ptr, le: u32, tbo: u32, tbl: u32) -> u32 {
     let d: u32 = c;
     let n: u32 = cell(tab, C_NPHI);
     let curbo: u32 = cell(tab, C_CURBO);
     let curbl: u32 = cell(tab, C_CURBL);
     let i: u32 = 0;
-    while i < n {
+    while i < n {                              // 第一趟: 入边值 -> 栈
         let base: u32 = TB_PHI + i * 16;
         if span_eq(t, load32(tab, base + PH_BOFF), load32(tab, base + PH_BLEN), tbo, tbl) == 1 {
             let io: u32 = load32(tab, base + PH_IOFF);
@@ -3051,13 +3064,11 @@ fn emit_phis(tab: ptr, out: ptr, c: u32, t: ptr, le: u32, tbo: u32, tbl: u32) ->
                     let l2e: u32 = word_end(t, l2, ie);
                     if span_eq(t, l2, l2e - l2, curbo, curbl) == 1 {
                         if is_agg(t, ptyo, ptyl) == 1 {
-                            let so: u32 = slot_find(tab, t, io, dlen);
-                            d = em_lea(out, d, RDI, RBP, so);
                             d = emit_agg_addr(tab, out, d, t, vs, ve - vs, RSI);
-                            d = em_copy(out, d, RDI, RSI, ty_size(t, ptyo, ptyl));
+                            d = e1(out, d, 86);            // push rsi
                         } else {
                             d = emit_get(tab, out, d, t, ptyo, ptyl, vs, ve - vs, RAX);
-                            d = emit_put(tab, out, d, t, io, dlen, RAX);
+                            d = e1(out, d, 80);            // push rax
                         }
                     }
                     while k < ie && load8(t, k) != 93 {
@@ -3068,6 +3079,49 @@ fn emit_phis(tab: ptr, out: ptr, c: u32, t: ptr, le: u32, tbo: u32, tbl: u32) ->
             }
         }
         i = i + 1;
+    }
+    let j: u32 = n;
+    while j > 0 {                              // 第二趟: 反序取回 (栈是 LIFO) -> 目标
+        j = j - 1;
+        let base2: u32 = TB_PHI + j * 16;
+        if span_eq(t, load32(tab, base2 + PH_BOFF), load32(tab, base2 + PH_BLEN), tbo, tbl) == 1 {
+            let io2: u32 = load32(tab, base2 + PH_IOFF);
+            let ie2: u32 = io2 + load32(tab, base2 + PH_ILEN);
+            let dlen2: u32 = word_end(t, io2, ie2) - io2;
+            let qq: u32 = skip_sp(t, io2 + dlen2, ie2);
+            let qq2: u32 = skip_sp(t, qq + 1, ie2);
+            let ts2: u64 = type_span(t, qq2 + 4, ie2);
+            let ptyo2: u32 = hi32(ts2);
+            let ptyl2: u32 = lo32(ts2);
+            let k2: u32 = ptyo2 + ptyl2;
+            while k2 < ie2 {
+                if load8(t, k2) == 91 {
+                    let vs2: u32 = skip_sp(t, k2 + 1, ie2);
+                    let ve2: u32 = word_end(t, vs2, ie2);
+                    let lb2: u32 = skip_comma(t, ve2, ie2);
+                    let m2: u32 = lb2;
+                    if m2 < ie2 && load8(t, m2) == 37 {
+                        m2 = m2 + 1;
+                    }
+                    let m2e: u32 = word_end(t, m2, ie2);
+                    if span_eq(t, m2, m2e - m2, curbo, curbl) == 1 {
+                        if is_agg(t, ptyo2, ptyl2) == 1 {
+                            let so: u32 = slot_find(tab, t, io2, dlen2);
+                            d = e1(out, d, 94);            // pop rsi
+                            d = em_lea(out, d, RDI, RBP, so);
+                            d = em_copy(out, d, RDI, RSI, ty_size(t, ptyo2, ptyl2));
+                        } else {
+                            d = e1(out, d, 88);            // pop rax
+                            d = emit_put(tab, out, d, t, io2, dlen2, RAX);
+                        }
+                    }
+                    while k2 < ie2 && load8(t, k2) != 93 {
+                        k2 = k2 + 1;
+                    }
+                }
+                k2 = k2 + 1;
+            }
+        }
     }
     return d;
 }

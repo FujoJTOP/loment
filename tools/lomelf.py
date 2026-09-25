@@ -961,24 +961,49 @@ class Emitter:
         self.asm.label(nxt)
 
     def _emit_phis_then(self, tgt: str) -> tuple[str, str]:
-        """给 target 的每个 phi 写入来自**当前块**的入边值，返回 (真实标签, 跳过标签)。"""
+        """给 target 的每个 phi 写入来自**当前块**的入边值，返回 (真实标签, 跳过标签)。
+
+        **两趟，不是一趟。** LLVM 的 phi 是**同时**赋值：同一前驱上的若干 phi
+        按"读旧值、写新值"一次完成。一趟顺序写会当场自我覆盖 —— 最典型的是
+        `%cur = phi [.., %nxt]` 与 `%prev = phi [.., %cur]` 这一对（链表遍历里
+        的标准写法）：先写 `%cur` 再读 `%cur` 给 `%prev`，`%prev` 拿到的是 `%nxt`。
+
+        实测（2026-09-25）：这一条让 `__loment_free` 的插入**每步都以为走到了链尾**，
+        于是每次都插在头部 —— 空闲链表恒为 1 个节点，`gc_auto` 因此回收不掉、
+        arena 一路涨到 OOM。最小复现是一个三行的循环：`%j = phi [.., %i]` 该得 2，
+        一趟写会得 3。所以这一趟暂存不是优化，是语义。
+
+        暂存用 `push`/`pop`（各自 1 字节），不占帧 —— 栈本来就是现成的暂存区，
+        而 pop 反序正好把顺序还原。自举侧 `loment/tools/lomelf.lomt` 同一形态，
+        两边的产物才逐字节相同。
+        """
         nxt = f"__ph{self.asm.here():x}"
         phis = self.phis.get(tgt)
         if not phis:
             return tgt, nxt
+        pending: list[tuple[Instr, str, bool]] = []
         for phi in phis:
             pty, entries = parse_phi(phi.text)
             for ival, pred in entries:
                 if pred != self.cur_block:
                     continue
-                if is_agg(pty):
+                agg = is_agg(pty)
+                if agg:
                     ity, i2 = parse_type(ival)
                     self.agg_addr(ival[i2:].strip(), RSI)
-                    self.asm.emit(lea(RDI, RBP, self.slots[phi.dest]))
-                    self.copy(RDI, RSI, size_of(pty))
+                    self.asm.emit(push_r(RSI))
                 else:
                     self.get(pty, ival, RAX)
-                    self.put(phi.dest, RAX)
+                    self.asm.emit(push_r(RAX))
+                pending.append((phi, pty, agg))
+        for phi, pty, agg in reversed(pending):
+            if agg:
+                self.asm.emit(pop_r(RSI))
+                self.asm.emit(lea(RDI, RBP, self.slots[phi.dest]))
+                self.copy(RDI, RSI, size_of(pty))
+            else:
+                self.asm.emit(pop_r(RAX))
+                self.put(phi.dest, RAX)
         return tgt, nxt
 
     def _switch(self, t):
