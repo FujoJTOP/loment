@@ -510,6 +510,68 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
+@test
+def test_l1_definite_lifetime_bounds_the_heap():
+    """**L1（定活）真的发生**（`docs/210` §2.5）—— 判据是**一对**程序。
+
+    **Why**：静态判据（`lomentc_test::test_l1_definite_lifetime_rule`）钉的是"编译器决定了
+    要还哪些"；这一条钉"还了之后内存真的不涨"。
+
+    **How to apply**：两只程序**逐字同源**，只差 `choose` 那一行。形状是**故意挑的** ——
+    要让 L0 与 L2 都接不到，只有 L1 能救：
+
+      * `alloc(n)` 的尺寸是**变量**（`let n: u32 = 64;`）—— L0 只认字面量，接不到；
+      * 分配写在**辅助函数**里、循环在**调用方** —— 调用方的循环体里只有一次调用、没有
+        `alloc`，所以 L2 那一格（按**循环体**开纪元）也接不到；
+      * `p` 只被 `store8`/`load8` 透过、从不外逃 —— L1 的资格。
+
+    4000 次调用、每次 64 B 请求（≈288 KB）过 64 KiB arena：
+      * `gc_auto_alpha` → **跑完**（rc = 7）：每次调用在返回前把它那块还掉了，峰值是一块；
+      * `gc_manual` → **耗尽**（rc = 132）。这一半是**证伪**：arena 没被撑爆就说明它比
+        288 KB 大得多，那这条判据什么也没测。
+
+    **端到端**：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcl1\n%s\nchoose runtime\n\n"
+            "fn work() -> u32 {\n"
+            "    let n: u32 = 64;\n"
+            "    let p: ptr = alloc(n);\n"
+            "    store8(p, 0, 1);\n"
+            "    return load8(p, 0);\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let i: u32 = 0;\n"
+            "    let s: u32 = 0;\n"
+            "    while i < 4000 {\n"
+            "        s = s + work();\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if s == 4000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("alpha", "choose gc_auto_alpha"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"l1_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[0]}（期望 7）。"
+        "要么 L1 没插 `free`，要么插的位置不对（那一格该由静态判据先抓住）")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出 L1："
+        "arena 没被耗尽，说明它比 288 KB 大得多")
+    print(f"      alpha 跑通 (rc={got[0]}，4000 次调用每次一块过 64 KiB arena)；"
+          f"manual 耗尽 (rc={got[1]}) —— 定活是真的")
+
+
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 

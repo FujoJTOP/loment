@@ -2347,6 +2347,217 @@ def test_gc_auto_collector_text():
     assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
 
 
+#: `gc_auto_alpha` 的 **L1（定活）** 那一份源。**源只有一份** —— 真值表判据与字节一致判据
+#: （`loment_p8_test::test_m91_l1_definite_lifetime_is_byte_identical`）都读它。
+#:
+#: 每一格对着 `_l1_place` 的一条边界（那一格为什么这样，见 `L1_WANT` 里逐条的注释）。
+L1_SRC = """module gc_l1
+@@CHOOSE@@
+choose runtime
+
+fn f_ret() -> u32 {
+    let n: u32 = 64;
+    let p: ptr = alloc(n);
+    store8(p, 0, 1);
+    return load8(p, 0);
+}
+
+fn f_end() {
+    let n: u32 = 64;
+    let p: ptr = alloc(n);
+    store8(p, 0, 1);
+    syscall4(60, load8(p, 0) as u64, 0, 0);
+}
+
+fn f_loop() {
+    let n: u32 = 64;
+    let p: ptr = alloc(n);
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 4 {
+        store8(p, 0, 1);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    syscall4(60, s as u64, 0, 0);
+}
+
+fn f_nest() -> u32 {
+    let n: u32 = 64;
+    let p: ptr = alloc(n);
+    let i: u32 = 0;
+    let j: u32 = 0;
+    let s: u32 = 0;
+    while i < 4 {
+        j = 0;
+        while j < 4 {
+            s = s + load8(p, 0);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn f_two() -> u32 {
+    let n: u32 = 32;
+    let a: ptr = alloc(n);
+    let b: ptr = alloc(n);
+    store8(a, 0, 1);
+    store8(b, 0, 2);
+    return load8(a, 0) + load8(b, 0);
+}
+
+fn f_early() -> u32 {
+    let n: u32 = 8;
+    let p: ptr = alloc(n);
+    store8(p, 0, 1);
+    if load8(p, 0) == 0 {
+        return 9;
+    }
+    syscall4(60, 1, 0, 0);
+    return 0;
+}
+
+fn f_l0() -> u32 {
+    let p: ptr = alloc(16);
+    store8(p, 0, 1);
+    return load8(p, 0);
+}
+
+fn f_cond(c: u32) -> u32 {
+    if c == 1 {
+        let n: u32 = 8;
+        let p: ptr = alloc(n);
+        store8(p, 0, 1);
+        return load8(p, 0);
+    }
+    return 0;
+}
+
+fn eat(q: ptr) -> u32 {
+    return load8(q, 0);
+}
+
+fn f_escape() -> u32 {
+    let n: u32 = 8;
+    let p: ptr = alloc(n);
+    store8(p, 0, 5);
+    return eat(p);
+}
+
+fn f_userfree() -> u32 {
+    let n: u32 = 8;
+    let p: ptr = alloc(n);
+    store8(p, 0, 1);
+    let v: u32 = load8(p, 0);
+    free(p);
+    return v;
+}
+
+fn f_reassign() -> u32 {
+    let n: u32 = 8;
+    let p: ptr = alloc(n);
+    store8(p, 0, 1);
+    p = alloc(n);
+    store8(p, 0, 2);
+    return load8(p, 0);
+}
+"""
+L1_ALPHA_SRC = L1_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+L1_MANUAL_SRC = L1_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+L1_AUTO_SRC = L1_SRC.replace("@@CHOOSE@@", "choose gc_auto")
+
+#: 每个函数里 L1 **决定要还掉**的名字（按 AST 序：各循环末尾的、各 `return` 前的、函数末尾的）。
+#: 每一格的"为什么"，对着 `_l1_place` 的规则读：
+#:   * `f_ret` 用处在返回表达式里 -> 落点一（那条 `return` 之前）；
+#:   * `f_end` void 函数没有 `return` -> 落点二（函数末尾）；
+#:   * `f_loop` / `f_nest` 用处落在循环里 -> 也是落点二（"最外层循环之后"那个落点撤了，
+#:     理由写在 §2.5：自举侧拿不到外层循环的跨度，而函数末尾同样安全）；
+#:   * `f_two` 两个候选一次扫描按声明序出来；
+#:   * `f_early` 最后一次用处之后还有两条 `return` -> 挑**最早**那条（`return 9`）之前 ——
+#:     落空的那条路（`return 0`）会漏一次，**安全但不是最优**，这是明写的；
+#:   * `f_l0` 尺寸是字面量 -> L0 已经提到栈上 -> 它不碰 arena，这里不接；
+#:   * `f_cond` 声明不在函数体顶层 -> 那一支可能根本没走、槽里是未初始化的值 -> **不接**（安全）；
+#:   * `f_escape` 交给用户函数 -> 外逃；`f_userfree` 用户自己 `free` 过（那一处**不是**
+#:     候选的"安全用法"）；`f_reassign` 重新赋值 —— 三条都取消资格；
+#:   * `eat` 没有候选。
+L1_WANT = {
+    "f_ret": ["p"],
+    "f_end": ["p"],
+    "f_loop": ["p"],
+    "f_nest": ["p"],
+    "f_two": ["a", "b"],
+    "f_early": ["p"],
+    "f_l0": [],
+    "f_cond": [],
+    "eat": [],
+    "f_escape": [],
+    "f_userfree": [],
+    "f_reassign": [],
+}
+
+
+def _l1_names(src: str) -> dict[str, list[str]]:
+    """每个函数里 L1 要还掉的名字 —— 直接读**编译器的决定**（AST 上那三个 `l1` 槽），
+    不去 grep 产物（产物里分不出"用户自己写的 `free`"与"L1 插的"）。"""
+    mod = parse(src)
+    errs_ = lomentc.check(mod)
+    assert not errs_, errs_[:2]
+    out: dict[str, list[str]] = {}
+
+    def walk(stmts: list, acc: list) -> None:
+        for s in stmts:
+            if isinstance(s, (lomentc.While, lomentc.For)):
+                walk(s.body, acc)
+                acc.extend(s.l1)
+            elif isinstance(s, lomentc.If):
+                walk(s.then, acc)
+                walk(s.otherwise, acc)
+            elif isinstance(s, lomentc.Match):
+                for _, b in s.arms:
+                    walk(b, acc)
+            elif isinstance(s, lomentc.Return):
+                acc.extend(s.l1)
+
+    for f in mod.funcs:
+        acc: list[str] = []
+        walk(f.body, acc)
+        acc.extend(f.l1)
+        out[f.name] = acc
+    return out
+
+
+@test
+def test_l1_definite_lifetime_rule():
+    """`gc_auto_alpha` 的 **L1（定活）**：**逐格的真值表**（`docs/210` §2.5）。
+
+    **为什么这一层必须长在 token 流上**（而不是 `docs/210` §2 原先写的"靠 `docs/206` 的
+    移动/借用子集"）：那条路的证据是 E006（移出之后不许再用），而 `_is_copy_type` 把 `ptr`
+    算作 **Copy** ⇒ 传一个 `ptr` 根本不算"移出" ⇒ E006 对 `ptr` 一句话也说不了。所以这一层
+    与 L0/L2 同一条纪律：**规则定义在 token 流上**（两个实现唯一都完整持有的表示）。
+
+    **两个方向都是钩子**：哪一格该插而没插（规则太窄）会红；哪一格不该插却插了
+    （规则太松 —— 那是 **use-after-free**）也会红。第二条尤其重要：`f_cond` 那一格
+    （声明在 `if` 里）就是"松一格就出事"的例子 —— 声明那一支没走时槽里是**未初始化**的
+    值，在函数末尾 `free` 它就是在 free 一个垃圾指针。
+
+    **档位门**：`gc_manual`（默认档）与 `gc_auto` 下这一层**一个都不许插** —— 默认档
+    不许改变任何现有程序（`docs/175` §3.4 五条之一）。
+    """
+    alpha = _l1_names(L1_ALPHA_SRC)
+    manual = _l1_names(L1_MANUAL_SRC)
+    auto = _l1_names(L1_AUTO_SRC)
+    assert alpha == L1_WANT, f"alpha 的决定表 {alpha} / 期望 {L1_WANT}"
+    assert all(v == [] for v in manual.values()), f"`gc_manual` 下不许插：{manual}"
+    assert all(v == [] for v in auto.values()), f"`gc_auto` 下不许插：{auto}"
+    # 不许空转：这一份源里必须**真的**有插进去的，也有被取消资格的
+    assert sum(len(v) for v in alpha.values()) == 7, "这条判据在空转（没有插进去的）"
+    assert alpha["f_l0"] == [] and alpha["f_cond"] == [] and alpha["f_escape"] == []
+    # 两份源只差那一行
+    assert L1_ALPHA_SRC.replace("choose gc_auto_alpha", "X") ==         L1_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

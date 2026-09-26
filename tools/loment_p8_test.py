@@ -834,6 +834,48 @@ def test_m90_gc_auto_collector_is_byte_identical():
     assert "@__loment_collect" not in outs["manual"], "manual 那一份不该有收集器"
 
 
+@test
+def test_m91_l1_definite_lifetime_is_byte_identical():
+    """L1（**定活**，`docs/210` §2.5）：那一份真值表源，在**两个实现**上逐字节一致。
+
+    这一条钉的是 L1 的镜像那一半。规则定义在 token 流上（理由：`ptr` 是 Copy，
+    `docs/206` 的 E006 对它一句话也说不了 —— 详见 `lomentc_test::test_l1_definite_lifetime_rule`），
+    两个实现各写一份实现，所以"逐字节"不是形式：
+      * **落点**（"最后一次用处之后最早那条 `return` 之前 / 函数末尾"）两边各有一份推演，
+        差一格产物就整段不同；
+      * 插进去的那两条指令（`load ptr` + `call @__loment_free`）要**吃 temp 号** ——
+        编号错一位，后面全错。
+
+    **源只有一份**（`lomentc_test.L1_SRC`，那边同时钉逐格的真值表）。`gc_manual` 那一份
+    一起过：它在 L1 上是**空的**，所以这一条也顺带钉住"默认档一个字节都不动"。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in (("alpha", lomentc_test.L1_ALPHA_SRC),
+                         ("manual", lomentc_test.L1_MANUAL_SRC)):
+            target = Path(td) / f"gc_l1_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"gc_l1_{tag} 首个差异 @{i}: "
+                    f"loment {got[a:(i or 0) + 80]!r} / python {want[a:(i or 0) + 80]!r}")
+    # 不许空转：alpha 那一份必须**真的**多出 L1 的 free，manual 那一份一个都不许多
+    assert outs["alpha"].count("@__loment_free") > outs["manual"].count("@__loment_free"), \
+        "alpha 那一份没有多出 L1 的 free —— 这条判据在空转"
+
+
 def _dep_paths(target: Path) -> list[Path]:
     """按 lomentc.resolve_deps 的规则取依赖文件 (被依赖者在前), 并与参考实现的模块名序列核对。
 
