@@ -19,6 +19,7 @@ module codegen
 //         枚举表 CG_ENUM+i*80 (CG_MAXENUM 个) 局部表 CG_LOCAL.. (4 KiB) 每函数形参类型 CG_PARAM+i*80
 //         564/568 = 当前函数体的 token 跨度 (L0 分析用), 572 = 本单元是不是 `gc_auto_alpha`
 //         576 = 本单元是不是 `gc_auto` (收集器), 580 = 本帧的根表格数 (`gc_auto` 用, 每函数写)
+//         584 = L1 扫描的临时: 某个名字**最后一次出现**的 token 下标
 //
 // **容量**: 每函数 100 字节 (12+8+80)。这几张表**按单元的规模**定, 所以整块不再放进
 // 语言自带的 64 KiB bump 堆 —— 由驱动器从 `brk` 拿 `cg_arena_bytes()` 再传进来
@@ -1124,6 +1125,169 @@ fn epoch_close(s: ptr, out: ptr, sv: u32) -> u32 {
     emit_str(s, out, "  store i32 %t");
     emit_dec(s, out, sv);
     return emit_str(s, out, ", ptr @__loment_off\n");
+}
+
+// ---------------------------------------------------------------- L1 定活 (docs/210 §2.5)
+
+/// `return` 那条语句的**结束**（它的 `;` 下标）。从 `i`（"return" 自己那个 token）往后扫，
+/// 只认**括号深度 0** 上的 `;` —— `return f(x);` 里的括号要配平。
+fn ret_end(src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
+    let j: u32 = i + 1;
+    let depth: u32 = 0;
+    while j < end {
+        if tok_is(src, toks, j, "(") {
+            depth = depth + 1;
+        }
+        if tok_is(src, toks, j, ")") {
+            depth = depth - 1;
+        }
+        if depth == 0 && tok_is(src, toks, j, ";") {
+            return j;
+        }
+        j = j + 1;
+    }
+    return end;
+}
+
+/// `[a, b)` 里有没有**结束在 `last` 之后**的 `return`。L1 的落点判据要它两次：落点一
+/// 要求"手上这条是最早的"（在它之前的一条都不许算数），落点二要求"一条都没有"。
+fn ret_after(src: ptr, toks: ptr, a: u32, b: u32, last: u32, end: u32) -> u32 {
+    let i: u32 = a;
+    while i < b {
+        if tok_is(src, toks, i, "return") && ret_end(src, toks, i, end) > last {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `NAME` 是不是"**只被解引用透过、从不外逃**"（与 `lomentc._ptr_only_uses` 同一条判据），
+/// 并把**最后一次出现**的下标落进槽 584。回 1/0。
+///
+/// 与 L0 **共用理由但不是同一格**：L0 还要求尺寸是字面量（它要开栈缓冲），这一层不要
+/// （它只管还）。所以这边不调 `l0_size`，用自己这条 —— 而调用方靠"`l0_size` 非 0"
+/// 把 L0 已经提走的排除掉（提走的根本不碰 arena）。
+fn l1_ptr_only(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let at: u32 = load32(s, 564);
+    let end: u32 = load32(s, 568);
+    let q: u32 = 0;
+    while q < load32(s, 12) {                        // 形参同名 -> 不是候选
+        if tok_eq(src, toks, load32(s, CG_CUR + q * 8), nm) {
+            return 0;
+        }
+        q = q + 1;
+    }
+    let ndecl: u32 = 0;
+    let lst: u32 = 0;
+    let k: u32 = at;
+    while k < end {
+        if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, nm) {
+            lst = k;
+            if k == nm {
+                ndecl = ndecl + 1;
+            } else if tok_is(src, toks, k - 1, "let") {
+                return 0;                            // 第二处声明（遮蔽）
+            } else if tok_is(src, toks, k + 1, "=") {
+                return 0;                            // 重新赋值
+            } else if !(k >= 2 && tok_is(src, toks, k - 1, "(")
+                    && l0_safe_callee(src, toks, k - 2)
+                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+                return 0;                            // 其余任何用法：外逃
+            }
+        }
+        k = k + 1;
+    }
+    if ndecl != 1 || lst == nm {
+        return 0;                                    // 声明不止一处 / 一次都没用过
+    }
+    store32(s, 584, lst);
+    return 1;
+}
+
+/// **L1 定活**（`docs/210` §2.5）：把"最后一次用处已经过去"的块还掉。
+///
+/// `hook` = 1 -> 手上这条 `return`（跨度 `rt_at`..`rt_end`）**之前**；= 0 -> **函数末尾**。
+/// 落点规则与 `lomentc._l1_place` 是同一套（两处，按序取第一个成立的）。
+///
+/// 资格三条，每条都有它挡的东西：
+///   * 形状 `let NAME: ptr = alloc(...)`（尺寸**不限** —— 常量是 L0 的事）；
+///   * **声明在函数体顶层**（大括号深度 0）：否则那一支可能根本没走，槽里是**未初始化**
+///     的值，在末尾 `free` 它就是在 free 一个垃圾指针；
+///   * `l1_ptr_only`：只被解引用透过 ⇒ 块只有这一个入口 ⇒ 还掉它别处也摸不到。
+///
+/// **L0 提走的不接**（它不碰 arena）。**落点一的判据**：`last < rt_end` 且"在它之前
+/// 结束在 `last` 之后的 `return` 一条都没有" —— 合起来就是"这条是最早的那条"。
+fn emit_l1(s: ptr, out: ptr, src: ptr, toks: ptr, hook: u32, rt_at: u32, rt_end: u32) -> u32 {
+    if load32(s, 572) == 0 {
+        return 0;
+    }
+    let at: u32 = load32(s, 564);
+    let end: u32 = load32(s, 568);
+    let n: u32 = 0;
+    let d: u32 = at;
+    while d < end {
+        let nm: u32 = d + 1;
+        if tok_is(src, toks, d, "let") && !tok_is(src, toks, d - 1, "if")
+                && tok_kind(toks, nm) == 0 && tok_is(src, toks, nm + 1, ":")
+                && tok_is(src, toks, nm + 2, "ptr") && tok_is(src, toks, nm + 3, "=")
+                && tok_is(src, toks, nm + 4, "alloc") && tok_is(src, toks, nm + 5, "(") {
+            let j: u32 = nm + 5;                     // 找 alloc 的右括号（尺寸不限 -> 要配平）
+            let depth: u32 = 0;
+            let done: u32 = 0;
+            while j < end && done == 0 {
+                if tok_is(src, toks, j, "(") {
+                    depth = depth + 1;
+                }
+                if tok_is(src, toks, j, ")") {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        done = 1;
+                    }
+                }
+                j = j + 1;
+            }
+            let dep: u32 = 0;                        // 声明在顶层？（大括号深度 0）
+            let z: u32 = at;
+            while z < nm {
+                if tok_is(src, toks, z, "{") {
+                    dep = dep + 1;
+                }
+                if tok_is(src, toks, z, "}") {
+                    dep = dep - 1;
+                }
+                z = z + 1;
+            }
+            if done == 1 && dep == 0 && tok_is(src, toks, j, ";")
+                    && l0_size(s, src, toks, nm) == 0 {
+                if l1_ptr_only(s, src, toks, nm) == 1 {
+                    let last: u32 = load32(s, 584);
+                    let take: u32 = 0;
+                    if hook == 1 {
+                        if last < rt_end && ret_after(src, toks, at, rt_at, last, end) == 0 {
+                            take = 1;
+                        }
+                    } else {
+                        if ret_after(src, toks, at, end, last, end) == 0 {
+                            take = 1;
+                        }
+                    }
+                    if take == 1 {
+                        emit_str(s, out, "  ");
+                        let t: u32 = new_temp(s, out);
+                        emit_str(s, out, " = load ptr, ptr %");
+                        emit_local_name(s, out, src, toks, nm);
+                        emit_str(s, out, ".addr\n  call void @__loment_free(ptr ");
+                        emit_temp_ref(s, out, t);
+                        emit_str(s, out, ")\n");
+                        n = n + 1;
+                    }
+                }
+            }
+        }
+        d = d + 1;
+    }
+    return n;
 }
 
 /// 纪元开：记下前沿，回它的 temp 号（0 = 这一格没开纪元，什么都不发）。
@@ -3103,6 +3267,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         while tok_kind(toks, jj) != 4 {
             if tok_is(src, toks, jj, "}") {
                 if load32(s, 476) == 0 {
+                    emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾
                     if load32(s, 576) == 1 {
                         roots_pop(s, out);
                     }
@@ -3191,6 +3356,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     while tok_kind(toks, j) != 4 {
         if tok_is(src, toks, j, "}") {
             if load32(s, 476) == 0 {   // 块未终止: unit 函数补 ret void, 其余补 unreachable
+                emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾（档位门在 emit_l1 里）
                 if is_unit_tok(src, toks, ret) == 1 {
                     if load32(s, 576) == 1 {   // `gc_auto`：函数末尾那条隐式 return
                         roots_pop(s, out);
@@ -3637,6 +3803,8 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let rsub: u32 = push_ty_subst(s, src, toks, ret);
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0);
         pop_subst(s, rsub);
+        // L1 定活：返回值**已经读出来**了，现在可以还那块（档位门在 `emit_l1` 里面）
+        emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
         if load32(s, 576) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
             roots_pop(s, out);
         }

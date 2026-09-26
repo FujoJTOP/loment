@@ -539,6 +539,8 @@ class For:
     tok_at: int = 0
     tok_end: int = 0
     l2: bool = False
+    #: **L1**（`docs/210` §2.5）：本循环之后要还掉的名字（"最后一次用处"落在体内）。
+    l1: list = field(default_factory=list)
 
 
 @dataclass
@@ -618,12 +620,16 @@ class While:
     tok_at: int = 0
     tok_end: int = 0
     l2: bool = False
+    #: **L1**（`docs/210` §2.5）：本循环之后要还掉的名字（"最后一次用处"落在体内）。
+    l1: list = field(default_factory=list)
 
 
 @dataclass
 class Return:
     expr: object
     line: int
+    #: **L1**（`docs/210` §2.5）：本 `return` **求值之后、`ret` 之前**要还掉的名字。
+    l1: list = field(default_factory=list)
 
 
 @dataclass
@@ -654,6 +660,9 @@ class Func:
     #: 于是泛型参数写成 `T` 的函数在单态化成 `ptr` 之后**仍然不提升**（自举侧同判）。
     tok_at: int = 0
     tok_end: int = 0
+    #: **L1**（`docs/210` §2.5）：**函数末尾**要还掉的名字 —— "最后一次用处"不落在任何
+    #: 循环体内的那些（落点选函数末尾的理由见 `_l1_place`）。
+    l1: list = field(default_factory=list)
 
 
 def _rename_self(stmts: list) -> None:
@@ -1460,6 +1469,7 @@ class Parser:
             for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
                 f.l0 = _l0_promotable(f, self.toks)
                 _l2_loop_epochs(f, self.toks)   # L2 在 L0 之后（它要读 f.l0）
+                _l1_place(f, self.toks)         # L1 在最后（它要读 f.l0 与 s.l2）
         return mod
 
     def parse_struct(self) -> Struct:
@@ -4485,25 +4495,192 @@ def _l0_promotable(f: Func, toks: list) -> dict[str, int]:
         d += 1
         if name in params or size == 0 or name in out:
             continue
-        ok, ndecl = True, 0
-        k = at
-        while k < end:
-            if ident(k) and toks[k].val == name:
-                if k == nm:
-                    ndecl += 1
-                elif word(k - 1, "let"):
-                    ok = False                      # 第二处声明（遮蔽）
-                elif word(k + 1, "="):
-                    ok = False                      # 重新赋值
-                elif not (word(k - 1, "(") and safe_callee(k - 2)
-                          and (word(k + 1, ",") or word(k + 1, ")"))):
-                    ok = False                      # 其余任何用法：外逃
-                if not ok:
-                    break
-            k += 1
+        ok, ndecl, _last = _ptr_only_uses(toks, at, end, name, nm)
         if ok and ndecl == 1:
             out[name] = size
     return out
+
+
+def _ptr_only_uses(toks: list, at: int, end: int, name: str,
+                   nm: int) -> tuple[bool, int, int]:
+    """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
+
+    **L0 与 L1 共用这一条**（它们的差别只在"尺寸要不要字面量"与"插不插 `free`"）——
+    抽出来是因为它俩的**安全性判据是同一个**：只要 `name` 不外逃，块就只有它这一个入口，
+    于是"在最后一次用处之后还掉"就是安全的（L1 靠的就是这一句）。
+    规则原文见 `_l0_promotable` 的 1–3 条；`last` 是**任意**出现的最大值（含声明处），
+    一次都不出现时回 `-1`。
+    """
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    def safe_callee(i: int) -> bool:
+        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
+                and not word(i - 1, ".") and not word(i - 1, ":"))
+
+    ok, ndecl, last = True, 0, -1
+    k = at
+    while k < end:
+        if ident(k) and toks[k].val == name:
+            last = k
+            if k == nm:
+                ndecl += 1
+            elif word(k - 1, "let"):
+                ok = False                          # 第二处声明（遮蔽）
+                break
+            elif word(k + 1, "="):
+                ok = False                          # 重新赋值
+                break
+            elif not (word(k - 1, "(") and safe_callee(k - 2)
+                      and (word(k + 1, ",") or word(k + 1, ")"))):
+                ok = False                          # 其余任何用法：外逃
+                break
+        k += 1
+    return ok, ndecl, last
+
+
+def _l1_place(f: Func, toks: list) -> None:
+    """`gc_auto_alpha` 的 **L1（定活）**：把 `free` 挂到 AST 上（`s.l1` / `f.l1`）。
+
+    **这一层证的是什么**：某个 `alloc` 出来的块，在**它最后一次被用到之后**立刻还掉。
+    资格与 L0 **同一条**（`_ptr_only_uses`）—— 只被 `load8`/`store8`/`atomic_add`
+    当整个首参透过、从不外逃 ⇒ **块只有这一个入口** ⇒ 还掉它不可能被别处再摸到。
+
+    **声明必须在函数体的顶层**（不在任何 `{` 里）。这一条是**安全**要的：局部槽在入口块
+    统一 alloca，而**赋值只发生在声明那一处**；声明若在条件里、那一支又没走，槽里是
+    **未初始化**的值 —— 在函数末尾 `free` 它就是在 free 一个垃圾指针。顶层声明 ⇒
+    每次调用**恰好执行一次、无条件** ⇒ 那个槽一定已经存好了块。**代价是明写的**：
+    循环体内分配的那一类（L2 的地盘）L1 一律不接。
+
+    **落点**（两个，按序取第一个成立的）：
+      1. **最后一次用处之后、最早那条 `return` 之前**（在它求值之后、`ret` 之前 ——
+         返回的那个值就是从块里读出来的，得先读到）；
+      2. 都不成立 → **函数末尾**（在 `ret`/`unreachable` 之前、`roots_pop` 之前）。
+
+    两处的共同点是：**都落在"最后一次用处之后"** —— 最后一次用处按 token 序取，
+    而 token 序是**动态序的超集**（文本上更靠后的用处必然更晚执行），所以"所有用处都在这
+    个位置之前"在两种序下都成立。落点 1 的 `tok_end > last` 是它的判据（结束在用处之后的
+    `return` 才作数）。落点 2 之所以有用：块是**每次调用**新分配的，在函数返回前还掉就足以
+    让**调用方**的循环不涨 —— 而调用方那一格 L2 管不到（它的体里只有调用、没有分配）。
+
+    **原本还有第三个落点**（"含最后一次用处的最外层循环之后"），**撤掉了**：它要求知道
+    外层循环的跨度，而自举侧的发射器手上的只有**当前**这一层的跨度（它不维护循环栈）
+    —— 为了那一点更早的回收，两边要多一处容易写歪的推理。换掉的代价是明写的：
+    用处落在循环里、函数又往下写了不少语句时，块要活到函数末尾（或者那条 `return`）
+    才还 —— **晚一点还，不是不还**。
+
+    **与 L2 不重叠**（不成立就会 double free）：L2 认领的是"**循环体内**分配、且名字不出体"
+    的块；而这里要求声明在**顶层**（不在任何循环里）⇒ 两者**不可能指同一块** ——
+    这是"声明必须顶层"这条限制白送的一个性质，所以这里不用再单独判 `s.l2`。
+
+    **为什么不靠 `docs/206`**：那条路的证据是 E006（移出之后不许再用），而
+    `_is_copy_type` 把 `ptr` 算作 **Copy** ⇒ 传一个 `ptr` 根本不算"移出" ⇒ E006 对 `ptr`
+    一句话也说不了。所以 L1 与 L0/L2 一样，**长在 token 流上**（`docs/210` §2.5 记这条更正）。
+    """
+    cands: list[tuple[str, int, int]] = []      # (名字, 声明处, 最后一次用处)
+    params = {p.name for p in f.params}
+    at, end = f.tok_at, f.tok_end
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    d = at
+    while d < end:
+        nm = d + 1
+        if not (word(d, "let") and not word(d - 1, "if")
+                and ident(nm) and word(nm + 1, ":") and word(nm + 2, "ptr")
+                and word(nm + 3, "=") and word(nm + 4, "alloc") and word(nm + 5, "(")):
+            d += 1
+            continue
+        # `alloc(...)` 的右括号（尺寸**不限** —— 那是 L0 的事），紧跟一个 `;`
+        j, depth = nm + 5, 0
+        while j < end:
+            if word(j, "("):
+                depth += 1
+            elif word(j, ")"):
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        d += 1
+        if j >= end or not word(j + 1, ";"):
+            continue
+        name = toks[nm].val
+        if name in params or name in f.l0:
+            continue            # 形参没有"这次分配"；L0 已经提到栈上的根本不碰 arena
+        # **声明必须在函数体的顶层**（不在任何 `{` 里 —— 也就是不在 if / match / 循环 / 裸块里）。
+        # 这一条是**安全**要的，不是洁癖：局部槽在入口块统一 alloca，**赋值只发生在声明那一处**；
+        # 声明若在条件里而那一支没走，槽里是**未初始化**的值 —— 在函数末尾 free 它就是在
+        # free 一个垃圾指针。顶层声明 ⇒ 每次调用**恰好执行一次、无条件** ⇒ 那个槽一定已赋值。
+        depth0 = 0
+        for k in range(at, nm):
+            if word(k, "{"):
+                depth0 += 1
+            elif word(k, "}"):
+                depth0 -= 1
+        if depth0 != 0:
+            continue
+        ok, ndecl, last = _ptr_only_uses(toks, at, end, name, nm)
+        if ok and ndecl == 1 and last >= 0 and last != nm:
+            cands.append((name, nm, last))
+    if not cands:
+        return
+
+    rets: list[tuple[int, int, object]] = []
+
+    def walk(stmts: list, cur: int) -> int:
+        """收所有 `return` 的跨度。**AST 序 == token 序**，所以跨度可以顺着游标在 token 流里
+        找（`Return` 没有自己的跨度字段；这一招省掉一次解析器改动 —— 而解析器改动要两个
+        实现 + 种子一起动）。"""
+        for s in stmts:
+            if isinstance(s, (While, For)):
+                cur = walk(s.body, cur)
+            elif isinstance(s, If):
+                cur = walk(s.then, cur)
+                cur = walk(s.otherwise, cur)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    cur = walk(b, cur)
+            elif isinstance(s, Return):
+                k = cur
+                while k < end and not (ident(k) and toks[k].val == "return"):
+                    k += 1
+                j, d = k + 1, 0
+                while j < end:
+                    if word(j, "("):
+                        d += 1
+                    elif word(j, ")"):
+                        d -= 1
+                    elif d == 0 and word(j, ";"):
+                        break
+                    j += 1
+                rets.append((k, j, s))
+                cur = j + 1
+        return cur
+
+    walk(f.body, at)
+    for name, _decl, last in cands:
+        # 落点一：**最后一次用处之后最早的那条 `return` 之前**（求值完、`ret` 之前）。
+        # 判据是 `tok_end > last` —— 这条 `return` 的**结束**在用处之后 ⇒ 它肯定在用处之后
+        # 跑（`return load8(p, 0);` 那一格正是靠这条选中的，也是最常见的那一格）。
+        # 为什么安全：`return` 是**终结**语句，每次调用至多执行一次 —— 哪怕它本身在某个
+        # 循环体内（走到它就出函数了，不会再来一遍），插在它前面也不会多跑一次。
+        after = [r for r in rets if r[1] > last]
+        if after:
+            min(after, key=lambda r: r[1])[2].l1.append(name)
+            continue
+        # 落点二：函数末尾（在 `ret`/`unreachable` 之前、`roots_pop` 之前）。
+        # void 函数常常落在这儿（它没有 `return` 语句）。
+        f.l1.append(name)
 
 
 def _int_lit(v: str) -> int:
@@ -4916,6 +5093,19 @@ class _Ir:
         self.w("unreachable")
         self.terminated = True
         self.label(ok)
+
+    def l1_free(self, names) -> None:
+        """`gc_auto_alpha` 的 **L1**：把这些名字的块还掉（`docs/210` §2.5）。
+
+        发的 IR 与用户手写 `free(NAME);` **逐字节同形**（先一条 `load ptr`，再 `call
+        void @__loment_free(ptr %t)`）—— 参考侧那句在 `builtin` 的 `free` 分支里，
+        这里照抄同一形状，两个实现才对得上。
+        """
+        for name in names or ():
+            _, slot = self.vars[name]
+            t = self.t()
+            self.w(f"{t} = load ptr, ptr {slot}")
+            self.w(f"call void @__loment_free(ptr {t})")
 
     def roots_pop(self) -> None:
         """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
@@ -5562,6 +5752,7 @@ class _Ir:
             self.epoch_close(s, sv)
             self.jump(cond_l)
             self.label(end_l)
+            self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
             return
         if isinstance(s, For):
             ty, ptr = self.vars[s.var]
@@ -5587,6 +5778,7 @@ class _Ir:
             self.w(f"store {it} {nxt}, ptr {ptr}")
             self.jump(cond_l)
             self.label(end_l)
+            self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
             return
         if isinstance(s, Guard):  # P4/M36+M38: 域检查 + 审计
             _, iv = self.expr(s.expr, "u32")
@@ -5616,6 +5808,7 @@ class _Ir:
             return
         if isinstance(s, Return):
             _, v = self.expr(s.expr, self.f.ret)
+            self.l1_free(s.l1)   # L1：返回值**已经读出来**了，现在可以还那块
             self.roots_pop()   # gc_auto：离开本帧前把根表游标退回去
             self.w(f"ret {self.ll(self.f.ret)} {v}")
             self.terminated = True
@@ -5646,6 +5839,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         ir.roots_push(f)
         ir.block(f.body)
         if not ir.terminated:
+            ir.l1_free(f.l1)            # L1：函数末尾（落点选这儿的理由见 `_l1_place`）
             ir.roots_pop()
             ir.w("ret void")
         ir.out.append("}")
@@ -5668,6 +5862,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     ir.roots_push(f)
     ir.block(f.body)
     if not ir.terminated:
+        ir.l1_free(f.l1)            # L1：函数末尾（落点选这儿的理由见 `_l1_place`）
         if f.ret == "()":
             ir.roots_pop()
             ir.w("ret void")
