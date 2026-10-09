@@ -403,6 +403,45 @@ def test_out_of_subset_is_loud():
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
 
 
+@test
+def test_renames_cover_the_declaration_and_the_use_sites():
+    """改名有两条规矩，各对应一处"发出去的东西自己过不了"：
+
+    * **函数名也要过 `safe()`**。原先变量名、形参名都过了，**只有函数名漏在外面** ——
+      `int command(void) { … }` 于是发出 `pub fn command(…)`，而 `command` 是本语言的
+      **语句关键字**，产物死在词法上，报出来还带着**生成单元**的行号。
+      头改了就还得改**调用点**（两处一起改，不然名字对不上）。
+    * **改完不许撞用户自己的名字**。`safe()` 是**无状态纯函数**，只知道"这个词是不是
+      保留字"：`int let = 1; int let_c = 2;` 里 `let` 被改成 `let_c`，与用户那个真叫
+      `let_c` 的撞上 —— 发出去是两条并排的 `let let_c`，本语言照收、第一条成死代码。
+
+    两条都**真编一遍**（`lomentc.load`）：词法/语法不过就在这里炸。
+    """
+    safe_cmd = ctrans.C.safe("command")
+    out = ctrans.translate("int command(void) { return 41; }\n"
+                           "int main(void) { return command(); }\n")
+    assert f"pub fn {safe_cmd}(" in out, out
+    assert f"{safe_cmd}()" in out, f"调用点没跟着改:\n{out}"
+    assert "pub fn command(" not in out, out
+
+    out2 = ctrans.translate("int main(void) { int let = 1; int let_c = 2;"
+                            " return let + let_c; }\n")
+    decl = re.findall(r"let (\w+): i32 =", out2)
+    assert len(decl) == 2 and decl[0] != decl[1], f"两条声明撞名了:\n{out2}"
+    assert f"{decl[0]} + {decl[1]}" in out2, f"读的时候没跟着改:\n{out2}"
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for i, body in enumerate((out, out2)):
+            p = td / f"u{i}.lomt"
+            p.write_text("module u\n\n" + body + "\n", encoding="utf-8", newline="\n")
+            lomentc.load(p)          # 词法/语法不过会在这里抛
+    print("      函数名与调用点一起改名；改完的两条声明名字不同，且产物真编得过")
+
+
+
+
+
 #: 四门共用 `trans_core` 的方言表 —— 共享核里的一处守卫要**四门都验**：
 #: 某一门单独"收下"它，就是漏（那正是 `~` 原先的样子）。
 _BRACE = [

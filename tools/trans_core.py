@@ -747,9 +747,15 @@ class Emitter:
     """
 
     def __init__(self, fns: dict[str, str], d: "Dialect",
-                 consts: dict[str, str] | None = None) -> None:
+                 consts: dict[str, str] | None = None,
+                 fname: dict[str, str] | None = None) -> None:
         #: 本单元**所有**函数的返回类型。调用点的类型靠它 —— 子集里没有跨单元调用。
         self.fns = fns
+        #: C 函数名 -> 发出去的名字（`translate` 算好的）。**函数名也要过 `safe()`** ——
+        #: 撞上本语言保留字的函数名会让**产物本身**过不了词法（`pub fn command(…)` 里
+        #: `command` 是语句关键字），而调用点还得跟着改，所以整份单元算一次、两处共用。
+        #: 不在表里的名字（比如 `extern fn` 那种、名字由 `lomt_from` 发的）**照原样**。
+        self.fname = dict(fname or {})
         self.d = d
         #: **模块常量的名字**。`pub const` 由 `lomt_from` 从 Potato 的 `consts` 发，
         #: 翻译器只要**认得那些名字**（顶层声明本身在解析时被跳过）。不给这张表的话
@@ -768,6 +774,20 @@ class Emitter:
         #: 当前这个函数**声明的**返回类型（`emit_fn` 里设）。`return` 要按它决定
         #: 那个表达式是在"整数场合"还是"布尔场合"—— 见 `stmt` 的 `Return` 那支。
         self.ret: str = "()"
+
+    def bind(self, raw: str) -> str:
+        """C 局部名 -> 发出去的名字。**同一个 C 名字永远给同一个**（重复声明照旧），
+        但**不同的** C 名字落到同一个名字上时，后到的让开。
+
+        为什么不能只靠 `safe()`：它是**无状态的纯函数**，只知道"这个词是不是保留字"。
+        撞了保留字加后缀之后完全可能撞上**用户自己写的**名字 ——
+        `int let = 1; int let_c = 2;` 里 `let` 被改成 `let_c`，与用户那个真叫 `let_c` 的
+        撞上，发出去是两条并排的 `let let_c`（本语言照收，第一条成死代码，**退 0**）。
+        """
+        nm = self.d.safe(raw)
+        while raw not in self.vars and nm in self.vars.values():
+            nm += "_"
+        return nm
 
     def fresh(self, base: str) -> str:
         while True:
@@ -875,7 +895,9 @@ class Emitter:
                     f"的 `consts` 发 —— 名字对不上的话就是那一步没收它）")
             return self.vars[e.name]
         if isinstance(e, Call):
-            return f"{e.name}({', '.join(self.ex(a, 'int') for a in e.args)})"
+            # 调用点跟着函数名的改名走（见 `fname`）。
+            nm = self.fname.get(e.name, e.name)
+            return f"{nm}({', '.join(self.ex(a, 'int') for a in e.args)})"
         if isinstance(e, Un):
             if e.op == "!":
                 # Loment 的 `!` 只收 bool，而 C 的 `!x` 收 int —— 直接写成 `x == 0`
@@ -895,13 +917,13 @@ class Emitter:
         if isinstance(s, Decl):
             if s.ty == "()":
                 raise Unsupported(f"第 {s.line} 行: 不能声明 `void` 变量")
-            self.vars[s.name] = self.d.safe(s.name)
+            self.vars[s.name] = self.bind(s.name)
             self.varty[s.name] = s.ty
             if s.init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
-                self.out(f"let {self.d.safe(s.name)}: {s.ty} = 0;", depth)
+                self.out(f"let {self.vars[s.name]}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {self.d.safe(s.name)}: {s.ty} = "
+                self.out(f"let {self.vars[s.name]}: {s.ty} = "
                          f"{self.ex(s.init, self.want_of(s.ty))};", depth)
             return
         if isinstance(s, Assign):
@@ -1008,13 +1030,15 @@ class Emitter:
                 self.varty[name] = oldty      # type: ignore[assignment]
 
     def emit_fn(self, f: Fn) -> str:
-        self.vars = {n: self.d.safe(n) for (_t, n, _l) in f.params}
+        self.vars = {}
+        for (_t, n, _l) in f.params:
+            self.vars[n] = self.bind(n)
         self.varty = {n: t for (t, n, _l) in f.params}
         self.ret = f.ret
         self.n = 0
         self.lines = []
-        ps = ", ".join(f"{self.d.safe(n)}: {t}" for (t, n, _l) in f.params)
-        head = f"pub fn {f.name}({ps})"
+        ps = ", ".join(f"{self.vars[n]}: {t}" for (t, n, _l) in f.params)
+        head = f"pub fn {self.fname.get(f.name, f.name)}({ps})"
         if f.ret != "()":
             head += f" -> {f.ret}"
         self.lines.append(head + " {")
@@ -1055,11 +1079,21 @@ def translate(src: str, d: "Dialect", keep: set[str] | None = None,
             raise Unsupported(f"第 {f.line} 行: 函数 `{f.name}` 重名"
                               f"（Loment 没有重载，名字必须精确）")
         seen.add(f.name)
+    # 函数名 -> 发出去的名字。**整份单元算一次**：函数名与调用点必须一起改，
+    # 而且改完要**两两不同**（`safe()` 只管保留字，不管两个名字会不会撞到一起）。
+    fname: dict[str, str] = {}
+    taken: set[str] = set()
+    for f in fns:
+        nm = d.safe(f.name)
+        while nm in taken:
+            nm += "_"
+        taken.add(nm)
+        fname[f.name] = nm
     out = []
     for f in fns:
         if keep is not None and f.name not in keep:
             continue
-        out.append(Emitter(rets, d, consts).emit_fn(f))
+        out.append(Emitter(rets, d, consts, fname).emit_fn(f))
     return "\n\n".join(out) + "\n"
 
 
