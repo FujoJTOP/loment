@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 25fb7c052db171a0091efbb9d2b2885ab7261a846c9175aa8936336f1dca0cc8 -->
+<!-- source-sha256: c3b2a1128094a34412b492f02ab3d317554c9c8f5fef55a1b07031e81dc18554 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -132,7 +132,7 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0` … **`v9`**, and an unknown version =
+- the object carries its own version number; the validator accepts `v0` … **`v10`**, and an unknown version =
   illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
   required field to an old version would turn every existing object illegal, and the old versions are
   **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
@@ -149,8 +149,9 @@ formal object and reconciles byte for byte".
   | `v7` | `boundary` | `docs/205` R5 |
   | `v8` | `gc` | `docs/175` §3.4 |
   | `v9` | `runtime` | `docs/175` §3.6 |
+  | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
 
-  The ladder **accumulates**: `v9` requires the fields of every version below it.
+  The ladder **accumulates**: `v10` requires the fields of every version below it.
 
 - **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
   `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory
@@ -176,6 +177,16 @@ formal object and reconciles byte for byte".
   what wants that runtime, so the two contradict by definition. **`gc_manual` is not part of
   that rule**: `runtime` + `gc_manual` ("I want a runtime, but I manage memory myself") is a
   legitimate tier and must not be refused. See `docs/175` §3.6.
+
+- **`gc_ladder` (v10)**: **the composition of the GC** — how many `alloc` sites each rung of
+  the four-rung ladder took: `{l0, l1, l2, l3, total_sites}`. **Same shape as `boundary`**
+  (a self-describing object of counts plus one self-consistency sum), and for the same reason:
+  an auditor should be able to answer "what is this program's GC made of" **without reading the
+  source**. The validator **rules on that sum on its own** — `l0 + l1 + l2 + l3` must equal
+  `total_sites`. It cannot read the source, so it cannot judge whether the numbers are **counted**
+  right, but it can judge that they **contradict themselves**. This is exactly what `docs/210` §3
+  asks for: the composition of GC is a number decidable without reading the source. Outside the
+  `gc_auto_alpha` tier the first three are always `0` (only that tier classifies sites).
 
 
 - **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine

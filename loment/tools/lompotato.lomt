@@ -558,6 +558,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 9 && eq_lit(kp, kl, "runtime") == 1 {
         return 1;
     }
+    // v10 = v9 + **GC 的组成**（`docs/210` §3/§5）：四层梯各领走几个 `alloc` 站点。
+    if ver >= 10 && eq_lit(kp, kl, "gc_ladder") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1567,6 +1571,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v9") == 1 {
             ver = 9;
         }
+        if eq_lit(t, l, "v10") == 1 {
+            ver = 10;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -1620,6 +1627,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 7 {
         chk_boundary(mem, doc);
+    }
+    if ver >= 10 {
+        chk_gc_ladder(mem, doc);
     }
     return 0;
 }
@@ -1675,6 +1685,62 @@ fn chk_boundary(mem: ptr, doc: u32) -> u32 {
 /// `boundary` 里的一个计数: 非负整数就返回它的值, 否则记**一次**错并返回 `NOTFOUND`。
 fn bnd_part(mem: ptr, b: u32, key: str) -> u32 {
     let v: u32 = jget(mem, b, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _v: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+}
+
+/// `gc_ladder`（`docs/210` §3/§5, v10）: 四个**分层计数**都是非负整数, 四项之和等于
+/// `total_sites`, 而且没有不认识的键。**与 `chk_boundary` 同形** —— 这是校验器
+/// **独立判得了**的那部分: 读不到源码, 判不了"数得对不对", 但判得了"它们自相矛盾"。
+/// 逐条与 Python 的 `potato.validate` 对齐, **连错的条数都要一致**。
+fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
+    let gl: u32 = jget(mem, doc, "gc_ladder");
+    if gl == NOTFOUND || jkind(mem, gl) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let n0: u32 = gl_part(mem, gl, "l0");
+    let n1: u32 = gl_part(mem, gl, "l1");
+    let n2: u32 = gl_part(mem, gl, "l2");
+    let n3: u32 = gl_part(mem, gl, "l3");
+    let tot: u32 = gl_part(mem, gl, "total_sites");
+    // 分量不合法时 `gl_part` 已经记过一次错, 这里**不再重复记** —— 与 Python 那边的
+    // `elif` 同形: 和数只在五项都是合法整数时才去对。
+    if n0 != NOTFOUND && n1 != NOTFOUND && n2 != NOTFOUND && n3 != NOTFOUND
+            && tot != NOTFOUND && tot != n0 + n1 + n2 + n3 {
+        let _t: u32 = bad(mem);
+    }
+    // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(gl) - …)` 一条消息）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, gl);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "l0") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "l1") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "l2") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "l3") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "total_sites") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `gc_ladder` 里的一个计数: 非负整数就返回它的值, 否则记**一次**错并返回 `NOTFOUND`。
+fn gl_part(mem: ptr, gl: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, gl, key);
     if v == NOTFOUND || jnonneg(mem, v) == 0 {
         let _v: u32 = bad(mem);
         return NOTFOUND;

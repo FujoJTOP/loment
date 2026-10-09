@@ -911,7 +911,7 @@ fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
 /// `loment/examples/bytes.lomt` 里用 `load8`/`store8` 拼出来的 pub 函数：调用它们
 /// 等于**把指针交给别人的栈帧**，而"那个函数不会把 p 存起来"编译器并不知道
 /// （用户自己写一个同名函数就能推翻它）。这是 L0 今天最窄的一处，见 `docs/210` §7。
-fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
+pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
     if i == 0 || tok_kind(toks, i) != 0 {
         return false;
     }
@@ -939,12 +939,11 @@ fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
 ///
 /// (b) 等价于"只被读/写透过、从不外逃"；提升后的缓冲是**入口块的一条 alloca**，
 /// 活满整个函数调用，所以**不需要**"引用不出块"那条约束。
-fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
-    let at: u32 = load32(s, 564);
-    let end: u32 = load32(s, 568);
+pub fn l0_size_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
+                   npar: u32, par: ptr) -> u32 {
     let q: u32 = 0;
-    while q < load32(s, 12) {                       // 形参同名 -> 不提升
-        if tok_eq(src, toks, load32(s, CG_CUR + q * 8), nm) {
+    while q < npar {                                // 形参同名 -> 不提升
+        if tok_eq(src, toks, load32(par, q * 8), nm) {
             return 0;
         }
         q = q + 1;
@@ -977,6 +976,13 @@ fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
         k = k + 1;
     }
     return tok_int(src, toks, nm + 6);
+}
+
+/// `l0_size_at` 的 `s` 包装 —— 从状态块取"当前函数的跨度 / 形参表"。发射路径走这一支；
+/// 数 `gc_ladder`（`docs/210` §5）那一支自己给显式参数，见 `potato.lomt`。
+fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    return l0_size_at(src, toks, nm, load32(s, 564), load32(s, 568),
+                      load32(s, 12), ptr_add(s, CG_CUR));
 }
 
 /// 入口块的 L0 缓冲 alloca（紧跟 `.addr` 之后发，与 `lomentc.locals_prologue` 同序）。
@@ -1032,8 +1038,8 @@ fn l0_store(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
 ///
 /// **L0 已经提到栈上的名字豁免 4、5**（它不碰 arena）。**代价是"整体取消"**：体内一个分配
 /// 出体，整格就不能归还 —— 用表达力换零成本（`docs/210` §4.4），不是缺陷。
-fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
-    let fend: u32 = load32(s, 568);
+pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
+                npar: u32, par: ptr) -> u32 {
     let nalloc: u32 = 0;
     let k: u32 = at;
     while k < end {
@@ -1067,7 +1073,7 @@ fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
                 && tok_is(src, toks, nm + 2, "ptr") && tok_is(src, toks, nm + 3, "=")
                 && tok_is(src, toks, nm + 4, "alloc") && tok_is(src, toks, nm + 5, "(") {
             ncand = ncand + 1;
-            if l0_size(s, src, toks, nm) == 0 {   // 提到栈上的豁免（它不欠这次归还）
+            if l0_size_at(src, toks, nm, fat, fend, npar, par) == 0 {   // 提到栈上的豁免（它不欠这次归还）
                 nlive = nlive + 1;
                 let ndecl: u32 = 0;
                 let p: u32 = at;
@@ -1110,6 +1116,13 @@ fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
         return 1;                                 // 有认不出来的分配 -> 整格取消
     }
     return 0;
+}
+
+/// `l2_ok_at` 的 `s` 包装（当前函数的跨度 / 形参表从状态块取）。
+fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
+    let fat: u32 = load32(s, 564);
+    let fend: u32 = load32(s, 568);
+    return l2_ok_at(src, toks, at, end, fat, fend, load32(s, 12), ptr_add(s, CG_CUR));
 }
 
 /// 纪元关：把前沿写回入口那一刻的值（`sv` = 入口记下的 temp 号；0 = 这一格没开纪元）。
@@ -1168,12 +1181,11 @@ fn ret_after(src: ptr, toks: ptr, a: u32, b: u32, last: u32, end: u32) -> u32 {
 /// 与 L0 **共用理由但不是同一格**：L0 还要求尺寸是字面量（它要开栈缓冲），这一层不要
 /// （它只管还）。所以这边不调 `l0_size`，用自己这条 —— 而调用方靠"`l0_size` 非 0"
 /// 把 L0 已经提走的排除掉（提走的根本不碰 arena）。
-fn l1_ptr_only(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
-    let at: u32 = load32(s, 564);
-    let end: u32 = load32(s, 568);
+pub fn l1_ptr_only_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
+                      npar: u32, par: ptr, out: ptr) -> u32 {
     let q: u32 = 0;
-    while q < load32(s, 12) {                        // 形参同名 -> 不是候选
-        if tok_eq(src, toks, load32(s, CG_CUR + q * 8), nm) {
+    while q < npar {                                 // 形参同名 -> 不是候选
+        if tok_eq(src, toks, load32(par, q * 8), nm) {
             return 0;
         }
         q = q + 1;
@@ -1201,8 +1213,15 @@ fn l1_ptr_only(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     if ndecl != 1 || lst == nm {
         return 0;                                    // 声明不止一处 / 一次都没用过
     }
-    store32(s, 584, lst);
+    store32(out, 0, lst);
     return 1;
+}
+
+/// `l1_ptr_only_at` 的 `s` 包装：跨度 / 形参表从状态块取，"最后一次用处"落进槽 584
+/// （`emit_l1` 要读它）。数 `gc_ladder` 那一支自己给 `out`（见 `potato.lomt`）。
+fn l1_ptr_only(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    return l1_ptr_only_at(src, toks, nm, load32(s, 564), load32(s, 568),
+                          load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, 584));
 }
 
 /// **L1 定活**（`docs/210` §2.5）：把"最后一次用处已经过去"的块还掉。

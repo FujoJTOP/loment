@@ -1932,6 +1932,56 @@ def test_l0_rule_pair():
         L0_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+#: `gc_ladder` 那一对（`docs/210` §3/§5）：一份 `gc_auto_alpha` 的源里四层**各来一站** ——
+#: `a` 是字面量尺寸（L0）、`b` 尺寸是变量且顶层（L1）、`c` 在循环体里（L2）、`d` 外逃（L3）。
+GC_LADDER_ALPHA_SRC = """module gc_ladder
+choose gc_auto_alpha
+choose runtime
+
+fn main() -> i32 {
+    let a: ptr = alloc(64);
+    store8(a, 0, 9);
+    let n: u32 = 8;
+    let b: ptr = alloc(n);
+    store8(b, 0, 3);
+    let i: i32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 1);
+        i = i + 1;
+    }
+    let d: ptr = alloc(n);
+    let e: ptr = d;
+    store8(e, 0, 1);
+    return (load8(a, 0) as i32) + (load8(b, 0) as i32) + (load8(e, 0) as i32);
+}
+"""
+GC_LADDER_MANUAL_SRC = GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "choose gc_manual")
+
+
+@test
+def test_gc_ladder_rule():
+    """`gc_ladder`（`docs/210` §3/§5, Potato v10）：一对只差 `choose` 一行的程序，逐格钉住四层。
+
+    **这一格的全部价值是那条自洽**（`docs/210` §5 第一行）：`l0 + l1 + l2 + l3 == total_sites`。
+    校验器**读不到源码**，所以它判不了"这几个数数得对不对"，但判得了"它们自相矛盾" ——
+    于是这四个数必须**真的**把 `alloc` 站点分完，而不是编译器顺手写几个好看的数字。
+
+    四格**各自**钉住，也是为了挡住"随手报个绿"：只钉和的话，`{0,0,0,4}` 与 `{1,1,1,1}`
+    都能让和成立。**非 alpha 档三个数恒为 0** —— 与"默认档一行都不动"（`docs/175` §3.4）
+    是同一条事实（参考侧那三张表只在 alpha 那一趟填）。
+    """
+    a = json.loads(lomentc.emit_potato(parse(GC_LADDER_ALPHA_SRC), ROOT))["gc_ladder"]
+    m = json.loads(lomentc.emit_potato(parse(GC_LADDER_MANUAL_SRC), ROOT))["gc_ladder"]
+    assert a == {"l0": 1, "l1": 1, "l2": 1, "l3": 1, "total_sites": 4}, f"alpha: {a}"
+    assert m == {"l0": 0, "l1": 0, "l2": 0, "l3": 4, "total_sites": 4}, f"manual: {m}"
+    for d in (a, m):
+        assert d["l0"] + d["l1"] + d["l2"] + d["l3"] == d["total_sites"], d
+    # 两份源**只差那一行**
+    assert GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
+        GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
 @test
 def test_l0_param_shadow_is_not_promoted():
     """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。

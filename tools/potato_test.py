@@ -111,7 +111,7 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v10"), "版本"),
+    ("version", lambda d: d.__setitem__("potato", "v11"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -276,6 +276,19 @@ def fixture_v9() -> dict:
     return d
 
 
+def fixture_v10() -> dict:
+    """一份合法的 **v10** 形式对象: v9 的再 + v10 的 `gc_ladder`（`docs/210` §3/§5）。
+
+    与 `fixture_v7` … `fixture_v9` 同一个理由单独来一份：`gc_ladder` 从 v10 起才合法 ——
+    拿 v9 去试只会得到"未知顶层字段"，校验器里那几条规则（四个分量必须是非负整数、
+    四数之和要等于 `total_sites`、不认识的键要报）**一条都碰不到**，那种绿是空转。
+    """
+    d = fixture_v9()
+    d["potato"] = "v10"
+    d["gc_ladder"] = {"l0": 1, "l1": 2, "l2": 3, "l3": 4, "total_sites": 10}
+    return d
+
+
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
     ("gc 缺这一项", lambda d: d.pop("gc"), "gc 必须是"),
@@ -298,6 +311,25 @@ MUTATORS_V9 = [
                                         d.__setitem__("gc", "gc_auto")), "不能同时选"),
     # 反面：`gc_manual` **不**与 `no_runtime` 冲突 —— 这一条钉住"别把这一对也拒了"。
     # 它**不该**报错，所以放进 `_cases()` 当合法样本（见那里），不在这张反例表里。
+]
+
+
+#: v10 的 `gc_ladder` 那几条规则的反例（`docs/210` §3/§5）。作用在 **v10** 的对象上。
+#: 与 `MUTATORS_V7` 的 `boundary` 一一对应 —— 两者是**同一形状**（四个分量 + 总数自洽）。
+MUTATORS_V10 = [
+    ("gc_ladder 缺一项", lambda d: d["gc_ladder"].pop("l2"), "gc_ladder.l2"),
+    ("gc_ladder 分量是负数", lambda d: d["gc_ladder"].__setitem__("l3", -1),
+     "gc_ladder.l3"),
+    ("gc_ladder 分量不是整数", lambda d: d["gc_ladder"].__setitem__("l0", "x"),
+     "gc_ladder.l0"),
+    # **自洽**（`docs/210` §5 第一行）—— 四数之和必须等于 `total_sites`。校验器读不到源码，
+    # 判不了"数得对不对"，但判得了"它们自相矛盾"。
+    ("gc_ladder 总数对不上", lambda d: d["gc_ladder"].__setitem__("total_sites", 99),
+     "total_sites"),
+    ("gc_ladder 多一个键", lambda d: d["gc_ladder"].__setitem__("extra", 0), "不认识的键"),
+    ("gc_ladder 不是对象", lambda d: d.__setitem__("gc_ladder", []),
+     "gc_ladder 必须是对象"),
+    ("gc_ladder 整个缺掉", lambda d: d.pop("gc_ladder"), "gc_ladder 必须是对象"),
 ]
 
 
@@ -338,6 +370,12 @@ def test_every_spec_rule_has_a_rejection_case():
     # v9 那一组同理（`runtime`）。
     for name, mut, needle in MUTATORS_V9:
         d = fixture_v9()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v10 那一组同理（`gc_ladder`, docs/210 §3/§5）。
+    for name, mut, needle in MUTATORS_V10:
+        d = fixture_v10()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -510,7 +548,8 @@ def _cases() -> list[tuple[str, dict]]:
     * 非法: `MUTATORS` 那 51 条（每条钉一条规则）。
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
-                                   ("v8", fixture_v8()), ("v9", fixture_v9())]
+                                   ("v8", fixture_v8()), ("v9", fixture_v9()),
+                                   ("v10", fixture_v10())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -536,6 +575,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v9()
         mut(d)
         out.append((f"v9-{name}", d))
+    # v10 那一组（`gc_ladder`）同理。
+    for name, mut, _ in MUTATORS_V10:
+        d = fixture_v10()
+        mut(d)
+        out.append((f"v10-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

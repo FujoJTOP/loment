@@ -3987,6 +3987,106 @@ def _count_boundary(mod: Module) -> dict:
             "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
 
 
+def _count_gc_ladder(mod: Module) -> dict:
+    """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 四层梯各领走几个 `alloc` 站点。
+
+    形状**照 `boundary`**（§5 R5 那条自洽规则的同形）：四个非负整数 + `total_sites`，
+    而且 **`l0 + l1 + l2 + l3` 必须等于 `total_sites`**。这一条是**校验器独立判得了的**：
+    它读不到源码，所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾" —— 这正是
+    `docs/210` §3 那句"GC 的组成是一个不读源码可判的数"要的那件事。
+
+    口径：本单元**每一处 `alloc`** 从强到弱、先到先得，正好分到一层：
+
+      * **L0** —— `let NAME: ptr = alloc(<字面量>)` 且 `NAME` 只被解引用透过（`Func.l0` 那张表）；
+      * **L2** —— 落在某个**开着纪元**的循环体里（那个 `while`/`for` 的 `l2` 为真）；
+      * **L1** —— 剩下的里、`NAME` 在 `Func.l1` 上的（定活，插 `free`）；
+      * **L3** —— 其余（送给收集器）。
+
+    **非 alpha 档**：`f.l0` / `f.l1` 恒空、`s.l2` 恒假 ⇒ L0=L1=L2=0、L3=total。这与
+    "默认档一行都不动"（`docs/175` §3.4）是同一条事实，不是巧合。
+
+    三个分层表都由**规则**在 token 流上填（`_l0_promotable` / `_l2_loop_epochs` /
+    `_l1_place`），这里只是把它们的**决定**数出来 —— 于是自举侧
+    （`loment/selfhost/potato.lomt`）数的是同一套谓词的同一个结果。
+
+    在 **`raw_mod`（单态化之前）** 上数：自举侧看到的是**源 token**，也只有单态化前的
+    那份视图与它对齐（单态化会造出实例的副本，那些副本两边都不数）。
+    """
+    import dataclasses as _dc
+
+    #: 全部 `alloc` 调用点（**不看形状**）：凡是一个 `alloc` 就是一处站点，形状不合的
+    #: （落不到 `let NAME: ptr = ...` 那种）自然落在 L3。用**通用** dataclass 遍历，
+    #: 不手写节点表 —— 理由同 `_count_boundary`：漏一个节点类型就少算几个，要等自举侧
+    #: 逐字节比对才看得出来。
+    total = 0
+
+    def reap(x) -> None:
+        nonlocal total
+        if isinstance(x, Call) and x.name == "alloc":
+            total += 1
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                reap(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                reap(y)
+
+    reap(mod)
+
+    l0 = l1 = l2 = 0
+
+    def walk(ss: list, in_l2: bool, l0n: set, l1n: set) -> None:
+        """可分层站点**只可能是语句级的** `let`（表达式里不嵌语句），所以这里只走语句
+        列表：`if` 的两支、`while`/`for` 的体（带上 `l2` 这个"落在纪元里"的标记）、
+        `match` 各臂。"""
+        nonlocal l0, l1, l2
+        for s in ss:
+            if (isinstance(s, Let) and s.type == "ptr"
+                    and isinstance(s.expr, Call) and s.expr.name == "alloc"):
+                if s.name in l0n:
+                    l0 += 1
+                elif in_l2:
+                    l2 += 1
+                elif s.name in l1n:
+                    l1 += 1
+                # 其余落 L3（在 `l3` 那一格用 total 减出来）
+            if isinstance(s, If):
+                walk(s.then, in_l2, l0n, l1n)
+                walk(s.otherwise, in_l2, l0n, l1n)
+            elif isinstance(s, While):
+                walk(s.body, in_l2 or s.l2, l0n, l1n)
+            elif isinstance(s, For):
+                walk(s.body, in_l2 or s.l2, l0n, l1n)
+            elif isinstance(s, Match):
+                for _pat, body in s.arms:
+                    walk(body, in_l2, l0n, l1n)
+
+    def ret_l1(ss: list, out: set) -> None:
+        """收本函数体里被 L1 认领的名字 —— `_l1_place` 把 `free` 挂在**最早那条够得着的
+        `return` 之前**（`Return.l1`），够不着就挂**函数末尾**（`Func.l1`）。两边合起来才是
+        本函数的 L1 名单，只数 `f.l1` 会**漏掉最常见的那一格**（用处落在 `return` 之前）。"""
+        for s in ss:
+            if isinstance(s, Return):
+                out.update(s.l1)
+            elif isinstance(s, If):
+                ret_l1(s.then, out)
+                ret_l1(s.otherwise, out)
+            elif isinstance(s, (While, For)):
+                ret_l1(s.body, out)
+            elif isinstance(s, Match):
+                for _pat, body in s.arms:
+                    ret_l1(body, out)
+
+    for f in list(mod.funcs) + [g for im in mod.impls for g in im.funcs]:
+        l1n = set(f.l1)
+        ret_l1(f.body, l1n)
+        walk(f.body, False, set(f.l0), l1n)
+    return {"l0": l0, "l1": l1, "l2": l2, "l3": total - l0 - l1 - l2,
+            "total_sites": total}
+
+
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
@@ -4063,7 +4163,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v9 = v8 + **运行期** `runtime`（`docs/175` §3.6）：`runtime` / `no_runtime`。
         # 与 `mode` 同级同形 —— 一个字符串取值、**必填**、只有根单元能定，所以
         # "这个产物是在哪一档下编的"是**不读源码可判**的。
-        "potato": "v9",
+        # v10 = v9 + **GC 的组成** `gc_ladder`（`docs/210` §3 / §5）：四层梯各领走几个
+        # `alloc` 站点。**与 `boundary` 同级同形**（一个自描述的对象 + 一条自洽的和）——
+        # 于是"这份程序的 GC 由哪几层组成"是**不读源码可判**的（这正是 `docs/210` §3 那句
+        # "GC 的组成是一个不读源码可判的数"）。
+        "potato": "v10",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4134,6 +4238,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "instances": instances,
         "guards": _count_guards(mod),
         "boundary": _count_boundary(mod),
+        # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
+        # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
+        "gc_ladder": _count_gc_ladder(raw_mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
