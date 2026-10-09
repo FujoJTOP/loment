@@ -323,6 +323,8 @@ tools/loment_probe.py
 tools/loment_release.py
 tools/loment_status.py
 tools/loment_syscalls_test.py
+tools/loment_state.py
+tools/loment_state_test.py
 ";
 }
 

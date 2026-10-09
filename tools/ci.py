@@ -150,7 +150,11 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_multisyntax_test",
                  # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
                  # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
-                 "loment_multisyntax_projects_test")
+                 "loment_multisyntax_projects_test",
+                 # 权威状态在 `origin`、不在本地树那一条 (CLAUDE.md 第一节): 判据在临时
+                 # 夹具仓里验"工具报的是权威那一份还是工作树那一份", 并钉住"无法判定"
+                 # 必须是**可见的** rc=2, 不能伪装成同步
+                 "loment_state_test")
 
 
 #: **不能与别的检查同时跑**的那几条 —— 它们**写仓库里的共享位置**。
