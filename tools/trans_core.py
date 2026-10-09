@@ -849,8 +849,16 @@ class Emitter:
                     f"第 {e.line} 行: 这里要的是**整数**，给的是布尔。"
                     f"{self.d.name} 的布尔与整数**不是一回事**（不像 C 那样能互相顶），"
                     f"所以这里本来就该是个整数表达式（多半写错了）")
-            # `int x = (a < b);`：bool -> 0/1
-            return f"({raw}) as {self.d.int_default}"
+            # `int x = (a < b);`：bool -> 0/1。
+            #
+            # **整条投影要自己套一层括号**：`ex()` 的返回值是拿去当**操作数**用的
+            # （`raw(Bin)` 把两侧直接拼进 `({左} {op} {右})`），所以它必须自足。
+            # 原先只括了 `raw`、没括整条，于是 `as i32` 后面**紧接着** `<` / `<=` / `<<`
+            # 时被本语言的 parser 当成泛型实参的开头：
+            #     (2 < 3) < c   ->   ((2 < 3)) as i32 < c   ->   `11:40 期望 >，得到 ')'`
+            # 而这是子集内的普通 C（比较套比较），换个不成功的写法（`+ 1`）就没事 ——
+            # 所以 `loment/ctrans/coerce.c` 那份专挑这条缝的语料一直没照到它。
+            return f"(({raw}) as {self.d.int_default})"
         raise AssertionError((got, want))
 
     def raw(self, e: object) -> str:

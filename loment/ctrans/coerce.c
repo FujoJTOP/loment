@@ -32,6 +32,22 @@ int f(int a, int b) {
     return x + y + z + w + xorv + shifted;
 }
 
+/* 投影**当左操作数**再参与一次运算 —— 运算符以 `<` 开头的那几个。
+ *
+ * 这一格原先译出一份**解析不过**的 Loment：`((a < b)) as i32 < c` 里 `as i32 <` 被本语言的
+ * parser 当成**泛型实参**的开头（`tools/trans_core.py` 的 `ex()` 里那段，投影原先只括了
+ * `raw`、没括整条）。`(a < b) + 1` 那两格碰巧没事 —— 所以上面 `w` 那一行一直没照到它。
+ *
+ * `s` 是**对照**：`>` / `>>` 那一侧一直是对的（裸的 `>` 被当比较，不会被误读成泛型）。
+ */
+int cmp_chain(int a, int b, int c) {
+    int p = (a < b) < c;
+    int q = (a < b) <= c;
+    int r = (a < b) << 1;
+    int s = (a > b) >> 1;
+    return p * 8 + q * 4 + r * 2 + s;
+}
+
 int main() {
-    return f(3, 2) % 256;
+    return (f(3, 2) + cmp_chain(1, 2, 3)) % 256;
 }

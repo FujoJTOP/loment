@@ -84,7 +84,14 @@ def _coerce_expected() -> int:
         b -= 1
     xorv = a ^ b          # b 已经是 0 了
     shifted = (a << 2) | (b >> 1)
-    return (x + y + z + w + xorv + shifted) % 256
+    # `cmp_chain(1, 2, 3)` —— 投影**当左操作数**那一格（照 C 语义另写一遍）：
+    #   (1 < 2) = 1 ⇒ p = (1 < 3) = 1、q = (1 <= 3) = 1、r = (1 << 1) = 2
+    #                 s = (0 >> 1) = 0（对照：`>` / `>>` 那侧不带括号也是对的）
+    #   ⇒ 1*8 + 1*4 + 2*2 + 0 = 16
+    ca, cb, cc = 1, 2, 3
+    chain = (int(ca < cb) < cc) * 8 + (int(ca < cb) <= cc) * 4 \
+        + ((int(ca < cb)) << 1) * 2 + ((int(ca > cb)) >> 1)
+    return (x + y + z + w + xorv + shifted + chain) % 256
 
 
 def _scoping_expected() -> int:
