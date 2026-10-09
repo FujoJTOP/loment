@@ -440,6 +440,28 @@ def test_python_lsp_honours_comefor():
     print("      语言服务: 方言源**编得过**且不报假错")
 
 
+#: 一份带 `choose write grammar` 声明的方言源（issue #142）—— 内容并不重要，
+#: 光是这行声明就够让 `_parse` 在 `lomentc.Parser` 里炸开（它只认原生语法）。
+GRAMMAR_SRC = "choose write grammar c\n\nint main() {\n    return 1;\n}\n"
+
+
+@test
+def test_python_lsp_definition_survives_grammar_declaration():
+    """`textDocument/definition` 撞上带 `choose write grammar` 声明的文件时不该让
+    语言服务整个炸掉（issue #142）—— `didOpen` 会把同一个 `LomError` 接住变成诊断,
+    但 `handle()` 里 `textDocument/definition` 分支直接调 `_decls` -> `_parse`,
+    没有 `try`, 于是 `LomError` 会一路抛出 handler, 在真实 serve 循环里就是服务器退出。
+    """
+    uri = "file:///grammar.lomt"
+    docs = {uri: GRAMMAR_SRC}
+    out = PY_LSP.handle({"jsonrpc": "2.0", "id": 1, "method": "textDocument/definition",
+                         "params": {"textDocument": {"uri": uri},
+                                    "position": {"line": 2, "character": 4}}},
+                        docs)
+    assert out and out[0].get("result") is None, out
+    print("      带 grammar 声明的文件: definition 请求返回 null 而不是抛出 LomError")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

@@ -129,7 +129,10 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             m = re.match(r"[A-Za-z_]\w*", line[start:])
             if m:
                 word = m.group(0)
-        sym = _decls(text).get(word)
+        try:
+            sym = _decls(text).get(word)
+        except lomc.LomError:  # 解析不了的源 (如 `choose write grammar`) -> null, 不炸服务
+            sym = None
         if not sym:
             return [{"jsonrpc": "2.0", "id": rid, "result": None}]
         return [{"jsonrpc": "2.0", "id": rid, "result": {
