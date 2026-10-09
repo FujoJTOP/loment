@@ -1013,9 +1013,17 @@ _C_ENUM = re.compile(r"\benum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
 #: 这种**一行写完的结构体**只抽得到第一个字段 (整个 `int a; int b;` 是一行, `.+?` 只吃一段),
 #: 而第二个字段**静默消失**。一行写 struct 在 C 里很常见 (2026-09-17 加多语法判据时撞到)。
 _C_FIELD = re.compile(r"([^;{}]+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;")
-_C_FN = re.compile(r"^[ \t]*(?:static\s+|inline\s+|const\s+)*"
-                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]",
-                   re.M)
+#: 函数**定义或声明**（`类型 名字(...)` 后面跟 `{` 或 `;`）。
+#:
+#: **不锚行首** —— 原先锚了 `^[ \t]*`（配 `re.M`），于是**同一行上的第二个函数永远匹配不到**：
+#: `int f(){ … } int g(){ … }` 里 `g` 整个消失，而且 `skipped` 也是空的（不是"跳过了"，
+#: 是**压根没看见**）。C 完全允许这么写。与 `_C_FIELD` 是同一处毛病（那一处已经改过）。
+#:
+#: 行首锚**本来是为了别匹配到函数体里的调用** —— 那一层改由 `_from_c` 按"已认下的函数体
+#: 范围"挡（那里的 `claimed`）：那条更准，因为 `Foo bar(1);` 这类写法在 C++ 里就是**变量
+#: 声明**，与函数定义同形，只靠关键字表挡不住。
+_C_FN = re.compile(r"(?:static\s+|inline\s+|const\s+)*"
+                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]")
 _C_KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -1159,10 +1167,24 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
                     continue
                 doc["consts"].append({"name": vn, "type": "i32", "value": vv})
         rep.ok += 1
+    #: 已认下的函数体延伸到哪（右花括号之后的**第一个位置**）。`_C_FN` 不锚行首了，
+    #: 所以体里那些与定义同形的写法要靠它挡 —— 见那条正则上面的注解。
+    claimed = -1
     for m in _C_FN.finditer(body):
+        if m.start() < claimed:
+            continue                # 落在上一个函数的**体内**：那是调用/声明，不是定义
         rt, fn, params = m.group(1), m.group(2), m.group(3)
         if fn in _C_KEYWORDS or rt.strip().split()[-1] in _C_KEYWORDS:
             continue
+        # 是**定义**就把整段范围先认下来 —— 哪怕它随后因为返回类型无映射被跳过：
+        # 不然它**体内**的写法会被接着当成函数。
+        is_def = m.end() > 0 and body[m.end() - 1] == "{"
+        close = _block_end(body, m.end() - 1) if is_def else -1
+        if is_def and close < 0:
+            rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            continue
+        if is_def:
+            claimed = close + 1
         if "..." in params:
             rep.skip("fn", fn, "变参")
             continue
@@ -1202,11 +1224,7 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
         # **映射后的** Loment 类型名（`i32`），从 `i32` 反推回 C 的拼法是另一张表，
         # 而原文本来就在手边。另一个理由更要紧 —— **原文是保真的**：`unsigned` 与
         # `unsigned int` 在 Potato 里都是 `u32`，回推必然丢掉用户写的那个拼法。
-        if m.end() > 0 and body[m.end() - 1] == "{":
-            close = _block_end(body, m.end() - 1)
-            if close < 0:
-                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
-                continue
+        if is_def:
             raw = src[m.start():close + 1]
             ent["body"] = raw.strip()
             ent["body_line"] = _body_at(src, m.start(), raw)

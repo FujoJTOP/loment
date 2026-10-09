@@ -837,6 +837,47 @@ def test_declaration_forms_that_used_to_vanish():
 
 
 @test
+def test_functions_are_found_wherever_they_start():
+    """**同一行上的第二个函数**也是一条声明，不能因为"不在行首"就看不见（C / C++）。
+
+    `_C_FN` 原先锚 `^[ \\t]*`（配 `re.M`），于是 `int f(){ … } int g(){ … }` 里 `g`
+    **整个消失** —— 而且不是"被跳过"：对象里没有它、`skipped` 里也没有它，下游只会说
+    "调用了本单元没有的函数 `g`"（一个**指向别处**的错）。这与 `_C_FIELD` 是同一处毛病
+    （`struct P { int a; int b; };` 一行写完只抽得到第一个字段），那一处已经改过。
+
+    **为什么不能只把锚去掉**：那个锚本来挡的是"函数**体**里与定义同形的写法" ——
+    `Foo bar(1);` 在 C++ 里就是**变量声明**，与 `Foo bar(...) {...}` 只差一个 `{`。
+    所以 `_from_c` 里按"已认下的函数体范围"再挡一道（`claimed`）。这一条两面都钉。
+    """
+    # ① 两个函数同一行：都要在
+    doc, rep = potato_from.from_c("int f(int a){return a+1;} int g(int a){return a+2;}\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    assert not rep.skipped, rep.skipped
+    # ② 顶层语句 + 函数同一行（`int g = 7; int main(void){…}`）
+    doc, _ = potato_from.from_c("int g = 7; int main(void){ return 5; }\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["main"], doc["functions"]
+    # ③ 三个同一行
+    doc, _ = potato_from.from_c(
+        "int a1(){return 1;} int a2(){return 2;} int a3(){return 3;}\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["a1", "a2", "a3"], doc["functions"]
+    # ④ **反面**：体里那些与定义同形的写法不是函数。
+    #    - 裸的调用（`g(1)`）本来就不该匹配；
+    #    - C++ 的 `Foo bar(1);` **会**匹配那条正则，靠 `claimed` 挡下来。
+    doc, _ = potato_from.from_c("int f(){ return g(1); }\nint g(int x){ return x; }\n",
+                                "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    doc, _ = potato_from.from_cpp("int f(){ Foo bar(1); return 0; }\n", "t.cpp", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f"], doc["functions"]
+    # ⑤ 被跳过的定义，**体内**同样要被认下来（不然它的体会被当成一串函数）
+    doc, rep = potato_from.from_c("float f(){ int x = 1; return 0; }\nint g(){ return 1; }\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["g"], doc["functions"]
+    assert [x["name"] for x in rep.skipped] == ["f"], rep.skipped
+    print("      同行多函数都找得到；体内与定义同形的写法（含 C++ 的 `Foo bar(1);`）不被误认")
+
+
+@test
 def test_array_typed_struct_field_does_not_invalidate_the_object():
     """`[T; N]` 当**结构体字段**: 校验器曾经把它判成"未声明", 于是**整份对象非法**、
     `lomt_from` 直接 `[ERR]` 退出 —— 一个字段的问题毁掉整个模块, 比 skip 更坏。
