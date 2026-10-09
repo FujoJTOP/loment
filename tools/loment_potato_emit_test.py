@@ -128,6 +128,11 @@ EXTRA_COVERED = (
     # 它同时钉住**名字的规则**（`test_nested_instance_name_follows_the_rule`）与
     # **逐字节**（这一份进 `COVERED` 就自动比）。
     "loment/examples/nested_gen/main.lomt",
+    # **四层梯各来一站**（`gc_ladder`, `docs/210` §2/§3）—— 这一份是 v10 的钉子：它是**唯一**
+    # 一份 `choose gc_auto_alpha` 的语料，于是 `gc_ladder` 的 `l0`/`l1`/`l2` 都非零，
+    # 两个实现数出来的**组成**才真的被比过。别的语料全是 `gc_manual`，那里三个数恒为 0 ——
+    # 只比那些，"自举侧重推四层"这件事从没被验过。
+    "loment/examples/gc_ladder/main.lomt",
 )
 
 #: 语料之外单独点的拒绝轴：`comefor` 与外部代码块都由**驱动器**拒（那不是这一格的判断，

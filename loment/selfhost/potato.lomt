@@ -89,6 +89,11 @@ module potato
 
 use bytes
 use switches
+// v10 的 `gc_ladder`（`docs/210` §3/§5）要**四层梯的谓词**（L0/L1/L2 的资格），而那三条
+// 与 `codegen.lomt` 的发射路径是同一条 —— 所以**共用**它们（`l0_size_at` / `l1_ptr_only_at`
+// / `l2_ok_at` / `l0_safe_callee`，那边已 `pub`）。不复制一份的理由：复制必然漂，而这三条
+// 已经由 IR 逐字节比对钉住与参考实现一致（`loment_p8_test` 的 m88/m89/m91）。
+use codegen
 
 /// 无符号里当"哨兵"用。token 下标从 0 起, 这个值不可能撞上 (与 `switches.SW_NONE` 同形)。
 const PT_NONE: u32 = 4294967295;
@@ -837,6 +842,273 @@ fn pt_cnt_boundary_extcalls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+// ---------------------------------------------------------------- GC 的四层梯 (docs/210 §3/§5)
+//
+// v10 的 `gc_ladder`：本单元每一处 `alloc` 从强到弱、先到先得分到一层。**与参考实现的
+// `_count_gc_ladder` 数同一批站点** —— 参考侧从 `Func.l0` / `Func.l1` / 每个循环的 `l2`
+// 那几张表上数，这里没有它们，所以按**同一套 token 规则重推**。谓词本身与 `codegen.lomt`
+// **共用**（`l0_size_at` / `l1_ptr_only_at` / `l2_ok_at`），那份一致性已由 IR 逐字节比对
+// 钉住，于是两边数的是同一套规则的同一个结果。**非 alpha 档**（`572 == 0`）三数恒为 0。
+
+/// `alloc` 调用点总数（`docs/210` §5 第一行的分母）—— 词法口径与 `pt_cnt_boundary_call` 同。
+fn pt_gl_total(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    return pt_cnt_boundary_call(unit, t, lo, hi, "alloc");
+}
+
+/// 形参**名字**的 token 下标写进 `out`（每格 8 字节，与 codegen 的 `CG_CUR` 同形），回个数。
+/// 分组与 `pt_cnt_params` 同形：`,` 在 `<>` / `[]` 里不算分隔。
+fn pt_gl_params(unit: ptr, t: ptr, lp: u32, out: ptr) -> u32 {
+    let n: u32 = 0;
+    let j: u32 = lp + 1;
+    let d: u32 = 0;
+    let atn: u32 = 1;
+    while pt_kind(t, j) != 4 && !(pt_tis(unit, t, j, ")") && d == 0) {
+        if atn == 1 && pt_kind(t, j) == 0 {
+            store32(out, n * 8, j);
+            n = n + 1;
+            atn = 0;
+        }
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") {
+            d = d + 1;
+        }
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")) && d > 0 {
+            d = d - 1;
+        }
+        if d == 0 && pt_tis(unit, t, j, ",") {
+            atn = 1;
+        }
+        j = j + 1;
+    }
+    return n;
+}
+
+/// `fn`（下标 `i`）之后那个 `(` —— 跳过函数名与 `<...>`。没有就回 `PT_NONE`。
+fn pt_gl_lparen(unit: ptr, t: ptr, i: u32, hi: u32) -> u32 {
+    let j: u32 = i + 1;
+    let d: u32 = 0;
+    while j < hi && pt_kind(t, j) != 4 {
+        if pt_tis(unit, t, j, "(") && d == 0 {
+            return j;
+        }
+        if pt_tis(unit, t, j, "<") {
+            d = d + 1;
+        }
+        if pt_tis(unit, t, j, ">") && d > 0 {
+            d = d - 1;
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+/// `(`（下标 `lp`）配对的 `)`。没有就回 `PT_NONE`。
+fn pt_gl_rparen(unit: ptr, t: ptr, lp: u32, hi: u32) -> u32 {
+    let j: u32 = lp;
+    let d: u32 = 0;
+    while j < hi && pt_kind(t, j) != 4 {
+        if pt_tis(unit, t, j, "(") {
+            d = d + 1;
+        }
+        if pt_tis(unit, t, j, ")") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+/// `nm` 处的声明在**函数体顶层**吗（`fat` 到 `nm` 之间大括号配平为 0）—— 与 `_l1_place`
+/// 的 `depth0 == 0` 同一条。
+fn pt_gl_istop(unit: ptr, t: ptr, fat: u32, nm: u32) -> u32 {
+    let dep: u32 = 0;
+    let z: u32 = fat;
+    while z < nm {
+        if pt_tis(unit, t, z, "{") {
+            dep = dep + 1;
+        }
+        if pt_tis(unit, t, z, "}") {
+            dep = dep - 1;
+        }
+        z = z + 1;
+    }
+    if dep == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// `nm` 落在 `out` 里那 `n` 个范围（`{at, end}`）之内吗 —— L2 的判据。
+fn pt_gl_inrange(nm: u32, out: ptr, n: u32) -> u32 {
+    let q: u32 = 0;
+    while q < n {
+        let a: u32 = load32(out, q * 8);
+        let b: u32 = load32(out, q * 8 + 4);
+        if nm >= a && nm < b {
+            return 1;
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
+/// 扫出本函数体里**开着纪元的循环体**范围（`docs/210` §2.3 的 L2），成对写进 `out`（`at`,`end`），
+/// 回对数。`while` / `for VAR in …` 之后**第一个** `{` 就是体 —— 解析器在循环头里
+/// `no_struct`，所以那里不会冒出结构体字面量的 `{`（与 `lomentc` 的 `at = self.i + 1` 同一起点）。
+/// **`impl T for X` 里的 `for` 不算**：靠 "`for` 名字 `in`" 这个形状分开。
+fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, out: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = fat;
+    while i < fend && n < PT_GLRMX {
+        let isloop: u32 = 0;
+        if pt_tis(unit, t, i, "while") {
+            isloop = 1;
+        }
+        if pt_tis(unit, t, i, "for") && pt_kind(t, i + 1) == 0
+                && pt_tis(unit, t, i + 2, "in") {
+            isloop = 1;
+        }
+        if isloop == 1 {
+            let b: u32 = i + 1;
+            while b < fend && !pt_tis(unit, t, b, "{") && pt_kind(t, b) != 4 {
+                b = b + 1;
+            }
+            if b < fend {
+                let at: u32 = b + 1;
+                let end: u32 = skip_block(unit, t, b) - 1;
+                if l2_ok_at(unit, t, at, end, fat, fend, npar, par) == 1 {
+                    store32(out, n * 8, at);
+                    store32(out, n * 8 + 4, end);
+                    n = n + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 一个函数体里四层各领走几个：回打包 `l0 | (l1 << 16) | (l2 << 32)`（每格 16 位够用）。
+///
+/// 候选只有一种形状：`let NAME: ptr = alloc(...)`（尺寸不限）且**紧跟 `;`** —— 与
+/// `_l1_place` 的 `word(j + 1, ";")` 同一条。归属**从强到弱**：
+///   * **L0** —— `l0_size_at` 非 0（字面量尺寸 + 只被解引用透过）；
+///   * **L2** —— 落在 `pt_gl_l2ranges` 扫出的某个纪元体内；
+///   * **L1** —— 声明在**函数体顶层**、`l0_size_at` 为 0、`l1_ptr_only_at` 为 1；
+///   * 其余落 L3（由调用方用 `total` 减出来）。
+/// 12 个十六进制位的打包与"站点数不可能过 65535"这条一起成立 —— 单元规模那里早有上限。
+fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr) -> u64 {
+    let nrng: u32 = pt_gl_l2ranges(unit, t, fat, fend, npar, par, ptr_add(sc, PT_GLRNG));
+    let nl0: u32 = 0;
+    let nl1: u32 = 0;
+    let nl2: u32 = 0;
+    let d: u32 = fat;
+    while d < fend {
+        let nm: u32 = d + 1;
+        if pt_tis(unit, t, d, "let") && !pt_tis(unit, t, d - 1, "if") && nm + 5 < fend
+                && pt_kind(t, nm) == 0 && pt_tis(unit, t, nm + 1, ":")
+                && pt_tis(unit, t, nm + 2, "ptr") && pt_tis(unit, t, nm + 3, "=")
+                && pt_tis(unit, t, nm + 4, "alloc") && pt_tis(unit, t, nm + 5, "(") {
+            let j: u32 = nm + 5;
+            let dep: u32 = 0;
+            let done: u32 = 0;
+            while j < fend && done == 0 {
+                if pt_tis(unit, t, j, "(") {
+                    dep = dep + 1;
+                }
+                if pt_tis(unit, t, j, ")") {
+                    dep = dep - 1;
+                    if dep == 0 {
+                        done = 1;
+                    }
+                }
+                j = j + 1;
+            }
+            if done == 1 && pt_tis(unit, t, j, ";") {
+                if l0_size_at(unit, t, nm, fat, fend, npar, par) != 0 {
+                    nl0 = nl0 + 1;
+                } else if pt_gl_inrange(nm, ptr_add(sc, PT_GLRNG), nrng) == 1 {
+                    nl2 = nl2 + 1;
+                } else if pt_gl_istop(unit, t, fat, nm) == 1
+                        && l1_ptr_only_at(unit, t, nm, fat, fend, npar, par,
+                                          ptr_add(sc, PT_GLSCR)) == 1 {
+                    nl1 = nl1 + 1;
+                }
+            }
+        }
+        d = d + 1;
+    }
+    return (nl0 as u64) | ((nl1 as u64) << 16) | ((nl2 as u64) << 32);
+}
+
+/// 本单元是不是 `gc_auto_alpha` 档（`docs/175` §3.4）—— 四层梯**只在这一档算**，别的档
+/// 三个数恒为 0（参考侧 `f.l0` / `f.l1` / `s.l2` 只在 alpha 那一趟填，见 `parse()` 末尾）。
+/// 扫描口径与 `pt_gc` 同。
+fn pt_gc_is_alpha(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && pt_tis(unit, t, i + 1, "gc_auto_alpha") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 本单元里四层各领走几个（打包同上）。扫**每一个 `fn` 体**（顶层 + `impl` 里的方法 +
+/// 泛型原件）—— 与参考实现在 `raw_mod`（**单态化之前**）上迭代 `mod.funcs + impl 方法`
+/// 是同一批函数体（单态化造出的实例副本两边都不数）。
+/// **非 alpha 档直接回 0** —— 三张分层表那时是空的。
+fn pt_gl_all(sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
+    if pt_gc_is_alpha(unit, t, lo, hi) == 0 {
+        return 0;
+    }
+    let nl0: u64 = 0;
+    let nl1: u64 = 0;
+    let nl2: u64 = 0;
+    let fi: u32 = lo;
+    while fi < hi && pt_kind(t, fi) != 4 {
+        if pt_tis(unit, t, fi, "fn")
+                && !(fi > lo && pt_tis(unit, t, fi - 1, "extern")) {
+            let lp: u32 = pt_gl_lparen(unit, t, fi, hi);
+            if lp != PT_NONE {
+                let rp: u32 = pt_gl_rparen(unit, t, lp, hi);
+                if rp != PT_NONE {
+                    let b: u32 = rp + 1;
+                    while b < hi && !pt_tis(unit, t, b, "{") && pt_kind(t, b) != 4 {
+                        b = b + 1;
+                    }
+                    if b < hi {
+                        let fat: u32 = b + 1;
+                        let fend: u32 = skip_block(unit, t, b) - 1;
+                        let npar: u32 = pt_gl_params(unit, t, lp, ptr_add(sc, PT_GLPAR));
+                        let pk: u64 = pt_gl_fn(sc, unit, t, fat, fend, npar,
+                                               ptr_add(sc, PT_GLPAR));
+                        nl0 = nl0 + (pk & 65535);
+                        nl1 = nl1 + ((pk >> 16) & 65535);
+                        nl2 = nl2 + ((pk >> 32) & 65535);
+                    }
+                }
+            }
+        }
+        fi = fi + 1;
+    }
+    return nl0 | (nl1 << 16) | (nl2 << 32);
+}
+
 /// 类型形参个数: `Name < A , B >` 里逗号个数 + 1。
 fn pt_cnt_tps(unit: ptr, t: ptr, lt: u32, gt: u32) -> u32 {
     let n: u32 = 1;
@@ -1002,12 +1274,19 @@ const PT_FTAB: u32 = 113328;
 const PT_RMETA: u32 = 113648;
 const PT_L0CAP: u32 = 65536;
 const PT_FMAX: u32 = 16;
+// `gc_ladder`（`docs/210` §5, v10）用的两张临时表。都在状态块尾巴上 —— 与 `boundary`
+// 那种"数一遍就完"的不同，四层梯要**先扫出 L2 的循环体范围、再对每个候选站点查归属**。
+const PT_GLPAR: u32 = 113680;       // 当前函数的形参名字表: 64 × 8 (与 `CG_CUR` 同形)
+const PT_GLPMX: u32 = 64;
+const PT_GLRNG: u32 = 114192;       // 本函数"开着纪元的循环体"范围: 32 × 8 {at, end}
+const PT_GLRMX: u32 = 32;
+const PT_GLSCR: u32 = 114448;       // `l1_ptr_only_at` 的 `out`（它要写"最后一次用处"）
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 113680;
+const PT_SC_BYTES: u64 = 114456;
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -4510,8 +4789,15 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let nim: u32 = pt_cnt_imports(unit, t, lo);
     let o: u32 = 0;
     o = pt_str(out, o, "{\n");
+    // v10 = v9 + **GC 的组成**（`docs/210` §3/§5）：四层梯各领走几个 `alloc` 站点。
+    let ngl_tot: u32 = pt_gl_total(unit, t, lo, hi);
+    let ngl_pk: u64 = pt_gl_all(sc, unit, t, lo, hi);
+    // 三个份额**先落成 u32** —— 混用 u32/u64 的减法会发出类型不匹配的 IR（实测被 clang 拒）。
+    let ngl_a: u32 = (ngl_pk & 65535) as u32;
+    let ngl_b: u32 = ((ngl_pk >> 16) & 65535) as u32;
+    let ngl_c: u32 = ((ngl_pk >> 32) & 65535) as u32;
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v9");
+    o = pt_qs(out, o, "v10");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -4641,6 +4927,28 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, (nbd_ec + nbd_sys + nbd_ptr) as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **GC 的组成**（`docs/210` §3/§5, v10）—— 与 `boundary` 同形：四个分量 + 一个总数，
+    // 总数就是四者之和。**必填**：一个"缺席的组成"会被读成"这份程序没有 GC"。
+    o = pt_key(out, o, 1, "gc_ladder");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "l0");
+    o = pt_dec(out, o, ngl_a as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "l1");
+    o = pt_dec(out, o, ngl_b as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "l2");
+    o = pt_dec(out, o, ngl_c as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "l3");
+    o = pt_dec(out, o, (ngl_tot - (ngl_a + ngl_b + ngl_c)) as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "total_sites");
+    o = pt_dec(out, o, ngl_tot as u64);
     o = pt_str(out, o, "\n");
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");
