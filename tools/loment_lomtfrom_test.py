@@ -252,6 +252,33 @@ def test_lomtfrom_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomtfrom.lomt 成功，且 IR 与参考逐字节相同 ({len(want)}B)")
 
 
+@test
+def test_externs_keys_are_the_declared_names():
+    """`emit_lomt(impl=True)` 递给翻译器的 `externs` 表，**每个键必须是那条声明自己的名字**。
+
+    `docs/186` §9 那条"声明在此、实现在别处"的口子就是它：带正文的函数体里调用一个
+    **本单元没有正文**的函数时，靠这张表让调用点解析得到。
+
+    曾经写成 `{n: _ty(...) for f in fns ...}` —— 而 `n` 不是这个推导式的变量，它是上面
+    `for f in fns:` 那个循环**残留下来**的最后一个函数名。于是每个条目的键都塌成同一个
+    名字、表只剩一条，调用点解析不到，报出来的却是"本单元没有这个函数"（指向别处）。
+
+    这一条**不在孪生的覆盖面上** —— `lomtfrom.lomt` 只走 `impl=False` 那条路
+    （它的头注写明），所以只在参考实现这边钉。
+    """
+    doc = _base(functions=[
+        # 无正文 + `abi="c"` = 外部函数：发 `pub extern fn`，并进 `externs` 表
+        _fn(name="helper", params=[{"name": "x", "type": "i32"}], ret="i32"),
+        # 有正文的那个调用它
+        _fn(name="main", abi=None, body="int main() { return helper(3); }", body_line=3),
+    ])
+    text, skipped = lomt_from.emit_lomt(doc, impl=True)
+    assert not skipped, f"没有东西该被跳过，却跳了：{skipped}"
+    assert "pub extern fn helper" in text, text
+    assert "helper(3)" in text, text
+    print("      externs 的键是声明自己的名字；调用点因此解析得到")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:

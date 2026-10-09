@@ -371,7 +371,11 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             # 所以 Python 单元里的跨函数调用只认带正文的那些 —— 缺了会**响亮报错**。
             kw: dict = {}
             if lang == "c":
-                kw["externs"] = {n: _ty(f.get("ret") or "()")
+                # 键**必须**是 `f.get("name")`，不能写成 `n` —— 上面那个 `for f in fns`
+                # 的循环变量叫 `n`，循环结束后它留着**最后一个函数**的名字。曾经写的就是
+                # `n`，于是每个条目的键都塌成同一个名字、字典只剩一条，跨单元那条路
+                # 整个失效（而报出来的话是"本单元没有这个函数"，指向别处）。
+                kw["externs"] = {f.get("name"): _ty(f.get("ret") or "()")
                                  for f in fns
                                  if _is_ident(f.get("name")) and f.get("name") not in bodies
                                  and _ffi_ok(f.get("ret") or "()")}
