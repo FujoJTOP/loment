@@ -1097,6 +1097,47 @@ CPP_TYPES = dict(C_TYPES, **{
 })
 
 
+def _past_semi(body: str, i: int) -> int:
+    """从 `i` 起吃掉同一行上的空白与一个可选的 `;`，返回新末尾（给"认下这一条"用）。
+
+    `struct P { … }` / `enum E { … }` 那两条正则到 `}` 就停了，**尾随的 `;` 不在匹配里**
+    —— 不补这一下，那个分号会被当成"谁也不认识的顶层内容"报出来。
+    """
+    j = i
+    while j < len(body) and body[j] in " \t":
+        j += 1
+    return j + 1 if j < len(body) and body[j] == ";" else i
+
+
+def _c_leftover_lines(body: str, consumed: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """顶层**没有任何规则认下来**的非空白内容 -> `[(行号, 那一行的原文), …]`（一行一条）。
+
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏，
+    而 `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层 ——
+    扫不到的既不进产物、也不进 `skipped`。单元于是带着**半份内容**被发出去，
+    而 `check` 判 `[OK]`。这一条把残渣找出来（`docs/167`："不静默丢"）。
+
+    输入是**只抹了注释**的那一份（`_from_c` 里的 `nocomment`），不是扫描用的 `body` ——
+    后者连 `#` 行也抹掉了，而 `#include` / `#define` **正是要报的东西**。
+    两份逐字节等长（抹的是等长空白），所以 `consumed` 的下标在两边通用。
+    """
+    used = bytearray(len(body))
+    for a, b in consumed:
+        for i in range(max(a, 0), min(b, len(used))):
+            used[i] = 1
+    out: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for m in re.finditer(r"[^\s]", body):
+        if used[m.start()]:
+            continue
+        ln = body.count("\n", 0, m.start()) + 1
+        if ln in seen:
+            continue
+        seen.add(ln)
+        out.append((ln, body.splitlines()[ln - 1].strip()))
+    return out
+
+
 def _from_c(src: str, name: str, mode: str, grammar: str,
             types: dict) -> tuple[dict, Report]:
     """**C 系那一门**（C / C++）的共用引擎：函数、结构体、枚举、常量四种声明。
@@ -1107,9 +1148,17 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     rep = Report(name, grammar, mode)
     doc = _blank(_ident(Path(name).stem), grammar)
     body = _C_COMMENT.sub(_blank_keep_off, src)
+    #: **只抹了注释**的那一份。残渣检测要它：扫描用的 `body` 连 `#` 行也抹掉了
+    #: （下一行），而 `#include` / `#define` 正是 `docs/186` §4 列进"点名拒绝"那一栏的
+    #: 东西 —— 抹掉之后谁也看不见它们。
+    nocomment = body
     body = re.sub(r"^[ \t]*#.*$", _blank_keep_off, body, flags=re.M)
     known: set[str] = set()
+    #: 三条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
+    #: 由 `_c_leftover_lines` 报出来（见那一处的注解）。
+    consumed: list[tuple[int, int]] = []
     for m in _C_STRUCT.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         sname, inner = m.group(1), m.group(2)
         fields = []
         for fm in _C_FIELD.finditer(inner):
@@ -1134,6 +1183,7 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     # 判据是"有没有任何一个变体带显式值": 有 -> 全按 C 语义算出值、发芽成 consts;
     # 没有 -> 就是一个普通枚举, 进 `enums`。
     for m in _C_ENUM.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         ename, inner = m.group(1), m.group(2)
         members, cur, next_v = [], None, 0
         for raw in inner.split(","):
@@ -1182,9 +1232,13 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
         close = _block_end(body, m.end() - 1) if is_def else -1
         if is_def and close < 0:
             rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            consumed.append((m.start(), m.end()))
             continue
         if is_def:
             claimed = close + 1
+            consumed.append((m.start(), close + 1))
+        else:
+            consumed.append((m.start(), m.end()))
         if "..." in params:
             rep.skip("fn", fn, "变参")
             continue
@@ -1230,6 +1284,12 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    # ---- 残渣：顶层还有"谁也不认识"的东西 -> **报出来**，别让半份单元悄悄发出去
+    for ln, txt in _c_leftover_lines(nocomment, consumed):
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Stage A 只认函数 / `struct` / "
+                 f"`enum`；`typedef`、全局量、`union`、预处理指令都在子集外"
+                 f"（`docs/186` §4）。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 

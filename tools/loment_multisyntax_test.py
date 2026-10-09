@@ -878,6 +878,44 @@ def test_functions_are_found_wherever_they_start():
 
 
 @test
+def test_unrecognised_toplevel_content_is_reported():
+    """顶层"谁也不认识"的东西要**报出来**，不能让它悄悄蒸发。
+
+    `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层，**扫不到的既不进
+    产物、也不进 `skipped`** —— 单元于是带着**半份内容**被发出去，而 `check` 判 `[OK]`。
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏。
+
+    两面都钉：七种认不出的形状**必须报**；而认识的形状（含 `struct` / `enum` 后面那个
+    分号、以及注释里的 `#`）**不许**被误报 —— 残渣检测最容易错的就是"顺手报多了"。
+    """
+    for label, head in {
+        "typedef": "typedef int myint;\n",
+        "global":  "int g = 7;\n",
+        "union":   "union U { int a; long b; };\n",
+        "include": "#include <stdio.h>\n",
+        "define":  "#define N 5\n",
+        "extern":  "extern int g;\n",
+        "knr":     "int f(a, b) int a; int b; { return a + b; }\n",
+    }.items():
+        doc, rep = potato_from.from_c(head + "int main() { return 5; }\n", "t.c", "strict")
+        got = [x for x in rep.skipped if "没有对应的规则" in x["why"]]
+        assert got, f"{label}: 没报出来（skipped={rep.skipped}）"
+        assert [f["name"] for f in doc["functions"]] == ["main"], (label, doc["functions"])
+    # 反面：认识的形状不许被当成残渣（`struct` / `enum` 尾随的分号也算它们的）
+    doc, rep = potato_from.from_c(
+        "struct P { int a; };\nenum E { A, B };\nint main() { return 5; }\n", "t.c", "strict")
+    assert not [x for x in rep.skipped if "没有对应的规则" in x["why"]], rep.skipped
+    assert [t["name"] for t in doc["types"]] == ["P"], doc["types"]
+    # 注释里的 `#` 不算（注释先被等长抹掉）
+    _, rep = potato_from.from_c("/* #define X 5 */\nint main() { return 5; }\n", "t.c", "strict")
+    assert not rep.skipped, rep.skipped
+    print("      顶层认不出的七种形状都报得出来；struct/enum 与注释里的 # 不误报")
+
+
+
+
+
+@test
 def test_array_typed_struct_field_does_not_invalidate_the_object():
     """`[T; N]` 当**结构体字段**: 校验器曾经把它判成"未声明", 于是**整份对象非法**、
     `lomt_from` 直接 `[ERR]` 退出 —— 一个字段的问题毁掉整个模块, 比 skip 更坏。
