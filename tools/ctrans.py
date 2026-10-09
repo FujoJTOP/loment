@@ -92,6 +92,8 @@ C = Dialect(
     # C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
     # `#include` —— `int true = 5;` 是合法的普通变量。见 `Dialect.bool_literals`。
     bool_literals=False,
+    # 函数内的 `static` 是**静态存储期**，丢掉会改程序的数 —— 见 `Dialect.local_storage`。
+    local_storage=frozenset({"static"}),
 )
 
 

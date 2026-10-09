@@ -474,6 +474,44 @@ def test_true_and_false_are_ordinary_names_in_c():
     print("      C 里 `true`/`false` 是普通名字；Java/C#/C++ 里仍是字面量")
 
 
+@test
+def test_local_static_is_refused_not_dropped():
+    """函数内的 `static` **响亮拒绝**，不是"收下并丢掉"。
+
+    `docs/186` §6.3 给"丢掉 `static`"写的理由是**内部链接**（"这里翻的是整个单元的
+    全部函数，没有第二个翻译单元能再定义同名函数"）。那条理由对**函数级** `static` 成立，
+    对**函数内** `static` **不成立** —— 那里 `static` 说的是**静态存储期**（值跨调用保留）。
+
+    实测：`int bump() { static int c = 0; c = c + 1; return c; }` 把 `static` 丢掉之后，
+    `bump() * 10 + bump()` 给 **11**，而 clang 给 **12** —— 产物编得过、跑得动、数不对，
+    而且**没有任何一处出声**。
+
+    这一条同时钉住"别顺手拒多了"：函数级 `static`、局部 `const`、局部 `inline`、
+    形参 `const` 都要**照旧收下**（那几处在各自的位置上确实没有可分辨的差别）。
+    """
+    try:
+        ctrans.translate("int bump() { static int c = 0; c = c + 1; return c; }\n")
+    except trans_core.Unsupported as e:
+        assert "存储期" in str(e), str(e)
+    else:
+        raise AssertionError("函数内的 `static` 被静默丢掉了")
+    for still_ok in ("static int f() { return 7; }\n",           # 函数级：内部链接
+                     "int f() { const int c = 7; return c; }\n",  # 局部 const：保义
+                     "int f() { inline int c = 7; return c; }\n",
+                     "int f(const int a) { return a; }\n"):       # 形参 const
+        ctrans.translate(still_ok)
+    try:
+        cpptrans.translate("int f() { static int c = 0; return c; }\n")
+    except trans_core.Unsupported:
+        pass
+    else:
+        raise AssertionError("C++ 的函数内 `static` 没被拒")
+    print("      函数内 `static` 点名拒；函数级 static 与局部 const/inline 照旧")
+
+
+
+
+
 
 
 

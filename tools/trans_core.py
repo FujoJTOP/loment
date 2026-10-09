@@ -142,6 +142,11 @@ class Dialect:
     #: `pub const`。翻译器只要**跳过**那条声明，并且认得那个名字。
     #: **空集 = 这一族不收顶层常量**（C 就是 —— `potato_from` 也不收它的全局量）。
     const_words: frozenset = frozenset()
+    #: **在"函数内声明"这个位置上，哪些修饰词不能当成无所谓而丢掉。**
+    #: C / C++ 的 `static` 在这里说的是**静态存储期**（值跨调用保留），与链接无关 ——
+    #: 丢掉它会让每次调用都从初值重来，**产物照样编得过，只是数不对**。
+    #: `const` / `inline` 在局部位置上没有可分辨的差别，所以不在这一集里。
+    local_storage: frozenset = frozenset()
     #: **这一族特有的源码预处理**（`src -> src`），在分词**之前**跑。
     #:   Java / C# —— 抹掉 `class` 外壳（函数住在类里，而解析器看的是顶层）
     #:   C / C++   —— 没有
@@ -450,7 +455,7 @@ class Parser:
         return t[1], t[2]
 
     # ---- 声明说明符
-    def spec(self) -> tuple[str, str, int]:
+    def spec(self, local: bool = False) -> tuple[str, str, int]:
         """吃 `[unsigned] int` / `void` / … -> `(Loment 类型, 变量名, 行)`。
 
         **顺手把"这一条声明里出现过哪些词"记在 `self.last_spec` 上** ——
@@ -466,9 +471,19 @@ class Parser:
             if w in self.d.bad_spec:
                 raise Unsupported(f"第 {self.peek()[2]} 行: 不支持存储类/限定符 `{w}`")
             if w in self.d.linkage:
-                # 收下并丢掉。**丢掉是保义的**：`static` 是内部链接、`inline` 是内联建议，
+                # **函数那一层**收下并丢掉：`static` 是内部链接、`inline` 是内联建议，
                 # 而这里翻的是**整个单元的全部函数** —— 没有第二个翻译单元能再定义同名函数，
-                # 于是"内部链接"在这个语境里没有可分辨的差别。见文件头 §语义选择 3。
+                # 于是"内部链接"在这个语境里没有可分辨的差别。`const` 在只有标量、没有指针的
+                # 子集里也一样（源侧本就保证它不会被改）。见文件头 §语义选择 3。
+                #
+                # **局部位置上不是这么回事**：那里 `static` 说的是**静态存储期**（值跨调用
+                # 保留），与链接无关，丢掉会改程序的数。`local=True` 时拒掉 —— 见
+                # `Dialect.local_storage`。
+                if local and w in self.d.local_storage:
+                    raise Unsupported(
+                        f"第 {self.peek()[2]} 行: 函数内的 `{w}` 改的是**存储期**"
+                        f"（值跨调用保留），Stage A 没有对应的表示 —— 丢掉它会让每次调用"
+                        f"都从初值重来（**产物照样编得过，只是数不对**）。这一处不收。")
                 self.i += 1
                 continue
             if w in self.d.agg:
@@ -633,7 +648,7 @@ class Parser:
         """
         t = self.peek()
         if t[0] == "id" and t[1] in self.d.spec_words:
-            ty, name, line = self.spec()
+            ty, name, line = self.spec(local=True)
             if self.at(";"):
                 self.i += 1
                 return Decl(ty, name, None, line)
