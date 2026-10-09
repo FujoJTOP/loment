@@ -2,6 +2,62 @@
 
 > 工作区级指令。ZCode 读 `<repo>/AGENTS.md`，Claude Code / DSH 也认同名文件。
 > 只写"从代码本身看不出来"的约定；判据与进度在 `docs/`。
+>
+> **动手之前先 `git fetch origin`** —— 你面前这棵树**会静默落后**，权威状态在 `origin`
+> （第一节；懒得记就跑 `python tools/loment_state.py`）。
+
+## 权威状态在 `origin`，不在你面前这棵本地树
+
+**背景**：**本仓的检出静默落后是常态，而且落后得很多。** 2026-09-25 实测：本地 `main`
+比 `origin/main` 落后 **181 个提交**，树里连 `.github/` 都不存在（它对 main 是 tracked）。
+同形状的另一次代价更贵：0.1.4 **早已发布、公告都发了**，而有人读着本地树还在说"等
+0.1.4"；一笔早已由别的会话合进主线的成品，被当成"还没人做"又收了一遍。
+
+代价不在"少几行代码"，在于**基于旧树下结论**：版本、发布与否、tag、CI、某个文件在不在、
+某条约定落没落地 —— 这些一旦读错，后面的判断全歪，而且**旧树不会报错**。还有一次是 PR：
+基点老，一开出来就带着一片"看着像回归、其实是基点太老"的红。
+
+**做法**：
+
+1. **开工第一条命令是 `git fetch origin`**，并看一眼 `git log --oneline -1 origin/main` 的日期。
+2. **判断任何"项目状态"都读 `origin/main`，不读工作树**。不必 checkout，直接读远端引用：
+   `git show origin/main:<路径>`、`git log origin/main`。
+3. **开分支 / rebase 一律以 `origin/main` 为基点**，不要以本地 `main` 为基点。
+4. **对外文案**（README / 公告 / PR 描述）里的版本与"已发布"表态，必须核 `origin` 的 tag。
+5. 懒人版：`python tools/loment_state.py` —— 上面这几件一次打出来（默认先 fetch）。
+
+**边界**（别做过头）：
+
+- 这条只约束**读状态**，不约束**写** —— 改东西照旧在工作树里，而 `fetch` **不会**更新检出。
+- **落后是常态，不是故障**：发现自己落后时先 `git log` / `git diff` 看清是谁的，别惊慌回退。
+- 反过来，"树老"**不是**本机红项的免罪牌：归因仍要落到具体那一笔（自己的 / 别人的在制品 /
+  本机固有红项）。两条不能互相顶替。
+
+## `kernel/` 与 `sdk/fuai-spec/` 在本仓是 **vendored 只读副本**，不是活的
+
+**背景**：本仓是 Loment 的开发口，但 Loment 的 L0 接口层（`lom/*.lom`）是**跨线契约** ——
+契约对面那一侧的源码在 FujoOS 仓里。若本仓不带那一侧，几条对账判据就**没有对照面**
+（`lom_audit` 直接崩、`fuai_contract_check` 读不到）、`loment_p7_test` 断言不了
+"syscall 层单一真源"。
+
+**做法**：把这些对照物**按原路径**带进来（`tools/loment_publish.py` 顶部 `COUNTERPARTS`
+是那份清单），判据因此一行都不用改。
+
+**另有一类**：`loment/corpus.json` 点名的**语料**（Potato LLM 那一臂的输入，含
+`sdk/linux/m1*.c` 与 `kernel/src/{smp,desk,graphics}.rs`）。它不是契约对照物，但同一个
+道理 —— 判据要读、文件在 FujoOS 侧。那一份**从 `corpus.json` 推导**，不手抄：语料随
+AI 线经常变，手抄必然静默漂。
+
+**约定**：
+
+1. **只读**。改它们要去 FujoOS 仓改，改完把副本重新拷一份过来 —— 与
+   "本仓 `kernel/` 是陈旧副本"的既有分界一致。**在本仓直接改是错的**：没有东西会
+   把你的改动带回去，而判据会拿着一份只在本地成立的对照面报绿。
+2. 少了它们判据会**崩**，不是静默红；`loment_publish.py --check` 里有一条判据钉住
+   "对照物在树里且在发布清单里"。
+3. `LinuxFUAI/`（compat 线的 C 实现）**不在**这份清单里 —— 那是对方的独立仓库，不是
+   文件。读它的两条判据（`lom_audit` 的 C 头、`lomc_test` 的发布副本一致性）在本机
+   是**固有红项**，与搬家无关（旧树逐条同样红）。
 
 ## 展示 Loment 代码时用 `rust` 作围栏语言
 
@@ -54,6 +110,25 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 4. 若确要变 L0：在 `docs/` 留一行"下游影响"，并知会 compat 线。
 
 **不做**：不在语言冻结前把 Loment 产物提交成内核依赖、不把 Python 引入内核构建链（见 `docs/165`）。
+
+## 改语言面要付双倍的工：手写一条提交、生成一条提交
+
+**背景**：语言面（lexer / parser / checker / codegen + 诊断码 + 内建表）在仓里有**两个实现**
+（`tools/lomentc.py` 与 `loment/selfhost/*.lomt`），必须逐字节一致（`docs/158` §5）。
+每次改完，`loment/build/selfhost_driver.ll`（46 KB 的自举种子）会被 `--emit` 重生成，
+而 SSA 编号会整体位移 —— 实测 `extern fn` 那两次提交里它以 **3858 行占了 diff 的 93%**，
+把真正要看的 **153 行手写**淹掉（测量见 `docs/176` §1）。
+
+**约定**：
+
+1. **机械产物单独成一条提交**，消息里写明"只有生成物"。手写那条（源 + 文档 + 判据）与它
+   分开，这样 review 只需要看前者。
+2. **种子永远重新生成，不手工合并**。它在 `.gitattributes` 里标了 `-diff`，于是两边都改了
+   它时是**整file 冲突** —— 那是对的，逼你跑 `python tools/loment_seed.py --emit`
+   （`loment_seed_test` 会告诉你它是否过期）。
+3. 判据 `loment_seed_test::test_seed_is_marked_generated` 钉住"种子被标成生成物"，
+   防止这条纪律悄悄回退。**能藏的前提是它可复现** —— 上面那条"种子 == 参考实现的产物"
+   就是那个前提，两条是一对。
 
 ## 写 Loment 程序之前，先读那份 agent 指南
 

@@ -230,6 +230,11 @@ GLOBS = [
     "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
     "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
     "tools/loment_syscalls_test.py",
+    # 权威状态在 `origin` 那一条 (CLAUDE.md 第一节): 读 origin 的版本/tag/落后数, 让
+    # "先 fetch 再读状态"可执行。**这两行的位置与 `loment/tools/lomrel.lomt` 的
+    # `globs_text()` 逐行对齐** —— 两处插在不同位置会给出同集合不同顺序的两份清单,
+    # `loment_rel_test` 报"落盘不同"而字节数一样。
+    "tools/loment_state.py", "tools/loment_state_test.py",
 ]
 
 
