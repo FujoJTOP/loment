@@ -89,6 +89,9 @@ C = Dialect(
     coerce_bool_to_int=True,
     int_default="i32",
     safe_suffix="_c",
+    # C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
+    # `#include` —— `int true = 5;` 是合法的普通变量。见 `Dialect.bool_literals`。
+    bool_literals=False,
 )
 
 

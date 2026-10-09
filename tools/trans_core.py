@@ -123,6 +123,13 @@ class Dialect:
     #: 同一处差，两条判据（"能表达的就转，表达不出来的就报错"）给出相反结论。
     coerce_int_to_bool: bool = True
     coerce_bool_to_int: bool = True
+    #: **这一族的源码里 `true` / `false` 是不是字面量。**
+    #: Java / C# / Go / C++ 是（它们是关键字，写 `int true = 5;` 本身就非法）；
+    #: **C 不是** —— C99/C11 里它只是 `<stdbool.h>` 的一个**宏**，而这一门没有
+    #: `#include`，所以 `int true = 5;` 是完全合法的普通变量。认成字面量的话，
+    #: 声明处被改名（`let true_c: i32 = 5;`）、引用处却没改（`return (true) as i32;`）——
+    #: 同一个名字在一个函数里**两个身份**，退 0 而数是错的。
+    bool_literals: bool = True
     #: 布尔的整型投影用哪个宽度（`bool -> int` 的 `as <x>`）。**粗粒度的兜底** ——
     #: 真需求是"按上下文的具体整型"，现在传不进来，所以取这一族的默认宽度。
     int_default: str = "i32"
@@ -531,8 +538,9 @@ class Parser:
         if t[0] == "num":
             self.i += 1
             return Lit(int(t[1], 0), t[2])
-        if t[0] == "id" and t[1] in ("true", "false"):
-            # **四门都有这两个字面量**，而 Loment 也有 `true` / `false` —— 直接映过去。
+        if t[0] == "id" and t[1] in ("true", "false") and self.d.bool_literals:
+            # 这一族的源码里这两个就是**字面量**（见 `Dialect.bool_literals`），
+            # 而 Loment 也有 `true` / `false` —— 直接映过去。
             # 不走 `Var`：那样会报"用了没声明过的 `true`"，一句指不到点子的话
             # （真原因是"这是个布尔字面量，不是变量"）。
             self.i += 1

@@ -439,6 +439,44 @@ def test_renames_cover_the_declaration_and_the_use_sites():
     print("      函数名与调用点一起改名；改完的两条声明名字不同，且产物真编得过")
 
 
+@test
+def test_true_and_false_are_ordinary_names_in_c():
+    """C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
+    `#include`，所以 `int true = 5;` 是合法的普通变量（C99/C11）。
+
+    原先按字面量认，于是**声明处被改名、引用处没改**：
+
+        let true_c: i32 = 5;      ← 声明改了名（`true` 撞 Loment 保留字）
+        return (true) as i32;     ← 引用仍是**布尔字面量**
+
+    一个名字在一个函数里**两个身份**，产物编得过、退 0，而数是错的。特别阴的是
+    `int true = 5; return true;` 恰好给 1 —— 与"它真是字面量"的行为**无法区分**，
+    得换个初值才显形。
+
+    **别的门必须不变**：Java / C# / Go / C++ 里这两个是关键字，写 `int true = 5;`
+    本身就非法 —— 它们的字面量识别照旧（`Dialect.bool_literals` 默认就是 True）。
+    """
+    out = ctrans.translate("int main(void) { int true = 5; return true; }\n")
+    assert out.count("true_c") == 2, f"声明处与引用处要同名:\n{out}"
+    out2 = ctrans.translate("int main(void) { int false = 5; return false; }\n")
+    assert out2.count("false_c") == 2, out2
+    # 别的门：字面量照旧
+    others = [
+        ("jtrans", jtrans, "public class T {\n    public static int f() {\n"
+                           "        boolean b = true;\n        return 1;\n    }\n}\n"),
+        ("cstrans", cstrans, "class T {\n    static int F() {\n"
+                             "        bool b = false;\n        return 1;\n    }\n}\n"),
+        ("cpptrans", cpptrans, "int f() {\n    bool b = true;\n    return 1;\n}\n"),
+    ]
+    for nm, mod, src in others:
+        got = mod.translate(src)
+        assert "true" in got or "false" in got, f"{nm} 的布尔字面量丢了:\n{got}"
+    print("      C 里 `true`/`false` 是普通名字；Java/C#/C++ 里仍是字面量")
+
+
+
+
+
 
 
 
