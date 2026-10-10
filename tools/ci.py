@@ -202,12 +202,15 @@ SHARD_COST = {
 SHARD_DEFAULT_S = 8.0
 
 #: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 200s+）, 与任何别的判据同片
-#: 都不会更快（墙钟是 max 不是 sum）, 而独占一片之后那一片的工具链可以压到最小。
-#: 两条都只用 **clang**: `loment_seed_test` 的 `bootstrap.sh` 在 runner 上走 clang 那支
-#: （`loment/build/genesis/` 那份的 git mode 是 100644, 没有可执行位, `[ -x ]` 过不了）,
-#: `loment_p8_test` 的对照组也是 clang。所以 `shard_profile` 敢把它们的那两片标成 `llvm`。
-#: **往这里加一条之前, 先逐条确认它真的只要 clang** —— 并把它从 `SHARD_COST` 的负担里
-#: 拿走（它自己一片, 不再参与均分）。
+#: 都不会更快（墙钟是 max 不是 sum）。
+#:
+#: **为什么独占还更划算**: 它们是**单线程长跑**, 跟三条重判据挤同一台 4 vCPU 的 runner
+#: 时会互相拖 —— 实测独占一个安静的 runner 之后 `loment_seed_test` 从 **244s 掉到 172s**、
+#: `loment_p8_test` 从 229s 掉到 156s（docs/213 §5）。**这才是这条名单现在的理由**;
+#: 以前还有一条"独占之后那一片的工具链可以压到最小", 那个随工具链做成镜像而作废了
+#: （各片现在是同一份镜像, 没有"档位"可言）。
+#: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）, 并把它从
+#: `SHARD_COST` 的负担里拿走（它自己一片, 不再参与均分）。
 ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test")
 
 
@@ -224,7 +227,7 @@ def shards(n: int) -> list[list[str]]:
     别的判据同时跑, 而摊到并行 job 上之后"同时"还包括**别的 job**, 所以那一片自己
     一个 job（`gate.yml` 里其余分片 `needs:` 它）; 接着每一条 `ISOLATED_STATIC`
     各占一片; 最后才是均分出来的片。`n` 不够分时**直接断言失败**, 不静默合并 ——
-    合并了就不再是"那一片只要 clang"。
+    静默合并会把"那几条独占一片"这件事悄悄变成"它们与什么都有的一片挤在一起"。
 
     `n <= 1` 时退化成"整道门禁一片"（就是老行为）。
     """
@@ -234,8 +237,9 @@ def shards(n: int) -> list[list[str]]:
     iso = [x for x in STATIC_CHECKS if x in ISOLATED_STATIC]
     rest = [x for x in STATIC_CHECKS if x not in excl and x not in iso]
     n_rest = n - 1 - len(iso)
-    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会让
-    # `gate.yml` 里那句"这一片只要 clang"变成假话（合片之后什么判据都有）。
+    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会把上面那两件
+    # 事（独占、长尾各占一片）悄悄取消掉, 而调用方（`gate.yml`）是按片号取名字的:
+    # 合掉之后 `--shard K/N` 取到的就不是它以为的那一片。
     assert n_rest >= 1, (f"要 {n} 片分不开: 独占的 {len(excl)} 条 + 长尾的 {len(iso)} 条"
                          f"各占一片（共 {1 + len(iso)} 片）, 剩下 {len(rest)} 条还得有地方放"
                          f" —— 至少 {2 + len(iso)} 片")
@@ -254,25 +258,6 @@ def shards(n: int) -> list[list[str]]:
     assert sorted(flat) == sorted(STATIC_CHECKS), "分片不是 STATIC_CHECKS 的划分"
     assert all(b for b in out), "有分片是空的"
     return out
-
-
-def shard_profile(k: int, n: int) -> str:
-    """第 `k` 片（从 1 数）要装什么 —— `gate.yml` 按这个决定装工具链。
-
-    三档, 理由都很具体（**少装一个包就是一条假红**, 多装一个就是白等的几十秒）:
-
-    * `none` —— 这一片一条外部命令都不碰（纯 Python + 仓内自己的原生后端）。
-    * `llvm` —— 只要 LLVM 19（clang）+ coreutils。**只有 `ISOLATED_STATIC` 独占的片
-      能是这一档**: "只要 clang"那句话是**逐条看过**的, 而均分出来的片里什么判据
-      都有, 看不过来 —— 于是那些一律 `full`, 宁可多装。
-    * `full` —— 其余: qemu / go / java / node / vim 都可能用上（包名单在 `gate.yml`）。
-    """
-    b = shards(n)[k - 1]
-    if b and all(any(e in x for e in EXCLUSIVE_STATIC) for x in b):
-        return "none"
-    if b and all(x in ISOLATED_STATIC for x in b):
-        return "llvm"
-    return "full"
 
 
 def _sweep_wsl_tmp() -> None:
@@ -444,9 +429,7 @@ def main():
                     help="只跑第 K 片（共 N 片, K 从 1 数）—— 把整道门禁摊到 N 个并行 job 上, "
                          "见 shards()。`K/N` 里 N 必须等于 `--shard-plan` 给的那个 N")
     ap.add_argument("--shard-plan", type=int, metavar="N", default=None,
-                    help="只打印 N 片的分法（每片一行: 档位 + 名字）, 不跑任何判据")
-    ap.add_argument("--shard-profile", metavar="K/N", default=None,
-                    help="只打印第 K 片要装的工具链档位（none/llvm/full）—— gate.yml 用")
+                    help="只打印 N 片的分法（每片一行: 片号 + 条数 + 名字）, 不跑任何判据")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
@@ -454,17 +437,7 @@ def main():
 
     if a.shard_plan is not None:
         for i, b in enumerate(shards(a.shard_plan)):
-            print(f"shard {i + 1}/{a.shard_plan} [{shard_profile(i + 1, a.shard_plan)}]: "
-                  f"{' '.join(b)}")
-        return 0
-
-    if a.shard_profile:
-        k_s, _, n_s = a.shard_profile.partition("/")
-        try:
-            k, n = int(k_s), int(n_s)
-        except ValueError:
-            ap.error(f"--shard-profile 要写成 K/N（如 2/5）, 得到 {a.shard_profile!r}")
-        print(shard_profile(k, n))
+            print(f"shard {i + 1}/{a.shard_plan} ({len(b)} 条): {' '.join(b)}")
         return 0
 
     # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的

@@ -755,7 +755,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "14a22585c1a39f99654203f80c0f45cc31dd866c1dfdbf37bc14304acc70780c"
+   "sha256": "98504a71ce7bae41667223a5e5f2490b4042aa8efeedf0c5eff0bdbdc94120ad"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1959,7 +1959,7 @@
   },
   {
    "path": "docs/213-gate-shards.md",
-   "sha256": "77ae2041e101b38ac3241766efd76bb5f1cd1406dbb0b7ef4943139b52e13126"
+   "sha256": "d681899ae042ca61bb132d1c0e6df0e40f9b45b64e0fa9528171e787679060dc"
   },
   {
    "path": "docs/217-loment-socket-parity.md",
