@@ -3457,7 +3457,18 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_name_tok(s, out, src, toks, load32(s, CG_CUR + a * 8));
         a = a + 1;
     }
-    emit_str(s, out, ") {\nentry:\n");
+    emit_str(s, out, ")");
+    // 程序入口要 `stackrealign`：进程入口不是一次 `call`，内核给的 rsp 比 SysV 的函数入口
+    // 约定**少 8**（16 对齐 vs `%16 == 8`）。不声明它，`_start` 与它下面每一帧整体偏 8 ——
+    // `lomelf` 那台栈机不碰对齐所以一直看不出来，clang `-O1/-O2` 把局部数组的清零写成
+    // `movaps` 就 `#GP`（`docs/212` §5.2）。参考实现同一行在 `tools/lomentc.py` 的
+    // `ENTRY_FN` / `ENTRY_ATTR`，两处必须逐字节同。
+    // 判据与参考实现同一条：只看**发射出来的名字** —— 泛型实例与 impl 方法的名字都被改写过，
+    // 不可能等于 `_start`，所以它们那两条分支不算。
+    if load32(s, 60) == 4294967295 && fkind != 2 && tok_is(src, toks, base + 1, "_start") == 1 {
+        emit_str(s, out, " \"stackrealign\"");
+    }
+    emit_str(s, out, " {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
