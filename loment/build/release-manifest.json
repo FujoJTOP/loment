@@ -747,7 +747,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "92e04bb0f58f60f4ad6722a33bed80bbc6a979aceb80245fc6fb91e0760d03c2"
+   "sha256": "3e40498cdc1c5458d882bc15ac919c571871cde1020776420c2acfa6cb93e4b2"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1015,11 +1015,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "a3728297ddb80f713c6a86aff0c544376a211ebcf7a671a9a03c95998aacc4f5"
+   "sha256": "d42536b7a8614eac45c9c58c9b1cc80dea2107c6e3f0a7f8b682e76d5e6e3c2c"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "4c6e4df531391f27daae22d54b43baeba7bd7db8d7108c6eb44ff5e3b2df448b"
+   "sha256": "0ead69e78f3d2edffe93db757ea16ebf190b46e9a75bb15f1d4bf31e13bfb4fd"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1936,6 +1936,10 @@
   {
    "path": "docs/211-c-surface-grammar-sweep.md",
    "sha256": "8c2bb42daeaa5b7315cd5afe52fc6f211d72001388a4323b826546ef00bf4953"
+  },
+  {
+   "path": "docs/212-gate-shards.md",
+   "sha256": "93c95d60d1069db2b533a41d8150d1f0a27ebf00c6c95d1484484950d9d622f2"
   },
   {
    "path": "docs/manual/index.md",
