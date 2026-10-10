@@ -47,7 +47,11 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 81
+#
+# 2026-10-10 `register`（`docs/218` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
+# 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
+# 函数那种写法**判成同一批码**，这正是"形态 A 编译到形态 B"要看见的东西。
+BUDGET = 86
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -226,6 +230,25 @@ _CASES: list[tuple[str, str]] = [
      "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
     ("cmd-body-no-decl",
      "module m\n\npub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    # ---- `register`（形态 A，`docs/218` §2 第 3 步）--------------------------------
+    # 与上面那五条**同一批码**，只是换了一种写法：名字由**语法**给出（不再从函数体里扫
+    # 字符串），块里是这条命令的条目。两种写法在两边都必须判成同一个码。
+    ("reg-reserved-name",
+     "module m\n\nregister version {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-two-entries",
+     "module m\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\nregister mcmd {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-bad-signature",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn command_main(a: u32, b: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-no-main",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n"),
+    # 反向那一半（声明在、体不在）也要成对 —— 它原先要等到**链接**才炸。
+    ("cmd-decl-no-body",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn helper() -> u32 {\n    return 0;\n}\n"),
 ]
 
 

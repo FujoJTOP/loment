@@ -40,6 +40,8 @@ capability <ident> : <space>[<lo>..<hi>] [revocable]        // 能力声明
 
 excluded "<说明>"                                           // 出界声明 (可多次)
 
+register <名字> { <条目> }                                   // 命令声明: 名字在语法里 (见 §3.3)
+
 const <NAME>: <int-type> = <int> ;                          // 整型常量
 
 struct <Name> { <field>: <type>, ... }                      // L1 原生数据类型
@@ -217,35 +219,54 @@ freestanding 子集 —— 否则会造出一种"看着像 Python、却什么都
 形式对象**（否则"至多一次"这条规矩审计不到）。走 `docs/158` §5 的四条流程，记录在同文 §5
 的 2026-09-17 条目。
 
-### 3.3 命令声明（`loment_command`，2026-10-10）
+### 3.3 命令声明（`register`，2026-10-10）
 
 **一个单元可以声明自己是一条 `loment` 命令**（设计见 `docs/218`）：
 
 ```rust
 module mycmd
 
-pub fn loment_command() -> str { return "mycmd"; }
-pub fn command_main(argv: ptr, argc: u32) -> u32 { return 0; }
+register mycmd {
+    pub fn command_main(argv: ptr, argc: u32) -> u32 { return 0; }
+}
 ```
 
 编出来的产物因此叫 `loment-mycmd` —— 放上 `PATH`，`loment mycmd …` 就能用（启动器那条
 `loment foo` -> `loment-foo`，`docs/169` §3b）。
 
+**同一件事的另一种写法**（先落地的那一种，仍然成立）：
+
+```rust
+pub fn loment_command() -> str { return "mycmd"; }
+pub fn command_main(argv: ptr, argc: u32) -> u32 { return 0; }
+```
+
+两者**语义相同**：都声明「这个单元是命令 `<名字>`」，都要求 `fn command_main`。差别只在
+**名字从哪来** —— 块那种写在语法里，函数那种是从函数体里**扫**出来的一个字符串。名字是
+**扫**出来的就有一层可以写错的地方（`return` 后面必须直接是字面量，不做常量折叠），块那种
+没有，所以推荐块那种。
+
 | 位置 | 规则 |
 |---|---|
-| 声明 | `pub fn loment_command() -> str { return "<名字>"; }` —— **`return` 后面必须直接是字面量**（工具链**扫**出来，不做常量折叠），而且只在**入口单元** |
+| 声明 | `register <名字> { … }` —— 名字是**标识符**，或字符串字面量（`-` 不是标识符字符，名字里要带它时用这种）；或者 `pub fn loment_command() -> str { return "<名字>"; }`，后者 **`return` 后面必须直接是字面量**。只在**入口单元** |
 | 名字 | `[A-Za-z0-9_-]`、长度 1..64；**不许撞 loment 官方的命令名**（官方优先，撞名等于白做） |
 | 入口 | `fn command_main(argv: ptr, argc: u32) -> u32` —— 签名固定；`argv` 是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径 |
 | 互斥 | 声明了命令就**不许**再写 `_start` —— 进程入口由工具链生成（读 cmdline、数字段、调 `command_main`、把返回值交给 `exit`） |
+| 成对 | 声明与 `command_main` **必须成对**：只有一半都是 E026（有体没声明 = 死代码；有声明没体 = **链接期**才炸，所以拦在检查这一步） |
 | 库 | **库不许声明**：命令是**可执行产物**的身份，库是给别人 `use` 的代码 |
 
+**块里的条目就是普通条目** —— 照常进函数表、照常发射，所以解析、类型检查、L0/L1 分析、
+Potato 形式对象**都不必知道 `register` 存在**。**一个单元只认第一个**：块里再套一个没有
+额外含义（扫描扫出第一个就停，两个实现同一份规则）。
+
 **读法是词法器扫标签**（与 `loment.conf` 的 `source_ext` 同一种，`docs/158`「两个实现的读法
-必须逐字节同源」那条），所以没有新关键字、没有新 AST 节点。标签叫 `loment_command` 而不是
-`command`，是因为 **`command` 已经是关键字**（`command <语言>`，`docs/185`）——
-实测 `pub fn command()` 连解析都过不去。
+必须逐字节同源」那条），所以**没有新 AST 节点**；`register` 是**上下文关键字** —— 只有在
+条目起始的位置才是声明，别处叫这个名字照样是标识符（`let register: u32 = 1;` 编得过）。
+函数那种写法的标签叫 `loment_command` 而不是 `command`，是因为 **`command` 已经是关键字**
+（`command <语言>`，`docs/185`）—— 实测 `pub fn command()` 连解析都过不去。
 
 诊断：**E024** 命令声明不合法（形状 / 名字 / 撞官方名 / 库不许声明）、**E025** 两个进程入口、
-**E026** 命令体与声明对不上（没声明却写了 `command_main` / 签名不对）。
+**E026** 命令体与声明对不上（只有一半 / 签名不对）。
 **"一个单元两条命令"不另立码** —— 那是现成的 **E013**（重名）。
 
 ## 4. 转译契约（Loment → Rust）

@@ -3257,6 +3257,12 @@ fn chk_command(src: ptr, t: ptr, out: ptr, o: u32, scr: ptr) -> u32 {
             o = sym_pub(src, t, out, o, E_CMD_BODY, cm - 1);
         }
     }
+    // 4) 反向那一半：**声明了**却没有 `command_main` —— 工具链生成的 `_start` 要调它，
+    //    没有它就只能等到**链接**（未定义符号）才炸。码用同一个（两半少一半，修法都是
+    //    把两半凑齐）—— 与参考实现那一条逐字对齐。
+    if lt > 0 && cm == 0 {
+        o = sym_pub(src, t, out, o, E_CMD_BODY, lt - 1);
+    }
     return o;
 }
 

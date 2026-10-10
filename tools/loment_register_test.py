@@ -30,6 +30,8 @@ import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "loment" / "examples" / "cmd_hello.lomt"
+#: 同一个命令的**另一种写法**（`register` 块，`docs/218` 形态 A）—— 两条判据拿这两个比。
+REGISTER_EXAMPLE = ROOT / "loment" / "examples" / "register_hello.lomt"
 CHECKER_SRC = ROOT / "loment" / "selfhost" / "checker.lomt"
 IS_WIN = sys.platform == "win32"
 TESTS: list[tuple[str, object]] = []
@@ -53,6 +55,10 @@ def _codes(src: str) -> list[int]:
 GOOD = ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
         "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n")
 
+#: 形态 A（`docs/218` §2 第 3 步）：名字在**语法**里，块里是这条命令的条目。
+GOOD_A = ("module m\n\nregister mcmd {\n"
+          "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n")
+
 
 # ---------------------------------------------------------------- 1. 声明
 
@@ -63,7 +69,25 @@ def test_the_five_rules_report_the_three_codes():
     合法的那个**必须是零码**：一个"看谁都想报"的规则比漏报更糟（它会把正常程序拦下来）。
     """
     assert _codes(GOOD) == [], "合法的命令单元不该有诊断"
+    assert _codes(GOOD_A) == [], "合法的 `register` 单元不该有诊断"
+    # 名字写成字符串（要带 `-` 时用）也是合法的 —— 合法名字的字符集是 `[A-Za-z0-9_-]`，
+    # 而 `-` 不是标识符字符。
+    assert _codes(GOOD_A.replace("register mcmd", 'register "m-cmd"')) == [], \
+        "字符串写法的名字不该有诊断"
     cases = {
+        # ---- 形态 A：与上面那几条同一批码，只是名字在语法里 --------------------
+        "a-bad-name": ('module m\n\nregister "a/b" {\n'
+                       "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
+                       "        return 0;\n    }\n}\n", [24]),
+        # 块里再套一个：扫出第一个就停，所以只认最外层那个（**零码**，不是报错）——
+        # 两个实现都不做深度判断（自举镜同一条规则），这条钉的就是那份一致。
+        "a-nested": ('module m\n\nregister outer {\n    register inner {\n'
+                     "        pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
+                     "            return 0;\n        }\n    }\n}\n", []),
+        "a-no-main": ("module m\n\nregister mcmd {\n"
+                      "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n", [26]),
+        "decl-no-body": ('module m\n\npub fn loment_command() -> str { return "mcmd"; }\n\n'
+                         "fn helper() -> u32 {\n    return 0;\n}\n", [26]),
         # (源码, 期望码)
         "bad-name": ("module m\n\npub fn loment_command() -> str { return \"a/b\"; }\n\n"
                      "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
@@ -147,6 +171,8 @@ def _print_command(src: Path) -> str:
 @test
 def test_print_command_answers_with_the_name_or_nothing():
     assert _print_command(EXAMPLE) == "cmd-hello", "带声明的单元要答出名字"
+    assert _print_command(REGISTER_EXAMPLE) == "reghello", \
+        "`register` 块那种写法要答出同一件事（名字在语法里）"
     assert _print_command(ROOT / "loment" / "examples" / "tour.lomt") == "", \
         "没声明的单元要答一个空行（调用方按「空 = 不是命令」处理）"
 
@@ -235,16 +261,15 @@ def test_generated_entry_calls_command_main_and_the_unit_has_no_start():
     assert "fn _start" not in src, "示例自己写了 `_start` —— 那样这个例子就测不到生成那一路"
 
 
-@test
-def test_the_command_really_runs_and_sees_its_own_command_line():
-    """编出来、**链出来、跑起来**：stdout 是 cmdline 的头四个字节，退出码是参数个数。
+def _build_and_run(src: Path, args: list[str]) -> "tuple[bytes, int] | None":
+    """把 `src` 编出来、链出来、跑起来。链不出来（本机没有那个后端）返回 None。
 
-    只断言 IR 里有 `_start` 是这套东西最容易骗过自己的地方（`docs/218` 的入口那一半
-    第一次就是这么过的：形状对、跑起来 SIGILL）。
+    **不只看 IR**：这套东西最容易骗过自己的地方就是"形状对、跑起来 SIGILL"（`docs/218`
+    的入口那一半第一次就是这么过的），所以每一个命令判据都落到真进程的输出与退出码上。
     """
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
-        mod, deps = lomentc.load_unit(EXAMPLE, ROOT)
+        mod, deps = lomentc.load_unit(src, ROOT)
         ll_text = lomentc.emit_llvm(mod, ROOT, deps)
         (d / "a.ll").write_text(ll_text, encoding="utf-8", newline="\n")
         try:
@@ -252,15 +277,40 @@ def test_the_command_really_runs_and_sees_its_own_command_line():
             raw, _entry = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(ll_text)
         except Exception as e:  # noqa: BLE001
             print(f"      (跳过: 链不出来 —— {type(e).__name__}: {e})")
-            return
+            return None
         exe = d / ("a.exe" if IS_WIN else "a")
         exe.write_bytes(raw)
         exe.chmod(0o755)
-        r = subprocess.run([str(exe), "one", "two"], capture_output=True, timeout=60, shell=False)
-        head = ROOT.as_posix().encode()[:4]
-        assert r.stdout.startswith(head) or len(r.stdout) == 4, \
-            f"stdout 不是命令行开头: {r.stdout[:40]!r}"
-        assert r.returncode == 3, f"`a one two` 该有 3 个字段，实际退出 {r.returncode}"
+        r = subprocess.run([str(exe), *args], capture_output=True, timeout=60, shell=False)
+        return r.stdout, r.returncode
+
+
+@test
+def test_the_command_really_runs_and_sees_its_own_command_line():
+    """编出来、**链出来、跑起来**：stdout 是 cmdline 的头四个字节，退出码是参数个数。"""
+    got = _build_and_run(EXAMPLE, ["one", "two"])
+    if got is None:
+        return
+    out, rc = got
+    head = ROOT.as_posix().encode()[:4]
+    assert out.startswith(head) or len(out) == 4, f"stdout 不是命令行开头: {out[:40]!r}"
+    assert rc == 3, f"`a one two` 该有 3 个字段，实际退出 {rc}"
+
+
+@test
+def test_the_register_form_runs_exactly_like_the_declaration_form():
+    """两种写法编出来的程序**跑起来一样**（同一条命令行 -> 同一份 stdout、同一个退出码）。
+
+    这条是"形态 A 编译到形态 B"那句声明的**行为证据**。断言两边 IR 都有 `_start` 说明不了
+    任何事（两种写法当然都有），要看见的是：块那种写法真的跑出同一个结果。
+    （IR 逐字节那一半由 `loment_p8_test` 的语料闸门管 —— `register_hello.lomt` 就在语料里。）
+    """
+    a = _build_and_run(EXAMPLE, ["one", "two"])
+    b = _build_and_run(REGISTER_EXAMPLE, ["one", "two"])
+    if a is None or b is None:
+        return
+    assert a == b, f"两种写法跑出来不一样: 函数那种 {a!r} vs 块那种 {b!r}"
+    assert b[1] == 3, f"块那种写法该拿到 3 个字段，实际退出 {b[1]}"
 
 
 def main() -> int:

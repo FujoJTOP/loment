@@ -270,21 +270,28 @@ pub fn lex_tok_is(src: ptr, toks: ptr, i: u32, s: str) -> bool {
     return lx_is(src, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8), s);
 }
 
-/// 扫命令声明（`docs/218` 形态 B）：
+/// 扫命令声明（`docs/218`），两种写法：
 ///
-///     pub fn loment_command() -> str { return "名字"; }
+///     register 名字 { … }                              // 形态 A：名字在语法里
+///     pub fn loment_command() -> str { return "名字"; } // 形态 B：名字在函数体里
 ///
 /// **只有这一份**：三个调用方共用 —— checker 判那三条规则、codegen 决定发不发命令入口、
 /// driver 应答 `--print-command`。读法与参考实现的 `command_label_from_tokens` 同源
 /// （词法器扫标签、不套 parser，`docs/158` 那条棘轮），**两边必须一起改**。
 ///
 /// 返回一个 64 位包：**高 32 = 标签 token 下标 + 1**（0 = 这个单元没声明命令），
-/// **低 32 = 名字长度**（0 = 写了但取不出名字 —— 形状不对）。名字字节写进 `dst`，
-/// **不含两端引号**、不补 NUL（token 的原文含引号，跟 `cfg_source_ext` 一样自己剥）。
+/// **低 32 = 名字所在 token 下标 + 1**（0 = 写了但取不出名字 —— 形状不对）。名字字节写进
+/// `dst`，**不含两端引号**（`lex_cmd_label` 那一层剥）。
 ///
-/// 形状与参考实现逐条一样：标签后面必须紧跟 `(`；名字取**函数体顶层** `return` 紧跟的
-/// 那个字符串（不钻嵌套块、不越过后面的函数）。这两条都是"在真实单元里不误命中"要的
-/// —— 实测过：松规则会把 `let s: str = "x";` 里的那个字面量当成命令名。
+/// 形状与参考实现逐条一样：
+///
+/// * 形态 B：标签后面必须紧跟 `(`；名字取**函数体顶层** `return` 紧跟的那个字符串
+///   （不钻嵌套块、不越过后面的函数）。这两条都是"在真实单元里不误命中"要的 ——
+///   实测过：松规则会把 `let s: str = "x";` 里的那个字面量当成命令名。
+/// * 形态 A：`register` 后面**必须真的是一个名字**（ident 或字符串字面量；`fn register(…)`
+///   那种下一个 token 是 `(`，不是本构造，直接放过）。误命中的面因此只剩
+///   `register <名字>` 一种。**不做深度判断**：扫出第一个就停 —— 块里再套一个 `register`
+///   自然被忽略（只认最外层那个），两个实现因此不必各写一套嵌套规则。
 pub fn lex_cmd_find(src: ptr, toks: ptr) -> u64 {
     let n: u32 = 0;
     while load32(toks, n * 20) != 4 {
@@ -292,7 +299,21 @@ pub fn lex_cmd_find(src: ptr, toks: ptr) -> u64 {
     }
     let i: u32 = 0;
     while i < n {
-        if load32(toks, i * 20) == 0 && lex_tok_is(src, toks, i, "loment_command")
+        let kd: u32 = load32(toks, i * 20);
+        if kd == 0 && lex_tok_is(src, toks, i, "register")
+                && (load32(toks, (i + 1) * 20) == 0 || load32(toks, (i + 1) * 20) == 2) {
+            // 名字：ident（常用）或字符串字面量（要带 `-` 时用 —— 合法名字的字符集是
+            // `[A-Za-z0-9_-]`，而 `-` 不是标识符字符）。别的种类就不是本构造
+            // （`fn register(…)` 那种下一个是 `(`）。
+            // **不做深度判断**：扫出第一个就停（块里再套一个 `register` 自然被忽略）。
+            if load32(toks, (i + 2) * 20) != 3 || !lex_tok_is(src, toks, i + 2, "{") {
+                // 名字后面不是 `{` —— 写了、取不出来（与形态 B 的"形状不对"同一个出口）。
+                // 参考实现在这里连**解析**都过不去；两条路都拒，只是层次不同。
+                return ((i + 1) as u64) * 4294967296;
+            }
+            return ((i + 1) as u64) * 4294967296 + ((i + 2) as u64);
+        }
+        if kd == 0 && lex_tok_is(src, toks, i, "loment_command")
                 && load32(toks, (i + 1) * 20) == 3 && lex_tok_is(src, toks, i + 1, "(") {
             // 函数体的 `{`；先撞到 `;` 就是没有体（声明式）。
             let j: u32 = i + 2;
@@ -329,9 +350,13 @@ pub fn lex_cmd_find(src: ptr, toks: ptr) -> u64 {
     return 0;
 }
 
-/// 名字抄进 `dst`（**剥引号**、不补 NUL），返回高 32 = 标签 token + 1、低 32 = 名字长度
-/// （0 = 形状不对 / 没声明）。名字的来源是那个字符串 token 的原文跨度（**含引号**，
-/// 与 `cfg_source_ext` 同一个坑：剥引号是这一层的事）。
+/// 名字抄进 `dst`、不补 NUL，返回高 32 = 标签 token + 1、低 32 = 名字长度
+/// （0 = 形状不对 / 没声明）。
+///
+/// 名字 token 的**种类**决定抄法：字符串字面量（形态 B）的原文**含两端引号**，剥掉
+/// （与 `cfg_source_ext` 同一个坑）；ident（形态 A，`register 名字`）原样抄。
+/// 长的 ident 抄到 256 字节就停 —— 合法名字上限是 64，超了本来就判不合法（E024），
+/// 而暂存区是有限的（**不能**照抄一个又长又假的名字把它写穿）。
 pub fn lex_cmd_label(src: ptr, toks: ptr, dst: ptr) -> u64 {
     let pk: u64 = lex_cmd_find(src, toks);
     let lt: u32 = (pk / 4294967296) as u32;
@@ -339,15 +364,23 @@ pub fn lex_cmd_label(src: ptr, toks: ptr, dst: ptr) -> u64 {
     if lt == 0 || st == 0 {
         return (lt as u64) * 4294967296;
     }
+    let sk: u32 = load32(toks, (st - 1) * 20);
     let so: u32 = load32(toks, (st - 1) * 20 + 4);
     let sl: u32 = load32(toks, (st - 1) * 20 + 8);
-    if sl < 3 {
-        return (lt as u64) * 4294967296;
-    }
     let q: u32 = 0;
-    while q < sl - 2 {
-        store8(dst, q, load8(src, so + 1 + q) as u8);
-        q = q + 1;
+    if sk == 2 {
+        if sl < 3 {
+            return (lt as u64) * 4294967296;
+        }
+        while q < sl - 2 {
+            store8(dst, q, load8(src, so + 1 + q) as u8);
+            q = q + 1;
+        }
+    } else {
+        while q < sl && q < 256 {
+            store8(dst, q, load8(src, so + q) as u8);
+            q = q + 1;
+        }
     }
     return (lt as u64) * 4294967296 + (q as u64);
 }

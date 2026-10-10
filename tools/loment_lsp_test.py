@@ -40,6 +40,10 @@ BAD = ("module t\n\nfn helper() -> u32 {\n    return 1;\n}\n\n"
        "fn main() -> u32 {\n    return missing_fn();\n}\n")
 DUP = ("module t\n\nfn a() -> u32 {\n    return 1;\n}\n\n"
        "fn a() -> u32 {\n    return 2;\n}\n")
+#: `register` 块（`docs/218` 形态 A）—— **新语法**，语言服务不认它就会在编得过的源上
+#: 报假错（消费方轴 `docs/182` §1.9 那条，与开关/方言是同一个入口缺口）。
+REG_SRC = ("module t\n\nregister tcmd {\n"
+           "    fn command_main(argv: ptr, argc: u32) -> u32 {\n        return argc;\n    }\n}\n")
 
 
 def test(fn):
@@ -194,7 +198,7 @@ def test_lsp_protocol_roundtrip():
     items = comp["result"]["items"]
     labels = {it["label"] for it in items}
     kinds = {it["label"]: it["kind"] for it in items}
-    assert {"fn", "let", "u32", "helper", "main"} <= labels, sorted(labels)[:24]
+    assert {"fn", "let", "u32", "helper", "main", "register"} <= labels, sorted(labels)[:24]
     assert kinds["fn"] == 14 and kinds["u32"] == 6, kinds
     assert kinds["helper"] == 3 and kinds["main"] == 3, kinds
     py_items = PY_LSP.handle({"id": 9, "method": "textDocument/completion",
@@ -230,6 +234,9 @@ def test_lsp_diagnostics_match_selfhosted_checker():
                                  if l.startswith("fn a")][-1], 1),   # 报的是**重复**的那个
         ("undeclared", BAD, "E002", BAD.splitlines().index("    return missing_fn();"), 1),
         ("clean", GOOD, None, 0, 0),
+        # `register` 块是新语法：语言服务认不出它就会在这份**编得过**的源上报一条
+        # "未知顶层关键字"，而那正是消费方轴要抓的那种假错。
+        ("register", REG_SRC, None, 0, 0),
     ]
     msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
     for name, text, _c, _l, _n in cases:
@@ -438,6 +445,33 @@ def test_python_lsp_honours_comefor():
     got = diags(CF_SRC)
     assert got == [], f"编得过的方言源不该在编辑器里报假错, 实得 {got}"
     print("      语言服务: 方言源**编得过**且不报假错")
+
+
+@test
+def test_python_lsp_accepts_the_register_form():
+    """`register` 块是**新语法**（`docs/218` 形态 A）：语言服务不认它，就会在一份
+    **编得过**的源上报一条假错 —— "编得过但编辑器报错"比两边都报错更糟
+    （消费方轴，`docs/182` §1.9；与开关/方言那两条同一个入口缺口）。
+
+    **前提先拿编译器验**（这份源真的零诊断），否则"没报错"可能只是因为它本来就该报错。
+    """
+    def diags(text: str) -> list[dict]:
+        out = PY_LSP.handle({"id": 1, "method": "textDocument/didOpen",
+                             "params": {"textDocument": {"uri": "file:///reg.lomt",
+                                                         "text": text}}},
+                            {"file:///reg.lomt": text})
+        pub = [f for f in out if f.get("method") == "textDocument/publishDiagnostics"]
+        assert pub, f"didOpen 应当回一条 publishDiagnostics: {out}"
+        return pub[0]["params"]["diagnostics"]
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "reg.lomt"
+        p.write_text(REG_SRC, encoding="utf-8", newline="\n")
+        errs = lomentc.check(lomentc.load(p))
+        assert errs == [], f"前提不成立：这份源应当零诊断, 实得 {errs}"
+    got = diags(REG_SRC)
+    assert got == [], f"编得过的 `register` 源不该在编辑器里报假错, 实得 {got}"
+    print("      Python 版语言服务: `register` 块不报假错")
 
 
 #: 一份带 `choose write grammar` 声明的方言源（issue #142）—— 内容并不重要，

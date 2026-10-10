@@ -10,8 +10,10 @@
 最新"是个**可以算**的问题 —— 两个仓库里每个文件都有内容，逐文件比一遍就行。
 
 ```bash
-# 装：编出来就是 `loment-lompicheck`（名字来自源码里的声明，见 docs/218）
-loment build loment/tools/lompicheck.lomt -o ~/.local/bin
+# 编出来，产物就叫 `loment-lompicheck`（名字来自源码里的 `register` 块，`docs/218`）
+loment build loment/tools/lompicheck.lomt
+# 自己把它放进 PATH —— `loment build --install DIR` 还没做（`docs/218` §6 步骤 2）
+mv loment-lompicheck ~/.local/bin/
 loment lompicheck                                  # 之后随时
 ```
 
@@ -32,14 +34,15 @@ lompicheck: the lompi publish outlet against the loment source
 
 | 这一半 | 在哪 | 干什么 | 为什么不能是另一半 |
 |---|---|---|---|
-| **引擎** | `loment/tools/lompicheck.lomt`（编成 PE/ELF） | 只读**本地两棵树**，逐文件比内容 | 它**不能联网**：PE 运行时只实现 8 个 syscall，里面没有 socket（`loment/tools/win_shim_data.lomt` 的导入表就是全部家当）。换 Linux ELF 也不行 —— `socket` 有，但到 `api.github.com` 要走 TLS，工具链里没有 TLS |
-| **薄壳** | `--install` 生成的两个注册器 | 用 `git` 把 `FujoJTOP/lompi` 的一份缓存 clone 更新好，再把两个根交给引擎 | 它是 shell，能跑 git；引擎是 Loment，不能 fork |
+| **引擎** | `loment/tools/lompicheck.lomt`（编成 PE/ELF；一条注册出来的 `loment` 命令） | 只读**本地两棵树**，逐文件比内容 | 它**不能联网**：PE 运行时只实现 8 个 syscall，里面没有 socket（`loment/tools/win_shim_data.lomt` 的导入表就是全部家当）。换 Linux ELF 也不行 —— `socket` 有，但到 `api.github.com` 要走 TLS，工具链里没有 TLS |
+| **拉取那一半** | **你**（跑引擎打出来的那条 `git` 命令） | 把 `FujoJTOP/lompi` 的一份缓存 clone 更新好，再跑一次引擎 | 引擎是 Loment，**不会 fork 也不会联网**；`git` 是 shell 的事 |
 
 这与 lompi 自己"PE 上没有 socket，于是 `lompi fetch` 只把 `git clone` 打印出来"是**同一个
 边界**：**是运行时缺，不是设计上不想要**。
 
-Loment 在 Git Bash 里更愿意用 `loment.cmd`（POSIX 那份在 Windows 上会去链 ELF），薄壳替你把
-这件事办了 —— 所以 `loment lompicheck` 在两个 shell 里都能敲。
+（2026-10-10 之前这儿有个 `--install` 生成的 shell 薄壳替你跑 git。`docs/218` 的注册机制把
+"注册"那一半吃掉之后它就没有必要了 —— 剩下的"打印一条 `git` 命令"不值得再养一个安装器，
+那个 `tools/lompicheck.py` 已经删掉。）
 
 ## 2. 比的到底是什么
 
@@ -72,9 +75,9 @@ Loment 在 Git Bash 里更愿意用 `loment.cmd`（POSIX 那份在 Windows 上�
 CRLF**，而开发口那边因为 `.gitattributes` 的 `*.lomt text eol=lf` 是 **LF** —— 逐文件比
 字节，170 个全不同。实测过：污染后 46/46 行是 CRLF。
 
-薄壳因此**显式**用 `-c core.autocrlf=false -c core.eol=lf` 拉，并且每次跑之前都会
-`git config` 再 `reset --hard` 一遍 —— 老的、按默认设置拉下来的缓存会被自动修好（实测：
-把一份 CRLF 缓存摆在那儿再跑一次，出来是 `[OK]`，工作树回到 LF）。
+所以引擎打出来的那条 `git` 命令**显式**带着 `-c core.autocrlf=false -c core.eol=lf`（更新
+已有的缓存那条走 `fetch --depth 1 origin main` + `reset --hard FETCH_HEAD`）—— 老的、按默认
+设置拉下来的缓存因此会被修回 LF。这一步**没有自动化的部分**：程序只把命令打给你。
 
 ### 3.2 参考实现的 codegen 不能比两个指针（`docs/189` §47）
 
@@ -91,22 +94,26 @@ CRLF**，而开发口那边因为 `.gitattributes` 的 `*.lomt text eol=lf` 是 
 - **缓存 clone 是浅的**（`--depth 1`）：只用来读文件，不给你历史。
 - **取不到网就退化成"读旧缓存"**，并且**会在输出第二行说明**这份可能是旧的；一份缓存都
   没有、又取不到网才退出 2。
-- **要能编 Loment**：引擎第一次跑会 `loment build` 一次（之后直接用产物）。没有工具链就
-  装不了这条命令 —— 它是给"有 loment 检出的人"用的。
-- **包里没有它**：安装包（`loment_dist`）里没有 Python，而 `--install` 那一步要 Python。
-  发行包里因此没有这条命令；`loment/tools/lompicheck.lomt` 随源码发，谁有检出谁能编。
-- **它不修任何东西**：发布口只由 `--push` 写，这条命令只**说**。
+- **要能编 Loment**：`loment build loment/tools/lompicheck.lomt` 一次，之后直接用产物。
+  没有工具链就没有这条命令 —— 它是给"有 loment 检出的人"用的。
+- **包里没有它**：发行包（`loment_dist`）装的是工具链本身，这条命令不在里面；
+  `loment/tools/lompicheck.lomt` 随源码发，谁有检出谁能编。
+- **它不修任何东西**：发布口只由 `--push` 写，这条命令只**说**（连那份缓存 clone 也只**打印**
+  该跑的 `git` 命令）。
 
 ## 5. 判据
 
-`tools/lompicheck_test.py`（登记在 `ci.py` 的 `STATIC_CHECKS`，也在发布清单 `GLOBS` 里）：
+`tools/lompicheck_test.py`（登记在 `ci.py` 的 `STATIC_CHECKS`，也在发布清单 `GLOBS` 里）**7/7**：
 
-1. 引擎里那两对根必须**正好**是发布清单里那两棵子树（外加根上那三条例外）；
-2. `--install` 生成的注册器：纯 ASCII、`.cmd` 是 CRLF、POSIX 那份是合法 sh、两边都关掉了
-   `autocrlf`、都点名了引擎的源文件与产物路径；
-3. 用**仓库里的参考编译器**把引擎编出来，拿本仓**真的** `lompi/` 当源侧造一个发布口目录，
-   跑出四种结论：一致（并核文件数）/ 改一个 / 删一个 / 多一个（文件与整棵目录各一次）；
-4. argv 的三种形状：参数不够报用法；第 4 个参数是 `stale` 时那句"可能是旧的"要说出来。
+1. 单元里那条命令声明在（`register` 块，`docs/218` 形态 A）、而且**没有** `_start`；
+2. 发布口那个 URL 必须**正好**是发布清单里那一份（`loment_publish.REPOS["lompi"]["repo"]`）；
+3. `--print-command` 答出 `lompicheck` —— 启动器就是拿它命名产物的；
+4. `--help` 与 `--refresh` 有回应；
+5. 未知选项**退出 2**（不是静默忽略）；
+6. 用**仓库里的参考编译器**把引擎编出来，拿本仓**真的** `lompi/` 当源侧造一个发布口目录，
+   两个方向各跑一遍：一致（并核文件数）/ 改一个 / 删一个 / 多一个（文件与整棵目录各一次）；
+7. 默认发布口**从 `argv[0]` 推**（`<家目录>/.lompi/cache/lompi`），期望值按"第一个
+   `/Users/` 标记之后那个分隔符"独立算出来。
 
 夹具是**真源码树**拷贝出来的，不是手写的小玩意 —— 手写的不会告诉你"170 个文件里从哪一个
 开始不对"。

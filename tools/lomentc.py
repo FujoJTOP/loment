@@ -1387,7 +1387,28 @@ class Parser:
     def parse(self) -> Module:
         self.expect("ident", "module", "（文件必须以 module 开头）")
         mod = Module(self.ident("模块名"))
-        while not self.at("eof"):
+        self.parse_items(mod)
+        # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
+        # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
+        # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
+        # 与否"由跨函数、跨模块的全局不动点定（`_gc_alpha_pass`）。
+        for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
+            f.deref = _deref_summary(f, self.toks)
+        # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
+        # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
+        mod.toks = self.toks
+        return mod
+
+    def parse_items(self, mod: Module, nested: bool = False) -> None:
+        """顶层条目。`nested=True` 是 `register <名字> { … }` 块里那一层：**同一批条目**，
+        只是遇到 `}` 就停（收尾那一步归调用方）。
+
+        块里的条目就是**普通条目** —— 它们照常进 `mod.funcs` / `mod.structs` / …，
+        于是后面每一趟（符号表、类型检查、发射、L0/L1 分析）都**不必知道 register 存在**。
+        声明本身（名字、E024/E025/E026）全部由**词法标签那一趟**给出（`command_label_from_tokens`）
+        —— 名字在这里只被**吃掉**，不另存一份（两处存必然漂，自举侧更是只有扫描那一处）。
+        """
+        while not self.at("eof") and not (nested and self.at("punct", "}")):
             t = self.peek()
             if t.kind != "ident":
                 raise LomError(t.line, t.col, f"顶层只允许 use/capability/fn，得到 {t.val!r}")
@@ -1398,7 +1419,16 @@ class Parser:
                 t = self.peek()
                 if t.kind != "ident":
                     raise LomError(t.line, t.col, "pub 之后需要一项声明")
-            if t.val == "use":
+            if t.val == "register":  # docs/218 §2 形态 A
+                self.next()
+                if not self.accept("string"):
+                    # 名字：标识符（常用）或字符串字面量（要带 `-` 时用 —— 合法名字的字符集
+                    # 是 `[A-Za-z0-9_-]`，而 `-` 不是标识符字符）。
+                    self.ident("命令名")
+                self.expect("punct", "{", "（`register <名字> { … }`：块里放这条命令的东西）")
+                self.parse_items(mod, nested=True)
+                self.expect("punct", "}")
+            elif t.val == "use":
                 self.next()
                 # 两种写法并存:
                 #   use "loment/examples/bytes.lomt"   路径形式
@@ -1491,16 +1521,6 @@ class Parser:
                 mod.funcs.append(f)
             else:
                 raise LomError(t.line, t.col, f"未知顶层关键字 {t.val!r}")
-        # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
-        # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
-        # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
-        # 与否"由跨函数、跨模块的全局不动点定（`_gc_alpha_pass`）。
-        for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
-            f.deref = _deref_summary(f, self.toks)
-        # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
-        # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
-        mod.toks = self.toks
-        return mod
 
     def parse_struct(self) -> Struct:
         kw = self.expect("ident", "struct")
@@ -2779,7 +2799,10 @@ def valid_command_name(name: str) -> bool:
 
 
 def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
-    """从词法流里取**命令声明**（`docs/218`）：`pub fn loment_command() -> str { return "x"; }`。
+    """从词法流里取**命令声明**（`docs/218`），两种写法：
+
+      * 形态 B：`pub fn loment_command() -> str { return "x"; }`
+      * 形态 A：`register x { … }` —— 名字就在语法里，块里是这条命令的条目
 
     返回 `(行号, 名字, 拒绝的原因)`：
 
@@ -2797,11 +2820,33 @@ def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
         字面量"。差别实测得到：`let s: str = "x"; return s;` 那种写法在松规则下会**扫到
         `"x"` 并当成命令名**，而它根本不是常量（名字是**扫**出来的，不是算出来的）。宁拒勿猜。
 
-    **自举镜用同一条规则**（`loment/selfhost/driver.lomt` 的 `cmd_label`），两边必须一起改
+    形态 A 那边只多一条约束：`register` 后面必须**真的是一个名字**（`fn register(…)` 那种
+    下一个 token 是 `(`，不是本构造，直接放过）—— 误命中的面因此只剩 `register <名字>`。
+    **不做深度判断**：扫出第一个就停，于是块里再套一个 `register` 自然被忽略（只认最外层
+    那个），两个实现因此不必各写一套嵌套规则。
+
+    **自举镜用同一条规则**（`loment/selfhost/lexer.lomt` 的 `lex_cmd_find`），两边必须一起改
     —— 与 `source_ext` 那条棘轮同源（`docs/158`：「两个实现的读法必须逐字节同源」）。
     """
     for i, t in enumerate(toks):
-        if t.kind != "ident" or t.val != "loment_command":
+        if t.kind != "ident":
+            continue
+        if t.val == "register":  # 形态 A
+            if i + 1 >= len(toks):
+                continue
+            n1 = toks[i + 1]
+            if n1.kind == "ident":
+                name = n1.val
+            elif n1.kind == "string":
+                # 名字里要带 `-`（合法名字的字符集是 `[A-Za-z0-9_-]`）就得写字符串 ——
+                # `val` 已经去掉引号（自举镜那边是原始跨度、它自己剥）。
+                name = n1.val
+            else:
+                continue          # `fn register(…)` 那种：下一个不是名字，不是本构造
+            if i + 2 >= len(toks) or toks[i + 2].kind != "punct" or toks[i + 2].val != "{":
+                return t.line, None, "名字后面要跟 `{`"
+            return t.line, name, ""
+        if t.val != "loment_command":
             continue
         if i + 1 >= len(toks) or toks[i + 1].kind != "punct" or toks[i + 1].val != "(":
             continue
@@ -3362,8 +3407,8 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     if mod.command_line:
         _cline, _cname = mod.command_line, mod.command
         if mod.command_bad:
-            errs.append(f"{_cline}: 命令声明的形状不对（{mod.command_bad}）—— 命令名要写成"
-                        f"**返回一个字面量**的函数："
+            errs.append(f"{_cline}: 命令声明的形状不对（{mod.command_bad}）—— 写成块那种"
+                        f"`register 名字 {{ … }}`，或者写成**返回一个字面量**的函数："
                         f'`pub fn loment_command() -> str {{ return "名字"; }}`')
         elif _cname in RESERVED_COMMANDS:
             errs.append(f"{_cline}: `{_cname}` 是 loment 的官方命令 —— 启动器**官方优先**"
@@ -3374,6 +3419,12 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         f"（`loment <名>` -> `loment-<名>`），所以名字只能是 "
                         f"`[A-Za-z0-9_-]`、长度 1..64")
     _cm = next((f for f in mod.funcs if f.name == "command_main"), None)
+    if mod.command_line and _cm is None:
+        # 两半少了一半。这一向是**链接期**才炸的（生成的 `_start` 去调一个不存在的符号），
+        # 所以拦在检查这一步 —— 码与"有体没声明"同一个：修法都是把两半凑齐。
+        errs.append(f"{mod.command_line}: 声明了命令却没有 `command_main` —— 工具链生成的"
+                    f"入口要调它，没有它就得等到**链接**才报错。补上 "
+                    f"`fn command_main(argv: ptr, argc: u32) -> u32`，或者删掉那条声明")
     if _cm is not None:
         if not mod.command_line:
             errs.append(f"{_cm.line}: 写了 `command_main` 却没有命令声明 —— 它**不会被"

@@ -1348,7 +1348,7 @@ fn print_command(path: ptr, n: u32, scr: ptr) -> u32 {
         return 0;
     }
     if nl == 0 {
-        return fail("fujoc-s: 命令声明的形状不对 —— 名字要写成 `return \"…\";`\n");
+        return fail("fujoc-s: 命令声明的形状不对 —— 名字写在 `register <名字> { … }` 里, 或者让声明直接返回一个字面量\n");
     }
     write_all(1, ptr_add(scr, CMD_OFF), nl as u64);
     write_all(1, str_ptr("\n"), 1);

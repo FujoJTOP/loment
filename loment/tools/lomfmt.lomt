@@ -64,7 +64,8 @@ fn T_TYPE_BODY() -> str { return "struct\nenum\ntrait\nmatch"; }
 fn T_BRACE_KW() -> str { return "struct\nenum\ntrait\nimpl\nfn\nif\nwhile\nfor\nmatch\nelse\ncapability"; }
 // **`choose` 原先就不在这张表里**（既有缺口, 与 `tools/lomfmt.py` 的 TOP_KW 同一处）:
 // 没有它, `choose std` 会被揉进上一行; 加开关之后 `set choose X { … }` 更是整块贴上去。
-fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset\naddin\ncomefor\nbyuse"; }
+// `register`（`docs/218` 形态 A）同理：它是**顶层**声明, 不进这张表就会被揉进上一行。
+fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset\naddin\ncomefor\nbyuse\nregister"; }
 
 // ---------------------------------------------------------------- 系统调用
 

@@ -10,10 +10,11 @@
 // 那边的判据 (`tools/lompicheck_test.py`) 会核这几条字面量与发布清单仍然一致 —— 引擎这边
 // 引不了 Python 的清单, 所以用一条**判据**当那份"不能漂"的保证。
 //
-// **联网那一半不在这里**: PE 运行时只实现 8 个 syscall, 里面没有 socket。拉取由注册器
-// 那个薄壳用 git 做 (更新缓存 clone), 它把两个根交给本程序。
+// **联网那一半不在这里**: PE 运行时只实现 8 个 syscall, 里面没有 socket —— 本程序不联网,
+// 也起不了 `git`。要更新那份缓存 clone 时它把该跑的 `git` 命令**打出来**让你跑
+// (与 `lompi fetch` 同一招), 缓存路径默认从 `argv[0]` 推 (`<家目录>/.lompi/cache/lompi`)。
 //
-//   argv[1] 开发口仓库根    argv[2] 发布口缓存目录    argv[3] "fresh" | "stale" (可省)
+//   loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
 //
 // 退出码: 0 = 一致 / 1 = 不一致 / 2 = 用法错或读不了
 //
@@ -694,78 +695,83 @@ fn lpc_run(r1: ptr, r1n: u32, r2: ptr, r2n: u32, stale: bool) -> u32 {
 
 // ---------------------------------------------------------------- 命令入口 (docs/218)
 
-/// 这条单元注册的命令名（`docs/218` 形态 B）：编出来的产物因此叫 `loment-lompicheck`
+/// 这条单元注册的命令名（`docs/218` 形态 A）：编出来的产物因此叫 `loment-lompicheck`
 /// —— 放上 `PATH` 就有一条 `loment lompicheck`。
-pub fn loment_command() -> str { return "lompicheck"; }
+///
+/// 名字在**语法**里（块那种写法），不再是从函数体里**扫**出来的一个字符串 ——
+/// 这一层原先写的是 `pub fn loment_command() -> str { return "lompicheck"; }`，
+/// 名字与实现分在两处；`docs/218` §2 的块把它合成一处。
+register lompicheck {
 
-/// 命令体（`docs/218` §3.2）。**不再自己写 `_start`** —— 工具链生成的入口读
-/// `/proc/self/cmdline`、数出字段数，把那一整块与个数交到这里。
-///
-///     loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
-///
-/// `--source` 默认**当前目录**（在 loment 检出里跑就是它）；`--outlet` 默认从 `argv[0]`
-/// 推出来 —— 与 `lompi` 推它的全局根**同一条规矩**：程序在哪个家目录下，缓存就在那儿。
-///
-/// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/217` §1），Loment 起不了
-/// `git`。所以需要更新缓存时它**把该跑的命令打出来**让你跑 —— `lompi fetch` 对同一个
-/// 局面用的就是这一招。
-pub fn command_main(argv: ptr, argc: u32) -> u32 {
-    let m: u32 = lpc_cmdline_len(argv, argc);
-    let srcb: ptr = lpc_alloc(PATH_CAP as u64);
-    let outb: ptr = lpc_alloc(PATH_CAP as u64);
-    if (srcb as u64) == 0 || (outb as u64) == 0 {
-        lpc_ws(FD_ERR, "lompicheck: out of memory\n");
-        return 2;
-    }
-    lpc_put_lit(srcb, ".");
-    let a0: u64 = lpc_arg_at(argv, m, 0);
-    lpc_outlet_of(argv, lpc_arg_off(a0), lpc_arg_len(a0), outb);
-    let want_refresh: u32 = 0;
-    let i: u32 = 1;
-    while i < argc {
-        let a: u64 = lpc_arg_at(argv, m, i);
-        let ap: ptr = ptr_add(argv, lpc_arg_off(a));
-        let an: u32 = lpc_arg_len(a);
-        if (lpc_eq_lit(ap, an, "--source") || lpc_eq_lit(ap, an, "--outlet")) && i + 1 < argc {
-            let b: u64 = lpc_arg_at(argv, m, i + 1);
-            // **不用 `if` 表达式** —— 语言里 `if` 是语句（与 `match` 的臂体是块同一条），
-            // 参考实现直接报 `期望 ;，得到 …`。
-            let dst: ptr = srcb;
-            if !lpc_eq_lit(ap, an, "--source") {
-                dst = outb;
-            }
-            let bl: u32 = lpc_arg_len(b);
-            lpc_copy(dst, 0, ptr_add(argv, lpc_arg_off(b)), 0, bl);
-            store8(dst, bl, 0 as u8);
-            i = i + 1;
-        } else if lpc_eq_lit(ap, an, "--refresh") {
-            want_refresh = 1;
-        } else if lpc_eq_lit(ap, an, "-h") || lpc_eq_lit(ap, an, "--help") {
-            lpc_usage();
-            return 0;
-        } else {
-            lpc_ws(FD_ERR, "lompicheck: unknown option ");
-            lpc_wb(FD_ERR, ap, an);
-            lpc_ws(FD_ERR, "\n");
-            lpc_usage();
+    /// 命令体（`docs/218` §3.2）。**不自己写 `_start`** —— 工具链生成的入口读
+    /// `/proc/self/cmdline`、数出字段数，把那一整块与个数交到这里。
+    ///
+    ///     loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
+    ///
+    /// `--source` 默认**当前目录**（在 loment 检出里跑就是它）；`--outlet` 默认从 `argv[0]`
+    /// 推出来 —— 与 `lompi` 推它的全局根**同一条规矩**：程序在哪个家目录下，缓存就在那儿。
+    ///
+    /// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/217` §1），Loment 起不了
+    /// `git`。所以需要更新缓存时它**把该跑的命令打出来**让你跑 —— `lompi fetch` 对同一个
+    /// 局面用的就是这一招。
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        let m: u32 = lpc_cmdline_len(argv, argc);
+        let srcb: ptr = lpc_alloc(PATH_CAP as u64);
+        let outb: ptr = lpc_alloc(PATH_CAP as u64);
+        if (srcb as u64) == 0 || (outb as u64) == 0 {
+            lpc_ws(FD_ERR, "lompicheck: out of memory\n");
             return 2;
         }
-        i = i + 1;
+        lpc_put_lit(srcb, ".");
+        let a0: u64 = lpc_arg_at(argv, m, 0);
+        lpc_outlet_of(argv, lpc_arg_off(a0), lpc_arg_len(a0), outb);
+        let want_refresh: u32 = 0;
+        let i: u32 = 1;
+        while i < argc {
+            let a: u64 = lpc_arg_at(argv, m, i);
+            let ap: ptr = ptr_add(argv, lpc_arg_off(a));
+            let an: u32 = lpc_arg_len(a);
+            if (lpc_eq_lit(ap, an, "--source") || lpc_eq_lit(ap, an, "--outlet")) && i + 1 < argc {
+                let b: u64 = lpc_arg_at(argv, m, i + 1);
+                // **不用 `if` 表达式** —— 语言里 `if` 是语句（与 `match` 的臂体是块同一条），
+                // 参考实现直接报 `期望 ;，得到 …`。
+                let dst: ptr = srcb;
+                if !lpc_eq_lit(ap, an, "--source") {
+                    dst = outb;
+                }
+                let bl: u32 = lpc_arg_len(b);
+                lpc_copy(dst, 0, ptr_add(argv, lpc_arg_off(b)), 0, bl);
+                store8(dst, bl, 0 as u8);
+                i = i + 1;
+            } else if lpc_eq_lit(ap, an, "--refresh") {
+                want_refresh = 1;
+            } else if lpc_eq_lit(ap, an, "-h") || lpc_eq_lit(ap, an, "--help") {
+                lpc_usage();
+                return 0;
+            } else {
+                lpc_ws(FD_ERR, "lompicheck: unknown option ");
+                lpc_wb(FD_ERR, ap, an);
+                lpc_ws(FD_ERR, "\n");
+                lpc_usage();
+                return 2;
+            }
+            i = i + 1;
+        }
+        let srcn: u32 = lpc_strlen(srcb);
+        let outn: u32 = lpc_strlen(outb);
+        if outn == 0 {
+            lpc_ws(FD_ERR, "lompicheck: cannot tell where the outlet clone is -- pass --outlet DIR\n");
+            lpc_ws(FD_ERR, "  (the default is derived from this program's own path, the way lompi derives its root; that failed here)\n");
+            return 2;
+        }
+        if want_refresh == 1 {
+            lpc_print_refresh(outb, outn);
+            return 0;
+        }
+        // lpc_run 的最后一个参数是「这份缓存可能是旧的」那句提示 —— 缓存什么时候刷新
+        // 由 `--refresh` 打印出来的那条命令决定，这个程序自己判断不了，所以恒 false。
+        return lpc_run(srcb, srcn, outb, outn, false);
     }
-    let srcn: u32 = lpc_strlen(srcb);
-    let outn: u32 = lpc_strlen(outb);
-    if outn == 0 {
-        lpc_ws(FD_ERR, "lompicheck: cannot tell where the outlet clone is -- pass --outlet DIR\n");
-        lpc_ws(FD_ERR, "  (the default is derived from this program's own path, the way lompi derives its root; that failed here)\n");
-        return 2;
-    }
-    if want_refresh == 1 {
-        lpc_print_refresh(outb, outn);
-        return 0;
-    }
-    // lpc_run 的最后一个参数是「这份缓存可能是旧的」那句提示 —— 缓存什么时候刷新
-    // 由 `--refresh` 打印出来的那条命令决定，这个程序自己判断不了，所以恒 false。
-    return lpc_run(srcb, srcn, outb, outn, false);
 }
 
 /// 命令行的字节长度。**命令体拿到的是 (整块 cmdline, 字段数)，没有长度**

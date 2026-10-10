@@ -251,6 +251,33 @@ python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由�
    不在冻结面里（§3 的"工具链内部"），但它**改了 CLI 的对外行为**，所以记在这里：
    官方命令**优先**（`loment version` 不受 PATH 影响），且没有注册表 —— 约定就是文件名。
 
+**2026-10-10 再一条（`register` 块，`docs/218` §2 形态 A / `docs/143` §3.3）** —— 与上面那条
+同一天、同一件事的**另一种写法**：名字由**语法**给出，块里是这条命令的条目。它同样**动了装载
+规则**（词法扫标签那一趟），所以照 §5 再走一遍：
+
+1. **规范**：`docs/143` §2 的语法块与 §3.3 改成以 `register <名字> { … }` 为主，先落地的那
+   种写法原样留着；**码集不动**（复用 E024/E025/E026）。**多了一个触发**：声明了命令却没有
+   `command_main` —— 那一向要到**链接**期（未定义符号）才炸，现在拦在检查这一步；
+2. **探针**：`loment_rule_parity._CASES` 再加**五条**（块那种写法与函数那种写法判成**同一批
+   码**），`BUDGET` **81 -> 86**（只升不降）；
+3. **两份实现同一笔**：参考 `tools/lomentc.py`（`command_label_from_tokens` 的形态 A 分支 +
+   `Parser.parse_items` 的 `register` 分支）与自举 `loment/selfhost/lexer.lomt`
+   （`lex_cmd_find` / `lex_cmd_label`）。**自举侧只动词法器那一处** —— 它的函数发现
+   （checker 找 `command_main`、codegen 的顶层 `fn` 扫描、字符串常量按函数归属）本来就
+   **不看括号深度**，于是块里的 `fn command_main` 与写在顶层的那一份走同一条路。这是"表层
+   多一门、语义面只加一处"最直接的证据；
+4. **种子**：`loment/selfhost/{lexer,checker}.lomt` 动了（前者扫标签，后者多一条 E026 触发），
+   种子单独一笔重生成。
+
+**"形态 A 编译到形态 B"这句话要说得更准**（写设计文档时的不精确处，这里钉死）：**语义等价，
+IR 不等**。形态 B 那个标签函数在产物里是一条定义（`@loment_command`）加一个字符串常量
+（`@.str.loment_command.0`），**没有任何人调用**；形态 A 的名字直接从语法来，没有那个函数
+可发。所以判据比的是**行为**而不是逐字节
+（`loment_register_test::test_the_register_form_runs_exactly_like_the_declaration_form`：
+两种写法跑出同一份 stdout 与同一个退出码）。**IR 逐字节那一半仍然有** —— 但它管的是
+"两个**实现**对同一份源发一样的 IR"（`loment_p8_test` 的语料闸门，两份示例都在语料里），
+不是"两种**写法**发一样的 IR"。
+
 **2026-10-10 又一条（命令声明 `loment_command`，`docs/218` / `docs/143` §3.3）** —— 这一条
 **动了装载规则**（`docs/158` §2 那一行），所以按 §5 走：
 
