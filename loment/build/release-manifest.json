@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "b4c50f7fb1a5c951df7317ef5ce77c14139a59a2143cef429de8d9f4594e1e4b"
+   "sha256": "4db3ebc2b9b9bc48d4a0379ad68805178ffa7f99bb27d3d62ccdb8087f6f12ee"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "7aed1e16ca31634d1a886baef4666566cf2a74121a1b47cefbf3b697cd1315a5"
+   "sha256": "497ff539ae6b8fee8f7c283d801c8837913cc83800a5c36344b3901290158a17"
   },
   {
    "path": "tools/lomt_from.py",
@@ -1967,7 +1967,7 @@
   },
   {
    "path": "docs/218-loment-net-admission.md",
-   "sha256": "9c83bd873002ae9a999eb4cc04aa1ba77fd93ce34a991b43e4329793cb62e5be"
+   "sha256": "2e01b745c8d48e0291eb6e53d057a014b227030f64950599c5694974288a86de"
   },
   {
    "path": "docs/manual/index.md",
