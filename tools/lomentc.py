@@ -3306,8 +3306,11 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             seen_name[m0.name] = m0
         else:
             dup_unit = True
-            errs.append(f"1: 单元名 `{m0.name}` 被两份文件同时声明 —— "
-                        f"{_unit_where(prev)} 与 {_unit_where(m0)}；单元的发射符号是平的 "
+            # 措辞里带"重名" —— 与既有的 E-DUP 口径一致（`loment_diag.RULES` 的 E013
+            # 就是按这几个词锚的；换一种说法会让这条消息掉出分类表，
+            # `loment_tools_test::test_m64_all_reference_messages_are_classified` 当场红）。
+            errs.append(f"1: 单元名 `{m0.name}` 重名 —— {_unit_where(prev)} 与 "
+                        f"{_unit_where(m0)} 两份文件都声明了它；单元的发射符号是平的 "
                         f"(ABI)，两份同名单元会把同一个符号定义两遍。改掉其中一个 `module` 名")
 
     # 名字已经撞了的话下面这条**不再报** —— 那些"同名符号"全是上面那条的症状,
