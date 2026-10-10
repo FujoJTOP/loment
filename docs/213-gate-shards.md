@@ -259,10 +259,19 @@ def test_driver_seed_matches_reference() -> None:
      `python3`；而 `vscode_ext_test` 的 `_python()` 是
      `shutil.which("python") or "python"` —— **找不到就退回裸名**。修在镜像里
      （`python-is-python3`），并把 tag 抬到 `2`。
+  3. **`run:` 的默认 shell 在容器里是 `sh`（dash），在 runner 上是 bash**（这一条不红，
+     是**静默**的）：`static-manual` 里 `read -ra parts <<< "..."` 直接
+     `Syntax error: redirection unexpected`。各分片那几条恰好只用了 POSIX 写法所以没炸
+     —— **那是运气**。修法是在 workflow 级声明 `defaults.run.shell: bash`。
+
+  还有一条**顺带看见、不属于容器**的：`safe.directory` 的值别写 `${{ github.workspace }}`
+  —— 那是**宿主**路径（`/home/runner/work/loment/loment`），而容器里同一棵树在
+  `/__w/loment/loment`（git 自己的提示原文打的就是后者）。**路径写死会静默打不中**，
+  于是"看着配上了、其实没配上"，白跑一轮才看得出来。取 `*`。
 
   **教训**：包名单"照抄原来那两条命令"是不够的 —— 原来那些判据跑在 **runner 镜像**上，
-  而 runner 镜像自带的东西（`python` / `gh` / `git` 的配置行为）在 `gate.yml` 里**一个字
-  都没写**。能找出来的办法只有一次真跑 + 逐条看红。
+  而 runner 镜像自带的东西（`python` / `gh` / git 的配置行为 / **默认 shell**）在
+  `gate.yml` 里**一个字都没写**。能找出来的办法只有一次真跑 + 逐条看红。
 
 
 ## 9. 怎么用

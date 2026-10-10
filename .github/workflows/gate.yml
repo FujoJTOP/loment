@@ -86,20 +86,32 @@ permissions:
 #: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
 env:
   GATE_SHARDS: "6"
-  #: **容器里的 git 要靠这一条才肯干活。** 工作区在那边是 runner 的用户 checkout 的
-  #: （UID 不是容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` /
-  #: `rev-parse` / `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。
-  #: 2026-10-10 换上容器那次实测：`loment_eol` 报"不是 git 工作树"、`loment_src` 报
-  #: "git ls-files 失败"、`loment_publish` 直接把 git 的提示原文打了出来，连
-  #: `loment_seed_test` 的 gitattributes 那条也一起红。
+  #: **容器里的 git 要靠这一条才肯干活。** 工作区是 runner 的用户 checkout 的（UID 不是
+  #: 容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` / `rev-parse` /
+  #: `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。2026-10-10 换上
+  #: 容器那次实测：`loment_eol` 报"不是 git 工作树"、`loment_src` 报"git ls-files 失败"、
+  #: `loment_publish` 把 git 的提示原文打了出来，连 `loment_seed_test` 的 gitattributes
+  #: 那条也一起红。
   #:
   #: 用 **git 自己的环境变量入口**注入（`GIT_CONFIG_COUNT` 那一族等价于 `git -c`），
-  #: 于是不必在每个 job 里各写一遍 `git config --add safe.directory`。值取工作区而不是
-  #: `*`：要放行的只有这一棵（`actions/checkout` 自己在 runner 上做的也是同一件事，
-  #: 只是它没有"跨进容器"这一层）。
+  #: 于是不必在每个 job 里各写一遍 `git config --add safe.directory`。
+  #:
+  #: 值取 `*` 而**不是** `${{ github.workspace }}`：那个 context 是**宿主**的路径
+  #: （`/home/runner/work/loment/loment`），而容器里看到的同一棵树在 `/__w/loment/loment`
+  #: —— git 自己的提示原文打的就是后者。路径写死就**静默打不中**，这一类"看着配上了、
+  #: 其实没配上"最费时间。CI 容器里只有我们自己这一棵树，`*` 不多放行任何东西。
   GIT_CONFIG_COUNT: "1"
   GIT_CONFIG_KEY_0: "safe.directory"
-  GIT_CONFIG_VALUE_0: "${{ github.workspace }}"
+  GIT_CONFIG_VALUE_0: "*"
+
+#: **容器里 `run:` 的默认 shell 是 `sh`（dash），不是 runner 上的 bash。** 这不是小事：
+#: 2026-10-10 实测，`static-manual` 那条"单跑套件"里的 `read -ra parts <<< "..."` 在容器
+#: 里直接 `Syntax error: redirection unexpected`（`<<<` 是 bash 的 herestring）。各分片
+#: 那几条恰好都只用了 POSIX 写法所以没炸 —— 那是**运气**，不是设计。统一声明成 bash：
+#: 镜像里有 bash，而门禁里这些汇总/比对的脚本本来就是在 bash 下写的。
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
