@@ -26,7 +26,7 @@
 
 module surface_data
 
-pub fn n_codes() -> u32 { return 23; }
+pub fn n_codes() -> u32 { return 24; }
 
 pub fn code_title(c: u32, lang: u32) -> str {
     let k: u32 = c * 2 + lang;
@@ -76,6 +76,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 45 { return "`choose` / `addin` 用法不对"; }
     if k == 46 { return "not implemented in this version (compiler limit)"; }
     if k == 47 { return "这一版还没实现（编译器限制）"; }
+    if k == 48 { return "control flow: this function may fall off the end of its body"; }
+    if k == 49 { return "控制流：可能从末尾掉出去"; }
     return "";
 }
 
@@ -127,6 +129,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 45 { return "开关（`choose`）或核心模式（`std`/`no_std`）的写法不对。"; }
     if k == 46 { return "What you wrote is syntactically and semantically right - **this version of the compiler backend just does not do that yet**."; }
     if k == 47 { return "你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。"; }
+    if k == 48 { return "A function that **declares a return type** has a path that reaches the end of its body without a `return`."; }
+    if k == 49 { return "一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。"; }
     return "";
 }
 
@@ -178,6 +182,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 45 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"; }
     if k == 46 { return "The reference implementation has two backends: the Rust transpile path goes further, and the native IR path (from M0 on) is filled in **block by block**. This message comes from the latter, so it is **not your mistake** - read it as \"the design has not arrived here yet\". That is also why it has a code of its own: what the user can do here (write it another way) is completely different from \"fix that line as suggested\"."; }
     if k == 47 { return "参考实现有两条后端：一条 Rust 转译路径走得远，原生 IR 路径（M0 起）是**逐块补**出来的。这条消息来自后者 —— 所以它**不是你的错**，把它当成“设计上还没到这里”看。这也是它单独一个码的理由：用户能做的事（换个写法绕开）与“照建议改那一行”完全不同。"; }
+    if k == 48 { return "After codegen that path becomes an **illegal instruction** (`SIGILL`), and it only fires when the path is actually taken - so it is the kind of bug that ships and then blows up when a new input reaches an error branch nobody exercised. \"check passes\" is supposed to mean \"this program will not trap\"; this rule is what makes that true, because a static check is the only place that can say it before the fact."; }
+    if k == 49 { return "这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。`check` 通过本该等于「这份程序不会 trap」，这一条就是把那句话兑现：静态检查是唯一能在事前说出口的地方（原先它只是一条写作纪律，见 SKILL.md §6.14）。"; }
     return "";
 }
 
@@ -229,6 +235,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 45 { return "单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域"; }
     if k == 46 { return "scalar arithmetic, control flow, strings, arrays, slices, structs, enums (`match`) - passing aggregates by value depends on the backend"; }
     if k == 47 { return "标量运算、控制流、字符串、数组、切片、结构体、枚举（`match`）—— 按值传聚合看目标后端"; }
+    if k == 48 { return "the last statement is `return`; an `if` with an `else` where both branches return; a `match` whose every arm returns"; }
+    if k == 49 { return "末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`"; }
     return "";
 }
 
@@ -280,6 +288,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 45 { return "核心模式写两次或写在库里；取值前没定义；同名两个取值；嵌套声明；库写 `choose` 或 `addin`"; }
     if k == 46 { return "**this message itself is the \"not supported\"** - the exact scope is the milestone table in `docs/145`, not anything on your side of the source"; }
     if k == 47 { return "**这条消息本身就是“不支持”** —— 具体范围以 `docs/145` 的里程碑表为准，不在源码那一侧"; }
+    if k == 48 { return "the last statement is `while` / `for` (these end normally), an expression statement, or an `if` **without** an `else`"; }
+    if k == 49 { return "末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`"; }
     return "";
 }
 
@@ -307,6 +317,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 21 { return "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only"; }
     if c == 22 { return "bad `choose`: written twice, bad mode name, or written in a library"; }
     if c == 23 { return "not implemented in this version - a compiler limit, not your code"; }
+    if c == 24 { return "a non-() function may fall off the end of its body - every path must return"; }
     return "";
 }
 
@@ -485,6 +496,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 369 { return "换个写法绕开：用循环 + 数组代替还没支持的表达式，或用内建能做的那几种形态。"; }
     if k == 371 { return "查进度：`docs/145` 的里程碑表里看这一块排在哪一档。"; }
     if k == 373 { return "绕不开就报告：附上这条消息 + 最小可复现的那个文件（`loment ir` 的输出也有用）。"; }
+    if k == 384 { return "Make every path return: add a `return` at the end."; }
+    if k == 386 { return "Write the tail as an `if` **with** an `else` where both branches return; if the tail is a `match`, every arm must return (exhaustiveness is E008)."; }
+    if k == 388 { return "If the function has no value to return, declare it `()` and drop the value after `return`."; }
+    if k == 385 { return "让每条路径都 `return`：末尾补一个 `return`。"; }
+    if k == 387 { return "收尾写成**带 `else` 的 `if`**、两支都返回；`match` 收尾时让**每条臂**都返回（穷尽性由 E008 单独管）。"; }
+    if k == 389 { return "函数本来就没有返回值的话，把它声明成 `()` 并去掉 `return` 后面的值。"; }
     return "";
 }
 
@@ -514,6 +531,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 21 { return 4; }
     if c == 22 { return 5; }
     if c == 23 { return 3; }
+    if c == 24 { return 3; }
     return 0;
 }
 
