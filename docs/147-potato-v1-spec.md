@@ -153,6 +153,13 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   **`gc_manual` 不在这一条里**：`runtime` + `gc_manual`（"要运行期、但内存我自己管"）
   是合法档，不许拒。理由见 `docs/175` §3.6。
 
+<<<<<<< HEAD
+  **2026-10-10 起这一维是一句保证**（`docs/224`）—— 上面那句"不读源码可判"从
+  **承诺**变成了**断言**：`no_runtime` 的产物里**一定没有**那段运行期，凡会把它拖进来的
+  构造（`/` `%` `alloc` `free` `str_concat` `str_eq` `panic` `guard`）在**这一档下编译期拒**
+  （E022）；`runtime` 反过来**强制**把那段带进产物。**字段形状一个字没动**（不升版、
+  不加字段），变的是这句话的分量；`gc_manual` + `runtime` 那条合法档照旧。
+=======
 - **`port`（v11）**：**产物通不通着世界** —— `sealed`（封闭，默认）或 `hosted`（对外）。
   与 `mode` / `gc` / `runtime` 同级同形：一个字符串取值、**必填**、只有根单元能定，
   于是"这份产物允不允许有对外端口"是**不读源码可判**的 —— 这正是 `docs/219` §7 那句
@@ -164,6 +171,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   那些指针在 Loment 的栈之外 —— `docs/219` §6.1）。
   **`gc_manual` / `gc_auto` 不在这一条里**：`hosted` + 手动或自动回收
   （"要对外、但内存我自己管"）是合法档，不许拒。
+>>>>>>> origin/main
 
 - **`boundary`（v7）**：一份单元里越过语言保证的那些**调用点**有几个 —— 机调用
   （`syscall4`/`syscall6`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元

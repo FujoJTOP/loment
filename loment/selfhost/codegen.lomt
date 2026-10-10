@@ -1,4 +1,5 @@
 module codegen
+choose runtime
 
 // M82: Loment 版 IR 生成 —— 生成的 .ll 与 tools/lomentc.py 的 --emit-llvm 逐字节一致。
 //
@@ -5649,6 +5650,22 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
     return 0;
 }
 
+/// 本单元声明了 `choose runtime` 吗（`docs/217`）—— 那是**强制带**那一半。
+///
+/// 与 `gc_alpha_tier` 同形：codegen 不知道档位，但整条 token 流在手，而核心模式只由
+/// **根单元**声明，扫那一行就够。`no_runtime` 那一半（"一定不带"）**不在这里** ——
+/// 它在检查器里拒（`checker.lomt` 的 E022），发射器只管"带"。
+fn rt_tier(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "runtime") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 主入口: 写完整 IR (子集), 返回长度; **返回 0 = 单元的规模超过表容量** (驱动器据此报错)。
 // ---------------------------------------------------------------- 命令入口 (docs/223)
 
@@ -5750,6 +5767,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 576, gc_auto_tier(src, toks));    // 自动收集只在 `gc_auto` 档上跑
     // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
     store32(s, 512, runtime_needed(s, src, toks));
+    // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
+    // 参考实现那一半是 `if rt_on or "@__loment_" in text_all:` —— 同一个或。
+    if rt_tier(src, toks) == 1 {
+        store32(s, 512, 1);
+    }
     store32(s, 516, heap_needed(s, src, toks));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)

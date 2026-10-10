@@ -1,4 +1,5 @@
 module parser
+choose runtime
 
 // M80: Loment 版 parser —— 消费 M79 的 token 记录, 产出规范 AST dump。
 // 覆盖: module / fn 签名 + 函数体 (let/set/ret/if/while/guard/表达式语句)

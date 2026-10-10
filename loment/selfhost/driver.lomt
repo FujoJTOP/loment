@@ -21,6 +21,7 @@
 // 写成"先写自己再回头看依赖"会让依赖落在后面, 与参考实现的顺序不符。
 
 module driver
+choose runtime
 
 // 尺寸都用 u32 字面量: 常量在表达式里**没有类型** (参考实现的 expr_type(Ident) 只看
 // 局部/参数), 所以 `(SLOT + 64) * 20` 会被算成 i32。要么显式 `as u64`, 要么把乘积
@@ -1307,6 +1308,23 @@ fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
     }
 }
 
+/// 把一个 token 的字节**抹成等长空白**（`load_file` 抹依赖写下的核心 `choose` 行用）。
+///
+/// 与 `choose write grammar` 那一行同一个手法：**长度不变**，所以行号、后面对得上的
+/// 偏移全都不动。刻意不删字节 —— 删了就要重排整块，而整块的位置是这套驱动的内存布局。
+/// **不调 `tok_start`/`tok_len`**：那两个住在 `parser.lomt`，而驱动不 `use parser`
+/// （它读 token 一律走裸 `load32(toks, i * 20 + …)`，与下面那些一样）。token 记录是
+/// 20 字节：kind +0 / start +4 / len +8 / line +12 / col +16。
+fn blank_tok(src: ptr, toks: ptr, i: u32) {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let l: u32 = load32(toks, i * 20 + 8);
+    let k: u32 = 0;
+    while k < l {
+        store8(src, st + k, 32);
+        k = k + 1;
+    }
+}
+
 /// 「chooseset 白名单」那一条的报错出口。
 fn die_chooseset(path: ptr, n: u32) -> u32 {
     let m: str = "fujoc-s: addin 拉进来的单元里只能写 choose 相关代码 (装代码请用 use): ";
@@ -1438,11 +1456,30 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // `addin` 拉进来的单元**正是**为了写 `choose` 才存在的, 所以这条对它不适用 ——
         // 反过来它有自己的白名单 (`check_chooseset`)。
         if depth > 0 && from_addin == 0 && tok_is(slot, toks, i, "choose") {
-            let mc: str = "fujoc-s: 库不许写 choose (它是整个程序的模式, 只有根单元能定): ";
-            write_all(2, str_ptr(mc), str_len(mc) as u64);
-            write_all(2, path, n as u64);
-            write_all(2, str_ptr("\n"), 1);
-            die(1);
+            // **依赖可以声明它的需求**（`docs/224`，用户 2026-10-09 裁决）。从前这里一律
+            // 硬拒 —— 那让一个要除法的库**两面堵死**：当根编要 `choose runtime`，当依赖
+            // 又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。
+            //
+            // 但**不能留着**：单元文本是**整段**拷进合并流的（`copy_bytes(out, off, slot,
+            // 0, nb)`），留着它检查器会当成"这一维写了两次" —— 而那是要报的（E022）。
+            // ⇒ 抹成等长空白，与 `choose write grammar` 那一行同一个手法（行号不动）。
+            //
+            // **与参考实现的一处已知不对称**（`docs/224` §5）：参考实现在 `check()` 里还判
+            // "依赖要求 X、根的取值必须是 X"，这里**不判**。想在这里判过一次，**行不通**：
+            // `toks` 是**共享**暂存、每个单元进来就 `lex(slot, nb, toks)` 重写一遍
+            // （`load_file` 头顶那条注释写着"递归会复用 toks"），所以等这一层跑到时，
+            // 根那一层的 token 早没了。要判得给根留一份 token 或把它的文本长度一路传下来 ——
+            // 那是另一轮的事。
+            //
+            // **保证本身不受影响**：依赖的**代码**照样进合并流，于是"依赖里有除法而根写着
+            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E022），而且判得比参考实现
+            // **更宽**（它连深度 > 1 的依赖也看得见）。两边只在"依赖声明了一个它**用不上**的
+            // 核心模式"这一格上不同 —— 那一格不影响产物。
+            blank_tok(slot, toks, i);
+            blank_tok(slot, toks, i + 1);
+            if tok_is(slot, toks, i + 2, ";") {
+                blank_tok(slot, toks, i + 2);
+            }
         }
         // **库不许 `addin`** —— 装载器只走"根 + 根 `addin` 到的单元"那张图, 所以库里的
         // `addin` **不会生效**。写了没生效正是本仓反复要消灭的那种东西, 所以报出来。

@@ -1940,6 +1940,66 @@ class FrontDoorRefused(ValueError):
     """
 
 
+#: 一行**核心模式声明**：`choose <核心词>`（可选分号）。`choose write grammar …` 不匹配
+#: —— 它的第二个词是 `write`，不是核心词。
+_CORE_CHOOSE_RE = re.compile(r"^[ \t]*choose[ \t]+([A-Za-z_]\w*)[ \t]*;?[ \t]*$")
+
+
+def _take_core_choose(src: str) -> tuple[str, list[str]]:
+    """把**核心模式声明**（`choose runtime` / `choose gc_auto` / `choose no_std`）**摘出来**。
+
+    返回 `(抹掉它们之后的源, 摘出来的那些行)`。
+
+    **为什么是前门的活**（2026-10-09）：按 `docs/188` §0，一份用 Python/C 写法写的单元
+    **仍然是一个 Loment 程序** —— 拼法是那一门的，**语义是 Loment 的**。核心 `choose`
+    说的是"这个程序要什么"（`docs/182` §1.3 的"核心语法硬写法"），它是**源的一部分**，
+    而各家翻译器不认识它：C 那一门把它算成"子集外的一条"直接拒（实测），
+    别的门当自己那门语法吃掉（实测：`m.chooses` 空着）。
+
+    **抹成等长空白**（与 `strip_grammar_decl` 同一手法）：行号不动，翻译器报的错还指在
+    原来的行上。
+
+    与 `strip_grammar_decl` 方向相反、理由同一条：`choose write grammar` 说的是
+    "**怎么读这份文件**"（属于前端，所以抹掉不留），核心 `choose` 说的是
+    "**这份程序要什么**"（属于源，所以抹掉之后要**带回来**）。
+    """
+    kept: list[str] = []
+    core: list[str] = []
+    for line in src.split("\n"):
+        m = _CORE_CHOOSE_RE.match(line.rstrip("\r"))
+        if m and m.group(1) in potato.CORE_WORDS:
+            core.append(f"choose {m.group(1)}")
+            kept.append(" " * len(line))
+        else:
+            kept.append(line)
+    return "\n".join(kept), core
+
+
+def _inject_core_choose(text: str, core: list[str]) -> str:
+    """把摘出来的核心声明**接在译文第一行 `module` 之后**。
+
+    **不能接在最前面**：`parse()` 的第一步是 `expect("module")`（文件必须以 `module`
+    开头），`choose` 行只能出现在它之后。
+
+    **译文自己已经写过的那几条要跳过**（2026-10-10）：`lomt_from.emit_lomt` 在 `impl=True`
+    时会**自己**给实体单元发一行 `choose runtime`（`docs/224`）。重复注入的后果不是"多一行
+    废话"，是**这一维写了两次** —— 那是 E022，而 `loment/lib/lumtui_math.lomt` 那份
+    python 写法的模块当场就红（实测）。
+    """
+    if not core:
+        return text
+    core = [c for c in core
+            if not re.search(rf"^[ \t]*{re.escape(c)}[ \t]*$", text, re.M)]
+    if not core:
+        return text
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(nl)
+    for i, l in enumerate(lines):
+        if l.startswith("module "):
+            return nl.join(lines[:i + 1] + core + lines[i + 1:])
+    return text
+
+
 def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
     """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
 
@@ -2017,8 +2077,11 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     _hit = _FRONT_MEMO.get(_key)
     if _hit is not None:
         return _hit
+    # **核心声明先摘出来**（`_take_core_choose`）：翻译器不认识那几行，交给它就是
+    # "子集外的一条"（C 门直接拒）或者被当成本门语法吃掉（别的门）。摘出来之后接回译文。
+    _body, _core = _take_core_choose(strip_grammar_decl(src))
     try:
-        doc, rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+        doc, rep = LANGS[lang](_body, path.name, mode)
     except front_errors(lang) as e:
         # 写法读不通 —— 与"翻不出来"一样响亮地拒，**不给一份少算一步的单元**
         # （见 `front_errors` 的注解）。
@@ -2042,6 +2105,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             f"{path}: 用 {lang} 写法写的单元里有 {len(skipped)} 处发不出来"
             f"（前 3 处：{skipped[:3]}）—— 那一门整份是全有或全无，"
             f"翻不出来的部分不会悄悄丢掉，这里直接拒")
+    # **核心声明跟着译文一起交出去**（见 `_core_choose_lines`）。放在最后一步、只对
+    # "翻了的那一支"做 —— 原生拼法那一支原样交出去，那些行本来就在源里。
+    text = _inject_core_choose(text, _core)
     _out = FrontUnit(lang, text, True, path)
     _FRONT_MEMO[_key] = _out
     return _out

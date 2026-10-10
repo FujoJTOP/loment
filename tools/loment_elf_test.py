@@ -244,7 +244,7 @@ def test_free_really_reclaims():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcfree\n\nfn _start() {\n"
+    body = ("module gcfree\nchoose runtime\n\nfn _start() {\n"
             "    let i: u32 = 0;\n"
             "    let sum: u32 = 0;\n"
             "    while i < 2000 {\n"
@@ -315,7 +315,7 @@ def test_gc_l2_epoch_bounds_the_heap():
         td = Path(tds)
         got = []
         for tag, ch in (("alpha", "choose gc_auto_alpha\nchoose runtime"),
-                        ("manual", "choose gc_manual")):
+                        ("manual", "choose gc_manual\nchoose runtime")):
             src = td / f"{tag}.lomt"
             src.write_text(body % ch, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
@@ -424,7 +424,7 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\n\nfn _start() {\n"
+    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"

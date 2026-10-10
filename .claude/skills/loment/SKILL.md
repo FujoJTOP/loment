@@ -189,6 +189,7 @@ Below is the whole thing (it is called `tour`; the walkthrough follows the progr
 
 ```rust
 module tour
+choose runtime
 
 const LIMIT: u32 = 3;
 
@@ -583,6 +584,7 @@ It lives under the toolchain prefix in `share/lompi/store/` (in the source repos
 
 ```rust
 module myapp
+choose runtime
 
 use vec            // dynamic array (u32 elements, the caller owns the buffer)
 use numfmt         // decimal/hex formatting
@@ -656,16 +658,16 @@ table above is only an overview.
 1;` is not legal; write `let x: u32 = 1;`) or an undefined function name; `E3` is a call with the
 wrong argument count; `E19` see 6.1.
 
-## 5. Capability domains (the one new thing Loment adds)
-
-```rust
-module blk
+## 5. Capability domains (the one new thing Loment module blk
+choose runtime
 
 capability blk_write : disk[0..4] revocable
 
 fn write_slot(slot: u32) -> u32 {
     guard blk_write(slot);   // out of range -> trap; in range -> audit count +1
     return slot;
+}
+return slot;
 }
 ```
 
@@ -933,6 +935,7 @@ produces an **error**, not a guess):
 
 ```rust
 module py_demo
+choose runtime
 
 use proc
 

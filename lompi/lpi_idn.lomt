@@ -23,6 +23,7 @@
 // 命名: 公开 idn_*, 自检 test_idn_*。
 
 module lpi_idn
+choose runtime
 
 use "lpi_pkg.lomt"
 

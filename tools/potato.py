@@ -116,6 +116,17 @@ RUNTIMES = ("runtime", "no_runtime")
 #: `sealed`（封闭，默认）= 今天的形状，到世界没有端口；`hosted`（对外）= 允许链真 libc /
 #: 真共享库。与 `RUNTIMES` 同一条纪律：**不带生态名**。
 PORTS = ("sealed", "hosted")
+#: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
+#:
+#: 放在这里是因为**两个模块都要它**：编译器用它判"这一条 `choose` 是核心模式还是开关"，
+#: `potato_from.front_door` 用它把**核心 `choose` 行从表层语法里摘出来**（`docs/188` §0：
+#: 一份 Python/C 写法的单元**仍然是 Loment 程序**，语义是 Loment 的 —— 所以那几行不能
+#: 交给各家翻译器吃掉）。两处各写一份必然漂，判据钉的是"两份相等"。
+#:
+#: ⚠ **加一维就要动这一行**：`port`（`docs/222`）进来时这里少了它 —— 合并当场撞出来。
+#: 少一个词的后果是**静默的**：那道维度在表层语法里会被当成"未定义的开关"。
+CORE_WORDS = (frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
+              | frozenset(PORTS))
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)

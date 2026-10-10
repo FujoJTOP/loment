@@ -17,6 +17,7 @@
 // 自举子集注意 (docs/150 的两条自举链缺口): 不写 `(a + b as T) as U`, 变量不叫 `fn`。
 
 module lomelf
+choose runtime
 
 use bytes
 use win_shim_data

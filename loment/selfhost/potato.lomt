@@ -86,6 +86,7 @@
 //   * 枚举/结构体体里的分隔符 **`,` 与 `;` 都算**, 而 `<...>` / `[...]` / `(...)` 里的
 //     逗号**不算** —— 否则 `Result<T, E>` 会被数成两个变体。
 module potato
+choose runtime
 
 use bytes
 use switches

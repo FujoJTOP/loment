@@ -57,6 +57,7 @@
 // 用法: `lompotc <--cpp|--java|--csharp|--go|--rust|--python> <src>` —— 对象打到 stdout（紧凑那种）。
 
 module lompotc
+choose runtime
 
 use bytes
 use json

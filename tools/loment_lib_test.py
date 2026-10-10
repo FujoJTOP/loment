@@ -37,6 +37,7 @@ def test(fn):
 # ---------------------------------------------------------------- 夹具
 
 IO_SRC = '''module io
+choose runtime
 
 pub fn write_str(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
@@ -68,6 +69,7 @@ pub fn write_dec(fd: u64, v: u32) {
 '''
 
 APP_SRC = '''module app
+choose runtime
 
 use mid1
 use mid2
@@ -288,7 +290,7 @@ pub fn h() -> u32 {
         w(base, "io/io.lomt", IO_SRC)
         w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
         w(base, "app/app.lomt",
-          'module app\n\nuse mid1\nuse mid2\nuse io\n\nfn _start() {\n'
+          'module app\nchoose runtime\n\nuse mid1\nuse mid2\nuse io\n\nfn _start() {\n'
           '    let a: u32 = sum1();\n    let b: u32 = sum2();\n'
           '    write_dec(1, a);\n    write_str(1, " ");\n    write_dec(1, b);\n'
           '    write_str(1, "\\n");\n    syscall4(60, 0, 0, 0);\n}\n')
@@ -328,7 +330,7 @@ def test_truly_ambiguous_reference_is_refused():
         w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
         # app 同时 use mid1/mid2, 而两边都导出 run -> 点 run 就是真歧义
         w(base, "app/app.lomt",
-          "module app\n\nuse mid1\nuse mid2\n\nfn _start() {\n    let a: u32 = run();\n"
+          "module app\nchoose runtime\n\nuse mid1\nuse mid2\n\nfn _start() {\n    let a: u32 = run();\n"
           "    syscall4(60, 0, 0, 0);\n}\n")
         for n in ("mid1", "mid2"):
             shutil.copytree(base / n, base / "app" / "deps" / n)

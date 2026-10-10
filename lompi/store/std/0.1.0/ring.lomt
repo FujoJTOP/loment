@@ -13,6 +13,7 @@
 // 命名: 公开一律 ring_*, 内部一律 rg_*。自检 test_ring_*。
 
 module ring
+choose runtime
 
 use "mem.lomt"
 use "num.lomt"

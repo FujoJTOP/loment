@@ -1,4 +1,5 @@
 module checker
+choose runtime
 
 // M81 (子集): Loment 版类型/符号检查 —— 消费 M79 token 流, 判定程序是否合法。
 // 覆盖规则 (与 Python 版 lomentc.check 的判定对照):
@@ -358,6 +359,44 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
         return 3;
     }
     return 4;
+}
+
+/// token `i` 是不是**会把运行期拖进产物**的构造（`docs/217`）。1 = 是。
+///
+/// 表与参考实现的 `_RUNTIME_SITES` **同一条**：punct 的 `/` `%`，ident 的 `alloc` /
+/// `free` / `str_concat` / `str_eq` / `panic` / `guard`。两边都长在 token 流上，
+/// 所以能数的必须是同一个东西（`docs/210` §2.2 那条理由）。
+///
+/// kind 3 = punct（`codegen.runtime_needed` 判除法用的是同一个常量）。
+/// `chk_tok_is` 自己跳过 kind 2（字符串），所以 `"/"` 不会撞上字符串里的斜杠。
+fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_kind(t, i) == 3 {
+        if chk_tok_is(src, t, i, "/") || chk_tok_is(src, t, i, "%") {
+            return 1;
+        }
+        return 0;
+    }
+    // **只有"用"才触发，名字本身不触发**（参考实现 `_runtime_sites` 同一条，理由见那里）：
+    // `fn` 后面的名字是**声明**；五个内建要**紧跟 `(`**（调用）；`guard` 是**语句**，
+    // 要**紧跟一个名字**（`guard c(0);`）。kind 0 = ident（`lexer.lomt:202`）。
+    if i > 0 && chk_tok_is(src, t, i - 1, "fn") {
+        return 0;
+    }
+    if chk_tok_is(src, t, i, "guard") {
+        if chk_tok_kind(t, i + 1) == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
+            || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_eq")
+            || chk_tok_is(src, t, i, "panic") {
+        if chk_tok_is(src, t, i + 1, "(") {
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 /// 两维里**较后**出现的那个行号（0 = 那一维没写过）。报冲突时的锚点。
@@ -3027,6 +3066,27 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // (mode, runtime) 那一对今天没有冲突 —— 留个位置说明它被想过，不是漏了。
     if eff_gc >= 2 && eff_rt == 2 {
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
+    }
+    // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
+    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒（E022 —— 按
+    // "码按修法分"，这一条的修法与 `choose` 那几条同族：去写一行 `choose runtime`）。
+    // **锚在第一个这样的 token 上**，与参考实现 `_runtime_sites` 取首项同判。
+    if eff_rt == 2 {
+        let jr: u32 = 0;
+        let hit: u32 = 4294967295;
+        let found: u32 = 0;
+        while chk_tok_kind(t, jr) != 4 {
+            if found == 0 {
+                if chk_rt_site(src, t, jr) == 1 {
+                    hit = jr;
+                    found = 1;
+                }
+            }
+            jr = jr + 1;
+        }
+        if found == 1 {
+            o = sym_pub(src, t, out, o, E_MODE, hit);
+        }
     }
     // (gc, port)：混合档的 L2 是前沿回卷，C 库手里的指针在 Loment 的栈之外（`docs/219` §6.1）。
     if eff_gc == 3 && eff_port == 2 {

@@ -3,6 +3,7 @@
 // 堆分配接口 (bump) + 回绕语义 + 除零 trap + panic。
 
 module native_mem
+choose runtime
 
 fn heap_roundtrip() -> u32 {
     let p: ptr = alloc(16);

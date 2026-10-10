@@ -186,8 +186,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 41 { return "这是一道**防静默丢**的闸门：自举镜像里那个暂存区原来就那么大，超出的会被悄悄丢掉，于是同一份源码在参考实现与自举镜下**给出不同的单元**。现在两边都是 300，超限报错 ——宁可报错也不要“少了一块但看起来编过了”。"; }
     if k == 42 { return "Stage 1 takes only **scalars** (`i8..i64` / `u8..u64` / `bool`) and `ptr`. In Loment `str` is **a pointer plus a length**, **not** a C string, and the two are not interchangeable; passing structs or enums by value needs a different register classification. Both of those **change the shape of the code at the call site**, so this errors out rather than compiling something quietly wrong."; }
     if k == 43 { return "第 1 阶段只收**标量**（`i8..i64` / `u8..u64` / `bool`）与 `ptr`。`str` 在 Loment 里是“**指针 + 长度**”，**不是** C 字符串，两者不通用；结构体/枚举按值传要另一套寄存器分类规则 —— 都会**改变调用点的代码形状**，所以一律报错退出而不是静默错编。"; }
-    if k == 44 { return "Two different things are managed here: (1) **the core mode** is a property of **the whole program** - it may appear once and only in the root unit (nothing outside `loment.conf` can change it); (2) **a switch** is \"code that is compiled in only when it is on\". There can be many switches, but **one name may be written once**, and a value may only be set after `set choose` declared it. A library may not `choose`: to express a need, a library declares a **capability requirement** and the project decides."; }
-    if k == 45 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"; }
+    if k == 44 { return "Two different things are managed here: (1) **the core mode** is a property of **the whole program** - it may appear once and only in the root unit (nothing outside `loment.conf` can change it); (2) **a switch** is \"code that is compiled in only when it is on\". There can be many switches, but **one name may be written once**, and a value may only be set after `set choose` declared it. A library may not `choose`: to express a need, a library declares a **capability requirement** and the project decides. (3) **The `runtime` dimension is a guarantee** (`docs/224`): `no_runtime` (the default) says \"this artifact carries no runtime\", so every construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, `guard` ... - is refused at compile time **in that tier**."; }
+    if k == 45 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。③ **`runtime` 那一维是一句保证**（`docs/224`）：`no_runtime`（默认）说的是“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。"; }
     if k == 46 { return "The reference implementation has two backends: the Rust transpile path goes further, and the native IR path (from M0 on) is filled in **block by block**. This message comes from the latter, so it is **not your mistake** - read it as \"the design has not arrived here yet\". That is also why it has a code of its own: what the user can do here (write it another way) is completely different from \"fix that line as suggested\"."; }
     if k == 47 { return "参考实现有两条后端：一条 Rust 转译路径走得远，原生 IR 路径（M0 起）是**逐块补**出来的。这条消息来自后者 —— 所以它**不是你的错**，把它当成“设计上还没到这里”看。这也是它单独一个码的理由：用户能做的事（换个写法绕开）与“照建议改那一行”完全不同。"; }
     if k == 48 { return "There is exactly one way `loment <name>` can find a command: a file called `loment-<name>` on `PATH` (`docs/169` section 3b, the way `git` does it). The design in `docs/223` lets the **source** give the name, so the toolchain can name the artifact after it at **build time**. There are two spellings: the block `register name { ... }` (the name is in the grammar), or the older function returning a literal - and the latter has to be **scanned**: the toolchain reads it with the lexer (the same read as `loment.conf`'s `source_ext`, `docs/158`), with **no parser and no constant folding**, so a literal must sit directly after `return`. The name also has to become a file name, and it must not collide with an official one - the launcher gives official commands priority (`loment version` always runs the official one), so a colliding command builds, installs, and then never runs."; }
@@ -243,8 +243,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 41 { return "单文件最多 300 条 `use`（路径形式 + 名字形式合起来算）"; }
     if k == 42 { return "scalar and `ptr` parameters / returns; several `--link`; the call site uses the platform C ABI (on Linux the first six integer arguments go in rdi/rsi/rdx/rcx/r8/r9, on Windows in rcx/rdx/r8/r9)"; }
     if k == 43 { return "标量与 `ptr` 的形参/返回；多个 `--link`；调用点走平台 C ABI（Linux 前六个整数实参进 rdi/rsi/rdx/rcx/r8/r9；Windows 进 rcx/rdx/r8/r9）"; }
-    if k == 44 { return "up to 500 switches per file; `addin` to carry switch settings across files (root unit only); empty switch bodies (purely to drive compiler behaviour); capability domains declared by a library"; }
-    if k == 45 { return "单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域"; }
+    if k == 44 { return "up to 500 switches per file; `addin` to carry switch settings across files (root unit only); empty switch bodies (purely to drive compiler behaviour); capability domains declared by a library; a library declaring a core mode (read as a requirement the root must satisfy)"; }
+    if k == 45 { return "单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）"; }
     if k == 46 { return "scalar arithmetic, control flow, strings, arrays, slices, structs, enums (`match`) - passing aggregates by value depends on the backend"; }
     if k == 47 { return "标量运算、控制流、字符串、数组、切片、结构体、枚举（`match`）—— 按值传聚合看目标后端"; }
     if k == 48 { return "one command per unit; the name is a function returning a literal; libraries export functions and declare no command"; }
@@ -300,8 +300,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 41 { return "超过 300 条（超限是**报错**，不是截断）"; }
     if k == 42 { return "`str` parameters / returns (that is a pointer plus a length, not a C string); structs / enums / arrays **by value**; an `extern fn` with type parameters; FFI on the PE target; `.a` archives and `.so` / `.dll` dynamic libraries"; }
     if k == 43 { return "`str` 形参/返回（那是“指针+长度”，不是 C 字符串）；结构体/枚举/数组**按值**；`extern fn` 带类型参数；PE 目标的 FFI；`.a` 归档与 `.so`/`.dll` 动态库"; }
-    if k == 44 { return "the core mode written twice or written in a library; setting a value before declaring it; two settings for one name; nested declarations; a library writing `choose` or `addin`"; }
-    if k == 45 { return "核心模式写两次或写在库里；取值前没定义；同名两个取值；嵌套声明；库写 `choose` 或 `addin`"; }
+    if k == 44 { return "the core mode written twice, or a dependency and the root disagreeing; setting a value before declaring it; two settings for one name; nested declarations; a library that uses a runtime-dragging construct without declaring it; division / `alloc` / `str_concat` in the **default tier** without `choose runtime`"; }
+    if k == 45 { return "核心模式写两次或写在根单元之外不一致；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`"; }
     if k == 46 { return "**this message itself is the \"not supported\"** - the exact scope is the milestone table in `docs/145`, not anything on your side of the source"; }
     if k == 47 { return "**这条消息本身就是“不支持”** —— 具体范围以 `docs/145` 的里程碑表为准，不在源码那一侧"; }
     if k == 48 { return "computing the name from a variable; a name with `/`, a space or non-ASCII; a name from the official 38; a library declaring a command"; }
@@ -503,15 +503,17 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 341 { return "要传结构体：改成传指针，或者把字段拆成几个标量参数。"; }
     if k == 343 { return "需要泛型：`extern fn` **不能带类型参数** —— 在 Loment 侧包一层泛型函数，里面调具体的那条。"; }
     if k == 352 { return "Write the core mode once, in the entry unit only: `choose std` or `choose no_std`."; }
-    if k == 354 { return "Declare a switch before setting it: `set choose verbose { ... }` then `choose verbose` (or `choose close verbose`)."; }
-    if k == 356 { return "The declaration lives in another unit: pull it in with `addin chooseset` in the entry unit, and write `set choose` in that `chooseset.lomt`."; }
-    if k == 358 { return "Move the `choose` out of the library into the root unit (the library side declares a capability domain instead)."; }
-    if k == 360 { return "Do not nest a declaration inside another switch's body - the pre-scan cannot see it, which turns \"is it on\" into a chicken-and-egg question."; }
+    if k == 354 { return "If the message names `no_runtime`: write `choose runtime` in the **root unit** (the artifact then carries that runtime), or replace the construct it named."; }
+    if k == 356 { return "Declare a switch before setting it: `set choose verbose { ... }` then `choose verbose` (or `choose close verbose`)."; }
+    if k == 358 { return "The declaration lives in another unit: pull it in with `addin chooseset` in the entry unit, and write `set choose` in that `chooseset.lomt`."; }
+    if k == 360 { return "If the message says a dependency requires X and the root does not: write the same `choose X` in the root unit - a dependency's declaration is a **requirement**."; }
+    if k == 362 { return "Do not nest a declaration inside another switch's body - the pre-scan cannot see it, which turns \"is it on\" into a chicken-and-egg question."; }
     if k == 353 { return "核心模式只写一次，而且只在入口那一份：`choose std` 或 `choose no_std`。"; }
-    if k == 355 { return "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。"; }
-    if k == 357 { return "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。"; }
-    if k == 359 { return "库里的 `choose` 搬到根单元去（库这一侧改成声明能力域）。"; }
-    if k == 361 { return "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。"; }
+    if k == 355 { return "报的是 `no_runtime`：要运行期就在**根单元**写一行 `choose runtime`（产品里就带上那段）；不要就把那个构造换掉。"; }
+    if k == 357 { return "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。"; }
+    if k == 359 { return "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。"; }
+    if k == 361 { return "报的是“依赖要求 X 而根不满足”：在根单元写一行同样的 `choose X` —— 依赖的声明是**需求**。"; }
+    if k == 363 { return "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。"; }
     if k == 368 { return "Write it another way: a loop plus an array instead of the unsupported expression, or one of the forms the builtins cover."; }
     if k == 370 { return "Check the schedule: the milestone table in `docs/145` shows which tier this sits in."; }
     if k == 372 { return "If there is no way around it, report it: attach this message plus the smallest file that reproduces it (`loment ir`'s output helps too)."; }
@@ -569,7 +571,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 19 { return 4; }
     if c == 20 { return 3; }
     if c == 21 { return 4; }
-    if c == 22 { return 5; }
+    if c == 22 { return 6; }
     if c == 23 { return 3; }
     if c == 24 { return 5; }
     if c == 25 { return 3; }

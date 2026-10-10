@@ -215,6 +215,15 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
     if impl:
         lines[1] = "// 它是**带实现的单元** (`--impl`, docs/186): 带正文的函数是真 `pub fn`，"
         lines[2] = "// 没带正文的仍是 `extern fn` (实现在源语言那一侧, docs/173 §2)。"
+        # **实体单元带运行期声明**（`docs/224`）。翻译过来的程序按 C / Python / Java / Go
+        # 的语义算 —— 那几门语言**都有运行期**（除法要 trap、内存要分配），而 Loment 从
+        # 2026-10-10 起默认档是一句**保证**：`no_runtime` 的产物里不许出现那段运行期。
+        # 不带这一行，**每一份**翻出来的程序都会在检查器那里被拒。
+        #
+        # **只加在 `impl=True` 这一支**，两个理由：接口单元（全是 `extern fn`，没有正文）
+        # 一个构造都不产生，本来就不需要它；而自举侧的孪生 `loment/tools/lomtfrom.lomt`
+        # **只走 `impl=False` 那一支**（见它的头注），所以这一改**不用动孪生**。
+        lines.insert(6, "choose runtime")
 
     # ---- 能力域
     caps = doc.get("capabilities") or []

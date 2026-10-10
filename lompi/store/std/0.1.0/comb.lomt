@@ -43,6 +43,7 @@
 // 自检 test_comb_*。
 
 module comb
+choose runtime
 
 use "mem.lomt"
 

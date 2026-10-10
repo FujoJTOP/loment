@@ -994,6 +994,32 @@ def _dep_paths(target: Path) -> list[Path]:
     return paths
 
 
+#: 核心模式的全部取值（与 `potato.CORE_WORDS` 同一条；只在这个夹具里用来认那一行）。
+_CORE_CHOOSE = ("std", "no_std", "gc_manual", "gc_auto", "gc_auto_alpha",
+                "runtime", "no_runtime")
+
+
+def _blank_core_choose(text: str) -> str:
+    """把**核心 `choose` 行抹成等长空白** —— 镜像装载器对依赖做的那一下（`docs/224` §4）。
+
+    **为什么夹具要自己镜像它**：`load_file` 在把依赖拼进合并流之前，会把依赖写下的核心
+    `choose` 抹掉（`blank_tok`）—— 不然检查器会当成"这一维写了两次"。这个夹具是**绕过
+    装载器**直接拼的，所以它得自己抹；不抹的话，一份 `choose runtime` 的库 + 一份
+    `choose runtime` 的根拼起来就是两次声明 —— 实测 `ahci.lomt` 当场报
+    `假报 [22] 22@166:choose`。
+
+    只抹**依赖**那一侧：根那一行是它的容器，留着（与装载器同一条）。
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        head = line.strip().rstrip(";").split()
+        if len(head) == 2 and head[0] == "choose" and head[1] in _CORE_CHOOSE:
+            out.append(" " * len(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _unit_text(target: Path) -> str:
     """依赖按序拼接 + 本单元 (与 lomentc.emit_llvm 的 `mods = deps + [mod]` 同序)。
 
@@ -1001,7 +1027,8 @@ def _unit_text(target: Path) -> str:
     `mod.enums`。原生后端按声明发射聚合类型 (`Result<u32,u32>` -> `{ i32, i64 }`),
     所以这份声明对被编译单元必须是可见的 —— 否则枚举查不到, 只能退化成 i64。
     """
-    text = ("".join(p.read_text(encoding="utf-8") + "\n" for p in _dep_paths(target))
+    text = ("".join(_blank_core_choose(p.read_text(encoding="utf-8")) + "\n"
+                    for p in _dep_paths(target))
             + target.read_text(encoding="utf-8"))
     # 判据要用**注入前**的模块 (lomentc.load 返回值里已经有它们了, 拿它判断永远为真)。
     # **开关也要先落定**（`docs/182` §1）—— 这里绕过了 `lomentc.load` 直接调 `Parser`,
@@ -1172,15 +1199,18 @@ def test_m85_driver_checks_before_emitting():
         assert rc != 0, f"跨模块重名没被拒 (exit {rc})"
         assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
-        # 装载器级负例: 依赖里写了 `choose` (docs/143 §3.2)。这条**只能**在装载器判 ——
-        # 单元拼完之后模块边界就没了, 检查器分不清这句是入口写的还是被 use 进来的。
-        # 与 E018 同构, 所以没有 `loment_rule_parity` 那一环, 棘轮就在这里。
+        # 跨单元负例（`docs/224` §4 第 2 条）：依赖用了**会拖运行期的构造**（除法）却
+        # 什么都没声明，而根写着 `no_runtime`（默认档）。
+        #
+        # **这一条 2026-10-10 换过形状**：从前测的是"库不许写 `choose`"，而那条规则已经
+        # 不存在了（依赖现在可以声明需求、根必须满足它）。换成新规则下真正违法的形状之后，
+        # **两个实现都判得住** —— 自举侧是把所有单元拼成一整块 token 再查，依赖里那个 `/`
+        # 就在眼前；参考实现走的是"依赖义务"那条。
+        # （装载器**不再**管依赖写的 `choose`；它只把那些行抹成空白，原因见 `load_file`。）
         rel = "loment/selfhost/neg_dep_choose/entry.lomt"
         rc, out, err = _run_driver_raw(elf, rel, td, "neg_dep_choose")
-        assert rc != 0, f"依赖里的 choose 没被拒 (exit {rc})"
-        assert "库不许写 choose" in err, f"没报装载器诊断: {err[:200]}"
-        # 报的必须是**依赖那个文件** —— 只说"有库写了 choose"等于让用户自己去翻
-        assert "neg_dep_choose/lib.lomt" in err, f"没点出是哪个库: {err[:200]}"
+        assert rc != 0, f"依赖用了运行期构造却没声明, 没被拒 (exit {rc})"
+        assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
         for f in pos:
             rel = f.relative_to(ROOT).as_posix()
@@ -1684,6 +1714,13 @@ def test_m86_selfhost_perf_budget():
     ⚠ **量这条的时候先看机器闲不闲**：2026-09-22 本轮实测，空闲时 42.3s（WSL 基线 0.15s），
     而我自己的一个后台编译在跑时同一份源报了 **81s** —— 差 1.9 倍全在争抢上。
     判"这条红是不是回归"之前，先单独跑一次并且确认没有别的构建在跑。
+
+    ⚠ **2026-10-10 复核：余量只剩 ~1%**。并进 `runtime` 维兑现（`docs/224`）与自适应收集器
+    （`docs/212`/`#200`）之后，**单独跑**（确认没有别的构建在跑）实测 **59.33s / 60s**。
+    同一棵树上后台还有活时那次报 **61.4s** —— 正是上面那条"先看机器闲不闲"的又一次实测。
+    **护栏这次没有抬**：它是绊线不是预算，抬了就得有个"谁变慢了"的说法，而这里没有 ——
+    变慢的是**单元规模**（那条超线性曲线本来就写着这个结局）。真正的修法还是给
+    `chk_lookup_slot` / `find_fn` 加索引，那件事仍然没做。
 
     **2026-09-21 护栏从 30s 抬到 60s**: 第二行那个 435 是 `docs/189` S1 第十九格
     (自举侧 potato 发射, +59 个函数) 之后的驱动链 —— 它把 30s 那道线顶破了,

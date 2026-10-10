@@ -441,7 +441,7 @@ print(len(json.dumps([1,2,3])))"""
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         (td / "p.lomt").write_text(
-            "module pybridge\n\n"
+            "module pybridge\nchoose runtime\n\n"
             "use proc\n\n"
             "fn _start() {\n"
             "    let buf: ptr = alloc(1024);\n"
@@ -521,7 +521,7 @@ def test_javascript_via_process_bridge():
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         (td / "j.lomt").write_text(
-            "module jsbridge\n\n"
+            "module jsbridge\nchoose runtime\n\n"
             "use proc\n\n"
             "fn _start() {\n"
             "    let buf: ptr = alloc(1024);\n"
@@ -569,7 +569,7 @@ def _bridge_case(cmd: str, want_rc: int, label: str) -> None:
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         (td / "p.lomt").write_text(
-            "module bridge\n\n"
+            "module bridge\nchoose runtime\n\n"
             "use proc\n\n"
             "fn _start() {\n"
             "    let buf: ptr = alloc(1024);\n"
