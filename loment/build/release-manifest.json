@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "dd0a4d388c9fdd3cb5efecf8ed92542e260e00cfb31dda7233ac4ae66d85907f"
+   "sha256": "366a46fcebc60f2dc5d582ee5d9e81be513da0db6cbe3410bbabe2c74b692862"
   },
   {
    "path": "tools/loment_opt_obj.py",

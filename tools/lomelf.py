@@ -3374,14 +3374,13 @@ C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 #: （`loment_ports_test::test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set`）：
 #: 尺子说"可闭合"而链接器发不出来，那条产物就会在链接期报"未定义的符号"，
 #: **与表上的话正好相反**。反过来不要求 —— 表里还有一批**尚未实现**的
-#: （`malloc` / `strlen` / `__udivdi3` …），那是 S1c 的活。
+#: （`calloc` / `realloc` / `strlen` / `__udivdi3` …），那是 S1d/S1e 的活。
+#:
+#: ⚠ `malloc` / `free` 多一条条件：**堆在才发** —— 它们是一层"换成 C ABI"的薄壳，
+#: 底下调的是 `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1）。没有堆就没有
+#: "我们的堆"可指，发了会悬着一个未定义的调用。判据是**我们这份 IR 里有没有那两条定义**
+#: （`funcs` 的名字），不是文本里出现过那个名字。
 CONSCRIPT = ("memcpy", "memset", "memcmp", "malloc", "free")
-
-#: 需要**堆在**才发的两个 —— 它们是一层"换成 C ABI"的薄壳，底下调的是
-#: `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1：**libc 的内存不属于 libc，
-#: 属于 Loment 的分配器**）。没有堆就没有"我们的堆"可指，发了会悬着一个未定义的调用。
-#: 判据是**我们这份 IR 里有没有那两条定义**，不是文本里出现过那个名字。
-CONSCRIPT_NEEDS_HEAP = ("malloc", "free")
 
 
 def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
