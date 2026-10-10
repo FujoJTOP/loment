@@ -220,7 +220,7 @@ class Pkg:
             paths = [str(self.bin)] + ([str(self.shim)] if self.shim.exists() else [])
             r = subprocess.run([str(self.bin / "loment"), *args], capture_output=True,
                                text=True, shell=False, encoding="utf-8",
-                               errors="replace", timeout=600,
+                               errors="replace", timeout=600, cwd=str(self.td),
                                env={**os.environ, "PATH": os.pathsep.join(paths + [os.environ.get("PATH", "")])})
             return r.returncode, (r.stdout or "") + (r.stderr or "")
         return self._run_wsl(args, src_name)
@@ -253,6 +253,41 @@ def _pkg(td: Path, src: str) -> Pkg:
     p = Pkg(td, native)
     p.emit(src)
     return p
+
+
+# ---------------------------------------------------------------- 环境: 两边各一套
+
+#: 外源工件 (`.o` / `.so` / `.class`) 必须在**能产出 ELF 的那一侧**编出来。
+#: 本机是 Windows 时那就是 WSL, 是 Linux 时就是本机。**判据不假装这两边一样** ——
+#: 它把"在哪一侧"写成一个函数, 而不是散在每一条判据里。
+class Env:
+    def __init__(self, td: Path, native: bool) -> None:
+        self.td = td
+        self.native = native
+
+    def path(self, p: Path) -> str:
+        """这份工件在**跑工件的那一侧**怎么写。"""
+        return str(p) if self.native else _wsl_path(p)
+
+    def sh(self, script: str) -> tuple[int, str]:
+        # `LOMENT_PATH_EXTRA`: 开发机上工具链不在 PATH 里时 (装在 `~/.lompi020` 那种),
+        # 由**调用者显式**指出来。**判据不猜路径** —— CI 上它为空, 走的还是系统 PATH。
+        extra = os.environ.get("LOMENT_PATH_EXTRA", "")
+        if extra:
+            script = f'export PATH="{extra}:$PATH"\n' + script
+        cmd = ["bash", "-lc", script] if self.native else ["wsl", "-e", "bash", "-lc", script]
+        r = subprocess.run(cmd, capture_output=True, text=True, shell=False,
+                           encoding="utf-8", errors="replace", timeout=1800)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+    def which(self, name: str) -> str | None:
+        rc, out = self.sh(f"command -v {name} || true")
+        s = out.strip().splitlines()
+        return s[-1].strip() if rc == 0 and s and s[-1].strip() else None
+
+
+def _env(td: Path) -> Env:
+    return Env(td, _resolves_with_flags(_clang() or "cc"))
 
 
 # ---------------------------------------------------------------- 判据
@@ -341,6 +376,328 @@ def test_the_shipped_usage_mentions_hosted():
     assert "--hosted" in sh, "POSIX 启动器的用法没提 --hosted"
     assert "--hosted" in loment_dist.LAUNCHER_CMD, "Windows 启动器的用法没提 --hosted"
     print("      两份启动器的用法文本都提到 --hosted")
+
+
+# ---------------------------------------------------------------- 五个生态，各一条
+
+#: C++ 那份库: 一个**真类** (构造函数 / 成员函数), 没有任何 `extern "C"` 包装。
+#: 所以 Loment 那一侧要按**改名字符**声明 —— 这正是"用 C++ 的库"与"用 C 的库"的区别:
+#: 名字被编过、`this` 是第一个实参、底下要链 libstdc++ 的运行期。
+CPP_LIB = """\
+class Counter {
+public:
+    int v;
+    Counter(int x) : v(x) {}
+    int add(int d) { v += d; return v; }
+};
+Counter* counter_new(int x) { return new Counter(x); }
+int counter_add(Counter* c, int d) { return c->add(d); }
+"""
+
+#: 改名字符是 `nm` 量出来的, 不是猜的 (实测 `_Z11counter_newi` / `_Z11counter_addP7Counteri`)。
+CPP_CALLER = """\
+module cppcaller
+
+extern fn _Z11counter_newi(x: i32) -> ptr;
+extern fn _Z11counter_addP7Counteri(c: ptr, d: i32) -> i32;
+
+fn main() -> u32 {
+    let c: ptr = _Z11counter_newi(5 as i32);
+    if (c as u64) == 0 { return 10; }
+    if _Z11counter_addP7Counteri(c, 37 as i32) != 42 { return 30; }
+    return 0;
+}
+"""
+
+#: 嵌入 CPython 的那一段: `PyRun_SimpleString` 让 CPython 自己算 `6*7` 并写出来。
+#: 判据比的是**那个文件的内容** —— 也就是"CPython 真的在这个进程里跑并算对了",
+#: 不是"链接没报错"。
+PY_SCRIPT = "open('%s','w').write(str(6*7))\\n"
+PY_CALLER = """\
+module pycaller
+
+extern fn Py_Initialize() -> u32;
+extern fn PyRun_SimpleString(code: ptr) -> i32;
+
+fn main() -> u32 {
+    let buf: ptr = alloc(512);
+    let code: str = "%s";
+    let n: u32 = str_len(code);
+    let i: u32 = 0;
+    while i < n {
+        store8(buf, i, str_byte(code, i) as u8);
+        i = i + 1;
+    }
+    store8(buf, n, 0);
+    Py_Initialize();
+    if PyRun_SimpleString(buf) != 0 { return 10; }
+    return 0;
+}
+"""
+
+#: JNI 垫片 (与 `docs/222` §8 里那份同源): 把 JNI 的**间接调用**摊平成具名的直接调用,
+#: 因为 Loment 的 codegen 至今不支持间接调用。
+JNI_SHIM = """\
+#include <jni.h>
+#include <stdio.h>
+#include <string.h>
+static JavaVM *g_vm = NULL;
+static JNIEnv *g_env = NULL;
+long jvm_start(const char *classpath) {
+    if (g_vm != NULL) { return 0; }
+    static char cp[2048];
+    snprintf(cp, sizeof(cp), "-Djava.class.path=%s", classpath);
+    JavaVMOption opts[2];
+    opts[0].optionString = cp;
+    opts[1].optionString = "-Xrs";
+    JavaVMInitArgs args;
+    memset(&args, 0, sizeof(args));
+    args.version = JNI_VERSION_1_8;
+    args.nOptions = 2;
+    args.options = opts;
+    args.ignoreUnrecognized = JNI_FALSE;
+    if (JNI_CreateJavaVM(&g_vm, (void **)&g_env, &args) != JNI_OK) { g_vm = NULL; return -1000; }
+    return 0;
+}
+long jvm_static_int(const char *cls, const char *method, long a) {
+    if (g_env == NULL) { return -1000; }
+    jclass c = (*g_env)->FindClass(g_env, cls);
+    if (c == NULL) { return -1001; }
+    jmethodID mid = (*g_env)->GetStaticMethodID(g_env, c, method, "(I)I");
+    if (mid == NULL) { return -1002; }
+    return (long)(*g_env)->CallStaticIntMethod(g_env, c, mid, (jint)a);
+}
+void jvm_stop(void) { if (g_vm != NULL) { (*g_vm)->DestroyJavaVM(g_vm); g_vm = NULL; g_env = NULL; } }
+"""
+
+JAVA_LIB = """\
+public class Hello {
+    public static int compute(int seed) {
+        int acc = seed;
+        for (int i = 0; i < 10; i++) { acc = acc * 2 + i; }
+        return acc;
+    }
+}
+"""
+
+#: `Hello.compute(1)` 推出来是 2037 (10 圈 acc = acc*2 + i), 不是抄的。
+JAVA_CALLER = """\
+module javacaller
+
+extern fn jvm_start(classpath: ptr) -> i64;
+extern fn jvm_static_int(cls: ptr, method: ptr, a: i64) -> i64;
+extern fn jvm_stop();
+
+fn put(p: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(p, n, 0);
+    return n;
+}
+
+fn main() -> u32 {
+    let cp: ptr = alloc(256);
+    let cls: ptr = alloc(64);
+    let mtd: ptr = alloc(64);
+    put(cp, "%s");
+    put(cls, "Hello");
+    put(mtd, "compute");
+    if jvm_start(cp) != 0 { return 10; }
+    let v: i64 = jvm_static_int(cls, mtd, 1 as i64);
+    jvm_stop();
+    if v == 2037 { return 0; }
+    if v < 0 { return (200 as u32) + ((0 - v) as u32 %% 100); }
+    return 30;
+}
+"""
+
+CS_LIB = """\
+using System.Runtime.InteropServices;
+public static class Lib
+{
+    [UnmanagedCallersOnly(EntryPoint = "cs_compute")]
+    public static int Compute(int seed)
+    {
+        int acc = seed;
+        for (int i = 0; i < 10; i++) { acc = acc * 3 - i; }
+        return acc;
+    }
+}
+"""
+
+CS_PROJ = """\
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>CsLib</AssemblyName>
+  </PropertyGroup>
+</Project>
+"""
+
+#: `Lib.Compute(1)` 推出来是 44292 (10 圈 acc = acc*3 - i)。
+CS_CALLER = """\
+module cscaller
+
+extern fn cs_compute(seed: i32) -> i32;
+
+fn main() -> u32 {
+    if cs_compute(1 as i32) == 44292 { return 0; }
+    return 30;
+}
+"""
+
+
+def _libpython_args(env: Env) -> list[str]:
+    """系统那份 libpython 的 `-L` / `-l` —— 由 `sysconfig` 报出来, 不猜。"""
+    rc, out = env.sh(
+        "python3 -c \"import sysconfig as s;"
+        "print(s.get_config_var('LIBDIR'), s.get_config_var('LDLIBRARY'))\"")
+    assert rc == 0 and out.strip(), f"问不出 libpython 的位置: {out[-300:]}"
+    libdir, soname = out.split()[-2], out.split()[-1]
+    stem = soname.split(".so")[0]
+    name = stem[3:] if stem.startswith("lib") else stem          # libpython3.12 -> python3.12
+    return [f"-L{libdir}", f"-l{name}"]
+
+
+def _java_home(env: Env) -> str | None:
+    """JDK 根 —— 判据要的是 **JDK**(有 `include/jni.h`), 不是 JRE。"""
+    rc, out = env.sh(
+        "jh=$(readlink -f \"$(command -v javac)\" 2>/dev/null || true); "
+        "jh=${jh%/bin/javac}; "
+        "if [ -n \"$jh\" ] && [ -f \"$jh/include/jni.h\" ]; then echo \"$jh\"; fi")
+    home = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    return home or None
+
+
+def _java_link_args(home: str) -> list[str]:
+    """链 `libjvm.so` 要捎的那几件。rpath 走 `--cc-arg` 直通 —— 它不在标准库目录里。"""
+    return [f"--cc-arg=-Wl,-rpath,{home}/lib/server",
+            f"-L{home}/lib/server", "-ljvm", "-lstdc++", "-lpthread", "-ldl"]
+
+
+def _dotnet(env: Env) -> str | None:
+    rc, out = env.sh("command -v dotnet || true")
+    s = [x.strip() for x in out.strip().splitlines() if x.strip()]
+    return s[-1] if s else None
+
+
+@test
+def test_cpp_a_real_class_through_mangled_names():
+    """C++: 按**改名字符**调一个真类 —— 没有 `extern "C"`, `this` 是第一个实参。"""
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        env = Env(td, _resolves_with_flags(_clang() or "cc"))
+        if not env.which("g++") and not env.which("clang++"):
+            print("      SKIP: 这一侧没有 C++ 编译器")
+            return
+        d = td / "cpp"
+        d.mkdir()
+        (d / "foo.cpp").write_text(CPP_LIB, encoding="utf-8", newline="\n")
+        cxx = env.which("g++") or env.which("clang++")
+        rc, log = env.sh(f"cd '{env.path(d)}' && {cxx} -O1 -c foo.cpp -o foo.o")
+        assert rc == 0, log[-600:]
+        pkg = Pkg(td, env.native)
+        pkg.emit(CPP_CALLER)
+        out = str(td / "out.bin") if env.native else "./out.bin"
+        rc, log = pkg.run(["build", "src/prog.lomt", "--hosted",
+                           "--link", env.path(d / "foo.o"), "-lstdc++", "-o", out])
+        assert rc == 0, f"C++ 那条返回 {rc}\n{log[-900:]}"
+        print("      C++: 改名字符 + this 指针 + libstdc++ -> 42 (rc=0)")
+
+
+@test
+def test_python_embeds_cpython_and_evaluates():
+    """Python: 进程里嵌 CPython, 让它**自己算** `6*7`, 判据比的是它写出来的数。"""
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        env = Env(td, _resolves_with_flags(_clang() or "cc"))
+        flags = _libpython_args(env)
+        py_out = td / "py.txt"
+        src = PY_CALLER % (PY_SCRIPT % env.path(py_out))
+        pkg = Pkg(td, env.native)
+        try:
+            pkg.emit(src)
+        except Exception as e:                                      # noqa: BLE001
+            raise AssertionError(f"这份 Loment 源没编过: {e}") from e
+        out = str(td / "out.bin") if env.native else "./out.bin"
+        rc, log = pkg.run(["build", "src/prog.lomt", "--hosted",
+                           *flags, "-o", out])
+        assert rc == 0, f"Python 那条返回 {rc}\n{log[-900:]}"
+        got = py_out.read_text(encoding="utf-8").strip() if py_out.exists() else ""
+        assert got == "42", f"CPython 写出来的是 {got!r}, 期望 '42'"
+        print("      Python: 进程里嵌 CPython, 它算出 6*7=42 (rc=0)")
+
+
+@test
+def test_java_calls_a_real_class_through_jni():
+    """Java: 起 JVM, 调 `Hello.compute(1)` —— 2037 是推出来的, 不是抄的。"""
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        env = Env(td, _resolves_with_flags(_clang() or "cc"))
+        if not env.which("javac"):
+            print("      SKIP: 这一侧没有 javac (CI 镜像里由 default-jdk 提供)")
+            return
+        home = _java_home(env)
+        if home is None:
+            print("      SKIP: 有 javac 但没有 JNI 头 (要 JDK, 不是 JRE)")
+            return
+        d = td / "java"
+        (d / "classes").mkdir(parents=True)
+        (d / "Hello.java").write_text(JAVA_LIB, encoding="utf-8", newline="\n")
+        (d / "jni_shim.c").write_text(JNI_SHIM, encoding="utf-8", newline="\n")
+        rc, log = env.sh(f"cd '{env.path(d)}' && javac -d classes Hello.java")
+        assert rc == 0, f"javac 没编过:\n{log[-900:]}"
+        rc, log = env.sh(f"cd '{env.path(d)}' && gcc -O1 -fPIC -c jni_shim.c -o jni_shim.o "
+                         f"-I{home}/include -I{home}/include/linux")
+        assert rc == 0, f"JNI 垫片没编过:\n{log[-900:]}"
+        pkg = Pkg(td, env.native)
+        pkg.emit(JAVA_CALLER % env.path(d / "classes"))
+        out = str(td / "out.bin") if env.native else "./out.bin"
+        rc, log = pkg.run(["build", "src/prog.lomt", "--hosted",
+                           "--link", env.path(d / "jni_shim.o"),
+                           *_java_link_args(home), "-o", out])
+        assert rc == 0, f"Java 那条返回 {rc}\n{log[-900:]}"
+        print("      Java: JNI 垫片 + libjvm, Hello.compute(1)=2037 (rc=0)")
+
+
+@test
+def test_csharp_nativeaot_library_is_callable():
+    """C#: NativeAOT 出的 `.so` 上 `[UnmanagedCallersOnly]` 导出的那个符号。
+
+    **这一条在 CI 上会 SKIP** —— 门禁镜像**故意**不含 `dotnet`
+    (`.github/ci/Dockerfile` 的边界段写明理由: 那几条判据的 SKIP 已写进基线,
+    加进来是改覆盖面)。所以"五个都跑通"这句话在 CI 上目前是**四个**;
+    这一点写在 `docs/222` §8, 不在判据里假装。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        env = Env(td, _resolves_with_flags(_clang() or "cc"))
+        dotnet = _dotnet(env)
+        if not dotnet:
+            print("      SKIP: 这一侧没有 dotnet (CI 镜像故意不含; 见 docs/222 §8)")
+            return
+        d = td / "cs"
+        d.mkdir()
+        (d / "CsLib.csproj").write_text(CS_PROJ, encoding="utf-8", newline="\n")
+        (d / "Lib.cs").write_text(CS_LIB, encoding="utf-8", newline="\n")
+        rc, log = env.sh(
+            f"cd '{env.path(d)}' && DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 "
+            f"{dotnet} publish -c Release -r linux-x64 --self-contained true -o out > /dev/null 2>&1")
+        assert rc == 0, f"NativeAOT publish 没成功:\n{log[-900:]}"
+        pkg = Pkg(td, env.native)
+        pkg.emit(CS_CALLER)
+        out = str(td / "out.bin") if env.native else "./out.bin"
+        rc, log = pkg.run(["build", "src/prog.lomt", "--hosted",
+                           "--link", env.path(d / "out" / "CsLib.so"), "-o", out])
+        assert rc == 0, f"C# 那条返回 {rc}\n{log[-900:]}"
+        print("      C#: NativeAOT 的 .so, Lib.Compute(1)=44292 (rc=0)")
 
 
 def main() -> int:

@@ -38,7 +38,7 @@ permissions:
 
 env:
   #: 与 `gate.yml` 各 job 的 `container.image` 里那个 tag **必须一样**
-  TAG: "4"
+  TAG: "5"
 
 jobs:
   build:

@@ -161,11 +161,11 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR...] [-l LIB...]]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
                               --hosted: link against the host's real libraries (docs/222)
-  loment run FILE [--opt] [--hosted [-L DIR...] [-l LIB...]]
+  loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
@@ -268,6 +268,7 @@ case "${1:-help}" in
         hosted=
         Largs=
         largs=
+        ccargs=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
@@ -288,6 +289,12 @@ case "${1:-help}" in
                 -L?*) Largs="$Largs -L$(to_posix "${1#-L}")"; shift ;;
                 -l) largs="$largs -l${2:-}"; shift 2 ;;
                 -l?*) largs="$largs -l${1#-l}"; shift ;;
+                # `--cc-arg X` hands X straight to the C toolchain. A real library brings its
+                # own link flags (`-Wl,-rpath,...` for libjvm, `-pthread`, ...) and this
+                # launcher must not grow a flag of its own for each of them. `--cc-arg=` is
+                # the one-word spelling.
+                --cc-arg) ccargs="$ccargs ${2:-}"; shift 2 ;;
+                --cc-arg=*) ccargs="$ccargs ${1#--cc-arg=}"; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
@@ -312,8 +319,8 @@ case "${1:-help}" in
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
         # say it instead of silently dropping the flags (docs/222 sec 4.1).
-        if [ -z "$hosted" ] && { [ -n "$Largs" ] || [ -n "$largs" ]; }; then
-            echo "loment: -L / -l need --hosted: a sealed product links no host library (docs/222)" >&2
+        if [ -z "$hosted" ] && { [ -n "$Largs" ] || [ -n "$largs" ] || [ -n "$ccargs" ]; }; then
+            echo "loment: -L / -l / --cc-arg need --hosted: a sealed product links no host library (docs/222)" >&2
             exit 2
         fi
         linkargs=
@@ -338,7 +345,7 @@ case "${1:-help}" in
                 exit 1
             fi
             # shellcheck disable=SC2086
-            "$cc" "$tmp/a.ll" $objs $Largs $largs -o "$out" || exit 1
+            "$cc" "$tmp/a.ll" $objs $ccargs $Largs $largs -o "$out" || exit 1
         elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
@@ -525,6 +532,8 @@ if /I "%~1"=="-O2" goto barg_opt
 if /I "%~1"=="--hosted" goto barg_hosted
 if /I "%~1"=="-L" goto barg_hosted
 if /I "%~1"=="-l" goto barg_hosted
+set "bcs=%~1"
+if "%bcs:~0,9%"=="--cc-arg=" goto barg_hosted
 if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
