@@ -34,7 +34,10 @@ const PE_DATA_RVA: u32 = 0x2000000;
 const PE_STATE_RVA: u32 = 0x3000000;
 const PE_SEC_ALIGN: u32 = 0x1000;
 const PE_FILE_ALIGN: u32 = 0x200;
-const PE_WS_SIZE: u32 = 1066840;   // 与参考实现的 WS_SIZE 对齐
+const PE_WS_SIZE: u32 = 1067616;   // 与参考实现的 WS_SIZE 对齐（联网加了 WSADATA + 暂存）
+const PE_IMPORT_DESC: u32 = 60;    // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
+                                   // （kernel32 + ws2_32 ⇒ 两条描述符；写死 40 会让
+                                   //   镜像的 PE 与参考差这一格 —— 判据当场抓）
 const PE_LIT_OFF: u32 = 0x1000;    // "/proc/self/cmdline" 在 .idata 内的偏移
 const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝对地址时才加
                                        // （表里存的是 RVA：u32 装不下这个基址）
@@ -2922,7 +2925,7 @@ fn build_pe(ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, idata: ptr, ilen: 
     w32(ob, opt + 96, 4096);                             // HeapCommit
     w32(ob, opt + 108, 16);                              // NumberOfRvaAndSizes
     w32(ob, opt + 120, PE_IDATA_RVA);                    // DataDirectory[1] = Import
-    w32(ob, opt + 124, 40);
+    w32(ob, opt + 124, PE_IMPORT_DESC);
     pe_sec(ob, st, ".text", PE_IDATA_RVA - PE_TEXT_RVA, PE_TEXT_RVA,
            align_to(tlen, PE_FILE_ALIGN), toff, 0x60000020);
     pe_sec(ob, st + 40, ".idata", PE_DATA_RVA - PE_IDATA_RVA, PE_IDATA_RVA,
