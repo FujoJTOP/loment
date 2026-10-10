@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "6efe3bb2cc711e03c505b7d51d05a07ffe29823f996bf85ad41c50990f3660f9"
+   "sha256": "8884f5478d2720ce51a22b7693a5ad8b9200db5eee50d8441d92a109ffcf2392"
   },
   {
    "path": "tools/potato_measure.py",
@@ -827,7 +827,7 @@
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "1f9733f364a7480bc57a7bcefad99994926c9891b4e83d1670b8d10610b11cff"
+   "sha256": "b06381c16021eb22a4dae0c88f503a70b7dbe396642abd90e91ab744f10a15f5"
   },
   {
    "path": "tools/loment_multisyntax_projects_test.py",
@@ -839,7 +839,7 @@
   },
   {
    "path": "tools/trans_core.py",
-   "sha256": "b8ca069ef0b706ba810d4f644951bc324851a5f35385ffdde415ab152e82a380"
+   "sha256": "aae7f66d21143d05e9af3080cdf93a6692691ba24a38b2d63c641f76c610fe81"
   },
   {
    "path": "tools/ctrans.py",
@@ -911,7 +911,7 @@
   },
   {
    "path": "tools/loment_grammar_test.py",
-   "sha256": "708f0b00e92c34b1ea785c481b6013a255dba769f4153f89eedc832d6cf0f0b3"
+   "sha256": "482c7f64902fc5eb4eddc767b205f56c40336f15df96a6244c4c305dc3b86952"
   },
   {
    "path": "loment/build/win_shim.bin",
