@@ -1938,6 +1938,10 @@
    "sha256": "8c2bb42daeaa5b7315cd5afe52fc6f211d72001388a4323b826546ef00bf4953"
   },
   {
+   "path": "docs/212-loment-offload.md",
+   "sha256": "ee134553dcd4391af387203e7ed3d71836a02546c45654ceb8099556a969e635"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "4b77d53d397fe8a5843650c12c4df7a50d78fe6ac7fb3e465f91fec6749b944e"
   },
