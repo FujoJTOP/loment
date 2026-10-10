@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # default-jdk nodejs npm vim`），后面几件是 runner 镜像本来就有、容器里得自己装的。
 # 不用 `--no-install-recommends`：原来那一步也没用，换掉会静默改环境。
 RUN apt-get update -qq && apt-get install -y -qq \
-      ca-certificates curl wget gnupg git sudo \
+      ca-certificates curl wget gnupg git sudo lsb-release \
       python3 make unzip xz-utils diffutils \
       qemu-system-x86 qemu-user \
       golang-go default-jdk \
