@@ -76,6 +76,47 @@ def wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
+#: `--opt` 的**试金石**：一段有"按字节铺"与"按字节搬"两种循环的程序。
+#:
+#: 为什么需要它：`-O2` 会把这两种循环改写成 `memset` / `memcpy` / `memmove` 的调用，而
+#: Loment 是无 libc 的 —— 少补一个符号，clang 就在**链接期**报 `undefined symbol: memset`
+#: （实测）。`user_hello` 只有一次 `write`，没有这种循环，所以光靠它那一条 `--opt` 判据
+#: 是看不见这一格的。这段程序**故意**两样都有：铺（`store8(p, i, 常量)`）与搬
+#: （`store8(d, i, load8(s, i))`），且长度是运行期参数，优化器不会把它折没了。
+#: `_start` 读到最后一个字节再退出，于是"跑起来"这件事本身就是"搬对了"。
+OPT_LIBCALL_PROBE = """\
+module optlibcall_probe
+
+fn fill(p: ptr, n: u32, v: u8) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, v);
+        i = i + 1;
+    }
+}
+
+fn copy(d: ptr, s: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(d, i, load8(s, i) as u8);
+        i = i + 1;
+    }
+}
+
+fn _start() {
+    let p: ptr = alloc(4096);
+    let q: ptr = alloc(4096);
+    fill(p, 2048, 7);
+    copy(q, p, 2048);
+    exit(load8(q, 2047) as u64);
+}
+
+fn exit(code: u64) -> i64 {
+    return syscall4(60, code, 0, 0);
+}
+"""
+
+
 # ------------------------------------------------------------------ 1. 布局
 
 def test_layout() -> None:
@@ -272,6 +313,26 @@ def test_install_sh(tar: Path) -> None:
     else:
         check("无 clang 时 --opt **点名**退回 lomelf（不静默）",
               "no clang" in (r.stderr or ""), (r.stderr or "")[-160:])
+
+    # 上面那条 `--opt` 判据只说明"编译得动 user_hello"。**链得起来**是另一件事：`-O2`
+    # 会把字节循环改写成 memset/memcpy/memmove，而这个运行期没有 libc。见 OPT_LIBCALL_PROBE。
+    IT_OUT.mkdir(parents=True, exist_ok=True)
+    probe = IT_OUT / "optlibcall_probe.lomt"
+    probe.write_text(OPT_LIBCALL_PROBE, encoding="utf-8", newline="\n")
+    p_src = wsl_path(probe)
+    p_def, p_opt = f"{_T}probe_def", f"{_T}probe_opt"
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "-o", p_def)
+    check("有字节循环的程序 build 得动（默认后端）",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "--opt", "-o", p_opt)
+    check("有字节循环的程序 --opt 也**链得起来**（合成的 libcall 有人补）",
+          r.returncode == 0 and "undefined symbol" not in (r.stderr or ""),
+          (r.stderr or "")[-240:])
+    if has_clang and r.returncode == 0:
+        wsl("chmod", "755", p_opt)
+        rr = wsl(p_opt)
+        check("补齐 libcall 的产物跑出正确结果（搬对了）",
+              rr.returncode == 7, f"rc={rr.returncode} {(rr.stderr or '')[-120:]}")
 
     # `loment help [COMMAND]` 必须**走得到那一页**。启动器只转发 `help` 而不带后面的参数时,
     # 详细页永远看不到 —— 而目录页里印的正是 `loment help [COMMAND]`。`loment-cli help build`

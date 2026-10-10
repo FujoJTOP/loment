@@ -73,6 +73,14 @@ check。这一步在 `CONTRIBUTING.md` 里也写明了。
   **插入位置逐条对齐**（两份不同序 = `loment_rel_test` 报"同集合不同顺序"，
   症状是 `落盘不同: 47434B vs 47434B`）。
 
+**第三处登记（自举镜像）当时没有判据兜着 —— 2026-10-10 补上**：上面那条钉的是
+`tools/*.py` ↔ `GLOBS`，**比不到自举那一份** —— `loment/tools/lomrel.lomt` 的
+`globs_text()`。实测：`f262a67`（逃生舱·粒度 B）把 `tools/loment_opt_obj.py` 加进 `GLOBS`
+却漏了 `lomrel.lomt`，一路漂到 `main`（两侧工件数 539 / 538）。**CI 上看不见**：会抓它的
+那几条判据（`loment_rel_test` 的 `--check` / `--emit` / `--checksums`）全要 WSL，ubuntu 的
+runner 上 SKIP。补法是 `loment_rel_test::test_lomrel_globs_match_python_globs` ——
+**纯 Python**（不编链、不跑 WSL），逐条同序比两份清单，所以在 CI 上真跑。
+
 **故意的例外**：`docs/i18n/` 不管。`docs/i18n/glossary.md` §1 明写它是**译者向工件**、
 "sits outside every release GLOB … and is not shipped"——那一格的"没进清单"是设计，
 不是漏。判据的 docstring 里写着这句，免得以后有人照这条判据去"修"它。

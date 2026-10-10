@@ -159,7 +159,8 @@ def test_every_tool_is_in_the_release_manifest():
         f"这些被跟踪的 `tools/*.py` 不在 `loment_release.GLOBS` 里 —— 发布账本上"
         f"没有它们，于是它们变了也不会有人知道（`--check` 照样绿）：{missing}。"
         f"加进 GLOBS，并**与 `loment/tools/lomrel.lomt` 的 `globs_text()` 插入同一位置**"
-        f"（两份逐条同序，否则 `loment_rel_test` 红）。")
+        f"（两份逐条同序 —— `loment_rel_test::test_lomrel_globs_match_python_globs` "
+        f"纯 Python 逐条比这两份清单，缺项/失序当场红）。")
     assert not dead, (
         f"`loment_release.GLOBS` 里这些条目一个文件都匹配不到（陈旧条目）：{dead}")
     print(f"      发布清单覆盖：{len(have)} 个 tools/*.py 一件不少，{len(loment_release.GLOBS)} 条 glob 无空转")
@@ -169,21 +170,31 @@ def test_every_tool_is_in_the_release_manifest():
 
 @test
 def test_m55_fmt_idempotent_and_semantics():
+    """格式化幂等 + 不改语义。**格式化后的副本写在本进程私有的临时目录**里。
+
+    **为什么不能写在源同目录**：那样它就是一个 `loment/examples/*.lomt` 能匹配到的
+    **仓库内临时文件**（原先叫 `._fmt_<名字>.lomt`）。原先赌的是"点开头的名字 glob
+    匹配不到" —— 那是 **shell 与 `glob` 模块**的规矩，**`pathlib.Path.glob` 不遵守**
+    （按 `fnmatch` 比，`*.lomt` 照样命中），于是它会被
+    `loment_rel_test::test_manifest_order_is_platform_independent` 数进 GLOB 组里，
+    报"这一组在清单里的次序不是字节序"（与 `loment_gc_surface._ladder_of` 那处同一个
+    形状：两条判据分到同一片之后就成了偶发红）。副本**不必**挨着源：名字形式的 `use`
+    按 `NAME_ROOTS` 解析，路径形式先试 `root`。
+    """
     import lomfmt
-    for p in sorted(EX.glob("*.lomt")):
-        src = p.read_text(encoding="utf-8")
-        f1 = lomfmt.format_source(src)
-        assert lomfmt.format_source(f1) == f1, f"{p.name} 非幂等"
-        tmp = p.with_name("._fmt_" + p.name)
-        tmp.write_text(f1, encoding="utf-8")
-        try:
+    with tempfile.TemporaryDirectory(prefix="fmt-sem-") as tds:
+        td = Path(tds)
+        for p in sorted(EX.glob("*.lomt")):
+            src = p.read_text(encoding="utf-8")
+            f1 = lomfmt.format_source(src)
+            assert lomfmt.format_source(f1) == f1, f"{p.name} 非幂等"
+            tmp = td / p.name
+            tmp.write_text(f1, encoding="utf-8")
             m1 = lomentc.load(p)
             d1 = lomentc.emit_potato(m1, ROOT, lomentc.resolve_deps(m1, ROOT, p.parent, entry=p))
             m2 = lomentc.load(tmp)
             d2 = lomentc.emit_potato(m2, ROOT, lomentc.resolve_deps(m2, ROOT, tmp.parent, entry=tmp))
             assert d1 == d2, f"{p.name} 格式化改变了语义"
-        finally:
-            tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- M56 LSP

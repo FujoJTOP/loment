@@ -115,9 +115,14 @@ stage1"那一步出现（见 §5）。
    seccomp 沙箱里 getrandom 会失败的断言，在 Windows 上**本就该不同** —— 拿它们当判据只会
    把平台差异误判成回归。
 
-   **syscall 面已经是完整的一组**（2026-09-14 补齐）：`read`(0) / `write`(1) / `close`(3) /
-   `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262) —— 正是
-   仓库里 Loment 工具用到的全部。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
+   **syscall 面（2026-09-14 补齐）**：`read`(0) / `write`(1) / `close`(3) /
+   `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262) —— 那是
+   仓库里 Loment 工具用到的全部，但**只是文件与进程那一半**：**联网一个号都没有**。
+   **2026-10-10 补上联网那 13 个**（`socket`/`connect`/`accept`/`accept4`/`sendto`/`recvfrom`/
+   `shutdown`/`bind`/`listen`/`getsockname`/`getpeername`/`setsockopt`/`getsockopt`，
+   由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。号表、五条翻译决定
+   （family / `SO_*` / timeval↔毫秒 / errno / `MSG_NOSIGNAL`）与**点名不做**的那几件
+   见 **`docs/217`**。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
@@ -169,8 +174,8 @@ stage1"那一步出现（见 §5）。
 
    **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
    状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是
-   编译期常量，`--dump-win-shim` 冻出来的 2312 字节 blob **一个待回填的地址都没有** ——
-   自举镜像照抄即可。又撞到两条加载器脾气，只有实测才看得见：
+   编译期常量，`--dump-win-shim` 冻出来的 blob（联网之后是 **6296 字节**；2026-10-10 前是
+   2312，见 `docs/217` §4）**一个待回填的地址都没有** —— 自举镜像照抄即可。又撞到两条加载器脾气，只有实测才看得见：
    （f）**节间不能留空洞** —— `.text` 与 `.idata` 之间只要空 0x1000，加载器就报"不是有效的
    Win32 应用程序"。解法是每节的 VirtualSize 一直铺到下一节起点；
    （g）`out[dll_rva - d:] = dll` 是**开放切片赋值**，会把缓冲区从那里截断 —— 以前缓冲区正好
