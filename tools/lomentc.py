@@ -663,6 +663,13 @@ class Func:
     #: **L1**（`docs/210` §2.5）：**函数末尾**要还掉的名字 —— "最后一次用处"不落在任何
     #: 循环体内的那些（落点选函数末尾的理由见 `_l1_place`）。
     l1: list = field(default_factory=list)
+    #: **跨函数 deref-only 参数分析的小结**（`docs/210` §7 的那次放宽）。形如
+    #: `None`（首参不是 `ptr`，不参与）或 `(escapes, callees)`：
+    #: `escapes` = 首参**有没有**逃逸的用法；`callees` = 首参**只**当"整个第一个实参"
+    #: 流进去的那些被调名字的集合。由**解析器**在 token 流上填（见 `_deref_summary`：
+    #: 规则定义在 token 流上，与 L0/L1/L2 同一条纪律）。全局不动点见 `_gc_alpha_pass`。
+    #: 存**小结**而不是 token 流：它小、随 `deepcopy` 走，且不必把整条词法流留在模块上。
+    deref: object = None
 
 
 def _rename_self(stmts: list) -> None:
@@ -921,6 +928,11 @@ class Module:
     #: 那让 `loment dbg`（M75）报的"源码级符号化"指不到源，也让断点无从对起 ——
     #: **调试器就是被这一条挡住的**。
     src: "Path | None" = None
+    #: 本模块的**词法流**（`load()` 填，已在开关/`comefor` 之后）。L0/L1/L2 的判据都
+    #: 定义在 token 流上，而"跨函数 deref-only"那次放宽（`docs/210` §7）让分析**不能在
+    #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
+    #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
+    toks: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -1461,15 +1473,15 @@ class Parser:
                 mod.funcs.append(f)
             else:
                 raise LomError(t.line, t.col, f"未知顶层关键字 {t.val!r}")
-        # **L0 静态提升**（`docs/210` §2 / `gc_auto_alpha`）：判据定义在 **token 流**上
-        # （理由见 `_l0_promotable` 的 docstring），所以只能在这里做 —— 解析器是唯一
-        # 同时握着 token 流（`self.toks`）与每个函数体跨度（`f.tok_at/tok_end`）的地方。
-        # 只在 alpha 档算：其它档 `f.l0` 恒空，产物逐字节不变（`docs/175` §3.4 五条之一）。
-        if mod.chooses.get("gc") == "gc_auto_alpha":
-            for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
-                f.l0 = _l0_promotable(f, self.toks)
-                _l2_loop_epochs(f, self.toks)   # L2 在 L0 之后（它要读 f.l0）
-                _l1_place(f, self.toks)         # L1 在最后（它要读 f.l0 与 s.l2）
+        # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
+        # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
+        # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
+        # 与否"由跨函数、跨模块的全局不动点定（`_gc_alpha_pass`）。
+        for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
+            f.deref = _deref_summary(f, self.toks)
+        # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
+        # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
+        mod.toks = self.toks
         return mod
 
     def parse_struct(self) -> Struct:
@@ -4091,6 +4103,8 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
 
+    _gc_alpha_pass(mod, deps)       # L0/L1/L2 —— **在 deepcopy 之前**（`_count_gc_ladder`
+                                    # 读的就是 raw_mod 那几张表）
     raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
     mod, deps = prepare(mod, deps)  # M6
     layouts = []
@@ -4543,7 +4557,111 @@ _L0_SAFE_BUILTINS = frozenset(("load8", "store8", "atomic_add"))
 _L0_PTR_ARG0_UNSAFE = frozenset(("free", "ptr_add", "ptr_sub"))
 
 
-def _l0_promotable(f: Func, toks: list) -> dict[str, int]:
+def _reset_l1(stmts: list) -> None:
+    """清空一棵语句树的 `Return.l1` —— `_gc_alpha_pass` 要能**幂等**重跑（同一份 mod 被
+    `emit_*` 两次不会把 `free` 叠两遍）。`f.l1` / `f.l0` 是赋值，`s.l2` 是赋值，只有
+    `Return.l1` 是 `append`，所以要单独清。"""
+    for s in stmts:
+        if isinstance(s, Return):
+            s.l1 = []
+        elif isinstance(s, If):
+            _reset_l1(s.then)
+            _reset_l1(s.otherwise)
+        elif isinstance(s, (While, For)):
+            _reset_l1(s.body)
+        elif isinstance(s, Match):
+            for _pat, b in s.arms:
+                _reset_l1(b)
+
+
+def _deref_summary(f: Func, toks: list):
+    """`f` 的**首参**流进哪些被调 —— `docs/210` §7 那次放宽的原料。回 `None` 或
+    `(escapes, callees)`：首参不是 `ptr` 回 `None`；`escapes` = 首参**有没有**逃逸的用法；
+    `callees` = 首参**只**当"整个第一个实参"流进去的那些被调名字。
+
+    **规则与 L0/L1/L2 同一条，定义在 token 流上**（理由见 `_l0_promotable`）：首参名 `P`
+    在函数体内每一处出现都必须紧跟 `(`、那个 `(` 紧跟一个**标识符**被调名（不是限定名）、
+    且 `P` 后面紧跟 `,` 或 `)`。任何别的用法 —— 重新赋值、遮蔽（`let P`）、传第二参、
+    进算术、当返回值 —— 即 **escape**。
+
+    **"安全"不在这一步判**：这里只记"流进了哪些名字"。`callees` 是否全都安全，由
+    `_gc_alpha_pass` 的**全局不动点**定 —— 于是 `load32 -> load16 -> load8` 一层层解开。
+    """
+    if not f.params or f.params[0].type != "ptr":
+        return None
+    p = f.params[0].name
+    at, end = f.tok_at, f.tok_end
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    callees: set[str] = set()
+    k = at
+    while k < end:
+        if ident(k) and toks[k].val == p:
+            if word(k - 1, "let") or word(k + 1, "="):
+                return (True, frozenset())              # 遮蔽 / 重新赋值
+            if (word(k - 1, "(") and ident(k - 2) and not word(k - 3, ".")
+                    and not word(k - 3, ":")
+                    and (word(k + 1, ",") or word(k + 1, ")"))):
+                callees.add(toks[k - 2].val)
+            else:
+                return (True, frozenset())              # 其余任何用法：逃逸
+        k += 1
+    return (False, frozenset(callees))
+
+
+def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
+    """`docs/210` 的 L0/L1/L2 分析 —— **发射前跑**，因为它要一张**跨模块**的安全表。
+
+    **为什么从 `parse()` 搬出来**：那次"最该先做的放宽"（`docs/210` §7）把 L0/L1/L2 的
+    安全名单从三个内建放宽到"**首参不外逃的用户函数**"。而旗舰证据 `load32(p, off)`
+    的那个 `load32` **常常在依赖里**（`bytes.lomt`），解析器手上只有本模块的 token ——
+    安全表要 root + deps 一起才算得出，那只有 `emit_*` 这一层够得着。
+
+    两半：
+
+    1. **全局不动点**：`safe = 三个内建`；反复把"首参是 `ptr`、不外逃、且 `callees` 全落在
+       `safe` 里"的用户函数加进去，直到不动。于是 `load8`（内建）⇒ `load16`（只进 `load8`）
+       ⇒ `load32`（只进 `load16`）一层层解开。
+    2. **跑分析**：对每个**自己选了 `gc_auto_alpha`** 的模块，用这张 `safe` 重算 L0/L1/L2。
+       **幂等**（先清空三张表再算），所以同一份 mod 被 emit 两次也不会叠。
+
+    只有**自选 alpha 的模块**才重算 —— 依赖没写 `choose`，照旧不分析（与"只有根单元能定
+    `choose`"一致：默认档一行都不动）。
+    """
+    mods = list(deps or []) + [mod]
+    safe: set[str] = set(_L0_SAFE_BUILTINS)
+    changed = True
+    while changed:
+        changed = False
+        for m in mods:
+            for f in list(m.funcs) + [g for im in m.impls for g in im.funcs]:
+                if f.name in safe or f.deref is None:
+                    continue
+                escapes, callees = f.deref
+                if not escapes and callees <= safe:
+                    safe.add(f.name)
+                    changed = True
+    frozen = frozenset(safe)
+    for m in mods:
+        if m.chooses.get("gc") != "gc_auto_alpha":
+            continue
+        toks = m.toks
+        for f in list(m.funcs) + [g for im in m.impls for g in im.funcs]:
+            f.l0 = _l0_promotable(f, toks, frozen)
+            f.l1 = []
+            _reset_l1(f.body)
+            _l2_loop_epochs(f, toks, frozen)   # L2 在 L0 之后（它要读 f.l0）
+            _l1_place(f, toks, frozen)         # L1 在最后（它要读 f.l0 与 s.l2）
+
+
+def _l0_promotable(f: Func, toks: list,
+                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> dict[str, int]:
     """`gc_auto_alpha` 的 **L0**：哪些 `alloc(<常量>)` 可以**提升到栈**。回 `{变量名: 字节数}`。
 
     **规则定义在 token 流上，不在 AST 上 —— 这是有意的**，也是它与自举侧
@@ -4580,10 +4698,6 @@ def _l0_promotable(f: Func, toks: list) -> dict[str, int]:
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
-                and not word(i - 1, ".") and not word(i - 1, ":"))
-
     at, end = f.tok_at, f.tok_end
     params = {p.name for p in f.params}
     out: dict[str, int] = {}
@@ -4602,14 +4716,14 @@ def _l0_promotable(f: Func, toks: list) -> dict[str, int]:
         d += 1
         if name in params or size == 0 or name in out:
             continue
-        ok, ndecl, _last = _ptr_only_uses(toks, at, end, name, nm)
+        ok, ndecl, _last = _ptr_only_uses(toks, at, end, name, nm, safe)
         if ok and ndecl == 1:
             out[name] = size
     return out
 
 
-def _ptr_only_uses(toks: list, at: int, end: int, name: str,
-                   nm: int) -> tuple[bool, int, int]:
+def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
+                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
 
     **L0 与 L1 共用这一条**（它们的差别只在"尺寸要不要字面量"与"插不插 `free`"）——
@@ -4627,7 +4741,7 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str,
         return 0 <= i < n and toks[i].kind == "ident"
 
     def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
+        return (ident(i) and toks[i].val in safe
                 and not word(i - 1, ".") and not word(i - 1, ":"))
 
     ok, ndecl, last = True, 0, -1
@@ -4651,7 +4765,8 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str,
     return ok, ndecl, last
 
 
-def _l1_place(f: Func, toks: list) -> None:
+def _l1_place(f: Func, toks: list,
+              safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
     """`gc_auto_alpha` 的 **L1（定活）**：把 `free` 挂到 AST 上（`s.l1` / `f.l1`）。
 
     **这一层证的是什么**：某个 `alloc` 出来的块，在**它最后一次被用到之后**立刻还掉。
@@ -4736,7 +4851,7 @@ def _l1_place(f: Func, toks: list) -> None:
                 depth0 -= 1
         if depth0 != 0:
             continue
-        ok, ndecl, last = _ptr_only_uses(toks, at, end, name, nm)
+        ok, ndecl, last = _ptr_only_uses(toks, at, end, name, nm, safe)
         if ok and ndecl == 1 and last >= 0 and last != nm:
             cands.append((name, nm, last))
     if not cands:
@@ -4798,7 +4913,8 @@ def _int_lit(v: str) -> int:
         return 0
 
 
-def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int]) -> bool:
+def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
+           safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> bool:
     """循环体能不能在末尾**批量归还**（`docs/210` §2 的 **L2**）。**规则也定义在 token 流上。**
 
     这是"回收时间而不是对象"今天能落地的那一半：**体的末尾把分配器的前沿退回去**，
@@ -4829,7 +4945,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int]) -> bool
         return 0 <= i < n and toks[i].kind == "ident"
 
     def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in _L0_SAFE_BUILTINS
+        return (ident(i) and toks[i].val in safe
                 and not word(i - 1, ".") and not word(i - 1, ":"))
 
     nalloc = 0
@@ -4892,15 +5008,16 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int]) -> bool
     return nalloc == ncand                 # 有认不出来的分配 -> 整格取消
 
 
-def _l2_loop_epochs(f: Func, toks: list) -> None:
+def _l2_loop_epochs(f: Func, toks: list,
+                    safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
     """把 `f` 里每个 `while`/`for` 的 `l2` 填上（`docs/210` §2 的 L2）。"""
     def walk(stmts: list) -> None:
         for s in stmts:
             if isinstance(s, While):
-                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0)
+                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0, safe)
                 walk(s.body)
             elif isinstance(s, For):
-                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0)
+                s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0, safe)
                 walk(s.body)
             elif isinstance(s, If):
                 walk(s.then)
@@ -5982,6 +6099,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
+    _gc_alpha_pass(mod, deps)       # L0/L1/L2（`docs/210`）—— **在 prepare 之前**，要跨模块
     mod, deps = prepare(mod, deps)  # M6
     mods = list(deps or []) + [mod]
     funcs: dict[str, Func] = {}
