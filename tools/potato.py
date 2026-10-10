@@ -107,6 +107,13 @@ GCS = ("gc_manual", "gc_auto", "gc_auto_alpha")
 #: `runtime` 的取值 = **产物里有没有运行期**（`docs/175` §3.6）。只有这两个 ——
 #: 它是一个**存在开关**，不是"运行期里装了什么清单"（那个会随年份长）。
 RUNTIMES = ("runtime", "no_runtime")
+#: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：三维的取值并起来。
+#:
+#: 放在这里是因为**两个模块都要它**：编译器用它判"这一条 `choose` 是核心模式还是开关"，
+#: `potato_from.front_door` 用它把**核心 `choose` 行从表层语法里摘出来**（`docs/188` §0：
+#: 一份 Python/C 写法的单元**仍然是 Loment 程序**，语义是 Loment 的 —— 所以那几行不能
+#: 交给各家翻译器吃掉）。两处各写一份必然漂，判据钉的是"两份相等"。
+CORE_WORDS = frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)

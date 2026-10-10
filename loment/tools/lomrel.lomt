@@ -7,6 +7,7 @@
 // 第一档只做: 参数解析 + 读一个文件 + 写一个文件。
 
 module lomrel
+choose runtime
 
 use bytes
 use sha256

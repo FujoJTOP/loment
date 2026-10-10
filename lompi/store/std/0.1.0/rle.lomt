@@ -34,6 +34,7 @@
 // 命名: 公开 rle_*, 内部 rl_*。自检 test_rle_*。
 
 module rle
+choose runtime
 
 use "mem.lomt"
 

@@ -60,6 +60,7 @@ GOLDEN = {
 }
 # 能力域探针（见 test_pe_links_capability_programs）: 域内两个槽位相加, 顺带过一次 syscall。
 CAP_DEMO = """module capdemo
+choose runtime
 
 capability blk_write : disk[0..4] revocable
 
@@ -473,6 +474,7 @@ def test_pe_cli_check_and_usage():
 #: 三行输出各钉一件事：回显对得上 / 读超时返回 -EAGAIN / 对端挂断之后进程还活着。
 #: 走 127.0.0.1 + 临时端口，所以并发跑门禁也不会撞端口。
 SOCK_DEMO = """module sockdemo
+choose runtime
 
 fn w(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);

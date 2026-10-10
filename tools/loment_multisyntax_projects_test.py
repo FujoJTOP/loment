@@ -150,6 +150,15 @@ def _control_source(proj: Path, grammar: str) -> str:
     text = _module_of(proj).read_text(encoding="utf-8")
     lines = text.split("\n")
     lines[0] = _blank_line(lines[0])            # `choose write grammar <语法>`
+    # **核心 `choose` 行也要抹掉**（`docs/219`）：与 `choose write grammar` 同一条理由 ——
+    # 它是 **Loment 层**的声明（`docs/182` §1.3 的"核心语法硬写法"），不是那一门语法的一部分。
+    # 抹的时机与前端**同一处**（`potato_from._take_core_choose`）：不抹的话这一行会被当成
+    # 那门语言的语法喂给真编译器 —— 实测 clang 报 `unknown type name 'choose'`。
+    _CORE = ("std", "no_std", "gc_manual", "gc_auto", "gc_auto_alpha", "runtime", "no_runtime")
+    for _k, _ln in enumerate(lines):
+        _head = _ln.strip().rstrip(";").split()
+        if len(_head) == 2 and _head[0] == "choose" and _head[1] in _CORE:
+            lines[_k] = _blank_line(_ln)
     if grammar == "rust":
         # 声明之后**第一处非空行**应当是 `module <名>` —— 原生读法要求源里写着它
         # （另五门的模块名是翻译器从文件名造的，所以那五份里**不该**有这一行）

@@ -16,6 +16,7 @@
 // 2026-09-15: st_size 恒为 0), 所以文件大小一律靠"读到底数出来", 不看 stat。
 
 module lomcli
+choose runtime
 
 use bytes
 use sha256

@@ -1,5 +1,6 @@
 choose write grammar rust
 module bitkit
+choose runtime
 
 /* bitkit.lomt —— 用 **Rust 拼法**写的 Loment 模块。
  *

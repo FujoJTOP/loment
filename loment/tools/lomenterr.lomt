@@ -28,6 +28,7 @@
 //   lomenterr <诊断.jsonl>
 
 module lomenterr
+choose runtime
 
 use json
 use surface_data

@@ -1134,11 +1134,11 @@ def test_p4_domain_table_and_audit():
 @test
 def test_p4_guard_bounds():
     """M36: 字面量越界编译期拒绝; 域内放行。"""
-    ok = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(2); return 0; }\n"
+    ok = "module m\nchoose runtime\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(2); return 0; }\n"
     assert errs(ok) == [], errs(ok)
-    bad = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(9); return 0; }\n"
+    bad = "module m\nchoose runtime\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(9); return 0; }\n"
     assert any("越界" in x for x in errs(bad)), errs(bad)
-    e = errs("module m\nfn f() -> u32 { guard nope(0); return 0; }\n")
+    e = errs("module m\nchoose runtime\nfn f() -> u32 { guard nope(0); return 0; }\n")
     assert any("未声明的能力" in x for x in e), e
 
 
@@ -1162,7 +1162,7 @@ def test_m43_capability_fuzz():
         lo = rnd.randint(0, 8)
         hi = lo + rnd.randint(0, 8)
         idx = rnd.randint(0, 20)
-        src = (f"module m\ncapability c : disk[{lo}..{hi}]\n"
+        src = (f"module m\nchoose runtime\ncapability c : disk[{lo}..{hi}]\n"
                f"fn f() -> u32 {{ guard c({idx}); return 0; }}\n")
         got = errs(src)
         should_reject = not (lo <= idx <= hi)
@@ -1663,7 +1663,7 @@ def test_extern_without_a_return_type_is_void():
     这一条是**实测踩出来的**：parse_fn 原先靠"后面是 `{`"判断无返回类型，而外部函数没有
     函数体（后面是 `;`），于是最普通的释放函数写法直接被判成"缺了 `->`"。
     """
-    src = ("module m\n\nextern fn c_free(p: ptr);\n\n"
+    src = ("module m\nchoose runtime\n\nextern fn c_free(p: ptr);\n\n"
            "fn f() -> u32 { let q: ptr = alloc(8); c_free(q); return 0; }\n")
     assert errs(src) == [], errs(src)
     ir = lomentc.emit_llvm(parse(src), ROOT)
@@ -2615,6 +2615,72 @@ def test_l1_definite_lifetime_rule():
     assert alpha["f_escape"] == ["p"], alpha["f_escape"]
     # 两份源只差那一行
     assert L1_ALPHA_SRC.replace("choose gc_auto_alpha", "X") ==         L1_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+@test
+def test_runtime_is_forced_in_and_absent_by_default():
+    """`docs/219` 判据 C：`runtime` = **强制带**，默认档 = 一个 `@__loment_` 都没有。
+
+    这一对是这一维**买到的全部**：同一份**用不到**运行期的程序，加不加那一行，产物差
+    **恰好**是那段运行期。差得比它多（比如把分配器也带进来）就说明"强制带"越了界 ——
+    §2.3 那条：`_IR_HEAP` **不**跟着 `rt_on` 走，因为那是 64 KiB 的零初全局，
+    给一个只会除法的裸机程序凭空装上它是"给承诺加税"。
+    """
+    NL = chr(10)
+    body = NL.join(["fn f() -> u32 {", "    return 7;", "}", ""])
+    off = "module m" + NL + NL + body
+    on = "module m" + NL + "choose runtime" + NL + NL + body
+    assert errs(off) == [], errs(off)
+    assert errs(on) == [], errs(on)
+
+    ir_off = lomentc.emit_llvm(parse(off), ROOT, [])
+    ir_on = lomentc.emit_llvm(parse(on), ROOT, [])
+    # 默认档：这段运行期**一点痕迹都没有**
+    assert "@__loment_" not in ir_off, ir_off
+    # `choose runtime`：那段在，而且**只有**那段（四个符号 = memcmp/memset/memcpy/abort）
+    assert ir_on.count("@__loment_") == 4, ir_on
+    for sym in ("memcmp", "memset", "memcpy", "abort"):
+        assert f"@__loment_{sym}" in ir_on, sym
+    # **分配器不在里面**（§2.3）：强制带的是那段 freestanding 文本块，不是那 64 KiB 的堆
+    assert "@__loment_alloc" not in ir_on, "强制带把分配器也拖进来了"
+    assert "@__loment_heap" not in ir_on, "强制带把堆全局也拖进来了"
+    # 产物差**恰好**是那一段：摘掉它，剩下的与默认档逐字符相同
+    assert ir_on.replace(lomentc._IR_RUNTIME + NL, "", 1) == ir_off, (len(ir_off), len(ir_on))
+
+
+@test
+def test_runtime_dep_must_declare_and_agree():
+    """`docs/219` 判据 D：依赖的**声明是需求** —— 库没写要报，根不满足要报。
+
+    改之前这里是一律「库不许 `choose`」（`lomentc.py` 的 `check()`）。那条按字面做不下去：
+    `loment/lib/proc.lomt` 要除法，当根编要 `choose runtime`、当依赖又不许写 —— 两面堵死。
+    新规矩把方向反过来，而它**本来就是那句老报错自己写的**（"库该声明**能力需求**"）。
+    """
+    import tempfile
+    NL = chr(10)
+    lib_div = "module lib" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
+    lib_rt = "module lib" + NL + "choose runtime" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
+    tail = NL + 'use "lib.lomt"' + NL + NL + "fn f() -> u32 {" + NL + "    return half(4);" + NL + "}" + NL
+
+    def run(lib: str, root: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "lib.lomt").write_text(lib, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text(root, encoding="utf-8")
+            m = lomentc.load(rp)
+            deps = lomentc.resolve_deps(m, ROOT, rp.parent, entry=rp)
+            return lomentc.check(m, None, deps)
+
+    # ① 库用了会拖运行期的构造却**什么都没写** ⇒ 报，并且点名那个库
+    e = run(lib_div, "module root" + tail)
+    assert any("lib" in x and "需求" in x for x in e), e
+    # ② 库要求 `runtime`、根不满足（默认 `no_runtime`）⇒ 报，两边都点名
+    e = run(lib_rt, "module root" + tail)
+    assert any("runtime" in x and "根" in x for x in e), e
+    # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
+    e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
+    assert e == [], e
 
 
 def main() -> int:

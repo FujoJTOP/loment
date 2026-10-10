@@ -23,6 +23,7 @@
 // 命名: 公开 cli_*, 自检 test_cli_*。
 
 module lpi_cli
+choose runtime
 
 use "lpi_idn.lomt"
 

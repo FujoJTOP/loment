@@ -138,8 +138,14 @@ RULES = [
     # 2026-09-23 加 `gc` 维（`docs/175` §3.4）时消息改了两处措辞，这里跟着放宽：
     #   * "只能声明一次" -> "**这一维**只能声明一次"（有两维之后，"哪一维"必须说出来）；
     #   * 多一条"两档不能同时选"（`no_std` + `gc_auto`）。
+    # 2026-10-09 `runtime` 维**兑现**（`docs/217`）：这一维从"只声明"变成"有保证"，
+    # 多出两条消息，**并进 E022 而不是开一个新码** —— 按"码按修法分"的口径，
+    # 这一条的修法与既有那几条同族：**去改那一行 `choose`**（写 `choose runtime`），
+    # 或者把那个拖运行期的构造换掉。开一个新码就还要多一张 zh/en 说明卡、一行自举码表、
+    # 四条"键集相等"的判据，而用户要做的事一个字没变。
     ("E022", r"核心模式只能声明一次|核心模式这一维只能声明一次|模式只能是|"
              r"不能同时选|库不许 `choose`|未定义的开关|"
+             r"声明了 `no_runtime`|依赖 `.*` 要求 |依赖 `.*` 用了会把运行期拖进产物的构造|"
              r"开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|"
              r"不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|"
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
@@ -153,8 +159,14 @@ RULES = [
      "要运行期、但内存自己管。"
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"
-     "而且取值前要先用 `set choose` 定义。库不许 `choose` —— 库要表达需要就**声明能力需求**"
-     "（`docs/168`），由项目决定。见 `docs/143` §3.2 与 `docs/182` §1。\n"
+     "而且取值前要先用 `set choose` 定义。"
+     "**`runtime` 维是一句保证**（`docs/217`）：`no_runtime`（默认）说的是"
+     "「产物里没有运行期」，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
+     "`str_concat`、`panic`、`guard` …）在**这一档下编译期点名拒** —— "
+     "要运行期就在**根单元**写一行 "
+     "`choose runtime`。**库**可以声明它的需求（`choose runtime`），但根的取值必须与它一致；"
+     "库用了拖运行期的构造却什么都没写，也要报 —— 库该声明它的**需求**"
+     "（`docs/168`），由项目决定。见 `docs/143` §3.2、`docs/182` §1 与 `docs/217`。\n"
      "**`addin <名字>`** 是同一个语法的另一半（`docs/182` §1.4）：它拉进来的**不是库**，"
      "而是**一份开关设定** —— 所以那里面**正是**要写 `choose`，反过来**别的一律不许**"
      "（`fn`/`struct`/`use` 都拒），而且只有**根单元**能写 `addin`（库和 addin 单元都不行）。"
@@ -574,16 +586,21 @@ CARDS: dict[int, Card] = {
         why="这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、"
             "只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，"
             "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
-            "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。",
+            "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"
+            "③ **`runtime` 那一维是一句保证**（`docs/219`）：`no_runtime`（默认）说的是"
+            "“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
+            "`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。",
         fixes=(
             "核心模式只写一次，而且只在入口那一份：`choose std` 或 `choose no_std`。",
+            "报的是 `no_runtime`：要运行期就在**根单元**写一行 `choose runtime`（产品里就带上那段）；"
+            "不要就把那个构造换掉。",
             "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。",
             "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。",
-            "库里的 `choose` 搬到根单元去（库这一侧改成声明能力域）。",
+            "报的是“依赖要求 X 而根不满足”：在根单元写一行同样的 `choose X` —— 依赖的声明是**需求**。",
             "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。",
         ),
-        yes="单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域",
-        no="核心模式写两次或写在库里；取值前没定义；同名两个取值；嵌套声明；库写 `choose` 或 `addin`",
+        yes="单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）",
+        no="核心模式写两次或写在根单元之外不一致；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`",
     ),
     23: Card(
         what="你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。",
@@ -1030,24 +1047,31 @@ CARDS_EN: dict[int, Card] = {
             "when it is on\". There can be many switches, but **one name may be written once**, "
             "and a value may only be set after `set choose` declared it. A library may not "
             "`choose`: to express a need, a library declares a **capability requirement** and the "
-            "project decides.",
+            "project decides. (3) **The `runtime` dimension is a guarantee** (`docs/219`): "
+            "`no_runtime` (the default) says \"this artifact carries no runtime\", so every "
+            "construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, "
+            "`guard` ... - is refused at compile time **in that tier**.",
         fixes=(
             "Write the core mode once, in the entry unit only: `choose std` or `choose no_std`.",
+            "If the message names `no_runtime`: write `choose runtime` in the **root unit** (the "
+            "artifact then carries that runtime), or replace the construct it named.",
             "Declare a switch before setting it: `set choose verbose { ... }` then `choose "
             "verbose` (or `choose close verbose`).",
             "The declaration lives in another unit: pull it in with `addin chooseset` in the entry "
             "unit, and write `set choose` in that `chooseset.lomt`.",
-            "Move the `choose` out of the library into the root unit (the library side declares a "
-            "capability domain instead).",
+            "If the message says a dependency requires X and the root does not: write the same "
+            "`choose X` in the root unit - a dependency's declaration is a **requirement**.",
             "Do not nest a declaration inside another switch's body - the pre-scan cannot see it, "
             "which turns \"is it on\" into a chicken-and-egg question.",
         ),
         yes="up to 500 switches per file; `addin` to carry switch settings across files (root unit "
             "only); empty switch bodies (purely to drive compiler behaviour); capability domains "
-            "declared by a library",
-        no="the core mode written twice or written in a library; setting a value before declaring "
-           "it; two settings for one name; nested declarations; a library writing `choose` or "
-           "`addin`",
+            "declared by a library; a library declaring a core mode (read as a requirement the "
+            "root must satisfy)",
+        no="the core mode written twice, or a dependency and the root disagreeing; setting a value "
+           "before declaring it; two settings for one name; nested declarations; a library that "
+           "uses a runtime-dragging construct without declaring it; division / `alloc` / "
+           "`str_concat` in the **default tier** without `choose runtime`",
     ),
     23: Card(
         what="What you wrote is syntactically and semantically right - **this version of the "
