@@ -473,7 +473,7 @@ df9166a9f11db9ffc35775adb34e7eb2abee41192ae0fcbb9ac5d766909b88fa  docs/192-lomel
 007cc34e7a2d88bfdffe4b48f80fcd4ee73bead832aea8a78b617c0608d4b598  docs/197-natural-grammar.md
 e4b565cfc43a3ac7b40579acc1d9bb2f0728731d80fa61ff8b4f9c14773ade8c  docs/198-surface-syntax-defects.md
 75384f6cb47e726bf6d30a373c17bf02663e05ef8f6894f952fd413d3468c339  docs/199-std-reachable.md
-7957c649b22973372fde4cd82ff2145cff074c53424ac69a7ccba84aa2c912a2  docs/200-lomelf-table-caps.md
+b68e1513943b56e3e07baff6e0de98d4cc470a68701d313956204dd79268d774  docs/200-lomelf-table-caps.md
 112a966a6b967c4c77522b0808e9dfce9614ada46b9cbf21c567d1b226191616  docs/201-doors-and-registries.md
 f139f9ce04590443f5896e58a16fbdc01f70a49e72c19d2bd6e277be557df10b  docs/202-loment-014-release-gate.md
 35c15169951a4755c0bae26bff4c16df60c589ebdcfee4ebf2491e860f6c8e51  docs/203-third-party-audit.md
@@ -493,7 +493,7 @@ e022c7151c824208bac126d923c15ca7c34c8064fef7036d359a3d55bcb6ef09  docs/213-gate-
 eb4dce1c2f72462e6884da3bf0afdd9b4cd5284eac736e2efb3e59e979a6e9fe  docs/219-world-ports.md
 062d2d143aac1e2842c8fa0a93fa0d7ff1861e226bbdd01a7e29d6914ad9fe73  docs/220-syscall7-and-udp.md
 495615ee4d2cc35eb3ea87dcc0648aaba7595056bf5a224dc6f6fa60b4657ed0  docs/221-loment-pe-poll.md
-8aaa58d72540b495a13e009c5fd6d7b4b121ad2f868929cd4cdc034655e311aa  docs/222-lompi-020-foreign-libs.md
+faf9fc8dd137de7dfb54bb3c9e8f7bc288ba782cbc82997d45e6437f8be9e97c  docs/222-lompi-020-foreign-libs.md
 0e028c420b45d8af50f22034ae6f93e911e32f2d64ad283fb2dba4cdb4b32d9b  docs/manual/index.md
 36cae734cd3e7ee1da5b36538042179b93407566eed9ef03bfd2f0852922ab0f  docs/manual/api/ahci.md
 5f24f76cb511fbc469cc1c7e965da69e643ba4aac7f62e56ab9c082f3663cdf4  docs/manual/api/all_loment.md
