@@ -1320,7 +1320,7 @@ fn die_chooseset(path: ptr, n: u32) -> u32 {
 ///
 /// 形参不能叫 `entry`: LLVM 的块标签与局部值共用名字空间, 每个函数的第一块都叫
 /// `entry`, 于是 `%entry` 参数会让 clang 报 "unable to create block named 'entry'"。
-/// `--print-command FILE`（`docs/218`）：把这个单元注册的命令名打到 stdout；没声明就打
+/// `--print-command FILE`（`docs/223`）：把这个单元注册的命令名打到 stdout；没声明就打
 /// 一个**空行**（调用方按"空 = 不是命令"处理）。
 ///
 /// **单独一趟词法**：不装载依赖、不做 comefor 展开、不单态化 —— 前端只要一个名字，
@@ -1416,7 +1416,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     //   名字形式   `use name`       -> 解析成真实路径, 写在 slot 的 nb 之后
     // (每层各有一个槽, 所以递归不会踩到父层写下的这些路径)
     let rbase: u32 = nb;
-    // **库不许声明命令**（`docs/218` §3.3）：命令是**可执行产物**的身份，而库是给别人
+    // **库不许声明命令**（`docs/223` §3.3）：命令是**可执行产物**的身份，而库是给别人
     // `use` 的代码。与"库不许 `choose`"同一条纪律、同一个落点 —— 只有装载器分得清
     // "这一层是根还是被 use 进来的"（单元拼完之后检查器看到的是一整块 token）。
     // 一次算完再进循环：`lex_cmd_find` 扫的是整条 token 流，放在循环里就是 O(n²)。
@@ -1614,7 +1614,7 @@ fn _start() -> u32 {
         } else if streq(p2, n2, "--emit-potato") == 1 {
             pmode = 1;
         } else if streq(p2, n2, "--print-command") == 1 {
-            // `--print-command` (docs/218): 这个单元注册了哪条命令 —— 构建前端拿它去命名
+            // `--print-command` (docs/223): 这个单元注册了哪条命令 —— 构建前端拿它去命名
             // 产物（`loment-<名字>`）。**不装载**，只词法扫一遍（见 print_command）。
             pmode = 2;
         }

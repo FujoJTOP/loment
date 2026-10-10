@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# lompicheck_test.py — `loment lompicheck` 的判据 (docs/217)
+# lompicheck_test.py — `loment lompicheck` 的判据 (docs/222)
 #
-# 这条命令**自己就是一条注册出来的命令**（`docs/218` 形态 B）：单元里声明 `loment_command()`
+# 这条命令**自己就是一条注册出来的命令**（`docs/223` 形态 B）：单元里声明 `loment_command()`
 # 与 `command_main`，产出因此叫 `loment-lompicheck`，放上 PATH 就有 `loment lompicheck`。
 # 所以判据从"声明"一路判到"跑起来"，中间没有一段是靠读代码相信的：
 #
@@ -93,7 +93,7 @@ def test_the_unit_declares_the_command_and_has_no_start():
     """它就是一条**注册出来的**命令：声明在源码里，`_start` 由工具链生成。
 
     自己写 `_start` 的话这条命令照样能跑 —— 但那就退回了"手抄入口"，而这正是
-    `docs/218` 要消灭的东西。判据把这条钉住，免得哪天被"顺手写回去"。
+    `docs/223` 要消灭的东西。判据把这条钉住，免得哪天被"顺手写回去"。
     """
     src = SRC.read_text(encoding="utf-8")
     assert 'pub fn loment_command() -> str { return "lompicheck"; }' in src, "没有命令声明"

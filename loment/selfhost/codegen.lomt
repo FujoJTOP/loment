@@ -5527,7 +5527,7 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
 }
 
 /// 主入口: 写完整 IR (子集), 返回长度; **返回 0 = 单元的规模超过表容量** (驱动器据此报错)。
-// ---------------------------------------------------------------- 命令入口 (docs/218)
+// ---------------------------------------------------------------- 命令入口 (docs/223)
 
 /// 这个单元要不要发命令入口：**声明了命令、名字取出来了、又没有 `_start`**。
 ///
@@ -5569,7 +5569,7 @@ fn emit_cmd_globals(s: ptr, out: ptr) -> u32 {
 /// —— `loment_p8_test` 那道闸要求两个实现发出的 IR 逐字节相同。
 /// 局部名一律 `%lc.*` 前缀，与单元自己生成的 `%tN` 不会撞。
 fn emit_cmd_entry(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 命令入口 (docs/218: 工具链生成, 不是用户写的) ----
+    return emit_str(s, out, "; ---- 命令入口 (docs/223: 工具链生成, 不是用户写的) ----
 define void @_start() {
 entry:
   %lc.o = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 12, i64 0, i64 0, i64 0)
@@ -5952,7 +5952,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         ic = load32(s, 64);   // 实例体内可能又发现新实例
         ie = ie + 1;
     }
-    // 命令入口（`docs/218`）：**所有函数之后**发 —— 参考实现把它追加在 `text_all` 末尾。
+    // 命令入口（`docs/223`）：**所有函数之后**发 —— 参考实现把它追加在 `text_all` 末尾。
     if cmd_entry_needed(src, toks) == 1 {
         emit_cmd_entry(s, out);
     }

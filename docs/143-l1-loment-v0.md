@@ -221,7 +221,7 @@ freestanding 子集 —— 否则会造出一种"看着像 Python、却什么都
 
 ### 3.3 命令声明（`register`，2026-10-10）
 
-**一个单元可以声明自己是一条 `loment` 命令**（设计见 `docs/218`）：
+**一个单元可以声明自己是一条 `loment` 命令**（设计见 `docs/223`）：
 
 ```rust
 module mycmd

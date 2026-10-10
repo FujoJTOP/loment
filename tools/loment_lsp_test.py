@@ -40,7 +40,7 @@ BAD = ("module t\n\nfn helper() -> u32 {\n    return 1;\n}\n\n"
        "fn main() -> u32 {\n    return missing_fn();\n}\n")
 DUP = ("module t\n\nfn a() -> u32 {\n    return 1;\n}\n\n"
        "fn a() -> u32 {\n    return 2;\n}\n")
-#: `register` 块（`docs/218` 形态 A）—— **新语法**，语言服务不认它就会在编得过的源上
+#: `register` 块（`docs/223` 形态 A）—— **新语法**，语言服务不认它就会在编得过的源上
 #: 报假错（消费方轴 `docs/182` §1.9 那条，与开关/方言是同一个入口缺口）。
 REG_SRC = ("module t\n\nregister tcmd {\n"
            "    fn command_main(argv: ptr, argc: u32) -> u32 {\n        return argc;\n    }\n}\n")
@@ -449,7 +449,7 @@ def test_python_lsp_honours_comefor():
 
 @test
 def test_python_lsp_accepts_the_register_form():
-    """`register` 块是**新语法**（`docs/218` 形态 A）：语言服务不认它，就会在一份
+    """`register` 块是**新语法**（`docs/223` 形态 A）：语言服务不认它，就会在一份
     **编得过**的源上报一条假错 —— "编得过但编辑器报错"比两边都报错更糟
     （消费方轴，`docs/182` §1.9；与开关/方言那两条同一个入口缺口）。
 

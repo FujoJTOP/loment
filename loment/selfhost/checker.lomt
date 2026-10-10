@@ -3104,14 +3104,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             i = i + 1;
         }
     }
-    // ---- 最后一趟: 命令声明（`docs/218` 形态 B）。
+    // ---- 最后一趟: 命令声明（`docs/223` 形态 B）。
     // **单独一趟**：它只看两样东西（`loment_command` 的标签、`command_main` / `_start`
     // 的存在），与上面那几趟的游标状态一件都不共用 —— 塞进主扫描反而要跟着它们的规则走。
     o = chk_command(src, t, out, o, scr);
     return o / 8;
 }
 
-// ---------------------------------------------------------------- 命令声明 (docs/218)
+// ---------------------------------------------------------------- 命令声明 (docs/223)
 
 //: E024 命令声明不合法（形状 / 名字 / 撞官方名）、E025 两个进程入口、
 //: E026 `command_main` 与声明对不上。**与参考实现同一批码**（`tools/loment_diag.py`
@@ -3135,7 +3135,7 @@ fn cmd_span_is(src: ptr, p: u32, n: u32, s: str) -> bool {
     return true;
 }
 
-/// `loment` 官方的命令名（`docs/218` §3.3）—— **与参考实现的 `RESERVED_COMMANDS`
+/// `loment` 官方的命令名（`docs/223` §3.3）—— **与参考实现的 `RESERVED_COMMANDS`
 /// 同一份表，两处一起改**。手抄的第二份必然漂，所以 `tools/loment_register_test.py`
 /// 有一条判据把两边逐条钉在 `loment commands` 打出来的那批上。
 fn cmd_reserved(src: ptr, p: u32, n: u32) -> bool {
@@ -3180,7 +3180,7 @@ fn cmd_reserved(src: ptr, p: u32, n: u32) -> bool {
     return false;
 }
 
-/// 命令名合不合法（`docs/218` §3.4）：只收 `[A-Za-z0-9_-]`、长度 1..64。
+/// 命令名合不合法（`docs/223` §3.4）：只收 `[A-Za-z0-9_-]`、长度 1..64。
 /// 启动器按**文件名**找命令（`loment <名>` -> `loment-<名>`），所以带路径分隔符、
 /// 空格或非 ASCII 的名字拼不出一个可靠的路径。
 fn cmd_name_ok(src: ptr, p: u32, n: u32) -> bool {
@@ -3200,7 +3200,7 @@ fn cmd_name_ok(src: ptr, p: u32, n: u32) -> bool {
     return true;
 }
 
-/// 入口签名是不是 `fn command_main(argv: ptr, argc: u32) -> u32`（`docs/218` §3.2）。
+/// 入口签名是不是 `fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。
 /// 签名是**固定的**（不是用户可选的），所以逐 token 比就够 —— 再写一个小 parser 不值。
 fn cmd_main_sig_ok(src: ptr, t: ptr, itok: u32) -> bool {
     let lp: u32 = itok + 1;

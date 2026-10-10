@@ -1,4 +1,4 @@
-// loment/tools/lompicheck.lomt — `loment lompicheck` 的引擎 (docs/217)
+// loment/tools/lompicheck.lomt — `loment lompicheck` 的引擎 (docs/222)
 //
 // 它**只读本地两棵树**, 逐文件比内容:
 //
@@ -693,17 +693,17 @@ fn lpc_run(r1: ptr, r1n: u32, r2: ptr, r2n: u32, stale: bool) -> u32 {
 
 // ---------------------------------------------------------------- 入口
 
-// ---------------------------------------------------------------- 命令入口 (docs/218)
+// ---------------------------------------------------------------- 命令入口 (docs/223)
 
-/// 这条单元注册的命令名（`docs/218` 形态 A）：编出来的产物因此叫 `loment-lompicheck`
+/// 这条单元注册的命令名（`docs/223` 形态 A）：编出来的产物因此叫 `loment-lompicheck`
 /// —— 放上 `PATH` 就有一条 `loment lompicheck`。
 ///
 /// 名字在**语法**里（块那种写法），不再是从函数体里**扫**出来的一个字符串 ——
 /// 这一层原先写的是 `pub fn loment_command() -> str { return "lompicheck"; }`，
-/// 名字与实现分在两处；`docs/218` §2 的块把它合成一处。
+/// 名字与实现分在两处；`docs/223` §2 的块把它合成一处。
 register lompicheck {
 
-    /// 命令体（`docs/218` §3.2）。**不自己写 `_start`** —— 工具链生成的入口读
+    /// 命令体（`docs/223` §3.2）。**不自己写 `_start`** —— 工具链生成的入口读
     /// `/proc/self/cmdline`、数出字段数，把那一整块与个数交到这里。
     ///
     ///     loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
@@ -711,7 +711,7 @@ register lompicheck {
     /// `--source` 默认**当前目录**（在 loment 检出里跑就是它）；`--outlet` 默认从 `argv[0]`
     /// 推出来 —— 与 `lompi` 推它的全局根**同一条规矩**：程序在哪个家目录下，缓存就在那儿。
     ///
-    /// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/217` §1），Loment 起不了
+    /// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/222` §1），Loment 起不了
     /// `git`。所以需要更新缓存时它**把该跑的命令打出来**让你跑 —— `lompi fetch` 对同一个
     /// 局面用的就是这一招。
     pub fn command_main(argv: ptr, argc: u32) -> u32 {
@@ -775,7 +775,7 @@ register lompicheck {
 }
 
 /// 命令行的字节长度。**命令体拿到的是 (整块 cmdline, 字段数)，没有长度**
-/// （入口签名是固定的，`docs/218` §3.2），所以自己数到第 `argc` 个 NUL。
+/// （入口签名是固定的，`docs/223` §3.2），所以自己数到第 `argc` 个 NUL。
 fn lpc_cmdline_len(buf: ptr, argc: u32) -> u32 {
     let i: u32 = 0;
     let f: u32 = 0;
@@ -823,7 +823,7 @@ fn lpc_usage() {
     lpc_ws(FD_OUT, "  --refresh      print the git command that updates the outlet clone\n");
 }
 
-/// **拉取那一半**（`docs/217` §1）：本程序联不了网，所以把该跑的 git 命令打出来。
+/// **拉取那一半**（`docs/222` §1）：本程序联不了网，所以把该跑的 git 命令打出来。
 /// 外面的单引号是刻意选的 —— Loment 的转义集里没有 `\'`，用双引号就得写成 `\\"`，
 /// 而这条路径上每多一层转义就多一次能和自举侧分叉的机会。
 fn lpc_print_refresh(outlet: ptr, on: u32) {

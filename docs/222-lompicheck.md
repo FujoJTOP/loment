@@ -1,6 +1,6 @@
-# 217 · `loment lompicheck`：发布口的 lompi 跟上开发口了没
+# 222 · `loment lompicheck`：发布口的 lompi 跟上开发口了没
 
-> 2026-10-09 · 2026-10-10 重写成**注册出来的命令**（`docs/218`）· 源码 `loment/tools/lompicheck.lomt`
+> 2026-10-09 · 2026-10-10 重写成**注册出来的命令**（`docs/223`）· 源码 `loment/tools/lompicheck.lomt`
 > · 上游：`docs/171`（两个发布口）、`docs/169`（CLI 与启动器）、`docs/189` §47（指针比较那条限制）
 
 ## 0. 一句话

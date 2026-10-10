@@ -48,7 +48,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
 #
-# 2026-10-10 `register`（`docs/218` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
+# 2026-10-10 `register`（`docs/223` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
 # 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
 # 函数那种写法**判成同一批码**，这正是"形态 A 编译到形态 B"要看见的东西。
 BUDGET = 86
@@ -210,7 +210,7 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
-    # ---- 命令声明 (E024/E025/E026, docs/218) --------------------------------
+    # ---- 命令声明 (E024/E025/E026, docs/223) --------------------------------
     # 这五条是**检查器**规则（只看这一个单元）。第六条"库不许声明命令"是**装载器**规则
     # —— 它要两个单元（入口 + 被 use 的那个），装不进这张表，与 `choose` 那第三条
     # 同一个落点：棘轮由 `loment_p8_test` 的驱动闸门承担，预算里不算它。
@@ -230,7 +230,7 @@ _CASES: list[tuple[str, str]] = [
      "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
     ("cmd-body-no-decl",
      "module m\n\npub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
-    # ---- `register`（形态 A，`docs/218` §2 第 3 步）--------------------------------
+    # ---- `register`（形态 A，`docs/223` §2 第 3 步）--------------------------------
     # 与上面那五条**同一批码**，只是换了一种写法：名字由**语法**给出（不再从函数体里扫
     # 字符串），块里是这条命令的条目。两种写法在两边都必须判成同一个码。
     ("reg-reserved-name",

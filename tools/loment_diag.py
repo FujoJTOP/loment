@@ -174,7 +174,7 @@ RULES = [
      "不是 `=> 表达式`）；`return` 必须带值（没有 `return;`）；用了 Loment 没有的"
      "字面量或符号（单引号字符、`#`、`@`…）。**若这个文件本来就不是 Loment**，"
      "`loment diag` 会另给一条提示（见 `foreign_note`）。"),
-    # E024/E025/E026 (2026-10-10 新增, **源码里注册一条 `loment` 命令**, `docs/218`)。
+    # E024/E025/E026 (2026-10-10 新增, **源码里注册一条 `loment` 命令**, `docs/223`)。
     # 三条码按「码按修法分」切开: 改那条声明 / 删一个入口 / 把入口与声明对上。
     #
     # **为什么是三个而不是一个**: 三件事用户要做的事完全不同 —— 一个改名字或挪位置,
@@ -189,7 +189,7 @@ RULES = [
     ("E024", r"命令声明的形状不对|是 loment 的官方命令|命令名 .* 不合法|库不许声明命令"
              r"|名字后面要跟",
      "命令声明不合法",
-     "注册一条 `loment` 命令的声明写错了（`docs/218`）。两种写法：块里的 "
+     "注册一条 `loment` 命令的声明写错了（`docs/223`）。两种写法：块里的 "
      "`register 名字 { … }`（名字由**语法**给出），或者写成 "
      "`pub fn loment_command() -> str { return \"名字\"; }` —— 后一种**必须是 `return` "
      "后面紧跟一个字面量**，工具链是**扫**出来的、不算表达式。名字只能是 `[A-Za-z0-9_-]`"
@@ -207,7 +207,7 @@ RULES = [
      "所以两者必须成对：有 `command_main` 却没有命令声明，它就是**死代码**（不会被调用）；"
      "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
      "签名不对则生成的入口调不动它 —— 入口固定是 "
-     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/218` §3.2）。"),
+     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
 ]
 
 
@@ -641,7 +641,7 @@ CARDS: dict[int, Card] = {
     24: Card(
         what="在源码里注册一条 `loment` 命令的**声明**写错了（名字、形状，或者它出现的地方）。",
         why="`loment <名>` 能找到命令只有一条路：`PATH` 上有一个叫 `loment-<名>` 的可执行"
-            "文件（`docs/169` §3b，与 `git` 同款）。`docs/218` 的那条设计让**名字由源码给出**，"
+            "文件（`docs/169` §3b，与 `git` 同款）。`docs/223` 的那条设计让**名字由源码给出**，"
             "于是工具链能在**构建时**把产物命名成那个文件。两种写法：块里的 "
             "`register 名字 { … }`（名字在语法里），或者老那种返回字面量的函数 —— 后一种要能被"
             "**扫**出来：工具链用的是词法器扫标签（与 `loment.conf` 的 `source_ext` 同一种读法，"
@@ -663,7 +663,7 @@ CARDS: dict[int, Card] = {
         what="同一个程序里有两个**进程入口**：`_start` 和 `command_main`。",
         why="`_start` 是普通程序自己写的入口（语言约定，链接器按名字找它）；"
             "`command_main` 是**命令体**的入口，声明了命令之后由**工具链生成** `_start` 去调它"
-            "（读 `/proc/self/cmdline`、数出字段数、把返回值交给 `exit`，`docs/218` §3.2）。"
+            "（读 `/proc/self/cmdline`、数出字段数、把返回值交给 `exit`，`docs/223` §3.2）。"
             "两个都在就是两个入口，链接器只能认一个 —— 那是静默丢掉另一个的地带，所以在这里拒。",
         fixes=(
             "要当命令：删掉 `_start`，把逻辑搬进 `command_main(argv: ptr, argc: u32) -> u32`。",
@@ -684,7 +684,7 @@ CARDS: dict[int, Card] = {
             "签名不对则生成的入口传不进去参数。"
             "入口的签名是固定的：`fn command_main(argv: ptr, argc: u32) -> u32`，"
             "`argv` 就是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径"
-            "（`docs/218` §3.2）。",
+            "（`docs/223` §3.2）。",
         fixes=(
             "补上声明：`register mycmd { … }` 或者 "
             "`pub fn loment_command() -> str { return \"mycmd\"; }`。",
@@ -1172,7 +1172,7 @@ CARDS_EN: dict[int, Card] = {
              " its shape, its name, or where it appears.",
         why="There is exactly one way `loment <name>` can find a command: a file called "
             "`loment-<name>` on `PATH` (`docs/169` section 3b, the way `git` does it). The "
-            "design in `docs/218` lets the **source** give the name, so the toolchain can name "
+            "design in `docs/223` lets the **source** give the name, so the toolchain can name "
             "the artifact after it at **build time**. There are two spellings: the block "
             "`register name { ... }` (the name is in the grammar), or the older function "
             "returning a literal - and the latter has to be **scanned**: the toolchain reads it "
@@ -1205,7 +1205,7 @@ CARDS_EN: dict[int, Card] = {
             "linker finds it by name). `command_main` is the entry of a **command body**: once "
             "a command is declared, the **toolchain generates** the `_start` that calls it "
             "(reads `/proc/self/cmdline`, counts the fields, hands the return value to `exit` -"
-            " `docs/218` section 3.2). Two entries means the linker can only pick one, and "
+            " `docs/223` section 3.2). Two entries means the linker can only pick one, and "
             "silently dropping the other is exactly the kind of thing this repo refuses, so it "
             "is rejected here.",
         fixes=(
@@ -1235,7 +1235,7 @@ CARDS_EN: dict[int, Card] = {
             "pass its arguments. The signature is fixed: "
             "`fn command_main(argv: ptr, argc: u32) -> u32`, where `argv` is the whole "
             "`/proc/self/cmdline` block and `argv[0]` is the command's own path "
-            "(`docs/218` section 3.2).",
+            "(`docs/223` section 3.2).",
         fixes=(
             "Add the declaration: `register mycmd { ... }`, or "
             "`pub fn loment_command() -> str { return \"mycmd\"; }`.",

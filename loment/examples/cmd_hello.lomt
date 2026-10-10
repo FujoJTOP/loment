@@ -1,4 +1,4 @@
-// loment/examples/cmd_hello.lomt — 一条**注册给 `loment` CLI 的命令**（`docs/218` 形态 B）
+// loment/examples/cmd_hello.lomt — 一条**注册给 `loment` CLI 的命令**（`docs/223` 形态 B）
 //
 // 编出来的产物叫 `loment-cmd-hello`：丢进 `PATH`，`loment cmd-hello ...` 就能用
 // （启动器那条 `loment foo` -> PATH 上的 `loment-foo`，`docs/169` §3b）。

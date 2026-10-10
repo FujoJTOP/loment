@@ -1,9 +1,9 @@
-# 218 · `register`：在源码里注册一条 `loment` 命令
+# 223 · `register`：在源码里注册一条 `loment` 命令
 
 > 2026-10-09 用户提的形态 · **形态 B 与形态 A 都已落地（2026-10-10，§10）** · 上游：`docs/169` §3b（今天唯一的注册方式）、
 > `docs/162` §2b（两个扩展点、没有注册表）、`docs/188` §7.1（加语法要动的登记处）、
 > `docs/146` §5 与 SKILL §5（`guard` 不是授权、`syscall4` / FFI 都是裸的）、
-> `docs/217`（第一个消费者：`loment lompicheck`）
+> `docs/222`（第一个消费者：`loment lompicheck`）
 
 ## 0. 一句话
 

@@ -263,14 +263,14 @@ pub fn lex(src: ptr, len: u32, out: ptr) -> u32 {
     return lex_cap(src, len, out, 4294967295);
 }
 
-// ---------------------------------------------------------------- 命令声明 (docs/218)
+// ---------------------------------------------------------------- 命令声明 (docs/223)
 
 /// token i 的原文是否等于 s（ident/punct 用；字符串 token 的原文含引号，别拿它比内容）。
 pub fn lex_tok_is(src: ptr, toks: ptr, i: u32, s: str) -> bool {
     return lx_is(src, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8), s);
 }
 
-/// 扫命令声明（`docs/218`），两种写法：
+/// 扫命令声明（`docs/223`），两种写法：
 ///
 ///     register 名字 { … }                              // 形态 A：名字在语法里
 ///     pub fn loment_command() -> str { return "名字"; } // 形态 B：名字在函数体里

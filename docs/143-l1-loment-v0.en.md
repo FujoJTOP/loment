@@ -1,5 +1,5 @@
 <!-- translated-from: docs/143-l1-loment-v0.md -->
-<!-- source-sha256: d9a5827a0fe1b9f563a73dbc0e5ba40d9139eb016a224c7a701cf55e1d770466 -->
+<!-- source-sha256: 4e5ca6d8ce5c2aeca514ca012ebb786241acbaa25e79a62eff3724689c85d260 -->
 
 # 143 · L1 Loment v0: language specification and compiler
 
@@ -193,7 +193,7 @@ choose std
 
 ### 3.3 Command declaration (`register`, 2026-10-10)
 
-**A unit can declare itself to be one `loment` command** (design: `docs/218`):
+**A unit can declare itself to be one `loment` command** (design: `docs/223`):
 
 ```rust
 module mycmd

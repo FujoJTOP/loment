@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# loment_register_test.py — 在源码里注册一条 `loment` 命令的判据 (docs/218)
+# loment_register_test.py — 在源码里注册一条 `loment` 命令的判据 (docs/223)
 #
 # 这条设计有三块，判据也按三块判：
 #
@@ -30,7 +30,7 @@ import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "loment" / "examples" / "cmd_hello.lomt"
-#: 同一个命令的**另一种写法**（`register` 块，`docs/218` 形态 A）—— 两条判据拿这两个比。
+#: 同一个命令的**另一种写法**（`register` 块，`docs/223` 形态 A）—— 两条判据拿这两个比。
 REGISTER_EXAMPLE = ROOT / "loment" / "examples" / "register_hello.lomt"
 CHECKER_SRC = ROOT / "loment" / "selfhost" / "checker.lomt"
 IS_WIN = sys.platform == "win32"
@@ -55,7 +55,7 @@ def _codes(src: str) -> list[int]:
 GOOD = ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
         "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n")
 
-#: 形态 A（`docs/218` §2 第 3 步）：名字在**语法**里，块里是这条命令的条目。
+#: 形态 A（`docs/223` §2 第 3 步）：名字在**语法**里，块里是这条命令的条目。
 GOOD_A = ("module m\n\nregister mcmd {\n"
           "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n")
 
@@ -264,7 +264,7 @@ def test_generated_entry_calls_command_main_and_the_unit_has_no_start():
 def _build_and_run(src: Path, args: list[str]) -> "tuple[bytes, int] | None":
     """把 `src` 编出来、链出来、跑起来。链不出来（本机没有那个后端）返回 None。
 
-    **不只看 IR**：这套东西最容易骗过自己的地方就是"形状对、跑起来 SIGILL"（`docs/218`
+    **不只看 IR**：这套东西最容易骗过自己的地方就是"形状对、跑起来 SIGILL"（`docs/223`
     的入口那一半第一次就是这么过的），所以每一个命令判据都落到真进程的输出与退出码上。
     """
     with tempfile.TemporaryDirectory() as td:

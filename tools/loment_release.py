@@ -75,7 +75,7 @@ GLOBS = [
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
-    # 发布口跟上了没 (docs/217): `loment lompicheck` —— 一条**注册出来的**用户命令,
+    # 发布口跟上了没 (docs/222): `loment lompicheck` —— 一条**注册出来的**用户命令,
     # 联网把 `FujoJTOP/lompi` 与 `FujoJTOP/loment` 的文件树逐条比。
     # **位置必须与自举那份 `lomrel.lomt` 逐行对齐**（那份只认名字, 没有注释可依）。
     "tools/lompicheck_test.py",

@@ -290,7 +290,7 @@ case "${1:-help}" in
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         if [ -z "$out" ]; then
-            # docs/218: a unit that registers a command (a `loment_command()` declaration)
+            # docs/223: a unit that registers a command (a `loment_command()` declaration)
             # names its own artifact -- `loment-<name>`, which is exactly what the launcher's
             # git-style lookup looks for (`loment foo` -> `loment-foo` on PATH). The name is
             # asked out of the driver, which is the side that reads the declaration; keeping
@@ -542,7 +542,7 @@ exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
 
-rem docs/218: a unit that registers a command names its own artifact (`loment-<name>`),
+rem docs/223: a unit that registers a command names its own artifact (`loment-<name>`),
 rem which is what the launcher's git-style lookup looks for. Ask the driver -- it reads the
 rem declaration. No answer (not a command) => the old rule, the source file's own name.
 if not "%out%"=="" goto have_out

@@ -916,7 +916,7 @@ class Module:
     #:   * `ext_blocks` = 块本身（语言名 + 正文）。
     ext_langs: list[str] = field(default_factory=list)
     ext_blocks: list[ExtBlock] = field(default_factory=list)
-    #: **这个单元注册的 `loment` 命令名**（`docs/218` 形态 B）。声明写成：
+    #: **这个单元注册的 `loment` 命令名**（`docs/223` 形态 B）。声明写成：
     #:
     #:     pub fn loment_command() -> str { return "mycmd"; }
     #:
@@ -1425,7 +1425,7 @@ class Parser:
                 t = self.peek()
                 if t.kind != "ident":
                     raise LomError(t.line, t.col, "pub 之后需要一项声明")
-            if t.val == "register":  # docs/218 §2 形态 A
+            if t.val == "register":  # docs/223 §2 形态 A
                 self.next()
                 if not self.accept("string"):
                     # 名字：标识符（常用）或字符串字面量（要带 `-` 时用 —— 合法名字的字符集
@@ -2774,7 +2774,7 @@ def _conf_ext_from_tokens(toks: list) -> str | None:
     return None
 
 
-#: `loment` **官方**的命令名（`docs/218` §3.3）：注册成这些名字的命令**直接拒**。
+#: `loment` **官方**的命令名（`docs/223` §3.3）：注册成这些名字的命令**直接拒**。
 #:
 #: **为什么编译器要管这件事**：启动器是"官方优先"的（`docs/169` §3b）—— `loment version`
 #: 永远走官方那份，`PATH` 上的 `loment-version` 顶不掉。所以撞名的命令**永远跑不到**：
@@ -2793,7 +2793,7 @@ RESERVED_COMMANDS = (
 
 
 def valid_command_name(name: str) -> bool:
-    """命令名合不合法（`docs/218` §3.4：名字是**平的**）。
+    """命令名合不合法（`docs/223` §3.4：名字是**平的**）。
 
     启动器按**文件名**找命令（`loment mycmd` -> `PATH` 上的 `loment-mycmd`），所以名字里
     出现路径分隔符、空格、或什么都不能有——拼出来的那个文件名要么指到别处、要么根本不是
@@ -2805,7 +2805,7 @@ def valid_command_name(name: str) -> bool:
 
 
 def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
-    """从词法流里取**命令声明**（`docs/218`），两种写法：
+    """从词法流里取**命令声明**（`docs/223`），两种写法：
 
       * 形态 B：`pub fn loment_command() -> str { return "x"; }`
       * 形态 A：`register x { … }` —— 名字就在语法里，块里是这条命令的条目
@@ -3401,7 +3401,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         f"「根 + 根 `addin` 到的单元」那张图，所以库里的 `addin` **不会生效**。"
                         f"库要装代码请用 `use`")
 
-    # ---- 命令声明（`docs/218` 形态 B）：`pub fn loment_command() -> str { return "名字"; }`
+    # ---- 命令声明（`docs/223` 形态 B）：`pub fn loment_command() -> str { return "名字"; }`
     #
     # 一个单元要么是**一条命令**（声明 + `command_main`），要么是普通程序（`_start`）。
     # 三条判断都在这一处 —— 与 `choose` / `addin` 同一层，两个实现要对齐的只有这里。
@@ -6312,7 +6312,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     return ir.globals, "\n".join(ir.out)
 
 
-#: **命令入口**（`docs/218` §3.2）：单元声明了命令、又没写 `_start` 时，工具链替它生成进程
+#: **命令入口**（`docs/223` §3.2）：单元声明了命令、又没写 `_start` 时，工具链替它生成进程
 #: 入口 —— 读 `/proc/self/cmdline`、数出字段数、调 `command_main(argv, argc)`、把返回值交给
 #: `exit`。**生成而不是让每个命令自己抄**：一整段 `_start` + cmdline 解析 + `exit` 会在每一条
 #: 命令里各写一遍（`loment/tools/lompicheck.lomt` 的引擎就是这么写的，四十行）。
@@ -6323,7 +6323,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
 #: 这个桩的命令白发出整段 freestanding 运行时，而自举那边按需扫描不会发 —— 实测
 #: 两边就这么差出 75 行。桩自带 argc 的计数，不欠运行期任何东西。**自举镜**（`loment/selfhost/codegen.lomt` 的 `emit_cmd_entry`）是同一段
 #: 文本，两处的产物必须逐字节相同（`loment_p8_test` 那道闸）。
-_IR_CMD_ENTRY = '''; ---- 命令入口 (docs/218: 工具链生成, 不是用户写的) ----
+_IR_CMD_ENTRY = '''; ---- 命令入口 (docs/223: 工具链生成, 不是用户写的) ----
 define void @_start() {
 entry:
   %lc.o = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 12, i64 0, i64 0, i64 0)
@@ -6490,7 +6490,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     dbg_types if debug else None, gc_alpha, gc_auto)
             globals_ += g
             body.append(text)
-    # **命令入口**（`docs/218`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
+    # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
     # 条件是三条一起看：有声明、名字取出来了、**没有** `_start`。三种"半截"状态
     # （形状不对 / 双入口 / 没声明却写了 `command_main`）在 `check()` 里就报掉了，
     # 走到这里必然干净 —— 这里再判一次只是不让 `emit_*` 单独被调用时发出畸形 IR。
@@ -6614,7 +6614,7 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
         elif _d == 0 and _t.kind == "ident" and _t.val == "addin" \
                 and _i + 1 < len(toks) and toks[_i + 1].kind == "ident":
             mod.addin_lines.append((toks[_i + 1].val, _t.line))
-    # 命令声明（`docs/218` 形态 B）。**在 token 流上读**，与 `addin` / `source_ext` 同一层
+    # 命令声明（`docs/223` 形态 B）。**在 token 流上读**，与 `addin` / `source_ext` 同一层
     # 理由：它是标签、不是语法 —— 让它进 AST 就要动 lexer/parser/checker/codegen 两套实现。
     mod.command_line, mod.command, mod.command_bad = command_label_from_tokens(toks)
     # 命令体入口。与 `_start` 互斥，两个都是进程入口（`check()` 里报）。
@@ -6706,11 +6706,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--debug", action="store_true", help="M59: DWARF 行表元数据 (配合 --emit-llvm)")
     ap.add_argument("--print", dest="print_target", choices=("rust", "potato", "llvm"))
     ap.add_argument("--check", action="store_true")
-    #: **这个单元注册的命令名**（`docs/218`）。给构建前端用的：它们要拿它去命名产物
+    #: **这个单元注册的命令名**（`docs/223`）。给构建前端用的：它们要拿它去命名产物
     #: （`loment-<名字>`）。没声明就打印一个空行 —— 调用方按"空 = 不是命令"处理。
     #: 单独一趟而不是从 IR 里读：声明读在**装载**那一层，链接器那边看不到它。
     ap.add_argument("--print-command", action="store_true",
-                    help="打印本单元注册的命令名 (没声明就打空行), docs/218")
+                    help="打印本单元注册的命令名 (没声明就打空行), docs/223")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
     args = ap.parse_args(argv)
 
