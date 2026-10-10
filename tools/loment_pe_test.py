@@ -714,6 +714,42 @@ def test_pe_shim_dispatches_the_documented_numbers():
 
 
 @test
+def test_pe_dispatch_table_is_the_single_source():
+    """派发面由**一张表**生成：表决定字节，**双向**可证。
+
+    这是"万物可改"落到运行时联网面上的那一格（`docs/218` §12）：加号、改面名、划自己的面，
+    改的是**数据**（`lomelf.PE_SYSCALLS`），不是手写的机器码发射序列；而"改了什么"由
+    **产物字节的哈希**说话 —— 冻出来的 `win_shim_data.lomt` 被发布清单
+    （`loment/build/SHA256SUMS`）钉着，于是"两端跑的是不是同一张表"不靠版本号、靠字节。
+
+    判据要**两边都证**：同一张表 ⇒ 逐字节相同（表真的决定字节）；改一个号 ⇒ 字节不同
+    且更短（表真的在被读，不是摆设）。
+    """
+    nums = [n for n, _s, _l in lomelf.PE_SYSCALLS]
+    assert len(set(nums)) == len(nums), f"派发表里号重复: {sorted(nums)}"
+    assert nums == lomelf.PE_DISPATCH, "`PE_DISPATCH` 必须从表派生，不能是手写的第二份"
+    for _n, surface, label in lomelf.PE_SYSCALLS:
+        assert surface and " " not in surface, f"面名不合形: {surface!r}"
+        assert label.startswith("__ws_"), f"处理块名不合形: {label}"
+    blob, _idata, _slots, labels = _shim_blob()
+    for _n, _s, label in lomelf.PE_SYSCALLS:
+        assert label in labels, f"派发表指向一个不存在的处理块: {label}"
+    assert _shim_blob()[0] == blob, "同一张表生成两次应当逐字节相同"
+    counts = lomelf.pe_surface_sites()
+    assert sum(counts.values()) == len(lomelf.PE_SYSCALLS), "面计数之和应当等于表长"
+    orig = lomelf.PE_SYSCALLS
+    try:
+        lomelf.PE_SYSCALLS = tuple(t for t in orig if t[0] != lomelf.SYS_SOCKET)
+        shrunk = _shim_blob()[0]
+    finally:
+        lomelf.PE_SYSCALLS = orig
+    assert shrunk != blob, "把 socket 从表里拿掉，产物字节没变 —— 表没在决定字节"
+    assert len(shrunk) < len(blob), "拿掉一条应当让派发面变短"
+    print(f"      {len(nums)} 条表 ⇒ {len(blob)} B，面计数 {counts}；"
+          f"拿掉 socket ⇒ {len(shrunk)} B（表确实在决定字节）")
+
+
+@test
 def test_pe_imports_two_dlls_with_the_socket_surface():
     """导入表：两条描述符 + 终止项、两个 DLL 名、整个 ws2_32 面，且塞得进孪生那块落点。"""
     idata, slots = lomelf.build_pe_idata()

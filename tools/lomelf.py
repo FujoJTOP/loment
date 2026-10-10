@@ -1252,13 +1252,76 @@ SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
 SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
 SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
 SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
-# 派发面上登记的号，**按 shim 里的比较次序**排 —— 判据把它与 `--dump-win-shim` 产物的
-# `cmp eax,imm32` 序列逐条对齐，所以"注释/文档/派发面"三者不可能各自漂。
-PE_DISPATCH = [SYS_EXIT, SYS_WRITE, SYS_READ, SYS_CLOSE, SYS_OPENAT, SYS_BRK,
-               SYS_GETDENTS64, SYS_NEWFSTATAT, SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT,
-               SYS_ACCEPT4, SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN, SYS_BIND,
-               SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME, SYS_SETSOCKOPT,
-               SYS_GETSOCKOPT]
+#: **PE 运行时的派发面 —— 这是一张表，不是一段手写的发射序列。**
+#:
+#: 每条：`(Linux 系统调用号, 面名, 处理块标签)`。`__win_syscall` 的序言照这张表生成
+#: （`emit_win_shim` 里那个循环），所以 —— 这是本文档这一格的关键 ——
+#: **"给运行时加自己的系统调用 / 划自己的面"改的是数据**，不是手写的机器码。
+#:
+#: 面名由**用的人**定，不是这里内建的闭集：`file`/`mem`/`proc`/`net` 只是仓库自己的划法。
+#: 谁想把自己那族号叫 `peer`、`ledger`、`radio` 都行 —— 表是他的。这一点是刻意的：
+#: 在这门语言里**万物可改**，连执行者本身也可改，所以这里能做的从来不是"设闸"，
+#: 只能是把"改了什么"变成**看得见的东西**。
+#:
+#: **看得见的形态就是这段字节的哈希**：表 → 生成的派发面 → `--dump-win-shim` 冻出的
+#: `loment/tools/win_shim_data.lomt` → 发布清单里的 sha256（`loment/build/SHA256SUMS`）。
+#: 于是"两端跑的是不是同一张表"不靠版本号，靠**字节**。
+#: 判据：`tools/loment_pe_test.py::test_pe_dispatch_table_is_the_single_source`
+#: （表决定字节，双向可证）。
+PE_SYSCALLS = (
+    (SYS_EXIT, "proc", "__ws_exit"),
+    (SYS_WRITE, "file", "__ws_write"),
+    (SYS_READ, "file", "__ws_read"),
+    (SYS_CLOSE, "file", "__ws_close"),
+    (SYS_OPENAT, "file", "__ws_openat"),
+    (SYS_BRK, "mem", "__ws_brk"),
+    (SYS_GETDENTS64, "file", "__ws_getdents"),
+    (SYS_NEWFSTATAT, "file", "__ws_fstatat"),
+    (SYS_SOCKET, "net", "__ws_socket"),
+    (SYS_CONNECT, "net", "__ws_connect"),
+    (SYS_ACCEPT, "net", "__ws_accept"),
+    (SYS_ACCEPT4, "net", "__ws_accept4"),
+    (SYS_SENDTO, "net", "__ws_sendto"),
+    (SYS_RECVFROM, "net", "__ws_recvfrom"),
+    (SYS_SHUTDOWN, "net", "__ws_shutdown"),
+    (SYS_BIND, "net", "__ws_bind"),
+    (SYS_LISTEN, "net", "__ws_listen"),
+    (SYS_GETSOCKNAME, "net", "__ws_getsockname"),
+    (SYS_GETPEERNAME, "net", "__ws_getpeername"),
+    (SYS_SETSOCKOPT, "net", "__ws_setsockopt"),
+    (SYS_GETSOCKOPT, "net", "__ws_getsockopt"),
+)
+#: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
+PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
+
+
+def _pe_table_check() -> None:
+    """表是**用户改的**，所以只在"写得不成形"时拦一下 —— 不拦"你声明了什么"。
+
+    号重复会让后一条**静默**变成死代码；面名或处理块空着会让计数与派发对不上。
+    这两件都属于"表写坏了"，报出来比产出一段坏机器码强。
+    """
+    seen: set = set()
+    for num, surface, label in PE_SYSCALLS:
+        if num in seen:
+            raise ElfError(f"派发表里号重复: {num}（后一条会静默变成死代码）")
+        if not surface or not label:
+            raise ElfError(f"派发表里 {num} 缺面名或处理块")
+        seen.add(num)
+
+
+def pe_surface_sites() -> dict:
+    """每个面各领走几个号 —— **运行时这一半**的"面有多大"。
+
+    与 Potato 里 `boundary` / `gc_ladder` 是同一个动作（把一件事变成可数的数，
+    `docs/210` §3）：只不过这一半数的是**运行时实现了的号**，另一半（`docs/218` §7）
+    数的是**单元里的调用点**。两个数合起来才叫"联网面"。
+    """
+    _pe_table_check()
+    counts: dict = {}
+    for _num, surface, _label in PE_SYSCALLS:
+        counts[surface] = counts.get(surface, 0) + 1
+    return counts
 PE_O_WRONLY, PE_O_CREAT, PE_O_TRUNC = 1, 0x40, 0x200
 # Linux 语义 → WinSock 的翻译表（两边**不同名同值**，所以是仿真不是转发）
 WS2_SOL_SOCKET = 0xFFFF
@@ -1369,7 +1432,11 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     状态基址放 `rbx`：Loment 生成的代码不用 rbx/r12-r15，Windows API 调用又会保存它，
     所以它在整段 shim 里稳定。Loment 侧写的是 **Linux 语义**（brk 给堆、/proc/self/cmdline
     给 argv、linux_dirent64 给目录项），所以这里是**语义仿真**，不是"差不多能用"。
+
+    派发面照 `PE_SYSCALLS` 那张表生成（见那里的注释）—— 表是**用户改的**，
+    所以这里先核一遍"写得成不成形"，别把一张坏表变成一段坏机器码。
     """
+    _pe_table_check()
     a = em.asm
 
     def i32(v):
@@ -1511,49 +1578,11 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     sub_rsp(0x60)                               # 32 shadow + 第五~七参 + 暂存
     movi(RBX, PE_STATE_VA)
 
-    cmp_eax(SYS_EXIT)
-    jcc_l("e", "__ws_exit")
-    cmp_eax(SYS_WRITE)
-    jcc_l("e", "__ws_write")
-    cmp_eax(SYS_READ)
-    jcc_l("e", "__ws_read")
-    cmp_eax(SYS_CLOSE)
-    jcc_l("e", "__ws_close")
-    cmp_eax(SYS_OPENAT)
-    jcc_l("e", "__ws_openat")
-    cmp_eax(SYS_BRK)
-    jcc_l("e", "__ws_brk")
-    cmp_eax(SYS_GETDENTS64)
-    jcc_l("e", "__ws_getdents")
-    cmp_eax(SYS_NEWFSTATAT)
-    jcc_l("e", "__ws_fstatat")
-    cmp_eax(SYS_SOCKET)
-    jcc_l("e", "__ws_socket")
-    cmp_eax(SYS_CONNECT)
-    jcc_l("e", "__ws_connect")
-    cmp_eax(SYS_ACCEPT)
-    jcc_l("e", "__ws_accept")
-    cmp_eax(SYS_ACCEPT4)
-    jcc_l("e", "__ws_accept4")
-    cmp_eax(SYS_SENDTO)
-    jcc_l("e", "__ws_sendto")
-    cmp_eax(SYS_RECVFROM)
-    jcc_l("e", "__ws_recvfrom")
-    cmp_eax(SYS_SHUTDOWN)
-    jcc_l("e", "__ws_shutdown")
-    cmp_eax(SYS_BIND)
-    jcc_l("e", "__ws_bind")
-    cmp_eax(SYS_LISTEN)
-    jcc_l("e", "__ws_listen")
-    cmp_eax(SYS_GETSOCKNAME)
-    jcc_l("e", "__ws_getsockname")
-    cmp_eax(SYS_GETPEERNAME)
-    jcc_l("e", "__ws_getpeername")
-    cmp_eax(SYS_SETSOCKOPT)
-    jcc_l("e", "__ws_setsockopt")
-    cmp_eax(SYS_GETSOCKOPT)
-    jcc_l("e", "__ws_getsockopt")
-    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")     # mov rax, -1（未实现的号）
+    # 派发面**照表生成** —— 加号、改面、换名字改的是 `PE_SYSCALLS`，不是这段代码。
+    for _num, _surface, _label in PE_SYSCALLS:
+        cmp_eax(_num)
+        jcc_l("e", _label)
+    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")     # mov rax, -1（表外的号）
     jmp_l("__ws_ret")
 
     a.label("__ws_ret")
