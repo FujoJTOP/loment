@@ -493,7 +493,7 @@ e022c7151c824208bac126d923c15ca7c34c8064fef7036d359a3d55bcb6ef09  docs/213-gate-
 eb4dce1c2f72462e6884da3bf0afdd9b4cd5284eac736e2efb3e59e979a6e9fe  docs/219-world-ports.md
 062d2d143aac1e2842c8fa0a93fa0d7ff1861e226bbdd01a7e29d6914ad9fe73  docs/220-syscall7-and-udp.md
 495615ee4d2cc35eb3ea87dcc0648aaba7595056bf5a224dc6f6fa60b4657ed0  docs/221-loment-pe-poll.md
-ee2479e5474e5955821bc2bd441d40e02ba72ed3e517c1d506fe5345580d0858  docs/222-lompi-020-foreign-libs.md
+8aaa58d72540b495a13e009c5fd6d7b4b121ad2f868929cd4cdc034655e311aa  docs/222-lompi-020-foreign-libs.md
 0e028c420b45d8af50f22034ae6f93e911e32f2d64ad283fb2dba4cdb4b32d9b  docs/manual/index.md
 36cae734cd3e7ee1da5b36538042179b93407566eed9ef03bfd2f0852922ab0f  docs/manual/api/ahci.md
 5f24f76cb511fbc469cc1c7e965da69e643ba4aac7f62e56ab9c082f3663cdf4  docs/manual/api/all_loment.md

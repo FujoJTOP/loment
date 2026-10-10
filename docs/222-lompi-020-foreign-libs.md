@@ -151,24 +151,45 @@ gcc hostz.o -lz -o hostz                 # WSL, 系统 libz
   **这是本程序里最长的一段**，且它与 ELF 的形状不同（PE 的导入表是**写死的 11 个 kernel32
   函数**，`lomelf.py:1203`）。
 
-## 8. 交付面：五个生态 × 两条腿
+## 8. 交付面：五个生态 —— **实测结果**（2026-10-10）
 
-| 生态 | 走哪条腿 | 端到端判据（**不允许 SKIP**） |
+**五个生态全部真跑通，零 SKIP**（本机 `loment_hosted_test` **10/10**）。
+它们是**同一个机制**在五个运行期上的样子 —— 不是"六门表层语法"那种横向铺开：
+
+| 生态 | 怎么调的 | 判据比的是什么（期望值怎么来的） |
 |---|---|---|
-| **C** | hosted 静态链（`.a`/`.so`） | 调 zlib `compress`/`uncompress`，逐字节回原文（§2 已实测） |
-| **C++** | hosted，链 `libstdc++`（本机有 `libstdc++.a`） | 调一个真 C++ 库，结果进 Loment |
-| **C#** | hosted，NativeAOT 出 C ABI 库 | 调一个 C# 库的方法，结果进 Loment |
-| **Python** | hosted，链 `libpython3.14`（本机有 `.a` 与 `.so`）+ CPython C-API | 调 `numpy`/stdlib 算一个值，结果进 Loment |
-| **Java** | hosted，链 `libjvm` + JNI | 调一个 Java 类的方法，结果进 Loment |
+| **C** | `extern fn` + 系统 `libz.so` | 64 字节 compress→uncompress **逐字节回原文**，并验证压缩后确实更小（`ncomp < NSRC`） |
+| **C++** | 按**改名字符** `_Z11counter_newi` 声明（**没有** `extern "C"` 包装）+ libstdc++ | 造出真 C++ 对象、透过 `this` 指针调方法 → **42**（5 + 37） |
+| **Python** | 嵌 `libpython3.x`，CPython C-API | **读 CPython 自己写出来的文件**：进程里算出 `6*7` → **42** |
+| **Java** | JNI 垫片 + `libjvm.so` | `Hello.compute(1)` → **2037**（10 圈 `acc = acc*2 + i`，手推） |
+| **C#** | NativeAOT 的 `.so` + `[UnmanagedCallersOnly]` | `Lib.Compute(1)` → **44292**（10 圈 `acc = acc*3 - i`，手推） |
 
-**两处已知的坑，先写死**：
+**期望值一律是推出来的，不是把一次运行的输出抄进去的。** 这一条是判据的全部价值所在：
+抄一个输出，就只能证明"这次没崩"。
 
-1. **本机 JDK 是 Windows 的（只有 `jvm.dll`）**，Linux 侧没有 `libjvm.so` ——
-   Java 那条要先按 `docs/177` 的老办法从 Adoptium 拿一份免安装 Linux JDK（实测
-   `api.adoptium.net` 200）。
-2. **CI 镜像故意不含 `dotnet`/`rustc`**（`.github/workflows/gate.yml` 的边界段写明了理由）。
-   用户要"不许 SKIP"，所以 C# 那条**要么把工具链进镜像（要同时改 tag 两处）**，
-   **要么单开一个 job**。这条要在动 C# 之前定，不能到时候才发现。
+### 8.1 一处必须说清的设计后果：Java 那条需要一个垫片
+
+**JNI 的 `JNIEnv` 是一张函数指针表**，`(*env)->FindClass(env, ...)` 是**间接调用**，
+而 Loment 的 codegen 至今不支持间接调用（`tools/lomelf.py:1034`）。所以 Java 的边界
+**必然**是"声明面 + 一小段 C 垫片 + 运行期"——
+
+**这不是绕路，这就是 `§5` 那个外源包的形状本身**：垫片是包的一部分，它把运行期的
+间接调用摊平成具名的直接调用。C / C++ / C# 三条不需要垫片，因为它们**本来就是 C ABI**；
+Python 那条也不需要，因为 CPython 的 C-API 本来就是直接函数。**"需要垫片的只有 Java"这句
+话本身就是一个可核的事实**，不是设计口味。
+
+### 8.2 CI 上跑得起来几条（如实记）
+
+| 生态 | CI 上 | 为什么 |
+|---|---|---|
+| C / C++ / Python | ✅ | 镜像补了 `gcc g++ libc6-dev zlib1g-dev python3-dev` |
+| Java | ✅ | **不需要新包** —— `default-jdk` 本来就在名单里，它同时给 `jni.h` 与 `libjvm.so` |
+| **C#** | ⛔ **SKIP** | 镜像**故意**不含 `dotnet`（`.github/ci/Dockerfile` 的边界段写明：加了它会改变 `loment_multisyntax_projects_test` 的覆盖面）。判据里**点名说了这件事**，不假装它跑了 |
+
+⇒ **"五个全跑通"今天在 CI 上是四个 + 一条具名的 SKIP。** 要让第五条也在 CI 上跑，
+要动的是镜像（加 `dotnet-sdk-8.0`）—— 而那会顺带把 `loment_multisyntax_projects_test`
+的 C# 那一半从 SKIP 翻成「跑」。**那是一次覆盖面变更，不是一次补包**，所以它要单独拍一次，
+不能混在这一版里。
 
 ## 9. 不做什么 / 欠账（分开记，不许混）
 
