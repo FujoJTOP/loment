@@ -195,6 +195,8 @@ lompi/store/host/0.1.0/*
 tools/lompi_sync.py
 tools/loment_lompi_test.py
 tools/loment_publish.py
+tools/lompicheck_test.py
+tools/loment_register_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py
@@ -322,6 +324,7 @@ tools/loment_bootstrap.py
 tools/loment_capasserts_test.py
 tools/loment_eol_test.py
 tools/loment_ffi_test.py
+tools/loment_hosted_test.py
 tools/loment_i18n_test.py
 tools/loment_ports.py
 tools/loment_ports_test.py

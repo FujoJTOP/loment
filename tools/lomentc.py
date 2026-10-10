@@ -916,6 +916,24 @@ class Module:
     #:   * `ext_blocks` = 块本身（语言名 + 正文）。
     ext_langs: list[str] = field(default_factory=list)
     ext_blocks: list[ExtBlock] = field(default_factory=list)
+    #: **这个单元注册的 `loment` 命令名**（`docs/223` 形态 B）。声明写成：
+    #:
+    #:     pub fn loment_command() -> str { return "mycmd"; }
+    #:
+    #: `None` = 没声明。"声明了但名字取不出来"是**另一种状态**，靠 `command_line` 分：
+    #: `command_line > 0 && command is None` 就是形状不对（要报，不能当成"没声明"）。
+    #:
+    #: **它不是语法** —— 词法器扫标签读出来的（与 `loment.conf` 的 `source_ext` 同一种
+    #: 读法），所以没有新关键字、没有新 AST 节点。
+    command: "str | None" = None
+    #: `command()` 那个函数写在第几行（报错要点到它）。
+    command_line: int = 0
+    #: 写了 `command()` 但名字取不出来时的**原因**（空串 = 取出来了 / 压根没写）。
+    #: 它存在就说明"声明形状不对" —— 必须报，不能当成"没声明"。
+    command_bad: str = ""
+    #: 这个单元有没有 `command_main`（命令体入口）。它与 `_start` **互斥** ——
+    #: 两个都是进程入口，同时写就是两个入口（`check()` 里报）。
+    command_main: bool = False
     #: `addin <名字>` 的位置（`docs/182` §1.4）。**只有根单元能写** —— 与"库不许 `choose`"
     #: 是同一条纪律的两半。它不进 AST（`_apply_switches` 会抹掉），但**"写了没生效"必须报出来**：
     #: 预扫只走"根 + `addin` 目标"那一张图，所以**被 `use` 进来的库里的 `addin` 会静默失效**
@@ -975,10 +993,11 @@ MAXDEPTH = 8
 #: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
 #: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
 #:
-#: 今天三维：
+#: 今天四维：
 #:   * `mode`    —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
-#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）。
+#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
+#:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -992,22 +1011,31 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 用户 2026-09-23：「运行期是海量工程必经之路，我们不得不利用 `choose` 开关
     # 启动/关闭 runtime」。**默认是关的** —— 默认档不许改变任何现有程序的行为。
     "runtime": ("runtime", "no_runtime"),
+    # **对外端口**（`docs/222` §4，用户 2026-10-10 拍的价）。`docs/219` 把"链接结束后仍未
+    # 定义的符号集合"翻成一份**世界端口表**；这一维声明的是**这份产物允不允许有端口**。
+    # `sealed`（封闭）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为；
+    # `hosted`（对外）= 允许链真 libc / 真共享库，端口表就是它声明的世界面。
+    # 取值**刻意不带生态名**：今天是 libc/zlib，明天是 JVM/CPython —— 与 `runtime` 同一条
+    # 纪律，装的东西不进值名。
+    "port": ("sealed", "hosted"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime")
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
-CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime"}
+CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
+                 "port": "sealed"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
     "mode": "运行模式（`std` / `no_std`）",
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
+    "port": "对外端口（`sealed` / `hosted`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -1035,6 +1063,18 @@ CORE_CONFLICTS = {
         "混合档（`gc_auto_alpha`）**更依赖运行期**（它要自适应、要策略池，"
         "还要放编译期算不出来的那部分），"
         "而 `no_runtime` 是明说产物里不要运行期 —— 同一条冲突，对它只强不弱"),
+    # `hosted` 那两条（`docs/222` §4.2）。**两条理由不同，所以各写一份** —— 与
+    # `no_std`+`gc_auto` / `no_runtime`+`gc_auto` 那一对的分法同形。
+    ("no_std", "hosted"): (
+        "`no_std` 的定义是「只能用核那一层」——**没有宿主**；"
+        "而 `hosted` 要链的是**宿主上的**库（libc / 共享库）。"
+        "这一对是**定义上就矛盾**：一个说「底下没有东西」，一个说「往下链东西」"),
+    ("gc_auto_alpha", "hosted"): (
+        "混合档的 L2（块纪元）是**分配器前沿回卷**（`docs/210` §2.3），买的是栈纪律；"
+        "而外部库把指针放进**它自己的结构**里（zlib 的 `z_stream` 就是），"
+        "那些指针在 Loment 的栈之外 —— 前沿一回卷，C 手里那个指针就指到了**已经退回去"
+        "的地方**。`docs/219` §6.1 已把这一对写成硬边界；"
+        "要 hosted 请用 `gc_manual` 或 `gc_auto`"),
 }
 
 
@@ -1379,7 +1419,31 @@ class Parser:
     def parse(self) -> Module:
         self.expect("ident", "module", "（文件必须以 module 开头）")
         mod = Module(self.ident("模块名"))
-        while not self.at("eof"):
+        self.parse_items(mod)
+        # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
+        # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
+        # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
+        # 与否"由跨函数、跨模块的全局不动点定（`_gc_alpha_pass`）。
+        for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
+            f.deref = _deref_summary(f, self.toks)
+        # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
+        # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
+        mod.toks = self.toks
+        # **拖运行期的构造**（`docs/224`）：与 `f.deref` 同一条理由 —— 规则定义在
+        # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
+        mod.rt_sites = _runtime_sites(self.toks)
+        return mod
+
+    def parse_items(self, mod: Module, nested: bool = False) -> None:
+        """顶层条目。`nested=True` 是 `register <名字> { … }` 块里那一层：**同一批条目**，
+        只是遇到 `}` 就停（收尾那一步归调用方）。
+
+        块里的条目就是**普通条目** —— 它们照常进 `mod.funcs` / `mod.structs` / …，
+        于是后面每一趟（符号表、类型检查、发射、L0/L1 分析）都**不必知道 register 存在**。
+        声明本身（名字、E024/E025/E026）全部由**词法标签那一趟**给出（`command_label_from_tokens`）
+        —— 名字在这里只被**吃掉**，不另存一份（两处存必然漂，自举侧更是只有扫描那一处）。
+        """
+        while not self.at("eof") and not (nested and self.at("punct", "}")):
             t = self.peek()
             if t.kind != "ident":
                 raise LomError(t.line, t.col, f"顶层只允许 use/capability/fn，得到 {t.val!r}")
@@ -1390,7 +1454,16 @@ class Parser:
                 t = self.peek()
                 if t.kind != "ident":
                     raise LomError(t.line, t.col, "pub 之后需要一项声明")
-            if t.val == "use":
+            if t.val == "register":  # docs/223 §2 形态 A
+                self.next()
+                if not self.accept("string"):
+                    # 名字：标识符（常用）或字符串字面量（要带 `-` 时用 —— 合法名字的字符集
+                    # 是 `[A-Za-z0-9_-]`，而 `-` 不是标识符字符）。
+                    self.ident("命令名")
+                self.expect("punct", "{", "（`register <名字> { … }`：块里放这条命令的东西）")
+                self.parse_items(mod, nested=True)
+                self.expect("punct", "}")
+            elif t.val == "use":
                 self.next()
                 # 两种写法并存:
                 #   use "loment/examples/bytes.lomt"   路径形式
@@ -1483,19 +1556,6 @@ class Parser:
                 mod.funcs.append(f)
             else:
                 raise LomError(t.line, t.col, f"未知顶层关键字 {t.val!r}")
-        # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
-        # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
-        # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
-        # 与否"由跨函数、跨模块的全局不动点定（`_gc_alpha_pass`）。
-        for f in mod.funcs + [g for im in mod.impls for g in im.funcs]:
-            f.deref = _deref_summary(f, self.toks)
-        # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
-        # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
-        mod.toks = self.toks
-        # **拖运行期的构造**（`docs/217`）：与 `f.deref` 同一条理由 —— 规则定义在 token
-        # 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
-        mod.rt_sites = _runtime_sites(self.toks)
-        return mod
 
     def parse_struct(self) -> Struct:
         kw = self.expect("ident", "struct")
@@ -2743,6 +2803,162 @@ def _conf_ext_from_tokens(toks: list) -> str | None:
     return None
 
 
+#: `loment` **官方**的命令名（`docs/223` §3.3）：注册成这些名字的命令**直接拒**。
+#:
+#: **为什么编译器要管这件事**：启动器是"官方优先"的（`docs/169` §3b）—— `loment version`
+#: 永远走官方那份，`PATH` 上的 `loment-version` 顶不掉。所以撞名的命令**永远跑不到**：
+#: 编得过、装得上、敲了没反应。用户 2026-10-09 定的处置是**编的时候就拦住**
+#: （"撞官方确定的名称直接报错，这是非法 token，不能被编译构建"）。
+#:
+#: **这份表是手抄的一份 38 条清单，所以有一条判据钉着它**（`tools/loment_register_test.py`：
+#: 逐条等于 `loment commands` 打出来的那批）。官方加一条命令而这里没跟上 -> 那条红。
+#: 自举镜在 `loment/selfhost/driver.lomt` 的 `cmd_reserved`，**同一份表，两处一起改**。
+RESERVED_COMMANDS = (
+    "about", "build", "builtins", "caps", "cat", "check", "cheat", "codes", "color",
+    "commands", "count", "doc", "doctor", "env", "example", "examples", "explain", "fmt",
+    "fns", "grep", "hash", "help", "ir", "keywords", "ls", "lsp", "new", "run", "skill",
+    "stat", "syntax", "todo", "tokens", "tools", "tree", "types", "version", "where",
+)
+
+
+def valid_command_name(name: str) -> bool:
+    """命令名合不合法（`docs/223` §3.4：名字是**平的**）。
+
+    启动器按**文件名**找命令（`loment mycmd` -> `PATH` 上的 `loment-mycmd`），所以名字里
+    出现路径分隔符、空格、或什么都不能有——拼出来的那个文件名要么指到别处、要么根本不是
+    一个可靠的路径。只收 `[A-Za-z0-9_-]`，非空、带长度上限（与 `PATH` 上的文件名同一条规矩）。
+    """
+    if not name or len(name) > 64:
+        return False
+    return all(c.isascii() and (c.isalnum() or c in "-_") for c in name)
+
+
+def _brace_close(toks: list, b: int) -> int:
+    """与 `toks[b]`（一个 `{`）**配对**的那个 `}` 的下标；配不上返回 -1。"""
+    depth = 1
+    j = b + 1
+    n = len(toks)
+    while j < n and depth > 0:
+        if toks[j].kind == "punct":
+            if toks[j].val == "{":
+                depth += 1
+            elif toks[j].val == "}":
+                depth -= 1
+        j += 1
+    return j - 1 if depth == 0 else -1
+
+
+def _reg_one_fn(toks: list, b: int) -> bool:
+    """`register <名字> { … }` 那个块的形状：**恰好一个函数**（`docs/223` §3.3）。
+
+    **为什么钉死这一条**（与自举镜 `lex_reg_one_fn` 同源）：块那层壳对"按深度走"的读者
+    （`potato` 收函数那两趟，将来还会有）是**可见**的，而语义上它是**透明**的（块里的函数
+    就是顶层函数 —— 参考实现按 AST 收，根本没有这一层）。钉成"只有一个函数"之后，需要
+    "看穿这层壳"的地方就只剩**函数**那两处；别的条目（`const` / `impl` / `use`）**进不来** ——
+    它们会被判成形状不对，而不是在某一侧被悄悄丢掉。
+
+    `toks[b]` 是块的 `{`。
+    """
+    n = len(toks)
+    f = b + 1
+    if f < n and toks[f].kind == "ident" and toks[f].val == "pub":
+        f += 1
+    if f >= n or toks[f].kind != "ident" or toks[f].val != "fn":
+        return False                       # 块里第一样东西不是函数
+    e = _brace_close(toks, b)
+    if e < 0:
+        return False                       # 块没有收尾
+    body = f + 1
+    while body < n and not (toks[body].kind == "punct" and toks[body].val == "{"):
+        if toks[body].kind == "punct" and toks[body].val == ";":
+            return False                   # 签名式（没有体）—— 命令体必须有体
+        body += 1
+    if body >= n:
+        return False
+    # 函数体的 `}` **紧贴**块的 `}`（块里除它之外什么都没有，前面只有可选的 `pub`）——
+    # 注意不是"同一个 `}`"：块的收尾在函数体收尾的**后一格**。
+    return _brace_close(toks, body) == e - 1
+
+
+def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
+    """从词法流里取**命令声明**（`docs/223`），两种写法：
+
+      * 形态 B：`pub fn loment_command() -> str { return "x"; }`
+      * 形态 A：`register x { … }` —— 名字就在语法里，块里是这条命令的条目
+
+    返回 `(行号, 名字, 拒绝的原因)`：
+
+      * 没写这个标签 -> `(0, None, "")` —— 这个单元不是一条命令，一切照旧；
+      * 写了、名字取出来了 -> `(行, "x", "")`；
+      * 写了但形状不对 -> `(行, None, 原因)` —— **不能当成"没声明"**：那样写错一个字母
+        就会静默地编出一个普通的 `_start` 程序，而这正是本仓反复要消灭的东西。
+
+    **读法与 `_conf_ext_from_tokens` 同源**（词法器扫标签，不套完整 parser）。比它多两条
+    约束，都是"在真实单元里不误命中"必须的：
+
+      * 标签后面**必须紧跟 `(`** —— 命令声明是个**函数**。不加这条的话，一个叫 `command`
+        的变量后面随便哪个字符串都会被当成命令名；
+      * 名字取**函数体顶层** `return` 后面紧跟的那个字符串字面量 —— 不是"体里第一个
+        字面量"。差别实测得到：`let s: str = "x"; return s;` 那种写法在松规则下会**扫到
+        `"x"` 并当成命令名**，而它根本不是常量（名字是**扫**出来的，不是算出来的）。宁拒勿猜。
+
+    形态 A 那边只多一条约束：`register` 后面必须**真的是一个名字**（`fn register(…)` 那种
+    下一个 token 是 `(`，不是本构造，直接放过）—— 误命中的面因此只剩 `register <名字>`。
+    **不做深度判断**：扫出第一个就停，于是块里再套一个 `register` 自然被忽略（只认最外层
+    那个），两个实现因此不必各写一套嵌套规则。
+
+    **自举镜用同一条规则**（`loment/selfhost/lexer.lomt` 的 `lex_cmd_find`），两边必须一起改
+    —— 与 `source_ext` 那条棘轮同源（`docs/158`：「两个实现的读法必须逐字节同源」）。
+    """
+    for i, t in enumerate(toks):
+        if t.kind != "ident":
+            continue
+        if t.val == "register":  # 形态 A
+            if i + 1 >= len(toks):
+                continue
+            n1 = toks[i + 1]
+            if n1.kind == "ident":
+                name = n1.val
+            elif n1.kind == "string":
+                # 名字里要带 `-`（合法名字的字符集是 `[A-Za-z0-9_-]`）就得写字符串 ——
+                # `val` 已经去掉引号（自举镜那边是原始跨度、它自己剥）。
+                name = n1.val
+            else:
+                continue          # `fn register(…)` 那种：下一个不是名字，不是本构造
+            if i + 2 >= len(toks) or toks[i + 2].kind != "punct" or toks[i + 2].val != "{":
+                return t.line, None, "名字后面要跟 `{`"
+            if not _reg_one_fn(toks, i + 2):
+                return t.line, None, "块里要**恰好一个函数**"
+            return t.line, name, ""
+        if t.val != "loment_command":
+            continue
+        if i + 1 >= len(toks) or toks[i + 1].kind != "punct" or toks[i + 1].val != "(":
+            continue
+        j = i + 2
+        while j < len(toks) and not (toks[j].kind == "punct" and toks[j].val == "{"):
+            if toks[j].kind == "punct" and toks[j].val == ";":
+                return t.line, None, "没有函数体"
+            j += 1
+        if j >= len(toks):
+            return t.line, None, "没有函数体"
+        depth = 1
+        k = j + 1
+        while k < len(toks) and depth > 0:
+            tk = toks[k]
+            if tk.kind == "punct" and tk.val == "{":
+                depth += 1
+            elif tk.kind == "punct" and tk.val == "}":
+                depth -= 1
+            elif (depth == 1 and tk.kind == "ident" and tk.val == "return"
+                    and k + 1 < len(toks) and toks[k + 1].kind == "string"):
+                # `val` 已经去掉引号（自举镜那边是原始跨度、含引号，它自己剥 —— 这个差别
+                # 只在这一层，别互相抄，与 `_conf_ext_from_tokens` 那条注解同源）。
+                return t.line, toks[k + 1].val, ""
+            k += 1
+        return t.line, None, "函数体里没有 `return \"…\";`"
+    return 0, None, ""
+
+
 def source_ext_of(proj: Path | None, tool_dir: Path | None) -> str:
     """名字形式 `use <名字>` 找的文件后缀: **项目自己那份 `loment.conf` 优先**, 再工具链
     旁边那份, 都没配就是 `DEFAULT_L1_EXT`（`.lomt`）。
@@ -3220,16 +3436,32 @@ def _runtime_sites(toks: list) -> list[tuple[str, int]]:
             out.append((_RUNTIME_SITES[t.val], t.line))
     return out
 
+def _unit_id(m: Module) -> object:
+    """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
+
+    同一个文件被 `load()` 两次会得到**两个对象**, 但仍是同一个单元 —— 所以有源文件
+    路径就取**规范化后的路径**; 没有路径 (`translated` 那种) 退回模块名。
+    """
+    if m.src is not None:
+        try:
+            return m.src.resolve()
+        except OSError:
+            return str(m.src)
+    return m.name
+
+
+def _unit_where(m: Module) -> str:
+    """诊断里指一个单元指到**文件**上 —— 名字相同的两份文件, 只报名字分不开。"""
+    return f"`{m.src.as_posix()}`" if m.src is not None else f"`{m.name}`"
+
 
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-          deps: list[Module] | None = None) -> list[str]:
-    # ⚠️ **已上报的缺口 (`docs/198` §4): 依赖模块的正文不查。**
-    # 只把 `deps` 的**导出符号**入表 (M12: 仅 pub 可见), 正文不验 —— 于是
-    # `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**,
-    # 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的
-    # 程序 check 都是绿的。最小复现六行, 在 `docs/198` §4。
-    # 今天唯一抓得住它的是"把库文件自己当入口"那种形状 (`loment_std_test`
-    # 的 `test_std_modules_are_checkable`) —— 给库写判据的人只能先靠这个。
+          deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+    # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
+    # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
+    # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
+    # 使用它的程序 check 都是绿的。做法见本函数末尾: 把每个依赖**当成入口**再查一遍
+    # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
     funcs = dict(ext_funcs or {})
@@ -3364,6 +3596,52 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         f" —— `addin` 是**根单元**专属的开关设定，装载器只走"
                         f"「根 + 根 `addin` 到的单元」那张图，所以库里的 `addin` **不会生效**。"
                         f"库要装代码请用 `use`")
+
+    # ---- 命令声明（`docs/223` 形态 B）：`pub fn loment_command() -> str { return "名字"; }`
+    #
+    # 一个单元要么是**一条命令**（声明 + `command_main`），要么是普通程序（`_start`）。
+    # 三条判断都在这一处 —— 与 `choose` / `addin` 同一层，两个实现要对齐的只有这里。
+    for d in deps:
+        if d.command_line:
+            errs.append(f"{d.command_line}: 库不许声明命令（在 `{d.name}` 里）—— 命令是"
+                        f"**可执行产物**的身份，而库是给别人 `use` 的代码。"
+                        f"把它挪进入口单元")
+    if mod.command_line:
+        _cline, _cname = mod.command_line, mod.command
+        if mod.command_bad:
+            errs.append(f"{_cline}: 命令声明的形状不对（{mod.command_bad}）—— 写成块那种"
+                        f"`register 名字 {{ … }}`，或者写成**返回一个字面量**的函数："
+                        f'`pub fn loment_command() -> str {{ return "名字"; }}`')
+        elif _cname in RESERVED_COMMANDS:
+            errs.append(f"{_cline}: `{_cname}` 是 loment 的官方命令 —— 启动器**官方优先**"
+                        f"（`loment {_cname}` 永远走官方那份，PATH 上的同名文件顶不掉），"
+                        f"所以这个名字注册上去**永远跑不到**。换一个名字")
+        elif not valid_command_name(_cname):
+            errs.append(f"{_cline}: 命令名 `{_cname}` 不合法 —— 启动器按**文件名**找命令"
+                        f"（`loment <名>` -> `loment-<名>`），所以名字只能是 "
+                        f"`[A-Za-z0-9_-]`、长度 1..64")
+    _cm = next((f for f in mod.funcs if f.name == "command_main"), None)
+    if mod.command_line and _cm is None:
+        # 两半少了一半。这一向是**链接期**才炸的（生成的 `_start` 去调一个不存在的符号），
+        # 所以拦在检查这一步 —— 码与"有体没声明"同一个：修法都是把两半凑齐。
+        errs.append(f"{mod.command_line}: 声明了命令却没有 `command_main` —— 工具链生成的"
+                    f"入口要调它，没有它就得等到**链接**才报错。补上 "
+                    f"`fn command_main(argv: ptr, argc: u32) -> u32`，或者删掉那条声明")
+    if _cm is not None:
+        if not mod.command_line:
+            errs.append(f"{_cm.line}: 写了 `command_main` 却没有命令声明 —— 它**不会被"
+                        f"调用**（静默失效）。补上 "
+                        f'`pub fn loment_command() -> str {{ return "名字"; }}`，'
+                        f"或者把入口改回 `_start`")
+        _st = next((f for f in mod.funcs if f.name == "_start"), None)
+        if _st is not None:
+            errs.append(f"{_cm.line}: `_start` 与 `command_main` 同时存在 —— 进程入口只能"
+                        f"有一个。声明了命令就由工具链生成入口，删掉 `_start`；"
+                        f"不想要命令就删掉那条声明")
+        elif [p.type for p in _cm.params] != ["ptr", "u32"] or _cm.ret != "u32":
+            errs.append(f"{_cm.line}: `command_main` 的签名不对 —— 入口是 "
+                        f"`fn command_main(argv: ptr, argc: u32) -> u32`（拿到的整块缓冲就是"
+                        f"`/proc/self/cmdline`，`argv[0]` 是命令自己的路径）")
     sw = mod.switches
     if sw is not None:
         n = len(sw.defs) + len(sw.vals) + sw.ndup
@@ -3390,20 +3668,44 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 解析到同一个函数 (静默错编)。以前只有"入口模块 vs 依赖的 pub"会报, 依赖之间的私有
     # 重名一路静默 —— 这里补齐。预置枚举 (Option/Result) 由 load() 注入每个模块, 排除。
     # 同一模块内部的重名由下面各自的规则报, 这里只管跨模块。
-    seen_decl: dict[str, str] = {}          # name -> 先声明它的模块名
+    # 闸立在这条**上面**: 单元的**名字**先得唯一。两份文件都写 `module same` 时,
+    # 下面那把按名字去重的闸会把它们当成同一个模块 —— 闸不响, 产物里两条
+    # `define @f` (非法 IR), 一直拖到链接器才炸成内部异常 (`#139`)。
+    seen_unit: dict[object, Module] = {}
     for m0 in [*deps, mod]:
-        decls = [(f.name, f.line, "函数") for f in m0.funcs]
-        decls += [(s.name, s.line, "结构体") for s in m0.structs]
-        decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
-        decls += [(c.name, c.line, "常量") for c in m0.consts]
-        for nm, ln, kind in decls:
-            prev = seen_decl.get(nm)
-            if prev is None:
-                seen_decl[nm] = m0.name
-            elif prev != m0.name:
-                # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
-                errs.append(f"{ln}: {kind} {nm} 与模块 {prev} 重名 —— "
-                            f"单元的发射符号是平的 (ABI), 请改名")
+        seen_unit.setdefault(_unit_id(m0), m0)
+    seen_name: dict[str, Module] = {}
+    dup_unit = False
+    for m0 in seen_unit.values():
+        prev = seen_name.get(m0.name)
+        if prev is None:
+            seen_name[m0.name] = m0
+        else:
+            dup_unit = True
+            # 措辞里带"重名" —— 与既有的 E-DUP 口径一致（`loment_diag.RULES` 的 E013
+            # 就是按这几个词锚的；换一种说法会让这条消息掉出分类表，
+            # `loment_tools_test::test_m64_all_reference_messages_are_classified` 当场红）。
+            errs.append(f"1: 单元名 `{m0.name}` 重名 —— {_unit_where(prev)} 与 "
+                        f"{_unit_where(m0)} 两份文件都声明了它；单元的发射符号是平的 "
+                        f"(ABI)，两份同名单元会把同一个符号定义两遍。改掉其中一个 `module` 名")
+
+    # 名字已经撞了的话下面这条**不再报** —— 那些"同名符号"全是上面那条的症状,
+    # 一起倒出来只会把根因埋掉 (第一个错才是根因)。
+    if not dup_unit:
+        seen_decl: dict[str, Module] = {}   # name -> 先声明它的那个**单元**
+        for m0 in [*deps, mod]:
+            decls = [(f.name, f.line, "函数") for f in m0.funcs]
+            decls += [(s.name, s.line, "结构体") for s in m0.structs]
+            decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
+            decls += [(c.name, c.line, "常量") for c in m0.consts]
+            for nm, ln, kind in decls:
+                prev = seen_decl.get(nm)
+                if prev is None:
+                    seen_decl[nm] = m0
+                elif _unit_id(prev) != _unit_id(m0):
+                    # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
+                    errs.append(f"{ln}: {kind} {nm} 与模块 {prev.name} 重名 —— "
+                                f"单元的发射符号是平的 (ABI), 请改名")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -3624,6 +3926,30 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+
+    # ---- 依赖的**正文**也要查 (`#149`, 2026-10-09 补)。
+    #
+    # 上面走完的是**入口单元**的正文; `deps` 的正文一个字都没验 —— 一个库可以带着
+    # 正文类型错发布, 而每个使用它的程序 check 都是绿的 (`docs/198` §4)。
+    #
+    # 做法: 把每个依赖**当成入口**再查一遍。它的 `use` 图这次**不用重解** —— 把
+    # 其余依赖整份当符号表递下去就够了(`resolve_deps` 给的就是整个闭包, 而被依赖者
+    # 在前的顺序意味着一个依赖的符号在这次调用里**已经看见了**)。传整份闭包只会让
+    # 可见面**更宽**, 于是漏报的可能有、误报没有 —— 宁可少报也不冤枉。
+    #
+    # `_dep_pass` 挡住递归: 依赖再审一遍它的依赖会转成环。
+    #
+    # 入口**已经有错**就不往下走了 —— 那些错多半就是下游症状的原因, 一起倒出来只会
+    # 把根因埋掉 (与 `pytrans` 的 `pp_uns`、`check` 里那条 `dup_unit` 同一条纪律)。
+    # 改完入口再跑一次, 依赖那层的错自然浮上来。
+    if not _dep_pass and deps and not errs:
+        for d in deps:
+            others = [x for x in deps if _unit_id(x) != _unit_id(d)]
+            sub = check(d, ext_funcs=ext_funcs, deps=others, _dep_pass=True)
+            if sub:
+                # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。
+                where = _unit_where(d)
+                errs.extend(f"{where}: {e}" for e in sub)
     return errs
 
 
@@ -4306,7 +4632,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # `alloc` 站点。**与 `boundary` 同级同形**（一个自描述的对象 + 一条自洽的和）——
         # 于是"这份程序的 GC 由哪几层组成"是**不读源码可判**的（这正是 `docs/210` §3 那句
         # "GC 的组成是一个不读源码可判的数"）。
-        "potato": "v10",
+        "potato": "v11",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4326,6 +4652,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 装的东西会随年份长（今天是收集器，明天可能是线程、宿主服务），钉进值名里
         # 就等于两年后加一项能力要回头改这一维的定义。
         "runtime": mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]),
+        # **对外端口在不在**（`docs/222` §4）：`sealed` / `hosted`。与上面三维同一条纪律 ——
+        # **必填**，所以"这份产物通不通着世界"是**不读源码可判的**，而不是"看源码里有没有
+        # `choose hosted`"。这正是 `docs/219` §7 那句"测量强于声明"在这一维的落法。
+        "port": mod.chooses.get("port", CORE_DEFAULTS["port"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -6333,6 +6663,76 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     return ir.globals, "\n".join(ir.out)
 
 
+#: **命令入口**（`docs/223` §3.2）：单元声明了命令、又没写 `_start` 时，工具链替它生成进程
+#: 入口 —— 读 `/proc/self/cmdline`、数出字段数、调 `command_main(argv, argc)`、把返回值交给
+#: `exit`。**生成而不是让每个命令自己抄**：一整段 `_start` + cmdline 解析 + `exit` 会在每一条
+#: 命令里各写一遍（`loment/tools/lompicheck.lomt` 的引擎就是这么写的，四十行）。
+#:
+#: 局部名一律 `%lc.*` 前缀，与单元自己生成的 `%tN` 不会撞。辅助函数叫 `@.lc.argc`
+#: **故意不带 `__loment_` 前缀** —— 那串名字是**运行期前奏的发不发的开关**
+#: （`emit_llvm` 里 `"@__loment_" in text_all` 那一句），带了它就会给一条只调用
+#: 这个桩的命令白发出整段 freestanding 运行时，而自举那边按需扫描不会发 —— 实测
+#: 两边就这么差出 75 行。桩自带 argc 的计数，不欠运行期任何东西。**自举镜**（`loment/selfhost/codegen.lomt` 的 `emit_cmd_entry`）是同一段
+#: 文本，两处的产物必须逐字节相同（`loment_p8_test` 那道闸）。
+_IR_CMD_ENTRY = '''; ---- 命令入口 (docs/223: 工具链生成, 不是用户写的) ----
+define void @_start() {
+entry:
+  %lc.o = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 12, i64 0, i64 0, i64 0)
+  %lc.w = add i64 %lc.o, 65536
+  %lc.g = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 12, i64 %lc.w, i64 0, i64 0)
+  %lc.b = inttoptr i64 %lc.o to ptr
+  %lc.p = getelementptr inbounds [19 x i8], ptr @.lc.cmdline, i64 0, i64 0
+  %lc.pi = ptrtoint ptr %lc.p to i64
+  %lc.fd = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 257, i64 18446744073709551516, i64 %lc.pi, i64 0)
+  %lc.bi = ptrtoint ptr %lc.b to i64
+  %lc.n = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 0, i64 %lc.fd, i64 %lc.bi, i64 65536)
+  %lc.c = call i32 @.lc.argc(ptr %lc.b, i64 %lc.n)
+  %lc.r = call i32 @command_main(ptr %lc.b, i32 %lc.c)
+  %lc.re = zext i32 %lc.r to i64
+  %lc.x = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %lc.re, i64 0, i64 0)
+  ret void
+}
+
+define internal i32 @.lc.argc(ptr %b, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]
+  %f = phi i64 [ 0, %entry ], [ %f1, %cont ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %out, label %body
+body:
+  %bp = getelementptr i8, ptr %b, i64 %i
+  %bc = load i8, ptr %bp
+  %bz = icmp eq i8 %bc, 0
+  br i1 %bz, label %zero, label %cont
+zero:
+  %f0 = add i64 %f, 1
+  br label %cont
+cont:
+  %f1 = phi i64 [ %f, %body ], [ %f0, %zero ]
+  %i1 = add i64 %i, 1
+  br label %loop
+out:
+  %r = trunc i64 %f to i32
+  ret i32 %r
+}
+'''
+
+
+def _cmd_entry_ir() -> tuple[list[str], list[str]]:
+    """(全局, 函数体) —— 路径那个字符串常量按本文件里 `StrLit` 的老写法转义。
+
+    **这个常量带 NUL**（19 字节），而别处的字符串字面量不带（`StrLit` 只按内容长度发）。
+    `openat` 要的是 NUL 结尾的路径 —— 别处能跑是因为 `.rodata` 里后面恰好还有零字节，
+    那不是一条能靠的规矩，所以这里自己写全。
+    """
+    b = b"/proc/self/cmdline\x00"
+    esc = "".join(f"\\{x:02X}" for x in b)
+    return ([f'@.lc.cmdline = private unnamed_addr constant [{len(b)} x i8] c"{esc}"'],
+            [_IR_CMD_ENTRY])
+
+
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
@@ -6367,8 +6767,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     out = [
         "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)",
         "; clang -O1 driver.c this.ll -o exe",
-        "",
     ]
+    # `choose hosted`（`docs/222` §4.4）：构建那一侧要知道这份产物是**对外**的 ——
+    # 它决定链接交给谁（C 工具链还是自举 lomelf）。**写进 IR 而不是让启动器去读源码**：
+    # 读源码要启动器懂 Loment 的词法，而这份 IR 本来就是构建的输入。
+    # **只有 hosted 才多发这一行** —— sealed 是默认档，于是现存每一份单元的 IR
+    # 一个字节都不变（孪生判据逐字节比的那 46 份）。
+    if mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted":
+        out.append("; loment-port: hosted")
+    out.append("")
     globals_: list[str] = []
     body: list[str] = []
     # 外部函数声明: 每个外部符号**一条 `declare`**, 按名字去重 (两个模块声明同一个外部
@@ -6451,6 +6858,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     dbg_types if debug else None, gc_alpha, gc_auto)
             globals_ += g
             body.append(text)
+    # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
+    # 条件是三条一起看：有声明、名字取出来了、**没有** `_start`。三种"半截"状态
+    # （形状不对 / 双入口 / 没声明却写了 `command_main`）在 `check()` 里就报掉了，
+    # 走到这里必然干净 —— 这里再判一次只是不让 `emit_*` 单独被调用时发出畸形 IR。
+    if mod.command_line and mod.command and not mod.command_bad \
+            and not any(f.name == "_start" for f in mod.funcs):
+        _g, _b = _cmd_entry_ir()
+        globals_ += _g
+        body += _b
     text_all = "\n".join(body)
     if debug:  # M59: 具名元数据 + 编号元数据
         out.append("!llvm.dbg.cu = !{!0}")
@@ -6577,6 +6993,11 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
         elif _d == 0 and _t.kind == "ident" and _t.val == "addin" \
                 and _i + 1 < len(toks) and toks[_i + 1].kind == "ident":
             mod.addin_lines.append((toks[_i + 1].val, _t.line))
+    # 命令声明（`docs/223` 形态 B）。**在 token 流上读**，与 `addin` / `source_ext` 同一层
+    # 理由：它是标签、不是语法 —— 让它进 AST 就要动 lexer/parser/checker/codegen 两套实现。
+    mod.command_line, mod.command, mod.command_bad = command_label_from_tokens(toks)
+    # 命令体入口。与 `_start` 互斥，两个都是进程入口（`check()` 里报）。
+    mod.command_main = any(f.name == "command_main" for f in mod.funcs)
     names = {e.name for e in mod.enums}  # M10: 预置 Option/Result
     if "Option" not in names or "Result" not in names:
         pre = Parser(lomc.lex(_PRELUDE), _PRELUDE).parse()
@@ -6664,6 +7085,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--debug", action="store_true", help="M59: DWARF 行表元数据 (配合 --emit-llvm)")
     ap.add_argument("--print", dest="print_target", choices=("rust", "potato", "llvm"))
     ap.add_argument("--check", action="store_true")
+    #: **这个单元注册的命令名**（`docs/223`）。给构建前端用的：它们要拿它去命名产物
+    #: （`loment-<名字>`）。没声明就打印一个空行 —— 调用方按"空 = 不是命令"处理。
+    #: 单独一趟而不是从 IR 里读：声明读在**装载**那一层，链接器那边看不到它。
+    ap.add_argument("--print-command", action="store_true",
+                    help="打印本单元注册的命令名 (没声明就打空行), docs/223")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
     args = ap.parse_args(argv)
 
@@ -6702,6 +7128,12 @@ def main(argv: list[str] | None = None) -> int:
         write_diags(args.diag_out,
                     [diag_record(path, _leading_line(e), 0, e) for e in errs])
         return 1
+
+    if args.print_command:
+        # 只回答"这个单元注册了哪条命令"。**放在 check 之后**：声明不合法时先报错，
+        # 不能把一个非法名字当成构建前端要的那个名字（那样构建器会照着写一个畸形产物名）。
+        print(mod.command or "")
+        return 0
 
     try:
         rust = emit_rust(mod, root, deps)

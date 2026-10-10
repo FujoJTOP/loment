@@ -48,6 +48,11 @@ ROOT = Path(__file__).resolve().parent.parent
 #: 真跑的一批: 有 `_start`、会终止、原生后端支持 —— 两条路各编一个, 比 stdout 与退出码。
 CORPUS = [
     "loment/examples/user_hello.lomt",
+    # 命令单元（`docs/223`）：`_start` 由**工具链生成**（读 `/proc/self/cmdline`、调
+    # `command_main`），所以它们有入口、跑得起来。两种写法各一份 —— clang 与原生链接器
+    # 编出来的 stdout 与退出码都比。
+    "loment/examples/cmd_hello.lomt",
+    "loment/examples/register_hello.lomt",
     "loment/examples/bootprobe.lomt",
     "loment/examples/selfcheck.lomt",
     "loment/examples/all_loment.lomt",
@@ -1097,6 +1102,16 @@ def test_lomelf_selfhost_links_foreign_object():
         # 这条必须逐字节比 —— 自举侧重定位算错的话, 参考侧照样绿。
         ("ffi3", ffitest.LOMENT_MULTI_SOURCE,
          [(ffitest.C_CALLER_SOURCE, "a"), (ffitest.C_SUB_SOURCE, "b")], ["a", "b"], 22),
+        # **收编面**（`docs/219` §6）：这份 C 要 `memcpy`/`memset`/`memcmp`，两个链接器
+        # 各自**发出同一段收编面**（参考侧字面字节、自举侧同一串的 hex）—— 这一格逐字节
+        # 比的就是那 102 字节。参考侧发了、自举侧忘了发，这里必红。
+        ("ffi4", ffitest.LOMENT_CONSCRIPT_SOURCE,
+         [(ffitest.C_CONSCRIPT_SOURCE, "cons")], ["cons"], 130),
+        # **C2**（`docs/219` §8）：`malloc`/`free` 是**换 ABI 的薄壳**，底下调我们的堆 ——
+        # 壳里的 `call` 是**回填**出来的（两侧都算 rel32），所以这一格逐字节比的就是
+        # 那两条薄壳有没有算成同一个地址。
+        ("ffi5", ffitest.LOMENT_MALLOC_SOURCE,
+         [(ffitest.C_MALLOC_SOURCE, "mallocc")], ["mallocc"], 42),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -1134,8 +1149,8 @@ def test_lomelf_selfhost_links_foreign_object():
             finally:
                 for p in [elfrepo, llrepo, *clones]:
                     p.unlink(missing_ok=True)
-    print("      镜像 + --link 三例 (单对象/双对象/跨对象重定位): 与参考逐字节相同, "
-          "退出码 52 / 75 / 22")
+    print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳): "
+          f"与参考逐字节相同, 退出码 " + " / ".join(str(c[4]) for c in cases))
 
 
 def main() -> int:

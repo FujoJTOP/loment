@@ -580,6 +580,184 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
     print("      五种语法都给出对得上的提示; Loment 的 typo 不给")
 
 
+@test
+def test_diag_does_not_call_a_native_declaration_foreign():
+    """**声明里写的"原生"语法不是"外源"** —— `rust` 是 `NATIVE_GRAMMARS` 里那个。
+
+    `choose write grammar rust` 的文件**就是** Loment（只是拼法，`docs/188` §2、
+    2026-09-22 的裁定），前门当原生读。而这一处原先对 `lang in LANGS` 一律给外源卡 ——
+    `rust` 也在 `LANGS` 里，于是它说"**这个文件不是 Loment 语法**、别照上面那条改"，
+    而上面那条（**补 `module`**）**恰恰是对的**：一条该听的话被一句"别听"撤销。
+
+    **但只排"声明"那一路**：一份**真 Rust 源码**叫 `.rs`、没写声明 —— 那时按**后缀**
+    认，而那句提示**是对的**（那份内容确实不是 Loment）。靠 `resolve_lang` 给的
+    `why`（`文件头声明 …` / `后缀 …`）分。一刀切把 `rust` 整个排掉，
+    会把那条真该说的话一起消掉（`SYNTAXES` 里那条 `.rs` 用的就是真 Rust 源码）。
+    """
+    import loment_diag                                                # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        d = td / "r.lomt"                      # 声明是 rust、正文是 Loment
+        d.write_text("choose write grammar rust\n\nfn f() -> i32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert loment_diag.foreign_note(d, ["2:1: 期望 module，得到 'fn'"]) is None, \
+            "对一份 `choose write grammar rust` 的 Loment 说了'不是 Loment'"
+        # 反面一：真 Rust 源码（`.rs`、没声明）**照旧**要点名
+        r = td / "real.rs"
+        r.write_text("#[no_mangle]\npub fn f() {}\n", encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(r, ["1:1: 期望 module，得到 '#'"])
+        assert note and "不是 Loment" in note and "rust" in note.lower(), note
+        # 反面二：声明为**外源**的照旧要点名
+        c = td / "x.lomt"
+        c.write_text("choose write grammar c\nint f() { return ~1; }\n",
+                     encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(c, ["2:22: 非法字符 '~'"])
+        assert note and "不是 Loment" in note, note
+    print("      声明为原生的不给'外源'提示；真 Rust 源码与声明为外源的照旧点名")
+
+
+@test
+def test_dbg_refuses_foreign_grammar():
+    """`loment dbg` 对别的写法要**拒** —— 它给的 `文件:行` 两头都不对。
+
+    `dbg` 过前门，拿到的是**译文**的模块：DWARF 行表里写的是**译文**的行号，
+    而 `mod.src` 是 `None`（`lomentc.load`：翻译出来的单元**不声称**源文件是那一份）。
+    于是输出指向一个**不存在的地方**——实测一份 **9 行**的 C 写法文件报 `…\\t.lomt:10`，
+    而且路径丢了一截、分隔符混用。**退 0**，看着像成功。
+
+    只钉"拒"，不钉输出格式：`dbg` 那条路要 clang 才能走完，而这一条在**用不着 clang**
+    的那一步就该拦住（判据因此在本机与 CI 上都能跑）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "d.lomt"
+        p.write_text("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                     "    return x + 1;\n}\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "dbg", str(p), "--fn", "f"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        out = r.stdout + r.stderr
+        assert r.returncode != 0, f"没拒（rc=0）:\n{out[:200]}"
+        assert "只处理**原生**写法" in out, f"没给出说得通的拒绝理由:\n{out[:200]}"
+        # 那份"文件:行"走的是 **stdout** —— 拒绝之后它必须是空的
+        # （不能拿整段出来查 `.lomt:`：拒绝消息自己就带上路径了）。
+        assert r.stdout.strip() == "", f"还吐了个 文件:行:\n{r.stdout[:200]}"
+    print("      `loment dbg` 认出非原生写法就拒，不给不存在之处的 文件:行")
+
+
+@test
+def test_the_cross_unit_gate_does_not_depend_on_call_position():
+    """"本单元没有的函数"这条闸，**不许**因为调用恰好写在语句位就绕过去。
+
+    `trans_core.raw()` 对 `ast.Call` 原先**不查** `self.fns`（`ty_of` 才查）——
+    于是同一个 `acquire(16);`：写在**值位**被拒、写在**语句位**照发。
+    判决取决于"恰好写在哪个位置"不是设计，是**漏**：那道闸的用意是"跨单元调用要
+    显式声明"，与写法位置无关。（`docs/198` §3 报过这一条，说根在共用核、
+    不只 Python 那一门。）
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        msgs = []
+        for i, body in enumerate(("int f() { acquire(16); return 7; }\n",
+                                  "int f() { return acquire(16); }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                msgs.append(str(e))
+            else:
+                raise AssertionError(f"第 {i} 种（{'语句位' if i == 0 else '值位'}）没拒")
+        for m in msgs:
+            assert "acquire" in m and "本单元没有的函数" in m, m
+        # 反面：调**已在本单元**的函数照旧（语句位也不许被误拒）
+        p = td / "ok.lomt"
+        p.write_text("choose write grammar c\nint g(int x) { return x; }\n"
+                     "int f() { g(1); return 7; }\n", encoding="utf-8", newline="\n")
+        assert "g(1);" in potato_from.front_door(p).source
+    print("      语句位与值位给同一个判决；调本单元的函数照旧")
+
+
+@test
+def test_forward_declaration_is_merged_and_a_real_duplicate_is_not():
+    """**前向声明并进它的定义**；**真重复照旧报**。
+
+    C 里 `int g(int);` 后面跟 `int g(int x) { … }` 是**最常规**的写法 —— 互相递归的
+    两个函数**只能**这么写。对象里于是一个名字有两条记录（一条有正文、一条没有），
+    而下游报"**函数 g 重复**"：一个**假的重复**，用户只写了一份定义。
+    （`docs/186` §4 承诺"报得出是哪个函数"，而这里报的是一个不存在的冲突。）
+
+    四种形状各钉一面：声明+定义 → 并成一条；两条声明 → 并成一条（下游说"只有声明
+    没有定义"，那是对的）；**两条都有正文 → 不并**（真重复，一并就把一份写重复了的
+    源悄悄收下了 —— 那比报错坏）；互相递归 → 现在**翻得过**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        def fns_of(i: int, body: str) -> list[str]:
+            p = td / f"t{i}.lomt"          # **路径要不同** —— front_door 按路径备忘
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            return [x.split("(")[0].replace("pub fn ", "")
+                    for x in potato_from.front_door(p).source.splitlines()
+                    if x.startswith("pub fn")]
+        assert fns_of(0, "int g(int x);\nint g(int x) { return x; }\n"
+                         "int main() { return g(7); }\n") == ["g", "main"]
+        assert fns_of(1, "int odd(int n);\n"
+                         "int even(int n) { if (n == 0) { return 1; } return odd(n - 1); }\n"
+                         "int odd(int n) { if (n == 0) { return 0; } return even(n - 1); }\n"
+                         "int main() { return even(4); }\n") == ["odd", "even", "main"]
+        for i, body in ((2, "int g(int x) { return x; }\nint g(int x) { return x; }\n"
+                            "int main() { return g(1); }\n"),
+                        (3, "int g(int x);\nint g(int x);\nint main() { return 7; }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable:
+                pass
+            else:
+                raise AssertionError(f"第 {i} 种该拒（真重复 / 只有声明）却过了")
+    print("      前向声明并进定义、互相递归翻得过；真重复与只有声明照旧拒")
+
+
+@test
+def test_an_unmappable_return_type_names_the_declaration_not_the_call_site():
+    """返回类型映不上时，报的必须是**那条声明**，不是几行之外的**调用点**。
+
+    `float f() { … }` 在转写那一步就没进对象（"返回类型 'float' 无映射"）。原先用户
+    看到的是下游那句"**调用了本单元没有的函数 `f`**"—— 指到 `main` 里那个调用点，
+    而真正该改的是**三行之上**那条声明。
+
+    **这一条是第二批（`#74` 那一笔）修好的**：前门原先把 `potato_from` 的
+    `Report.skipped` 整个丢掉（`doc, _rep = LANGS[lang](…)`），于是转写期丢的东西
+    在编译器这条路上一个字都不说、只剩下游那句假消息。这里把它**钉住** ——
+    没有判据的话，那句话改回去也没人知道。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "f.lomt"
+        p.write_text("choose write grammar c\nfloat f() { return 7; }\n"
+                     "int main() { return f(); }\n", encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except lomt_from.NotRepresentable as e:
+            msg = str(e)
+            assert "float" in msg and "无映射" in msg, f"没说清是返回类型的问题:\n{msg}"
+            assert "'f'" in msg or "`f`" in msg, f"没点名那条声明:\n{msg}"
+            assert "调用了本单元没有的函数" not in msg, \
+                f"又只报调用点了（真因在那条声明上）:\n{msg}"
+        else:
+            raise AssertionError("`float` 返回类型映不上，却没拒")
+    print("      返回类型映不上时报的是那条声明（点名 + 真因），不是调用点")
+
+
+
+
+
+
+
+
+
+
 #: 照 2026-09-17 一个子 agent **真写出来的那份 C** 蒸馏的 (无 `#include`、无 libc),
 #: 刻意保留了三处当时把工具链绊倒的形状: Allman `{`、`unsigned` 单独写、
 #: 单引号字符字面量 `'0'`。它由下面那条端到端每次真跑 —— 见 `docs/179` §6。
@@ -990,6 +1168,47 @@ def test_bad_literals_and_identifiers_are_refused_at_the_users_line():
             p.write_text("choose write grammar c\n" + okk, encoding="utf-8", newline="\n")
             assert potato_from.front_door(p).source
     print("      八进制与 Unicode 标识符在**用户那一行**被拒；hex/十进制/ASCII 照旧")
+
+
+@test
+def test_entry_layer_refuses_foreign_grammar_instead_of_mangling_it():
+    """**"读 L1 源的入口"认出别的写法就拒**（`docs/182` §1.9 那条消费者轴）。
+
+    `lomfmt` / `lomdoc` 是**独立入口**：它们不走前门，直接拿词法器读原文。而一份
+    `.lomt` 里可以装六种写法的任何一种。对 C 那门后果很重：
+
+        choose write grammar c unsigned int f(unsigned int x) {     ← 声明与函数头揉成一行
+
+    **声明那一行整个是"怎么读"**：前门按它定读法、再把它抹成等长空白 ⇒ 那一行上的
+    函数跟着一起消失，单元变成空的。`lomfmt --write` 是**原地写回**，用户那份源就这么
+    被改坏了（实测：改之前跑一次，前门译文里那个函数**没了**）。
+
+    `lomdoc` 那边更绕：它**过前门**拿到的是**译文**的模块（函数带的是**译文行号**），
+    却拿**原文**去按那些行号索引 —— 短文件 `IndexError` 甩栈；长文件不越界，于是
+    **不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
+
+    两面都钉：非原生写法**必须拒**（`fmt` 还**不许动文件**），原生与 `rust` **照旧**。
+    """
+    import lomdoc                                                     # noqa: PLC0415
+    import lomfmt                                                     # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "w.lomt"
+        p.write_bytes(("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                       "    return x + 1;\n}\n").encode("utf-8"))
+        before = p.read_bytes()
+        assert lomfmt.main(["--write", str(p)]) == 2, "fmt 对 C 写法没拒"
+        assert p.read_bytes() == before, "fmt --write 把用户那份源改了"
+        assert lomfmt.main([str(p)]) == 2, "fmt（stdout 模式）没拒"
+        assert lomdoc.main([str(p)]) == 1, "doc 对 C 写法没拒"
+        # 原生与 `rust`（`NATIVE_GRAMMARS` 里那个）照旧
+        for tag, src in (("native.lomt", "module m\n\nfn f() -> i32 {\n    return 1;\n}\n"),
+                         ("rust.lomt", "choose write grammar rust\n\nmodule m\n\n"
+                                       "fn f() -> i32 {\n    return 1;\n}\n")):
+            q = td / tag
+            q.write_text(src, encoding="utf-8", newline="\n")
+            assert "fn f" in lomfmt.format_source(q.read_text(encoding="utf-8")), tag
+    print("      fmt/doc 认出非原生写法就拒（fmt 不动文件）；原生与 rust 照旧")
 
 
 

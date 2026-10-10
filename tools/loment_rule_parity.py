@@ -47,10 +47,20 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-# 2026-10-09 `runtime` 维**兑现**（`docs/217`）: **78/78**。两条 —— 默认档（`no_runtime`）
+# 2026-10-09 `runtime` 维**兑现**（`docs/224`）: **92/92**。两条 —— 默认档（`no_runtime`）
 # 下，`/` 与 `alloc` 各一条。这一维从此不再是"只声明"：它成了一句**保证**，而保证要有
 # 可证伪的判据，所以它必须进这张表（两个实现各判一次才叫等价）。
-BUDGET = 78
+#
+# 2026-10-10 `register`（`docs/223` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
+# 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
+# 函数那种写法**判成同一批码**，这正是"形态 A 编译到形态 B"要看见的东西。
+# 2026-10-10 `choose hosted`（`docs/222` §4，第四维 `port`）落地: **90/90**。四条 ——
+# 按维写两次、同维两个取值、`hosted` × `no_std`、`hosted` × `gc_auto_alpha`。
+# （`hosted` × `gc_manual` / `gc_auto` 是**合法档**，不进这张负例表，由 `potato_test`
+# 的 `v11-hosted-gc_manual` 合法样本守着。）
+# **这一条当场抓到一个真分歧**：冲突说明里写了"悬垂"两个字，撞上 E012 的关键词分类器 ——
+# 参考实现把那条冲突归成 E012、自举归成 E022。改写措辞之后两边一致。
+BUDGET = 92
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -196,13 +206,24 @@ _CASES: list[tuple[str, str]] = [
     # 我自己管" —— 它是合法档，**不该**报错。套件只收负例，所以这里放的是该报的
     # 那一对；合法的那一对由 `potato_test` 的 `v9-runtime-on` 合法样本守着。
     ("choose-no-runtime-gc-auto", "module m\n\nchoose no_runtime\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
-    # ---- `runtime` 维**兑现**（`docs/217`，2026-10-09）--------------------------------
+    # ---- `runtime` 维**兑现**（`docs/224`，2026-10-09）--------------------------------
     # 这一维从"只声明"变成"有保证"：`no_runtime`（默认）说"产物里没有运行期"，于是凡是
     # 会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。两条负例各钉一边 ——
     # 一条走**算术**（`/` 拖进 `__loment_abort`）、一条走**分配**（`alloc` 拖进分配器 +
     # 堆全局），因为参考实现的触发是**分开判**的（`@__loment_` 与 `@__loment_alloc`）。
     ("choose-no-runtime-div", "module m\n\nfn f() -> u32 {\n    return 10 / 3;\n}\n"),
     ("choose-no-runtime-alloc", "module m\n\nchoose no_runtime\n\nfn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n"),
+    # ---- 第四维 `port`（`docs/222` §4）--------------------------------------
+    # 与前面三维同一套：按维一次、取值只有两个、与两个档**定义上矛盾**。
+    ("choose-port-twice", "module m\n\nchoose sealed\nchoose sealed\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-port-two-values", "module m\n\nchoose sealed\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # `no_std` 说"底下没有东西"、`hosted` 说"往下链东西" —— 定义上矛盾。
+    ("choose-hosted-no-std", "module m\n\nchoose no_std\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 混合档的 L2 是前沿回卷，而外部库把指针放进它自己的结构里（`docs/219` §6.1）。
+    ("choose-hosted-gc-alpha", "module m\n\nchoose hosted\nchoose gc_auto_alpha\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **有一条不冲突的配对必须记着**：`hosted` + `gc_manual` / `gc_auto` = "要对外、
+    # 但内存我自己管" —— 合法档，**不该**报错。这套件只收负例，所以合法的那一对由
+    # `potato_test` 的 `v11-hosted-gc_manual` 合法样本守着，这里不重复。
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：
@@ -216,6 +237,45 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 命令声明 (E024/E025/E026, docs/223) --------------------------------
+    # 这五条是**检查器**规则（只看这一个单元）。第六条"库不许声明命令"是**装载器**规则
+    # —— 它要两个单元（入口 + 被 use 的那个），装不进这张表，与 `choose` 那第三条
+    # 同一个落点：棘轮由 `loment_p8_test` 的驱动闸门承担，预算里不算它。
+    ("cmd-bad-name",
+     "module m\n\npub fn loment_command() -> str { return \"a/b\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-reserved-name",
+     "module m\n\npub fn loment_command() -> str { return \"version\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-bad-shape",
+     "module m\n\npub fn loment_command() -> str {\n"
+     "    let s: str = \"x\";\n    return s;\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-two-entries",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-body-no-decl",
+     "module m\n\npub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    # ---- `register`（形态 A，`docs/223` §2 第 3 步）--------------------------------
+    # 与上面那五条**同一批码**，只是换了一种写法：名字由**语法**给出（不再从函数体里扫
+    # 字符串），块里是这条命令的条目。两种写法在两边都必须判成同一个码。
+    ("reg-reserved-name",
+     "module m\n\nregister version {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-two-entries",
+     "module m\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\nregister mcmd {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-bad-signature",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn command_main(a: u32, b: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-no-main",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n"),
+    # 反向那一半（声明在、体不在）也要成对 —— 它原先要等到**链接**才炸。
+    ("cmd-decl-no-body",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn helper() -> u32 {\n    return 0;\n}\n"),
 ]
 
 

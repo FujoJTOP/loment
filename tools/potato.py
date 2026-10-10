@@ -86,7 +86,12 @@ TOP_KEYS_V9 = TOP_KEYS_V8 | {"runtime"}
 # **与 `boundary` 同级同形** —— 一个自描述的对象 + 一条自洽的和; 理由也一样: 审计/读者
 # 要能**不读源码**就回答"这份程序的 GC 由哪几层组成"（`docs/210` §3 那句的头条主张）。
 TOP_KEYS_V10 = TOP_KEYS_V9 | {"gc_ladder"}
-VERSIONS = ("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10")
+# v11 = v10 + **对外端口** `port` (`docs/222` §4): `sealed` / `hosted`。
+# 与 `runtime` 同形、同一条纪律: 取值**只说"通不通着世界"**, 不说"链的是哪个生态的库"
+# （那会随年份长）。它是 `docs/219` 那张"世界端口表"在**产物里的那一格** ——
+# 于是"这份产物允不允许有对外端口"是**不读源码可判**的。
+TOP_KEYS_V11 = TOP_KEYS_V10 | {"port"}
+VERSIONS = ("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11")
 #: `boundary` 的四个**分量**键。**口径是词法的**（`docs/204` R5: "可 grep、可计数、
 #: 可审计"）: 只看"这个名字被调用了没有", 不判类型、不判危险 —— 那是编译器的事。
 BOUNDARY_KEYS = ("extern_declared", "extern_calls", "syscalls", "ptr_transforms")
@@ -107,13 +112,21 @@ GCS = ("gc_manual", "gc_auto", "gc_auto_alpha")
 #: `runtime` 的取值 = **产物里有没有运行期**（`docs/175` §3.6）。只有这两个 ——
 #: 它是一个**存在开关**，不是"运行期里装了什么清单"（那个会随年份长）。
 RUNTIMES = ("runtime", "no_runtime")
-#: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：三维的取值并起来。
+#: `port` 的取值 = **产物通不通着世界**（`docs/222` §4）。只有这两个 ——
+#: `sealed`（封闭，默认）= 今天的形状，到世界没有端口；`hosted`（对外）= 允许链真 libc /
+#: 真共享库。与 `RUNTIMES` 同一条纪律：**不带生态名**。
+PORTS = ("sealed", "hosted")
+#: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
 #:
 #: 放在这里是因为**两个模块都要它**：编译器用它判"这一条 `choose` 是核心模式还是开关"，
 #: `potato_from.front_door` 用它把**核心 `choose` 行从表层语法里摘出来**（`docs/188` §0：
 #: 一份 Python/C 写法的单元**仍然是 Loment 程序**，语义是 Loment 的 —— 所以那几行不能
 #: 交给各家翻译器吃掉）。两处各写一份必然漂，判据钉的是"两份相等"。
-CORE_WORDS = frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
+#:
+#: ⚠ **加一维就要动这一行**：`port`（`docs/222`）进来时这里少了它 —— 合并当场撞出来。
+#: 少一个词的后果是**静默的**：那道维度在表层语法里会被当成"未定义的开关"。
+CORE_WORDS = (frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
+              | frozenset(PORTS))
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)
@@ -190,25 +203,26 @@ def validate(doc: object) -> list[str]:
         ver = "v0"
     top = {"v0": TOP_KEYS_V0, "v1": TOP_KEYS_V1, "v2": TOP_KEYS_V2, "v3": TOP_KEYS_V3,
            "v4": TOP_KEYS_V4, "v5": TOP_KEYS_V5, "v6": TOP_KEYS_V6, "v7": TOP_KEYS_V7,
-           "v8": TOP_KEYS_V8, "v9": TOP_KEYS_V9, "v10": TOP_KEYS_V10}[ver]
+           "v8": TOP_KEYS_V8, "v9": TOP_KEYS_V9, "v10": TOP_KEYS_V10,
+           "v11": TOP_KEYS_V11}[ver]
     for k in doc:
         if k not in top:
             errs.append(f"未知顶层字段 {k!r}（{ver} 不允许扩展字段）")
-    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"):
         for k in ("traits", "impls", "generics", "instances"):
             if not isinstance(doc.get(k), list):
                 errs.append(f"{ver}: 缺字段 {k}（必须是数组，可为空）")
         g = doc.get("guards")
         if not isinstance(g, int) or isinstance(g, bool) or g < 0:
             errs.append(f"{ver}: guards 必须是非负整数，得到 {g!r}")
-    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"):
         # **必填** (docs/175 §8 的判据: 从对象里删掉该字段, 校验器必须红)。这就是
         # 必须升版本而不是往旧版里加字段的原因 —— 要求必填会让既有的旧版对象全变非法,
         # 而旧版是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
         m = doc.get("mode")
         if m not in MODES:
             errs.append(f"{ver}: mode 必须是 {MODES} 之一，得到 {m!r}")
-    if ver in ("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"):
         # **必填, 可为空数组** (docs/182 §1)。与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这份单元是在什么开关状态下编的"是**可回放**的。
         # 用户 2026-09-17: **"开关的取值是要进 Potato 的"**。
@@ -231,7 +245,7 @@ def validate(doc: object) -> list[str]:
                     seen_s.add(nm)
                 if not isinstance(s.get("on"), bool):
                     errs.append(f"{w}.on 必须是布尔（开关**只能**是开或关，没有第三态）")
-    if ver in ("v4", "v5", "v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"):
         # **必填, 可为空数组**（`docs/184` §9 S4.3）。同 `mode`/`switches` 那条纪律：
         # 不存在"缺这项"的形态 —— 于是"这份产物用了哪些自定义语法"是**可回放**的。
         #
@@ -257,7 +271,7 @@ def validate(doc: object) -> list[str]:
                     seen_d.add(nm)
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（定义处那段程序的源文本）")
-    if ver in ("v5", "v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v5", "v6", "v7", "v8", "v9", "v10", "v11"):
         # **必填, 可为空数组** —— 同 `mode`/`switches`/`dialects` 那条纪律。
         #
         # **按源里的顺序, 不按名字排**: 与 `dialects` 不同 —— 方言是个**集合**（名字唯一），
@@ -276,7 +290,7 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{w}.lang 非法: {nm!r}")
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（块里的原始正文）")
-    if ver in ("v6", "v7", "v8", "v9", "v10"):
+    if ver in ("v6", "v7", "v8", "v9", "v10", "v11"):
         # **必填**（`docs/188` §2）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么它必须必填**：`docs/179` §3.1 说**可选**的前提是"不认识它的消费者
@@ -289,7 +303,7 @@ def validate(doc: object) -> list[str]:
         if g not in GRAMMARS:
             errs.append(f"v6: grammar 必须是 {GRAMMARS} 之一，得到 {g!r}"
                         f"（**写法名**，不是语言名；见 docs/188）")
-    if ver in ("v7", "v8", "v9", "v10"):
+    if ver in ("v7", "v8", "v9", "v10", "v11"):
         # **必填**（`docs/205` R5）—— 与 `mode` / `guards` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么不是可选的**：`boundary` 的全部价值在"可 grep、可计数、可审计"。
@@ -322,7 +336,7 @@ def validate(doc: object) -> list[str]:
             if extra:
                 errs.append(f"boundary 里有不认识的键: {extra}")
 
-    if ver in ("v8", "v9", "v10"):
+    if ver in ("v8", "v9", "v10", "v11"):
         # **必填**（`docs/175` §3.4）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
         # 于是"这个产物是哪一档"（以及它有没有放弃确定性）是**可回放**的。
         # **台阶是累积的**：v9/v10 也要验 v8 的 `gc`（原先这里写的是 `== "v8"`，
@@ -338,7 +352,7 @@ def validate(doc: object) -> list[str]:
             errs.append("mode=no_std 与 gc=gc_auto 不能同时选 —— 自动回收要一个运行期，"
                         "而 no_std 的定义是「只能用核那一层」（docs/175 §3.4）")
 
-    if ver in ("v9", "v10"):
+    if ver in ("v9", "v10", "v11"):
         # **必填**（`docs/175` §3.6）—— 与 `mode` / `gc` 同一条纪律：不存在"缺这项"的形态。
         # 于是"这个产物里有没有运行期"是**不读源码可判**的。
         # 台阶累积：v10 也要验 v9 的 `runtime`（同 `gc` 那一条）。
@@ -352,7 +366,7 @@ def validate(doc: object) -> list[str]:
             errs.append("runtime=no_runtime 与 gc=gc_auto 不能同时选 —— 自动回收要的就是"
                         "那个运行期，两者定义上矛盾（docs/175 §3.6）")
 
-    if ver == "v10":
+    if ver in ("v10", "v11"):
         # **必填**（`docs/210` §5 第一条）—— 与 `boundary` / `guards` 同一条纪律：
         # 不存在"缺这项"的形态。`gc_ladder` 的全部价值在"**GC 的组成**不读源码可判"，
         # 而一个**缺席**的组成会被读成"这份程序没有 GC"，那是误判。
@@ -382,6 +396,25 @@ def validate(doc: object) -> list[str]:
             extra = sorted(set(gl) - set(GC_LADDER_KEYS) - {"total_sites"})
             if extra:
                 errs.append(f"gc_ladder 里有不认识的键: {extra}")
+
+    if ver == "v11":
+        # **必填**（`docs/222` §4）—— 与 `mode` / `gc` / `runtime` 同一条纪律：
+        # 不存在"缺这项"的形态。于是"这份产物通不通着世界"是**不读源码可判**的，
+        # 而不是"看源码里写没写 `choose hosted`"（`docs/219` §7：测量强于声明）。
+        # 台阶累积：v11 也要验 v10 以下每一版的字段（上面那些 `if ver in (...)` 已经覆盖）。
+        pt = doc.get("port")
+        if pt not in PORTS:
+            errs.append(f"{ver}: port 必须是 {PORTS} 之一，得到 {pt!r}")
+        # **两条冲突，校验器独立判得了**（两个取值都在对象里，不需要读源码）——
+        # 与 `runtime` 那一条同口径。`hosted` 与 `gc_manual` / `gc_auto` **不冲突**：
+        # "要对外、但内存我自己管"是一条必须能表达的档。
+        if pt == "hosted" and doc.get("mode") == "no_std":
+            errs.append("port=hosted 与 mode=no_std 不能同时选 —— `no_std` 说「底下没有"
+                        "东西」，`hosted` 说「往下链东西」（docs/222 §4.2）")
+        if pt == "hosted" and doc.get("gc") == "gc_auto_alpha":
+            errs.append("port=hosted 与 gc=gc_auto_alpha 不能同时选 —— 混合档的 L2 是"
+                        "分配器前沿回卷，而外部库把指针放进它自己的结构里，那些指针在"
+                        "Loment 的栈之外（docs/219 §6.1）")
 
     unit = _req(doc, "unit", "根", errs)
     if unit is not None and (not isinstance(unit, str) or not IDENT_RE.match(unit)):

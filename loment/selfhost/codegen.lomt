@@ -4653,7 +4653,12 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
 }
 
 /// 匹配的 '}' 之后的下标 (i 指向 '{')。
-fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
+///
+/// **`pub` 是必需的**：`potato.lomt` 也用它（它读 token 流，不重新解析）——
+/// 而跨模块调用只认 `pub`（M12）。原先这里漏了 `pub`，`potato.lomt` 那两处调用
+/// 一直是"调用未定义的函数"，只是**从来没有人把 potato 当入口查过**才没暴露
+/// （`#149` 那条：依赖的正文不查 —— 参考实现补上之后，driver 的依赖检查立刻报出来）。
+pub fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
     let d: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 {
@@ -5662,6 +5667,94 @@ fn rt_tier(src: ptr, toks: ptr) -> u32 {
 }
 
 /// 主入口: 写完整 IR (子集), 返回长度; **返回 0 = 单元的规模超过表容量** (驱动器据此报错)。
+// ---------------------------------------------------------------- 命令入口 (docs/223)
+
+/// 这个单元要不要发命令入口：**声明了命令、名字取出来了、又没有 `_start`**。
+///
+/// 三种"半截"状态（形状不对 / 双入口 / 没声明却写了 `command_main`）在 checker 那一趟
+/// 就报掉了，走到这里必然干净；这里再判一次只是不让 codegen 单独被调用时发出畸形 IR。
+fn cmd_entry_needed(src: ptr, toks: ptr) -> u32 {
+    let pk: u64 = lex_cmd_find(src, toks);
+    if (pk / 4294967296) == 0 || (pk % 4294967296) == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if i >= 1 && tok_is(src, toks, i, "_start") && tok_is(src, toks, i - 1, "fn") {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 命令入口的路径常量。**与参考实现逐字节同源**（`tools/lomentc.py` 的
+/// `_cmd_entry_ir`）：`/proc/self/cmdline` 每个字节按 `\XX` 十六进制写，**末尾那个 0
+/// 也写出来**（19 字节）—— 别处的字符串字面量不带 NUL，而 `openat` 要的是 NUL 结尾的
+/// 路径；别处能跑是因为 `.rodata` 里后面恰好还有零字节，那不是一条能靠的规矩。
+fn emit_cmd_globals(s: ptr, out: ptr) -> u32 {
+    emit_str(s, out, "@.lc.cmdline = private unnamed_addr constant [19 x i8] c\"");
+    let p: str = "/proc/self/cmdline";
+    let q: u32 = 0;
+    while q < str_len(p) {
+        emit_hex_byte(s, out, str_byte(p, q));
+        q = q + 1;
+    }
+    emit_hex_byte(s, out, 0);
+    return emit_str(s, out, "\"
+");
+}
+
+/// 工具链生成的进程入口。**这段文本与 `tools/lomentc.py` 的 `_IR_CMD_ENTRY` 完全一样**
+/// —— `loment_p8_test` 那道闸要求两个实现发出的 IR 逐字节相同。
+/// 局部名一律 `%lc.*` 前缀，与单元自己生成的 `%tN` 不会撞。
+fn emit_cmd_entry(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "; ---- 命令入口 (docs/223: 工具链生成, 不是用户写的) ----
+define void @_start() {
+entry:
+  %lc.o = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 12, i64 0, i64 0, i64 0)
+  %lc.w = add i64 %lc.o, 65536
+  %lc.g = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 12, i64 %lc.w, i64 0, i64 0)
+  %lc.b = inttoptr i64 %lc.o to ptr
+  %lc.p = getelementptr inbounds [19 x i8], ptr @.lc.cmdline, i64 0, i64 0
+  %lc.pi = ptrtoint ptr %lc.p to i64
+  %lc.fd = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 257, i64 18446744073709551516, i64 %lc.pi, i64 0)
+  %lc.bi = ptrtoint ptr %lc.b to i64
+  %lc.n = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 0, i64 %lc.fd, i64 %lc.bi, i64 65536)
+  %lc.c = call i32 @.lc.argc(ptr %lc.b, i64 %lc.n)
+  %lc.r = call i32 @command_main(ptr %lc.b, i32 %lc.c)
+  %lc.re = zext i32 %lc.r to i64
+  %lc.x = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 60, i64 %lc.re, i64 0, i64 0)
+  ret void
+}
+
+define internal i32 @.lc.argc(ptr %b, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]
+  %f = phi i64 [ 0, %entry ], [ %f1, %cont ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %out, label %body
+body:
+  %bp = getelementptr i8, ptr %b, i64 %i
+  %bc = load i8, ptr %bp
+  %bz = icmp eq i8 %bc, 0
+  br i1 %bz, label %zero, label %cont
+zero:
+  %f0 = add i64 %f, 1
+  br label %cont
+cont:
+  %f1 = phi i64 [ %f, %body ], [ %f0, %zero ]
+  %i1 = add i64 %i, 1
+  br label %loop
+out:
+  %r = trunc i64 %f to i32
+  ret i32 %r
+}
+");
+}
+
 pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
@@ -5878,7 +5971,16 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     store32(s, 540, en);
     emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
-    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
+    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n");
+    // `choose hosted`（`docs/222` §4.4）：构建那一侧要知道这份产物是**对外**的 ——
+    // 它决定链接交给谁（C 工具链还是自举 lomelf）。**只有 hosted 才多发这一行** ——
+    // sealed 是默认档，于是现存每一份单元的 IR 一个字节都不变。
+    // 认法是 `contains_ident`（同 `guard` 那条）：`hosted` 这个 ident 只可能出现在
+    // `choose hosted` 的值位置，别处写它就是一个未定义名字、检查器早就拒了。
+    if contains_ident(src, toks, "hosted") == 1 {
+        emit_str(s, out, "; loment-port: hosted\n");
+    }
+    emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
     }
@@ -5934,6 +6036,20 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     if load32(s, 532) == 1 {
         emit_str_globals(s, out, src, toks);
+    }
+    // 命令入口的路径常量**紧跟字符串常量之后、那个空行之前** —— 参考实现里它落在
+    // `globals_` 的末尾（字符串常量也是追加进 `globals_` 的），于是产物里是
+    // `[字符串][它][空行][函数]`。
+    //
+    // **它不在"有没有字符串常量"那个分支里**：形态 A（`register` 块）的单元可以
+    // **一个字符串字面量都没有**（形态 B 一定有 —— 名字本身就是那个字符串）。原先
+    // 挂在那个分支下，于是这类单元的产物里 `_start` 引用了一个**没定义**的全局，
+    // 而参考实现有 —— 实测：`loment_p8_test` 报 `register_hello.lomt` 少 117 字节。
+    let has_cmd: u32 = cmd_entry_needed(src, toks);
+    if has_cmd == 1 {
+        emit_cmd_globals(s, out);
+    }
+    if load32(s, 532) == 1 || has_cmd == 1 {
         emit_str(s, out, "\n");
     }
     store32(s, 64, 0);       // 实例表: 按"首次被用到"的顺序追加
@@ -6000,6 +6116,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         pop_subst(s, esub);
         ic = load32(s, 64);   // 实例体内可能又发现新实例
         ie = ie + 1;
+    }
+    // 命令入口（`docs/223`）：**所有函数之后**发 —— 参考实现把它追加在 `text_all` 末尾。
+    if cmd_entry_needed(src, toks) == 1 {
+        emit_cmd_entry(s, out);
     }
     return st_o(s);
 }

@@ -1116,6 +1116,47 @@ fn render(mem: ptr, src: ptr, len: u32, t: ptr, n: u32, path: ptr, pn: u32) -> u
     return olen(mem);
 }
 
+// ---------------------------------------------------------------- 别的写法要拦住
+
+/// 文件头是不是**别的表层写法**（`docs/182` §1.9 / `#144`）？是就返回 1。
+///
+/// `lomdoc` 是**独立入口**：它拿词法层直接读原文、**不走前门** —— 而一份 `.lomt`
+/// 里可以装六种写法的任何一种。对 C 那门后果很重：
+///
+///     choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+///
+/// 声明那一行整个是"**怎么读**"：前门按它定读法、再抹成等长空白 ⇒ **那一行上的
+/// 函数跟着一起消失**，单元变空，而这里**退 0** 给出一份没有函数的文档（模块名还
+/// 成了 `grammar`）。同一份文件 `loment check` 是**响亮地拒**的 —— 一套工具链两个答案。
+///
+/// 所以与参考实现 `potato_from.refuse_foreign_grammar` 同一条：**认出非原生写法就拒**。
+/// `loment` / `rust` 是原生（`NATIVE_GRAMMARS`），照旧放行。
+///
+/// 找法与报错器的 `decl_at` 同一个形状：**只找那一行**（`choose write grammar <别名>`
+/// 三个词同行、别名紧跟着），而且它必须在 `module` 之前（`docs/188` §1）。
+fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if tk_is(src, t, i, "module") == true {
+            return 0;                       // 声明必须写在 `module` 之前
+        }
+        if tk_is(src, t, i, "choose") == true && i + 3 < n
+                && tk_is(src, t, i + 1, "write") == true
+                && tk_is(src, t, i + 2, "grammar") == true
+                && tk_line(t, i) == tk_line(t, i + 1)
+                && tk_line(t, i) == tk_line(t, i + 2)
+                && tk_line(t, i) == tk_line(t, i + 3) {
+            if tk_is(src, t, i + 3, "loment") == true
+                    || tk_is(src, t, i + 3, "rust") == true {
+                return 0;                   // 原生写法，照旧放行
+            }
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn _start() -> u32 {
@@ -1151,6 +1192,12 @@ fn _start() -> u32 {
     // 里的声明落在 depth 1, 走查顶层的那一圈**看不见它**, 而参考实现走 `lomentc.load`
     // （已摊开）会记下来, 两边对照就红了。实测撞到（`loment_doc_test`）。
     let ntok0: u32 = lex(src, len, toks);
+    // **别的写法在这里拦住**（`#144`）—— 必须在**看词法流之前**，因为声明那一行
+    // 一旦被 `apply_switches` 吃掉，下文就全是"照着译文读原文"的错位。
+    if foreign_grammar(src, toks, ntok0) == 1 {
+        return fail("lomdoc: 这是用别的写法写的 Loment（文件头有 `choose write grammar`）—— lomdoc 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`（docs/211 / docs/182 §1.9）。
+");
+    }
     let ntok: u32 = apply_switches(src, toks, ntok0, sw);
     let m: u32 = render(mem, src, len, toks, ntok, ap, an);
     write_all(1, ptr_add(mem, OUT_OFF), m as u64);
