@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "052afb9c73b94bb90a3d752c9e57bd37fc4cbc3793aa23eb23eb694a89f971ba"
+   "sha256": "366a46fcebc60f2dc5d582ee5d9e81be513da0db6cbe3410bbabe2c74b692862"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -819,7 +819,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "4e42a341e2893c370ab282643b045dcf7ba35afe894420408110a011fa1717f5"
+   "sha256": "35f624d3f57f3b178e5c8c0a62b78ea595aa337eb0222bd2ba881fdafdc883bd"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1099,7 +1099,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "bb41b2f0e7a6a7105ab7f632c1477d3e4b1da04390f41a42450f628bf1de1853"
+   "sha256": "26852809d9bcde9e7ae6dac66062a4d7bf7384c2927e764abbfcd0ce8eeb26b7"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1979,7 +1979,7 @@
   },
   {
    "path": "docs/219-world-ports.md",
-   "sha256": "eb4dce1c2f72462e6884da3bf0afdd9b4cd5284eac736e2efb3e59e979a6e9fe"
+   "sha256": "a1b163588af011e683b201ac6b59ee615a5322d1f7d859e3ee2a4c54d0f90e1f"
   },
   {
    "path": "docs/220-syscall7-and-udp.md",
@@ -2155,7 +2155,7 @@
   },
   {
    "path": "tools/loment_ffi_test.py",
-   "sha256": "ed1df7d79b11999001e01cf2f376090941e32ef31bad67a20e19e19f27f81d59"
+   "sha256": "2fa3bf009e67c97615be16b5d48f79bf91218376882666efb774cb70f9595e7a"
   },
   {
    "path": "tools/loment_i18n_test.py",
@@ -2167,7 +2167,7 @@
   },
   {
    "path": "tools/loment_ports_test.py",
-   "sha256": "dab631538c0be54ade346be2122784b2f445f550bd955b6f927eff04bbf598a1"
+   "sha256": "f329661cfb87a8ad7147f94dd989e0411146fc0a958c3e5145564520debf9afc"
   },
   {
    "path": "tools/loment_probe.py",
