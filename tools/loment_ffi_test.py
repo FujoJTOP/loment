@@ -848,6 +848,65 @@ def test_object_with_relocations_is_rejected():
         print("      不认识的重定位类型: 硬拒")
 
 
+#: **收编面**（`docs/219` §6）的夹具：这份 C 要 `memset` / `memcpy` / `memcmp` 三个
+#: **未定义符号** —— 在此之前这是"链接期硬拒"（就是下面那条判据），现在是**由 Loment
+#: 自己写的那三个函数**满足。三个都用上，因为"三条各自都能收"才是那条主张。
+C_CONSCRIPT_SOURCE = """\
+extern void *memcpy(void *, const void *, unsigned long);
+extern void *memset(void *, int, unsigned long);
+extern int memcmp(const void *, const void *, unsigned long);
+
+int c_fill_compare(char *d, char *s, unsigned long n) {
+    memset(s, 65, n);                 /* s = "AAAA" */
+    memcpy(d, s, n);                  /* d = "AAAA" */
+    if (memcmp(d, s, n) != 0) return 7;
+    return (int)(unsigned char)d[0] + (int)(unsigned char)d[3];   /* 65 + 65 */
+}
+"""
+
+#: 调上面那份 C 的 Loment 程序。退出码 = `c_fill_compare` 的返回值 = **130**。
+LOMENT_CONSCRIPT_SOURCE = """\
+module conscript
+
+extern fn c_fill_compare(d: ptr, s: ptr, n: u64) -> i32;
+
+fn _start() {
+    let d: ptr = alloc(16 as u32);
+    let s: ptr = alloc(16 as u32);
+    let r: i32 = c_fill_compare(d, s, 4 as u64);
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_object_using_memcpy_is_conscripted_and_runs():
+    """**收编面第一刀**（`docs/219` §6）：外部 C 对象要的 `memcpy`/`memset`/`memcmp`，
+    由 **Loment 自己写的那三个函数**提供 —— 它们于是从端口表上被**划掉**，而不是
+    "链一个系统 libc 进来"。
+
+    判据是**跑出来的数**，不是"IR 里有个定义"：`memset` 把 `s` 填成 `'A'`(65)、
+    `memcpy` 拷到 `d`、`memcmp` 判等，返回 `d[0] + d[3]` = 65 + 65 = **130**。
+    任何一环错都到不了这个数：`memcpy` 不发则 `d` 是垃圾、`memset` 错则 `d[0]` 不是 65、
+    `memcmp` 误报不等则退 7。
+
+    **它同时是证伪对**：把 `Emitter.emit_conscript` 里 `memcpy` 那段删掉，链接期就会
+    重新报"引用了未定义的符号 memcpy"（就是下面那条判据的形状）。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "cons.c").write_text(C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "cons.c", td / "cons.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "cons.o"], 130)
+        assert rc == 130, f"收编面结果不对: rc={rc} (期望 130) err={err[-300:]!r}"
+        print("      收编面: memset/memcpy/memcmp 由 Loment 提供 -> 退出码 130")
+
+
 @test
 def test_object_with_undefined_symbol_is_rejected():
     """一个符号**到链接结束都没人提供** (典型是 libc) -> **硬拒**, 不猜。
