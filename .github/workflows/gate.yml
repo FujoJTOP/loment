@@ -209,11 +209,18 @@ jobs:
       #
       # **片与片各装一份**是故意的：装的是**系统**包，没法在 job 之间传（artifact 只能
       # 传文件，铺不进 /usr）。收益是各片的安装**并行**发生 —— 95s 不再乘 N。
+      #
+      # **加上限与重试**（2026-10-10 实测过一次 apt 抽风）：正常 95s，而有一轮
+      # `apt-get` 在镜像上卡了 **10 分钟**没动静 —— 分片把它复制的次数乘了 N 倍，
+      # 所以这里必须有个"卡住就快点失败"的界，而不是靠 job 那个 60 分钟的上限兜着
+      # （那正是"门禁太慢"最坏的形状：什么都没在跑，但 PR 就是不动）。抽风了重跑一次
+      # 就好 —— 重试是外层的，不是这里悄悄放行。
       - name: 装工具链（full）
+        timeout-minutes: 10
         if: ${{ matrix.profile == 'full' }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo apt-get -o Acquire::Retries=3 install -y -qq \
             qemu-system-x86 qemu-user \
             golang-go default-jdk \
             nodejs npm vim
@@ -233,6 +240,7 @@ jobs:
       # 起的调试记录语法，而 ubuntu-24.04 自带的 clang 是 **18**（本机能过是因为本机
       # LLVM 是 22）。版本下限写在 CONTRIBUTING「Getting a toolchain」。
       - name: 装工具链（只要 clang）
+        timeout-minutes: 10
         if: ${{ matrix.profile == 'llvm' }}
         run: |
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
@@ -358,9 +366,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 装工具链
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo apt-get -o Acquire::Retries=3 install -y -qq \
             qemu-system-x86 qemu-user \
             golang-go default-jdk \
             nodejs npm vim
