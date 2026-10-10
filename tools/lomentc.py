@@ -2804,6 +2804,53 @@ def valid_command_name(name: str) -> bool:
     return all(c.isascii() and (c.isalnum() or c in "-_") for c in name)
 
 
+def _brace_close(toks: list, b: int) -> int:
+    """与 `toks[b]`（一个 `{`）**配对**的那个 `}` 的下标；配不上返回 -1。"""
+    depth = 1
+    j = b + 1
+    n = len(toks)
+    while j < n and depth > 0:
+        if toks[j].kind == "punct":
+            if toks[j].val == "{":
+                depth += 1
+            elif toks[j].val == "}":
+                depth -= 1
+        j += 1
+    return j - 1 if depth == 0 else -1
+
+
+def _reg_one_fn(toks: list, b: int) -> bool:
+    """`register <名字> { … }` 那个块的形状：**恰好一个函数**（`docs/223` §3.3）。
+
+    **为什么钉死这一条**（与自举镜 `lex_reg_one_fn` 同源）：块那层壳对"按深度走"的读者
+    （`potato` 收函数那两趟，将来还会有）是**可见**的，而语义上它是**透明**的（块里的函数
+    就是顶层函数 —— 参考实现按 AST 收，根本没有这一层）。钉成"只有一个函数"之后，需要
+    "看穿这层壳"的地方就只剩**函数**那两处；别的条目（`const` / `impl` / `use`）**进不来** ——
+    它们会被判成形状不对，而不是在某一侧被悄悄丢掉。
+
+    `toks[b]` 是块的 `{`。
+    """
+    n = len(toks)
+    f = b + 1
+    if f < n and toks[f].kind == "ident" and toks[f].val == "pub":
+        f += 1
+    if f >= n or toks[f].kind != "ident" or toks[f].val != "fn":
+        return False                       # 块里第一样东西不是函数
+    e = _brace_close(toks, b)
+    if e < 0:
+        return False                       # 块没有收尾
+    body = f + 1
+    while body < n and not (toks[body].kind == "punct" and toks[body].val == "{"):
+        if toks[body].kind == "punct" and toks[body].val == ";":
+            return False                   # 签名式（没有体）—— 命令体必须有体
+        body += 1
+    if body >= n:
+        return False
+    # 函数体的 `}` **紧贴**块的 `}`（块里除它之外什么都没有，前面只有可选的 `pub`）——
+    # 注意不是"同一个 `}`"：块的收尾在函数体收尾的**后一格**。
+    return _brace_close(toks, body) == e - 1
+
+
 def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
     """从词法流里取**命令声明**（`docs/223`），两种写法：
 
@@ -2851,6 +2898,8 @@ def command_label_from_tokens(toks: list) -> tuple[int, "str | None", str]:
                 continue          # `fn register(…)` 那种：下一个不是名字，不是本构造
             if i + 2 >= len(toks) or toks[i + 2].kind != "punct" or toks[i + 2].val != "{":
                 return t.line, None, "名字后面要跟 `{`"
+            if not _reg_one_fn(toks, i + 2):
+                return t.line, None, "块里要**恰好一个函数**"
             return t.line, name, ""
         if t.val != "loment_command":
             continue

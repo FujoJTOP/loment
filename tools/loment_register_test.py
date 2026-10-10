@@ -79,11 +79,10 @@ def test_the_five_rules_report_the_three_codes():
         "a-bad-name": ('module m\n\nregister "a/b" {\n'
                        "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
                        "        return 0;\n    }\n}\n", [24]),
-        # 块里再套一个：扫出第一个就停，所以只认最外层那个（**零码**，不是报错）——
-        # 两个实现都不做深度判断（自举镜同一条规则），这条钉的就是那份一致。
+        # 块里再套一个：块**只许一个函数**，所以这是形状不对（E024）—— 不是"最外层说了算"。
         "a-nested": ('module m\n\nregister outer {\n    register inner {\n'
                      "        pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
-                     "            return 0;\n        }\n    }\n}\n", []),
+                     "            return 0;\n        }\n    }\n}\n", [24]),
         "a-no-main": ("module m\n\nregister mcmd {\n"
                       "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n", [26]),
         "decl-no-body": ('module m\n\npub fn loment_command() -> str { return "mcmd"; }\n\n'

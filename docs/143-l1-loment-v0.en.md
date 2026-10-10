@@ -1,5 +1,5 @@
 <!-- translated-from: docs/143-l1-loment-v0.md -->
-<!-- source-sha256: 4e5ca6d8ce5c2aeca514ca012ebb786241acbaa25e79a62eff3724689c85d260 -->
+<!-- source-sha256: 5c435f3f723cab6bf8f7730a3da1992fded8f353ea63fd9d36218d7b8a7df3fe -->
 
 # 143 · L1 Loment v0: language specification and compiler
 
@@ -221,18 +221,27 @@ no constant folding); the block does not, which is why it is the recommended spe
 
 | Where | Rule |
 |---|---|
-| Declaration | `register <name> { … }` — the name is an **identifier**, or a string literal (a `-` is not an identifier character, so use that form for names containing one); or `pub fn loment_command() -> str { return "<name>"; }`, where the literal must sit **directly after `return`**. Only in the **entry unit** |
+| Declaration | `register <name> { <one function> }` — the name is an **identifier**, or a string literal (a `-` is not an identifier character, so use that form for names containing one); or `pub fn loment_command() -> str { return "<name>"; }`, where the literal must sit **directly after `return`**. Only in the **entry unit** |
+| Inside the block | **exactly one function** (it may carry `pub`) — more, fewer, or a `const`/`impl` is a shape error (E024). That function's **name** is not constrained by this layer: the entry rule is what requires a `command_main` in the unit |
 | Name | `[A-Za-z0-9_-]`, length 1..64; it must **not collide with an official `loment` command** (official commands win, so a colliding name is unreachable) |
 | Entry | `fn command_main(argv: ptr, argc: u32) -> u32` — the signature is fixed; `argv` is the whole `/proc/self/cmdline` block and `argv[0]` is the command's own path |
 | Excluded | once a command is declared the unit must **not** also write `_start` — the process entry is generated (read cmdline, count the fields, call `command_main`, hand the return value to `exit`) |
 | Paired | the declaration and `command_main` must **come in pairs**: one without the other is E026 (a body without a declaration is dead code; a declaration without a body only blows up at **link** time, so it is caught here instead) |
 | Libraries | a **library may not declare** one: a command is the identity of an **executable**, a library is code other people `use` |
 
-**The block's items are ordinary items** — they join the function table and are emitted like any
-other, so parsing, type checking, the L0/L1 analyses and the Potato form object **never have to
-know `register` exists**. **Only the first one in a unit counts**: nesting another `register`
-inside the block means nothing extra (the scan stops at the first match, the same rule in both
-implementations).
+**The function in the block is an ordinary item** — it joins the function table and is emitted like
+any other, so parsing, type checking and the L0/L1 analyses **never have to know `register`
+exists**.
+
+> **Why "exactly one" is nailed down** (this is a measurement, not taste): the wrapper is
+> **visible** to readers that walk by brace depth (the self-host `potato`'s two function passes),
+> while semantically it is **transparent** (a function in the block is a top-level function — the
+> reference collects it from the AST and never sees the wrapper). If the block could hold other
+> items, every depth-walking reader would have to learn to see through the wrapper, and missing
+> any one of them shows up as a **missing field in the form object** — visible only on the corpus
+> gate (that is exactly how it surfaced: `register_hello.lomt: line 14 differs`). With "one
+> function only", the places that must see through the wrapper are down to those two function
+> passes, and other items **cannot get in at all** (the shape check rejects them).
 
 **The read is a lexer label scan** (the same read as `loment.conf`'s `source_ext`, `docs/158`'s
 "the two implementations must read byte-identically"), so there is **no new AST node**;

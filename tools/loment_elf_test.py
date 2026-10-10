@@ -48,6 +48,11 @@ ROOT = Path(__file__).resolve().parent.parent
 #: 真跑的一批: 有 `_start`、会终止、原生后端支持 —— 两条路各编一个, 比 stdout 与退出码。
 CORPUS = [
     "loment/examples/user_hello.lomt",
+    # 命令单元（`docs/223`）：`_start` 由**工具链生成**（读 `/proc/self/cmdline`、调
+    # `command_main`），所以它们有入口、跑得起来。两种写法各一份 —— clang 与原生链接器
+    # 编出来的 stdout 与退出码都比。
+    "loment/examples/cmd_hello.lomt",
+    "loment/examples/register_hello.lomt",
     "loment/examples/bootprobe.lomt",
     "loment/examples/selfcheck.lomt",
     "loment/examples/all_loment.lomt",

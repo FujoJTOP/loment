@@ -133,11 +133,17 @@ def test_help_and_refresh():
     assert rc == 0, f"--help 退出 {rc}"
     assert "--source" in out and "--outlet" in out and "--refresh" in out, out
 
-    rc, out, _ = _run("--refresh")
-    assert rc == 0, f"--refresh 退出 {rc}"
-    assert "git clone" in out and "git -C" in out, out
-    assert "https://github.com/FujoJTOP/lompi" in out, out
-    assert ".lompi/cache/lompi" in out, out
+    # `--refresh` 要一条**能确定**的发布口路径。这条判据**不靠 `argv[0]`**：它跑在临时
+    # 目录里，而 CI 的临时目录是 `/tmp/...` —— **没有家目录标记**，那一刻引擎按设计
+    # 报"推不出来、请用 `--outlet` 指明"并退出 2（`docs/222` §4 那条边界）。
+    # 从 `argv[0]` 推那条规矩由下面 `test_default_outlet_comes_from_argv0` 专门管。
+    with tempfile.TemporaryDirectory() as tds:
+        outlet = Path(tds) / "cache" / "lompi"
+        rc, out, _ = _run("--refresh", "--outlet", str(outlet))
+        assert rc == 0, f"--refresh 退出 {rc}"
+        assert "git clone" in out and "git -C" in out, out
+        assert "https://github.com/FujoJTOP/lompi" in out, out
+        assert str(outlet) in out, out
 
 
 @test

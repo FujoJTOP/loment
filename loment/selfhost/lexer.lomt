@@ -270,6 +270,67 @@ pub fn lex_tok_is(src: ptr, toks: ptr, i: u32, s: str) -> bool {
     return lx_is(src, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8), s);
 }
 
+/// 与 `toks[b]`（一个 `{`）**配对**的那个 `}` 的下标；配不上返回 0。
+fn lex_reg_close(src: ptr, toks: ptr, n: u32, b: u32) -> u32 {
+    let d: u32 = 1;
+    let j: u32 = b + 1;
+    while j < n && d > 0 {
+        if load32(toks, j * 20) == 3 {
+            if lex_tok_is(src, toks, j, "{") {
+                d = d + 1;
+            } else if lex_tok_is(src, toks, j, "}") {
+                d = d - 1;
+            }
+        }
+        j = j + 1;
+    }
+    if d > 0 {
+        return 0;
+    }
+    return j - 1;
+}
+
+/// `register <名字> { … }` 那个块的形状：**恰好一个函数**（`docs/223` §3.3）。
+///
+/// **为什么钉死这一条**：块那层壳对"按深度走"的读者（`potato` 收函数那两趟，将来还会有）
+/// 是**可见**的，而语义上它是**透明**的（块里的函数就是顶层函数 —— 参考实现是按 AST 收的，
+/// 根本没有这一层）。钉成"只有一个函数"之后，需要"看穿这层壳"的地方就只剩**函数**那两处；
+/// 别的条目（`const` / `impl` / `use`）**进不来** —— 它们会被判成形状不对（E024），
+/// 而不是在某一侧被悄悄丢掉。**实测**：`potato` 的形式对象就是这么先差出来的
+/// （`loment_potato_emit_test` 报 `register_hello.lomt: 第 14 行不同`）。
+///
+/// `b` = 块的 `{` 下标。返回 1 = 形状对。
+fn lex_reg_one_fn(src: ptr, toks: ptr, n: u32, b: u32) -> u32 {
+    let f: u32 = b + 1;
+    if load32(toks, f * 20) == 0 && lex_tok_is(src, toks, f, "pub") {
+        f = f + 1;
+    }
+    if load32(toks, f * 20) != 0 || !lex_tok_is(src, toks, f, "fn") {
+        return 0;                      // 块里第一样东西不是函数
+    }
+    let e: u32 = lex_reg_close(src, toks, n, b);
+    if e == 0 {
+        return 0;                      // 块没有收尾
+    }
+    // 函数体的 `{`：形参里的 `[` / `(` 都包不住 `{`，所以"第一个 `{`"就是它。
+    let body: u32 = f + 1;
+    while body < n && !(load32(toks, body * 20) == 3 && lex_tok_is(src, toks, body, "{")) {
+        if load32(toks, body * 20) == 3 && lex_tok_is(src, toks, body, ";") {
+            return 0;                  // 签名式（没有体）—— 命令体必须有体
+        }
+        body = body + 1;
+    }
+    if body >= n {
+        return 0;
+    }
+    // 函数体的 `}` **紧贴**块的 `}`（块里除它之外什么都没有，前面只有可选的 `pub`）——
+    // 注意不是"同一个 `}`"：块的收尾在函数体收尾的**后一格**。
+    if lex_reg_close(src, toks, n, body) + 1 != e {
+        return 0;
+    }
+    return 1;
+}
+
 /// 扫命令声明（`docs/223`），两种写法：
 ///
 ///     register 名字 { … }                              // 形态 A：名字在语法里
@@ -289,9 +350,8 @@ pub fn lex_tok_is(src: ptr, toks: ptr, i: u32, s: str) -> bool {
 ///   （不钻嵌套块、不越过后面的函数）。这两条都是"在真实单元里不误命中"要的 ——
 ///   实测过：松规则会把 `let s: str = "x";` 里的那个字面量当成命令名。
 /// * 形态 A：`register` 后面**必须真的是一个名字**（ident 或字符串字面量；`fn register(…)`
-///   那种下一个 token 是 `(`，不是本构造，直接放过）。误命中的面因此只剩
-///   `register <名字>` 一种。**不做深度判断**：扫出第一个就停 —— 块里再套一个 `register`
-///   自然被忽略（只认最外层那个），两个实现因此不必各写一套嵌套规则。
+///   那种下一个 token 是 `(`，不是本构造，直接放过），而且**块里恰好一个函数**
+///   （`lex_reg_one_fn`）。误命中的面因此只剩 `register <名字> { <一个函数> }` 一种。
 pub fn lex_cmd_find(src: ptr, toks: ptr) -> u64 {
     let n: u32 = 0;
     while load32(toks, n * 20) != 4 {
@@ -309,6 +369,10 @@ pub fn lex_cmd_find(src: ptr, toks: ptr) -> u64 {
             if load32(toks, (i + 2) * 20) != 3 || !lex_tok_is(src, toks, i + 2, "{") {
                 // 名字后面不是 `{` —— 写了、取不出来（与形态 B 的"形状不对"同一个出口）。
                 // 参考实现在这里连**解析**都过不去；两条路都拒，只是层次不同。
+                return ((i + 1) as u64) * 4294967296;
+            }
+            if lex_reg_one_fn(src, toks, n, i + 2) == 0 {
+                // 块里不是"恰好一个函数" —— 也是形状不对。
                 return ((i + 1) as u64) * 4294967296;
             }
             return ((i + 1) as u64) * 4294967296 + ((i + 2) as u64);
