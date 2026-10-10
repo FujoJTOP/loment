@@ -720,7 +720,7 @@ def test_pe_imports_two_dlls_with_the_socket_surface():
     d = lomelf.PE_IDATA_RVA
     got, k = [], 0
     while True:
-        ilt, _ts, _fc, name_rva, iat = struct.unpack_from("<IIIII", idata, k * 20)
+        ilt, _ts, _fc, name_rva, _iat = struct.unpack_from("<IIIII", idata, k * 20)
         if ilt == 0 and name_rva == 0:
             break                                # 全零终止项
         got.append(idata[name_rva - d:idata.index(b"\x00", name_rva - d)].decode())
