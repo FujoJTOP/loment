@@ -203,22 +203,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
-    container:
-      image: ghcr.io/fujojtop/loment-ci:4
+    # **它故意不拉镜像。** 这一片（现在只有 `lompi_sync`）一条外部命令都不碰，而要命的是
+    # 它**串在其余五片前面**（`needs:`，独占那条保证要的）：拉镜像那 ~60s 会变成
+    # **整道门禁的前置等待**。2026-10-10 实测过一次：加了容器之后这一片 8s → 62s，
+    # 而它带来的净收益（各片把 95s 的 apt 换成 ~55s 的拉取）一共才四十来秒
+    # —— 于是总墙钟从 5m13s 变成 **5m38s**，白改。
+    #
+    # 所以这一片留在 runner 上：要的东西它本来就有（python3 + git），而 `git`
+    # 在 runner 上也不会有容器那套 "dubious ownership"。**它的成员必须保持
+    # "一条外部命令都不碰"** —— 哪天往 `EXCLUSIVE_STATIC` 里加一条要用工具链的，
+    # 它在这里会直接因为缺命令而红（那是能看见的，不是静默）。
     steps:
       - uses: actions/checkout@v4
 
-      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是这个镜像里缺了那个命令。
-      # 镜像那一侧的自述在 `ci-image.yml` 的构建日志里（`Dockerfile` 最后那条 `RUN`）。
+      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是**这一台**上缺了那个命令。
+      # 这一片跑在 **runner** 上（不拉镜像，见上面那段），所以这里列的就是 runner 自带的
+      # 那几件；其余分片的自述在它们各自的 job 里（列的是镜像里的，clang 那行会是 19）。
       - name: 环境自述
         run: |
           echo "runner: $(uname -a)"
           echo "python: $(python3 -V)"
           echo "cpu: $(nproc)"
-          echo "clang: $(clang --version | head -1)"
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
-                   qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
-                   python3 git gh sh make; do
+          for t in python3 git gh sh make; do
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 

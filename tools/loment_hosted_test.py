@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# loment_hosted_test.py — `--hosted` 的门面判据 (docs/220)
+# loment_hosted_test.py — `--hosted` 的门面判据 (docs/222)
 #
 # 判的是一整条链, 不是一层: **一份 Loment 源, 经真的启动器编出来, 链上系统真实的
 # `libz.so`, 跑出逐字节正确的结果**。这条一旦绿, "能调外部库"就是真的, 而不是
@@ -43,7 +43,7 @@ def test(fn):
 
 # ---------------------------------------------------------------- 被验的那份 Loment
 
-#: 一份**未改动的** Loment 源: `fn main` 是 hosted 的入口 (docs/220 §4.3)。
+#: 一份**未改动的** Loment 源: `fn main` 是 hosted 的入口 (docs/222 §4.3)。
 #: 它调系统 libz 的 `compress` / `uncompress`, 把 64 字节往返一遍。
 #: 成功返回 0; 每一个非零都是一个**具体的**失败点, 不是笼统的"没过"。
 HOSTED_SRC = """\
@@ -320,7 +320,7 @@ def test_hosted_needs_a_main_entry():
 
 @test
 def test_windows_launcher_refuses_hosted_by_name():
-    """PE 侧今天没有 hosted 这条路 (docs/220 §7)。**点名拒**, 不许静默按 lomelf 链。
+    """PE 侧今天没有 hosted 这条路 (docs/222 §7)。**点名拒**, 不许静默按 lomelf 链。
 
     这台机器上 Windows 启动器跑不了 hosted, 所以这一条只能静态判 —— 它判的是
     "那份批处理里有这一支, 而且它会退 2", 不是"PE 上能跑"。
@@ -346,11 +346,11 @@ def test_the_shipped_usage_mentions_hosted():
 def main() -> int:
     if not _clang():
         print("loment_hosted_test: SKIP —— 这台机器上没有 clang, "
-              "IR 编不成目标文件 (docs/220)")
+              "IR 编不成目标文件 (docs/222)")
         return 0
     if not _resolves_with_flags(_clang()) and not _wsl():
         print("loment_hosted_test: SKIP —— 本机是 Windows 且没有 WSL: "
-              "ELF 产物跑不起来 (docs/220)")
+              "ELF 产物跑不起来 (docs/222)")
         return 0
     failed = []
     for fn in TESTS:

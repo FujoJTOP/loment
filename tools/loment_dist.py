@@ -164,7 +164,7 @@ Loment @DISPLAY@  (@VERSION@)
   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR...] [-l LIB...]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-                              --hosted: link against the host's real libraries (docs/220)
+                              --hosted: link against the host's real libraries (docs/222)
   loment run FILE [--opt] [--hosted [-L DIR...] [-l LIB...]]
                               compile, link and run
   loment fmt FILE             format (prints the formatted text)
@@ -277,7 +277,7 @@ case "${1:-help}" in
                 # the default path stays clang-free (`lomelf`), so the hermetic / offline build
                 # never grows a dependency on an optimizer being present.
                 --opt|-O2) opt=1; shift ;;
-                # Hosted (docs/220): the product is allowed to have open ports to the world, so
+                # Hosted (docs/222): the product is allowed to have open ports to the world, so
                 # it is linked by the host's C toolchain against the real libc and the real
                 # libraries you name. The entry becomes `main` (the C runtime starts us) and
                 # `-L` / `-l` name library directories and libraries. Sealed builds - the
@@ -311,9 +311,9 @@ case "${1:-help}" in
         # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
-        # say it instead of silently dropping the flags (docs/220 sec 4.1).
+        # say it instead of silently dropping the flags (docs/222 sec 4.1).
         if [ -z "$hosted" ] && { [ -n "$Largs" ] || [ -n "$largs" ]; }; then
-            echo "loment: -L / -l need --hosted: a sealed product links no host library (docs/220)" >&2
+            echo "loment: -L / -l need --hosted: a sealed product links no host library (docs/222)" >&2
             exit 2
         fi
         linkargs=
@@ -323,13 +323,13 @@ case "${1:-help}" in
             objs="$objs $(to_posix "$l")"
         done
         if [ -n "$hosted" ]; then
-            # ---- hosted (docs/220 sec 4): a C-runtime product with open ports to the world.
+            # ---- hosted (docs/222 sec 4): a C-runtime product with open ports to the world.
             # The entry must be `main`, not `_start`: the host C runtime calls it, which is
             # what gives us TLS/stdio/atexit init. Keeping `_start` here would bypass that
             # init AND lose buffered output on a raw exit - a silent wrong, so refuse.
             if ! grep -qE '^define .*@main\(' "$tmp/a.ll"; then
                 echo "loment: --hosted expects \`fn main() -> u32\` as the entry, but this unit defines no @main." >&2
-                echo "        Hosted products start under the C runtime; sealed ones start at _start (docs/220 sec 4.3)." >&2
+                echo "        Hosted products start under the C runtime; sealed ones start at _start (docs/222 sec 4.3)." >&2
                 exit 1
             fi
             cc=$(command -v clang 2>/dev/null || command -v cc 2>/dev/null || true)
@@ -569,11 +569,11 @@ rem with the self-hosted lomelf. Refused **by name** rather than silently ignore
 echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
 exit /b 2
 :barg_hosted
-rem Hosted linking (docs/220 sec 4) needs a PE-side path that does not exist yet: this launcher
+rem Hosted linking (docs/222 sec 4) needs a PE-side path that does not exist yet: this launcher
 rem has no import-table handling and no C toolchain wiring. Refused **by name** - silently
 rem ignoring --hosted would link with lomelf and report "undefined label: compress", which
 rem points the user at the wrong problem entirely.
-echo loment: --hosted is not available on Windows yet (ELF only for now; docs/220 sec 7) 1>&2
+echo loment: --hosted is not available on Windows yet (ELF only for now; docs/222 sec 7) 1>&2
 exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
