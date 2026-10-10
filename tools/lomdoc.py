@@ -92,6 +92,17 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     root = Path(a.lom_root) if a.lom_root else ROOT
     p = Path(a.file)
+    # **别的写法要在这里拦住**（`docs/182` §1.9）。`load_unit` 会**过前门**，
+    # 于是拿到的是**译文**的模块（函数带的是**译文行号**），而下面 `render` 拿
+    # **原文**去按那些行号索引 —— 短文件越界、`IndexError` 甩栈；长文件不越界，
+    # 于是**不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
+    # 两种都是静默错，所以**认出非原生写法就拒**。
+    try:
+        import potato_from                                            # noqa: PLC0415
+        potato_from.refuse_foreign_grammar(p.read_text(encoding="utf-8"), "lomdoc")
+    except (ValueError, OSError) as e:
+        print(f"[ERR] {p}: {e}", file=sys.stderr)
+        return 1
     try:
         mod, deps = lomentc.load_unit(p, root)      # 唯一入口（docs/182 §1.10）
         errs = lomentc.check(mod, deps=deps)
