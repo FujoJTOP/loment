@@ -6156,6 +6156,20 @@ class _Ir:
         raise LomError(getattr(s, "line", 1), 1, f"native M0 不支持该语句: {type(s).__name__}")
 
 
+#: 程序入口（`docs/189` §3：入口是 `fn _start()`，不是 `main`）。ELF 那条路靠
+#: `-Wl,-e,_start` 把它点成**进程入口**（`loment/bootstrap.sh`、`tools/loment_genesis.py`、
+#: `tools/loment_elf_test.py::_link_clang`、`tools/loment_dist.py::_link_opt` 都是这么做的）。
+ENTRY_FN = "_start"
+
+#: 进程入口**不是一次 `call`**：内核进来时 `rsp` 是 16 对齐的，比 System V 的函数入口
+#: 约定（`rsp % 16 == 8`，`call` 压了返回地址）**少 8**。不声明这一条，`_start` 与它下面
+#: 的每一帧就整体偏 8 —— `lomelf` 是一台不碰对齐的栈机，所以一直看不出来；clang `-O1/-O2`
+#: 会把局部数组的清零改写成 `movaps`（16 字节对齐的写），一跑就 `#GP`。实测：自举驱动
+#: 3.2 MB 的 IR 在 `-O0` 编出来一切正常，`-O1/-O2` 编出来一跑就 SIGSEGV（`docs/212` §5.2）。
+#: `stackrealign` 让后端在序言里补一句 `and rsp, -16`，那 8 个字节就回来了。
+ENTRY_ATTR = ' "stackrealign"'
+
+
 def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
@@ -6184,6 +6198,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     args = ", ".join(f"{ir.ll(p.type)} %{p.name}" for p in f.params)
     ir.out.append(f"; {f.name} -> {f.ret}")
     ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
+                  f"{ENTRY_ATTR if f.name == ENTRY_FN else ''}"
                   f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
     ir.out.append("entry:")
     ir.cur_label = "entry"
