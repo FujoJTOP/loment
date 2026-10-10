@@ -1206,9 +1206,18 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 #     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
 #   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
 #     而被调方（Windows API）里的 `movaps` 会直接 #GP。
-#   * 实现了 8 个号: `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257)
-#     `brk`(12) `getdents64`(217) `newfstatat`(262)；**其余号返回 -1**。
-#     写要跨平台跑的程序时按这 8 个来 —— 别处用了别的号, 在 PE 上是静默的 -1。
+#   * 实现了 21 个号，**其余号返回 -1**。第一批 8 个是文件与进程：
+#     `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257) `brk`(12)
+#     `getdents64`(217) `newfstatat`(262)。第二批 13 个是**联网**（2026-10-10，docs/217）：
+#     `socket`(41) `connect`(42) `accept`(43) `accept4`(288) `sendto`(44) `recvfrom`(45)
+#     `shutdown`(48) `bind`(49) `listen`(50) `getsockname`(51) `getpeername`(52)
+#     `setsockopt`(54) `getsockopt`(55) —— 由 `ws2_32.dll` 顶上，socket 型 fd 在
+#     read/write/close 上分流到 recv/send/closesocket。
+#     写要跨平台跑的程序时按这 21 个来 —— 别处用了别的号, 在 PE 上是静默的 -1。
+#   * 联网那批是**语义仿真**而不是转发：负 errno、`AF_INET6`=10（Windows 是 23）、
+#     `SOL_SOCKET` 与 `SO_*` 的号、`struct timeval` 的超时（Windows 只认毫秒）、
+#     `MSG_NOSIGNAL`（Windows 没有这一位）都得翻译。派发面的真话是 `PE_DISPATCH`
+#     那张表，判据把它与冻出来的 blob 逐条对齐。
 #   * Windows 没有 procfs，argv 靠 shim 从 `GetCommandLineA` 合成 `/proc/self/cmdline`
 #     （空格分隔转 NUL 分隔, 并合并连续分隔符）。
 
@@ -1228,16 +1237,48 @@ PE_CMDLINE = b"/proc/self/cmdline\x00"
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
               "FindFirstFileA", "FindNextFileA"]
+# 第二个导入 DLL：联网。名字与上一组无一重名，所以 `slots` 仍是一张按函数名索引的平表。
+PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
+                  "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
+                  "setsockopt", "getsockopt", "getpeername", "getsockname",
+                  "ioctlsocket", "WSAGetLastError"]
+# 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
+PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2)]
+PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
 SYS_GETDENTS64, SYS_OPENAT, SYS_NEWFSTATAT = 217, 257, 262
+SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
+SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
+SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
+SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
+# 派发面上登记的号，**按 shim 里的比较次序**排 —— 判据把它与 `--dump-win-shim` 产物的
+# `cmp eax,imm32` 序列逐条对齐，所以"注释/文档/派发面"三者不可能各自漂。
+PE_DISPATCH = [SYS_EXIT, SYS_WRITE, SYS_READ, SYS_CLOSE, SYS_OPENAT, SYS_BRK,
+               SYS_GETDENTS64, SYS_NEWFSTATAT, SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT,
+               SYS_ACCEPT4, SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN, SYS_BIND,
+               SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME, SYS_SETSOCKOPT,
+               SYS_GETSOCKOPT]
 PE_O_WRONLY, PE_O_CREAT, PE_O_TRUNC = 1, 0x40, 0x200
+# Linux 语义 → WinSock 的翻译表（两边**不同名同值**，所以是仿真不是转发）
+WS2_SOL_SOCKET = 0xFFFF
+WS2_SO = {2: 0x0004, 9: 0x0008, 7: 0x1001, 8: 0x1002, 21: 0x1005, 20: 0x1006, 4: 0x1007}
+WS2_SO_RCVTIMEO, WS2_SO_SNDTIMEO = 0x1006, 0x1005
+WIN_AF_INET6, LINUX_AF_INET6 = 23, 10
+WIN_FIONBIO = 0x8004667E
+LINUX_MSG_NOSIGNAL = 0x4000
+LINUX_SOCK_NONBLOCK, LINUX_SOCK_CLOEXEC = 0x800, 0x80000
+# WSA 错误 → 负 errno。WSAETIMEDOUT 归 EAGAIN，与 Linux 上 SO_RCVTIMEO 到点的表现一致
+# （docs/217 §超时那一格：`read` 返回 -11，不是 -110）。
+WSA_ERRNO = [(10035, 11), (10060, 11), (10036, 115), (10038, 88), (10047, 97),
+             (10048, 98), (10049, 99), (10051, 101), (10054, 104), (10061, 111),
+             (10065, 113), (10022, 22)]
 
 # shim 的静态状态：排在 .data 的**零填充尾巴**上（不占文件的 raw 字节，靠 VirtualSize>RawDataSize）。
 WS_FD_COUNT = 64
 WS_FD_SIZE = 24                                # kind(u32) / handle(u64) / pos(u64)
 WS_FD_KIND, WS_FD_HANDLE, WS_FD_POS = 0, 8, 16
-WS_FD_FREE, WS_FD_FILE, WS_FD_DIR, WS_FD_CMD = 0, 1, 2, 3
+WS_FD_FREE, WS_FD_FILE, WS_FD_DIR, WS_FD_CMD, WS_FD_SOCK = 0, 1, 2, 3, 4
 WS_BRK = WS_FD_COUNT * WS_FD_SIZE              # brk 当前值 / 上界 / cmdline 长度 / cmdline 缓冲
 WS_BRK_END = WS_BRK + 8
 WS_CMD_LEN = WS_BRK_END + 8
@@ -1251,45 +1292,65 @@ WS_TMP2 = WS_TMP + WS_TMP_CAP                   # 目录枚举 / dirent 记录�
 WS_TMP2_CAP = 4096
 WS_FIND = WS_TMP2 + WS_TMP2_CAP                 # WIN32_FIND_DATAA（320 字节）
 WS_FIND_NAME = 44                               # cFileName 在 FIND_DATAA 里的偏移
-WS_SIZE = WS_FIND + 320
+WS_WSA = WS_FIND + 320                          # WSAStartup 只做一次的标志
+WS_WSADATA = WS_WSA + 8                         # WSADATA（408 字节，留 512）
+WS_WSADATA_CAP = 512
+WS_SOCKTMP = WS_WSADATA + WS_WSADATA_CAP        # timeval↔毫秒 / FIONBIO 的暂存
+WS_SOCKTMP_CAP = 256
+WS_ADDR_FIX = WS_SOCKTMP + 240                  # "AF_INET6 的 family 字被我改过"标志
+WS_SIZE = WS_SOCKTMP + WS_SOCKTMP_CAP
 WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
 
 def build_pe_idata() -> tuple[bytes, dict]:
-    """kernel32.dll 的导入表 + cmdline 字面量。返回 (blob, {函数名: IAT 槽 VA})。
+    """`PE_DLLS` 的导入表 + cmdline 字面量。返回 (blob, {函数名: IAT 槽 VA})。
 
     描述符表**必须**以一条全零描述符终止：少了它，加载器会把紧随其后的 ILT 当成第二条
     描述符，导入解析中途失败、IAT 保持未填，随后 `call rax` 直接崩（症状是 SIGSEGV）。
+
+    多个 DLL 只是把这一套排两遍：每条描述符指自己那条 ILT / IAT / 名字串，终止项仍在最后。
+    `slots` 仍按函数名索引（两组无一重名）；这些都还是 RVA 相对量，blob 照旧与布局无关。
     """
-    funcs = PE_IMPORTS
     d = PE_IDATA_RVA
-    n = len(funcs)
-    ilt = d + 40                                   # 一条描述符 + 一条全零终止项
-    iat = ilt + (n + 1) * 8
-    off = iat + (n + 1) * 8
+    off = d + 20 * (len(PE_DLLS) + 1)              # 描述符表（含全零终止项）
+    ilts, iats = [], []
+    for _name, funcs in PE_DLLS:
+        ilts.append(off)
+        off += (len(funcs) + 1) * 8
+    for _name, funcs in PE_DLLS:
+        iats.append(off)
+        off += (len(funcs) + 1) * 8
     hint_rvas, blobs = [], []
-    for nm in funcs:
-        b = struct.pack("<H", 0) + nm.encode() + b"\x00"
-        if len(b) % 2:
-            b += b"\x00"
-        hint_rvas.append(off)
-        blobs.append((off, b))
+    for _name, funcs in PE_DLLS:
+        for nm in funcs:
+            b = struct.pack("<H", 0) + nm.encode() + b"\x00"
+            if len(b) % 2:
+                b += b"\x00"
+            hint_rvas.append(off)
+            blobs.append((off, b))
+            off += len(b)
+    name_rvas, name_blobs = [], []
+    for dll_name, _funcs in PE_DLLS:
+        b = dll_name.encode() + b"\x00"
+        name_rvas.append(off)
+        name_blobs.append((off, b))
         off += len(b)
-    dll_rva = off
-    dll = b"kernel32.dll\x00"
-    off += len(dll)
 
     out = bytearray(max(off - d, PE_LIT_OFF + len(PE_CMDLINE)))
-    struct.pack_into("<IIIII", out, 0, ilt, 0, 0, dll_rva, iat)
-    for i, r in enumerate(hint_rvas):
-        struct.pack_into("<Q", out, ilt - d + i * 8, r)
-        struct.pack_into("<Q", out, iat - d + i * 8, r)
+    slots, k = {}, 0
+    for gi, (_name, funcs) in enumerate(PE_DLLS):
+        struct.pack_into("<IIIII", out, gi * 20, ilts[gi], 0, 0, name_rvas[gi], iats[gi])
+        for j, nm in enumerate(funcs):
+            struct.pack_into("<Q", out, ilts[gi] - d + j * 8, hint_rvas[k])
+            struct.pack_into("<Q", out, iats[gi] - d + j * 8, hint_rvas[k])
+            slots[nm] = PE_IMAGE_BASE + iats[gi] + j * 8
+            k += 1
     for at, b in blobs:
         out[at - d:at - d + len(b)] = b
-    out[dll_rva - d:dll_rva - d + len(dll)] = dll   # 有界切片：开放切片会把缓冲区截断
+    for at, b in name_blobs:
+        out[at - d:at - d + len(b)] = b
     out[PE_LIT_OFF:PE_LIT_OFF + len(PE_CMDLINE)] = PE_CMDLINE   # shim 用常量取址，无需回填
-    slots = {nm: PE_IMAGE_BASE + iat + i * 8 for i, nm in enumerate(funcs)}
     return bytes(out), slots
 
 
@@ -1422,6 +1483,27 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
         imul_ri(RAX, WS_FD_SIZE)
         add_rr(RAX, RBX)
 
+    def cmp_edx(v):
+        a.emit(b"\x81\xFA" + i32(v))            # cmp edx, imm32
+
+    def cmp_eax_m1():
+        a.emit(b"\x83\xF8\xFF")                 # cmp eax, -1（**32 位**返回值：SOCKET_ERROR）
+
+    def cmp_rax_m1():
+        a.emit(b"\x48\x83\xF8\xFF")             # cmp rax, -1（句柄 / SOCKET）
+
+    def zext_eax():
+        a.emit(b"\x89\xC0")                     # mov eax, eax：int 返回值的上 32 位是未定义的
+
+    def xor_eax():
+        a.emit(b"\x31\xC0")                     # xor eax, eax（成功返回 0）
+
+    def add_rsp28():
+        a.emit(b"\x48\x83\xC4\x28")             # add rsp, 0x28
+
+    def ret_():
+        a.emit(b"\xC3")
+
     a.label("__win_syscall")
     a.emit(b"\x55")                             # push rbp
     a.emit(b"\x48\x89\xE5")                     # mov rbp, rsp
@@ -1445,6 +1527,32 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     jcc_l("e", "__ws_getdents")
     cmp_eax(SYS_NEWFSTATAT)
     jcc_l("e", "__ws_fstatat")
+    cmp_eax(SYS_SOCKET)
+    jcc_l("e", "__ws_socket")
+    cmp_eax(SYS_CONNECT)
+    jcc_l("e", "__ws_connect")
+    cmp_eax(SYS_ACCEPT)
+    jcc_l("e", "__ws_accept")
+    cmp_eax(SYS_ACCEPT4)
+    jcc_l("e", "__ws_accept4")
+    cmp_eax(SYS_SENDTO)
+    jcc_l("e", "__ws_sendto")
+    cmp_eax(SYS_RECVFROM)
+    jcc_l("e", "__ws_recvfrom")
+    cmp_eax(SYS_SHUTDOWN)
+    jcc_l("e", "__ws_shutdown")
+    cmp_eax(SYS_BIND)
+    jcc_l("e", "__ws_bind")
+    cmp_eax(SYS_LISTEN)
+    jcc_l("e", "__ws_listen")
+    cmp_eax(SYS_GETSOCKNAME)
+    jcc_l("e", "__ws_getsockname")
+    cmp_eax(SYS_GETPEERNAME)
+    jcc_l("e", "__ws_getpeername")
+    cmp_eax(SYS_SETSOCKOPT)
+    jcc_l("e", "__ws_setsockopt")
+    cmp_eax(SYS_GETSOCKOPT)
+    jcc_l("e", "__ws_getsockopt")
     a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")     # mov rax, -1（未实现的号）
     jmp_l("__ws_ret")
 
@@ -1498,6 +1606,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.label("__ws_write")
     st(RSP, 0x30, RSI)
     st(RSP, 0x38, RDX)
+    a.call("__ws_sock_of_fd")                   # socket 型 fd（edi 还是 fd）
+    test_rax()
+    jcc_l("ne", "__ws_write_sock")
     a.call("__ws_handle")
     test_rax()
     jcc_l("e", "__ws_fail")
@@ -1509,6 +1620,19 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     st(RSP, 0x20, RAX)                          # 第五参 lpOverlapped = NULL
     api("WriteFile")
     ld(RAX, RSP, 0x38)                          # 返回写入字节数（照 write(2)）
+    jmp_l("__ws_ret")
+
+    # socket 型 fd：write 落到 send（Windows 上 WriteFile 写不了 socket 句柄）。
+    # 掩掉 MSG_NOSIGNAL：Windows 没这一位，那边也没有 SIGPIPE。
+    a.label("__ws_write_sock")
+    a.emit(mov_rr(RCX, RAX))
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    a.emit(b"\x45\x31\xC9")
+    api("send")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    zext_eax()
     jmp_l("__ws_ret")
 
     # ---- close(fd) -------------------------------------------------------
@@ -1524,6 +1648,8 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     jcc_l("e", "__ws_close_ok")
     cmp_ecx(WS_FD_CMD)
     jcc_l("e", "__ws_close_zap")                # CMD 没有句柄可关
+    cmp_ecx(WS_FD_SOCK)
+    jcc_l("e", "__ws_close_sock")
     st(RSP, 0x28, RAX)                          # 保存表项指针（CloseHandle 会踩寄存器）
     ld(RCX, RAX, WS_FD_HANDLE)
     api("CloseHandle")
@@ -1535,6 +1661,12 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     st(RAX, WS_FD_POS, RCX)
     a.label("__ws_close_ok")
     a.emit(b"\x31\xC0")                         # xor eax, eax
+    jmp_l("__ws_ret")
+
+    # socket 型 fd：走 closesocket（rdi 还拿着 fd）
+    a.label("__ws_close_sock")
+    a.call("__ws_sock_drop")
+    a.emit(b"\x31\xC0")
     jmp_l("__ws_ret")
 
     # ---- brk(addr) -------------------------------------------------------
@@ -1789,6 +1921,8 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     jcc_l("ae", "__ws_read_file")
     entry_of_fd()
     ld32(RCX, RAX, WS_FD_KIND)
+    cmp_ecx(WS_FD_SOCK)
+    jcc_l("e", "__ws_read_sock")
     cmp_ecx(WS_FD_CMD)
     jcc_l("e", "__ws_read_cmd")
     a.label("__ws_read_file")
@@ -1803,6 +1937,19 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     st(RSP, 0x20, RAX)
     api("ReadFile")
     ld32(RAX, RSP, 0x28)
+    jmp_l("__ws_ret")
+
+    # socket 型 fd：read 落到 recv（Windows 上 ReadFile 读不了 socket 句柄）
+    a.label("__ws_read_sock")
+    a.call("__ws_sock_of_fd")
+    a.emit(mov_rr(RCX, RAX))
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    a.emit(b"\x45\x31\xC9")                     # xor r9d, r9d（flags = 0）
+    api("recv")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    zext_eax()
     jmp_l("__ws_ret")
 
     a.label("__ws_read_cmd")
@@ -1958,6 +2105,506 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.emit(b"\x31\xC0")
     jmp_l("__ws_ret")
 
+    # ================================================================ 联网
+    # （docs/217）。这一批是**语义仿真**，不是转发 —— 凡两边不同值的都在这里翻译：
+    #   * `AF_INET`=2 两边同值、`sockaddr_in`/`sockaddr_in6` 布局逐字节相同 ⇒ 直通；
+    #     **`AF_INET6` Linux=10 / Windows=23** ⇒ 进出各补一次 family 字；
+    #   * `SOL_SOCKET` 1→0xffff，`SO_*` 各有各的号（见 `WS2_SO`）；`IPPROTO_TCP`=6 与
+    #     `TCP_NODELAY`=1 两边同值 ⇒ 直通；
+    #   * `SO_RCVTIMEO`/`SO_SNDTIMEO`：Linux 收 `struct timeval{i64 sec; i64 usec}`，
+    #     Windows 只认 32 位毫秒 ⇒ 两种量纲都要算（**除法**，`imul_ri` 只吃 imm8）；
+    #   * 失败返回**负 errno**（`__ws_wsa_err` 那张表），不是 SOCKET_ERROR；
+    #   * `MSG_NOSIGNAL`(0x4000) 掩掉：Windows 没有这一位，那边也没有 SIGPIPE；
+    #   * `SOCK_NONBLOCK`(0x800) → ioctlsocket(FIONBIO)，`SOCK_CLOEXEC`(0x80000) 丢掉。
+    #   * **点名不做**（用得着就是 -1）：`poll`/`select`/`epoll`、`sendmsg`/`recvmsg`、
+    #     `socketpair`、`AF_UNIX`。
+    #
+    # 两条纪律，错了是静默的错值：
+    #   ① Win64 只保 rbx/rbp/rdi/rsi/r12-r15 ⇒ Linux 的实参（rsi/rdx/r10/r8/r9）在**第一次
+    #      API 调用前**全部落到栈槽；
+    #   ② 这些 case 直接坐在 `__win_syscall` 的序言栈帧上（rsp 16 对齐、0x60 里已含 32 字节
+    #      影子空间）⇒ **不再 `sub rsp,0x28`**，第五参就是 [rsp+0x20]。子程序是 `call`
+    #      进来的，只有它们才要自己 sub。（子程序用的格子从 0x40 起，落在调用方 0x20 以下。）
+
+    # ---- 内部：WSAStartup 只做一次（不做则第一次 socket() 报 WSANOTINITIALISED）---
+    a.label("__ws_wsa_start")
+    sub_rsp(0x28)
+    ld(RAX, RBX, WS_WSA)
+    test_rax()
+    jcc_l("ne", "__ws_wsa_done")
+    movi32(RCX, 0x0202)                         # MAKEWORD(2, 2)
+    movi(RDX, PE_STATE_VA + WS_WSADATA)
+    api("WSAStartup")
+    movi(RCX, 1)
+    st(RBX, WS_WSA, RCX)                        # 失败也立标志：真正的错由后面那次调用报
+    a.label("__ws_wsa_done")
+    add_rsp28()
+    ret_()
+
+    # ---- 内部：WSA 错误码 → 负 errno -------------------------------------
+    a.label("__ws_wsa_err")
+    sub_rsp(0x28)
+    api("WSAGetLastError")
+    add_rsp28()
+    for _code, _errno in WSA_ERRNO:
+        cmp_eax(_code)
+        jcc_l("e", f"__ws_wsa_e{_code}")
+    movi(RAX, -1)                               # 表外的一律 -1（明写的上限，见 docs/217）
+    ret_()
+    for _code, _errno in WSA_ERRNO:
+        a.label(f"__ws_wsa_e{_code}")
+        movi(RAX, -_errno)
+        ret_()
+
+    # ---- 内部：fd → SOCKET（不是 socket 型就 0）---------------------------
+    a.label("__ws_sock_of_fd")
+    cmp_edi(3)
+    jcc_l("b", "__ws_sof_no")                   # 0/1/2 是标准流
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_sof_no")
+    entry_of_fd()
+    ld32(RCX, RAX, WS_FD_KIND)
+    cmp_ecx(WS_FD_SOCK)
+    jcc_l("ne", "__ws_sof_no")
+    ld(RAX, RAX, WS_FD_HANDLE)
+    ret_()
+    a.label("__ws_sof_no")
+    xor_eax()
+    ret_()
+
+    # ---- 内部：SOCKET（rax）→ 一个 socket 型 fd（eax = fd，rdx = &表项）----
+    a.label("__ws_sock_alloc")
+    sub_rsp(0x28)
+    st(RSP, 0x40, RAX)                          # SOCKET：__ws_alloc_fd 会踩 rax/rdx/rcx
+    a.call("__ws_alloc_fd")
+    a.emit(b"\x85\xC0")                         # test eax, eax
+    jcc_l("s", "__ws_sa_full")
+    movi(RCX, WS_FD_SOCK)
+    st32(RDX, WS_FD_KIND, RCX)
+    ld(RCX, RSP, 0x40)
+    st(RDX, WS_FD_HANDLE, RCX)
+    a.emit(b"\x31\xC9")
+    st(RDX, WS_FD_POS, RCX)
+    add_rsp28()
+    ret_()
+    a.label("__ws_sa_full")
+    movi32(RAX, -1)
+    add_rsp28()
+    ret_()
+
+    # ---- 内部：关掉一个 socket 型 fd（edi = fd；表项清零）-----------------
+    a.label("__ws_sock_drop")
+    cmp_edi(3)
+    jcc_l("b", "__ws_sd_done")
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_sd_done")
+    entry_of_fd()
+    st(RSP, 0x40, RAX)                          # &表项
+    ld(RCX, RAX, WS_FD_HANDLE)
+    sub_rsp(0x28)
+    api("closesocket")
+    add_rsp28()
+    ld(RAX, RSP, 0x40)                          # 同一个格子：sub/add 前后 RSP 相同
+    a.emit(b"\x31\xC9")
+    st32(RAX, WS_FD_KIND, RCX)
+    st(RAX, WS_FD_HANDLE, RCX)
+    st(RAX, WS_FD_POS, RCX)
+    a.label("__ws_sd_done")
+    ret_()
+
+    # ---- 内部：sockaddr 的 family 字（AF_INET6：Linux 10 ↔ Windows 23）-----
+    # 布局逐字节相同，差别只在这两个字，所以**就地改**、进 API 前后各补一次（单线程，
+    # 程序在系统调用期间看不到）。空指针合法（connect/accept 的 addr 可以是 0）⇒ 跳过。
+    a.label("__ws_addr_in")                     # rdi = &sockaddr
+    xor_eax()
+    st(RBX, WS_ADDR_FIX, RAX)                   # 默认"没改过"
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_ai_done")
+    a.emit(b"\x0F\xB7\x07")                     # movzx eax, word [rdi]
+    cmp_eax(LINUX_AF_INET6)
+    jcc_l("ne", "__ws_ai_done")
+    movi(RCX, WIN_AF_INET6)
+    a.emit(b"\x66\x89\x0F")                     # mov word [rdi], cx
+    movi(RAX, 1)
+    st(RBX, WS_ADDR_FIX, RAX)
+    a.label("__ws_ai_done")
+    ret_()
+
+    a.label("__ws_addr_restore")                # rdi = &sockaddr
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_ar_done")
+    ld(RAX, RBX, WS_ADDR_FIX)
+    test_rax()
+    jcc_l("e", "__ws_ar_done")
+    movi(RCX, LINUX_AF_INET6)
+    a.emit(b"\x66\x89\x0F")
+    a.label("__ws_ar_done")
+    ret_()
+
+    a.label("__ws_addr_out")                    # 出口方向：23 → 10
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_ao_done")
+    a.emit(b"\x0F\xB7\x07")
+    cmp_eax(WIN_AF_INET6)
+    jcc_l("ne", "__ws_ao_done")
+    movi(RCX, LINUX_AF_INET6)
+    a.emit(b"\x66\x89\x0F")
+    a.label("__ws_ao_done")
+    ret_()
+
+    # ---- 公共出口 --------------------------------------------------------
+    a.label("__ws_not_sock")
+    movi(RAX, -88)                              # ENOTSOCK：给的 fd 不是 socket
+    jmp_l("__ws_ret")
+
+    a.label("__ws_sock_err")                    # API 失败 → 负 errno
+    a.call("__ws_wsa_err")
+    jmp_l("__ws_ret")
+
+    def case_fd1(api_name):
+        """listen(50) / shutdown(48)：参数两边同值，直通。"""
+        st(RSP, 0x30, RSI)
+        a.call("__ws_sock_of_fd")
+        test_rax()
+        jcc_l("e", "__ws_not_sock")
+        a.emit(mov_rr(RCX, RAX))
+        ld(RDX, RSP, 0x30)
+        api(api_name)
+        cmp_eax_m1()
+        jcc_l("e", "__ws_sock_err")
+        xor_eax()
+        jmp_l("__ws_ret")
+
+    def case_addr2(api_name):
+        """connect(42) / bind(49)：fd, addr, addrlen —— 差别只在 API 名字。"""
+        st(RSP, 0x30, RSI)                      # addr
+        st(RSP, 0x38, RDX)                      # addrlen
+        a.call("__ws_sock_of_fd")
+        test_rax()
+        jcc_l("e", "__ws_not_sock")
+        st(RSP, 0x40, RAX)                      # SOCKET
+        ld(RDI, RSP, 0x30)
+        a.call("__ws_addr_in")
+        ld(RCX, RSP, 0x40)
+        ld(RDX, RSP, 0x30)
+        ld(R8, RSP, 0x38)
+        api(api_name)
+        st(RSP, 0x48, RAX)                      # 返回值
+        ld(RDI, RSP, 0x30)
+        a.call("__ws_addr_restore")
+        ld(RAX, RSP, 0x48)
+        cmp_eax_m1()
+        jcc_l("e", "__ws_sock_err")
+        xor_eax()
+        jmp_l("__ws_ret")
+
+    def case_peername(api_name):
+        """getsockname(51) / getpeername(52)：出口方向要补 family 字。"""
+        st(RSP, 0x30, RSI)                      # addr（可为 0）
+        st(RSP, 0x38, RDX)                      # addrlen 指针
+        a.call("__ws_sock_of_fd")
+        test_rax()
+        jcc_l("e", "__ws_not_sock")
+        a.emit(mov_rr(RCX, RAX))
+        ld(RDX, RSP, 0x30)
+        ld(R8, RSP, 0x38)
+        api(api_name)
+        cmp_eax_m1()
+        jcc_l("e", "__ws_sock_err")
+        ld(RDI, RSP, 0x30)
+        a.call("__ws_addr_out")
+        xor_eax()
+        jmp_l("__ws_ret")
+
+    def case_sendrecv(api6, api4, is_send, tag):
+        """sendto(44) / recvfrom(45)：6 参，第 5/6 参走栈（[rsp+0x20]/[rsp+0x28]）。
+
+        **addr 为 NULL 时走 `send`/`recv`**：Linux 上 `sendto(已连接, …, NULL, …)` 就是
+        `send`，而 WinSock 的 `sendto` 拿 NULL 加非零 tolen 会报 WSAEFAULT —— 不分流就是
+        一个"Linux 能跑、Windows 报错"的暗沟。
+        """
+        st(RSP, 0x30, RSI)                      # buf
+        st(RSP, 0x38, RDX)                      # len
+        st(RSP, 0x40, R10)                      # flags
+        st(RSP, 0x48, R8)                       # addr
+        st(RSP, 0x50, R9)                       # addrlen
+        a.call("__ws_sock_of_fd")
+        test_rax()
+        jcc_l("e", "__ws_not_sock")
+        st(RSP, 0x58, RAX)                      # SOCKET
+        a.emit(mov_rr(RCX, RAX))
+        ld(RDX, RSP, 0x30)
+        ld(R8, RSP, 0x38)
+        ld(R9, RSP, 0x40)
+        a.emit(alu_ri(AND_, R9, ~LINUX_MSG_NOSIGNAL))                # 掩 MSG_NOSIGNAL
+        ld(RAX, RSP, 0x48)
+        test_rax()
+        jcc_l("e", f"__ws_sr_{tag}_plain")
+        st(RSP, 0x20, RAX)                      # 第 5 参 = addr
+        ld(RAX, RSP, 0x50)
+        st(RSP, 0x28, RAX)                      # 第 6 参 = addrlen
+        ld(RDI, RSP, 0x48)
+        if is_send:
+            a.call("__ws_addr_in")
+        api(api6)
+        st(RSP, 0x50, RAX)                      # 返回值（0x50 那个 addrlen 已经用完了）
+        ld(RDI, RSP, 0x48)
+        if is_send:
+            a.call("__ws_addr_restore")
+        else:
+            a.call("__ws_addr_out")
+        ld(RAX, RSP, 0x50)
+        jmp_l(f"__ws_sr_{tag}_fin")
+        a.label(f"__ws_sr_{tag}_plain")         # addr == NULL ⇒ send/recv
+        api(api4)
+        a.label(f"__ws_sr_{tag}_fin")
+        cmp_eax_m1()
+        jcc_l("e", "__ws_sock_err")
+        zext_eax()
+        jmp_l("__ws_ret")
+
+    # ---- socket(af, type, proto) ----------------------------------------
+    a.label("__ws_socket")
+    st(RSP, 0x28, RDI)                          # af
+    st(RSP, 0x30, RSI)                          # type
+    st(RSP, 0x38, RDX)                          # proto
+    a.call("__ws_wsa_start")
+    ld(RCX, RSP, 0x30)
+    a.emit(mov_rr(RAX, RCX))
+    movi32(R11, LINUX_SOCK_NONBLOCK)
+    a.emit(alu_rr(0x21, RAX, R11))              # and rax, r11（非零 = 要设非阻塞）
+    st(RSP, 0x40, RAX)
+    movi32(RAX, 0xFFF7F7FF)                     # 清 SOCK_NONBLOCK|SOCK_CLOEXEC 两位
+    a.emit(alu_rr(0x21, RCX, RAX))
+    st(RSP, 0x30, RCX)
+    ld(RDI, RSP, 0x28)
+    cmp_edi(LINUX_AF_INET6)
+    jcc_l("ne", "__ws_sk_af")
+    movi32(RDI, WIN_AF_INET6)
+    a.label("__ws_sk_af")
+    ld(RDX, RSP, 0x38)
+    a.emit(mov_rr(R8, RDX))                     # proto → 第 3 参
+    ld(RDX, RSP, 0x30)
+    a.emit(mov_rr(RCX, RDI))                    # af → 第 1 参
+    api("socket")
+    cmp_rax_m1()                                # INVALID_SOCKET 是 64 位的全 1
+    jcc_l("e", "__ws_sock_err")
+    a.call("__ws_sock_alloc")
+    a.emit(b"\x85\xC0")
+    jcc_l("s", "__ws_fail")
+    st(RSP, 0x48, RAX)                          # fd
+    ld(R11, RSP, 0x40)
+    test_rr(R11, R11)
+    jcc_l("e", "__ws_sk_done")
+    movi(R11, 1)
+    st(RBX, WS_SOCKTMP, R11)                    # FIONBIO 的 u_long = 1
+    ld(RCX, RDX, WS_FD_HANDLE)                  # rdx 还指着刚分配的表项
+    movi32(RDX, WIN_FIONBIO)
+    movi(R8, PE_STATE_VA + WS_SOCKTMP)
+    api("ioctlsocket")
+    cmp_eax_m1()
+    jcc_l("ne", "__ws_sk_done")
+    a.call("__ws_wsa_err")                      # 设不上非阻塞就别留个"假非阻塞"的 socket
+    st(RSP, 0x50, RAX)
+    ld(RDI, RSP, 0x48)
+    a.call("__ws_sock_drop")
+    ld(RAX, RSP, 0x50)
+    jmp_l("__ws_ret")
+    a.label("__ws_sk_done")
+    ld(RAX, RSP, 0x48)
+    jmp_l("__ws_ret")
+
+    # ---- accept(43) / accept4(288) --------------------------------------
+    a.label("__ws_accept")
+    a.emit(b"\x45\x31\xD2")                     # xor r10d, r10d：accept 没有 flags
+    jmp_l("__ws_ac_go")
+    a.label("__ws_accept4")
+    a.label("__ws_ac_go")
+    st(RSP, 0x40, R10)                          # flags（accept4）
+    st(RSP, 0x30, RSI)                          # addr（可为 0）
+    st(RSP, 0x38, RDX)                          # addrlen 指针
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_not_sock")
+    a.emit(mov_rr(RCX, RAX))
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    api("accept")
+    cmp_rax_m1()
+    jcc_l("e", "__ws_sock_err")
+    st(RSP, 0x48, RAX)                          # 新 SOCKET
+    ld(RDI, RSP, 0x30)
+    a.call("__ws_addr_out")
+    ld(RAX, RSP, 0x48)
+    a.call("__ws_sock_alloc")
+    a.emit(b"\x85\xC0")
+    jcc_l("s", "__ws_fail")
+    st(RSP, 0x50, RAX)                          # fd
+    ld(R11, RSP, 0x40)
+    movi32(RCX, LINUX_SOCK_NONBLOCK)
+    a.emit(alu_rr(0x85, R11, RCX))              # test r11, rcx（只用来跳）
+    jcc_l("e", "__ws_ac_done")
+    movi(R11, 1)
+    st(RBX, WS_SOCKTMP, R11)
+    ld(RCX, RDX, WS_FD_HANDLE)
+    movi32(RDX, WIN_FIONBIO)
+    movi(R8, PE_STATE_VA + WS_SOCKTMP)
+    api("ioctlsocket")
+    cmp_eax_m1()
+    jcc_l("ne", "__ws_ac_done")
+    a.call("__ws_wsa_err")
+    st(RSP, 0x58, RAX)
+    ld(RDI, RSP, 0x50)
+    a.call("__ws_sock_drop")
+    ld(RAX, RSP, 0x58)
+    jmp_l("__ws_ret")
+    a.label("__ws_ac_done")
+    ld(RAX, RSP, 0x50)
+    jmp_l("__ws_ret")
+
+    # ---- connect / bind / listen / shutdown / getsockname / getpeername --
+    a.label("__ws_connect")
+    case_addr2("connect")
+    a.label("__ws_bind")
+    case_addr2("bind")
+    a.label("__ws_listen")
+    case_fd1("listen")
+    a.label("__ws_shutdown")
+    case_fd1("shutdown")
+    a.label("__ws_getsockname")
+    case_peername("getsockname")
+    a.label("__ws_getpeername")
+    case_peername("getpeername")
+    a.label("__ws_sendto")
+    case_sendrecv("sendto", "send", True, "sd")
+    a.label("__ws_recvfrom")
+    case_sendrecv("recvfrom", "recv", False, "rf")
+
+    # ---- setsockopt(fd, level, optname, optval, optlen) ------------------
+    # Linux 的 level/optname 与 `SO_*` 号都要翻；两个 TIMEO 还要把 timeval 折成毫秒。
+    a.label("__ws_setsockopt")
+    st(RSP, 0x30, RSI)                          # level
+    st(RSP, 0x38, RDX)                          # optname
+    st(RSP, 0x40, R10)                          # optval
+    st(RSP, 0x48, R8)                           # optlen
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_not_sock")
+    st(RSP, 0x58, RAX)                          # SOCKET
+    ld(RCX, RSP, 0x30)
+    cmp_ecx(1)                                  # SOL_SOCKET
+    jcc_l("ne", "__ws_sso_go")                  # 别的 level 两边同值 ⇒ 直通
+    movi(RCX, WS2_SOL_SOCKET)
+    st(RSP, 0x30, RCX)
+    ld(RDX, RSP, 0x38)
+    for _opt in sorted(WS2_SO):
+        cmp_edx(_opt)
+        jcc_l("e", f"__ws_sso_{_opt}")
+    jmp_l("__ws_sso_bad")
+    for _opt in sorted(WS2_SO):
+        a.label(f"__ws_sso_{_opt}")
+        movi(RCX, WS2_SO[_opt])
+        st(RSP, 0x38, RCX)
+        if _opt in (21, 20):                    # SO_SNDTIMEO / SO_RCVTIMEO
+            # ms = sec*1000 + usec/1000（`imul_ri` 只吃 imm8，乘 1000 得用 imul_rr/div）
+            ld(RAX, RSP, 0x40)
+            ld(RAX, RAX, 0)
+            movi(RCX, 1000)
+            a.emit(imul_rr(RAX, RCX))           # sec * 1000
+            st(RSP, 0x50, RAX)
+            ld(RAX, RSP, 0x40)
+            ld(RAX, RAX, 8)                     # usec
+            a.emit(b"\x31\xD2")                 # xor edx, edx
+            movi(RCX, 1000)
+            a.emit(group3(6, RCX))              # div rcx → rax = usec/1000
+            ld(R11, RSP, 0x50)
+            add_rr(RAX, R11)
+            st(RBX, WS_SOCKTMP, RAX)            # 低 32 位就是毫秒
+            movi(RCX, PE_STATE_VA + WS_SOCKTMP)
+            st(RSP, 0x40, RCX)
+            movi(RCX, 4)
+            st(RSP, 0x48, RCX)
+        jmp_l("__ws_sso_go")
+    a.label("__ws_sso_bad")
+    movi(RAX, -95)                              # EOPNOTSUPP：没映射的 SO_*
+    jmp_l("__ws_ret")
+    a.label("__ws_sso_go")
+    ld(RCX, RSP, 0x58)
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    ld(R9, RSP, 0x40)
+    ld(RAX, RSP, 0x48)
+    st(RSP, 0x20, RAX)                          # 第 5 参 = optlen
+    api("setsockopt")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    xor_eax()
+    jmp_l("__ws_ret")
+
+    # ---- getsockopt(fd, level, optname, optval, optlen 指针) -------------
+    a.label("__ws_getsockopt")
+    st(RSP, 0x30, RSI)
+    st(RSP, 0x38, RDX)
+    st(RSP, 0x40, R10)
+    st(RSP, 0x48, R8)
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_not_sock")
+    st(RSP, 0x58, RAX)
+    ld(RCX, RSP, 0x30)
+    cmp_ecx(1)
+    jcc_l("ne", "__ws_gso_go")
+    movi(RCX, WS2_SOL_SOCKET)
+    st(RSP, 0x30, RCX)
+    ld(RDX, RSP, 0x38)
+    for _opt in sorted(WS2_SO):
+        cmp_edx(_opt)
+        jcc_l("e", f"__ws_gso_{_opt}")
+    jmp_l("__ws_gso_bad")
+    for _opt in sorted(WS2_SO):
+        a.label(f"__ws_gso_{_opt}")
+        movi(RCX, WS2_SO[_opt])
+        st(RSP, 0x38, RCX)
+        jmp_l("__ws_gso_go")
+    a.label("__ws_gso_bad")
+    movi(RAX, -95)
+    jmp_l("__ws_ret")
+    a.label("__ws_gso_go")
+    ld(RCX, RSP, 0x58)
+    ld(RDX, RSP, 0x30)
+    ld(R8, RSP, 0x38)
+    ld(R9, RSP, 0x40)
+    ld(RAX, RSP, 0x48)                          # optlen 指针（调用方的，Windows 会回写）
+    st(RSP, 0x20, RAX)
+    api("getsockopt")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    ld(RCX, RSP, 0x38)
+    cmp_ecx(WS2_SO_RCVTIMEO)
+    jcc_l("e", "__ws_gso_time")
+    cmp_ecx(WS2_SO_SNDTIMEO)
+    jcc_l("e", "__ws_gso_time")
+    xor_eax()
+    jmp_l("__ws_ret")
+    a.label("__ws_gso_time")                    # 毫秒 → timeval（Windows 还把 *optlen 改成 4）
+    ld(RAX, RSP, 0x40)
+    ld32(RAX, RAX, 0)                           # ms（DWORD）
+    a.emit(b"\x31\xD2")
+    movi(RCX, 1000)
+    a.emit(group3(6, RCX))                      # div rcx → rax = sec，rdx = ms % 1000
+    movi(RCX, 1000)
+    a.emit(imul_rr(RDX, RCX))                   # usec = (ms%1000) * 1000
+    ld(RCX, RSP, 0x40)
+    st(RCX, 0, RAX)                             # timeval.tv_sec
+    st(RCX, 8, RDX)                             # timeval.tv_usec
+    ld(RCX, RSP, 0x48)
+    movi(RDX, 16)
+    st32(RCX, 0, RDX)                           # *optlen = sizeof(struct timeval)
+    xor_eax()
+    jmp_l("__ws_ret")
+
     # （cmdline 字面量在 .idata 的固定偏移 PE_LIT_OFF 上，shim 用常量取址，不必内嵌）
 
 
@@ -2014,7 +2661,7 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, idata: bytes) -> bytes:
     struct.pack_into("<Q", opt, 88, 0x100000)
     struct.pack_into("<Q", opt, 96, 0x1000)
     struct.pack_into("<I", opt, 108, 16)
-    struct.pack_into("<II", opt, 112 + 8, PE_IDATA_RVA, 40)  # Import Directory
+    struct.pack_into("<II", opt, 112 + 8, PE_IDATA_RVA, PE_IMPORT_DESC_BYTES)  # Import Directory
     o += opt
 
     def sec(name, vs, rva, rs, rp, ch):
@@ -2098,7 +2745,7 @@ def dump_win_shim(path) -> int:
         "// win_shim_data.lomt — 由 `tools/lomelf.py --dump-win-shim` 生成，别手改。",
         "//",
         f"// 两段**与布局无关**的数据：`__win_syscall` 的机器码（{len(blob)} 字节）与",
-        f"// kernel32 导入表（{len(idata)} 字节，含 /proc/self/cmdline 字面量）。四个节钉在固定",
+        f"// 导入表（{len(idata)} 字节，kernel32 + ws2_32，含 /proc/self/cmdline 字面量）。四个节钉在固定",
         "// RVA、IAT 槽是常量，所以它们里面一个待回填的地址都没有 —— 自举镜像原样搬即可。",
         "//",
         "// **故意按片给、不做 str_concat**：运行时的 bump 堆只有 64 KiB（lomentc.py 的",
