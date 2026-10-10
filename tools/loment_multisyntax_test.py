@@ -580,6 +580,42 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
     print("      五种语法都给出对得上的提示; Loment 的 typo 不给")
 
 
+@test
+def test_diag_does_not_call_a_native_declaration_foreign():
+    """**声明里写的"原生"语法不是"外源"** —— `rust` 是 `NATIVE_GRAMMARS` 里那个。
+
+    `choose write grammar rust` 的文件**就是** Loment（只是拼法，`docs/188` §2、
+    2026-09-22 的裁定），前门当原生读。而这一处原先对 `lang in LANGS` 一律给外源卡 ——
+    `rust` 也在 `LANGS` 里，于是它说"**这个文件不是 Loment 语法**、别照上面那条改"，
+    而上面那条（**补 `module`**）**恰恰是对的**：一条该听的话被一句"别听"撤销。
+
+    **但只排"声明"那一路**：一份**真 Rust 源码**叫 `.rs`、没写声明 —— 那时按**后缀**
+    认，而那句提示**是对的**（那份内容确实不是 Loment）。靠 `resolve_lang` 给的
+    `why`（`文件头声明 …` / `后缀 …`）分。一刀切把 `rust` 整个排掉，
+    会把那条真该说的话一起消掉（`SYNTAXES` 里那条 `.rs` 用的就是真 Rust 源码）。
+    """
+    import loment_diag                                                # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        d = td / "r.lomt"                      # 声明是 rust、正文是 Loment
+        d.write_text("choose write grammar rust\n\nfn f() -> i32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert loment_diag.foreign_note(d, ["2:1: 期望 module，得到 'fn'"]) is None, \
+            "对一份 `choose write grammar rust` 的 Loment 说了'不是 Loment'"
+        # 反面一：真 Rust 源码（`.rs`、没声明）**照旧**要点名
+        r = td / "real.rs"
+        r.write_text("#[no_mangle]\npub fn f() {}\n", encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(r, ["1:1: 期望 module，得到 '#'"])
+        assert note and "不是 Loment" in note and "rust" in note.lower(), note
+        # 反面二：声明为**外源**的照旧要点名
+        c = td / "x.lomt"
+        c.write_text("choose write grammar c\nint f() { return ~1; }\n",
+                     encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(c, ["2:22: 非法字符 '~'"])
+        assert note and "不是 Loment" in note, note
+    print("      声明为原生的不给'外源'提示；真 Rust 源码与声明为外源的照旧点名")
+
+
 #: 照 2026-09-17 一个子 agent **真写出来的那份 C** 蒸馏的 (无 `#include`、无 libc),
 #: 刻意保留了三处当时把工具链绊倒的形状: Allman `{`、`unsigned` 单独写、
 #: 单引号字符字面量 `'0'`。它由下面那条端到端每次真跑 —— 见 `docs/179` §6。
