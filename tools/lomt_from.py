@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -167,6 +168,22 @@ def _sig_params(fn: dict) -> str:
             raise NotRepresentable(f"函数 {fn.get('name')!r} 的形参名 {n!r} 不是标识符")
         out.append(f"{n}: {_ty(p.get('type'))}")
     return ", ".join(out)
+
+
+def _whose_line(e: object, body_at: dict[str, int]) -> str | None:
+    """从翻译器抛出的消息里取出 `第 N 行`，回查那是**哪个函数**的正文（`docs/186` §4）。
+
+    没有行号、或没有函数落在它之前，就返回 `None`（调用方照旧走原来那句话）。
+    """
+    m = re.search(r"第 (\d+) 行", str(e))
+    if m is None:
+        return None
+    ln = int(m.group(1))
+    best: str | None = None
+    for name, start in body_at.items():
+        if start <= ln and (best is None or start > body_at[best]):
+            best = name
+    return best
 
 
 def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]]:
@@ -392,8 +409,20 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 text = mod.translate(_join_bodies(bodies, body_at),
                                      keep=set(bodies), **kw)
             except errs as e:  # type: ignore[misc]
-                # **翻不过去就说清有多少个、以及是什么毛病** —— 只说"子集外"的话，
-                # 一份文件里十几个函数，用户不知道去改哪一个。
+                # **报得出是哪个函数** —— `docs/186` §4 的承诺（"一份文件里往往十几个
+                # 函数，只说'子集外'用户不知道该去改哪一个"）。
+                #
+                # 异常里带的是**原文行号**（`_join_bodies` 按 `body_line` 垫空行保证了
+                # 这一点），而 `body_at` 记着每个函数的**起始行** —— 拿行号回查就能点名。
+                #
+                # 原先只给"`{len(bodies)}` 个带正文的函数里有子集外的写法"：那个数是
+                # **所有**带正文的函数的个数，不是"有几个出问题"，而且**函数名一个都
+                # 没有**。实测：一份 4 个函数的文件、第 3 个非法，报的是
+                # "**4 个**带正文的函数里有子集外的写法: 第 4 行: 不支持 `switch`"。
+                who = _whose_line(e, body_at)
+                if who is not None:
+                    raise NotRepresentable(
+                        f"函数 `{who}` 里有子集外的写法（{tool} 的 Stage A {hint}）: {e}")
                 raise NotRepresentable(
                     f"{len(bodies)} 个带正文的函数里有子集外的写法（{tool} 的 Stage A "
                     f"{hint}）: {e}")

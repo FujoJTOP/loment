@@ -396,8 +396,13 @@ def test_out_of_subset_is_loud():
     except lomt_from.NotRepresentable as e:
         msg = str(e)
         assert "switch" in msg, f"报的话里要指出是 `switch`，实得: {msg}"
-        # 一份文件里往往十几个函数，只说"子集外"用户不知道该去改哪一个
-        assert "带正文的" in msg or "1 个" in msg, f"要说得清范围: {msg}"
+        # **点名到函数** —— 这条判据的 docstring 一直写着"报得出是哪个函数"，
+        # `docs/186` §4 也是这么承诺的（"一份文件里往往十几个函数，只说'子集外'
+        # 用户不知道该去改哪一个"）。而断言原先只查"说得清范围"
+        # （`带正文的` / `1 个`）—— 那句话把承诺**弱化**掉了：
+        # "4 个带正文的函数里有子集外的写法"说得清范围、却**一个函数名都没有**，
+        # 而且那个数是**所有**带正文的函数，不是"有几个出问题"。
+        assert "with_switch" in msg, f"要点名到出问题的那个函数（docs/186 §4）: {msg}"
         print(f"      子集外报得出: {msg[:90]}…")
         return
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
