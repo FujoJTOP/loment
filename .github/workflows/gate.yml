@@ -77,6 +77,12 @@ on:
 permissions:
   contents: read
 
+#: 分几片。它**必须**与 `tools/ci.py shards()` 的分法一致 —— 下面矩阵里每条的 `total`
+#: 与 `--shard K/N` 的 N 都是它。写错了分片划分就变，并集不再是 `STATIC_CHECKS`，
+#: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
+env:
+  GATE_SHARDS: "6"
+
 jobs:
   # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
   #
@@ -154,13 +160,159 @@ jobs:
           done
           exit 1
 
+  # 独占那一条（`EXCLUSIVE_STATIC`）**先单独跑完**，其余分片 `needs:` 它。
+  #
+  # **为什么非单独一个 job 不可**（这是分片本身不会给你的保证）：独占的成员写**仓库里的
+  # 共享位置**（`lompi_sync` 会同步 `lompi/`），所以"不能与别的判据同时跑"—— 而摊到并行
+  # job 上之后，那句话里的"同时"**还包括别的 job**。`ci.py:shards` 把这一片排在片 1，
+  # 这里再用 `needs:` 把它与其余分片串起来，两件事缺一不可。
+  #
+  # **它的步骤与 `static-shard` 是同一套**（只差矩阵那几行），改一边要改两边。没有抽成
+  # composite action 是因为门禁自己的纪律："逻辑写在 workflow 里，不落成脚本"。两边走样
+  # 的后果由三道守卫兜住：这一片的"档位自检"、聚合那步的"合成条数 == STATIC_CHECKS"、
+  # 以及聚合那步的"任一片红就是红"。
+  static-exclusive:
+    name: 静态门禁（独占那一片）
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    env:
+      GATE_PROFILE: none
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先核对档位再动手装 —— `ci.py` 那边改了 `ISOLATED_STATIC`/独占名单而这里没跟上，
+      # 就会变成"少装了包"→ 一条**假红**。宁可在这里失败。
+      - name: 档位自检
+        run: |
+          want=$(python3 tools/ci.py --shard-profile "1/$GATE_SHARDS")
+          echo "ci.py 说这一片要: $want  这里写的是: $GATE_PROFILE"
+          if [ "$want" != "$GATE_PROFILE" ]; then
+            echo "::error::档位对不上 —— 不猜。改 ci.py 或改这里的 GATE_PROFILE，两边要一致"
+            exit 1
+          fi
+
+      - name: 装工具链（full）
+        timeout-minutes: 10
+        if: ${{ env.GATE_PROFILE == 'full' }}
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo apt-get -o Acquire::Retries=3 install -y -qq \
+            qemu-system-x86 qemu-user \
+            golang-go default-jdk \
+            nodejs npm vim
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
+            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
+              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
+            fi
+          done
+          clang --version | head -1
+
+      - name: 装工具链（只要 clang）
+        timeout-minutes: 10
+        if: ${{ env.GATE_PROFILE == 'llvm' }}
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
+            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
+              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
+            fi
+          done
+          clang --version | head -1
+
+      - name: 环境自述
+        run: |
+          echo "runner: $(uname -a)"
+          echo "python: $(python3 -V)"
+          echo "cpu: $(nproc)"
+          for t in clang llvm-objdump qemu-system-x86_64 go java javac node npm vim \
+                   python3 git sh; do
+            printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
+          done
+
+      - name: 跑这一片
+        run: |
+          python3 tools/ci.py --shard-plan "$GATE_SHARDS" | sed -n "1p"
+          python3 tools/ci.py --static-only --shard "1/$GATE_SHARDS" > gate.out 2>&1 || true
+          echo "--- 尾 30 行 ---"
+          tail -30 gate.out
+
+      - name: 汇总（这一片）
+        if: ${{ always() }}
+        run: |
+          set +e
+          pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
+          fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          echo "独占片: 绿 $pass / 红 $fail / 共 $((pass + fail))"
+          {
+            echo "## 静态门禁（独占那一片）—— 测量"
+            echo ""
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（档位 $GATE_PROFILE）"
+            echo '```'
+            grep ':: \[static\]' gate.out || echo "（无）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 对照基线（这一片的新红，单跑确认）
+        if: ${{ always() }}
+        run: |
+          set +e
+          : > red.txt; : > base.txt; : > new_red.txt
+          : > confirmed.txt; : > flaked.txt
+          if [ ! -f .github/gate-baseline.txt ]; then
+            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
+            exit 1
+          fi
+          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
+          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
+          comm -13 base.txt red.txt > new_red.txt
+          while read -r name; do
+            [ -z "$name" ] && continue
+            echo "=== 新红复跑（单跑）: $name ==="
+            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
+            rc=$?
+            tail -4 "re_$name.log"
+            if [ $rc -eq 0 ]; then
+              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
+              echo "$name" >> flaked.txt
+            else
+              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
+              echo "$name" >> confirmed.txt
+            fi
+          done < new_red.txt
+          if [ -s confirmed.txt ]; then
+            echo "::error::门禁（独占片）：新红 $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+          echo "独占片: 没有新红"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: gate-log-1
+          path: |
+            gate.out
+            red.txt
+            base.txt
+            new_red.txt
+            confirmed.txt
+            flaked.txt
+            re_*.log
+          if-no-files-found: warn
+
   # **干活的那一半**：每一片是一个独立 runner，片内仍是 `-j 4`。
   #
   # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
   # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
   #
-  # `include:` 里那 6 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数、
-  # 档位）。**改分片形状要同时改 `ci.py` 和这里**，而"档位自检"那一步会让漏改的
+  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数、
+  # 档位），**不含片 1** —— 那是上面那个 job，这里用 `needs:` 与它串行。
+  # **改分片形状要同时改 `ci.py` 和这里**，而"档位自检"那一步会让漏改的
   # 那一片直接失败 —— 见文件头第四条边界。
   #
   # **6 这个数是量出来的**：5 片那一轮（run 38008195263）最重的是"均分"那两片之一
@@ -171,12 +323,15 @@ jobs:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    # `always()`：独占那片红了**也要**把其余五片跑完。`needs` 的默认行为是"依赖失败就
+    # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"—— 门禁红的时候最不缺的就是
+    # 少看见几条。独占那片与这里并行**不会**踩到共享位置：它是**先跑完**的那一个。
+    if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    needs: [static-exclusive]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { shard: 1, total: 6, profile: none }
           - { shard: 2, total: 6, profile: llvm }
           - { shard: 3, total: 6, profile: llvm }
           - { shard: 4, total: 6, profile: full }
@@ -471,7 +626,7 @@ jobs:
   # （新红单跑已经在各片里做完了 —— 只有那边有工具链）。
   static:
     name: ci.py --static-only
-    needs: [static-shard]
+    needs: [static-exclusive, static-shard]
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -562,9 +717,9 @@ jobs:
       # 分片那边红了，这一道必须**跟着红**。`needs` 的默认行为是"依赖失败就跳过"，
       # 而跳过**不算失败** —— 保护规则会当成"还没报"而永远等下去。所以这里显式看结果。
       - name: 分片有红就是红
-        if: ${{ needs.static-shard.result != 'success' }}
+        if: ${{ needs.static-exclusive.result != 'success' || needs.static-shard.result != 'success' }}
         run: |
-          echo "::error::分片 job 结果 = ${{ needs.static-shard.result }} —— 门禁不通过"
+          echo "::error::独占片 = ${{ needs.static-exclusive.result }}，分片 = ${{ needs.static-shard.result }} —— 门禁不通过"
           exit 1
 
       - uses: actions/upload-artifact@v4
