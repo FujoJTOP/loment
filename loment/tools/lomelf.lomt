@@ -34,7 +34,7 @@ const PE_DATA_RVA: u32 = 0x2000000;
 const PE_STATE_RVA: u32 = 0x3000000;
 const PE_SEC_ALIGN: u32 = 0x1000;
 const PE_FILE_ALIGN: u32 = 0x200;
-const PE_WS_SIZE: u32 = 1067616;   // 与参考实现的 WS_SIZE 对齐（联网加了 WSADATA + 暂存）
+const PE_WS_SIZE: u32 = 1069192;   // 与参考实现的 WS_SIZE 对齐（再加 `poll` 的三个 fd_set）
 const PE_IMPORT_DESC: u32 = 60;    // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
                                    // （kernel32 + ws2_32 ⇒ 两条描述符；写死 40 会让
                                    //   镜像的 PE 与参考差这一格 —— 判据当场抓）
@@ -125,20 +125,29 @@ const G_ZERO: u32 = 28;
 // 每张表的**容量**单独一个常量: ① 表满时要报错（下面各 `*_add` 的守卫）; ②
 // `loment_genesis_test::test_seed_fits_lomelf_table_caps` 按它数种子 —— **不另抄一份数**,
 // 与 `IN_CAP` / `test_m85_codegen_table_capacity` 同一条纪律。
-const TB_LBL_MAX: u32 = 16384;     // 标签表条数
+// ---- 2026-10-10: 标签表从 16384 抬到 32768（`docs/200` 记的那条墙的下一次）
+//
+// 同一个病第三次: 种子又长过了一格。这次撞标签表时**余量只剩 9**（并 main 之后
+// 16375/16384）—— 任何一笔让自举编译器自己多出两位数的基本块/字符串全局的改动都会
+// 顶破它（实测: 给入口发一个 `"stackrealign"` 属性就多 3 个全局 + 9 个基本块, 当场
+// 16387）。抬法同前: **整条表区往后挪** `24 × 16384 = 393216`（`TB_FIX` 及其后的
+// `TB_SLOT` / `TB_ALLOC` / `TB_ARG` / `TB_PHI` / `TB_IDATA` / `TB_EXT` / `TB_OBJ` /
+// `TB_FREL` 一起移), 表尾从 2244360 涨到 2637576 —— 仍在 4 MiB 表区内, 所以
+// `M_OBJ` / `ARENA` 这次**不用动**。
+const TB_LBL_MAX: u32 = 32768;     // 标签表条数
 const TB_FIX_MAX: u32 = 32768;     // 回填表条数
 const TB_SLOT_MAX: u32 = 32768;    // 槽表条数（每函数清）
 const TB_ALLOC_MAX: u32 = 8192;    // alloca 表条数（每函数清）
 const TB_PHI_MAX: u32 = 512;       // phi 表条数（每函数清）
 
-const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 16384: (函数名, 块名, 地址)
+const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 32768: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
 const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
 const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 524544;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
+const TB_FIX: u32 = 917760;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
@@ -146,38 +155,38 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 1442048;       // 槽表 stride 16 × 32768 (每函数清)
+const TB_SLOT: u32 = 1835264;       // 槽表 stride 16 × 32768 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 1966336;     // alloca 表 stride 16 × 8192 (每函数清)
+const TB_ALLOC: u32 = 2359552;     // alloca 表 stride 16 × 8192 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 2097408;       // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 2490624;       // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 2097792;       // phi 表 stride 16 × 512 (每函数清)
-const TB_IDATA: u32 = 2105984;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
+const TB_PHI: u32 = 2491008;       // phi 表 stride 16 × 512 (每函数清)
+const TB_IDATA: u32 = 2499200;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
 const PH_ILEN: u32 = 12;
 
 // 外部函数表 (docs/173): `declare` 出来的符号名, 偏移指向**输入文本** (与标签表同基)。
-const TB_EXT: u32 = 2111488;       // stride 8 × 4096: (起点, 长度)
+const TB_EXT: u32 = 2504704;       // stride 8 × 4096: (起点, 长度)
 const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
 
 // 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
-const TB_OBJ: u32 = 2112288;       // stride 8 × 256
+const TB_OBJ: u32 = 2505504;       // stride 8 × 256
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
 
 // 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
 // —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
-const TB_FREL: u32 = 2113288;      // stride 32 × 4096
+const TB_FREL: u32 = 2506504;      // stride 32 × 4096
 const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
 const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
 const F2_OFF: u32 = 8;             // r_offset (节内偏移)
@@ -1962,6 +1971,9 @@ fn asm_code(t: ptr, s: u32, e: u32) -> u32 {
     if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 56 {
         return 6;                                   // r8
     }
+    if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 57 {
+        return 7;                                   // r9（Linux 第 6 个实参，syscall7 用满）
+    }
     return 0;
 }
 
@@ -1980,6 +1992,9 @@ fn asm_reg(code: u32) -> u32 {
     }
     if code == 5 {
         return 10;
+    }
+    if code == 7 {
+        return 9;                               // r9
     }
     return 8;
 }
@@ -2041,7 +2056,7 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
     let d: u32 = c;
     // rax 最后写, 其余先写
     let code: u32 = 2;
-    while code <= 6 {
+    while code <= 7 {
         let q: u32 = 0;
         while q < nargs {
             if arg_code(t, p3, p4, q) == code {

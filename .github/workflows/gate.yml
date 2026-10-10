@@ -8,22 +8,24 @@
 # 2026-09-24 复核时那个状态已经过去了：基线收到 8 条，保护规则里已经挂上这个 job。
 #
 # 所以判据不是"全绿"而是**"不新增红"**：基线（`.github/gate-baseline.txt`，**实测**
-# 出来的那份清单）上的红不判失败，**清单之外的**红判失败。这就是"必需检查"能挂上来
-# 而不变成噪音的原因。两处细节（各片与 `static` 里各有一半，别搬走）:
+# 出来的那份清单）上的红不判失败，**清单之外的**红判失败。两处细节（各片与 `static` 里
+# 各有一半，别搬走）:
 #   * **新红先单跑一遍再判**：并行轮里的红有一部分只是撞上了别的套件在写同一棵树
 #     （`CONTRIBUTING.md` 记过）。单跑还是红才算数 —— 误报的门会被人忽略。
 #   * **基线只许变短**：哪一条修好了就在同一个 PR 里删掉它，否则 summary 会一直提醒。
 #
-# ## 为什么拆成 N 片（2026-10-09, docs/213）
+# ## 它长成现在这样，是两轮实测的结果（docs/213）
 #
-# 实测那一轮（run 36209626967）整道门禁 **20m10s**：装工具链 95s + 判据 18m27s。
-# 64 条合计 2036s，`-j 4` 下墙钟 1107s —— 并行是有效的，**但墙钟被一条判据钉死**：
-# `loment_dist_test` 一条 **954s**，占墙钟 58%。它自己 3/4 的时间花在"用 stage1 重编
-# 自举驱动"上（纯 Python `lomelf` 链出来的 stage1 是无优化的，而 Python 参考实现
-# 做同一件事只要 2.5s），**而那是同一件事的第二遍** —— `loment_seed_test` 已经用
-# 便宜得多的方式（clang 编的 stage1）付过账。那一步拿掉之后（`ci.py:SEED_TOOL`），
-# 剩下的工作量在 4 路上摊不开，于是按实测耗时切成 N 片：
-# **片是并行 job，片内仍是 `-j 4`**，墙钟从"最慢那条"降到"最重那片"。
+# 第一轮（2026-10-09）：整道门禁 **20m10s**，而墙钟被**一条判据里的一步**钉死 ——
+# `loment_dist_test` 一条 954s，其中 3/4 花在"用 stage1 重编自举驱动"上，而那是
+# **同一件事的第二遍**（`loment_seed_test` 已经用便宜得多的方式付过账）。拿掉它之后
+# 按实测耗时切成 N 片：**片是并行 job，片内仍是 `-j 4`**。→ **5m15s**。
+#
+# 第二轮（2026-10-10）：剩下最重那一片的墙钟里，**装工具链占了 95s**（apt 55s +
+# LLVM 19 35s），而那是"同一份东西装 N 遍"。于是把工具链做成**镜像**
+# （`.github/ci/Dockerfile`，由 `ci-image.yml` 构建推送），各 job 只拉它，**一次 apt
+# 都不跑**。顺带把"apt 在镜像上抽风"的暴露面也一起消掉 —— 抽风那次发生在**构建**里，
+# 不占任何人的墙钟。
 #
 # 分片表**不在这个文件里**：`python tools/ci.py --shard-plan N` 打印它，而它是把
 # `STATIC_CHECKS` 全表切出来的**划分**（覆盖是构造性的，见 `ci.py:shards`）。
@@ -40,7 +42,7 @@
 #   2)~4) 都走 `static-manual` 那个 job（它**不**叫 `ci.py --static-only`）：它们是手工
 #   诊断，不该顶替 PR 上那道门，也不该被摊进分片（分片的前提是"跑全部"）。
 #
-# ## 四条边界（都来自仓库自己的纪律）
+# ## 五条边界（都来自仓库自己的纪律）
 #
 #   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
 #     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
@@ -49,9 +51,11 @@
 #     分片之后真正干活的是 `static-shard`（矩阵，名字带 `(K/N)` 后缀），
 #     所以那一名必须由 `static` 扛着 —— 名字一没，保护规则就永远等不到它，
 #     PR 会**全部**卡住（而不是松开）。
-#   * **片号与档位是 `ci.py` 说了算**（`--shard-profile K/N`）。矩阵里那份
-#     `include:` 只是它的**副本**，而那一片自己会**当场核对**（"档位自检"那一步）。
-#     对不上就失败，不猜 —— 少装一个包会变成一条假红，那比慢几分钟糟得多。
+#   * **镜像的 tag 在两处**：这里各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+#     改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的**唯一**动作。
+#   * **容器里的包不许随手改**：名单的来路与两条纪律写在 `.github/ci/Dockerfile` 里
+#     （少一个包 = 一条假红；**不加** `rustc`/`dotnet`/`nvim`，因为那几条判据的 SKIP
+#     已经写进基线，加进来是改覆盖面而不是改进）。改完跑一遍门禁，看 `环境自述`。
 
 name: gate
 
@@ -82,25 +86,49 @@ permissions:
 #: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
 env:
   GATE_SHARDS: "6"
+  #: **容器里的 git 要靠这一条才肯干活。** 工作区是 runner 的用户 checkout 的（UID 不是
+  #: 容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` / `rev-parse` /
+  #: `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。2026-10-10 换上
+  #: 容器那次实测：`loment_eol` 报"不是 git 工作树"、`loment_src` 报"git ls-files 失败"、
+  #: `loment_publish` 把 git 的提示原文打了出来，连 `loment_seed_test` 的 gitattributes
+  #: 那条也一起红。
+  #:
+  #: 用 **git 自己的环境变量入口**注入（`GIT_CONFIG_COUNT` 那一族等价于 `git -c`），
+  #: 于是不必在每个 job 里各写一遍 `git config --add safe.directory`。
+  #:
+  #: 值取 `*` 而**不是** `${{ github.workspace }}`：那个 context 是**宿主**的路径
+  #: （`/home/runner/work/loment/loment`），而容器里看到的同一棵树在 `/__w/loment/loment`
+  #: —— git 自己的提示原文打的就是后者。路径写死就**静默打不中**，这一类"看着配上了、
+  #: 其实没配上"最费时间。CI 容器里只有我们自己这一棵树，`*` 不多放行任何东西。
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "safe.directory"
+  GIT_CONFIG_VALUE_0: "*"
+
+#: **容器里 `run:` 的默认 shell 是 `sh`（dash），不是 runner 上的 bash。** 这不是小事：
+#: 2026-10-10 实测，`static-manual` 那条"单跑套件"里的 `read -ra parts <<< "..."` 在容器
+#: 里直接 `Syntax error: redirection unexpected`（`<<<` 是 bash 的 herestring）。各分片
+#: 那几条恰好都只用了 POSIX 写法所以没炸 —— 那是**运气**，不是设计。统一声明成 bash：
+#: 镜像里有 bash，而门禁里这些汇总/比对的脚本本来就是在 bash 下写的。
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
   #
   # **为什么要有这个 job**: 那一条把机制描述成"自动检测并关闭"，而 2026-09-22 查过 ——
-  # 仓里此前**没有任何东西**做这件事（`origin/main` 上只有这一个 workflow，`/rulesets`
-  # 返回空，branch protection 里没有路径规则也没有必需检查）。一条写在文档里、没有
-  # 实现的规矩，是最坏的一种：它让**外面**的贡献者以为会被拦下，实际不会。
-  # 这个 job 就是那句话可验证的那一半 —— **检测**。剩下的一半（关闭 PR、三次禁言）
-  # 需要仓库设置或一个 org 级 App，不是这个文件能单方面做到的，所以 CONTRIBUTING
-  # 的措辞也改成说实话。
+  # 仓里此前**没有任何东西**做这件事。一条写在文档里、没有实现的规矩，是最坏的一种：
+  # 它让**外面**的贡献者以为会被拦下，实际不会。这个 job 就是那句话可验证的那一半 ——
+  # **检测**。剩下的一半（关闭 PR、三次禁言）需要仓库设置或一个 org 级 App，
+  # 不是这个文件能单方面做到的，所以 CONTRIBUTING 的措辞也改成说实话。
   #
   # **为什么不 checkout**: 这个 job 骑在**别人的**补丁上跑，而它要的只是一串**文件名**。
   # 一个字节都不取进工作区，就没有"未审代码被执行"的面。也正因如此它**不需要**
   # `pull_request_target`（那个事件为了拿写权限会带来真实的注入风险）—— 只读 token
   # 就够读文件列表。
   #
-  # **它为什么不进分片**：它一个字节都不从树里取，跑 5 秒，也不碰任何共享位置。
-  # 摊进分片只会让它跟着某一片一起排队。
+  # **它为什么不进分片、也不进容器**：它一个字节都不从树里取，跑 5 秒，只要 `gh` 与
+  # `jq`（runner 上现成）。摊进分片只会让它跟着某一片排队。
   lom-door:
     name: lom/ 禁区
     runs-on: ubuntu-latest
@@ -169,69 +197,34 @@ jobs:
   #
   # **它的步骤与 `static-shard` 是同一套**（只差矩阵那几行），改一边要改两边。没有抽成
   # composite action 是因为门禁自己的纪律："逻辑写在 workflow 里，不落成脚本"。两边走样
-  # 的后果由三道守卫兜住：这一片的"档位自检"、聚合那步的"合成条数 == STATIC_CHECKS"、
-  # 以及聚合那步的"任一片红就是红"。
+  # 的后果由两道守卫兜住：聚合那步的"合成条数 == STATIC_CHECKS"，以及"任一片红就是红"。
   static-exclusive:
     name: 静态门禁（独占那一片）
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
-    env:
-      GATE_PROFILE: none
+    # **它故意不拉镜像。** 这一片（现在只有 `lompi_sync`）一条外部命令都不碰，而要命的是
+    # 它**串在其余五片前面**（`needs:`，独占那条保证要的）：拉镜像那 ~60s 会变成
+    # **整道门禁的前置等待**。2026-10-10 实测过一次：加了容器之后这一片 8s → 62s，
+    # 而它带来的净收益（各片把 95s 的 apt 换成 ~55s 的拉取）一共才四十来秒
+    # —— 于是总墙钟从 5m13s 变成 **5m38s**，白改。
+    #
+    # 所以这一片留在 runner 上：要的东西它本来就有（python3 + git），而 `git`
+    # 在 runner 上也不会有容器那套 "dubious ownership"。**它的成员必须保持
+    # "一条外部命令都不碰"** —— 哪天往 `EXCLUSIVE_STATIC` 里加一条要用工具链的，
+    # 它在这里会直接因为缺命令而红（那是能看见的，不是静默）。
     steps:
       - uses: actions/checkout@v4
 
-      # 先核对档位再动手装 —— `ci.py` 那边改了 `ISOLATED_STATIC`/独占名单而这里没跟上，
-      # 就会变成"少装了包"→ 一条**假红**。宁可在这里失败。
-      - name: 档位自检
-        run: |
-          want=$(python3 tools/ci.py --shard-profile "1/$GATE_SHARDS")
-          echo "ci.py 说这一片要: $want  这里写的是: $GATE_PROFILE"
-          if [ "$want" != "$GATE_PROFILE" ]; then
-            echo "::error::档位对不上 —— 不猜。改 ci.py 或改这里的 GATE_PROFILE，两边要一致"
-            exit 1
-          fi
-
-      - name: 装工具链（full）
-        timeout-minutes: 10
-        if: ${{ env.GATE_PROFILE == 'full' }}
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get -o Acquire::Retries=3 install -y -qq \
-            qemu-system-x86 qemu-user \
-            golang-go default-jdk \
-            nodejs npm vim
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
-          done
-          clang --version | head -1
-
-      - name: 装工具链（只要 clang）
-        timeout-minutes: 10
-        if: ${{ env.GATE_PROFILE == 'llvm' }}
-        run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
-          done
-          clang --version | head -1
-
+      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是**这一台**上缺了那个命令。
+      # 这一片跑在 **runner** 上（不拉镜像，见上面那段），所以这里列的就是 runner 自带的
+      # 那几件；其余分片的自述在它们各自的 job 里（列的是镜像里的，clang 那行会是 19）。
       - name: 环境自述
         run: |
           echo "runner: $(uname -a)"
           echo "python: $(python3 -V)"
           echo "cpu: $(nproc)"
-          for t in clang llvm-objdump qemu-system-x86_64 go java javac node npm vim \
-                   python3 git sh; do
+          for t in python3 git gh sh make; do
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 
@@ -252,7 +245,7 @@ jobs:
           {
             echo "## 静态门禁（独占那一片）—— 测量"
             echo ""
-            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（档位 $GATE_PROFILE）"
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
             echo '```'
             grep ':: \[static\]' gate.out || echo "（无）"
             echo '```'
@@ -310,116 +303,46 @@ jobs:
   # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
   # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
   #
-  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数、
-  # 档位），**不含片 1** —— 那是上面那个 job，这里用 `needs:` 与它串行。
-  # **改分片形状要同时改 `ci.py` 和这里**，而"档位自检"那一步会让漏改的
-  # 那一片直接失败 —— 见文件头第四条边界。
+  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数），
+  # **不含片 1** —— 那是上面那个 job，这里用 `needs:` 与它串行。
+  # **改分片形状要同时改 `ci.py` 和这里**。
   #
   # **6 这个数是量出来的**：5 片那一轮（run 38008195263）最重的是"均分"那两片之一
   # （301s = 装工具链 95s + 30 条判据的和 294s），而长尾那两片各自只要 180s / 202s。
-  # 把均分的那两片再对半切，最重片就落到 seed 那片的地板上（~207s）—— 再往上加片
-  # 只会重复付装工具链的钱，墙钟不动（它的下限是"最长的那条判据 + 那片的工具链"）。
+  # 把均分的那两片再对半切，最重片就落到 seed 那片的地板上 —— 再往上加片只会让更多片
+  # 各自付一次"起步"的钱，墙钟不动（它的下限是"最长的那条判据 + 起身那一段"）。
   static-shard:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # `always()`：独占那片红了**也要**把其余五片跑完。`needs` 的默认行为是"依赖失败就
-    # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"—— 门禁红的时候最不缺的就是
-    # 少看见几条。独占那片与这里并行**不会**踩到共享位置：它是**先跑完**的那一个。
+    # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"。独占那片与这里并行**不会**踩到
+    # 共享位置：它是**先跑完**的那一个。
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     needs: [static-exclusive]
+    container:
+      image: ghcr.io/fujojtop/loment-ci:3
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { shard: 2, total: 6, profile: llvm }
-          - { shard: 3, total: 6, profile: llvm }
-          - { shard: 4, total: 6, profile: full }
-          - { shard: 5, total: 6, profile: full }
-          - { shard: 6, total: 6, profile: full }
+          - { shard: 2, total: 6 }
+          - { shard: 3, total: 6 }
+          - { shard: 4, total: 6 }
+          - { shard: 5, total: 6 }
+          - { shard: 6, total: 6 }
     steps:
       - uses: actions/checkout@v4
 
-      # 先核对档位再动手装 —— 矩阵里那格是**手抄**的，抄错（或 `ci.py` 那边的
-      # `ISOLATED_STATIC` 改了）会变成"少装了包"→ 一条**假红**。宁可在这里失败。
-      - name: 档位自检
-        run: |
-          want=$(python3 tools/ci.py --shard-profile "${{ matrix.shard }}/${{ matrix.total }}")
-          echo "ci.py 说这一片要: $want  矩阵里写的是: ${{ matrix.profile }}"
-          if [ "$want" != "${{ matrix.profile }}" ]; then
-            echo "::error::档位对不上 —— 不猜。改 ci.py 或改这里的 include:，两边要一致"
-            exit 1
-          fi
-
-      # 装门禁要的外部命令。名单是实测出来的
-      # （`grep -rho 'which("...")' tools/*.py`）: clang 45 处，还有
-      # llvm-objdump/nm/ar、qemu-system-x86_64/qemu-aarch64、rustc、java、go、vim、node。
-      # 第一轮的环境自述证明**命令清单**已经够（只缺不需要的 nvim）—— 但**版本**不够:
-      # 见下面 LLVM 那一段。
-      #
-      # **按档位装**：`full` 那几片什么都可能用上；`llvm` 那两片是 `ISOLATED_STATIC`
-      # 独占的（`loment_seed_test` / `loment_p8_test`），逐条看过只用 clang；`none`
-      # 那片一条外部命令都不碰，什么都不装。省下的是**最重那两片**的等待 ——
-      # 它们本来就要跑 200s+，不该再为 qemu/jdk/go 干等几十秒。
-      #
-      # **片与片各装一份**是故意的：装的是**系统**包，没法在 job 之间传（artifact 只能
-      # 传文件，铺不进 /usr）。收益是各片的安装**并行**发生 —— 95s 不再乘 N。
-      #
-      # **加上限与重试**（2026-10-10 实测过一次 apt 抽风）：正常 95s，而有一轮
-      # `apt-get` 在镜像上卡了 **10 分钟**没动静 —— 分片把它复制的次数乘了 N 倍，
-      # 所以这里必须有个"卡住就快点失败"的界，而不是靠 job 那个 60 分钟的上限兜着
-      # （那正是"门禁太慢"最坏的形状：什么都没在跑，但 PR 就是不动）。抽风了重跑一次
-      # 就好 —— 重试是外层的，不是这里悄悄放行。
-      - name: 装工具链（full）
-        timeout-minutes: 10
-        if: ${{ matrix.profile == 'full' }}
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get -o Acquire::Retries=3 install -y -qq \
-            qemu-system-x86 qemu-user \
-            golang-go default-jdk \
-            nodejs npm vim
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          # 让不带版本号的名字指向 19（/usr/local/bin 在 PATH 里排在 /usr/bin 前面）。
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
-          done
-          clang --version | head -1
-          llvm-objdump --version | head -1
-
-      # `llvm` 档：只要 clang。仓里发出的 IR 用 `#dbg_declare` —— 那是 **LLVM 19**
-      # 起的调试记录语法，而 ubuntu-24.04 自带的 clang 是 **18**（本机能过是因为本机
-      # LLVM 是 22）。版本下限写在 CONTRIBUTING「Getting a toolchain」。
-      - name: 装工具链（只要 clang）
-        timeout-minutes: 10
-        if: ${{ matrix.profile == 'llvm' }}
-        run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
-          done
-          clang --version | head -1
-
-      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是这个 runner 上没有那个命令。
-      # 按档位装的片里，用不上的工具**预期是"缺"** —— 那一列不是红，是这一片的形状。
       - name: 环境自述
         run: |
           echo "runner: $(uname -a)"
           echo "python: $(python3 -V)"
           echo "cpu: $(nproc)"
           echo "clang: $(clang --version | head -1)"
-          echo "llvm-objdump: $(llvm-objdump --version | head -1)"
           for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
                    qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
-                   python3 git sh; do
+                   python3 git gh sh make; do
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 
@@ -444,7 +367,7 @@ jobs:
           {
             echo "## 静态门禁 ${{ matrix.shard }}/${{ matrix.total }} —— 测量"
             echo ""
-            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链档位 ${{ matrix.profile }}）"
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
             echo ""
             echo "### 红项"
             echo '```'
@@ -460,8 +383,8 @@ jobs:
       # 门那一半：**只对"基线之外的红"报红**，而且**先单跑一遍再判**。
       #
       # **单跑放在**这里**（而不是最后那个汇总 job）是有原因的**：单跑一次要**真的跑**
-      # 那条判据，也就需要这一片的工具链。汇总 job 特意不装任何东西（它是最后一道，
-      # 装了就是纯加墙钟），所以那里只汇总结果、不再动手跑。
+      # 那条判据，也就需要这一片的环境。汇总 job 只用 runner 上的 shell 与 `cat`，
+      # 所以那里只汇总结果、不再动手跑。
       - name: 对照基线（这一片的新红，单跑确认）
         if: ${{ always() }}
         run: |
@@ -517,26 +440,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
+    container:
+      image: ghcr.io/fujojtop/loment-ci:3
     steps:
       - uses: actions/checkout@v4
-
-      - name: 装工具链
-        timeout-minutes: 10
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get -o Acquire::Retries=3 install -y -qq \
-            qemu-system-x86 qemu-user \
-            golang-go default-jdk \
-            nodejs npm vim
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
-          done
-          clang --version | head -1
 
       - name: 环境自述
         run: |
@@ -546,7 +453,7 @@ jobs:
           echo "clang: $(clang --version | head -1)"
           for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
                    qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
-                   python3 git sh; do
+                   python3 git gh sh make gdb; do
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 
@@ -586,6 +493,7 @@ jobs:
       # 用法 4: 定向探针 —— 三条套件里的自举孪生二进制在 runner 上段错误（rc=-11），
       # 而本机（WSL，也是 Linux）全绿。这类事猜不出来，只能在 runner 上直接看。
       # **写死的固定步骤**，不做"任意命令"输入（这是公开仓）。
+      # `gdb` 在镜像里（原来这一步会现装一次 —— 那也是"每次跑都装"的一种）。
       - name: 探针 —— 孪生二进制的段错误
         if: ${{ github.event.inputs.diagnose_twin == 'true' }}
         run: |
@@ -600,12 +508,11 @@ jobs:
           timeout 600 python3 tools/potato_test.py 2>&1 | tail -8
           echo
           echo "### 段错误地址（dmesg 那一行还带着出错指令的 ip）"
-          sudo dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -4 \
-            || echo "（dmesg 拿不到：kernel.dmesg_restrict）"
+          dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -4 \
+            || echo "（dmesg 拿不到：容器里没有内核环缓冲的读权限）"
           echo
           echo "### gdb 跟着子进程抓现场：出错指令 + 周围的指令 + 寄存器里的坏地址"
           echo "### （固定 ip 说明同一个代码点拿到坏参数；rdi/rsi 就是那个参数）"
-          sudo apt-get install -y -qq gdb
           timeout 900 gdb -batch -q \
             -ex "set follow-fork-mode child" \
             -ex "set detach-on-fork off" \
@@ -622,8 +529,8 @@ jobs:
   #      各片单独算是错的：别的片跑到绿的那几条，在它眼里全都"不在我这一轮的红里"，
   #      会被误报成"已经绿了"。
   #   2. 一句话报出全貌（绿/红/新红/假红/过期基线）。
-  # **特意不装工具链**：它是最后一道，装了就是纯加墙钟，而它不需要跑任何判据
-  # （新红单跑已经在各片里做完了 —— 只有那边有工具链）。
+  # **它不拉镜像**：它只用 runner 上的 `cat`/`grep`/`sort`/`python3` 数一遍条数，
+  # 拉一个 1GB 的镜像只为这个就是纯加墙钟。
   static:
     name: ci.py --static-only
     needs: [static-exclusive, static-shard]
