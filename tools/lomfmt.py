@@ -37,7 +37,9 @@ TOP_KW = {"module", "use", "capability", "const", "struct", "enum", "trait", "im
           # `comefor` / `byuse` 是**编译期的块级构造**，与 `set choose` 同形：
           # 不进这张表的话，`comefor let "x" to {` 会被揉进上一行、
           # `byuse "x" done` 也一样 —— 与当初 `choose` 漏掉时同一个症状。
-          "comefor", "byuse"}
+          "comefor", "byuse",
+          # `register`（docs/223 形态 A）是**顶层**声明，同理。
+          "register"}
 INDENT = "    "
 
 
