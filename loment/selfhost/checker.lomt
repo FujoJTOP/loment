@@ -3140,7 +3140,172 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             i = i + 1;
         }
     }
+    // ---- 最后一趟: 命令声明（`docs/223` 形态 B）。
+    // **单独一趟**：它只看两样东西（`loment_command` 的标签、`command_main` / `_start`
+    // 的存在），与上面那几趟的游标状态一件都不共用 —— 塞进主扫描反而要跟着它们的规则走。
+    o = chk_command(src, t, out, o, scr);
     return o / 8;
+}
+
+// ---------------------------------------------------------------- 命令声明 (docs/223)
+
+//: E024 命令声明不合法（形状 / 名字 / 撞官方名）、E025 两个进程入口、
+//: E026 `command_main` 与声明对不上。**与参考实现同一批码**（`tools/loment_diag.py`
+//: 的 RULES）—— 码集是判据比的那一样东西（`loment_rule_parity`）。
+const E_CMD_DECL: u32 = 24;
+const E_CMD_ENTRY: u32 = 25;
+const E_CMD_BODY: u32 = 26;
+
+/// 一段字节（不是 token）是否等于字面量 —— 名字已经剥掉引号抄进暂存了。
+fn cmd_span_is(src: ptr, p: u32, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    let q: u32 = 0;
+    while q < n {
+        if load8(src, p + q) != str_byte(s, q) {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// `loment` 官方的命令名（`docs/223` §3.3）—— **与参考实现的 `RESERVED_COMMANDS`
+/// 同一份表，两处一起改**。手抄的第二份必然漂，所以 `tools/loment_register_test.py`
+/// 有一条判据把两边逐条钉在 `loment commands` 打出来的那批上。
+fn cmd_reserved(src: ptr, p: u32, n: u32) -> bool {
+    if cmd_span_is(src, p, n, "about") { return true; }
+    if cmd_span_is(src, p, n, "build") { return true; }
+    if cmd_span_is(src, p, n, "builtins") { return true; }
+    if cmd_span_is(src, p, n, "caps") { return true; }
+    if cmd_span_is(src, p, n, "cat") { return true; }
+    if cmd_span_is(src, p, n, "check") { return true; }
+    if cmd_span_is(src, p, n, "cheat") { return true; }
+    if cmd_span_is(src, p, n, "codes") { return true; }
+    if cmd_span_is(src, p, n, "color") { return true; }
+    if cmd_span_is(src, p, n, "commands") { return true; }
+    if cmd_span_is(src, p, n, "count") { return true; }
+    if cmd_span_is(src, p, n, "doc") { return true; }
+    if cmd_span_is(src, p, n, "doctor") { return true; }
+    if cmd_span_is(src, p, n, "env") { return true; }
+    if cmd_span_is(src, p, n, "example") { return true; }
+    if cmd_span_is(src, p, n, "examples") { return true; }
+    if cmd_span_is(src, p, n, "explain") { return true; }
+    if cmd_span_is(src, p, n, "fmt") { return true; }
+    if cmd_span_is(src, p, n, "fns") { return true; }
+    if cmd_span_is(src, p, n, "grep") { return true; }
+    if cmd_span_is(src, p, n, "hash") { return true; }
+    if cmd_span_is(src, p, n, "help") { return true; }
+    if cmd_span_is(src, p, n, "ir") { return true; }
+    if cmd_span_is(src, p, n, "keywords") { return true; }
+    if cmd_span_is(src, p, n, "ls") { return true; }
+    if cmd_span_is(src, p, n, "lsp") { return true; }
+    if cmd_span_is(src, p, n, "new") { return true; }
+    if cmd_span_is(src, p, n, "run") { return true; }
+    if cmd_span_is(src, p, n, "skill") { return true; }
+    if cmd_span_is(src, p, n, "stat") { return true; }
+    if cmd_span_is(src, p, n, "syntax") { return true; }
+    if cmd_span_is(src, p, n, "todo") { return true; }
+    if cmd_span_is(src, p, n, "tokens") { return true; }
+    if cmd_span_is(src, p, n, "tools") { return true; }
+    if cmd_span_is(src, p, n, "tree") { return true; }
+    if cmd_span_is(src, p, n, "types") { return true; }
+    if cmd_span_is(src, p, n, "version") { return true; }
+    if cmd_span_is(src, p, n, "where") { return true; }
+    return false;
+}
+
+/// 命令名合不合法（`docs/223` §3.4）：只收 `[A-Za-z0-9_-]`、长度 1..64。
+/// 启动器按**文件名**找命令（`loment <名>` -> `loment-<名>`），所以带路径分隔符、
+/// 空格或非 ASCII 的名字拼不出一个可靠的路径。
+fn cmd_name_ok(src: ptr, p: u32, n: u32) -> bool {
+    if n == 0 || n > 64 {
+        return false;
+    }
+    let q: u32 = 0;
+    while q < n {
+        let c: u32 = load8(src, p + q);
+        let ok: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            || c == 45 || c == 95;
+        if !ok {
+            return false;
+        }
+        q = q + 1;
+    }
+    return true;
+}
+
+/// 入口签名是不是 `fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。
+/// 签名是**固定的**（不是用户可选的），所以逐 token 比就够 —— 再写一个小 parser 不值。
+fn cmd_main_sig_ok(src: ptr, t: ptr, itok: u32) -> bool {
+    let lp: u32 = itok + 1;
+    if !chk_tok_is(src, t, lp, "(") { return false; }
+    if chk_tok_kind(t, lp + 1) != 0 { return false; }        // 形参名
+    if !chk_tok_is(src, t, lp + 2, ":") { return false; }
+    if !chk_tok_is(src, t, lp + 3, "ptr") { return false; }
+    if !chk_tok_is(src, t, lp + 4, ",") { return false; }
+    if chk_tok_kind(t, lp + 5) != 0 { return false; }        // 形参名
+    if !chk_tok_is(src, t, lp + 6, ":") { return false; }
+    if !chk_tok_is(src, t, lp + 7, "u32") { return false; }
+    if !chk_tok_is(src, t, lp + 8, ")") { return false; }
+    if !chk_tok_is(src, t, lp + 9, "-") { return false; }
+    if !chk_tok_is(src, t, lp + 10, ">") { return false; }
+    return chk_tok_is(src, t, lp + 11, "u32");
+}
+
+/// 命令声明的三条检查。返回诊断缓冲的新偏移（`o` 进 `o` 出）。
+fn chk_command(src: ptr, t: ptr, out: ptr, o: u32, scr: ptr) -> u32 {
+    let pk: u64 = lex_cmd_label(src, t, scr);
+    let lt: u32 = (pk / 4294967296) as u32;      // 标签 token 下标 + 1
+    let nl: u32 = (pk % 4294967296) as u32;      // 名字长度（0 = 形状不对）
+    // `command_main` / `_start` 只认**顶层 `fn` 声明**那一处 —— 名字出现在调用点不算
+    // （参考实现查的是模块的函数表）。`fn` 在这里也是 ident token。
+    let cm: u32 = 0;
+    let st: u32 = 0;
+    let n: u32 = 0;
+    while load32(t, n * 20) != 4 {
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if i >= 1 && load32(t, i * 20) == 0 && load32(t, (i - 1) * 20) == 0
+                && chk_tok_is(src, t, i - 1, "fn") {
+            if cm == 0 && chk_tok_is(src, t, i, "command_main") { cm = i + 1; }
+            if st == 0 && chk_tok_is(src, t, i, "_start") { st = i + 1; }
+        }
+        i = i + 1;
+    }
+    // 1) 声明本身不合法：形状不对 / 名字不合法 / 撞官方名。
+    // 锚在**标签那一行**（参考实现也是报 command_lines 那一行）。
+    if lt > 0 {
+        // 名字已经抄进 `scr`（`lex_cmd_label` 剥了引号），所以这两条读的是**暂存**不是
+        // 源文件 —— 读源文件等于拿文件开头那几十个字节当名字（实测：`module m` 被当成
+        // 名字，于是"非法名字"漏报、合法名字反而报）。
+        if nl == 0 || !cmd_name_ok(scr, 0, nl) || cmd_reserved(scr, 0, nl) {
+            o = sym_pub(src, t, out, o, E_CMD_DECL, lt - 1);
+        }
+    }
+    // 2) `command_main` 却没有声明 —— 死代码（静默失效）。
+    if cm > 0 && lt == 0 {
+        o = sym_pub(src, t, out, o, E_CMD_BODY, cm - 1);
+    }
+    // 3) 两个入口 / 签名不对。**互斥**（与参考实现同顺序：有 `_start` 报入口冲突，
+    //    没 `_start` 才轮到签名）。
+    if cm > 0 {
+        if st > 0 {
+            o = sym_pub(src, t, out, o, E_CMD_ENTRY, cm - 1);
+        } else if !cmd_main_sig_ok(src, t, cm - 1) {
+            o = sym_pub(src, t, out, o, E_CMD_BODY, cm - 1);
+        }
+    }
+    // 4) 反向那一半：**声明了**却没有 `command_main` —— 工具链生成的 `_start` 要调它，
+    //    没有它就只能等到**链接**（未定义符号）才炸。码用同一个（两半少一半，修法都是
+    //    把两半凑齐）—— 与参考实现那一条逐字对齐。
+    if lt > 0 && cm == 0 {
+        o = sym_pub(src, t, out, o, E_CMD_BODY, lt - 1);
+    }
+    return o;
 }
 
 /// arena 一块里的分段布局 (驱动按这几个常量切片; 单位: 字节)。

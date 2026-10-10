@@ -667,6 +667,16 @@ fn pt_cnt_fn(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             if ft != PT_NONE {
                 its = ft + 1;
             }
+        } else if d == 0 && pt_tis(unit, t, i, "register")
+                && (pt_kind(t, i + 1) == 0 || pt_kind(t, i + 1) == 2)
+                && pt_tis(unit, t, i + 2, "{") {
+            // `register <名字> { <那个函数> }`（`docs/223` 形态 A）：那层壳是**透明的** ——
+            // 块里的函数在语义上就是顶层条目（参考实现按 AST 收，根本没有这一层）。
+            // 跳过 `register` 与名字，下一轮就落在 `{` 的**下一个** token 上，深度不动；
+            // 块的 `}` 落在 d == 0 上，被上面那条 `&& d > 0` 挡住，不会把深度打成负数。
+            // 块里**只允许一个函数**（形状那一关在 `lex_reg_one_fn`，两个实现同一份规则），
+            // 所以跳过壳就够了，不必为别的条目再开一条路。
+            i = i + 2;
         } else if pt_tis(unit, t, i, "fn") && (d == 0 || (d == 1 && its != PT_NONE)) {
             if d == 0 && pt_is_body_fn(unit, t, i + 1) == 0 {
                 // `extern fn` 不进 `functions`(参考实现收在 `mod.externs`)
@@ -2236,6 +2246,14 @@ fn pt_functions(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32, 
             if ft != PT_NONE {
                 its = ft + 1;
             }
+        } else if d == 0 && pt_tis(unit, t, i, "register")
+                && (pt_kind(t, i + 1) == 0 || pt_kind(t, i + 1) == 2)
+                && pt_tis(unit, t, i + 2, "{") {
+            // 与 `pt_cnt_fn` 那一处**同一条规则**：`register <名字> { <那个函数> }` 的壳
+            // 是透明的，跳过它让块里的函数按顶层收（`docs/223` 形态 A）。
+            // **两处必须一起改** —— 只改一处的话，条数与实际发出的条数对不上
+            // （`pt_aopen` 会按错的条数写数组头）。
+            i = i + 2;
         } else if pt_tis(unit, t, i, "fn")
                 && (d == 0 || (d == 1 && its != PT_NONE)) {
             let skip: u32 = 0;

@@ -312,7 +312,21 @@ case "${1:-help}" in
             exit 1
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
-        [ -n "$out" ] || out="${src%.lomt}"
+        if [ -z "$out" ]; then
+            # docs/223: a unit that registers a command (a `loment_command()` declaration)
+            # names its own artifact -- `loment-<name>`, which is exactly what the launcher's
+            # git-style lookup looks for (`loment foo` -> `loment-foo` on PATH). The name is
+            # asked out of the driver, which is the side that reads the declaration; keeping
+            # the rule here instead would be a second copy of it.
+            #
+            # One extra driver load per `build` with no `-o`. That is the price of naming the
+            # artifact from the source; `-o` skips the question entirely.
+            cname=$("$(tool loment-driver)" "$(to_posix "$src")" --print-command 2>/dev/null) || cname=
+            case "$cname" in
+                "") out="${src%.lomt}" ;;
+                *)  out="loment-$cname" ;;
+            esac
+        fi
         # Default: link with the self-hosted lomelf - the package needs no clang.
         # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
         # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
@@ -593,7 +607,18 @@ exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
 
-if "%out%"=="" set "out=%src:.lomt=%"
+rem docs/223: a unit that registers a command names its own artifact (`loment-<name>`),
+rem which is what the launcher's git-style lookup looks for. Ask the driver -- it reads the
+rem declaration. No answer (not a command) => the old rule, the source file's own name.
+if not "%out%"=="" goto have_out
+set "cname="
+for /f "delims=" %%A in ('"%here%loment-driver.exe" "%src%" --print-command 2^>nul') do if not defined cname set "cname=%%A"
+if not defined cname goto no_cname
+set "out=loment-%cname%"
+goto have_out
+:no_cname
+set "out=%src:.lomt=%"
+:have_out
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
