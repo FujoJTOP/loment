@@ -16,8 +16,7 @@
 module stat
 
 use "io.lomt"
-use numfmt
-use mem
+use std
 
 /// newfstatat 的系统调用号。
 pub const STAT_SYS_NEWFSTATAT: u64 = 262;
