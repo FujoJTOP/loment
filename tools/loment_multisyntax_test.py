@@ -912,6 +912,47 @@ def test_unrecognised_toplevel_content_is_reported():
     print("      顶层认不出的七种形状都报得出来；struct/enum 与注释里的 # 不误报")
 
 
+@test
+def test_front_door_refuses_when_the_transcribe_step_drops_something():
+    """**转写那一步丢的东西也要到用户面前**（既有 #74 的实质）。
+
+    `potato_from` 的 `Report.skipped` 与 `lomt_from.emit_lomt` 的 `skipped` 是两处：
+    前者是"**根本没进对象**"（顶层 `typedef` / 全局量 / `union` / 预处理指令 / K&R 函数），
+    后者是"进了对象但发不出来"。`front_door` 一直只看后者，把前者整个丢掉
+    （`doc, _rep = LANGS[lang](…)`）—— 于是这些东西**在编译器这条路上一个字都不说**，
+    而 `lomt_from.py` 那条 CLI 会打 `[skip]`。**两副面孔，而编译器那副是瞎的。**
+
+    这条同时钉住那个"假 skip"：Java / C# 的**类壳**（没有字段的类）原先无条件报一条
+    `无可用字段` —— 那不是丢东西，它只是方法的命名空间。不清掉它，"有 skip 就拒"
+    会把**每一份** Java / C# 语料都拒掉（实测：7 门语料里 6 份带这条假 skip）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for label, body in [("typedef", "typedef int myint;\nint main() { return 5; }\n"),
+                            ("include", "#include <stdio.h>\nint main() { return 5; }\n"),
+                            ("knr", "int f(a, b) int a; int b; { return a + b; }\n"),
+                            ("use", "use bytes\nint f() { return 1; }\n")]:
+            p = td / f"{label}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable:
+                pass
+            else:
+                raise AssertionError(f"{label}: 转写期丢了东西，前门却放过了")
+        # 反面一：干净的单元照过
+        good = td / "ok.lomt"
+        good.write_text("choose write grammar c\nint main() { return 5; }\n",
+                        encoding="utf-8", newline="\n")
+        assert potato_from.front_door(good).source
+        # 反面二：Java / C# 的**类壳**（无字段）不算丢
+        for name, src in (
+            ("java", "public class Sample {\n    public static int f() {\n        return 1;\n    }\n}\n"),
+            ("csharp", "class Sample {\n    static int F() {\n        return 1;\n    }\n}\n"),
+        ):
+            doc, rep = potato_from.LANGS[name](src, f"Sample.{name}", "strict")
+            assert not rep.skipped, f"{name}: 类壳被当成丢东西了 {rep.skipped}"
+    print("      转写期丢的东西前门会拒；类壳（无字段）不受影响")
 
 
 

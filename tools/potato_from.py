@@ -439,7 +439,11 @@ def _from_class_lang(src: str, name: str, mode: str,
             doc["types"].append({"name": cname, "fields": flds})
             known.add(cname)
             rep.ok += 1
-        else:
+        elif fields:
+            # **只有"本来有字段、一个都没映上"才算丢。** 一个**没有字段**的类不是丢东西 ——
+            # 它只是方法的命名空间，Java / C# 里到处都是这种壳。原先无条件报，
+            # 于是每一份 Java / C# 语料都带一条假的 `skip`（`无可用字段`），
+            # 而那正好挡住了"转写期的 skip 要报给用户"那一道（见 `front_door`）。
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
         for rty, mname, params, mem_raw, mem_off in methods:
@@ -1920,11 +1924,21 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     if _hit is not None:
         return _hit
     try:
-        doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+        doc, rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
     except front_errors(lang) as e:
         # 写法读不通 —— 与"翻不出来"一样响亮地拒，**不给一份少算一步的单元**
         # （见 `front_errors` 的注解）。
         raise lomt_from.NotRepresentable(f"{path}: 这份源读不通 —— {e}")
+    # **转写那一步丢的东西也要报**。`emit_lomt` 的 `skipped` 只管"发不出来"；
+    # 转写期丢的是**根本没进对象**的东西（顶层 `typedef` / 全局量 / `union` /
+    # 预处理指令 / K&R 函数 …）。这一条原先把报告整个丢掉（`_rep`），于是这些东西
+    # **在编译器这条路上一个字都不说** —— 而 `lomt_from.py` 那条路会打 `[skip]`。
+    # 同一条纪律：全有或全无，丢了就拒（`docs/167`"不静默丢"）。
+    if rep.skipped:
+        raise lomt_from.NotRepresentable(
+            f"{path}: 用 {lang} 写法写的单元里有 {len(rep.skipped)} 处转写不了"
+            f"（前 3 处：{[(x['name'], x['why']) for x in rep.skipped[:3]]}）—— "
+            f"那一门整份是全有或全无，丢了的部分不会悄悄跳过，这里直接拒")
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     if skipped:
         # **子集外的东西发不出来** —— 必须响亮，不能给一份"少算一步却照样能编"的单元。
