@@ -731,7 +731,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "8ada8e8aec087c73605e6fbbec5132204a8eaa4bb64e9fbb4a04cb002e4bd610"
+   "sha256": "f72049af046af3fa7b92da5b8a5430e5421a304725f6b680df8dfe9c05ac6fdb"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -819,7 +819,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "4e42a341e2893c370ab282643b045dcf7ba35afe894420408110a011fa1717f5"
+   "sha256": "e78bef75c5eb9e89b8eeced2719476662ca25fc69113acf9fc3ab825251002fe"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1559,7 +1559,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "9bf74348db668886e8aa9f8b9c63420e7e88eac2e5a050d718bd97d26325aa25"
+   "sha256": "66964f2930bae28322c5b41e2251b3b70be8788544f017b032e3bfe6858aff9c"
   },
   {
    "path": "loment/selfhost/interp.lomt",
