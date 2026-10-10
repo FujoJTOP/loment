@@ -161,10 +161,12 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...] [--opt]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-  loment run FILE [--opt]     compile, link and run
+                              --hosted: link against the host's real libraries (docs/222)
+  loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
+                              compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
@@ -263,6 +265,10 @@ case "${1:-help}" in
         nc=
         om=
         opt=
+        hosted=
+        Largs=
+        largs=
+        ccargs=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
@@ -272,6 +278,23 @@ case "${1:-help}" in
                 # the default path stays clang-free (`lomelf`), so the hermetic / offline build
                 # never grows a dependency on an optimizer being present.
                 --opt|-O2) opt=1; shift ;;
+                # Hosted (docs/222): the product is allowed to have open ports to the world, so
+                # it is linked by the host's C toolchain against the real libc and the real
+                # libraries you name. The entry becomes `main` (the C runtime starts us) and
+                # `-L` / `-l` name library directories and libraries. Sealed builds - the
+                # default - keep the self-hosted lomelf path, unchanged.
+                --hosted) hosted=1; shift ;;
+                # `-Ldir` and `-L dir` are both accepted, exactly as the C toolchains do.
+                -L) Largs="$Largs -L$(to_posix "${2:-}")"; shift 2 ;;
+                -L?*) Largs="$Largs -L$(to_posix "${1#-L}")"; shift ;;
+                -l) largs="$largs -l${2:-}"; shift 2 ;;
+                -l?*) largs="$largs -l${1#-l}"; shift ;;
+                # `--cc-arg X` hands X straight to the C toolchain. A real library brings its
+                # own link flags (`-Wl,-rpath,...` for libjvm, `-pthread`, ...) and this
+                # launcher must not grow a flag of its own for each of them. `--cc-arg=` is
+                # the one-word spelling.
+                --cc-arg) ccargs="$ccargs ${2:-}"; shift 2 ;;
+                --cc-arg=*) ccargs="$ccargs ${1#--cc-arg=}"; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
@@ -307,13 +330,43 @@ case "${1:-help}" in
         # Default: link with the self-hosted lomelf - the package needs no clang.
         # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
         # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
+        # `choose hosted` in the source is the SAME claim as the `--hosted` flag - the unit says
+        # so in the IR header (docs/222 sec 4.4), so the declaration alone is enough and the
+        # two spellings cannot silently disagree.
+        if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
+            hosted=1
+        fi
+        # Naming a host library is a claim that this product HAS ports to the world. In a
+        # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
+        # say it instead of silently dropping the flags (docs/222 sec 4.1).
+        if [ -z "$hosted" ] && { [ -n "$Largs" ] || [ -n "$largs" ] || [ -n "$ccargs" ]; }; then
+            echo "loment: -L / -l / --cc-arg need --hosted: a sealed product links no host library (docs/222)" >&2
+            exit 2
+        fi
         linkargs=
         objs=
         for l in "${links[@]}"; do
             linkargs="$linkargs --link $(to_posix "$l")"
             objs="$objs $(to_posix "$l")"
         done
-        if [ -n "$opt" ]; then
+        if [ -n "$hosted" ]; then
+            # ---- hosted (docs/222 sec 4): a C-runtime product with open ports to the world.
+            # The entry must be `main`, not `_start`: the host C runtime calls it, which is
+            # what gives us TLS/stdio/atexit init. Keeping `_start` here would bypass that
+            # init AND lose buffered output on a raw exit - a silent wrong, so refuse.
+            if ! grep -qE '^define .*@main\(' "$tmp/a.ll"; then
+                echo "loment: --hosted expects \`fn main() -> u32\` as the entry, but this unit defines no @main." >&2
+                echo "        Hosted products start under the C runtime; sealed ones start at _start (docs/222 sec 4.3)." >&2
+                exit 1
+            fi
+            cc=$(command -v clang 2>/dev/null || command -v cc 2>/dev/null || true)
+            if [ -z "$cc" ]; then
+                echo "loment: --hosted needs a C toolchain (clang or cc) to link against the host's libraries" >&2
+                exit 1
+            fi
+            # shellcheck disable=SC2086
+            "$cc" "$tmp/a.ll" $objs $ccargs $Largs $largs -o "$out" || exit 1
+        elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
                 # -O2 rewrites byte loops into memset/memcpy/memmove calls, and this runtime has
@@ -496,6 +549,11 @@ if /I "%~1"=="--out" goto barg_out
 if /I "%~1"=="--link" goto barg_link
 if /I "%~1"=="--opt" goto barg_opt
 if /I "%~1"=="-O2" goto barg_opt
+if /I "%~1"=="--hosted" goto barg_hosted
+if /I "%~1"=="-L" goto barg_hosted
+if /I "%~1"=="-l" goto barg_hosted
+set "bcs=%~1"
+if "%bcs:~0,9%"=="--cc-arg=" goto barg_hosted
 if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
@@ -538,6 +596,13 @@ goto barg_loop
 rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
 rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
 echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
+exit /b 2
+:barg_hosted
+rem Hosted linking (docs/222 sec 4) needs a PE-side path that does not exist yet: this launcher
+rem has no import-table handling and no C toolchain wiring. Refused **by name** - silently
+rem ignoring --hosted would link with lomelf and report "undefined label: compress", which
+rem points the user at the wrong problem entirely.
+echo loment: --hosted is not available on Windows yet (ELF only for now; docs/222 sec 7) 1>&2
 exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
@@ -632,10 +697,12 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...] [--opt]
+echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
 echo                               compile and link; --link adds a foreign object (FFI)
 echo                               --opt: optimize with clang -O2 (ELF only)
-echo   loment run FILE [--opt]     compile, link and run
+echo                               --hosted: link the host's real libraries (ELF only)
+echo   loment run FILE [--opt] [--hosted]
+echo                               compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio

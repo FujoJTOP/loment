@@ -51,7 +51,13 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 2026-10-10 `register`（`docs/223` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
 # 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
 # 函数那种写法**判成同一批码**，这正是"形态 A 编译到形态 B"要看见的东西。
-BUDGET = 86
+# 2026-10-10 `choose hosted`（`docs/222` §4，第四维 `port`）落地: **90/90**。四条 ——
+# 按维写两次、同维两个取值、`hosted` × `no_std`、`hosted` × `gc_auto_alpha`。
+# （`hosted` × `gc_manual` / `gc_auto` 是**合法档**，不进这张负例表，由 `potato_test`
+# 的 `v11-hosted-gc_manual` 合法样本守着。）
+# **这一条当场抓到一个真分歧**：冲突说明里写了"悬垂"两个字，撞上 E012 的关键词分类器 ——
+# 参考实现把那条冲突归成 E012、自举归成 E022。改写措辞之后两边一致。
+BUDGET = 90
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -197,6 +203,17 @@ _CASES: list[tuple[str, str]] = [
     # 我自己管" —— 它是合法档，**不该**报错。套件只收负例，所以这里放的是该报的
     # 那一对；合法的那一对由 `potato_test` 的 `v9-runtime-on` 合法样本守着。
     ("choose-no-runtime-gc-auto", "module m\n\nchoose no_runtime\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 第四维 `port`（`docs/222` §4）--------------------------------------
+    # 与前面三维同一套：按维一次、取值只有两个、与两个档**定义上矛盾**。
+    ("choose-port-twice", "module m\n\nchoose sealed\nchoose sealed\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-port-two-values", "module m\n\nchoose sealed\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # `no_std` 说"底下没有东西"、`hosted` 说"往下链东西" —— 定义上矛盾。
+    ("choose-hosted-no-std", "module m\n\nchoose no_std\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 混合档的 L2 是前沿回卷，而外部库把指针放进它自己的结构里（`docs/219` §6.1）。
+    ("choose-hosted-gc-alpha", "module m\n\nchoose hosted\nchoose gc_auto_alpha\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **有一条不冲突的配对必须记着**：`hosted` + `gc_manual` / `gc_auto` = "要对外、
+    # 但内存我自己管" —— 合法档，**不该**报错。这套件只收负例，所以合法的那一对由
+    # `potato_test` 的 `v11-hosted-gc_manual` 合法样本守着，这里不重复。
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：

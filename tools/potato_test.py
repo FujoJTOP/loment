@@ -111,7 +111,10 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v11"), "版本"),
+    # 版本串必须是**认得的**那几版之一；`v99` 不认得，所以这条测的是"认版本"本身。
+    # （2026-10-10 改：原先钉的是 `v11`，而 v11 从这次起是**合法**版本 —— 那条夹具
+    #  于是不再报"版本"，改报缺字段，测的就不是这条规则了。）
+    ("version", lambda d: d.__setitem__("potato", "v99"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -287,6 +290,35 @@ def fixture_v10() -> dict:
     d["potato"] = "v10"
     d["gc_ladder"] = {"l0": 1, "l1": 2, "l2": 3, "l3": 4, "total_sites": 10}
     return d
+
+
+def fixture_v11() -> dict:
+    """一份合法的 **v11** 形式对象: v10 的再 + v11 的 `port`（`docs/222` §4）。
+
+    与 `fixture_v7` … `fixture_v10` 同一个理由单独来一份：`port` 从 v11 起才合法 ——
+    拿 v10 去试只会得到"未知顶层字段"，校验器里那几条规则（两个取值、两条冲突）
+    **一条都碰不到**，那种绿是空转。
+    """
+    d = fixture_v10()
+    d["potato"] = "v11"
+    d["port"] = "sealed"
+    return d
+
+
+#: v11 的 `port` 那几条规则的反例（`docs/222` §4）。作用在 **v11** 的对象上。
+MUTATORS_V11 = [
+    ("port 缺这一项", lambda d: d.pop("port"), "port 必须是"),
+    ("port 取值拼错", lambda d: d.__setitem__("port", "hosted_nope"), "port 必须是"),
+    ("port 不是字符串", lambda d: d.__setitem__("port", 1), "port 必须是"),
+    # **两条冲突** —— 校验器独立判得了（两个取值都在对象里，不需要读源码）。
+    ("hosted + no_std", lambda d: (d.__setitem__("port", "hosted"),
+                                   d.__setitem__("mode", "no_std")), "不能同时选"),
+    ("hosted + gc_auto_alpha", lambda d: (d.__setitem__("port", "hosted"),
+                                          d.__setitem__("gc", "gc_auto_alpha")),
+     "不能同时选"),
+    # 反面：`hosted` **不**与 `gc_manual` / `gc_auto` 冲突 —— 这一条钉住"别把这一对也拒了"。
+    # 它**不该**报错，所以当合法样本（见 `_cases()`），不在这张反例表里。
+]
 
 
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
@@ -549,7 +581,7 @@ def _cases() -> list[tuple[str, dict]]:
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
-                                   ("v10", fixture_v10())]
+                                   ("v10", fixture_v10()), ("v11", fixture_v11())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -580,6 +612,16 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v10()
         mut(d)
         out.append((f"v10-{name}", d))
+    # v11 那一组（`port`）同理。
+    for name, mut, _ in MUTATORS_V11:
+        d = fixture_v11()
+        mut(d)
+        out.append((f"v11-{name}", d))
+    # **`hosted` + `gc_manual` 是合法档**（"要对外、但内存我自己管"）—— 必须**不报错**。
+    # 反例表只钉"该拒的要拒"，钉不住"不该拒的别拒"。
+    _okp = fixture_v11()
+    _okp["port"] = "hosted"
+    out.append(("v11-hosted-gc_manual", _okp))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

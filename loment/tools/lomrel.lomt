@@ -323,6 +323,7 @@ tools/loment_bootstrap.py
 tools/loment_capasserts_test.py
 tools/loment_eol_test.py
 tools/loment_ffi_test.py
+tools/loment_hosted_test.py
 tools/loment_i18n_test.py
 tools/loment_ports.py
 tools/loment_ports_test.py
