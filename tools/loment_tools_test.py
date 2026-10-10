@@ -159,7 +159,8 @@ def test_every_tool_is_in_the_release_manifest():
         f"这些被跟踪的 `tools/*.py` 不在 `loment_release.GLOBS` 里 —— 发布账本上"
         f"没有它们，于是它们变了也不会有人知道（`--check` 照样绿）：{missing}。"
         f"加进 GLOBS，并**与 `loment/tools/lomrel.lomt` 的 `globs_text()` 插入同一位置**"
-        f"（两份逐条同序，否则 `loment_rel_test` 红）。")
+        f"（两份逐条同序 —— `loment_rel_test::test_lomrel_globs_match_python_globs` "
+        f"纯 Python 逐条比这两份清单，缺项/失序当场红）。")
     assert not dead, (
         f"`loment_release.GLOBS` 里这些条目一个文件都匹配不到（陈旧条目）：{dead}")
     print(f"      发布清单覆盖：{len(have)} 个 tools/*.py 一件不少，{len(loment_release.GLOBS)} 条 glob 无空转")
