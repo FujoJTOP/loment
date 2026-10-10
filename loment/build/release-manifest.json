@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/lomt_from.py",
-   "sha256": "9be30d59100ee00886681cf645385af9a1daee29189a5492944e5f34a2b65871"
+   "sha256": "a27baaf6bd2b8981a07945768916dd5fc6f7f4ec618c44c88af2045710851d1c"
   },
   {
    "path": "tools/loment_multisyntax_test.py",
@@ -899,7 +899,7 @@
   },
   {
    "path": "tools/loment_lomtfrom_test.py",
-   "sha256": "aa70b92cc823aaa019c3df91cae43812086cc9a63e34a4fc48c1f701fa524460"
+   "sha256": "aa230ab2dff90469d1efbe76bef1d929d04acbb9b7c9d4f55d9f9469ee67433a"
   },
   {
    "path": "tools/loment_trans_test.py",
@@ -1283,7 +1283,7 @@
   },
   {
    "path": "loment/examples/multilang/README.md",
-   "sha256": "77b892ad4e6b6388bd7e4d9b41120d91771c0191280644c4230ea9782bcd9afa"
+   "sha256": "5816befeff1329f6add107ef98d6e3824d4a1df7043785d31f1ae466c8034185"
   },
   {
    "path": "loment/examples/cproject/bitkit.lomt",
