@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "92698e9c059e5bb009b819ca879192591af6eaa148352d2807f6452f878e6cfd"
+   "sha256": "6efe3bb2cc711e03c505b7d51d05a07ffe29823f996bf85ad41c50990f3660f9"
   },
   {
    "path": "tools/potato_measure.py",
@@ -815,11 +815,11 @@
   },
   {
    "path": "tools/lomt_from.py",
-   "sha256": "e227bd535a0058ab3f99d72c2fc47a4fcbc1538a1e6a5b541ad21e997b8b78f1"
+   "sha256": "9be30d59100ee00886681cf645385af9a1daee29189a5492944e5f34a2b65871"
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "f2c92c15a1c9e0bb23bd5c2fee5693f5a41b2f6d060624020fce607bfb12d1ea"
+   "sha256": "1f9733f364a7480bc57a7bcefad99994926c9891b4e83d1670b8d10610b11cff"
   },
   {
    "path": "tools/loment_multisyntax_projects_test.py",
@@ -831,15 +831,15 @@
   },
   {
    "path": "tools/trans_core.py",
-   "sha256": "71499d41dacd842045d2b3caef84cc26c832cdb34971dd38758afaeec7176ec7"
+   "sha256": "b8ca069ef0b706ba810d4f644951bc324851a5f35385ffdde415ab152e82a380"
   },
   {
    "path": "tools/ctrans.py",
-   "sha256": "546a019427c258590d09cc218589f6d93f511fa4d9e9e7eaa3cdff470f88d68b"
+   "sha256": "66a76ca3d38d14ab5c3342990c7d310eda3a8bba727d9c1b2750e05e7740c034"
   },
   {
    "path": "tools/loment_ctrans_test.py",
-   "sha256": "649ac8cad21c41e917a99aac2069ef9c0b7060378e4c06c61cddbb10522d0537"
+   "sha256": "a8a2ba6143328a9ff4e2f86dcc2ef76fbb6b3068ee0ccbc9ba7ee3957cc323ab"
   },
   {
    "path": "tools/pytrans.py",
@@ -867,7 +867,7 @@
   },
   {
    "path": "tools/cpptrans.py",
-   "sha256": "eb79b9141a8c449d8b38d0f7d9a44a980a762a6edaa022eebac2057122568558"
+   "sha256": "3348819681a448f6a3fe801ac5ff28fd757d28fddc4f67c26d963cab3a4ead78"
   },
   {
    "path": "tools/loment_cpptrans_test.py",
@@ -891,7 +891,7 @@
   },
   {
    "path": "tools/loment_lomtfrom_test.py",
-   "sha256": "446cdcbefbc04390015cd5ef69e39613a7f7a1bcee65dc958b55eadded9dc7d5"
+   "sha256": "aa70b92cc823aaa019c3df91cae43812086cc9a63e34a4fc48c1f701fa524460"
   },
   {
    "path": "tools/loment_trans_test.py",
@@ -1307,7 +1307,7 @@
   },
   {
    "path": "loment/ctrans/coerce.c",
-   "sha256": "ecfd3830171a1143f99a767f4976cb771333eb016c22d9a12d25e45b39eee3b4"
+   "sha256": "2b4ef53c2da8c1b471a7364ecb36b05f30bafc99a7a30eed6de845addecbe967"
   },
   {
    "path": "loment/ctrans/numeric.c",
@@ -1847,7 +1847,7 @@
   },
   {
    "path": "docs/186-c-to-loment-translation.md",
-   "sha256": "3c94548cb12e34abb3f63c8a20a88b4583eb38ed274830e550183078f43b0d28"
+   "sha256": "251cd4cbdc41f85dd7aec971ae22294a36e8249793c3a2cc29e9345ad3c52191"
   },
   {
    "path": "docs/187-python-to-loment-translation.md",

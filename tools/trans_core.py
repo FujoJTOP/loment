@@ -123,6 +123,13 @@ class Dialect:
     #: 同一处差，两条判据（"能表达的就转，表达不出来的就报错"）给出相反结论。
     coerce_int_to_bool: bool = True
     coerce_bool_to_int: bool = True
+    #: **这一族的源码里 `true` / `false` 是不是字面量。**
+    #: Java / C# / Go / C++ 是（它们是关键字，写 `int true = 5;` 本身就非法）；
+    #: **C 不是** —— C99/C11 里它只是 `<stdbool.h>` 的一个**宏**，而这一门没有
+    #: `#include`，所以 `int true = 5;` 是完全合法的普通变量。认成字面量的话，
+    #: 声明处被改名（`let true_c: i32 = 5;`）、引用处却没改（`return (true) as i32;`）——
+    #: 同一个名字在一个函数里**两个身份**，退 0 而数是错的。
+    bool_literals: bool = True
     #: 布尔的整型投影用哪个宽度（`bool -> int` 的 `as <x>`）。**粗粒度的兜底** ——
     #: 真需求是"按上下文的具体整型"，现在传不进来，所以取这一族的默认宽度。
     int_default: str = "i32"
@@ -135,6 +142,11 @@ class Dialect:
     #: `pub const`。翻译器只要**跳过**那条声明，并且认得那个名字。
     #: **空集 = 这一族不收顶层常量**（C 就是 —— `potato_from` 也不收它的全局量）。
     const_words: frozenset = frozenset()
+    #: **在"函数内声明"这个位置上，哪些修饰词不能当成无所谓而丢掉。**
+    #: C / C++ 的 `static` 在这里说的是**静态存储期**（值跨调用保留），与链接无关 ——
+    #: 丢掉它会让每次调用都从初值重来，**产物照样编得过，只是数不对**。
+    #: `const` / `inline` 在局部位置上没有可分辨的差别，所以不在这一集里。
+    local_storage: frozenset = frozenset()
     #: **这一族特有的源码预处理**（`src -> src`），在分词**之前**跑。
     #:   Java / C# —— 抹掉 `class` 外壳（函数住在类里，而解析器看的是顶层）
     #:   C / C++   —— 没有
@@ -443,7 +455,7 @@ class Parser:
         return t[1], t[2]
 
     # ---- 声明说明符
-    def spec(self) -> tuple[str, str, int]:
+    def spec(self, local: bool = False) -> tuple[str, str, int]:
         """吃 `[unsigned] int` / `void` / … -> `(Loment 类型, 变量名, 行)`。
 
         **顺手把"这一条声明里出现过哪些词"记在 `self.last_spec` 上** ——
@@ -459,9 +471,19 @@ class Parser:
             if w in self.d.bad_spec:
                 raise Unsupported(f"第 {self.peek()[2]} 行: 不支持存储类/限定符 `{w}`")
             if w in self.d.linkage:
-                # 收下并丢掉。**丢掉是保义的**：`static` 是内部链接、`inline` 是内联建议，
+                # **函数那一层**收下并丢掉：`static` 是内部链接、`inline` 是内联建议，
                 # 而这里翻的是**整个单元的全部函数** —— 没有第二个翻译单元能再定义同名函数，
-                # 于是"内部链接"在这个语境里没有可分辨的差别。见文件头 §语义选择 3。
+                # 于是"内部链接"在这个语境里没有可分辨的差别。`const` 在只有标量、没有指针的
+                # 子集里也一样（源侧本就保证它不会被改）。见文件头 §语义选择 3。
+                #
+                # **局部位置上不是这么回事**：那里 `static` 说的是**静态存储期**（值跨调用
+                # 保留），与链接无关，丢掉会改程序的数。`local=True` 时拒掉 —— 见
+                # `Dialect.local_storage`。
+                if local and w in self.d.local_storage:
+                    raise Unsupported(
+                        f"第 {self.peek()[2]} 行: 函数内的 `{w}` 改的是**存储期**"
+                        f"（值跨调用保留），Stage A 没有对应的表示 —— 丢掉它会让每次调用"
+                        f"都从初值重来（**产物照样编得过，只是数不对**）。这一处不收。")
                 self.i += 1
                 continue
             if w in self.d.agg:
@@ -531,8 +553,9 @@ class Parser:
         if t[0] == "num":
             self.i += 1
             return Lit(int(t[1], 0), t[2])
-        if t[0] == "id" and t[1] in ("true", "false"):
-            # **四门都有这两个字面量**，而 Loment 也有 `true` / `false` —— 直接映过去。
+        if t[0] == "id" and t[1] in ("true", "false") and self.d.bool_literals:
+            # 这一族的源码里这两个就是**字面量**（见 `Dialect.bool_literals`），
+            # 而 Loment 也有 `true` / `false` —— 直接映过去。
             # 不走 `Var`：那样会报"用了没声明过的 `true`"，一句指不到点子的话
             # （真原因是"这是个布尔字面量，不是变量"）。
             self.i += 1
@@ -625,7 +648,7 @@ class Parser:
         """
         t = self.peek()
         if t[0] == "id" and t[1] in self.d.spec_words:
-            ty, name, line = self.spec()
+            ty, name, line = self.spec(local=True)
             if self.at(";"):
                 self.i += 1
                 return Decl(ty, name, None, line)
@@ -747,9 +770,15 @@ class Emitter:
     """
 
     def __init__(self, fns: dict[str, str], d: "Dialect",
-                 consts: dict[str, str] | None = None) -> None:
+                 consts: dict[str, str] | None = None,
+                 fname: dict[str, str] | None = None) -> None:
         #: 本单元**所有**函数的返回类型。调用点的类型靠它 —— 子集里没有跨单元调用。
         self.fns = fns
+        #: C 函数名 -> 发出去的名字（`translate` 算好的）。**函数名也要过 `safe()`** ——
+        #: 撞上本语言保留字的函数名会让**产物本身**过不了词法（`pub fn command(…)` 里
+        #: `command` 是语句关键字），而调用点还得跟着改，所以整份单元算一次、两处共用。
+        #: 不在表里的名字（比如 `extern fn` 那种、名字由 `lomt_from` 发的）**照原样**。
+        self.fname = dict(fname or {})
         self.d = d
         #: **模块常量的名字**。`pub const` 由 `lomt_from` 从 Potato 的 `consts` 发，
         #: 翻译器只要**认得那些名字**（顶层声明本身在解析时被跳过）。不给这张表的话
@@ -768,6 +797,20 @@ class Emitter:
         #: 当前这个函数**声明的**返回类型（`emit_fn` 里设）。`return` 要按它决定
         #: 那个表达式是在"整数场合"还是"布尔场合"—— 见 `stmt` 的 `Return` 那支。
         self.ret: str = "()"
+
+    def bind(self, raw: str) -> str:
+        """C 局部名 -> 发出去的名字。**同一个 C 名字永远给同一个**（重复声明照旧），
+        但**不同的** C 名字落到同一个名字上时，后到的让开。
+
+        为什么不能只靠 `safe()`：它是**无状态的纯函数**，只知道"这个词是不是保留字"。
+        撞了保留字加后缀之后完全可能撞上**用户自己写的**名字 ——
+        `int let = 1; int let_c = 2;` 里 `let` 被改成 `let_c`，与用户那个真叫 `let_c` 的
+        撞上，发出去是两条并排的 `let let_c`（本语言照收，第一条成死代码，**退 0**）。
+        """
+        nm = self.d.safe(raw)
+        while raw not in self.vars and nm in self.vars.values():
+            nm += "_"
+        return nm
 
     def fresh(self, base: str) -> str:
         while True:
@@ -849,8 +892,16 @@ class Emitter:
                     f"第 {e.line} 行: 这里要的是**整数**，给的是布尔。"
                     f"{self.d.name} 的布尔与整数**不是一回事**（不像 C 那样能互相顶），"
                     f"所以这里本来就该是个整数表达式（多半写错了）")
-            # `int x = (a < b);`：bool -> 0/1
-            return f"({raw}) as {self.d.int_default}"
+            # `int x = (a < b);`：bool -> 0/1。
+            #
+            # **整条投影要自己套一层括号**：`ex()` 的返回值是拿去当**操作数**用的
+            # （`raw(Bin)` 把两侧直接拼进 `({左} {op} {右})`），所以它必须自足。
+            # 原先只括了 `raw`、没括整条，于是 `as i32` 后面**紧接着** `<` / `<=` / `<<`
+            # 时被本语言的 parser 当成泛型实参的开头：
+            #     (2 < 3) < c   ->   ((2 < 3)) as i32 < c   ->   `11:40 期望 >，得到 ')'`
+            # 而这是子集内的普通 C（比较套比较），换个不成功的写法（`+ 1`）就没事 ——
+            # 所以 `loment/ctrans/coerce.c` 那份专挑这条缝的语料一直没照到它。
+            return f"(({raw}) as {self.d.int_default})"
         raise AssertionError((got, want))
 
     def raw(self, e: object) -> str:
@@ -867,7 +918,9 @@ class Emitter:
                     f"的 `consts` 发 —— 名字对不上的话就是那一步没收它）")
             return self.vars[e.name]
         if isinstance(e, Call):
-            return f"{e.name}({', '.join(self.ex(a, 'int') for a in e.args)})"
+            # 调用点跟着函数名的改名走（见 `fname`）。
+            nm = self.fname.get(e.name, e.name)
+            return f"{nm}({', '.join(self.ex(a, 'int') for a in e.args)})"
         if isinstance(e, Un):
             if e.op == "!":
                 # Loment 的 `!` 只收 bool，而 C 的 `!x` 收 int —— 直接写成 `x == 0`
@@ -887,13 +940,13 @@ class Emitter:
         if isinstance(s, Decl):
             if s.ty == "()":
                 raise Unsupported(f"第 {s.line} 行: 不能声明 `void` 变量")
-            self.vars[s.name] = self.d.safe(s.name)
+            self.vars[s.name] = self.bind(s.name)
             self.varty[s.name] = s.ty
             if s.init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
-                self.out(f"let {self.d.safe(s.name)}: {s.ty} = 0;", depth)
+                self.out(f"let {self.vars[s.name]}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {self.d.safe(s.name)}: {s.ty} = "
+                self.out(f"let {self.vars[s.name]}: {s.ty} = "
                          f"{self.ex(s.init, self.want_of(s.ty))};", depth)
             return
         if isinstance(s, Assign):
@@ -1000,13 +1053,15 @@ class Emitter:
                 self.varty[name] = oldty      # type: ignore[assignment]
 
     def emit_fn(self, f: Fn) -> str:
-        self.vars = {n: self.d.safe(n) for (_t, n, _l) in f.params}
+        self.vars = {}
+        for (_t, n, _l) in f.params:
+            self.vars[n] = self.bind(n)
         self.varty = {n: t for (t, n, _l) in f.params}
         self.ret = f.ret
         self.n = 0
         self.lines = []
-        ps = ", ".join(f"{self.d.safe(n)}: {t}" for (t, n, _l) in f.params)
-        head = f"pub fn {f.name}({ps})"
+        ps = ", ".join(f"{self.vars[n]}: {t}" for (t, n, _l) in f.params)
+        head = f"pub fn {self.fname.get(f.name, f.name)}({ps})"
         if f.ret != "()":
             head += f" -> {f.ret}"
         self.lines.append(head + " {")
@@ -1047,11 +1102,21 @@ def translate(src: str, d: "Dialect", keep: set[str] | None = None,
             raise Unsupported(f"第 {f.line} 行: 函数 `{f.name}` 重名"
                               f"（Loment 没有重载，名字必须精确）")
         seen.add(f.name)
+    # 函数名 -> 发出去的名字。**整份单元算一次**：函数名与调用点必须一起改，
+    # 而且改完要**两两不同**（`safe()` 只管保留字，不管两个名字会不会撞到一起）。
+    fname: dict[str, str] = {}
+    taken: set[str] = set()
+    for f in fns:
+        nm = d.safe(f.name)
+        while nm in taken:
+            nm += "_"
+        taken.add(nm)
+        fname[f.name] = nm
     out = []
     for f in fns:
         if keep is not None and f.name not in keep:
             continue
-        out.append(Emitter(rets, d, consts).emit_fn(f))
+        out.append(Emitter(rets, d, consts, fname).emit_fn(f))
     return "\n\n".join(out) + "\n"
 
 

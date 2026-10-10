@@ -837,6 +837,85 @@ def test_declaration_forms_that_used_to_vanish():
 
 
 @test
+def test_functions_are_found_wherever_they_start():
+    """**同一行上的第二个函数**也是一条声明，不能因为"不在行首"就看不见（C / C++）。
+
+    `_C_FN` 原先锚 `^[ \\t]*`（配 `re.M`），于是 `int f(){ … } int g(){ … }` 里 `g`
+    **整个消失** —— 而且不是"被跳过"：对象里没有它、`skipped` 里也没有它，下游只会说
+    "调用了本单元没有的函数 `g`"（一个**指向别处**的错）。这与 `_C_FIELD` 是同一处毛病
+    （`struct P { int a; int b; };` 一行写完只抽得到第一个字段），那一处已经改过。
+
+    **为什么不能只把锚去掉**：那个锚本来挡的是"函数**体**里与定义同形的写法" ——
+    `Foo bar(1);` 在 C++ 里就是**变量声明**，与 `Foo bar(...) {...}` 只差一个 `{`。
+    所以 `_from_c` 里按"已认下的函数体范围"再挡一道（`claimed`）。这一条两面都钉。
+    """
+    # ① 两个函数同一行：都要在
+    doc, rep = potato_from.from_c("int f(int a){return a+1;} int g(int a){return a+2;}\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    assert not rep.skipped, rep.skipped
+    # ② 顶层语句 + 函数同一行（`int g = 7; int main(void){…}`）
+    doc, _ = potato_from.from_c("int g = 7; int main(void){ return 5; }\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["main"], doc["functions"]
+    # ③ 三个同一行
+    doc, _ = potato_from.from_c(
+        "int a1(){return 1;} int a2(){return 2;} int a3(){return 3;}\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["a1", "a2", "a3"], doc["functions"]
+    # ④ **反面**：体里那些与定义同形的写法不是函数。
+    #    - 裸的调用（`g(1)`）本来就不该匹配；
+    #    - C++ 的 `Foo bar(1);` **会**匹配那条正则，靠 `claimed` 挡下来。
+    doc, _ = potato_from.from_c("int f(){ return g(1); }\nint g(int x){ return x; }\n",
+                                "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    doc, _ = potato_from.from_cpp("int f(){ Foo bar(1); return 0; }\n", "t.cpp", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f"], doc["functions"]
+    # ⑤ 被跳过的定义，**体内**同样要被认下来（不然它的体会被当成一串函数）
+    doc, rep = potato_from.from_c("float f(){ int x = 1; return 0; }\nint g(){ return 1; }\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["g"], doc["functions"]
+    assert [x["name"] for x in rep.skipped] == ["f"], rep.skipped
+    print("      同行多函数都找得到；体内与定义同形的写法（含 C++ 的 `Foo bar(1);`）不被误认")
+
+
+@test
+def test_unrecognised_toplevel_content_is_reported():
+    """顶层"谁也不认识"的东西要**报出来**，不能让它悄悄蒸发。
+
+    `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层，**扫不到的既不进
+    产物、也不进 `skipped`** —— 单元于是带着**半份内容**被发出去，而 `check` 判 `[OK]`。
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏。
+
+    两面都钉：七种认不出的形状**必须报**；而认识的形状（含 `struct` / `enum` 后面那个
+    分号、以及注释里的 `#`）**不许**被误报 —— 残渣检测最容易错的就是"顺手报多了"。
+    """
+    for label, head in {
+        "typedef": "typedef int myint;\n",
+        "global":  "int g = 7;\n",
+        "union":   "union U { int a; long b; };\n",
+        "include": "#include <stdio.h>\n",
+        "define":  "#define N 5\n",
+        "extern":  "extern int g;\n",
+        "knr":     "int f(a, b) int a; int b; { return a + b; }\n",
+    }.items():
+        doc, rep = potato_from.from_c(head + "int main() { return 5; }\n", "t.c", "strict")
+        got = [x for x in rep.skipped if "没有对应的规则" in x["why"]]
+        assert got, f"{label}: 没报出来（skipped={rep.skipped}）"
+        assert [f["name"] for f in doc["functions"]] == ["main"], (label, doc["functions"])
+    # 反面：认识的形状不许被当成残渣（`struct` / `enum` 尾随的分号也算它们的）
+    doc, rep = potato_from.from_c(
+        "struct P { int a; };\nenum E { A, B };\nint main() { return 5; }\n", "t.c", "strict")
+    assert not [x for x in rep.skipped if "没有对应的规则" in x["why"]], rep.skipped
+    assert [t["name"] for t in doc["types"]] == ["P"], doc["types"]
+    # 注释里的 `#` 不算（注释先被等长抹掉）
+    _, rep = potato_from.from_c("/* #define X 5 */\nint main() { return 5; }\n", "t.c", "strict")
+    assert not rep.skipped, rep.skipped
+    print("      顶层认不出的七种形状都报得出来；struct/enum 与注释里的 # 不误报")
+
+
+
+
+
+@test
 def test_array_typed_struct_field_does_not_invalidate_the_object():
     """`[T; N]` 当**结构体字段**: 校验器曾经把它判成"未声明", 于是**整份对象非法**、
     `lomt_from` 直接 `[ERR]` 退出 —— 一个字段的问题毁掉整个模块, 比 skip 更坏。

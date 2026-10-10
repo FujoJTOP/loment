@@ -84,7 +84,14 @@ def _coerce_expected() -> int:
         b -= 1
     xorv = a ^ b          # b 已经是 0 了
     shifted = (a << 2) | (b >> 1)
-    return (x + y + z + w + xorv + shifted) % 256
+    # `cmp_chain(1, 2, 3)` —— 投影**当左操作数**那一格（照 C 语义另写一遍）：
+    #   (1 < 2) = 1 ⇒ p = (1 < 3) = 1、q = (1 <= 3) = 1、r = (1 << 1) = 2
+    #                 s = (0 >> 1) = 0（对照：`>` / `>>` 那侧不带括号也是对的）
+    #   ⇒ 1*8 + 1*4 + 2*2 + 0 = 16
+    ca, cb, cc = 1, 2, 3
+    chain = (int(ca < cb) < cc) * 8 + (int(ca < cb) <= cc) * 4 \
+        + ((int(ca < cb)) << 1) * 2 + ((int(ca > cb)) >> 1)
+    return (x + y + z + w + xorv + shifted + chain) % 256
 
 
 def _scoping_expected() -> int:
@@ -394,6 +401,121 @@ def test_out_of_subset_is_loud():
         print(f"      子集外报得出: {msg[:90]}…")
         return
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
+
+
+@test
+def test_renames_cover_the_declaration_and_the_use_sites():
+    """改名有两条规矩，各对应一处"发出去的东西自己过不了"：
+
+    * **函数名也要过 `safe()`**。原先变量名、形参名都过了，**只有函数名漏在外面** ——
+      `int command(void) { … }` 于是发出 `pub fn command(…)`，而 `command` 是本语言的
+      **语句关键字**，产物死在词法上，报出来还带着**生成单元**的行号。
+      头改了就还得改**调用点**（两处一起改，不然名字对不上）。
+    * **改完不许撞用户自己的名字**。`safe()` 是**无状态纯函数**，只知道"这个词是不是
+      保留字"：`int let = 1; int let_c = 2;` 里 `let` 被改成 `let_c`，与用户那个真叫
+      `let_c` 的撞上 —— 发出去是两条并排的 `let let_c`，本语言照收、第一条成死代码。
+
+    两条都**真编一遍**（`lomentc.load`）：词法/语法不过就在这里炸。
+    """
+    safe_cmd = ctrans.C.safe("command")
+    out = ctrans.translate("int command(void) { return 41; }\n"
+                           "int main(void) { return command(); }\n")
+    assert f"pub fn {safe_cmd}(" in out, out
+    assert f"{safe_cmd}()" in out, f"调用点没跟着改:\n{out}"
+    assert "pub fn command(" not in out, out
+
+    out2 = ctrans.translate("int main(void) { int let = 1; int let_c = 2;"
+                            " return let + let_c; }\n")
+    decl = re.findall(r"let (\w+): i32 =", out2)
+    assert len(decl) == 2 and decl[0] != decl[1], f"两条声明撞名了:\n{out2}"
+    assert f"{decl[0]} + {decl[1]}" in out2, f"读的时候没跟着改:\n{out2}"
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for i, body in enumerate((out, out2)):
+            p = td / f"u{i}.lomt"
+            p.write_text("module u\n\n" + body + "\n", encoding="utf-8", newline="\n")
+            lomentc.load(p)          # 词法/语法不过会在这里抛
+    print("      函数名与调用点一起改名；改完的两条声明名字不同，且产物真编得过")
+
+
+@test
+def test_true_and_false_are_ordinary_names_in_c():
+    """C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
+    `#include`，所以 `int true = 5;` 是合法的普通变量（C99/C11）。
+
+    原先按字面量认，于是**声明处被改名、引用处没改**：
+
+        let true_c: i32 = 5;      ← 声明改了名（`true` 撞 Loment 保留字）
+        return (true) as i32;     ← 引用仍是**布尔字面量**
+
+    一个名字在一个函数里**两个身份**，产物编得过、退 0，而数是错的。特别阴的是
+    `int true = 5; return true;` 恰好给 1 —— 与"它真是字面量"的行为**无法区分**，
+    得换个初值才显形。
+
+    **别的门必须不变**：Java / C# / Go / C++ 里这两个是关键字，写 `int true = 5;`
+    本身就非法 —— 它们的字面量识别照旧（`Dialect.bool_literals` 默认就是 True）。
+    """
+    out = ctrans.translate("int main(void) { int true = 5; return true; }\n")
+    assert out.count("true_c") == 2, f"声明处与引用处要同名:\n{out}"
+    out2 = ctrans.translate("int main(void) { int false = 5; return false; }\n")
+    assert out2.count("false_c") == 2, out2
+    # 别的门：字面量照旧
+    others = [
+        ("jtrans", jtrans, "public class T {\n    public static int f() {\n"
+                           "        boolean b = true;\n        return 1;\n    }\n}\n"),
+        ("cstrans", cstrans, "class T {\n    static int F() {\n"
+                             "        bool b = false;\n        return 1;\n    }\n}\n"),
+        ("cpptrans", cpptrans, "int f() {\n    bool b = true;\n    return 1;\n}\n"),
+    ]
+    for nm, mod, src in others:
+        got = mod.translate(src)
+        assert "true" in got or "false" in got, f"{nm} 的布尔字面量丢了:\n{got}"
+    print("      C 里 `true`/`false` 是普通名字；Java/C#/C++ 里仍是字面量")
+
+
+@test
+def test_local_static_is_refused_not_dropped():
+    """函数内的 `static` **响亮拒绝**，不是"收下并丢掉"。
+
+    `docs/186` §6.3 给"丢掉 `static`"写的理由是**内部链接**（"这里翻的是整个单元的
+    全部函数，没有第二个翻译单元能再定义同名函数"）。那条理由对**函数级** `static` 成立，
+    对**函数内** `static` **不成立** —— 那里 `static` 说的是**静态存储期**（值跨调用保留）。
+
+    实测：`int bump() { static int c = 0; c = c + 1; return c; }` 把 `static` 丢掉之后，
+    `bump() * 10 + bump()` 给 **11**，而 clang 给 **12** —— 产物编得过、跑得动、数不对，
+    而且**没有任何一处出声**。
+
+    这一条同时钉住"别顺手拒多了"：函数级 `static`、局部 `const`、局部 `inline`、
+    形参 `const` 都要**照旧收下**（那几处在各自的位置上确实没有可分辨的差别）。
+    """
+    try:
+        ctrans.translate("int bump() { static int c = 0; c = c + 1; return c; }\n")
+    except trans_core.Unsupported as e:
+        assert "存储期" in str(e), str(e)
+    else:
+        raise AssertionError("函数内的 `static` 被静默丢掉了")
+    for still_ok in ("static int f() { return 7; }\n",           # 函数级：内部链接
+                     "int f() { const int c = 7; return c; }\n",  # 局部 const：保义
+                     "int f() { inline int c = 7; return c; }\n",
+                     "int f(const int a) { return a; }\n"):       # 形参 const
+        ctrans.translate(still_ok)
+    try:
+        cpptrans.translate("int f() { static int c = 0; return c; }\n")
+    except trans_core.Unsupported:
+        pass
+    else:
+        raise AssertionError("C++ 的函数内 `static` 没被拒")
+    print("      函数内 `static` 点名拒；函数级 static 与局部 const/inline 照旧")
+
+
+
+
+
+
+
+
+
 
 
 #: 四门共用 `trans_core` 的方言表 —— 共享核里的一处守卫要**四门都验**：

@@ -1013,9 +1013,17 @@ _C_ENUM = re.compile(r"\benum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
 #: 这种**一行写完的结构体**只抽得到第一个字段 (整个 `int a; int b;` 是一行, `.+?` 只吃一段),
 #: 而第二个字段**静默消失**。一行写 struct 在 C 里很常见 (2026-09-17 加多语法判据时撞到)。
 _C_FIELD = re.compile(r"([^;{}]+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;")
-_C_FN = re.compile(r"^[ \t]*(?:static\s+|inline\s+|const\s+)*"
-                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]",
-                   re.M)
+#: 函数**定义或声明**（`类型 名字(...)` 后面跟 `{` 或 `;`）。
+#:
+#: **不锚行首** —— 原先锚了 `^[ \t]*`（配 `re.M`），于是**同一行上的第二个函数永远匹配不到**：
+#: `int f(){ … } int g(){ … }` 里 `g` 整个消失，而且 `skipped` 也是空的（不是"跳过了"，
+#: 是**压根没看见**）。C 完全允许这么写。与 `_C_FIELD` 是同一处毛病（那一处已经改过）。
+#:
+#: 行首锚**本来是为了别匹配到函数体里的调用** —— 那一层改由 `_from_c` 按"已认下的函数体
+#: 范围"挡（那里的 `claimed`）：那条更准，因为 `Foo bar(1);` 这类写法在 C++ 里就是**变量
+#: 声明**，与函数定义同形，只靠关键字表挡不住。
+_C_FN = re.compile(r"(?:static\s+|inline\s+|const\s+)*"
+                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]")
 _C_KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -1089,6 +1097,47 @@ CPP_TYPES = dict(C_TYPES, **{
 })
 
 
+def _past_semi(body: str, i: int) -> int:
+    """从 `i` 起吃掉同一行上的空白与一个可选的 `;`，返回新末尾（给"认下这一条"用）。
+
+    `struct P { … }` / `enum E { … }` 那两条正则到 `}` 就停了，**尾随的 `;` 不在匹配里**
+    —— 不补这一下，那个分号会被当成"谁也不认识的顶层内容"报出来。
+    """
+    j = i
+    while j < len(body) and body[j] in " \t":
+        j += 1
+    return j + 1 if j < len(body) and body[j] == ";" else i
+
+
+def _c_leftover_lines(body: str, consumed: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """顶层**没有任何规则认下来**的非空白内容 -> `[(行号, 那一行的原文), …]`（一行一条）。
+
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏，
+    而 `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层 ——
+    扫不到的既不进产物、也不进 `skipped`。单元于是带着**半份内容**被发出去，
+    而 `check` 判 `[OK]`。这一条把残渣找出来（`docs/167`："不静默丢"）。
+
+    输入是**只抹了注释**的那一份（`_from_c` 里的 `nocomment`），不是扫描用的 `body` ——
+    后者连 `#` 行也抹掉了，而 `#include` / `#define` **正是要报的东西**。
+    两份逐字节等长（抹的是等长空白），所以 `consumed` 的下标在两边通用。
+    """
+    used = bytearray(len(body))
+    for a, b in consumed:
+        for i in range(max(a, 0), min(b, len(used))):
+            used[i] = 1
+    out: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for m in re.finditer(r"[^\s]", body):
+        if used[m.start()]:
+            continue
+        ln = body.count("\n", 0, m.start()) + 1
+        if ln in seen:
+            continue
+        seen.add(ln)
+        out.append((ln, body.splitlines()[ln - 1].strip()))
+    return out
+
+
 def _from_c(src: str, name: str, mode: str, grammar: str,
             types: dict) -> tuple[dict, Report]:
     """**C 系那一门**（C / C++）的共用引擎：函数、结构体、枚举、常量四种声明。
@@ -1099,9 +1148,17 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     rep = Report(name, grammar, mode)
     doc = _blank(_ident(Path(name).stem), grammar)
     body = _C_COMMENT.sub(_blank_keep_off, src)
+    #: **只抹了注释**的那一份。残渣检测要它：扫描用的 `body` 连 `#` 行也抹掉了
+    #: （下一行），而 `#include` / `#define` 正是 `docs/186` §4 列进"点名拒绝"那一栏的
+    #: 东西 —— 抹掉之后谁也看不见它们。
+    nocomment = body
     body = re.sub(r"^[ \t]*#.*$", _blank_keep_off, body, flags=re.M)
     known: set[str] = set()
+    #: 三条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
+    #: 由 `_c_leftover_lines` 报出来（见那一处的注解）。
+    consumed: list[tuple[int, int]] = []
     for m in _C_STRUCT.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         sname, inner = m.group(1), m.group(2)
         fields = []
         for fm in _C_FIELD.finditer(inner):
@@ -1126,6 +1183,7 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     # 判据是"有没有任何一个变体带显式值": 有 -> 全按 C 语义算出值、发芽成 consts;
     # 没有 -> 就是一个普通枚举, 进 `enums`。
     for m in _C_ENUM.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         ename, inner = m.group(1), m.group(2)
         members, cur, next_v = [], None, 0
         for raw in inner.split(","):
@@ -1159,10 +1217,28 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
                     continue
                 doc["consts"].append({"name": vn, "type": "i32", "value": vv})
         rep.ok += 1
+    #: 已认下的函数体延伸到哪（右花括号之后的**第一个位置**）。`_C_FN` 不锚行首了，
+    #: 所以体里那些与定义同形的写法要靠它挡 —— 见那条正则上面的注解。
+    claimed = -1
     for m in _C_FN.finditer(body):
+        if m.start() < claimed:
+            continue                # 落在上一个函数的**体内**：那是调用/声明，不是定义
         rt, fn, params = m.group(1), m.group(2), m.group(3)
         if fn in _C_KEYWORDS or rt.strip().split()[-1] in _C_KEYWORDS:
             continue
+        # 是**定义**就把整段范围先认下来 —— 哪怕它随后因为返回类型无映射被跳过：
+        # 不然它**体内**的写法会被接着当成函数。
+        is_def = m.end() > 0 and body[m.end() - 1] == "{"
+        close = _block_end(body, m.end() - 1) if is_def else -1
+        if is_def and close < 0:
+            rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            consumed.append((m.start(), m.end()))
+            continue
+        if is_def:
+            claimed = close + 1
+            consumed.append((m.start(), close + 1))
+        else:
+            consumed.append((m.start(), m.end()))
         if "..." in params:
             rep.skip("fn", fn, "变参")
             continue
@@ -1202,16 +1278,18 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
         # **映射后的** Loment 类型名（`i32`），从 `i32` 反推回 C 的拼法是另一张表，
         # 而原文本来就在手边。另一个理由更要紧 —— **原文是保真的**：`unsigned` 与
         # `unsigned int` 在 Potato 里都是 `u32`，回推必然丢掉用户写的那个拼法。
-        if m.end() > 0 and body[m.end() - 1] == "{":
-            close = _block_end(body, m.end() - 1)
-            if close < 0:
-                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
-                continue
+        if is_def:
             raw = src[m.start():close + 1]
             ent["body"] = raw.strip()
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    # ---- 残渣：顶层还有"谁也不认识"的东西 -> **报出来**，别让半份单元悄悄发出去
+    for ln, txt in _c_leftover_lines(nocomment, consumed):
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Stage A 只认函数 / `struct` / "
+                 f"`enum`；`typedef`、全局量、`union`、预处理指令都在子集外"
+                 f"（`docs/186` §4）。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
