@@ -603,8 +603,8 @@ fn catalog(mem: ptr, fd: u64) {
     sec(mem, fd, "COMPILE & RUN");
     row(mem, fd, "ir", "FILE", "print LLVM IR to stdout");
     row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
-    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "compile and link to an executable");
-    row(mem, fd, "run", "FILE [--link OBJ...]", "compile, link and run");
+    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "compile and link to an executable");
+    row(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "compile, link and run");
     row(mem, fd, "version", "", "print the version line");
     row(mem, fd, "lsp", "", "language server over stdio");
     sec(mem, fd, "SOURCE TOOLS");
@@ -692,11 +692,11 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  The object must be self-contained -- no relocations, no undefined symbols (no libc).");
+        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  The object must be self-contained -- no relocations, no undefined symbols (no libc).\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {
-        usage_line(mem, fd, "run", "FILE [--link OBJ...]", "Compile, link and run. The exit code is the program's own exit code.\n  --link OBJ adds a foreign ELF object (FFI), same rules as build.");
+        usage_line(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "Compile, link and run. The exit code is the program's own exit code.\n  --link OBJ adds a foreign ELF object (FFI), same rules as build.\n  --opt: same as build (clang -O2 when installed, ELF).");
         return 0;
     }
     if eq_cstr(cmd, n, "fmt") {
