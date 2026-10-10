@@ -222,6 +222,23 @@ def test_driver_seed_matches_reference() -> None:
   改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的**唯一**动作。
 * **可见性**：ghcr 的包默认**私有**，而**外部贡献者从 fork 提的 PR 拿不到私有包** ⇒
   它们的门禁会在拉镜像那一步就死。所以包必须是 **public**（一次性仓库设置）。
+* **容器 ≠ runner，差的那些东西只能靠"跑一次"找出来**。换上去第一次跑红了 6 条（14 条红里
+  其余是基线里本来就有的 + 一条已知的争用假红），两条根因：
+
+  1. **git 的 "dubious ownership"**（5 条）：工作区是 runner 的用户 checkout 的，而容器里
+     是 root ⇒ git 拒绝 `ls-files` / `rev-parse` / `check-attr` / `check-ignore`，而好几条
+     判据正靠这几个子命令（`loment_eol` / `loment_src` / `loment_publish` /
+     `loment_sign_test` / `loment_tools_test` / `loment_seed_test` 的 gitattributes 那条）。
+     **修在调用侧**（`gate.yml` 用 git 的环境变量入口注入一次 `safe.directory`，值取工作区），
+     不在镜像里 —— 那是环境的用法，不是工具链的组成。
+  2. **`python` 这个命令**（1 条）：runner 镜像上有 `python`（指向 3），ubuntu 24.04 只有
+     `python3`；而 `vscode_ext_test` 的 `_python()` 是
+     `shutil.which("python") or "python"` —— **找不到就退回裸名**。修在镜像里
+     （`python-is-python3`），并把 tag 抬到 `2`。
+
+  **教训**：包名单"照抄原来那两条命令"是不够的 —— 原来那些判据跑在 **runner 镜像**上，
+  而 runner 镜像自带的东西（`python` / `gh` / `git` 的配置行为）在 `gate.yml` 里**一个字
+  都没写**。能找出来的办法只有一次真跑 + 逐条看红。
 
 
 ## 9. 怎么用

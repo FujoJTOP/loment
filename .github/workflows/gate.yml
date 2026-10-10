@@ -86,6 +86,20 @@ permissions:
 #: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
 env:
   GATE_SHARDS: "6"
+  #: **容器里的 git 要靠这一条才肯干活。** 工作区在那边是 runner 的用户 checkout 的
+  #: （UID 不是容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` /
+  #: `rev-parse` / `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。
+  #: 2026-10-10 换上容器那次实测：`loment_eol` 报"不是 git 工作树"、`loment_src` 报
+  #: "git ls-files 失败"、`loment_publish` 直接把 git 的提示原文打了出来，连
+  #: `loment_seed_test` 的 gitattributes 那条也一起红。
+  #:
+  #: 用 **git 自己的环境变量入口**注入（`GIT_CONFIG_COUNT` 那一族等价于 `git -c`），
+  #: 于是不必在每个 job 里各写一遍 `git config --add safe.directory`。值取工作区而不是
+  #: `*`：要放行的只有这一棵（`actions/checkout` 自己在 runner 上做的也是同一件事，
+  #: 只是它没有"跨进容器"这一层）。
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "safe.directory"
+  GIT_CONFIG_VALUE_0: "${{ github.workspace }}"
 
 jobs:
   # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
@@ -178,7 +192,7 @@ jobs:
     timeout-minutes: 60
     if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:1
+      image: ghcr.io/fujojtop/loment-ci:2
     steps:
       - uses: actions/checkout@v4
 
@@ -289,7 +303,7 @@ jobs:
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     needs: [static-exclusive]
     container:
-      image: ghcr.io/fujojtop/loment-ci:1
+      image: ghcr.io/fujojtop/loment-ci:2
     strategy:
       fail-fast: false
       matrix:
@@ -409,7 +423,7 @@ jobs:
     timeout-minutes: 180
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:1
+      image: ghcr.io/fujojtop/loment-ci:2
     steps:
       - uses: actions/checkout@v4
 
