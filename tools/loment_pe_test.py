@@ -561,6 +561,20 @@ fn _start() {
     if load8(rb, 1) != 111 {
         die(15, "FAIL echo byte 2\\n");
     }
+    // getpeername：出口方向也写回 sockaddr（AF_INET 两边同值，只验它填了东西）
+    let pa: ptr = alloc(64);
+    let pn: ptr = alloc(8);
+    store8(pn, 0, 16);
+    let gp: i64 = syscall6(52, ac as u64, pa as u64, pn as u64, 0, 0);
+    if gp < 0 {
+        die(16, "FAIL getpeername\\n");
+    }
+    if load8(pa, 1) != 0 {
+        die(17, "FAIL getpeername family\\n");
+    }
+    if load8(pa, 3) == 0 {
+        die(18, "FAIL getpeername port\\n");
+    }
     w(1, "ECHO OK\\n");
 
     let tv: ptr = alloc(16);
@@ -569,30 +583,104 @@ fn _start() {
     store8(tv, 10, 4);
     let st1: i64 = syscall6(54, ac as u64, 1, 20, tv as u64, 16);
     if st1 < 0 {
-        die(16, "FAIL setsockopt(SO_RCVTIMEO)\\n");
+        die(19, "FAIL setsockopt(SO_RCVTIMEO)\\n");
     }
     let r3: i64 = syscall6(0, ac as u64, rb as u64, 4, 0, 0);
     if r3 != -11 {
-        die(17, "FAIL read-timeout is not -EAGAIN\\n");
+        die(20, "FAIL read-timeout is not -EAGAIN\\n");
+    }
+    // getsockopt 反向那一次换算：毫秒摊回 timeval，并把 *optlen 写回 16
+    let gb: ptr = alloc(16);
+    let gl: ptr = alloc(8);
+    store8(gl, 0, 16);
+    let gs: i64 = syscall6(55, ac as u64, 1, 20, gb as u64, gl as u64);
+    if gs < 0 {
+        die(21, "FAIL getsockopt(SO_RCVTIMEO)\\n");
+    }
+    if load8(gl, 0) != 16 {
+        die(22, "FAIL getsockopt optlen\\n");
+    }
+    if load8(gb, 8) != 224 {
+        die(23, "FAIL getsockopt usec low\\n");
+    }
+    if load8(gb, 9) != 147 {
+        die(24, "FAIL getsockopt usec high\\n");
     }
     w(1, "TIMEOUT OK\\n");
 
+    // accept4 + SOCK_NONBLOCK：新 socket 要真的建成非阻塞（read 立刻 -EAGAIN）
+    let cs2: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if cs2 < 0 {
+        die(25, "FAIL socket(client2)\\n");
+    }
+    let cn2: i64 = syscall6(42, cs2 as u64, sa as u64, 16, 0, 0);
+    if cn2 < 0 {
+        die(26, "FAIL connect 2\\n");
+    }
+    let ac2: i64 = syscall6(288, ls as u64, 0, 0, 2048, 0);
+    if ac2 < 0 {
+        die(27, "FAIL accept4\\n");
+    }
+    let r4: i64 = syscall6(0, ac2 as u64, rb as u64, 4, 0, 0);
+    if r4 != -11 {
+        die(28, "FAIL accept4 socket is not non-blocking\\n");
+    }
+    syscall6(3, ac2 as u64, 0, 0, 0, 0);
+    syscall6(3, cs2 as u64, 0, 0, 0, 0);
+    w(1, "NONBLOCK OK\\n");
+
+    // AF_INET6 的两侧翻译（Linux=10 / Windows=23）。**允许这台机器没有 IPv6**：
+    // 那就两边一起打印 IPV6 NO —— 判据是"两个平台看到同一件事"，不是"必须有 IPv6"。
+    let s6: i64 = syscall6(41, 10, 1, 0, 0, 0);
+    if s6 < 0 {
+        w(1, "IPV6 NO\\n");
+    } else {
+        let a6: ptr = alloc(64);
+        store8(a6, 0, 10);
+        store8(a6, 1, 0);
+        store8(a6, 23, 1);
+        let b6: i64 = syscall6(49, s6 as u64, a6 as u64, 28, 0, 0);
+        if b6 < 0 {
+            w(1, "IPV6 NO\\n");
+        } else {
+            let n6: ptr = alloc(8);
+            store8(n6, 0, 28);
+            let g6: i64 = syscall6(51, s6 as u64, a6 as u64, n6 as u64, 0, 0);
+            if g6 < 0 {
+                die(29, "FAIL v6 getsockname\\n");
+            }
+            if load8(a6, 0) != 10 {
+                die(30, "FAIL v6 family not translated back\\n");
+            }
+            w(1, "IPV6 OK\\n");
+        }
+        syscall6(3, s6 as u64, 0, 0, 0, 0);
+    }
+
     let extra: i64 = syscall6(1, cs as u64, str_ptr("xxxx") as u64, 4, 0, 0);
     if extra != 4 {
-        die(18, "FAIL client write 2\\n");
+        die(31, "FAIL client write 2\\n");
     }
     syscall6(3, cs as u64, 0, 0, 0, 0);
     let big: ptr = alloc(2048);
     let _x1: i64 = syscall6(44, ac as u64, big as u64, 2048, 16384, 0);
     let _x2: i64 = syscall6(44, ac as u64, big as u64, 2048, 16384, 0);
     w(1, "SURVIVED\\n");
+    let _sd: i64 = syscall6(48, ac as u64, 2, 0, 0, 0);
     syscall6(3, ac as u64, 0, 0, 0, 0);
     syscall6(3, ls as u64, 0, 0, 0, 0);
     syscall4(60, 0, 0, 0);
 }
 """
 
-SOCK_GOLDEN = (0, b"ECHO OK\nTIMEOUT OK\nSURVIVED\n")
+SOCK_HEAD = b"ECHO OK\nTIMEOUT OK\nNONBLOCK OK\n"
+SOCK_TAIL = (b"IPV6 OK\nSURVIVED\n", b"IPV6 NO\nSURVIVED\n")
+
+
+def _sock_ok(out: bytes) -> bool:
+    """IPv6 那一行**允许两种情况**（机器没有 IPv6 时两边都打 NO）——
+    判据是"两个平台看到同一件事"，不是"必须有 IPv6"。"""
+    return out.startswith(SOCK_HEAD) and out[len(SOCK_HEAD):] in SOCK_TAIL
 
 
 def _shim_blob():
@@ -703,9 +791,9 @@ def test_elf_socket_program_runs_on_linux():
         elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
         elf.chmod(0o755)
         r = subprocess.run([str(elf)], capture_output=True, timeout=60, shell=False)
-        assert (r.returncode, r.stdout) == SOCK_GOLDEN, \
+        assert r.returncode == 0 and _sock_ok(r.stdout), \
             f"Linux 上联网语料没跑对: rc={r.returncode} out={r.stdout!r} err={r.stderr[:200]!r}"
-    print("      回显 / 读超时 -EAGAIN / 对端挂断存活：Linux 原生真跑通过")
+    print("      回显 / 读超时 -EAGAIN / 非阻塞 / 对端挂断存活：Linux 原生真跑通过")
 
 
 @test
@@ -730,8 +818,8 @@ def test_pe_and_elf_agree_on_a_socket_program():
         got = _run_native(exe, timeout=60)
         want = _run_in_wsl(elf, "sockdemo", td, timeout=60)
         assert got == want, f"两个平台不一致:\n  PE   {got!r}\n  ELF  {want!r}"
-        assert got == SOCK_GOLDEN, f"联网语料没跑对: {got!r}"
-    print(f"      回显 / 读超时 / 对端挂断：PE 与 ELF 同为 {SOCK_GOLDEN[1]!r}")
+        assert got[0] == 0 and _sock_ok(got[1]), f"联网语料没跑对: {got!r}"
+    print(f"      回显 / 读超时 / 非阻塞 / IPv6 family / 对端挂断：PE 与 ELF 同为 {got[1]!r}")
 
 
 def main() -> int:

@@ -84,12 +84,19 @@ Linux 上"`sendto(已连接, …, NULL, …)`"就是 `send`；WinSock 的 `sendt
 
 | 平台 | 怎么跑 | 退出码 | stdout |
 |---|---|---|---|
-| PE（Windows 原生） | 本机直接跑 `.exe` | 0 | `ECHO OK` / `TIMEOUT OK` / `SURVIVED` |
+| PE（Windows 原生） | 本机直接跑 `.exe` | 0 | `ECHO OK` / `TIMEOUT OK` / `NONBLOCK OK` / `IPV6 OK` / `SURVIVED` |
 | ELF（Linux） | WSL 里直接跑 | 0 | 同上，**逐字节相同** |
 
-三行输出各钉一件事：**回显对得上**（socket 型 fd 上的 read/write 分流对）、
-**读超时返回 -EAGAIN**（timeval→毫秒那条路对）、**对端挂断之后进程还活着**
-（`MSG_NOSIGNAL` 那条路对；Linux 上不带它这里会被 SIGPIPE 杀掉）。
+五行输出各钉一件事：**回显对得上**（socket 型 fd 上的 read/write 分流对）、
+**读超时返回 -EAGAIN**（`setsockopt` 的 timeval→毫秒那条路）、
+**`accept4(SOCK_NONBLOCK)` 的 socket 真的非阻塞**（读立刻 -EAGAIN ⇒ `ioctlsocket(FIONBIO)` 那条路；
+**这一格正是这次抓出真 bug 的地方**，见 §7）、**`AF_INET6` 的 family 两侧都翻译**（`getsockname`
+回来必须是 10 而不是 Windows 的 23）、**对端挂断之后进程还活着**（`MSG_NOSIGNAL` 那条路；
+Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（出口方向的 sockaddr）与
+`getsockopt(SO_RCVTIMEO)` 的**反向**换算（毫秒摊回 timeval，并把 `*optlen` 写回 16）。
+
+`IPV6` 那一行**允许两种结果**（这台机器没有 IPv6 时两边都打 `IPV6 NO`）—— 判据是
+"两个平台看到同一件事"，不是"必须有 IPv6"。
 
 ## 5. 点名不做
 
@@ -97,9 +104,12 @@ Linux 上"`sendto(已连接, …, NULL, …)`"就是 `send`；WinSock 的 `sendt
   一律 -1（派发面的兜底）。`epoll` 要真做得上 IOCP，不是一次翻译能补的；
   `sendmsg`/`recvmsg` 要仿 `iovec` 与辅助数据，消费方今天也够不着。
 * **语言侧的一条真限制**：`syscall6` 的内建签名是 `nr + a0..a4`（5 个实参），
-  所以 6 参的 `sendto`/`recvfrom` 从 `.lomt` 里**递不满**（`addrlen` 那一格没地方放）。
-  这次靠"addr=NULL 落 send/recv"那一支让它**可用**；要真带地址收发的 UDP，
-  得先给语言侧第 6 个实参（那是另一笔账，不在本文）。
+  所以 6 参的 `sendto`/`recvfrom` 从 `.lomt` 里**递不满**（`addrlen` 那一格没地方放，
+  递过去的是寄存器里的残留值）。这次靠"addr=NULL 落 `send`/`recv`"那一支让它**可用**；
+  要真带地址收发的 UDP，得先给语言侧第 6 个实参（那是另一笔账，不在本文）。
+  **代价要说清**：因此 `sendto`/`recvfrom` 的**非 NULL 那一支今天没有动态判据**
+  —— 语料只能走 NULL 那一支。它在机器码里是实现了的（地址进/出各补一次 family、
+  第 5/6 参走栈），但**没有一条判据碰过它**；谁先给语言侧补上第 6 个实参，谁就该把这一格补上。
 * **`capability` 域的联网面**：这次没动。今天 `guard` 管的是域的**下标**，
   而 socket 是裸 `syscall6` —— 指南 §5 那句"没有任何东西拦得住真正做事的操作"照旧成立。
 
@@ -111,8 +121,8 @@ Linux 上"`sendto(已连接, …, NULL, …)`"就是 `send`；WinSock 的 `sendt
 | 导入面真的是两个 DLL | `test_pe_imports_two_dlls_with_the_socket_surface`：描述符表读到底、两个 DLL 名、ws2_32 的 18 个函数都在、可选头里的 Import Directory size 跟着条数走。**跨平台** |
 | 冻出来的那份没漂 | `test_frozen_shim_blob_matches_the_reference`：树里的 `win_shim_data.lomt` 与现算的 shim/导入表**逐字节相同**（防止"改了 shim 忘了重冻"，那样自举链接器会照抄旧的）。**跨平台** |
 | 导入表塞得进孪生那块落点 | 同上的末段：`len(idata) ≤ TB_EXT - TB_IDATA`（撑破是**静默截断**，不是报错） |
-| 两个平台行为一致 | `test_pe_and_elf_agree_on_a_socket_program`：同一份源，PE 原生与 WSL 的 ELF 输出逐字节相同（**Windows 机器**才跑） |
-| Linux 侧也真的收发过字节 | `test_elf_socket_program_runs_on_linux`：Linux 原生真跑一遍语料（**CI 的 ubuntu runner 跑得到**） |
+| 两个平台行为一致 | `test_pe_and_elf_agree_on_a_socket_program`：同一份源，PE 原生与 WSL 的 ELF 输出逐字节相同 —— 里面覆盖 socket/bind/listen/getsockname/connect/accept/**accept4(FIONBIO)**/read/write/**getpeername**/**getsockopt 的毫秒→timeval**/**IPv6 family 两侧**/sendto(MSG_NOSIGNAL)/shutdown/close（**Windows 机器**才跑） |
+| Linux 侧也真的收发过字节 | `test_elf_socket_program_runs_on_linux`：Linux 原生真跑同一份语料（**CI 的 ubuntu runner 跑得到**；PE 那半在 CI 里没有任何 runner） |
 
 门禁里没有 Windows runner，所以"PE 确实能跑"这条**只能在本机**验；做 CI 兜底的是那三条
 形状钉子（纯数据，平台无关）—— 它们盯的是"文档说的和机器里冻的是不是同一件事"。
