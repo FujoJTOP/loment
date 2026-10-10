@@ -433,6 +433,23 @@ def main(argv: list[str] | None = None) -> int:
     #: 初值给 `a.lang` 只是为了下面那个 `except SyntaxError` 里引用得到它。
     got = a.lang
 
+    # **不给 `--lang` 时按输入的性质分**，不是一律当 JSON 读。
+    #
+    # 这个工具有两种输入：`.potato.json`（形式对象）与**源文件**（配 `--lang`）。
+    # 原先不给 `--lang` 就一律走 JSON 那一支，于是 `lomt_from.py g.c` 把一份 C 源码
+    # 喂给 `json.loads`，端到用户面前的是 **Python 的 json 异常文本**：
+    #
+    #     [ERR] 读取失败: Expecting value: line 1 column 1 (char 0)
+    #
+    # 那句话对一份 C 文件没有任何意义；而同一个文件经**上游那一段**
+    # （`potato_from.py g.c`）却好好出来（rc=0）。`.c` 后缀本来就有确定答案
+    # （`potato_from.EXT[".c"] == "c"`），而 `resolve_lang` 这台工具**本来就有**
+    # （给了 `--lang auto` 时走的就是它）。
+    #
+    # 判据取**后缀**而不是内容：`.json` 是形式对象，别的都当源文件交给 `auto`。
+    if a.lang is None and Path(a.path).suffix.lower() != ".json":
+        a.lang = "auto"
+
     try:
         if a.lang is not None:
             import potato_from

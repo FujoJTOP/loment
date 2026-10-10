@@ -288,7 +288,13 @@ def test_the_declaration_word_order_is_the_shared_contract():
     # 他拿到的是一行残缺的源 + 一句指不到点子的语法错。
     for s in ("choose write grammars python\n", "choose writes grammar c\n"):
         g, err, declared = potato_from.read_grammar_decl(s)
-        assert (g, err, declared) == ("loment", None, False), (s, g, err, declared)
+        # **2026-10-09（#148）：这一格从"不报错"改成了"报错"。**
+        # 原先那条断言钉的是"拼错**不能**被当成声明"（对），但它顺带把**静默退回**
+        # 也钉住了 —— 而那正是 `docs/198` §2 记的缺陷（"§2 那句'兜底从**猜**变**拒绝**'
+        # 正是为它写的；现在它既没猜也没拒，是**换了一个猜法**"）。所以这里改判：
+        # 仍然 `loment` / 仍然 `declared=False`，但**要说出来**。
+        # 下面那一句才是这条用例真正要保的东西，一字未动：拼错的那行**不许被抹掉半截**。
+        assert g == "loment" and declared is False and err, (s, g, err, declared)
         assert potato_from.strip_grammar_decl(s) == s, f"拼错的那行被抹了半截: {s!r}"
 
     # **导出那半边也钉上**：产物里就是这三个词、按这个顺序。它 + 对方那条"产物必须新鲜"
@@ -939,6 +945,65 @@ def test_grammar_twin_selfhost_compiles():
         assert rr.returncode == 0, f"stage1 编译 lomgrammar.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
     print(f"      种子自举链编译 lomgrammar.lomt 成功 ({len(rr.stdout)}B IR)")
+
+
+@test
+def test_a_bom_does_not_hide_the_declaration():
+    """文件开头的 **UTF-8 BOM** 不能让声明失效。
+
+    Windows 的编辑器默认会写 BOM（记事本、"另存为 UTF-8"、PowerShell 的 `>`），
+    而 `docs/188` §2 把"这份源怎么读"**整个压在那一行**上（`.lomt` 刻意**不嗅探**内容）。
+    原先四条第 `_GRAMMAR_*` 正则都是 `^[ \\t]*`：BOM 不是空白 ⇒ `choose` 不在"行首"⇒
+    **声明整个找不到** ⇒ 文件落到"缺声明 = 原生 Loment"，整份 C 被当 Loment 编，
+    报出来是 `1:1 非法字符 '\\ufeff'` —— 用户完全看不出"是你那行声明没生效"。
+
+    两边都钉：带 BOM 与不带 BOM **读出来的语法与译文必须一样**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        body = "choose write grammar c\nint main() { return 44; }\n"
+        outs = []
+        for tag, prefix in (("bom", "﻿"), ("nobom", "")):
+            # **文件名要一样** —— 产物里的 `module <主干名>` 取自路径，
+            # 换个名字比出来的差就不是 BOM 那一处了。
+            d = td / tag
+            d.mkdir()
+            p = d / "t.lomt"
+            p.write_bytes((prefix + body).encode("utf-8"))
+            fu = potato_from.front_door(p)
+            assert fu.grammar == "c" and fu.translated, (tag, fu.grammar, fu.translated)
+            assert "choose write grammar" not in fu.source, (tag, fu.source[:80])
+            outs.append(fu.source)
+        assert outs[0] == outs[1], "带 BOM 与不带的产物不同"
+    print("      带 BOM 的声明照常认到，产物与不带 BOM 的逐字节相同")
+
+
+@test
+def test_a_misspelled_declaration_is_refused_not_guessed_past():
+    """**关键词写错 / 词序不对**要报，不能"当成没有声明"悄悄读成 Loment。
+
+    `docs/188` §1 列了四种"声明写错"的报错（名字不在表里 / 写在 `module` 之后 /
+    写两次 / 后面没写名字）—— **漏了"关键词本身写错"这一种**（`docs/198` §2 报过，
+    当时未修）。这一种原先**一声不响**：文件落到"缺 = Loment"那一条，用户拿到的是
+    正文里某处的语法错（`未知顶层关键字 'def'` 之类）—— **指的不是那一行**。
+
+    §2 那句"兜底从**猜**变**拒绝**"正是为它写的；原先它既没猜也没拒，是**换了一个猜法**。
+
+    两面都钉：四种写错**必须报**（且指出那一行的原文），而**真没写声明**的照旧回退
+    到 Loment（那是 `docs/188` §2 的规矩：99% 的文件是 Loment，缺 = Loment 没有歧义）。
+    """
+    for bad in ("choose grammar c", "grammar c", "choose write grammars c", "choose language c"):
+        lang, err, declared = potato_from.read_grammar_decl(bad + "\n\nint main() { return 7; }\n")
+        assert err and not declared, (bad, err, declared)
+        assert "第 1 行" in err and bad in err, (bad, err)
+    # 真没声明的照旧回退
+    assert potato_from.read_grammar_decl("module m\nfn f() { }\n") == ("loment", None, False)
+    # 写对的照旧
+    assert potato_from.read_grammar_decl("choose write grammar c\nint main(){}")[:1] == ("c",)
+    # **合法的开关不算"写错的声明"**（它在 `module` 之后；写在之前本来就另有错）
+    assert potato_from.read_grammar_decl("module m\nchoose gc_auto\nfn f() { }\n") == \
+        ("loment", None, False)
+    print("      四种写错的声明都报得出（并给出那一行原文）；缺声明照旧回退")
 
 
 def main() -> int:

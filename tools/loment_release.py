@@ -87,6 +87,9 @@ GLOBS = [
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
+    # GC 证明面的量尺（`docs/210` §7）：把语料跑成 `gc_auto_alpha`，加总 v10 的 `gc_ladder`。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
@@ -97,7 +100,7 @@ GLOBS = [
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
-    "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
     # 多语法前端 (docs/179): 形式对象 -> L1 接口单元, 及其端到端判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
     # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。

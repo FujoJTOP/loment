@@ -279,6 +279,40 @@ def test_externs_keys_are_the_declared_names():
     print("      externs 的键是声明自己的名字；调用点因此解析得到")
 
 
+@test
+def test_cli_without_lang_reads_a_source_file_not_json():
+    """不给 `--lang` 时**按输入的性质分**：`.json` 是形式对象，别的都是源文件。
+
+    这个工具有两种输入，而原先"不给 `--lang`"一律走 JSON 那一支 —— 于是
+    `lomt_from.py g.c` 把一份 C 源码喂给 `json.loads`，端到用户面前的是
+    **Python 的 json 异常文本**（`Expecting value: line 1 column 1 (char 0)`），
+    那句话对一份 C 文件没有任何意义；而**同一条流水的上一段**（`potato_from.py g.c`）
+    却好好出来（rc=0）。`.c` 后缀本来就有确定答案，而 `resolve_lang` 这台工具本来就有
+    （给了 `--lang auto` 时走的就是它）。
+
+    两面都钉：源码文件不给 `--lang` 能过（且打得出 `[detect]`），
+    而 `.potato.json` **照旧**当对象读（不许被 `resolve_lang` 拿去嗅）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        src = td / "g.c"
+        src.write_text("int f(int x) { return x + 1; }\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomt_from.py"), str(src)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 0, f"rc={r.returncode} {(r.stdout + r.stderr)[:200]}"
+        assert "[detect]" in r.stderr and "-> c" in r.stderr, r.stderr[:200]
+        assert "Expecting value" not in r.stderr, f"又按 JSON 读了:\n{r.stderr[:200]}"
+        # 形式对象那条路照旧（喂一份**合法**对象）
+        obj = td / "o.potato.json"
+        obj.write_text(json.dumps(_base(functions=[_fn(name="f")])), encoding="utf-8")
+        r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "lomt_from.py"), str(obj)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", shell=False, timeout=120)
+        assert r2.returncode == 0, f"rc={r2.returncode} {(r2.stdout + r2.stderr)[:200]}"
+    print("      源码文件不给 --lang 会按后缀认；`.potato.json` 照旧当对象读")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:

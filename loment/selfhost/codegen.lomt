@@ -42,7 +42,11 @@ const CG_ENUM: u32 = 105472;       // 枚举表 (80 B/条)
 const CG_MAXENUM: u32 = 320;
 const CG_LOCAL: u32 = 131072;      // 局部表 (4 KiB, 每函数清零)
 const CG_PARAM: u32 = 135168;      // 每函数形参类型 (80 B/条)
-const CG_BYTES: u32 = 503168;      // 整块大小 (驱动器按这个数从 brk 开)
+// `docs/210` §7 那次放宽的**安全名表**：`[0]` 条数，`[1..]` = "首参不外逃"的用户函数
+// **名字 token 下标**。由 `compute_safe` 在 `emit_module` 里算（`compute_safe` 也 `pub`，
+// 于是 `potato.lomt` 用同一支扫描、只是写进它自己的表 —— **同一份源，两边算出的集合相同**）。
+const CG_SAFE: u32 = 503168;       // 安全名表 (1 + CG_MAXFN 个 u32)
+const CG_BYTES: u32 = 521576;      // 整块大小 (驱动器按这个数从 brk 开；含上面的安全名表)
 use bytes
 use lexer
 
@@ -911,21 +915,131 @@ fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
 
 // ---------------------------------------------------------------- L0 静态提升 (docs/210 §2)
 
-/// `load8` / `store8` / `atomic_add` —— **唯一三个"首参是 `ptr`、且只解引用它"的内建**。
-/// 名单的来源与排除理由在 `tools/lomentc.py` 的 `_L0_SAFE_BUILTINS`（那里有一张逐条说清的
-/// 表）。**`load16/32/64`、`store16/32/64` 不在里面** —— 它们不是内建，是
-/// `loment/examples/bytes.lomt` 里用 `load8`/`store8` 拼出来的 pub 函数：调用它们
-/// 等于**把指针交给别人的栈帧**，而"那个函数不会把 p 存起来"编译器并不知道
-/// （用户自己写一个同名函数就能推翻它）。这是 L0 今天最窄的一处，见 `docs/210` §7。
-pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
+/// 被调 `i` 安不安全 —— **首参不会因为这次调用而外逃**。两类：
+///
+///   * 三个内建 `load8` / `store8` / `atomic_add`（`.lomentc._L0_SAFE_BUILTINS` 那张表，
+///     逐条理由在那边）；
+///   * **首参不外逃的用户函数**（`tbl` 里那些，见 `compute_safe`）—— **`docs/210` §7 那次
+///     放宽**。`load16/32/64`、`store16/32/64` 原来被排除（"p 进了别人的栈帧"），现在
+///     只要那个函数**只把首参透给安全的被调**（`load32 -> load16 -> load8`），它就够格 ——
+///     于是 `bytes.lomt` 的库函数对 L0/L1/L2 都成了安全被调。**这是 L0 那一处最窄的放宽。**
+///
+/// 限定名（`x.p`）不是内建、也不是我们的用户函数。
+pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32, tbl: ptr) -> bool {
     if i == 0 || tok_kind(toks, i) != 0 {
         return false;
     }
     if tok_is(src, toks, i - 1, ".") || tok_is(src, toks, i - 1, ":") {
-        return false;   // 限定名不是内建
+        return false;   // 限定名不是内建、也不是我们的用户函数
     }
-    return tok_is(src, toks, i, "load8") || tok_is(src, toks, i, "store8")
-        || tok_is(src, toks, i, "atomic_add");
+    if tok_is(src, toks, i, "load8") || tok_is(src, toks, i, "store8")
+            || tok_is(src, toks, i, "atomic_add") {
+        return true;
+    }
+    // **跨函数 deref-only 放宽**（`docs/210` §7）：`tbl` 里那些"首参不外逃"的用户函数，
+    // 调用它们与调内建**一样安全**（首参不会流到别处）。
+    return safe_by_tok(src, toks, i, tbl) == 1;
+}
+
+/// token `i` 的名字在安全名表 `tbl` 里吗（按**文本**比，不看下标 —— 调用点与声明处是
+/// 两个 token）。表形如 `[count, name_tok_1, name_tok_2, …]`。
+pub fn safe_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
+    let n: u32 = load32(tbl, 0);
+    let j: u32 = 1;
+    while j <= n {
+        if tok_eq(src, toks, load32(tbl, j * 4), i) == 1 {
+            return 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 试把 `nm`（一个 `fn` 的名字 token）标进安全名表 —— 够格就标、回 1（**变了**），否则回 0。
+///
+/// 规则与参考实现的 `_deref_summary` + `_gc_alpha_pass` 的不动点**同一条**（定义在 token 流上）：
+/// 首参是 `ptr`，且它在函数体内**每一处**出现都必须是"**整个第一个实参**" —— 紧跟 `(`、
+/// 那个 `(` 紧跟一个标识符被调名（不是限定名）、且首参后面紧跟 `,` 或 `)` —— 而那个被调
+/// **本身安全**（内建或已在表里）。任何别的用法即逃逸，不标。
+fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
+    if safe_by_tok(src, toks, nm, tbl) == 1 {
+        return 0;                                   // 已经在表里
+    }
+    // 找形参表的 `(`（跳过函数名与 `<...>`）
+    let lp: u32 = nm + 1;
+    let g1: u32 = 0;
+    while tok_kind(toks, lp) != 4 && !tok_is(src, toks, lp, "(") && g1 < 64 {
+        lp = lp + 1;
+        g1 = g1 + 1;
+    }
+    if !tok_is(src, toks, lp, "(") {
+        return 0;
+    }
+    let p: u32 = lp + 1;
+    if tok_kind(toks, p) != 0 || tok_is(src, toks, p, "self") {
+        return 0;                                   // 首参不是普通标识符（空表 / self）
+    }
+    if !(tok_is(src, toks, p + 1, ":") && tok_is(src, toks, p + 2, "ptr")) {
+        return 0;                                   // 首参不是 ptr
+    }
+    // 函数体的 `{`
+    let b: u32 = p + 3;
+    let g2: u32 = 0;
+    while tok_kind(toks, b) != 4 && !tok_is(src, toks, b, "{") && g2 < 8192 {
+        b = b + 1;
+        g2 = g2 + 1;
+    }
+    if !tok_is(src, toks, b, "{") {
+        return 0;
+    }
+    let at: u32 = b + 1;
+    let end: u32 = skip_block(src, toks, b) - 1;
+    let k: u32 = at;
+    while k < end {
+        if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, p) {
+            if tok_is(src, toks, k - 1, "let") || tok_is(src, toks, k + 1, "=") {
+                return 0;                           // 遮蔽 / 重新赋值
+            }
+            if !(k >= 2 && tok_is(src, toks, k - 1, "(") && tok_kind(toks, k - 2) == 0
+                    && !tok_is(src, toks, k - 3, ".") && !tok_is(src, toks, k - 3, ":")
+                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+                return 0;                           // 其余任何用法：逃逸
+            }
+            if l0_safe_callee(src, toks, k - 2, tbl) == false {
+                return 0;                           // 被调本身还不安全
+            }
+        }
+        k = k + 1;
+    }
+    let c: u32 = load32(tbl, 0);
+    store32(tbl, (c + 1) * 4, nm);
+    store32(tbl, 0, c + 1);
+    return 1;
+}
+
+/// 算安全名表（`tbl`，写进调用方给的缓冲）—— 全局不动点：`safe = 三个内建`；反复把
+/// "首参不外逃、且只流进安全被调"的用户函数加进去，直到不动。于是 `load32 -> load16 ->
+/// load8` 一层层解开。**与 `potato.lomt` 共用**（那边 `use codegen` 调这一支）——
+/// 同一份扫描 ⇒ 两边集合相同。回表里的条数。
+pub fn compute_safe(src: ptr, toks: ptr, tbl: ptr) -> u32 {
+    store32(tbl, 0, 0);
+    let ch: u32 = 1;
+    let rounds: u32 = 0;
+    while ch == 1 && rounds < 256 {
+        ch = 0;
+        rounds = rounds + 1;
+        let i: u32 = 0;
+        while tok_kind(toks, i) != 4 {
+            if tok_is(src, toks, i, "fn") && !(i > 0 && tok_is(src, toks, i - 1, "extern"))
+                    && tok_kind(toks, i + 1) == 0 {
+                if safe_mark_fn(src, toks, i + 1, tbl) == 1 {
+                    ch = 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return load32(tbl, 0);
 }
 
 /// L0 提升的字节数（0 = 不提升）。`nm` 是那个局部**名字的 token 下标**。
@@ -946,7 +1060,7 @@ pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32) -> bool {
 /// (b) 等价于"只被读/写透过、从不外逃"；提升后的缓冲是**入口块的一条 alloca**，
 /// 活满整个函数调用，所以**不需要**"引用不出块"那条约束。
 pub fn l0_size_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
-                   npar: u32, par: ptr) -> u32 {
+                   npar: u32, par: ptr, tbl: ptr) -> u32 {
     let q: u32 = 0;
     while q < npar {                                // 形参同名 -> 不提升
         if tok_eq(src, toks, load32(par, q * 8), nm) {
@@ -974,7 +1088,7 @@ pub fn l0_size_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
                 return 0;                           // 重新赋值
             }
             if !(k >= 2 && tok_is(src, toks, k - 1, "(")
-                    && l0_safe_callee(src, toks, k - 2)
+                    && l0_safe_callee(src, toks, k - 2, tbl)
                     && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
                 return 0;                           // 其余任何用法: 外逃
             }
@@ -988,7 +1102,7 @@ pub fn l0_size_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
 /// 数 `gc_ladder`（`docs/210` §5）那一支自己给显式参数，见 `potato.lomt`。
 fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     return l0_size_at(src, toks, nm, load32(s, 564), load32(s, 568),
-                      load32(s, 12), ptr_add(s, CG_CUR));
+                      load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, CG_SAFE));
 }
 
 /// 入口块的 L0 缓冲 alloca（紧跟 `.addr` 之后发，与 `lomentc.locals_prologue` 同序）。
@@ -1045,7 +1159,7 @@ fn l0_store(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
 /// **L0 已经提到栈上的名字豁免 4、5**（它不碰 arena）。**代价是"整体取消"**：体内一个分配
 /// 出体，整格就不能归还 —— 用表达力换零成本（`docs/210` §4.4），不是缺陷。
 pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
-                npar: u32, par: ptr) -> u32 {
+                npar: u32, par: ptr, tbl: ptr) -> u32 {
     let nalloc: u32 = 0;
     let k: u32 = at;
     while k < end {
@@ -1079,7 +1193,7 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
                 && tok_is(src, toks, nm + 2, "ptr") && tok_is(src, toks, nm + 3, "=")
                 && tok_is(src, toks, nm + 4, "alloc") && tok_is(src, toks, nm + 5, "(") {
             ncand = ncand + 1;
-            if l0_size_at(src, toks, nm, fat, fend, npar, par) == 0 {   // 提到栈上的豁免（它不欠这次归还）
+            if l0_size_at(src, toks, nm, fat, fend, npar, par, tbl) == 0 {   // 提到栈上的豁免（它不欠这次归还）
                 nlive = nlive + 1;
                 let ndecl: u32 = 0;
                 let p: u32 = at;
@@ -1092,7 +1206,7 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
                         } else if tok_is(src, toks, p + 1, "=") {
                             return 0;             // 重新赋值
                         } else if !(p >= 2 && tok_is(src, toks, p - 1, "(")
-                                && l0_safe_callee(src, toks, p - 2)
+                                && l0_safe_callee(src, toks, p - 2, tbl)
                                 && (tok_is(src, toks, p + 1, ",")
                                     || tok_is(src, toks, p + 1, ")"))) {
                             return 0;
@@ -1128,7 +1242,8 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
 fn l2_ok(s: ptr, src: ptr, toks: ptr, at: u32, end: u32) -> u32 {
     let fat: u32 = load32(s, 564);
     let fend: u32 = load32(s, 568);
-    return l2_ok_at(src, toks, at, end, fat, fend, load32(s, 12), ptr_add(s, CG_CUR));
+    return l2_ok_at(src, toks, at, end, fat, fend, load32(s, 12), ptr_add(s, CG_CUR),
+                    ptr_add(s, CG_SAFE));
 }
 
 /// 纪元关：把前沿写回入口那一刻的值（`sv` = 入口记下的 temp 号；0 = 这一格没开纪元）。
@@ -1188,7 +1303,7 @@ fn ret_after(src: ptr, toks: ptr, a: u32, b: u32, last: u32, end: u32) -> u32 {
 /// （它只管还）。所以这边不调 `l0_size`，用自己这条 —— 而调用方靠"`l0_size` 非 0"
 /// 把 L0 已经提走的排除掉（提走的根本不碰 arena）。
 pub fn l1_ptr_only_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
-                      npar: u32, par: ptr, out: ptr) -> u32 {
+                      npar: u32, par: ptr, out: ptr, tbl: ptr) -> u32 {
     let q: u32 = 0;
     while q < npar {                                 // 形参同名 -> 不是候选
         if tok_eq(src, toks, load32(par, q * 8), nm) {
@@ -1209,7 +1324,7 @@ pub fn l1_ptr_only_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
             } else if tok_is(src, toks, k + 1, "=") {
                 return 0;                            // 重新赋值
             } else if !(k >= 2 && tok_is(src, toks, k - 1, "(")
-                    && l0_safe_callee(src, toks, k - 2)
+                    && l0_safe_callee(src, toks, k - 2, tbl)
                     && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
                 return 0;                            // 其余任何用法：外逃
             }
@@ -1227,7 +1342,8 @@ pub fn l1_ptr_only_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
 /// （`emit_l1` 要读它）。数 `gc_ladder` 那一支自己给 `out`（见 `potato.lomt`）。
 fn l1_ptr_only(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     return l1_ptr_only_at(src, toks, nm, load32(s, 564), load32(s, 568),
-                          load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, 584));
+                          load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, 584),
+                          ptr_add(s, CG_SAFE));
 }
 
 /// **L1 定活**（`docs/210` §2.5）：把"最后一次用处已经过去"的块还掉。
@@ -5530,6 +5646,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         i = i + 1;
     }
     store32(s, 640, n);
+    // **跨函数 deref-only 安全表**（`docs/210` §7）：函数表登记完就能算 —— 它只读 token 流。
+    // 放在这里（不是发射前逐个）：`l0_safe_callee` 在发射**每个** `alloc` 候选时都要查它。
+    let _sft: u32 = compute_safe(src, toks, ptr_add(s, CG_SAFE));
     // struct 表: name_tok | nfields | 8 × (field_tok, type_tok) —— 字段仅标量类型
     let sn: u32 = 0;
     i = 0;

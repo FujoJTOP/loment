@@ -115,6 +115,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
+                 "loment_gc_surface_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
@@ -162,6 +164,112 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
 #: 一次脏树就够), 而好几条判据要读 `lompi/`。并行调度时这一组单独串行跑。
 #: (`loment_dist_test` 用的 `loment/build/dist` 只有它自己碰, 不必独占。)
 EXCLUSIVE_STATIC = ("lompi_sync",)
+
+#: 各条判据在 **CI runner**（ubuntu-latest, 4 vCPU）上的实测耗时, 秒。
+#: 量于 2026-09-26 那一轮 `gate.out`（run 36209626967）, **`loment_dist_test` 除外** ——
+#: 它那 954s 里有 3/4 是"用 stage1 重编自举驱动", 2026-10-09 已经拿掉（docs/213）,
+#: 这里填的是拿掉之后的估计值。
+#:
+#: **只用来切分片**, 且过期只会让分片不均 —— 不会漏判据: 分片是对 `STATIC_CHECKS`
+#: **全表**切的（见 `shards`）, 没登记的名字按 `SHARD_DEFAULT_S` 算。
+SHARD_COST = {
+    "lomentc_test": 15.8,
+    "potato_test": 16.8,
+    "loment_ct_test": 1.9,
+    "loment_ctrans_test": 168.9,
+    "loment_lomtfrom_test": 9.3,
+    "loment_trans_test": 136.6,
+    "loment_potato_emit_test": 50.0,
+    "loment_grammar_test": 1.1,
+    "loment_tools_test": 6.3,
+    "loment_p8_test": 229.2,
+    "loment_rule_parity": 2.5,
+    "loment_seed_test": 243.8,
+    "loment_editors_test": 1.3,
+    "loment_dist_test": 110.0,
+    "loment_src": 1.2,
+    "loment_lib_test": 10.0,
+    "loment_cli_test": 50.8,
+    "loment_err_test": 6.6,
+    "loment_std_test": 1.0,
+    "loment_lompi_test": 119.8,
+    "loment_multisyntax_projects_test": 2.1,
+}
+#: 没登记耗时的判据按这个算。实测大部分判据在秒级, 取 8s 偏保守。
+SHARD_DEFAULT_S = 8.0
+
+#: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 200s+）, 与任何别的判据同片
+#: 都不会更快（墙钟是 max 不是 sum）, 而独占一片之后那一片的工具链可以压到最小。
+#: 两条都只用 **clang**: `loment_seed_test` 的 `bootstrap.sh` 在 runner 上走 clang 那支
+#: （`loment/build/genesis/` 那份的 git mode 是 100644, 没有可执行位, `[ -x ]` 过不了）,
+#: `loment_p8_test` 的对照组也是 clang。所以 `shard_profile` 敢把它们的那两片标成 `llvm`。
+#: **往这里加一条之前, 先逐条确认它真的只要 clang** —— 并把它从 `SHARD_COST` 的负担里
+#: 拿走（它自己一片, 不再参与均分）。
+ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test")
+
+
+def shards(n: int) -> list[list[str]]:
+    """把 `STATIC_CHECKS` 切成 `n` 片: 独占的、长尾的各自成片, 其余按实测耗时贪心均分。
+
+    **为什么是计算出来的而不是手写一张表**: 门禁的分片表一旦手写, 新增一条判据时
+    它就会**静默落在所有分片之外** —— 那条判据从此不跑, 而门禁照样绿。这正是
+    "加语法构造要清点所有读 L1 源的入口"那类洞的分片版。计算出来的表是
+    `STATIC_CHECKS` 的一个**划分**, 覆盖是构造性的; 下面那条断言是防止将来改写时
+    把它悄悄破坏（`--shard-plan` 也会跑一遍）。
+
+    片序（`n` 足够大时）: **片 0** = `EXCLUSIVE_STATIC` —— 它们写仓库共享位置, 不能与
+    别的判据同时跑, 而摊到并行 job 上之后"同时"还包括**别的 job**, 所以那一片自己
+    一个 job（`gate.yml` 里其余分片 `needs:` 它）; 接着每一条 `ISOLATED_STATIC`
+    各占一片; 最后才是均分出来的片。`n` 不够分时**直接断言失败**, 不静默合并 ——
+    合并了就不再是"那一片只要 clang"。
+
+    `n <= 1` 时退化成"整道门禁一片"（就是老行为）。
+    """
+    if n <= 1:
+        return [list(STATIC_CHECKS)]
+    excl = [x for x in STATIC_CHECKS if any(e in x for e in EXCLUSIVE_STATIC)]
+    iso = [x for x in STATIC_CHECKS if x in ISOLATED_STATIC]
+    rest = [x for x in STATIC_CHECKS if x not in excl and x not in iso]
+    n_rest = n - 1 - len(iso)
+    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会让
+    # `gate.yml` 里那句"这一片只要 clang"变成假话（合片之后什么判据都有）。
+    assert n_rest >= 1, (f"要 {n} 片分不开: 独占的 {len(excl)} 条 + 长尾的 {len(iso)} 条"
+                         f"各占一片（共 {1 + len(iso)} 片）, 剩下 {len(rest)} 条还得有地方放"
+                         f" —— 至少 {2 + len(iso)} 片")
+    buckets: list[list[str]] = [[] for _ in range(n_rest)]
+    load = [0.0] * len(buckets)
+    # **按耗时从大到小**装进当前最轻的那片: 先放大件, 大小件之间的空隙才填得满。
+    for name in sorted(rest, key=lambda x: -SHARD_COST.get(x, SHARD_DEFAULT_S)):
+        i = load.index(min(load))
+        buckets[i].append(name)
+        load[i] += SHARD_COST.get(name, SHARD_DEFAULT_S)
+    out = [excl] + [[x] for x in iso] + buckets
+    # 守卫: 这必须是一个**划分** —— 一条不漏、一条不重
+    flat = [x for b in out for x in b]
+    assert len(out) == n, f"切出 {len(out)} 片, 要 {n} 片"
+    assert len(flat) == len(set(flat)), f"分片里有重复: {len(flat)} vs {len(set(flat))}"
+    assert sorted(flat) == sorted(STATIC_CHECKS), "分片不是 STATIC_CHECKS 的划分"
+    assert all(b for b in out), "有分片是空的"
+    return out
+
+
+def shard_profile(k: int, n: int) -> str:
+    """第 `k` 片（从 1 数）要装什么 —— `gate.yml` 按这个决定装工具链。
+
+    三档, 理由都很具体（**少装一个包就是一条假红**, 多装一个就是白等的几十秒）:
+
+    * `none` —— 这一片一条外部命令都不碰（纯 Python + 仓内自己的原生后端）。
+    * `llvm` —— 只要 LLVM 19（clang）+ coreutils。**只有 `ISOLATED_STATIC` 独占的片
+      能是这一档**: "只要 clang"那句话是**逐条看过**的, 而均分出来的片里什么判据
+      都有, 看不过来 —— 于是那些一律 `full`, 宁可多装。
+    * `full` —— 其余: qemu / go / java / node / vim 都可能用上（包名单在 `gate.yml`）。
+    """
+    b = shards(n)[k - 1]
+    if b and all(any(e in x for e in EXCLUSIVE_STATIC) for x in b):
+        return "none"
+    if b and all(x in ISOLATED_STATIC for x in b):
+        return "llvm"
+    return "full"
 
 
 def _sweep_wsl_tmp() -> None:
@@ -213,13 +321,17 @@ def _run_one_check(name: str) -> tuple[str, bool, str, float]:
     return name, rc == 0, (tail[-1] if tail else ""), dt
 
 
-def run_static(only: tuple[str, ...] = (), jobs: int = 1):
+def run_static(only: tuple[str, ...] = (), jobs: int = 1, names: list[str] | None = None):
     """跑各检查脚本的 main()。返回 [(name, ok, tail, dt)], **顺序 = STATIC_CHECKS 顺序**。
 
     **每条都计时**: 不看这个数就没法谈"门禁太慢"是慢在哪 —— 41 条里往往几条吃掉大半。
     计时结果按耗时排序打出来 (见 `main`), 于是"该优化哪条"是个实测结论而不是猜。
 
     `only` 非空时只跑名字里含这些子串的那几条 —— 优化门禁时得能单独把一条跑起来看。
+
+    `names` 直接给**这一轮要跑的名字表**（`--shard K/N` 走这条）, 与 `only` 二选一;
+    它来自 `shards()` 的某一格, 所以**不需要**在这里再校验覆盖 —— 那里已经断言过
+    "分片是 `STATIC_CHECKS` 的一个划分"。
 
     **`jobs > 1` 时并行跑**。41 条彼此独立, 串行跑纯是浪费; 墙钟时间从"和"变成
     "最慢的那条"。两条前提:
@@ -228,7 +340,8 @@ def run_static(only: tuple[str, ...] = (), jobs: int = 1):
       * 但 WSL 的 `/tmp` 与仓库是**共享**的, 所以 (a) 各模块的 WSL 临时文件名都带了
         进程号 (见那些模块里的 `_T`), (b) `EXCLUSIVE_STATIC` 里那几条独占着跑。
     """
-    names = [n for n in STATIC_CHECKS if not only or any(o in n for o in only)]
+    if names is None:
+        names = [n for n in STATIC_CHECKS if not only or any(o in n for o in only)]
     if only:
         print(f"fujoci: --only-static 只跑 {len(names)}/{len(STATIC_CHECKS)} 条", flush=True)
 
@@ -324,15 +437,52 @@ def main():
                     help="只跑 L0 静态门禁 (lomc_test / lom_audit / fuai_contract), 不启 QEMU")
     ap.add_argument("--only-static", action="append", default=[], metavar="SUBSTR",
                     help="只跑静态门禁里名字含 SUBSTR 的那几条 (可重复) —— 优化门禁用")
+    ap.add_argument("--shard", metavar="K/N", default=None,
+                    help="只跑第 K 片（共 N 片, K 从 1 数）—— 把整道门禁摊到 N 个并行 job 上, "
+                         "见 shards()。`K/N` 里 N 必须等于 `--shard-plan` 给的那个 N")
+    ap.add_argument("--shard-plan", type=int, metavar="N", default=None,
+                    help="只打印 N 片的分法（每片一行: 档位 + 名字）, 不跑任何判据")
+    ap.add_argument("--shard-profile", metavar="K/N", default=None,
+                    help="只打印第 K 片要装的工具链档位（none/llvm/full）—— gate.yml 用")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
     a = ap.parse_args()
 
+    if a.shard_plan is not None:
+        for i, b in enumerate(shards(a.shard_plan)):
+            print(f"shard {i + 1}/{a.shard_plan} [{shard_profile(i + 1, a.shard_plan)}]: "
+                  f"{' '.join(b)}")
+        return 0
+
+    if a.shard_profile:
+        k_s, _, n_s = a.shard_profile.partition("/")
+        try:
+            k, n = int(k_s), int(n_s)
+        except ValueError:
+            ap.error(f"--shard-profile 要写成 K/N（如 2/5）, 得到 {a.shard_profile!r}")
+        print(shard_profile(k, n))
+        return 0
+
+    # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的
+    # 覆盖守卫都只在那一个地方（手写名字表会静默漏掉新判据, 见 `shards` 的说明）。
+    picked: list[str] | None = None
+    if a.shard:
+        k_s, _, n_s = a.shard.partition("/")
+        try:
+            k, n = int(k_s), int(n_s)
+        except ValueError:
+            ap.error(f"--shard 要写成 K/N（如 2/6）, 得到 {a.shard!r}")
+        allp = shards(n)
+        if not 1 <= k <= len(allp):
+            ap.error(f"--shard {a.shard}: K 要在 1..{len(allp)} 之间")
+        picked = allp[k - 1]
+        print(f"fujoci: 分片 {k}/{n} —— {len(picked)} 条: {' '.join(picked)}", flush=True)
+
     if a.static_only:
         _sweep_wsl_tmp()
     wall0 = time.perf_counter()
-    static = run_static(tuple(a.only_static), a.jobs)     # 每条结果它自己打 (见 _report)
+    static = run_static(tuple(a.only_static), a.jobs, picked)   # 每条结果它自己打 (见 _report)
     wall = time.perf_counter() - wall0
     # **耗时榜**: 优化门禁只能优化"实测最慢的那几条"。41 条里往往 5 条吃掉八成 ——
     # 没有这张榜，"哪条慢"就永远是个印象 (而印象通常错)。
