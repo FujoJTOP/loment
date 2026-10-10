@@ -159,9 +159,14 @@ jobs:
   # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
   # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
   #
-  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 5` 的副本（片号、总数、
+  # `include:` 里那 6 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数、
   # 档位）。**改分片形状要同时改 `ci.py` 和这里**，而"档位自检"那一步会让漏改的
   # 那一片直接失败 —— 见文件头第四条边界。
+  #
+  # **6 这个数是量出来的**：5 片那一轮（run 38008195263）最重的是"均分"那两片之一
+  # （301s = 装工具链 95s + 30 条判据的和 294s），而长尾那两片各自只要 180s / 202s。
+  # 把均分的那两片再对半切，最重片就落到 seed 那片的地板上（~207s）—— 再往上加片
+  # 只会重复付装工具链的钱，墙钟不动（它的下限是"最长的那条判据 + 那片的工具链"）。
   static-shard:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
@@ -171,11 +176,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { shard: 1, total: 5, profile: none }
-          - { shard: 2, total: 5, profile: llvm }
-          - { shard: 3, total: 5, profile: llvm }
-          - { shard: 4, total: 5, profile: full }
-          - { shard: 5, total: 5, profile: full }
+          - { shard: 1, total: 6, profile: none }
+          - { shard: 2, total: 6, profile: llvm }
+          - { shard: 3, total: 6, profile: llvm }
+          - { shard: 4, total: 6, profile: full }
+          - { shard: 5, total: 6, profile: full }
+          - { shard: 6, total: 6, profile: full }
     steps:
       - uses: actions/checkout@v4
 
