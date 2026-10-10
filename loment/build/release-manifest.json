@@ -35,7 +35,7 @@
   },
   {
    "path": "tools/potato_from.py",
-   "sha256": "8884f5478d2720ce51a22b7693a5ad8b9200db5eee50d8441d92a109ffcf2392"
+   "sha256": "453943dd705e31ae30772b9c683b5ea0ee52923ca5c49f88075c2f72b856d3f6"
   },
   {
    "path": "tools/potato_measure.py",
@@ -51,15 +51,15 @@
   },
   {
    "path": "tools/loment.py",
-   "sha256": "dee5bcafe03ea2767e6d5eff295f11202623c95e5c55a1d581118630eac9ded2"
+   "sha256": "e393307bacb4c9dc8f89d76773ef2e6aba56f48bcb6e1f62623a37813149c444"
   },
   {
    "path": "tools/lomfmt.py",
-   "sha256": "6a7edf655f5ffeb59930dbca0000148370efc1bb2089776c172d19904f08d156"
+   "sha256": "25cd667e20d71e388d51d7a008d1ce7c44af651e54b4d06fc41205d765159fd5"
   },
   {
    "path": "tools/lomdoc.py",
-   "sha256": "da187be19e6dae612979fee1629d904444d1ab58081498e11054cd632c79d7b7"
+   "sha256": "c231137adbc933061ce950821120d4a545a91fcbe875acabf8c5da039177665a"
   },
   {
    "path": "tools/lompkg.py",
@@ -687,7 +687,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "3c64e63a779c48cdad3ee49d931fcb802a3a48a46d9055043e3d76dd43f32b9e"
+   "sha256": "007aa99105d2a0c9ae6d1cbc52756e51c880c431a0a2d911c6d729dd501ed3f3"
   },
   {
    "path": "tools/loment_build.py",
@@ -823,11 +823,11 @@
   },
   {
    "path": "tools/lomt_from.py",
-   "sha256": "a27baaf6bd2b8981a07945768916dd5fc6f7f4ec618c44c88af2045710851d1c"
+   "sha256": "9f429ecee13ec3630dec58f3b741f4c0bb6a4136234845f0c81114ed03a98b6e"
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "b06381c16021eb22a4dae0c88f503a70b7dbe396642abd90e91ab744f10a15f5"
+   "sha256": "286c9433352c127cdd23c3d1d034c55d616023d5fd80f11d8a4e28ccd59ad1b7"
   },
   {
    "path": "tools/loment_multisyntax_projects_test.py",
@@ -839,7 +839,7 @@
   },
   {
    "path": "tools/trans_core.py",
-   "sha256": "aae7f66d21143d05e9af3080cdf93a6692691ba24a38b2d63c641f76c610fe81"
+   "sha256": "55e04d8e1d13266413190f77ab2e036d83f3c7416e0db3203fd40cbabc328187"
   },
   {
    "path": "tools/ctrans.py",
@@ -847,7 +847,7 @@
   },
   {
    "path": "tools/loment_ctrans_test.py",
-   "sha256": "a8a2ba6143328a9ff4e2f86dcc2ef76fbb6b3068ee0ccbc9ba7ee3957cc323ab"
+   "sha256": "981457d90e82e789896dfac64169413ea019675a31b5b7c7c620210fb732b8e6"
   },
   {
    "path": "tools/pytrans.py",
@@ -1855,7 +1855,7 @@
   },
   {
    "path": "docs/186-c-to-loment-translation.md",
-   "sha256": "251cd4cbdc41f85dd7aec971ae22294a36e8249793c3a2cc29e9345ad3c52191"
+   "sha256": "5084dbaf665f31e34a84e9b13b1a5cc13adeb9023d949b696f09be68aaf6ed1a"
   },
   {
    "path": "docs/187-python-to-loment-translation.md",
