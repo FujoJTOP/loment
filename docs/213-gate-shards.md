@@ -263,6 +263,15 @@ def test_driver_seed_matches_reference() -> None:
      是**静默**的）：`static-manual` 里 `read -ra parts <<< "..."` 直接
      `Syntax error: redirection unexpected`。各分片那几条恰好只用了 POSIX 写法所以没炸
      —— **那是运气**。修法是在 workflow 级声明 `defaults.run.shell: bash`。
+  4. **`rustc`/`cargo`（2 条）** —— 而这一条**我把判断做错了**：v1 的注释写着"不加
+     rustc/dotnet/nvim，runner 上本来就没有"，依据是"原 `gate.yml` 那两条 apt 命令里
+     没有 rustc"。但那份 apt 命令**只是补差**，runner 镜像自带的东西它一个字都不提。
+     查旧 runner 的自述才看清 `rustc  /home/runner/.cargo/bin/rustc` —— **一直有**
+     （rustup 装的）。于是 `loment_tools_test` 的 `test_m61/m62`（**裸调** `rustc`，没有
+     which 守卫）在容器里 `FileNotFoundError`。加 `rustc cargo`（apt 版），并把那条"不加"
+     的纪律收窄到 `dotnet`/`nvim`（那两个才是真没有）。
+     **顺带**：镜像末尾那条自述 `RUN` 加了 `set -e` + 一串 `--version`，于是**删掉一个包
+     会在构建时失败**，而不是变成门禁上一条看着像判据坏了的假红。
 
   还有一条**顺带看见、不属于容器**的：`safe.directory` 的值别写 `${{ github.workspace }}`
   —— 那是**宿主**路径（`/home/runner/work/loment/loment`），而容器里同一棵树在
