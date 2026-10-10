@@ -115,6 +115,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
+                 "loment_gc_surface_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
