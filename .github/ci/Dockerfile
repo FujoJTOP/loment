@@ -25,6 +25,15 @@
 #     的自述才看清：`rustc  /home/runner/.cargo/bin/rustc` —— **runner 自带**（rustup 装的），
 #     只是从来没写进 gate.yml。所以这里加 `rustc cargo`（apt 版）把它补回来。
 #   * 增删之后要跑一遍门禁，看 `环境自述` 那一步的输出与红项有没有变。
+#
+# **`gcc libc6-dev zlib1g-dev`（2026-10-10 加，随 `docs/220` 的 `--hosted`）**：这是
+# 上面那条纪律的一次**正面使用** —— 不是"补一个本来就该有的"，是**新能力要的新依赖**。
+# 原来一条都不需要：`--opt` 走的是 `clang -nostdlib -ffreestanding -static`，刻意不碰
+# libc。而 `--hosted` 要的正是反过来 —— **链真 libc、链真库**，所以它需要
+# `libc6-dev`（`crt1.o` / `libc.so`）与一个**能链接的** `libz`（`zlib1g-dev` 提供
+# `libz.so` 那个符号链接，运行期的 `libz.so.1` 不足以 `-lz`）。
+# 判据是 `loment_hosted_test`：缺了它那条会**红**（不是 SKIP）—— 这正是要的效果，
+# 少了包就是假红，而不是静默少跑一条。
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -45,6 +54,7 @@ RUN apt-get update -qq && apt-get install -y -qq \
       ca-certificates curl wget gnupg git sudo lsb-release software-properties-common \
       python3 python-is-python3 make unzip xz-utils diffutils \
       rustc cargo \
+      gcc libc6-dev zlib1g-dev \
       qemu-system-x86 qemu-user \
       golang-go default-jdk \
       nodejs npm vim \

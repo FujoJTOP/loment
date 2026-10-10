@@ -125,6 +125,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
                  # 含 `dlsym`(按名解析) 与内联 `syscall`(符号表看不见) 两个证伪对。
                  "loment_ports_test",
+                 # 对外端口的第一条腿 (docs/220): `--hosted` 真的链上系统 libz,
+                 # 一份 Loment 源 compress/uncompress 逐字节回原文; 附一条证伪。
+                 "loment_hosted_test",
                  "loment_rel_test",
                  "loment_editors_test",
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",

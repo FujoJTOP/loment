@@ -204,7 +204,7 @@ jobs:
     timeout-minutes: 60
     if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:3
+      image: ghcr.io/fujojtop/loment-ci:4
     steps:
       - uses: actions/checkout@v4
 
@@ -315,7 +315,7 @@ jobs:
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     needs: [static-exclusive]
     container:
-      image: ghcr.io/fujojtop/loment-ci:3
+      image: ghcr.io/fujojtop/loment-ci:4
     strategy:
       fail-fast: false
       matrix:
@@ -435,7 +435,7 @@ jobs:
     timeout-minutes: 180
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:3
+      image: ghcr.io/fujojtop/loment-ci:4
     steps:
       - uses: actions/checkout@v4
 

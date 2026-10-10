@@ -1,0 +1,190 @@
+# 220 · lompi 0.2.0：外源库成为库系统的头等公民
+
+> 状态: **执行中的程序**（2026-10-10）。起点是用户的一句话：
+> **「开发 lompi 0.2.0 Alpha —— 可以安装 Java/Python/C/C++/C# 的库并真的在 Loment 编译器
+> 调用这些库；同样允许修改 Loment 源代码。」**
+> 上游：`docs/183`（库兼容 × 语法层那条垂直，V0–V5 阶段表）· `docs/173`（FFI 四阶段）·
+> `docs/219`（世界端口表，S0 已落地）· `docs/212`（逃生舱：把优化外包给另一个时间点）。
+> 本文是**这次执行的账**：把用户拍的四条价写死，把程序分段，每段一条可证伪的判据。
+
+## 0. 一句话
+
+> **今天 README 上那句「calls libraries written in other languages」是真的才怪 —— 真实的
+> C 库连读都读不进来。** 这一版把它变成真的：一种**外源库**进 lompi 的 store，
+> 一条 `use` 把它链进产物，**真的算出结果**。
+>
+> 而这件事**几乎不用新写链接器**：Loment 发的本来就是 LLVM IR，
+> `extern fn` 本来就是 `declare` —— 缺的不是能力，是**一条把它交给 C 工具链的路，
+> 和一份把"这个产物通着世界"说出来的声明**。
+
+## 1. 起点：今天真不真（都有出处）
+
+| README / 文档说 | 今天 | 卡在哪 |
+|---|---|---|
+| `README.md:12`「calls libraries written in other languages — ten of them, end to end」 | **假的**。`--link` 只吃**自包含**的 `.o`（无重定位到非代码节、无未定义符号） | `tools/lomelf.py:2857`（指向 `.data`/`.rodata` 的重定位硬拒）· `tools/lomelf.py:3118`（未定义符号硬杀） |
+| 「外部库」在**库系统**里 | **不存在**。lompi 只认 `.lomt` 源码库 | `lompi/lpi_pkg.lomt:583`（只收 `.lomt`）· `lompi/lpi_cli.lomt:1414`（拒装） |
+| 动态库 / libc（`docs/173` 阶段 3） | **一处都没有** | `docs/173` §5b 那一格 ⛔ |
+| PE 侧 FFI | **明确拒绝** | `tools/lomelf.py:3173` |
+
+**一句话**：这不是"某层薄"，是**两条断开的半截**（`docs/183` §1 的原话）。
+`--link` 要你手工挑好一个玩具对象；lompi 不认任何非 Loment 的东西；两者只在源码里那个
+符号名上相接，此外零代码关联。
+
+## 2. 这次量到的那件事（决定全文的形状）
+
+**一份未改动的 Loment 源，经 clang 交叉编成 ELF 目标文件，由 gcc 链上系统真实的
+`libz.so`，跑出正确答案。**（2026-10-10，本机实测，`rc=0`）
+
+```
+loment ir hostz.lomt > hostz.ll          # 编译器一个字没改
+clang --target=x86_64-unknown-linux-gnu -c hostz.ll -o hostz.o
+gcc hostz.o -lz -o hostz                 # WSL, 系统 libz
+./hostz; echo $?                          # 0 —— compress→uncompress 逐字节回原文, 且压缩后确实更小
+```
+
+那条链上**每一个零件都已经在仓里**：
+
+* `tools/lomentc.py` 发的就是**标准文本 LLVM IR**（`tools/lomelf.py:20`：*"只吃文本 IR……任何
+  产出同一子集 `.ll` 的东西都能喂进来"*），而 clang 吃的**正是同一种文本 IR**；
+* `extern fn` 在 IR 里**本来就是** `declare i32 @compress(ptr, ptr, ptr, i64)`
+  （实测：`hostz.ll:220`）—— 一分改动都不需要；
+* `--opt` 已经在做同一形状的事（把 IR 交给 clang，`docs/212` §5 粒度 A）。
+
+⇒ **缺的只有两件**：一条**告诉构建"这个产物通着世界"的路**，和一份**库系统的位置**。
+
+## 3. 用户拍的四个价（2026-10-10）
+
+`docs/219` §10.3 把其中第一条写成"**要用户拍的价，不是本文能替他定的**"。用户拍了：
+
+| # | 问题 | 裁定 | 落点 |
+|---|---|---|---|
+| 1 | 动态装载与"产物可证明确定"互斥，选哪边 | **两者并存** | 静态收编做**默认纯净路径**；另开 `choose hosted` 解锁真 libc / 动态库（§4） |
+| 2 | 库从哪来 | **真去官方仓装**（并指出网络底座已在 main） | §6。⚠ 但 TLS/DNS 是缺的，见那一节 |
+| 3 | 平台 | **ELF + PE 都要** | §7 |
+| 4 | 完成线 | **五个生态全部真跑通才算完**（不接受 SKIP） | §8 的总表 |
+
+**第 1 条是这份文档的骨架**：它不是"选一边"，是**把一个程序的两条路都做出来，让程序自己说
+它走了哪条**。这正是 `choose` 的形状 —— 用户 2026-09-17 的原话是"**choose 就是 loment
+最伟大的发明**"（`docs/183` §2）。
+
+## 4. 机制一：`choose hosted`（新的一维）
+
+### 4.1 取值与默认
+
+| 写法 | 含义 | 默认？ |
+|---|---|---|
+| 不写 / `choose sealed` | **封闭**：产物到世界没有端口。外源成员必须自己闭合（今天 `--link` 的形状） | ✅ 默认 —— **默认档不改变任何现有程序的行为** |
+| `choose hosted` | **对外**：产物可以链真 libc / 真共享库。**端口表（`docs/219` §4）就是这份产物声明的世界面** | 否 |
+
+**为什么默认必须是 `sealed`**：默认档不许改变任何现有程序的行为（`docs/175` §3.4 的既有纪律）。
+`sealed` 就是今天的行为，一个字不改。
+
+### 4.2 两条冲突，各自点名拒
+
+| 对 | 为什么 |
+|---|---|
+| `hosted` × `no_std` | `no_std` 的定义是"只能用核那一层"、**没有宿主**；而 `hosted` 要链**宿主上的**库。定义上矛盾，与 `gc_auto` × `no_std` 那条同形 |
+| `hosted` × `gc_auto_alpha` | `docs/219` §6.1：L2（块纪元）是**分配器前沿回卷**（`docs/210` §2.3），它买的是栈纪律；而 C 库把指针放进**它自己的结构**里（zlib 的 `z_stream`），那些指针在 Loment 的栈之外 —— 前沿一回卷就是**悬垂** |
+
+**`hosted` × `gc_manual` / `gc_auto` 合法** —— 与 `runtime` × `gc_manual` 那条同理
+（"要这个、但那一项我自己管"必须能表达）。
+
+### 4.3 入口：hosted 产物是 C 运行期程序
+
+**`choose hosted` ⇒ 入口是 `fn main() -> u32`**；`sealed` 照旧是 `fn _start()`。
+
+**为什么不能沿用 `_start`**：宿主 C 运行期要自己起进程（`__libc_start_main` 做 TLS、
+`atexit`、stdio 缓冲），`_start` 跑在它前面。若 hosted 程序用 `printf` 再按今天的写法
+`syscall4(60, …)` 退出，**stdout 的缓冲不会被冲刷** —— 那是**静默丢输出**，
+正是本仓反复要消灭的那一类。让 C 运行期调用 `main` 并接管退出，这条隐患就不存在。
+
+### 4.4 构建怎么知道走了哪条
+
+编译器在 IR 头上发一行标记（`tools/lomentc.py:6131` 那个头旁边），两个启动器读它：
+
+* `sealed` → `lomelf`（自举链接器，`docs/173` §5b）；
+* `hosted` → C 工具链链真库。
+
+标成**响的失败**：`lomelf` 拿到 `hosted` 的 IR 要**明说**"hosted 产物不能用我链"，
+不许静默按 sealed 链出一个符号找不到的东西。
+
+## 5. 机制二：外源库进库系统（`docs/183` V0）
+
+**一个库 = 一份声明面 + 一份实现（源码**或**二进制）+ 一个身份**（`docs/183` §3）。
+
+```
+<store>/<name>/<version>/
+  <name>.lomt     声明单元 —— 普通 Loment, 里面全是 `extern fn`（语法层能生成, docs/183 V4）
+  foreign.lomp    清单 —— 生态 / 成员文件 / 取件配方 / 运行期需求
+  libfoo.a        实现（一个或多个成员；进**身份**）
+```
+
+**身份必须含二进制**（`docs/183` §3 的原话："二进制也要进身份，否则'同一份声明绑到不同的
+机器码'正是 `docs/168` 要防的那种错合并"）。今天只哈希 `.lomt`（`lompi/lpi_pkg.lomt:603`）。
+
+**为什么声明面是 `.lomt`**：`use <name>` 今天解析的**就是** `<name>.lomt`
+（`lpi_pkg.lomt:861`），而 `extern fn` 本来就是"只声明不发射"。所以**编译器的解析路径
+一行都不用改** —— 外源库与 Loment 库在 `use` 这一层**长得一模一样**。
+
+## 6. 取件：用户要"真去官方仓装"，而 TLS 是缺的
+
+**实测（本机，2026-10-10）**：socket 两个平台都通了（`docs/217` 已落地，PE 派发面 8→21 号，
+13 个联网号由 `ws2_32` 顶着）；但
+
+* **全树零 TLS** —— 没有握手、没有证书、没有密钥交换。`https://` 只作为 registry 的**字符串**
+  出现过（`lompi/lpi_cli.lomt:836`）；
+* **没有解析器** —— 没有 `getaddrinfo`，示例一律把 `127.0.0.1` 逐字节写进 `sockaddr_in`；
+* `lompi fetch` **不做任何网络 I/O** —— 它打印 `git clone`（`lpi_cli.lomt:1187`）。
+
+而 PyPI / Maven Central / NuGet **全是 HTTPS**。所以"真去官方仓装"今天的形状是：
+
+1. **取件配方**（每个生态一条：`pip download` / `mvn dependency:get` / `dotnet` / 源码 tarball），
+   lompi **打印**它，或（ELF 上，`loment/lib/proc.lomt` 的 `proc_sh`）执行它；
+2. 产物进 `lompi import`，内容寻址地进 store；
+3. **TLS 与 DNS 是这张表上的欠账，单独记**（§9）—— 不假装它已经解决。
+
+## 7. 平台：ELF + PE
+
+* **ELF 先通**：`gcc`/`clang` 链真库在这边是现成的（§2 实测）。
+* **PE 那条今天连 `--link` 都没有**（`tools/lomelf.py:3173` 明确拒绝）。PE 要有：
+  外部 COFF 目标文件的读入 + 导入表（`docs/173` 阶段 3 的 PE 面）+ hosted 的 C 工具链路径。
+  **这是本程序里最长的一段**，且它与 ELF 的形状不同（PE 的导入表是**写死的 11 个 kernel32
+  函数**，`lomelf.py:1203`）。
+
+## 8. 交付面：五个生态 × 两条腿
+
+| 生态 | 走哪条腿 | 端到端判据（**不允许 SKIP**） |
+|---|---|---|
+| **C** | hosted 静态链（`.a`/`.so`） | 调 zlib `compress`/`uncompress`，逐字节回原文（§2 已实测） |
+| **C++** | hosted，链 `libstdc++`（本机有 `libstdc++.a`） | 调一个真 C++ 库，结果进 Loment |
+| **C#** | hosted，NativeAOT 出 C ABI 库 | 调一个 C# 库的方法，结果进 Loment |
+| **Python** | hosted，链 `libpython3.14`（本机有 `.a` 与 `.so`）+ CPython C-API | 调 `numpy`/stdlib 算一个值，结果进 Loment |
+| **Java** | hosted，链 `libjvm` + JNI | 调一个 Java 类的方法，结果进 Loment |
+
+**两处已知的坑，先写死**：
+
+1. **本机 JDK 是 Windows 的（只有 `jvm.dll`）**，Linux 侧没有 `libjvm.so` ——
+   Java 那条要先按 `docs/177` 的老办法从 Adoptium 拿一份免安装 Linux JDK（实测
+   `api.adoptium.net` 200）。
+2. **CI 镜像故意不含 `dotnet`/`rustc`**（`.github/workflows/gate.yml` 的边界段写明了理由）。
+   用户要"不许 SKIP"，所以 C# 那条**要么把工具链进镜像（要同时改 tag 两处）**，
+   **要么单开一个 job**。这条要在动 C# 之前定，不能到时候才发现。
+
+## 9. 不做什么 / 欠账（分开记，不许混）
+
+**不做**
+
+* **不把五个生态做成五套机制** —— 它们**共用一条**：`extern fn` + C ABI + 一条 hosted 链接路。
+  语言数量不是工作量（`docs/173` §2 的原话）。
+* **不给动态装载写一个自己的 ELF 加载器**（除非 hosted 链到真 `.so` 时 C 工具链做不到）——
+  `docs/219` §5.3 说它与端口表互斥，而用户选了"并存"，所以 hosted 走**系统加载器**，
+  sealed 那条的纯度证明**一个字都不动**。
+* **不在 sealed 路径上放宽任何判据** —— 现有的绿判据（`docs/219` §8 C5）只强不弱。
+
+**欠账（明写在表上，不假装已解决）**
+
+| 欠账 | 为什么现在不做 |
+|---|---|
+| TLS / DNS | §6。它是"真去官方仓装"的前置，但不是"调用外源库"的前置 |
+| 声明面**自动生成**（`docs/183` V4） | 今天先手写声明单元；从 `zlib.h` / `.jar` / wheel 生成是另一段 |
+| PE 侧的全部 | §7 |
