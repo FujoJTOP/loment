@@ -1432,7 +1432,7 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
 #: `loment_seed_test` 钉住"种子 == 参考实现为 driver.lomt 发射的 IR"，`loment/bootstrap.sh`
 #: 钉住"stage1 编译 driver.lomt == 种子"。所以在这里再用 stage1 重编一遍，买到的是
 #: **同一件事的第二遍**，而它是整条 `--emit` 里最贵的一步：本机 273s（`build_tools` 的
-#: 76%），CI 上约 700s —— 占 `loment_dist_test` 那 954s 的四分之三（实测见 docs/212）。
+#: 76%），CI 上约 700s —— 占 `loment_dist_test` 那 954s 的四分之三（实测见 docs/213）。
 #: 定点本身仍被上面两条判据守着，只是不再由**发行包判据**重复付账。
 SEED_TOOL = "loment-driver"
 
