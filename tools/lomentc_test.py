@@ -2418,17 +2418,25 @@ def test_gc_auto_collector_text():
     auto = _gc_emit(GC_AUTO_AUTO_SRC)
     manual = _gc_emit(GC_AUTO_MANUAL_SRC)
     alpha = _gc_emit(GC_AUTO_ALPHA_SRC)
-    marks = (("分配量计数", "@__loment_gcbytes"),
-             ("标记位表", "@__loment_mark"),
-             ("根表", "@__loment_roots"),
-             ("根表游标", "@__loment_rootn"),
-             ("标记函数", "@__loment_markp"),
-             ("收集器", "@__loment_collect"),
-             ("触发入口", "@__loment_maybe_collect"))
-    for what, sym in marks:
+    roots = (("根表", "@__loment_roots"), ("根表游标", "@__loment_rootn"))
+    coll = (("分配量计数", "@__loment_gcbytes"),
+            ("标记位表", "@__loment_mark"),
+            ("标记函数", "@__loment_markp"),
+            ("收集器", "@__loment_collect"),
+            ("触发入口", "@__loment_maybe_collect"))
+    # **根表**：`gc_auto` 与 `gc_auto_alpha` **都发** —— 两档只要函数里有指针槽就会往它写
+    # （`roots_push`），定义必须在（见 `_IR_ROOTS`）。
+    for what, sym in roots:
+        assert sym in auto and sym in alpha, f"两档都该有{what}（{sym}）"
+        assert sym not in manual, f"`gc_manual` 的产物里不该有{what}（{sym}）—— 默认档不许变"
+    # **收集器**：这份源里 alpha 的 `alloc` 全被 L0 提走了（`a`/`t` 都是字面量尺寸）+ `hold`
+    # 是 deref-only ⇒ **没有堆**，所以 alpha **不该带收集器**（它引用的是堆那几个全局）。
+    # 这一栏就是"档位串了没有"—— alpha 那份只该差根表，不该差收集器。
+    for what, sym in coll:
         assert sym in auto, f"`gc_auto` 的产物里没有{what}（{sym}）"
         assert sym not in manual, f"`gc_manual` 的产物里不该有{what}（{sym}）—— 默认档不许变"
-        assert sym not in alpha, f"`gc_auto_alpha` 的产物里不该有{what}（{sym}）—— 档位串了"
+        assert sym not in alpha, (f"`gc_auto_alpha` 这份源没堆（alloc 全被 L0 提走），"
+                                  f"不该有{what}（{sym}）")
     # **挂点**：每个 `alloc` 站点前面正好一条（本程序两个函数各一处）
     assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
         ("触发点该正好两处（每个 `alloc` 站点之前一条），得到 "
@@ -2445,6 +2453,74 @@ def test_gc_auto_collector_text():
     # L0/L2 只在 alpha 档 —— 这两条同时挡住"档位串了"的另一半
     assert ".buf" not in auto, "`gc_auto` 不该有 L0 缓冲（L0 只在 alpha 档）"
     assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
+
+
+#: `gc_auto_alpha` 的**自适应收集器**那一份源（`docs/210` §2.4 的"策略池"那一半）。
+#: `chew` 里那块 `p` 是 **L3**（尺寸是变量 ⇒ 不是 L0；`let q: ptr = p` 是外逃 ⇒ 不是 L1），
+#: 所以 alpha 这一档**非得有收集器**不可 —— 此前它根本没有（L3 残差没人收，只有分配器）。
+GC_ADAPT_SRC = """module gc_adapt
+@@CHOOSE@@
+choose runtime
+
+fn chew(n: u32) -> u32 {
+    let p: ptr = alloc(n);
+    let q: ptr = p;
+    store8(q, 0, 1);
+    return load8(q, 0);
+}
+
+fn _start() {
+    let sz: u32 = 64;
+    let a: ptr = alloc(sz);
+    store8(a, 0, 5);
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 64 {
+        s = s + chew(16);
+        i = i + 1;
+    }
+    if load8(a, 0) == 5 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+GC_ADAPT_AUTO_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_auto")
+GC_ADAPT_ALPHA_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+GC_ADAPT_MANUAL_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+
+
+@test
+def test_gc_alpha_adaptive_collector_text():
+    """`gc_auto_alpha` 的收集器是**自适应**那一支（`docs/210` §2.4 的"策略池"）。
+
+    **Why**：alpha 此前**根本没有收集器**（L3 残差没人收），与 `gc_auto` 的区别只在阶梯 ——
+    这一步给它配上收集器、且触发是**自适应**的（阈值跟活集走 + 空间触发）。静态上钉三件事：
+
+    1. alpha 现在**有**收集器（`__loment_collect` / `maybe_collect` / 根表 / 标记函数）；
+    2. 它的触发**是自适应那一支**（`@__loment_thresh` + `@__loment_livebytes`）；
+    3. `gc_auto` 那支**碰都不碰**那些符号（档位没串）—— 它仍是固定 32 KiB。
+
+    **动态那一半**（"真的收得掉、而且比固定档收得下更大的活集"）在
+    `loment_elf_test::test_gc_alpha_adaptive_bounds_a_large_live_set`。
+    """
+    auto = _gc_emit(GC_ADAPT_AUTO_SRC)
+    alpha = _gc_emit(GC_ADAPT_ALPHA_SRC)
+    manual = _gc_emit(GC_ADAPT_MANUAL_SRC)
+    shared = ("@__loment_collect", "@__loment_maybe_collect", "@__loment_roots",
+              "@__loment_markp", "@__loment_gcbytes")
+    adapt = ("@__loment_thresh", "@__loment_livebytes")
+    for sym in shared:
+        assert sym in auto and sym in alpha, f"两档都该有收集器痕迹：{sym}"
+        assert sym not in manual, f"`gc_manual` 不该有收集器痕迹：{sym}"
+    for sym in adapt:
+        assert sym in alpha, f"alpha 的自适应触发缺 {sym}"
+        assert sym not in auto, f"`gc_auto` 不该有自适应那一支（{sym}）—— 档位串了"
+    # **挂点**：两档各挂两条（本程序两个 `alloc` 站点 —— `chew` 的 `p`、`_start` 的 `a`）
+    assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
+        f"`gc_auto` 挂点该两条，得到 {auto.count('call void @__loment_maybe_collect(i32 ')}"
+    assert alpha.count("call void @__loment_maybe_collect(i32 ") == 2, \
+        f"alpha 挂点该两条，得到 {alpha.count('call void @__loment_maybe_collect(i32 ')}"
 
 
 #: `gc_auto_alpha` 的 **L1（定活）** 那一份源。**源只有一份** —— 真值表判据与字节一致判据
