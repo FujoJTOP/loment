@@ -205,6 +205,60 @@ def test_loment_fmt_is_idempotent():
         print("      6 个语料格式化两次结果相同")
 
 
+#: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。
+#: 声明那一行整个是"怎么读" —— 前门会把它抹成等长空白，于是**那一行上的函数
+#: 跟着消失**，而 `--write` 是**原地写回**（`#115`）：用户的源就这么被改坏。
+FOREIGN = """choose write grammar c
+
+unsigned int add(unsigned int a, unsigned int b) {
+    return a + b;
+}
+"""
+
+
+@test
+def test_loment_fmt_refuses_foreign_grammar():
+    """**别的写法要拦住**（`#115` 的后半）—— 两个实现都拒，盘上那份源一个字不动。
+
+    `lomfmt` 是**独立入口**（拿词法层直接读原文、不走前门），所以"这份源该怎么读"
+    这一层得它自己判 —— 参考实现的 `potato_from.refuse_foreign_grammar` 就是这一层，
+    孪生这边是新加的 `lomfmt.lomt::foreign_grammar`。不拦的后果实测过（`#115`）：
+    命令**退 0**、说都不说一句，而文件已经被重排成既不是 C 也不是 Loment 的样子
+    —— 比 `lomdoc` 那半边更重，因为 `--write` 是**原地写回**。
+
+    两边都跑：只钉孪生的话，参考实现哪天松掉就没人管了。
+    退出码**故意不写成同一个数**：`lomfmt.py` 把这条例外归到它文档里的"读取或词法
+    错误"那一档（退 2），孪生的 `fail` 退 1 —— 判据要的是"**拒了**"，不是"退几"。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "lomfmt_foreign.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(FOREIGN)
+        before = probe.read_bytes()
+        # 参考实现：`--write` 真跑一遍 —— 它拒了就不能碰盘上那份
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomfmt.py"),
+                            "--write", str(probe)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode != 0, f"参考实现没拒 (rc={r.returncode}): {r.stdout[:200]}"
+        assert r.stdout == "", f"参考实现拒了却还往 stdout 写了东西: {r.stdout[:200]!r}"
+        assert r.stderr.strip(), "参考实现拒了却没吭声 (stderr 空)"
+        assert probe.read_bytes() == before, "参考实现拒了却把文件改坏了 (#115 就是这个症状)"
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            got, note = _run(elf, td, probe, "foreign")
+            assert got == "", f"孪生拒了却还写了格式化结果: {got[:200]!r} [{note}]"
+            assert "rc=1" in note, f"孪生没退 1: {note}"
+            assert probe.read_bytes() == before, "孪生跑完把文件动过了"
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      别的写法: 两个实现都拒 (参考实现退非 0 / 孪生退 1)，盘上那份源未变")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

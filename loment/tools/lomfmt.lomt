@@ -184,6 +184,28 @@ fn tk_len(t: ptr, i: u32) -> u32 {
     return load32(t, i * 20 + 8);
 }
 
+fn tk_line(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 12);
+}
+
+/// token 文本等于字面量。字符串 token 直接不算 (原文含引号, 会与关键字撞车)。
+fn tk_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tk_kind(t, i) == 2 {
+        return false;
+    }
+    if tk_len(t, i) != str_len(s) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(s) {
+        if load8(src, tk_start(t, i) + k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
 /// token 的 val 与表成员 [off, off+len) 相等?
 /// 非字符串: val 就是原文切片; 字符串: val 是**转义解码后**的内容 (镜像 Python)。
 fn val_eq(src: ptr, t: ptr, i: u32, tbl: str, off: u32, len: u32) -> bool {
@@ -721,6 +743,48 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     return cut;
 }
 
+// ---------------------------------------------------------------- 别的写法要拦住
+
+/// 文件头是不是**别的表层写法**（`docs/182` §1.9 / `#115`）？是就返回 1。
+///
+/// `lomfmt` 是**独立入口**：它拿词法层直接读原文、**不走前门** —— 而一份 `.lomt`
+/// 里可以装六种写法的任何一种。对 C 那门后果很重：
+///
+///     choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+///
+/// 声明那一行整个是"**怎么读**"：前门按它定读法、再抹成等长空白 ⇒ **那一行上的
+/// 函数跟着一起消失**，单元变空，而这里**退 0** 把一份删掉了函数的源交出去 ——
+/// 而 `--write` 是**原地写回**，用户那份源就这么被改坏了（`#115` 的实测）。
+/// 同一份文件 `loment check` 是**响亮地拒**的 —— 一套工具链两个答案。
+///
+/// 所以与参考实现 `potato_from.refuse_foreign_grammar` 同一条：**认出非原生写法就拒**。
+/// `loment` / `rust` 是原生（`NATIVE_GRAMMARS`），照旧放行。
+///
+/// 找法与报错器的 `decl_at` 同一个形状：**只找那一行**（`choose write grammar <别名>`
+/// 三个词同行、别名紧跟着），而且它必须在 `module` 之前（`docs/188` §1）。
+fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if tk_is(src, t, i, "module") == true {
+            return 0;                       // 声明必须写在 `module` 之前
+        }
+        if tk_is(src, t, i, "choose") == true && i + 3 < n
+                && tk_is(src, t, i + 1, "write") == true
+                && tk_is(src, t, i + 2, "grammar") == true
+                && tk_line(t, i) == tk_line(t, i + 1)
+                && tk_line(t, i) == tk_line(t, i + 2)
+                && tk_line(t, i) == tk_line(t, i + 3) {
+            if tk_is(src, t, i + 3, "loment") == true
+                    || tk_is(src, t, i + 3, "rust") == true {
+                return 0;                   // 原生写法，照旧放行
+            }
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn _start() -> u32 {
@@ -751,6 +815,13 @@ fn _start() -> u32 {
     let len: u32 = strip_cr(src, raw as u32);
     store8(src, len, 0 as u8);
     let cnt: u32 = lex(src, len, toks);
+    // **别的写法在这里拦住**（`#115`）—— 必须在**拿到词法流、动手重排之前**。
+    // `--write` 是**原地写回**：声明那一行一旦被当成正文重排，前门会把它抹成等长空白，
+    // 那一行上的函数跟着消失，而这里照旧退 0 —— 用户的源就这么被改坏了。
+    if foreign_grammar(src, toks, cnt) == 1 {
+        return fail("lomfmt: 这是用别的写法写的 Loment（文件头有 `choose write grammar`）—— lomfmt 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`（docs/211 / docs/182 §1.9）。
+");
+    }
     let m: u32 = format_src(src, toks, cnt, mem);
     write_all(1, ptr_add(mem, OFF_OUT), m as u64);
     return die(0);

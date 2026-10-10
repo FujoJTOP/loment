@@ -795,7 +795,7 @@
   },
   {
    "path": "tools/loment_fmt_test.py",
-   "sha256": "ca8ad7f0a2b52ee846e18cfee07780d828150f880e129bf413da4c1cc643d0d8"
+   "sha256": "c21ea397bfd768cd3b6254245fcf56deff89b7b7b1660eb44d341b8ced9bf6cd"
   },
   {
    "path": "tools/loment_audit.py",
@@ -1119,7 +1119,7 @@
   },
   {
    "path": "loment/tools/lomfmt.lomt",
-   "sha256": "8bf8702bfda7ceb52b159b58e262cad1bc34ca6e1b347ed13b3f493185d23b48"
+   "sha256": "d282ffb6b9792b6053ca6eb0e64841fc690389ed6208b3ff1dac1bcf568a3bfd"
   },
   {
    "path": "loment/tools/lomgrammar.lomt",
