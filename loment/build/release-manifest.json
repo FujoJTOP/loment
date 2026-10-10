@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "483328908e9cb614c8368f05671362ab37cfd4e8a589f218f9d8df9b533b6bb6"
+   "sha256": "d5138645020b6c5a6b0a444b26d92c1933261ec5d4d267b91ae7c6079872b404"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -1027,11 +1027,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "ded015f62db0a565eb75161aeadcb23315a37f51aaad2955fd1a840a24d384dd"
+   "sha256": "c3e508f7895b4513a3b2907ec4c7fc839224816f6788cbd6615e32d37b5a1bf6"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "862c7c64e1a5e353515848cddb11933ad218b796864da8cd86b0fe9511bd6e4b"
+   "sha256": "abdc8bb95c0ee541a3de8af6291b4efdcaebdb87b9229917baced39ec6798c16"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1059,15 +1059,15 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "0e37d15aabe904a2cdd066f37b0b791c74db8c3fc3dff532f237f3f429b83c26"
+   "sha256": "7b21d2b0543c84534c4cb59627e71a9c5ac6f601d087d5764166efc9825d6ba1"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
-   "sha256": "93cea7e9cc2b282f17fb127e9f0d31793fbcaf4d2160ed30958c27b6d61860ca"
+   "sha256": "a0fece49e51cde2ce7912f4d30a0a97c68bf81c41be78d9249b81b7ff9dee281"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
-   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
+   "sha256": "b56184006f346096bc409bc325517f3c763909bd5a5d74967388c256361a01ba"
   },
   {
    "path": "loment/tools/lomc.lomt",
@@ -1551,7 +1551,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "d2653a0a08404aa7d4f87ecbcfa308c2a335fe2fcfebb1bb6efddbdfd5f2fb60"
+   "sha256": "c6fed412e71c9d447a19f4b5e120d1e8e698b559d3efe4f801ad88db88a72086"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1951,7 +1951,7 @@
   },
   {
    "path": "docs/212-loment-offload.md",
-   "sha256": "87cddf2eb95e51f519c0bbc1d09c2779a8ae04feafb98edeb82867e3f7e57747"
+   "sha256": "fafa2b23ab2f313695a356a12ffc85e5dd9395e27c7764174fdd34fc379274cf"
   },
   {
    "path": "docs/212-loment-open-license.md",
