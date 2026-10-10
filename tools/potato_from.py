@@ -439,7 +439,11 @@ def _from_class_lang(src: str, name: str, mode: str,
             doc["types"].append({"name": cname, "fields": flds})
             known.add(cname)
             rep.ok += 1
-        else:
+        elif fields:
+            # **只有"本来有字段、一个都没映上"才算丢。** 一个**没有字段**的类不是丢东西 ——
+            # 它只是方法的命名空间，Java / C# 里到处都是这种壳。原先无条件报，
+            # 于是每一份 Java / C# 语料都带一条假的 `skip`（`无可用字段`），
+            # 而那正好挡住了"转写期的 skip 要报给用户"那一道（见 `front_door`）。
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
         for rty, mname, params, mem_raw, mem_off in methods:
@@ -1714,11 +1718,20 @@ _GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
 #: 退回嗅探。**两边对同一份源说不同的话** —— 正是这条线要防的那类分歧。
 #: 现在两边同一条规矩：非空白非 `;` 的字符接在 `grammar` 后面 ⇒ **根本没有声明头**。
 _GRAMMAR_TAIL = r"(?=[ \t;]|$)"
-_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
+#: 行首那一格 —— **允许一个 UTF-8 BOM**。
+#:
+#: Windows 的编辑器（记事本、"另存为 UTF-8"、PowerShell 的 `>`）默认会写 BOM，
+#: 而原先那四条正则都是 `^[ \t]*`：BOM 不是空白，`choose` 就不在"行首"了 ⇒
+#: **声明整个找不到**。于是文件落到"缺声明 = 原生 Loment"那一条，整份 C 被当 Loment 编，
+#: 报出来的是 `1:1 非法字符 '﻿'` —— 用户完全看不出"是你那行声明没生效"。
+#: 而在本仓的平台上带 BOM 是常态（`docs/188` §2 又把"读法"整个压在那一行上）。
+#: 抹白是**等长**的，所以 BOM 会被换成空白、行号与偏移都不动。
+_GRAMMAR_LEAD = r"^(?:\ufeff)?[ \t]*"
+_GRAMMAR_ANY = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
 #: 别名**必须空白分隔**：`choose write grammar;python` 里的 `;python` **不是**别名
 #: （那是"头写了、别名没写"⇒ 报"后面要写语法名"）。别名本体到空白或 `;` 为止 ——
 #: 所以 `c#` 里的 `#` 是别名的一部分，不是注释头。
-_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
+_GRAMMAR_DECL = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
                            re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
 #:
@@ -1727,7 +1740,7 @@ _GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+
 #: （拼错一个字母）会匹配到 `choose write grammar` 这个**前缀**、把前 20 个字符抹成空白、
 #: 留下 `s python`。而 `read_grammar_decl` 那边有边界检查、**不认为**这是声明、**不报错**，
 #: 一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句指不到点子的语法错。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
+_GRAMMAR_LINE = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
@@ -1764,6 +1777,28 @@ def find_decl(src: str) -> tuple[bool, str | None, int]:
     return True, (m.group(1) if m else None), line
 
 
+def _grammar_attempt(src: str) -> tuple[int, str] | None:
+    """找一行"**像是想写声明、但没写对**"的 -> `(行号, 那一行的原文)`；没有就是 `None`。
+
+    判据：**`module` 之前**有一行，头一个词是 `choose` / `write` / `grammar` 里的任意一个，
+    但**后面还有别的词**（`choose write grammar` 那条严格头没匹配上，`find_decl` 已经确认了）。
+
+    为什么限定在 `module` 之前：声明必须在那儿（`docs/188` §1）。这一条让规则**很窄** ——
+    那三个词在合法源里只出现在声明本身里。实测（本仓 171 份 `.lomt` / `.lom`）：
+    `module` 之前以它们开头、又不是严格声明的行 **一条都没有**。
+
+    为什么不用更宽的"行首是那三个词的任意子集"（`docs/198` §2 的初稿）：那样
+    `choose gc_auto` 这类**开关**会中招，而它是合法的 Loment。
+    """
+    mod = _MODULE_LINE.search(src)
+    head = src[:mod.start()] if mod is not None else src
+    for i, l in enumerate(head.splitlines(), 1):
+        t = l.split()
+        if len(t) >= 2 and t[0] in GRAMMAR_DECL_WORDS and not _GRAMMAR_ANY.match(l.lstrip()):
+            return i, l.strip()
+    return None
+
+
 def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
 
@@ -1775,6 +1810,21 @@ def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """
     found, alias, line = find_decl(src)
     if not found:
+        # **"想写、但没写对"也要报**（`docs/188` §1 那四种之外的一种，`docs/198` §2 报过）。
+        # 关键词写错 / 词序不对时原先**一声不响**：文件落到"缺 = Loment"那一条，
+        # 用户拿到的是正文里某处的语法错（`未知顶层关键字 'def'` 之类）—— **指的不是那一行**。
+        # §2 那句"兜底从**猜**变**拒绝**"正是为它写的；现在它既没猜也没拒，
+        # 是**换了一个猜法**（当成 Loment）。
+        guess = _grammar_attempt(src)
+        if guess is not None:
+            ln, txt = guess
+            return "loment", (
+                f"第 {ln} 行: 这一行像是想写 `choose write grammar <语法名>`，"
+                f"但词序或拼写对不上（实得：{txt!r}）。正确写法是 "
+                f"`choose write grammar <名字>` —— 写在 `module` 之前、只写一次，"
+                f"名字取出厂锁的那张表（`docs/188` §1）。"
+                f"（若你本意是**开关** `choose <名字>`，那不是这一条：开关要写在 "
+                f"`module` **之后**。）"), False
         return "loment", None, False
     first = _GRAMMAR_ANY.search(src)
     assert first is not None
@@ -1920,11 +1970,21 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     if _hit is not None:
         return _hit
     try:
-        doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+        doc, rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
     except front_errors(lang) as e:
         # 写法读不通 —— 与"翻不出来"一样响亮地拒，**不给一份少算一步的单元**
         # （见 `front_errors` 的注解）。
         raise lomt_from.NotRepresentable(f"{path}: 这份源读不通 —— {e}")
+    # **转写那一步丢的东西也要报**。`emit_lomt` 的 `skipped` 只管"发不出来"；
+    # 转写期丢的是**根本没进对象**的东西（顶层 `typedef` / 全局量 / `union` /
+    # 预处理指令 / K&R 函数 …）。这一条原先把报告整个丢掉（`_rep`），于是这些东西
+    # **在编译器这条路上一个字都不说** —— 而 `lomt_from.py` 那条路会打 `[skip]`。
+    # 同一条纪律：全有或全无，丢了就拒（`docs/167`"不静默丢"）。
+    if rep.skipped:
+        raise lomt_from.NotRepresentable(
+            f"{path}: 用 {lang} 写法写的单元里有 {len(rep.skipped)} 处转写不了"
+            f"（前 3 处：{[(x['name'], x['why']) for x in rep.skipped[:3]]}）—— "
+            f"那一门整份是全有或全无，丢了的部分不会悄悄跳过，这里直接拒")
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     if skipped:
         # **子集外的东西发不出来** —— 必须响亮，不能给一份"少算一步却照样能编"的单元。
