@@ -683,7 +683,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "5690d0cfa4cbc6d6b66234c6a9ef1c051915f62b13208a31d6927303fc5a0ee5"
+   "sha256": "7a11979fa4424befb1272a7200ea33a29fe79c23ff36a21f4487c1fdf1bdc21e"
   },
   {
    "path": "tools/loment_diag.py",
@@ -1179,7 +1179,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "6df21a566f2ede00abb4ae7a9af53d1e05095029bec1227f97a136faec917de0"
+   "sha256": "45538bad640db45e94e5012ae58f6b3a1a8a12c3db0ceaba5802d9125b7fc5a4"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1936,6 +1936,10 @@
   {
    "path": "docs/211-c-surface-grammar-sweep.md",
    "sha256": "8c2bb42daeaa5b7315cd5afe52fc6f211d72001388a4323b826546ef00bf4953"
+  },
+  {
+   "path": "docs/212-loment-open-license.md",
+   "sha256": "bae432e8e67c673815ea5a8b9510d2ebfad9310031ff2f7c9b3674ae9296a906"
   },
   {
    "path": "docs/manual/index.md",
