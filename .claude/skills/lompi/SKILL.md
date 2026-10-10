@@ -84,8 +84,16 @@ lompi resolve <store> <name[@version]>              print the lock (hash-pinned)
 lompi verify  <store> <name[@version]> <lockfile>   recompute and compare byte-for-byte
 lompi plan    <store> <name[@version]> [--into DIR]   closure + materialization plan
 lompi hash    <package-dir>                         own-source hash of one package
+lompi obj     add <store> <file.o>                  content-addressed object into <store>
+lompi obj     get <store> <sha256> [--out OUT.o]    fetch an object's bytes (no compiler needed)
 lompi help
 ```
+
+`lompi obj` is how a **pre-optimized object** rides along with the store: `add` writes it as
+`<store>/obj-<sha256>.o` (its own content address), `get` pulls the bytes back. The point
+(`docs/212` §5 B): the heavy kernel is compiled **once** on a machine that has clang, and every
+other machine fetches the bytes and links them (`loment build app.lomt --link obj-….o`) **without
+a compiler**. Flat layout on purpose — `sys_mkdir` does not exist on the PE side.
 
 `<name[@version]>`: `mathutil` means "highest version", `mathutil@0.1.0` pins one.
 

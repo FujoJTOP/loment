@@ -182,6 +182,26 @@ pub fn sys_put_bytes(dst: ptr, p: ptr, off: u32, n: u32) -> u32 {
     return n;
 }
 
+/// 把静态字面量**追加**到 dst[off..] 再补 NUL。返回新的长度 (不含 NUL)。
+/// 与 `sys_put_lit` 的分工: 那个从 0 写起, 这个接在已有内容后面拼路径。
+pub fn sys_append_lit(dst: ptr, off: u32, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, off + i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, off + n, 0 as u8);
+    return off + n;
+}
+
+/// 把运行期串 (p, n) **追加**到 dst[off..] 再补 NUL。返回新的长度。
+pub fn sys_append_bytes(dst: ptr, off: u32, p: ptr, n: u32) -> u32 {
+    sys_copy(dst, off, p, 0, n);
+    store8(dst, off + n, 0 as u8);
+    return off + n;
+}
+
 /// a + "/" + b, 补 NUL。返回总长。a 为空时不加分隔符。
 pub fn sys_join(scr: ptr, a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
     sys_copy(scr, 0, a, 0, an);

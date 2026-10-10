@@ -464,6 +464,110 @@ fn cmd_hash(ws: ptr, buf: ptr, m: u32, av_dir: u64) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- obj: 预优化对象的仓 (docs/212 §5 B)
+//
+// 一个"对象"（`loment build --opt` 或 `tools/loment_opt_obj.py` 产的 `.o`）按**内容寻址**
+// 落进 store: `<store>/obj-<sha256>.o`。**端机不需要 clang** —— 拿到那串十六进制就能取回字节,
+// 再 `loment build app.lomt --link that.o`。这是"编一次、按内容寻址分发"那格里 store 的这半边。
+//
+// **扁平存放（`obj-<hex>.o` 直接躺在 store 目录里），不建子目录** —— lompi 的 mkdir 在 PE 上
+// 没实现（`sys_can_mkdir()` 恒 false），建子目录会让这一格在 Windows 上直接不可用；而"写一个
+// 文件"两个平台都行。store 目录里其它成员是 `<名字>/`，一个 `obj-…` 文件不会与它们撞。
+
+//: 单个对象的字节上限 = WS_SHA - WS_FILE (256 KiB)。满了就**点名拒**，绝不存截断的字节。
+const OBJ_CAP: u32 = 262144;
+
+fn cmd_obj(ws: ptr, buf: ptr, m: u32, ac: u32) -> u32 {
+    let c2: u64 = sys_arg_at(buf, m, 2);
+    if arg_is(buf, c2, "add") {
+        if ac < 5 {
+            return cli_usage("obj add needs <store> <file.o>");
+        }
+        return obj_add(ws, buf, sys_arg_at(buf, m, 3), sys_arg_at(buf, m, 4));
+    }
+    if arg_is(buf, c2, "get") {
+        if ac < 5 {
+            return cli_usage("obj get needs <store> <sha256> [--out OUT.o]");
+        }
+        return obj_get(ws, buf, m, ac, sys_arg_at(buf, m, 3), sys_arg_at(buf, m, 4));
+    }
+    return cli_usage("obj needs add|get");
+}
+
+/// `<store>/obj-<hex>.o` 写进 WS_SCR2，返回长度 (不含 NUL)。
+fn obj_slot(ws: ptr, buf: ptr, store_av: u64, hex: ptr, hn: u32) -> u32 {
+    let scr2: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
+    let n: u32 = sys_put_bytes(scr2, buf, sys_arg_off(store_av), sys_arg_len(store_av));
+    n = sys_append_lit(scr2, n, "/obj-");
+    n = sys_append_bytes(scr2, n, hex, hn);
+    return sys_append_lit(scr2, n, ".o");
+}
+
+fn obj_add(ws: ptr, buf: ptr, store_av: u64, file_av: u64) -> u32 {
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let obuf: ptr = ((ws as u64) + WS_FILE as u64) as ptr;
+    let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
+    let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
+    let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
+    let _fl: u32 = sys_put_bytes(scr, buf, sys_arg_off(file_av), sys_arg_len(file_av));
+    let n: u64 = sys_read_file(scr, obuf, OBJ_CAP as u64);
+    if n == SYS_ERR {
+        cli_die("obj add: cannot open the object file");
+        return 1;
+    }
+    if n >= OBJ_CAP as u64 {
+        cli_die("obj add: object exceeds the 256 KiB slot (refusing to store truncated bytes)");
+        return 1;
+    }
+    sha_hex_of(obuf, n as u32, st, dig, hex);
+    let _sl: u32 = obj_slot(ws, buf, store_av, hex, 64);
+    let w: u64 = sys_write_file(((ws as u64) + WS_SCR2 as u64) as ptr, obuf, n);
+    if w == SYS_ERR {
+        cli_die("obj add: cannot write into the store");
+        return 1;
+    }
+    out_lit("obj: ");
+    out_slice(hex, 0, 64);
+    out_lit("\n");
+    return 0;
+}
+
+fn obj_get(ws: ptr, buf: ptr, m: u32, ac: u32, store_av: u64, hex_av: u64) -> u32 {
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let obuf: ptr = ((ws as u64) + WS_FILE as u64) as ptr;
+    let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
+    let hn: u32 = sys_arg_len(hex_av);
+    if hn == 0 || hn > 64 {
+        cli_die("obj get: the content address must be 1..64 hex chars");
+        return 1;
+    }
+    let _hl: u32 = sys_put_bytes(hex, buf, sys_arg_off(hex_av), hn);
+    let _sl: u32 = obj_slot(ws, buf, store_av, hex, hn);
+    let n: u64 = sys_read_file(((ws as u64) + WS_SCR2 as u64) as ptr, obuf, OBJ_CAP as u64);
+    if n == SYS_ERR {
+        cli_die("obj get: no such object in the store");
+        return 1;
+    }
+    // 落点: `--out OUT` 给了就用它; 否则 `<hex>.o` 落在当前目录。
+    let ol: u32 = 0;
+    if ac >= 7 && arg_is(buf, sys_arg_at(buf, m, 5), "--out") {
+        ol = sys_put_bytes(scr, buf, sys_arg_off(sys_arg_at(buf, m, 6)),
+                           sys_arg_len(sys_arg_at(buf, m, 6)));
+    } else {
+        ol = sys_put_bytes(scr, buf, sys_arg_off(hex_av), hn);
+        ol = sys_append_lit(scr, ol, ".o");
+    }
+    let w: u64 = sys_write_file(scr, obuf, n);
+    if w == SYS_ERR {
+        cli_die("obj get: cannot write the output file");
+        return 1;
+    }
+    out_lit("wrote: ");
+    out_slice(scr, 0, ol);
+    out_lit("\n");
+    return 0;
+}
+
 // ---------------------------------------------------------------- help / main
 
 // Output here is ASCII-only ON PURPOSE: on a 936 (GBK) Windows console the PE
@@ -490,6 +594,8 @@ fn print_help() {
     out_lit("  lompi verify  <store> <name[@version]> <lockfile>   recompute and compare byte-for-byte\n");
     out_lit("  lompi plan    <store> <name[@version]> [--into DIR]   closure + materialization plan\n");
     out_lit("  lompi hash    <package-dir>                         own-source hash of one package\n");
+    out_lit("  lompi obj     add <store> <file.o>                  content-addressed object -> <store>\n");
+    out_lit("  lompi obj     get <store> <sha256> [--out OUT.o]    fetch an object (no compiler needed)\n");
     out_lit("\n");
     out_lit("store layout: <store>/<name>/<version>/*.lomt (+ optional pkg.lomp)\n");
     out_lit("registry:     a git repo with that same layout; see lompi.conf or --registry\n");
@@ -540,6 +646,12 @@ pub fn cli_main(ws: ptr, buf: ptr, m: u32) -> u32 {
             return cli_usage("hash needs a <package-dir>");
         }
         return cmd_hash(ws, buf, m, sys_arg_at(buf, m, 2));
+    }
+    if arg_is(buf, c1, "obj") {
+        if ac < 4 {
+            return cli_usage("obj needs add|get <store> ...");
+        }
+        return cmd_obj(ws, buf, m, ac);
     }
     if arg_is(buf, c1, "show") {
         if ac < 4 {
