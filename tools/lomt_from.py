@@ -346,10 +346,17 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 # 而这一门也未必有翻译器（`_TOOLS` 里没有就得先有孪生，`docs/189` §4.1）。
                 why = ("这是个 Loment 函数但对象里没带正文 —— 接口单元里没有它的实现。"
                        if not impl else
-                       "对象里没有这个函数的正文（已经是 `--impl` 这条路了）—— "
-                       "这份对象的 grammar 是抽接口那条路读出来的，它只记声明、不抓正文"
-                       "（`docs/179` §2）；要么换 `choose write grammar` 那条前门，"
-                       "要么这一门还没有带正文的翻译器（`docs/188` §7.1）")
+                       # **`impl=True` 这条**：`front_door` 就是用它调的。所以走到这里
+                       # 最常见的情形是"**源码里这条只有声明、没有定义**"——C 里就是
+                       # **原型**（`int g(int x);`）。原先把原因写成"这份对象的 grammar 是
+                       # **抽接口那条路**读出来的，它只记声明、不抓正文" —— 那句话对
+                       # 前门那条路**是反的**（前门就是抓正文的那条），用户按它去"换
+                       # `choose write grammar` 前门"只会原地打转。
+                       "这份对象里没有这个函数的正文 —— 走 `choose write grammar` 前门时，"
+                       "那意味着**源码里这条只有声明、没有定义**（C 里就是**原型** "
+                       "`int g(int x);`，而 Stage A **不支持原型**）。给它补一个定义；"
+                       "若它本来就是**外部函数**，那走 `pub extern fn` 那条路（`docs/186` §9），"
+                       "不是这一条。")
                 skipped.append((n, why))
                 continue
             if abi != "c":

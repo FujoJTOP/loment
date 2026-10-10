@@ -679,6 +679,82 @@ def test_the_cross_unit_gate_does_not_depend_on_call_position():
     print("      语句位与值位给同一个判决；调本单元的函数照旧")
 
 
+@test
+def test_forward_declaration_is_merged_and_a_real_duplicate_is_not():
+    """**前向声明并进它的定义**；**真重复照旧报**。
+
+    C 里 `int g(int);` 后面跟 `int g(int x) { … }` 是**最常规**的写法 —— 互相递归的
+    两个函数**只能**这么写。对象里于是一个名字有两条记录（一条有正文、一条没有），
+    而下游报"**函数 g 重复**"：一个**假的重复**，用户只写了一份定义。
+    （`docs/186` §4 承诺"报得出是哪个函数"，而这里报的是一个不存在的冲突。）
+
+    四种形状各钉一面：声明+定义 → 并成一条；两条声明 → 并成一条（下游说"只有声明
+    没有定义"，那是对的）；**两条都有正文 → 不并**（真重复，一并就把一份写重复了的
+    源悄悄收下了 —— 那比报错坏）；互相递归 → 现在**翻得过**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        def fns_of(i: int, body: str) -> list[str]:
+            p = td / f"t{i}.lomt"          # **路径要不同** —— front_door 按路径备忘
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            return [x.split("(")[0].replace("pub fn ", "")
+                    for x in potato_from.front_door(p).source.splitlines()
+                    if x.startswith("pub fn")]
+        assert fns_of(0, "int g(int x);\nint g(int x) { return x; }\n"
+                         "int main() { return g(7); }\n") == ["g", "main"]
+        assert fns_of(1, "int odd(int n);\n"
+                         "int even(int n) { if (n == 0) { return 1; } return odd(n - 1); }\n"
+                         "int odd(int n) { if (n == 0) { return 0; } return even(n - 1); }\n"
+                         "int main() { return even(4); }\n") == ["odd", "even", "main"]
+        for i, body in ((2, "int g(int x) { return x; }\nint g(int x) { return x; }\n"
+                            "int main() { return g(1); }\n"),
+                        (3, "int g(int x);\nint g(int x);\nint main() { return 7; }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable:
+                pass
+            else:
+                raise AssertionError(f"第 {i} 种该拒（真重复 / 只有声明）却过了")
+    print("      前向声明并进定义、互相递归翻得过；真重复与只有声明照旧拒")
+
+
+@test
+def test_an_unmappable_return_type_names_the_declaration_not_the_call_site():
+    """返回类型映不上时，报的必须是**那条声明**，不是几行之外的**调用点**。
+
+    `float f() { … }` 在转写那一步就没进对象（"返回类型 'float' 无映射"）。原先用户
+    看到的是下游那句"**调用了本单元没有的函数 `f`**"—— 指到 `main` 里那个调用点，
+    而真正该改的是**三行之上**那条声明。
+
+    **这一条是第二批（`#74` 那一笔）修好的**：前门原先把 `potato_from` 的
+    `Report.skipped` 整个丢掉（`doc, _rep = LANGS[lang](…)`），于是转写期丢的东西
+    在编译器这条路上一个字都不说、只剩下游那句假消息。这里把它**钉住** ——
+    没有判据的话，那句话改回去也没人知道。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "f.lomt"
+        p.write_text("choose write grammar c\nfloat f() { return 7; }\n"
+                     "int main() { return f(); }\n", encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except lomt_from.NotRepresentable as e:
+            msg = str(e)
+            assert "float" in msg and "无映射" in msg, f"没说清是返回类型的问题:\n{msg}"
+            assert "'f'" in msg or "`f`" in msg, f"没点名那条声明:\n{msg}"
+            assert "调用了本单元没有的函数" not in msg, \
+                f"又只报调用点了（真因在那条声明上）:\n{msg}"
+        else:
+            raise AssertionError("`float` 返回类型映不上，却没拒")
+    print("      返回类型映不上时报的是那条声明（点名 + 真因），不是调用点")
+
+
+
+
+
+
+
 
 
 

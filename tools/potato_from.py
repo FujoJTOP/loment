@@ -1288,6 +1288,29 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    # ---- **前向声明并进它的定义**。
+    #
+    # C 里 `int g(int);` 后面跟 `int g(int x) { … }` 是**最常规**的写法（互相递归的两
+    # 个函数只能这么写），对象里于是一个名字有**两条**记录：一条有正文、一条没有。
+    # 不并的话 `lomt_from` 报"**函数 g 重复**" —— 一个**假的重复**：用户只写了一份定义。
+    # 两条**都有正文**的才是真重复，那种照旧留给下游报。
+    _by_name: dict[str, list[dict]] = {}
+    for ent in doc["functions"]:
+        _by_name.setdefault(ent["name"], []).append(ent)
+    _merged: list[dict] = []
+    for _ents in _by_name.values():
+        _with = [x for x in _ents if "body" in x]
+        # **至多一条有正文时才并**（有正文的那条留下；一条都没有就留第一条声明）。
+        # 这样三种形状各得其所：
+        #   声明 + 定义     -> 并成一条（真定义）
+        #   两条都只是声明  -> 并成一条（下游说"只有声明没有定义"，那是对的）
+        #   **两条都有正文** -> 不并（那是**真重复**，一并就把一份写重复了的源
+        #                        悄悄收下了 —— 那比报错坏）
+        if len(_ents) > 1 and len(_with) <= 1:
+            _merged.append(_with[0] if _with else _ents[0])
+            continue
+        _merged.extend(_ents)
+    doc["functions"] = _merged
     # ---- 残渣：顶层还有"谁也不认识"的东西 -> **报出来**，别让半份单元悄悄发出去
     for ln, txt in _c_leftover_lines(nocomment, consumed):
         rep.skip("decl", (txt.split() or ["?"])[0][:24],
