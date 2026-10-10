@@ -37,6 +37,9 @@ TOP_KW = {"module", "use", "capability", "const", "struct", "enum", "trait", "im
           # 不进这张表的话，`comefor let "x" to {` 会被揉进上一行、
           # `byuse "x" done` 也一样 —— 与当初 `choose` 漏掉时同一个症状。
           "comefor", "byuse"}
+#: **声明行首的修饰词**（`#46`）：它们不单独占一行，要和后面那一项连在一起。
+#: `pub` 在 `TOP_KW` 里（它确实起一条声明），`extern` 不在（它不触发换行）。
+_HEAD_MODS = {"pub", "extern"}
 INDENT = "    "
 
 
@@ -132,10 +135,22 @@ def format_source(src: str) -> str:
                 flush()
         # 顶层声明之间空行 (同类单行声明不插空行; 多行声明之间插空行)
         if depth == 0 and t.kind == "ident" and v in TOP_KW:
-            flush()
-            if out and out[-1] != "" and last_top and (last_top != v or out[-1] == "}"):
-                out.append("")
-            last_top = v
+            # **修饰词不是声明本身的首词**（`#46`）：`pub fn f()` / `pub extern fn f()`
+            # 要待在**同一行**，起头的是 `fn` / `struct` …（空行与分组也按那一个算）。
+            # 原先每个顶层关键字都 flush 一次，于是 `pub` 被留成**单独一行**、和它修饰的
+            # 东西隔了一个空行 —— 那不是"格式"，那是把一项声明劈成两段。
+            #
+            # 判据是"**这一行到现在只有修饰词**"，而不是"刚看见 `pub`"：`extern` 不是
+            # 顶层关键字（它跟在 `pub` 后面、不会触发这一支），只认 `pub` 的话
+            # `pub extern fn` 仍会被劈开。
+            mods_only = bool(line_toks) and all(
+                x.kind == "ident" and x.val in _HEAD_MODS for x in line_toks)
+            if not mods_only:
+                flush()
+            if v != "pub":
+                if out and out[-1] != "" and last_top and (last_top != v or out[-1] == "}"):
+                    out.append("")
+                last_top = v
         if v == "{":
             kind = _brace_kind(line_toks)
             if _needs_space(pp, prev, t):

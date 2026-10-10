@@ -913,6 +913,49 @@ def test_unrecognised_toplevel_content_is_reported():
 
 
 @test
+def test_class_languages_report_unrecognised_toplevel_content():
+    """**Java / C# 那一族也要报"谁也不认识"的顶层内容**（`#121` / `#75`）。
+
+    同一个口子在 C 那边（批次 1）就补上了（上面那条判据），而 `_from_class_lang`
+    当时**漏了** —— 于是：
+
+      * `use "x.lomt"` / `use bytes`（**Loment 语法**，这一族没有对应构造）静默蒸发；
+      * 类里一条谁也不认识的成员（方法头写坏成 `static int bad( { … }`、嵌套类、
+        静态初始化块、带注解的方法）**静默消失**。
+
+    两种都是"整份单元少一块内容，而 `check` 判 OK"。**两面都钉**：认不出的必须报；
+    认识的（一个正常的类 + 枚举、以及类里的常量/字段/方法）**不许**被误报 ——
+    残渣检测最容易错的就是"顺手报多了"。
+    """
+    NL = chr(10)
+    java_good = ("class K {" + NL + "    static final int N0 = 5;" + NL
+                 + "    int a;" + NL + "    static int f() { return 1; }" + NL + "}" + NL
+                 + "enum E { A, B }" + NL)
+    cs_good = ("class K {" + NL + "    const int N0 = 5;" + NL
+               + "    int a;" + NL + "    static int f() { return 1; }" + NL + "}" + NL
+               + "enum E { A, B }" + NL)
+    for lang, fn, good in (("java", potato_from.from_java, java_good),
+                           ("csharp", potato_from.from_csharp, cs_good)):
+        # ① `use` 行：既不进产物、也不该无声无息
+        doc, rep = fn('use "d_packdef.lomt"' + NL + "use bytes" + NL + NL + good, "t.x", "strict")
+        left = [x for x in rep.skipped if "没有对应的规则" in x["why"]]
+        assert len(left) == 2, f"{lang}: 两条 use 没报出来: {rep.skipped}"
+        assert [f["name"] for f in doc["functions"]] == ["f"], (lang, doc["functions"])
+        # ② 写坏的成员：原来整条消失（连 `[skip]` 都没有）
+        broken = ("class K {" + NL + "    static int good() { return 7; }" + NL
+                  + "    static int bad( { return 1; }" + NL + "}" + NL)
+        doc2, rep2 = fn(broken, "t.x", "strict")
+        lost = [x for x in rep2.skipped if "不是常量 / 字段 / 方法" in x["why"]]
+        assert lost, f"{lang}: 认不出的成员没报出来: {rep2.skipped}"
+        assert [f["name"] for f in doc2["functions"]] == ["good"], (lang, doc2["functions"])
+        # ③ 反面：正常的类 + 枚举、类里的常量/字段/方法都不许被当成残渣
+        _, rep3 = fn(good, "t.x", "strict")
+        assert not [x for x in rep3.skipped if "没有对应的规则" in x["why"]], (lang, rep3.skipped)
+        assert not [x for x in rep3.skipped if "不是常量 / 字段 / 方法" in x["why"]], (lang, rep3.skipped)
+    print("      Java / C#：use 与写坏的成员都报得出来；正常的类与枚举不误报")
+
+
+@test
 def test_front_door_refuses_when_the_transcribe_step_drops_something():
     """**转写那一步丢的东西也要到用户面前**（既有 #74 的实质）。
 

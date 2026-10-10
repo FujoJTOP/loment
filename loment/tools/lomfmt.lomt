@@ -41,6 +41,9 @@ const S_NL: u32 = 24;              // 已输出行数
 const S_LBLANK: u32 = 28;          // 最后输出的是空行 (Python: out[-1] == "")
 const S_LBRACE: u32 = 32;          // 最后输出行正好是 `}` (Python: out[-1] == "}")
 const S_STOP: u32 = 36;            // 块类型栈顶
+// `#46`: 这一行**到现在为止**的记号是不是全是声明行首的修饰词
+//（`pub` / `extern`）。下一个顶层关键字要接在它后面，不另起一行。
+const S_LHEAD: u32 = 40;
 
 // ---------------------------------------------------------------- 成员表
 // 每个集合用 "\n" 分隔。L1 的 `const` 只收**整数字面量** (parse_const 走 int_lit),
@@ -65,6 +68,13 @@ fn T_BRACE_KW() -> str { return "struct\nenum\ntrait\nimpl\nfn\nif\nwhile\nfor\n
 // **`choose` 原先就不在这张表里**（既有缺口, 与 `tools/lomfmt.py` 的 TOP_KW 同一处）:
 // 没有它, `choose std` 会被揉进上一行; 加开关之后 `set choose X { … }` 更是整块贴上去。
 fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset\naddin\ncomefor\nbyuse"; }
+
+/// 声明行首的**修饰词**（`#46`）：它们不单独占一行，要与后面那一项连在一起。
+fn T_HEAD_MODS() -> str { return "pub
+extern"; }
+
+/// 单独一个 `pub`（`#46`：它不参与"顶层声明之间插空行"那一套分组）。
+fn T_PUB() -> str { return "pub"; }
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -599,6 +609,7 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_LBLANK, 0);
     store32(mem, S_LBRACE, 0);
     store32(mem, S_STOP, 0);
+    store32(mem, S_LHEAD, 0);
     let i: u32 = 0;
     let pp: u32 = 0;
     let prev: u32 = 0;
@@ -617,22 +628,36 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
         }
         // ---- 顶层声明之间插空行
         if load32(mem, S_DEPTH) == 0 && top_id(src, t, i) != 0 {
-            flush_line(mem);
-            if load32(mem, S_NL) > 0 {
-                if load32(mem, S_LBLANK) == 0 {
-                    if load32(mem, S_LASTTOP) != 0 {
-                        if load32(mem, S_LASTTOP) != top_id(src, t, i) {
-                            out_blank(mem);
-                        } else {
-                            if load32(mem, S_LBRACE) == 1 {
+            // **修饰词不是声明本身的首词**（`#46`）：`pub fn f()` / `pub extern fn f()`
+            // 要待在**同一行**，起头的是 `fn` / `struct` …（空行与分组也按那一个算）。
+            // 判据是"这一行到现在**只有**修饰词"，而不是"刚看见 `pub`" —— 只认 `pub`
+            // 的话 `pub extern fn` 仍会被劈开（`extern` 不是顶层关键字，不触发这一支）。
+            let mods_only: u32 = 0;
+            if load32(mem, S_LTN) > 0 && load32(mem, S_LHEAD) == 1 {
+                mods_only = 1;
+            }
+            if mods_only == 0 {
+                flush_line(mem);
+            }
+            if !v_in(src, t, i, mg, T_PUB()) {
+                if load32(mem, S_NL) > 0 {
+                    if load32(mem, S_LBLANK) == 0 {
+                        if load32(mem, S_LASTTOP) != 0 {
+                            if load32(mem, S_LASTTOP) != top_id(src, t, i) {
                                 out_blank(mem);
+                            } else {
+                                if load32(mem, S_LBRACE) == 1 {
+                                    out_blank(mem);
+                                }
                             }
                         }
                     }
                 }
+                store32(mem, S_LASTTOP, top_id(src, t, i));
             }
-            store32(mem, S_LASTTOP, top_id(src, t, i));
         }
+        // 推这一格之前，这一行已经有几个记号 —— 下面那道 `S_LHEAD` 的更新要用它。
+        let head_was: u32 = load32(mem, S_LTN);
         let is_brace: u32 = 0;
         let is_close: u32 = 0;
         let is_semi: u32 = 0;
@@ -701,6 +726,21 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
                         prev = enc(i, mg);
                     }
                 }
+            }
+        }
+        // **这一行到现在是不是只有修饰词**（`#46`）：空行起步的修饰词记 1，
+        // 之后**每个**记号都得还是修饰词才保持 1，否则归 0（括号/分号/逗号当然归 0）。
+        let hmod: u32 = 0;
+        if tk_kind(t, i) == 0 && v_in(src, t, i, 0, T_HEAD_MODS()) {
+            hmod = 1;
+        }
+        if head_was == 0 {
+            store32(mem, S_LHEAD, hmod);
+        } else {
+            if load32(mem, S_LHEAD) == 1 && hmod == 1 {
+                store32(mem, S_LHEAD, 1);
+            } else {
+                store32(mem, S_LHEAD, 0);
             }
         }
         i = i + step;
