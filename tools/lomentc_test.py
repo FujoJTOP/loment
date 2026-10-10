@@ -2695,7 +2695,7 @@ def test_l1_definite_lifetime_rule():
 
 @test
 def test_runtime_is_forced_in_and_absent_by_default():
-    """`docs/219` 判据 C：`runtime` = **强制带**，默认档 = 一个 `@__loment_` 都没有。
+    """`docs/224` 判据 C：`runtime` = **强制带**，默认档 = 一个 `@__loment_` 都没有。
 
     这一对是这一维**买到的全部**：同一份**用不到**运行期的程序，加不加那一行，产物差
     **恰好**是那段运行期。差得比它多（比如把分配器也带进来）就说明"强制带"越了界 ——
@@ -2726,7 +2726,7 @@ def test_runtime_is_forced_in_and_absent_by_default():
 
 @test
 def test_runtime_dep_must_declare_and_agree():
-    """`docs/219` 判据 D：依赖的**声明是需求** —— 库没写要报，根不满足要报。
+    """`docs/224` 判据 D：依赖的**声明是需求** —— 库没写要报，根不满足要报。
 
     改之前这里是一律「库不许 `choose`」（`lomentc.py` 的 `check()`）。那条按字面做不下去：
     `loment/lib/proc.lomt` 要除法，当根编要 `choose runtime`、当依赖又不许写 —— 两面堵死。

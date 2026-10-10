@@ -178,7 +178,7 @@ formal object and reconciles byte for byte".
   that rule**: `runtime` + `gc_manual` ("I want a runtime, but I manage memory myself") is a
   legitimate tier and must not be refused. See `docs/175` §3.6.
 
-  **As of 2026-10-10 this dimension is a guarantee** (`docs/219`) — the sentence above,
+  **As of 2026-10-10 this dimension is a guarantee** (`docs/224`) — the sentence above,
   "decidable without reading the source", went from a **promise** to an **assertion**: a
   `no_runtime` artifact carries **no** runtime, and every construct that would drag one in
   (`/` `%` `alloc` `free` `str_concat` `str_eq` `panic` `guard`) is refused at compile time

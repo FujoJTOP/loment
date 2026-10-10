@@ -1934,7 +1934,7 @@ def _inject_core_choose(text: str, core: list[str]) -> str:
     开头），`choose` 行只能出现在它之后。
 
     **译文自己已经写过的那几条要跳过**（2026-10-10）：`lomt_from.emit_lomt` 在 `impl=True`
-    时会**自己**给实体单元发一行 `choose runtime`（`docs/219`）。重复注入的后果不是"多一行
+    时会**自己**给实体单元发一行 `choose runtime`（`docs/224`）。重复注入的后果不是"多一行
     废话"，是**这一维写了两次** —— 那是 E022，而 `loment/lib/lumtui_math.lomt` 那份
     python 写法的模块当场就红（实测）。
     """

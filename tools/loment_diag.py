@@ -587,7 +587,7 @@ CARDS: dict[int, Card] = {
             "只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，"
             "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
             "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"
-            "③ **`runtime` 那一维是一句保证**（`docs/219`）：`no_runtime`（默认）说的是"
+            "③ **`runtime` 那一维是一句保证**（`docs/224`）：`no_runtime`（默认）说的是"
             "“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
             "`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。",
         fixes=(
@@ -1047,7 +1047,7 @@ CARDS_EN: dict[int, Card] = {
             "when it is on\". There can be many switches, but **one name may be written once**, "
             "and a value may only be set after `set choose` declared it. A library may not "
             "`choose`: to express a need, a library declares a **capability requirement** and the "
-            "project decides. (3) **The `runtime` dimension is a guarantee** (`docs/219`): "
+            "project decides. (3) **The `runtime` dimension is a guarantee** (`docs/224`): "
             "`no_runtime` (the default) says \"this artifact carries no runtime\", so every "
             "construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, "
             "`guard` ... - is refused at compile time **in that tier**.",

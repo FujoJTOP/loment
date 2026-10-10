@@ -150,7 +150,7 @@ def _control_source(proj: Path, grammar: str) -> str:
     text = _module_of(proj).read_text(encoding="utf-8")
     lines = text.split("\n")
     lines[0] = _blank_line(lines[0])            # `choose write grammar <语法>`
-    # **核心 `choose` 行也要抹掉**（`docs/219`）：与 `choose write grammar` 同一条理由 ——
+    # **核心 `choose` 行也要抹掉**（`docs/224`）：与 `choose write grammar` 同一条理由 ——
     # 它是 **Loment 层**的声明（`docs/182` §1.3 的"核心语法硬写法"），不是那一门语法的一部分。
     # 抹的时机与前端**同一处**（`potato_from._take_core_choose`）：不抹的话这一行会被当成
     # 那门语言的语法喂给真编译器 —— 实测 clang 报 `unknown type name 'choose'`。
