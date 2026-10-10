@@ -19,8 +19,11 @@
 * 数的是 **`alloc` 调用点**（`gc_ladder` 的定义）。`str_concat` 也落堆，但它不是 `alloc` 站点，
   **不计入** —— 这一层是 `docs/210` 设计里就写明的口径，不是这里的省略。
 * 注入只加 `choose`，**不改函数体**，所以「站点数」是这份源本来就有的。
-* 临时文件写在**源同目录**、名字**点开头**（`*.lomt` 的 glob 匹配不到点开头的名字），
-  这样 `use` 的相对依赖照旧解析，而不会被发布清单/其它 glob 顺手收走。
+* 注入后的副本写在**本进程私有的临时目录**里 —— 那段源**不进仓库**（见 `_ladder_of`）。
+  它**不必**是源的同级文件：名字形式的 `use` 按 `lomentc.NAME_ROOTS`（仓根的
+  `loment/lib` / `loment/examples` / `loment/selfhost` / `loment/tools`）解析，**没有一层是
+  「入口文件旁边」**；路径形式的 `use` 先试 `root` 再试文件自己的目录，语料里唯一一条
+  （`loment/examples/demo.lomt` 的 `use "lom/fujr.lom"`）正是 `root` 那一条。
 """
 from __future__ import annotations
 
@@ -61,19 +64,26 @@ def _inject(text: str) -> str | None:
 
 
 def _ladder_of(path: Path) -> dict:
-    """一份源在 alpha 档下的 `gc_ladder`。**临时文件写在源同目录、点开头**（见模块头）。"""
+    """一份源在 alpha 档下的 `gc_ladder`。注入后的副本**写在本进程私有的临时目录**里。
+
+    **为什么不能写在源同目录**（2026-10-10 实测的那条并行假红）：那样它就是一个
+    `loment/selfhost/*.lomt` 能匹配到的**仓库内固定路径**。原先赌的是"点开头的名字
+    glob 匹配不到" —— 那是 **shell / `glob` 模块**的规矩，`pathlib.Path.glob` **不遵守**：
+    它按 `fnmatch` 比，`*.lomt` 照样命中 `.tmp-gcsurface-driver.lomt`。于是分片把
+    `loment_gc_surface_test` 与 `loment_rel_test` 放进同一片之后，
+    `loment_rel_test::test_manifest_order_is_platform_independent` 会在窗口里数到多出来的
+    那一份，报"这一组在清单里的次序不是字节序" —— 5/6，单跑 6/6（`docs/213` §7 记的那次）。
+    """
     text = path.read_text(encoding="utf-8")
     src = _inject(text)
     if src is None:
         return {"skipped": True}
-    tmp = path.parent / f".tmp-gcsurface-{path.stem}.lomt"
-    try:
+    with tempfile.TemporaryDirectory(prefix="gcsurface-") as tds:
+        tmp = Path(tds) / path.name
         tmp.write_text(src, encoding="utf-8", newline="\n")
         mod, deps = lomentc.load_unit(tmp, ROOT)
         doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
         return doc["gc_ladder"]
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def measure(dirs=CORPUS) -> list[tuple[str, dict]]:

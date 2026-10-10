@@ -1,7 +1,7 @@
 // loment/tools/lomrel.lomt — Loment 版发布清单生成器 (无 Python, docs/167 Stage 3)
 //
 // 判据 (tools/loment_rel_test.py): 与 `tools/loment_release.py` 的 stdout / 落盘字节 / 退出码
-// **逐字节相同** (--emit / --checksums / --check / 无参数)。
+// **逐字节相同** (--emit [PATH] / --checksums PATH / --check / 无参数)。
 //
 // 本文件按**能编译的最小骨架起步**逐档长 (docs/167 记的教训: 盲写大段 = 镜像第一版的下场)。
 // 第一档只做: 参数解析 + 读一个文件 + 写一个文件。
@@ -226,6 +226,7 @@ tools/loment_audit.py
 tools/loment_doc_test.py
 tools/loment_json_test.py
 tools/lomelf.py
+tools/loment_opt_obj.py
 tools/loment_elf_test.py
 tools/loment_pe_test.py
 tools/lomt_from.py
@@ -321,6 +322,8 @@ tools/loment_capasserts_test.py
 tools/loment_eol_test.py
 tools/loment_ffi_test.py
 tools/loment_i18n_test.py
+tools/loment_ports.py
+tools/loment_ports_test.py
 tools/loment_probe.py
 tools/loment_release.py
 tools/loment_status.py
@@ -863,8 +866,10 @@ fn run(mem: ptr) -> u32 {
     store32(tmp, C_POOL, 0);
     let o1: u64 = argv_n(ab, 8192, 1);
     let n: u32 = expand_all(mem, tmp);
-    // 参数: --emit / --checksums PATH / --check
+    // 参数: --emit [PATH] / --checksums PATH / --check
     let emit_f: u32 = 0;
+    let emit_o: u32 = 0;
+    let emit_l: u32 = 0;
     let check_f: u32 = 0;
     let cks_f: u32 = 0;
     let cks_o: u32 = 0;
@@ -876,6 +881,14 @@ fn run(mem: ptr) -> u32 {
         let ol: u32 = lo32(ax);
         if span_is(ab, oo, ol, "--emit") == 1 {
             emit_f = 1;
+            // 路径**可选** (与 `--checksums PATH` 同一形状): 给了就写那里, 不给还是仓库那条。
+            // 并发判据要它 —— `loment_rel_test` 现在两边各写一份进程私有路径再比字节, 不再去改
+            // 仓库里那条共享清单 (改它 = 在窗口里让别的判据读到半截文件)。
+            let a3: u64 = argv_n(ab, 8192, k + 1);
+            if a3 != 0 {
+                emit_o = hi32(a3);
+                emit_l = lo32(a3);
+            }
         }
         if span_is(ab, oo, ol, "--check") == 1 {
             check_f = 1;
@@ -923,7 +936,12 @@ fn run(mem: ptr) -> u32 {
             return 2;
         }
         let pb: ptr = ptr_add(tmp, 4096 - 256);
-        cstr(pb, "loment/build/release-manifest.json");
+        if emit_o != 0 {
+            copy_bytes(pb, 0, ab, emit_o, emit_l);
+            store8(pb, emit_l, 0 as u8);
+        } else {
+            cstr(pb, "loment/build/release-manifest.json");
+        }
         let fd: i64 = open_wo(pb);
         if fd < 0 {
             wstr(2, "[ERR] 写不了清单\n");
@@ -932,7 +950,11 @@ fn run(mem: ptr) -> u32 {
         write_all(fd as u64, outb, olen as u64);
         close_fd(fd);
         wstr(1, "[OK] ");
-        wstr(1, "loment/build/release-manifest.json");
+        if emit_o != 0 {
+            write_all(1, pb, emit_l as u64);
+        } else {
+            wstr(1, "loment/build/release-manifest.json");
+        }
         wstr(1, " (");
         wdec(1, tmp, n);
         wstr(1, " 个工件)\n");
