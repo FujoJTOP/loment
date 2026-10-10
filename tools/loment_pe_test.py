@@ -24,6 +24,7 @@ import contextlib
 import importlib
 import io
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -463,6 +464,362 @@ def test_pe_cli_check_and_usage():
                             capture_output=True, text=True, shell=False)
         assert r2.returncode == 2, f"非法 --target 应当 rc=2, 得到 {r2.returncode}"
     print("      --target pe --check 不落盘 rc=0 · 非法 --target rc=2")
+
+
+#: 联网语料：**一份源、两个平台**。它自己起监听（端口填 0 ⇒ 由内核挑临时端口）、
+#: 自己连自己，一次把 shim 的联网面走完：socket / setsockopt(SO_REUSEADDR) / bind /
+#: listen / getsockname / connect / accept / read / write（socket 型 fd 上分流到 recv/send）/
+#: setsockopt(SO_RCVTIMEO)（timeval → 毫秒） / sendto(addr=NULL, MSG_NOSIGNAL)。
+#: 三行输出各钉一件事：回显对得上 / 读超时返回 -EAGAIN / 对端挂断之后进程还活着。
+#: 走 127.0.0.1 + 临时端口，所以并发跑门禁也不会撞端口。
+SOCK_DEMO = """module sockdemo
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa_init(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn _start() {
+    let sa: ptr = alloc(64);
+    let _z: u32 = sa_init(sa, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket(listener)\\n");
+    }
+    let one: ptr = alloc(8);
+    store8(one, 0, 1);
+    let so: i64 = syscall6(54, ls as u64, 1, 2, one as u64, 4);
+    if so < 0 {
+        die(2, "FAIL setsockopt(SO_REUSEADDR)\\n");
+    }
+    let bi: i64 = syscall6(49, ls as u64, sa as u64, 16, 0, 0);
+    if bi < 0 {
+        die(3, "FAIL bind\\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(4, "FAIL listen\\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let gn: i64 = syscall6(51, ls as u64, sa as u64, ln as u64, 0, 0);
+    if gn < 0 {
+        die(5, "FAIL getsockname\\n");
+    }
+    if load8(sa, 3) == 0 {
+        die(6, "FAIL ephemeral port is 0\\n");
+    }
+    let cs: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if cs < 0 {
+        die(7, "FAIL socket(client)\\n");
+    }
+    let cn: i64 = syscall6(42, cs as u64, sa as u64, 16, 0, 0);
+    if cn < 0 {
+        die(8, "FAIL connect\\n");
+    }
+    let ac: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if ac < 0 {
+        die(9, "FAIL accept\\n");
+    }
+    let pw: i64 = syscall6(1, cs as u64, str_ptr("ping") as u64, 4, 0, 0);
+    if pw != 4 {
+        die(10, "FAIL client write\\n");
+    }
+    let rb: ptr = alloc(64);
+    let r1: i64 = syscall6(0, ac as u64, rb as u64, 4, 0, 0);
+    if r1 != 4 {
+        die(11, "FAIL server read\\n");
+    }
+    if load8(rb, 0) != 112 {
+        die(12, "FAIL echo byte\\n");
+    }
+    let pw2: i64 = syscall6(1, ac as u64, str_ptr("pong") as u64, 4, 0, 0);
+    if pw2 != 4 {
+        die(13, "FAIL server write\\n");
+    }
+    let r2: i64 = syscall6(0, cs as u64, rb as u64, 4, 0, 0);
+    if r2 != 4 {
+        die(14, "FAIL client read\\n");
+    }
+    if load8(rb, 1) != 111 {
+        die(15, "FAIL echo byte 2\\n");
+    }
+    // getpeername：出口方向也写回 sockaddr（AF_INET 两边同值，只验它填了东西）
+    let pa: ptr = alloc(64);
+    let pn: ptr = alloc(8);
+    store8(pn, 0, 16);
+    let gp: i64 = syscall6(52, ac as u64, pa as u64, pn as u64, 0, 0);
+    if gp < 0 {
+        die(16, "FAIL getpeername\\n");
+    }
+    if load8(pa, 1) != 0 {
+        die(17, "FAIL getpeername family\\n");
+    }
+    if load8(pa, 3) == 0 {
+        die(18, "FAIL getpeername port\\n");
+    }
+    w(1, "ECHO OK\\n");
+
+    let tv: ptr = alloc(16);
+    store8(tv, 8, 224);
+    store8(tv, 9, 147);
+    store8(tv, 10, 4);
+    let st1: i64 = syscall6(54, ac as u64, 1, 20, tv as u64, 16);
+    if st1 < 0 {
+        die(19, "FAIL setsockopt(SO_RCVTIMEO)\\n");
+    }
+    let r3: i64 = syscall6(0, ac as u64, rb as u64, 4, 0, 0);
+    if r3 != -11 {
+        die(20, "FAIL read-timeout is not -EAGAIN\\n");
+    }
+    // getsockopt 反向那一次换算：毫秒摊回 timeval，并把 *optlen 写回 16
+    let gb: ptr = alloc(16);
+    let gl: ptr = alloc(8);
+    store8(gl, 0, 16);
+    let gs: i64 = syscall6(55, ac as u64, 1, 20, gb as u64, gl as u64);
+    if gs < 0 {
+        die(21, "FAIL getsockopt(SO_RCVTIMEO)\\n");
+    }
+    if load8(gl, 0) != 16 {
+        die(22, "FAIL getsockopt optlen\\n");
+    }
+    if load8(gb, 8) != 224 {
+        die(23, "FAIL getsockopt usec low\\n");
+    }
+    if load8(gb, 9) != 147 {
+        die(24, "FAIL getsockopt usec high\\n");
+    }
+    w(1, "TIMEOUT OK\\n");
+
+    // accept4 + SOCK_NONBLOCK：新 socket 要真的建成非阻塞（read 立刻 -EAGAIN）
+    let cs2: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if cs2 < 0 {
+        die(25, "FAIL socket(client2)\\n");
+    }
+    let cn2: i64 = syscall6(42, cs2 as u64, sa as u64, 16, 0, 0);
+    if cn2 < 0 {
+        die(26, "FAIL connect 2\\n");
+    }
+    let ac2: i64 = syscall6(288, ls as u64, 0, 0, 2048, 0);
+    if ac2 < 0 {
+        die(27, "FAIL accept4\\n");
+    }
+    let r4: i64 = syscall6(0, ac2 as u64, rb as u64, 4, 0, 0);
+    if r4 != -11 {
+        die(28, "FAIL accept4 socket is not non-blocking\\n");
+    }
+    syscall6(3, ac2 as u64, 0, 0, 0, 0);
+    syscall6(3, cs2 as u64, 0, 0, 0, 0);
+    w(1, "NONBLOCK OK\\n");
+
+    // AF_INET6 的两侧翻译（Linux=10 / Windows=23）。**允许这台机器没有 IPv6**：
+    // 那就两边一起打印 IPV6 NO —— 判据是"两个平台看到同一件事"，不是"必须有 IPv6"。
+    let s6: i64 = syscall6(41, 10, 1, 0, 0, 0);
+    if s6 < 0 {
+        w(1, "IPV6 NO\\n");
+    } else {
+        let a6: ptr = alloc(64);
+        store8(a6, 0, 10);
+        store8(a6, 1, 0);
+        store8(a6, 23, 1);
+        let b6: i64 = syscall6(49, s6 as u64, a6 as u64, 28, 0, 0);
+        if b6 < 0 {
+            w(1, "IPV6 NO\\n");
+        } else {
+            let n6: ptr = alloc(8);
+            store8(n6, 0, 28);
+            let g6: i64 = syscall6(51, s6 as u64, a6 as u64, n6 as u64, 0, 0);
+            if g6 < 0 {
+                die(29, "FAIL v6 getsockname\\n");
+            }
+            if load8(a6, 0) != 10 {
+                die(30, "FAIL v6 family not translated back\\n");
+            }
+            w(1, "IPV6 OK\\n");
+        }
+        syscall6(3, s6 as u64, 0, 0, 0, 0);
+    }
+
+    let extra: i64 = syscall6(1, cs as u64, str_ptr("xxxx") as u64, 4, 0, 0);
+    if extra != 4 {
+        die(31, "FAIL client write 2\\n");
+    }
+    syscall6(3, cs as u64, 0, 0, 0, 0);
+    let big: ptr = alloc(2048);
+    let _x1: i64 = syscall6(44, ac as u64, big as u64, 2048, 16384, 0);
+    let _x2: i64 = syscall6(44, ac as u64, big as u64, 2048, 16384, 0);
+    w(1, "SURVIVED\\n");
+    let _sd: i64 = syscall6(48, ac as u64, 2, 0, 0, 0);
+    syscall6(3, ac as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+SOCK_HEAD = b"ECHO OK\nTIMEOUT OK\nNONBLOCK OK\n"
+SOCK_TAIL = (b"IPV6 OK\nSURVIVED\n", b"IPV6 NO\nSURVIVED\n")
+
+
+def _sock_ok(out: bytes) -> bool:
+    """IPv6 那一行**允许两种情况**（机器没有 IPv6 时两边都打 NO）——
+    判据是"两个平台看到同一件事"，不是"必须有 IPv6"。"""
+    return out.startswith(SOCK_HEAD) and out[len(SOCK_HEAD):] in SOCK_TAIL
+
+
+def _shim_blob():
+    """现算一遍 shim 机器码 + 导入表（`--dump-win-shim` 冻的就是这两段）。"""
+    a = lomelf.Asm(0)
+    em = lomelf.PeEmitter([])
+    em.asm = a
+    idata, slots = lomelf.build_pe_idata()
+    lomelf.emit_win_shim(em, slots)
+    return a.finalize(), idata, slots, a.labels
+
+
+@test
+def test_pe_shim_dispatches_the_documented_numbers():
+    """派发面 == `PE_DISPATCH` 那张登记表：注释、文档、机器码三者不能各自漂。
+
+    跨平台（纯数据），所以**门禁的 ubuntu runner 也跑得到** —— 它盯的是
+    "文档说支持哪些号"这件事本身，而不是那些号在 Windows 上跑得对不对。
+    """
+    blob, _idata, _slots, labels = _shim_blob()
+    i = labels["__win_syscall"]
+    while not (blob[i] == 0x3D and blob[i + 5] == 0x0F and 0x80 <= blob[i + 6] <= 0x8F):
+        i += 1                                   # 跳过序言（push rbp / mov rbx,…）
+    seen = []
+    while blob[i] == 0x3D and blob[i + 5] == 0x0F and 0x80 <= blob[i + 6] <= 0x8F:
+        seen.append(struct.unpack_from("<i", blob, i + 1)[0])
+        i += 11                                  # cmp eax,imm32 (5) + jcc rel32 (6)
+    assert seen == lomelf.PE_DISPATCH, f"派发面与登记表不符:\n  {seen}\n  {lomelf.PE_DISPATCH}"
+    assert blob[i:i + 7] == b"\x48\xC7\xC0\xFF\xFF\xFF\xFF", "兜底不是 `mov rax,-1`"
+    print(f"      {len(seen)} 个号逐个对上 `PE_DISPATCH`，兜底 -1")
+
+
+@test
+def test_pe_imports_two_dlls_with_the_socket_surface():
+    """导入表：两条描述符 + 终止项、两个 DLL 名、整个 ws2_32 面，且塞得进孪生那块落点。"""
+    idata, slots = lomelf.build_pe_idata()
+    d = lomelf.PE_IDATA_RVA
+    got, k = [], 0
+    while True:
+        ilt, _ts, _fc, name_rva, _iat = struct.unpack_from("<IIIII", idata, k * 20)
+        if ilt == 0 and name_rva == 0:
+            break                                # 全零终止项
+        got.append(idata[name_rva - d:idata.index(b"\x00", name_rva - d)].decode())
+        k += 1
+    assert got == [n for n, _f in lomelf.PE_DLLS], f"描述符指向的 DLL 不对: {got}"
+    for nm in lomelf.PE_IMPORTS_WS2:
+        assert nm in slots, f"ws2_32 少了 `{nm}`"
+    assert len(slots) == len(lomelf.PE_IMPORTS) + len(lomelf.PE_IMPORTS_WS2), \
+        "函数名有重名（`slots` 是按名字索引的平表，重名会静默覆盖）"
+    # Import Directory 的 size 必须跟着描述符条数走（原先写死 40 = 一条 + 终止项）
+    assert lomelf.PE_IMPORT_DESC_BYTES == 20 * (len(lomelf.PE_DLLS) + 1)
+    tiny = "define void @_start() {\nentry:\n  ret void\n}\n"
+    blob, _info = lomelf.compile_pe(tiny)
+    pe = struct.unpack_from("<I", blob, 0x3C)[0]
+    opt = pe + 24
+    dir_rva, dir_sz = struct.unpack_from("<II", blob, opt + 112 + 8)
+    assert (dir_rva, dir_sz) == (lomelf.PE_IDATA_RVA, lomelf.PE_IMPORT_DESC_BYTES), \
+        f"可选头里的 Import Directory = {hex(dir_rva)}/{dir_sz}，与描述符条数不符"
+    # 孪生侧给导入表留的落点只有 TB_EXT-TB_IDATA 宽，**撑破是静默截断**
+    twin = (ROOT / "loment" / "tools" / "lomelf.lomt").read_text(encoding="utf-8")
+    tb = int(re.search(r"const TB_IDATA: u32 = (\d+);", twin).group(1))
+    ext = int(re.search(r"const TB_EXT: u32 = (\d+);", twin).group(1))
+    assert len(idata) <= ext - tb, f"导入表 {len(idata)} B 撑破了孪生落点的 {ext - tb} B"
+    print(f"      {len(got)} 个 DLL、{len(slots)} 个导入；导入表 {len(idata)} B ≤ 孪生落点 {ext - tb} B")
+
+
+@test
+def test_frozen_shim_blob_matches_the_reference():
+    """树里冻的那份（`win_shim_data.lomt`）== 参考实现现算的那份 —— 孪生照抄的就是它。
+
+    这条盯的是"改了 shim 却忘了重新冻"：没有它，自举链接器会照抄一份**旧的**机器码，
+    而参考实现编出的 PE 是新的 —— 两边在 `test_pe_selfhost_mirror_matches_reference`
+    之前都不会有人喊。
+    """
+    src = (ROOT / "loment" / "tools" / "win_shim_data.lomt").read_text(encoding="utf-8")
+    blob, idata, _slots, _labels = _shim_blob()
+
+    def decode(block: str, n: int) -> bytes:
+        got = {int(a): b for a, b in
+               re.findall(r'if i == (\d+) \{ return "([0-9a-f]*)"; \}', block)}
+        assert sorted(got) == list(range(n)), f"分片编号不连续: {sorted(got)[:4]}…"
+        return bytes.fromhex("".join(got[i] for i in range(n)))
+
+    n_shim = int(re.search(r"pub fn n_shim\(\) -> u32 \{ return (\d+); \}", src).group(1))
+    n_idata = int(re.search(r"pub fn n_idata\(\) -> u32 \{ return (\d+); \}", src).group(1))
+    sblock = re.search(r"pub fn shim_part.*?(?=pub fn n_idata)", src, re.S).group(0)
+    iblock = re.search(r"pub fn idata_part.*", src, re.S).group(0)
+    assert decode(sblock, n_shim) == blob, "shim 机器码与冻结的那份不符 —— 跑 `--dump-win-shim`"
+    assert decode(iblock, n_idata) == idata, "导入表与冻结的那份不符 —— 跑 `--dump-win-shim`"
+    print(f"      冻结的 shim {len(blob)} B / 导入表 {len(idata)} B 与现算的逐字节相同")
+
+
+@test
+def test_elf_socket_program_runs_on_linux():
+    """Linux 上**真跑**一遍联网语料 —— CI 的 ubuntu runner 跑得到这一条。
+
+    PE 那一侧要靠 Windows 机器（见下一条），所以这条是门禁里**唯一**会真的收发字节的联网判据。
+    """
+    if not sys.platform.startswith("linux"):
+        print("      SKIP: 非 Linux（PE 那半由 test_pe_and_elf_agree_on_a_socket_program 钉）")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "sockdemo.lomt"
+        src.write_text(SOCK_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        elf = td / "sockdemo.elf"
+        elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
+        elf.chmod(0o755)
+        r = subprocess.run([str(elf)], capture_output=True, timeout=60, shell=False)
+        assert r.returncode == 0 and _sock_ok(r.stdout), \
+            f"Linux 上联网语料没跑对: rc={r.returncode} out={r.stdout!r} err={r.stderr[:200]!r}"
+    print("      回显 / 读超时 -EAGAIN / 非阻塞 / 对端挂断存活：Linux 原生真跑通过")
+
+
+@test
+def test_pe_and_elf_agree_on_a_socket_program():
+    """同一份 `.lomt`：PE（本机原生）与 ELF（WSL）**输出逐字节相同、退出码相同**。
+
+    这就是"孪生联网"的正题 —— 不是"两个平台各自能跑"，而是**同一份源在两边行为一致**。
+    """
+    if not (_on_windows() and _wsl()):
+        print("      SKIP: 非 Windows 或无 WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "sockdemo.lomt"
+        src.write_text(SOCK_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        text = ll.read_text(encoding="utf-8")
+        exe = td / "sockdemo.exe"
+        exe.write_bytes(lomelf.compile_pe(text)[0])
+        elf = td / "sockdemo.elf"
+        elf.write_bytes(lomelf.compile_ll(text)[0])
+        got = _run_native(exe, timeout=60)
+        want = _run_in_wsl(elf, "sockdemo", td, timeout=60)
+        assert got == want, f"两个平台不一致:\n  PE   {got!r}\n  ELF  {want!r}"
+        assert got[0] == 0 and _sock_ok(got[1]), f"联网语料没跑对: {got!r}"
+    print(f"      回显 / 读超时 / 非阻塞 / IPv6 family / 对端挂断：PE 与 ELF 同为 {got[1]!r}")
 
 
 def main() -> int:
