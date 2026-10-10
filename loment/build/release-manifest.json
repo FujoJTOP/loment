@@ -1962,6 +1962,10 @@
    "sha256": "77ae2041e101b38ac3241766efd76bb5f1cd1406dbb0b7ef4943139b52e13126"
   },
   {
+   "path": "docs/219-libc-conscription.md",
+   "sha256": "900cafd42291876014dacd08dcb887a4c6fb88a1d23c9dcbf52e39cd901c690e"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "2e9655b04ae67f329e4f9cc61dce7bc0b6ae3a531f234a416167a0c43b6651d5"
   },
