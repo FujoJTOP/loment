@@ -643,7 +643,43 @@ def test_dbg_refuses_foreign_grammar():
         # 那份"文件:行"走的是 **stdout** —— 拒绝之后它必须是空的
         # （不能拿整段出来查 `.lomt:`：拒绝消息自己就带上路径了）。
         assert r.stdout.strip() == "", f"还吐了个 文件:行:\n{r.stdout[:200]}"
-    print("      `loment dbg` 认出非原生写法就拒，不给指向不存在之处的 文件:行")
+    print("      `loment dbg` 认出非原生写法就拒，不给不存在之处的 文件:行")
+
+
+@test
+def test_the_cross_unit_gate_does_not_depend_on_call_position():
+    """"本单元没有的函数"这条闸，**不许**因为调用恰好写在语句位就绕过去。
+
+    `trans_core.raw()` 对 `ast.Call` 原先**不查** `self.fns`（`ty_of` 才查）——
+    于是同一个 `acquire(16);`：写在**值位**被拒、写在**语句位**照发。
+    判决取决于"恰好写在哪个位置"不是设计，是**漏**：那道闸的用意是"跨单元调用要
+    显式声明"，与写法位置无关。（`docs/198` §3 报过这一条，说根在共用核、
+    不只 Python 那一门。）
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        msgs = []
+        for i, body in enumerate(("int f() { acquire(16); return 7; }\n",
+                                  "int f() { return acquire(16); }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                msgs.append(str(e))
+            else:
+                raise AssertionError(f"第 {i} 种（{'语句位' if i == 0 else '值位'}）没拒")
+        for m in msgs:
+            assert "acquire" in m and "本单元没有的函数" in m, m
+        # 反面：调**已在本单元**的函数照旧（语句位也不许被误拒）
+        p = td / "ok.lomt"
+        p.write_text("choose write grammar c\nint g(int x) { return x; }\n"
+                     "int f() { g(1); return 7; }\n", encoding="utf-8", newline="\n")
+        assert "g(1);" in potato_from.front_door(p).source
+    print("      语句位与值位给同一个判决；调本单元的函数照旧")
+
+
+
 
 
 #: 照 2026-09-17 一个子 agent **真写出来的那份 C** 蒸馏的 (无 `#include`、无 libc),

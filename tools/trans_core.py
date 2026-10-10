@@ -933,6 +933,14 @@ class Emitter:
                     f"的 `consts` 发 —— 名字对不上的话就是那一步没收它）")
             return self.vars[e.name]
         if isinstance(e, Call):
+            # **那道闸在这里也要过一遍**（`docs/198` §3）。`ty_of` 对 `ast.Call` 会查
+            # `self.fns`（"Stage A 不跨单元"那条），而 `raw` 原先**不查**、直接发名字 ——
+            # 于是同一个"本单元没有的函数"，写在**值位**被拒、写在**语句位**照发。
+            # 判决取决于"恰好写在哪个位置"不是设计，是**漏**：那道闸的用意是"跨单元调用
+            # 要显式声明"，与写法位置无关。
+            #
+            # **复用 `ty_of`**，不在这里另抄一份 —— 两处各写一遍必然漂。
+            self.ty_of(e)
             # 调用点跟着函数名的改名走（见 `fname`）。
             nm = self.fname.get(e.name, e.name)
             return f"{nm}({', '.join(self.ex(a, 'int') for a in e.args)})"
