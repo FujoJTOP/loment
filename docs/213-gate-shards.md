@@ -198,12 +198,24 @@ def test_driver_seed_matches_reference() -> None:
 `loment_rel_test::test_manifest_order_is_platform_independent` 数进了
 `loment/selfhost/*.lomt` 那一组，报"这一组在清单里的次序不是字节序"。
 
-**改法**：① `_ladder_of` 的注入副本改写到**本进程私有的临时目录**（那段源根本不进仓库；
-它不必是同级文件 —— 名字形式的 `use` 按 `NAME_ROOTS` 解析，没有一层是"入口文件旁边"，
-路径形式先试 `root`）；② `loment_rel_test` 那两条写盘的判据改喂进程私有路径：`--checksums`
-本来就收路径，`--emit` 现在也收一条**可选**路径（两侧逐字对齐，不给还是仓库那条），于是
-"真落盘 + 比字节"一条没少，而共享清单一个字节都不碰。默认路径那件事由
+**同一根因有第二个出口**，只堵一处门禁照旧偶发红：把修好的树放回复现里，第 1 次迭代就换成
+`loment_tools_test::test_m55_fmt_idempotent_and_semantics` 报同一条红 —— 它把格式化后的副本
+写成源同目录的 `._fmt_<名字>.lomt`（`loment/examples/` 也是 `*.lomt` 的 GLOB 目录），
+赌的是同一句"点开头的名字 glob 匹配不到"。**教训**：这类"临时文件藏在 GLOB 目录里"要按
+**写法**扫（`with_name(` / `path.parent /`），不能按现象扫 —— 扫出来的两个文件前缀
+（`.tmp-` 与 `._`）毫无共同点。
+
+**改法**：① `_ladder_of` 与 `test_m55` 的副本都改写到**本进程私有的临时目录**（那段源根本
+不进仓库；它不必是同级文件 —— 名字形式的 `use` 按 `NAME_ROOTS` 解析，没有一层是"入口文件
+旁边"，路径形式先试 `root`）；② `loment_rel_test` 那两条写盘的判据改喂进程私有路径：
+`--checksums` 本来就收路径，`--emit` 现在也收一条**可选**路径（两侧逐字对齐，不给还是仓库
+那条），于是"真落盘 + 比字节"一条没少，而共享清单一个字节都不碰。默认路径那件事由
 `test_emit_default_path_is_the_same_on_both_sides` 就地钉住（它不需要 WSL，在 ubuntu 上真跑）。
+
+**怎么验**：`loment_rel_test` 在**无 WSL** 的档位上循环 500 次，同时压着同片的
+`loment_gc_surface_test` / `loment_tools_test` / `loment_dist_test` / `loment_lompi_test`
+（写 GLOB 目录的两处都在里面）——改前第 1 次就红，改后 0 次。（无 WSL 这一档与 CI 一致：
+那三条要 WSL 的判据在 ubuntu 上全 SKIP，所以 CI 上跑的正是这几条。）
 
 还有一条与"快"相反、但必须一起记的：**分片把"装工具链"这件事复制了 N 份**。
 2026-10-10 实测到一次 `apt-get` 在镜像上卡住 **10 分钟**（正常 95s）—— 单 job 时
