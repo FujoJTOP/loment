@@ -44,8 +44,14 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # Python 判据仍在仓里，六门表层语法的翻译器也还没有 Loment 孪生（`docs/189`）。
 # 那句话的对外版本写在 README 的 `## Status`（与 `tools/loment_publish.py` 里那份
 # 逐字同源）—— **改版本号时一起改**，`loment_publish` 的判据会核。
-RELEASE = "0.1.4"
-RELEASE_NAME = "0.1.4"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-10-10 升到 **0.1.4.5-pre**（用户定的）：**预告版** —— 这一版的用处不是"装完的东西",
+# 而是**提前把 0.1.4.5 要装的三件事宣告出去**（用户原话：pre-release 不要求做完，
+# 只要告诉大家我们准备发这个版本了）。三件事：LomentGC 四层梯全量上线 / 网络在
+# 两个平台都能用 / lompi 升到 0.2.0 Alpha。**正文里"已落地"与"预告"要分清**
+# （`.github/release-notes/v0.1.4.5-pre.md` 里逐条标了），别把预告写成既成事实。
+# tag = `v0.1.4.5-pre`；`release.yml` 认 tag 里带 `-` 即 Pre-release。
+RELEASE = "0.1.4.5-pre"
+RELEASE_NAME = "0.1.4.5 Pre"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
