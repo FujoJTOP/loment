@@ -692,32 +692,219 @@ fn lpc_run(r1: ptr, r1n: u32, r2: ptr, r2n: u32, stale: bool) -> u32 {
 
 // ---------------------------------------------------------------- 入口
 
-fn _start() {
-    let av: ptr = lpc_alloc(65536);
-    let scr: ptr = lpc_alloc(1024);
-    if (av as u64) == 0 || (scr as u64) == 0 {
+// ---------------------------------------------------------------- 命令入口 (docs/218)
+
+/// 这条单元注册的命令名（`docs/218` 形态 B）：编出来的产物因此叫 `loment-lompicheck`
+/// —— 放上 `PATH` 就有一条 `loment lompicheck`。
+pub fn loment_command() -> str { return "lompicheck"; }
+
+/// 命令体（`docs/218` §3.2）。**不再自己写 `_start`** —— 工具链生成的入口读
+/// `/proc/self/cmdline`、数出字段数，把那一整块与个数交到这里。
+///
+///     loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
+///
+/// `--source` 默认**当前目录**（在 loment 检出里跑就是它）；`--outlet` 默认从 `argv[0]`
+/// 推出来 —— 与 `lompi` 推它的全局根**同一条规矩**：程序在哪个家目录下，缓存就在那儿。
+///
+/// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/217` §1），Loment 起不了
+/// `git`。所以需要更新缓存时它**把该跑的命令打出来**让你跑 —— `lompi fetch` 对同一个
+/// 局面用的就是这一招。
+pub fn command_main(argv: ptr, argc: u32) -> u32 {
+    let m: u32 = lpc_cmdline_len(argv, argc);
+    let srcb: ptr = lpc_alloc(PATH_CAP as u64);
+    let outb: ptr = lpc_alloc(PATH_CAP as u64);
+    if (srcb as u64) == 0 || (outb as u64) == 0 {
         lpc_ws(FD_ERR, "lompicheck: out of memory\n");
-        syscall4(SYS_EXIT, 2, 0, 0);
+        return 2;
     }
-    lpc_join_lit(scr, av, 0, "/proc/self/cmdline");
-    let fd: i64 = syscall4(SYS_OPENAT, AT_FDCWD, scr as u64, O_RDONLY);
-    if fd < 0 {
-        lpc_ws(FD_ERR, "lompicheck: cannot read /proc/self/cmdline\n");
-        syscall4(SYS_EXIT, 2, 0, 0);
+    lpc_put_lit(srcb, ".");
+    let a0: u64 = lpc_arg_at(argv, m, 0);
+    lpc_outlet_of(argv, lpc_arg_off(a0), lpc_arg_len(a0), outb);
+    let want_refresh: u32 = 0;
+    let i: u32 = 1;
+    while i < argc {
+        let a: u64 = lpc_arg_at(argv, m, i);
+        let ap: ptr = ptr_add(argv, lpc_arg_off(a));
+        let an: u32 = lpc_arg_len(a);
+        if (lpc_eq_lit(ap, an, "--source") || lpc_eq_lit(ap, an, "--outlet")) && i + 1 < argc {
+            let b: u64 = lpc_arg_at(argv, m, i + 1);
+            // **不用 `if` 表达式** —— 语言里 `if` 是语句（与 `match` 的臂体是块同一条），
+            // 参考实现直接报 `期望 ;，得到 …`。
+            let dst: ptr = srcb;
+            if !lpc_eq_lit(ap, an, "--source") {
+                dst = outb;
+            }
+            let bl: u32 = lpc_arg_len(b);
+            lpc_copy(dst, 0, ptr_add(argv, lpc_arg_off(b)), 0, bl);
+            store8(dst, bl, 0 as u8);
+            i = i + 1;
+        } else if lpc_eq_lit(ap, an, "--refresh") {
+            want_refresh = 1;
+        } else if lpc_eq_lit(ap, an, "-h") || lpc_eq_lit(ap, an, "--help") {
+            lpc_usage();
+            return 0;
+        } else {
+            lpc_ws(FD_ERR, "lompicheck: unknown option ");
+            lpc_wb(FD_ERR, ap, an);
+            lpc_ws(FD_ERR, "\n");
+            lpc_usage();
+            return 2;
+        }
+        i = i + 1;
     }
-    let m: u32 = lpc_read_all(fd, av, 65536) as u32;
-    syscall4(SYS_CLOSE, fd as u64, 0, 0);
-    let argc: u32 = lpc_arg_count(av, m);
-    if argc < 3 {
-        lpc_ws(FD_ERR, "usage: lompicheck <loment-root> <outlet-dir> [fresh|stale]\n");
-        syscall4(SYS_EXIT, 2, 0, 0);
+    let srcn: u32 = lpc_strlen(srcb);
+    let outn: u32 = lpc_strlen(outb);
+    if outn == 0 {
+        lpc_ws(FD_ERR, "lompicheck: cannot tell where the outlet clone is -- pass --outlet DIR\n");
+        lpc_ws(FD_ERR, "  (the default is derived from this program's own path, the way lompi derives its root; that failed here)\n");
+        return 2;
     }
-    let a1: u64 = lpc_arg_at(av, m, 1);
-    let a2: u64 = lpc_arg_at(av, m, 2);
-    let stale: bool = argc >= 4 && lpc_arg_eq(av, lpc_arg_at(av, m, 3), "stale");
-    let code: u32 = lpc_run(ptr_add(av, lpc_arg_off(a1)), lpc_arg_len(a1),
-                            ptr_add(av, lpc_arg_off(a2)), lpc_arg_len(a2), stale);
-    syscall4(SYS_EXIT, code as u64, 0, 0);
+    if want_refresh == 1 {
+        lpc_print_refresh(outb, outn);
+        return 0;
+    }
+    // lpc_run 的最后一个参数是「这份缓存可能是旧的」那句提示 —— 缓存什么时候刷新
+    // 由 `--refresh` 打印出来的那条命令决定，这个程序自己判断不了，所以恒 false。
+    return lpc_run(srcb, srcn, outb, outn, false);
+}
+
+/// 命令行的字节长度。**命令体拿到的是 (整块 cmdline, 字段数)，没有长度**
+/// （入口签名是固定的，`docs/218` §3.2），所以自己数到第 `argc` 个 NUL。
+fn lpc_cmdline_len(buf: ptr, argc: u32) -> u32 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    while f < argc {
+        if load8(buf, i) == 0 {
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn lpc_strlen(p: ptr) -> u32 {
+    let n: u32 = 0;
+    while load8(p, n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn lpc_put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+/// 发布口那个库的地址。**与 `loment_publish.REPOS["lompi"]["repo"]` 同源** ——
+/// `tools/lompicheck_test.py` 有一条判据把这两处钉在一起（写死在源码里是没办法：
+/// 这个程序引不了 Python 的发布清单，而且 Loment **没有字符串常量**，只能写成函数）。
+fn lpc_outlet_url() -> str {
+    return "https://github.com/FujoJTOP/lompi";
+}
+
+/// 写一行帮助。**纯 ASCII 英文**：与 `loment` / `lompi` 两个 CLI 同一条规矩
+/// （PE 把字节直接写进控制台，936 代码页下中文是乱码，SKILL §6.1.12）。
+fn lpc_usage() {
+    lpc_ws(FD_OUT, "usage: loment lompicheck [--source DIR] [--outlet DIR] [--refresh]\n");
+    lpc_ws(FD_OUT, "  --source DIR   the loment checkout to compare (default: current directory)\n");
+    lpc_ws(FD_OUT, "  --outlet DIR   the clone of the publish outlet (default: from argv[0])\n");
+    lpc_ws(FD_OUT, "  --refresh      print the git command that updates the outlet clone\n");
+}
+
+/// **拉取那一半**（`docs/217` §1）：本程序联不了网，所以把该跑的 git 命令打出来。
+/// 外面的单引号是刻意选的 —— Loment 的转义集里没有 `\'`，用双引号就得写成 `\\"`，
+/// 而这条路径上每多一层转义就多一次能和自举侧分叉的机会。
+fn lpc_print_refresh(outlet: ptr, on: u32) {
+    lpc_ws(FD_OUT, "# the outlet clone: ");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "\n");
+    lpc_ws(FD_OUT, "# this program cannot fetch (the PE runtime has no socket) -- run one of:\n");
+    lpc_ws(FD_OUT, "git clone --depth 1 -c core.autocrlf=false -c core.eol=lf ");
+    lpc_ws(FD_OUT, lpc_outlet_url());
+    lpc_ws(FD_OUT, " '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "'\n");
+    lpc_ws(FD_OUT, "# or, if it is already there:\n");
+    lpc_ws(FD_OUT, "git -C '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "' fetch --depth 1 origin main && git -C '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "' reset --hard FETCH_HEAD\n");
+}
+
+/// 从 `argv[0]` 推出发布口缓存的位置：**与 `lompi` 推它的全局根同一条规矩** ——
+/// 程序放在哪个家目录下，缓存就在那儿。认得 `\Users\<名>\`、`/home/<名>/`、`/Users/<名>/`。
+///
+/// **为什么不用环境变量**：PE 运行时没有 `getenv`，`/proc/self/environ` 也读不到
+/// （`lompi` 的 SKILL 专门记过这条）。`argv[0]` 是唯一定位得了的东西。
+/// 推不出来就把 `dst` 留成空串 —— 调用方据此让你用 `--outlet` 指明。
+fn lpc_outlet_of(argv: ptr, a0off: u32, a0len: u32, dst: ptr) -> u32 {
+    let home: u32 = lpc_home_len(argv, a0off, a0len);
+    if home == 0 {
+        store8(dst, 0, 0 as u8);
+        return 0;
+    }
+    lpc_copy(dst, 0, ptr_add(argv, a0off), 0, home);
+    store8(dst, home, 0 as u8);
+    // `lpc_join_lit` 自己会补一个分隔符 —— 这里再写一个就成了 `hooya//.lompi/...`
+    // （实测就是这样，路径难看还不一定打不开）。
+    return lpc_join_lit(dst, dst, home, ".lompi/cache/lompi");
+}
+
+/// `argv[0]` 里家目录那一段的长度（到**下一个路径分隔符之前**为止），0 = 认不出来。
+/// 92 = `\`、47 = `/`（两个分隔符都认，Windows 与 POSIX 同一份代码）。
+fn lpc_home_len(b: ptr, off: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let mk: u32 = lpc_marker_len(b, off + i, n - i);
+        if mk > 0 {
+            let j: u32 = i + mk;
+            while j < n && load8(b, off + j) != 92 && load8(b, off + j) != 47 {
+                j = j + 1;
+            }
+            if j < n {
+                return j;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 三个"家目录"标记之一在 `p[off..]` 处的话返回它的长度，否则 0。
+fn lpc_marker_len(p: ptr, off: u32, rem: u32) -> u32 {
+    let a: u32 = lpc_prefix_lit(p, off, rem, "\Users\\");
+    if a > 0 {
+        return a;
+    }
+    let b: u32 = lpc_prefix_lit(p, off, rem, "/home/");
+    if b > 0 {
+        return b;
+    }
+    return lpc_prefix_lit(p, off, rem, "/Users/");
+}
+
+/// `p[off..off+len(lit)]` 与字面量逐字节相同的话返回它的长度，否则 0。
+fn lpc_prefix_lit(p: ptr, off: u32, rem: u32, lit: str) -> u32 {
+    let ln: u32 = str_len(lit);
+    if rem < ln {
+        return 0;
+    }
+    let q: u32 = 0;
+    while q < ln {
+        if load8(p, off + q) != str_byte(lit, q) {
+            return 0;
+        }
+        q = q + 1;
+    }
+    return ln;
 }
 
 // ---- argv: /proc/self/cmdline 是一串 NUL 结尾的字段 (PE 运行时也会合成它)
