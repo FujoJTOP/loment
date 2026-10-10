@@ -2155,7 +2155,7 @@
   },
   {
    "path": "tools/loment_hosted_test.py",
-   "sha256": "a80bb11e4928c51ef97a7216266b404c1b29a91f4fa2a18947fcaf3090e816f9"
+   "sha256": "1e47f7ca0401d7f3b0af9166026221bf921e6718e4c188463f8b24628f0cec46"
   },
   {
    "path": "tools/loment_i18n_test.py",

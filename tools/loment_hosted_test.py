@@ -215,14 +215,40 @@ class Pkg:
         _write_sh(self.ll, lomentc.emit_llvm(mod, ROOT))
 
     def run(self, args: list[str], src_name: str = "src/prog.lomt") -> tuple[int, str]:
-        """跑**真启动器**。返回 (退出码, 合并输出)。"""
+        """跑**真启动器**，再跑**它编出来的那个程序**。返回 (程序的退出码, 合并输出)。
+
+        ⚠ **两步都要有。** 第一版只有 WSL 那一侧把程序跑起来，native 那一侧只调了
+        启动器就返回 —— 于是 CI（Linux、native）拿到的永远是**构建的退出码 0**，
+        十二条判据**全部空转**：zlib 那条"PASS"是假的，Python 那条因为程序根本没跑
+        所以文件是空的。**抓到它的是证伪那条**（它期望 40，拿到 0）—— 这正是
+        "判据要能变红"这条纪律买到的东西，不是多余的一步。
+
+        构建失败时返回**构建的**退出码（拒绝面的判据要的就是它，那时没有程序可跑）。
+        """
         if self.native:
             paths = [str(self.bin)] + ([str(self.shim)] if self.shim.exists() else [])
             r = subprocess.run([str(self.bin / "loment"), *args], capture_output=True,
                                text=True, shell=False, encoding="utf-8",
                                errors="replace", timeout=600, cwd=str(self.td),
                                env={**os.environ, "PATH": os.pathsep.join(paths + [os.environ.get("PATH", "")])})
-            return r.returncode, (r.stdout or "") + (r.stderr or "")
+            build_log = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0:
+                return r.returncode, build_log
+            # 产物路径**从参数里解析**，不写死 —— 写死就又是一处"本地与 CI 不一样"的
+            # 地方，而这一条判据已经因为这类不一致空转过一次。
+            exe = None
+            for i, a in enumerate(args):
+                if a in ("-o", "--out") and i + 1 < len(args):
+                    exe = Path(args[i + 1])
+                    if not exe.is_absolute():
+                        exe = self.td / exe
+                    break
+            if exe is None or not exe.exists():
+                return r.returncode, build_log + "\n(构建成功但没找到产物)"
+            r2 = subprocess.run([str(exe)], capture_output=True, text=True, shell=False,
+                                encoding="utf-8", errors="replace", timeout=600,
+                                cwd=str(self.td))
+            return r2.returncode, build_log + (r2.stdout or "") + (r2.stderr or "")
         return self._run_wsl(args, src_name)
 
     def _run_wsl(self, args: list[str], src_name: str) -> tuple[int, str]:
