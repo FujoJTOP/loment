@@ -231,6 +231,9 @@ GLOBS = [
     "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
     "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
     "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
+    # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
+    "tools/loment_ports.py", "tools/loment_ports_test.py",
     "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
     "tools/loment_syscalls_test.py",
     # 权威状态在 `origin` 那一条 (CLAUDE.md 第一节): 读 origin 的版本/tag/落后数, 让
