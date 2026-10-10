@@ -1,6 +1,6 @@
 # Loment 语言手册
 
-> 编译器版本戳: `lomentc-c0125a98cf43`（由 tools/loment_manual.py 生成）
+> 编译器版本戳: `lomentc-e795df0e5b1c`（由 tools/loment_manual.py 生成）
 
 ## 规范
 
@@ -45,6 +45,7 @@
 - [native_slice](api/native_slice.md)
 - [native_str](api/native_str.md)
 - [native_trait](api/native_trait.md)
+- [register_hello](api/register_hello.md)
 - [selfcheck](api/selfcheck.md)
 - [switch](api/switch.md)
 - [toolchain](api/toolchain.md)
