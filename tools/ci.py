@@ -122,6 +122,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
                  "loment_ffi_test",
+                 # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
+                 # 含 `dlsym`(按名解析) 与内联 `syscall`(符号表看不见) 两个证伪对。
+                 "loment_ports_test",
                  "loment_rel_test",
                  "loment_editors_test",
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
