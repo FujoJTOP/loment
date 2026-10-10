@@ -174,6 +174,56 @@ def test_manifest_order_is_platform_independent():
     assert pos == len(got), f"清单条目数 {len(got)} 与 GLOBS 展开的 {pos} 对不上"
 
 
+_GL = re.compile(r'fn globs_text\(\) -> str \{\s*return "(.*?)";', re.S)
+
+
+def _lomrel_globs() -> list[str]:
+    """从 `lomrel.lomt` 的 `globs_text()` 里读那份 glob 清单（一条一行）。
+
+    **从源码里读，不另抄一份** —— 抄一份就是又一处会漂的清单，正是下面那条判据要防的东西。
+    提取口径：字符串字面量里是**真的换行**（Loment 里没写 `\\n` 转义），收尾是 `";`。
+    """
+    m = _GL.search(SRC.read_text(encoding="utf-8"))
+    assert m, f"在 {SRC.name} 里找不到 `fn globs_text()` 的字符串字面量"
+    lines = m.group(1).split("\n")
+    if lines and lines[-1] == "":       # 字面量末尾那个换行
+        lines.pop()
+    return lines
+
+
+@test
+def test_lomrel_globs_match_python_globs():
+    """两处清单**逐条同序同名**：`loment_release.GLOBS` 与自举那份 `globs_text()`。
+
+    **Why**：这是 `--emit` / `--checksums` / `--check` 三条"比两侧字节"的前提，而
+    **此前没有一条判据在核它** —— `loment_tools_test::test_every_tool_is_in_the_release_manifest`
+    只在**报错信息**里写着"要同步"，它比的是"工具在不在 `GLOBS` 里"，比不到自举那一份。
+    2026-10-10 实测：`f262a67`（逃生舱·粒度 B）把 `tools/loment_opt_obj.py` 加进 `GLOBS`
+    却漏了 `lomrel.lomt`，一路漂到 `main`：两侧工件数 539 / 538。
+
+    **CI 上看不见，所以这条必须是纯 Python**：会抓它的那三条判据全要 WSL（编 lomrel 再跑），
+    ubuntu 的 runner 上 SKIP —— 漏项因此漂过去了。本判据不编、不跑 WSL，在 CI 上真跑。
+
+    **How to apply**：改 `GLOBS` 就改 `lomrel.lomt`，**同一位置**（顺序也是清单口径的一部分；
+    两处插在不同位置会给出"同集合不同顺序"的两份清单，`--emit` 报字节不同而工件数一样）。
+    """
+    py, sh = list(loment_release.GLOBS), _lomrel_globs()
+    if py == sh:
+        print(f"      两处清单一致 ({len(py)} 条)")
+        return
+    ipy, ish = set(py), set(sh)
+    first = next((i for i, (a, b) in enumerate(zip(py, sh)) if a != b), min(len(py), len(sh)))
+    a = py[first] if first < len(py) else "<无>"
+    b = sh[first] if first < len(sh) else "<无>"
+    raise AssertionError(
+        f"两侧发布清单不一致: GLOBS {len(py)} 条 / lomrel {len(sh)} 条。\n"
+        f"  首个不同在第 {first + 1} 条: GLOBS={a!r} lomrel={b!r}\n"
+        f"  只在 GLOBS: {[g for g in py if g not in ish][:8]}\n"
+        f"  只在 lomrel: {[g for g in sh if g not in ipy][:8]}\n"
+        f"  改法: 两处在**同一位置**增删同一行 (`tools/loment_release.py` 的 `GLOBS` 与 "
+        f"`{SRC.name}` 的 `globs_text()`)。")
+
+
 @test
 def test_lomrel_matches_python():
     """无参数 (门禁模式) 与 `--check`: stdout / stderr / 退出码逐字节相同。"""
