@@ -1297,6 +1297,10 @@ PE_SYSCALLS = (
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
+#: 号 → 面。**编译器那一侧有一份同名表**（`lomentc.SURFACE_NUMBERS`，用于把单元里的
+#: 机调用站点按面分类、写进 Potato 的 `surfaces`，`docs/222`）；两份必须**逐条一致**，
+#: 判据 `loment_pe_test::test_surface_table_matches_the_runtime` 钉着它。
+PE_SURFACE_BY_NUMBER = {num: surface for num, surface, _label in PE_SYSCALLS}
 
 
 def _pe_table_check() -> None:

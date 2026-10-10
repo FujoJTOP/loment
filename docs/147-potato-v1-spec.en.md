@@ -132,7 +132,7 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0` … **`v10`**, and an unknown version =
+- the object carries its own version number; the validator accepts `v0` … **`v11`**, and an unknown version =
   illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
   required field to an old version would turn every existing object illegal, and the old versions are
   **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
@@ -150,8 +150,9 @@ formal object and reconciles byte for byte".
   | `v8` | `gc` | `docs/175` §3.4 |
   | `v9` | `runtime` | `docs/175` §3.6 |
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
+  | `v11` | `surfaces` | `docs/222` |
 
-  The ladder **accumulates**: `v10` requires the fields of every version below it.
+  The ladder **accumulates**: `v11` requires the fields of every version below it.
 
 - **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
   `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory
@@ -190,7 +191,7 @@ formal object and reconciles byte for byte".
 
 
 - **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine
-  calls (`syscall4`/`syscall6`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
+  calls (`syscall4`/`syscall6`/`syscall7`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
   the unit itself declared `extern fn`. **The measure is lexical**: it only asks whether a name is called,
   never what type it has or whether it is really dangerous — which is exactly what `docs/204` R5 asks for
   ("greppable, countable, auditable"). The shape is five non-negative integers
@@ -199,9 +200,20 @@ formal object and reconciles byte for byte".
   so it cannot tell whether the numbers were counted correctly — but it can tell when they contradict each
   other. `loment stat` reports **the same numbers** (that copy is checked against the reference
   implementation's real lexer). The list of builtins
-  (`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
+  (`syscall4`/`syscall6`/`syscall7`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
   there because this validator must not import the compiler (M47), and "which builtins cross the boundary" is
   precisely what an auditor needs.
+
+- **`surfaces` (v11)**: sorts **the same batch of sites** that `boundary.syscalls` counts into
+  "surfaces" — `{surface name: site count, …, total_sites}`. The surface names are **the user's**
+  (`file`/`mem`/`net`/`proc` are this repository's own division; `other` is the fallback, for a number
+  that is not in the table or a first argument that is not an integer literal). Empty surfaces are not
+  emitted, and a unit with no machine call is `{"total_sites": 0}`. The validator rules on **two**
+  things by itself: the surfaces must sum to `total_sites`, and `total_sites` must equal
+  `boundary.syscalls` (every site falls in exactly one surface, so the two count the same batch).
+  The number→surface table is `SURFACE_NUMBERS` in `tools/lomentc.py`, and it must match the PE
+  runtime's dispatch table entry for entry
+  (`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`). The full picture is `docs/222`.
 
 - **`v6` used to be emitted only by `tools/potato_from.py`** (whose output is *translated* units). The main
   compiler only picked `grammar` up **when `v7` was added**: the ladder accumulates, and it had been emitting

@@ -111,7 +111,7 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v11"), "版本"),
+    ("version", lambda d: d.__setitem__("potato", "v12"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -289,6 +289,23 @@ def fixture_v10() -> dict:
     return d
 
 
+def fixture_v11() -> dict:
+    """一份合法的 **v11** 形式对象: v10 的再 + v11 的 `surfaces`（`docs/222`）。
+
+    与 `fixture_v7` … `fixture_v10` 同一个理由单独来一份：`surfaces` 从 v11 起才合法 ——
+    拿 v10 去试只会得到"未知顶层字段"，校验器里那几条规则（面名得是标识符、值得是非负
+    整数、各面之和要等于 `total_sites`、以及 `total_sites` 要等于 `boundary.syscalls`）
+    **一条都碰不到**，那种绿是空转。
+
+    这里的数**刻意与 `fixture_v7` 的 `boundary.syscalls`（=3）对上** —— 交叉不变量是
+    v11 独有的那一条，正例里就得先成立，否则测的就不是"自洽"而是"必然报错"。
+    """
+    d = fixture_v10()
+    d["potato"] = "v11"
+    d["surfaces"] = {"file": 1, "net": 2, "total_sites": 3}
+    return d
+
+
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
     ("gc 缺这一项", lambda d: d.pop("gc"), "gc 必须是"),
@@ -330,6 +347,36 @@ MUTATORS_V10 = [
     ("gc_ladder 不是对象", lambda d: d.__setitem__("gc_ladder", []),
      "gc_ladder 必须是对象"),
     ("gc_ladder 整个缺掉", lambda d: d.pop("gc_ladder"), "gc_ladder 必须是对象"),
+]
+
+
+#: v11 的 `surfaces` 那几条规则的反例（`docs/222`）。作用在 **v11** 的对象上。
+#:
+#: 与 `MUTATORS_V10` 同形，但**多一条 `boundary` 那边没有的**：`surfaces.total_sites`
+#: 必须等于 `boundary.syscalls`（`docs/222` §"交叉不变量"）。那是 v11 唯一一条**跨字段**
+#: 的自洽要求 —— 每个机调用站点落在恰好一个面里，所以两处数的是同一批站点。
+MUTATORS_V11 = [
+    ("surfaces 整个缺掉", lambda d: d.pop("surfaces"), "surfaces 必须是对象"),
+    ("surfaces 不是对象", lambda d: d.__setitem__("surfaces", []),
+     "surfaces 必须是对象"),
+    ("surfaces total_sites 缺掉", lambda d: d["surfaces"].pop("total_sites"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces total_sites 不是整数", lambda d: d["surfaces"].__setitem__("total_sites", "x"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces 面名不是标识符", lambda d: d["surfaces"].__setitem__("no such face", 0),
+     "不是标识符"),
+    ("surfaces 面是负数", lambda d: d["surfaces"].__setitem__("net", -1),
+     "必须是非负整数"),
+    ("surfaces 面不是整数", lambda d: d["surfaces"].__setitem__("net", "x"),
+     "必须是非负整数"),
+    # **自洽**：和数只在分量都合法时才去对。
+    ("surfaces 各面之和对不上", lambda d: d["surfaces"].__setitem__("total_sites", 9),
+     "各面之和"),
+    # **交叉不变量**：和数与 `boundary.syscalls` 各说各话时，校验器读不到源码也判得出打架。
+    # 这一条**故意让和数自洽**（`2+3=5`），这样报的只能是交叉那一条。
+    ("surfaces 与 boundary.syscalls 打架",
+     lambda d: d.__setitem__("surfaces", {"file": 2, "net": 3, "total_sites": 5}),
+     "boundary.syscalls"),
 ]
 
 
@@ -376,6 +423,12 @@ def test_every_spec_rule_has_a_rejection_case():
     # v10 那一组同理（`gc_ladder`, docs/210 §3/§5）。
     for name, mut, needle in MUTATORS_V10:
         d = fixture_v10()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v11 那一组同理（`surfaces`, docs/222）。
+    for name, mut, needle in MUTATORS_V11:
+        d = fixture_v11()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -549,7 +602,7 @@ def _cases() -> list[tuple[str, dict]]:
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
-                                   ("v10", fixture_v10())]
+                                   ("v10", fixture_v10()), ("v11", fixture_v11())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -580,6 +633,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v10()
         mut(d)
         out.append((f"v10-{name}", d))
+    # v11 那一组（`surfaces`）同理。
+    for name, mut, _ in MUTATORS_V11:
+        d = fixture_v11()
+        mut(d)
+        out.append((f"v11-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

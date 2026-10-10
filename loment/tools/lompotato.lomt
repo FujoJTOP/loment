@@ -562,6 +562,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 10 && eq_lit(kp, kl, "gc_ladder") == 1 {
         return 1;
     }
+    // v11 = v10 + **面的组成**（`docs/222`）：机调用站点按面分一分。
+    if ver >= 11 && eq_lit(kp, kl, "surfaces") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1574,6 +1578,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v10") == 1 {
             ver = 10;
         }
+        if eq_lit(t, l, "v11") == 1 {
+            ver = 11;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -1630,6 +1637,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 10 {
         chk_gc_ladder(mem, doc);
+    }
+    if ver >= 11 {
+        chk_surfaces(mem, doc);
     }
     return 0;
 }
@@ -1746,6 +1756,119 @@ fn gl_part(mem: ptr, gl: u32, key: str) -> u32 {
         return NOTFOUND;
     }
     return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+}
+
+/// `surfaces`（`docs/222`, v11）: **面名 → 站点数**（面名由用的人定：`net`/`file`/…
+/// 只是仓库自己的划法），外加一个保留键 `total_sites`。**与 `chk_boundary` /
+/// `chk_gc_ladder` 同形** —— 校验器读不到源码，判不了"数得对不对"，但判得了
+/// "它们自相矛盾"：各面之和要等于 `total_sites`。
+///
+/// 比前两个多一条**交叉不变量**：每个机调用站点落在**恰好一个**面里，所以
+/// `total_sites` 必须等于 `boundary.syscalls` —— 两处数的是同一批站点，读不到源码
+/// 也能判它们打架。逐条与 Python 的 `potato.validate` 对齐，**连错的条数都要一致**。
+fn chk_surfaces(mem: ptr, doc: u32) -> u32 {
+    let sf: u32 = jget(mem, doc, "surfaces");
+    if sf == NOTFOUND || jkind(mem, sf) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    // 逐键：名字得是标识符、值得是非负整数 —— **每个键最多记一次错**（Python 那边是
+    // `if`/`elif`：名字都不合法时就不再挑值的错）。但**值的合法性另记一个闸**：
+    // Python 的 `all(...)` 看的是 `parts.values()`，名字不合格的键只要值合格照样进和。
+    let sum: u32 = 0;
+    let vals_ok: u32 = 1;
+    let tot: u32 = 0;
+    let tot_ok: u32 = 0;
+    let tot_seen: u32 = 0;
+    let m: u32 = jfirst(mem, sf);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let vn: u32 = jmval(mem, m);
+        let vok: u32 = 0;
+        let vv: u32 = 0;
+        if vn != NOTFOUND && jnonneg(mem, vn) == 1 {
+            vok = 1;
+            vv = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), vn);
+        }
+        if eq_lit(ptr_add(mem, M_SB2), kl, "total_sites") == 1 {
+            tot_seen = 1;
+            if vok == 1 {
+                tot = vv;
+                tot_ok = 1;
+            } else {
+                let _t: u32 = bad(mem);
+            }
+        } else {
+            if ident_node(mem, kn, ptr_add(mem, M_SB2)) == NOTFOUND {
+                let _k: u32 = bad(mem);
+            } else if vok == 0 {
+                let _v: u32 = bad(mem);
+            }
+            if vok == 1 {
+                sum = sum + vv;
+            } else {
+                vals_ok = 0;
+            }
+        }
+        m = jsib(mem, m);
+    }
+    // `total_sites` 缺项与取值不合法在 Python 那边是同一条错（`sf.get` 拿到 `None`），
+    // 所以这里也**只记一次**：取值不合法在环里已经记过，缺项在这里补上。
+    if tot_seen == 0 {
+        let _t: u32 = bad(mem);
+    }
+    if tot_ok == 1 {
+        // 和数只在**分量都合法**时才去对（与 `boundary` / `gc_ladder` 同口径：否则是级联，
+        // 而两份校验器比的正是错误条数）。
+        if vals_ok == 1 && tot != sum {
+            let _s: u32 = bad(mem);
+        }
+        // 交叉不变量：`boundary` 得是个对象、`syscalls` 得是个**整数**（负数也算数 ——
+        // Python 那边是 `isinstance(int)`），缺了就不判。
+        let bnd: u32 = jget(mem, doc, "boundary");
+        if bnd != NOTFOUND && jkind(mem, bnd) == 1 {
+            let bs: u32 = jget(mem, bnd, "syscalls");
+            if bs != NOTFOUND && jkind(mem, bs) == 4 {
+                if (tot as i64) != jint_signed(mem, bs) {
+                    let _c: u32 = bad(mem);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/// 整数结点的**带符号**值（`jkind` 是 4 时才有意义）。Python 那边的交叉不变量用的是
+/// `isinstance(int)`，负数也算数 —— `jnonneg` 判掉的那种形态在这里还得读得出来。
+fn jint_signed(mem: ptr, n: u32) -> i64 {
+    let i: u32 = json_raw_off(ptr_add(mem, M_ARENA), n);
+    let neg: u32 = 0;
+    let c0: u32 = load8(ptr_add(mem, M_IN), i);
+    if c0 == 45 {
+        neg = 1;
+        i = i + 1;
+    } else if c0 == 43 {
+        i = i + 1;
+    }
+    // 位数上界只是防跑飞：真结点是解析器吐出来的，位数有限。
+    let acc: i64 = 0;
+    let k: u32 = 0;
+    let go: u32 = 1;
+    while k < 32 && go == 1 {
+        let c: u32 = load8(ptr_add(mem, M_IN), i);
+        if c < 48 || c > 57 {
+            go = 0;
+        } else {
+            acc = acc * 10 + ((c - 48) as i64);
+            i = i + 1;
+            k = k + 1;
+        }
+    }
+    if neg == 1 {
+        return 0 - acc;
+    }
+    return acc;
 }
 
 fn _start() -> u32 {
