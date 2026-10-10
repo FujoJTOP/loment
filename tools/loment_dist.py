@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1457,20 +1458,49 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
     return _write_shared(out, r.stdout)     # 共享产物: 见 _write_shared 的说明
 
 
+#: 包里唯一一个**不现场编译**的工具。它的入口就是自举驱动 `loment/selfhost/driver.lomt`，
+#: 而它的 IR **已经作为 `SEED` 提交在仓里** —— 种子是这个入口的**定点**（docs/159）：
+#: `loment_seed_test` 钉住"种子 == 参考实现为 driver.lomt 发射的 IR"，`loment/bootstrap.sh`
+#: 钉住"stage1 编译 driver.lomt == 种子"。所以在这里再用 stage1 重编一遍，买到的是
+#: **同一件事的第二遍**，而它是整条 `--emit` 里最贵的一步：本机 273s（`build_tools` 的
+#: 76%），CI 上约 700s —— 占 `loment_dist_test` 那 954s 的四分之三（实测见 docs/213）。
+#: 定点本身仍被上面两条判据守着，只是不再由**发行包判据**重复付账。
+SEED_TOOL = "loment-driver"
+
+
 def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
     """名字 -> (Linux ELF 字节, Windows PE 字节)。
 
-    IR 是**目标无关**的，所以只跑一次 stage1，然后同一份 IR 各链一遍 —— 两个平台的包
+    IR 是**目标无关**的，所以每个入口的 IR 只算一次，同一份再各链一遍 —— 两个平台的包
     都能从本机构建出来，不需要另一个平台、也不需要 WSL。
+
+    `SEED_TOOL` 的 IR 直接取 `SEED`（见上）；其余入口由 stage1 现场编译，且**并发**跑
+    —— 它们彼此独立（各写各的 `STAGE/<name>.ll`）。并发的收益全在 `emit_ir` 那些
+    **子进程**上；`_lomelf_link` 是纯 Python，GIL 下并不并行，但它总共才几秒
+    （最大的 3.2MB IR 也只要 0.8s），不值得为它上进程池。
     """
-    stage1 = build_stage1()
+    todo = [(n, e, c) for n, e, c in TOOLS if not only or n in only]
+    if not todo:
+        return {}
+    if any(n == SEED_TOOL for n, _e, _c in todo) and not SEED.exists():
+        raise SystemExit(f"missing seed {SEED.relative_to(ROOT)} (docs/159)")
+    # stage1 只在真需要现场编译时才造 —— 于是 `--only driver` 是秒级
+    stage1 = None if all(n == SEED_TOOL for n, _e, _c in todo) else build_stage1()
+
+    def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
+        text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
+                ).read_text(encoding="utf-8")
+        return name, _lomelf_link(text, "elf"), _lomelf_link(text, "pe")
+
+    jobs = max(1, min(4, (os.cpu_count() or 1)))
+    if jobs == 1 or len(todo) == 1:
+        made = [one(*t) for t in todo]
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            made = list(ex.map(lambda t: one(*t), todo))
+
     out: dict[str, tuple[bytes, bytes]] = {}
-    for name, entry, cwd in TOOLS:
-        if only and name not in only:
-            continue
-        ir = emit_ir(stage1, entry, cwd)
-        text = ir.read_text(encoding="utf-8")
-        elf, pe = _lomelf_link(text, "elf"), _lomelf_link(text, "pe")
+    for name, elf, pe in made:      # **按 TOOLS 顺序落盘 —— 发布清单的顺序是判据**
         out[name] = (elf, pe)
         print(f"  [{name}] elf {len(elf)} 字节 / pe {len(pe)} 字节")
     return out
