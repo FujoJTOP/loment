@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "3946f47936e0d0336a7bb9d5f1e248253dc5e971c0d2266137ac02f00cd473c1"
+   "sha256": "4c2f2fa3827e2f989ffe312ff66a0fa4440e7a1fdba441297c74bc8342790560"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -1983,7 +1983,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "b90801aeccb474abf93729847f0354cc040a3336e396c9c9a8c4c51540b8c75d"
+   "sha256": "98d252976025b66fbf5c37442055ecd072c0e4021eafe4468362b68e442684e0"
   },
   {
    "path": "docs/manual/api/ahci.md",
