@@ -25,8 +25,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # 这一组与原来 `gate.yml` 那一步**逐字对应**（`qemu-system-x86 qemu-user golang-go
 # default-jdk nodejs npm vim`），后面几件是 runner 镜像本来就有、容器里得自己装的。
 # 不用 `--no-install-recommends`：原来那一步也没用，换掉会静默改环境。
+#
+# **`lsb-release` + `software-properties-common` + `gnupg` + `wget` 那四件是给 `llvm.sh`
+# 用的**（它在 runner 上跑时那四件都在，所以以前没人注意）。少一个就是一次构建失败 ——
+# 2026-10-10 连着红了两轮：先 `lsb_release: command not found`，再
+# `Missing required tools: add-apt-repository`（`software-properties-common` 提供）。
+# `llvm.sh` 自己的提示原话就是 `apt install lsb-release wget software-properties-common gnupg`。
 RUN apt-get update -qq && apt-get install -y -qq \
-      ca-certificates curl wget gnupg git sudo lsb-release \
+      ca-certificates curl wget gnupg git sudo lsb-release software-properties-common \
       python3 make unzip xz-utils diffutils \
       qemu-system-x86 qemu-user \
       golang-go default-jdk \
