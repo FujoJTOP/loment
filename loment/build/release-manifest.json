@@ -1059,15 +1059,15 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "0e37d15aabe904a2cdd066f37b0b791c74db8c3fc3dff532f237f3f429b83c26"
+   "sha256": "99ce3ce6a2846531ef35abb1270aeeaaabe78fc4323b4318f80c580e5f87aa16"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
-   "sha256": "93cea7e9cc2b282f17fb127e9f0d31793fbcaf4d2160ed30958c27b6d61860ca"
+   "sha256": "097856fae2632ad14413be8304eec58cd71db38c2666eefcaa4dd91a5c74d3e1"
   },
   {
    "path": "loment/build/genesis/lomelf-linux-x64.elf",
-   "sha256": "a4d219f33c4b8b500081619b32c118deae50669be8a64b9e2fc779a9fe479ce1"
+   "sha256": "d0e00a5fb02d2692be996f22d0ab35b0ad5f5aea43aa8c78d89c0e77a0395ccb"
   },
   {
    "path": "loment/tools/lomc.lomt",
@@ -1099,7 +1099,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "03b4026736601d868acc8ed372f267cc9425523fcdd89780796cb56e08c8342c"
+   "sha256": "4bccb48fd7a54301373c55c112e55cc42466aab7e3d61dd193ff2657525d00f4"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1551,7 +1551,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "d2653a0a08404aa7d4f87ecbcfa308c2a335fe2fcfebb1bb6efddbdfd5f2fb60"
+   "sha256": "827ec397884348bdcee1833534d5d64a7d7113f82bd6bc11157ba91fbf546216"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1903,7 +1903,7 @@
   },
   {
    "path": "docs/200-lomelf-table-caps.md",
-   "sha256": "7957c649b22973372fde4cd82ff2145cff074c53424ac69a7ccba84aa2c912a2"
+   "sha256": "48e95452b1cc9cb36a4c63ab64c24a5de144931fcd245b514aec132ab6028f06"
   },
   {
    "path": "docs/201-doors-and-registries.md",
