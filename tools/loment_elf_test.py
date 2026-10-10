@@ -511,6 +511,67 @@ def test_gc_auto_collects_while_manual_exhausts():
 
 
 @test
+def test_gc_alpha_adaptive_bounds_a_large_live_set():
+    """`gc_auto_alpha` 的**自适应**收集器收得下更大的活集（`docs/210` §2.4 的"策略池"）。
+
+    **Why**：`gc_auto` 那条明写的上限是"**活集 ≳ 32 KB 会耗尽**"—— 它按**固定** 32 KiB 的
+    分配量触发，于是"活集 + 至多 32 KiB 垃圾 ≤ 64 KiB"，活集一过 32 KB 就装不下。alpha
+    的自适应触发多一条**空间触发**（前沿快满就收），把这一条抬到"活集接近整个 arena"。
+
+    **How to apply**：一对逐字同源、只差 `choose` 一行的程序 —— 活集 **44 KB**（`a`+`b`，
+    尺寸是变量所以不是 L0、末尾还在用所以活到最后），随后循环里每圈漏一块**收得掉的垃圾**
+    （`chew` 里 `p` 是 L3：`let q: ptr = p` 外逃，出了 `chew` 就没人指得到）。总量
+    400×136 ≈ 53 KB 请求过 64 KiB arena：
+      * `gc_auto` → **耗尽**（rc=132）—— 固定触发还没到，arena 先满了；
+      * `gc_auto_alpha` → **跑完**（rc=7）—— 空间触发在快满时收掉垃圾。
+    两只是**同一份源**，所以差别只来自那一档的触发策略。端到端过**包内镜像链接器**。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcadapt\n%s\nchoose runtime\n\n"
+            "fn chew(n: u32) -> u32 {\n"
+            "    let p: ptr = alloc(n);\n"
+            "    let q: ptr = p;\n"
+            "    store8(q, 0, 1);\n"
+            "    return load8(q, 0);\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let sz: u32 = 22000;\n"
+            "    let a: ptr = alloc(sz);\n"
+            "    store8(a, 0, 5);\n"
+            "    let b: ptr = alloc(sz);\n"
+            "    store8(b, 0, 6);\n"
+            "    let s: u32 = 0;\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 400 {\n"
+            "        s = s + chew(128);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if load8(a, 0) == 5 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"adapt_{tag}", td, timeout=60)[0])
+    assert got[1] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。自适应收集器要么没生效，"
+        "要么空间触发 / 活集量法 / 阈值任一处坏了")
+    assert got[0] != 7, (
+        f"**`gc_auto` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出自适应的好处："
+        "固定 32 KiB 触发本该在活集 44 KB 时装不下 arena")
+    print(f"      gc_auto 耗尽 (rc={got[0]}，活集 44 KB)；gc_auto_alpha 跑通 (rc={got[1]}) "
+          "—— 自适应触发收得下更大的活集")
+
+
+@test
 def test_l1_definite_lifetime_bounds_the_heap():
     """**L1（定活）真的发生**（`docs/210` §2.5）—— 判据是**一对**程序。
 

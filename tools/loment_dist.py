@@ -1613,19 +1613,6 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
 #: 定点本身仍被上面两条判据守着，只是不再由**发行包判据**重复付账。
 SEED_TOOL = "loment-driver"
 
-#: `--opt` **不许碰**的入口（`docs/212` §5.2，2026-10-10 实测）。
-#:
-#: 编译驱动的那份 IR 在 clang `-O1`/`-O2` 下会被**编坏**：同一个入口用 `-O0` 编出来
-#: 一切正常，`-O1`/`-O2` 编出来一跑就是 SIGSEGV（`rc=139`）。这不是补的那三个 libcall
-#: 的问题 —— 把它们换成 LLVM 自己的 `llvm.memset`/`llvm.memcpy`/`llvm.memmove` 内建，
-#: 同样段错误。也就是说驱动那份 IR 里有 `-O1` 会踩到的东西（UB 或某个 LLVM 假设），
-#: 而它是**入口里最大的一份**（3.2 MB IR），也只有它是**从种子**来的（不是 stage1 现编）。
-#:
-#: 所以这一格**点名退回** lomelf：慢，但是对的。把一份**一跑就崩的编译器**递出去，
-#: 比给它一份慢的糟糕得多 —— 递出去的东西必须是可信的，这一条优先于快。
-#: 修好 §5.2 那条之后把这里删掉、让驱动也吃 `--opt`。
-NO_OPT_TOOL = SEED_TOOL
-
 
 def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[bytes, bytes]]:
     """名字 -> (Linux ELF 字节, Windows PE 字节)。
@@ -1657,14 +1644,10 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
         text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
-        skip_opt = cc is not None and name == NO_OPT_TOOL
-        elf, why = _link_opt(text, cc) if (cc and not skip_opt) else (None, "")
+        elf, why = _link_opt(text, cc) if cc else (None, "")
         if elf is None:
             elf = _lomelf_link(text, "elf")
-            if skip_opt:
-                print(f"  [{name}] --opt **跳过**：clang -O1/-O2 会把这份 IR 编坏"
-                      "（一跑就 SIGSEGV，见 docs/212 §5.2）—— 留 lomelf，慢但对")
-            elif cc:
+            if cc:
                 print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
         else:
             optimized.append(name)
@@ -1875,6 +1858,12 @@ def skill_zip() -> bytes:
     它是**第 4 个发行件**, 由 --emit 一起产出 —— 既不手工打(手工打的哈希必然与
     随后的 SHA256SUMS 对不上, 2026-09-15 踩过), 也能被 --check 的新鲜度检查覆盖。
     结构与 loment_dist_test 里的确定性约定一致: 固定时间戳 1980-01-01 + 权限 0644。
+
+    `create_system = 3` 与 `_zip` 同一条口径, 但**这里漏过一次** (2026-10-10):
+    `ZipInfo.__init__` 按 `sys.platform` 填默认值 (`'win32'` → 0, 其余 → 3), 于是同一份
+    内容在 Windows 宿主上压出的字节与 Linux 宿主不同 —— 内容一个字节不差, 只是容器里那
+    一个字段。它咬到的是"同一 tag 在两个 runner 上出两个哈希", 而发布流水线正好要从
+    ubuntu 挪到 windows (`release.yml` 的 setup.exe 要 iexpress)。钉死它, 换宿主才**不改产物**。
     """
     skill_dir = Path(ROOT / SKILL).parent         # 例如 .claude/skills/loment
     buf = io.BytesIO()
@@ -1886,6 +1875,7 @@ def skill_zip() -> bytes:
                                  (1980, 1, 1, 0, 0, 0))
             zi.external_attr = 0o644 << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.create_system = 3
             z.writestr(zi, p.read_bytes())
     return buf.getvalue()
 
