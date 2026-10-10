@@ -955,6 +955,43 @@ def test_front_door_refuses_when_the_transcribe_step_drops_something():
     print("      转写期丢的东西前门会拒；类壳（无字段）不受影响")
 
 
+@test
+def test_bad_literals_and_identifiers_are_refused_at_the_users_line():
+    """词法上"读不了"的东西要**当着用户那一行**说，而不是甩 Python 内部异常。
+
+    两处都在共用词法表里，六门一起受影响：
+
+    * **前导零的整数字面量**（C 的八进制，`010` == 8）。`primary` 用的是
+      `int(t[1], 0)` —— 那是**按 Python 的读法**认进制，它**拒绝前导零**，与 C **正好相反**。
+      原先漏出裸 `ValueError`：整屏回溯、没有行号、退出码 1（与"子集外"同码不同因），
+      而三条防线（`emit_lomt` / `front_door` / `lomentc.load_unit`）**一条都拦不住**。
+    * **标识符里的 `\\w` 是 Unicode 的**。`_变量` 这种名字前端收下、产物却过不了本语言的
+      词法（那边是 ASCII），报出来还带着**生成单元**的行号。现在收紧成 `[A-Za-z0-9_]`。
+
+    两边都钉：**拒得到**（且行号是用户的），而 `0x1F` / 十进制 / ASCII 标识符**照旧**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for label, body in [("octal", "int main() { return 010; }\n"),
+                            ("cjk", "int main() { int _变量 = 46; return _变量; }\n")]:
+            p = td / f"{label}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                assert "第 2 行" in str(e), f"{label}: 行号不是用户那一行 —— {str(e)[:120]}"
+            except ValueError as e:
+                raise AssertionError(f"{label}: 漏出裸 Python 异常 {e}")
+            else:
+                raise AssertionError(f"{label}: 读不了，却没拒")
+        for okk in ("int main() { return 0x1F; }\n", "int main() { return 8; }\n",
+                    "int main() { int _v1 = 46; return _v1; }\n"):
+            p = td / "ok.lomt"
+            p.write_text("choose write grammar c\n" + okk, encoding="utf-8", newline="\n")
+            assert potato_from.front_door(p).source
+    print("      八进制与 Unicode 标识符在**用户那一行**被拒；hex/十进制/ASCII 照旧")
+
+
 
 @test
 def test_array_typed_struct_field_does_not_invalidate_the_object():
