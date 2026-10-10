@@ -30,6 +30,9 @@
 #
 # **实测（2026-10-10，本机 Windows）**：`python tools/loment_dist.py --emit` **52 秒**出齐
 # 五件（含 2.36 MB 的自解压 setup.exe），`--check` 报 4/4 一致。
+# **并已在真实的 `windows-latest` 上跑通一次**（`workflow_dispatch` + `dry_run=true`，
+# 借 `v0.1.4` 那个版本号对得上的 tag）：五件齐、`--check` 过、artifact 传上去了 ——
+# 这是这条流水线自写下以来的第一次成功运行。
 # **并且内容与 Linux 宿主出的一样**：把两边的包解开逐成员比，**每一个二进制成员逐字节
 # 相同**，权限位与时间戳全同 —— 差别只剩 `create_system` 那一个字节（见下条），已钉死。
 # 所以换 runner **不改发布出去的产物**，只改是谁把它压出来的。
