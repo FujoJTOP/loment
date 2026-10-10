@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loment_dist  # noqa: E402
+import loment_seed  # noqa: E402
 import lomentc  # noqa: E402
 
 #: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
@@ -73,6 +74,47 @@ def wsl_path(p: Path) -> str:
         return str(p.resolve())
     s = str(p.resolve()).replace("\\", "/")
     return "/mnt/" + s[0].lower() + s[2:]
+
+
+#: `--opt` 的**试金石**：一段有"按字节铺"与"按字节搬"两种循环的程序。
+#:
+#: 为什么需要它：`-O2` 会把这两种循环改写成 `memset` / `memcpy` / `memmove` 的调用，而
+#: Loment 是无 libc 的 —— 少补一个符号，clang 就在**链接期**报 `undefined symbol: memset`
+#: （实测）。`user_hello` 只有一次 `write`，没有这种循环，所以光靠它那一条 `--opt` 判据
+#: 是看不见这一格的。这段程序**故意**两样都有：铺（`store8(p, i, 常量)`）与搬
+#: （`store8(d, i, load8(s, i))`），且长度是运行期参数，优化器不会把它折没了。
+#: `_start` 读到最后一个字节再退出，于是"跑起来"这件事本身就是"搬对了"。
+OPT_LIBCALL_PROBE = """\
+module optlibcall_probe
+
+fn fill(p: ptr, n: u32, v: u8) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, v);
+        i = i + 1;
+    }
+}
+
+fn copy(d: ptr, s: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(d, i, load8(s, i) as u8);
+        i = i + 1;
+    }
+}
+
+fn _start() {
+    let p: ptr = alloc(4096);
+    let q: ptr = alloc(4096);
+    fill(p, 2048, 7);
+    copy(q, p, 2048);
+    exit(load8(q, 2047) as u64);
+}
+
+fn exit(code: u64) -> i64 {
+    return syscall4(60, code, 0, 0);
+}
+"""
 
 
 # ------------------------------------------------------------------ 1. 布局
@@ -189,10 +231,10 @@ def build() -> tuple[Path, Path]:
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
     check("--check 与 SHA256SUMS 一致",
           loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
-    # 归档里的 driver == 同一份 IR 现链出来的（中间没被动过）
+    # 归档里的 driver == **种子**现链出来的（中间没被动过）
     driver = loment_dist._lomelf_link(
-        (loment_dist.STAGE / "driver.ll").read_text(encoding="utf-8"), "elf")
-    check("归档里的 loment-driver == 构建产物",
+        loment_dist.SEED.read_text(encoding="utf-8"), "elf")
+    check("归档里的 loment-driver == 种子链出来的",
           read_tar(tar)["bin/loment-driver"] == driver)
     check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
           "bin/loment-lomelf" in read_tar(tar))
@@ -245,6 +287,52 @@ def test_install_sh(tar: Path) -> None:
             f"{PREFIX_IT}/share/loment/examples/user_hello.lomt")
     check("loment run 编译+链接+运行并打出东西",
           r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
+
+    # `--opt` (docs/212 §5 A): hand the IR to clang -O2 when clang is on PATH, else **say so**
+    # and fall back to the self-hosted lomelf linker. Either way the binary must run; the
+    # two branches are pinned separately so a silent no-op `--opt` cannot pass.
+    ex = f"{PREFIX_IT}/share/loment/examples/user_hello.lomt"
+    d_bin, o_bin = "/tmp/loment_def_bin", "/tmp/loment_opt_bin"
+    wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "-o", d_bin)
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "--opt", "-o", o_bin)
+    check("loment build --opt 产出可运行二进制",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    # `build` does not set the exec bit (only `run` chmods -- pre-existing, both backends),
+    # so set it before running.
+    wsl("chmod", "755", o_bin)
+    rr = wsl(o_bin)
+    check("build --opt 的产物跑得起来",
+          rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
+    has_clang = wsl("sh", "-c", "command -v clang >/dev/null && echo y || echo n").stdout.strip() == "y"
+    if has_clang:
+        check("有 clang 时 --opt 走优化路径（不说 fallback）",
+              "falling back" not in (r.stderr or ""), (r.stderr or "")[-160:])
+        sz = lambda p: int(wsl("sh", "-c", f"wc -c < {p}").stdout.strip() or "0")
+        check("有 clang 时 --opt 是**另一个后端**的产物（与默认不同）",
+              sz(o_bin) != sz(d_bin), f"default={sz(d_bin)} opt={sz(o_bin)}")
+    else:
+        check("无 clang 时 --opt **点名**退回 lomelf（不静默）",
+              "no clang" in (r.stderr or ""), (r.stderr or "")[-160:])
+
+    # 上面那条 `--opt` 判据只说明"编译得动 user_hello"。**链得起来**是另一件事：`-O2`
+    # 会把字节循环改写成 memset/memcpy/memmove，而这个运行期没有 libc。见 OPT_LIBCALL_PROBE。
+    IT_OUT.mkdir(parents=True, exist_ok=True)
+    probe = IT_OUT / "optlibcall_probe.lomt"
+    probe.write_text(OPT_LIBCALL_PROBE, encoding="utf-8", newline="\n")
+    p_src = wsl_path(probe)
+    p_def, p_opt = f"{_T}probe_def", f"{_T}probe_opt"
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "-o", p_def)
+    check("有字节循环的程序 build 得动（默认后端）",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "--opt", "-o", p_opt)
+    check("有字节循环的程序 --opt 也**链得起来**（合成的 libcall 有人补）",
+          r.returncode == 0 and "undefined symbol" not in (r.stderr or ""),
+          (r.stderr or "")[-240:])
+    if has_clang and r.returncode == 0:
+        wsl("chmod", "755", p_opt)
+        rr = wsl(p_opt)
+        check("补齐 libcall 的产物跑出正确结果（搬对了）",
+              rr.returncode == 7, f"rc={rr.returncode} {(rr.stderr or '')[-120:]}")
 
     # `loment help [COMMAND]` 必须**走得到那一页**。启动器只转发 `help` 而不带后面的参数时,
     # 详细页永远看不到 —— 而目录页里印的正是 `loment help [COMMAND]`。`loment-cli help build`
@@ -565,6 +653,23 @@ def test_windows_installer(zipf: Path) -> None:
 
 # ------------------------------------------------------------------ main
 
+def test_driver_seed_matches_reference() -> None:
+    """`SEED` 必须**就是**参考实现为 `loment/selfhost/driver.lomt` 发射的 IR。
+
+    **为什么这条在这个文件里也要有**（`loment_seed_test` 已经有一条一样的）：包里的
+    `bin/loment-driver` 现在**取自种子**，不再现场重编（见 `loment_dist.SEED_TOOL`）——
+    于是"包里那个 driver 确实等于从 driver.lomt 编出来的东西"就全押在种子上，而种子
+    一旦悄悄过期，**发行包判据自己看不出来**。这条把那个前提钉在**同一个判据**里。
+
+    代价是参考实现发射一次 driver（本机 2.5s），换掉的是原来那 273s 的重编 —— 同一件事
+    的**第一遍**，由本地跑的这条钉住；`loment_seed_test` 的 `bootstrap` 另有一条
+    "stage1 自编 == 种子"的定点判据。
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = loment_seed.check()
+    check("种子 == 参考实现为 driver.lomt 发射的 IR（包里 driver 的来源）", rc == 0)
+
+
 def test_check_detects_staleness() -> None:
     """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
 
@@ -688,7 +793,8 @@ def test_docs_samples_compile() -> None:
 
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
-    for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+    for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
+                     ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):

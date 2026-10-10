@@ -100,7 +100,7 @@ GLOBS = [
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
-    "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
     # 多语法前端 (docs/179): 形式对象 -> L1 接口单元, 及其端到端判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
     # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。
@@ -231,6 +231,9 @@ GLOBS = [
     "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
     "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
     "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
+    # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
+    "tools/loment_ports.py", "tools/loment_ports_test.py",
     "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
     "tools/loment_syscalls_test.py",
     # 权威状态在 `origin` 那一条 (CLAUDE.md 第一节): 读 origin 的版本/tag/落后数, 让
@@ -279,7 +282,11 @@ def checksums_text(doc: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_release")
-    ap.add_argument("--emit", action="store_true")
+    # 路径**可选** (与 `--checksums PATH` 同一形状): 给了就写那里, 不给还是仓库那条。
+    # 与自举那份 `lomrel.lomt` 的 `--emit` 逐字对齐 —— 两边都认这条可选路径,
+    # `loment_rel_test` 才能拿"各写一份进程私有路径, 再比字节"来验它。
+    ap.add_argument("--emit", nargs="?", const="", metavar="PATH",
+                    help="写发布清单 (默认 loment/build/release-manifest.json)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
@@ -289,14 +296,17 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.checksums).write_text(checksums_text(want), encoding="utf-8", newline="\n")
         print(f"[OK] {a.checksums} ({len(want['files'])} 行)")
         return 0
-    if a.emit:
-        OUT.parent.mkdir(parents=True, exist_ok=True)
+    if a.emit is not None:
+        # 给没给路径决定写哪儿; 打出来的那一行**回显调用方给的那个串** (自举侧也是这么做的),
+        # 不给才回显仓库那条默认路径。
+        dest = Path(a.emit) if a.emit else OUT
+        dest.parent.mkdir(parents=True, exist_ok=True)
         # 显式 LF: 清单是机器读的工件 (行尾不该随宿主变), 见 loment_manual 同处注释
-        OUT.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8", newline="\n")
-        print(f"[OK] {OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
+        dest.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
+                        encoding="utf-8", newline="\n")
+        print(f"[OK] {a.emit or OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
         return 0
-    if a.check or not (a.emit or a.checksums):
+    if a.check or (a.emit is None and not a.checksums):
         # 无参数 = 门禁模式 (与仓库其它工具同一约定: ci.py 的静态门禁按 main() 调用)
         if not OUT.exists():
             print(f"[ERR] {OUT.relative_to(ROOT)} 缺失 (运行 --emit)")
