@@ -3,9 +3,16 @@
 #
 # 判据: `loment/tools/lomrel.lomt` (链成 ELF 后跑) 与 `tools/loment_release.py`:
 #   1. 无参数 (门禁模式) 与 `--check`: stdout / stderr / 退出码逐字节相同;
-#   2. `--emit`: 写出的 release-manifest.json 逐字节相同, stdout 也相同;
+#   2. `--emit PATH`: 写出的清单逐字节相同, stdout 也相同;
 #   3. `--checksums PATH`: 写出的清单逐字节相同 (路径不同则比内容), stdout 除路径外相同;
-#   4. `lomrel.lomt` 必须能走**种子自举链**编译 (无 Python 参与编译器本身)。
+#   4. (不给路径的) `--emit` 写的是仓库那条默认清单 —— 两侧点名同一条;
+#   5. `lomrel.lomt` 必须能走**种子自举链**编译 (无 Python 参与编译器本身)。
+#
+# **2/3 两条都喂进程私有路径** (`_rel_*-<pid>.json` / `.sum`, 见各自用例): 它们原先改写的是
+# 仓库里那条**共享**的 `loment/build/release-manifest.json`（写完再还原）。并发时那是个
+# 窗口：同片任何一条读它的判据都可能读到**半截文件**。两侧现在都认 `--emit PATH`
+# (与本来就认路径的 `--checksums` 同一形状), 所以"真落盘 + 比字节"一条都没少,
+# 而共享路径一个字节都不碰 —— 与 `docs/181` §2 那条纪律同源。
 #
 # 平台口径 (重要): 清单次序**必须与平台无关** —— 两边都按 **posix 路径的字节序**排。
 # `sorted(Path)` 不能直接用: 它在 Windows 上按 normcase 小写比、在 Linux 上按字节比,
@@ -233,27 +240,62 @@ def test_lomrel_matches_python():
 
 @test
 def test_lomrel_emit_writes_same_bytes():
-    """`--emit`: 写出的清单逐字节相同, stdout 也相同 (并把原清单还原)。"""
+    """`--emit PATH`: 写出的清单逐字节相同, stdout 也相同 —— **落在进程私有路径上**。
+
+    **Why 私有路径**：这一段原先喂的是仓库那条 `loment/build/release-manifest.json` ——
+    两侧轮流**改写共享文件**, 完了在 `finally` 里还原。写出来的内容虽然与原来一致,
+    但写的那一刻是**truncate + write**：同片任何一条读它的判据都可能读到半截/空文件
+    （`docs/181` §2 那条纪律治的就是这个形状）。两侧都认 `--emit PATH` 之后,
+    这里照样比**真落盘的字节**, 却一个字节都不碰共享路径。
+
+    **默认路径那件事没有因此漏掉**：它由
+    `test_emit_default_path_is_the_same_on_both_sides` 就地钉住（那一条不需要 WSL,
+    在 CI 上真跑）。
+    """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
     orig = MANIFEST.read_bytes()
+    out = ROOT / f"loment/build/_rel_manifest-{os.getpid()}.json"
+    out_rel = out.relative_to(ROOT).as_posix()
     try:
         with tempfile.TemporaryDirectory() as tds:
             td = Path(tds)
             elf = _build(td)
-            rc, po, pe = _py(["--emit"])
+            rc, po, pe = _py(["--emit", out_rel])
             assert rc == 0, f"python --emit 失败 rc={rc}"
-            py_bytes = MANIFEST.read_bytes()
-            gr, go, ge = _run(elf, td, "emit", ["--emit"])
-            sh_bytes = MANIFEST.read_bytes()
+            py_bytes = out.read_bytes()
+            gr, go, ge = _run(elf, td, "emit", ["--emit", out_rel])
+            sh_bytes = out.read_bytes()
             assert (rc, _norm(po), _norm(pe)) == (gr, go, ge), (
                 f"stdout 不一致:\n  py {po!r} {pe!r}\n  sh {go!r} {ge!r}")
             assert py_bytes == sh_bytes, f"落盘不同: {len(py_bytes)}B vs {len(sh_bytes)}B"
             assert py_bytes == orig, "两边写出的清单与仓库里的不同 (不该)"
     finally:
-        MANIFEST.write_bytes(orig)
+        out.unlink(missing_ok=True)
     print("      --emit: 清单字节 + 输出行一致 (与仓库现有清单相同)")
+
+
+@test
+def test_emit_default_path_is_the_same_on_both_sides():
+    """不给路径时 `--emit` 写哪儿 —— 两侧必须点名**同一条**。
+
+    **Why 要有这一条**：`--emit PATH` 那条判据现在各写一份私有路径, "默认写仓库那条"
+    就不再由它覆盖, 而自举侧的默认值是个**写死的字面量**, 且在两个分支各写一遍
+    (`--emit` 一处写、一处回显; `--check` 两处)。少一处或多一处都没人会发现:
+    `lomrel --emit` 会写到一条没人读的路径上, 门禁照样绿。这里就地把它钉成棘轮。
+
+    不需要 WSL/clang, 所以在 ubuntu 的 runner 上**真跑** —— 这一份文件里那四条要 WSL 的
+    判据在那上面全 SKIP, 那边实际只跑本条与另外两条纯 Python 的。
+    """
+    want = loment_release.OUT.relative_to(ROOT).as_posix()
+    src = SRC.read_text(encoding="utf-8")
+    got = src.count(f'"{want}"')
+    assert got == 4, (
+        f"`{SRC.relative_to(ROOT)}` 里 `{want}` 应正好 4 处"
+        f"（`--emit` 与 `--check` 两个分支各两处: 一处 cstr 写、一处 wstr 回显）, 实际 {got} 处"
+        f" —— 改了默认路径就两边一起改")
+    print(f"      默认清单路径两侧同为 {want} (共 4 处)")
 
 
 @test
@@ -262,7 +304,8 @@ def test_lomrel_checksums_same_bytes():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    out_rel = "loment/build/_rel_cks.sum"
+    #: **每进程一份**：固定文件名在并发时会让两条判据互相覆盖/读到半截 (`docs/181` §2)。
+    out_rel = f"loment/build/_rel_cks-{os.getpid()}.sum"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         elf = _build(td)
