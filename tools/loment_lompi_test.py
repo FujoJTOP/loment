@@ -179,6 +179,31 @@ def test_index_lists_the_fixture_store():
 
 
 @test
+def test_index_handles_module_references_in_the_shipped_store():
+    """随包 store 里 `host` 用**裸名字**引用 std 的模块 (`numfmt`/`out`/`mem`) ——
+    `lompi index` 必须认得出这两个包, 并且 `host` 真的依赖 `std`。
+
+    2026-10-09 实测的缺口: 名字边一律被当成**包边**, 而 `numfmt`/`out`/`mem` 是 std 的
+    **模块** —— 于是 index 报 `missing dependency in store: outfmt` (那串还叠了一个没补
+    NUL 的消息截断 bug)。这条**不经过 zip**: 端到端那条要 `loment/dist/` 里有归档才跑,
+    CI 从不摆, 于是整条在 CI 上跳过去。这里直接对仓内那棵 store 跑, 补上那个盲区。
+    """
+    rc, out = _run(["index", "store"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    assert rc == 0, f"index 退出 {rc}: {out[:300]}"
+    assert "2 package(s) in store" in out, out
+    for pkg in STORE_MODULES:
+        assert re.search(rf"^{pkg} \S+ [0-9a-f]{{16}}$", out, re.M), \
+            f"index 没报出 {pkg}: {out}"
+    # 模块引用必须真的落成一条包边 —— 不是被静默丢掉
+    rc2, out2 = _run(["tree", "store", "host"])
+    assert rc2 == 0, f"tree 退出 {rc2}: {out2[:300]}"
+    assert re.search(r"^\s+std@", out2, re.M), f"host 的依赖边里没有 std:\n{out2}"
+
+
+@test
 def test_obj_store_is_content_addressed():
     """**粒度 B 的 store 那半边（`docs/212` §5 B）**：`lompi obj add/get` 按**内容**存取对象。
 

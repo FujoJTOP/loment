@@ -316,9 +316,15 @@ case "${1:-help}" in
         if [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
+                # -O2 rewrites byte loops into memset/memcpy/memmove calls, and this runtime has
+                # no libc - so the link step supplies those three (docs/212 sec 5A). Same text
+                # the packaging step uses; see _FREESTANDING_LIBCALLS in tools/loment_dist.py.
+                cat > "$tmp/libcalls.ll" <<'LOMENT_LIBCALLS_EOF'
+@LIBCALLS@
+LOMENT_LIBCALLS_EOF
                 # shellcheck disable=SC2086
                 "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
-                    -fno-pie -O2 "$tmp/a.ll" $objs -o "$out" || exit 1
+                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" $objs -o "$out" || exit 1
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
                 # shellcheck disable=SC2086
@@ -1432,6 +1438,102 @@ def clang_path() -> str | None:
     return None
 
 
+#: 优化器可能合成出来的三个 libcall（`docs/212` §5A）。
+#:
+#: `-O2` 会把"按字节铺/搬"的循环改写成对 `memset` / `memcpy` / `memmove` 的调用 —— 它既
+#: 认得出 Loment 运行期里那两段循环，也认得出**用户代码**里同样的循环。Loment 是无 libc
+#: 的，于是链接期就是 `undefined symbol: memset`。实测：`lomelf` / `lomcli` / `driver`
+#: 三个入口全栽在这一条上（另外四个入口没有这种循环，所以一直是绿的）。
+#:
+#: 三条都是**公开定义**，不能是 `internal` —— `internal` 满足不了 LLVM 合成到**外部**
+#: 名字上的调用（实测仍然 `undefined symbol`）。签名与 libcall 逐字对齐（返回 `ptr`、
+#: 长度 `i64`、填充值 `i32`）；`memcpy` 只按正方向搬（它的契约就是"不重叠"），`memmove`
+#: 按方向 —— 两者**故意不写成同一个函数体**，否则 mergefunc 会把它们并成一个，再在其中
+#: 一条上长出调用来。
+#:
+#: **为什么补在链接这一步，而不是补进 IR 运行期**：那份运行期在**两个实现**里
+#: （`tools/lomentc.py` 与 `loment/selfhost/codegen.lomt`，须逐字节一致），改它就要连带
+#: 重出种子、**重出提交进仓库的 genesis 二进制**、再重算两份 SHA256SUMS。而这条路
+#: （clang 链）的产物根本不经过 lomelf，前端一行都不用动 —— 那就别动。
+#:
+#: 也不进 `.o`（粒度 B）：那个 `.o` 是给**没有 clang**的端机用的，符号在这里补齐正是
+#: "端机不必有编译器"的意思。两边都补反而会重复定义。
+_FREESTANDING_LIBCALLS = """\
+define ptr @memset(ptr %p, i32 %v, i64 %n) {
+entry:
+  %vb = trunc i32 %v to i8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %q = getelementptr i8, ptr %p, i64 %i
+  store i8 %vb, ptr %q
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret ptr %p
+}
+
+define ptr @memcpy(ptr %d, ptr %s, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %end, label %body
+body:
+  %sp = getelementptr i8, ptr %s, i64 %i
+  %b = load i8, ptr %sp
+  %dp = getelementptr i8, ptr %d, i64 %i
+  store i8 %b, ptr %dp
+  %i1 = add i64 %i, 1
+  br label %loop
+end:
+  ret ptr %d
+}
+
+define ptr @memmove(ptr %d, ptr %s, i64 %n) {
+entry:
+  %fwdok = icmp ult ptr %d, %s
+  br i1 %fwdok, label %fwd, label %chk
+chk:
+  %se = getelementptr i8, ptr %s, i64 %n
+  %bwdok = icmp uge ptr %d, %se
+  br i1 %bwdok, label %fwd, label %bwd
+fwd:
+  br label %floop
+floop:
+  %i = phi i64 [ 0, %fwd ], [ %i1, %fbody ]
+  %fdone = icmp uge i64 %i, %n
+  br i1 %fdone, label %end, label %fbody
+fbody:
+  %fsp = getelementptr i8, ptr %s, i64 %i
+  %fb = load i8, ptr %fsp
+  %fdp = getelementptr i8, ptr %d, i64 %i
+  store i8 %fb, ptr %fdp
+  %i1 = add i64 %i, 1
+  br label %floop
+bwd:
+  br label %bloop
+bloop:
+  %j = phi i64 [ %n, %bwd ], [ %j1, %bbody ]
+  %jz = icmp eq i64 %j, 0
+  br i1 %jz, label %end, label %bbody
+bbody:
+  %j1 = sub i64 %j, 1
+  %bsp = getelementptr i8, ptr %s, i64 %j1
+  %bb = load i8, ptr %bsp
+  %bdp = getelementptr i8, ptr %d, i64 %j1
+  store i8 %bb, ptr %bdp
+  br label %bloop
+end:
+  ret ptr %d
+}
+"""
+
+
 def _link_opt(ir_text: str, cc: str) -> tuple[bytes | None, str]:
     """IR -> **clang -O2** 出来的 ELF 可执行文件（docs/212 §5A）。
 
@@ -1449,10 +1551,12 @@ def _link_opt(ir_text: str, cc: str) -> tuple[bytes | None, str]:
     with tempfile.TemporaryDirectory(prefix="optdist-") as td:
         ll = Path(td) / "u.ll"
         ll.write_text(ir_text, encoding="utf-8", newline="\n")
+        lc = Path(td) / "libcalls.ll"
+        lc.write_text(_FREESTANDING_LIBCALLS, encoding="utf-8", newline="\n")
         out = Path(td) / "u.bin"
         r = subprocess.run([cc, "--target=x86_64-unknown-linux-gnu", "-nostdlib",
                             "-ffreestanding", "-static", "-fno-pie", "-O2",
-                            str(ll), "-o", str(out)],
+                            str(ll), str(lc), "-o", str(out)],
                            capture_output=True, text=True, shell=False,
                            encoding="utf-8", errors="replace")
         if r.returncode != 0 or not out.exists():
@@ -1534,6 +1638,19 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
 #: 定点本身仍被上面两条判据守着，只是不再由**发行包判据**重复付账。
 SEED_TOOL = "loment-driver"
 
+#: `--opt` **不许碰**的入口（`docs/212` §5.2，2026-10-10 实测）。
+#:
+#: 编译驱动的那份 IR 在 clang `-O1`/`-O2` 下会被**编坏**：同一个入口用 `-O0` 编出来
+#: 一切正常，`-O1`/`-O2` 编出来一跑就是 SIGSEGV（`rc=139`）。这不是补的那三个 libcall
+#: 的问题 —— 把它们换成 LLVM 自己的 `llvm.memset`/`llvm.memcpy`/`llvm.memmove` 内建，
+#: 同样段错误。也就是说驱动那份 IR 里有 `-O1` 会踩到的东西（UB 或某个 LLVM 假设），
+#: 而它是**入口里最大的一份**（3.2 MB IR），也只有它是**从种子**来的（不是 stage1 现编）。
+#:
+#: 所以这一格**点名退回** lomelf：慢，但是对的。把一份**一跑就崩的编译器**递出去，
+#: 比给它一份慢的糟糕得多 —— 递出去的东西必须是可信的，这一条优先于快。
+#: 修好 §5.2 那条之后把这里删掉、让驱动也吃 `--opt`。
+NO_OPT_TOOL = SEED_TOOL
+
 
 def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[bytes, bytes]]:
     """名字 -> (Linux ELF 字节, Windows PE 字节)。
@@ -1565,10 +1682,14 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
         text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
-        elf, why = _link_opt(text, cc) if cc else (None, "")
+        skip_opt = cc is not None and name == NO_OPT_TOOL
+        elf, why = _link_opt(text, cc) if (cc and not skip_opt) else (None, "")
         if elf is None:
             elf = _lomelf_link(text, "elf")
-            if cc:
+            if skip_opt:
+                print(f"  [{name}] --opt **跳过**：clang -O1/-O2 会把这份 IR 编坏"
+                      "（一跑就 SIGSEGV，见 docs/212 §5.2）—— 留 lomelf，慢但对")
+            elif cc:
                 print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
         else:
             optimized.append(name)
@@ -1667,7 +1788,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
 
 
 def _subst(text: str) -> str:
-    return text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
+    return (text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
+            .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS))
 
 
 def _crlf(text: str) -> str:
