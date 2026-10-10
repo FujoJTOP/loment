@@ -1027,11 +1027,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "6a6886d8c9bb155228ca9de91b5b2067d27384db15946d37133c9a8aa8c836f8"
+   "sha256": "ded015f62db0a565eb75161aeadcb23315a37f51aaad2955fd1a840a24d384dd"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "49e5e52d8015bda9e93bccea05b9f7626cb024d8d05b861df67017d5cccecb0d"
+   "sha256": "862c7c64e1a5e353515848cddb11933ad218b796864da8cd86b0fe9511bd6e4b"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1951,7 +1951,7 @@
   },
   {
    "path": "docs/212-loment-offload.md",
-   "sha256": "ee134553dcd4391af387203e7ed3d71836a02546c45654ceb8099556a969e635"
+   "sha256": "87cddf2eb95e51f519c0bbc1d09c2779a8ae04feafb98edeb82867e3f7e57747"
   },
   {
    "path": "docs/212-loment-open-license.md",
@@ -1968,6 +1968,10 @@
   {
    "path": "docs/218-loment-net-admission.md",
    "sha256": "2e01b745c8d48e0291eb6e53d057a014b227030f64950599c5694974288a86de"
+  },
+  {
+   "path": "docs/219-world-ports.md",
+   "sha256": "df2e6d7998107e0ac9006f1eeb251f5f5b9a8cc9ceb190146f24fd0b3168c98a"
   },
   {
    "path": "docs/manual/index.md",
