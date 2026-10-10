@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -160,9 +161,10 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt]
                               compile and link; --link adds a foreign object (FFI)
-  loment run FILE             compile, link and run
+                              --opt: optimize with clang -O2 when it is installed (ELF)
+  loment run FILE [--opt]     compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
@@ -260,11 +262,16 @@ case "${1:-help}" in
         links=()
         nc=
         om=
+        opt=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
                 # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
+                # Optimize with clang when it is installed (docs/212 sec 5A). **Opt-in on purpose**:
+                # the default path stays clang-free (`lomelf`), so the hermetic / offline build
+                # never grows a dependency on an optimizer being present.
+                --opt|-O2) opt=1; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
@@ -283,10 +290,27 @@ case "${1:-help}" in
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
-        # link with the self-hosted lomelf - the package no longer needs clang
-        if [ ${#links[@]} -gt 0 ]; then
-            linkargs=
-            for l in "${links[@]}"; do linkargs="$linkargs --link $(to_posix "$l")"; done
+        # Default: link with the self-hosted lomelf - the package needs no clang.
+        # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
+        # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
+        linkargs=
+        objs=
+        for l in "${links[@]}"; do
+            linkargs="$linkargs --link $(to_posix "$l")"
+            objs="$objs $(to_posix "$l")"
+        done
+        if [ -n "$opt" ]; then
+            cc=$(command -v clang 2>/dev/null || true)
+            if [ -n "$cc" ]; then
+                # shellcheck disable=SC2086
+                "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
+                    -fno-pie -O2 "$tmp/a.ll" $objs -o "$out" || exit 1
+            else
+                echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
+                # shellcheck disable=SC2086
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+            fi
+        elif [ ${#links[@]} -gt 0 ]; then
             # shellcheck disable=SC2086
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
         else
@@ -450,6 +474,8 @@ if "%~1"=="" goto barg_done
 if /I "%~1"=="-o" goto barg_out
 if /I "%~1"=="--out" goto barg_out
 if /I "%~1"=="--link" goto barg_link
+if /I "%~1"=="--opt" goto barg_opt
+if /I "%~1"=="-O2" goto barg_opt
 if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
@@ -488,6 +514,11 @@ set "linkargs=%linkargs% --link %~2"
 shift
 shift
 goto barg_loop
+:barg_opt
+rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
+rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
+echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
+exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
 
@@ -570,9 +601,10 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...]
+echo   loment build FILE [-o OUT] [--link OBJ...] [--opt]
 echo                               compile and link; --link adds a foreign object (FFI)
-echo   loment run FILE             compile, link and run
+echo                               --opt: optimize with clang -O2 (ELF only)
+echo   loment run FILE [--opt]     compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio
@@ -1363,6 +1395,47 @@ def _host_target() -> str:
     return "pe" if sys.platform == "win32" else "elf"
 
 
+#: clang 的位置 —— 与 `loment_opt_obj.py` 是**同一张表**（换机器只改一处口径）。
+CLANG_CANDIDATES = ("clang", r"C:\Program Files\LLVM\bin\clang.exe")
+
+
+def clang_path() -> str | None:
+    for c in CLANG_CANDIDATES:
+        p = shutil.which(c) or (c if Path(c).exists() else None)
+        if p:
+            return p
+    return None
+
+
+def _link_opt(ir_text: str, cc: str) -> tuple[bytes | None, str]:
+    """IR -> **clang -O2** 出来的 ELF 可执行文件（docs/212 §5A）。
+
+    返回 `(字节, "")` 或 `(None, 第一行诊断)`。**降级必须吵** —— clang 拒一份 IR 是
+    "我们这个代码生成器发了非法 IR"的信号（实测就是这么抓到的），静默退回 lomelf 会让
+    它永远看不见。诊断只取第一行：那是 `文件:行: 错误`，够定位了。
+
+    这是**打包机上的那一次**：整程序交给 clang，与 C / Rust 用的是同一个优化器。命令行与
+    包内启动器的 `--opt` 逐字相同 —— 否则"包里那个 lompi"和"你本地 `loment build --opt`
+    出来的"会是两种不同的东西，而两边都自称同一条逃生舱。
+
+    PE 那一半**不走这里**：这个包的 PE 形状由自举链接器决定，不是 clang 出的。所以
+    `--opt` 只让 ELF 侧变快，Windows 侧维持 lomelf —— 这是如实的不对称，不是遗漏。
+    """
+    with tempfile.TemporaryDirectory(prefix="optdist-") as td:
+        ll = Path(td) / "u.ll"
+        ll.write_text(ir_text, encoding="utf-8", newline="\n")
+        out = Path(td) / "u.bin"
+        r = subprocess.run([cc, "--target=x86_64-unknown-linux-gnu", "-nostdlib",
+                            "-ffreestanding", "-static", "-fno-pie", "-O2",
+                            str(ll), "-o", str(out)],
+                           capture_output=True, text=True, shell=False,
+                           encoding="utf-8", errors="replace")
+        if r.returncode != 0 or not out.exists():
+            err = next((l.strip() for l in (r.stderr or "").splitlines() if l.strip()), "")
+            return None, err or f"clang 退出码 {r.returncode}"
+        return out.read_bytes(), ""
+
+
 def _write_shared(path: Path, data: bytes) -> Path:
     """把共享产物写进 `STAGE`：**内容一样就一个字节都不写**, 否则原子换入。
 
@@ -1437,7 +1510,7 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
 SEED_TOOL = "loment-driver"
 
 
-def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
+def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[bytes, bytes]]:
     """名字 -> (Linux ELF 字节, Windows PE 字节)。
 
     IR 是**目标无关**的，所以每个入口的 IR 只算一次，同一份再各链一遍 —— 两个平台的包
@@ -1447,6 +1520,10 @@ def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
     —— 它们彼此独立（各写各的 `STAGE/<name>.ll`）。并发的收益全在 `emit_ir` 那些
     **子进程**上；`_lomelf_link` 是纯 Python，GIL 下并不并行，但它总共才几秒
     （最大的 3.2MB IR 也只要 0.8s），不值得为它上进程池。
+
+    `opt=True` 时**ELF 那一半**改走 clang -O2（docs/212 §5A）；PE 那一半不动（见
+    `_link_opt` 的注解）。没有 clang 就**降级并说清楚**，不失败 —— 与启动器的 `--opt`
+    同一条口径（"装上 clang 才更快，没有它照样发得出去"）。
     """
     todo = [(n, e, c) for n, e, c in TOOLS if not only or n in only]
     if not todo:
@@ -1455,11 +1532,22 @@ def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
         raise SystemExit(f"missing seed {SEED.relative_to(ROOT)} (docs/159)")
     # stage1 只在真需要现场编译时才造 —— 于是 `--only driver` 是秒级
     stage1 = None if all(n == SEED_TOOL for n, _e, _c in todo) else build_stage1()
+    cc = clang_path() if opt else None
+    if opt and cc is None:
+        print("  [--opt] 没找到 clang —— 退回未优化的 lomelf 后端（包照样出得来）")
+    optimized: list[str] = []
 
     def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
         text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
-        return name, _lomelf_link(text, "elf"), _lomelf_link(text, "pe")
+        elf, why = _link_opt(text, cc) if cc else (None, "")
+        if elf is None:
+            elf = _lomelf_link(text, "elf")
+            if cc:
+                print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
+        else:
+            optimized.append(name)
+        return name, elf, _lomelf_link(text, "pe")
 
     jobs = max(1, min(4, (os.cpu_count() or 1)))
     if jobs == 1 or len(todo) == 1:
@@ -1472,6 +1560,9 @@ def build_tools(only: set[str] | None) -> dict[str, tuple[bytes, bytes]]:
     for name, elf, pe in made:      # **按 TOOLS 顺序落盘 —— 发布清单的顺序是判据**
         out[name] = (elf, pe)
         print(f"  [{name}] elf {len(elf)} 字节 / pe {len(pe)} 字节")
+    if opt:
+        print(f"  [--opt] clang -O2 了 {len(optimized)}/{len(out)} 个入口"
+              + (f"（{' '.join(optimized)}）" if optimized else ""))
     return out
 
 
@@ -1677,9 +1768,10 @@ def skill_zip() -> bytes:
     return buf.getvalue()
 
 
-def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None) -> int:
+def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None,
+         opt: bool = False) -> int:
     out = out_dir or OUT
-    bins = build_tools(only)
+    bins = build_tools(only, opt)
     lin = payload("linux", bins)
     win = payload("windows", bins)
     out.mkdir(parents=True, exist_ok=True)
@@ -1872,6 +1964,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", metavar="NAME[,NAME]",
                     help="只构建这些工具 (driver,lsp,fmt,doc,lomelf,cli,lompi)")
     ap.add_argument("--no-exe", action="store_true", help="跳过 Windows 自解压安装包")
+    ap.add_argument("--opt", action="store_true",
+                    help="ELF 侧改用 clang -O2 构建（docs/212 §5A；没有 clang 就降级）")
     ap.add_argument("--out", metavar="DIR", help="产物目录 (默认 loment/dist)")
     a = ap.parse_args(argv)
 
@@ -1901,7 +1995,7 @@ def main(argv: list[str] | None = None) -> int:
             if unknown:
                 print(f"[ERR] 未知工具: {sorted(unknown)}", file=sys.stderr)
                 return 2
-        return emit(only, not a.no_exe, out_dir)
+        return emit(only, not a.no_exe, out_dir, a.opt)
     ap.print_help()
     return 2
 

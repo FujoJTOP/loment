@@ -247,6 +247,32 @@ def test_install_sh(tar: Path) -> None:
     check("loment run 编译+链接+运行并打出东西",
           r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
 
+    # `--opt` (docs/212 §5 A): hand the IR to clang -O2 when clang is on PATH, else **say so**
+    # and fall back to the self-hosted lomelf linker. Either way the binary must run; the
+    # two branches are pinned separately so a silent no-op `--opt` cannot pass.
+    ex = f"{PREFIX_IT}/share/loment/examples/user_hello.lomt"
+    d_bin, o_bin = "/tmp/loment_def_bin", "/tmp/loment_opt_bin"
+    wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "-o", d_bin)
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "--opt", "-o", o_bin)
+    check("loment build --opt 产出可运行二进制",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    # `build` does not set the exec bit (only `run` chmods -- pre-existing, both backends),
+    # so set it before running.
+    wsl("chmod", "755", o_bin)
+    rr = wsl(o_bin)
+    check("build --opt 的产物跑得起来",
+          rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
+    has_clang = wsl("sh", "-c", "command -v clang >/dev/null && echo y || echo n").stdout.strip() == "y"
+    if has_clang:
+        check("有 clang 时 --opt 走优化路径（不说 fallback）",
+              "falling back" not in (r.stderr or ""), (r.stderr or "")[-160:])
+        sz = lambda p: int(wsl("sh", "-c", f"wc -c < {p}").stdout.strip() or "0")
+        check("有 clang 时 --opt 是**另一个后端**的产物（与默认不同）",
+              sz(o_bin) != sz(d_bin), f"default={sz(d_bin)} opt={sz(o_bin)}")
+    else:
+        check("无 clang 时 --opt **点名**退回 lomelf（不静默）",
+              "no clang" in (r.stderr or ""), (r.stderr or "")[-160:])
+
     # `loment help [COMMAND]` 必须**走得到那一页**。启动器只转发 `help` 而不带后面的参数时,
     # 详细页永远看不到 —— 而目录页里印的正是 `loment help [COMMAND]`。`loment-cli help build`
     # 直呼是好的, 所以这条**只能由装好的启动器**来测 (源码级判据看不见这一层)。

@@ -262,8 +262,8 @@ _TOKEN = re.compile(r"""
       (?P<ws>\s+)
     | (?P<lc>//[^\n]*)
     | (?P<bc>/\*.*?\*/)
-    | (?P<id>[A-Za-z_]\w*)
-    | (?P<num>0[xX][0-9a-fA-F]+|\d+)
+    | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
+    | (?P<num>0[xX][0-9a-fA-F]+|[0-9]+)
     | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:#])
 """, re.X | re.S)
 
@@ -552,7 +552,22 @@ class Parser:
             return e
         if t[0] == "num":
             self.i += 1
-            return Lit(int(t[1], 0), t[2])
+            try:
+                v = int(t[1], 0)
+            except ValueError:
+                # `int(s, 0)` 是**按 Python 的读法**认进制：它拒绝前导零（`010`），
+                # 而 C 的前导零**恰恰是八进制**（`010` == 8）—— 两边正好相反。
+                # 原先这一处**漏出裸 `ValueError`**：整屏 Python 回溯、没有行号、
+                # 退出码 1（与"子集外"同码而不同因），三条防线
+                # （`emit_lomt` 的 `except errs`、`front_door` 的 `except front_errors`、
+                # `lomentc.load_unit` 那个唯一入口）**一条都拦不住**。
+                # 子集只收十/十六进制（`docs/186` §4），所以这里**点名拒**并给出路。
+                raise Unsupported(
+                    f"第 {t[2]} 行: 读不了这个整数字面量 `{t[1]}` —— 子集只收"
+                    f"**十/十六进制**（`docs/186` §4）。C 里前导零是**八进制**"
+                    f"（`010` 就是 8），这一门没有那种写法：写成十进制 `8`，"
+                    f"或者写成十六进制 `0x8`。")
+            return Lit(v, t[2])
         if t[0] == "id" and t[1] in ("true", "false") and self.d.bool_literals:
             # 这一族的源码里这两个就是**字面量**（见 `Dialect.bool_literals`），
             # 而 Loment 也有 `true` / `false` —— 直接映过去。

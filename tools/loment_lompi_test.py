@@ -28,10 +28,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT / "lompi"
 ENTRY = SRC_DIR / "lompi.lomt"
 IS_WIN = sys.platform == "win32"
-#: 随包发行的 lompi 版本 —— 用户 2026-09-15 定「完全稳定 0.1.0」。
+#: 随包发行的 **lompi 自己的版本**（命令行的那个号）。
 #: 它**同时写在 lpi_cli.lomt 里**（那是真源），这条常量的作用是：**改版本要过一次手动确认**，
 #: 不能悄悄漂（红了就说明被测的那个版本号 ≠ 我们说好要发的那个）。
-STABLE_VERSION = "0.1.0"
+LPI_VERSION = "0.1.5"
+#: 随包 store 里 `<name>/<version>/` 那一层的**包版本** —— 是 std/host 这两个库自己的版本,
+#: 不是 lompi 的版本。两者今天都是 0.1.x, 但**不是一回事**: 升 lompi 不该动它, 动了就得
+#: 同时改 `loment_release.GLOBS` 与 `loment/tools/lomrel.lomt` 里那两个写死的 glob。
+STORE_VERSION = "0.1.0"
 TESTS: list[tuple[str, object]] = []
 
 
@@ -175,6 +179,46 @@ def test_index_lists_the_fixture_store():
 
 
 @test
+def test_obj_store_is_content_addressed():
+    """**粒度 B 的 store 那半边（`docs/212` §5 B）**：`lompi obj add/get` 按**内容**存取对象。
+
+    端机**不需要 clang** —— 拿到那串 sha256 就能取回字节，再 `loment build app.lomt --link it.o`。
+    判据四样，缺一不可：
+      * `add` 打出的十六进制**等于**那个文件的 sha256，且**两次一样**（幂等 == 内容寻址）；
+      * store 里出现 `obj-<hex>.o`，字节与输入**逐字节相同**；
+      * `get --out` 取回来的与输入**逐字节相同**；
+      * 一个不存在的地址**硬拒**（rc≠0 + 点名）—— 不静默写个空文件出来。
+
+    对象用 fixture 里的一个真文件（store 里存什么字节都行 —— 这一格测的是**寻址机制**，
+    不是对象本身）。写完**清掉**那个 `obj-…o`，免得后面的 `index` 判据看到多余成员。
+    """
+    import hashlib as _h
+
+    src_rel = "fixture/store/mathutil/0.1.0/mathutil.lomt"
+    blob = (SRC_DIR / src_rel).read_bytes()
+    want = _h.sha256(blob).hexdigest()
+    slot = SRC_DIR / "fixture/store" / f"obj-{want}.o"
+    outobj = SRC_DIR / "objroundtrip-tmp.o"
+    try:
+        rc, out = _run(["obj", "add", "fixture/store", src_rel])
+        if rc == -1:
+            print(f"      SKIP: {_skip}")
+            return
+        assert rc == 0 and want in out, f"add 失败: rc={rc} out={out!r}"
+        rc2, out2 = _run(["obj", "add", "fixture/store", src_rel])
+        assert rc2 == 0 and want in out2, f"第二次 add 失败或哈希不同: rc={rc2} out={out2!r}"
+        assert slot.exists() and slot.read_bytes() == blob, "store 里那份字节与输入不符"
+        rc3, out3 = _run(["obj", "get", "fixture/store", want, "--out", "objroundtrip-tmp.o"])
+        assert rc3 == 0 and outobj.read_bytes() == blob, f"get 回环不符: rc={rc3} {out3[:160]}"
+        rc4, out4 = _run(["obj", "get", "fixture/store", "deadbeef"])
+        assert rc4 != 0 and "no such object" in out4, f"缺地址没硬拒: rc={rc4} {out4[:160]}"
+    finally:
+        slot.unlink(missing_ok=True)
+        outobj.unlink(missing_ok=True)
+    print("      obj add/get: 内容寻址 + 逐字节回环 + 缺地址硬拒")
+
+
+@test
 def test_check_has_discriminating_power():
     """`lompi check` 必须**分得清好坏** —— 合法库退 0 说 OK，坏库退 1 说 BAD。
 
@@ -214,21 +258,21 @@ def test_version_command_and_the_shipped_version_agree():
     """`lompi version` 打的那个号，必须是我们说好要发的那个。
 
     "检测最新的"落在两条上：① 版本号从**源码真源** `lpi_cli.lomt` 里解出来（不是这里
-    另抄一份）；② 它与 `lompi version` 的实际输出一致。再拿 STABLE_VERSION 钉一次 ——
+    另抄一份）；② 它与 `lompi version` 的实际输出一致。再拿 LPI_VERSION 钉一次 ——
     改版本要过一次手动确认，不能悄悄漂。
     """
     src = (SRC_DIR / "lpi_cli.lomt").read_text(encoding="utf-8")
     m = re.search(r"lompi (\d+\.\d+\.\d+) - package manager", src)
     assert m, "在 lpi_cli.lomt 里找不到版本串（真源变了？）"
     found = m.group(1)
-    assert found == STABLE_VERSION, (
-        f"源码里的版本是 {found}，本判据钉的是 {STABLE_VERSION} —— "
-        f"要发新版就改 STABLE_VERSION 并重出包")
+    assert found == LPI_VERSION, (
+        f"源码里的版本是 {found}，本判据钉的是 {LPI_VERSION} —— "
+        f"要发新版就改 LPI_VERSION 并重出包")
     rc, out = _run(["version"])
     if rc == -1:
         print(f"      SKIP: {_skip}")
         return
-    assert rc == 0 and out.strip() == f"lompi {STABLE_VERSION}", out[:120]
+    assert rc == 0 and out.strip() == f"lompi {LPI_VERSION}", out[:120]
 
 
 @test
@@ -239,6 +283,84 @@ def test_unknown_command_is_a_clean_error():
         return
     assert rc != 0, "未知命令不该退 0"
     assert "unknown command" in out, out[:200]
+
+
+@test
+def test_store_argument_is_optional():
+    """`<store>` 省略时走**全局 store** —— 也就是 `lompi config` 打的那一行。
+
+    和 pip 一样：`lompi show mathutil` 不该逼着人先知道库在哪。判据不是"它没报用法错"
+    —— 那太弱，一个永远退 1 的实现也能过 —— 而是**两条路给出同一份事实**：
+
+      * 把 fixture 摆到全局 store 的位置上，`lompi index`（不传）与
+        `lompi index <那个路径>` 的输出必须**逐字节相同**；
+      * `lompi show <名字>`（不传）与显式传拿到**同一个 64 位内容哈希**；
+      * `list` 是 `index` 的同义词（pip 的习惯动词）；
+      * 缺 store 时**点名报错**，不是静默退 1。
+
+    **沙箱**：exe 摆在 `<临时目录>/bin/`，`cfg_root` 的 fallback 规则就指到
+    `<临时目录>/bin/.lompi` —— 全程不碰用户真实的 store。**先问再动**：先跑一次
+    `lompi config`，目的地若在沙箱外就整体跳过（那说明这条判据会去动真东西）。
+    临时目录开在 `loment/dist/` 下（已 .gitignore）：那个前缀里没有 `\\AppData\\Local\\`
+    也没有 `\\Users\\`，于是 Windows 上命中 fallback 而不是用户的家目录。
+    """
+    import shutil as _sh
+
+    exe = _build()
+    if exe is None:
+        print(f"      SKIP: {_skip}")
+        return
+    dist = ROOT / "loment" / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    td = Path(tempfile.mkdtemp(dir=dist, prefix=".lompi-optstore-"))
+    try:
+        bin2 = td / "bin"
+        bin2.mkdir()
+        exe2 = bin2 / ("lompi.exe" if IS_WIN else "lompi")
+        _sh.copy2(exe, exe2)
+        exe2.chmod(0o755)
+
+        def run2(*args: str) -> tuple[int, str]:
+            r = subprocess.run([str(exe2), *args], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        probe = subprocess.run([str(exe2), "config"], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+        line = _store_line(probe.stdout or "")
+        assert line, f"lompi config 没给出 store 路径: {(probe.stdout or '')[:200]!r}"
+        dst = Path(line)
+        if not str(dst.resolve()).lower().startswith(str(td.resolve()).lower()):
+            print(f"         (跳过: 全局 store 落在 {dst}，在沙箱外 —— 不去动它)")
+            return
+
+        rc0, out0 = run2("index")
+        assert rc0 != 0 and "cannot read the store" in out0, \
+            f"全局 store 还不存在时应当**点名**报错: rc={rc0} {out0[:200]!r}"
+
+        dst.mkdir(parents=True, exist_ok=True)
+        _sh.copytree(SRC_DIR / "fixture" / "store", dst, dirs_exist_ok=True)
+
+        rc_a, out_a = run2("index")
+        rc_b, out_b = run2("index", str(dst))
+        assert rc_a == 0, f"不传 store 的 index 失败: rc={rc_a} {out_a[:200]!r}"
+        assert out_a == out_b, "两条路给出的不是同一份事实:\n 不传: " + out_a[:200] + "\n 显式: " + out_b[:200]
+        assert "5 package(s) in store" in out_a, out_a[:200]
+
+        rc_l, out_l = run2("list")
+        assert rc_l == 0 and out_l == out_a, f"list 不是 index 的同义词: {out_l[:200]!r}"
+
+        rc_s, out_s = run2("show", "mathutil")
+        rc_t, out_t = run2("show", str(dst), "mathutil")
+        assert rc_s == 0, f"不传 store 的 show 失败: rc={rc_s} {out_s[:200]!r}"
+        assert out_s == out_t, "show 两条路不一致"
+        m = re.search(r"^\s*id:\s+([0-9a-f]{64})\s*$", out_s, re.M)
+        assert m, f"show 没给出 64 位内容哈希: {out_s[:240]}"
+        print("      省略 <store> == 全局 store；list == index；缺 store 时点名报错")
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- 边界（这是用户定的）
@@ -346,10 +468,10 @@ def test_package_carries_the_whole_store():
         got = [f for f in files if f.startswith(f"{pkg}/") and f.endswith(".lomt")]
         assert len(got) == n, f"{pkg} 有 {len(got)} 个 .lomt，应为 {n}"
         # 版本目录必须和 lompi 自己认的那个版本一致，否则装过去它看不见
-        assert f"{pkg}/{STABLE_VERSION}/pkg.lomp" in files, f"{pkg} 缺 {STABLE_VERSION}/pkg.lomp"
+        assert f"{pkg}/{STORE_VERSION}/pkg.lomp" in files, f"{pkg} 缺 {STORE_VERSION}/pkg.lomp"
     # 包里的路径（store 是 `<name>/<version>/`，别漏了版本那一层）
-    for rel in (f"share/lompi/store/std/{STABLE_VERSION}/std.lomt",
-                f"share/lompi/store/host/{STABLE_VERSION}/pkg.lomp"):
+    for rel in (f"share/lompi/store/std/{STORE_VERSION}/std.lomt",
+                f"share/lompi/store/host/{STORE_VERSION}/pkg.lomp"):
         assert rel in d.payload("linux", {}), f"{rel} 没进归档"
     # 源码直出：改了库里任何一个模块而不重打包，--check 要红
     fresh = d._fresh_sources("linux")

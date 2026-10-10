@@ -1,27 +1,37 @@
-![Loment — Programming Language, Program by Fujo](editors/loment-banner.png)
+<p align="center">
+  <img src="editors/loment-banner.png" width="720" alt="Loment — Programming Language, Program by Fujo">
+</p>
 
-# Loment
+<p align="center">
+  <a href="https://github.com/FujoJTOP/loment/actions/workflows/gate.yml"><img src="https://github.com/FujoJTOP/loment/actions/workflows/gate.yml/badge.svg" alt="gate"></a>
+  <a href="https://github.com/FujoJTOP/loment/releases/latest"><img src="https://img.shields.io/github/v/release/FujoJTOP/loment?label=release&amp;color=4c6ef5" alt="latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Loment--Open-4c6ef5" alt="license: Loment-Open"></a>
+  <a href="https://discord.gg/rGw7NRNU"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&amp;logoColor=white" alt="Discord"></a>
+</p>
 
-[![gate](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml/badge.svg)](https://github.com/FujoJTOP/loment/actions/workflows/gate.yml)
+<p align="center">
+  <b>A systems programming language.</b><br>
+  Native x86-64 — Linux ELF, Windows PE, or bare metal. No runtime, no libc.
+</p>
 
-Loment is a **systems programming language**. It compiles to native x86-64 executables —
-Linux ELF, Windows PE, or a freestanding object for bare metal — with no runtime and no
-libc. The toolchain is itself written in Loment and needs no Python to run. Its own syntax
-is Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go or
-Python.
+<p align="center">
+  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4"><b>Download 0.1.4</b></a> ·
+  <a href="QUICKSTART.md">Quick start</a> ·
+  <a href="docs/manual/index.md">Manual</a> ·
+  <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
+  <a href="loment/examples/">Examples</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://fujojtop.github.io/loment-site/">Site</a> ·
+  <a href="https://github.com/FujoJTOP/loment/issues">Issues</a>
+</p>
 
-**[Download 0.1.4](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4)** ·
-[Quick start](QUICKSTART.md) ·
-[Project site](https://fujojtop.github.io/loment-site/) ·
-[Manual](docs/manual/index.md) ·
-[Language guide](.claude/skills/loment/SKILL.md) ·
-[Examples](loment/examples/) ·
-[Contributing](CONTRIBUTING.md) ·
-[Issues](https://github.com/FujoJTOP/loment/issues) ·
-[Discord](https://discord.gg/rGw7NRNU)
+Loment compiles to native x86-64 executables — Linux ELF, Windows PE, or a freestanding
+object for bare metal — with no runtime and no libc. The toolchain is itself written in
+Loment and needs no Python to run. Its own syntax is Rust-flavored, and the same program can
+be written in six more: C, C++, Java, C#, Go or Python.
 
-The release has a Linux `tar.gz`, a Windows `zip` and a Windows installer — installing and
-running needs **no Python, no clang and no WSL**. `loment run hello.lomt` and you are done.
+Installing and running needs **no Python, no clang and no WSL** — the package is native
+binaries plus the standard library. `loment run hello.lomt` and you are done.
 
 ## Status
 
@@ -30,6 +40,14 @@ running needs **no Python, no clang and no WSL**. `loment run hello.lomt` and yo
 `tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip. You can also
 build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)). What 0.1.4 does **not**
 include yet is listed honestly in [docs/202](docs/202-loment-014-release-gate.md).
+
+> [!WARNING]
+> **On Windows, install from the `zip`.** On a machine with the
+> `NoDefaultCurrentDirectoryInExePath` hardening setting,
+> `loment-0.1.4-windows-x64-setup.exe` exits silently and installs nothing. The published
+> installer will not be rebuilt — rebuilding would change the bytes under an existing version
+> number ([#117](https://github.com/FujoJTOP/loment/issues/117)). Both routes install the same
+> files.
 
 The toolchain is **self-hosted at run time**: it compiles and runs with no Python and no
 libc. The **development side is not**, and 0.1.4 shipped before that gap closed:
@@ -60,14 +78,15 @@ fn _start() {
 }
 ```
 
-```
+```console
 $ loment run hello.lomt
 hello from Loment
 ```
 
 `_start` is the entry point, because there is no runtime to call one for you, and output goes
 through the `write` system call, because there is no `printf`. [QUICKSTART.md](QUICKSTART.md)
-takes it from here — sources, toolchain, and the first four rows below.
+takes it from here: getting the sources, building the toolchain, and `loment run` / `build` /
+`check` / `ir`.
 
 ![How a program is built: hello.lomt goes to loment-driver, which checks it and emits LLVM IR; loment-lomelf, the repository's own linker, turns that into an 8 KB static executable](editors/loment-pipeline.png)
 
