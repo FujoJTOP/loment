@@ -1027,11 +1027,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "c3e508f7895b4513a3b2907ec4c7fc839224816f6788cbd6615e32d37b5a1bf6"
+   "sha256": "c9cfb2a893459b5b6c370f15ac37e282d377ee5ca1ed06db6073c5fbd6c1af81"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "abdc8bb95c0ee541a3de8af6291b4efdcaebdb87b9229917baced39ec6798c16"
+   "sha256": "48a4e03ae7e3008bbcca117532a142b7ec0aa13a9f5645d5a782d89f6eeef919"
   },
   {
    "path": "tools/loment_sign.py",

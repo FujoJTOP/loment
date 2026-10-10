@@ -6,6 +6,8 @@
 #      (PS 5.1 用 ANSI 读无 BOM 的非 ASCII 会把后续行解析坏 —— docs/157 §3.4)
 #   2. 归档内容 == payload (逐个 sha256 对得上, 不是"大概在")
 #   3. 归档**确定性**: 同样输入两次写出字节相同 (zip 固定时间戳 + tar.gz mtime=0)
+#      + **宿主无关**: 换掉 `sys.platform` 再压一遍, zip 字节必须一模一样
+#      (容器里 `create_system` 那一个字段; 见 test_archives 里那条注解)。
 #   4. `--check` 对产物与 SHA256SUMS 一致
 #   5. install.sh 端到端 (WSL 里): tar → 装进临时前缀 → `loment version` →
 #      `loment ir` 的产物与参考实现**逐字节相同** → `loment run` 打出东西 →
@@ -206,6 +208,30 @@ def test_archives() -> None:
           loment_dist._zip("loment-x", win) == loment_dist._zip("loment-x", win))
     check("tar.gz 两次写出字节相同",
           loment_dist._tar_gz("loment-x", lin) == loment_dist._tar_gz("loment-x", lin))
+
+    # 3b. **宿主无关**: zip 容器里 `create_system` 那一个字段由 `zipfile` 按
+    # `sys.platform` 填 (win32 → 0, 其余 → 3)。内容一个字节不差, 但"同一 tag 在两个
+    # runner 上出两个哈希"。2026-10-10 咬到过一次: `skill_zip()` 自己建的那份 ZipFile
+    # 漏了 `create_system = 3` (`_zip` 一直有), 而发布流水线正好要从 ubuntu 挪到
+    # windows —— 第五件 setup.exe 要 Windows 自带的 iexpress。
+    #
+    # **为什么不能只断言"等于 3"**: 默认值本来就是"除 win32 外都是 3", 于是在 ubuntu
+    # 门禁上两种写法都过 —— 那条断言是空的。真正的性质是**不随 `sys.platform` 变**,
+    # 所以这里在同一个进程里把它换成另一个值再压一遍、比字节。
+    # **两个平台都判得动**: 在 Windows 上它盯 `skill_zip` 那一半, 在 ubuntu 上盯 `_zip`
+    # 那一半 —— 而"只在 Windows 上现形"正是这条缺陷当初能溜过去的理由。
+    here = {"_zip": loment_dist._zip("loment-x", win),
+            "skill_zip": loment_dist.skill_zip()}
+    real_plat = sys.platform
+    try:
+        sys.platform = "linux" if real_plat == "win32" else "win32"
+        other = {"_zip": loment_dist._zip("loment-x", win),
+                 "skill_zip": loment_dist.skill_zip()}
+    finally:
+        sys.platform = real_plat
+    drifted = [k for k in here if here[k] != other[k]]
+    check("zip 字节不随 sys.platform 变 (容器里 create_system 那一个字段)",
+          not drifted, ",".join(drifted))
 
 
 def read_zip_bytes(blob: bytes) -> dict[str, bytes]:
