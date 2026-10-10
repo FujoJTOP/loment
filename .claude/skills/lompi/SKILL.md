@@ -77,17 +77,27 @@ lompi check   <dir>                                 is this a valid Loment libra
 lompi fetch   [--registry URL]                      plan the registry download
 lompi config                                        show global root + registry (and the rule)
 lompi version                                       print the version
-lompi index   <store>                               list packages in the store
-lompi show    <store> <name[@version]>              metadata / use edges / identity
-lompi tree    <store> <name[@version]>              dependency tree
-lompi resolve <store> <name[@version]>              print the lock (hash-pinned)
-lompi verify  <store> <name[@version]> <lockfile>   recompute and compare byte-for-byte
-lompi plan    <store> <name[@version]> [--into DIR]   closure + materialization plan
+lompi list    [<store>]                             list packages in the store
+lompi show    [<store>] <name[@version]>            metadata / use edges / identity
+lompi tree    [<store>] <name[@version]>            dependency tree
+lompi resolve [<store>] <name[@version]>            print the lock (hash-pinned)
+lompi verify  [<store>] <name[@version]> <lockfile> recompute and compare byte-for-byte
+lompi plan    [<store>] <name[@version]> [--into DIR]  closure + materialization plan
 lompi hash    <package-dir>                         own-source hash of one package
-lompi obj     add <store> <file.o>                  content-addressed object into <store>
-lompi obj     get <store> <sha256> [--out OUT.o]    fetch an object's bytes (no compiler needed)
+lompi obj     add [<store>] <file.o>                content-addressed object into <store>
+lompi obj     get [<store>] <sha256> [--out OUT.o]  fetch an object's bytes (no compiler needed)
 lompi help
 ```
+
+**`<store>` is optional on every verb above.** Omit it and the **global store** is used —
+exactly the directory `lompi config` prints on its `store:` line. `lompi show mathutil` and
+`lompi show <store> mathutil` take the same code path (the dispatcher resolves the store once),
+so they cannot drift apart. Both spellings stay supported forever: scripts that pass a store
+explicitly keep working. `index` is kept as a synonym for `list`.
+
+The reason is the same one pip has: a package manager's user should not have to know where the
+library lives. Making the store a required argument turns "where is your library" into a field
+you retype on every call — that is something the machine should remember, not the person.
 
 `lompi obj` is how a **pre-optimized object** rides along with the store: `add` writes it as
 `<store>/obj-<sha256>.o` (its own content address), `get` pulls the bytes back. The point
@@ -99,7 +109,7 @@ a compiler**. Flat layout on purpose — `sys_mkdir` does not exist on the PE si
 
 ## 3.5 Registry, global root, and where `install` puts things
 
-lompi 0.1.0 adds a **registry**: an optional git repository laid out exactly like a store
+lompi has a **registry**: an optional git repository laid out exactly like a store
 (`<name>/<version>/*.lomt`). It is configured in `lompi.conf`, a **Loment source file that
 sits next to `lompi.exe`**:
 
@@ -268,7 +278,7 @@ git clone --depth 1 https://github.com/you/loment-libs C:\Users\hooya\.lompi\cac
 and none of them is `socket`; the runtime shim imports no `ws2_32` / `winhttp`. So `fetch`
 emits the exact command for a shell or CI to run — the same situation as `mkdir` in 5.6.
 **Neither is a lompi design position**: both are gaps in the runtime the PE build is
-compiled against, and the socket one is scheduled to be lifted in lompi 0.1.1. Do not
+compiled against, and the socket one is still not lifted as of lompi 0.1.5. Do not
 design a workflow around them being permanent. Run the printed command, then
 `lompi install <name>` will find the package in the cache.
 
@@ -276,10 +286,10 @@ design a workflow around them being permanent. Run the printed command, then
 
 ```
 $ lompi version
-lompi 0.1.0
+lompi 0.1.5
 
 $ lompi config
-version:  0.1.0
+version:  0.1.5
 exe:      C:\Users\hooya\.local\bin
 global:   C:\Users\hooya\.lompi
   rule:   argv[0] sits under \Users\<name>\, so <that>\.lompi
@@ -425,7 +435,7 @@ The entry point for "which Loment libraries are available here", "what is in the
 
 ```
 $ lompi config
-version:  0.1.0
+version:  0.1.5
 exe:      C:\Users\hooya\.local\bin
 global:   C:\Users\hooya\.lompi
   rule:   argv[0] sits under \Users\<name>\, so <that>\.lompi
@@ -615,7 +625,7 @@ around one
 - **No socket.** The PE runtime exposes eight syscalls and none of them is a socket, so
   `lompi fetch` emits the `git clone` command instead of running it, and installing is
   always reading local files. **This is a toolchain gap, not a design position** — it is
-  scheduled to be lifted in lompi 0.1.1.
+  still not lifted as of lompi 0.1.5.
 - **No `mkdir`.** `install --apply` writes files into directories that already exist; it
   checks them all up front and lists the `mkdir` commands you need instead of leaving a
   partial install. Same status as the socket — the runtime does not offer it yet. On ELF
@@ -659,14 +669,19 @@ around one
 | pip | lompi | difference |
 |---|---|---|
 | `pip install X` | `lompi install X --apply` (or `--into DIR`) | validates first; without `--apply` it only prints the plan; needs the target directories to exist (PE shim has no `mkdir` yet — see 9) |
-| `pip download` | `lompi fetch` | prints the `git clone` for you to run (no socket in the PE shim yet — scheduled for 0.1.1; see 9) |
+| `pip download` | `lompi fetch` | prints the `git clone` for you to run (no socket in the PE shim yet — still not lifted as of 0.1.5; see 9) |
 | `pip config` | `lompi config` | also shows *how* the global root was derived |
 | `twine check` / wheel validation | `lompi check <dir>` | structural rules that `use <name>` will actually depend on |
-| `pip index versions X` | `lompi index <store>` | lists every instance, not just one package |
-| `pip show X` | `lompi show <store> X` | also gives instance identity and use edges |
-| `pip freeze` | `lompi resolve <store> X` | pins content hashes, not version numbers |
+| `pip list` / `pip index versions X` | `lompi list [<store>]` | lists every instance, not just one package; `index` is a synonym |
+| `pip show X` | `lompi show [<store>] X` | also gives instance identity and use edges |
+| `pip freeze` | `lompi resolve [<store>] X` | pins content hashes, not version numbers |
 | `pip install -r requirements.txt` | `lompi install X --from-lock lompi.lock --apply` | refuses if any pinned instance is missing or its identity changed |
-| `pip check` | `lompi verify <store> X <lock>` | recompute + byte-for-byte compare; much stronger |
-| `pipdeptree` | `lompi tree <store> X` | two versions of one package each get their own line |
+| `pip check` | `lompi verify [<store>] X <lock>` | recompute + byte-for-byte compare; much stronger |
+| `pipdeptree` | `lompi tree [<store>] X` | two versions of one package each get their own line |
 | `requirements.txt` | `lompi.lock` | no ranges to write; the hash *is* the identity |
 | `~/.cache/pip` | `<global root>\cache` | holds cloned registries |
+
+**The difference that used to be here is gone**: pip never makes you name site-packages, and
+neither does lompi any more — `<store>` is optional on every verb above (see 3). What is *not*
+the same as pip, deliberately: `install` still refuses to create directories on PE and prints a
+plan instead, and `fetch` still prints the clone command rather than doing it.

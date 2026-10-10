@@ -13,6 +13,11 @@
 // 代价是 O(n²) 最坏, 而一个仓库包数很少 (上限 512), 这个代价换得起。
 // 环也因此自然暴露: A→B→A 两边都永远"还没准备好", 循环结束后它们就是剩下来的。
 //
+// **那条 O(n²) 里真正贵的是 I/O, 不是比较**: 每一遍扫到还没定身份的包就把它的源码
+// 重新列目录 + 重新 lex 一遍 —— 链式依赖下同一份源码会被读 n 遍。所以每一遍记下
+// "这个包当时卡在哪个依赖上" (WS_BLOCK), 挡路的那个还没定身份就直接跳过它。
+// 剩下的每一遍仍然 O(n) 次比较, 但读盘那次只剩"确实可能变了的那些包"。
+//
 // 身份算不出来要**响亮**: 环与缺依赖各自有独立的状态位与消息, 不混成一个"失败"。
 //
 // 命名: 公开 idn_*, 自检 test_idn_*。
@@ -28,6 +33,10 @@ use "lpi_pkg.lomt"
 pub const IDN_OK: u32 = 0;
 pub const IDN_CYCLE: u32 = 1;
 pub const IDN_MISSING: u32 = 2;
+
+/// WS_BLOCK 里的"这个包还没被看过"哨兵。与 PKG_NONE 分开: PKG_NONE 在那里是
+/// "缺依赖 = 永远别再重试"的意思, 两者在这一格上必须能分开。
+pub const IDN_UNPARSED: u32 = 4294967294;
 
 /// 第 idx 个包的边表暂存位置 (WS_EPOOL / WS_EENTS) —— 由 pkg_edges 填。
 fn idn_edges(ws: ptr, idx: u32) -> u32 {
@@ -112,7 +121,13 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
     let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
     let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
     let zero: ptr = ((ws as u64) + WS_ZERO as u64) as ptr;
+    let blk: ptr = ((ws as u64) + WS_BLOCK as u64) as ptr;
     store8(zero, 0, 0 as u8);
+    let z: u32 = 0;
+    while z < n {
+        txt_store32(blk, z * 4, IDN_UNPARSED);
+        z = z + 1;
+    }
     let missing: u32 = 0;
     let progress: u32 = 1;
     while progress == 1 {
@@ -120,9 +135,24 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
         let i: u32 = 0;
         while i < n {
             if (pkg_flags(ws, i) & PKG_F_IDENT) == 0 && (pkg_flags(ws, i) & PKG_F_MISSING) == 0 {
+                // **这一遍还要不要再 lex 一遍这个包?**
+                // 上一遍看过它, 而当时卡住它的那个依赖**到现在还没有身份** —— 那它这一遍
+                // 一定还是不 ready (ready 要求**全部**依赖都有身份, 那一个没有)。重新列目录
+                // + 重新 lex 是纯白干, 而链式依赖下这正是"每扫一遍就把每个包的源码重读
+                // 一遍"的来源。拿不准 (没看过 / 缺依赖) 一律走下面老实重解析 —— 这个判断只
+                // 用到"挡路的那个还没身份"这一件事实, 与别处发生了什么无关。
+                let block: u32 = txt_load32(blk, i * 4);
+                let skip: u32 = 0;
+                if block != IDN_UNPARSED && block != PKG_NONE {
+                    if (pkg_flags(ws, block) & PKG_F_IDENT) == 0 {
+                        skip = 1;
+                    }
+                }
+                if skip == 0 {
                 let c: u32 = idn_edges(ws, i);
                 idn_sort_edges(pool, eents, c);
-                // 依赖齐了吗
+                // 依赖齐了吗 (顺手记下第一个还没身份的, 下一遍拿它判断要不要重来)
+                let first: u32 = IDN_UNPARSED;
                 let ready: u32 = 1;
                 let k: u32 = 0;
                 while k < c {
@@ -135,11 +165,15 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
                             pkg_set_flag(ws, i, PKG_F_MISSING);
                             missing = idn_copy_msg(msg, msgcap, nm, nl);
                         } else if (pkg_flags(ws, ch) & PKG_F_IDENT) == 0 {
+                            if first == IDN_UNPARSED {
+                                first = ch;
+                            }
                             ready = 0;
                         }
                     }
                     k = k + 1;
                 }
+                txt_store32(blk, i * 4, first);
                 if ready == 1 {
                     // id = H( 自身 hex ⊕ 每条 (边名 0x00 子身份 0x00) )
                     sha_init(st);
@@ -164,6 +198,7 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
                     idn_copy_hex(ws, i, hex);
                     pkg_set_flag(ws, i, PKG_F_IDENT);
                     progress = 1;
+                }
                 }
             }
             i = i + 1;

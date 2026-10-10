@@ -69,6 +69,9 @@ fn cli_die(msg: str) -> u32 {
 
 fn R(ws: ptr) -> ptr { return ((ws as u64) + WS_REPORT as u64) as ptr; }
 
+/// 生效 store 路径的槽 —— 见 WS_DSTORE 的注释。
+fn S(ws: ptr) -> ptr { return ((ws as u64) + WS_DSTORE as u64) as ptr; }
+
 // ---------------------------------------------------------------- argv
 
 fn arg_count(buf: ptr, m: u32) -> u32 {
@@ -98,17 +101,63 @@ fn spec_ver_ptr(buf: ptr, sp: u64) -> ptr {
     return ((buf as u64) + (spec_name_off(sp) as u64) + (spec_name_len(sp) as u64) + 1) as ptr;
 }
 
+// ---------------------------------------------------------------- 生效 store
+
+/// 把**生效的 store 路径**写进 WS_DSTORE (NUL 结尾), 返回长度; 0 = 推不出来。
+///
+/// `av == 0` 表示命令行**没给** `<store>` —— 那时用全局根下的 `store\`, 也就是
+/// `lompi config` 打的那一行; 给了就照抄。于是 `lompi show mathutil` 与
+/// `lompi show <store> mathutil` 走同一条码路, 命令体里一次分支都不用写。
+///
+/// 推不出来是**报错**而不是悄悄落到当前目录: 全局根是从 argv[0] 反推的, 反推不出来
+/// 说明这个二进制是被从莫名其妙的地方调起来的 —— 那时猜一个目录只会把东西装到别处。
+fn cli_resolve_store(ws: ptr, buf: ptr, m: u32, av: u64) -> u32 {
+    let out: ptr = S(ws);
+    if av != 0 {
+        return sys_put_bytes(out, buf, sys_arg_off(av), sys_arg_len(av));
+    }
+    let scr: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
+    let exed: ptr = ((ws as u64) + WS_TMP as u64) as ptr;
+    let root: ptr = ((ws as u64) + WS_TMP as u64 + 1024) as ptr;
+    if cfg_exe_dir(buf, m, scr, exed, 1024) == 0 {
+        return 0;
+    }
+    cfg_root(exed, scr, root, 1024);
+    return cfg_join(root, "store", out, WS_DSTORE_CAP);
+}
+
+/// 数位置参数 (`--flag <值>` 这样的成对参数整个跳过)。用来裁决"给没给 `<store>`":
+/// `show [<store>] <名字>` 给了一个位置参数就是没给 store, 两个就是给了。
+fn cli_npos(buf: ptr, m: u32, from: u32, flag: str) -> u32 {
+    let ac: u32 = sys_arg_count(buf, m);
+    let n: u32 = 0;
+    let i: u32 = from;
+    while i < ac {
+        if arg_is(buf, sys_arg_at(buf, m, i), flag) {
+            i = i + 2;
+        } else {
+            n = n + 1;
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
 // ---------------------------------------------------------------- 公共步骤
 
 /// 扫仓库 + 算身份。返回包数; 失败时用 code 指出原因 (1 打不开 / 2 环 / 3 缺依赖)。
-fn load_store(ws: ptr, buf: ptr, m: u32, store: u64, msg: ptr, msgcap: u32) -> u32 {
-    let sp: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
-    sys_put_bytes(sp, buf, sys_arg_off(store), sys_arg_len(store));
-    let n: u32 = sto_scan(ws, sp);
+fn load_store(ws: ptr, store: ptr, msg: ptr, msgcap: u32) -> u32 {
+    let n: u32 = sto_scan(ws, store);
     if n == 0 {
+        // **不静默**: 不传 <store> 时走的是全局 store, 那条路径打不开必须看得见是哪一条,
+        // 否则用户只看到"退 1 且什么都不说" —— 而这正是最容易配错的地方。
+        err_lit("lompi: cannot read the store: ");
+        sys_write(2, store, txt_len_cstr(store) as u64);
+        err_lit("\n  (pass <store> explicitly, or check the `store:` line of `lompi config`)\n");
         return 0;
     }
     if idn_pass1(ws, n) != n {
+        err_lit("lompi: some package in the store could not be hashed (see the guide's limits)\n");
         return 0;
     }
     let r: u32 = idn_pass2(ws, n, msg, msgcap);
@@ -127,11 +176,11 @@ fn load_store(ws: ptr, buf: ptr, m: u32, store: u64, msg: ptr, msgcap: u32) -> u
 
 // ---------------------------------------------------------------- index
 
-fn cmd_index(ws: ptr, buf: ptr, m: u32, av_store: u64) -> u32 {
+fn cmd_index(ws: ptr, store: ptr) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
     let scr: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
     let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -152,11 +201,11 @@ fn cmd_index(ws: ptr, buf: ptr, m: u32, av_store: u64) -> u32 {
 
 // ---------------------------------------------------------------- show
 
-fn cmd_show(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64) -> u32 {
+fn cmd_show(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
     let scr: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
     let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -218,7 +267,7 @@ fn idn_edges_of(ws: ptr, idx: u32) -> u32 {
 
 /// 依赖树。用一个 (下标, 深度) 的显式栈 —— 语言没有递归深度保证, 而且树里
 /// 菱形依赖会让同一个包出现多次, 所以"已经打过"的要标出来, 不能默默重复。
-fn cmd_tree(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64) -> u32 {
+fn cmd_tree(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
     let scr: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
     let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
@@ -226,7 +275,7 @@ fn cmd_tree(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64) -> u32 {
     let eents: ptr = ((ws as u64) + WS_EENTS as u64) as ptr;
     // 栈: 每个元素 8 字节 (下标 u32 + 深度 u32), 放在报告区尾部之前的一块独立空间
     let stack: ptr = ((ws as u64) + WS_TMP as u64 + 5120) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -331,9 +380,9 @@ fn build_lock(ws: ptr, n: u32, root: u32) -> u32 {
     return o;
 }
 
-fn cmd_resolve(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64) -> u32 {
+fn cmd_resolve(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -352,10 +401,10 @@ fn cmd_resolve(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64) -> u32 {
 
 /// verify: **重新算一遍**, 与锁文件逐字节比。
 /// 比"检查版本对不对"强 —— 它回答的是"这棵仓库还是不是那把锁描述的那棵"。
-fn cmd_verify(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64, av_lock: u64) -> u32 {
+fn cmd_verify(ws: ptr, buf: ptr, store: ptr, av_spec: u64, av_lock: u64) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
     let lockp: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -390,11 +439,11 @@ fn cmd_verify(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64, av_lock: u
 
 /// 落盘计划。**这一步就是 pip 的 install**, 只是把"建目录"那部分如实写在计划里,
 /// 因为 PE 上 lompi 自己做不到 (没有 mkdir) —— 不假装做到。
-fn cmd_plan(ws: ptr, buf: ptr, m: u32, av_store: u64, av_spec: u64, into: u64) -> u32 {
+fn cmd_plan(ws: ptr, buf: ptr, store: ptr, av_spec: u64, into: u64) -> u32 {
     let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
     let scr: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
     let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
-    let n: u32 = load_store(ws, buf, m, av_store, msg, 128);
+    let n: u32 = load_store(ws, store, msg, 128);
     if n == 0 {
         return 1;
     }
@@ -480,30 +529,54 @@ const OBJ_CAP: u32 = 262144;
 fn cmd_obj(ws: ptr, buf: ptr, m: u32, ac: u32) -> u32 {
     let c2: u64 = sys_arg_at(buf, m, 2);
     if arg_is(buf, c2, "add") {
-        if ac < 5 {
-            return cli_usage("obj add needs <store> <file.o>");
+        // ac-3 个位置参数: 一个 = 只有 <file.o> (store 走默认), 两个 = <store> <file.o>。
+        let np: u32 = ac - 3;
+        if np == 1 {
+            if cli_resolve_store(ws, buf, m, 0) == 0 {
+                return cli_die("cannot derive the store path (pass <store> explicitly)");
+            }
+            return obj_add(ws, buf, S(ws), sys_arg_at(buf, m, 3));
         }
-        return obj_add(ws, buf, sys_arg_at(buf, m, 3), sys_arg_at(buf, m, 4));
+        if np == 2 {
+            if cli_resolve_store(ws, buf, m, sys_arg_at(buf, m, 3)) == 0 {
+                return cli_die("obj add: the store path is unusable");
+            }
+            return obj_add(ws, buf, S(ws), sys_arg_at(buf, m, 4));
+        }
+        return cli_usage("obj add needs [<store>] <file.o>");
     }
     if arg_is(buf, c2, "get") {
-        if ac < 5 {
-            return cli_usage("obj get needs <store> <sha256> [--out OUT.o]");
+        // `--out` 可以跟在任何一个位置参数后面, 所以先数**位置参数**再裁决。
+        let np: u32 = cli_npos(buf, m, 3, "--out");
+        let hexa: u64 = 0;
+        if np == 1 {
+            hexa = sys_arg_at(buf, m, 3);
+            if cli_resolve_store(ws, buf, m, 0) == 0 {
+                return cli_die("cannot derive the store path (pass <store> explicitly)");
+            }
+        } else if np == 2 {
+            if cli_resolve_store(ws, buf, m, sys_arg_at(buf, m, 3)) == 0 {
+                return cli_die("obj get: the store path is unusable");
+            }
+            hexa = sys_arg_at(buf, m, 4);
+        } else {
+            return cli_usage("obj get needs [<store>] <sha256> [--out OUT.o]");
         }
-        return obj_get(ws, buf, m, ac, sys_arg_at(buf, m, 3), sys_arg_at(buf, m, 4));
+        return obj_get(ws, buf, S(ws), hexa, cfg_flag_arg(buf, m, "--out"));
     }
     return cli_usage("obj needs add|get");
 }
 
 /// `<store>/obj-<hex>.o` 写进 WS_SCR2，返回长度 (不含 NUL)。
-fn obj_slot(ws: ptr, buf: ptr, store_av: u64, hex: ptr, hn: u32) -> u32 {
+fn obj_slot(ws: ptr, store: ptr, hex: ptr, hn: u32) -> u32 {
     let scr2: ptr = ((ws as u64) + WS_SCR2 as u64) as ptr;
-    let n: u32 = sys_put_bytes(scr2, buf, sys_arg_off(store_av), sys_arg_len(store_av));
+    let n: u32 = cli_put_cstr(scr2, 0, store);
     n = sys_append_lit(scr2, n, "/obj-");
     n = sys_append_bytes(scr2, n, hex, hn);
     return sys_append_lit(scr2, n, ".o");
 }
 
-fn obj_add(ws: ptr, buf: ptr, store_av: u64, file_av: u64) -> u32 {
+fn obj_add(ws: ptr, buf: ptr, store: ptr, file_av: u64) -> u32 {
     let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
     let obuf: ptr = ((ws as u64) + WS_FILE as u64) as ptr;
     let st: ptr = ((ws as u64) + WS_SHA as u64) as ptr;
@@ -520,7 +593,7 @@ fn obj_add(ws: ptr, buf: ptr, store_av: u64, file_av: u64) -> u32 {
         return 1;
     }
     sha_hex_of(obuf, n as u32, st, dig, hex);
-    let _sl: u32 = obj_slot(ws, buf, store_av, hex, 64);
+    let _sl: u32 = obj_slot(ws, store, hex, 64);
     let w: u64 = sys_write_file(((ws as u64) + WS_SCR2 as u64) as ptr, obuf, n);
     if w == SYS_ERR {
         cli_die("obj add: cannot write into the store");
@@ -532,7 +605,7 @@ fn obj_add(ws: ptr, buf: ptr, store_av: u64, file_av: u64) -> u32 {
     return 0;
 }
 
-fn obj_get(ws: ptr, buf: ptr, m: u32, ac: u32, store_av: u64, hex_av: u64) -> u32 {
+fn obj_get(ws: ptr, buf: ptr, store: ptr, hex_av: u64, out_av: u64) -> u32 {
     let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
     let obuf: ptr = ((ws as u64) + WS_FILE as u64) as ptr;
     let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
@@ -542,7 +615,7 @@ fn obj_get(ws: ptr, buf: ptr, m: u32, ac: u32, store_av: u64, hex_av: u64) -> u3
         return 1;
     }
     let _hl: u32 = sys_put_bytes(hex, buf, sys_arg_off(hex_av), hn);
-    let _sl: u32 = obj_slot(ws, buf, store_av, hex, hn);
+    let _sl: u32 = obj_slot(ws, store, hex, hn);
     let n: u64 = sys_read_file(((ws as u64) + WS_SCR2 as u64) as ptr, obuf, OBJ_CAP as u64);
     if n == SYS_ERR {
         cli_die("obj get: no such object in the store");
@@ -550,9 +623,8 @@ fn obj_get(ws: ptr, buf: ptr, m: u32, ac: u32, store_av: u64, hex_av: u64) -> u3
     }
     // 落点: `--out OUT` 给了就用它; 否则 `<hex>.o` 落在当前目录。
     let ol: u32 = 0;
-    if ac >= 7 && arg_is(buf, sys_arg_at(buf, m, 5), "--out") {
-        ol = sys_put_bytes(scr, buf, sys_arg_off(sys_arg_at(buf, m, 6)),
-                           sys_arg_len(sys_arg_at(buf, m, 6)));
+    if out_av != 0 {
+        ol = sys_put_bytes(scr, buf, sys_arg_off(out_av), sys_arg_len(out_av));
     } else {
         ol = sys_put_bytes(scr, buf, sys_arg_off(hex_av), hn);
         ol = sys_append_lit(scr, ol, ".o");
@@ -575,7 +647,7 @@ fn obj_get(ws: ptr, buf: ptr, m: u32, ac: u32, store_av: u64, hex_av: u64) -> u3
 // anything non-ASCII becomes mojibake. The runtime has no WriteConsoleW, so the only
 // lever we own is to print nothing but ASCII.
 fn print_help() {
-    out_lit("lompi 0.1.0 - package manager for Loment libraries\n");
+    out_lit("lompi 0.1.5 - package manager for Loment libraries\n");
     out_lit("        identity = content hash, dependencies = `use` in source\n");
     out_lit("\n");
     out_lit("  lompi install <name> [--into DIR] [--apply] [--from-lock F]  fetch/validate/install\n");
@@ -587,16 +659,19 @@ fn print_help() {
     out_lit("  lompi config                                        show global root and registry\n");
     out_lit("  lompi version                                       print the version\n");
     out_lit("\n");
-    out_lit("  lompi index   <store>                               list packages in the store\n");
-    out_lit("  lompi show    <store> <name[@version]>              metadata / use edges / identity\n");
-    out_lit("  lompi tree    <store> <name[@version]>              dependency tree\n");
-    out_lit("  lompi resolve <store> <name[@version]>              print the lock (hash-pinned)\n");
-    out_lit("  lompi verify  <store> <name[@version]> <lockfile>   recompute and compare byte-for-byte\n");
-    out_lit("  lompi plan    <store> <name[@version]> [--into DIR]   closure + materialization plan\n");
+    out_lit("  lompi list    [<store>]                             list packages in the store\n");
+    out_lit("  lompi show    [<store>] <name[@version]>            metadata / use edges / identity\n");
+    out_lit("  lompi tree    [<store>] <name[@version]>            dependency tree\n");
+    out_lit("  lompi resolve [<store>] <name[@version]>            print the lock (hash-pinned)\n");
+    out_lit("  lompi verify  [<store>] <name[@version]> <lockfile> recompute, compare byte-for-byte\n");
+    out_lit("  lompi plan    [<store>] <name[@version]> [--into DIR]  closure + install plan\n");
     out_lit("  lompi hash    <package-dir>                         own-source hash of one package\n");
-    out_lit("  lompi obj     add <store> <file.o>                  content-addressed object -> <store>\n");
-    out_lit("  lompi obj     get <store> <sha256> [--out OUT.o]    fetch an object (no compiler needed)\n");
+    out_lit("  lompi obj     add [<store>] <file.o>                content-addressed object -> <store>\n");
+    out_lit("  lompi obj     get [<store>] <sha256> [--out OUT.o]  fetch an object (no compiler needed)\n");
     out_lit("\n");
+    out_lit("<store> is optional on every verb above: omit it and the global store is\n");
+    out_lit("used -- the directory `lompi config` prints on its `store:` line.\n");
+    out_lit("`index` is kept as a synonym for `list`.\n");
     out_lit("store layout: <store>/<name>/<version>/*.lomt (+ optional pkg.lomp)\n");
     out_lit("registry:     a git repo with that same layout; see lompi.conf or --registry\n");
     out_lit("install default destination: the global store (use --into DIR for a project)\n");
@@ -635,11 +710,15 @@ pub fn cli_main(ws: ptr, buf: ptr, m: u32) -> u32 {
         }
         return cmd_install(ws, buf, m, sys_arg_at(buf, m, 2));
     }
-    if arg_is(buf, c1, "index") {
-        if ac < 3 {
-            return cli_usage("index needs a <store>");
+    if arg_is(buf, c1, "index") || arg_is(buf, c1, "list") {
+        let av: u64 = 0;
+        if ac >= 3 {
+            av = sys_arg_at(buf, m, 2);
         }
-        return cmd_index(ws, buf, m, sys_arg_at(buf, m, 2));
+        if cli_resolve_store(ws, buf, m, av) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
+        }
+        return cmd_index(ws, S(ws));
     }
     if arg_is(buf, c1, "hash") {
         if ac < 3 {
@@ -649,48 +728,94 @@ pub fn cli_main(ws: ptr, buf: ptr, m: u32) -> u32 {
     }
     if arg_is(buf, c1, "obj") {
         if ac < 4 {
-            return cli_usage("obj needs add|get <store> ...");
+            return cli_usage("obj needs add|get");
         }
         return cmd_obj(ws, buf, m, ac);
     }
     if arg_is(buf, c1, "show") {
-        if ac < 4 {
-            return cli_usage("show needs <store> <name>");
+        let stv: u64 = 0;
+        let nm: u64 = 0;
+        if ac >= 4 {
+            stv = sys_arg_at(buf, m, 2);
+            nm = sys_arg_at(buf, m, 3);
+        } else if ac >= 3 {
+            nm = sys_arg_at(buf, m, 2);
+        } else {
+            return cli_usage("show needs a <name>");
         }
-        return cmd_show(ws, buf, m, sys_arg_at(buf, m, 2), sys_arg_at(buf, m, 3));
+        if cli_resolve_store(ws, buf, m, stv) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
+        }
+        return cmd_show(ws, buf, S(ws), nm);
     }
     if arg_is(buf, c1, "tree") {
-        if ac < 4 {
-            return cli_usage("tree needs <store> <name>");
+        let stv: u64 = 0;
+        let nm: u64 = 0;
+        if ac >= 4 {
+            stv = sys_arg_at(buf, m, 2);
+            nm = sys_arg_at(buf, m, 3);
+        } else if ac >= 3 {
+            nm = sys_arg_at(buf, m, 2);
+        } else {
+            return cli_usage("tree needs a <name>");
         }
-        return cmd_tree(ws, buf, m, sys_arg_at(buf, m, 2), sys_arg_at(buf, m, 3));
+        if cli_resolve_store(ws, buf, m, stv) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
+        }
+        return cmd_tree(ws, buf, S(ws), nm);
     }
     if arg_is(buf, c1, "resolve") {
-        if ac < 4 {
-            return cli_usage("resolve needs <store> <name>");
+        let stv: u64 = 0;
+        let nm: u64 = 0;
+        if ac >= 4 {
+            stv = sys_arg_at(buf, m, 2);
+            nm = sys_arg_at(buf, m, 3);
+        } else if ac >= 3 {
+            nm = sys_arg_at(buf, m, 2);
+        } else {
+            return cli_usage("resolve needs a <name>");
         }
-        return cmd_resolve(ws, buf, m, sys_arg_at(buf, m, 2), sys_arg_at(buf, m, 3));
+        if cli_resolve_store(ws, buf, m, stv) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
+        }
+        return cmd_resolve(ws, buf, S(ws), nm);
     }
     if arg_is(buf, c1, "verify") {
-        if ac < 5 {
-            return cli_usage("verify needs <store> <name> <lockfile>");
+        let stv: u64 = 0;
+        let nm: u64 = 0;
+        let lk: u64 = 0;
+        if ac >= 5 {
+            stv = sys_arg_at(buf, m, 2);
+            nm = sys_arg_at(buf, m, 3);
+            lk = sys_arg_at(buf, m, 4);
+        } else if ac >= 4 {
+            nm = sys_arg_at(buf, m, 2);
+            lk = sys_arg_at(buf, m, 3);
+        } else {
+            return cli_usage("verify needs a <name> and a <lockfile>");
         }
-        return cmd_verify(ws, buf, m, sys_arg_at(buf, m, 2), sys_arg_at(buf, m, 3),
-                          sys_arg_at(buf, m, 4));
+        if cli_resolve_store(ws, buf, m, stv) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
+        }
+        return cmd_verify(ws, buf, S(ws), nm, lk);
     }
     if arg_is(buf, c1, "plan") {
-        if ac < 4 {
-            return cli_usage("plan needs <store> <name>");
+        // `[<store>] <name> [--into DIR]` —— 数位置参数裁决给没给 store。
+        let np: u32 = cli_npos(buf, m, 2, "--into");
+        let stv: u64 = 0;
+        let nm: u64 = 0;
+        if np >= 2 {
+            stv = sys_arg_at(buf, m, 2);
+            nm = sys_arg_at(buf, m, 3);
+        } else if np == 1 {
+            nm = sys_arg_at(buf, m, 2);
+        } else {
+            return cli_usage("plan needs a <name>");
         }
-        let into: u64 = 0;
-        let k: u32 = 4;
-        while k < ac {
-            if arg_is(buf, sys_arg_at(buf, m, k), "--into") && k + 1 < ac {
-                into = sys_arg_at(buf, m, k + 1);
-            }
-            k = k + 1;
+        if cli_resolve_store(ws, buf, m, stv) == 0 {
+            return cli_die("cannot derive the store path (pass <store> explicitly)");
         }
-        return cmd_plan(ws, buf, m, sys_arg_at(buf, m, 2), sys_arg_at(buf, m, 3), into);
+        return cmd_plan(ws, buf, S(ws), nm, cfg_flag_arg(buf, m, "--into"));
     }
     err_lit("lompi: unknown command: ");
     sys_write(2, ((buf as u64) + (sys_arg_off(c1) as u64)) as ptr, sys_arg_len(c1) as u64);
@@ -886,7 +1011,7 @@ pub fn cfg_flag_arg(buf: ptr, m: u32, lit: str) -> u64 {
 // ---------------------------------------------------------------- version / config / check
 
 fn cmd_version() -> u32 {
-    out_lit("lompi 0.1.0\n");
+    out_lit("lompi 0.1.5\n");
     return 0;
 }
 
@@ -900,7 +1025,7 @@ fn cmd_config(ws: ptr, buf: ptr, m: u32) -> u32 {
     let reg: ptr = ((ws as u64) + WS_OUT as u64 + 3072) as ptr;
     let sr: ptr = ((ws as u64) + WS_TMP as u64 + 512) as ptr;
     let exen: u32 = cfg_exe_dir(buf, m, scr, exed, 1024);
-    out_lit("version:  0.1.0\n");
+    out_lit("version:  0.1.5\n");
     out_lit("exe:      ");
     sys_write(1, exed, exen as u64);
     out_lit("\n");
