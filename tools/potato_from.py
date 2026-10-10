@@ -326,6 +326,13 @@ class ClassLang:
         self.method = method
 
 
+#: 这一族的**壳行**：`namespace X` / `using …;` / `package …;` / `import …;`，
+#: 以及只剩一对花括号的行。它们都是**结构**，不是"谁也不认识的内容" ——
+#: 类体已经由 `class` / `enum` 两条正则认下来了，没人认那几行壳是正常的。
+_SHELL_LINE = re.compile(r"^\s*(?:namespace|using|package|import)(?:[^A-Za-z0-9_]|$)"
+                           r"|^\s*[{}]\s*$")
+
+
 def _from_class_lang(src: str, name: str, mode: str,
                      lang: ClassLang) -> tuple[dict, Report]:
     """**"函数住在 `class X { … }` 里"这一族**的共用引擎：Java 与 C#。
@@ -506,6 +513,14 @@ def _from_class_lang(src: str, name: str, mode: str,
     # 构造）、散在类外的声明、写坏的顶层形状。原先它们**既不进产物也不进 `skipped`**：
     # 整份单元少一块内容，而 `check` 判 OK。
     for ln, txt in _c_leftover_lines(body, consumed):
+        # **壳行不算"谁也不认识的内容"**：`namespace D` / `using System;` / `package …;`
+        # / 只剩花括号的行 —— 它们都是**结构**，`class` / `enum` 那两条正则已经把类体认
+        # 下来了（见 `_class_members`），壳没有人认是**正常**的。
+        # 不排掉的话，一份平常的 C# 文件（`using` + `namespace` + 两层壳的花括号）会因为
+        # 这几行被**整份拒掉** —— 而 `loment/cstrans/*.cs` 三份语料全是这个形状。
+        # `using` 那一条与翻译器的 `_CS_SHELLS` 同一口径（那里也把它当壳）。
+        if _SHELL_LINE.match(txt):
+            continue
         rep.skip("decl", (txt.split() or ["?"])[0][:24],
                  f"第 {ln} 行: 顶层这一条没有对应的规则 —— {lang.grammar} 这一门只认 "
                  f"`class` / `enum`（以及类里的常量 / 字段 / 方法）；`use`、散在类外的"

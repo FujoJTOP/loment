@@ -949,9 +949,19 @@ def test_class_languages_report_unrecognised_toplevel_content():
         assert lost, f"{lang}: 认不出的成员没报出来: {rep2.skipped}"
         assert [f["name"] for f in doc2["functions"]] == ["good"], (lang, doc2["functions"])
         # ③ 反面：正常的类 + 枚举、类里的常量/字段/方法都不许被当成残渣
+        # **壳行也不算**（`namespace` / `using` / 两层壳的花括号）—— 它们是**结构**，
+        # `class` / `enum` 那两条正则已经把类体认下来了。不排掉的话，一份平常的 C# 文件
+        # （`loment/cstrans/*.cs` 三份语料都是这个形状）会因为这些行被**整份拒掉**。
         _, rep3 = fn(good, "t.x", "strict")
         assert not [x for x in rep3.skipped if "没有对应的规则" in x["why"]], (lang, rep3.skipped)
         assert not [x for x in rep3.skipped if "不是常量 / 字段 / 方法" in x["why"]], (lang, rep3.skipped)
+        shelled = ("using System;" + NL + NL + "namespace D" + NL + "{" + NL
+                   + "    public class T" + NL + "    {" + NL
+                   + "        public static int f(int a) { return a; }" + NL
+                   + "    }" + NL + "}" + NL)
+        _, rep4 = fn(shelled, "t.x", "strict")
+        left4 = [x for x in rep4.skipped if "没有对应的规则" in x["why"]]
+        assert not left4, f"{lang}: shell rows were reported as leftovers: {left4}"
     print("      Java / C#：use 与写坏的成员都报得出来；正常的类与枚举不误报")
 
 
