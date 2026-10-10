@@ -616,6 +616,36 @@ def test_diag_does_not_call_a_native_declaration_foreign():
     print("      声明为原生的不给'外源'提示；真 Rust 源码与声明为外源的照旧点名")
 
 
+@test
+def test_dbg_refuses_foreign_grammar():
+    """`loment dbg` 对别的写法要**拒** —— 它给的 `文件:行` 两头都不对。
+
+    `dbg` 过前门，拿到的是**译文**的模块：DWARF 行表里写的是**译文**的行号，
+    而 `mod.src` 是 `None`（`lomentc.load`：翻译出来的单元**不声称**源文件是那一份）。
+    于是输出指向一个**不存在的地方**——实测一份 **9 行**的 C 写法文件报 `…\\t.lomt:10`，
+    而且路径丢了一截、分隔符混用。**退 0**，看着像成功。
+
+    只钉"拒"，不钉输出格式：`dbg` 那条路要 clang 才能走完，而这一条在**用不着 clang**
+    的那一步就该拦住（判据因此在本机与 CI 上都能跑）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "d.lomt"
+        p.write_text("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                     "    return x + 1;\n}\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "dbg", str(p), "--fn", "f"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        out = r.stdout + r.stderr
+        assert r.returncode != 0, f"没拒（rc=0）:\n{out[:200]}"
+        assert "只处理**原生**写法" in out, f"没给出说得通的拒绝理由:\n{out[:200]}"
+        # 那份"文件:行"走的是 **stdout** —— 拒绝之后它必须是空的
+        # （不能拿整段出来查 `.lomt:`：拒绝消息自己就带上路径了）。
+        assert r.stdout.strip() == "", f"还吐了个 文件:行:\n{r.stdout[:200]}"
+    print("      `loment dbg` 认出非原生写法就拒，不给指向不存在之处的 文件:行")
+
+
 #: 照 2026-09-17 一个子 agent **真写出来的那份 C** 蒸馏的 (无 `#include`、无 libc),
 #: 刻意保留了三处当时把工具链绊倒的形状: Allman `{`、`unsigned` 单独写、
 #: 单引号字符字面量 `'0'`。它由下面那条端到端每次真跑 —— 见 `docs/179` §6。
