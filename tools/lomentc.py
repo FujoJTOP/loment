@@ -3175,15 +3175,32 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     return mod, deps
 
 
+def _unit_id(m: Module) -> object:
+    """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
+
+    同一个文件被 `load()` 两次会得到**两个对象**, 但仍是同一个单元 —— 所以有源文件
+    路径就取**规范化后的路径**; 没有路径 (`translated` 那种) 退回模块名。
+    """
+    if m.src is not None:
+        try:
+            return m.src.resolve()
+        except OSError:
+            return str(m.src)
+    return m.name
+
+
+def _unit_where(m: Module) -> str:
+    """诊断里指一个单元指到**文件**上 —— 名字相同的两份文件, 只报名字分不开。"""
+    return f"`{m.src.as_posix()}`" if m.src is not None else f"`{m.name}`"
+
+
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-          deps: list[Module] | None = None) -> list[str]:
-    # ⚠️ **已上报的缺口 (`docs/198` §4): 依赖模块的正文不查。**
-    # 只把 `deps` 的**导出符号**入表 (M12: 仅 pub 可见), 正文不验 —— 于是
-    # `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**,
-    # 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的
-    # 程序 check 都是绿的。最小复现六行, 在 `docs/198` §4。
-    # 今天唯一抓得住它的是"把库文件自己当入口"那种形状 (`loment_std_test`
-    # 的 `test_std_modules_are_checkable`) —— 给库写判据的人只能先靠这个。
+          deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+    # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
+    # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
+    # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
+    # 使用它的程序 check 都是绿的。做法见本函数末尾: 把每个依赖**当成入口**再查一遍
+    # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
     funcs = dict(ext_funcs or {})
@@ -3303,20 +3320,44 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 解析到同一个函数 (静默错编)。以前只有"入口模块 vs 依赖的 pub"会报, 依赖之间的私有
     # 重名一路静默 —— 这里补齐。预置枚举 (Option/Result) 由 load() 注入每个模块, 排除。
     # 同一模块内部的重名由下面各自的规则报, 这里只管跨模块。
-    seen_decl: dict[str, str] = {}          # name -> 先声明它的模块名
+    # 闸立在这条**上面**: 单元的**名字**先得唯一。两份文件都写 `module same` 时,
+    # 下面那把按名字去重的闸会把它们当成同一个模块 —— 闸不响, 产物里两条
+    # `define @f` (非法 IR), 一直拖到链接器才炸成内部异常 (`#139`)。
+    seen_unit: dict[object, Module] = {}
     for m0 in [*deps, mod]:
-        decls = [(f.name, f.line, "函数") for f in m0.funcs]
-        decls += [(s.name, s.line, "结构体") for s in m0.structs]
-        decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
-        decls += [(c.name, c.line, "常量") for c in m0.consts]
-        for nm, ln, kind in decls:
-            prev = seen_decl.get(nm)
-            if prev is None:
-                seen_decl[nm] = m0.name
-            elif prev != m0.name:
-                # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
-                errs.append(f"{ln}: {kind} {nm} 与模块 {prev} 重名 —— "
-                            f"单元的发射符号是平的 (ABI), 请改名")
+        seen_unit.setdefault(_unit_id(m0), m0)
+    seen_name: dict[str, Module] = {}
+    dup_unit = False
+    for m0 in seen_unit.values():
+        prev = seen_name.get(m0.name)
+        if prev is None:
+            seen_name[m0.name] = m0
+        else:
+            dup_unit = True
+            # 措辞里带"重名" —— 与既有的 E-DUP 口径一致（`loment_diag.RULES` 的 E013
+            # 就是按这几个词锚的；换一种说法会让这条消息掉出分类表，
+            # `loment_tools_test::test_m64_all_reference_messages_are_classified` 当场红）。
+            errs.append(f"1: 单元名 `{m0.name}` 重名 —— {_unit_where(prev)} 与 "
+                        f"{_unit_where(m0)} 两份文件都声明了它；单元的发射符号是平的 "
+                        f"(ABI)，两份同名单元会把同一个符号定义两遍。改掉其中一个 `module` 名")
+
+    # 名字已经撞了的话下面这条**不再报** —— 那些"同名符号"全是上面那条的症状,
+    # 一起倒出来只会把根因埋掉 (第一个错才是根因)。
+    if not dup_unit:
+        seen_decl: dict[str, Module] = {}   # name -> 先声明它的那个**单元**
+        for m0 in [*deps, mod]:
+            decls = [(f.name, f.line, "函数") for f in m0.funcs]
+            decls += [(s.name, s.line, "结构体") for s in m0.structs]
+            decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
+            decls += [(c.name, c.line, "常量") for c in m0.consts]
+            for nm, ln, kind in decls:
+                prev = seen_decl.get(nm)
+                if prev is None:
+                    seen_decl[nm] = m0
+                elif _unit_id(prev) != _unit_id(m0):
+                    # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
+                    errs.append(f"{ln}: {kind} {nm} 与模块 {prev.name} 重名 —— "
+                                f"单元的发射符号是平的 (ABI), 请改名")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -3537,6 +3578,30 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+
+    # ---- 依赖的**正文**也要查 (`#149`, 2026-10-09 补)。
+    #
+    # 上面走完的是**入口单元**的正文; `deps` 的正文一个字都没验 —— 一个库可以带着
+    # 正文类型错发布, 而每个使用它的程序 check 都是绿的 (`docs/198` §4)。
+    #
+    # 做法: 把每个依赖**当成入口**再查一遍。它的 `use` 图这次**不用重解** —— 把
+    # 其余依赖整份当符号表递下去就够了(`resolve_deps` 给的就是整个闭包, 而被依赖者
+    # 在前的顺序意味着一个依赖的符号在这次调用里**已经看见了**)。传整份闭包只会让
+    # 可见面**更宽**, 于是漏报的可能有、误报没有 —— 宁可少报也不冤枉。
+    #
+    # `_dep_pass` 挡住递归: 依赖再审一遍它的依赖会转成环。
+    #
+    # 入口**已经有错**就不往下走了 —— 那些错多半就是下游症状的原因, 一起倒出来只会
+    # 把根因埋掉 (与 `pytrans` 的 `pp_uns`、`check` 里那条 `dup_unit` 同一条纪律)。
+    # 改完入口再跑一次, 依赖那层的错自然浮上来。
+    if not _dep_pass and deps and not errs:
+        for d in deps:
+            others = [x for x in deps if _unit_id(x) != _unit_id(d)]
+            sub = check(d, ext_funcs=ext_funcs, deps=others, _dep_pass=True)
+            if sub:
+                # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。
+                where = _unit_where(d)
+                errs.extend(f"{where}: {e}" for e in sub)
     return errs
 
 
@@ -4333,10 +4398,16 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #: 它按**累计请求量**记 —— 过了 32 KiB 就收一次并清零。**不是按前沿**：前沿在有活块的
 #: 时候根本不会回落（`free` 只在"释放的块顶到前沿"时退），按它判会让每次分配都收一次
 #: （实测：40000 次循环跑成超时）。按分配量记是 O(1)、可预期，也是主流那几家的做法。
-_IR_GC = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
+#: **根表那两个全局** —— 与收集器**分开一段**：`gc_any`（`gc_auto` / `gc_auto_alpha`）档
+#: 只要函数里有指针槽就往根表写（`roots_push`），而**根表定义在收集器那一段里** ——
+#: 一份"有根没堆"的单元（典型的：alpha 把 `alloc` 全 L0 提走、只剩下指针局部）会发出
+#: **引用未定义全局**的产物（实测：`gc_auto` 只带一个 `fn f(p: ptr)` 也会）。所以根表
+#: **跟着 `gc_any` 发**，收集器**跟着堆发** —— 两件事不再绑死。
+_IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
-@__loment_rootn = internal global i32 0
-@__loment_gcbytes = internal global i32 0
+@__loment_rootn = internal global i32 0'''
+
+_IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
 @__loment_mark = internal global [8192 x i32] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
@@ -4505,7 +4576,9 @@ done:
   ret void
 }
 
-define internal void @__loment_maybe_collect(i32 %sz) {
+'''
+#: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
+_IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
   %b = load i32, ptr @__loment_gcbytes
   %b2 = add i32 %b, %sz
@@ -4520,6 +4593,82 @@ out:
   ret void
 }
 '''
+
+#: `gc_auto_alpha` 的**自适应**触发（`docs/210` §2.4 的"自适应策略池"那一半）—— 两处与
+#: `gc_auto` **不同**，都是"让阈值跟着程序自己走"：
+#:
+#:   * **阈值跟着活集走**（`@__loment_thresh`）：每收一次，量出**活集字节数**（清扫后标记还在，
+#:     扫一遍把标记块的 size 加总），把下次的触发阈值设成 `活集 × 2`（下限 32 KiB）。活集小
+#:     ⇒ 收得勤而便宜；活集大 ⇒ 收得稀，让 arena 装得下。
+#:   * **空间触发**（前沿 + 本次 + 头 > 65536 − 余量）：分配快把 arena 填满时**也收一次**。
+#:     这一条正对着 `gc_auto` 那条明写的上限 —— 固定 32 KiB 触发时，"活集 + 至多 32 KiB 垃圾
+#:     ≤ 64 KiB"，所以**活集 ≳ 32 KB 必耗尽**；空间触发把这一条抬到"活集接近整个 arena"。
+#:
+#: **不用 `select`**（下限那一格走分支）—— 自举镜像链接器 `lomelf` 的 `lower` 里没有 `select`。
+_IR_GC_TRIGGER_ADAPT = '''@__loment_thresh = internal global i32 32768
+define internal void @__loment_maybe_collect(i32 %sz) {
+entry:
+  %b = load i32, ptr @__loment_gcbytes
+  %b2 = add i32 %b, %sz
+  store i32 %b2, ptr @__loment_gcbytes
+  %t = load i32, ptr @__loment_thresh
+  %big = icmp ugt i32 %b2, %t
+  %off = load i32, ptr @__loment_off
+  %n1 = add i32 %off, %sz
+  %n2 = add i32 %n1, 8
+  %near = icmp ugt i32 %n2, 64512
+  %go = or i1 %big, %near
+  br i1 %go, label %do, label %out
+do:
+  store i32 0, ptr @__loment_gcbytes
+  call void @__loment_collect()
+  %live = call i32 @__loment_livebytes()
+  %dbl = mul i32 %live, 2
+  %lo = icmp ult i32 %dbl, 32768
+  br i1 %lo, label %floor, label %set
+floor:
+  store i32 32768, ptr @__loment_thresh
+  br label %out
+set:
+  store i32 %dbl, ptr @__loment_thresh
+  br label %out
+out:
+  ret void
+}
+
+define internal i32 @__loment_livebytes() {
+entry:
+  br label %l
+l:
+  %li = phi i32 [ 8, %entry ], [ %lex, %lc ]
+  %acc = phi i32 [ 0, %entry ], [ %acc2, %lc ]
+  %lof = load i32, ptr @__loment_off
+  %ld = icmp uge i32 %li, %lof
+  br i1 %ld, label %done, label %b
+b:
+  %idx = lshr i32 %li, 3
+  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
+  %mk = load i32, ptr %mp
+  %sm = icmp eq i32 %mk, 1
+  %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
+  %sz = load i32, ptr %sp
+  br i1 %sm, label %hit, label %miss
+hit:
+  %acc1 = add i32 %acc, %sz
+  br label %lc
+miss:
+  br label %lc
+lc:
+  %acc2 = phi i32 [ %acc1, %hit ], [ %acc, %miss ]
+  %lex = add i32 %li, %sz
+  br label %l
+done:
+  ret i32 %acc
+}
+'''
+
+_IR_GC = _IR_GC_SHARED + _IR_GC_TRIGGER_FIXED
+_IR_GC_ALPHA = _IR_GC_SHARED + _IR_GC_TRIGGER_ADAPT
 
 
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
@@ -5158,6 +5307,10 @@ class _Ir:
         #: **`gc_auto`**（`docs/210` §2.1 的"自动"那一档）：本帧要不要 push 根表、多少格。
         #: 与 `gc_alpha` **互斥**（两档不同时成立），所以下面那些挂点不会互相打架。
         self.gc_auto = gc_auto
+        #: **`gc_auto_alpha`**（`docs/210` §2.4 的"自适应"那一档）：它**也有收集器**了 ——
+        #: 此前 alpha 的 L3 残差没人收（只有分配器）。`gc_any` = 要根表/收集器的任意一档。
+        self.gc_alpha = gc_alpha
+        self.gc_any = gc_auto or gc_alpha
         self.rootk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
@@ -5327,7 +5480,7 @@ class _Ir:
         **槽的顺序必须与自举侧同序**（形参在前、局部按声明序）—— 那是逐字节判据的一部分。
         表满（1024 格，递归深了才可能）**点名拒**，不静默写穿。
         """
-        if not self.gc_auto:
+        if not self.gc_any:
             return
         self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
         if self.rootk == 0:
@@ -5375,7 +5528,7 @@ class _Ir:
 
     def roots_pop(self) -> None:
         """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
-        if not self.gc_auto or self.rootk == 0:
+        if not self.gc_any or self.rootk == 0:
             return
         n = self.t()
         self.w(f"{n} = load i32, ptr @__loment_rootn")
@@ -5673,7 +5826,7 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            if self.gc_auto:
+            if self.gc_any:
                 # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
                 # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
                 self.w(f"call void @__loment_maybe_collect(i32 {sz})")
@@ -6094,6 +6247,20 @@ class _Ir:
         raise LomError(getattr(s, "line", 1), 1, f"native M0 不支持该语句: {type(s).__name__}")
 
 
+#: 程序入口（`docs/189` §3：入口是 `fn _start()`，不是 `main`）。ELF 那条路靠
+#: `-Wl,-e,_start` 把它点成**进程入口**（`loment/bootstrap.sh`、`tools/loment_genesis.py`、
+#: `tools/loment_elf_test.py::_link_clang`、`tools/loment_dist.py::_link_opt` 都是这么做的）。
+ENTRY_FN = "_start"
+
+#: 进程入口**不是一次 `call`**：内核进来时 `rsp` 是 16 对齐的，比 System V 的函数入口
+#: 约定（`rsp % 16 == 8`，`call` 压了返回地址）**少 8**。不声明这一条，`_start` 与它下面
+#: 的每一帧就整体偏 8 —— `lomelf` 是一台不碰对齐的栈机，所以一直看不出来；clang `-O1/-O2`
+#: 会把局部数组的清零改写成 `movaps`（16 字节对齐的写），一跑就 `#GP`。实测：自举驱动
+#: 3.2 MB 的 IR 在 `-O0` 编出来一切正常，`-O1/-O2` 编出来一跑就 SIGSEGV（`docs/212` §5.2）。
+#: `stackrealign` 让后端在序言里补一句 `and rsp, -16`，那 8 个字节就回来了。
+ENTRY_ATTR = ' "stackrealign"'
+
+
 def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
@@ -6122,6 +6289,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     args = ", ".join(f"{ir.ll(p.type)} %{p.name}" for p in f.params)
     ir.out.append(f"; {f.name} -> {f.ret}")
     ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
+                  f"{ENTRY_ATTR if f.name == ENTRY_FN else ''}"
                   f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
     ir.out.append("entry:")
     ir.cur_label = "entry"
@@ -6296,10 +6464,21 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
     if _needs_heap:
         out.append(_IR_HEAP)
-        if gc_auto:
-            # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
-            # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
-            out.append(_IR_GC)
+    # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
+    # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
+    # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
+    if gc_auto or gc_alpha:
+        out.append(_IR_ROOTS)
+        if _needs_heap:
+            if gc_auto:
+                # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
+                # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
+                out.append(_IR_GC)
+            else:
+                # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
+                # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前
+                # alpha 根本不发收集器（L3 残差没人收）—— 这一步让它有。
+                out.append(_IR_GC_ALPHA)
     out += globals_
     if globals_:
         out.append("")

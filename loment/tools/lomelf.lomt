@@ -125,20 +125,29 @@ const G_ZERO: u32 = 28;
 // 每张表的**容量**单独一个常量: ① 表满时要报错（下面各 `*_add` 的守卫）; ②
 // `loment_genesis_test::test_seed_fits_lomelf_table_caps` 按它数种子 —— **不另抄一份数**,
 // 与 `IN_CAP` / `test_m85_codegen_table_capacity` 同一条纪律。
-const TB_LBL_MAX: u32 = 24576;     // 标签表条数
+// ---- 2026-10-10: 标签表从 16384 抬到 32768（`docs/200` 记的那条墙的下一次）
+//
+// 同一个病第三次: 种子又长过了一格。这次撞标签表时**余量只剩 9**（并 main 之后
+// 16375/16384）—— 任何一笔让自举编译器自己多出两位数的基本块/字符串全局的改动都会
+// 顶破它（实测: 给入口发一个 `"stackrealign"` 属性就多 3 个全局 + 9 个基本块, 当场
+// 16387）。抬法同前: **整条表区往后挪** `24 × 16384 = 393216`（`TB_FIX` 及其后的
+// `TB_SLOT` / `TB_ALLOC` / `TB_ARG` / `TB_PHI` / `TB_IDATA` / `TB_EXT` / `TB_OBJ` /
+// `TB_FREL` 一起移), 表尾从 2244360 涨到 2637576 —— 仍在 4 MiB 表区内, 所以
+// `M_OBJ` / `ARENA` 这次**不用动**。
+const TB_LBL_MAX: u32 = 32768;     // 标签表条数
 const TB_FIX_MAX: u32 = 32768;     // 回填表条数
 const TB_SLOT_MAX: u32 = 32768;    // 槽表条数（每函数清）
 const TB_ALLOC_MAX: u32 = 8192;    // alloca 表条数（每函数清）
 const TB_PHI_MAX: u32 = 512;       // phi 表条数（每函数清）
 
-const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 24576: (函数名, 块名, 地址)
+const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 32768: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
 const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
 const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 721152;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
+const TB_FIX: u32 = 917760;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
@@ -146,38 +155,38 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 1638656;       // 槽表 stride 16 × 32768 (每函数清)
+const TB_SLOT: u32 = 1835264;       // 槽表 stride 16 × 32768 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 2162944;     // alloca 表 stride 16 × 8192 (每函数清)
+const TB_ALLOC: u32 = 2359552;     // alloca 表 stride 16 × 8192 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 2294016;       // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 2490624;       // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 2294400;       // phi 表 stride 16 × 512 (每函数清)
-const TB_IDATA: u32 = 2302592;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
+const TB_PHI: u32 = 2491008;       // phi 表 stride 16 × 512 (每函数清)
+const TB_IDATA: u32 = 2499200;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
 const PH_ILEN: u32 = 12;
 
 // 外部函数表 (docs/173): `declare` 出来的符号名, 偏移指向**输入文本** (与标签表同基)。
-const TB_EXT: u32 = 2308096;       // stride 8 × 4096: (起点, 长度)
+const TB_EXT: u32 = 2504704;       // stride 8 × 4096: (起点, 长度)
 const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
 
 // 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
-const TB_OBJ: u32 = 2308896;       // stride 8 × 256
+const TB_OBJ: u32 = 2505504;       // stride 8 × 256
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
 
 // 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
 // —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
-const TB_FREL: u32 = 2309896;      // stride 32 × 4096
+const TB_FREL: u32 = 2506504;      // stride 32 × 4096
 const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
 const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
 const F2_OFF: u32 = 8;             // r_offset (节内偏移)
@@ -3475,6 +3484,78 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     return d;
 }
 
+/// 把字面量的字节写进 `t` 的 `at` 处（不含结尾 0），返回写到的位置。
+/// 收编面那三个名字用它进名字池 —— 与 `copy_name` 同一条理由：标签表存的是**偏移**，
+/// 而 `lbl_find` 拿输入缓冲当基，所以名字必须落在 `t` 里。
+fn put_name(t: ptr, at: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    // 与 `copy_name` 同一条守卫: 名字池住在**输入缓冲**里，越界就踩到下一张缓冲 ——
+    // **响亮地退出**，不静默写坏（与 `IN_CAP` 那条同一个纪律）。
+    if at + n >= IN_CAP {
+        return fail("输入缓冲没有空间放收编面的名字");
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(t, at + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return at + n;
+}
+
+/// **收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
+///
+/// **hex 与 `tools/lomelf.py` 的 `Emitter.emit_conscript` 逐字节相同** —— 那边是
+/// `emit(...)` 的字面字节，这里是同一串的十六进制。`loment_elf_test` 的自举镜像那格
+/// **逐字节比两份产物**，所以两处**必须一起改**：动一条指令就要重算 hex（内部的 rel32
+/// 是手算好的字面位移，不是回填出来的）。
+///
+/// 三个入口在整段里的偏移是 `0` / `29` / `54`（`memcpy` 29 字节、`memset` 25、`memcmp` 48）。
+/// 发一个"**换 ABI 的薄壳**"（`docs/219` §2.1）：C 按 System V 把实参放在 `rdi`，
+/// 而我们自己的函数**从栈上取**（调用方 `push`、被调方从 `[rbp+16]` 起）——
+/// 所以壳是 `push rbp; push rdi; call <tgt>; add rsp,8; pop rbp; ret`。
+///
+/// 与参考实现 `Emitter.emit_conscript` 里那两段**逐字节相同**：`call` 的 rel32 是
+/// **回填**出来的（不是字面量 —— 目标地址随布局变），两侧的回填口径也一样。
+fn emit_abi_wrapper(tab: ptr, out: ptr, c: u32, t: ptr, nm: u32, nl: u32, ts: u32, tl: u32) -> u32 {
+    lbl_add(tab, nm, nl, 0, 0, txt_base(tab) + c);
+    let d: u32 = blob_copy(out, c, "5557e800000000");   // push rbp; push rdi; call <占位>
+    fix_add(tab, c + 3, 0, ts, tl, 0, 0);               // rel32 落在 `E8` 的下一字节
+    return blob_copy(out, d, "4883c4085dc3");           // add rsp,8; pop rbp; ret
+}
+
+fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
+    let p0: u32 = cell(tab, C_EXTN);
+    let p1: u32 = put_name(t, p0, "memcpy");
+    let p2: u32 = put_name(t, p1, "memset");
+    let p3: u32 = put_name(t, p2, "memcmp");
+    setcell(tab, C_EXTN, p3);
+    lbl_add(tab, p0, 6, 0, 0, txt_base(tab) + c);
+    lbl_add(tab, p1, 6, 0, 0, txt_base(tab) + c + 29);
+    lbl_add(tab, p2, 6, 0, 0, txt_base(tab) + c + 54);
+    let d: u32 = blob_copy(out, c, "4885d20f84130000008a06880748ffc648ffc748ffca0f85edffffffc34885d20f840f00000040883748ffc748ffca0f85f1ffffffc34885d20f841b0000008a078a0e38c80f851200000048ffc748ffc648ffca0f85e5ffffff31c0c30fb6c00fb6c929c8c3");
+    // ---- malloc / free：**内存那一条不收编，是"划掉"**（docs/219 §2.1）----
+    // **只在堆在的时候发** —— 底下调的是 `@__loment_alloc` / `@__loment_free`；没有它们
+    // 就没有"我们的堆"，发了会悬着一个未定义的调用。判据是**这份 IR 里有没有那两条定义**：
+    // `lbl_find` 比的是**内容**（`span_eq`），所以把名字写进名字池、拿这段 span 去查即可 ——
+    // 不必复用函数定义那一处 span。
+    // `put_name` 返回的是**末尾**偏移，所以每个名字的**起点**是它前一次的返回值：
+    // 起点依次是 `hn` / `a1` / `a2` / `a3`。长度写死（14/13/6/4）—— 与名字本身同生共死。
+    let hn: u32 = cell(tab, C_EXTN);
+    let a1: u32 = put_name(t, hn, "__loment_alloc");     // 14 字节
+    let a2: u32 = put_name(t, a1, "__loment_free");      // 13
+    let a3: u32 = put_name(t, a2, "malloc");             // 6
+    let a4: u32 = put_name(t, a3, "free");               // 4
+    setcell(tab, C_EXTN, a4);
+    let dd: u32 = d;
+    if lbl_find(tab, t, hn, 14, 0, 0) != NO {
+        dd = emit_abi_wrapper(tab, out, dd, t, a2, 6, hn, 14);
+    }
+    if lbl_find(tab, t, a1, 13, 0, 0) != NO {
+        dd = emit_abi_wrapper(tab, out, dd, t, a3, 4, a1, 13);
+    }
+    return dd;
+}
+
 fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {
     let ss: u32 = find_start(t, n);
     if ss == NO {
@@ -3677,7 +3758,15 @@ fn run(mem: ptr) -> u32 {
     collect_globals(tab, inb, n as u32, gb);
     collect_externs(tab, inb, n as u32);
     place_globals(tab, inb);
-    let tlen: u32 = emit_all(tab, txt, 0, inb, n as u32);
+    let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32);
+    // **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
+    // 于是它们不再是未定义符号 —— 从表上划掉。粒度是"有没有外部对象"，与参考实现
+    // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
+    // 镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
+    let tlen: u32 = tlen0;
+    if nlink != 0 {
+        tlen = emit_conscript(tab, txt, tlen, inb);
+    }
     // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, 导出符号立标签。
     let tobj: ptr = ptr_add(mem, M_OBJ);
     let got: u32 = 0;
