@@ -203,12 +203,12 @@ pub fn ini_count_keys(d: ptr, so: u32, n: u32, kbuf: ptr, vbuf: ptr, kl: ptr) ->
 // ---------------------------------------------------------------- 自检
 
 /// 自检用的配置文本 (含注释/空行/全局区/两个节/值内含空白)。
-fn cfg() -> str {
+fn i_cfg() -> str {
     return "; 顶部注释\nname = demo\n\n[server]\nhost = 127.0.0.1\nport = 8080\n\n[dB]\nurl = postgres://x?y=1\n; 行内注释行\n";
 }
 
 fn test_ini_global_section() -> bool {
-    let s: str = cfg();
+    let s: str = i_cfg();
     let out: ptr = alloc(64);
     let kb: ptr = alloc(64);
     let vb: ptr = alloc(64);
@@ -220,7 +220,7 @@ fn test_ini_global_section() -> bool {
 }
 
 fn test_ini_section_value() -> bool {
-    let s: str = cfg();
+    let s: str = i_cfg();
     let out: ptr = alloc(64);
     let kb: ptr = alloc(64);
     let vb: ptr = alloc(64);
@@ -233,7 +233,7 @@ fn test_ini_section_value() -> bool {
 
 fn test_ini_section_names_are_case_sensitive() -> bool {
     // 节名 `dB` 与 `db` 是两回事 —— INI 惯例里键与节都区分大小写。
-    let s: str = cfg();
+    let s: str = i_cfg();
     let out: ptr = alloc(64);
     let kb: ptr = alloc(64);
     let vb: ptr = alloc(64);
@@ -271,7 +271,7 @@ fn test_ini_same_key_in_two_sections() -> bool {
 }
 
 fn test_ini_missing_key_and_section() -> bool {
-    let s: str = cfg();
+    let s: str = i_cfg();
     let out: ptr = alloc(64);
     let kb: ptr = alloc(64);
     let vb: ptr = alloc(64);
@@ -336,7 +336,7 @@ fn test_ini_crlf_line_endings() -> bool {
 }
 
 fn test_ini_counters() -> bool {
-    let s: str = cfg();
+    let s: str = i_cfg();
     let kb: ptr = alloc(64);
     let vb: ptr = alloc(64);
     let sb: ptr = alloc(64);
@@ -347,7 +347,7 @@ fn test_ini_counters() -> bool {
 }
 
 fn test_ini_has_section() -> bool {
-    let s: str = cfg();
+    let s: str = i_cfg();
     let sb: ptr = alloc(64);
     return ini_has_section_str(str_ptr(s), 0, str_len(s), "server", sb)
         && ini_has_section_str(str_ptr(s), 0, str_len(s), "nope", sb) == false

@@ -772,7 +772,7 @@ pub fn cbor_map_get_ptr(d: ptr, so: u32, n: u32, i: u32, kp: ptr, kn: u32, key_o
 
 // ---------------------------------------------------------------- 自检
 
-fn hv(c: u32) -> u32 {
+fn cb_hv(c: u32) -> u32 {
     if c >= 48 && c <= 57 {
         return c - 48;
     }
@@ -782,12 +782,12 @@ fn hv(c: u32) -> u32 {
     return c - 55;
 }
 
-fn hx(out: ptr, s: str) -> u32 {
+fn cb_hx(out: ptr, s: str) -> u32 {
     let n: u32 = str_len(s);
     let k: u32 = 0;
     while k < n / 2 {
-        let hi: u32 = hv(str_byte(s, k * 2));
-        let lo: u32 = hv(str_byte(s, k * 2 + 1));
+        let hi: u32 = cb_hv(str_byte(s, k * 2));
+        let lo: u32 = cb_hv(str_byte(s, k * 2 + 1));
         store8(out, k, ((hi << 4) | lo) as u8);
         k = k + 1;
     }
@@ -798,17 +798,17 @@ fn test_cbor_uint_forms() -> bool {
     // 附加信息的四种宽度各来一个 —— 这是 CBOR 的骨架。
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let a: u32 = hx(d, "00");
+    let a: u32 = cb_hx(d, "00");
     let ok1: bool = cbor_u64(d, 0, a, 0, ok) == 0 && mem_load32(ok, 0) == 1;
-    let b: u32 = hx(d, "17");
+    let b: u32 = cb_hx(d, "17");
     let ok2: bool = cbor_u64(d, 0, b, 0, ok) == 23;
-    let c: u32 = hx(d, "1818");
+    let c: u32 = cb_hx(d, "1818");
     let ok3: bool = cbor_u64(d, 0, c, 0, ok) == 24;
-    let e: u32 = hx(d, "190100");
+    let e: u32 = cb_hx(d, "190100");
     let ok4: bool = cbor_u64(d, 0, e, 0, ok) == 256;
-    let f: u32 = hx(d, "1a00010000");
+    let f: u32 = cb_hx(d, "1a00010000");
     let ok5: bool = cbor_u64(d, 0, f, 0, ok) == 65536;
-    let g: u32 = hx(d, "1bffffffffffffffff");
+    let g: u32 = cb_hx(d, "1bffffffffffffffff");
     let ok6: bool = cbor_u64(d, 0, g, 0, ok) == 18446744073709551615;
     return ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
 }
@@ -818,13 +818,13 @@ fn test_cbor_negative_is_minus_one_minus_arg() -> bool {
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
     let zero: i64 = 0;
-    let a: u32 = hx(d, "20");
+    let a: u32 = cb_hx(d, "20");
     let ok1: bool = cbor_i64(d, 0, a, 0, ok) == (zero - 1) && mem_load32(ok, 0) == 1;
-    let b: u32 = hx(d, "37");
+    let b: u32 = cb_hx(d, "37");
     let ok2: bool = cbor_i64(d, 0, b, 0, ok) == (zero - 24);
-    let c: u32 = hx(d, "3818");
+    let c: u32 = cb_hx(d, "3818");
     let ok3: bool = cbor_i64(d, 0, c, 0, ok) == (zero - 25);
-    let e: u32 = hx(d, "3b7fffffffffffffff");
+    let e: u32 = cb_hx(d, "3b7fffffffffffffff");
     let ok4: bool = cbor_i64(d, 0, e, 0, ok) == (zero - 9223372036854775807 - 1);
     return ok1 && ok2 && ok3 && ok4;
 }
@@ -833,31 +833,31 @@ fn test_cbor_nint_rejects_too_large_arg() -> bool {
     // 0x3b ffffffffffffffff 的参数超出 i64 能表示的范围 -> 老实报 ok=0
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "3bffffffffffffffff");
+    let n: u32 = cb_hx(d, "3bffffffffffffffff");
     cbor_i64(d, 0, n, 0, ok);
     return mem_load32(ok, 0) == 0;
 }
 
 fn test_cbor_byte_and_text_strings() -> bool {
-    // 每个向量一块**独立**缓冲。共用一个的话, 后面的 hx 会覆盖前面的,
+    // 每个向量一块**独立**缓冲。共用一个的话, 后面的 cb_hx 会覆盖前面的,
     // 到最后那句断言验的其实是最后一个向量 (这条我踩过两次)。
     let d: ptr = alloc(32);
     let out: ptr = alloc(32);
-    let a: u32 = hx(d, "4401020304");
+    let a: u32 = cb_hx(d, "4401020304");
     let L: u32 = cbor_str(d, 0, a, 0, out, 0);
     let ok1: bool = L == 4 && load8(out, 0) == 1 && load8(out, 3) == 4
         && cbor_type_at(d, 0, a, 0) == CBOR_BYTES;
     let d2: ptr = alloc(32);
-    let b: u32 = hx(d2, "6461626364");
+    let b: u32 = cb_hx(d2, "6461626364");
     let L2: u32 = cbor_str(d2, 0, b, 0, out, 0);
     let ok2: bool = L2 == 4 && mem_eq(out, 0, str_ptr("abcd"), 0, 4)
         && cbor_type_at(d2, 0, b, 0) == CBOR_TEXT;
     let d3: ptr = alloc(16);
-    let c: u32 = hx(d3, "40");
+    let c: u32 = cb_hx(d3, "40");
     let ok3: bool = cbor_str(d3, 0, c, 0, out, 0) == 0
         && cbor_type_at(d3, 0, c, 0) == CBOR_BYTES;
     let d4: ptr = alloc(16);
-    let e: u32 = hx(d4, "60");
+    let e: u32 = cb_hx(d4, "60");
     let ok4: bool = cbor_str(d4, 0, e, 0, out, 0) == 0
         && cbor_type_at(d4, 0, e, 0) == CBOR_TEXT;
     return ok1 && ok2 && ok3 && ok4;
@@ -866,12 +866,12 @@ fn test_cbor_byte_and_text_strings() -> bool {
 fn test_cbor_array() -> bool {
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "83010203");
+    let n: u32 = cb_hx(d, "83010203");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_arr_len(d, 0, n, 0) == 3;
     let e1: u32 = cbor_arr_at(d, 0, n, 0, 1);
     let v: u64 = cbor_u64(d, 0, n, e1, ok);
     let e9: u32 = cbor_arr_at(d, 0, n, 0, 9);
-    let em: u32 = hx(d, "80");
+    let em: u32 = cb_hx(d, "80");
     return ok1 && v == 2 && e9 == CBOR_NO && cbor_arr_len(d, 0, em, 0) == 0;
 }
 
@@ -881,7 +881,7 @@ fn test_cbor_map() -> bool {
     let ok: ptr = alloc(8);
     let key: ptr = alloc(8);
     // a2 61 61 01 61 62 02  = {"a":1,"b":2}
-    let n: u32 = hx(d, "a2616101616202");
+    let n: u32 = cb_hx(d, "a2616101616202");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_map_len(d, 0, n, 0) == 2;
     let vb: u32 = cbor_map_get(d, 0, n, 0, "b", key);
     let v: u64 = cbor_u64(d, 0, n, vb, ok);
@@ -897,7 +897,7 @@ fn test_cbor_map_iteration_with_mixed_keys() -> bool {
     let key: ptr = alloc(8);
     let ok: ptr = alloc(8);
     // a2 01 61 61 02 61 62 = {1:"a",2:"b"}
-    let n: u32 = hx(d, "a2016161026162");
+    let n: u32 = cb_hx(d, "a2016161026162");
     let ok1: bool = cbor_validate(d, 0, n);
     let v0: u32 = cbor_map_first(d, 0, n, 0, key);
     let k0: u64 = cbor_u64(d, 0, n, mem_load32(key, 0), ok);
@@ -910,7 +910,7 @@ fn test_cbor_map_iteration_with_mixed_keys() -> bool {
 fn test_cbor_simple_values() -> bool {
     let d: ptr = alloc(16);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "f4f5f6f7");
+    let n: u32 = cb_hx(d, "f4f5f6f7");
     let f: bool = cbor_bool(d, 0, n, 0, ok);
     let ok1: bool = f == false && mem_load32(ok, 0) == 1;
     let t: bool = cbor_bool(d, 0, n, 1, ok);
@@ -922,20 +922,20 @@ fn test_cbor_simple_values() -> bool {
 fn test_cbor_floats() -> bool {
     let ok: ptr = alloc(8);
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "f93c00"); // float16 1.0
+    let na: u32 = cb_hx(a, "f93c00"); // float16 1.0
     let h: u32 = cbor_f16bits(a, 0, na, 0, ok);
     let ok1: bool = mem_load32(ok, 0) == 1 && h == 15360 && cbor_validate(a, 0, na);
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "fa3f800000"); // float32 1.0
+    let nb: u32 = cb_hx(b, "fa3f800000"); // float32 1.0
     let f: u32 = cbor_f32bits(b, 0, nb, 0, ok);
     let ok2: bool = mem_load32(ok, 0) == 1 && f == 1065353216 && cbor_validate(b, 0, nb);
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "fb3ff0000000000000"); // float64 1.0
+    let nc: u32 = cb_hx(c, "fb3ff0000000000000"); // float64 1.0
     let g: u64 = cbor_f64bits(c, 0, nc, 0, ok);
     let ok3: bool = mem_load32(ok, 0) == 1 && g == 4607182418800017408 && cbor_validate(c, 0, nc);
     // 0.1 —— 字节序写错的话这里立刻露馅
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "fb3fb999999999999a");
+    let ne: u32 = cb_hx(e, "fb3fb999999999999a");
     let gg: u64 = cbor_f64bits(e, 0, ne, 0, ok);
     return ok1 && ok2 && ok3 && gg == 4591870180066957722;
 }
@@ -943,13 +943,13 @@ fn test_cbor_floats() -> bool {
 fn test_cbor_float_widths_not_confused() -> bool {
     // f16 宽 3 字节, f32 宽 5, f64 宽 9 —— 头长写错会把后面的字节卷进来。
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "f93c00");
+    let na: u32 = cb_hx(a, "f93c00");
     let ok1: bool = cbor_head_len(a, 0, na, 0) == 3;
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "fa3f800000");
+    let nb: u32 = cb_hx(b, "fa3f800000");
     let ok2: bool = cbor_head_len(b, 0, nb, 0) == 5;
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "fb3ff0000000000000");
+    let nc: u32 = cb_hx(c, "fb3ff0000000000000");
     let ok3: bool = cbor_head_len(c, 0, nc, 0) == 9;
     return ok1 && ok2 && ok3;
 }
@@ -959,14 +959,14 @@ fn test_cbor_tag() -> bool {
     let d: ptr = alloc(64);
     let out: ptr = alloc(64);
     let t: ptr = alloc(8);
-    let n: u32 = hx(d, "c074323031332d30332d32315432303a30343a30305a");
+    let n: u32 = cb_hx(d, "c074323031332d30332d32315432303a30343a30305a");
     let ok1: bool = cbor_validate(d, 0, n);
     let inner: u32 = cbor_tag(d, 0, n, 0, t);
     let ok2: bool = mem_load32(t, 0) == 0 && cbor_type_at(d, 0, n, inner) == CBOR_TEXT;
     let L: u32 = cbor_str(d, 0, n, inner, out, 0);
     let ok3: bool = L == 20 && load8(out, 0) == 50;
     // 标签后面必须真的跟一个值
-    let bad: u32 = hx(d, "c0");
+    let bad: u32 = cb_hx(d, "c0");
     let t2: ptr = alloc(8);
     let ok4: bool = cbor_tag(d, 0, bad, 0, t2) == CBOR_ERR
         && cbor_validate(d, 0, bad) == false;
@@ -977,14 +977,14 @@ fn test_cbor_indefinite_array() -> bool {
     // 9f 01 02 ff = 不定长数组 [1, 2]
     let d: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "9f0102ff");
+    let n: u32 = cb_hx(d, "9f0102ff");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_arr_len(d, 0, n, 0) == 2;
     let e0: u32 = cbor_arr_first(d, 0, n, 0);
     let v: u64 = cbor_u64(d, 0, n, e0, ok);
     let e1: u32 = cbor_arr_next(d, 0, n, e0);
     let e2: u32 = cbor_arr_next(d, 0, n, e1);
     // 空的定长 vs 空的不定长
-    let a: u32 = hx(d, "9fff");
+    let a: u32 = cb_hx(d, "9fff");
     return ok1 && v == 1 && e2 == CBOR_NO && cbor_validate(d, 0, a)
         && cbor_arr_len(d, 0, a, 0) == 0;
 }
@@ -993,7 +993,7 @@ fn test_cbor_indefinite_string_is_concatenated() -> bool {
     // 7f 61 61 62 62 63 ff = 不定长文本 "a" + "bc" = "abc"
     let d: ptr = alloc(32);
     let out: ptr = alloc(32);
-    let n2: u32 = hx(d, "7f6161626263ff");
+    let n2: u32 = cb_hx(d, "7f6161626263ff");
     let L: u32 = cbor_str(d, 0, n2, 0, out, 0);
     let want: str = "abc";
     // **立刻收结论**: out 会被下一段覆盖, 留到最后再比就比错了。
@@ -1001,7 +1001,7 @@ fn test_cbor_indefinite_string_is_concatenated() -> bool {
         && mem_eq(out, 0, str_ptr(want), 0, 3);
     // 不定长字节串: 5f 42 0102 43 030405 ff = 01 02 + 03 04 05
     let d2: ptr = alloc(32);
-    let e: u32 = hx(d2, "5f42010243030405ff");
+    let e: u32 = cb_hx(d2, "5f42010243030405ff");
     let L2: u32 = cbor_str(d2, 0, e, 0, out, 0);
     let ok2: bool = cbor_validate(d2, 0, e) && cbor_str_len(d2, 0, e, 0) == 5 && L2 == 5
         && load8(out, 1) == 2 && load8(out, 4) == 5 && load8(out, 0) == 1;
@@ -1013,21 +1013,21 @@ fn test_cbor_indefinite_map() -> bool {
     let d: ptr = alloc(32);
     let key: ptr = alloc(8);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "bf616101ff");
+    let n: u32 = cb_hx(d, "bf616101ff");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_map_len(d, 0, n, 0) == 1;
     let v: u32 = cbor_map_get(d, 0, n, 0, "a", key);
     let val: u64 = cbor_u64(d, 0, n, v, ok);
     // 缺值的映射 (键后面直接收尾) 必须被拒
-    let bad: u32 = hx(d, "bf6161ff");
+    let bad: u32 = cb_hx(d, "bf6161ff");
     return ok1 && val == 1 && cbor_validate(d, 0, bad) == false;
 }
 
 fn test_cbor_indefinite_without_break_rejected() -> bool {
     let a: ptr = alloc(32);
-    let na: u32 = hx(a, "9f0102"); // 不定长数组没收尾
+    let na: u32 = cb_hx(a, "9f0102"); // 不定长数组没收尾
     let ok1: bool = cbor_validate(a, 0, na) == false;
     let b: ptr = alloc(32);
-    let nb: u32 = hx(b, "7f6161"); // 不定长文本没收尾
+    let nb: u32 = cb_hx(b, "7f6161"); // 不定长文本没收尾
     let ok2: bool = cbor_validate(b, 0, nb) == false;
     return ok1 && ok2;
 }
@@ -1035,31 +1035,31 @@ fn test_cbor_indefinite_without_break_rejected() -> bool {
 fn test_cbor_rejects_reserved_info() -> bool {
     // 附加信息 28/29/30 是保留值 —— 严格解析必须拒, 不能猜成 "也就是 0 吧"。
     let a: ptr = alloc(16);
-    let na: u32 = hx(a, "1c");
+    let na: u32 = cb_hx(a, "1c");
     let ok1: bool = cbor_validate(a, 0, na) == false;
     let b: ptr = alloc(16);
-    let nb: u32 = hx(b, "1d");
+    let nb: u32 = cb_hx(b, "1d");
     let ok2: bool = cbor_validate(b, 0, nb) == false;
     let c: ptr = alloc(16);
-    let nc: u32 = hx(c, "1e");
+    let nc: u32 = cb_hx(c, "1e");
     let ok3: bool = cbor_validate(c, 0, nc) == false;
     let e: ptr = alloc(16);
-    let ne: u32 = hx(e, "3c");
+    let ne: u32 = cb_hx(e, "3c");
     let ok4: bool = cbor_validate(e, 0, ne) == false;
     return ok1 && ok2 && ok3 && ok4;
 }
 
 fn test_cbor_rejects_truncated_and_trailing() -> bool {
     let d: ptr = alloc(32);
-    let a: u32 = hx(d, "18");     // 说好跟 1 字节, 没有
+    let a: u32 = cb_hx(d, "18");     // 说好跟 1 字节, 没有
     let ok1: bool = cbor_validate(d, 0, a) == false;
-    let b: u32 = hx(d, "1901");   // 说好跟 2 字节, 只有 1
+    let b: u32 = cb_hx(d, "1901");   // 说好跟 2 字节, 只有 1
     let ok2: bool = cbor_validate(d, 0, b) == false;
-    let c: u32 = hx(d, "430102"); // 说好 3 字节, 只有 2 —— 手写长度最常算错的地方
+    let c: u32 = cb_hx(d, "430102"); // 说好 3 字节, 只有 2 —— 手写长度最常算错的地方
     let ok3: bool = cbor_validate(d, 0, c) == false;
-    let e: u32 = hx(d, "0000");   // 两个值连着
+    let e: u32 = cb_hx(d, "0000");   // 两个值连着
     let ok4: bool = cbor_validate(d, 0, e) == false;
-    let f: u32 = hx(d, "ff");     // 孤立的 break, 不在容器里
+    let f: u32 = cb_hx(d, "ff");     // 孤立的 break, 不在容器里
     let ok5: bool = cbor_validate(d, 0, f) == false;
     return ok1 && ok2 && ok3 && ok4 && ok5;
 }
@@ -1069,7 +1069,7 @@ fn test_cbor_nested_and_skip() -> bool {
     let d: ptr = alloc(64);
     let key: ptr = alloc(8);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "8201a1616b05");
+    let n: u32 = cb_hx(d, "8201a1616b05");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_arr_len(d, 0, n, 0) == 2;
     let e1: u32 = cbor_arr_at(d, 0, n, 0, 1);
     let ok2: bool = cbor_type_at(d, 0, n, e1) == CBOR_MAP;
@@ -1105,7 +1105,7 @@ fn test_cbor_realistic_document() -> bool {
     let key: ptr = alloc(8);
     let out: ptr = alloc(32);
     let ok: ptr = alloc(8);
-    let n: u32 = hx(d, "a46269640764746167738261616162626f6bf565726174696ffb3fb999999999999a");
+    let n: u32 = cb_hx(d, "a46269640764746167738261616162626f6bf565726174696ffb3fb999999999999a");
     let ok1: bool = cbor_validate(d, 0, n) && cbor_map_len(d, 0, n, 0) == 4;
     let id: u32 = cbor_map_get(d, 0, n, 0, "id", key);
     let v: u64 = cbor_u64(d, 0, n, id, ok);

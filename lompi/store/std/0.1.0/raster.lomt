@@ -34,9 +34,9 @@ module raster
 
 use "mem.lomt"
 
-pub const RA_ERR: u32 = 4294967295;
-/// "没有交集"/"取不到" —— 与 RA_ERR 分开: 一个是**算不出来**, 一个是**合法地没有**。
-pub const RA_NO: u32 = 4294967294;
+pub const RASTER_ERR: u32 = 4294967295;
+/// "没有交集"/"取不到" —— 与 RASTER_ERR 分开: 一个是**算不出来**, 一个是**合法地没有**。
+pub const RASTER_NO: u32 = 4294967294;
 
 // ---------------------------------------------------------------- 小工具
 
@@ -118,18 +118,18 @@ pub fn ra_get_safe(ws: ptr, w: u32, h: u32, x: i32, y: i32, dflt: u32) -> u32 {
 // ---------------------------------------------------------------- 裁剪
 
 /// 把矩形 (x,y,rw,rh) 与网格裁成交集, 写进 out 的 4 个 u32: `x0, y0, x1, y1`
-/// (**右/下开区间**)。有交集返回 1, 没有返回 `RA_NO`, 参数非法返回 `RA_ERR`。
+/// (**右/下开区间**)。有交集返回 1, 没有返回 `RASTER_NO`, 参数非法返回 `RASTER_ERR`。
 /// 这是"裁剪"这件事的**可复用形态** —— 直接拿它去算, 别在每处重写一遍判界。
 pub fn ra_clip(w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, out: ptr) -> u32 {
     if rw <= 0 || rh <= 0 {
-        return RA_ERR;
+        return RASTER_ERR;
     }
     let x0: i32 = ra_maxi(x, 0);
     let y0: i32 = ra_maxi(y, 0);
     let x1: i32 = ra_mini(x + rw, w as i32);
     let y1: i32 = ra_mini(y + rh, h as i32);
     if x0 >= x1 || y0 >= y1 {
-        return RA_NO;
+        return RASTER_NO;
     }
     mem_store32(out, 0, x0 as u32);
     mem_store32(out, 4, y0 as u32);
@@ -645,7 +645,7 @@ fn test_raster_clip_helper() -> bool {
         && mem_load32(o, 8) == 4 && mem_load32(o, 12) == 3;
     let b: u32 = ra_clip(8, 4, 20, 20, 3, 3, o);
     let c: u32 = ra_clip(8, 4, 0, 0, 0, 5, o);
-    return ok && b == RA_NO && c == RA_ERR;
+    return ok && b == RASTER_NO && c == RASTER_ERR;
 }
 
 fn test_raster_isqrt() -> bool {
