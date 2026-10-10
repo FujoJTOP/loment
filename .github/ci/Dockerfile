@@ -46,6 +46,24 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 # gdb：`diagnose_twin` 那个定向探针用它（原来是探针步骤里现装）。
 RUN apt-get update -qq && apt-get install -y -qq gdb && rm -rf /var/lib/apt/lists/*
 
+# Node 20（**固定版本**，官方 tarball）盖在 apt 那个 18 上面（`/usr/local/bin` 在
+# `/usr/bin` 前面）。两条理由：
+#   * **runner 上就是 20**（GitHub 的镜像自带），而 ubuntu 24.04 的 `nodejs` 是 18 ——
+#     判据 `vscode_ext_test` 拿它跑 JS，版本对齐更贴近原来的环境；
+#   * **`container:` job 里的 JS action**（`actions/checkout`、`upload-artifact@v4` 都是）
+#     `using: node20`。它们用的是 runner 挂进来的 node 还是镜像里的，取决于 runner 怎么
+#     挂载 —— 猜不如给一个 20 放在 PATH 最前面。
+# 用固定 tarball 而不是"下载一个 setup 脚本再执行"：前者可复现（`llvm.sh` 那一步是
+# apt.llvm.org 官方给的唯一路子，两回事）。
+RUN arch=$(dpkg --print-architecture); \
+    case "$arch" in amd64) na=x64 ;; arm64) na=arm64 ;; *) echo "不认识的架构 $arch" >&2; exit 1 ;; esac; \
+    wget -qO /tmp/node.tar.xz "https://nodejs.org/dist/v20.19.0/node-v20.19.0-linux-$na.tar.xz" \
+    && tar -xJf /tmp/node.tar.xz -C /opt \
+    && mv "/opt/node-v20.19.0-linux-$na" /opt/node \
+    && for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done \
+    && rm -f /tmp/node.tar.xz \
+    && /usr/local/bin/node -v
+
 # LLVM 19 + 不带版本号的符号链接 —— 与原来 `gate.yml` 里那几行**同一套**。
 # 为什么非要 19：仓里发出的 IR 用 `#dbg_declare`（LLVM 19 起的调试记录语法），而 ubuntu
 # 自带的 clang 是 18 → `--debug` 那几条判据会报 `error: expected instruction opcode`。
