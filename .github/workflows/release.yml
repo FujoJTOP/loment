@@ -30,9 +30,17 @@
 #
 # **实测（2026-10-10，本机 Windows）**：`python tools/loment_dist.py --emit` **52 秒**出齐
 # 五件（含 2.36 MB 的自解压 setup.exe），`--check` 报 4/4 一致。
+# **并已在真实的 `windows-latest` 上跑通一次**（`workflow_dispatch` + `dry_run=true`，
+# 借 `v0.1.4` 那个版本号对得上的 tag）：五件齐、`--check` 过、artifact 传上去了 ——
+# 这是这条流水线自写下以来的第一次成功运行。
 # **并且内容与 Linux 宿主出的一样**：把两边的包解开逐成员比，**每一个二进制成员逐字节
 # 相同**，权限位与时间戳全同 —— 差别只剩 `create_system` 那一个字节（见下条），已钉死。
 # 所以换 runner **不改发布出去的产物**，只改是谁把它压出来的。
+#
+# **换宿主带来第二个坑，已在作业级 `env` 里堵掉**：runner 的 python 按控制台代码页
+# （cp1252）编码 stdout，而这个仓的工具到处打中文 —— 第一次真跑（2026-10-10）就死在
+# `UnicodeEncodeError: 'charmap'` 上。本机是 GBK 控制台，编码得出来，所以本机看不见。
+# `PYTHONUTF8: 1` 把 stdio 与默认文件编码一起拉回 utf-8，与 Linux 一致。
 #
 # ## 硬判据：tag 必须等于仓里的版本号
 #
@@ -113,6 +121,13 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Windows 的 python 默认按**控制台代码页**编码 stdout，而 runner 上那个是 cp1252
+      # ——这个仓的工具到处打中文（`字节`、`个工件`…），一打就 `UnicodeEncodeError`。
+      # 2026-10-10 第一次真跑这条流水线时正是死在这里，而本机（GBK 控制台）编码得出来，
+      # 所以本机一直看不见。UTF-8 模式把 stdio **与**默认文件编码一起拉回 utf-8，
+      # 与 Linux 那边一致 —— 换宿主本来就不该改行为。
+      PYTHONUTF8: "1"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

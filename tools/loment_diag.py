@@ -1535,7 +1535,20 @@ def foreign_note(path: Path, errs: list[str]) -> str | None:
     # **从 `potato_from` 推导, 不写死** —— 原先这里硬编码了 `("c","rust","python")`,
     # 于是加了 Go/Java 之后, 一份 Go 源码的诊断提示**静默消失**(`resolve_lang` 明明
     # 认出来了)。硬编码一份"支持哪些语言"的清单, 必然在加语言时漏掉。
-    if lang in potato_from.LANGS:
+    # **声明里写的"原生"语法不是"外源"。** `rust` 也是 `LANGS` 里的一门（它有翻译器），
+    # 但它同时是**原生**基础语法（`NATIVE_GRAMMARS`，`docs/188` §2、2026-09-22 的裁定）：
+    # 一份 `choose write grammar rust` 的文件**就是** Loment（只是拼法），前门当原生读。
+    # 不排掉的话，报错器会对它说"**这个文件不是 Loment 语法**、别照上面那条改"，
+    # 而上面那条（补 `module`）**恰恰是对的** —— 一条该听的话被一句"别听"撤销。
+    #
+    # **但只排"声明"那一路**（靠 `why` 分）：一份**真 Rust 源码**叫 `.rs`、
+    # 没写声明 —— 那时 `resolve_lang` 按**后缀**认，而这句提示**是对的**
+    # （那份内容确实不是 Loment，前门会当原生读、然后读不通）。
+    # 一刀切把 `rust` 整个排掉，会把那条真该说的话也一起消掉
+    # （实测：`loment_multisyntax_test::test_diag_does_not_tell_you_to_fix_valid_foreign_source`
+    # 的 `SYNTAXES` 里那条 `.rs` 用的是**真 Rust 源码**，它就该被点名）。
+    _by_decl = why.startswith("文件头声明")
+    if lang in potato_from.LANGS and not (_by_decl and lang in potato_from.NATIVE_GRAMMARS):
         card = LANG_CARDS.get(lang)
         head = (f"这个文件**不是 Loment 语法**, 看内容是 "
                 f"**{card.display if card else lang.upper()}**（{why}）。"
