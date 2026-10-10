@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "74ba45483665666d7ba67b4af29f351a39320e9ecd68a571f35b7917f0571c05"
+   "sha256": "b4c50f7fb1a5c951df7317ef5ce77c14139a59a2143cef429de8d9f4594e1e4b"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "17cca351b15d60074b8d7a18d326cde264c27096ed900ac33ac6418a0c68b064"
+   "sha256": "7aed1e16ca31634d1a886baef4666566cf2a74121a1b47cefbf3b697cd1315a5"
   },
   {
    "path": "tools/lomt_from.py",
@@ -919,7 +919,7 @@
   },
   {
    "path": "loment/build/win_shim.bin",
-   "sha256": "eade5674bd80a55ab14f35df4bbbcb343a5ccb7d4ad46d133d317759d407b3c0"
+   "sha256": "cb56cd79a02070c6af00c791be9d1be47d9b78638ee26d4f2aa4b36534c21cca"
   },
   {
    "path": "tools/loment_genesis.py",
@@ -1099,7 +1099,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "d75d12db9f22ba2468853b08b82b9e0764642e302c2f1a932088d44ade3a5c0e"
+   "sha256": "03b4026736601d868acc8ed372f267cc9425523fcdd89780796cb56e08c8342c"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1183,7 +1183,7 @@
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
-   "sha256": "5d53a4abf4a7bfb3f16554c68b8b11f060f8b1eabdfc9bb44699b71091a8d91e"
+   "sha256": "ba12dc05c0cf4c3b7a3ace742d6cdf1e5096832cae4ffa3c592a752a7da3a118"
   },
   {
    "path": "editors/loment.ico",
@@ -1779,7 +1779,7 @@
   },
   {
    "path": "docs/167-loment-native-elf.md",
-   "sha256": "8dfc722f35f9dbae1f6d47d0a5df6d7d7aa2d009dfdd8da4694875e831e41bad"
+   "sha256": "c3fad52ade1734a8c2dbbdb2353e215ea45729ba6b3c832e3b2f1a42f424d079"
   },
   {
    "path": "docs/168-loment-library-system.md",
@@ -1960,6 +1960,10 @@
   {
    "path": "docs/213-gate-shards.md",
    "sha256": "77ae2041e101b38ac3241766efd76bb5f1cd1406dbb0b7ef4943139b52e13126"
+  },
+  {
+   "path": "docs/217-loment-socket-parity.md",
+   "sha256": "a0a80e38af51c6da7f8914bfbd75eb7decf4e2f094dc343da231c6a18bd83a41"
   },
   {
    "path": "docs/219-world-ports.md",

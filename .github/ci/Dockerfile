@@ -31,9 +31,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # 2026-10-10 连着红了两轮：先 `lsb_release: command not found`，再
 # `Missing required tools: add-apt-repository`（`software-properties-common` 提供）。
 # `llvm.sh` 自己的提示原话就是 `apt install lsb-release wget software-properties-common gnupg`。
+# **`python-is-python3` 是补 runner 与容器的差**：runner 镜像上有 `python`（指向 3），
+# 而 ubuntu 24.04 只有 `python3`。`vscode_ext_test` 的 `_python()` 是
+# `shutil.which("python") or "python"` —— 找得到就用，找不到**退回裸名**，于是容器里
+# 直接 `FileNotFoundError: 'python'`（2026-10-10 实测，那一条因此从绿变红）。
 RUN apt-get update -qq && apt-get install -y -qq \
       ca-certificates curl wget gnupg git sudo lsb-release software-properties-common \
-      python3 make unzip xz-utils diffutils \
+      python3 python-is-python3 make unzip xz-utils diffutils \
       qemu-system-x86 qemu-user \
       golang-go default-jdk \
       nodejs npm vim \
