@@ -50,6 +50,12 @@ BUILTINS = {
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
     "syscall6": (("u64", "u64", "u64", "u64", "u64", "u64"), "i64"),  # M72: nr, a0..a4
+    # M72+: nr + a0..a5 —— 名字里的数就是**值**的个数（与 syscall4 / syscall6 同一约定），
+    # 所以 7 = nr + 6 个实参，正好把 Linux 的六个实参寄存器（rdi/rsi/rdx/r10/r8/**r9**）用满。
+    # 为什么非要有它：`sendto`(44) 与 `recvfrom`(45) 的第 6 个实参是 `socklen_t`，
+    # 在 syscall6 上**没有地方放**（递过去的是寄存器里的残留值）—— 于是"带地址的 UDP"
+    # 从 Loment 源码里写不出来（`docs/217` §5 点名的那个缺口，`docs/220` 关掉它）。
+    "syscall7": (("u64", "u64", "u64", "u64", "u64", "u64", "u64"), "i64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 
@@ -3725,6 +3731,16 @@ def _expr_rs(e) -> str:
                     "in(\"r10\") (" + a[4] + ") as i64, "
                     "in(\"r8\") (" + a[5] + ") as i64, "
                     "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
+        if e.name == "syscall7":  # M72+: 六个实参寄存器用满
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "in(\"r10\") (" + a[4] + ") as i64, "
+                    "in(\"r8\") (" + a[5] + ") as i64, "
+                    "in(\"r9\") (" + a[6] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
         if e.name == "str_len":
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
@@ -5736,6 +5752,15 @@ class _Ir:
                    f'~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
                    f"i64 {vals[4]}, i64 {vals[5]})")
+            return "i64", r
+        if e.name == "syscall7":  # M72+: 六个实参寄存器用满（多一个 r9）
+            vals = [self.expr(a, "u64")[1] for a in e.args]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},{{r10}},{{r8}},{{r9}},~{{cx}},~{{r11}},'
+                   f'~{{memory}}"'
+                   f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
+                   f"i64 {vals[4]}, i64 {vals[5]}, i64 {vals[6]})")
             return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")
