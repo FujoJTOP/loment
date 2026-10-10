@@ -78,7 +78,8 @@ GLOBS = [
     # 发布口跟上了没 (docs/217): `loment lompicheck` —— 一条**注册出来的**用户命令,
     # 联网把 `FujoJTOP/lompi` 与 `FujoJTOP/loment` 的文件树逐条比。
     # **位置必须与自举那份 `lomrel.lomt` 逐行对齐**（那份只认名字, 没有注释可依）。
-    "tools/lompicheck.py", "tools/lompicheck_test.py",
+    "tools/lompicheck_test.py",
+    "tools/loment_register_test.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     # 编译期子集解释器 (S4.0, docs/184 §9): 参考侧解释器 + 它的判据 + 语料。

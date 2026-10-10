@@ -1,5 +1,5 @@
 <!-- translated-from: docs/143-l1-loment-v0.md -->
-<!-- source-sha256: 9c5bf23e30de0dbc616da1e831b94e964497f805b8c35afcd09e2273d41b902c -->
+<!-- source-sha256: 33a2752ee5532574649b5f9341b85f962d38b82ed511110086dd3ec11abdf75a -->
 
 # 143 · L1 Loment v0: language specification and compiler
 
@@ -188,6 +188,38 @@ choose std
 **Relation to the multi-syntax frontends**: the frontends are **mode-dependent**. In a `choose std` project the Python/Java syntax frontends are usable (they need a runtime anyway); in a `choose no_std` project the Python frontend should be **refused**, or only a freestanding subset of it allowed — otherwise you create something that "looks like Python but can import nothing", which is worse than not supporting it (`docs/175` §5.4).
 
 **Relation to the freeze surface**: this is a new top-level form = a change to the "syntax and type rules" column of the freeze surface, and the mode **must enter the Potato formal object** (otherwise the "at most once" rule cannot be audited). It went through the four procedures of `docs/158` §5, recorded in that file's §5 entry for 2026-09-17.
+
+### 3.3 Command declaration (`loment_command`, 2026-10-10)
+
+**A unit can declare itself to be one `loment` command** (design: `docs/218`):
+
+```rust
+module mycmd
+
+pub fn loment_command() -> str { return "mycmd"; }
+pub fn command_main(argv: ptr, argc: u32) -> u32 { return 0; }
+```
+
+The artifact is therefore called `loment-mycmd` — put it on `PATH` and `loment mycmd …` works
+(the launcher's `loment foo` -> `loment-foo` lookup, `docs/169` section 3b).
+
+| Where | Rule |
+|---|---|
+| Declaration | `pub fn loment_command() -> str { return "<name>"; }` — the literal must sit **directly after `return`** (the toolchain **scans** it, it does not fold constants), and only in the **entry unit** |
+| Name | `[A-Za-z0-9_-]`, length 1..64; it must **not collide with an official `loment` command** (official commands win, so a colliding name is unreachable) |
+| Entry | `fn command_main(argv: ptr, argc: u32) -> u32` — the signature is fixed; `argv` is the whole `/proc/self/cmdline` block and `argv[0]` is the command's own path |
+| Excluded | once a command is declared the unit must **not** also write `_start` — the process entry is generated (read cmdline, count the fields, call `command_main`, hand the return value to `exit`) |
+| Libraries | a **library may not declare** one: a command is the identity of an **executable**, a library is code other people `use` |
+
+**The read is a lexer label scan** (the same read as `loment.conf`'s `source_ext`, `docs/158`'s
+"the two implementations must read byte-identically"), so there is no new keyword and no new AST
+node. The label is `loment_command` rather than `command` because **`command` is already a
+keyword** (`command <language>`, `docs/185`) — measured: `pub fn command()` does not even parse.
+
+Diagnostics: **E024** bad command declaration (shape / name / an official name / a library),
+**E025** two process entries, **E026** `command_main` without a matching declaration (dead code /
+bad signature). **"Two commands in one unit" gets no code of its own** — that is the existing
+**E013** (duplicate definition).
 
 ## 4. Translation contract (Loment → Rust)
 

@@ -251,6 +251,25 @@ python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由�
    不在冻结面里（§3 的"工具链内部"），但它**改了 CLI 的对外行为**，所以记在这里：
    官方命令**优先**（`loment version` 不受 PATH 影响），且没有注册表 —— 约定就是文件名。
 
+**2026-10-10 又一条（命令声明 `loment_command`，`docs/218` / `docs/143` §3.3）** —— 这一条
+**动了装载规则**（`docs/158` §2 那一行），所以按 §5 走：
+
+1. **规范**：`docs/143` 加 §3.3，诊断码进 `tools/loment_diag.RULES`（**E024/E025/E026**，
+   只增不改）；
+2. **探针**：`loment_rule_parity._CASES` 加五条命令声明的负例，`BUDGET` **76 -> 81**
+   （只升不降）。第六条"库不许声明命令"与 `choose` 那第三条同一个落点 —— 它是**装载器**
+   规则（要两个单元），棘轮由 `loment_p8_test` 的驱动闸门承担，**不进这个预算**；
+3. **两份实现同一笔**：参考 `tools/lomentc.py`（`command_label_from_tokens` + `check()` +
+   `_IR_CMD_ENTRY`）与自举（`lexer.lex_cmd_find` / `checker.chk_command` /
+   `codegen.emit_cmd_entry` / `driver.load_file`）。**生成的入口两边发的 IR 逐字节相同**
+   —— 拿 `loment/examples/cmd_hello.lomt` 对着 stage1 比过；
+4. **种子**：`loment/selfhost/{lexer,checker,codegen,driver}.lomt` 都动了，所以种子单独一笔
+   重生成（`loment_seed.py --emit`）。
+
+**这一条与"自定义命令"那条的关系**：那条**没动运行时、没动冻结面**（纯文件名约定）；
+这一条**动了装载规则**，因为它要工具链**读源码里的声明**。两条并存：没有声明的单元，
+行为与改动前逐字节一样。
+
 第 2 条那个"棘轮"由 `loment_p8_test` 的驱动闸门承担：它拿一个真配了 `.foo` 的工程跑
 **自举驱动**，再把同一份工程交给参考实现，要求两边 IR **逐字节一致**；另加一条"配坏的后缀
 两边都当没配"。`BUDGET` 不动（口径同前两次：它数的是检查器规则）。

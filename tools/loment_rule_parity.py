@@ -47,7 +47,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 76
+BUDGET = 81
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -206,6 +206,26 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 命令声明 (E024/E025/E026, docs/218) --------------------------------
+    # 这五条是**检查器**规则（只看这一个单元）。第六条"库不许声明命令"是**装载器**规则
+    # —— 它要两个单元（入口 + 被 use 的那个），装不进这张表，与 `choose` 那第三条
+    # 同一个落点：棘轮由 `loment_p8_test` 的驱动闸门承担，预算里不算它。
+    ("cmd-bad-name",
+     "module m\n\npub fn loment_command() -> str { return \"a/b\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-reserved-name",
+     "module m\n\npub fn loment_command() -> str { return \"version\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-bad-shape",
+     "module m\n\npub fn loment_command() -> str {\n"
+     "    let s: str = \"x\";\n    return s;\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-two-entries",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-body-no-decl",
+     "module m\n\npub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
 ]
 
 

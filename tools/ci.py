@@ -151,6 +151,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # **联网那条可跳**，且不断言"两边一致"（掉队是开发侧该跑 `--push`，
                  # 不是这份 PR 的错）—— 见那份判据的文件头。
                  "lompicheck_test",
+                 # 在源码里注册一条 `loment` 命令 (docs/218): 声明扫描 /
+                 # `--print-command` / 两个启动器的命名分流 / 生成的进程入口真跑一遍。
+                 "loment_register_test",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
                  "loment_multisyntax_test",
