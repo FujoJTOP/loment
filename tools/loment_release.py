@@ -44,8 +44,17 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # Python 判据仍在仓里，六门表层语法的翻译器也还没有 Loment 孪生（`docs/189`）。
 # 那句话的对外版本写在 README 的 `## Status`（与 `tools/loment_publish.py` 里那份
 # 逐字同源）—— **改版本号时一起改**，`loment_publish` 的判据会核。
-RELEASE = "0.1.4"
-RELEASE_NAME = "0.1.4"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-10-10 升到 **0.1.4.5-pre**（用户定的）：**预告版** —— 这一版的用处不是"装完的东西",
+# 而是**提前把 0.1.4.5 要装的三件事宣告出去**（用户原话：pre-release 不要求做完，
+# 只要告诉大家我们准备发这个版本了）。三件事：LomentGC 四层梯全量上线 / 网络在
+# 两个平台都能用 / lompi 升到 0.2.0 Alpha。**正文里"已落地"与"预告"要分清**
+# （`.github/release-notes/v0.1.4.5-pre.md` 里逐条标了），别把预告写成既成事实。
+# tag = `v0.1.4.5-pre`。**`-pre` 后缀同时也是"宣告版"的记号**：`release.yml` 整个跳过
+# 带 `-pre` 的 tag（它只发通知、不出包），所以这一版**没有产物**，由人直接建：
+# `gh release create v0.1.4.5-pre --prerelease --notes-file .github/release-notes/v0.1.4.5-pre.md`。
+# 见 `release.yml` 文件头那两节（其中一节记着"ubuntu runner 出不了 setup.exe"这个未解问题）。
+RELEASE = "0.1.4.5-pre"
+RELEASE_NAME = "0.1.4.5 Pre"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
@@ -231,6 +240,9 @@ GLOBS = [
     "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
     "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
     "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
+    # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
+    "tools/loment_ports.py", "tools/loment_ports_test.py",
     "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
     "tools/loment_syscalls_test.py",
     # 权威状态在 `origin` 那一条 (CLAUDE.md 第一节): 读 origin 的版本/tag/落后数, 让

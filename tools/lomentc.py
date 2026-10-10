@@ -50,6 +50,12 @@ BUILTINS = {
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
     "syscall6": (("u64", "u64", "u64", "u64", "u64", "u64"), "i64"),  # M72: nr, a0..a4
+    # M72+: nr + a0..a5 —— 名字里的数就是**值**的个数（与 syscall4 / syscall6 同一约定），
+    # 所以 7 = nr + 6 个实参，正好把 Linux 的六个实参寄存器（rdi/rsi/rdx/r10/r8/**r9**）用满。
+    # 为什么非要有它：`sendto`(44) 与 `recvfrom`(45) 的第 6 个实参是 `socklen_t`，
+    # 在 syscall6 上**没有地方放**（递过去的是寄存器里的残留值）—— 于是"带地址的 UDP"
+    # 从 Loment 源码里写不出来（`docs/217` §5 点名的那个缺口，`docs/220` 关掉它）。
+    "syscall7": (("u64", "u64", "u64", "u64", "u64", "u64", "u64"), "i64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 
@@ -3834,6 +3840,16 @@ def _expr_rs(e) -> str:
                     "in(\"r10\") (" + a[4] + ") as i64, "
                     "in(\"r8\") (" + a[5] + ") as i64, "
                     "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
+        if e.name == "syscall7":  # M72+: 六个实参寄存器用满
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "in(\"r10\") (" + a[4] + ") as i64, "
+                    "in(\"r8\") (" + a[5] + ") as i64, "
+                    "in(\"r9\") (" + a[6] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
         if e.name == "str_len":
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
@@ -4400,10 +4416,16 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #: 它按**累计请求量**记 —— 过了 32 KiB 就收一次并清零。**不是按前沿**：前沿在有活块的
 #: 时候根本不会回落（`free` 只在"释放的块顶到前沿"时退），按它判会让每次分配都收一次
 #: （实测：40000 次循环跑成超时）。按分配量记是 O(1)、可预期，也是主流那几家的做法。
-_IR_GC = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
+#: **根表那两个全局** —— 与收集器**分开一段**：`gc_any`（`gc_auto` / `gc_auto_alpha`）档
+#: 只要函数里有指针槽就往根表写（`roots_push`），而**根表定义在收集器那一段里** ——
+#: 一份"有根没堆"的单元（典型的：alpha 把 `alloc` 全 L0 提走、只剩下指针局部）会发出
+#: **引用未定义全局**的产物（实测：`gc_auto` 只带一个 `fn f(p: ptr)` 也会）。所以根表
+#: **跟着 `gc_any` 发**，收集器**跟着堆发** —— 两件事不再绑死。
+_IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
-@__loment_rootn = internal global i32 0
-@__loment_gcbytes = internal global i32 0
+@__loment_rootn = internal global i32 0'''
+
+_IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
 @__loment_mark = internal global [8192 x i32] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
@@ -4572,7 +4594,9 @@ done:
   ret void
 }
 
-define internal void @__loment_maybe_collect(i32 %sz) {
+'''
+#: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
+_IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
   %b = load i32, ptr @__loment_gcbytes
   %b2 = add i32 %b, %sz
@@ -4587,6 +4611,82 @@ out:
   ret void
 }
 '''
+
+#: `gc_auto_alpha` 的**自适应**触发（`docs/210` §2.4 的"自适应策略池"那一半）—— 两处与
+#: `gc_auto` **不同**，都是"让阈值跟着程序自己走"：
+#:
+#:   * **阈值跟着活集走**（`@__loment_thresh`）：每收一次，量出**活集字节数**（清扫后标记还在，
+#:     扫一遍把标记块的 size 加总），把下次的触发阈值设成 `活集 × 2`（下限 32 KiB）。活集小
+#:     ⇒ 收得勤而便宜；活集大 ⇒ 收得稀，让 arena 装得下。
+#:   * **空间触发**（前沿 + 本次 + 头 > 65536 − 余量）：分配快把 arena 填满时**也收一次**。
+#:     这一条正对着 `gc_auto` 那条明写的上限 —— 固定 32 KiB 触发时，"活集 + 至多 32 KiB 垃圾
+#:     ≤ 64 KiB"，所以**活集 ≳ 32 KB 必耗尽**；空间触发把这一条抬到"活集接近整个 arena"。
+#:
+#: **不用 `select`**（下限那一格走分支）—— 自举镜像链接器 `lomelf` 的 `lower` 里没有 `select`。
+_IR_GC_TRIGGER_ADAPT = '''@__loment_thresh = internal global i32 32768
+define internal void @__loment_maybe_collect(i32 %sz) {
+entry:
+  %b = load i32, ptr @__loment_gcbytes
+  %b2 = add i32 %b, %sz
+  store i32 %b2, ptr @__loment_gcbytes
+  %t = load i32, ptr @__loment_thresh
+  %big = icmp ugt i32 %b2, %t
+  %off = load i32, ptr @__loment_off
+  %n1 = add i32 %off, %sz
+  %n2 = add i32 %n1, 8
+  %near = icmp ugt i32 %n2, 64512
+  %go = or i1 %big, %near
+  br i1 %go, label %do, label %out
+do:
+  store i32 0, ptr @__loment_gcbytes
+  call void @__loment_collect()
+  %live = call i32 @__loment_livebytes()
+  %dbl = mul i32 %live, 2
+  %lo = icmp ult i32 %dbl, 32768
+  br i1 %lo, label %floor, label %set
+floor:
+  store i32 32768, ptr @__loment_thresh
+  br label %out
+set:
+  store i32 %dbl, ptr @__loment_thresh
+  br label %out
+out:
+  ret void
+}
+
+define internal i32 @__loment_livebytes() {
+entry:
+  br label %l
+l:
+  %li = phi i32 [ 8, %entry ], [ %lex, %lc ]
+  %acc = phi i32 [ 0, %entry ], [ %acc2, %lc ]
+  %lof = load i32, ptr @__loment_off
+  %ld = icmp uge i32 %li, %lof
+  br i1 %ld, label %done, label %b
+b:
+  %idx = lshr i32 %li, 3
+  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
+  %mk = load i32, ptr %mp
+  %sm = icmp eq i32 %mk, 1
+  %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
+  %sz = load i32, ptr %sp
+  br i1 %sm, label %hit, label %miss
+hit:
+  %acc1 = add i32 %acc, %sz
+  br label %lc
+miss:
+  br label %lc
+lc:
+  %acc2 = phi i32 [ %acc1, %hit ], [ %acc, %miss ]
+  %lex = add i32 %li, %sz
+  br label %l
+done:
+  ret i32 %acc
+}
+'''
+
+_IR_GC = _IR_GC_SHARED + _IR_GC_TRIGGER_FIXED
+_IR_GC_ALPHA = _IR_GC_SHARED + _IR_GC_TRIGGER_ADAPT
 
 
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
@@ -5225,6 +5325,10 @@ class _Ir:
         #: **`gc_auto`**（`docs/210` §2.1 的"自动"那一档）：本帧要不要 push 根表、多少格。
         #: 与 `gc_alpha` **互斥**（两档不同时成立），所以下面那些挂点不会互相打架。
         self.gc_auto = gc_auto
+        #: **`gc_auto_alpha`**（`docs/210` §2.4 的"自适应"那一档）：它**也有收集器**了 ——
+        #: 此前 alpha 的 L3 残差没人收（只有分配器）。`gc_any` = 要根表/收集器的任意一档。
+        self.gc_alpha = gc_alpha
+        self.gc_any = gc_auto or gc_alpha
         self.rootk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
@@ -5394,7 +5498,7 @@ class _Ir:
         **槽的顺序必须与自举侧同序**（形参在前、局部按声明序）—— 那是逐字节判据的一部分。
         表满（1024 格，递归深了才可能）**点名拒**，不静默写穿。
         """
-        if not self.gc_auto:
+        if not self.gc_any:
             return
         self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
         if self.rootk == 0:
@@ -5442,7 +5546,7 @@ class _Ir:
 
     def roots_pop(self) -> None:
         """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
-        if not self.gc_auto or self.rootk == 0:
+        if not self.gc_any or self.rootk == 0:
             return
         n = self.t()
         self.w(f"{n} = load i32, ptr @__loment_rootn")
@@ -5740,7 +5844,7 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            if self.gc_auto:
+            if self.gc_any:
                 # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
                 # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
                 self.w(f"call void @__loment_maybe_collect(i32 {sz})")
@@ -5845,6 +5949,15 @@ class _Ir:
                    f'~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
                    f"i64 {vals[4]}, i64 {vals[5]})")
+            return "i64", r
+        if e.name == "syscall7":  # M72+: 六个实参寄存器用满（多一个 r9）
+            vals = [self.expr(a, "u64")[1] for a in e.args]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},{{r10}},{{r8}},{{r9}},~{{cx}},~{{r11}},'
+                   f'~{{memory}}"'
+                   f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
+                   f"i64 {vals[4]}, i64 {vals[5]}, i64 {vals[6]})")
             return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")
@@ -6152,6 +6265,20 @@ class _Ir:
         raise LomError(getattr(s, "line", 1), 1, f"native M0 不支持该语句: {type(s).__name__}")
 
 
+#: 程序入口（`docs/189` §3：入口是 `fn _start()`，不是 `main`）。ELF 那条路靠
+#: `-Wl,-e,_start` 把它点成**进程入口**（`loment/bootstrap.sh`、`tools/loment_genesis.py`、
+#: `tools/loment_elf_test.py::_link_clang`、`tools/loment_dist.py::_link_opt` 都是这么做的）。
+ENTRY_FN = "_start"
+
+#: 进程入口**不是一次 `call`**：内核进来时 `rsp` 是 16 对齐的，比 System V 的函数入口
+#: 约定（`rsp % 16 == 8`，`call` 压了返回地址）**少 8**。不声明这一条，`_start` 与它下面
+#: 的每一帧就整体偏 8 —— `lomelf` 是一台不碰对齐的栈机，所以一直看不出来；clang `-O1/-O2`
+#: 会把局部数组的清零改写成 `movaps`（16 字节对齐的写），一跑就 `#GP`。实测：自举驱动
+#: 3.2 MB 的 IR 在 `-O0` 编出来一切正常，`-O1/-O2` 编出来一跑就 SIGSEGV（`docs/212` §5.2）。
+#: `stackrealign` 让后端在序言里补一句 `and rsp, -16`，那 8 个字节就回来了。
+ENTRY_ATTR = ' "stackrealign"'
+
+
 def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   structs: dict | None = None, enums: dict | None = None,
                   coverage: bool = False, cov_counter: list | None = None,
@@ -6180,6 +6307,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
     args = ", ".join(f"{ir.ll(p.type)} %{p.name}" for p in f.params)
     ir.out.append(f"; {f.name} -> {f.ret}")
     ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
+                  f"{ENTRY_ATTR if f.name == ENTRY_FN else ''}"
                   f"{f' !dbg !{dbg_scope}' if dbg_scope is not None else ''} {{")
     ir.out.append("entry:")
     ir.cur_label = "entry"
@@ -6357,10 +6485,21 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
     if _needs_heap:
         out.append(_IR_HEAP)
-        if gc_auto:
-            # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
-            # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
-            out.append(_IR_GC)
+    # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
+    # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
+    # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
+    if gc_auto or gc_alpha:
+        out.append(_IR_ROOTS)
+        if _needs_heap:
+            if gc_auto:
+                # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
+                # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
+                out.append(_IR_GC)
+            else:
+                # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
+                # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前
+                # alpha 根本不发收集器（L3 残差没人收）—— 这一步让它有。
+                out.append(_IR_GC_ALPHA)
     out += globals_
     if globals_:
         out.append("")

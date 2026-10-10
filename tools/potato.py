@@ -48,7 +48,7 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: ⚠ **本文件里连"编译器那个模块的名字"都不能出现**：`potato_test` 的独立性判据
 #: （M47）是对**这份源码做子串搜索**的, 而它要找的那个模块名恰好就是那两个字 ——
 #: 2026-09-23 实测: 这段注释原来写了那个名字, 判据当场红。所以这里一律只写"编译器"。
-BOUNDARY_BUILTINS = ("syscall4", "syscall6", "ptr_add", "ptr_sub", "str_ptr")
+BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "str_ptr")
 # v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45); v2 = v1 + 项目模式 (docs/143 §3.2);
 # v3 = v2 + **开关取值** (docs/182 §1);
 # v4 = v3 + **方言** (docs/184 §9 S4.3): 这份单元用了 `comefor` 定义的那些语法；

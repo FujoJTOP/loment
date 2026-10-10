@@ -566,6 +566,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `inb(port: u16) -> u32` / `outb(port: u16, v: u8) -> u32` | Port I/O (**only on the Rust translation path**, not the native one) |
 | `syscall4(nr: u64, a0: u64, a1: u64, a2: u64) -> i64` | A raw syscall (rax/rdi/rsi/rdx) |
 | `syscall6(nr: u64, a0..a4: u64) -> i64` | The same, with two more arguments |
+| `syscall7(nr: u64, a0..a5: u64) -> i64` | The same, with **all six** argument registers used (`rdi/rsi/rdx/r10/r8/r9`). This is what makes **UDP with addresses writable**: `sendto`(44) / `recvfrom`(45) take a sixth argument (a `socklen_t`), which had nowhere to go on `syscall6` |
 
 **To print a number**: copy `write_dec` from section 1. There is no `printf`.
 

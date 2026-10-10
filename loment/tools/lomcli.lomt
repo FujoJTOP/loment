@@ -1820,7 +1820,8 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     // 于是它可 grep、可计数、可审计: 一个工程可以规定"裸指针只许出现在这三个文件"。
     // 数的全是**写出来了没有**, 不是"危不危险" —— 后者要类型, 那是编译器的事。
     let n_sys: u32 = cnt_calls(p, n, str_ptr("syscall4"), str_len("syscall4"))
-                   + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"));
+                   + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"))
+                   + cnt_calls(p, n, str_ptr("syscall7"), str_len("syscall7"));
     let n_ptr: u32 = cnt_calls(p, n, str_ptr("ptr_add"), str_len("ptr_add"))
                    + cnt_calls(p, n, str_ptr("ptr_sub"), str_len("ptr_sub"))
                    + cnt_calls(p, n, str_ptr("str_ptr"), str_len("str_ptr"));

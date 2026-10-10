@@ -6,6 +6,8 @@
 #      (PS 5.1 用 ANSI 读无 BOM 的非 ASCII 会把后续行解析坏 —— docs/157 §3.4)
 #   2. 归档内容 == payload (逐个 sha256 对得上, 不是"大概在")
 #   3. 归档**确定性**: 同样输入两次写出字节相同 (zip 固定时间戳 + tar.gz mtime=0)
+#      + **宿主无关**: 换掉 `sys.platform` 再压一遍, zip 字节必须一模一样
+#      (容器里 `create_system` 那一个字段; 见 test_archives 里那条注解)。
 #   4. `--check` 对产物与 SHA256SUMS 一致
 #   5. install.sh 端到端 (WSL 里): tar → 装进临时前缀 → `loment version` →
 #      `loment ir` 的产物与参考实现**逐字节相同** → `loment run` 打出东西 →
@@ -207,6 +209,30 @@ def test_archives() -> None:
           loment_dist._zip("loment-x", win) == loment_dist._zip("loment-x", win))
     check("tar.gz 两次写出字节相同",
           loment_dist._tar_gz("loment-x", lin) == loment_dist._tar_gz("loment-x", lin))
+
+    # 3b. **宿主无关**: zip 容器里 `create_system` 那一个字段由 `zipfile` 按
+    # `sys.platform` 填 (win32 → 0, 其余 → 3)。内容一个字节不差, 但"同一 tag 在两个
+    # runner 上出两个哈希"。2026-10-10 咬到过一次: `skill_zip()` 自己建的那份 ZipFile
+    # 漏了 `create_system = 3` (`_zip` 一直有), 而发布流水线正好要从 ubuntu 挪到
+    # windows —— 第五件 setup.exe 要 Windows 自带的 iexpress。
+    #
+    # **为什么不能只断言"等于 3"**: 默认值本来就是"除 win32 外都是 3", 于是在 ubuntu
+    # 门禁上两种写法都过 —— 那条断言是空的。真正的性质是**不随 `sys.platform` 变**,
+    # 所以这里在同一个进程里把它换成另一个值再压一遍、比字节。
+    # **两个平台都判得动**: 在 Windows 上它盯 `skill_zip` 那一半, 在 ubuntu 上盯 `_zip`
+    # 那一半 —— 而"只在 Windows 上现形"正是这条缺陷当初能溜过去的理由。
+    here = {"_zip": loment_dist._zip("loment-x", win),
+            "skill_zip": loment_dist.skill_zip()}
+    real_plat = sys.platform
+    try:
+        sys.platform = "linux" if real_plat == "win32" else "win32"
+        other = {"_zip": loment_dist._zip("loment-x", win),
+                 "skill_zip": loment_dist.skill_zip()}
+    finally:
+        sys.platform = real_plat
+    drifted = [k for k in here if here[k] != other[k]]
+    check("zip 字节不随 sys.platform 变 (容器里 create_system 那一个字段)",
+          not drifted, ",".join(drifted))
 
 
 def read_zip_bytes(blob: bytes) -> dict[str, bytes]:
@@ -671,6 +697,66 @@ def test_driver_seed_matches_reference() -> None:
     check("种子 == 参考实现为 driver.lomt 发射的 IR（包里 driver 的来源）", rc == 0)
 
 
+def test_opt_driver_runs() -> None:
+    """`--opt` 编出来的**驱动自己**必须跑得起来，而且与 `-O0` 产物**逐字节同输出**。
+
+    **为什么单起一条**：包里 `bin/loment-driver` 的来源就是 `SEED`（3.2 MB IR，全仓最大的
+    一个入口），而 `--opt` 会把这份 IR 直接交给 clang `-O2`。2026-10-10 实测过它的下场：
+    `-O0` 编出来一切正常，`-O1/-O2` 编出来**一跑就 SIGSEGV**（`docs/212` §5.2）。
+    `user_hello` 那条 `--opt` 判据**看不见它** —— 那条编的是**用户程序**，不是驱动。
+
+    根因是入口 `_start` 缺 `stackrealign`（进程入口的 `rsp` 比 SysV 函数入口约定少 8），
+    修法见 `docs/212` §5.2。这条判据钉的就是"修好了"这件事：同一个程序，优化过的驱动与
+    没优化的驱动必须**行为相同**——这不是"跑得动"能替代的（编错的值照样跑得动）。
+
+    **Why `-O0` 当对照而不是跟参考实现比**：不需要第二份真源，而且它直接测的正是那条通用
+    主张本身（同一份 IR 换个优化档不该改行为）。代价是 3.2 MB IR 上两趟 clang。
+    """
+    cc = loment_dist.clang_path()
+    if cc is None:
+        print("  SKIP  没有 clang —— 驱动 --opt 这条要真编一次才作数")
+        return
+    # Windows 上交叉编出的是 Linux ELF, 本机跑不了, 得借 WSL (与 `wsl()` 同一条分流)。
+    if sys.platform == "win32" and not shutil.which("wsl"):
+        print("  SKIP  没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        (td / "seed.ll").write_text(loment_dist.SEED.read_text(encoding="utf-8"),
+                                    encoding="utf-8", newline="\n")
+        # 与打包那一步**同一份文本**：`-O2` 会合成 memset/memcpy/memmove（docs/212 §5.1）
+        (td / "libcalls.ll").write_text(loment_dist._FREESTANDING_LIBCALLS,
+                                        encoding="utf-8", newline="\n")
+        src = ROOT / "loment" / "examples" / "user_hello.lomt"
+        got: dict[str, tuple[int, bytes]] = {}
+        for lvl in ("0", "2"):
+            exe = td / f"driver_O{lvl}"
+            b = subprocess.run(
+                [cc, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+                 "-static", "-fno-pie", "-Wl,-e,_start", f"-O{lvl}", str(td / "seed.ll"),
+                 str(td / "libcalls.ll"), "-o", str(exe)],
+                capture_output=True, text=True, shell=False)
+            if b.returncode != 0:
+                check(f"驱动 IR 能被 clang -O{lvl} 编出来", False, b.stderr[-200:])
+                return
+            # **拷到 WSL 自己的盘上再跑** —— DrvFs (/mnt/c...) 上执行不了 ELF。
+            tag = f"{_T}optdrv_O{lvl}.bin"
+            outp = td / f"out_O{lvl}.txt"
+            r = wsl("sh", "-c",
+                    f"cd {wsl_path(ROOT)} && rm -f {tag} && cp {wsl_path(exe)} {tag} && "
+                    f"chmod +x {tag} && timeout 300 {tag} {wsl_path(src)} "
+                    f"> {wsl_path(outp)} 2>/dev/null; echo -n $?")
+            try:
+                rc = int(r.stdout.strip())
+            except ValueError:
+                rc = -1
+            got[lvl] = (rc, outp.read_bytes() if outp.exists() else b"")
+        check("驱动自己在 -O2 下编出来跑得起来 (rc=0)", got["2"][0] == 0, f"rc={got['2'][0]}")
+        check("驱动 -O2 与 -O0 的产物逐字节同输出",
+              got["0"][1] == got["2"][1] and got["0"][1] != b"",
+              f"{len(got['0'][1])}B vs {len(got['2'][1])}B")
+
+
 def test_check_detects_staleness() -> None:
     """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
 
@@ -795,6 +881,7 @@ def test_docs_samples_compile() -> None:
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
     for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
+                     ("--opt 编出来的驱动自己跑得起来", test_opt_driver_runs),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),

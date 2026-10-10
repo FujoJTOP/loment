@@ -4782,7 +4782,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // 数的就是"这个名字被调用了没有", 不判类型、不判危险。与参考实现的 `_count_boundary`
     // 是同一组数（`loment_cli_test` 另拿参考实现的**真词法器**对过 `loment stat` 那一份）。
     let nbd_sys: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "syscall4")
-                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6");
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall7");
     let nbd_ptr: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "ptr_add")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "ptr_sub")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "str_ptr");
