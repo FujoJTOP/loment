@@ -699,7 +699,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "480d1f3463063aaef5157ff9af4ffd8af8e6bd952a81f40f82c83ba451d27340"
+   "sha256": "90df3660feeab1542fbbef449292bc060db4833ac83385bc187ebdd981ccb5fd"
   },
   {
    "path": "tools/loment_boot.py",
@@ -935,7 +935,7 @@
   },
   {
    "path": "tools/loment_rel_test.py",
-   "sha256": "3328dadb10c83e203f6fa378e4bb7fcaf959f0e3cd3e9b0d69f71eadaa4be863"
+   "sha256": "59e187838bb8925441fd54fe42a2066894a628266d6b095f64742f040d65fdff"
   },
   {
    "path": "tools/loment_pkg_test.py",
@@ -1147,7 +1147,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "b6a016f5b346a3666b8401bb17ca5b1bfaf68337555ef30f310894fa8870a5c4"
+   "sha256": "b850a32e5dff44ecda450b07f5ff455f5d6af4abec057431b304d7866865ea8c"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1907,7 +1907,7 @@
   },
   {
    "path": "docs/201-doors-and-registries.md",
-   "sha256": "728f845cf9095bbf367ccdb8f1c861cfa9525465c30681fc1a291c59f05181a4"
+   "sha256": "112a966a6b967c4c77522b0808e9dfce9614ada46b9cbf21c567d1b226191616"
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
