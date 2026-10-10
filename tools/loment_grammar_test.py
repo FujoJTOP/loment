@@ -941,6 +941,37 @@ def test_grammar_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomgrammar.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_a_bom_does_not_hide_the_declaration():
+    """文件开头的 **UTF-8 BOM** 不能让声明失效。
+
+    Windows 的编辑器默认会写 BOM（记事本、"另存为 UTF-8"、PowerShell 的 `>`），
+    而 `docs/188` §2 把"这份源怎么读"**整个压在那一行**上（`.lomt` 刻意**不嗅探**内容）。
+    原先四条第 `_GRAMMAR_*` 正则都是 `^[ \\t]*`：BOM 不是空白 ⇒ `choose` 不在"行首"⇒
+    **声明整个找不到** ⇒ 文件落到"缺声明 = 原生 Loment"，整份 C 被当 Loment 编，
+    报出来是 `1:1 非法字符 '\\ufeff'` —— 用户完全看不出"是你那行声明没生效"。
+
+    两边都钉：带 BOM 与不带 BOM **读出来的语法与译文必须一样**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        body = "choose write grammar c\nint main() { return 44; }\n"
+        outs = []
+        for tag, prefix in (("bom", "﻿"), ("nobom", "")):
+            # **文件名要一样** —— 产物里的 `module <主干名>` 取自路径，
+            # 换个名字比出来的差就不是 BOM 那一处了。
+            d = td / tag
+            d.mkdir()
+            p = d / "t.lomt"
+            p.write_bytes((prefix + body).encode("utf-8"))
+            fu = potato_from.front_door(p)
+            assert fu.grammar == "c" and fu.translated, (tag, fu.grammar, fu.translated)
+            assert "choose write grammar" not in fu.source, (tag, fu.source[:80])
+            outs.append(fu.source)
+        assert outs[0] == outs[1], "带 BOM 与不带的产物不同"
+    print("      带 BOM 的声明照常认到，产物与不带 BOM 的逐字节相同")
+
+
 def main() -> int:
     failed: list[str] = []
     for fn in TESTS:

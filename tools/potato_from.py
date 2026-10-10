@@ -1718,11 +1718,20 @@ _GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
 #: 退回嗅探。**两边对同一份源说不同的话** —— 正是这条线要防的那类分歧。
 #: 现在两边同一条规矩：非空白非 `;` 的字符接在 `grammar` 后面 ⇒ **根本没有声明头**。
 _GRAMMAR_TAIL = r"(?=[ \t;]|$)"
-_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
+#: 行首那一格 —— **允许一个 UTF-8 BOM**。
+#:
+#: Windows 的编辑器（记事本、"另存为 UTF-8"、PowerShell 的 `>`）默认会写 BOM，
+#: 而原先那四条正则都是 `^[ \t]*`：BOM 不是空白，`choose` 就不在"行首"了 ⇒
+#: **声明整个找不到**。于是文件落到"缺声明 = 原生 Loment"那一条，整份 C 被当 Loment 编，
+#: 报出来的是 `1:1 非法字符 '﻿'` —— 用户完全看不出"是你那行声明没生效"。
+#: 而在本仓的平台上带 BOM 是常态（`docs/188` §2 又把"读法"整个压在那一行上）。
+#: 抹白是**等长**的，所以 BOM 会被换成空白、行号与偏移都不动。
+_GRAMMAR_LEAD = r"^(?:\ufeff)?[ \t]*"
+_GRAMMAR_ANY = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
 #: 别名**必须空白分隔**：`choose write grammar;python` 里的 `;python` **不是**别名
 #: （那是"头写了、别名没写"⇒ 报"后面要写语法名"）。别名本体到空白或 `;` 为止 ——
 #: 所以 `c#` 里的 `#` 是别名的一部分，不是注释头。
-_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
+_GRAMMAR_DECL = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
                            re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
 #:
@@ -1731,7 +1740,7 @@ _GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+
 #: （拼错一个字母）会匹配到 `choose write grammar` 这个**前缀**、把前 20 个字符抹成空白、
 #: 留下 `s python`。而 `read_grammar_decl` 那边有边界检查、**不认为**这是声明、**不报错**，
 #: 一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句指不到点子的语法错。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
+_GRAMMAR_LINE = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
