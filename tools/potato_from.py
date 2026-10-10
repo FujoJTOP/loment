@@ -1777,6 +1777,28 @@ def find_decl(src: str) -> tuple[bool, str | None, int]:
     return True, (m.group(1) if m else None), line
 
 
+def _grammar_attempt(src: str) -> tuple[int, str] | None:
+    """找一行"**像是想写声明、但没写对**"的 -> `(行号, 那一行的原文)`；没有就是 `None`。
+
+    判据：**`module` 之前**有一行，头一个词是 `choose` / `write` / `grammar` 里的任意一个，
+    但**后面还有别的词**（`choose write grammar` 那条严格头没匹配上，`find_decl` 已经确认了）。
+
+    为什么限定在 `module` 之前：声明必须在那儿（`docs/188` §1）。这一条让规则**很窄** ——
+    那三个词在合法源里只出现在声明本身里。实测（本仓 171 份 `.lomt` / `.lom`）：
+    `module` 之前以它们开头、又不是严格声明的行 **一条都没有**。
+
+    为什么不用更宽的"行首是那三个词的任意子集"（`docs/198` §2 的初稿）：那样
+    `choose gc_auto` 这类**开关**会中招，而它是合法的 Loment。
+    """
+    mod = _MODULE_LINE.search(src)
+    head = src[:mod.start()] if mod is not None else src
+    for i, l in enumerate(head.splitlines(), 1):
+        t = l.split()
+        if len(t) >= 2 and t[0] in GRAMMAR_DECL_WORDS and not _GRAMMAR_ANY.match(l.lstrip()):
+            return i, l.strip()
+    return None
+
+
 def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
 
@@ -1788,6 +1810,21 @@ def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """
     found, alias, line = find_decl(src)
     if not found:
+        # **"想写、但没写对"也要报**（`docs/188` §1 那四种之外的一种，`docs/198` §2 报过）。
+        # 关键词写错 / 词序不对时原先**一声不响**：文件落到"缺 = Loment"那一条，
+        # 用户拿到的是正文里某处的语法错（`未知顶层关键字 'def'` 之类）—— **指的不是那一行**。
+        # §2 那句"兜底从**猜**变**拒绝**"正是为它写的；现在它既没猜也没拒，
+        # 是**换了一个猜法**（当成 Loment）。
+        guess = _grammar_attempt(src)
+        if guess is not None:
+            ln, txt = guess
+            return "loment", (
+                f"第 {ln} 行: 这一行像是想写 `choose write grammar <语法名>`，"
+                f"但词序或拼写对不上（实得：{txt!r}）。正确写法是 "
+                f"`choose write grammar <名字>` —— 写在 `module` 之前、只写一次，"
+                f"名字取出厂锁的那张表（`docs/188` §1）。"
+                f"（若你本意是**开关** `choose <名字>`，那不是这一条：开关要写在 "
+                f"`module` **之后**。）"), False
         return "loment", None, False
     first = _GRAMMAR_ANY.search(src)
     assert first is not None
