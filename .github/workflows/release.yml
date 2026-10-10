@@ -29,6 +29,31 @@
 # 手写的正文不是一个量级，静默降级会让"这一版为什么发"这件事悄悄丢掉。
 # `.github/**` 不在 `loment_release.GLOBS` 里，所以往这里加文件不会让发布清单过期。
 #
+# ## tag 带 `-pre` = **宣告版**，这条流水线整个跳过（2026-10-10 用户定）
+#
+# 用户原话：「pre 版啥也没有，只是一个通知而已。」所以带 `-pre` 的 tag **不出包、不建
+# release** —— 那一版由人直接发：
+#
+#     gh release create vX.Y.Z-pre --prerelease \
+#       --notes-file .github/release-notes/vX.Y.Z-pre.md
+#
+# **一个 asset 都不挂**，正文就是那份人写的 notes。
+#
+# **为什么必须在这里挡**：`v0.1.4.5-pre` 同样匹配下面的 `v*`。不挡就会进这条流水线，
+# 而它按设计要出五件产物、最后那道核对**硬要求**五件 —— 于是会先建好 release、再红。
+#
+# ## ⚠ 未解：ubuntu runner 上出不了 `setup.exe`
+#
+# 第五件走 `loment_dist.emit_exe()`，它调 Windows 自带的 `iexpress`
+# （`tools/loment_dist.py`: `shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"`），
+# **在 ubuntu 上找不到就 SKIP 并返回 False**。所以这条流水线在 Linux runner 上只出四件，
+# 而最后那道 asset 核对要五件 ⇒ **真发一版时会红，而且是建完 release 之后才红**。
+# `v0.1.4` 那五个 asset 是本机（Windows）手工出的 —— 这条流水线**至今没成功跑过一次**。
+#
+# 两条修法都还没做：① dist 作业挪到 `windows-latest`（`build_stage1` 本来就按宿主平台出
+# stage1，iexpress 也在 `System32` 里）；② 第五件改成纯 Python 的自解压。**下一次真发版
+# 之前必须解决。**（宣告版不走这条流水线，所以今天不受影响。）
+#
 # ## 边界
 #
 # * **不新增 `tools/*.py`**（`GLOBS` 是显式清单），逻辑全在这个文件里。
@@ -61,6 +86,8 @@ concurrency:
 
 jobs:
   dist:
+    # 宣告版（tag 带 `-pre`）整个跳过 —— 它只有正文，没有产物。见文件头那两节。
+    if: ${{ !endsWith(github.event.inputs.tag || github.ref_name, '-pre') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
