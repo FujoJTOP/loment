@@ -1,6 +1,6 @@
 # Loment 语言手册
 
-> 编译器版本戳: `lomentc-483328908e9c`（由 tools/loment_manual.py 生成）
+> 编译器版本戳: `lomentc-c0125a98cf43`（由 tools/loment_manual.py 生成）
 
 ## 规范
 
@@ -22,6 +22,7 @@
 - [allocator](api/allocator.md)
 - [bootprobe](api/bootprobe.md)
 - [bytes](api/bytes.md)
+- [cmd_hello](api/cmd_hello.md)
 - [demo](api/demo.md)
 - [fuc_node](api/fuc_node.md)
 - [lumtui_demo](api/lumtui_demo.md)
