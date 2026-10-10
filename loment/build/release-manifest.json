@@ -699,7 +699,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "6655c154a7a3e142cea8a25d3b30fd2a497fe3674593793a4f19d8074767c89a"
+   "sha256": "7dc8f0fd5062733a5d87d43c6296651e22eb11dc89acbbca2b4e447e872d3aa8"
   },
   {
    "path": "tools/loment_boot.py",
@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "b4c50f7fb1a5c951df7317ef5ce77c14139a59a2143cef429de8d9f4594e1e4b"
+   "sha256": "4db3ebc2b9b9bc48d4a0379ad68805178ffa7f99bb27d3d62ccdb8087f6f12ee"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "7aed1e16ca31634d1a886baef4666566cf2a74121a1b47cefbf3b697cd1315a5"
+   "sha256": "497ff539ae6b8fee8f7c283d801c8837913cc83800a5c36344b3901290158a17"
   },
   {
    "path": "tools/lomt_from.py",
@@ -935,7 +935,7 @@
   },
   {
    "path": "tools/loment_rel_test.py",
-   "sha256": "a7063f4860727e57d9048dcdf556469170a36b5d4096f65d080e09b5968c2b46"
+   "sha256": "8872154b66c4c2a33f65f697b9808de8c35620521bb31a344d2e31488f734664"
   },
   {
    "path": "tools/loment_pkg_test.py",
@@ -1027,11 +1027,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "6a6886d8c9bb155228ca9de91b5b2067d27384db15946d37133c9a8aa8c836f8"
+   "sha256": "ded015f62db0a565eb75161aeadcb23315a37f51aaad2955fd1a840a24d384dd"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "49e5e52d8015bda9e93bccea05b9f7626cb024d8d05b861df67017d5cccecb0d"
+   "sha256": "862c7c64e1a5e353515848cddb11933ad218b796864da8cd86b0fe9511bd6e4b"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1907,7 +1907,7 @@
   },
   {
    "path": "docs/201-doors-and-registries.md",
-   "sha256": "728f845cf9095bbf367ccdb8f1c861cfa9525465c30681fc1a291c59f05181a4"
+   "sha256": "112a966a6b967c4c77522b0808e9dfce9614ada46b9cbf21c567d1b226191616"
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
@@ -1951,7 +1951,7 @@
   },
   {
    "path": "docs/212-loment-offload.md",
-   "sha256": "ee134553dcd4391af387203e7ed3d71836a02546c45654ceb8099556a969e635"
+   "sha256": "87cddf2eb95e51f519c0bbc1d09c2779a8ae04feafb98edeb82867e3f7e57747"
   },
   {
    "path": "docs/212-loment-open-license.md",
@@ -1964,6 +1964,10 @@
   {
    "path": "docs/217-loment-socket-parity.md",
    "sha256": "a0a80e38af51c6da7f8914bfbd75eb7decf4e2f094dc343da231c6a18bd83a41"
+  },
+  {
+   "path": "docs/218-loment-net-admission.md",
+   "sha256": "e8a2f0c0dd78887d9c56da5fe4bc1cfea114a58997f5ad6b1bf5d0ce8622de30"
   },
   {
    "path": "docs/219-world-ports.md",
