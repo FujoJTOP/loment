@@ -1966,6 +1966,10 @@
    "sha256": "a0a80e38af51c6da7f8914bfbd75eb7decf4e2f094dc343da231c6a18bd83a41"
   },
   {
+   "path": "docs/218-loment-net-admission.md",
+   "sha256": "9e13e483004f7bd866169be3e7b5c6979056158029fef4e3dff496cf2c3cb057"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "2e9655b04ae67f329e4f9cc61dce7bc0b6ae3a531f234a416167a0c43b6651d5"
   },
