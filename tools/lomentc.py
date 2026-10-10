@@ -5483,18 +5483,23 @@ class _Ir:
                 _, sv = self.expr(e.obj, ty)
                 p = self.t()
                 self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
-                _, iv = self.expr(e.idx, "u32")
+                it, iv = self.expr(e.idx)          # 下标**自己的类型**（见下面那处注释）
                 g = self.t()
-                self.w(f"{g} = getelementptr inbounds {self.ll(et)}, ptr {p}, i32 {iv}")
+                self.w(f"{g} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
                 r = self.t()
                 self.w(f"{r} = load {self.ll(et)}, ptr {g}")
                 return et, r
             if not _is_array(ty):
                 raise LomError(e.line, 1, f"native M24: {ty} 不是数组")
             et = _array_elem(ty)
-            _, iv = self.expr(e.idx, "u32")
+            # **下标按它自己的类型发**，不写死 `i32`。`self.expr` 对 `Ident` 返回的是变量
+            # **自己的**类型（`want` 只管字面量），所以 `i: u64` 的 `a[i]` 拿到的是一个
+            # **i64 值** —— 塞进写死 `i32` 的 GEP 就是**不合法的 LLVM IR**。
+            # `lomelf` 按 GEP 里写的类型去读下标（`tools/lomelf.py:799`），于是**悄悄截成
+            # 32 位**照跑，所以这个 bug 一直没露；clang 不宽容，当场拒（见 `docs/212` §4）。
+            it, iv = self.expr(e.idx)
             gp = self.t()
-            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {iv}")
+            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, {self.ll(it)} {iv}")
             r = self.t()
             self.w(f"{r} = load {self.ll(et)}, ptr {gp}")
             return et, r
@@ -5871,18 +5876,18 @@ class _Ir:
                 _, sv = self.expr(base, ty)
                 p = self.t()
                 self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
-                _, iv = self.expr(s.target.idx, "u32")
+                it, iv = self.expr(s.target.idx)   # 下标**自己的类型**（见 `Index` 读处那段注释）
                 gp = self.t()
-                self.w(f"{gp} = getelementptr inbounds {self.ll(et)}, ptr {p}, i32 {iv}")
+                self.w(f"{gp} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
                 _, v = self.expr(s.expr, et)
                 self.w(f"store {self.ll(et)} {v}, ptr {gp}")
                 return
             if not _is_array(ty):
                 raise LomError(s.line, 1, f"native M24: {ty} 不是数组")
             et = _array_elem(ty)
-            _, iv = self.expr(s.target.idx, "u32")
+            it, iv = self.expr(s.target.idx)       # 同上：下标按它自己的类型发
             gp = self.t()
-            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {iv}")
+            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, {self.ll(it)} {iv}")
             _, v = self.expr(s.expr, et)
             self.w(f"store {self.ll(et)} {v}, ptr {gp}")
             return

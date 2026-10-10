@@ -670,6 +670,12 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             }
             return 0;
         }
+        if tok_is(src, toks, j + 1, "[") {   // M3/M24: 下标 -> **元素类型**，不是数组/切片类型
+            let at: u32 = var_type(s, src, toks, j);
+            if is_array_tok(src, toks, at) == 1 || is_slice_tok(src, toks, at) == 1 {
+                return elem_tok(src, toks, at);
+            }
+        }
         return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
     if tok_is(src, toks, j, "(") {
@@ -2985,6 +2991,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_str(s, out, " = extractvalue { ptr, i64 } ");
         emit_val(s, out, lvl);
         emit_str(s, out, ", 0\n");
+        let itx: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**（不写死 i32）
         let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1);
         emit_str(s, out, "  ");
         let g: u32 = new_temp(s, out);
@@ -2992,7 +2999,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_ty(s, out, src, toks, et);
         emit_str(s, out, ", ptr %t");
         emit_dec(s, out, sp);
-        emit_str(s, out, ", i32 ");
+        emit_str(s, out, ", ");
+        emit_ty(s, out, src, toks, itx);
+        emit_str(s, out, " ");
         emit_val(s, out, lvl + 1);
         emit_str(s, out, "\n  ");
         let rl: u32 = new_temp(s, out);
@@ -3012,6 +3021,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
     if tok_is(src, toks, dot, "[") && is_array_tok(src, toks, ty) == 1 {
         // M24: 数组下标 a[i] -> GEP(数组, 0, i) + load
         let et2: u32 = elem_tok(src, toks, ty);
+        let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl);
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
@@ -3019,7 +3029,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
         emit_name_tok(s, out, src, toks, j);
-        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_str(s, out, ".addr, i32 0, ");
+        emit_ty(s, out, src, toks, itx2);
+        emit_str(s, out, " ");
         emit_val(s, out, lvl);
         emit_str(s, out, "\n  ");
         let rl2: u32 = new_temp(s, out);
@@ -4485,6 +4497,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
             emit_val(s, out, 0);
             emit_str(s, out, ", 0\n");
+            let sitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1);
             emit_str(s, out, "  ");
             let sgp: u32 = new_temp(s, out);
@@ -4492,7 +4505,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_ty(s, out, src, toks, set);
             emit_str(s, out, ", ptr %t");
             emit_dec(s, out, sp);
-            emit_str(s, out, ", i32 ");
+            emit_str(s, out, ", ");
+            emit_ty(s, out, src, toks, sitx);
+            emit_str(s, out, " ");
             emit_val(s, out, 1);
             emit_str(s, out, "\n");
             let sve: u32 = expr_bin(s, out, src, toks, siv + 2, 1, 2);
@@ -4506,6 +4521,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             return sve + 1;
         }
         if is_array_tok(src, toks, sty) == 1 {
+            let aitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0);
             emit_str(s, out, "  ");
             let agp: u32 = new_temp(s, out);
@@ -4513,7 +4529,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_ty(s, out, src, toks, sty);
             emit_str(s, out, ", ptr %");
             emit_name_tok(s, out, src, toks, j);
-            emit_str(s, out, ".addr, i32 0, i32 ");
+            emit_str(s, out, ".addr, i32 0, ");
+            emit_ty(s, out, src, toks, aitx);
+            emit_str(s, out, " ");
             emit_val(s, out, 0);
             emit_str(s, out, "\n");
             let ave: u32 = expr_bin(s, out, src, toks, aiv + 2, 1, 1);

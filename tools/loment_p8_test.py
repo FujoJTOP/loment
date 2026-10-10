@@ -706,6 +706,7 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_for.lomt",
                        ROOT / "loment" / "selfhost" / "ir_div.lomt",
                        ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_index.lomt",
                        ROOT / "loment" / "selfhost" / "ir_call5.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
@@ -1411,6 +1412,7 @@ def test_m82_coverage_report():
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
              "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt",
+             "ir_index.lomt",
              "ir_call5.lomt",
              # 预置枚举 + `?` 早退 + `if let` 三条路径的回归闸 (不放进列表就会静默退化)
              "native_res.lomt",
