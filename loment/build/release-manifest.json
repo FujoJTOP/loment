@@ -823,7 +823,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "292d03a8601b4b2906bf2c38374c20a952c9278f017dfb18220c85ba9084a16c"
+   "sha256": "a33b3dae3493901cd32666deeef8eadad04a69253c6d4ecfc077ad677ecb31da"
   },
   {
    "path": "tools/lomt_from.py",
@@ -1963,7 +1963,7 @@
   },
   {
    "path": "docs/217-loment-socket-parity.md",
-   "sha256": "444035b1cd8310c4fbc603d653c0945a3ca91b593bdcd649441383635db59c10"
+   "sha256": "a0a80e38af51c6da7f8914bfbd75eb7decf4e2f094dc343da231c6a18bd83a41"
   },
   {
    "path": "docs/manual/index.md",
