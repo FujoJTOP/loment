@@ -1858,6 +1858,12 @@ def skill_zip() -> bytes:
     它是**第 4 个发行件**, 由 --emit 一起产出 —— 既不手工打(手工打的哈希必然与
     随后的 SHA256SUMS 对不上, 2026-09-15 踩过), 也能被 --check 的新鲜度检查覆盖。
     结构与 loment_dist_test 里的确定性约定一致: 固定时间戳 1980-01-01 + 权限 0644。
+
+    `create_system = 3` 与 `_zip` 同一条口径, 但**这里漏过一次** (2026-10-10):
+    `ZipInfo.__init__` 按 `sys.platform` 填默认值 (`'win32'` → 0, 其余 → 3), 于是同一份
+    内容在 Windows 宿主上压出的字节与 Linux 宿主不同 —— 内容一个字节不差, 只是容器里那
+    一个字段。它咬到的是"同一 tag 在两个 runner 上出两个哈希", 而发布流水线正好要从
+    ubuntu 挪到 windows (`release.yml` 的 setup.exe 要 iexpress)。钉死它, 换宿主才**不改产物**。
     """
     skill_dir = Path(ROOT / SKILL).parent         # 例如 .claude/skills/loment
     buf = io.BytesIO()
@@ -1869,6 +1875,7 @@ def skill_zip() -> bytes:
                                  (1980, 1, 1, 0, 0, 0))
             zi.external_attr = 0o644 << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.create_system = 3
             z.writestr(zi, p.read_bytes())
     return buf.getvalue()
 
