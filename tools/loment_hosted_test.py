@@ -370,6 +370,41 @@ def test_windows_launcher_refuses_hosted_by_name():
 
 
 @test
+def test_choose_hosted_alone_is_enough():
+    """**声明与开关是同一件事的两种说法**（`docs/222` §4.4）。
+
+    一份 `choose hosted` 的源，命令行上**一个 `--hosted` 都不打**，也必须走 hosted 那条路
+    并算出正确答案 —— 否则用户写了声明却静默按 sealed 链，报"未定义的符号 compress"。
+    判据同时钉住 IR 里那一行标记真的发出来了。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        pkg = Pkg(td, _resolves_with_flags(_clang() or "cc"))
+        # `choose` 只能出现在根单元的顶层，所以放在 `module` 之后。
+        pkg.emit(HOSTED_SRC.replace("module hostz\n", "module hostz\n\nchoose hosted\n", 1))
+        ir = pkg.ll.read_text(encoding="utf-8")
+        assert "; loment-port: hosted" in ir, "IR 里没有那行标记（声明到不了构建那一侧）"
+        out = str(td / "out.bin") if pkg.native else "./out.bin"
+        rc, log = pkg.run(["build", "src/prog.lomt", "-lz", "-o", out])   # **没有 --hosted**
+        assert rc == 0, f"只写声明的那份返回 {rc}\n{log[-900:]}"
+        print("      `choose hosted` 单独就够: 不打 --hosted 也走 hosted 并算对 (rc=0)")
+
+
+@test
+def test_sealed_units_get_no_marker():
+    """反向: **sealed 是默认档**，所以现存每一份单元的 IR 一个字节都不该变。
+
+    没有这一条，那行标记可能被无条件发出去 —— 而孪生判据逐字节比的那 46 份会一起红，
+    病因却指不到这里。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        pkg = _pkg(Path(t), HOSTED_SRC)          # 没有 `choose hosted`
+        ir = pkg.ll.read_text(encoding="utf-8")
+        assert "loment-port" not in ir, "sealed 的单元不该有 port 标记"
+        print("      sealed 单元不带 port 标记（现存 IR 逐字节不变）")
+
+
+@test
 def test_the_shipped_usage_mentions_hosted():
     """两份启动器的用法文本都要提到 `--hosted` —— 否则它是个"藏在代码里"的开关。"""
     sh = loment_dist._subst(loment_dist.LAUNCHER_SH)

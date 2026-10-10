@@ -5738,7 +5738,16 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     store32(s, 540, en);
     emit_str(s, out, "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)\n");
-    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n\n");
+    emit_str(s, out, "; clang -O1 driver.c this.ll -o exe\n");
+    // `choose hosted`（`docs/222` §4.4）：构建那一侧要知道这份产物是**对外**的 ——
+    // 它决定链接交给谁（C 工具链还是自举 lomelf）。**只有 hosted 才多发这一行** ——
+    // sealed 是默认档，于是现存每一份单元的 IR 一个字节都不变。
+    // 认法是 `contains_ident`（同 `guard` 那条）：`hosted` 这个 ident 只可能出现在
+    // `choose hosted` 的值位置，别处写它就是一个未定义名字、检查器早就拒了。
+    if contains_ident(src, toks, "hosted") == 1 {
+        emit_str(s, out, "; loment-port: hosted\n");
+    }
+    emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
     }

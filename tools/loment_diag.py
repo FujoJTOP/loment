@@ -146,10 +146,11 @@ RULES = [
              r"依赖嵌套超过",
      "`choose` / `addin` 用法不对",
      "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`、"
-     "`runtime`/`no_runtime`）声明的是**整个程序**的取值，"
+     "`runtime`/`no_runtime`、`sealed`/`hosted`）声明的是**整个程序**的取值，"
      "所以**每一维**只能出现一次、只能在**根单元**，而且有些档**不能同时选**"
      "（`no_std` + `gc_auto` 要往核里塞收集器；`no_runtime` + `gc_auto` 是定义上矛盾"
-     "—— `docs/175` §3.4 / §3.6）。**`runtime` + `gc_manual` 是合法档**："
+     "—— `docs/175` §3.4 / §3.6；`no_std` + `hosted` 是「底下没有东西」对上"
+     "「往下链东西」—— `docs/222` §4.2）。**`runtime` + `gc_manual` 是合法档**："
      "要运行期、但内存自己管。"
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"

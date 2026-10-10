@@ -971,10 +971,11 @@ MAXDEPTH = 8
 #: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
 #: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
 #:
-#: 今天三维：
+#: 今天四维：
 #:   * `mode`    —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
-#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）。
+#:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
+#:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -988,22 +989,31 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 用户 2026-09-23：「运行期是海量工程必经之路，我们不得不利用 `choose` 开关
     # 启动/关闭 runtime」。**默认是关的** —— 默认档不许改变任何现有程序的行为。
     "runtime": ("runtime", "no_runtime"),
+    # **对外端口**（`docs/222` §4，用户 2026-10-10 拍的价）。`docs/219` 把"链接结束后仍未
+    # 定义的符号集合"翻成一份**世界端口表**；这一维声明的是**这份产物允不允许有端口**。
+    # `sealed`（封闭）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为；
+    # `hosted`（对外）= 允许链真 libc / 真共享库，端口表就是它声明的世界面。
+    # 取值**刻意不带生态名**：今天是 libc/zlib，明天是 JVM/CPython —— 与 `runtime` 同一条
+    # 纪律，装的东西不进值名。
+    "port": ("sealed", "hosted"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime")
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
-CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime"}
+CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
+                 "port": "sealed"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
     "mode": "运行模式（`std` / `no_std`）",
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
+    "port": "对外端口（`sealed` / `hosted`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -1031,6 +1041,18 @@ CORE_CONFLICTS = {
         "混合档（`gc_auto_alpha`）**更依赖运行期**（它要自适应、要策略池，"
         "还要放编译期算不出来的那部分），"
         "而 `no_runtime` 是明说产物里不要运行期 —— 同一条冲突，对它只强不弱"),
+    # `hosted` 那两条（`docs/222` §4.2）。**两条理由不同，所以各写一份** —— 与
+    # `no_std`+`gc_auto` / `no_runtime`+`gc_auto` 那一对的分法同形。
+    ("no_std", "hosted"): (
+        "`no_std` 的定义是「只能用核那一层」——**没有宿主**；"
+        "而 `hosted` 要链的是**宿主上的**库（libc / 共享库）。"
+        "这一对是**定义上就矛盾**：一个说「底下没有东西」，一个说「往下链东西」"),
+    ("gc_auto_alpha", "hosted"): (
+        "混合档的 L2（块纪元）是**分配器前沿回卷**（`docs/210` §2.3），买的是栈纪律；"
+        "而外部库把指针放进**它自己的结构**里（zlib 的 `z_stream` 就是），"
+        "那些指针在 Loment 的栈之外 —— 前沿一回卷，C 手里那个指针就指到了**已经退回去"
+        "的地方**。`docs/219` §6.1 已把这一对写成硬边界；"
+        "要 hosted 请用 `gc_manual` 或 `gc_auto`"),
 }
 
 
@@ -4197,7 +4219,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # `alloc` 站点。**与 `boundary` 同级同形**（一个自描述的对象 + 一条自洽的和）——
         # 于是"这份程序的 GC 由哪几层组成"是**不读源码可判**的（这正是 `docs/210` §3 那句
         # "GC 的组成是一个不读源码可判的数"）。
-        "potato": "v10",
+        "potato": "v11",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4217,6 +4239,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 装的东西会随年份长（今天是收集器，明天可能是线程、宿主服务），钉进值名里
         # 就等于两年后加一项能力要回头改这一维的定义。
         "runtime": mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]),
+        # **对外端口在不在**（`docs/222` §4）：`sealed` / `hosted`。与上面三维同一条纪律 ——
+        # **必填**，所以"这份产物通不通着世界"是**不读源码可判的**，而不是"看源码里有没有
+        # `choose hosted`"。这正是 `docs/219` §7 那句"测量强于声明"在这一维的落法。
+        "port": mod.chooses.get("port", CORE_DEFAULTS["port"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -6155,8 +6181,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     out = [
         "; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)",
         "; clang -O1 driver.c this.ll -o exe",
-        "",
     ]
+    # `choose hosted`（`docs/222` §4.4）：构建那一侧要知道这份产物是**对外**的 ——
+    # 它决定链接交给谁（C 工具链还是自举 lomelf）。**写进 IR 而不是让启动器去读源码**：
+    # 读源码要启动器懂 Loment 的词法，而这份 IR 本来就是构建的输入。
+    # **只有 hosted 才多发这一行** —— sealed 是默认档，于是现存每一份单元的 IR
+    # 一个字节都不变（孪生判据逐字节比的那 46 份）。
+    if mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted":
+        out.append("; loment-port: hosted")
+    out.append("")
     globals_: list[str] = []
     body: list[str] = []
     # 外部函数声明: 每个外部符号**一条 `declare`**, 按名字去重 (两个模块声明同一个外部

@@ -316,6 +316,12 @@ case "${1:-help}" in
         # Default: link with the self-hosted lomelf - the package needs no clang.
         # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
         # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
+        # `choose hosted` in the source is the SAME claim as the `--hosted` flag - the unit says
+        # so in the IR header (docs/222 sec 4.4), so the declaration alone is enough and the
+        # two spellings cannot silently disagree.
+        if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
+            hosted=1
+        fi
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
         # say it instead of silently dropping the flags (docs/222 sec 4.1).
