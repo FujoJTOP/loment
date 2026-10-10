@@ -101,8 +101,11 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 ## 5. 点名不做
 
 * **`poll` / `select` / `epoll`**、**`sendmsg` / `recvmsg`**、**`socketpair`**、**`AF_UNIX`** ——
-  一律 -1（派发面的兜底）。`epoll` 要真做得上 IOCP，不是一次翻译能补的；
-  `sendmsg`/`recvmsg` 要仿 `iovec` 与辅助数据，消费方今天也够不着。
+  表外的号一律 -1（派发面的兜底）。
+  **`poll`(7) 已做**（2026-10-10，`docs/221`）：架在 WinSock 的 `select` 上，
+  `pollfd` ↔ `fd_set` 两边翻译。**名单的现状与逐条理由见 `docs/221` §7** ——
+  其中 `select`(23)、`epoll`、`sendmsg`/`recvmsg`、`socketpair`/`AF_UNIX` 仍是**点名不做**，
+  各自都写了理由（不是"懒得做"）。
 * ~~**语言侧的一条真限制**：`syscall6` 的内建签名是 `nr + a0..a4`（5 个实参），
   所以 6 参的 `sendto`/`recvfrom` 从 `.lomt` 里**递不满**（`addrlen` 那一格没地方放，
   递过去的是寄存器里的残留值）……~~

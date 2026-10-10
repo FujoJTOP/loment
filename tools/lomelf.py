@@ -1243,13 +1243,14 @@ PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHand
 PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
                   "setsockopt", "getsockopt", "getpeername", "getsockname",
-                  "ioctlsocket", "WSAGetLastError"]
+                  "ioctlsocket", "select", "WSAGetLastError"]
 # 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
 PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2)]
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
 SYS_GETDENTS64, SYS_OPENAT, SYS_NEWFSTATAT = 217, 257, 262
+SYS_POLL, SYS_SELECT = 7, 23
 SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
 SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
 SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
@@ -1279,6 +1280,7 @@ PE_SYSCALLS = (
     (SYS_BRK, "mem", "__ws_brk"),
     (SYS_GETDENTS64, "file", "__ws_getdents"),
     (SYS_NEWFSTATAT, "file", "__ws_fstatat"),
+    (SYS_POLL, "net", "__ws_poll"),
     (SYS_SOCKET, "net", "__ws_socket"),
     (SYS_CONNECT, "net", "__ws_connect"),
     (SYS_ACCEPT, "net", "__ws_accept"),
@@ -1326,6 +1328,10 @@ def pe_surface_sites() -> dict:
     return counts
 PE_O_WRONLY, PE_O_CREAT, PE_O_TRUNC = 1, 0x40, 0x200
 # Linux 语义 → WinSock 的翻译表（两边**不同名同值**，所以是仿真不是转发）
+# Linux `poll` 的事件位。**与 WinSock 的 `POLL*` 不同值**（那边 POLLRDNORM=0x100、
+# POLLWRNORM=0x10），所以 shim 进出各映射一次 —— 直接透传就是静默错值。
+LINUX_POLLIN, LINUX_POLLOUT = 0x0001, 0x0004
+LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLNVAL = 0x0008, 0x0010, 0x0020
 WS2_SOL_SOCKET = 0xFFFF
 WS2_SO = {2: 0x0004, 9: 0x0008, 7: 0x1001, 8: 0x1002, 21: 0x1005, 20: 0x1006, 4: 0x1007}
 WS2_SO_RCVTIMEO, WS2_SO_SNDTIMEO = 0x1006, 0x1005
@@ -1363,7 +1369,10 @@ WS_WSADATA_CAP = 512
 WS_SOCKTMP = WS_WSADATA + WS_WSADATA_CAP        # timeval↔毫秒 / FIONBIO 的暂存
 WS_SOCKTMP_CAP = 256
 WS_ADDR_FIX = WS_SOCKTMP + 240                  # "AF_INET6 的 family 字被我改过"标志
-WS_SIZE = WS_SOCKTMP + WS_SOCKTMP_CAP
+WS_FDSETS = WS_SOCKTMP + WS_SOCKTMP_CAP         # `poll`/`select` 用：三个 WinSock fd_set
+WS_FDSET_CAP = 520                              # 4（count）+ 64 × 8（SOCKET）= 516 → 对齐到 520
+WS_POLLTV = WS_FDSETS + 3 * WS_FDSET_CAP        # WinSock 的 timeval（两个 32 位 long）
+WS_SIZE = WS_POLLTV + 16
 WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
@@ -1541,6 +1550,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     def st16(base, disp, src):
         a.emit(b"\x66" + rex(0, src, 0, base) + b"\x89" + _mem(src, base, disp))
 
+    def ld16z(dst, base, disp):                 # movzx r32, word [base+disp]
+        a.emit(rex(0, dst, 0, base) + b"\x0F\xB7" + _mem(dst, base, disp))
+
     def test_edx(v):
         a.emit(b"\xF7\xC2" + i32(v))
 
@@ -1577,7 +1589,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.emit(b"\x55")                             # push rbp
     a.emit(b"\x48\x89\xE5")                     # mov rbp, rsp
     a.emit(b"\x48\x83\xE4\xF0")                 # and rsp, -16
-    sub_rsp(0x60)                               # 32 shadow + 第五~七参 + 暂存
+    sub_rsp(0x80)                               # 32 shadow + 第五~七参 + 各 case 的暂存
+                                                # （`poll` 那一格要用到 0x60/0x68，
+                                                #   所以从 0x60 抬到 0x80；既有格位不动）
     movi(RBX, PE_STATE_VA)
 
     # 派发面**照表生成** —— 加号、改面、换名字改的是 `PE_SYSCALLS`，不是这段代码。
@@ -2634,6 +2648,230 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     movi(RDX, 16)
     st32(RCX, 0, RDX)                           # *optlen = sizeof(struct timeval)
     xor_eax()
+    jmp_l("__ws_ret")
+
+    # ---- poll(7)：Linux 的 pollfd 数组 → WinSock 的 select --------------------
+    #
+    # 为什么架在 `select` 上而不是 `WSAPoll`：WSAPoll 在 Windows 上有名的问题
+    # （连接失败时 POLLOUT 照样报、POLLHUP 不可靠），而 `select` 是 WinSock 里最老最稳的一个。
+    #
+    # **两处点名偏差**（也写进 `docs/221`）：
+    #   * 只认 **socket 型 fd**：文件 fd（0/1/2 等）在 PE 上报 `POLLNVAL`，
+    #     而 Linux 会给它们 `POLLIN`/`POLLOUT`；
+    #   * 三个集合全空时**不睡**（WinSock 的 select 拿空集合直接 `WSAEINVAL`）。
+    #
+    # 事件位两边**不一样**（Linux `POLLIN`=1 / `POLLOUT`=4；Windows `POLLRDNORM`=0x100 /
+    # `POLLWRNORM`=0x10），所以进出各映射一次；`POLLNVAL` 这一档 Windows 没有，由这里补。
+
+    a.label("__ws_set_init")                    # rdi = setptr
+    xor_eax()
+    st32(RDI, 0, RAX)                           # fd_count = 0
+    ret_()
+
+    a.label("__ws_set_add")                     # rdi = setptr, rsi = handle → rax = 1 / 0(满)
+    ld32(RCX, RDI, 0)
+    cmp_ecx(WS_FD_COUNT)                        # WinSock 的 FD_SETSIZE = 64
+    jcc_l("ae", "__ws_sadd_full")
+    a.emit(mov_rr(RAX, RCX))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RDI)
+    st(RAX, 8, RSI)                             # fd_array[count] = handle
+                                                # ⚠ 偏移是 **8** 不是 4：Win64 上
+                                                # `SOCKET` 是 8 字节，`u_int fd_count` 后面
+                                                # 要按 8 对齐 —— 写进 4 就落进填充区，
+                                                # select 拿到的是垃圾句柄（症状：它报错）
+    add_ri(RCX, 1)
+    st32(RDI, 0, RCX)
+    movi(RAX, 1)
+    ret_()
+    a.label("__ws_sadd_full")
+    xor_eax()
+    ret_()
+
+    a.label("__ws_set_has")                     # rdi = setptr, rsi = handle → rax = 1 / 0
+    ld32(RCX, RDI, 0)
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    a.label("__ws_shas_loop")
+    a.emit(alu_rr(0x39, RDX, RCX))              # cmp rdx, rcx
+    jcc_l("ae", "__ws_shas_no")
+    a.emit(mov_rr(RAX, RDX))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RDI)
+    ld(RAX, RAX, 8)                             # fd_array 在偏移 8（见 __ws_set_add）
+    a.emit(alu_rr(0x39, RAX, RSI))              # cmp rax, rsi
+    jcc_l("e", "__ws_shas_yes")
+    add_ri(RDX, 1)
+    jmp_l("__ws_shas_loop")
+    a.label("__ws_shas_no")
+    xor_eax()
+    ret_()
+    a.label("__ws_shas_yes")
+    movi(RAX, 1)
+    ret_()
+
+    a.label("__ws_poll")
+    st(RSP, 0x28, RDI)                          # fds
+    st(RSP, 0x30, RSI)                          # nfds
+    st(RSP, 0x38, RDX)                          # timeout（毫秒；< 0 = 无限等）
+    a.emit(mov_rr(RAX, RSI))
+    cmp_eax(WS_FD_COUNT)                        # 我们只认自己那张 64 格的 fd 表
+    jcc_l("a", "__ws_poll_einval")
+    a.call("__ws_wsa_start")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + 2 * WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    # ---- 第一趟：清 revents、把要等的 handle 塞进集合 ----
+    xor_eax()
+    st(RSP, 0x40, RAX)                          # i = 0
+    a.label("__ws_poll_1l")
+    ld(RAX, RSP, 0x40)
+    ld(RCX, RSP, 0x30)
+    a.emit(alu_rr(0x39, RAX, RCX))              # cmp rax, rcx
+    jcc_l("ae", "__ws_poll_1d")
+    imul_ri(RAX, 8)
+    ld(RCX, RSP, 0x28)
+    add_rr(RAX, RCX)                            # rax = &pollfd[i]
+    st(RSP, 0x48, RAX)
+    ld32(RCX, RAX, 0)                           # fd
+    movi32(RDX, 0)
+    st16(RAX, 6, RDX)                           # revents = 0
+    cmp_ecx(0)
+    jcc_l("l", "__ws_poll_1n")                  # 负 fd：Linux 跳过它
+    a.emit(mov_rr(RDI, RCX))                    # edi = fd
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("ne", "__ws_poll_have")
+    ld(RAX, RSP, 0x48)
+    movi32(RCX, LINUX_POLLNVAL)
+    st16(RAX, 6, RCX)                           # 不是 socket ⇒ POLLNVAL
+    jmp_l("__ws_poll_1n")
+    a.label("__ws_poll_have")
+    st(RSP, 0x50, RAX)                          # SOCKET
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 4)                          # events
+    movi32(RAX, LINUX_POLLIN)
+    a.emit(alu_rr(0x85, RCX, RAX))              # test rcx, rax
+    jcc_l("e", "__ws_poll_ev_w")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_poll_einval")              # 集合满了：报错，不静默丢
+    a.label("__ws_poll_ev_w")
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 4)
+    movi32(RAX, LINUX_POLLOUT)
+    a.emit(alu_rr(0x85, RCX, RAX))              # test rcx, rax
+    jcc_l("e", "__ws_poll_1n")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_poll_einval")
+    a.label("__ws_poll_1n")
+    ld(RAX, RSP, 0x40)
+    add_ri(RAX, 1)
+    st(RSP, 0x40, RAX)
+    jmp_l("__ws_poll_1l")
+    # ---- 等 ----
+    a.label("__ws_poll_1d")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld32(RCX, RDI, 0)
+    movi(RDX, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld32(RAX, RDX, 0)
+    add_rr(RCX, RAX)
+    test_ecx()
+    jcc_l("e", "__ws_poll_2")                   # 全空 ⇒ 不睡（见上面的偏差说明）
+    ld32(RAX, RSP, 0x38)
+    cmp_eax(0)
+    jcc_l("l", "__ws_poll_inf")
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    movi(RCX, 1000)
+    a.emit(group3(6, RCX))                      # div rcx → rax = 秒，rdx = 毫秒余数
+    movi(RCX, 1000)
+    a.emit(imul_rr(RDX, RCX))                   # 微秒 = (ms % 1000) * 1000
+    movi(RDI, PE_STATE_VA + WS_POLLTV)
+    st32(RDI, 0, RAX)
+    st32(RDI, 4, RDX)
+    st(RSP, 0x20, RDI)
+    jmp_l("__ws_poll_go")
+    a.label("__ws_poll_inf")
+    movi(RDX, 0)
+    st(RSP, 0x20, RDX)                          # 第五参 NULL ⇒ 无限等
+    a.label("__ws_poll_go")
+    movi32(RCX, 0)                              # WinSock 忽略 nfds
+    movi(RDX, PE_STATE_VA + WS_FDSETS)
+    movi(R8, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    movi(R9, 0)                                 # exceptfds = NULL
+    api("select")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    # ---- 第二趟：把就绪映射回 revents，数几个非零 ----
+    a.label("__ws_poll_2")
+    xor_eax()
+    st(RSP, 0x40, RAX)                          # i
+    st(RSP, 0x58, RAX)                          # n = 0
+    a.label("__ws_poll_2l")
+    ld(RAX, RSP, 0x40)
+    ld(RCX, RSP, 0x30)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_poll_2d")
+    imul_ri(RAX, 8)
+    ld(RCX, RSP, 0x28)
+    add_rr(RAX, RCX)
+    st(RSP, 0x48, RAX)
+    ld32(RCX, RAX, 0)
+    cmp_ecx(0)
+    jcc_l("l", "__ws_poll_2n")
+    a.emit(mov_rr(RDI, RCX))
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_poll_2n")                  # 非 socket（POLLNVAL 已经写好）
+    st(RSP, 0x50, RAX)
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 6)
+    st(RSP, 0x60, RCX)                          # rev = 上一趟留下的 revents
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("e", "__ws_poll_2w")
+    ld(RAX, RSP, 0x60)
+    movi32(RCX, LINUX_POLLIN)
+    add_rr(RAX, RCX)                            # 位不相交 ⇒ 加法就是或
+    st(RSP, 0x60, RAX)
+    a.label("__ws_poll_2w")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("e", "__ws_poll_2s")
+    ld(RAX, RSP, 0x60)
+    movi32(RCX, LINUX_POLLOUT)
+    add_rr(RAX, RCX)
+    st(RSP, 0x60, RAX)
+    a.label("__ws_poll_2s")
+    ld(RDX, RSP, 0x48)
+    ld(RAX, RSP, 0x60)
+    st16(RDX, 6, RAX)
+    test_rax()
+    jcc_l("e", "__ws_poll_2n")
+    ld(RAX, RSP, 0x58)
+    add_ri(RAX, 1)
+    st(RSP, 0x58, RAX)
+    a.label("__ws_poll_2n")
+    ld(RAX, RSP, 0x40)
+    add_ri(RAX, 1)
+    st(RSP, 0x40, RAX)
+    jmp_l("__ws_poll_2l")
+    a.label("__ws_poll_2d")
+    ld(RAX, RSP, 0x58)
+    jmp_l("__ws_ret")
+    a.label("__ws_poll_einval")
+    movi(RAX, -22)                              # EINVAL
     jmp_l("__ws_ret")
 
     # （cmdline 字面量在 .idata 的固定偏移 PE_LIT_OFF 上，shim 用常量取址，不必内嵌）

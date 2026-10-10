@@ -652,6 +652,35 @@ fn _start() {
             if load8(a6, 0) != 10 {
                 die(30, "FAIL v6 family not translated back\\n");
             }
+            let l6: i64 = syscall6(50, s6 as u64, 4, 0, 0, 0);
+            if l6 < 0 {
+                die(31, "FAIL v6 listen\\n");
+            }
+            let v6c: i64 = syscall6(41, 10, 1, 0, 0, 0);
+            if v6c < 0 {
+                die(32, "FAIL v6 client socket\\n");
+            }
+            let nc: i64 = syscall6(42, v6c as u64, a6 as u64, 28, 0, 0);
+            if nc < 0 {
+                die(33, "FAIL v6 connect\\n");
+            }
+            let ac6: i64 = syscall6(43, s6 as u64, 0, 0, 0, 0);
+            if ac6 < 0 {
+                die(34, "FAIL v6 accept\\n");
+            }
+            let w6: i64 = syscall6(1, v6c as u64, str_ptr("v") as u64, 1, 0, 0);
+            if w6 != 1 {
+                die(35, "FAIL v6 write\\n");
+            }
+            let r6: i64 = syscall6(0, ac6 as u64, rb as u64, 1, 0, 0);
+            if r6 != 1 {
+                die(36, "FAIL v6 read\\n");
+            }
+            if load8(rb, 0) != 118 {
+                die(37, "FAIL v6 payload\\n");
+            }
+            syscall6(3, ac6 as u64, 0, 0, 0, 0);
+            syscall6(3, v6c as u64, 0, 0, 0, 0);
             w(1, "IPV6 OK\\n");
         }
         syscall6(3, s6 as u64, 0, 0, 0, 0);
@@ -783,6 +812,139 @@ def _udp_ok(out: bytes) -> bool:
     return out == UDP_GOLDEN
 
 
+#: **多路复用语料**：两个连接，一个有数据、一个没有，`poll`(7) 必须**只**报有数据的那个；
+#: 把数据读掉之后再 `poll` 一次，两个都不就绪 ⇒ 超时返回 **0**（不是永远阻塞）。
+#: 这条钉的是 PE 侧那一格：`poll` 在 Windows 上没得直接转发 —— WinSock 只有 `select`，
+#: 两边的事件位还**不同值**（Linux `POLLIN`=1 / Windows `POLLRDNORM`=0x100），
+#: 所以 shim 得把 `pollfd` 数组翻成三个 `fd_set`、再把就绪翻回去（`docs/221`）。
+POLL_DEMO = """module polldemo
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn pfd(p: ptr, fd: i64, ev: u8) -> u32 {
+    store8(p, 0, fd as u8);
+    store8(p, 1, 0);
+    store8(p, 2, 0);
+    store8(p, 3, 0);
+    store8(p, 4, ev);
+    store8(p, 5, 0);
+    store8(p, 6, 0);
+    store8(p, 7, 0);
+    return 0;
+}
+
+fn _start() {
+    let sa0: ptr = alloc(64);
+    let _z: u32 = sa(sa0, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket(ls)\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let bi: i64 = syscall6(49, ls as u64, sa0 as u64, 16, 0, 0);
+    if bi < 0 {
+        die(2, "FAIL bind\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(3, "FAIL listen\n");
+    }
+    let g1: i64 = syscall6(51, ls as u64, sa0 as u64, ln as u64, 0, 0);
+    if g1 < 0 {
+        die(4, "FAIL getsockname\n");
+    }
+    let c1: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c1 < 0 {
+        die(5, "FAIL socket(c1)\n");
+    }
+    let n1: i64 = syscall6(42, c1 as u64, sa0 as u64, 16, 0, 0);
+    if n1 < 0 {
+        die(6, "FAIL connect 1\n");
+    }
+    let a1: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a1 < 0 {
+        die(7, "FAIL accept 1\n");
+    }
+    let d1: i64 = syscall6(1, c1 as u64, str_ptr("hi") as u64, 2, 0, 0);
+    if d1 != 2 {
+        die(8, "FAIL write 1\n");
+    }
+    let c2: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c2 < 0 {
+        die(9, "FAIL socket(c2)\n");
+    }
+    let n2: i64 = syscall6(42, c2 as u64, sa0 as u64, 16, 0, 0);
+    if n2 < 0 {
+        die(10, "FAIL connect 2\n");
+    }
+    let a2: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a2 < 0 {
+        die(11, "FAIL accept 2\n");
+    }
+    let pf: ptr = alloc(64);
+    let pf2: ptr = ptr_add(pf, 8);
+    let _p1: u32 = pfd(pf, a1, 1);
+    let _p2: u32 = pfd(pf2, a2, 1);
+    let r1: i64 = syscall6(7, pf as u64, 2, 3000, 0, 0);
+    if r1 != 1 {
+        die(12, "FAIL poll count\n");
+    }
+    if load8(pf, 6) != 1 {
+        die(13, "FAIL poll revents[0]\n");
+    }
+    if load8(pf2, 6) != 0 {
+        die(14, "FAIL poll revents[1]\n");
+    }
+    w(1, "POLL READY OK\n");
+    let rb: ptr = alloc(64);
+    let rd: i64 = syscall6(0, a1 as u64, rb as u64, 8, 0, 0);
+    if rd != 2 {
+        die(15, "FAIL read a1\n");
+    }
+    let r2: i64 = syscall6(7, pf as u64, 2, 200, 0, 0);
+    if r2 != 0 {
+        die(16, "FAIL poll timeout\n");
+    }
+    if load8(pf, 6) != 0 {
+        die(17, "FAIL timeout revents\n");
+    }
+    w(1, "POLL TIMEOUT OK\n");
+    syscall6(3, a1 as u64, 0, 0, 0, 0);
+    syscall6(3, a2 as u64, 0, 0, 0, 0);
+    syscall6(3, c1 as u64, 0, 0, 0, 0);
+    syscall6(3, c2 as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+POLL_GOLDEN = b"POLL READY OK\nPOLL TIMEOUT OK\n"
+
+
+def _poll_ok(out: bytes) -> bool:
+    return out == POLL_GOLDEN
+
+
 SOCK_HEAD = b"ECHO OK\nTIMEOUT OK\nNONBLOCK OK\n"
 SOCK_TAIL = (b"IPV6 OK\nSURVIVED\n", b"IPV6 NO\nSURVIVED\n")
 
@@ -793,9 +955,10 @@ def _sock_ok(out: bytes) -> bool:
     return out.startswith(SOCK_HEAD) and out[len(SOCK_HEAD):] in SOCK_TAIL
 
 
-#: 两份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
+#: 三份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
-NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok))
+NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
+             ("polldemo", POLL_DEMO, _poll_ok))
 
 
 def _shim_blob():
