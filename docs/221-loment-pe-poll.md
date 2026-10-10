@@ -75,7 +75,7 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 | 项 | 现状 |
 |---|---|
 | `poll`(7) | ✅ **已做**（本文） |
-| `select`(23) | **故意不做**：它要的是 Linux 的三张 **1024 位位图** ↔ WinSock 的 `fd_set` 数组，是同一个 `select` 之上的**另一套**翻译；而 `poll` 已经给了同样的能力（结构体更简单、没有 `FD_SETSIZE` 这堵墙）。要补的话集合助手已经在了 |
+| `select`(23) | **故意不做**，两条理由。① 能力上它与 `poll` **重复**（`poll` 结构体更简单、没有 `FD_SETSIZE` 那堵墙），而它要的是 Linux 的三张 **1024 位位图** ↔ WinSock 的 `fd_set` 数组，是同一个 `select` 之上的**另一套**翻译。② 更硬的一条：**`exceptfds` 没有忠实对应** —— WinSock 的 except 集是"带外数据 + 连接失败"，Linux 的是"异常条件"，没有一对一的映射。按这个 shim 自己的规矩（"**语义仿真，不是差不多能用**"），**近似的 select 比没有 select 更坏**：它会把分歧藏在一个看起来成熟的 API 后面。要补的话集合助手已经在了 |
 | `epoll` | 不做：IOCP，不是一次翻译能补的（原文理由仍成立） |
 | `sendmsg` / `recvmsg` | 不做：`iovec` 那一套；`sendto`/`recvfrom` + `syscall7` 已经够写 UDP 回显 |
 | `socketpair` / `AF_UNIX` | 不做：Windows 的语义与路径规则都不同，转发会**假装成功** |
