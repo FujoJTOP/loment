@@ -288,4 +288,6 @@ or you only want it to keep going — that is the whole ask. Thank you.
 
 ## Licence
 
-MIT ([LICENSE](LICENSE)). Contributions are accepted under it.
+The **Loment-Open License** ([LICENSE](LICENSE)) — the MIT License plus a base-attribution
+condition and a reserved name; file extensions and syntax are free. Contributions are accepted
+under it.

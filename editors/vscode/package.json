@@ -4,7 +4,7 @@
   "description": "Loment 语言支持：语法高亮 + LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155）",
   "version": "0.1.0",
   "publisher": "FujoJTOP",
-  "license": "MIT",
+  "license": "Loment-Open",
   "engines": {
     "vscode": "^1.91.0"
   },

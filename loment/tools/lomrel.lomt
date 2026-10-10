@@ -207,6 +207,8 @@ tools/loment_extblock_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py
 tools/loment_p9_test.py
+tools/loment_gc_surface.py
+tools/loment_gc_surface_test.py
 tools/loment_syscalls.py
 tools/loment_manual.py
 tools/ci.py

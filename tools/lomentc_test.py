@@ -28,7 +28,11 @@ def test(fn):
 
 
 def parse(src: str) -> lomentc.Module:
-    return lomentc.Parser(lomc.lex(src), src).parse()
+    m = lomentc.Parser(lomc.lex(src), src).parse()
+    # L0/L1/L2 的分析现在**不在 `parse()` 里**（它要跨模块的安全表，见 `_gc_alpha_pass`）——
+    # 判据若只 `parse` 就要读 `f.l0`/`s.l2`/`Return.l1`，得自己把那一趟跑上。无依赖 ⇒ `[]`。
+    lomentc._gc_alpha_pass(m, [])
+    return m
 
 
 def errs(src: str) -> list[str]:
@@ -1872,7 +1876,7 @@ L0_MANUAL_SRC = L0_PAIR_SRC.replace("@@CHOOSE@@", "choose gc_manual")
 #: `f_round`（20 -> 3×i64）、`f_atomic`（第三个只解引用的内建）在提升那一栏。
 L0_WANT = {
     "f_pos": {"p": 64},
-    "f_alias": {},
+    "f_alias": {"p": 64},
     "f_assign": {},
     "f_ret": {},
     "f_dyn": {},
@@ -1884,13 +1888,15 @@ L0_WANT = {
     "f_freed": {},
     "f_atomic": {"p": 8},
     "f_iflet": {},
-    "f_partial": {"p": 64},
+    "f_partial": {"p": 64, "q": 32},
 }
 
 #: 那一对程序里的 `alloc` 站点总数、以及 alpha 档**留下不动的**那几个 —— 两个数都写死，
 #: 于是"少提升一格"（alpha 数变大）与"多提升一格"（alpha 数变小）都会红。
+#: **跨函数 deref-only 放宽之后**（`docs/210` §7）：`consume`（只把首参透给 `load8`）成了安全
+#: 的被调 —— 于是 `f_alias` 的 `p`、`f_partial` 的 `q` 也提走了（站点 5 → 7，留下 11 → 9）。
 L0_ALLOC_SITES = 16
-L0_ALPHA_ALLOC_LEFT = 11
+L0_ALPHA_ALLOC_LEFT = 9
 
 
 def _l0_emit(src: str) -> tuple[dict[str, dict[str, int]], str]:
@@ -1925,7 +1931,7 @@ def test_l0_rule_pair():
     # 两个数都非平凡：不然"全都提升"与"一个都不提升"都能让上面两条同时成立
     assert 0 < L0_ALPHA_ALLOC_LEFT < L0_ALLOC_SITES, "这一对里两种走向都要有"
     # 缓冲的 `[... x i64]` 计数（每格两行：alloca + store）钉住"尺寸取整"没被改坏
-    assert alpha_ll.count(".buf") == 2 * sum(1 for v in L0_WANT.values() if v), alpha_ll.count(".buf")
+    assert alpha_ll.count(".buf") == 2 * sum(len(v) for v in L0_WANT.values()), alpha_ll.count(".buf")
     assert ".buf" not in manual_ll
     # 两份源**只差那一行** —— 不然"差别来自档位"这个说法就不成立
     assert L0_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
@@ -2248,7 +2254,7 @@ L2_WANT = {
     "f_free": [False],
     "f_l0": [False],
     "f_inline": [False],
-    "f_call": [False],
+    "f_call": [True],
     "f_bodyret": [True],
     "f_rettp": [False],
     "f_nested": [True, True],
@@ -2542,7 +2548,7 @@ L1_WANT = {
     "f_l0": [],
     "f_cond": [],
     "eat": [],
-    "f_escape": [],
+    "f_escape": ["p"],
     "f_userfree": [],
     "f_reassign": [],
 }
@@ -2602,8 +2608,11 @@ def test_l1_definite_lifetime_rule():
     assert all(v == [] for v in manual.values()), f"`gc_manual` 下不许插：{manual}"
     assert all(v == [] for v in auto.values()), f"`gc_auto` 下不许插：{auto}"
     # 不许空转：这一份源里必须**真的**有插进去的，也有被取消资格的
-    assert sum(len(v) for v in alpha.values()) == 7, "这条判据在空转（没有插进去的）"
-    assert alpha["f_l0"] == [] and alpha["f_cond"] == [] and alpha["f_escape"] == []
+    assert sum(len(v) for v in alpha.values()) == 8, "这条判据在空转（没有插进去的）"
+    assert alpha["f_l0"] == [] and alpha["f_cond"] == []
+    # `f_escape` 把 `p` 交给用户函数 `eat` —— `eat` 只把首参透给 `load8`（deref-only 放宽，
+    # `docs/210` §7），所以 `p` **不外逃**了，L1 接得住它。这一格正是那次放宽在 L1 上的钉子。
+    assert alpha["f_escape"] == ["p"], alpha["f_escape"]
     # 两份源只差那一行
     assert L1_ALPHA_SRC.replace("choose gc_auto_alpha", "X") ==         L1_MANUAL_SRC.replace("choose gc_manual", "X")
 
