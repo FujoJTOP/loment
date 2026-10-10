@@ -4633,7 +4633,12 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
 }
 
 /// 匹配的 '}' 之后的下标 (i 指向 '{')。
-fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
+///
+/// **`pub` 是必需的**：`potato.lomt` 也用它（它读 token 流，不重新解析）——
+/// 而跨模块调用只认 `pub`（M12）。原先这里漏了 `pub`，`potato.lomt` 那两处调用
+/// 一直是"调用未定义的函数"，只是**从来没有人把 potato 当入口查过**才没暴露
+/// （`#149` 那条：依赖的正文不查 —— 参考实现补上之后，driver 的依赖检查立刻报出来）。
+pub fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
     let d: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 {

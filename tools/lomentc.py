@@ -3147,15 +3147,32 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     return mod, deps
 
 
+def _unit_id(m: Module) -> object:
+    """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
+
+    同一个文件被 `load()` 两次会得到**两个对象**, 但仍是同一个单元 —— 所以有源文件
+    路径就取**规范化后的路径**; 没有路径 (`translated` 那种) 退回模块名。
+    """
+    if m.src is not None:
+        try:
+            return m.src.resolve()
+        except OSError:
+            return str(m.src)
+    return m.name
+
+
+def _unit_where(m: Module) -> str:
+    """诊断里指一个单元指到**文件**上 —— 名字相同的两份文件, 只报名字分不开。"""
+    return f"`{m.src.as_posix()}`" if m.src is not None else f"`{m.name}`"
+
+
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-          deps: list[Module] | None = None) -> list[str]:
-    # ⚠️ **已上报的缺口 (`docs/198` §4): 依赖模块的正文不查。**
-    # 只把 `deps` 的**导出符号**入表 (M12: 仅 pub 可见), 正文不验 —— 于是
-    # `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**,
-    # 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的
-    # 程序 check 都是绿的。最小复现六行, 在 `docs/198` §4。
-    # 今天唯一抓得住它的是"把库文件自己当入口"那种形状 (`loment_std_test`
-    # 的 `test_std_modules_are_checkable`) —— 给库写判据的人只能先靠这个。
+          deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+    # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
+    # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
+    # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
+    # 使用它的程序 check 都是绿的。做法见本函数末尾: 把每个依赖**当成入口**再查一遍
+    # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
     funcs = dict(ext_funcs or {})
@@ -3275,20 +3292,41 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 解析到同一个函数 (静默错编)。以前只有"入口模块 vs 依赖的 pub"会报, 依赖之间的私有
     # 重名一路静默 —— 这里补齐。预置枚举 (Option/Result) 由 load() 注入每个模块, 排除。
     # 同一模块内部的重名由下面各自的规则报, 这里只管跨模块。
-    seen_decl: dict[str, str] = {}          # name -> 先声明它的模块名
+    # 闸立在这条**上面**: 单元的**名字**先得唯一。两份文件都写 `module same` 时,
+    # 下面那把按名字去重的闸会把它们当成同一个模块 —— 闸不响, 产物里两条
+    # `define @f` (非法 IR), 一直拖到链接器才炸成内部异常 (`#139`)。
+    seen_unit: dict[object, Module] = {}
     for m0 in [*deps, mod]:
-        decls = [(f.name, f.line, "函数") for f in m0.funcs]
-        decls += [(s.name, s.line, "结构体") for s in m0.structs]
-        decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
-        decls += [(c.name, c.line, "常量") for c in m0.consts]
-        for nm, ln, kind in decls:
-            prev = seen_decl.get(nm)
-            if prev is None:
-                seen_decl[nm] = m0.name
-            elif prev != m0.name:
-                # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
-                errs.append(f"{ln}: {kind} {nm} 与模块 {prev} 重名 —— "
-                            f"单元的发射符号是平的 (ABI), 请改名")
+        seen_unit.setdefault(_unit_id(m0), m0)
+    seen_name: dict[str, Module] = {}
+    dup_unit = False
+    for m0 in seen_unit.values():
+        prev = seen_name.get(m0.name)
+        if prev is None:
+            seen_name[m0.name] = m0
+        else:
+            dup_unit = True
+            errs.append(f"1: 单元名 `{m0.name}` 被两份文件同时声明 —— "
+                        f"{_unit_where(prev)} 与 {_unit_where(m0)}；单元的发射符号是平的 "
+                        f"(ABI)，两份同名单元会把同一个符号定义两遍。改掉其中一个 `module` 名")
+
+    # 名字已经撞了的话下面这条**不再报** —— 那些"同名符号"全是上面那条的症状,
+    # 一起倒出来只会把根因埋掉 (第一个错才是根因)。
+    if not dup_unit:
+        seen_decl: dict[str, Module] = {}   # name -> 先声明它的那个**单元**
+        for m0 in [*deps, mod]:
+            decls = [(f.name, f.line, "函数") for f in m0.funcs]
+            decls += [(s.name, s.line, "结构体") for s in m0.structs]
+            decls += [(e.name, e.line, "枚举") for e in m0.enums if not e.from_prelude]
+            decls += [(c.name, c.line, "常量") for c in m0.consts]
+            for nm, ln, kind in decls:
+                prev = seen_decl.get(nm)
+                if prev is None:
+                    seen_decl[nm] = m0
+                elif _unit_id(prev) != _unit_id(m0):
+                    # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
+                    errs.append(f"{ln}: {kind} {nm} 与模块 {prev.name} 重名 —— "
+                                f"单元的发射符号是平的 (ABI), 请改名")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -3509,6 +3547,30 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+
+    # ---- 依赖的**正文**也要查 (`#149`, 2026-10-09 补)。
+    #
+    # 上面走完的是**入口单元**的正文; `deps` 的正文一个字都没验 —— 一个库可以带着
+    # 正文类型错发布, 而每个使用它的程序 check 都是绿的 (`docs/198` §4)。
+    #
+    # 做法: 把每个依赖**当成入口**再查一遍。它的 `use` 图这次**不用重解** —— 把
+    # 其余依赖整份当符号表递下去就够了(`resolve_deps` 给的就是整个闭包, 而被依赖者
+    # 在前的顺序意味着一个依赖的符号在这次调用里**已经看见了**)。传整份闭包只会让
+    # 可见面**更宽**, 于是漏报的可能有、误报没有 —— 宁可少报也不冤枉。
+    #
+    # `_dep_pass` 挡住递归: 依赖再审一遍它的依赖会转成环。
+    #
+    # 入口**已经有错**就不往下走了 —— 那些错多半就是下游症状的原因, 一起倒出来只会
+    # 把根因埋掉 (与 `pytrans` 的 `pp_uns`、`check` 里那条 `dup_unit` 同一条纪律)。
+    # 改完入口再跑一次, 依赖那层的错自然浮上来。
+    if not _dep_pass and deps and not errs:
+        for d in deps:
+            others = [x for x in deps if _unit_id(x) != _unit_id(d)]
+            sub = check(d, ext_funcs=ext_funcs, deps=others, _dep_pass=True)
+            if sub:
+                # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。
+                where = _unit_where(d)
+                errs.extend(f"{where}: {e}" for e in sub)
     return errs
 
 
