@@ -958,7 +958,8 @@ fn pt_gl_inrange(nm: u32, out: ptr, n: u32) -> u32 {
 /// 回对数。`while` / `for VAR in …` 之后**第一个** `{` 就是体 —— 解析器在循环头里
 /// `no_struct`，所以那里不会冒出结构体字面量的 `{`（与 `lomentc` 的 `at = self.i + 1` 同一起点）。
 /// **`impl T for X` 里的 `for` 不算**：靠 "`for` 名字 `in`" 这个形状分开。
-fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, out: ptr) -> u32 {
+fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, out: ptr,
+                  safe: ptr) -> u32 {
     let n: u32 = 0;
     let i: u32 = fat;
     while i < fend && n < PT_GLRMX {
@@ -978,7 +979,7 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
             if b < fend {
                 let at: u32 = b + 1;
                 let end: u32 = skip_block(unit, t, b) - 1;
-                if l2_ok_at(unit, t, at, end, fat, fend, npar, par) == 1 {
+                if l2_ok_at(unit, t, at, end, fat, fend, npar, par, safe) == 1 {
                     store32(out, n * 8, at);
                     store32(out, n * 8 + 4, end);
                     n = n + 1;
@@ -1000,7 +1001,8 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
 ///   * 其余落 L3（由调用方用 `total` 减出来）。
 /// 12 个十六进制位的打包与"站点数不可能过 65535"这条一起成立 —— 单元规模那里早有上限。
 fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr) -> u64 {
-    let nrng: u32 = pt_gl_l2ranges(unit, t, fat, fend, npar, par, ptr_add(sc, PT_GLRNG));
+    let nrng: u32 = pt_gl_l2ranges(unit, t, fat, fend, npar, par, ptr_add(sc, PT_GLRNG),
+                                   ptr_add(sc, PT_GLSAFE));
     let nl0: u32 = 0;
     let nl1: u32 = 0;
     let nl2: u32 = 0;
@@ -1027,13 +1029,15 @@ fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr
                 j = j + 1;
             }
             if done == 1 && pt_tis(unit, t, j, ";") {
-                if l0_size_at(unit, t, nm, fat, fend, npar, par) != 0 {
+                if l0_size_at(unit, t, nm, fat, fend, npar, par,
+                              ptr_add(sc, PT_GLSAFE)) != 0 {
                     nl0 = nl0 + 1;
                 } else if pt_gl_inrange(nm, ptr_add(sc, PT_GLRNG), nrng) == 1 {
                     nl2 = nl2 + 1;
                 } else if pt_gl_istop(unit, t, fat, nm) == 1
                         && l1_ptr_only_at(unit, t, nm, fat, fend, npar, par,
-                                          ptr_add(sc, PT_GLSCR)) == 1 {
+                                          ptr_add(sc, PT_GLSCR),
+                                          ptr_add(sc, PT_GLSAFE)) == 1 {
                     nl1 = nl1 + 1;
                 }
             }
@@ -1281,12 +1285,15 @@ const PT_GLPMX: u32 = 64;
 const PT_GLRNG: u32 = 114192;       // 本函数"开着纪元的循环体"范围: 32 × 8 {at, end}
 const PT_GLRMX: u32 = 32;
 const PT_GLSCR: u32 = 114448;       // `l1_ptr_only_at` 的 `out`（它要写"最后一次用处"）
+// `docs/210` §7 那次放宽的**安全名表**（`[count, name_tok…]`，与 codegen 的 `CG_SAFE` 同形）。
+// 由 codegen 的 **`compute_safe`** 填（potato `use codegen`，两边共用同一支扫描 ⇒ 同一集合）。
+const PT_GLSAFE: u32 = 114456;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 114456;
+const PT_SC_BYTES: u64 = 132864;    // 含上面的安全名表 ((1 + 4600) × 4)
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -4716,6 +4723,9 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
         return pt_wfail("fujoc-s: --emit-potato: brk 失败 (单态化工作区)\n");
     }
     let sc: ptr = scv as ptr;
+    // **跨函数 deref-only 安全表**（`docs/210` §7）—— codegen 的 `compute_safe`（potato
+    // `use codegen`）。与 codegen 那边**同一支扫描**，于是 gc_ladder 四层与发射路径一致。
+    let _sft: u32 = compute_safe(unit, t, ptr_add(sc, PT_GLSAFE));
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);
     store32(sc, PT_EN, 0);
