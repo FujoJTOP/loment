@@ -1954,6 +1954,22 @@
    "sha256": "bae432e8e67c673815ea5a8b9510d2ebfad9310031ff2f7c9b3674ae9296a906"
   },
   {
+   "path": "docs/213-reclamation-limit.md",
+   "sha256": "603e6dc7523d0111c9b6daac6649c98b4b0e7654e62b2fd7256c933d1e95f9ef"
+  },
+  {
+   "path": "docs/214-lomentgc-absolute-limit.md",
+   "sha256": "03a133e800d119272ea12b0155464b680938deb19f7fe5ca40eff544af51ab08"
+  },
+  {
+   "path": "docs/215-recompute-reclamation.md",
+   "sha256": "b8e5892b88dc01743a8b4bb29f36dbfd5c402701a38f13a93c4387eed44b3f08"
+  },
+  {
+   "path": "docs/216-alpha-v2-design-final.md",
+   "sha256": "c60f285d5a6188c4ad1bbcda19bd0ea8addc0746831b6aa8418f03deef917bc2"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "2e9655b04ae67f329e4f9cc61dce7bc0b6ae3a531f234a416167a0c43b6651d5"
   },
