@@ -317,10 +317,10 @@ fn cmd_tree(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
             while k > 0 {
                 k = k - 1;
                 if lex_ent_kind(eents, k) == LEX_NAME {
-                    let ch: u32 = sto_find_bytes(ws, n,
+                    let ch: u32 = idn_resolve_name(ws, n, cur,
                         ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr,
                         lex_ent_len(eents, k));
-                    if ch != PKG_NONE && spx < 256 {
+                    if ch != PKG_NONE && ch != IDN_NOEDGE && spx < 256 {
                         txt_store32(stack, spx * 8, ch);
                         txt_store32(stack, spx * 8 + 4, depth + 1);
                         spx = spx + 1;
@@ -366,10 +366,11 @@ fn build_lock(ws: ptr, n: u32, root: u32) -> u32 {
         while k > 0 {
             k = k - 1;
             if lex_ent_kind(eents, k) == LEX_NAME {
-                let ch: u32 = sto_find_bytes(ws, n,
+                let ch: u32 = idn_resolve_name(ws, n, cur,
                     ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr,
                     lex_ent_len(eents, k));
-                if ch != PKG_NONE && (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && spx < 256 {
+                if ch != PKG_NONE && ch != IDN_NOEDGE
+                    && (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && spx < 256 {
                     pkg_set_flag(ws, ch, PKG_F_INCLOSURE);
                     txt_store32(stack, spx * 8, ch);
                     spx = spx + 1;
