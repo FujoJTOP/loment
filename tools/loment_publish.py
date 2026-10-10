@@ -345,12 +345,15 @@ loment build lompi.lomt -o lompi
 
 ```
 lompi version
-lompi index   <store>
-lompi show    <store> <name[@version]>
-lompi tree    <store> <name[@version]>
-lompi resolve <store> <name[@version]>          # 打锁（按哈希钉住）
-lompi check   <dir>                             # 校验一个库目录
+lompi list  [<store>]                     # 列出仓库里的包（index 是同义词）
+lompi show  [<store>] <name[@version]>
+lompi tree  [<store>] <name[@version]>
+lompi resolve [<store>] <name[@version]>  # 打锁（按哈希钉住）
+lompi check <dir>                         # 校验一个库目录
 ```
+
+`<store>` 可以省 —— 省掉就用全局 store（`lompi config` 打的那一行 `store:`），
+和 pip 一样不必每次把库的位置写出来。
 
 自检驱动 `lpi_test.lomt`：每个模块一个 `selftest_<模块>()`，汇总后**退出码即结论**。
 

@@ -410,7 +410,7 @@ pub fn selftest_lex() -> u32 {
 // 每一段都不重叠 —— 手写偏移重叠一次就是难查的踩内存, test_pkg_ws_* 把每条
 // 相邻边界都断言一遍。改任何数字都要让那条测试继续过。
 
-pub fn ws_size() -> u32 { return 1441792; }
+pub fn ws_size() -> u32 { return 1397120; }
 
 pub const WS_NAMES: u32 = 0;            // 名字池 (包名 + 版本名)
 pub const WS_ENTS: u32 = 65536;         // 外层目录项
@@ -461,6 +461,17 @@ pub const WS_ZERO_CAP: u32 = 8;
 /// 给调用方 (lpi_cli) 用的**报告输出**区 —— 内部不碰它, 所以可以边查边往里拼。
 pub const WS_REPORT: u32 = 1253760;
 pub const WS_REPORT_CAP: u32 = 131072;
+/// 给调用方 (lpi_cli) 用的**生效 store 路径** —— 命令行走一次就定下来 (给了 `<store>`
+/// 就照抄, 没给就按全局根推一个), 后面所有命令都读这一份。
+/// 单独占一块而不是借 WS_SCR: `obj add/get` 也把 WS_SCR 当自己的文件路径暂存用,
+/// 借用的话 store 会在读出来之前被覆盖掉。
+pub const WS_DSTORE: u32 = 1384832;
+pub const WS_DSTORE_CAP: u32 = 4096;
+/// `idn_pass2` 的**每包一格**记录 (u32/包, 下标 = 包下标): 上一遍把这个包卡在
+/// **哪个依赖**上。挡路的那个还没定身份时, 那一遍不必再 lex 这个包一遍
+/// (见 `idn_pass2` 里的注释)。长度按 `WS_PKG_CAP` 开。
+pub const WS_BLOCK: u32 = 1388928;
+pub const WS_BLOCK_CAP: u32 = 2048;
 pub const WS_ONAMES_CAP: u32 = 8192;
 pub const WS_INAMES_CAP: u32 = 4096;
 
@@ -1201,6 +1212,41 @@ pub fn sto_find_bytes(ws: ptr, n: u32, nm: ptr, nl: u32) -> u32 {
     return best;
 }
 
+/// 按**模块名**找它的**归属包**: 遍历仓库里每个包, 看哪个包的源文件里有 `<名字>.lomt`。
+/// 找不到返回 PKG_NONE。
+///
+/// 为什么需要它 (docs/199): 名字形式的 `use X` 现在也命中**包内模块** —— std 的
+/// `numfmt` / `out` / `mem` 就是这么被 host 用的 (`host/{io,log,stat}.lomt`)。X 是
+/// 模块时它的依赖是**归属包**, 不是"名叫 X 的那个包"(store 里没有)。
+///
+/// 取**第一个**命中的包: 仓库里同名模块多于一个时编译器本来就报"名字导入有歧义",
+/// 那种树编不出来, 这里给它一个确定的答案就够了。
+///
+/// 注意: 会用掉列目录那套暂存 (WS_NAMES / WS_ENTS / WS_DBUF), 与 `pkg_list_sources` 同
+/// —— 调用方别指望它们。
+pub fn sto_find_module(ws: ptr, n: u32, nm: ptr, nl: u32) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let i: u32 = 0;
+    while i < n {
+        let nf: u32 = pkg_list_sources(ws, pkg_dir(ws, i));
+        if nf != DIR_ERR {
+            let k: u32 = 0;
+            while k < nf {
+                let o: u32 = dir_ent_name_off(ents, k);
+                let l: u32 = dir_ent_name_len(ents, k);
+                if l == nl + 5 && txt_eq(names, o, nl, nm, 0, nl)
+                    && txt_eq_lit(names, o + nl, 5, ".lomt") {
+                    return i;
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return PKG_NONE;
+}
+
 /// 按**字节**名字 + 可选版本找包 (给命令行用: 参数是运行期的字节, 不是字面量)。
 /// vl == 0 表示不限定版本, 取版本最大的那条。
 pub fn sto_find_bytes2(ws: ptr, n: u32, nm: ptr, nl: u32, vm: ptr, vl: u32) -> u32 {
@@ -1428,7 +1474,9 @@ fn test_pkg_ws_layout_does_not_overlap() -> bool {
         && WS_SNAMES + WS_SNAMES_CAP <= WS_STORE
         && WS_STORE + WS_STORE_CAP <= WS_ZERO
         && WS_ZERO + WS_ZERO_CAP <= WS_REPORT
-        && WS_REPORT + WS_REPORT_CAP <= ws_size();
+        && WS_REPORT + WS_REPORT_CAP <= WS_DSTORE
+        && WS_DSTORE + WS_DSTORE_CAP <= WS_BLOCK
+        && WS_BLOCK + WS_BLOCK_CAP <= ws_size();
     // 暂存内部的三处固定用法 (zero 在 TMP+0, leaf 在 TMP+2048, sto_scan 的包名在
     // TMP+4096) 必须都落在 TMP 里 —— 也就是上面那条 WS_TMP + WS_TMP_CAP <= WS_ONAMES。
 }
