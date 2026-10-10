@@ -279,7 +279,11 @@ def checksums_text(doc: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_release")
-    ap.add_argument("--emit", action="store_true")
+    # 路径**可选** (与 `--checksums PATH` 同一形状): 给了就写那里, 不给还是仓库那条。
+    # 与自举那份 `lomrel.lomt` 的 `--emit` 逐字对齐 —— 两边都认这条可选路径,
+    # `loment_rel_test` 才能拿"各写一份进程私有路径, 再比字节"来验它。
+    ap.add_argument("--emit", nargs="?", const="", metavar="PATH",
+                    help="写发布清单 (默认 loment/build/release-manifest.json)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
@@ -289,14 +293,17 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.checksums).write_text(checksums_text(want), encoding="utf-8", newline="\n")
         print(f"[OK] {a.checksums} ({len(want['files'])} 行)")
         return 0
-    if a.emit:
-        OUT.parent.mkdir(parents=True, exist_ok=True)
+    if a.emit is not None:
+        # 给没给路径决定写哪儿; 打出来的那一行**回显调用方给的那个串** (自举侧也是这么做的),
+        # 不给才回显仓库那条默认路径。
+        dest = Path(a.emit) if a.emit else OUT
+        dest.parent.mkdir(parents=True, exist_ok=True)
         # 显式 LF: 清单是机器读的工件 (行尾不该随宿主变), 见 loment_manual 同处注释
-        OUT.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8", newline="\n")
-        print(f"[OK] {OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
+        dest.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
+                        encoding="utf-8", newline="\n")
+        print(f"[OK] {a.emit or OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
         return 0
-    if a.check or not (a.emit or a.checksums):
+    if a.check or (a.emit is None and not a.checksums):
         # 无参数 = 门禁模式 (与仓库其它工具同一约定: ci.py 的静态门禁按 main() 调用)
         if not OUT.exists():
             print(f"[ERR] {OUT.relative_to(ROOT)} 缺失 (运行 --emit)")

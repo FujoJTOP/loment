@@ -184,14 +184,26 @@ def test_driver_seed_matches_reference() -> None:
 
 **加片号已经没用了**：再切只会让更多片各自付那 95s，墙钟不动。
 
-还有一条**没修**的观察，记在这里免得下次重新发现：分片把"哪些判据会同时跑"这件事换了，
-于是**并发窗口变密**。6 片那一轮实测到一次 `loment_rel_test` 在片 6 里 **5/6**、单跑
-**6/6** —— 按既有机制判为并行假红（`flaked.txt`），门禁结论不受影响，但它每出现一次就
-要多花一次单跑的时间，且是噪音。**没修的理由**：那一条的根因要么是它自己**写仓库里的
-固定路径**（`loment/build/_rel_cks.sum`，以及它 `--emit` 那一条会临时改写
-`loment/build/release-manifest.json` —— 与 docs/181 §2 那条"临时文件名必须带进程号"的
-纪律不符），要么是分片本身给它的压力；两种都该单独一个 PR 改，而**把门禁搬上分片时
-不该顺手改判据**（文件头第二条边界）。
+还有一条**已修**的观察（分片搬上来时先记在这里，按"别在搬家时顺手改判据"那条边界留到
+单独一个 PR）：分片把"哪些判据会同时跑"这件事换了，于是**并发窗口变密**。6 片那一轮实测到
+一次 `loment_rel_test` 在片 6 里 **5/6**、单跑 **6/6** —— 按既有机制判为并行假红
+（`flaked.txt`），门禁结论不受影响，但每出现一次就多花一次单跑，且是噪音。
+
+**根因不在 `loment_rel_test` 自己**（原先猜的两个固定路径确实也不合规，一起改了，见下），
+而在**同片的 `loment_gc_surface_test`**：`loment_gc_surface._ladder_of` 把注入后的源写在
+**源同目录**（`loment/selfhost|lib|examples/`，三个都是 `*.lomt` 的 GLOB 目录），名字取
+`.tmp-gcsurface-<名字>.lomt`。它赌的是"**点开头的名字 glob 匹配不到**" —— 那是 **shell 与
+`glob` 模块**的规矩，**`pathlib.Path.glob` 不遵守**（按 `fnmatch` 比，`*.lomt` 照样命中），
+而 `loment_release.build()` 走的正是 `Path.glob`。于是窗口里那一份被
+`loment_rel_test::test_manifest_order_is_platform_independent` 数进了
+`loment/selfhost/*.lomt` 那一组，报"这一组在清单里的次序不是字节序"。
+
+**改法**：① `_ladder_of` 的注入副本改写到**本进程私有的临时目录**（那段源根本不进仓库；
+它不必是同级文件 —— 名字形式的 `use` 按 `NAME_ROOTS` 解析，没有一层是"入口文件旁边"，
+路径形式先试 `root`）；② `loment_rel_test` 那两条写盘的判据改喂进程私有路径：`--checksums`
+本来就收路径，`--emit` 现在也收一条**可选**路径（两侧逐字对齐，不给还是仓库那条），于是
+"真落盘 + 比字节"一条没少，而共享清单一个字节都不碰。默认路径那件事由
+`test_emit_default_path_is_the_same_on_both_sides` 就地钉住（它不需要 WSL，在 ubuntu 上真跑）。
 
 还有一条与"快"相反、但必须一起记的：**分片把"装工具链"这件事复制了 N 份**。
 2026-10-10 实测到一次 `apt-get` 在镜像上卡住 **10 分钟**（正常 95s）—— 单 job 时
