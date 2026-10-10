@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+import potato_from  # noqa: E402
 
 # 需要合并的多字符运算符 (词法器逐字符产出 punct)
 MERGE = {"->", "::", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "..", "=>"}
@@ -110,6 +111,7 @@ def _brace_kind(line_toks: list[lomc.Tok]) -> str:
 
 
 def format_source(src: str) -> str:
+    potato_from.refuse_foreign_grammar(src, "lomfmt")
     toks = [t for t in merge_ops(lomc.lex(src)) if t.kind != "eof"]
     out: list[str] = []
     line: list[str] = []

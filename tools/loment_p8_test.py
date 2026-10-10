@@ -572,6 +572,81 @@ def test_m81_falling_off_the_end_is_refused():
             errs = lomentc.check(lomentc.load(f))
             assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
         print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E024), {len(good)} 种合法收尾都放行")
+def test_m81_two_units_with_the_same_module_name():
+    """M81/单元级唯一性: **两份文件都写 `module same`** 必须先被拒 (`#139`)。
+
+    这把闸原先按**模块名**去重 —— 两份都叫 `same` 的文件在它眼里是**同一个模块**,
+    于是闸不响: `check` 退 0、`build` 报 "0 失败"、产物里两条 `define i32 @f`
+    (**非法 IR**), 一路拖到链接器才炸成内部异常 (`ELF-ERR: ElfError: 标签重复: f`,
+    而 `tools/loment.py` 只接 `lomc.LomError`, 所以那是一段栈)。
+
+    现在**单元名**这一条立在符号那条**上面**, 而且消息点出**两个文件** —— 只报名字
+    的话, 用户分不清"改哪一个"。
+
+    自举 checker 这边对不上: 它**不解析 `use`**(见 `test_m81_loment_checker_matches_python`
+    那条边界), 根本看不见第二个单元 —— 所以这一条只钉参考实现。移植到 checker.lomt
+    时会落到 `RULE_GAPS` 那条纪律上。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        d = Path(tds)
+        (d / "a.lomt").write_text(
+            "module same\npub fn f() -> i32 {\n    return 11;\n}\n",
+            encoding="utf-8", newline="\n")
+        (d / "b.lomt").write_text(
+            "module same\npub fn f() -> i32 {\n    return 22;\n}\n",
+            encoding="utf-8", newline="\n")
+        ent = d / "host.lomt"
+        ent.write_text(
+            'module host\nuse "a.lomt"\nuse "b.lomt"\n'
+            "fn _start() {\n    syscall4(60, f() as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        mod = lomentc.load(ent)
+        deps = lomentc.resolve_deps(mod, ROOT, ent.parent, entry=ent)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "两份同名单元没被拒 —— 产物会是两条 define @f (非法 IR)"
+        assert any("单元名" in e and "a.lomt" in e and "b.lomt" in e for e in errs), \
+            f"没报出'单元名被两份文件同时声明', 也没点出是哪两个文件: {errs}"
+        assert len(errs) == 1, f"根因一条就够, 不该倒出一串症状: {errs}"
+        print(f"      同名单元: 拒, 且消息点出两个文件（{errs[0][:48]}…）")
+
+
+@test
+def test_m81_dep_body_is_checked():
+    """M81: **依赖的正文也要查** (`#149`, `docs/198` §4)。
+
+    `check` 原先只把 `deps` 的**导出符号**入表, 正文一个字不验 —— 于是
+    `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**, 只有当**入口**
+    查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的程序 check 都绿;
+    抓得住它的只有"把库文件自己当入口"那种形状 —— 那是**给库写判据的人**的义务,
+    没有一个消费者能强制。
+
+    现在把每个依赖**当成入口**再查一遍(它的 `use` 图就是整份闭包), 消息前面点出
+    **哪个文件** —— 不然用户不知道去改哪一个。自举 checker 不解析 `use`, 所以这一条
+    同样只钉参考实现。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        d = Path(tds)
+        (d / "deps" / "badlib").mkdir(parents=True)
+        (d / "deps" / "badlib" / "badlib.lomt").write_text(
+            "module badlib\npub fn f(p: ptr) -> u32 {\n    return p;\n}\n",
+            encoding="utf-8", newline="\n")
+        ent = d / "main.lomt"
+        ent.write_text(
+            "module main\nuse badlib\nfn _start() {\n"
+            "    let x: u32 = f(alloc(8));\n    syscall4(60, x as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        mod = lomentc.load(ent)
+        deps = lomentc.resolve_deps(mod, ROOT, ent.parent, entry=ent)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "库的正文类型错在**当依赖**时没被报出来"
+        assert any("badlib" in e and "return 类型 ptr" in e for e in errs), \
+            f"报了别的、没报库正文那一处: {errs}"
+        # 库文件**自己当入口**时也报 —— 两边是同一句话 (否则又是两个答案)
+        own = lomentc.load(d / "deps" / "badlib" / "badlib.lomt")
+        own_deps = lomentc.resolve_deps(own, ROOT, d / "deps" / "badlib", entry=None)
+        direct = lomentc.check(own, deps=own_deps)
+        assert any("return 类型 ptr" in e for e in direct), direct
+        print("      依赖正文: 当依赖 / 当入口 都报得出同一处")
 
 
 def _build_checker(td: str) -> Path:
