@@ -755,7 +755,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "39ef0188291fe2e93a5972651de0d9eb2ca7ceeb1066fa724af699156bfeebb8"
+   "sha256": "4ee9796485b7deacde6ad58d88b578b64b22b687c50f8f0b9165ffa14b573909"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1023,11 +1023,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "a3728297ddb80f713c6a86aff0c544376a211ebcf7a671a9a03c95998aacc4f5"
+   "sha256": "1f7a34fd37abaac5076a4845ab14d120b64421d6ee685b4e0bf1e8909c2e60c0"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "4c6e4df531391f27daae22d54b43baeba7bd7db8d7108c6eb44ff5e3b2df448b"
+   "sha256": "0ead69e78f3d2edffe93db757ea16ebf190b46e9a75bb15f1d4bf31e13bfb4fd"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1952,6 +1952,10 @@
   {
    "path": "docs/212-loment-open-license.md",
    "sha256": "bae432e8e67c673815ea5a8b9510d2ebfad9310031ff2f7c9b3674ae9296a906"
+  },
+  {
+   "path": "docs/213-gate-shards.md",
+   "sha256": "2d3b9acdc8d5753bcd29473f468ab680d29309bfccd44b2cf94c3d15ba7fbd02"
   },
   {
    "path": "docs/manual/index.md",

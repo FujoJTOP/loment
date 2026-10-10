@@ -14,12 +14,15 @@
 # 量于 2026-09-22，`main@61f6289` 那一轮（run 35785011534）实测 10 条：
 # 4 条是"缺 LinuxFUAI 姊妹检出"（与本机同源），其余是 Linux 可移植性（正在逐条修）。
 #
+# 2026-10-10 删两条（**只许变短**，本轮就是那个 PR）：
+#   * `loment_lomtfrom_test` —— 连续两轮实测全绿；
+#   * `potato_test` —— 同上（那两条"孪生二进制段错误"的 Linux 可移植性已经不再复现；
+#     门禁从 2026-10-09 起每轮都在 summary 里点名它们"已经绿了"，删掉就是消掉那个提醒）。
+#
 # 格式：每行一个检查名（`:: [static] <名字> … FAIL` 里的那个名字）；`#` 起头是注释。
 fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
 lom_audit                    # 环境：同上（要读对方的 C 头）
 lomc_test                    # 环境：同上（发布副本一致性那两条）
 potato_cross                 # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
-loment_lomtfrom_test         # 仓库：Linux 可移植性
 loment_multisyntax_projects_test  # 仓库：新落的判据，runner 上 2/3（正在修）
 loment_trans_test            # 仓库：Linux 可移植性
-potato_test                  # 仓库：Linux 可移植性（孪生二进制段错误那条）
