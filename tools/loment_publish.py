@@ -306,7 +306,10 @@ bug reports. Loment is developed in this repository, and the working conventions
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The **Loment-Open License** — the MIT License plus two conditions: source derived from Loment
+must credit that base, and the name "Loment" is reserved. File extensions and syntax are free:
+you may build a different language from this source without `.lomt` or `.lom`. See
+[LICENSE](LICENSE).
 """,
     },
     "lompi": {
