@@ -34,7 +34,7 @@ const PE_DATA_RVA: u32 = 0x2000000;
 const PE_STATE_RVA: u32 = 0x3000000;
 const PE_SEC_ALIGN: u32 = 0x1000;
 const PE_FILE_ALIGN: u32 = 0x200;
-const PE_WS_SIZE: u32 = 1067616;   // 与参考实现的 WS_SIZE 对齐（联网加了 WSADATA + 暂存）
+const PE_WS_SIZE: u32 = 1069192;   // 与参考实现的 WS_SIZE 对齐（再加 `poll` 的三个 fd_set）
 const PE_IMPORT_DESC: u32 = 60;    // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
                                    // （kernel32 + ws2_32 ⇒ 两条描述符；写死 40 会让
                                    //   镜像的 PE 与参考差这一格 —— 判据当场抓）
@@ -1962,6 +1962,9 @@ fn asm_code(t: ptr, s: u32, e: u32) -> u32 {
     if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 56 {
         return 6;                                   // r8
     }
+    if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 57 {
+        return 7;                                   // r9（Linux 第 6 个实参，syscall7 用满）
+    }
     return 0;
 }
 
@@ -1980,6 +1983,9 @@ fn asm_reg(code: u32) -> u32 {
     }
     if code == 5 {
         return 10;
+    }
+    if code == 7 {
+        return 9;                               // r9
     }
     return 8;
 }
@@ -2041,7 +2047,7 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
     let d: u32 = c;
     // rax 最后写, 其余先写
     let code: u32 = 2;
-    while code <= 6 {
+    while code <= 7 {
         let q: u32 = 0;
         while q < nargs {
             if arg_code(t, p3, p4, q) == code {
