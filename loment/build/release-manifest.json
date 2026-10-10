@@ -755,7 +755,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "4ee9796485b7deacde6ad58d88b578b64b22b687c50f8f0b9165ffa14b573909"
+   "sha256": "e5f4dc26d20da8ecc45af800893862524b95ec38b7be2070638c9b06edd7e874"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1959,7 +1959,7 @@
   },
   {
    "path": "docs/213-gate-shards.md",
-   "sha256": "2d3b9acdc8d5753bcd29473f468ab680d29309bfccd44b2cf94c3d15ba7fbd02"
+   "sha256": "a8c2407ed35ae6b578a172f53436c5d8ed6b8bae18f087e60304b4999b6a0ff8"
   },
   {
    "path": "docs/manual/index.md",
