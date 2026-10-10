@@ -1015,11 +1015,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "a3728297ddb80f713c6a86aff0c544376a211ebcf7a671a9a03c95998aacc4f5"
+   "sha256": "449c17b09bab3f1ff934d35116b8535f4d30cfa7f91b1cd181c2ccda12074e0c"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "4c6e4df531391f27daae22d54b43baeba7bd7db8d7108c6eb44ff5e3b2df448b"
+   "sha256": "eb81bf8ba268facdfb0a7cd028da647d44cfbb5119c79504d9795443cca1e7c5"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1071,7 +1071,7 @@
   },
   {
    "path": "loment/tools/lomcli.lomt",
-   "sha256": "4e93aa8d52444f11cbe81161b389340a88f5efa7216bad4bcb453692f73b34dc"
+   "sha256": "e9db5354ed0abe388789eb26ec28423f10d12e9109f2e3b5f541fc4757862518"
   },
   {
    "path": "loment/tools/lomclicheck.lomt",
