@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loment_dist  # noqa: E402
+import loment_seed  # noqa: E402
 import lomentc  # noqa: E402
 
 #: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
@@ -189,10 +190,10 @@ def build() -> tuple[Path, Path]:
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
     check("--check 与 SHA256SUMS 一致",
           loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
-    # 归档里的 driver == 同一份 IR 现链出来的（中间没被动过）
+    # 归档里的 driver == **种子**现链出来的（中间没被动过）
     driver = loment_dist._lomelf_link(
-        (loment_dist.STAGE / "driver.ll").read_text(encoding="utf-8"), "elf")
-    check("归档里的 loment-driver == 构建产物",
+        loment_dist.SEED.read_text(encoding="utf-8"), "elf")
+    check("归档里的 loment-driver == 种子链出来的",
           read_tar(tar)["bin/loment-driver"] == driver)
     check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
           "bin/loment-lomelf" in read_tar(tar))
@@ -565,6 +566,23 @@ def test_windows_installer(zipf: Path) -> None:
 
 # ------------------------------------------------------------------ main
 
+def test_driver_seed_matches_reference() -> None:
+    """`SEED` 必须**就是**参考实现为 `loment/selfhost/driver.lomt` 发射的 IR。
+
+    **为什么这条在这个文件里也要有**（`loment_seed_test` 已经有一条一样的）：包里的
+    `bin/loment-driver` 现在**取自种子**，不再现场重编（见 `loment_dist.SEED_TOOL`）——
+    于是"包里那个 driver 确实等于从 driver.lomt 编出来的东西"就全押在种子上，而种子
+    一旦悄悄过期，**发行包判据自己看不出来**。这条把那个前提钉在**同一个判据**里。
+
+    代价是参考实现发射一次 driver（本机 2.5s），换掉的是原来那 273s 的重编 —— 同一件事
+    的**第一遍**，由本地跑的这条钉住；`loment_seed_test` 的 `bootstrap` 另有一条
+    "stage1 自编 == 种子"的定点判据。
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = loment_seed.check()
+    check("种子 == 参考实现为 driver.lomt 发射的 IR（包里 driver 的来源）", rc == 0)
+
+
 def test_check_detects_staleness() -> None:
     """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
 
@@ -688,7 +706,8 @@ def test_docs_samples_compile() -> None:
 
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
-    for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+    for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
+                     ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):

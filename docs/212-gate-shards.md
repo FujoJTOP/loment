@@ -1,0 +1,160 @@
+# 212 · 门禁：20 分钟砍到 N 片
+
+> 状态: **已实现**（2026-10-09）· 入口: `python tools/ci.py --static-only`（本机一条路、
+> CI 上 N 片并行）
+> 一句话: **整道门禁的墙钟被一条判据里的一步钉死（954s / 20 分钟里的 16 分钟），而那一步
+> 是同一件事的第二遍 —— 拿掉它，再按实测耗时切片。**
+
+`docs/181` 是上一集：串行 25+ 分钟 → `-j` 并行 3 分钟。它结尾留了三条"下一步"，其中
+第二条是**去掉重复的自举链**，并且写着"**在没量之前，别在这三条里选**"。这篇就是量完之后
+的结论 —— 它选的是那一条。
+
+## 1. 先量
+
+那一轮 CI（run 36209626967，2026-09-26，`main@8ebef4e`）的 job 级与判据级实测：
+
+```
+装工具链      95s
+跑静态门禁  1107s        （下面这张表之和 = 2036s，`-j 4`）
+job 合计   20m10s
+```
+
+64 条里**八条吃掉 96%**：
+
+| 判据 | 秒 | 占比 |
+|---|---|---|
+| `loment_dist_test` | **954.5** | 46.9% |
+| `loment_seed_test` | 243.8 | 12.0% |
+| `loment_p8_test` | 229.2 | 11.3% |
+| `loment_ctrans_test` | 168.9 | 8.3% |
+| `loment_trans_test` | 136.6 | 6.7% |
+| `loment_lompi_test` | 119.8 | 5.9% |
+| `loment_cli_test` | 50.8 | 2.5% |
+| `loment_potato_emit_test` | 50.0 | 2.5% |
+| 其余 56 条 | ~82 | 4% |
+
+两个数一起看才说明问题：**墙钟 1107s ≈ 最慢一条 954s**。并行早就榨干了 ——
+其余 63 条全都跑在它的阴影里。所以"门禁太慢"这件事当时**不是调度问题**，
+是那一条本身的问题。
+
+## 2. 瓶颈在"一条判据里的**一步**"
+
+把 `loment_dist_test` 拆开量（本机 Windows，`--emit` 那段逐工具计时）：
+
+| 段 | 本机 | 说明 |
+|---|---|---|
+| 前置五条（布局/归档/新鲜度/skill/文档样例） | 3s | 与速度无关 |
+| `build_stage1`（种子 → stage1） | 0.9s | 纯 Python `lomelf` 链一次 |
+| `build_tools` 里 **`emit_ir(loment-driver)`** | **273.1s** | **`build_tools` 的 76%** |
+| `build_tools` 其余 8 个工具 | 88s | lsp 27 / lompi 17 / lomenterr 15 / … |
+| 两个平台各链一遍（9 工具 × 2） | 3.8s | 3.2MB 的 IR 也只要 0.8s |
+| `test_install_sh`（WSL/Linux 上装+跑） | 5.7s | |
+
+那 273s 是**自举编译器编译它自己**（`loment/selfhost/driver.lomt`）。对比：
+
+```
+Python 参考实现 lomentc 发射 driver.lomt   2.5s   → 3.21MB IR
+自举 stage1        编译 driver.lomt     273.1s   → 3.21MB IR   （慢 110 倍）
+```
+
+**为什么差 110 倍**：`loment_dist.build_stage1` 用**纯 Python 的 `lomelf`** 把种子链成
+stage1，而 `lomelf` 是"栈机、不做寄存器分配"的后端（见 `tools/lomelf.py` 开头那串 v0
+取舍）。那个 stage1 跑起来比参考实现慢两个数量级。
+
+CI 上按 **2.55×** 的实测倍率折算（本机 `loment_dist_test` 374s ↔ CI 954s）：
+`emit_ir(loment-driver)` ≈ **700s**，正好是那 954s 的四分之三。
+
+## 3. 那一步是**重复劳动** —— 这才是关键
+
+`loment/selfhost/driver.lomt` 的 IR 有两条独立判据在守，而它**已经作为种子提交在仓里**
+（`loment/build/selfhost_driver.ll`，docs/159）：
+
+* `loment_seed_test`：**种子 == 参考实现为 driver.lomt 发射的 IR**（`loment_seed.check()`，
+  本机 3.1s）；
+* `loment/bootstrap.sh` 第 2 步：**stage1 编译 driver.lomt == 种子**（定点本身）。
+
+而 `bootstrap.sh` 在 CI 上**走的是 clang 那支**：`loment/build/genesis/lomelf-linux-x64.elf`
+的 git mode 是 **100644（没有可执行位）**，`[ -x "$genesis" ]` 过不了。clang 编出来的
+stage1 是**优化过的**，所以那边同样的活便宜得多 —— `loment_seed_test` 整条才 244s（含
+两遍定点 + 一遍非自身入口），而这恰恰说明`loment_dist_test` 那 700s 买到的**不是覆盖，
+是同一件事的第二遍**。
+
+## 4. 改了什么
+
+1. **`loment_dist.py`: `SEED_TOOL`** —— `build_tools` 里 `loment-driver` 的 IR 直接取
+   `SEED`，不再用 stage1 重编。`--only driver` 因此连 stage1 都不必造（秒级）。
+   包里那个 `bin/loment-driver` 于是**就是种子链出来的** —— 语义与原来一致（定点保证
+   两者逐字节相同），只是不再为它等 700s。
+2. **`loment_dist.py`: `build_tools` 并发** —— 其余 8 个入口互相独立（各写各的
+   `STAGE/<name>.ll`），用 `ThreadPoolExecutor` 并行跑。收益全在 `emit_ir` 那些**子进程**
+   上；链接是纯 Python、GIL 下不并行，但它总共才几秒。落盘仍按 `TOOLS` 顺序 ——
+   **发布清单的顺序是判据**（`loment_publish` 那条钉的就是"两处清单同集合不同顺序"）。
+3. **`loment_dist_test.py`: 补一条便宜的自我佐证** —— 见第 6 节。
+4. **`ci.py`: `--shard K/N`** —— 把 `STATIC_CHECKS` 切成 N 片，**第 0 片是独占的**
+   （`EXCLUSIVE_STATIC`），**`ISOLATED_STATIC` 那两条长尾各占一片**，其余按实测耗时贪心
+   均分。划分是**算出来的**、并且当场断言"并集恰好等于 `STATIC_CHECKS`、互不相交" ——
+   手写一张名单的话，新增一条判据就会静默落在所有片之外，那条判据从此不跑而门禁照样绿。
+5. **`ci.py`: `--shard-profile K/N`** —— 每一片要装什么，三档：`none`（一条外部命令都不碰）、
+   `llvm`（只要 clang）、`full`。**只有 `ISOLATED_STATIC` 独占的片能是 `llvm`**，
+   因为"只要 clang"那句话是逐条看过的。
+6. **`gate.yml`: 矩阵 + 聚合** —— 各片一个 runner（`fail-fast: false`，一片红不许砍掉
+   别的片）、按档位装工具链；`static` 那个 job **名字不变**（保护规则挂的就是它），
+   负责把 N 份 `gate.out` 合成一份再对基线判定，并显式把"分片红了"转成自己红
+   （`needs` 失败默认是**跳过**，而跳过不算失败 —— 保护规则会永远等下去）。
+
+## 5. 实测（本机）
+
+| | 改前 | 改后 |
+|---|---|---|
+| `loment_dist.py --emit --no-exe` | 361.3s | **34.1s** |
+| `loment_dist_test` | ~374s | **63.9s** |
+
+改后 `loment_dist_test` 里最大的一块变成其余 8 个工具的并发编译。
+
+## 6. 覆盖没有少，只是换了个地方付账
+
+`loment_dist_test` 现在**不重编 driver**，所以"包里那个 driver 确实等于从 driver.lomt
+编出来的东西"这句话**在该判据内部**就少了一个前提。补法不是"信任兄弟判据"，
+而是把那个前提**就地钉住**：
+
+```python
+def test_driver_seed_matches_reference() -> None:
+    """`SEED` 必须**就是**参考实现为 driver.lomt 发射的 IR。"""
+```
+
+它跑 `loment_seed.check()`（本机 3.1s，换掉的是原来的 273s）。于是判据自己就能推出
+"归档里的 driver == 参考实现的产物"，而"stage1 自编 == 种子"那条定点仍由
+`loment_seed_test` 的 `bootstrap` 守着（它一直在门禁里）。
+
+**别把这两条判据拆到不同地方去**：它们是一对，一条没了另一条就变成"把可能过期的东西
+藏起来"（与 `loment_seed_test` 里 `test_seed_is_marked_generated` 和
+`test_seed_matches_reference` 的关系同一个形状）。
+
+## 7. 地板在哪（下一步别再往这儿使劲）
+
+分片之后墙钟 ≈ **最重那一片**，不是"总和 ÷ N"。所以：
+
+* `loment_seed_test` 244s **整条没法再切**（它的两遍定点是**先后依赖**的：stage2 来自
+  stage1 的输出）。它自己一片，`+ 装 clang` 就是那一片的地板 ≈ 280s。
+* 同一档位上的 `loment_p8_test` 229s 同理。
+* 装工具链那 95s（apt 55s + LLVM 19 35s）现在**每片各付一次**，但它是**各片并行**付的 ——
+  所以在墙钟上只算一次，且只算在最重那片身上。
+
+于是"再快"只剩三条路，都**还没做**：
+
+1. **把 244s/229s 这两条本身弄快**（它们的对照组是 clang，慢在自举那两遍定点）；
+2. **把工具链装成缓存/镜像**（95s → 二十几秒）；
+3. 这两条判据能不能共用一次自举（同 §1，得先量）。
+
+## 8. 怎么用
+
+```bash
+python tools/ci.py --shard-plan 5        # 打印 5 片的分法（片号/档位/名字）
+python tools/ci.py --shard-profile 3/5   # 只打印第 3 片要装什么（none/llvm/full）
+python tools/ci.py --static-only --shard 3/5     # 只跑第 3 片
+python tools/ci.py --static-only                 # 本机整道（不分片，老行为）
+```
+
+`gate.yml` 的矩阵里那五行（片号、总数、档位）是 `--shard-plan 5` 的**副本**，而每一片
+开头会**当场核对**（"档位自检"）：对不上就失败。理由是**少装一个包会变成一条假红** ——
+那比慢几分钟糟得多，所以这里不猜。

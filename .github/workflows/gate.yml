@@ -1,34 +1,57 @@
 # 静态门禁 —— **已经是必需检查**（`main` 的保护规则里 `ci.py --static-only` 挂着）
 #
-# 历史: 第一轮是**测量轮**（62 条 43 PASS / 19 FAIL，整轮 6m23s，artifact 里有原始日志）。
-# 那一轮不当门用是对的 —— 19 条红里 15 条是"本机全绿、runner 上红"的 Linux 可移植性问题，
-# 而基线必须**实测**，否则接上必需检查的第一天就是 19 条红的噪音。
-# **2026-09-24 复核时那个状态已经过去了**：基线收到 8 条，保护规则里已经挂上这个 job，
-# 所以这段头注释此前是错的（写着"还没设成必需检查"，而它当时已经是了）。改掉。
+# ## 它为什么不是"全绿才算过"（历史，别删）
 #
-# 三种用法:
-#   1) 自动: PR 与 push 到 main → 跑整道静态门禁（62 条）→ 红项进 job summary、
-#      原始日志进 artifact；
-#   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
-#      输出**。为什么需要这条: `bash tools/ci.py:203` 每条只留**最后一行**，那不够
-#      定位病因（第一轮的 artifact 就是这么被它限制住的）；
-#   3) 手动给 `only`（逗号分隔的子串）→ 走 ci.py 只跑那几条，用来快速确认"修好了"。
+# 第一轮（2026-09-22 搬上 CI）是**测量轮**：62 条 43 PASS / 19 FAIL，整轮 6m23s，
+# artifact 里有原始日志。那一轮不当门用是对的 —— 19 条红里 15 条是"本机全绿、runner 上红"
+# 的 Linux 可移植性问题，而基线**必须实测**，否则接上必需检查的第一天就是 19 条红的噪音。
+# 2026-09-24 复核时那个状态已经过去了：基线收到 8 条，保护规则里已经挂上这个 job。
 #
-# 三条边界（都来自仓库自己的纪律）:
-#   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
-#     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
-#   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
-#
-# ## 它现在是**门**，判据是"不新增红"
-#
-# 全绿还不是现状（实测 10 条已知红），所以判据不是"全绿"而是**"不新增红"**：
-# 基线（`.github/gate-baseline.txt`，**实测**出来的那份清单）上的红不判失败，
-# **清单之外的**红判失败。这就是"必需检查"能挂上来而不变成噪音的原因。
-#
-# 两处细节:
+# 所以判据不是"全绿"而是**"不新增红"**：基线（`.github/gate-baseline.txt`，**实测**
+# 出来的那份清单）上的红不判失败，**清单之外的**红判失败。这就是"必需检查"能挂上来
+# 而不变成噪音的原因。两处细节（各片与 `static` 里各有一半，别搬走）:
 #   * **新红先单跑一遍再判**：并行轮里的红有一部分只是撞上了别的套件在写同一棵树
 #     （`CONTRIBUTING.md` 记过）。单跑还是红才算数 —— 误报的门会被人忽略。
 #   * **基线只许变短**：哪一条修好了就在同一个 PR 里删掉它，否则 summary 会一直提醒。
+#
+# ## 为什么拆成 N 片（2026-10-09, docs/212）
+#
+# 实测那一轮（run 36209626967）整道门禁 **20m10s**：装工具链 95s + 判据 18m27s。
+# 64 条合计 2036s，`-j 4` 下墙钟 1107s —— 并行是有效的，**但墙钟被一条判据钉死**：
+# `loment_dist_test` 一条 **954s**，占墙钟 58%。它自己 3/4 的时间花在"用 stage1 重编
+# 自举驱动"上（纯 Python `lomelf` 链出来的 stage1 是无优化的，而 Python 参考实现
+# 做同一件事只要 2.5s），**而那是同一件事的第二遍** —— `loment_seed_test` 已经用
+# 便宜得多的方式（clang 编的 stage1）付过账。那一步拿掉之后（`ci.py:SEED_TOOL`），
+# 剩下的工作量在 4 路上摊不开，于是按实测耗时切成 N 片：
+# **片是并行 job，片内仍是 `-j 4`**，墙钟从"最慢那条"降到"最重那片"。
+#
+# 分片表**不在这个文件里**：`python tools/ci.py --shard-plan N` 打印它，而它是把
+# `STATIC_CHECKS` 全表切出来的**划分**（覆盖是构造性的，见 `ci.py:shards`）。
+# 手写一张名单在这里，新增判据就会静默落在所有片之外 —— 那条判据从此不跑，
+# 而门禁照样绿。这正是本仓反复踩过的那类洞。
+#
+# ## 四种用法
+#
+#   1) 自动: PR 与 push 到 main → 各片并行跑 → `static` 合起来汇总、对基线判失败；
+#   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
+#      输出**。为什么需要这条: `tools/ci.py` 每条只留**最后一行**，那不够定位病因；
+#   3) 手动给 `only`（逗号分隔的子串）→ 走 ci.py 只跑那几条，用来快速确认"修好了"；
+#   4) 手动给 `diagnose_twin` → 跑写死的定向探针。
+#   2)~4) 都走 `static-manual` 那个 job（它**不**叫 `ci.py --static-only`）：它们是手工
+#   诊断，不该顶替 PR 上那道门，也不该被摊进分片（分片的前提是"跑全部"）。
+#
+# ## 四条边界（都来自仓库自己的纪律）
+#
+#   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
+#     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
+#   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
+#   * **`static` 那个 job 的名字不许改**：它**就是**保护规则里挂着的那个必需检查名。
+#     分片之后真正干活的是 `static-shard`（矩阵，名字带 `(K/N)` 后缀），
+#     所以那一名必须由 `static` 扛着 —— 名字一没，保护规则就永远等不到它，
+#     PR 会**全部**卡住（而不是松开）。
+#   * **片号与档位是 `ci.py` 说了算**（`--shard-profile K/N`）。矩阵里那份
+#     `include:` 只是它的**副本**，而那一片自己会**当场核对**（"档位自检"那一步）。
+#     对不上就失败，不猜 —— 少装一个包会变成一条假红，那比慢几分钟糟得多。
 
 name: gate
 
@@ -69,6 +92,9 @@ jobs:
   # 一个字节都不取进工作区，就没有"未审代码被执行"的面。也正因如此它**不需要**
   # `pull_request_target`（那个事件为了拿写权限会带来真实的注入风险）—— 只读 token
   # 就够读文件列表。
+  #
+  # **它为什么不进分片**：它一个字节都不从树里取，跑 5 秒，也不碰任何共享位置。
+  # 摊进分片只会让它跟着某一片一起排队。
   lom-door:
     name: lom/ 禁区
     runs-on: ubuntu-latest
@@ -128,30 +154,63 @@ jobs:
           done
           exit 1
 
-  static:
-    name: ci.py --static-only
+  # **干活的那一半**：每一片是一个独立 runner，片内仍是 `-j 4`。
+  #
+  # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
+  # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
+  #
+  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 5` 的副本（片号、总数、
+  # 档位）。**改分片形状要同时改 `ci.py` 和这里**，而"档位自检"那一步会让漏改的
+  # 那一片直接失败 —— 见文件头第四条边界。
+  static-shard:
+    name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
+    if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, total: 5, profile: none }
+          - { shard: 2, total: 5, profile: llvm }
+          - { shard: 3, total: 5, profile: llvm }
+          - { shard: 4, total: 5, profile: full }
+          - { shard: 5, total: 5, profile: full }
     steps:
       - uses: actions/checkout@v4
+
+      # 先核对档位再动手装 —— 矩阵里那格是**手抄**的，抄错（或 `ci.py` 那边的
+      # `ISOLATED_STATIC` 改了）会变成"少装了包"→ 一条**假红**。宁可在这里失败。
+      - name: 档位自检
+        run: |
+          want=$(python3 tools/ci.py --shard-profile "${{ matrix.shard }}/${{ matrix.total }}")
+          echo "ci.py 说这一片要: $want  矩阵里写的是: ${{ matrix.profile }}"
+          if [ "$want" != "${{ matrix.profile }}" ]; then
+            echo "::error::档位对不上 —— 不猜。改 ci.py 或改这里的 include:，两边要一致"
+            exit 1
+          fi
 
       # 装门禁要的外部命令。名单是实测出来的
       # （`grep -rho 'which("...")' tools/*.py`）: clang 45 处，还有
       # llvm-objdump/nm/ar、qemu-system-x86_64/qemu-aarch64、rustc、java、go、vim、node。
       # 第一轮的环境自述证明**命令清单**已经够（只缺不需要的 nvim）—— 但**版本**不够:
       # 见下面 LLVM 那一段。
-      - name: 装工具链
+      #
+      # **按档位装**：`full` 那几片什么都可能用上；`llvm` 那两片是 `ISOLATED_STATIC`
+      # 独占的（`loment_seed_test` / `loment_p8_test`），逐条看过只用 clang；`none`
+      # 那片一条外部命令都不碰，什么都不装。省下的是**最重那两片**的等待 ——
+      # 它们本来就要跑 200s+，不该再为 qemu/jdk/go 干等几十秒。
+      #
+      # **片与片各装一份**是故意的：装的是**系统**包，没法在 job 之间传（artifact 只能
+      # 传文件，铺不进 /usr）。收益是各片的安装**并行**发生 —— 95s 不再乘 N。
+      - name: 装工具链（full）
+        if: ${{ matrix.profile == 'full' }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             qemu-system-x86 qemu-user \
             golang-go default-jdk \
             nodejs npm vim
-          # 仓里发出的 IR 用 `#dbg_declare` —— 那是 **LLVM 19** 起的调试记录语法。
-          # ubuntu-24.04 自带的 clang 是 **18**，于是在 `--debug` 那几条判据上报
-          # `error: expected instruction opcode`（`loment_p7_test` 的符号化器、
-          # `loment_tools_test` 的 m59 三条）。本机能过是因为本机 LLVM 是 22。
-          # 版本下限写在 CONTRIBUTING「Getting a toolchain」。
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 19
@@ -164,7 +223,24 @@ jobs:
           clang --version | head -1
           llvm-objdump --version | head -1
 
+      # `llvm` 档：只要 clang。仓里发出的 IR 用 `#dbg_declare` —— 那是 **LLVM 19**
+      # 起的调试记录语法，而 ubuntu-24.04 自带的 clang 是 **18**（本机能过是因为本机
+      # LLVM 是 22）。版本下限写在 CONTRIBUTING「Getting a toolchain」。
+      - name: 装工具链（只要 clang）
+        if: ${{ matrix.profile == 'llvm' }}
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
+            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
+              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
+            fi
+          done
+          clang --version | head -1
+
       # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是这个 runner 上没有那个命令。
+      # 按档位装的片里，用不上的工具**预期是"缺"** —— 那一列不是红，是这一片的形状。
       - name: 环境自述
         run: |
           echo "runner: $(uname -a)"
@@ -172,6 +248,132 @@ jobs:
           echo "cpu: $(nproc)"
           echo "clang: $(clang --version | head -1)"
           echo "llvm-objdump: $(llvm-objdump --version | head -1)"
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
+                   qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
+                   python3 git sh; do
+            printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
+          done
+
+      # 这一片是哪些判据 —— **从 `ci.py` 打印**，不在这里列名字（理由见文件头）。
+      # 片内并行度 `-j` 用默认（min(8, nproc)）；片与片之间已经是并行的了，
+      # 再往上抬 `-j` 只会让同一台 4 vCPU 的 runner 自己跟自己抢。
+      - name: 跑这一片
+        run: |
+          python3 tools/ci.py --shard-plan "${{ matrix.total }}" | sed -n "${{ matrix.shard }}p"
+          python3 tools/ci.py --static-only --shard "${{ matrix.shard }}/${{ matrix.total }}" \
+            > gate.out 2>&1 || true
+          echo "--- 尾 30 行 ---"
+          tail -30 gate.out
+
+      - name: 汇总（这一片）
+        if: ${{ always() }}
+        run: |
+          set +e
+          pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
+          fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          echo "片 ${{ matrix.shard }}: 绿 $pass / 红 $fail / 共 $((pass + fail))"
+          {
+            echo "## 静态门禁 ${{ matrix.shard }}/${{ matrix.total }} —— 测量"
+            echo ""
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链档位 ${{ matrix.profile }}）"
+            echo ""
+            echo "### 红项"
+            echo '```'
+            grep ':: \[static\].*FAIL' gate.out || echo "（无）"
+            echo '```'
+            echo ""
+            echo "### 最慢的 8 条（这一片）"
+            echo '```'
+            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 门那一半：**只对"基线之外的红"报红**，而且**先单跑一遍再判**。
+      #
+      # **单跑放在**这里**（而不是最后那个汇总 job）是有原因的**：单跑一次要**真的跑**
+      # 那条判据，也就需要这一片的工具链。汇总 job 特意不装任何东西（它是最后一道，
+      # 装了就是纯加墙钟），所以那里只汇总结果、不再动手跑。
+      - name: 对照基线（这一片的新红，单跑确认）
+        if: ${{ always() }}
+        run: |
+          set +e
+          : > red.txt; : > base.txt; : > new_red.txt
+          : > confirmed.txt; : > flaked.txt
+          if [ ! -f .github/gate-baseline.txt ]; then
+            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
+            exit 1
+          fi
+          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
+          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
+          comm -13 base.txt red.txt > new_red.txt
+          while read -r name; do
+            [ -z "$name" ] && continue
+            echo "=== 新红复跑（单跑）: $name ==="
+            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
+            rc=$?
+            tail -4 "re_$name.log"
+            if [ $rc -eq 0 ]; then
+              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
+              echo "$name" >> flaked.txt
+            else
+              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
+              echo "$name" >> confirmed.txt
+            fi
+          done < new_red.txt
+          if [ -s confirmed.txt ]; then
+            echo "::error::门禁（片 ${{ matrix.shard }}）：新红 $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+          echo "片 ${{ matrix.shard }}: 没有新红"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: gate-log-${{ matrix.shard }}
+          path: |
+            gate.out
+            red.txt
+            base.txt
+            new_red.txt
+            confirmed.txt
+            flaked.txt
+            re_*.log
+          if-no-files-found: warn
+
+  # 手动用法（`suite` / `only` / `diagnose_twin`）—— 与日常那条路分开。它**不能**叫
+  # `ci.py --static-only`：那一名是保护规则里挂着的必需检查，而手工跑的这次不是 PR 上
+  # 的门。名字分开之后，两条路谁也不挡谁。
+  static-manual:
+    name: 门禁（手动：单跑套件 / 只跑几条 / 定向探针）
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 qemu-user \
+            golang-go default-jdk \
+            nodejs npm vim
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 19
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
+            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
+              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
+            fi
+          done
+          clang --version | head -1
+
+      - name: 环境自述
+        run: |
+          echo "runner: $(uname -a)"
+          echo "python: $(python3 -V)"
+          echo "cpu: $(nproc)"
+          echo "clang: $(clang --version | head -1)"
           for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
                    qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
                    python3 git sh; do
@@ -199,6 +401,17 @@ jobs:
             tail -60 "$out"
             rm -f "$out"
           done
+
+      # 用法 3: 只跑几条（走 ci.py 的 `--only-static`）。打的是**那几条**的原样输出 ——
+      # 这条路的用处是"我刚修完，确认一下"。
+      - name: 只跑几条
+        if: ${{ github.event.inputs.only != '' }}
+        run: |
+          set +e
+          args=""
+          IFS=',' read -ra parts <<< "${{ github.event.inputs.only }}"
+          for p in "${parts[@]}"; do args="$args --only-static $p"; done
+          python3 tools/ci.py --static-only $args 2>&1 | tail -60
 
       # 用法 4: 定向探针 —— 三条套件里的自举孪生二进制在 runner 上段错误（rc=-11），
       # 而本机（WSL，也是 Linux）全绿。这类事猜不出来，只能在 runner 上直接看。
@@ -233,93 +446,85 @@ jobs:
             -ex "bt" \
             --args python3 tools/potato_test.py 2>&1 | tail -70
 
-      # 用法 1/3: 跑整道门禁（或只跑几条）。红项留给下一步汇总，不让它把 job 弄挂。
-      - name: 跑静态门禁
-        if: ${{ github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
-        run: |
-          if [ -n "${{ github.event.inputs.only }}" ]; then
-            args=""
-            IFS=',' read -ra parts <<< "${{ github.event.inputs.only }}"
-            for p in "${parts[@]}"; do args="$args --only-static $p"; done
-            python3 tools/ci.py --static-only $args > gate.out 2>&1 || true
-          else
-            python3 tools/ci.py --static-only > gate.out 2>&1 || true
-          fi
-          echo "--- 尾 40 行 ---"
-          tail -40 gate.out
+  # `static` —— **这个名字就是保护规则里挂着的必需检查**（见文件头第三条边界）。
+  # 它不跑任何判据（那是各分片的事），只做两件各分片单看不了的事：
+  #   1. **把 N 片的 `gate.out` 合成一份** —— 于是"基线该变短了"能对着**整张表**算。
+  #      各片单独算是错的：别的片跑到绿的那几条，在它眼里全都"不在我这一轮的红里"，
+  #      会被误报成"已经绿了"。
+  #   2. 一句话报出全貌（绿/红/新红/假红/过期基线）。
+  # **特意不装工具链**：它是最后一道，装了就是纯加墙钟，而它不需要跑任何判据
+  # （新红单跑已经在各片里做完了 —— 只有那边有工具链）。
+  static:
+    name: ci.py --static-only
+    needs: [static-shard]
+    if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: 汇总
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gate-log-*
+          path: shards
+
+      # 合成是靠约定（各片都叫 `gate.out`，下载进 `shards/gate-log-<K>/`）。
+      # **少一片就少几条判据 —— 那不能静默**: 数对不上就红。
+      # 这也是"N 写错了"的兜底: N 一偏，划分就变，并集就不再是 `STATIC_CHECKS` 那么多条。
+      - name: 合成一份 gate.out
         run: |
+          set +e
+          cat shards/gate-log-*/*.out > gate.out 2>/dev/null
+          got=$(grep -c ':: \[static\]' gate.out || true)
+          want=$(python3 -c "import sys; sys.path.insert(0,'tools'); import ci; print(len(ci.STATIC_CHECKS))")
+          echo "合成后 $got 条 / STATIC_CHECKS 里 $want 条"
+          if [ "$got" != "$want" ]; then
+            echo "::error::分片结果不齐：只有 $got 条，应为 $want 条 —— 有一片没跑完或没上传"
+            exit 1
+          fi
+
+      - name: 汇总（全貌）
+        run: |
+          set +e
           pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          cat shards/gate-log-*/confirmed.txt 2>/dev/null | sed '/^$/d' | sort -u > confirmed.txt
+          cat shards/gate-log-*/flaked.txt 2>/dev/null | sed '/^$/d' | sort -u > flaked.txt
+          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
+          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
+          comm -13 base.txt red.txt > new_red.txt
+          comm -23 base.txt red.txt > gone.txt
+          n_red=$(wc -l < red.txt | tr -d ' ')
+          n_base=$(wc -l < base.txt | tr -d ' ')
+          n_bad=$(wc -l < confirmed.txt | tr -d ' ')
+          n_flake=$(wc -l < flaked.txt | tr -d ' ')
+          n_gone=$(wc -l < gone.txt | tr -d ' ')
           echo "绿 $pass / 红 $fail / 共 $((pass + fail))"
           {
-            echo "## 静态门禁 —— 测量"
+            echo "## 静态门禁 —— 全貌（各片合并）"
             echo ""
-            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链自述见日志）"
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
+            echo ""
+            echo "本轮红 **$n_red** · 基线 **$n_base** · 新红 **$n_bad** · 并行假红 $n_flake · 基线已过期 $n_gone"
             echo ""
             echo "### 红项"
             echo '```'
             grep ':: \[static\].*FAIL' gate.out || echo "（无）"
             echo '```'
             echo ""
-            echo "### 最慢的 8 条"
-            echo '```'
-            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # 真门那一半：对照基线，**只对新红报红**。
-      - name: 对照基线（只对新红报红）
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
-        run: |
-          set +e
-          if [ ! -f .github/gate-baseline.txt ]; then
-            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
-            exit 1
-          fi
-          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
-          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
-          comm -13 base.txt red.txt > new_red.txt
-          comm -23 base.txt red.txt > gone.txt
-          : > confirmed.txt
-          : > flaked.txt
-          while read -r name; do
-            [ -z "$name" ] && continue
-            echo "=== 新红复跑（单跑）: $name ==="
-            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
-            rc=$?
-            tail -4 "re_$name.log"
-            if [ $rc -eq 0 ]; then
-              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
-              echo "$name" >> flaked.txt
-            else
-              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
-              echo "$name" >> confirmed.txt
-            fi
-          done < new_red.txt
-          n_red=$(wc -l < red.txt | tr -d ' ')
-          n_base=$(wc -l < base.txt | tr -d ' ')
-          n_bad=$(wc -l < confirmed.txt | tr -d ' ')
-          n_flake=$(wc -l < flaked.txt | tr -d ' ')
-          n_gone=$(wc -l < gone.txt | tr -d ' ')
-          {
-            echo "## 对照基线（判据：不新增红）"
-            echo ""
-            echo "本轮红 **$n_red** · 基线 **$n_base** · 新红 **$n_bad** · 并行假红 $n_flake · 基线已过期 $n_gone"
-            echo ""
             if [ "$n_bad" -gt 0 ]; then
               echo "### 新红（这一笔引入的）"
               echo '```'
               cat confirmed.txt
               echo '```'
+              echo ""
             fi
             if [ "$n_flake" -gt 0 ]; then
               echo "### 并行假红（单跑绿 —— **不**判失败）"
               echo '```'
               cat flaked.txt
               echo '```'
+              echo ""
             fi
             if [ "$n_gone" -gt 0 ]; then
               echo "### 基线该变短了"
@@ -327,18 +532,30 @@ jobs:
               echo '```'
               cat gone.txt
               echo '```'
+              echo ""
             fi
+            echo "### 最慢的 8 条（各片合计）"
+            echo '```'
+            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n_bad" -gt 0 ]; then
             echo "::error::门禁：新红 $n_bad 条 —— $(paste -sd ' ' confirmed.txt)"
             exit 1
           fi
-          echo "门禁：没有新红（基线里 $n_gone 条已过期，见 job summary）"
+
+      # 分片那边红了，这一道必须**跟着红**。`needs` 的默认行为是"依赖失败就跳过"，
+      # 而跳过**不算失败** —— 保护规则会当成"还没报"而永远等下去。所以这里显式看结果。
+      - name: 分片有红就是红
+        if: ${{ needs.static-shard.result != 'success' }}
+        run: |
+          echo "::error::分片 job 结果 = ${{ needs.static-shard.result }} —— 门禁不通过"
+          exit 1
 
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+        if: ${{ always() }}
         with:
-          name: gate-log
+          name: gate-log-merged
           path: |
             gate.out
             red.txt
@@ -347,5 +564,4 @@ jobs:
             confirmed.txt
             flaked.txt
             gone.txt
-            re_*.log
           if-no-files-found: warn
