@@ -3501,6 +3501,19 @@ fn put_name(t: ptr, at: u32, s: str) -> u32 {
 /// 是手算好的字面位移，不是回填出来的）。
 ///
 /// 三个入口在整段里的偏移是 `0` / `29` / `54`（`memcpy` 29 字节、`memset` 25、`memcmp` 48）。
+/// 发一个"**换 ABI 的薄壳**"（`docs/219` §2.1）：C 按 System V 把实参放在 `rdi`，
+/// 而我们自己的函数**从栈上取**（调用方 `push`、被调方从 `[rbp+16]` 起）——
+/// 所以壳是 `push rbp; push rdi; call <tgt>; add rsp,8; pop rbp; ret`。
+///
+/// 与参考实现 `Emitter.emit_conscript` 里那两段**逐字节相同**：`call` 的 rel32 是
+/// **回填**出来的（不是字面量 —— 目标地址随布局变），两侧的回填口径也一样。
+fn emit_abi_wrapper(tab: ptr, out: ptr, c: u32, t: ptr, nm: u32, nl: u32, ts: u32, tl: u32) -> u32 {
+    lbl_add(tab, nm, nl, 0, 0, txt_base(tab) + c);
+    let d: u32 = blob_copy(out, c, "5557e800000000");   // push rbp; push rdi; call <占位>
+    fix_add(tab, c + 3, 0, ts, tl, 0, 0);               // rel32 落在 `E8` 的下一字节
+    return blob_copy(out, d, "4883c4085dc3");           // add rsp,8; pop rbp; ret
+}
+
 fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     let p0: u32 = cell(tab, C_EXTN);
     let p1: u32 = put_name(t, p0, "memcpy");
@@ -3510,7 +3523,28 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     lbl_add(tab, p0, 6, 0, 0, txt_base(tab) + c);
     lbl_add(tab, p1, 6, 0, 0, txt_base(tab) + c + 29);
     lbl_add(tab, p2, 6, 0, 0, txt_base(tab) + c + 54);
-    return blob_copy(out, c, "4885d20f84130000008a06880748ffc648ffc748ffca0f85edffffffc34885d20f840f00000040883748ffc748ffca0f85f1ffffffc34885d20f841b0000008a078a0e38c80f851200000048ffc748ffc648ffca0f85e5ffffff31c0c30fb6c00fb6c929c8c3");
+    let d: u32 = blob_copy(out, c, "4885d20f84130000008a06880748ffc648ffc748ffca0f85edffffffc34885d20f840f00000040883748ffc748ffca0f85f1ffffffc34885d20f841b0000008a078a0e38c80f851200000048ffc748ffc648ffca0f85e5ffffff31c0c30fb6c00fb6c929c8c3");
+    // ---- malloc / free：**内存那一条不收编，是"划掉"**（docs/219 §2.1）----
+    // **只在堆在的时候发** —— 底下调的是 `@__loment_alloc` / `@__loment_free`；没有它们
+    // 就没有"我们的堆"，发了会悬着一个未定义的调用。判据是**这份 IR 里有没有那两条定义**：
+    // `lbl_find` 比的是**内容**（`span_eq`），所以把名字写进名字池、拿这段 span 去查即可 ——
+    // 不必复用函数定义那一处 span。
+    // `put_name` 返回的是**末尾**偏移，所以每个名字的**起点**是它前一次的返回值：
+    // 起点依次是 `hn` / `a1` / `a2` / `a3`。长度写死（14/13/6/4）—— 与名字本身同生共死。
+    let hn: u32 = cell(tab, C_EXTN);
+    let a1: u32 = put_name(t, hn, "__loment_alloc");     // 14 字节
+    let a2: u32 = put_name(t, a1, "__loment_free");      // 13
+    let a3: u32 = put_name(t, a2, "malloc");             // 6
+    let a4: u32 = put_name(t, a3, "free");               // 4
+    setcell(tab, C_EXTN, a4);
+    let dd: u32 = d;
+    if lbl_find(tab, t, hn, 14, 0, 0) != NO {
+        dd = emit_abi_wrapper(tab, out, dd, t, a2, 6, hn, 14);
+    }
+    if lbl_find(tab, t, a1, 13, 0, 0) != NO {
+        dd = emit_abi_wrapper(tab, out, dd, t, a3, 4, a1, 13);
+    }
+    return dd;
 }
 
 fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {

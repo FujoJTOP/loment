@@ -1166,7 +1166,7 @@ class Emitter:
         self.asm.emit(mov_ri32(RDI, 0))
         self.asm.emit(b"\x0F\x05")
 
-    def emit_conscript(self) -> None:
+    def emit_conscript(self, defined: set[str]) -> None:
         """**收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
 
         名字与实现在这里，**表的另一半在 `tools/loment_ports.py`** —— 那边把它判成 `close`，
@@ -1232,6 +1232,25 @@ class Emitter:
                b"\x0F\xB6\xC9"                      # movzx ecx, cl
                b"\x29\xC8"                          # sub eax, ecx
                b"\xC3")                             # ret
+        # ---- malloc / free：**内存那一条不收编，是"划掉"**（`docs/219` §2.1）----
+        #
+        # 它们是一层**换 ABI 的薄壳**，不是一份新分配器：C 按 System V 把实参放在
+        # `rdi`，而我们自己的函数**从栈上取实参**（调用方 `push`、`[rbp+16]` 起）。
+        # 所以壳做三件事：`push rbp` / `push rdi` / `call`，回来清栈再返回。
+        #
+        # **只在堆在的时候发**：底下那两条 `@__loment_alloc` / `@__loment_free` 是我们这份
+        # IR 里的定义（编译器在程序用到 `alloc`/`free` 时发出）。没有它们就没有"我们的堆"——
+        # 那时**不发**，让外部对象的 `malloc` 在链接期响亮地报未定义，而不是发一个悬空调用。
+        if "__loment_alloc" in defined:
+            a.label("malloc")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (size)
+            a.call("__loment_alloc")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
+        if "__loment_free" in defined:
+            a.label("free")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (ptr)
+            a.call("__loment_free")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
 
 
 # ------------------------------------------------------------------ ELF 写出
@@ -3356,7 +3375,13 @@ C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 #: 尺子说"可闭合"而链接器发不出来，那条产物就会在链接期报"未定义的符号"，
 #: **与表上的话正好相反**。反过来不要求 —— 表里还有一批**尚未实现**的
 #: （`malloc` / `strlen` / `__udivdi3` …），那是 S1c 的活。
-CONSCRIPT = ("memcpy", "memset", "memcmp")
+CONSCRIPT = ("memcpy", "memset", "memcmp", "malloc", "free")
+
+#: 需要**堆在**才发的两个 —— 它们是一层"换成 C ABI"的薄壳，底下调的是
+#: `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1：**libc 的内存不属于 libc，
+#: 属于 Loment 的分配器**）。没有堆就没有"我们的堆"可指，发了会悬着一个未定义的调用。
+#: 判据是**我们这份 IR 里有没有那两条定义**，不是文本里出现过那个名字。
+CONSCRIPT_NEEDS_HEAP = ("malloc", "free")
 
 
 def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
@@ -3411,7 +3436,7 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     # "有没有人要它"：精确到后者要链接器先算出需求集，自举侧 `lomelf.lomt` 一次只驻留
     # 一个对象，那一格留到下一轮（`docs/219` §8b）。**测量不受影响** —— 那始终是尺子的活。
     if objects:
-        em.emit_conscript()
+        em.emit_conscript({f.name for f in funcs})
     # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
     #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
     #   ② **建符号表**: 把我们自己的标签与所有对象的导出符号合成一张表。**必须先全摆完**:

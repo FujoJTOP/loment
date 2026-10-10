@@ -1041,6 +1041,11 @@ def test_lomelf_selfhost_links_foreign_object():
         # 比的就是那 102 字节。参考侧发了、自举侧忘了发，这里必红。
         ("ffi4", ffitest.LOMENT_CONSCRIPT_SOURCE,
          [(ffitest.C_CONSCRIPT_SOURCE, "cons")], ["cons"], 130),
+        # **C2**（`docs/219` §8）：`malloc`/`free` 是**换 ABI 的薄壳**，底下调我们的堆 ——
+        # 壳里的 `call` 是**回填**出来的（两侧都算 rel32），所以这一格逐字节比的就是
+        # 那两条薄壳有没有算成同一个地址。
+        ("ffi5", ffitest.LOMENT_MALLOC_SOURCE,
+         [(ffitest.C_MALLOC_SOURCE, "mallocc")], ["mallocc"], 42),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -1078,7 +1083,7 @@ def test_lomelf_selfhost_links_foreign_object():
             finally:
                 for p in [elfrepo, llrepo, *clones]:
                     p.unlink(missing_ok=True)
-    print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面): "
+    print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳): "
           f"与参考逐字节相同, 退出码 " + " / ".join(str(c[4]) for c in cases))
 
 

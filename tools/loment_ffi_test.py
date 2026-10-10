@@ -907,6 +907,61 @@ def test_object_using_memcpy_is_conscripted_and_runs():
         print("      收编面: memset/memcpy/memcmp 由 Loment 提供 -> 退出码 130")
 
 
+#: **`docs/219` §8 的 C2 夹具**：C 侧的 `free` 要还的是 **Loment `alloc` 出来的块** ——
+#: 同一条空闲链。Loment 先 `alloc` 一块、交给 C；C 写一个字节，然后**用 C 的 `free`**
+#: 把它还掉；Loment 再要一次同尺寸 —— 只有拿回**同一个地址**才算"同一个堆"。
+C_MALLOC_SOURCE = """\
+extern void free(void *);
+
+int c_put(char *p) { p[0] = 42; free(p); return p[0]; }
+int c_same(char *a, char *b) { return a == b; }
+"""
+
+#: 退出码 = `(r - 42) * 1000 + 7 + c_same(b, b2) * 35` = **42**（两项都对时）。
+LOMENT_MALLOC_SOURCE = """\
+module consp3
+
+extern fn c_put(p: ptr) -> i32;
+extern fn c_same(a: ptr, b: ptr) -> i32;
+
+fn _start() {
+    let b: ptr = alloc(8 as u32);
+    let r: i32 = c_put(b);
+    let b2: ptr = alloc(8 as u32);
+    let code: i32 = (r - 42) * 1000 + 7 + c_same(b, b2) * 35;
+    syscall4(60, code as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_malloc_and_free_are_loments_own_heap():
+    """**`docs/219` §8 C2**（"堆**真是**我们的"，含反面）：C 世界的 `malloc`/`free`
+    不是另一份分配器，是 `@__loment_alloc` / `@__loment_free` 的**换 ABI 薄壳**。
+
+    判据要能分辨"同一个堆"与"另一个堆"，所以**不是**"C 能 malloc 出东西"（那太弱：
+    另起一份分配器也成立），而是**地址同一**：Loment `alloc` 一块 → C 写一个字节并用
+    **C 的 `free`** 还掉 → Loment 再要一次同尺寸，**必须拿回同一个地址**。
+    第一块在 bump 前沿上，前沿回退把它退回去 —— 只有 `free` 真接到了我们的空闲链，
+    第二次才会命中同一个地址。
+
+    **反面（这条判据的证伪）**：把 `free` 那一格从收编面里去掉（或让壳不接 `@__loment_free`），
+    地址就对不上 —— 退出码从 42 变成 7。C2 在文档里就是带这个反面的。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "m.c").write_text(C_MALLOC_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "m.c", td / "m.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_MALLOC_SOURCE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "m.o"], 42)
+        assert rc == 42, f"C2 不对: rc={rc} (期望 42; 7 = free 没接到我们的堆) err={err[-300:]!r}"
+        print("      C2: C 的 free 还回 Loment 的空闲链 -> 再 alloc 命中同一地址 (rc=42)")
+
+
 @test
 def test_object_with_undefined_symbol_is_rejected():
     """一个符号**到链接结束都没人提供** (典型是 libc) -> **硬拒**, 不猜。
