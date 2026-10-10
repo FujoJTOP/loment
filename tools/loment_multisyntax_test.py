@@ -992,6 +992,47 @@ def test_bad_literals_and_identifiers_are_refused_at_the_users_line():
     print("      八进制与 Unicode 标识符在**用户那一行**被拒；hex/十进制/ASCII 照旧")
 
 
+@test
+def test_entry_layer_refuses_foreign_grammar_instead_of_mangling_it():
+    """**"读 L1 源的入口"认出别的写法就拒**（`docs/182` §1.9 那条消费者轴）。
+
+    `lomfmt` / `lomdoc` 是**独立入口**：它们不走前门，直接拿词法器读原文。而一份
+    `.lomt` 里可以装六种写法的任何一种。对 C 那门后果很重：
+
+        choose write grammar c unsigned int f(unsigned int x) {     ← 声明与函数头揉成一行
+
+    **声明那一行整个是"怎么读"**：前门按它定读法、再把它抹成等长空白 ⇒ 那一行上的
+    函数跟着一起消失，单元变成空的。`lomfmt --write` 是**原地写回**，用户那份源就这么
+    被改坏了（实测：改之前跑一次，前门译文里那个函数**没了**）。
+
+    `lomdoc` 那边更绕：它**过前门**拿到的是**译文**的模块（函数带的是**译文行号**），
+    却拿**原文**去按那些行号索引 —— 短文件 `IndexError` 甩栈；长文件不越界，于是
+    **不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
+
+    两面都钉：非原生写法**必须拒**（`fmt` 还**不许动文件**），原生与 `rust` **照旧**。
+    """
+    import lomdoc                                                     # noqa: PLC0415
+    import lomfmt                                                     # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "w.lomt"
+        p.write_bytes(("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                       "    return x + 1;\n}\n").encode("utf-8"))
+        before = p.read_bytes()
+        assert lomfmt.main(["--write", str(p)]) == 2, "fmt 对 C 写法没拒"
+        assert p.read_bytes() == before, "fmt --write 把用户那份源改了"
+        assert lomfmt.main([str(p)]) == 2, "fmt（stdout 模式）没拒"
+        assert lomdoc.main([str(p)]) == 1, "doc 对 C 写法没拒"
+        # 原生与 `rust`（`NATIVE_GRAMMARS` 里那个）照旧
+        for tag, src in (("native.lomt", "module m\n\nfn f() -> i32 {\n    return 1;\n}\n"),
+                         ("rust.lomt", "choose write grammar rust\n\nmodule m\n\n"
+                                       "fn f() -> i32 {\n    return 1;\n}\n")):
+            q = td / tag
+            q.write_text(src, encoding="utf-8", newline="\n")
+            assert "fn f" in lomfmt.format_source(q.read_text(encoding="utf-8")), tag
+    print("      fmt/doc 认出非原生写法就拒（fmt 不动文件）；原生与 rust 照旧")
+
+
 
 @test
 def test_array_typed_struct_field_does_not_invalidate_the_object():

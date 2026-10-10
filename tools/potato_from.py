@@ -1799,6 +1799,31 @@ def _grammar_attempt(src: str) -> tuple[int, str] | None:
     return None
 
 
+def refuse_foreign_grammar(src: str, tool: str) -> None:
+    """**"读 L1 源的入口"不许去动用别的表层语法写的源** —— `docs/182` §1.9 那条轴。
+
+    `lomfmt` / `lomdoc` 是**独立入口**：它们拿 `lomc.lex` 直接读原文，**不走前门**。
+    而一份 `.lomt` 里可以装六种写法的任何一种。对 C 那门后果很重：
+
+        choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+
+    而**声明那一行整个是"怎么读"**：前门按它定读法、再把它抹成等长空白 ⇒
+    **那一行上的函数跟着一起消失**，单元变成空的，而全程**退 0**；
+    `lomfmt --write` 是**原地写回**，用户那份源就这么被改坏了。
+
+    所以这里**认出非原生写法就拒** —— 与 `loment check` 对同一份文件的处置一致。
+    `rust` 是**原生**（`NATIVE_GRAMMARS`，2026-09-22 的裁定），照旧放行。
+
+    **放在这里、不是各入口各写一份**：这是一条**规则**，抄两份必然漂。
+    """
+    lang, _err, declared = read_grammar_decl(src)
+    if declared and lang not in NATIVE_GRAMMARS:
+        raise ValueError(
+            f"这是用 {lang} 写法写的 Loment（文件头有 `choose write grammar`）—— "
+            f"{tool} 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`"
+            f"（`docs/211` / `docs/182` §1.9）。")
+
+
 def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
 
