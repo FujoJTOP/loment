@@ -6000,13 +6000,20 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     if load32(s, 532) == 1 {
         emit_str_globals(s, out, src, toks);
-        // 命令入口的路径常量**紧跟字符串常量之后、那个空行之前** —— 参考实现里它落在
-        // `globals_` 的末尾（字符串常量也是追加进 `globals_` 的），于是产物里是
-        // `[字符串][它][空行][函数]`。带命令声明的单元**必然**有字符串字面量（名字本身
-        // 就是），所以这一格总在。
-        if cmd_entry_needed(src, toks) == 1 {
-            emit_cmd_globals(s, out);
-        }
+    }
+    // 命令入口的路径常量**紧跟字符串常量之后、那个空行之前** —— 参考实现里它落在
+    // `globals_` 的末尾（字符串常量也是追加进 `globals_` 的），于是产物里是
+    // `[字符串][它][空行][函数]`。
+    //
+    // **它不在"有没有字符串常量"那个分支里**：形态 A（`register` 块）的单元可以
+    // **一个字符串字面量都没有**（形态 B 一定有 —— 名字本身就是那个字符串）。原先
+    // 挂在那个分支下，于是这类单元的产物里 `_start` 引用了一个**没定义**的全局，
+    // 而参考实现有 —— 实测：`loment_p8_test` 报 `register_hello.lomt` 少 117 字节。
+    let has_cmd: u32 = cmd_entry_needed(src, toks);
+    if has_cmd == 1 {
+        emit_cmd_globals(s, out);
+    }
+    if load32(s, 532) == 1 || has_cmd == 1 {
         emit_str(s, out, "\n");
     }
     store32(s, 64, 0);       // 实例表: 按"首次被用到"的顺序追加
