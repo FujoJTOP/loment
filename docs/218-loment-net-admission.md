@@ -37,7 +37,7 @@ fn _start() {
 
 ```rust
 // tools/potato.py:51 —— 边界由**名字**划
-BOUNDARY_BUILTINS = ("syscall4", "syscall6", "ptr_add", "ptr_sub", "str_ptr")
+BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "str_ptr")
 ```
 `tools/lomentc.py:3996` 就是在数这几个名字出现了几次。它的文档（`lomentc.py:3956-3971`）
 把立场写得比我能写的更清楚：
