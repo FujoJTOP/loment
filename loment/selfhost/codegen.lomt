@@ -2329,7 +2329,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32) -> u32 {
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            if load32(s, 576) == 1 {
+            if gc_any(s) == 1 {
                 // `gc_auto`：分配**之前**先问一句"该收了没有"（`docs/210` §2.1）。
                 // 收在分配之前 -> 不需要"分配失败再重试"那条路，`__loment_alloc`
                 // 一个字节都不用动（另外两档的产物因此逐字节不变）。
@@ -3403,7 +3403,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             bi = bi + 1;
         }
-        if load32(s, 576) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
+        if gc_any(s) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
             roots_push(s, out, src, toks, 0, nl);
         }
         let jj: u32 = find_body(src, toks, lp);
@@ -3411,7 +3411,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             if tok_is(src, toks, jj, "}") {
                 if load32(s, 476) == 0 {
                     emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾
-                    if load32(s, 576) == 1 {
+                    if gc_any(s) == 1 {
                         roots_pop(s, out);
                     }
                     emit_str(s, out, "  ret void\n");
@@ -3457,7 +3457,18 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_name_tok(s, out, src, toks, load32(s, CG_CUR + a * 8));
         a = a + 1;
     }
-    emit_str(s, out, ") {\nentry:\n");
+    emit_str(s, out, ")");
+    // 程序入口要 `stackrealign`：进程入口不是一次 `call`，内核给的 rsp 比 SysV 的函数入口
+    // 约定**少 8**（16 对齐 vs `%16 == 8`）。不声明它，`_start` 与它下面每一帧整体偏 8 ——
+    // `lomelf` 那台栈机不碰对齐所以一直看不出来，clang `-O1/-O2` 把局部数组的清零写成
+    // `movaps` 就 `#GP`（`docs/212` §5.2）。参考实现同一行在 `tools/lomentc.py` 的
+    // `ENTRY_FN` / `ENTRY_ATTR`，两处必须逐字节同。
+    // 判据与参考实现同一条：只看**发射出来的名字** —— 泛型实例与 impl 方法的名字都被改写过，
+    // 不可能等于 `_start`，所以它们那两条分支不算。
+    if load32(s, 60) == 4294967295 && fkind != 2 && tok_is(src, toks, base + 1, "_start") == 1 {
+        emit_str(s, out, " \"stackrealign\"");
+    }
+    emit_str(s, out, " {\nentry:\n");
     let b: u32 = 0;
     while b < k {
         emit_str(s, out, "  %");
@@ -3492,7 +3503,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
-    if load32(s, 576) == 1 {   // `gc_auto`：本帧的指针槽登记进根表
+    if gc_any(s) == 1 {   // `gc_auto`：本帧的指针槽登记进根表
         roots_push(s, out, src, toks, k, nl);
     }
     let j: u32 = find_body(src, toks, lp);
@@ -3501,7 +3512,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             if load32(s, 476) == 0 {   // 块未终止: unit 函数补 ret void, 其余补 unreachable
                 emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾（档位门在 emit_l1 里）
                 if is_unit_tok(src, toks, ret) == 1 {
-                    if load32(s, 576) == 1 {   // `gc_auto`：函数末尾那条隐式 return
+                    if gc_any(s) == 1 {   // `gc_auto`：函数末尾那条隐式 return
                         roots_pop(s, out);
                     }
                     emit_str(s, out, "  ret void\n");
@@ -3948,7 +3959,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         pop_subst(s, rsub);
         // L1 定活：返回值**已经读出来**了，现在可以还那块（档位门在 `emit_l1` 里面）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
-        if load32(s, 576) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
+        if gc_any(s) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
             roots_pop(s, out);
         }
         emit_str(s, out, "  ret ");
@@ -4641,7 +4652,12 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
 }
 
 /// 匹配的 '}' 之后的下标 (i 指向 '{')。
-fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
+///
+/// **`pub` 是必需的**：`potato.lomt` 也用它（它读 token 流，不重新解析）——
+/// 而跨模块调用只认 `pub`（M12）。原先这里漏了 `pub`，`potato.lomt` 那两处调用
+/// 一直是"调用未定义的函数"，只是**从来没有人把 potato 当入口查过**才没暴露
+/// （`#149` 那条：依赖的正文不查 —— 参考实现补上之后，driver 的依赖检查立刻报出来）。
+pub fn skip_block(src: ptr, toks: ptr, i: u32) -> u32 {
     let d: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 {
@@ -5023,11 +5039,31 @@ setprev:
 /// 尾部多一个换行：Loment 的多行字面量**不吞**任何字符（值就是引号之间原样），
 /// 而这一个换行是参考实现把各段 `join` 起来时 `_IR_GC` 之后那个分隔符 ——
 /// 与 `emit_heap` 尾巴上那一个同一个道理。
-fn emit_gc(s: ptr, out: ptr) -> u32 {
+/// 本单元要不要**收集器与根表**（`docs/210` §2.1）：`gc_auto`（576）**或** `gc_auto_alpha`
+/// （572）。此前只有 `gc_auto` —— alpha 的 L3 残差没人收（只有分配器）；这一步给 alpha
+/// 也配上收集器（它的触发是自适应那支，见 `emit_gc_trigger`）。
+fn gc_any(s: ptr) -> u32 {
+    if load32(s, 576) == 1 {
+        return 1;
+    }
+    if load32(s, 572) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// **根表那两个全局** —— 与收集器**分开一段**（见参考实现 `lomentc._IR_ROOTS`）：`gc_any` 档
+/// 只要函数里有指针槽就往根表写，而**根表的定义必须在** —— "有根没堆"的单元（alpha 把 `alloc`
+/// 全 L0 提走、只剩指针局部那种）否则会发出**引用未定义全局**的产物。
+fn emit_roots(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
 @__loment_rootn = internal global i32 0
-@__loment_gcbytes = internal global i32 0
+");
+}
+
+fn emit_gc(s: ptr, out: ptr) -> u32 {
+    let _r: u32 = emit_str(s, out, "@__loment_gcbytes = internal global i32 0
 @__loment_mark = internal global [8192 x i32] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
@@ -5196,7 +5232,83 @@ done:
   ret void
 }
 
+");
+    return emit_gc_trigger(s, out);
+}
+
+/// 收集器的**触发**那一段，按档选一支（`docs/210` §2.4）：
+///   * `gc_auto`（576）—— **固定**：累计请求量过 32 KiB 收一次；
+///   * `gc_auto_alpha`（572）—— **自适应**：阈值跟着活集走（`活集 × 2`，下限 32 KiB）+
+///     **空间触发**（前沿 + 本次 + 头 > 65536 − 余量）。正对着 `gc_auto` 那条"活集 ≳ 32 KB
+///     必耗尽"的上限 —— 空间触发把它抬到"活集接近整个 arena"。
+/// 两段文本与参考实现的 `_IR_GC_TRIGGER_FIXED` / `_IR_GC_TRIGGER_ADAPT` **逐字节同**。
+/// **不用 `select`**（下限那一格走分支）—— 自举镜像链接器没有 `select`。
+fn emit_gc_trigger(s: ptr, out: ptr) -> u32 {
+    if load32(s, 572) == 1 {
+        return emit_str(s, out, "@__loment_thresh = internal global i32 32768
 define internal void @__loment_maybe_collect(i32 %sz) {
+entry:
+  %b = load i32, ptr @__loment_gcbytes
+  %b2 = add i32 %b, %sz
+  store i32 %b2, ptr @__loment_gcbytes
+  %t = load i32, ptr @__loment_thresh
+  %big = icmp ugt i32 %b2, %t
+  %off = load i32, ptr @__loment_off
+  %n1 = add i32 %off, %sz
+  %n2 = add i32 %n1, 8
+  %near = icmp ugt i32 %n2, 64512
+  %go = or i1 %big, %near
+  br i1 %go, label %do, label %out
+do:
+  store i32 0, ptr @__loment_gcbytes
+  call void @__loment_collect()
+  %live = call i32 @__loment_livebytes()
+  %dbl = mul i32 %live, 2
+  %lo = icmp ult i32 %dbl, 32768
+  br i1 %lo, label %floor, label %set
+floor:
+  store i32 32768, ptr @__loment_thresh
+  br label %out
+set:
+  store i32 %dbl, ptr @__loment_thresh
+  br label %out
+out:
+  ret void
+}
+
+define internal i32 @__loment_livebytes() {
+entry:
+  br label %l
+l:
+  %li = phi i32 [ 8, %entry ], [ %lex, %lc ]
+  %acc = phi i32 [ 0, %entry ], [ %acc2, %lc ]
+  %lof = load i32, ptr @__loment_off
+  %ld = icmp uge i32 %li, %lof
+  br i1 %ld, label %done, label %b
+b:
+  %idx = lshr i32 %li, 3
+  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
+  %mk = load i32, ptr %mp
+  %sm = icmp eq i32 %mk, 1
+  %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
+  %sz = load i32, ptr %sp
+  br i1 %sm, label %hit, label %miss
+hit:
+  %acc1 = add i32 %acc, %sz
+  br label %lc
+miss:
+  br label %lc
+lc:
+  %acc2 = phi i32 [ %acc1, %hit ], [ %acc, %miss ]
+  %lex = add i32 %li, %sz
+  br label %l
+done:
+  ret i32 %acc
+}
+
+");
+    }
+    return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
   %b = load i32, ptr @__loment_gcbytes
   %b2 = add i32 %b, %sz
@@ -5215,28 +5327,39 @@ out:
 }
 
 
-/// `gc_auto`：本帧有几个"持有指针的槽" —— 形参在前、局部按声明序。
+/// `gc_auto` / `gc_auto_alpha`：本帧有几个"持有指针的槽" —— 形参在前、局部按声明序。
 ///
-/// **与 `lomentc._Ir.roots_push` 同序**（那是逐字节判据的一部分）。参考侧的
-/// `_root_ty` 认 `ptr` / `str` / 切片；孪生的子集里**没有 `str` 与切片**（它编不了），
-/// 所以这边只认 `ptr` —— 两份实现在**共同子集**上等价，子集之外的那两样孪生本来就拒。
+/// **与 `lomentc._Ir.roots_push` 同序**（那是逐字节判据的一部分）。参考侧的 `_root_ty` 认
+/// **`ptr` / `str`（`{ptr,i64}`）/ 切片**；这边按**类型 token** 认同样四样 —— `ptr`/`str`/
+/// `[`（切片）/ `mut`（`mut [T]`）。**此前只认 `ptr`**（旧注释说"孪生编不了 str/切片"，
+/// 与事实不符：`str` 那一格它编得了），于是"有 str 局部"的帧两边数出的根数**不一样**
+/// —— 此前只有 `gc_auto` 会 push、而那种源不在语料里，所以没暴露。
 fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let n: u32 = 0;
     let i: u32 = 0;
     while i < k {
-        if tok_is(src, toks, load32(s, CG_CUR + i * 8 + 4), "ptr") {
+        if root_ty_tok(src, toks, load32(s, CG_CUR + i * 8 + 4)) == 1 {
             n = n + 1;
         }
         i = i + 1;
     }
     let j: u32 = 0;
     while j < nl {
-        if tok_is(src, toks, load32(s, CG_LOCAL + j * 8 + 4), "ptr") {
+        if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
             n = n + 1;
         }
         j = j + 1;
     }
     return n;
+}
+
+/// 一个**类型 token** 是不是"槽里有指针"那种（`lomentc._Ir._root_ty` 的 token 版）。
+fn root_ty_tok(src: ptr, toks: ptr, ty: u32) -> u32 {
+    if tok_is(src, toks, ty, "ptr") || tok_is(src, toks, ty, "str")
+            || tok_is(src, toks, ty, "[") || tok_is(src, toks, ty, "mut") {
+        return 1;
+    }
+    return 0;
 }
 
 /// 登记一格：`add` / `getelementptr` / `ptrtoint` 三条 temp（**先后与参考侧一致**），
@@ -5291,7 +5414,7 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let c: u32 = 0;
     let i: u32 = 0;
     while i < k {
-        if tok_is(src, toks, load32(s, CG_CUR + i * 8 + 4), "ptr") {
+        if root_ty_tok(src, toks, load32(s, CG_CUR + i * 8 + 4)) == 1 {
             emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_CUR + i * 8), 1);
             c = c + 1;
         }
@@ -5299,7 +5422,7 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     }
     let j: u32 = 0;
     while j < nl {
-        if tok_is(src, toks, load32(s, CG_LOCAL + j * 8 + 4), "ptr") {
+        if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
             emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_LOCAL + j * 8), 0);
             c = c + 1;
         }
@@ -5751,10 +5874,14 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     if load32(s, 516) == 1 {
         emit_heap(s, out);
-        if load32(s, 576) == 1 {   // `gc_auto`：收集器紧跟在堆那一段之后
-            // **嵌在堆门里面**（与参考实现同形：`_IR_GC` 只在 `_needs_heap` 那一支里追加）——
-            // 一份不用 `alloc` 的 `gc_auto` 单元不该带收集器：它引用的是堆那几个全局，
-            // 带上了就是一份引用未定义符号的产物。
+    }
+    if gc_any(s) == 1 {
+        // **根表跟着 `gc_any` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；
+        // 而收集器**跟着堆发**（下面那一层 `516` 门）。次序 HEAP→ROOTS→GC。
+        emit_roots(s, out);
+        if load32(s, 516) == 1 {
+            // 一份不用 `alloc` 的单元（alpha 把 alloc 全 L0 提走那种）**不该带收集器** ——
+            // 它引用的是堆那几个全局，带上了就是引用未定义符号。
             emit_gc(s, out);
         }
     }
