@@ -1655,7 +1655,10 @@ fn _start() -> u32 {
     // / `apply_switches` / `check_arena` / `emit_module`）都默认这一格在。
     // 名字那一格也要判 —— `module` 单独一行时后面每一趟都会把**下一个记号**当名字用
     // （`module` + 换行 + `fn` 会被当成"模块名是 `fn`"）。
-    if tok_is(unit, toks2, 0, "module") == false {
+    // **只有"有内容"的源才要求 `module`** —— 只有注释（或空）的文件与空文件同类：
+    // "没有可编译的源"，`test_m85_entry_load_distinguishes_empty_file_from_directory`
+    // 钉着它必须被**接受**。判据是"lexer 认得出不止一个记号"。
+    if nt0 > 1 && tok_is(unit, toks2, 0, "module") == false {
         return fail("fujoc-s: 文件必须以 `module` 开头（第一个记号得是 `module`）—— 少了它这份源没法定位\n");
     }
     if load32(toks2, 20) != 0 {
