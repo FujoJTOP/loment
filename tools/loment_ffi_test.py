@@ -75,6 +75,29 @@ fn _start() {
 }
 """
 
+#: 粒度 B (docs/212 §5): 内核用 **Loment** 写 (不是 C), 经 `tools/loment_opt_obj.py` 编成
+#: 预优化的 C-ABI `.o`; 再 `--link` 进调用方。`pub` 是必须的 —— 只有外部链接的函数才会
+#: 出现在 `.o` 的导出表里 (`T k_add`)。
+KERNEL_SOURCE = """\
+module k
+
+pub fn k_add(a: i32, b: i32) -> i32 { return a + b; }
+pub fn k_mul(a: i32, b: i32) -> i32 { return a * b; }
+"""
+
+#: 调 `KERNEL_SOURCE` 的调用方: 3+4 + 5*6 = **37**。
+KERNEL_CALLER_SOURCE = """\
+module kapp
+
+extern fn k_add(a: i32, b: i32) -> i32;
+extern fn k_mul(a: i32, b: i32) -> i32;
+
+fn _start() {
+    let r: i32 = k_add(3 as i32, 4 as i32) + k_mul(5 as i32, 6 as i32);
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
 
 def _clang() -> str | None:
     for c in CLANG_CANDIDATES:
@@ -158,6 +181,57 @@ def test_c_end_to_end():
         rc, err = build_and_run(td, td / "m.lomt", [td / "c.o"], 52)
         assert rc == 52, f"C 端到端结果不对: rc={rc} (期望 52) err={err[-300:]!r}"
         print("      C: c_add/c_mul/c_sub 端到端 -> 退出码 52 (含次序敏感的一项)")
+
+
+@test
+def test_loment_kernel_object_is_reusable_without_clang():
+    """**粒度 B (docs/212 §5)** —— "端机只要那个字节"。
+
+    内核用 **Loment** 写, 经 `tools/loment_opt_obj.py` 编成**预优化的 C-ABI `.o`**
+    (那一步**要 clang**), 再 `--link` 进调用方。**链接与运行那一侧完全不碰 clang**
+    (自举链接器 `lomelf` 是纯 Python) —— 这就是 Python 的 `numpy` wheel 那个形状:
+    编一次、按内容寻址、端机不需要编译器。
+
+    判据三样, 缺一不可:
+      * 产物**确定**: 同一份内核两次编出的**字节相同** (那才是"按内容寻址"能成立的前提),
+        且 `.o` **导出**了该导出的符号;
+      * `--link` 进来**跑出正确答案** (3+4 + 5*6 = 37);
+      * **把 `PATH` 掐掉** (端机上根本没有 clang) 之后, 链接+运行那一步**照跑** ——
+        这一条才是这条主张本身, 前两条单独都撑不住它。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    import os
+
+    import loment_opt_obj
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        k = td / "k.lomt"
+        k.write_text(KERNEL_SOURCE, encoding="utf-8", newline="\n")
+        app = td / "app.lomt"
+        app.write_text(KERNEL_CALLER_SOURCE, encoding="utf-8", newline="\n")
+        o1, o2 = td / "k1.o", td / "k2.o"
+        assert loment_opt_obj.emit_object(k, o1) == 0, "产出内核对象失败"
+        assert loment_opt_obj.emit_object(k, o2) == 0, "第二次产出失败"
+        assert o1.read_bytes() == o2.read_bytes(), "同一份内核两次编出的字节不同 (内容寻址不成立)"
+        # 端机那一侧: **PATH 里没有 clang**, 链接照旧 (这一段不 spawn 任何东西, 掐 PATH 安全)。
+        old = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = "/nonexistent-clang-free"
+            mod = lomentc.load(app)
+            assert not lomentc.check(mod), "调用方自检失败"
+            ir = lomentc.emit_llvm(mod, ROOT)
+            blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(o1)])
+        finally:
+            os.environ["PATH"] = old
+        exe = td / "k.elf"
+        exe.write_bytes(blob)
+        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert r.returncode == 37, f"无 clang 端机 `--link` 跑错: rc={r.returncode} {r.stderr[-200:]}"
+        print("      Loment 内核 -> clang -O2 的 .o -> **无 clang 端机** --link -> rc=37")
 
 
 @test

@@ -160,9 +160,10 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt]
                               compile and link; --link adds a foreign object (FFI)
-  loment run FILE             compile, link and run
+                              --opt: optimize with clang -O2 when it is installed (ELF)
+  loment run FILE [--opt]     compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
@@ -260,11 +261,16 @@ case "${1:-help}" in
         links=()
         nc=
         om=
+        opt=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
                 # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
+                # Optimize with clang when it is installed (docs/212 sec 5A). **Opt-in on purpose**:
+                # the default path stays clang-free (`lomelf`), so the hermetic / offline build
+                # never grows a dependency on an optimizer being present.
+                --opt|-O2) opt=1; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
@@ -283,10 +289,27 @@ case "${1:-help}" in
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         [ -n "$out" ] || out="${src%.lomt}"
-        # link with the self-hosted lomelf - the package no longer needs clang
-        if [ ${#links[@]} -gt 0 ]; then
-            linkargs=
-            for l in "${links[@]}"; do linkargs="$linkargs --link $(to_posix "$l")"; done
+        # Default: link with the self-hosted lomelf - the package needs no clang.
+        # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
+        # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
+        linkargs=
+        objs=
+        for l in "${links[@]}"; do
+            linkargs="$linkargs --link $(to_posix "$l")"
+            objs="$objs $(to_posix "$l")"
+        done
+        if [ -n "$opt" ]; then
+            cc=$(command -v clang 2>/dev/null || true)
+            if [ -n "$cc" ]; then
+                # shellcheck disable=SC2086
+                "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
+                    -fno-pie -O2 "$tmp/a.ll" $objs -o "$out" || exit 1
+            else
+                echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
+                # shellcheck disable=SC2086
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+            fi
+        elif [ ${#links[@]} -gt 0 ]; then
             # shellcheck disable=SC2086
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
         else
@@ -450,6 +473,8 @@ if "%~1"=="" goto barg_done
 if /I "%~1"=="-o" goto barg_out
 if /I "%~1"=="--out" goto barg_out
 if /I "%~1"=="--link" goto barg_link
+if /I "%~1"=="--opt" goto barg_opt
+if /I "%~1"=="-O2" goto barg_opt
 if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
@@ -488,6 +513,11 @@ set "linkargs=%linkargs% --link %~2"
 shift
 shift
 goto barg_loop
+:barg_opt
+rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
+rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
+echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
+exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
 
@@ -570,9 +600,10 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...]
+echo   loment build FILE [-o OUT] [--link OBJ...] [--opt]
 echo                               compile and link; --link adds a foreign object (FFI)
-echo   loment run FILE             compile, link and run
+echo                               --opt: optimize with clang -O2 (ELF only)
+echo   loment run FILE [--opt]     compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio

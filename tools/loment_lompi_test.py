@@ -175,6 +175,46 @@ def test_index_lists_the_fixture_store():
 
 
 @test
+def test_obj_store_is_content_addressed():
+    """**粒度 B 的 store 那半边（`docs/212` §5 B）**：`lompi obj add/get` 按**内容**存取对象。
+
+    端机**不需要 clang** —— 拿到那串 sha256 就能取回字节，再 `loment build app.lomt --link it.o`。
+    判据四样，缺一不可：
+      * `add` 打出的十六进制**等于**那个文件的 sha256，且**两次一样**（幂等 == 内容寻址）；
+      * store 里出现 `obj-<hex>.o`，字节与输入**逐字节相同**；
+      * `get --out` 取回来的与输入**逐字节相同**；
+      * 一个不存在的地址**硬拒**（rc≠0 + 点名）—— 不静默写个空文件出来。
+
+    对象用 fixture 里的一个真文件（store 里存什么字节都行 —— 这一格测的是**寻址机制**，
+    不是对象本身）。写完**清掉**那个 `obj-…o`，免得后面的 `index` 判据看到多余成员。
+    """
+    import hashlib as _h
+
+    src_rel = "fixture/store/mathutil/0.1.0/mathutil.lomt"
+    blob = (SRC_DIR / src_rel).read_bytes()
+    want = _h.sha256(blob).hexdigest()
+    slot = SRC_DIR / "fixture/store" / f"obj-{want}.o"
+    outobj = SRC_DIR / "objroundtrip-tmp.o"
+    try:
+        rc, out = _run(["obj", "add", "fixture/store", src_rel])
+        if rc == -1:
+            print(f"      SKIP: {_skip}")
+            return
+        assert rc == 0 and want in out, f"add 失败: rc={rc} out={out!r}"
+        rc2, out2 = _run(["obj", "add", "fixture/store", src_rel])
+        assert rc2 == 0 and want in out2, f"第二次 add 失败或哈希不同: rc={rc2} out={out2!r}"
+        assert slot.exists() and slot.read_bytes() == blob, "store 里那份字节与输入不符"
+        rc3, out3 = _run(["obj", "get", "fixture/store", want, "--out", "objroundtrip-tmp.o"])
+        assert rc3 == 0 and outobj.read_bytes() == blob, f"get 回环不符: rc={rc3} {out3[:160]}"
+        rc4, out4 = _run(["obj", "get", "fixture/store", "deadbeef"])
+        assert rc4 != 0 and "no such object" in out4, f"缺地址没硬拒: rc={rc4} {out4[:160]}"
+    finally:
+        slot.unlink(missing_ok=True)
+        outobj.unlink(missing_ok=True)
+    print("      obj add/get: 内容寻址 + 逐字节回环 + 缺地址硬拒")
+
+
+@test
 def test_check_has_discriminating_power():
     """`lompi check` 必须**分得清好坏** —— 合法库退 0 说 OK，坏库退 1 说 BAD。
 
