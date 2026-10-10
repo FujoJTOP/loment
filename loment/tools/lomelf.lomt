@@ -1962,6 +1962,9 @@ fn asm_code(t: ptr, s: u32, e: u32) -> u32 {
     if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 56 {
         return 6;                                   // r8
     }
+    if e - s == 2 && load8(t, s) == 114 && load8(t, s + 1) == 57 {
+        return 7;                                   // r9（Linux 第 6 个实参，syscall7 用满）
+    }
     return 0;
 }
 
@@ -1980,6 +1983,9 @@ fn asm_reg(code: u32) -> u32 {
     }
     if code == 5 {
         return 10;
+    }
+    if code == 7 {
+        return 9;                               // r9
     }
     return 8;
 }
@@ -2041,7 +2047,7 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
     let d: u32 = c;
     // rax 最后写, 其余先写
     let code: u32 = 2;
-    while code <= 6 {
+    while code <= 7 {
         let q: u32 = 0;
         while q < nargs {
             if arg_code(t, p3, p4, q) == code {

@@ -673,6 +673,116 @@ fn _start() {
 }
 """
 
+#: **UDP 语料**：它证明的是"七个值的系统调用"—— `sendto`(44)/`recvfrom`(45) 的第 6 个
+#: 实参（`socklen_t`）原先**没有地方放**，所以"带地址的 UDP"从 Loment 源码里写不出来
+#: （`docs/217` §5 点名的缺口）。它两个方向都走：客户端 `sendto` 到一个已知 `sockaddr`、
+#: 服务端 `recvfrom` 拿到**发送方的地址**、再用那个地址回一发、客户端 `recvfrom` 收回来。
+#: 地址是 `127.0.0.1` + **内核挑的临时端口**（`getsockname` 问出来），所以并发跑门禁不撞端口。
+UDP_DEMO = """module udpdemo
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn _start() {
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(64);
+    let _z1: u32 = sa(a, 0, 0);
+    let _z2: u32 = sa(b, 0, 0);
+    let s1: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    if s1 < 0 {
+        die(1, "FAIL socket(1)\n");
+    }
+    let s2: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    if s2 < 0 {
+        die(2, "FAIL socket(2)\n");
+    }
+    let l1: ptr = alloc(8);
+    store8(l1, 0, 16);
+    let b1: i64 = syscall6(49, s1 as u64, a as u64, 16, 0, 0);
+    if b1 < 0 {
+        die(3, "FAIL bind(1)\n");
+    }
+    let l2: ptr = alloc(8);
+    store8(l2, 0, 16);
+    let b2: i64 = syscall6(49, s2 as u64, b as u64, 16, 0, 0);
+    if b2 < 0 {
+        die(4, "FAIL bind(2)\n");
+    }
+    let g1: i64 = syscall6(51, s1 as u64, a as u64, l1 as u64, 0, 0);
+    if g1 < 0 {
+        die(5, "FAIL getsockname\n");
+    }
+    let sb: ptr = alloc(64);
+    store8(sb, 0, 104);
+    store8(sb, 1, 105);
+    let t1: i64 = syscall7(44, s2 as u64, sb as u64, 2, 0, a as u64, 16);
+    if t1 != 2 {
+        die(6, "FAIL sendto\n");
+    }
+    let rb: ptr = alloc(64);
+    let src: ptr = alloc(64);
+    let sl: ptr = alloc(8);
+    store8(sl, 0, 16);
+    let r1: i64 = syscall7(45, s1 as u64, rb as u64, 8, 0, src as u64, sl as u64);
+    if r1 != 2 {
+        die(7, "FAIL recvfrom\n");
+    }
+    if load8(rb, 0) != 104 {
+        die(8, "FAIL payload\n");
+    }
+    if load8(src, 1) != 0 {
+        die(9, "FAIL src family\n");
+    }
+    if load8(src, 3) == 0 {
+        die(10, "FAIL src port\n");
+    }
+    w(1, "UDP RECV OK\n");
+    store8(rb, 0, 121);
+    store8(rb, 1, 111);
+    let n2: i64 = load8(sl, 0) as i64;
+    let t2: i64 = syscall7(44, s1 as u64, rb as u64, 2, 0, src as u64, n2 as u64);
+    if t2 != 2 {
+        die(11, "FAIL reply\n");
+    }
+    let r2: i64 = syscall7(45, s2 as u64, rb as u64, 8, 0, src as u64, sl as u64);
+    if r2 != 2 {
+        die(12, "FAIL client recvfrom\n");
+    }
+    if load8(rb, 1) != 111 {
+        die(13, "FAIL reply payload\n");
+    }
+    w(1, "UDP OK\n");
+    syscall6(3, s1 as u64, 0, 0, 0, 0);
+    syscall6(3, s2 as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+UDP_GOLDEN = b"UDP RECV OK\nUDP OK\n"
+
+
+def _udp_ok(out: bytes) -> bool:
+    return out == UDP_GOLDEN
+
+
 SOCK_HEAD = b"ECHO OK\nTIMEOUT OK\nNONBLOCK OK\n"
 SOCK_TAIL = (b"IPV6 OK\nSURVIVED\n", b"IPV6 NO\nSURVIVED\n")
 
@@ -681,6 +791,11 @@ def _sock_ok(out: bytes) -> bool:
     """IPv6 那一行**允许两种情况**（机器没有 IPv6 时两边都打 NO）——
     判据是"两个平台看到同一件事"，不是"必须有 IPv6"。"""
     return out.startswith(SOCK_HEAD) and out[len(SOCK_HEAD):] in SOCK_TAIL
+
+
+#: 两份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
+#: 加一份语料就两边一起覆盖，别只在一边加。
+NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok))
 
 
 def _shim_blob():
@@ -810,52 +925,57 @@ def test_frozen_shim_blob_matches_the_reference():
 
 
 @test
-def test_elf_socket_program_runs_on_linux():
-    """Linux 上**真跑**一遍联网语料 —— CI 的 ubuntu runner 跑得到这一条。
+def test_elf_net_programs_run_on_linux():
+    """Linux 上**真跑**一遍两份联网语料（TCP 与 UDP）—— CI 的 ubuntu runner 跑得到这一条。
 
     PE 那一侧要靠 Windows 机器（见下一条），所以这条是门禁里**唯一**会真的收发字节的联网判据。
     """
     if not sys.platform.startswith("linux"):
-        print("      SKIP: 非 Linux（PE 那半由 test_pe_and_elf_agree_on_a_socket_program 钉）")
+        print("      SKIP: 非 Linux（PE 那半由 test_pe_and_elf_agree_on_net_programs 钉）")
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        src = td / "sockdemo.lomt"
-        src.write_text(SOCK_DEMO, encoding="utf-8", newline="\n")
-        ll = _ir(src, td)
-        elf = td / "sockdemo.elf"
-        elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
-        elf.chmod(0o755)
-        r = subprocess.run([str(elf)], capture_output=True, timeout=60, shell=False)
-        assert r.returncode == 0 and _sock_ok(r.stdout), \
-            f"Linux 上联网语料没跑对: rc={r.returncode} out={r.stdout!r} err={r.stderr[:200]!r}"
-    print("      回显 / 读超时 -EAGAIN / 非阻塞 / 对端挂断存活：Linux 原生真跑通过")
+        for name, source, ok in NET_CASES:
+            src = td / f"{name}.lomt"
+            src.write_text(source, encoding="utf-8", newline="\n")
+            ll = _ir(src, td)
+            elf = td / f"{name}.elf"
+            elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
+            elf.chmod(0o755)
+            r = subprocess.run([str(elf)], capture_output=True, timeout=60, shell=False)
+            assert r.returncode == 0 and ok(r.stdout),                 f"[{name}] Linux 上没跑对: rc={r.returncode} out={r.stdout!r} err={r.stderr[:200]!r}"
+    print("      TCP（回显/超时/非阻塞/IPv6/挂断）与 UDP（带地址的 sendto/recvfrom）都在 Linux 上真跑通过")
 
 
 @test
-def test_pe_and_elf_agree_on_a_socket_program():
+def test_pe_and_elf_agree_on_net_programs():
     """同一份 `.lomt`：PE（本机原生）与 ELF（WSL）**输出逐字节相同、退出码相同**。
 
     这就是"孪生联网"的正题 —— 不是"两个平台各自能跑"，而是**同一份源在两边行为一致**。
+    两份语料（TCP 与 UDP）走同一条路，所以"加了语料只钉了一边"这种漏法在这里报不出来。
     """
     if not (_on_windows() and _wsl()):
         print("      SKIP: 非 Windows 或无 WSL")
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        src = td / "sockdemo.lomt"
-        src.write_text(SOCK_DEMO, encoding="utf-8", newline="\n")
-        ll = _ir(src, td)
-        text = ll.read_text(encoding="utf-8")
-        exe = td / "sockdemo.exe"
-        exe.write_bytes(lomelf.compile_pe(text)[0])
-        elf = td / "sockdemo.elf"
-        elf.write_bytes(lomelf.compile_ll(text)[0])
-        got = _run_native(exe, timeout=60)
-        want = _run_in_wsl(elf, "sockdemo", td, timeout=60)
-        assert got == want, f"两个平台不一致:\n  PE   {got!r}\n  ELF  {want!r}"
-        assert got[0] == 0 and _sock_ok(got[1]), f"联网语料没跑对: {got!r}"
-    print(f"      回显 / 读超时 / 非阻塞 / IPv6 family / 对端挂断：PE 与 ELF 同为 {got[1]!r}")
+        outs = []
+        for name, source, ok in NET_CASES:
+            src = td / f"{name}.lomt"
+            src.write_text(source, encoding="utf-8", newline="\n")
+            ll = _ir(src, td)
+            text = ll.read_text(encoding="utf-8")
+            exe = td / f"{name}.exe"
+            exe.write_bytes(lomelf.compile_pe(text)[0])
+            elf = td / f"{name}.elf"
+            elf.write_bytes(lomelf.compile_ll(text)[0])
+            got = _run_native(exe, timeout=60)
+            want = _run_in_wsl(elf, name, td, timeout=60)
+            assert got == want, f"[{name}] 两个平台不一致:\n  PE   {got!r}\n  ELF  {want!r}"
+            assert got[0] == 0 and ok(got[1]), f"[{name}] 联网语料没跑对: {got!r}"
+            outs.append((name, got[1]))
+        shown = " · ".join(f"{n}={o!r}" for n, o in outs)
+    print(f"      PE 与 ELF 逐字节相同：{shown}")
 
 
 def main() -> int:

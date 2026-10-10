@@ -103,13 +103,14 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 * **`poll` / `select` / `epoll`**、**`sendmsg` / `recvmsg`**、**`socketpair`**、**`AF_UNIX`** ——
   一律 -1（派发面的兜底）。`epoll` 要真做得上 IOCP，不是一次翻译能补的；
   `sendmsg`/`recvmsg` 要仿 `iovec` 与辅助数据，消费方今天也够不着。
-* **语言侧的一条真限制**：`syscall6` 的内建签名是 `nr + a0..a4`（5 个实参），
+* ~~**语言侧的一条真限制**：`syscall6` 的内建签名是 `nr + a0..a4`（5 个实参），
   所以 6 参的 `sendto`/`recvfrom` 从 `.lomt` 里**递不满**（`addrlen` 那一格没地方放，
-  递过去的是寄存器里的残留值）。这次靠"addr=NULL 落 `send`/`recv`"那一支让它**可用**；
-  要真带地址收发的 UDP，得先给语言侧第 6 个实参（那是另一笔账，不在本文）。
-  **代价要说清**：因此 `sendto`/`recvfrom` 的**非 NULL 那一支今天没有动态判据**
-  —— 语料只能走 NULL 那一支。它在机器码里是实现了的（地址进/出各补一次 family、
-  第 5/6 参走栈），但**没有一条判据碰过它**；谁先给语言侧补上第 6 个实参，谁就该把这一格补上。
+  递过去的是寄存器里的残留值）……~~
+  **已关掉（2026-10-10，`docs/220`）**：语言侧补了 `syscall7`（`nr` + 6 个实参，
+  `rdi/rsi/rdx/r10/r8/r9` 用满），于是**带地址的 UDP 写得出来了**，
+  这一支也从"没有人碰过"变成**判据**（`test_pe_and_elf_agree_on_net_programs` 的 UDP 语料，
+  两个方向都走）。上面那条"addr=NULL 落 `send`/`recv`"的分流**留着**：它是 Linux 的语义
+  （已连接的 socket 上 `sendto(…, NULL, …)` 就是 `send`），不是补丁。
 * **`capability` 域的联网面**：这次没动。今天 `guard` 管的是域的**下标**，
   而 socket 是裸 `syscall6` —— 指南 §5 那句"没有任何东西拦得住真正做事的操作"照旧成立。
 

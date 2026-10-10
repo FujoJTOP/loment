@@ -1092,11 +1092,13 @@ class Emitter:
         regs = [x.strip().strip("{}") for x in cons.split(",") if x.strip().startswith("{")]
         regs = [r for r in regs if not r.startswith(("=", "~"))]
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
-        regmap = {"ax": RAX, "di": RDI, "si": RSI, "dx": RDX, "r10": R10, "r8": R8}
+        regmap = {"ax": RAX, "di": RDI, "si": RSI, "dx": RDX, "r10": R10, "r8": R8,
+                  "r9": R9}
         if len(regs) != len(args):
             raise Unsupported(f"内联汇编约束与实参不匹配: {cons!r}")
         # 依赖寄存器顺序: rax 最后写 (syscall 号), 但其它寄存器不能互相踩
-        for regname in ("di", "si", "dx", "r10", "r8"):
+        # （`r9` 是 Linux 第 6 个实参寄存器，`syscall7` 用满它 —— 孪生侧那张表也要同步）
+        for regname in ("di", "si", "dx", "r10", "r8", "r9"):
             for (ty, val), r in zip(args, regs):
                 if r == regname:
                     self.get(ty, val, regmap[regname])
