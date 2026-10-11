@@ -943,6 +943,8 @@ fn _start() {
 }
 """
 SEL_DEMO = """module seldemo
+choose runtime              // 夹具里用 `%` 与 `/`（位图按字节定位）—— 按 main 的
+                            // `no_runtime` 保证，用到运行期就得在**根单元**声明
 
 fn w(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
