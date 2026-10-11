@@ -319,6 +319,73 @@ def _env(td: Path) -> Env:
 # ---------------------------------------------------------------- 判据
 
 
+def _run_ir(ir: str, td: Path, name: str) -> int:
+    """一段 IR -> 跑起来的**退出码**（被信号打断也归一成 128+sig）。
+
+    `hosted` 的产物由 **C 工具链**链（真 libc，`docs/222` §4.4）—— 所以这里就是
+    "clang 出目标文件、系统链接器链上"，与启动器那条路上的**同一件事**，只是省掉启动器。
+    本机是 Linux 时 clang 一步链完；Windows 开发机上 clang 交叉出 ELF、gcc 在 WSL 里链 + 跑
+    （与上面那个 `CLANG_SHIM` 同一套舞步）。
+    """
+    ll = td / f"{name}.ll"
+    _write_sh(ll, ir)
+    cc = _clang()
+    assert cc, "无 clang"
+    if _resolves_with_flags(cc):                      # 本机是 Linux
+        exe = td / name
+        r = subprocess.run([cc, "-o", str(exe), str(ll)], capture_output=True,
+                           text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        rc = subprocess.run([str(exe)], capture_output=True, shell=False).returncode
+        return rc if rc >= 0 else 128 - rc            # -4 (SIGILL) -> 132
+    obj = td / f"{name}.o"
+    r = subprocess.run([cc, "--target=x86_64-unknown-linux-gnu", "-c", str(ll), "-o", str(obj)],
+                       capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    script = (f"cd '{_wsl_path(td)}' && gcc {name}.o -o {name}.bin && ./{name}.bin; echo \"RC=$?\"")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=300, shell=False)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert "RC=" in out, out[-400:]
+    return int(out.rsplit("RC=", 1)[1].split()[0])
+
+
+@test
+def test_hosted_heap_asks_the_os_and_sealed_cannot():
+    """`docs/228` §5 的 **A3**（= `docs/219` §8b 的 S1e）：**同一条程序**，
+    `hosted` 真的拿到了 > 64 KiB 的 arena，`sealed` 真的拿不到。
+
+    那条程序（`lomentc_test.HEAP_SRC`，**源只有一份**）分配 **200000** 字节（> 64 KiB）
+    逐字节写 7、读回最后一字节 —— 成功返回 **7**。
+
+    **两个方向都是判据**：只判"`hosted` 能跑"会被"把 `65536` 改大"骗过 ——
+    而那一改 `sealed` 那条保证就没了（`docs/219` §7 那条"测量强于声明"）。
+    `sealed` 这一侧要的是**死在 `lomentc.py:218` 那条 `boom` 上**（SIGILL）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    if os.name == "nt" and not _wsl():
+        print("      SKIP: 无 WSL (Windows 上把 IR 交叉成 ELF 要它)")
+        return
+    import lomentc_test as CT                                        # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        got: dict[str, int] = {}
+        for tag, src in (("hosted", CT.HEAP_HOSTED_SRC), ("sealed", CT.HEAP_SEALED_SRC)):
+            f = td / f"{tag}.lomt"
+            _write_sh(f, src)
+            mod = lomentc.load(f)
+            errs = lomentc.check(mod)
+            assert not errs, errs
+            got[tag] = _run_ir(lomentc.emit_llvm(mod, ROOT), td, tag)
+    assert got["hosted"] == 7, f"hosted 没拿到 > 64 KiB 的 arena (rc={got['hosted']})"
+    assert got["sealed"] == 132, (
+        f"sealed 居然拿到了 > 64 KiB (rc={got['sealed']}) —— `sealed` 那条保证被改掉了")
+    print(f"      hosted rc={got['hosted']} (200000 字节真的拿到了)"
+          f" / sealed rc={got['sealed']} (SIGILL，拿不到)")
+
+
 @test
 def test_hosted_links_a_real_library_and_returns_the_right_answer():
     """**那一条判据**: 一份 Loment 源调系统 libz, compress→uncompress 逐字节回原文。

@@ -5064,6 +5064,177 @@ setprev:
 ");
 }
 
+/// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
+/// 下面这段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它生成，不手抄）。
+///
+/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**宿主**来
+/// （`@__loment_arena()` 惰性地 `malloc` 一块，拿不到就 `__loment_abort`），
+/// 于是寻址全走 `%hb`（基址）。块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动。
+///
+/// **`sealed` 走不到这一段**（`docs/228` §2）—— 闸门是 `choose hosted`，所以现存每一份
+/// sealed 产物的字节不变。**`gc_any` 档也走不到**：收集器的标记表按 arena 偏移索引、
+/// 行数 = arena/8，换 arena 要同时换表的口径，那是收集器的活（`docs/228` §4 的 B1）。
+/// 它**不静默**：那一档发 `; loment-heap: static 65536`（见 `emit_llvm` 里那个门）。
+fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+;
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动 —— 因为 arena 仍是**一段
+; 连续内存**（偏移是 i32；多段才是重写分配器，见 `docs/228` §4 的 B2）。
+;
+; 一次要 `1048576` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
+
+define internal ptr @__loment_arena() {
+entry:
+  %h = load ptr, ptr @__loment_heap
+  %nul = icmp eq ptr %h, null
+  br i1 %nul, label %ask, label %have
+ask:
+  %m = call ptr @malloc(i64 1048576)
+  %bad = icmp eq ptr %m, null
+  br i1 %bad, label %oom, label %set
+oom:
+  call void @__loment_abort()
+  unreachable
+set:
+  store ptr %m, ptr @__loment_heap
+  br label %have
+have:
+  %r = phi ptr [ %h, %entry ], [ %m, %set ]
+  ret ptr %r
+}
+
+define internal ptr @__loment_alloc(i32 %size) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %need0 = add i32 %size, 15
+  %need = and i32 %need0, -8
+  %head = load i32, ptr @__loment_freehead
+  br label %floop
+floop:
+  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
+  %fend = icmp eq i32 %cur, 0
+  br i1 %fend, label %bump, label %fit
+fit:
+  %hp = getelementptr i8, ptr %hb, i32 %cur
+  %bsz = load i32, ptr %hp
+  %big = icmp uge i32 %bsz, %need
+  br i1 %big, label %take, label %fnext
+fnext:
+  %n4 = add i32 %cur, 4
+  %npp = getelementptr i8, ptr %hb, i32 %n4
+  %nxt = load i32, ptr %npp
+  br label %floop
+take:
+  %slack = sub i32 %bsz, %need
+  %cansplit = icmp uge i32 %slack, 16
+  %t4 = add i32 %cur, 4
+  %tpp = getelementptr i8, ptr %hb, i32 %t4
+  %rest = load i32, ptr %tpp
+  br i1 %cansplit, label %split, label %nosplit
+split:
+  %so = add i32 %cur, %need
+  %spp = getelementptr i8, ptr %hb, i32 %so
+  store i32 %slack, ptr %spp
+  %so4 = add i32 %so, 4
+  %spp4 = getelementptr i8, ptr %hb, i32 %so4
+  store i32 %rest, ptr %spp4
+  br label %relink
+nosplit:
+  br label %relink
+relink:
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+  br i1 %ishead, label %sethead, label %setprev
+sethead:
+  store i32 %newhead, ptr @__loment_freehead
+  br label %taken
+setprev:
+  %p4 = add i32 %prev, 4
+  %ppp = getelementptr i8, ptr %hb, i32 %p4
+  store i32 %newhead, ptr %ppp
+  br label %taken
+taken:
+  store i32 %need, ptr %hp
+  %ko = add i32 %cur, 8
+  %kp = getelementptr i8, ptr %hb, i32 %ko
+  ret ptr %kp
+bump:
+  %off = load i32, ptr @__loment_off
+  %nxtoff = add i32 %off, %need
+  %fits = icmp ule i32 %nxtoff, 1048576
+  br i1 %fits, label %bok, label %boom
+boom:
+  call void @__loment_abort()
+  unreachable
+bok:
+  store i32 %nxtoff, ptr @__loment_off
+  %wp = getelementptr i8, ptr %hb, i32 %off
+  store i32 %need, ptr %wp
+  %w4 = add i32 %off, 4
+  %wp4 = getelementptr i8, ptr %hb, i32 %w4
+  store i32 0, ptr %wp4
+  %bo = add i32 %off, 8
+  %bp = getelementptr i8, ptr %hb, i32 %bo
+  ret ptr %bp
+}
+
+define internal void @__loment_free(ptr %p) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %base = ptrtoint ptr %hb to i64
+  %pi = ptrtoint ptr %p to i64
+  %d64 = sub i64 %pi, %base
+  %d32 = trunc i64 %d64 to i32
+  %hi = sub i32 %d32, 8
+  %hp = getelementptr i8, ptr %hb, i32 %hi
+  %sz = load i32, ptr %hp
+  %hend = add i32 %hi, %sz
+  %off = load i32, ptr @__loment_off
+  %istail = icmp eq i32 %hend, %off
+  br i1 %istail, label %rewind, label %link
+rewind:
+  store i32 %hi, ptr @__loment_off
+  ret void
+link:
+  %head = load i32, ptr @__loment_freehead
+  br label %lloop
+lloop:
+  %cur = phi i32 [ %head, %link ], [ %nxt, %lcont ]
+  %prev = phi i32 [ 0, %link ], [ %cur, %lcont ]
+  %lend = icmp eq i32 %cur, 0
+  %after = icmp ugt i32 %cur, %hi
+  %stop = or i1 %lend, %after
+  br i1 %stop, label %ins, label %lcont
+lcont:
+  %l4 = add i32 %cur, 4
+  %lpp = getelementptr i8, ptr %hb, i32 %l4
+  %nxt = load i32, ptr %lpp
+  br label %lloop
+ins:
+  %i4 = add i32 %hi, 4
+  %ipp = getelementptr i8, ptr %hb, i32 %i4
+  store i32 %cur, ptr %ipp
+  %ishead2 = icmp eq i32 %prev, 0
+  br i1 %ishead2, label %sethead, label %setprev
+sethead:
+  store i32 %hi, ptr @__loment_freehead
+  ret void
+setprev:
+  %q4 = add i32 %prev, 4
+  %qpp = getelementptr i8, ptr %hb, i32 %q4
+  store i32 %hi, ptr %qpp
+  ret void
+}
+
+@__loment_heap = internal global ptr null
+@__loment_off = internal global i32 8
+@__loment_freehead = internal global i32 0
+
+");
+}
+
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
 /// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
 ///
@@ -5554,6 +5725,20 @@ fn contains_ident(src: ptr, toks: ptr, text: str) -> u32 {
     return 0;
 }
 
+/// 单元里**声明**过这个外部符号吗（`docs/228` §3.2）。运行期自己那份 `declare` 必须
+/// **让给用户的**：LLVM 对同一条 `declare` 重复出现报 `invalid redefinition of
+/// function`（实测），签名不同更糟。与参考实现的 `seen_ext` 同义。
+fn extern_named(s: ptr, src: ptr, toks: ptr, text: str) -> u32 {
+    let dx: u32 = 0;
+    while dx < load32(s, 640) {
+        if load32(s, fk_base(dx)) == 3 && tok_is(src, toks, load32(s, CG_FN + dx * 12), text) == 1 {
+            return 1;
+        }
+        dx = dx + 1;
+    }
+    return 0;
+}
+
 fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
@@ -6018,8 +6203,24 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         emit_caps_table(s, out, src, toks);
         emit_str(s, out, "\n");
     }
+    // **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
+    // 闸门与上面那行 `; loment-port: hosted` **同一个认法**（`contains_ident`），
+    // 所以两侧说的一定是同一件事。`gc_any` 档不走这一支：收集器的标记表按 arena 偏移
+    // 索引、行数 = arena/8，换 arena 要同时换表的口径 —— 那是收集器的活（`docs/228` §4 的 B1）。
+    // 它**不静默**：那一档发 `; loment-heap: static 65536`，于是"没吃到 A"是量出来的。
     if load32(s, 516) == 1 {
-        emit_heap(s, out);
+        if contains_ident(src, toks, "hosted") == 1 && gc_any(s) == 0 {
+            emit_str(s, out, "; loment-heap: platform 1048576\n");
+            if extern_named(s, src, toks, "malloc") == 0 {
+                emit_str(s, out, "declare ptr @malloc(i64)\n");
+            }
+            emit_heap_hosted(s, out);
+        } else {
+            if contains_ident(src, toks, "hosted") == 1 {
+                emit_str(s, out, "; loment-heap: static 65536\n");
+            }
+            emit_heap(s, out);
+        }
     }
     if gc_any(s) == 1 {
         // **根表跟着 `gc_any` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；

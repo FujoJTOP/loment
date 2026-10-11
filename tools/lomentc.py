@@ -284,6 +284,184 @@ setprev:
 @__loment_freehead = internal global i32 0
 '''
 
+#: `hosted` 那一份 arena 的字节数（`docs/228` §3.3）。**编译期常量**，并且**写进产物**
+#: （`; loment-heap: platform <N>`）—— 与上面那个 `; loment-port: hosted` 同一个道理：
+#: 构建那一侧要知道这件事，而它不该去读源码（读源码要它懂 Loment 的词法，而 IR 本来就是
+#: 构建的输入）。写进字节之后，"这一份到底吃没吃到 A"是**量**出来的，不是**声明**出来的。
+HOSTED_ARENA_BYTES = 1 << 20
+
+#: **`hosted` 那一份分配器**（`docs/228` 的 A；`docs/219` §8b 的 **S1e**）。
+#:
+#: 与 `_IR_HEAP` **同序、同一条空闲链表**，只换两件事：
+#:   ① arena 不是 `.bss` 里的 `[65536 x i8]`，而是 `@__loment_arena()` 向**宿主**要的一块；
+#:   ② 于是寻址全走 `%hb`（基址），而不是数组符号。
+#: 块的形状、地址序、首次适配 + 拆分、前沿回退**一个字节没动** —— 因为 arena 仍是
+#: **一段连续内存**：`free` 靠 `ptrtoint - 基址` 反算偏移（`:237`），多段才是重写分配器
+#: （`docs/228` §1 第三行、§4 的 B2）。
+#:
+#: **要谁**：宿主的 `malloc`（`docs/228` §3.1）。`hosted` 的产物本来就由 C 工具链链出
+#: （`loment_hosted_test` 那条判据链的是真的 `libz.so`），所以宿主分配器就是"OS 那一层"
+#: 在这条路上的正确接口；raw syscall 反而要**多一张平台表**，与 `docs/219` §5 的记账面重复。
+#: **惰性**：第一次 `alloc` 才要（不在启动路径上挂钩子）；要不到就落 `__loment_abort`。
+#:
+#: **`sealed` 走不到这一段** —— 它走 `_IR_HEAP`，逐字节不变（`docs/228` §2）。
+_IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+;
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动 —— 因为 arena 仍是**一段
+; 连续内存**（偏移是 i32；多段才是重写分配器，见 `docs/228` §4 的 B2）。
+;
+; 一次要 `@ARENA@` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
+
+define internal ptr @__loment_arena() {
+entry:
+  %h = load ptr, ptr @__loment_heap
+  %nul = icmp eq ptr %h, null
+  br i1 %nul, label %ask, label %have
+ask:
+  %m = call ptr @malloc(i64 @ARENA@)
+  %bad = icmp eq ptr %m, null
+  br i1 %bad, label %oom, label %set
+oom:
+  call void @__loment_abort()
+  unreachable
+set:
+  store ptr %m, ptr @__loment_heap
+  br label %have
+have:
+  %r = phi ptr [ %h, %entry ], [ %m, %set ]
+  ret ptr %r
+}
+
+define internal ptr @__loment_alloc(i32 %size) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %need0 = add i32 %size, 15
+  %need = and i32 %need0, -8
+  %head = load i32, ptr @__loment_freehead
+  br label %floop
+floop:
+  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
+  %fend = icmp eq i32 %cur, 0
+  br i1 %fend, label %bump, label %fit
+fit:
+  %hp = getelementptr i8, ptr %hb, i32 %cur
+  %bsz = load i32, ptr %hp
+  %big = icmp uge i32 %bsz, %need
+  br i1 %big, label %take, label %fnext
+fnext:
+  %n4 = add i32 %cur, 4
+  %npp = getelementptr i8, ptr %hb, i32 %n4
+  %nxt = load i32, ptr %npp
+  br label %floop
+take:
+  %slack = sub i32 %bsz, %need
+  %cansplit = icmp uge i32 %slack, 16
+  %t4 = add i32 %cur, 4
+  %tpp = getelementptr i8, ptr %hb, i32 %t4
+  %rest = load i32, ptr %tpp
+  br i1 %cansplit, label %split, label %nosplit
+split:
+  %so = add i32 %cur, %need
+  %spp = getelementptr i8, ptr %hb, i32 %so
+  store i32 %slack, ptr %spp
+  %so4 = add i32 %so, 4
+  %spp4 = getelementptr i8, ptr %hb, i32 %so4
+  store i32 %rest, ptr %spp4
+  br label %relink
+nosplit:
+  br label %relink
+relink:
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+  br i1 %ishead, label %sethead, label %setprev
+sethead:
+  store i32 %newhead, ptr @__loment_freehead
+  br label %taken
+setprev:
+  %p4 = add i32 %prev, 4
+  %ppp = getelementptr i8, ptr %hb, i32 %p4
+  store i32 %newhead, ptr %ppp
+  br label %taken
+taken:
+  store i32 %need, ptr %hp
+  %ko = add i32 %cur, 8
+  %kp = getelementptr i8, ptr %hb, i32 %ko
+  ret ptr %kp
+bump:
+  %off = load i32, ptr @__loment_off
+  %nxtoff = add i32 %off, %need
+  %fits = icmp ule i32 %nxtoff, @ARENA@
+  br i1 %fits, label %bok, label %boom
+boom:
+  call void @__loment_abort()
+  unreachable
+bok:
+  store i32 %nxtoff, ptr @__loment_off
+  %wp = getelementptr i8, ptr %hb, i32 %off
+  store i32 %need, ptr %wp
+  %w4 = add i32 %off, 4
+  %wp4 = getelementptr i8, ptr %hb, i32 %w4
+  store i32 0, ptr %wp4
+  %bo = add i32 %off, 8
+  %bp = getelementptr i8, ptr %hb, i32 %bo
+  ret ptr %bp
+}
+
+define internal void @__loment_free(ptr %p) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %base = ptrtoint ptr %hb to i64
+  %pi = ptrtoint ptr %p to i64
+  %d64 = sub i64 %pi, %base
+  %d32 = trunc i64 %d64 to i32
+  %hi = sub i32 %d32, 8
+  %hp = getelementptr i8, ptr %hb, i32 %hi
+  %sz = load i32, ptr %hp
+  %hend = add i32 %hi, %sz
+  %off = load i32, ptr @__loment_off
+  %istail = icmp eq i32 %hend, %off
+  br i1 %istail, label %rewind, label %link
+rewind:
+  store i32 %hi, ptr @__loment_off
+  ret void
+link:
+  %head = load i32, ptr @__loment_freehead
+  br label %lloop
+lloop:
+  %cur = phi i32 [ %head, %link ], [ %nxt, %lcont ]
+  %prev = phi i32 [ 0, %link ], [ %cur, %lcont ]
+  %lend = icmp eq i32 %cur, 0
+  %after = icmp ugt i32 %cur, %hi
+  %stop = or i1 %lend, %after
+  br i1 %stop, label %ins, label %lcont
+lcont:
+  %l4 = add i32 %cur, 4
+  %lpp = getelementptr i8, ptr %hb, i32 %l4
+  %nxt = load i32, ptr %lpp
+  br label %lloop
+ins:
+  %i4 = add i32 %hi, 4
+  %ipp = getelementptr i8, ptr %hb, i32 %i4
+  store i32 %cur, ptr %ipp
+  %ishead2 = icmp eq i32 %prev, 0
+  br i1 %ishead2, label %sethead, label %setprev
+sethead:
+  store i32 %hi, ptr @__loment_freehead
+  ret void
+setprev:
+  %q4 = add i32 %prev, 4
+  %qpp = getelementptr i8, ptr %hb, i32 %q4
+  store i32 %hi, ptr %qpp
+  ret void
+}
+
+@__loment_heap = internal global ptr null
+@__loment_off = internal global i32 8
+@__loment_freehead = internal global i32 0
+'''.replace("@ARENA@", str(HOSTED_ARENA_BYTES))
+
 _RUST_RUNTIME = '''
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -6807,7 +6985,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 读源码要启动器懂 Loment 的词法，而这份 IR 本来就是构建的输入。
     # **只有 hosted 才多发这一行** —— sealed 是默认档，于是现存每一份单元的 IR
     # 一个字节都不变（孪生判据逐字节比的那 46 份）。
-    if mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted":
+    _hosted_port = mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted"
+    if _hosted_port:
         out.append("; loment-port: hosted")
     out.append("")
     globals_: list[str] = []
@@ -6923,8 +7102,26 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 而不是"堆那个符号出现过没有"。两者分开判会漏发（实测：`free` 一用就报
     # "未定义的标签"；而只用整数除法、不用 alloc 的单元会反过来——发出分配器却没有全局）。
     _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
+    # **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
+    # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
+    # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉
+    # （`docs/228` §2）。`sealed` 因此走原来那段文本，**一个字节没动**。
+    # **`gc_auto`/`alpha` 不走这一支**：收集器的标记表按 arena 偏移索引、行数 = arena/8
+    # （见 `_IR_GC` 里那个 `@__loment_mark`），换 arena 要**同时**换表的口径与两处根扫边界
+    # —— 那是收集器的活
+    # （`docs/228` §4 的 B1）。它**不静默**：那一档发出 `; loment-heap: static 65536`，
+    # 于是"这一份没吃到 A"是被**量**出来的，不是被默认掉的。
+    _hosted_grown = _hosted_port and not (gc_auto or gc_alpha)
     if _needs_heap:
-        out.append(_IR_HEAP)
+        if _hosted_grown:
+            out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
+            if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
+                out.append("declare ptr @malloc(i64)")
+            out.append(_IR_HEAP_HOSTED)
+        else:
+            if _hosted_port:
+                out.append("; loment-heap: static 65536")
+            out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
     # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
