@@ -3908,6 +3908,23 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if space and space == c.space:
                 errs.append(f"{c.line}: 能力 {c.name} 使用了 excluded 的空间 {space}")
 
+    # **行为轴**（`docs/218` §7 第 2 件，2026-10-11）：上面那条 M41 比的是**名字**
+    # （`excluded "usb"` 对 `capability … : usb[…]`）—— 它**从不看行为**，所以
+    # "声明了不碰网络、代码里却在调 `socket`"是它看不见的。补上的就是这一条。
+    #
+    # **两轴必须分开**（`docs/218` §8 最后两行）：这条是**权威**读法（"这个门不开"），
+    # 与 `docs/208` 那条**保密**读法（"我不会把数据送出去"，由 M41 那一族管）不是一件事 ——
+    # 拿一条冒充两条，正是那次更正重演的路径。所以这里只判"**开了没有**"，
+    # 不判"外发的字节里有没有本域的数据"。
+    for site_line, num in _machine_call_sites(mod):
+        if SURFACE_NUMBERS.get(num) != "net":
+            continue
+        for ex in mod.excluded:
+            space = ex.split(":")[0].strip()
+            if space in EXCLUDED_NET_SPACES:
+                errs.append(f"{site_line}: 机调用号 {num} 使用了 excluded 的空间 {space}")
+                break                      # 一个站点只报一次（两个写法都写了也还是一次）
+
     for f in mod.funcs:
         if not _type_ok(f.ret, known):
             errs.append(f"{f.line}: 函数 {f.name} 返回类型 {f.ret} 未声明")
@@ -4614,6 +4631,42 @@ SURFACE_OTHER = "other"
 SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
 
 
+def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
+    """**每一个机调用站点** `(行号, 号或 None)` —— 号只在首参写成整数字面量时给得出。
+
+    三处共用这一遍（`_count_surfaces` 与 `excluded` 的行为轴那一条）—— 走两遍就会漂：
+    一处按 `IntLit` 认、另一处顺手也认了常量名，两份口径差一个号，判据各自绿着。
+    """
+    import dataclasses as _dc
+
+    out: list[tuple[int, int | None]] = []
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
+            args = getattr(x, "args", [])
+            first = args[0] if args else None
+            out.append((getattr(x, "line", 0),
+                        first.value if isinstance(first, IntLit) else None))
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    return out
+
+
+#: `excluded` 里**指网络空间**的那几个名字（`docs/218` §7 第 2 件）。
+#: 面名本身由用的人定（`docs/224`），这里只认仓库自己的两个写法：
+#: `net` 是**面**的叫法（`SURFACE_NUMBERS` 里那个），`network` 是**空间**的叫法
+#: （`loment/examples/demo.lomt:18` 与 `docs/218` §1 用的就是它）。
+EXCLUDED_NET_SPACES = ("net", "network")
+
+
 def _count_surfaces(mod: Module) -> dict:
     """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
 
@@ -4629,27 +4682,10 @@ def _count_surfaces(mod: Module) -> dict:
     面才是读者要问的问题（"这份程序碰了网络没有"）。**号写成了变量就落 `other`** ——
     那是词法口径的诚实边界，不是漏数。
     """
-    import dataclasses as _dc
-
     counts: dict = {}
-
-    def walk(x) -> None:
-        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
-            args = getattr(x, "args", [])
-            first = args[0] if args else None
-            num = first.value if isinstance(first, IntLit) else None
-            key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
-            counts[key] = counts.get(key, 0) + 1
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                walk(y)
-
-    walk(mod)
+    for _line, num in _machine_call_sites(mod):
+        key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
+        counts[key] = counts.get(key, 0) + 1
     out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
     out["total_sites"] = sum(counts.values())
     return out
@@ -5018,32 +5054,16 @@ no:
   ret i32 0
 }
 
-define internal void @__loment_collect() {
+; **根那一趟单独成函数** —— 分代那一档的「小回收」要**同一趟**（§2.7），抽出来比复制一份好。
+; 代价是 `gc_auto` 的产物里这一段从内联变成一次调用；两个实现同时变，逐字节判据照旧守着。
+define internal void @__loment_markroots() {
 entry:
-  br label %cl
-cl:
-  %ci = phi i32 [ 8, %entry ], [ %cex, %clc ]
-  %co = load i32, ptr @__loment_off
-  %cd = icmp uge i32 %ci, %co
-  br i1 %cd, label %roots, label %clb
-clb:
-  %cidx = lshr i32 %ci, 3
-  %cby = lshr i32 %cidx, 3
-  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
-  store i8 0, ptr %cmp
-  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
-  %csz = load i32, ptr %csp
-  %cex = add i32 %ci, %csz
-  br label %clc
-clc:
-  br label %cl
-roots:
   br label %rl
 rl:
-  %rk = phi i32 [ 0, %roots ], [ %rk2, %rlc ]
+  %rk = phi i32 [ 0, %entry ], [ %rk2, %rlc ]
   %rn = load i32, ptr @__loment_rootn
   %rd = icmp uge i32 %rk, %rn
-  br i1 %rd, label %prop, label %rb
+  br i1 %rd, label %done, label %rb
 rb:
   %rs = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 %rk
   %rsv = load i64, ptr %rs
@@ -5060,21 +5080,28 @@ rmk:
 rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
-prop:
+done:
+  ret void
+}
+
+; **传播**：从 `%from` 起扫块，把块里**长得像堆内地址**的字递归标记上，直到不动点。
+; 起点参数化是给分代那一档用的（小回收只扫年轻代）—— 全量那一趟传 8。
+define internal void @__loment_propagate(i32 %from) {
+entry:
   br label %pl
 pl:
-  %ch = phi i32 [ 1, %prop ], [ %acc, %pw ]
+  %ch = phi i32 [ 1, %entry ], [ %acc, %pw ]
   %zero = icmp eq i32 %ch, 0
-  br i1 %zero, label %sweep, label %pw
+  br i1 %zero, label %done, label %pw
 pw:
-  %wi = phi i32 [ 8, %pl ], [ %we, %wlc ]
+  %wi = phi i32 [ %from, %pl ], [ %we, %wlc ]
   %acc = phi i32 [ 0, %pl ], [ %acc2, %wlc ]
   %wo = load i32, ptr @__loment_off
   %wd = icmp uge i32 %wi, %wo
   br i1 %wd, label %pl, label %wb
 wb:
-  %wszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
-  %wsz = load i32, ptr %wszp
+  %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
+  %wsz = load i32, ptr %wp
   %widx = lshr i32 %wi, 3
   %wby = lshr i32 %widx, 3
   %wmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %wby
@@ -5119,14 +5146,21 @@ wlc:
   %we = phi i32 [ %wex, %wn ], [ %wey, %wn2 ]
   %acc2 = phi i32 [ %wacc, %wn ], [ %acc, %wn2 ]
   br label %pw
-; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
-; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
-; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
-sweep:
-  store i32 0, ptr @__loment_freehead
+done:
+  ret void
+}
+
+; **清扫**：从 `%from` 起把没标记的块**交回分配器**。**起点参数化**同 `propagate`
+; （小回收只清扫年轻代）。
+; **这里不重置空闲链表**（`@__loment_freehead`）—— 全量那一趟由**调用方**在进这里之前重置。
+; 理由见 `__loment_collect` 里那段：重置是「防止同一块被挂两次」的手段，而**小回收不能重置**
+; —— 老年代里那些**已经挂在链上的空闲块**不属于这次清扫的范围，重置一次就把它们从链上
+; 丢了（不是不安全，是白漏内存）。
+define internal void @__loment_sweep(i32 %from) {
+entry:
   br label %sl
 sl:
-  %si = phi i32 [ 8, %sweep ], [ %sex, %slc ]
+  %si = phi i32 [ %from, %entry ], [ %sex, %slc ]
   %so = load i32, ptr @__loment_off
   %sd = icmp uge i32 %si, %so
   br i1 %sd, label %done, label %sb
@@ -5146,6 +5180,9 @@ sb:
 keep:
   br label %slc
 kill:
+  ; **释放前先把这一格的标记清零** —— 于是「空闲块一律未标记」这条不变式成立，清扫**可以重复跑**
+  ; （见 `__loment_minor` 里那段：它每次都重置空闲链表，重复跑正是它要的）。
+  store i32 0, ptr %smp
   %k8 = add i32 %si, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
   call void @__loment_free(ptr %kp)
@@ -5154,6 +5191,37 @@ slc:
   %sex = add i32 %si, %ssz
   br label %sl
 done:
+  ret void
+}
+
+; **全量回收的四趟**：清标记 → 扫根 → 传播到定点 → 清扫，一趟不少（`docs/210` §2.4）。
+define internal void @__loment_collect() {
+entry:
+  br label %cl
+cl:
+  %ci = phi i32 [ 8, %entry ], [ %cex, %clc ]
+  %co = load i32, ptr @__loment_off
+  %cd = icmp uge i32 %ci, %co
+  br i1 %cd, label %roots, label %clb
+clb:
+  %cidx = lshr i32 %ci, 3
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
+  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
+  %csz = load i32, ptr %csp
+  %cex = add i32 %ci, %csz
+  br label %clc
+clc:
+  br label %cl
+roots:
+  call void @__loment_markroots()
+  call void @__loment_propagate(i32 8)
+  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
+  ; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
+  ; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
+  store i32 0, ptr @__loment_freehead
+  call void @__loment_sweep(i32 8)
   ret void
 }
 
@@ -5186,7 +5254,173 @@ out:
 #:     ≤ 64 KiB"，所以**活集 ≳ 32 KB 必耗尽**；空间触发把这一条抬到"活集接近整个 arena"。
 #:
 #: **不用 `select`**（下限那一格走分支）—— 自举镜像链接器 `lomelf` 的 `lower` 里没有 `select`。
+#:
+#: **再往上的一格：分代（`docs/210` §2.7）** —— 这一档的收集器**不止一种策略**：
+#:
+#:   * `__loment_major()` = 全量（`__loment_collect` + 把 `@__loment_oldtop` 推到前沿 + 清卡表）；
+#:   * `__loment_minor()` = **只收年轻代**（地址 ≥ `@__loment_oldtop`）：清年轻代的标记、
+#:     扫根、扫**脏卡**、**只传播年轻代**、**只清扫年轻代**。老年代一个字节都不扫。
+#:
+#: 年轻代 = **上次全量之后分配出来的那一截**。这一刀切在哪儿是**地址**，不是"对象的岁数"：
+#: 分配器是 bump + 地址序空闲链表，于是"复用一块老空闲块"会落在老年代里（按地址算老）——
+#: 那是**保守**的一侧（老年代不被小回收扫），不是不安全的一侧。
+#:
+#: **写屏障**（`__loment_wb`）是小回收能成立的前提：小回收不扫老年代，而**老块里可能存着
+#: 指向年轻代的指针**（`p as u64` + `store64` 就写得出一个真指针，见 §4.2）—— 不记下来就会
+#: 把活块当垃圾扫掉。所以**每一次写堆**（每个 `store8` 站点前、以及 `atomic_add` 前）落一条
+#: 屏障调用：地址落在**老年代**就把它所在的 64 B **卡**置脏。小回收扫脏卡找年轻代指针，
+#: 扫完清脏。卡表 1024 格 × 64 B = 整个 arena。
+#:
+#: **这是这一档的价钱，写明了**：屏障挂在**每一个 `store8` 站点**上（`gc_auto` 那一档**不带**，
+#: 它老实做全量）。一次写一条间接调用，是这一档用"写多"换"收得少"的交换 —— 值不值要看
+#: 写的次数与收的次数之比，这一版**没有量过**（§7 最后一条）。
 _IR_GC_TRIGGER_ADAPT = '''@__loment_thresh = internal global i32 32768
+@__loment_oldtop = internal global i32 8
+@__loment_cards = internal global [1024 x i32] zeroinitializer
+
+; **写屏障**：地址落在老年代 ⇒ 它所在的卡置脏。落在堆外（栈、只读段）或年轻代 ⇒ 什么都不做。
+; 堆外那一条靠 `ptrtoint` 相减：栈地址与堆基址的差是一个**巨大的无符号数**，`ult 65536` 自然为假。
+define internal void @__loment_wb(ptr %g) {
+entry:
+  %a64 = ptrtoint ptr %g to i64
+  %b64 = ptrtoint ptr @__loment_heap to i64
+  %d = sub i64 %a64, %b64
+  %in = icmp ult i64 %d, 65536
+  br i1 %in, label %heap, label %out
+heap:
+  %a = trunc i64 %d to i32
+  %ge8 = icmp uge i32 %a, 8
+  %ot = load i32, ptr @__loment_oldtop
+  %lt = icmp ult i32 %a, %ot
+  %yes = and i1 %ge8, %lt
+  br i1 %yes, label %mark, label %out
+mark:
+  %ci = lshr i32 %a, 6
+  %cp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %ci
+  store i32 1, ptr %cp
+  br label %out
+out:
+  ret void
+}
+
+; **小回收**：只动年轻代（地址 ≥ `@__loment_oldtop`）。五步 ——
+;   ① 清**年轻代**的标记位（老年代的标记位不动：它们不参与这次清扫）；
+;   ② 扫根（与全量同一趟）；
+;   ③ 扫**脏卡**：老年代里被写过的那 64 B 块，逐个 8 字节窗口找落在堆里的值，标记其所在块；
+;   ④ **只传播年轻代**（起点 `oldtop`）—— 年轻代内部互相指的那些；老→年轻由③兜住；
+;   ⑤ **只清扫年轻代**（起点 `oldtop`），**不重置空闲链表**（理由见 `__loment_sweep`）。
+define internal void @__loment_minor() {
+entry:
+  %ot = load i32, ptr @__loment_oldtop
+  br label %cl
+cl:
+  %ci = phi i32 [ %ot, %entry ], [ %cex, %clc ]
+  %co = load i32, ptr @__loment_off
+  %cd = icmp uge i32 %ci, %co
+  br i1 %cd, label %roots, label %clb
+clb:
+  %cidx = lshr i32 %ci, 3
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
+  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
+  %csz = load i32, ptr %csp
+  %cex = add i32 %ci, %csz
+  br label %clc
+clc:
+  br label %cl
+roots:
+  call void @__loment_markroots()
+  br label %cr
+cr:
+  %ri = phi i32 [ 0, %roots ], [ %ri2, %rc ]
+  %rcd = icmp uge i32 %ri, 1024
+  br i1 %rcd, label %prop, label %rcb
+rcb:
+  %rcp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %ri
+  %rcv = load i32, ptr %rcp
+  %rset = icmp eq i32 %rcv, 1
+  br i1 %rset, label %cscan, label %rc
+cscan:
+  %rbase = ptrtoint ptr @__loment_heap to i64
+  %cstart = shl i32 %ri, 6
+  %cend = add i32 %cstart, 64
+  br label %cs
+cs:
+  %sj = phi i32 [ %cstart, %cscan ], [ %sj2, %csc ]
+  %sjd = icmp uge i32 %sj, %cend
+  br i1 %sjd, label %cdone, label %csb
+csb:
+  %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %sj
+  %sv = load i64, ptr %sp
+  %sdo = sub i64 %sv, %rbase
+  %sin = icmp ult i64 %sdo, 65536
+  br i1 %sin, label %smk, label %csc
+smk:
+  %sd32 = trunc i64 %sdo to i32
+  %sr = call i32 @__loment_markp(i32 %sd32)
+  br label %csc
+csc:
+  %sj2 = add i32 %sj, 8
+  br label %cs
+cdone:
+  store i32 0, ptr %rcp
+  br label %rc
+rc:
+  %ri2 = add i32 %ri, 1
+  br label %cr
+prop:
+  call void @__loment_propagate(i32 %ot)
+  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
+  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
+  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
+  ;      `oldtop` 之下」的成因）；
+  ;   ② 既然重置，就必须能重复跑：所以释放那一格顺手把标记清零（`__loment_sweep` 的 `kill:`）。
+  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
+  store i32 0, ptr @__loment_freehead
+  call void @__loment_sweep(i32 8)
+  ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
+  ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的
+  ; 时候根本不会跑）—— 那样小回收 ≡ 全量、卡表永不生效。**实测**：少了这一条，
+  ; `loment_elf_test` 那条分代判据在「拆掉卡扫描」之后照样通过（判据失去证伪力）。
+  ; `off` 可能已经**退回**到 `oldtop` 之下（前沿回退），那就不动它（`max`，走分支不用 `select`）。
+  %o2 = load i32, ptr @__loment_off
+  %up = icmp ugt i32 %o2, %ot
+  br i1 %up, label %prom, label %out
+prom:
+  store i32 %o2, ptr @__loment_oldtop
+  br label %out
+out:
+  ret void
+}
+
+; **全量**：`__loment_collect` 那一套，外加「这一刀切在这儿」——把 `oldtop` 推到前沿、
+; 把卡表清空（老年代整个换了一遍，旧卡不再代表任何东西）。
+define internal void @__loment_major() {
+entry:
+  call void @__loment_collect()
+  %o = load i32, ptr @__loment_off
+  store i32 %o, ptr @__loment_oldtop
+  br label %cc
+cc:
+  %i = phi i32 [ 0, %entry ], [ %i2, %ccc ]
+  %cd = icmp uge i32 %i, 1024
+  br i1 %cd, label %out, label %ccb
+ccb:
+  %cp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %i
+  store i32 0, ptr %cp
+  br label %ccc
+ccc:
+  %i2 = add i32 %i, 1
+  br label %cc
+out:
+  ret void
+}
+
+; **策略选择**：该收的时候**先小回收**；小回收之后前沿**还是顶在装满那一档**就跟一次
+; **全量**兜底 —— 于是「要么收够、要么确实装不下」，不留「收了但没用」那条路。
+; **不做「年轻代太大就直接全量」那种优化**：前沿能不能退回去才是「这次小回收有没有用」的
+; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
   %b = load i32, ptr @__loment_gcbytes
@@ -5202,7 +5436,16 @@ entry:
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
-  call void @__loment_collect()
+  call void @__loment_minor()
+  %of2 = load i32, ptr @__loment_off
+  %m1 = add i32 %of2, %sz
+  %m2 = add i32 %m1, 8
+  %still = icmp ugt i32 %m2, 64512
+  br i1 %still, label %maj, label %tune
+maj:
+  call void @__loment_major()
+  br label %tune
+tune:
   %live = call i32 @__loment_livebytes()
   %dbl = mul i32 %live, 2
   %lo = icmp ult i32 %dbl, 32768
@@ -6310,18 +6553,23 @@ class _Ir:
                 _, sv = self.expr(e.obj, ty)
                 p = self.t()
                 self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
-                _, iv = self.expr(e.idx, "u32")
+                it, iv = self.expr(e.idx)          # 下标**自己的类型**（见下面那处注释）
                 g = self.t()
-                self.w(f"{g} = getelementptr inbounds {self.ll(et)}, ptr {p}, i32 {iv}")
+                self.w(f"{g} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
                 r = self.t()
                 self.w(f"{r} = load {self.ll(et)}, ptr {g}")
                 return et, r
             if not _is_array(ty):
                 raise LomError(e.line, 1, f"native M24: {ty} 不是数组")
             et = _array_elem(ty)
-            _, iv = self.expr(e.idx, "u32")
+            # **下标按它自己的类型发**，不写死 `i32`。`self.expr` 对 `Ident` 返回的是变量
+            # **自己的**类型（`want` 只管字面量），所以 `i: u64` 的 `a[i]` 拿到的是一个
+            # **i64 值** —— 塞进写死 `i32` 的 GEP 就是**不合法的 LLVM IR**。
+            # `lomelf` 按 GEP 里写的类型去读下标（`tools/lomelf.py:799`），于是**悄悄截成
+            # 32 位**照跑，所以这个 bug 一直没露；clang 不宽容，当场拒（见 `docs/212` §4）。
+            it, iv = self.expr(e.idx)
             gp = self.t()
-            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {iv}")
+            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, {self.ll(it)} {iv}")
             r = self.t()
             self.w(f"{r} = load {self.ll(et)}, ptr {gp}")
             return et, r
@@ -6483,12 +6731,23 @@ class _Ir:
             _, vv = self.expr(e.args[2], "u8")
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {pv}, i32 {ov}")
+            if self.gc_alpha:
+                # **写屏障**（`docs/210` §2.7）：分代那一档的小回收不扫老年代，而老块里可能
+                # 存着指向年轻代的指针 —— 写一次就记一次卡。**只在 alpha 档发**：`gc_auto`
+                # 老实做全量，不带这条税（两档的差别因此仍然是一个可测的事实）。
+                # 挂在这里而不是 `__loment_alloc` 上，是因为**指针是这么写进堆里的**：
+                # 一个 8 字节值由 8 条 `store8` 拼出来（`store64` 在 `bytes.lomt` 里就是这么
+                # 写的），所以"字节级"就是这道屏障唯一能看见的粒度 —— 好在**卡是 64 B**，
+                # 8 条 `store8` 无论怎么跨都落在同一张或相邻两三张卡里，一张都不会漏。
+                self.w(f"call void @__loment_wb(ptr {g})")
             self.w(f"store i8 {vv}, ptr {g}")
             return "u32", "0"
         if e.name == "atomic_add":  # M21
             _, pv = self.expr(e.args[0], "ptr")
             _, vv = self.expr(e.args[1], "u32")
             r = self.t()
+            if self.gc_alpha:
+                self.w(f"call void @__loment_wb(ptr {pv})")   # 同上：它也是一次写堆
             self.w(f"{r} = atomicrmw add ptr {pv}, i32 {vv} seq_cst")
             return "u32", r
         if e.name in ("get_bits", "set_bits"):  # M22: 位域
@@ -6707,18 +6966,18 @@ class _Ir:
                 _, sv = self.expr(base, ty)
                 p = self.t()
                 self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
-                _, iv = self.expr(s.target.idx, "u32")
+                it, iv = self.expr(s.target.idx)   # 下标**自己的类型**（见 `Index` 读处那段注释）
                 gp = self.t()
-                self.w(f"{gp} = getelementptr inbounds {self.ll(et)}, ptr {p}, i32 {iv}")
+                self.w(f"{gp} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
                 _, v = self.expr(s.expr, et)
                 self.w(f"store {self.ll(et)} {v}, ptr {gp}")
                 return
             if not _is_array(ty):
                 raise LomError(s.line, 1, f"native M24: {ty} 不是数组")
             et = _array_elem(ty)
-            _, iv = self.expr(s.target.idx, "u32")
+            it, iv = self.expr(s.target.idx)       # 同上：下标按它自己的类型发
             gp = self.t()
-            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {iv}")
+            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, {self.ll(it)} {iv}")
             _, v = self.expr(s.expr, et)
             self.w(f"store {self.ll(et)} {v}, ptr {gp}")
             return

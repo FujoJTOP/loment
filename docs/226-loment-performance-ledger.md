@@ -33,10 +33,34 @@
 
 **边界（诚实）**：
 
-* 本机**没有 clang**，所以 `docs/212` 那条 **IR → clang -O2** 的卸载路**本轮没量**。
 * **Rust 那一列在 Windows 上跑**（WSL 里没有 rustc）—— **跨 OS，不可与其余列直接比**，
   只作旁证。要正经比，得把 rustc 装进 WSL。
 * 数字是**相对**的：换机器绝对值会变，比值才是结论。
+
+> **订正（2026-10-11 同日）**：本节初版写着"本机**没有 clang**，所以 **IR → clang -O2**
+> 的卸载路本轮没量"。**那句是错的** —— clang 在 `C:\Program Files\LLVM\bin\clang.exe`
+> （22.1.8），只是**不在 `PATH` 上**，我用 `command -v clang` 查漏了。那条路补量如下。
+
+### 2.1 卸载那一格：**Loment 的 IR 喂 clang -O2，快 3.7×**
+
+同一份 `sum`（§2 那张表的第一行），同一台机，`min of 5`：
+
+| 产物 | ms | 相对 lomelf |
+|---|---|---|
+| `lomelf` 原生 | 56.6 | 1.00× |
+| **同一份 IR → `clang -O2`** | **15.3** | **0.27×** |
+| 手写 C（`gcc -O2`，§2） | 11 | 0.19× |
+
+命令就是一行（`docs/212` §5 粒度 A 的原话）：
+
+```bash
+python tools/lomentc.py --emit llvm prog.lomt -o prog.ll
+clang --target=x86_64-unknown-linux-gnu -O2 -static -nostdlib -ffreestanding -o prog prog.ll
+```
+
+**这是 `docs/212` §4 那条"天花板就是 C"的直接实测**：同一个后端（LLVM），
+Loment 的 IR 编译出来只比手写 C 慢 **1.4×**，而原生栈机慢 5.1×。
+§6 的杠杆 2 因此从"理论上成立"变成"这一格已经量过"。
 
 ## 2. 运行速度：原生 ≈ C -O2 的 4.0–6.4×
 
