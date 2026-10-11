@@ -15,6 +15,7 @@
 // `if rc != 0: return None`(→ SKIP, 退 2)是同一条判据。
 
 module lomeol
+choose runtime
 
 use proc
 
