@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lomentc                                                        # noqa: E402
 import loment_json_test as J                                          # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -305,6 +306,9 @@ def _loment_probe() -> str:
 //
 // 与 C 侧对照物**同标签、同顺序**。分叉时判据会指出第一个不同行。
 module libl_probe
+
+// 根单元：LibL 四张脸都声明了 `choose runtime`（需求），根必须满足它（docs/227 §2.2）。
+choose runtime
 
 use "lompi/store/std/0.1.0/string.lomt"
 use "lompi/store/std/0.1.0/ctype.lomt"
@@ -706,13 +710,50 @@ def _run_c(td: Path, name: str, src: str) -> str:
     return (td / f"{name}.out").read_bytes().decode("utf-8")
 
 
+def _check_unit(mod, deps, entry: Path) -> list[str]:
+    """查一个单元**自己的正文**。
+
+    `_dep_pass=True` 关掉的是 `check()` 末尾那趟"把每个依赖**当入口**再查一遍"
+    （issue **#246**）。那趟把**其余依赖整份**当符号表递下去 —— 对"符号可见面"是对的
+    （更宽只会少报），但 `runtime` 维（`docs/227`）问的是"这个单元自己的生效维，
+    与它**真正依赖**的那些单元的要求一致吗"，而递下去的根本不是它的依赖。
+
+    于是任何闭包里同时有"声明了 `choose runtime` 的"与"什么也没声明的叶子"的单元，
+    都会收到一条**假**报错，还报在那个无辜的叶子上。实测：`main` 上 `text`/`trim`/
+    `word`/`f64*`/`mathf`/`round`/`std`（门面 258 条）**九个模块**已经栽在这上面 ——
+    不是这一笔带进来的，是既有缺陷，**没有**任何门禁拿这些模块当入口查，所以一直潜伏。
+
+    LibL 的判据只主张"这几个模块自己是合法单元"，那正好是 `_dep_pass=True` 量的事。
+    **不主张**"它的依赖也合法" —— 那是库系统与仓库的事，不是 libc 面的事。
+    """
+    return lomentc.check(mod, deps=deps, _dep_pass=True)
+
+
+def _compile_probe(probe: Path, td: Path, name: str) -> Path:
+    """照 `loment_json_test._compile`，但走 `_check_unit`（理由见它）。"""
+    mod = lomentc.load(probe)
+    deps = lomentc.resolve_deps(mod, ROOT, probe.parent, entry=probe)
+    errs = _check_unit(mod, deps, probe)
+    assert not errs, f"探针自己检查不过: {errs[:3]}"
+    ll = td / f"{name}.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    elf = td / f"{name}.elf"
+    r = subprocess.run(
+        [J._clang(), "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    return elf
+
+
 def _run_loment(td: Path) -> str:
     probe = ROOT / "loment" / "build" / "libl_probe.lomt"
     probe.parent.mkdir(parents=True, exist_ok=True)
     with probe.open("w", encoding="utf-8", newline="\n") as f:
         f.write(_loment_probe())
     try:
-        elf = J._compile(probe, td, "libl_probe")
+        elf = _compile_probe(probe, td, "libl_probe")
         return J._run(elf, td)
     finally:
         probe.unlink(missing_ok=True)
@@ -746,13 +787,12 @@ def test_libl_matches_libc():
 @test
 def test_libl_modules_are_checkable():
     """每个被量的 LibL 模块**自己**必须是合法的 L1 单元（不靠 clang，永远跑）。"""
-    import lomentc
     for name in LIBL_MODULES:
         p = ROOT / "lompi" / "store" / "std" / "0.1.0" / f"{name}.lomt"
         assert p.exists(), f"缺模块 {p}"
         mod = lomentc.load(p)
         deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
-        errs = lomentc.check(mod, deps=deps)
+        errs = _check_unit(mod, deps, p)
         assert not errs, f"{p.name}: {errs[:2]}"
     print(f"      {len(LIBL_MODULES)} 个 LibL 模块都过检查")
 

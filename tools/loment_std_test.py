@@ -36,6 +36,11 @@ def test(fn):
 PROBE = r'''
 module stdprobe
 
+// `runtime` 维从 `docs/227` 起是一条**保证**：探针用了 `alloc`，根单元就得声明它。
+// 仓内那个孪生 (`loment/tools/lomstdcheck.lomt:20`) 早就有一行，这个**生成的**探针
+// 漏了 —— 于是 `main` 上这条判据一直是红的（不是这一笔带出来的，是 #212 漏改）。
+choose runtime
+
 use "loment/lib/mem.lomt"
 use "loment/lib/num.lomt"
 
