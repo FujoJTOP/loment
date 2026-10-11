@@ -2022,6 +2022,10 @@
    "sha256": "d68459ecdeb0d6ffaf863e04d613ba9827244a8c6ec96b627ea3c8f90b47c2d5"
   },
   {
+   "path": "docs/225-loment-runtime-gaps.md",
+   "sha256": "c060c98ffa53cff17bc51fbbda1ccd61eb35b53e9974fe79cc89b99bbfe1fddc"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "962edd7c40617d044efc16abfc8eb3cefd0b16f4c6edfb9cb91dcb5c9beca38d"
   },
