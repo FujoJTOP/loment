@@ -5231,6 +5231,51 @@ _IR_GC = _IR_GC_SHARED + _IR_GC_TRIGGER_FIXED
 _IR_GC_ALPHA = _IR_GC_SHARED + _IR_GC_TRIGGER_ADAPT
 
 
+def _arena_indirect(ir: str, nbytes: int) -> str:
+    """把一段**直接寻址 arena** 的 IR 换成**经基址指针**的间接寻址（`docs/230`）。
+
+    `hosted` 的 arena 是宿主给的一块（`@__loment_heap` 是 `ptr`，不是 `[65536 x i8]`），
+    所以收集器里**三件事**都得跟着换：
+
+    * **基址** —— `getelementptr [65536 x i8], ptr @__loment_heap, …` → `getelementptr i8, ptr %hb, …`，
+      以及 `ptrtoint ptr @__loment_heap` → `ptrtoint ptr %hb`；
+    * **标记表的行数** —— 它本来就是 `arena / 8`（`docs/228` §1 第四行那个要害），
+      所以换 arena 就是换这个数，索引口径 `偏移 >> 3` **一个字节没动**；
+    * **两处根扫的边界**（`icmp ult i64 %rdo / %wdo, 65536`）。
+
+    `%hb` 插在**每个 `entry:` 之后**：这两个函数的入口块都叫 `entry`，而入口块**支配**
+    其余每一块 —— 所以 `%hb` 在哪儿都可用。这是 LLVM 的支配关系保证的，不是"觉得够用"。
+
+    **为什么是"换"而不是"再抄一份"**：`_IR_GC_SHARED` 是一条会继续长的文本，抄一份就是
+    两份要同时改的东西（`docs/158` §5 那条孪生纪律）。判据反过来钉：两边的**非 arena 行
+    必须逐字相同**（`lomentc_test` 里那条）。
+    """
+    out: list[str] = []
+    for line in ir.split("\n"):
+        if line == "entry:":
+            out.append(line)
+            out.append("  %hb = call ptr @__loment_arena()")
+            continue
+        line = line.replace("getelementptr [65536 x i8], ptr @__loment_heap, i32 0,",
+                            "getelementptr i8, ptr %hb,")
+        line = line.replace("ptrtoint ptr @__loment_heap to i64", "ptrtoint ptr %hb to i64")
+        line = line.replace("icmp ult i64 %rdo, 65536", f"icmp ult i64 %rdo, {nbytes}")
+        line = line.replace("icmp ult i64 %wdo, 65536", f"icmp ult i64 %wdo, {nbytes}")
+        line = line.replace("[8192 x i32]", f"[{nbytes // 8} x i32]")
+        out.append(line)
+    return "\n".join(out)
+
+
+#: **`hosted` 那一份收集器**（`docs/230`，`docs/228` §4 的 B1）—— 与 `_IR_GC_SHARED`
+#: **同源**：机器从它换出来的，不手抄（换法与理由见 `_arena_indirect`）。
+#:
+#: 触发那一段**一个字节都不用换**：`_IR_GC_TRIGGER_FIXED` 按**字节数**触发（32768），
+#: 不看 arena 大小 —— 所以两个端口共用它。`gc_auto_alpha` 不需要第二份 hosted：
+#: `hosted` 与它本来就是**定义上冲突**的（`CORE_CONFLICTS`）。
+_IR_GC_SHARED_HOSTED = _arena_indirect(_IR_GC_SHARED, HOSTED_ARENA_BYTES)
+_IR_GC_HOSTED = _IR_GC_SHARED_HOSTED + _IR_GC_TRIGGER_FIXED
+
+
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
 
 IR_TYPES = {
@@ -7106,12 +7151,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
     # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉
     # （`docs/228` §2）。`sealed` 因此走原来那段文本，**一个字节没动**。
-    # **`gc_auto`/`alpha` 不走这一支**：收集器的标记表按 arena 偏移索引、行数 = arena/8
-    # （见 `_IR_GC` 里那个 `@__loment_mark`），换 arena 要**同时**换表的口径与两处根扫边界
-    # —— 那是收集器的活
-    # （`docs/228` §4 的 B1）。它**不静默**：那一档发出 `; loment-heap: static 65536`，
-    # 于是"这一份没吃到 A"是被**量**出来的，不是被默认掉的。
-    _hosted_grown = _hosted_port and not (gc_auto or gc_alpha)
+    # **收集器那一档也在这支里**（`docs/230`，= `docs/228` §4 的 B1）：标记表的**行数
+    # 就是 arena/8**，所以换 arena 必须**同时**换表 —— 那就是 `_IR_GC_HOSTED`。此前
+    # 这一档留在静态 64 KiB 并靠 `; loment-heap: static 65536` 说出来；现在它也吃平台
+    # 那一块，那条"不静默"的记号因此**没有再出现的场合**（判据从"它说了"改成"它涨了"）。
+    # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`CORE_CONFLICTS`），走不到这儿。
+    _hosted_grown = _hosted_port
     if _needs_heap:
         if _hosted_grown:
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
@@ -7119,8 +7164,6 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 out.append("declare ptr @malloc(i64)")
             out.append(_IR_HEAP_HOSTED)
         else:
-            if _hosted_port:
-                out.append("; loment-heap: static 65536")
             out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
@@ -7131,7 +7174,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             if gc_auto:
                 # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
                 # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
-                out.append(_IR_GC)
+                # `hosted` 那一份与它**同源**（`_arena_indirect` 机器换的，见 `_IR_GC_HOSTED`）：
+                # 收集器要认的是**同一块 arena**，所以 arena 换了它也得换。
+                out.append(_IR_GC_HOSTED if _hosted_grown else _IR_GC)
             else:
                 # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
                 # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前
