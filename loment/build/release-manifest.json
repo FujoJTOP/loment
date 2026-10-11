@@ -7,7 +7,7 @@
   },
   {
    "path": "tools/lom_audit.py",
-   "sha256": "d13479d219cabde4cf66933ff2a1afeb519e6eb8b41395b4fc15f059a9cac102"
+   "sha256": "5d2f2d82cb80e2fa17b5ee666aeac855e33d337c86e6b394c5d71d9b79c4d83c"
   },
   {
    "path": "tools/lomc_test.py",
@@ -835,7 +835,7 @@
   },
   {
    "path": "tools/loment_net_test.py",
-   "sha256": "ad81bb83a89645a2ca2f96f35864fecaa3349125ff8a96014ab466684ed0e554"
+   "sha256": "370812dae9ada7ef53c255c045b751890f193fae6d8333f9f4034b6a535f7ad9"
   },
   {
    "path": "tools/lomt_from.py",
@@ -1679,7 +1679,7 @@
   },
   {
    "path": "lom/net.lom",
-   "sha256": "2249a4fbcf3d3dc92631ec511454652d68588da2d45b0ae854221aecf3077e3d"
+   "sha256": "94f91638186bb6e9e39fdddf4cb6873747e6fdc1b37cddb13519d40c364acec9"
   },
   {
    "path": "docs/110-w36-potato-lang.md",
@@ -1951,7 +1951,7 @@
   },
   {
    "path": "docs/201-doors-and-registries.md",
-   "sha256": "caf9f12b3012f32cf7ad8345493064cdafc61b6c1f723f918afe29179b778a36"
+   "sha256": "adf09c309fe0fa70e2c8a7da9e0ef66ea5ac6c82fee2d766b3df9076e2f3401f"
   },
   {
    "path": "docs/202-loment-014-release-gate.md",
@@ -2051,7 +2051,7 @@
   },
   {
    "path": "docs/227-loment-net-closeout.md",
-   "sha256": "fbfaed295d35646cdaa5d04e1637df8794cf04d8f2641fcfaa6afabeaa1a7f88"
+   "sha256": "0df7f8e86cf3ff30bba861097c6db49d86823b986944d0a474c4f25097fdc23e"
   },
   {
    "path": "docs/228-grammar-semantics-audit.md",
@@ -2062,8 +2062,8 @@
    "sha256": "e6c76855f9ad7d221a5aa5a2e7b8637d3eebd1b4b3059f95a8b0ce0980486a84"
   },
   {
-   "path": "docs/228-lom-net-contract.md",
-   "sha256": "36d763e148c077a6529246cc23dc80ecf6b0f975afeca8b999cb58a9818d8b79"
+   "path": "docs/229-lom-net-contract.md",
+   "sha256": "d82fa8fdf4d896a48efc2a6d90dbf476374c12df399372acd639ebaad008d478"
   },
   {
    "path": "docs/manual/index.md",
@@ -2263,7 +2263,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "bbe3922fa779d583a421c715c7c6c6bf627f5299090371bc376b524395ad17e7"
+   "sha256": "d89ae9685bab76cc460bc83bf97fcbabc0d6cd5d42dd02b9d3d612f4897175a3"
   },
   {
    "path": "tools/loment_status.py",
