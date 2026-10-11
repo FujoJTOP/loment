@@ -1107,7 +1107,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "493e526300fcce17c4e47704f9025494d2cd9fb561fd0475a1d3fd9a323cb388"
+   "sha256": "7b584e581755e6c6af28502830dc4e65912767619352dfb6a663ce3ec7c07595"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1619,7 +1619,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "5dc65b0efed11e0d0be0e4ae9f19a82ac7853bc201866ebbcb15a70b286b14e8"
+   "sha256": "62d270060e49df907877f06ecbd6f035bdf8a2cb92f5a5544d55fe275ba0f0a5"
   },
   {
    "path": "loment/selfhost/comefor.lomt",

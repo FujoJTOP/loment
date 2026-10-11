@@ -5744,7 +5744,8 @@ done:
 }
 
 ; **全量回收的四趟**：清标记 → 扫根 → 传播到定点 → 清扫，一趟不少（`docs/210` §2.4）。
-define internal void @__loment_collect() {
+");
+    let _r2: u32 = emit_str(s, out, "define internal void @__loment_collect() {
 entry:
   %hb = call ptr @__loment_arena()
   br label %cl
