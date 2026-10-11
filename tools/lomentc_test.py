@@ -1953,6 +1953,49 @@ def _l0_emit(src: str) -> tuple[dict[str, dict[str, int]], str]:
 
 
 @test
+def test_array_index_ir_is_valid_llvm():
+    """数组/切片**下标**的 GEP 必须用下标**自己的类型** —— 写死 `i32` 会发出**不合法的 LLVM IR**
+    （`i32 %<i64 值>`，见 `docs/212` §4）。而 `lomelf` 是按 GEP 里**写的**类型去读下标的
+    （`tools/lomelf.py:799`），于是**悄悄截成 32 位**照跑 —— 所以这个 bug 一直没露；clang 不宽容，当场拒。
+
+    两条判据互补（**光有文本不够**：文本判据抓不到语义）：
+
+      * **文本**：`a[i]`（`i: u64`）的 GEP 里是 `i64 %`；`a[2] * 5` 那个算式是 `mul i64`
+        （**不是** `mul [4 x i64]` —— 那是孪生曾经发的形状，见 `loment_p8_test::test_m82` 里
+        `ir_index.lomt` 那条逐字节判据）；
+      * **语义**：真 `clang` 收得下（有 clang 才算，没有就 SKIP —— 与仓里其它 clang 判据同形）。
+    """
+    import shutil
+    import subprocess
+
+    src = ("module m\nfn _start() {\n"
+           "    let a: [u64; 4] = [1, 2, 3, 4];\n"
+           "    let i: u64 = 1;\n"
+           "    let x: u64 = a[i] * 3 + a[2];\n"
+           "    a[i] = x;\n"
+           "    syscall4(60, a[i] % 256, 0, 0);\n"
+           "}\n")
+    ir = lomentc.emit_llvm(parse(src), ROOT)
+    assert "i32 0, i64 %" in ir, f"动态下标没按 i64 发:\n{ir[:500]}"
+    assert "mul i64 %" in ir, f"算式里 `a[i]` 的类型不是元素 i64:\n{ir[:500]}"
+    assert "mul [4 x i64]" not in ir, "算式里 `a[i]` 用成了**数组**类型（同 `docs/212` §4）"
+    clang = shutil.which("clang") or (
+        r"C:\Program Files\LLVM\bin\clang.exe"
+        if Path(r"C:\Program Files\LLVM\bin\clang.exe").exists() else None)
+    if not clang:
+        print("      SKIP 语义那一半：无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        ll = Path(td) / "m.ll"
+        ll.write_text(ir, encoding="utf-8")
+        obj = Path(td) / "m.o"
+        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib",
+                            "-ffreestanding", "-O2", "-c", str(ll), "-o", str(obj)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, f"clang 拒了 IR（类型不合法）:\n{r.stderr[:400]}"
+
+
+@test
 def test_l0_rule_pair():
     """`gc_auto_alpha` 的 **L0**：一对只差 `choose` 一行的程序，逐格钉住提升表（`docs/210` §2）。
 
@@ -2602,6 +2645,22 @@ def test_gc_alpha_adaptive_collector_text():
     for sym in adapt:
         assert sym in alpha, f"alpha 的自适应触发缺 {sym}"
         assert sym not in auto, f"`gc_auto` 不该有自适应那一支（{sym}）—— 档位串了"
+    # **分代那一档**（`docs/210` §2.7）：alpha 多一张卡表、一条写屏障、minor/major 两个入口；
+    # `gc_auto` **一个都不沾** —— 它老实做全量，也就不该替每一次 `store8` 付那条间接调用。
+    # 这一栏钉的是这一格最要紧的那件事：**写屏障是分代成立的前提**（小回收不扫老年代），
+    # 少了它，`loment_elf_test::test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one`
+    # 立刻红。
+    gen = ("@__loment_cards", "@__loment_oldtop", "@__loment_wb",
+           "@__loment_minor", "@__loment_major")
+    for sym in gen:
+        assert sym in alpha, f"alpha 的分代那一档缺 {sym}"
+        assert sym not in auto, f"`gc_auto` 不该有分代的痕迹（{sym}）—— 档位串了"
+    # **挂点比符号更紧**：本程序两个 `store8`（`chew` 里的 `q`、`_start` 里的 `a`）⇒ alpha
+    # 正好两条屏障；符号在而挂点漏了，是**静默地少收一块**（那一块正是判据要抓的）。
+    assert alpha.count("call void @__loment_wb(ptr ") == 2, \
+        f"alpha 的写屏障该两条（两个 `store8` 站点），得到 {alpha.count('call void @__loment_wb(ptr ')}"
+    assert auto.count("call void @__loment_wb(ptr ") == 0, \
+        "`gc_auto` 不该挂写屏障 —— 它做全量，那条税买不到东西"
     # **挂点**：两档各挂两条（本程序两个 `alloc` 站点 —— `chew` 的 `p`、`_start` 的 `a`）
     assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
         f"`gc_auto` 挂点该两条，得到 {auto.count('call void @__loment_maybe_collect(i32 ')}"
