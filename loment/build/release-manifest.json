@@ -763,7 +763,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "8ddcf63964c73556976ff43ffecbb95189198598fce315190f90c7d7d525729a"
+   "sha256": "fdbc384797feb86a5a1fe37159bf17e86458331f0bfb90055c42145631d809bd"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -847,7 +847,7 @@
   },
   {
    "path": "tools/loment_megaproject_test.py",
-   "sha256": "1d2c1be75d4b8a1e87c3a897f29aa330e42abfc2f2edb827badbf0b268b2827b"
+   "sha256": "b1033a742553520aab06c79041f27f61f0f65228ccdad635383da413d0d7eb83"
   },
   {
    "path": "tools/loment_multilang_test.py",
