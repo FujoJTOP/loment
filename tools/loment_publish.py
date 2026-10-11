@@ -187,8 +187,9 @@ REPOS: dict[str, dict] = {
         #: 下次建库/换机器就丢了; 写进 spec 则每次 `--push` 都会对齐 (值一样时是无操作)。
         #: 用户 2026-09-16 定: **Loment 公开**, 且**不打 tag** (tag 要等真发布)。
         "visibility": "public",
-        "description": "Loment — a systems programming language with a Rust-subset syntax "
-                       "and capability domains; compiles to native binaries with no runtime",
+        "description": "Loment — a systems programming language with a Rust-flavored syntax "
+                       "and capability domains; artifacts are sealed (no runtime, no libc) by "
+                       "default, hosted on request",
         "homepage": "https://fujojtop.github.io/loment-site/",
         "topics": ["programming-language", "compiler", "rust", "self-hosted",
                    "systems-programming", "capability-security", "no-std"],
@@ -220,9 +221,12 @@ loment/build/** linguist-generated
 # Loment
 
 Loment is a **systems programming language**: it compiles to native x86-64 executables —
-Linux ELF and Windows PE, or a freestanding object for bare metal — with no runtime and no
-libc, and the toolchain is itself written in Loment. Its own syntax is Rust-flavored, and the
-same program can be written in six more: C, C++, Java, C#, Go or Python.
+Linux ELF and Windows PE, or a freestanding object for bare metal. What goes into one is the
+program's decision, and the build records it: `choose sealed`, the default, is an artifact
+with no runtime, no libc and no undefined symbols, and `choose hosted` is one that may link
+against real libc and shared libraries. The toolchain is itself written in Loment. Its own
+syntax is Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go
+or Python.
 
 **[Quick start](QUICKSTART.md)** ·
 [Project site](https://fujojtop.github.io/loment-site/) ·
@@ -233,7 +237,8 @@ same program can be written in six more: C, C++, Java, C#, Go or Python.
 
 ## Status
 
-`0.1.4`; prebuilt toolchains are not published yet. The toolchain is **self-hosted**: it
+`0.1.4` **ships as a package** — a Linux `tar.gz`, a Windows `zip` and a Windows installer.
+The toolchain is **self-hosted**: it
 compiles and runs with no Python and no libc at run time. **Not yet finished**: the
 *development-side* self-hosting is incomplete (`docs/189`) — the reference implementation
 (`tools/lomentc.py` and friends) and the Python test suites are still in the repository, and
@@ -259,15 +264,17 @@ $ loment run hello.lomt
 hello from Loment
 ```
 
-`_start` is the entry point, because there is no runtime to call one for you, and output goes
-through the `write` system call, because there is no `printf`. [QUICKSTART.md](QUICKSTART.md)
-takes it from here — sources, toolchain, and the first four rows below.
+`_start` is the entry point, because a sealed artifact has no runtime to call one for you, and
+output goes through the `write` system call, because there is no `printf`. A `hosted` artifact
+is a C-runtime program instead, with `fn main() -> u32` as its entry point.
+[QUICKSTART.md](QUICKSTART.md) takes it from here — sources, toolchain, and the first four rows
+below.
 
 ## What it does that others do not
 
 | | |
 |---|---|
-| **Calls libraries written in other languages** | Ten of them, end to end: C, C++, Rust and Zig by static linking behind the C ABI, then Go, Python, Java, JavaScript, Perl and Lua over a process bridge. [docs/173](docs/173-loment-ffi.md) is the honest ledger — dynamic libraries and embedding a runtime are not started. |
+| **Calls libraries written in other languages** | Ten of them, two mechanisms: C, C++, Rust and Zig by static linking behind the C ABI, then Go, Python, Java, JavaScript, Perl and Lua over a process bridge. [docs/173](docs/173-loment-ffi.md) is the honest ledger, and it draws the boundary plainly — what links in today must be a **self-contained** object, so nothing reaches a real system library yet. Reading an actual C library in is the other half of `choose hosted` ([docs/222](docs/222-lompi-020-foreign-libs.md)). |
 | **Can be written in six other syntaxes** | C, C++, Java, C#, Go, Python. Only the spelling changes; the semantics are always Loment's. Declaring it in the file (`choose write grammar`) is not wired into the compiler yet — the translators in `tools/` are the path. [docs/188](docs/188-grammar-declaration.md) |
 | **Everything is customizable** | The source suffix, the command surface (`loment-<name>` on `PATH`; official commands always win), the libraries (a directory whose identity is a content hash), and the toolchain itself. No registry — the extension points are files on disk. |
 | **Reports errors out of a separate program** | The compiler emits structured diagnostics; `lomenterr` adds the title, the location and how to fix it, so the compiler carries no message table of its own. [docs/182](docs/182-lomenterr-and-choose-switches.md) |
