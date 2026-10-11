@@ -1719,11 +1719,11 @@
   },
   {
    "path": "docs/147-potato-v1-spec.en.md",
-   "sha256": "0e6d9ce2083e16b5b98ea1b7be8db85e8cb9a2ba28ac3a770962daf68ece74ff"
+   "sha256": "77a37bf98c863852fd3267d4f9f0173a0043ae4764e8511cf5398afca25319eb"
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "ae05502a0ef077efc283a7ca5607bc5f57373598ebcba8ad2595ec2e71a2d0cd"
+   "sha256": "d146ad1f921d7fe3e863a2a5209a643263e5179122ce7457787909ad21781bc4"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
