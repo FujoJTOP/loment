@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "7b3c7360ade71b6a3b6fabdb04faa99fbeee6ac2d01f77dc06c27e57cdcc78db"
+   "sha256": "d56086c95cf40f014f33ad9066a4f6f6f7fcd8ddf58726160a4faf2c735b21e1"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "520fc4f8b318442d847024e931d6146d295c10b37b5ffccb61d7dac7d99de2f6"
+   "sha256": "9b0fb353cf11f8dd7ae82adb48e53d13970eb70ff96485e3e1a74a607685d669"
   },
   {
    "path": "tools/potato.py",
@@ -739,7 +739,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "a6aa69e21c5366880e53f9078db0ca696e3f122495fa06eee6007ad1da2aeaf1"
+   "sha256": "f73181a6caecbf3a345190754c02d04eac7602d98d2d6170d2d65efc1e7b4010"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -1067,7 +1067,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "80d90c05f266e10b2e3f8e4e6925b66faf265fe05f487ae1281112a6a9a10410"
+   "sha256": "6bf1b131d040f31e21ce4904b98764257acf967c6719896af26afb78c90cd441"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1579,7 +1579,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "a22ca0f2923b2f077e1c61f30b9ee7bab870b35b3baa358cfb77bfa7711dee0f"
+   "sha256": "ca98e503f0a6709a481ca2bbd212de14427746b52dcfa917c696af7fc8d2c25b"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -2030,8 +2030,12 @@
    "sha256": "1637d6146e36f33dc040e7d5d6839357919a08e5da0c46da81b91ae3ea288e14"
   },
   {
+   "path": "docs/228-hosted-heap.md",
+   "sha256": "e6c76855f9ad7d221a5aa5a2e7b8637d3eebd1b4b3059f95a8b0ce0980486a84"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "b6e193dbd8089d0664d21601af4510783b8e5aa54eaad1be0657de7b9d08bd22"
+   "sha256": "fd30ca0eaa7a6399d83263077b39df0c024db0d64fcea31bbfebdeca5c5e2ac7"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -2207,7 +2211,7 @@
   },
   {
    "path": "tools/loment_hosted_test.py",
-   "sha256": "1e47f7ca0401d7f3b0af9166026221bf921e6718e4c188463f8b24628f0cec46"
+   "sha256": "32e6937e055e731600b5938b0251b4200874caaeba202cea62bc0458cbac46ab"
   },
   {
    "path": "tools/loment_i18n_test.py",
