@@ -2965,9 +2965,13 @@ fn main() -> i32 {
 }
 """
 
-HEAP_HOSTED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose hosted")
-# 同一份源，**只去掉那一行**：于是它就是"没有 `choose hosted`"的那一档（默认 `sealed`）。
-HEAP_SEALED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "")
+# `choose runtime` 是 `alloc` 自己要的（`docs/227`：默认档 `no_runtime` 是一句**保证**，
+# 不是提示）—— 这一份用了 `alloc`，所以两档都必须写上，否则**检查器先拒**，
+# 后面那些"产物长什么样"的判据根本走不到。
+HEAP_HOSTED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose hosted\nchoose runtime")
+# 同一份源，**只去掉 `choose hosted` 那一行**：于是它就是没有 `choose hosted` 的那一档
+# （默认 `sealed`）。
+HEAP_SEALED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose runtime")
 # `hosted` + `gc_auto`：走不到 A（`docs/228` §4 的 B1），但**不许静默**。
 # `choose runtime` 是 `gc_auto` 自己要的（`gc_auto` 与默认的 `no_runtime` 定义上冲突）。
 HEAP_HOSTED_GC_AUTO_SRC = HEAP_SRC.replace(
