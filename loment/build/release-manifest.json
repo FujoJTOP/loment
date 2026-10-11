@@ -703,7 +703,7 @@
   },
   {
    "path": "tools/loment_lompi_test.py",
-   "sha256": "2557b182e6b941a02462d5e501da4731b23e2cd9d6c53c252cb24070286b2b97"
+   "sha256": "677d4750619d80eb211687c13e4b4215d27e571f9945953d7d4bd2002b1e03b6"
   },
   {
    "path": "tools/loment_publish.py",
@@ -2095,7 +2095,7 @@
   },
   {
    "path": "docs/232-libl.md",
-   "sha256": "c93c310f9d4162a656009e8fefdb5dc776ef193e14e9338439af8dddb27b9058"
+   "sha256": "311218e4236564ca53c05d526afde863d9509597f3819ebb1380ca2be39acff2"
   },
   {
    "path": "docs/manual/index.md",
