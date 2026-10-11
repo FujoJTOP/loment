@@ -867,6 +867,7 @@ int c_fill_compare(char *d, char *s, unsigned long n) {
 #: 调上面那份 C 的 Loment 程序。退出码 = `c_fill_compare` 的返回值 = **130**。
 LOMENT_CONSCRIPT_SOURCE = """\
 module conscript
+choose runtime
 
 extern fn c_fill_compare(d: ptr, s: ptr, n: u64) -> i32;
 
@@ -920,6 +921,7 @@ int c_same(char *a, char *b) { return a == b; }
 #: 退出码 = `(r - 42) * 1000 + 7 + c_same(b, b2) * 35` = **42**（两项都对时）。
 LOMENT_MALLOC_SOURCE = """\
 module consp3
+choose runtime
 
 extern fn c_put(p: ptr) -> i32;
 extern fn c_same(a: ptr, b: ptr) -> i32;
@@ -974,6 +976,7 @@ int c_pick(int i) {
 
 LOMENT_DATA_SOURCE = """\
 module consp4
+choose runtime
 
 extern fn c_pick(i: i32) -> i32;
 

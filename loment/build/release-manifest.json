@@ -2271,7 +2271,7 @@
   },
   {
    "path": "tools/loment_ffi_test.py",
-   "sha256": "8a3716c4f43300a25ab8791db3bcb5b54454ef193a6c06a32475958b4ad2a43a"
+   "sha256": "383dbea946f0cf5ce9322b2da70578da90834aa0b6360ad798c8d9e98562cab7"
   },
   {
    "path": "tools/loment_hosted_test.py",
