@@ -3033,6 +3033,88 @@ def test_hosted_with_gc_auto_says_so_instead_of_going_quiet():
     assert "; loment-heap: platform 1048576" in _heap_ir(HEAP_HOSTED_SRC)
 
 
+#: `docs/232` 那条判据的输入：**一档一份**最小程序。每档都得有自己的产物 ——
+#: 只测一档看不出"某一档的文本少了终结指令"这类错。
+_TIER_PROBE = """module tier_probe
+
+@@CHOOSE@@
+
+fn main() -> i32 {
+    let p: ptr = alloc(64);
+    store8(p, 0, 7 as u8);
+    return load8(p, 0) as i32;
+}
+"""
+
+#: （名字，`choose` 那几行）。`hosted` 与 `gc_auto_alpha` 是**定义上冲突**的
+#: （`CORE_CONFLICTS`），所以没有那一格。
+#:
+#: **已知缺口**（棘轮：只许变短，条目在就断言"它仍然在"）。`gc_auto_alpha` 那一档现在还
+#: 发不出合法 LLVM，而且**与本 PR 修的不是同一个缺陷**：它把 `alloc` 提到栈上之后
+#: **整个单元没有堆** ⇒ 收集器整段不发，而**写屏障的调用照样发**（`__loment_wb` 只定义在
+#: 收集器那一段里）⇒ `use of undefined value '@__loment_wb'`。修它要先回答"没有堆的单元
+#: 怎么知道堆不在"（发射前扫一遍，还是干脆让 alpha 档永远带堆），那是**另一笔**。
+_KNOWN_ILLEGAL_TIERS = {"gc_auto_alpha/sealed"}
+
+_TIER_CHOOSES = (
+    ("gc_manual/sealed", "choose runtime"),
+    ("gc_auto/sealed", "choose gc_auto\nchoose runtime"),
+    ("gc_auto_alpha/sealed", "choose gc_auto_alpha\nchoose runtime"),
+    ("gc_manual/hosted", "choose hosted\nchoose runtime"),
+    ("gc_auto/hosted", "choose hosted\nchoose gc_auto\nchoose runtime"),
+)
+
+
+@test
+def test_every_tier_emits_ir_clang_accepts():
+    """**每一档**的产物都要过 clang 的**前端**（`-c`：不链接、也不跑）。
+
+    这条补的是一个**结构性盲点**：孪生判据比的是"两个实现**一不一致**"，而两个实现
+    **一起错**的时候它照样绿。实测（2026-10-11）：`_IR_GC_TRIGGER_FIXED` 的 `go:` 块
+    少了一条终结指令（`call void @__loment_collect()` 之后直接就是 `out:` 标签），
+    自举那一份**同样**少 —— 于是**所有**孪生判据都看不见它，而任何走 clang 的路径
+    （`hosted` 构建）拿到的是一份**非法 IR**：
+
+        error: expected instruction opcode
+
+    用 `-c` 而不是链接：这一条量的是"**产物是不是合法 LLVM**"，与"能不能链上 libc"无关
+    —— 后者是各条运行时判据的活。
+    """
+    import shutil
+    import subprocess
+    clang = shutil.which("clang") or (
+        r"C:\Program Files\LLVM\bin\clang.exe"
+        if Path(r"C:\Program Files\LLVM\bin\clang.exe").exists() else None)
+    if not clang:
+        print("      SKIP: 无 clang")
+        return
+    bad: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        for tag, chooses in _TIER_CHOOSES:
+            f = Path(td) / "tier_probe.lomt"
+            f.write_text(_TIER_PROBE.replace("@@CHOOSE@@", chooses),
+                         encoding="utf-8", newline="\n")
+            mod = lomentc.load(f)
+            deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"{tag} 自己检查不过: {errs[:1]}"
+            ll = Path(td) / "tier_probe.ll"
+            ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8", newline="\n")
+            r = subprocess.run([clang, "-c", str(ll), "-o", str(Path(td) / "tier_probe.o")],
+                               capture_output=True, text=True, shell=False)
+            if tag in _KNOWN_ILLEGAL_TIERS:
+                assert r.returncode != 0, (
+                    f"{tag} 已经能过了 —— 请把它从 `_KNOWN_ILLEGAL_TIERS` 里删掉")
+                continue
+            if r.returncode != 0:
+                first = next((l for l in r.stderr.split("\n") if "error" in l), r.stderr[:80])
+                bad.append(f"{tag}: {first.strip()}")
+    assert not bad, "有档位发出来的不是合法 LLVM:\n  " + "\n  ".join(bad)
+    ok = len(_TIER_CHOOSES) - len(_KNOWN_ILLEGAL_TIERS)
+    print(f"      {ok} 档的产物都过 clang 前端"
+          f"（另有已登记缺口 {len(_KNOWN_ILLEGAL_TIERS)} 个: {', '.join(sorted(_KNOWN_ILLEGAL_TIERS))}）")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:
