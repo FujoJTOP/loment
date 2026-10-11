@@ -2604,6 +2604,22 @@ def test_gc_alpha_adaptive_collector_text():
     for sym in adapt:
         assert sym in alpha, f"alpha 的自适应触发缺 {sym}"
         assert sym not in auto, f"`gc_auto` 不该有自适应那一支（{sym}）—— 档位串了"
+    # **分代那一档**（`docs/210` §2.7）：alpha 多一张卡表、一条写屏障、minor/major 两个入口；
+    # `gc_auto` **一个都不沾** —— 它老实做全量，也就不该替每一次 `store8` 付那条间接调用。
+    # 这一栏钉的是这一格最要紧的那件事：**写屏障是分代成立的前提**（小回收不扫老年代），
+    # 少了它，`loment_elf_test::test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one`
+    # 立刻红。
+    gen = ("@__loment_cards", "@__loment_oldtop", "@__loment_wb",
+           "@__loment_minor", "@__loment_major")
+    for sym in gen:
+        assert sym in alpha, f"alpha 的分代那一档缺 {sym}"
+        assert sym not in auto, f"`gc_auto` 不该有分代的痕迹（{sym}）—— 档位串了"
+    # **挂点比符号更紧**：本程序两个 `store8`（`chew` 里的 `q`、`_start` 里的 `a`）⇒ alpha
+    # 正好两条屏障；符号在而挂点漏了，是**静默地少收一块**（那一块正是判据要抓的）。
+    assert alpha.count("call void @__loment_wb(ptr ") == 2, \
+        f"alpha 的写屏障该两条（两个 `store8` 站点），得到 {alpha.count('call void @__loment_wb(ptr ')}"
+    assert auto.count("call void @__loment_wb(ptr ") == 0, \
+        "`gc_auto` 不该挂写屏障 —— 它做全量，那条税买不到东西"
     # **挂点**：两档各挂两条（本程序两个 `alloc` 站点 —— `chew` 的 `p`、`_start` 的 `a`）
     assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
         f"`gc_auto` 挂点该两条，得到 {auto.count('call void @__loment_maybe_collect(i32 ')}"
