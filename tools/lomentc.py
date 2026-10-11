@@ -1331,12 +1331,21 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
 
 # ---------------------------------------------------------------- 语法分析
 
+#: **嵌套深度上限**（`#44`）。解析器是递归下降的：一层块 = 好几帧 Python 栈，
+#: 而 400 层嵌套块（4 KB 的一份源）原先直接把栈用穿 —— 参考实现抛 `RecursionError`
+#: 冒到命令行上，**自举侧那边是 SIGSEGV**（C 的栈更小）。两种都不是诊断。
+#: 本仓最深的语料是 12 层，64 给了 5 倍余量；上限存在的意义是"报出来"，不是"够用"。
+MAX_NEST = 64
+
+
 class Parser:
     """复用 lomc 的词法器; 只实现 L1 的顶层与语句/表达式。"""
 
     def __init__(self, toks: list[Tok], src: str):
         self.toks, self.src, self.i = toks, src, 0
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
+        #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
+        self.depth = 0
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -1700,13 +1709,27 @@ class Parser:
         f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
         return f
 
+    def deeper(self) -> None:
+        """进一层嵌套。**超了在这里报出来** —— 不让 Python / C 的栈去当那道闸（`#44`）。"""
+        self.depth += 1
+        if self.depth > MAX_NEST:
+            t = self.peek()
+            raise LomError(t.line, t.col,
+                           f"嵌套超过 {MAX_NEST} 层 —— 编译器是递归下降的，再深就要把栈"
+                           f"用穿了（自举那一边直接段错误，不是诊断）。把中间那几层提成"
+                           f"函数，或把这段拆开")
+
     def parse_block(self) -> list:
-        self.expect("punct", "{")
-        out = []
-        while not self.at("punct", "}"):
-            out.append(self.parse_stmt())
-        self.expect("punct", "}")
-        return out
+        self.deeper()
+        try:
+            self.expect("punct", "{")
+            out = []
+            while not self.at("punct", "}"):
+                out.append(self.parse_stmt())
+            self.expect("punct", "}")
+            return out
+        finally:
+            self.depth -= 1
 
     def parse_stmt(self):
         t = self.peek()
@@ -1829,6 +1852,15 @@ class Parser:
 
     # -- 表达式 (优先级爬升)
     def parse_expr(self, min_prec: int = 0):
+        # 表达式也递归（括号 / 一元前缀 / 后缀调用），**同一个计数** ——
+        # `((((…))))` 与 `if` 套 400 层是同一件事（`#44`）。
+        self.deeper()
+        try:
+            return self._parse_expr(min_prec)
+        finally:
+            self.depth -= 1
+
+    def _parse_expr(self, min_prec: int = 0):
         left = self.parse_unary()
         while True:
             t = self.peek()
@@ -3595,9 +3627,15 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if prev is None:
                     seen_decl[nm] = m0
                 elif _unit_id(prev) != _unit_id(m0):
-                    # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
-                    errs.append(f"{ln}: {kind} {nm} 与模块 {prev.name} 重名 —— "
-                                f"单元的发射符号是平的 (ABI), 请改名")
+                    # **说出来是"哪一份文件"**（`#141`）：原先写"与模块 {prev} 重名",
+                    # 而那是**模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名`
+                    # 让用户去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。
+                    # 真正撞车的是**两份单元都发射 `f`**, 所以指到**另一份文件**上。
+                    # 措辞仍留"重名"二字 —— `loment_diag.RULES` 的 E013 按这几个词锚,
+                    # 换一种说法这条消息会掉出分类表。
+                    errs.append(f"{ln}: {kind} `{nm}` 与 {_unit_where(prev)} 里的 `{nm}` 重名 —— "
+                                f"单元的发射符号是平的 (ABI)，两份单元都会发射 `{nm}`，"
+                                f"调用点也解析到同一个函数；改掉其中一个")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -3818,6 +3856,16 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+        # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
+        # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
+        # （`SIGILL`）—— 只在**真走到那一支**时才发生，所以静态检查是唯一能在事前说这句
+        # 话的地方。SKILL.md §6.14 原先把它写成一条**写作纪律**（"check 放行，跑到就是
+        # Illegal instruction"）：一条静态检查的通过不意味着"不会 trap"，那正是这里的洞。
+        if f.ret != "()" and _falls_through(f.body):
+            errs.append(
+                f"{f.line}: 函数 {f.name} 声明返回 {f.ret}，但**可能从末尾掉出去** —— "
+                f"那条路上没有 `return`。走到那里是非法指令（SIGILL），不是返回一个默认值；"
+                f"让每条路径都 `return`，或在最后补一个")
 
     # ---- 依赖的**正文**也要查 (`#149`, 2026-10-09 补)。
     #
@@ -3843,6 +3891,33 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 where = _unit_where(d)
                 errs.extend(f"{where}: {e}" for e in sub)
     return errs
+
+
+def _falls_through(body: list) -> bool:
+    """这个体**可能**从末尾掉出去吗？（`#22`）
+
+    只认三种**结构上**说得清的收尾 —— 末尾是 `return`；末尾是带 `else` 的 `if` 且两支
+    都不掉；末尾是 `match` 且**每条臂**都不掉（穷尽性由既有的那条判据单独管，这里不重复
+    判）。**别的形状一律算会掉** —— `while` / `for` 会正常结束，末尾一个表达式语句当然
+    也掉。宁可让作者补一个 `return`，也不要让"check 过了却 trap"。
+
+    跑遍本仓 184 份 `.lomt` 的语料，这条规则**一条都不误报**（0 个非 `()` 函数掉末尾）——
+    所以它只会抓**新**写出来的漏。
+    """
+    if not body:
+        return False
+    s = body[-1]
+    if isinstance(s, Return):
+        return False
+    if isinstance(s, If):
+        if not s.otherwise:
+            return True
+        return _falls_through(s.then) or _falls_through(s.otherwise)
+    if isinstance(s, Match):
+        if not s.arms:
+            return True
+        return any(_falls_through(b) for _p, b in s.arms)
+    return True
 
 
 def _is_copy_type(t: str, structs: dict, enums: dict) -> bool:

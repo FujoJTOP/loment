@@ -168,6 +168,50 @@ def test_return_type_mismatch_rejected():
     assert any("return 类型" in x for x in e), e
 
 
+@test
+def test_deep_nesting_is_refused_not_crashed():
+    """**嵌套太深要报出来**，不是把栈用穿（`#44`）。
+
+    400 层嵌套块（4 KB 的一份源）原先让参考实现抛 `RecursionError`、让**自举侧直接
+    段错误**（C 的栈更小）—— 两种都到不了用户面前，而 `check` 是个会被人拿去喂
+    **未知输入**的命令（格式化器、LSP 的半成品缓冲、注册表里被截断的第一行）。
+
+    两面都钉：超过上限**必须报**（带行号与原因）；**没到上限的合法程序不许被误拒** ——
+    上限设小了就会把正常程序挡在门外，而本仓最深的语料是 12 层。
+    """
+    deep = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+            + "".join("    " * (i + 1) + "if 1 > 0 {" + chr(10) for i in range(200))
+            + "    " * 201 + "return 1;" + chr(10)
+            + "".join("    " * (200 - i) + "}" + chr(10) for i in range(200)) + "}" + chr(10))
+    try:
+        lomentc.check(parse(deep))
+    except lomentc.LomError as ex:
+        msg = str(ex)
+        assert "嵌套超过" in msg, msg
+        assert str(lomentc.MAX_NEST) in msg, msg
+    else:
+        raise AssertionError("200 层嵌套没被拒 —— 栈会先爆")
+    # 表达式那一侧同一个闸
+    paren = "module m" + chr(10) + "fn f() -> u32 {" + chr(10) + "    return " + "(" * 200 + "1"         + ")" * 200 + ";" + chr(10) + "}" + chr(10)
+    try:
+        lomentc.check(parse(paren))
+    except lomentc.LomError as ex:
+        assert "嵌套超过" in str(ex), ex
+    else:
+        raise AssertionError("200 层括号没被拒")
+    # 反面：上限以内照旧（注意收尾 —— 嵌套的那几层 `if` 摆在 `while` 体里、
+    # 末尾 `return 0;` 收口，不然会被 E024「从末尾掉出去」抓住，那是另一条规则的事）
+    ok = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+          + "    while 1 > 0 {" + chr(10)
+          + "".join("    " * (i + 2) + "if 1 > 0 {" + chr(10) for i in range(8))
+          + "    " * 10 + "return 1;" + chr(10)
+          + "".join("    " * (9 - i) + "}" + chr(10) for i in range(8))
+          + "        return 0;" + chr(10) + "    }" + chr(10) + "    return 0;" + chr(10)
+          + "}" + chr(10))
+    assert lomentc.check(parse(ok)) == [], lomentc.check(parse(ok))
+    print(f"      嵌套上限：超过 {lomentc.MAX_NEST} 层报得出（块与表达式各一条），以内照旧")
+
+
 # ---------------------------------------------------------------- 负例: Potato 校验器
 
 @test

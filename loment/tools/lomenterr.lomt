@@ -2782,26 +2782,35 @@ fn _start() -> u32 {
                             o3 = h_nosrc(ctx, o2, w, plen);
                         }
                         let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                        let o5: u32 = h_card(ctx, o4, cnum, w);
-                        // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
-                        // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
-                        let o5b: u32 = o5;
-                        if load32(ctx, C_CANDN) > 0 {
-                            o5b = h_sug(ctx, o5, sr, srl, w);
-                        } else {
-                            if cnum == 18 && load32(ctx, C_TOKOFF) != 4294967295 {
-                                o5b = h_cands(ctx, o5, w, dn,
-                                              ptr_add(sr, load32(ctx, C_TOKOFF)),
-                                              load32(ctx, C_TOKLEN));
-                            }
-                        }
-                        let o6: u32 = o5b;
+                        // **外源那条提示顶到卡片前面，而且卡片整块不渲染**（`#29`）。
+                        // 卡片那四段（what / why / 怎么改 / supported）讲的**全是 Loment 的
+                        // 规矩**，而这份文件根本不是 Loment —— 原先它排在**最后**，读的人先
+                        // 照着一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句
+                        // "这个文件不是 Loment"。**说的那句才是对的**，所以它先出来，
+                        // 而那四段**不再出现**（`h_foreign` 自带这门语言的边界与调用约定）。
+                        let f_li: u32 = 4294967295;
                         if have == 1 && foreign_seen(ctx, plen) == 0 {
-                            let li: u32 = sniff_lang(ctx, sr, srl, cnum, plen);
-                            if li != 4294967295 {
-                                o6 = h_foreign(ctx, o5b, li, w, plen);
-                                foreign_remember(ctx, plen);
+                            f_li = sniff_lang(ctx, sr, srl, cnum, plen);
+                        }
+                        let o6: u32 = 0;
+                        if f_li != 4294967295 {
+                            o6 = h_foreign(ctx, o4, f_li, w, plen);
+                            foreign_remember(ctx, plen);
+                        } else {
+                            let o5: u32 = h_card(ctx, o4, cnum, w);
+                            // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
+                            // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
+                            let o5b: u32 = o5;
+                            if load32(ctx, C_CANDN) > 0 {
+                                o5b = h_sug(ctx, o5, sr, srl, w);
+                            } else {
+                                if cnum == 18 && load32(ctx, C_TOKOFF) != 4294967295 {
+                                    o5b = h_cands(ctx, o5, w, dn,
+                                                  ptr_add(sr, load32(ctx, C_TOKOFF)),
+                                                  load32(ctx, C_TOKLEN));
+                                }
                             }
+                            o6 = o5b;
                         }
                         write_all(2, ctx, em(ctx, o6, "\n") as u64);
                         if load32(ctx, C_TRUNC) == 1 {

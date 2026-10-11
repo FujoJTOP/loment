@@ -326,6 +326,13 @@ class ClassLang:
         self.method = method
 
 
+#: 这一族的**壳行**：`namespace X` / `using …;` / `package …;` / `import …;`，
+#: 以及只剩一对花括号的行。它们都是**结构**，不是"谁也不认识的内容" ——
+#: 类体已经由 `class` / `enum` 两条正则认下来了，没人认那几行壳是正常的。
+_SHELL_LINE = re.compile(r"^\s*(?:namespace|using|package|import)(?:[^A-Za-z0-9_]|$)"
+                           r"|^\s*[{}]\s*$")
+
+
 def _from_class_lang(src: str, name: str, mode: str,
                      lang: ClassLang) -> tuple[dict, Report]:
     """**"函数住在 `class X { … }` 里"这一族**的共用引擎：Java 与 C#。
@@ -352,6 +359,10 @@ def _from_class_lang(src: str, name: str, mode: str,
     # （`_STR_LIT` 那一层改的是行**内**的长度，不动换行，所以行号不受它影响。）
     body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub('""', src))
     known: set[str] = set()
+    #: 两条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
+    #: 末尾由 `_c_leftover_lines` 报出来（`#121` / `#75` —— C 那一门在 2026-10-20 的
+    #: 批次 1 就补上了，Java / C# 这一族当时漏了）。
+    consumed: list[tuple[int, int]] = []
     # ---- Java 的 `enum Name { A, B, C }` —— **不是 class**, 所以上面那圈抓不到它。
     # 原先 Java 的枚举**静默消失** (与 C 那边同一个口子)。
     # 变体可以带构造实参 (`B(1)`) 与体 (`C { … }`), 这里只取**名字**: Potato 的 enums
@@ -363,6 +374,7 @@ def _from_class_lang(src: str, name: str, mode: str,
         if end < 0:
             rep.skip("type", ename, "枚举体配平不了 (花括号不配对)")
             continue
+        consumed.append((m.start(), end + 1))
         inner = body[open_idx + 1:end]
         vs, lossy = [], False
         for raw in inner.split(","):
@@ -397,6 +409,7 @@ def _from_class_lang(src: str, name: str, mode: str,
         if end < 0:
             rep.skip("type", cname, "类体配平不了 (花括号不配对)")
             continue
+        consumed.append((m.start(), end + 1))
         inner = body[open_idx + 1:end]
         fields, consts, methods = [], [], []
         for mem, mem_raw, mem_off in _class_members(inner):
@@ -417,6 +430,13 @@ def _from_class_lang(src: str, name: str, mode: str,
                 mf = lang.field.match(mem)
                 if mf and IDENT_RE.match(mf.group(2)):
                     fields.append((mf.group(1), mf.group(2)))
+                    continue
+            # **类里这一条谁也不认识**（`#75`）：不是常量、不是字段、也不是方法 ——
+            # 原先它**静默消失**（方法头写坏成 `static int bad( { … }`、嵌套类、
+            # 静态初始化块、带注解的方法…）。整份单元少一块内容，而 `check` 判 OK。
+            rep.skip("member", (mem.split() or ["?"])[0][:24],
+                     f"类 {cname} 里这一条不是常量 / 字段 / 方法 —— 这一门只认那三种；"
+                     f"原文：{mem[:60]!r}")
         # ---- 常量 (类里先取, 因为它们的类型也会进 known 的判断)
         for ty, cn, val in consts:
             if cn in {c["name"] for c in doc["consts"]}:
@@ -488,6 +508,23 @@ def _from_class_lang(src: str, name: str, mode: str,
                 ent["body_line"] = _body_at(src, open_idx + 1 + mem_off, mem_raw)
             doc["functions"].append(ent)
             rep.ok += 1
+    # ---- **谁也不认识的顶层行**（`#121` / `#75`）：类 / 枚举两条正则认下来的范围之外
+    # 的非空白内容 —— `use "x.lomt"` / `use bytes`（那是 Loment 语法，这一门没有对应
+    # 构造）、散在类外的声明、写坏的顶层形状。原先它们**既不进产物也不进 `skipped`**：
+    # 整份单元少一块内容，而 `check` 判 OK。
+    for ln, txt in _c_leftover_lines(body, consumed):
+        # **壳行不算"谁也不认识的内容"**：`namespace D` / `using System;` / `package …;`
+        # / 只剩花括号的行 —— 它们都是**结构**，`class` / `enum` 那两条正则已经把类体认
+        # 下来了（见 `_class_members`），壳没有人认是**正常**的。
+        # 不排掉的话，一份平常的 C# 文件（`using` + `namespace` + 两层壳的花括号）会因为
+        # 这几行被**整份拒掉** —— 而 `loment/cstrans/*.cs` 三份语料全是这个形状。
+        # `using` 那一条与翻译器的 `_CS_SHELLS` 同一口径（那里也把它当壳）。
+        if _SHELL_LINE.match(txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— {lang.grammar} 这一门只认 "
+                 f"`class` / `enum`（以及类里的常量 / 字段 / 方法）；`use`、散在类外的"
+                 f"声明、顶层函数都在子集外（`docs/188` §4）。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -929,7 +966,16 @@ def _py_const(name: str, value, ann, mode: str) -> tuple[dict | None, str]:
 def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "python", mode)
     doc = _blank(_ident(Path(name).stem), "python")
-    tree = ast.parse(src)
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        # **这一门自己就有"读不通"这一档**（`pytrans.PyError`），可这条路原先让它
+        # **裸着冒出去** —— 命令行上收到的是一段 Python 的 traceback，不是编译器的话
+        # （`#76`；另外五门在这件事上都是干净的拒：`[ERR] <文件>: … 第 N 行: …`）。
+        # 换一个只改了**消息**的 `SyntaxError` 重抛，由 `front_errors("python")` 接住、
+        # 翻成 `NotRepresentable` —— 与"翻不出来"走同一条出口。
+        where = f"第 {e.lineno} 行" if e.lineno else "文件头附近"
+        raise SyntaxError(f"{where}: 这份 Python 解析不过 —— {e.msg}") from None
     known: set[str] = set()
 
     def _put_const(cname: str, cval, cann) -> None:
@@ -1644,6 +1690,11 @@ def front_errors(lang: str) -> tuple:
     if lang == "natural":
         import nltrans  # noqa: PLC0415
         return (nltrans.NaturalError, nltrans.Unsupported)
+    if lang == "python":
+        # `ast.parse` 的语法错。**必须在这里接住**：这条路上 Python 的解析器是我们
+        # 自己调的，它抛的异常与另外五门那几种（`Unsupported` / `CError` …）不同族 ——
+        # 不接就是"用户看到一段 Python traceback"（`#76`）。
+        return (SyntaxError,)
     return ()
 
 

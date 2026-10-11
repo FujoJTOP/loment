@@ -164,6 +164,11 @@ def test_loment_fmt_edge_cases():
         "comment_only": "// 只有注释\n",
         "string_only": 'module x\n\nconst C: u32 = 1;\n\nfn f() -> str {\n    return "a\\\\b\\"c";\n}\n',
         "crlf": 'module x\r\n\r\nfn f() -> u32 {\r\n    return 1;\r\n}\r\n',
+        # `#46`: 修饰词不与自己修饰的那一项分开（这一张**两边都跑**，所以孪生也被钉住）
+        "pub_fn": "module x\n\npub fn f() -> u32 {\n    return 1;\n}\n",
+        "pub_extern": ("module x\n\npub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;\n"
+                       "\nfn f() -> u32 {\n    return 1;\n}\n"),
+        "pub_const_pair": "module x\n\npub const A: u32 = 1;\npub const B: u32 = 2;\n",
     }
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -180,6 +185,41 @@ def test_loment_fmt_edge_cases():
         probe.unlink(missing_ok=True)
         assert not bad, "; ".join(bad)
         print(f"      {len(cases)} 个边界用例一致")
+
+
+def test_fmt_keeps_declaration_modifiers_on_one_line():
+    """**修饰词不单独占一行**（`#46`）—— `pub fn f()` 要待在同一行。
+
+    原先每个顶层关键字都 flush 一次，于是 `pub` 被留成**单独一行**、和它修饰的东西
+    隔了一个空行：
+
+        pub
+        <空行>
+        fn f() -> u32 {
+
+    那不是"格式"，那是把一项声明劈成两段。判据是"**这一行到现在只有修饰词**"而不是
+    "刚看见 `pub`" —— 只认 `pub` 的话 `pub extern fn …;` 仍会被劈开（`extern` 不是顶层
+    关键字）。所以三条形状都钉：`pub fn` / `pub extern fn` / 两条相邻的 `pub const`。
+    """
+    for label, src, want in (
+        ("pub fn", "module x" + chr(10) + chr(10) + "pub fn f() -> u32 {" + chr(10) + "    return 1;" + chr(10)
+                   + "}" + chr(10),
+         ["module x", "", "pub fn f() -> u32 {", "    return 1;", "}"]),
+        ("pub extern fn",
+         "module x" + chr(10) + chr(10) + "pub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;"
+         + chr(10) + chr(10) + "fn f() -> u32 {" + chr(10) + "    return 1;" + chr(10) + "}" + chr(10),
+         ["module x", "", "pub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;",
+          "fn f() -> u32 {", "    return 1;", "}"]),
+        ("pub const x2", "module x" + chr(10) + chr(10) + "pub const A: u32 = 1;" + chr(10)
+         + "pub const B: u32 = 2;" + chr(10),
+         ["module x", "", "pub const A: u32 = 1;", "pub const B: u32 = 2;"]),
+    ):
+        got = lomfmt.format_source(src).split(chr(10))
+        while got and got[-1] == "":
+            got.pop()
+        assert got == want, f"{label}: 行不对 —— {got!r}"
+        assert "pub" not in got, f"{label}: `pub` 被留成单独一行"
+    print("      修饰词与声明同处一行：pub fn / pub extern fn / 两条 pub const")
 
 
 @test

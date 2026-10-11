@@ -57,6 +57,10 @@ RULES = [
     # 对用户是**错的处境**（E999 的意思是"分类表漏了"，这条是"编译器还没做这块"）。
     # 2026-09-24 由 `loment_tools_test::test_m64_all_reference_messages_are_classified`
     # 抓出来 —— 那正是这条判据存在的理由（分类表漏一条，缺口会**静默消失**）。
+    # **解析器的**递归下降深度上限（`#44`）—— 与上面那一条同一个码：**这不是用户源码的错**
+    # （那几层嵌套写法完全合法），是**这一版实现**扛不住；修法也一样，是"换个写法绕开"
+    # （把中间那几层提成函数），而不是"按那一行改写法"。
+    ("E023", r"嵌套超过", "源码太深", "把中间那几层提成函数，或把这段拆开。"),
     ("E023", r"^泛型实参的形状这一格不收",
      "这一版还没实现（编译器限制）",
      "这不是你源码的语义错 —— 是**发射器**还没给这个形状定名字规则：实例名要能拼成"
@@ -167,6 +171,15 @@ RULES = [
     # `非法字符` 是**词法**期的, 但它与解析期那批是同一类修法 (改那一行的写法), 所以
     # 共用一个码。2026-09-17 补: 用一份 C 装 `.lomt` 时先撞到的就是它 (第 63 行的 `'0'`
     # 字面量), 而它当时**一条都不在分类表里** —— 显示成 E999「未分类, 请报告」。
+    # **E027**：非 `()` 的函数可能从末尾掉出去（`#22`）。**单独一个码、不并进 E001**：
+    # （编号是 27 而不是 24 —— 合并 main 时 E024/E025/E026 已被 `docs/223` 的命令声明那三条占走）
+    # 按"码按修法分"——E001 的修法是"看两侧类型、必要时 `as`"，而这里的修法是
+    # "让每条路径都 `return`"。并进去的话，一条控制流的错会被配上一条讲类型转换的建议，
+    # 那正是本仓最反对的"指错地方"（第三批整批都在治这个）。
+    ("E027", r"可能从末尾掉出去",
+     "控制流：可能从末尾掉出去",
+     "让每条路径都 `return`（末尾补一个，或把收尾写成两支都返回的 `if`）。"
+     "走到没有 `return` 的那条路是**非法指令**（SIGILL），不是返回一个默认值。"),
     ("E019", r"期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|"
              r"pub 之后需要一项声明|数组长度必须为正|第一个参数必须是 self|"
              r"`set choose` 后面要跟一个块|的块没闭合",
@@ -253,6 +266,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     24: "bad command declaration - shape, name, an official name, or a library",
     25: "two process entries: `_start` and `command_main`",
     26: "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)",
+    27: "a non-() function may fall off the end of its body - every path must return",
 }
 
 
@@ -293,6 +307,7 @@ TITLE_EN: dict[int, str] = {
     24: "bad command declaration",
     25: "two process entries",
     26: "`command_main` without a matching declaration",
+    27: "control flow: this function may fall off the end of its body",
 }
 
 
@@ -695,6 +710,21 @@ CARDS: dict[int, Card] = {
         ),
         yes="声明 + 签名一致的 `command_main`；普通程序用 `_start`",
         no="只有 `command_main` 没有声明；`command_main(a: u32, b: u32)`；返回 `()`；两个参数顺序反了",
+    ),
+    27: Card(
+        what="一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。",
+        why="这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的"
+            "走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。"
+            "`check` 通过本该等于「这份程序不会 trap」，这一条就是把那句话兑现：静态检查是"
+            "唯一能在事前说出口的地方（原先它只是一条写作纪律，见 SKILL.md §6.14）。",
+        fixes=(
+            "让每条路径都 `return`：末尾补一个 `return`。",
+            "收尾写成**带 `else` 的 `if`**、两支都返回；`match` 收尾时让**每条臂**都返回"
+            "（穷尽性由 E008 单独管）。",
+            "函数本来就没有返回值的话，把它声明成 `()` 并去掉 `return` 后面的值。",
+        ),
+        yes="末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`",
+        no="末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`",
     ),
 }
 
@@ -1251,6 +1281,27 @@ CARDS_EN: dict[int, Card] = {
             "uses `_start`",
         no="`command_main` with no declaration; `command_main(a: u32, b: u32)`; returning `()`; "
            "the two parameters swapped",
+    ),
+    27: Card(
+        what="A function that **declares a return type** has a path that reaches the end "
+             "of its body without a `return`.",
+        why="After codegen that path becomes an **illegal instruction** (`SIGILL`), and it "
+            "only fires when the path is actually taken - so it is the kind of bug that "
+            "ships and then blows up when a new input reaches an error branch nobody "
+            "exercised. \"check passes\" is supposed to mean \"this program will not "
+            "trap\"; this rule is what makes that true, because a static check is the only "
+            "place that can say it before the fact.",
+        fixes=(
+            "Make every path return: add a `return` at the end.",
+            "Write the tail as an `if` **with** an `else` where both branches return; if the "
+            "tail is a `match`, every arm must return (exhaustiveness is E008).",
+            "If the function has no value to return, declare it `()` and drop the value "
+            "after `return`.",
+        ),
+        yes="the last statement is `return`; an `if` with an `else` where both branches "
+            "return; a `match` whose every arm returns",
+        no="the last statement is `while` / `for` (these end normally), an expression "
+           "statement, or an `if` **without** an `else`",
     ),
 }
 

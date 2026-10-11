@@ -1702,6 +1702,30 @@ fn _start() -> u32 {
     if nt0 > ntk {
         return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
     }
+    // **文件必须以 `module` 开头，而且名字要写在同一行**（`#24`）。
+    // 自举这一侧原先**没有这一条**：少了那一行的单元会一路走到 codegen —— 而 codegen
+    // 假设"第一个记号就是 `module`、第二个就是它的名字"，于是**编译器自己段错误**
+    // （用户拿到的是 shell 的 "Segmentation fault"：没有诊断、没有行号、没有退出码）。
+    // 参考实现那句是 "期望 module（文件必须以 module 开头），得到 'fn'"。
+    //
+    // 位置在**词法之后、别的任何一趟之前**：后面每一趟（`has_enum` / `append_prelude`
+    // / `apply_switches` / `check_arena` / `emit_module`）都默认这一格在。
+    // 名字那一格也要判 —— `module` 单独一行时后面每一趟都会把**下一个记号**当名字用
+    // （`module` + 换行 + `fn` 会被当成"模块名是 `fn`"）。
+    // **只有"有内容"的源才要求 `module`** —— 只有注释（或空）的文件与空文件同类：
+    // "没有可编译的源"，`test_m85_entry_load_distinguishes_empty_file_from_directory`
+    // 钉着它必须被**接受**。判据是"lexer 认得出不止一个记号"。
+    if nt0 > 1 {
+        if tok_is(unit, toks2, 0, "module") == false {
+            return fail("fujoc-s: 文件必须以 `module` 开头（第一个记号得是 `module`）—— 少了它这份源没法定位\n");
+        }
+        if load32(toks2, 20) != 0 {
+            return fail("fujoc-s: `module` 后面要跟模块名（一个标识符）\n");
+        }
+        if load32(toks2, 32) != load32(toks2, 12) {
+            return fail("fujoc-s: 模块名要与 `module` 写在**同一行**（换行之后的名字不算）\n");
+        }
+    }
     if has_enum(unit, toks2, "Option") == 0 || has_enum(unit, toks2, "Result") == 0 {
         len = append_prelude(unit, len);
     }
