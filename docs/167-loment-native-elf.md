@@ -101,7 +101,7 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
    `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
-   （主张 **C24**，判据 `tools/loment_pe_test.py` 9/9）。
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 16/16）。
 
    与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
    换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
@@ -120,13 +120,15 @@ stage1"那一步出现（见 §5）。
    仓库里 Loment 工具用到的全部，但**只是文件与进程那一半**：**联网一个号都没有**。
    **2026-10-10 补上联网那 13 个**（`socket`/`connect`/`accept`/`accept4`/`sendto`/`recvfrom`/
    `shutdown`/`bind`/`listen`/`getsockname`/`getpeername`/`setsockopt`/`getsockopt`，
-   由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。号表、五条翻译决定
+   由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。
+   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/230`）
+   ⇒ 派发面 **23 个号**。号表、五条翻译决定
    （family / `SO_*` / timeval↔毫秒 / errno / `MSG_NOSIGNAL`）与**点名不做**的那几件
-   见 **`docs/217`**。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
+   见 **`docs/217`**（今天只剩 6 个号；单源是 `lom/net.lom` 的 `NotDispatched`）。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
-   于是判据 `tools/loment_pe_test.py` **9/9**：
+   于是判据 `tools/loment_pe_test.py` **16/16**：
 
    * `test_pe_runs_the_loment_toolchain_natively` —— **`lomstatus` 与 `lomrel` 本身**编成 PE 在
      本机原生跑（argv + 目录遍历 + 文件 I/O），stdout 字节 + 退出码与 Python 版逐字节相同；

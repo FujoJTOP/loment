@@ -1335,7 +1335,7 @@ PE_LIT_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_LIT_OFF
 PE_CMDLINE = b"/proc/self/cmdline\x00"
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
-              "FindFirstFileA", "FindNextFileA"]
+              "FindFirstFileA", "FindNextFileA", "Sleep"]
 # 第二个导入 DLL：联网。名字与上一组无一重名，所以 `slots` 仍是一张按函数名索引的平表。
 PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
@@ -1384,6 +1384,7 @@ PE_SYSCALLS = (
     (SYS_GETDENTS64, "file", "__ws_getdents"),
     (SYS_NEWFSTATAT, "file", "__ws_fstatat"),
     (SYS_POLL, "net", "__ws_poll"),
+    (SYS_SELECT, "net", "__ws_select"),
     (SYS_SOCKET, "net", "__ws_socket"),
     (SYS_CONNECT, "net", "__ws_connect"),
     (SYS_ACCEPT, "net", "__ws_accept"),
@@ -1479,7 +1480,16 @@ WS_ADDR_FIX = WS_SOCKTMP + 240                  # "AF_INET6 的 family 字被我
 WS_FDSETS = WS_SOCKTMP + WS_SOCKTMP_CAP         # `poll`/`select` 用：三个 WinSock fd_set
 WS_FDSET_CAP = 520                              # 4（count）+ 64 × 8（SOCKET）= 516 → 对齐到 520
 WS_POLLTV = WS_FDSETS + 3 * WS_FDSET_CAP        # WinSock 的 timeval（两个 32 位 long）
-WS_SIZE = WS_POLLTV + 16
+#: `select` 的**影子 except 集合**：调用方没给 exceptfds 时也得给 WinSock 一个，
+#: 否则**连接失败**（WinSock 只报在 except 集里）永远看不见 —— 见 `__ws_select` 那段。
+WS_SHADOW_EX = WS_POLLTV + 16
+#: `select` 这一趟里每个 fd 进过哪几个集合（位 0=读 1=写 2=异常）—— 归一化时要按"调用方
+#: 要过 write"来扫，而 select **会把集合改写成结果**，所以要自己留一份成员关系。
+WS_SELFLAG = WS_SHADOW_EX + WS_FDSET_CAP
+#: 被归一化读掉的 `SO_ERROR`（**读即清零**，两边平台都是）—— 存下来，等应用自己调用
+#: `getsockopt(SO_ERROR)` 时**原样还回去**（`__ws_getsockopt` 那一格）。
+WS_SERR = WS_SELFLAG + WS_FD_COUNT
+WS_SIZE = WS_SERR + WS_FD_COUNT * 4
 WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
@@ -1656,6 +1666,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
     def st16(base, disp, src):
         a.emit(b"\x66" + rex(0, src, 0, base) + b"\x89" + _mem(src, base, disp))
+
+    def ld8z(dst, base, disp):                  # movzx r32, byte [base+disp]
+        a.emit(rex(0, dst, 0, base) + b"\x0F\xB6" + _mem(dst, base, disp))
 
     def ld16z(dst, base, disp):                 # movzx r32, word [base+disp]
         a.emit(rex(0, dst, 0, base) + b"\x0F\xB7" + _mem(dst, base, disp))
@@ -2697,6 +2710,7 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
     # ---- getsockopt(fd, level, optname, optval, optlen 指针) -------------
     a.label("__ws_getsockopt")
+    st(RSP, 0x60, RDI)                          # fd（`SO_ERROR` 那张小表要用）
     st(RSP, 0x30, RSI)
     st(RSP, 0x38, RDX)
     st(RSP, 0x40, R10)
@@ -2724,6 +2738,29 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     movi(RAX, -95)
     jmp_l("__ws_ret")
     a.label("__ws_gso_go")
+    # `select` 的归一化为了判"连接失败"读过 `SO_ERROR`，而**读即清零** —— 先把我们存的那份
+    # 还回去（否则应用自己读 `SO_ERROR` 会看到 0，与 Linux 不同）。
+    ld(RCX, RSP, 0x38)
+    cmp_ecx(WS2_SO[4])                          # SO_ERROR
+    jcc_l("ne", "__ws_gso_wsa")
+    ld(RAX, RSP, 0x60)                          # fd
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_gso_wsa")
+    movi(RDX, PE_STATE_VA + WS_SERR)
+    imul_ri(RAX, 4)
+    add_rr(RDX, RAX)
+    ld32(RCX, RDX, 0)
+    test_ecx()
+    jcc_l("e", "__ws_gso_wsa")                  # 没存过：照常问 WinSock
+    st32(RDX, 0, RCX)                           # 还回去，自己那份清掉（读即清零）
+    ld(RAX, RSP, 0x40)                          # 调用方的 optval
+    st32(RAX, 0, RCX)
+    ld(RAX, RSP, 0x48)                          # 调用方的 optlen
+    movi(RCX, 4)
+    st32(RAX, 0, RCX)
+    xor_eax()
+    jmp_l("__ws_ret")
+    a.label("__ws_gso_wsa")
     ld(RCX, RSP, 0x58)
     ld(RDX, RSP, 0x30)
     ld(R8, RSP, 0x38)
@@ -2980,6 +3017,505 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.label("__ws_poll_einval")
     movi(RAX, -22)                              # EINVAL
     jmp_l("__ws_ret")
+
+    # ---- select(23)：Linux 的三张位图 → WinSock 的三个 fd_set ----------------
+    #
+    # 与 `poll` 复用**同一批集合助手**（`__ws_set_init/add/has`）与同一片状态
+    # （`WS_FDSETS` 三个 520 字节的 fd_set —— `poll` 那一轮就是按三个留的）。
+    # 不同的地方在**入参的形状**：`poll` 收 `pollfd` 数组，`select` 收 Linux 的
+    # **位图**（`__fds_bits`，x86-64 上一个 `u64`），所以这里多一层位 ↔ 集合的搬运。
+    #
+    # **这一格真正的活是 `exceptfds` 的语义差**：
+    #   * Linux：非阻塞 connect 失败 ⇒ 那个 fd 出现在 **writefds**（再由 `SO_ERROR` 报错）；
+    #   * WinSock：非阻塞 connect 失败 ⇒ 出现在 **exceptfds**（MSDN：except 集"用于检测
+    #     连接失败与 OOB 数据"），而 writefds **不报**。
+    # 直接转发的话，一份"等 writefds 判连接成没成"的程序在 Linux 上跑得动、在 Windows 上
+    # **永远等不到** —— 正是 `docs/217` 要堵的那种静默分歧。所以出参这里做一次**归一化**：
+    # 对 except 集里每个 socket 问一次 `SO_ERROR`，非零（= 连接失败，不是 OOB）就把它
+    # 从 except **挪进** write。
+    #
+    # **两处点名的偏差**（与 `poll` 同族，写进 `docs/230`）：
+    #   * 只认 **socket 型 fd**：三个位图里若有一位是我们等不了的 fd（文件 fd、越界的
+    #     编号），返回 `-EBADF`。`poll` 那格能**逐 fd** 报 `POLLNVAL`，`select` 没有
+    #     逐 fd 的出口，所以只能响亮地拒 —— 不静默丢掉那一位；
+    #   * `nfds > 64` 报 `-EINVAL`（我们那张 fd 表就 64 格）。
+    #
+    # 三个集合**全空**时：Linux 的语义是"就睡 `timeout`"（`select(0,NULL,NULL,NULL,&tv)`
+    # 是常见的毫秒睡眠），而 WinSock 对全空集合直接 `WSAEINVAL`，所以这一格自己 `Sleep`。
+    # **这是 `poll` 那格没有的好处**：那边三个集合全空时不睡（`docs/221` §3）。
+
+    a.label("__ws_bit_get")                     # rdi = 位图, rsi = fd → rax = 0/1
+    ld(RAX, RDI, 0)
+    a.emit(mov_rr(RCX, RSI))
+    a.emit(shift_cl(5, RAX))                    # shr rax, cl（Group2 /5）
+    a.emit(alu_ri(AND_, RAX, 1))
+    ret_()
+
+    a.label("__ws_bit_set")                     # rdi = 位图, rsi = fd
+    movi(RDX, 1)
+    a.emit(mov_rr(RCX, RSI))
+    a.emit(shift_cl(4, RDX))                    # shl rdx, cl
+    ld(RAX, RDI, 0)
+    a.emit(alu_rr(0x09, RAX, RDX))              # or rax, rdx
+    st(RDI, 0, RAX)
+    ret_()
+
+    a.label("__ws_bit_clr")                     # rdi = 位图, rsi = fd
+    movi(RDX, 1)
+    a.emit(mov_rr(RCX, RSI))
+    a.emit(shift_cl(4, RDX))                    # shl rdx, cl
+    a.emit(b"\x48\xF7\xD2")                     # not rdx
+    ld(RAX, RDI, 0)
+    a.emit(alu_rr(0x21, RAX, RDX))              # and rax, rdx
+    st(RDI, 0, RAX)
+    ret_()
+
+    a.label("__ws_fd_of_sock")                  # rdi = SOCKET → rax = fd（找不到 = -1）
+    xor_eax()
+    a.label("__ws_fos_loop")
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_fos_no")
+    a.emit(mov_rr(RCX, RAX))
+    imul_ri(RCX, WS_FD_SIZE)
+    a.emit(mov_rr(RDX, RBX))
+    add_rr(RCX, RDX)                            # rcx = &fd 表项
+    ld32(RDX, RCX, WS_FD_KIND)
+    a.emit(alu_ri(CMP, RDX, WS_FD_SOCK))
+    jcc_l("ne", "__ws_fos_next")
+    ld(RDX, RCX, WS_FD_HANDLE)
+    a.emit(alu_rr(0x39, RDX, RDI))              # cmp rdx, rdi
+    jcc_l("e", "__ws_fos_yes")
+    a.label("__ws_fos_next")
+    add_ri(RAX, 1)
+    jmp_l("__ws_fos_loop")
+    a.label("__ws_fos_yes")
+    ret_()
+    a.label("__ws_fos_no")
+    movi(RAX, -1)
+    ret_()
+
+    a.label("__ws_select")                      # rdi=nfds rsi=rd rdx=wr r10=ex r8=tv
+    st(RSP, 0x28, RDI)                          # nfds
+    st(RSP, 0x30, RSI)                          # readfds（位图指针，可 NULL）
+    st(RSP, 0x38, RDX)                          # writefds
+    st(RSP, 0x40, R10)                          # exceptfds
+    st(RSP, 0x48, R8)                           # timeout（Linux timeval：两个 i64）
+    a.emit(mov_rr(RAX, RDI))
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("a", "__ws_sel_einval")
+    a.call("__ws_wsa_start")
+    # `WS_SELFLAG`：这一趟里每个 fd 进过哪几个集合（归一化要按"调用方要过 write"扫，
+    # 而 `select` 会把集合改写成结果 ⇒ 自己留一份成员关系）
+    movi(RDI, PE_STATE_VA + WS_SELFLAG)
+    movi(RCX, WS_FD_COUNT)
+    xor_eax()
+    a.label("__ws_sel_zf")
+    st8(RDI, 0, RAX)
+    add_ri(RDI, 1)
+    a.emit(alu_ri(SUB, RCX, 1))
+    test_rr(RCX, RCX)
+    jcc_l("ne", "__ws_sel_zf")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_SHADOW_EX)
+    a.call("__ws_set_init")             # 影子 except 集（见"归一化"那段）
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + 2 * WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    # ---- 第一趟：位图 → 三个集合；顺手把调用方位图里那一位**清掉**
+    #      （Linux 语义：返回时集合里只剩就绪的 —— 结果那一趟再按真实就绪置位）----
+    xor_eax()
+    st(RSP, 0x50, RAX)                          # i（fd）
+    st(RSP, 0x60, RAX)                          # nhandles（三个集合里的 handle 总数）
+    a.label("__ws_sel_1l")
+    ld(RAX, RSP, 0x50)
+    ld(RCX, RSP, 0x28)
+    a.emit(alu_rr(0x39, RAX, RCX))              # cmp rax, rcx
+    jcc_l("ae", "__ws_sel_1d")
+    xor_eax()
+    st(RSP, 0x58, RAX)                          # k（第几个集合：0=读 1=写 2=异常）
+    a.label("__ws_sel_1k")
+    ld(RAX, RSP, 0x58)
+    cmp_eax(3)
+    jcc_l("ae", "__ws_sel_1n")
+    # 位图指针 = *(rsp + 0x30 + k*8)（位移是变量，所以先算地址再解引用）
+    a.emit(mov_rr(RCX, RAX))
+    imul_ri(RCX, 8)
+    add_ri(RCX, 0x30)
+    add_rr(RCX, RSP)
+    ld(RCX, RCX, 0)
+    st(RSP, 0x70, RCX)                          # 位图指针（0 = 调用方没给这个集合）
+    test_ecx()
+    jcc_l("e", "__ws_sel_1kn")                  # NULL：跳过
+    a.emit(mov_rr(RDI, RCX))
+    ld(RSI, RSP, 0x50)                          # fd
+    a.call("__ws_bit_get")
+    test_rax()
+    jcc_l("e", "__ws_sel_1kn")                  # 这一位没置
+    # 有位：这个 fd 必须是 socket 型的，否则我们等不了它
+    ld(RDI, RSP, 0x50)
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_sel_ebadf")
+    st(RSP, 0x78, RAX)                          # SOCKET
+    # 集合指针 = WS_FDSETS + k*WS_FDSET_CAP
+    ld(RCX, RSP, 0x58)
+    movi(RDX, WS_FDSET_CAP)                     # ⚠ `imul_ri` 只吃 imm8（520 & 0xFF = 8），
+    a.emit(imul_rr(RCX, RDX))                   #    所以乘数得放进寄存器用 `imul_rr`
+    movi(RDX, PE_STATE_VA + WS_FDSETS)
+    add_rr(RCX, RDX)
+    a.emit(mov_rr(RDI, RCX))
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_sel_einval")               # 集合满（>64 个 handle）：报错，不静默丢
+    ld(RAX, RSP, 0x60)
+    add_ri(RAX, 1)
+    st(RSP, 0x60, RAX)
+    # 影子 except 集：**write / except 两栏的成员都得进去**。WinSock 把"非阻塞 connect
+    # 失败"报在 **except 集**里（MSDN），光放进 writefds 是等不到的 —— 实测症状是
+    # `select` 干等超时、返回 0。归一化那一段再把它搬回 write 集（见那段注释）。
+    ld(RCX, RSP, 0x58)                          # k
+    test_ecx()
+    jcc_l("e", "__ws_sel_nosh")                 # k == 0（readfds）不进影子集
+    movi(RDI, PE_STATE_VA + WS_SHADOW_EX)
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_sel_einval")
+    a.label("__ws_sel_nosh")
+    # WS_SELFLAG[fd] |= 1 << k（成员关系自己留一份：`select` 会把集合改写成结果）
+    movi(RDX, PE_STATE_VA + WS_SELFLAG)
+    ld(RAX, RSP, 0x50)                          # fd
+    add_rr(RDX, RAX)
+    movi(RAX, 1)
+    ld(RCX, RSP, 0x58)                          # k（进 cl）
+    a.emit(shift_cl(4, RAX))                    # rax = 1 << k
+    ld8z(RCX, RDX, 0)
+    a.emit(alu_rr(0x09, RCX, RAX))              # or rcx, rax
+    st8(RDX, 0, RCX)
+    # 清掉调用方位图里这一位（结果那一趟会按就绪重设）
+    ld(RDI, RSP, 0x70)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_bit_clr")
+    a.label("__ws_sel_1kn")
+    ld(RAX, RSP, 0x58)
+    add_ri(RAX, 1)
+    st(RSP, 0x58, RAX)
+    jmp_l("__ws_sel_1k")
+    a.label("__ws_sel_1n")
+    ld(RAX, RSP, 0x50)
+    add_ri(RAX, 1)
+    st(RSP, 0x50, RAX)
+    jmp_l("__ws_sel_1l")
+    a.label("__ws_sel_1d")
+    # ---- 三个集合全空：Linux 是"就睡 timeout" ----
+    ld(RAX, RSP, 0x60)
+    test_rax()
+    jcc_l("ne", "__ws_sel_go")
+    ld(RAX, RSP, 0x48)
+    test_rax()
+    jcc_l("e", "__ws_sel_sleep_inf")
+    # 毫秒 = sec*1000 + usec/1000
+    ld(RCX, RAX, 0)                             # sec
+    movi(RDX, 1000)
+    a.emit(imul_rr(RCX, RDX))
+    ld(RDX, RAX, 8)                             # usec
+    movi(R8, 1000)
+    a.emit(mov_rr(RAX, RDX))
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    a.emit(group3(6, R8))                       # div r8 → rax = usec/1000
+    add_rr(RCX, RAX)
+    api("Sleep")
+    xor_eax()
+    jmp_l("__ws_ret")
+    a.label("__ws_sel_sleep_inf")
+    movi32(RCX, 0xFFFFFFFF)                     # INFINITE：与 Linux 的"永远等"同义
+    api("Sleep")
+    xor_eax()
+    jmp_l("__ws_ret")
+    # ---- 等 ----
+    a.label("__ws_sel_go")
+    ld(RAX, RSP, 0x48)
+    test_rax()
+    jcc_l("e", "__ws_sel_notv")
+    ld(RCX, RAX, 0)                             # sec（i64）
+    a.emit(alu_ri(CMP, RCX, 0x7FFFFFFF))        # ⚠ 比的是**秒**不是指针：`alloc` 给的是
+                                                #   高地址（PE 基址 0x140000000），拿指针去
+                                                #   `jle` 会**从不跳**，于是每格都被夹成
+                                                #   0x7FFFFFFF ≈ 36 分钟（实测：整支挂住）
+    jcc_l("le", "__ws_sel_secok")
+    movi(RCX, 0x7FFFFFFF)                       # 夹到 32 位（Windows timeval 是两个 long）
+    a.label("__ws_sel_secok")
+    movi(RDX, PE_STATE_VA + WS_POLLTV)
+    st32(RDX, 0, RCX)                           # sec  （Linux 的 i64 → Windows 的 long）
+    ld(RCX, RSP, 0x48)
+    ld(RCX, RCX, 8)                             # usec（i64）
+    st32(RDX, 4, RCX)
+    st(RSP, 0x20, RDX)                          # 第 5 参：与 `poll` 同一处（存 RDX）
+    jmp_l("__ws_sel_call")
+    a.label("__ws_sel_notv")
+    movi(R8, 0)
+    st(RSP, 0x20, R8)                           # NULL ⇒ 无限等
+    a.label("__ws_sel_call")
+    movi32(RCX, 0)                              # WinSock 忽略 nfds
+    ld(RDX, RSP, 0x30)                          # readfds 位图指针（NULL 就传 NULL）
+    test_rr(RDX, RDX)
+    jcc_l("e", "__ws_sel_rd0")
+    movi(RDX, PE_STATE_VA + WS_FDSETS)
+    a.label("__ws_sel_rd0")
+    ld(R8, RSP, 0x38)                           # writefds 位图指针
+    test_rr(R8, R8)
+    jcc_l("e", "__ws_sel_wr0")
+    movi(R8, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    a.label("__ws_sel_wr0")
+    # exceptfds **永远**用影子集：里面装着调用方 write / except 两栏的全部成员。
+    # 为什么不能直接把调用方的 except 集递过去 —— 两个原因，都是实测撞出来的：
+    #   (a) 调用方常常只给 writefds（等 connect 成没成的标准写法），NULL 递过去就没人报
+    #       连接失败；给它一个空集也一样，因为 WinSock 只报**集合里**的句柄；
+    #   (b) 结果不能直接落回调用方的 except 集，得先按 SO_ERROR 分类（见归一化（一））。
+    movi(R9, PE_STATE_VA + WS_SHADOW_EX)
+    api("select")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    # **返回 0 也照样往下走**：两趟归一化要按名单再问一遍 `SO_ERROR` —— "同步就失败"
+    # 的 socket 恰好让 WinSock 报 0（`docs/230`）
+    # ---- 归一化（一）：把影子集里"连接失败"的挪进 write 集 ----
+    # 逐个问 SO_ERROR：非零 = **连接失败**（不是 OOB）⇒ 从影子里摘掉 + 加进 write。
+    # 这一格是 Linux 与 WinSock **语义真的不同**的地方（`docs/230`）：不归一化的话，
+    # "等 writefds 判连接成没成"的程序在 Windows 上永远等不到。
+    xor_eax()
+    st(RSP, 0x50, RAX)                          # i（在影子集里的下标）
+    movi(RCX, PE_STATE_VA + WS_SHADOW_EX)       # WinSock 的结果**永远**落在影子集里
+    st(RSP, 0x68, RCX)
+    a.label("__ws_sel_nl")
+    ld(RCX, RSP, 0x68)
+    ld32(RAX, RCX, 0)                           # ex.fd_count
+    ld(RDX, RSP, 0x50)
+    a.emit(alu_rr(0x39, RDX, RAX))              # cmp rdx, rax
+    jcc_l("ae", "__ws_sel_wscan")               # i >= count ⇒ 完（接着跑写入扫描）
+    a.emit(mov_rr(RAX, RDX))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RCX)
+    ld(RAX, RAX, 8)                             # SOCKET
+    st(RSP, 0x78, RAX)
+    # getsockopt(sock, SOL_SOCKET, SO_ERROR, &tmp, &len)
+    movi32(RCX, 4)
+    movi(RDX, PE_STATE_VA + WS_SOCKTMP + 8)
+    st32(RDX, 0, RCX)                           # optlen = sizeof(int)
+    st(RSP, 0x20, RDX)                          # 第五参
+    ld(RCX, RSP, 0x78)
+    movi(RDX, WS2_SOL_SOCKET)
+    movi(R8, WS2_SO[4])                         # SO_ERROR
+    movi(R9, PE_STATE_VA + WS_SOCKTMP)
+    api("getsockopt")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    movi(RCX, PE_STATE_VA + WS_SOCKTMP)
+    ld32(RAX, RCX, 0)                           # 错误码
+    test_rax()
+    jcc_l("e", "__ws_sel_nnext")                # 0 ⇒ 真的 OOB，留在 except
+    ld(RDI, RSP, 0x78)
+    a.emit(mov_rr(RSI, RAX))
+    a.call("__ws_sel_save_err")                 # 读即清零 ⇒ 存一份给应用（见那个助手）
+    # 连接失败：**调用方要了 writefds 才搬**（没要就只是把它丢掉）
+    ld(RAX, RSP, 0x38)
+    test_rr(RAX, RAX)
+    jcc_l("e", "__ws_sel_nswap")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("ne", "__ws_sel_nswap")               # 已在 write 集里：别加第二遍（计数会翻倍）
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_sel_einval")
+    a.label("__ws_sel_nswap")
+    # swap-remove：count -= 1; ex[i] = ex[count-1]（**不动 i**，下一轮看新进来的那个）
+    ld(RCX, RSP, 0x68)
+    ld32(RAX, RCX, 0)
+    a.emit(alu_ri(SUB, RAX, 1))
+    st32(RCX, 0, RAX)
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, 8)
+    add_rr(RDX, RCX)
+    ld(RDX, RDX, 8)                             # ex[count-1]
+    ld(RSI, RSP, 0x50)
+    a.emit(mov_rr(RAX, RSI))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RCX)
+    st(RAX, 8, RDX)                             # ex[i] = ex[count-1]
+    jmp_l("__ws_sel_nl")
+
+    a.label("__ws_sel_nnext")
+    # SO_ERROR == 0 ⇒ 不是连接失败，是**真 except 事件**（带外数据）。影子集是内部的：只有
+    # 调用方**点名要过** exceptfds（SELFLAG 位 2）时，才留着让它落到调用方的位图上；
+    # 否则从影子里**摘掉** —— WinSock 报了、调用方没问的东西不该出现在结果里。
+    ld(RAX, RSP, 0x40)
+    test_rr(RAX, RAX)
+    jcc_l("e", "__ws_sel_nswap")                # 调用方没要 exceptfds ⇒ 摘掉
+    ld(RDI, RSP, 0x78)
+    a.call("__ws_fd_of_sock")
+    test_rax()
+    jcc_l("e", "__ws_sel_nswap")
+    movi(RDX, PE_STATE_VA + WS_SELFLAG)
+    add_rr(RDX, RAX)
+    ld8z(RCX, RDX, 0)
+    a.emit(alu_ri(AND_, RCX, 4))                # 位 2 = 这个 fd 进过调用方的 exceptfds
+    test_ecx()
+    jcc_l("e", "__ws_sel_nswap")                # 不在那一栏里 ⇒ 摘掉
+    ld(RAX, RSP, 0x50)                          # 留着：只往前走一格（不做 swap-remove）
+    add_ri(RAX, 1)
+    st(RSP, 0x50, RAX)
+    jmp_l("__ws_sel_nl")
+    # ---- 归一化（二）：**调用方要过 write 的 socket** 身上若已有错，补报可写 ----
+    # 排在归一化（一）**之后**：那一趟要看**真实的** `SO_ERROR` 才分得清"连接失败"与
+    # "真 OOB"；这个扫描读一次就把它清零（读即清零），抢在前面会把失败误判成 OOB、
+    # 塞进调用方的 except 集。
+    a.label("__ws_sel_wscan")
+    # 为什么还要这一步：Linux 把"connect 已经失败"的 socket 报成**可写**（实测），而 WinSock
+    # 对这种**同步就失败**的 socket 在 select 里**什么都不报**（实测：把同一个 socket 同时
+    # 放进 writefds 与 exceptfds，两边都拿不到）。所以按调用方的 write 名单再问一遍
+    # `SO_ERROR` —— 有错就正是 Linux 说的那个"可写"。
+    xor_eax()
+    st(RSP, 0x50, RAX)                          # fd
+    a.label("__ws_sel_wl")
+    ld(RAX, RSP, 0x50)
+    cmp_eax(WS_FD_COUNT)
+    jcc_l("ae", "__ws_sel_wscand")               # 扫描完 → 第三趟
+    movi(RDX, PE_STATE_VA + WS_SELFLAG)
+    add_rr(RDX, RAX)
+    ld8z(RCX, RDX, 0)
+    a.emit(alu_ri(AND_, RCX, 2))                # 位 1 = 这个 fd 进过 writefds
+    test_ecx()
+    jcc_l("e", "__ws_sel_wn")
+    ld(RDI, RSP, 0x50)
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_sel_wn")                   # 不是 socket：不管
+    st(RSP, 0x78, RAX)                          # SOCKET
+    movi32(RCX, 4)
+    movi(RDX, PE_STATE_VA + WS_SOCKTMP + 8)
+    st32(RDX, 0, RCX)
+    st(RSP, 0x20, RDX)
+    ld(RCX, RSP, 0x78)
+    movi(RDX, WS2_SOL_SOCKET)
+    movi(R8, WS2_SO[4])                         # SO_ERROR
+    movi(R9, PE_STATE_VA + WS_SOCKTMP)
+    api("getsockopt")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    movi(RCX, PE_STATE_VA + WS_SOCKTMP)
+    ld32(RAX, RCX, 0)
+    test_rax()
+    jcc_l("e", "__ws_sel_wn")                   # 没挂账：本来就好好的
+    ld(RDI, RSP, 0x78)
+    a.emit(mov_rr(RSI, RAX))
+    a.call("__ws_sel_save_err")                 # 读即清零 ⇒ 存一份给应用
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("ne", "__ws_sel_wn")                  # WinSock 本来就报了它 ⇒ 别加第二遍
+                                                #   （加两遍 = 返回的**计数**翻倍；
+                                                #    Linux 数的是三个集合里置位的**位数**）
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x78)
+    a.call("__ws_set_add")
+    a.label("__ws_sel_wn")
+    ld(RAX, RSP, 0x50)
+    add_ri(RAX, 1)
+    st(RSP, 0x50, RAX)
+    jmp_l("__ws_sel_wl")
+    a.label("__ws_sel_wscand")
+    # ---- 第三趟：三个集合 → 调用方位图，数就绪的 ----
+    a.label("__ws_sel_nd")
+    xor_eax()
+    st(RSP, 0x68, RAX)                          # total = 0
+    st(RSP, 0x58, RAX)                          # k
+    a.label("__ws_sel_3k")
+    ld(RAX, RSP, 0x58)
+    cmp_eax(3)
+    jcc_l("ae", "__ws_sel_3d")
+    # 位图指针 = *(rsp + 0x30 + k*8)
+    a.emit(mov_rr(RCX, RAX))
+    imul_ri(RCX, 8)
+    add_ri(RCX, 0x30)
+    add_rr(RCX, RSP)
+    ld(RCX, RCX, 0)
+    st(RSP, 0x70, RCX)
+    test_ecx()
+    jcc_l("e", "__ws_sel_3kn")                  # 调用方没给这个集合
+    xor_eax()
+    st(RSP, 0x50, RAX)                          # j
+    a.label("__ws_sel_3l")
+    ld(RAX, RSP, 0x50)
+    ld(RCX, RSP, 0x58)
+    movi(RDX, WS_FDSET_CAP)                     # ⚠ `imul_ri` 只吃 imm8（520 & 0xFF = 8），
+    a.emit(imul_rr(RCX, RDX))                   #    所以乘数得放进寄存器用 `imul_rr`
+    movi(RDX, PE_STATE_VA + WS_FDSETS)
+    add_rr(RCX, RDX)                            # 集合指针
+    # k == 2（except）不一样：WinSock 的结果**落在影子集里**（三个 `WS_FDSETS` 集合只当
+    # 入参用），所以那一栏得改去读影子集 —— 否则读到的会是"调用方输入的陈旧拷贝"，
+    # 凡是问过的 fd 都会被当成就绪（实测：只问 except 的用例里全报就绪）。
+    ld(RDX, RSP, 0x58)                          # k
+    a.emit(alu_ri(CMP, RDX, 2))
+    jcc_l("ne", "__ws_sel_3set")
+    movi(RCX, PE_STATE_VA + WS_SHADOW_EX)
+    a.label("__ws_sel_3set")
+    ld32(RDX, RCX, 0)                           # count
+    a.emit(alu_rr(0x39, RAX, RDX))              # cmp rax, rdx
+    jcc_l("ae", "__ws_sel_3kn")
+    imul_ri(RAX, 8)
+    add_rr(RAX, RCX)
+    ld(RAX, RAX, 8)                             # SOCKET
+    a.emit(mov_rr(RDI, RAX))
+    a.call("__ws_fd_of_sock")
+    cmp_eax(0)
+    jcc_l("l", "__ws_sel_3j")                   # 找不到对应的 fd：跳过（不该发生）
+    ld(RDI, RSP, 0x70)
+    a.emit(mov_rr(RSI, RAX))
+    a.call("__ws_bit_set")
+    ld(RAX, RSP, 0x68)
+    add_ri(RAX, 1)
+    st(RSP, 0x68, RAX)                          # total += 1
+    a.label("__ws_sel_3j")
+    ld(RAX, RSP, 0x50)
+    add_ri(RAX, 1)
+    st(RSP, 0x50, RAX)
+    jmp_l("__ws_sel_3l")
+    a.label("__ws_sel_3kn")
+    ld(RAX, RSP, 0x58)
+    add_ri(RAX, 1)
+    st(RSP, 0x58, RAX)
+    jmp_l("__ws_sel_3k")
+    a.label("__ws_sel_3d")
+    ld(RAX, RSP, 0x68)
+    jmp_l("__ws_ret")
+    a.label("__ws_sel_zero")
+    xor_eax()
+    jmp_l("__ws_ret")
+    a.label("__ws_sel_ebadf")
+    movi(RAX, -9)                               # EBADF
+    jmp_l("__ws_ret")
+    a.label("__ws_sel_einval")
+    movi(RAX, -22)                              # EINVAL
+    jmp_l("__ws_ret")
+
+    a.label("__ws_sel_save_err")                # in: rdi = SOCKET, rsi = 错误码
+    a.emit(mov_rr(R8, RSI))                     # 先藏起来：`__ws_fd_of_sock` 会用 rcx/rdx
+    a.call("__ws_fd_of_sock")                   # rdi → rax = fd（-1 = 找不到）
+    cmp_eax(0)
+    jcc_l("l", "__ws_sse_no")
+    movi(RDX, PE_STATE_VA + WS_SERR)
+    imul_ri(RAX, 4)
+    add_rr(RDX, RAX)
+    st32(RDX, 0, R8)
+    a.label("__ws_sse_no")
+    ret_()
 
     # （cmdline 字面量在 .idata 的固定偏移 PE_LIT_OFF 上，shim 用常量取址，不必内嵌）
 

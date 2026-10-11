@@ -101,13 +101,19 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 ## 5. 点名不做
 
 * **`poll` / `select` / `epoll`**、**`sendmsg` / `recvmsg`**、**`socketpair`**、**`AF_UNIX`** ——
+  （`poll` 与 `select` 后来都补上了：见下面那两行与 `docs/221` / `docs/230`）
   表外的号一律 **`-ENOSYS`（-38）**（派发面的兜底；2026-10-11 之前是 `-1`，那次改动见
   `docs/227` §2 —— `-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，而 Linux 对不认得的号
   返回的就是 `-ENOSYS`）。
   **`poll`(7) 已做**（2026-10-10，`docs/221`）：架在 WinSock 的 `select` 上，
   `pollfd` ↔ `fd_set` 两边翻译。**名单的现状与逐条理由见 `docs/221` §7** ——
-  其中 `select`(23)、`epoll`、`sendmsg`/`recvmsg`、`socketpair`/`AF_UNIX` 仍是**点名不做**，
+  其中 `epoll`、`sendmsg`/`recvmsg`、`socketpair`/`AF_UNIX` 仍是**点名不做**，
   各自都写了理由（不是"懒得做"）。
+  **`select`(23) 已做**（2026-10-11，`docs/230`）：`__fds_bits` 位图 ↔ WinSock `fd_set`，
+  外加**出参归一化** —— WinSock 把"非阻塞 connect 失败"报在 except 集里（Linux 报在
+  writefds），且那种 socket 的 `SO_ERROR` 会被读掉，所以 shim 自己留一份、`getsockopt`
+  时还回去。两条**平台差异**写在那儿了（Windows 把"本地端口被拒"升上来要 ~2–3 秒；
+  同步就失败的 connect 在 WinSock 的 `select` 里**什么都不报**）。
 * ~~**语言侧的一条真限制**：`syscall6` 的内建签名是 `nr + a0..a4`（5 个实参），
   所以 6 参的 `sendto`/`recvfrom` 从 `.lomt` 里**递不满**（`addrlen` 那一格没地方放，
   递过去的是寄存器里的残留值）……~~

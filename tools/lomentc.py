@@ -4620,7 +4620,7 @@ def _count_boundary(mod: Module) -> dict:
 #: 而判据能钉住它们不漂 —— 比"跨模块 import"更诚实（谁都不许偷偷多认一个号）。
 SURFACE_NUMBERS = {
     60: "proc", 1: "file", 0: "file", 3: "file", 257: "file", 12: "mem",
-    217: "file", 262: "file", 7: "net", 41: "net", 42: "net", 43: "net",
+    217: "file", 262: "file", 7: "net", 23: "net", 41: "net", 42: "net", 43: "net",
     288: "net", 44: "net", 45: "net", 48: "net", 49: "net", 50: "net",
     51: "net", 52: "net", 54: "net", 55: "net",
 }
