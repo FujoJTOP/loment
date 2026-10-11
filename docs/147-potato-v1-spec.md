@@ -130,8 +130,9 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v9` | `runtime` | `docs/175` §3.6 |
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
   | `v11` | `port` | `docs/222` §4 |
+  | `v12` | `surfaces` | `docs/224` |
 
-  台阶是**累积**的：`v11` 要求它下面每一版的字段都在。
+  台阶是**累积**的：`v12` 要求它下面每一版的字段都在。
 
 - **`gc`（v8）**：**回收档**之一 —— `gc_manual`（回收由程序显式做）、`gc_auto`
   （运行期负责回收）、或 `gc_auto_alpha`（**混合**档：静态内存管理 + 动态回收，
@@ -166,16 +167,25 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   （"要对外、但内存我自己管"）是合法档，不许拒。
 
 - **`boundary`（v7）**：一份单元里越过语言保证的那些**调用点**有几个 —— 机调用
-  （`syscall4`/`syscall6`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
+  （`syscall4`/`syscall6`/`syscall7`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
   `extern fn` 声明过的名字。**口径是词法的**：只看"这个名字被调用了没有"，不判类型、
   不判危险 —— `docs/204` R5 那一格要的正是"可 grep、可计数、可审计"。
   形状是五个非负整数 `{extern_declared, extern_calls, syscalls, ptr_transforms,
   total_sites}`，其中 `total_sites` 必须等于后三项之和。**那一条是校验器独立判得了的**：
   它读不到源码，所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾"。
   `loment stat` 报的是**同一组数**（那份由参考实现真正的词法器独立对过）。
-  那份内建清单（`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`）住在
+  那份内建清单（`syscall4`/`syscall6`/`syscall7`/`ptr_add`/`ptr_sub`/`str_ptr`）住在
   `tools/potato.py` 的 `BOUNDARY_BUILTINS` —— 放在那儿是因为这个校验器按 M47
   **不许 import 编译器**，而"哪些内建越界"恰恰是审计要用的东西。
+
+- **`surfaces`（v12）**：把 `boundary.syscalls` 数的那**同一批站点**按"面"分一分 ——
+  `{面名: 站点数, …, total_sites}`，面名由用的人定（`file`/`mem`/`net`/`proc` 是本仓库的划法，
+  `other` 是兜底：首参不是整数字面量的、或号不在表里的）。零计数的面不写出来（零站点写
+  `{"total_sites": 0}`）。校验器独立判得了**两条**：各面之和等于 `total_sites`，
+  而且 `total_sites` **等于 `boundary.syscalls`**（每个站点落在恰好一个面里 ⇒ 两处数的是
+  同一批站点）。号 → 面那张表在 `tools/lomentc.py::SURFACE_NUMBERS`，它必须与 PE 运行时
+  的派发表逐条相同（`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`）。
+  全貌见 `docs/222`。
 
 - **`v6` 曾经只有 `tools/potato_from.py` 在发**（那一档的产出方是"翻译出来的单元"）。
   主编译器是**加 `v7` 的时候才把 `grammar` 一起接上**的：台阶累积，而它此前一直发 `v5`，

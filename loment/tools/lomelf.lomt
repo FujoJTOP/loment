@@ -134,13 +134,16 @@ const G_ZERO: u32 = 28;
 // `TB_SLOT` / `TB_ALLOC` / `TB_ARG` / `TB_PHI` / `TB_IDATA` / `TB_EXT` / `TB_OBJ` /
 // `TB_FREL` 一起移), 表尾从 2244360 涨到 2637576 —— 仍在 4 MiB 表区内, 所以
 // `M_OBJ` / `ARENA` 这次**不用动**。
+//
+// **同一抬法当时在另一条分支上也做了一遍**（`docs/222` §7 的自举侧 v11 `surfaces`，
+// 多 193 条标签）—— 两边数一模一样，并进 main 时这一处按一份落地，不是两抬。
 const TB_LBL_MAX: u32 = 32768;     // 标签表条数
 const TB_FIX_MAX: u32 = 32768;     // 回填表条数
 const TB_SLOT_MAX: u32 = 32768;    // 槽表条数（每函数清）
 const TB_ALLOC_MAX: u32 = 8192;    // alloca 表条数（每函数清）
 const TB_PHI_MAX: u32 = 512;       // phi 表条数（每函数清）
 
-const TB_LBL: u32 = 131328;          // 标签表 stride 24 × 32768: (函数名, 块名, 地址)
+const TB_LBL: u32 = 131328;          // 标签表 stride 24 × TB_LBL_MAX: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;

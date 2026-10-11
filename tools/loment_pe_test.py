@@ -1028,6 +1028,32 @@ def test_pe_dispatch_table_is_the_single_source():
 
 
 @test
+def test_pe_surface_table_matches_the_artifact_counter():
+    """运行时的**面表**与产物里那张**号 → 面**表必须是同一张（`docs/222`）。
+
+    声明侧（`lomentc.SURFACE_NUMBERS`）决定 `.potato.json` 的 `surfaces` 怎么分，运行时侧
+    （`lomelf.PE_SURFACE_BY_NUMBER`）决定 PE 上哪个号真的被派发、算哪个面。两份各自漂会
+    产出最难看的那一格：产物说"这个单元有 3 个 `net` 站点"，而 Windows 上那个号拿到 -1 ——
+    **数得出来、跑不起来**。那正是 `docs/217` 要堵的缺口，所以这里两个方向都报。
+
+    这张表**不是**"语言规定的"：`lomelf.PE_SYSCALLS` 是用户可以改的数据（`docs/218` §12）。
+    改它没问题 —— 改完这一条就红，于是"面名换了 / 号挪了"必须**两边一起显式改**，不能悄悄漂。
+    """
+    decl = lomentc.SURFACE_NUMBERS
+    run = lomelf.PE_SURFACE_BY_NUMBER
+    miss = {n: run[n] for n in sorted(run) if n not in decl}
+    extra = {n: decl[n] for n in sorted(decl) if n not in run}
+    diff = {n: (run[n], decl[n]) for n in sorted(run) if n in decl and run[n] != decl[n]}
+    assert not miss, f"运行时派发了、产物计数却不认识这些号（会被算进 other）: {miss}"
+    assert not extra, f"产物计数认得、PE 运行时不派发这些号（数得出来、跑不起来）: {extra}"
+    assert not diff, f"同一个号两边算的面不同: {diff}"
+    # 面名两边都得是"一个词" —— 空串/带空格会让"各面之和"看着对、其实什么都没分
+    for m in (decl, run):
+        assert all(isinstance(v, str) and v and " " not in v for v in m.values()), m
+    print(f"      {len(decl)} 个号、面名逐条相同（声明侧 == 运行时侧）")
+
+
+@test
 def test_pe_imports_two_dlls_with_the_socket_surface():
     """导入表：两条描述符 + 终止项、两个 DLL 名、整个 ws2_32 面，且塞得进孪生那块落点。"""
     idata, slots = lomelf.build_pe_idata()
