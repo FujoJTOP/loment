@@ -87,7 +87,7 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 |---|---|
 | `poll` 在 PE 上真的会报"谁就绪" | `polldemo`：两个连接只有一个有数据 ⇒ `poll` 返回 1，且**只有那一条**的 `revents` 非零；读掉之后再 poll ⇒ 返回 **0**（超时） |
 | 两个平台行为一致 | `test_pe_and_elf_agree_on_net_programs`：三份语料 PE vs ELF **逐字节相同** |
-| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：22 个号逐个对上 `PE_DISPATCH` |
+| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：逐个对上 `PE_DISPATCH`（本文那一轮是 22 个号；`select` 落地后是 23，见 `docs/230`） |
 | 冻出来的 blob 没漂 | `test_frozen_shim_blob_matches_the_reference`（7362 B） |
 | 孪生那条不变量还在 | `test_pe_selfhost_mirror_matches_reference`（镜像与参考的 PE 逐字节相同；状态区跟着长到 1069192） |
 

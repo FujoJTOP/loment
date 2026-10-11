@@ -164,7 +164,8 @@ BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "
 1. ~~**把 `boundary` 从"越了几次"细到"越到哪个面"。**~~ **已落（2026-10-10/11）**：
    下文那三段现在是一条**实测的结论**，不是待办 —— `surfaces` 就是那一项，形状见 **`docs/224`**
    （Potato **v12**）。序号 → 面那张表住在 `lomentc.SURFACE_NUMBERS`，与 PE 运行时的
-   `PE_SURFACE_BY_NUMBER` **逐条判等**（22 个号）。
+   `PE_SURFACE_BY_NUMBER` **逐条判等**（写这段时 22 个号；今天是 23 —— `poll`/`select` 后来补了，
+   `docs/221` / `docs/230`）。
    保留下面这段**当时的推理**，因为它记的是"为什么当时说'那表只活在散文里'"：
    想细分就得有一张"Linux 号 → 语义"的表 —— 而它**今天只活在散文里**
    （指南 §6.2 那张踩坑表、`loment/lib/proc.lomt:142` 的注释）；
@@ -214,7 +215,7 @@ BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "
 
 ## 10. 与其它文档的关系
 
-* **`docs/217`（这次落的联网面）** —— 本文的**前置**：21 个号、`PE_DISPATCH` 那张表、
+* **`docs/217`（这次落的联网面）** —— 本文的**前置**：当时 21 个号（今天 23）、`PE_DISPATCH` 那张表、
   两个平台行为一致。没有那张号表，"越到哪个面"这句话就没有真值。
 * **`docs/210` §3 / `docs/205` 的 J3 行（`gc_ladder`）** —— §7 第 3 条**照抄的形状**；
   也是本文"把一件事变成可数对象"这个动作的**成功先例**。
@@ -305,7 +306,8 @@ PE 运行时的派发面，从"手写的 21 对 `cmp/jcc`"改成 **`PE_SYSCALLS`
 另一半（单元里的调用点按面计数、进 Potato，§7 那三件）**已做**（2026-10-10）：
 Potato **v12** 的 `surfaces` 把同一批机调用站点按面分一分，而
 `total_sites` 必须等于 `boundary.syscalls` —— 声明侧的号表与运行时的派发表被判等
-（`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`，实测 22 个号逐条相同）。
+（`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`；写这段时实测 22 个号逐条相同，
+今天 23 —— 那条判据是**算出来的**，数字跟着表走，这里只是当时的读数）。
 形状、号的表、判据与实测数字都在 **`docs/224`**。
 
 ### 前人（这一格的）
