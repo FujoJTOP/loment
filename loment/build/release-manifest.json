@@ -1579,7 +1579,7 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "d2a863b9f8f440b1ed27c1736a7abdd1622ae5b4647c71056a891b1fef1f6230"
+   "sha256": "5709147e5553b80b4e55518744be797d2cb5c9ac7d2cf6bf76c80f1d8bec0db9"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
