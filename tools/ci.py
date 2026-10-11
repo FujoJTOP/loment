@@ -166,6 +166,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
                  # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
                  "loment_multisyntax_projects_test",
+                 # **超大型**: 100 个 Python 语法模块、1000 个函数, 一次编一次跑;
+                 # 语料是生成物, 判据逐字节钉住它不漂
+                 "loment_megaproject_test",
                  # 权威状态在 `origin`、不在本地树那一条 (CLAUDE.md 第一节): 判据在临时
                  # 夹具仓里验"工具报的是权威那一份还是工作树那一份", 并钉住"无法判定"
                  # 必须是**可见的** rc=2, 不能伪装成同步
@@ -207,6 +210,7 @@ SHARD_COST = {
     "loment_std_test": 1.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
+    "loment_megaproject_test": 4.6,
 }
 #: 没登记耗时的判据按这个算。实测大部分判据在秒级, 取 8s 偏保守。
 SHARD_DEFAULT_S = 8.0

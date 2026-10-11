@@ -123,6 +123,9 @@ GLOBS = [
     # Loment 跑出的数 == 对照组 == 独立期望值。**那批语料本身不进清单** —— 它要靠
     # `tools/` 才能跑，而 `tools/` 不随包发（与 `docs/179` §8 同一个理由）。
     "tools/loment_multisyntax_projects_test.py",
+    # **超大型**项目 (100 个 Python 语法模块、1000 个函数): 语料是**生成物**,
+    # 判据逐字节钉住它不漂。与上面那批同理, **语料本身不进清单** (tools/ 不随包发)。
+    "tools/loment_megaproject_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
     # 花括号族 (C/C++/Java/C#) 的**共享前端核** (docs/188 §7.1): 一份解析器 + 方言表。
