@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import shutil
 import subprocess
@@ -592,7 +593,9 @@ def test_m81_dep_body_is_checked():
             encoding="utf-8", newline="\n")
         ent = d / "main.lomt"
         ent.write_text(
-            "module main\nuse badlib\nfn _start() {\n"
+            # `choose runtime`：这个入口用了 `alloc`（`docs/224` 之后默认档是一句保证）。
+            # 少了它，E022 会**抢在**"库正文那一处"前面报 —— 而这条判据要看的正是后者。
+            "module main\nchoose runtime\nuse badlib\nfn _start() {\n"
             "    let x: u32 = f(alloc(8));\n    syscall4(60, x as u64, 0, 0);\n}\n",
             encoding="utf-8", newline="\n")
         mod = lomentc.load(ent)
@@ -1753,10 +1756,22 @@ def test_m86_selfhost_perf_budget():
         runs = [timed(f"cd {_wsl_path(ROOT)} && {_T}perf_drv loment/selfhost/driver.lomt "
                       f"> /dev/null") for _ in range(2)]
         best = min(runs) - base
-        budget = 60.0
-        assert best <= budget, f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s (435 个函数时基线 34.1s)"
-        print(f"      自举自编译: {best:.2f}s (护栏 {budget:.0f}s; 参考实现 Python 1.7s, "
-              f"WSL 基线 {base:.2f}s)")
+        #: **函数数打进输出**（2026-10-10 起）：这条护栏量的是一条 **O(n²)** 的曲线
+        #: （见本函数头注），所以"时间涨了"要先问"单元是不是也涨了"。不印这个数，
+        #: 下一个人只看到时间变了，分不清是回归还是规模。
+        n_fn = len(re.findall(r"^define ", ll.read_text(encoding="utf-8"), re.M))
+        #: **60 → 90（2026-10-10）**。理由与 2026-09-21 那次 30 → 60 **同一条**：
+        #: 破的不是"谁变慢了"，是**单元规模** —— 446 个函数时 42.3s，现在 **604 个函数**
+        #: （`runtime` 维兑现 + 自适应收集器 + 第四维 `port` 都加了代码），单独跑实测 59.33s，
+        #: 而护栏 60s 只剩 ~1% 余量 ⇒ **在 CI 上随机翻红**（同一棵树上后台有活时实测 63.6s）。
+        #: **它仍然是绊线，不是预算**：90s 之下，"忽然又慢一倍"照样看得见。
+        #: 真正的修法没变 —— 给 `chk_lookup_slot` / `find_fn` 加索引，那件事仍然没做。
+        budget = 90.0
+        assert best <= budget, (
+            f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s ({n_fn} 个函数; "
+            f"446 个函数时基线 42.3s)")
+        print(f"      自举自编译: {best:.2f}s / {n_fn} 个函数 (护栏 {budget:.0f}s; "
+              f"参考实现 Python 1.7s, WSL 基线 {base:.2f}s)")
 
 
 #: 参考实现在**解析期**就拒、而驱动器看不见的用例 (驱动器只有 lex -> check -> emit,
