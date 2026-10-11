@@ -931,7 +931,11 @@ def test_m89_l2_epoch_is_byte_identical():
         exe = _build_codegen(td)
         outs: dict[str, str] = {}
         for tag, src in (("alpha", lomentc_test.L2_ALPHA_SRC),
-                         ("manual", lomentc_test.L2_MANUAL_SRC)):
+                         ("manual", lomentc_test.L2_MANUAL_SRC),
+                         # `if` 的两支那一格（`docs/210` §2.3）：孪生那边的支跨度是
+                         # `skip_block` **现算**的 —— 差一格这一条就红。
+                         ("ifalpha", lomentc_test.L2_IF_ALPHA_SRC),
+                         ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC)):
             target = Path(td) / f"gc_l2_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
             mod = lomentc.load(target)
