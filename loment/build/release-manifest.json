@@ -2031,11 +2031,11 @@
   },
   {
    "path": "docs/217-loment-socket-parity.md",
-   "sha256": "6c9da1fe772cb638cbb55b00a52ad97d7e59af4466d72ee1f885dfdd707fd45a"
+   "sha256": "2d285c670fc0571038c24381827bdb1a3df616ff2d6af371f995e17cd8a88699"
   },
   {
    "path": "docs/218-loment-net-admission.md",
-   "sha256": "9a48301330977deeadd0a89071ce5cb8aa223cf4c1fc684842f487cc6e6fdbd6"
+   "sha256": "b8e3c92095228970095fb9cb514b3eef12aaa606b668357945f5f939ab6abc90"
   },
   {
    "path": "docs/219-world-ports.md",
@@ -2047,7 +2047,7 @@
   },
   {
    "path": "docs/221-loment-pe-poll.md",
-   "sha256": "32570b2e25388feff52ae57f1d74449f97f6486869be5eea2bdf0e79c25a2cb3"
+   "sha256": "0435e4619fbbca3bdfb2d5be11909cdaf43cd51baf7df8018fb77259c5475d77"
   },
   {
    "path": "docs/222-lompi-020-foreign-libs.md",
@@ -2063,7 +2063,7 @@
   },
   {
    "path": "docs/224-potato-v12-surfaces.md",
-   "sha256": "78805eeab1310e69a2c29df9e634b1da48b758a8f3e1d581e092a87db118e18c"
+   "sha256": "abc300b4c353ed21de8325ccd6f33399dbdd983f3b69b1d4dd8182f530007988"
   },
   {
    "path": "docs/225-loment-runtime-gaps.md",
