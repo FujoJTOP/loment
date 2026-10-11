@@ -370,21 +370,28 @@ def test_hosted_heap_asks_the_os_and_sealed_cannot():
         print("      SKIP: 无 WSL (Windows 上把 IR 交叉成 ELF 要它)")
         return
     import lomentc_test as CT                                        # noqa: PLC0415
+    # 两对：**分配器**那一对（`docs/228`）与 **分配器+收集器**那一对（`docs/230`）。
+    # 后一对里 `hosted` 那一份还额外要求"**活着的数据在收集之后仍然在**" ——
+    # 收集器真的在这块大 arena 上跑过、而且认得同一块内存，才算过。
+    pairs = (("heap", CT.HEAP_HOSTED_SRC, CT.HEAP_SEALED_SRC),
+             ("gc", CT.HEAP_HOSTED_GC_AUTO_SRC, CT.HEAP_SEALED_GC_AUTO_SRC))
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        got: dict[str, int] = {}
-        for tag, src in (("hosted", CT.HEAP_HOSTED_SRC), ("sealed", CT.HEAP_SEALED_SRC)):
-            f = td / f"{tag}.lomt"
-            _write_sh(f, src)
-            mod = lomentc.load(f)
-            errs = lomentc.check(mod)
-            assert not errs, errs
-            got[tag] = _run_ir(lomentc.emit_llvm(mod, ROOT), td, tag)
-    assert got["hosted"] == 7, f"hosted 没拿到 > 64 KiB 的 arena (rc={got['hosted']})"
-    assert got["sealed"] == 132, (
-        f"sealed 居然拿到了 > 64 KiB (rc={got['sealed']}) —— `sealed` 那条保证被改掉了")
-    print(f"      hosted rc={got['hosted']} (200000 字节真的拿到了)"
-          f" / sealed rc={got['sealed']} (SIGILL，拿不到)")
+        for label, hsrc, ssrc in pairs:
+            got: dict[str, int] = {}
+            for tag, src in (("hosted", hsrc), ("sealed", ssrc)):
+                f = td / f"{tag}_{label}.lomt"
+                _write_sh(f, src)
+                mod = lomentc.load(f)
+                errs = lomentc.check(mod)
+                assert not errs, errs
+                got[tag] = _run_ir(lomentc.emit_llvm(mod, ROOT), td, f"{tag}_{label}")
+            assert got["hosted"] == 7, (
+                f"[{label}] hosted 没拿到 > 64 KiB 的 arena (rc={got['hosted']})")
+            assert got["sealed"] == 132, (
+                f"[{label}] sealed 居然拿到了 > 64 KiB (rc={got['sealed']})"
+                " —— `sealed` 那条保证被改掉了")
+            print(f"      [{label}] hosted rc=7 / sealed rc=132 (SIGILL)")
 
 
 @test

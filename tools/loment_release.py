@@ -106,6 +106,7 @@ GLOBS = [
     # GC 证明面的量尺（`docs/210` §7）：把语料跑成 `gc_auto_alpha`，加总 v10 的 `gc_ladder`。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
+    "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
