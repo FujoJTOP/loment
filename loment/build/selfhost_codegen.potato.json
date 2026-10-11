@@ -3017,6 +3017,20 @@
       "ret": "u32"
     },
     {
+      "name": "emit_gc_hosted",
+      "params": [
+        {
+          "name": "s",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "emit_gc_trigger",
       "params": [
         {
