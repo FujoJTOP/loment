@@ -138,6 +138,7 @@ def _fnv1a(data: bytes) -> int:
 #: 两边都按这个描述各写一遍, 于是"库有没有重述 L0"这件事才量得准。
 FUC_PROBE = r'''
 module lumtui_fuc_probe
+choose runtime
 
 use lumtui
 use lumtui_doc
@@ -247,6 +248,7 @@ def test_fuc_bytes_match_lom_single_source():
 
 LAYOUT_PROBE = r'''
 module lumtui_layout_probe
+choose runtime
 
 use lumtui
 use lumtui_doc
@@ -367,6 +369,7 @@ def test_layout_matches_independent_expectation():
 
 MATH_PROBE = r'''
 module lumtui_math_probe
+choose runtime
 
 use lumtui_math
 use "loment/lib/num.lomt"
@@ -532,6 +535,7 @@ def _have_pillow() -> bool:
 #: 步进在字体单位下是整数, 与 FreeType 对得上**没有舍入** —— 这是最硬的一条。
 FONT_PROBE = r'''
 module lumtui_font_probe
+choose runtime
 
 use lumtui
 use lumtui_font

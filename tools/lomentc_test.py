@@ -1178,11 +1178,11 @@ def test_p4_domain_table_and_audit():
 @test
 def test_p4_guard_bounds():
     """M36: 字面量越界编译期拒绝; 域内放行。"""
-    ok = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(2); return 0; }\n"
+    ok = "module m\nchoose runtime\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(2); return 0; }\n"
     assert errs(ok) == [], errs(ok)
-    bad = "module m\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(9); return 0; }\n"
+    bad = "module m\nchoose runtime\ncapability c : disk[0..4]\nfn f() -> u32 { guard c(9); return 0; }\n"
     assert any("越界" in x for x in errs(bad)), errs(bad)
-    e = errs("module m\nfn f() -> u32 { guard nope(0); return 0; }\n")
+    e = errs("module m\nchoose runtime\nfn f() -> u32 { guard nope(0); return 0; }\n")
     assert any("未声明的能力" in x for x in e), e
 
 
@@ -1206,7 +1206,7 @@ def test_m43_capability_fuzz():
         lo = rnd.randint(0, 8)
         hi = lo + rnd.randint(0, 8)
         idx = rnd.randint(0, 20)
-        src = (f"module m\ncapability c : disk[{lo}..{hi}]\n"
+        src = (f"module m\nchoose runtime\ncapability c : disk[{lo}..{hi}]\n"
                f"fn f() -> u32 {{ guard c({idx}); return 0; }}\n")
         got = errs(src)
         should_reject = not (lo <= idx <= hi)
@@ -1707,7 +1707,7 @@ def test_extern_without_a_return_type_is_void():
     这一条是**实测踩出来的**：parse_fn 原先靠"后面是 `{`"判断无返回类型，而外部函数没有
     函数体（后面是 `;`），于是最普通的释放函数写法直接被判成"缺了 `->`"。
     """
-    src = ("module m\n\nextern fn c_free(p: ptr);\n\n"
+    src = ("module m\nchoose runtime\n\nextern fn c_free(p: ptr);\n\n"
            "fn f() -> u32 { let q: ptr = alloc(8); c_free(q); return 0; }\n")
     assert errs(src) == [], errs(src)
     ir = lomentc.emit_llvm(parse(src), ROOT)
@@ -2880,6 +2880,157 @@ def test_l1_definite_lifetime_rule():
     assert alpha["f_escape"] == ["p"], alpha["f_escape"]
     # 两份源只差那一行
     assert L1_ALPHA_SRC.replace("choose gc_auto_alpha", "X") ==         L1_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+@test
+def test_runtime_is_forced_in_and_absent_by_default():
+    """`docs/227` 判据 C：`runtime` = **强制带**，默认档 = 一个 `@__loment_` 都没有。
+
+    这一对是这一维**买到的全部**：同一份**用不到**运行期的程序，加不加那一行，产物差
+    **恰好**是那段运行期。差得比它多（比如把分配器也带进来）就说明"强制带"越了界 ——
+    §2.3 那条：`_IR_HEAP` **不**跟着 `rt_on` 走，因为那是 64 KiB 的零初全局，
+    给一个只会除法的裸机程序凭空装上它是"给承诺加税"。
+    """
+    NL = chr(10)
+    body = NL.join(["fn f() -> u32 {", "    return 7;", "}", ""])
+    off = "module m" + NL + NL + body
+    on = "module m" + NL + "choose runtime" + NL + NL + body
+    assert errs(off) == [], errs(off)
+    assert errs(on) == [], errs(on)
+
+    ir_off = lomentc.emit_llvm(parse(off), ROOT, [])
+    ir_on = lomentc.emit_llvm(parse(on), ROOT, [])
+    # 默认档：这段运行期**一点痕迹都没有**
+    assert "@__loment_" not in ir_off, ir_off
+    # `choose runtime`：那段在，而且**只有**那段（四个符号 = memcmp/memset/memcpy/abort）
+    assert ir_on.count("@__loment_") == 4, ir_on
+    for sym in ("memcmp", "memset", "memcpy", "abort"):
+        assert f"@__loment_{sym}" in ir_on, sym
+    # **分配器不在里面**（§2.3）：强制带的是那段 freestanding 文本块，不是那 64 KiB 的堆
+    assert "@__loment_alloc" not in ir_on, "强制带把分配器也拖进来了"
+    assert "@__loment_heap" not in ir_on, "强制带把堆全局也拖进来了"
+    # 产物差**恰好**是那一段：摘掉它，剩下的与默认档逐字符相同
+    assert ir_on.replace(lomentc._IR_RUNTIME + NL, "", 1) == ir_off, (len(ir_off), len(ir_on))
+
+
+@test
+def test_runtime_dep_must_declare_and_agree():
+    """`docs/227` 判据 D：依赖的**声明是需求** —— 库没写要报，根不满足要报。
+
+    改之前这里是一律「库不许 `choose`」（`lomentc.py` 的 `check()`）。那条按字面做不下去：
+    `loment/lib/proc.lomt` 要除法，当根编要 `choose runtime`、当依赖又不许写 —— 两面堵死。
+    新规矩把方向反过来，而它**本来就是那句老报错自己写的**（"库该声明**能力需求**"）。
+    """
+    import tempfile
+    NL = chr(10)
+    lib_div = "module lib" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
+    lib_rt = "module lib" + NL + "choose runtime" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
+    tail = NL + 'use "lib.lomt"' + NL + NL + "fn f() -> u32 {" + NL + "    return half(4);" + NL + "}" + NL
+
+    def run(lib: str, root: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "lib.lomt").write_text(lib, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text(root, encoding="utf-8")
+            m = lomentc.load(rp)
+            deps = lomentc.resolve_deps(m, ROOT, rp.parent, entry=rp)
+            return lomentc.check(m, None, deps)
+
+    # ① 库用了会拖运行期的构造却**什么都没写** ⇒ 报，并且点名那个库
+    e = run(lib_div, "module root" + tail)
+    assert any("lib" in x and "需求" in x for x in e), e
+    # ② 库要求 `runtime`、根不满足（默认 `no_runtime`）⇒ 报，两边都点名
+    e = run(lib_rt, "module root" + tail)
+    assert any("runtime" in x and "根" in x for x in e), e
+    # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
+    e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
+    assert e == [], e
+#: `docs/228` 的 A 那一份程序：分配 **200000** 字节（> 64 KiB）逐字节写 7，读回最后一字节。
+#: **源只有一份** —— `loment_hosted_test` 那条运行时判据（A3）用的就是**同一个常量**。
+#: 分开抄一份必然漂，而 A3 的全部意义就是"两个方向上看的是同一条程序"。
+HEAP_SRC = """module host_heap
+
+@@CHOOSE@@
+
+fn main() -> i32 {
+    let n: u32 = 200000;
+    let p: ptr = alloc(n);
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 7 as u8);
+        i = i + 1;
+    }
+    return load8(p, n - 1) as i32;
+}
+"""
+
+# `choose runtime` 是 `alloc` 自己要的（`docs/227`：默认档 `no_runtime` 是一句**保证**，
+# 不是提示）—— 这一份用了 `alloc`，所以两档都必须写上，否则**检查器先拒**，
+# 后面那些"产物长什么样"的判据根本走不到。
+HEAP_HOSTED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose hosted\nchoose runtime")
+# 同一份源，**只去掉 `choose hosted` 那一行**：于是它就是没有 `choose hosted` 的那一档
+# （默认 `sealed`）。
+HEAP_SEALED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose runtime")
+# `hosted` + `gc_auto`：走不到 A（`docs/228` §4 的 B1），但**不许静默**。
+# `choose runtime` 是 `gc_auto` 自己要的（`gc_auto` 与默认的 `no_runtime` 定义上冲突）。
+HEAP_HOSTED_GC_AUTO_SRC = HEAP_SRC.replace(
+    "@@CHOOSE@@", "choose hosted\nchoose gc_auto\nchoose runtime")
+
+
+def _heap_ir(src: str) -> str:
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "heap.lomt"
+        f.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(f)
+        deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+        assert lomentc.check(mod, deps=deps) == []
+        return lomentc.emit_llvm(mod, ROOT, deps)
+
+
+@test
+def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
+    """`docs/228` §5 的 **A2 + A1**：`hosted` 向宿主声明分配器；`sealed` 一个字节没动。
+
+    **两条一起判**才说明问题：只判"`hosted` 里有 `malloc`"会被"给**所有**程序都加上"
+    骗过 —— 而那正是 `sealed` 那条保证被改掉的样子（`docs/228` §2）。
+    """
+    hosted = _heap_ir(HEAP_HOSTED_SRC)
+    sealed = _heap_ir(HEAP_SEALED_SRC)
+
+    # A2：arena 不是 `.bss` 里的定长数组，而是宿主给的一块
+    assert "@__loment_heap = internal global ptr null" in hosted
+    assert "[65536 x i8]" not in hosted, "hosted 的 arena 还是那个静态数组"
+    assert "declare ptr @malloc(i64)" in hosted, "没向宿主声明分配器"
+    assert "; loment-heap: platform 1048576" in hosted, "没把这件事写进产物"
+    # 声明在**用之前**（LLVM 对未声明的调用是 `use of undefined value`，实测）
+    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048576)")
+
+    # A1：同一份源去掉那一行 ⇒ 逐字节还是原来那一段（闸门真的在 `port` 上）
+    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
+    assert "malloc" not in sealed, "sealed 的产物里出现了宿主符号"
+    assert "loment-heap" not in sealed, "sealed 的产物里出现了 A 的标记"
+    # 两份唯一的差别就是 arena 那一段 —— 偏移模型、空闲链表、前沿回退**共用**
+    assert "icmp ule i32 %nxtoff, 1048576" in hosted
+    assert "icmp ule i32 %nxtoff, 65536" in sealed
+
+
+@test
+def test_hosted_with_gc_auto_says_so_instead_of_going_quiet():
+    """`docs/228` §5 的 **A5**：`hosted` + `gc_auto` 吃不到 A —— 但它**说出来**。
+
+    收集器的标记表按 arena 偏移索引、行数 = arena/8（`lomentc.py` 里那个
+    `@__loment_mark`），换 arena 要
+    **同时**换表的口径与两处根扫边界，那是收集器的活（`docs/228` §4 的 B1）。这一档因此
+    仍是静态 64 KiB —— 而"没吃到"必须是产物里**量得出来的**一条，不是默认掉的
+    （`docs/205` §0.2 那条零沉默）。
+    """
+    ir = _heap_ir(HEAP_HOSTED_GC_AUTO_SRC)
+    assert "; loment-heap: static 65536" in ir, "这一档没吃到 A 却没有说出来"
+    assert "platform" not in ir
+    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in ir
+    # 与它配对的那一档**有** platform —— 于是这条判据不是"永远为真"
+    assert "; loment-heap: platform 1048576" in _heap_ir(HEAP_HOSTED_SRC)
 
 
 def main() -> int:

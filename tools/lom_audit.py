@@ -33,6 +33,14 @@ FUC_RS = ROOT / "kernel" / "src" / "fui" / "fuc.rs"
 FUJR_RS = ROOT / "kernel" / "src" / "fujr.rs"
 FUJPACK = ROOT / "tools" / "fujopack.py"
 
+#: `lom/net.lom`（号 → 面）的对账面 —— **四处**：编译器的计数词汇、链接器的派发面，
+#: 以及自举侧两处**只认 net 那几个号**的派生用法（`docs/229` §2）。
+LOM_NET = ROOT / "lom" / "net.lom"
+NET_TWIN_NET_SETS = [
+    (ROOT / "loment" / "selfhost" / "checker.lomt", "chk_num_is_net"),
+    (ROOT / "loment" / "selfhost" / "potato.lomt", "pt_surf_code"),
+]
+
 # 生成物登记: (lom 源, 生成器, 磁盘路径) — 逐字节对账, 漂移即报错
 GENERATED = [
     (LOM_FUC, "rust", ROOT / "lom" / "build" / "fuc.rs"),
@@ -48,6 +56,7 @@ GENERATED = [
     (LOM_FUJR, "c", ROOT / "lom" / "build" / "fujr.h"),
     (LOM_FUJR, "python", ROOT / "lom" / "build" / "fujr.py"),
     (LOM_FUJR, "json", ROOT / "lom" / "build" / "fujr.json"),
+    (LOM_NET, "json", ROOT / "lom" / "build" / "net.json"),
 ]
 
 # 部署参数 -> 富士侧实现文件与别名模式 (项目特有知识, 故留在审计脚本而非语言里)
@@ -250,6 +259,84 @@ def audit_generated(diffs: list[str]) -> int:
     return len(GENERATED)
 
 
+def _fn_body(text: str, name: str) -> str:
+    """源码里那个顶层函数的正文（从 `fn NAME(` 到下一行的 `}`）。
+
+    审计要看的是"**这个函数认哪些号**"，所以只取正文 —— 取整个文件会把别处的数字也算进来。
+    """
+    m = re.search(rf"(?m)^fn {name}\(.*$", text)
+    if not m:
+        return ""
+    end = text.find("\n}", m.end())
+    return text[m.start():end if end > 0 else len(text)]
+
+
+def audit_net(diffs: list[str]) -> None:
+    """`lom/net.lom` 是"号 → 面"的**单源**（`docs/229` §2）。
+
+    四处实现/用法各自抄过一份，这里按**两个方向**对账：多一个号、少一个号、面不同，
+    三种都算差异（"方向反了也一样" —— 早期那些对账只查一个方向，于是"实现多了个号"
+    一直没人报）。
+    """
+    import lomentc  # noqa: PLC0415  (审计读实现, 与上面 `import potato` 同一个形状)
+    import lomelf
+
+    mod = lomc.load(LOM_NET)
+    sc = next(e for e in mod.enums if e.name == "Syscall")
+    nd = next(e for e in mod.enums if e.name == "NotDispatched")
+    want = {v.value: v.meta.get("surface") for v in sc.variants}
+
+    # (a) 编译器那一份 —— 计数词汇（`surfaces` 按面分类用的就是它）
+    got_c = dict(lomentc.SURFACE_NUMBERS)
+    for n in sorted(set(want) | set(got_c)):
+        if want.get(n) != got_c.get(n):
+            diffs.append(f"[net/lomentc] 号 {n}: .lom={want.get(n)!r} lomentc={got_c.get(n)!r}")
+
+    # (b) 链接器那一份 —— PE 真正派发哪些号 + 各属哪一面
+    pe = {n: s for n, s, _label in lomelf.PE_SYSCALLS}
+    for n in sorted(set(want) | set(pe)):
+        if want.get(n) != pe.get(n):
+            diffs.append(f"[net/lomelf ] 号 {n}: .lom={want.get(n)!r} PE_SYSCALLS={pe.get(n)!r}")
+
+    # (c) "点名不做"那一族必须**不在**派发面上 —— 哪天谁顺手实现了其中一个，这条红
+    for v in nd.variants:
+        if v.value in pe:
+            diffs.append(f"[net/lomelf ] {v.name}({v.value}) 在 NotDispatched 里, 却被 "
+                         f"PE_SYSCALLS 派发了 —— 两条路选一条: 实现它并挪进 Syscall, "
+                         f"或者把这条从 NotDispatched 删掉")
+
+    # (d) 自举侧那两处派生用法。它们**形状不同**，所以分开对：
+    #     `chk_num_is_net` 只认 net 那一族；`pt_surf_code` 是**整张表**（用代号 1..4
+    #     表示 file/mem/net/proc）—— 后者按**分块**比，免得把那四个代号抄进审计里。
+    path, fn = NET_TWIN_NET_SETS[0]
+    body = _fn_body(path.read_text(encoding="utf-8"), fn)
+    if not body:
+        diffs.append(f"[net/twin   ] {path.name} 里找不到 {fn}()")
+    else:
+        net_want = sorted(n for n, s in want.items() if s == "net")
+        got = sorted(int(x) for x in re.findall(r"\b(?:n|num)\s*==\s*(\d+)", body))
+        if got != net_want:
+            diffs.append(f"[net/twin   ] {path.name} 的 {fn}(): {got} != .lom 的 net 表 {net_want}")
+
+    path, fn = NET_TWIN_NET_SETS[1]
+    body = _fn_body(path.read_text(encoding="utf-8"), fn)
+    if not body:
+        diffs.append(f"[net/twin   ] {path.name} 里找不到 {fn}()")
+    else:
+        by_code: dict[int, list[int]] = {}
+        for m in re.finditer(r"if ([^{]+?)\{\s*return (\d+);", body):
+            for num in re.findall(r"\bnum\s*==\s*(\d+)", m.group(1)):
+                by_code.setdefault(int(m.group(2)), []).append(int(num))
+        by_surface: dict[str, list[int]] = {}
+        for n, s in want.items():
+            by_surface.setdefault(s, []).append(n)
+        got_groups = sorted(sorted(v) for v in by_code.values())
+        want_groups = sorted(sorted(v) for v in by_surface.values())
+        if got_groups != want_groups:
+            diffs.append(f"[net/twin   ] {path.name} 的 {fn}(): 分块 {got_groups} "
+                         f"!= .lom 的面 {want_groups}")
+
+
 def audit_fujr(diffs: list[str]) -> None:
     mod = lomc.load(LOM_FUJR)
     hdr = next(r for r in mod.records if r.name == "Header")
@@ -433,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         n_prim, n_spec = audit_fuai(diffs)
         audit_fuc(diffs)
         audit_fujr(diffs)
+        audit_net(diffs)
         n_gen = audit_generated(diffs)
         audit_l1(diffs)
     except lomc.LomError as e:

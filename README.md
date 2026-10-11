@@ -11,7 +11,9 @@
 
 <p align="center">
   <b>A systems programming language.</b><br>
-  Native x86-64 — Linux ELF, Windows PE, or bare metal. No runtime, no libc.
+  Native x86-64 — Linux ELF, Windows PE, or bare metal.<br>
+  <b>Sealed</b> by default: no runtime, no libc, no undefined symbols.
+  <b>Hosted</b> when you say so: real libc and shared libraries.
 </p>
 
 <p align="center">
@@ -27,9 +29,11 @@
 </p>
 
 Loment compiles to native x86-64 executables — Linux ELF, Windows PE, or a freestanding
-object for bare metal — with no runtime and no libc. The toolchain is itself written in
-Loment and needs no Python to run. Its own syntax is Rust-flavored, and the same program can
-be written in six more: C, C++, Java, C#, Go or Python.
+object for bare metal. **What goes into one is the program's decision, and the build records
+it.** `choose sealed`, the default, is an artifact with no runtime, no libc and no undefined
+symbols. `choose hosted` is one that may link against real libc and shared libraries. The
+toolchain is itself written in Loment and needs no Python to run. Its own syntax is
+Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go or Python.
 
 Installing and running needs **no Python, no clang and no WSL** — the package is native
 binaries plus the standard library. `loment run hello.lomt` and you are done.
@@ -59,8 +63,9 @@ before the Python side can be retired. Until that finishes, both copies are in t
 on purpose, and "the repository contains only Loment" is not yet true.
 
 What 0.1.4 does and does not include is listed item by item, and was audited, in
-[docs/202](docs/202-loment-014-release-gate.md) — including the three items still open
-(a hosted layer, two GC tiers, full self-hosting).
+[docs/202](docs/202-loment-014-release-gate.md). Some of what it records as still open has
+landed since — the [reclamation ladder](.github/release-notes/v0.1.4.5-pre.md) is the largest —
+and that announcement says which half each remaining item is in: in `main` today, or planned.
 
 The language surface is frozen — [docs/158](docs/158-loment-freeze.md) says what changing it
 costs — and the implementation is not.
@@ -84,8 +89,10 @@ $ loment run hello.lomt
 hello from Loment
 ```
 
-`_start` is the entry point, because there is no runtime to call one for you, and output goes
-through the `write` system call, because there is no `printf`. [QUICKSTART.md](QUICKSTART.md)
+`_start` is the entry point, because a sealed artifact has no runtime to call one for you, and
+output goes through the `write` system call, because there is no `printf`. A `hosted` artifact
+is a C-runtime program instead — its entry point is `fn main() -> u32`, and that is one of the
+things the port setting decides. [QUICKSTART.md](QUICKSTART.md)
 takes it from here: getting the sources, building the toolchain, and `loment run` / `build` /
 `check` / `ir`.
 
@@ -101,7 +108,7 @@ source?** Three things carry it:
 |---|---|
 | **Capability domains** | `capability blk : disk[0..4]` declares the range a unit may reach and `guard blk(i);` checks the index against it — at compile time when the index is a literal, otherwise at run time, where an out-of-range index traps. [docs/146](docs/146-loment-capability-semantics.md) states the boundary rather than glossing it: a guard bounds the *index*, not the *subject*. |
 | **Potato form objects** | Every unit exports a declared, machine-readable summary of what it contains and what it reaches, judged by two independent validators — so "what can this touch" is answerable without reading the source. [docs/147](docs/147-potato-v1-spec.md) |
-| **A compat layer** | Ten languages' libraries, callable end to end: C, C++, Rust and Zig behind the C ABI by static linking, then Go, Python, Java, JavaScript, Perl and Lua over a process bridge. [docs/173](docs/173-loment-ffi.md) is the honest ledger — dynamic libraries and embedding a runtime are not started. |
+| **A compat layer** | Ten languages, two mechanisms: C, C++, Rust and Zig behind the C ABI; Go, Python, Java, JavaScript, Perl and Lua over a process bridge. Where the boundary sits is worth stating precisely. On a **sealed** artifact, `--link` takes only a **self-contained** object — no undefined symbols. `choose hosted` is the path that reaches real libraries, and it is exercised: the criteria link libstdc++ and libz and embed CPython. What is **not** there is the **library system** — lompi still installs `.lomt` sources only, so a real C library is not yet an installable dependency, and that is what [docs/222](docs/222-lompi-020-foreign-libs.md) is building. [docs/173](docs/173-loment-ffi.md) is the ledger. |
 
 The rest of the language exists to keep that question answerable. The core stays small; what
 grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).
@@ -112,7 +119,7 @@ grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).
 |---|---|
 | **A standard library, imported one module at a time** | `lompi/store/` ships with the toolchain: `std` (127 modules — vectors, maps, text, big integers, floats, hashing, compression) and `host` (files, argv, directories). `use vec`, `use map`, `use fs`. The package facade `use std` also works, but pulls all 127 modules into one unit — emitted symbols are flat, so that is slow and collision-prone. Prefer per-module. |
 | **Can be written in six other syntaxes** | C, C++, Java, C#, Go, Python. Only the spelling changes; the meaning is always Loment's — it is a syntax, not a semantics, and each front end says so on its first line. Declaring it in the file (`choose write grammar`) is not wired into the compiler yet; the translators are. [docs/188](docs/188-grammar-declaration.md) · [docs/179](docs/179-multisyntax-frontends.md) |
-| **A project mode, not a crate attribute** | `choose std` or `choose no_std`, at most once, in the root unit. "Hosted or freestanding" becomes a property of the whole program — the compiler can refuse a half-hosted one, and a form object can carry the setting. [docs/180](docs/180-std-core.md) |
+| **A project mode, not a crate attribute** | `choose` has four dimensions: which layer the program may use (`std` / `no_std`), the reclamation tier, whether the artifact may carry a runtime, and whether it may reach outside itself — `sealed` or `hosted`. Each is written at most once, in the root unit, and each becomes a property of the whole program: a contradictory pair is refused, and a form object carries the setting. [docs/180](docs/180-std-core.md) |
 | **Reports errors from a separate program** | The compiler emits structured diagnostics; `lomenterr` adds the title, the location and how to fix it, so the compiler carries no message table of its own. [docs/182](docs/182-lomenterr-and-choose-switches.md) |
 | **Everything is customizable** | The source suffix, the command surface (`loment-<name>` on `PATH`; official commands always win), the libraries (a directory whose identity is a content hash), and the toolchain itself. No registry — the extension points are files on disk. |
 

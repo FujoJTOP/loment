@@ -35,6 +35,7 @@
 // 命名: 公开 mst_*, 内部 ms_* / mu_*。自检 test_mst_*。
 
 module mst
+choose runtime
 
 use "mem.lomt"
 use "graph.lomt"

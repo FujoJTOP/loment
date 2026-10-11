@@ -39,7 +39,9 @@ _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomc.lomt"
-LOMS = ["lom/fuai.lom", "lom/fuc.lom", "lom/fujr.lom"]
+# `lom/net.lom` 从它在的那天起就得进这份清单 —— 它是**同一种东西**（L0 单一真源）。
+# 少一份的症状很安静: 自举 lomc 读不了它, 而 Python 那份读得了。
+LOMS = ["lom/fuai.lom", "lom/fuc.lom", "lom/fujr.lom", "lom/net.lom"]
 TARGETS = ["rust", "c", "python", "json"]
 # 目标后缀 (与 lomc.py 的调用约定一致, 供 --check 的默认对账路径用)
 EXT = {"rust": "rs", "c": "h", "python": "py", "json": "json"}

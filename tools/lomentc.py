@@ -284,6 +284,184 @@ setprev:
 @__loment_freehead = internal global i32 0
 '''
 
+#: `hosted` 那一份 arena 的字节数（`docs/228` §3.3）。**编译期常量**，并且**写进产物**
+#: （`; loment-heap: platform <N>`）—— 与上面那个 `; loment-port: hosted` 同一个道理：
+#: 构建那一侧要知道这件事，而它不该去读源码（读源码要它懂 Loment 的词法，而 IR 本来就是
+#: 构建的输入）。写进字节之后，"这一份到底吃没吃到 A"是**量**出来的，不是**声明**出来的。
+HOSTED_ARENA_BYTES = 1 << 20
+
+#: **`hosted` 那一份分配器**（`docs/228` 的 A；`docs/219` §8b 的 **S1e**）。
+#:
+#: 与 `_IR_HEAP` **同序、同一条空闲链表**，只换两件事：
+#:   ① arena 不是 `.bss` 里的 `[65536 x i8]`，而是 `@__loment_arena()` 向**宿主**要的一块；
+#:   ② 于是寻址全走 `%hb`（基址），而不是数组符号。
+#: 块的形状、地址序、首次适配 + 拆分、前沿回退**一个字节没动** —— 因为 arena 仍是
+#: **一段连续内存**：`free` 靠 `ptrtoint - 基址` 反算偏移（`:237`），多段才是重写分配器
+#: （`docs/228` §1 第三行、§4 的 B2）。
+#:
+#: **要谁**：宿主的 `malloc`（`docs/228` §3.1）。`hosted` 的产物本来就由 C 工具链链出
+#: （`loment_hosted_test` 那条判据链的是真的 `libz.so`），所以宿主分配器就是"OS 那一层"
+#: 在这条路上的正确接口；raw syscall 反而要**多一张平台表**，与 `docs/219` §5 的记账面重复。
+#: **惰性**：第一次 `alloc` 才要（不在启动路径上挂钩子）；要不到就落 `__loment_abort`。
+#:
+#: **`sealed` 走不到这一段** —— 它走 `_IR_HEAP`，逐字节不变（`docs/228` §2）。
+_IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+;
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动 —— 因为 arena 仍是**一段
+; 连续内存**（偏移是 i32；多段才是重写分配器，见 `docs/228` §4 的 B2）。
+;
+; 一次要 `@ARENA@` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
+
+define internal ptr @__loment_arena() {
+entry:
+  %h = load ptr, ptr @__loment_heap
+  %nul = icmp eq ptr %h, null
+  br i1 %nul, label %ask, label %have
+ask:
+  %m = call ptr @malloc(i64 @ARENA@)
+  %bad = icmp eq ptr %m, null
+  br i1 %bad, label %oom, label %set
+oom:
+  call void @__loment_abort()
+  unreachable
+set:
+  store ptr %m, ptr @__loment_heap
+  br label %have
+have:
+  %r = phi ptr [ %h, %entry ], [ %m, %set ]
+  ret ptr %r
+}
+
+define internal ptr @__loment_alloc(i32 %size) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %need0 = add i32 %size, 15
+  %need = and i32 %need0, -8
+  %head = load i32, ptr @__loment_freehead
+  br label %floop
+floop:
+  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
+  %fend = icmp eq i32 %cur, 0
+  br i1 %fend, label %bump, label %fit
+fit:
+  %hp = getelementptr i8, ptr %hb, i32 %cur
+  %bsz = load i32, ptr %hp
+  %big = icmp uge i32 %bsz, %need
+  br i1 %big, label %take, label %fnext
+fnext:
+  %n4 = add i32 %cur, 4
+  %npp = getelementptr i8, ptr %hb, i32 %n4
+  %nxt = load i32, ptr %npp
+  br label %floop
+take:
+  %slack = sub i32 %bsz, %need
+  %cansplit = icmp uge i32 %slack, 16
+  %t4 = add i32 %cur, 4
+  %tpp = getelementptr i8, ptr %hb, i32 %t4
+  %rest = load i32, ptr %tpp
+  br i1 %cansplit, label %split, label %nosplit
+split:
+  %so = add i32 %cur, %need
+  %spp = getelementptr i8, ptr %hb, i32 %so
+  store i32 %slack, ptr %spp
+  %so4 = add i32 %so, 4
+  %spp4 = getelementptr i8, ptr %hb, i32 %so4
+  store i32 %rest, ptr %spp4
+  br label %relink
+nosplit:
+  br label %relink
+relink:
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+  br i1 %ishead, label %sethead, label %setprev
+sethead:
+  store i32 %newhead, ptr @__loment_freehead
+  br label %taken
+setprev:
+  %p4 = add i32 %prev, 4
+  %ppp = getelementptr i8, ptr %hb, i32 %p4
+  store i32 %newhead, ptr %ppp
+  br label %taken
+taken:
+  store i32 %need, ptr %hp
+  %ko = add i32 %cur, 8
+  %kp = getelementptr i8, ptr %hb, i32 %ko
+  ret ptr %kp
+bump:
+  %off = load i32, ptr @__loment_off
+  %nxtoff = add i32 %off, %need
+  %fits = icmp ule i32 %nxtoff, @ARENA@
+  br i1 %fits, label %bok, label %boom
+boom:
+  call void @__loment_abort()
+  unreachable
+bok:
+  store i32 %nxtoff, ptr @__loment_off
+  %wp = getelementptr i8, ptr %hb, i32 %off
+  store i32 %need, ptr %wp
+  %w4 = add i32 %off, 4
+  %wp4 = getelementptr i8, ptr %hb, i32 %w4
+  store i32 0, ptr %wp4
+  %bo = add i32 %off, 8
+  %bp = getelementptr i8, ptr %hb, i32 %bo
+  ret ptr %bp
+}
+
+define internal void @__loment_free(ptr %p) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %base = ptrtoint ptr %hb to i64
+  %pi = ptrtoint ptr %p to i64
+  %d64 = sub i64 %pi, %base
+  %d32 = trunc i64 %d64 to i32
+  %hi = sub i32 %d32, 8
+  %hp = getelementptr i8, ptr %hb, i32 %hi
+  %sz = load i32, ptr %hp
+  %hend = add i32 %hi, %sz
+  %off = load i32, ptr @__loment_off
+  %istail = icmp eq i32 %hend, %off
+  br i1 %istail, label %rewind, label %link
+rewind:
+  store i32 %hi, ptr @__loment_off
+  ret void
+link:
+  %head = load i32, ptr @__loment_freehead
+  br label %lloop
+lloop:
+  %cur = phi i32 [ %head, %link ], [ %nxt, %lcont ]
+  %prev = phi i32 [ 0, %link ], [ %cur, %lcont ]
+  %lend = icmp eq i32 %cur, 0
+  %after = icmp ugt i32 %cur, %hi
+  %stop = or i1 %lend, %after
+  br i1 %stop, label %ins, label %lcont
+lcont:
+  %l4 = add i32 %cur, 4
+  %lpp = getelementptr i8, ptr %hb, i32 %l4
+  %nxt = load i32, ptr %lpp
+  br label %lloop
+ins:
+  %i4 = add i32 %hi, 4
+  %ipp = getelementptr i8, ptr %hb, i32 %i4
+  store i32 %cur, ptr %ipp
+  %ishead2 = icmp eq i32 %prev, 0
+  br i1 %ishead2, label %sethead, label %setprev
+sethead:
+  store i32 %hi, ptr @__loment_freehead
+  ret void
+setprev:
+  %q4 = add i32 %prev, 4
+  %qpp = getelementptr i8, ptr %hb, i32 %q4
+  store i32 %hi, ptr %qpp
+  ret void
+}
+
+@__loment_heap = internal global ptr null
+@__loment_off = internal global i32 8
+@__loment_freehead = internal global i32 0
+'''.replace("@ARENA@", str(HOSTED_ARENA_BYTES))
+
 _RUST_RUNTIME = '''
 // ---- Loment 运行时 (M15 堆分配) ----
 #[allow(static_mut_refs)]
@@ -957,6 +1135,10 @@ class Module:
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
+    #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
+    #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
+    #: 在 token 流上，而解析器是唯一握着它的地方）。`no_runtime` 那条强保证读它。
+    rt_sites: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -1434,6 +1616,9 @@ class Parser:
         # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
         # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
         mod.toks = self.toks
+        # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
+        # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
+        mod.rt_sites = _runtime_sites(self.toks)
         return mod
 
     def parse_items(self, mod: Module, nested: bool = False) -> None:
@@ -3401,6 +3586,66 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     return mod, deps
 
 
+#: **会把运行期拖进产物的构造**（`docs/217` / `docs/175` §3.6）。
+#: 键 = token 值（punct 的 `/` `%`，ident 的那六个内建/关键字），值 = 报错时点名的名字。
+#:
+#: 这张表**刻意长在 token 层**（与 `_l0_promotable` 同一个理由，`docs/210` §2.2）：自举侧
+#: 手上只有 token 流，规则写在 token 上，两个实现才可能逐字节一致。
+#:
+#: 它是**保守的**：一个叫 `alloc` 的用户函数也会被算进来。多报的代价是一次点名拒，
+#: 漏报的代价是"声明了 `no_runtime` 而产物里有运行期" —— 那是这一维唯一的失败形状，
+#: 两边的代价不对称，所以往保守那边偏。`tools/loment_runtime_test.py` 在全仓语料上核
+#: "被拒 ⟺ 产物真带运行期"，把这笔保守账钉成可证伪的。
+_RUNTIME_SITES: dict[str, str] = {
+    "/": "除法 `/`",
+    "%": "取模 `%`",
+    "alloc": "`alloc`",
+    "free": "`free`",
+    "str_concat": "`str_concat`",
+    "str_eq": "`str_eq`",
+    "panic": "`panic`",
+    "guard": "`guard`（能力域守卫）",
+}
+
+
+def _runtime_sites(toks: list) -> list[tuple[str, int]]:
+    """扫出本单元里所有**会把运行期拖进产物**的构造（`docs/217`）。
+
+    **为什么是 token 而不是 AST**：同 `_l0_promotable`。自举侧没有 AST，只有 token 流；
+    两边要数的必须是同一个东西，所以规则只能写在两边都完整持有的那个表示上。
+
+    **为什么保守**：见 `_RUNTIME_SITES` 的注释 —— 多报一次是点名拒，漏报一次是
+    "保证了产物里没有运行期而它其实有"。
+    """
+    out: list[tuple[str, int]] = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind == "punct" and t.val in ("/", "%"):
+            out.append((_RUNTIME_SITES[t.val], t.line))
+            continue
+        if t.kind != "ident" or t.val not in _RUNTIME_SITES:
+            continue
+        # **只有"用"才触发，名字本身不触发**。这一条是被两处**实测的假阳性**逼出来的：
+        #   * 一份 Java 语料的接口单元里有 `pub extern fn guard(...)` —— **方法叫 `guard`**；
+        #   * 同一份里还有个**结构体字段** `guard: Guard,`。
+        # 两者都只是名字，一个构造都没产生，却都会把产物判成"要运行期"。
+        # 收紧成**位置**判据：
+        #   * `fn` 后面的那个名字 —— 声明，不算；
+        #   * 其余那五个（`alloc`/`free`/`str_concat`/`str_eq`/`panic`）—— **紧跟 `(`** 才算（调用）；
+        #   * `guard` —— 语法里它是**语句**（`guard c(0);`），所以**紧跟一个名字**才算；
+        #     写成 `guard: Guard` 或 `let g: guard` 都不符合这两条，自然落选。
+        prev = toks[i - 1].val if i > 0 else ""
+        if prev == "fn":
+            continue
+        nxt = toks[i + 1] if i + 1 < n else None
+        if t.val == "guard":
+            hit = nxt is not None and nxt.kind == "ident"
+        else:
+            hit = nxt is not None and nxt.kind == "punct" and nxt.val == "("
+        if hit:
+            out.append((_RUNTIME_SITES[t.val], t.line))
+    return out
+
 def _unit_id(m: Module) -> object:
     """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
 
@@ -3498,6 +3743,26 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             if _w in _pair), 1)
                 errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
 
+    # ---- **运行期维是一条保证，不是一句期望**（`docs/217` / `docs/175` §3.6）。
+    # `no_runtime`（默认）说的不是"我们希望产物里没有运行期"，而是"**产物里没有运行期**"
+    # —— 于是凡是会把它拖进去的构造，**编译期点名拒**（用户 2026-10-09 裁决：按字面做，
+    # 规格让路）。这不是"顺手加一条检查"：没有它，`no_runtime` 与 `runtime` 在产物上
+    # 没有任何可分辨的差别，"不读源码可判"（`docs/147`）那句就是空的。
+    #
+    # **默认档也拒**：这一维不写就是 `no_runtime`。所以"老程序一行不改照编"这条从
+    # 2026-10-09 起**不再成立** —— 凡用到除法/分配/字符串拼接的程序都要在根单元写一行
+    # `choose runtime`。这是**明写的代价**，不是漏掉的一格（`docs/217` §3）。
+    if _eff["runtime"] == "no_runtime":
+        _sites = mod.rt_sites
+        if _sites:
+            _name, _line = _sites[0]
+            _rest = len(_sites) - 1
+            errs.append(
+                f"{_line}: 声明了 `no_runtime`，但它会让产物带上运行期 —— {_name}"
+                f"（`no_runtime` 是**保证**：产物里不许出现那段运行期）。"
+                + (f"这一类构造本单元另有 {_rest} 处。" if _rest else "")
+                + "要运行期就在根单元写 `choose runtime`；不要就把这个构造换掉")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
@@ -3510,10 +3775,31 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             f"（在 `{d.name}` 里，`{word0}`）—— "
                             f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
+        # **库要声明它的运行期需求**（`docs/217`）：上面那条"根必须满足依赖"只对
+        # **声明了**的依赖有效 —— 一个用了除法却什么都不写的库，会在根写着 `no_runtime`
+        # 的时候**静默**把运行期带进产物。那句老报错本来就写着"库该声明**能力需求**，
+        # 由项目决定"：这一条就是把它兑现。
+        if d.rt_sites and d.chooses.get("runtime") != "runtime":
+            _n0, _l0 = d.rt_sites[0]
+            errs.append(
+                f"{_l0}: 依赖 `{d.name}` 用了会把运行期拖进产物的构造（{_n0}），"
+                f"却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
+                f"`choose runtime`")
         if d.chooses:
-            dim0, word0, line0 = d.choose_lines[0]
-            errs.append(f"{line0}: 库不许 `choose`（在 `{d.name}` 里，`{word0}`）"
-                        f" —— 库该声明**能力需求**, 由项目决定{CORE_DIM_ZH[dim0]}")
+            # **依赖可以声明它的需求**（`docs/217`，用户 2026-10-09 裁决）。从前这里一律
+            # "库不许 `choose`" —— 那让一个要除法的库**两面堵死**：当根编要 `choose runtime`，
+            # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
+            # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
+            _seen: set[str] = set()
+            for dim0, word0, line0 in d.choose_lines:
+                if dim0 in _seen:
+                    continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
+                _seen.add(dim0)
+                if _eff[dim0] != word0:
+                    errs.append(
+                        f"{line0}: 依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
+                        f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
+                        f"根必须满足它。在根单元写一行 `choose {word0}`")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
             errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
@@ -7064,7 +7350,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 读源码要启动器懂 Loment 的词法，而这份 IR 本来就是构建的输入。
     # **只有 hosted 才多发这一行** —— sealed 是默认档，于是现存每一份单元的 IR
     # 一个字节都不变（孪生判据逐字节比的那 46 份）。
-    if mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted":
+    _hosted_port = mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted"
+    if _hosted_port:
         out.append("; loment-port: hosted")
     out.append("")
     globals_: list[str] = []
@@ -7088,6 +7375,16 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
+    # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
+    #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
+    #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
+    #     （编译期点名，而不是发射到一半才发现）。两半合起来才是这一维。
+    #
+    # **`_IR_HEAP` 不跟着 `rt_on` 强发**：那是 64 KiB 的零初全局 + 分配器，程序不 `alloc`
+    # 就不该装它（一个只会除法的裸机引导程序不该凭空多 64 KiB 的 .bss）。它仍旧按需 ——
+    # 而"用得到 `alloc`"这一半由 `check()` 管着：`no_runtime` 下写 `alloc` 是拒的，
+    # 所以"产物里有分配器"必然意味着"根写过 `choose runtime`"。
+    rt_on = mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]) == "runtime"
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -7160,7 +7457,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("@__loment_cov = global [256 x i64] zeroinitializer")
         out.append(f"@__loment_cov_n = constant i64 {cov_counter[0]}")
         out.append("")
-    if "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
+    if rt_on or "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
         out.append(_IR_RUNTIME)
     if "@__loment_audit" in text_all:  # P4/M38
         out.append("@__loment_audit = internal global [16 x i64] zeroinitializer")
@@ -7180,8 +7477,26 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 而不是"堆那个符号出现过没有"。两者分开判会漏发（实测：`free` 一用就报
     # "未定义的标签"；而只用整数除法、不用 alloc 的单元会反过来——发出分配器却没有全局）。
     _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
+    # **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
+    # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
+    # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉
+    # （`docs/228` §2）。`sealed` 因此走原来那段文本，**一个字节没动**。
+    # **`gc_auto`/`alpha` 不走这一支**：收集器的标记表按 arena 偏移索引、行数 = arena/8
+    # （见 `_IR_GC` 里那个 `@__loment_mark`），换 arena 要**同时**换表的口径与两处根扫边界
+    # —— 那是收集器的活
+    # （`docs/228` §4 的 B1）。它**不静默**：那一档发出 `; loment-heap: static 65536`，
+    # 于是"这一份没吃到 A"是被**量**出来的，不是被默认掉的。
+    _hosted_grown = _hosted_port and not (gc_auto or gc_alpha)
     if _needs_heap:
-        out.append(_IR_HEAP)
+        if _hosted_grown:
+            out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
+            if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
+                out.append("declare ptr @malloc(i64)")
+            out.append(_IR_HEAP_HOSTED)
+        else:
+            if _hosted_port:
+                out.append("; loment-heap: static 65536")
+            out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
     # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
