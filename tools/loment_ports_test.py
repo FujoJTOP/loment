@@ -276,6 +276,29 @@ def test_ruler_agrees_with_the_linker_on_every_object_the_linker_can_read():
     print(f"      尺子与 lomelf 在 {checked} 份对象上逐条相同")
 
 
+@test
+def test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set():
+    """**两半表不许分叉**（`docs/219` §5.2 条件二："名字的另一端在我们手里"）。
+
+    表有两半：**尺子**判一个名字 `close`（`loment_ports.PROVIDE`），**链接器**真的把它
+    发出来（`lomelf.CONSCRIPT`）。链接器那一半必须是尺子那一半的**子集** —— 否则尺子会说
+    "这条端口可闭合"，而链接器提供不出来，产物在链接期报"未定义的符号"，
+    **与表上的话正好相反**。
+
+    反过来**不要求**：表里还有一批尚未实现的（`malloc` / `strlen` / `__udivdi3` …），
+    那是 S1c 的活。这条判据**不需要 clang**，所以它不会 SKIP。
+    """
+    have = set(lomelf.CONSCRIPT)
+    missing = sorted(have - loment_ports.PROVIDE)
+    assert not missing, (
+        f"链接器发出了尺子不认识的名字：{missing} —— 把它们加进 `loment_ports.PROVIDE`，"
+        f"否则表会说'可闭合'而链接器在那条上发不出来")
+    print(f"      收编面两半一致：链接器发出 {len(have)} 个名字，"
+          f"都在尺子的 PROVIDE（{len(loment_ports.PROVIDE)} 个）里")
+    print(f"      表上尚未实现（S1c 的活）："
+          f"{sorted(loment_ports.PROVIDE - have)[:6]} …")
+
+
 def main() -> int:
     _FIX.build()
     failed = []

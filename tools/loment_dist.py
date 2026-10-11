@@ -161,10 +161,12 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...] [--opt]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-  loment run FILE [--opt]     compile, link and run
+                              --hosted: link against the host's real libraries (docs/222)
+  loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
+                              compile, link and run
   loment fmt FILE             format (prints the formatted text)
   loment doc FILE             write API docs to stdout
   loment lsp                  language server over stdio
@@ -263,6 +265,10 @@ case "${1:-help}" in
         nc=
         om=
         opt=
+        hosted=
+        Largs=
+        largs=
+        ccargs=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -o|--out) out=${2:-}; shift 2 ;;
@@ -272,6 +278,23 @@ case "${1:-help}" in
                 # the default path stays clang-free (`lomelf`), so the hermetic / offline build
                 # never grows a dependency on an optimizer being present.
                 --opt|-O2) opt=1; shift ;;
+                # Hosted (docs/222): the product is allowed to have open ports to the world, so
+                # it is linked by the host's C toolchain against the real libc and the real
+                # libraries you name. The entry becomes `main` (the C runtime starts us) and
+                # `-L` / `-l` name library directories and libraries. Sealed builds - the
+                # default - keep the self-hosted lomelf path, unchanged.
+                --hosted) hosted=1; shift ;;
+                # `-Ldir` and `-L dir` are both accepted, exactly as the C toolchains do.
+                -L) Largs="$Largs -L$(to_posix "${2:-}")"; shift 2 ;;
+                -L?*) Largs="$Largs -L$(to_posix "${1#-L}")"; shift ;;
+                -l) largs="$largs -l${2:-}"; shift 2 ;;
+                -l?*) largs="$largs -l${1#-l}"; shift ;;
+                # `--cc-arg X` hands X straight to the C toolchain. A real library brings its
+                # own link flags (`-Wl,-rpath,...` for libjvm, `-pthread`, ...) and this
+                # launcher must not grow a flag of its own for each of them. `--cc-arg=` is
+                # the one-word spelling.
+                --cc-arg) ccargs="$ccargs ${2:-}"; shift 2 ;;
+                --cc-arg=*) ccargs="$ccargs ${1#--cc-arg=}"; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
@@ -289,17 +312,61 @@ case "${1:-help}" in
             exit 1
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
-        [ -n "$out" ] || out="${src%.lomt}"
+        if [ -z "$out" ]; then
+            # docs/223: a unit that registers a command (a `loment_command()` declaration)
+            # names its own artifact -- `loment-<name>`, which is exactly what the launcher's
+            # git-style lookup looks for (`loment foo` -> `loment-foo` on PATH). The name is
+            # asked out of the driver, which is the side that reads the declaration; keeping
+            # the rule here instead would be a second copy of it.
+            #
+            # One extra driver load per `build` with no `-o`. That is the price of naming the
+            # artifact from the source; `-o` skips the question entirely.
+            cname=$("$(tool loment-driver)" "$(to_posix "$src")" --print-command 2>/dev/null) || cname=
+            case "$cname" in
+                "") out="${src%.lomt}" ;;
+                *)  out="loment-$cname" ;;
+            esac
+        fi
         # Default: link with the self-hosted lomelf - the package needs no clang.
         # `--opt`: hand the IR to clang -O2 instead (docs/212 sec 5A) - the same optimizer C and
         # Rust use. It **degrades loudly**: no clang => say so and fall back, never fail.
+        # `choose hosted` in the source is the SAME claim as the `--hosted` flag - the unit says
+        # so in the IR header (docs/222 sec 4.4), so the declaration alone is enough and the
+        # two spellings cannot silently disagree.
+        if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
+            hosted=1
+        fi
+        # Naming a host library is a claim that this product HAS ports to the world. In a
+        # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
+        # say it instead of silently dropping the flags (docs/222 sec 4.1).
+        if [ -z "$hosted" ] && { [ -n "$Largs" ] || [ -n "$largs" ] || [ -n "$ccargs" ]; }; then
+            echo "loment: -L / -l / --cc-arg need --hosted: a sealed product links no host library (docs/222)" >&2
+            exit 2
+        fi
         linkargs=
         objs=
         for l in "${links[@]}"; do
             linkargs="$linkargs --link $(to_posix "$l")"
             objs="$objs $(to_posix "$l")"
         done
-        if [ -n "$opt" ]; then
+        if [ -n "$hosted" ]; then
+            # ---- hosted (docs/222 sec 4): a C-runtime product with open ports to the world.
+            # The entry must be `main`, not `_start`: the host C runtime calls it, which is
+            # what gives us TLS/stdio/atexit init. Keeping `_start` here would bypass that
+            # init AND lose buffered output on a raw exit - a silent wrong, so refuse.
+            if ! grep -qE '^define .*@main\(' "$tmp/a.ll"; then
+                echo "loment: --hosted expects \`fn main() -> u32\` as the entry, but this unit defines no @main." >&2
+                echo "        Hosted products start under the C runtime; sealed ones start at _start (docs/222 sec 4.3)." >&2
+                exit 1
+            fi
+            cc=$(command -v clang 2>/dev/null || command -v cc 2>/dev/null || true)
+            if [ -z "$cc" ]; then
+                echo "loment: --hosted needs a C toolchain (clang or cc) to link against the host's libraries" >&2
+                exit 1
+            fi
+            # shellcheck disable=SC2086
+            "$cc" "$tmp/a.ll" $objs $ccargs $Largs $largs -o "$out" || exit 1
+        elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
                 # -O2 rewrites byte loops into memset/memcpy/memmove calls, and this runtime has
@@ -482,6 +549,11 @@ if /I "%~1"=="--out" goto barg_out
 if /I "%~1"=="--link" goto barg_link
 if /I "%~1"=="--opt" goto barg_opt
 if /I "%~1"=="-O2" goto barg_opt
+if /I "%~1"=="--hosted" goto barg_hosted
+if /I "%~1"=="-L" goto barg_hosted
+if /I "%~1"=="-l" goto barg_hosted
+set "bcs=%~1"
+if "%bcs:~0,9%"=="--cc-arg=" goto barg_hosted
 if /I "%~1"=="-C" goto barg_nc
 if /I "%~1"=="--no-color" goto barg_nc
 if /I "%~1"=="--short" goto barg_om
@@ -525,10 +597,28 @@ rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this
 rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
 echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
 exit /b 2
+:barg_hosted
+rem Hosted linking (docs/222 sec 4) needs a PE-side path that does not exist yet: this launcher
+rem has no import-table handling and no C toolchain wiring. Refused **by name** - silently
+rem ignoring --hosted would link with lomelf and report "undefined label: compress", which
+rem points the user at the wrong problem entirely.
+echo loment: --hosted is not available on Windows yet (ELF only for now; docs/222 sec 7) 1>&2
+exit /b 2
 :barg_done
 if "%bmode%"=="r" goto run_go
 
-if "%out%"=="" set "out=%src:.lomt=%"
+rem docs/223: a unit that registers a command names its own artifact (`loment-<name>`),
+rem which is what the launcher's git-style lookup looks for. Ask the driver -- it reads the
+rem declaration. No answer (not a command) => the old rule, the source file's own name.
+if not "%out%"=="" goto have_out
+set "cname="
+for /f "delims=" %%A in ('"%here%loment-driver.exe" "%src%" --print-command 2^>nul') do if not defined cname set "cname=%%A"
+if not defined cname goto no_cname
+set "out=loment-%cname%"
+goto have_out
+:no_cname
+set "out=%src:.lomt=%"
+:have_out
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
@@ -607,10 +697,12 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...] [--opt]
+echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
 echo                               compile and link; --link adds a foreign object (FFI)
 echo                               --opt: optimize with clang -O2 (ELF only)
-echo   loment run FILE [--opt]     compile, link and run
+echo                               --hosted: link the host's real libraries (ELF only)
+echo   loment run FILE [--opt] [--hosted]
+echo                               compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
 echo   loment doc FILE             write API docs to stdout
 echo   loment lsp                  language server over stdio
@@ -1613,19 +1705,6 @@ def emit_ir(stage1: Path, entry: str, cwd: str = ".") -> Path:
 #: 定点本身仍被上面两条判据守着，只是不再由**发行包判据**重复付账。
 SEED_TOOL = "loment-driver"
 
-#: `--opt` **不许碰**的入口（`docs/212` §5.2，2026-10-10 实测）。
-#:
-#: 编译驱动的那份 IR 在 clang `-O1`/`-O2` 下会被**编坏**：同一个入口用 `-O0` 编出来
-#: 一切正常，`-O1`/`-O2` 编出来一跑就是 SIGSEGV（`rc=139`）。这不是补的那三个 libcall
-#: 的问题 —— 把它们换成 LLVM 自己的 `llvm.memset`/`llvm.memcpy`/`llvm.memmove` 内建，
-#: 同样段错误。也就是说驱动那份 IR 里有 `-O1` 会踩到的东西（UB 或某个 LLVM 假设），
-#: 而它是**入口里最大的一份**（3.2 MB IR），也只有它是**从种子**来的（不是 stage1 现编）。
-#:
-#: 所以这一格**点名退回** lomelf：慢，但是对的。把一份**一跑就崩的编译器**递出去，
-#: 比给它一份慢的糟糕得多 —— 递出去的东西必须是可信的，这一条优先于快。
-#: 修好 §5.2 那条之后把这里删掉、让驱动也吃 `--opt`。
-NO_OPT_TOOL = SEED_TOOL
-
 
 def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[bytes, bytes]]:
     """名字 -> (Linux ELF 字节, Windows PE 字节)。
@@ -1657,14 +1736,10 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
         text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
-        skip_opt = cc is not None and name == NO_OPT_TOOL
-        elf, why = _link_opt(text, cc) if (cc and not skip_opt) else (None, "")
+        elf, why = _link_opt(text, cc) if cc else (None, "")
         if elf is None:
             elf = _lomelf_link(text, "elf")
-            if skip_opt:
-                print(f"  [{name}] --opt **跳过**：clang -O1/-O2 会把这份 IR 编坏"
-                      "（一跑就 SIGSEGV，见 docs/212 §5.2）—— 留 lomelf，慢但对")
-            elif cc:
+            if cc:
                 print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
         else:
             optimized.append(name)
@@ -1875,6 +1950,12 @@ def skill_zip() -> bytes:
     它是**第 4 个发行件**, 由 --emit 一起产出 —— 既不手工打(手工打的哈希必然与
     随后的 SHA256SUMS 对不上, 2026-09-15 踩过), 也能被 --check 的新鲜度检查覆盖。
     结构与 loment_dist_test 里的确定性约定一致: 固定时间戳 1980-01-01 + 权限 0644。
+
+    `create_system = 3` 与 `_zip` 同一条口径, 但**这里漏过一次** (2026-10-10):
+    `ZipInfo.__init__` 按 `sys.platform` 填默认值 (`'win32'` → 0, 其余 → 3), 于是同一份
+    内容在 Windows 宿主上压出的字节与 Linux 宿主不同 —— 内容一个字节不差, 只是容器里那
+    一个字段。它咬到的是"同一 tag 在两个 runner 上出两个哈希", 而发布流水线正好要从
+    ubuntu 挪到 windows (`release.yml` 的 setup.exe 要 iexpress)。钉死它, 换宿主才**不改产物**。
     """
     skill_dir = Path(ROOT / SKILL).parent         # 例如 .claude/skills/loment
     buf = io.BytesIO()
@@ -1886,6 +1967,7 @@ def skill_zip() -> bytes:
                                  (1980, 1, 1, 0, 0, 0))
             zi.external_attr = 0o644 << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.create_system = 3
             z.writestr(zi, p.read_bytes())
     return buf.getvalue()
 

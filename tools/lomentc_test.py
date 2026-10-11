@@ -168,6 +168,50 @@ def test_return_type_mismatch_rejected():
     assert any("return 类型" in x for x in e), e
 
 
+@test
+def test_deep_nesting_is_refused_not_crashed():
+    """**嵌套太深要报出来**，不是把栈用穿（`#44`）。
+
+    400 层嵌套块（4 KB 的一份源）原先让参考实现抛 `RecursionError`、让**自举侧直接
+    段错误**（C 的栈更小）—— 两种都到不了用户面前，而 `check` 是个会被人拿去喂
+    **未知输入**的命令（格式化器、LSP 的半成品缓冲、注册表里被截断的第一行）。
+
+    两面都钉：超过上限**必须报**（带行号与原因）；**没到上限的合法程序不许被误拒** ——
+    上限设小了就会把正常程序挡在门外，而本仓最深的语料是 12 层。
+    """
+    deep = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+            + "".join("    " * (i + 1) + "if 1 > 0 {" + chr(10) for i in range(200))
+            + "    " * 201 + "return 1;" + chr(10)
+            + "".join("    " * (200 - i) + "}" + chr(10) for i in range(200)) + "}" + chr(10))
+    try:
+        lomentc.check(parse(deep))
+    except lomentc.LomError as ex:
+        msg = str(ex)
+        assert "嵌套超过" in msg, msg
+        assert str(lomentc.MAX_NEST) in msg, msg
+    else:
+        raise AssertionError("200 层嵌套没被拒 —— 栈会先爆")
+    # 表达式那一侧同一个闸
+    paren = "module m" + chr(10) + "fn f() -> u32 {" + chr(10) + "    return " + "(" * 200 + "1"         + ")" * 200 + ";" + chr(10) + "}" + chr(10)
+    try:
+        lomentc.check(parse(paren))
+    except lomentc.LomError as ex:
+        assert "嵌套超过" in str(ex), ex
+    else:
+        raise AssertionError("200 层括号没被拒")
+    # 反面：上限以内照旧（注意收尾 —— 嵌套的那几层 `if` 摆在 `while` 体里、
+    # 末尾 `return 0;` 收口，不然会被 E024「从末尾掉出去」抓住，那是另一条规则的事）
+    ok = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+          + "    while 1 > 0 {" + chr(10)
+          + "".join("    " * (i + 2) + "if 1 > 0 {" + chr(10) for i in range(8))
+          + "    " * 10 + "return 1;" + chr(10)
+          + "".join("    " * (9 - i) + "}" + chr(10) for i in range(8))
+          + "        return 0;" + chr(10) + "    }" + chr(10) + "    return 0;" + chr(10)
+          + "}" + chr(10))
+    assert lomentc.check(parse(ok)) == [], lomentc.check(parse(ok))
+    print(f"      嵌套上限：超过 {lomentc.MAX_NEST} 层报得出（块与表达式各一条），以内照旧")
+
+
 # ---------------------------------------------------------------- 负例: Potato 校验器
 
 @test
@@ -1909,6 +1953,49 @@ def _l0_emit(src: str) -> tuple[dict[str, dict[str, int]], str]:
 
 
 @test
+def test_array_index_ir_is_valid_llvm():
+    """数组/切片**下标**的 GEP 必须用下标**自己的类型** —— 写死 `i32` 会发出**不合法的 LLVM IR**
+    （`i32 %<i64 值>`，见 `docs/212` §4）。而 `lomelf` 是按 GEP 里**写的**类型去读下标的
+    （`tools/lomelf.py:799`），于是**悄悄截成 32 位**照跑 —— 所以这个 bug 一直没露；clang 不宽容，当场拒。
+
+    两条判据互补（**光有文本不够**：文本判据抓不到语义）：
+
+      * **文本**：`a[i]`（`i: u64`）的 GEP 里是 `i64 %`；`a[2] * 5` 那个算式是 `mul i64`
+        （**不是** `mul [4 x i64]` —— 那是孪生曾经发的形状，见 `loment_p8_test::test_m82` 里
+        `ir_index.lomt` 那条逐字节判据）；
+      * **语义**：真 `clang` 收得下（有 clang 才算，没有就 SKIP —— 与仓里其它 clang 判据同形）。
+    """
+    import shutil
+    import subprocess
+
+    src = ("module m\nfn _start() {\n"
+           "    let a: [u64; 4] = [1, 2, 3, 4];\n"
+           "    let i: u64 = 1;\n"
+           "    let x: u64 = a[i] * 3 + a[2];\n"
+           "    a[i] = x;\n"
+           "    syscall4(60, a[i] % 256, 0, 0);\n"
+           "}\n")
+    ir = lomentc.emit_llvm(parse(src), ROOT)
+    assert "i32 0, i64 %" in ir, f"动态下标没按 i64 发:\n{ir[:500]}"
+    assert "mul i64 %" in ir, f"算式里 `a[i]` 的类型不是元素 i64:\n{ir[:500]}"
+    assert "mul [4 x i64]" not in ir, "算式里 `a[i]` 用成了**数组**类型（同 `docs/212` §4）"
+    clang = shutil.which("clang") or (
+        r"C:\Program Files\LLVM\bin\clang.exe"
+        if Path(r"C:\Program Files\LLVM\bin\clang.exe").exists() else None)
+    if not clang:
+        print("      SKIP 语义那一半：无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        ll = Path(td) / "m.ll"
+        ll.write_text(ir, encoding="utf-8")
+        obj = Path(td) / "m.o"
+        r = subprocess.run([clang, "--target=x86_64-unknown-linux-gnu", "-nostdlib",
+                            "-ffreestanding", "-O2", "-c", str(ll), "-o", str(obj)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, f"clang 拒了 IR（类型不合法）:\n{r.stderr[:400]}"
+
+
+@test
 def test_l0_rule_pair():
     """`gc_auto_alpha` 的 **L0**：一对只差 `choose` 一行的程序，逐格钉住提升表（`docs/210` §2）。
 
@@ -1986,6 +2073,51 @@ def test_gc_ladder_rule():
     # 两份源**只差那一行**
     assert GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: `surfaces`（`docs/222`, v11）：**每一个面至少两站**，外加两处"归 `other`"的形态
+#: —— 号不在表里的（`9999`）与**首参不是字面量**的（`n1`）。数够少，所以每个格子都能
+#: 逐个点名比对，而不是"和对了就行"。
+SURFACES_SRC = """module surf
+choose runtime
+
+fn n() -> i64 {
+    let n1: u64 = 41;
+    let a: i64 = syscall4(0, 1, 0, 0);
+    let b: i64 = syscall4(1, 1, 0, 0);
+    let c: i64 = syscall6(41, 0, 0, 0, 0, 0);
+    let d: i64 = syscall7(288, 0, 0, 0, 0, 0, 0);
+    let e: i64 = syscall4(60, 0, 0, 0);
+    let f: i64 = syscall4(12, 4096, 0, 0);
+    let g: i64 = syscall4(9999, 0, 0, 0);
+    let h: i64 = syscall4(n1, 0, 0, 0);
+    return a + b + c + d + e + f + g + h;
+}
+"""
+
+
+@test
+def test_surfaces_rule():
+    """`surfaces`（`docs/222`, Potato v11）：机调用站点按"面"分一分，**逐格**钉住。
+
+    与 `gc_ladder` 那条同一个形状，但多一条**跨字段**的自洽：`total_sites` 必须同时等于
+    各面之和**和** `boundary.syscalls`（每个机调用站点落在恰好一个面里 ⇒ 两处数的是同一批
+    站点）。所以这里两处都断言 —— 只钉一边的话，`surfaces` 自己内部自洽、却整批漏数站点
+    （或整批多数）照样能过。
+
+    **两处"归 `other`"的形态各来一站**（号不在表里 / 首参不是字面量）：`other` 是这张表的
+    兜底，兜底塌了就等于"凡是没登记的号静默消失"，而那正是这份计数要防的事。
+    """
+    doc = json.loads(lomentc.emit_potato(parse(SURFACES_SRC), ROOT))
+    sf = doc["surfaces"]
+    assert sf == {"file": 2, "mem": 1, "net": 2, "other": 2, "proc": 1, "total_sites": 8}, sf
+    assert doc["boundary"]["syscalls"] == sf["total_sites"], (doc["boundary"], sf)
+    # 两处都非平凡：不然"全归 `other`"或"什么都数不到"也能让上面那条成立
+    assert sf["other"] < sf["total_sites"], sf
+    # 空程序也得有这一项（**必填**，与 `boundary`/`gc_ladder` 同一条纪律）
+    empty = json.loads(lomentc.emit_potato(parse("module e\n"), ROOT))
+    assert empty["surfaces"] == {"total_sites": 0}, empty["surfaces"]
+    assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
 
 
 @test
@@ -2374,17 +2506,25 @@ def test_gc_auto_collector_text():
     auto = _gc_emit(GC_AUTO_AUTO_SRC)
     manual = _gc_emit(GC_AUTO_MANUAL_SRC)
     alpha = _gc_emit(GC_AUTO_ALPHA_SRC)
-    marks = (("分配量计数", "@__loment_gcbytes"),
-             ("标记位表", "@__loment_mark"),
-             ("根表", "@__loment_roots"),
-             ("根表游标", "@__loment_rootn"),
-             ("标记函数", "@__loment_markp"),
-             ("收集器", "@__loment_collect"),
-             ("触发入口", "@__loment_maybe_collect"))
-    for what, sym in marks:
+    roots = (("根表", "@__loment_roots"), ("根表游标", "@__loment_rootn"))
+    coll = (("分配量计数", "@__loment_gcbytes"),
+            ("标记位表", "@__loment_mark"),
+            ("标记函数", "@__loment_markp"),
+            ("收集器", "@__loment_collect"),
+            ("触发入口", "@__loment_maybe_collect"))
+    # **根表**：`gc_auto` 与 `gc_auto_alpha` **都发** —— 两档只要函数里有指针槽就会往它写
+    # （`roots_push`），定义必须在（见 `_IR_ROOTS`）。
+    for what, sym in roots:
+        assert sym in auto and sym in alpha, f"两档都该有{what}（{sym}）"
+        assert sym not in manual, f"`gc_manual` 的产物里不该有{what}（{sym}）—— 默认档不许变"
+    # **收集器**：这份源里 alpha 的 `alloc` 全被 L0 提走了（`a`/`t` 都是字面量尺寸）+ `hold`
+    # 是 deref-only ⇒ **没有堆**，所以 alpha **不该带收集器**（它引用的是堆那几个全局）。
+    # 这一栏就是"档位串了没有"—— alpha 那份只该差根表，不该差收集器。
+    for what, sym in coll:
         assert sym in auto, f"`gc_auto` 的产物里没有{what}（{sym}）"
         assert sym not in manual, f"`gc_manual` 的产物里不该有{what}（{sym}）—— 默认档不许变"
-        assert sym not in alpha, f"`gc_auto_alpha` 的产物里不该有{what}（{sym}）—— 档位串了"
+        assert sym not in alpha, (f"`gc_auto_alpha` 这份源没堆（alloc 全被 L0 提走），"
+                                  f"不该有{what}（{sym}）")
     # **挂点**：每个 `alloc` 站点前面正好一条（本程序两个函数各一处）
     assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
         ("触发点该正好两处（每个 `alloc` 站点之前一条），得到 "
@@ -2401,6 +2541,74 @@ def test_gc_auto_collector_text():
     # L0/L2 只在 alpha 档 —— 这两条同时挡住"档位串了"的另一半
     assert ".buf" not in auto, "`gc_auto` 不该有 L0 缓冲（L0 只在 alpha 档）"
     assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
+
+
+#: `gc_auto_alpha` 的**自适应收集器**那一份源（`docs/210` §2.4 的"策略池"那一半）。
+#: `chew` 里那块 `p` 是 **L3**（尺寸是变量 ⇒ 不是 L0；`let q: ptr = p` 是外逃 ⇒ 不是 L1），
+#: 所以 alpha 这一档**非得有收集器**不可 —— 此前它根本没有（L3 残差没人收，只有分配器）。
+GC_ADAPT_SRC = """module gc_adapt
+@@CHOOSE@@
+choose runtime
+
+fn chew(n: u32) -> u32 {
+    let p: ptr = alloc(n);
+    let q: ptr = p;
+    store8(q, 0, 1);
+    return load8(q, 0);
+}
+
+fn _start() {
+    let sz: u32 = 64;
+    let a: ptr = alloc(sz);
+    store8(a, 0, 5);
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 64 {
+        s = s + chew(16);
+        i = i + 1;
+    }
+    if load8(a, 0) == 5 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+GC_ADAPT_AUTO_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_auto")
+GC_ADAPT_ALPHA_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+GC_ADAPT_MANUAL_SRC = GC_ADAPT_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+
+
+@test
+def test_gc_alpha_adaptive_collector_text():
+    """`gc_auto_alpha` 的收集器是**自适应**那一支（`docs/210` §2.4 的"策略池"）。
+
+    **Why**：alpha 此前**根本没有收集器**（L3 残差没人收），与 `gc_auto` 的区别只在阶梯 ——
+    这一步给它配上收集器、且触发是**自适应**的（阈值跟活集走 + 空间触发）。静态上钉三件事：
+
+    1. alpha 现在**有**收集器（`__loment_collect` / `maybe_collect` / 根表 / 标记函数）；
+    2. 它的触发**是自适应那一支**（`@__loment_thresh` + `@__loment_livebytes`）；
+    3. `gc_auto` 那支**碰都不碰**那些符号（档位没串）—— 它仍是固定 32 KiB。
+
+    **动态那一半**（"真的收得掉、而且比固定档收得下更大的活集"）在
+    `loment_elf_test::test_gc_alpha_adaptive_bounds_a_large_live_set`。
+    """
+    auto = _gc_emit(GC_ADAPT_AUTO_SRC)
+    alpha = _gc_emit(GC_ADAPT_ALPHA_SRC)
+    manual = _gc_emit(GC_ADAPT_MANUAL_SRC)
+    shared = ("@__loment_collect", "@__loment_maybe_collect", "@__loment_roots",
+              "@__loment_markp", "@__loment_gcbytes")
+    adapt = ("@__loment_thresh", "@__loment_livebytes")
+    for sym in shared:
+        assert sym in auto and sym in alpha, f"两档都该有收集器痕迹：{sym}"
+        assert sym not in manual, f"`gc_manual` 不该有收集器痕迹：{sym}"
+    for sym in adapt:
+        assert sym in alpha, f"alpha 的自适应触发缺 {sym}"
+        assert sym not in auto, f"`gc_auto` 不该有自适应那一支（{sym}）—— 档位串了"
+    # **挂点**：两档各挂两条（本程序两个 `alloc` 站点 —— `chew` 的 `p`、`_start` 的 `a`）
+    assert auto.count("call void @__loment_maybe_collect(i32 ") == 2, \
+        f"`gc_auto` 挂点该两条，得到 {auto.count('call void @__loment_maybe_collect(i32 ')}"
+    assert alpha.count("call void @__loment_maybe_collect(i32 ") == 2, \
+        f"alpha 挂点该两条，得到 {alpha.count('call void @__loment_maybe_collect(i32 ')}"
 
 
 #: `gc_auto_alpha` 的 **L1（定活）** 那一份源。**源只有一份** —— 真值表判据与字节一致判据
