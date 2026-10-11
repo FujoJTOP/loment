@@ -101,7 +101,9 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 ## 5. 点名不做
 
 * **`poll` / `select` / `epoll`**、**`sendmsg` / `recvmsg`**、**`socketpair`**、**`AF_UNIX`** ——
-  表外的号一律 -1（派发面的兜底）。
+  表外的号一律 **`-ENOSYS`（-38）**（派发面的兜底；2026-10-11 之前是 `-1`，那次改动见
+  `docs/227` §2 —— `-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，而 Linux 对不认得的号
+  返回的就是 `-ENOSYS`）。
   **`poll`(7) 已做**（2026-10-10，`docs/221`）：架在 WinSock 的 `select` 上，
   `pollfd` ↔ `fd_set` 两边翻译。**名单的现状与逐条理由见 `docs/221` §7** ——
   其中 `select`(23)、`epoll`、`sendmsg`/`recvmsg`、`socketpair`/`AF_UNIX` 仍是**点名不做**，
@@ -121,7 +123,8 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 
 | 主张 | 判据（`tools/loment_pe_test.py`） |
 |---|---|
-| 派发面 == 文档/注释登记的那张表 | `test_pe_shim_dispatches_the_documented_numbers`：解出来的 `cmp eax,imm32` 序列逐条对上 `PE_DISPATCH`，兜底是 `mov rax,-1`。**跨平台**，门禁的 ubuntu 也跑 |
+| 派发面 == 文档/注释登记的那张表 | `test_pe_shim_dispatches_the_documented_numbers`：解出来的 `cmp eax,imm32` 序列逐条对上 `PE_DISPATCH`，兜底是 `mov rax,PE_ENOSYS`（按常量比，不抄字节）。**跨平台**，门禁的 ubuntu 也跑 |
+| 表外的号两个平台说同一句话 | `test_pe_and_elf_agree_on_net_programs` 的 `enosysdemo` 语料：Linux 自己也不认得的号（9999/9998/9997）两边都回 `-38`。**Windows 机器**才跑；反证已验（把 `PE_ENOSYS` 改回 `-1`，这条当场红） |
 | 导入面真的是两个 DLL | `test_pe_imports_two_dlls_with_the_socket_surface`：描述符表读到底、两个 DLL 名、ws2_32 的 18 个函数都在、可选头里的 Import Directory size 跟着条数走。**跨平台** |
 | 冻出来的那份没漂 | `test_frozen_shim_blob_matches_the_reference`：树里的 `win_shim_data.lomt` 与现算的 shim/导入表**逐字节相同**（防止"改了 shim 忘了重冻"，那样自举链接器会照抄旧的）。**跨平台** |
 | 导入表塞得进孪生那块落点 | 同上的末段：`len(idata) ≤ TB_EXT - TB_IDATA`（撑破是**静默截断**，不是报错） |

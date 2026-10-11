@@ -386,6 +386,15 @@ def mov_ri32(dst, imm) -> bytes:
     return rex(0, 0, 0, dst) + bytes([0xB8 + (dst & 7)]) + struct.pack("<I", imm & 0xFFFFFFFF)
 
 
+def mov_ri_se(dst, imm) -> bytes:
+    """`mov r/m64, imm32`（**符号扩展**）—— 与 `mov_ri32` 只差这一点。
+
+    `mov_ri32` 发的是 `mov eax, imm32`：高位**清零**，所以常数只能是非负的
+    （`-38` 会变成 `4294967258`）。要往寄存器里放一个**负**常数（错误码）就得用这一条。
+    """
+    return rex(1, 0, 0, dst) + b"\xC7" + modrm(3, 0, dst) + struct.pack("<i", imm)
+
+
 def mov_rm(dst, base, disp) -> bytes:
     return rex(1, dst, 0, base) + b"\x8B" + _mem(dst, base, disp)
 
@@ -1294,14 +1303,16 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 #     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
 #   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
 #     而被调方（Windows API）里的 `movaps` 会直接 #GP。
-#   * 实现了 21 个号，**其余号返回 -1**。第一批 8 个是文件与进程：
+#   * 实现了 22 个号，**其余号返回 `-ENOSYS`（-38）**。第一批 8 个是文件与进程：
 #     `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257) `brk`(12)
 #     `getdents64`(217) `newfstatat`(262)。第二批 13 个是**联网**（2026-10-10，docs/217）：
 #     `socket`(41) `connect`(42) `accept`(43) `accept4`(288) `sendto`(44) `recvfrom`(45)
 #     `shutdown`(48) `bind`(49) `listen`(50) `getsockname`(51) `getpeername`(52)
 #     `setsockopt`(54) `getsockopt`(55) —— 由 `ws2_32.dll` 顶上，socket 型 fd 在
-#     read/write/close 上分流到 recv/send/closesocket。
-#     写要跨平台跑的程序时按这 21 个来 —— 别处用了别的号, 在 PE 上是静默的 -1。
+#     read/write/close 上分流到 recv/send/closesocket。第三批 1 个是 `poll`(7)。
+#     写要跨平台跑的程序时按这 22 个来 —— 别处用了别的号, 在 PE 上是 `-ENOSYS`
+#     （2026-10-11 从 `-1` 改过来的：`-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，
+#     而 Linux 对不认得的号就是返回 `-ENOSYS` —— 见 `PE_ENOSYS`）。
 #   * 联网那批是**语义仿真**而不是转发：负 errno、`AF_INET6`=10（Windows 是 23）、
 #     `SOL_SOCKET` 与 `SO_*` 的号、`struct timeval` 的超时（Windows 只认毫秒）、
 #     `MSG_NOSIGNAL`（Windows 没有这一位）都得翻译。派发面的真话是 `PE_DISPATCH`
@@ -1341,6 +1352,12 @@ SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
 SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
 SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
 SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
+
+#: 派发面**之外**的号返回什么。**不是 -1**：`-1` 是 `EPERM`（"权限不够"），拿它当
+#: "没这个号"用是在**说假话** —— Linux 对不认得的系统调用返回 `-ENOSYS`（`-38`），
+#: 所以 PE 这一侧照抄那个语义，"这个号没实现"与"这个操作被拒绝"就不再是一句话。
+#: 判据 `loment_pe_test::test_pe_unknown_syscall_says_enosys_on_both_platforms`。
+PE_ENOSYS = -38
 #: **PE 运行时的派发面 —— 这是一张表，不是一段手写的发射序列。**
 #:
 #: 每条：`(Linux 系统调用号, 面名, 处理块标签)`。`__win_syscall` 的序言照这张表生成
@@ -1688,7 +1705,7 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     for _num, _surface, _label in PE_SYSCALLS:
         cmp_eax(_num)
         jcc_l("e", _label)
-    a.emit(b"\x48\xC7\xC0\xFF\xFF\xFF\xFF")     # mov rax, -1（表外的号）
+    a.emit(mov_ri_se(RAX, PE_ENOSYS))           # 表外的号 -> -ENOSYS
     jmp_l("__ws_ret")
 
     a.label("__ws_ret")
