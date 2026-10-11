@@ -18,6 +18,7 @@
   <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4"><b>Download 0.1.4</b></a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href="docs/manual/index.md">Manual</a> ·
+  <a href="https://loment.fandom.com/">Wiki</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="loment/examples/">Examples</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
@@ -127,6 +128,7 @@ compiler emitted a code and a position; everything below `message:` came from `l
 | `.claude/skills/loment/SKILL.md` | The language guide: syntax, built-ins, error codes, and the deviations from Rust. Self-contained, shipped inside the package (`loment skill --print`), and the fastest way in. |
 | `loment/examples/tour.lomt` | The whole language in one file, with commentary (`loment example tour`). |
 | `docs/manual/` | The generated manual: specifications, plus a page per example. |
+| [Loment Wiki](https://loment.fandom.com/) | The language, the toolchain and the ecosystem as a browsable wiki, plus where the project is going. |
 | `docs/143-l1-loment-v0.md` · `docs/146` · `docs/158` | The specification, capability semantics, and what is frozen. |
 | `docs/173` · `docs/188` · `docs/189` | The three long-running threads: the compat layer, multi-syntax, and full self-hosting. |
 | `docs/` | Design and measurement records, numbered by document. Most are written in Chinese. |

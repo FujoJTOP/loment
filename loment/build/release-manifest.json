@@ -763,7 +763,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "e8edc3a10c973e88a8fdacf6f5c7620f968a36ee6e5168597d8a2e9aa02a3069"
+   "sha256": "fdbc384797feb86a5a1fe37159bf17e86458331f0bfb90055c42145631d809bd"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -844,6 +844,10 @@
   {
    "path": "tools/loment_multisyntax_projects_test.py",
    "sha256": "a1fce414f23082b0be07bec493d09d2af94e0fd9b05d485c2bf060b7aaa2c112"
+  },
+  {
+   "path": "tools/loment_megaproject_test.py",
+   "sha256": "b1033a742553520aab06c79041f27f61f0f65228ccdad635383da413d0d7eb83"
   },
   {
    "path": "tools/loment_multilang_test.py",
@@ -1159,7 +1163,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "9b40caefe5c7dde16797cd3829e4007ca3b6c2f3bc5cec337cb5df130c9cc664"
+   "sha256": "f07cae593d3aadf1b5d115f38c5d3a75cfea6f192f8737d03f0fc74c28f78a9e"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -2030,6 +2034,10 @@
    "sha256": "1637d6146e36f33dc040e7d5d6839357919a08e5da0c46da81b91ae3ea288e14"
   },
   {
+   "path": "docs/226-loment-performance-ledger.md",
+   "sha256": "d95eabaeb668ae8bba887e61ebc5558556088cc970ad8944f01e49c308a7fd1a"
+  },
+  {
    "path": "docs/228-hosted-heap.md",
    "sha256": "e6c76855f9ad7d221a5aa5a2e7b8637d3eebd1b4b3059f95a8b0ce0980486a84"
   },
@@ -2231,7 +2239,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "24ca7c79af4641a429ee2eab690d66af37f6236195c7fae41ef2e4d9561cd78c"
+   "sha256": "0dbf1a36f53441d6f67a9a505e02c33b13656294860d8665029ddc62ea4553b9"
   },
   {
    "path": "tools/loment_status.py",
