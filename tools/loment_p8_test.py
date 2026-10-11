@@ -533,7 +533,7 @@ def test_m81_cross_module_dup_is_rejected():
 
 @test
 def test_m81_falling_off_the_end_is_refused():
-    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E024）。
+    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E027）。
 
     "`check` 通过 = 这份程序不会 trap" 是这条命令给人的唯一保证, 而"掉出末尾"发射之后
     是一条**非法指令**（SIGILL）—— 只在**真走到那一支**时才发生, 所以多半是"上线很久、
@@ -565,13 +565,13 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            assert "E024" in codes, f"{tag}: 掉出末尾没按 E024 拒: {errs}"
+            assert "E027" in codes, f"{tag}: 掉出末尾没按 E027 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
-        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E024), {len(good)} 种合法收尾都放行")
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行")
 def test_m81_two_units_with_the_same_module_name():
     """M81/单元级唯一性: **两份文件都写 `module same`** 必须先被拒 (`#139`)。
 
@@ -1829,7 +1829,7 @@ def test_m86_selfhost_perf_budget():
 #:     驱动器跑得到, 但它的 checker 还没那条规则。
 #: 两类都只要求"驱动器不崩", 不要求它拒。
 PARSE_LEVEL: set[str] = {
-    # `#22` 的控制流规则（非 `()` 函数不许从末尾掉出去, 码 E024）：自举 checker 还没实现,
+    # `#22` 的控制流规则（非 `()` 函数不许从末尾掉出去, 码 E027）：自举 checker 还没实现,
     # `loment_rule_parity` 里同样是 MISSING。那一边补完, 这两行一起删。
     "falloff-if",
     "falloff-match-arm",

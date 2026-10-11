@@ -125,6 +125,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
                  # 含 `dlsym`(按名解析) 与内联 `syscall`(符号表看不见) 两个证伪对。
                  "loment_ports_test",
+                 # 对外端口的第一条腿 (docs/222): `--hosted` 真的链上系统 libz,
+                 # 一份 Loment 源 compress/uncompress 逐字节回原文; 附一条证伪。
+                 "loment_hosted_test",
                  "loment_rel_test",
                  "loment_editors_test",
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
@@ -150,6 +153,13 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
                  "loment_lompi_test", "lompi_sync", "loment_publish",
+                 # 发布口跟上了没 (docs/222): `loment lompicheck` 的映射与比对。
+                 # **联网那条可跳**，且不断言"两边一致"（掉队是开发侧该跑 `--push`，
+                 # 不是这份 PR 的错）—— 见那份判据的文件头。
+                 "lompicheck_test",
+                 # 在源码里注册一条 `loment` 命令 (docs/223): 声明扫描 /
+                 # `--print-command` / 两个启动器的命名分流 / 生成的进程入口真跑一遍。
+                 "loment_register_test",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
                  "loment_multisyntax_test",

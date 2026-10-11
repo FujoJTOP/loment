@@ -150,10 +150,11 @@ RULES = [
              r"依赖嵌套超过",
      "`choose` / `addin` 用法不对",
      "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`、"
-     "`runtime`/`no_runtime`）声明的是**整个程序**的取值，"
+     "`runtime`/`no_runtime`、`sealed`/`hosted`）声明的是**整个程序**的取值，"
      "所以**每一维**只能出现一次、只能在**根单元**，而且有些档**不能同时选**"
      "（`no_std` + `gc_auto` 要往核里塞收集器；`no_runtime` + `gc_auto` 是定义上矛盾"
-     "—— `docs/175` §3.4 / §3.6）。**`runtime` + `gc_manual` 是合法档**："
+     "—— `docs/175` §3.4 / §3.6；`no_std` + `hosted` 是「底下没有东西」对上"
+     "「往下链东西」—— `docs/222` §4.2）。**`runtime` + `gc_manual` 是合法档**："
      "要运行期、但内存自己管。"
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"
@@ -170,11 +171,12 @@ RULES = [
     # `非法字符` 是**词法**期的, 但它与解析期那批是同一类修法 (改那一行的写法), 所以
     # 共用一个码。2026-09-17 补: 用一份 C 装 `.lomt` 时先撞到的就是它 (第 63 行的 `'0'`
     # 字面量), 而它当时**一条都不在分类表里** —— 显示成 E999「未分类, 请报告」。
-    # **E024**：非 `()` 的函数可能从末尾掉出去（`#22`）。**单独一个码、不并进 E001**：
+    # **E027**：非 `()` 的函数可能从末尾掉出去（`#22`）。**单独一个码、不并进 E001**：
+    # （编号是 27 而不是 24 —— 合并 main 时 E024/E025/E026 已被 `docs/223` 的命令声明那三条占走）
     # 按"码按修法分"——E001 的修法是"看两侧类型、必要时 `as`"，而这里的修法是
     # "让每条路径都 `return`"。并进去的话，一条控制流的错会被配上一条讲类型转换的建议，
     # 那正是本仓最反对的"指错地方"（第三批整批都在治这个）。
-    ("E024", r"可能从末尾掉出去",
+    ("E027", r"可能从末尾掉出去",
      "控制流：可能从末尾掉出去",
      "让每条路径都 `return`（末尾补一个，或把收尾写成两支都返回的 `if`）。"
      "走到没有 `return` 的那条路是**非法指令**（SIGILL），不是返回一个默认值。"),
@@ -186,6 +188,40 @@ RULES = [
      "不是 `=> 表达式`）；`return` 必须带值（没有 `return;`）；用了 Loment 没有的"
      "字面量或符号（单引号字符、`#`、`@`…）。**若这个文件本来就不是 Loment**，"
      "`loment diag` 会另给一条提示（见 `foreign_note`）。"),
+    # E024/E025/E026 (2026-10-10 新增, **源码里注册一条 `loment` 命令**, `docs/223`)。
+    # 三条码按「码按修法分」切开: 改那条声明 / 删一个入口 / 把入口与声明对上。
+    #
+    # **为什么是三个而不是一个**: 三件事用户要做的事完全不同 —— 一个改名字或挪位置,
+    # 一个删代码, 一个改签名或补声明。合并会造出"照着建议改却没解决"的那类消息。
+    # 与 E022「三条消息共用一个码」不矛盾: 那三条的共同修法**是**同一件（改这一行的
+    # `choose`，或把它挪到根单元）。
+    #
+    # **排在 E022 之后**（不是并进它）: `command` 在语言里已经是关键字
+    # （`command <语言>` 那个外部代码块声明, `docs/185`），所以命令声明的标签叫
+    # `loment_command()` —— 这条设计本身就是被那个关键字逼出来的（实测 `fn command()`
+    # 连解析都过不去）。
+    ("E024", r"命令声明的形状不对|是 loment 的官方命令|命令名 .* 不合法|库不许声明命令"
+             r"|名字后面要跟",
+     "命令声明不合法",
+     "注册一条 `loment` 命令的声明写错了（`docs/223`）。两种写法：块里的 "
+     "`register 名字 { … }`（名字由**语法**给出），或者写成 "
+     "`pub fn loment_command() -> str { return \"名字\"; }` —— 后一种**必须是 `return` "
+     "后面紧跟一个字面量**，工具链是**扫**出来的、不算表达式。名字只能是 `[A-Za-z0-9_-]`"
+     "（启动器按**文件名**找命令：`loment <名>` -> `loment-mycmd`），而且不能是 loment 的"
+     "官方命令（官方优先，撞名等于白做）。库不许声明命令 —— 命令是**可执行产物**的身份，"
+     "库是给别人 `use` 的代码。"),
+    ("E025", r"`_start` 与 `command_main` 同时存在",
+     "进程入口冲突",
+     "一个程序只能有一个入口，而这里有两个：`_start`（普通程序自己写的进程入口）和 "
+     "`command_main`（命令体，工具链会替它生成 `_start`）。声明了命令就不该再写 `_start`。"),
+    ("E026", r"写了 `command_main` 却没有命令声明|`command_main` 的签名不对"
+             r"|声明了命令却没有 `command_main`",
+     "命令体与声明对不上",
+     "`command_main` 是命令体的入口，它由**命令声明**让工具链生成 `_start` 去调用。"
+     "所以两者必须成对：有 `command_main` 却没有命令声明，它就是**死代码**（不会被调用）；"
+     "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
+     "签名不对则生成的入口调不动它 —— 入口固定是 "
+     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
 ]
 
 
@@ -227,7 +263,10 @@ ASCII_ONE_LINER: dict[int, str] = {
     21: "`extern fn` signature outside FFI stage 1 - scalars and `ptr` only",
     22: "bad `choose`: written twice, bad mode name, or written in a library",
     23: "not implemented in this version - a compiler limit, not your code",
-    24: "a non-() function may fall off the end of its body - every path must return",
+    24: "bad command declaration - shape, name, an official name, or a library",
+    25: "two process entries: `_start` and `command_main`",
+    26: "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)",
+    27: "a non-() function may fall off the end of its body - every path must return",
 }
 
 
@@ -265,7 +304,10 @@ TITLE_EN: dict[int, str] = {
     21: "unsupported `extern fn` signature",
     22: "bad `choose` / `addin`",
     23: "not implemented in this version (compiler limit)",
-    24: "control flow: this function may fall off the end of its body",
+    24: "bad command declaration",
+    25: "two process entries",
+    26: "`command_main` without a matching declaration",
+    27: "control flow: this function may fall off the end of its body",
 }
 
 
@@ -613,6 +655,63 @@ CARDS: dict[int, Card] = {
         no="**这条消息本身就是“不支持”** —— 具体范围以 `docs/145` 的里程碑表为准，不在源码那一侧",
     ),
     24: Card(
+        what="在源码里注册一条 `loment` 命令的**声明**写错了（名字、形状，或者它出现的地方）。",
+        why="`loment <名>` 能找到命令只有一条路：`PATH` 上有一个叫 `loment-<名>` 的可执行"
+            "文件（`docs/169` §3b，与 `git` 同款）。`docs/223` 的那条设计让**名字由源码给出**，"
+            "于是工具链能在**构建时**把产物命名成那个文件。两种写法：块里的 "
+            "`register 名字 { … }`（名字在语法里），或者老那种返回字面量的函数 —— 后一种要能被"
+            "**扫**出来：工具链用的是词法器扫标签（与 `loment.conf` 的 `source_ext` 同一种读法，"
+            "`docs/158`），**没有解析器、没有常量折叠**，所以 `return` 后面必须直接是字面量。"
+            "名字还要能变成文件名；而且不能撞官方 —— 启动器**官方优先**"
+            "（`loment version` 永远走官方那份），撞名的命令编得过、装得上、敲了没反应。",
+        fixes=(
+            "写成块那种：`register mycmd { … }` —— 名字在语法里，没有扫描这一层可以写错。",
+            "写成函数那种：`pub fn loment_command() -> str { return \"mycmd\"; }`"
+            "（`return` 紧跟着那个字面量，中间不经过变量）。",
+            "名字只用 `[A-Za-z0-9_-]`，长度 1..64 —— 它要变成 `loment-<名字>` 这个文件名。",
+            "撞官方名就换一个：`loment commands` 打出全部官方名字。",
+            "库里的声明挪进入口单元：命令是**可执行产物**的身份，库是给别人 `use` 的代码。",
+        ),
+        yes="一个单元声明**一条**命令；名字写成一个返回字面量的函数；库只导出函数、不声明命令",
+        no="命令名从变量里算出来；名字含 `/`、空格或非 ASCII；用官方那 38 条里的名字；库声明命令",
+    ),
+    25: Card(
+        what="同一个程序里有两个**进程入口**：`_start` 和 `command_main`。",
+        why="`_start` 是普通程序自己写的入口（语言约定，链接器按名字找它）；"
+            "`command_main` 是**命令体**的入口，声明了命令之后由**工具链生成** `_start` 去调它"
+            "（读 `/proc/self/cmdline`、数出字段数、把返回值交给 `exit`，`docs/223` §3.2）。"
+            "两个都在就是两个入口，链接器只能认一个 —— 那是静默丢掉另一个的地带，所以在这里拒。",
+        fixes=(
+            "要当命令：删掉 `_start`，把逻辑搬进 `command_main(argv: ptr, argc: u32) -> u32`。",
+            "要当普通程序：删掉 `loment_command()` 声明，把 `command_main` 改回 `_start`"
+            "（`_start` 不带参数，参数自己从 `/proc/self/cmdline` 读）。",
+            "两者都要（同一份代码既要当命令、又要当普通程序）就**分成两个单元**，"
+            "各自一个入口 —— 一个程序只有一个入口，这件事不该靠链接器决定谁赢。",
+        ),
+        yes="普通程序只写 `_start`；命令只写 `command_main` 加一条声明",
+        no="两个都写；把 `_start` 里的东西原样留着一份又写 `command_main`",
+    ),
+    26: Card(
+        what="命令声明与 `command_main` 对不上：少了一个，或者签名不是入口要求的那个。",
+        why="`command_main` **不是**被谁直接调用的普通函数 —— 它是工具链生成的那个 `_start` "
+            "要去调用的目标，而「生成」这件事只由**命令声明**触发。两半必须成对："
+            "没有声明时它是一个**没人调用的函数**（编得过、静默无效）；只有声明而没有它，"
+            "生成的入口就没有东西可调 —— 那要等到**链接**才炸，所以在检查这一步就拒；"
+            "签名不对则生成的入口传不进去参数。"
+            "入口的签名是固定的：`fn command_main(argv: ptr, argc: u32) -> u32`，"
+            "`argv` 就是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径"
+            "（`docs/223` §3.2）。",
+        fixes=(
+            "补上声明：`register mycmd { … }` 或者 "
+            "`pub fn loment_command() -> str { return \"mycmd\"; }`。",
+            "补上命令体：入口固定是 `fn command_main(argv: ptr, argc: u32) -> u32`。",
+            "把签名改成入口要求的：`fn command_main(argv: ptr, argc: u32) -> u32`。",
+            "本来就不想当命令：把它改回 `fn _start()`，参数自己从 `/proc/self/cmdline` 读。",
+        ),
+        yes="声明 + 签名一致的 `command_main`；普通程序用 `_start`",
+        no="只有 `command_main` 没有声明；`command_main(a: u32, b: u32)`；返回 `()`；两个参数顺序反了",
+    ),
+    27: Card(
         what="一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。",
         why="这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的"
             "走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。"
@@ -1100,6 +1199,90 @@ CARDS_EN: dict[int, Card] = {
            "table in `docs/145`, not anything on your side of the source",
     ),
     24: Card(
+        what="The **declaration** that registers a `loment` command in the source is wrong -"
+             " its shape, its name, or where it appears.",
+        why="There is exactly one way `loment <name>` can find a command: a file called "
+            "`loment-<name>` on `PATH` (`docs/169` section 3b, the way `git` does it). The "
+            "design in `docs/223` lets the **source** give the name, so the toolchain can name "
+            "the artifact after it at **build time**. There are two spellings: the block "
+            "`register name { ... }` (the name is in the grammar), or the older function "
+            "returning a literal - and the latter has to be **scanned**: the toolchain reads it "
+            "with the lexer (the same read as `loment.conf`'s `source_ext`, `docs/158`), with "
+            "**no parser and no constant folding**, so a literal must sit directly after "
+            "`return`. The name also has to "
+            "become a file name, and it must not collide with an official one - the launcher "
+            "gives official commands priority (`loment version` always runs the official one), "
+            "so a colliding command builds, installs, and then never runs.",
+        fixes=(
+            "Use the block form: `register mycmd { ... }` - the name is in the grammar, so "
+            "there is no scanning step left to get wrong.",
+            "Or use the function form: `pub fn loment_command() -> str { return \"mycmd\"; }`"
+            " (the literal directly after `return`, not through a variable).",
+            "Keep the name to `[A-Za-z0-9_-]`, length 1..64 - it becomes the file name "
+            "`loment-<name>`.",
+            "If it collides with an official name, pick another one: `loment commands` prints "
+            "all of them.",
+            "Move a declaration out of a library and into the entry unit: a command is the "
+            "identity of an **executable**, and a library is code other people `use`.",
+        ),
+        yes="one command per unit; the name is a function returning a literal; libraries export "
+            "functions and declare no command",
+        no="computing the name from a variable; a name with `/`, a space or non-ASCII; a name "
+           "from the official 38; a library declaring a command",
+    ),
+    25: Card(
+        what="One program with two **process entries**: `_start` and `command_main`.",
+        why="`_start` is the entry a normal program writes itself (a language convention; the "
+            "linker finds it by name). `command_main` is the entry of a **command body**: once "
+            "a command is declared, the **toolchain generates** the `_start` that calls it "
+            "(reads `/proc/self/cmdline`, counts the fields, hands the return value to `exit` -"
+            " `docs/223` section 3.2). Two entries means the linker can only pick one, and "
+            "silently dropping the other is exactly the kind of thing this repo refuses, so it "
+            "is rejected here.",
+        fixes=(
+            "To be a command: delete `_start` and move the logic into "
+            "`command_main(argv: ptr, argc: u32) -> u32`.",
+            "To be a normal program: delete the `loment_command()` declaration and rename "
+            "`command_main` back to `_start` (which takes no parameters - read them from "
+            "`/proc/self/cmdline` yourself).",
+            "If you need both (one body that is a command and a normal program), **split it "
+            "into two units**, one entry each - a program has one entry, and which one wins "
+            "must not be left to the linker.",
+        ),
+        yes="a normal program writes only `_start`; a command writes only `command_main` plus "
+            "one declaration",
+        no="both at once; keeping a copy of the `_start` body while also writing `command_main`",
+    ),
+    26: Card(
+        what="A command declaration and `command_main` do not match: one of them is missing, or "
+             "the signature is not the one the entry needs.",
+        why="`command_main` is **not** an ordinary function somebody calls - it is the target of "
+            "the `_start` the toolchain generates, and that generation is triggered only by the "
+            "**command declaration**. The two halves have to come in pairs: without a "
+            "declaration, `command_main` is a function nobody calls (it builds, and does "
+            "nothing); with a declaration but no `command_main`, the generated entry has "
+            "nothing to call - that would only blow up at **link** time, so it is rejected "
+            "here; with the wrong signature the generated entry cannot "
+            "pass its arguments. The signature is fixed: "
+            "`fn command_main(argv: ptr, argc: u32) -> u32`, where `argv` is the whole "
+            "`/proc/self/cmdline` block and `argv[0]` is the command's own path "
+            "(`docs/223` section 3.2).",
+        fixes=(
+            "Add the declaration: `register mycmd { ... }`, or "
+            "`pub fn loment_command() -> str { return \"mycmd\"; }`.",
+            "Add the command body: the entry is fixed at "
+            "`fn command_main(argv: ptr, argc: u32) -> u32`.",
+            "Change the signature to the one the entry needs: "
+            "`fn command_main(argv: ptr, argc: u32) -> u32`.",
+            "If it was not meant to be a command, make it `fn _start()` and read the arguments "
+            "from `/proc/self/cmdline` yourself.",
+        ),
+        yes="a declaration plus a `command_main` with the matching signature; a normal program "
+            "uses `_start`",
+        no="`command_main` with no declaration; `command_main(a: u32, b: u32)`; returning `()`; "
+           "the two parameters swapped",
+    ),
+    27: Card(
         what="A function that **declares a return type** has a path that reaches the end "
              "of its body without a `return`.",
         why="After codegen that path becomes an **illegal instruction** (`SIGILL`), and it "

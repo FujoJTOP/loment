@@ -84,6 +84,11 @@ GLOBS = [
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
+    # 发布口跟上了没 (docs/222): `loment lompicheck` —— 一条**注册出来的**用户命令,
+    # 联网把 `FujoJTOP/lompi` 与 `FujoJTOP/loment` 的文件树逐条比。
+    # **位置必须与自举那份 `lomrel.lomt` 逐行对齐**（那份只认名字, 没有注释可依）。
+    "tools/lompicheck_test.py",
+    "tools/loment_register_test.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     # 编译期子集解释器 (S4.0, docs/184 §9): 参考侧解释器 + 它的判据 + 语料。
@@ -239,7 +244,7 @@ GLOBS = [
     "tools/_safepath.py", "tools/fuai_contract_check.py", "tools/fuic.py",
     "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
     "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
-    "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    "tools/loment_ffi_test.py", "tools/loment_hosted_test.py", "tools/loment_i18n_test.py",
     # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
     # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
     "tools/loment_ports.py", "tools/loment_ports_test.py",

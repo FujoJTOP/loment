@@ -1,6 +1,6 @@
 ---
 name: loment
-description: Read this before writing a program in Loment - FujoOS's own systems language (Rust-flavoured surface syntax plus capability domains; six more surface grammars - C, C++, Java, C#, Go, Python - share its semantics, see docs/188). With the toolchain installed you can write, check and compile native executables with no Python runtime. Use it for: writing a Loment program or a .lomt file; **writing a Loment library** (a library is a directory, dependencies are the `use` lines in the source, exports are `pub`, optional `pkg.lomp` manifest, see section 9); managing or debugging dependencies; compiling or running with the `loment` command; reading the E001-E024 error codes; looking up a builtin or a piece of syntax (`loment builtins` / `loment syntax` / `loment cheat`); expressing a piece of logic in the project's own language; how to write struct / enum / match / capability / guard; **giving a project its own source extension** (`source_ext` in `loment.conf`, section 7.1); **registering a custom `loment` subcommand** (`loment foo` runs `loment-foo` from PATH, section 7.2); and what differs when migrating from another language. **For anything about libraries and dependencies read the lompi guide first** (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md` when you only have the package) - installing a library, resolving dependencies, which libraries exist on this machine, and what a `use <name>` resolves to all live there. Also use this whenever the task is to author, read or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the toolchain installed.
+description: Read this before writing a program in Loment - FujoOS's own systems language (Rust-flavoured surface syntax plus capability domains; six more surface grammars - C, C++, Java, C#, Go, Python - share its semantics, see docs/188). With the toolchain installed you can write, check and compile native executables with no Python runtime. Use it for: writing a Loment program or a .lomt file; **writing a Loment library** (a library is a directory, dependencies are the `use` lines in the source, exports are `pub`, optional `pkg.lomp` manifest, see section 9); managing or debugging dependencies; compiling or running with the `loment` command; reading the E001-E027 error codes; looking up a builtin or a piece of syntax (`loment builtins` / `loment syntax` / `loment cheat`); expressing a piece of logic in the project's own language; how to write struct / enum / match / capability / guard; **giving a project its own source extension** (`source_ext` in `loment.conf`, section 7.1); **registering a custom `loment` subcommand** (`loment foo` runs `loment-foo` from PATH, section 7.2); and what differs when migrating from another language. **For anything about libraries and dependencies read the lompi guide first** (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md` when you only have the package) - installing a library, resolving dependencies, which libraries exist on this machine, and what a `use <name>` resolves to all live there. Also use this whenever the task is to author, read or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the toolchain installed.
 ---
 
 # Loment: the language you write programs in
@@ -88,7 +88,7 @@ what self-contained means here):
 | `loment syntax` | The syntax cheat sheet |
 | `loment builtins` | The builtin table (all of them, there are no others) |
 | `loment types` / `keywords` / `caps` | Type table / keywords / capability domains |
-| `loment codes` / `loment explain E4` | The E001-E024 table / one code in detail |
+| `loment codes` / `loment explain E4` | The E001-E027 table / one code in detail |
 | `loment new NAME` | Write a skeleton that `loment run` accepts immediately |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | Read source (lines, signatures, search, sha256, numbered print) |
 | `loment ls` / `tree` / `examples` / `example tour` | Directory and examples |
@@ -772,7 +772,7 @@ are different things, and it is worth knowing which one you are looking at.
     `a / b` and `a % b` with `b == 0` **abort the process** (SIGILL, exit code 132). The builtin
     table has no `checked_add` or `checked_mul` to reach for.
 
-17. **A non-`()` function that can fall off its end is refused by `check` (E024).** Write
+17. **A non-`()` function that can fall off its end is refused by `check` (E027).** Write
     `fn f() -> u32 { … }`, forget the final `return <expr>;`, and `loment check` says so - before
     2026-10-10 it **passed** and the binary died with `Illegal instruction` when execution reached
     that path (measured while writing `loment/tools/lomcli.lomt` on 2026-09-15: a 40-line

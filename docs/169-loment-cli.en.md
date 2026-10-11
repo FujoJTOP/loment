@@ -163,7 +163,7 @@ Three design trade-offs, written down so the next person does not "optimise" the
 1. **Falling off a non-void function → SIGILL**. `ls_dir` was marked `-> u32` so that it could early-exit with
    `return 0;`, but the normal path had no `return` — at the time the checker allowed it and **it crashed at run
    time** (measured as `Illegal instruction`). Any function with a `-> T` must end with a `return`; since
-   2026-10-10 the checker refuses the shape outright (E024) instead of letting it through.
+   2026-10-10 the checker refuses the shape outright (E027) instead of letting it through.
 2. **The `mut` in `let mut x` is not a keyword**, it is an ordinary identifier (there is a variable genuinely
    called `mut` in `loment/selfhost/checker.lomt`). Writing `let mut len: u32 = ...` means "declare a variable
    called `mut`, then a `len`" — a real syntax error. Local variables do not need `mut`.
