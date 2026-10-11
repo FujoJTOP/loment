@@ -122,6 +122,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
                  "loment_ffi_test",
+                 # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
+                 # 含 `dlsym`(按名解析) 与内联 `syscall`(符号表看不见) 两个证伪对。
+                 "loment_ports_test",
+                 # 对外端口的第一条腿 (docs/222): `--hosted` 真的链上系统 libz,
+                 # 一份 Loment 源 compress/uncompress 逐字节回原文; 附一条证伪。
+                 "loment_hosted_test",
                  "loment_rel_test",
                  "loment_editors_test",
                  "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
@@ -147,12 +153,22 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
                  "loment_lompi_test", "lompi_sync", "loment_publish",
+                 # 发布口跟上了没 (docs/222): `loment lompicheck` 的映射与比对。
+                 # **联网那条可跳**，且不断言"两边一致"（掉队是开发侧该跑 `--push`，
+                 # 不是这份 PR 的错）—— 见那份判据的文件头。
+                 "lompicheck_test",
+                 # 在源码里注册一条 `loment` 命令 (docs/223): 声明扫描 /
+                 # `--print-command` / 两个启动器的命名分流 / 生成的进程入口真跑一遍。
+                 "loment_register_test",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
                  "loment_multisyntax_test",
                  # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
                  # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
                  "loment_multisyntax_projects_test",
+                 # **超大型**: 100 个 Python 语法模块、1000 个函数, 一次编一次跑;
+                 # 语料是生成物, 判据逐字节钉住它不漂
+                 "loment_megaproject_test",
                  # 权威状态在 `origin`、不在本地树那一条 (CLAUDE.md 第一节): 判据在临时
                  # 夹具仓里验"工具报的是权威那一份还是工作树那一份", 并钉住"无法判定"
                  # 必须是**可见的** rc=2, 不能伪装成同步
@@ -194,17 +210,22 @@ SHARD_COST = {
     "loment_std_test": 1.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
+    # 含 300 个 Java 模块那一档的 javac + JVM（没有 javac 时那一支可见地 SKIP，快得多）
+    "loment_megaproject_test": 15.0,
 }
 #: 没登记耗时的判据按这个算。实测大部分判据在秒级, 取 8s 偏保守。
 SHARD_DEFAULT_S = 8.0
 
 #: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 200s+）, 与任何别的判据同片
-#: 都不会更快（墙钟是 max 不是 sum）, 而独占一片之后那一片的工具链可以压到最小。
-#: 两条都只用 **clang**: `loment_seed_test` 的 `bootstrap.sh` 在 runner 上走 clang 那支
-#: （`loment/build/genesis/` 那份的 git mode 是 100644, 没有可执行位, `[ -x ]` 过不了）,
-#: `loment_p8_test` 的对照组也是 clang。所以 `shard_profile` 敢把它们的那两片标成 `llvm`。
-#: **往这里加一条之前, 先逐条确认它真的只要 clang** —— 并把它从 `SHARD_COST` 的负担里
-#: 拿走（它自己一片, 不再参与均分）。
+#: 都不会更快（墙钟是 max 不是 sum）。
+#:
+#: **为什么独占还更划算**: 它们是**单线程长跑**, 跟三条重判据挤同一台 4 vCPU 的 runner
+#: 时会互相拖 —— 实测独占一个安静的 runner 之后 `loment_seed_test` 从 **244s 掉到 172s**、
+#: `loment_p8_test` 从 229s 掉到 156s（docs/213 §5）。**这才是这条名单现在的理由**;
+#: 以前还有一条"独占之后那一片的工具链可以压到最小", 那个随工具链做成镜像而作废了
+#: （各片现在是同一份镜像, 没有"档位"可言）。
+#: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）, 并把它从
+#: `SHARD_COST` 的负担里拿走（它自己一片, 不再参与均分）。
 ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test")
 
 
@@ -221,7 +242,7 @@ def shards(n: int) -> list[list[str]]:
     别的判据同时跑, 而摊到并行 job 上之后"同时"还包括**别的 job**, 所以那一片自己
     一个 job（`gate.yml` 里其余分片 `needs:` 它）; 接着每一条 `ISOLATED_STATIC`
     各占一片; 最后才是均分出来的片。`n` 不够分时**直接断言失败**, 不静默合并 ——
-    合并了就不再是"那一片只要 clang"。
+    静默合并会把"那几条独占一片"这件事悄悄变成"它们与什么都有的一片挤在一起"。
 
     `n <= 1` 时退化成"整道门禁一片"（就是老行为）。
     """
@@ -231,8 +252,9 @@ def shards(n: int) -> list[list[str]]:
     iso = [x for x in STATIC_CHECKS if x in ISOLATED_STATIC]
     rest = [x for x in STATIC_CHECKS if x not in excl and x not in iso]
     n_rest = n - 1 - len(iso)
-    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会让
-    # `gate.yml` 里那句"这一片只要 clang"变成假话（合片之后什么判据都有）。
+    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会把上面那两件
+    # 事（独占、长尾各占一片）悄悄取消掉, 而调用方（`gate.yml`）是按片号取名字的:
+    # 合掉之后 `--shard K/N` 取到的就不是它以为的那一片。
     assert n_rest >= 1, (f"要 {n} 片分不开: 独占的 {len(excl)} 条 + 长尾的 {len(iso)} 条"
                          f"各占一片（共 {1 + len(iso)} 片）, 剩下 {len(rest)} 条还得有地方放"
                          f" —— 至少 {2 + len(iso)} 片")
@@ -251,25 +273,6 @@ def shards(n: int) -> list[list[str]]:
     assert sorted(flat) == sorted(STATIC_CHECKS), "分片不是 STATIC_CHECKS 的划分"
     assert all(b for b in out), "有分片是空的"
     return out
-
-
-def shard_profile(k: int, n: int) -> str:
-    """第 `k` 片（从 1 数）要装什么 —— `gate.yml` 按这个决定装工具链。
-
-    三档, 理由都很具体（**少装一个包就是一条假红**, 多装一个就是白等的几十秒）:
-
-    * `none` —— 这一片一条外部命令都不碰（纯 Python + 仓内自己的原生后端）。
-    * `llvm` —— 只要 LLVM 19（clang）+ coreutils。**只有 `ISOLATED_STATIC` 独占的片
-      能是这一档**: "只要 clang"那句话是**逐条看过**的, 而均分出来的片里什么判据
-      都有, 看不过来 —— 于是那些一律 `full`, 宁可多装。
-    * `full` —— 其余: qemu / go / java / node / vim 都可能用上（包名单在 `gate.yml`）。
-    """
-    b = shards(n)[k - 1]
-    if b and all(any(e in x for e in EXCLUSIVE_STATIC) for x in b):
-        return "none"
-    if b and all(x in ISOLATED_STATIC for x in b):
-        return "llvm"
-    return "full"
 
 
 def _sweep_wsl_tmp() -> None:
@@ -441,9 +444,7 @@ def main():
                     help="只跑第 K 片（共 N 片, K 从 1 数）—— 把整道门禁摊到 N 个并行 job 上, "
                          "见 shards()。`K/N` 里 N 必须等于 `--shard-plan` 给的那个 N")
     ap.add_argument("--shard-plan", type=int, metavar="N", default=None,
-                    help="只打印 N 片的分法（每片一行: 档位 + 名字）, 不跑任何判据")
-    ap.add_argument("--shard-profile", metavar="K/N", default=None,
-                    help="只打印第 K 片要装的工具链档位（none/llvm/full）—— gate.yml 用")
+                    help="只打印 N 片的分法（每片一行: 片号 + 条数 + 名字）, 不跑任何判据")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
@@ -451,17 +452,7 @@ def main():
 
     if a.shard_plan is not None:
         for i, b in enumerate(shards(a.shard_plan)):
-            print(f"shard {i + 1}/{a.shard_plan} [{shard_profile(i + 1, a.shard_plan)}]: "
-                  f"{' '.join(b)}")
-        return 0
-
-    if a.shard_profile:
-        k_s, _, n_s = a.shard_profile.partition("/")
-        try:
-            k, n = int(k_s), int(n_s)
-        except ValueError:
-            ap.error(f"--shard-profile 要写成 K/N（如 2/5）, 得到 {a.shard_profile!r}")
-        print(shard_profile(k, n))
+            print(f"shard {i + 1}/{a.shard_plan} ({len(b)} 条): {' '.join(b)}")
         return 0
 
     # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的

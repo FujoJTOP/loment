@@ -224,6 +224,53 @@ def test_loment_lomdoc_edge_cases():
     print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc) 一致")
 
 
+#: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。
+#: 声明那一行整个是"怎么读" —— 前门会把它抹成等长空白，于是**那一行上的函数
+#: 跟着消失**，单元变空，工具却退 0（`#144`）。
+FOREIGN = """choose write grammar c
+
+unsigned int add(unsigned int a, unsigned int b) {
+    return a + b;
+}
+"""
+
+
+@test
+def test_loment_lomdoc_refuses_foreign_grammar():
+    """**别的写法要拦住**（`#144`）—— 两个实现都拒，都是退 1、stdout 为空。
+
+    `lomdoc` 是**独立入口**（拿词法层直接读原文、不走前门），所以"这份源该怎么读"
+    这一层得它自己判 —— 参考实现的 `potato_from.refuse_foreign_grammar` 就是这一层，
+    孪生这边是新加的 `lomdoc.lomt::foreign_grammar`。不拦的后果实测过：文档里
+    **一个函数都没有**、模块名成了 `grammar`、退 0。
+
+    两边都跑：只钉孪生的话，参考实现哪天松掉就没人管了。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "lomdoc_foreign.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(FOREIGN)
+        # 参考实现：命令行真跑一遍（`refuse_foreign_grammar` 在 main 里）
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"),
+                            str(probe)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, f"参考实现没拒 (rc={r.returncode}): {r.stdout[:200]}"
+        assert r.stdout == "", f"参考实现拒了却还往 stdout 写了东西: {r.stdout[:200]!r}"
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            got, note = _run(elf, td, probe, "foreign")
+            assert got == "", f"孪生拒了却还写了文档: {got[:200]!r} [{note}]"
+            assert "rc=1" in note, f"孪生没退 1: {note}"
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      别的写法: 两个实现都拒 (rc=1, stdout 空)")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

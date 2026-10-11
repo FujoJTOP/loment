@@ -121,7 +121,7 @@ which older clangs do not know; on clang 18 the `--debug` criteria fail with
 clang 18, which is why the CI workflow installs LLVM 19 explicitly.)
 
 Before writing much Loment, read `.claude/skills/loment/SKILL.md`. It is the language guide —
-syntax, builtins, the E001–E023 codes, and the traps that cost the most time — and it ships with
+syntax, builtins, the E001–E027 codes, and the traps that cost the most time — and it ships with
 the toolchain (`loment skill --print`).
 
 ## Run the gate before you open a pull request

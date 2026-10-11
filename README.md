@@ -18,6 +18,7 @@
   <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4"><b>Download 0.1.4</b></a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href="docs/manual/index.md">Manual</a> ·
+  <a href="https://loment.fandom.com/">Wiki</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="loment/examples/">Examples</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
@@ -127,6 +128,7 @@ compiler emitted a code and a position; everything below `message:` came from `l
 | `.claude/skills/loment/SKILL.md` | The language guide: syntax, built-ins, error codes, and the deviations from Rust. Self-contained, shipped inside the package (`loment skill --print`), and the fastest way in. |
 | `loment/examples/tour.lomt` | The whole language in one file, with commentary (`loment example tour`). |
 | `docs/manual/` | The generated manual: specifications, plus a page per example. |
+| [Loment Wiki](https://loment.fandom.com/) | The language, the toolchain and the ecosystem as a browsable wiki, plus where the project is going. |
 | `docs/143-l1-loment-v0.md` · `docs/146` · `docs/158` | The specification, capability semantics, and what is frozen. |
 | `docs/173` · `docs/188` · `docs/189` | The three long-running threads: the compat layer, multi-syntax, and full self-hosting. |
 | `docs/` | Design and measurement records, numbered by document. Most are written in Chinese. |
@@ -140,7 +142,7 @@ compiler emitted a code and a position; everything below `message:` came from `l
 | `loment/tools/` | CLI, formatter, documentation generator, language server, linker, error reporter — and the Loment-side criteria that mirror `tools/`. |
 | `loment/lib/` | Core library modules: `mem`, `num`, `json`, `sha256`, `proc`; plus `lumtui`, a terminal UI library ([docs/196](docs/196-lumtui.md)). |
 | `lompi/store/` | The standard library, shipped with the toolchain: `std` (127 modules) and `host` (syscalls, files, argv, directories). One `use` per module — `use vec`, `use map`, `use fs`. |
-| `loment/examples/` | 32 example programs. |
+| `loment/examples/` | 34 example programs. |
 | `lom/` | Interface layer: one declaration source that generates constants and decoders for other languages. |
 | `lompi/` | The package manager, written in Loment. |
 | `editors/` | Editor support: VS Code and Vim. |

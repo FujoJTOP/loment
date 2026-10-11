@@ -24,7 +24,7 @@ import lomentc  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
-            "capability", "guard", "excluded", "interrupt", "as"]
+            "capability", "guard", "excluded", "interrupt", "as", "register"]
 TYPE_KEYWORDS = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "str",
                  "ptr", "()", "Option", "Result"]
 
@@ -44,8 +44,17 @@ def _parse(text: str):
     # 顺序与 `lomentc.load` 一致：先开关，再方言。
     tbl = lomentc.SwitchTable()
     tt = lomentc._apply_switches(lomc.lex(text), tbl)
-    mod = lomentc.Parser(loment_comefor.expand(tt, text)[0], text).parse()
+    # **命令声明也是同一处入口缺口**（`docs/223`，`docs/182` §1.9）：编译器在 `load` 里
+    # 从 token 流上读它（`command_label_from_tokens`），文件因此知道"我是一个命令"。
+    # 这里绕过 `load` 不补这一步的话，一份**编得过**的命令单元在编辑器里会被报成
+    # 「写了 `command_main` 却没有命令声明」—— 假错，而且正是 `docs/223` 要消灭的那种。
+    # **同一条流水线**：先开关、再方言 —— 扫的也是**展开之后**那份 token 流
+    # （`expand` 返回的是 token 表，`Parser` 与 `command_label_from_tokens` 吃的都是它）。
+    toks = loment_comefor.expand(tt, text)[0]
+    mod = lomentc.Parser(toks, text).parse()
     mod.switches = tbl
+    mod.command_line, mod.command, mod.command_bad = \
+        lomentc.command_label_from_tokens(toks)
     return mod
 
 

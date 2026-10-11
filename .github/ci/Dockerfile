@@ -15,10 +15,33 @@
 # 的命令名，与这份名单对照。
 #
 # **不许随手增删**：少一个包就是一条**假红**，多一个包是白等的下载。两条纪律：
-#   * **不加** `rustc` / `dotnet` / `nvim` —— runner 上本来就没有，几条判据靠"缺"来
-#     SKIP，而**那些 SKIP 已经写进基线**（例如 `loment_multisyntax_projects_test` 那条
-#     "runner 上 2/3"）。加进来会改变覆盖面，不是改进。
+#   * **不加** `dotnet` / `nvim` —— runner 上本来就没有，那几条判据靠"缺"来 SKIP，
+#     而**那些 SKIP 已经写进基线**（`loment_multisyntax_projects_test` 那条"runner 上
+#     2/3"是其中一个）。加进来会改变覆盖面，不是改进。
+#     **`rustc`/`cargo` 不在"不加"之列 —— 这一条改过一次**：最初按"原 gate.yml 那两条
+#     apt 里没有 rustc"推断 runner 也没有，于是故意不加；换上容器后 `loment_tools_test`
+#     的 `test_m61_test_framework` / `test_m62_bench_table` 立刻报
+#     `FileNotFoundError: 'rustc'`（它们**裸调** `rustc`，没有 which 守卫）。查回旧 runner
+#     的自述才看清：`rustc  /home/runner/.cargo/bin/rustc` —— **runner 自带**（rustup 装的），
+#     只是从来没写进 gate.yml。所以这里加 `rustc cargo`（apt 版）把它补回来。
 #   * 增删之后要跑一遍门禁，看 `环境自述` 那一步的输出与红项有没有变。
+#
+# **`gcc g++ libc6-dev zlib1g-dev python3-dev`（2026-10-10 加，随 `docs/222` 的
+# `--hosted`）**：这是上面那条纪律的一次**正面使用** —— 不是"补一个本来就该有的"，
+# 是**新能力要的新依赖**。
+#
+# 原来一条都不需要：`--opt` 走的是 `clang -nostdlib -ffreestanding -static`，刻意不碰
+# libc。而 `--hosted` 要的正是反过来 —— **链真 libc、链真库**：
+#   * `libc6-dev` —— `crt1.o` / `libc.so`（没有它连一个普通 C 程序都链不出来）；
+#   * `zlib1g-dev` —— `libz.so` 那个符号链接（运行期的 `libz.so.1` 不足以 `-lz`）；
+#   * `g++` —— C++ 那条判据要按**改名字符**调一个真类，链接要 `libstdc++`；
+#   * `python3-dev` —— `libpython3.x.so` 那个符号链接，嵌 CPython 要它。
+#
+# Java 那条**不需要新包**：`default-jdk` 本来就在名单里，它同时提供 `jni.h` 与
+# `libjvm.so`。
+#
+# 判据是 `loment_hosted_test` 的四个生态那几条：缺哪个包，**哪一条红**（不是静默
+# 少跑一条）。这正是要的效果 —— 少一个包就是一条假红。
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -38,6 +61,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq \
       ca-certificates curl wget gnupg git sudo lsb-release software-properties-common \
       python3 python-is-python3 make unzip xz-utils diffutils \
+      rustc cargo \
+      gcc g++ libc6-dev zlib1g-dev python3-dev \
       qemu-system-x86 qemu-user \
       golang-go default-jdk \
       nodejs npm vim \
@@ -85,8 +110,11 @@ RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh \
     && rm -f /tmp/llvm.sh && rm -rf /var/lib/apt/lists/*
 
 # 自述一遍 —— 构建日志里就能看出这一版镜像装成了什么（门禁那边 `环境自述` 是另一半）。
+# **`set -e` 加上这几行本身就是一条判据**：哪个包被删了，构建就在这里失败，而不是等到
+# 门禁上变成一条"看着像判据有问题"的假红。
 RUN set -e; \
-    python3 -V; git --version; make --version | head -1; \
+    python3 -V; python --version; git --version; make --version | head -1; \
     clang --version | head -1; llvm-objdump --version | head -1; \
     qemu-system-x86_64 --version | head -1; qemu-aarch64 --version | head -1; \
-    go version; javac -version; node -v; gh --version | head -1; gdb --version | head -1
+    go version; javac -version; node -v; gh --version | head -1; gdb --version | head -1; \
+    rustc -V; cargo -V

@@ -531,6 +531,124 @@ def test_m81_cross_module_dup_is_rejected():
         print(f"      跨模块重名: 两边都报 E-DUP (参考消息 + 自举码 {sorted(set(got))})")
 
 
+@test
+def test_m81_falling_off_the_end_is_refused():
+    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E027）。
+
+    "`check` 通过 = 这份程序不会 trap" 是这条命令给人的唯一保证, 而"掉出末尾"发射之后
+    是一条**非法指令**（SIGILL）—— 只在**真走到那一支**时才发生, 所以多半是"上线很久、
+    错误分支被新输入踩到"才炸。SKILL.md §6.14 原先把它写成一条**写作纪律**（"check 放行,
+    跑到就是 Illegal instruction"）：一条静态检查的通过不意味着"不会 trap", 那正是这里的洞。
+
+    规则是**结构**的(不做数据流): 末尾是 `return`、是带 `else` 的 `if` 且两支都返回、是
+    **每条臂都返回**的 `match`。**四种合法收尾在下面当正例钉着** —— 只钉"该拒的拒了"
+    很容易把规矩收严到误报合法程序。跑遍本仓语料时这条规则一条都不误报。
+
+    自举 checker 还没这条(`loment_rule_parity` 里那两条探针登记成 MISSING), 所以这一条
+    只钉参考实现 —— 与 `test_m81_two_units_with_the_same_module_name` 同一个口径。
+    '''
+    bad = {
+        "if-no-else": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n",
+        "match-arm-falls": "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            let v: u32 = 2;\n        }\n    }\n}\n",
+        "ends-with-expr": "module m\n\nfn pick(x: u32) -> u32 {\n    let v: u32 = x;\n    v + 1;\n}\n",
+    }
+    good = {
+        "tail-return": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n    return 0;\n}\n",
+        "if-else-both": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    } else {\n        return 2;\n    }\n}\n",
+        "match-all-arms": "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            return 2;\n        }\n    }\n}\n",
+        "void-falls-fine": "module m\n\nfn log(x: u32) {\n    let v: u32 = x;\n}\n",
+    }
+    with tempfile.TemporaryDirectory() as tds:
+        d = Path(tds)
+        for tag, src in bad.items():
+            f = d / (tag + ".lomt")
+            f.write_text(src, encoding="utf-8", newline="\n")
+            errs = lomentc.check(lomentc.load(f))
+            codes = {loment_diag.classify(e)[0] for e in errs}
+            assert "E027" in codes, f"{tag}: 掉出末尾没按 E027 拒: {errs}"
+        for tag, src in good.items():
+            f = d / (tag + ".lomt")
+            f.write_text(src, encoding="utf-8", newline="\n")
+            errs = lomentc.check(lomentc.load(f))
+            assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行")
+def test_m81_two_units_with_the_same_module_name():
+    """M81/单元级唯一性: **两份文件都写 `module same`** 必须先被拒 (`#139`)。
+
+    这把闸原先按**模块名**去重 —— 两份都叫 `same` 的文件在它眼里是**同一个模块**,
+    于是闸不响: `check` 退 0、`build` 报 "0 失败"、产物里两条 `define i32 @f`
+    (**非法 IR**), 一路拖到链接器才炸成内部异常 (`ELF-ERR: ElfError: 标签重复: f`,
+    而 `tools/loment.py` 只接 `lomc.LomError`, 所以那是一段栈)。
+
+    现在**单元名**这一条立在符号那条**上面**, 而且消息点出**两个文件** —— 只报名字
+    的话, 用户分不清"改哪一个"。
+
+    自举 checker 这边对不上: 它**不解析 `use`**(见 `test_m81_loment_checker_matches_python`
+    那条边界), 根本看不见第二个单元 —— 所以这一条只钉参考实现。移植到 checker.lomt
+    时会落到 `RULE_GAPS` 那条纪律上。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        d = Path(tds)
+        (d / "a.lomt").write_text(
+            "module same\npub fn f() -> i32 {\n    return 11;\n}\n",
+            encoding="utf-8", newline="\n")
+        (d / "b.lomt").write_text(
+            "module same\npub fn f() -> i32 {\n    return 22;\n}\n",
+            encoding="utf-8", newline="\n")
+        ent = d / "host.lomt"
+        ent.write_text(
+            'module host\nuse "a.lomt"\nuse "b.lomt"\n'
+            "fn _start() {\n    syscall4(60, f() as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        mod = lomentc.load(ent)
+        deps = lomentc.resolve_deps(mod, ROOT, ent.parent, entry=ent)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "两份同名单元没被拒 —— 产物会是两条 define @f (非法 IR)"
+        assert any("单元名" in e and "a.lomt" in e and "b.lomt" in e for e in errs), \
+            f"没报出'单元名被两份文件同时声明', 也没点出是哪两个文件: {errs}"
+        assert len(errs) == 1, f"根因一条就够, 不该倒出一串症状: {errs}"
+        print(f"      同名单元: 拒, 且消息点出两个文件（{errs[0][:48]}…）")
+
+
+@test
+def test_m81_dep_body_is_checked():
+    """M81: **依赖的正文也要查** (`#149`, `docs/198` §4)。
+
+    `check` 原先只把 `deps` 的**导出符号**入表, 正文一个字不验 —— 于是
+    `pub fn f(p: ptr) -> u32 { return p; }` 这样的库**当依赖时一路绿**, 只有当**入口**
+    查才报。后果: 一个库可以带着正文类型错发布, 而每一个使用它的程序 check 都绿;
+    抓得住它的只有"把库文件自己当入口"那种形状 —— 那是**给库写判据的人**的义务,
+    没有一个消费者能强制。
+
+    现在把每个依赖**当成入口**再查一遍(它的 `use` 图就是整份闭包), 消息前面点出
+    **哪个文件** —— 不然用户不知道去改哪一个。自举 checker 不解析 `use`, 所以这一条
+    同样只钉参考实现。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        d = Path(tds)
+        (d / "deps" / "badlib").mkdir(parents=True)
+        (d / "deps" / "badlib" / "badlib.lomt").write_text(
+            "module badlib\npub fn f(p: ptr) -> u32 {\n    return p;\n}\n",
+            encoding="utf-8", newline="\n")
+        ent = d / "main.lomt"
+        ent.write_text(
+            "module main\nuse badlib\nfn _start() {\n"
+            "    let x: u32 = f(alloc(8));\n    syscall4(60, x as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        mod = lomentc.load(ent)
+        deps = lomentc.resolve_deps(mod, ROOT, ent.parent, entry=ent)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "库的正文类型错在**当依赖**时没被报出来"
+        assert any("badlib" in e and "return 类型 ptr" in e for e in errs), \
+            f"报了别的、没报库正文那一处: {errs}"
+        # 库文件**自己当入口**时也报 —— 两边是同一句话 (否则又是两个答案)
+        own = lomentc.load(d / "deps" / "badlib" / "badlib.lomt")
+        own_deps = lomentc.resolve_deps(own, ROOT, d / "deps" / "badlib", entry=None)
+        direct = lomentc.check(own, deps=own_deps)
+        assert any("return 类型 ptr" in e for e in direct), direct
+        print("      依赖正文: 当依赖 / 当入口 都报得出同一处")
+
+
 def _build_checker(td: str) -> Path:
     mod = lomentc.load(CHECKER)
     deps = lomentc.resolve_deps(mod, ROOT, CHECKER.parent, entry=CHECKER)
@@ -1059,6 +1177,66 @@ def _unsupported(target: Path) -> str | None:
     except Exception as e:  # noqa: BLE001
         return f"{type(e).__name__}: {e}"
     return None
+
+
+@test
+def test_m85_missing_module_declaration_says_so():
+    """issue #24: **缺 `module` 那一行要说得出话，不能让编译器自己段错误。**
+
+    自举驱动原先没有这一条：少了那一行的单元一路走到 codegen —— 而 codegen 假设
+    "第一个记号就是 `module`、第二个就是它的名字"，于是**编译器自己**段错误（用户拿到
+    shell 的 "Segmentation fault"：没有诊断、没有行号、没有退出码）。参考实现那一步是
+    `期望 module（文件必须以 module 开头），得到 'fn'` 退 1。
+
+    **`check` 是会被人拿去喂未知输入的命令**（格式化器、LSP 的半成品缓冲、注册表里被
+    截断的第一行），所以这条的代价不是"报错不好看"，而是"工具死了还不说为什么"。
+
+    两面都钉：缺 `module` / 名字写丢了 / 名字换了行 —— 三种各退 1 且说得出是哪一种；
+    **合法的源（含写了 `choose write grammar loment` 的那种）照旧要编得出来**。
+    """
+    clang = _clang()
+    native = sys.platform.startswith("linux")
+    if not clang or not (native or _wsl()):
+        print("      SKIP: 需要 clang, 以及本机 Linux 或 WSL")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        mod = lomentc.load(DRIVER_LOMT)
+        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
+        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_nomod")
+        work = Path(td)
+
+        def run(p: Path, name: str) -> tuple[int, str]:
+            if native:
+                elf.chmod(0o755)
+                r = subprocess.run([str(elf), str(p)], cwd=str(ROOT),
+                                   capture_output=True, shell=False)
+                return r.returncode, r.stderr.decode("utf-8", "replace")
+            rc, _out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
+            return rc, err
+
+        bad = {
+            "nomod.lomt": ("fn _start() {" + chr(10) + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10),
+                           "module"),
+            "noname.lomt": ("module" + chr(10) + chr(10) + "fn _start() {" + chr(10)
+                            + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10), "同一行"),
+        }
+        for name, (src, want) in bad.items():
+            p = work / name
+            p.write_text(src, encoding="utf-8", newline=chr(10))
+            rc, err = run(p, name.replace(".", "_"))
+            assert rc == 1, f"{name}: 应当退 1, 得到 {rc}（段错误的话就是没拦住）: {err[:200]}"
+            assert want in err, f"{name}: 没说清是哪一种: {err[:200]!r}"
+        for name, src in {
+            "good.lomt": ("module good" + chr(10) + chr(10) + "fn _start() {" + chr(10)
+                          + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10)),
+            "decl.lomt": ("choose write grammar loment" + chr(10) + chr(10) + "module good" + chr(10) + chr(10)
+                          + "fn _start() {" + chr(10) + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10)),
+        }.items():
+            p = work / name
+            p.write_text(src, encoding="utf-8", newline=chr(10))
+            rc, err = run(p, name.replace(".", "_"))
+            assert rc == 0, f"{name}: 合法源被拒了: rc={rc} {err[:200]}"
+        print("      缺 module / 名字丢了 / 名字换行: 三种都退 1 报得出；合法源照旧编译")
 
 
 @test
@@ -1646,9 +1824,18 @@ def test_m86_selfhost_perf_budget():
               f"WSL 基线 {base:.2f}s)")
 
 
-#: 参考实现在**解析期**就拒、而驱动器看不见的用例 (驱动器只有 lex -> check -> emit,
-#: 没有 parser)。这些用例只要求"驱动器不崩", 不要求它拒。
-PARSE_LEVEL: set[str] = set()
+#: 参考实现拒了、而**驱动器看不见**的用例。驱动器只有 lex -> check -> emit、**没有 parser**,
+#: 所以两类都落在这里, 各自的理由写在条目旁:
+#:   * **解析期错误** —— 驱动器没有那一趟, 看不见;
+#:   * **自举 checker 还没实现的规则**（`loment_rule_parity` 里登记成 MISSING 的那几条）——
+#:     驱动器跑得到, 但它的 checker 还没那条规则。
+#: 两类都只要求"驱动器不崩", 不要求它拒。
+PARSE_LEVEL: set[str] = {
+    # `#22` 的控制流规则（非 `()` 函数不许从末尾掉出去, 码 E027）：自举 checker 还没实现,
+    # `loment_rule_parity` 里同样是 MISSING。那一边补完, 这两行一起删。
+    "falloff-if",
+    "falloff-match-arm",
+}
 
 
 @test

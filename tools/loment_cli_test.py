@@ -360,8 +360,8 @@ def test_stat_boundary_counts_match_the_lexer():
     # 边缘 (注释里的名字、字符串里的名字、以它开头的长名字、声明处那个 `(`)
     # 全在 `loment/lex/boundary.lomt` 里, 而它在语料里一次都碰不到。
     fix = ROOT / "loment" / "lex" / "boundary.lomt"
-    pinned = {"extern fn declared": 2, "extern call sites": 3, "syscalls": 3,
-              "raw ptr transforms": 4, "total sites": 10}
+    pinned = {"extern fn declared": 2, "extern call sites": 3, "syscalls": 4,
+              "raw ptr transforms": 4, "total sites": 11}
     got_o = _boundary_counts(fix.read_text(encoding="utf-8"))
     assert got_o == pinned, f"夹具自己的期望值漂了: 词法器数出 {got_o}, 写的是 {pinned}"
     rc, out, err = _run(["stat", str(fix)] + _no_color())

@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: c3b2a1128094a34412b492f02ab3d317554c9c8f5fef55a1b07031e81dc18554 -->
+<!-- source-sha256: 4379d40db5d1809120a4f8785f485180f512bdb6c92a17ad5e564b39c84276a5 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -132,7 +132,7 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0` … **`v10`**, and an unknown version =
+- the object carries its own version number; the validator accepts `v0` … **`v11`**, and an unknown version =
   illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
   required field to an old version would turn every existing object illegal, and the old versions are
   **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
@@ -150,8 +150,10 @@ formal object and reconciles byte for byte".
   | `v8` | `gc` | `docs/175` §3.4 |
   | `v9` | `runtime` | `docs/175` §3.6 |
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
+  | `v11` | `port` | `docs/222` §4 |
+  | `v12` | `surfaces` | `docs/224` |
 
-  The ladder **accumulates**: `v10` requires the fields of every version below it.
+  The ladder **accumulates**: `v12` requires the fields of every version below it.
 
 - **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
   `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory
@@ -188,9 +190,24 @@ formal object and reconciles byte for byte".
   asks for: the composition of GC is a number decidable without reading the source. Outside the
   `gc_auto_alpha` tier the first three are always `0` (only that tier classifies sites).
 
+- **`port` (v11)**: **whether the product has ports to the world** — `sealed` (the default) or
+  `hosted`. Same shape and same discipline as `mode` / `gc` / `runtime`: one string value,
+  **required**, settable only by the root unit. So "may this product have outbound ports" is
+  **decidable without reading the source** — which is how `docs/219` §7's "measurement beats
+  declaration" lands on this dimension: you do not ask whether the source wrote
+  `choose hosted`, you read the value in the object. The values **deliberately carry no
+  ecosystem name** (libc/zlib today, a JVM/CPython tomorrow) — the same rule as `runtime`.
+  The validator **rules on two conflicts on its own**: `port=hosted` with `mode=no_std`
+  (`no_std` says "there is nothing underneath", `hosted` says "link downwards" — `docs/222`
+  §4.2), and `port=hosted` with `gc=gc_auto_alpha` (the hybrid tier's L2 rewinds the
+  allocator's front pointer, while an external library keeps pointers inside its own
+  structures, outside Loment's stack — `docs/219` §6.1). **`gc_manual` / `gc_auto` are not
+  part of either rule**: `hosted` with manual or automatic collection ("I want outbound ports,
+  but I manage memory myself") is a legitimate tier and must not be refused.
+
 
 - **`boundary` (v7)**: how many **call sites** in a unit step outside the language's guarantees — machine
-  calls (`syscall4`/`syscall6`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
+  calls (`syscall4`/`syscall6`/`syscall7`), raw-pointer transforms (`ptr_add`/`ptr_sub`/`str_ptr`), and calls to names
   the unit itself declared `extern fn`. **The measure is lexical**: it only asks whether a name is called,
   never what type it has or whether it is really dangerous — which is exactly what `docs/204` R5 asks for
   ("greppable, countable, auditable"). The shape is five non-negative integers
@@ -199,9 +216,20 @@ formal object and reconciles byte for byte".
   so it cannot tell whether the numbers were counted correctly — but it can tell when they contradict each
   other. `loment stat` reports **the same numbers** (that copy is checked against the reference
   implementation's real lexer). The list of builtins
-  (`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
+  (`syscall4`/`syscall6`/`syscall7`/`ptr_add`/`ptr_sub`/`str_ptr`) lives in `BOUNDARY_BUILTINS` in `tools/potato.py` —
   there because this validator must not import the compiler (M47), and "which builtins cross the boundary" is
   precisely what an auditor needs.
+
+- **`surfaces` (v12)**: sorts **the same batch of sites** that `boundary.syscalls` counts into
+  "surfaces" — `{surface name: site count, …, total_sites}`. The surface names are **the user's**
+  (`file`/`mem`/`net`/`proc` are this repository's own division; `other` is the fallback, for a number
+  that is not in the table or a first argument that is not an integer literal). Empty surfaces are not
+  emitted, and a unit with no machine call is `{"total_sites": 0}`. The validator rules on **two**
+  things by itself: the surfaces must sum to `total_sites`, and `total_sites` must equal
+  `boundary.syscalls` (every site falls in exactly one surface, so the two count the same batch).
+  The number→surface table is `SURFACE_NUMBERS` in `tools/lomentc.py`, and it must match the PE
+  runtime's dispatch table entry for entry
+  (`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`). The full picture is `docs/222`.
 
 - **`v6` used to be emitted only by `tools/potato_from.py`** (whose output is *translated* units). The main
   compiler only picked `grammar` up **when `v7` was added**: the ladder accumulates, and it had been emitting

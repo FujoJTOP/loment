@@ -300,6 +300,18 @@ int main(void) {{
 def cmd_dbg(a) -> int:
     """M75: 源码级符号化 —— 地址 <-> 源行 (基于 DWARF 行表)。"""
     import re
+    # **别的写法不支持**（`docs/182` §1.9 那条"读 L1 源的入口"轴）：`_load` **过前门**，
+    # 拿到的是**译文**的模块，而 DWARF 行表里写的是**译文**的行号，`mod.src` 又是 `None`
+    # （`lomentc.load`：翻译出来的单元**不声称**源文件是那一份）。于是报出来的 `文件:行`
+    # **两头都不对**：路径丢了一截、分隔符混用，行号在用户那份文件里根本不存在
+    # （实测：一份 **9 行**的文件报 `…\t.lomt:10`）—— 一个**指向不存在的地方**的成功输出。
+    try:
+        import potato_from
+        potato_from.refuse_foreign_grammar(Path(a.file).read_text(encoding="utf-8"),
+                                           "loment dbg")
+    except (ValueError, OSError) as e:
+        print(f"[ERR] {a.file}: {e}", file=sys.stderr)
+        return 1
     p, mod, deps = _load(a.file)
     ir = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
     with tempfile.TemporaryDirectory() as td:

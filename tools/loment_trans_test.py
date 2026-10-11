@@ -145,6 +145,39 @@ _EXTRA: list[tuple[str, str, object, str, dict]] = [
 
     # ---- 裸 `return`（不带值）：本语言的 `()` 函数没有提前退出，点名拒
     ("void_early_return", "void f(int x) { if (x) { return; } }\n", ctrans.C, ".c", {}),
+
+    # ---- **寻常算术转换**（`#123` / `#133`）：C / C++ 转，Java / C# 不转（对照面）
+    ("c_mixed_cmp",
+     "int f(int a, unsigned int b) { return a > b; }\n", ctrans.C, ".c", {}),
+    ("c_mixed_arith",
+     "int f(int a, unsigned int b) { return a + b; }\n", ctrans.C, ".c", {}),
+    ("c_long_promote",
+     "int f(int x, long y) { return (x + y) > 0; }\n", ctrans.C, ".c", {}),
+    ("c_sink_ret",
+     "int f(unsigned int v) { return v; }\n", ctrans.C, ".c", {}),
+    ("c_sink_arg",
+     "unsigned int g(unsigned int a) { return a; }\n"
+     "int f(int x) { return g(x); }\n", ctrans.C, ".c", {}),
+    ("cs_no_promote",
+     "class K { static int f(int a, uint b) { return a > b; } }\n",
+     cstrans.CSHARP, ".cs", {}),
+
+    # ---- **块作用域**（`#119` / `#120`）：遮蔽改名、出块撤掉、同层重复声明**拒**
+    ("c_block_shadow",
+     "int f(int c) { int x = 1; if (c) { int x = 2; } return x; }\n",
+     ctrans.C, ".c", {}),
+    ("c_for_body_shadow",
+     "int f() { int s = 0; for (int i = 0; i < 3; i = i + 1) { int i = 9; s = s + i; }"
+     " return s; }\n", ctrans.C, ".c", {}),
+    ("c_block_redecl_ok",
+     "int f(int c) { if (c) { int y = 1; } int y = 2; return y; }\n",
+     ctrans.C, ".c", {}),
+    ("c_same_scope_redecl",
+     "int f() { int x = 1; int x = 2; return x; }\n", ctrans.C, ".c", {}),
+
+    # ---- 语句位的调用也要过"本单元没有"那道闸（`#147`）
+    ("c_call_stmt_position",
+     "int f(int n) { g(n); return n; }\n", ctrans.C, ".c", {}),
 ]
 
 

@@ -1092,11 +1092,13 @@ class Emitter:
         regs = [x.strip().strip("{}") for x in cons.split(",") if x.strip().startswith("{")]
         regs = [r for r in regs if not r.startswith(("=", "~"))]
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
-        regmap = {"ax": RAX, "di": RDI, "si": RSI, "dx": RDX, "r10": R10, "r8": R8}
+        regmap = {"ax": RAX, "di": RDI, "si": RSI, "dx": RDX, "r10": R10, "r8": R8,
+                  "r9": R9}
         if len(regs) != len(args):
             raise Unsupported(f"内联汇编约束与实参不匹配: {cons!r}")
         # 依赖寄存器顺序: rax 最后写 (syscall 号), 但其它寄存器不能互相踩
-        for regname in ("di", "si", "dx", "r10", "r8"):
+        # （`r9` 是 Linux 第 6 个实参寄存器，`syscall7` 用满它 —— 孪生侧那张表也要同步）
+        for regname in ("di", "si", "dx", "r10", "r8", "r9"):
             for (ty, val), r in zip(args, regs):
                 if r == regname:
                     self.get(ty, val, regmap[regname])
@@ -1163,6 +1165,92 @@ class Emitter:
         self.asm.emit(mov_ri32(RAX, 60))  # exit(0)
         self.asm.emit(mov_ri32(RDI, 0))
         self.asm.emit(b"\x0F\x05")
+
+    def emit_conscript(self, defined: set[str]) -> None:
+        """**收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
+
+        名字与实现在这里，**表的另一半在 `tools/loment_ports.py`** —— 那边把它判成 `close`，
+        这边把它做出来；两处指的是同一批符号（那是 `docs/219` §5.2 条件二："名字的另一端
+        在我们手里"）。⚠ 改动这一批时**两边一起改**，否则尺子会报"可闭合"而链接器提供不出。
+
+        **为什么是裸机器码而不是 IR**：调用方是**外部 C 对象**，按 System V 传参
+        （`rdi`/`rsi`/`rdx`），而我们自己 IR 定义的函数**实参走栈**。这三个都是叶子函数
+        —— 只用 caller-saved 寄存器、不碰栈、不需要序言 —— 所以既不用给发射器加
+        "C ABI 定义"那一档（那是 `docs/205` C2 的活），也不需要栈帧。
+
+        三条都**不主张**超出 C 标准的语义：`memcpy` 重叠是 UB（所以前向拷贝就够），
+        `memcmp` 只保证符号。
+
+        **优先级**：这几个标签在我们自己的代码**之后、外部对象之前**立起来，而摆对象时的
+        规则是"以先来的为准"（`compile_ll` 里那句 `if nm in em.asm.labels: continue`）——
+        所以**一个自带 `memcpy` 的库，它的那份会被我们盖掉**。这不是疏忽，是 §5.2 条件二：
+        名字的另一端**在我们手里**，"`memcpy` 是什么意思"由我们说了算。
+
+        **内部跳转写成字面字节**（不是 `jcc` + 标签）：这样两侧发的是**同一串字节**，
+        自举侧 (`loment/tools/lomelf.lomt` 的 `emit_conscript`) 不必用它的回填机制 ——
+        而逐字节一致是 `loment_elf_test` 的自举镜像那格在钉的。位移按下面的布局手算，
+        改任何一条指令都要把三处 `rel32`（`0F 84`/`0F 85` 后面那 4 字节）重算。
+        """
+        a = self.asm
+        # memcpy(rdi=d, rsi=s, rdx=n)。布局: test(3) jz(6)=9 | loop@9 … jnz@22(6) | done@28 ret
+        a.label("memcpy")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x13\x00\x00\x00"          # jz done   (28 - 9  = +19)
+               b"\x8A\x06"                          # mov al, [rsi]
+               b"\x88\x07"                          # mov [rdi], al
+               b"\x48\xFF\xC6"                      # inc rsi
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xED\xFF\xFF\xFF"          # jnz loop  (9 - 28  = -19)
+               b"\xC3")                             # ret
+        # memset(rdi=p, esi=v, rdx=n) —— C 的第二个实参是 `int`，低 8 位在 sil。
+        # 布局: test(3) jz(6)=9 | loop@9(9 字节) … jnz@18(6) | done@24 ret
+        a.label("memset")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x0F\x00\x00\x00"          # jz done   (24 - 9  = +15)
+               b"\x40\x88\x37"                      # mov [rdi], sil
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xF1\xFF\xFF\xFF"          # jnz loop  (9 - 24  = -15)
+               b"\xC3")                             # ret
+        # memcmp(rdi=a, rsi=b, rdx=n) -> eax (符号)。
+        # 布局: test(3) jz eq(6)=9 | loop@9 jnz diff@15(6) | jnz loop@30(6) | eq@36 ret | diff@39 ret
+        a.label("memcmp")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x1B\x00\x00\x00"          # jz eq     (36 - 9  = +27)
+               b"\x8A\x07"                          # mov al, [rdi]
+               b"\x8A\x0E"                          # mov cl, [rsi]
+               b"\x38\xC8"                          # cmp al, cl
+               b"\x0F\x85\x12\x00\x00\x00"          # jnz diff  (39 - 21 = +18)
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xC6"                      # inc rsi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xE5\xFF\xFF\xFF"          # jnz loop  (9 - 36  = -27)
+               b"\x31\xC0"                          # xor eax, eax
+               b"\xC3"                              # ret
+               b"\x0F\xB6\xC0"                      # movzx eax, al
+               b"\x0F\xB6\xC9"                      # movzx ecx, cl
+               b"\x29\xC8"                          # sub eax, ecx
+               b"\xC3")                             # ret
+        # ---- malloc / free：**内存那一条不收编，是"划掉"**（`docs/219` §2.1）----
+        #
+        # 它们是一层**换 ABI 的薄壳**，不是一份新分配器：C 按 System V 把实参放在
+        # `rdi`，而我们自己的函数**从栈上取实参**（调用方 `push`、`[rbp+16]` 起）。
+        # 所以壳做三件事：`push rbp` / `push rdi` / `call`，回来清栈再返回。
+        #
+        # **只在堆在的时候发**：底下那两条 `@__loment_alloc` / `@__loment_free` 是我们这份
+        # IR 里的定义（编译器在程序用到 `alloc`/`free` 时发出）。没有它们就没有"我们的堆"——
+        # 那时**不发**，让外部对象的 `malloc` 在链接期响亮地报未定义，而不是发一个悬空调用。
+        if "__loment_alloc" in defined:
+            a.label("malloc")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (size)
+            a.call("__loment_alloc")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
+        if "__loment_free" in defined:
+            a.label("free")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (ptr)
+            a.call("__loment_free")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
 
 
 # ------------------------------------------------------------------ ELF 写出
@@ -1241,13 +1329,14 @@ PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHand
 PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
                   "setsockopt", "getsockopt", "getpeername", "getsockname",
-                  "ioctlsocket", "WSAGetLastError"]
+                  "ioctlsocket", "select", "WSAGetLastError"]
 # 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
 PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2)]
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
 SYS_GETDENTS64, SYS_OPENAT, SYS_NEWFSTATAT = 217, 257, 262
+SYS_POLL, SYS_SELECT = 7, 23
 SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
 SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
 SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
@@ -1277,6 +1366,7 @@ PE_SYSCALLS = (
     (SYS_BRK, "mem", "__ws_brk"),
     (SYS_GETDENTS64, "file", "__ws_getdents"),
     (SYS_NEWFSTATAT, "file", "__ws_fstatat"),
+    (SYS_POLL, "net", "__ws_poll"),
     (SYS_SOCKET, "net", "__ws_socket"),
     (SYS_CONNECT, "net", "__ws_connect"),
     (SYS_ACCEPT, "net", "__ws_accept"),
@@ -1293,6 +1383,10 @@ PE_SYSCALLS = (
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
+#: 号 → 面。**编译器那一侧有一份同名表**（`lomentc.SURFACE_NUMBERS`，用于把单元里的
+#: 机调用站点按面分类、写进 Potato 的 `surfaces`，`docs/224`）；两份必须**逐条一致**，
+#: 判据 `loment_pe_test::test_surface_table_matches_the_runtime` 钉着它。
+PE_SURFACE_BY_NUMBER = {num: surface for num, surface, _label in PE_SYSCALLS}
 
 
 def _pe_table_check() -> None:
@@ -1324,6 +1418,10 @@ def pe_surface_sites() -> dict:
     return counts
 PE_O_WRONLY, PE_O_CREAT, PE_O_TRUNC = 1, 0x40, 0x200
 # Linux 语义 → WinSock 的翻译表（两边**不同名同值**，所以是仿真不是转发）
+# Linux `poll` 的事件位。**与 WinSock 的 `POLL*` 不同值**（那边 POLLRDNORM=0x100、
+# POLLWRNORM=0x10），所以 shim 进出各映射一次 —— 直接透传就是静默错值。
+LINUX_POLLIN, LINUX_POLLOUT = 0x0001, 0x0004
+LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLNVAL = 0x0008, 0x0010, 0x0020
 WS2_SOL_SOCKET = 0xFFFF
 WS2_SO = {2: 0x0004, 9: 0x0008, 7: 0x1001, 8: 0x1002, 21: 0x1005, 20: 0x1006, 4: 0x1007}
 WS2_SO_RCVTIMEO, WS2_SO_SNDTIMEO = 0x1006, 0x1005
@@ -1361,7 +1459,10 @@ WS_WSADATA_CAP = 512
 WS_SOCKTMP = WS_WSADATA + WS_WSADATA_CAP        # timeval↔毫秒 / FIONBIO 的暂存
 WS_SOCKTMP_CAP = 256
 WS_ADDR_FIX = WS_SOCKTMP + 240                  # "AF_INET6 的 family 字被我改过"标志
-WS_SIZE = WS_SOCKTMP + WS_SOCKTMP_CAP
+WS_FDSETS = WS_SOCKTMP + WS_SOCKTMP_CAP         # `poll`/`select` 用：三个 WinSock fd_set
+WS_FDSET_CAP = 520                              # 4（count）+ 64 × 8（SOCKET）= 516 → 对齐到 520
+WS_POLLTV = WS_FDSETS + 3 * WS_FDSET_CAP        # WinSock 的 timeval（两个 32 位 long）
+WS_SIZE = WS_POLLTV + 16
 WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
@@ -1539,6 +1640,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     def st16(base, disp, src):
         a.emit(b"\x66" + rex(0, src, 0, base) + b"\x89" + _mem(src, base, disp))
 
+    def ld16z(dst, base, disp):                 # movzx r32, word [base+disp]
+        a.emit(rex(0, dst, 0, base) + b"\x0F\xB7" + _mem(dst, base, disp))
+
     def test_edx(v):
         a.emit(b"\xF7\xC2" + i32(v))
 
@@ -1575,7 +1679,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.emit(b"\x55")                             # push rbp
     a.emit(b"\x48\x89\xE5")                     # mov rbp, rsp
     a.emit(b"\x48\x83\xE4\xF0")                 # and rsp, -16
-    sub_rsp(0x60)                               # 32 shadow + 第五~七参 + 暂存
+    sub_rsp(0x80)                               # 32 shadow + 第五~七参 + 各 case 的暂存
+                                                # （`poll` 那一格要用到 0x60/0x68，
+                                                #   所以从 0x60 抬到 0x80；既有格位不动）
     movi(RBX, PE_STATE_VA)
 
     # 派发面**照表生成** —— 加号、改面、换名字改的是 `PE_SYSCALLS`，不是这段代码。
@@ -2634,6 +2740,230 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     xor_eax()
     jmp_l("__ws_ret")
 
+    # ---- poll(7)：Linux 的 pollfd 数组 → WinSock 的 select --------------------
+    #
+    # 为什么架在 `select` 上而不是 `WSAPoll`：WSAPoll 在 Windows 上有名的问题
+    # （连接失败时 POLLOUT 照样报、POLLHUP 不可靠），而 `select` 是 WinSock 里最老最稳的一个。
+    #
+    # **两处点名偏差**（也写进 `docs/221`）：
+    #   * 只认 **socket 型 fd**：文件 fd（0/1/2 等）在 PE 上报 `POLLNVAL`，
+    #     而 Linux 会给它们 `POLLIN`/`POLLOUT`；
+    #   * 三个集合全空时**不睡**（WinSock 的 select 拿空集合直接 `WSAEINVAL`）。
+    #
+    # 事件位两边**不一样**（Linux `POLLIN`=1 / `POLLOUT`=4；Windows `POLLRDNORM`=0x100 /
+    # `POLLWRNORM`=0x10），所以进出各映射一次；`POLLNVAL` 这一档 Windows 没有，由这里补。
+
+    a.label("__ws_set_init")                    # rdi = setptr
+    xor_eax()
+    st32(RDI, 0, RAX)                           # fd_count = 0
+    ret_()
+
+    a.label("__ws_set_add")                     # rdi = setptr, rsi = handle → rax = 1 / 0(满)
+    ld32(RCX, RDI, 0)
+    cmp_ecx(WS_FD_COUNT)                        # WinSock 的 FD_SETSIZE = 64
+    jcc_l("ae", "__ws_sadd_full")
+    a.emit(mov_rr(RAX, RCX))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RDI)
+    st(RAX, 8, RSI)                             # fd_array[count] = handle
+                                                # ⚠ 偏移是 **8** 不是 4：Win64 上
+                                                # `SOCKET` 是 8 字节，`u_int fd_count` 后面
+                                                # 要按 8 对齐 —— 写进 4 就落进填充区，
+                                                # select 拿到的是垃圾句柄（症状：它报错）
+    add_ri(RCX, 1)
+    st32(RDI, 0, RCX)
+    movi(RAX, 1)
+    ret_()
+    a.label("__ws_sadd_full")
+    xor_eax()
+    ret_()
+
+    a.label("__ws_set_has")                     # rdi = setptr, rsi = handle → rax = 1 / 0
+    ld32(RCX, RDI, 0)
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    a.label("__ws_shas_loop")
+    a.emit(alu_rr(0x39, RDX, RCX))              # cmp rdx, rcx
+    jcc_l("ae", "__ws_shas_no")
+    a.emit(mov_rr(RAX, RDX))
+    imul_ri(RAX, 8)
+    add_rr(RAX, RDI)
+    ld(RAX, RAX, 8)                             # fd_array 在偏移 8（见 __ws_set_add）
+    a.emit(alu_rr(0x39, RAX, RSI))              # cmp rax, rsi
+    jcc_l("e", "__ws_shas_yes")
+    add_ri(RDX, 1)
+    jmp_l("__ws_shas_loop")
+    a.label("__ws_shas_no")
+    xor_eax()
+    ret_()
+    a.label("__ws_shas_yes")
+    movi(RAX, 1)
+    ret_()
+
+    a.label("__ws_poll")
+    st(RSP, 0x28, RDI)                          # fds
+    st(RSP, 0x30, RSI)                          # nfds
+    st(RSP, 0x38, RDX)                          # timeout（毫秒；< 0 = 无限等）
+    a.emit(mov_rr(RAX, RSI))
+    cmp_eax(WS_FD_COUNT)                        # 我们只认自己那张 64 格的 fd 表
+    jcc_l("a", "__ws_poll_einval")
+    a.call("__ws_wsa_start")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + 2 * WS_FDSET_CAP)
+    a.call("__ws_set_init")
+    # ---- 第一趟：清 revents、把要等的 handle 塞进集合 ----
+    xor_eax()
+    st(RSP, 0x40, RAX)                          # i = 0
+    a.label("__ws_poll_1l")
+    ld(RAX, RSP, 0x40)
+    ld(RCX, RSP, 0x30)
+    a.emit(alu_rr(0x39, RAX, RCX))              # cmp rax, rcx
+    jcc_l("ae", "__ws_poll_1d")
+    imul_ri(RAX, 8)
+    ld(RCX, RSP, 0x28)
+    add_rr(RAX, RCX)                            # rax = &pollfd[i]
+    st(RSP, 0x48, RAX)
+    ld32(RCX, RAX, 0)                           # fd
+    movi32(RDX, 0)
+    st16(RAX, 6, RDX)                           # revents = 0
+    cmp_ecx(0)
+    jcc_l("l", "__ws_poll_1n")                  # 负 fd：Linux 跳过它
+    a.emit(mov_rr(RDI, RCX))                    # edi = fd
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("ne", "__ws_poll_have")
+    ld(RAX, RSP, 0x48)
+    movi32(RCX, LINUX_POLLNVAL)
+    st16(RAX, 6, RCX)                           # 不是 socket ⇒ POLLNVAL
+    jmp_l("__ws_poll_1n")
+    a.label("__ws_poll_have")
+    st(RSP, 0x50, RAX)                          # SOCKET
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 4)                          # events
+    movi32(RAX, LINUX_POLLIN)
+    a.emit(alu_rr(0x85, RCX, RAX))              # test rcx, rax
+    jcc_l("e", "__ws_poll_ev_w")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_poll_einval")              # 集合满了：报错，不静默丢
+    a.label("__ws_poll_ev_w")
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 4)
+    movi32(RAX, LINUX_POLLOUT)
+    a.emit(alu_rr(0x85, RCX, RAX))              # test rcx, rax
+    jcc_l("e", "__ws_poll_1n")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_add")
+    test_rax()
+    jcc_l("e", "__ws_poll_einval")
+    a.label("__ws_poll_1n")
+    ld(RAX, RSP, 0x40)
+    add_ri(RAX, 1)
+    st(RSP, 0x40, RAX)
+    jmp_l("__ws_poll_1l")
+    # ---- 等 ----
+    a.label("__ws_poll_1d")
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld32(RCX, RDI, 0)
+    movi(RDX, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld32(RAX, RDX, 0)
+    add_rr(RCX, RAX)
+    test_ecx()
+    jcc_l("e", "__ws_poll_2")                   # 全空 ⇒ 不睡（见上面的偏差说明）
+    ld32(RAX, RSP, 0x38)
+    cmp_eax(0)
+    jcc_l("l", "__ws_poll_inf")
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    movi(RCX, 1000)
+    a.emit(group3(6, RCX))                      # div rcx → rax = 秒，rdx = 毫秒余数
+    movi(RCX, 1000)
+    a.emit(imul_rr(RDX, RCX))                   # 微秒 = (ms % 1000) * 1000
+    movi(RDI, PE_STATE_VA + WS_POLLTV)
+    st32(RDI, 0, RAX)
+    st32(RDI, 4, RDX)
+    st(RSP, 0x20, RDI)
+    jmp_l("__ws_poll_go")
+    a.label("__ws_poll_inf")
+    movi(RDX, 0)
+    st(RSP, 0x20, RDX)                          # 第五参 NULL ⇒ 无限等
+    a.label("__ws_poll_go")
+    movi32(RCX, 0)                              # WinSock 忽略 nfds
+    movi(RDX, PE_STATE_VA + WS_FDSETS)
+    movi(R8, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    movi(R9, 0)                                 # exceptfds = NULL
+    api("select")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    # ---- 第二趟：把就绪映射回 revents，数几个非零 ----
+    a.label("__ws_poll_2")
+    xor_eax()
+    st(RSP, 0x40, RAX)                          # i
+    st(RSP, 0x58, RAX)                          # n = 0
+    a.label("__ws_poll_2l")
+    ld(RAX, RSP, 0x40)
+    ld(RCX, RSP, 0x30)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_poll_2d")
+    imul_ri(RAX, 8)
+    ld(RCX, RSP, 0x28)
+    add_rr(RAX, RCX)
+    st(RSP, 0x48, RAX)
+    ld32(RCX, RAX, 0)
+    cmp_ecx(0)
+    jcc_l("l", "__ws_poll_2n")
+    a.emit(mov_rr(RDI, RCX))
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_poll_2n")                  # 非 socket（POLLNVAL 已经写好）
+    st(RSP, 0x50, RAX)
+    ld(RDX, RSP, 0x48)
+    ld16z(RCX, RDX, 6)
+    st(RSP, 0x60, RCX)                          # rev = 上一趟留下的 revents
+    movi(RDI, PE_STATE_VA + WS_FDSETS)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("e", "__ws_poll_2w")
+    ld(RAX, RSP, 0x60)
+    movi32(RCX, LINUX_POLLIN)
+    add_rr(RAX, RCX)                            # 位不相交 ⇒ 加法就是或
+    st(RSP, 0x60, RAX)
+    a.label("__ws_poll_2w")
+    movi(RDI, PE_STATE_VA + WS_FDSETS + WS_FDSET_CAP)
+    ld(RSI, RSP, 0x50)
+    a.call("__ws_set_has")
+    test_rax()
+    jcc_l("e", "__ws_poll_2s")
+    ld(RAX, RSP, 0x60)
+    movi32(RCX, LINUX_POLLOUT)
+    add_rr(RAX, RCX)
+    st(RSP, 0x60, RAX)
+    a.label("__ws_poll_2s")
+    ld(RDX, RSP, 0x48)
+    ld(RAX, RSP, 0x60)
+    st16(RDX, 6, RAX)
+    test_rax()
+    jcc_l("e", "__ws_poll_2n")
+    ld(RAX, RSP, 0x58)
+    add_ri(RAX, 1)
+    st(RSP, 0x58, RAX)
+    a.label("__ws_poll_2n")
+    ld(RAX, RSP, 0x40)
+    add_ri(RAX, 1)
+    st(RSP, 0x40, RAX)
+    jmp_l("__ws_poll_2l")
+    a.label("__ws_poll_2d")
+    ld(RAX, RSP, 0x58)
+    jmp_l("__ws_ret")
+    a.label("__ws_poll_einval")
+    movi(RAX, -22)                              # EINVAL
+    jmp_l("__ws_ret")
+
     # （cmdline 字面量在 .idata 的固定偏移 PE_LIT_OFF 上，shim 用常量取址，不必内嵌）
 
 
@@ -3041,6 +3371,21 @@ def load_foreign(path: Path):
 #: System V AMD64 整数实参寄存器 (我们**自己的**约定是实参走栈, 这一套只给 extern 调用点)。
 C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 
+#: **链接器今天真正发出的收编面**（`docs/219` §6 第 1 条）。`Emitter.emit_conscript`
+#: 发的那几个名字 —— 与 `loment/tools/lomelf.lomt` 的 `emit_conscript` 同序同字节。
+#:
+#: ⚠ 它是 `tools/loment_ports.py` 的 `PROVIDE` 的**子集**，而这件事有一条判据钉着
+#: （`loment_ports_test::test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set`）：
+#: 尺子说"可闭合"而链接器发不出来，那条产物就会在链接期报"未定义的符号"，
+#: **与表上的话正好相反**。反过来不要求 —— 表里还有一批**尚未实现**的
+#: （`calloc` / `realloc` / `strlen` / `__udivdi3` …），那是 S1d/S1e 的活。
+#:
+#: ⚠ `malloc` / `free` 多一条条件：**堆在才发** —— 它们是一层"换成 C ABI"的薄壳，
+#: 底下调的是 `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1）。没有堆就没有
+#: "我们的堆"可指，发了会悬着一个未定义的调用。判据是**我们这份 IR 里有没有那两条定义**
+#: （`funcs` 的名字），不是文本里出现过那个名字。
+CONSCRIPT = ("memcpy", "memset", "memcmp", "malloc", "free")
+
 
 def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     objects = objects or []
@@ -3089,6 +3434,12 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     em.emit_entry_stub("_start")
     for f in funcs:
         em.emit_func(f)
+    # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
+    # 于是它们**不再是未定义符号** —— 从表上划掉。粒度是"有没有外部对象"，不是
+    # "有没有人要它"：精确到后者要链接器先算出需求集，自举侧 `lomelf.lomt` 一次只驻留
+    # 一个对象，那一格留到下一轮（`docs/219` §8b）。**测量不受影响** —— 那始终是尺子的活。
+    if objects:
+        em.emit_conscript({f.name for f in funcs})
     # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
     #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
     #   ② **建符号表**: 把我们自己的标签与所有对象的导出符号合成一张表。**必须先全摆完**:

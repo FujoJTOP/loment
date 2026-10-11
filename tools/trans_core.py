@@ -133,6 +133,23 @@ class Dialect:
     #: 布尔的整型投影用哪个宽度（`bool -> int` 的 `as <x>`）。**粗粒度的兜底** ——
     #: 真需求是"按上下文的具体整型"，现在传不进来，所以取这一族的默认宽度。
     int_default: str = "i32"
+    #: **要不要按源语言的"寻常算术转换"插入整型转换。**
+    #:
+    #: `types` 里列了好几档整型（C 是 `int`/`unsigned`/`long`/`unsigned long` —— 见
+    #: `docs/186` §4），可**混着用**的时候两侧怎么办，各语言规则不同：
+    #:
+    #:   * C / C++ —— **向更宽 / 无符号那侧提升**。这一门**能表达**那个意思（`as`），
+    #:     所以**转**：`int a = -1; unsigned b = 0; a > b` 在 C 里是 `(a as u32) > b`
+    #:     （`a` 变成 4294967295 ⇒ 真）。不转的话本语言按**有符号**算，答**假**。
+    #:     同一件事还有一处：`int x = 1; long y = 2147483647;` 里 `(x + y > 0)` 原本
+    #:     答 0（`x + y` 在 64 位算、`> 0` 却在 32 位比），而 C 答 1。
+    #:   * Java / C# —— Java 的窄化转换**是编译错**（要显式写 `(int)`），C# 只有
+    #:     常量折叠才隐式收窄。按 C 的规则插转换会写出这两门**本不接受**的程序，
+    #:     所以**不转**（保持现状：让它在 check 那层响亮地失败）。
+    #:   * Go —— 连**加宽**都要显式 `int64(x)`，规则又不一样。
+    #:
+    #: 所以这是**方言面**上的开关，不是 `if <语言>`（`docs/188` §7.1）。
+    usual_arith: bool = False
     #: 撞上 Loment 保留字时给名字加的后缀。**每门不同** —— 两门用同一个后缀的话，
     #: 将来把两个单元合起来会莫名其妙撞名。
     safe_suffix: str = "_x"
@@ -770,6 +787,77 @@ class Parser:
 # ---------------------------------------------------------------- 发射
 
 #: Loment 的保留字 —— 生成的标识符不能撞上。**这一张四门共用**（保留字是本语言的）。
+def _lit32(e: object) -> None:
+    """**整数字面量必须在 32 位以内**，否则**拒**（不再静默截断）。
+
+    C 里超 32 位的字面量是 `long`（或 `unsigned`），而这一门的 `int` 是 32 位。
+    更麻烦的是：本语言里**没标注宽度的整数字面量是不确定的**，实测 `8589934591`
+    读出来就是 `4294967295` —— 在**解析那一层**截断，事后 `as i64` 也救不回来
+    （实测 `(8589934591 as i64) == (4294967295 as i64)` 是**真**）。
+
+    子集没有更宽的字面量写法（没有后缀、没有专门的字面量类型），所以这里**拒** ——
+    静默截断会让 `0x1FFFFFFFF == 0xFFFFFFFF` 从假变真。
+    """
+    if not (-(2 ** 31) <= e.v < 2 ** 31):
+        raise Unsupported(
+            f"第 {e.line} 行: 整数字面量 {e.v} 超出 32 位。C 里它是一个 `long`"
+            f"（或 `unsigned`），而这一门的 `int` 是 32 位、**没有更宽的字面量写法**；"
+            f"放着不管它会在解析那一层被静默截断。请把它拆小，或者改成运行时算。")
+
+
+#: **比较**运算符（Loment 侧的拼法）—— 这几个的结论会被**宽窄 / 有符号无符号**翻掉，
+#: 所以 `Emitter.pinned` 只对它们的操作数生效（见那一处）。
+#: `==` / `!=` 也在内：宽窄不同时它们同样给出相反的答案
+#: （`0x1FFFFFFFF == 0xFFFFFFFF` 在 64 位上为假、在 32 位上为真）。
+_CMP_OPS = frozenset({"<", ">", "<=", ">=", "==", "!="})
+
+#: **算术**运算符（转换要按"寻常算术转换"插在两边的那些）。移位不在内 ——
+#: C 里移位的结果类型**只看左操作数**，右操作数不参与提升（`Dialect.usual_arith`）。
+_ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "&", "|", "^"})
+
+#: 整型的**秩**（C 的寻常算术转换按它走）。秩 0 那几档**比 `int` 还窄** ——
+#: C/C++ 里它们先被**整型提升**到 `int`（下面 `_promote`），再参与寻常算术转换。
+#: `int` 与 `unsigned`（同 `signed`/`unsigned char` 那类）同秩，`long` 更高。
+_INT_RANK = {"i8": 0, "u8": 0, "i16": 0, "u16": 0, "i32": 1, "u32": 1, "i64": 2, "u64": 2}
+_INT_UNSIGNED = frozenset({"u8", "u16", "u32", "u64"})
+
+
+def _promote(t: str) -> str:
+    """**整型提升**：比 `int` 窄的一律先升到 `i32`（`u16` 的最大值也装得下）。"""
+    return "i32" if _INT_RANK[t] == 0 else t
+
+
+def _usual_arith(a: str | None, b: str | None) -> str | None:
+    """C 的**寻常算术转换**：给了两边的整型，返回运算该在哪个宽度做。
+
+    `None` 表示"这一侧不定型"（字面量，或全是字面量的式子）—— 由**上下文**决定，
+    所以另一侧说了算；两侧都是 `None` 才返回 `None`。
+
+    C 的规则（就这几档，`docs/186` §4 那张表）：
+      0. 比 `int` 窄的先**整型提升**到 `i32`。
+      1. 同型 ⇒ 同型。
+      2. 同秩不同符号 ⇒ **无符号**那侧（`int` + `unsigned` = `unsigned`）。
+      3. 秩不同 ⇒ 秩高的那侧**装得下**秩低那侧的全部值就取它
+         （`long` 装得下 `int` / `unsigned`）。
+      4. 否则 ⇒ 秩高那种的**无符号版**（`int` + `unsigned long` = `unsigned long`）。
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    a, b = _promote(a), _promote(b)
+    if a == b:
+        return a
+    ra, rb = _INT_RANK[a], _INT_RANK[b]
+    if ra == rb:
+        return a if a in _INT_UNSIGNED else b
+    hi, lo = (a, b) if ra > rb else (b, a)
+    # **能装下**：秩高的那侧是无符号时不一定装得下同秩的有符号 —— 而这里秩不同，
+    # 所以只要高的那侧是有符号就够（`i64` 装得下 `i32` / `u32`）。
+    if hi not in _INT_UNSIGNED:
+        return hi
+    return "u64" if _INT_RANK[hi] == 2 else "u32"
+
 _LOMENT_KW = {
     "module", "use", "fn", "let", "if", "else", "while", "return", "pub", "extern",
     "const", "struct", "enum", "capability", "guard", "excluded", "revocable",
@@ -786,9 +874,14 @@ class Emitter:
 
     def __init__(self, fns: dict[str, str], d: "Dialect",
                  consts: dict[str, str] | None = None,
-                 fname: dict[str, str] | None = None) -> None:
+                 fname: dict[str, str] | None = None,
+                 fparams: dict[str, list[str]] | None = None) -> None:
         #: 本单元**所有**函数的返回类型。调用点的类型靠它 —— 子集里没有跨单元调用。
         self.fns = fns
+        #: 函数名 -> 形参的 Loment 类型表。**实参转换要按它**（`#125`：`int x = 7;
+        #: f(x)` 调 `unsigned int f(unsigned int)`，C 里 `x` 隐式转 `u32`）。
+        #: 不知道的函数（`extern`、跨单元）没有条目 ⇒ **不转** —— 宁可少转也别乱转。
+        self.fparams: dict[str, list[str]] = dict(fparams or {})
         #: C 函数名 -> 发出去的名字（`translate` 算好的）。**函数名也要过 `safe()`** ——
         #: 撞上本语言保留字的函数名会让**产物本身**过不了词法（`pub fn command(…)` 里
         #: `command` 是语句关键字），而调用点还得跟着改，所以整份单元算一次、两处共用。
@@ -801,6 +894,9 @@ class Emitter:
         self.consts: dict[str, str] = dict(consts or {})
         #: C 名字 -> 发出去的名字。`for` 的改名外提就靠这张表（见文件头 §语义选择 2）。
         self.vars: dict[str, str] = {}
+        #: **块作用域栈**（`#120`）。每进一个 `if` / `while` / `for` 的体压一层，
+        #: 记着那一层里重新绑定过的名及其外层原值 —— 出块时逆序还回去（`self.block`）。
+        self.scopes: list[dict[str, tuple[str | None, str | None]]] = []
         #: **变量声明时的类型**（Loment 类型串）。发射器只需要分**两档**：
         #: `bool` 与"其它"（都当整数）。不分的话 `bool ok = …; if (ok) …` 会走错：
         #: `ty_of` 一律报 "int"，于是 Java 那条 `coerce_int_to_bool=False` 的路
@@ -826,6 +922,59 @@ class Emitter:
         while raw not in self.vars and nm in self.vars.values():
             nm += "_"
         return nm
+
+    def decl_bind(self, name: str, line: int) -> str:
+        """一条**声明**要发出去的名字 —— 并管住"同名"这件事（`#119` / `#120`）。
+
+        * **外层已经有同名** ⇒ 源语言里这是**遮蔽**（块作用域），而本语言**没有块作用域**
+          （`docs/188` §0.1.1 实测：块里 `let` 的名块外看得见），不能靠 `{ }` 圈住。
+          所以**改名**，出块时把外层那个还回去（`self.block` 管还原）。
+        * **同一层里再来一条同名** ⇒ 源语言里是编译错（C 报 "redefinition"）——**拒**。
+          放过去的话它静默变成一次赋值，程序算出不同的数（`#120` 的 Also 那张表：
+          `int x = 1; int x = 2; return x;` 在 C 里编不过，在这里却答 2、退 0）。
+        """
+        if self.scopes:
+            cur = self.scopes[-1]
+            if name in cur:
+                raise Unsupported(
+                    f"第 {line} 行: `{name}` 在同一个块里声明了两次"
+                    f"（源语言里这是编译错）—— 放过去它只会变成一次赋值，数就不同了")
+            old = self.vars.get(name)
+            cur[name] = (old, self.varty.get(name))
+            if old is not None:
+                nm = self.fresh(name)
+                self.vars[name] = nm
+                return nm
+        elif name in self.vars:
+            raise Unsupported(
+                f"第 {line} 行: `{name}` 在同一个函数里声明了两次"
+                f"（源语言里这是编译错）—— 放过去它只会变成一次赋值，数就不同了")
+        nm = self.bind(name)
+        self.vars[name] = nm
+        return nm
+
+    def block(self, body: list, depth: int) -> None:
+        """发一个**块**（`if` / `while` / `for` 的体），并**保住源语言的块作用域**。
+
+        体里声明的名出块之后就不该再看得见（源语言的规则）。本语言没有块作用域，
+        所以：体里**遮蔽**外层同名的声明走改名（`decl_bind`），体里**新**声明的名
+        出块时**撤掉** —— 不撤的话，函数后面再声明一个同名会被当成"重复声明"而**误拒**
+        （`int f(int c) { if (c) { int y = 1; } int y = 2; return y; }` 在 C 里是合法的）。
+        """
+        saved: dict[str, tuple[str | None, str | None]] = {}
+        self.scopes.append(saved)
+        try:
+            for s in body:
+                self.stmt(s, depth)
+        finally:
+            self.scopes.pop()
+            for name, (old, oldty) in saved.items():
+                if old is None:
+                    self.vars.pop(name, None)
+                    self.varty.pop(name, None)
+                else:
+                    self.vars[name] = old
+                    self.varty[name] = oldty      # type: ignore[assignment]
 
     def fresh(self, base: str) -> str:
         while True:
@@ -869,6 +1018,49 @@ class Emitter:
         """这是不是一个**模块常量**（而不是局部名）。"""
         return n in self.consts
 
+    # ---- 整型宽度：只有**已知类型**的式子参与提升（字面量不定型，由上下文定）
+    def num_ty(self, e: object) -> str | None:
+        """表达式在源语言宽度规则下的**整型**；`None` = "不定型或不参与提升"。
+
+        `None` 有两种来源，处理它们的办法一样（**不主动转**，交给接收方），
+        所以合成一个返回值：
+          * **字面量**（或全是字面量的式子）—— 不定型，接收方说了算（`docs/188` §7.1.1；
+            一律钉成 `i32` 会弄坏 `u8 probe() { return 255; }` 那种，C# 的 `Byte.cs` 就是这么红的）；
+          * 结果**不是整数**（比较 / `&&` / `||` 出 bool）—— 提升不适用。
+
+        **调用点跟着改名走**（`self.fname`）不在这里管 —— 这里只问类型。
+        """
+        if isinstance(e, Var):
+            t = self.varty.get(e.name)
+            return t if t in _INT_RANK else None
+        if isinstance(e, Call):
+            t = self.fns.get(e.name)
+            return t if t in _INT_RANK else None
+        if isinstance(e, Un):
+            # 一元 `-` 出的是**提升后**的操作数类型（`-x` 里 `x` 已经是那一档了）。
+            return self.num_ty(e.e) if e.op == "-" else None
+        if isinstance(e, Bin):
+            if e.op in ("&&", "||") or self.d.bin[e.op][2]:
+                return None                      # 比较 / 逻辑 ⇒ bool
+            if e.op in ("<<", ">>"):
+                return self.num_ty(e.l)          # C：移位的类型**只看左操作数**
+            return _usual_arith(self.num_ty(e.l), self.num_ty(e.r))
+        return None
+
+    def conv(self, e: object, ty: str | None) -> str:
+        """把表达式转成 `ty`（`ty` 为 `None` = 不转，按它自己的类型发）。
+
+        两条纪律（都写在 `docs/188` §7.1.1 与 #125 / #123 里）：
+          * **只转已知类型的式子** —— 字面量不定型，接收方说了算（见 `num_ty`）；
+          * **同型不加** —— 别写 `(v as i32)` 这种废话。
+        """
+        if ty is None:
+            return self.ex(e, "int")
+        t = self.num_ty(e)
+        if t is None or t == ty:
+            return self.ex(e, "int")
+        return f"({self.ex(e, 'int')} as {ty})"
+
     def want_of(self, ty: str) -> str:
         """一个**声明出来的** Loment 类型，在这个发射器眼里是"整数场合"还是
         "布尔场合"。
@@ -879,6 +1071,20 @@ class Emitter:
         本语言的类型错。这一族里只有 `bool` 与整数两档要分（见 `self.varty`）。
         """
         return "bool" if ty == "bool" else "int"
+
+    def sink(self, e: object, ty: str) -> str:
+        """表达式放进一个**声明类型为 `ty` 的位置**（赋值 / 返回 / 实参 / `for` 初值）。
+
+        源语言在这里做**隐式整型转换**（C：`unsigned int f(unsigned int v){return v;}`
+        被 `int` 调用时，`v` 按 `u32` 收、按 `i32` 还 —— `#125`）。规则能表达就转
+        （这一门的 `as` 做得到），所以**转**；不开 `usual_arith` 的方言
+        （Java / C# / Go）**不转** —— 它们的规则各不同，硬转会写出那些语言本不接受
+        的程序。`bool` 位置照旧走 `ex` 那条投影（`want_of`）。
+        """
+        w = self.want_of(ty)
+        if w != "int" or not self.d.usual_arith:
+            return self.ex(e, w)
+        return self.conv(e, ty if ty in _INT_RANK else None)
 
     def ex(self, e: object, want: str) -> str:
         """表达式，**在 `want` 这个上下文里**的写法（必要时补转换）。
@@ -919,10 +1125,51 @@ class Emitter:
             return f"(({raw}) as {self.d.int_default})"
         raise AssertionError((got, want))
 
+    def pinned(self, e: object, ty: str | None = None) -> str:
+        """把表达式的操作数**按 `ty` 钉住宽度**，字面量**叶子式**地钉。
+
+        只用在**比较**（`< > <= >= == !=`，见 `_CMP_OPS`）的两侧，理由是
+        **只有它们会被宽窄 / 有符号无符号翻转结论**：
+
+            本语言里没标注宽度的整数字面量是**不确定的**。实测 `(0 - 1) < 0` 编出来是
+            `icmp ult i32`（**无符号**），而 `((0 as i32) - (1 as i32)) < (0 as i32)`
+            才是 `icmp slt`。C 在这里是**有符号**的 —— 于是 `-1 < 0` 在 C 是真、在这边
+            是假。给操作数带上 `as`，整条表达式就有了确定的类型。
+
+        为什么要**递归到叶子**而不是给整条套一个 `as`：`as` 套在**没定型**的式子上
+        改不了它内部怎么算（`(0 - 1)` 里那个减法还是无符号的）。所以必须一路钉到
+        每个字面量。`ty` 默认取本族的 `int_default`（没有宽度信息时的兜底）；
+        C 那门会传**提升后**的类型（见 `raw(Bin)`）—— 于是 `int a; unsigned b; a > b`
+        钉成 `u32`，与 C 的规则一致。
+
+        **别处（赋值 / 返回 / 实参）不走这里** —— 那些位置的宽度由**接收方**决定
+        （`u8` / `u64` …），走 `conv`，而且**只转已知类型的式子**。
+
+        超 i32 的字面量**拒**（`_lit32`）—— 这一门没有更宽的字面量写法，而解析层
+        就会截断，`as` 救不回来。所以到不了这里。
+        """
+        if ty is None:
+            ty = self.d.int_default
+        if isinstance(e, Lit) and not e.b:
+            _lit32(e)
+            # **括号自己带上**（与 `ex` 里那处 `as` 同一个理由）：`(0 as i32) < (1 as i32)`
+            # 里的 `i32 <` 否则会被 parser 当成**泛型实参**的开头。
+            return f"({e.v} as {ty})"
+        if isinstance(e, Bin) and e.op not in ("&&", "||"):
+            op, _want, _b = self.d.bin[e.op]
+            return f"({self.pinned(e.l, ty)} {op} {self.pinned(e.r, ty)})"
+        t = self.num_ty(e)
+        if t is not None and t != ty:
+            return f"({self.ex(e, 'int')} as {ty})"
+        return self.ex(e, "int")
+
     def raw(self, e: object) -> str:
         """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
         if isinstance(e, Lit):
-            return ("true" if e.v else "false") if e.b else str(e.v)
+            if e.b:
+                return "true" if e.v else "false"
+            _lit32(e)
+            return str(e.v)
         if isinstance(e, Var):
             if self.const_name(e.name):
                 return e.name          # 模块常量名照抄 —— `pub const` 在同层
@@ -933,9 +1180,26 @@ class Emitter:
                     f"的 `consts` 发 —— 名字对不上的话就是那一步没收它）")
             return self.vars[e.name]
         if isinstance(e, Call):
+            # **那道闸在这里也要过一遍**（`docs/198` §3）。`ty_of` 对 `ast.Call` 会查
+            # `self.fns`（"Stage A 不跨单元"那条），而 `raw` 原先**不查**、直接发名字 ——
+            # 于是同一个"本单元没有的函数"，写在**值位**被拒、写在**语句位**照发。
+            # 判决取决于"恰好写在哪个位置"不是设计，是**漏**：那道闸的用意是"跨单元调用
+            # 要显式声明"，与写法位置无关。
+            #
+            # **复用 `ty_of`**，不在这里另抄一份 —— 两处各写一遍必然漂。
+            self.ty_of(e)
             # 调用点跟着函数名的改名走（见 `fname`）。
             nm = self.fname.get(e.name, e.name)
-            return f"{nm}({', '.join(self.ex(a, 'int') for a in e.args)})"
+            # **实参按形参类型转**（`#125`）。形参表不知道（`extern` / 跨单元）或
+            # 个数对不上（变参）就不转 —— 宁可少转也别乱转。
+            ps = self.fparams.get(e.name)
+            if ps is not None and len(ps) == len(e.args) and self.d.usual_arith:
+                args = [self.ex(a, "bool") if self.want_of(t) == "bool"
+                        else self.conv(a, t if t in _INT_RANK else None)
+                        for a, t in zip(e.args, ps)]
+            else:
+                args = [self.ex(a, "int") for a in e.args]
+            return f"{nm}({', '.join(args)})"
         if isinstance(e, Un):
             if e.op == "!":
                 # Loment 的 `!` 只收 bool，而 C 的 `!x` 收 int —— 直接写成 `x == 0`
@@ -943,6 +1207,17 @@ class Emitter:
             return f"({e.op}{self.ex(e.e, 'int')})"
         if isinstance(e, Bin):
             op, want, _b = self.d.bin[e.op]
+            if op in _CMP_OPS:
+                # **比较的操作数要钉住宽度**（见 `pinned`）：先按源语言的寻常算术转换
+                # 算该在哪个宽度比，再**叶子式**地钉那张表。不定型才退回 `int_default`。
+                pt = None
+                if self.d.usual_arith:
+                    pt = _usual_arith(self.num_ty(e.l), self.num_ty(e.r))
+                return f"({self.pinned(e.l, pt)} {op} {self.pinned(e.r, pt)})"
+            if self.d.usual_arith and op in _ARITH_OPS:
+                # **算术也要按提升后的宽度做**（`int` + `long` 在 C 里是 64 位加法）。
+                pt = _usual_arith(self.num_ty(e.l), self.num_ty(e.r))
+                return f"({self.conv(e.l, pt)} {op} {self.conv(e.r, pt)})"
             return f"({self.ex(e.l, want)} {op} {self.ex(e.r, want)})"
         raise AssertionError(type(e))
 
@@ -955,20 +1230,19 @@ class Emitter:
         if isinstance(s, Decl):
             if s.ty == "()":
                 raise Unsupported(f"第 {s.line} 行: 不能声明 `void` 变量")
-            self.vars[s.name] = self.bind(s.name)
+            nm = self.decl_bind(s.name, s.line)
             self.varty[s.name] = s.ty
             if s.init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
-                self.out(f"let {self.vars[s.name]}: {s.ty} = 0;", depth)
+                self.out(f"let {nm}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {self.vars[s.name]}: {s.ty} = "
-                         f"{self.ex(s.init, self.want_of(s.ty))};", depth)
+                self.out(f"let {nm}: {s.ty} = {self.sink(s.init, s.ty)};", depth)
             return
         if isinstance(s, Assign):
             if s.name not in self.vars:
                 raise Unsupported(f"第 {s.line} 行: 赋值给没声明过的 `{s.name}`")
-            w = self.want_of(self.varty.get(s.name, "int"))
-            self.out(f"{self.vars[s.name]} = {self.ex(s.e, w)};", depth)
+            self.out(f"{self.vars[s.name]} = "
+                     f"{self.sink(s.e, self.varty.get(s.name, 'int'))};", depth)
             return
         if isinstance(s, Return):
             if s.e is None:
@@ -989,24 +1263,23 @@ class Emitter:
                 # 只有**翻 `bool` 返回的函数**才撞得到这一处，而 C 那门根本没有 bool
                 # （Java/C# 的语料里也没有返回 bool 的函数），所以它一直没被逼出来 ——
                 # C++ 一上来就撞到了。
-                self.out(f"return {self.ex(s.e, 'bool' if self.ret == 'bool' else 'int')};",
-                         depth)
+                self.out(f"return {self.sink(s.e, self.ret)};", depth)
             return
         if isinstance(s, If):
             self.gap()
             self.out(f"if {self.ex(s.cond, 'bool')} {{", depth)
-            self.stmts(s.then, depth + 1)
+            self.block(s.then, depth + 1)
             if s.els is None:
                 self.out("}", depth)
             else:
                 self.out("} else {", depth)
-                self.stmts(s.els, depth + 1)
+                self.block(s.els, depth + 1)
                 self.out("}", depth)
             return
         if isinstance(s, While):
             self.gap()
             self.out(f"while {self.ex(s.cond, 'bool')} {{", depth)
-            self.stmts(s.body, depth + 1)
+            self.block(s.body, depth + 1)
             self.out("}", depth)
             return
         if isinstance(s, For):
@@ -1044,15 +1317,17 @@ class Emitter:
             if s.init.init is None:
                 self.out(f"let {new}: {s.init.ty} = 0;", depth)
             else:
-                self.out(f"let {new}: {s.init.ty} = "
-                         f"{self.ex(s.init.init, self.want_of(s.init.ty))};", depth)
+                self.out(f"let {new}: {s.init.ty} = {self.sink(s.init.init, s.init.ty)};",
+                         depth)
             saved = (s.init.name, old, oldty)
         elif s.init is not None:
             self.stmt(s.init, depth)
 
         cond = self.ex(s.cond, "bool") if s.cond is not None else "true"
         self.out(f"while {cond} {{", depth)
-        self.stmts(s.body, depth + 1)
+        # 体是**独立的一层作用域**（`#119`：体里 `int i = 9;` 遮蔽循环变量时，
+        # 步进必须还写到循环变量那个名上，而不是被遮蔽的那个）。
+        self.block(s.body, depth + 1)
         if s.step is not None:
             self.stmt(s.step, depth + 1)  # 步进在体**之后**
         self.out("}", depth)
@@ -1069,6 +1344,7 @@ class Emitter:
 
     def emit_fn(self, f: Fn) -> str:
         self.vars = {}
+        self.scopes = []
         for (_t, n, _l) in f.params:
             self.vars[n] = self.bind(n)
         self.varty = {n: t for (t, n, _l) in f.params}
@@ -1128,10 +1404,13 @@ def translate(src: str, d: "Dialect", keep: set[str] | None = None,
         taken.add(nm)
         fname[f.name] = nm
     out = []
+    # 函数名 -> 形参的 Loment 类型表。**实参转换要用它**（`#125`）—— 与 `rets` 一样
+    # 整份单元算一次。`extern` 那种不在表里的照旧"不转"。
+    pars = {f.name: [t for (t, _n, _l) in f.params] for f in fns}
     for f in fns:
         if keep is not None and f.name not in keep:
             continue
-        out.append(Emitter(rets, d, consts, fname).emit_fn(f))
+        out.append(Emitter(rets, d, consts, fname, pars).emit_fn(f))
     return "\n\n".join(out) + "\n"
 
 

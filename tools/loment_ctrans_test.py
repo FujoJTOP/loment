@@ -91,7 +91,10 @@ def _coerce_expected() -> int:
     ca, cb, cc = 1, 2, 3
     chain = (int(ca < cb) < cc) * 8 + (int(ca < cb) <= cc) * 4 \
         + ((int(ca < cb)) << 1) * 2 + ((int(ca > cb)) >> 1)
-    return (x + y + z + w + xorv + shifted + chain) % 256
+    # **有符号那一面**（照 C 语义手推，不抄 C 的结果）：
+    #   `(0 - 1) < 0` 是**真**（1）—— 有符号比较；无符号的话 `-1` 是个大正数，为假
+    sc = int((0 - 1) < 0)
+    return (x + y + z + w + xorv + shifted + chain + sc * 4) % 256
 
 
 def _scoping_expected() -> int:
@@ -186,6 +189,55 @@ def _numeric_expected() -> int:
     return total % 256
 
 
+def _widths_expected() -> int:
+    """`loment/ctrans/widths.c` 的独立算法（照 C 的**宽度规则**手推，不抄 C 的输出）。
+
+    这一份专门混用几种整数宽度，所以推的时候必须**把每一档显式掩码**，对上的才是
+    C 的规则而不是"照着译文反推"：
+
+      * `u32` 是 32 位无符号 —— `(-1)` 收进来是 `4294967295`
+      * `int` 收下一个 `u32` / `i64` 是**按 32 位截断再当有符号看**
+      * `long` 的加宽是**符号扩展**（所以 `-1` 还是 `-1`）
+
+    两侧一起错的典型症状是"译文与 clang 都答同一个数"，所以每一个子结论各推一遍、
+    最后按 main 里的位权凑起来（与 `_coerce_expected` 同一个手法）。
+    """
+    def u32(v: int) -> int:
+        return v & 0xFFFFFFFF
+
+    def i32(v: int) -> int:
+        v &= 0xFFFFFFFF
+        return v - 2 ** 32 if v >= 2 ** 31 else v
+
+    mixed_cmp = int(u32(-1) > 0)                      # `(unsigned)a > b`，a = -1
+    mixed_add = int(u32(u32(-1) + 1) == 0)            # `-1 + 1u` 在 32 位回绕成 0
+    long_cmp = int((1 + 2147483647) > 0)              # 加法与比较都在 64 位
+    narrow_ret = int(i32(u32(-1)) == -1)              # 实参转 u32、返回值转 i32
+    widen_arg = int(u32(-1) > 100)                    # 收进来的 -1 是 4294967295
+    sink_ok = int(i32(-1) == -1) + int(i32(5) == 5)   # i64 -> i32、u32 -> i32
+    return (mixed_cmp * 1 + mixed_add * 2 + long_cmp * 4
+            + narrow_ret * 8 + widen_arg * 16 + sink_ok * 32) % 256
+
+
+def _blockscope_expected() -> int:
+    """`loment/ctrans/blockscope.c` 的独立算法（照 C 的**块作用域**手推）。
+
+    这一份的四段各自对应本语言**没有**块作用域这件事的一条后果（见 `Emitter.block`）：
+
+      * `if_shadow(1)` / `while_shadow()` —— 体里那句赋值改的是**体里那个** x，
+        出了块就没了，函数层那个还是初值 1；
+      * `for_shadow()` —— 三轮各加 **9**（体里那个 `i = 9`），步进改的是循环变量；
+      * `redecl_ok(1)` —— 函数层那句 `int y = 2` **后来居上**（两处作用域不同，
+        在 C 里合法）⇒ 2。
+    """
+    if_shadow = 1
+    for_shadow = 9 * 3
+    while_shadow = 1
+    redecl_ok = 2
+    return (if_shadow * 1 + int(for_shadow == 27) * 2
+            + while_shadow * 4 + redecl_ok * 8) % 256
+
+
 #: 语料表：`(文件名, 期望退出码)`。两边都真编真跑，各自的数还要与这里对一次 ——
 #: 否则"翻译器与 clang 一起错成同一副样子"会被当成通过。
 CORPUS = [
@@ -193,6 +245,8 @@ CORPUS = [
     ("coerce.c", _coerce_expected()),
     ("scoping.c", _scoping_expected()),
     ("numeric.c", _numeric_expected()),
+    ("widths.c", _widths_expected()),
+    ("blockscope.c", _blockscope_expected()),
 ]
 
 TESTS: list = []
@@ -396,11 +450,69 @@ def test_out_of_subset_is_loud():
     except lomt_from.NotRepresentable as e:
         msg = str(e)
         assert "switch" in msg, f"报的话里要指出是 `switch`，实得: {msg}"
-        # 一份文件里往往十几个函数，只说"子集外"用户不知道该去改哪一个
-        assert "带正文的" in msg or "1 个" in msg, f"要说得清范围: {msg}"
+        # **点名到函数** —— 这条判据的 docstring 一直写着"报得出是哪个函数"，
+        # `docs/186` §4 也是这么承诺的（"一份文件里往往十几个函数，只说'子集外'
+        # 用户不知道该去改哪一个"）。而断言原先只查"说得清范围"
+        # （`带正文的` / `1 个`）—— 那句话把承诺**弱化**掉了：
+        # "4 个带正文的函数里有子集外的写法"说得清范围、却**一个函数名都没有**，
+        # 而且那个数是**所有**带正文的函数，不是"有几个出问题"。
+        assert "with_switch" in msg, f"要点名到出问题的那个函数（docs/186 §4）: {msg}"
         print(f"      子集外报得出: {msg[:90]}…")
         return
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
+
+
+@test
+def test_comparison_operands_are_pinned_to_a_signed_width():
+    """**比较的操作数要钉住宽度** —— 否则 C 的有符号比较在这边按**无符号**做。
+
+    本语言里**没标注宽度的整数字面量是不确定的**。实测（原生 Loment，不经 C 前端）：
+
+        pub fn main() -> i32 { return ((-1) < 0) as i32; }
+        ->  %t2 = icmp ult i32 %t1, 0        ← **无符号**
+        变量形态（`let a: i32 = 0 - 1; a < 0`）才是 `icmp slt`
+
+    于是 C 的 `-1 < 0`（真）翻过来是**假**。给比较的操作数带上 `as`，表达式就有了
+    确定的类型：`((0 as i32) - (1 as i32)) < a` -> `icmp slt` ✓。
+
+    **超 i32 的字面量只能拒**（不再静默截断，也不再往 `i64` 上钉）—— C 里那两个
+    常量是 `long`，可这一门**没有更宽的字面量写法**：没标注宽度的整数字面量在
+    **解析那一层**就被截断（实测 `8589934591` 读出来是 `4294967295`），事后 `as i64`
+    也救不回来。于是 `0x1FFFFFFFF == 0xFFFFFFFF` 会从**假**变**真**。测得出来、
+    救不回来 —— 那就只剩拒。
+
+    **别处不许钉**：赋值 / 返回 / 实参的宽度由**接收方**决定（`u8` / `u64` …），
+    而翻译器不跟宽度（`docs/188` §7.1.1）—— 一律钉成 `i32` 会当场弄坏
+    `u8 probe() { return 255; }` 那种（实测 C# 那门的 `Byte.cs` 语料就是这么红的）。
+    所以这一条**两面都钉**：比较里必须有 `as`，而**返回字面量那种不许加**。
+    """
+    # ① 比较的操作数被钉住（文本）② 编出来是**有符号**比较（IR）
+    for label, src, want_txt in (
+            ("负数比较", "int f(int a) { return ((0 - 1) < a); }\n", "(0 as i32) - (1 as i32)"),
+            ("字面量对字面量", "int f() { return (0 - 1) < 0; }\n", "(0 as i32) - (1 as i32)"),
+    ):
+        out = ctrans.translate(src)
+        assert want_txt in out, f"{label}: 没钉住宽度:\n{out}"
+    # ④ 超 i32 的字面量：拒（比较里、以及任何位置 —— 截断发生在解析层，救不回来）
+    for label, src in (
+            ("比较里的宽字面量", "int f() { return (0x1FFFFFFFF == 0xFFFFFFFF); }\n"),
+            ("赋值里的宽字面量", "int f() { int x = 8589934591; return x; }\n"),
+    ):
+        try:
+            ctrans.translate(src)
+        except trans_core.Unsupported as e:
+            assert "超出 32 位" in str(e), f"{label}: 拒的理由不对: {e}"
+        else:
+            raise AssertionError(f"{label}: 超 i32 的字面量没被拒")
+    # ③ 别处**不许**钉：返回一个字面量
+    out = ctrans.translate("int f() { return 7; }\n")
+    assert "return 7;" in out, f"返回位置被钉了（那会弄坏 u8/u64 那种接收方）:\n{out}"
+    out = ctrans.translate("unsigned int f() { unsigned int x = 255; return x; }\n")
+    assert "as i32" not in out, f"u32 那条路被钉了:\n{out}"
+    print("      比较的操作数钉住宽度（负数 -> 有符号）；超 i32 的字面量拒；返回/赋值不钉")
+
+
+
 
 
 @test

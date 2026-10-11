@@ -194,6 +194,8 @@ lompi/store/host/0.1.0/*
 tools/lompi_sync.py
 tools/loment_lompi_test.py
 tools/loment_publish.py
+tools/lompicheck_test.py
+tools/loment_register_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py
@@ -232,6 +234,7 @@ tools/loment_pe_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
 tools/loment_multisyntax_projects_test.py
+tools/loment_megaproject_test.py
 tools/loment_multilang_test.py
 tools/trans_core.py
 tools/ctrans.py
@@ -321,7 +324,10 @@ tools/loment_bootstrap.py
 tools/loment_capasserts_test.py
 tools/loment_eol_test.py
 tools/loment_ffi_test.py
+tools/loment_hosted_test.py
 tools/loment_i18n_test.py
+tools/loment_ports.py
+tools/loment_ports_test.py
 tools/loment_probe.py
 tools/loment_release.py
 tools/loment_status.py
@@ -681,7 +687,7 @@ fn emit_json(mem: ptr, n: u32, out: ptr) -> u32 {
     k = put_str(k, out, " \"release\": \"");
     // 与 tools/loment_release.py 的 RELEASE 必须**逐字节一致** —— 版本名有两个实现,
     // 这里是自举镜像那一份; 判据 loment_rel_test 会对着比。
-    k = put_str(k, out, "0.1.4");
+    k = put_str(k, out, "0.1.4.5-pre");
     k = put_str(k, out, "\",\n");
     k = put_str(k, out, " \"files\": [\n");
     let i: u32 = 0;
