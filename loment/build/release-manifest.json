@@ -2034,6 +2034,10 @@
    "sha256": "1637d6146e36f33dc040e7d5d6839357919a08e5da0c46da81b91ae3ea288e14"
   },
   {
+   "path": "docs/226-loment-performance-ledger.md",
+   "sha256": "d95eabaeb668ae8bba887e61ebc5558556088cc970ad8944f01e49c308a7fd1a"
+  },
+  {
    "path": "docs/227-loment-runtime-dimension.md",
    "sha256": "8356fcc7ba28b26d1d01046a7c828affa096724dfd7a6ae88b2de48f088388fe"
   },
