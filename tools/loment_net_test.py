@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# loment_net_test.py — `lom/net.lom`（号 → 面）这条 L0 契约的判据 (docs/228)
+# loment_net_test.py — `lom/net.lom`（号 → 面）这条 L0 契约的判据 (docs/229)
 #
 # 为什么单独一条判据: 这条契约的对账面**在四个地方**, 而其中一处（`lom_audit`）
 # 在门禁里是**已知红**（本机与 CI 都缺 `LinuxFUAI/` 姊妹检出，见 gate-baseline.txt）——
@@ -75,7 +75,7 @@ def test_contract_shape():
 
 @test
 def test_four_counterparts_agree():
-    """四处对账面逐条一致（`docs/228` §2）：编译器 / 链接器 / 自举 checker / 自举 potato。"""
+    """四处对账面逐条一致（`docs/229` §2）：编译器 / 链接器 / 自举 checker / 自举 potato。"""
     diffs = _audit()
     assert diffs == [], "对账不齐:\n  " + "\n  ".join(diffs[:6])
     print("      编译器 · 链接器 · 自举 checker · 自举 potato —— 四处逐条对上")

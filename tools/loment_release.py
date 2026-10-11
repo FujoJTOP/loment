@@ -115,7 +115,7 @@ GLOBS = [
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
-    # `lom/net.lom` 那条 L0 契约的判据 (docs/228): 四处对账 + 自证会红。
+    # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
     "tools/loment_net_test.py",
     # 多语法前端 (docs/179): 形式对象 -> L1 接口单元, 及其端到端判据。

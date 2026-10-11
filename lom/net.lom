@@ -1,6 +1,6 @@
 // lom/net.lom — 联网面契约：Linux 系统调用号 → 面 (L0 单一真源)
 //
-// 取代两处平行实现 (docs/228 §2):
+// 取代两处平行实现 (docs/229 §2):
 //   tools/lomentc.py  SURFACE_NUMBERS  —— 编译器：把单元里的机调用站点按面分类 → Potato 的 `surfaces`
 //   tools/lomelf.py   PE_SYSCALLS      —— 链接器：PE 运行时派发哪些号、各属哪一面
 // 另有两处**只认 net 那几个号**的派生用法（同上，一并由审计对账）：

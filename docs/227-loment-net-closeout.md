@@ -56,7 +56,7 @@
 现在：**声明 `excluded "network"`（或 `net`）的单元里出现联网面的机调用号 ⇒ 检查期报 E005**。
 
 * 两个实现各一份：参考 `lomentc.check`、自举 `loment/selfhost/checker.lomt`；
-* 号 → 面那张表**升成了 L0 契约**：`lom/net.lom`（2026-10-11，`docs/228`）——
+* 号 → 面那张表**升成了 L0 契约**：`lom/net.lom`（2026-10-11，`docs/229`）——
   编译器、链接器、自举 checker、自举 potato 四处由 `lom_audit` 的 `[net/…]` 四节 +
   `loment_net_test` 逐条对账（两个方向都查）；`loment_rule_parity` 的两条探针照旧钉行为那一面；
 * **两轴照旧分开**（`docs/218` §8 最后两行）：这条只答"**门开了没有**"（权威读法），

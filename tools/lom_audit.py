@@ -34,7 +34,7 @@ FUJR_RS = ROOT / "kernel" / "src" / "fujr.rs"
 FUJPACK = ROOT / "tools" / "fujopack.py"
 
 #: `lom/net.lom`（号 → 面）的对账面 —— **四处**：编译器的计数词汇、链接器的派发面，
-#: 以及自举侧两处**只认 net 那几个号**的派生用法（`docs/228` §2）。
+#: 以及自举侧两处**只认 net 那几个号**的派生用法（`docs/229` §2）。
 LOM_NET = ROOT / "lom" / "net.lom"
 NET_TWIN_NET_SETS = [
     (ROOT / "loment" / "selfhost" / "checker.lomt", "chk_num_is_net"),
@@ -272,7 +272,7 @@ def _fn_body(text: str, name: str) -> str:
 
 
 def audit_net(diffs: list[str]) -> None:
-    """`lom/net.lom` 是"号 → 面"的**单源**（`docs/228` §2）。
+    """`lom/net.lom` 是"号 → 面"的**单源**（`docs/229` §2）。
 
     四处实现/用法各自抄过一份，这里按**两个方向**对账：多一个号、少一个号、面不同，
     三种都算差异（"方向反了也一样" —— 早期那些对账只查一个方向，于是"实现多了个号"

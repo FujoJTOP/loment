@@ -58,7 +58,7 @@ check。这一步在 `CONTRIBUTING.md` 里也写明了。
 现在按 `gh api` 的 `status` 分流：`added` 放行并在 summary 里列出来，
 `modified`/`removed`/`renamed` 照旧拦，**列表形状不对**（缺 `status` 列）一律红
 （fail closed —— 不给"API 换了形状就静默放行"留缝）。同一轮加了第四份契约
-`lom/net.lom`，它是这条改动的第一个用例（`docs/228`）。
+`lom/net.lom`，它是这条改动的第一个用例（`docs/229`）。
 
 **这条改动本身没有让门变硬**：`lom/ 禁区` 仍然不是 required status，所以"新增放行"
 在今天的实际效果是"不再对合法的扩展动作报一次红"，而不是"挡不住别的什么"。
