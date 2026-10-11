@@ -11,7 +11,7 @@
 > `getdents64`/`newfstatat`）—— 文件与进程那一半，**一个 socket 号都没有**。
 > 所以在那之前，"孪生联网"是个**假命题**：同一份源，Linux 上能监听端口，Windows 上 `socket()`
 > 拿到 -1 且**什么都不说**。
-> 现在派发面是 **23 个号**（21 + `poll`(7) + `select`(23)，见 `docs/221` / `docs/230`），
+> 现在派发面是 **23 个号**（21 + `poll`(7) + `select`(23)，见 `docs/221` / `docs/231`），
 > 联网那 13 个由 `ws2_32.dll` 顶着；
 > **同一份源在 Windows 原生与 WSL/Linux 上输出逐字节相同、退出码相同**（§4 有数）。
 
@@ -102,7 +102,7 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
 ## 5. 点名不做
 
 * **`poll` / `select` / `epoll`**、**`sendmsg` / `recvmsg`**、**`socketpair`**、**`AF_UNIX`** ——
-  （`poll` 与 `select` 后来都补上了：见下面那两行与 `docs/221` / `docs/230`）
+  （`poll` 与 `select` 后来都补上了：见下面那两行与 `docs/221` / `docs/231`）
   表外的号一律 **`-ENOSYS`（-38）**（派发面的兜底；2026-10-11 之前是 `-1`，那次改动见
   `docs/227` §2 —— `-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，而 Linux 对不认得的号
   返回的就是 `-ENOSYS`）。
@@ -110,7 +110,7 @@ Linux 上不带它这里会被 SIGPIPE 杀掉）。中间还有 `getpeername`（
   `pollfd` ↔ `fd_set` 两边翻译。**名单的现状与逐条理由见 `docs/221` §7** ——
   其中 `epoll`、`sendmsg`/`recvmsg`、`socketpair`/`AF_UNIX` 仍是**点名不做**，
   各自都写了理由（不是"懒得做"）。
-  **`select`(23) 已做**（2026-10-11，`docs/230`）：`__fds_bits` 位图 ↔ WinSock `fd_set`，
+  **`select`(23) 已做**（2026-10-11，`docs/231`）：`__fds_bits` 位图 ↔ WinSock `fd_set`，
   外加**出参归一化** —— WinSock 把"非阻塞 connect 失败"报在 except 集里（Linux 报在
   writefds），且那种 socket 的 `SO_ERROR` 会被读掉，所以 shim 自己留一份、`getsockopt`
   时还回去。两条**平台差异**写在那儿了（Windows 把"本地端口被拒"升上来要 ~2–3 秒；

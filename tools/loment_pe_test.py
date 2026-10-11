@@ -1114,7 +1114,7 @@ fn _start() {
     w(1, "SELECT TIMEOUT OK\\n");
     // ---- ③ **连接失败**：非阻塞 connect 到一个没人听的端口 ----
     //    Linux 把它报在 **writefds**，WinSock 报在 **exceptfds** ——
-    //    shim 的出参归一化就是为这一格写的（docs/230）。
+    //    shim 的出参归一化就是为这一格写的（docs/231）。
     let c3: i64 = syscall6(41, 2, 2049, 0, 0, 0);
     if c3 < 0 {
         die(18, "FAIL socket(c3 nonblock)\\n");

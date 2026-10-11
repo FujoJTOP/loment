@@ -76,7 +76,7 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 |---|---|
 | `poll`(7) | ✅ **已做**（本文） |
 | `select`(23) | 见下一行（同一套集合助手，另加出参归一化） |
-| `select`(23) | ✅ **已做**（2026-10-11，`docs/230`）。当时列的两条理由里，① 是"重复"（不构成不做的理由）；② `exceptfds` 没有一对一映射 —— **仍然成立**，所以翻译里加的是**出参归一化**（WinSock 报在 except 的连接失败搬进 write 集 + `SO_ERROR` 自己留一份、读时还回去），而不是把 except 集硬塞给调用方。这一条现在由 `seldemo` 那一格钉住（PE×ELF 逐字节） |
+| `select`(23) | ✅ **已做**（2026-10-11，`docs/231`）。当时列的两条理由里，① 是"重复"（不构成不做的理由）；② `exceptfds` 没有一对一映射 —— **仍然成立**，所以翻译里加的是**出参归一化**（WinSock 报在 except 的连接失败搬进 write 集 + `SO_ERROR` 自己留一份、读时还回去），而不是把 except 集硬塞给调用方。这一条现在由 `seldemo` 那一格钉住（PE×ELF 逐字节） |
 | `epoll` | 不做：IOCP，不是一次翻译能补的（原文理由仍成立） |
 | `sendmsg` / `recvmsg` | 不做：`iovec` 那一套；`sendto`/`recvfrom` + `syscall7` 已经够写 UDP 回显 |
 | `socketpair` / `AF_UNIX` | 不做：Windows 的语义与路径规则都不同，转发会**假装成功** |
@@ -87,7 +87,7 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 |---|---|
 | `poll` 在 PE 上真的会报"谁就绪" | `polldemo`：两个连接只有一个有数据 ⇒ `poll` 返回 1，且**只有那一条**的 `revents` 非零；读掉之后再 poll ⇒ 返回 **0**（超时） |
 | 两个平台行为一致 | `test_pe_and_elf_agree_on_net_programs`：三份语料 PE vs ELF **逐字节相同** |
-| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：逐个对上 `PE_DISPATCH`（本文那一轮是 22 个号；`select` 落地后是 23，见 `docs/230`） |
+| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：逐个对上 `PE_DISPATCH`（本文那一轮是 22 个号；`select` 落地后是 23，见 `docs/231`） |
 | 冻出来的 blob 没漂 | `test_frozen_shim_blob_matches_the_reference`（7362 B） |
 | 孪生那条不变量还在 | `test_pe_selfhost_mirror_matches_reference`（镜像与参考的 PE 逐字节相同；状态区跟着长到 1069192） |
 

@@ -9,7 +9,7 @@
 // 校验: python tools/lom_audit.py + python tools/loment_net_test.py
 //
 // 2026-10-11.2: `select`(23) 从 NotDispatched 移进 Syscall —— PE 运行时真的派发它了
-//   (docs/230: 位图 ↔ WinSock fd_set、exceptfds 归一化、SO_ERROR 补挂账)。
+//   (docs/231: 位图 ↔ WinSock fd_set、exceptfds 归一化、SO_ERROR 补挂账)。
 //   这是**契约变更**不是新增: 依赖方是本表自己那张"同宽"的保证(gates.why_equal) ——
 //   `Syscall` 今天与 PE 派发面取相等，多一个号就得不一致，所以运行时落地了就必须跟着挪。
 

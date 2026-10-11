@@ -54,7 +54,7 @@ enum NotDispatched  : u32  { sendmsg = 46 … epoll_create1 = 291 }             
   审计要求这一族与派发面**不相交**：哪天谁"顺手"实现了 `sendmsg`，`[net/lomelf]` 当场红。
 
   2026-10-11.2：`select`(23) **已经从这一族挪进 `Syscall`** —— 运行时真的派发了它
-  （`docs/230`）。挪动的形状正是上面那条审计设计的：先让 `[net/lomelf]` 红，再两边一起挪。
+  （`docs/231`）。挪动的形状正是上面那条审计设计的：先让 `[net/lomelf]` 红，再两边一起挪。
 
 ## 3. 四处对账（`lom_audit` 的 `[net/…]`）
 

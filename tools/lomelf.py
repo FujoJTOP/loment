@@ -3034,7 +3034,7 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     # 对 except 集里每个 socket 问一次 `SO_ERROR`，非零（= 连接失败，不是 OOB）就把它
     # 从 except **挪进** write。
     #
-    # **两处点名的偏差**（与 `poll` 同族，写进 `docs/230`）：
+    # **两处点名的偏差**（与 `poll` 同族，写进 `docs/231`）：
     #   * 只认 **socket 型 fd**：三个位图里若有一位是我们等不了的 fd（文件 fd、越界的
     #     编号），返回 `-EBADF`。`poll` 那格能**逐 fd** 报 `POLLNVAL`，`select` 没有
     #     逐 fd 的出口，所以只能响亮地拒 —— 不静默丢掉那一位；
@@ -3280,10 +3280,10 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     cmp_eax_m1()
     jcc_l("e", "__ws_sock_err")
     # **返回 0 也照样往下走**：两趟归一化要按名单再问一遍 `SO_ERROR` —— "同步就失败"
-    # 的 socket 恰好让 WinSock 报 0（`docs/230`）
+    # 的 socket 恰好让 WinSock 报 0（`docs/231`）
     # ---- 归一化（一）：把影子集里"连接失败"的挪进 write 集 ----
     # 逐个问 SO_ERROR：非零 = **连接失败**（不是 OOB）⇒ 从影子里摘掉 + 加进 write。
-    # 这一格是 Linux 与 WinSock **语义真的不同**的地方（`docs/230`）：不归一化的话，
+    # 这一格是 Linux 与 WinSock **语义真的不同**的地方（`docs/231`）：不归一化的话，
     # "等 writefds 判连接成没成"的程序在 Windows 上永远等不到。
     xor_eax()
     st(RSP, 0x50, RAX)                          # i（在影子集里的下标）

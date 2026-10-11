@@ -121,7 +121,7 @@ stage1"那一步出现（见 §5）。
    **2026-10-10 补上联网那 13 个**（`socket`/`connect`/`accept`/`accept4`/`sendto`/`recvfrom`/
    `shutdown`/`bind`/`listen`/`getsockname`/`getpeername`/`setsockopt`/`getsockopt`，
    由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。
-   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/230`）
+   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/231`）
    ⇒ 派发面 **23 个号**。号表、五条翻译决定
    （family / `SO_*` / timeval↔毫秒 / errno / `MSG_NOSIGNAL`）与**点名不做**的那几件
    见 **`docs/217`**（今天只剩 6 个号；单源是 `lom/net.lom` 的 `NotDispatched`）。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim

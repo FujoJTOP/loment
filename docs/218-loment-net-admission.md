@@ -165,7 +165,7 @@ BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "
    下文那三段现在是一条**实测的结论**，不是待办 —— `surfaces` 就是那一项，形状见 **`docs/224`**
    （Potato **v12**）。序号 → 面那张表住在 `lomentc.SURFACE_NUMBERS`，与 PE 运行时的
    `PE_SURFACE_BY_NUMBER` **逐条判等**（写这段时 22 个号；今天是 23 —— `poll`/`select` 后来补了，
-   `docs/221` / `docs/230`）。
+   `docs/221` / `docs/231`）。
    保留下面这段**当时的推理**，因为它记的是"为什么当时说'那表只活在散文里'"：
    想细分就得有一张"Linux 号 → 语义"的表 —— 而它**今天只活在散文里**
    （指南 §6.2 那张踩坑表、`loment/lib/proc.lomt:142` 的注释）；
