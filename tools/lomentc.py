@@ -1335,12 +1335,21 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
 
 # ---------------------------------------------------------------- 语法分析
 
+#: **嵌套深度上限**（`#44`）。解析器是递归下降的：一层块 = 好几帧 Python 栈，
+#: 而 400 层嵌套块（4 KB 的一份源）原先直接把栈用穿 —— 参考实现抛 `RecursionError`
+#: 冒到命令行上，**自举侧那边是 SIGSEGV**（C 的栈更小）。两种都不是诊断。
+#: 本仓最深的语料是 12 层，64 给了 5 倍余量；上限存在的意义是"报出来"，不是"够用"。
+MAX_NEST = 64
+
+
 class Parser:
     """复用 lomc 的词法器; 只实现 L1 的顶层与语句/表达式。"""
 
     def __init__(self, toks: list[Tok], src: str):
         self.toks, self.src, self.i = toks, src, 0
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
+        #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
+        self.depth = 0
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -1707,13 +1716,27 @@ class Parser:
         f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
         return f
 
+    def deeper(self) -> None:
+        """进一层嵌套。**超了在这里报出来** —— 不让 Python / C 的栈去当那道闸（`#44`）。"""
+        self.depth += 1
+        if self.depth > MAX_NEST:
+            t = self.peek()
+            raise LomError(t.line, t.col,
+                           f"嵌套超过 {MAX_NEST} 层 —— 编译器是递归下降的，再深就要把栈"
+                           f"用穿了（自举那一边直接段错误，不是诊断）。把中间那几层提成"
+                           f"函数，或把这段拆开")
+
     def parse_block(self) -> list:
-        self.expect("punct", "{")
-        out = []
-        while not self.at("punct", "}"):
-            out.append(self.parse_stmt())
-        self.expect("punct", "}")
-        return out
+        self.deeper()
+        try:
+            self.expect("punct", "{")
+            out = []
+            while not self.at("punct", "}"):
+                out.append(self.parse_stmt())
+            self.expect("punct", "}")
+            return out
+        finally:
+            self.depth -= 1
 
     def parse_stmt(self):
         t = self.peek()
@@ -1836,6 +1859,15 @@ class Parser:
 
     # -- 表达式 (优先级爬升)
     def parse_expr(self, min_prec: int = 0):
+        # 表达式也递归（括号 / 一元前缀 / 后缀调用），**同一个计数** ——
+        # `((((…))))` 与 `if` 套 400 层是同一件事（`#44`）。
+        self.deeper()
+        try:
+            return self._parse_expr(min_prec)
+        finally:
+            self.depth -= 1
+
+    def _parse_expr(self, min_prec: int = 0):
         left = self.parse_unary()
         while True:
             t = self.peek()
@@ -3703,9 +3735,15 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if prev is None:
                     seen_decl[nm] = m0
                 elif _unit_id(prev) != _unit_id(m0):
-                    # 措辞用"重名"—— 与既有的 E-DUP 口径一致 (lomentc_test 的 PY_RULES 按词分类)
-                    errs.append(f"{ln}: {kind} {nm} 与模块 {prev.name} 重名 —— "
-                                f"单元的发射符号是平的 (ABI), 请改名")
+                    # **说出来是"哪一份文件"**（`#141`）：原先写"与模块 {prev} 重名",
+                    # 而那是**模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名`
+                    # 让用户去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。
+                    # 真正撞车的是**两份单元都发射 `f`**, 所以指到**另一份文件**上。
+                    # 措辞仍留"重名"二字 —— `loment_diag.RULES` 的 E013 按这几个词锚,
+                    # 换一种说法这条消息会掉出分类表。
+                    errs.append(f"{ln}: {kind} `{nm}` 与 {_unit_where(prev)} 里的 `{nm}` 重名 —— "
+                                f"单元的发射符号是平的 (ABI)，两份单元都会发射 `{nm}`，"
+                                f"调用点也解析到同一个函数；改掉其中一个")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -3926,6 +3964,16 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+        # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
+        # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
+        # （`SIGILL`）—— 只在**真走到那一支**时才发生，所以静态检查是唯一能在事前说这句
+        # 话的地方。SKILL.md §6.14 原先把它写成一条**写作纪律**（"check 放行，跑到就是
+        # Illegal instruction"）：一条静态检查的通过不意味着"不会 trap"，那正是这里的洞。
+        if f.ret != "()" and _falls_through(f.body):
+            errs.append(
+                f"{f.line}: 函数 {f.name} 声明返回 {f.ret}，但**可能从末尾掉出去** —— "
+                f"那条路上没有 `return`。走到那里是非法指令（SIGILL），不是返回一个默认值；"
+                f"让每条路径都 `return`，或在最后补一个")
 
     # ---- 依赖的**正文**也要查 (`#149`, 2026-10-09 补)。
     #
@@ -3951,6 +3999,33 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 where = _unit_where(d)
                 errs.extend(f"{where}: {e}" for e in sub)
     return errs
+
+
+def _falls_through(body: list) -> bool:
+    """这个体**可能**从末尾掉出去吗？（`#22`）
+
+    只认三种**结构上**说得清的收尾 —— 末尾是 `return`；末尾是带 `else` 的 `if` 且两支
+    都不掉；末尾是 `match` 且**每条臂**都不掉（穷尽性由既有的那条判据单独管，这里不重复
+    判）。**别的形状一律算会掉** —— `while` / `for` 会正常结束，末尾一个表达式语句当然
+    也掉。宁可让作者补一个 `return`，也不要让"check 过了却 trap"。
+
+    跑遍本仓 184 份 `.lomt` 的语料，这条规则**一条都不误报**（0 个非 `()` 函数掉末尾）——
+    所以它只会抓**新**写出来的漏。
+    """
+    if not body:
+        return False
+    s = body[-1]
+    if isinstance(s, Return):
+        return False
+    if isinstance(s, If):
+        if not s.otherwise:
+            return True
+        return _falls_through(s.then) or _falls_through(s.otherwise)
+    if isinstance(s, Match):
+        if not s.arms:
+            return True
+        return any(_falls_through(b) for _p, b in s.arms)
+    return True
 
 
 def _is_copy_type(t: str, structs: dict, enums: dict) -> bool:
@@ -4450,6 +4525,66 @@ def _count_boundary(mod: Module) -> dict:
             "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
 
 
+#: **号 → 面**（`docs/222`）：只有这张表里点过名的号才有"面"，其余一律落在 `other`。
+#:
+#: **这份表照 `lomelf.PE_SYSCALLS` 抄**（那份是运行时的真话：这个仓自己实现了哪些号、
+#: 各属哪一面），两边**逐条一致**由判据钉住（`loment_pe_test::test_surface_table_matches_the_runtime`）。
+#: 抄第二份的理由与 `potato.BOUNDARY_BUILTINS` 那条子集判据同一个：两边分处两个模块，
+#: 而判据能钉住它们不漂 —— 比"跨模块 import"更诚实（谁都不许偷偷多认一个号）。
+SURFACE_NUMBERS = {
+    60: "proc", 1: "file", 0: "file", 3: "file", 257: "file", 12: "mem",
+    217: "file", 262: "file", 7: "net", 41: "net", 42: "net", 43: "net",
+    288: "net", 44: "net", 45: "net", 48: "net", 49: "net", 50: "net",
+    51: "net", 52: "net", 54: "net", 55: "net",
+}
+#: 表里查不到的号落在这一面：**不猜**（`docs/188` 那条"不猜，报错"的同一条纪律 ——
+#: 只是这里没有可报的错，因为"用了本仓运行时没实现的号"在语言里是合法的）。
+SURFACE_OTHER = "other"
+#: 机调用内建。与 `potato.BOUNDARY_BUILTINS` 里 `syscall` 开头那几个一致（那条子集判据钉着）。
+SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+
+
+def _count_surfaces(mod: Module) -> dict:
+    """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
+
+    口径与 `_count_boundary` 一样是**词法的**：只看 `syscall4/6/7` 的**第一个实参**写没写成
+    字面量 —— 是字面量就查 `SURFACE_NUMBERS` 得面名（查不到落 `other`），不是字面量也落
+    `other`。于是"这个单元碰了哪个面、各几次"是**不读源码可判**的。
+
+    **它多一条别的字段没有的交叉不变量**：`total_sites` 必然等于 `boundary.syscalls` ——
+    每一个机调用站点都落在**恰好一个**面里，两处数的是同一批东西。那条由**校验器**独立判
+    （它读不到源码，但判得了两处自相矛盾）。
+
+    **为什么是"哪个面"而不是"哪个号"**：号是运行时的实现细节（`docs/217`），
+    面才是读者要问的问题（"这份程序碰了网络没有"）。**号写成了变量就落 `other`** ——
+    那是词法口径的诚实边界，不是漏数。
+    """
+    import dataclasses as _dc
+
+    counts: dict = {}
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
+            args = getattr(x, "args", [])
+            first = args[0] if args else None
+            num = first.value if isinstance(first, IntLit) else None
+            key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
+            counts[key] = counts.get(key, 0) + 1
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
+    out["total_sites"] = sum(counts.values())
+    return out
+
+
 def _count_gc_ladder(mod: Module) -> dict:
     """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 四层梯各领走几个 `alloc` 站点。
 
@@ -4632,7 +4767,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # `alloc` 站点。**与 `boundary` 同级同形**（一个自描述的对象 + 一条自洽的和）——
         # 于是"这份程序的 GC 由哪几层组成"是**不读源码可判**的（这正是 `docs/210` §3 那句
         # "GC 的组成是一个不读源码可判的数"）。
-        "potato": "v11",
+        # v11 = v10 + **对外端口** `port`（`docs/222` §4）：`sealed` / `hosted`。
+        # v12 = v11 + **面的组成** `surfaces`（`docs/224`）：机调用站点按面分一分
+        # （`net`/`file`/`mem`/`proc`/`other`）。与 `gc_ladder` 同形，但多一条**交叉**：
+        # `total_sites` 必然等于 `boundary.syscalls`。
+        "potato": "v12",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4710,6 +4849,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _count_gc_ladder(raw_mod),
+        # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
+        # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
+        "surfaces": _count_surfaces(mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"

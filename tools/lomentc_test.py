@@ -168,6 +168,50 @@ def test_return_type_mismatch_rejected():
     assert any("return 类型" in x for x in e), e
 
 
+@test
+def test_deep_nesting_is_refused_not_crashed():
+    """**嵌套太深要报出来**，不是把栈用穿（`#44`）。
+
+    400 层嵌套块（4 KB 的一份源）原先让参考实现抛 `RecursionError`、让**自举侧直接
+    段错误**（C 的栈更小）—— 两种都到不了用户面前，而 `check` 是个会被人拿去喂
+    **未知输入**的命令（格式化器、LSP 的半成品缓冲、注册表里被截断的第一行）。
+
+    两面都钉：超过上限**必须报**（带行号与原因）；**没到上限的合法程序不许被误拒** ——
+    上限设小了就会把正常程序挡在门外，而本仓最深的语料是 12 层。
+    """
+    deep = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+            + "".join("    " * (i + 1) + "if 1 > 0 {" + chr(10) for i in range(200))
+            + "    " * 201 + "return 1;" + chr(10)
+            + "".join("    " * (200 - i) + "}" + chr(10) for i in range(200)) + "}" + chr(10))
+    try:
+        lomentc.check(parse(deep))
+    except lomentc.LomError as ex:
+        msg = str(ex)
+        assert "嵌套超过" in msg, msg
+        assert str(lomentc.MAX_NEST) in msg, msg
+    else:
+        raise AssertionError("200 层嵌套没被拒 —— 栈会先爆")
+    # 表达式那一侧同一个闸
+    paren = "module m" + chr(10) + "fn f() -> u32 {" + chr(10) + "    return " + "(" * 200 + "1"         + ")" * 200 + ";" + chr(10) + "}" + chr(10)
+    try:
+        lomentc.check(parse(paren))
+    except lomentc.LomError as ex:
+        assert "嵌套超过" in str(ex), ex
+    else:
+        raise AssertionError("200 层括号没被拒")
+    # 反面：上限以内照旧（注意收尾 —— 嵌套的那几层 `if` 摆在 `while` 体里、
+    # 末尾 `return 0;` 收口，不然会被 E024「从末尾掉出去」抓住，那是另一条规则的事）
+    ok = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+          + "    while 1 > 0 {" + chr(10)
+          + "".join("    " * (i + 2) + "if 1 > 0 {" + chr(10) for i in range(8))
+          + "    " * 10 + "return 1;" + chr(10)
+          + "".join("    " * (9 - i) + "}" + chr(10) for i in range(8))
+          + "        return 0;" + chr(10) + "    }" + chr(10) + "    return 0;" + chr(10)
+          + "}" + chr(10))
+    assert lomentc.check(parse(ok)) == [], lomentc.check(parse(ok))
+    print(f"      嵌套上限：超过 {lomentc.MAX_NEST} 层报得出（块与表达式各一条），以内照旧")
+
+
 # ---------------------------------------------------------------- 负例: Potato 校验器
 
 @test
@@ -1986,6 +2030,51 @@ def test_gc_ladder_rule():
     # 两份源**只差那一行**
     assert GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: `surfaces`（`docs/222`, v11）：**每一个面至少两站**，外加两处"归 `other`"的形态
+#: —— 号不在表里的（`9999`）与**首参不是字面量**的（`n1`）。数够少，所以每个格子都能
+#: 逐个点名比对，而不是"和对了就行"。
+SURFACES_SRC = """module surf
+choose runtime
+
+fn n() -> i64 {
+    let n1: u64 = 41;
+    let a: i64 = syscall4(0, 1, 0, 0);
+    let b: i64 = syscall4(1, 1, 0, 0);
+    let c: i64 = syscall6(41, 0, 0, 0, 0, 0);
+    let d: i64 = syscall7(288, 0, 0, 0, 0, 0, 0);
+    let e: i64 = syscall4(60, 0, 0, 0);
+    let f: i64 = syscall4(12, 4096, 0, 0);
+    let g: i64 = syscall4(9999, 0, 0, 0);
+    let h: i64 = syscall4(n1, 0, 0, 0);
+    return a + b + c + d + e + f + g + h;
+}
+"""
+
+
+@test
+def test_surfaces_rule():
+    """`surfaces`（`docs/222`, Potato v11）：机调用站点按"面"分一分，**逐格**钉住。
+
+    与 `gc_ladder` 那条同一个形状，但多一条**跨字段**的自洽：`total_sites` 必须同时等于
+    各面之和**和** `boundary.syscalls`（每个机调用站点落在恰好一个面里 ⇒ 两处数的是同一批
+    站点）。所以这里两处都断言 —— 只钉一边的话，`surfaces` 自己内部自洽、却整批漏数站点
+    （或整批多数）照样能过。
+
+    **两处"归 `other`"的形态各来一站**（号不在表里 / 首参不是字面量）：`other` 是这张表的
+    兜底，兜底塌了就等于"凡是没登记的号静默消失"，而那正是这份计数要防的事。
+    """
+    doc = json.loads(lomentc.emit_potato(parse(SURFACES_SRC), ROOT))
+    sf = doc["surfaces"]
+    assert sf == {"file": 2, "mem": 1, "net": 2, "other": 2, "proc": 1, "total_sites": 8}, sf
+    assert doc["boundary"]["syscalls"] == sf["total_sites"], (doc["boundary"], sf)
+    # 两处都非平凡：不然"全归 `other`"或"什么都数不到"也能让上面那条成立
+    assert sf["other"] < sf["total_sites"], sf
+    # 空程序也得有这一项（**必填**，与 `boundary`/`gc_ladder` 同一条纪律）
+    empty = json.loads(lomentc.emit_potato(parse("module e\n"), ROOT))
+    assert empty["surfaces"] == {"total_sites": 0}, empty["surfaces"]
+    assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
 
 
 @test
