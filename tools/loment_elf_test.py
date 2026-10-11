@@ -581,6 +581,70 @@ def test_l0_static_promotion_bounds_the_heap():
 
 
 @test
+def test_l2_if_branch_epoch_bounds_the_heap():
+    """**L2 也认 `if` 的两支**（`docs/210` §2.3 / §7）—— 判据是**一对**程序。
+
+    **Why**：L2 原先只认 `while`/`for` 的体（`docs/210` §7 把"`if` 的体还是块、也能开纪元"
+    列在"没做"里）。这一格把它补上：`if` 的每一支与循环体是**同一个形状的块**，规则也还是
+    那一条（`_l2_ok`），"体"换成那一支的 token 跨度。
+
+    **How to apply**：一对**逐字同源**、只差 `choose` 一行的程序。形状是**故意挑的** ——
+    要让 L0、L1、以及**调用方的循环纪元**都接不到，只有 `if` 那一支自己能救：
+
+      * `alloc(n)` 的尺寸是**变量**（`let n: u32 = 64;`）—— L0 只认字面量，接不到；
+      * 分配写在**辅助函数** `step()` 里、循环在**调用方** —— 调用方的循环体里没有 `alloc`，
+        循环那一格（按**循环体**开纪元）也接不到；
+      * 分配在**分支里**（不在函数体顶层）—— L1 要求"声明必须在函数体顶层（不在任何 `{` 里）"，
+        所以 L1 也接不到（`docs/210` §2.5 那条边界）。
+
+    40000 次调用 × 64 B ≈ 2.56 MB 过 64 KiB arena：`gc_auto_alpha` **跑完**（rc=7，
+    而且 `t == 40000` 顺带判了每次读回来的值没被写坏）/ `gc_manual` **耗尽**（rc=132）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcif\n%s\nchoose runtime\n\n"
+            "fn step(x: u32) -> u32 {\n"
+            "    let n: u32 = 64;\n"
+            "    let s: u32 = 0;\n"
+            "    if x > 0 {\n"
+            "        let p: ptr = alloc(n);\n"
+            "        store8(p, 0, 1);\n"
+            "        s = s + load8(p, 0);\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let t: u32 = 0;\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 40000 {\n"
+            "        t = t + step(1);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if t == 40000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("manual", "choose gc_manual"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcif_{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcif_{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"gcif_{tag}", td, timeout=60)[0])
+    assert got[1] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。`if` 支那一格纪元要么没开，"
+        "要么开在不该开的地方（退出码 3 表示累加和对不上，说明块被提前收回或写坏了）")
+    assert got[0] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出 `if` 支的纪元："
+        "2.56 MB 的请求本该把 64 KiB 的 arena 耗尽")
+    print(f"      manual 耗尽 (rc={got[0]})；alpha 跑通 (rc={got[1]}) "
+          "—— `if` 那一支的纪元把每次分配都在支末尾还掉了")
+
+
+@test
 def test_gc_alpha_adaptive_bounds_a_large_live_set():
     """`gc_auto_alpha` 的**自适应**收集器收得下更大的活集（`docs/210` §2.4 的"策略池"）。
 
