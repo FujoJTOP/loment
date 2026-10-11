@@ -4417,6 +4417,66 @@ def _count_boundary(mod: Module) -> dict:
             "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
 
 
+#: **号 → 面**（`docs/222`）：只有这张表里点过名的号才有"面"，其余一律落在 `other`。
+#:
+#: **这份表照 `lomelf.PE_SYSCALLS` 抄**（那份是运行时的真话：这个仓自己实现了哪些号、
+#: 各属哪一面），两边**逐条一致**由判据钉住（`loment_pe_test::test_surface_table_matches_the_runtime`）。
+#: 抄第二份的理由与 `potato.BOUNDARY_BUILTINS` 那条子集判据同一个：两边分处两个模块，
+#: 而判据能钉住它们不漂 —— 比"跨模块 import"更诚实（谁都不许偷偷多认一个号）。
+SURFACE_NUMBERS = {
+    60: "proc", 1: "file", 0: "file", 3: "file", 257: "file", 12: "mem",
+    217: "file", 262: "file", 7: "net", 41: "net", 42: "net", 43: "net",
+    288: "net", 44: "net", 45: "net", 48: "net", 49: "net", 50: "net",
+    51: "net", 52: "net", 54: "net", 55: "net",
+}
+#: 表里查不到的号落在这一面：**不猜**（`docs/188` 那条"不猜，报错"的同一条纪律 ——
+#: 只是这里没有可报的错，因为"用了本仓运行时没实现的号"在语言里是合法的）。
+SURFACE_OTHER = "other"
+#: 机调用内建。与 `potato.BOUNDARY_BUILTINS` 里 `syscall` 开头那几个一致（那条子集判据钉着）。
+SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+
+
+def _count_surfaces(mod: Module) -> dict:
+    """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
+
+    口径与 `_count_boundary` 一样是**词法的**：只看 `syscall4/6/7` 的**第一个实参**写没写成
+    字面量 —— 是字面量就查 `SURFACE_NUMBERS` 得面名（查不到落 `other`），不是字面量也落
+    `other`。于是"这个单元碰了哪个面、各几次"是**不读源码可判**的。
+
+    **它多一条别的字段没有的交叉不变量**：`total_sites` 必然等于 `boundary.syscalls` ——
+    每一个机调用站点都落在**恰好一个**面里，两处数的是同一批东西。那条由**校验器**独立判
+    （它读不到源码，但判得了两处自相矛盾）。
+
+    **为什么是"哪个面"而不是"哪个号"**：号是运行时的实现细节（`docs/217`），
+    面才是读者要问的问题（"这份程序碰了网络没有"）。**号写成了变量就落 `other`** ——
+    那是词法口径的诚实边界，不是漏数。
+    """
+    import dataclasses as _dc
+
+    counts: dict = {}
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
+            args = getattr(x, "args", [])
+            first = args[0] if args else None
+            num = first.value if isinstance(first, IntLit) else None
+            key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
+            counts[key] = counts.get(key, 0) + 1
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
+    out["total_sites"] = sum(counts.values())
+    return out
+
+
 def _count_gc_ladder(mod: Module) -> dict:
     """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 四层梯各领走几个 `alloc` 站点。
 
@@ -4599,7 +4659,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # `alloc` 站点。**与 `boundary` 同级同形**（一个自描述的对象 + 一条自洽的和）——
         # 于是"这份程序的 GC 由哪几层组成"是**不读源码可判**的（这正是 `docs/210` §3 那句
         # "GC 的组成是一个不读源码可判的数"）。
-        "potato": "v11",
+        # v11 = v10 + **对外端口** `port`（`docs/222` §4）：`sealed` / `hosted`。
+        # v12 = v11 + **面的组成** `surfaces`（`docs/224`）：机调用站点按面分一分
+        # （`net`/`file`/`mem`/`proc`/`other`）。与 `gc_ladder` 同形，但多一条**交叉**：
+        # `total_sites` 必然等于 `boundary.syscalls`。
+        "potato": "v12",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -4677,6 +4741,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _count_gc_ladder(raw_mod),
+        # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
+        # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
+        "surfaces": _count_surfaces(mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"

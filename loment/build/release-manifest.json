@@ -15,19 +15,19 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "d352d39b0d266c852d62f67a04a5960cbb0348261eb790d399ea46dfc5905e2e"
+   "sha256": "7b3c7360ade71b6a3b6fabdb04faa99fbeee6ac2d01f77dc06c27e57cdcc78db"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "529e2a05eab9a62bdbf1cc94be69522076a9705cd31245472dac9714daf65281"
+   "sha256": "520fc4f8b318442d847024e931d6146d295c10b37b5ffccb61d7dac7d99de2f6"
   },
   {
    "path": "tools/potato.py",
-   "sha256": "c66658618664138179c6de1c3f194e703b192d0730f6e22533e985bb0980083e"
+   "sha256": "26ea35d6f588cad539da6ece11de8d636b88588219107f6d8997d06f77da2767"
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "fd16937d6f37f3109acfe2b638c77eb86b3da4321d5de165e41c7605434bf9bb"
+   "sha256": "fe5b4d29be521f86e4da5c37860180fc06730b8277a32848c6404c1bb46b164f"
   },
   {
    "path": "tools/potato_cross.py",
@@ -819,7 +819,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "366a46fcebc60f2dc5d582ee5d9e81be513da0db6cbe3410bbabe2c74b692862"
+   "sha256": "bab49e826770d6af8afee1d065569268b4f181ac10f0f9926505bd1cf468d9f4"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -831,7 +831,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "d3cb430b612c464492f0743a3e4550f9202d0375defe21da4c0eca6500dc33da"
+   "sha256": "15ae8ee60bf7932a1fb03e1fea1b0983fa2362f491aa478f5b95926f88e489e2"
   },
   {
    "path": "tools/lomt_from.py",
@@ -1067,7 +1067,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "5d12331b7a572323245d43e0fd2ba883fa02ce5a5bce0cada28404b5567d1b7f"
+   "sha256": "8d4652537776300e47fd2c4e5004fe39a02c0b19334a89abd535b444611e1bc9"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1107,7 +1107,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "26852809d9bcde9e7ae6dac66062a4d7bf7384c2927e764abbfcd0ce8eeb26b7"
+   "sha256": "9b414315ec1f5b8a79195317357e8c70899636ebdec4d87fa21fb1f041b0234d"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1151,7 +1151,7 @@
   },
   {
    "path": "loment/tools/lompotato.lomt",
-   "sha256": "7fd29712c580d16234110903c67de35f7c83bab3884286eff203de76503a19cd"
+   "sha256": "d217e3fcbe36dbcaae49de7c525906d04625ad8c4a631747aff3263afa058a9f"
   },
   {
    "path": "loment/tools/lompotc.lomt",
@@ -1643,7 +1643,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "a4c45d64ef474d31b7448f97a13aaf6069cef8aeb22ca576ab5f648c67769599"
+   "sha256": "c4c3143b98e5212807e7338e09e411f4b0bdfaf9b1b3a2e8b91a0078ff9a4c01"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -1719,11 +1719,11 @@
   },
   {
    "path": "docs/147-potato-v1-spec.en.md",
-   "sha256": "717428d1d7c152b8ab16de4d9d3a7c4bec40a0fa4c7c97ea08762793c2c55d90"
+   "sha256": "8c1bd8ff2c96158c555db3a4fc42c6997cf11632bde274a6953f7e1e1522f130"
   },
   {
    "path": "docs/147-potato-v1-spec.md",
-   "sha256": "b1951eadb44cf26b985d5375e33339f1f269b337e78533baf4ead1d196445e8c"
+   "sha256": "4379d40db5d1809120a4f8785f485180f512bdb6c92a17ad5e564b39c84276a5"
   },
   {
    "path": "docs/148-loment-toolchain.en.md",
@@ -1931,7 +1931,7 @@
   },
   {
    "path": "docs/200-lomelf-table-caps.md",
-   "sha256": "527c5931a74a0711695f4b6c553c1294130cc916956b6c536913acee83317f63"
+   "sha256": "535b07934221eb364d770594662988a4de315aa8053af816209f86e871a379a6"
   },
   {
    "path": "docs/201-doors-and-registries.md",
@@ -1951,7 +1951,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "e22d50b847654d58ca0519c07c90a7aef0637e5ec4e69d81ee632e8f55237025"
+   "sha256": "aec201977816203f415b1d190a0485295f178d08953aafe7fdf4eeeaae0e62f1"
   },
   {
    "path": "docs/206-loment-ownership-boundary.md",
@@ -1995,7 +1995,7 @@
   },
   {
    "path": "docs/218-loment-net-admission.md",
-   "sha256": "723380114aca2e6c439ad041cc0e6d68c22ae09bc6ebbad7aea870f2493badda"
+   "sha256": "4cc12215481e743fb217e0b2954c920c6aee8b218d137aa923b761879d29f7b9"
   },
   {
    "path": "docs/219-world-ports.md",
@@ -2022,8 +2022,12 @@
    "sha256": "d68459ecdeb0d6ffaf863e04d613ba9827244a8c6ec96b627ea3c8f90b47c2d5"
   },
   {
+   "path": "docs/224-potato-v12-surfaces.md",
+   "sha256": "3479c5e7c45ea73fb607adacad816388f61940bde5608a9661dc005f3f2877a3"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "962edd7c40617d044efc16abfc8eb3cefd0b16f4c6edfb9cb91dcb5c9beca38d"
+   "sha256": "b6e193dbd8089d0664d21601af4510783b8e5aa54eaad1be0657de7b9d08bd22"
   },
   {
    "path": "docs/manual/api/ahci.md",

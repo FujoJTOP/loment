@@ -2032,6 +2032,51 @@ def test_gc_ladder_rule():
         GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+#: `surfaces`（`docs/222`, v11）：**每一个面至少两站**，外加两处"归 `other`"的形态
+#: —— 号不在表里的（`9999`）与**首参不是字面量**的（`n1`）。数够少，所以每个格子都能
+#: 逐个点名比对，而不是"和对了就行"。
+SURFACES_SRC = """module surf
+choose runtime
+
+fn n() -> i64 {
+    let n1: u64 = 41;
+    let a: i64 = syscall4(0, 1, 0, 0);
+    let b: i64 = syscall4(1, 1, 0, 0);
+    let c: i64 = syscall6(41, 0, 0, 0, 0, 0);
+    let d: i64 = syscall7(288, 0, 0, 0, 0, 0, 0);
+    let e: i64 = syscall4(60, 0, 0, 0);
+    let f: i64 = syscall4(12, 4096, 0, 0);
+    let g: i64 = syscall4(9999, 0, 0, 0);
+    let h: i64 = syscall4(n1, 0, 0, 0);
+    return a + b + c + d + e + f + g + h;
+}
+"""
+
+
+@test
+def test_surfaces_rule():
+    """`surfaces`（`docs/222`, Potato v11）：机调用站点按"面"分一分，**逐格**钉住。
+
+    与 `gc_ladder` 那条同一个形状，但多一条**跨字段**的自洽：`total_sites` 必须同时等于
+    各面之和**和** `boundary.syscalls`（每个机调用站点落在恰好一个面里 ⇒ 两处数的是同一批
+    站点）。所以这里两处都断言 —— 只钉一边的话，`surfaces` 自己内部自洽、却整批漏数站点
+    （或整批多数）照样能过。
+
+    **两处"归 `other`"的形态各来一站**（号不在表里 / 首参不是字面量）：`other` 是这张表的
+    兜底，兜底塌了就等于"凡是没登记的号静默消失"，而那正是这份计数要防的事。
+    """
+    doc = json.loads(lomentc.emit_potato(parse(SURFACES_SRC), ROOT))
+    sf = doc["surfaces"]
+    assert sf == {"file": 2, "mem": 1, "net": 2, "other": 2, "proc": 1, "total_sites": 8}, sf
+    assert doc["boundary"]["syscalls"] == sf["total_sites"], (doc["boundary"], sf)
+    # 两处都非平凡：不然"全归 `other`"或"什么都数不到"也能让上面那条成立
+    assert sf["other"] < sf["total_sites"], sf
+    # 空程序也得有这一项（**必填**，与 `boundary`/`gc_ladder` 同一条纪律）
+    empty = json.loads(lomentc.emit_potato(parse("module e\n"), ROOT))
+    assert empty["surfaces"] == {"total_sites": 0}, empty["surfaces"]
+    assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
+
+
 @test
 def test_l0_param_shadow_is_not_promoted():
     """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。
