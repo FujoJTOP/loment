@@ -3162,8 +3162,28 @@ fn find_start(t: ptr, n: u32) -> u32 {
     return r;
 }
 
-fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
-    let d: u32 = em_call_lbl(out, c, tab, ss, 6);
+/// ELF 入口桩。`tlsn`/`tls` **带外部对象时才用**（`docs/219` S2）：
+/// `-fstack-protector` 编出来的库（发行版的 zlib 就是）会读 **`fs:0x28`** 取栈金丝雀，
+/// 而没有 TLS 时 `fs` 是 0 —— 那是去读地址 `0x28`，未映射，**一进去就段错误**。
+/// 所以先 `arch_prctl(ARCH_SET_FS, &__loment_tls)` 把 `fs` 指过来。
+/// 金丝雀**不需要是随机数**：入口存一次、出口比一次，中间没人改，永远相等。
+fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32) -> u32 {
+    let d: u32 = c;
+    if tls != 0 {
+        d = e1(out, d, 184);                       // b8
+        d = e1(out, d, 158);                       // 9e  -> mov eax, 158 (arch_prctl)
+        d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);
+        d = e1(out, d, 191);                       // bf
+        d = e1(out, d, 2);                         // 02  -> mov edi, 0x1002 (ARCH_SET_FS)
+        d = e1(out, d, 16); d = e1(out, d, 0); d = e1(out, d, 0);
+        d = e1(out, d, 72);                        // 48
+        d = e1(out, d, 190);                       // be  -> movabs rsi, &__loment_tls
+        fix_add(tab, d, 1, tlsn, 12, 0, 0);        // kind 1 = abs64（写 64 位绝对地址）
+        d = d + 8;
+        d = e1(out, d, 15);                        // 0f
+        d = e1(out, d, 5);                         // 05  -> syscall
+    }
+    d = em_call_lbl(out, d, tab, ss, 6);
     d = em_mov_ri32(out, d, RAX, 60);
     d = em_mov_ri32(out, d, RDI, 0);
     d = e1(out, d, 15);
@@ -3701,11 +3721,17 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     let p1: u32 = put_name(t, p0, "memcpy");
     let p2: u32 = put_name(t, p1, "memset");
     let p3: u32 = put_name(t, p2, "memcmp");
-    setcell(tab, C_EXTN, p3);
+    let p4: u32 = put_name(t, p3, "__stack_chk_fail");
+    setcell(tab, C_EXTN, p4);
+    // 三段是 `memcpy`(35) / `memset`(31) / `memcmp`(48)，`__stack_chk_fail`(2) 在 114。
+    // `memcpy`/`memset` 比上一版长了 6 字节 —— 它们现在把**原起点**放进 rax 再返回
+    // （C 的 `memcpy`/`memset` 返回 `void*`），循环里 `rdi` 被推到末尾、rax 被字节搬运占用，
+    // 所以借 `r8`（调用者保存）存一下。两侧同一串字节，参考实现那边有逐条注释。
     lbl_add(tab, p0, 6, 0, 0, txt_base(tab) + c);
-    lbl_add(tab, p1, 6, 0, 0, txt_base(tab) + c + 29);
-    lbl_add(tab, p2, 6, 0, 0, txt_base(tab) + c + 54);
-    let d: u32 = blob_copy(out, c, "4885d20f84130000008a06880748ffc648ffc748ffca0f85edffffffc34885d20f840f00000040883748ffc748ffca0f85f1ffffffc34885d20f841b0000008a078a0e38c80f851200000048ffc748ffc648ffca0f85e5ffffff31c0c30fb6c00fb6c929c8c3");
+    lbl_add(tab, p1, 6, 0, 0, txt_base(tab) + c + 35);
+    lbl_add(tab, p2, 6, 0, 0, txt_base(tab) + c + 66);
+    lbl_add(tab, p3, 16, 0, 0, txt_base(tab) + c + 114);
+    let d: u32 = blob_copy(out, c, "4989f84885d20f84130000008a06880748ffc648ffc748ffca0f85edffffff4c89c0c34989f84885d20f840f00000040883748ffc748ffca0f85f1ffffff4c89c0c34885d20f841b0000008a078a0e38c80f851200000048ffc748ffc648ffca0f85e5ffffff31c0c30fb6c00fb6c929c8c30f0b");
     // ---- malloc / free：**内存那一条不收编，是"划掉"**（docs/219 §2.1）----
     // **只在堆在的时候发** —— 底下调的是 `@__loment_alloc` / `@__loment_free`；没有它们
     // 就没有"我们的堆"，发了会悬着一个未定义的调用。判据是**这份 IR 里有没有那两条定义**：
@@ -3729,7 +3755,7 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     return dd;
 }
 
-fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {
+fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32) -> u32 {
     let ss: u32 = find_start(t, n);
     if ss == NO {
         return fail("没有 _start 入口");
@@ -3745,7 +3771,7 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32) -> u32 {
             k = k + 1;
         }
     } else {
-        d = em_entry_stub(out, c, tab, ss);
+        d = em_entry_stub(out, c, tab, ss, tlsn, tls);
     }
     let i: u32 = 0;
     while i < n {
@@ -3931,7 +3957,15 @@ fn run(mem: ptr) -> u32 {
     collect_globals(tab, inb, n as u32, gb);
     collect_externs(tab, inb, n as u32);
     place_globals(tab, inb);
-    let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32);
+    // **TLS 的名字先写进名字池**：入口桩要用它（`arch_prctl` 的目标），而标签要等
+    // TLS 块摆好（在对象之后）才立 —— 回填在最后一步，所以中间这段时间"有名无址"是对的。
+    let tlsn: u32 = cell(tab, C_EXTN);
+    let tls: u32 = 0;
+    if nlink != 0 {
+        setcell(tab, C_EXTN, put_name(inb, tlsn, "__loment_tls"));
+        tls = 1;
+    }
+    let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls);
     // **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
     // 于是它们不再是未定义符号 —— 从表上划掉。粒度是"有没有外部对象"，与参考实现
     // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
@@ -3949,6 +3983,15 @@ fn run(mem: ptr) -> u32 {
         got = got + 1;
     }
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
+    // **TLS 块**（`docs/219` S2）：接在对象数据之后、与参考实现同一处、同样 256 字节。
+    // 必须在 `place_bss` **之前** —— bss 的地址是按数据段当前长度算的。
+    if nlink != 0 {
+        let t0: u32 = align_to(cell(tab, C_GB), 16);
+        pad_zero(gb, cell(tab, C_GB), t0);
+        pad_zero(gb, t0, t0 + 256);
+        setcell(tab, C_GB, t0 + 256);
+        lbl_add(tab, tlsn, 12, 0, 0, data_base(tab) + t0);
+    }
     place_bss(tab, inb);
     // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。
     let rr: u32 = apply_relocs(tab, inb, txt, gb);

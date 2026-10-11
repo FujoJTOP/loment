@@ -1009,6 +1009,82 @@ def test_object_with_rodata_and_data_relocations_runs():
         print("      数据节: .rodata 字符串 + .data.rel.ro 表 -> rc=100")
 
 
+#: **栈金丝雀**的夹具（`docs/219` S2）：`-fstack-protector-all` 会插 `fs:0x28` 的读写。
+#: `volatile` 是为了**别被优化掉** —— 没有它，`-O1` 会把整个数组消掉、金丝雀也就不插了
+#: （实测：不写 `volatile` 时对象里一次 `fs` 读取都没有）。
+C_CANARY_SOURCE = """\
+int c_canary(int x) { volatile char b[64]; b[0] = (char)x; b[63] = 0; return b[0]; }
+"""
+
+#: **`memcpy`/`memset` 的返回值**：C 里它们返回 `void*`（就是目标指针），调用方**会用它**。
+C_RETVAL_SOURCE = """\
+extern void *memset(void *, int, unsigned long);
+extern void *memcpy(void *, const void *, unsigned long);
+
+int c_retval(void) {
+    char a[8], b[8];
+    char *p = (char *)memset(a, 7, 8);   /* p 必须是 a */
+    char *q = (char *)memcpy(b, p, 8);   /* q 必须是 b */
+    return q[0] + p[7];                  /* 7 + 7 */
+}
+"""
+
+
+@test
+def test_stack_protector_object_runs_because_we_give_it_tls():
+    """**TLS**（`docs/219` S2）：`-fstack-protector` 编出来的库会读 **`fs:0x28`** 取金丝雀，
+    而我们没有 TLS 时 `fs` 是 0 —— 那是去读地址 `0x28`，**一进去就段错误**。
+
+    所以带外部对象时，产物里放一小块 TLS，入口用 `arch_prctl(ARCH_SET_FS)` 把 `fs` 指过来。
+    金丝雀不需要是随机数：入口存一次、出口比一次，中间没人改，永远相等。
+
+    这条夹具**特意用 `-fstack-protector-all` 强制插金丝雀**（普通 `-strong` 在小函数上
+    根本不插，实测过）—— 没有 TLS 时这条会以**段错误**收场，而不是算错。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "can.c").write_text(C_CANARY_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "can.c", td / "can.o",
+                         ("-fstack-protector-all",)) == 0, "C 编译失败"
+        fo = lomelf.load_foreign(td / "can.o")
+        assert "__stack_chk_fail" in fo.undefined, "夹具没插金丝雀 (判据自己坏了)"
+        (td / "m.lomt").write_text(
+            "module canary\n\nextern fn c_canary(x: i32) -> i32;\n\n"
+            "fn _start() {\n    syscall4(60, c_canary(6 as i32) as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "can.o"], 6)
+        assert rc == 6, f"带金丝雀的对象: rc={rc} (期望 6; 139 = 没有 TLS) err={err[-300:]!r}"
+        print("      栈金丝雀: -fstack-protector-all 的对象链上就跑通 (rc=6, 有 TLS)")
+
+
+@test
+def test_memcpy_and_memset_return_the_destination():
+    """C 的 `memcpy`/`memset` **返回 `void*`**（目标指针），调用方会拿它。第一版收编面
+    没把原起点放回 `rax`（循环把 `rdi` 推到了末尾），于是 `p = memset(...)` 拿到垃圾。
+
+    判据取 `q[0] + p[7]` = 7 + 7 = **14**：两个返回值都得对。返回垃圾时要么算错、要么崩。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "r.c").write_text(C_RETVAL_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "r.c", td / "r.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(
+            "module retval\n\nextern fn c_retval() -> i32;\n\n"
+            "fn _start() {\n    syscall4(60, c_retval() as u64, 0, 0);\n}\n",
+            encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "r.o"], 14)
+        assert rc == 14, f"返回值不对: rc={rc} (期望 14) err={err[-300:]!r}"
+        print("      memcpy/memset 的返回值: p/q 都是目标指针 -> rc=14")
+
+
 @test
 def test_object_with_undefined_symbol_is_rejected():
     """一个符号**到链接结束都没人提供** (典型是 libc) -> **硬拒**, 不猜。
