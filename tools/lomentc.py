@@ -1429,7 +1429,7 @@ class Parser:
         # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
         # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
         mod.toks = self.toks
-        # **拖运行期的构造**（`docs/224`）：与 `f.deref` 同一条理由 —— 规则定义在
+        # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
         # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
         mod.rt_sites = _runtime_sites(self.toks)
         return mod
