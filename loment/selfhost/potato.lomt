@@ -852,6 +852,118 @@ fn pt_cnt_boundary_extcalls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+// ---------------------------------------------------------------- 面的组成 (docs/224, v12)
+//
+// v12 的 `surfaces`：把**机调用站点**按"面"分一分。**与参考实现的 `_count_surfaces` 数
+// 同一批站点** —— 口径是词法的：只看 `syscall4/6/7` 的第一个实参**写没写成字面量**，
+// 是字面量就查表得面名（查不到落 `other`），不是字面量也落 `other`。
+// 表（号 → 面）与参考实现 `lomentc.SURFACE_NUMBERS` 的一致由两处钉住：
+// `loment_pe_test::test_surface_table_matches_the_runtime`（表本身）与
+// `loment_potato_emit_test`（42 份单元的逐字节孪生 —— 数不对当场对不上）。
+
+/// 号 → 面代号：0=other 1=file 2=mem 3=net 4=proc。**代号只为分桶**，名字在发射处。
+fn pt_surf_code(num: u32) -> u32 {
+    if num == 0 || num == 1 || num == 3 || num == 217 || num == 257 || num == 262 {
+        return 1;                                   // file
+    }
+    if num == 12 {
+        return 2;                                   // mem
+    }
+    if num == 7 || num == 41 || num == 42 || num == 43 || num == 44 || num == 45
+            || num == 48 || num == 49 || num == 50 || num == 51 || num == 52
+            || num == 54 || num == 55 || num == 288 {
+        return 3;                                   // net
+    }
+    if num == 60 {
+        return 4;                                   // proc
+    }
+    return 0;                                       // other（含"号不是字面量"）
+}
+
+/// 数字 token 的十进制 / `0x` 十六进制值；不是数字 token（或写法不认识）返回 `4294967295`。
+/// **与参考实现同口径**：那边读 `IntLit.value`（十进制与 `0x` 都认）；一个**负号**在两边
+/// 都会落 `other` —— 这边因为 `-` 是个 punct token，根本不是数字 token。
+fn pt_tok_num(unit: ptr, t: ptr, i: u32) -> u32 {
+    if pt_kind(t, i) != 1 {
+        return 4294967295;
+    }
+    let p: u32 = pt_off(t, i);
+    let n: u32 = pt_tlen(t, i);
+    if n == 0 {
+        return 4294967295;
+    }
+    let k: u32 = 0;
+    let v: u32 = 0;
+    if n >= 2 && load8(unit, p) == 48 && (load8(unit, p + 1) == 120 || load8(unit, p + 1) == 88) {
+        k = 2;
+        while k < n {
+            let c: u32 = load8(unit, p + k);
+            let d: u32 = 4294967295;
+            if c >= 48 && c <= 57 {
+                d = c - 48;
+            } else if c >= 97 && c <= 102 {
+                d = c - 97 + 10;
+            } else if c >= 65 && c <= 70 {
+                d = c - 65 + 10;
+            }
+            if d == 4294967295 {
+                return 4294967295;
+            }
+            v = v * 16 + d;
+            k = k + 1;
+        }
+        return v;
+    }
+    while k < n {
+        let c: u32 = load8(unit, p + k);
+        if c < 48 || c > 57 {
+            return 4294967295;                      // 不猜
+        }
+        v = v * 10 + (c - 48);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// 名字 `name` 的调用点里、"第一个实参是字面量且面 == `code`"的个数。判据与
+/// `pt_cnt_boundary_call` 同一套：名字 token + 紧跟 `(` + 不是 `fn NAME(` 那个声明。
+fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, code: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, name) && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            let num: u32 = pt_tok_num(unit, t, i + 2);
+            let c: u32 = 0;
+            if num != 4294967295 {
+                c = pt_surf_code(num);
+            }
+            if c == code {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 某个面（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍。
+fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
+    return pt_surf_count(unit, t, lo, hi, "syscall4", code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6", code)
+         + pt_surf_count(unit, t, lo, hi, "syscall7", code);
+}
+
+/// 写一个面（名 + 数）；`first` 为 0 时先补一个逗号。**只写非零的那些、按面名字母序**，
+/// 与参考实现的 `sorted(counts)` 同口径（两边逐字节要比）。
+fn pt_surf_one(out: ptr, o: u32, first: u32, name: str, n: u32) -> u32 {
+    if first == 0 {
+        o = pt_str(out, o, ",\n");
+    }
+    o = pt_key(out, o, 2, name);
+    return pt_dec(out, o, n as u64);
+}
+
 // ---------------------------------------------------------------- GC 的四层梯 (docs/210 §3/§5)
 //
 // v10 的 `gc_ladder`：本单元每一处 `alloc` 从强到弱、先到先得分到一层。**与参考实现的
@@ -4850,8 +4962,15 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let ngl_a: u32 = (ngl_pk & 65535) as u32;
     let ngl_b: u32 = ((ngl_pk >> 16) & 65535) as u32;
     let ngl_c: u32 = ((ngl_pk >> 32) & 65535) as u32;
+    // v12 = v11 + **面的组成**（`docs/224`）：机调用站点按面分一分。
+    let nsf_file: u32 = pt_surf_total(unit, t, lo, hi, 1);
+    let nsf_mem: u32 = pt_surf_total(unit, t, lo, hi, 2);
+    let nsf_net: u32 = pt_surf_total(unit, t, lo, hi, 3);
+    let nsf_proc: u32 = pt_surf_total(unit, t, lo, hi, 4);
+    let nsf_other: u32 = pt_surf_total(unit, t, lo, hi, 0);
+    let nsf_tot: u32 = nsf_file + nsf_mem + nsf_net + nsf_proc + nsf_other;
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v11");
+    o = pt_qs(out, o, "v12");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5008,6 +5127,41 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, ngl_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **面的组成**（`docs/224`, v12）—— 与 `boundary`/`gc_ladder` 同形；**键按面名的字母序、
+    // 只写非零**（`file` < `mem` < `net` < `other` < `proc` < `total_sites`，
+    // 与参考实现的 `sorted(counts)` 同序），所以最后那个逗号只在"写过至少一个"时补。
+    o = pt_key(out, o, 1, "surfaces");
+    o = pt_str(out, o, "{\n");
+    let sf_first: u32 = 1;
+    if nsf_file > 0 {
+        o = pt_surf_one(out, o, sf_first, "file", nsf_file);
+        sf_first = 0;
+    }
+    if nsf_mem > 0 {
+        o = pt_surf_one(out, o, sf_first, "mem", nsf_mem);
+        sf_first = 0;
+    }
+    if nsf_net > 0 {
+        o = pt_surf_one(out, o, sf_first, "net", nsf_net);
+        sf_first = 0;
+    }
+    if nsf_other > 0 {
+        o = pt_surf_one(out, o, sf_first, "other", nsf_other);
+        sf_first = 0;
+    }
+    if nsf_proc > 0 {
+        o = pt_surf_one(out, o, sf_first, "proc", nsf_proc);
+        sf_first = 0;
+    }
+    if sf_first == 0 {
+        o = pt_str(out, o, ",\n");
+    }
+    o = pt_key(out, o, 2, "total_sites");
+    o = pt_dec(out, o, nsf_tot as u64);
     o = pt_str(out, o, "\n");
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");
