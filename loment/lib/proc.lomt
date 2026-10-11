@@ -21,6 +21,7 @@
 // 语言只有字节级访存 (`load8`/`store8`, 没有 store64), 所以指针数组是逐字节拼的。
 
 module proc
+choose runtime
 
 /// 工作区大小: 路径 + 选项 + 命令行 + 管道 fd + argv 指针数组。
 const PROC_WS: u32 = 4096;

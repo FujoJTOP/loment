@@ -26,6 +26,7 @@
 // 命名: 公开 lex_* / pkg_* / sto_*, 自检 test_lex_* 与 test_pkg_*。
 
 module lpi_pkg
+choose runtime
 
 use "lpi_sha.lomt"
 

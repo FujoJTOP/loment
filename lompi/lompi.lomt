@@ -15,6 +15,7 @@
 // 整链失效 (底层 sys_* 会被报成"未声明", 而且报错指向的层与真正的原因无关)。
 
 module lompi
+choose runtime
 
 use "lpi_cli.lomt"
 

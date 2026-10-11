@@ -1,5 +1,7 @@
 module main
 
+choose runtime
+
 use "j000.lomt"
 use "j001.lomt"
 use "j002.lomt"
