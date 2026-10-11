@@ -33,6 +33,7 @@
 // 用法: `lomtrans --lang <c|cpp|java|csharp|python> [--keep a,b] [--extern f:i32] [--const K:i32] <src>`
 
 module lomtrans
+choose runtime
 
 use bytes
 

@@ -1,4 +1,5 @@
 module lexer
+choose runtime
 
 // M79: Loment 版 lexer —— 与 tools/lomc.py 的词法规则一致 (token 流对照见 loment_p8_test)。
 // token 记录 20B (小端): kind u32 @0 | start u32 @4 | len u32 @8 | line u32 @12 | col u32 @16

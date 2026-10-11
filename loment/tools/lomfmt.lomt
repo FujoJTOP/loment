@@ -18,6 +18,7 @@
 //   ./fujofmt <文件.lomt> > 格式化后
 
 module lomfmt
+choose runtime
 
 use lexer
 
