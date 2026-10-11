@@ -188,6 +188,7 @@ const E_NLEN: u32 = 4;
 // 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
 const TB_OBJ: u32 = 2505504;       // stride 8 × 256
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
+const O_DATA: u32 = 4;             // 该对象的**数据节**在数据缓冲 (gb) 里的起点 (16 对齐)
 
 // 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
 // —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
@@ -199,6 +200,7 @@ const F2_TY: u32 = 12;             // 重定位类型 (ELF 的 R_X86_64_* 编号
 const F2_NOFF: u32 = 16;           // 目标符号名 (名字池内偏移, 与标签表同基)
 const F2_NLEN: u32 = 20;
 const F2_ADD: u32 = 24;            // 加数 (i32 位型)
+const F2_IN: u32 = 28;             // 0 = 落在**代码**上 (写 txt); 1 = 落在**数据**上 (写 gb)
 
 // ---------------------------------------------------------------- 常量
 
@@ -1497,29 +1499,47 @@ fn collect_globals(tab: ptr, t: ptr, n: u32, gb: ptr) {
 /// 第二遍: 定位 (有内容的进 data, 全零的进 bss), 并登记成标签。
 fn place_globals(tab: ptr, t: ptr) {
     let n: u32 = cell(tab, C_NG);
+    let i: u32 = 0;
+    while i < n {
+        let gbase: u32 = TB_G + i * 32;
+        if load32(tab, gbase + G_ZERO) == 0 {
+            store32(tab, gbase + G_ADDR, data_base(tab) + load32(tab, gbase + G_DOFF));
+            lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN), 0, 0,
+                    load32(tab, gbase + G_ADDR));
+        }
+        i = i + 1;
+    }
+    // **零初始化的那些（bss）故意留到 `place_bss`** —— 见那里的理由。
+}
+
+/// **bss 的地址必须等外部对象的数据节摆完才算**（`docs/219` §8b 第 1 条）。
+///
+/// 原先它和上面那些一起算，值是 `data_base + dlen + bss`，而 `dlen` 是**那一刻**的数据
+/// 长度。外部对象的数据节是**之后**追加到同一个数据段里的 —— 于是 `@__loment_heap`
+/// （64 KiB，正是堆）会**和对象的数据重叠**：在堆上写一个字节就踩坏了别人的 `.rodata`。
+/// 链接期一切正常、跑起来才错，**判据抓不到**，所以顺序必须对。
+fn place_bss(tab: ptr, t: ptr) {
+    let n: u32 = cell(tab, C_NG);
     let dlen: u32 = align_to(cell(tab, C_GB), 8);
     let bss: u32 = 0;
     let i: u32 = 0;
     while i < n {
         let gbase: u32 = TB_G + i * 32;
-        let sz: u32 = load32(tab, gbase + G_SIZE);
-        let z: u32 = load32(tab, gbase + G_ZERO);
-        if z == 1 {
+        if load32(tab, gbase + G_ZERO) == 1 {
             bss = align_to(bss, 8);
             store32(tab, gbase + G_ADDR, data_base(tab) + dlen + bss);
-            bss = bss + align_to(sz, 8);
-        } else {
-            store32(tab, gbase + G_ADDR, data_base(tab) + load32(tab, gbase + G_DOFF));
+            bss = bss + align_to(load32(tab, gbase + G_SIZE), 8);
         }
         i = i + 1;
     }
     setcell(tab, C_BSS, bss);
-    // 登记标签
     i = 0;
     while i < n {
         let gbase: u32 = TB_G + i * 32;
-        lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN), 0, 0,
-                load32(tab, gbase + G_ADDR));
+        if load32(tab, gbase + G_ZERO) == 1 {
+            lbl_add(tab, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN), 0, 0,
+                    load32(tab, gbase + G_ADDR));
+        }
         i = i + 1;
     }
 }
@@ -2381,6 +2401,64 @@ fn sh_info(raw: ptr, k: u32) -> u32 {
     return load32(raw, sec_hdr(raw, k) + 44);
 }
 
+fn sh_flags(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 8);
+}
+
+/// **元数据节**（`.eh_frame` / `.debug*` / `.comment` / `.note*`）：代码引用不到它们，
+/// 丢掉无损。**与参考实现 `_META_SEC` 同一份名单** —— "摆哪些节"两边必须一致，
+/// 否则同一次链接两侧产物不同（镜像判据逐字节比）。
+fn is_meta_sec(raw: ptr, noff: u32) -> u32 {
+    let n: u32 = cstr_len(raw, noff);
+    if n >= 9 && lit_at(raw, noff, noff + 9, ".eh_frame") == 1 { return 1; }
+    if n >= 6 && lit_at(raw, noff, noff + 6, ".debug") == 1 { return 1; }
+    if n >= 8 && lit_at(raw, noff, noff + 8, ".comment") == 1 { return 1; }
+    if n >= 5 && lit_at(raw, noff, noff + 5, ".note") == 1 { return 1; }
+    return 0;
+}
+
+/// 该节是不是要摆的**数据节**：`SHF_ALLOC`(0x2) 且类型 PROGBITS(1)/NOBITS(8)，
+/// 不是代码节、不是元数据节、非空。**与参考实现那条筛选一一对应**（镜像判据钉）。
+fn is_data_sec(raw: ptr, k: u32) -> u32 {
+    if sh_type(raw, k) != 1 && sh_type(raw, k) != 8 { return 0; }
+    if sh_flags(raw, k) % 4 < 2 { return 0; }              // SHF_ALLOC = 0x2
+    if is_code_sec(raw, sec_name(raw, k)) == 1 { return 0; }
+    if is_meta_sec(raw, sec_name(raw, k)) == 1 { return 0; }
+    if sh_size(raw, k) == 0 { return 0; }
+    return 1;
+}
+
+/// 第 k 节在该对象**数据块**里的起点（数据节按节表顺序拼接、每节 16 对齐）。
+/// 与 `sec_at` 同一形状，只是筛的是 `is_data_sec`。
+fn dsec_at(raw: ptr, k: u32) -> u32 {
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < k {
+        if is_data_sec(raw, i) == 1 {
+            cur = align_to(cur, 16) + sh_size(raw, i);
+        }
+        i = i + 1;
+    }
+    return align_to(cur, 16);
+}
+
+/// 把节符号的**合成名**写进名字池：`$` + 对象号 + `.` + 节号（四个字节，**不是**文本）。
+/// **节符号**（`STT_SECTION`）的 `st_name` 是 0，名字靠 `shndx` 认 —— clang 对"指向
+/// `.rodata` 里某个常量"的重定位就是引用它。
+///
+/// ⚠ 名字必须**按对象**唯一：只用节号的话，两个对象各有 `.rodata` 时第二个会被
+/// "先来的为准"挡掉、指到**第一个对象的节**上（静默算错地址）。参考实现同一条理由。
+fn put_secname(t: ptr, at: u32, oi: u32, shndx: u32) -> u32 {
+    if at + 4 >= IN_CAP {
+        return fail("输入缓冲没有空间放节符号名");
+    }
+    store8(t, at, 36 as u8);              // '$'
+    store8(t, at + 1, oi as u8);
+    store8(t, at + 2, 46 as u8);          // '.'
+    store8(t, at + 3, shndx as u8);
+    return at + 4;
+}
+
 fn sh_num(raw: ptr) -> u32 {
     return rd16(raw, 60);
 }
@@ -2550,7 +2628,7 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
 
 /// 读 `path` 那个 `.o`, 把它的代码节接到代码缓冲之后, 并为它导出的符号立标签。
 /// 返回新的代码缓冲游标。四条边界都是**硬失败** (与参考实现同口径, docs/173 §3)。
-fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
+fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
     let fd: i64 = open_ro(path);
     if fd < 0 {
         wstr(2, "lomelf: 打不开外部目标文件: ");
@@ -2617,6 +2695,31 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
         }
         i3 = i3 + 1;
     }
+    // **数据节**（`docs/219` §8b 第 1 条）：接在**数据缓冲** `gb` 的当前游标之后。
+    // 真实 C 库的字符串常量、常量表、结构体都在这里；不摆它们，代码里那条
+    // `lea rdi, [rip + .L.str]` 就没有标签可指（症状是"引用了未定义的符号 .L.str"，
+    // 一句"不支持的节"都看不到 ⇒ 这是**读得进来**的门槛，不是摆放的门槛）。
+    // `.bss`(NOBITS) 按零字节摆进数据段（与参考实现同一取舍，代价是文件变大）。
+    let gb0: u32 = align_to(cell(tab, C_GB), 16);
+    pad_zero(gb, cell(tab, C_GB), gb0);
+    let db: u32 = gb0;
+    let i6: u32 = 0;
+    while i6 < ns {
+        if is_data_sec(mem, i6) == 1 {
+            let nd2: u32 = align_to(db, 16);
+            pad_zero(gb, db, nd2);
+            db = nd2;
+            if sh_type(mem, i6) == 1 {
+                copy_n(gb, db, mem, sh_off(mem, i6), sh_size(mem, i6));
+            } else {
+                pad_zero(gb, db, db + sh_size(mem, i6));
+            }
+            db = db + sh_size(mem, i6);
+        }
+        i6 = i6 + 1;
+    }
+    setcell(tab, C_GB, db);
+    store32(tab, TB_OBJ + oi * 8 + O_DATA, gb0);
     let i4: u32 = 0;
     while i4 < ns {
         if sh_type(mem, i4) == 2 {
@@ -2637,9 +2740,13 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
                     let bind: u32 = (load8(mem, o2 + 4) as u32) / 16;
                     // GLOBAL(1) / WEAK(2), 且落在某个代码节里。shndx 可以是保留值
                     // (SHN_ABS=0xfff1 等), 比节表长 —— 直接拿去索引会读飞, 所以先比大小。
-                    if nmoff2 != 0 && shndx != 0 && shndx < ns && (bind == 1 || bind == 2) {
+                    if shndx != 0 && shndx < ns {
+                        let code_sec: u32 = 0;
                         if sh_type(mem, shndx) == 1
                             && is_code_sec(mem, sec_name(mem, shndx)) == 1 {
+                            code_sec = 1;
+                        }
+                        if code_sec == 1 && nmoff2 != 0 && (bind == 1 || bind == 2) {
                             // 名字必须拷进**输入缓冲尾部**的名字池: 标签表存的是偏移, 而
                             // lbl_find 拿输入缓冲当基 —— 名字留在 .o 的缓冲里, 下一个 .o
                             // 一读进来就被盖掉了。
@@ -2649,6 +2756,36 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
                                 let val: u32 = lo32(rd64(mem, o2 + 8));
                                 lbl_add(tab, noff, nl, 0, 0,
                                         TEXT_VADDR + at0 + sec_at(mem, shndx) + val);
+                            }
+                        } else if code_sec == 1 || is_data_sec(mem, shndx) == 1 {
+                            // **数据节里的符号一律收（含局部）**：`.L.str` 就是 `bind=0` 的
+                            // `STT_OBJECT`；**节符号**（`st_name` 为 0）两边都给一个按对象
+                            // 唯一的合成名（参考实现 `$<对象名>$sec<k>`，这里 `$<对象号>.<节号>`）
+                            // —— 名字不进产物，两侧只要各自自洽。
+                            let noff: u32 = 0;
+                            let nl: u32 = 0;
+                            if nmoff2 == 0 {
+                                // ⚠ `put_secname` 返回的是**末尾**（好推进游标）—— 标签名要的是
+                                // **起点**，所以两处必须分开取。写成 `noff = put_secname(...)`
+                                // 会让标签名读成名字**后面**那 4 个字节，于是登记与查找各落在
+                                // 不同位置、永远对不上（实测就是这么红的）。
+                                let cur: u32 = cell(tab, C_EXTN);
+                                noff = cur;
+                                nl = 4;
+                                setcell(tab, C_EXTN, put_secname(t, cur, oi, shndx));
+                            } else {
+                                noff = copy_name(tab, t, mem, stro2 + nmoff2);
+                                nl = cstr_len(mem, stro2 + nmoff2);
+                            }
+                            if lbl_find(tab, t, noff, nl, 0, 0) == NO {
+                                let val: u32 = lo32(rd64(mem, o2 + 8));
+                                if code_sec == 1 {
+                                    lbl_add(tab, noff, nl, 0, 0,
+                                            TEXT_VADDR + at0 + sec_at(mem, shndx) + val);
+                                } else {
+                                    lbl_add(tab, noff, nl, 0, 0,
+                                            data_base(tab) + gb0 + dsec_at(mem, shndx) + val);
+                                }
                             }
                         }
                     }
@@ -2666,12 +2803,18 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
     while i5 < ns {
         if sh_type(mem, i5) == 4 && sh_size(mem, i5) > 0 {
             let tgt: u32 = sh_info(mem, i5);                  // sh_info = 被重定位的节
-            if tgt >= ns || sh_type(mem, tgt) != 1
+            let in_data: u32 = 0;
+            if tgt < ns && is_data_sec(mem, tgt) == 1 {
+                in_data = 1;                                  // 落在数据节上: 写 gb
+            } else if tgt >= ns || sh_type(mem, tgt) != 1
                 || is_code_sec(mem, sec_name(mem, tgt)) == 0 {
                 wstr(2, "lomelf: 重定位指向非代码节 (docs/173 §3)\n");
                 return die(1);
             }
             let tsecat: u32 = sec_at(mem, tgt);
+            if in_data == 1 {
+                tsecat = dsec_at(mem, tgt);
+            }
             // **两个不同的偏移, 别搞混** (第一版就在这里错了两次):
             //   `symsec` 是**符号表**节号; 符号记录在 `sh_off(symsec) + 下标*24`;
             //   名字串却在**它 `sh_link` 指向的 `.strtab`** 里 —— 与符号表**不是同一节**。
@@ -2693,8 +2836,20 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
                 }
                 let symoff: u32 = symoff0 + si * 24;
                 let nmoff3: u32 = load32(mem, symoff);
-                let nlen3: u32 = cstr_len(mem, stro3 + nmoff3);
-                let noff3: u32 = copy_name(tab, t, mem, stro3 + nmoff3);
+                let noff3: u32 = 0;
+                let nlen3: u32 = 0;
+                if nmoff3 == 0 {
+                    // **节符号**：`st_name` 是 0，名字靠 `shndx` 认 —— 与上面登记时
+                    // 同一套按对象唯一的合成名（两边必须用同一个，否则查不到）。
+                    // ⚠ 与登记处同一条：起点与游标是两个值，别把返回值当起点。
+                    let cur: u32 = cell(tab, C_EXTN);
+                    noff3 = cur;
+                    nlen3 = 4;
+                    setcell(tab, C_EXTN, put_secname(t, cur, oi, rd16(mem, symoff + 6)));
+                } else {
+                    nlen3 = cstr_len(mem, stro3 + nmoff3);
+                    noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                }
                 let fi: u32 = cell(tab, C_NFREL);
                 let fb: u32 = TB_FREL + fi * 32;
                 store32(tab, fb + F2_OBJ, oi);
@@ -2704,6 +2859,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
                 store32(tab, fb + F2_NOFF, noff3);
                 store32(tab, fb + F2_NLEN, nlen3);
                 store32(tab, fb + F2_ADD, lo32(rd64(mem, o5 + 16)));
+                store32(tab, fb + F2_IN, in_data);
                 setcell(tab, C_NFREL, fi + 1);
                 k5 = k5 + 1;
             }
@@ -2718,7 +2874,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
 /// `PC64` 这里按**零扩展**写 (参考实现按有符号)。实测到不了这条路 —— 它只出现在数据节的
 /// 64 位 PC 相对引用上, 而落在非代码节的重定位我们**一开始就拒了**。留个记号免得以后有人
 /// 以为两边逐位一致。
-fn apply_relocs(tab: ptr, t: ptr, txt: ptr) -> u32 {
+fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
     let n: u32 = cell(tab, C_NFREL);
     let i: u32 = 0;
     while i < n {
@@ -2735,19 +2891,33 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr) -> u32 {
             wstr(2, " —— 到链接结束都没人提供它 (第 2 阶段仍不链 libc, docs/173 §3)\n");
             return die(1);
         }
-        let site: u32 = load32(tab, TB_OBJ + oi * 8 + O_TEXT)
-                        + load32(tab, base + F2_AT) + load32(tab, base + F2_OFF);
-        let p: u32 = TEXT_VADDR + site;                       // 公式里的 P
+        // **两条路**（`docs/219` §8b 第 1 条）：`F2_IN` 说这条重定位的**落点**在哪 ——
+        // 0 = 代码缓冲 `txt`（基址 `TEXT_VADDR`），1 = 数据缓冲 `gb`（基址 `data_base`）。
+        // 算的是同一套 `S + A` / `S + A - P`，只是写到不同的缓冲、P 用不同的基址。
+        let in_data: u32 = load32(tab, base + F2_IN);
+        let site: u32 = 0;
+        let p: u32 = 0;
+        let buf: ptr = txt;
+        if in_data == 1 {
+            site = load32(tab, TB_OBJ + oi * 8 + O_DATA)
+                   + load32(tab, base + F2_AT) + load32(tab, base + F2_OFF);
+            p = data_base(tab) + site;
+            buf = gb;
+        } else {
+            site = load32(tab, TB_OBJ + oi * 8 + O_TEXT)
+                   + load32(tab, base + F2_AT) + load32(tab, base + F2_OFF);
+            p = TEXT_VADDR + site;                            // 公式里的 P
+        }
         let val: u32 = target + load32(tab, base + F2_ADD);   // 公式里的 S + A
         let ty: u32 = load32(tab, base + F2_TY);
         if ty == 2 || ty == 4 {
-            store32(txt, site, val - p);                      // PC32 / PLT32
+            store32(buf, site, val - p);                      // PC32 / PLT32
         } else if ty == 24 {
-            w64(txt, site, (val - p) as u64);                 // PC64
+            w64(buf, site, (val - p) as u64);                 // PC64
         } else if ty == 1 {
-            w64(txt, site, val as u64);                       // 64
+            w64(buf, site, val as u64);                       // 64
         } else {
-            store32(txt, site, val);                          // 32 / 32S
+            store32(buf, site, val);                          // 32 / 32S
         }
         i = i + 1;
     }
@@ -3772,15 +3942,18 @@ fn run(mem: ptr) -> u32 {
     if nlink != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }
-    // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, 导出符号立标签。
+    // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
+    // 导出符号立标签。
     let tobj: ptr = ptr_add(mem, M_OBJ);
     let got: u32 = 0;
     while got < nlink {
-        tlen = link_object(tab, inb, txt, tlen, tobj, ptr_add(pbuf, obase + got * 1024));
+        tlen = link_object(tab, inb, txt, gb, tlen, tobj, ptr_add(pbuf, obase + got * 1024));
         got = got + 1;
     }
+    // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
+    place_bss(tab, inb);
     // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。
-    let rr: u32 = apply_relocs(tab, inb, txt);
+    let rr: u32 = apply_relocs(tab, inb, txt, gb);
     if rr != 0 {
         return rr;
     }
