@@ -16,6 +16,7 @@ module set
 
 use "map.lomt"
 use "mem.lomt"
+choose runtime
 
 /// 建集合要多少字节 (与 map 相同)。
 pub fn set_bytes(cap: u32) -> u32 {

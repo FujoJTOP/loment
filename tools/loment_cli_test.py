@@ -400,7 +400,7 @@ def test_count_and_fns_on_a_known_file():
     d = Path(tempfile.mkdtemp(prefix="lomcli-cnt-"))
     f = d / "x.lomt"
     f.write_text(
-        "module x\n\nstruct S {\n    a: u32,\n}\n\n"
+        "module x\nchoose runtime\n\nstruct S {\n    a: u32,\n}\n\n"
         "enum E {\n    A,\n}\n\n"
         "fn one() -> u32 {\n    return 1;\n}\n\n"
         "pub fn two(a: u32) -> u32 {\n    return a;\n}\n",
@@ -418,7 +418,7 @@ def test_count_and_fns_on_a_known_file():
 def test_tokens_picks_up_strings_and_comments():
     d = Path(tempfile.mkdtemp(prefix="lomcli-tok-"))
     f = d / "x.lomt"
-    f.write_text('module x\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n    return 1;\n}\n',
+    f.write_text('module x\nchoose runtime\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n    return 1;\n}\n',
                  encoding="utf-8", newline="\n")
     rc, out, _ = _run(["tokens", str(f)] + _no_color())
     assert rc == 0
@@ -897,10 +897,10 @@ TWIN = ROOT / "loment" / "tools" / "lomclicheck.lomt"
 _VER_TXT = ("Loment 0.1.4 Pre2 (0.1.4-pre2), commit 0123456\nbuild 2026-09-15\n")
 _TOUR = "module tour\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n"
 _Y_SRC = "one\nalpha\ntwo\nalpha\nthree\n"
-_C_SRC = ("module x\n\nstruct S {\n    a: u32,\n}\n\nenum E {\n    A,\n}\n\n"
+_C_SRC = ("module x\nchoose runtime\n\nstruct S {\n    a: u32,\n}\n\nenum E {\n    A,\n}\n\n"
           "fn one() -> u32 {\n    return 1;\n}\n\n"
           "pub fn two(a: u32) -> u32 {\n    return a;\n}\n")
-_T_SRC = ('module x\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n'
+_T_SRC = ('module x\nchoose runtime\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n'
           '    return 1;\n}\n')
 _HI_SRC = "module hi\n"
 _STUBS = ("loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
