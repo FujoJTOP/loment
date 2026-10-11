@@ -12,6 +12,7 @@
 //   ./lomdoc <文件.lomt> > out.md
 
 module lomdoc
+choose runtime
 
 use lexer
 use switches

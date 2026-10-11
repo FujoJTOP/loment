@@ -48,6 +48,7 @@ def test(fn):
 #: 成功返回 0; 每一个非零都是一个**具体的**失败点, 不是笼统的"没过"。
 HOSTED_SRC = """\
 module hostz
+choose runtime
 
 extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
 extern fn uncompress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
@@ -561,6 +562,7 @@ int counter_add(Counter* c, int d) { return c->add(d); }
 #: 改名字符是 `nm` 量出来的, 不是猜的 (实测 `_Z11counter_newi` / `_Z11counter_addP7Counteri`)。
 CPP_CALLER = """\
 module cppcaller
+choose runtime
 
 extern fn _Z11counter_newi(x: i32) -> ptr;
 extern fn _Z11counter_addP7Counteri(c: ptr, d: i32) -> i32;
@@ -579,6 +581,7 @@ fn main() -> u32 {
 PY_SCRIPT = "open('%s','w').write(str(6*7))\\n"
 PY_CALLER = """\
 module pycaller
+choose runtime
 
 extern fn Py_Initialize() -> u32;
 extern fn PyRun_SimpleString(code: ptr) -> i32;
@@ -647,6 +650,7 @@ public class Hello {
 #: `Hello.compute(1)` 推出来是 2037 (10 圈 acc = acc*2 + i), 不是抄的。
 JAVA_CALLER = """\
 module javacaller
+choose runtime
 
 extern fn jvm_start(classpath: ptr) -> i64;
 extern fn jvm_static_int(cls: ptr, method: ptr, a: i64) -> i64;
@@ -708,6 +712,7 @@ CS_PROJ = """\
 #: `Lib.Compute(1)` 推出来是 44292 (10 圈 acc = acc*3 - i)。
 CS_CALLER = """\
 module cscaller
+choose runtime
 
 extern fn cs_compute(seed: i32) -> i32;
 

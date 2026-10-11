@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 4379d40db5d1809120a4f8785f485180f512bdb6c92a17ad5e564b39c84276a5 -->
+<!-- source-sha256: d146ad1f921d7fe3e863a2a5209a643263e5179122ce7457787909ad21781bc4 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -179,6 +179,14 @@ formal object and reconciles byte for byte".
   what wants that runtime, so the two contradict by definition. **`gc_manual` is not part of
   that rule**: `runtime` + `gc_manual` ("I want a runtime, but I manage memory myself") is a
   legitimate tier and must not be refused. See `docs/175` §3.6.
+
+  **As of 2026-10-10 this dimension is a guarantee** (`docs/227`) — the sentence above,
+  "decidable without reading the source", went from a **promise** to an **assertion**: a
+  `no_runtime` artifact carries **no** runtime, and every construct that would drag one in
+  (`/` `%` `alloc` `free` `str_concat` `str_eq` `panic` `guard`) is refused at compile time
+  **in that tier** (E022); `runtime` conversely **forces** that block into the artifact. **The
+  field's shape did not change at all** (no version bump, no new field) — what changed is the
+  weight of the sentence; the `gc_manual` + `runtime` legitimate tier stands.
 
 - **`gc_ladder` (v10)**: **the composition of the GC** — how many `alloc` sites each rung of
   the four-rung ladder took: `{l0, l1, l2, l3, total_sites}`. **Same shape as `boundary`**
