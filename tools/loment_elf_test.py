@@ -577,6 +577,88 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
 
 
 @test
+def test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one():
+    """分代那一档的**写屏障是承重的**（`docs/210` §2.7）—— 老块里存着指向年轻块的指针。
+
+    **Why**：小回收**不扫老年代**（那是它省下来的工），而老块里可能存着**指向年轻代的真
+    指针** —— `p as u64`（`ptrtoint`）+ `store64` 就写得出来（`docs/210` §4.2 那条
+    「根表是一个可审计的产物」正是想说清这件事）。没有写屏障把那张卡标脏，小回收就会把
+    **还活着的**年轻块当垃圾扫掉。它扫得悄无声息：**释放不改有效载荷**，所以要判"它还是
+    不是活的"，不能只看那几个字节，要看它**有没有被复用**。
+
+    **How to apply**：三段 churn，每一段都在排除一个"会让目标块不年轻"的机关 ——
+
+      * 目标块**尺寸独一无二**（20000 B，垃圾是 3000）—— 空闲链表接不住它，于是它
+        **只能从前沿分配**，而前沿 ≥ `oldtop` ⇒ 它是**真年轻代**。（实测：尺寸撞上垃圾
+        尺寸时，`alloc` 会从空闲链表给一个**低地址**的块，那一出生就算"老" —— 判据空转。）
+      * 目标块在**第一轮之后**分配 —— 那时 `oldtop` 已经立起来（`big` 已经算老的了）；
+      * 之后**换一个尺寸**继续 churn —— 空闲链表接不住新尺寸，年轻代才**真的长起来**，
+        小回收才有得扫。（实测：同尺寸会被链表复用、年轻代不长，判据同样空转。）
+
+    末尾读回老块里那个指针指向的字节：必须还是当初写进去的标签。
+    **把 `__loment_minor` 里那趟脏卡扫描拆掉，这一条立刻红**（实测 `rc=110`：块被回收、
+    字节被后一轮垃圾改写）—— 这就是它证伪得了的理由。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_text = ("module gcminor\nchoose gc_auto_alpha\nchoose runtime\n\n"
+                "fn w64(p: ptr, off: u32, v: u64) {\n"
+                "    let i: u32 = 0;\n"
+                "    while i < 8 {\n"
+                "        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);\n"
+                "        i = i + 1;\n"
+                "    }\n"
+                "}\n\n"
+                "fn r64(p: ptr, off: u32) -> u64 {\n"
+                "    let v: u64 = 0;\n"
+                "    let i: u32 = 0;\n"
+                "    while i < 8 {\n"
+                "        let b: u64 = load8(p, off + i) as u64;\n"
+                "        v = v + (b << (i * 8));\n"
+                "        i = i + 1;\n"
+                "    }\n"
+                "    return v;\n"
+                "}\n\n"
+                "fn stash_at(big: ptr, off: u32, sz: u32, tag: u32) {\n"
+                "    let g: ptr = alloc(sz);\n"
+                "    store8(g, 0, (tag & 255) as u8);\n"
+                "    w64(g, 8, g as u64);\n"
+                "    w64(big, off, g as u64);\n"
+                "}\n\n"
+                "fn _start() {\n"
+                "    let bs: u32 = 2000;\n"
+                "    let big: ptr = alloc(bs);\n"
+                "    store8(big, 0, 1);\n"
+                "    let a: u32 = 0;\n"
+                "    while a < 20 {\n"
+                "        stash_at(big, 128, 3000, a + 10);\n"
+                "        a = a + 1;\n"
+                "    }\n"
+                "    stash_at(big, 8, 20000, 201);\n"
+                "    let b: u32 = 0;\n"
+                "    while b < 40 {\n"
+                "        stash_at(big, 192, 3000, b + 80);\n"
+                "        b = b + 1;\n"
+                "    }\n"
+                "    let back: ptr = r64(big, 8) as ptr;\n"
+                "    if load8(back, 0) == (201 & 255) {\n        syscall4(60, 7, 0, 0);\n    }\n"
+                "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "gcminor.lomt"
+        src.write_text(src_text, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "gcminor.native"
+        nat.write_bytes(blob)
+        rc = _run_bin(nat, "gcminor", td, timeout=60)[0]
+    assert rc == 7, (
+        f"老块里那个指针指向的年轻块**没了**：退出码 {rc}（期望 7）。分代那一档的写屏障 / "
+        "脏卡扫描 / 晋升（`oldtop` 推进）/ 年轻代传播，四处任一处坏了都会走到这儿")
+
+
+@test
 def test_l1_definite_lifetime_bounds_the_heap():
     """**L1（定活）真的发生**（`docs/210` §2.5）—— 判据是**一对**程序。
 
