@@ -1,0 +1,26 @@
+// std/libl.lomt — LibL 的入口（docs/232）
+//
+// **LibL 是这个标准库的专有名词。** 入口有两个，指的是**同一个包**：
+//
+//   * `use std`  —— 老名字，照旧能用（整包，127+ 个模块）；
+//   * `use libl` —— 这一份：只把 **libc 那四张脸**拉进来。
+//
+// **为什么 `libl` 不等于 `std`**：`std.lomt` 那个门面把整包拼进**一个单元**，于是平的
+// 发射符号空间里挤着 1350+ 个顶层名字，编译时间还按模块数超线性涨（实测自举侧 n=64
+// 已 187 秒，`docs/199` §1）。这一份只有四份（加它们依赖的 `mem`/`char`），
+// 是"我只要 libc 那张脸"时该用的入口 —— 面小、编得快、撞名面也小。
+//
+// **包名仍然是 `std`**：库系统的判据要求"包名与入口文件名一致"（`docs/168`
+// `test_multi_file_package_survives_materialize`），所以这个包叫 `std`，
+// 而**库**叫 LibL。两者不矛盾 —— 一个是库系统的键，一个是这门语言里这个库的名字。
+//
+// 按依赖序：`char`/`mem` -> `string` `ctype` -> `stdlib` -> `stdio`。
+
+module libl
+
+use "char.lomt"
+use "mem.lomt"
+use "string.lomt"
+use "ctype.lomt"
+use "stdlib.lomt"
+use "stdio.lomt"
