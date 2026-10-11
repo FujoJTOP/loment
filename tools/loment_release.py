@@ -65,6 +65,8 @@ GLOBS = [
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
+    "tools/loment_libl_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
@@ -104,6 +106,7 @@ GLOBS = [
     # GC 证明面的量尺（`docs/210` §7）：把语料跑成 `gc_auto_alpha`，加总 v10 的 `gc_ladder`。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
+    "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
