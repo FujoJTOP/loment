@@ -394,6 +394,35 @@ def test_hosted_heap_asks_the_os_and_sealed_cannot():
 
 
 @test
+def test_the_static_arena_collector_still_reclaims():
+    """`docs/231`（B3）：位图换掉之后，**静态那一档的收集器**仍然收得对。
+
+    这条是 B3 的骨架判据：上面那条两方向的判据里 `sealed` 那一份在第一次
+    `alloc(200000)` 就落 `boom` —— **根本没走到收集器**。而 B3 改的是 `_IR_GC_SHARED`
+    本体，**每一档**都变了。所以另起一条：只在 **64 KiB** 里跑，累计要 **200 KB**
+    （收不回来必然 OOM），同时守着一块只被栈上 `keep` 指着的活数据 ——
+    **收集之后必须原样**（返回 9）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    if os.name == "nt" and not _wsl():
+        print("      SKIP: 无 WSL (Windows 上把 IR 交叉成 ELF 要它)")
+        return
+    import lomentc_test as CT                                        # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        f = td / "gc_sealed_churn.lomt"
+        _write_sh(f, CT.GC_SEALED_CHURN_SRC)
+        mod = lomentc.load(f)
+        errs = lomentc.check(mod)
+        assert not errs, errs
+        rc = _run_ir(lomentc.emit_llvm(mod, ROOT), td, "gc_sealed_churn")
+    assert rc == 9, f"静态档的收集器没收对 (rc={rc}) —— 位图那一改有问题"
+    print("      静态 64 KiB：累计 200 KB 收得回来，活数据原样 (rc=9)")
+
+
+@test
 def test_hosted_links_a_real_library_and_returns_the_right_answer():
     """**那一条判据**: 一份 Loment 源调系统 libz, compress→uncompress 逐字节回原文。
 

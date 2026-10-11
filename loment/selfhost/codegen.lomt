@@ -5284,7 +5284,7 @@ fn emit_roots(s: ptr, out: ptr) -> u32 {
 
 fn emit_gc(s: ptr, out: ptr) -> u32 {
     let _r: u32 = emit_str(s, out, "@__loment_gcbytes = internal global i32 0
-@__loment_mark = internal global [8192 x i32] zeroinitializer
+@__loment_mark = internal global [1024 x i8] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
 ; （分配器那句注释：偏移 0 永远不是块）。从 0 起会读到 size=0，`i += 0` 就是死循环
@@ -5313,10 +5313,16 @@ cont:
   br label %scan
 found:
   %midx = lshr i32 %i, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %midx
-  %old = load i32, ptr %mp
-  %was = icmp eq i32 %old, 1
-  store i32 1, ptr %mp
+  %mby = lshr i32 %midx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %mby
+  %mcur = load i8, ptr %mp
+  %mbit = and i32 %midx, 7
+  %msh = shl i32 1, %mbit
+  %mmsk = trunc i32 %msh to i8
+  %mold = and i8 %mcur, %mmsk
+  %was = icmp ne i8 %mold, 0
+  %mnew = or i8 %mcur, %mmsk
+  store i8 %mnew, ptr %mp
   br i1 %was, label %no, label %yes
 yes:
   ret i32 1
@@ -5334,8 +5340,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5381,9 +5388,14 @@ wb:
   %wszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
   %wsz = load i32, ptr %wszp
   %widx = lshr i32 %wi, 3
-  %wmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %widx
-  %wmk = load i32, ptr %wmp
-  %wsm = icmp eq i32 %wmk, 1
+  %wby = lshr i32 %widx, 3
+  %wmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %wby
+  %wmk = load i8, ptr %wmp
+  %wbit = and i32 %widx, 7
+  %wsh = shl i32 1, %wbit
+  %wmsk = trunc i32 %wsh to i8
+  %wold = and i8 %wmk, %wmsk
+  %wsm = icmp ne i8 %wold, 0
   br i1 %wsm, label %ws, label %wn2
 ws:
   %wsstart = add i32 %wi, 8
@@ -5434,9 +5446,14 @@ sb:
   %sszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %si
   %ssz = load i32, ptr %sszp
   %sidx = lshr i32 %si, 3
-  %smp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %sidx
-  %smk = load i32, ptr %smp
-  %smsm = icmp eq i32 %smk, 1
+  %sby = lshr i32 %sidx, 3
+  %smp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %sby
+  %smk = load i8, ptr %smp
+  %sbit = and i32 %sidx, 7
+  %ssh = shl i32 1, %sbit
+  %smsk = trunc i32 %ssh to i8
+  %sold = and i8 %smk, %smsk
+  %smsm = icmp ne i8 %sold, 0
   br i1 %smsm, label %keep, label %kill
 keep:
   br label %slc
@@ -5465,7 +5482,7 @@ done:
 /// `gc_auto_alpha` 不需要第二份 hosted：`hosted` 与它**定义上冲突**，走不到这儿。
 fn emit_gc_hosted(s: ptr, out: ptr) -> u32 {
     let _r: u32 = emit_str(s, out, "@__loment_gcbytes = internal global i32 0
-@__loment_mark = internal global [131072 x i32] zeroinitializer
+@__loment_mark = internal global [16384 x i8] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
 ; （分配器那句注释：偏移 0 永远不是块）。从 0 起会读到 size=0，`i += 0` 就是死循环
@@ -5495,10 +5512,16 @@ cont:
   br label %scan
 found:
   %midx = lshr i32 %i, 3
-  %mp = getelementptr [131072 x i32], ptr @__loment_mark, i32 0, i32 %midx
-  %old = load i32, ptr %mp
-  %was = icmp eq i32 %old, 1
-  store i32 1, ptr %mp
+  %mby = lshr i32 %midx, 3
+  %mp = getelementptr [16384 x i8], ptr @__loment_mark, i32 0, i32 %mby
+  %mcur = load i8, ptr %mp
+  %mbit = and i32 %midx, 7
+  %msh = shl i32 1, %mbit
+  %mmsk = trunc i32 %msh to i8
+  %mold = and i8 %mcur, %mmsk
+  %was = icmp ne i8 %mold, 0
+  %mnew = or i8 %mcur, %mmsk
+  store i8 %mnew, ptr %mp
   br i1 %was, label %no, label %yes
 yes:
   ret i32 1
@@ -5517,8 +5540,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [131072 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [16384 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr i8, ptr %hb, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5564,9 +5588,14 @@ wb:
   %wszp = getelementptr i8, ptr %hb, i32 %wi
   %wsz = load i32, ptr %wszp
   %widx = lshr i32 %wi, 3
-  %wmp = getelementptr [131072 x i32], ptr @__loment_mark, i32 0, i32 %widx
-  %wmk = load i32, ptr %wmp
-  %wsm = icmp eq i32 %wmk, 1
+  %wby = lshr i32 %widx, 3
+  %wmp = getelementptr [16384 x i8], ptr @__loment_mark, i32 0, i32 %wby
+  %wmk = load i8, ptr %wmp
+  %wbit = and i32 %widx, 7
+  %wsh = shl i32 1, %wbit
+  %wmsk = trunc i32 %wsh to i8
+  %wold = and i8 %wmk, %wmsk
+  %wsm = icmp ne i8 %wold, 0
   br i1 %wsm, label %ws, label %wn2
 ws:
   %wsstart = add i32 %wi, 8
@@ -5617,9 +5646,14 @@ sb:
   %sszp = getelementptr i8, ptr %hb, i32 %si
   %ssz = load i32, ptr %sszp
   %sidx = lshr i32 %si, 3
-  %smp = getelementptr [131072 x i32], ptr @__loment_mark, i32 0, i32 %sidx
-  %smk = load i32, ptr %smp
-  %smsm = icmp eq i32 %smk, 1
+  %sby = lshr i32 %sidx, 3
+  %smp = getelementptr [16384 x i8], ptr @__loment_mark, i32 0, i32 %sby
+  %smk = load i8, ptr %smp
+  %sbit = and i32 %sidx, 7
+  %ssh = shl i32 1, %sbit
+  %smsk = trunc i32 %ssh to i8
+  %sold = and i8 %smk, %smsk
+  %smsm = icmp ne i8 %sold, 0
   br i1 %smsm, label %keep, label %kill
 keep:
   br label %slc
@@ -5691,9 +5725,14 @@ l:
   br i1 %ld, label %done, label %b
 b:
   %idx = lshr i32 %li, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
-  %mk = load i32, ptr %mp
-  %sm = icmp eq i32 %mk, 1
+  %bby = lshr i32 %idx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %bby
+  %mk = load i8, ptr %mp
+  %bbit = and i32 %idx, 7
+  %bsh = shl i32 1, %bbit
+  %bmsk = trunc i32 %bsh to i8
+  %band = and i8 %mk, %bmsk
+  %sm = icmp ne i8 %band, 0
   %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
   %sz = load i32, ptr %sp
   br i1 %sm, label %hit, label %miss
@@ -5709,7 +5748,6 @@ lc:
 done:
   ret i32 %acc
 }
-
 ");
     }
     return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
