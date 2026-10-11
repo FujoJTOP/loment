@@ -96,7 +96,7 @@ def w(base: Path, rel: str, text: str) -> None:
 
 
 def manifest(name: str, version: str) -> str:
-    return (f'module pkg\n\npub fn name() -> str {{\n    return "{name}";\n}}\n\n'
+    return (f'module pkg\nchoose runtime\n\npub fn name() -> str {{\n    return "{name}";\n}}\n\n'
             f'pub fn version() -> str {{\n    return "{version}";\n}}\n')
 
 
@@ -110,12 +110,12 @@ def build_tree(base: Path, v2_for_mid2: bool = False, manifest_for_app: bool = T
     for tag, mult, ver in (("v1", 2, "0.1.0"), ("v2", 3, "0.2.0")):
         w(base, f"mutil_{tag}/pkg.lomp", manifest("mathutil", ver))
         w(base, f"mutil_{tag}/mathutil.lomt",
-          f"module mathutil\n\npub fn scale(x: u32) -> u32 {{\n    return x * {mult};\n}}\n")
+          f"module mathutil\nchoose runtime\n\npub fn scale(x: u32) -> u32 {{\n    return x * {mult};\n}}\n")
     for mid, fn_name, extra, tag in (("mid1", "calc_one", 1, "v1"),
                                      ("mid2", "calc_two", 100, "v2" if v2_for_mid2 else "v1")):
         w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
         w(base, f"{mid}/{mid}.lomt",
-          f"module {mid}\n\nuse mathutil\n\npub fn {fn_name}(x: u32) -> u32 {{\n"
+          f"module {mid}\nchoose runtime\n\nuse mathutil\n\npub fn {fn_name}(x: u32) -> u32 {{\n"
           f"    return scale(x) + {extra};\n}}\n")
         shutil.copytree(base / f"mutil_{tag}", base / mid / "deps" / "mathutil")
     if manifest_for_app:
@@ -240,7 +240,7 @@ def test_rename_preserves_field_variant_and_local_names():
       2. 两个版本跑出各自的结果。
     """
     body = '''module shadow
-
+choose runtime
 pub fn item() -> u32 {
     return 2;
 }
@@ -283,7 +283,7 @@ pub fn h() -> u32 {
         for mid, tag, fn in (("mid1", "s1", "sum1"), ("mid2", "s2", "sum2")):
             w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
             w(base, f"{mid}/{mid}.lomt",
-              f"module {mid}\n\nuse shadow\n\npub fn {fn}() -> u32 {{\n"
+              f"module {mid}\nchoose runtime\n\nuse shadow\n\npub fn {fn}() -> u32 {{\n"
               f"    return f() + g() + h();\n}}\n")
             shutil.copytree(base / tag, base / mid / "deps" / "shadow")
         w(base, "io/pkg.lomp", manifest("io", "0.1.0"))
@@ -326,7 +326,7 @@ def test_truly_ambiguous_reference_is_refused():
         for mid in ("mid1", "mid2"):
             w(base, f"{mid}/pkg.lomp", manifest(mid, "0.1.0"))
             w(base, f"{mid}/{mid}.lomt",
-              f"module {mid}\n\npub fn run() -> u32 {{\n    return 1;\n}}\n")
+              f"module {mid}\nchoose runtime\n\npub fn run() -> u32 {{\n    return 1;\n}}\n")
         w(base, "app/pkg.lomp", manifest("app", "1.0.0"))
         # app 同时 use mid1/mid2, 而两边都导出 run -> 点 run 就是真歧义
         w(base, "app/app.lomt",
@@ -373,12 +373,12 @@ def test_cycle_detected_at_resolve_time():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         # 每个包目录里**只放一个 .lomt**: 同放两个会把兄弟文件也当成本包的边 (夹具坑)
-        w(td, "cyc/a/a.lomt", "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        w(td, "cyc/a/a.lomt", "module a\nchoose runtime\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
         w(td, "cyc/a/deps/b/b.lomt",
-          "module b\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
+          "module b\nchoose runtime\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
         # 第三层: 名字 a 再次出现 —— 环在**构造这个节点之前**就该被认出来
         w(td, "cyc/a/deps/b/deps/a/a.lomt",
-          "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+          "module a\nchoose runtime\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
         try:
             lomlib.resolve(td / "cyc" / "a")
         except lomlib.LibError as e:
@@ -408,12 +408,12 @@ def test_capability_closure_is_derived_and_conflicts_reported():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         w(td, "blk/blk.lomt",
-          "module blk\n\ncapability store : disk[0..4] revocable\n\n"
+          "module blk\nchoose runtime\n\ncapability store : disk[0..4] revocable\n\n"
           "pub fn put(i: u32) -> u32 {\n    guard store(i);\n    return i;\n}\n")
         w(td, "other/other.lomt",
-          "module other\n\ncapability store : disk[0..8] revocable\n\n"
+          "module other\nchoose runtime\n\ncapability store : disk[0..8] revocable\n\n"
           "pub fn put2(i: u32) -> u32 {\n    guard store(i);\n    return i;\n}\n")
-        w(td, "app/app.lomt", "module app\n\nuse blk\n\nfn _start() {\n"
+        w(td, "app/app.lomt", "module app\nchoose runtime\n\nuse blk\n\nfn _start() {\n"
           "    let a: u32 = put(1);\n    syscall4(60, 0, 0, 0);\n}\n")
         shutil.copytree(td / "blk", td / "app" / "deps" / "blk")
         g = lomlib.resolve(td / "app")
@@ -423,7 +423,7 @@ def test_capability_closure_is_derived_and_conflicts_reported():
         assert not conflicts, conflicts
 
         # 同一个构建里两个库各自声明同名能力, 域不同 -> 必须报
-        w(td, "app2/app.lomt", "module app2\n\nuse blk\nuse other\n\nfn _start() {\n"
+        w(td, "app2/app.lomt", "module app2\nchoose runtime\n\nuse blk\nuse other\n\nfn _start() {\n"
           "    let a: u32 = put(1);\n    syscall4(60, 0, 0, 0);\n}\n")
         for n, src in (("blk", "blk"), ("other", "other")):
             shutil.copytree(td / src, td / "app2" / "deps" / n)
@@ -447,12 +447,12 @@ def test_multi_file_package_survives_materialize():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         w(td, "lib/lib.lomt",
-          'module lib\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
+          'module lib\nchoose runtime\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
           "    return add(x, x);\n}\n")
         w(td, "lib/util.lomt",
-          "module util\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
+          "module util\nchoose runtime\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
         w(td, "app/app.lomt",
-          "module app\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
+          "module app\nchoose runtime\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
           "    syscall4(60, v as u64, 0, 0);\n}\n")
         shutil.copytree(td / "lib", td / "app" / "deps" / "lib")
         g = lomlib.resolve(td / "app")
@@ -484,10 +484,10 @@ def test_dependency_start_is_reported_once_and_correctly():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         w(td, "boot/boot.lomt",
-          "module boot\n\npub fn go() -> u32 {\n    return 1;\n}\n\n"
+          "module boot\nchoose runtime\n\npub fn go() -> u32 {\n    return 1;\n}\n\n"
           "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n")
         w(td, "app/app.lomt",
-          "module app\n\nuse boot\n\nfn _start() {\n    let a: u32 = go();\n"
+          "module app\nchoose runtime\n\nuse boot\n\nfn _start() {\n    let a: u32 = go();\n"
           "    syscall4(60, 0, 0, 0);\n}\n")
         shutil.copytree(td / "boot", td / "app" / "deps" / "boot")
         g = lomlib.resolve(td / "app")
@@ -557,7 +557,7 @@ def test_loment_lomlib_matches_python():
         # 依赖找不到: 两边都必须非零
         broken = td / "broken"
         w(broken, "app/app.lomt", """module app
-
+choose runtime
 use nope
 
 fn _start() {
@@ -591,23 +591,23 @@ def test_loment_lomlib_tree_matches_python():
         # 包内多文件: `use "util.lomt"` —— 物化时保留相对结构，树里也该看得见
         ml = td / "ml"
         w(ml, "lib/lib.lomt",
-          'module lib\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
+          'module lib\nchoose runtime\n\nuse "util.lomt"\n\npub fn twice(x: u32) -> u32 {\n'
           "    return add(x, x);\n}\n")
         w(ml, "lib/util.lomt",
-          "module util\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
+          "module util\nchoose runtime\n\npub fn add(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n")
         w(ml, "app/app.lomt",
-          "module app\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
+          "module app\nchoose runtime\n\nuse lib\n\nfn _start() {\n    let v: u32 = twice(21);\n"
           "    syscall4(60, v as u64, 0, 0);\n}\n")
         shutil.copytree(ml / "lib", ml / "app" / "deps" / "lib")
         _pair(exe, "tree", ml / "app", "包内多文件")
         # 环 / 依赖找不到: 两边都必须非零（文案各写各的，所以只比退出码）
         cyc = td / "cyc"
-        w(cyc, "a/a.lomt", "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
-        w(cyc, "a/deps/b/b.lomt", "module b\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
+        w(cyc, "a/a.lomt", "module a\nchoose runtime\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+        w(cyc, "a/deps/b/b.lomt", "module b\nchoose runtime\n\nuse a\n\npub fn g() -> u32 {\n    return 2;\n}\n")
         w(cyc, "a/deps/b/deps/a/a.lomt",
-          "module a\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
+          "module a\nchoose runtime\n\nuse b\n\npub fn f() -> u32 {\n    return 1;\n}\n")
         broken = td / "broken"
-        w(broken, "app/app.lomt", "module app\n\nuse nope\n\nfn _start() {\n"
+        w(broken, "app/app.lomt", "module app\nchoose runtime\n\nuse nope\n\nfn _start() {\n"
           "    syscall4(60, 0, 0, 0);\n}\n")
         for label, d in (("环", cyc / "a"), ("依赖找不到", broken / "app")):
             buf, err = io.StringIO(), io.StringIO()

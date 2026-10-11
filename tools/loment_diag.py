@@ -1736,6 +1736,10 @@ def surface_lomt() -> str:
         "// 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。",
         "",
         "module surface_data",
+        # **生成物也要满足新规矩**（`docs/224`）：这份单元 `use` 的是 `bytes` / `json`，
+        # 而它们都声明了运行期需求（它们要除法/分配）—— 根不写这一行，它**自己就检查不过**。
+        # 这一条是 CI 上抓到的：本地那一轮我重建了 surface_data 却忘了它也是调用方。
+        "choose runtime",
         "",
         f"pub fn n_codes() -> u32 {{ return {len(codes)}; }}",
         "",

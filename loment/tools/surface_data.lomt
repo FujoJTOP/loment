@@ -25,6 +25,7 @@
 // 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。
 
 module surface_data
+choose runtime
 
 pub fn n_codes() -> u32 { return 26; }
 

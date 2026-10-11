@@ -710,6 +710,7 @@ fn _start() {
 #: 服务端 `recvfrom` 拿到**发送方的地址**、再用那个地址回一发、客户端 `recvfrom` 收回来。
 #: 地址是 `127.0.0.1` + **内核挑的临时端口**（`getsockname` 问出来），所以并发跑门禁不撞端口。
 UDP_DEMO = """module udpdemo
+choose runtime
 
 fn w(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
@@ -820,6 +821,7 @@ def _udp_ok(out: bytes) -> bool:
 #: 两边的事件位还**不同值**（Linux `POLLIN`=1 / Windows `POLLRDNORM`=0x100），
 #: 所以 shim 得把 `pollfd` 数组翻成三个 `fd_set`、再把就绪翻回去（`docs/221`）。
 POLL_DEMO = """module polldemo
+choose runtime
 
 fn w(fd: u64, s: str) -> i64 {
     return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
