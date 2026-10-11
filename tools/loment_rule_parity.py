@@ -272,6 +272,16 @@ _CASES: list[tuple[str, str]] = [
     ("cmd-decl-no-body",
      "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
      "fn helper() -> u32 {\n    return 0;\n}\n"),
+    # ---- excluded 的**行为轴** (E005, `docs/218` §7 第 2 件 / `docs/227` §3) --------
+    # 这一族钉的是"**名字之外**的那一半"：M41 比的是空间名（`excluded "usb"` 对
+    # `capability … : usb[…]`），它**从不看行为**，所以"声明不碰网络、代码里在调 socket"
+    # 是它看不见的。两种写法（`network` / `net`）各一条 —— 参考实现认两个，自举版也得认。
+    ("excl-net-socket",
+     "module m\n\nexcluded \"network: 本单元不申请任何 net 能力\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(41, 2, 1, 0, 0, 0);\n}\n"),
+    ("excl-net-bind",
+     "module m\n\nexcluded \"net: 不碰网络\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(49, 3, 0, 16, 0, 0);\n}\n"),
 ]
 
 
