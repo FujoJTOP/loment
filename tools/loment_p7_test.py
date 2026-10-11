@@ -182,7 +182,7 @@ def test_m75_debugger_symbolizer():
 @test
 def test_m70_interrupt_handler_ir_shape():
     """M70: 中断处理函数的 IR 形状 (x86_intrcc + byval 帧) —— IDT 安装归内核侧。"""
-    src = ("module m\ninterrupt fn timer_isr() {\n    let t: u32 = 1;\n"
+    src = ("module m\nchoose runtime\ninterrupt fn timer_isr() {\n    let t: u32 = 1;\n"
            "    store8(alloc(1), 0, t as u8);\n}\n")
     mod = lomentc.Parser(__import__("lomc").lex(src), src).parse()
     ll = lomentc.emit_llvm(mod, ROOT)

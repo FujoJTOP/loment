@@ -88,6 +88,7 @@ def wsl_path(p: Path) -> str:
 #: `_start` 读到最后一个字节再退出，于是"跑起来"这件事本身就是"搬对了"。
 OPT_LIBCALL_PROBE = """\
 module optlibcall_probe
+choose runtime
 
 fn fill(p: ptr, n: u32, v: u8) {
     let i: u32 = 0;
