@@ -210,7 +210,8 @@ SHARD_COST = {
     "loment_std_test": 1.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
-    "loment_megaproject_test": 4.6,
+    # 含 300 个 Java 模块那一档的 javac + JVM（没有 javac 时那一支可见地 SKIP，快得多）
+    "loment_megaproject_test": 15.0,
 }
 #: 没登记耗时的判据按这个算。实测大部分判据在秒级, 取 8s 偏保守。
 SHARD_DEFAULT_S = 8.0
