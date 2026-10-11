@@ -1112,6 +1112,11 @@ def test_lomelf_selfhost_links_foreign_object():
         # 那两条薄壳有没有算成同一个地址。
         ("ffi5", ffitest.LOMENT_MALLOC_SOURCE,
          [(ffitest.C_MALLOC_SOURCE, "mallocc")], ["mallocc"], 42),
+        # **数据节**（`docs/219` §8b 第 1 条）：`.rodata` 里的字符串 + `.data.rel.ro`
+        # 里指向它们的表。这一格逐字节比的是**两边把数据节摆在同一个地址上** ——
+        # 摆错顺序（bss 与对象数据重叠）、或数据重定位算错，都会当场红。
+        ("ffi6", ffitest.LOMENT_DATA_SOURCE,
+         [(ffitest.C_DATA_SOURCE, "datac")], ["datac"], 100),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -1149,7 +1154,7 @@ def test_lomelf_selfhost_links_foreign_object():
             finally:
                 for p in [elfrepo, llrepo, *clones]:
                     p.unlink(missing_ok=True)
-    print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳): "
+    print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳/数据节): "
           f"与参考逐字节相同, 退出码 " + " / ".join(str(c[4]) for c in cases))
 
 

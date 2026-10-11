@@ -962,6 +962,53 @@ def test_malloc_and_free_are_loments_own_heap():
         print("      C2: C 的 free 还回 Loment 的空闲链 -> 再 alloc 命中同一地址 (rc=42)")
 
 
+#: **数据节**的夹具（`docs/219` §8b 第 1 条）：一份**真实 C 库的形状** —— 字符串常量
+#: 住在 `.rodata.str1.1`，一张 `const char *const` 表住在 `.data.rel.ro`。
+#: 两条都要：前者考"数据节摆不摆"，后者考"**落在数据节上的重定位**算不算"。
+C_DATA_SOURCE = """\
+int c_pick(int i) {
+    static const char *const names[] = {"ab", "cd"};
+    return names[i][1];
+}
+"""
+
+LOMENT_DATA_SOURCE = """\
+module consp4
+
+extern fn c_pick(i: i32) -> i32;
+
+fn _start() {
+    syscall4(60, c_pick(1 as i32) as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_object_with_rodata_and_data_relocations_runs():
+    """**真实 C 库的门槛**（`docs/219` §8b 第 1 条，S2 的前置）：数据节。
+
+    在此之前这一步**连读都读不进来** —— `.rodata` 从来没被摆过，于是代码里那条
+    `lea rdi, [rip + .L.str]` 以"引用了未定义的符号 .L.str"的面目报出来（一句"不支持的节"
+    都看不到）。而**真实 C 库的字符串常量、常量表都在这里**，所以这是 zlib 那一类库的门槛。
+
+    判据取 `names[1][1]` = `"cd"` 的第 2 个字节 = `'d'` = **100**：它同时要求
+    **数据节被摆对**（`"cd"` 那 3 个字节）**而且** `.data.rel.ro` 里那条**指向它的重定位**
+    算对（`names[1]` 才是 `"cd"` 的地址）。任一条错都到不了 100。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "d.c").write_text(C_DATA_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "d.c", td / "d.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_DATA_SOURCE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "d.o"], 100)
+        assert rc == 100, f"数据节结果不对: rc={rc} (期望 100) err={err[-300:]!r}"
+        print("      数据节: .rodata 字符串 + .data.rel.ro 表 -> rc=100")
+
+
 @test
 def test_object_with_undefined_symbol_is_rejected():
     """一个符号**到链接结束都没人提供** (典型是 libc) -> **硬拒**, 不猜。
