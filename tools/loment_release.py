@@ -111,6 +111,10 @@ GLOBS = [
     "tools/loment_dap.py", "tools/loment_dap_test.py",
     "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
+    # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
+    # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_channel.py", "tools/loment_channel_test.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",

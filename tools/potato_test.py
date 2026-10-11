@@ -369,6 +369,33 @@ MUTATORS_V12 = [
 ]
 
 
+def fixture_v13() -> dict:
+    """一份合法的 **v13** 形式对象: v12 的再 + v13 的 `vm`（`docs/231`）。
+
+    与 `fixture_v7` … `fixture_v12` 同一个理由单独来一份：`vm` 从 v13 起才合法 ——
+    拿 v12 去试只会得到"未知顶层字段"。
+
+    **这里没有冲突可判**，这是 v13 与前面几维不一样的地方：`vm` 与 `runtime` 今天确实
+    合不来（VM 要用运行期），但那条要**读源码**（源码里用没用到运行期构造）—— 对象里
+    判不了。所以它的反例只有"缺 / 拼错 / 不是字符串"三条，**没有**"不能同时选"那一条。
+    """
+    d = fixture_v12()
+    d["potato"] = "v13"
+    d["vm"] = "no_vm"
+    return d
+
+
+#: v13 的 `vm` 那几条规则的反例（`docs/231`）。作用在 **v13** 的对象上。
+MUTATORS_V13 = [
+    ("vm 缺这一项", lambda d: d.pop("vm"), "vm 必须是"),
+    ("vm 取值拼错", lambda d: d.__setitem__("vm", "vm_t0"), "vm 必须是"),
+    ("vm 不是字符串", lambda d: d.__setitem__("vm", 1), "vm 必须是"),
+    # **反面**：`vm` = `"vm"` 是**合法**的（dev 通道）—— 它不该报错，所以当合法样本
+    # （见 `_cases()`），不在这张反例表里。**发行版拒它是编译器的事，不是校验器的事**：
+    # 对象里没有"渠道"这一栏，校验器也判不了它（`docs/231` §5 判据 D 落在打包侧）。
+]
+
+
 
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
@@ -471,6 +498,12 @@ def test_every_spec_rule_has_a_rejection_case():
     # v12 那一组同理（`surfaces`, docs/224）。
     for name, mut, needle in MUTATORS_V12:
         d = fixture_v12()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v13 那一组同理（`vm`, docs/231）。
+    for name, mut, needle in MUTATORS_V13:
+        d = fixture_v13()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -691,6 +724,17 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v12()
         mut(d)
         out.append((f"v12-{name}", d))
+    # v13 那一组（`vm`, `docs/231`）同理。
+    for name, mut, _ in MUTATORS_V13:
+        d = fixture_v13()
+        mut(d)
+        out.append((f"v13-{name}", d))
+    # **`vm` = `"vm"` 是合法档**（dev 通道："这份产物要由 VM 执行"）—— 必须**不报错**。
+    # 反例表只钉"该拒的要拒"，钉不住"不该拒的别拒"。
+    # 发行版拒它是**编译器**的事：对象里没有"渠道"这一栏，校验器判不了（`docs/231` §5 判据 D）。
+    _okv = fixture_v13()
+    _okv["vm"] = "vm"
+    out.append(("v13-vm", _okv))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

@@ -33,14 +33,59 @@ SCRIPT = ROOT / "loment" / "bootstrap.sh"
 SH_REL = "loment/bootstrap.sh"
 
 
-def reference_ir() -> str:
-    """参考实现为自举驱动发射的单元 IR —— 种子应与它逐字符相同。"""
-    mod = lomentc.load(ENTRY)
-    deps = lomentc.resolve_deps(mod, ROOT, ENTRY.parent, entry=ENTRY)
-    errs = lomentc.check(mod, deps=deps)
-    if errs:
-        raise SystemExit(f"[ERR] driver.lomt 自己检查不过: {errs[0]}")
-    return lomentc.emit_llvm(mod, ROOT, deps)
+#: ---- 渠道注入（`docs/231` §2.3）------------------------------------------
+#:
+#: 发行版种子 = 把自举侧那一行渠道常量翻成 `1` 之后**重算**的种子。**只改这一行、
+#: 只在这一个文件里** —— 于是"包里的树除这一行之外与仓库逐字节相同"仍是一条可判的话。
+#:
+#: 钩子放在这里、不放进 `lomentc.load()`：那是**编译器**，不该知道"打包"这件事。
+#: `lomentc.load` 内部是**调用时才** `from potato_from import front_door`，
+#: 所以换掉 `potato_from.front_door` 就够 —— 编译器一个字节都不用碰。
+CHANNEL_FILE = "loment/selfhost/checker.lomt"
+CHANNEL_LINE_DEV = "const LOMENT_CHANNEL: u32 = 0;"
+CHANNEL_LINE_RELEASE = "const LOMENT_CHANNEL: u32 = 1;"
+
+
+def _front_door_for(channel: str):
+    """按渠道包一层 `front_door`；`dev` 就是原来那个。"""
+    import potato_from  # noqa: PLC0415
+
+    orig = potato_from.front_door
+    if channel == "dev":
+        return orig
+    want = (ROOT / CHANNEL_FILE).resolve()
+
+    def patched(path):
+        fu = orig(path)
+        if Path(path).resolve() == want:
+            if CHANNEL_LINE_DEV not in fu.source:
+                raise SystemExit(
+                    f"[ERR] 渠道注入点漂了：{CHANNEL_FILE} 里找不到 `{CHANNEL_LINE_DEV}` —— "
+                    "改了那一行的写法就要同时改这里（`docs/231` §2.3）")
+            fu.source = fu.source.replace(CHANNEL_LINE_DEV, CHANNEL_LINE_RELEASE, 1)
+        return fu
+
+    return patched
+
+
+def reference_ir(channel: str = "dev") -> str:
+    """参考实现为自举驱动发射的单元 IR —— 种子应与它逐字符相同。
+
+    `channel="release"` 时先做 §2.3 那一步注入，算出来的就是**发行版种子**。
+    """
+    import potato_from  # noqa: PLC0415
+
+    orig = potato_from.front_door
+    potato_from.front_door = _front_door_for(channel)
+    try:
+        mod = lomentc.load(ENTRY)
+        deps = lomentc.resolve_deps(mod, ROOT, ENTRY.parent, entry=ENTRY)
+        errs = lomentc.check(mod, deps=deps)
+        if errs:
+            raise SystemExit(f"[ERR] driver.lomt 自己检查不过: {errs[0]}")
+        return lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        potato_from.front_door = orig
 
 
 def check() -> int:

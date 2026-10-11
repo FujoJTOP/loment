@@ -43,6 +43,29 @@ OUT = ROOT / "loment" / "dist"
 STAGE = ROOT / "loment" / "build" / "dist"
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 
+#: ---- 渠道：包 = 发行版（`docs/231` §2.3）----------------------------------
+#:
+#: **这条流水线造出来的东西就是发行版**，所以它用的每一个二进制都由**发行版种子**建 ——
+#: 种子现算：`loment_seed.reference_ir("release")`，而那个注入**只改
+#: `loment/selfhost/checker.lomt` 里那一行渠道常量**。于是"发行版里 `choose vm` 是编译
+#: 错误"是**这条流水线的属性**，不是"谁记得去翻某个开关"。
+#:
+#: 代价（明写）：包里的 `selfhost_driver.ll` **不等于**仓库里那份。判据因此从"逐字节相等"
+#: 换成"**可重算的定点相等**"：`release_seed_text()` 任何时候重算都得得出同一串字节
+#: （`tools/loment_channel_test.py` 钉它）。
+RELEASE_SEED = STAGE / "selfhost_driver.release.ll"
+
+
+def release_seed_text() -> str:
+    """按发行版渠道算一遍自举驱动的 IR（注入只动 `checker.lomt` 那一行）。"""
+    import loment_seed  # noqa: PLC0415
+
+    return loment_seed.reference_ir("release")
+
+
+#: 当前这次构建用的种子。**默认是仓库里那份（dev）**，`emit()` 会把它换成发行版那份。
+ACTIVE_SEED: Path = SEED
+
 DISPLAY = loment_release.RELEASE_NAME       # 人读: 0.1.4
 VER = loment_release.RELEASE                # 机器: 0.1.4
 
@@ -1662,12 +1685,12 @@ def build_stage1() -> Path:
 
     stage1 按**本机**格式出：在 Windows 上出 PE，这样它直接就能跑，不必再去借 WSL。
     """
-    if not SEED.exists():
-        raise SystemExit(f"missing seed {SEED.relative_to(ROOT)} (docs/159)")
+    if not ACTIVE_SEED.exists():
+        raise SystemExit(f"missing seed {ACTIVE_SEED.relative_to(ROOT)} (docs/159)")
     STAGE.mkdir(parents=True, exist_ok=True)
     tgt = _host_target()
     stage1 = STAGE / ("stage1.exe" if tgt == "pe" else "stage1.elf")
-    p = _write_shared(stage1, _lomelf_link(SEED.read_text(encoding="utf-8"), tgt))
+    p = _write_shared(stage1, _lomelf_link(ACTIVE_SEED.read_text(encoding="utf-8"), tgt))
     # Linux 那支出来的是 ELF, 而 `emit_ir` **马上要执行它** —— 没有可执行位就是
     # `PermissionError: [Errno 13]`。Windows 那支是 PE, 而 PE 的执行不看这一位, 所以
     # 本机一直没暴露 (2026-09-22 把门禁搬上 CI, 第一条红就是它)。
@@ -1724,8 +1747,8 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     todo = [(n, e, c) for n, e, c in TOOLS if not only or n in only]
     if not todo:
         return {}
-    if any(n == SEED_TOOL for n, _e, _c in todo) and not SEED.exists():
-        raise SystemExit(f"missing seed {SEED.relative_to(ROOT)} (docs/159)")
+    if any(n == SEED_TOOL for n, _e, _c in todo) and not ACTIVE_SEED.exists():
+        raise SystemExit(f"missing seed {ACTIVE_SEED.relative_to(ROOT)} (docs/159)")
     # stage1 只在真需要现场编译时才造 —— 于是 `--only driver` 是秒级
     stage1 = None if all(n == SEED_TOOL for n, _e, _c in todo) else build_stage1()
     cc = clang_path() if opt else None
@@ -1734,7 +1757,7 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     optimized: list[str] = []
 
     def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
-        text = (SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
+        text = (ACTIVE_SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
         elf, why = _link_opt(text, cc) if cc else (None, "")
         if elf is None:
@@ -1972,9 +1995,28 @@ def skill_zip() -> bytes:
     return buf.getvalue()
 
 
+def _use_release_seed() -> None:
+    """把 `ACTIVE_SEED` 换成**发行版种子**（现算，落盘到 `STAGE`）。
+
+    **这是"包 = 发行版"的落点**（`docs/231` §2.3）：只要走这条流水线，包里每一个工具都是
+    发行版渠道建的 —— `loment-driver` 在其中，于是它会对 `choose vm` 报编译错误。
+
+    种子每次现算（不读盘上那份缓存）：缓存只省本机重复构建的时间，**判据不在缓存上** ——
+    `tools/loment_channel_test.py` 每次都重算一遍再对。
+    """
+    global ACTIVE_SEED
+    STAGE.mkdir(parents=True, exist_ok=True)
+    text = release_seed_text()
+    RELEASE_SEED.write_text(text, encoding="utf-8", newline="\n")
+    ACTIVE_SEED = RELEASE_SEED
+    print(f"  [channel] 发行版种子 {len(text)}B —— 注入点："
+          f"loment/selfhost/checker.lomt 那一行渠道常量（`docs/231` §2.3）")
+
+
 def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None,
          opt: bool = False) -> int:
     out = out_dir or OUT
+    _use_release_seed()
     bins = build_tools(only, opt)
     lin = payload("linux", bins)
     win = payload("windows", bins)
