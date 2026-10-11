@@ -466,9 +466,13 @@ def test_install_scripts_stay_pure_ascii():
 
 #: 随包发的标准库：`std` 127 个模块 + `std.lomt` 门面 = 128 个 `.lomt`；`host` 7 个。
 #: 各带一份 `pkg.lomp`，所以整棵树是 137 个文件。用户说的"127 个库"就是 std 的模块数。
+#:
+#: **2026-10-11 起 std 是 133** —— LibL 加了 5 份（`string` `ctype` `stdlib` `stdio`
+#: `libl`，`docs/232`），整棵树随之 137 -> 142。用户说的"127 个库"指的是**原来**那一批；
+#: 这里钉的是**文件数**，所以这个数会跟着库长，不是常量意义上的"127"。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 128, "host": 7}
-STORE_FILES = 137
+STORE_MODULES = {"std": 133, "host": 7}
+STORE_FILES = 142
 
 
 def _store_line(out: str) -> str:
