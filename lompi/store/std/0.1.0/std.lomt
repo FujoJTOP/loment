@@ -99,6 +99,20 @@ use "varint.lomt"
 use "sort.lomt"
 use "bsearch.lomt"
 
+// LibL —— 这个包对 libc 的那张脸 (docs/232)
+//
+// 上面那些模块是**这门语言自己的**形状: 长度显式、偏移寻址、没有 libc 的名字。
+// 这四份镜的是 libc 的四个头 —— 函数名、参数序、返回值语义都取 libc 的, 于是
+// "会 C 的人不必学新东西"; 而判据是**与真 glibc 逐字节对跑**
+// (tools/loment_libl_test.py)。它们**建在上面那些模块上**（ctype->char,
+// string->mem, stdlib/stdio->mem+string），不另起一份: 同一个字节不会有两个答案。
+//
+// 按依赖序: mem/char -> string, ctype -> stdlib -> stdio。
+use "string.lomt"
+use "ctype.lomt"
+use "stdlib.lomt"
+use "stdio.lomt"
+
 // 随机
 use "rand.lomt"
 
