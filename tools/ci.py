@@ -117,6 +117,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
                  "loment_gc_surface_test",
+                 # 逐站点说出"为什么落到那一层"（`docs/226`）—— 判据 A 是与编译器的**对账**：
+                 # 这份报告的四层直方图必须逐份等于 `_count_gc_ladder()`，漂了就红。
+                 "loment_gc_why_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",

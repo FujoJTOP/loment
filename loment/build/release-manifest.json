@@ -763,7 +763,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "e8edc3a10c973e88a8fdacf6f5c7620f968a36ee6e5168597d8a2e9aa02a3069"
+   "sha256": "f5613f828bfcff7f0fce16b7c4cdaf252f0487bf0ca2abf51aa97f6f39ff1db7"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -2020,6 +2020,10 @@
   {
    "path": "docs/223-register-command.md",
    "sha256": "d68459ecdeb0d6ffaf863e04d613ba9827244a8c6ec96b627ea3c8f90b47c2d5"
+  },
+  {
+   "path": "docs/226-gc-ladder-why.md",
+   "sha256": "1c6a4ec8e97972f3c0b12b14fb49616085f34e6182e3c63e266220df6bc0527e"
   },
   {
    "path": "docs/manual/index.md",
