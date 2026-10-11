@@ -5,7 +5,7 @@
   "grammar": "loment",
   "mode": "std",
   "gc": "gc_manual",
-  "runtime": "no_runtime",
+  "runtime": "runtime",
   "port": "sealed",
   "switches": [],
   "dialects": [],
@@ -3315,6 +3315,20 @@
     },
     {
       "name": "gc_auto_tier",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "rt_tier",
       "params": [
         {
           "name": "src",

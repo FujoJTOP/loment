@@ -22,6 +22,7 @@
 // 命名: 公开 map_*, 内部 mp_*。自检 test_map_*。
 
 module map
+choose runtime
 
 use "mem.lomt"
 

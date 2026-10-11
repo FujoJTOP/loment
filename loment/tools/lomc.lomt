@@ -15,6 +15,7 @@
 // 符号+量值实现 (与 Python 的 int_lit 一致)。
 
 module lomc
+choose runtime
 
 use lexer
 use json

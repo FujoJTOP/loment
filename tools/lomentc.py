@@ -793,6 +793,17 @@ class If:
     then: list
     otherwise: list
     line: int
+    #: **两支各自的 token 跨度**（半开，`[at, end)`）—— 同 `While.tok_at/tok_end` 的约定：
+    #: `at` 取 `{` **之后**那一格、`end` 取 `}` 那一格。`else if` 链上 `otherwise` 是
+    #: **一条**语句，跨度就是那条语句本身。
+    then_at: int = 0
+    then_end: int = 0
+    else_at: int = 0
+    else_end: int = 0
+    #: **L2**（`docs/210` §2.3）：这一支能不能在末尾批量归还（把前沿退回去）。
+    #: 与 `While.l2` 同一条规则（`_l2_ok`），只是"体"换成了分支。
+    then_l2: bool = False
+    else_l2: bool = False
 
 
 @dataclass
@@ -1135,6 +1146,10 @@ class Module:
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
+    #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
+    #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
+    #: 在 token 流上，而解析器是唯一握着它的地方）。`no_runtime` 那条强保证读它。
+    rt_sites: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -1612,6 +1627,9 @@ class Parser:
         # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
         # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
         mod.toks = self.toks
+        # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
+        # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
+        mod.rt_sites = _runtime_sites(self.toks)
         return mod
 
     def parse_items(self, mod: Module, nested: bool = False) -> None:
@@ -1955,15 +1973,27 @@ class Parser:
             self.no_struct += 1
             cond = self.parse_expr()
             self.no_struct -= 1
+            then_at = self.i + 1              # '{' 之后 —— 与自举侧同一个起点
             then = self.parse_block()
+            then_end = self.i - 1             # '}' 的下标（不含）
             otherwise = []
+            else_at = 0
+            else_end = 0
             if self.at("ident", "else"):
                 self.next()
                 if self.at("ident", "if"):  # else if 链
+                    # **不给跨度**：`else if` 是一条**语句**（`otherwise = [If(...)]`），
+                    # 它自己那两支的跨度由它自己的解析填 —— 在这里再包一层，自举侧那一份
+                    # 就对不上（它走的是 `stmt()` 递归，没有对应的一层）⇒ 逐字节判据会红。
                     otherwise = [self.parse_stmt()]
                 else:
+                    else_at = self.i + 1
                     otherwise = self.parse_block()
-            return If(cond, then, otherwise, t.line)
+                    else_end = self.i - 1
+            s = If(cond, then, otherwise, t.line)
+            s.then_at, s.then_end = then_at, then_end
+            s.else_at, s.else_end = else_at, else_end
+            return s
         if t.val == "while":
             self.next()
             self.no_struct += 1
@@ -3579,6 +3609,66 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     return mod, deps
 
 
+#: **会把运行期拖进产物的构造**（`docs/217` / `docs/175` §3.6）。
+#: 键 = token 值（punct 的 `/` `%`，ident 的那六个内建/关键字），值 = 报错时点名的名字。
+#:
+#: 这张表**刻意长在 token 层**（与 `_l0_promotable` 同一个理由，`docs/210` §2.2）：自举侧
+#: 手上只有 token 流，规则写在 token 上，两个实现才可能逐字节一致。
+#:
+#: 它是**保守的**：一个叫 `alloc` 的用户函数也会被算进来。多报的代价是一次点名拒，
+#: 漏报的代价是"声明了 `no_runtime` 而产物里有运行期" —— 那是这一维唯一的失败形状，
+#: 两边的代价不对称，所以往保守那边偏。`tools/loment_runtime_test.py` 在全仓语料上核
+#: "被拒 ⟺ 产物真带运行期"，把这笔保守账钉成可证伪的。
+_RUNTIME_SITES: dict[str, str] = {
+    "/": "除法 `/`",
+    "%": "取模 `%`",
+    "alloc": "`alloc`",
+    "free": "`free`",
+    "str_concat": "`str_concat`",
+    "str_eq": "`str_eq`",
+    "panic": "`panic`",
+    "guard": "`guard`（能力域守卫）",
+}
+
+
+def _runtime_sites(toks: list) -> list[tuple[str, int]]:
+    """扫出本单元里所有**会把运行期拖进产物**的构造（`docs/217`）。
+
+    **为什么是 token 而不是 AST**：同 `_l0_promotable`。自举侧没有 AST，只有 token 流；
+    两边要数的必须是同一个东西，所以规则只能写在两边都完整持有的那个表示上。
+
+    **为什么保守**：见 `_RUNTIME_SITES` 的注释 —— 多报一次是点名拒，漏报一次是
+    "保证了产物里没有运行期而它其实有"。
+    """
+    out: list[tuple[str, int]] = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind == "punct" and t.val in ("/", "%"):
+            out.append((_RUNTIME_SITES[t.val], t.line))
+            continue
+        if t.kind != "ident" or t.val not in _RUNTIME_SITES:
+            continue
+        # **只有"用"才触发，名字本身不触发**。这一条是被两处**实测的假阳性**逼出来的：
+        #   * 一份 Java 语料的接口单元里有 `pub extern fn guard(...)` —— **方法叫 `guard`**；
+        #   * 同一份里还有个**结构体字段** `guard: Guard,`。
+        # 两者都只是名字，一个构造都没产生，却都会把产物判成"要运行期"。
+        # 收紧成**位置**判据：
+        #   * `fn` 后面的那个名字 —— 声明，不算；
+        #   * 其余那五个（`alloc`/`free`/`str_concat`/`str_eq`/`panic`）—— **紧跟 `(`** 才算（调用）；
+        #   * `guard` —— 语法里它是**语句**（`guard c(0);`），所以**紧跟一个名字**才算；
+        #     写成 `guard: Guard` 或 `let g: guard` 都不符合这两条，自然落选。
+        prev = toks[i - 1].val if i > 0 else ""
+        if prev == "fn":
+            continue
+        nxt = toks[i + 1] if i + 1 < n else None
+        if t.val == "guard":
+            hit = nxt is not None and nxt.kind == "ident"
+        else:
+            hit = nxt is not None and nxt.kind == "punct" and nxt.val == "("
+        if hit:
+            out.append((_RUNTIME_SITES[t.val], t.line))
+    return out
+
 def _unit_id(m: Module) -> object:
     """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
 
@@ -3676,6 +3766,26 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             if _w in _pair), 1)
                 errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
 
+    # ---- **运行期维是一条保证，不是一句期望**（`docs/217` / `docs/175` §3.6）。
+    # `no_runtime`（默认）说的不是"我们希望产物里没有运行期"，而是"**产物里没有运行期**"
+    # —— 于是凡是会把它拖进去的构造，**编译期点名拒**（用户 2026-10-09 裁决：按字面做，
+    # 规格让路）。这不是"顺手加一条检查"：没有它，`no_runtime` 与 `runtime` 在产物上
+    # 没有任何可分辨的差别，"不读源码可判"（`docs/147`）那句就是空的。
+    #
+    # **默认档也拒**：这一维不写就是 `no_runtime`。所以"老程序一行不改照编"这条从
+    # 2026-10-09 起**不再成立** —— 凡用到除法/分配/字符串拼接的程序都要在根单元写一行
+    # `choose runtime`。这是**明写的代价**，不是漏掉的一格（`docs/217` §3）。
+    if _eff["runtime"] == "no_runtime":
+        _sites = mod.rt_sites
+        if _sites:
+            _name, _line = _sites[0]
+            _rest = len(_sites) - 1
+            errs.append(
+                f"{_line}: 声明了 `no_runtime`，但它会让产物带上运行期 —— {_name}"
+                f"（`no_runtime` 是**保证**：产物里不许出现那段运行期）。"
+                + (f"这一类构造本单元另有 {_rest} 处。" if _rest else "")
+                + "要运行期就在根单元写 `choose runtime`；不要就把这个构造换掉")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
@@ -3688,10 +3798,31 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             f"（在 `{d.name}` 里，`{word0}`）—— "
                             f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
+        # **库要声明它的运行期需求**（`docs/217`）：上面那条"根必须满足依赖"只对
+        # **声明了**的依赖有效 —— 一个用了除法却什么都不写的库，会在根写着 `no_runtime`
+        # 的时候**静默**把运行期带进产物。那句老报错本来就写着"库该声明**能力需求**，
+        # 由项目决定"：这一条就是把它兑现。
+        if d.rt_sites and d.chooses.get("runtime") != "runtime":
+            _n0, _l0 = d.rt_sites[0]
+            errs.append(
+                f"{_l0}: 依赖 `{d.name}` 用了会把运行期拖进产物的构造（{_n0}），"
+                f"却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
+                f"`choose runtime`")
         if d.chooses:
-            dim0, word0, line0 = d.choose_lines[0]
-            errs.append(f"{line0}: 库不许 `choose`（在 `{d.name}` 里，`{word0}`）"
-                        f" —— 库该声明**能力需求**, 由项目决定{CORE_DIM_ZH[dim0]}")
+            # **依赖可以声明它的需求**（`docs/217`，用户 2026-10-09 裁决）。从前这里一律
+            # "库不许 `choose`" —— 那让一个要除法的库**两面堵死**：当根编要 `choose runtime`，
+            # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
+            # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
+            _seen: set[str] = set()
+            for dim0, word0, line0 in d.choose_lines:
+                if dim0 in _seen:
+                    continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
+                _seen.add(dim0)
+                if _eff[dim0] != word0:
+                    errs.append(
+                        f"{line0}: 依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
+                        f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
+                        f"根必须满足它。在根单元写一行 `choose {word0}`")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
             errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
@@ -4757,8 +4888,8 @@ def _count_gc_ladder(mod: Module) -> dict:
                     l1 += 1
                 # 其余落 L3（在 `l3` 那一格用 total 减出来）
             if isinstance(s, If):
-                walk(s.then, in_l2, l0n, l1n)
-                walk(s.otherwise, in_l2, l0n, l1n)
+                walk(s.then, in_l2 or s.then_l2, l0n, l1n)
+                walk(s.otherwise, in_l2 or s.else_l2, l0n, l1n)
             elif isinstance(s, While):
                 walk(s.body, in_l2 or s.l2, l0n, l1n)
             elif isinstance(s, For):
@@ -5216,6 +5347,7 @@ entry:
 go:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_collect()
+  br label %out
 out:
   ret void
 }
@@ -6002,7 +6134,12 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
 def _l2_loop_epochs(f: Func, toks: list,
                     safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
-    """把 `f` 里每个 `while`/`for` 的 `l2` 填上（`docs/210` §2 的 L2）。"""
+    """把 `f` 里每个 `while`/`for` **以及 `if` 的两支**的 `l2` 填上（`docs/210` §2.3 的 L2）。
+
+    `if` 的两支与循环体是**同一个形状的块**（`docs/210` §7 原先把它列在"没做"里），规则也
+    是同一条（`_l2_ok`）—— 只是"体"换成了那一支的 token 跨度。`else` 支为空时
+    `else_end == 0`，`else_end > else_at` 天然不成立，不用再加一个"有没有 else"的判断。
+    """
     def walk(stmts: list) -> None:
         for s in stmts:
             if isinstance(s, While):
@@ -6012,6 +6149,10 @@ def _l2_loop_epochs(f: Func, toks: list,
                 s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0, safe)
                 walk(s.body)
             elif isinstance(s, If):
+                if s.then_end > s.then_at:
+                    s.then_l2 = _l2_ok(toks, s.then_at, s.then_end, f.tok_end, f.l0, safe)
+                if s.else_end > s.else_at:
+                    s.else_l2 = _l2_ok(toks, s.else_at, s.else_end, f.tok_end, f.l0, safe)
                 walk(s.then)
                 walk(s.otherwise)
             elif isinstance(s, Match):
@@ -6242,7 +6383,12 @@ class _Ir:
         值就是一条 SSA 指令，不需要 alloca —— 循环体那块标签**支配**体内的一切，
         自然也支配回边之前那个位置。
         """
-        if not s.l2:
+        return self.epoch_open_flag(s.l2)
+
+    def epoch_open_flag(self, ok: bool) -> str | None:
+        """同上，但"这一格开不开"由**调用方算好的布尔**给 —— `if` 的两支没有语句对象可读。
+        """
+        if not ok:
             return None
         v = self.t()
         self.w(f"{v} = load i32, ptr @__loment_off")
@@ -6977,10 +7123,16 @@ class _Ir:
             self.w(f"br i1 {c}, label %{then_l}, label %{else_l}")
             self.terminated = True
             self.label(then_l)
+            # **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：
+            # 两支各是一个块，规则与循环体同一条 —— 入口记前沿、末尾退回。
+            tv = self.epoch_open_flag(s.then_l2)
             self.block(s.then)
+            self.epoch_close(s, tv)
             self.jump(end_l)
             self.label(else_l)
+            ev = self.epoch_open_flag(s.else_l2)
             self.block(s.otherwise)
+            self.epoch_close(s, ev)
             self.jump(end_l)
             self.label(end_l)
             return
@@ -7267,6 +7419,16 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
+    # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
+    #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
+    #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
+    #     （编译期点名，而不是发射到一半才发现）。两半合起来才是这一维。
+    #
+    # **`_IR_HEAP` 不跟着 `rt_on` 强发**：那是 64 KiB 的零初全局 + 分配器，程序不 `alloc`
+    # 就不该装它（一个只会除法的裸机引导程序不该凭空多 64 KiB 的 .bss）。它仍旧按需 ——
+    # 而"用得到 `alloc`"这一半由 `check()` 管着：`no_runtime` 下写 `alloc` 是拒的，
+    # 所以"产物里有分配器"必然意味着"根写过 `choose runtime`"。
+    rt_on = mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]) == "runtime"
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -7339,7 +7501,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("@__loment_cov = global [256 x i64] zeroinitializer")
         out.append(f"@__loment_cov_n = constant i64 {cov_counter[0]}")
         out.append("")
-    if "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
+    if rt_on or "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
         out.append(_IR_RUNTIME)
     if "@__loment_audit" in text_all:  # P4/M38
         out.append("@__loment_audit = internal global [16 x i64] zeroinitializer")

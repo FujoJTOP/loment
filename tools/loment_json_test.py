@@ -87,6 +87,7 @@ def _lom_str(s: str) -> str:
 
 PROBE_TMPL = '''// loment/build/json_probe.lomt — JSON 库的探针 (由 tools/loment_json_test.py 生成)
 module json_probe
+choose runtime
 
 use "loment/lib/json.lomt"
 
@@ -251,6 +252,7 @@ def test_json_decoding_and_lookup():
     probe.parent.mkdir(parents=True, exist_ok=True)
     p0, p2, p5 = PAYLOADS[0], PAYLOADS[2], PAYLOADS[5]
     src = f'''module json_lookup
+choose runtime
 
 use "loment/lib/json.lomt"
 

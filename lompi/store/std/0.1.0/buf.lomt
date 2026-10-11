@@ -10,6 +10,7 @@
 // 命名: 公开一律 buf_*, 内部一律 bu_*。自检 test_buf_*。
 
 module buf
+choose runtime
 
 use "numfmt.lomt"
 use "math.lomt"
