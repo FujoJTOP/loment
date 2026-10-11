@@ -3232,8 +3232,9 @@ class ForeignObject:
             o = e_shoff + k * e_shentsize
             nameoff, typ, flags, addr, off, size, link, info, align, entsize = \
                 struct.unpack_from("<IIQQQQIIQQ", raw, o)
-            secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
-                         "link": link, "info": info, "entsize": entsize, "name": ""})
+            secs.append({"nameoff": nameoff, "type": typ, "flags": flags, "off": off,
+                         "size": size, "link": link, "info": info, "entsize": entsize,
+                         "name": ""})
         shstr = secs[e_shstrndx]
         for s in secs:
             end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
@@ -3257,8 +3258,38 @@ class ForeignObject:
             raise Unsupported(f"{name}: 没有代码节 (.text / .text.*)")
         self.text = bytes(buf)
         self.sec_at = {k: s["at"] for k, s in enumerate(secs) if "at" in s}
+        # **数据节**（`docs/219` S2 的前置，§8b 第 1 条）：`SHF_ALLOC` 的 `.rodata*` /
+        # `.data*` / `.bss`。真实 C 库的**字符串常量、常量表、结构体**都在这里。
+        #
+        # **它卡住的不是"摆不摆得下"，是"读不读得进来"**：代码里那条
+        # `lea rdi, [rip + .L.str]` 是一条**指向数据节的符号**的重定位，而我们原先只登记
+        # 代码节里的符号 ⇒ 它会以"引用了未定义的符号 .L.str"的面目报出来（实测），
+        # 一句"不支持的节"都看不到。所以这一步是**真实库的门槛**。
+        #
+        # 收 `SHF_ALLOC`(0x2) 且类型是 `SHT_PROGBITS`(1) 或 `SHT_NOBITS`(8) 的；`.text*`
+        # 已经在上面那一趟收走；元数据节（`.eh_frame`/`.debug`/`.comment`/`.note`）**不收**
+        # —— 代码引用不到它们（`_META_SEC` 同一条理由）。
+        #
+        # `.bss`(NOBITS) 这里**按零字节摆进 DATA**（不是单独一段）：小、且省掉一条"段内
+        # 符号落在 bss"的路径。**代价**：带大 `.bss` 的库会把零字节写进文件 —— 这是本档
+        # 明写的边界，不是疏忽。
+        dbuf = bytearray()
+        for s in secs:
+            if s["name"] == ".text" or s["name"].startswith(".text."):
+                continue
+            if s["name"].startswith(_META_SEC) or s["size"] == 0:
+                continue
+            if s["type"] not in (1, 8) or not (s["flags"] & 0x2):   # SHF_ALLOC
+                continue
+            while len(dbuf) % 16:
+                dbuf.append(0)
+            s["dat"] = len(dbuf)
+            dbuf += raw[s["off"]:s["off"] + s["size"]] if s["type"] == 1 else bytes(s["size"])
+        self.data = bytes(dbuf)
+        self.dsec_at = {k: s["dat"] for k, s in enumerate(secs) if "dat" in s}
         # 符号: 定义在代码节里的全局/弱符号进 `syms`; 未定义的只记名 (`undefined`)
         syms: dict[str, int] = {}
+        dsyms: dict[str, int] = {}      #: 数据节里的符号（**含局部**）
         undefined: list[str] = []
         #: (symtab 节号, 符号下标) -> 名字 —— 重定位按**下标**引用符号, 靠它回查名字
         name_of: dict[tuple[int, int], str] = {}
@@ -3270,6 +3301,22 @@ class ForeignObject:
                 o = s["off"] + k * 24
                 nameoff, info, other, shndx, value, size = struct.unpack_from("<IBBHQQ", raw, o)
                 if nameoff == 0:
+                    # **节符号**（`STT_SECTION`）：`st_name` 就是 0，名字靠 `shndx` 认。
+                    # clang 对"指向 `.rodata` 里某个常量"的重定位就是引用它 —— 实测
+                    # `static const char *const msgs[] = {"ab","cd"};` 那条报的是
+                    # "重定位引用了下标记号外的符号 3"。给它一个**合成名**（只在本函数内用、
+                    # 不进产物），地址 = 该节基址 + `st_value`。
+                    # ⚠ 名字必须**按对象**唯一：两个对象各有 `.rodata` 时，只用节号的话
+                    # 第二个会被"先来的为准"挡掉、指到**第一个对象的节**上（静默算错地址）。
+                    synth = f"${name}$sec{shndx}"
+                    if shndx < len(secs):
+                        s0 = secs[shndx]
+                        if "at" in s0:
+                            name_of[(si, k)] = synth
+                            syms[synth] = s0["at"] + value
+                        elif "dat" in s0:
+                            name_of[(si, k)] = synth
+                            dsyms[synth] = s0["dat"] + value
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
@@ -3285,20 +3332,29 @@ class ForeignObject:
                         undefined.append(nm)
                 # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
                 # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
-                elif shndx < len(secs) and bind in (1, 2):  # GLOBAL / WEAK
+                elif shndx < len(secs):
                     tgt = secs[shndx]
-                    if "at" in tgt:                              # 落在某个代码节里
+                    if "at" in tgt and bind in (1, 2):           # 代码节里的 GLOBAL/WEAK
                         syms[nm] = tgt["at"] + value
+                    elif "dat" in tgt:
+                        # **数据节里的符号一律收（含局部）**：`.L.str` 就是 `bind=0` 的
+                        # `STT_OBJECT`（实测），只收 GLOBAL/WEAK 会把它漏掉，于是代码里那条
+                        # `lea rdi, [rip + .L.str]` 找不到标签、以"未定义的符号"报出来。
+                        dsyms[nm] = tgt["dat"] + value
         self.syms = syms
+        self.dsyms = dsyms
         self.undefined = sorted(set(undefined))
-        # 重定位: (目标节号, 节内偏移, 类型, 目标符号名, 加数)。**只摆代码节** ——
-        # 落在 `.data`/`.rodata` 上的一律拒, 因为本档不摆那些节, 静默算出来的地址是错的。
+        # 重定位: (目标节号, 节内偏移, 类型, 目标符号名, 加数)。**两条路** ——
+        # 落在**代码节**上的进 `relocs`(写进代码缓冲), 落在**数据节**上的进 `drelocs`
+        # (写进数据段)。两者都在"所有对象都摆好"之后才应用。
         self.relocs: list[tuple[int, int, int, str, int]] = []
+        self.drelocs: list[tuple[int, int, int, str, int]] = []
         for s in secs:
             if s["type"] != 4 or s["size"] == 0:        # SHT_RELA
                 continue
             tgt = s["info"]
-            if tgt >= len(secs) or "at" not in secs[tgt]:
+            into_data = tgt < len(secs) and "dat" in secs[tgt]
+            if tgt >= len(secs) or ("at" not in secs[tgt] and not into_data):
                 where = secs[tgt]["name"] if tgt < len(secs) else f"#{tgt}"
                 if tgt < len(secs) and secs[tgt]["name"].startswith(_META_SEC):
                     continue          # 展开/调试信息: 我们不摆, 丢掉无损 (见 _META_SEC)
@@ -3312,7 +3368,7 @@ class ForeignObject:
                 nm = name_of.get((s["link"], sym_i))
                 if nm is None:
                     raise Unsupported(f"{name}: 重定位引用了下标记号外的符号 {sym_i}")
-                self.relocs.append((tgt, r_off, ty, nm, r_add))
+                (self.drelocs if into_data else self.relocs).append((tgt, r_off, ty, nm, r_add))
 
 
 class Archive:
@@ -3433,6 +3489,21 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
             data += g.data
     while len(data) % 8:
         data.append(0)
+    # **外部对象的数据节**（`docs/219` §8b 第 1 条）：接在我们自己的全局**之后**、
+    # bss **之前**。顺序不能换 —— bss 的地址是在这一趟**之后**才算的
+    # （`len(data) + bss`），先算 bss 再追加数据会让两者撞在一起。
+    # 16 对齐：取各节自己对齐要求的上界，简单且安全（多出来的零字节是代价，不是错）。
+    dbases: list[int] = []
+    for obj in objects:
+        while len(data) % 16:
+            data.append(0)
+        dbases.append(len(data))
+        data += obj.data
+    # **数据长度要 8 对齐再往下算**：自举侧是 `align_to(cell(tab, C_GB), 8)`，
+    # 它按那个长度放 bss、也按那个长度写段大小 —— 这里不对齐就会在"bss 的地址"与
+    # "数据段字节数"两处各差一截（实测差 2 字节：`filesz=22` vs `24`）。
+    while len(data) % 8:
+        data.append(0)
     for g in globals_:  # 第二遍: 全零的进 bss（排在 data 之后, 否则会和 rodata 撞）
         sz = size_of(g.ty)
         if g.data == b"\0" * sz:
@@ -3465,7 +3536,7 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     # 调用点照旧走现有的 `call`/fixup 机制 (唯一多出来的是"参数进寄存器", 见 `Emitter._call`)。
     bases: list[int] = []
     appended: list[str] = []
-    for obj in objects:
+    for i, obj in enumerate(objects):
         while len(em.asm.buf) % 16:
             em.asm.buf.append(0)
         bases.append(len(em.asm.buf))
@@ -3473,6 +3544,12 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
             if nm in em.asm.labels:
                 continue          # 我们 (或先摆的那个对象) 已经有它: 以先来的为准
             em.asm.labels[nm] = TEXT_VADDR + bases[-1] + val
+            appended.append(nm)
+        # 数据节里的符号（含**局部**，见 `ForeignObject._load`）：地址落在 DATA 段。
+        for nm, val in obj.dsyms.items():
+            if nm in em.asm.labels:
+                continue
+            em.asm.labels[nm] = DATA_VADDR + dbases[i] + val
             appended.append(nm)
         em.asm.buf += obj.text
     applied = 0
@@ -3500,6 +3577,30 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
                 struct.pack_into("<Q", em.asm.buf, site, val & 0xFFFFFFFFFFFFFFFF)
             else:                                          # REL_32 / REL_32S
                 struct.pack_into("<I", em.asm.buf, site, val & 0xFFFFFFFF)
+            applied += 1
+    # **落在数据节上的重定位**：算的是同一套 `S + A` / `S + A - P`，只是**写进 DATA**
+    # 而不是代码缓冲（`.data.rel.ro` 里的函数指针表、指向字符串的 `const char *` 都是这一类）。
+    for i, obj in enumerate(objects):
+        for sec, r_off, ty, nm, add in obj.drelocs:
+            target = em.asm.labels.get(nm)
+            if target is None:
+                raise Unsupported(
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
+                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+            site = dbases[i] + obj.dsec_at[sec] + r_off
+            here = DATA_VADDR + site
+            val = target + add
+            if ty in (REL_PC32, REL_PLT32):
+                rel = val - here
+                if not -2 ** 31 <= rel < 2 ** 31:
+                    raise Unsupported(f"{obj.name}: 数据节的 PC32 重定位溢出 ({nm})")
+                struct.pack_into("<i", data, site, rel)
+            elif ty == REL_PC64:
+                struct.pack_into("<q", data, site, val - here)
+            elif ty == REL_64:
+                struct.pack_into("<Q", data, site, val & 0xFFFFFFFFFFFFFFFF)
+            else:                                          # REL_32 / REL_32S
+                struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
             applied += 1
     text = em.asm.finalize()
     entry = em.asm.labels["__entry"]
