@@ -2461,6 +2461,35 @@ def _l2_flags(src: str) -> dict[str, list[bool]]:
     return out
 
 
+def _l2_if_flags(src: str) -> dict[str, list[tuple[bool, bool]]]:
+    """每个函数里每个 `if` 的**两支**各开不开纪元（`docs/210` §2.3 的 `if` 那一格）。
+
+    **与 `_l2_flags` 分开成两把尺子**：那一张是"每个循环一格"，把 `if` 混进去会把已有的
+    那些格子全打乱。这一张各管各的，顺序就是源里 `if` 的出现序（含嵌套、含 `else if` 链
+    展开出来的那些）。
+    """
+    mod = parse(src)
+    errs_ = lomentc.check(mod)
+    assert not errs_, errs_[:2]
+    out: dict[str, list[tuple[bool, bool]]] = {}
+    for f in mod.funcs:
+
+        def walk(stmts: list, acc: list) -> None:
+            for s in stmts:
+                if isinstance(s, (lomentc.While, lomentc.For)):
+                    walk(s.body, acc)
+                elif isinstance(s, lomentc.If):
+                    acc.append((s.then_l2, s.else_l2))
+                    walk(s.then, acc)
+                    walk(s.otherwise, acc)
+
+        acc: list = []
+        walk(f.body, acc)
+        if acc:
+            out[f.name] = acc
+    return out
+
+
 @test
 def test_l2_block_epoch_rule():
     """`gc_auto_alpha` 的 **L2**：**编译器自己推断的块纪元** —— 循环体末尾把分配器前沿退回
@@ -2487,6 +2516,124 @@ def test_l2_block_epoch_rule():
     # 两份源只差那一行
     assert L2_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         L2_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: `if` 的两支开纪元那一格（`docs/210` §2.3 / §7）。**源只有一份** —— 这条真值表判据与
+#: 字节一致判据（`loment_p8_test::test_m89_l2_epoch_is_byte_identical`）都读它。
+L2_IF_SRC = """module l2if_t
+@@CHOOSE@@
+choose runtime
+
+fn f_ok(x: u32) -> u32 {
+    let n: u32 = 64;
+    let s: u32 = 0;
+    if x > 0 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 1);
+        s = s + load8(p, 0);
+    }
+    return s;
+}
+
+fn f_escape(x: u32) -> u32 {
+    let n: u32 = 64;
+    let s: u32 = 0;
+    if x > 0 {
+        let p: ptr = alloc(n);
+        s = s + (p as u64) as u32;
+    }
+    return s;
+}
+
+fn f_both(x: u32) -> u32 {
+    let n: u32 = 64;
+    let s: u32 = 0;
+    if x > 0 {
+        let a: ptr = alloc(n);
+        store8(a, 0, 1);
+        s = s + load8(a, 0);
+    } else {
+        let b: ptr = alloc(n);
+        store8(b, 0, 2);
+        s = s + load8(b, 0);
+    }
+    return s;
+}
+
+fn f_l0(x: u32) -> u32 {
+    let s: u32 = 0;
+    if x > 0 {
+        let c: ptr = alloc(64);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+    }
+    return s;
+}
+
+fn f_after(x: u32) -> u32 {
+    let n: u32 = 64;
+    let q: ptr = alloc(n);
+    let s: u32 = 0;
+    if x > 0 {
+        let d: ptr = alloc(n);
+        q = d;
+        store8(q, 0, 4);
+    }
+    return s;
+}
+
+fn f_none(x: u32) -> u32 {
+    let s: u32 = 0;
+    if x > 0 {
+        s = s + 1;
+    }
+    return s;
+}
+"""
+L2_IF_ALPHA_SRC = L2_IF_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha")
+L2_IF_MANUAL_SRC = L2_IF_SRC.replace("@@CHOOSE@@", "choose gc_manual")
+
+#: 每一格 = 一个 `if` 的 `(then_l2, else_l2)`；顺序就是源里的出现序（**没有嵌套**，所以
+#: 每个函数正好一格）。逐条说清为什么：
+L2_IF_WANT = {
+    # 支里分配、名字只当 `store8`/`load8` 的第一个实参、出支之后一处也不出现 ⇒ 开
+    "f_ok": [(True, False)],
+    # `p as u64` 把指针变出了一个**整数**（它会流到哪儿这里看不见）⇒ 取消
+    "f_escape": [(False, False)],
+    # **两支各自**判：两支都合格 ⇒ 都开（两支的纪元各退各的，互不影响）
+    "f_both": [(True, True)],
+    # 尺寸是**字面量** ⇒ 这一格已经被 **L0** 提到栈上了。它在 arena 上不占地方，
+    # 既不欠这次归还、也不该挡别人 —— 于是这一支"没有可归还的"（`nlive == 0`）⇒ 不开
+    "f_l0": [(False, False)],
+    # `d` 被赋给**支外**的 `q`（`q = d`）⇒ 出支了 ⇒ 取消
+    "f_after": [(False, False)],
+    # 支里一个 `alloc` 都没有 ⇒ 没什么可归还的（规则 1）⇒ 不开；`else` 缺席也记 False
+    "f_none": [(False, False)],
+}
+
+
+@test
+def test_l2_if_branch_rule():
+    """`gc_auto_alpha` 的 **L2 也认 `if` 的两支**（`docs/210` §2.3；§7 原先把它列在"没做"里）。
+
+    **Why**：`if` 的每一支与循环体是**同一个形状的块**，规则也还是那一条（`_l2_ok`），
+    只是"体"换成那一支的 token 跨度。少了这一格，**写在分支里的分配**（不在函数体顶层，
+    所以 L1 也接不到）就只能等收集器。
+
+    **判据在这里是"逐格的真值表"**，两个方向都是钩子：该开而没开会红（规则太窄），
+    不该开却开了也会红（那会**悬空指针**，不是记错账而已）。
+
+    **动态那一半**（"前沿真的退回去了"）在
+    `loment_elf_test::test_l2_if_branch_epoch_bounds_the_heap`。
+    """
+    assert _l2_if_flags(L2_IF_ALPHA_SRC) == L2_IF_WANT, f"alpha: {_l2_if_flags(L2_IF_ALPHA_SRC)}"
+    manual = _l2_if_flags(L2_IF_MANUAL_SRC)
+    assert set(manual) == set(L2_IF_WANT), "`gc_manual` 下的函数集合该与 alpha 一样"
+    assert all(not a and not b for v in manual.values() for a, b in v), \
+        f"`gc_manual` 下不许开纪元: {manual}"
+    # 两份源只差那一行
+    assert L2_IF_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
+        L2_IF_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
 #: `gc_auto`（`docs/210` §2.1 的"自动"那一档）那一段。**源只有一份** —— 这条静态判据与

@@ -4216,9 +4216,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 476, 1);
         lab_def(s, out, base_l, "then");
         let k: u32 = e3 + 1;   // '{' 之后的第一条语句
+        // **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：两支各是一个
+        // 块，规则与循环体同一条（`epoch_open` 内部的 `l2_ok` 就是用这一支的跨度判的）。
+        // `else if` 链**不在这儿开** —— 那是一条语句，它自己那两支会各自开（参考侧同形）。
+        let tv: u32 = epoch_open(s, out, src, toks, e3 + 1, skip_block(src, toks, e3) - 1);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
+        epoch_close(s, out, tv);
         k = k + 1;
         jump(s, out, base_l + 2, "end");
         lab_def(s, out, base_l + 1, "else");
@@ -4227,10 +4232,12 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             if tok_is(src, toks, k, "if") {
                 k = stmt(s, out, src, toks, k, ret);
             } else {
+                let ev: u32 = epoch_open(s, out, src, toks, k + 1, skip_block(src, toks, k) - 1);
                 k = k + 1;   // '{'
                 while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
                     k = stmt(s, out, src, toks, k, ret);
                 }
+                epoch_close(s, out, ev);
                 k = k + 1;
             }
         }
