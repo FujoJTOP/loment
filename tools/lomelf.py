@@ -1168,8 +1168,15 @@ class Emitter:
                 self.lower(ins)
         self.cur = None
 
-    def emit_entry_stub(self, start_name: str) -> None:
+    def emit_entry_stub(self, start_name: str, tls: bool = False) -> None:
         self.asm.label("__entry")
+        if tls:
+            # `arch_prctl(ARCH_SET_FS = 0x1002, &__loment_tls)` —— 让 `fs:0x28`
+            # （`-fstack-protector` 的金丝雀）落在我们自己的 TLS 块里，而不是地址 `0x28`。
+            self.asm.emit(b"\xB8" + struct.pack("<I", 158))       # mov eax, 158 (arch_prctl)
+            self.asm.emit(b"\xBF" + struct.pack("<I", 0x1002))    # mov edi, ARCH_SET_FS
+            self.asm.mov_abs(RSI, "__loment_tls")                 # movabs rsi, &tls
+            self.asm.emit(b"\x0F\x05")                            # syscall
         self.asm.call(start_name)
         self.asm.emit(mov_ri32(RAX, 60))  # exit(0)
         self.asm.emit(mov_ri32(RDI, 0))
@@ -1201,26 +1208,34 @@ class Emitter:
         改任何一条指令都要把三处 `rel32`（`0F 84`/`0F 85` 后面那 4 字节）重算。
         """
         a = self.asm
-        # memcpy(rdi=d, rsi=s, rdx=n)。布局: test(3) jz(6)=9 | loop@9 … jnz@22(6) | done@28 ret
+        # memcpy(rdi=d, rsi=s, rdx=n) -> rax=d。**C 的 `memcpy` 返回 `void*`（就是 `d`）** ——
+        # 调用方可能拿它（`p = memcpy(...)`），所以原起点必须先存起来：
+        # 循环里 `rdi` 会被推到末尾，rax 又被字节搬运占用，于是借 `r8`（SysV 调用者保存、
+        # 本叶子里没人碰）。
+        # 布局: mov(3) test(3) jz(6)=12 | loop@12(14 字节) … jnz@25(6) | done@31 movret ret
         a.label("memcpy")
-        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
-               b"\x0F\x84\x13\x00\x00\x00"          # jz done   (28 - 9  = +19)
+        a.emit(b"\x49\x89\xF8"                      # mov r8, rdi
+               b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x13\x00\x00\x00"          # jz done   (31 - 12 = +19)
                b"\x8A\x06"                          # mov al, [rsi]
                b"\x88\x07"                          # mov [rdi], al
                b"\x48\xFF\xC6"                      # inc rsi
                b"\x48\xFF\xC7"                      # inc rdi
                b"\x48\xFF\xCA"                      # dec rdx
-               b"\x0F\x85\xED\xFF\xFF\xFF"          # jnz loop  (9 - 28  = -19)
+               b"\x0F\x85\xED\xFF\xFF\xFF"          # jnz loop  (12 - 31 = -19)
+               b"\x4C\x89\xC0"                      # mov rax, r8
                b"\xC3")                             # ret
-        # memset(rdi=p, esi=v, rdx=n) —— C 的第二个实参是 `int`，低 8 位在 sil。
-        # 布局: test(3) jz(6)=9 | loop@9(9 字节) … jnz@18(6) | done@24 ret
+        # memset(rdi=p, esi=v, rdx=n) -> rax=p（同一条理由）。
+        # 布局: mov(3) test(3) jz(6)=12 | loop@12(9 字节) … jnz@21(6) | done@27 movret ret
         a.label("memset")
-        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
-               b"\x0F\x84\x0F\x00\x00\x00"          # jz done   (24 - 9  = +15)
+        a.emit(b"\x49\x89\xF8"                      # mov r8, rdi
+               b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x0F\x00\x00\x00"          # jz done   (27 - 12 = +15)
                b"\x40\x88\x37"                      # mov [rdi], sil
                b"\x48\xFF\xC7"                      # inc rdi
                b"\x48\xFF\xCA"                      # dec rdx
-               b"\x0F\x85\xF1\xFF\xFF\xFF"          # jnz loop  (9 - 24  = -15)
+               b"\x0F\x85\xF1\xFF\xFF\xFF"          # jnz loop  (12 - 27 = -15)
+               b"\x4C\x89\xC0"                      # mov rax, r8
                b"\xC3")                             # ret
         # memcmp(rdi=a, rsi=b, rdx=n) -> eax (符号)。
         # 布局: test(3) jz eq(6)=9 | loop@9 jnz diff@15(6) | jnz loop@30(6) | eq@36 ret | diff@39 ret
@@ -1241,6 +1256,11 @@ class Emitter:
                b"\x0F\xB6\xC9"                      # movzx ecx, cl
                b"\x29\xC8"                          # sub eax, ecx
                b"\xC3")                             # ret
+        # **栈金丝雀失败了**（`-fstack-protector` 编出来的库会引它）：`ud2` = 立刻 SIGILL。
+        # 它**不该被调到** —— 我们的 TLS 块（见 `compile_ll` 的 `__loment_tls`）里那个金丝雀
+        # 没人写，入口读它、出口比它，两边相等。真被调到说明栈被踩了，那时**响亮地死**才对。
+        a.label("__stack_chk_fail")
+        a.emit(b"\x0F\x0B")                         # ud2
         # ---- malloc / free：**内存那一条不收编，是"划掉"**（`docs/219` §2.1）----
         #
         # 它们是一层**换 ABI 的薄壳**，不是一份新分配器：C 按 System V 把实参放在
@@ -3993,7 +4013,11 @@ C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 #: 底下调的是 `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1）。没有堆就没有
 #: "我们的堆"可指，发了会悬着一个未定义的调用。判据是**我们这份 IR 里有没有那两条定义**
 #: （`funcs` 的名字），不是文本里出现过那个名字。
-CONSCRIPT = ("memcpy", "memset", "memcmp", "malloc", "free")
+CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
+
+#: 产物带外部对象时给它的一小块 **TLS**（`docs/219` S2）。要 ≥ 0x30 字节 ——
+#: `-fstack-protector` 的库读 **`fs:0x28`** 取金丝雀；留大一点是给以后 `errno` 之类的槽位。
+_TLS_SIZE = 256
 
 
 def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
@@ -4035,6 +4059,20 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
             data.append(0)
         dbases.append(len(data))
         data += obj.data
+    # **TLS 块**（`docs/219` S2）：`-fstack-protector` 编出来的库（发行版的 zlib 就是）
+    # 会读 **`fs:0x28`** 取栈金丝雀。我们**没有 TLS**，`fs` 是 0 —— 那就是去读地址 `0x28`，
+    # 未映射 ⇒ **一进去就段错误**。所以带外部对象时给一小块 TLS，入口用
+    # `arch_prctl(ARCH_SET_FS)` 把 `fs` 指过来。
+    #
+    # 金丝雀**不需要是随机数**：函数入口把它存到栈上、出口比一次，中间没人改 ⇒ 永远相等。
+    # 这块只要**存在且可读写**就够了。**谁都不该调到 `__stack_chk_fail`** —— 调到了说明
+    # 栈真被踩了，那时响亮地死（`ud2`）才对。
+    tls_addr = 0
+    if objects:
+        while len(data) % 16:
+            data.append(0)
+        tls_addr = DATA_VADDR + len(data)
+        data += bytes(_TLS_SIZE)
     # **数据长度要 8 对齐再往下算**：自举侧是 `align_to(cell(tab, C_GB), 8)`，
     # 它按那个长度放 bss、也按那个长度写段大小 —— 这里不对齐就会在"bss 的地址"与
     # "数据段字节数"两处各差一截（实测差 2 字节：`filesz=22` vs `24`）。
@@ -4053,9 +4091,11 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")})
     for g in globals_:
         em.asm.labels[g.name] = g.addr
+    if objects:
+        em.asm.labels["__loment_tls"] = tls_addr
     if not any(f.name == "_start" for f in funcs):
         raise Unsupported("没有 _start 入口（原生产物 v0 需要一个用户态入口）")
-    em.emit_entry_stub("_start")
+    em.emit_entry_stub("_start", tls=bool(objects))
     for f in funcs:
         em.emit_func(f)
     # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
