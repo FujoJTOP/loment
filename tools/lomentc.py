@@ -5324,6 +5324,7 @@ entry:
 go:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_collect()
+  br label %out
 out:
   ret void
 }
