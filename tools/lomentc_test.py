@@ -2120,6 +2120,47 @@ def test_surfaces_rule():
     assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
 
 
+#: `excluded` 的**行为轴**那一条用的源（`docs/218` §7 第 2 件 / `docs/227` §3）。
+EXCLUDED_NET_SRC = """module x
+
+excluded "network: 本单元不申请任何 net 能力"
+
+fn f() -> i64 {
+    return syscall6(41, 2, 1, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_excluded_network_is_a_behaviour_claim():
+    """`excluded "network"` × 联网号：**声明说不开的门，代码里开了**（`docs/218` §7 第 2 件）。
+
+    M41 那条（`能力 X 使用了 excluded 的空间`）比的是**名字** —— `excluded "usb"` 对
+    `capability … : usb[…]`，它**从不看行为**，所以"声明了不碰网络、代码里却在调 `socket`"
+    是它看不见的。这一条钉的就是补上的那半。
+
+    **它只回答"开了没有"**（**权威**读法），不回答"外发的字节里有没有本域的数据"
+    （那是 `docs/208` 的**保密**读法，由 M41 那一族管）—— `docs/218` §8 最后两行点名的
+    "两轴不能混、不能拿一条冒充两条"就落在这里：两条判据各判各的。
+    """
+    assert errs(EXCLUDED_NET_SRC) == ["6: 机调用号 41 使用了 excluded 的空间 network"], \
+        errs(EXCLUDED_NET_SRC)
+    # **别的空间不管这件事** —— 那正是 M41 那一半（名字），不是这一条（行为）
+    assert errs(EXCLUDED_NET_SRC.replace('excluded "network:', 'excluded "usb:')) == [], \
+        "`usb` 的空间不该被联网号触发"
+    # **别的面也不管** —— `exit`(60) 是 `proc`，不是 `net`
+    assert errs(EXCLUDED_NET_SRC.replace("syscall6(41, 2, 1, 0, 0, 0)",
+                                         "syscall4(60, 0, 0, 0)")) == [], \
+        "非联网面不该被这条判据碰到"
+    # 面名两个写法都认（`net` 是**面**的叫法、`network` 是**空间**的叫法）
+    spelled = EXCLUDED_NET_SRC.replace('"network:', '"net:')
+    assert errs(spelled) == ["6: 机调用号 41 使用了 excluded 的空间 net"], errs(spelled)
+    # **号写成变量就什么都不说** —— 词法口径的诚实边界（与 `surfaces` 落 `other` 同一条）
+    var = ('module x\n\nexcluded "network: 本单元不申请任何 net 能力"\n\n'
+           "fn f(n1: u64) -> i64 {\n    return syscall6(n1, 2, 1, 0, 0, 0);\n}\n")
+    assert errs(var) == [], errs(var)
+
+
 @test
 def test_l0_param_shadow_is_not_promoted():
     """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。
@@ -2905,6 +2946,87 @@ def test_runtime_dep_must_declare_and_agree():
     # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
     e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
     assert e == [], e
+#: `docs/228` 的 A 那一份程序：分配 **200000** 字节（> 64 KiB）逐字节写 7，读回最后一字节。
+#: **源只有一份** —— `loment_hosted_test` 那条运行时判据（A3）用的就是**同一个常量**。
+#: 分开抄一份必然漂，而 A3 的全部意义就是"两个方向上看的是同一条程序"。
+HEAP_SRC = """module host_heap
+
+@@CHOOSE@@
+
+fn main() -> i32 {
+    let n: u32 = 200000;
+    let p: ptr = alloc(n);
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 7 as u8);
+        i = i + 1;
+    }
+    return load8(p, n - 1) as i32;
+}
+"""
+
+HEAP_HOSTED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose hosted")
+# 同一份源，**只去掉那一行**：于是它就是"没有 `choose hosted`"的那一档（默认 `sealed`）。
+HEAP_SEALED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "")
+# `hosted` + `gc_auto`：走不到 A（`docs/228` §4 的 B1），但**不许静默**。
+# `choose runtime` 是 `gc_auto` 自己要的（`gc_auto` 与默认的 `no_runtime` 定义上冲突）。
+HEAP_HOSTED_GC_AUTO_SRC = HEAP_SRC.replace(
+    "@@CHOOSE@@", "choose hosted\nchoose gc_auto\nchoose runtime")
+
+
+def _heap_ir(src: str) -> str:
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "heap.lomt"
+        f.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(f)
+        deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+        assert lomentc.check(mod, deps=deps) == []
+        return lomentc.emit_llvm(mod, ROOT, deps)
+
+
+@test
+def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
+    """`docs/228` §5 的 **A2 + A1**：`hosted` 向宿主声明分配器；`sealed` 一个字节没动。
+
+    **两条一起判**才说明问题：只判"`hosted` 里有 `malloc`"会被"给**所有**程序都加上"
+    骗过 —— 而那正是 `sealed` 那条保证被改掉的样子（`docs/228` §2）。
+    """
+    hosted = _heap_ir(HEAP_HOSTED_SRC)
+    sealed = _heap_ir(HEAP_SEALED_SRC)
+
+    # A2：arena 不是 `.bss` 里的定长数组，而是宿主给的一块
+    assert "@__loment_heap = internal global ptr null" in hosted
+    assert "[65536 x i8]" not in hosted, "hosted 的 arena 还是那个静态数组"
+    assert "declare ptr @malloc(i64)" in hosted, "没向宿主声明分配器"
+    assert "; loment-heap: platform 1048576" in hosted, "没把这件事写进产物"
+    # 声明在**用之前**（LLVM 对未声明的调用是 `use of undefined value`，实测）
+    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048576)")
+
+    # A1：同一份源去掉那一行 ⇒ 逐字节还是原来那一段（闸门真的在 `port` 上）
+    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
+    assert "malloc" not in sealed, "sealed 的产物里出现了宿主符号"
+    assert "loment-heap" not in sealed, "sealed 的产物里出现了 A 的标记"
+    # 两份唯一的差别就是 arena 那一段 —— 偏移模型、空闲链表、前沿回退**共用**
+    assert "icmp ule i32 %nxtoff, 1048576" in hosted
+    assert "icmp ule i32 %nxtoff, 65536" in sealed
+
+
+@test
+def test_hosted_with_gc_auto_says_so_instead_of_going_quiet():
+    """`docs/228` §5 的 **A5**：`hosted` + `gc_auto` 吃不到 A —— 但它**说出来**。
+
+    收集器的标记表按 arena 偏移索引、行数 = arena/8（`lomentc.py` 里那个
+    `@__loment_mark`），换 arena 要
+    **同时**换表的口径与两处根扫边界，那是收集器的活（`docs/228` §4 的 B1）。这一档因此
+    仍是静态 64 KiB —— 而"没吃到"必须是产物里**量得出来的**一条，不是默认掉的
+    （`docs/205` §0.2 那条零沉默）。
+    """
+    ir = _heap_ir(HEAP_HOSTED_GC_AUTO_SRC)
+    assert "; loment-heap: static 65536" in ir, "这一档没吃到 A 却没有说出来"
+    assert "platform" not in ir
+    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in ir
+    # 与它配对的那一档**有** platform —— 于是这条判据不是"永远为真"
+    assert "; loment-heap: platform 1048576" in _heap_ir(HEAP_HOSTED_SRC)
 
 
 def main() -> int:

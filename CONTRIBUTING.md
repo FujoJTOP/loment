@@ -62,9 +62,16 @@ So:
 
 - **A pull request that modifies anything under `lom/` is detected automatically.** Every pull
   request runs a job named `lom/ 禁区` (`.github/workflows/gate.yml`, job `lom-door`). It reads the
-  pull request's changed-file list and **fails** if anything under `lom/` is in it. No human has to
-  agree with it, and there is no review that overrides it — there is no way to evaluate the change
-  from inside this repository alone, because the half it would break is not here.
+  pull request's changed-file list and **fails** if any file under `lom/` is **modified, deleted or
+  renamed** in it. No human has to agree with it, and there is no review that overrides it — there
+  is no way to evaluate the change from inside this repository alone, because the half it would
+  break is not here.
+- **Adding a new file under `lom/` is not a modification and is not blocked** (2026-10-11). The
+  door is about the contracts that already exist: their other half is in another repository and
+  cannot be re-checked from here. A new file touches none of them. The job lists new `lom/` files
+  in its summary instead of failing — so the reviewer sees them — and the file is expected to
+  arrive with its own criteria. Once something depends on it, changing *it* is back under the door,
+  because by then it has a counterpart too.
 - **Make that check required and it is a hard door**, because a failing required check cannot be
   merged. Turning it into one is a repository setting rather than a file in this tree; if you find
   it is not enforced when you open a pull request, say so in an issue — a door that is described

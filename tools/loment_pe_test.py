@@ -953,16 +953,51 @@ SOCK_HEAD = b"ECHO OK\nTIMEOUT OK\nNONBLOCK OK\n"
 SOCK_TAIL = (b"IPV6 OK\nSURVIVED\n", b"IPV6 NO\nSURVIVED\n")
 
 
+#: **兜底那条路的语料**（2026-10-11 收口）：一个 Linux 自己也不认得的号。
+#: 两边的期望值是**同一个数** —— 这就把"表外的号返回什么"从散文变成判据。
+#: 挑 `9999`/`9998` 是因为它们**在 Linux 上也没实现**，所以不存在"一边能做一边不能"
+#: 那种不可比的形态：真的判据是"同一个语义两边都成立"。
+ENOSYS_DEMO = """module enosysdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn _start() -> u32 {
+    let want: i64 = 0 - 38;
+    let a: i64 = syscall4(9999, 0, 0, 0);
+    let b: i64 = syscall6(9998, 0, 0, 0, 0, 0);
+    let _c: i64 = syscall7(9997, 0, 0, 0, 0, 0, 0);
+    if a != want {
+        w(1, "ENOSYS BAD a\\n");
+        return 1;
+    }
+    if b != want {
+        w(1, "ENOSYS BAD b\\n");
+        return 2;
+    }
+    w(1, "ENOSYS OK\\n");
+    return 0;
+}
+"""
+ENOSYS_GOLDEN = b"ENOSYS OK\n"
+
+
+def _enosys_ok(out: bytes) -> bool:
+    return out == ENOSYS_GOLDEN
+
+
 def _sock_ok(out: bytes) -> bool:
     """IPv6 那一行**允许两种情况**（机器没有 IPv6 时两边都打 NO）——
     判据是"两个平台看到同一件事"，不是"必须有 IPv6"。"""
     return out.startswith(SOCK_HEAD) and out[len(SOCK_HEAD):] in SOCK_TAIL
 
 
-#: 三份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
+#: 四份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
 NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
-             ("polldemo", POLL_DEMO, _poll_ok))
+             ("polldemo", POLL_DEMO, _poll_ok), ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
 
 
 def _shim_blob():
@@ -991,8 +1026,10 @@ def test_pe_shim_dispatches_the_documented_numbers():
         seen.append(struct.unpack_from("<i", blob, i + 1)[0])
         i += 11                                  # cmp eax,imm32 (5) + jcc rel32 (6)
     assert seen == lomelf.PE_DISPATCH, f"派发面与登记表不符:\n  {seen}\n  {lomelf.PE_DISPATCH}"
-    assert blob[i:i + 7] == b"\x48\xC7\xC0\xFF\xFF\xFF\xFF", "兜底不是 `mov rax,-1`"
-    print(f"      {len(seen)} 个号逐个对上 `PE_DISPATCH`，兜底 -1")
+    # 兜底**照常量比**，不抄字节：`mov rax, imm32`（符号扩展）的前缀 + `PE_ENOSYS`。
+    want = b"\x48\xC7\xC0" + struct.pack("<i", lomelf.PE_ENOSYS)
+    assert blob[i:i + 7] == want, f"兜底不是 `mov rax,{lomelf.PE_ENOSYS}`: {blob[i:i+7]!r}"
+    print(f"      {len(seen)} 个号逐个对上 `PE_DISPATCH`，兜底 {lomelf.PE_ENOSYS}（-ENOSYS）")
 
 
 @test
