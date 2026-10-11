@@ -17,6 +17,7 @@
 // 超了直接 abort (SIGILL), 而 lompi 要装整棵源码树。
 
 module lpi_sys
+choose runtime
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;

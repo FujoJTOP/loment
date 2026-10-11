@@ -6,6 +6,8 @@
 // I/O 与 `_start` 只能是宿主的事（见 `loment/examples/multisyntax-projects/README.md`）。
 module main
 
+choose runtime
+
 use "signals.lomt"
 
 fn _start() {

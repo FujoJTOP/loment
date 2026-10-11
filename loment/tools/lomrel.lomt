@@ -7,6 +7,7 @@
 // 第一档只做: 参数解析 + 读一个文件 + 写一个文件。
 
 module lomrel
+choose runtime
 
 use bytes
 use sha256
@@ -233,6 +234,7 @@ tools/lomelf.py
 tools/loment_opt_obj.py
 tools/loment_elf_test.py
 tools/loment_pe_test.py
+tools/loment_net_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
 tools/loment_multisyntax_projects_test.py

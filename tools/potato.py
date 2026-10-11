@@ -137,6 +137,22 @@ PORTS = ("sealed", "hosted")
 #: （T0 解释 / T1 反馈向量 / … 那梯子会随年份长，钉进值名里就等于把今天的内容钉成身份）。
 #: ⚠ 发行版发的对象里它**恒为** `no_vm`（渠道闸）；校验器判不了渠道，读得出值。
 VMS = ("vm", "no_vm")
+#: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
+#:
+#: 放在这里是因为**两个模块都要它**：编译器用它判"这一条 `choose` 是核心模式还是开关"，
+#: `potato_from.front_door` 用它把**核心 `choose` 行从表层语法里摘出来**（`docs/188` §0：
+#: 一份 Python/C 写法的单元**仍然是 Loment 程序**，语义是 Loment 的 —— 所以那几行不能
+#: 交给各家翻译器吃掉）。两处各写一份必然漂，判据钉的是"两份相等"。
+#:
+#: ⚠ **加一维就要动这一行**：`port`（`docs/222`）进来时这里少了它 —— 合并当场撞出来。
+#: 少一个词的后果是**静默的**：那道维度在表层语法里会被当成"未定义的开关"。
+#:
+#: ⚠ **`vm`（`docs/231`）是第二次撞同一处** —— 而且自举侧那份手抄的
+#: （`loment/selfhost/switches.lomt` 的 `sw_is_core`）当时**真的漏了**，症状正是上面那句：
+#: `choose vm` 报 **E022「未定义的开关」**（码对、理由错），而 `loment_rule_parity` 只比
+#: **码集**所以判绿。⇒ **加第三维的人：这里与 `sw_is_core` 两处都要动。**
+CORE_WORDS = (frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
+              | frozenset(PORTS) | frozenset(VMS))
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)

@@ -244,7 +244,7 @@ def test_free_really_reclaims():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcfree\n\nfn _start() {\n"
+    body = ("module gcfree\nchoose runtime\n\nfn _start() {\n"
             "    let i: u32 = 0;\n"
             "    let sum: u32 = 0;\n"
             "    while i < 2000 {\n"
@@ -315,7 +315,7 @@ def test_gc_l2_epoch_bounds_the_heap():
         td = Path(tds)
         got = []
         for tag, ch in (("alpha", "choose gc_auto_alpha\nchoose runtime"),
-                        ("manual", "choose gc_manual")):
+                        ("manual", "choose gc_manual\nchoose runtime")):
             src = td / f"{tag}.lomt"
             src.write_text(body % ch, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
@@ -424,7 +424,7 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\n\nfn _start() {\n"
+    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"
@@ -516,6 +516,135 @@ def test_gc_auto_collects_while_manual_exhausts():
 
 
 @test
+def test_l0_static_promotion_bounds_the_heap():
+    """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
+
+    **Why**：L0 的静态那一半（`lomentc_test::test_l0_rule_pair`）钉的是"编译器决定提走哪几个
+    站点"（那对程序上 16 个站点 → 11 个）；这一条钉**整条链**：提走之后程序**跑得对**，
+    而且 arena 真的**没被碰**。`docs/210` §5 末尾点名的就是这一对 —— 静态形式更强
+    （产物里连 `@__loment_alloc` 都不剩），但"整条链跑得通"是另一件事，值得单独有。
+
+    **How to apply**：一对**逐字同源**、只差 `choose` 一行的程序 —— 分配写在**辅助函数**
+    `bump()` 里、循环在**调用方**，于是 L2（按循环体开纪元）接不到（循环体里没有 `alloc`）；
+    尺寸是**字面量** `alloc(64)` ⇒ 落 L0 那一格。4000 次调用 × 64 B ≈ 256 KB 过 64 KiB arena：
+    `gc_auto_alpha` **跑完**（rc=7）/ `gc_manual` **耗尽**（rc=132）。
+
+    退出码还兼判**正确性**：`s` 累加 4000 次 `load8` 读回来的 5，必须正好 20000 ——
+    提升到栈上的那块缓冲被**反复复用**，写进去的字节必须每次读得回来。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    # **今天跑不了 —— 而且原因不是环境**：L0 提升出来的产物**链不过包内镜像链接器**。
+    # L0 会把栈上那块缓冲的地址存进指针槽（`store ptr %p.buf, ptr %p.addr`），于是 alloca
+    # 被当成**普通 SSA 值**用 —— 而 `lomelf` 只在 `get_ptr` / `agg_addr` 里认 alloca，
+    # `get()` 不认（`_store` 走的是 `get()`）。`clang` 收这份 IR，是镜像链接器的口子。
+    # `docs/210` §8 那条硬约束要求**每一层**的产物都能被包内链接器链出来，所以这是 **L0
+    # 那一格的真缺口**（这一格此前只有静态证据，动态那一对从没跑过，原因就是这个）。
+    # 下面那三段是**写好的判据**：`FujoJTOP/loment#239` 修好，删掉这三行就有了动态证据。
+    print("      SKIP: 包内镜像链接器还链不了 L0 提升的产物 —— 见 FujoJTOP/loment#239")
+    return
+    body = ("module gcl0\n%s\nchoose runtime\n\n"
+            "fn bump() -> u32 {\n"
+            "    let p: ptr = alloc(64);\n"
+            "    store8(p, 0, 5);\n"
+            "    return load8(p, 0);\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let s: u32 = 0;\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 {\n"
+            "        s = s + bump();\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if s == 20000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("manual", "choose gc_manual"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcl0_{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcl0_{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"gcl0_{tag}", td, timeout=60)[0])
+    assert got[1] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。要么提升没发生（256 KB 请求"
+        "过不了 64 KiB arena），要么提升上去的那块缓冲被写坏了（退出码 3 表示累加和不等于 20000）")
+    assert got[0] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出提升："
+        "256 KB 的请求本该把 64 KiB 的 arena 耗尽")
+    print(f"      manual 耗尽 (rc={got[0]})；alpha 跑通 (rc={got[1]}) "
+          "—— 字面量尺寸的分配提到栈上，arena 一个字节没碰")
+
+
+@test
+def test_l2_if_branch_epoch_bounds_the_heap():
+    """**L2 也认 `if` 的两支**（`docs/210` §2.3 / §7）—— 判据是**一对**程序。
+
+    **Why**：L2 原先只认 `while`/`for` 的体（`docs/210` §7 把"`if` 的体还是块、也能开纪元"
+    列在"没做"里）。这一格把它补上：`if` 的每一支与循环体是**同一个形状的块**，规则也还是
+    那一条（`_l2_ok`），"体"换成那一支的 token 跨度。
+
+    **How to apply**：一对**逐字同源**、只差 `choose` 一行的程序。形状是**故意挑的** ——
+    要让 L0、L1、以及**调用方的循环纪元**都接不到，只有 `if` 那一支自己能救：
+
+      * `alloc(n)` 的尺寸是**变量**（`let n: u32 = 64;`）—— L0 只认字面量，接不到；
+      * 分配写在**辅助函数** `step()` 里、循环在**调用方** —— 调用方的循环体里没有 `alloc`，
+        循环那一格（按**循环体**开纪元）也接不到；
+      * 分配在**分支里**（不在函数体顶层）—— L1 要求"声明必须在函数体顶层（不在任何 `{` 里）"，
+        所以 L1 也接不到（`docs/210` §2.5 那条边界）。
+
+    40000 次调用 × 64 B ≈ 2.56 MB 过 64 KiB arena：`gc_auto_alpha` **跑完**（rc=7，
+    而且 `t == 40000` 顺带判了每次读回来的值没被写坏）/ `gc_manual` **耗尽**（rc=132）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module gcif\n%s\nchoose runtime\n\n"
+            "fn step(x: u32) -> u32 {\n"
+            "    let n: u32 = 64;\n"
+            "    let s: u32 = 0;\n"
+            "    if x > 0 {\n"
+            "        let p: ptr = alloc(n);\n"
+            "        store8(p, 0, 1);\n"
+            "        s = s + load8(p, 0);\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let t: u32 = 0;\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 40000 {\n"
+            "        t = t + step(1);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if t == 40000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("manual", "choose gc_manual"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcif_{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcif_{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"gcif_{tag}", td, timeout=60)[0])
+    assert got[1] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。`if` 支那一格纪元要么没开，"
+        "要么开在不该开的地方（退出码 3 表示累加和对不上，说明块被提前收回或写坏了）")
+    assert got[0] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出 `if` 支的纪元："
+        "2.56 MB 的请求本该把 64 KiB 的 arena 耗尽")
+    print(f"      manual 耗尽 (rc={got[0]})；alpha 跑通 (rc={got[1]}) "
+          "—— `if` 那一支的纪元把每次分配都在支末尾还掉了")
+
+
+@test
 def test_gc_alpha_adaptive_bounds_a_large_live_set():
     """`gc_auto_alpha` 的**自适应**收集器收得下更大的活集（`docs/210` §2.4 的"策略池"）。
 
@@ -574,6 +703,88 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
         "固定 32 KiB 触发本该在活集 44 KB 时装不下 arena")
     print(f"      gc_auto 耗尽 (rc={got[0]}，活集 44 KB)；gc_auto_alpha 跑通 (rc={got[1]}) "
           "—— 自适应触发收得下更大的活集")
+
+
+@test
+def test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one():
+    """分代那一档的**写屏障是承重的**（`docs/210` §2.7）—— 老块里存着指向年轻块的指针。
+
+    **Why**：小回收**不扫老年代**（那是它省下来的工），而老块里可能存着**指向年轻代的真
+    指针** —— `p as u64`（`ptrtoint`）+ `store64` 就写得出来（`docs/210` §4.2 那条
+    「根表是一个可审计的产物」正是想说清这件事）。没有写屏障把那张卡标脏，小回收就会把
+    **还活着的**年轻块当垃圾扫掉。它扫得悄无声息：**释放不改有效载荷**，所以要判"它还是
+    不是活的"，不能只看那几个字节，要看它**有没有被复用**。
+
+    **How to apply**：三段 churn，每一段都在排除一个"会让目标块不年轻"的机关 ——
+
+      * 目标块**尺寸独一无二**（20000 B，垃圾是 3000）—— 空闲链表接不住它，于是它
+        **只能从前沿分配**，而前沿 ≥ `oldtop` ⇒ 它是**真年轻代**。（实测：尺寸撞上垃圾
+        尺寸时，`alloc` 会从空闲链表给一个**低地址**的块，那一出生就算"老" —— 判据空转。）
+      * 目标块在**第一轮之后**分配 —— 那时 `oldtop` 已经立起来（`big` 已经算老的了）；
+      * 之后**换一个尺寸**继续 churn —— 空闲链表接不住新尺寸，年轻代才**真的长起来**，
+        小回收才有得扫。（实测：同尺寸会被链表复用、年轻代不长，判据同样空转。）
+
+    末尾读回老块里那个指针指向的字节：必须还是当初写进去的标签。
+    **把 `__loment_minor` 里那趟脏卡扫描拆掉，这一条立刻红**（实测 `rc=110`：块被回收、
+    字节被后一轮垃圾改写）—— 这就是它证伪得了的理由。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_text = ("module gcminor\nchoose gc_auto_alpha\nchoose runtime\n\n"
+                "fn w64(p: ptr, off: u32, v: u64) {\n"
+                "    let i: u32 = 0;\n"
+                "    while i < 8 {\n"
+                "        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);\n"
+                "        i = i + 1;\n"
+                "    }\n"
+                "}\n\n"
+                "fn r64(p: ptr, off: u32) -> u64 {\n"
+                "    let v: u64 = 0;\n"
+                "    let i: u32 = 0;\n"
+                "    while i < 8 {\n"
+                "        let b: u64 = load8(p, off + i) as u64;\n"
+                "        v = v + (b << (i * 8));\n"
+                "        i = i + 1;\n"
+                "    }\n"
+                "    return v;\n"
+                "}\n\n"
+                "fn stash_at(big: ptr, off: u32, sz: u32, tag: u32) {\n"
+                "    let g: ptr = alloc(sz);\n"
+                "    store8(g, 0, (tag & 255) as u8);\n"
+                "    w64(g, 8, g as u64);\n"
+                "    w64(big, off, g as u64);\n"
+                "}\n\n"
+                "fn _start() {\n"
+                "    let bs: u32 = 2000;\n"
+                "    let big: ptr = alloc(bs);\n"
+                "    store8(big, 0, 1);\n"
+                "    let a: u32 = 0;\n"
+                "    while a < 20 {\n"
+                "        stash_at(big, 128, 3000, a + 10);\n"
+                "        a = a + 1;\n"
+                "    }\n"
+                "    stash_at(big, 8, 20000, 201);\n"
+                "    let b: u32 = 0;\n"
+                "    while b < 40 {\n"
+                "        stash_at(big, 192, 3000, b + 80);\n"
+                "        b = b + 1;\n"
+                "    }\n"
+                "    let back: ptr = r64(big, 8) as ptr;\n"
+                "    if load8(back, 0) == (201 & 255) {\n        syscall4(60, 7, 0, 0);\n    }\n"
+                "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "gcminor.lomt"
+        src.write_text(src_text, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "gcminor.native"
+        nat.write_bytes(blob)
+        rc = _run_bin(nat, "gcminor", td, timeout=60)[0]
+    assert rc == 7, (
+        f"老块里那个指针指向的年轻块**没了**：退出码 {rc}（期望 7）。分代那一档的写屏障 / "
+        "脏卡扫描 / 晋升（`oldtop` 推进）/ 年轻代传播，四处任一处坏了都会走到这儿")
 
 
 @test

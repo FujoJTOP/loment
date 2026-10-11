@@ -882,7 +882,7 @@ def test_c_source_named_lomt_end_to_end():
 
         want = (720 + 21 + 13) % 256            # 6! + gcd(1071,462) + popcount(0xbeef)
         main = td / "main.lomt"
-        main.write_text(f'module msc\n\nuse "{unit.as_posix()}"\n\n'
+        main.write_text(f'module msc\nchoose runtime\n\nuse "{unit.as_posix()}"\n\n'
                         "fn _start() {\n"
                         "    let a: u32 = c_fact(6 as i32) as u32;\n"
                         "    let b: u32 = c_gcd(1071 as u32, 462 as u32);\n"

@@ -13,6 +13,7 @@
 // 实现的完整消息措辞。判据见 tools/loment_lsp_test.py。
 
 module lsp
+choose runtime
 
 use json
 use lexer

@@ -123,6 +123,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
+                 # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
+                 "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
                  "loment_ffi_test",
                  # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
@@ -215,6 +217,7 @@ SHARD_COST = {
     "loment_std_test": 1.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
+    "loment_net_test": 0.2,          # 实测: 读四份表 + 四条自证, 不编译
     # 含 300 个 Java 模块那一档的 javac + JVM（没有 javac 时那一支可见地 SKIP，快得多）
     "loment_megaproject_test": 15.0,
 }

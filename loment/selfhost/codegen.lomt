@@ -1,4 +1,5 @@
 module codegen
+choose runtime
 
 // M82: Loment 版 IR 生成 —— 生成的 .ll 与 tools/lomentc.py 的 --emit-llvm 逐字节一致。
 //
@@ -669,6 +670,12 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
                 return fn_ret(s, fi);
             }
             return 0;
+        }
+        if tok_is(src, toks, j + 1, "[") {   // M3/M24: 下标 -> **元素类型**，不是数组/切片类型
+            let at: u32 = var_type(s, src, toks, j);
+            if is_array_tok(src, toks, at) == 1 || is_slice_tok(src, toks, at) == 1 {
+                return elem_tok(src, toks, at);
+            }
         }
         return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
@@ -2326,6 +2333,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_val(s, out, lvl);
             emit_str(s, out, ", i32 ");
             emit_val(s, out, lvl + 1);
+            if load32(s, 572) == 1 {
+                // **写屏障**（`docs/210` §2.7）：与参考侧**同位置**（格与 store 之间）、
+                // **同门槛**（只有 alpha 发）。位置在那条 gep 之后，因为它要的是**被写的地址**。
+                emit_str(s, out, "\n  call void @__loment_wb(ptr %t");
+                emit_dec(s, out, g2);
+                emit_str(s, out, ")");
+            }
             emit_str(s, out, "\n  store i8 ");
             emit_val(s, out, lvl + 2);
             emit_str(s, out, ", ptr %t");
@@ -2366,6 +2380,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         if tok_is(src, toks, j, "atomic_add") {   // M21
             let k3: u32 = arg1(s, out, src, toks, j + 2, lvl);
             let k4: u32 = arg1(s, out, src, toks, k3, lvl + 1);
+            if load32(s, 572) == 1 {
+                // 写屏障：`atomic_add` 也是一次**写堆**（同参考侧的落点与门槛）。
+                emit_str(s, out, "  call void @__loment_wb(ptr ");
+                emit_val(s, out, lvl);
+                emit_str(s, out, ")\n");
+            }
             emit_str(s, out, "  ");
             let at: u32 = new_temp(s, out);
             emit_str(s, out, " = atomicrmw add ptr ");
@@ -3001,6 +3021,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, " = extractvalue { ptr, i64 } ");
         emit_val(s, out, lvl);
         emit_str(s, out, ", 0\n");
+        let itx: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**（不写死 i32）
         let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1, 0);
         emit_str(s, out, "  ");
         let g: u32 = new_temp(s, out);
@@ -3008,7 +3029,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_ty(s, out, src, toks, et);
         emit_str(s, out, ", ptr %t");
         emit_dec(s, out, sp);
-        emit_str(s, out, ", i32 ");
+        emit_str(s, out, ", ");
+        emit_ty(s, out, src, toks, itx);
+        emit_str(s, out, " ");
         emit_val(s, out, lvl + 1);
         emit_str(s, out, "\n  ");
         let rl: u32 = new_temp(s, out);
@@ -3028,6 +3051,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     if tok_is(src, toks, dot, "[") && is_array_tok(src, toks, ty) == 1 {
         // M24: 数组下标 a[i] -> GEP(数组, 0, i) + load
         let et2: u32 = elem_tok(src, toks, ty);
+        let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl, 0);
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
@@ -3035,7 +3059,9 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
         emit_name_tok(s, out, src, toks, j);
-        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_str(s, out, ".addr, i32 0, ");
+        emit_ty(s, out, src, toks, itx2);
+        emit_str(s, out, " ");
         emit_val(s, out, lvl);
         emit_str(s, out, "\n  ");
         let rl2: u32 = new_temp(s, out);
@@ -4190,9 +4216,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 476, 1);
         lab_def(s, out, base_l, "then");
         let k: u32 = e3 + 1;   // '{' 之后的第一条语句
+        // **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：两支各是一个
+        // 块，规则与循环体同一条（`epoch_open` 内部的 `l2_ok` 就是用这一支的跨度判的）。
+        // `else if` 链**不在这儿开** —— 那是一条语句，它自己那两支会各自开（参考侧同形）。
+        let tv: u32 = epoch_open(s, out, src, toks, e3 + 1, skip_block(src, toks, e3) - 1);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
+        epoch_close(s, out, tv);
         k = k + 1;
         jump(s, out, base_l + 2, "end");
         lab_def(s, out, base_l + 1, "else");
@@ -4201,10 +4232,12 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             if tok_is(src, toks, k, "if") {
                 k = stmt(s, out, src, toks, k, ret);
             } else {
+                let ev: u32 = epoch_open(s, out, src, toks, k + 1, skip_block(src, toks, k) - 1);
                 k = k + 1;   // '{'
                 while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
                     k = stmt(s, out, src, toks, k, ret);
                 }
+                epoch_close(s, out, ev);
                 k = k + 1;
             }
         }
@@ -4553,6 +4586,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
             emit_val(s, out, 0);
             emit_str(s, out, ", 0\n");
+            let sitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1, 0);
             emit_str(s, out, "  ");
             let sgp: u32 = new_temp(s, out);
@@ -4560,7 +4594,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_ty(s, out, src, toks, set);
             emit_str(s, out, ", ptr %t");
             emit_dec(s, out, sp);
-            emit_str(s, out, ", i32 ");
+            emit_str(s, out, ", ");
+            emit_ty(s, out, src, toks, sitx);
+            emit_str(s, out, " ");
             emit_val(s, out, 1);
             emit_str(s, out, "\n");
             let sve: u32 = expr_bin(s, out, src, toks, siv + 2, 1, 2, set);
@@ -4574,6 +4610,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             return sve + 1;
         }
         if is_array_tok(src, toks, sty) == 1 {
+            let aitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, 0);
             emit_str(s, out, "  ");
             let agp: u32 = new_temp(s, out);
@@ -4581,7 +4618,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_ty(s, out, src, toks, sty);
             emit_str(s, out, ", ptr %");
             emit_name_tok(s, out, src, toks, j);
-            emit_str(s, out, ".addr, i32 0, i32 ");
+            emit_str(s, out, ".addr, i32 0, ");
+            emit_ty(s, out, src, toks, aitx);
+            emit_str(s, out, " ");
             emit_val(s, out, 0);
             emit_str(s, out, "\n");
             let ave: u32 = expr_bin(s, out, src, toks, aiv + 2, 1, 1, set);
@@ -5064,6 +5103,177 @@ setprev:
 ");
 }
 
+/// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
+/// 下面这段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它生成，不手抄）。
+///
+/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**宿主**来
+/// （`@__loment_arena()` 惰性地 `malloc` 一块，拿不到就 `__loment_abort`），
+/// 于是寻址全走 `%hb`（基址）。块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动。
+///
+/// **`sealed` 走不到这一段**（`docs/228` §2）—— 闸门是 `choose hosted`，所以现存每一份
+/// sealed 产物的字节不变。**`gc_any` 档也走不到**：收集器的标记表按 arena 偏移索引、
+/// 行数 = arena/8，换 arena 要同时换表的口径，那是收集器的活（`docs/228` §4 的 B1）。
+/// 它**不静默**：那一档发 `; loment-heap: static 65536`（见 `emit_llvm` 里那个门）。
+fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+;
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动 —— 因为 arena 仍是**一段
+; 连续内存**（偏移是 i32；多段才是重写分配器，见 `docs/228` §4 的 B2）。
+;
+; 一次要 `1048576` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
+
+define internal ptr @__loment_arena() {
+entry:
+  %h = load ptr, ptr @__loment_heap
+  %nul = icmp eq ptr %h, null
+  br i1 %nul, label %ask, label %have
+ask:
+  %m = call ptr @malloc(i64 1048576)
+  %bad = icmp eq ptr %m, null
+  br i1 %bad, label %oom, label %set
+oom:
+  call void @__loment_abort()
+  unreachable
+set:
+  store ptr %m, ptr @__loment_heap
+  br label %have
+have:
+  %r = phi ptr [ %h, %entry ], [ %m, %set ]
+  ret ptr %r
+}
+
+define internal ptr @__loment_alloc(i32 %size) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %need0 = add i32 %size, 15
+  %need = and i32 %need0, -8
+  %head = load i32, ptr @__loment_freehead
+  br label %floop
+floop:
+  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
+  %fend = icmp eq i32 %cur, 0
+  br i1 %fend, label %bump, label %fit
+fit:
+  %hp = getelementptr i8, ptr %hb, i32 %cur
+  %bsz = load i32, ptr %hp
+  %big = icmp uge i32 %bsz, %need
+  br i1 %big, label %take, label %fnext
+fnext:
+  %n4 = add i32 %cur, 4
+  %npp = getelementptr i8, ptr %hb, i32 %n4
+  %nxt = load i32, ptr %npp
+  br label %floop
+take:
+  %slack = sub i32 %bsz, %need
+  %cansplit = icmp uge i32 %slack, 16
+  %t4 = add i32 %cur, 4
+  %tpp = getelementptr i8, ptr %hb, i32 %t4
+  %rest = load i32, ptr %tpp
+  br i1 %cansplit, label %split, label %nosplit
+split:
+  %so = add i32 %cur, %need
+  %spp = getelementptr i8, ptr %hb, i32 %so
+  store i32 %slack, ptr %spp
+  %so4 = add i32 %so, 4
+  %spp4 = getelementptr i8, ptr %hb, i32 %so4
+  store i32 %rest, ptr %spp4
+  br label %relink
+nosplit:
+  br label %relink
+relink:
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+  br i1 %ishead, label %sethead, label %setprev
+sethead:
+  store i32 %newhead, ptr @__loment_freehead
+  br label %taken
+setprev:
+  %p4 = add i32 %prev, 4
+  %ppp = getelementptr i8, ptr %hb, i32 %p4
+  store i32 %newhead, ptr %ppp
+  br label %taken
+taken:
+  store i32 %need, ptr %hp
+  %ko = add i32 %cur, 8
+  %kp = getelementptr i8, ptr %hb, i32 %ko
+  ret ptr %kp
+bump:
+  %off = load i32, ptr @__loment_off
+  %nxtoff = add i32 %off, %need
+  %fits = icmp ule i32 %nxtoff, 1048576
+  br i1 %fits, label %bok, label %boom
+boom:
+  call void @__loment_abort()
+  unreachable
+bok:
+  store i32 %nxtoff, ptr @__loment_off
+  %wp = getelementptr i8, ptr %hb, i32 %off
+  store i32 %need, ptr %wp
+  %w4 = add i32 %off, 4
+  %wp4 = getelementptr i8, ptr %hb, i32 %w4
+  store i32 0, ptr %wp4
+  %bo = add i32 %off, 8
+  %bp = getelementptr i8, ptr %hb, i32 %bo
+  ret ptr %bp
+}
+
+define internal void @__loment_free(ptr %p) {
+entry:
+  %hb = call ptr @__loment_arena()
+  %base = ptrtoint ptr %hb to i64
+  %pi = ptrtoint ptr %p to i64
+  %d64 = sub i64 %pi, %base
+  %d32 = trunc i64 %d64 to i32
+  %hi = sub i32 %d32, 8
+  %hp = getelementptr i8, ptr %hb, i32 %hi
+  %sz = load i32, ptr %hp
+  %hend = add i32 %hi, %sz
+  %off = load i32, ptr @__loment_off
+  %istail = icmp eq i32 %hend, %off
+  br i1 %istail, label %rewind, label %link
+rewind:
+  store i32 %hi, ptr @__loment_off
+  ret void
+link:
+  %head = load i32, ptr @__loment_freehead
+  br label %lloop
+lloop:
+  %cur = phi i32 [ %head, %link ], [ %nxt, %lcont ]
+  %prev = phi i32 [ 0, %link ], [ %cur, %lcont ]
+  %lend = icmp eq i32 %cur, 0
+  %after = icmp ugt i32 %cur, %hi
+  %stop = or i1 %lend, %after
+  br i1 %stop, label %ins, label %lcont
+lcont:
+  %l4 = add i32 %cur, 4
+  %lpp = getelementptr i8, ptr %hb, i32 %l4
+  %nxt = load i32, ptr %lpp
+  br label %lloop
+ins:
+  %i4 = add i32 %hi, 4
+  %ipp = getelementptr i8, ptr %hb, i32 %i4
+  store i32 %cur, ptr %ipp
+  %ishead2 = icmp eq i32 %prev, 0
+  br i1 %ishead2, label %sethead, label %setprev
+sethead:
+  store i32 %hi, ptr @__loment_freehead
+  ret void
+setprev:
+  %q4 = add i32 %prev, 4
+  %qpp = getelementptr i8, ptr %hb, i32 %q4
+  store i32 %hi, ptr %qpp
+  ret void
+}
+
+@__loment_heap = internal global ptr null
+@__loment_off = internal global i32 8
+@__loment_freehead = internal global i32 0
+
+");
+}
+
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
 /// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
 ///
@@ -5153,31 +5363,16 @@ no:
   ret i32 0
 }
 
-define internal void @__loment_collect() {
+; **根那一趟单独成函数** —— 分代那一档的「小回收」要**同一趟**（§2.7），抽出来比复制一份好。
+; 代价是 `gc_auto` 的产物里这一段从内联变成一次调用；两个实现同时变，逐字节判据照旧守着。
+define internal void @__loment_markroots() {
 entry:
-  br label %cl
-cl:
-  %ci = phi i32 [ 8, %entry ], [ %cex, %clc ]
-  %co = load i32, ptr @__loment_off
-  %cd = icmp uge i32 %ci, %co
-  br i1 %cd, label %roots, label %clb
-clb:
-  %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
-  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
-  %csz = load i32, ptr %csp
-  %cex = add i32 %ci, %csz
-  br label %clc
-clc:
-  br label %cl
-roots:
   br label %rl
 rl:
-  %rk = phi i32 [ 0, %roots ], [ %rk2, %rlc ]
+  %rk = phi i32 [ 0, %entry ], [ %rk2, %rlc ]
   %rn = load i32, ptr @__loment_rootn
   %rd = icmp uge i32 %rk, %rn
-  br i1 %rd, label %prop, label %rb
+  br i1 %rd, label %done, label %rb
 rb:
   %rs = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 %rk
   %rsv = load i64, ptr %rs
@@ -5194,21 +5389,28 @@ rmk:
 rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
-prop:
+done:
+  ret void
+}
+
+; **传播**：从 `%from` 起扫块，把块里**长得像堆内地址**的字递归标记上，直到不动点。
+; 起点参数化是给分代那一档用的（小回收只扫年轻代）—— 全量那一趟传 8。
+define internal void @__loment_propagate(i32 %from) {
+entry:
   br label %pl
 pl:
-  %ch = phi i32 [ 1, %prop ], [ %acc, %pw ]
+  %ch = phi i32 [ 1, %entry ], [ %acc, %pw ]
   %zero = icmp eq i32 %ch, 0
-  br i1 %zero, label %sweep, label %pw
+  br i1 %zero, label %done, label %pw
 pw:
-  %wi = phi i32 [ 8, %pl ], [ %we, %wlc ]
+  %wi = phi i32 [ %from, %pl ], [ %we, %wlc ]
   %acc = phi i32 [ 0, %pl ], [ %acc2, %wlc ]
   %wo = load i32, ptr @__loment_off
   %wd = icmp uge i32 %wi, %wo
   br i1 %wd, label %pl, label %wb
 wb:
-  %wszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
-  %wsz = load i32, ptr %wszp
+  %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
+  %wsz = load i32, ptr %wp
   %widx = lshr i32 %wi, 3
   %wmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %widx
   %wmk = load i32, ptr %wmp
@@ -5248,14 +5450,21 @@ wlc:
   %we = phi i32 [ %wex, %wn ], [ %wey, %wn2 ]
   %acc2 = phi i32 [ %wacc, %wn ], [ %acc, %wn2 ]
   br label %pw
-; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
-; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
-; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
-sweep:
-  store i32 0, ptr @__loment_freehead
+done:
+  ret void
+}
+
+; **清扫**：从 `%from` 起把没标记的块**交回分配器**。**起点参数化**同 `propagate`
+; （小回收只清扫年轻代）。
+; **这里不重置空闲链表**（`@__loment_freehead`）—— 全量那一趟由**调用方**在进这里之前重置。
+; 理由见 `__loment_collect` 里那段：重置是「防止同一块被挂两次」的手段，而**小回收不能重置**
+; —— 老年代里那些**已经挂在链上的空闲块**不属于这次清扫的范围，重置一次就把它们从链上
+; 丢了（不是不安全，是白漏内存）。
+define internal void @__loment_sweep(i32 %from) {
+entry:
   br label %sl
 sl:
-  %si = phi i32 [ 8, %sweep ], [ %sex, %slc ]
+  %si = phi i32 [ %from, %entry ], [ %sex, %slc ]
   %so = load i32, ptr @__loment_off
   %sd = icmp uge i32 %si, %so
   br i1 %sd, label %done, label %sb
@@ -5270,6 +5479,9 @@ sb:
 keep:
   br label %slc
 kill:
+  ; **释放前先把这一格的标记清零** —— 于是「空闲块一律未标记」这条不变式成立，清扫**可以重复跑**
+  ; （见 `__loment_minor` 里那段：它每次都重置空闲链表，重复跑正是它要的）。
+  store i32 0, ptr %smp
   %k8 = add i32 %si, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
   call void @__loment_free(ptr %kp)
@@ -5278,6 +5490,36 @@ slc:
   %sex = add i32 %si, %ssz
   br label %sl
 done:
+  ret void
+}
+
+; **全量回收的四趟**：清标记 → 扫根 → 传播到定点 → 清扫，一趟不少（`docs/210` §2.4）。
+define internal void @__loment_collect() {
+entry:
+  br label %cl
+cl:
+  %ci = phi i32 [ 8, %entry ], [ %cex, %clc ]
+  %co = load i32, ptr @__loment_off
+  %cd = icmp uge i32 %ci, %co
+  br i1 %cd, label %roots, label %clb
+clb:
+  %cidx = lshr i32 %ci, 3
+  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
+  store i32 0, ptr %cmp
+  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
+  %csz = load i32, ptr %csp
+  %cex = add i32 %ci, %csz
+  br label %clc
+clc:
+  br label %cl
+roots:
+  call void @__loment_markroots()
+  call void @__loment_propagate(i32 8)
+  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
+  ; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
+  ; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
+  store i32 0, ptr @__loment_freehead
+  call void @__loment_sweep(i32 8)
   ret void
 }
 
@@ -5295,6 +5537,151 @@ done:
 fn emit_gc_trigger(s: ptr, out: ptr) -> u32 {
     if load32(s, 572) == 1 {
         return emit_str(s, out, "@__loment_thresh = internal global i32 32768
+@__loment_oldtop = internal global i32 8
+@__loment_cards = internal global [1024 x i32] zeroinitializer
+
+; **写屏障**：地址落在老年代 ⇒ 它所在的卡置脏。落在堆外（栈、只读段）或年轻代 ⇒ 什么都不做。
+; 堆外那一条靠 `ptrtoint` 相减：栈地址与堆基址的差是一个**巨大的无符号数**，`ult 65536` 自然为假。
+define internal void @__loment_wb(ptr %g) {
+entry:
+  %a64 = ptrtoint ptr %g to i64
+  %b64 = ptrtoint ptr @__loment_heap to i64
+  %d = sub i64 %a64, %b64
+  %in = icmp ult i64 %d, 65536
+  br i1 %in, label %heap, label %out
+heap:
+  %a = trunc i64 %d to i32
+  %ge8 = icmp uge i32 %a, 8
+  %ot = load i32, ptr @__loment_oldtop
+  %lt = icmp ult i32 %a, %ot
+  %yes = and i1 %ge8, %lt
+  br i1 %yes, label %mark, label %out
+mark:
+  %ci = lshr i32 %a, 6
+  %cp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %ci
+  store i32 1, ptr %cp
+  br label %out
+out:
+  ret void
+}
+
+; **小回收**：只动年轻代（地址 ≥ `@__loment_oldtop`）。五步 ——
+;   ① 清**年轻代**的标记位（老年代的标记位不动：它们不参与这次清扫）；
+;   ② 扫根（与全量同一趟）；
+;   ③ 扫**脏卡**：老年代里被写过的那 64 B 块，逐个 8 字节窗口找落在堆里的值，标记其所在块；
+;   ④ **只传播年轻代**（起点 `oldtop`）—— 年轻代内部互相指的那些；老→年轻由③兜住；
+;   ⑤ **只清扫年轻代**（起点 `oldtop`），**不重置空闲链表**（理由见 `__loment_sweep`）。
+define internal void @__loment_minor() {
+entry:
+  %ot = load i32, ptr @__loment_oldtop
+  br label %cl
+cl:
+  %ci = phi i32 [ %ot, %entry ], [ %cex, %clc ]
+  %co = load i32, ptr @__loment_off
+  %cd = icmp uge i32 %ci, %co
+  br i1 %cd, label %roots, label %clb
+clb:
+  %cidx = lshr i32 %ci, 3
+  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
+  store i32 0, ptr %cmp
+  %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
+  %csz = load i32, ptr %csp
+  %cex = add i32 %ci, %csz
+  br label %clc
+clc:
+  br label %cl
+roots:
+  call void @__loment_markroots()
+  br label %cr
+cr:
+  %ri = phi i32 [ 0, %roots ], [ %ri2, %rc ]
+  %rcd = icmp uge i32 %ri, 1024
+  br i1 %rcd, label %prop, label %rcb
+rcb:
+  %rcp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %ri
+  %rcv = load i32, ptr %rcp
+  %rset = icmp eq i32 %rcv, 1
+  br i1 %rset, label %cscan, label %rc
+cscan:
+  %rbase = ptrtoint ptr @__loment_heap to i64
+  %cstart = shl i32 %ri, 6
+  %cend = add i32 %cstart, 64
+  br label %cs
+cs:
+  %sj = phi i32 [ %cstart, %cscan ], [ %sj2, %csc ]
+  %sjd = icmp uge i32 %sj, %cend
+  br i1 %sjd, label %cdone, label %csb
+csb:
+  %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %sj
+  %sv = load i64, ptr %sp
+  %sdo = sub i64 %sv, %rbase
+  %sin = icmp ult i64 %sdo, 65536
+  br i1 %sin, label %smk, label %csc
+smk:
+  %sd32 = trunc i64 %sdo to i32
+  %sr = call i32 @__loment_markp(i32 %sd32)
+  br label %csc
+csc:
+  %sj2 = add i32 %sj, 8
+  br label %cs
+cdone:
+  store i32 0, ptr %rcp
+  br label %rc
+rc:
+  %ri2 = add i32 %ri, 1
+  br label %cr
+prop:
+  call void @__loment_propagate(i32 %ot)
+  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
+  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
+  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
+  ;      `oldtop` 之下」的成因）；
+  ;   ② 既然重置，就必须能重复跑：所以释放那一格顺手把标记清零（`__loment_sweep` 的 `kill:`）。
+  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
+  store i32 0, ptr @__loment_freehead
+  call void @__loment_sweep(i32 8)
+  ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
+  ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的
+  ; 时候根本不会跑）—— 那样小回收 ≡ 全量、卡表永不生效。**实测**：少了这一条，
+  ; `loment_elf_test` 那条分代判据在「拆掉卡扫描」之后照样通过（判据失去证伪力）。
+  ; `off` 可能已经**退回**到 `oldtop` 之下（前沿回退），那就不动它（`max`，走分支不用 `select`）。
+  %o2 = load i32, ptr @__loment_off
+  %up = icmp ugt i32 %o2, %ot
+  br i1 %up, label %prom, label %out
+prom:
+  store i32 %o2, ptr @__loment_oldtop
+  br label %out
+out:
+  ret void
+}
+
+; **全量**：`__loment_collect` 那一套，外加「这一刀切在这儿」——把 `oldtop` 推到前沿、
+; 把卡表清空（老年代整个换了一遍，旧卡不再代表任何东西）。
+define internal void @__loment_major() {
+entry:
+  call void @__loment_collect()
+  %o = load i32, ptr @__loment_off
+  store i32 %o, ptr @__loment_oldtop
+  br label %cc
+cc:
+  %i = phi i32 [ 0, %entry ], [ %i2, %ccc ]
+  %cd = icmp uge i32 %i, 1024
+  br i1 %cd, label %out, label %ccb
+ccb:
+  %cp = getelementptr [1024 x i32], ptr @__loment_cards, i32 0, i32 %i
+  store i32 0, ptr %cp
+  br label %ccc
+ccc:
+  %i2 = add i32 %i, 1
+  br label %cc
+out:
+  ret void
+}
+
+; **策略选择**：该收的时候**先小回收**；小回收之后前沿**还是顶在装满那一档**就跟一次
+; **全量**兜底 —— 于是「要么收够、要么确实装不下」，不留「收了但没用」那条路。
+; **不做「年轻代太大就直接全量」那种优化**：前沿能不能退回去才是「这次小回收有没有用」的
+; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
   %b = load i32, ptr @__loment_gcbytes
@@ -5310,7 +5697,16 @@ entry:
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
-  call void @__loment_collect()
+  call void @__loment_minor()
+  %of2 = load i32, ptr @__loment_off
+  %m1 = add i32 %of2, %sz
+  %m2 = add i32 %m1, 8
+  %still = icmp ugt i32 %m2, 64512
+  br i1 %still, label %maj, label %tune
+maj:
+  call void @__loment_major()
+  br label %tune
+tune:
   %live = call i32 @__loment_livebytes()
   %dbl = mul i32 %live, 2
   %lo = icmp ult i32 %dbl, 32768
@@ -5554,6 +5950,20 @@ fn contains_ident(src: ptr, toks: ptr, text: str) -> u32 {
     return 0;
 }
 
+/// 单元里**声明**过这个外部符号吗（`docs/228` §3.2）。运行期自己那份 `declare` 必须
+/// **让给用户的**：LLVM 对同一条 `declare` 重复出现报 `invalid redefinition of
+/// function`（实测），签名不同更糟。与参考实现的 `seen_ext` 同义。
+fn extern_named(s: ptr, src: ptr, toks: ptr, text: str) -> u32 {
+    let dx: u32 = 0;
+    while dx < load32(s, 640) {
+        if load32(s, fk_base(dx)) == 3 && tok_is(src, toks, load32(s, CG_FN + dx * 12), text) == 1 {
+            return 1;
+        }
+        dx = dx + 1;
+    }
+    return 0;
+}
+
 fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
@@ -5698,6 +6108,22 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
     return 0;
 }
 
+/// 本单元声明了 `choose runtime` 吗（`docs/217`）—— 那是**强制带**那一半。
+///
+/// 与 `gc_alpha_tier` 同形：codegen 不知道档位，但整条 token 流在手，而核心模式只由
+/// **根单元**声明，扫那一行就够。`no_runtime` 那一半（"一定不带"）**不在这里** ——
+/// 它在检查器里拒（`checker.lomt` 的 E022），发射器只管"带"。
+fn rt_tier(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "runtime") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 主入口: 写完整 IR (子集), 返回长度; **返回 0 = 单元的规模超过表容量** (驱动器据此报错)。
 // ---------------------------------------------------------------- 命令入口 (docs/223)
 
@@ -5799,6 +6225,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 576, gc_auto_tier(src, toks));    // 自动收集只在 `gc_auto` 档上跑
     // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
     store32(s, 512, runtime_needed(s, src, toks));
+    // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
+    // 参考实现那一半是 `if rt_on or "@__loment_" in text_all:` —— 同一个或。
+    if rt_tier(src, toks) == 1 {
+        store32(s, 512, 1);
+    }
     store32(s, 516, heap_needed(s, src, toks));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
@@ -6018,8 +6449,24 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         emit_caps_table(s, out, src, toks);
         emit_str(s, out, "\n");
     }
+    // **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
+    // 闸门与上面那行 `; loment-port: hosted` **同一个认法**（`contains_ident`），
+    // 所以两侧说的一定是同一件事。`gc_any` 档不走这一支：收集器的标记表按 arena 偏移
+    // 索引、行数 = arena/8，换 arena 要同时换表的口径 —— 那是收集器的活（`docs/228` §4 的 B1）。
+    // 它**不静默**：那一档发 `; loment-heap: static 65536`，于是"没吃到 A"是量出来的。
     if load32(s, 516) == 1 {
-        emit_heap(s, out);
+        if contains_ident(src, toks, "hosted") == 1 && gc_any(s) == 0 {
+            emit_str(s, out, "; loment-heap: platform 1048576\n");
+            if extern_named(s, src, toks, "malloc") == 0 {
+                emit_str(s, out, "declare ptr @malloc(i64)\n");
+            }
+            emit_heap_hosted(s, out);
+        } else {
+            if contains_ident(src, toks, "hosted") == 1 {
+                emit_str(s, out, "; loment-heap: static 65536\n");
+            }
+            emit_heap(s, out);
+        }
     }
     if gc_any(s) == 1 {
         // **根表跟着 `gc_any` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；

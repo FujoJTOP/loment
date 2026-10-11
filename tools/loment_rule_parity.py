@@ -47,6 +47,9 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
+# 2026-10-09 `runtime` 维**兑现**（`docs/227`）: **92/92**。两条 —— 默认档（`no_runtime`）
+# 下，`/` 与 `alloc` 各一条。这一维从此不再是"只声明"：它成了一句**保证**，而保证要有
+# 可证伪的判据，所以它必须进这张表（两个实现各判一次才叫等价）。
 #
 # 2026-10-10 `register`（`docs/223` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
 # 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
@@ -57,7 +60,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 的 `v11-hosted-gc_manual` 合法样本守着。）
 # **这一条当场抓到一个真分歧**：冲突说明里写了"悬垂"两个字，撞上 E012 的关键词分类器 ——
 # 参考实现把那条冲突归成 E012、自举归成 E022。改写措辞之后两边一致。
-BUDGET = 93
+BUDGET = 97
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -203,6 +206,13 @@ _CASES: list[tuple[str, str]] = [
     # 我自己管" —— 它是合法档，**不该**报错。套件只收负例，所以这里放的是该报的
     # 那一对；合法的那一对由 `potato_test` 的 `v9-runtime-on` 合法样本守着。
     ("choose-no-runtime-gc-auto", "module m\n\nchoose no_runtime\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- `runtime` 维**兑现**（`docs/227`，2026-10-09）--------------------------------
+    # 这一维从"只声明"变成"有保证"：`no_runtime`（默认）说"产物里没有运行期"，于是凡是
+    # 会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。两条负例各钉一边 ——
+    # 一条走**算术**（`/` 拖进 `__loment_abort`）、一条走**分配**（`alloc` 拖进分配器 +
+    # 堆全局），因为参考实现的触发是**分开判**的（`@__loment_` 与 `@__loment_alloc`）。
+    ("choose-no-runtime-div", "module m\n\nfn f() -> u32 {\n    return 10 / 3;\n}\n"),
+    ("choose-no-runtime-alloc", "module m\n\nchoose no_runtime\n\nfn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n"),
     # ---- 第四维 `port`（`docs/222` §4）--------------------------------------
     # 与前面三维同一套：按维一次、取值只有两个、与两个档**定义上矛盾**。
     ("choose-port-twice", "module m\n\nchoose sealed\nchoose sealed\n\nfn f() -> u32 {\n    return 1;\n}\n"),
@@ -283,6 +293,16 @@ _CASES: list[tuple[str, str]] = [
     ("cmd-decl-no-body",
      "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
      "fn helper() -> u32 {\n    return 0;\n}\n"),
+    # ---- excluded 的**行为轴** (E005, `docs/218` §7 第 2 件 / `docs/227` §3) --------
+    # 这一族钉的是"**名字之外**的那一半"：M41 比的是空间名（`excluded "usb"` 对
+    # `capability … : usb[…]`），它**从不看行为**，所以"声明不碰网络、代码里在调 socket"
+    # 是它看不见的。两种写法（`network` / `net`）各一条 —— 参考实现认两个，自举版也得认。
+    ("excl-net-socket",
+     "module m\n\nexcluded \"network: 本单元不申请任何 net 能力\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(41, 2, 1, 0, 0, 0);\n}\n"),
+    ("excl-net-bind",
+     "module m\n\nexcluded \"net: 不碰网络\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(49, 3, 0, 16, 0, 0);\n}\n"),
 ]
 
 
