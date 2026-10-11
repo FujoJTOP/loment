@@ -181,8 +181,12 @@ def gen_main() -> str:
     """宿主：**原生 Loment**，`use` 全部模块，把每个 `entry()` 折成一个数。
 
     折法顺序敏感（`acc * 31 + e`，再取模），所以两处错不会互相抵消。
+
+    **`choose runtime` 是必需的**（`docs/227`：那一维是一句**保证**，不是提示）：这些模块
+    自己用了 `%`，于是它们是"要运行期"的依赖，而**根单元必须满足依赖的要求**。少了这一行，
+    编译器点名拒（`no_runtime` ⇒ 产物里不许出现那段运行期）。
     """
-    out = ["module main", ""]
+    out = ["module main", "", "choose runtime", ""]
     for i in range(N_MODULES):
         out.append(f'use "m{i:03d}.lomt"')
     out += ["", "fn _start() {", "    let acc: i64 = 0;"]
@@ -271,12 +275,14 @@ def gen_tiered(hubs: int, leaves: int) -> dict[str, str]:
             names.append(f"m{n:04d}")
             n += 1
         hp = f"hub{h:03d}"
-        s = [f"module {hp}", ""] + [f'use "{x}.lomt"' for x in names]
+        # hub 自己用了 `%` ⇒ 它是"要运行期"的**库**，而库必须**声明**它的需求
+        # （`docs/227`：根那一行是"保证"，这一行是"需求"）。
+        s = [f"module {hp}", "", "choose runtime", ""] + [f'use "{x}.lomt"' for x in names]
         s += ["", f"pub fn {hp}_entry() -> i64 {{", "    let acc: i64 = 0;"]
         s += [f"    acc = (acc * 31 + {x}_entry() as i64) % 1000003;" for x in names]
         s += ["    return acc;", "}", ""]
         files[f"{hp}.lomt"] = "\n".join(s)
-    m = ["module main", ""] + [f'use "hub{h:03d}.lomt"' for h in range(hubs)]
+    m = ["module main", "", "choose runtime", ""] + [f'use "hub{h:03d}.lomt"' for h in range(hubs)]
     m += ["", "fn _start() {", "    let acc: i64 = 0;"]
     m += [f"    acc = (acc * 31 + hub{h:03d}_entry()) % 1000003;" for h in range(hubs)]
     m += ["    syscall4(60, (acc % 256) as u64, 0, 0);", "}", ""]
@@ -347,7 +353,7 @@ public class C{i:03d} {{
 
 def gen_java_main() -> str:
     """宿主：原生 Loment，`use` **恰好 300 条**（这就是那个上限），把它们折起来。"""
-    out = ["module main", ""]
+    out = ["module main", "", "choose runtime", ""]
     for i in range(N_JAVA_MODULES):
         out.append(f'use "j{i:03d}.lomt"')
     out += ["", "fn _start() {", "    let acc: i64 = 0;"]

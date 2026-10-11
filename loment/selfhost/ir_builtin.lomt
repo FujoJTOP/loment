@@ -1,4 +1,5 @@
 module ir_builtin
+choose runtime
 
 // M82 目标文件 (指针/位域内建子集): alloc/free/atomic_add/ptr_add/ptr_sub/get_bits/set_bits/panic;
 // 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致 (含堆全局与运行时的位置)。

@@ -151,13 +151,17 @@ jobs:
           err=$(mktemp)
           files=""
           rc=0
+          # **带 status 取文件名**（`added` / `modified` / `removed` / `renamed`）——
+          # 这个 job 拦的是"**改**契约"，而**新增一份**契约文件不是改：
+          # 既有那几份（`fuai` / `fuc` / `fujr`）一个字节都没动，对面那一半也就没被碰。
+          # 所以下面按 status 分流：非 `added` 的才拦，`added` 的只列出来（见 2026-10-11 那条）。
           if [ "$EVENT" = "pull_request" ]; then
-            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .status + "|" + .filename' 2>"$err") || rc=$?
           elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[] | .status + "|" + .filename' 2>"$err") || rc=$?
           else
             # 新分支的首次 push（`before` 是全零）—— 退回看这一个提交自己动了什么
-            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[] | .status + "|" + .filename' 2>"$err") || rc=$?
           fi
           # **列不出来就按失败算**（fail closed）。`gh` 拿不到文件列表时 `files` 是空串，
           # 下面的 `grep` 于是找不到 `lom/` 而**放行** —— 那是这个 job 最坏的失败形状:
@@ -167,17 +171,45 @@ jobs:
             cat "$err"
             exit 1
           fi
+          # **`status` 那一列必须是三种之一**：API 换了形状（比如 status 没了）时要**红**，
+          # 而不是让所有行都落进"不是 added"里 —— 那会把新增也拦下（保守，但仍是不对的红），
+          # 或者更糟：反过来把改动当新增放行。所以先验形状。
+          if [ -n "$files" ]; then
+            shape=$(printf '%s\n' "$files" | grep -cv '|' || true)
+            if [ "$shape" != 0 ]; then
+              echo "::error::文件列表的形状变了（$shape 行没有 status 列）—— 门禁无法判定，按失败处理"
+              printf '%s\n' "$files" | head -5
+              exit 1
+            fi
+          fi
           n=$(printf '%s\n' "$files" | grep -c . || true)
-          bad=$(printf '%s\n' "$files" | grep -E '^lom/' || true)
+          bad=$(printf '%s\n' "$files" | grep '|lom/' | grep -v '^added|' | cut -d'|' -f2- || true)
+          newf=$(printf '%s\n' "$files" | grep '^added|lom/' | cut -d'|' -f2- || true)
           if [ -z "$bad" ]; then
-            echo "lom/ 禁区: 无改动（比对了 $n 个文件）"
+            if [ -n "$newf" ]; then
+              {
+                echo "## \`lom/\` 禁区：**新增**了 L0 文件（不拦）"
+                echo ""
+                echo "这个 job 拦的是**改动既有契约** —— 那几份的对面在另一个仓库，本仓单方面"
+                echo "看不出改坏没改坏。**新增**一份不是改：既有那几份一个字节都没动。"
+                echo "新增的那份仍要自己的判据（它一旦被谁依赖，改它就回到这条门下面）。"
+                echo ""
+                echo '```'
+                echo "$newf"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "lom/ 禁区: 无**改动**（比对了 $n 个文件，其中新增 ${newf:+$(printf '%s\n' "$newf" | grep -c .)} 个 lom/ 文件）"
             exit 0
           fi
           {
-            echo "## \`lom/\` 禁区：这次改动碰了 L0 接口层"
+            echo "## \`lom/\` 禁区：这次**改**了 L0 接口层"
             echo ""
             echo "接口对面那一半在**另一个仓库**里，从本仓单方面看不出改坏没改坏 ——"
             echo "所以这里不评审，只拦下。想让接口变，去开 issue，那不是一个补丁。"
+            echo ""
+            echo "（**新增**一份 L0 文件不在这条门下面 —— 那几份既有契约一个字节都没动。"
+            echo "门拦的是下面这些 `modified`/`removed`/`renamed`。）"
             echo ""
             echo '```'
             echo "$bad"
@@ -186,6 +218,13 @@ jobs:
           echo "$bad" | while read -r f; do
             echo "::error file=$f::改了 L0 接口层（lom/ 禁区）—— 见 CONTRIBUTING.md"
           done
+          if [ -n "$newf" ]; then
+            # 同一笔里既有"改既有契约"又有"新增"时，把新增那条也说出来 ——
+            # 免得读者以为 red 的名单里那几行是"新增"。
+            echo "$newf" | while read -r f; do
+              echo "::notice file=$f::新增 L0 文件（不在这条门下面，等它被依赖了才需要）"
+            done
+          fi
           exit 1
 
   # 独占那一条（`EXCLUSIVE_STATIC`）**先单独跑完**，其余分片 `needs:` 它。

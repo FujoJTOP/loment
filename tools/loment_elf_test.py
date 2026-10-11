@@ -244,7 +244,7 @@ def test_free_really_reclaims():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcfree\n\nfn _start() {\n"
+    body = ("module gcfree\nchoose runtime\n\nfn _start() {\n"
             "    let i: u32 = 0;\n"
             "    let sum: u32 = 0;\n"
             "    while i < 2000 {\n"
@@ -315,7 +315,7 @@ def test_gc_l2_epoch_bounds_the_heap():
         td = Path(tds)
         got = []
         for tag, ch in (("alpha", "choose gc_auto_alpha\nchoose runtime"),
-                        ("manual", "choose gc_manual")):
+                        ("manual", "choose gc_manual\nchoose runtime")):
             src = td / f"{tag}.lomt"
             src.write_text(body % ch, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
@@ -424,7 +424,7 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\n\nfn _start() {\n"
+    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"
@@ -513,6 +513,71 @@ def test_gc_auto_collects_while_manual_exhausts():
         "arena 没被耗尽，说明它比 1.4 MB 大得多")
     print(f"      auto 跑通 (rc={got[0]}，1.4 MB 请求过 64 KiB arena)；"
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
+
+
+@test
+def test_l0_static_promotion_bounds_the_heap():
+    """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
+
+    **Why**：L0 的静态那一半（`lomentc_test::test_l0_rule_pair`）钉的是"编译器决定提走哪几个
+    站点"（那对程序上 16 个站点 → 11 个）；这一条钉**整条链**：提走之后程序**跑得对**，
+    而且 arena 真的**没被碰**。`docs/210` §5 末尾点名的就是这一对 —— 静态形式更强
+    （产物里连 `@__loment_alloc` 都不剩），但"整条链跑得通"是另一件事，值得单独有。
+
+    **How to apply**：一对**逐字同源**、只差 `choose` 一行的程序 —— 分配写在**辅助函数**
+    `bump()` 里、循环在**调用方**，于是 L2（按循环体开纪元）接不到（循环体里没有 `alloc`）；
+    尺寸是**字面量** `alloc(64)` ⇒ 落 L0 那一格。4000 次调用 × 64 B ≈ 256 KB 过 64 KiB arena：
+    `gc_auto_alpha` **跑完**（rc=7）/ `gc_manual` **耗尽**（rc=132）。
+
+    退出码还兼判**正确性**：`s` 累加 4000 次 `load8` 读回来的 5，必须正好 20000 ——
+    提升到栈上的那块缓冲被**反复复用**，写进去的字节必须每次读得回来。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    # **今天跑不了 —— 而且原因不是环境**：L0 提升出来的产物**链不过包内镜像链接器**。
+    # L0 会把栈上那块缓冲的地址存进指针槽（`store ptr %p.buf, ptr %p.addr`），于是 alloca
+    # 被当成**普通 SSA 值**用 —— 而 `lomelf` 只在 `get_ptr` / `agg_addr` 里认 alloca，
+    # `get()` 不认（`_store` 走的是 `get()`）。`clang` 收这份 IR，是镜像链接器的口子。
+    # `docs/210` §8 那条硬约束要求**每一层**的产物都能被包内链接器链出来，所以这是 **L0
+    # 那一格的真缺口**（这一格此前只有静态证据，动态那一对从没跑过，原因就是这个）。
+    # 下面那三段是**写好的判据**：`FujoJTOP/loment#239` 修好，删掉这三行就有了动态证据。
+    print("      SKIP: 包内镜像链接器还链不了 L0 提升的产物 —— 见 FujoJTOP/loment#239")
+    return
+    body = ("module gcl0\n%s\nchoose runtime\n\n"
+            "fn bump() -> u32 {\n"
+            "    let p: ptr = alloc(64);\n"
+            "    store8(p, 0, 5);\n"
+            "    return load8(p, 0);\n"
+            "}\n\n"
+            "fn _start() {\n"
+            "    let s: u32 = 0;\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 {\n"
+            "        s = s + bump();\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if s == 20000 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("manual", "choose gc_manual"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcl0_{tag}.lomt"
+            src.write_text(body % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcl0_{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"gcl0_{tag}", td, timeout=60)[0])
+    assert got[1] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。要么提升没发生（256 KB 请求"
+        "过不了 64 KiB arena），要么提升上去的那块缓冲被写坏了（退出码 3 表示累加和不等于 20000）")
+    assert got[0] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出提升："
+        "256 KB 的请求本该把 64 KiB 的 arena 耗尽")
+    print(f"      manual 耗尽 (rc={got[0]})；alpha 跑通 (rc={got[1]}) "
+          "—— 字面量尺寸的分配提到栈上，arena 一个字节没碰")
 
 
 @test
