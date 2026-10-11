@@ -824,6 +824,7 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_for.lomt",
                        ROOT / "loment" / "selfhost" / "ir_div.lomt",
                        ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
+                       ROOT / "loment" / "selfhost" / "ir_index.lomt",
                        ROOT / "loment" / "selfhost" / "ir_call5.lomt"):
             mod = lomentc.load(target)
             deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
@@ -835,6 +836,44 @@ def test_m82_loment_codegen_byte_identical():
                 raise AssertionError(
                     f"{target.name} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+
+
+@test
+def test_m82_hosted_arena_is_byte_identical():
+    """`docs/228` §5 的 **A4**：`choose hosted` 那一份产物，两个实现**逐字节**一致。
+
+    **这条不判"跑得起来"**（那是 `loment_hosted_test` 的 A3）—— 它只钉"两个实现发的是
+    同一段文本"。分开的理由与 `test_m88` 同：IR 等价与"那个 IR 真的做了事"是两件事，
+    合成一条会让"两边一起错"看起来是绿的。
+
+    **源只有一份** —— 就是 `lomentc_test.HEAP_HOSTED_SRC`（A3 那条运行时判据用的也是它）。
+
+    它也是 **A1 的另一半**：这一份**带 `choose hosted`**，而 `ir_mem.lomt` 那 9 份
+    **不带** —— 两边各自逐字节一致，才说得上"`sealed` 没动、`hosted` 才动"。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test                                            # noqa: E402,PLC0415
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        target = Path(td) / "ir_hosted.lomt"
+        target.write_text(lomentc_test.HEAP_HOSTED_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(target)
+        deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+        got = _run_codegen(exe, target, td)
+        if got != want:
+            i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+            a = max(0, (i or 0) - 60)
+            raise AssertionError(
+                f"ir_hosted 首个差异 @{i}:\n"
+                f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+        # 两边一致还不够 —— 一致地**没做**那件事也是"一致"。这一段把"做了什么"钉住，
+        # 免得两个实现一起退回静态 arena 而这条判据照样绿（`docs/219` §7 那条口径）。
+        assert "@__loment_heap = internal global ptr null" in want, "hosted 的 arena 不是宿主来的"
+        assert "declare ptr @malloc(i64)" in want, "没向宿主声明分配器"
+        print("      hosted arena: 两个实现逐字节一致 (含 malloc 那一支)")
 
 
 @test
@@ -1589,6 +1628,7 @@ def test_m82_coverage_report():
         return
     known = ["ir_const.lomt", "ir_expr.lomt", "ir_stmt.lomt", "ir_logic.lomt",
              "ir_cast.lomt", "ir_mem.lomt", "ir_for.lomt", "ir_div.lomt", "ir_builtin.lomt",
+             "ir_index.lomt",
              "ir_call5.lomt",
              # 预置枚举 + `?` 早退 + `if let` 三条路径的回归闸 (不放进列表就会静默退化)
              "native_res.lomt",
