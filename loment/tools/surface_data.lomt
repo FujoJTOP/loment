@@ -26,7 +26,7 @@
 
 module surface_data
 
-pub fn n_codes() -> u32 { return 26; }
+pub fn n_codes() -> u32 { return 27; }
 
 pub fn code_title(c: u32, lang: u32) -> str {
     let k: u32 = c * 2 + lang;
@@ -82,6 +82,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 51 { return "进程入口冲突"; }
     if k == 52 { return "`command_main` without a matching declaration"; }
     if k == 53 { return "命令体与声明对不上"; }
+    if k == 54 { return "control flow: this function may fall off the end of its body"; }
+    if k == 55 { return "控制流：可能从末尾掉出去"; }
     return "";
 }
 
@@ -139,6 +141,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 51 { return "同一个程序里有两个**进程入口**：`_start` 和 `command_main`。"; }
     if k == 52 { return "A command declaration and `command_main` do not match: one of them is missing, or the signature is not the one the entry needs."; }
     if k == 53 { return "命令声明与 `command_main` 对不上：少了一个，或者签名不是入口要求的那个。"; }
+    if k == 54 { return "A function that **declares a return type** has a path that reaches the end of its body without a `return`."; }
+    if k == 55 { return "一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。"; }
     return "";
 }
 
@@ -196,6 +200,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 51 { return "`_start` 是普通程序自己写的入口（语言约定，链接器按名字找它）；`command_main` 是**命令体**的入口，声明了命令之后由**工具链生成** `_start` 去调它（读 `/proc/self/cmdline`、数出字段数、把返回值交给 `exit`，`docs/223` §3.2）。两个都在就是两个入口，链接器只能认一个 —— 那是静默丢掉另一个的地带，所以在这里拒。"; }
     if k == 52 { return "`command_main` is **not** an ordinary function somebody calls - it is the target of the `_start` the toolchain generates, and that generation is triggered only by the **command declaration**. The two halves have to come in pairs: without a declaration, `command_main` is a function nobody calls (it builds, and does nothing); with a declaration but no `command_main`, the generated entry has nothing to call - that would only blow up at **link** time, so it is rejected here; with the wrong signature the generated entry cannot pass its arguments. The signature is fixed: `fn command_main(argv: ptr, argc: u32) -> u32`, where `argv` is the whole `/proc/self/cmdline` block and `argv[0]` is the command's own path (`docs/223` section 3.2)."; }
     if k == 53 { return "`command_main` **不是**被谁直接调用的普通函数 —— 它是工具链生成的那个 `_start` 要去调用的目标，而「生成」这件事只由**命令声明**触发。两半必须成对：没有声明时它是一个**没人调用的函数**（编得过、静默无效）；只有声明而没有它，生成的入口就没有东西可调 —— 那要等到**链接**才炸，所以在检查这一步就拒；签名不对则生成的入口传不进去参数。入口的签名是固定的：`fn command_main(argv: ptr, argc: u32) -> u32`，`argv` 就是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径（`docs/223` §3.2）。"; }
+    if k == 54 { return "After codegen that path becomes an **illegal instruction** (`SIGILL`), and it only fires when the path is actually taken - so it is the kind of bug that ships and then blows up when a new input reaches an error branch nobody exercised. \"check passes\" is supposed to mean \"this program will not trap\"; this rule is what makes that true, because a static check is the only place that can say it before the fact."; }
+    if k == 55 { return "这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。`check` 通过本该等于「这份程序不会 trap」，这一条就是把那句话兑现：静态检查是唯一能在事前说出口的地方（原先它只是一条写作纪律，见 SKILL.md §6.14）。"; }
     return "";
 }
 
@@ -253,6 +259,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 51 { return "普通程序只写 `_start`；命令只写 `command_main` 加一条声明"; }
     if k == 52 { return "a declaration plus a `command_main` with the matching signature; a normal program uses `_start`"; }
     if k == 53 { return "声明 + 签名一致的 `command_main`；普通程序用 `_start`"; }
+    if k == 54 { return "the last statement is `return`; an `if` with an `else` where both branches return; a `match` whose every arm returns"; }
+    if k == 55 { return "末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`"; }
     return "";
 }
 
@@ -310,6 +318,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 51 { return "两个都写；把 `_start` 里的东西原样留着一份又写 `command_main`"; }
     if k == 52 { return "`command_main` with no declaration; `command_main(a: u32, b: u32)`; returning `()`; the two parameters swapped"; }
     if k == 53 { return "只有 `command_main` 没有声明；`command_main(a: u32, b: u32)`；返回 `()`；两个参数顺序反了"; }
+    if k == 54 { return "the last statement is `while` / `for` (these end normally), an expression statement, or an `if` **without** an `else`"; }
+    if k == 55 { return "末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`"; }
     return "";
 }
 
@@ -340,6 +350,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 24 { return "bad command declaration - shape, name, an official name, or a library"; }
     if c == 25 { return "two process entries: `_start` and `command_main`"; }
     if c == 26 { return "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)"; }
+    if c == 27 { return "a non-() function may fall off the end of its body - every path must return"; }
     return "";
 }
 
@@ -542,6 +553,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 419 { return "补上命令体：入口固定是 `fn command_main(argv: ptr, argc: u32) -> u32`。"; }
     if k == 421 { return "把签名改成入口要求的：`fn command_main(argv: ptr, argc: u32) -> u32`。"; }
     if k == 423 { return "本来就不想当命令：把它改回 `fn _start()`，参数自己从 `/proc/self/cmdline` 读。"; }
+    if k == 432 { return "Make every path return: add a `return` at the end."; }
+    if k == 434 { return "Write the tail as an `if` **with** an `else` where both branches return; if the tail is a `match`, every arm must return (exhaustiveness is E008)."; }
+    if k == 436 { return "If the function has no value to return, declare it `()` and drop the value after `return`."; }
+    if k == 433 { return "让每条路径都 `return`：末尾补一个 `return`。"; }
+    if k == 435 { return "收尾写成**带 `else` 的 `if`**、两支都返回；`match` 收尾时让**每条臂**都返回（穷尽性由 E008 单独管）。"; }
+    if k == 437 { return "函数本来就没有返回值的话，把它声明成 `()` 并去掉 `return` 后面的值。"; }
     return "";
 }
 
@@ -574,6 +591,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 24 { return 5; }
     if c == 25 { return 3; }
     if c == 26 { return 4; }
+    if c == 27 { return 3; }
     return 0;
 }
 

@@ -227,6 +227,12 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 控制流: 非 () 的函数可能从末尾掉出去 (E024, `#22`) --------------
+    # 这张表只收负例(参考实现必须报错, 否则记 NOPY) —— 所以合法的收尾不在这里,
+    # 它们由 `loment_p8_test` 的正例钉子管。
+    # 自举 checker 还没这条规则 ⇒ 它是 MISSING(允许; 补完再把 BUDGET 调上去)。
+    ("falloff-if", "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n"),
+    ("falloff-match-arm", "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            let v: u32 = 2;\n        }\n    }\n}\n"),
     # ---- 命令声明 (E024/E025/E026, docs/223) --------------------------------
     # 这五条是**检查器**规则（只看这一个单元）。第六条"库不许声明命令"是**装载器**规则
     # —— 它要两个单元（入口 + 被 use 的那个），装不进这张表，与 `choose` 那第三条

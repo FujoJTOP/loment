@@ -401,7 +401,14 @@ def test_foreign_file_gets_a_language_section():
     assert "--impl" in out and ".iface.lomt" in out, "三条路没写全"
     assert "边界" in out, "没给这门语言的边界"
     assert "别拿它当结论" in out, "没说语言只是提示"
-    print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准")
+    # **顺序也是判据**（`#29`）：外源那条提示要**顶到卡片前面** —— 或者说，卡片那四段
+    # （错了什么 / 为什么错 / 怎么改 / 支持 / 不支持）**根本不该出现**，因为它们讲的
+    # 全是 Loment 的规矩，而这份文件不是 Loment。原先它排在**最后**，读的人先照着
+    # 一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句"这个文件不是 Loment"。
+    for label in ("错了什么:", "为什么错:", "怎么改:", "支持:", "不支持:"):
+        assert label not in out, f"外源文件不该给 Loment 的说明卡（{label}）: {out[-400:]!r}"
+    print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准；"
+          "提示顶在前面，Loment 的说明卡不再出现")
 
 
 @test
