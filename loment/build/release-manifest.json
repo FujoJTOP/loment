@@ -739,7 +739,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "d7186638b926f3074b50e66b76a67086b45eff3346fba1b4df100898b49f08a9"
+   "sha256": "ccdc6d10a03980e632d3f4077ad86e633dc0b7b9efbe2790e52e9f5763045a16"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -2083,7 +2083,7 @@
   },
   {
    "path": "docs/232-loment-vm.md",
-   "sha256": "a390d588682e1a10039daa0335c1e5541f687db630543f821601d377c227db2c"
+   "sha256": "680459fc2569cb46a68eb5434e5636da6061db82743b09a5f2b672dfe5ed1874"
   },
   {
    "path": "docs/manual/index.md",
