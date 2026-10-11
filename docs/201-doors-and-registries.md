@@ -51,6 +51,18 @@
 所以这个 job 红了也只是红了。要它真的成为门，得把 `lom/ 禁区` 设成 required status
 check。这一步在 `CONTRIBUTING.md` 里也写明了。
 
+**2026-10-11：判定的内容改了一格 —— 拦住的是"改"，不是"碰"。** 文档一直写的是
+"a pull request that **modifies** anything under `lom/`"，而实现是 `grep -E '^lom/'`
+（碰到就拦）。两者在**新增**这一格上不一致，而差的那一格恰好是唯一能扩大接口面、
+又不碰任何既有契约的动作（既有的三份那儿，对面在另一个仓库；新增一份没有对面可坏）。
+现在按 `gh api` 的 `status` 分流：`added` 放行并在 summary 里列出来，
+`modified`/`removed`/`renamed` 照旧拦，**列表形状不对**（缺 `status` 列）一律红
+（fail closed —— 不给"API 换了形状就静默放行"留缝）。同一轮加了第四份契约
+`lom/net.lom`，它是这条改动的第一个用例（`docs/228`）。
+
+**这条改动本身没有让门变硬**：`lom/ 禁区` 仍然不是 required status，所以"新增放行"
+在今天的实际效果是"不再对合法的扩展动作报一次红"，而不是"挡不住别的什么"。
+
 ## 2. 发布清单 `GLOBS`：没有"该列而没列"的判据
 
 `loment_release.GLOBS` 是**显式清单**（不扫目录），而 `loment_rel_test` 比的是
