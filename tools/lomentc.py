@@ -3730,6 +3730,23 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if space and space == c.space:
                 errs.append(f"{c.line}: 能力 {c.name} 使用了 excluded 的空间 {space}")
 
+    # **行为轴**（`docs/218` §7 第 2 件，2026-10-11）：上面那条 M41 比的是**名字**
+    # （`excluded "usb"` 对 `capability … : usb[…]`）—— 它**从不看行为**，所以
+    # "声明了不碰网络、代码里却在调 `socket`"是它看不见的。补上的就是这一条。
+    #
+    # **两轴必须分开**（`docs/218` §8 最后两行）：这条是**权威**读法（"这个门不开"），
+    # 与 `docs/208` 那条**保密**读法（"我不会把数据送出去"，由 M41 那一族管）不是一件事 ——
+    # 拿一条冒充两条，正是那次更正重演的路径。所以这里只判"**开了没有**"，
+    # 不判"外发的字节里有没有本域的数据"。
+    for site_line, num in _machine_call_sites(mod):
+        if SURFACE_NUMBERS.get(num) != "net":
+            continue
+        for ex in mod.excluded:
+            space = ex.split(":")[0].strip()
+            if space in EXCLUDED_NET_SPACES:
+                errs.append(f"{site_line}: 机调用号 {num} 使用了 excluded 的空间 {space}")
+                break                      # 一个站点只报一次（两个写法都写了也还是一次）
+
     for f in mod.funcs:
         if not _type_ok(f.ret, known):
             errs.append(f"{f.line}: 函数 {f.name} 返回类型 {f.ret} 未声明")
@@ -4436,6 +4453,42 @@ SURFACE_OTHER = "other"
 SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
 
 
+def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
+    """**每一个机调用站点** `(行号, 号或 None)` —— 号只在首参写成整数字面量时给得出。
+
+    三处共用这一遍（`_count_surfaces` 与 `excluded` 的行为轴那一条）—— 走两遍就会漂：
+    一处按 `IntLit` 认、另一处顺手也认了常量名，两份口径差一个号，判据各自绿着。
+    """
+    import dataclasses as _dc
+
+    out: list[tuple[int, int | None]] = []
+
+    def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
+            args = getattr(x, "args", [])
+            first = args[0] if args else None
+            out.append((getattr(x, "line", 0),
+                        first.value if isinstance(first, IntLit) else None))
+        if _dc.is_dataclass(x) and not isinstance(x, type):
+            for fd in _dc.fields(x):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                walk(getattr(x, fd.name))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    return out
+
+
+#: `excluded` 里**指网络空间**的那几个名字（`docs/218` §7 第 2 件）。
+#: 面名本身由用的人定（`docs/224`），这里只认仓库自己的两个写法：
+#: `net` 是**面**的叫法（`SURFACE_NUMBERS` 里那个），`network` 是**空间**的叫法
+#: （`loment/examples/demo.lomt:18` 与 `docs/218` §1 用的就是它）。
+EXCLUDED_NET_SPACES = ("net", "network")
+
+
 def _count_surfaces(mod: Module) -> dict:
     """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
 
@@ -4451,27 +4504,10 @@ def _count_surfaces(mod: Module) -> dict:
     面才是读者要问的问题（"这份程序碰了网络没有"）。**号写成了变量就落 `other`** ——
     那是词法口径的诚实边界，不是漏数。
     """
-    import dataclasses as _dc
-
     counts: dict = {}
-
-    def walk(x) -> None:
-        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
-            args = getattr(x, "args", [])
-            first = args[0] if args else None
-            num = first.value if isinstance(first, IntLit) else None
-            key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
-            counts[key] = counts.get(key, 0) + 1
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                walk(y)
-
-    walk(mod)
+    for _line, num in _machine_call_sites(mod):
+        key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
+        counts[key] = counts.get(key, 0) + 1
     out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
     out["total_sites"] = sum(counts.values())
     return out

@@ -2120,6 +2120,47 @@ def test_surfaces_rule():
     assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
 
 
+#: `excluded` 的**行为轴**那一条用的源（`docs/218` §7 第 2 件 / `docs/227` §3）。
+EXCLUDED_NET_SRC = """module x
+
+excluded "network: 本单元不申请任何 net 能力"
+
+fn f() -> i64 {
+    return syscall6(41, 2, 1, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_excluded_network_is_a_behaviour_claim():
+    """`excluded "network"` × 联网号：**声明说不开的门，代码里开了**（`docs/218` §7 第 2 件）。
+
+    M41 那条（`能力 X 使用了 excluded 的空间`）比的是**名字** —— `excluded "usb"` 对
+    `capability … : usb[…]`，它**从不看行为**，所以"声明了不碰网络、代码里却在调 `socket`"
+    是它看不见的。这一条钉的就是补上的那半。
+
+    **它只回答"开了没有"**（**权威**读法），不回答"外发的字节里有没有本域的数据"
+    （那是 `docs/208` 的**保密**读法，由 M41 那一族管）—— `docs/218` §8 最后两行点名的
+    "两轴不能混、不能拿一条冒充两条"就落在这里：两条判据各判各的。
+    """
+    assert errs(EXCLUDED_NET_SRC) == ["6: 机调用号 41 使用了 excluded 的空间 network"], \
+        errs(EXCLUDED_NET_SRC)
+    # **别的空间不管这件事** —— 那正是 M41 那一半（名字），不是这一条（行为）
+    assert errs(EXCLUDED_NET_SRC.replace('excluded "network:', 'excluded "usb:')) == [], \
+        "`usb` 的空间不该被联网号触发"
+    # **别的面也不管** —— `exit`(60) 是 `proc`，不是 `net`
+    assert errs(EXCLUDED_NET_SRC.replace("syscall6(41, 2, 1, 0, 0, 0)",
+                                         "syscall4(60, 0, 0, 0)")) == [], \
+        "非联网面不该被这条判据碰到"
+    # 面名两个写法都认（`net` 是**面**的叫法、`network` 是**空间**的叫法）
+    spelled = EXCLUDED_NET_SRC.replace('"network:', '"net:')
+    assert errs(spelled) == ["6: 机调用号 41 使用了 excluded 的空间 net"], errs(spelled)
+    # **号写成变量就什么都不说** —— 词法口径的诚实边界（与 `surfaces` 落 `other` 同一条）
+    var = ('module x\n\nexcluded "network: 本单元不申请任何 net 能力"\n\n'
+           "fn f(n1: u64) -> i64 {\n    return syscall6(n1, 2, 1, 0, 0, 0);\n}\n")
+    assert errs(var) == [], errs(var)
+
+
 @test
 def test_l0_param_shadow_is_not_promoted():
     """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。
