@@ -2039,11 +2039,15 @@
   },
   {
    "path": "docs/226-loment-performance-ledger.md",
-   "sha256": "d95eabaeb668ae8bba887e61ebc5558556088cc970ad8944f01e49c308a7fd1a"
+   "sha256": "99ad8dc1a29e4b3939c33532998652f44de3f9817b64001d891d8a17d85a6f36"
   },
   {
    "path": "docs/227-loment-net-closeout.md",
    "sha256": "5900ad29714366aba18a30772cefe271b90c4e81258fbd8c2006027a351b1316"
+  },
+  {
+   "path": "docs/228-grammar-semantics-audit.md",
+   "sha256": "9cd61425b5847ef5b7008b658ac7bec952d281093c4b4fe6c83ea3e7f42f5c11"
   },
   {
    "path": "docs/manual/index.md",
