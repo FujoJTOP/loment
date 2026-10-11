@@ -793,6 +793,17 @@ class If:
     then: list
     otherwise: list
     line: int
+    #: **两支各自的 token 跨度**（半开，`[at, end)`）—— 同 `While.tok_at/tok_end` 的约定：
+    #: `at` 取 `{` **之后**那一格、`end` 取 `}` 那一格。`else if` 链上 `otherwise` 是
+    #: **一条**语句，跨度就是那条语句本身。
+    then_at: int = 0
+    then_end: int = 0
+    else_at: int = 0
+    else_end: int = 0
+    #: **L2**（`docs/210` §2.3）：这一支能不能在末尾批量归还（把前沿退回去）。
+    #: 与 `While.l2` 同一条规则（`_l2_ok`），只是"体"换成了分支。
+    then_l2: bool = False
+    else_l2: bool = False
 
 
 @dataclass
@@ -1962,15 +1973,27 @@ class Parser:
             self.no_struct += 1
             cond = self.parse_expr()
             self.no_struct -= 1
+            then_at = self.i + 1              # '{' 之后 —— 与自举侧同一个起点
             then = self.parse_block()
+            then_end = self.i - 1             # '}' 的下标（不含）
             otherwise = []
+            else_at = 0
+            else_end = 0
             if self.at("ident", "else"):
                 self.next()
                 if self.at("ident", "if"):  # else if 链
+                    # **不给跨度**：`else if` 是一条**语句**（`otherwise = [If(...)]`），
+                    # 它自己那两支的跨度由它自己的解析填 —— 在这里再包一层，自举侧那一份
+                    # 就对不上（它走的是 `stmt()` 递归，没有对应的一层）⇒ 逐字节判据会红。
                     otherwise = [self.parse_stmt()]
                 else:
+                    else_at = self.i + 1
                     otherwise = self.parse_block()
-            return If(cond, then, otherwise, t.line)
+                    else_end = self.i - 1
+            s = If(cond, then, otherwise, t.line)
+            s.then_at, s.then_end = then_at, then_end
+            s.else_at, s.else_end = else_at, else_end
+            return s
         if t.val == "while":
             self.next()
             self.no_struct += 1
@@ -4865,8 +4888,8 @@ def _count_gc_ladder(mod: Module) -> dict:
                     l1 += 1
                 # 其余落 L3（在 `l3` 那一格用 total 减出来）
             if isinstance(s, If):
-                walk(s.then, in_l2, l0n, l1n)
-                walk(s.otherwise, in_l2, l0n, l1n)
+                walk(s.then, in_l2 or s.then_l2, l0n, l1n)
+                walk(s.otherwise, in_l2 or s.else_l2, l0n, l1n)
             elif isinstance(s, While):
                 walk(s.body, in_l2 or s.l2, l0n, l1n)
             elif isinstance(s, For):
@@ -6156,7 +6179,12 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
 def _l2_loop_epochs(f: Func, toks: list,
                     safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
-    """把 `f` 里每个 `while`/`for` 的 `l2` 填上（`docs/210` §2 的 L2）。"""
+    """把 `f` 里每个 `while`/`for` **以及 `if` 的两支**的 `l2` 填上（`docs/210` §2.3 的 L2）。
+
+    `if` 的两支与循环体是**同一个形状的块**（`docs/210` §7 原先把它列在"没做"里），规则也
+    是同一条（`_l2_ok`）—— 只是"体"换成了那一支的 token 跨度。`else` 支为空时
+    `else_end == 0`，`else_end > else_at` 天然不成立，不用再加一个"有没有 else"的判断。
+    """
     def walk(stmts: list) -> None:
         for s in stmts:
             if isinstance(s, While):
@@ -6166,6 +6194,10 @@ def _l2_loop_epochs(f: Func, toks: list,
                 s.l2 = _l2_ok(toks, s.tok_at, s.tok_end, f.tok_end, f.l0, safe)
                 walk(s.body)
             elif isinstance(s, If):
+                if s.then_end > s.then_at:
+                    s.then_l2 = _l2_ok(toks, s.then_at, s.then_end, f.tok_end, f.l0, safe)
+                if s.else_end > s.else_at:
+                    s.else_l2 = _l2_ok(toks, s.else_at, s.else_end, f.tok_end, f.l0, safe)
                 walk(s.then)
                 walk(s.otherwise)
             elif isinstance(s, Match):
@@ -6396,7 +6428,12 @@ class _Ir:
         值就是一条 SSA 指令，不需要 alloca —— 循环体那块标签**支配**体内的一切，
         自然也支配回边之前那个位置。
         """
-        if not s.l2:
+        return self.epoch_open_flag(s.l2)
+
+    def epoch_open_flag(self, ok: bool) -> str | None:
+        """同上，但"这一格开不开"由**调用方算好的布尔**给 —— `if` 的两支没有语句对象可读。
+        """
+        if not ok:
             return None
         v = self.t()
         self.w(f"{v} = load i32, ptr @__loment_off")
@@ -7131,10 +7168,16 @@ class _Ir:
             self.w(f"br i1 {c}, label %{then_l}, label %{else_l}")
             self.terminated = True
             self.label(then_l)
+            # **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：
+            # 两支各是一个块，规则与循环体同一条 —— 入口记前沿、末尾退回。
+            tv = self.epoch_open_flag(s.then_l2)
             self.block(s.then)
+            self.epoch_close(s, tv)
             self.jump(end_l)
             self.label(else_l)
+            ev = self.epoch_open_flag(s.else_l2)
             self.block(s.otherwise)
+            self.epoch_close(s, ev)
             self.jump(end_l)
             self.label(end_l)
             return
