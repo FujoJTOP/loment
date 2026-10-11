@@ -135,3 +135,8 @@ ahci_events.txt
 /loment/build/native_slice.rs
 /loment/build/native_str.rs
 /loment/build/native_trait.rs
+
+# The wiki's source is deliberately not in this repository. It is maintained as
+# a local directory and pushed to https://loment.fandom.com/ over the MediaWiki
+# API; the README links to the wiki itself rather than to its sources.
+/wiki/
