@@ -129,9 +129,10 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v8` | `gc` | `docs/175` §3.4 |
   | `v9` | `runtime` | `docs/175` §3.6 |
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
-  | `v11` | `surfaces` | `docs/222` |
+  | `v11` | `port` | `docs/222` §4 |
+  | `v12` | `surfaces` | `docs/224` |
 
-  台阶是**累积**的：`v11` 要求它下面每一版的字段都在。
+  台阶是**累积**的：`v12` 要求它下面每一版的字段都在。
 
 - **`gc`（v8）**：**回收档**之一 —— `gc_manual`（回收由程序显式做）、`gc_auto`
   （运行期负责回收）、或 `gc_auto_alpha`（**混合**档：静态内存管理 + 动态回收，
@@ -153,6 +154,18 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   **`gc_manual` 不在这一条里**：`runtime` + `gc_manual`（"要运行期、但内存我自己管"）
   是合法档，不许拒。理由见 `docs/175` §3.6。
 
+- **`port`（v11）**：**产物通不通着世界** —— `sealed`（封闭，默认）或 `hosted`（对外）。
+  与 `mode` / `gc` / `runtime` 同级同形：一个字符串取值、**必填**、只有根单元能定，
+  于是"这份产物允不允许有对外端口"是**不读源码可判**的 —— 这正是 `docs/219` §7 那句
+  "测量强于声明"在这一维的落法（不问"源码里写没写 `choose hosted`"，读对象里的那个值）。
+  取值**刻意不带生态名**（今天是 libc/zlib，明天是 JVM/CPython）—— 与 `runtime` 同一条纪律。
+  校验器**独立判得了**那两条：`port=hosted` 与 `mode=no_std`（`no_std` 说「底下没有
+  东西」、`hosted` 说「往下链东西」，`docs/222` §4.2），以及 `port=hosted` 与
+  `gc=gc_auto_alpha`（混合档的 L2 是分配器前沿回卷，而外部库把指针放进它自己的结构里，
+  那些指针在 Loment 的栈之外 —— `docs/219` §6.1）。
+  **`gc_manual` / `gc_auto` 不在这一条里**：`hosted` + 手动或自动回收
+  （"要对外、但内存我自己管"）是合法档，不许拒。
+
 - **`boundary`（v7）**：一份单元里越过语言保证的那些**调用点**有几个 —— 机调用
   （`syscall4`/`syscall6`/`syscall7`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
   `extern fn` 声明过的名字。**口径是词法的**：只看"这个名字被调用了没有"，不判类型、
@@ -165,7 +178,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   `tools/potato.py` 的 `BOUNDARY_BUILTINS` —— 放在那儿是因为这个校验器按 M47
   **不许 import 编译器**，而"哪些内建越界"恰恰是审计要用的东西。
 
-- **`surfaces`（v11）**：把 `boundary.syscalls` 数的那**同一批站点**按"面"分一分 ——
+- **`surfaces`（v12）**：把 `boundary.syscalls` 数的那**同一批站点**按"面"分一分 ——
   `{面名: 站点数, …, total_sites}`，面名由用的人定（`file`/`mem`/`net`/`proc` 是本仓库的划法，
   `other` 是兜底：首参不是整数字面量的、或号不在表里的）。零计数的面不写出来（零站点写
   `{"total_sites": 0}`）。校验器独立判得了**两条**：各面之和等于 `total_sites`，

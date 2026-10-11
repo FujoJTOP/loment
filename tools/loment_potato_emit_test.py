@@ -40,6 +40,9 @@ EX = ROOT / "loment" / "examples"
 COVERED = (
     "bootprobe.lomt",
     "bytes.lomt",
+    # ---- 命令单元（`docs/223`）：两种写法各一份，形式对象与参考实现逐字节比
+    "cmd_hello.lomt",           # 形态 B：`pub fn loment_command()` + `command_main`
+    "register_hello.lomt",      # 形态 A：`register <名字> { … }`
     "mathutil.lomt",
     "native.lomt",
     "native_agg.lomt",

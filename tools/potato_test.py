@@ -111,7 +111,11 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v12"), "版本"),
+    # 版本串必须是**认得的**那几版之一；`v99` 不认得，所以这条测的是"认版本"本身。
+    # （2026-10-10 改：原先钉的是 `v11`，而 v11 从这次起是**合法**版本 —— 那条夹具
+    #  于是不再报"版本"，改报缺字段，测的就不是这条规则了。同一天 `v12` 也合法了，
+    #  所以这条夹具改钉**永远不认得**的 `v99`，免得每升一版都要来动它。）
+    ("version", lambda d: d.__setitem__("potato", "v99"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -290,20 +294,80 @@ def fixture_v10() -> dict:
 
 
 def fixture_v11() -> dict:
-    """一份合法的 **v11** 形式对象: v10 的再 + v11 的 `surfaces`（`docs/222`）。
+    """一份合法的 **v11** 形式对象: v10 的再 + v11 的 `port`（`docs/222` §4）。
 
-    与 `fixture_v7` … `fixture_v10` 同一个理由单独来一份：`surfaces` 从 v11 起才合法 ——
-    拿 v10 去试只会得到"未知顶层字段"，校验器里那几条规则（面名得是标识符、值得是非负
+    与 `fixture_v7` … `fixture_v10` 同一个理由单独来一份：`port` 从 v11 起才合法 ——
+    拿 v10 去试只会得到"未知顶层字段"，校验器里那几条规则（两个取值、两条冲突）
+    **一条都碰不到**，那种绿是空转。
+    """
+    d = fixture_v10()
+    d["potato"] = "v11"
+    d["port"] = "sealed"
+    return d
+
+
+def fixture_v12() -> dict:
+    """一份合法的 **v12** 形式对象: v11 的再 + v12 的 `surfaces`（`docs/224`）。
+
+    与 `fixture_v7` … `fixture_v11` 同一个理由单独来一份：`surfaces` 从 v12 起才合法 ——
+    拿 v11 去试只会得到"未知顶层字段"，校验器里那几条规则（面名得是标识符、值得是非负
     整数、各面之和要等于 `total_sites`、以及 `total_sites` 要等于 `boundary.syscalls`）
     **一条都碰不到**，那种绿是空转。
 
     这里的数**刻意与 `fixture_v7` 的 `boundary.syscalls`（=3）对上** —— 交叉不变量是
-    v11 独有的那一条，正例里就得先成立，否则测的就不是"自洽"而是"必然报错"。
+    v12 独有的那一条，正例里就得先成立，否则测的就不是"自洽"而是"必然报错"。
     """
-    d = fixture_v10()
-    d["potato"] = "v11"
+    d = fixture_v11()
+    d["potato"] = "v12"
     d["surfaces"] = {"file": 1, "net": 2, "total_sites": 3}
     return d
+
+
+#: v11 的 `port` 那几条规则的反例（`docs/222` §4）。作用在 **v11** 的对象上。
+MUTATORS_V11 = [
+    ("port 缺这一项", lambda d: d.pop("port"), "port 必须是"),
+    ("port 取值拼错", lambda d: d.__setitem__("port", "hosted_nope"), "port 必须是"),
+    ("port 不是字符串", lambda d: d.__setitem__("port", 1), "port 必须是"),
+    # **两条冲突** —— 校验器独立判得了（两个取值都在对象里，不需要读源码）。
+    ("hosted + no_std", lambda d: (d.__setitem__("port", "hosted"),
+                                   d.__setitem__("mode", "no_std")), "不能同时选"),
+    ("hosted + gc_auto_alpha", lambda d: (d.__setitem__("port", "hosted"),
+                                          d.__setitem__("gc", "gc_auto_alpha")),
+     "不能同时选"),
+    # 反面：`hosted` **不**与 `gc_manual` / `gc_auto` 冲突 —— 这一条钉住"别把这一对也拒了"。
+    # 它**不该**报错，所以当合法样本（见 `_cases()`），不在这张反例表里。
+]
+
+
+#: v12 的 `surfaces` 那几条规则的反例（`docs/224`）。作用在 **v12** 的对象上。
+#:
+#: 与 `MUTATORS_V10` 同形，但**多一条 `boundary` 那边没有的**：`surfaces.total_sites`
+#: 必须等于 `boundary.syscalls`。那是 v12 唯一一条**跨字段**的自洽要求 ——
+#: 每个机调用站点落在恰好一个面里，所以两处数的是同一批站点。
+MUTATORS_V12 = [
+    ("surfaces 整个缺掉", lambda d: d.pop("surfaces"), "surfaces 必须是对象"),
+    ("surfaces 不是对象", lambda d: d.__setitem__("surfaces", []),
+     "surfaces 必须是对象"),
+    ("surfaces total_sites 缺掉", lambda d: d["surfaces"].pop("total_sites"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces total_sites 不是整数", lambda d: d["surfaces"].__setitem__("total_sites", "x"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces 面名不是标识符", lambda d: d["surfaces"].__setitem__("no such face", 0),
+     "不是标识符"),
+    ("surfaces 面是负数", lambda d: d["surfaces"].__setitem__("net", -1),
+     "必须是非负整数"),
+    ("surfaces 面不是整数", lambda d: d["surfaces"].__setitem__("net", "x"),
+     "必须是非负整数"),
+    # **自洽**：和数只在分量都合法时才去对。
+    ("surfaces 各面之和对不上", lambda d: d["surfaces"].__setitem__("total_sites", 9),
+     "各面之和"),
+    # **交叉不变量**：和数与 `boundary.syscalls` 各说各话时，校验器读不到源码也判得出打架。
+    # 这一条**故意让和数自洽**（`2+3=5`），这样报的只能是交叉那一条。
+    ("surfaces 与 boundary.syscalls 打架",
+     lambda d: d.__setitem__("surfaces", {"file": 2, "net": 3, "total_sites": 5}),
+     "boundary.syscalls"),
+]
+
 
 
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
@@ -350,34 +414,6 @@ MUTATORS_V10 = [
 ]
 
 
-#: v11 的 `surfaces` 那几条规则的反例（`docs/222`）。作用在 **v11** 的对象上。
-#:
-#: 与 `MUTATORS_V10` 同形，但**多一条 `boundary` 那边没有的**：`surfaces.total_sites`
-#: 必须等于 `boundary.syscalls`（`docs/222` §"交叉不变量"）。那是 v11 唯一一条**跨字段**
-#: 的自洽要求 —— 每个机调用站点落在恰好一个面里，所以两处数的是同一批站点。
-MUTATORS_V11 = [
-    ("surfaces 整个缺掉", lambda d: d.pop("surfaces"), "surfaces 必须是对象"),
-    ("surfaces 不是对象", lambda d: d.__setitem__("surfaces", []),
-     "surfaces 必须是对象"),
-    ("surfaces total_sites 缺掉", lambda d: d["surfaces"].pop("total_sites"),
-     "surfaces.total_sites 必须是非负整数"),
-    ("surfaces total_sites 不是整数", lambda d: d["surfaces"].__setitem__("total_sites", "x"),
-     "surfaces.total_sites 必须是非负整数"),
-    ("surfaces 面名不是标识符", lambda d: d["surfaces"].__setitem__("no such face", 0),
-     "不是标识符"),
-    ("surfaces 面是负数", lambda d: d["surfaces"].__setitem__("net", -1),
-     "必须是非负整数"),
-    ("surfaces 面不是整数", lambda d: d["surfaces"].__setitem__("net", "x"),
-     "必须是非负整数"),
-    # **自洽**：和数只在分量都合法时才去对。
-    ("surfaces 各面之和对不上", lambda d: d["surfaces"].__setitem__("total_sites", 9),
-     "各面之和"),
-    # **交叉不变量**：和数与 `boundary.syscalls` 各说各话时，校验器读不到源码也判得出打架。
-    # 这一条**故意让和数自洽**（`2+3=5`），这样报的只能是交叉那一条。
-    ("surfaces 与 boundary.syscalls 打架",
-     lambda d: d.__setitem__("surfaces", {"file": 2, "net": 3, "total_sites": 5}),
-     "boundary.syscalls"),
-]
 
 
 #: v7 的 `boundary` 那几条规则的反例（`docs/205` R5）。**单独一张表**：
@@ -426,9 +462,15 @@ def test_every_spec_rule_has_a_rejection_case():
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
-    # v11 那一组同理（`surfaces`, docs/222）。
+    # v11 那一组同理（`port`, docs/222 §4）。
     for name, mut, needle in MUTATORS_V11:
         d = fixture_v11()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v12 那一组同理（`surfaces`, docs/224）。
+    for name, mut, needle in MUTATORS_V12:
+        d = fixture_v12()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -602,7 +644,8 @@ def _cases() -> list[tuple[str, dict]]:
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
-                                   ("v10", fixture_v10()), ("v11", fixture_v11())]
+                                   ("v10", fixture_v10()), ("v11", fixture_v11()),
+                                   ("v12", fixture_v12())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -633,11 +676,21 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v10()
         mut(d)
         out.append((f"v10-{name}", d))
-    # v11 那一组（`surfaces`）同理。
+    # v11 那一组（`port`）同理。
     for name, mut, _ in MUTATORS_V11:
         d = fixture_v11()
         mut(d)
         out.append((f"v11-{name}", d))
+    # **`hosted` + `gc_manual` 是合法档**（"要对外、但内存我自己管"）—— 必须**不报错**。
+    # 反例表只钉"该拒的要拒"，钉不住"不该拒的别拒"。
+    _okp = fixture_v11()
+    _okp["port"] = "hosted"
+    out.append(("v11-hosted-gc_manual", _okp))
+    # v12 那一组（`surfaces`）同理。
+    for name, mut, _ in MUTATORS_V12:
+        d = fixture_v12()
+        mut(d)
+        out.append((f"v12-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

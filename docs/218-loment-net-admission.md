@@ -294,10 +294,10 @@ PE 运行时的派发面，从"手写的 21 对 `cmp/jcc`"改成 **`PE_SYSCALLS`
 而"两端说的是不是同一种话"，从此有一个**可以互相验的**答案。
 
 另一半（单元里的调用点按面计数、进 Potato，§7 那三件）**已做**（2026-10-10）：
-Potato **v11** 的 `surfaces` 把同一批机调用站点按面分一分，而
+Potato **v12** 的 `surfaces` 把同一批机调用站点按面分一分，而
 `total_sites` 必须等于 `boundary.syscalls` —— 声明侧的号表与运行时的派发表被判等
 （`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`，实测 22 个号逐条相同）。
-形状、号的表、判据与实测数字都在 **`docs/222`**。
+形状、号的表、判据与实测数字都在 **`docs/224`**。
 
 ### 前人（这一格的）
 

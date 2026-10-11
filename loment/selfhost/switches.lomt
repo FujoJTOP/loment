@@ -134,6 +134,14 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "no_runtime") {
         return true;
     }
+    // 第四维（`docs/222` §4）：`sealed` / `hosted` —— 产物**通不通着世界**。
+    // 与参考实现的 `CORE_DIMS["port"]` 是同一张表；默认 `sealed`（今天的形状）。
+    if sw_tok_is(unit, toks, k, "sealed") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "hosted") {
+        return true;
+    }
     return false;
 }
 

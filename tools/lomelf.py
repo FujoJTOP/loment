@@ -1166,6 +1166,92 @@ class Emitter:
         self.asm.emit(mov_ri32(RDI, 0))
         self.asm.emit(b"\x0F\x05")
 
+    def emit_conscript(self, defined: set[str]) -> None:
+        """**收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
+
+        名字与实现在这里，**表的另一半在 `tools/loment_ports.py`** —— 那边把它判成 `close`，
+        这边把它做出来；两处指的是同一批符号（那是 `docs/219` §5.2 条件二："名字的另一端
+        在我们手里"）。⚠ 改动这一批时**两边一起改**，否则尺子会报"可闭合"而链接器提供不出。
+
+        **为什么是裸机器码而不是 IR**：调用方是**外部 C 对象**，按 System V 传参
+        （`rdi`/`rsi`/`rdx`），而我们自己 IR 定义的函数**实参走栈**。这三个都是叶子函数
+        —— 只用 caller-saved 寄存器、不碰栈、不需要序言 —— 所以既不用给发射器加
+        "C ABI 定义"那一档（那是 `docs/205` C2 的活），也不需要栈帧。
+
+        三条都**不主张**超出 C 标准的语义：`memcpy` 重叠是 UB（所以前向拷贝就够），
+        `memcmp` 只保证符号。
+
+        **优先级**：这几个标签在我们自己的代码**之后、外部对象之前**立起来，而摆对象时的
+        规则是"以先来的为准"（`compile_ll` 里那句 `if nm in em.asm.labels: continue`）——
+        所以**一个自带 `memcpy` 的库，它的那份会被我们盖掉**。这不是疏忽，是 §5.2 条件二：
+        名字的另一端**在我们手里**，"`memcpy` 是什么意思"由我们说了算。
+
+        **内部跳转写成字面字节**（不是 `jcc` + 标签）：这样两侧发的是**同一串字节**，
+        自举侧 (`loment/tools/lomelf.lomt` 的 `emit_conscript`) 不必用它的回填机制 ——
+        而逐字节一致是 `loment_elf_test` 的自举镜像那格在钉的。位移按下面的布局手算，
+        改任何一条指令都要把三处 `rel32`（`0F 84`/`0F 85` 后面那 4 字节）重算。
+        """
+        a = self.asm
+        # memcpy(rdi=d, rsi=s, rdx=n)。布局: test(3) jz(6)=9 | loop@9 … jnz@22(6) | done@28 ret
+        a.label("memcpy")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x13\x00\x00\x00"          # jz done   (28 - 9  = +19)
+               b"\x8A\x06"                          # mov al, [rsi]
+               b"\x88\x07"                          # mov [rdi], al
+               b"\x48\xFF\xC6"                      # inc rsi
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xED\xFF\xFF\xFF"          # jnz loop  (9 - 28  = -19)
+               b"\xC3")                             # ret
+        # memset(rdi=p, esi=v, rdx=n) —— C 的第二个实参是 `int`，低 8 位在 sil。
+        # 布局: test(3) jz(6)=9 | loop@9(9 字节) … jnz@18(6) | done@24 ret
+        a.label("memset")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x0F\x00\x00\x00"          # jz done   (24 - 9  = +15)
+               b"\x40\x88\x37"                      # mov [rdi], sil
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xF1\xFF\xFF\xFF"          # jnz loop  (9 - 24  = -15)
+               b"\xC3")                             # ret
+        # memcmp(rdi=a, rsi=b, rdx=n) -> eax (符号)。
+        # 布局: test(3) jz eq(6)=9 | loop@9 jnz diff@15(6) | jnz loop@30(6) | eq@36 ret | diff@39 ret
+        a.label("memcmp")
+        a.emit(b"\x48\x85\xD2"                      # test rdx, rdx
+               b"\x0F\x84\x1B\x00\x00\x00"          # jz eq     (36 - 9  = +27)
+               b"\x8A\x07"                          # mov al, [rdi]
+               b"\x8A\x0E"                          # mov cl, [rsi]
+               b"\x38\xC8"                          # cmp al, cl
+               b"\x0F\x85\x12\x00\x00\x00"          # jnz diff  (39 - 21 = +18)
+               b"\x48\xFF\xC7"                      # inc rdi
+               b"\x48\xFF\xC6"                      # inc rsi
+               b"\x48\xFF\xCA"                      # dec rdx
+               b"\x0F\x85\xE5\xFF\xFF\xFF"          # jnz loop  (9 - 36  = -27)
+               b"\x31\xC0"                          # xor eax, eax
+               b"\xC3"                              # ret
+               b"\x0F\xB6\xC0"                      # movzx eax, al
+               b"\x0F\xB6\xC9"                      # movzx ecx, cl
+               b"\x29\xC8"                          # sub eax, ecx
+               b"\xC3")                             # ret
+        # ---- malloc / free：**内存那一条不收编，是"划掉"**（`docs/219` §2.1）----
+        #
+        # 它们是一层**换 ABI 的薄壳**，不是一份新分配器：C 按 System V 把实参放在
+        # `rdi`，而我们自己的函数**从栈上取实参**（调用方 `push`、`[rbp+16]` 起）。
+        # 所以壳做三件事：`push rbp` / `push rdi` / `call`，回来清栈再返回。
+        #
+        # **只在堆在的时候发**：底下那两条 `@__loment_alloc` / `@__loment_free` 是我们这份
+        # IR 里的定义（编译器在程序用到 `alloc`/`free` 时发出）。没有它们就没有"我们的堆"——
+        # 那时**不发**，让外部对象的 `malloc` 在链接期响亮地报未定义，而不是发一个悬空调用。
+        if "__loment_alloc" in defined:
+            a.label("malloc")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (size)
+            a.call("__loment_alloc")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
+        if "__loment_free" in defined:
+            a.label("free")
+            a.emit(b"\x55\x57")                  # push rbp; push rdi (ptr)
+            a.call("__loment_free")
+            a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
+
 
 # ------------------------------------------------------------------ ELF 写出
 
@@ -1298,7 +1384,7 @@ PE_SYSCALLS = (
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
 #: 号 → 面。**编译器那一侧有一份同名表**（`lomentc.SURFACE_NUMBERS`，用于把单元里的
-#: 机调用站点按面分类、写进 Potato 的 `surfaces`，`docs/222`）；两份必须**逐条一致**，
+#: 机调用站点按面分类、写进 Potato 的 `surfaces`，`docs/224`）；两份必须**逐条一致**，
 #: 判据 `loment_pe_test::test_surface_table_matches_the_runtime` 钉着它。
 PE_SURFACE_BY_NUMBER = {num: surface for num, surface, _label in PE_SYSCALLS}
 
@@ -3285,6 +3371,21 @@ def load_foreign(path: Path):
 #: System V AMD64 整数实参寄存器 (我们**自己的**约定是实参走栈, 这一套只给 extern 调用点)。
 C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 
+#: **链接器今天真正发出的收编面**（`docs/219` §6 第 1 条）。`Emitter.emit_conscript`
+#: 发的那几个名字 —— 与 `loment/tools/lomelf.lomt` 的 `emit_conscript` 同序同字节。
+#:
+#: ⚠ 它是 `tools/loment_ports.py` 的 `PROVIDE` 的**子集**，而这件事有一条判据钉着
+#: （`loment_ports_test::test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set`）：
+#: 尺子说"可闭合"而链接器发不出来，那条产物就会在链接期报"未定义的符号"，
+#: **与表上的话正好相反**。反过来不要求 —— 表里还有一批**尚未实现**的
+#: （`calloc` / `realloc` / `strlen` / `__udivdi3` …），那是 S1d/S1e 的活。
+#:
+#: ⚠ `malloc` / `free` 多一条条件：**堆在才发** —— 它们是一层"换成 C ABI"的薄壳，
+#: 底下调的是 `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1）。没有堆就没有
+#: "我们的堆"可指，发了会悬着一个未定义的调用。判据是**我们这份 IR 里有没有那两条定义**
+#: （`funcs` 的名字），不是文本里出现过那个名字。
+CONSCRIPT = ("memcpy", "memset", "memcmp", "malloc", "free")
+
 
 def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     objects = objects or []
@@ -3333,6 +3434,12 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
     em.emit_entry_stub("_start")
     for f in funcs:
         em.emit_func(f)
+    # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
+    # 于是它们**不再是未定义符号** —— 从表上划掉。粒度是"有没有外部对象"，不是
+    # "有没有人要它"：精确到后者要链接器先算出需求集，自举侧 `lomelf.lomt` 一次只驻留
+    # 一个对象，那一格留到下一轮（`docs/219` §8b）。**测量不受影响** —— 那始终是尺子的活。
+    if objects:
+        em.emit_conscript({f.name for f in funcs})
     # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
     #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
     #   ② **建符号表**: 把我们自己的标签与所有对象的导出符号合成一张表。**必须先全摆完**:
