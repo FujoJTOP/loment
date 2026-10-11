@@ -827,7 +827,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "d290f3e31e5a8df00984d75beec2e2f1eedb72e97a61b146ec0aec94c937a78c"
+   "sha256": "75aae18c0d1aad4f3dd2165c78914aac7e667ea10723382850bc26b5aa6439bd"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1987,7 +1987,7 @@
   },
   {
    "path": "docs/210-loment-gc-design.md",
-   "sha256": "140a1cb957b0885d7568db7630c0e5dcb0daac3fd8d25498367cbae9c353a34e"
+   "sha256": "885246aa21b17854d6f5720952857641df4c1e4461fe5582f2023f922603ad2e"
   },
   {
    "path": "docs/211-c-surface-grammar-sweep.md",
