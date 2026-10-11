@@ -6010,6 +6010,7 @@ lc:
 done:
   ret i32 %acc
 }
+
 ");
     }
     return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
