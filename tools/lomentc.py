@@ -3366,7 +3366,28 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
 
     后缀来自 `loment.conf`（`source_ext_of`），默认 `.lomt`；每层都按 `_ext_chain` 的顺序
     试（自定义后缀优先，再兜默认），所以项目换后缀不会把工具链自带的模块弄丢。
+
+    ---- **渠道闸（`libl`）**（`docs/232` §1.1）
+
+    **发行版里 `use libl` 是错误**（用户 2026-10-12：「LibL 仍然在仓库中，和 LVM 一样发行
+    再锁」）。与 `check()` 里那条 `choose vm` 的闸**同形**：读同一个渠道常量，打包期只换
+    那一行；dev 放行、发行版点名拒。
+
+    **为什么闸在名字解析这一层**：被锁的是**一个名字能不能取到**，那是装载器的事 ——
+    `check()` 那层手上只有 token 流，判"这个单元 `use` 过谁"要另做一趟全量扫描。
+    自举侧同一个位置是 `driver.lomt` 的 `use` 分支（`resolve_use_name` 的调用点），
+    两边因此落在同一层、报文也对得上。
     """
+    # 只闸**名字形式**：路径形式（`use "…/libl.lomt"`）与"把文件拷进自己项目"都绕得过去
+    # —— 那与那四份面本身可用是一回事（它们经 `use std` 本来就在）。这条边界写进
+    # `docs/232` §1.1，不假装它堵得住。
+    if loment_channel.RELEASE and name == "libl":
+        raise LomError(
+            1, 1,
+            "发行版不含 `libl` 入口 —— `use libl` 只在**开发通道**可用。"
+            "LibL 是这个标准库的**名字**，那四张脸（string/ctype/stdlib/stdio）在发行版里"
+            "经 `use std` 或按名 `use string` 都还在。"
+            "**修法**：改用 `use std`（或按需 `use string` 等），或换本仓的工具链来开发它")
     exts = _ext_chain(ext)
     stores = store_roots(root, tool_dir)
 
@@ -3818,6 +3839,25 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             f"这一档今天还没有引擎：字节码与解释器都还没写（`docs/231` §1.3），"
             f"所以发行版里它只能是一句拿不到的承诺。"
             f"**修法二选一**：删掉这一行（回到默认的 `no_vm`），"
+            f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
+
+    # **渠道闸（对外端口）**：`hosted` 那一维要的是**真 libc / 真共享库**（`docs/222` §4）。
+    # 那条路还没完工 —— 机制在，但 `docs/219` §8b 的 S2 还差三件（堆太小、堆只在程序自己
+    # 分配时才发、某个成员的数据/重定位还有残留缺陷），所以发行版里它只能是一句**拿不到的
+    # 承诺**。与上面 `vm` 那条同一个闸、同一个理由：**承诺落空比拒绝更坏，发行版说"不"**。
+    #
+    # 用户 2026-10-12：「锁掉 LibC，在 0.1.4.5（即将发布）中不可调用 LibC，因为这尚未完工」。
+    # 两扇门都要关：这一条关**声明的门**（`choose hosted`），`--link` 那扇由链接器自己关
+    # （带未定义符号的外源对象默认被拒，`tools/lomelf.py` 与自举侧同一口径）。
+    #
+    # **次序**：排在 `vm` 那条**之后** —— 自举侧 `checker.lomt` 里两条闸的先后就是这个次序。
+    if _eff["port"] == "hosted" and loment_channel.RELEASE:
+        _ln = next((l for _d, _w, l in reversed(mod.choose_lines) if _w == "hosted"), 1)
+        errs.append(
+            f"{_ln}: 发行版不含对外端口 —— `choose hosted` 只在**开发通道**可用。"
+            f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，`docs/219` §8b 的 "
+            f"S2 还差三件），所以发行版里它只能是一句拿不到的承诺。"
+            f"**修法二选一**：删掉这一行（回到默认的 `sealed`），"
             f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
 
     for d in deps:

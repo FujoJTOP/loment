@@ -187,7 +187,8 @@ Loment @DISPLAY@  (@VERSION@)
   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-                              --hosted: link against the host's real libraries (docs/222)
+                              --hosted: link against the host's real libraries (docs/222);
+                                        dev channel only -- a release build refuses it
   loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile, link and run
   loment fmt FILE             format (prints the formatted text)
@@ -359,6 +360,20 @@ case "${1:-help}" in
         if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
             hosted=1
         fi
+        # ---- channel (@CHANNEL@, docs/222 sec 4). A release build has no open ports: real
+        # libc and real shared libraries are **not available in 0.1.4.5** - that path is not
+        # finished (docs/222 sec 4, docs/219 sec 8b), and a promise nobody can keep is worse
+        # than a refusal. So refuse by name here, and pass no port flag to the linker below:
+        # its own default is "refuse a ported object", which is what makes the lock hold.
+        portarg=
+        if [ "@CHANNEL@" = "dev" ]; then portarg=--allow-ports; fi
+        if [ "@CHANNEL@" = "release" ] && [ -n "$hosted" ]; then
+            echo "loment: this is a release build: open ports to the world (real libc, real" >&2
+            echo "        shared libraries) are not available - that path is unfinished and is" >&2
+            echo "        not part of 0.1.4.5 (docs/222 sec 4, docs/219 sec 8b)." >&2
+            echo "        To work on it, use the toolchain in the repository." >&2
+            exit 2
+        fi
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
         # say it instead of silently dropping the flags (docs/222 sec 4.1).
@@ -404,11 +419,11 @@ LOMENT_LIBCALLS_EOF
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
                 # shellcheck disable=SC2086
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
             fi
         elif [ ${#links[@]} -gt 0 ]; then
             # shellcheck disable=SC2086
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
         else
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
         fi
@@ -561,6 +576,11 @@ set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
 set "linkargs="
+rem Channel (@CHANNEL@, docs/222 sec 4): in a release build the world-port door is shut, so
+rem nothing extra is passed and lomelf's own default - refuse an object that carries
+rem undefined symbols - is what holds. `dev` passes the flag that opens it.
+set "portarg="
+if "@CHANNEL@"=="dev" set "portarg=--allow-ports"
 set "cnc="
 set "com="
 shift
@@ -648,7 +668,7 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs%
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs% %portarg%
 if not "%ERRORLEVEL%"=="0" goto fail
 goto done
 
@@ -659,7 +679,7 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs%
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs% %portarg%
 if not "%ERRORLEVEL%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
@@ -723,7 +743,8 @@ echo                               --max N: render at most N (default 20; 0 = al
 echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
 echo                               compile and link; --link adds a foreign object (FFI)
 echo                               --opt: optimize with clang -O2 (ELF only)
-echo                               --hosted: link the host's real libraries (ELF only)
+echo                               --hosted: link the host's real libraries (ELF only;
+echo                                        dev channel only -- a release build refuses it)
 echo   loment run FILE [--opt] [--hosted]
 echo                               compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
@@ -1825,10 +1846,12 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     idx = 1 if kind == "windows" else 0
     for name, pair in bins.items():
         files[f"bin/{name}{'.exe' if kind == 'windows' else ''}"] = (pair[idx], 0o755)
-    files["bin/loment"] = (_subst(LAUNCHER_SH).encode("ascii"), 0o755)
+    # 包里那份启动器是**发行版渠道**的（`docs/222` §4 的端口门）：`--hosted` 与端口标记
+    # 点名拒、不给链接器传 `--allow-ports`。开发通道用 `LAUNCHER_SH` 本体（判据里的桩包）。
+    files["bin/loment"] = (_subst(LAUNCHER_SH, "release").encode("ascii"), 0o755)
     if kind == "windows":
         # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
-        files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD)).encode("ascii"), 0o755)
+        files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD, "release")).encode("ascii"), 0o755)
     files["share/loment/version"] = (version_text().encode(), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     for ex in EXAMPLES:
@@ -1860,9 +1883,21 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     return files
 
 
-def _subst(text: str) -> str:
+def _subst(text: str, channel: str = "dev") -> str:
+    """把模板里的占位符换掉。**默认 `dev`** —— 于是老调用点（判据里的桩包）行为不变。
+
+    `channel` 只喂 `@CHANNEL@`（`docs/222` §4 的**端口门**，2026-10-12 用户定）：
+
+    * `dev`：`--hosted` 那条路照旧，链外源对象时给链接器传 `--allow-ports`（那扇门在开发
+      通道是开的）；
+    * `release`：`--hosted` / 端口标记**点名拒**，且**一个标志都不传** —— 链接器的默认
+      就是"拒"，于是"发行版里 libc 不可调用"不靠启动器记得做什么，靠默认值本身。
+
+    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。
+    """
     return (text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
-            .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS))
+            .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS)
+            .replace("@CHANNEL@", channel))
 
 
 def _crlf(text: str) -> str:
@@ -2146,10 +2181,10 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
         "LICENSE": _read(LICENSE),
     }
     if kind == "linux":
-        out["bin/loment"] = _subst(LAUNCHER_SH).encode("ascii")
+        out["bin/loment"] = _subst(LAUNCHER_SH, "release").encode("ascii")
         out["install.sh"] = _subst(INSTALL_SH).encode("ascii")
     else:
-        out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD)).encode("ascii")
+        out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD, "release")).encode("ascii")
         # 安装脚本也是**模板直出**的 —— 改了模板不重打包, 归档里就是旧的, 而
         # `--check` 原先照样绿 (2026-09-16 加 store 时踩到: 改完 INSTALL_SH 才发现)。
         out["install.ps1"] = _crlf(_subst(INSTALL_PS1)).encode("ascii")

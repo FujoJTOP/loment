@@ -3321,6 +3321,18 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     test_rax()
     jcc_l("e", "__ws_ek_badfd")
     st(RSP, 0x48, RAX)                          # 实例
+    # **先验 op**（Linux 的顺序：op 不认识就 EINVAL，与那个 fd 登记没登记无关）——
+    # 放到后面去会让"op 不认识 + fd 已登记"落进 MOD 分支、返回 0（实测撞出来的）
+    ld(RAX, RSP, 0x30)
+    cmp_eax(1)
+    jcc_l("b", "__ws_ek_opbad")
+    cmp_eax(3)
+    jcc_l("a", "__ws_ek_opbad")
+    jmp_l("__ws_ek_opok")
+    a.label("__ws_ek_opbad")
+    movi(RAX, -22)                              # EINVAL
+    jmp_l("__ws_ret")
+    a.label("__ws_ek_opok")
     ld(RDI, RSP, 0x38)
     a.call("__ws_sock_of_fd")
     test_rax()
@@ -5079,7 +5091,8 @@ CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 _TLS_SIZE = 256
 
 
-def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
+def compile_ll(text: str, objects: list | None = None,
+               allow_ports: bool = False) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
@@ -5097,6 +5110,26 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
             if isinstance(a, Archive):
                 flat += a.select(need)
         objects = flat
+    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。带**未定义符号**的外源
+    # 对象就是"这份产物有通向世界的端口"（`docs/222` §4 那一维的价），而那条路 —— 真 libc /
+    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2 还差三件），所以链接器**默认不收**，
+    # 只有显式 `--allow-ports` 才收（开发通道与判据用它；启动器只在 dev 传它）。
+    #
+    # **自闭合的对象不受影响**：没有未定义符号 ⇒ 走不过这一条。那正是 `docs/173` 一直在发
+    # 的 FFI 形状，`docs/177` 那 10 个语言全在它上面 —— 这扇门关的是 libc，不是 FFI。
+    #
+    # 判据是 `objects` 里那批对象的 `undefined`（归档在这一步之前已经按定点挑完成员，
+    # 所以挑中的成员也在这里面）。名字排序只为**报文稳定**，与谁提供什么无关。
+    if not allow_ports:
+        ported = sorted({nm for o in objects for nm in o.undefined})
+        if ported:
+            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "")
+            raise Unsupported(
+                f"外源对象带了未定义符号（通向世界的端口）：{shown} —— 链接器默认不收。"
+                f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，"
+                f"`docs/219` §8b 的 S2 还差三件），0.1.4.5 里它是关着的。"
+                f"开发通道要它得显式写 `--allow-ports`；"
+                f"自闭合的对象（没有未定义符号）不受这条影响")
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -5251,6 +5284,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
         return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
+    allow_ports = False
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -5264,6 +5298,9 @@ def main(argv: list[str] | None = None) -> int:
             target = argv[i]
         elif a == "--check":
             check = True
+        elif a == "--allow-ports":
+            # 开发通道专用（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
+            allow_ports = True
         elif a == "--link":
             i += 1
             link.append(Path(argv[i]))
@@ -5272,7 +5309,7 @@ def main(argv: list[str] | None = None) -> int:
         i += 1
     if len(files) != 1 or target not in ("elf", "pe"):
         print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
-              " [--link OBJ.o ...]", file=sys.stderr)
+              " [--link OBJ.o ...] [--allow-ports]", file=sys.stderr)
         return 2
     if link and target == "pe":
         print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
@@ -5281,7 +5318,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         objs = [load_foreign(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
-            src.read_text(encoding="utf-8"), *(() if target == "pe" else (objs,)))
+            src.read_text(encoding="utf-8"),
+            *(() if target == "pe" else (objs, allow_ports)))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1

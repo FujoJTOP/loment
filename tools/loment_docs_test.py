@@ -149,6 +149,44 @@ def test_fix_renumbers_only_the_newly_added_doc():
 
 
 @test
+def test_fix_ignores_collisions_that_are_already_on_the_base():
+    """**base 上本来就有的撞号，不该让这一次改号判成失败。**
+
+    这是第一版**真的错过的**形状（2026-10-12 拿一次真推检验出来的）：base 上已经有一对撞号
+    （212 那一类，实测 main 上有 7 个），我又新加一份撞同一号的文档 —— `--fix` 把**新那份**
+    改号改对了，可它随后去查**整棵树**的重号，撞上 base 那对，于是自判失败退 1。
+    机器人于是**每一次推都红**，而它明明已经把该改的改好了。
+
+    钉住两件事：① 退 0；② base 上那一对**一个都没动**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        def git(*a):
+            r = subprocess.run(["git", "-C", str(root)] + list(a),
+                               capture_output=True, text=True, errors="replace", shell=False)
+            assert r.returncode == 0, f"git {a}: {r.stderr[:200]}"
+            return r.stdout
+
+        git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+        docs = root / "docs"; docs.mkdir()
+        # base 自己就带着一对撞号 —— 既成事实，这一趟不归它管
+        (docs / "001-a.md").write_text("# 1 · a\n", encoding="utf-8", newline="\n")
+        (docs / "001-b.md").write_text("# 1 · b\n", encoding="utf-8", newline="\n")
+        git("add", "-A"); git("commit", "-q", "-m", "base")
+        base = git("rev-parse", "HEAD").strip()
+
+        (docs / "001-c.md").write_text("# 1 · c\n", encoding="utf-8", newline="\n")
+        git("add", "-A"); git("commit", "-q", "-m", "add c")
+
+        rc = D.main(["--fix", "--base", base, str(root)])
+        assert rc == 0, f"这一趟该退 0（base 那对不归它管），得到 {rc}"
+        names = sorted(p.name for p in docs.iterdir())
+        assert names == ["001-a.md", "001-b.md", "002-c.md"], f"只该动 c，得到 {names}"
+        assert set(D.duplicates(root)) == {1}, "base 那对撞号该**原样留着**，不该被顺手改掉"
+    print("      base 上既有的撞号不影响本次改号（退 0，且那对没被动）")
+
+
+@test
 def test_fix_refuses_when_the_base_is_unreachable():
     """**取不到 base 就不改号** —— 不确定时改号比不改更坏（改错是静默的）。"""
     with tempfile.TemporaryDirectory() as t:

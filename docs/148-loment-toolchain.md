@@ -12,6 +12,15 @@
 ## 0.1 语法高亮（`editors/vscode/syntaxes/`）
 
 两套 TextMate 语法：`loment.tmLanguage.json`（`.lomt`）与 `lom.tmLanguage.json`（`.lom`）。
+**2026-10-12 又加了七套**：`loment-<规范名>.tmLanguage.json`（c / cpp / java / csharp / go /
+python / natural）—— 一份源的文件头写了 `choose write grammar <别名>` 时用它们，规则只有两条
+（认那行声明 + `include` 宿主的 `source.c` / `source.python` / …），设计与理由见 `docs/235`。
+同一天把主语法补到当时的语言面：`choose write grammar` 声明、`set choose` / `choose` /
+`addin` / `command` / `foruse` / `register`（**按形状认，不按词认** —— 这几个词不是保留字，
+写成裸关键字会把 `let set: u32` 也染色）、核心维取值、内建 `syscall7`；并摘掉四条**不是内建**的
+`load16/load32/store16/store32`（那是 `loment/examples/bytes.lomt` 里的普通函数）与两个
+**不是类型**的 `usize`/`isize`（实测 `-> usize` 报"返回类型 usize 未声明"）。
+
 2026-09-11 做了一次"彻底"扫：**用 VS Code 同款引擎**（TextMate + Oniguruma）把语法跑成
 scope 流逐 token 核对，补掉了这些盲区：
 
