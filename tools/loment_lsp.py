@@ -104,11 +104,17 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     params = msg.get("params") or {}
     rid = msg.get("id")
     if method == "initialize":
+        # `completionProvider: {}` = "支持补全，但**没有触发字符**"。
+        #
+        # #28：原先登的是 `{"triggerCharacters": [".", ":"]}`，而补全**不看位置**
+        # （`p.` 后面回来的还是一屏关键字）——于是每敲一个点就弹一屏没用的东西，
+        # 读起来就是坏的。成员补全没实现之前，**不广告触发字符**才是诚实的那一半
+        # （issue 自己指的那条路）。手动 Ctrl+Space 照旧可用。
         return [{"jsonrpc": "2.0", "id": rid, "result": {
             "capabilities": {"textDocumentSync": 1,
                              "definitionProvider": True,
                              "documentFormattingProvider": True,
-                             "completionProvider": {"triggerCharacters": [".", ":"]}},
+                             "completionProvider": {}},
             "serverInfo": {"name": "loment-lsp", "version": "0.2"}}}]
     if method in ("textDocument/didOpen", "textDocument/didChange"):
         td = params.get("textDocument") or {}

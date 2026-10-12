@@ -42,8 +42,8 @@ SH_REL = "loment/bootstrap.sh"
 #: `lomentc.load` 内部是**调用时才** `from potato_from import front_door`，
 #: 所以换掉 `potato_from.front_door` 就够 —— 编译器一个字节都不用碰。
 CHANNEL_FILE = "loment/selfhost/checker.lomt"
-CHANNEL_LINE_DEV = "const LOMENT_CHANNEL: u32 = 0;"
-CHANNEL_LINE_RELEASE = "const LOMENT_CHANNEL: u32 = 1;"
+CHANNEL_LINE_DEV = "pub const LOMENT_CHANNEL: u32 = 0;"
+CHANNEL_LINE_RELEASE = "pub const LOMENT_CHANNEL: u32 = 1;"
 
 
 def _front_door_for(channel: str):
