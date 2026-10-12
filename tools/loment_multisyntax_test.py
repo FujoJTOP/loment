@@ -468,8 +468,10 @@ def _run_with(td: Path, iface: Path, objs: list[Path], exit_want: int, fname: st
     deps = lomentc.resolve_deps(mod, ROOT, main.parent, entry=main)
     errs = lomentc.check(mod, deps=deps)
     assert not errs, errs
+    # `allow_ports=True`：外源语法编出来的那些 `.o` 是**真的外源对象**，链接器默认会因为
+    # "可能带端口"而拒（`docs/222` §4 的门）；这条要测的是"七门语法跑同一条管线"。
     blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps),
-                               [lomelf.load_foreign(p) for p in objs])
+                               [lomelf.load_foreign(p) for p in objs], allow_ports=True)
     exe = td / "ms.elf"
     exe.write_bytes(blob)
     r = subprocess.run(["wsl", "-e", "bash", "-lc",

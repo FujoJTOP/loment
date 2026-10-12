@@ -31,7 +31,10 @@
 Loment compiles to native x86-64 executables — Linux ELF, Windows PE, or a freestanding
 object for bare metal. **What goes into one is the program's decision, and the build records
 it.** `choose sealed`, the default, is an artifact with no runtime, no libc and no undefined
-symbols. `choose hosted` is one that may link against real libc and shared libraries. The
+symbols. `choose hosted` — the path to real libc and shared libraries — **is not finished and a
+release build refuses it**; the development channel is where it is being built, and an artifact
+that carries undefined symbols is refused by the linker by default ([docs/222](docs/222-lompi-020-foreign-libs.md)
+sec 4.5). The
 toolchain is itself written in Loment and needs no Python to run. Its own syntax is
 Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go or Python.
 
@@ -108,7 +111,7 @@ source?** Three things carry it:
 |---|---|
 | **Capability domains** | `capability blk : disk[0..4]` declares the range a unit may reach and `guard blk(i);` checks the index against it — at compile time when the index is a literal, otherwise at run time, where an out-of-range index traps. [docs/146](docs/146-loment-capability-semantics.md) states the boundary rather than glossing it: a guard bounds the *index*, not the *subject*. |
 | **Potato form objects** | Every unit exports a declared, machine-readable summary of what it contains and what it reaches, judged by two independent validators — so "what can this touch" is answerable without reading the source. [docs/147](docs/147-potato-v1-spec.md) |
-| **A compat layer** | Ten languages, two mechanisms: C, C++, Rust and Zig behind the C ABI; Go, Python, Java, JavaScript, Perl and Lua over a process bridge. Where the boundary sits is worth stating precisely. On a **sealed** artifact, `--link` takes only a **self-contained** object — no undefined symbols. `choose hosted` is the path that reaches real libraries, and it is exercised: the criteria link libstdc++ and libz and embed CPython. What is **not** there is the **library system** — lompi still installs `.lomt` sources only, so a real C library is not yet an installable dependency, and that is what [docs/222](docs/222-lompi-020-foreign-libs.md) is building. [docs/173](docs/173-loment-ffi.md) is the ledger. |
+| **A compat layer** | Ten languages, two mechanisms: C, C++, Rust and Zig behind the C ABI; Go, Python, Java, JavaScript, Perl and Lua over a process bridge. Where the boundary sits is worth stating precisely. `--link` takes a **self-contained** object (relocations are applied, and objects may reference each other); one that carries **undefined symbols** — `printf`, `malloc` — is **refused by default**. `choose hosted`, the dimension that reaches real libraries, is **not available in a release build**: that path is unfinished, so the release toolchain refuses `choose hosted` and keeps that door shut, while the development channel is where it is built and exercised — the criteria there link libstdc++ and libz and embed CPython. What is **not** there either is the **library system** — lompi still installs `.lomt` sources only, so a real C library is not yet an installable dependency, and that is what [docs/222](docs/222-lompi-020-foreign-libs.md) is building. [docs/173](docs/173-loment-ffi.md) is the ledger. |
 
 The rest of the language exists to keep that question answerable. The core stays small; what
 grows is the layer around it ([docs/175](docs/175-loment-014-direction.md)).

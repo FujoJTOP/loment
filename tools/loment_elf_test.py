@@ -895,13 +895,21 @@ def test_l1_definite_lifetime_bounds_the_heap():
           f"manual 耗尽 (rc={got[1]}) —— 定活是真的")
 
 
-def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
+def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (),
+                ports: bool = True) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
     stdout 与退出码不混在一个流里: 先让它跑, 再单独 `echo -n $?` (与 `_run_bin` 同一条纪律)。
+
+    `ports=True`（默认）时带对象就补 `--allow-ports`（`docs/222` §4 的端口门）：链接器
+    **默认拒**带未定义符号的外源对象，判据要在开发通道上跑那条还没完工的路，得显式把门
+    放开。没有对象就不传 —— 这样"不带对象"的那些调用逐字节仍是老样子。`ports=False`
+    是给**门本身**那条判据用的（同一份对象、不给开关 ⇒ 必须拒）。
     """
     tag = f"{_T}lomelf_m.bin"
     extra = "".join(f" --link {x}" for x in links)
+    if links and ports:
+        extra += " --allow-ports"
     script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
               f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
@@ -1390,7 +1398,8 @@ def test_lomelf_selfhost_links_foreign_object():
             ll = _ref_ir(src, td)
             want, _info = lomelf.compile_ll(
                 ll.read_text(encoding="utf-8"),
-                [lomelf.ForeignObject(objs[s]) for s in order])
+                [lomelf.ForeignObject(objs[s]) for s in order],
+                allow_ports=True)     # 开发通道：这几份 C 都带端口（docs/222 §4 的门）
             # 外部对象与 IR 都要放成**仓库内相对路径** —— 镜像在 WSL 里按相对路径找。
             llrepo = bld / f"_mirror_{tag}.ll"
             elfrepo = bld / f"_mirror_{tag}.elf"
@@ -1413,6 +1422,46 @@ def test_lomelf_selfhost_links_foreign_object():
                     p.unlink(missing_ok=True)
     print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳/数据节): "
           f"与参考逐字节相同, 退出码 " + " / ".join(str(c[4]) for c in cases))
+
+
+@test
+def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
+    """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
+    `--allow-ports` 就**必须拒**。
+
+    参考侧那条在 `loment_ffi_test::test_the_port_gate_refuses_by_default_...`；这一条是它
+    的孪生。**为什么非要有**：包里装的是**自举**那一只链接器 —— 只有它也拒，
+    "0.1.4.5 里 libc 不可调用"才是真的。参考拒、自举收，是最坏的那种分叉。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    td = Path(tempfile.mkdtemp(prefix="mf_"))
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    tag = "portgate"
+    src = td / f"{tag}.lomt"
+    src.write_text(ffitest.LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+    ll = _ref_ir(src, td)
+    (td / "cons.c").write_text(ffitest.C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+    assert ffitest.compile_c(_clang(), td / "cons.c", td / "cons.o") == 0
+    llrepo = bld / f"_mirror_{tag}.ll"
+    elfrepo = bld / f"_mirror_{tag}.elf"
+    objrepo = ROOT / f"loment/build/_mirror_{tag}_cons.o"
+    try:
+        llrepo.write_bytes(ll.read_bytes())
+        objrepo.write_bytes((td / "cons.o").read_bytes())
+        rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
+                              f"loment/build/_mirror_{tag}.elf",
+                              (f"loment/build/_mirror_{tag}_cons.o",), ports=False)
+        assert rc != 0, (
+            "自举链接器**没有**端口门 —— 带未定义符号的对象照收，于是包里的 "
+            "`loment build --link` 又把 libc 放进来了（`docs/222` §4）")
+        print("      自举链接器：不给 --allow-ports 就拒带端口的对象")
+    finally:
+        for p in (llrepo, elfrepo, objrepo):
+            p.unlink(missing_ok=True)
 
 
 def main() -> int:
