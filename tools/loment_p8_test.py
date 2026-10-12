@@ -30,9 +30,9 @@ _T = f"/tmp/loment-{os.getpid()}-"
 
 # ---------------------------------------------------------------- 结果复用
 #
-# 这套判据里最贵的一件事是"同一个二进制编译同一个大单元": 交叉编出来的 ELF 建在 `-O0`
-# 上 (`_build_linux_elf` 不给优化开关, clang 的默认就是它), 于是驱动编译 `driver.lomt`
-# 要 ~55s, 而**同一件事**在几个判据里各跑一遍 —— 全套 635s 里有 ~290s 落在这一项上。
+# 这套判据里最贵的一件事是"同一个二进制编译同一个大单元": 驱动编译 `driver.lomt`
+# 本身就要 ~55s（`-O0`）/~9s（`-O1`，见 `_build_linux_elf`）, 而**同一件事**在几个判据
+# 里各跑一遍 —— 全套里最大的一项开销就落在这一项上。
 #
 # 缓存只用在"输入确定 ⇒ 输出确定"的计算上, 三条边界把它框住:
 #
@@ -1276,6 +1276,37 @@ def _wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
+#: `-O1` 的 loop-idiom 把逐字节拷贝的循环认成 `memmove` 调用, 而 `-nostdlib` 的链接里
+#: 没有它 (报 `undefined symbol: memmove`, 且**只缺这一个**)。补一个最小的实现即可 ——
+#: 写错了不会悄悄换个产物: 判据比的是产物与参考**逐字节相同**, 抄错一步当场红。
+_MEM_STUB = """\
+void *memmove(void *d, const void *s, unsigned long n) {
+    unsigned char *dd = d; const unsigned char *ss = s;
+    if (dd < ss) { for (unsigned long i = 0; i < n; i++) dd[i] = ss[i]; }
+    else { for (unsigned long i = n; i > 0; i--) dd[i - 1] = ss[i - 1]; }
+    return d;
+}
+"""
+
+
+def _mem_stub() -> Path:
+    """`-O1` 的 ELF 要的 `memmove` (见上); 编一次, 复用。"""
+    hit = _BUILT.get("memstub")
+    if hit is not None and hit.exists():
+        return hit
+    c = _CACHE_DIR / "memstub.c"
+    c.write_text(_MEM_STUB, encoding="utf-8")
+    o = _CACHE_DIR / "memstub.o"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "--target=x86_64-unknown-linux-gnu", "-ffreestanding", "-fno-builtin", "-O0",
+         "-c", "-o", str(o), str(c)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["memstub"] = o
+    return o
+
+
 def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
     """IR -> x86_64 Linux ELF (无 libc, `_start` 即入口) —— 从 Windows 交叉编译。
 
@@ -1283,6 +1314,11 @@ def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
     驱动二进制 (m83 的 elf1 与 elf2、语料判据、perf 判据各建一份), 这里让它们指向同一
     个文件 —— 也就是让"用同一份 IR"这件事在**字节层面**成立, 而不是靠两个路径都叫
     "驱动"。
+
+    **`-O1`**: 原先不给优化开关, clang 的默认 `-O0` 就是它。这个二进制是这一整套判据里
+    反复跑的那个, 而同一个二进制在 `-O1` 下**快 6.3 倍** (驱动编译自身: 本机 5 次采样
+    54.45–57.53s vs 8.65–9.28s), 产物与 `-O0` **逐字节相同** —— 判据比的正是那份产物,
+    优化级别只决定跑得多快。
     """
     key = _digest(ll_text.encode("utf-8"))
     hit = _BUILT.get(f"elf:{key}")
@@ -1294,7 +1330,7 @@ def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+         "-static", "-fuse-ld=lld", "-O1", "-o", str(elf), str(ll), str(_mem_stub())],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-500:]
     _BUILT[f"elf:{key}"] = elf
@@ -1976,6 +2012,15 @@ def test_m86_selfhost_perf_budget():
     自举侧涨 2.7x, 差距正是上面那条超线性曲线。真正的修法是给那几处查找加索引
     (**独立的一件事**, 没有做), 在那之前护栏只能跟着单元规模走。它仍然报数,
     所以"忽然又慢一倍"这种真回归照样看得见。
+
+    **2026-10-12 护栏从 90s 降到 20s —— 这条与上面几次方向相反, 理由也不同**:
+    上面几次是"线没动, 单元长大了"; 这一次是**被测的那个二进制换了优化级别** ——
+    `_build_linux_elf` 从 clang 默认的 `-O0` 改成 `-O1` (同一份 IR 从 54.5s 降到
+    8.65s, 本机 5 次采样 8.65–9.28s, 产物与 `-O0` 逐字节相同)。线不动才是错的:
+    90s 之下, 这条判据要等到自举侧**慢 10 倍**才响, 那已经不是绊线了。
+    20s ≈ 实测的 2.3 倍, 仍罩得住这条判据自己记录过的最大争抢膨胀 (1.9 倍,
+    见上面 42.3s -> 81s 那次), "忽然又慢一倍"照样看得见。
+    上面表格里那些 `-O0` 的数不再与本判据直接可比, 但作为**超线性曲线**的记账保留。
     """
     if not (_wsl() and _clang()):
         print("      SKIP: 需要 WSL + clang")
@@ -2003,16 +2048,16 @@ def test_m86_selfhost_perf_budget():
         #: （见本函数头注），所以"时间涨了"要先问"单元是不是也涨了"。不印这个数，
         #: 下一个人只看到时间变了，分不清是回归还是规模。
         n_fn = len(re.findall(r"^define ", ll.read_text(encoding="utf-8"), re.M))
-        #: **60 → 90（2026-10-10）**。理由与 2026-09-21 那次 30 → 60 **同一条**：
-        #: 破的不是"谁变慢了"，是**单元规模** —— 446 个函数时 42.3s，现在 **604 个函数**
-        #: （`runtime` 维兑现 + 自适应收集器 + 第四维 `port` 都加了代码），单独跑实测 59.33s，
-        #: 而护栏 60s 只剩 ~1% 余量 ⇒ **在 CI 上随机翻红**（同一棵树上后台有活时实测 63.6s）。
-        #: **它仍然是绊线，不是预算**：90s 之下，"忽然又慢一倍"照样看得见。
+        #: **90 → 20（2026-10-12）**：与上面几次**方向相反** —— 不是单元长大了，是
+        #: ELF 换了优化级别（`-O0` → `-O1`，见 `_build_linux_elf`：同一份 IR 54.5s → 8.65s，
+        #: 产物逐字节相同）。线不动才是错的：90s 之下要等自举侧慢 10 倍才响。
+        #: 20s ≈ 实测的 2.3 倍，仍罩得住本判据记录过的最大争抢膨胀（1.9 倍）。
+        #: **它仍然是绊线，不是预算**：20s 之下，"忽然又慢一倍"照样看得见。
         #: 真正的修法没变 —— 给 `chk_lookup_slot` / `find_fn` 加索引，那件事仍然没做。
-        budget = 90.0
+        budget = 20.0
         assert best <= budget, (
             f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s ({n_fn} 个函数; "
-            f"446 个函数时基线 42.3s)")
+            f"-O1 下 618 个函数时基线 8.65s)")
         print(f"      自举自编译: {best:.2f}s / {n_fn} 个函数 (护栏 {budget:.0f}s; "
               f"参考实现 Python 1.7s, WSL 基线 {base:.2f}s)")
 
