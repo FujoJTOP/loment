@@ -2114,6 +2114,10 @@
    "sha256": "b376bd0dc8b673f14747ccea50850866955892876fc523c7904364924360a885"
   },
   {
+   "path": "docs/229-lvm-base-and-novelty.md",
+   "sha256": "aa88e6c3736bf464b610e209f405011c1b022a17ef922469efd652f84ad03e0a"
+  },
+  {
    "path": "docs/230-hosted-collector.md",
    "sha256": "d57fd46a6f215304f6b25e219c4527f0d9d3d267eb37775c4cf3af73f0fee6a9"
   },
@@ -2127,7 +2131,7 @@
   },
   {
    "path": "docs/231-lvm-channel-and-vm-dimension.md",
-   "sha256": "2d6d3d95dde8a0f41a252ac2c91598913e1d2b9d945c062c3db3d0dd570e1b34"
+   "sha256": "28ea976f893e8fd1197c6f42cfcceccc065d87b4917de608588b568b0888e1e1"
   },
   {
    "path": "docs/232-libl.md",
