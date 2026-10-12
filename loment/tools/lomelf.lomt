@@ -1117,6 +1117,14 @@ fn emit_get(tab: ptr, out: ptr, c: u32, t: ptr, tyo: u32, tyl: u32,
     let c0: u32 = load8(t, vo);
     let d: u32 = c;
     if c0 == 37 {
+        // **alloca 的"值"就是它的地址** —— `store ptr %p.buf, ptr %p.addr`（L0 提升出来的
+        // 产物就是这一条）。`emit_get_ptr` 一直在查 `alloc_find`，这一格漏了 —— 于是那份
+        // 产物在参考侧报"未定义的 SSA 值"，在这儿**静默**按槽表查空（FujoJTOP/loment#239）。
+        // 走这条**不落 zext**（与参考侧同形，否则两边 ELF 不逐字节同）。
+        let ao: u32 = alloc_find(tab, t, vo, vl);
+        if ao != NO {
+            return em_lea(out, c, reg, RBP, ao);
+        }
         let so: u32 = slot_find(tab, t, vo, vl);
         d = em_load_sized(out, d, reg, RBP, so, sz);
     } else {

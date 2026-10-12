@@ -6344,7 +6344,8 @@ class _Ir:
                  coverage: bool = False, cov_counter: list | None = None,
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
                  dbg_meta: list | None = None, dbg_types: dict | None = None,
-                 gc_alpha: bool = False, gc_auto: bool = False):
+                 gc_alpha: bool = False, gc_auto: bool = False,
+                 gc_barrier: bool = True):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -6370,6 +6371,11 @@ class _Ir:
         #: 此前 alpha 的 L3 残差没人收（只有分配器）。`gc_any` = 要根表/收集器的任意一档。
         self.gc_alpha = gc_alpha
         self.gc_any = gc_auto or gc_alpha
+        #: **写屏障要不要挂**：alpha 档**且这份单元真的要那块 arena**。一份把 `alloc` 全
+        #: L0 提走的单元**没有堆**（`docs/210` §2.2 那句"连分配器都不剩"），而屏障引用堆
+        #: —— 挂上去就是未定义符号（实测：`FujoJTOP/loment#239` 一修好，这条立刻露出来）。
+        #: 与自举侧同一个判据（那边是 `heap_needed` 预扫描出来的 `s+516`）。
+        self.gc_barrier = gc_barrier
         self.rootk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
@@ -6920,7 +6926,7 @@ class _Ir:
             _, vv = self.expr(e.args[2], "u8")
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {pv}, i32 {ov}")
-            if self.gc_alpha:
+            if self.gc_barrier:
                 # **写屏障**（`docs/210` §2.7）：分代那一档的小回收不扫老年代，而老块里可能
                 # 存着指向年轻代的指针 —— 写一次就记一次卡。**只在 alpha 档发**：`gc_auto`
                 # 老实做全量，不带这条税（两档的差别因此仍然是一个可测的事实）。
@@ -6935,7 +6941,7 @@ class _Ir:
             _, pv = self.expr(e.args[0], "ptr")
             _, vv = self.expr(e.args[1], "u32")
             r = self.t()
-            if self.gc_alpha:
+            if self.gc_barrier:
                 self.w(f"call void @__loment_wb(ptr {pv})")   # 同上：它也是一次写堆
             self.w(f"{r} = atomicrmw add ptr {pv}, i32 {vv} seq_cst")
             return "u32", r
@@ -7352,10 +7358,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   coverage: bool = False, cov_counter: list | None = None,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
                   dbg_meta: list | None = None, dbg_types: dict | None = None,
-                  gc_alpha: bool = False, gc_auto: bool = False
+                  gc_alpha: bool = False, gc_auto: bool = False,
+                  gc_barrier: bool = True
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -7471,6 +7478,49 @@ def _cmd_entry_ir() -> tuple[list[str], list[str]]:
             [_IR_CMD_ENTRY])
 
 
+def _alloc_promoted(toks: list, a: int, funcs: list) -> bool:
+    """`alloc` 那一格（token `a`）是不是**已经落到 L0**（提到栈上了）—— 与自举侧
+    `codegen.lomt` 的 `alloc_is_promoted` 同一条规则（同一份源 ⇒ 两边同一个答案）。
+
+    形状就是 L0 认的那一个：`let NAME : ptr = alloc` —— `alloc` 往前四格是那个名字。
+    """
+    if a < 5:
+        return False
+    if not (toks[a - 1].val == "=" and toks[a - 2].val == "ptr"
+            and toks[a - 3].val == ":" and toks[a - 5].val == "let"):
+        return False
+    name = toks[a - 4]
+    if name.kind != "ident":
+        return False
+    for f in funcs:
+        if f.tok_at <= a < f.tok_end:
+            return name.val in f.l0
+    return False
+
+
+def _heap_needed(mods: list) -> bool:
+    """这份单元（**连同依赖**）要不要那块 arena —— 与自举侧 `heap_needed` 同一条规则：
+    `alloc`（**没被 L0 提到栈上的那些**）/ `str_concat` / `free` 三者之一出现即算。
+
+    **必须在发射函数体之前算出来**：`gc_auto_alpha` 的写屏障挂在每个 `store8` 站点上，
+    而屏障**引用堆** —— 一份把 `alloc` 全 L0 提走的单元没有堆，那儿的屏障就成了未定义符号
+    （实测：`FujoJTOP/loment#239` 一修好，这条立刻露出来）。
+
+    它与 `emit_llvm` 里那条**文本判据**（`"@__loment_alloc" in text_all`）说的必须是同一件事
+    —— 自举侧两侧同源（`heap_needed` 预扫描 + 同一份发堆门），逐字节判据一直钉着这一点。
+    """
+    for m in mods:
+        toks = getattr(m, "toks", None) or []
+        funcs = getattr(m, "funcs", None) or []
+        for i, tk in enumerate(toks):
+            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "free"):
+                continue
+            if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
+                continue
+            return True
+    return False
+
+
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
@@ -7536,6 +7586,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
+    # **写屏障要不要挂**（`docs/210` §2.7 / `FujoJTOP/loment#239`）：alpha 档**且**这份
+    # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
+    # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
+    _has_heap_pre = _heap_needed([mod, *deps])
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -7594,7 +7648,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
-                                    dbg_types if debug else None, gc_alpha, gc_auto)
+                                    dbg_types if debug else None, gc_alpha, gc_auto,
+                                    gc_alpha and _has_heap_pre)
             globals_ += g
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。

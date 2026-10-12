@@ -2333,9 +2333,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_val(s, out, lvl);
             emit_str(s, out, ", i32 ");
             emit_val(s, out, lvl + 1);
-            if load32(s, 572) == 1 {
+            if load32(s, 516) == 1 && load32(s, 572) == 1 {
                 // **写屏障**（`docs/210` §2.7）：与参考侧**同位置**（格与 store 之间）、
-                // **同门槛**（只有 alpha 发）。位置在那条 gep 之后，因为它要的是**被写的地址**。
+                // **同门槛** —— alpha 档**且这份单元真的要那块 arena**（`516` 是 `heap_needed`
+                // 预扫描的结果）。位置在那条 gep 之后，因为它要的是**被写的地址**。
+                // 少了 `516` 那一半，一份把 `alloc` 全 L0 提走的单元会挂一堆引用不到堆的屏障
+                // （实测：`FujoJTOP/loment#239` 一修好这条立刻露出来）。
                 emit_str(s, out, "\n  call void @__loment_wb(ptr %t");
                 emit_dec(s, out, g2);
                 emit_str(s, out, ")");
@@ -2380,8 +2383,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         if tok_is(src, toks, j, "atomic_add") {   // M21
             let k3: u32 = arg1(s, out, src, toks, j + 2, lvl);
             let k4: u32 = arg1(s, out, src, toks, k3, lvl + 1);
-            if load32(s, 572) == 1 {
-                // 写屏障：`atomic_add` 也是一次**写堆**（同参考侧的落点与门槛）。
+            if load32(s, 516) == 1 && load32(s, 572) == 1 {
+                // 写屏障：`atomic_add` 也是一次**写堆**（同参考侧的落点与门槛：alpha **且**要堆）。
                 emit_str(s, out, "  call void @__loment_wb(ptr ");
                 emit_val(s, out, lvl);
                 emit_str(s, out, ")\n");
