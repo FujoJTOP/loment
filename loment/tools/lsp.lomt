@@ -919,7 +919,9 @@ fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
     let b: ptr = out_body(mem);
     if method_eq(src, arena, m, "initialize") {
         let o: u32 = resp_prefix(mem, src, arena, id);
-        let o2: u32 = json_emit_lit(b, o, "{\"capabilities\": {\"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {\"triggerCharacters\": [\".\", \":\"]}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
+        // `completionProvider: {}` = 支持补全、但**没有触发字符**（`#28`：原先登着 `.` 与 `:`，
+        // 而补全不看位置 —— 每敲一个点就弹一屏关键字。两处实现一起改：`tools/loment_lsp.py`）
+        let o2: u32 = json_emit_lit(b, o, "{\"capabilities\": {\"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
         // 注意: 上面这段以 `"0.3"}}` 收尾 = 关掉 serverInfo 与 result; **外层对象还要一个 `}`**
         let o2b: u32 = json_emit_lit(b, o2, "}");
         out_done(mem, o2b);

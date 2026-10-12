@@ -743,7 +743,14 @@ genesis 汇编 -> rc=139 (段错误)        clang 汇编 -> rc=0, 产物 3172 B 
   连同 `.lomt` 不嗅探那条（兜底已从"猜"改成"拒绝"，§2 那一句的落地）。
 - **自举侧那一半**：`grammar loment` 这一格**落了**（§7.2，`loment_p8_test` M87）——
   按字节抹，lexer/parser 一行未动。仍开着的是**别的写法**（阻塞在 `docs/189` §4.1 的
-  翻译器孪生上）与**直接读源的编辑器入口**（`lomfmt` / `lomdoc` / LSP）。
+  翻译器孪生上）。
+- **直接读源的入口**（`docs/182` §1.9 那张清单）—— 2026-10-12 的状态：
+  * `lomfmt` / `lomdoc` / `loment check`：**认出非原生写法就拒**
+    （`potato_from.refuse_foreign_grammar`，两份实现同一条）；
+  * **VS Code 扩展**：读那一行，按它给文档换语言 id 上色（`docs/235`）；
+  * **两个 LSP（`tools/loment_lsp.py` / `loment/tools/lsp.lomt`）：仍按原生 Loment 解析** ——
+    一份声明了外门写法的源接上语言服务会拿到**假诊断**。扩展因此**不把外门那几种接给
+    语言服务**（只给高亮）。这是**开着**的那一格，另记 issue。
 - **⚠ 驱动单元的 `.ll` 离 lomelf 的 2 MiB 输入上限只剩 1377 B**（§7.2 末、`docs/192`）。
   这一轮是被它绊倒的：越界**不报错**，而是**静默截断**成一个启动就崩的二进制。
   两条判据钉着了：预算一条（`loment_genesis_test::test_seed_fits_lomelf_input_buffer`，
