@@ -3820,6 +3820,25 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             f"**修法二选一**：删掉这一行（回到默认的 `no_vm`），"
             f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
 
+    # **渠道闸（对外端口）**：`hosted` 那一维要的是**真 libc / 真共享库**（`docs/222` §4）。
+    # 那条路还没完工 —— 机制在，但 `docs/219` §8b 的 S2 还差三件（堆太小、堆只在程序自己
+    # 分配时才发、某个成员的数据/重定位还有残留缺陷），所以发行版里它只能是一句**拿不到的
+    # 承诺**。与上面 `vm` 那条同一个闸、同一个理由：**承诺落空比拒绝更坏，发行版说"不"**。
+    #
+    # 用户 2026-10-12：「锁掉 LibC，在 0.1.4.5（即将发布）中不可调用 LibC，因为这尚未完工」。
+    # 两扇门都要关：这一条关**声明的门**（`choose hosted`），`--link` 那扇由链接器自己关
+    # （带未定义符号的外源对象默认被拒，`tools/lomelf.py` 与自举侧同一口径）。
+    #
+    # **次序**：排在 `vm` 那条**之后** —— 自举侧 `checker.lomt` 里两条闸的先后就是这个次序。
+    if _eff["port"] == "hosted" and loment_channel.RELEASE:
+        _ln = next((l for _d, _w, l in reversed(mod.choose_lines) if _w == "hosted"), 1)
+        errs.append(
+            f"{_ln}: 发行版不含对外端口 —— `choose hosted` 只在**开发通道**可用。"
+            f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，`docs/219` §8b 的 "
+            f"S2 还差三件），所以发行版里它只能是一句拿不到的承诺。"
+            f"**修法二选一**：删掉这一行（回到默认的 `sealed`），"
+            f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条

@@ -1376,7 +1376,9 @@ LANG_CARDS: dict[str, LangCard] = {
         tokens=("#include", "int main(", "printf("),
         edge="指针算术、`union`、位域、宏、可变参数（`...`）、`goto` 进来的跳转都不翻；"
              "`int` 与条件混用（`if (x)`）、`&&` 出 int 要**补转换**（Loment 的条件只收 bool）。",
-        abi="C ABI 是它默认的导出方式（`--link` 那份 `.o` 要自包含：不能有重定位、不能引用未定义的符号）。",
+        abi="C ABI 是它默认的导出方式。`--link` 那份 `.o` **自包含**就够了（重定位会应用，"
+            "多个对象也可以互相引用）；带**未定义符号**的那种（`printf`/`malloc`）**默认被拒** —— "
+            "那扇门（真 libc / 真共享库）还没完工，发行版里是关着的（`docs/222` §4.5）。",
     ),
     "python": LangCard(
         key="python", display="Python", exts=(".py",),
@@ -1549,8 +1551,11 @@ LANG_EDGE_EN: dict[str, str] = {
 }
 
 LANG_ABI_EN: dict[str, str] = {
-    "c": "The C ABI is its default export convention (the `.o` given to `--link` must be "
-         "self-contained: no relocations, no undefined symbols).",
+    "c": "The C ABI is its default export convention. A **self-contained** `.o` is all `--link` "
+         "needs (relocations are applied, and several objects may reference each other); one "
+         "that carries **undefined symbols** (`printf`/`malloc`) is refused by default - that "
+         "door (real libc, shared libraries) is unfinished and a release build keeps it shut "
+         "(docs/222 sec 4.5).",
     "python": "**CPython does not export a C ABI** - an interface-only unit comes out as an "
               "**empty module** (stderr carries `[skip] f: calling convention is not the C "
               "ABI`). Real linking has to go through the C-extension route.",

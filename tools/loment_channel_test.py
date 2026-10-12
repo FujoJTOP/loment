@@ -34,6 +34,11 @@ SEED = loment_seed.SEED
 PROBE_VM = "module probe_vm\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 对照组：同样一份、**不声明** `choose vm` —— 两个驱动器都必须收。
 PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
+#: 探针：`choose hosted`（`docs/222` §4）。**发行版里同样非法** —— 那扇门要的是真 libc /
+#: 真共享库，而那条路还没完工（`docs/219` §8b 的 S2 还差三件）。2026-10-12 用户定：
+#: 0.1.4.5 里 libc 不可调用。与 `vm` 那条同一个闸、同一个理由。
+#: 入口写 `fn main`（`docs/222` §4.3：hosted 产物由 C 运行期起）—— 这一条只看驱动器收不收。
+PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    return 1;\n}\n"
 
 TESTS: list[tuple[str, object]] = []
 
@@ -111,8 +116,73 @@ def test_dist_builds_with_the_release_seed():
 
 
 @test
-def test_release_driver_refuses_vm_dev_driver_accepts():
-    """**判据 D**：发行版驱动器拒 `choose vm`，dev 驱动器收 —— 两端都要测。
+def test_the_python_checker_refuses_hosted_in_the_release_channel():
+    """参考实现的**端口闸**（`docs/222` §4）：`loment_channel.RELEASE` 为真时
+    `choose hosted` 报错、为假时不报。
+
+    **不需要 clang** —— 这一条只走 `load` + `check`，所以它在哪儿都能跑。两端都测：
+    只测"拒"的话，一个"什么都拒"的检查器也能绿。
+    """
+    import lomentc  # noqa: PLC0415
+    import loment_channel  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "h.lomt"
+        p.write_text(PROBE_HOSTED, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, Path(td), entry=p)
+        old = loment_channel.RELEASE
+        try:
+            loment_channel.RELEASE = False
+            dev = lomentc.check(mod, deps=deps)
+            loment_channel.RELEASE = True
+            rel = lomentc.check(mod, deps=deps)
+        finally:
+            loment_channel.RELEASE = old
+    assert not dev, f"开发通道也拒了 `choose hosted` —— 那这一维就永远是死的：{dev}"
+    assert rel, "发行版收下了 `choose hosted` —— 端口闸没生效（`docs/222` §4）"
+    assert any("端口" in e for e in rel), rel
+    print("      Python 检查器：dev 收 / 发行版拒 `choose hosted` —— 两端都核过")
+
+
+@test
+def test_the_release_launcher_shuts_the_port_door():
+    """发行版启动器（`docs/222` §4）：`--hosted` **点名拒**，且**永不**给链接器
+    `--allow-ports`。
+
+    两层一起才成立：链接器的默认是"拒"，而"发行版不传那面旗"这件事靠启动器里的
+    `@CHANNEL@` 替换 —— 替换错了、或者哪次改动让那条 `dev` 分支活过来，这一条就红。
+    """
+    import loment_dist  # noqa: PLC0415
+
+    for name, tpl in (("launcher.sh", loment_dist.LAUNCHER_SH),
+                      ("launcher.cmd", loment_dist.LAUNCHER_CMD)):
+        dev = loment_dist._subst(tpl, "dev")
+        rel = loment_dist._subst(tpl, "release")
+        if name.endswith(".sh"):
+            # 开发版：条件是 `"dev" = "dev"` ⇒ **活的**（`portarg` 真的被设上）。
+            assert '[ "dev" = "dev" ]' in dev, name
+            # 发行版：左边操作数换成 release ⇒ **死的** ⇒ `portarg` 恒为空 ⇒ 链接器默认生效。
+            assert '[ "release" = "dev" ]' in rel, (
+                f"{name}: 发行版启动器里那条 dev 分支还活着 —— 它会把 `--allow-ports` "
+                "传给链接器，于是包里的 libc 又可调用了")
+        else:
+            assert '"dev"=="dev"' in dev, name
+            assert '"release"=="dev"' in rel, (
+                f"{name}: 发行版启动器里那条 dev 分支还活着 —— 它会把 `--allow-ports` "
+                "传给链接器，于是包里的 libc 又可调用了")
+    # sh 那一份还多一道**点名的门**：`--hosted`（或源码里的端口标记）在发行版里直接拒。
+    sh_rel = loment_dist._subst(loment_dist.LAUNCHER_SH, "release")
+    assert "-n \"$hosted\"" in sh_rel and "release build" in sh_rel, (
+        "发行版启动器没有把 `--hosted` 点名拒掉 —— 那扇门就只剩编译器那道闸"
+        "（源码里写 `choose hosted` 会被拒，但命令行 `--hosted` 绕过编译器）")
+    assert "--hosted" in loment_dist.LAUNCHER_SH, "开发版启动器必须留着 `--hosted`"
+    print("      两份启动器：dev 传 `--allow-ports` / 发行版不传且点名拒 `--hosted`")
+
+
+@test
+def test_release_driver_refuses_dev_only_dimensions_and_dev_driver_accepts():
+    """**判据 D**：发行版驱动器拒 `choose vm` 与 `choose hosted`，dev 驱动器收 —— 两端都要测。
 
     跳过条件与 `loment_p8_test` 同：要 clang（建 ELF）与 WSL（跑 ELF）。
     """
@@ -121,9 +191,13 @@ def test_release_driver_refuses_vm_dev_driver_accepts():
         return
     probe_dir = ROOT / "loment" / "build"
     probe_dir.mkdir(parents=True, exist_ok=True)
+    #: (标签, 源码, 发行版里必须拒吗) —— `plain` 那行是**对照组**：它在两边都得过。
+    probes = [("plain", PROBE_PLAIN, False),
+              ("vm", PROBE_VM, True),
+              ("hosted", PROBE_HOSTED, True)]
     made: list[Path] = []
     try:
-        for tag, src in (("plain", PROBE_PLAIN), ("vm", PROBE_VM)):
+        for tag, src, _refuse in probes:
             p = probe_dir / f"channel_probe_{tag}.lomt"
             p.write_text(src, encoding="utf-8", newline="\n")
             made.append(p)
@@ -133,14 +207,17 @@ def test_release_driver_refuses_vm_dev_driver_accepts():
             # td 里的路径，td 一销毁它就是悬空的（第一版踩过）。
             dev_elf = P8._build_linux_elf(SEED.read_text(encoding="utf-8"), td, "chan_dev")
             rel_elf = P8._build_linux_elf(loment_seed.reference_ir("release"), td, "chan_rel")
-            # **dev 两个都得过** —— 不然"发行版拒"可能只是因为它什么都拒。
-            P8._run_driver(dev_elf, rel % "plain", td, "cd_p")
-            P8._run_driver(dev_elf, rel % "vm", td, "cd_v")
-            # **发行版**：普通那份照过，`choose vm` 那份**必须非零退出**。
-            P8._run_driver(rel_elf, rel % "plain", td, "cr_p")
-            rc, _out, err = P8._run_driver_raw(rel_elf, rel % "vm", td, "cr_v")
-            assert rc != 0, "发行版驱动器收下了 `choose vm` —— 渠道闸没生效（`docs/231` §2）"
-        print("      dev 收 `choose vm` / 发行版拒 —— 两端都核过")
+            for tag, _src, refuse in probes:
+                # **dev 每一份都得过** —— 不然"发行版拒"可能只是因为它什么都拒。
+                P8._run_driver(dev_elf, rel % tag, td, f"cd_{tag}")
+                rc, _out, err = P8._run_driver_raw(rel_elf, rel % tag, td, f"cr_{tag}")
+                if refuse:
+                    assert rc != 0, (
+                        f"发行版驱动器收下了 `choose {tag}` —— 渠道闸没生效"
+                        f"（`docs/231` §2 / `docs/222` §4）")
+                else:
+                    assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
+        print("      dev 收 / 发行版拒：vm 与 hosted 两维 —— 两端都核过")
     finally:
         for p in made:
             p.unlink(missing_ok=True)
