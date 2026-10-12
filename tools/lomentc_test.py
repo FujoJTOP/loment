@@ -3161,6 +3161,60 @@ HEAP_HOSTED_GC_AUTO_SRC = HEAP_GC_SRC.replace(
     "@@CHOOSE@@", "choose hosted\nchoose gc_auto\nchoose runtime")
 HEAP_SEALED_GC_AUTO_SRC = HEAP_GC_SRC.replace("@@CHOOSE@@", "choose gc_auto\nchoose runtime")
 
+#: `docs/231`（B3）用的那一份：**在静态 64 KiB 上真的收一次**。
+#:
+#: 上面那两份判据里 `sealed` 那一侧在第一次 `alloc(200000)` 就落 `boom` —— **根本没走到
+#: 收集器**。而 B3 改的是 `_IR_GC_SHARED` 本体，**每一档**都变了，所以得单独有一条把
+#: 静态档的收集器跑起来：累计要 **200 KB**（收不回来必然 OOM），同时守着一块只被栈上
+#: `keep` 指着的 1000 字节 —— **收集之后必须原样**。成功返回 **9**。
+GC_SEALED_CHURN_SRC = """module gc_sealed_churn
+
+choose gc_auto
+choose runtime
+
+fn main() -> i32 {
+    let keep: ptr = alloc(1000);
+    let i: u32 = 0;
+    while i < 1000 {
+        store8(keep, i, 9 as u8);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < 200 {
+        let junk: ptr = alloc(1024);
+        store8(junk, 0, 1 as u8);
+        j = j + 1;
+    }
+    let k: u32 = 0;
+    let bad: u32 = 0;
+    while k < 1000 {
+        if load8(keep, k) != 9 { bad = bad + 1; }
+        k = k + 1;
+    }
+    if bad == 0 { return 9; }
+    return 99;
+}
+"""
+
+
+@test
+def test_mark_table_is_a_bitmap_sized_by_the_arena():
+    """`docs/231`（B3）：标记表是**位图**，每 8 字节一位 ⇒ **arena / 64 字节**。
+
+    判的是**关系**而不是某个数：两档各自的 arena 与表的大小必须是那个除法。
+    以前是"每 8 字节一个 `i32`"（arena / 2 字节 —— 1 MiB 的 arena 带 512 KiB 的 `.bss`）。
+    """
+    for ir, arena in ((lomentc._IR_GC_SHARED, 65536),
+                      (lomentc._IR_GC_SHARED_HOSTED, 1048576)):
+        assert f"@__loment_mark = internal global [{arena // 64} x i8] zeroinitializer" in ir
+        assert f"[{arena // 8} x i32]" not in ir, "旧的那个形状不该再出现"
+    # 位运算的三件：字节下标 = 位号 >> 3、掩码 = 低三位、按位与判"标过没有"
+    g = lomentc._IR_GC_SHARED
+    assert "%mby = lshr i32 %midx, 3" in g and "%mbit = and i32 %midx, 7" in g
+    assert "%mmsk = trunc i32 %msh to i8" in g and "%was = icmp ne i8 %mold, 0" in g
+    # **口径没变**：位号仍是「块头偏移 >> 3」—— 换 arena 只换表的行数
+    assert "%midx = lshr i32 %i, 3" in g
+
 
 def _heap_ir(src: str) -> str:
     with tempfile.TemporaryDirectory() as td:
@@ -3214,10 +3268,10 @@ def test_hosted_collector_is_the_same_collector():
                 if l != "entry:" and not any(m in l for m in markers)]
     a = lomentc._IR_GC_SHARED
     b = lomentc._IR_GC_SHARED_HOSTED
-    assert rest(a, ("@__loment_heap", "65536", "[8192 x i32]")) == \
-           rest(b, ("%hb", "1048576", "[131072 x i32]")), "两份收集器已经不一样了"
+    assert rest(a, ("@__loment_heap", "65536", "[1024 x i8]")) == \
+           rest(b, ("%hb", "1048576", "[16384 x i8]")), "两份收集器已经不一样了"
     # 换掉的**每一处**都真的换掉了 —— 这条防"上面那条因为两边都空而恒真"
-    assert "@__loment_heap" not in b and "65536" not in b and "[8192 x i32]" not in b
+    assert "@__loment_heap" not in b and "65536" not in b and "[1024 x i8]" not in b
     assert b.count("%hb = call ptr @__loment_arena()") == a.count("entry:")
     # 触发那一段**共用**：它按字节数触发，不看 arena 大小
     assert lomentc._IR_GC_HOSTED == b + lomentc._IR_GC_TRIGGER_FIXED
@@ -3235,13 +3289,13 @@ def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
     ir = _heap_ir(HEAP_HOSTED_GC_AUTO_SRC)
     assert "; loment-heap: platform 1048576" in ir
     assert "@__loment_heap = internal global ptr null" in ir, "arena 不是宿主来的"
-    assert "@__loment_mark = internal global [131072 x i32]" in ir, "标记表没跟着 arena 换"
-    assert "[8192 x i32]" not in ir
+    assert "@__loment_mark = internal global [16384 x i8]" in ir, "标记表没跟着 arena 换"
+    assert "[1024 x i8]" not in ir
     assert "%hb = call ptr @__loment_arena()" in ir, "收集器没用基址指针"
     assert "; loment-heap: static" not in ir, "B1 落地后这条记号不该再出现"
     # 对照：同一份源**去掉 `choose hosted`** ⇒ 还是静态那一套 —— 闸门真的在 `port` 上
     sealed = _heap_ir(HEAP_SEALED_GC_AUTO_SRC)
-    assert "@__loment_mark = internal global [8192 x i32]" in sealed
+    assert "@__loment_mark = internal global [1024 x i8]" in sealed
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
     assert "malloc" not in sealed
 

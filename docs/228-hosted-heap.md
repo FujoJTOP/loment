@@ -29,7 +29,7 @@
 | arena 本体 | `:282` | `@__loment_heap = internal global [65536 x i8] zeroinitializer` |
 | 前沿容量 | `:218` | `%fits = icmp ule i32 %nxtoff, 65536` |
 | `free` 反算基址 | `:237` | `%base = ptrtoint ptr @__loment_heap to i64` |
-| 收集器的**标记表** | `:4971` | `@__loment_mark = internal global [8192 x i32]` —— 而 **8192 = 65536 / 8**，按块头`偏移 >> 3` 索引 |
+| 收集器的**标记表** | `:4971` | `@__loment_mark = internal global [8192 x i32]` —— 而 **8192 = 65536 / 8**，按块头`偏移 >> 3` 索引（**`docs/231` 之后它是 `[1024 x i8]` 的位图，口径未变**） |
 | 收集器的**根扫边界** | `:5043` `:5086` | `icmp ult i64 %rdo, 65536` / `%wdo` |
 
 要害在第四行：**标记表的行数与它的索引口径里，写着 arena 的大小**。所以"把 64 KiB 改成
