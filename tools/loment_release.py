@@ -196,6 +196,7 @@ GLOBS = [
     "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
+    "editors/vscode/language-configuration-python.json",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
     # 编译期子集语料 (S4.0): `loment_ct_test` 读它们, 判据随包发就得连语料一起发。

@@ -143,7 +143,10 @@ def build_and_run(td: Path, lomt: Path, objs: list[Path], exit_want: int) -> tup
     errs = lomentc.check(mod)
     assert not errs, errs
     ir = lomentc.emit_llvm(mod, ROOT)
-    blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(p) for p in objs])
+    # `allow_ports=True`：这条判据跑的**就是**开发通道那条还没完工的路（`docs/222` §4 的
+    # 端口门默认拒带未定义符号的外源对象 —— 发行版里 libc 不可调用，正是靠那个默认值）。
+    blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(p) for p in objs],
+                                    allow_ports=True)
     exe = td / "ffi.elf"
     exe.write_bytes(blob)
     r = subprocess.run(["wsl", "-e", "bash", "-lc",
@@ -222,7 +225,7 @@ def test_loment_kernel_object_is_reusable_without_clang():
             mod = lomentc.load(app)
             assert not lomentc.check(mod), "调用方自检失败"
             ir = lomentc.emit_llvm(mod, ROOT)
-            blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(o1)])
+            blob, _info = lomelf.compile_ll(ir, [lomelf.load_foreign(o1)], allow_ports=True)
         finally:
             os.environ["PATH"] = old
         exe = td / "k.elf"
@@ -1117,12 +1120,79 @@ def test_object_with_undefined_symbol_is_rejected():
         assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
         ir = lomentc.emit_llvm(mod, ROOT, deps)
         try:
-            lomelf.compile_ll(ir, [lomelf.ForeignObject(td / "c.o")])
+            # `allow_ports=True`：**必须**过这一关才测得到本判据要测的东西。不传的话先撞上
+            # 端口门（`docs/222` §4），这条就变成了"测那扇门"、而不是"测没人提供的符号被拒"
+            # —— 那种"因为别的原因而绿"正是最该避免的。
+            lomelf.compile_ll(ir, [lomelf.ForeignObject(td / "c.o")], allow_ports=True)
         except lomelf.Unsupported as e:
             assert "未定义" in str(e), e
         else:
             raise AssertionError("引用没人提供的符号应当被拒")
         print("      没人提供的符号: 链接期硬拒 (第 2 阶段仍不链 libc)")
+
+
+@test
+def test_the_port_gate_refuses_by_default_and_the_dev_channel_opens_it():
+    """**端口门**（`docs/222` §4，2026-10-12 用户定）：带**未定义符号**的外源对象默认被拒 ——
+    这就是"0.1.4.5 里 libc 不可调用"在**链接器**这一侧的落点（另一侧是编译器那条渠道闸：
+    发行版不收 `choose hosted`）。
+
+    **两端都要测**：只测"拒"的话，一个"什么外源对象都拒"的链接器也能绿；只测"收"的话，
+    门什么时候被悄悄拆掉谁也不知道。夹具用**收编面**那一份 —— 它的未定义符号就是
+    `memcpy`/`memset`/`memcmp` 三个，正是真 C 库要吃的名字。
+    """
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 需要 clang")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "cons.c").write_text(C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "cons.c", td / "cons.o") == 0
+        (td / "m.lomt").write_text(LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "m.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "m.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        fo = lomelf.load_foreign(td / "cons.o")
+        assert set(fo.undefined) >= {"memcpy"}, fo.undefined
+        try:
+            lomelf.compile_ll(ir, [fo])
+        except lomelf.Unsupported as e:
+            assert "端口" in str(e), str(e)
+        else:
+            raise AssertionError(
+                "带端口的对象**默认竟然收下了** —— 发行版里 libc 就是可调用的了"
+                "（`docs/222` §4 那扇门被拆了）")
+        blob, _info = lomelf.compile_ll(ir, [fo], allow_ports=True)
+        assert len(blob) > 0
+        print("      默认拒（发行版）/ `allow_ports` 收（开发通道）—— 两端都核过")
+
+
+@test
+def test_a_selfclosed_object_is_untouched_by_the_port_gate():
+    """那扇门只关 libc：**自闭合**的外源对象（一条未定义符号都没有）两档都收。
+
+    这条是"锁过头"的守卫 —— `docs/173` 一直在发的 FFI 形状、`docs/177` 那 10 个语言
+    全建立在这上面。门若把自闭合对象也拒掉，"锁 libc"就变成了"砍掉 FFI"。
+    """
+    clang = _clang()
+    if not clang:
+        print("      SKIP: 需要 clang")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "c.c").write_text(C_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "c.c", td / "c.o") == 0
+        (td / "m.lomt").write_text(LOMENT_SOURCE, encoding="utf-8", newline="\n")
+        mod = lomentc.load(td / "m.lomt")
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "m.lomt")
+        assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
+        fo = lomelf.load_foreign(td / "c.o")
+        assert fo.undefined == [], fo.undefined
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [fo])
+        assert len(blob) > 0
+        print("      自闭合对象不带开关也照样链 —— 门没有锁过头")
 
 
 @test

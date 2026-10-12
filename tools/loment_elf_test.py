@@ -645,6 +645,52 @@ def test_l2_if_branch_epoch_bounds_the_heap():
 
 
 @test
+def test_gc_heap_example_runs_under_the_collecting_tiers():
+    """**真拿 `alloc` 写堆的程序**（`loment/examples/gc_heap`，`docs/210` §7）—— 三个档位各跑一遍。
+
+    **Why**：§7 那两条（"证明面在真实代码里有多宽""收集器在真实工作量下什么样"）在**现有语料上
+    问不出答案**：仓里自己的 Loment 代码一共只有 23 个 `alloc` 站点，而 `loment/lib` +
+    `loment/selfhost` 那 28 份真代码里**一个都没有**（它们走 `sys_alloc`/`brk`）。这一条把那个
+    前提落成一份**真在堆上建结构**的程序：一张**单向链表**（节点 16 B，下一个节点的地址用
+    `as u64` 存进块里、`as ptr` 取回 —— 正是 §4.2 那句"指针进得了堆块"的形状），一个**长命**
+    节点 + 每圈一个**短命**节点，6000 圈 × 16 B = 96 KB 的请求过 64 KiB arena。
+
+    **判据**：`gc_manual` **耗尽**（rc=132 —— 没人还它）；`gc_auto` 与 `gc_auto_alpha` **跑完**
+    （rc=7）。而那个 7 是**读回来的**：`walk(keep)` 只该看见一个节点、值是 7 ⇒ 长命的那个**没被
+    误收**（短命的那些被收了才对）。少了这一句，一个"把什么都收掉"的收集器也能过。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_path = ROOT / "loment" / "examples" / "gc_heap" / "main.lomt"
+    assert src_path.exists(), f"缺那份真在堆上建结构的例子: {src_path}"
+    base = src_path.read_text(encoding="utf-8")
+    assert "choose gc_auto_alpha" in base, "例子里那一行档位没了 —— 这条判据要拿它换档"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tag, ch in (("manual", "choose gc_manual"), ("auto", "choose gc_auto"),
+                        ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcheap_{tag}.lomt"
+            src.write_text(base.replace("choose gc_auto_alpha", ch, 1),
+                           encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcheap_{tag}.native"
+            nat.write_bytes(blob)
+            got[tag] = _run_bin(nat, f"gcheap_{tag}", td, timeout=180)[0]
+    assert got["manual"] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got['manual']}）—— 那这份工作量压不出收集器："
+        "96 KB 的请求本该把 64 KiB 的 arena 耗尽")
+    for tag in ("auto", "alpha"):
+        assert got[tag] == 7, (
+            f"`gc_{tag}` 那一只没跑完：退出码 {got[tag]}（期望 7）。3 表示长命的那个节点被误收了 "
+            f"（`walk(keep)` 读回来的不是 7），132 表示耗尽")
+    print(f"      gc_heap: manual 耗尽 (rc={got['manual']})；auto rc={got['auto']}；"
+          f"alpha rc={got['alpha']}（7 是 `walk` 读回来的 —— 长命的没被误收）")
+
+
+@test
 def test_gc_alpha_adaptive_bounds_a_large_live_set():
     """`gc_auto_alpha` 的**自适应**收集器收得下更大的活集（`docs/210` §2.4 的"策略池"）。
 
@@ -849,13 +895,21 @@ def test_l1_definite_lifetime_bounds_the_heap():
           f"manual 耗尽 (rc={got[1]}) —— 定活是真的")
 
 
-def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = ()) -> tuple[int, str]:
+def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (),
+                ports: bool = True) -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
     stdout 与退出码不混在一个流里: 先让它跑, 再单独 `echo -n $?` (与 `_run_bin` 同一条纪律)。
+
+    `ports=True`（默认）时带对象就补 `--allow-ports`（`docs/222` §4 的端口门）：链接器
+    **默认拒**带未定义符号的外源对象，判据要在开发通道上跑那条还没完工的路，得显式把门
+    放开。没有对象就不传 —— 这样"不带对象"的那些调用逐字节仍是老样子。`ports=False`
+    是给**门本身**那条判据用的（同一份对象、不给开关 ⇒ 必须拒）。
     """
     tag = f"{_T}lomelf_m.bin"
     extra = "".join(f" --link {x}" for x in links)
+    if links and ports:
+        extra += " --allow-ports"
     script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
               f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
@@ -1344,7 +1398,8 @@ def test_lomelf_selfhost_links_foreign_object():
             ll = _ref_ir(src, td)
             want, _info = lomelf.compile_ll(
                 ll.read_text(encoding="utf-8"),
-                [lomelf.ForeignObject(objs[s]) for s in order])
+                [lomelf.ForeignObject(objs[s]) for s in order],
+                allow_ports=True)     # 开发通道：这几份 C 都带端口（docs/222 §4 的门）
             # 外部对象与 IR 都要放成**仓库内相对路径** —— 镜像在 WSL 里按相对路径找。
             llrepo = bld / f"_mirror_{tag}.ll"
             elfrepo = bld / f"_mirror_{tag}.elf"
@@ -1367,6 +1422,46 @@ def test_lomelf_selfhost_links_foreign_object():
                     p.unlink(missing_ok=True)
     print(f"      镜像 + --link {len(cases)} 例 (单对象/双对象/跨对象重定位/收编面/堆的薄壳/数据节): "
           f"与参考逐字节相同, 退出码 " + " / ".join(str(c[4]) for c in cases))
+
+
+@test
+def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
+    """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
+    `--allow-ports` 就**必须拒**。
+
+    参考侧那条在 `loment_ffi_test::test_the_port_gate_refuses_by_default_...`；这一条是它
+    的孪生。**为什么非要有**：包里装的是**自举**那一只链接器 —— 只有它也拒，
+    "0.1.4.5 里 libc 不可调用"才是真的。参考拒、自举收，是最坏的那种分叉。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    td = Path(tempfile.mkdtemp(prefix="mf_"))
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    tag = "portgate"
+    src = td / f"{tag}.lomt"
+    src.write_text(ffitest.LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+    ll = _ref_ir(src, td)
+    (td / "cons.c").write_text(ffitest.C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
+    assert ffitest.compile_c(_clang(), td / "cons.c", td / "cons.o") == 0
+    llrepo = bld / f"_mirror_{tag}.ll"
+    elfrepo = bld / f"_mirror_{tag}.elf"
+    objrepo = ROOT / f"loment/build/_mirror_{tag}_cons.o"
+    try:
+        llrepo.write_bytes(ll.read_bytes())
+        objrepo.write_bytes((td / "cons.o").read_bytes())
+        rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
+                              f"loment/build/_mirror_{tag}.elf",
+                              (f"loment/build/_mirror_{tag}_cons.o",), ports=False)
+        assert rc != 0, (
+            "自举链接器**没有**端口门 —— 带未定义符号的对象照收，于是包里的 "
+            "`loment build --link` 又把 libc 放进来了（`docs/222` §4）")
+        print("      自举链接器：不给 --allow-ports 就拒带端口的对象")
+    finally:
+        for p in (llrepo, elfrepo, objrepo):
+            p.unlink(missing_ok=True)
 
 
 def main() -> int:

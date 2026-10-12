@@ -1,12 +1,32 @@
 {
   "name": "loment",
   "displayName": "Loment",
-  "description": "Loment 语言支持：语法高亮 + LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155）",
-  "version": "0.1.0",
+  "description": "Loment 语言支持：语法高亮（含七门外门表层语法）+ LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155/188）",
+  "version": "0.2.0",
   "publisher": "FujoJTOP",
   "license": "Loment-Open",
   "engines": {
     "vscode": "^1.91.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "未受信工作区（Restricted Mode）里保留语法高亮与语言服务；下面这些设置被挡住 —— 工作区的 .vscode/settings.json 不能借着它们指向任意程序或脚本（#166）。",
+      "restrictedConfigurations": [
+        "loment.serverCommand",
+        "loment.serverArgs",
+        "loment.toolCommand",
+        "loment.toolArgs",
+        "loment.dapCommand",
+        "loment.dapArgs",
+        "loment.serverPath",
+        "loment.dapScript"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "构建 / 运行 / 调试都要真文件系统（编译产物、ELF、ptrace）。"
+    }
   },
   "categories": [
     "Programming Languages",
@@ -21,7 +41,15 @@
   "main": "./src/extension.js",
   "activationEvents": [
     "onLanguage:loment",
-    "onLanguage:lom"
+    "onLanguage:lom",
+    "onLanguage:loment-c",
+    "onLanguage:loment-cpp",
+    "onLanguage:loment-java",
+    "onLanguage:loment-csharp",
+    "onLanguage:loment-go",
+    "onLanguage:loment-python",
+    "onLanguage:loment-natural",
+    "workspaceContains:**/loment.conf"
   ],
   "dependencies": {
     "vscode-languageclient": "^10.1.1"
@@ -49,6 +77,40 @@
           ".lom"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-c",
+        "aliases": ["Loment (C surface grammar)"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-cpp",
+        "aliases": ["Loment (C++ surface grammar)"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-java",
+        "aliases": ["Loment (Java surface grammar)"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-csharp",
+        "aliases": ["Loment (C# surface grammar)"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-go",
+        "aliases": ["Loment (Go surface grammar)"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "loment-python",
+        "aliases": ["Loment (Python surface grammar)"],
+        "configuration": "./language-configuration-python.json"
+      },
+      {
+        "id": "loment-natural",
+        "aliases": ["Loment (natural surface grammar)"]
       }
     ],
     "grammars": [
@@ -61,6 +123,41 @@
         "language": "lom",
         "scopeName": "source.lom",
         "path": "./syntaxes/lom.tmLanguage.json"
+      },
+      {
+        "language": "loment-c",
+        "scopeName": "source.loment.c",
+        "path": "./syntaxes/loment-c.tmLanguage.json"
+      },
+      {
+        "language": "loment-cpp",
+        "scopeName": "source.loment.cpp",
+        "path": "./syntaxes/loment-cpp.tmLanguage.json"
+      },
+      {
+        "language": "loment-java",
+        "scopeName": "source.loment.java",
+        "path": "./syntaxes/loment-java.tmLanguage.json"
+      },
+      {
+        "language": "loment-csharp",
+        "scopeName": "source.loment.csharp",
+        "path": "./syntaxes/loment-csharp.tmLanguage.json"
+      },
+      {
+        "language": "loment-go",
+        "scopeName": "source.loment.go",
+        "path": "./syntaxes/loment-go.tmLanguage.json"
+      },
+      {
+        "language": "loment-python",
+        "scopeName": "source.loment.python",
+        "path": "./syntaxes/loment-python.tmLanguage.json"
+      },
+      {
+        "language": "loment-natural",
+        "scopeName": "source.loment.natural",
+        "path": "./syntaxes/loment-natural.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -88,6 +185,14 @@
           "type": "boolean",
           "default": true,
           "description": "启用语言服务（补全 / 跳转 / 诊断 / 格式化）。关掉后只保留语法高亮与命令。"
+        },
+        "loment.extraExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "额外认成 L1 源的后缀（例：[\".foo\"]）。项目在 `loment.conf` 里用 `source_ext()` 声明自定义后缀时**不用填这里** —— 扩展会自己去读那份 conf（打开的是子目录、conf 在上一层时也照样找得到）。这里是给「没有 conf 也想认某个后缀」的场合用的。"
         },
         "loment.buildDir": {
           "type": "string",
@@ -130,6 +235,27 @@
     "breakpoints": [
       {
         "language": "loment"
+      },
+      {
+        "language": "loment-c"
+      },
+      {
+        "language": "loment-cpp"
+      },
+      {
+        "language": "loment-java"
+      },
+      {
+        "language": "loment-csharp"
+      },
+      {
+        "language": "loment-go"
+      },
+      {
+        "language": "loment-python"
+      },
+      {
+        "language": "loment-natural"
       }
     ],
     "debuggers": [
@@ -137,7 +263,14 @@
         "type": "loment",
         "label": "Loment 调试",
         "languages": [
-          "loment"
+          "loment",
+          "loment-c",
+          "loment-cpp",
+          "loment-java",
+          "loment-csharp",
+          "loment-go",
+          "loment-python",
+          "loment-natural"
         ],
         "configurationAttributes": {
           "launch": {
@@ -260,41 +393,41 @@
       "commandPalette": [
         {
           "command": "loment.showIr",
-          "when": "editorLangId == loment"
+          "when": "editorLangId =~ /^loment/"
         },
         {
           "command": "loment.checkFile",
-          "when": "editorLangId == loment"
+          "when": "editorLangId =~ /^loment/"
         },
         {
           "command": "loment.runTests",
-          "when": "editorLangId == loment"
+          "when": "editorLangId =~ /^loment/"
         },
         {
           "command": "loment.build",
-          "when": "editorLangId == loment"
+          "when": "editorLangId =~ /^loment/"
         },
         {
           "command": "loment.run",
-          "when": "editorLangId == loment"
+          "when": "editorLangId =~ /^loment/"
         }
       ],
       "editor/context": [
         {
           "command": "loment.build",
-          "when": "editorLangId == loment",
+          "when": "editorLangId =~ /^loment/",
           "group": "loment@1"
         },
         {
           "command": "loment.run",
-          "when": "editorLangId == loment",
+          "when": "editorLangId =~ /^loment/",
           "group": "loment@2"
         }
       ],
       "editor/title/run": [
         {
           "command": "loment.run",
-          "when": "editorLangId == loment",
+          "when": "editorLangId =~ /^loment/",
           "group": "navigation@0"
         }
       ]
