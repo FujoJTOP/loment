@@ -40557,12 +40557,66 @@ L41_sc_short:
   br label %L42_sc_end
 L42_sc_end:
   %t44 = phi i1 [ %t43, %L40_sc_rhs ], [ true, %L41_sc_short ]
-  br i1 %t44, label %L43_then, label %L44_else
-L43_then:
+  br i1 %t44, label %L44_sc_short, label %L43_sc_rhs
+L43_sc_rhs:
+  %t45 = load i32, ptr %n.addr
+  %t46 = icmp eq i32 %t45, 46
+  br label %L45_sc_end
+L44_sc_short:
+  br label %L45_sc_end
+L45_sc_end:
+  %t47 = phi i1 [ %t46, %L43_sc_rhs ], [ true, %L44_sc_short ]
+  br i1 %t47, label %L47_sc_short, label %L46_sc_rhs
+L46_sc_rhs:
+  %t48 = load i32, ptr %n.addr
+  %t49 = icmp eq i32 %t48, 47
+  br label %L48_sc_end
+L47_sc_short:
+  br label %L48_sc_end
+L48_sc_end:
+  %t50 = phi i1 [ %t49, %L46_sc_rhs ], [ true, %L47_sc_short ]
+  br i1 %t50, label %L50_sc_short, label %L49_sc_rhs
+L49_sc_rhs:
+  %t51 = load i32, ptr %n.addr
+  %t52 = icmp eq i32 %t51, 53
+  br label %L51_sc_end
+L50_sc_short:
+  br label %L51_sc_end
+L51_sc_end:
+  %t53 = phi i1 [ %t52, %L49_sc_rhs ], [ true, %L50_sc_short ]
+  br i1 %t53, label %L53_sc_short, label %L52_sc_rhs
+L52_sc_rhs:
+  %t54 = load i32, ptr %n.addr
+  %t55 = icmp eq i32 %t54, 232
+  br label %L54_sc_end
+L53_sc_short:
+  br label %L54_sc_end
+L54_sc_end:
+  %t56 = phi i1 [ %t55, %L52_sc_rhs ], [ true, %L53_sc_short ]
+  br i1 %t56, label %L56_sc_short, label %L55_sc_rhs
+L55_sc_rhs:
+  %t57 = load i32, ptr %n.addr
+  %t58 = icmp eq i32 %t57, 233
+  br label %L57_sc_end
+L56_sc_short:
+  br label %L57_sc_end
+L57_sc_end:
+  %t59 = phi i1 [ %t58, %L55_sc_rhs ], [ true, %L56_sc_short ]
+  br i1 %t59, label %L59_sc_short, label %L58_sc_rhs
+L58_sc_rhs:
+  %t60 = load i32, ptr %n.addr
+  %t61 = icmp eq i32 %t60, 291
+  br label %L60_sc_end
+L59_sc_short:
+  br label %L60_sc_end
+L60_sc_end:
+  %t62 = phi i1 [ %t61, %L58_sc_rhs ], [ true, %L59_sc_short ]
+  br i1 %t62, label %L61_then, label %L62_else
+L61_then:
   ret i32 1
-L44_else:
-  br label %L45_end
-L45_end:
+L62_else:
+  br label %L63_end
+L63_end:
   ret i32 0
 }
 ; chk_excl_net -> u32
@@ -66836,20 +66890,74 @@ L62_sc_short:
   br label %L63_sc_end
 L63_sc_end:
   %t63 = phi i1 [ %t62, %L61_sc_rhs ], [ true, %L62_sc_short ]
-  br i1 %t63, label %L64_then, label %L65_else
-L64_then:
-  ret i32 3
-L65_else:
-  br label %L66_end
-L66_end:
+  br i1 %t63, label %L65_sc_short, label %L64_sc_rhs
+L64_sc_rhs:
   %t64 = load i32, ptr %num.addr
-  %t65 = icmp eq i32 %t64, 60
-  br i1 %t65, label %L67_then, label %L68_else
-L67_then:
+  %t65 = icmp eq i32 %t64, 46
+  br label %L66_sc_end
+L65_sc_short:
+  br label %L66_sc_end
+L66_sc_end:
+  %t66 = phi i1 [ %t65, %L64_sc_rhs ], [ true, %L65_sc_short ]
+  br i1 %t66, label %L68_sc_short, label %L67_sc_rhs
+L67_sc_rhs:
+  %t67 = load i32, ptr %num.addr
+  %t68 = icmp eq i32 %t67, 47
+  br label %L69_sc_end
+L68_sc_short:
+  br label %L69_sc_end
+L69_sc_end:
+  %t69 = phi i1 [ %t68, %L67_sc_rhs ], [ true, %L68_sc_short ]
+  br i1 %t69, label %L71_sc_short, label %L70_sc_rhs
+L70_sc_rhs:
+  %t70 = load i32, ptr %num.addr
+  %t71 = icmp eq i32 %t70, 53
+  br label %L72_sc_end
+L71_sc_short:
+  br label %L72_sc_end
+L72_sc_end:
+  %t72 = phi i1 [ %t71, %L70_sc_rhs ], [ true, %L71_sc_short ]
+  br i1 %t72, label %L74_sc_short, label %L73_sc_rhs
+L73_sc_rhs:
+  %t73 = load i32, ptr %num.addr
+  %t74 = icmp eq i32 %t73, 232
+  br label %L75_sc_end
+L74_sc_short:
+  br label %L75_sc_end
+L75_sc_end:
+  %t75 = phi i1 [ %t74, %L73_sc_rhs ], [ true, %L74_sc_short ]
+  br i1 %t75, label %L77_sc_short, label %L76_sc_rhs
+L76_sc_rhs:
+  %t76 = load i32, ptr %num.addr
+  %t77 = icmp eq i32 %t76, 233
+  br label %L78_sc_end
+L77_sc_short:
+  br label %L78_sc_end
+L78_sc_end:
+  %t78 = phi i1 [ %t77, %L76_sc_rhs ], [ true, %L77_sc_short ]
+  br i1 %t78, label %L80_sc_short, label %L79_sc_rhs
+L79_sc_rhs:
+  %t79 = load i32, ptr %num.addr
+  %t80 = icmp eq i32 %t79, 291
+  br label %L81_sc_end
+L80_sc_short:
+  br label %L81_sc_end
+L81_sc_end:
+  %t81 = phi i1 [ %t80, %L79_sc_rhs ], [ true, %L80_sc_short ]
+  br i1 %t81, label %L82_then, label %L83_else
+L82_then:
+  ret i32 3
+L83_else:
+  br label %L84_end
+L84_end:
+  %t82 = load i32, ptr %num.addr
+  %t83 = icmp eq i32 %t82, 60
+  br i1 %t83, label %L85_then, label %L86_else
+L85_then:
   ret i32 4
-L68_else:
-  br label %L69_end
-L69_end:
+L86_else:
+  br label %L87_end
+L87_end:
   ret i32 0
 }
 ; pt_tok_num -> u32

@@ -201,11 +201,23 @@ jobs:
           python-version: "3.11"
 
       # 顺序是硬的，见上面「最后两件」那一节：**名字进 GLOBS 的先生成，清单最后算**。
-      # 依赖顺序：种子 -> surface_data -> 手册 -> 发布清单 -> 校验和。
+      # 依赖顺序：改号 -> 种子 -> surface_data -> 手册 -> 发布清单 -> 校验和。
       - name: 重算生成物
         if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         run: |
           set -e
+          # **改号排在清单之前**：它改的是**文件名**，而清单记的正是文件名 + 哈希。
+          # 两条线同时取一个号就撞（实测：main 上撞过 7 个号）。这里按 `origin/main` 判一遍 ——
+          # 只有**这一次新增**的那一份会被挪到下一个空号，已经在 base 上的一个不动。
+          # 退 2 = 取不到 base，那**不改号**（不确定时改号比不改更坏，见工具文件头）。
+          git fetch -q origin main || true
+          rc=0
+          python tools/loment_docs.py --fix || rc=$?
+          case "$rc" in
+            0) : ;;
+            1) echo "::error::改号之后 docs/ 仍有重号"; exit 1 ;;
+            *) echo "::notice::这一轮没改号（取不到 origin/main，rc=$rc）" ;;
+          esac
           python tools/loment_seed.py --emit
           python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
           python tools/loment_manual.py --emit docs/manual
@@ -235,8 +247,11 @@ jobs:
         if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         run: |
           set -e
+          # `docs/NNN-slug.md` 那一支是**改号**用的（`tools/loment_docs.py --fix`）：撞号时它把
+          # **新增的那一份**换个号，于是这里会出现**新路径**。刻意收窄到"带号的 .md"——
+          # 别的文档改动不在这条路径上，仍然会判成 stray。
           stray=$(git diff HEAD --name-only | cut -c1- \
-            | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/' || true)
+            | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/|^docs/[0-9]{1,4}-[^/]+\.md$' || true)
           if [ -n "$stray" ]; then
             echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着生成物命令坏了："
             echo "$stray"
@@ -258,10 +273,12 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # 点名 add，不用 `git add -A`（本仓纪律：提交要能一眼看清收了什么）
+          # 点名 add，不用 `git add -A`（本仓纪律：提交要能一眼看清收了什么）。
+          # `docs/` 是给**改号**留的：撞号时 `--fix` 会把新增那份改名，重命名要两边都收
+          # （`git add docs` 同时收下删除与新增）。白名单守卫已经把可动的路径钉死了。
           git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt \
-                  loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual
-          git commit -m "[生成物] 只有生成物：种子 + surface_data + 发布清单 + SHA256SUMS + 手册（CI 自动重算）"
+                  loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
+          git commit -m "[生成物] 只有生成物：种子 + surface_data + 发布清单 + SHA256SUMS + 手册（CI 自动重算；撞号的 docs 会被改号）"
           # 推回的目标由上面那一步决定：普通 push 是本仓的分支，fork 的 PR 是**人家**的分支
           # （后者要求 PR 勾了 "Allow edits by maintainers"，已在 guard 里查过）。
           git push "https://x-access-token:${GH_TOKEN}@${REMOTE}.git" "HEAD:${BRANCH}"

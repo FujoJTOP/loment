@@ -7,7 +7,7 @@
 # 所以这条独立出来跑同一组对账。
 #
 # 三件事:
-#   1. 契约本身的形状（23 个号 / 15 个 net / 6 个点名不做 / 不相交）；
+#   1. 契约本身的形状（29 个号 / 21 个 net / **0 个点名不做** / 不相交）；
 #   2. 四处对账（编译器、链接器、自举 checker、自举 potato）；
 #   3. **这条判据自己会红** —— 四个方向各改一次，看它报不报。
 #
@@ -40,9 +40,12 @@ def _contract() -> tuple[dict[int, str], dict[int, str]]:
     errs = lomc.check(mod)
     assert errs == [], f"lom/net.lom 自己不合法: {errs[:2]}"
     sc = next(e for e in mod.enums if e.name == "Syscall")
-    nd = next(e for e in mod.enums if e.name == "NotDispatched")
+    # 2026-10-12 起联网面没有「点名不做」了 —— 枚举**不在**契约里就是空（留空枚举
+    # 过不了检查器），所以形状判据钉的是「它不在 **或** 它是空的」。
+    nd = next((e for e in mod.enums if e.name == "NotDispatched"), None)
     return ({v.value: v.meta.get("surface") for v in sc.variants},
-            {v.value: v.meta.get("surface") for v in nd.variants})
+            {v.value: v.meta.get("surface") for v in
+             (nd.variants if nd is not None else [])})
 
 
 def _audit() -> list[str]:
@@ -67,9 +70,9 @@ def test_contract_shape():
     assert not (set(want) & set(nd)), f"同一个号既派发又点名不做: {sorted(set(want) & set(nd))}"
     # 数：与 docs/224 §6 那几行实测对得上（改了这里就该改文档，反之亦然）
     net = [n for n, s in want.items() if s == "net"]
-    assert len(want) == 23, f"派发面是 23 个号，得到 {len(want)}"
-    assert len(net) == 15, f"net 面是 15 个号，得到 {len(net)}"
-    assert len(nd) == 6, f"点名不做是 6 个号，得到 {len(nd)}"
+    assert len(want) == 29, f"派发面是 29 个号，得到 {len(want)}"
+    assert len(net) == 21, f"net 面是 21 个号，得到 {len(net)}"
+    assert len(nd) == 0, f"点名不做**已经清零**（联网面补完），得到 {len(nd)}"
     print(f"      {len(want)} 个号（net {len(net)}）+ {len(nd)} 个点名不做，面 {sorted(names)}")
 
 
@@ -102,8 +105,10 @@ def test_the_criterion_can_go_red():
         cases.append(("派发面少一个", lambda: _audit()))
         lomelf.PE_SYSCALLS = orig_pe
         # ④ **顺手实现了一个"点名不做"的号** —— 这一格最值得钉: 它正是"名单会腐烂"的形状
-        lomelf.PE_SYSCALLS = orig_pe + ((46, "net", "__ws_sendmsg"),)
-        cases.append(("顺手实现 sendmsg", lambda: _audit()))
+        # 「顺手多认一个号」：`NotDispatched` 已经空了，所以拿一个**谁都没有的号**当探针
+        # —— 这一格钉的仍是"派发面比声明面宽"那一类漂移。
+        lomelf.PE_SYSCALLS = orig_pe + ((9999, "net", "__ws_nothing"),)
+        cases.append(("派发面多一个", lambda: _audit()))
         for tag, fn in cases:
             assert fn(), f"改了「{tag}」而判据没报 —— 这条判据是空转的"
     finally:
