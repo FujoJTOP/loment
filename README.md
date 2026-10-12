@@ -45,7 +45,7 @@ binaries plus the standard library. `loment run hello.lomt` and you are done.
 
 The language has a **named, citable standard**: **LLS**, the *Loment Language Standard*.
 
-> **[`standard/LLS.md`](standard/LLS.md)** · version `0.1.4.5` · Edition 1
+> **[`standard/LLS.md`](standard/LLS.md)** — the standard, with its version in its own front matter
 
 It is a **frame, not a second copy of the language.** The repository's rule is that the
 authoritative copy of anything exists in exactly one place, so the standard states **no language
