@@ -119,6 +119,10 @@ clang -nostdlib -static        -> ELF     (无 libc, _start 即入口)
   `D:\...` 路径转成 `/mnt/d/...`（`wslpath`）。
 - **PATH**：Windows 走用户级 `Path`（`HKCU`，不需要管理员）；Linux 只打印该加哪一行，
   **不替用户改 shell 配置**（`--no-path` 关掉提示）。
+- **PATH 上有更靠前的同名命令**：安装器只**追加**、不重排别人的 PATH，所以一个更早装下的
+  `lompi` / `loment` 会**静默**盖过这一份 —— 敲 `lompi` 拿到的是旧那份，而**装完不会有一句话
+  提到**（2026-10-12 的报障：`lompi` 一直是 0.1.0）。装完会**点名**它的路径；**不删**它 ——
+  那不是这个安装器的东西。判据两半：静态形状（跨平台，门禁跑得到）+ Windows 上放个诱饵真跑。
 - **文件类型**：Windows 上注册 `.lomt`/`.lom`（ProgID `Loment.Source` / `Loment.L0`，
   HKCU only），与 `tools/loment_filetype.py` 同一套键；`-NoFileType` 可关。
 - **冒烟测试**：装完立刻 `loment version` + 编一个示例，失败就报错退出（不是"复制完就完事"）。

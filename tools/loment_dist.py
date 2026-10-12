@@ -855,6 +855,22 @@ done
 [ -n "$prefix" ] || { echo "install: empty --prefix" >&2; exit 2; }
 src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# A `lompi` or `loment` that is NOT ours but sits EARLIER on PATH wins, silently: you type
+# `lompi version` and get an older standalone build, with nothing anywhere saying why. This
+# installer never reorders a PATH it does not own, so a copy installed earlier by hand stays
+# in front for good. Name it; do not remove it -- that is not this installer's call.
+warn_shadowed() {
+    for _n in loment lompi; do
+        _hit=$(command -v "$_n" 2>/dev/null || true)
+        case "$_hit" in
+            ""|"$prefix/bin/$_n") ;;
+            *) echo "install: WARNING: '$_n' on PATH is $_hit -- not this install" >&2
+               echo "install:          that one comes first and wins; remove or rename it," >&2
+               echo "install:          or put $prefix/bin ahead of it" >&2 ;;
+        esac
+    done
+}
+
 if [ "$uninstall" = 1 ]; then
     # Take back the libraries this package put into lompi's store. Ask lompi where that is
     # BEFORE deleting the binary (same question the install side asked, so same answer),
@@ -1010,6 +1026,7 @@ case ":${PATH}:" in
         echo "install: put $prefix/bin on PATH, e.g."
         echo "         echo 'export PATH=\"$prefix/bin:\$PATH\"' >> ~/.profile" >&2 ; } ;;
 esac
+warn_shadowed
 '''
 
 INSTALL_PS1 = r'''# install.ps1 - Loment @DISPLAY@ installer for Windows (native toolchain).
@@ -1081,6 +1098,27 @@ function Add-PathEntry([string]$dir) {
     if ($cur -and ($cur.Split(';') -contains $dir)) { return }
     $new = if ($cur) { "$cur;$dir" } else { $dir }
     [Environment]::SetEnvironmentVariable('Path', $new, 'User')
+}
+
+# A `lompi` or `loment` that is NOT ours but sits EARLIER on PATH wins, silently: you type
+# `lompi version` and get an older standalone build, with nothing anywhere saying why --
+# "lompi is still 0.1.0" is then unattributable. This installer APPENDS to PATH on purpose
+# (it must not reorder a machine it does not own), so a copy installed earlier by hand stays
+# in front for good. Name it, once, and never touch it -- deleting someone else's command is
+# not this installer's call. 2026-10-12: a user reported exactly this.
+function Show-Shadowed {
+    $mine = @('loment', 'lompi')
+    $found = 0
+    foreach ($n in $mine) {
+        $c = @(Get-Command $n -CommandType Application -ErrorAction SilentlyContinue)[0]
+        if (-not $c -or -not $c.Source) { continue }
+        if ($c.Source.ToLower().StartsWith($BinDir.ToLower())) { continue }
+        Say "[3a/6] WARNING: '$n' on PATH resolves to $($c.Source) -- not this install."
+        Say "        That one comes first and wins; remove or rename it,"
+        Say "        or put $BinDir ahead of it."
+        $found++
+    }
+    if ($found -eq 0) { Say "[3a/6] no other loment/lompi earlier on PATH" }
 }
 
 function Find-Editor {
@@ -1264,6 +1302,7 @@ Say "[2/6] toolchain -> $BinDir"
 
 if ($NoPath) { Say "[3/6] PATH unchanged (-NoPath)" }
 else { Add-PathEntry $BinDir; Say "[3/6] user PATH += $BinDir" }
+Show-Shadowed
 
 & (Join-Path $BinDir 'loment.cmd') version
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LASTEXITCODE" }
