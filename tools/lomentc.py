@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+import loment_channel  # noqa: E402
 
 Tok = lomc.Tok
 LomError = lomc.LomError
@@ -1182,11 +1183,12 @@ MAXDEPTH = 8
 #: 所以这里是一张**维 → 取值**的表，而不是一串散在各处的字面量 —— 加一维就只动这一处。
 #: （改之前 `("std", "no_std")` 裸写了三遍，那种写法加第二维必漏。）
 #:
-#: 今天四维：
+#: 今天五维：
 #:   * `mode`    —— `std` / `no_std`：跑在宿主上还是裸机上（`docs/143` §3.2）；
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
-#:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）。
+#:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
+#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -1207,17 +1209,25 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 取值**刻意不带生态名**：今天是 libc/zlib，明天是 JVM/CPython —— 与 `runtime` 同一条
     # 纪律，装的东西不进值名。
     "port": ("sealed", "hosted"),
+    # **执行模型**（`docs/231`，用户 2026-10-11 定第五维）。与 `runtime` 同一条纪律：
+    # 取值**只说"有没有"**，不说"是哪一档"—— 照 `docs/229` §1.5.5 那张梯子，档位会随年份长
+    # （T0 解释 / T1 反馈向量 / T2 基线编译 / T3 优化+去优化），钉进值名里就等于把今天的内容
+    # 钉成这一维的身份。**默认 `no_vm`** —— 默认档不许改变任何现有程序的行为。
+    #
+    # **它今天不提供任何东西**（没有字节码、没有解释器，`docs/231` §1.3），所以被**渠道闸**
+    # 关在发行版外面（`_vm_gate` 那一段）：写得出、却什么也拿不到，比写不出来更坏。
+    "vm": ("vm", "no_vm"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port")
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed"}
+                 "port": "sealed", "vm": "no_vm"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -1225,6 +1235,7 @@ CORE_DIM_ZH = {
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
+    "vm": "执行模型（`vm` / `no_vm`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -3786,6 +3797,29 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 + (f"这一类构造本单元另有 {_rest} 处。" if _rest else "")
                 + "要运行期就在根单元写 `choose runtime`；不要就把这个构造换掉")
 
+    # **渠道闸**（`docs/231` §2）：`vm` 这一维今天**不提供任何东西**（没有字节码、
+    # 没有解释器，`docs/231` §1.3）—— 所以它被关在**发行版**外面。用户 2026-10-11 的话：
+    # 「不要在发行版 Loment 里被调用，所有调用 VM 的都是非法的，只能 dev 可以被调用，
+    # 直到第一个可使用的 LVM 诞生」。
+    #
+    # **为什么这是一条"闸"而不是一句提醒**：`choose vm` 若在发行版里编得过，它就是
+    # **一句用户写得出、却什么也拿不到的承诺** —— 而承诺落空比拒绝更坏。发行版说"不"。
+    #
+    # **它不看冲突表**：`vm` 与 `no_runtime` 今天确实合不来（VM 要用运行期），但那是
+    # 上面那条**既有的**检查接住的（"声明了 `no_runtime` 但它会让产物带上运行期"），
+    # 不是一条新写的冲突 —— 少写一条冲突、多复用一条既有规则，与那条自己的口径一致。
+    #
+    # **次序**：排在运行期那条**之后** —— 自举侧的合并结果就是这个次序
+    # （`checker.lomt` 的强保证块在 `eff_vm` 那块之前），两边报文次序才对得上。
+    if _eff["vm"] == "vm" and loment_channel.RELEASE:
+        _ln = next((l for _d, _w, l in reversed(mod.choose_lines) if _w == "vm"), 1)
+        errs.append(
+            f"{_ln}: 发行版不含 VM —— `choose vm` 只在**开发通道**可用。"
+            f"这一档今天还没有引擎：字节码与解释器都还没写（`docs/231` §1.3），"
+            f"所以发行版里它只能是一句拿不到的承诺。"
+            f"**修法二选一**：删掉这一行（回到默认的 `no_vm`），"
+            f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
+
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
@@ -5008,7 +5042,12 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v12 = v11 + **面的组成** `surfaces`（`docs/224`）：机调用站点按面分一分
         # （`net`/`file`/`mem`/`proc`/`other`）。与 `gc_ladder` 同形，但多一条**交叉**：
         # `total_sites` 必然等于 `boundary.syscalls`。
-        "potato": "v12",
+        # v13 = v12 + **执行模型** `vm`（`docs/231`）：`vm` / `no_vm`。与 `mode`/`gc`/
+        # `runtime`/`port` 同级同形 —— 一个字符串取值、**必填**、只有根单元能定，所以
+        # "这份产物是给 VM 的还是原生的"是**不读源码可判**的。
+        # ⚠ 这一档今天**只在开发通道**编得出来（渠道闸，`docs/231` §2）：发行版里 `choose vm`
+        # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
+        "potato": "v13",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5032,6 +5071,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **必填**，所以"这份产物通不通着世界"是**不读源码可判的**，而不是"看源码里有没有
         # `choose hosted`"。这正是 `docs/219` §7 那句"测量强于声明"在这一维的落法。
         "port": mod.chooses.get("port", CORE_DEFAULTS["port"]),
+        # **执行模型**（`docs/231`）：`vm` / `no_vm`。与上面四维同一条纪律 —— **必填**，
+        # 所以"这份产物是给 VM 的还是原生的"是**不读源码可判的**（`docs/229` §4.1 那处
+        # 空白的第一格）。发行版里它恒为 `no_vm`（渠道闸）。**它今天不承诺性能**：
+        # 没有字节码、没有解释器，`choose vm` 的产物与 `no_vm` **逐字节相同**。
+        "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。

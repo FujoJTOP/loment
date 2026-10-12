@@ -121,6 +121,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 这份报告的四层直方图必须逐份等于 `_count_gc_ladder()`，漂了就红。
                  "loment_gc_why_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
+                 # 渠道（`docs/231` §5 判据 D/F）：发行版种子可重算、且与 dev 只差一个字节；
+                 # 发行版驱动器拒 `choose vm`、dev 收（后者要 clang + WSL，没有就 SKIP）。
+                 "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
@@ -208,6 +211,8 @@ SHARD_COST = {
     "loment_tools_test": 6.3,
     "loment_p8_test": 229.2,
     "loment_rule_parity": 2.5,
+    # 渠道（`docs/231`）：三次自举驱动 IR + 两个 ELF 构建 —— 与本机实测同量级时再收窄。
+    "loment_channel_test": 300.0,
     "loment_seed_test": 243.8,
     "loment_editors_test": 1.3,
     "loment_dist_test": 110.0,
@@ -236,7 +241,7 @@ SHARD_DEFAULT_S = 8.0
 #: （各片现在是同一份镜像, 没有"档位"可言）。
 #: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）, 并把它从
 #: `SHARD_COST` 的负担里拿走（它自己一片, 不再参与均分）。
-ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test")
+ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test", "loment_channel_test")
 
 
 def shards(n: int) -> list[list[str]]:

@@ -571,6 +571,11 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 12 && eq_lit(kp, kl, "surfaces") == 1 {
         return 1;
     }
+    // v13 = v12 + **执行模型**（`docs/231`）：`vm` / `no_vm`。与 `mode`/`gc`/`runtime`/`port`
+    // 同级同形 —— 必填，所以"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
+    if ver >= 13 && eq_lit(kp, kl, "vm") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1525,6 +1530,26 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _c11b: u32 = bad(mem);
         }
     }
+    if ver >= 13 {
+        // **必填**（`docs/231`）—— 与 `mode` / `gc` / `runtime` / `port` 同一条纪律：
+        // 不存在"缺这项"的形态。于是"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
+        // **这里刻意不写冲突**：`vm` 与 `runtime` 今天确实合不来（VM 要用运行期），但那条由
+        // 编译器那边 `docs/227` 的既有检查接住 —— 对象里判不了它，因为"用不用得到运行期"
+        // 要读源码。少写一条判不了的冲突，比写一条判不准的强（`docs/188` 的"宁拒勿猜"）。
+        // ⚠ **每个不合法情形恰好一次 `bad`** —— 两份校验器比的是**错误条数**。
+        let vv: u32 = jget(mem, doc, "vm");
+        let vok: u32 = 0;
+        if vv != NOTFOUND && jkind(mem, vv) == 3 {
+            let lv: u32 = jstr(mem, vv, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lv, "vm") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lv, "no_vm") == 1 {
+                vok = 1;
+            }
+        }
+        if vok == 0 {
+            let _v13: u32 = bad(mem);
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1615,6 +1640,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v12") == 1 {
             ver = 12;
+        }
+        if eq_lit(t, l, "v13") == 1 {
+            ver = 13;
         }
     }
     if ver == NOTFOUND {

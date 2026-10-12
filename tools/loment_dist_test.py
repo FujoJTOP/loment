@@ -258,9 +258,19 @@ def build() -> tuple[Path, Path]:
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
     check("--check 与 SHA256SUMS 一致",
           loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
-    # 归档里的 driver == **种子**现链出来的（中间没被动过）
+    # 归档里的 driver == **本包实际用的那个种子**现链出来的（中间没被动过）。
+    #
+    # ⚠ **包是发行版**（`docs/231` §2.3）：`emit()` 会把 `ACTIVE_SEED` 换成
+    # **发行版种子**（只改 `loment/selfhost/checker.lomt` 那一行渠道常量，再重算）。
+    # 这里原先写死的是 `loment_dist.SEED` —— **仓库里那份 dev 种子** —— 所以渠道闸一进来
+    # 就当场红（2026-10-12 那次 CI 里 50 条判据中唯一的新红）。
+    # 这不是"放宽判据"：比的是**同一个东西**（归档里的 driver 与种子链产物逐字节相同），
+    # 只是那份种子现在**按渠道**取；下面那条断言把"有没有走发行版"单独钉住。
+    assert loment_dist.ACTIVE_SEED == loment_dist.RELEASE_SEED, (
+        "打包没有走发行版种子 —— 包里会是 dev 工具链，于是发行版照样收 `choose vm`"
+        "（`docs/231` §2.3）")
     driver = loment_dist._lomelf_link(
-        loment_dist.SEED.read_text(encoding="utf-8"), "elf")
+        loment_dist.ACTIVE_SEED.read_text(encoding="utf-8"), "elf")
     check("归档里的 loment-driver == 种子链出来的",
           read_tar(tar)["bin/loment-driver"] == driver)
     check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
