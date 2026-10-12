@@ -237,7 +237,7 @@ or Python.
 
 ## Status
 
-`0.1.4` **ships as a package** — a Linux `tar.gz`, a Windows `zip` and a Windows installer.
+`0.1.4.5` **ships as a package** — a Linux `tar.gz`, a Windows `zip` and a Windows installer.
 The toolchain is **self-hosted**: it
 compiles and runs with no Python and no libc at run time. **Not yet finished**: the
 *development-side* self-hosting is incomplete (`docs/189`) — the reference implementation
