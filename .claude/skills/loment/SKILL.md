@@ -345,7 +345,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | Construct | How it is written |
 |---|---|
 | Module | `module <name>` on the first line (no semicolon) |
-| Project mode | `choose` - **four dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` · `runtime` / `no_runtime` · `sealed` / `hosted` - see 2.1 |
+| Project mode | `choose` - **five dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
 | Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the four built-in roots `loment/lib` → `examples` → `selfhost` → `tools`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **At most one name-form `use` per unit today** - see 6.3 |
@@ -371,7 +371,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 
 ### 2.1 Project mode `choose`
 
-`choose` is how a program states a property of **the whole artifact**. There are **four
+`choose` is how a program states a property of **the whole artifact**. There are **five
 dimensions**, each written at most once, and each one lands in the Potato form object - so
 "what kind of artifact is this" is answerable on the side that does **not** read the source.
 
@@ -387,8 +387,9 @@ choose no_std          // ← once for the whole program; the default is std
 | **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` | `gc_manual` | how memory is reclaimed - see section 3.2 |
 | **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
+| **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for |
 
-What holds for all four:
+What holds for all five:
 
 - **It is a property of the program, not of a file**: each dimension appears at most once, and
   **only in the entry unit** (a library pulled in by `use` that writes one is E22). Both compilers
@@ -400,6 +401,14 @@ What holds for all four:
   there is nothing underneath and `hosted` says to link against it. The diagnostic names the pair
   and the reason; it never says "illegal combination".
 - A value that is not in the table is a typo, and a typo **is E22**.
+
+**`vm` is the fifth, and it does nothing yet.** It answers *which execution model is this program
+for?*, and like every other dimension the value says **whether**, never **which** - a name that
+encoded today's tier would have to be renamed in order to add tomorrow's. **In a release build
+`choose vm` is a compile error**; only the development channel accepts it, so an installed
+toolchain can never accept a promise it cannot keep. What that channel produces is
+**byte-identical to `no_vm`** - there is no bytecode and no interpreter yet (`docs/231`,
+`docs/232`).
 
 **`no_std` is what Loment actually is** (it was written for FujoOS in the first place). `std` is
 the default and means you may use host capabilities. **When it is required**: writing systems,
