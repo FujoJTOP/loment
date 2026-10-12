@@ -1083,11 +1083,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "9f7e4c8de8208ccf081f8c1e3cd5d2932280e44e23c3e040f0c46153952c2e0d"
+   "sha256": "03bc50c48ae86ee92aa975b0f85094db1adf7bacb0da7b7784235dc1a649ec4f"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "fcc6090910b1b2655c75a93d5ff83565a36d14ce6cddca221d952ed022c7f4b6"
+   "sha256": "37f738a12d0a2d1310f29c6d1ebd5d90c7bce9a82013e7ac37a364e6a78f88bc"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1887,7 +1887,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "f0a3a764b2b9f30036cc7c3bbad3e0a3f6d34a46c12284a8b2eb173a029bd7fd"
+   "sha256": "5ede23a35a6adb70fdf7c06fefb6a6e0b093bfcdf9c3025f0aecaece16cae413"
   },
   {
    "path": "docs/163-loment-signing.md",
