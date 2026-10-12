@@ -99,7 +99,8 @@ program*, not of a function or a file.
 | `vm` | `vm` / `no_vm` | `no_vm` | Which execution model the program is for |
 
 The set above is **frozen** (§6.1): it is listed here because it will not drift, and a change to it
-takes §6.2. The authoritative table is `tools/lomentc.py:CORE_DIMS`.
+takes §6.2. The authoritative table is `tools/lomentc.py:CORE_DIMS`. **It is not the whole story** —
+§4.5 lists the values that are planned and not yet built.
 
 ### 4.1 Invariants
 
@@ -178,6 +179,44 @@ is worse than a refusal**.
 **This standard states no channel behaviour**, deliberately. Which switch is exposed in which
 channel is a fact about a build, not about the language, and a standard that restated it would go
 stale at the next release. Read the constant.
+
+### 4.5 Planned values
+
+The switch set grows, and a **value may be planned before it is built**. The distinction is the
+whole point of this section: **a value that no implementation accepts is a gap in the
+implementations, not a rule of the language.** "Not built" and "not allowed" read the same at the
+command line and mean opposite things in a standard.
+
+| Value | Dimension | What it declares |
+|---|---|---|
+| `no_gc` | `gc` | That the artifact carries **no collector**. |
+
+The position behind `no_gc` is already the language's, and is already checkable: **an internal
+absence is a first-class claim.** "This artifact has no runtime, no allocator and no collector" is
+enforced by the **compiler** rather than probed at run time, and it is **printed into the
+artifact** (`docs/229` §4.2). Absence is the degenerate case of composition — a program whose
+allocations are all settled before run time ends with an L3 residue of zero, emits no collector,
+and its own summary is what says so (`docs/210` §4.5: *the normal case is that there is no
+component called GC*).
+
+So the **property exists today, as a consequence**. What is planned is the **declaration**: a `gc`
+value that states it, so that "this artifact carries no collector" is a claim the program makes and
+the build records, rather than something a reader has to derive from the numbers. That is the same
+move the language makes everywhere else — which is why the value is on this list rather than
+written off as unreachable.
+
+Two consequences follow:
+
+- A conforming implementation is **not** required to accept `no_gc` today.
+- An implementation that refuses it **must not present the refusal as the language forbidding it.**
+
+When `no_gc` is built it joins the table in §4 and takes §6.2 like any other change to the switch
+set.
+
+> **The plan has no record of its own.** There is no `docs/NNN` for `no_gc`; this clause is the only
+> place the value is written down, and a standard is the wrong place for a plan. The project
+> records plans as numbered documents. Until one exists, read this as a note rather than as a
+> decision.
 
 ---
 
