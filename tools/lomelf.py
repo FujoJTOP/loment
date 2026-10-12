@@ -1422,6 +1422,7 @@ PE_SYSCALLS = (
     (SYS_GETSOCKOPT, "net", "__ws_getsockopt"),
     (SYS_SENDMSG, "net", "__ws_sendmsg"),
     (SYS_RECVMSG, "net", "__ws_recvmsg"),
+    (SYS_SOCKETPAIR, "net", "__ws_socketpair"),
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
@@ -2921,6 +2922,285 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     st32(RCX, 8, RDX)                           # msg_namelen = 收下来的地址长度
     a.label("__ws_rm_fin")
     ld(RAX, RBX, WS_NETTMP + 40)
+    jmp_l("__ws_ret")
+
+    # ---- socketpair(53) --------------------------------------------------
+    # Windows **没有** `socketpair`，而它的 `AF_UNIX` 也不认 Linux 那种路径 —— 所以这里
+    # 造的是**回环上的一对真 socket**（STREAM→TCP、DGRAM→两条互 connect 的 UDP）。
+    # 怎么做：**调内部调度器**（把 Linux 号与参数摆好 `call __win_syscall`），于是
+    # `socket`/`bind`/`getsockname`/`listen`/`connect`/`accept` 全走那几条**已经有两平台
+    # 语料钉着的**路径 —— 比在这里手搓一串 WinSock 调用少一大截、也都验过。
+    # 与 Linux 的差别写进 `docs/234`（不是 AF_UNIX、没有 SCM_RIGHTS、getsockname 报 AF_INET，
+    # 且这一对 fd 不是"最低的两个"）。
+    a.label("__ws_socketpair")                  # rdi=domain rsi=type rdx=proto r10=sv
+    st(RSP, 0x30, RSI)                          # type
+    st(RSP, 0x38, RDX)                          # proto
+    st(RSP, 0x40, R10)                          # sv
+    xor_eax()
+    st(RBX, WS_NETTMP, RAX)                     # listener / a1（0 = 还没建）
+    st(RBX, WS_NETTMP + 8, RAX)                 # client / a2
+    st(RBX, WS_NETTMP + 16, RAX)                # server（只有 STREAM 有）
+    cmp_edi(1)                                  # AF_UNIX
+    jcc_l("e", "__ws_sp_dom")
+    cmp_edi(2)                                  # AF_INET
+    jcc_l("e", "__ws_sp_eopnotsupp")
+    cmp_edi(LINUX_AF_INET6)
+    jcc_l("e", "__ws_sp_eopnotsupp")
+    movi(RAX, -97)                              # EAFNOSUPPORT
+    jmp_l("__ws_ret")
+    a.label("__ws_sp_eopnotsupp")
+    movi(RAX, -95)                              # EOPNOTSUPP：AF_INET 上 Linux 也这么拒
+    jmp_l("__ws_ret")
+    a.label("__ws_sp_dom")
+    ld(RDX, RSP, 0x38)
+    test_rr(RDX, RDX)
+    jcc_l("e", "__ws_sp_proto0")
+    movi(RAX, -93)                              # EPROTONOSUPPORT
+    jmp_l("__ws_ret")
+    a.label("__ws_sp_proto0")
+    ld(RAX, RSP, 0x30)
+    a.emit(mov_rr(RCX, RAX))
+    a.emit(alu_ri(AND_, RCX, 0xF))              # 低 4 位 = 类型
+    st(RBX, WS_NETTMP + 48, RCX)
+    a.emit(alu_ri(AND_, RAX, LINUX_SOCK_NONBLOCK))
+    st(RBX, WS_NETTMP + 56, RAX)                # 要不要非阻塞（建完再设）
+    cmp_ecx(1)
+    jcc_l("e", "__ws_sp_tok")
+    cmp_ecx(2)
+    jcc_l("e", "__ws_sp_tok")
+    movi(RAX, -22)                              # EINVAL（**照 Linux 实测**：类型不认识时
+                                                # `socketpair` 给的是 EINVAL，不是
+                                                # EPROTOTYPE —— 差一个码就是"两边不一致"）
+    jmp_l("__ws_ret")
+    a.label("__ws_sp_tok")
+    cmp_ecx(2)
+    jcc_l("e", "__ws_sp_dgram")
+    # ================= STREAM：回环 TCP 一对 =================
+    movi32(RDI, 2)                              # AF_INET
+    movi32(RSI, 1)                              # SOCK_STREAM
+    movi32(RDX, 0)
+    movi(RAX, SYS_SOCKET)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    st(RBX, WS_NETTMP, RAX)                     # listener
+    # sa = 127.0.0.1:0
+    movi(RCX, 2)
+    st32(RBX, WS_NETTMP + 64, RCX)              # family = AF_INET、port = 0
+    movi32(RCX, 0x0100007F)                     # 127.0.0.1（网络序）
+    st32(RBX, WS_NETTMP + 68, RCX)
+    xor_eax()
+    st32(RBX, WS_NETTMP + 72, RAX)
+    st32(RBX, WS_NETTMP + 76, RAX)
+    # bind(listener, sa, 16)
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi32(RDX, 16)
+    movi(RAX, SYS_BIND)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # listen(listener, 1)
+    ld(RDI, RBX, WS_NETTMP)
+    movi32(RSI, 1)
+    movi(RAX, SYS_LISTEN)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # getsockname(listener, sa, &len=16) —— 端口落回 sa，于是 sa 就是"对端地址"
+    movi32(RCX, 16)
+    st32(RBX, WS_NETTMP + 80, RCX)
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi(RDX, PE_STATE_VA + WS_NETTMP + 80)
+    movi(RAX, SYS_GETSOCKNAME)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # client = socket(AF_INET, SOCK_STREAM, 0)
+    movi32(RDI, 2)
+    movi32(RSI, 1)
+    movi32(RDX, 0)
+    movi(RAX, SYS_SOCKET)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    st(RBX, WS_NETTMP + 8, RAX)                 # client
+    # connect(client, sa, 16)
+    ld(RDI, RBX, WS_NETTMP + 8)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi32(RDX, 16)
+    movi(RAX, SYS_CONNECT)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # server = accept(listener, NULL, NULL)
+    ld(RDI, RBX, WS_NETTMP)
+    xor_eax()
+    a.emit(mov_rr(RSI, RAX))
+    a.emit(mov_rr(RDX, RAX))
+    movi(RAX, SYS_ACCEPT)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    st(RBX, WS_NETTMP + 16, RAX)                # server
+    # 监听者用完就关（Linux 的 socketpair 也不会留这个 fd）
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RAX, SYS_CLOSE)
+    a.call("__win_syscall")
+    xor_eax()
+    st(RBX, WS_NETTMP, RAX)                     # 标记"已关"，别在清理时重复关
+    jmp_l("__ws_sp_finish")
+    # ================= DGRAM：两条互 connect 的 UDP =================
+    a.label("__ws_sp_dgram")
+    movi32(RDI, 2)
+    movi32(RSI, 2)                              # SOCK_DGRAM
+    movi32(RDX, 0)
+    movi(RAX, SYS_SOCKET)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    st(RBX, WS_NETTMP, RAX)                     # a1
+    movi(RCX, 2)
+    st32(RBX, WS_NETTMP + 64, RCX)              # a1 的 sa：127.0.0.1:0
+    movi32(RCX, 0x0100007F)
+    st32(RBX, WS_NETTMP + 68, RCX)
+    xor_eax()
+    st32(RBX, WS_NETTMP + 72, RAX)
+    st32(RBX, WS_NETTMP + 76, RAX)
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi32(RDX, 16)
+    movi(RAX, SYS_BIND)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    movi32(RCX, 16)
+    st32(RBX, WS_NETTMP + 80, RCX)
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi(RDX, PE_STATE_VA + WS_NETTMP + 80)
+    movi(RAX, SYS_GETSOCKNAME)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # a2
+    movi32(RDI, 2)
+    movi32(RSI, 2)
+    movi32(RDX, 0)
+    movi(RAX, SYS_SOCKET)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    st(RBX, WS_NETTMP + 8, RAX)                 # a2
+    movi(RCX, 2)
+    st32(RBX, WS_NETTMP + 96, RCX)              # a2 的 sa
+    movi32(RCX, 0x0100007F)
+    st32(RBX, WS_NETTMP + 100, RCX)
+    xor_eax()
+    st32(RBX, WS_NETTMP + 104, RAX)
+    st32(RBX, WS_NETTMP + 108, RAX)
+    ld(RDI, RBX, WS_NETTMP + 8)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 96)
+    movi32(RDX, 16)
+    movi(RAX, SYS_BIND)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    movi32(RCX, 16)
+    st32(RBX, WS_NETTMP + 80, RCX)
+    ld(RDI, RBX, WS_NETTMP + 8)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 96)
+    movi(RDX, PE_STATE_VA + WS_NETTMP + 80)
+    movi(RAX, SYS_GETSOCKNAME)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    # 互 connect（Linux 的 DGRAM socketpair 也是连着的）
+    ld(RDI, RBX, WS_NETTMP)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 96)
+    movi32(RDX, 16)
+    movi(RAX, SYS_CONNECT)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    ld(RDI, RBX, WS_NETTMP + 8)
+    movi(RSI, PE_STATE_VA + WS_NETTMP + 64)
+    movi32(RDX, 16)
+    movi(RAX, SYS_CONNECT)
+    a.call("__win_syscall")
+    test_rax()
+    jcc_l("s", "__ws_sp_err")
+    a.label("__ws_sp_finish")
+    # 要非阻塞就把两边都设上（建的时候故意用阻塞的：非阻塞的 connect 立刻返回）
+    ld(RAX, RBX, WS_NETTMP + 56)
+    test_rax()
+    jcc_l("e", "__ws_sp_sv")
+    movi(RCX, 1)
+    st(RBX, WS_SOCKTMP, RCX)                    # FIONBIO 的 u_long = 1
+    ld(RDI, RBX, WS_NETTMP)
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_sp_nb2")
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_sp_nb2")                   # 那个 fd 已经关了（listener）
+    a.emit(mov_rr(RCX, RAX))
+    movi32(RDX, WIN_FIONBIO)
+    movi(R8, PE_STATE_VA + WS_SOCKTMP)
+    api("ioctlsocket")
+    a.label("__ws_sp_nb2")
+    ld(RDI, RBX, WS_NETTMP + 8)
+    a.call("__ws_sock_of_fd")
+    a.emit(mov_rr(RCX, RAX))
+    movi32(RDX, WIN_FIONBIO)
+    movi(R8, PE_STATE_VA + WS_SOCKTMP)
+    api("ioctlsocket")
+    # STREAM 那一格还有 server 这个 fd 也要设
+    ld(RDI, RBX, WS_NETTMP + 16)
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_sp_sv")
+    a.call("__ws_sock_of_fd")
+    a.emit(mov_rr(RCX, RAX))
+    movi32(RDX, WIN_FIONBIO)
+    movi(R8, PE_STATE_VA + WS_SOCKTMP)
+    api("ioctlsocket")
+    a.label("__ws_sp_sv")
+    # sv[0] / sv[1]
+    ld(RCX, RSP, 0x40)                          # sv
+    ld(R9, RBX, WS_NETTMP + 16)
+    test_rr(R9, R9)
+    jcc_l("e", "__ws_sp_svd")
+    ld(RDX, RBX, WS_NETTMP + 8)                 # STREAM：sv[0] = client
+    st32(RCX, 0, RDX)
+    ld(RDX, RBX, WS_NETTMP + 16)                #        sv[1] = server
+    st32(RCX, 4, RDX)
+    jmp_l("__ws_sp_svdone")
+    a.label("__ws_sp_svd")
+    ld(RDX, RBX, WS_NETTMP)                     # DGRAM：sv[0] = a1
+    st32(RCX, 0, RDX)
+    ld(RDX, RBX, WS_NETTMP + 8)                 #        sv[1] = a2
+    st32(RCX, 4, RDX)
+    a.label("__ws_sp_svdone")
+    xor_eax()
+    jmp_l("__ws_ret")
+    a.label("__ws_sp_err")
+    st(RBX, WS_NETTMP + 88, RAX)                # 先记下 errno
+    ld(RDI, RBX, WS_NETTMP + 16)
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_sp_e1")
+    a.call("__ws_sock_drop")
+    a.label("__ws_sp_e1")
+    ld(RDI, RBX, WS_NETTMP + 8)
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_sp_e2")
+    a.call("__ws_sock_drop")
+    a.label("__ws_sp_e2")
+    ld(RDI, RBX, WS_NETTMP)
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_sp_e3")
+    a.call("__ws_sock_drop")
+    a.label("__ws_sp_e3")
+    ld(RAX, RBX, WS_NETTMP + 88)
     jmp_l("__ws_ret")
 
     # ---- socket(af, type, proto) ----------------------------------------

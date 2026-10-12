@@ -1456,11 +1456,128 @@ def _msg_ok(out: bytes) -> bool:
     return out == MSG_GOLDEN
 
 
+SP_DEMO = """module spdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+// 小整数（含负数）打到 stdout —— 错误码要**看得见**，否则两边不一致也只会"都过了"
+fn num(tag: str, v: i64) -> u32 {
+    w(1, tag);
+    let x: i64 = v;
+    if x < 0 {
+        w(1, "-");
+        x = 0 - x;
+    }
+    let buf: ptr = alloc(32);
+    let n: u32 = 0;
+    if x == 0 {
+        store8(buf, 0, 48);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = n;
+    while i > 0 {
+        i = i - 1;
+        syscall4(1, 1, buf as u64 + i as u64, 1);
+    }
+    w(1, "\n");
+    return 0;
+}
+
+fn _start() {
+    // ---- STREAM：一对流式 socket，来回各一次 ----
+    let sv: ptr = alloc(16);
+    let r1: i64 = syscall6(53, 1, 1, 0, sv as u64, 0);
+    if r1 < 0 {
+        die(1, "FAIL socketpair(stream)\n");
+    }
+    let f0: i64 = load8(sv, 0) as i64;
+    let f1: i64 = load8(sv, 4) as i64;
+    let p1: i64 = syscall6(1, f0 as u64, str_ptr("ping") as u64, 4, 0, 0);
+    if p1 != 4 {
+        die(2, "FAIL write a\n");
+    }
+    let rb: ptr = alloc(16);
+    let q1: i64 = syscall6(0, f1 as u64, rb as u64, 4, 0, 0);
+    if q1 != 4 {
+        die(3, "FAIL read a\n");
+    }
+    if load8(rb, 0) != 112 {
+        die(4, "FAIL payload a\n");
+    }
+    let p2: i64 = syscall6(1, f1 as u64, str_ptr("pong") as u64, 4, 0, 0);
+    if p2 != 4 {
+        die(5, "FAIL write b\n");
+    }
+    let q2: i64 = syscall6(0, f0 as u64, rb as u64, 4, 0, 0);
+    if q2 != 4 {
+        die(6, "FAIL read b\n");
+    }
+    if load8(rb, 3) != 103 {
+        die(7, "FAIL payload b\n");
+    }
+    w(1, "SP STREAM OK\n");
+    // ---- DGRAM：一对数据报 socket ----
+    let sv2: ptr = alloc(16);
+    let r2: i64 = syscall6(53, 1, 2, 0, sv2 as u64, 0);
+    if r2 < 0 {
+        die(8, "FAIL socketpair(dgram)\n");
+    }
+    let g0: i64 = load8(sv2, 0) as i64;
+    let g1: i64 = load8(sv2, 4) as i64;
+    let d1: i64 = syscall6(1, g0 as u64, str_ptr("dg") as u64, 2, 0, 0);
+    if d1 != 2 {
+        die(9, "FAIL dgram write\n");
+    }
+    let d2: i64 = syscall6(0, g1 as u64, rb as u64, 8, 0, 0);
+    if d2 != 2 {
+        die(10, "FAIL dgram read\n");
+    }
+    if load8(rb, 0) != 100 {
+        die(11, "FAIL dgram payload\n");
+    }
+    w(1, "SP DGRAM OK\n");
+    // ---- 错误路：错误码要与 Linux **逐字相同**（不是"都是负数"就算过）----
+    let e1: i64 = syscall6(53, 2, 1, 0, sv as u64, 0);
+    let _n1: u32 = num("sp(af_inet) = ", e1);
+    let e2: i64 = syscall6(53, 1, 99, 0, sv as u64, 0);
+    let _n2: u32 = num("sp(type99)  = ", e2);
+    syscall6(3, f0 as u64, 0, 0, 0, 0);
+    syscall6(3, f1 as u64, 0, 0, 0, 0);
+    syscall6(3, g0 as u64, 0, 0, 0, 0);
+    syscall6(3, g1 as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+SP_HEAD = b"SP STREAM OK\nSP DGRAM OK\n"
+
+
+def _sp_ok(out: bytes) -> bool:
+    """两行正常路必须过；后两行是**错误码**，值本身钉在这里（Linux 实测）。"""
+    if not out.startswith(SP_HEAD):
+        return False
+    return out[len(SP_HEAD):] == b"sp(af_inet) = -95\nsp(type99)  = -22\n"
+
+
 #: 联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
 NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
              ("polldemo", POLL_DEMO, _poll_ok), ("seldemo", SEL_DEMO, _sel_ok),
-             ("msgdemo", MSG_DEMO, _msg_ok), ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
+             ("msgdemo", MSG_DEMO, _msg_ok), ("spdemo", SP_DEMO, _sp_ok),
+             ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
 
 
 def _shim_blob():
