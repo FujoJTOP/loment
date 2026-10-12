@@ -942,6 +942,234 @@ fn _start() {
     syscall4(60, 0, 0, 0);
 }
 """
+SEL_DEMO = """module seldemo
+choose runtime              // 夹具里用 `%` 与 `/`（位图按字节定位）—— 按 main 的
+                            // `no_runtime` 保证，用到运行期就得在**根单元**声明
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+// 128 字节的 fd_set 位图清零（x86-64 是 16 个 u64）
+fn fs_clr(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 128 {
+        store8(p, i, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// 置第 fd 位：`fd_set` 是**位图**，第 fd 位落在第 `fd / 8` 个字节、字节内第 `fd % 8` 位。
+// ⚠ 别只写第一个字节 —— 这个夹具里第 4 个 socket 就是 fd 8，只写 byte 0 会把那一位
+// **截断成 0**（`1 << 8` 塞进 u8 是 0），于是 writefds 是空的、`select` 干等到超时：
+// 症状长得像"shim 没归一化"，其实是语料自己没置上位。
+fn fs_set(p: ptr, fd: i64) -> u32 {
+    let bi: i64 = fd / 8;
+    let b: u32 = 1;
+    let k: i64 = 0;
+    while k < fd % 8 {
+        b = b * 2;
+        k = k + 1;
+    }
+    let old: u32 = load8(p, bi as u32);
+    store8(p, bi as u32, (old | b) as u8);
+    return 0;
+}
+
+// 第 fd 位是一吗（多位置着也判得对：先除再模）
+fn fs_has(p: ptr, fd: i64) -> u32 {
+    let bi: i64 = fd / 8;
+    let b: u32 = 1;
+    let k: i64 = 0;
+    while k < fd % 8 {
+        b = b * 2;
+        k = k + 1;
+    }
+    let v: u32 = load8(p, bi as u32);
+    if (v / b) % 2 == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+// Linux 的 struct timeval 是**两个 i64**（16 字节）—— Windows 那边是两个 32 位 long，
+// 换算在 shim 里做。这里只写微秒那一格（秒保持 0）：都是亚秒的超时。
+fn put64(p: ptr, off: u32, v: i64) -> u32 {
+    let k: u32 = 0;
+    let x: i64 = v;
+    while k < 8 {
+        store8(p, off + k, (x % 256) as u8);
+        x = x / 256;
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn _start() {
+    let sa0: ptr = alloc(64);
+    let _z: u32 = sa(sa0, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket(ls)\\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let bi: i64 = syscall6(49, ls as u64, sa0 as u64, 16, 0, 0);
+    if bi < 0 {
+        die(2, "FAIL bind\\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(3, "FAIL listen\\n");
+    }
+    let g1: i64 = syscall6(51, ls as u64, sa0 as u64, ln as u64, 0, 0);
+    if g1 < 0 {
+        die(4, "FAIL getsockname\\n");
+    }
+    let c1: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c1 < 0 {
+        die(5, "FAIL socket(c1)\\n");
+    }
+    let n1: i64 = syscall6(42, c1 as u64, sa0 as u64, 16, 0, 0);
+    if n1 < 0 {
+        die(6, "FAIL connect 1\\n");
+    }
+    let a1: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a1 < 0 {
+        die(7, "FAIL accept 1\\n");
+    }
+    let d1: i64 = syscall6(1, c1 as u64, str_ptr("hi") as u64, 2, 0, 0);
+    if d1 != 2 {
+        die(8, "FAIL write 1\\n");
+    }
+    let c2: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c2 < 0 {
+        die(9, "FAIL socket(c2)\\n");
+    }
+    let n2: i64 = syscall6(42, c2 as u64, sa0 as u64, 16, 0, 0);
+    if n2 < 0 {
+        die(10, "FAIL connect 2\\n");
+    }
+    let a2: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a2 < 0 {
+        die(11, "FAIL accept 2\\n");
+    }
+    // ---- ① 可读：a1 有数据、a2 没有 ----
+    let rf: ptr = alloc(128);
+    let wf: ptr = alloc(128);
+    let tv: ptr = alloc(16);
+    let _q0: u32 = fs_clr(rf);
+    let _q1: u32 = fs_clr(wf);
+    let _s1: u32 = fs_set(rf, a1);
+    let _s2: u32 = fs_set(rf, a2);
+    let _t1: u32 = put64(tv, 0, 0);
+    let _t2: u32 = put64(tv, 8, 300000);
+    let r1: i64 = syscall6(23, (a2 + 1) as u64, rf as u64, 0, 0, tv as u64);
+    if r1 != 1 {
+        die(12, "FAIL select(read) count\\n");
+    }
+    if fs_has(rf, a1) != 1 {
+        die(13, "FAIL select(read) a1 ready\\n");
+    }
+    if fs_has(rf, a2) != 0 {
+        die(14, "FAIL select(read) a2 not ready\\n");
+    }
+    w(1, "SELECT READY OK\\n");
+    let rb: ptr = alloc(64);
+    let rd: i64 = syscall6(0, a1 as u64, rb as u64, 8, 0, 0);
+    if rd != 2 {
+        die(15, "FAIL read a1\\n");
+    }
+    // ---- ② 超时：两个都没数据 ----
+    let _q2: u32 = fs_clr(rf);
+    let _s3: u32 = fs_set(rf, a1);
+    let _s4: u32 = fs_set(rf, a2);
+    let _t3: u32 = put64(tv, 8, 200000);
+    let r2: i64 = syscall6(23, (a2 + 1) as u64, rf as u64, 0, 0, tv as u64);
+    if r2 != 0 {
+        die(16, "FAIL select timeout count\\n");
+    }
+    if fs_has(rf, a1) != 0 {
+        die(17, "FAIL timeout a1 not ready\\n");
+    }
+    w(1, "SELECT TIMEOUT OK\\n");
+    // ---- ③ **连接失败**：非阻塞 connect 到一个没人听的端口 ----
+    //    Linux 把它报在 **writefds**，WinSock 报在 **exceptfds** ——
+    //    shim 的出参归一化就是为这一格写的（docs/231）。
+    let c3: i64 = syscall6(41, 2, 2049, 0, 0, 0);
+    if c3 < 0 {
+        die(18, "FAIL socket(c3 nonblock)\\n");
+    }
+    let sa3: ptr = alloc(64);
+    let _z3: u32 = sa(sa3, 0, 1);
+    let n3: i64 = syscall6(42, c3 as u64, sa3 as u64, 16, 0, 0);
+    if n3 == 0 {
+        die(19, "FAIL connect to a closed port should not succeed\\n");
+    }
+    let _q3: u32 = fs_clr(wf);
+    let _s5: u32 = fs_set(wf, c3);
+    // 超时给 **3 秒**：Windows 把"本地端口被拒"这件事升上来要 ~2.8 s（实测，见 docs/230），
+    // Linux 是瞬间。300 ms 在两个平台上都是"没等到"，但那说明不了归一化对错。
+    let _t4: u32 = put64(tv, 8, 3000000);
+    let r3: i64 = syscall6(23, (c3 + 1) as u64, 0, wf as u64, 0, tv as u64);
+    if r3 != 1 {
+        die(20, "FAIL select(connfail) count\\n");
+    }
+    if fs_has(wf, c3) != 1 {
+        die(21, "FAIL connfail not in writefds\\n");
+    }
+    let errb: ptr = alloc(8);
+    let errl: ptr = alloc(8);
+    store8(errl, 0, 4);
+    let eg: i64 = syscall6(55, c3 as u64, 1, 4, errb as u64, errl as u64);
+    if eg < 0 {
+        die(22, "FAIL getsockopt(SO_ERROR)\\n");
+    }
+    if load8(errb, 0) == 0 {
+        die(23, "FAIL SO_ERROR should be non-zero\\n");
+    }
+    w(1, "SELECT CONNFAIL OK\\n");
+    // ---- ④ 三个集合全空 = 睡 timeout（Linux 的 `select(0,NULL,NULL,NULL,&tv)`）----
+    let _t5: u32 = put64(tv, 8, 100000);
+    let r4: i64 = syscall6(23, 0, 0, 0, 0, tv as u64);
+    if r4 != 0 {
+        die(24, "FAIL select sleep\\n");
+    }
+    w(1, "SELECT SLEEP OK\\n");
+    syscall6(3, a1 as u64, 0, 0, 0, 0);
+    syscall6(3, a2 as u64, 0, 0, 0, 0);
+    syscall6(3, c1 as u64, 0, 0, 0, 0);
+    syscall6(3, c2 as u64, 0, 0, 0, 0);
+    syscall6(3, c3 as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+SEL_GOLDEN = b"SELECT READY OK\nSELECT TIMEOUT OK\nSELECT CONNFAIL OK\nSELECT SLEEP OK\n"
+
+
+def _sel_ok(out: bytes) -> bool:
+    return out == SEL_GOLDEN
+
 POLL_GOLDEN = b"POLL READY OK\nPOLL TIMEOUT OK\n"
 
 
@@ -997,7 +1225,8 @@ def _sock_ok(out: bytes) -> bool:
 #: 四份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
 NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
-             ("polldemo", POLL_DEMO, _poll_ok), ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
+             ("polldemo", POLL_DEMO, _poll_ok), ("seldemo", SEL_DEMO, _sel_ok),
+             ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
 
 
 def _shim_blob():

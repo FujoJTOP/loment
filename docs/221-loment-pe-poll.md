@@ -75,7 +75,8 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 | 项 | 现状 |
 |---|---|
 | `poll`(7) | ✅ **已做**（本文） |
-| `select`(23) | **故意不做**，两条理由。① 能力上它与 `poll` **重复**（`poll` 结构体更简单、没有 `FD_SETSIZE` 那堵墙），而它要的是 Linux 的三张 **1024 位位图** ↔ WinSock 的 `fd_set` 数组，是同一个 `select` 之上的**另一套**翻译。② 更硬的一条：**`exceptfds` 没有忠实对应** —— WinSock 的 except 集是"带外数据 + 连接失败"，Linux 的是"异常条件"，没有一对一的映射。按这个 shim 自己的规矩（"**语义仿真，不是差不多能用**"），**近似的 select 比没有 select 更坏**：它会把分歧藏在一个看起来成熟的 API 后面。要补的话集合助手已经在了 |
+| `select`(23) | 见下一行（同一套集合助手，另加出参归一化） |
+| `select`(23) | ✅ **已做**（2026-10-11，`docs/231`）。当时列的两条理由里，① 是"重复"（不构成不做的理由）；② `exceptfds` 没有一对一映射 —— **仍然成立**，所以翻译里加的是**出参归一化**（WinSock 报在 except 的连接失败搬进 write 集 + `SO_ERROR` 自己留一份、读时还回去），而不是把 except 集硬塞给调用方。这一条现在由 `seldemo` 那一格钉住（PE×ELF 逐字节） |
 | `epoll` | 不做：IOCP，不是一次翻译能补的（原文理由仍成立） |
 | `sendmsg` / `recvmsg` | 不做：`iovec` 那一套；`sendto`/`recvfrom` + `syscall7` 已经够写 UDP 回显 |
 | `socketpair` / `AF_UNIX` | 不做：Windows 的语义与路径规则都不同，转发会**假装成功** |
@@ -86,7 +87,7 @@ PE（Windows 原生）与 ELF（WSL）的输出**逐字节相同**，退出码�
 |---|---|
 | `poll` 在 PE 上真的会报"谁就绪" | `polldemo`：两个连接只有一个有数据 ⇒ `poll` 返回 1，且**只有那一条**的 `revents` 非零；读掉之后再 poll ⇒ 返回 **0**（超时） |
 | 两个平台行为一致 | `test_pe_and_elf_agree_on_net_programs`：三份语料 PE vs ELF **逐字节相同** |
-| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：22 个号逐个对上 `PE_DISPATCH` |
+| 派发面没有偷偷少一个号 | `test_pe_shim_dispatches_the_documented_numbers`：逐个对上 `PE_DISPATCH`（本文那一轮是 22 个号；`select` 落地后是 23，见 `docs/231`） |
 | 冻出来的 blob 没漂 | `test_frozen_shim_blob_matches_the_reference`（7362 B） |
 | 孪生那条不变量还在 | `test_pe_selfhost_mirror_matches_reference`（镜像与参考的 PE 逐字节相同；状态区跟着长到 1069192） |
 

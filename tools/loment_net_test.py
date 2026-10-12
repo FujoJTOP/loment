@@ -7,7 +7,7 @@
 # 所以这条独立出来跑同一组对账。
 #
 # 三件事:
-#   1. 契约本身的形状（22 个号 / 14 个 net / 7 个点名不做 / 不相交）；
+#   1. 契约本身的形状（23 个号 / 15 个 net / 6 个点名不做 / 不相交）；
 #   2. 四处对账（编译器、链接器、自举 checker、自举 potato）；
 #   3. **这条判据自己会红** —— 四个方向各改一次，看它报不报。
 #
@@ -67,9 +67,9 @@ def test_contract_shape():
     assert not (set(want) & set(nd)), f"同一个号既派发又点名不做: {sorted(set(want) & set(nd))}"
     # 数：与 docs/224 §6 那几行实测对得上（改了这里就该改文档，反之亦然）
     net = [n for n, s in want.items() if s == "net"]
-    assert len(want) == 22, f"派发面是 22 个号，得到 {len(want)}"
-    assert len(net) == 14, f"net 面是 14 个号，得到 {len(net)}"
-    assert len(nd) == 7, f"点名不做是 7 个号，得到 {len(nd)}"
+    assert len(want) == 23, f"派发面是 23 个号，得到 {len(want)}"
+    assert len(net) == 15, f"net 面是 15 个号，得到 {len(net)}"
+    assert len(nd) == 6, f"点名不做是 6 个号，得到 {len(nd)}"
     print(f"      {len(want)} 个号（net {len(net)}）+ {len(nd)} 个点名不做，面 {sorted(names)}")
 
 
@@ -102,8 +102,8 @@ def test_the_criterion_can_go_red():
         cases.append(("派发面少一个", lambda: _audit()))
         lomelf.PE_SYSCALLS = orig_pe
         # ④ **顺手实现了一个"点名不做"的号** —— 这一格最值得钉: 它正是"名单会腐烂"的形状
-        lomelf.PE_SYSCALLS = orig_pe + ((23, "net", "__ws_select"),)
-        cases.append(("顺手实现 select", lambda: _audit()))
+        lomelf.PE_SYSCALLS = orig_pe + ((46, "net", "__ws_sendmsg"),)
+        cases.append(("顺手实现 sendmsg", lambda: _audit()))
         for tag, fn in cases:
             assert fn(), f"改了「{tag}」而判据没报 —— 这条判据是空转的"
     finally:
