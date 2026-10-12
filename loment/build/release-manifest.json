@@ -1239,7 +1239,7 @@
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "5f1aba2bff964e811593039e66f5c577f598c4519a773750a5efc5e868f886e6"
+   "sha256": "2669cdd4daca56fb22bc417b4eca140b5e667380b63c4e20c6b3451f0506ca23"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -2143,7 +2143,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "d4e74034cc789f777cb1c3383ccfee0e9505fcf66a88a53da738bfdf6b011ee5"
+   "sha256": "3e41125ba6d5290f92bdc2253ebe7ce4da98dfcfff81bfaa23d3706197897a94"
   },
   {
    "path": "docs/manual/api/ahci.md",
