@@ -99,3 +99,37 @@ for CR: `"\r"` compiles to the letter r, and unrecognised escapes are silently d
 * `selftest_net()` 接进自检驱动（`lpi_test.lomt`）：URL 拆解三条自检（认 IP+端口、拒 https、
   拒主机名）现在**真的会跑**；它当场抓出过一个真 bug —— `txt_parse_dec` 返回的是**打包值**
   （高位是数、低位是位数），第一版把它当数用，于是每段都"大于 255"、整个 URL 都判"不认"。
+
+## 6. 判据在 Linux 上翻出的一件旧事：路径分隔符是写死的 `\`
+
+跑 CI 那次 `test_fetch_pulls_the_registry_over_http_itself` 红了，红在**落点**这一格：lompi 报的
+目的地是
+
+```
+lompi: registry fetched into /tmp\.lompi\cache\51217
+```
+
+POSIX 上反斜杠**是普通字符** —— 那不是一条路径，是**一个扁平的文件名**（整串作为一个目录项）。
+
+**为什么一直没露**：本机 Windows 上它是绿的（那边 `\` 是对的），而 Linux 本地这一条判据
+因为**没 clang** 一直跳过。只有 CI（Linux + clang）两样都齐。
+
+查下来是 lompi 的**路径层写死了 Windows 分隔符**：`"\\"` 与 `92 as u8` 散在十几处
+（`cfg_root` / `cfg_join` / `cfg_label` / fetch 落盘 / install 目标 / 缓存源），而 `sys_join`
+用的又是写死的 `/` —— 同一份源码里两套。
+
+**改的只有分隔符，没有动任何规则**：新增 `sys_sep()`，十几处一律用它。它靠**一次运行时探针**
+判平台 —— 拿垫子派发面上没有的 `unlink`(87) 去调：PE 在**取路径之前**就返回 `-ENOSYS`(-38)，
+Linux 对空指针回 `-EFAULT`(-14)，所以探针**不需要缓冲区、也没有副作用**。判定写成
+"比 -30 更负"而不是跟负字面量比相等（那条语法有坑，见 `docs/228`）。
+
+**写明的边界**（都不假装）：
+
+| 事 | 今天的样子 |
+|---|---|
+| `cfg_root` 的两条规则认 `\Users\` / `\AppData\Local\` | 只在 PE 上成立；其余平台落规则 2 —— **exe 旁边**那个 `.lompi`，不是 `$HOME/.lompi`。给 ELF 定一条新根规则是**另一件事**，要先拍 |
+| `sys_can_mkdir()` 恒假 | 照旧。那是**策略**（"lompi 不建目录"），不是平台探针 —— 两个平台都成立 |
+| 探针依赖"PE 不派发 87" | 哪天派发了这里会**静默**翻面；`loment_lompi_test::test_paths_use_the_platform_separator` 两个方向都拦（PE 混 `/`、POSIX 混 `\` 都红） |
+
+`sys_join` 的自检也一起改了：原来钉的是写死的 `47`（`/`），现在钉 `sys_sep()` —— 原来那条
+在 PE 上本身就是错的。

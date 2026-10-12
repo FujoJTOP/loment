@@ -416,6 +416,31 @@ def test_fetch_prints_the_plan_for_https_and_hostnames():
     assert rc2 == 0 and "git clone --depth 1" in out2, out2[:300]
     assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
 
+
+@test
+def test_paths_use_the_platform_separator():
+    """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。
+
+    以前这里是**写死的 `\\`**（`"\\\\"` / `92 as u8` 散在十几处），于是 ELF 上报的落点是
+    `/tmp\\.lompi\\cache\\51217` —— POSIX 上反斜杠是普通字符，那**不是一条路径**，是
+    一个扁平的文件名。`fetch` 那条判据在 CI 上抓到它（本机 Linux 那份因为没 clang
+    一直跳过，所以藏了很久）。
+
+    这一条**两个方向都拦**：PE 上混进 `/`、POSIX 上混进 `\\`，都红 —— 于是"哪天探针
+    静默翻面"不会没人管。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["config"])
+    assert rc == 0, out[:200]
+    line = next((x for x in out.splitlines() if x.startswith("store:")), None)
+    assert line, f"config 没打出 store 行: {out[:300]!r}"
+    sep, other = ("\\", "/") if IS_WIN else ("/", "\\")
+    assert sep in line, f"{'PE' if IS_WIN else 'POSIX'} 上分隔符不对: {line!r}"
+    assert other not in line, f"路径里混进了外来分隔符: {line!r}"
+
+
 @test
 def test_unknown_command_is_a_clean_error():
     rc, out = _run(["definitely-not-a-command"])

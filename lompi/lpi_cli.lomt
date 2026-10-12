@@ -909,8 +909,12 @@ fn cfg_exe_dir(buf: ptr, m: u32, scr: ptr, out: ptr, outcap: u32) -> u32 {
 /// 全局根 (store / cache / lompi.conf 的父目录)。路径写进 out, 返回**命中的规则号**:
 ///   0 = exe 在 `\AppData\Local\` 下 -> 它就是 %LOCALAPPDATA%, 根 = <它>\lompi
 ///   1 = exe 在 `\Users\<名>\` 下      -> 根 = `\Users\<名>\.lompi`
-///   2 = 都不是                       -> 根 = <exe 目录>\.lompi
+///   2 = 都不是                       -> 根 = <exe 目录><分隔符>.lompi
 /// 命中的是哪条会由 `lompi config` 打出来 —— 推错了要看得见。
+///
+/// 规则 0/1 认的是 **Windows 的字面串**, 所以只有 PE 上会命中; 其余平台落到规则 2
+/// (exe 旁边那个 `.lompi`)。**这是既有的规则, 本文只换分隔符** —— 没给 ELF 发明
+/// 新规则 (比如 `$HOME/.lompi`), 那是一条要单独拍的决定。
 pub fn cfg_root(exe_path: ptr, scr: ptr, out: ptr, outcap: u32) -> u32 {
     let n: u32 = txt_len_cstr(exe_path);
     let a: u32 = cfg_find_ci(exe_path, n, "\\AppData\\Local\\");
@@ -929,7 +933,7 @@ pub fn cfg_root(exe_path: ptr, scr: ptr, out: ptr, outcap: u32) -> u32 {
         }
         if ne > ns && ne + 8 <= outcap {
             sys_copy(out, 0, exe_path, 0, ne);
-            txt_put(out, ne, "\\.lompi");
+            sys_put_sep(out, ne, ".lompi");
             return 1;
         }
     }
@@ -939,11 +943,11 @@ pub fn cfg_root(exe_path: ptr, scr: ptr, out: ptr, outcap: u32) -> u32 {
         return 2;
     }
     sys_copy(out, 0, scr, 0, dn);
-    txt_put(out, dn, "\\.lompi");
+    sys_put_sep(out, dn, ".lompi");
     return 2;
 }
 
-/// `root` + `\` + `sub`, 写进 out 并补 NUL。返回总长度。
+/// `root` + <分隔符> + `sub`, 写进 out 并补 NUL。返回总长度。
 pub fn cfg_join(root: ptr, sub: str, out: ptr, outcap: u32) -> u32 {
     let rn: u32 = txt_len_cstr(root);
     let sl: u32 = str_len(sub);
@@ -951,13 +955,13 @@ pub fn cfg_join(root: ptr, sub: str, out: ptr, outcap: u32) -> u32 {
         return 0;
     }
     sys_copy(out, 0, root, 0, rn);
-    let o1: u32 = txt_put(out, rn, "\\");
+    let o1: u32 = sys_append_sep(out, rn);
     let o2: u32 = txt_put(out, o1, sub);
     store8(out, o2, 0 as u8);
     return o2;
 }
 
-/// 读 `<dir>\lompi.conf` 里的标签 (Loment 源码, 形状同 pkg.lomp)。返回长度 (0 = 没有)。
+/// 读 `<dir><分隔符>lompi.conf` 里的标签 (Loment 源码, 形状同 pkg.lomp)。返回长度 (0 = 没有)。
 /// out 不能用 WS_SCR2 (本函数内部拿它拼路径)。
 pub fn cfg_label(ws: ptr, dir: ptr, name: str, out: ptr, outcap: u32) -> u32 {
     let file: ptr = ((ws as u64) + WS_FILE as u64) as ptr;
@@ -967,7 +971,7 @@ pub fn cfg_label(ws: ptr, dir: ptr, name: str, out: ptr, outcap: u32) -> u32 {
         return 0;
     }
     sys_copy(scr, 0, dir, 0, dn);
-    let o: u32 = txt_put(scr, dn, "\\lompi.conf");
+    let o: u32 = sys_put_sep(scr, dn, "lompi.conf");
     store8(scr, o, 0 as u8);
     let got: u64 = sys_read_file(scr, file, 65536);
     if got == SYS_ERR {
@@ -1625,13 +1629,13 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
             }
             let dlen: u32 = txt_len_cstr(dst);
             sys_copy(ffull, 0, dst, 0, dlen);
-            let q1: u32 = sys_append_lit(ffull, dlen, "\\");
+            let q1: u32 = sys_append_sep(ffull, dlen);
             let q2: u32 = sys_append_bytes(ffull, q1, name, nl);
-            let q3: u32 = sys_append_lit(ffull, q2, "\\");
+            let q3: u32 = sys_append_sep(ffull, q2);
             let q4: u32 = sys_append_bytes(ffull, q3, ver, vl);
             store8(ffull, q4, 0 as u8);
             sys_copy(fpath, 0, ffull, 0, q4);
-            let q5: u32 = sys_append_lit(fpath, q4, "\\");
+            let q5: u32 = sys_append_sep(fpath, q4);
             let q6: u32 = sys_append_bytes(fpath, q5, fdir, bn);
             store8(fpath, q6, 0 as u8);
             let wn: u64 = sys_write_file(fpath, body, got);
@@ -1699,7 +1703,7 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     cfg_slug(reg, n, slug, 256);
     let dn: u32 = txt_len_cstr(cache);
     sys_copy(dst, 0, cache, 0, dn);
-    let o1: u32 = txt_put(dst, dn, "\\");
+    let o1: u32 = sys_append_sep(dst, dn);
     let o2: u32 = cli_put_cstr(dst, o1, slug);
     store8(dst, o2, 0 as u8);
 
@@ -1834,12 +1838,12 @@ fn cli_dst_of(dst: ptr, buf: ptr, into: u64, store: ptr, ws: ptr, i: u32) {
         sys_copy(dst, 0, store, 0, sn);
         o = sn;
     }
-    store8(dst, o, 92 as u8);
+    store8(dst, o, sys_sep());
     o = o + 1;
     sys_copy(dst, o, names, pkg_name_off(ws, i), pkg_name_len(ws, i));
     o = o + pkg_name_len(ws, i);
     if into == 0 {
-        store8(dst, o, 92 as u8);
+        store8(dst, o, sys_sep());
         o = o + 1;
         sys_copy(dst, o, names, pkg_ver_off(ws, i), pkg_ver_len(ws, i));
         o = o + pkg_ver_len(ws, i);
@@ -1940,7 +1944,7 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
         cfg_slug(reg, n, slug, 256);
         let cn: u32 = txt_len_cstr(cache);
         sys_copy(srcroot, 0, cache, 0, cn);
-        let g1: u32 = txt_put(srcroot, cn, "\\");
+        let g1: u32 = sys_append_sep(srcroot, cn);
         let g2: u32 = cli_put_cstr(srcroot, g1, slug);
         store8(srcroot, g2, 0 as u8);
         if cli_exists(srcroot) {
