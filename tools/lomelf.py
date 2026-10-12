@@ -3313,6 +3313,18 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     test_rax()
     jcc_l("e", "__ws_ek_badfd")
     st(RSP, 0x48, RAX)                          # 实例
+    # **先验 op**（Linux 的顺序：op 不认识就 EINVAL，与那个 fd 登记没登记无关）——
+    # 放到后面去会让"op 不认识 + fd 已登记"落进 MOD 分支、返回 0（实测撞出来的）
+    ld(RAX, RSP, 0x30)
+    cmp_eax(1)
+    jcc_l("b", "__ws_ek_opbad")
+    cmp_eax(3)
+    jcc_l("a", "__ws_ek_opbad")
+    jmp_l("__ws_ek_opok")
+    a.label("__ws_ek_opbad")
+    movi(RAX, -22)                              # EINVAL
+    jmp_l("__ws_ret")
+    a.label("__ws_ek_opok")
     ld(RDI, RSP, 0x38)
     a.call("__ws_sock_of_fd")
     test_rax()

@@ -1736,8 +1736,12 @@ fn _start() {
     let _m1: u32 = num("ctl(add dup) = ", x1);
     let x2: i64 = syscall6(233, ep as u64, 3, ls as u64, ev as u64, 0);   // MOD 没登记
     let _m2: u32 = num("ctl(mod none) = ", x2);
-    let x3: i64 = syscall6(233, ep as u64, 1, 1, ev as u64, 0);           // 不是 socket
-    let _m3: u32 = num("ctl(file fd) = ", x3);
+    // ⚠ 这里**不能**拿 fd 1 当"不是 socket 的 fd"：Linux 那边"能不能进 epoll"取决于它
+    // 到底是什么 —— **管道可以**（CI runner 上 stdout 就是管道，这条当场给出 0）、
+    // 常规文件与字符设备**不行**（EPERM）。那是**环境相关**的，逐字节判据不能钉它。
+    // 改用"op 不认识"：两边都稳定地给 EINVAL。
+    let x3: i64 = syscall6(233, ep as u64, 99, c1 as u64, ev as u64, 0);  // op 不认识
+    let _m3: u32 = num("ctl(bad op) = ", x3);
     let x4: i64 = syscall6(291, 3, 0, 0, 0, 0);                           // flags 不认识
     let _m4: u32 = num("create1(bad) = ", x4);
     // ---- 关掉实例之后还能再建一个（实例要回收，不然四次就 EMFILE）----
@@ -1757,7 +1761,7 @@ fn _start() {
 EP_GOLDEN = (b"epoll_create1 = @G@\nwait(empty) = 0\nwait(read) n = 1\nwait(read) ev = 1\n"
              b"wait(read) data = 7\nwait(write) n = 1\nwait(write) ev = 4\n"
              b"wait(write) data = 9\nctl(add dup) = -17\nctl(mod none) = -2\n"
-             b"ctl(file fd) = -1\ncreate1(bad) = -22\nEPOLL REUSE OK\n")
+             b"ctl(bad op) = -22\ncreate1(bad) = -22\nEPOLL REUSE OK\n")
 
 
 def _ep_ok(out: bytes) -> bool:
