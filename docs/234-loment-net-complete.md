@@ -64,8 +64,15 @@ Windows 上没有 epoll，也没有"接一下就能用"的东西：**IOCP 是完
 * `epoll_wait`：超时是毫秒；空登记表 = 睡超时再回 0（与 `select`/`poll` 那一格同形）；
   已关闭的 fd 在 `epoll_wait` 里被跳过（Linux 是自动摘掉，结果一样）。
 
-**三条写明的差别**：
+**四条写明的差别**：
 
+0. **只认 socket 型 fd** —— Linux 的 epoll 还能收**管道**（以及 `eventfd`、`signalfd` 那一类），
+   往这儿 `epoll_ctl` 会报 `EPERM`。**这一条是实测出来的，不是猜的**：CI runner 上 stdout
+   是管道，语料里原本那格"拿 fd 1 当不是 socket 的 fd"在那儿给出 `0`、在本机给出 `-1` ——
+   于是它成了**环境相关**的判据，被换掉了（现存的那格改成"op 不认识"，两边稳定 `EINVAL`）。
+   要补这一条得把 shim 的"是不是能等的东西"从"是不是 socket"放宽到"是不是可等句柄"，
+   而 Windows 侧对应的东西是 `WaitForSingleObject` 那一族，语义不同（见 `docs/221` 那条
+   "只认 socket 型 fd"的偏差）；
 1. **`EPOLLET`（边沿）不兑现** —— 当水平触发处理。安全（不会丢事件），代价是"靠边沿省
    唤醒"的程序在 Windows 上会多醒几次；
 2. **`EPOLLHUP` 不合成** —— Linux 在对端关闭时会给 HUP，这里探测不到（`EPOLLERR` 会给，
@@ -95,7 +102,7 @@ Windows 上没有 epoll，也没有"接一下就能用"的东西：**IOCP 是完
 |---|---|
 | `msgdemo` | TCP 三条 iovec 散出去、按 2+2+2 收回来（`ABCDEF` 落位）；UDP 用 `sendmsg` 带 `msg_name` 发一个数据报（两个 iovec 拼成 `hey`）、用 `recvmsg` 收回来并核对来源地址与 `msg_namelen` |
 | `spdemo` | STREAM 来回各一次、DGRAM 一次收发；两条**错误路**的错误码（`-95` / `-22`）**打印出来比**，不是只看符号 |
-| `epdemo` | 空等超时 0；写两个字节后 `n=1 / ev=1 / data=7`；改 `EPOLLOUT` 后 `n=1 / ev=4 / data=9`；四条错误路（`-17` `-2` `-1` `-22`）逐字比；**关掉再造一个实例** |
+| `epdemo` | 空等超时 0；写两个字节后 `n=1 / ev=1 / data=7`；改 `EPOLLOUT` 后 `n=1 / ev=4 / data=9`；四条错误路（`-17` `-2` `-22` `-22`）逐字比；**关掉再造一个实例** |
 
 判定方式与既有语料相同：**同一份 `.lomt`，PE（本机原生）与 ELF（WSL）输出逐字节相同、
 退出码相同**。本机实测 `loment_pe_test` **16/16**、`loment_net_test` **3/3**；冻结的 shim
