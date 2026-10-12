@@ -136,12 +136,15 @@ def test_vscode_grammar_lints():
                 for x in o:
                     walk(x, key)
             elif isinstance(o, str):
-                if key == "name" and o not in ("Loment", "L0 (.lom)"):
+                if key == "name":
                     names.append(o)
                 if key == "match" and '"' in o:
                     quotes.append(o)
 
-        walk(doc)
+        # **文档顶层的 `name` 是显示名, 不是 scope** —— 走过去要一份豁免名单
+        # ("Loment" / "L0 (.lom)"), 而名单外的显示名（如 "Loment (Python surface grammar)"）
+        # 会被当成非法根名。规则本意是"scope 名要有标准根"，那就别把显示名算进来。
+        walk({k: v for k, v in doc.items() if k != "name"})
         bad = [n for n in names if n.split(".")[0] not in roots]
         assert not bad, f"{g['path']}: 非标准 scope 根名 {bad[:4]}"
         assert not quotes, f"{g['path']}: match 里出现引号 (会吃掉字符串引号): {quotes[:2]}"
@@ -393,6 +396,7 @@ process.stdout.write(JSON.stringify({
 #: 那正是本仓最讨厌的静默（`docs/167`）。
 _ACTIVATE_HARNESS = r"""
 const Module = require('module');
+const fs = require('fs');
 const EXT = process.argv[2];
 const ROOT = process.argv[3];
 
@@ -400,15 +404,35 @@ const reg = [];
 const dis = () => ({ dispose() {} });
 const file = ROOT + '/loment/examples/user_hello.lomt';
 const SETTINGS = JSON.parse(process.argv[4] || '{}');
+//: 要"打开"的文档: [{path, lang}]。语言提示那一路是**事件驱动**的（开文档 / 文件头改动），
+//: 所以这里得把真的开文档事件喂进去，而不是只检查订阅建没建。
+const DOCS = JSON.parse(process.argv[5] || '[]');
+const langs = [];
+const openers = [], closers = [];
 
 function Task(def, scope, name, source, exec, matcher) {
   this.definition = def; this.name = name; this.exec = exec; this.matcher = matcher;
 }
 const vscode = {
+  languages: {
+    // `setTextDocumentLanguage` 在真实现里会**触发该文档的 close+open**；这里照实改
+    // languageId 并记一笔，让判据能看到"最后停在哪个语言 id 上"。
+    setTextDocumentLanguage: async (doc, id) => {
+      doc.languageId = id;
+      langs.push([doc.uri.fsPath, id]);
+      return doc;
+    },
+  },
   workspace: {
     getConfiguration: () => ({ get: (k) => SETTINGS[k] }),
     workspaceFolders: [{ uri: { fsPath: ROOT } }],
     openTextDocument: async () => ({ uri: {} }),
+    textDocuments: [],
+    onDidOpenTextDocument: (f) => { openers.push(f); return dis(); },
+    onDidChangeTextDocument: () => dis(),
+    onDidCloseTextDocument: (f) => { closers.push(f); return dis(); },
+    createFileSystemWatcher: () => ({ onDidChange: dis, onDidCreate: dis,
+                                      onDidDelete: dis, dispose() {} }),
   },
   window: {
     activeTextEditor: { document: { uri: { fsPath: file }, languageId: 'loment' } },
@@ -469,7 +493,8 @@ Module._load = function (req) {
 };
 
 (async () => {
-  const out = { ok: false, reg: [], subs: 0, tasks: null, buildGroup: null, dap: null };
+  const out = { ok: false, reg: [], subs: 0, tasks: null, buildGroup: null, dap: null,
+                docs: [], langs: [] };
   try {
     const ext = require(EXT);
     const ctx = { subscriptions: [] };
@@ -485,6 +510,18 @@ Module._load = function (req) {
       const d = vscode.__factory.createDebugAdapterDescriptor();
       out.dap = d ? { cmd: d.cmd, args: d.args } : null;
     }
+    // 打开 DOCS 里每一份文档（语言提示是事件驱动的，必须真的派事件）
+    const docs = DOCS.map((c) => ({
+      uri: { scheme: 'file', fsPath: c.path },
+      languageId: c.lang || 'loment',
+      getText: () => fs.readFileSync(c.path, 'utf8'),
+    }));
+    for (const d of docs) {
+      for (const h of openers) h(d);
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    out.docs = docs.map((d) => ({ path: d.uri.fsPath, lang: d.languageId }));
+    out.langs = langs;
   } catch (e) {
     out.error = String((e && e.stack) || e);
   }
@@ -494,6 +531,22 @@ Module._load = function (req) {
 """
 
 
+def _activate(settings: dict, docs: list[dict]) -> subprocess.CompletedProcess:
+    """跑一遍**真的 `activate()`**（假 `vscode` 由 `_ACTIVATE_HARNESS` 注入）。
+
+    `docs` 是"要打开的文档" `[{path, lang}]` —— 语言提示那一路是事件驱动的，所以判据
+    必须把开文档事件派进去，而不是只检查订阅建没建。
+    """
+    node = _node()
+    with tempfile.TemporaryDirectory() as td:
+        h = Path(td) / "activate-harness.js"
+        h.write_text(_ACTIVATE_HARNESS, encoding="utf-8")
+        return subprocess.run(
+            [node, str(h), str(EXT / "src" / "extension.js"), str(ROOT),
+             json.dumps(settings), json.dumps(docs)],
+            capture_output=True, text=True, shell=False)
+
+
 @test
 def test_vscode_extension_activates():
     """**扩展真的激活得起来，而且该注册的都注册了。**
@@ -501,19 +554,13 @@ def test_vscode_extension_activates():
     `activate()` 抛异常时 VS Code 只会把扩展标红，功能**静默全丢** ——
     而清单、纯模块单测、语法文件全都还是绿的。所以这一条要真的跑一遍它。
     """
-    node = _node()
-    if not node:
+    if not _node():
         print("      SKIP: 无 node")
         return
-    with tempfile.TemporaryDirectory() as td:
-        h = Path(td) / "activate-harness.js"
-        h.write_text(_ACTIVATE_HARNESS, encoding="utf-8")
-        # **语言服务开着**（`enableLsp: true`）：关掉它 `startClient` 根本不跑，而这一格里
-        # 藏着真 bug —— v10 的客户端要求输出通道是 `LogOutputChannel`。
-        settings = json.dumps({"enableLsp": True, "toolCommand": "loment",
-                               "buildDir": "loment/build"})
-        r = subprocess.run([node, str(h), str(EXT / "src" / "extension.js"), str(ROOT), settings],
-                           capture_output=True, text=True, shell=False)
+    # **语言服务开着**（`enableLsp: true`）：关掉它 `startClient` 根本不跑，而这一格里
+    # 藏着真 bug —— v10 的客户端要求输出通道是 `LogOutputChannel`。
+    r = _activate({"enableLsp": True, "toolCommand": "loment",
+                   "buildDir": "loment/build"}, [])
 
     def fail(msg):
         return AssertionError(f"{msg}\n  node stderr: {r.stderr.strip()[-400:]}")
@@ -561,6 +608,259 @@ def test_vscode_extension_activates():
           f"调试适配器 `{dap['cmd']} …{Path(dap['args'][-1]).name}`")
 
 
+# ------------------------------------------------- 5.5 表层语法与未受信工作区
+
+#: 与参考实现对拍的**边角**语料。主体是仓库里**全部** `.lomt` / `.lom`（枚举，不是手挑）——
+#: 手挑的那几条往往正好避开分叉（`docs/188` §1 那条教训）。
+_DECL_EDGE = [
+    "module m\n\nfn f() -> u32 { return 1; }\n",
+    "choose write grammar python\nmodule m\n",
+    "choose write grammar rust\nmodule m\n",
+    "choose write grammar c#\nmodule m\n",
+    "﻿choose write grammar go\nmodule m\n",
+    "   choose write grammar java\nmodule m\n",
+    "module m\nchoose write grammar python\n",
+    "choose write grammar python\nchoose write grammar c\nmodule m\n",
+    "choose write grammar\nmodule m\n",
+    "choose write grammars python\nmodule m\n",
+    "grammar python\nmodule m\n",
+    "module m\n\nchoose gc_auto_alpha\n",
+    "choose write grammar python;\nmodule m\n",
+    # 声明**不在第 1 行**（前面一段块注释）—— 实测过：漏了这个形状时
+    # `loment/examples/cproject/bitkit.lomt` 两边说法不一致（2026-10-12），
+    # 而手挑的边角全在第 1 行、全绿。
+    "/*\n * 说明\n */\n\nchoose write grammar c\n\nunsigned int f(unsigned int x) {\n",
+]
+
+_CONF_EDGE = [
+    'pub fn source_ext() -> str { return ".foo"; }\n',
+    '// source_ext ".bar"\nmodule conf\n\npub fn source_ext() -> str { return ".foo"; }\n',
+    '/* source_ext ".bar" */\npub fn source_ext() -> str { return ".baz"; }\n',
+    'pub fn other() -> str { return ".foo"; }\n',
+    'pub fn source_ext() -> str { return x; }\n',
+    'pub fn source_ext() -> str { return "foo"; }\n',
+    'pub fn source_ext() -> str { return ""; }\n',
+    'pub fn source_ext() -> str {\n  let a: u32 = 1;\n  return ".foo";\n}\n',
+    '',
+]
+
+_NODE_DECL = r"""
+const g = require(process.argv[1]);
+const texts = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+process.stdout.write(JSON.stringify(
+  texts.map((t) => { const r = g.readGrammarDecl(t); return [r.grammar, r.declared]; })));
+"""
+
+_NODE_CONF = r"""
+const c = require(process.argv[1]);
+const texts = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+process.stdout.write(JSON.stringify(texts.map((t) => c.readSourceExt(t))));
+"""
+
+
+def _run_node_module(script: str, module: Path, corpus: list[str]) -> list:
+    """把一批输入喂给一个**纯 Node 模块**，拿回它的判断。"""
+    node = _node()
+    assert node, "无 node"
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "corpus.json"
+        f.write_text(json.dumps(corpus), encoding="utf-8")
+        r = subprocess.run([node, "-e", script, str(module), str(f)],
+                           capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, f"node 侧挂了: {r.stderr[-400:]}"
+    return json.loads(r.stdout)
+
+
+def _l1_sources() -> list[tuple[str, str]]:
+    """仓库里全部 `.lomt` / `.lom` 的 `(相对路径, 原文)`（跳过 `dist/` 下那几份拷贝）。"""
+    out = []
+    for p in sorted(ROOT.rglob("*")):
+        if p.suffix not in (".lomt", ".lom") or not p.is_file():
+            continue
+        if "dist" in p.relative_to(ROOT).parts:
+            continue
+        try:
+            out.append((p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8")))
+        except UnicodeDecodeError:
+            continue
+    return out
+
+
+@test
+def test_vscode_grammar_decl_matches_reference():
+    """`grammar-detect.js` 与参考实现（`potato_from.read_grammar_decl`）**逐条对拍**。
+
+    只比 `(规范名, 声明成立吗)` —— 报错文案归编译器，编辑器这一侧不重复它。
+    语料是**仓库里每一份 L1/L0 源**加上那批边角：判据的价值全在"枚举"，手挑几条会
+    正好避开分叉（`docs/188` §1 那条教训）。
+    """
+    if not _node():
+        print("      SKIP: 无 node")
+        return
+    import potato_from  # noqa: PLC0415  （对拍的另一边）
+    pairs = _l1_sources()
+    texts = [t for _rel, t in pairs] + _DECL_EDGE
+    js = _run_node_module(_NODE_DECL, EXT / "src" / "grammar-detect.js", texts)
+    bad = []
+    for i, t in enumerate(texts):
+        grammar, _err, declared = potato_from.read_grammar_decl(t)
+        if js[i] != [grammar, declared]:
+            name = pairs[i][0] if i < len(pairs) else f"<边角 #{i - len(pairs)}>"
+            bad.append(f"{name}: js={js[i]} py={[grammar, declared]}")
+    assert not bad, "声明检测两边说法不一致:\n  " + "\n  ".join(bad[:8])
+    # 别名表本身也要同表 —— 右列是规范名，错一格就会"源里能写、对象非法"。
+    js_aliases = _run_node_module(
+        "const g = require(process.argv[1]);\nprocess.stdout.write(JSON.stringify(g.GRAMMAR_ALIASES));",
+        EXT / "src" / "grammar-detect.js",
+        [""])
+    assert js_aliases == potato_from.GRAMMAR_ALIASES, (
+        f"别名表两边不同:\n  js={js_aliases}\n  py={potato_from.GRAMMAR_ALIASES}")
+    print(f"      声明检测对拍: {len(texts)} 份源（含 {len(_DECL_EDGE)} 条边角）两边一致；"
+          f"别名表 {len(js_aliases)} 条同表")
+
+
+@test
+def test_vscode_source_ext_matches_reference():
+    """`conf-ext.js` 与参考实现（`lomentc._conf_ext_from_tokens`）逐条对拍。"""
+    if not _node():
+        print("      SKIP: 无 node")
+        return
+    import lomc  # noqa: PLC0415
+    import lomentc  # noqa: PLC0415
+    js = _run_node_module(_NODE_CONF, EXT / "src" / "conf-ext.js", _CONF_EDGE)
+    bad = []
+    for i, t in enumerate(_CONF_EDGE):
+        want = lomentc._conf_ext_from_tokens(lomc.lex(t))
+        if js[i] != want:
+            bad.append(f"#{i}: js={js[i]!r} py={want!r}")
+    assert not bad, "`source_ext` 读法两边不一致:\n  " + "\n  ".join(bad)
+    print(f"      source_ext 对拍: {len(_CONF_EDGE)} 条一致（含注释里的同名标签、带标签无字符串）")
+
+
+@test
+def test_vscode_surface_grammar_switches_language():
+    """**真的打开文档**：声明了外门表层语法的源切到 `loment-<规范名>`，原生的不动。
+
+    这一格跑的是 `activate()` 里注册的那个**入口函数**（开文档 -> 读声明 -> 换语言 id），
+    而不是纯模块 —— 纯模块全绿而入口没接上，用户在编辑器里看到的还是"一片不上色"。
+    """
+    if not _node():
+        print("      SKIP: 无 node")
+        return
+    cases = [
+        # (仓库相对路径, 打开时的语言 id, 期望停在哪个语言 id)
+        ("loment/examples/multisyntax-projects/python/01-numtheory/numtheory.lomt",
+         "loment", "loment-python"),
+        ("loment/examples/multisyntax-projects/c/01-algo/algo.lomt", "loment", "loment-c"),
+        ("loment/examples/multisyntax-projects/go/01-digest/digest.lomt", "loment", "loment-go"),
+        ("loment/lib/lumtui_math.lomt", "loment", "loment-python"),
+        # `rust` 是**原生**（docs/188 §7.3）：声明了也不该换语言 id
+        ("loment/selfhost/grammar_decl/rust.lomt", "loment", "loment"),
+        # 没声明 = 原生
+        ("loment/examples/tour.lomt", "loment", "loment"),
+        # 用户显式指定过的语言不去抢（`lom` 是 L0，家族之外）
+        ("lom/fuai.lom", "lom", "lom"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        (proj / "loment.conf").write_text(
+            'pub fn source_ext() -> str { return ".foo"; }\n', encoding="utf-8")
+        (proj / "a.foo").write_text("module a\n", encoding="utf-8")
+        (proj / "b.txt").write_text("hello\n", encoding="utf-8")
+        cases += [(str(proj / "a.foo"), "plaintext", "loment"),   # 项目自定义后缀 -> L1
+                  (str(proj / "b.txt"), "plaintext", "plaintext")]  # 别的后缀，不认领
+        docs = [{"path": (c[0] if Path(c[0]).is_absolute() else str(ROOT / c[0])),
+                 "lang": c[1]} for c in cases]
+        r = _activate({"enableLsp": False, "buildDir": "loment/build"}, docs)
+
+    def fail(msg):
+        return AssertionError(f"{msg}\n  node stderr: {r.stderr.strip()[-400:]}")
+
+    assert r.returncode == 0, fail(f"脚手架挂了 (rc={r.returncode})")
+    got = json.loads(r.stdout)
+    assert got.get("ok"), fail(f"`activate()` 抛了: {got.get('error', '')[:600]}")
+    after = {d["path"]: d["lang"] for d in got["docs"]}
+    bad = []
+    for rel, _before, want in cases:
+        path = rel if Path(rel).is_absolute() else str(ROOT / rel)
+        if after[path] != want:
+            bad.append(f"{Path(rel).name}（打开时 {_before}）: 期望 {want}，实得 {after[path]}")
+    assert not bad, "表层语法没有换到该在的语言 id:\n  " + "\n  ".join(bad)
+    print(f"      开文档换语言: {len(cases)} 例（外门七门换、原生不换、L0 不抢、"
+          f"项目自定义后缀认成 loment）")
+
+
+@test
+def test_vscode_multisyntax_languages_are_declared():
+    """七门外门表层语法**在清单里各有语言 + 语法**，而且借的宿主 scope 写对。
+
+    三处必须说同一件事：出厂锁那张别名表（`potato_from.GRAMMAR_ALIASES`）、
+    `grammar-detect.js` 的 `languageIdFor`、以及 `package.json` 的 languages/grammars。
+    少一处就是"声明写得出、编辑器里没那门"。
+    """
+    import potato_from  # noqa: PLC0415
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    langs = {lang["id"] for lang in pkg["contributes"]["languages"]}
+    canonical = sorted(set(potato_from.GRAMMAR_ALIASES.values()))
+    foreign = [g for g in canonical if g not in potato_from.NATIVE_GRAMMARS]
+    want = {"loment", "lom"} | {f"loment-{g}" for g in foreign}
+    assert langs == want, f"清单里的语言 id 对不上出厂锁那张表:\n  多: {sorted(langs - want)}\n  少: {sorted(want - langs)}"
+    if _node():
+        ids = _run_node_module(
+            "const g = require(process.argv[1]);\n"
+            "const names = [...new Set(Object.values(g.GRAMMAR_ALIASES))];\n"
+            "process.stdout.write(JSON.stringify(names.map((c) => g.languageIdFor(c))));",
+            EXT / "src" / "grammar-detect.js", [""])
+        assert set(ids) == want - {"lom"}, (
+            f"`languageIdFor` 给出的 id 与清单不同: {sorted(set(ids))}")
+    # 每一门外门语法的语法文件都必须**只做两件事**：认那行声明 + include 宿主的语法。
+    guests = {"c": "source.c", "cpp": "source.cpp", "java": "source.java",
+              "csharp": "source.cs", "go": "source.go", "python": "source.python"}
+    for g in foreign:
+        path = EXT / "syntaxes" / f"loment-{g}.tmLanguage.json"
+        assert path.is_file(), f"缺语法文件: {path.name}"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        pats = [json.dumps(p, ensure_ascii=False) for p in doc["patterns"]]
+        assert any("source.loment#grammar-decl" in p for p in pats), (
+            f"{path.name} 没 include 那行声明的规则（它就该只做这件事 + 借宿主）")
+        if g in guests:
+            assert any(guests[g] in p for p in pats), (
+                f"{path.name} 没 include 宿主语法 {guests[g]}")
+    # 声明那一格必须真的在主语法里（否则 include 的是个空名字，静默不上色）
+    main = json.loads((EXT / "syntaxes" / "loment.tmLanguage.json").read_text(encoding="utf-8"))
+    assert "grammar-decl" in main["repository"], "主语法里没有 `grammar-decl` 这一格"
+    print(f"      多语法登记: {len(foreign)} 门外门语法各有语言 id 与语法文件，"
+          f"宿主 scope 逐门对得上")
+
+
+@test
+def test_vscode_hardens_untrusted_workspaces():
+    """#166：未受信工作区要有**声明**，且"能变成跑什么"的设置要被挡住。
+
+    这一条与 `vscode_ext.check()` 里那条是同一个判断的两处落点 —— 这里断言的是
+    **内容**（哪几个设置、为什么是它们），`--check` 那条保证**每次打包都会看**。
+    """
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    cap = pkg.get("capabilities", {})
+    untrusted = cap.get("untrustedWorkspaces")
+    assert untrusted, "package.json 没有 capabilities.untrustedWorkspaces（#166）"
+    assert untrusted.get("supported") in (True, "limited"), (
+        f"untrustedWorkspaces.supported 取值不对: {untrusted.get('supported')!r}")
+    restricted = set(untrusted.get("restrictedConfigurations") or [])
+    props = set(pkg["contributes"]["configuration"]["properties"])
+    need = set(vscode_ext.MUST_RESTRICT)
+    assert need <= restricted, f"这些设置没被挡住: {sorted(need - restricted)}"
+    assert restricted <= props, f"restrictedConfigurations 里有不存在的设置: {sorted(restricted - props)}"
+    # 挡住的那几个必须**确实**是"能变成跑什么"的那类（命令 / 参数 / 会被执行的脚本路径）
+    for s in sorted(need):
+        assert s.split(".")[-1].endswith(("Command", "Args", "Path", "Script")), \
+            f"{s} 看着不像是能变成命令的设置 —— MUST_RESTRICT 该改就一起改"
+    assert all(b is None or "untrustedWorkspaces" not in b for b in vscode_ext.check()), \
+        "vscode_ext.check() 也该钉着这件事（--check 与 CI 都要看得到）"
+    print(f"      未受信工作区: 声明了 supported={untrusted.get('supported')!r}，"
+          f"挡住 {len(restricted)} 个设置（命令/参数/脚本路径）")
+
+
 @test
 def test_vscode_registration_points_at_the_real_dir():
     """**登记必须指向真目录** —— 它指向别处时高亮/命令/F5 整个消失，而磁盘上一切"看着在"。
@@ -600,6 +900,29 @@ def test_vscode_registration_points_at_the_real_dir():
         "$mid": 1, "path": "/d:/Dev/Loment-DEV/x", "scheme": "file"}, \
         vscode_ext.vs_uri(Path("D:/Dev/Loment-DEV/x"))
     print(f"      登记修复：{ident}-0.1.0.old -> {dest.name}；别人的条目未动")
+
+
+@test
+def test_vscode_install_sweeps_stale_versions():
+    """升级时**旧的版本目录必须被挪走** —— `extensions/` 下每个带 `package.json` 的目录
+    都会被扫成一个扩展，同 ident 两份就各认一份 `.lomt`。
+
+    2026-10-12 从 0.1.0 升到 0.2.0 时实测撞上的：`--install` 只挪 `dest`，
+    旧目录名（版本号变了）原地不动，于是两份一起被扫进去 —— 而 `--doctor` 的
+    "抢语言 id" 那一格**看不见它**（那循环跳过同 ident 的目录）。判据是纯函数那一层，
+    不碰本机真的 `~/.vscode`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        extdir = Path(tds)
+        ident = "fujojtop.loment"
+        dest = extdir / f"{ident}-0.2.0"
+        for name in (f"{ident}-0.1.0", f"{ident}-0.2.0", f"{ident}-0.1.0.old",
+                     "someoneelse.thing-1.0.0"):
+            (extdir / name).mkdir()
+        (extdir / f"{ident}-0.1.0" / "package.json").write_text("{}", encoding="utf-8")
+        got = [p.name for p in vscode_ext.stale_dirs(extdir, ident, dest)]
+        assert got == [f"{ident}-0.1.0", f"{ident}-0.1.0.old"], got
+    print("      升级扫旧版：只认同 ident 的旧目录（不含 dest 自己、不含别人的扩展）")
 
 
 def main(argv: list[str] | None = None) -> int:

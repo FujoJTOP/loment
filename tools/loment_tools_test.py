@@ -206,7 +206,10 @@ def test_m56_lsp_three_capabilities():
     docs: dict[str, str] = {}
     init = loment_lsp.handle({"id": 1, "method": "initialize", "params": {}}, docs)
     caps = init[0]["result"]["capabilities"]
-    assert caps["definitionProvider"] and caps["completionProvider"]
+    # **"在不在"而不是"真不真"**：`completionProvider` 现在是 `{}` —— 那是刻意的
+    # （支持补全、但不广告触发字符，见 #28）。空 dict 在 Python 里是假值，
+    # 拿它当真假判会红，而它表达的恰恰是"支持"。
+    assert caps["definitionProvider"] and "completionProvider" in caps
     text = TOOLCHAIN.read_text(encoding="utf-8")
     msgs = loment_lsp.handle({"method": "textDocument/didOpen",
                               "params": {"textDocument": {"uri": uri, "text": text}}}, docs)
