@@ -107,6 +107,10 @@ use "bsearch.lomt"
 // (tools/loment_libl_test.py)。它们**建在上面那些模块上**（ctype->char,
 // string->mem, stdlib/stdio->mem+string），不另起一份: 同一个字节不会有两个答案。
 //
+// **LibL 没有自己的入口**（用户 2026-10-12 要求）: 这里就是取到它的唯一一条路。
+// `use libl` 会报 E018 —— 那个文件**故意不存在**, 免得这个名字成一条事实上的 ABI。
+// 判据钉着这件事: `loment_libl_test::test_libl_is_not_a_use_entry`。
+//
 // 按依赖序: mem/char -> string, ctype -> stdlib -> stdio。
 use "string.lomt"
 use "ctype.lomt"

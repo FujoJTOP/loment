@@ -467,12 +467,16 @@ def test_install_scripts_stay_pure_ascii():
 #: 随包发的标准库：`std` 127 个模块 + `std.lomt` 门面 = 128 个 `.lomt`；`host` 7 个。
 #: 各带一份 `pkg.lomp`，所以整棵树是 137 个文件。用户说的"127 个库"就是 std 的模块数。
 #:
-#: **2026-10-11 起 std 是 133** —— LibL 加了 5 份（`string` `ctype` `stdlib` `stdio`
-#: `libl`，`docs/232`），整棵树随之 137 -> 142。用户说的"127 个库"指的是**原来**那一批；
+#: **2026-10-11 起 std 是 132** —— LibL 加了 4 份（`string` `ctype` `stdlib` `stdio`，
+#: `docs/232`），整棵树随之 137 -> 141。用户说的"127 个库"指的是**原来**那一批；
 #: 这里钉的是**文件数**，所以这个数会跟着库长，不是常量意义上的"127"。
+#:
+#: （曾经是 133/142：那时还有一份 `libl.lomt` 入口。用户 2026-10-12 要求去掉它 ——
+#: LibL 是库的**名字**不是入口，`use libl` 要报错，见 `docs/232` §1.1。
+#: 那条判据在 `loment_libl_test::test_libl_is_not_a_use_entry`。）
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 133, "host": 7}
-STORE_FILES = 142
+STORE_MODULES = {"std": 132, "host": 7}
+STORE_FILES = 141
 
 
 def _store_line(out: str) -> str:

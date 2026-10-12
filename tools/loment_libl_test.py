@@ -785,6 +785,31 @@ def test_libl_matches_libc():
 
 
 @test
+def test_libl_is_not_a_use_entry():
+    """`use libl` **必须解析不到** —— 这是**要求的**，不是漏了（`docs/232` §1.1）。
+
+    LibL 是这个标准库的**名字**，不是它自己的入口；取到它只有 `use std` 一条路
+    （那个门面把这几份一起拉进来）。**名字一旦可 `use`，它就成了一条事实上的 ABI** ——
+    有人开始依赖 `use libl`，之后改这四张脸的范围就是破坏性变更。所以现在就不给，
+    并且把"给不出来"钉死：谁哪天顺手把 `libl.lomt` 加回来，这条当场红。
+
+    用户 2026-10-12 明确要求这一条。
+    """
+    # 对照：同一个函数对 `string` 必须命中 —— 否则上面那条会因为"解析器坏了"而假绿。
+    hit = lomentc.resolve_name("string", ROOT, ROOT)
+    assert hit.name == "string.lomt", f"对照组没命中：{hit}"
+    try:
+        got = lomentc.resolve_name("libl", ROOT, ROOT)
+    except lomentc.LomError as e:
+        msg = str(e).strip()
+        assert "libl" in msg, f"报错里没点名 `libl`：{msg}"
+        print(f"      `use libl` 被拒：{msg[:70]}")
+        return
+    raise AssertionError(
+        f"`use libl` 解析到了 {got} —— LibL 不该有自己的入口（docs/232 §1.1）")
+
+
+@test
 def test_libl_modules_are_checkable():
     """每个被量的 LibL 模块**自己**必须是合法的 L1 单元（不靠 clang，永远跑）。"""
     for name in LIBL_MODULES:
