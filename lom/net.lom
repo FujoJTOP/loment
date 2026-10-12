@@ -8,6 +8,9 @@
 //   loment/selfhost/potato.lomt   pt_surf_code     (自举侧的 `surfaces`)
 // 校验: python tools/lom_audit.py + python tools/loment_net_test.py
 //
+// 2026-10-12.1: 联网面补完 —— `sendmsg`(46)/`recvmsg`(47)/`socketpair`(53)/
+//   `epoll_wait`(232)/`epoll_ctl`(233)/`epoll_create1`(291) 一起从 NotDispatched 移进
+//   `Syscall`，于是那一族**空了**（`docs/234`）。`select` 那一笔见 2026-10-11.2。
 // 2026-10-11.2: `select`(23) 从 NotDispatched 移进 Syscall —— PE 运行时真的派发它了
 //   (docs/231: 位图 ↔ WinSock fd_set、exceptfds 归一化、SO_ERROR 补挂账)。
 //   这是**契约变更**不是新增: 依赖方是本表自己那张"同宽"的保证(gates.why_equal) ——
@@ -18,12 +21,12 @@ module net
 meta {
   schema = "fujo-net-spec/v1"
   title = "network surface contract: Linux syscall number -> surface"
-  version = "2026-10-11.2"
+  version = "2026-10-12.1"
   authority = "docs/224 §3（面进 Potato）+ docs/227（收口账）：本文件是那张表的单源，两边实现由它校验"
   layers {
     surface = "号 → 面的划分。**面名由用的人定** —— file/mem/net/proc 只是本仓库自己的划法，other 是兜底"
     runtime = "PE 运行时**真的派发**哪些号。今天它与 surface **同宽**（见 gates.why_equal）：表外的号在 PE 上回 -ENOSYS，不是「另一个面」"
-    not_dispatched = "Linux 有、本仓运行时**故意不派发**的号。它们**不进 Syscall**：计数词汇与派发面保持同宽，否则产物会数出一个跑不了的站点（docs/227 §5）"
+    not_dispatched = "Linux 有、本仓运行时**故意不派发**的号。它们**不进 Syscall**：计数词汇与派发面保持同宽，否则产物会数出一个跑不了的站点（docs/227 §5）。**2026-10-12 起这一族是空的** —— 联网面补完了（docs/234），留着枚举是为了让“点名不做”继续可数"
   }
   gates {
     why_equal = "`surfaces` 是**不读源码可判**的数（docs/224），而它的价值在「数与行为对得上」。若 `Syscall` 比派发面宽，产物就会说出「3 个 net 站点」而其中一个是 PE 答不了的号 —— 那正是 docs/217 要堵的缺口。所以两边今天取**相等**，而不是包含"
@@ -70,17 +73,17 @@ enum Syscall : u32 {
   openat       = 257 { surface = "file" }
   newfstatat   = 262 { surface = "file" }
   accept4      = 288 { surface = "net"  }
+  sendmsg      = 46  { surface = "net"  }
+  recvmsg      = 47  { surface = "net"  }
+  socketpair   = 53  { surface = "net"  }
+  epoll_wait   = 232 { surface = "net"  }
+  epoll_ctl    = 233 { surface = "net"  }
+  epoll_create1 = 291 { surface = "net"  }
 }
 
-//: **点名不做**（`docs/221` §7 / `docs/227` §6）：号是 Linux 的，面也清楚，但本仓的 PE 运行时
-//: **故意**不派发。列在这里是为了让"不做什么"也**可数**（此前它只活在散文里）。
-//:
-//: 审计要求这一族与本仓的派发面**不相交** —— 哪天谁"顺手"实现了其中一个，这条会红。
-enum NotDispatched : u32 {
-  sendmsg       = 46  { surface = "net" why = "iovec 那一套; sendto/recvfrom + syscall7 已经够写 UDP" }
-  recvmsg       = 47  { surface = "net" why = "同上" }
-  socketpair    = 53  { surface = "net" why = "Windows 的语义与路径规则都不同, 转发会**假装成功**" }
-  epoll_wait    = 232 { surface = "net" why = "要 IOCP, 不是一次翻译能补的" }
-  epoll_ctl     = 233 { surface = "net" why = "同上" }
-  epoll_create1 = 291 { surface = "net" why = "同上" }
-}
+//: **点名不做**（`docs/221` §7 / `docs/234`）：**2026-10-12 起联网面没有这一族了** ——
+//: `select` / `sendmsg` / `recvmsg` / `socketpair` / `epoll_wait` / `epoll_ctl` /
+//: `epoll_create1` 全部落进了 `Syscall`。原来那个 `NotDispatched` 枚举是**删掉**的，
+//: 不是留空：Loment 的检查器不许空枚举（`loment_net_test` 当场报「枚举 NotDispatched
+//: 为空」），而留个空壳只会让人以为「点名不做」还活着。哪天又有号被点名不做，写回这里；
+//: 而「点名不做 ∩ 派发面 = ∅」那条审计在枚举缺席时按空集判 —— 判据本身还在。
