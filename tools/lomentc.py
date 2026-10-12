@@ -5113,9 +5113,13 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #:   "持有指针的函数"在入口 push、在每个 `return` 前 pop。
 #: * **标记-清扫**（不搬移）：块无类型（`alloc(N)`），所以块内**保守**扫 ——
 #:   每个 8 字节字当候选指针；**根是精确的**。
-#: * **标记位另开一张表**（`@__loment_mark`，按块头偏移 >> 3 索引）。曾经想借块头的
-#:   `next` 那一格（分配出去的块 `next` 恒为 0），**实测踩坑**：清标记那一趟会把
-#:   空闲链表的 `next` 全抹掉 —— 链断了，`free` 过的块再也取不回来。
+#: * **标记位另开一张表**（`@__loment_mark`，**位图**：每 8 字节一位 ⇒ **arena / 64 字节**）。
+#:   索引仍是「块头偏移 `>> 3`」（那给出**位号**），字节下标再 `>> 3`、掩码取低三位 ——
+#:   所以 **arena 的大小只体现在表的行数上**，口径不变（`docs/228` §1 第四行那个要害）。
+#:   以前是"每 8 字节一个 `i32`"（arena / 2 字节），1 MiB 的 arena 要带 512 KiB 的 `.bss`
+#:   —— `docs/231` 把它换成位图（1 MiB ⇒ 16 KiB）。
+#:   曾经想借块头的 `next` 那一格（分配出去的块 `next` 恒为 0），**实测踩坑**：清标记那一趟
+#:   会把空闲链表的 `next` 全抹掉 —— 链断了，`free` 过的块再也取不回来。
 #: * **四趟遍历一律从偏移 8 起**：`@__loment_off` 的初值就是 8，偏移 0..7 不是块。
 #:   从 0 起会读到 `size = 0`，而 `i += 0` 是个**死循环**（实测：那次的探针直接超时）。
 #: * **清扫前先清空 `@__loment_freehead`**：不然"本来就在链上的块"会被再 `free` 一次
@@ -5135,7 +5139,7 @@ _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）------------------------
 @__loment_rootn = internal global i32 0'''
 
 _IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
-@__loment_mark = internal global [8192 x i32] zeroinitializer
+@__loment_mark = internal global [1024 x i8] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
 ; （分配器那句注释：偏移 0 永远不是块）。从 0 起会读到 size=0，`i += 0` 就是死循环
@@ -5164,10 +5168,16 @@ cont:
   br label %scan
 found:
   %midx = lshr i32 %i, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %midx
-  %old = load i32, ptr %mp
-  %was = icmp eq i32 %old, 1
-  store i32 1, ptr %mp
+  %mby = lshr i32 %midx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %mby
+  %mcur = load i8, ptr %mp
+  %mbit = and i32 %midx, 7
+  %msh = shl i32 1, %mbit
+  %mmsk = trunc i32 %msh to i8
+  %mold = and i8 %mcur, %mmsk
+  %was = icmp ne i8 %mold, 0
+  %mnew = or i8 %mcur, %mmsk
+  store i8 %mnew, ptr %mp
   br i1 %was, label %no, label %yes
 yes:
   ret i32 1
@@ -5224,9 +5234,14 @@ wb:
   %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
   %wsz = load i32, ptr %wp
   %widx = lshr i32 %wi, 3
-  %wmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %widx
-  %wmk = load i32, ptr %wmp
-  %wsm = icmp eq i32 %wmk, 1
+  %wby = lshr i32 %widx, 3
+  %wmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %wby
+  %wmk = load i8, ptr %wmp
+  %wbit = and i32 %widx, 7
+  %wsh = shl i32 1, %wbit
+  %wmsk = trunc i32 %wsh to i8
+  %wold = and i8 %wmk, %wmsk
+  %wsm = icmp ne i8 %wold, 0
   br i1 %wsm, label %ws, label %wn2
 ws:
   %wsstart = add i32 %wi, 8
@@ -5284,9 +5299,14 @@ sb:
   %sszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %si
   %ssz = load i32, ptr %sszp
   %sidx = lshr i32 %si, 3
-  %smp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %sidx
-  %smk = load i32, ptr %smp
-  %smsm = icmp eq i32 %smk, 1
+  %sby = lshr i32 %sidx, 3
+  %smp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %sby
+  %smk = load i8, ptr %smp
+  %sbit = and i32 %sidx, 7
+  %ssh = shl i32 1, %sbit
+  %smsk = trunc i32 %ssh to i8
+  %sold = and i8 %smk, %smsk
+  %smsm = icmp ne i8 %sold, 0
   br i1 %smsm, label %keep, label %kill
 keep:
   br label %slc
@@ -5316,8 +5336,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5430,8 +5451,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5580,9 +5602,14 @@ l:
   br i1 %ld, label %done, label %b
 b:
   %idx = lshr i32 %li, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
-  %mk = load i32, ptr %mp
-  %sm = icmp eq i32 %mk, 1
+  %bby = lshr i32 %idx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %bby
+  %mk = load i8, ptr %mp
+  %bbit = and i32 %idx, 7
+  %bsh = shl i32 1, %bbit
+  %bmsk = trunc i32 %bsh to i8
+  %band = and i8 %mk, %bmsk
+  %sm = icmp ne i8 %band, 0
   %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
   %sz = load i32, ptr %sp
   br i1 %sm, label %hit, label %miss
@@ -5612,8 +5639,9 @@ def _arena_indirect(ir: str, nbytes: int) -> str:
 
     * **基址** —— `getelementptr [65536 x i8], ptr @__loment_heap, …` → `getelementptr i8, ptr %hb, …`，
       以及 `ptrtoint ptr @__loment_heap` → `ptrtoint ptr %hb`；
-    * **标记表的行数** —— 它本来就是 `arena / 8`（`docs/228` §1 第四行那个要害），
-      所以换 arena 就是换这个数，索引口径 `偏移 >> 3` **一个字节没动**；
+    * **标记表的行数** —— 位图下它是 `arena / 64`（每 8 字节一位；`docs/228` §1 第四行那个
+      要害），所以换 arena 就是换这个数，**口径一个字节没动**：位号仍是 `偏移 >> 3`，
+      字节下标与掩码由它推出来；
     * **两处根扫的边界**（`icmp ult i64 %rdo / %wdo, 65536`）。
 
     `%hb` 插在**每个 `entry:` 之后**：这两个函数的入口块都叫 `entry`，而入口块**支配**
@@ -5634,7 +5662,7 @@ def _arena_indirect(ir: str, nbytes: int) -> str:
         line = line.replace("ptrtoint ptr @__loment_heap to i64", "ptrtoint ptr %hb to i64")
         line = line.replace("icmp ult i64 %rdo, 65536", f"icmp ult i64 %rdo, {nbytes}")
         line = line.replace("icmp ult i64 %wdo, 65536", f"icmp ult i64 %wdo, {nbytes}")
-        line = line.replace("[8192 x i32]", f"[{nbytes // 8} x i32]")
+        line = line.replace("[1024 x i8]", f"[{nbytes // 64} x i8]")
         out.append(line)
     return "\n".join(out)
 

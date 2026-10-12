@@ -882,8 +882,8 @@ def test_m82_hosted_arena_is_byte_identical():
             # 免得两个实现一起退回静态 arena 而这条判据照样绿（`docs/219` §7 那条口径）。
             assert "@__loment_heap = internal global ptr null" in want, "hosted 的 arena 不是宿主来的"
             assert "declare ptr @malloc(i64)" in want, "没向宿主声明分配器"
-    # 收集器那一份还得**真的带着收集器**：表按 arena 换过、且用的是基址指针
-    assert "@__loment_mark = internal global [131072 x i32]" in want
+    # 收集器那一份还得**真的带着收集器**：表按 arena 换过（位图：1 MiB / 64）、且走基址指针
+    assert "@__loment_mark = internal global [16384 x i8]" in want
     assert "%hb = call ptr @__loment_arena()" in want
     print("      hosted arena + hosted collector: 两个实现逐字节一致")
 
