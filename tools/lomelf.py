@@ -660,6 +660,14 @@ class Emitter:
         """标量 -> reg，**零扩展**到 64 位（符号语义在用到的地方显式 sext）。"""
         sz = size_of(ty)
         if val.startswith("%"):
+            if val in self.allocas:
+                # **alloca 的"值"就是它的地址** —— `%p.buf = alloca …` 之后把 `%p.buf`
+                # 当**普通 SSA 值**用（`store ptr %p.buf, ptr %p.addr`，L0 提升出来的产物
+                # 就是这一条）。`get_ptr` / `agg_addr` 一直在做这件事，`get` 漏了这一格 ——
+                # 于是那份产物在链接期报"未定义的 SSA 值"（FujoJTOP/loment#239）。
+                # 走这条不落 `zext`：`lea` 出来的已经是 64 位地址（自举侧同形，否则 ELF 不逐字节同）。
+                self.asm.emit(lea(reg, RBP, self.allocas[val][0]))
+                return
             off = self.slots.get(val)
             if off is None:
                 raise ElfError(f"未定义的 SSA 值: {val}")
