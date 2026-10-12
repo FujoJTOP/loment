@@ -31,7 +31,7 @@ IS_WIN = sys.platform == "win32"
 #: 随包发行的 **lompi 自己的版本**（命令行的那个号）。
 #: 它**同时写在 lpi_cli.lomt 里**（那是真源），这条常量的作用是：**改版本要过一次手动确认**，
 #: 不能悄悄漂（红了就说明被测的那个版本号 ≠ 我们说好要发的那个）。
-LPI_VERSION = "0.1.5"
+LPI_VERSION = "0.2.0"
 #: 随包 store 里 `<name>/<version>/` 那一层的**包版本** —— 是 std/host 这两个库自己的版本,
 #: 不是 lompi 的版本。两者今天都是 0.1.x, 但**不是一回事**: 升 lompi 不该动它, 动了就得
 #: 同时改 `loment_release.GLOBS` 与 `loment/tools/lomrel.lomt` 里那两个写死的 glob。
@@ -298,6 +298,147 @@ def test_version_command_and_the_shipped_version_agree():
         print(f"      SKIP: {_skip}")
         return
     assert rc == 0 and out.strip() == f"lompi {LPI_VERSION}", out[:120]
+
+
+# ---------------------------------------------------------------- 自己联网 (0.2.0)
+
+def _serve_registry(root: Path, index: str, files: dict[str, bytes]) -> tuple[object, int]:
+    """起一个**真的** HTTP 服务器（127.0.0.1，端口由内核分配）喂一份注册表。
+
+    为什么真的起服务器而不是打桩：这条判据要证的正是"lompi 自己把 socket 用起来"——
+    打桩等于把被测的那一段换掉。索引与文件都写在 root 下，服务器直接 serve 它。
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    (root / "lompi-index.txt").write_text(index, encoding="utf-8", newline=chr(10))
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):            # 别把每个请求打到 stderr 上
+            pass
+
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
+@test
+def test_fetch_pulls_the_registry_over_http_itself():
+    """**0.2.0 的正题**：`lompi fetch` 自己联网把注册表拉下来（`docs/236`）。
+
+    起一个真的 HTTP 服务器，喂一份索引 + 两个文件；lompi 必须 GET 索引、逐个 GET 文件、
+    **校验索引里写着的 sha256**、落到 `<root>/cache/<slug>/<name>/<version>/`。
+
+    边界也一起钉住：`https://` 与主机名**照旧打印计划**（TLS / 解析器不在工具链里），
+    这条判据不去要那两样东西 —— 要的是"明文 http + IPv4 字面量这条路真的通了"。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    exe = _build()
+    with tempfile.TemporaryDirectory(prefix="reg-") as td:
+        reg = Path(td)
+        # 两个文件（一个包的一对）
+        f1 = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+        f2 = b"name = mathutil\nversion = 0.1.0\n"
+        h1 = hashlib.sha256(f1).hexdigest()
+        h2 = hashlib.sha256(f2).hexdigest()
+        index = (f"# lompi registry index (test)\n"
+                 f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+                 f"mathutil 0.1.0 mathutil/0.1.0/pkg.lomp {h2}\n")
+        httpd, port = _serve_registry(reg, index, {
+            "mathutil/0.1.0/mathutil.lomt": f1,
+            "mathutil/0.1.0/pkg.lomp": f2,
+        })
+        try:
+            # 落盘那一半撞上 PE 的真边界：**没有 mkdir**（`sys_can_mkdir()` = false）。
+            # 所以判据分两步，而且**不猜 lompi 的 root 规则**（那是 `cfg_root` 的事）：
+            # 先跑一次，拿它自己打出来的 `mkdir -p <目录>` 提示照做，再跑一次。
+            url = f"http://127.0.0.1:{port}"
+            _, out0 = _run(["fetch", "--registry", url])
+            for line in out0.splitlines():
+                if line.startswith("lompi: make it first:"):
+                    Path(line.split("mkdir -p ", 1)[1].strip()).mkdir(parents=True, exist_ok=True)
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc == 0, out[:300]
+            assert "fetched mathutil 0.1.0" in out, f"fetch 没去拉: {out[:400]!r}"
+            assert "sha256 ok" in out, f"没校验摘要: {out[:400]!r}"
+            # 落到哪儿**由 lompi 报**（root 由 argv[0] 推、规则在 `cfg_root`，判据不猜）
+            dest = None
+            for line in out.splitlines():
+                if line.startswith("lompi: registry fetched into "):
+                    dest = Path(line.split("into ", 1)[1].strip())
+            assert dest and dest.is_dir(), f"没报落点或不落盘: {out[:400]!r}"
+            got = sorted(dest.rglob("mathutil.lomt"))
+            assert got, f"没有落盘: {sorted(dest.rglob('*'))[:6]}"
+            assert got[0].read_bytes() == f1, got[0]
+            assert sorted(p.name for p in got[0].parent.iterdir()) == ["mathutil.lomt", "pkg.lomp"], \
+                sorted(p.name for p in got[0].parent.iterdir())
+            # ---- 摘要对不上时必须**拒** ----
+            bad_index = index.replace(h1, "0" * 64)
+            httpd.shutdown()
+            httpd2, port2 = _serve_registry(reg, bad_index, {
+                "mathutil/0.1.0/mathutil.lomt": f1,
+                "mathutil/0.1.0/pkg.lomp": f2,
+            })
+            try:
+                for p in dest.rglob("mathutil.lomt"):
+                    p.unlink()
+                _, out2 = _run(["fetch", "--registry", f"http://127.0.0.1:{port2}"])
+                assert "sha256 mismatch" in out2, f"没说清是摘要对不上: {out2[:300]!r}"
+                left = sorted(dest.rglob("mathutil.lomt"))
+                assert not left, f"摘要对不上却落盘了: {left}"
+            finally:
+                httpd2.shutdown()
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_fetch_prints_the_plan_for_https_and_hostnames():
+    """不让"能联网"这句话盖住边界：https 与主机名**照旧打印计划**，而且**说清理由**。"""
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["fetch", "--registry", "https://github.com/you/loment-libs"])
+    assert rc == 0 and "git clone --depth 1" in out, out[:300]
+    assert "TLS" in out, f"https 那条没说清是 TLS 缺: {out[:300]!r}"
+    rc2, out2 = _run(["fetch", "--registry", "http://libs.example.com/x"])
+    assert rc2 == 0 and "git clone --depth 1" in out2, out2[:300]
+    assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
+
+
+@test
+def test_paths_use_the_platform_separator():
+    """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。
+
+    以前这里是**写死的 `\\`**（`"\\\\"` / `92 as u8` 散在十几处），于是 ELF 上报的落点是
+    `/tmp\\.lompi\\cache\\51217` —— POSIX 上反斜杠是普通字符，那**不是一条路径**，是
+    一个扁平的文件名。`fetch` 那条判据在 CI 上抓到它（本机 Linux 那份因为没 clang
+    一直跳过，所以藏了很久）。
+
+    这一条**两个方向都拦**：PE 上混进 `/`、POSIX 上混进 `\\`，都红 —— 于是"哪天探针
+    静默翻面"不会没人管。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["config"])
+    assert rc == 0, out[:200]
+    line = next((x for x in out.splitlines() if x.startswith("store:")), None)
+    assert line, f"config 没打出 store 行: {out[:300]!r}"
+    sep, other = ("\\", "/") if IS_WIN else ("/", "\\")
+    assert sep in line, f"{'PE' if IS_WIN else 'POSIX'} 上分隔符不对: {line!r}"
+    assert other not in line, f"路径里混进了外来分隔符: {line!r}"
 
 
 @test

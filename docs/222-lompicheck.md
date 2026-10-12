@@ -34,11 +34,12 @@ lompicheck: the lompi publish outlet against the loment source
 
 | 这一半 | 在哪 | 干什么 | 为什么不能是另一半 |
 |---|---|---|---|
-| **引擎** | `loment/tools/lompicheck.lomt`（编成 PE/ELF；一条注册出来的 `loment` 命令） | 只读**本地两棵树**，逐文件比内容 | 它**不能联网**：PE 运行时只实现 8 个 syscall，里面没有 socket（`loment/tools/win_shim_data.lomt` 的导入表就是全部家当）。换 Linux ELF 也不行 —— `socket` 有，但到 `api.github.com` 要走 TLS，工具链里没有 TLS |
+| **引擎** | `loment/tools/lompicheck.lomt`（编成 PE/ELF；一条注册出来的 `loment` 命令） | 只读**本地两棵树**，逐文件比内容 | 它**不联网**：不是因为没有 socket —— PE 派发面现在是 29 个号、socket 那一族两个平台都在（`docs/234`）—— 而是因为到 `api.github.com` 要走 TLS，**工具链里没有 TLS** |
 | **拉取那一半** | **你**（跑引擎打出来的那条 `git` 命令） | 把 `FujoJTOP/lompi` 的一份缓存 clone 更新好，再跑一次引擎 | 引擎是 Loment，**不会 fork 也不会联网**；`git` 是 shell 的事 |
 
-这与 lompi 自己"PE 上没有 socket，于是 `lompi fetch` 只把 `git clone` 打印出来"是**同一个
-边界**：**是运行时缺，不是设计上不想要**。
+这条边界与 lompi 自己那条**现在不是同一条了**：`lompi fetch` 从 0.2.0 起自己做 HTTP
+（`docs/236`），卡的是 **TLS 与解析器**，而这里卡的是**同一个** —— `api.github.com` 是 HTTPS。
+两次都是**工具链缺，不是设计上不想要**。
 
 （2026-10-10 之前这儿有个 `--install` 生成的 shell 薄壳替你跑 git。`docs/218` 的注册机制把
 "注册"那一半吃掉之后它就没有必要了 —— 剩下的"打印一条 `git` 命令"不值得再养一个安装器，

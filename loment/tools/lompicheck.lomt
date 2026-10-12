@@ -10,9 +10,11 @@
 // 那边的判据 (`tools/lompicheck_test.py`) 会核这几条字面量与发布清单仍然一致 —— 引擎这边
 // 引不了 Python 的清单, 所以用一条**判据**当那份"不能漂"的保证。
 //
-// **联网那一半不在这里**: PE 运行时只实现 8 个 syscall, 里面没有 socket —— 本程序不联网,
+// **联网那一半不在这里**: 卡住它的不是 socket —— 派发面里 socket 那一族两个平台都在
+// (docs/234) —— 而是发布口在 GitHub 上, 走 HTTPS, 而工具链里没有 TLS。所以本程序不联网,
 // 也起不了 `git`。要更新那份缓存 clone 时它把该跑的 `git` 命令**打出来**让你跑
-// (与 `lompi fetch` 同一招), 缓存路径默认从 `argv[0]` 推 (`<家目录>/.lompi/cache/lompi`)。
+// (够不着的时候 `lompi fetch` 也是这一招, docs/236), 缓存路径默认从 `argv[0]` 推
+// (`<家目录>/.lompi/cache/lompi`)。
 //
 //   loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
 //

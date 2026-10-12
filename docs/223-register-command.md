@@ -35,9 +35,10 @@ pub fn command_main(argv: ptr, argc: u32) -> u32 {      // 实现也在源码里
    `catalog()`（`docs/169` §2），是一份**编译好的** Loment 程序里的表。用户的单元不是它的
    一部分。
 2. **没有运行时装载。** 链接是静态的：ELF 那边 `-nostdlib -static`，PE 那边的导入表是
-   **构建期写死**的 11 个 kernel32 函数（`loment/tools/win_shim_data.lomt` 里那两张表），
-   而运行时只有 8 个 syscall（`docs/167` §5 / `docs/169` §4）—— 没有 `dlopen`，
-   也没有能用 `LoadLibrary` 的入口。所以"把一条命令塞进正在跑的那个 CLI"没有机制。
+   **构建期写死**的两张表 —— `kernel32.dll` 11 个 + `ws2_32.dll` 19 个
+   （`loment/tools/win_shim_data.lomt`），而派发面（`docs/167` §5 / `docs/169` §4）里
+   没有 `dlopen`，也没有能用 `LoadLibrary` 的入口。所以"把一条命令塞进正在跑的那个 CLI"
+   没有机制。
 3. **启动器是唯一看得见 `PATH` 的地方**（`docs/169` §3b 的原话）。官方 CLI 看不见 `PATH`，
    所以分发只能发生在启动器这一层。
 
@@ -192,12 +193,15 @@ pub fn command_main(argv: ptr, argc: u32) -> u32 {      // 实现也在源码里
   没有任何声明、没有审计、没有拦截 —— 同一条边界在 `docs/146` §5（"`guard` 不是授权"）、
   SKILL §5（"`syscall4` / `alloc` / FFI 都是裸的"）与 issue #23 里各写了一遍。
   发布别人的命令等于发布别人的程序。
-- **不能联网。** PE 那 8 个 syscall 里没有 socket（`docs/217` §1）。真想联网的命令得自己带
-  网络那一半 —— `lompicheck` 就是：命令用 Loment 写，拉取交给一个 shell 薄壳。
-  形式 B 落地后它**只会少掉"注册"那一半**，拉取那一半仍然是 shell。
-  （另一条路：像 `lompi fetch` 那样**只打印出 `git clone` 命令**，于是它变成一个纯二进制、
-  零 Python、零 shell —— 代价是每次自己更新缓存。两条路都成立，选哪条是它自己的事。）
-- **跨平台按目标编**：PE 上只有那 8 个 syscall，写死的 Linux syscall 在 Windows 上返回 -1。
+- **联网卡在 TLS，不是卡在 socket。** 派发面上 socket 那一族两个平台都在（`docs/234`），
+  拿它连 `127.0.0.1` 没问题 —— 而到 GitHub 要走 HTTPS，工具链里没有 TLS，也没有解析器
+  （`docs/236`）。真想联网的命令得自己带网络那一半 —— `lompicheck` 就是：命令用 Loment 写，
+  拉取交给一个 shell 薄壳。形式 B 落地后它**只会少掉"注册"那一半**，拉取那一半仍然是 shell。
+  （另一条路：够不着的时候**把 `git clone` 命令打出来**，于是它变成一个纯二进制、
+  零 Python、零 shell —— `lompi fetch` 就是这么干的（`docs/236`）。两条路都成立，
+  选哪条是它自己的事。）
+- **跨平台按目标编**：PE 的派发面只有那些号，其余 Linux syscall 在 Windows 上返回
+  `-ENOSYS`（`docs/167` §5）。
 - **不管分发**：`--install` 只是把文件放对地方；`PATH` 仍然是你的事。
 - **名字是平的、大小写敏感**（与 `PATH` 上的文件名同一条规矩）。
 - **不解决"命令怎么被找到"之外的任何事**：没有版本、没有依赖、没有卸载
