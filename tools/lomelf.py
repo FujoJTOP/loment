@@ -1372,6 +1372,8 @@ SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
 SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN = 44, 45, 48
 SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
 SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
+SYS_SENDMSG, SYS_RECVMSG, SYS_SOCKETPAIR = 46, 47, 53
+SYS_EPOLL_WAIT, SYS_EPOLL_CTL, SYS_EPOLL_CREATE1 = 232, 233, 291
 
 #: 派发面**之外**的号返回什么。**不是 -1**：`-1` 是 `EPERM`（"权限不够"），拿它当
 #: "没这个号"用是在**说假话** —— Linux 对不认得的系统调用返回 `-ENOSYS`（`-38`），
@@ -1418,6 +1420,8 @@ PE_SYSCALLS = (
     (SYS_GETPEERNAME, "net", "__ws_getpeername"),
     (SYS_SETSOCKOPT, "net", "__ws_setsockopt"),
     (SYS_GETSOCKOPT, "net", "__ws_getsockopt"),
+    (SYS_SENDMSG, "net", "__ws_sendmsg"),
+    (SYS_RECVMSG, "net", "__ws_recvmsg"),
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
@@ -1478,6 +1482,12 @@ WS_FD_COUNT = 64
 WS_FD_SIZE = 24                                # kind(u32) / handle(u64) / pos(u64)
 WS_FD_KIND, WS_FD_HANDLE, WS_FD_POS = 0, 8, 16
 WS_FD_FREE, WS_FD_FILE, WS_FD_DIR, WS_FD_CMD, WS_FD_SOCK = 0, 1, 2, 3, 4
+#: epoll 实例在 fd 表里也占一格（`epoll_create1` 返回的就是它）—— Linux 那边 `epoll` 也是
+#: 一个 fd，所以号段与文件/socket **共用**、"最低可用"的取号规则两边一致。
+WS_FD_EPOLL = 5
+#: socket 型 fd 的 `WS_FD_POS` 拿来记**类型**（`SOCK_STREAM`/`SOCK_DGRAM`）——
+#: `sendmsg` 要靠它决定"拼成一块再发"还是"逐块发"（见 `__ws_sendmsg`）。
+LINUX_SOCK_STREAM, LINUX_SOCK_DGRAM = 1, 2
 WS_BRK = WS_FD_COUNT * WS_FD_SIZE              # brk 当前值 / 上界 / cmdline 长度 / cmdline 缓冲
 WS_BRK_END = WS_BRK + 8
 WS_CMD_LEN = WS_BRK_END + 8
@@ -1509,7 +1519,26 @@ WS_SELFLAG = WS_SHADOW_EX + WS_FDSET_CAP
 #: 被归一化读掉的 `SO_ERROR`（**读即清零**，两边平台都是）—— 存下来，等应用自己调用
 #: `getsockopt(SO_ERROR)` 时**原样还回去**（`__ws_getsockopt` 那一格）。
 WS_SERR = WS_SELFLAG + WS_FD_COUNT
-WS_SIZE = WS_SERR + WS_FD_COUNT * 4
+#: `sendmsg`/`recvmsg` 的**散列暂存**。WinSock 没有"把 iovec 数组直接交给内核"的那条路
+#: （真要用 `WSARecvMsg` 得先经 `WSAIoctl` 取扩展函数指针，而 `WSAMSG`/`WSABUF` 的字段
+#: 顺序与 Linux 的 `msghdr`/`iovec` **正好相反**）—— 于是这里走"**摊平/散开**"：
+#: 发送先把 iovec 拼进这块暂存，接收先收进它再散回 iovec。**一次拷贝**换掉一整族翻译；
+#: 边界（流式按块循环 / 数据报超上限）写在 `docs/234`。
+WS_IOV_BUF = WS_SERR + WS_FD_COUNT * 4
+WS_IOV_CAP = 64 * 1024
+#: epoll 实例表。**没有 IOCP**：`epoll_wait` 是架在 WinSock `select` 上的**水平触发**实现
+#: （见 `__ws_epoll_wait`）。每个实例 = 16 字节头（live / count）+ 64 条登记 × 16 字节
+#: （fd / events / data）。实例数 4、每实例 64 条 —— 超了**报错**，不静默丢。
+WS_EPOLL = WS_IOV_BUF + WS_IOV_CAP
+WS_EPOLL_MAX = 4
+WS_EPOLL_SLOTS = 64
+WS_EPOLL_INST = 16 + WS_EPOLL_SLOTS * 16
+#: 新这几个号（`sendmsg`/`recvmsg`/`socketpair`/`epoll`）要的游标比帧里那十个槽多
+#: （iov 下标 / 剩余长度 / 块长 / 首块标志…），所以给它们**自己一块** scratch ——
+#: 别去挤那些被别的处理器复用的帧槽（挤了就会出现"改 A 坏 B"的暗沟）。
+WS_NETTMP = WS_EPOLL + WS_EPOLL_MAX * WS_EPOLL_INST
+WS_NETTMP_CAP = 256
+WS_SIZE = WS_NETTMP + WS_NETTMP_CAP
 WS_HEAP = 64 * 1024 * 1024
 WS_CP_UTF8, WS_CP_ACP = 65001, 0               # 多字节码页（cmdline 走 A 版 API 要显式转）
 
@@ -2549,6 +2578,350 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
         jcc_l("e", "__ws_sock_err")
         zext_eax()
         jmp_l("__ws_ret")
+
+    # ---- sendmsg(46) / recvmsg(47) --------------------------------------
+    # Linux 的 `msghdr` 与 WinSock 的 `WSAMSG`/`WSABUF` **不是同一份东西**：字段顺序相反
+    # （`iovec` 是 {base,len}、`WSABUF` 是 {len,buf}），真要走 `WSASendMsg`/`WSARecvMsg`
+    # 还得先 `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` 取扩展函数指针。
+    # 这里换一条路：**摊平/散开**（发送逐 iov 直发、接收先收进暂存再散回 iov）。
+    # 代价、边界与不做的部分（`msg_control`）写在 `docs/234`。
+    a.label("__ws_sendmsg")                     # rdi=fd rsi=msghdr rdx=flags
+    st(RSP, 0x30, RSI)                          # msghdr
+    st(RSP, 0x38, RDX)                          # flags
+    a.call("__ws_sock_of_fd")                   # rdi 不变（助手只写 rax/rcx/rdx）
+    test_rax()
+    jcc_l("e", "__ws_not_sock")
+    st(RSP, 0x58, RAX)                          # SOCKET
+    ld(RCX, RSP, 0x30)
+    ld(RDX, RCX, 0)                             # msg_name
+    st(RSP, 0x40, RDX)
+    ld(RDX, RCX, 8)                             # msg_namelen
+    st(RSP, 0x48, RDX)
+    ld(RDX, RCX, 16)                            # msg_iov
+    st(RSP, 0x50, RDX)
+    ld(RDX, RCX, 24)                            # msg_iovlen
+    st(RSP, 0x60, RDX)
+    xor_eax()
+    st(RBX, WS_NETTMP, RAX)                     # j（第几条 iov）
+    st(RBX, WS_NETTMP + 8, RAX)                 # iovoff（本条里发到哪了）
+    st(RBX, WS_NETTMP + 16, RAX)                # remaining（还没发出去的字节）
+    st(RBX, WS_NETTMP + 40, RAX)                # sent（已发总数）
+    movi(RCX, 1)
+    st(RBX, WS_NETTMP + 48, RCX)                # 首块标志（地址只用在第一块上）
+    # remaining = Σ iov.len
+    xor_eax()
+    st(RSP, 0x68, RAX)
+    a.label("__ws_sm_sum")
+    ld(RAX, RSP, 0x68)
+    ld(RCX, RSP, 0x60)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_sm_fill")
+    ld(RCX, RSP, 0x50)
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, 16)
+    add_rr(RCX, RDX)
+    ld(RDX, RCX, 8)
+    ld(RCX, RBX, WS_NETTMP + 16)
+    add_rr(RCX, RDX)
+    st(RBX, WS_NETTMP + 16, RCX)
+    ld(RAX, RSP, 0x68)
+    add_ri(RAX, 1)
+    st(RSP, 0x68, RAX)
+    jmp_l("__ws_sm_sum")
+    # ---- 拼一块（最多 WS_IOV_CAP）再发 ---------------------------------
+    # **为什么按块而不是按 iov 逐条发**：一次 `sendmsg` 在数据报 socket 上必须是**一个**
+    # 数据报 —— 逐 iov 发会把它拆成好几个（实测：第二个 iov 走 `send`，未 connect 的
+    # UDP socket 上直接 WSAENOTCONN）。而数据报的上限（65507）小于这里的块大小，
+    # 所以"拼够一块就发"对数据报永远是"整个数据报一次发出"，分块只可能发生在流上。
+    a.label("__ws_sm_fill")
+    ld(RAX, RBX, WS_NETTMP + 16)
+    test_rax()
+    jcc_l("e", "__ws_sm_done")                  # 一个字节都没有 ⇒ 0（Linux 同）
+    xor_eax()
+    st(RBX, WS_NETTMP + 24, RAX)                # 本块的字节数 n = 0
+    a.label("__ws_sm_floop")
+    ld(RAX, RBX, WS_NETTMP + 24)
+    movi(RCX, WS_IOV_CAP)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_sm_fldone")               # 块满了
+    ld(RAX, RBX, WS_NETTMP)                     # j
+    ld(RCX, RSP, 0x60)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_sm_fldone")               # iov 用完了
+    ld(RCX, RSP, 0x50)
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, 16)
+    add_rr(RCX, RDX)                            # &iov[j]
+    st(RBX, WS_NETTMP + 56, RCX)
+    ld(RDX, RCX, 8)                             # len_k
+    ld(R9, RBX, WS_NETTMP + 8)
+    sub_rr(RDX, R9)                             # 本条还剩多少
+    test_rr(RDX, RDX)
+    jcc_l("ne", "__ws_sm_have")
+    xor_eax()
+    st(RBX, WS_NETTMP + 8, RAX)                 # 本条空了：iovoff = 0、换下一条
+    ld(RAX, RBX, WS_NETTMP)
+    add_ri(RAX, 1)
+    st(RBX, WS_NETTMP, RAX)
+    jmp_l("__ws_sm_floop")
+    a.label("__ws_sm_have")                     # rdx = 本条剩余
+    ld(RCX, RBX, WS_NETTMP + 24)                # rcx = n
+    movi(R9, WS_IOV_CAP)
+    sub_rr(R9, RCX)                             # 缓冲还能装多少
+    a.emit(alu_rr(0x39, RDX, R9))
+    jcc_l("be", "__ws_sm_m")
+    a.emit(mov_rr(RDX, R9))
+    a.label("__ws_sm_m")                        # rdx = 这一段
+    movi(RDI, PE_STATE_VA + WS_IOV_BUF)
+    add_rr(RDI, RCX)                            # 目的 = 暂存 + n
+    ld(RCX, RBX, WS_NETTMP + 56)                # （n 已经用过了）
+    ld(RSI, RCX, 0)                             # iov[j].base
+    ld(R9, RBX, WS_NETTMP + 8)
+    add_rr(RSI, R9)                             # 源 = base + iovoff
+    st(RBX, WS_NETTMP + 64, RDX)
+    a.emit(mov_rr(RCX, RDX))
+    a.emit(b"\xF3\xA4")                         # rep movsb
+    ld(RDX, RBX, WS_NETTMP + 64)
+    ld(RCX, RBX, WS_NETTMP + 24)
+    add_rr(RCX, RDX)
+    st(RBX, WS_NETTMP + 24, RCX)                # n += 这一段
+    ld(RCX, RBX, WS_NETTMP + 8)
+    add_rr(RCX, RDX)
+    st(RBX, WS_NETTMP + 8, RCX)                 # iovoff += 这一段
+    ld(RCX, RBX, WS_NETTMP + 16)
+    sub_rr(RCX, RDX)
+    st(RBX, WS_NETTMP + 16, RCX)                # remaining -= 这一段
+    jmp_l("__ws_sm_floop")
+    a.label("__ws_sm_fldone")
+    xor_eax()
+    st(RBX, WS_NETTMP + 32, RAX)                # 这一块已经发出去多少
+    # ---- 发：给了地址且是首块就 `sendto`，否则 `send` ---------------------
+    a.label("__ws_sm_again")
+    movi(RDX, PE_STATE_VA + WS_IOV_BUF)
+    ld(RAX, RBX, WS_NETTMP + 32)
+    add_rr(RDX, RAX)                            # 缓冲 + 本块已发
+    ld(R8, RBX, WS_NETTMP + 24)
+    sub_rr(R8, RAX)                             # 本块还剩多少
+    ld(RCX, RSP, 0x40)                          # name
+    test_rr(RCX, RCX)
+    jcc_l("e", "__ws_sm_plain")
+    ld(R9, RBX, WS_NETTMP + 48)
+    test_rr(R9, R9)
+    jcc_l("e", "__ws_sm_plain")
+    xor_eax()
+    st(RBX, WS_NETTMP + 48, RAX)                # 首块用掉了
+    ld(RDI, RSP, 0x40)
+    a.call("__ws_addr_in")
+    ld(RCX, RSP, 0x58)
+    ld(R8, RBX, WS_NETTMP + 24)
+    ld(RAX, RBX, WS_NETTMP + 32)
+    sub_rr(R8, RAX)
+    movi(RDX, PE_STATE_VA + WS_IOV_BUF)
+    add_rr(RDX, RAX)
+    ld(R9, RSP, 0x38)
+    a.emit(alu_ri(AND_, R9, ~LINUX_MSG_NOSIGNAL))
+    ld(RAX, RSP, 0x40)
+    st(RSP, 0x20, RAX)                          # 第 5 参 = addr
+    ld(RAX, RSP, 0x48)
+    st(RSP, 0x28, RAX)                          # 第 6 参 = addrlen
+    api("sendto")
+    st(RBX, WS_NETTMP + 56, RAX)
+    ld(RDI, RSP, 0x40)
+    a.call("__ws_addr_restore")
+    ld(RAX, RBX, WS_NETTMP + 56)
+    jmp_l("__ws_sm_got")
+    a.label("__ws_sm_plain")
+    ld(RCX, RSP, 0x58)
+    ld(R9, RSP, 0x38)
+    a.emit(alu_ri(AND_, R9, ~LINUX_MSG_NOSIGNAL))
+    api("send")
+    a.label("__ws_sm_got")
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sm_err")
+    zext_eax()
+    ld(RCX, RBX, WS_NETTMP + 32)
+    add_rr(RCX, RAX)
+    st(RBX, WS_NETTMP + 32, RCX)                # 本块已发 += 这次发出去的
+    # 本块发完了吗
+    ld(RCX, RBX, WS_NETTMP + 24)
+    a.emit(alu_rr(0x39, RCX, RAX))              # cmp n, 本块已发
+    jcc_l("be", "__ws_sm_nextblk")              # n <= 已发 ⇒ 发完了
+    jmp_l("__ws_sm_again")                      # 短写：接着发剩下的
+    a.label("__ws_sm_nextblk")
+    ld(RCX, RBX, WS_NETTMP + 40)
+    ld(RAX, RBX, WS_NETTMP + 32)
+    add_rr(RCX, RAX)
+    st(RBX, WS_NETTMP + 40, RCX)                # sent += 本块
+    jmp_l("__ws_sm_fill")
+    a.label("__ws_sm_err")
+    # **一个字节都没出去** ⇒ 报错；已经出去过 ⇒ 返回已发字节数（Linux 的短写语义）
+    ld(RCX, RBX, WS_NETTMP + 32)
+    test_rr(RCX, RCX)
+    jcc_l("ne", "__ws_sm_part")
+    ld(RCX, RBX, WS_NETTMP + 40)
+    test_rr(RCX, RCX)
+    jcc_l("ne", "__ws_sm_part")
+    a.call("__ws_sock_err")
+    jmp_l("__ws_ret")
+    a.label("__ws_sm_part")
+    ld(RAX, RBX, WS_NETTMP + 40)
+    ld(RCX, RBX, WS_NETTMP + 32)
+    add_rr(RAX, RCX)
+    jmp_l("__ws_ret")
+    a.label("__ws_sm_done")
+    ld(RAX, RBX, WS_NETTMP + 40)
+    jmp_l("__ws_ret")
+
+    a.label("__ws_recvmsg")                     # rdi=fd rsi=msghdr rdx=flags
+    st(RSP, 0x30, RSI)
+    st(RSP, 0x38, RDX)
+    a.call("__ws_sock_of_fd")
+    test_rax()
+    jcc_l("e", "__ws_not_sock")
+    st(RSP, 0x58, RAX)
+    ld(RCX, RSP, 0x30)
+    ld(RDX, RCX, 0)
+    st(RSP, 0x40, RDX)                          # msg_name
+    ld(RDX, RCX, 8)
+    st(RSP, 0x48, RDX)                          # msg_namelen（调用方给的容量）
+    ld(RDX, RCX, 16)
+    st(RSP, 0x50, RDX)                          # msg_iov
+    ld(RDX, RCX, 24)
+    st(RSP, 0x60, RDX)                          # msg_iovlen
+    # 收多长：iov 总长，且不超过暂存
+    xor_eax()
+    st(RSP, 0x68, RAX)                          # k
+    st(RSP, 0x70, RAX)                          # total
+    a.label("__ws_rm_sum")
+    ld(RAX, RSP, 0x68)
+    ld(RCX, RSP, 0x60)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_rm_go")
+    ld(RCX, RSP, 0x50)
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, 16)
+    add_rr(RCX, RDX)
+    ld(RDX, RCX, 8)
+    ld(RCX, RSP, 0x70)
+    add_rr(RCX, RDX)
+    st(RSP, 0x70, RCX)
+    ld(RAX, RSP, 0x68)
+    add_ri(RAX, 1)
+    st(RSP, 0x68, RAX)
+    jmp_l("__ws_rm_sum")
+    a.label("__ws_rm_go")
+    ld(RAX, RSP, 0x70)
+    movi(RCX, WS_IOV_CAP)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("be", "__ws_rm_cap")
+    a.emit(mov_rr(RAX, RCX))
+    a.label("__ws_rm_cap")
+    st(RBX, WS_NETTMP + 32, RAX)                # 这次最多收这么多
+    ld(RCX, RSP, 0x40)
+    test_rr(RCX, RCX)
+    jcc_l("e", "__ws_rm_plain")
+    movi32(RCX, 128)                            # sockaddr_storage 够大
+    st(RBX, WS_NETTMP + 24, RCX)
+    movi(RCX, PE_STATE_VA + WS_NETTMP + 24)
+    st(RSP, 0x28, RCX)                          # 第 6 参 = &addrlen
+    movi(RCX, PE_STATE_VA + WS_SOCKTMP)
+    st(RSP, 0x20, RCX)                          # 第 5 参 = addr
+    ld(RCX, RSP, 0x58)
+    movi(RDX, PE_STATE_VA + WS_IOV_BUF)
+    ld(R8, RBX, WS_NETTMP + 32)
+    ld(R9, RSP, 0x38)
+    a.emit(alu_ri(AND_, R9, ~LINUX_MSG_NOSIGNAL))
+    api("recvfrom")
+    st(RBX, WS_NETTMP + 40, RAX)
+    movi(RDI, PE_STATE_VA + WS_SOCKTMP)
+    a.call("__ws_addr_out")                     # family 字回 Linux 的值
+    jmp_l("__ws_rm_have")
+    a.label("__ws_rm_plain")
+    ld(RCX, RSP, 0x58)
+    movi(RDX, PE_STATE_VA + WS_IOV_BUF)
+    ld(R8, RBX, WS_NETTMP + 32)
+    ld(R9, RSP, 0x38)
+    a.emit(alu_ri(AND_, R9, ~LINUX_MSG_NOSIGNAL))
+    api("recv")
+    st(RBX, WS_NETTMP + 40, RAX)
+    a.label("__ws_rm_have")
+    ld(RAX, RBX, WS_NETTMP + 40)
+    cmp_eax_m1()
+    jcc_l("e", "__ws_sock_err")
+    zext_eax()
+    st(RBX, WS_NETTMP + 40, RAX)                # n
+    # 散开：n 字节按 iov[] 依次放
+    xor_eax()
+    st(RSP, 0x68, RAX)                          # k
+    st(RSP, 0x70, RAX)                          # off
+    a.label("__ws_rm_sc")
+    ld(RAX, RSP, 0x70)
+    ld(RCX, RBX, WS_NETTMP + 40)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_rm_scd")
+    ld(RAX, RSP, 0x68)
+    ld(RCX, RSP, 0x60)
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("ae", "__ws_rm_scd")
+    ld(RCX, RSP, 0x50)
+    a.emit(mov_rr(RDX, RAX))
+    imul_ri(RDX, 16)
+    add_rr(RCX, RDX)                            # &iov[k]
+    ld(RDX, RCX, 8)                             # len_k
+    ld(R8, RBX, WS_NETTMP + 40)                 # n
+    ld(R9, RSP, 0x70)
+    sub_rr(R8, R9)                              # n - off
+    a.emit(alu_rr(0x39, RDX, R8))
+    jcc_l("be", "__ws_rm_scm")
+    a.emit(mov_rr(RDX, R8))
+    a.label("__ws_rm_scm")                      # rdx = 这一段拷多少
+    st(RBX, WS_NETTMP + 48, RDX)
+    st(RBX, WS_NETTMP + 56, RCX)                # &iov[k]（rep 会踩 rcx）
+    ld(RDI, RCX, 0)                             # 目的 = iov[k].base
+    movi(RSI, PE_STATE_VA + WS_IOV_BUF)
+    ld(R9, RSP, 0x70)
+    add_rr(RSI, R9)                             # 源 = 暂存 + off
+    a.emit(mov_rr(RCX, RDX))
+    a.emit(b"\xF3\xA4")                         # rep movsb
+    ld(RCX, RBX, WS_NETTMP + 48)
+    ld(RAX, RSP, 0x70)
+    add_rr(RAX, RCX)
+    st(RSP, 0x70, RAX)                          # off += 这一段
+    ld(RAX, RSP, 0x68)
+    add_ri(RAX, 1)
+    st(RSP, 0x68, RAX)                          # k += 1
+    jmp_l("__ws_rm_sc")
+    a.label("__ws_rm_scd")
+    ld(RCX, RSP, 0x30)
+    xor_eax()
+    st32(RCX, 48, RAX)                          # msg_flags = 0（没有 OOB/TRUNC 可报）
+    # 对端地址：WinSock 写进的是**我们的** scratch（`WS_SOCKTMP`），得拷回调用方的
+    # `msg_name`，并按调用方给的容量截断（Linux 的 `msg_namelen` 收尾就是"库容不够就截"）。
+    ld(RDX, RSP, 0x40)                          # name
+    test_rr(RDX, RDX)
+    jcc_l("e", "__ws_rm_fin")
+    ld(RAX, RBX, WS_NETTMP + 24)                # WinSock 回来的地址长度
+    test_rax()
+    jcc_l("e", "__ws_rm_nl")
+    ld(RCX, RSP, 0x48)                          # 调用方的容量
+    a.emit(alu_rr(0x39, RAX, RCX))
+    jcc_l("be", "__ws_rm_cp")
+    a.emit(mov_rr(RAX, RCX))                    # 太短 ⇒ 拷这么多
+    a.label("__ws_rm_cp")
+    test_rax()
+    jcc_l("e", "__ws_rm_nl")
+    st(RBX, WS_NETTMP + 48, RAX)
+    a.emit(mov_rr(RDI, RDX))
+    movi(RSI, PE_STATE_VA + WS_SOCKTMP)
+    a.emit(mov_rr(RCX, RAX))
+    a.emit(b"\xF3\xA4")                        # rep movsb
+    a.label("__ws_rm_nl")
+    ld(RCX, RSP, 0x30)
+    ld(RDX, RBX, WS_NETTMP + 24)
+    st32(RCX, 8, RDX)                           # msg_namelen = 收下来的地址长度
+    a.label("__ws_rm_fin")
+    ld(RAX, RBX, WS_NETTMP + 40)
+    jmp_l("__ws_ret")
 
     # ---- socket(af, type, proto) ----------------------------------------
     a.label("__ws_socket")

@@ -1224,9 +1224,243 @@ def _sock_ok(out: bytes) -> bool:
 
 #: 四份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
+MSG_DEMO = """module msgdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn put64(p: ptr, off: u32, v: i64) -> u32 {
+    let k: u32 = 0;
+    let x: i64 = v;
+    while k < 8 {
+        store8(p, off + k, (x % 256) as u8);
+        x = x / 256;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Linux 的 struct msghdr（x86-64）：name@0 namelen@8 iov@16 iovlen@24
+//                                  control@32 controllen@40 flags@48
+fn mkhdr(m: ptr, name: ptr, namelen: i64, iov: ptr, iovlen: i64) -> u32 {
+    let _a: u32 = put64(m, 0, name as i64);
+    let _b: u32 = put64(m, 8, namelen);
+    let _c: u32 = put64(m, 16, iov as i64);
+    let _d: u32 = put64(m, 24, iovlen);
+    let _e: u32 = put64(m, 32, 0);
+    let _f: u32 = put64(m, 40, 0);
+    let _g: u32 = put64(m, 48, 0);
+    return 0;
+}
+
+// struct iovec 是 {base, len}，每条 16 字节
+fn mkiov(v: ptr, k: u32, base: ptr, len: i64) -> u32 {
+    let _a: u32 = put64(v, k * 16, base as i64);
+    let _b: u32 = put64(v, k * 16 + 8, len);
+    return 0;
+}
+
+fn _start() {
+    // ---- TCP：`sendmsg` 把三段散出去，`recvmsg` 再按三条 iovec 收回来 ----
+    let sa0: ptr = alloc(64);
+    let _z0: u32 = sa(sa0, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket\\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let bi: i64 = syscall6(49, ls as u64, sa0 as u64, 16, 0, 0);
+    if bi < 0 {
+        die(2, "FAIL bind\\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(3, "FAIL listen\\n");
+    }
+    let g1: i64 = syscall6(51, ls as u64, sa0 as u64, ln as u64, 0, 0);
+    if g1 < 0 {
+        die(4, "FAIL getsockname\\n");
+    }
+    let c1: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c1 < 0 {
+        die(5, "FAIL socket(c)\\n");
+    }
+    let n1: i64 = syscall6(42, c1 as u64, sa0 as u64, 16, 0, 0);
+    if n1 < 0 {
+        die(6, "FAIL connect\\n");
+    }
+    let a1: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a1 < 0 {
+        die(7, "FAIL accept\\n");
+    }
+    let b0: ptr = alloc(8);
+    store8(b0, 0, 65);
+    store8(b0, 1, 66);
+    let b1: ptr = alloc(8);
+    store8(b1, 0, 67);
+    store8(b1, 1, 68);
+    store8(b1, 2, 69);
+    let b2: ptr = alloc(8);
+    store8(b2, 0, 70);
+    let iov: ptr = alloc(64);
+    let _i0: u32 = mkiov(iov, 0, b0, 2);
+    let _i1: u32 = mkiov(iov, 1, b1, 3);
+    let _i2: u32 = mkiov(iov, 2, b2, 1);
+    let m: ptr = alloc(64);
+    let nil: ptr = 0 as ptr;
+    let _h0: u32 = mkhdr(m, nil, 0, iov, 3);
+    let sn: i64 = syscall6(46, c1 as u64, m as u64, 0, 0, 0);
+    if sn != 6 {
+        die(8, "FAIL sendmsg count\\n");
+    }
+    w(1, "SENDMSG OK\\n");
+    let r0: ptr = alloc(8);
+    let r1: ptr = alloc(8);
+    let r2: ptr = alloc(8);
+    let riov: ptr = alloc(64);
+    let _j0: u32 = mkiov(riov, 0, r0, 2);
+    let _j1: u32 = mkiov(riov, 1, r1, 2);
+    let _j2: u32 = mkiov(riov, 2, r2, 2);
+    let rm: ptr = alloc(64);
+    let _h1: u32 = mkhdr(rm, nil, 0, riov, 3);
+    let rn: i64 = syscall6(47, a1 as u64, rm as u64, 0, 0, 0);
+    if rn != 6 {
+        die(9, "FAIL recvmsg count\\n");
+    }
+    if load8(r0, 0) != 65 {
+        die(10, "FAIL r0a\\n");
+    }
+    if load8(r0, 1) != 66 {
+        die(11, "FAIL r0b\\n");
+    }
+    if load8(r1, 0) != 67 {
+        die(12, "FAIL r1a\\n");
+    }
+    if load8(r1, 1) != 68 {
+        die(13, "FAIL r1b\\n");
+    }
+    if load8(r2, 0) != 69 {
+        die(14, "FAIL r2a\\n");
+    }
+    if load8(r2, 1) != 70 {
+        die(15, "FAIL r2b\\n");
+    }
+    w(1, "RECVMSG SCATTER OK\\n");
+    // ---- UDP：`sendmsg` 带 msg_name（没 connect 过也能发），`recvmsg` 收地址 ----
+    let ua: ptr = alloc(64);
+    let ub: ptr = alloc(64);
+    let _z1: u32 = sa(ua, 0, 0);
+    let _z2: u32 = sa(ub, 0, 0);
+    let us: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    let ur: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    if us < 0 {
+        die(16, "FAIL udp socket(1)\\n");
+    }
+    if ur < 0 {
+        die(17, "FAIL udp socket(2)\\n");
+    }
+    let ul: ptr = alloc(8);
+    store8(ul, 0, 16);
+    let bu1: i64 = syscall6(49, us as u64, ua as u64, 16, 0, 0);
+    if bu1 < 0 {
+        die(18, "FAIL udp bind(1)\\n");
+    }
+    let bu2: i64 = syscall6(49, ur as u64, ub as u64, 16, 0, 0);
+    if bu2 < 0 {
+        die(19, "FAIL udp bind(2)\\n");
+    }
+    let gu: i64 = syscall6(51, us as u64, ua as u64, ul as u64, 0, 0);
+    if gu < 0 {
+        die(20, "FAIL udp getsockname\\n");
+    }
+    let h0: ptr = alloc(8);
+    store8(h0, 0, 104);
+    store8(h0, 1, 101);
+    let h1: ptr = alloc(8);
+    store8(h1, 0, 121);
+    let uiov: ptr = alloc(64);
+    let _u0: u32 = mkiov(uiov, 0, h0, 2);
+    let _u1: u32 = mkiov(uiov, 1, h1, 1);
+    let um: ptr = alloc(64);
+    let _h2: u32 = mkhdr(um, ua, 16, uiov, 2);
+    let un: i64 = syscall6(46, ur as u64, um as u64, 0, 0, 0);
+    if un != 3 {
+        die(21, "FAIL udp sendmsg count\\n");
+    }
+    w(1, "UDP SENDMSG OK\\n");
+    let pl: ptr = alloc(64);
+    let giov: ptr = alloc(64);
+    let _g0: u32 = mkiov(giov, 0, pl, 16);
+    let src: ptr = alloc(64);
+    let gm: ptr = alloc(64);
+    let _h3: u32 = mkhdr(gm, src, 128, giov, 1);
+    // 收在 `us` 上：数据报是 `ur` 发往 `ua` 的，而 `ua` 是 `us` 的名字
+    let gn: i64 = syscall6(47, us as u64, gm as u64, 0, 0, 0);
+    if gn != 3 {
+        die(22, "FAIL udp recvmsg count\\n");
+    }
+    if load8(pl, 0) != 104 {
+        die(23, "FAIL udp payload a\\n");
+    }
+    if load8(pl, 1) != 101 {
+        die(24, "FAIL udp payload b\\n");
+    }
+    if load8(pl, 2) != 121 {
+        die(25, "FAIL udp payload c\\n");
+    }
+    // 来源地址被写进 msg_name，且 msg_namelen 被回写成真长度
+    let nl: i64 = load8(src, 1) as i64;
+    if nl != 0 {
+        die(26, "FAIL udp src family\\n");
+    }
+    if load8(src, 3) == 0 {
+        die(27, "FAIL udp src port\\n");
+    }
+    if load8(gm, 8) == 0 {
+        die(28, "FAIL udp msg_namelen\\n");
+    }
+    w(1, "UDP RECVMSG OK\\n");
+    syscall6(3, a1 as u64, 0, 0, 0, 0);
+    syscall6(3, c1 as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall6(3, us as u64, 0, 0, 0, 0);
+    syscall6(3, ur as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+MSG_GOLDEN = (b"SENDMSG OK\nRECVMSG SCATTER OK\nUDP SENDMSG OK\nUDP RECVMSG OK\n")
+
+
+def _msg_ok(out: bytes) -> bool:
+    return out == MSG_GOLDEN
+
+
+#: 联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
+#: 加一份语料就两边一起覆盖，别只在一边加。
 NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
              ("polldemo", POLL_DEMO, _poll_ok), ("seldemo", SEL_DEMO, _sel_ok),
-             ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
+             ("msgdemo", MSG_DEMO, _msg_ok), ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
 
 
 def _shim_blob():
