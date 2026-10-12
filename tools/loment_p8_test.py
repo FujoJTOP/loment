@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import atexit
+import hashlib
 import json
 import os
 import re
@@ -25,6 +27,62 @@ import lomentc  # noqa: E402
 #: 共用的, 固定文件名在**并发跑门禁**时会让两个进程互相跑对方的二进制 ——
 #: 那是**错结果**, 不是慢。见 `ci.py` 的 `-j`。
 _T = f"/tmp/loment-{os.getpid()}-"
+
+# ---------------------------------------------------------------- 结果复用
+#
+# 这套判据里最贵的一件事是"同一个二进制编译同一个大单元": 驱动编译 `driver.lomt`
+# 本身就要 ~55s（`-O0`）/~9s（`-O1`，见 `_build_linux_elf`）, 而**同一件事**在几个判据
+# 里各跑一遍 —— 全套里最大的一项开销就落在这一项上。
+#
+# 缓存只用在"输入确定 ⇒ 输出确定"的计算上, 三条边界把它框住:
+#
+#   1. **只缓存纯计算**: 单元文本、参考实现的 IR、按 (IR 字节) 链出来的二进制、
+#      以及"缓存二进制 + 仓库里的相对入口"的一次运行。运行之所以可以复用, 是因为
+#      判据运行期间**树不变**, 而链接与驱动都是确定性的 —— 同一份字节跑两遍给同一份
+#      产出。反过来, 任何**临时夹具**（探测用例、`deps/` 工程、自定义后缀工程 …）都
+#      不进缓存: 它们每次写在不同目录, 内容也随测试而变, 键只能靠绝对路径区分,
+#      所以规则取"**入口是仓库相对路径才缓存**"（夹具一律递 WSL 绝对路径）。
+#   2. **缓存只活在本进程**, 进程结束即失效; 构建产物落在一个临时目录里, 由 atexit
+#      删掉。判据各用自己的 `TemporaryDirectory`, 缓存目录独立于它们。
+#   3. **不缓存断言**: 每个判据自己的比较、棘轮、正负例判定原样保留。
+_CACHE_DIR = Path(tempfile.mkdtemp(prefix="loment-p8-cache-"))
+atexit.register(shutil.rmtree, _CACHE_DIR, ignore_errors=True)
+
+_MISS = object()
+_UNIT_LL: dict[Path, str | Exception] = {}
+#: 已构建的 Windows 侧可执行文件（词法器/parser/checker/codegen, 按 tag）。产物落在
+#: `_CACHE_DIR`: 每个判据都有自己的 `TemporaryDirectory`, 放进那里的话它一退出就被删,
+#: 后面的判据就无从复用了。
+_BUILT: dict[str, Path] = {}
+_DEP_PATHS: dict[Path, list[Path]] = {}
+_UNIT_TEXT: dict[Path, str] = {}
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _unit_ll(target: Path) -> str:
+    """参考实现在该文件上发出来的 IR（`load` + `resolve_deps(entry=target)` + `emit_llvm`）。
+
+    这条装载路径是本文件里**绝大多数**判据取 `want` 的方式（语料循环里每个文件还要
+    取两遍: 一次在 `_unsupported` 里试能不能发, 一次在正文里当对照）, 而它是树上一个
+    纯函数。异常同样缓存 —— 参考实现发不出来的文件每次都会抛同一个, 重算没有信息量。
+    """
+    key = target.resolve()
+    got = _UNIT_LL.get(key, _MISS)
+    if got is _MISS:
+        try:
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            got = lomentc.emit_llvm(mod, ROOT, deps)
+        except Exception as e:  # noqa: BLE001
+            got = e
+        _UNIT_LL[key] = got
+    if isinstance(got, Exception):
+        raise got
+    return got
+
 
 ROOT = Path(__file__).resolve().parent.parent
 LEXER = ROOT / "loment" / "selfhost" / "lexer.lomt"
@@ -72,19 +130,23 @@ int main(int argc, char **argv) {
 
 
 def _build(td: str) -> Path:
+    hit = _BUILT.get("lexer")
+    if hit is not None and hit.exists():
+        return hit
     mod = lomentc.load(LEXER)
     deps = lomentc.resolve_deps(mod, ROOT, LEXER.parent, entry=LEXER)
     assert not lomentc.check(mod, deps=deps)
-    ll = Path(td) / "lexer.ll"
+    ll = _CACHE_DIR / "lexer.ll"
     ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-    c = Path(td) / "drv.c"
+    c = _CACHE_DIR / "drv.c"
     c.write_text(DRIVER, encoding="utf-8")
-    exe = Path(td) / "lexer.exe"
+    exe = _CACHE_DIR / "lexer.exe"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "-O1", "-o", str(exe), str(c), str(ll)],
         capture_output=True, text=True, shell=False)
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["lexer"] = exe
     return exe
 
 
@@ -173,19 +235,23 @@ int main(int argc, char **argv) {
 
 
 def _build_parser(td: str) -> Path:
+    hit = _BUILT.get("parser")
+    if hit is not None and hit.exists():
+        return hit
     mod = lomentc.load(PARSER)
     deps = lomentc.resolve_deps(mod, ROOT, PARSER.parent, entry=PARSER)
     assert not lomentc.check(mod, deps=deps)
-    ll = Path(td) / "parser.ll"
+    ll = _CACHE_DIR / "parser.ll"
     ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-    c = Path(td) / "pdrv.c"
+    c = _CACHE_DIR / "pdrv.c"
     c.write_text(PARSER_DRIVER, encoding="utf-8")
-    exe = Path(td) / "parser.exe"
+    exe = _CACHE_DIR / "parser.exe"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "-O1", "-o", str(exe), str(c), str(ll)],
         capture_output=True, text=True, shell=False)
-    assert r.returncode == 0, r.stderr[-500:]
+    assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["parser"] = exe
     return exe
 
 
@@ -653,19 +719,23 @@ def test_m81_dep_body_is_checked():
 
 
 def _build_checker(td: str) -> Path:
+    hit = _BUILT.get("checker")
+    if hit is not None and hit.exists():
+        return hit
     mod = lomentc.load(CHECKER)
     deps = lomentc.resolve_deps(mod, ROOT, CHECKER.parent, entry=CHECKER)
     assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)[:2]
-    ll = Path(td) / "checker.ll"
+    ll = _CACHE_DIR / "checker.ll"
     ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-    c = Path(td) / "cdrv.c"
+    c = _CACHE_DIR / "cdrv.c"
     c.write_text(CHECKER_DRIVER, encoding="utf-8")
-    exe = Path(td) / "checker.exe"
+    exe = _CACHE_DIR / "checker.exe"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "-O1", "-o", str(exe), str(c), str(ll)],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["checker"] = exe
     return exe
 
 
@@ -752,19 +822,23 @@ int main(int argc, char **argv) {
 
 
 def _build_codegen(td: str) -> Path:
+    hit = _BUILT.get("codegen")
+    if hit is not None and hit.exists():
+        return hit
     mod = lomentc.load(CODEGEN)
     deps = lomentc.resolve_deps(mod, ROOT, CODEGEN.parent, entry=CODEGEN)
     assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)[:2]
-    ll = Path(td) / "codegen.ll"
+    ll = _CACHE_DIR / "codegen.ll"
     ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-    c = Path(td) / "gdrv.c"
+    c = _CACHE_DIR / "gdrv.c"
     c.write_text(CODEGEN_DRIVER, encoding="utf-8")
-    exe = Path(td) / "codegen.exe"
+    exe = _CACHE_DIR / "codegen.exe"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "-O1", "-o", str(exe), str(c), str(ll)],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["codegen"] = exe
     return exe
 
 
@@ -829,9 +903,7 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
                        ROOT / "loment" / "selfhost" / "ir_index.lomt",
                        ROOT / "loment" / "selfhost" / "ir_call5.lomt"):
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:
                 i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
@@ -868,9 +940,7 @@ def test_m82_hosted_arena_is_byte_identical():
         for name, src in cases:
             target = Path(td) / f"{name}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:
                 i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
@@ -910,9 +980,7 @@ def test_m88_l0_alpha_pair_is_byte_identical():
                          ("manual", lomentc_test.L0_MANUAL_SRC)):
             target = Path(td) / f"gc_l0_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             outs[tag] = got
             if got != want:
@@ -950,9 +1018,7 @@ def test_m89_l2_epoch_is_byte_identical():
                          ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC)):
             target = Path(td) / f"gc_l2_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             outs[tag] = got
             if got != want:
@@ -990,9 +1056,7 @@ def test_m90_gc_auto_collector_is_byte_identical():
                          ("manual", lomentc_test.GC_AUTO_MANUAL_SRC)):
             target = Path(td) / f"gc_auto_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             outs[tag] = got
             if got != want:
@@ -1033,9 +1097,7 @@ def test_m91_l1_definite_lifetime_is_byte_identical():
                          ("manual", lomentc_test.L1_MANUAL_SRC)):
             target = Path(td) / f"gc_l1_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
-            mod = lomentc.load(target)
-            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(mod, ROOT, deps)
+            want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             outs[tag] = got
             if got != want:
@@ -1055,7 +1117,14 @@ def _dep_paths(target: Path) -> list[Path]:
     Loment 版 codegen 只吃**单个编译单元**(不解析 `use`) —— 依赖装载由驱动/夹具负责,
     与 M80/M81 自举阶段的边界一致。这里把"参考实现解析出的模块序"当判据钉死:
     路径规则一旦与 lomentc 漂移, 名字序列就对不上, 测试会直接失败。
+
+    **按文件缓存**（连同下面那条名字序断言）—— 判据里同一份单元的单元文本被反复要
+    （`_run_codegen` 一个文件一次, 语料循环里还要再来）, 而它是纯函数。
     """
+    key = target.resolve()
+    hit = _DEP_PATHS.get(key)
+    if hit is not None:
+        return hit
     mod = lomentc.load(target)
     deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
     paths: list[Path] = []
@@ -1086,6 +1155,7 @@ def _dep_paths(target: Path) -> list[Path]:
     visit(mod, target.parent)
     names = [lomentc.load(p).name for p in paths]
     assert names == [m.name for m in deps], f"依赖序与 lomentc 不一致: {names} vs {[m.name for m in deps]}"
+    _DEP_PATHS[key] = paths
     return paths
 
 
@@ -1127,6 +1197,10 @@ def _unit_text(target: Path) -> str:
     `mod.enums`。原生后端按声明发射聚合类型 (`Result<u32,u32>` -> `{ i32, i64 }`),
     所以这份声明对被编译单元必须是可见的 —— 否则枚举查不到, 只能退化成 i64。
     """
+    key = target.resolve()
+    hit = _UNIT_TEXT.get(key)
+    if hit is not None:
+        return hit
     text = ("".join(_blank_core_choose(p.read_text(encoding="utf-8")) + "\n"
                     for p in _dep_paths(target))
             + target.read_text(encoding="utf-8"))
@@ -1140,6 +1214,7 @@ def _unit_text(target: Path) -> str:
         lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw).parse().enums}
     if "Option" not in have or "Result" not in have:
         text += "\n" + lomentc._PRELUDE
+    _UNIT_TEXT[key] = text
     return text
 
 
@@ -1161,15 +1236,24 @@ def _run_codegen(exe: Path, target: Path, td: str) -> str:
 
 
 def _build_from_ll(ll: Path, td: str, name: str) -> Path:
-    """用给定的 .ll + 同一个 C 驱动链出可执行文件 —— 自举多阶段复用 (M83/M84)。"""
-    c = Path(td) / f"{name}_drv.c"
+    """用给定的 .ll + 同一个 C 驱动链出可执行文件 —— 自举多阶段复用 (M83/M84)。
+
+    **按 .ll 的字节缓存**: 链接是确定性的, 同一份 IR 给同一个二进制 (M84 的定点正好是
+    "第 2 阶段喂进去的 IR 与第 1 阶段相同")。
+    """
+    key = _digest(ll.read_bytes())
+    hit = _BUILT.get(f"from_ll:{key}")
+    if hit is not None and hit.exists():
+        return hit
+    c = _CACHE_DIR / f"{name}_drv.c"
     c.write_text(CODEGEN_DRIVER, encoding="utf-8")
-    exe = Path(td) / f"{name}.exe"
+    exe = _CACHE_DIR / f"{name}_{key}.exe"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "-O1", "-o", str(exe), str(c), str(ll)],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-400:]
+    _BUILT[f"from_ll:{key}"] = exe
     return exe
 
 
@@ -1192,22 +1276,85 @@ def _wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
+#: `-O1` 的 loop-idiom 把逐字节拷贝的循环认成 `memmove` 调用, 而 `-nostdlib` 的链接里
+#: 没有它 (报 `undefined symbol: memmove`, 且**只缺这一个**)。补一个最小的实现即可 ——
+#: 写错了不会悄悄换个产物: 判据比的是产物与参考**逐字节相同**, 抄错一步当场红。
+_MEM_STUB = """\
+void *memmove(void *d, const void *s, unsigned long n) {
+    unsigned char *dd = d; const unsigned char *ss = s;
+    if (dd < ss) { for (unsigned long i = 0; i < n; i++) dd[i] = ss[i]; }
+    else { for (unsigned long i = n; i > 0; i--) dd[i - 1] = ss[i - 1]; }
+    return d;
+}
+"""
+
+
+def _mem_stub() -> Path:
+    """`-O1` 的 ELF 要的 `memmove` (见上); 编一次, 复用。"""
+    hit = _BUILT.get("memstub")
+    if hit is not None and hit.exists():
+        return hit
+    c = _CACHE_DIR / "memstub.c"
+    c.write_text(_MEM_STUB, encoding="utf-8")
+    o = _CACHE_DIR / "memstub.o"
+    r = subprocess.run(
+        [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
+         "--target=x86_64-unknown-linux-gnu", "-ffreestanding", "-fno-builtin", "-O0",
+         "-c", "-o", str(o), str(c)],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, r.stderr[-400:]
+    _BUILT["memstub"] = o
+    return o
+
+
 def _build_linux_elf(ll_text: str, td: str, name: str) -> Path:
-    """IR -> x86_64 Linux ELF (无 libc, `_start` 即入口) —— 从 Windows 交叉编译。"""
-    ll = Path(td) / f"{name}.ll"
+    """IR -> x86_64 Linux ELF (无 libc, `_start` 即入口) —— 从 Windows 交叉编译。
+
+    **按 IR 的字节缓存**: 链接确定性, 同一份 IR 给同一个 ELF。几处判据要的是**同一个**
+    驱动二进制 (m83 的 elf1 与 elf2、语料判据、perf 判据各建一份), 这里让它们指向同一
+    个文件 —— 也就是让"用同一份 IR"这件事在**字节层面**成立, 而不是靠两个路径都叫
+    "驱动"。
+
+    **`-O1`**: 原先不给优化开关, clang 的默认 `-O0` 就是它。这个二进制是这一整套判据里
+    反复跑的那个, 而同一个二进制在 `-O1` 下**快 6.3 倍** (驱动编译自身: 本机 5 次采样
+    54.45–57.53s vs 8.65–9.28s), 产物与 `-O0` **逐字节相同** —— 判据比的正是那份产物,
+    优化级别只决定跑得多快。
+    """
+    key = _digest(ll_text.encode("utf-8"))
+    hit = _BUILT.get(f"elf:{key}")
+    if hit is not None and hit.exists():
+        return hit
+    ll = _CACHE_DIR / f"{key}.ll"
     ll.write_text(ll_text, encoding="utf-8")
-    elf = Path(td) / f"{name}.elf"
+    elf = _CACHE_DIR / f"{key}.elf"
     r = subprocess.run(
         [shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe",
          "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
-         "-static", "-fuse-ld=lld", "-o", str(elf), str(ll)],
+         "-static", "-fuse-ld=lld", "-O1", "-o", str(elf), str(ll), str(_mem_stub())],
         capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-500:]
+    _BUILT[f"elf:{key}"] = elf
     return elf
 
 
+#: (二进制字节, 仓库内相对入口) -> 那次运行的结果。
+_DRIVER_RUNS: dict[tuple[str, str], tuple[int, str, str]] = {}
+
+
 def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, str, str]:
-    """跑自举驱动, 返回 (退出码, stdout 文本, stderr 文本)。"""
+    """跑自举驱动, 返回 (退出码, stdout 文本, stderr 文本)。
+
+    **入口是仓库相对路径时按 (二进制字节, 入口) 缓存** —— 这条路上同一个二进制被喂给
+    同一个大单元好几次 (m83 的定点、语料判据、perf 的两次计时), 一次 ~58s。驱动与链接
+    都是确定性的, 判据运行期间**树不变**, 所以同一份字节跑两遍给同一份产出。
+    **临时夹具一并排除**: 它们递的是 WSL 绝对路径 (每次运行都不同), 不进这条分支。
+    """
+    key = None
+    if not relpath.startswith("/"):
+        key = (_digest(elf.read_bytes()), relpath)
+        hit = _DRIVER_RUNS.get(key)
+        if hit is not None:
+            return hit
     got = Path(td) / f"{name}.out.ll"
     # rm -f 先删: 目标名固定, 上一次刚退出的进程可能还占着 inode
     # (cp 会报 "Text file busy"); unlink 总能成功, cp 于是写新 inode
@@ -1216,7 +1363,10 @@ def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, s
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     text = got.read_text(encoding="utf-8") if got.exists() else ""
-    return r.returncode, text, r.stderr
+    out = (r.returncode, text, r.stderr)
+    if key is not None:
+        _DRIVER_RUNS[key] = out
+    return out
 
 
 def _run_driver(elf: Path, relpath: str, td: str, name: str) -> str:
@@ -1256,10 +1406,8 @@ def _unsupported(target: Path) -> str | None:
         target.read_text(encoding="utf-8", errors="replace"))
     if declared and g != "loment":
         return f"声明的读法是 {g}（自举侧只收 loment，docs/188 §4.1）"
-    mod = lomentc.load(target)
-    deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
     try:
-        lomentc.emit_llvm(mod, ROOT, deps)
+        _unit_ll(target)
     except Exception as e:  # noqa: BLE001
         return f"{type(e).__name__}: {e}"
     return None
@@ -1286,9 +1434,7 @@ def test_m85_missing_module_declaration_says_so():
         print("      SKIP: 需要 clang, 以及本机 Linux 或 WSL")
         return
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_nomod")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_nomod")
         work = Path(td)
 
         def run(p: Path, name: str) -> tuple[int, str]:
@@ -1343,9 +1489,7 @@ def test_m85_driver_checks_before_emitting():
     pos = sorted((ROOT / "loment" / "selfhost" / "pos").glob("*.lomt"))
     assert neg and pos, "缺负例/正例语料"
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_gate")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_gate")
         for f in neg:
             rel = f.relative_to(ROOT).as_posix()
             rc, out, err = _run_driver_raw(elf, rel, td, f"neg_{f.stem}")
@@ -1380,10 +1524,8 @@ def test_m85_driver_checks_before_emitting():
             # (pos/ok.lomt 是给 checker 写的正例, 含 IR 后端不支持的类型, 这不是闸门的事)
             assert "静态检查未通过" not in err, f"{f.name}: 正例被 check 拒了: {err[:200]}"
             if unsupported is None:
-                m = lomentc.load(f)
-                d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
                 assert rc == 0, f"{f.name}: 正例退出码 {rc}: {err[:200]}"
-                assert out == lomentc.emit_llvm(m, ROOT, d), f"{f.name}: 正例产物与参考不一致"
+                assert out == _unit_ll(f), f"{f.name}: 正例产物与参考不一致"
         print(f"      驱动闸门: 负例 {len(neg)}/{len(neg)} 被拒, 正例 {len(pos)}/{len(pos)} 过检")
 
 
@@ -1415,17 +1557,13 @@ def test_m87_driver_strips_grammar_decl():
         print("      SKIP: 无 clang/WSL")
         return
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_grammar")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_grammar")
         outs = {}
         for name in ("plain", "decl", "rust"):
             f = GDECL / f"{name}.lomt"
             rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, name)
             assert rc == 0, f"{name}.lomt: 自举侧退出 {rc}: {err[-300:]}"
-            m = lomentc.load(f)
-            d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
-            assert out == lomentc.emit_llvm(m, ROOT, d), f"{name}.lomt: 产物与参考不一致"
+            assert out == _unit_ll(f), f"{name}.lomt: 产物与参考不一致"
             outs[name] = out
         for name, spelling in (("decl", "loment"), ("rust", "rust")):
             assert outs[name] == outs["plain"], (
@@ -1434,9 +1572,7 @@ def test_m87_driver_strips_grammar_decl():
         f = GDECL / "foreign.lomt"
         rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, "foreign")
         # 参考实现这份是**收**的 (拿它自己的前门按 Python 读) —— 分歧正是 docs/189 §4.1 那句话
-        m = lomentc.load(f)
-        d = lomentc.resolve_deps(m, ROOT, f.parent, entry=f)
-        assert lomentc.emit_llvm(m, ROOT, d).strip(), "参考实现本该读得通这份 (夹具的前提)"
+        assert _unit_ll(f).strip(), "参考实现本该读得通这份 (夹具的前提)"
         assert rc != 0, f"foreign.lomt: 别的拼法没被拒 (exit {rc})"
         assert "自举侧收不了" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
         assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
@@ -1466,9 +1602,7 @@ def test_m85_driver_emits_structured_diagnostics():
     src = ROOT / "loment" / "selfhost" / "neg" / "choose_twice.lomt"
     rel = src.relative_to(ROOT).as_posix()
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocsd")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocsd")
 
         def drive(entry_rel: str, diag: Path) -> int:
             script = (f"rm -f {_T}fd && cp {_wsl_path(elf)} {_T}fd && chmod +x {_T}fd && "
@@ -1519,24 +1653,25 @@ def test_m83_selfhosted_driver_compiles_itself():
     self_rel = DRIVER_LOMT.relative_to(ROOT).as_posix()
     with tempfile.TemporaryDirectory() as td:
         # 1. 参考发射 -> ELF1
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        want = lomentc.emit_llvm(mod, ROOT, deps)
+        want = _unit_ll(DRIVER_LOMT)
         elf1 = _build_linux_elf(want, td, "fujocs1")
         got1 = _run_driver(elf1, self_rel, td, "fujocs1")
         bad = next((k for k in range(min(len(got1), len(want))) if got1[k] != want[k]), None)
         assert got1 == want, (
             f"驱动产物与参考不一致: want {len(want)}B got {len(got1)}B @{bad}")
-        # 2. 用驱动自己的产物再链一个 -> 定点
+        # 2. 用驱动自己的产物再链一个 -> 定点。
+        # 上一行已经钉住 `got1 == want`, 即第 2 阶段喂给链接器的是**同一份 IR**; 链接是
+        # 确定性的, 所以 elf2 就是 elf1 —— 这里把这件事**显式断言**出来 (而不是让它只是
+        # 缓存命中的副作用), 定点才落到"同一个二进制跑同一入口给同一份产出"上。
         elf2 = _build_linux_elf(got1, td, "fujocs2")
+        assert elf2.read_bytes() == elf1.read_bytes(), \
+            "M84: 产物与参考逐字节相同, 但由它链出的二进制与第 1 阶段不同 —— 链接不定点"
         got2 = _run_driver(elf2, self_rel, td, "fujocs2")
         assert got2 == got1, "M84: 自举驱动的第 2 阶段产物与第 1 阶段不一致"
         # 3. 同一个二进制对别的入口也与参考一致
         for rel in ("loment/examples/native_res.lomt", "loment/examples/demo.lomt"):
             target = ROOT / rel
-            m2 = lomentc.load(target)
-            d2 = lomentc.resolve_deps(m2, ROOT, target.parent, entry=target)
-            assert _run_driver(elf1, rel, td, f"u_{target.stem}") == lomentc.emit_llvm(m2, ROOT, d2), \
+            assert _run_driver(elf1, rel, td, f"u_{target.stem}") == _unit_ll(target), \
                 f"驱动在 {rel} 上与参考不一致"
         print(f"      自举驱动: {len(want)}B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致")
 
@@ -1560,9 +1695,7 @@ def test_m86_driver_handles_addin():
     rel = "loment/examples/addin/main.lomt"
     target = ROOT / rel
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs86")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs86")
         # 参考侧走**唯一入口**（预扫 → 装载 → 解析依赖）—— 手拼 `load` + `resolve_deps`
         # 会漏掉预扫那一趟，`addin` 就白写了（实测 `tools/loment.py` 原先就是这么拼的）。
         m2, d2 = lomentc.load_unit(target, ROOT)
@@ -1586,9 +1719,7 @@ def test_m85_selfhosted_driver_compiles_corpus():
         print("      SKIP: 无 clang/WSL")
         return
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs85")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs85")
         ok, skip, gap = [], [], []
         # 语料 = 示例 + 自举前端 + **工具与库** (loment/tools, loment/lib)。
         # 后者是"用**自举编译器**就能造出这些工具"的判据 —— 装 LSP/格式化器不需要 Python。
@@ -1605,9 +1736,7 @@ def test_m85_selfhosted_driver_compiles_corpus():
             if why:
                 skip.append((target.name, why))
                 continue
-            m = lomentc.load(target)
-            d = lomentc.resolve_deps(m, ROOT, target.parent, entry=target)
-            want = lomentc.emit_llvm(m, ROOT, d)
+            want = _unit_ll(target)
             rel = target.relative_to(ROOT).as_posix()
             got = _run_driver(elf, rel, td, f"m85_{target.stem}")
             bad = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
@@ -1644,9 +1773,7 @@ def test_m83_m84_self_compile_and_fixed_point():
     with tempfile.TemporaryDirectory() as td:
         exe1 = _build_codegen(td)                      # stage1
         s1 = _run_codegen(exe1, CODEGEN, td)           # stage1 产出的 codegen.lomt 的 IR
-        mod = lomentc.load(CODEGEN)
-        deps = lomentc.resolve_deps(mod, ROOT, CODEGEN.parent, entry=CODEGEN)
-        assert s1 == lomentc.emit_llvm(mod, ROOT, deps), "stage1 产物与参考不一致 (M82 回归)"
+        assert s1 == _unit_ll(CODEGEN), "stage1 产物与参考不一致 (M82 回归)"
         ll1 = Path(td) / "s1.ll"
         ll1.write_text(s1, encoding="utf-8")
         exe2 = _build_from_ll(ll1, td, "stage2")       # M83
@@ -1660,9 +1787,7 @@ def test_m83_m84_self_compile_and_fixed_point():
         # 定点不能是巧合: 第 2 阶段对别的单元也要与参考一致
         for target in (ROOT / "loment" / "selfhost" / "checker.lomt",
                        ROOT / "loment" / "selfhost" / "ir_div.lomt"):
-            m2 = lomentc.load(target)
-            d2 = lomentc.resolve_deps(m2, ROOT, target.parent, entry=target)
-            assert _run_codegen(exe2, target, td) == lomentc.emit_llvm(m2, ROOT, d2), \
+            assert _run_codegen(exe2, target, td) == _unit_ll(target), \
                 f"stage2 在 {target.name} 上与参考不一致"
         print(f"      定点: stage1 == stage2 == stage3 ({len(s1)}B); stage2 对 checker/ir_div 亦一致")
 
@@ -1698,9 +1823,7 @@ def test_m82_coverage_report():
                              + list((ROOT / "loment" / "tools").glob("*.lomt"))
                              + list((ROOT / "loment" / "lib").glob("*.lomt"))):
             try:
-                mod = lomentc.load(target)
-                deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-                want = lomentc.emit_llvm(mod, ROOT, deps)
+                want = _unit_ll(target)
             except Exception as e:  # noqa: BLE001  参考实现的 IR 后端本身就不发这个示例
                 unsupported.append((target.name, f"{type(e).__name__}: {e}"))
                 continue
@@ -1889,16 +2012,23 @@ def test_m86_selfhost_perf_budget():
     自举侧涨 2.7x, 差距正是上面那条超线性曲线。真正的修法是给那几处查找加索引
     (**独立的一件事**, 没有做), 在那之前护栏只能跟着单元规模走。它仍然报数,
     所以"忽然又慢一倍"这种真回归照样看得见。
+
+    **2026-10-12 护栏从 90s 降到 20s —— 这条与上面几次方向相反, 理由也不同**:
+    上面几次是"线没动, 单元长大了"; 这一次是**被测的那个二进制换了优化级别** ——
+    `_build_linux_elf` 从 clang 默认的 `-O0` 改成 `-O1` (同一份 IR 从 54.5s 降到
+    8.65s, 本机 5 次采样 8.65–9.28s, 产物与 `-O0` 逐字节相同)。线不动才是错的:
+    90s 之下, 这条判据要等到自举侧**慢 10 倍**才响, 那已经不是绊线了。
+    20s ≈ 实测的 2.3 倍, 仍罩得住这条判据自己记录过的最大争抢膨胀 (1.9 倍,
+    见上面 42.3s -> 81s 那次), "忽然又慢一倍"照样看得见。
+    上面表格里那些 `-O0` 的数不再与本判据直接可比, 但作为**超线性曲线**的记账保留。
     """
     if not (_wsl() and _clang()):
         print("      SKIP: 需要 WSL + clang")
         return
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        ll = Path(td) / "perf.ll"
-        ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-        elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "perf_drv")
+        ll = _CACHE_DIR / "perf_driver.ll"
+        ll.write_text(_unit_ll(DRIVER_LOMT), encoding="utf-8")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "perf_drv")
         subprocess.run(["wsl", "-e", "bash", "-lc",
                         f"rm -f {_T}perf_drv && "
                         f"cp {_wsl_path(elf)} {_T}perf_drv && chmod +x {_T}perf_drv"],
@@ -1918,16 +2048,16 @@ def test_m86_selfhost_perf_budget():
         #: （见本函数头注），所以"时间涨了"要先问"单元是不是也涨了"。不印这个数，
         #: 下一个人只看到时间变了，分不清是回归还是规模。
         n_fn = len(re.findall(r"^define ", ll.read_text(encoding="utf-8"), re.M))
-        #: **60 → 90（2026-10-10）**。理由与 2026-09-21 那次 30 → 60 **同一条**：
-        #: 破的不是"谁变慢了"，是**单元规模** —— 446 个函数时 42.3s，现在 **604 个函数**
-        #: （`runtime` 维兑现 + 自适应收集器 + 第四维 `port` 都加了代码），单独跑实测 59.33s，
-        #: 而护栏 60s 只剩 ~1% 余量 ⇒ **在 CI 上随机翻红**（同一棵树上后台有活时实测 63.6s）。
-        #: **它仍然是绊线，不是预算**：90s 之下，"忽然又慢一倍"照样看得见。
+        #: **90 → 20（2026-10-12）**：与上面几次**方向相反** —— 不是单元长大了，是
+        #: ELF 换了优化级别（`-O0` → `-O1`，见 `_build_linux_elf`：同一份 IR 54.5s → 8.65s，
+        #: 产物逐字节相同）。线不动才是错的：90s 之下要等自举侧慢 10 倍才响。
+        #: 20s ≈ 实测的 2.3 倍，仍罩得住本判据记录过的最大争抢膨胀（1.9 倍）。
+        #: **它仍然是绊线，不是预算**：20s 之下，"忽然又慢一倍"照样看得见。
         #: 真正的修法没变 —— 给 `chk_lookup_slot` / `find_fn` 加索引，那件事仍然没做。
-        budget = 90.0
+        budget = 20.0
         assert best <= budget, (
             f"自举自编译 {best:.1f}s 超过护栏 {budget:.0f}s ({n_fn} 个函数; "
-            f"446 个函数时基线 42.3s)")
+            f"-O1 下 618 个函数时基线 8.65s)")
         print(f"      自举自编译: {best:.2f}s / {n_fn} 个函数 (护栏 {budget:.0f}s; "
               f"参考实现 Python 1.7s, WSL 基线 {base:.2f}s)")
 
@@ -1966,11 +2096,7 @@ def test_m85_driver_gate_on_probe_cases():
     sys.path.insert(0, str(ROOT / "tools"))
     import loment_rule_parity as P  # noqa: E402
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        ll = Path(td) / "drv.ll"
-        ll.write_text(lomentc.emit_llvm(mod, ROOT, deps), encoding="utf-8")
-        elf = _build_linux_elf(ll.read_text(encoding="utf-8"), td, "gate_drv")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "gate_drv")
         cases = list(P._CASES)
         bad_signal: list[str] = []
         leaked: list[str] = []
@@ -2130,9 +2256,7 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         print("      SKIP: 需要 clang, 以及本机 Linux 或 WSL")
         return
     with tempfile.TemporaryDirectory() as td:
-        mod = lomentc.load(DRIVER_LOMT)
-        deps = lomentc.resolve_deps(mod, ROOT, DRIVER_LOMT.parent, entry=DRIVER_LOMT)
-        elf = _build_linux_elf(lomentc.emit_llvm(mod, ROOT, deps), td, "fujocs_empty")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_empty")
         work = Path(td)
 
         def run(p: Path, name: str) -> tuple[int, str]:
