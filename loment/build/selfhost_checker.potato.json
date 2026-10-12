@@ -1,5 +1,5 @@
 {
-  "potato": "v12",
+  "potato": "v13",
   "unit": "checker",
   "language": "loment",
   "grammar": "loment",
@@ -7,6 +7,7 @@
   "gc": "gc_manual",
   "runtime": "runtime",
   "port": "sealed",
+  "vm": "no_vm",
   "switches": [],
   "dialects": [],
   "bodies": [],
@@ -2754,6 +2755,11 @@
   ],
   "layouts": [],
   "consts": [
+    {
+      "name": "LOMENT_CHANNEL",
+      "type": "u32",
+      "value": 0
+    },
     {
       "name": "K_FN",
       "type": "u32",
