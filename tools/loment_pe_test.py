@@ -1224,8 +1224,556 @@ def _sock_ok(out: bytes) -> bool:
 
 #: 四份联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
 #: 加一份语料就两边一起覆盖，别只在一边加。
+MSG_DEMO = """module msgdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn put64(p: ptr, off: u32, v: i64) -> u32 {
+    let k: u32 = 0;
+    let x: i64 = v;
+    while k < 8 {
+        store8(p, off + k, (x % 256) as u8);
+        x = x / 256;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Linux 的 struct msghdr（x86-64）：name@0 namelen@8 iov@16 iovlen@24
+//                                  control@32 controllen@40 flags@48
+fn mkhdr(m: ptr, name: ptr, namelen: i64, iov: ptr, iovlen: i64) -> u32 {
+    let _a: u32 = put64(m, 0, name as i64);
+    let _b: u32 = put64(m, 8, namelen);
+    let _c: u32 = put64(m, 16, iov as i64);
+    let _d: u32 = put64(m, 24, iovlen);
+    let _e: u32 = put64(m, 32, 0);
+    let _f: u32 = put64(m, 40, 0);
+    let _g: u32 = put64(m, 48, 0);
+    return 0;
+}
+
+// struct iovec 是 {base, len}，每条 16 字节
+fn mkiov(v: ptr, k: u32, base: ptr, len: i64) -> u32 {
+    let _a: u32 = put64(v, k * 16, base as i64);
+    let _b: u32 = put64(v, k * 16 + 8, len);
+    return 0;
+}
+
+fn _start() {
+    // ---- TCP：`sendmsg` 把三段散出去，`recvmsg` 再按三条 iovec 收回来 ----
+    let sa0: ptr = alloc(64);
+    let _z0: u32 = sa(sa0, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket\\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let bi: i64 = syscall6(49, ls as u64, sa0 as u64, 16, 0, 0);
+    if bi < 0 {
+        die(2, "FAIL bind\\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(3, "FAIL listen\\n");
+    }
+    let g1: i64 = syscall6(51, ls as u64, sa0 as u64, ln as u64, 0, 0);
+    if g1 < 0 {
+        die(4, "FAIL getsockname\\n");
+    }
+    let c1: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if c1 < 0 {
+        die(5, "FAIL socket(c)\\n");
+    }
+    let n1: i64 = syscall6(42, c1 as u64, sa0 as u64, 16, 0, 0);
+    if n1 < 0 {
+        die(6, "FAIL connect\\n");
+    }
+    let a1: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a1 < 0 {
+        die(7, "FAIL accept\\n");
+    }
+    let b0: ptr = alloc(8);
+    store8(b0, 0, 65);
+    store8(b0, 1, 66);
+    let b1: ptr = alloc(8);
+    store8(b1, 0, 67);
+    store8(b1, 1, 68);
+    store8(b1, 2, 69);
+    let b2: ptr = alloc(8);
+    store8(b2, 0, 70);
+    let iov: ptr = alloc(64);
+    let _i0: u32 = mkiov(iov, 0, b0, 2);
+    let _i1: u32 = mkiov(iov, 1, b1, 3);
+    let _i2: u32 = mkiov(iov, 2, b2, 1);
+    let m: ptr = alloc(64);
+    let nil: ptr = 0 as ptr;
+    let _h0: u32 = mkhdr(m, nil, 0, iov, 3);
+    let sn: i64 = syscall6(46, c1 as u64, m as u64, 0, 0, 0);
+    if sn != 6 {
+        die(8, "FAIL sendmsg count\\n");
+    }
+    w(1, "SENDMSG OK\\n");
+    let r0: ptr = alloc(8);
+    let r1: ptr = alloc(8);
+    let r2: ptr = alloc(8);
+    let riov: ptr = alloc(64);
+    let _j0: u32 = mkiov(riov, 0, r0, 2);
+    let _j1: u32 = mkiov(riov, 1, r1, 2);
+    let _j2: u32 = mkiov(riov, 2, r2, 2);
+    let rm: ptr = alloc(64);
+    let _h1: u32 = mkhdr(rm, nil, 0, riov, 3);
+    let rn: i64 = syscall6(47, a1 as u64, rm as u64, 0, 0, 0);
+    if rn != 6 {
+        die(9, "FAIL recvmsg count\\n");
+    }
+    if load8(r0, 0) != 65 {
+        die(10, "FAIL r0a\\n");
+    }
+    if load8(r0, 1) != 66 {
+        die(11, "FAIL r0b\\n");
+    }
+    if load8(r1, 0) != 67 {
+        die(12, "FAIL r1a\\n");
+    }
+    if load8(r1, 1) != 68 {
+        die(13, "FAIL r1b\\n");
+    }
+    if load8(r2, 0) != 69 {
+        die(14, "FAIL r2a\\n");
+    }
+    if load8(r2, 1) != 70 {
+        die(15, "FAIL r2b\\n");
+    }
+    w(1, "RECVMSG SCATTER OK\\n");
+    // ---- UDP：`sendmsg` 带 msg_name（没 connect 过也能发），`recvmsg` 收地址 ----
+    let ua: ptr = alloc(64);
+    let ub: ptr = alloc(64);
+    let _z1: u32 = sa(ua, 0, 0);
+    let _z2: u32 = sa(ub, 0, 0);
+    let us: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    let ur: i64 = syscall6(41, 2, 2, 0, 0, 0);
+    if us < 0 {
+        die(16, "FAIL udp socket(1)\\n");
+    }
+    if ur < 0 {
+        die(17, "FAIL udp socket(2)\\n");
+    }
+    let ul: ptr = alloc(8);
+    store8(ul, 0, 16);
+    let bu1: i64 = syscall6(49, us as u64, ua as u64, 16, 0, 0);
+    if bu1 < 0 {
+        die(18, "FAIL udp bind(1)\\n");
+    }
+    let bu2: i64 = syscall6(49, ur as u64, ub as u64, 16, 0, 0);
+    if bu2 < 0 {
+        die(19, "FAIL udp bind(2)\\n");
+    }
+    let gu: i64 = syscall6(51, us as u64, ua as u64, ul as u64, 0, 0);
+    if gu < 0 {
+        die(20, "FAIL udp getsockname\\n");
+    }
+    let h0: ptr = alloc(8);
+    store8(h0, 0, 104);
+    store8(h0, 1, 101);
+    let h1: ptr = alloc(8);
+    store8(h1, 0, 121);
+    let uiov: ptr = alloc(64);
+    let _u0: u32 = mkiov(uiov, 0, h0, 2);
+    let _u1: u32 = mkiov(uiov, 1, h1, 1);
+    let um: ptr = alloc(64);
+    let _h2: u32 = mkhdr(um, ua, 16, uiov, 2);
+    let un: i64 = syscall6(46, ur as u64, um as u64, 0, 0, 0);
+    if un != 3 {
+        die(21, "FAIL udp sendmsg count\\n");
+    }
+    w(1, "UDP SENDMSG OK\\n");
+    let pl: ptr = alloc(64);
+    let giov: ptr = alloc(64);
+    let _g0: u32 = mkiov(giov, 0, pl, 16);
+    let src: ptr = alloc(64);
+    let gm: ptr = alloc(64);
+    let _h3: u32 = mkhdr(gm, src, 128, giov, 1);
+    // 收在 `us` 上：数据报是 `ur` 发往 `ua` 的，而 `ua` 是 `us` 的名字
+    let gn: i64 = syscall6(47, us as u64, gm as u64, 0, 0, 0);
+    if gn != 3 {
+        die(22, "FAIL udp recvmsg count\\n");
+    }
+    if load8(pl, 0) != 104 {
+        die(23, "FAIL udp payload a\\n");
+    }
+    if load8(pl, 1) != 101 {
+        die(24, "FAIL udp payload b\\n");
+    }
+    if load8(pl, 2) != 121 {
+        die(25, "FAIL udp payload c\\n");
+    }
+    // 来源地址被写进 msg_name，且 msg_namelen 被回写成真长度
+    let nl: i64 = load8(src, 1) as i64;
+    if nl != 0 {
+        die(26, "FAIL udp src family\\n");
+    }
+    if load8(src, 3) == 0 {
+        die(27, "FAIL udp src port\\n");
+    }
+    if load8(gm, 8) == 0 {
+        die(28, "FAIL udp msg_namelen\\n");
+    }
+    w(1, "UDP RECVMSG OK\\n");
+    syscall6(3, a1 as u64, 0, 0, 0, 0);
+    syscall6(3, c1 as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall6(3, us as u64, 0, 0, 0, 0);
+    syscall6(3, ur as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+MSG_GOLDEN = (b"SENDMSG OK\nRECVMSG SCATTER OK\nUDP SENDMSG OK\nUDP RECVMSG OK\n")
+
+
+def _msg_ok(out: bytes) -> bool:
+    return out == MSG_GOLDEN
+
+
+SP_DEMO = """module spdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+// 小整数（含负数）打到 stdout —— 错误码要**看得见**，否则两边不一致也只会"都过了"
+fn num(tag: str, v: i64) -> u32 {
+    w(1, tag);
+    let x: i64 = v;
+    if x < 0 {
+        w(1, "-");
+        x = 0 - x;
+    }
+    let buf: ptr = alloc(32);
+    let n: u32 = 0;
+    if x == 0 {
+        store8(buf, 0, 48);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = n;
+    while i > 0 {
+        i = i - 1;
+        syscall4(1, 1, buf as u64 + i as u64, 1);
+    }
+    w(1, "\n");
+    return 0;
+}
+
+fn _start() {
+    // ---- STREAM：一对流式 socket，来回各一次 ----
+    let sv: ptr = alloc(16);
+    let r1: i64 = syscall6(53, 1, 1, 0, sv as u64, 0);
+    if r1 < 0 {
+        die(1, "FAIL socketpair(stream)\n");
+    }
+    let f0: i64 = load8(sv, 0) as i64;
+    let f1: i64 = load8(sv, 4) as i64;
+    let p1: i64 = syscall6(1, f0 as u64, str_ptr("ping") as u64, 4, 0, 0);
+    if p1 != 4 {
+        die(2, "FAIL write a\n");
+    }
+    let rb: ptr = alloc(16);
+    let q1: i64 = syscall6(0, f1 as u64, rb as u64, 4, 0, 0);
+    if q1 != 4 {
+        die(3, "FAIL read a\n");
+    }
+    if load8(rb, 0) != 112 {
+        die(4, "FAIL payload a\n");
+    }
+    let p2: i64 = syscall6(1, f1 as u64, str_ptr("pong") as u64, 4, 0, 0);
+    if p2 != 4 {
+        die(5, "FAIL write b\n");
+    }
+    let q2: i64 = syscall6(0, f0 as u64, rb as u64, 4, 0, 0);
+    if q2 != 4 {
+        die(6, "FAIL read b\n");
+    }
+    if load8(rb, 3) != 103 {
+        die(7, "FAIL payload b\n");
+    }
+    w(1, "SP STREAM OK\n");
+    // ---- DGRAM：一对数据报 socket ----
+    let sv2: ptr = alloc(16);
+    let r2: i64 = syscall6(53, 1, 2, 0, sv2 as u64, 0);
+    if r2 < 0 {
+        die(8, "FAIL socketpair(dgram)\n");
+    }
+    let g0: i64 = load8(sv2, 0) as i64;
+    let g1: i64 = load8(sv2, 4) as i64;
+    let d1: i64 = syscall6(1, g0 as u64, str_ptr("dg") as u64, 2, 0, 0);
+    if d1 != 2 {
+        die(9, "FAIL dgram write\n");
+    }
+    let d2: i64 = syscall6(0, g1 as u64, rb as u64, 8, 0, 0);
+    if d2 != 2 {
+        die(10, "FAIL dgram read\n");
+    }
+    if load8(rb, 0) != 100 {
+        die(11, "FAIL dgram payload\n");
+    }
+    w(1, "SP DGRAM OK\n");
+    // ---- 错误路：错误码要与 Linux **逐字相同**（不是"都是负数"就算过）----
+    let e1: i64 = syscall6(53, 2, 1, 0, sv as u64, 0);
+    let _n1: u32 = num("sp(af_inet) = ", e1);
+    let e2: i64 = syscall6(53, 1, 99, 0, sv as u64, 0);
+    let _n2: u32 = num("sp(type99)  = ", e2);
+    syscall6(3, f0 as u64, 0, 0, 0, 0);
+    syscall6(3, f1 as u64, 0, 0, 0, 0);
+    syscall6(3, g0 as u64, 0, 0, 0, 0);
+    syscall6(3, g1 as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+SP_HEAD = b"SP STREAM OK\nSP DGRAM OK\n"
+
+
+def _sp_ok(out: bytes) -> bool:
+    """两行正常路必须过；后两行是**错误码**，值本身钉在这里（Linux 实测）。"""
+    if not out.startswith(SP_HEAD):
+        return False
+    return out[len(SP_HEAD):] == b"sp(af_inet) = -95\nsp(type99)  = -22\n"
+
+
+EP_DEMO = """module epdemo
+choose runtime
+
+fn w(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn die(code: u64, s: str) -> u32 {
+    w(1, s);
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn num(tag: str, v: i64) -> u32 {
+    w(1, tag);
+    let x: i64 = v;
+    if x < 0 {
+        w(1, "-");
+        x = 0 - x;
+    }
+    let buf: ptr = alloc(32);
+    let n: u32 = 0;
+    if x == 0 {
+        store8(buf, 0, 48);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = n;
+    while i > 0 {
+        i = i - 1;
+        syscall4(1, 1, buf as u64 + i as u64, 1);
+    }
+    w(1, "\n");
+    return 0;
+}
+
+fn sa(sa: ptr, port_hi: u8, port_lo: u8) -> u32 {
+    store8(sa, 0, 2);
+    store8(sa, 1, 0);
+    store8(sa, 2, port_hi);
+    store8(sa, 3, port_lo);
+    store8(sa, 4, 127);
+    store8(sa, 5, 0);
+    store8(sa, 6, 0);
+    store8(sa, 7, 1);
+    return 0;
+}
+
+fn put32(p: ptr, off: u32, v: i64) -> u32 {
+    let k: u32 = 0;
+    let x: i64 = v;
+    while k < 4 {
+        store8(p, off + k, (x % 256) as u8);
+        x = x / 256;
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn put64(p: ptr, off: u32, v: i64) -> u32 {
+    let k: u32 = 0;
+    let x: i64 = v;
+    while k < 8 {
+        store8(p, off + k, (x % 256) as u8);
+        x = x / 256;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// struct epoll_event 在 x86-64 Linux 上是 **packed**：events(u32)@0、data(u64)@4（共 12 字节）
+fn mkev(ev: ptr, events: i64, data: i64) -> u32 {
+    let _a: u32 = put32(ev, 0, events);
+    let _b: u32 = put64(ev, 4, data);
+    return 0;
+}
+
+fn ev_of(o: ptr) -> i64 {
+    return load8(o, 0) as i64;
+}
+
+fn data_of(o: ptr) -> i64 {
+    return load8(o, 4) as i64;
+}
+
+fn _start() {
+    // 一对连着的 TCP socket：c1 ↔ a1
+    let sa0: ptr = alloc(64);
+    let _z: u32 = sa(sa0, 0, 0);
+    let ls: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    if ls < 0 {
+        die(1, "FAIL socket(ls)\n");
+    }
+    let ln: ptr = alloc(8);
+    store8(ln, 0, 16);
+    let bi: i64 = syscall6(49, ls as u64, sa0 as u64, 16, 0, 0);
+    if bi < 0 {
+        die(2, "FAIL bind\n");
+    }
+    let li: i64 = syscall6(50, ls as u64, 8, 0, 0, 0);
+    if li < 0 {
+        die(3, "FAIL listen\n");
+    }
+    let g1: i64 = syscall6(51, ls as u64, sa0 as u64, ln as u64, 0, 0);
+    if g1 < 0 {
+        die(4, "FAIL getsockname\n");
+    }
+    let c1: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    let n1: i64 = syscall6(42, c1 as u64, sa0 as u64, 16, 0, 0);
+    if n1 < 0 {
+        die(5, "FAIL connect\n");
+    }
+    let a1: i64 = syscall6(43, ls as u64, 0, 0, 0, 0);
+    if a1 < 0 {
+        die(6, "FAIL accept\n");
+    }
+    // ---- epoll 实例 ----
+    let ep: i64 = syscall6(291, 0, 0, 0, 0, 0);
+    if ep < 0 {
+        die(7, "FAIL epoll_create1\n");
+    }
+    let _n0: u32 = num("epoll_create1 = ", ep);
+    let ev: ptr = alloc(16);
+    let out: ptr = alloc(128);
+    let _e1: u32 = mkev(ev, 1, 42);                   // EPOLLIN，data=42
+    let r1: i64 = syscall6(233, ep as u64, 1, c1 as u64, ev as u64, 0);
+    if r1 != 0 {
+        die(8, "FAIL ctl add c1\n");
+    }
+    let _e2: u32 = mkev(ev, 1, 7);                    // EPOLLIN，data=7
+    let r2: i64 = syscall6(233, ep as u64, 1, a1 as u64, ev as u64, 0);
+    if r2 != 0 {
+        die(9, "FAIL ctl add a1\n");
+    }
+    // ① 谁都还没有数据 ⇒ 等到超时，返回 0
+    let w1: i64 = syscall6(232, ep as u64, out as u64, 8, 200, 0);
+    let _n1: u32 = num("wait(empty) = ", w1);
+    // ② 往 c1 写两个字节 ⇒ a1 可读
+    let _p: i64 = syscall6(1, c1 as u64, str_ptr("hi") as u64, 2, 0, 0);
+    let w2: i64 = syscall6(232, ep as u64, out as u64, 8, 1000, 0);
+    let _n2: u32 = num("wait(read) n = ", w2);
+    let _n3: u32 = num("wait(read) ev = ", ev_of(out));
+    let _n4: u32 = num("wait(read) data = ", data_of(out));
+    let rb: ptr = alloc(16);
+    let _r: i64 = syscall6(0, a1 as u64, rb as u64, 2, 0, 0);
+    // ③ c1 改成等 EPOLLOUT（连着的就是可写的）
+    let _e3: u32 = mkev(ev, 4, 9);
+    let r3: i64 = syscall6(233, ep as u64, 3, c1 as u64, ev as u64, 0);
+    if r3 != 0 {
+        die(10, "FAIL ctl mod\n");
+    }
+    let w3: i64 = syscall6(232, ep as u64, out as u64, 8, 500, 0);
+    let _n5: u32 = num("wait(write) n = ", w3);
+    let _n6: u32 = num("wait(write) ev = ", ev_of(out));
+    let _n7: u32 = num("wait(write) data = ", data_of(out));
+    // ---- 错误路：码要与 Linux 逐字相同 ----
+    let x1: i64 = syscall6(233, ep as u64, 1, c1 as u64, ev as u64, 0);   // ADD 已登记
+    let _m1: u32 = num("ctl(add dup) = ", x1);
+    let x2: i64 = syscall6(233, ep as u64, 3, ls as u64, ev as u64, 0);   // MOD 没登记
+    let _m2: u32 = num("ctl(mod none) = ", x2);
+    let x3: i64 = syscall6(233, ep as u64, 1, 1, ev as u64, 0);           // 不是 socket
+    let _m3: u32 = num("ctl(file fd) = ", x3);
+    let x4: i64 = syscall6(291, 3, 0, 0, 0, 0);                           // flags 不认识
+    let _m4: u32 = num("create1(bad) = ", x4);
+    // ---- 关掉实例之后还能再建一个（实例要回收，不然四次就 EMFILE）----
+    let _c: i64 = syscall6(3, ep as u64, 0, 0, 0, 0);
+    let ep2: i64 = syscall6(291, 0, 0, 0, 0, 0);
+    if ep2 < 0 {
+        die(11, "FAIL epoll_create1 reuse\n");
+    }
+    w(1, "EPOLL REUSE OK\n");
+    syscall6(3, c1 as u64, 0, 0, 0, 0);
+    syscall6(3, a1 as u64, 0, 0, 0, 0);
+    syscall6(3, ls as u64, 0, 0, 0, 0);
+    syscall6(3, ep2 as u64, 0, 0, 0, 0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+EP_GOLDEN = (b"epoll_create1 = @G@\nwait(empty) = 0\nwait(read) n = 1\nwait(read) ev = 1\n"
+             b"wait(read) data = 7\nwait(write) n = 1\nwait(write) ev = 4\n"
+             b"wait(write) data = 9\nctl(add dup) = -17\nctl(mod none) = -2\n"
+             b"ctl(file fd) = -1\ncreate1(bad) = -22\nEPOLL REUSE OK\n")
+
+
+def _ep_ok(out: bytes) -> bool:
+    """实例号（fd）两边不保证同值，所以只钉"它是个正整数"，其余逐字节比。"""
+    for i in range(3, 64):
+        if out == EP_GOLDEN.replace(b"@G@", str(i).encode(), 1):
+            return True
+    return False
+
+
+#: 联网语料：`(文件名, 源码, 输出怎么算对)`。两条动态判据都跑这一份清单 ——
+#: 加一份语料就两边一起覆盖，别只在一边加。
 NET_CASES = (("sockdemo", SOCK_DEMO, _sock_ok), ("udpdemo", UDP_DEMO, _udp_ok),
              ("polldemo", POLL_DEMO, _poll_ok), ("seldemo", SEL_DEMO, _sel_ok),
+             ("msgdemo", MSG_DEMO, _msg_ok), ("spdemo", SP_DEMO, _sp_ok),
+             ("epdemo", EP_DEMO, _ep_ok),
              ("enosysdemo", ENOSYS_DEMO, _enosys_ok))
 
 

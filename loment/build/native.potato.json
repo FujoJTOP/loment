@@ -1,5 +1,5 @@
 {
-  "potato": "v12",
+  "potato": "v13",
   "unit": "native",
   "language": "loment",
   "grammar": "loment",
@@ -7,6 +7,7 @@
   "gc": "gc_manual",
   "runtime": "runtime",
   "port": "sealed",
+  "vm": "no_vm",
   "switches": [],
   "dialects": [],
   "bodies": [],
