@@ -719,7 +719,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "b4a2ddacfe9e8b576d1ad91db37975067242e67cce753d42f3690f2043d4002a"
+   "sha256": "f9597b9c9ed6cb232e75370ce4245b4aa52dfbc6183e076db10100997e6b0fdc"
   },
   {
    "path": "tools/loment_build.py",
@@ -871,7 +871,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "73100f93588324298a130c411deba1ab07902b9bbca686e6cea66d3074e012a5"
+   "sha256": "d5e5bc4383c2af2f62187e3474e8adaeee857154f0d4a77d772596d0bb47e2cf"
   },
   {
    "path": "tools/loment_net_test.py",
