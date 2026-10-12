@@ -871,7 +871,7 @@
   },
   {
    "path": "tools/loment_pe_test.py",
-   "sha256": "d5e5bc4383c2af2f62187e3474e8adaeee857154f0d4a77d772596d0bb47e2cf"
+   "sha256": "9004f3c0499bc6e97911c1329fd482f8cf4c7e8cab5fcd3bbdcc9c3a36291684"
   },
   {
    "path": "tools/loment_net_test.py",
