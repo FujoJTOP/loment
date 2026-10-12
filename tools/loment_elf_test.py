@@ -535,15 +535,6 @@ def test_l0_static_promotion_bounds_the_heap():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    # **今天跑不了 —— 而且原因不是环境**：L0 提升出来的产物**链不过包内镜像链接器**。
-    # L0 会把栈上那块缓冲的地址存进指针槽（`store ptr %p.buf, ptr %p.addr`），于是 alloca
-    # 被当成**普通 SSA 值**用 —— 而 `lomelf` 只在 `get_ptr` / `agg_addr` 里认 alloca，
-    # `get()` 不认（`_store` 走的是 `get()`）。`clang` 收这份 IR，是镜像链接器的口子。
-    # `docs/210` §8 那条硬约束要求**每一层**的产物都能被包内链接器链出来，所以这是 **L0
-    # 那一格的真缺口**（这一格此前只有静态证据，动态那一对从没跑过，原因就是这个）。
-    # 下面那三段是**写好的判据**：`FujoJTOP/loment#239` 修好，删掉这三行就有了动态证据。
-    print("      SKIP: 包内镜像链接器还链不了 L0 提升的产物 —— 见 FujoJTOP/loment#239")
-    return
     body = ("module gcl0\n%s\nchoose runtime\n\n"
             "fn bump() -> u32 {\n"
             "    let p: ptr = alloc(64);\n"
