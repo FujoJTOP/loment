@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "d29fc1b47a655d65811b5ee7919f2365bfc0994937c5540925c841fae027806b"
+   "sha256": "df76c489f8987326589e8ee6a6bf34e39355b0b66156009be0b81e3933ec4605"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "2f6ecfcc30422fe85e35c897a353080b4bc8121fe38edc55a06d8d56211494ba"
+   "sha256": "699d764581dc4b8480707eeba4e2aea65a350662bd6dbd79b884cc305e88ee97"
   },
   {
    "path": "tools/potato.py",
@@ -859,7 +859,7 @@
   },
   {
    "path": "tools/lomelf.py",
-   "sha256": "741dbd51c60d2544ac28e1dab92858008cd2a86485818a573341f0b0e3d1bc60"
+   "sha256": "e8cedd39fdc2dbe47dd0a32d908e1b5b38f41450544781535015888bbc2717c6"
   },
   {
    "path": "tools/loment_opt_obj.py",
@@ -867,7 +867,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "02a8b1ece762030cd6b57032720bf180d7c0d33f956562ad96af4cb1e847f98b"
+   "sha256": "b526ce28b14a5e612e657ce7b391d5dcac8b56ce0e70dd41ff31d4bfab96cb32"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1115,7 +1115,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "283ed3c422977a002d6dad1ecb6d60a4da9a88ff6a530029744f6d8cd7172459"
+   "sha256": "e8d8c5ce206006d7a407675893329276f0228ea01bbf52314a10f12d64f5e395"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1155,7 +1155,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "27569ec43af1e95c1b097aa47c478b87bac9ce8e9c27bf15e919455b8972411b"
+   "sha256": "8073b5265e30dc3cea81ea005a89be804f46b6800f91c9c79699b1a54722f025"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1627,7 +1627,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "fff8530d10af6371c81f862ae30bc13a490589be4086c3ce249a2c40b60e20d1"
+   "sha256": "69e50095bc99ff71fb47b367d57f0ce2b08f5bcd24e35463de0eda27b6adfea0"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -2027,7 +2027,7 @@
   },
   {
    "path": "docs/210-loment-gc-design.md",
-   "sha256": "a9847f79fe72c078f9bd65ed92a3f4aec8f0fa675acd13572ef994e3fe858130"
+   "sha256": "1c5e4cd6533b6796b7a70aae7bb652b9a219030fa3eb55fda21342d4a6b62aff"
   },
   {
    "path": "docs/211-c-surface-grammar-sweep.md",
@@ -2143,7 +2143,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "d4e74034cc789f777cb1c3383ccfee0e9505fcf66a88a53da738bfdf6b011ee5"
+   "sha256": "54e44e44b7ff489739c66f9a4cdd65dab1e0358fac1f89470819c5ab25f1ecaf"
   },
   {
    "path": "docs/manual/api/ahci.md",
