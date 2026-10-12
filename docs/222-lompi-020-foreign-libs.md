@@ -146,7 +146,8 @@ gcc hostz.o -lz -o hostz                 # WSL, 系统 libz
 * **全树零 TLS** —— 没有握手、没有证书、没有密钥交换。`https://` 只作为 registry 的**字符串**
   出现过（`lompi/lpi_cli.lomt:836`）；
 * **没有解析器** —— 没有 `getaddrinfo`，示例一律把 `127.0.0.1` 逐字节写进 `sockaddr_in`；
-* `lompi fetch` **不做任何网络 I/O** —— 它打印 `git clone`（`lpi_cli.lomt:1187`）。
+* `lompi fetch` 现在**自己做 HTTP I/O**（2026-10-12 起，`docs/236`）—— 但只认
+  `http://` + IPv4 字面量，`https://` 与主机名落回"打印 `git clone` 计划 + 说清缺什么"。
 
 而 PyPI / Maven Central / NuGet **全是 HTTPS**。所以"真去官方仓装"今天的形状是：
 

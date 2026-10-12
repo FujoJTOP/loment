@@ -1,6 +1,6 @@
 # 170 · lompi 随 Loment 一起发行
 
-> 版本 `0.1.4` · lompi `0.1.5` · 实现 `loment/tools/lomcli.lomt` 之外
+> 版本 `0.1.4` · lompi `0.2.0` · 实现 `loment/tools/lomcli.lomt` 之外
 > · 判据 `tools/loment_lompi_test.py` · 同步 `tools/lompi_sync.py`
 > · 边界见 `docs/169 §2`（`loment` 的命令面里**不出现** lompi）
 
@@ -30,7 +30,7 @@ lompi obj   add  fixture/store k.o  ==  lompi obj add k.o
 路径，等于把"你的库装在哪"变成每次调用的必填项 —— 而那是机器该记住的事，不是人该背的。
 `list` 是 `index` 的同义词（pip 的习惯动词）。
 
-**两个版本号是两件事**，别看成同一个：`lompi version` 打的 `0.1.5` 是**这个工具自己**的
+**两个版本号是两件事**，别看成同一个：`lompi version` 打的 `0.2.0` 是**这个工具自己**的
 版本；`lompi/store/<name>/0.1.0/` 里那个 `0.1.0` 是**随包标准库**（`std`/`host`）自己的
 包版本。升 lompi 不该动后者 —— 动了就要同时改 `loment_release.GLOBS` 与
 `loment/tools/lomrel.lomt` 里那两个写死的 glob（判据见 `loment_lompi_test` 的

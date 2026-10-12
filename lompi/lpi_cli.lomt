@@ -11,7 +11,7 @@
 //   lompi hash    <包目录>                     单个包的自身源码哈希
 //   lompi help
 //
-// **为什么没有"直接装"**: 实测 PE 上只有 8 个 syscall, 其中**没有 mkdir (83)** ——
+// **为什么没有"直接装"**: 实测 PE 的派发面 (`docs/167` §5) 里**没有 mkdir (83)** ——
 // 能写进已存在的目录, 但建不了目录。装一个包要新建 `deps/<名字>/`, 所以 lompi 把
 // 那一步做成**计划** (plan): 打出确定的目录与文件清单, 由上层的 shell / CI / 参考
 // 工具链去执行。在 ELF 目标上 mkdir 是可用的, 那时 plan 可以直接就地执行 —— 边界
@@ -649,7 +649,7 @@ fn obj_get(ws: ptr, buf: ptr, store: ptr, hex_av: u64, out_av: u64) -> u32 {
 // anything non-ASCII becomes mojibake. The runtime has no WriteConsoleW, so the only
 // lever we own is to print nothing but ASCII.
 fn print_help() {
-    out_lit("lompi 0.1.5 - package manager for Loment libraries\n");
+    out_lit("lompi 0.2.0 - package manager for Loment libraries\n");
     out_lit("        identity = content hash, dependencies = `use` in source\n");
     out_lit("\n");
     out_lit("  lompi install <name> [--into DIR] [--apply] [--from-lock F]  fetch/validate/install\n");
@@ -1013,7 +1013,7 @@ pub fn cfg_flag_arg(buf: ptr, m: u32, lit: str) -> u64 {
 // ---------------------------------------------------------------- version / config / check
 
 fn cmd_version() -> u32 {
-    out_lit("lompi 0.1.5\n");
+    out_lit("lompi 0.2.0\n");
     return 0;
 }
 
@@ -1027,7 +1027,7 @@ fn cmd_config(ws: ptr, buf: ptr, m: u32) -> u32 {
     let reg: ptr = ((ws as u64) + WS_OUT as u64 + 3072) as ptr;
     let sr: ptr = ((ws as u64) + WS_TMP as u64 + 512) as ptr;
     let exen: u32 = cfg_exe_dir(buf, m, scr, exed, 1024);
-    out_lit("version:  0.1.5\n");
+    out_lit("version:  0.2.0\n");
     out_lit("exe:      ");
     sys_write(1, exed, exen as u64);
     out_lit("\n");
@@ -1145,9 +1145,538 @@ pub fn cfg_slug(url: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
     return e2;
 }
 
-/// `fetch`: 把网址库克隆到缓存 —— **lompi 自己做不到联网**, 所以给出计划。
-/// PE 上只有 8 个 syscall, 没有 socket; 垫片也没有 ws2_32/winhttp。这一步必须由
-/// shell / CI 执行, 与 `mkdir` 那条边界是同一个道理。
+// ---------------------------------------------------------------- 联网 (0.2.0)
+//
+// **为什么这一层住在 lpi_cli 里**: 链的**嵌套上限是 8 层**(`loment ir` 报
+// 「依赖嵌套超过 8 层」), 而 lompi 的链已经是 `lompi -> lpi_cli -> lpi_idn ->
+// lpi_pkg -> lpi_sha -> lpi_dir -> lpi_txt -> lpi_sys` 八层 —— 再插一个模块就
+// 超了。所以联网原语与 `fetch` 放在同一个文件里: 它在链顶, `txt_*`/`sha_*` 都够得着。
+//
+// **能力边界**(写在 `docs/236`): 只认 `http://` + IPv4 字面量 —— 工具链里
+// **没有解析器**(没有 `getaddrinfo`)、**没有 TLS**。这两条是运行时欠账, 不是
+// lompi 的设计立场: 0.1.5 时那句是「PE 上没有 socket」, 联网面补完(`docs/234`)
+// 之后往后退到了这一格。
+
+/// socket / connect / sendto / recvfrom 的 Linux 号 (x86-64)。
+pub const NET_SYS_SOCKET: u64 = 41;
+pub const NET_SYS_CONNECT: u64 = 42;
+pub const NET_SYS_SENDTO: u64 = 44;
+pub const NET_SYS_RECVFROM: u64 = 45;
+pub const NET_AF_INET: u64 = 2;
+pub const NET_SOCK_STREAM: u64 = 1;
+/// 端口是 16 位。
+pub const NET_PORT_MAX: u64 = 65535;
+/// 失败哨兵 (与 `SYS_ERR` 同值, 免得两个哨兵混着比)。
+pub const NET_ERR: u64 = 18446744073709551615;
+
+// ---------------------------------------------------------------- 基本件
+
+/// IPv4 TCP socket。失败返回 -1。
+pub fn net_tcp4() -> i64 {
+    return syscall4(NET_SYS_SOCKET, NET_AF_INET, NET_SOCK_STREAM, 0);
+}
+
+/// 连到 a.b.c.d:port —— **点分四段直接写进 `sockaddr_in`** (没有解析器可用)。
+/// addr 至少 16 字节。返回 connect 的返回值 (0 = 成)。
+pub fn net_connect4(fd: i64, addr: ptr, a: u32, b: u32, c: u32, d: u32, port: u64) -> i64 {
+    store8(addr, 0, 2 as u8);            // sin_family = AF_INET
+    store8(addr, 1, 0 as u8);
+    let ph: u64 = port / 256;
+    store8(addr, 2, ph as u8);           // 端口是**网络序**: 高字节在前
+    store8(addr, 3, (port % 256) as u8);
+    store8(addr, 4, a as u8);
+    store8(addr, 5, b as u8);
+    store8(addr, 6, c as u8);
+    store8(addr, 7, d as u8);
+    let i: u32 = 8;
+    while i < 16 {
+        store8(addr, i, 0 as u8);
+        i = i + 1;
+    }
+    return syscall4(NET_SYS_CONNECT, fd as u64, addr as u64, 16);
+}
+
+/// 已连接的 socket 上 `sendto` 不带地址就是 `send`。
+pub fn net_send(fd: i64, p: ptr, n: u64) -> i64 {
+    return syscall7(NET_SYS_SENDTO, fd as u64, p as u64, n, 0, 0, 0);
+}
+
+pub fn net_recv(fd: i64, p: ptr, cap: u64) -> i64 {
+    return syscall7(NET_SYS_RECVFROM, fd as u64, p as u64, cap, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- 明文 HTTP GET
+
+/// 一条 `HTTP/1.0 GET`。连 a.b.c.d:port, 把 `path` 取进 `out`, 返回**响应体**长度;
+/// 任何一步失败返回 `NET_ERR`。
+///
+/// * 参数从 `req` 那块暂存里取 (`NETREQ_*`); `head` 缓冲固定 1024 字节;
+/// * 整条响应先收进 `out`, 再把头切掉 —— 所以 `cap` 要装得下"头 + 体";
+/// * `Host:` 里写 `a.b.c.d:port` (对 IP 字面量来说这就是对的名字)。
+/// 写一个 CRLF —— **不能靠字符串字面量**: Loment 的转义只认 `\n`, `\r` 会**退化成一个
+/// 字母 `r`**(实测: 服务器收到的请求行是 `HTTP/1.0r`, 直接回 400 "Bad request version")。
+/// 所以 CR 走字节写, 不写字面量。
+pub fn net_crlf(dst: ptr, off: u32) -> u32 {
+    store8(dst, off, 13 as u8);
+    store8(dst, off + 1, 10 as u8);
+    return off + 2;
+}
+
+/// 找 HTTP 头结束(字节 13,10,13,10), 返回头结束的下标; 找不到返回 DIR_ERR。
+/// 顺手认一下只发 LF 的服务器 —— 少见, 但撞上了不该被当成"这不是 HTTP"。
+pub fn net_hdr_end(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 4 <= n {
+        if load8(p, i) == 13 && load8(p, i + 1) == 10
+            && load8(p, i + 2) == 13 && load8(p, i + 3) == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j + 2 <= n {
+        if load8(p, j) == 10 && load8(p, j + 1) == 10 {
+            return j;
+        }
+        j = j + 1;
+    }
+    return DIR_ERR;
+}
+
+pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
+    let scr: ptr = txt_load64(req, NETREQ_SCR) as ptr;
+    let head: ptr = txt_load64(req, NETREQ_HEAD) as ptr;
+    let a: u32 = txt_load32(req, NETREQ_A);
+    let b: u32 = txt_load32(req, NETREQ_B);
+    let c: u32 = txt_load32(req, NETREQ_C);
+    let d: u32 = txt_load32(req, NETREQ_D);
+    let port: u64 = txt_load64(req, NETREQ_PORT);
+    let fd: i64 = net_tcp4();
+    if fd < 0 {
+        return NET_ERR;
+    }
+    let cn: i64 = net_connect4(fd, scr, a, b, c, d, port);
+    if cn < 0 {
+        sys_close(fd);
+        return NET_ERR;
+    }
+    let o: u32 = txt_put(head, 0, "GET ");
+    let o1: u32 = txt_put_bytes(head, o, path, 0, plen);
+    let o2: u32 = net_crlf(head, txt_put(head, o1, " HTTP/1.0"));
+    let o2b: u32 = txt_put(head, o2, "Host: ");
+    let o3: u32 = txt_put_dec(head, o2b, a as u64);
+    let o4: u32 = txt_put_byte(head, o3, 46);
+    let o5: u32 = txt_put_dec(head, o4, b as u64);
+    let o6: u32 = txt_put_byte(head, o5, 46);
+    let o7: u32 = txt_put_dec(head, o6, c as u64);
+    let o8: u32 = txt_put_byte(head, o7, 46);
+    let o9: u32 = txt_put_dec(head, o8, d as u64);
+    let oA: u32 = txt_put_byte(head, o9, 58);
+    let oB: u32 = txt_put_dec(head, oA, port);
+    let oC: u32 = net_crlf(head, txt_put(head, oB, "Connection: close"));
+    let oD: u32 = net_crlf(head, oC);
+    if oD > 1024 {
+        sys_close(fd);
+        return NET_ERR;
+    }
+    let sn: i64 = net_send(fd, head, oD as u64);
+    if sn < 0 {
+        sys_close(fd);
+        return NET_ERR;
+    }
+    let got: u64 = 0;
+    let run: u32 = 1;
+    while run == 1 && got < cap {
+        let dst: ptr = ((out as u64) + got) as ptr;
+        let r: i64 = net_recv(fd, dst, cap - got);
+        if r <= 0 {
+            run = 0;
+        } else {
+            got = got + (r as u64);
+        }
+    }
+    sys_close(fd);
+    if got == 0 {
+        return NET_ERR;
+    }
+    let hdr: u32 = net_hdr_end(out, got as u32);
+    if hdr == DIR_ERR {
+        return NET_ERR;                  // 不是一条 HTTP 响应
+    }
+    if txt_find_lit(out, 0, hdr, " 200") == TXT_NFIND {
+        return NET_ERR;                  // 非 200(含 3xx: 不跟重定向)
+    }
+    let bstart: u32 = hdr + 4;
+    let blen: u32 = (got as u32) - bstart;
+    if bstart > 0 {
+        sys_copy(out, 0, out, bstart, blen);
+    }
+    return blen as u64;
+}
+
+// ---------------------------------------------------------------- URL 拆解
+//
+// 只拆 `http://a.b.c.d[:port][/path]` 这一种形状; 别的一律"不认"(返回 0),
+// 由上层回退到打印计划。**不猜**: 认不出来就说不认。
+
+/// 拆一个 registry URL。全部成功返回 1, 否则返回 0 (调用方去打印计划)。
+/// * `a`..`d` 收 4 段地址; `port_out` 收端口 (缺省 80);
+/// * `path`/`pathcap` 收**路径**(含前导 `/`, 不含 query; 空路径写成 `/`);
+/// * `ip` 是"这个 URL 能不能自己连"的标志位输出(0/1) —— 现代码里它总是 1,
+///   留着是为了"主机不是 IP 字面量"那一支明确地失败。
+pub fn net_parse_http(url: ptr, n: u32,
+                      pa: ptr, pb: ptr, pc: ptr, pd: ptr, port_out: ptr,
+                      path: ptr, pathcap: u32) -> u32 {
+    // 必须 http:// 开头 (https:// 直接不认 —— 没有 TLS)
+    if n < 8 || !txt_eq_lit(url, 0, 7, "http://") {
+        return 0;
+    }
+    let i: u32 = 7;
+    // 四段十进制, 点分隔
+    let ok: u32 = 1;
+    let seg: u32 = 0;
+    let v0: u32 = 0;
+    let v1: u32 = 0;
+    let v2: u32 = 0;
+    let v3: u32 = 0;
+    while seg < 4 && ok == 1 {
+        let st: u32 = i;
+        while i < n && txt_is_digit(load8(url, i)) {
+            i = i + 1;
+        }
+        if i == st {
+            ok = 0;
+        } else {
+            let v: u64 = txt_parse_dec_v(txt_parse_dec(url, st, i - st));
+            if v > 255 {
+                ok = 0;
+            }
+            if seg == 0 {
+                v0 = v as u32;
+            } else if seg == 1 {
+                v1 = v as u32;
+            } else if seg == 2 {
+                v2 = v as u32;
+            } else {
+                v3 = v as u32;
+            }
+            seg = seg + 1;
+            if seg < 4 {
+                if i >= n || load8(url, i) != 46 {
+                    ok = 0;
+                } else {
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    if ok == 0 {
+        return 0;
+    }
+    let port: u64 = 80;
+    if i < n && load8(url, i) == 58 {
+        i = i + 1;
+        let ps: u32 = i;
+        while i < n && txt_is_digit(load8(url, i)) {
+            i = i + 1;
+        }
+        if i == ps {
+            return 0;
+        }
+        port = txt_parse_dec_v(txt_parse_dec(url, ps, i - ps));
+        if port == 0 || port > NET_PORT_MAX {
+            return 0;
+        }
+    }
+    // 余下的是路径 (可空; 空 = `/`)
+    let pn: u32 = 0;
+    if i < n {
+        if load8(url, i) != 47 {
+            return 0;                    // 主机后面必须是 `/` 或结束
+        }
+        while i < n {
+            if load8(url, i) == 63 || load8(url, i) == 35 {
+                // `?` / `#` 之后不取(我们不支持 query)
+                i = n;
+            } else {
+                if pn + 1 >= pathcap {
+                    return 0;
+                }
+                store8(path, pn, load8(url, i) as u8);
+                pn = pn + 1;
+                i = i + 1;
+            }
+        }
+    }
+    if pn == 0 {
+        store8(path, 0, 47 as u8);
+        pn = 1;
+    }
+    store8(path, pn, 0 as u8);
+    txt_store32(pa, 0, v0);
+    txt_store32(pb, 0, v1);
+    txt_store32(pc, 0, v2);
+    txt_store32(pd, 0, v3);
+    txt_store64(port_out, 0, port);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 自检 (联网那一层)
+
+fn test_net_parse_rejects_https() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "https://github.com/x/y");
+    return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
+}
+
+fn test_net_parse_accepts_ip_and_port() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://127.0.0.1:8080/libs");
+    if net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) != 1 {
+        return false;
+    }
+    if txt_load32(pa, 0) != 127 || txt_load32(pb, 0) != 0
+        || txt_load32(pc, 0) != 0 || txt_load32(pd, 0) != 1 {
+        return false;
+    }
+    if txt_load64(po, 0) != 8080 {
+        return false;
+    }
+    let pl: u32 = txt_len_cstr(path);
+    return pl == 5 && txt_eq_lit(path, 0, 5, "/libs");
+}
+
+fn test_net_parse_rejects_hostname() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://libs.example.com/x");
+    return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
+}
+
+/// 跑本模块全部自检, 返回失败条数 (0 = 全绿)。
+pub fn selftest_net() -> u32 {
+    let f: u32 = 0;
+    if !test_net_parse_rejects_https() { f = f + 1; sys_write_str(1, "  FAIL net_parse_https\n"); }
+    if !test_net_parse_accepts_ip_and_port() { f = f + 1; sys_write_str(1, "  FAIL net_parse_ip\n"); }
+    if !test_net_parse_rejects_hostname() { f = f + 1; sys_write_str(1, "  FAIL net_parse_hostname\n"); }
+    return f;
+}
+// ---------------------------------------------------------------- 注册表: 自己拉 (0.2.0)
+
+//: 单个文件的落盘上限, 与 `pkg` 那一侧同一条口径 (256 KiB)。
+const NET_FILE_CAP: u32 = 262144;
+
+//: **一次取件的全部参数**挤在这一块暂存里 —— 为什么不摊成形参: **自举编译器的形参上限
+//: 是 10**(11 个直接 SIGILL, 而且**无声**), 参考实现却照收。这条差异是实测出来的。
+const NETREQ_SCR: u32 = 0;          // ptr: 16 字节 sockaddr 暂存
+const NETREQ_HEAD: u32 = 8;         // ptr: 请求头暂存 (1024)
+const NETREQ_BASE: u32 = 16;        // ptr: 注册表基路径 (已带前导 `/`)
+const NETREQ_A: u32 = 24;           // u32: 四段地址
+const NETREQ_B: u32 = 32;
+const NETREQ_C: u32 = 40;
+const NETREQ_D: u32 = 48;
+const NETREQ_PORT: u32 = 56;        // u64: 端口
+const NETREQ_IDX: u32 = 64;         // ptr: 索引缓冲
+const NETREQ_IDXCAP: u32 = 72;      // u32
+const NETREQ_BODY: u32 = 80;        // ptr: 单文件响应缓冲
+const NETREQ_BODYCAP: u32 = 88;     // u32
+const NETREQ_SIZE: u32 = 128;
+
+/// 从 p 的 [off, n) 取一个空白分隔的字段写进 out (cap)。
+/// 返回 `(新起点 << 32) | 字段长度`; 长度 0 = 这一行没有这一段(调用方据此判失败)。
+fn net_field(p: ptr, off: u32, n: u32, out: ptr, cap: u32) -> u64 {
+    let i: u32 = txt_skip_ws(p, off, n);
+    let st: u32 = i;
+    let done: u32 = 0;
+    while i < n && done == 0 {
+        let c: u32 = load8(p, i);
+        if c == 32 || c == 9 || c == 13 {
+            done = 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    let ln: u32 = i - st;
+    if ln >= cap {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < ln {
+        store8(out, k, load8(p, st + k) as u8);
+        k = k + 1;
+    }
+    store8(out, ln, 0 as u8);
+    return ((i as u64 + 1) * 4294967296) + (ln as u64);
+}
+
+fn net_foff(v: u64) -> u32 { return (v / 4294967296) as u32; }
+fn net_flen(v: u64) -> u32 { return (v % 4294967296) as u32; }
+
+/// 取 `p` 最后一段(落盘时的文件名)。返回长度; 0 = 路径不合法。
+fn net_basename(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let cut: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 47 {
+            cut = i + 1;
+        }
+        i = i + 1;
+    }
+    let ln: u32 = n - cut;
+    if ln == 0 || ln >= cap {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < ln {
+        store8(out, k, load8(p, cut + k) as u8);
+        k = k + 1;
+    }
+    store8(out, ln, 0 as u8);
+    return ln;
+}
+
+/// 把注册表拉进 `dst`(一个**已经存在**的目录: `<root>/cache/<slug>`)。
+/// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 任一步不成。
+fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
+    let base: ptr = txt_load64(req, NETREQ_BASE) as ptr;
+    let blen: u32 = txt_len_cstr(base);
+    let idx: ptr = txt_load64(req, NETREQ_IDX) as ptr;
+    let idxcap: u32 = txt_load32(req, NETREQ_IDXCAP);
+    let body: ptr = txt_load64(req, NETREQ_BODY) as ptr;
+    let bodycap: u64 = txt_load32(req, NETREQ_BODYCAP) as u64;
+    let ipath: ptr = sys_alloc(1200);
+    sys_copy(ipath, 0, base, 0, blen);
+    let o1: u32 = sys_append_lit(ipath, blen, "lompi-index.txt");
+    store8(ipath, o1, 0 as u8);
+    let ilen: u64 = net_http_get(req, ipath, o1, idx, idxcap as u64);
+    if ilen == NET_ERR {
+        sys_write_str(2, "lompi: the registry did not answer -- falling back to the plan\n");
+        return 0;
+    }
+    let name: ptr = sys_alloc(192);
+    let ver: ptr = sys_alloc(128);
+    let rel: ptr = sys_alloc(576);
+    let sha: ptr = sys_alloc(128);
+    let fpath: ptr = sys_alloc(1200);
+    let fdir: ptr = sys_alloc(1200);
+    let ffull: ptr = sys_alloc(1600);
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let dig: ptr = sys_alloc(64);
+    let hex: ptr = sys_alloc(128);
+    let off: u32 = 0;
+    let files: u32 = 0;
+    while off < (ilen as u32) {
+        let ll: u32 = txt_line_len(idx, off, ilen as u32);
+        if ll > 0 && load8(idx, off) != 35 {
+            let f0: u64 = net_field(idx, off, off + ll, name, 192);
+            let f1: u64 = net_field(idx, net_foff(f0), off + ll, ver, 128);
+            let f2: u64 = net_field(idx, net_foff(f1), off + ll, rel, 576);
+            let f3: u64 = net_field(idx, net_foff(f2), off + ll, sha, 128);
+            let nl: u32 = net_flen(f0);
+            let vl: u32 = net_flen(f1);
+            let rl: u32 = net_flen(f2);
+            let sl: u32 = net_flen(f3);
+            if nl == 0 || vl == 0 || rl == 0 || sl != 64 {
+                sys_write_str(2, "lompi: bad index line (want: name version path sha256)\n");
+                return 0;
+            }
+            sys_copy(fpath, 0, base, 0, blen);
+            let g1: u32 = blen;              // 基路径已经以 `/` 收尾, 别再加一个
+            let g2: u32 = sys_append_bytes(fpath, g1, rel, rl);
+            store8(fpath, g2, 0 as u8);
+            let got: u64 = net_http_get(req, fpath, g2, body, bodycap);
+            if got == NET_ERR {
+                sys_write_str(2, "lompi: no body for ");
+                sys_write(2, rel, rl as u64);
+                sys_write_str(2, "\n");
+                return 0;
+            }
+            sha_init(st);
+            sha_update(st, body, got as u32);
+            sha_final(st, dig);
+            sha_hex(dig, hex);
+            if !txt_eq(hex, 0, 64, sha, 0, 64) {
+                sys_write_str(2, "lompi: sha256 mismatch for ");
+                sys_write(2, rel, rl as u64);
+                sys_write_str(2, " -- refused\n");
+                return 0;
+            }
+            let bn: u32 = net_basename(rel, rl, fdir, 576);
+            if bn == 0 {
+                sys_write_str(2, "lompi: bad path in index\n");
+                return 0;
+            }
+            let dlen: u32 = txt_len_cstr(dst);
+            sys_copy(ffull, 0, dst, 0, dlen);
+            let q1: u32 = sys_append_lit(ffull, dlen, "\\");
+            let q2: u32 = sys_append_bytes(ffull, q1, name, nl);
+            let q3: u32 = sys_append_lit(ffull, q2, "\\");
+            let q4: u32 = sys_append_bytes(ffull, q3, ver, vl);
+            store8(ffull, q4, 0 as u8);
+            sys_copy(fpath, 0, ffull, 0, q4);
+            let q5: u32 = sys_append_lit(fpath, q4, "\\");
+            let q6: u32 = sys_append_bytes(fpath, q5, fdir, bn);
+            store8(fpath, q6, 0 as u8);
+            let wn: u64 = sys_write_file(fpath, body, got);
+            if wn == SYS_ERR {
+                // `mkdir` 在 PE 上没有(与 `install --apply` 同一条边界): 建不了目录就说清
+                // **要建哪个**, 而不是含糊地"写不了"。
+                sys_write_str(2, "lompi: cannot write ");
+                sys_write(2, fpath, q6 as u64);
+                sys_write_str(2, "\nlompi: make it first:  mkdir -p ");
+                sys_write(2, ffull, q4 as u64);
+                sys_write_str(2, "\nlompi: (mkdir is not in the PE runtime -- docs/236)\n");
+                return 0;
+            }
+            sys_write_str(1, "fetched ");
+            sys_write(1, name, nl as u64);
+            sys_write_str(1, " ");
+            sys_write(1, ver, vl as u64);
+            sys_write_str(1, " ");
+            sys_write(1, fdir, bn as u64);
+            sys_write_str(1, "  sha256 ok\n");
+            files = files + 1;
+        }
+        let nxt: u32 = txt_next_line(idx, off, ilen as u32);
+        if nxt <= off {
+            off = ilen as u32;
+        } else {
+            off = nxt;
+        }
+    }
+    if files == 0 {
+        sys_write_str(2, "lompi: the index has no entries\n");
+        return 0;
+    }
+    return 1;
+}
+
+/// `fetch`: 把注册表拉进缓存。
+///
+/// **0.2.0 起它真的自己联网**(`docs/236`): 注册表是 `http://<IPv4>[:port][/path]` 时,
+/// 直接 GET `<base>/lompi-index.txt`, 再按索引逐个下文件、**校验 sha256**、写进
+/// `<root>/cache/<slug>/<name>/<version>/`。
+///
+/// **别的形状照旧打印计划**, 而且把理由写清楚(https 要 TLS、主机名要解析器) ——
+/// 不含糊地说"做不到"。这不是 lompi 的设计立场, 是运行时的欠账: 0.1.5 那句是
+/// "PE 上没有 socket", 现在是"没有 TLS / 没有解析器"(联网面补完了, `docs/234`)。
 fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
     let exed: ptr = ((ws as u64) + WS_OUT as u64) as ptr;
@@ -1174,7 +1703,42 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     let o2: u32 = cli_put_cstr(dst, o1, slug);
     store8(dst, o2, 0 as u8);
 
-    out_lit("# lompi fetch plan (lompi cannot do network on PE -- no socket in the 8 syscalls)\n");
+    let ipa: ptr = sys_alloc(8);
+    let ipb: ptr = sys_alloc(8);
+    let ipc: ptr = sys_alloc(8);
+    let ipd: ptr = sys_alloc(8);
+    let pop: ptr = sys_alloc(8);
+    let base: ptr = sys_alloc(1200);
+    if net_parse_http(reg, n, ipa, ipb, ipc, ipd, pop, base, 1200) == 1 {
+        let head: ptr = sys_alloc(1024);
+        let idx: ptr = sys_alloc(65536);
+        let body: ptr = sys_alloc((NET_FILE_CAP as u64) + 8192);
+        let req: ptr = sys_alloc(NETREQ_SIZE as u64);
+        txt_store64(req, NETREQ_SCR, scr as u64);
+        txt_store64(req, NETREQ_HEAD, head as u64);
+        txt_store64(req, NETREQ_BASE, base as u64);
+        txt_store32(req, NETREQ_A, txt_load32(ipa, 0));
+        txt_store32(req, NETREQ_B, txt_load32(ipb, 0));
+        txt_store32(req, NETREQ_C, txt_load32(ipc, 0));
+        txt_store32(req, NETREQ_D, txt_load32(ipd, 0));
+        txt_store64(req, NETREQ_PORT, txt_load64(pop, 0));
+        txt_store64(req, NETREQ_IDX, idx as u64);
+        txt_store32(req, NETREQ_IDXCAP, 65536);
+        txt_store64(req, NETREQ_BODY, body as u64);
+        txt_store32(req, NETREQ_BODYCAP, NET_FILE_CAP + 8192);
+        let bak: u32 = net_fetch_registry(req, dst);
+        if bak == 1 {
+            out_lit("lompi: registry fetched into ");
+            sys_write(1, dst, txt_len_cstr(dst) as u64);
+            out_lit("\n");
+            return 0;
+        }
+        out_lit("# the http fetch did not go through -- plan below\n");
+    } else {
+        out_lit("# lompi will not fetch this registry itself: only http:// with an IPv4 literal\n");
+        out_lit("#   (https needs TLS; a hostname needs a resolver -- neither is in the toolchain)\n");
+    }
+
     out_lit("# registry: ");
     sys_write(1, reg, n as u64);
     if load8(sr, 0) == 0 {
@@ -1194,7 +1758,6 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     out_lit(" pull\n");
     return 0;
 }
-
 /// 把一个包的源文件 (含可选的 pkg.lomp) 从 src 目录拷进 dst 目录。
 /// 返回拷过去的文件数; 有任何一步失败返回 4294967295。
 ///

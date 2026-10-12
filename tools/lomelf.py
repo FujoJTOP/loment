@@ -1323,14 +1323,17 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 #     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
 #   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
 #     而被调方（Windows API）里的 `movaps` 会直接 #GP。
-#   * 实现了 22 个号，**其余号返回 `-ENOSYS`（-38）**。第一批 8 个是文件与进程：
+#   * 实现了 29 个号，**其余号返回 `-ENOSYS`（-38）**。第一批 8 个是文件与进程：
 #     `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257) `brk`(12)
 #     `getdents64`(217) `newfstatat`(262)。第二批 13 个是**联网**（2026-10-10，docs/217）：
 #     `socket`(41) `connect`(42) `accept`(43) `accept4`(288) `sendto`(44) `recvfrom`(45)
 #     `shutdown`(48) `bind`(49) `listen`(50) `getsockname`(51) `getpeername`(52)
 #     `setsockopt`(54) `getsockopt`(55) —— 由 `ws2_32.dll` 顶上，socket 型 fd 在
 #     read/write/close 上分流到 recv/send/closesocket。第三批 1 个是 `poll`(7)。
-#     写要跨平台跑的程序时按这 22 个来 —— 别处用了别的号, 在 PE 上是 `-ENOSYS`
+#     第四批 7 个（2026-10-12，docs/231 与 docs/234）：`select`(23) `sendmsg`(46)
+#     `recvmsg`(47) `socketpair`(53) `epoll_wait`(232) `epoll_ctl`(233)
+#     `epoll_create1`(291) —— 到这儿联网面上**再不剩"点名不做"的号**。
+#     写要跨平台跑的程序时按这 29 个来 —— 别处用了别的号, 在 PE 上是 `-ENOSYS`
 #     （2026-10-11 从 `-1` 改过来的：`-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，
 #     而 Linux 对不认得的号就是返回 `-ENOSYS` —— 见 `PE_ENOSYS`）。
 #   * 联网那批是**语义仿真**而不是转发：负 errno、`AF_INET6`=10（Windows 是 23）、
