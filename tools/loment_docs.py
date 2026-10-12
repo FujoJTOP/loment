@@ -219,6 +219,7 @@ def cmd_fix(root: Path, base: str) -> int:
 
     taken = set(used_base)
     changed: list[str] = []
+    assigned: list[int] = []
     for p in sorted(added, key=lambda q: (number_of(q) or 0, q.name)):
         n = number_of(p)
         if n is None:
@@ -235,6 +236,7 @@ def cmd_fix(root: Path, base: str) -> int:
         # **被改号的那份自己也在重写范围内** —— 它正文里可能引用自己。
         hits = rewrite_full_refs(root, old_tail, new_stem)
         taken.add(new_num)
+        assigned.append(new_num)
         extra = f"，另改了 {sum(h[1] for h in hits)} 处全路径引用" if hits else ""
         changed.append(f"{p.name} -> {target.name}（{n} 已被 `{base}` 占用）{extra}")
 
@@ -244,15 +246,20 @@ def cmd_fix(root: Path, base: str) -> int:
 
     for line in changed:
         print(f"[改号] {line}")
-    dups = duplicates(root)
-    if dups:
-        print(f"[ERR] 改完**仍有**重号（同一次里三方撞号？）：", file=sys.stderr)
-        for num, ps in sorted(dups.items()):
-            print(f"  {num}: " + "、".join(p.name for p in ps), file=sys.stderr)
+
+    # **只看"我刚发的那些号"**，不看整棵树 —— base 上本来就有的撞号（2026-10-11 实测 7 个）
+    # 不归这一趟管，拿它们判会让机器人**每一次推都红**（第一版就是这么错的：改号明明成功，
+    # 却在全树查重时撞上那些既有的，于是自判失败）。
+    cur = scan(root)
+    bad = [n for n in assigned if len({slug_key(p) for p in cur.get(n, [])}) > 1]
+    if bad:
+        print(f"[ERR] 我新发的号里还有撞的（同一次里两处撞到同一个空号？）：{sorted(bad)}",
+              file=sys.stderr)
+        for n in bad:
+            print(f"  {n}: " + "、".join(p.name for p in cur[n]), file=sys.stderr)
         return 1
-    touched = {int(c.split()[0].split("-")[0]) for c in changed}
-    loose = bare_refs(root, touched, root / "docs" / "none")
-    print(f"[OK] 改了 {len(changed)} 份；现在没有重号。")
+    loose = bare_refs(root, assigned, root / "docs" / "none")
+    print(f"[OK] 改了 {len(changed)} 份；我发的那些号都不撞。")
     print("     **裸 `docs/NNN` 引用一概没动**（撞号时它指两份里的哪一份没法替你决定）。")
     if loose:
         print("     下面这些文件里有撞号那几个号的裸引用，请自己看一眼是不是指新文档：")
