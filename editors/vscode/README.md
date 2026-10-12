@@ -9,6 +9,7 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 | 能力 | 来源 | 说明 |
 |---|---|---|
 | 语法高亮 | `syntaxes/loment.tmLanguage.json`（`.lomt`）+ `syntaxes/lom.tmLanguage.json`（`.lom`） | 关键字/类型/内建/能力域/注释/字符串/数字/运算符 |
+| 语法高亮（**七门表层语法**） | `syntaxes/loment-<规范名>.tmLanguage.json` | 文件头写了 `choose write grammar python`（c / cpp / java / csharp / go / natural 同理）时，自动切到 `loment-<规范名>` 并**借宿主的语法**上色 —— 详见下节 |
 | 补全 | `tools/loment_lsp.py` → `textDocument/completion` | 语言关键字、类型、以及本文件已声明的符号（fn/struct/enum/trait/const/capability） |
 | 跳转定义 | 同上 → `textDocument/definition` | 跳到本文件内的声明行 |
 | 诊断 | 同上 → `textDocument/publishDiagnostics` | 打开/编辑时跑类型检查，报在"问题"面板 |
@@ -19,6 +20,32 @@ Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语�
 | 静态检查 | 命令 → `tools/loment.py diag` | 输出到终端 |
 | 运行 `test_*` | 命令 → `tools/loment.py test` | 输出到终端 |
 | 在 FujoOS 里运行 | 命令 → `tools/loment_boot.py` | 需要内核镜像与 QEMU（见 docs/149） |
+
+### 七门表层语法（`choose write grammar`）
+
+一份 Loment 源可以在**文件头**声明"这份是用哪一种**写法**写的"（`docs/188`）：
+
+```
+choose write grammar python
+module demo
+...
+```
+
+扩展读那一行，把文档切到 `loment-<规范名>`（`loment-python` / `loment-c` / `loment-cpp` /
+`loment-java` / `loment-csharp` / `loment-go` / `loment-natural`），上色**借宿主的语法**
+（Python / C/C++ / Java / C# / Go 各自的扩展）。`rust` 与 `loment` 是**原生写法**，
+不换（原生的那套语法就够）。
+
+三条要知道的：
+
+- **宿主扩展没装**时那份文件只有声明那一行着色 —— 宁可不上色，也不拿 Loment 的规则去染别人
+  的正文（那会给出看着像高亮、其实是错的颜色）。`natural` 那一门本来就没有宿主语法。
+- **外门那几种不接语言服务**：仓库里两个 LSP 都按原生 Loment 解析这类源，接上去只会报假诊断。
+- **`编译 / 运行 / 调试 / 断点` 照常可用** —— 它仍然是 Loment 程序，只是换了一种写法。
+
+项目在 `loment.conf` 里把 L1 后缀改成自定义的（`source_ext()`，默认 `.lomt`）时，
+那些后缀的文件也认成 Loment —— 扩展会自己向上找那份 conf；没有 conf 也可以用设置
+`loment.extraExtensions` 直接列后缀。
 
 命令面板里搜 `Loment:` 全部可见；`编译` / `编译并运行` 也在编辑器右键菜单里。
 
@@ -93,7 +120,14 @@ Shift+F11 跳出（`stepOut`），继续 F5。
 | `loment.dapScript` | 空 | 调试适配器 `tools/loment_dap.py` 绝对路径；留空则自动向上查找 |
 | `loment.dapCommand` / `dapArgs` | 空 | 改用别的命令起调试适配器。默认 Windows 走 `wsl -e python3 <dapScript>`，其它平台走 `python3 <dapScript>` |
 | `loment.enableLsp` | `true` | 关掉后只留语法高亮与命令 |
+| `loment.extraExtensions` | `[]` | 额外认成 L1 源的后缀（例：`[".foo"]`）。项目有 `loment.conf` 时**不用填** |
 | `loment.buildDir` | `loment/build` | `.ll` / `.potato.json` 输出目录（相对工作区根） |
+
+**工作区受信（Workspace Trust）**：能变成"跑什么"的那八个设置
+（`serverCommand` / `serverArgs` / `toolCommand` / `toolArgs` / `dapCommand` / `dapArgs` /
+`serverPath` / `dapScript`）已列进 `capabilities.untrustedWorkspaces.restrictedConfigurations`
+（#166）—— 在**未受信工作区**里，`.vscode/settings.json` 改不动它们，扩展回落成自动查找。
+受信工作区里照旧按项目配置覆盖。
 
 ## 安装 / 打包
 
@@ -129,6 +163,8 @@ python tools/vscode_ext.py --doctor
 python tools/vscode_ext_test.py
 ```
 
-它做四件事：清单/语法文件结构校验（每个正则都能编译）、`server-path.js` 真的能找到服务、
+它做这些事：清单/语法文件结构校验（每个正则都能编译）、`server-path.js` 真的能找到服务、
 **对真实语言服务做一次完整 LSP 往返**（initialize → didOpen → 补全 → 跳转 → 格式化）、
-以及 `.vsix` 结构校验。
+`.vsix` 结构校验、**真的跑一遍 `activate()`**（注册的命令/任务/调试器一个不少）、
+**表层语法声明检测与参考实现逐条对拍**（全仓 769 份源，枚举而非手挑）、
+**真的开文档看语言 id 换没换**、未受信工作区那组声明、以及升级时旧版本目录的清理。共 15 条。

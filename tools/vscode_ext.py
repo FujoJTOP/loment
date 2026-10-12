@@ -28,8 +28,18 @@ DEFAULT_OUT = ROOT / "loment" / "build" / "loment-vscode.vsix"
 
 # 打进 VSIX 的目录/文件 (相对 editors/vscode); node_modules 是运行时依赖, 必须带
 INCLUDE_DIRS = ("src", "syntaxes", "node_modules")
-INCLUDE_FILES = ("package.json", "language-configuration.json", "README.md")
+INCLUDE_FILES = ("package.json", "language-configuration.json",
+                 "language-configuration-python.json", "README.md")
 SKIP_NAMES = (".map", ".ts", ".md.bak")
+
+#: 必须进 `capabilities.untrustedWorkspaces.restrictedConfigurations` 的设置 (#166)。
+#: 前六个是 issue 点名的"命令 + 参数"; 后两个是**同一类** —— `serverPath` / `dapScript`
+#: 的取值最终会变成 `python <那个路径>`（或 `wsl -e python3 <那个路径>`），
+#: 于是工作区改它一个字段就等于换掉"要跑哪个程序"，与改 command 是同一件事。
+MUST_RESTRICT = ("loment.serverCommand", "loment.serverArgs",
+                 "loment.toolCommand", "loment.toolArgs",
+                 "loment.dapCommand", "loment.dapArgs",
+                 "loment.serverPath", "loment.dapScript")
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -105,6 +115,31 @@ def check() -> list[str]:
     for c in pkg.get("contributes", {}).get("commands", []):
         if not c.get("command") or not c.get("title"):
             bad.append(f"命令缺 command/title: {c}")
+    # 语言引用的 `configuration` 必须**存在**且**在打包清单里** —— 少一样都是"装上去才发现";
+    # 2026-10-12 加第二份配置 (python 写法的注释记号是 `#`, 不是 `//`) 时补的这条。
+    for lang in pkg.get("contributes", {}).get("languages", []):
+        conf = lang.get("configuration")
+        if not conf:
+            continue
+        if not (EXT / str(conf)).is_file():
+            bad.append(f"语言 {lang.get('id')} 的 configuration 不存在: {conf}")
+        elif Path(str(conf)).name not in INCLUDE_FILES:
+            bad.append(f"语言 {lang.get('id')} 的 configuration 不在打包清单里: {conf}")
+    # 未受信工作区的声明 (#166): 工作区能覆盖的"命令 + 参数"设置必须列进
+    # `restrictedConfigurations`, 否则 Restricted Mode 下它们照旧生效。
+    cap = pkg.get("capabilities", {}).get("untrustedWorkspaces")
+    if not cap:
+        bad.append("缺 capabilities.untrustedWorkspaces (#166)")
+    else:
+        props = set(pkg.get("contributes", {}).get("configuration", {})
+                    .get("properties", {}))
+        restricted = set(cap.get("restrictedConfigurations", []))
+        missing = sorted(s for s in MUST_RESTRICT if s not in restricted)
+        if missing:
+            bad.append(f"这些设置没进 restrictedConfigurations: {missing}")
+        unknown = sorted(r for r in restricted if r not in props)
+        if unknown:
+            bad.append(f"restrictedConfigurations 里有不存在的设置: {unknown}")
     if not (EXT / "node_modules" / "vscode-languageclient" / "package.json").is_file():
         bad.append("缺 node_modules/vscode-languageclient（先跑 npm install --omit=dev）")
     return bad
@@ -223,6 +258,20 @@ def fix_registration(entries: list, ident: str, dest: Path) -> tuple[list, int]:
     return entries, n
 
 
+def stale_dirs(extdir: Path, ident: str, dest: Path) -> list[Path]:
+    """`extensions/` 里**同一个 ident 的旧副本**（不含 `dest` 自己）。
+
+    **为什么要专门认它们**：那个目录下每个带 `package.json` 的文件夹都会被扫成一个扩展，
+    所以同 ident 两份 = 同一份扩展装了两遍（各自认 `.lomt`、各自被登记）。版本号一变，
+    旧目录名就不再等于 `dest` —— 2026-10-12 从 0.1.0 升到 0.2.0 时撞上的就是这个：
+    `--install` 当时只挪 `dest`，0.1.0 原地不动、跟着一起被扫进去。
+    """
+    if not extdir.is_dir():
+        return []
+    return sorted(p for p in extdir.glob(f"{ident}-*")
+                  if p.is_dir() and p.name != dest.name)
+
+
 def doctor() -> list[str]:
     """体检 VS Code **已安装副本**: 语法高亮出问题时, 90% 的原因在这四件事上。
 
@@ -275,6 +324,12 @@ def doctor() -> list[str]:
             out.append(f"extensions.json 读不了: {e}")
     else:
         out.append("找不到 extensions.json")
+    # 同 ident 的旧版本目录还在 —— **上面"抢语言 id"那个循环看不见它**（它跳过
+    # `startswith(ident)` 的目录），所以这里单独认一遍。
+    for old in stale_dirs(extdir, ident, inst):
+        out.append(f"{old.name} 也还在 extensions/ 里（装的是 {inst.name}）—— "
+                   f"同 ident 两份都会被扫成一个扩展，抢同一份 `.lomt` 关联"
+                   f"（`--install` 会把旧的挪走）")
     # 抢语言 id
     for other in sorted(extdir.glob("*/package.json")):
         if other.parent.name.startswith(ident):
@@ -318,6 +373,11 @@ def install(vsix: Path) -> list[str]:
     extdir.mkdir(parents=True, exist_ok=True)
     stash = Path(tempfile.mkdtemp(prefix="loment-vscode-"))     # **在 extensions/ 外面**
     try:
+        # **同 ident 的旧副本（版本号变了那些）一并挪走** —— 只挪 `dest` 是不够的，见
+        # `stale_dirs` 的注释（2026-10-12 升级时撞到）。挪到 `extensions/` **外面**的
+        # 临时目录，与下面 dest 那条同一处理由：留在这里会被当成扩展扫进去。
+        for old in stale_dirs(extdir, ident, dest):
+            shutil.move(str(old), str(stash / old.name))
         if dest.exists():
             shutil.move(str(dest), str(stash / dest.name))
         dest.mkdir(parents=True)
