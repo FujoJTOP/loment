@@ -645,6 +645,52 @@ def test_l2_if_branch_epoch_bounds_the_heap():
 
 
 @test
+def test_gc_heap_example_runs_under_the_collecting_tiers():
+    """**真拿 `alloc` 写堆的程序**（`loment/examples/gc_heap`，`docs/210` §7）—— 三个档位各跑一遍。
+
+    **Why**：§7 那两条（"证明面在真实代码里有多宽""收集器在真实工作量下什么样"）在**现有语料上
+    问不出答案**：仓里自己的 Loment 代码一共只有 23 个 `alloc` 站点，而 `loment/lib` +
+    `loment/selfhost` 那 28 份真代码里**一个都没有**（它们走 `sys_alloc`/`brk`）。这一条把那个
+    前提落成一份**真在堆上建结构**的程序：一张**单向链表**（节点 16 B，下一个节点的地址用
+    `as u64` 存进块里、`as ptr` 取回 —— 正是 §4.2 那句"指针进得了堆块"的形状），一个**长命**
+    节点 + 每圈一个**短命**节点，6000 圈 × 16 B = 96 KB 的请求过 64 KiB arena。
+
+    **判据**：`gc_manual` **耗尽**（rc=132 —— 没人还它）；`gc_auto` 与 `gc_auto_alpha` **跑完**
+    （rc=7）。而那个 7 是**读回来的**：`walk(keep)` 只该看见一个节点、值是 7 ⇒ 长命的那个**没被
+    误收**（短命的那些被收了才对）。少了这一句，一个"把什么都收掉"的收集器也能过。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_path = ROOT / "loment" / "examples" / "gc_heap" / "main.lomt"
+    assert src_path.exists(), f"缺那份真在堆上建结构的例子: {src_path}"
+    base = src_path.read_text(encoding="utf-8")
+    assert "choose gc_auto_alpha" in base, "例子里那一行档位没了 —— 这条判据要拿它换档"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tag, ch in (("manual", "choose gc_manual"), ("auto", "choose gc_auto"),
+                        ("alpha", "choose gc_auto_alpha")):
+            src = td / f"gcheap_{tag}.lomt"
+            src.write_text(base.replace("choose gc_auto_alpha", ch, 1),
+                           encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"gcheap_{tag}.native"
+            nat.write_bytes(blob)
+            got[tag] = _run_bin(nat, f"gcheap_{tag}", td, timeout=180)[0]
+    assert got["manual"] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got['manual']}）—— 那这份工作量压不出收集器："
+        "96 KB 的请求本该把 64 KiB 的 arena 耗尽")
+    for tag in ("auto", "alpha"):
+        assert got[tag] == 7, (
+            f"`gc_{tag}` 那一只没跑完：退出码 {got[tag]}（期望 7）。3 表示长命的那个节点被误收了 "
+            f"（`walk(keep)` 读回来的不是 7），132 表示耗尽")
+    print(f"      gc_heap: manual 耗尽 (rc={got['manual']})；auto rc={got['auto']}；"
+          f"alpha rc={got['alpha']}（7 是 `walk` 读回来的 —— 长命的没被误收）")
+
+
+@test
 def test_gc_alpha_adaptive_bounds_a_large_live_set():
     """`gc_auto_alpha` 的**自适应**收集器收得下更大的活集（`docs/210` §2.4 的"策略池"）。
 
