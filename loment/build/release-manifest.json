@@ -1087,7 +1087,7 @@
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "13f2560808c63974f8295de3c8597d49a50fffb47b676c27d61c3ae9ea3b2c8f"
+   "sha256": "fcc6090910b1b2655c75a93d5ff83565a36d14ce6cddca221d952ed022c7f4b6"
   },
   {
    "path": "tools/loment_sign.py",
@@ -2123,7 +2123,7 @@
   },
   {
    "path": "docs/231-lvm-channel-and-vm-dimension.md",
-   "sha256": "4d6af942ca35a3ca610694df2dd3e76dd716add48db85eab4b7547afab11c155"
+   "sha256": "2d6d3d95dde8a0f41a252ac2c91598913e1d2b9d945c062c3db3d0dd570e1b34"
   },
   {
    "path": "docs/232-libl.md",
