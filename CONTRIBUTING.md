@@ -253,6 +253,14 @@ never a line to relax quietly.
 Reasoning that should outlive the thread goes in `docs/NNN-kebab-name.md`, using the next free
 number. `docs/manual/` is generated: change the generator, not the output.
 
+**Two lines working at once often pick the same number** — that is not a mistake either of you
+made, it is the convention meeting parallelism. `python tools/loment_docs.py --next` prints the
+next free number; `--check` reports collisions; and `--fix` renumbers the doc **you added** (and
+nothing already on the base) onto the next free number, renaming the file, the `# NNN ·` heading
+and any full-path `docs/NNN-slug` references. A CI job runs `--fix` on every push, and
+`loment_docs_test` fails on any collision that is not in its (shrinking) baseline — so a collision
+is normally fixed before it lands, and can never land twice.
+
 ### Displaying Loment
 
 Loment has no syntax highlighter anywhere — not on GitHub, not in either editor's built-in

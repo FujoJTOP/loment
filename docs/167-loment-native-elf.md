@@ -121,10 +121,11 @@ stage1"那一步出现（见 §5）。
    **2026-10-10 补上联网那 13 个**（`socket`/`connect`/`accept`/`accept4`/`sendto`/`recvfrom`/
    `shutdown`/`bind`/`listen`/`getsockname`/`getpeername`/`setsockopt`/`getsockopt`，
    由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。
-   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/231`）
-   ⇒ 派发面 **23 个号**。号表、五条翻译决定
+   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/231`）、
+   **2026-10-12 加 `sendmsg`/`recvmsg`/`socketpair`/`epoll` 那一族**（`docs/234`）
+   ⇒ 派发面 **29 个号**、联网面**再无「点名不做」**。号表、五条翻译决定
    （family / `SO_*` / timeval↔毫秒 / errno / `MSG_NOSIGNAL`）与**点名不做**的那几件
-   见 **`docs/217`**（今天只剩 6 个号；单源是 `lom/net.lom` 的 `NotDispatched`）。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
+   见 **`docs/217`**（那一族**已经清零**；2026-10-12 起契约里连 `NotDispatched` 这个枚举都删了 —— `docs/234` §2）。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。

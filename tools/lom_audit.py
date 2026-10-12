@@ -283,7 +283,9 @@ def audit_net(diffs: list[str]) -> None:
 
     mod = lomc.load(LOM_NET)
     sc = next(e for e in mod.enums if e.name == "Syscall")
-    nd = next(e for e in mod.enums if e.name == "NotDispatched")
+    # 联网面补完后（`docs/234`）这一族整个不在契约里了 —— 缺席 = 空集
+    nd = next((e for e in mod.enums if e.name == "NotDispatched"), None)
+    nd_variants = nd.variants if nd is not None else []
     want = {v.value: v.meta.get("surface") for v in sc.variants}
 
     # (a) 编译器那一份 —— 计数词汇（`surfaces` 按面分类用的就是它）
@@ -299,7 +301,7 @@ def audit_net(diffs: list[str]) -> None:
             diffs.append(f"[net/lomelf ] 号 {n}: .lom={want.get(n)!r} PE_SYSCALLS={pe.get(n)!r}")
 
     # (c) "点名不做"那一族必须**不在**派发面上 —— 哪天谁顺手实现了其中一个，这条红
-    for v in nd.variants:
+    for v in nd_variants:
         if v.value in pe:
             diffs.append(f"[net/lomelf ] {v.name}({v.value}) 在 NotDispatched 里, 却被 "
                          f"PE_SYSCALLS 派发了 —— 两条路选一条: 实现它并挪进 Syscall, "

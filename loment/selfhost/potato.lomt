@@ -872,7 +872,8 @@ fn pt_surf_code(num: u32) -> u32 {
     }
     if num == 7 || num == 23 || num == 41 || num == 42 || num == 43 || num == 44 || num == 45
             || num == 48 || num == 49 || num == 50 || num == 51 || num == 52
-            || num == 54 || num == 55 || num == 288 {
+            || num == 54 || num == 55 || num == 288
+            || num == 46 || num == 47 || num == 53 || num == 232 || num == 233 || num == 291 {
         return 3;                                   // net
     }
     if num == 60 {

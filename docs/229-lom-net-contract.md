@@ -40,7 +40,8 @@ module net
 meta   { schema, title, version, authority, layers{surface,runtime,not_dispatched}, gates{…} }
 enum Surface        : u8   { other = 0, file = 1, mem = 2, net = 3, proc = 4 }
 enum Syscall        : u32  { read = 0 {surface="file"} … accept4 = 288 {surface="net"} }   // 23 条
-enum NotDispatched  : u32  { sendmsg = 46 … epoll_create1 = 291 }                           // 6 条
+// 2026-10-12：`NotDispatched` **整个枚举已删**（联网面补完，`docs/234` §2）——
+// Loment 的检查器不许空枚举，而留个空壳会让人以为"点名不做"还活着。
 ```
 
 三件事**被写进文件**（不写在文档里、也不写在注释里）：
@@ -50,8 +51,10 @@ enum NotDispatched  : u32  { sendmsg = 46 … epoll_create1 = 291 }             
 * **`Syscall` 与派发面今天同宽**（`gates.why_equal`）—— 不是"包含"。
   理由写在那儿：`surfaces` 的价值在"数与行为对得上"，若计数词汇比派发面宽，
   产物就会说出"3 个 net 站点"而其中一个是这个运行时答不了的号 —— `docs/217` 要堵的就是它；
-* **"点名不做"也进了契约**（`NotDispatched`）—— 此前它只活在 `docs/221` §7 的散文里。
-  审计要求这一族与派发面**不相交**：哪天谁"顺手"实现了 `sendmsg`，`[net/lomelf]` 当场红。
+* **"点名不做"也曾进契约**（`NotDispatched`）—— 此前它只活在 `docs/221` §7 的散文里。
+  审计要求这一族与派发面**不相交**：哪天谁"顺手"实现了一个，`[net/lomelf]` 当场红。
+  **2026-10-12 这一族清零、枚举删掉**（`docs/234` §2）—— 审计那条在枚举缺席时按空集判，
+  判据留着；"派发面比声明面宽"改由 `loment_net_test` 的第四个反向用例钉（塞一个 `9999`）。
 
   2026-10-11.2：`select`(23) **已经从这一族挪进 `Syscall`** —— 运行时真的派发了它
   （`docs/231`）。挪动的形状正是上面那条审计设计的：先让 `[net/lomelf]` 红，再两边一起挪。
@@ -71,7 +74,7 @@ enum NotDispatched  : u32  { sendmsg = 46 … epoll_create1 = 291 }             
 
 `lom_audit` 在门禁里是**已知红**（本机与 CI 都缺 `LinuxFUAI/` 姊妹检出），也就是说它的红
 **不构成信号** —— 所以同一组对账另有一条**能绿也能红**的判据：`tools/loment_net_test.py`。
-它三件事：契约自己的形状（23 / 15 / 6 / 不相交）、四处逐条一致、
+它三件事：契约自己的形状（**29 / 21 / 0 / 不相交**）、四处逐条一致、
 以及**自证会红**（四个方向各改一次：面名 / 少一个号 / 派发面少一个 / 顺手实现 `sendmsg`）。
 
 ## 4. 顺带撞出来的一个真 bug（自举 `lomc` 的值 0）
