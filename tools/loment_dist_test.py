@@ -399,6 +399,28 @@ def test_install_sh(tar: Path) -> None:
 
 # ------------------------------------------------------------------ 6. Windows 安装脚本
 
+def test_installers_name_an_earlier_lompi() -> None:
+    """更靠前的 `lompi`/`loment` 会**静默**盖过我们装的那份 —— 两份安装脚本都要点名它。
+
+    **Why**：2026-10-12 用户报"敲 `lompi` 显示 0.1.0"。查下来是 `~/.local/bin/lompi.exe`
+    （一个月前单独装的那份）在 PATH 上排得更前：安装器是**追加** PATH 的（刻意不打乱别人的
+    机器），所以更早的那份永远赢，而装完**没有任何一句话**提到这件事 —— 版本号看着不对，
+    却无从归因。
+
+    **为什么不能只靠真跑**：真跑那半在 `test_windows_installer` 里（Windows-only），而门禁
+    只有 ubuntu runner —— 光靠它的话，这个缺陷在 CI 里谁都拦不住。这一条钉**静态形状**，
+    哪台机都跑得到：两份脚本里都要有这段检查，且**真的被调用**（定义在而没人调 = 没有）。
+    """
+    for label, src, fn in (("install.ps1", loment_dist.INSTALL_PS1, "Show-Shadowed"),
+                           ("install.sh", loment_dist.INSTALL_SH, "warn_shadowed")):
+        n = src.count(fn)
+        check(f"{label} 有'更靠前的同名命令'检查且被真的调用 (定义+调用 >= 2 处)",
+              n >= 2, f"{fn} 出现 {n} 次")
+        body = src.split(fn, 1)[1] if n else ""
+        check(f"{label} 的检查同时管 loment 与 lompi (只管一个就漏一半)",
+              "loment" in body and "lompi" in body, f"检查体里少了名字: {body[:90]!r}")
+
+
 def test_windows_installer(zipf: Path) -> None:
     if sys.platform != "win32":
         # 这一条验的是 install.ps1 / install.cmd 那套 Windows 安装脚本。runner 上**有
@@ -528,13 +550,26 @@ def test_windows_installer(zipf: Path) -> None:
     (home / ".codex").mkdir(parents=True)
     codex = home / ".codex" / "AGENTS.md"
     codex.write_text("MY OWN RULES\nsecond line\n", encoding="utf-8", newline="\n")
+    # ★ 更靠前的 `lompi`/`loment` 会**静默**盖过我们装的那份。2026-10-12 用户报障：
+    #   敲 `lompi` 拿到的是一个月前单独装的那份（0.1.0）。安装器是**追加** PATH 的（刻意
+    #   不打乱别人的机器），所以更早的那份永远赢，而装完没有一句话提到它 —— 版本号看着不
+    #   对，却无从归因。就地造一个假 `lompi` 放在 PATH 最前面，装一遍，要求它被**点名**。
+    decoy = work / "decoy"
+    if decoy.exists():
+        shutil.rmtree(decoy)
+    decoy.mkdir(parents=True)
+    (decoy / "lompi.cmd").write_bytes(b"@echo off\r\necho decoy-lompi\r\n")
     env = dict(os.environ, USERPROFILE=str(home))
+    env["PATH"] = str(decoy) + os.pathsep + env.get("PATH", "")
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                         "-Prefix", str(pfx), "-PayloadDir", str(root),
                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
                        shell=False, encoding="utf-8", errors="replace", timeout=300, env=env)
+    inst_out = (r.stdout or "") + (r.stderr or "")
     check("install.ps1 真装 (临时前缀, 原生 PE, 无 WSL) 退出 0", r.returncode == 0,
-          ((r.stdout or "") + (r.stderr or ""))[-260:])
+          inst_out[-260:])
+    check("更靠前的 lompi 被点名 (给出路径, 而不是只说一句注意 PATH)",
+          "WARNING" in inst_out and str(decoy).lower() in inst_out.lower(), inst_out[-300:])
     cmd = pfx / "bin/loment.cmd"
     body = cmd.read_text(encoding="utf-8", errors="replace") if cmd.exists() else ""
     check("装出 loment.cmd, 它调本机 exe, 且**不再出现 wsl**",
@@ -893,6 +928,7 @@ def main() -> int:
     for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
                      ("--opt 编出来的驱动自己跑得起来", test_opt_driver_runs),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+                     ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):

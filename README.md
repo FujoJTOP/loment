@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4"><b>Download 0.1.4</b></a> ·
+  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5"><b>Download 0.1.4.5</b></a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href="docs/manual/index.md">Manual</a> ·
   <a href="https://loment.fandom.com/">Wiki</a> ·
@@ -78,32 +78,30 @@ table would be a second source of truth.
 
 ## Status
 
-`0.1.4`. **It ships as a package** — the
-[Loment 0.1.4](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4) release carries a Linux
+`0.1.4.5`. **It ships as a package** — the
+[Loment 0.1.4.5](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5) release carries a Linux
 `tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip. You can also
-build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)). What 0.1.4 does **not**
-include yet is listed honestly in [docs/202](docs/202-loment-014-release-gate.md).
+build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)).
 
-> [!WARNING]
-> **On Windows, install from the `zip`.** On a machine with the
-> `NoDefaultCurrentDirectoryInExePath` hardening setting,
-> `loment-0.1.4-windows-x64-setup.exe` exits silently and installs nothing. The published
-> installer will not be rebuilt — rebuilding would change the bytes under an existing version
-> number ([#117](https://github.com/FujoJTOP/loment/issues/117)). Both routes install the same
-> files.
+> [!NOTE]
+> **Windows users: 0.1.4's `setup.exe` installed nothing; 0.1.4.5's does.** Where the
+> `NoDefaultCurrentDirectoryInExePath` hardening setting is on, the 0.1.4 installer could not find
+> the script it had just unpacked, so it exited having installed nothing — that asset is not being
+> rebuilt, because rebuilding would change the bytes under a version number already in the wild
+> ([#117](https://github.com/FujoJTOP/loment/issues/117)). The 0.1.4.5 installer launches the
+> script by an absolute path. The `zip` works in both versions.
 
 The toolchain is **self-hosted at run time**: it compiles and runs with no Python and no
-libc. The **development side is not**, and 0.1.4 shipped before that gap closed:
+libc. The **development side is not**, and 0.1.4.5 ships before that gap closed:
 `tools/` still holds the reference implementation (`tools/lomentc.py` and friends) and the
 Python test suites ([docs/189](docs/189-full-selfhosting.md)). The work is done one criterion
 at a time — each Python criterion gains a Loment twin, and the two must agree byte for byte
 before the Python side can be retired. Until that finishes, both copies are in the repository
 on purpose, and "the repository contains only Loment" is not yet true.
 
-What 0.1.4 does and does not include is listed item by item, and was audited, in
-[docs/202](docs/202-loment-014-release-gate.md). Some of what it records as still open has
-landed since — the [reclamation ladder](.github/release-notes/v0.1.4.5-pre.md) is the largest —
-and that announcement says which half each remaining item is in: in `main` today, or planned.
+What **this** release does and does not include is in the
+[0.1.4.5 release notes](.github/release-notes/v0.1.4.5.md); what 0.1.4 included, listed item by
+item and audited, is in [docs/202](docs/202-loment-014-release-gate.md).
 
 The language surface is frozen — [docs/158](docs/158-loment-freeze.md) says what changing it
 costs — and the implementation is not.
