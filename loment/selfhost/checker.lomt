@@ -31,7 +31,13 @@ use switches
 // 届时这套闸要么拆掉、要么留给下一个还没兑现的维（`docs/231` §6 第 2 条）。
 //
 //: 0 = 开发版（默认）；1 = 发行版。**打包期由 `loment_dist.py` 替换这一行。**
-const LOMENT_CHANNEL: u32 = 0;
+//
+//: **`pub` 是因为渠道闸现在有两处**（2026-10-12）：`vm` 那条在本文件（`check()` 读它），
+//: `libl` 那条在**名字解析**处（`driver.lomt` 的 `use <名字>` 分支），那在另一个模块里 ——
+//: 它 `use checker`，要读得到这条常量就得是 `pub`。
+//: **"一行常量"这条形状没变**：打包仍只替换这一行的文本（`tools/loment_seed.py` 的
+//: `CHANNEL_LINE_DEV`/`CHANNEL_LINE_RELEASE` 跟着这一行走），判据 F 照旧成立。
+pub const LOMENT_CHANNEL: u32 = 0;
 
 const K_FN: u32 = 1;
 const K_STRUCT: u32 = 2;
