@@ -39,8 +39,8 @@
 module net
 meta   { schema, title, version, authority, layers{surface,runtime,not_dispatched}, gates{…} }
 enum Surface        : u8   { other = 0, file = 1, mem = 2, net = 3, proc = 4 }
-enum Syscall        : u32  { read = 0 {surface="file"} … accept4 = 288 {surface="net"} }   // 22 条
-enum NotDispatched  : u32  { select = 23 … epoll_create1 = 291 }                            // 7 条
+enum Syscall        : u32  { read = 0 {surface="file"} … accept4 = 288 {surface="net"} }   // 23 条
+enum NotDispatched  : u32  { sendmsg = 46 … epoll_create1 = 291 }                           // 6 条
 ```
 
 三件事**被写进文件**（不写在文档里、也不写在注释里）：
@@ -51,7 +51,10 @@ enum NotDispatched  : u32  { select = 23 … epoll_create1 = 291 }              
   理由写在那儿：`surfaces` 的价值在"数与行为对得上"，若计数词汇比派发面宽，
   产物就会说出"3 个 net 站点"而其中一个是这个运行时答不了的号 —— `docs/217` 要堵的就是它；
 * **"点名不做"也进了契约**（`NotDispatched`）—— 此前它只活在 `docs/221` §7 的散文里。
-  审计要求这一族与派发面**不相交**：哪天谁"顺手"实现了 `select`，`[net/lomelf]` 当场红。
+  审计要求这一族与派发面**不相交**：哪天谁"顺手"实现了 `sendmsg`，`[net/lomelf]` 当场红。
+
+  2026-10-11.2：`select`(23) **已经从这一族挪进 `Syscall`** —— 运行时真的派发了它
+  （`docs/231`）。挪动的形状正是上面那条审计设计的：先让 `[net/lomelf]` 红，再两边一起挪。
 
 ## 3. 四处对账（`lom_audit` 的 `[net/…]`）
 
@@ -68,8 +71,8 @@ enum NotDispatched  : u32  { select = 23 … epoll_create1 = 291 }              
 
 `lom_audit` 在门禁里是**已知红**（本机与 CI 都缺 `LinuxFUAI/` 姊妹检出），也就是说它的红
 **不构成信号** —— 所以同一组对账另有一条**能绿也能红**的判据：`tools/loment_net_test.py`。
-它三件事：契约自己的形状（22 / 14 / 7 / 不相交）、四处逐条一致、
-以及**自证会红**（四个方向各改一次：面名 / 少一个号 / 派发面少一个 / 顺手实现 `select`）。
+它三件事：契约自己的形状（23 / 15 / 6 / 不相交）、四处逐条一致、
+以及**自证会红**（四个方向各改一次：面名 / 少一个号 / 派发面少一个 / 顺手实现 `sendmsg`）。
 
 ## 4. 顺带撞出来的一个真 bug（自举 `lomc` 的值 0）
 

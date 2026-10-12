@@ -99,9 +99,13 @@
 
 ## 6. 点名不做（运行时层那 3% 的全额）
 
+> **2026-10-11 更新**：这一族的 `select`(23) 已经**移出名单**（PE 运行时落地了，`docs/231`）。
+> 底下那张表是当时（2026-10-10）的形状，留着当对照 —— 名单本身的可数版本是
+> `lom/net.lom` 的 `NotDispatched`（今天 6 条，审计对着派发面查不相交）。
+
 | 项 | 为什么不做 |
 |---|---|
-| `select`(23) | `exceptfds` 没有忠实对应（WinSock 的 except 是"带外数据 + 连接失败"）；近似的 `select` 比没有更坏 |
+| ~~`select`(23)~~ | ~~`exceptfds` 没有忠实对应~~ —— **已做**（`docs/231`）：except 集确实没有一对一映射，所以翻译做的是**出参归一化**（失败从 except 搬进 write + `SO_ERROR` 补挂账），不是"近似" |
 | `epoll` | 要 IOCP，不是一次翻译能补 |
 | `sendmsg` / `recvmsg` | `iovec` 那一套；`sendto`/`recvfrom` + `syscall7` 已经够写 UDP |
 | `socketpair` / `AF_UNIX` | Windows 的语义与路径规则都不同，转发会**假装成功** |

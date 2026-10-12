@@ -209,7 +209,7 @@ jobs:
             echo "所以这里不评审，只拦下。想让接口变，去开 issue，那不是一个补丁。"
             echo ""
             echo "（**新增**一份 L0 文件不在这条门下面 —— 那几份既有契约一个字节都没动。"
-            echo "门拦的是下面这些 `modified`/`removed`/`renamed`。）"
+            echo "门拦的是下面这些 \`modified\`/\`removed\`/\`renamed\`。）"
             echo ""
             echo '```'
             echo "$bad"
