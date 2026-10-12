@@ -107,6 +107,11 @@ use "bsearch.lomt"
 // (tools/loment_libl_test.py)。它们**建在上面那些模块上**（ctype->char,
 // string->mem, stdlib/stdio->mem+string），不另起一份: 同一个字节不会有两个答案。
 //
+// **`libl.lomt` 是个门面**: 只 `use` 下面这四份（加 `mem`/`char`），面小、编得快。
+// 但那个名字**在发行版里被渠道闸关住**（`use libl` = 编译错误，用户 2026-10-12 定：
+// "LibL 仍然在仓库中，和 LVM 一样发行再锁"）—— 文件照发、dev 照用，锁的是**能不能取到
+// 这个名字**。`docs/232` §1.1；闸在名字解析处（`lomentc.resolve_name` / `driver.lomt`）。
+//
 // 按依赖序: mem/char -> string, ctype -> stdlib -> stdio。
 use "string.lomt"
 use "ctype.lomt"
