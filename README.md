@@ -41,6 +41,41 @@ Rust-flavored, and the same program can be written in six more: C, C++, Java, C#
 Installing and running needs **no Python, no clang and no WSL** — the package is native
 binaries plus the standard library. `loment run hello.lomt` and you are done.
 
+## The Loment Language Standard — `LLS`
+
+The language has a **named, citable standard**: **LLS**, the *Loment Language Standard*.
+
+> **[`standard/LLS.md`](standard/LLS.md)** — the standard, with its version in its own front matter
+
+It is a **frame, not a second copy of the language.** The repository's rule is that the
+authoritative copy of anything exists in exactly one place, so the standard states **no language
+rules of its own**. It does two things:
+
+| | |
+|---|---|
+| **Fixes the surface** | What is frozen, and what changing it costs. |
+| **Decides conformance** | And says plainly that **the conformance suite decides** — not the document, and not any implementation. |
+
+**Loment is defined by its switches, not by what it lacks.** Every subsystem the language can have
+is one of them: which layer the program may use, who reclaims memory, whether the artifact carries
+a runtime, whether it has ports to the world, and which execution model it is for. A program sets
+each at most once, in its root unit, and the build records it.
+
+The defaults are conservative so that **writing nothing changes nothing** — `sealed`, `no_runtime`,
+`no_vm`, `gc_manual` are what you get when you say nothing, which is why the paragraph above can
+describe a program that has no runtime, no libc and no ports. That is a property of the defaults,
+not a claim about the language: the same switches go the other way, and each of them is a
+**position a program states** rather than a limit it works around.
+
+The standard's version **is** the version of the surface it defines — one number, not two, because
+a separate edition axis would require a table mapping editions to language versions, and that
+table would be a second source of truth.
+
+> **A limitation, stated rather than discovered:** the standard is written in English, and most of
+> what it normatively references — [`docs/143`](docs/143-l1-loment-v0.md) (the language),
+> [`docs/146`](docs/146-loment-capability-semantics.md) (capability semantics),
+> [`docs/158`](docs/158-loment-freeze.md) (the frozen surface) — is written in Chinese.
+
 ## Status
 
 `0.1.4`. **It ships as a package** — the
