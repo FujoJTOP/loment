@@ -17,7 +17,7 @@ f2c8e1f1e2147e3f17668ced99615ea27f23e6886dc80347d2ca9a2c1246f0ec  tools/lompkg.p
 d61825ffa98d293e362cfa478279bbd9d38bacc0d1680c08f637393a391f7de9  tools/lomlib.py
 f3b69914364b1762119ffef03a1ef5db1c7b06453bb082efece150596a500d22  tools/loment_lib_test.py
 4b8dae2c2a9b2556168c70a7229e44c0171fbd0f2a81f2904c7ca139f4f2c477  tools/loment_std_test.py
-7ac02483088ececc138952146c69f47d50df2a795a52ee4e8b9d26bc3eb90a14  tools/loment_libl_test.py
+604dff241bddecc4f1a6167dd2125ffb393bd5f518fdb9660184d023ba93d681  tools/loment_libl_test.py
 aa932e65c5dd60b24f44c969460cdea1617d3c6cc6506aaa3bf88ad7b28b9036  tools/loment_lumtui_test.py
 d165bacb2c0c60d83c916a25c44c5c999ce1e3c27ba01aa458c2a9da89a4f24f  tools/loment_cli_test.py
 27f4eb268cf68ad13b7c9c1221b2fc9bbf4499d46f0a30bbebd8415f052f77db  tools/loment_err_test.py
@@ -94,7 +94,6 @@ a1778b9ee068e2ccee47dbf73243e49932e65db87a02d88647cacc7d0c311340  lompi/store/st
 ed6a4e08530b9f2825c23f2849eb669e1016e40c69a7618c819e4b7e9cb36b17  lompi/store/std/0.1.0/intmath.lomt
 53431aa6a274c8d9da4914fbb9cd757b6c156381d90459a33d6e33bd487d4299  lompi/store/std/0.1.0/jsn.lomt
 a1c61e314863958fe8c084b12360ab288702ea76ce23de8a6df3dac61dc9a47a  lompi/store/std/0.1.0/kdf.lomt
-e5de7f250f6b6240f0fe51a4f4e9e2c7fe4162073863cdef2dff8e28c34bea7e  lompi/store/std/0.1.0/libl.lomt
 4feb56d8033a4231cd0b988932eef7246c8f27bf54c94a09faf7c8b99a6fc4b9  lompi/store/std/0.1.0/line.lomt
 c94df7f08c521fa3ee5796b535d91b58c01fdf10e5f25ba539d6999b4ab13ce8  lompi/store/std/0.1.0/lru.lomt
 117dfb054c60cf78b14141fda4c15a1a29494633e2037ae2fef67fa5c30a5140  lompi/store/std/0.1.0/lzss.lomt
@@ -141,7 +140,7 @@ f01c691c8acfdb2890f5b9287b3014b887c7a66fcad8296f8841b151aeef4096  lompi/store/st
 32a7c19809a7f771a6a8f5e68e9a4bfa5d5ff94c357fc67e1bbc20ec8b41c3d7  lompi/store/std/0.1.0/spin.lomt
 494903810b193e555615c274d1e849cc61d944efec70b873a51b3059a4c221fe  lompi/store/std/0.1.0/split.lomt
 2e24a059bc31059c18841b1201d1a86f91c6fd5e5298bc0fda7971bf297d58bc  lompi/store/std/0.1.0/stats.lomt
-384f6b3cd5f959237fe4d8fb8a9f567253147db79f06205a326eb378657da44f  lompi/store/std/0.1.0/std.lomt
+a9bebcd657003ae7b661c23bcb5b1e5eb8387bca3662a070a9fde2bb25519272  lompi/store/std/0.1.0/std.lomt
 d0f59279ad4b634654292e8a4b79a1e243639c9a18815dc0e279bc5736fc69f2  lompi/store/std/0.1.0/stdio.lomt
 7b9f7f4db74997cdac959e79e14c4ed30774a891e1876779ce097981dce68f15  lompi/store/std/0.1.0/stdlib.lomt
 776e0aa3117e24643f5f7f8ca510196dd8f9b84d1284e84dabcba3c15a90b5ad  lompi/store/std/0.1.0/string.lomt
@@ -173,7 +172,7 @@ a3e4efbfb8ce9b9b6c0c69ff3de3325f5f79cbf62ee6633f2fe1f5ec1ef23ae4  lompi/store/ho
 cc8696b95af31803c137942226bcf33c71b37ba6e789531bba388a5cbbd7d56f  lompi/store/host/0.1.0/pkg.lomp
 6b5ea6e971fdd378c2dc89eaafcdbfd28f2b9ca2d67367759e7fe0763924793e  lompi/store/host/0.1.0/stat.lomt
 dcc08193aeb54336d5de0731af332384a0e7a5f050e98f863c8333ba4ef64ca9  tools/lompi_sync.py
-677d4750619d80eb211687c13e4b4215d27e571f9945953d7d4bd2002b1e03b6  tools/loment_lompi_test.py
+28054c81fdb305aebc9ac696731383b4639bbdb0b21f33af9a6120c997cf2aed  tools/loment_lompi_test.py
 b73f58f68c4dad92c309af25cf6860b24043f2b4652f92d116e1dd03c0a94b82  tools/loment_publish.py
 1ccbc31d68a6ed7725320d085ece3682494025056b9e84bc5238c2533a4bae7b  tools/lompicheck_test.py
 8fc4d9d2a17d800342f6b27acc6bb094f30e51cfb723377911012c9ff8684223  tools/loment_register_test.py
@@ -531,7 +530,7 @@ d57fd46a6f215304f6b25e219c4527f0d9d3d267eb37775c4cf3af73f0fee6a9  docs/230-hoste
 a86d3232760cd3dcaceb75d61c4b070fc435e1f5c0889d86f917feee6e34bf5d  docs/231-bitmap-mark-table.md
 9bdf62468f8b0d54d97443b76f8897b0c9b2b56e5593198dd1a3e920798bcd3e  docs/231-loment-select-parity.md
 28ea976f893e8fd1197c6f42cfcceccc065d87b4917de608588b568b0888e1e1  docs/231-lvm-channel-and-vm-dimension.md
-311218e4236564ca53c05d526afde863d9509597f3819ebb1380ca2be39acff2  docs/232-libl.md
+f73a6c4f449ec83bf531571153bfad08dc80f090d165da862a976ac4599bdc79  docs/232-libl.md
 680459fc2569cb46a68eb5434e5636da6061db82743b09a5f2b672dfe5ed1874  docs/232-loment-vm.md
 d4e74034cc789f777cb1c3383ccfee0e9505fcf66a88a53da738bfdf6b011ee5  docs/manual/index.md
 36cae734cd3e7ee1da5b36538042179b93407566eed9ef03bfd2f0852922ab0f  docs/manual/api/ahci.md
