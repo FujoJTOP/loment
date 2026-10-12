@@ -858,25 +858,34 @@ def test_m82_hosted_arena_is_byte_identical():
         print("      SKIP: 无 clang")
         return
     import lomentc_test                                            # noqa: E402,PLC0415
+    # 两份源：**分配器**那一份（`docs/228`）与 **分配器+收集器**那一份（`docs/230`）。
+    # 后者是这一步真正的新东西 —— 收集器本体也是**换**出来的（`_arena_indirect`），
+    # 两个实现必须发同一段，所以它必须各过一遍。
+    cases = (("ir_hosted", lomentc_test.HEAP_HOSTED_SRC),
+             ("ir_hosted_gc", lomentc_test.HEAP_HOSTED_GC_AUTO_SRC))
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
-        target = Path(td) / "ir_hosted.lomt"
-        target.write_text(lomentc_test.HEAP_HOSTED_SRC, encoding="utf-8", newline="\n")
-        mod = lomentc.load(target)
-        deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
-        want = lomentc.emit_llvm(mod, ROOT, deps)
-        got = _run_codegen(exe, target, td)
-        if got != want:
-            i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
-            a = max(0, (i or 0) - 60)
-            raise AssertionError(
-                f"ir_hosted 首个差异 @{i}:\n"
-                f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
-        # 两边一致还不够 —— 一致地**没做**那件事也是"一致"。这一段把"做了什么"钉住，
-        # 免得两个实现一起退回静态 arena 而这条判据照样绿（`docs/219` §7 那条口径）。
-        assert "@__loment_heap = internal global ptr null" in want, "hosted 的 arena 不是宿主来的"
-        assert "declare ptr @malloc(i64)" in want, "没向宿主声明分配器"
-        print("      hosted arena: 两个实现逐字节一致 (含 malloc 那一支)")
+        for name, src in cases:
+            target = Path(td) / f"{name}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"{name} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+            # 两边一致还不够 —— 一致地**没做**那件事也是"一致"。这一段把"做了什么"钉住，
+            # 免得两个实现一起退回静态 arena 而这条判据照样绿（`docs/219` §7 那条口径）。
+            assert "@__loment_heap = internal global ptr null" in want, "hosted 的 arena 不是宿主来的"
+            assert "declare ptr @malloc(i64)" in want, "没向宿主声明分配器"
+    # 收集器那一份还得**真的带着收集器**：表按 arena 换过（位图：1 MiB / 64）、且走基址指针
+    assert "@__loment_mark = internal global [16384 x i8]" in want
+    assert "%hb = call ptr @__loment_arena()" in want
+    print("      hosted arena + hosted collector: 两个实现逐字节一致")
 
 
 @test

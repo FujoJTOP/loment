@@ -3119,10 +3119,101 @@ HEAP_HOSTED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose hosted\nchoose runtime"
 # 同一份源，**只去掉 `choose hosted` 那一行**：于是它就是没有 `choose hosted` 的那一档
 # （默认 `sealed`）。
 HEAP_SEALED_SRC = HEAP_SRC.replace("@@CHOOSE@@", "choose runtime")
-# `hosted` + `gc_auto`：走不到 A（`docs/228` §4 的 B1），但**不许静默**。
-# `choose runtime` 是 `gc_auto` 自己要的（`gc_auto` 与默认的 `no_runtime` 定义上冲突）。
-HEAP_HOSTED_GC_AUTO_SRC = HEAP_SRC.replace(
+#: `docs/230` 那一份：**hosted + `gc_auto`**，而且**逼收集器真的跑起来**。
+#:
+#: 先要一块 **200000 字节**（> 64 KiB —— 静态 arena 装不下它）写满 7；再churn 200 次小分配，
+#: 把触发计数据推过 `32768`（`_IR_GC_TRIGGER_FIXED` 的阈值），也就是**收集器一定会收**；
+#: 最后把那 200000 字节**逐字节读回来** —— 只被栈上 `big` 指着的那一块**必须原封不动**。
+#: 读回全对返回 7。静态档在第一次 `alloc(200000)` 就落 `boom`（SIGILL）。
+#:
+#: **源只有一份**：孪生那条（`loment_p8_test`）与运行时那条（`loment_hosted_test`）都用它。
+HEAP_GC_SRC = """module host_gc
+
+@@CHOOSE@@
+
+fn main() -> i32 {
+    let big: ptr = alloc(200000);
+    let i: u32 = 0;
+    while i < 200000 {
+        store8(big, i, 7 as u8);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < 200 {
+        let junk: ptr = alloc(1024);
+        store8(junk, 0, 1 as u8);
+        j = j + 1;
+    }
+    let k: u32 = 0;
+    let bad: u32 = 0;
+    while k < 200000 {
+        if load8(big, k) != 7 { bad = bad + 1; }
+        k = k + 1;
+    }
+    if bad == 0 { return 7; }
+    return 99;
+}
+"""
+
+# `choose runtime` 是 `gc_auto` 自己要的（它与默认的 `no_runtime` 定义上冲突）。
+# 两份只差 `choose hosted` 那一行，而**收集器换不换**就看它。
+HEAP_HOSTED_GC_AUTO_SRC = HEAP_GC_SRC.replace(
     "@@CHOOSE@@", "choose hosted\nchoose gc_auto\nchoose runtime")
+HEAP_SEALED_GC_AUTO_SRC = HEAP_GC_SRC.replace("@@CHOOSE@@", "choose gc_auto\nchoose runtime")
+
+#: `docs/231`（B3）用的那一份：**在静态 64 KiB 上真的收一次**。
+#:
+#: 上面那两份判据里 `sealed` 那一侧在第一次 `alloc(200000)` 就落 `boom` —— **根本没走到
+#: 收集器**。而 B3 改的是 `_IR_GC_SHARED` 本体，**每一档**都变了，所以得单独有一条把
+#: 静态档的收集器跑起来：累计要 **200 KB**（收不回来必然 OOM），同时守着一块只被栈上
+#: `keep` 指着的 1000 字节 —— **收集之后必须原样**。成功返回 **9**。
+GC_SEALED_CHURN_SRC = """module gc_sealed_churn
+
+choose gc_auto
+choose runtime
+
+fn main() -> i32 {
+    let keep: ptr = alloc(1000);
+    let i: u32 = 0;
+    while i < 1000 {
+        store8(keep, i, 9 as u8);
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < 200 {
+        let junk: ptr = alloc(1024);
+        store8(junk, 0, 1 as u8);
+        j = j + 1;
+    }
+    let k: u32 = 0;
+    let bad: u32 = 0;
+    while k < 1000 {
+        if load8(keep, k) != 9 { bad = bad + 1; }
+        k = k + 1;
+    }
+    if bad == 0 { return 9; }
+    return 99;
+}
+"""
+
+
+@test
+def test_mark_table_is_a_bitmap_sized_by_the_arena():
+    """`docs/231`（B3）：标记表是**位图**，每 8 字节一位 ⇒ **arena / 64 字节**。
+
+    判的是**关系**而不是某个数：两档各自的 arena 与表的大小必须是那个除法。
+    以前是"每 8 字节一个 `i32`"（arena / 2 字节 —— 1 MiB 的 arena 带 512 KiB 的 `.bss`）。
+    """
+    for ir, arena in ((lomentc._IR_GC_SHARED, 65536),
+                      (lomentc._IR_GC_SHARED_HOSTED, 1048576)):
+        assert f"@__loment_mark = internal global [{arena // 64} x i8] zeroinitializer" in ir
+        assert f"[{arena // 8} x i32]" not in ir, "旧的那个形状不该再出现"
+    # 位运算的三件：字节下标 = 位号 >> 3、掩码 = 低三位、按位与判"标过没有"
+    g = lomentc._IR_GC_SHARED
+    assert "%mby = lshr i32 %midx, 3" in g and "%mbit = and i32 %midx, 7" in g
+    assert "%mmsk = trunc i32 %msh to i8" in g and "%was = icmp ne i8 %mold, 0" in g
+    # **口径没变**：位号仍是「块头偏移 >> 3」—— 换 arena 只换表的行数
+    assert "%midx = lshr i32 %i, 3" in g
 
 
 def _heap_ir(src: str) -> str:
@@ -3163,21 +3254,50 @@ def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
 
 
 @test
-def test_hosted_with_gc_auto_says_so_instead_of_going_quiet():
-    """`docs/228` §5 的 **A5**：`hosted` + `gc_auto` 吃不到 A —— 但它**说出来**。
+def test_hosted_collector_is_the_same_collector():
+    """`docs/230`：`_IR_GC_HOSTED` 与 `_IR_GC_SHARED` **只差 arena 那三件事**。
 
-    收集器的标记表按 arena 偏移索引、行数 = arena/8（`lomentc.py` 里那个
-    `@__loment_mark`），换 arena 要
-    **同时**换表的口径与两处根扫边界，那是收集器的活（`docs/228` §4 的 B1）。这一档因此
-    仍是静态 64 KiB —— 而"没吃到"必须是产物里**量得出来的**一条，不是默认掉的
-    （`docs/205` §0.2 那条零沉默）。
+    这是"**换**出来"而不是"另抄一份"的判据：两份文本把 arena 相关的行去掉之后，
+    **其余每一行必须逐字相同**。不同就说明两份收集器已经开始各长各的了 ——
+    而那正是 `docs/158` §5 那条孪生纪律要挡的东西。
+
+    它同时钉住"换的是哪三件"：基址、基址反算、标记表行数、以及两处根扫边界。
+    """
+    def rest(text: str, markers: tuple[str, ...]) -> list[str]:
+        return [l for l in text.split("\n")
+                if l != "entry:" and not any(m in l for m in markers)]
+    a = lomentc._IR_GC_SHARED
+    b = lomentc._IR_GC_SHARED_HOSTED
+    assert rest(a, ("@__loment_heap", "65536", "[1024 x i8]")) == \
+           rest(b, ("%hb", "1048576", "[16384 x i8]")), "两份收集器已经不一样了"
+    # 换掉的**每一处**都真的换掉了 —— 这条防"上面那条因为两边都空而恒真"
+    assert "@__loment_heap" not in b and "65536" not in b and "[1024 x i8]" not in b
+    assert b.count("%hb = call ptr @__loment_arena()") == a.count("entry:")
+    # 触发那一段**共用**：它按字节数触发，不看 arena 大小
+    assert lomentc._IR_GC_HOSTED == b + lomentc._IR_GC_TRIGGER_FIXED
+
+
+@test
+def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
+    """`docs/230`（= `docs/228` §4 的 **B1**）：`hosted` + `gc_auto` 也吃平台那一块，
+    而且**收集器跟着换**。
+
+    在这之前 `gc_auto` 那一档留在静态 64 KiB，靠 `; loment-heap: static 65536` 说出来
+    （`docs/228` §5 的 A5）。B1 落地后那条记号**没有再出现的场合** —— 判据也从
+    "它说了"改成"它涨了"：这一档现在必须**在平台上**，表也跟着换成 `arena/8`。
     """
     ir = _heap_ir(HEAP_HOSTED_GC_AUTO_SRC)
-    assert "; loment-heap: static 65536" in ir, "这一档没吃到 A 却没有说出来"
-    assert "platform" not in ir
-    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in ir
-    # 与它配对的那一档**有** platform —— 于是这条判据不是"永远为真"
-    assert "; loment-heap: platform 1048576" in _heap_ir(HEAP_HOSTED_SRC)
+    assert "; loment-heap: platform 1048576" in ir
+    assert "@__loment_heap = internal global ptr null" in ir, "arena 不是宿主来的"
+    assert "@__loment_mark = internal global [16384 x i8]" in ir, "标记表没跟着 arena 换"
+    assert "[1024 x i8]" not in ir
+    assert "%hb = call ptr @__loment_arena()" in ir, "收集器没用基址指针"
+    assert "; loment-heap: static" not in ir, "B1 落地后这条记号不该再出现"
+    # 对照：同一份源**去掉 `choose hosted`** ⇒ 还是静态那一套 —— 闸门真的在 `port` 上
+    sealed = _heap_ir(HEAP_SEALED_GC_AUTO_SRC)
+    assert "@__loment_mark = internal global [1024 x i8]" in sealed
+    assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
+    assert "malloc" not in sealed
 
 
 #: `docs/232` 那条判据的输入：**一档一份**最小程序。每档都得有自己的产物 ——

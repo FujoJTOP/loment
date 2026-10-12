@@ -5157,9 +5157,13 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #:   "持有指针的函数"在入口 push、在每个 `return` 前 pop。
 #: * **标记-清扫**（不搬移）：块无类型（`alloc(N)`），所以块内**保守**扫 ——
 #:   每个 8 字节字当候选指针；**根是精确的**。
-#: * **标记位另开一张表**（`@__loment_mark`，按块头偏移 >> 3 索引）。曾经想借块头的
-#:   `next` 那一格（分配出去的块 `next` 恒为 0），**实测踩坑**：清标记那一趟会把
-#:   空闲链表的 `next` 全抹掉 —— 链断了，`free` 过的块再也取不回来。
+#: * **标记位另开一张表**（`@__loment_mark`，**位图**：每 8 字节一位 ⇒ **arena / 64 字节**）。
+#:   索引仍是「块头偏移 `>> 3`」（那给出**位号**），字节下标再 `>> 3`、掩码取低三位 ——
+#:   所以 **arena 的大小只体现在表的行数上**，口径不变（`docs/228` §1 第四行那个要害）。
+#:   以前是"每 8 字节一个 `i32`"（arena / 2 字节），1 MiB 的 arena 要带 512 KiB 的 `.bss`
+#:   —— `docs/231` 把它换成位图（1 MiB ⇒ 16 KiB）。
+#:   曾经想借块头的 `next` 那一格（分配出去的块 `next` 恒为 0），**实测踩坑**：清标记那一趟
+#:   会把空闲链表的 `next` 全抹掉 —— 链断了，`free` 过的块再也取不回来。
 #: * **四趟遍历一律从偏移 8 起**：`@__loment_off` 的初值就是 8，偏移 0..7 不是块。
 #:   从 0 起会读到 `size = 0`，而 `i += 0` 是个**死循环**（实测：那次的探针直接超时）。
 #: * **清扫前先清空 `@__loment_freehead`**：不然"本来就在链上的块"会被再 `free` 一次
@@ -5179,7 +5183,7 @@ _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）------------------------
 @__loment_rootn = internal global i32 0'''
 
 _IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
-@__loment_mark = internal global [8192 x i32] zeroinitializer
+@__loment_mark = internal global [1024 x i8] zeroinitializer
 
 ; **四个遍历一律从偏移 8 起** —— `@__loment_off` 的初值就是 8，偏移 0..7 不是块
 ; （分配器那句注释：偏移 0 永远不是块）。从 0 起会读到 size=0，`i += 0` 就是死循环
@@ -5208,10 +5212,16 @@ cont:
   br label %scan
 found:
   %midx = lshr i32 %i, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %midx
-  %old = load i32, ptr %mp
-  %was = icmp eq i32 %old, 1
-  store i32 1, ptr %mp
+  %mby = lshr i32 %midx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %mby
+  %mcur = load i8, ptr %mp
+  %mbit = and i32 %midx, 7
+  %msh = shl i32 1, %mbit
+  %mmsk = trunc i32 %msh to i8
+  %mold = and i8 %mcur, %mmsk
+  %was = icmp ne i8 %mold, 0
+  %mnew = or i8 %mcur, %mmsk
+  store i8 %mnew, ptr %mp
   br i1 %was, label %no, label %yes
 yes:
   ret i32 1
@@ -5268,9 +5278,14 @@ wb:
   %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wi
   %wsz = load i32, ptr %wp
   %widx = lshr i32 %wi, 3
-  %wmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %widx
-  %wmk = load i32, ptr %wmp
-  %wsm = icmp eq i32 %wmk, 1
+  %wby = lshr i32 %widx, 3
+  %wmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %wby
+  %wmk = load i8, ptr %wmp
+  %wbit = and i32 %widx, 7
+  %wsh = shl i32 1, %wbit
+  %wmsk = trunc i32 %wsh to i8
+  %wold = and i8 %wmk, %wmsk
+  %wsm = icmp ne i8 %wold, 0
   br i1 %wsm, label %ws, label %wn2
 ws:
   %wsstart = add i32 %wi, 8
@@ -5328,9 +5343,14 @@ sb:
   %sszp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %si
   %ssz = load i32, ptr %sszp
   %sidx = lshr i32 %si, 3
-  %smp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %sidx
-  %smk = load i32, ptr %smp
-  %smsm = icmp eq i32 %smk, 1
+  %sby = lshr i32 %sidx, 3
+  %smp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %sby
+  %smk = load i8, ptr %smp
+  %sbit = and i32 %sidx, 7
+  %ssh = shl i32 1, %sbit
+  %smsk = trunc i32 %ssh to i8
+  %sold = and i8 %smk, %smsk
+  %smsm = icmp ne i8 %sold, 0
   br i1 %smsm, label %keep, label %kill
 keep:
   br label %slc
@@ -5360,8 +5380,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5474,8 +5495,9 @@ cl:
   br i1 %cd, label %roots, label %clb
 clb:
   %cidx = lshr i32 %ci, 3
-  %cmp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %cidx
-  store i32 0, ptr %cmp
+  %cby = lshr i32 %cidx, 3
+  %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
+  store i8 0, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -5624,9 +5646,14 @@ l:
   br i1 %ld, label %done, label %b
 b:
   %idx = lshr i32 %li, 3
-  %mp = getelementptr [8192 x i32], ptr @__loment_mark, i32 0, i32 %idx
-  %mk = load i32, ptr %mp
-  %sm = icmp eq i32 %mk, 1
+  %bby = lshr i32 %idx, 3
+  %mp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %bby
+  %mk = load i8, ptr %mp
+  %bbit = and i32 %idx, 7
+  %bsh = shl i32 1, %bbit
+  %bmsk = trunc i32 %bsh to i8
+  %band = and i8 %mk, %bmsk
+  %sm = icmp ne i8 %band, 0
   %sp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %li
   %sz = load i32, ptr %sp
   br i1 %sm, label %hit, label %miss
@@ -5646,6 +5673,52 @@ done:
 
 _IR_GC = _IR_GC_SHARED + _IR_GC_TRIGGER_FIXED
 _IR_GC_ALPHA = _IR_GC_SHARED + _IR_GC_TRIGGER_ADAPT
+
+
+def _arena_indirect(ir: str, nbytes: int) -> str:
+    """把一段**直接寻址 arena** 的 IR 换成**经基址指针**的间接寻址（`docs/230`）。
+
+    `hosted` 的 arena 是宿主给的一块（`@__loment_heap` 是 `ptr`，不是 `[65536 x i8]`），
+    所以收集器里**三件事**都得跟着换：
+
+    * **基址** —— `getelementptr [65536 x i8], ptr @__loment_heap, …` → `getelementptr i8, ptr %hb, …`，
+      以及 `ptrtoint ptr @__loment_heap` → `ptrtoint ptr %hb`；
+    * **标记表的行数** —— 位图下它是 `arena / 64`（每 8 字节一位；`docs/228` §1 第四行那个
+      要害），所以换 arena 就是换这个数，**口径一个字节没动**：位号仍是 `偏移 >> 3`，
+      字节下标与掩码由它推出来；
+    * **两处根扫的边界**（`icmp ult i64 %rdo / %wdo, 65536`）。
+
+    `%hb` 插在**每个 `entry:` 之后**：这两个函数的入口块都叫 `entry`，而入口块**支配**
+    其余每一块 —— 所以 `%hb` 在哪儿都可用。这是 LLVM 的支配关系保证的，不是"觉得够用"。
+
+    **为什么是"换"而不是"再抄一份"**：`_IR_GC_SHARED` 是一条会继续长的文本，抄一份就是
+    两份要同时改的东西（`docs/158` §5 那条孪生纪律）。判据反过来钉：两边的**非 arena 行
+    必须逐字相同**（`lomentc_test` 里那条）。
+    """
+    out: list[str] = []
+    for line in ir.split("\n"):
+        if line == "entry:":
+            out.append(line)
+            out.append("  %hb = call ptr @__loment_arena()")
+            continue
+        line = line.replace("getelementptr [65536 x i8], ptr @__loment_heap, i32 0,",
+                            "getelementptr i8, ptr %hb,")
+        line = line.replace("ptrtoint ptr @__loment_heap to i64", "ptrtoint ptr %hb to i64")
+        line = line.replace("icmp ult i64 %rdo, 65536", f"icmp ult i64 %rdo, {nbytes}")
+        line = line.replace("icmp ult i64 %wdo, 65536", f"icmp ult i64 %wdo, {nbytes}")
+        line = line.replace("[1024 x i8]", f"[{nbytes // 64} x i8]")
+        out.append(line)
+    return "\n".join(out)
+
+
+#: **`hosted` 那一份收集器**（`docs/230`，`docs/228` §4 的 B1）—— 与 `_IR_GC_SHARED`
+#: **同源**：机器从它换出来的，不手抄（换法与理由见 `_arena_indirect`）。
+#:
+#: 触发那一段**一个字节都不用换**：`_IR_GC_TRIGGER_FIXED` 按**字节数**触发（32768），
+#: 不看 arena 大小 —— 所以两个端口共用它。`gc_auto_alpha` 不需要第二份 hosted：
+#: `hosted` 与它本来就是**定义上冲突**的（`CORE_CONFLICTS`）。
+_IR_GC_SHARED_HOSTED = _arena_indirect(_IR_GC_SHARED, HOSTED_ARENA_BYTES)
+_IR_GC_HOSTED = _IR_GC_SHARED_HOSTED + _IR_GC_TRIGGER_FIXED
 
 
 # ---------------------------------------------------------------- LLVM IR 后端 (M0: 标量子集, docs/144)
@@ -7569,12 +7642,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
     # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉
     # （`docs/228` §2）。`sealed` 因此走原来那段文本，**一个字节没动**。
-    # **`gc_auto`/`alpha` 不走这一支**：收集器的标记表按 arena 偏移索引、行数 = arena/8
-    # （见 `_IR_GC` 里那个 `@__loment_mark`），换 arena 要**同时**换表的口径与两处根扫边界
-    # —— 那是收集器的活
-    # （`docs/228` §4 的 B1）。它**不静默**：那一档发出 `; loment-heap: static 65536`，
-    # 于是"这一份没吃到 A"是被**量**出来的，不是被默认掉的。
-    _hosted_grown = _hosted_port and not (gc_auto or gc_alpha)
+    # **收集器那一档也在这支里**（`docs/230`，= `docs/228` §4 的 B1）：标记表的**行数
+    # 就是 arena/8**，所以换 arena 必须**同时**换表 —— 那就是 `_IR_GC_HOSTED`。此前
+    # 这一档留在静态 64 KiB 并靠 `; loment-heap: static 65536` 说出来；现在它也吃平台
+    # 那一块，那条"不静默"的记号因此**没有再出现的场合**（判据从"它说了"改成"它涨了"）。
+    # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`CORE_CONFLICTS`），走不到这儿。
+    _hosted_grown = _hosted_port
     if _needs_heap:
         if _hosted_grown:
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
@@ -7582,8 +7655,6 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 out.append("declare ptr @malloc(i64)")
             out.append(_IR_HEAP_HOSTED)
         else:
-            if _hosted_port:
-                out.append("; loment-heap: static 65536")
             out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
@@ -7594,7 +7665,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             if gc_auto:
                 # **只在自动档追加**（`docs/210` §2.4）—— 另外两档的产物因此逐字节不变。
                 # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
-                out.append(_IR_GC)
+                # `hosted` 那一份与它**同源**（`_arena_indirect` 机器换的，见 `_IR_GC_HOSTED`）：
+                # 收集器要认的是**同一块 arena**，所以 arena 换了它也得换。
+                out.append(_IR_GC_HOSTED if _hosted_grown else _IR_GC)
             else:
                 # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
                 # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前

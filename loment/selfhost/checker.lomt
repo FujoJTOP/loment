@@ -3228,8 +3228,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // ---- **渠道闸**（`docs/231` §2）：发行版里 `choose vm` 是编译错误。
     // 用户 2026-10-11：「不要在发行版 Loment 里被调用，所有调用 VM 的都是非法的，
     // 只能 dev 可以被调用，直到第一个可使用的 LVM 诞生」。
-    // `LOMENT_CHANNEL` 来自 `channel` 那一模块 —— 打包期**只换那一个文件**，
-    // 于是"包里除它之外逐字节等于仓库"仍可判（`docs/231` §5 判据 F）。
+    // `LOMENT_CHANNEL` 就是**本文件顶上那一行常量** —— 打包期只换那一行，
+    // 于是"包里除那一行之外逐字节等于仓库"仍可判（`docs/231` §5 判据 F）。
+    // （⚠ 第一版曾把它做成独立模块 `channel.lomt`；那样会往语料里塞一份**空单元**，
+    // 而空单元的 IR 收尾两个实现本来就不同 —— 改回一行常量，见 `docs/231` §2.2。）
     if eff_vm == 1 {
         // **先落到一个局部变量，再比** —— 直接写 `if LOMENT_CHANNEL == 1` 两边都是
         // **字面量**，那会踩到 **issue #224**：`tools/lomentc.py` 把上下文的 `bool` 期望

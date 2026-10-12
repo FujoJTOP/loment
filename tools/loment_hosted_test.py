@@ -370,21 +370,57 @@ def test_hosted_heap_asks_the_os_and_sealed_cannot():
         print("      SKIP: 无 WSL (Windows 上把 IR 交叉成 ELF 要它)")
         return
     import lomentc_test as CT                                        # noqa: PLC0415
+    # 两对：**分配器**那一对（`docs/228`）与 **分配器+收集器**那一对（`docs/230`）。
+    # 后一对里 `hosted` 那一份还额外要求"**活着的数据在收集之后仍然在**" ——
+    # 收集器真的在这块大 arena 上跑过、而且认得同一块内存，才算过。
+    pairs = (("heap", CT.HEAP_HOSTED_SRC, CT.HEAP_SEALED_SRC),
+             ("gc", CT.HEAP_HOSTED_GC_AUTO_SRC, CT.HEAP_SEALED_GC_AUTO_SRC))
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        got: dict[str, int] = {}
-        for tag, src in (("hosted", CT.HEAP_HOSTED_SRC), ("sealed", CT.HEAP_SEALED_SRC)):
-            f = td / f"{tag}.lomt"
-            _write_sh(f, src)
-            mod = lomentc.load(f)
-            errs = lomentc.check(mod)
-            assert not errs, errs
-            got[tag] = _run_ir(lomentc.emit_llvm(mod, ROOT), td, tag)
-    assert got["hosted"] == 7, f"hosted 没拿到 > 64 KiB 的 arena (rc={got['hosted']})"
-    assert got["sealed"] == 132, (
-        f"sealed 居然拿到了 > 64 KiB (rc={got['sealed']}) —— `sealed` 那条保证被改掉了")
-    print(f"      hosted rc={got['hosted']} (200000 字节真的拿到了)"
-          f" / sealed rc={got['sealed']} (SIGILL，拿不到)")
+        for label, hsrc, ssrc in pairs:
+            got: dict[str, int] = {}
+            for tag, src in (("hosted", hsrc), ("sealed", ssrc)):
+                f = td / f"{tag}_{label}.lomt"
+                _write_sh(f, src)
+                mod = lomentc.load(f)
+                errs = lomentc.check(mod)
+                assert not errs, errs
+                got[tag] = _run_ir(lomentc.emit_llvm(mod, ROOT), td, f"{tag}_{label}")
+            assert got["hosted"] == 7, (
+                f"[{label}] hosted 没拿到 > 64 KiB 的 arena (rc={got['hosted']})")
+            assert got["sealed"] == 132, (
+                f"[{label}] sealed 居然拿到了 > 64 KiB (rc={got['sealed']})"
+                " —— `sealed` 那条保证被改掉了")
+            print(f"      [{label}] hosted rc=7 / sealed rc=132 (SIGILL)")
+
+
+@test
+def test_the_static_arena_collector_still_reclaims():
+    """`docs/231`（B3）：位图换掉之后，**静态那一档的收集器**仍然收得对。
+
+    这条是 B3 的骨架判据：上面那条两方向的判据里 `sealed` 那一份在第一次
+    `alloc(200000)` 就落 `boom` —— **根本没走到收集器**。而 B3 改的是 `_IR_GC_SHARED`
+    本体，**每一档**都变了。所以另起一条：只在 **64 KiB** 里跑，累计要 **200 KB**
+    （收不回来必然 OOM），同时守着一块只被栈上 `keep` 指着的活数据 ——
+    **收集之后必须原样**（返回 9）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    if os.name == "nt" and not _wsl():
+        print("      SKIP: 无 WSL (Windows 上把 IR 交叉成 ELF 要它)")
+        return
+    import lomentc_test as CT                                        # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        f = td / "gc_sealed_churn.lomt"
+        _write_sh(f, CT.GC_SEALED_CHURN_SRC)
+        mod = lomentc.load(f)
+        errs = lomentc.check(mod)
+        assert not errs, errs
+        rc = _run_ir(lomentc.emit_llvm(mod, ROOT), td, "gc_sealed_churn")
+    assert rc == 9, f"静态档的收集器没收对 (rc={rc}) —— 位图那一改有问题"
+    print("      静态 64 KiB：累计 200 KB 收得回来，活数据原样 (rc=9)")
 
 
 @test
