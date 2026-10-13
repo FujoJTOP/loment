@@ -795,7 +795,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "439e499663737251b7bc287d2adeeca0db36f05cb5d853e174efdbf0aef13843"
+   "sha256": "28660821d91ce545da50ee0b0c1debdbff68af4ba90e29f16d00eeb83b1f6e72"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1207,7 +1207,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "f477ca209b0db5d72c53c88f3fef91f157b3b52dfcdc337f27088581619571f4"
+   "sha256": "9b80c767d11d67762be945968e279464cfcee95820990a0a834abd2d34e86119"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -2207,7 +2207,7 @@
   },
   {
    "path": "docs/239-l0-width-invariant.md",
-   "sha256": "8fb55cc39a9dfd289da1dc066d7aebc322a2d1c5e09a25f26c1fdc83a584b2e8"
+   "sha256": "9ca16709ff3478b08c7e6d7d2f9ee423cdb2b3ec87913568550a9dd348dbcc0b"
   },
   {
    "path": "docs/manual/index.md",
@@ -2402,6 +2402,10 @@
    "sha256": "00214864a66219c1a020c05fdf32ca1c458ef29ddc124ebb43fb31dd4e7f2780"
   },
   {
+   "path": "tools/loment_door_test.py",
+   "sha256": "2f087e92d7b8a361412de2e8e59eaad85c78588c845d01b04556e6eae1644905"
+  },
+  {
    "path": "tools/loment_ports.py",
    "sha256": "6b354187e2917d62017702cd006ca7d0ff3aee0cf59d1a644fad15ddf8cc5134"
   },
@@ -2415,7 +2419,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "188d98db940bacf4e86896824a10aa45d33c526e197095d2c0719c2ab6d66f59"
+   "sha256": "148b6404cad9674929217011159664c31e9dbad6d05b45f924d46bf41542e2d1"
   },
   {
    "path": "tools/loment_status.py",
