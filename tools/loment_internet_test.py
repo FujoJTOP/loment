@@ -284,6 +284,22 @@ fn _start() {
     return "\n".join(b) + "\n"
 
 
+#: **Python 3.12 是唯一一个把 IPv4 映射地址印成十六进制组的版本。** 3.11 / 3.13 / 3.14 都印
+#: `::ffff:1.2.3.4`（RFC 5952 §5 建议的写法，也是本库的写法），只有 3.12 印 `::ffff:102:304`
+#: —— 而 CI 的容器**正好**是 3.12（本机是 3.11、WSL 是 3.14，两边都绿，所以它只在 CI 现形）。
+#: 处置与 `_SUPERSEDED` 同一套：**点名**容忍那一种渲染，而且**只在 `::ffff:0:0/96` 里** ——
+#: 别的一律逐字节比。将来再有分歧，这条会红，那是该看见的信号。
+def _v6_same_address(our_text: str, ref_text: str) -> bool:
+    if our_text == ref_text:
+        return True
+    try:
+        a = ipaddress.IPv6Address(our_text)
+        b = ipaddress.IPv6Address(ref_text)
+    except ValueError:
+        return False
+    return a == b and a in ipaddress.IPv6Network("::ffff:0:0/96")
+
+
 @test
 def test_ip_matches_python_ipaddress():
     """ip 的解析 / 格式化 / 网段归属与 CPython `ipaddress` 逐字节一致。"""
@@ -296,17 +312,30 @@ def test_ip_matches_python_ipaddress():
             want.append(f"{s}|{int(ipaddress.IPv4Address(s))}")
         except ValueError:
             want.append(f"{s}|NO")
+    v6_lo = len(want)
     for s in _IP_V6:
         try:
             want.append(f"{s}|{ipaddress.IPv6Address(s)}")
         except ValueError:
             want.append(f"{s}|NO")
+    v6_hi = len(want)
     for a, net, bits in _IN_NET:
         n = ipaddress.IPv4Network(f"{net}/{bits}")
         want.append(f"{a}|{1 if ipaddress.IPv4Address(a) in n else 0}")
-    diff = _first_diff(got, "\n".join(want))
-    assert not diff, f"ip 与 ipaddress 不一致 @ {diff}"
-    print(f"      ip: {len(want)} 项与 CPython ipaddress 逐字节一致")
+    g, w = got.splitlines(), want
+    assert len(g) == len(w), f"探针打出的行数不对: 本库 {len(g)} / 参考 {len(w)}"
+    tolerated = 0
+    for i in range(len(w)):
+        if g[i] == w[i]:
+            continue
+        our = g[i].split("|", 1)[1] if "|" in g[i] else g[i]
+        ref = w[i].split("|", 1)[1] if "|" in w[i] else w[i]
+        if v6_lo <= i < v6_hi and _v6_same_address(our, ref):
+            tolerated += 1
+            continue
+        raise AssertionError(f"ip 与 ipaddress 不一致 @ 第 {i + 1} 行: 本库={g[i]!r} 参考={w[i]!r}")
+    note = f"（其中 {tolerated} 项走 CPython 3.12 独有的 IPv4 映射渲染，已点名容忍）" if tolerated else ""
+    print(f"      ip: {len(want)} 项与 CPython ipaddress 一致{note}")
 
 
 # ---------------------------------------------------------------- uri 对 urllib
