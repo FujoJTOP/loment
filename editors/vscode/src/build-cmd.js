@@ -106,10 +106,10 @@ function invocation(o) {
   // 例子：`loment/examples/mathutil.lomt` 是个库模块（只有 `pub fn`/`pub const`），
   // 要运行的是**用它的那个入口文件**。**编译**不受影响（出 IR/目标文件是正当的）。
   if (action === 'run' && !hasEntry(file)) {
-    return { error: `这个文件不是可运行的程序 —— 它里面没有 \`fn _start\`（ELF 的入口）。` +
-                    `\n多半它是个**库模块**：要运行的是**用它的那个入口文件**` +
-                    `（自己有 \`_start\` 的那个，例如同目录下的 \`tour.lomt\`）。` +
-                    `\n只想编它（出 IR / 目标文件）就用「Loment: 编译当前文件」。` };
+    return { error: `This file is not a runnable program — it has no \`fn _start\` (the ELF entry).` +
+                    `\nIt is most likely a **library module**: what you want to run is the **entry file that uses it**` +
+                    ` (the one with its own \`_start\`, e.g. \`tour.lomt\` next to it).` +
+                    `\nTo merely compile it (IR / object file), use "Loment: Build current file".` };
   }
 
   // ---- ① 装了 Loment 命令（产品路径，不需要 Python）
@@ -117,8 +117,8 @@ function invocation(o) {
     const rel = posixRel(root, file);
     if (!rel || rel.startsWith('..')) {
       // 相对路径要传给外部命令，`..` 会指到别处（clang/WSL 那侧解出来不是这个文件）
-      return { error: '这个文件不在工作区里 —— 编译命令的基准是工作区根。'
-                      + '把它的目录加进工作区，或把工作区设成它的上一层。' };
+      return { error: 'This file is not inside the workspace — build commands are relative to the workspace root.'
+                      + ' Add its directory to the workspace, or open the workspace one level above it.' };
     }
     const extra = Array.isArray(o.toolArgs) ? o.toolArgs.map(String) : [];
     const args = extra.concat([action, rel]);
@@ -149,12 +149,12 @@ function invocation(o) {
 
   // ---- ③ 两条都没有：说清楚该做什么，别静默
   return {
-    error: '找不到能编译的东西。两种办法任选一种：\n'
-      + '  · 装好工具链后在设置里填 `loment.toolCommand`'
-      + '（装了包的话它是 `loment`；Windows 上经 WSL 跑时填 `wsl`，'
-      + '`loment.toolArgs` 填 ["-e", "/home/<你>/.local/share/loment/bin/loment"]）；\n'
-      + '  · 或者把这个文件放在 Loment 仓库里（`scripts/lomc.ps1` 在的话会自动用它 ——'
-      + '**不要求打开文件夹**，从文件往上找）。',
+    error: 'Nothing to build with. Two ways, pick either:\n'
+      + '  · install the toolchain and set `loment.toolCommand`'
+      + ' (with the package installed it is `loment`; to run through WSL on Windows set `wsl`,'
+      + ' with `loment.toolArgs` = ["-e", "/home/<you>/.local/share/loment/bin/loment"]);\n'
+      + '  · or put this file inside a Loment checkout (`scripts/lomc.ps1` is then used automatically —'
+      + ' **no workspace folder required**, it is searched upward from the file).',
   };
 }
 

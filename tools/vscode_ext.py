@@ -29,7 +29,10 @@ DEFAULT_OUT = ROOT / "loment" / "build" / "loment-vscode.vsix"
 # 打进 VSIX 的目录/文件 (相对 editors/vscode); node_modules 是运行时依赖, 必须带
 INCLUDE_DIRS = ("src", "syntaxes", "node_modules")
 INCLUDE_FILES = ("package.json", "language-configuration.json",
-                 "language-configuration-python.json", "README.md")
+                 "language-configuration-python.json", "README.md",
+                 # 发布到商店那两件（vsce 要 `icon` 指到的文件在包里，
+                 # `LICENSE` 是 `Loment-Open` 的正文 —— vsce 只找**扩展目录**这一份）
+                 "LICENSE", "loment-icon.png")
 SKIP_NAMES = (".map", ".ts", ".md.bak")
 
 #: 必须进 `capabilities.untrustedWorkspaces.restrictedConfigurations` 的设置 (#166)。
@@ -115,6 +118,11 @@ def check() -> list[str]:
     for c in pkg.get("contributes", {}).get("commands", []):
         if not c.get("command") or not c.get("title"):
             bad.append(f"命令缺 command/title: {c}")
+    # 商店发布那两件：`icon` 指到的文件要在，`LICENSE` 要在扩展目录里（vsce 只看这一份）
+    if pkg.get("icon") and not (EXT / str(pkg["icon"])).is_file():
+        bad.append(f"icon 指的文件不存在: {pkg['icon']}")
+    if not (EXT / "LICENSE").is_file():
+        bad.append("扩展目录里没有 LICENSE（vsce 只找这一份；仓根那份它看不见）")
     # 语言引用的 `configuration` 必须**存在**且**在打包清单里** —— 少一样都是"装上去才发现";
     # 2026-10-12 加第二份配置 (python 写法的注释记号是 `#`, 不是 `//`) 时补的这条。
     for lang in pkg.get("contributes", {}).get("languages", []):
@@ -272,6 +280,46 @@ def stale_dirs(extdir: Path, ident: str, dest: Path) -> list[Path]:
                   if p.is_dir() and p.name != dest.name)
 
 
+def renamed_publisher_dirs(extdir: Path, pkg: dict, dest: Path) -> list[Path]:
+    """**同名、不同发布者**的其它扩展目录 —— 只报给 `doctor()`，**绝不自动删**。
+
+    与 `stale_dirs` 不是一个类别：那个按**当前的 ident**（`<发布者>.<名>`）glob，
+    而换了发布者之后 ident **整个变了**（`fujojtop.loment` → `hooyan2022.loment`），
+    旧目录根本不在它匹配范围里。2026-10-13 实测撞到：磁盘上两份都声明 `.lomt`/`.lom`，
+    而 `--doctor` 只看得见症状（"别人也认 .lomt"），看不见那是**自己**的旧目录。
+
+    ## 为什么只报不删（这一条是被判据逼出来的）
+
+    判据 `test_vscode_install_sweeps_renamed_publisher` 第一版正是让 `--install` 把它们
+    一并挪走的，条件是"`name` 相同、`publisher` 不同" —— 而那个条件**分不开**这两种东西：
+
+    * 你自己换发布者留下的旧目录；
+    * **别人的扩展，恰好也叫 `loment`**。
+
+    清单里没有任何字段能把这两者分开（名字就是唯一的联系），所以自动删就可能删掉别人的扩展
+    —— 那是**不可逆地动别人的东西**。改成：这里只把它们**认出来**，由 `doctor()` 点名，
+    处置交给人（自己换过就删；不是自己的，那就是它在跟你抢 `.lomt`，二选一）。
+    """
+    out: list[Path] = []
+    if not extdir.is_dir():
+        return out
+    name = str(pkg.get("name", ""))
+    ours = str(pkg.get("publisher", "")).lower()
+    if not name:
+        return out
+    for d in sorted(extdir.glob(f"*.{name}-*")):
+        if not d.is_dir() or d.name == dest.name:
+            continue
+        try:
+            other = json.loads((d / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (str(other.get("name", "")) == name
+                and str(other.get("publisher", "")).lower() != ours):
+            out.append(d)
+    return out
+
+
 def doctor() -> list[str]:
     """体检 VS Code **已安装副本**: 语法高亮出问题时, 90% 的原因在这四件事上。
 
@@ -306,8 +354,12 @@ def doctor() -> list[str]:
             entries = json.loads(idx.read_text(encoding="utf-8"))
             hit = [e for e in entries if (e.get("identifier") or {}).get("id") == ident]
             if not hit:
-                out.append(f"扩展在磁盘上但 extensions.json 里没有 {ident} 的登记 —— "
-                           f"用 `python tools/vscode_ext.py --install` 重装")
+                out.append(
+                    f"扩展在磁盘上但 extensions.json 里没有 {ident} 的登记 —— "
+                    f"**退出 VS Code 再打开**：它启动时重扫 `extensions/`，会把这份登记上。"
+                    f"（`--install` 只**改写已有**条目：那条登记里有 VS Code 自己写的 uuid 与元数据，"
+                    f"我们不替它造 —— 换发布者之后 ident 整个变了，就会走到这一格。"
+                    f"2026-10-13 实测。）")
             else:
                 loc = hit[0].get("location") or {}
                 p = str(loc.get("fsPath") or loc.get("path") or "")
@@ -326,6 +378,11 @@ def doctor() -> list[str]:
         out.append("找不到 extensions.json")
     # 同 ident 的旧版本目录还在 —— **上面"抢语言 id"那个循环看不见它**（它跳过
     # `startswith(ident)` 的目录），所以这里单独认一遍。
+    for old in renamed_publisher_dirs(extdir, pkg, inst):
+        out.append(f"{old.name} 与本次装的是**同名不同发布者**（现在是 {inst.name}）—— "
+                   f"两份都声明 `.lomt`/`.lom`，会互相抢。**处置由人定**：扩展清单里没有字段"
+                   f"能分开「你自己换过发布者留下的」与「别人的同名扩展」——是你自己换的就删掉"
+                   f"那个目录（`--install` **不会**替你删）；不是你的，那就是它在跟你抢 `.lomt`。")
     for old in stale_dirs(extdir, ident, inst):
         out.append(f"{old.name} 也还在 extensions/ 里（装的是 {inst.name}）—— "
                    f"同 ident 两份都会被扫成一个扩展，抢同一份 `.lomt` 关联"

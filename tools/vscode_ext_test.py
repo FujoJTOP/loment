@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -862,6 +863,63 @@ def test_vscode_hardens_untrusted_workspaces():
 
 
 @test
+def test_vscode_publish_ready():
+    """商店发布那几件 —— `vsce publish` 的硬要求，加"两份打包清单不许漏同一类文件"。
+
+    2026-10-13 第一次把它发到 Marketplace 之前补的。四件事：
+
+    1. `repository` 要在（否则每次都得带 `--allow-missing-repository`）；
+    2. `icon` 指到的文件要**真的在包里**，而且按商店规范是 128×128 的 PNG；
+    3. `LICENSE` 要在**扩展目录**里，且与仓根那份**逐字节相同** —— vsce 只找扩展目录这一份，
+       而"同一份东西存在第二份就会漂"在本仓对别的派生物一律上判据，许可正文不该例外；
+    4. `node_modules` 必须在**两份**清单里：`files`（vsce 认的那份）与
+       `vscode_ext.INCLUDE_DIRS`（本机侧载那份）。漏了的话商店装下来的扩展起不来 ——
+       VS Code **不会**替用户跑 `npm install`。
+    """
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    # ① repository
+    repo = pkg.get("repository") or {}
+    url = repo.get("url") if isinstance(repo, dict) else repo
+    assert url and "github.com" in str(url), f"repository 不对: {repo!r}"
+    # ② icon：存在、是 PNG、128×128、且在两份清单里
+    icon = pkg.get("icon")
+    assert icon, "package.json 缺 icon（商店卡片会是灰的）"
+    ip = EXT / str(icon)
+    assert ip.is_file(), f"icon 指的文件不存在: {icon}"
+    raw = ip.read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n", f"{icon} 不是 PNG"
+    w, h = struct.unpack(">II", raw[16:24])
+    assert (w, h) == (128, 128), f"{icon} 是 {w}x{h}，商店要 128x128"
+    files = pkg.get("files") or []
+    assert str(icon) in files, f"{icon} 不在 package.json 的 files 里"
+    assert str(icon) in vscode_ext.INCLUDE_FILES, \
+        f"{icon} 不在 vscode_ext.INCLUDE_FILES 里（本机侧载那份会缺它）"
+    # ③ LICENSE：扩展目录里那份 == 仓根那份
+    lic_ext, lic_root = EXT / "LICENSE", ROOT / "LICENSE"
+    assert lic_ext.is_file(), "扩展目录里没有 LICENSE（vsce 只找这一份）"
+    assert lic_root.is_file(), "仓根没有 LICENSE？"
+    assert lic_ext.read_bytes().replace(b"\r\n", b"\n") == \
+        lic_root.read_bytes().replace(b"\r\n", b"\n"), \
+        "editors/vscode/LICENSE 与仓根 LICENSE 不一致（两份许可正文已经开始漂了）"
+    assert "LICENSE" in files and "LICENSE" in vscode_ext.INCLUDE_FILES, \
+        "LICENSE 没进打包清单"
+    # ④ node_modules 两份清单都要有
+    assert "node_modules" in files, "files 里没有 node_modules —— 商店装下来的跑不起来"
+    assert "node_modules" in vscode_ext.INCLUDE_DIRS, "INCLUDE_DIRS 里没有 node_modules"
+    # 附带：语言引用的 grammar / configuration 要被 vsce 那份清单罩住
+    for g in pkg["contributes"]["grammars"]:
+        assert Path(str(g["path"]).lstrip("./")).parts[0] in files, \
+            f"files 没罩住语法目录: {g['path']}"
+    for lang in pkg["contributes"]["languages"]:
+        conf = lang.get("configuration")
+        if conf:
+            assert Path(str(conf).lstrip("./")).name in files, \
+                f"files 没罩住 {lang['id']} 的 configuration: {conf}"
+    print(f"      发布就绪：repository / icon 128x128 / LICENSE 与仓根逐字节相同 / "
+          f"node_modules 在两份清单里（{len(files)} 条允许清单）")
+
+
+@test
 def test_vscode_registration_points_at_the_real_dir():
     """**登记必须指向真目录** —— 它指向别处时高亮/命令/F5 整个消失，而磁盘上一切"看着在"。
 
@@ -870,7 +928,7 @@ def test_vscode_registration_points_at_the_real_dir():
     这个**马上要被删掉**的名字上。当时 `--doctor` 只查"有没有登记"，所以照常报 OK ——
     这一条把那个盲点钉住。
     """
-    ident = "fujojtop.loment"
+    ident = "hooyan2022.loment"
     dest = vscode_ext.ext_dir() / f"{ident}-0.1.0"
     stale = {"identifier": {"id": ident}, "version": "0.1.0",
              "location": {"$mid": 1, "path": f"/c:/x/{ident}-0.1.0.old", "scheme": "file"},
@@ -914,7 +972,7 @@ def test_vscode_install_sweeps_stale_versions():
     """
     with tempfile.TemporaryDirectory() as tds:
         extdir = Path(tds)
-        ident = "fujojtop.loment"
+        ident = "hooyan2022.loment"
         dest = extdir / f"{ident}-0.2.0"
         for name in (f"{ident}-0.1.0", f"{ident}-0.2.0", f"{ident}-0.1.0.old",
                      "someoneelse.thing-1.0.0"):
@@ -923,6 +981,48 @@ def test_vscode_install_sweeps_stale_versions():
         got = [p.name for p in vscode_ext.stale_dirs(extdir, ident, dest)]
         assert got == [f"{ident}-0.1.0", f"{ident}-0.1.0.old"], got
     print("      升级扫旧版：只认同 ident 的旧目录（不含 dest 自己、不含别人的扩展）")
+
+
+@test
+def test_vscode_doctor_names_same_name_other_publisher():
+    """**同名、不同发布者**的目录：认出来点名，但**绝不自动删**。
+
+    `stale_dirs` 按**当前 ident**（`<发布者>.<名>`）glob，而换发布者之后 ident 整个变了
+    （`fujojtop.loment` → `hooyan2022.loment`），旧目录不在它的匹配范围里。
+    2026-10-13 实测撞到：磁盘上两份都声明 `.lomt`/`.lom`，而 `--doctor` 只看得见症状
+    （"别人也认 .lomt"），看不见那是**自己**的旧目录。
+
+    **这一条最初写反过**：第一版让 `--install` 把它们一并挪走（判据第一版的期望值就是
+    "两个都挪"），而它把**别人的同名扩展**也一起挪了 —— 判据当场抓出来。清单里没有任何
+    字段能分开那两件事，所以现在的规矩是：**认出来给 doctor 点名，删不删由人**。
+    这里同时钉住那两件事：① 该认的认得出；② 它**不在** `--install` 该挪的那一批里。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        extdir = Path(tds)
+        dest = extdir / "hooyan2022.loment-0.2.0"
+        dest.mkdir()
+        pkg = {"name": "loment", "publisher": "hooyan2022"}
+        # 自己换发布者留下的（要**认出来**，但不自动删）
+        (extdir / "fujojtop.loment-0.2.0").mkdir()
+        (extdir / "fujojtop.loment-0.2.0" / "package.json").write_text(
+            json.dumps({"name": "loment", "publisher": "FujoJTOP"}), encoding="utf-8")
+        # 别人的同名扩展 —— 和上面那个**在清单里长得一模一样**，这正是不能自动删的理由
+        (extdir / "someoneelse.loment-1.0.0").mkdir()
+        (extdir / "someoneelse.loment-1.0.0" / "package.json").write_text(
+            json.dumps({"name": "loment", "publisher": "someoneelse"}), encoding="utf-8")
+        # 名字不同的（不该被认出来）
+        (extdir / "fujojtop.other-0.1.0").mkdir()
+        (extdir / "fujojtop.other-0.1.0" / "package.json").write_text(
+            json.dumps({"name": "other", "publisher": "FujoJTOP"}), encoding="utf-8")
+        got = sorted(p.name for p in vscode_ext.renamed_publisher_dirs(extdir, pkg, dest))
+        # ① 两个同名不同发布者的都被认出来（doctor 会各自点名）
+        assert got == ["fujojtop.loment-0.2.0", "someoneelse.loment-1.0.0"], got
+        # ② 但它们**不在** `--install` 该挪的那一批里（那一批按当前 ident 走）
+        ident = "hooyan2022.loment"
+        swept = [p.name for p in vscode_ext.stale_dirs(extdir, ident, dest)]
+        assert swept == [], f"`--install` 的自动清理不该碰这两个: {swept}"
+    print("      同名不同发布者：doctor 逐个点名，但**不自动删**（分不开 _自己的旧目录_ 与"
+          " _别人的同名扩展_）")
 
 
 def main(argv: list[str] | None = None) -> int:
