@@ -460,6 +460,7 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
 | **L3 的根表是对的** | 一对程序（逐字同源，只差 `choose` 那一行）：每圈漏一块 64 B、只留一块活到末尾（末尾 `load8(a,0) == 5` 是"活块没被误回收"的守门）。总量 ≈ 1.4 MB，而 arena 只有 64 KiB —— `gc_auto` **跑完**（rc=7）、`gc_manual` **耗尽**（rc=132）。这一对的另一半在静态上：`gc_auto` 的产物里每个 `alloc` 站点前**正好**一条 `@__loment_maybe_collect`、根表**正好**登记三格（形参 + 两个局部），而另外两档**一个符号都不沾**（`loment_elf_test::test_gc_auto_collects_while_manual_exhausts` + `lomentc_test::test_gc_auto_collector_text`）| ✅ **已写**（动态 + 静态，两条互补）|
 | **默认不变** | 不加任何 `choose` 的语料 → 产物**逐字节不变**（`loment_potato_emit_test` 守着）| ✅ 既有判据 |
 | **两个实现一致** | L0 那一对、L1 那份真值表、L2 那份真值表、**收集器那一份**，两个实现都**逐字节**一致（`loment_p8_test` 的 `test_m88_l0_alpha_pair_is_byte_identical` / `test_m91_l1_definite_lifetime_is_byte_identical` / `test_m89_l2_epoch_is_byte_identical` / `test_m90_gc_auto_collector_is_byte_identical`）。m90 尤其难"蒙对"：收集器本体可以脚本生成，但**挂点是手写的** —— 根表每格吃三条 temp，编号错一位整段就错 | ✅ **已写** |
+| **`--debug` 不改产物** | L0 与 L2 各一份：`--debug` 的 IR 与不带的那一份**必须不同**且带 `#dbg_declare`（否则判据在空转），过**两个**链接器后与原生产物**逐字节相同**，跑起来退出码一致（`loment_elf_test::test_debug_flag_adds_metadata_and_nothing_else` + `::test_debug_ir_links_the_same_through_the_mirror`）| ✅ **已写** |
 
 **注意第七、八条是互补的**：只做甲，一个"从不回收"的收集器也能过；只做乙，一个"乱回收"的能过。**这两条必须成对**，形状与 `gc_manual` 那条 `free` 的证伪对（带 `free` 跑通 rc=176 / 不带耗尽 rc=132）一样。
 
@@ -557,7 +558,19 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
      `heap_needed`／`s+516`）—— 与 `_IR_ROOTS` 那次"有根没堆"是同一类账。
   判据（`loment_elf_test::test_l0_static_promotion_bounds_the_heap`）**已经翻成真断言**：
   `gc_manual` 耗尽（rc=132）/ alpha 跑通（rc=7，且 4000 次读回来的值必须对）。
-* **L0 与 L2 都没有在 `debug` 档下核过**（自举侧根本没有 debug 档，是既有的边界）。
+* ~~**L0 与 L2 都没有在 `debug` 档下核过**~~ —— **核过了**（2026-10-13）。那一句底下压着一个
+  **真 bug**：`lomelf` 把 `#dbg_declare` 当成**不支持的指令**直接拒 —— 于是 `--debug` 的 IR
+  **链不出来**，而 `docs/167` §4 第 7 行写的是"元数据**被忽略**、原生产物没有行表"。文档与
+  实现相反，而两边都各有一套解析器，所以"核过"是**四处**。修法两边一样：行首的 `#dbg_*`
+  记录（`#dbg_declare` / `#dbg_value` / `#dbg_assign` / `#dbg_label`）**跳过**，行尾的
+  `, !dbg !N` **附着**在判读前去掉（不去掉，实参个数会按顶层逗号算多，而两边的错法不同 ——
+  参考侧 `ValueError`、自举侧编出错机器码，逐字节判据兜不住）。
+  判据两条，都在 `loment_elf_test`：`test_debug_flag_adds_metadata_and_nothing_else`
+  （L0 与 L2 各一份，`--debug` 的 IR 与不带的那一份**必须不同**、带 `#dbg_declare`、
+  过 `lomelf` 后**逐字节相同**、跑起来退出码一致）与 `test_debug_ir_links_the_same_through_the_mirror`
+  （同样的 IR 喂镜像，与参考**逐字节相同**）。**自举侧仍然没有 `--debug` 这一档**
+  （`--debug` 是参考实现的旗标）—— 那是既有的边界；这一次核的是"参考实现发的 debug IR，
+  **两个**链接器都认，且产物不受影响"。
 * **块内精确性做不到**（§4.2 那个诚实边界）：`alloc` 无类型。要精确得先给 `alloc` 带类型，那可能要过 B0。
 * **收集器的算法已经落地**（§2.4 是它的全部取舍），但**这一版有一处明写的上限**：
   ~~触发按分配量（32 KiB）而 arena 是 64 KiB ⇒ **活集 ≳ 32 KB 的程序照样耗尽**。~~
