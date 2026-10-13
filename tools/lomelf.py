@@ -171,6 +171,29 @@ def parse_operand(s: str) -> tuple[str, str]:
     return ty, m.group(1)
 
 
+#: 行尾的**元数据附着**: `, !dbg !12`。M59 的 `--debug` 才发 (`docs/167` §7)。
+_META_TAIL_RE = re.compile(r",\s*![-A-Za-z0-9_.]*(?:\s+![-A-Za-z0-9_.]+)?\s*$")
+
+
+def strip_meta(s: str) -> str:
+    """去掉行尾的元数据附着 (`, !dbg !12`), 反复去直到不动。
+
+    附着**只长在指令末尾** —— `!` 在操作数位置上不出现 (`!` 开头的定义行在 `parse_ll`
+    里整行跳过)。所以这条正则不会误伤; 引号数**为奇**时整行不动, 那是字符串还没合上,
+    行尾的 `, !x` 是字符串的内容而不是附着 (本工具链不产生这种形状, 但便宜的护栏)。
+
+    去掉之后 `--debug` 的 IR 与不带 `--debug` 的那一份在**指令这一层逐字节同** ——
+    原生产物因此两者**字节相同** (`docs/167` §7: 元数据被忽略, 不留行表)。
+    """
+    if s.count('"') % 2:
+        return s
+    while True:
+        n = _META_TAIL_RE.sub("", s)
+        if n == s:
+            return s
+        s = n
+
+
 def unbalanced(s: str) -> bool:
     depth = 0
     for ch in s:
@@ -216,12 +239,18 @@ def parse_ll(text: str) -> tuple[list[Global], list[Func], list[str]]:
     `declare` —— 外部符号连表示都没有, 于是 `call @c_add` 会在 `finalize()` 里报"未定义的
     标签"。现在记下来: 它们由 `--link` 进来的外部目标文件提供, 调用点还要按 **C ABI**
     传参 (见 `Emitter._call`)。
+
+    行首的 `#dbg_*` (`#dbg_declare` / `#dbg_value` / `#dbg_assign` / `#dbg_label`) 是
+    **M59 的调试记录**, 只有 `--debug` 才发。它们**不是指令**: 原生产物里不留行表, 元数据
+    被忽略 (`docs/167` §7 那一行) —— 所以这里跟 `;` 注释和 `!` 元数据定义一样**整行跳过**。
+    不跳的话它会落到 `lower()` 的兜底 `Unsupported` 上: 于是 `--debug` 的 IR **链不出来**,
+    而文档说的是"被忽略"。两边都得跳 (`parse_ll` 顶层与 `parse_func` 内各一处)。
     """
     globals_, funcs, externs, lines, i = [], [], [], text.split("\n"), 0
     while i < len(lines):
         line = lines[i].strip()
         i += 1
-        if not line or line[0] in ";!":
+        if not line or line[0] in ";!" or line.startswith("#dbg_"):
             continue
         if line.startswith("declare "):
             m = re.match(r"declare\s+(?:[\w.]+\s+)*?(@[-A-Za-z0-9_.]+)\s*\(", line)
@@ -334,7 +363,7 @@ def _parse_func(lines: list[str], start: int) -> tuple[Func, int]:
         i += 1
         if line == "}":
             break
-        if not line or line[0] in ";!":
+        if not line or line[0] in ";!" or line.startswith("#dbg_"):
             continue
         if line.endswith(":") and "=" not in line and not line.startswith("%"):
             cur = Block(line[:-1])
@@ -347,7 +376,10 @@ def _parse_func(lines: list[str], start: int) -> tuple[Func, int]:
             cur = Block("entry")
             fn.blocks.append(cur)
         m2 = re.match(r"^(%[-A-Za-z0-9_.]+)\s*=\s*(.*)$", line)
-        cur.instrs.append(Instr(m2.group(1), m2.group(2).strip()) if m2 else Instr(None, line))
+        if m2:
+            cur.instrs.append(Instr(m2.group(1), strip_meta(m2.group(2).strip())))
+        else:
+            cur.instrs.append(Instr(None, strip_meta(line)))
     return fn, i
 
 

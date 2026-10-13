@@ -332,6 +332,133 @@ def test_gc_l2_epoch_bounds_the_heap():
     print(f"      alpha 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 块纪元是真的")
 
 
+#: `--debug` 那一对（`docs/210` §7 的"**L0 与 L2 都没有在 `debug` 档下核过**"）。
+#: 两层的形状各取一个**已经在别处立住**的：L0 那份把唯一一个 `alloc` 提到栈上
+#: （产物里连分配器都不剩），L2 那份靠前沿回退跑完 40000 圈。`--debug` 只该**多加元数据**。
+_DEBUG_L0_SRC = """module dbgl0
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let a: ptr = alloc(16);
+    store8(a, 0, 5);
+    syscall4(60, load8(a, 0) as u64, 0, 0);
+}
+"""
+
+_DEBUG_L2_SRC = """module dbgl2
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let n: u32 = 64;
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 40000 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 1);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    if s == 40000 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+
+
+@test
+def test_debug_flag_adds_metadata_and_nothing_else():
+    """`--debug` **只加元数据** —— L0 与 L2 在 debug 档下产物**逐字节不变**（`docs/210` §7）。
+
+    **Why**：`docs/210` §7 那句"L0 与 L2 都没有在 `debug` 档下核过"底下压着一个**真 bug**：
+    `lomelf` 把 `#dbg_declare` 当成**不支持的指令**直接拒 —— 于是 `--debug` 的 IR
+    **链不出来**，而 `docs/167` §7 白纸黑字写的是"元数据**被忽略**、原生产物没有行表"。
+    文档与实现对不上，而链接器有**两套**（`tools/lomelf.py` 与 `loment/tools/lomelf.lomt`），
+    所以"核过"要**四处**都算上（另一半在下面 `test_debug_ir_links_the_same_through_the_mirror`）。
+
+    **How to apply**：三个断言缺一条就是"顺手报个绿"：
+      * `--debug` 的 IR 与不带的那一份**必须不同**（否则这条判据什么也没测到）；
+      * `#dbg_declare` 那一行**必须在**（元数据真的发了，不是"两边都没发"）；
+      * 两份 IR 过 `lomelf` 之后**字节相同**，且**跑起来退出码一致** —— 静态那一半
+        覆盖不了"元数据漏进机器码"这种错法（行表本来就不进 `.text`，但记录**被当成指令**
+        时会，见这条判据没有它时的样子）。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for tag, src, want_rc in (("l0", _DEBUG_L0_SRC, 5), ("l2", _DEBUG_L2_SRC, 7)):
+            ll = {}
+            for dbg in (False, True):
+                f = td / f"{tag}{int(dbg)}.lomt"
+                f.write_text(src, encoding="utf-8", newline="\n")
+                mod = lomentc.load(f)
+                deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+                assert not lomentc.check(mod, deps=deps), f"{tag}: 自己检查不过"
+                ll[dbg] = lomentc.emit_llvm(mod, ROOT, deps, debug=dbg)
+            assert ll[True] != ll[False], f"{tag}: `--debug` 没往 IR 里加任何东西 —— 这条判据在空转"
+            assert "#dbg_declare" in ll[True], f"{tag}: `--debug` 的 IR 里没有 `#dbg_declare`"
+            assert "#dbg_declare" not in ll[False], f"{tag}: 不带 `--debug` 也发了调试记录"
+            nat = {}
+            for dbg in (False, True):
+                nat[dbg], _ = lomelf.compile_ll(ll[dbg])
+            assert nat[True] == nat[False], (
+                f"{tag}: `--debug` 改了原生产物（{len(nat[True])}B vs {len(nat[False])}B）—— "
+                "元数据没被忽略，漏进机器码了")
+            print(f"      {tag}: `--debug` 的 IR 多 {len(ll[True]) - len(ll[False])}B 元数据，"
+                  f"产物 {len(nat[True])}B 逐字节同")
+            if not (_clang() and _wsl()):
+                continue
+            got = []
+            for dbg in (False, True):
+                elf = td / f"{tag}{int(dbg)}.native"
+                elf.write_bytes(nat[dbg])
+                got.append(_run_bin(elf, f"{tag}{int(dbg)}", td, timeout=30)[0])
+            assert got == [want_rc, want_rc], (
+                f"{tag}: debug 档下跑起来不一样 ({got}) —— 期望两只都是 {want_rc}"
+                "（L0 那份是「提干净了、分配器都不剩」，L2 那份是「前沿真回退了」）")
+            print(f"      {tag}: 两个档位都跑出 rc={want_rc}")
+
+
+@test
+def test_debug_ir_links_the_same_through_the_mirror():
+    """**镜像链接器**对 `--debug` 的同一条判据（`docs/210` §7）。
+
+    **Why**：参考实现与自举镜像**各有一套**解析器，而"元数据被忽略"这件事要**两边都成** ——
+    只修参考侧的话，用户手上那份（包内那只，`loment/tools/lomelf.lomt`）照样链不出来。
+    这条判据喂给镜像的正是 `--debug` 的那一份 IR，产物必须与参考**逐字节相同**。
+
+    **How to apply**：语料取 L2 那一份 —— 它的 IR 同时含 `#dbg_declare`、带 `, !dbg !N`
+    附着的 `icmp`/`store`，以及收集器整段运行期，是"元数据混进指令流"最容易出错的形状。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "dbgl2.lomt"
+        src.write_text(_DEBUG_L2_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        ll_text = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
+        assert "#dbg_declare" in ll_text, "语料没进 debug 档，这条判据在空转"
+        want, _ = lomelf.compile_ll(ll_text)
+        llrepo = ROOT / "loment" / "build" / "_mirror_dbg.ll"
+        elfrepo = ROOT / "loment" / "build" / "_mirror_dbg.elf"
+        llrepo.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            llrepo.write_text(ll_text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, "loment/build/_mirror_dbg.ll", "loment/build/_mirror_dbg.elf")
+            assert rc == 0, f"镜像拒了 `--debug` 的 IR (退出 {rc}): {err[-300:]}"
+            nat = elfrepo.read_bytes()
+        finally:
+            elfrepo.unlink(missing_ok=True)
+            llrepo.unlink(missing_ok=True)
+        assert nat == want, f"镜像的 `--debug` 产物与参考不同 ({len(nat)}B vs {len(want)}B)"
+        print(f"      `--debug` 的 IR: 镜像与参考都出 {len(nat)}B，逐字节同")
+
+
 #: 只测一件事的 IR：`%j = phi [.., %i]` 与 `%i = phi [.., %i2]` 是**同一前驱上的一对**，
 #: `%j` 因此每次回边取 `%i` 的**旧值**。转 3 圈后 `%j` 必须是 2。
 _PHI_PAIR_IR = '''define i32 @_start() {
