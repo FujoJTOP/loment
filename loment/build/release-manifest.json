@@ -2282,12 +2282,12 @@
    "sha256": "9ca16709ff3478b08c7e6d7d2f9ee423cdb2b3ec87913568550a9dd348dbcc0b"
   },
   {
-   "path": "docs/240-loment-internet.md",
-   "sha256": "062588b0b09673af4c422f9203f9867cdf6bc6d605b1c7b11c02bd08e4e52cb6"
+   "path": "docs/241-loment-internet.md",
+   "sha256": "2b9932e45739d602254c2c9844941c95c28ff7a04c62f8f8c8c71f320456c855"
   },
   {
-   "path": "docs/241-loment-os.md",
-   "sha256": "2dcd38fbc9298312581bbabaa5f2f95c1145a408d87d8e17098734d9c5275660"
+   "path": "docs/242-loment-os.md",
+   "sha256": "8badc2a4deb9c95492afcc0e81987f32ce1d0df96b2c33fed1a00f4acb6e6085"
   },
   {
    "path": "docs/manual/index.md",

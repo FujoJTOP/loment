@@ -1,4 +1,4 @@
-# 241 · `os`：第四个随包库，判据是**与 CPython 在同一个环境里对跑**
+# 242 · `os`：第四个随包库，判据是**与 CPython 在同一个环境里对跑**
 
 > 状态: **已落地**（2026-10-13）· 自检: `tools/loment_os_test.py` 4/4 ·
 > 模块自检 4 份全过（`python tools/loment.py test <模块>`）· 门禁: `ci.py --static-only`
