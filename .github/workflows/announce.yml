@@ -1,0 +1,192 @@
+# 播报 —— release 一发布就往 Mastodon 发一条
+#
+# ## 为什么要放在这里，而不是手工发
+#
+# 发布稿最该发出去的那一刻，恰好是手上最忙的那一刻：`gh release create` 之后还要核 asset、
+# 改 README、回 issue。手工发社交平台的结果通常就是"这次先算了" —— 而发布公告的价值
+# 全在**准时**上：隔三天再发的 0.1.4.5，不如不发。
+#
+# ## 它发什么
+#
+# 标题一行 + 发布说明的**第一段** + 链接 + 话题标签。**不整篇转**：release notes 是一份
+# 文档（0.1.4.5 那份带安装表、带已知缺陷清单），塞进 500 字符里只会剩下一堆乱码。
+# 想换口吻就在发布说明里把第一段写好 —— 这一条只搬它。
+#
+# 字数按 Mastodon 的口径算：**每个 URL 一律记 23 字符**，不按它真实长度。第一段会被截到
+# 刚好放得下，在词边界断，末尾加省略号。
+#
+# ## 它刻意**不**做的三件事
+#
+# * **预发布不发**（`prerelease` 直接跳过）。`v0.1.4.5-pre` 那种是预告，把预告发到社交平台
+#   会被读成既成事实 —— 那正是 `docs/202` 记账时最怕的一类错。
+# * **同一条不发两次**：先读自己最近 40 条嘟文，正文里已经有这次 release 的链接就直接退出。
+#   所以重跑 workflow 不会刷屏，补发脚本也不怕手滑跑两遍。
+# * **没配密钥不报错**：`MASTODON_INSTANCE` / `MASTODON_TOKEN` 缺一个就打印一行、退出 0。
+#   一个社交播报不该让发布流程变红。
+#
+# ## 要配什么
+#
+# 仓库 → Settings → Secrets and variables → Actions：
+#
+#   Variables:  `MASTODON_INSTANCE`  例：https://fosstodon.org（**不带**结尾斜杠也行）
+#               `MASTODON_TAGS`      可选。不填就用下面那串默认标签
+#   Secrets:    `MASTODON_TOKEN`     那个实例上的 access token
+#
+# token 在实例的 Preferences → Development 建，勾 **read:accounts**（用来认自己是谁，
+# 也用来查"这条发过没有"）、**read:statuses**、**write:statuses**。
+#
+# ## 怎么试
+#
+# Actions → announce → Run workflow，填一个**已经存在**的 tag，`dry_run` 留 true ——
+# 只把要发的那段打出来，不碰 Mastodon。看着顺眼了再跑一遍 dry_run=false，
+# 或者干脆等下次发版自动发。
+
+name: announce
+
+on:
+  release:
+    types: [published]
+  # 补发（这条流水线落地之前已经发过的那几版）与试跑，都走这一支。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已经存在的 release tag"
+        required: true
+      dry_run:
+        description: "只打印，不发出去"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  toot:
+    runs-on: ubuntu-latest
+    # 预发布不发。手工触发那一支没有 `release` 对象，`!null` 为真 —— 那条路是显式要发的。
+    if: ${{ !github.event.release.prerelease }}
+    steps:
+      - name: 组一条，发出去
+        env:
+          INSTANCE: ${{ vars.MASTODON_INSTANCE }}
+          TOKEN: ${{ secrets.MASTODON_TOKEN }}
+          TAGS: ${{ vars.MASTODON_TAGS }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          NAME: ${{ github.event.release.name }}
+          BODY: ${{ github.event.release.body }}
+          URL: ${{ github.event.release.html_url }}
+          DRY: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+
+          LIMIT = 500                      # Mastodon 默认上限
+          SHORT = 23                       # 它给每个 URL 记的字符数
+          TAGS_FALLBACK = "#ProgrammingLanguages #SystemsProgramming"
+
+          instance = (os.environ.get("INSTANCE") or "").strip().rstrip("/")
+          token = (os.environ.get("TOKEN") or "").strip()
+          tags = (os.environ.get("TAGS") or "").strip() or TAGS_FALLBACK
+          tag = (os.environ.get("TAG") or "").strip()
+          name = (os.environ.get("NAME") or "").strip()
+          body = os.environ.get("BODY") or ""
+          url = (os.environ.get("URL") or "").strip()
+          dry = (os.environ.get("DRY") or "").strip().lower() in ("1", "true", "yes")
+
+          if not instance or not token:
+              print("MASTODON_INSTANCE / MASTODON_TOKEN 没配齐 —— 跳过播报。")
+              sys.exit(0)
+
+          # 手工补发那一支：事件里没有 release 对象，就从 GitHub 拉一份。
+          if tag and not url:
+              req = urllib.request.Request(
+                  "https://api.github.com/repos/%s/releases/tags/%s"
+                  % (os.environ.get("REPO", ""), urllib.parse.quote(tag)))
+              req.add_header("Authorization", "Bearer " + (os.environ.get("GH_TOKEN") or ""))
+              req.add_header("Accept", "application/vnd.github+json")
+              with urllib.request.urlopen(req) as r:
+                  rel = json.loads(r.read().decode())
+              name = (rel.get("name") or "").strip()
+              body = rel.get("body") or ""
+              url = rel.get("html_url") or url
+
+          name = name or tag
+
+
+          def counted(text):
+              """Mastodon 的计长口径：URL 一律算 23。"""
+              return len(text) - sum(len(m) - SHORT for m in re.findall(r"https?://\S+", text))
+
+
+          def first_paragraph(md):
+              """发布说明的第一段 —— 跳过标题、图片、表格与分隔线，第一个成段的文字块。"""
+              out = []
+              for raw in md.split("\n"):
+                  line = raw.strip()
+                  if not line or line.startswith(("#", "![", "|", "<!--", "---", "***")):
+                      if out:
+                          break
+                      continue
+                  out.append(line)
+              text = " ".join(out)
+              text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)   # [文字](链接) -> 文字
+              text = text.replace("**", "").replace("`", "").replace("*", "")
+              return re.sub(r"\s+", " ", text).strip()
+
+
+          head = "%s is out." % name
+          tail = "\n\n%s" % url
+          if tags:
+              tail += "\n\n" + tags
+          budget = LIMIT - counted(head) - counted(tail) - 4        # 4 = 两处空行
+
+          para = first_paragraph(body)
+          if counted(para) > budget:
+              cut = para[:budget]
+              para = cut.rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+
+          status = head + ("\n\n" + para if para else "") + tail
+
+          if counted(status) > LIMIT:
+              print("组出来的还是超长（%d）—— 不改了，直接报错。" % counted(status), file=sys.stderr)
+              sys.exit(1)
+
+          print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
+          print(status)
+          print("----------------------")
+
+          if dry:
+              print("dry_run —— 没有发出去。")
+              sys.exit(0)
+
+
+          def api(path, data=None):
+              req = urllib.request.Request(
+                  instance + path,
+                  data=urllib.parse.urlencode(data).encode() if data else None)
+              req.add_header("Authorization", "Bearer " + token)
+              if data:
+                  req.add_header("Content-Type", "application/x-www-form-urlencoded")
+              with urllib.request.urlopen(req) as r:
+                  return json.loads(r.read().decode())
+
+
+          # 同一条不发两次。读不到就照发 —— 重一条比漏一条好。
+          try:
+              me = api("/api/v1/accounts/verify_credentials")
+              for s in api("/api/v1/accounts/%s/statuses?limit=40" % me["id"]):
+                  if url and url in (s.get("content") or ""):
+                      print("这条已经发过了 —— 什么都不做。")
+                      sys.exit(0)
+          except urllib.error.HTTPError as e:
+              print("读不到最近的嘟文（%s）—— 直接发。" % e.code, file=sys.stderr)
+
+          try:
+              r = api("/api/v1/statuses", {"status": status, "visibility": "public"})
+          except urllib.error.HTTPError as e:
+              print("Mastodon 拒了：%s %s" % (e.code, e.read().decode()[:400]), file=sys.stderr)
+              sys.exit(1)
+          print("发出去了：%s" % (r.get("url") or r.get("uri")))
+          PY
