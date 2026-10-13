@@ -167,7 +167,7 @@ async function applyLanguageHint(doc) {
     await vscode.languages.setTextDocumentLanguage(doc, want);
   } catch (e) {
     applied.delete(key);
-    out().appendLine(`切换语言失败 (${want}): ${e}`);
+    out().appendLine(`Language switch failed (${want}): ${e}`);
   }
 }
 
@@ -246,7 +246,7 @@ async function runExec(name, cmd, args, cwd, matcher) {
 function currentFile() {
   const ed = vscode.window.activeTextEditor;
   if (!ed) {
-    vscode.window.showWarningMessage('Loment: 请先打开一个 .lomt 文件');
+    vscode.window.showWarningMessage('Loment: open a .lomt file first');
     return undefined;
   }
   return ed.document.uri.fsPath;
@@ -337,8 +337,8 @@ async function startClient(context) {
     const serverPath = resolveServerPath();
     if (!serverPath) {
       vscode.window.showWarningMessage(
-        'Loment: 找不到 tools/loment_lsp.py（可在设置 loment.serverPath 里指定绝对路径，'
-        + '或改用 loment.serverCommand/serverArgs 指向 Loment 版语言服务）');
+        'Loment: cannot find tools/loment_lsp.py (set loment.serverPath to an absolute path, '
+        + 'or use loment.serverCommand/serverArgs to point at a Loment language server)');
       return undefined;
     }
     args = [serverPath];
@@ -353,7 +353,7 @@ async function startClient(context) {
     { documentSelector: [{ scheme: 'file', language: 'loment' }], outputChannel: chan });
   context.subscriptions.push(c);
   await c.start();
-  chan.appendLine(`语言服务已启动: ${label}`);
+  chan.appendLine(`Language server started: ${label}`);
   return c;
 }
 
@@ -499,7 +499,7 @@ function activate(context) {
           vscode.window.showErrorMessage(`Loment: ${inv.error}`);
           return undefined;
         }
-        out().appendLine(`调试适配器: ${inv.cmd} ${inv.args.join(' ')}（${inv.how}）`);
+        out().appendLine(`Debug adapter: ${inv.cmd} ${inv.args.join(' ')} (${inv.how})`);
         return new vscode.DebugAdapterExecutable(inv.cmd, inv.args);
       },
     }));
@@ -508,7 +508,7 @@ function activate(context) {
     startClient(context).then((c) => {
       client = c;
     }, (e) => {
-      vscode.window.showErrorMessage(`Loment 语言服务启动失败: ${e}`);
+      vscode.window.showErrorMessage(`Loment: the language server failed to start: ${e}`);
     });
   }
 }
