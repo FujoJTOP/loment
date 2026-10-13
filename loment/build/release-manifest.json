@@ -799,11 +799,11 @@
   },
   {
    "path": "tools/vscode_ext.py",
-   "sha256": "81232ea451f891b48037887248e29386062b3aec5b6784447224e0715b743f3b"
+   "sha256": "da359ea2e7834f5223d3d372de96a4b47c2868f5d88c13fe58ca8ee877e8e4f9"
   },
   {
    "path": "tools/vscode_ext_test.py",
-   "sha256": "53f9119cc3b48f0a23c54689668e8de499be68068c2ddb0813e198171a1a377b"
+   "sha256": "de6a0b7ed240a59c288e3134ae2b600778ac4f998a08eb5909a078b790f07281"
   },
   {
    "path": "tools/loment_dap.py",
@@ -1251,7 +1251,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "10bda4a99152a31f62d86e9796f5f25b8d69cdd715b995148ca1bcbbaee32351"
+   "sha256": "ec0fba5b22d9dd8108ff01253017048e0724803722a1af95336606944f7cca21"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1271,7 +1271,7 @@
   },
   {
    "path": "editors/vscode/README.md",
-   "sha256": "2ab0ed66bf8fb417237057937aa7ae0abd8037c80dad89243091c6c4f30ac487"
+   "sha256": "1850b3f1aa82794dbd89c76921d4ade7ce2a03f8277a5c1409731a46e31e7480"
   },
   {
    "path": "editors/vscode/src/build-cmd.js",
@@ -1867,7 +1867,7 @@
   },
   {
    "path": "docs/155-loment-kernel-handoff.md",
-   "sha256": "7996e7b3dcc47b547f457f3b38812dafd46e362794c1cec6ae0bf1d2447236db"
+   "sha256": "593dd2af1bd6c595346297a502da67965b9003973095d0d2dacb4057329105e3"
   },
   {
    "path": "docs/156-loment-monomorphization.md",
@@ -1875,7 +1875,7 @@
   },
   {
    "path": "docs/157-loment-editor-hosts.md",
-   "sha256": "78319e824d23ff6794cd16bb8546b2d6bc984ef40e2ce9b243e33f327151b933"
+   "sha256": "383e7d5cc1ca005c82f923b4096692ac1eb7b1ec1941e3fc7dca048fedd528c5"
   },
   {
    "path": "docs/158-loment-freeze.md",
@@ -1931,7 +1931,7 @@
   },
   {
    "path": "docs/171-loment-publish-outlets.md",
-   "sha256": "e2450e17282c2408cb129e7d2e7ec796d07f609be5ed8f3c4053e3942fdc43c9"
+   "sha256": "b845d0d576e760aaa06b4f30ea8a3ee972e0af52a7770859df46ed1a3b6d4ca4"
   },
   {
    "path": "docs/172-loment-014-pre1.md",
