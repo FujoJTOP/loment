@@ -169,6 +169,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
                  "loment_libl_test",
+                 # LibL 家族第三个包 internet (docs/241): 对照物是 CPython 标准库
+                 # (ipaddress / urllib.parse / http.client) + **真起一个 http.server**。
+                 "loment_internet_test",
+                 # 第四个包 os (docs/242): 探针编成 ELF 与 CPython 的 os/time **在同一个
+                 # Linux 环境里**对跑 (Windows 走 WSL, Linux 直接跑)。
+                 "loment_os_test",
                  # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
@@ -232,6 +238,11 @@ SHARD_COST = {
     "loment_err_test": 6.6,
     "loment_std_test": 1.0,
     "loment_libl_test": 3.0,
+    # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
+    # 真 http.server。本机 6.9s。
+    "loment_internet_test": 10.0,
+    # 实测: 4 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑。本机 2.5s。
+    "loment_os_test": 5.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
     "loment_net_test": 0.2,          # 实测: 读四份表 + 四条自证, 不编译
