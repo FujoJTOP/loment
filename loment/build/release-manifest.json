@@ -795,7 +795,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "439e499663737251b7bc287d2adeeca0db36f05cb5d853e174efdbf0aef13843"
+   "sha256": "3af54374580cdc2b047d736ee01d5c8a0591beee8bcaf3f89e9570da420c5414"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -872,6 +872,14 @@
   {
    "path": "tools/loment_pe_test.py",
    "sha256": "01ef083853dfd826c5d08044341e05d6250d80eb17934827960616f5e55a6173"
+  },
+  {
+   "path": "tools/lvm.py",
+   "sha256": "576eee6d22877eab0ee9ed2ab6c4eb95a98b60483c0d443008e4d28c33c312f8"
+  },
+  {
+   "path": "tools/lvm_test.py",
+   "sha256": "d505addd6b3de3e96e1bfaa8ebf54f6d82d29fef417205a4b1899deb42cf2cff"
   },
   {
    "path": "tools/loment_net_test.py",
@@ -1207,7 +1215,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "f477ca209b0db5d72c53c88f3fef91f157b3b52dfcdc337f27088581619571f4"
+   "sha256": "58e2c031d5a149e58b8bfdc5b31a2630669366796dd7790c3ca4b38518dc38eb"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -2202,6 +2210,10 @@
    "sha256": "aefe0486ecfc7454d54fa5a1f0bbb9678f38e8483a89082a5d053ed8198decc1"
   },
   {
+   "path": "docs/237-lvm-t0-interpreter.md",
+   "sha256": "3c8ed59d6ac28b247ebfad1999a7c28a04823ddb95fbb42aff27b30a52d124f9"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "f795619713839b84ed86365c50d9eebe7f6e4fdc5b3fa9da2d10251e87158cc0"
   },
@@ -2407,7 +2419,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "188d98db940bacf4e86896824a10aa45d33c526e197095d2c0719c2ab6d66f59"
+   "sha256": "3f7c04356d9e6217dd6f5eff71655fe7b3be2b6b8649ad99937231475c82cae1"
   },
   {
    "path": "tools/loment_status.py",
