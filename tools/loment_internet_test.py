@@ -729,6 +729,262 @@ def test_dns_wire_format():
     print(f"      dns: {len(_DNS_NAMES)} 个域名的编码 + 一条查询报文与 RFC 1035 推导一致")
 
 
+# ---------------------------------------------------------------- 防守 (审计回归)
+#
+# 这一组对着一次审计里**实测**出来的缺陷 (issue #284..#297)。口径与前几条一致: 探针编成
+# 原生可执行文件跑。期望值不是"我们现在的输出", 而是**缺陷的反面**: 越界写要变成"一个字节
+# 都不写"、回绕要变成"拒绝"、越界的选择子要变成 0。每一条都在修之前实测过 (见对应 issue)。
+
+def _hardening_prelude() -> str:
+    """三个探针共用的抓手: 填缓冲、数写出去多少字节、写一个字面量。"""
+    return """
+fn fillv(p: ptr, n: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n { store8(p, i, v as u8); i = i + 1; }
+    return 0;
+}
+
+fn changed(p: ptr, n: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n { if load8(p, i) != (v as u8) { c = c + 1; } i = i + 1; }
+    return c;
+}
+
+fn putl(p: ptr, o: u32, s: str) -> u32 {
+    let i: u32 = 0;
+    while i < str_len(s) { store8(p, o + i, str_byte(s, i) as u8); i = i + 1; }
+    return o + str_len(s);
+}
+"""
+
+
+def _hard_head(use: str) -> str:
+    return _head(use).replace(_prelude(), _prelude() + _hardening_prelude())
+
+
+def _hardening_http_probe() -> str:
+    return _hard_head("use http") + """
+fn _start() {
+    // #284 一个让 `w + sz` 回绕的块长: 先 10 字节, 再 0xFFFFFFF6 (= 2^32 - 10)。
+    // 修之前: cap=64 却能写上千字节。修之后: 先拒, 只留下第一块那 10 字节 (<= cap)。
+    let b: ptr = alloc(2048);
+    fillv(b, 2048, 187);
+    let p: u32 = putl(b, 0, "A");
+    store8(b, p, 13 as u8);
+    store8(b, p + 1, 10 as u8);
+    let q: u32 = putl(b, p + 2, "BBBBBBBBBB");
+    store8(b, q, 13 as u8);
+    store8(b, q + 1, 10 as u8);
+    let hp: u32 = putl(b, q + 2, "FFFFFFF6");
+    store8(b, hp, 13 as u8);
+    store8(b, hp + 1, 10 as u8);
+    let o: ptr = alloc(4096);
+    fillv(o, 4096, 170);
+    w("CHUNK_WRAP|"); wd(http_chunked_decode(b, 0, 1024, o, 64));
+    w("|"); wd(changed(o, 4096, 170)); w("\\n");
+
+    // #284 块长写成 2^32 (`"100000000"`)。修之前回绕成 0 -> 被当成"最后一块",
+    // body 被悄悄截断。修之后: 拒。
+    let b2: ptr = alloc(256);
+    fillv(b2, 256, 187);
+    let s2: u32 = putl(b2, 0, "100000000");
+    store8(b2, s2, 13 as u8);
+    store8(b2, s2 + 1, 10 as u8);
+    let o2: ptr = alloc(64);
+    fillv(o2, 64, 170);
+    w("CHUNK_2P32|"); wd(http_chunked_decode(b2, 0, s2 + 2, o2, 64));
+    w("|"); wd(changed(o2, 64, 170)); w("\\n");
+
+    // #287 keep_alive + 四位端口: 任何小于真实长度的 cap 都必须被拒, 且写出去的字节
+    // 不得超过 cap。`full` 是 cap 给足时的长度; `bad` 是违规次数。
+    let pr: ptr = alloc(256);
+    fillv(pr, 256, 170);
+    let full: u32 = http_req_build(pr, 256, "GET", "/", "h", 8080, 1);
+    let bad: u32 = 0;
+    let k: u32 = 1;
+    while k < full {
+        let bb: ptr = alloc(256);
+        fillv(bb, 256, 170);
+        let r: u32 = http_req_build(bb, k, "GET", "/", "h", 8080, 1);
+        if r != HTTP_NO && (changed(bb, 256, 170) > k || r > k) {
+            bad = bad + 1;
+        }
+        k = k + 1;
+    }
+    w("REQ_KA|"); wd(full); w("|"); wd(bad); w("\\n");
+
+    // #288 超 u32 的 Content-Length 必须拒; 正常值照收。
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let h1: ptr = alloc(64);
+    let n1: u32 = putl(h1, 0, "Content-Length: 4294967296");
+    w("CL_2P32|"); wd(http_hdr_dec(h1, 0, n1, "Content-Length", oo, ol)); w("\\n");
+    let h2: ptr = alloc(64);
+    let n2: u32 = putl(h2, 0, "Content-Length: 99999999999");
+    w("CL_BIG|"); wd(http_hdr_dec(h2, 0, n2, "Content-Length", oo, ol)); w("\\n");
+    let h3: ptr = alloc(64);
+    let n3: u32 = putl(h3, 0, "Content-Length: 42");
+    w("CL_OK|"); wd(http_hdr_dec(h3, 0, n3, "Content-Length", oo, ol)); w("\\n");
+
+    // #292 只发 LF 的头, 而 body 里带 CRLF CRLF。头结束是**空行那两个 LF 里的第一个**
+    // (偏移 20), body 从 22 起 —— 修之前会认到 body 里的 26。
+    let m: ptr = alloc(256);
+    let a1: u32 = putl(m, 0, "HTTP/1.0 200 OK");
+    store8(m, a1, 10 as u8);
+    let a2: u32 = putl(m, a1 + 1, "X: 1");
+    store8(m, a2, 10 as u8);
+    store8(m, a2 + 1, 10 as u8);
+    let a3: u32 = putl(m, a2 + 2, "BODY");
+    store8(m, a3, 13 as u8);
+    store8(m, a3 + 1, 10 as u8);
+    store8(m, a3 + 2, 13 as u8);
+    store8(m, a3 + 3, 10 as u8);
+    let tot: u32 = putl(m, a3 + 4, "TAIL");
+    w("HDR_LF|"); wd(http_hdr_end(m, 0, tot));
+    w("|"); wd(http_body_start(m, 0, tot)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _hardening_dns_probe() -> str:
+    return _hard_head("use dns") + """
+fn _start() {
+    // #285 一个 63 字节的标签 + cap=8: 必须拒, 而且**一个字节都不写**
+    // (修之前写 64 字节, 然后才返回 DNS_NO)。
+    let b: ptr = alloc(256);
+    fillv(b, 256, 170);
+    let r: u32 = dns_name_encode(\"""" + ("A" * 63) + """.B", b, 8);
+    w("ENC_CAP|"); wd(r); w("|"); wd(changed(b, 256, 170)); w("\\n");
+
+    // #294 文档写着"允许结尾的 `.`" —— 修之前这条写法反而被拒。
+    let c: ptr = alloc(64);
+    w("ENC_DOT|"); wd(dns_name_encode("a.", c, 64)); w("\\n");
+    w("ENC_ROOT|"); wd(dns_name_encode(".", c, 64)); w("\\n");
+    w("ENC_EMPTY|"); wd(dns_name_encode("", c, 64)); w("\\n");
+    w("ENC_DBLDOT|"); wd(dns_name_encode("a..b", c, 64)); w("\\n");
+    w("ENC_OK|"); wd(dns_name_encode("a.b", c, 64)); w("\\n");
+
+    // #291 which 只有 0..3; 越界原来会去读 12 字节头之外。
+    let m: ptr = alloc(64);
+    fillv(m, 64, 0);
+    store8(m, 20, 190 as u8);
+    store8(m, 21, 186 as u8);
+    w("HC_OOR|"); wd(dns_hdr_count(m, 8)); w("\\n");
+    w("HC_OK|"); wd(dns_hdr_count(m, 1)); w("\\n");
+
+    // #293 保留的标签长度 (64..191) 必须拒。
+    let m2: ptr = alloc(256);
+    fillv(m2, 256, 0);
+    store8(m2, 0, 100 as u8);
+    store8(m2, 101, 0 as u8);
+    let out: ptr = alloc(256);
+    w("DEC_LEN100|"); wd(dns_name_decode(m2, 102, 0, out, 256)); w("\\n");
+
+    // #297 0xE0..0xFF 不是指针 (是保留值), 指针只能往回指。
+    let m3: ptr = alloc(64);
+    fillv(m3, 64, 0);
+    store8(m3, 0, 224 as u8);
+    store8(m3, 1, 0 as u8);
+    w("DEC_E0|"); wd(dns_name_decode(m3, 64, 0, out, 256)); w("\\n");
+    let m4: ptr = alloc(64);
+    fillv(m4, 64, 0);
+    store8(m4, 0, 192 as u8);
+    store8(m4, 1, 10 as u8);
+    w("DEC_FWD|"); wd(dns_name_decode(m4, 64, 0, out, 256)); w("\\n");
+    let m5: ptr = alloc(64);
+    fillv(m5, 64, 0);
+    let n5: u32 = dns_name_encode("example.com", m5, 64);
+    store8(m5, n5, 192 as u8);
+    store8(m5, n5 + 1, 0 as u8);
+    w("DEC_BACK|"); wd(dns_name_decode(m5, n5 + 2, n5, out, 256)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _hardening_uri_probe() -> str:
+    return _hard_head("use uri") + """
+fn _start() {
+    // #290 分量只有 0..5。修之前 `which = 6` 会读到记录外的槽位。
+    let s: ptr = alloc(64);
+    let n: u32 = putl(s, 0, "http://h/p#f");
+    let rec: ptr = alloc(64);
+    fillv(rec, 64, 170);
+    uri_parse(s, 0, n, rec);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    w("PART6|"); wd(uri_part(rec, 6, oo, ol)); w("\\n");
+    w("PART0|"); wd(uri_part(rec, 0, oo, ol)); w("\\n");
+    w("PART4|"); wd(uri_part(rec, 4, oo, ol)); w("\\n");
+    w("PART5|"); wd(uri_part(rec, 5, oo, ol)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_http_parser_hardening():
+    """审计回归 #284 / #287 / #288 / #292: 回绕的块长、keep-alive 的容量估算、
+    超 u32 的 Content-Length、LF-only 的头结束 —— 四条都必须 fail closed。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_hardening_http_probe(), "hard_http", Path(tds)))
+    want = "\n".join([
+        "CHUNK_WRAP|4294967295|10",     # 拒; 只留下第一块那 10 字节 (<= cap 64)
+        "CHUNK_2P32|4294967295|0",      # 拒; 一个字节都不写 (不再回绕成 0 当结尾)
+        "REQ_KA|56|0",                  # 真实长度 56; cap < 57 一律被拒, 越界写 0 次
+        "CL_2P32|4294967295",           # 2^32 不再读成 0
+        "CL_BIG|4294967295",            # 99999999999 不再读成 1215752191
+        "CL_OK|42",                     # 正常值照收
+        "HDR_LF|20|22",                 # LF 结束的头: 20 与 22, 不是 body 里的 26 与 30
+    ])
+    diff = _first_diff(got, want)
+    assert not diff, f"http 防守用例不一致 @ {diff}"
+    print("      http: 4 条审计缺陷 (块长回绕 / keep-alive 估算 / Content-Length 回绕 / LF 头结束) 全部 fail closed")
+
+
+@test
+def test_dns_parser_hardening():
+    """审计回归 #285 / #291 / #293 / #294 / #297: 容量先查后写、越界的选择子、
+    保留的标签长度、文档说允许的结尾 `.`、指针的范围与方向。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_hardening_dns_probe(), "hard_dns", Path(tds)))
+    want = "\n".join([
+        "ENC_CAP|4294967295|0",     # 拒, 且一个字节都不写 (修之前写 64)
+        "ENC_DOT|3",                # "a." -> [1]'a' + 0
+        "ENC_ROOT|1",               # "." -> 根, 一个 0 字节
+        "ENC_EMPTY|1",              # "" 同上
+        "ENC_DBLDOT|4294967295",    # 空标签仍然非法
+        "ENC_OK|5",                 # "a.b" -> [1]'a' [1]'b' 0
+        "HC_OOR|0",                 # which=8 -> 0 (不再读头之外)
+        "HC_OK|0",                  # which=1 且报文全 0 -> 0
+        "DEC_LEN100|4294967295",    # 保留标签长度 100 -> 拒
+        "DEC_E0|4294967295",        # 0xE0 不是指针 -> 拒
+        "DEC_FWD|4294967295",       # 往前指的指针 -> 拒
+        "DEC_BACK|11",              # 往回指的指针照收 -> "example.com"
+    ])
+    diff = _first_diff(got, want)
+    assert not diff, f"dns 防守用例不一致 @ {diff}"
+    print("      dns: 5 条审计缺陷 (容量先查后写 / 越界选择子 / 保留标签长 / 结尾点 / 指针范围) 全部 fail closed")
+
+
+@test
+def test_uri_parser_hardening():
+    """审计回归 #290: 越界的分量选择子不再读记录之外的槽位。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_hardening_uri_probe(), "hard_uri", Path(tds)))
+    want = "\n".join([
+        "PART6|0",      # 越界 -> 拒 (修之前返回 1 并带回记录外的长度)
+        "PART0|1",      # scheme 在场
+        "PART4|0",      # query 缺席
+        "PART5|1",      # fragment 在场
+    ])
+    diff = _first_diff(got, want)
+    assert not diff, f"uri 防守用例不一致 @ {diff}"
+    print("      uri: 越界的分量选择子已拒绝 (不再读记录之外的槽位)")
+
+
 # ---------------------------------------------------------------- 入口
 
 def main(argv: list[str] | None = None) -> int:

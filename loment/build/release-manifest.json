@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_internet_test.py",
-   "sha256": "4c2aad99df5c8a773b8d15dcfe4164c60836097ae1e75b6626d2b2fec1330fa3"
+   "sha256": "8f40f7b79c1d6c5d5c0f9c36a89e5c65e26461d6e927b1876bbdcf0cb343050a"
   },
   {
    "path": "tools/loment_os_test.py",
@@ -707,11 +707,11 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/dns.lomt",
-   "sha256": "09cc380a56b613ebfe3d0973b31f13c882def86a2e498df139b2b74e25b4bb7f"
+   "sha256": "f299747f17183994cb374b5203f60a82e3f8438e0f4be82a27c0a016b53d5d48"
   },
   {
    "path": "lompi/store/internet/0.1.0/http.lomt",
-   "sha256": "16cf1507aa6fc7fddd0a3faa5a62bd062e2b3316e7b7a45ac01932d38ce8d90b"
+   "sha256": "1d08564467aec573cc2cb77aa14feb8046cedc61f9c0c1e9e0109180966d0dd7"
   },
   {
    "path": "lompi/store/internet/0.1.0/internet.lomt",
@@ -739,7 +739,7 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/uri.lomt",
-   "sha256": "970f366d79bf86a60f1c7dd41c0e188c44d6fffcc02b5104ffc5aa256433eebf"
+   "sha256": "6e960e6c6dc1c82766a7903e197d4007cb80a00f339400c77516fc6412408bed"
   },
   {
    "path": "lompi/store/os/0.1.0/os.lomt",
