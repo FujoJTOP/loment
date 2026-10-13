@@ -1251,7 +1251,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "ec0fba5b22d9dd8108ff01253017048e0724803722a1af95336606944f7cca21"
+   "sha256": "4cd2ac57a631d5bee87a8d5e67a3f60d03bde99b2d39cd64b86403d12c91808b"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1271,11 +1271,11 @@
   },
   {
    "path": "editors/vscode/README.md",
-   "sha256": "1850b3f1aa82794dbd89c76921d4ade7ce2a03f8277a5c1409731a46e31e7480"
+   "sha256": "f9252c0c254f5f6275536eae90ab0182e4879608caca1ad39ac6239e66d4cb3d"
   },
   {
    "path": "editors/vscode/src/build-cmd.js",
-   "sha256": "bb42ac83fa3794b665477d84fc8c70be36cd06e36cc1cad2eaa6eae23db32a82"
+   "sha256": "a5ac7edf2cbc3d368e2428aed12dd8cb5be58757277ac1cc517b2898c42ab429"
   },
   {
    "path": "editors/vscode/src/conf-ext.js",
@@ -1283,11 +1283,11 @@
   },
   {
    "path": "editors/vscode/src/debug-cmd.js",
-   "sha256": "701ae0c818199ff6745960972337a74d907573d614c29ad20fdac6714248da11"
+   "sha256": "bbce7c9f025127284f80f3c8dca8ffc641f2241820e8a6903c8fe6518cef28bd"
   },
   {
    "path": "editors/vscode/src/extension.js",
-   "sha256": "569c485dcce52099c35f1145f122e857a168c1fbedcacfc4a10b6e7976545e09"
+   "sha256": "6331f6c490788cfeafe5fcbae752fcef9d8e94194ee674991bc12bd4610ccdc9"
   },
   {
    "path": "editors/vscode/src/grammar-detect.js",
@@ -1931,7 +1931,7 @@
   },
   {
    "path": "docs/171-loment-publish-outlets.md",
-   "sha256": "b845d0d576e760aaa06b4f30ea8a3ee972e0af52a7770859df46ed1a3b6d4ca4"
+   "sha256": "20981f3ea2a6add8ae74e774b9ec8e8a94d76c6185ac20f9ec39b0b4f4a9b04f"
   },
   {
    "path": "docs/172-loment-014-pre1.md",
