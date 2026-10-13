@@ -247,7 +247,7 @@ fn width_conns(code: u32) -> u32 {
 
 fn width_bytes(code: u32) -> u32 {
     if code == 0 {
-        return 1;
+        return 72;                                 // 一个帧长（`docs/240`，`lomzwframe.lomt` 的 FRAME_LEN）
     }
     if code == 1 {
         return 65536;

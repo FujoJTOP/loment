@@ -159,6 +159,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_door_test",
                  # 准入判定（`docs/238`）：两个实现逐字节相同 + 那条不对称
                  "loment_admit_test",
+                 # 零宽那一帧的静态规则 + 两条证伪（`docs/240`）
+                 "loment_zwframe_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
