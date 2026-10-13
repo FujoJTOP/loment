@@ -4896,6 +4896,35 @@ SURFACE_NUMBERS = {
 #: 表里查不到的号落在这一面：**不猜**（`docs/188` 那条"不猜，报错"的同一条纪律 ——
 #: 只是这里没有可报的错，因为"用了本仓运行时没实现的号"在语言里是合法的）。
 SURFACE_OTHER = "other"
+
+#: **联网站点 → 宽度档**（`docs/237`）：每处联网站点按"它要求多少宽度"归到一档。
+#:
+#: 这是**策略**，不是从运行时抄来的事实 —— 所以它**没有**"与运行时逐条判等"那条判据
+#: （`SURFACE_NUMBERS` 有，因为它抄的是 `lomelf.PE_SYSCALLS`）。这里能判的是两条自洽：
+#: ① **覆盖且不多余** —— 对 `SURFACE_NUMBERS` 的 net 集恰好一一对应（少一个号是多出来的
+#: 一道"没归类的联网站点"，多一个号是给不是网络的号配了宽度）；
+#: ② 各档之和 == `surfaces.net`（校验器判得了 —— 它读不到源码，但判得了两处自相矛盾）。
+#:
+#: 四档**从窄到宽**，对齐 `docs/218` §2 那三个刻度与 §11 的"宽度从 0 起"：
+#:   `w0` 只够验证对端字节 —— 同机上的一对端点，**没有陌生对端可以进来**；
+#:   `w1` 一条有界连接 —— 客户端与数据面：对端是它自己挑的**一个**；
+#:   `w2` 多条并发 —— 多路复用本身不搬字节，要的宽度是"同时盯着很多条"；
+#:   `w3` 接受任意对端 —— 对端**由别人挑**，宽度是"谁都能来"。
+#:
+#: **数的是站点，不是能力**：一个单元写了两处 `connect` 就是 `w1: 2` ——
+#: 与 `gc_ladder` 数的是 `alloc` 站点同一条口径。宽度**本身**（同时能持几条、能传多少字节、
+#: 能活多久）不在这里，它是这份组成 + 台账喂出来的**判定**（`docs/218` §2/§11）。
+NET_WIDTH_RUNGS = {
+    53: "w0",                                            # socketpair：同机
+    41: "w1", 42: "w1", 44: "w1", 45: "w1", 46: "w1",    # socket/connect/收发
+    47: "w1", 48: "w1", 51: "w1", 52: "w1", 54: "w1", 55: "w1",
+    7: "w2", 23: "w2", 232: "w2", 233: "w2", 291: "w2",  # poll/select/epoll_*
+    49: "w3", 50: "w3", 43: "w3", 288: "w3",             # bind/listen/accept*
+}
+#: `net_ladder` 的四个**分量**键 = 四档的名字，**从窄到宽**（`docs/237`）。
+#: **自洽的那条**：`w0 + w1 + w2 + w3` 必须等于 `total_net`，且 `total_net` 必须等于
+#: `surfaces.net` —— 两处数的是同一批站点，只是分的粗细不同。
+NET_WIDTH_RUNG_KEYS = ("w0", "w1", "w2", "w3")
 #: 机调用内建。与 `potato.BOUNDARY_BUILTINS` 里 `syscall` 开头那几个一致（那条子集判据钉着）。
 SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
 
@@ -4957,6 +4986,31 @@ def _count_surfaces(mod: Module) -> dict:
         counts[key] = counts.get(key, 0) + 1
     out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
     out["total_sites"] = sum(counts.values())
+    return out
+
+
+def _count_net_ladder(mod: Module) -> dict:
+    """`docs/237`：把**联网站点的宽度组成**写进产物 —— 四档各领走几个站点。
+
+    形状照 `gc_ladder`（四个非负整数 + `total_net`，各档之和必须等于总数），**多一条交叉**：
+    `total_net` 必须等于 `surfaces.net` —— 两处数的是同一批站点，只是分的粗细不同。
+    两条都由**校验器**独立判（它读不到源码，但判得了自相矛盾）。
+
+    口径与 `_count_surfaces` **共用同一遍遍历**（`_machine_call_sites`）：非字面量的号
+    两处都不认 —— 于是"梯子上的站点"与"面上的 net"**同集**，那条交叉不变量才成立。
+    非 net 号不在这条梯上（`NET_WIDTH_RUNGS` 查不到就跳过），**不设 `other` 档**：
+    `other` 是面那一层的兜底，梯子只回答"联网的部分按宽度怎么分"。
+
+    **四档恒在**（哪怕为 0），与 `gc_ladder` 同 —— 键的集合固定，校验器与读者都不用猜。
+    """
+    counts: dict = {}
+    for _line, num in _machine_call_sites(mod):
+        rung = NET_WIDTH_RUNGS.get(num)
+        if rung is None:
+            continue
+        counts[rung] = counts.get(rung, 0) + 1
+    out = {k: counts.get(k, 0) for k in NET_WIDTH_RUNG_KEYS}
+    out["total_net"] = sum(out[k] for k in NET_WIDTH_RUNG_KEYS)
     return out
 
 
@@ -5151,7 +5205,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # "这份产物是给 VM 的还是原生的"是**不读源码可判**的。
         # ⚠ 这一档今天**只在开发通道**编得出来（渠道闸，`docs/231` §2）：发行版里 `choose vm`
         # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
-        "potato": "v13",
+        # v14 = v13 + **联网站点的宽度组成** `net_ladder`（`docs/237`）：四档各领走几个站点。
+        # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
+        "potato": "v14",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5237,6 +5293,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
         # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
         "surfaces": _count_surfaces(mod),
+        # **联网站点的宽度组成**（`docs/237`, v14）—— 与 `surfaces` 同一个视图、**同一遍
+        # 遍历**：那条交叉不变量（`total_net == surfaces.net`）要求两处数的是同一批站点。
+        "net_ladder": _count_net_ladder(mod),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"

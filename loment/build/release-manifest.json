@@ -15,19 +15,19 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "a0e06e7602a1b3b8148223013193fac1ea8eae3b1134c2e69d6be02ed7b93e15"
+   "sha256": "6f12ddd5e67447688b04dbfaca95485022458fcac1efd6cdd201a615544325a1"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "699d764581dc4b8480707eeba4e2aea65a350662bd6dbd79b884cc305e88ee97"
+   "sha256": "3a1bc35775653d524a4fdfe2588b7ad7e2cea1c72db11273796682762db9a75b"
   },
   {
    "path": "tools/potato.py",
-   "sha256": "10c6f0a94adb3f5e46f5a58ba92f9c7061f14e018d2d26881ca4a95d7d7098f9"
+   "sha256": "3ff8e7dbaa6cfd350c20c40b03960dd2bdd40eb11a35c3dff478cb722093e812"
   },
   {
    "path": "tools/potato_test.py",
-   "sha256": "6605866f45b6fa73dc15c13e228d25c99be038430ff297299fcfbc8edd241c0b"
+   "sha256": "8c4266519d3e17a2db7e5e2cb3dcfc4a01da936572d2b7d10618019b6f67d948"
   },
   {
    "path": "tools/potato_cross.py",
@@ -967,7 +967,7 @@
   },
   {
    "path": "tools/loment_potato_emit_test.py",
-   "sha256": "f534f6eb618d9fd8bdf91fc7a898b57064c6ab641199944f724b5f5c22fe734b"
+   "sha256": "d917a96ace7bb419ab802290cc7b38eb762ce994628c71cb89b387d423e5952b"
   },
   {
    "path": "tools/loment_grammar_test.py",
@@ -1115,7 +1115,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "4a8160b592a28d6ffee53f5a01cbd8f59fec360a48b425c45e739baf04996c15"
+   "sha256": "eb3ccef88f9d642ad849cab848133a08c67b69e7a2977ba54fd82583970b13cf"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1199,7 +1199,7 @@
   },
   {
    "path": "loment/tools/lompotato.lomt",
-   "sha256": "181039382db28a019be0e244853a19639bcde0f10d4f74872059be974456fa76"
+   "sha256": "8704d403ddd891c40c9d20507c81076f70e8e79adb2251c3088cc3918fd10242"
   },
   {
    "path": "loment/tools/lompotc.lomt",
@@ -1743,7 +1743,7 @@
   },
   {
    "path": "loment/selfhost/potato.lomt",
-   "sha256": "6fd20deb7ce35b1eaf5da540c1f16752bd7ddb2987315be5c8b4231081169fbc"
+   "sha256": "b95f6cc4be31947bc3ddc1621f3a39a2d2d5c22c941055bb6f9614c988e2752d"
   },
   {
    "path": "loment/selfhost/switches.lomt",
@@ -2202,8 +2202,12 @@
    "sha256": "aefe0486ecfc7454d54fa5a1f0bbb9678f38e8483a89082a5d053ed8198decc1"
   },
   {
+   "path": "docs/237-loment-net-ladder.md",
+   "sha256": "a194f4ffc63393cea317e1152d7cb076ff23d969e0eb472347d5b816a4a812f4"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "9436f45f1b8390de92f7c381513164fa3a74c664044bcab87704ef4a569a4bfb"
+   "sha256": "86476b0726e6079f6a9cb70e4ac91b0277a3d9bc62481419556cee4e8fa2d41b"
   },
   {
    "path": "docs/manual/api/ahci.md",
