@@ -1755,7 +1755,7 @@
   },
   {
    "path": "lom/fuai.lom",
-   "sha256": "d6f24aa0de2941d8b5bb713c3c72225f9755eb53ae06acb50cd11e68b26b3aad"
+   "sha256": "ba04aa7bbb85a3dee8b8c1dd496bb235b56fba301a5ef5834e65841877b8c39c"
   },
   {
    "path": "lom/fuc.lom",
@@ -2204,6 +2204,10 @@
   {
    "path": "docs/237-loment-net-ladder.md",
    "sha256": "a194f4ffc63393cea317e1152d7cb076ff23d969e0eb472347d5b816a4a812f4"
+  },
+  {
+   "path": "docs/239-l0-width-invariant.md",
+   "sha256": "8fb55cc39a9dfd289da1dc066d7aebc322a2d1c5e09a25f26c1fdc83a584b2e8"
   },
   {
    "path": "docs/manual/index.md",
