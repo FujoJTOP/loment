@@ -155,7 +155,7 @@ test_vscode_hardens_untrusted_workspaces` 断言**内容**，`vscode_ext.check()
 ## 9. 判据
 
 ```
-python tools/vscode_ext_test.py        # 15/15（新增 6 条：对拍 ×2、换语言、多语法登记、#166、升级扫旧版）
+python tools/vscode_ext_test.py        # 16/16（新增 7 条：对拍 ×2、换语言、多语法登记、#166、升级扫旧版）
 python tools/loment_editors_test.py    # 3/3（vim 与 TextMate 词表交叉核对）
 python tools/loment_lsp_test.py        # 8/8（含自举 LSP；#28 那处改动真的编进去跑了）
 python tools/loment_tools_test.py      # 33/33

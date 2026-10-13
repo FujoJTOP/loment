@@ -294,6 +294,8 @@ editors/loment.ico
 editors/vscode/package.json
 editors/vscode/language-configuration.json
 editors/vscode/language-configuration-python.json
+editors/vscode/LICENSE
+editors/vscode/loment-icon.png
 editors/vscode/README.md
 editors/vscode/src/*.js
 editors/vscode/syntaxes/*.json

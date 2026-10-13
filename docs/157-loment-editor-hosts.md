@@ -46,7 +46,11 @@ ZCode 的 `app.asar` 头里**每个文件都带 SHA256 完整性哈希**：
 `editors/vscode/`：两套 TextMate 语法（`.lomt` / `.lom`）+ **七门外门表层语法各一套**
 （`loment-<规范名>`）+ LSP（补全/跳转/诊断/格式化）+ 8 个命令；打包 `tools/vscode_ext.py`，
 体检 `--doctor`，`--install` 侧载（本机 `code --install-extension` 起不来，见 `docs/235`），
-验收 `vscode_ext_test` 15/15。高亮本身用 VS Code 同款引擎逐 token 核过（docs/148 §0.1）。
+验收 `vscode_ext_test` 16/16。高亮本身用 VS Code 同款引擎逐 token 核过（docs/148 §0.1）。
+
+**2026-10-13 起它在商店上了**：`FujoJTOP.loment`（<https://marketplace.visualstudio.com/items?itemName=FujoJTOP.loment>，
+装法 `code --install-extension FujoJTOP.loment`）—— 发布那一套（账号、PAT、四个前置件、
+边界）记在 `docs/171` §5。
 
 **七门表层语法**（2026-10-12，`docs/235`）：一份源的文件头写了 `choose write grammar python`
 （c / cpp / java / csharp / go / natural 同理）时，扩展读那一行、把文档切到 `loment-<规范名>`，

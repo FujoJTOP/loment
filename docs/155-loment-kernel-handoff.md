@@ -158,7 +158,7 @@ python tools/vscode_ext.py --check              # 清单/语法结构校验
 python tools/vscode_ext.py --emit loment/build/loment-vscode.vsix
 python tools/vscode_ext.py --install            # 重打包 + 侧载（本机 `code --install-extension` 起不来）
 code --install-extension loment/build/loment-vscode.vsix --force
-python tools/vscode_ext_test.py                 # 无头验收 15/15（已进门禁 vscode_ext_test）
+python tools/vscode_ext_test.py                 # 无头验收 16/16（已进门禁 vscode_ext_test）
 ```
 
 要点（对内核线也有用）：
