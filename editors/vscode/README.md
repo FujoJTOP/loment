@@ -138,10 +138,10 @@ Shift+F11 跳出（`stepOut`），继续 F5。
 **从商店装**（推荐）：VS Code 里搜 `Loment`，或
 
 ```bash
-code --install-extension FujoJTOP.loment
+code --install-extension hooyan2022.loment
 ```
 
-<https://marketplace.visualstudio.com/items?itemName=FujoJTOP.loment>
+<https://marketplace.visualstudio.com/items?itemName=hooyan2022.loment>
 
 ```bash
 # 一条命令：重打包 + 侧载进本机 VS Code（然后 Developer: Reload Window）

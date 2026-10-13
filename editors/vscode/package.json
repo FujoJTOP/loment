@@ -3,7 +3,7 @@
   "displayName": "Loment",
   "description": "Loment 语言支持：语法高亮（含七门外门表层语法）+ LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155/188）",
   "version": "0.2.0",
-  "publisher": "FujoJTOP",
+  "publisher": "hooyan2022",
   "license": "Loment-Open",
   "repository": {
     "type": "git",

@@ -141,7 +141,7 @@ Loment 线收到后会：改 `lom/*.lom` 单源 → 重新生成包装与 spec �
 
 ## 8. 编辑器集成（VS Code 扩展，M56）
 
-Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，已在本机装为 `fujojtop.loment@0.2.0`）。
+Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，已在本机装为 `hooyan2022.loment@0.2.0`）。
 
 | 能力 | 谁提供 |
 |---|---|
