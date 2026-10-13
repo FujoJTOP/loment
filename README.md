@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5"><b>Download 0.1.4.5</b></a> ·
+  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix"><b>Download 0.1.4.5 QuickFix</b></a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href="docs/manual/index.md">Manual</a> ·
   <a href="https://loment.fandom.com/">Wiki</a> ·
@@ -43,18 +43,23 @@ binaries plus the standard library. `loment run hello.lomt` and you are done.
 
 ## Status
 
-`0.1.4.5`. **It ships as a package** — the
-[Loment 0.1.4.5](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5) release carries a Linux
-`tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip. You can also
-build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)).
+`0.1.4.5 QuickFix`. **It ships as a package** — the
+[Loment 0.1.4.5 QuickFix](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix) release
+carries a Linux `tar.gz`, a Windows `zip`, a Windows `setup.exe` installer and the agent-guide zip.
+You can also build the toolchain from a checkout ([QUICKSTART.md](QUICKSTART.md)).
 
 > [!NOTE]
-> **Windows users: 0.1.4's `setup.exe` installed nothing; 0.1.4.5's does.** Where the
-> `NoDefaultCurrentDirectoryInExePath` hardening setting is on, the 0.1.4 installer could not find
-> the script it had just unpacked, so it exited having installed nothing — that asset is not being
-> rebuilt, because rebuilding would change the bytes under a version number already in the wild
-> ([#117](https://github.com/FujoJTOP/loment/issues/117)). The 0.1.4.5 installer launches the
-> script by an absolute path. The `zip` works in both versions.
+> **On Windows, double-click the `setup.exe` and a window walks you through it** — where to install,
+> the switches as checkboxes, the install streaming as it runs, and a receipt at the end that waits
+> for you to close it. The command line is unchanged: `install.cmd` with any argument (and
+> `install.ps1` directly) behaves exactly as before.
+>
+> Two older installers are worth knowing about. **0.1.4's `setup.exe` installs nothing** — it could
+> not find the script it had unpacked, and that asset is not being rebuilt, because rebuilding would
+> change the bytes under a version number already in the wild
+> ([#117](https://github.com/FujoJTOP/loment/issues/117)); use the `zip`. **0.1.4.5's `setup.exe`
+> does install** — it just did it invisibly, which is what this release fixes. You do not need to
+> reinstall if it already worked for you.
 
 The toolchain is **self-hosted at run time**: it compiles and runs with no Python and no
 libc. The **development side is not**, and 0.1.4.5 ships before that gap closed:
