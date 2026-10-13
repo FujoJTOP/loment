@@ -338,6 +338,7 @@ tools/loment_hosted_test.py
 tools/loment_i18n_test.py
 tools/loment_docs.py
 tools/loment_docs_test.py
+tools/loment_door_test.py
 tools/loment_admit.py
 tools/loment_admit_test.py
 tools/loment_zwframe.py

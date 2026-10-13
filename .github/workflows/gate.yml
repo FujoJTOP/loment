@@ -171,6 +171,22 @@ jobs:
             cat "$err"
             exit 1
           fi
+          # **push 到 main 的那一跑要认出"这是走 PR 合进来的"。** 门在 PR 上已经拦过一次，
+          # 人也已经做过决定（admin 合就是那个决定的形状）—— 那一跑不该再红：否则**每一次
+          # 被认可**的 L0 改动都会在 main 上留一个红记号，而"门经常红"恰好教会所有人忽略它。
+          # **直接 push 到 main 的非合并提交照旧拦** —— 那条路绕过了 PR，没有人做过决定。
+          #
+          # 判据是"这个提交是不是合并提交"（parents >= 2）。取不到就按 1 算（保守：仍然拦）。
+          via_pr=0
+          if [ "$EVENT" != "pull_request" ] && [ -n "${AFTER:-}" ]; then
+            parents=$(gh api "repos/$REPO/commits/$AFTER" --jq '.parents | length' 2>/dev/null || echo 1)
+            case "${parents:-1}" in
+              ''|*[!0-9]*) parents=1 ;;
+            esac
+            if [ "$parents" -ge 2 ]; then
+              via_pr=1
+            fi
+          fi
           # **`status` 那一列必须是三种之一**：API 换了形状（比如 status 没了）时要**红**，
           # 而不是让所有行都落进"不是 added"里 —— 那会把新增也拦下（保守，但仍是不对的红），
           # 或者更糟：反过来把改动当新增放行。所以先验形状。
@@ -200,6 +216,24 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
             fi
             echo "lom/ 禁区: 无**改动**（比对了 $n 个文件，其中新增 ${newf:+$(printf '%s\n' "$newf" | grep -c .)} 个 lom/ 文件）"
+            exit 0
+          fi
+          if [ "$via_pr" = 1 ]; then
+            # 走 PR 合进来的：门在 PR 上已经拦过、决定也做过了（admin 合）。
+            # 这里只**记下来**，不判失败 —— 判失败等于让每一次认可的改动都在 main 上留红。
+            {
+              echo "## \`lom/\` 禁区：这次**改**了 L0 接口层（已走 PR 合进来，**不判失败**）"
+              echo ""
+              echo "这条改动在 PR 上被门拦过一次，人做过决定之后才合的（admin 合）。"
+              echo "main 这一跑只把它**记下来**；**直接 push 的非合并提交照旧拦**。"
+              echo ""
+              echo '```'
+              echo "$bad"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$bad" | while read -r f; do
+              echo "::notice file=$f::改了 L0 接口层（走 PR 合进来 —— 门在 PR 上拦过，已决定）"
+            done
             exit 0
           fi
           {
