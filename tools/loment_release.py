@@ -276,6 +276,8 @@ GLOBS = [
     # `docs/NNN-slug.md` 的**编号**：查重号 / 取空号 / 撞了改号（`docs/228` 那次撞号之后加的）。
     # 判据是"基线只许变短"那一条，见 `loment_docs_test` 的 docstring。
     "tools/loment_docs.py", "tools/loment_docs_test.py",
+    # 准入判定（`docs/238`）：判定是纯函数，两个实现逐字节相同。
+    "tools/loment_admit.py", "tools/loment_admit_test.py",
     # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
     # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
     "tools/loment_ports.py", "tools/loment_ports_test.py",

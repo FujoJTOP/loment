@@ -155,6 +155,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `docs/NNN` 的编号：**不许出现新的撞号**，且基线只许变短
                  # (2026-10-11 实测 main 上有 7 个号被两份以上文档共用) —— `tools/loment_docs.py`
                  "loment_docs_test",
+                 # 准入判定（`docs/238`）：两个实现逐字节相同 + 那条不对称
+                 "loment_admit_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
