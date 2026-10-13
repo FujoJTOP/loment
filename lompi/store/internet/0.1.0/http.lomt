@@ -341,6 +341,13 @@ pub fn http_chunked_decode(d: ptr, o: u32, n: u32, out: ptr, cap: u32) -> u32 {
 
 /// 状态码的标准原因短语 (IANA 注册表 —— 与 CPython `http.client.responses` 同一份)。
 /// 认不出来返回 HTTP_NO (写 0 字节)。
+///
+/// **这张表照的是 RFC 9110 的现行写法**, 而 RFC 9110 给四个码改过名 ——
+/// 413 `Request Entity Too Large` -> `Content Too Large`、414 `Request-URI Too Long` ->
+/// `URI Too Long`、416 `Requested Range Not Satisfiable` -> `Range Not Satisfiable`、
+/// 422 `Unprocessable Entity` -> `Unprocessable Content`。**旧写法仍在野** (CPython 3.11
+/// 的表就是旧的), 所以判据把那四条单列成"容忍的旧写法"而不是把这条判据放宽。
+/// `418` 不是 RFC 9110 的码 (它来自 RFC 2324), 写法跟 CPython 一致: `I'm a Teapot`。
 pub fn http_reason(code: u32, out: ptr, cap: u32) -> u32 {
     let s: str = httpp_reason_str(code);
     let n: u32 = str_len(s);
@@ -389,14 +396,14 @@ fn httpp_reason_str(code: u32) -> str {
     if code == 410 { return "Gone"; }
     if code == 411 { return "Length Required"; }
     if code == 412 { return "Precondition Failed"; }
-    if code == 413 { return "Request Entity Too Large"; }
-    if code == 414 { return "Request-URI Too Long"; }
+    if code == 413 { return "Content Too Large"; }
+    if code == 414 { return "URI Too Long"; }
     if code == 415 { return "Unsupported Media Type"; }
-    if code == 416 { return "Requested Range Not Satisfiable"; }
+    if code == 416 { return "Range Not Satisfiable"; }
     if code == 417 { return "Expectation Failed"; }
-    if code == 418 { return "I'm a teapot"; }
+    if code == 418 { return "I'm a Teapot"; }
     if code == 421 { return "Misdirected Request"; }
-    if code == 422 { return "Unprocessable Entity"; }
+    if code == 422 { return "Unprocessable Content"; }
     if code == 423 { return "Locked"; }
     if code == 424 { return "Failed Dependency"; }
     if code == 425 { return "Too Early"; }

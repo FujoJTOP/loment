@@ -106,9 +106,24 @@ def _compile(src: str, name: str, td: Path) -> Path:
 
 
 def _run(exe: Path, timeout: int = 60) -> str:
-    r = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", shell=False, timeout=timeout)
-    return r.stdout
+    """跑探针, 返回 stdout。
+
+    **按字节取回再手工解码**, 不用 `text=True` —— 那个默认做**通用换行转换**, 会把探针
+    写出的 `\\r\\n` 悄悄变成 `\\n`。于是"逐字节比请求头"那条判据其实**没在比 CRLF**,
+    在 Windows 上还能靠"两边一起被换行"侥幸过 (参考那份同样被转换)。这条是 CI 的 Linux
+    上才现形的 —— 那边 CPython 的表和本地不是一版, 顺藤摸出来的。
+    """
+    r = subprocess.run([str(exe)], capture_output=True, shell=False, timeout=timeout)
+    return r.stdout.decode("utf-8", "replace")
+
+
+def _kv(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for ln in text.splitlines():
+        if "|" in ln:
+            k, v = ln.split("|", 1)
+            out[k] = v
+    return out
 
 
 def _first_diff(got: str, want: str) -> str:
@@ -479,6 +494,17 @@ fn _start() {
     return "\n".join(b) + "\n"
 
 
+#: RFC 9110（2022）给这几个码**改过名**，模块带的是**现行**写法，而 CPython 的表随版本走
+#: （3.11 是旧写法、更新的那几版是新写法）。所以这里**点名**列出被取代的旧写法，只容忍这四条；
+#: 别的一律逐字节比 —— 将来再有改名，这条会红，那是该看见的信号。
+_SUPERSEDED = {
+    413: "Request Entity Too Large",
+    414: "Request-URI Too Long",
+    416: "Requested Range Not Satisfiable",
+    422: "Unprocessable Entity",
+}
+
+
 @test
 def test_http_matches_python_client():
     """http 的原因短语对 `http.client.responses`; 请求构建与头查找对 `http.client`。"""
@@ -486,9 +512,10 @@ def test_http_matches_python_client():
         td = Path(tds)
         got = _run(_compile(_http_probe(), "http_probe", td))
     want = [f"{c}|{http.client.responses[c]}" for c in _HTTP_CODES]
-    # 请求头: 逐字节 (CRLF 显式写; 端口 80 不写, keep-alive 写 keep-alive)
-    want.append("REQ|GET /x HTTP/1.1\r\nHost: h.example:8080\r\nConnection: close\r\n\r\n")
-    want.append("REQ2|GET / HTTP/1.1\r\nHost: h.example\r\nConnection: keep-alive\r\n\r\n")
+    # 请求头那两条**不能走按行解析**: 值本身就含 CRLF, 会被切碎。整串子串比对。
+    for k, v in (("REQ", "GET /x HTTP/1.1\r\nHost: h.example:8080\r\nConnection: close\r\n\r\n"),
+                 ("REQ2", "GET / HTTP/1.1\r\nHost: h.example\r\nConnection: keep-alive\r\n\r\n")):
+        assert (k + "|" + v) in got, f"{k} 与期望的字节不同 (期望 {v!r})"
     head, _, _body = _HTTP_RESP.partition(b"\r\n\r\n")
     want.append(f"HDREND|{len(head)}")
     want.append(f"BODYSTART|{len(head) + 4}")
@@ -496,9 +523,16 @@ def test_http_matches_python_client():
     want.append("CL|1|42")
     want.append("XM|1|spaced value")
     want.append("ABSENT|0")
-    diff = _first_diff(got, "\n".join(want))
-    assert not diff, f"http 与 http.client 不一致 @ {diff}"
-    print(f"      http: 原因短语 {len(_HTTP_CODES)} 条 + 报文框架 {7} 项与 CPython 一致")
+    g = _kv(got)
+    for line in want:
+        k, _, v = line.partition("|")
+        assert k in g, f"探针没打出 {k}"
+        ok = g[k] == v
+        if not ok and k.isdigit():
+            # 只容忍 RFC 9110 已公布的改名 (旧写法仍然出现在旧版 CPython 的表里)
+            ok = v == _SUPERSEDED.get(int(k))
+        assert ok, f"{k}: 本库={g[k]!r} CPython={v!r}"
+    print(f"      http: 原因短语 {len(_HTTP_CODES)} 条 + 报文框架 7 项与 CPython 一致")
 
 
 # ---------------------------------------------------------------- 端到端 (真服务器)
