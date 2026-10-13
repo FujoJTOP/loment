@@ -927,9 +927,33 @@ fn pt_tok_num(unit: ptr, t: ptr, i: u32) -> u32 {
     return v;
 }
 
-/// 名字 `name` 的调用点里、"第一个实参是字面量且面 == `code`"的个数。判据与
-/// `pt_cnt_boundary_call` 同一套：名字 token + 紧跟 `(` + 不是 `fn NAME(` 那个声明。
-fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, code: u32) -> u32 {
+/// 号 → 宽度档代号：0=`w0` 1=`w1` 2=`w2` 3=`w3`。**非联网号返回 `4294967295`** ——
+/// 与 `pt_surf_code` 的 `other` 不同：梯子上**没有兜底档**，它只回答"联网的那部分按宽度
+/// 怎么分"（`docs/237`）。返回一个哨兵而不是 0，是为了让"不是联网号"与"最窄那档"分开。
+///
+/// **定义在 `pt_surf_count` 之前**：那个循环要调它，而自举侧**没有前向引用**。
+fn pt_rung_code(num: u32) -> u32 {
+    if num == 53 {
+        return 0;                                   // w0：同机的一对端点
+    }
+    if num == 41 || num == 42 || num == 44 || num == 45 || num == 46 || num == 47
+            || num == 48 || num == 51 || num == 52 || num == 54 || num == 55 {
+        return 1;                                   // w1：一条有界连接
+    }
+    if num == 7 || num == 23 || num == 232 || num == 233 || num == 291 {
+        return 2;                                   // w2：多条并发
+    }
+    if num == 49 || num == 50 || num == 43 || num == 288 {
+        return 3;                                   // w3：接受任意对端
+    }
+    return 4294967295;
+}
+
+/// 名字 `name` 的调用点里、"第一个实参是字面量且 `table` 那张表分到的桶 == `code`"的个数。
+/// 判据与 `pt_cnt_boundary_call` 同一套：名字 token + 紧跟 `(` + 不是 `fn NAME(` 那个声明。
+/// `table`：0 = 面（`docs/224`），1 = 宽度档（`docs/237`）—— **同一个循环服务两张表**，
+/// 分成两遍就会漂（两边各按自己的口径认号）。
+fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, table: u32, code: u32) -> u32 {
     let n: u32 = 0;
     let i: u32 = lo;
     while i < hi && pt_kind(t, i) != 4 {
@@ -938,7 +962,11 @@ fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, code: u32) -> u
             let num: u32 = pt_tok_num(unit, t, i + 2);
             let c: u32 = 0;
             if num != 4294967295 {
-                c = pt_surf_code(num);
+                if table == 0 {
+                    c = pt_surf_code(num);
+                } else {
+                    c = pt_rung_code(num);
+                }
             }
             if c == code {
                 n = n + 1;
@@ -951,9 +979,23 @@ fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, code: u32) -> u
 
 /// 某个面（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍。
 fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
-    return pt_surf_count(unit, t, lo, hi, "syscall4", code)
-         + pt_surf_count(unit, t, lo, hi, "syscall6", code)
-         + pt_surf_count(unit, t, lo, hi, "syscall7", code);
+    return pt_surf_count(unit, t, lo, hi, "syscall4", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 0, code);
+}
+
+// ---------------------------------------------------------------- 宽度组成 (docs/237, v14)
+//
+// v14 的 `net_ladder`：联网站点按"它要求多少宽度"分四档。**与参考实现的
+// `lomentc.NET_WIDTH_RUNGS` 同表、同一批站点**（`surfaces.net` 那一批），表的一致由
+// 逐字节孪生判据钉住（数不对当场对不上）。表本身（`pt_rung_code`）定义在上面 ——
+// 共用的那个计数循环要调它。
+
+/// 某一档（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍（表选 1）。
+fn pt_rung_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
+    return pt_surf_count(unit, t, lo, hi, "syscall4", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 1, code);
 }
 
 /// 写一个面（名 + 数）；`first` 为 0 时先补一个逗号。**只写非零的那些、按面名字母序**，
@@ -4999,8 +5041,16 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let nsf_proc: u32 = pt_surf_total(unit, t, lo, hi, 4);
     let nsf_other: u32 = pt_surf_total(unit, t, lo, hi, 0);
     let nsf_tot: u32 = nsf_file + nsf_mem + nsf_net + nsf_proc + nsf_other;
+    // v14 = v13 + **联网站点的宽度组成**（`docs/237`）：四档各领走几个联网站点。
+    // 与 `surfaces` 数的是**同一批站点**（`nsf_net`），只是分的粗细不同 —— 那条交叉
+    // 不变量由两份校验器判。
+    let nlw0: u32 = pt_rung_total(unit, t, lo, hi, 0);
+    let nlw1: u32 = pt_rung_total(unit, t, lo, hi, 1);
+    let nlw2: u32 = pt_rung_total(unit, t, lo, hi, 2);
+    let nlw3: u32 = pt_rung_total(unit, t, lo, hi, 3);
+    let nlw_tot: u32 = nlw0 + nlw1 + nlw2 + nlw3;
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v13");
+    o = pt_qs(out, o, "v14");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5197,6 +5247,28 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     }
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, nsf_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **联网站点的宽度组成**（`docs/237`, v14）—— 与 `gc_ladder` 同形：四档恒在（哪怕为 0），
+    // 键的集合固定，读者与校验器都不用猜。
+    o = pt_key(out, o, 1, "net_ladder");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "w0");
+    o = pt_dec(out, o, nlw0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w1");
+    o = pt_dec(out, o, nlw1 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w2");
+    o = pt_dec(out, o, nlw2 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w3");
+    o = pt_dec(out, o, nlw3 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "total_net");
+    o = pt_dec(out, o, nlw_tot as u64);
     o = pt_str(out, o, "\n");
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");

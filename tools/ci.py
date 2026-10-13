@@ -163,7 +163,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
                  "loment_libl_test",
-                 # LibL 家族第三个包 internet (docs/237): 对照物是 CPython 标准库
+                 # LibL 家族第三个包 internet (docs/240): 对照物是 CPython 标准库
                  # (ipaddress / urllib.parse / http.client) + **真起一个 http.server**。
                  "loment_internet_test",
                  # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、

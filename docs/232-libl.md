@@ -97,7 +97,7 @@ dev 驱动器收 `use libl`、发行版驱动器拒**且报文点名 `libl`**；
 ### 1.2 LibL 家族：`internet` 是**第二个包**（2026-10-13）
 
 上面 §1–§1.1 说的 `libl` 是 `std` **包内**的一个小入口。家族的另一半是**另一个包**：
-`lompi/store/internet/0.1.0/`（`docs/237`）。两者是同一个说法下的两件事 ——
+`lompi/store/internet/0.1.0/`（`docs/240`）。两者是同一个说法下的两件事 ——
 
 * **`std` 是 libc 那一面**：把"写 C 的人以为语言自带的那些函数"补上（`string` / `ctype` /
   `stdlib` / `stdio`），判据对着**真 glibc** 逐字节跑；

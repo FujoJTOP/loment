@@ -80,7 +80,7 @@ GLOBS = [
     "tools/loment_std_test.py",
     # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
     "tools/loment_libl_test.py",
-    # LibL 家族第三个包 internet (docs/237): 对 CPython 标准库 + 真 http.server 对跑
+    # LibL 家族第三个包 internet (docs/240): 对 CPython 标准库 + 真 http.server 对跑
     "tools/loment_internet_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
