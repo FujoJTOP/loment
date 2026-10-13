@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""lvm.py — LVM 的参考实现：**那份 IR 的第四个读者**（`docs/237`）。
+"""lvm.py — LVM 的参考实现：**那份 IR 的第四个读者**（`docs/243`）。
 
 吃 `lomelf` 的同一种文本 IR 子集，**当场执行**，不落机器码。
 解析整段复用 `lomelf`（它已经产出 `Instr`/`Block`/`Func`/`Global` 这套表），
-这里只把"发射"换成"求值" —— 见 `docs/237` §3。
+这里只把"发射"换成"求值" —— 见 `docs/243` §3。
 
-**跳过的整段**（`docs/237` §2）：x86 编码、`Asm`、`plan_frame`（SSA→栈槽）、
+**跳过的整段**（`docs/243` §2）：x86 编码、`Asm`、`plan_frame`（SSA→栈槽）、
 重定位、ELF/PE 写出、收编面。**留下的**是**语言语义**：零/符号扩展、按宽度截断、
 phi 的两趟模型。
 
@@ -33,7 +33,7 @@ SLOT = 8
 
 
 class LvmError(Exception):
-    """解释器自己的错（**不是**"语言不支持" —— 那种要另说，见 `docs/237` §1）。"""
+    """解释器自己的错（**不是**"语言不支持" —— 那种要另说，见 `docs/243` §1）。"""
 
 
 # ---------------------------------------------------------------- 值
@@ -222,7 +222,7 @@ class _Exit(Exception):
 class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
     def syscall(self, nr: int, a: list[int]) -> int:
-        """**唯一**的对外通道（`docs/237` §3.4）。表里没有的就点名拒。"""
+        """**唯一**的对外通道（`docs/243` §3.4）。表里没有的就点名拒。"""
         if nr == 1:                                    # write(fd, buf, count)
             fd, buf, n = a[0], a[1], a[2]
             data = self.mem.get(buf, n)
@@ -241,7 +241,7 @@ class Executor(Vm):
             return self.mem.heap
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
-        raise LvmError(f"系统调用表里没有 {nr}（`docs/237` §3.4）")
+        raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")
 
     # ------------------------------------------------------------ 调用
     def call(self, fr: Frame, text: str):
@@ -264,7 +264,7 @@ class Executor(Vm):
         name = m2.group(1)
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
         if name in self.externs:
-            raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/237` §5）")
+            raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
         fn = self.funcs.get(name)
         if fn is None:
             raise LvmError(f"没有这个函数: {name}")
@@ -289,7 +289,7 @@ class Executor(Vm):
 
     def _run_body(self, fn, argtexts: list[str], caller: Frame | None, base: int):
         fr = Frame(self.mem, base)
-        # 形参与实参：实参在**调用者的**上下文里求值（`docs/237` §3.4）
+        # 形参与实参：实参在**调用者的**上下文里求值（`docs/243` §3.4）
         for (pty, pname), a in zip(fn.params, argtexts):
             if caller is None:
                 fr.vals[pname] = 0
@@ -532,7 +532,7 @@ class Executor(Vm):
 # ---------------------------------------------------------------- 前门
 
 def run_ir(text: str, out) -> int:
-    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/237` §3.5）。"""
+    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。"""
     globals_, funcs, externs = lomelf.parse_ll(text)
     vm = Executor(globals_, funcs, externs, out)
     start = next((f for f in funcs if f.name == "_start"), None)
@@ -561,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse  # noqa: PLC0415
     import io  # noqa: PLC0415
 
-    ap = argparse.ArgumentParser(prog="lvm", description="LVM T0：那份 IR 的第四个读者（docs/237）")
+    ap = argparse.ArgumentParser(prog="lvm", description="LVM T0：那份 IR 的第四个读者（docs/243）")
     ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")

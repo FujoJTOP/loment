@@ -332,6 +332,133 @@ def test_gc_l2_epoch_bounds_the_heap():
     print(f"      alpha 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 块纪元是真的")
 
 
+#: `--debug` 那一对（`docs/210` §7 的"**L0 与 L2 都没有在 `debug` 档下核过**"）。
+#: 两层的形状各取一个**已经在别处立住**的：L0 那份把唯一一个 `alloc` 提到栈上
+#: （产物里连分配器都不剩），L2 那份靠前沿回退跑完 40000 圈。`--debug` 只该**多加元数据**。
+_DEBUG_L0_SRC = """module dbgl0
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let a: ptr = alloc(16);
+    store8(a, 0, 5);
+    syscall4(60, load8(a, 0) as u64, 0, 0);
+}
+"""
+
+_DEBUG_L2_SRC = """module dbgl2
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let n: u32 = 64;
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 40000 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 1);
+        s = s + load8(p, 0);
+        i = i + 1;
+    }
+    if s == 40000 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+
+
+@test
+def test_debug_flag_adds_metadata_and_nothing_else():
+    """`--debug` **只加元数据** —— L0 与 L2 在 debug 档下产物**逐字节不变**（`docs/210` §7）。
+
+    **Why**：`docs/210` §7 那句"L0 与 L2 都没有在 `debug` 档下核过"底下压着一个**真 bug**：
+    `lomelf` 把 `#dbg_declare` 当成**不支持的指令**直接拒 —— 于是 `--debug` 的 IR
+    **链不出来**，而 `docs/167` §7 白纸黑字写的是"元数据**被忽略**、原生产物没有行表"。
+    文档与实现对不上，而链接器有**两套**（`tools/lomelf.py` 与 `loment/tools/lomelf.lomt`），
+    所以"核过"要**四处**都算上（另一半在下面 `test_debug_ir_links_the_same_through_the_mirror`）。
+
+    **How to apply**：三个断言缺一条就是"顺手报个绿"：
+      * `--debug` 的 IR 与不带的那一份**必须不同**（否则这条判据什么也没测到）；
+      * `#dbg_declare` 那一行**必须在**（元数据真的发了，不是"两边都没发"）；
+      * 两份 IR 过 `lomelf` 之后**字节相同**，且**跑起来退出码一致** —— 静态那一半
+        覆盖不了"元数据漏进机器码"这种错法（行表本来就不进 `.text`，但记录**被当成指令**
+        时会，见这条判据没有它时的样子）。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for tag, src, want_rc in (("l0", _DEBUG_L0_SRC, 5), ("l2", _DEBUG_L2_SRC, 7)):
+            ll = {}
+            for dbg in (False, True):
+                f = td / f"{tag}{int(dbg)}.lomt"
+                f.write_text(src, encoding="utf-8", newline="\n")
+                mod = lomentc.load(f)
+                deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
+                assert not lomentc.check(mod, deps=deps), f"{tag}: 自己检查不过"
+                ll[dbg] = lomentc.emit_llvm(mod, ROOT, deps, debug=dbg)
+            assert ll[True] != ll[False], f"{tag}: `--debug` 没往 IR 里加任何东西 —— 这条判据在空转"
+            assert "#dbg_declare" in ll[True], f"{tag}: `--debug` 的 IR 里没有 `#dbg_declare`"
+            assert "#dbg_declare" not in ll[False], f"{tag}: 不带 `--debug` 也发了调试记录"
+            nat = {}
+            for dbg in (False, True):
+                nat[dbg], _ = lomelf.compile_ll(ll[dbg])
+            assert nat[True] == nat[False], (
+                f"{tag}: `--debug` 改了原生产物（{len(nat[True])}B vs {len(nat[False])}B）—— "
+                "元数据没被忽略，漏进机器码了")
+            print(f"      {tag}: `--debug` 的 IR 多 {len(ll[True]) - len(ll[False])}B 元数据，"
+                  f"产物 {len(nat[True])}B 逐字节同")
+            if not (_clang() and _wsl()):
+                continue
+            got = []
+            for dbg in (False, True):
+                elf = td / f"{tag}{int(dbg)}.native"
+                elf.write_bytes(nat[dbg])
+                got.append(_run_bin(elf, f"{tag}{int(dbg)}", td, timeout=30)[0])
+            assert got == [want_rc, want_rc], (
+                f"{tag}: debug 档下跑起来不一样 ({got}) —— 期望两只都是 {want_rc}"
+                "（L0 那份是「提干净了、分配器都不剩」，L2 那份是「前沿真回退了」）")
+            print(f"      {tag}: 两个档位都跑出 rc={want_rc}")
+
+
+@test
+def test_debug_ir_links_the_same_through_the_mirror():
+    """**镜像链接器**对 `--debug` 的同一条判据（`docs/210` §7）。
+
+    **Why**：参考实现与自举镜像**各有一套**解析器，而"元数据被忽略"这件事要**两边都成** ——
+    只修参考侧的话，用户手上那份（包内那只，`loment/tools/lomelf.lomt`）照样链不出来。
+    这条判据喂给镜像的正是 `--debug` 的那一份 IR，产物必须与参考**逐字节相同**。
+
+    **How to apply**：语料取 L2 那一份 —— 它的 IR 同时含 `#dbg_declare`、带 `, !dbg !N`
+    附着的 `icmp`/`store`，以及收集器整段运行期，是"元数据混进指令流"最容易出错的形状。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "dbgl2.lomt"
+        src.write_text(_DEBUG_L2_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        ll_text = lomentc.emit_llvm(mod, ROOT, deps, debug=True)
+        assert "#dbg_declare" in ll_text, "语料没进 debug 档，这条判据在空转"
+        want, _ = lomelf.compile_ll(ll_text)
+        llrepo = ROOT / "loment" / "build" / "_mirror_dbg.ll"
+        elfrepo = ROOT / "loment" / "build" / "_mirror_dbg.elf"
+        llrepo.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            llrepo.write_text(ll_text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, "loment/build/_mirror_dbg.ll", "loment/build/_mirror_dbg.elf")
+            assert rc == 0, f"镜像拒了 `--debug` 的 IR (退出 {rc}): {err[-300:]}"
+            nat = elfrepo.read_bytes()
+        finally:
+            elfrepo.unlink(missing_ok=True)
+            llrepo.unlink(missing_ok=True)
+        assert nat == want, f"镜像的 `--debug` 产物与参考不同 ({len(nat)}B vs {len(want)}B)"
+        print(f"      `--debug` 的 IR: 镜像与参考都出 {len(nat)}B，逐字节同")
+
+
 #: 只测一件事的 IR：`%j = phi [.., %i]` 与 `%i = phi [.., %i2]` 是**同一前驱上的一对**，
 #: `%j` 因此每次回边取 `%i` 的**旧值**。转 3 圈后 `%j` 必须是 2。
 _PHI_PAIR_IR = '''define i32 @_start() {
@@ -633,6 +760,156 @@ def test_l2_if_branch_epoch_bounds_the_heap():
         "2.56 MB 的请求本该把 64 KiB 的 arena 耗尽")
     print(f"      manual 耗尽 (rc={got[0]})；alpha 跑通 (rc={got[1]}) "
           "—— `if` 那一支的纪元把每次分配都在支末尾还掉了")
+
+
+@test
+def test_free_refuses_a_double_free():
+    """`free` 挡住**双重释放**（#164 / `docs/210` §2.8）—— 两次 `alloc` 不许拿到同一段内存。
+
+    **Why**：块头的 `+4` 以前只有"空闲链下一跳"一个用途，于是 `free` 分不清"第一次"与
+    "第二次"。第二次释放把同一块**同时**放在 bump 前沿与空闲链表上 ⇒ 随后两次 `alloc`
+    拿到同一段 ⇒ **两段活内存互相写**。它的错法不是崩溃而是**静默串味**，所以必须在
+    "程序跑起来"这一层钉住，光看 IR 看不出来。
+
+    **How to apply**：`a` 后面还分配了 `b`，所以 `a` **不是尾块** —— 走挂链那一支（尾块那条
+    路由"落在已分配区间内"那条检查挡，是另一条路，另有用例覆盖）。第二次 `free(a)` 之后再
+    要两块、分别写不同字节：**没修好时它们会指向同一段**，后写的盖掉先写的 ⇒ 退出码 3。
+    借出标记（`next == -1`）正是让"已经释放过"这件事在第二次 `free` 时看得见的东西。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_text = (
+        "module freedbl\nchoose runtime\n\n"
+        "fn _start() {\n"
+        "    let n: u32 = 16;\n"
+        "    let a: ptr = alloc(n);\n"
+        "    let b: ptr = alloc(n);\n"
+        "    store8(b, 0, 1);\n"
+        "    free(a);\n"
+        "    free(a);\n"
+        "    let c: ptr = alloc(n);\n"
+        "    let d: ptr = alloc(n);\n"
+        "    store8(c, 0, 11);\n"
+        "    store8(d, 0, 22);\n"
+        "    if load8(d, 0) == 22 {\n"
+        "        if load8(c, 0) == 11 {\n"
+        "            syscall4(60, 7, 0, 0);\n"
+        "        }\n"
+        "    }\n"
+        "    syscall4(60, 3, 0, 0);\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "freedbl.lomt"
+        src.write_text(src_text, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "freedbl.native"
+        nat.write_bytes(blob)
+        rc, _out = _run_bin(nat, "freedbl", td)
+    assert rc == 7, (
+        f"双重释放之后分配出来的两块**串味了**：退出码 {rc}（期望 7）。"
+        "第二次 `free(a)` 不该被接受 —— 它一接受，`a` 就同时躺在空闲链表和 bump 前沿上，"
+        "`c` 与 `d` 会指向同一段内存")
+    print("      双重释放之后 c/d 各写各的（rc=7）—— 第二次 free 被挡在门外")
+
+
+@test
+def test_free_refuses_a_pointer_it_does_not_own():
+    """`free` 挡住**非自有指针**（#164 / `docs/210` §2.8）—— 越界的那个不许挂进空闲链。
+
+    **Why**：`free` 是从指针直接算块偏移的（`sub`/`trunc` 都会回绕），以前既没验范围也没验
+    对齐。一个 `ptr_add(p, 60000)` 那种指针会被当成块首，把**队外的一块偏移**挂进空闲链表
+    —— 下一次 `alloc` 顺着链表走就会拿到一个 arena 之外的"块"。这是**输入侧**的洞：
+    `free` 是普通内建函数，程序随时能把派生指针交给它。
+
+    **How to apply**：抛一个远在 arena 之外的派生指针进去，然后照常做一轮
+    `alloc`→写→读。判据有两条腿：**不许崩**（旧的会把垃圾挂链，随后 `alloc` 走进野块），
+    而且**正常的一次分配仍然对**（惰性返回不等于把分配器弄停）。末尾空转的 `free(bad)`
+    如果被接受，`b` 的写入会被挂在链上的野块带偏，退出码就不是 7。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_text = (
+        "module freebad\nchoose runtime\n\n"
+        "fn _start() {\n"
+        "    let n: u32 = 32;\n"
+        "    let a: ptr = alloc(n);\n"
+        "    let bad: ptr = ptr_add(a, 60000);\n"
+        "    free(bad);\n"
+        "    free(a);\n"
+        "    let b: ptr = alloc(n);\n"
+        "    store8(b, 0, 4);\n"
+        "    if load8(b, 0) == 4 {\n"
+        "        syscall4(60, 7, 0, 0);\n"
+        "    }\n"
+        "    syscall4(60, 3, 0, 0);\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "freebad.lomt"
+        src.write_text(src_text, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "freebad.native"
+        nat.write_bytes(blob)
+        rc, _out = _run_bin(nat, "freebad", td)
+    assert rc == 7, (
+        f"非自有指针被 `free` 接受了：退出码 {rc}（期望 7）。"
+        "越界的指针一旦挂进空闲链表，随后的分配就会踩到 arena 之外")
+    print("      越界指针被惰性丢掉，正常的那次分配照旧（rc=7）")
+
+
+@test
+def test_free_still_reuses_the_block_it_just_freed():
+    """借出标记**不许把复用弄坏**（#164 / `docs/210` §2.8）—— 这是一条**回归**判据。
+
+    **Why**：为了让 `free` 认出双重释放，`alloc` 开始在块头写 `next = -1`；而 `free` 的前沿
+    回退靠的是"这一块正好顶到前沿"。两件事撞在一起时最容易出的错，是把**正常**那一次释放
+    也挡掉 —— 那时内存只会一路涨（LIFO 不涨内存的性质没了），而且不会有任何报错。
+
+    **How to apply**：LIFO 一轮 —— `alloc`→`free`→`alloc`，两次拿到的地址必须**相等**
+    （前沿回退生效），而且写进去的字节读得回来。`a as u64` 是拿来比地址的（`ptrtoint`）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    src_text = (
+        "module freereuse\nchoose runtime\n\n"
+        "fn _start() {\n"
+        "    let n: u32 = 64;\n"
+        "    let a: ptr = alloc(n);\n"
+        "    let au: u64 = a as u64;\n"
+        "    store8(a, 0, 5);\n"
+        "    free(a);\n"
+        "    let b: ptr = alloc(n);\n"
+        "    let bu: u64 = b as u64;\n"
+        "    store8(b, 0, 9);\n"
+        "    if bu == au {\n"
+        "        if load8(b, 0) == 9 {\n"
+        "            syscall4(60, 7, 0, 0);\n"
+        "        }\n"
+        "    }\n"
+        "    syscall4(60, 3, 0, 0);\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "freereuse.lomt"
+        src.write_text(src_text, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "freereuse.native"
+        nat.write_bytes(blob)
+        rc, _out = _run_bin(nat, "freereuse", td)
+    assert rc == 7, (
+        f"释放之后没复用回同一地址：退出码 {rc}（期望 7）。这正是「把正常释放也挡掉」的签名 —— "
+        "内存会一路涨，而且没有任何报错")
+    print("      LIFO 复用照旧：释放后要回来的还是同一块（rc=7）")
 
 
 @test

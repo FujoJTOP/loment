@@ -80,6 +80,10 @@ GLOBS = [
     "tools/loment_std_test.py",
     # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
     "tools/loment_libl_test.py",
+    # LibL 家族第三个包 internet (docs/241): 对 CPython 标准库 + 真 http.server 对跑
+    "tools/loment_internet_test.py",
+    # 第四个包 os (docs/242): 与 CPython 的 os/time/signal **在同一个 Linux 环境里**对跑
+    "tools/loment_os_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
@@ -95,7 +99,8 @@ GLOBS = [
     # 当文件收了进来)。升版本要同时改两份清单 —— `loment_lompi_test` 里那条
     # `test_release_manifest_covers_every_store_file` 就是钉这个的: 库改版而清单没跟上,
     # `loment_release --check` 会**看不见文件而照样绿**, 那条会红。
-    "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*",
+    "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*", "lompi/store/internet/0.1.0/*",
+    "lompi/store/os/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
@@ -135,7 +140,7 @@ GLOBS = [
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
-    # LVM 的 T0（`docs/237`）：那份 IR 的**第四个读者**（解释器）+ 它那条判据
+    # LVM 的 T0（`docs/243`）：那份 IR 的**第四个读者**（解释器）+ 它那条判据
     # （同一批程序，原生产物与 VM 比 stdout 字节 + 退出码）。**两处清单插入同一位置**。
     "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
@@ -279,6 +284,13 @@ GLOBS = [
     # `docs/NNN-slug.md` 的**编号**：查重号 / 取空号 / 撞了改号（`docs/228` 那次撞号之后加的）。
     # 判据是"基线只许变短"那一条，见 `loment_docs_test` 的 docstring。
     "tools/loment_docs.py", "tools/loment_docs_test.py",
+    # `lom/` 那道禁区（`docs/239` §5）：把 `gate.yml` 里那段脚本抠出来真跑 ——
+    # 门是 L0 契约唯一的守卫，改它等于改守卫，所以它自己也得有判据。
+    "tools/loment_door_test.py",
+    # 准入判定（`docs/238`）：判定是纯函数，两个实现逐字节相同。
+    "tools/loment_admit.py", "tools/loment_admit_test.py",
+    # 零宽那一帧（`docs/240`）：定长、没有载荷字段。
+    "tools/loment_zwframe.py", "tools/loment_zwframe_test.py",
     # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
     # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
     "tools/loment_ports.py", "tools/loment_ports_test.py",

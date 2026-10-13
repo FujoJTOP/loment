@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lvm_twin_test.py — LVM 自举镜像的**孪生判据**（`docs/237` §5）。
+"""lvm_twin_test.py — LVM 自举镜像的**孪生判据**（`docs/243` §5）。
 
 **同一份 `.ll` 喂两个实现** —— `tools/lvm.py`（参考，进程内跑）与
 `loment/tools/lvm.lomt`（自举镜像，**走种子自举链**编成 ELF 后跑）—— 比

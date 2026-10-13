@@ -1,4 +1,4 @@
-// loment/tools/lvm.lomt — LVM 的**自举镜像**：那份 IR 的第四个读者（docs/237）
+// loment/tools/lvm.lomt — LVM 的**自举镜像**：那份 IR 的第四个读者（docs/243）
 //
 // 判据（tools/lvm_twin_test.py）：同一份 `.ll` 喂**两边** —— 参考实现
 // （`tools/lvm.py --ir`）与本程序（走自举链编成 ELF 后跑）—— **stdout 字节 + 退出码
@@ -9,7 +9,7 @@
 // CLI:  lvm IN.ll            （只吃 IR：Loment 侧没有前端，前端在 driver）
 // 退出码 = 被解释程序自己的退出码；输入读不了 / 解析不了 = 2（与参考实现的 main 同）
 //
-// 与参考实现的关系（`docs/237` §2 那张表）：**整段跳过**的是 x86 编码、`Asm`、
+// 与参考实现的关系（`docs/243` §2 那张表）：**整段跳过**的是 x86 编码、`Asm`、
 // SSA→栈槽、重定位、ELF/PE 写出 —— 那些 Python 侧也一个都不用。留下的是**语言语义**：
 // 按宽度截断、零/符号扩展、phi 取**前驱块**那一支的值。
 //
@@ -189,7 +189,7 @@ fn ctx_set(a: ptr, k: u32, v: u32) {
 //
 // 与 `lomelf.lomt` 逐字同源的那几个：`die`/`sys_alloc`/`read_all`/`write_all`/`wstr`/
 // `fail`/`cstr`/`argv_n`。**它们是解释器自己的系统调用**，不是被解释程序的 —— 后者走
-// `vm_syscall` 那张表（`docs/237` §3.4）。
+// `vm_syscall` 那张表（`docs/243` §3.4）。
 
 fn die(code: u64) -> u32 {
     syscall4(60, code, 0, 0);
@@ -1005,7 +1005,7 @@ fn blk_of(a: ptr, fi: u32, lo: u32, ll: u32) -> u32 {
 //
 // **解析成表**，不边扫边解释：名字 / 类型 / 文本全是**输入文本里的 span**（子串不拷贝），
 // 指令的种类在解析期算好。两趟：① 记录；② 把 `br` 的目标标签**解析成块号** ——
-// 分支是热路径，不能每条都线性找块（`docs/237` §3.2）。
+// 分支是热路径，不能每条都线性找块（`docs/243` §3.2）。
 
 /// 指令的第一个词 -> (种类 << 32) | 副码。
 fn kind_at(a: ptr, s: u32, e: u32) -> u64 {
@@ -1894,7 +1894,7 @@ fn insertvalue(a: ptr, m: ptr, fr: u32, io: u32, il: u32, do_: u32, dl: u32) -> 
     return (d as u64) | (((sz as u64)) << 32);
 }
 
-/// 被解释程序唯一能出去的门（`docs/237` §3.4）。表里没有的**点名拒**。
+/// 被解释程序唯一能出去的门（`docs/243` §3.4）。表里没有的**点名拒**。
 fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 1 {                                         // write(fd, buf, count)
         let fd: u64 = x1;
@@ -1922,7 +1922,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     }
     wstr(2, "lvm: 系统调用表里没有 ");
     write_num(a, 2, nr as u32);
-    wstr(2, "（docs/237 §3.4）
+    wstr(2, "（docs/243 §3.4）
 ");
     return die(2) as u64;
 }
@@ -2054,7 +2054,7 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
     let rp: u32 = match_close(a, lp, e, 40, 41);
     let fi: u32 = fn_find(a, hi32(nt), lo32(nt));
     if fi == NONE {
-        fail("没有这个函数（extern 不接 FFI —— docs/237 §5）");
+        fail("没有这个函数（extern 不接 FFI —— docs/243 §5）");
     }
     let npar: u32 = rd(a, F_OFF, fi * 8 + 4);
     let fp: u32 = rd(a, F_OFF, fi * 8 + 5);

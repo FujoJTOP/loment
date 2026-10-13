@@ -477,6 +477,79 @@ fn logical_end(t: ptr, i: u32, n: u32) -> u32 {
     return e;
 }
 
+/// 去掉行尾的**元数据附着**（`, !dbg !12`）—— M59 的 `--debug` 才有（`docs/167` §7）。
+///
+/// 与参考实现 `lomelf.py` 的 `strip_meta` **同判**: 附着只长在**指令末尾**（`!` 开头的
+/// 定义行在扫描里整行跳过, 所以 `!` 不进操作数位置）, 于是"末尾的**顶层**逗号 + 紧随一个
+/// `!`"就一定是附着。引号数为**奇**时整行不动 —— 那是字符串还没合上。
+///
+/// **为什么非去不可**: 留着它, 实参个数就会算多（`icmp` / `store` 那几处按顶层逗号切）,
+/// 而参考侧不去是 `ValueError`、自举侧不去是编出错的机器码 —— 两边错法不同, 逐字节判据
+/// 也兜不住。去掉之后 `--debug` 与不带 `--debug` 的 IR 在**指令这一层**逐字节同,
+/// 于是**原生产物两者字节相同**（`docs/167` §7 那句话的落地）。
+fn strip_meta(t: ptr, a: u32, e: u32) -> u32 {
+    // 引号没合上就别动: 行尾的 `, !x` 是字符串的内容
+    let q: u32 = 0;
+    let k: u32 = a;
+    while k < e {
+        if load8(t, k) == 34 {
+            q = q + 1;
+        }
+        k = k + 1;
+    }
+    if q % 2 == 1 {
+        return e;
+    }
+    let go: u32 = 1;
+    while go == 1 {
+        // 末尾空白先跳掉
+        let z: u32 = e;
+        let zg: u32 = 1;
+        while z > a && zg == 1 {
+            let cz: u32 = load8(t, z - 1);
+            if cz == 32 || cz == 9 || cz == 13 {
+                z = z - 1;
+            } else {
+                zg = 0;
+            }
+        }
+        // 从后往前找**顶层**逗号 (括号/花括号/方括号深度为 0 的那一层)
+        let j: u32 = z;
+        let dep: i32 = 0;
+        let cut: u32 = 0;
+        let found: u32 = 0;
+        let jg: u32 = 1;
+        while j > a && jg == 1 {
+            let cj: u32 = load8(t, j - 1);
+            if cj == 41 || cj == 125 || cj == 93 {
+                dep = dep + 1;
+            } else {
+                if cj == 40 || cj == 123 || cj == 91 {
+                    dep = dep - 1;
+                } else {
+                    if cj == 44 && dep == 0 {
+                        cut = j - 1;
+                        found = 1;
+                        jg = 0;
+                    }
+                }
+            }
+            j = j - 1;
+        }
+        if found == 0 {
+            return e;
+        }
+        // 逗号右边第一个非空白必须是 `!` —— 不是就不是附着, 原样返回
+        let nb: u32 = skip_sp(t, cut + 1, z);
+        if nb < z && load8(t, nb) == 33 {
+            e = cut;
+        } else {
+            return e;
+        }
+    }
+    return e;
+}
+
 /// 64 位字面量 (IR 里的常量可以是 2^32 这种; u32 版会截断)。
 fn num64_at(t: ptr, i: u32, n: u32) -> u64 {
     let j: u32 = skip_sp(t, i, n);
@@ -1577,6 +1650,13 @@ fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32) -> u32 {
         return c;
     }
     if load8(t, i) == 59 {
+        return c;
+    }
+    // `#dbg_declare` / `#dbg_value` / `#dbg_assign` / `#dbg_label`（M59 的调试记录）——
+    // **不是指令**: 原生产物不留行表 (`docs/167` §7), 所以跟 `;` 注释一样整行跳过。
+    // 不跳会落到末尾的 `fail_line`（"不支持的指令"），于是 `--debug` 的 IR 根本链不出来 ——
+    // 而文档说的是"被忽略"。与参考实现 `lomelf.py` 的 `parse_ll` 同判。
+    if lit_at(t, i, le, "#dbg") == 1 {
         return c;
     }
     if load8(t, i) == 125 {
@@ -3680,8 +3760,10 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     while i < be {
         let ls2: u32 = skip_sp(t, i, be);
         let le2: u32 = logical_end(t, i, be);
+        // M59 的元数据附着 (`--debug`) 去掉再判读 —— 但**推进仍按原行尾** (`i = le2 + 1`)
+        let me2: u32 = strip_meta(t, ls2, le2);
         // 基本块标签 -> 登记代码位置
-        let e3: u32 = le2;
+        let e3: u32 = me2;
         let go3: u32 = 1;
         while e3 > ls2 && go3 == 1 {
             let c3: u32 = load8(t, e3 - 1);
@@ -3691,21 +3773,21 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
                 go3 = 0;
             }
         }
-        if e3 > ls2 && load8(t, e3 - 1) == 58 && line_dest(t, ls2, le2) == 0 {
+        if e3 > ls2 && load8(t, e3 - 1) == 58 && line_dest(t, ls2, me2) == 0 {
             setcell(tab, C_CURBO, ls2);
             setcell(tab, C_CURBL, e3 - 1 - ls2);
             lbl_add(tab, cell(tab, C_FNO), cell(tab, C_FNL), ls2, e3 - 1 - ls2,
                     txt_base(tab) + d);
         } else {
-            let dst: u64 = line_dest(t, ls2, le2);
+            let dst: u64 = line_dest(t, ls2, me2);
             store32(tab, C_DESTO, hi32(dst));
             store32(tab, C_DESTL, lo32(dst));
             if dst != 0 {
-                let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), le2);
-                let op2: u32 = skip_sp(t, op + 1, le2);
-                d = lower(tab, out, d, t, op2, le2);
+                let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), me2);
+                let op2: u32 = skip_sp(t, op + 1, me2);
+                d = lower(tab, out, d, t, op2, me2);
             } else {
-                d = lower(tab, out, d, t, ls2, le2);
+                d = lower(tab, out, d, t, ls2, me2);
             }
         }
         i = le2 + 1;

@@ -396,6 +396,55 @@ MUTATORS_V13 = [
 ]
 
 
+def fixture_v14() -> dict:
+    """一份合法的 **v14** 形式对象: v13 的再 + v14 的 `net_ladder`（`docs/237`）。
+
+    与 `fixture_v7` … `fixture_v13` 同一个理由单独来一份：`net_ladder` 从 v14 起才合法 ——
+    拿 v13 去试只会得到"未知顶层字段"，校验器里那几条规则（四档得是非负整数、四档之和要
+    等于 `total_net`、`total_net` 要等于 `surfaces.net`、不认识的键要报）**一条都碰不到**。
+
+    这里的数**刻意与 `fixture_v12` 的 `surfaces.net`（=2）对上** —— 交叉不变量是 v14
+    独有的那一条，而且比 `surfaces` 那条更深一层（那条是"和 == 另一个字段"，这条是
+    "**和 == 另一个字段的一个分量**"），正例里就得先成立，否则测的不是"自洽"而是"必然报错"。
+    """
+    d = fixture_v13()
+    d["potato"] = "v14"
+    d["net_ladder"] = {"w0": 0, "w1": 1, "w2": 1, "w3": 0, "total_net": 2}
+    return d
+
+
+#: v14 的 `net_ladder` 那几条规则的反例（`docs/237`）。作用在 **v14** 的对象上。
+#:
+#: 与 `MUTATORS_V10`（`gc_ladder`）同形，**多一条 `gc_ladder` 那边没有的跨字段要求**：
+#: `net_ladder.total_net` 必须等于 `surfaces.net` —— 每个联网站点落在一档里，而它在
+#: `surfaces` 里落在 `net` 面里，所以两处数的是**同一批站点**（少一档 = 有的联网站点没归类，
+#: 多一档 = 给不联网的站点配了宽度）。
+MUTATORS_V14 = [
+    ("net_ladder 整个缺掉", lambda d: d.pop("net_ladder"), "net_ladder 必须是对象"),
+    ("net_ladder 不是对象", lambda d: d.__setitem__("net_ladder", []),
+     "net_ladder 必须是对象"),
+    ("net_ladder 缺一档", lambda d: d["net_ladder"].pop("w2"),
+     "net_ladder.w2 必须是非负整数"),
+    ("net_ladder 一档不是整数", lambda d: d["net_ladder"].__setitem__("w1", "x"),
+     "net_ladder.w1 必须是非负整数"),
+    ("net_ladder 一档是负数", lambda d: d["net_ladder"].__setitem__("w3", -1),
+     "net_ladder.w3 必须是非负整数"),
+    ("net_ladder total_net 缺掉", lambda d: d["net_ladder"].pop("total_net"),
+     "net_ladder.total_net 必须是非负整数"),
+    # **自洽**：和数只在四档都合法时才去对。
+    ("net_ladder 四档之和对不上", lambda d: d["net_ladder"].__setitem__("total_net", 9),
+     "四档之和"),
+    # **交叉不变量**：这一条**故意让和数自洽**（`1+2=3`），于是报的只能是"与 `surfaces.net`
+    # 打架"那一条 —— 否则测的是两件事撞在一起。
+    ("net_ladder 与 surfaces.net 打架",
+     lambda d: d.__setitem__("net_ladder",
+                             {"w0": 1, "w1": 2, "w2": 0, "w3": 0, "total_net": 3}),
+     "surfaces.net"),
+    ("net_ladder 多一个键", lambda d: d["net_ladder"].__setitem__("w4", 0),
+     "不认识的键"),
+]
+
+
 
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
@@ -735,6 +784,11 @@ def _cases() -> list[tuple[str, dict]]:
     _okv = fixture_v13()
     _okv["vm"] = "vm"
     out.append(("v13-vm", _okv))
+    # v14 那一组（`net_ladder`, `docs/237`）同理。
+    for name, mut, _ in MUTATORS_V14:
+        d = fixture_v14()
+        mut(d)
+        out.append((f"v14-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

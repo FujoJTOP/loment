@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lvm_test.py — LVM 的 T0 判据（`docs/237` §4）。
+"""lvm_test.py — LVM 的 T0 判据（`docs/243` §4）。
 
 **判 A：产物等价。** 同一份程序，`lomelf` 编出来的**原生产物**与 VM 各跑一遍，
 比 **stdout 的字节 + 退出码**。不看时间、不看中间表示 —— 与 `loment_elf_test.py`
@@ -40,7 +40,7 @@ VM_KNOWN_GAPS: dict[str, str] = {
         "不是被解释程序的。要么 VM 伪造一份，要么这条永远留在\"目标之外\"。"),
     "register_hello": "同 `cmd_hello`：要 257（openat）读 `/proc/self/cmdline`。",
     "bootprobe": "要系统调用 **63（uname）**。VM 要如实回答得伪造一个与宿主一致的 utsname。",
-    "selfcheck": "要系统调用 **39（getpid）**（还有其余几个）。见 `docs/237` §3.4 那张表。",
+    "selfcheck": "要系统调用 **39（getpid）**（还有其余几个）。见 `docs/243` §3.4 那张表。",
 }
 
 

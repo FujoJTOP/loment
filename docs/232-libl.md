@@ -94,6 +94,29 @@
 dev 驱动器收 `use libl`、发行版驱动器拒**且报文点名 `libl`**；同一个判据里也测 `choose vm`，
 **两端都测**（只测"拒"的话，一个"什么都拒"的驱动器也能绿）。
 
+### 1.2 LibL 家族：`internet` 是**第二个包**（2026-10-13）
+
+上面 §1–§1.1 说的 `libl` 是 `std` **包内**的一个小入口。家族的另一半是**另一个包**：
+`lompi/store/internet/0.1.0/`（`docs/240`）。两者是同一个说法下的两件事 ——
+
+* **`std` 是 libc 那一面**：把"写 C 的人以为语言自带的那些函数"补上（`string` / `ctype` /
+  `stdlib` / `stdio`），判据对着**真 glibc** 逐字节跑；
+* **`internet` 是网络那一面**：把"接上网"这件事收成库（`ip` / `uri` / `http` / `dns` /
+  `sock` / `tcp` / `udp`），判据对着**真的实现**跑 —— CPython 标准库
+  （`ipaddress` / `urllib.parse` / `http.client`）与**一个真起的 `http.server`**。
+
+两者共用**同一条判据口径**："对照物是真的东西，不是我们手写的期望值"。
+这条口径不是风格问题：LibL 那边 `strncpy` 补零、`strcmp` 返符号还是差值这些分歧，
+拿 Python 当对照物**对不出来**（§4）；`internet` 这边同理 —— DNS 的线格式没有真解析器
+可对（工具链里就没有，`docs/236`），所以那一层**明写**"对的是按 RFC 1035 独立推出来的
+字节，不是真实现"，不假装对过。
+
+**命名上的硬约束（加模块前必读）**：包内模块的**顶层名字在一个单元里是平的**，而
+`resolve_name` 在包内模块层遇到**同名两处命中直接报错**。所以 `internet` 里不能出现
+`url`（`std` 占了）、也不能用 `u_` 这种内部前缀（那是 `std/url.lomt` 的）。
+判据 `loment_internet_test::test_internet_names_do_not_collide_with_std` 逐条比
+internet 与 std 全部模块的顶层名字 —— 这是**第一个**看着这条规则的判据。
+
 ---
 
 ## 2. 四张脸：libc 头 -> LibL 模块

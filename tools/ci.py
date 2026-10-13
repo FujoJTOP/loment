@@ -126,9 +126,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
-                 # LVM 的 T0（`docs/237`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
+                 # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
                  "lvm_test",
-                 # LVM 自举镜像的**孪生判据**（`docs/237` §5）：同一份 `.ll` 喂参考实现与
+                 # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
                  # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
                  # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
                  "lvm_twin_test",
@@ -161,6 +161,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `docs/NNN` 的编号：**不许出现新的撞号**，且基线只许变短
                  # (2026-10-11 实测 main 上有 7 个号被两份以上文档共用) —— `tools/loment_docs.py`
                  "loment_docs_test",
+                 # `lom/` 那道禁区自己的判据（把 gate.yml 里那段脚本抠出来跑）
+                 "loment_door_test",
+                 # 准入判定（`docs/238`）：两个实现逐字节相同 + 那条不对称
+                 "loment_admit_test",
+                 # 零宽那一帧的静态规则 + 两条证伪（`docs/240`）
+                 "loment_zwframe_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
@@ -169,6 +175,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
                  "loment_libl_test",
+                 # LibL 家族第三个包 internet (docs/241): 对照物是 CPython 标准库
+                 # (ipaddress / urllib.parse / http.client) + **真起一个 http.server**。
+                 "loment_internet_test",
+                 # 第四个包 os (docs/242): 探针编成 ELF 与 CPython 的 os/time **在同一个
+                 # Linux 环境里**对跑 (Windows 走 WSL, Linux 直接跑)。
+                 "loment_os_test",
                  # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
@@ -232,6 +244,11 @@ SHARD_COST = {
     "loment_err_test": 6.6,
     "loment_std_test": 1.0,
     "loment_libl_test": 3.0,
+    # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
+    # 真 http.server。本机 6.9s。
+    "loment_internet_test": 10.0,
+    # 实测: 4 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑。本机 2.5s。
+    "loment_os_test": 5.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
     "loment_net_test": 0.2,          # 实测: 读四份表 + 四条自证, 不编译
