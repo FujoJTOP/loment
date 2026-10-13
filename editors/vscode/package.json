@@ -1,8 +1,8 @@
 {
   "name": "loment",
   "displayName": "Loment",
-  "description": "Loment 语言支持：语法高亮（含七门外门表层语法）+ LSP（补全/跳转/诊断/格式化）+ 构建/检查/运行命令（docs/143/148/155/188）",
-  "version": "0.2.0",
+  "description": "Loment language support for VS Code: syntax highlighting (including the seven surface grammars), a language server (completion, go to definition, diagnostics, formatting), and build / run / check / debug commands.",
+  "version": "0.2.1",
   "publisher": "hooyan2022",
   "license": "Loment-Open",
   "repository": {
@@ -13,7 +13,7 @@
   "engines": {
     "vscode": "^1.91.0"
   },
-  "//files": "打进包里的文件**允许清单**（vsce 认这个字段，npm 也认）。node_modules 必须在里面 —— 商店装下来的那份**不会**跑 npm install，vscode-languageclient 是随包发的。`tools/vscode_ext.py` 的 INCLUDE_* 是同一件事的另一份表达（那份给本机侧载用），判据钉着两边不漏同一类文件。",
+  "//files": "Allowlist of the files packed into the VSIX (both vsce and npm read this field). `node_modules` must be here: the copy installed from the Marketplace never runs `npm install`, so `vscode-languageclient` is shipped inside the package. The INCLUDE_* lists in `tools/vscode_ext.py` express the same thing for local side-loading, and a criterion keeps the two from missing the same class of file.",
   "files": [
     "src",
     "syntaxes",
@@ -28,7 +28,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "未受信工作区（Restricted Mode）里保留语法高亮与语言服务；下面这些设置被挡住 —— 工作区的 .vscode/settings.json 不能借着它们指向任意程序或脚本（#166）。",
+      "description": "In an untrusted workspace (Restricted Mode) syntax highlighting and the language server stay available while the settings below are blocked, so a workspace's .vscode/settings.json cannot point them at arbitrary programs or scripts (#166).",
       "restrictedConfigurations": [
         "loment.serverCommand",
         "loment.serverArgs",
@@ -42,7 +42,7 @@
     },
     "virtualWorkspaces": {
       "supported": false,
-      "description": "构建 / 运行 / 调试都要真文件系统（编译产物、ELF、ptrace）。"
+      "description": "Build, run and debug all need a real file system (build outputs, ELF, ptrace)."
     }
   },
   "categories": [
@@ -97,37 +97,51 @@
       },
       {
         "id": "loment-c",
-        "aliases": ["Loment (C surface grammar)"],
+        "aliases": [
+          "Loment (C surface grammar)"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "loment-cpp",
-        "aliases": ["Loment (C++ surface grammar)"],
+        "aliases": [
+          "Loment (C++ surface grammar)"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "loment-java",
-        "aliases": ["Loment (Java surface grammar)"],
+        "aliases": [
+          "Loment (Java surface grammar)"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "loment-csharp",
-        "aliases": ["Loment (C# surface grammar)"],
+        "aliases": [
+          "Loment (C# surface grammar)"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "loment-go",
-        "aliases": ["Loment (Go surface grammar)"],
+        "aliases": [
+          "Loment (Go surface grammar)"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "loment-python",
-        "aliases": ["Loment (Python surface grammar)"],
+        "aliases": [
+          "Loment (Python surface grammar)"
+        ],
         "configuration": "./language-configuration-python.json"
       },
       {
         "id": "loment-natural",
-        "aliases": ["Loment (natural surface grammar)"]
+        "aliases": [
+          "Loment (natural surface grammar)"
+        ]
       }
     ],
     "grammars": [
@@ -183,12 +197,12 @@
         "loment.serverPath": {
           "type": "string",
           "default": "",
-          "description": "tools/loment_lsp.py 的绝对路径（仅当没用 serverCommand 时生效）。留空则从工作区逐级向上自动查找。"
+          "description": "Absolute path to tools/loment_lsp.py (only used when serverCommand is not set). Empty means: search upward from the workspace."
         },
         "loment.serverCommand": {
           "type": "string",
           "default": "",
-          "description": "改用别的命令起语言服务（**不需要 Python**）。Windows 上的推荐值：wsl —— 配合 scripts/install-lsp.ps1 装好的 Loment 版服务。留空则用 python + serverPath。"
+          "description": "Start the language server with a different command (**no Python needed**). Recommended on Windows: `wsl`, with a Loment language server installed by scripts/install-lsp.ps1. Empty means: python + serverPath."
         },
         "loment.serverArgs": {
           "type": "array",
@@ -196,12 +210,12 @@
             "type": "string"
           },
           "default": [],
-          "description": "serverCommand 的参数。例：[\"-e\", \"/home/<you>/.local/share/loment/lsp\"]（scripts/install-lsp.ps1 会把该行打出来）。"
+          "description": "Arguments for serverCommand. Example: [\"-e\", \"/home/<you>/.local/share/loment/lsp\"] (scripts/install-lsp.ps1 prints that line)."
         },
         "loment.enableLsp": {
           "type": "boolean",
           "default": true,
-          "description": "启用语言服务（补全 / 跳转 / 诊断 / 格式化）。关掉后只保留语法高亮与命令。"
+          "description": "Enable the language server (completion / definition / diagnostics / formatting). Turned off, only syntax highlighting and the commands remain."
         },
         "loment.extraExtensions": {
           "type": "array",
@@ -209,17 +223,17 @@
             "type": "string"
           },
           "default": [],
-          "description": "额外认成 L1 源的后缀（例：[\".foo\"]）。项目在 `loment.conf` 里用 `source_ext()` 声明自定义后缀时**不用填这里** —— 扩展会自己去读那份 conf（打开的是子目录、conf 在上一层时也照样找得到）。这里是给「没有 conf 也想认某个后缀」的场合用的。"
+          "description": "Extra suffixes to treat as L1 source (example: [\".foo\"]). When a project declares its own suffix with `source_ext()` in `loment.conf` you do **not** need this: the extension reads that conf itself, including when you opened a subdirectory and the conf sits one level up. This setting is for the case where there is no conf."
         },
         "loment.buildDir": {
           "type": "string",
           "default": "loment/build",
-          "description": "构建产物（.ll / .potato.json）输出目录，相对工作区根。"
+          "description": "Output directory for build artifacts (.ll / .potato.json), relative to the workspace root."
         },
         "loment.toolCommand": {
           "type": "string",
           "default": "",
-          "description": "「编译 / 运行」用哪个 Loment 可执行文件（**不需要 Python**）。装了包就填 `loment`；Windows 上经 WSL 跑时填 `wsl`。留空时：Windows 上若工作区里有 scripts/lomc.ps1 就自动用它，否则命令**明确报错**（不会点了没反应）。"
+          "description": "Which Loment executable *Build / Run* uses (**no Python needed**). With the package installed: `loment`; running through WSL on Windows: `wsl`. Empty means: on Windows use scripts/lomc.ps1 from the workspace when present, otherwise the command **reports an explicit error** (it never silently does nothing)."
         },
         "loment.toolArgs": {
           "type": "array",
@@ -227,17 +241,17 @@
             "type": "string"
           },
           "default": [],
-          "description": "toolCommand 的参数。例：[\"-e\", \"/home/<you>/.local/share/loment/bin/loment\"]（配 toolCommand=\"wsl\"）。"
+          "description": "Arguments for toolCommand. Example: [\"-e\", \"/home/<you>/.local/share/loment/bin/loment\"] (with toolCommand=\"wsl\")."
         },
         "loment.dapScript": {
           "type": "string",
           "default": "",
-          "description": "调试适配器 tools/loment_dap.py 的绝对路径。留空则从工作区逐级向上自动查找。"
+          "description": "Absolute path to the debug adapter tools/loment_dap.py. Empty means: search upward from the workspace."
         },
         "loment.dapCommand": {
           "type": "string",
           "default": "",
-          "description": "改用别的命令起调试适配器（默认 Windows 上走 `wsl -e python3 <dapScript>`，其它平台走 `python3 <dapScript>`）。留空即用默认。"
+          "description": "Start the debug adapter with a different command (default: `wsl -e python3 <dapScript>` on Windows, `python3 <dapScript>` elsewhere). Empty means: use the default."
         },
         "loment.dapArgs": {
           "type": "array",
@@ -245,7 +259,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "dapCommand 的参数（不含脚本路径时，记得自己带上）。"
+          "description": "Arguments for dapCommand (include the script path yourself when it is not in there)."
         }
       }
     },
@@ -278,7 +292,7 @@
     "debuggers": [
       {
         "type": "loment",
-        "label": "Loment 调试",
+        "label": "Loment Debug",
         "languages": [
           "loment",
           "loment-c",
@@ -297,7 +311,7 @@
             "properties": {
               "program": {
                 "type": "string",
-                "description": "要调试的 .lomt 源文件（编译在调试会话里现做，带 DWARF）"
+                "description": "The .lomt source file to debug (compiled inside the debug session, with DWARF)"
               },
               "args": {
                 "type": "array",
@@ -305,12 +319,12 @@
                   "type": "string"
                 },
                 "default": [],
-                "description": "传给被调试程序的参数"
+                "description": "Arguments passed to the program being debugged"
               },
               "stopOnEntry": {
                 "type": "boolean",
                 "default": false,
-                "description": "在入口（`_start` 的第一条指令）就停下"
+                "description": "Stop at the entry point (the first instruction of `_start`)"
               }
             }
           }
@@ -319,19 +333,19 @@
           {
             "type": "loment",
             "request": "launch",
-            "name": "调试当前 Loment 文件",
+            "name": "Debug current Loment file",
             "program": "${file}",
             "stopOnEntry": false
           }
         ],
         "configurationSnippets": [
           {
-            "label": "Loment: 调试一个 .lomt 文件",
-            "description": "走 WSL 里的 ptrace（需要 Windows 侧装有 LLVM 的 clang / llvm-objdump）",
+            "label": "Loment: debug a .lomt file",
+            "description": "Uses ptrace inside WSL (needs LLVM's clang / llvm-objdump on the Windows side)",
             "body": {
               "type": "loment",
               "request": "launch",
-              "name": "调试 Loment",
+              "name": "Debug Loment",
               "program": "^\"\\${file}\"",
               "stopOnEntry": false
             }
@@ -348,7 +362,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "`build`（编译）或 `run`（编译并运行）"
+            "description": "`build` (compile) or `run` (compile and run)"
           }
         }
       }
@@ -356,35 +370,35 @@
     "commands": [
       {
         "command": "loment.build",
-        "title": "Loment: 编译当前文件"
+        "title": "Loment: Build current file"
       },
       {
         "command": "loment.run",
-        "title": "Loment: 编译并运行"
+        "title": "Loment: Build and run"
       },
       {
         "command": "loment.restartServer",
-        "title": "Loment: 重启语言服务"
+        "title": "Loment: Restart language server"
       },
       {
         "command": "loment.showIr",
-        "title": "Loment: 生成 LLVM IR（当前文件）"
+        "title": "Loment: Emit LLVM IR (current file)"
       },
       {
         "command": "loment.checkFile",
-        "title": "Loment: 静态检查（当前文件）"
+        "title": "Loment: Check (current file)"
       },
       {
         "command": "loment.runTests",
-        "title": "Loment: 运行文件内 test_* 函数"
+        "title": "Loment: Run test_* functions"
       },
       {
         "command": "loment.runInFujoOS",
-        "title": "Loment: 在 FujoOS 里运行（QEMU）"
+        "title": "Loment: Run on the FujoOS kernel (QEMU)"
       },
       {
         "command": "loment.formatDocument",
-        "title": "Loment: 格式化文档（lomfmt）"
+        "title": "Loment: Format document (lomfmt)"
       }
     ],
     "problemMatchers": [

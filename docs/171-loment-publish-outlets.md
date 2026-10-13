@@ -122,6 +122,13 @@ python tools/loment_publish.py --push loment   # 或 --push lompi / --push all
 
 > 2026-10-13 · 首次发布 `hooyan2022.loment` **v0.2.0** · 判据 `vscode_ext_test::test_vscode_publish_ready`
 >
+> **v0.2.1（同日）**：listing 整个换成**英文**、并且**不再拿 FujoOS 介绍自己**（商店页显示的就是
+> `editors/vscode/README.md` 加 `package.json` 的 `description`；第一版是中文、开篇写的是
+> "FUAI-OS 自研底层语言"，而 Loment 自 0.1.4.5 起已经是独立的东西，且 FujoOS 外界拿不到）。
+> 同一次把 `package.json` 里**用户看得见的**文案全换成英文（命令标题、设置说明、调试器标签、
+> 不受信工作区那段）—— 此前 32 条中文串，现在 0 条。`src/*.js` 里的**注释**保持中文（仓内文风），
+> 只有弹给用户看的那几句改了（编译器/工具链找不到时的提示）。
+>
 > **补记（同日的事实，不追因）**：第一次上传用的是**另一个账号**下的 `FujoJTOP` publisher ——
 > `vsce` 同样回了 `DONE`，但那次在浏览器里打开 `manage/publishers/FujoJTOP` 是 **404**，
 > 外面的三个探针（发布者页 / item 页 / 下载端点，外加一个已知存在的扩展做对照）也全查不到。
