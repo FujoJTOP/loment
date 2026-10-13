@@ -5,9 +5,26 @@
   "version": "0.2.0",
   "publisher": "FujoJTOP",
   "license": "Loment-Open",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FujoJTOP/loment.git"
+  },
+  "icon": "loment-icon.png",
   "engines": {
     "vscode": "^1.91.0"
   },
+  "//files": "打进包里的文件**允许清单**（vsce 认这个字段，npm 也认）。node_modules 必须在里面 —— 商店装下来的那份**不会**跑 npm install，vscode-languageclient 是随包发的。`tools/vscode_ext.py` 的 INCLUDE_* 是同一件事的另一份表达（那份给本机侧载用），判据钉着两边不漏同一类文件。",
+  "files": [
+    "src",
+    "syntaxes",
+    "node_modules",
+    "package.json",
+    "language-configuration.json",
+    "language-configuration-python.json",
+    "README.md",
+    "LICENSE",
+    "loment-icon.png"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",

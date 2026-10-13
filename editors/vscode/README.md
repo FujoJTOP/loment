@@ -2,6 +2,10 @@
 
 Loment（FUAI-OS 自研底层语言）的 VS Code 扩展：**语法高亮 + 语言服务 + 工具链命令**。
 
+> **它需要一套 Loment 检出**：语言服务、编译、运行、调试都走工作区里的 `tools/loment_lsp.py` /
+> `lomentc.py` / `loment.py` —— 扩展**不带编译器**。没有检出时只有语法高亮可用（见下面「依赖」一节）。
+> 检出：`git clone https://github.com/FujoJTOP/loment`。
+
 > 设计见 `docs/155-loment-kernel-handoff.md` §编辑器集成；语言与工具链见 `docs/143`/`docs/148`/`docs/150`。
 
 ## 能力
@@ -131,6 +135,14 @@ Shift+F11 跳出（`stepOut`），继续 F5。
 
 ## 安装 / 打包
 
+**从商店装**（推荐）：VS Code 里搜 `Loment`，或
+
+```bash
+code --install-extension FujoJTOP.loment
+```
+
+<https://marketplace.visualstudio.com/items?itemName=FujoJTOP.loment>
+
 ```bash
 # 一条命令：重打包 + 侧载进本机 VS Code（然后 Developer: Reload Window）
 python tools/vscode_ext.py --install
@@ -167,4 +179,4 @@ python tools/vscode_ext_test.py
 **对真实语言服务做一次完整 LSP 往返**（initialize → didOpen → 补全 → 跳转 → 格式化）、
 `.vsix` 结构校验、**真的跑一遍 `activate()`**（注册的命令/任务/调试器一个不少）、
 **表层语法声明检测与参考实现逐条对拍**（全仓 769 份源，枚举而非手挑）、
-**真的开文档看语言 id 换没换**、未受信工作区那组声明、以及升级时旧版本目录的清理。共 15 条。
+**真的开文档看语言 id 换没换**、未受信工作区那组声明、以及升级时旧版本目录的清理。共 16 条。

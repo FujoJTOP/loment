@@ -29,7 +29,10 @@ DEFAULT_OUT = ROOT / "loment" / "build" / "loment-vscode.vsix"
 # 打进 VSIX 的目录/文件 (相对 editors/vscode); node_modules 是运行时依赖, 必须带
 INCLUDE_DIRS = ("src", "syntaxes", "node_modules")
 INCLUDE_FILES = ("package.json", "language-configuration.json",
-                 "language-configuration-python.json", "README.md")
+                 "language-configuration-python.json", "README.md",
+                 # 发布到商店那两件（vsce 要 `icon` 指到的文件在包里，
+                 # `LICENSE` 是 `Loment-Open` 的正文 —— vsce 只找**扩展目录**这一份）
+                 "LICENSE", "loment-icon.png")
 SKIP_NAMES = (".map", ".ts", ".md.bak")
 
 #: 必须进 `capabilities.untrustedWorkspaces.restrictedConfigurations` 的设置 (#166)。
@@ -115,6 +118,11 @@ def check() -> list[str]:
     for c in pkg.get("contributes", {}).get("commands", []):
         if not c.get("command") or not c.get("title"):
             bad.append(f"命令缺 command/title: {c}")
+    # 商店发布那两件：`icon` 指到的文件要在，`LICENSE` 要在扩展目录里（vsce 只看这一份）
+    if pkg.get("icon") and not (EXT / str(pkg["icon"])).is_file():
+        bad.append(f"icon 指的文件不存在: {pkg['icon']}")
+    if not (EXT / "LICENSE").is_file():
+        bad.append("扩展目录里没有 LICENSE（vsce 只找这一份；仓根那份它看不见）")
     # 语言引用的 `configuration` 必须**存在**且**在打包清单里** —— 少一样都是"装上去才发现";
     # 2026-10-12 加第二份配置 (python 写法的注释记号是 `#`, 不是 `//`) 时补的这条。
     for lang in pkg.get("contributes", {}).get("languages", []):

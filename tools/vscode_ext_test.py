@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -859,6 +860,63 @@ def test_vscode_hardens_untrusted_workspaces():
         "vscode_ext.check() 也该钉着这件事（--check 与 CI 都要看得到）"
     print(f"      未受信工作区: 声明了 supported={untrusted.get('supported')!r}，"
           f"挡住 {len(restricted)} 个设置（命令/参数/脚本路径）")
+
+
+@test
+def test_vscode_publish_ready():
+    """商店发布那几件 —— `vsce publish` 的硬要求，加"两份打包清单不许漏同一类文件"。
+
+    2026-10-13 第一次把它发到 Marketplace 之前补的。四件事：
+
+    1. `repository` 要在（否则每次都得带 `--allow-missing-repository`）；
+    2. `icon` 指到的文件要**真的在包里**，而且按商店规范是 128×128 的 PNG；
+    3. `LICENSE` 要在**扩展目录**里，且与仓根那份**逐字节相同** —— vsce 只找扩展目录这一份，
+       而"同一份东西存在第二份就会漂"在本仓对别的派生物一律上判据，许可正文不该例外；
+    4. `node_modules` 必须在**两份**清单里：`files`（vsce 认的那份）与
+       `vscode_ext.INCLUDE_DIRS`（本机侧载那份）。漏了的话商店装下来的扩展起不来 ——
+       VS Code **不会**替用户跑 `npm install`。
+    """
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    # ① repository
+    repo = pkg.get("repository") or {}
+    url = repo.get("url") if isinstance(repo, dict) else repo
+    assert url and "github.com" in str(url), f"repository 不对: {repo!r}"
+    # ② icon：存在、是 PNG、128×128、且在两份清单里
+    icon = pkg.get("icon")
+    assert icon, "package.json 缺 icon（商店卡片会是灰的）"
+    ip = EXT / str(icon)
+    assert ip.is_file(), f"icon 指的文件不存在: {icon}"
+    raw = ip.read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n", f"{icon} 不是 PNG"
+    w, h = struct.unpack(">II", raw[16:24])
+    assert (w, h) == (128, 128), f"{icon} 是 {w}x{h}，商店要 128x128"
+    files = pkg.get("files") or []
+    assert str(icon) in files, f"{icon} 不在 package.json 的 files 里"
+    assert str(icon) in vscode_ext.INCLUDE_FILES, \
+        f"{icon} 不在 vscode_ext.INCLUDE_FILES 里（本机侧载那份会缺它）"
+    # ③ LICENSE：扩展目录里那份 == 仓根那份
+    lic_ext, lic_root = EXT / "LICENSE", ROOT / "LICENSE"
+    assert lic_ext.is_file(), "扩展目录里没有 LICENSE（vsce 只找这一份）"
+    assert lic_root.is_file(), "仓根没有 LICENSE？"
+    assert lic_ext.read_bytes().replace(b"\r\n", b"\n") == \
+        lic_root.read_bytes().replace(b"\r\n", b"\n"), \
+        "editors/vscode/LICENSE 与仓根 LICENSE 不一致（两份许可正文已经开始漂了）"
+    assert "LICENSE" in files and "LICENSE" in vscode_ext.INCLUDE_FILES, \
+        "LICENSE 没进打包清单"
+    # ④ node_modules 两份清单都要有
+    assert "node_modules" in files, "files 里没有 node_modules —— 商店装下来的跑不起来"
+    assert "node_modules" in vscode_ext.INCLUDE_DIRS, "INCLUDE_DIRS 里没有 node_modules"
+    # 附带：语言引用的 grammar / configuration 要被 vsce 那份清单罩住
+    for g in pkg["contributes"]["grammars"]:
+        assert Path(str(g["path"]).lstrip("./")).parts[0] in files, \
+            f"files 没罩住语法目录: {g['path']}"
+    for lang in pkg["contributes"]["languages"]:
+        conf = lang.get("configuration")
+        if conf:
+            assert Path(str(conf).lstrip("./")).name in files, \
+                f"files 没罩住 {lang['id']} 的 configuration: {conf}"
+    print(f"      发布就绪：repository / icon 128x128 / LICENSE 与仓根逐字节相同 / "
+          f"node_modules 在两份清单里（{len(files)} 条允许清单）")
 
 
 @test

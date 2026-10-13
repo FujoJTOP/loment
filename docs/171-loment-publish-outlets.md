@@ -117,3 +117,59 @@ python tools/loment_publish.py --push loment   # 或 --push lompi / --push all
 - **`--force` 是刻意的**：发布口的内容应当**完全**由单仓决定；留着分叉只会让人困惑。
   代价是"在那边提交过的东西会没"。
 - **切的是 `HEAD`**：只发已提交的内容，工作区里没提交的改动不会进去。
+
+## 5. 第三个发布口：VS Code Marketplace（扩展）
+
+> 2026-10-13 · 首次发布 `FujoJTOP.loment` **v0.2.0** · 判据 `vscode_ext_test::test_vscode_publish_ready`
+
+上面两个口是**代码仓**（`loment_publish.py --push`，内容完全由单仓决定）。Marketplace 是
+**另一个形状**：它是个商店 —— 发布要一个发布者账号，而且**版本号发出去就烧掉了**。所以单独成节。
+
+**地址**：<https://marketplace.visualstudio.com/items?itemName=FujoJTOP.loment> ·
+管理台 <https://marketplace.visualstudio.com/manage/publishers/FujoJTOP> ·
+装法 `code --install-extension FujoJTOP.loment`。
+
+### 5.1 账号那一半（做一次，之后不用碰）
+
+微软账号 → 建一个 Azure DevOps 组织 → 建 **PAT**（[短链](https://go.microsoft.com/fwlink/?LinkId=307137)）→
+在 [manage](https://marketplace.visualstudio.com/manage) 建发布者。
+
+两处**填错就 401、而报错看不出来**：
+
+- PAT 的 **Organization** 要选 **All accessible organizations**（选单个组织不行 —— 商店发布跨组织）；
+- Scopes 用 **Custom defined** → **Show all scopes** → **Marketplace → Manage**（只要这一个）。
+
+发布者 **ID 是永久的**（`FujoJTOP`，与 `package.json` 的 `publisher` 必须一致），显示名可以改。
+
+### 5.2 发布
+
+```
+cd editors/vscode
+npx --yes @vscode/vsce@latest publish      # 版本取 package.json；token 走 VSCE_PAT 环境变量
+```
+
+**升版用明确给号的写法**（`vsce publish 0.2.1`），别用 `patch`/`minor` —— 那两个会自己改
+`package.json` **并提交**，与"版本写在源里、由人提交"的既有习惯打架。
+
+### 5.3 发布前那四件（都有判据或工具兜着）
+
+| 件 | 为什么 |
+|---|---|
+| `repository` | 没有它 `vsce` 每次都要求 `--allow-missing-repository` |
+| 扩展目录里的 `LICENSE` | **`vsce` 只找扩展目录**这一份（仓根那份它看不见）；`Loment-Open` 不是 SPDX 标识，找不到文件它会提示。判据钉住它与仓根**逐字节相同** |
+| `icon`（128×128 PNG） | 没有它商店卡片是灰的。现在这份是从 `editors/loment.ico` 的 128 帧转出来的 |
+| `package.json` 的 `files` | vsce 的允许清单。**`node_modules` 必须在里面** —— 商店装下来的那份**不会**跑 `npm install` |
+
+判据 `test_vscode_publish_ready` 把它们连同"两份打包清单不许漏同一类文件"一次钉住；
+`vscode_ext.check()` 里另有 `icon` / `LICENSE` 两条（每次打包都会看）。
+
+### 5.4 边界（诚实清单）
+
+- **两个打包器**：商店走 `vsce`，本机侧载走 `python tools/vscode_ext.py --install`（确定性字节、进判据）。
+  **别拿侧载那份去发商店** —— 那份的 `vsixmanifest` 是手写的，商店的校验比侧载严，没验过。
+- **不在 CI 里发**：与 §4 同一条道理 —— 发布是对外动作，得人按；PAT 也不进 secrets。
+- **PAT 是明文的**：`vsce` 从 `VSCE_PAT` 读。**别把它写进任何文件、任何提交**；
+  贴出去过（截图、聊天、日志）就立刻去那个页面撤销重发。
+- **listing 的第一句必须说清"需要一套 Loment 检出"**：扩展不带编译器（`README.md` 顶上那句就是为它写的）。
+  不说的话，第一条评价会是"装了没反应"。
+- **版本号烧掉就没了**：撤下来也没法重发同一个号；发错了就发下一个号。

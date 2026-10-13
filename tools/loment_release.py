@@ -210,6 +210,7 @@ GLOBS = [
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/language-configuration-python.json",
+    "editors/vscode/LICENSE", "editors/vscode/loment-icon.png",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
     # 编译期子集语料 (S4.0): `loment_ct_test` 读它们, 判据随包发就得连语料一起发。
