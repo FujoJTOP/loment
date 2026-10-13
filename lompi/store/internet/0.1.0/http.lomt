@@ -50,23 +50,20 @@ fn httpp_lower(c: u32) -> u32 {
     return c;
 }
 
-/// 本报文头结束的位置: `CRLF CRLF` 里第一个 CR 的绝对下标; 没有返回 HTTP_NO。
-/// 顺手认只发 LF 的服务器 (`LF LF`) —— 少见, 但撞上了不该被当成"这不是 HTTP"。
+/// 本报文头结束的位置: `CRLF CRLF` 或 `LF LF` 里第一个字节的绝对下标; 没有返回 HTTP_NO。
+/// 两种形式**一起扫、谁先出现谁赢** —— 先在整个缓冲里找 `CRLF CRLF`、找不到才退到 `LF LF`,
+/// 会让一个 LF-only 的响应只要 body 里带 `CRLF CRLF` 就把 body 当成头结束。
 pub fn http_hdr_end(d: ptr, o: u32, n: u32) -> u32 {
     let i: u32 = 0;
-    while i + 4 <= n {
-        if load8(d, o + i) == HTTPP_CR && load8(d, o + i + 1) == HTTPP_LF
+    while i + 2 <= n {
+        if i + 4 <= n && load8(d, o + i) == HTTPP_CR && load8(d, o + i + 1) == HTTPP_LF
             && load8(d, o + i + 2) == HTTPP_CR && load8(d, o + i + 3) == HTTPP_LF {
             return o + i;
         }
-        i = i + 1;
-    }
-    let j: u32 = 0;
-    while j + 2 <= n {
-        if load8(d, o + j) == HTTPP_LF && load8(d, o + j + 1) == HTTPP_LF {
-            return o + j;
+        if load8(d, o + i) == HTTPP_LF && load8(d, o + i + 1) == HTTPP_LF {
+            return o + i;
         }
-        j = j + 1;
+        i = i + 1;
     }
     return HTTP_NO;
 }
@@ -77,7 +74,9 @@ pub fn http_body_start(d: ptr, o: u32, n: u32) -> u32 {
     if e == HTTP_NO {
         return HTTP_NO;
     }
-    if e + 3 < o + n && load8(d, e + 2) == HTTPP_CR {
+    // `e` 是空行的第一个字节 (CRLF 时是 CR, LF 时是 LF) —— 判它本身。拿 `e + 2` 去判
+    // 会让一个 LF 结束的头在 body 首字节恰好是 CR 时多跳两格。
+    if load8(d, e) == HTTPP_CR {
         return e + 4;
     }
     return e + 2;
@@ -206,6 +205,11 @@ pub fn http_hdr_dec(d: ptr, ho: u32, hn: u32, name: str,
         if c < 48 || c > 57 {
             return HTTP_NO;
         }
+        // 乘之前先判会不会回绕: 直接 `v = v * 10 + ...` 时一个超 u32 的头值静默回绕
+        // (2^32 读成 0, 99999999999 读成 1215752191) —— 算术静默回绕见 #19。
+        if v > (4294967295 - (c - 48)) / 10 {
+            return HTTP_NO;
+        }
         v = v * 10 + (c - 48);
         i = i + 1;
     }
@@ -219,9 +223,16 @@ pub fn http_hdr_dec(d: ptr, ho: u32, hn: u32, name: str,
 /// `keep_alive` 非 0 写 `Connection: keep-alive`, 否则 `Connection: close`。
 pub fn http_req_build(out: ptr, cap: u32, method: str, target: str, host: str,
                       port: u32, keep_alive: u32) -> u32 {
+    // 连接行按**最长的那一支**留: keep-alive 是 22 字节、close 是 17。原来固定给 18,
+    // 于是 keep_alive 非 0 时估算少 4 字节, 端口那 6 字节余量一旦被 5 位端口用满
+    // (实际超出 = 端口位数 - 1) 就会写到 cap 之外。改的时候两边**一起改**。
+    let conn: u32 = 17;                       // "Connection: close"
+    if keep_alive != 0 {
+        conn = 22;                            // "Connection: keep-alive"
+    }
     let need: u32 = str_len(method) + 1 + str_len(target) + 1 + 8 + 2
                   + 6 + str_len(host) + 6 + 2
-                  + 18 + 2 + 2;
+                  + conn + 2 + 2;
     if need > cap {
         return HTTP_NO;
     }
@@ -267,6 +278,10 @@ fn httpp_dec(out: ptr, o: u32, v: u32) -> u32 {
 
 // ---------------------------------------------------------------- 分块体
 
+/// 块长上限。比它大的块在这条解码路上装不进任何缓冲 (`cap` 就是 u32 的缓冲大小),
+/// 直接拒 —— 顺带让 `HTTP_NO`(0xFFFFFFFF) 不再与一个合法块长撞值。
+const HTTPP_MAX_CHUNK: u32 = 2147483647;
+
 fn httpp_hex(d: ptr, o: u32, n: u32) -> u32 {
     if n == 0 {
         return HTTP_NO;
@@ -287,7 +302,15 @@ fn httpp_hex(d: ptr, o: u32, n: u32) -> u32 {
         } else {
             return HTTP_NO;
         }
+        // 先判再乘, 否则一个超 u32 的块长静默回绕 —— `"100000000"` 会变成 0,
+        // 于是被当成"最后一块", body 被悄悄截断 (算术静默回绕见 #19)。
+        if v > (4294967295 - hv) / 16 {
+            return HTTP_NO;
+        }
         v = v * 16 + hv;
+        if v > HTTPP_MAX_CHUNK {
+            return HTTP_NO;
+        }
         i = i + 1;
     }
     return v;
@@ -313,7 +336,9 @@ pub fn http_chunked_decode(d: ptr, o: u32, n: u32, out: ptr, cap: u32) -> u32 {
         if sz == 0 {
             return w;
         }
-        if w + sz > cap {
+        // 减法形式: `w + sz` 自己会回绕 (一个 `2^32 - w` 的块长就让 `w + sz > cap` 为假)。
+        // `w <= cap` 由这条检查维持 —— 初始 0, 每次加的 `sz` 都 <= `cap - w`。
+        if sz > cap - w {
             return HTTP_NO;
         }
         let i: u32 = 0;
