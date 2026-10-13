@@ -50,11 +50,24 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 两个平台都能用 / lompi 升到 0.2.0 Alpha。**正文里"已落地"与"预告"要分清**
 # （`.github/release-notes/v0.1.4.5-pre.md` 里逐条标了），别把预告写成既成事实。
 # tag = `v0.1.4.5-pre`。**`-pre` 后缀同时也是"宣告版"的记号**：`release.yml` 整个跳过
-# 带 `-pre` 的 tag（它只发通知、不出包），所以这一版**没有产物**，由人直接建：
+# 带 `-pre` 的 tag（它只发通知、不出包），所以那一版**没有产物**，由人直接建：
 # `gh release create v0.1.4.5-pre --prerelease --notes-file .github/release-notes/v0.1.4.5-pre.md`。
-# 见 `release.yml` 文件头那两节（其中一节记着"ubuntu runner 出不了 setup.exe"这个未解问题）。
-RELEASE = "0.1.4.5-pre"
-RELEASE_NAME = "0.1.4.5 Pre"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-10-12 升到 **0.1.4.5**（用户定的）：**正式版** —— 宣告到此兑现，这一版**出五件产物**
+# （Linux `tar.gz` / Windows `zip` / Windows 自解压 `setup.exe` / skill `zip` / `SHA256SUMS`）。
+# tag = `v0.1.4.5`，由 `release.yml` 在 **`windows-latest`** 上出包 —— 第五件要走 Windows 自带的
+# `iexpress`，ubuntu runner 上出不来（那正是文件头原先记着的未解问题，2026-10-10 挪 runner 解决，
+# 并在真 runner 上 `dry_run` 打通一次）。**正文口径按 `-pre` 那份重新核一遍**
+# （`.github/release-notes/v0.1.4.5.md`）：当时在 review 的已经合了，仍然是设计稿的别写成既成事实。
+# 2026-10-12 升到 **0.1.4.5-quickfix**（用户定的名字：**Loment 0.1.4.5 QuickFix**）：**补丁** ——
+# 0.1.4.5 发出去两小时后发现：**双击安装包全程没有一个可见窗口**。实测那条路是通的（包解开了、
+# `install.cmd` 真跑了、东西也真装上了），只是"装好了"与"什么都没发生"长得一模一样，还留下
+# 卡在 `pause` 的僵尸 `cmd`。这一版补上安装器的**脸**：`welcome.ps1` —— 渐入圆角标 +
+# `Welcome to Loment` → 选装到哪 → 进度（流式显示 `install.ps1` 的输出）→ 完成回执，**等你手动关**。
+# **工具链本身一个字没动**（那八个二进制与 0.1.4.5 逐字节相同），所以这是补丁不是新版。
+# tag = `v0.1.4.5-quickfix`（`release.yml` 只对 `-pre` 结尾的 tag 整条跳过；这一版带产物，
+# 与那种"只发通知"的宣告版不是一回事）。
+RELEASE = "0.1.4.5-quickfix"
+RELEASE_NAME = "0.1.4.5 QuickFix"  # 人读显示名 (发行包/文档用同一个真源)
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",

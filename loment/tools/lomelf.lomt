@@ -1118,6 +1118,14 @@ fn emit_get(tab: ptr, out: ptr, c: u32, t: ptr, tyo: u32, tyl: u32,
     let c0: u32 = load8(t, vo);
     let d: u32 = c;
     if c0 == 37 {
+        // **alloca 的"值"就是它的地址** —— `store ptr %p.buf, ptr %p.addr`（L0 提升出来的
+        // 产物就是这一条）。`emit_get_ptr` 一直在查 `alloc_find`，这一格漏了 —— 于是那份
+        // 产物在参考侧报"未定义的 SSA 值"，在这儿**静默**按槽表查空（FujoJTOP/loment#239）。
+        // 走这条**不落 zext**（与参考侧同形，否则两边 ELF 不逐字节同）。
+        let ao: u32 = alloc_find(tab, t, vo, vl);
+        if ao != NO {
+            return em_lea(out, c, reg, RBP, ao);
+        }
         let so: u32 = slot_find(tab, t, vo, vl);
         d = em_load_sized(out, d, reg, RBP, so, sz);
     } else {
@@ -2629,7 +2637,8 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
 
 /// 读 `path` 那个 `.o`, 把它的代码节接到代码缓冲之后, 并为它导出的符号立标签。
 /// 返回新的代码缓冲游标。四条边界都是**硬失败** (与参考实现同口径, docs/173 §3)。
-fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr) -> u32 {
+fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
+               ap: u32) -> u32 {
     let fd: i64 = open_ro(path);
     if fd < 0 {
         wstr(2, "lomelf: 打不开外部目标文件: ");
@@ -2721,6 +2730,10 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr)
     }
     setcell(tab, C_GB, db);
     store32(tab, TB_OBJ + oi * 8 + O_DATA, gb0);
+    // **端口门**（`docs/222` §4，2026-10-12 用户定）：本对象里未定义符号的条数 ——
+    // 判据与参考实现 `tools/lomelf.py` 的 `ForeignObject.undefined` 逐字相同
+    // （`shndx == 0` 且 GLOBAL/WEAK 且有名字）。见下面那个 `else if`。
+    let np: u32 = 0;
     let i4: u32 = 0;
     while i4 < ns {
         if sh_type(mem, i4) == 2 {
@@ -2789,12 +2802,32 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr)
                                 }
                             }
                         }
+                    } else if shndx == 0 {
+                        // **未定义符号**：数一条。只要有一条，这个对象就带着**通向世界的
+                        // 端口**（`docs/222` §4 那一维的价）—— 那条路还没完工
+                        // （`docs/219` §8b 的 S2 还差三件），所以下面**默认拒**。
+                        // **自闭合的对象走不到这里**：`docs/173` 一直在发的 FFI 形状、
+                        // `docs/177` 那 10 个语言，对象里一条未定义符号都没有。
+                        if nmoff2 != 0 && (bind == 1 || bind == 2) {
+                            np = np + 1;
+                        }
                     }
                     k2 = k2 + 1;
                 }
             }
         }
         i4 = i4 + 1;
+    }
+    // **端口门**：这个对象带端口、而调用方没有显式放开 ⇒ **点名拒**（不是静默丢掉那些
+    // 符号 —— 丢掉会在回填时报一句"引用了未定义的符号"，用户看到的是"符号找不到"而不是
+    // "这扇门关着"，方向完全错了）。放开只有一条路：`--allow-ports`，开发通道与判据用它，
+    // 启动器只在 dev 传它（`tools/loment_dist.py`）。与参考实现同一条口径。
+    if ap == 0 && np != 0 {
+        wstr(2, "lomelf: 外源对象带了未定义符号（通向世界的端口），而链接器默认不收。\n");
+        wstr(2, "真 libc / 真共享库那条路还没完工（docs/222 §4 / docs/219 §8b 的 S2），\n");
+        wstr(2, "0.1.4.5 里它是关着的。开发通道要它得显式写 --allow-ports；\n");
+        wstr(2, "自闭合的对象（没有未定义符号）不受这条影响。\n");
+        return die(1);
     }
     // 重定位**只记不应用** (docs/173 阶段 2): 应用要等所有对象都摆好、标签都立好 ——
     // `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。只认参考实现认的那六种; 其余**硬拒**
@@ -3860,6 +3893,9 @@ fn run(mem: ptr) -> u32 {
     // 打到 5/7 (两条都是"镜像退出 2")。
     let pbuf: ptr = ptr_add(mem, M_TXT);
     let nlink: u32 = 0;
+    // `--allow-ports`（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
+    // 开发通道与判据显式写它；发行版启动器永不写（`tools/loment_dist.py`）。
+    let ap: u32 = 0;
     let obase: u32 = lo32(a1) + 8 + lo32(o1) + 8;   // 与下面的 pout 对齐
     let ok: u32 = 3;
     let go: u32 = 1;
@@ -3868,30 +3904,37 @@ fn run(mem: ptr) -> u32 {
         if lo32(av) == 0 {
             go = 0;
         } else {
-            if lo32(av) != 6 || lit_at(ab, hi32(av), hi32(av) + 6, "--link") == 0 {
+            // `--allow-ports`（`docs/222` §4 的端口门）：不带参数，只把门放开。**先认它**
+            // —— 两条都不带参数、长度不同，判在 `--link` 之前免得将来有人把 `--link` 的
+            // 名字判宽了、把这一条吞掉。
+            if lo32(av) == 13 && lit_at(ab, hi32(av), hi32(av) + 13, "--allow-ports") == 1 {
+                ap = 1;
+                ok = ok + 1;
+            } else if lo32(av) == 6 && lit_at(ab, hi32(av), hi32(av) + 6, "--link") == 1 {
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 0 {
+                    wstr(2, "lomelf: --link 缺文件名\n");
+                    return die(2);
+                }
+                let dst: u32 = obase + nlink * 1024;
+                if dst + 1024 >= 65536 {
+                    wstr(2, "lomelf: --link 的文件太多\n");
+                    return die(2);
+                }
+                let j: u32 = 0;
+                while j < lo32(pv) {
+                    store8(pbuf, dst + j, load8(ab, hi32(pv) + j) as u8);
+                    j = j + 1;
+                }
+                store8(pbuf, dst + lo32(pv), 0 as u8);
+                nlink = nlink + 1;
+                ok = ok + 2;
+            } else {
                 wstr(2, "lomelf: unknown option ");
                 write_all(2, ptr_add(ab, hi32(av)), lo32(av) as u64);
                 wstr(2, "\n");
                 return die(2);
             }
-            let pv: u64 = argv_n(ab, 8192, ok + 1);
-            if lo32(pv) == 0 {
-                wstr(2, "lomelf: --link 缺文件名\n");
-                return die(2);
-            }
-            let dst: u32 = obase + nlink * 1024;
-            if dst + 1024 >= 65536 {
-                wstr(2, "lomelf: --link 的文件太多\n");
-                return die(2);
-            }
-            let j: u32 = 0;
-            while j < lo32(pv) {
-                store8(pbuf, dst + j, load8(ab, hi32(pv) + j) as u8);
-                j = j + 1;
-            }
-            store8(pbuf, dst + lo32(pv), 0 as u8);
-            nlink = nlink + 1;
-            ok = ok + 2;
         }
     }
     let inb: ptr = ptr_add(mem, M_IN);
@@ -3982,7 +4025,7 @@ fn run(mem: ptr) -> u32 {
     let tobj: ptr = ptr_add(mem, M_OBJ);
     let got: u32 = 0;
     while got < nlink {
-        tlen = link_object(tab, inb, txt, gb, tlen, tobj, ptr_add(pbuf, obase + got * 1024));
+        tlen = link_object(tab, inb, txt, gb, tlen, tobj, ptr_add(pbuf, obase + got * 1024), ap);
         got = got + 1;
     }
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。

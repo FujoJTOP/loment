@@ -660,6 +660,14 @@ class Emitter:
         """标量 -> reg，**零扩展**到 64 位（符号语义在用到的地方显式 sext）。"""
         sz = size_of(ty)
         if val.startswith("%"):
+            if val in self.allocas:
+                # **alloca 的"值"就是它的地址** —— `%p.buf = alloca …` 之后把 `%p.buf`
+                # 当**普通 SSA 值**用（`store ptr %p.buf, ptr %p.addr`，L0 提升出来的产物
+                # 就是这一条）。`get_ptr` / `agg_addr` 一直在做这件事，`get` 漏了这一格 ——
+                # 于是那份产物在链接期报"未定义的 SSA 值"（FujoJTOP/loment#239）。
+                # 走这条不落 `zext`：`lea` 出来的已经是 64 位地址（自举侧同形，否则 ELF 不逐字节同）。
+                self.asm.emit(lea(reg, RBP, self.allocas[val][0]))
+                return
             off = self.slots.get(val)
             if off is None:
                 raise ElfError(f"未定义的 SSA 值: {val}")
@@ -1323,14 +1331,17 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
 #     由 shim 按 syscall 号派发到 kernel32。**syscall 面只收敛在这一处**。
 #   * shim 自己做栈对齐（`and rsp,-16`）—— Loment 自己的帧不保证 16 字节对齐，
 #     而被调方（Windows API）里的 `movaps` 会直接 #GP。
-#   * 实现了 22 个号，**其余号返回 `-ENOSYS`（-38）**。第一批 8 个是文件与进程：
+#   * 实现了 29 个号，**其余号返回 `-ENOSYS`（-38）**。第一批 8 个是文件与进程：
 #     `exit`(60) `write`(1) `read`(0) `close`(3) `openat`(257) `brk`(12)
 #     `getdents64`(217) `newfstatat`(262)。第二批 13 个是**联网**（2026-10-10，docs/217）：
 #     `socket`(41) `connect`(42) `accept`(43) `accept4`(288) `sendto`(44) `recvfrom`(45)
 #     `shutdown`(48) `bind`(49) `listen`(50) `getsockname`(51) `getpeername`(52)
 #     `setsockopt`(54) `getsockopt`(55) —— 由 `ws2_32.dll` 顶上，socket 型 fd 在
 #     read/write/close 上分流到 recv/send/closesocket。第三批 1 个是 `poll`(7)。
-#     写要跨平台跑的程序时按这 22 个来 —— 别处用了别的号, 在 PE 上是 `-ENOSYS`
+#     第四批 7 个（2026-10-12，docs/231 与 docs/234）：`select`(23) `sendmsg`(46)
+#     `recvmsg`(47) `socketpair`(53) `epoll_wait`(232) `epoll_ctl`(233)
+#     `epoll_create1`(291) —— 到这儿联网面上**再不剩"点名不做"的号**。
+#     写要跨平台跑的程序时按这 29 个来 —— 别处用了别的号, 在 PE 上是 `-ENOSYS`
 #     （2026-10-11 从 `-1` 改过来的：`-1` 是 `EPERM`，拿"权限不够"说"没实现"是假话，
 #     而 Linux 对不认得的号就是返回 `-ENOSYS` —— 见 `PE_ENOSYS`）。
 #   * 联网那批是**语义仿真**而不是转发：负 errno、`AF_INET6`=10（Windows 是 23）、
@@ -5083,7 +5094,8 @@ CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 _TLS_SIZE = 256
 
 
-def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
+def compile_ll(text: str, objects: list | None = None,
+               allow_ports: bool = False) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
@@ -5101,6 +5113,26 @@ def compile_ll(text: str, objects: list | None = None) -> tuple[bytes, dict]:
             if isinstance(a, Archive):
                 flat += a.select(need)
         objects = flat
+    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。带**未定义符号**的外源
+    # 对象就是"这份产物有通向世界的端口"（`docs/222` §4 那一维的价），而那条路 —— 真 libc /
+    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2 还差三件），所以链接器**默认不收**，
+    # 只有显式 `--allow-ports` 才收（开发通道与判据用它；启动器只在 dev 传它）。
+    #
+    # **自闭合的对象不受影响**：没有未定义符号 ⇒ 走不过这一条。那正是 `docs/173` 一直在发
+    # 的 FFI 形状，`docs/177` 那 10 个语言全在它上面 —— 这扇门关的是 libc，不是 FFI。
+    #
+    # 判据是 `objects` 里那批对象的 `undefined`（归档在这一步之前已经按定点挑完成员，
+    # 所以挑中的成员也在这里面）。名字排序只为**报文稳定**，与谁提供什么无关。
+    if not allow_ports:
+        ported = sorted({nm for o in objects for nm in o.undefined})
+        if ported:
+            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "")
+            raise Unsupported(
+                f"外源对象带了未定义符号（通向世界的端口）：{shown} —— 链接器默认不收。"
+                f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，"
+                f"`docs/219` §8b 的 S2 还差三件），0.1.4.5 里它是关着的。"
+                f"开发通道要它得显式写 `--allow-ports`；"
+                f"自闭合的对象（没有未定义符号）不受这条影响")
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -5255,6 +5287,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
         return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
+    allow_ports = False
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -5268,6 +5301,9 @@ def main(argv: list[str] | None = None) -> int:
             target = argv[i]
         elif a == "--check":
             check = True
+        elif a == "--allow-ports":
+            # 开发通道专用（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
+            allow_ports = True
         elif a == "--link":
             i += 1
             link.append(Path(argv[i]))
@@ -5276,7 +5312,7 @@ def main(argv: list[str] | None = None) -> int:
         i += 1
     if len(files) != 1 or target not in ("elf", "pe"):
         print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
-              " [--link OBJ.o ...]", file=sys.stderr)
+              " [--link OBJ.o ...] [--allow-ports]", file=sys.stderr)
         return 2
     if link and target == "pe":
         print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
@@ -5285,7 +5321,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         objs = [load_foreign(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
-            src.read_text(encoding="utf-8"), *(() if target == "pe" else (objs,)))
+            src.read_text(encoding="utf-8"),
+            *(() if target == "pe" else (objs, allow_ports)))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1

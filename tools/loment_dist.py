@@ -26,6 +26,7 @@ import gzip
 import hashlib
 import io
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -103,6 +104,9 @@ TOOLS: list[tuple[str, str, str]] = [
 EXAMPLES = ("loment/examples/user_hello.lomt", "loment/examples/tour.lomt")
 EXAMPLE = EXAMPLES[0]        # 冒烟测试与判据用的那一个
 ICON = "editors/loment.ico"
+#: 安装界面正中那个**圆角方形标**。不新画一张图：`editors/loment.ico` 的 7 帧全是 PNG，
+#: 取最大的那帧直接当图片用 —— 于是 logo 只有**一个真源**，安装器也不必自带解码器。
+LOGO_NAME = "loment-logo.png"
 LICENSE = "LICENSE"
 # 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
 # **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
@@ -187,7 +191,8 @@ Loment @DISPLAY@  (@VERSION@)
   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-                              --hosted: link against the host's real libraries (docs/222)
+                              --hosted: link against the host's real libraries (docs/222);
+                                        dev channel only -- a release build refuses it
   loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile, link and run
   loment fmt FILE             format (prints the formatted text)
@@ -359,6 +364,20 @@ case "${1:-help}" in
         if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
             hosted=1
         fi
+        # ---- channel (@CHANNEL@, docs/222 sec 4). A release build has no open ports: real
+        # libc and real shared libraries are **not available in 0.1.4.5** - that path is not
+        # finished (docs/222 sec 4, docs/219 sec 8b), and a promise nobody can keep is worse
+        # than a refusal. So refuse by name here, and pass no port flag to the linker below:
+        # its own default is "refuse a ported object", which is what makes the lock hold.
+        portarg=
+        if [ "@CHANNEL@" = "dev" ]; then portarg=--allow-ports; fi
+        if [ "@CHANNEL@" = "release" ] && [ -n "$hosted" ]; then
+            echo "loment: this is a release build: open ports to the world (real libc, real" >&2
+            echo "        shared libraries) are not available - that path is unfinished and is" >&2
+            echo "        not part of 0.1.4.5 (docs/222 sec 4, docs/219 sec 8b)." >&2
+            echo "        To work on it, use the toolchain in the repository." >&2
+            exit 2
+        fi
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
         # say it instead of silently dropping the flags (docs/222 sec 4.1).
@@ -404,11 +423,11 @@ LOMENT_LIBCALLS_EOF
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
                 # shellcheck disable=SC2086
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
             fi
         elif [ ${#links[@]} -gt 0 ]; then
             # shellcheck disable=SC2086
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs || exit 1
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
         else
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
         fi
@@ -561,6 +580,11 @@ set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
 set "linkargs="
+rem Channel (@CHANNEL@, docs/222 sec 4): in a release build the world-port door is shut, so
+rem nothing extra is passed and lomelf's own default - refuse an object that carries
+rem undefined symbols - is what holds. `dev` passes the flag that opens it.
+set "portarg="
+if "@CHANNEL@"=="dev" set "portarg=--allow-ports"
 set "cnc="
 set "com="
 shift
@@ -648,7 +672,7 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs%
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs% %portarg%
 if not "%ERRORLEVEL%"=="0" goto fail
 goto done
 
@@ -659,7 +683,7 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs%
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs% %portarg%
 if not "%ERRORLEVEL%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
@@ -723,7 +747,8 @@ echo                               --max N: render at most N (default 20; 0 = al
 echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
 echo                               compile and link; --link adds a foreign object (FFI)
 echo                               --opt: optimize with clang -O2 (ELF only)
-echo                               --hosted: link the host's real libraries (ELF only)
+echo                               --hosted: link the host's real libraries (ELF only;
+echo                                        dev channel only -- a release build refuses it)
 echo   loment run FILE [--opt] [--hosted]
 echo                               compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)
@@ -833,6 +858,22 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$prefix" ] || { echo "install: empty --prefix" >&2; exit 2; }
 src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# A `lompi` or `loment` that is NOT ours but sits EARLIER on PATH wins, silently: you type
+# `lompi version` and get an older standalone build, with nothing anywhere saying why. This
+# installer never reorders a PATH it does not own, so a copy installed earlier by hand stays
+# in front for good. Name it; do not remove it -- that is not this installer's call.
+warn_shadowed() {
+    for _n in loment lompi; do
+        _hit=$(command -v "$_n" 2>/dev/null || true)
+        case "$_hit" in
+            ""|"$prefix/bin/$_n") ;;
+            *) echo "install: WARNING: '$_n' on PATH is $_hit -- not this install" >&2
+               echo "install:          that one comes first and wins; remove or rename it," >&2
+               echo "install:          or put $prefix/bin ahead of it" >&2 ;;
+        esac
+    done
+}
 
 if [ "$uninstall" = 1 ]; then
     # Take back the libraries this package put into lompi's store. Ask lompi where that is
@@ -989,6 +1030,7 @@ case ":${PATH}:" in
         echo "install: put $prefix/bin on PATH, e.g."
         echo "         echo 'export PATH=\"$prefix/bin:\$PATH\"' >> ~/.profile" >&2 ; } ;;
 esac
+warn_shadowed
 '''
 
 INSTALL_PS1 = r'''# install.ps1 - Loment @DISPLAY@ installer for Windows (native toolchain).
@@ -1060,6 +1102,27 @@ function Add-PathEntry([string]$dir) {
     if ($cur -and ($cur.Split(';') -contains $dir)) { return }
     $new = if ($cur) { "$cur;$dir" } else { $dir }
     [Environment]::SetEnvironmentVariable('Path', $new, 'User')
+}
+
+# A `lompi` or `loment` that is NOT ours but sits EARLIER on PATH wins, silently: you type
+# `lompi version` and get an older standalone build, with nothing anywhere saying why --
+# "lompi is still 0.1.0" is then unattributable. This installer APPENDS to PATH on purpose
+# (it must not reorder a machine it does not own), so a copy installed earlier by hand stays
+# in front for good. Name it, once, and never touch it -- deleting someone else's command is
+# not this installer's call. 2026-10-12: a user reported exactly this.
+function Show-Shadowed {
+    $mine = @('loment', 'lompi')
+    $found = 0
+    foreach ($n in $mine) {
+        $c = @(Get-Command $n -CommandType Application -ErrorAction SilentlyContinue)[0]
+        if (-not $c -or -not $c.Source) { continue }
+        if ($c.Source.ToLower().StartsWith($BinDir.ToLower())) { continue }
+        Say "[3a/6] WARNING: '$n' on PATH resolves to $($c.Source) -- not this install."
+        Say "        That one comes first and wins; remove or rename it,"
+        Say "        or put $BinDir ahead of it."
+        $found++
+    }
+    if ($found -eq 0) { Say "[3a/6] no other loment/lompi earlier on PATH" }
 }
 
 function Find-Editor {
@@ -1243,6 +1306,7 @@ Say "[2/6] toolchain -> $BinDir"
 
 if ($NoPath) { Say "[3/6] PATH unchanged (-NoPath)" }
 else { Add-PathEntry $BinDir; Say "[3/6] user PATH += $BinDir" }
+Show-Shadowed
 
 & (Join-Path $BinDir 'loment.cmd') version
 if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LASTEXITCODE" }
@@ -1375,6 +1439,19 @@ setlocal
 set HERE=%~dp0
 set PSARGS=
 if exist "%HERE%payload.zip" set PSARGS=-PayloadZip "%HERE%payload.zip"
+
+rem Two faces, one installer. **No arguments = a double-click** -> the window (welcome.ps1),
+rem which drives install.ps1 and shows what it says. **Any argument = a script** -> the plain
+rem console path this file always had: CI, -DryRun, -Prefix, -Uninstall all land there, so
+rem nothing that parses this output (or checks a Windows-only criterion) changes behaviour.
+rem 2026-10-12: a double-click used to do *exactly* the right thing and show none of it -- the
+rem console is not visible in that launch, so "it worked" and "it did nothing" looked the same.
+if not "%~1"=="" goto console
+if not exist "%HERE%welcome.ps1" goto console
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%welcome.ps1" %PSARGS%
+exit /b %ERRORLEVEL%
+
+:console
 powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS% %*
 rem String compare, not `if errorlevel 1` -- a crashed interpreter exits NEGATIVE and
 rem cmd compares that as signed, so the batch test would read it as success.
@@ -1391,6 +1468,593 @@ if "%~1"=="" (
   pause
 )
 '''
+
+#: 安装器的**脸**：`welcome.ps1`。它自己**不装任何东西** —— 它驱动 `install.ps1`，把那边
+#: 说的话显示出来。一份安装逻辑、两张脸：命令行那张留给脚本与 CI（`install.cmd` 带参数时
+#: 走的就是它，判据也全在那边），窗口这张留给双击。
+#:
+#: **为什么要有它**：2026-10-12 用户报「双击 setup.exe 毫无反应」。实测下来包解开了、
+#: 脚本真跑了、东西真装上了 —— 只是那条路上**没有一个看得见的窗口**，于是「装好了」与
+#: 「什么都没发生」长得一模一样，还留下卡在 `pause` 的僵尸 cmd。窗口不是装饰，是那句回执。
+#:
+#: `-Screenshot` / `-ShotWizard` 让脚本把某一页画进 PNG 再退出：判据靠它在这台机器上量
+#: 「两页真的画得出来」，不必去截桌面（也就不会拍下不属于我们的东西）。
+#: `-AutoRun` 自动按下 Install、装完自己关 —— 判据靠它把「窗口这条路」真跑一遍，
+#: 不然窗口就只是一张图。
+#: `-AutoRun` 自动按下 Install、装完自己关 —— 判据靠它把「窗口这条路」真跑一遍，
+#: 不然窗口就只是一张图。
+#: `-AutoRun` 自动按下 Install、装完自己关 —— 判据靠它把「窗口这条路」真跑一遍，
+#: 不然窗口就只是一张图。
+#: `-AutoRun` 自动按下 Install、装完自己关 —— 判据靠它把「窗口这条路」真跑一遍，
+#: 不然窗口就只是一张图。
+WELCOME_PS1 = r'''# welcome.ps1 - Loment setup, the visible half.
+#
+# ASCII only (PS 5.1 reads a BOM-less .ps1 as ANSI -- same rule as install.ps1).
+# It installs nothing itself: it drives install.ps1 and shows what install.ps1 says.
+# One implementation of the install, two faces -- the console one stays for scripts
+# and CI (`install.cmd -DryRun` never reaches this file).
+#
+#   powershell -File welcome.ps1                        # splash -> wizard -> install
+#   powershell -File welcome.ps1 -Screenshot OUT.png    # draw the splash, save, exit
+#   powershell -File welcome.ps1 -ShotWizard OUT.png    # draw the wizard page, save, exit
+
+[CmdletBinding()]
+param(
+    [string]$InstallPs1 = '',
+    [string]$LogoPath = '',
+    [string]$PayloadZip = '',
+    [string]$Prefix = '',
+    [string]$Screenshot = '',
+    [string]$ShotWizard = '',
+    [string]$ShotDone = '',
+    [string]$Display = 'Loment @DISPLAY@',
+    [switch]$DryRun,
+    [switch]$AutoRun,
+    [switch]$AutoClose,
+    [switch]$NoPath,
+    [switch]$NoFileType,
+    [switch]$NoSkill,
+    [switch]$Uninstall,
+    [int]$HoldMs = 0
+)
+
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+# Must come before the first control exists. Without it the controls render in the classic
+# theme and -- the one that bit on 2026-10-12 -- a Marquee ProgressBar draws as an EMPTY
+# bar: the install was running while the window looked like nothing was happening.
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ($InstallPs1 -eq '') { $InstallPs1 = Join-Path $ScriptDir 'install.ps1' }
+if ($LogoPath -eq '') { $LogoPath = Join-Path $ScriptDir 'loment-logo.png' }
+if ($Prefix -eq '') { $Prefix = Join-Path $env:LOCALAPPDATA 'Loment' }
+
+$VERSION = $Display
+
+$PAPER = [System.Drawing.Color]::FromArgb(246, 247, 249)
+$CARD = [System.Drawing.Color]::White
+$INK = [System.Drawing.Color]::FromArgb(28, 32, 36)
+$MUTE = [System.Drawing.Color]::FromArgb(122, 130, 140)
+$EDGE = [System.Drawing.Color]::FromArgb(226, 229, 234)
+$BLUE = [System.Drawing.Color]::FromArgb(79, 107, 224)
+$BLUE_DK = [System.Drawing.Color]::FromArgb(64, 88, 196)
+
+# ---- rounded-corner helpers: every box in this program goes through these
+function New-RoundPath([int]$w, [int]$h, [int]$r) {
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    if ($r -lt 1) { $r = 1 }
+    $d = $r * 2
+    $p.AddArc(0, 0, $d, $d, 180, 90)
+    $p.AddArc($w - $d, 0, $d, $d, 270, 90)
+    $p.AddArc($w - $d, $h - $d, $d, $d, 0, 90)
+    $p.AddArc(0, $h - $d, $d, $d, 90, 90)
+    $p.CloseFigure()
+    return $p
+}
+function Set-Round($ctl, [int]$r) {
+    $w = $ctl.Width; $h = $ctl.Height
+    if ($w -lt 2 -or $h -lt 2) { return }
+    $path = New-RoundPath $w $h $r
+    $ctl.Region = New-Object System.Drawing.Region($path)
+}
+function New-FlatButton([string]$text, [int]$w, [int]$h, $back, $fore, [int]$r) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text
+    $b.Size = New-Object System.Drawing.Size($w, $h)
+    $b.FlatStyle = 'Flat'
+    $b.FlatAppearance.BorderSize = 0
+    $b.BackColor = $back
+    $b.ForeColor = $fore
+    $b.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
+    $b.Cursor = 'Hand'
+    Set-Round $b $r
+    return $b
+}
+function New-Badge([bool]$ok) {
+    # Drawn, not a character: the file is ASCII, so a check mark cannot be a literal here.
+    $s = 54
+    $bmp = New-Object System.Drawing.Bitmap($s, $s)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'
+    $col = if ($ok) { [System.Drawing.Color]::FromArgb(38, 150, 88) } else { [System.Drawing.Color]::FromArgb(198, 62, 44) }
+    $br = New-Object System.Drawing.SolidBrush($col)
+    $g.FillEllipse($br, 0, 0, ($s - 2), ($s - 2))
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 5)
+    $pen.StartCap = 'Round'
+    $pen.EndCap = 'Round'
+    if ($ok) {
+        $pts = @(
+            (New-Object System.Drawing.Point -ArgumentList @(14, 28)),
+            (New-Object System.Drawing.Point -ArgumentList @(23, 37)),
+            (New-Object System.Drawing.Point -ArgumentList @(40, 17))
+        )
+        $g.DrawLines($pen, $pts)
+    } else {
+        $g.DrawLine($pen, 17, 17, 37, 37)
+        $g.DrawLine($pen, 37, 17, 17, 37)
+    }
+    $g.Dispose()
+    $pb = New-Object System.Windows.Forms.PictureBox
+    $pb.Image = $bmp
+    $pb.Size = New-Object System.Drawing.Size($s, $s)
+    $pb.BackColor = [System.Drawing.Color]::Transparent
+    return $pb
+}
+
+$logo = $null
+if (Test-Path -LiteralPath $LogoPath) {
+
+    try {
+        $logo = [System.Drawing.Image]::FromFile($LogoPath)
+    } catch { $logo = $null }
+}
+
+# ---------------------------------------------------------------- splash
+
+$SW = 520; $SH = 340; $SR = 22
+$splash = New-Object System.Windows.Forms.Form
+$splash.FormBorderStyle = 'None'
+$splash.StartPosition = 'CenterScreen'
+$splash.ClientSize = New-Object System.Drawing.Size($SW, $SH)
+$splash.BackColor = $CARD
+$splash.Text = $VERSION
+$splash.Opacity = 0.0
+$splash.Region = New-Object System.Drawing.Region((New-RoundPath $SW $SH $SR))
+
+if ($logo -ne $null) {
+    $pic = New-Object System.Windows.Forms.PictureBox
+    $pic.Image = $logo
+    $pic.SizeMode = 'Zoom'
+    $pic.BackColor = [System.Drawing.Color]::Transparent
+    $pic.Size = New-Object System.Drawing.Size(132, 132)
+    $pic.Location = New-Object System.Drawing.Point -ArgumentList @(([int](($SW - 132) / 2)), 56)
+    $splash.Controls.Add($pic)
+    $y = 206
+} else {
+    $y = 130
+}
+
+$title = New-Object System.Windows.Forms.Label
+$title.Text = 'Welcome to Loment'
+$title.Font = New-Object System.Drawing.Font('Segoe UI', 20)
+$title.ForeColor = $INK
+$title.BackColor = [System.Drawing.Color]::Transparent
+$title.TextAlign = 'MiddleCenter'
+$title.Size = New-Object System.Drawing.Size($SW, 40)
+$title.Location = New-Object System.Drawing.Point -ArgumentList @(0, $y)
+$splash.Controls.Add($title)
+
+$sub = New-Object System.Windows.Forms.Label
+$sub.Text = $VERSION + '  -  a systems programming language'
+$sub.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
+$sub.ForeColor = $MUTE
+$sub.BackColor = [System.Drawing.Color]::Transparent
+$sub.TextAlign = 'MiddleCenter'
+$sub.Size = New-Object System.Drawing.Size($SW, 22)
+$sub.Location = New-Object System.Drawing.Point -ArgumentList @(0, ($y + 44))
+$splash.Controls.Add($sub)
+
+if ($Screenshot -ne '') {
+    $splash.Opacity = 1.0
+    $splash.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 200
+    $bmp = New-Object System.Drawing.Bitmap($SW, $SH)
+    $splash.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $SW, $SH)))
+    $bmp.Save($Screenshot, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $splash.Close()
+    Write-Host "wrote $Screenshot"
+    exit 0
+}
+
+$state = @{ step = 0; hold = 0 }
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 16
+$timer.Add_Tick({
+        $op = $splash.Opacity
+        if ($state.step -eq 0) {
+            $op += 0.06
+            if ($op -ge 1.0) { $op = 1.0; $state.step = 1 }
+            $splash.Opacity = $op
+        } elseif ($state.step -eq 1) {
+            $state.step = 2
+        } elseif ($state.step -eq 2) {
+            $state.hold++
+            if ($state.hold -gt (14 + [int]($HoldMs / 16))) { $state.step = 3 }
+        } else {
+            $op -= 0.08
+            if ($op -le 0.0) { $splash.Opacity = 0.0; $timer.Stop(); $splash.Close() }
+            $splash.Opacity = $op
+        }
+    })
+$splash.Show()
+$timer.Start()
+while ($splash.Visible) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 8 }
+$timer.Dispose()
+
+# ---------------------------------------------------------------- wizard
+
+$WW = 640; $WH = 452; $WR = 16
+$win = New-Object System.Windows.Forms.Form
+$win.Text = $VERSION + ' Setup'
+$win.FormBorderStyle = 'None'
+$win.StartPosition = 'CenterScreen'
+$win.ClientSize = New-Object System.Drawing.Size($WW, $WH)
+$win.BackColor = $PAPER
+$win.Opacity = 0.0
+$win.Region = New-Object System.Drawing.Region((New-RoundPath $WW $WH $WR))
+try {
+    if (Test-Path -LiteralPath (Join-Path $ScriptDir 'bin\loment.ico')) {
+        $win.Icon = New-Object System.Drawing.Icon((Join-Path $ScriptDir 'bin\loment.ico'))
+    }
+} catch { }
+
+# a borderless window has to be draggable by hand: the header is the handle
+Add-Type -Namespace Native -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ReleaseCapture();
+[DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
+'@
+function Enable-Drag($ctl) {
+    $ctl.Add_MouseDown({
+            param($s, $e)
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+                [Native.Win]::ReleaseCapture() | Out-Null
+                [Native.Win]::SendMessage($win.Handle, 0xA1, [IntPtr]2, [IntPtr]::Zero) | Out-Null
+            }
+        })
+}
+
+$head = New-Object System.Windows.Forms.Panel
+$head.Size = New-Object System.Drawing.Size($WW, 62)
+$head.Location = New-Object System.Drawing.Point(0, 0)
+$head.BackColor = $CARD
+$head.Region = New-Object System.Drawing.Region((New-RoundPath $WW 62 16))
+Enable-Drag $head
+$win.Controls.Add($head)
+
+if ($logo -ne $null) {
+    $hp = New-Object System.Windows.Forms.PictureBox
+    $hp.Image = $logo
+    $hp.SizeMode = 'Zoom'
+    $hp.BackColor = [System.Drawing.Color]::Transparent
+    $hp.Size = New-Object System.Drawing.Size(30, 30)
+    $hp.Location = New-Object System.Drawing.Point(22, 16)
+    $head.Controls.Add($hp)
+    Enable-Drag $hp
+}
+
+$ht = New-Object System.Windows.Forms.Label
+$ht.Text = $VERSION + ' Setup'
+$ht.Font = New-Object System.Drawing.Font('Segoe UI', 12)
+$ht.ForeColor = $INK
+$ht.BackColor = [System.Drawing.Color]::Transparent
+$ht.Size = New-Object System.Drawing.Size(420, 30)
+$ht.Location = New-Object System.Drawing.Point(62, 16)
+$head.Controls.Add($ht)
+Enable-Drag $ht
+
+$btnX = New-FlatButton 'x' 34 30 $CARD $MUTE 10
+$btnX.Location = New-Object System.Drawing.Point -ArgumentList @(($WW - 48), 16)
+$btnX.Add_Click({ $win.Close() })
+$head.Controls.Add($btnX)
+
+$body = New-Object System.Windows.Forms.Panel
+$body.Size = New-Object System.Drawing.Size(($WW - 48), ($WH - 62 - 92))
+$body.Location = New-Object System.Drawing.Point(24, 74)
+$body.BackColor = $CARD
+$body.Region = New-Object System.Drawing.Region((New-RoundPath ($WW - 48) ($WH - 62 - 92) 12))
+$win.Controls.Add($body)
+
+$foot = New-Object System.Windows.Forms.Panel
+$foot.Size = New-Object System.Drawing.Size($WW, 68)
+$foot.Location = New-Object System.Drawing.Point(0, ($WH - 68))
+$foot.BackColor = [System.Drawing.Color]::Transparent
+$win.Controls.Add($foot)
+
+$btnInstall = New-FlatButton 'Install' 118 34 $BLUE ([System.Drawing.Color]::White) 10
+$btnInstall.Location = New-Object System.Drawing.Point -ArgumentList @(($WW - 24 - 118), 18)
+$foot.Controls.Add($btnInstall)
+
+$btnBack = New-FlatButton 'Back' 92 34 $CARD $INK 10
+$btnBack.Location = New-Object System.Drawing.Point -ArgumentList @(($WW - 24 - 118 - 10 - 92), 18)
+$btnBack.Enabled = $false
+$foot.Controls.Add($btnBack)
+
+$btnCancel = New-FlatButton 'Cancel' 92 34 $CARD $MUTE 10
+$btnCancel.Location = New-Object System.Drawing.Point -ArgumentList @(($WW - 24 - 118 - 10 - 92 - 10 - 92), 18)
+$foot.Controls.Add($btnCancel)
+
+# ---- page 1: what and where
+$lblTo = New-Object System.Windows.Forms.Label
+$lblTo.Text = 'Install Loment to'
+$lblTo.Font = New-Object System.Drawing.Font('Segoe UI', 10.5)
+$lblTo.ForeColor = $INK
+$lblTo.BackColor = [System.Drawing.Color]::Transparent
+$lblTo.Size = New-Object System.Drawing.Size(240, 24)
+$lblTo.Location = New-Object System.Drawing.Point(28, 26)
+$body.Controls.Add($lblTo)
+
+$txtPrefix = New-Object System.Windows.Forms.TextBox
+$txtPrefix.Text = $Prefix
+$txtPrefix.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$txtPrefix.BorderStyle = 'FixedSingle'
+$txtPrefix.Size = New-Object System.Drawing.Size(430, 26)
+$txtPrefix.Location = New-Object System.Drawing.Point(28, 54)
+$body.Controls.Add($txtPrefix)
+
+$btnBrowse = New-FlatButton 'Change...' 106 28 ([System.Drawing.Color]::FromArgb(237, 240, 245)) $INK 8
+$btnBrowse.Location = New-Object System.Drawing.Point(468, 53)
+$body.Controls.Add($btnBrowse)
+
+$chkPath = New-Object System.Windows.Forms.CheckBox
+$chkPath.Text = 'Add Loment to PATH'
+$chkPath.Checked = -not $NoPath
+$chkPath.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
+$chkPath.ForeColor = $INK
+$chkPath.BackColor = [System.Drawing.Color]::Transparent
+$chkPath.Size = New-Object System.Drawing.Size(320, 24)
+$chkPath.Location = New-Object System.Drawing.Point(28, 104)
+$body.Controls.Add($chkPath)
+
+$chkType = New-Object System.Windows.Forms.CheckBox
+$chkType.Text = 'Open .lomt and .lom files with Loment'
+$chkType.Checked = -not $NoFileType
+$chkType.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
+$chkType.ForeColor = $INK
+$chkType.BackColor = [System.Drawing.Color]::Transparent
+$chkType.Size = New-Object System.Drawing.Size(400, 24)
+$chkType.Location = New-Object System.Drawing.Point(28, 132)
+$body.Controls.Add($chkType)
+
+$chkSkill = New-Object System.Windows.Forms.CheckBox
+$chkSkill.Text = 'Install the agent guide (SKILL.md)'
+$chkSkill.Checked = -not $NoSkill
+$chkSkill.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
+$chkSkill.ForeColor = $INK
+$chkSkill.BackColor = [System.Drawing.Color]::Transparent
+$chkSkill.Size = New-Object System.Drawing.Size(400, 24)
+$chkSkill.Location = New-Object System.Drawing.Point(28, 160)
+$body.Controls.Add($chkSkill)
+
+$note = New-Object System.Windows.Forms.Label
+$note.Text = 'No Python, no clang, no WSL - native binaries and the standard library.'
+$note.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$note.ForeColor = $MUTE
+$note.BackColor = [System.Drawing.Color]::Transparent
+$note.Size = New-Object System.Drawing.Size(540, 22)
+$note.Location = New-Object System.Drawing.Point(28, 200)
+$body.Controls.Add($note)
+
+$script:page = 1
+$script:ui = $null
+
+function Show-ProgressPage {
+    $body.Controls.Clear()
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = 'Installing'
+    $l.Font = New-Object System.Drawing.Font('Segoe UI', 10.5)
+    $l.ForeColor = $INK
+    $l.BackColor = [System.Drawing.Color]::Transparent
+    $l.Size = New-Object System.Drawing.Size(200, 24)
+    $l.Location = New-Object System.Drawing.Point(28, 24)
+    $body.Controls.Add($l)
+
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Style = 'Marquee'
+    $bar.MarqueeAnimationSpeed = 24
+    $bar.Size = New-Object System.Drawing.Size(($WW - 48 - 56), 12)
+    $bar.Location = New-Object System.Drawing.Point(28, 54)
+    $body.Controls.Add($bar)
+
+    $log = New-Object System.Windows.Forms.TextBox
+    $log.Multiline = $true
+    $log.ReadOnly = $true
+    $log.ScrollBars = 'Vertical'
+    $log.BorderStyle = 'None'
+    $log.Font = New-Object System.Drawing.Font('Consolas', 8.5)
+    $log.BackColor = $PAPER
+    $log.ForeColor = [System.Drawing.Color]::FromArgb(70, 76, 84)
+    $log.Size = New-Object System.Drawing.Size(($WW - 48 - 56), 178)
+    $log.Location = New-Object System.Drawing.Point(28, 78)
+    $body.Controls.Add($log)
+    return @{ bar = $bar; log = $log; title = $l }
+}
+
+function Fade-In {
+    for ($i = 0; $i -le 14; $i++) {
+        $win.Opacity = $i / 14.0
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 11
+    }
+    $win.Opacity = 1.0
+}
+
+$btnBrowse.Add_Click({
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = 'Where should Loment be installed?'
+        $dlg.SelectedPath = $txtPrefix.Text
+        if ($dlg.ShowDialog() -eq 'OK') { $txtPrefix.Text = $dlg.SelectedPath }
+    })
+$btnCancel.Add_Click({ $win.Close() })
+
+$btnInstall.Add_Click({
+        if ($script:page -eq 1) {
+            $script:page = 2
+            $ui = Show-ProgressPage
+            $script:ui = $ui
+            $btnBack.Enabled = $false
+            $btnInstall.Enabled = $false
+            $btnCancel.Text = 'Hide'
+
+            $argv = @('-Prefix', $txtPrefix.Text)
+            if (-not $chkPath.Checked) { $argv += '-NoPath' }
+            if (-not $chkType.Checked) { $argv += '-NoFileType' }
+            if (-not $chkSkill.Checked) { $argv += '-NoSkill' }
+            # In the self-extracting layout the payload sits inside payload.zip, not next to
+            # this file, so this has to be forwarded: without it the installer finds no
+            # checksum list beside the payload and refuses the package as incomplete.
+            if ($PayloadZip -ne '') { $argv += @('-PayloadZip', $PayloadZip) }
+            if ($DryRun) { $argv += '-DryRun' }
+            if ($Uninstall) { $argv += '-Uninstall' }
+
+            # The child writes its own log; the window reads the file. Deliberately NOT
+            # BeginOutputReadLine + a PowerShell event handler: that handler runs on a
+            # threadpool thread, and a scriptblock invoked there is not safe while the UI
+            # thread sits inside ShowDialog -- measured 2026-10-12: the window died the
+            # instant the child exited (exit 2, no message, no tick ever ran). A file has no
+            # threads in it.
+            $logFile = Join-Path $env:TEMP ('loment-setup-' + $PID + '.log')
+            Remove-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
+            $q = { param($t) "'" + $t.Replace("'", "''") + "'" }
+            # Quote the VALUES, never the switches: `'-Prefix'` is not a parameter name, and
+            # PowerShell answers with PositionalParameterNotFound before install.ps1 runs a
+            # single line -- which is exactly how "it did not install and the log is empty"
+            # looked on 2026-10-12.
+            $parts = @()
+            foreach ($a in $argv) {
+                if ($a.StartsWith('-')) { $parts += $a } else { $parts += (& $q $a) }
+            }
+            $inner = '& ' + (& $q $InstallPs1) + ' ' + ($parts -join ' ') + ' *> ' + (& $q $logFile)
+            $ps = New-Object System.Diagnostics.Process
+            $ps.StartInfo.FileName = 'powershell'
+            $ps.StartInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+            $ps.StartInfo.UseShellExecute = $false
+            $ps.StartInfo.CreateNoWindow = $true
+            $ps.Start() | Out-Null
+            # Every handler local the timer needs has to live in script scope: the timer's
+            # scriptblock runs later, from the message loop, and does NOT see the click
+            # handler's locals. Miss one and it reads $null -- that is how the window sat on
+            # "Installing" forever on 2026-10-12 while the install itself had already
+            # finished.
+            $script:proc = $ps
+            $script:logFile = $logFile
+            $script:lastTxt = ''
+
+            $tick = New-Object System.Windows.Forms.Timer
+            $tick.Interval = 120
+            $tick.Add_Tick({
+                    $txt = ''
+                    if (Test-Path -LiteralPath $logFile) {
+                        try { $txt = [string](Get-Content -LiteralPath $logFile -Raw -ErrorAction Stop) } catch { $txt = $script:lastTxt }
+                    }
+                    if ($txt -ne $script:lastTxt) {
+                        $script:lastTxt = $txt
+                        $ui.log.Text = $txt
+                        $ui.log.SelectionStart = $ui.log.Text.Length
+                        $ui.log.ScrollToCaret()
+                    }
+                    if ($script:proc.HasExited) {
+                        $tick.Stop()
+                        $code = $script:proc.ExitCode
+                        $script:rc = $code
+                        $ok = ($code -eq 0)
+
+                        # The receipt. This is the whole point of the window: say what happened
+                        # and then WAIT -- the window closes when the person closes it, never on
+                        # its own. (-AutoClose exists only so a criterion can run this file.)
+                        $ui.title.Text = 'Finished'
+                        $ui.bar.Style = 'Continuous'
+                        $ui.bar.Value = 100
+                        $ui.log.Size = New-Object System.Drawing.Size(($WW - 48 - 56), 116)
+
+                        $badge = New-Badge $ok
+                        $badge.Location = New-Object System.Drawing.Point(30, 206)
+                        $body.Controls.Add($badge)
+
+                        $res = New-Object System.Windows.Forms.Label
+                        if ($ok) { $res.Text = $VERSION + ' is installed.' }
+                        else { $res.Text = 'Install failed (exit ' + $code + ').' }
+                        $res.Font = New-Object System.Drawing.Font('Segoe UI', 12.5)
+                        $res.ForeColor = if ($ok) { [System.Drawing.Color]::FromArgb(38, 132, 78) } else { [System.Drawing.Color]::FromArgb(190, 60, 40) }
+                        $res.BackColor = [System.Drawing.Color]::Transparent
+                        $res.Size = New-Object System.Drawing.Size(470, 28)
+                        $res.Location = New-Object System.Drawing.Point(94, 206)
+                        $body.Controls.Add($res)
+
+                        $hint = New-Object System.Windows.Forms.Label
+                        if ($ok) { $hint.Text = 'Open a new terminal and try:  loment version' }
+                        else { $hint.Text = 'Nothing was left half-written -- see the log above.' }
+                        $hint.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
+                        $hint.ForeColor = $MUTE
+                        $hint.BackColor = [System.Drawing.Color]::Transparent
+                        $hint.Size = New-Object System.Drawing.Size(470, 24)
+                        $hint.Location = New-Object System.Drawing.Point(94, 234)
+                        $body.Controls.Add($hint)
+
+                        $btnInstall.Enabled = $true
+                        $btnInstall.Text = 'Close'
+                        $btnCancel.Visible = $false
+                        $script:page = 3
+                        if ($ShotDone -ne '') {
+                            [System.Windows.Forms.Application]::DoEvents()
+                            Start-Sleep -Milliseconds 250
+                            $bmp = New-Object System.Drawing.Bitmap($WW, $WH)
+                            $win.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $WW, $WH)))
+                            $bmp.Save($ShotDone, [System.Drawing.Imaging.ImageFormat]::Png)
+                            $bmp.Dispose()
+                            Write-Host "wrote $ShotDone"
+                            $win.Close()
+                        }
+                        if ($AutoClose) { $win.Close() }
+                    }
+                })
+            $tick.Start()
+            $script:tick = $tick
+        } else {
+            $win.Close()
+        }
+    })
+
+if ($ShotWizard -ne '') {
+    $win.Opacity = 1.0
+    $win.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 250
+    $bmp = New-Object System.Drawing.Bitmap($WW, $WH)
+    $win.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $WW, $WH)))
+    $bmp.Save($ShotWizard, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $win.Close()
+    Write-Host "wrote $ShotWizard"
+    exit 0
+}
+
+$script:rc = 0
+$win.Add_Shown({
+        Fade-In
+        # -AutoRun: press Install for the user and close when the install ends. It is how a
+        # criterion exercises this file at all -- a window nobody clicks is not a test.
+        if ($AutoRun) { $btnInstall.PerformClick() }
+    })
+[void]$win.ShowDialog()
+# Carry the install's own exit code out, so a script that launched the window can still
+# tell whether the install worked. Nothing installed -> 0.
+exit $script:rc
+'''
+
 
 README_MD = """# Loment {DISPLAY}
 
@@ -1440,6 +2104,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 也可以直接**双击 `install.cmd`**（按默认参数装；`install.cmd` 在 zip 布局与自解压布局里都能用）。
+**不带参数的双击会开一个窗口**（`welcome.ps1`：渐入 logo → 选装到哪 → 装完给回执），
+带参数时仍是下面那条命令行、输出照旧 —— 脚本与 CI 走的那条一点没变。
 遇到"被策略阻止"时用上面那条 `-ExecutionPolicy Bypass` 的命令。
 
 **③ 安装包安装 · Windows 双击**
@@ -1791,6 +2457,28 @@ def _read(p: str) -> bytes:
     return (ROOT / p).read_bytes()
 
 
+def logo_png() -> bytes:
+    """`editors/loment.ico` 里最大的那一帧 —— 纯 stdlib 解 ICO 目录，帧本身就是 PNG。
+
+    **不做缩放**：ico 里已经有 16/24/32/48/64/128/256 七档，安装界面要 30 与 132 两个尺寸，
+    让 GDI+ 自己缩比在 Python 里插值更准（也少一处会漂的东西）。
+    """
+    data = _read(ICON)
+    if data[:4] != b"\x00\x00\x01\x00":
+        raise ValueError(f"{ICON} 不是 ICO")
+    n = struct.unpack_from("<H", data, 4)[0]
+    best = (0, 0, 0)  # (边长, 偏移, 长度)
+    for i in range(n):
+        w, _h, _c, _r, _p, _bpp, size, off = struct.unpack_from("<BBBBHHII", data, 6 + i * 16)
+        w = w or 256  # 0 表示 256
+        if w > best[0]:
+            best = (w, off, size)
+    _w, off, size = best
+    if data[off:off + 4] != b"\x89PNG":
+        raise ValueError(f"{ICON} 的最大帧不是 PNG（{size} 字节）")
+    return data[off:off + size]
+
+
 def _store_files() -> dict[str, bytes]:
     """随包的 lompi 标准库 -> {`<name>/<version>/<file>`: 字节}。
 
@@ -1825,10 +2513,12 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     idx = 1 if kind == "windows" else 0
     for name, pair in bins.items():
         files[f"bin/{name}{'.exe' if kind == 'windows' else ''}"] = (pair[idx], 0o755)
-    files["bin/loment"] = (_subst(LAUNCHER_SH).encode("ascii"), 0o755)
+    # 包里那份启动器是**发行版渠道**的（`docs/222` §4 的端口门）：`--hosted` 与端口标记
+    # 点名拒、不给链接器传 `--allow-ports`。开发通道用 `LAUNCHER_SH` 本体（判据里的桩包）。
+    files["bin/loment"] = (_subst(LAUNCHER_SH, "release").encode("ascii"), 0o755)
     if kind == "windows":
         # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
-        files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD)).encode("ascii"), 0o755)
+        files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD, "release")).encode("ascii"), 0o755)
     files["share/loment/version"] = (version_text().encode(), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     for ex in EXAMPLES:
@@ -1855,14 +2545,29 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
         files["bin/loment.ico"] = (_read(ICON), 0o644)
         files["install.ps1"] = (_crlf(_subst(INSTALL_PS1)).encode("ascii"), 0o644)
         files["install.cmd"] = (_crlf(_subst(INSTALL_CMD)).encode("ascii"), 0o644)
+        # 安装器的脸，与它正中那张标。`install.cmd` 无参数（= 双击）时走这两个文件。
+        files["welcome.ps1"] = (_crlf(_subst(WELCOME_PS1)).encode("ascii"), 0o644)
+        files[LOGO_NAME] = (logo_png(), 0o644)
     # 随包校验和 (安装脚本第一步就校它; 覆盖上面所有文件, 不含自己)
     files["SHA256SUMS"] = (sums_text(files).encode(), 0o644)
     return files
 
 
-def _subst(text: str) -> str:
+def _subst(text: str, channel: str = "dev") -> str:
+    """把模板里的占位符换掉。**默认 `dev`** —— 于是老调用点（判据里的桩包）行为不变。
+
+    `channel` 只喂 `@CHANNEL@`（`docs/222` §4 的**端口门**，2026-10-12 用户定）：
+
+    * `dev`：`--hosted` 那条路照旧，链外源对象时给链接器传 `--allow-ports`（那扇门在开发
+      通道是开的）；
+    * `release`：`--hosted` / 端口标记**点名拒**，且**一个标志都不传** —— 链接器的默认
+      就是"拒"，于是"发行版里 libc 不可调用"不靠启动器记得做什么，靠默认值本身。
+
+    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。
+    """
     return (text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
-            .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS))
+            .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS)
+            .replace("@CHANNEL@", channel))
 
 
 def _crlf(text: str) -> str:
@@ -1948,6 +2653,8 @@ def emit_exe(zip_bytes: bytes, target: Path) -> bool:
     (src / "payload.zip").write_bytes(zip_bytes)
     (src / "install.ps1").write_bytes(_crlf(_subst(INSTALL_PS1)).encode("ascii"))
     (src / "install.cmd").write_bytes(_crlf(_subst(INSTALL_CMD)).encode("ascii"))
+    (src / "welcome.ps1").write_bytes(_crlf(_subst(WELCOME_PS1)).encode("ascii"))
+    (src / LOGO_NAME).write_bytes(logo_png())
     names = sorted(p.name for p in src.iterdir())   # 注意: 在写 loment.sed **之前**
     sed = src / "loment.sed"
     sed.write_text(iexpress_sed(target, src, names),
@@ -2146,14 +2853,16 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
         "LICENSE": _read(LICENSE),
     }
     if kind == "linux":
-        out["bin/loment"] = _subst(LAUNCHER_SH).encode("ascii")
+        out["bin/loment"] = _subst(LAUNCHER_SH, "release").encode("ascii")
         out["install.sh"] = _subst(INSTALL_SH).encode("ascii")
     else:
-        out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD)).encode("ascii")
+        out["bin/loment.cmd"] = _crlf(_subst(LAUNCHER_CMD, "release")).encode("ascii")
         # 安装脚本也是**模板直出**的 —— 改了模板不重打包, 归档里就是旧的, 而
         # `--check` 原先照样绿 (2026-09-16 加 store 时踩到: 改完 INSTALL_SH 才发现)。
         out["install.ps1"] = _crlf(_subst(INSTALL_PS1)).encode("ascii")
         out["install.cmd"] = _crlf(_subst(INSTALL_CMD)).encode("ascii")
+        out["welcome.ps1"] = _crlf(_subst(WELCOME_PS1)).encode("ascii")
+        out[LOGO_NAME] = logo_png()
     return out
 
 

@@ -263,33 +263,54 @@ Every rule is a precondition for `use <name>` working after install, not a style
 - `pkg.lomp`, if present, agrees with the directory (`name()` matching is a failure,
   `version()` mismatch is a warning).
 
-### 5.0.2 `fetch` — plan the registry download
+### 5.0.2 `fetch` — download the registry (0.2.0: lompi does this itself)
+
+```
+$ lompi fetch --registry http://127.0.0.1:8000/libs
+lompi: registry fetched into C:\Users\hooya\.lompi\cache\8000
+```
+
+It really does, over a raw socket, on **both** targets: `GET <base>/lompi-index.txt`,
+then one `GET <base>/<path>` per line of the index, **verifying the sha256 the index
+states** — a mismatch means the file is refused, not written. The result lands in
+`<global root>\cache\<slug>\`, which is exactly where `install` looks (§5.6).
+
+The index is a text file, one line per package:
+
+```
+<name> <version> <path> <sha256hex>
+```
+
+**What it will not do.** If the registry is not `http://` with an IPv4 literal, `fetch`
+does not fail silently — it says which piece is missing and then prints the clone plan
+you can run instead:
 
 ```
 $ lompi fetch --registry https://github.com/you/loment-libs
-# lompi fetch plan (lompi cannot do network on PE -- no socket in the 8 syscalls)
+# lompi will not fetch this registry itself: only http:// with an IPv4 literal
+#   (https needs TLS; a hostname needs a resolver -- neither is in the toolchain)
 # registry: https://github.com/you/loment-libs  (from --registry)
 mkdir -p C:\Users\hooya\.lompi\cache
 git clone --depth 1 https://github.com/you/loment-libs C:\Users\hooya\.lompi\cache\loment-libs
 # to update later:  git -C C:\Users\hooya\.lompi\cache\loment-libs pull
 ```
 
-**lompi cannot download anything itself — yet.** The Windows PE target implements 8 syscalls
-and none of them is `socket`; the runtime shim imports no `ws2_32` / `winhttp`. So `fetch`
-emits the exact command for a shell or CI to run — the same situation as `mkdir` in 5.6.
-**Neither is a lompi design position**: both are gaps in the runtime the PE build is
-compiled against, and the socket one is still not lifted as of lompi 0.1.5. Do not
-design a workflow around them being permanent. Run the printed command, then
-`lompi install <name>` will find the package in the cache.
+So the plan path is now a **fallback with a stated reason**, not the only behaviour:
+`https://` and hostnames are the two shapes it hands back. Also outside the contract —
+3xx redirects (non-200 is a failure) and a response larger than the buffer (refused, not
+truncated). The directory it writes into must already exist in the `cache\` tree; on a
+write failure it prints the exact `mkdir -p` (the same PE gap as §5.6) rather than
+leaving you with a partial cache. Run the printed command, then `lompi install <name>`
+will find the package in the cache.
 
 ### 5.0.3 `config` and `version`
 
 ```
 $ lompi version
-lompi 0.1.5
+lompi 0.2.0
 
 $ lompi config
-version:  0.1.5
+version:  0.2.0
 exe:      C:\Users\hooya\.local\bin
 global:   C:\Users\hooya\.lompi
   rule:   argv[0] sits under \Users\<name>\, so <that>\.lompi
@@ -404,9 +425,9 @@ It resolves the **closure** (which instances are needed) and each instance's **s
 directory**, and prints the one `mkdir` that is required (`--into` sets the target,
 defaulting to `deps`).
 
-**Why a plan instead of writing files directly**: the Windows PE target implements only
-8 syscalls and **`mkdir` / `unlink` are not among them** — it can write into directories
-that already exist, but cannot create one. Installing a package means creating
+**Why a plan instead of writing files directly**: the Windows PE target has no `mkdir` /
+`unlink` in its syscall surface — it can write into directories that already exist, but
+cannot create one. Installing a package means creating
 `deps/<name>/`, so that step is handed to the caller (a shell, CI, or the reference
 toolchain). On ELF targets `mkdir` is available and the same plan can be executed
 directly. **The boundary belongs to the target platform, not to lompi.**
@@ -435,7 +456,7 @@ The entry point for "which Loment libraries are available here", "what is in the
 
 ```
 $ lompi config
-version:  0.1.5
+version:  0.2.0
 exe:      C:\Users\hooya\.local\bin
 global:   C:\Users\hooya\.lompi
   rule:   argv[0] sits under \Users\<name>\, so <that>\.lompi
@@ -622,15 +643,16 @@ toolchain** (a gap in the runtime lompi is compiled with, not a decision lompi m
 **Not yet in the toolchain** — treat as "not yet", and check the version before designing
 around one
 
-- **No socket.** The PE runtime exposes eight syscalls and none of them is a socket, so
-  `lompi fetch` emits the `git clone` command instead of running it, and installing is
-  always reading local files. **This is a toolchain gap, not a design position** — it is
-  still not lifted as of lompi 0.1.5.
+- **No TLS and no resolver.** The socket syscalls *are* there (both targets — `docs/234`),
+  so `lompi fetch` does its own HTTP, but the toolchain has no TLS handshake and no
+  `getaddrinfo`, so only `http://` with an IPv4 literal is fetchable (§5.0.2). **Both are
+  toolchain gaps, not design positions** — do not design a workflow around them being
+  permanent. Note this list is about the *toolchain*: what lompi itself will never do is
+  the "By design" list above.
 - **No `mkdir`.** `install --apply` writes files into directories that already exist; it
   checks them all up front and lists the `mkdir` commands you need instead of leaving a
-  partial install. Same status as the socket — the runtime does not offer it yet. On ELF
-  targets it *is* available (see 5.6), which is the tell that this is the PE shim
-  speaking, not lompi.
+  partial install. The PE runtime still does not offer it. On ELF targets it *is* available
+  (see 5.6), which is the tell that this is the PE shim speaking, not lompi.
 
 **Behaviour you should know** (settled, and these are not limitations)
 
@@ -669,7 +691,7 @@ around one
 | pip | lompi | difference |
 |---|---|---|
 | `pip install X` | `lompi install X --apply` (or `--into DIR`) | validates first; without `--apply` it only prints the plan; needs the target directories to exist (PE shim has no `mkdir` yet — see 9) |
-| `pip download` | `lompi fetch` | prints the `git clone` for you to run (no socket in the PE shim yet — still not lifted as of 0.1.5; see 9) |
+| `pip download` | `lompi fetch` | does the download itself over `http://` + IPv4; `https://` and hostnames fall back to printing the `git clone` (no TLS, no resolver — see 9) |
 | `pip config` | `lompi config` | also shows *how* the global root was derived |
 | `twine check` / wheel validation | `lompi check <dir>` | structural rules that `use <name>` will actually depend on |
 | `pip list` / `pip index versions X` | `lompi list [<store>]` | lists every instance, not just one package; `index` is a synonym |
@@ -684,4 +706,4 @@ around one
 **The difference that used to be here is gone**: pip never makes you name site-packages, and
 neither does lompi any more — `<store>` is optional on every verb above (see 3). What is *not*
 the same as pip, deliberately: `install` still refuses to create directories on PE and prints a
-plan instead, and `fetch` still prints the clone command rather than doing it.
+plan instead. (`fetch`, which used to be on that list, now does its own download — see 5.0.2.)

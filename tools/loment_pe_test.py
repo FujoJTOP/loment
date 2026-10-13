@@ -1998,7 +1998,13 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             failed.append((name, e))
             print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_pe_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
+    # 总结行**带上失败的名字与原因**：门禁把每条脚本的 stdout 收进缓冲、只把最后一行
+    # 贴出来（`ci.py` 的 `_run_one_check`），于是"哪一条红的、为什么"在 CI 上**看不见** ——
+    # 2026-10-12 定位 `loment_pe_test` 15/16 里那一条时就卡在这儿。别的套件也该这么写。
+    why = "；".join(
+        (f"{n}: {type(e).__name__}: {str(e)[:600]}").replace("\n", " ") for n, e in failed)
+    tail = f"\n  红: {why}" if failed else ""
+    print(f"\nloment_pe_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过{tail}")
     return 1 if failed else 0
 
 

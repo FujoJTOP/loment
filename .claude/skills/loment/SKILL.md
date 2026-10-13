@@ -418,7 +418,10 @@ language does not force it.
 **`sealed` is what makes the artifact checkable.** An undefined symbol is an error, not a
 warning, so a sealed artifact provably has no ports to the world. `hosted` is the other path: a
 C-runtime program whose entry point is `fn main() -> u32` rather than `_start`, declared as
-allowed to link real libc and shared libraries.
+allowed to link real libc and shared libraries. **It is not finished, and a release build
+refuses it by name** - `choose hosted` is a compile error there, the launcher refuses `--hosted`
+too, and an object that carries undefined symbols is refused by the linker
+(`docs/222` section 4.5, `docs/219` section 8c). The development channel is where it is built.
 
 ### 2.2 Switches `set choose` / `choose` / `addin`
 
@@ -952,17 +955,20 @@ Call sites pass arguments by the **platform C ABI** (Linux: the first six intege
 `rdi rsi rdx rcx r8 r9`; Windows: `rcx rdx r8 r9`), while Loment-to-Loment calls keep Loment's own
 convention (arguments on the stack).
 
-**The other side's `.o` has to be self-contained** (a hard boundary of this stage; meeting it
-produces an **error**, not a guess):
+**What the other side's `.o` may contain, and the one door that is shut.** Relocations are
+applied, several objects may reference each other, and archives (`.a`) are expanded - all of
+that works. The boundary is the **port gate** (meeting it produces an **error**, not a guess):
 
-- it may contain **no relocations** and **no undefined symbols** - `printf`/`malloc` being the
-  typical ones. That means **no libc**: compile the other side freestanding
+- an object that carries **undefined symbols** (`printf`/`malloc` being the typical ones) is
+  **refused by default**. That door - real libc, real shared libraries - is unfinished, and a
+  release build keeps it shut (`docs/222` section 4.5, `docs/219` section 8c). The development
+  channel opens it explicitly (`--allow-ports`), and there the closed-off names it can supply
+  itself are `memcpy` / `memset` / `memcmp` / `malloc` / `free` / `__stack_chk_fail`.
+- so in a release build: compile the other side freestanding
   (`-ffreestanding -fno-stack-protector`) and let it call only itself.
-- consequently **two `.o` files cannot reference each other** (from one side the other is an
-  undefined symbol).
-- archives (`.a`) and dynamic libraries (`.so`/`.dll`) **do not exist yet** on this path, and
-  neither does FFI on the PE target. Reaching a real system library is what `choose hosted`
-  opens (section 2.1), and `docs/222-lompi-020-foreign-libs.md` is the build-out.
+- dynamic libraries (`.so`/`.dll`) **do not exist yet** on this path, and neither does FFI on
+  the PE target. Reaching a real system library is what `choose hosted` opens (section 2.1) -
+  and that dimension is itself **not available in a release build** right now.
 - several `--link` flags may be given at once; they are appended in order.
 - the other side's `.o` **may not exceed 4 MiB** (over that is an error, never a truncated build).
 

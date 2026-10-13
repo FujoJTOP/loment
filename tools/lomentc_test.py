@@ -3321,7 +3321,10 @@ fn main() -> i32 {
 #: **整个单元没有堆** ⇒ 收集器整段不发，而**写屏障的调用照样发**（`__loment_wb` 只定义在
 #: 收集器那一段里）⇒ `use of undefined value '@__loment_wb'`。修它要先回答"没有堆的单元
 #: 怎么知道堆不在"（发射前扫一遍，还是干脆让 alpha 档永远带堆），那是**另一笔**。
-_KNOWN_ILLEGAL_TIERS = {"gc_auto_alpha/sealed"}
+#: **现在是空的**：`gc_auto_alpha/sealed` 那一格原先在这里（写屏障挂在了没有 arena 的
+#: `sealed` 单元上 ⇒ 引用不到堆 ⇒ clang 拒）。2026-10-12 把它改成"跟着 `heap_needed`
+#: 走"之后，那一格过了 —— 这条判据自己会红着要求删掉它（`FujoJTOP/loment#239`）。
+_KNOWN_ILLEGAL_TIERS: set[str] = set()
 
 _TIER_CHOOSES = (
     ("gc_manual/sealed", "choose runtime"),
