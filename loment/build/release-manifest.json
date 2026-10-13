@@ -1,5 +1,5 @@
 {
- "release": "0.1.4.5",
+ "release": "0.1.4.5-quickfix",
  "files": [
   {
    "path": "tools/lomc.py",
@@ -707,7 +707,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "7fc63a069155aa461c735b0408d8ead247464f91d513543b5807cd01c704129f"
+   "sha256": "90f042a4a63ad96686a0077b02d3afbd838f2b2675901b3734ccbddc6924999c"
   },
   {
    "path": "tools/lompicheck_test.py",
@@ -1083,11 +1083,11 @@
   },
   {
    "path": "tools/loment_dist.py",
-   "sha256": "03bc50c48ae86ee92aa975b0f85094db1adf7bacb0da7b7784235dc1a649ec4f"
+   "sha256": "a085b9fbe01963110fd7123e27749839ddb0955bb698df0f63ce436e2bcf28b5"
   },
   {
    "path": "tools/loment_dist_test.py",
-   "sha256": "37f738a12d0a2d1310f29c6d1ebd5d90c7bce9a82013e7ac37a364e6a78f88bc"
+   "sha256": "b13392485aee87ce5d820c99d17780f01a3404b6a055c30e876b566e73e9128a"
   },
   {
    "path": "tools/loment_sign.py",
@@ -1207,7 +1207,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "4dc094326650a675b1d956b8c757a6ac64d204c66b99a1eac0282045d646dde9"
+   "sha256": "c1f98621b44b040c62e4f5a483f3b762a8ac6e8e981c0c639d275a27a5c80556"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1887,7 +1887,7 @@
   },
   {
    "path": "docs/162-loment-distribution.md",
-   "sha256": "5ede23a35a6adb70fdf7c06fefb6a6e0b093bfcdf9c3025f0aecaece16cae413"
+   "sha256": "b3577adbd283f378934326ced6b798307a966c45c74c0c925f0af8938d9d4005"
   },
   {
    "path": "docs/163-loment-signing.md",
@@ -2399,7 +2399,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "8a0342f078e6cd4d527002ca535e1005e364952c63d1f619db7f6b6e05a393e1"
+   "sha256": "f39d3b3c02f5a70c0ad67aa81527f01ac7bfc6cbde37fd941ef56e368b8c4ca8"
   },
   {
    "path": "tools/loment_status.py",
