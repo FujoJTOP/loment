@@ -120,14 +120,24 @@ python tools/loment_publish.py --push loment   # 或 --push lompi / --push all
 
 ## 5. 第三个发布口：VS Code Marketplace（扩展）
 
-> 2026-10-13 · 首次发布 `FujoJTOP.loment` **v0.2.0** · 判据 `vscode_ext_test::test_vscode_publish_ready`
+> 2026-10-13 · 首次发布 `hooyan2022.loment` **v0.2.0** · 判据 `vscode_ext_test::test_vscode_publish_ready`
+>
+> **补记（同日的事实，不追因）**：第一次上传用的是**另一个账号**下的 `FujoJTOP` publisher ——
+> `vsce` 同样回了 `DONE`，但那次在浏览器里打开 `manage/publishers/FujoJTOP` 是 **404**，
+> 外面的三个探针（发布者页 / item 页 / 下载端点，外加一个已知存在的扩展做对照）也全查不到。
+> 原因没查明（最可能是**浏览器登的账号与那个发布者不是同一个**），改用 `hooyan2022` 重发，
+> 不再追。旧账号下若真躺着一条，删不删都不影响这里。
+>
+> **建发布者只能人来点**：Marketplace 的 API 明确拒 ——
+> `Creating a publisher from command line is not supported`（错误类型是 `InvalidReCaptchaTokenException`，
+> 它挂了 reCAPTCHA 防脚本建号）。所以这一格写进流程，别指望自动化。
 
 上面两个口是**代码仓**（`loment_publish.py --push`，内容完全由单仓决定）。Marketplace 是
 **另一个形状**：它是个商店 —— 发布要一个发布者账号，而且**版本号发出去就烧掉了**。所以单独成节。
 
-**地址**：<https://marketplace.visualstudio.com/items?itemName=FujoJTOP.loment> ·
-管理台 <https://marketplace.visualstudio.com/manage/publishers/FujoJTOP> ·
-装法 `code --install-extension FujoJTOP.loment`。
+**地址**：<https://marketplace.visualstudio.com/items?itemName=hooyan2022.loment> ·
+管理台 <https://marketplace.visualstudio.com/manage/publishers/hooyan2022> ·
+装法 `code --install-extension hooyan2022.loment`。
 
 ### 5.1 账号那一半（做一次，之后不用碰）
 

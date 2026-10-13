@@ -928,7 +928,7 @@ def test_vscode_registration_points_at_the_real_dir():
     这个**马上要被删掉**的名字上。当时 `--doctor` 只查"有没有登记"，所以照常报 OK ——
     这一条把那个盲点钉住。
     """
-    ident = "fujojtop.loment"
+    ident = "hooyan2022.loment"
     dest = vscode_ext.ext_dir() / f"{ident}-0.1.0"
     stale = {"identifier": {"id": ident}, "version": "0.1.0",
              "location": {"$mid": 1, "path": f"/c:/x/{ident}-0.1.0.old", "scheme": "file"},
@@ -972,7 +972,7 @@ def test_vscode_install_sweeps_stale_versions():
     """
     with tempfile.TemporaryDirectory() as tds:
         extdir = Path(tds)
-        ident = "fujojtop.loment"
+        ident = "hooyan2022.loment"
         dest = extdir / f"{ident}-0.2.0"
         for name in (f"{ident}-0.1.0", f"{ident}-0.2.0", f"{ident}-0.1.0.old",
                      "someoneelse.thing-1.0.0"):
@@ -981,6 +981,48 @@ def test_vscode_install_sweeps_stale_versions():
         got = [p.name for p in vscode_ext.stale_dirs(extdir, ident, dest)]
         assert got == [f"{ident}-0.1.0", f"{ident}-0.1.0.old"], got
     print("      升级扫旧版：只认同 ident 的旧目录（不含 dest 自己、不含别人的扩展）")
+
+
+@test
+def test_vscode_doctor_names_same_name_other_publisher():
+    """**同名、不同发布者**的目录：认出来点名，但**绝不自动删**。
+
+    `stale_dirs` 按**当前 ident**（`<发布者>.<名>`）glob，而换发布者之后 ident 整个变了
+    （`fujojtop.loment` → `hooyan2022.loment`），旧目录不在它的匹配范围里。
+    2026-10-13 实测撞到：磁盘上两份都声明 `.lomt`/`.lom`，而 `--doctor` 只看得见症状
+    （"别人也认 .lomt"），看不见那是**自己**的旧目录。
+
+    **这一条最初写反过**：第一版让 `--install` 把它们一并挪走（判据第一版的期望值就是
+    "两个都挪"），而它把**别人的同名扩展**也一起挪了 —— 判据当场抓出来。清单里没有任何
+    字段能分开那两件事，所以现在的规矩是：**认出来给 doctor 点名，删不删由人**。
+    这里同时钉住那两件事：① 该认的认得出；② 它**不在** `--install` 该挪的那一批里。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        extdir = Path(tds)
+        dest = extdir / "hooyan2022.loment-0.2.0"
+        dest.mkdir()
+        pkg = {"name": "loment", "publisher": "hooyan2022"}
+        # 自己换发布者留下的（要**认出来**，但不自动删）
+        (extdir / "fujojtop.loment-0.2.0").mkdir()
+        (extdir / "fujojtop.loment-0.2.0" / "package.json").write_text(
+            json.dumps({"name": "loment", "publisher": "FujoJTOP"}), encoding="utf-8")
+        # 别人的同名扩展 —— 和上面那个**在清单里长得一模一样**，这正是不能自动删的理由
+        (extdir / "someoneelse.loment-1.0.0").mkdir()
+        (extdir / "someoneelse.loment-1.0.0" / "package.json").write_text(
+            json.dumps({"name": "loment", "publisher": "someoneelse"}), encoding="utf-8")
+        # 名字不同的（不该被认出来）
+        (extdir / "fujojtop.other-0.1.0").mkdir()
+        (extdir / "fujojtop.other-0.1.0" / "package.json").write_text(
+            json.dumps({"name": "other", "publisher": "FujoJTOP"}), encoding="utf-8")
+        got = sorted(p.name for p in vscode_ext.renamed_publisher_dirs(extdir, pkg, dest))
+        # ① 两个同名不同发布者的都被认出来（doctor 会各自点名）
+        assert got == ["fujojtop.loment-0.2.0", "someoneelse.loment-1.0.0"], got
+        # ② 但它们**不在** `--install` 该挪的那一批里（那一批按当前 ident 走）
+        ident = "hooyan2022.loment"
+        swept = [p.name for p in vscode_ext.stale_dirs(extdir, ident, dest)]
+        assert swept == [], f"`--install` 的自动清理不该碰这两个: {swept}"
+    print("      同名不同发布者：doctor 逐个点名，但**不自动删**（分不开 _自己的旧目录_ 与"
+          " _别人的同名扩展_）")
 
 
 def main(argv: list[str] | None = None) -> int:
