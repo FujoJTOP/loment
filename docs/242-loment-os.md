@@ -85,7 +85,7 @@
 
 ## 6. 加模块前必读：命名硬约束
 
-与 `internet` 同一条（`docs/240` §7）：**包内模块的顶层名字在一个单元里是平的**，
+与 `internet` 同一条（`docs/241` §7）：**包内模块的顶层名字在一个单元里是平的**，
 `resolve_name` 在包内模块层遇到**同名两处命中直接报错**。所以：
 
 * `os` 不能用 `env`（std 占了）、`proc`（`loment/lib/` 与 std 都占了）、`clock`（std 占了）
@@ -97,6 +97,6 @@ std + host + internet 全部模块的顶层名字。
 
 ## 7. 与其它文档的关系
 
-* `docs/240`：`internet`（第三个包）；`docs/232`：`std` 的 libc 面（LibL 这个名字）；
+* `docs/241`：`internet`（第三个包）；`docs/232`：`std` 的 libc 面（LibL 这个名字）；
 * `docs/168`：包系统（包名 == 入口文件名、依赖来自源码的 `use`）；
 * `docs/234` / `docs/236`：net 运行时面与 lompi 的联网 —— `os` **不参与**，它不发网络号。
