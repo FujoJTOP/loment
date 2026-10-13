@@ -614,9 +614,11 @@ def test_install_scripts_stay_pure_ascii():
 #:
 #: **2026-10-13 起第三个包 `internet` 是 8**（`ip` `uri` `http` `dns` `sock` `tcp` `udp`
 #: + 门面，`docs/240`），整棵树随之 142 -> 151。
+#: **同日第四个包 `os` 是 6**（`sys` `time` `signal` `tty` `user` + 门面，`docs/241`），
+#: 整棵树随之 151 -> 158。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 133, "host": 7, "internet": 8}
-STORE_FILES = 151
+STORE_MODULES = {"std": 133, "host": 7, "internet": 8, "os": 6}
+STORE_FILES = 158
 
 
 def _store_line(out: str) -> str:

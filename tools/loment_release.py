@@ -82,6 +82,8 @@ GLOBS = [
     "tools/loment_libl_test.py",
     # LibL 家族第三个包 internet (docs/240): 对 CPython 标准库 + 真 http.server 对跑
     "tools/loment_internet_test.py",
+    # 第四个包 os (docs/241): 与 CPython 的 os/time/signal **在同一个 Linux 环境里**对跑
+    "tools/loment_os_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
@@ -98,6 +100,7 @@ GLOBS = [
     # `test_release_manifest_covers_every_store_file` 就是钉这个的: 库改版而清单没跟上,
     # `loment_release --check` 会**看不见文件而照样绿**, 那条会红。
     "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*", "lompi/store/internet/0.1.0/*",
+    "lompi/store/os/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
