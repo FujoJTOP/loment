@@ -193,7 +193,7 @@ def test_index_handles_module_references_in_the_shipped_store():
         print(f"      SKIP: {_skip}")
         return
     assert rc == 0, f"index 退出 {rc}: {out[:300]}"
-    assert "2 package(s) in store" in out, out
+    assert f"{len(STORE_MODULES)} package(s) in store" in out, out
     for pkg in STORE_MODULES:
         assert re.search(rf"^{pkg} \S+ [0-9a-f]{{16}}$", out, re.M), \
             f"index 没报出 {pkg}: {out}"
@@ -611,9 +611,12 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-10-11 起 std 是 133** —— LibL 加了 5 份（`string` `ctype` `stdlib` `stdio`
 #: `libl`，`docs/232`），整棵树随之 137 -> 142。用户说的"127 个库"指的是**原来**那一批；
 #: 这里钉的是**文件数**，所以这个数会跟着库长，不是常量意义上的"127"。
+#:
+#: **2026-10-13 起第三个包 `internet` 是 8**（`ip` `uri` `http` `dns` `sock` `tcp` `udp`
+#: + 门面，`docs/237`），整棵树随之 142 -> 151。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 133, "host": 7}
-STORE_FILES = 142
+STORE_MODULES = {"std": 133, "host": 7, "internet": 8}
+STORE_FILES = 151
 
 
 def _store_line(out: str) -> str:
