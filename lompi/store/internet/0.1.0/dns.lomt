@@ -65,7 +65,8 @@ fn dnsp_label(name: str, so: u32, sn: u32, out: ptr, pos: u32) -> u32 {
 /// 允许结尾的 `.` (表示根), 但不允许空标签 (`a..b`)。
 pub fn dns_name_encode(name: str, out: ptr, cap: u32) -> u32 {
     let n: u32 = str_len(name);
-    if n == 0 {
+    // 空名字与单独一个 `.` 都是根: 线格式就是一个 0 字节。
+    if n == 0 || (n == 1 && str_byte(name, 0) == 46) {
         if cap < 1 {
             return DNS_NO;
         }
@@ -75,21 +76,40 @@ pub fn dns_name_encode(name: str, out: ptr, cap: u32) -> u32 {
     let pos: u32 = 0;
     let s: u32 = 0;
     let i: u32 = 0;
-    while i <= n {
-        if i == n || str_byte(name, i) == 46 {
-            let w: u32 = dnsp_label(name, s, i - s, out, pos);
+    while i < n {
+        if str_byte(name, i) == 46 {
+            let sn: u32 = i - s;
+            if sn == 0 {
+                return DNS_NO;                   // 空标签: `a..b` / 前导 `.`
+            }
+            // **先算容量再写** —— 写完才查的话, cap 小的调用方拿到的是 DNS_NO 加一块越界写。
+            // `pos + 1 + sn + 1` 是长度前缀 + 标签内容 + 结尾那个 0。
+            if sn > 63 || pos + 1 + sn + 1 > cap {
+                return DNS_NO;
+            }
+            let w: u32 = dnsp_label(name, s, sn, out, pos);
             if w == DNS_NO {
                 return DNS_NO;
             }
             pos = w;
-            if pos + 1 > cap {
-                return DNS_NO;
-            }
             s = i + 1;
         }
         i = i + 1;
     }
-    store8(out, pos, 0 as u8);
+    // 结尾带 `.` 时 `s == n`, 这一段不存在 —— 那正是"允许结尾的 `.`"的意思,
+    // 原来这里会拿一个空标签去编码, 于是文档说允许的写法反而被拒。`sn > 63` 同上。
+    if s < n {
+        let sn: u32 = n - s;
+        if sn > 63 || pos + 1 + sn + 1 > cap {
+            return DNS_NO;
+        }
+        let w: u32 = dnsp_label(name, s, sn, out, pos);
+        if w == DNS_NO {
+            return DNS_NO;
+        }
+        pos = w;
+    }
+    store8(out, pos, 0 as u8);                   // 上面每段都留出了这一个字节
     return pos + 1;
 }
 
@@ -107,16 +127,23 @@ pub fn dns_name_decode(msg: ptr, msg_n: u32, off: u32, out: ptr, cap: u32) -> u3
             }
             return w;
         }
-        if (c & 192) == 192 {
+        if c >= 192 && c <= 223 {
             if p + 1 >= msg_n {
                 return DNS_NO;
             }
+            let to: u32 = ((c & 63) << 8) | load8(msg, p + 1);
+            if to >= p {
+                return DNS_NO;                   // RFC 1035: 指针只能往回指 (同时让成环不可能)
+            }
             jumps = jumps + 1;
             if jumps > 128 {
-                return DNS_NO;                   // 成环的兜底 (指针本身不限制方向)
+                return DNS_NO;                   // 兜底 (上面的"只能往回指"已经让成环不可能)
             }
-            p = ((c & 63) << 8) | load8(msg, p + 1);
+            p = to;
         } else {
+            if c > 63 {
+                return DNS_NO;                   // 64..191 是保留值, 不是标签长度
+            }
             if w > 0 {
                 if w + 1 > cap {
                     return DNS_NO;
@@ -155,7 +182,11 @@ pub fn dns_hdr_rcode(msg: ptr) -> u32 {
 }
 
 /// 四个计数之一: which 0=QD 1=AN 2=NS 3=AR。
+/// 越界返回 0 —— 原来不校验, `which = 8` 会去读 12 字节头之外的 `msg[20]`。
 pub fn dns_hdr_count(msg: ptr, which: u32) -> u32 {
+    if which > 3 {
+        return 0;
+    }
     return dnsp_be16(msg, 4 + which * 2);
 }
 
@@ -206,8 +237,11 @@ fn dnsp_skip_name(msg: ptr, msg_n: u32, off: u32) -> u32 {
         if c == 0 {
             return p + 1;
         }
-        if (c & 192) == 192 {
-            return p + 2;
+        if c >= 192 && c <= 223 {
+            return p + 2;                        // 0xC0..0xDF 才是指针
+        }
+        if c > 63 {
+            return DNS_NO;                       // 64..191 / 0xE0..0xFF 都是保留值
         }
         p = p + 1 + c;
     }
