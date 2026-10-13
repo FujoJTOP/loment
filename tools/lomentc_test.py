@@ -2120,6 +2120,73 @@ def test_surfaces_rule():
     assert empty["boundary"]["syscalls"] == 0, empty["boundary"]
 
 
+#: `net_ladder` 那一条用的源：**四档各来一站**，再加一处"号是变量"。
+NET_LADDER_SRC = """module nl
+choose runtime
+
+fn n() -> i64 {
+    let v: u64 = 41;
+    let a: i64 = syscall4(53, 0, 0, 0);
+    let b: i64 = syscall4(41, 0, 0, 0);
+    let c: i64 = syscall4(42, 0, 0, 0);
+    let d: i64 = syscall4(7, 0, 0, 0);
+    let e: i64 = syscall4(291, 0, 0, 0);
+    let f: i64 = syscall4(49, 0, 0, 0);
+    let g: i64 = syscall4(v, 0, 0, 0);
+    return a + b + c + d + e + f + g;
+}
+"""
+
+
+@test
+def test_net_ladder_rule():
+    """`net_ladder`（`docs/237`, Potato v14）：联网站点按**宽度档**分一分，**逐档**钉住。
+
+    与 `gc_ladder` 同形（四档 + 总数、各档之和 == 总数），**多一条跨字段**：`total_net`
+    必须等于 `surfaces.net` —— 两处数的是**同一批站点**，只是分的粗细不同。所以这里两处
+    都断言：只钉一边的话，"梯子上少了一档"或"面上多算了几个"照样能过。
+
+    **`total_net` 与 `total_sites` 刻意不相等**（6 vs 7）：那个"号是变量"的站点落在
+    `surfaces.other` 里，**不在**梯子上 —— 梯子只回答"联网的那部分按宽度怎么分"。
+    把两者混起来（比如拿 `total_net` 去对 `boundary.syscalls`）就是错的，这条判据钉住它。
+    """
+    doc = json.loads(lomentc.emit_potato(parse(NET_LADDER_SRC), ROOT))
+    nl = doc["net_ladder"]
+    assert nl == {"w0": 1, "w1": 2, "w2": 2, "w3": 1, "total_net": 6}, nl
+    assert doc["surfaces"] == {"net": 6, "other": 1, "total_sites": 7}, doc["surfaces"]
+    assert nl["total_net"] == doc["surfaces"]["net"], (nl, doc["surfaces"])
+    assert nl["total_net"] != doc["surfaces"]["total_sites"], (nl, doc["surfaces"])
+    assert doc["boundary"]["syscalls"] == 7, doc["boundary"]
+    # 空程序也得有这一项、而且**四档恒在**（必填，与 `gc_ladder` 同一条纪律：
+    # 键的集合固定，读者与校验器都不用猜）。
+    empty = json.loads(lomentc.emit_potato(parse("module e\n"), ROOT))
+    assert empty["net_ladder"] == {"w0": 0, "w1": 0, "w2": 0, "w3": 0, "total_net": 0}, \
+        empty["net_ladder"]
+
+
+@test
+def test_net_width_rung_table_covers_the_net_numbers():
+    """**分档表与面表同集**（`docs/237`）：联网号**恰好**有一档，非联网号**一档也没有**。
+
+    这是这张表唯一的自洽判据 —— 它没有 `SURFACE_NUMBERS` 那条"与运行时逐条判等"
+    （那张表抄的是 `lomelf.PE_SYSCALLS`，是一份**事实**；分档是**策略**，运行时不认宽度）。
+    能判的只有两条：少一个号 = 有联网站点没归类（`total_net` 会小于 `surfaces.net`，
+    校验器红）；多一个号 = 给不联网的号配了宽度（那些站点在 `surfaces` 里不算 net，
+    校验器同样红）。**两条都在对象那一侧独立判得了**，这一条是把它钉在**表**这一层。
+    """
+    net_nums = {n for n, face in lomentc.SURFACE_NUMBERS.items() if face == "net"}
+    assert set(lomentc.NET_WIDTH_RUNGS) == net_nums, \
+        (sorted(net_nums - set(lomentc.NET_WIDTH_RUNGS)),
+         sorted(set(lomentc.NET_WIDTH_RUNGS) - net_nums))
+    assert set(lomentc.NET_WIDTH_RUNGS.values()) == set(lomentc.NET_WIDTH_RUNG_KEYS), \
+        sorted(set(lomentc.NET_WIDTH_RUNGS.values()))
+    # 四档**都要有号**：空着的那一档在对象里恒为 0，读者分不出"这档没有号"与"这份程序
+    # 不用它" —— 那是设计上要不要这四档的问题（`docs/237` §5 记着），不是实现能在这一层
+    # 消掉的。这里只钉"每一档至少有一个号"，免得表写成三档、代码里留着第四档。
+    used = set(lomentc.NET_WIDTH_RUNGS.values())
+    assert used == set(lomentc.NET_WIDTH_RUNG_KEYS), sorted(used)
+
+
 #: `excluded` 的**行为轴**那一条用的源（`docs/218` §7 第 2 件 / `docs/227` §3）。
 EXCLUDED_NET_SRC = """module x
 
