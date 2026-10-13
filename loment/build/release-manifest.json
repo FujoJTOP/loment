@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_internet_test.py",
-   "sha256": "f4cee16383416b720ec1dc31d42545b8230f828f224ccc9bd8ffd7f8be2711bf"
+   "sha256": "d3a29a6f866029455adb6186dfc8cc948e2f3e6692ac474a680bfe9d55e7bd0c"
   },
   {
    "path": "tools/loment_os_test.py",
@@ -711,7 +711,7 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/http.lomt",
-   "sha256": "d362e50a50fe0476ce5f186e1c9ce536e3d39c839c552c502c8cadccad596200"
+   "sha256": "16cf1507aa6fc7fddd0a3faa5a62bd062e2b3316e7b7a45ac01932d38ce8d90b"
   },
   {
    "path": "lompi/store/internet/0.1.0/internet.lomt",
