@@ -130,10 +130,13 @@ def test_layout() -> None:
     check("payload 公共布局齐全", want_common <= set(lin))
     check("linux 有 install.sh 且可执行",
           lin.get("install.sh", (b"", 0))[1] == 0o755)
-    check("windows 有 install.ps1/install.cmd/loment.ico",
-          {"install.ps1", "install.cmd", "bin/loment.ico"} <= set(win))
+    check("windows 有 install.ps1/install.cmd/welcome.ps1/logo/loment.ico",
+          {"install.ps1", "install.cmd", "welcome.ps1", "loment-logo.png",
+           "bin/loment.ico"} <= set(win))
     check("windows zip 里没有 install.sh (不混淆两种装法)",
           "install.sh" not in win and "install.ps1" not in lin)
+    check("loment-logo.png 真的是 PNG (从 editors/loment.ico 最大的那帧抽的)",
+          win["loment-logo.png"][0][:8] == b"\x89PNG\r\n\x1a\n")
     check("ELF 权限位是 755", all(m == 0o755 for (rel, (b, m)) in lin.items()
                                   if rel.startswith("bin/loment-")))
 
@@ -143,11 +146,29 @@ def test_layout() -> None:
     check("linux 脚本纯 ASCII", not bad_ascii, ",".join(bad_ascii))
     ps1 = win["install.ps1"][0]
     check("install.ps1 纯 ASCII", all(c <= 0x7E for c in ps1))
-    for rel in ("install.ps1", "install.cmd"):
+    # welcome.ps1 是同一类东西（PS 5.1 按 ANSI 读无 BOM 的 .ps1），卫生规则也同一套。
+    for rel in ("install.ps1", "install.cmd", "welcome.ps1"):
         blob = win[rel][0]
+        check(f"{rel} 纯 ASCII", all(c <= 0x7E for c in blob))
         check(f"{rel} 是 CRLF", b"\r\n" in blob and b"\n" not in blob.replace(b"\r\n", b""))
     check("bin/loment 是 LF (WSL/Linux 侧)",
           b"\r" not in lin["bin/loment"][0])
+
+    # 安装器的两张脸。**无参数（= 双击）走窗口，带参数走控制台** —— 而 2026-10-12 用户报的
+    # 「双击 setup.exe 毫无反应」，实测下来是包解开了、脚本真跑了、东西也真装上了，只是
+    # 那条路上**没有一个看得见的窗口**。这一条钉**静态形状**（跨平台跑得到）：下面那条
+    # 真开窗口的判据只在 Windows 上做，而门禁只有 ubuntu runner。
+    cmd = win["install.cmd"][0].decode("ascii")
+    check("install.cmd 两张脸: 无参数 -> 窗口(welcome.ps1), 有参数 -> 控制台",
+          "welcome.ps1" in cmd and ":console" in cmd and "goto console" in cmd
+          and cmd.index("welcome.ps1") < cmd.index(":console"),
+          "两条分支都要在, 且窗口那条排在前")
+    wps = win["welcome.ps1"][0].decode("ascii")
+    # 断言抓的是**重写的特征**（校验原语 / 复制载荷），不是某个词的出现 —— 第一版抓
+    # `SHA256SUMS` 这个词，结果被窗口自己的一句注释绊倒（2026-10-12 实测），那是假红。
+    check("welcome.ps1 只驱动 install.ps1, 不重写安装逻辑 (一份逻辑两张脸)",
+          "install.ps1" in wps and "Get-FileHash" not in wps and "Copy-Item" not in wps,
+          "窗口不该自己校验/复制载荷 —— 那是 install.ps1 的活")
     # Windows 包里工具都带 .exe, 而 `test -x name` 只在 MSYS 下自动补后缀 —— WSL 不会。
     # 所以启动器必须经 tool() 解析路径; 裸 `$here/loment-` 一旦回归就是「假报缺组件」。
     launcher = lin["bin/loment"][0].decode("ascii")
@@ -570,6 +591,37 @@ def test_windows_installer(zipf: Path) -> None:
           inst_out[-260:])
     check("更靠前的 lompi 被点名 (给出路径, 而不是只说一句注意 PATH)",
           "WARNING" in inst_out and str(decoy).lower() in inst_out.lower(), inst_out[-300:])
+
+    # ★ 窗口那条路真跑一遍。静态那两条只证明"两个分支在"；这两条证明它**开得起来、
+    #   装得完、拿得回退出码**。-AutoRun 自动按下 Install，-ShotDone 让窗口把完成页画成
+    #   PNG（窗口自己画自己 —— 判据不去截桌面，不拍不属于它的东西），装到沙箱前缀，
+    #   不动用户的 PATH 与文件类型。
+    wsplash = work / "shot-splash.png"
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", str(root / "welcome.ps1"),
+                        "-InstallPs1", str(root / "install.ps1"),
+                        "-LogoPath", str(root / "loment-logo.png"),
+                        "-Screenshot", str(wsplash)],
+                       capture_output=True, text=True, shell=False, encoding="utf-8",
+                       errors="replace", timeout=180, env=env)
+    check("welcome.ps1 能画出 splash（自画自截，不碰桌面）",
+          r.returncode == 0 and wsplash.exists() and wsplash.stat().st_size > 3000,
+          ((r.stdout or "") + (r.stderr or ""))[-200:])
+
+    gp = work / "gui-prefix"
+    gdone = work / "shot-done.png"
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", str(root / "welcome.ps1"),
+                        "-InstallPs1", str(root / "install.ps1"),
+                        "-LogoPath", str(root / "loment-logo.png"),
+                        "-Prefix", str(gp), "-NoPath", "-NoFileType", "-NoSkill",
+                        "-AutoRun", "-AutoClose", "-ShotDone", str(gdone)],
+                       capture_output=True, text=True, shell=False, encoding="utf-8",
+                       errors="replace", timeout=900, env=env)
+    check("窗口那条路真装一遍（AutoRun 到沙箱前缀），退出 0 且真装出东西",
+          r.returncode == 0 and (gp / "bin/loment.cmd").exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-260:])
+    check("完成页画得出来（绿勾那页）", gdone.exists() and gdone.stat().st_size > 3000, "")
     cmd = pfx / "bin/loment.cmd"
     body = cmd.read_text(encoding="utf-8", errors="replace") if cmd.exists() else ""
     check("装出 loment.cmd, 它调本机 exe, 且**不再出现 wsl**",
