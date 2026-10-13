@@ -1,4 +1,4 @@
-# 237 · Internet：第三个随包库，判据是**对着真东西**跑
+# 240 · Internet：第三个随包库，判据是**对着真东西**跑
 
 > 状态: **已落地**（2026-10-13）· 自检: `tools/loment_internet_test.py` 8/8 ·
 > 模块自检 7 份全过（`python tools/loment.py test <模块>`）· 门禁: `ci.py --static-only`
