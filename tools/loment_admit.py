@@ -30,6 +30,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_zwframe as _zwf  # noqa: E402  （只为借一个数：帧长）
+
 ADMIT_VERSION = 1
 
 #: 四档，**从窄到宽** —— 与 Potato v14 的 `net_ladder` 同一套档名（`docs/237`）。
@@ -39,7 +42,10 @@ RUNGS = ("w0", "w1", "w2", "w3")
 #: **这些数是策略，不是推导出来的**：换一组不改变形状，只改变"挣到一档等于拿到多少"。
 #: 宽度**不是**"能不能"这种布尔 —— 三刻度在下面那条记录里各占一格。
 WIDTH = {
-    "w0": (0, 1, 1),                       # 只够**一次验证交换**：一个字节、一个序号
+    # `w0` 的字节数**就是一个帧长**（`docs/240`）：§11 那句"只够验证对端字节"在数上
+    # 就是"一帧" —— 而一帧里**装不下载荷**（`loment_zwframe` 的规则 + 两条证伪判据：
+    # 多一个字节 ⇒ `bad-length`，往保留位塞 ⇒ `reserved-nonzero`）。
+    "w0": (0, _zwf.FRAME_LEN, 1),          # 只够**一次验证交换**：一帧、一个序号
     "w1": (1, 1 << 16, 1 << 12),           # 一条有界连接
     "w2": (64, 1 << 20, 1 << 16),          # 多条并发
     "w3": (4096, 1 << 30, 1 << 20),        # 接受任意对端
