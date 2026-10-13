@@ -60,6 +60,11 @@ fn urip_set(rec: ptr, i: u32, v: u32) {
 /// 分量编码: 0 scheme, 1 user, 2 host, 3 path, 4 query, 5 fragment。
 /// 在场返回 1 并把偏移 / 长度写进 out_off / out_len (各 4 字节); 缺席返回 0。
 pub fn uri_part(rec: ptr, which: u32, out_off: ptr, out_len: ptr) -> u32 {
+    // 分量只有 0..5。越界的 `which` 会算出记录外的槽位 —— `which = 6` 时 `lo = 13`、
+    // `lo + 1 = 14`, 而记录只有 14 个槽 (0..13), 于是读回相邻内存当长度。
+    if which > 5 {
+        return 0;
+    }
     // 槽位不是简单的 `2*which` —— 记录里 `6` 那一格被 port 占着, 所以 path 之后各分量
     // 往后**挪一格** (scheme/user/host 是 0/2/4, path/query/fragment 是 7/9/11)。
     let lo: u32 = 2 * which;
