@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_internet_test.py",
-   "sha256": "d3a29a6f866029455adb6186dfc8cc948e2f3e6692ac474a680bfe9d55e7bd0c"
+   "sha256": "4c2aad99df5c8a773b8d15dcfe4164c60836097ae1e75b6626d2b2fec1330fa3"
   },
   {
    "path": "tools/loment_os_test.py",
