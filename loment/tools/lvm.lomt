@@ -29,7 +29,7 @@
 // ⑤ 移位 / 比较 / 减法：**两边位宽必须一致**（`u64 << u32` 发出来的 IR，clang 直接拒：
 //    `'%t' defined with type 'i32' but expected 'i64'`）。**参考实现也有这个毛病** ——
 //    只是平时没人拿 clang 编过这种代码（`lomelf` 是宽松的，照收）。所以下面每个
-//    `u64` 的移位量都显式 `as u64`。见 issue #316（这条与 `bool != bool` 那条都在里面）。
+//    `u64` 的移位量都显式 `as u64`。见 issue **#289**（`bool != bool` 那条是 **#316**）。
 // ④ **没有模块级 `let`**（顶层只有 `module`/`use`/`choose`/`const`/`fn`）—— 所以
 //    「可变状态」一律落在 arena 头部那 256 字节的格区里（照 `lomelf.lomt` 的做法）。
 
