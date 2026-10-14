@@ -1161,17 +1161,33 @@ pub fn cfg_slug(url: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
 // lompi 的设计立场: 0.1.5 时那句是「PE 上没有 socket」, 联网面补完(`docs/234`)
 // 之后往后退到了这一格。
 
-/// socket / connect / sendto / recvfrom 的 Linux 号 (x86-64)。
+/// socket / connect / sendto / recvfrom / setsockopt 的 Linux 号 (x86-64)。
 pub const NET_SYS_SOCKET: u64 = 41;
 pub const NET_SYS_CONNECT: u64 = 42;
 pub const NET_SYS_SENDTO: u64 = 44;
 pub const NET_SYS_RECVFROM: u64 = 45;
+pub const NET_SYS_SETSOCKOPT: u64 = 54;
 pub const NET_AF_INET: u64 = 2;
 pub const NET_SOCK_STREAM: u64 = 1;
+pub const NET_SOL: u64 = 1;
+pub const NET_SO_SNDTIMEO: u64 = 21;
+pub const NET_SO_RCVTIMEO: u64 = 20;
+/// 写一个**对端已挂断**的 socket 时别收 SIGPIPE。不收的话第二次写直接杀进程、什么都不打
+/// (实测退出码 13, SKILL.md 6.2.18) —— 一个连上就 RST 的注册表就能让 lompi 无声死掉。
+pub const NET_MSG_NOSIGNAL: u64 = 16384;
+/// 收发超时 (毫秒)。**没有它**, 一个握手之后就不说话的对端能把 `fetch` 永久挂住
+/// (`recv` 一直阻塞, 没有 deadline)。15 秒对"取一个小文件"是宽裕的。
+pub const NET_TIMEOUT_MS: u64 = 15000;
+/// 一次 fetch 最多认这么多条索引。索引本身有 64 KiB 上限, 但每一条都要一次连接 + 一次落盘 ——
+/// 不封顶的话对端写满 64 KiB 就能让我们打几千个来回。`docs/236` 的索引格式没有条目数上限,
+/// 这里是**我们这一侧的**预算。
+pub const NET_MAX_ENTRIES: u32 = 4096;
 /// 端口是 16 位。
 pub const NET_PORT_MAX: u64 = 65535;
 /// 失败哨兵 (与 `SYS_ERR` 同值, 免得两个哨兵混着比)。
 pub const NET_ERR: u64 = 18446744073709551615;
+/// "这个头没出现" (只有 `Content-Length` 用)。
+pub const NET_NO_LEN: u32 = 4294967295;
 
 // ---------------------------------------------------------------- 基本件
 
@@ -1201,12 +1217,29 @@ pub fn net_connect4(fd: i64, addr: ptr, a: u32, b: u32, c: u32, d: u32, port: u6
 }
 
 /// 已连接的 socket 上 `sendto` 不带地址就是 `send`。
+/// **带 `MSG_NOSIGNAL`** —— 原来第四个实参写的是 0, 于是对端挂断后这次写会把进程直接杀掉
+/// (SIGPIPE, 退出码 13, 不留诊断)。`internet` 那一层处处守着这条 (`sock.lomt` 头,
+/// `tcp.lomt::tcp_send`), 而**这一份才是真的对着公网说话的那个**。
 pub fn net_send(fd: i64, p: ptr, n: u64) -> i64 {
-    return syscall7(NET_SYS_SENDTO, fd as u64, p as u64, n, 0, 0, 0);
+    return syscall7(NET_SYS_SENDTO, fd as u64, p as u64, n, NET_MSG_NOSIGNAL, 0, 0);
 }
 
 pub fn net_recv(fd: i64, p: ptr, cap: u64) -> i64 {
     return syscall7(NET_SYS_RECVFROM, fd as u64, p as u64, cap, 0, 0, 0);
+}
+
+/// 给 fd 设一个超时选项。`tv` 是调用方给的 16 字节 (两个 u64: 秒 / 微秒)。
+/// 摆好之后到点的 `recv` 返回 -11 (EAGAIN), 不会永久阻塞。
+pub fn net_set_timeout(fd: i64, tv: ptr, ms: u64, opt: u64) -> i64 {
+    let sec: u64 = ms / 1000;
+    let usec: u64 = (ms % 1000) * 1000;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(tv, i, ((sec >> (8 * i)) & 255) as u8);
+        store8(tv, 8 + i, ((usec >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return syscall6(NET_SYS_SETSOCKOPT, fd as u64, NET_SOL, opt, tv as u64, 16);
 }
 
 // ---------------------------------------------------------------- 明文 HTTP GET
@@ -1226,25 +1259,86 @@ pub fn net_crlf(dst: ptr, off: u32) -> u32 {
     return off + 2;
 }
 
-/// 找 HTTP 头结束(字节 13,10,13,10), 返回头结束的下标; 找不到返回 DIR_ERR。
-/// 顺手认一下只发 LF 的服务器 —— 少见, 但撞上了不该被当成"这不是 HTTP"。
+/// 找 HTTP 头结束: `CRLF CRLF` 或 `LF LF` 里**第一个字节**的下标; 找不到返回 DIR_ERR。
+/// 两种形式**一起扫、谁先出现谁赢**。原来是先在整个缓冲里找 `CRLF CRLF`、找不到才退到 `LF LF`,
+/// 于是一个 LF-only 的响应只要 body 里带 `CRLF CRLF` 就把 body 当成头结束 —— 与 `internet`
+/// 那边的 `http.lomt::http_hdr_end` 是同一个缺陷 (issue #292), 这一份是**对着公网**的那份。
 pub fn net_hdr_end(p: ptr, n: u32) -> u32 {
     let i: u32 = 0;
-    while i + 4 <= n {
-        if load8(p, i) == 13 && load8(p, i + 1) == 10
+    while i + 2 <= n {
+        if i + 4 <= n && load8(p, i) == 13 && load8(p, i + 1) == 10
             && load8(p, i + 2) == 13 && load8(p, i + 3) == 10 {
+            return i;
+        }
+        if load8(p, i) == 10 && load8(p, i + 1) == 10 {
             return i;
         }
         i = i + 1;
     }
-    let j: u32 = 0;
-    while j + 2 <= n {
-        if load8(p, j) == 10 && load8(p, j + 1) == 10 {
-            return j;
-        }
-        j = j + 1;
-    }
     return DIR_ERR;
+}
+
+/// 头块里的 `Content-Length`。没有 / 非法返回 `NET_NO_LEN`。
+/// 头名大小写不敏感 (`cfg_find_ci`), 冒号后跳过空白, 余下的十进制取到行尾; 乘之前先判回绕。
+fn net_content_length(p: ptr, n: u32) -> u32 {
+    let at: u32 = cfg_find_ci(p, n, "content-length:");
+    if at == TXT_NFIND {
+        return NET_NO_LEN;
+    }
+    let i: u32 = at + 15;
+    while i < n && (load8(p, i) == 32 || load8(p, i) == 9) {
+        i = i + 1;
+    }
+    let v: u32 = 0;
+    let seen: u32 = 0;
+    while i < n && load8(p, i) != 13 && load8(p, i) != 10 {
+        let c: u32 = load8(p, i);
+        if c < 48 || c > 57 {
+            return NET_NO_LEN;
+        }
+        if v > (4294967295 - (c - 48)) / 10 {
+            return NET_NO_LEN;
+        }
+        v = v * 10 + (c - 48);
+        seen = seen + 1;
+        i = i + 1;
+    }
+    if seen == 0 {
+        return NET_NO_LEN;
+    }
+    return v;
+}
+
+/// 状态行里那个码**正好**是 200 吗。`n` 是头块长度。只认 `HTTP/<版本> 200` 这一种形状,
+/// 且三位数字后面必须是空格 / CR / LF 或到头 (免得 `2000` 也算)。'2'/'0' 的字节值是 50/48。
+pub fn net_status_is_200(p: ptr, n: u32) -> u32 {
+    if n < 12 {
+        return 0;
+    }
+    if !txt_eq_lit(p, 0, 5, "HTTP/") {
+        return 0;
+    }
+    let i: u32 = 5;
+    while i < n && load8(p, i) != 32 {
+        i = i + 1;
+    }
+    if i >= n {
+        return 0;
+    }
+    let sp: u32 = i + 1;
+    if sp + 2 >= n {
+        return 0;
+    }
+    if load8(p, sp) != 50 || load8(p, sp + 1) != 48 || load8(p, sp + 2) != 48 {
+        return 0;
+    }
+    if sp + 3 < n {
+        let nx: u32 = load8(p, sp + 3);
+        if nx != 32 && nx != 13 && nx != 10 {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
@@ -1264,6 +1358,10 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
         sys_close(fd);
         return NET_ERR;
     }
+    // 连接一成先把超时摆上 —— `scr` 那个 16 字节的 `sockaddr_in` 暂存在 connect 之后就用不着了,
+    // 拿它当 timeval 用 (这一层零分配)。没这一步, 一个握手后不发东西的对端能把我们挂死。
+    net_set_timeout(fd, scr, NET_TIMEOUT_MS, NET_SO_RCVTIMEO);
+    net_set_timeout(fd, scr, NET_TIMEOUT_MS, NET_SO_SNDTIMEO);
     let o: u32 = txt_put(head, 0, "GET ");
     let o1: u32 = txt_put_bytes(head, o, path, 0, plen);
     let o2: u32 = net_crlf(head, txt_put(head, o1, " HTTP/1.0"));
@@ -1290,28 +1388,48 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
     }
     let got: u64 = 0;
     let run: u32 = 1;
+    let cut: u32 = 0;                    // 1 = 半路断了 (出错 / 超时 / 缓冲被填满)
     while run == 1 && got < cap {
         let dst: ptr = ((out as u64) + got) as ptr;
         let r: i64 = net_recv(fd, dst, cap - got);
-        if r <= 0 {
+        if r < 0 {
+            cut = 1;                     // 出错或超时 —— 这**不是**"对端说完了"
             run = 0;
+        } else if r == 0 {
+            run = 0;                     // 对端正常收尾
         } else {
             got = got + (r as u64);
         }
     }
     sys_close(fd);
-    if got == 0 {
+    // 原来这三个"为什么停"合成一个分支, 于是**被截断的响应会当成完整的交出去** ——
+    // 调用方拿去校验 sha256, 报出来的却是"哈希不匹配", 把矛头指向注册表。
+    if cut == 1 || got == 0 || got == cap {
         return NET_ERR;
     }
     let hdr: u32 = net_hdr_end(out, got as u32);
     if hdr == DIR_ERR {
         return NET_ERR;                  // 不是一条 HTTP 响应
     }
-    if txt_find_lit(out, 0, hdr, " 200") == TXT_NFIND {
+    // 按**状态行**判 200。原先是拿 `" 200"` 在整个头块里搜子串 —— 一个 `X-Fetch: 200`
+    // 就能让 404 / 500 被当成 200 收下, body 照样落盘。
+    if net_status_is_200(out, hdr) == 0 {
         return NET_ERR;                  // 非 200(含 3xx: 不跟重定向)
     }
-    let bstart: u32 = hdr + 4;
+    // `hdr` 是空行的第一个字节: CRLF 时是 CR (跳 4), LF 时是 LF (跳 2)。
+    let skip: u32 = 2;
+    if load8(out, hdr) == 13 {
+        skip = 4;
+    }
+    let bstart: u32 = hdr + skip;
     let blen: u32 = (got as u32) - bstart;
+    // 对端**声明了长度就得对得上**。少发一半再关连接时, `recv` 给的是一次**干净的 EOF**
+    // (不是错误) —— 光看上面那个 `cut` 判不出来, 而那正是最常见的截断形状 (issue #302)。
+    // 没带这个头的照旧 (HTTP/1.0 允许不带, 靠 Connection: close 划分边界)。
+    let cl: u32 = net_content_length(out, hdr);
+    if cl != NET_NO_LEN && cl != blen {
+        return NET_ERR;
+    }
     if bstart > 0 {
         sys_copy(out, 0, out, bstart, blen);
     }
@@ -1333,6 +1451,11 @@ pub fn net_parse_http(url: ptr, n: u32,
                       path: ptr, pathcap: u32) -> u32 {
     // 必须 http:// 开头 (https:// 直接不认 —— 没有 TLS)
     if n < 8 || !txt_eq_lit(url, 0, 7, "http://") {
+        return 0;
+    }
+    // 空路径那一支要写两个字节 (`/` 和结尾的 0), 而它对 `pathcap` 一个字都没查 ——
+    // 给 0 或 1 就是一次越界写 (issue #300)。
+    if pathcap < 2 {
         return 0;
     }
     let i: u32 = 7;
@@ -1474,12 +1597,33 @@ fn test_net_parse_rejects_hostname() -> bool {
     return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
 }
 
+/// issue #300: 空路径那一支要写 `/` 和结尾的 0 两个字节, 而 cap 给 0 或 1 时必须**拒**。
+/// 原来那一支对 `pathcap` 一个字都不查 —— 两个字节直接写出去。
+fn test_net_parse_short_pathcap() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(16);
+    let o: u32 = sys_put_lit(s, "http://127.0.0.1");
+    if net_parse_http(s, o, pa, pb, pc, pd, po, path, 0) != 0 {
+        return false;
+    }
+    if net_parse_http(s, o, pa, pb, pc, pd, po, path, 1) != 0 {
+        return false;
+    }
+    return net_parse_http(s, o, pa, pb, pc, pd, po, path, 16) == 1;
+}
+
 /// 跑本模块全部自检, 返回失败条数 (0 = 全绿)。
 pub fn selftest_net() -> u32 {
     let f: u32 = 0;
     if !test_net_parse_rejects_https() { f = f + 1; sys_write_str(1, "  FAIL net_parse_https\n"); }
     if !test_net_parse_accepts_ip_and_port() { f = f + 1; sys_write_str(1, "  FAIL net_parse_ip\n"); }
     if !test_net_parse_rejects_hostname() { f = f + 1; sys_write_str(1, "  FAIL net_parse_hostname\n"); }
+    if !test_net_parse_short_pathcap() { f = f + 1; sys_write_str(1, "  FAIL net_parse_short_pathcap\n"); }
     return f;
 }
 // ---------------------------------------------------------------- 注册表: 自己拉 (0.2.0)
@@ -1532,6 +1676,30 @@ fn net_field(p: ptr, off: u32, n: u32, out: ptr, cap: u32) -> u64 {
 
 fn net_foff(v: u64) -> u32 { return (v / 4294967296) as u32; }
 fn net_flen(v: u64) -> u32 { return (v % 4294967296) as u32; }
+
+/// 索引里的一个字段能不能当一个**路径段**用 (issue #305): 不能带分隔符 (`/` 或 0x5C) ——
+/// 带了就能从 `<root>/cache/<slug>/` 里爬出去; 也不能是 `.` / `..` 或含 NUL。
+/// 空串由调用方那三条 `== 0` 检查负责, 到这里 n 已经非 0。
+fn net_seg_ok(p: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    if n == 1 && load8(p, 0) == 46 {
+        return 0;
+    }
+    if n == 2 && load8(p, 0) == 46 && load8(p, 1) == 46 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 47 || c == 92 || c == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
 
 /// 取 `p` 最后一段(落盘时的文件名)。返回长度; 0 = 路径不合法。
 fn net_basename(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
@@ -1586,9 +1754,17 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let hex: ptr = sys_alloc(128);
     let off: u32 = 0;
     let files: u32 = 0;
+    let seen: u32 = 0;
     while off < (ilen as u32) {
         let ll: u32 = txt_line_len(idx, off, ilen as u32);
         if ll > 0 && load8(idx, off) != 35 {
+            // 索引本身有 64 KiB 上限, 但**条目数**没有 —— 对端把每行写短一点, 就能让我们
+            // 打几千个来回 (每条一次连接 + 一次落盘)。这里是我们这一侧的预算 (issue #303)。
+            seen = seen + 1;
+            if seen > NET_MAX_ENTRIES {
+                sys_write_str(2, "lompi: the index has more entries than we will fetch\n");
+                return 0;
+            }
             let f0: u64 = net_field(idx, off, off + ll, name, 192);
             let f1: u64 = net_field(idx, net_foff(f0), off + ll, ver, 128);
             let f2: u64 = net_field(idx, net_foff(f1), off + ll, rel, 576);
@@ -1599,6 +1775,13 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
             let sl: u32 = net_flen(f3);
             if nl == 0 || vl == 0 || rl == 0 || sl != 64 {
                 sys_write_str(2, "lompi: bad index line (want: name version path sha256)\n");
+                return 0;
+            }
+            // `name` / `ver` 会被当成**路径段**拼进落盘路径, 而原来一个字都没查 —— 只有
+            // `rel` 的最后一段过了 `net_basename`。于是一个带 `/` 或 `..` 的 name 就能把
+            // 文件写到 `<root>/cache/<slug>/` 之外, 内容还是对端给的那份 (issue #305)。
+            if net_seg_ok(name, nl) == 0 || net_seg_ok(ver, vl) == 0 {
+                sys_write_str(2, "lompi: refusing an index entry whose name/version is not a plain path segment\n");
                 return 0;
             }
             sys_copy(fpath, 0, base, 0, blen);
