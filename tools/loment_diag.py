@@ -655,16 +655,21 @@ CARDS: dict[int, Card] = {
         no="`str` 形参/返回（那是“指针+长度”，不是 C 字符串）；结构体/枚举/数组**按值**；`extern fn` 带类型参数；PE 目标的 FFI；`.a` 归档与 `.so`/`.dll` 动态库",
     ),
     22: Card(
-        what="开关（`choose`）或核心模式（`std`/`no_std`）的写法不对。",
-        why="这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性 —— 只能出现一次、"
-            "只能写在根单元（`loment.conf` 之外没有第二个地方能改它）；② **开关**是“打开才编进去的代码”，"
+        what="`choose` / `addin` 的写法不对 —— 可能是**核心模式**的某一维，也可能是**开关**。",
+        why="这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性，而且它有**五维** —— "
+            "`mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做）、"
+            "`runtime`（`runtime` / `no_runtime`：产物里有没有运行期）、`port`（`sealed` / `hosted`：通不通着世界）、"
+            "`vm`（`vm` / `no_vm`：要哪种执行模型）。**每一维各自只能声明一次**，而且只能在根单元"
+            "（`loment.conf` 之外没有第二个地方能改它）；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）也在这里报。"
+            "② **开关**是“打开才编进去的代码”，"
             "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
             "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"
             "③ **`runtime` 那一维是一句保证**（`docs/227`）：`no_runtime`（默认）说的是"
             "“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
             "`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。",
         fixes=(
-            "核心模式只写一次，而且只在入口那一份：`choose std` 或 `choose no_std`。",
+            "核心模式**每一维只写一次**，而且只在入口那一份：`choose std` / `choose gc_auto` / "
+            "`choose runtime` / `choose hosted` / `choose no_vm`（五维各自独立，不写就是那一维的默认档）。",
             "报的是 `no_runtime`：要运行期就在**根单元**写一行 `choose runtime`（产品里就带上那段）；"
             "不要就把那个构造换掉。",
             "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。",
@@ -672,8 +677,8 @@ CARDS: dict[int, Card] = {
             "报的是“依赖要求 X 而根不满足”：在根单元写一行同样的 `choose X` —— 依赖的声明是**需求**。",
             "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。",
         ),
-        yes="单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）",
-        no="核心模式写两次或写在根单元之外不一致；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`",
+        yes="五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）",
+        no="同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`",
     ),
     23: Card(
         what="你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。",
@@ -1185,10 +1190,17 @@ CARDS_EN: dict[int, Card] = {
            "PE target; `.a` archives and `.so` / `.dll` dynamic libraries",
     ),
     22: Card(
-        what="A switch (`choose`) or the core mode (`std`/`no_std`) is written wrongly.",
+        what="`choose` / `addin` is written wrongly - either a dimension of the **core mode**, or "
+             "a **switch**.",
         why="Two different things are managed here: (1) **the core mode** is a property of **the "
-            "whole program** - it may appear once and only in the root unit (nothing outside "
-            "`loment.conf` can change it); (2) **a switch** is \"code that is compiled in only "
+            "whole program**, and it has **five dimensions** - `mode` (`std` / `no_std`: which "
+            "layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha`: who reclaims), "
+            "`runtime` (`runtime` / `no_runtime`: whether the artifact carries one), `port` "
+            "(`sealed` / `hosted`: whether it reaches outside itself), and `vm` (`vm` / `no_vm`: "
+            "which execution model). **Each dimension may be declared once**, and only in the "
+            "root unit (nothing outside `loment.conf` can change it); two dimensions contradicting "
+            "each other (`gc_auto` with `no_runtime`) is reported here too. "
+            "(2) **a switch** is \"code that is compiled in only "
             "when it is on\". There can be many switches, but **one name may be written once**, "
             "and a value may only be set after `set choose` declared it. A library may not "
             "`choose`: to express a need, a library declares a **capability requirement** and the "
@@ -1197,7 +1209,9 @@ CARDS_EN: dict[int, Card] = {
             "construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, "
             "`guard` ... - is refused at compile time **in that tier**.",
         fixes=(
-            "Write the core mode once, in the entry unit only: `choose std` or `choose no_std`.",
+            "Write **each dimension** of the core mode once, in the entry unit only: `choose std` / "
+            "`choose gc_auto` / `choose runtime` / `choose hosted` / `choose no_vm` (the five are "
+            "independent; omitting one leaves it at that dimension's default).",
             "If the message names `no_runtime`: write `choose runtime` in the **root unit** (the "
             "artifact then carries that runtime), or replace the construct it named.",
             "Declare a switch before setting it: `set choose verbose { ... }` then `choose "
@@ -1209,14 +1223,17 @@ CARDS_EN: dict[int, Card] = {
             "Do not nest a declaration inside another switch's body - the pre-scan cannot see it, "
             "which turns \"is it on\" into a chicken-and-egg question.",
         ),
-        yes="up to 500 switches per file; `addin` to carry switch settings across files (root unit "
-            "only); empty switch bodies (purely to drive compiler behaviour); capability domains "
-            "declared by a library; a library declaring a core mode (read as a requirement the "
-            "root must satisfy)",
-        no="the core mode written twice, or a dependency and the root disagreeing; setting a value "
-           "before declaring it; two settings for one name; nested declarations; a library that "
-           "uses a runtime-dragging construct without declaring it; division / `alloc` / "
-           "`str_concat` in the **default tier** without `choose runtime`",
+        yes="the five core-mode dimensions (`mode` / `gc` / `runtime` / `port` / `vm`), values "
+            "above; up to 500 switches per file; `addin` to carry switch settings across files "
+            "(root unit only); empty switch bodies (purely to drive compiler behaviour); "
+            "capability domains declared by a library; a library declaring a core mode (read as a "
+            "requirement the root must satisfy)",
+        no="one dimension written twice, or written outside the root unit; two dimensions whose "
+           "values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an "
+           "outward port, in a release build (the channel gate); setting a value before declaring "
+           "it; two settings for one name; nested declarations; a library that uses a "
+           "runtime-dragging construct without declaring it; division / `alloc` / `str_concat` in "
+           "the **default tier** without `choose runtime`",
     ),
     23: Card(
         what="What you wrote is syntactically and semantically right - **this version of the "

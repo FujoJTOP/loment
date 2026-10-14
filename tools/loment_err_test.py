@@ -1253,6 +1253,62 @@ def test_the_docs_show_the_version_the_binary_prints():
     print(f"      README 与 QUICKSTART 都跟着真源 ({want!r})")
 
 
+@test
+def test_every_message_the_compiler_can_print_has_a_code():
+    """**编译器能说的每一句，报错器都得认得出是哪一类** —— 这是「减少静默」的机械落点。
+
+    分类是一张正则表（`loment_diag.RULES`）；落在表外的消息渲染成 **E999「未分类，请报告」**。
+    那是一条**响亮的**退路（不是静默），但它把"我们没覆盖到"推给用户，而且只在真有人撞上时
+    才暴露 —— 加了新诊断而忘了补分类，中间那段时间**没有任何东西会红**。
+
+    所以这条判据把**编译器的诊断模板**枚举出来（AST 扫 `tools/lomentc.py` 里
+    `errs.append(...)` 与 `LomError(...)` 的调用点），逐条过 `classify()`，断言没有一条落到
+    E999。加了新消息却没补分类 —— 这里当场红，而不是等用户来报。
+
+    **扫模板而不是跑语料**：模板是"编译器可能说什么"的**上界**，运行时的消息是它的实例化。
+    上界覆盖了实例化一定覆盖，反过来不成立 —— 跑一遍语料只碰得到其中一部分，而**碰不到的那些
+    恰恰是最容易漏的**（罕见路径）。这一轮实测：102 种模板，当时 0 条未分类。
+
+    `{…}` 占位代成**数字** `1`：消息里的数值位置（`需要 2 个实参`）靠 `\\d+` 匹配，
+    代成字母会**假红** —— 第一版就是这么误报的。
+    """
+    import ast
+    import loment_diag  # noqa: E402
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    def template(node):
+        if isinstance(node, ast.JoinedStr):
+            return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def is_error_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    seen: set[str] = set()
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_error_sink(node):
+            t = template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)      # 去掉 `12: ` 那个行号前缀
+            if t in seen:
+                continue
+            seen.add(t)
+            if loment_diag.classify(t)[0] == "E999":
+                bad.append(t)
+    assert seen, "一条诊断都没扫到 —— 提取方式跟编译器脱节了（这条判据在空转）"
+    assert not bad, (
+        f"这些编译器消息没有分类（会渲染成 E999「请报告」）: {bad[:6]}"
+        f" —— 去 `loment_diag.RULES` 补一条，别让用户替我们兜")
+    print(f"      编译器 {len(seen)} 种诊断模板**全部**有分类（没有一条落到 E999）")
+
+
 def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
                   file_first: bool = True):
     """跑**真启动器**。`file_first=False` 把开关放在文件名前面 —— 两种位置都得能跑。
