@@ -1728,6 +1728,24 @@ def _lom_str(s: str) -> str:
     return '"' + out + '"'
 
 
+def _lomenterr_version() -> str:
+    """报错器**自己的**版本号 —— 与语言版本是两条线（`docs/182` §17）。
+
+    **真源只有一个**：`loment_release.LOMENTERR`。这里只是把它取过来，好让
+    `--dump-surface` 把它导进 `surface_data`（报错器拿它打 `lomenterr version`）。
+    在别处再写一遍字面量就是"同一份清单抄第二遍" —— 本仓那条老账（`docs/179` §7.3），
+    而这一处的第二份会特别难抓：两个号都是 `0.1.x`，对不上时看不出谁对。
+
+    **取不到就炸，不给默认值**：给了默认值，生成物会带着一个**编出来**的版本号出门，
+    而它看着完全正常（`0.1.0` 这种真像回事的号），没人会发现 —— 宁可它红。
+    """
+    import loment_release
+    v = loment_release.LOMENTERR
+    if not v:
+        raise SystemExit("loment_diag: loment_release.LOMENTERR 是空的")
+    return v
+
+
 def surface_lomt() -> str:
     """把码表导出成自举侧/报错器能 `use` 的**纯数据**单元（`docs/176` B，`docs/182` §5.2）。
 
@@ -1816,6 +1834,16 @@ def surface_lomt() -> str:
         "",
         f"pub fn n_codes() -> u32 {{ return {len(codes)}; }}",
         "",
+        # 报错器**自己的**版本号 —— 与语言版本是两条线（`docs/182` §17）。
+        # **导进来而不是在这里再写一遍**：真源是 `loment_release.LOMENTERR`，而那正是
+        # 语言版本住的地方；版本这件事只有一处真源，报错器那个号也不例外。
+        # 函数内 import 是本文件已有的写法（见上面 `import potato_from`）——
+        # 这一层只在真的生成时才需要，不该让它跟着模块加载一起被拉进来。
+        *(
+            [f"/// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。",
+             f"pub fn lomenterr_version() -> str {{ return {_lom_str(_lomenterr_version())}; }}",
+             ""]
+        ),
     ]
     for fn, get in kinds:
         src.append(f"pub fn {fn}(c: u32, lang: u32) -> str {{")

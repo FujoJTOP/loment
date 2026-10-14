@@ -1197,6 +1197,62 @@ _LAUNCHER_ENV["PATH"] = (f"{_shp(Path('/usr/bin'))}:{_shp(Path('/bin'))}:"
                          f"{_LAUNCHER_ENV.get('PATH', '')}")
 
 
+@test
+def test_version_prints_the_reporter_own_number():
+    """`lomenterr version` 打的是**报错器自己的**版本号，与语言版本是**两条线**（`docs/182` §17）。
+
+    报错器是一件独立交付的程序 —— 它有自己的命令行面、自己的判据、自己的孪生，改动也与
+    语言面无关（2026-09-18 到 10-13 之间它改了七八轮，语言版本只动过一次）。捆在一个号上
+    就只能记成"语言又升了一版"，那既不真，也让人没法回答"我用的是哪个报错器"。
+
+    四个断言，各挡一种退化：
+    * **三个写法**都认（`version` / `--version` / `-V`）—— 少一个就有人敲不出想要的东西；
+    * 退 **0**（不是 2）—— 版本不是用法错误；
+    * 那一行在 **stdout**，stderr 是空的 —— 脚本要 `v=$(lomenterr version)` 拿它，
+      而 fd 2 抓不到（别处一律 fd 2，这一行是**有意的例外**，见 §17.4）；
+    * 与 `loment_release.LOMENTERR` **逐字相同** —— 这一条同时是"没有第二份字面量"的判据：
+      真源改了而 `--dump-surface` 忘了重跑，这里与 `test_surface_data_is_up_to_date`
+      会一起红，而不是让一个编出来的号静静发出去。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    assert re.fullmatch(r"\d+\.\d+(\.\d+)*", loment_release.LOMENTERR), (
+        f"真源里的版本号不像个版本号（被清空/写成占位符了？）: {loment_release.LOMENTERR!r}")
+    for spelling in ("version", "--version", "-V"):
+        r = subprocess.run([str(_bin()), spelling], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=60)
+        assert r.returncode == 0, (spelling, r.returncode, r.stderr[:120])
+        assert r.stdout.strip() == want, (
+            f"{spelling}: stdout={r.stdout!r}，期望 {want!r}")
+        assert r.stderr == "", (
+            f"{spelling}: 版本走 stdout，stderr 该是空的: {r.stderr!r}")
+    print(f"      lomenterr version: 三个写法都打 {want!r}（stdout，与真源逐字节相同）")
+
+
+@test
+def test_the_docs_show_the_version_the_binary_prints():
+    """README 与 QUICKSTART 里那两处 `lomenterr 0.1.2` 必须跟着真源走。
+
+    它们是**叙述**（不是第二份真源），但叙述里印着一个**具体的号**，就会过期 ——
+    而"文档说 0.1.2、二进制打 0.1.3"是最难被发现的那种不一致：两边单看都正常，
+    要同时看着两边才知道。本仓对这类"抄第二遍"的处置一向是二选一：要么**生成**它，
+    要么**判据盯着**它（`docs/182` §17.2）。这里选后者 —— 那两处是散文里嵌的一行示例，
+    生成进去反而读不通。
+
+    （`docs/182` §17 不进这份清单：它讲的是**机制**，引的是 `LOMENTERR` 那个常量名，
+    而不是"这个号现在是几"。）
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    for name in ("README.md", "QUICKSTART.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert want in text, (
+            f"{name} 里没有 {want!r} —— 版本号改了而文档没跟上（docs/182 §17.2）")
+    print(f"      README 与 QUICKSTART 都跟着真源 ({want!r})")
+
+
 def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
                   file_first: bool = True):
     """跑**真启动器**。`file_first=False` 把开关放在文件名前面 —— 两种位置都得能跑。

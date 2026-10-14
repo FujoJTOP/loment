@@ -285,6 +285,17 @@ It is read from the project root (the directory you run `loment` in), falling ba
 beside the toolchain; anything it cannot parse counts as "no setting", so a broken file
 gives you English rather than an error (`docs/182` §14).
 
+One more number, and it is deliberately **not** the language's:
+
+```
+$ lomenterr version
+lomenterr 0.1.2
+```
+
+The reporter changes on its own schedule — its wording, its exits, and what it offers to
+suggest — so it carries a version of its own rather than riding on `loment version`. If you
+report a rendering bug, that number is what the fix will be checked against (`docs/182` §17).
+
 Compile-time only, today. Rendering a **trap** — a division by zero, a capability guard
 going out of range — from a copy of the reporter linked into your program is designed but
 not implemented; `docs/182-lomenterr-and-choose-switches.md` §10.4 says what it waits on.
