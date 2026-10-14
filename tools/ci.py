@@ -126,6 +126,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
+                 # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
+                 "lvm_test",
+                 # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
+                 # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
+                 # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
+                 "lvm_twin_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
