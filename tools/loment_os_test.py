@@ -36,9 +36,16 @@ PROBE = ROOT / "loment" / "build" / "os_probe.lomt"
 IS_WIN = sys.platform == "win32"
 MODULES = ("sys", "time", "signal", "tty", "user", "thread")
 
-#: `os/thread` 那条真跑判据的规模：4 个线程各 5 万次临界区。
+#: `os/thread` 那条真跑判据的规模：4 个线程各 1 万次临界区。
+#:
+#: **为什么不是 5 万**：第一版写的 5 万，本机 5.6s、WSL 里 1 核也 5s —— 但在 GitHub 的
+#: 共享 runner 上（门禁 `-j 4`，同一片里还有 200s 级的兄弟）**跑到 300s 超时**，被门禁
+#: 自己的复跑判成 flake（`gate-log-5/flaked.txt`）。取号锁放锁是**全叫醒**（见 `docs/245`
+#: §8：丢唤醒是错、惊群只是慢），4 个线程时每次放锁最多额外叫醒 3 个 —— 负载一高，
+#: 系统调用数就压过了收益。1 万次仍然**远远**够用：锁一旦坏掉，4 个线程在
+#: `v = load; store(v+1)` 上丢的更新是成千上万，不是"碰巧没撞上"。
 N_THREADS = 4
-THREAD_ROUNDS = 50000
+THREAD_ROUNDS = 10000
 
 #: 逐字节与 CPython 比的那几个键 (两边跑在同一个环境里, 所以它们必须是同一个值)。
 BYTE_KEYS = ("sysname", "machine", "uid", "gid", "mkdir_ok", "access_ok",
