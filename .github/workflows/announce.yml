@@ -37,9 +37,14 @@
 #
 # ## 怎么试
 #
-# Actions → announce → Run workflow，填一个**已经存在**的 tag，`dry_run` 留 true ——
-# 只把要发的那段打出来，不碰 Mastodon。看着顺眼了再跑一遍 dry_run=false，
-# 或者干脆等下次发版自动发。
+# Actions → announce → Run workflow：
+#
+#   * 填 `tag`（已经存在的那个）→ 按 release 组一条，**补发**用；
+#   * 或填 `message` → 原样发这段话（不含标签，标签照加）。**不看 tag** ——
+#     "我们接下来做什么" 这种不属于任何 release 的话，走这一支；
+#   * `dry_run` 留 true → 只把要发的那段打出来，不碰 Mastodon。
+#
+# 看着顺眼了再跑一遍 dry_run=false，或者干脆等下次发版自动发。
 
 name: announce
 
@@ -50,8 +55,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "已经存在的 release tag"
-        required: true
+        description: "已经存在的 release tag（补发用；与 message 二选一）"
+        required: false
+      message:
+        description: "直接发这段话，原样发出（与 tag 二选一，填了就不看 tag）"
+        required: false
       dry_run:
         description: "只打印，不发出去"
         type: boolean
@@ -72,6 +80,7 @@ jobs:
           TOKEN: ${{ secrets.MASTODON_TOKEN }}
           TAGS: ${{ vars.MASTODON_TAGS }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          MESSAGE: ${{ inputs.message }}
           NAME: ${{ github.event.release.name }}
           BODY: ${{ github.event.release.body }}
           URL: ${{ github.event.release.html_url }}
@@ -93,6 +102,7 @@ jobs:
           name = (os.environ.get("NAME") or "").strip()
           body = os.environ.get("BODY") or ""
           url = (os.environ.get("URL") or "").strip()
+          message = (os.environ.get("MESSAGE") or "").strip()
           dry = (os.environ.get("DRY") or "").strip().lower() in ("1", "true", "yes")
 
           if not instance or not token:
@@ -100,7 +110,7 @@ jobs:
               sys.exit(0)
 
           # 手工补发那一支：事件里没有 release 对象，就从 GitHub 拉一份。
-          if tag and not url:
+          if tag and not url and not message:
               req = urllib.request.Request(
                   "https://api.github.com/repos/%s/releases/tags/%s"
                   % (os.environ.get("REPO", ""), urllib.parse.quote(tag)))
@@ -136,30 +146,46 @@ jobs:
               return re.sub(r"\s+", " ", text).strip()
 
 
-          head = "%s is out." % name
-          tail = "\n\n%s" % url
-          if tags:
-              tail += "\n\n" + tags
-          budget = LIMIT - counted(head) - counted(tail) - 4        # 4 = 两处空行
+          if message:
+              # 自由文本那一支：原样发，只把标签接在后面。**不截断** —— 话是人写的，
+              # 超了就该回去改短；机器替人砍句子，只会砍出病句。
+              status = message + ("\n\n" + tags if tags else "")
+              if counted(status) > LIMIT:
+                  print("这段话 %d 字符，超了 %d —— 改短一点。"
+                        % (counted(status), LIMIT), file=sys.stderr)
+                  sys.exit(1)
+              print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
+              print(status)
+              print("----------------------")
+              if dry:
+                  print("dry_run —— 没有发出去。")
+                  sys.exit(0)
+          if not message:
+              head = "%s is out." % name
+              tail = "\n\n%s" % url
+              if tags:
+                  tail += "\n\n" + tags
+              budget = LIMIT - counted(head) - counted(tail) - 4    # 4 = 两处空行
 
-          para = first_paragraph(body)
-          if counted(para) > budget:
-              cut = para[:budget]
-              para = cut.rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+              para = first_paragraph(body)
+              if counted(para) > budget:
+                  cut = para[:budget]
+                  para = cut.rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
 
-          status = head + ("\n\n" + para if para else "") + tail
+              status = head + ("\n\n" + para if para else "") + tail
 
-          if counted(status) > LIMIT:
-              print("组出来的还是超长（%d）—— 不改了，直接报错。" % counted(status), file=sys.stderr)
-              sys.exit(1)
+              if counted(status) > LIMIT:
+                  print("组出来的还是超长（%d）—— 不改了，直接报错。"
+                        % counted(status), file=sys.stderr)
+                  sys.exit(1)
 
-          print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
-          print(status)
-          print("----------------------")
+              print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
+              print(status)
+              print("----------------------")
 
-          if dry:
-              print("dry_run —— 没有发出去。")
-              sys.exit(0)
+              if dry:
+                  print("dry_run —— 没有发出去。")
+                  sys.exit(0)
 
 
           def api(path, data=None):
