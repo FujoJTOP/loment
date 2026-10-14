@@ -29,6 +29,9 @@ choose runtime
 
 pub fn n_codes() -> u32 { return 27; }
 
+/// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
+pub fn lomenterr_version() -> str { return "0.1.2"; }
+
 pub fn code_title(c: u32, lang: u32) -> str {
     let k: u32 = c * 2 + lang;
     if k == 2 { return "type mismatch"; }
