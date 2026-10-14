@@ -24,11 +24,10 @@
   <a href="https://discord.gg/rGw7NRNU">Discord</a>
 </p>
 
-Loment compiles to native x86-64 executables: Linux ELF, Windows PE, or a freestanding object
-for bare metal. `choose sealed`, the default, carries no runtime and no libc; `choose hosted`
-would reach real libraries, and a release build refuses it. The toolchain is written in Loment,
-and installing needs no Python, no clang and no WSL. Write in its Rust-flavored syntax or in C,
-C++, Java, C#, Go, Python.
+Loment compiles to native x86-64 executables for Linux, Windows or bare metal. `choose sealed`,
+the default, carries no runtime and no libc; `choose hosted` would reach real libraries, and a
+release build refuses it. The toolchain is written in Loment, and installing needs no Python,
+no clang and no WSL. Write in its Rust-flavored syntax or in C, C++, Java, C#, Go, Python.
 
 ## A first program
 
@@ -54,32 +53,30 @@ there is no `printf`.
 
 ## What it is for
 
-Loment asks: who can run what, in what scope, and can that be settled without reading the
-source?
+Loment asks: who can run what, in what scope, and can that be settled without reading the source?
 
 | | |
 |---|---|
-| **Capability domains** | `capability blk : disk[0..4]` declares the range a unit may reach. `guard blk(i);` checks an index against it at compile time for a literal, otherwise at run time, trapping out of range. |
+| **Capability domains** | `capability blk : disk[0..4]` declares the range a unit may reach; `guard blk(i);` checks an index against it — compile time for a literal, run time otherwise, trapping out of range. |
 | **Potato form objects** | Every unit exports a machine-readable summary of what it holds and reaches, judged by two independent validators. |
 | **A compat layer** | C, C++, Rust and Zig behind the C ABI; Go, Python, Java, JavaScript, Perl and Lua over a process bridge. |
-
-Diagnostics come from a separate program: `lomenterr` supplies what the compiler does not.
 
 ![loment check rendering an E002 undeclared-name diagnostic: the code, the source line with a caret, then message, what went wrong, why, four numbered fixes, and what is and is not supported](editors/loment-diagnostic.png)
 
 ## Status
 
-`0.1.4.5 QuickFix` ships as a package for Linux and Windows. The toolchain is self-hosted at run
-time; the development side is not yet.
+`0.1.4.5 QuickFix` ships as a package for Linux and Windows. Self-hosted at run time; the
+development side is not yet.
 
 ![The bootstrap: the committed seed is cooked into a stage1 by the genesis assembler; stage1 must reproduce the seed byte for byte; stage2 to stage3 reaches a fixed point; the two stages agree on a foreign entry file](editors/loment-bootstrap.png)
 
 ## How this is built
 
-AI coding agents work on Loment alongside people, and the repository says so: each change is
-checked by a program.
+**Not pure vibe coding.** Agents write most of it, but a person directs the work and a program
+decides what may land: two implementations of the language surface must agree byte for byte,
+and the conformance suite — not the document, not any implementation — decides what conforms.
 
 ## License
 
-**Loment-Open License**: MIT plus two conditions — derived source must credit Loment, and the
-name is reserved. See [LICENSE](LICENSE).
+**Loment-Open**: MIT plus two conditions — derived source must credit Loment, and the name is
+reserved. See [LICENSE](LICENSE).
