@@ -18,6 +18,8 @@
 <p align="center">
   <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix"><b>Download 0.1.4.5 QuickFix</b></a> ·
   <a href="https://fujojtop.github.io/loment-site/">Site</a> ·
+  <a href="https://loment.fandom.com/">Wiki</a> ·
+  <a href="https://mastodon.social/@Loment">Mastodon</a> ·
   <a href="https://github.com/FujoJTOP/loment/issues">Issues</a> ·
   <a href="https://discord.gg/rGw7NRNU">Discord</a>
 </p>
