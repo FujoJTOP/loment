@@ -1640,6 +1640,50 @@ def test_lomelf_selfhost_matches_reference():
 
 
 @test
+def test_selfhost_mirror_matches_reference_on_thread_spawn():
+    """自举镜像的 `thread_spawn` 定制序列与参考 `lomelf.py` **逐字节相同**。
+
+    **Why**：那条序列是**字面机器码**（不是一串 `mov_*` 助手拼出来的），两侧各写一遍 ——
+    参考侧是 `Emitter._SPAWN_HEAD` / `_SPAWN_TAIL`，镜像侧是 `do_call_spawn` 里那一串
+    `e1`。**它们漂一个字节就是另一份产物**：`jne 0x13` 那个位移是按后面 19 字节算的
+    （3+2+5+2+5+2），少一个字节就跳过 `.parent` 落到子线程那条路上；`call` 的相对地址
+    错开就是跑飞。而**别的判据一条都看不见** —— `loment_thread_test` 跑的是参考侧发的
+    产物，镜像那条路它碰不到（那边要用 clang 建镜像，代价太大，这里已经建过了）。
+
+    **探针源码从 `loment_thread_test` 借**（同一个常量，不抄第二份）：那份是这条构造的
+    主人，这里只做"同一份 IR 过两个链接器"的字节比对。
+    """
+    import loment_thread_test as th
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    src = ROOT / "loment" / "build" / "_thread_probe.lomt"
+    llrepo = ROOT / "loment" / "build" / "_thread_twin.ll"
+    elfrepo = ROOT / "loment" / "build" / "_thread_twin.elf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        src.write_text(th._WORKER, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, f"线程探针自己检查不过: {errs[:2]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+        llrepo.write_text(ll, encoding="utf-8", newline="\n")
+        want = lomelf.compile_ll(ll)[0]
+        rc, err = _mirror_run(mir, "loment/build/_thread_twin.ll",
+                              "loment/build/_thread_twin.elf")
+        assert rc == 0, f"镜像编线程探针退出 {rc}: {err[-200:]}"
+        got = elfrepo.read_bytes()
+    finally:
+        for p in (src, llrepo, elfrepo):
+            p.unlink(missing_ok=True)
+    assert got == want, (f"镜像的 thread_spawn 序列与参考不同 "
+                         f"({len(got)}B vs {len(want)}B)")
+    print(f"      thread_spawn: 镜像与参考逐字节相同 ({len(got)}B)")
+
+
+@test
 def test_both_linkers_agree_on_a_negative_immediate():
     """**负立即数**: 操作数的跨度要含 `-`。
 

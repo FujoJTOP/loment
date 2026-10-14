@@ -34,7 +34,18 @@ PKG = ROOT / "lompi" / "store" / "os" / "0.1.0"
 STORE = ROOT / "lompi" / "store"
 PROBE = ROOT / "loment" / "build" / "os_probe.lomt"
 IS_WIN = sys.platform == "win32"
-MODULES = ("sys", "time", "signal", "tty", "user")
+MODULES = ("sys", "time", "signal", "tty", "user", "thread")
+
+#: `os/thread` 那条真跑判据的规模：4 个线程各 1 万次临界区。
+#:
+#: **为什么不是 5 万**：第一版写的 5 万，本机 5.6s、WSL 里 1 核也 5s —— 但在 GitHub 的
+#: 共享 runner 上（门禁 `-j 4`，同一片里还有 200s 级的兄弟）**跑到 300s 超时**，被门禁
+#: 自己的复跑判成 flake（`gate-log-5/flaked.txt`）。取号锁放锁是**全叫醒**（见 `docs/245`
+#: §8：丢唤醒是错、惊群只是慢），4 个线程时每次放锁最多额外叫醒 3 个 —— 负载一高，
+#: 系统调用数就压过了收益。1 万次仍然**远远**够用：锁一旦坏掉，4 个线程在
+#: `v = load; store(v+1)` 上丢的更新是成千上万，不是"碰巧没撞上"。
+N_THREADS = 4
+THREAD_ROUNDS = 10000
 
 #: 逐字节与 CPython 比的那几个键 (两边跑在同一个环境里, 所以它们必须是同一个值)。
 BYTE_KEYS = ("sysname", "machine", "uid", "gid", "mkdir_ok", "access_ok",
@@ -275,13 +286,13 @@ def test_os_modules_are_checkable():
 
 @test
 def test_os_package_is_one_unit_without_name_collisions():
-    """门面 (5 个模块进同一个单元) 不许有重名 —— 顶层名字是**平的**。"""
+    """门面 (包内全部模块进同一个单元) 不许有重名 —— 顶层名字是**平的**。"""
     entry = PKG / "os.lomt"
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     errs = lomentc.check(mod, deps=deps, _dep_pass=True)
     assert not errs, f"门面检查不过: {errs[:3]}"
-    print("      门面 (5 个模块一个单元) 检查通过")
+    print(f"      门面 ({len(MODULES)} 个模块一个单元) 检查通过")
 
 
 def _top_names(path: Path) -> set[str]:
@@ -348,6 +359,145 @@ def test_os_matches_python():
     assert int(got["sigignore_ok"]) == 1, "rt_sigaction 忽略 SIGPIPE 失败"
     assert int(got["sigpipe_alive"]) == 1, "忽略 SIGPIPE 之后发给自己, 进程还是死了"
     print(f"      os: {len(BYTE_KEYS)} 项与 CPython 逐字节一致 + 5 项谓词 (pid/单调钟/时钟/信号)")
+
+
+#: `os/thread` 的真跑探针（`docs/245` §8 阶段 2）。
+#:
+#: **为什么计数器是"非原子的读改写"**：`thread_lw`/`thread_sw` 故意不用 `atomic_add`
+#: —— 临界区里就是一条 `v = load; store(v+1)`。于是**只有锁是对的，结果才对**：锁一旦
+#: 坏了（漏放、两个人同时进去、丢了唤醒），丢更新的概率在 4×50000 次上是必然的，
+#: 而不是"偶尔"。用原子加去测锁，测的是别的东西。
+#:
+#: `done` 那一路走的是**产物**的完成通知（`thread_spawn` 第四个实参），所以
+#: `thread_join_all` 能等到 N —— 工作线程里一句"喊一声"都没有。
+_THREAD_SRC = f"""
+module os_thread_probe
+choose runtime
+use thread
+
+const N: u32 = {N_THREADS};
+const ROUNDS: u32 = {THREAD_ROUNDS};
+const STACK: u32 = 262144;
+
+fn t_rd(p: ptr, o: u32) -> u32 {{
+    return load8(p, o) | (load8(p, o + 1) << 8) | (load8(p, o + 2) << 16)
+        | (load8(p, o + 3) << 24);
+}}
+
+fn t_wr(p: ptr, o: u32, v: u32) {{
+    store8(p, o, (v & 255) as u8);
+    store8(p, o + 1, ((v >> 8) & 255) as u8);
+    store8(p, o + 2, ((v >> 16) & 255) as u8);
+    store8(p, o + 3, ((v >> 24) & 255) as u8);
+}}
+
+/// 记录: [next(4) | serving(4) | 计数器(4) | 空(4)] —— 前 8 字节是取号锁, 后 4 个是
+/// **只用锁保护**的普通变量。
+const OFF_CNT: u32 = 8;
+
+fn worker(arg: u64) -> u32 {{
+    let m: ptr = arg as ptr;
+    let i: u32 = 0;
+    while i < ROUNDS {{
+        let _l: u32 = thread_lock(m);
+        let v: u32 = t_rd(m, OFF_CNT);
+        t_wr(m, OFF_CNT, v + 1);
+        let _u: u32 = thread_unlock(m);
+        i = i + 1;
+    }}
+    return 0;
+}}
+
+fn line(tag: str, v: u32) -> u32 {{
+    let _a: i64 = syscall4(1, 1, str_ptr(tag) as u64, str_len(tag) as u64);
+    let _e: i64 = syscall4(1, 1, str_ptr("|") as u64, 1);
+    let b: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {{
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }}
+    while x > 0 {{
+        store8(b, n, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        n = n + 1;
+    }}
+    let i: u32 = 0;
+    while i < n / 2 {{
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }}
+    let _o: i64 = syscall4(1, 1, b as u64, n as u64);
+    return syscall4(1, 1, str_ptr("\\n") as u64, 1) as u32;   // 一行一对 (`_kv` 按行解析)
+}}
+
+fn _start() {{
+    let m: ptr = alloc(16);
+    let k: u32 = 0;
+    while k < 16 {{
+        store8(m, k, 0 as u8);
+        k = k + 1;
+    }}
+    let done: ptr = alloc(4);
+    t_wr(done, 0, 0);
+    let stacks: ptr = alloc((N * 8) as u32);
+    let i: u32 = 0;
+    while i < N {{
+        let st: ptr = thread_stack(STACK);
+        t_wr(stacks, i * 4, ((st as u64) / 4096) as u32);     // 按页记下来比
+        let stk: u64 = st as u64;
+        let _t: i64 = thread_spawn("worker", stk, m as u64, done as u64);
+        i = i + 1;
+    }}
+    let got: u32 = thread_join_all(done, N);
+    let _1: u32 = line("count", t_rd(m, OFF_CNT));
+    let _2: u32 = line("joined", got);
+    i = 0;
+    while i < N {{
+        let _3: u32 = line("stk", t_rd(stacks, i * 4));
+        i = i + 1;
+    }}
+    let _4: i64 = syscall4(1, 1, str_ptr("\\n") as u64, 1);
+    syscall4(60, 0, 0, 0);
+}}
+"""
+
+
+@test
+def test_os_thread_mutex_serializes_writers():
+    """`os/thread` 的取号锁**真的把临界区串起来了** —— 这一条的对照物是**没有锁的结果**。
+
+    临界区里是**非原子**的 `v = load; store(v+1)`，所以锁一旦坏了（漏放、两人同时进、
+    `serving` 写错顺序），4×50000 次里丢更新是必然的。换言之：这条判据红的时候，坏的**一定
+    是锁**，不是"这个测试碰巧没撞上"。
+
+    它同时钉住 `thread_stack`（栈是 mmap 出来的，`thread_spawn` 要的正是那个栈顶）与
+    完成通知（工作线程里没有一句"喊一声"，`thread_join_all` 却等到了 N）。
+    """
+    if not _have_linux():
+        print("      SKIP: 无 WSL/Linux")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = _compile_elf(_THREAD_SRC, td, "os_thread_probe")
+        got_p = _run_linux([_lx(exe)], timeout=300)
+    assert got_p.returncode == 0, f"线程探针没跑完: {got_p.stderr[-300:]}"
+    got = _kv(got_p.stdout)
+    assert "count" in got and "joined" in got, f"探针输出不全: {got_p.stdout!r}"
+    want = N_THREADS * THREAD_ROUNDS
+    assert int(got["count"]) == want, \
+        f"锁保护的计数器是 {got['count']}，期望 {want} —— 锁漏了更新"
+    assert int(got["joined"]) == N_THREADS, \
+        f"join 等到 {got['joined']}，期望 {N_THREADS} —— 完成通知没到齐"
+    # `stk` 是**重复的键**, `_kv` 是 dict (后者覆盖) —— 所以这里从原始 stdout 数。
+    stk = [v for k, v in (ln.split("|", 1) for ln in got_p.stdout.splitlines()
+                          if ln.startswith("stk|"))]
+    assert len(stk) == N_THREADS, f"栈地址没打印全 ({len(stk)} 条): {got_p.stdout!r}"
+    assert len(set(stk)) == N_THREADS, f"两条线程共用了同一块栈: {stk}"
+    print(f"      os/thread: {N_THREADS} 个线程 {want} 次临界区 + join 到齐 + 栈各不同")
 
 
 # ---------------------------------------------------------------- 入口
