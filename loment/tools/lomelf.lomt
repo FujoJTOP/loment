@@ -2240,17 +2240,29 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
 ///   B8 38 00 00 00    mov  eax, 56       ; clone
 ///   0F 05             syscall
 ///   48 85 C0          test rax, rax
-///   75 13             jne  .parent       ; 跳过下面 19 字节 (3+2+5+2+5+2)
+///   75 35             jne  .parent       ; 跳过下面 53 字节
 ///   48 89 E5          mov  rbp, rsp      ; 子线程换掉继承来的 rbp (硬事实一)
 ///   41 51             push r9            ; 实参 → 被调方的第 0 个形参槽
 ///   E8 rel32          call 入口          ; **直接调用** —— 静态调用图不变
-///   89 C7             mov  edi, eax
+///   41 89 C5          mov  r13d, eax     ; 存住入口的返回值
+///   4D 85 E4          test r12, r12      ; 有完成通知地址吗
+///   74 19             jz   .no_done      ; 跳过下面 25 字节
+///   F0 41 FF 04 24    lock incl [r12]    ; 原子加一 (也是释放屏障)
+///   44 89 E7          mov  edi, r12d
+///   B8 CA 00 00 00    mov  eax, 202      ; futex
+///   BE 81 00 00 00    mov  esi, 129      ; FUTEX_WAKE|FUTEX_PRIVATE_FLAG
+///   BA 01 00 00 00    mov  edx, 1
+///   0F 05             syscall
+///   44 89 EF          .no_done: mov edi, r13d
 ///   B8 3C 00 00 00    mov  eax, 60       ; exit (**不是** exit_group: 后者杀掉整组)
 ///   0F 05             syscall
 /// ```
-/// 进门前 `emit_get` 已把**第 0 个操作数取进 r9**（子线程实参）、**第 1 个取进 rsi**
-/// （栈顶）。r9 是唯一能把一个值安全带过 `clone` 的寄存器: 系统调用不碰它（只踩
-/// rcx/r11），而子线程在 `clone` 那一刻继承整个寄存器组。
+/// 进门前 `emit_get` 已把**第 0 个操作数取进 rsi**（栈顶）、**第 1 个取进 r9**
+/// （子线程实参）、**第 2 个取进 r12**（完成通知地址, 0 = 不要通知）。r9/r12 是仅有的
+/// 两个能把值安全带过 `clone` 又不与 `clone` 自己那五个实参寄存器冲突的寄存器。
+///
+/// **通知那一段只有在编译器站得的位置才做得了**: 入口是 Loment 写的, 它一 `return`,
+/// 控制权就回到这段尾声 —— 所以 `join` 的握手是**产物保证的**, 不靠工作线程自觉。
 fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
                  doff: u32, dlen: u32) -> u32 {
     if cell(tab, C_PE) == 1 {
@@ -2292,9 +2304,11 @@ fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
         let vs: u32 = skip_sp(t, to + tl, rp);
         let ve: u32 = word_end(t, vs, rp);
         if q == 0 {
-            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, 9);      // r9 = 子线程实参
-        } else {
             d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RSI);    // rsi = 栈顶
+        } else if q == 1 {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, 9);      // r9  = 子线程实参
+        } else {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, 12);     // r12 = 完成通知地址
         }
         q = q + 1;
     }
@@ -2308,13 +2322,26 @@ fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
     d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // B8 38 00 00 00
     d = e1(out, d, 15); d = e1(out, d, 5);                     // 0F 05
     d = e1(out, d, 72); d = e1(out, d, 133); d = e1(out, d, 192);  // 48 85 C0
-    d = e1(out, d, 117); d = e1(out, d, 19);                   // 75 13
+    d = e1(out, d, 117); d = e1(out, d, 53);                   // 75 35
     d = e1(out, d, 72); d = e1(out, d, 137); d = e1(out, d, 229);  // 48 89 E5
     d = e1(out, d, 65); d = e1(out, d, 81);                    // 41 51
     // ---- 直接调用 (那条 `E8` 落在符号表上, 与普通调用同一条回填路)
     d = em_call_lbl(out, d, tab, eo, q2 - eo);
     // ---- 尾 (_SPAWN_TAIL)
-    d = e1(out, d, 137); d = e1(out, d, 199);                  // 89 C7
+    d = e1(out, d, 65); d = e1(out, d, 137); d = e1(out, d, 197);  // 41 89 C5
+    d = e1(out, d, 77); d = e1(out, d, 133); d = e1(out, d, 228);  // 4D 85 E4
+    d = e1(out, d, 116); d = e1(out, d, 25);                   // 74 19
+    d = e1(out, d, 240); d = e1(out, d, 65); d = e1(out, d, 255);
+    d = e1(out, d, 4); d = e1(out, d, 36);                     // F0 41 FF 04 24
+    d = e1(out, d, 68); d = e1(out, d, 137); d = e1(out, d, 231);  // 44 89 E7
+    d = e1(out, d, 184); d = e1(out, d, 202);
+    d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // B8 CA 00 00 00
+    d = e1(out, d, 190); d = e1(out, d, 129);
+    d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // BE 81 00 00 00
+    d = e1(out, d, 186); d = e1(out, d, 1);
+    d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // BA 01 00 00 00
+    d = e1(out, d, 15); d = e1(out, d, 5);                     // 0F 05
+    d = e1(out, d, 68); d = e1(out, d, 137); d = e1(out, d, 239);  // 44 89 EF
     d = e1(out, d, 184); d = e1(out, d, 60);
     d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // B8 3C 00 00 00
     d = e1(out, d, 15); d = e1(out, d, 5);                     // 0F 05

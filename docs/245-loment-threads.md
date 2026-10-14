@@ -41,7 +41,7 @@
 ### 线 A —— `thread_spawn`（默认可用，**不动任何既有保证**）· **已落地**
 
 ```rust
-let tid: i64 = thread_spawn("worker", stack_top, arg);
+let tid: i64 = thread_spawn("worker", stack_top, arg, done);
 ```
 
 * **入口是字符串字面量**，不是表达式。理由不是审美：产物里那是一条**写死的调用边**
@@ -53,6 +53,11 @@ let tid: i64 = thread_spawn("worker", stack_top, arg);
 * **只在 ELF 目标可用**。Windows 没有 `clone`，PE 目标**响亮地拒绝并点名**，不静默错编一个
   "假线程"（`test_pe_refuses_thread_spawn`）。
 
+**第四个实参是完成通知地址**（0 = 不要通知）。它不是一个可有可无的便利 —— 见下面那段
+尾声：**子线程的尾声是编译器发的**，入口一 `return` 就 `exit`，所以**工作线程在返回之后
+没有机会跑任何代码**。没有这一段，`join` 就只能靠"工作线程自己记得在最后喊一声"，
+忘了就是挂死 —— 一个系统语言不该有的地雷。
+
 **语义（定死在这里）**：
 
 | | |
@@ -62,11 +67,12 @@ let tid: i64 = thread_spawn("worker", stack_top, arg);
 | 退出码 | 入口的返回值 |
 | 返回值 | 新线程的 tid；失败时是负数（内核的负 errno） |
 | 栈 | **调用方给**（`stack_top` 是栈顶，往下长） |
+| 完成通知 | `done != 0` 时，入口返回后对 `*(u32*)done` **原子加一**并 `futex_wake(done, 1)` |
 
-**发出来的东西**（两侧**同一串字面机器码**，`c` 是调用点）：
+**发出来的东西**（两侧**同一串字面机器码**）：
 
 ```asm
-                            ; 进门前: 子线程实参 → r9, 栈顶 → rsi
+                            ; 进门前: 栈顶 → rsi, 子线程实参 → r9, 通知地址 → r12
   BF 00 0F 05 00            mov  edi, 331520   ; CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM
   31 D2                     xor  edx, edx      ; ptid  = NULL
   45 31 D2                  xor  r10d, r10d    ; ctid  = NULL
@@ -74,23 +80,35 @@ let tid: i64 = thread_spawn("worker", stack_top, arg);
   B8 38 00 00 00            mov  eax, 56       ; clone
   0F 05                     syscall
   48 85 C0                  test rax, rax
-  75 13                     jne  .parent       ; 父线程: rax = tid
+  75 35                     jne  .parent       ; 父线程: rax = tid, 跳过下面 53 字节
   48 89 E5                  mov  rbp, rsp      ; **子线程**: 换掉继承来的 rbp (硬事实一)
   41 51                     push r9            ; 实参 → 被调方的第 0 个形参槽
   E8 rel32                  call @入口          ; **直接调用**
-  89 C7                     mov  edi, eax
+  41 89 C5                  mov  r13d, eax     ; 存住入口的返回值
+  4D 85 E4                  test r12, r12      ; 有通知地址吗
+  74 19                     jz   .no_done
+  F0 41 FF 04 24            lock incl [r12]    ; 原子加一 (也是释放屏障)
+  44 89 E7                  mov  edi, r12d
+  B8 CA 00 00 00            mov  eax, 202      ; futex
+  BE 81 00 00 00            mov  esi, 129      ; FUTEX_WAKE|FUTEX_PRIVATE_FLAG
+  BA 01 00 00 00            mov  edx, 1        ; 唤醒一个等待者
+  0F 05                     syscall
+  44 89 EF                  .no_done: mov edi, r13d
   B8 3C 00 00 00            mov  eax, 60       ; exit
   0F 05                     syscall
 ```
 
-两条容易看漏、但**少了就错**的：
+三条容易看漏、但**少了就错**的：
 
-1. **实参走 `r9` 而不是栈**。`syscall` 只踩 `rcx`/`r11`，不碰 `r9`；而子线程在 `clone`
+1. **值走寄存器而不是栈**。`syscall` 只踩 `rcx`/`r11`，不碰 `r9`/`r12`；而子线程在 `clone`
    那一刻**继承整个寄存器组**（只有 `rsp` 被换成 `child_stack`、`rax` 置 0）。栈顶那个
    字节属于**父线程的帧**，子线程不能读。
-2. **`jne` 那个位移是按后面 19 字节算出来的**（3+2+5+2+5+2）。少一个字节就跳过 `.parent`
-   落到子线程那条路上 —— 而这是两侧各写一遍的**字面**序列，所以
-   `test_selfhost_mirror_matches_reference_on_thread_spawn` 逐字节钉着它。
+2. **两个位移都是手算的**：`jne` 跳过后面 **53** 字节（3+2+5+3+3+2+5+3+5+5+5+2+3+5+2），
+   `jz` 跳过 **25**（5+3+5+5+5+2）。少一个字节就落到子线程那条路上 —— 而这是两侧各写一遍
+   的**字面**序列，所以 `test_selfhost_mirror_matches_reference_on_thread_spawn` 逐字节
+   钉着它。
+3. **`lock incl` 既是计数也是屏障**：`futex_wake` 必须在计数**之后**，否则等待者会在值
+   还没变时被叫醒、然后回去接着睡。
 
 **`clone` 的 flags 一个字都不能错**：`0x50F00` = 331520。少一个 `CLONE_*`（或多一个
 `CLONE_PIDFD`）内核直接 `EINVAL` —— 而**产物照样生成成功**。第一版写的是
@@ -124,12 +142,13 @@ let tid: i64 = thread_spawn("worker", stack_top, arg);
 `lomdoc` 两份、编辑器语法……见 `docs/182` §1.9）都得跟着过一遍。字面量是**已经存在的
 表达式形状**，对它们全部透明。代价是入口看起来像字符串 —— 用编译期的三条检查补回来。
 
-## 5. 判据（`tools/loment_thread_test.py`，6 条）
+## 5. 判据（`tools/loment_thread_test.py`，7 条）
 
 | 判据 | 钉什么 |
 |---|---|
 | `test_threads_accumulate_on_shared_memory` | N 个线程在**共享**计数器上各原子加 `ROUNDS` 次，和 == `N × ROUNDS`。一条同时钉住 flags 对不对、`CLONE_VM` 在不在、子线程是不是真的从入口跑 |
 | `test_each_thread_is_a_distinct_thread` | 每个工作线程写下自己的 `gettid()` —— 必须**互不相同**且**都不等于主线程**。这是"真线程"的**证伪面**：换成顺序调用，上面的和**照样对**，tid 会全相同 |
+| `test_completion_wakes_the_joiner` | 主线程**睡在 futex 上**（工作线程先 `nanosleep` 5ms，保证主线程一定已经睡下去），`wakes` 数**真被叫醒**的次数（返回 0；值已经变了是 `EAGAIN`, 不算）。探针里的 `worker` **一句通知都没写** |
 | `test_entry_must_be_a_string_literal` | 入口写成变量 → 编译期报 |
 | `test_unknown_entry_is_a_compile_error` | 入口不在本单元 → 编译期**点名**，不留到链接期 |
 | `test_entry_must_take_exactly_one_parameter` | 入口两个形参 → 编译期报。这条不是洁癖：子线程只压一个槽，第二个形参读到栈上的垃圾，是**静默错编** |
@@ -162,11 +181,38 @@ let tid: i64 = thread_spawn("worker", stack_top, arg);
 
 `BOUNDARY_BUILTINS` ⊆ `lomentc.BUILTINS` 那条判据不受影响（它只要求子集关系）。
 
-## 8. 阶段 2 / 3（未开始）
+## 8. 阶段 2 / 3
 
-* **阶段 2 · `os/thread` 库**：`lompi/store/os/0.1.0/thread.lomt` —— `thread_spawn` 包装、
-  `gettid`、`mmap` 拿栈、futex 互斥/条件变量、`join`。判据进 `loment_os_test.py`
-  （同一个 WSL/ELF 环境）。
+### 阶段 2 · `os/thread` 库 · **已落地**
+
+`lompi/store/os/0.1.0/thread.lomt`：`thread_stack`（mmap 拿栈，给的是**栈顶**）、
+`thread_self`（gettid）、`thread_yield`、`thread_wait` / `thread_wake`（futex 原样）、
+`thread_lock` / `thread_unlock`、`thread_cv_wait` / `signal` / `broadcast`、
+`thread_join` / `thread_join_all`。
+
+**它不包 `thread_spawn`，而且包不了**：第一个实参是**编译期的名字**，包装函数里写的那个
+名字指的是**包装函数自己单元里**的函数，不是调用方的。所以 `thread_spawn("my_worker", …)`
+必须由用户在自己的单元里直接写 —— 这正是"不动静态调用图"买来的东西。这一层因此只提供
+**周围**那一圈，而它们恰好是"多线程系统"缺的那部分。
+
+**互斥量为什么是取号锁（ticket lock）**：语言只有 `atomic_add`（返回**旧值**），**没有**
+CAS、没有 xchg。而"加一试试、失败再减回去"那种写法是**错的** —— A 拿到锁（值 1）之后 B
+加一减一，值回到 0，锁看起来空了而 A 还拿着；那个坑很安静，表现为"偶发两个线程同时在临界区
+里"。取号锁只用"取号"一个原子操作，天然公平，记录就是两个 u32。
+
+**放锁为什么是"全叫醒"而不是"叫醒一个"** —— 这条是**实测**出来的：`futex_wake` 叫醒的是
+队列里的**某一个**等待者，不是"票号轮到的那个人"。被误叫的那个重读一眼、发现没到自己、
+**又睡了**，而它把本该属于下一个号的那次唤醒**吃掉了**。于是每多一次误叫就少一次该到的
+唤醒，最后某个号永远等不到人叫它。**4 线程 × 10 次那种规模根本撞不出来**（第一版档 3 全绿），
+一上到 4 × 5 万次就是 300s 死锁。判定：全叫醒有"惊群"（每次放锁最多叫醒 n-1 个，它们重读
+一眼又睡回去），但**丢唤醒是错，惊群只是慢**。
+
+**判据**（`loment_os_test.py::test_os_thread_mutex_serializes_writers`）：4 个线程各
+50000 次临界区，临界区里是**非原子**的 `v = load; store(v+1)` —— 对照物是"没有锁的结果"，
+所以锁一坏，丢更新是**必然**而不是"碰巧没撞上"。同时钉住 `thread_stack`（4 个栈地址互不
+相同）与完成通知（`thread_join_all` 等到 4，而工作线程里一句"喊一声"都没有）。
+
+### 阶段 3 · 函数指针 + 间接调用（线 B，开关下）· **未开始**
 * **阶段 3 · 函数指针 + 间接调用（线 B，开关下）**：按 `docs/158` §5 四步；两个链接器都拒绝
   间接调用（`tools/lomelf.py:1083` / `loment/tools/lomelf.lomt`），要四份实现一起改；
   外加 `docs/208` 那两条门禁前提改成"带开关的模式"。消费方清单见 `docs/182` §1.9

@@ -1052,7 +1052,7 @@ fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
         return 7;
     }
     if chk_tok_is(src, t, i, "thread_spawn") {
-        return 3;                                 // M84: 入口名、栈顶、实参 (docs/245)
+        return 4;                                 // M84: 入口名、栈顶、实参、完成通知地址
     }
     return 999999;
 }

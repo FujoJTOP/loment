@@ -107,10 +107,13 @@ def _compile_elf(src: str, td: Path, name: str) -> Path:
 
 # ---------------------------------------------------------------- 探针源码
 
-#: 工作线程：**先把自己的 tid 写进自己的槽**（证明它真是一个独立的线程，不是父线程
-#: 顺序跑下来的），再在**共享**计数器上原子累加 `ROUNDS` 次，最后 `done++`。
-#: 每个线程的实参指向自己那条 16 字节记录：`[tid 槽(8) | 共享计数器指针(8)]`。
-#: —— 一条实参、一块自己的栈，这就是 `thread_spawn` 全部的形状。
+#: 工作线程：**先睡一会儿**（让主线程一定已经睡在 futex 上，这样"被唤醒"才是可证的
+#: 而不是"撞运气"），再把自己的 tid 写进自己的槽（证明它真是一个独立的线程），然后在
+#: **共享**计数器上原子累加 `ROUNDS` 次，**然后什么都不写就 return**。
+#:
+#: 最后那句"什么都不写"是**刻意的**：让 `done` 加一、`futex_wake` 那件事是**产物做的**
+#: （`thread_spawn` 第四个实参那段尾声），不是这个函数做的。工作线程想赖也赖不掉。
+#: 每条实参指向自己那条 16 字节记录 `[tid 槽(8) | 共享计数器指针(8)]`。
 _WORKER = f"""
 module th_probe
 choose runtime
@@ -138,7 +141,11 @@ fn wr(p: ptr, o: u32, v: u64) {{
 
 fn worker(arg: u64) -> u32 {{
     let rec: ptr = arg as ptr;
-    wr(rec, 0, syscall4(186, 0, 0, 0) as u64);        // gettid() -> 自己那一格
+    let ts: ptr = alloc(16);
+    wr(ts, 0, 0);
+    wr(ts, 8, 5000000);                              // 5ms —— 让主线程先睡下去
+    let _s: i64 = syscall4(35, ts as u64, 0, 0);     // nanosleep
+    wr(rec, 0, syscall4(186, 0, 0, 0) as u64);       // gettid() -> 自己那一格
     let cnt: ptr = rd(rec, 8) as ptr;
     let i: u32 = 0;
     while i < ROUNDS {{
@@ -192,6 +199,8 @@ fn wr32(p: ptr, v: u32) {{
 fn _start() {{
     let cnt: ptr = alloc(8);
     wr32(cnt, 0);
+    let done: ptr = alloc(8);
+    wr32(done, 0);
     let recs: ptr = alloc((N * 16) as u32);
     let tids: ptr = alloc((N * 8) as u32);
     let main_tid: u64 = syscall4(186, 0, 0, 0) as u64;
@@ -204,14 +213,26 @@ fn _start() {{
         if stk < 0 {{
             let _e: u32 = wu(9999);
         }} else {{
-            let t: i64 = thread_spawn("worker", (stk as u64) + STACK, rec as u64);
+            // 第四个实参就是"完成通知地址" —— 子线程跑完由**产物**在那里加一并唤醒。
+            let t: i64 = thread_spawn("worker", (stk as u64) + STACK, rec as u64, done as u64);
             let _s: u32 = 0;
         }}
         i = i + 1;
     }}
-    // 等所有子线程把共享计数器填满（每个加 ROUNDS 次）。
+    // 睡在 futex 上等全部完成。**这是这一条要验的东西**：工作线程的 `worker` 里一句
+    // "喊一声"都没有，`done` 能到 N、futex 真把主线程叫醒，全是产物那段尾声做的。
+    // `wakes` 数的是**真被叫醒**的次数（返回 0），`EAGAIN`（值已经变了）不算。
+    let ts: ptr = alloc(16);
+    let wakes: u32 = 0;
     let spins: u32 = 0;
-    while rd32(cnt) < N * ROUNDS && spins < 400000000 {{
+    while rd32(done) < N && spins < 200 {{
+        let cur: u32 = rd32(done);
+        wr(ts, 0, 2);
+        wr(ts, 8, 0);
+        let r: i64 = syscall7(202, done as u64, 128, cur as u64, ts as u64, 0, 0);
+        if r == 0 {{
+            wakes = wakes + 1;
+        }}
         spins = spins + 1;
     }}
     // 把每条记录的 tid 抄到一处，顺序打出来。
@@ -222,13 +243,15 @@ fn _start() {{
         j = j + 1;
     }}
     let _1: u32 = line("sum", rd32(cnt) as u64);
-    let _2: u32 = line("main", main_tid);
+    let _2: u32 = line("done", rd32(done) as u64);
+    let _3: u32 = line("wakes", wakes as u64);
+    let _4: u32 = line("main", main_tid);
     j = 0;
     while j < N {{
-        let _3: u32 = line("tid", rd(tids, j * 8));
+        let _5: u32 = line("tid", rd(tids, j * 8));
         j = j + 1;
     }}
-    let _4: i64 = syscall4(1, 1, str_ptr("\\n") as u64, 1);
+    let _6: i64 = syscall4(1, 1, str_ptr("\\n") as u64, 1);
     syscall4(60, 0, 0, 0);
 }}
 """
@@ -286,6 +309,28 @@ def test_each_thread_is_a_distinct_thread():
     assert all(t > 0 for t in tids), f"有线程没写 tid: {tids}"
     assert len(set(tids)) == N, f"{N} 个线程的 tid 有重复: {tids}"
     assert main_tid not in tids, f"子线程的 tid 与主线程相同 ({main_tid}): {tids}"
+
+
+@test
+def test_completion_wakes_the_joiner():
+    """第四个实参那条**完成通知**真的发生 —— 而且**不是工作线程自觉做的**。
+
+    为什么非得有它：子线程的尾声是**编译器发的**（入口一 `return` 就 `exit`），所以工作
+    线程在返回之后**没有机会跑任何代码**。没有这段尾声，`join` 就只能靠"工作线程自己记得
+    在最后喊一声"，忘了就是**挂死** —— 一个系统语言不该有的地雷。
+
+    **怎么证**：主线程**睡在 futex 上**（工作线程先 `nanosleep` 5ms，保证主线程一定已经
+    睡下去），`wakes` 数的是**真被叫醒**的次数（`futex` 返回 0；值已经变了返回 `EAGAIN`,
+    不算）。这个探针里的 `worker` **一句通知都没写**，所以 `done` 到 N、主线程被叫醒，
+    只能来自产物。`done` 加一用的是 `lock incl` —— 它同时是那个唤醒的**释放屏障**。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run_probe(Path(tds))
+    assert "done" in got and "wakes" in got, f"探针输出不全: {got}"
+    assert int(got["done"][0]) == N, \
+        f"完成计数 {got['done'][0]}，期望 {N} —— 产物里那段尾声没跑到"
+    assert int(got["wakes"][0]) > 0, \
+        ("主线程一次都没被 futex 叫醒 —— 通知那一段没发出来 (或没发对)")
 
 
 @test

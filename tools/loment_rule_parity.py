@@ -310,20 +310,22 @@ _CASES: list[tuple[str, str]] = [
     # 这一族是"**直接调用**买到的东西"：入口是编译期的名字，于是**三条**都能在编译期判 ——
     # 是字面量、本单元里真有这个函数、形参恰好一个。两侧各写一遍（参考 `_walk_expr` 的
     # 内建分支 / 自举 `chk_tex_atom_call` + `chk_lookup_lit_name`），所以在这里成对钉。
+    # **除了 arity 那条，全用满四个实参** —— 元数不对时两侧走的是不同的分支（参考只在
+    # `else` 里做那三条检查，自举是"元数先报、检查照做"），要钉的是那三条本身，不是叠加。
     ("thread-entry-not-literal",
      "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
-     "fn f(s: str) -> i64 {\n    return thread_spawn(s, 0, 1);\n}\n"),
+     "fn f(s: str) -> i64 {\n    return thread_spawn(s, 0, 1, 2);\n}\n"),
     ("thread-entry-unknown",
-     "module m\n\nfn f() -> i64 {\n    return thread_spawn(\"nope\", 0, 1);\n}\n"),
+     "module m\n\nfn f() -> i64 {\n    return thread_spawn(\"nope\", 0, 1, 2);\n}\n"),
     ("thread-entry-two-params",
      "module m\n\nfn worker(a: u64, b: u64) -> u32 {\n    return 0;\n}\n\n"
-     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1);\n}\n"),
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1, 2);\n}\n"),
     ("thread-arity",
      "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
-     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0);\n}\n"),
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1);\n}\n"),
     ("thread-arg-type",
      "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
-     "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1);\n}\n"),
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1, 2);\n}\n"),
 ]
 
 
