@@ -988,7 +988,14 @@ class Emitter:
         m = re.match(r"(.+?)\s+(\S+)\s+to\s+(.+)$", t[len(op) + 1:], re.S)
         fty, fval, tty = parse_type(m.group(1))[0], m.group(2), parse_type(m.group(3))[0]
         if op == "ptrtoint":
-            self.get_ptr(fval, RAX)
+            # `ptrtoint ptr @f to i64`（M85, `docs/246`）—— **取一个函数的地址**。
+            # 标签表里**函数不带 `@`、全局带 `@`**（`emit_func` 那句 `label(f.name)` 与
+            # `compile_ll` 那句 `labels[g.name]`），所以这里按"它是不是一个全局"决定要不要
+            # 剥掉那个 `@`。不剥就是一句 `未定义的标签: @add` —— 离现场挺远。
+            if fval.startswith("@") and fval not in self.globals:
+                self.asm.mov_abs(RAX, fval[1:])
+            else:
+                self.get_ptr(fval, RAX)
         else:
             self.get(fty, fval, RAX)
         if size_of(tty) < 8:
@@ -1088,8 +1095,6 @@ class Emitter:
             rest = rest[i:].lstrip()
         cm = re.match(r"(@[-A-Za-z0-9_.]+|%[-A-Za-z0-9_.]+)\s*\((.*)\)\s*$", rest, re.S)
         callee, argstr = cm.group(1), cm.group(2)
-        if callee.startswith("%"):
-            raise Unsupported("v0 不支持间接调用")
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
         # ---- 外部函数 (docs/173): 实参走**寄存器**, 不走我们自己的栈约定。
         # 求值顺序: **从右往左**逐个算进 RAX 再 push, 然后从左往右 pop 进目标寄存器 ——
@@ -1138,6 +1143,13 @@ class Emitter:
             self.asm.emit(push_r(RAX))
         if callee == "@llvm.trap":
             self.asm.emit(b"\x0F\x0B")
+        elif callee.startswith("%"):
+            # 间接调用（M85, `docs/246`）: callee 是**值** —— 一个函数的地址（`i64`）。
+            # **地址在这里才读** —— 上面 push 实参用的是 rax，`get` 也只写自己的目标
+            # 寄存器，所以 rcx 一路没人碰；反过来的话（先读 rcx 再 push）rax 会在求值里
+            # 把它踩掉。`FF D1` = `call rcx`。
+            self.get("i64", callee, RCX)
+            self.asm.emit(b"\xFF\xD1")
         else:
             self.asm.call(callee[1:])
         if total:

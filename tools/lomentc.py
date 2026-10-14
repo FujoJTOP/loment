@@ -67,6 +67,11 @@ BUILTINS = {
     # 没有一个自动的通知点，`join` 就只能靠"工作线程自己记得喊一声"，忘了就是挂死。
     # 只在 ELF/lomelf 目标可用（Windows 没有 `clone`）；PE 目标报错并点名，不静默错编。
     "thread_spawn": (("str", "u64", "u64", "u64"), "i64"),
+    # M85: 取一个函数的地址（`docs/246`）。**返回类型是算出来的、不是这张表里写的** ——
+    # 它**就是被指名那个函数的 `fn(...)` 类型**（`expr_type` 里特判）。表里这个 `u64`
+    # 只是"算不出来时"的兜底，而算不出来的那种情况本来就有一条错误。
+    # 实参同 `thread_spawn`：**编译期的名字**（产物里是 `ptrtoint ptr @名字 to i64`）。
+    "fn_addr": (("str",), "u64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 
@@ -642,10 +647,57 @@ def _array_len(t: str) -> int:
     return int(t[t.rindex(";") + 1:-1].strip())
 
 
+def _fn_ty_split(t: str) -> tuple[list[str], str] | None:
+    """`fn(A, B) -> C` -> `(["A", "B"], "C")`；不是函数类型返回 `None`（M85, `docs/246`）。
+
+    实参表里可以嵌 `Pair<u32>` / `[T; N]` / 又一个 `fn(...)` —— 所以切逗号要**按深度**，
+    不能 `split(",")`。`re` 在本模块顶层没有 import（这个模块刻意只用字符串操作），
+    所以这里手写扫描。
+    """
+    if not t.startswith("fn("):
+        return None
+    depth, i = 1, 3
+    while i < len(t) and depth > 0:
+        c = t[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    if depth != 0 or not t.startswith("->", i):
+        return None
+    inner, ret = t[3:i - 1], t[i + 2:]
+    if not ret:
+        return None
+    args: list[str] = []
+    if inner:
+        start, d = 0, 0
+        for k, c in enumerate(inner):
+            if c in "(<[":
+                d += 1
+            elif c in ")>]":
+                d -= 1
+            elif c == "," and d == 0:
+                args.append(inner[start:k])
+                start = k + 1
+        args.append(inner[start:])
+    return args, ret
+
+
+def _fn_ty_make(args: list[str], ret: str) -> str:
+    """`(["A", "B"], "C")` -> `"fn(A,B)->C"`。**逗号后不留空格** —— 类型是字符串，
+    两边（参考 / 自举）拼出来的那一串必须逐字符相同，否则同一个类型会"看着一样却不相等"。"""
+    return f"fn({','.join(args)})->{ret}"
+
+
 def _type_ok(t: str, known: set[str]) -> bool:
-    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组或切片。"""
+    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组或切片 / 函数指针。"""
     if t in known:
         return True
+    ft = _fn_ty_split(t)
+    if ft is not None:
+        args, ret = ft
+        return _type_ok(ret, known) and all(_type_ok(a, known) for a in args)
     if _is_array(t):
         return _type_ok(_array_elem(t), known)
     if _is_slice(t):
@@ -1664,7 +1716,22 @@ class Parser:
         return -v if neg else v
 
     def type_name(self) -> str:
-        """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T]。"""
+        """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] / 函数指针。"""
+        # 函数指针 `fn(A, B) -> C`（M85, `docs/246`）。**只看 `fn` 后面是不是 `(`**：
+        # 函数定义是 `fn 名字(`，类型位置上的 `fn` 只可能是这一种。实参表里可以是任意类型
+        # （包括又一个 `fn(...)`），所以逐个 `type_name()` 递归。
+        if self.at("ident", "fn") and self.peek(1).kind == "punct" and self.peek(1).val == "(":
+            self.next()
+            self.next()
+            fargs: list[str] = []
+            while not self.at("punct", ")"):
+                fargs.append(self.type_name())
+                if self.at("punct", ","):
+                    self.next()
+            self.expect("punct", ")")
+            self.expect("punct", "-")
+            self.expect("punct", ">")
+            return _fn_ty_make(fargs, self.type_name())
         if self.at("ident", "mut") and self.peek(1).kind == "punct" and self.peek(1).val == "[":
             self.next()
             self.next()
@@ -2786,6 +2853,18 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, Ident):
         return scope.get(e.name)
     if isinstance(e, Call):
+        # 间接调用 `p(a, b)`（M85 `docs/246`）: callee 是 `fn(...)` 类型的**变量**，
+        # 返回类型取那个类型里的那一半。
+        _vt = scope.get(e.name)
+        _vtf = _fn_ty_split(_vt) if _vt is not None else None
+        if _vtf is not None:
+            return _vtf[1]
+        # `fn_addr("add")` 的返回类型**就是被指名那个函数的类型** —— 静态表（`BUILTINS`）
+        # 里表达不了"随实参而变"的返回类型，所以在这里算。
+        if e.name == "fn_addr" and e.args and isinstance(e.args[0], StrLit):
+            _f = funcs.get(e.args[0].value)
+            if _f is not None:
+                return _fn_ty_make([p.type for p in _f.params], _f.ret)
         if e.name in BUILTINS:
             return BUILTINS[e.name][1]
         if e.name == "slice_len":
@@ -2973,6 +3052,28 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             for a in e.args:
                 _walk_expr(a, scope, funcs, structs, errs, enums)
             return
+        # 间接调用 `p(a, b)`（M85 `docs/246`）: callee 是一个 `fn(...)` 类型的**变量**。
+        # 分派排在"内建 / 具名函数"**之前** —— 那两者都不可能是 `fn(...)` 类型的值，
+        # 而 `fn_addr("add")` 的结果必须先 `let p: fn(...) -> ... = ...;` 才调用得了。
+        _vt = scope.get(e.name)
+        _vtf = _fn_ty_split(_vt) if _vt is not None else None
+        if _vtf is not None:
+            _fargs, _fret = _vtf
+            if len(e.args) != len(_fargs):
+                errs.append(f"{e.line}: 间接调用 {e.name} 需要 {len(_fargs)} 个实参，"
+                            f"得到 {len(e.args)}")
+            else:
+                for a, wt in zip(e.args, _fargs):
+                    at = expr_type(a, scope, funcs, structs)
+                    if at is None:
+                        if wt not in INT_TYPES:
+                            errs.append(f"{e.line}: 间接调用 {e.name} 实参期望 {wt}，"
+                                        f"得到整型字面量")
+                    elif at != wt:
+                        errs.append(f"{e.line}: 间接调用 {e.name} 实参类型 {at}，期望 {wt}")
+            for a in e.args:
+                _walk_expr(a, scope, funcs, structs, errs, enums)
+            return
         if e.name in BUILTINS:
             want_t, _ret = BUILTINS[e.name]
             if len(e.args) != len(want_t):
@@ -3008,6 +3109,24 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                         errs.append(
                             f"{e.line}: thread_spawn 的入口 {ent} 需要 1 个实参，"
                             f"得到 {len(funcs[ent].params)}（子线程只压一个槽）")
+                # M85 （docs/246）: `fn_addr("add")` 的两条 —— **是字面量**、**名字合法且
+                # 是本单元里写着实现的函数**。与 `thread_spawn` 同一条理由：产物里那是
+                # `ptrtoint ptr @add to i64`，符号必须在编译期定下来。
+                # "写着实现"那一条要点名 `extern`：它走**平台 ABI**，而 `fn(...)` 表示的
+                # 是本语言**内部**的调用约定（`docs/158:39`），两者不能混（`docs/246` §1.1）。
+                if e.name == "fn_addr" and not isinstance(e.args[0], StrLit):
+                    errs.append(
+                        f"{e.line}: 内建 fn_addr 实参 1 必须是**字符串字面量** —— 它是"
+                        f"编译期的名字（产物里是一条写死的符号引用）")
+                elif e.name == "fn_addr":
+                    ent = e.args[0].value
+                    if not _is_fn_name(ent):
+                        errs.append(f"{e.line}: 内建 fn_addr 实参 1 不是合法的函数名: {ent!r}")
+                    elif ent not in funcs:
+                        errs.append(
+                            f"{e.line}: fn_addr 指名的 {ent} 是未定义的函数"
+                            f"（只能取本单元里**写着实现**的函数 —— `extern fn` 走平台 ABI，"
+                            f"而本语言的 `fn(...)` 表示的是内部约定）")
         elif e.name not in funcs:
             errs.append(f"{e.line}: 调用未定义的函数 {e.name}（跨模块调用需要 pub）")
         else:
@@ -5969,6 +6088,10 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
         return "ptr"
     if t == "()":  # M16: unit
         return "void"
+    if _fn_ty_split(t) is not None:
+        # 函数指针（M85, `docs/246`）在 LLVM 里就是**一个地址**（i64）。调用点要
+        # `inttoptr` 回 `ptr` 才 `call` 得了 —— 那一步在 `_Ir.expr` 的间接调用分支里。
+        return "i64"
     if _is_slice(t):
         et = _slice_elem(t)
         if et not in IR_TYPES:
@@ -6928,6 +7051,28 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
+        # 间接调用 `p(a, b)`（M85 `docs/246`）: callee 是一个 `fn(...)` 类型的**变量**，
+        # 它的运行时值就是那个函数的地址（`i64`）。产物里是 `load` → `inttoptr` →
+        # `call %fp(...)` —— 调用点是 `%`，所以链接器走的是**间接调用**那条路。
+        if isinstance(e, Call):
+            _vv = self.vars.get(e.name)
+            _f = _fn_ty_split(_vv[0]) if _vv is not None else None
+            if _f is not None:
+                _fargs, _fret = _f
+                _fp = self.t()
+                self.w(f"{_fp} = load i64, ptr {_vv[1]}")
+                _fnp = self.t()
+                self.w(f"{_fnp} = inttoptr i64 {_fp} to ptr")
+                _as = []
+                for a, wt in zip(e.args, _fargs):
+                    _, av = self.expr(a, wt)
+                    _as.append(f"{self.ll(wt)} {av}")
+                if _fret == "()":
+                    self.w(f"call void {_fnp}({', '.join(_as)})")
+                    return "()", ""
+                _r = self.t()
+                self.w(f"{_r} = call {self.ll(_fret)} {_fnp}({', '.join(_as)})")
+                return _fret, _r
         if isinstance(e, Call) and (e.name in BUILTINS or e.name == "slice_len"):
             return self.builtin(e)
         if isinstance(e, Call):
@@ -7268,6 +7413,11 @@ class _Ir:
                    f'"={{ax}},{{si}},{{r9}},{{r12}},'
                    f'~{{di}},~{{dx}},~{{r10}},~{{r8}},~{{cx}},~{{r11}},~{{memory}}"'
                    f"(i64 {a_stk}, i64 {a_arg}, i64 {a_done})")
+            return "i64", r
+        if e.name == "fn_addr":  # M85: 取函数地址 —— 编译期的名字, 产物里一条符号引用
+            ent = e.args[0].value
+            r = self.t()
+            self.w(f"{r} = ptrtoint ptr @{ent} to i64")
             return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")
