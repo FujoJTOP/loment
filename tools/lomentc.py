@@ -5559,9 +5559,14 @@ sb:
 keep:
   br label %slc
 kill:
-  ; **释放前先把这一格的标记清零** —— 于是「空闲块一律未标记」这条不变式成立，清扫**可以重复跑**
-  ; （见 `__loment_minor` 里那段：它每次都重置空闲链表，重复跑正是它要的）。
-  store i32 0, ptr %smp
+  ; **这里的「清标记」什么都不做**（曾经写的是 `store i32 0, ptr %smp`）—— 那不是清一格，
+  ; 是**越界清**：`%smp` 指向位图里的**一格字节**（`@__loment_mark` 每 8 字节堆一位），
+  ; `store i32` 一次抹掉 **4 格 = 256 字节堆里的全部块**；就算写成 `store i8 0`，也照样
+  ; 抹掉同一 64 字节里另外 7 个块的位。被顺带抹掉的块**可能是活的**，而**分代那一档的
+  ; 旧块标记一旦被抹就再也标不回来**（`propagate` 只从 `oldtop` 起走，整个老年代不扫）
+  ; —— 于是它们在同一趟清扫里被当垃圾交回分配器，程序随后读到的是复用后的字节。
+  ; 而清零**本来就不需要**：走到这一格的**前提**就是「这一位是 0」（`%smsm` 为假）。
+  ; 判据：`loment_elf_test::test_sweep_*` 两条同形语料（同源只差 `choose` 档位）。
   %k8 = add i32 %si, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
   call void @__loment_free(ptr %kp)
@@ -5698,10 +5703,24 @@ cl:
   %cd = icmp uge i32 %ci, %co
   br i1 %cd, label %roots, label %clb
 clb:
+  ; **只清这一格自己的那一位** —— 这里曾经写 `store i8 0`（清**一整格字节**），而
+  ; `@__loment_mark` 是**每 8 字节堆一位**的位图：一格字节覆盖**连续的 64 字节堆**，
+  ; 里面很可能挤着 2~3 个块。本趟从 `%ot`（`oldtop`）起走，而 `oldtop` **不保证 64 字节
+  ; 对齐** —— 于是第一趟就把 `oldtop` **下面**那几个**旧块**的位一起抹掉；而 `propagate`
+  ; 只从 `oldtop` 起走、旧块整段不扫，抹掉就**再也标不回来** ⇒ 它们在同一趟清扫里被当
+  ; 垃圾交回分配器，程序随后读到的是复用后的字节。
+  ; **这一半没有最小复现**：它是读代码读出来的，改动方向是**单向**的（新写法清的是旧写法
+  ; 所清位的一个子集），只会**少收**、不会多收。
   %cidx = lshr i32 %ci, 3
   %cby = lshr i32 %cidx, 3
   %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
-  store i8 0, ptr %cmp
+  %cmk = load i8, ptr %cmp
+  %cbit = and i32 %cidx, 7
+  %csh = shl i32 1, %cbit
+  %cmsk = trunc i32 %csh to i8
+  %cclr = xor i8 %cmsk, -1
+  %cnew = and i8 %cmk, %cclr
+  store i8 %cnew, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
