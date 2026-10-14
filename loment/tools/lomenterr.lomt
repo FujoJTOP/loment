@@ -93,6 +93,7 @@ const C_KIND: u32 = 64532;       // `decl_kw_at` 刚认出来的那个关键字�
 const C_TOKOFF: u32 = 64536;     // 那个词在**源文件**里的字节偏移（0xFFFFFFFF = 不唯一/找不到）
 const C_TOKLEN: u32 = 64540;     // 它的字节长度
 const C_MAX: u32 = 64928;        // 最多渲染几条（0 = 全部；默认 MAX_DEFAULT）
+const C_WANTVER: u32 = 64932;    // 命令行上要的是 `version` 而不是一份诊断（见 parse_args）
 //: 编辑距离的两行滚动数组（第 0 行 0..191、第 1 行 192..383）。名字上限 47 个字符 →
 //: 48 个格子 × 4 字节正好一行 192。**超过 47 的名字不参与比较**（见 edit_dist）——
 //: 那种长度的标识符拼错与否不是"想写哪一个"能回答的问题。
@@ -197,7 +198,10 @@ const S_NOOPEN: u32 = 34;
 // （rustc 只给命令，C# 的 helpUri 只进 SARIF），所以这一格是照最好的那个抄的。
 const S_MORE: u32 = 53;          // more: loment explain
 const S_CAPPED_A: u32 = 54;      // note: 
-const S_CAPPED_B: u32 = 55;      // 后面接「还有几条没显示」        // 打不开诊断文件（环境错，不是诊断）
+const S_CAPPED_B: u32 = 55;      // 后面接「还有几条没显示」
+// `version` 那一行前面那半句。**两门语言同形** —— 它是**程序名**，不是可翻译的散文；
+// 放进这张表只是为了让"打这一行"与别处一样走 `ui()`（一处组装、判据一处能扫到）。
+const S_VER: u32 = 56;           // "lomenterr "
 
 /// 当前语言槽（0 = 英文 / 1 = 中文）。
 fn lg(ctx: ptr) -> u32 {
@@ -244,7 +248,7 @@ fn ui_en(k: u32) -> str {
     if k == 23 { return "this language's boundary"; }
     if k == 24 { return "calling convention"; }
     if k == 25 { return "`--lang auto` decides the language - the above is only a hint from the content, do not treat it as a conclusion.\n"; }
-    if k == 26 { return "lomenterr: usage: lomenterr [--no-color] [--short|--json] [--max N] <diagnostics.jsonl>\n  the diagnostics file is written by the compiler's --diag-out PATH (loment check FILE --diag-out d.jsonl).\n  --max N caps how many are rendered (default 20; 0 = all).\n"; }
+    if k == 26 { return "lomenterr: usage: lomenterr [--no-color] [--short|--json] [--max N] <diagnostics.jsonl>\n  the diagnostics file is written by the compiler's --diag-out PATH (loment check FILE --diag-out d.jsonl).\n  --max N caps how many are rendered (default 20; 0 = all).\n  lomenterr version            print this reporter's own version (not the language's).\n"; }
     if k == 27 { return "[lomenterr] this line in the diagnostics file is not valid JSON, printing it as is:\n  "; }
     if k == 28 { return " lines are not valid JSON (the diagnostics file is corrupt, or it is not from this compiler build)\n"; }
     if k == 29 { return "[OK] no diagnostics\n"; }
@@ -274,6 +278,7 @@ fn ui_en(k: u32) -> str {
     if k == 53 { return "more: loment explain "; }
     if k == 54 { return "note: "; }
     if k == 55 { return " more not shown (--max 0 for all)"; }
+    if k == 56 { return "lomenterr "; }
     return "";
 }
 
@@ -304,7 +309,7 @@ fn ui_zh(k: u32) -> str {
     if k == 23 { return "这门语言的边界"; }
     if k == 24 { return "调用约定"; }
     if k == 25 { return "语言以 `--lang auto` 为准 —— 上面只是按内容给的提示，别拿它当结论。\n"; }
-    if k == 26 { return "lomenterr: 用法: lomenterr [--no-color] [--short|--json] [--max N] <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n  --max N 限制渲染几条（默认 20；0 = 全部）。\n"; }
+    if k == 26 { return "lomenterr: 用法: lomenterr [--no-color] [--short|--json] [--max N] <诊断.jsonl>\n  诊断文件由编译器的 --diag-out PATH 写出 (loment check FILE --diag-out d.jsonl)。\n  --max N 限制渲染几条（默认 20；0 = 全部）。\n  lomenterr version            打出报错器自己的版本（不是语言版本）。\n"; }
     if k == 27 { return "[lomenterr] 诊断文件里这一行不是合法 JSON, 原样输出:\n  "; }
     if k == 28 { return " 行不是合法 JSON (诊断文件损坏, 或与本次编译器不是同一版)\n"; }
     if k == 29 { return "[OK] 无诊断\n"; }
@@ -334,6 +339,7 @@ fn ui_zh(k: u32) -> str {
     if k == 53 { return "更多: loment explain "; }
     if k == 54 { return "note: "; }
     if k == 55 { return " 条诊断没显示（--max 0 看全部）"; }
+    if k == 56 { return "lomenterr "; }
     return "";
 }
 
@@ -706,6 +712,12 @@ fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
             if arg_is(p, n, "--no-color") == 1 || arg_is(p, n, "-C") == 1 {
                 store32(ctx, C_COLOR, 0);
             } else {
+                // `version` / `--version` / `-V` —— **这是要报错器报自己的版本，不是一份诊断**。
+                // 三个写法都收：裸词与 `loment version` 一致，两个带横杠的与别处一致
+                // （`lomcli` 也是 `version` 与 `--version` 都认）。
+                if arg_is(p, n, "version") == 1 || arg_is(p, n, "--version") == 1 || arg_is(p, n, "-V") == 1 {
+                    store32(ctx, C_WANTVER, 1);
+                } else {
                 // `--short` / `--json` **顺带关色**：它们存在的意义就是给管道与编辑器读
                 // （`docs/182` §15），一条带 ANSI 转义的"机器可读行"没人能 grep。
                 if arg_is(p, n, "--short") == 1 {
@@ -738,6 +750,7 @@ fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
                             }
                         }
                     }
+                }
                 }
             }
             k = k + 1;
@@ -2662,6 +2675,18 @@ fn _start() -> u32 {
     store32(ctx, C_MAX, MAX_DEFAULT);
 
     let av: u64 = parse_args(ctx, ab, sc);
+    // `lomenterr version` —— 打完就退 0。**趁早**：它压根没有诊断文件，不在这儿收，
+    // 就会一路走到下面的用法报错（而"用法不对"不是用户此刻的处境）。
+    // 也**故意不先读 errconfig**：这一行是程序名 + 版本号，两门语言同形，与语言无关。
+    if load32(ctx, C_WANTVER) == 1 {
+        let o: u32 = em(ctx, 0, ui(ctx, S_VER));
+        let o2: u32 = em(ctx, o, lomenterr_version());
+        // **走 stdout**（这个程序别处一律 fd 2）：这一行**不是诊断**，是"你是谁"。
+        // 脚本要 `v=$(lomenterr version)` 拿它，而 fd 2 抓不到 —— 报错器把唯一一条
+        // "给程序读"的输出放 stdout，这是一个**有意的例外**，不是漏改。
+        write_all(1, ctx, em_byte(ctx, o2, NL) as u64);
+        return die(0);
+    }
     // 语言在**用法报错之前**定下来：否则 `lomenterr` 自己用法写错时那句提示是一种语言、
     // 而诊断是另一种，"同一份输出里两种语言"就是这么来的。
     cfg_load(ctx, ab, sc);

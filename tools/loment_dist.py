@@ -2073,7 +2073,7 @@ README_MD = """# Loment {DISPLAY}
 | `bin/loment` | 启动器（下面那些子命令） |
 | `bin/loment-lomelf` | 链接器：把 `.ll` 变成可执行文件（`build`/`run` 用它） |
 | `bin/loment-cli` | 命令前端：`help` / `codes` / `stat` / `grep` / `ls` / `tree` / …（Loment 自己写的，`loment/tools/lomcli.lomt`） |
-| `bin/lomenterr` | 报错器：吃编译器 `--diag-out` 的 JSONL，补上标题、源行与修复建议（`loment/tools/lomenterr.lomt`，`docs/182`）。**由启动器自动调用**，不是 `loment` 的子命令 |
+| `bin/lomenterr` | 报错器：吃编译器 `--diag-out` 的 JSONL，补上标题、源行与修复建议（`loment/tools/lomenterr.lomt`，`docs/182`）。**由启动器自动调用**，不是 `loment` 的子命令。它有**自己的版本号**（与语言版本是两条线）：`lomenterr version` |
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，`lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi` |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |

@@ -1197,6 +1197,118 @@ _LAUNCHER_ENV["PATH"] = (f"{_shp(Path('/usr/bin'))}:{_shp(Path('/bin'))}:"
                          f"{_LAUNCHER_ENV.get('PATH', '')}")
 
 
+@test
+def test_version_prints_the_reporter_own_number():
+    """`lomenterr version` 打的是**报错器自己的**版本号，与语言版本是**两条线**（`docs/182` §17）。
+
+    报错器是一件独立交付的程序 —— 它有自己的命令行面、自己的判据、自己的孪生，改动也与
+    语言面无关（2026-09-18 到 10-13 之间它改了七八轮，语言版本只动过一次）。捆在一个号上
+    就只能记成"语言又升了一版"，那既不真，也让人没法回答"我用的是哪个报错器"。
+
+    四个断言，各挡一种退化：
+    * **三个写法**都认（`version` / `--version` / `-V`）—— 少一个就有人敲不出想要的东西；
+    * 退 **0**（不是 2）—— 版本不是用法错误；
+    * 那一行在 **stdout**，stderr 是空的 —— 脚本要 `v=$(lomenterr version)` 拿它，
+      而 fd 2 抓不到（别处一律 fd 2，这一行是**有意的例外**，见 §17.4）；
+    * 与 `loment_release.LOMENTERR` **逐字相同** —— 这一条同时是"没有第二份字面量"的判据：
+      真源改了而 `--dump-surface` 忘了重跑，这里与 `test_surface_data_is_up_to_date`
+      会一起红，而不是让一个编出来的号静静发出去。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    assert re.fullmatch(r"\d+\.\d+(\.\d+)*", loment_release.LOMENTERR), (
+        f"真源里的版本号不像个版本号（被清空/写成占位符了？）: {loment_release.LOMENTERR!r}")
+    for spelling in ("version", "--version", "-V"):
+        r = subprocess.run([str(_bin()), spelling], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=60)
+        assert r.returncode == 0, (spelling, r.returncode, r.stderr[:120])
+        assert r.stdout.strip() == want, (
+            f"{spelling}: stdout={r.stdout!r}，期望 {want!r}")
+        assert r.stderr == "", (
+            f"{spelling}: 版本走 stdout，stderr 该是空的: {r.stderr!r}")
+    print(f"      lomenterr version: 三个写法都打 {want!r}（stdout，与真源逐字节相同）")
+
+
+@test
+def test_the_docs_show_the_version_the_binary_prints():
+    """README 与 QUICKSTART 里那两处 `lomenterr 0.1.2` 必须跟着真源走。
+
+    它们是**叙述**（不是第二份真源），但叙述里印着一个**具体的号**，就会过期 ——
+    而"文档说 0.1.2、二进制打 0.1.3"是最难被发现的那种不一致：两边单看都正常，
+    要同时看着两边才知道。本仓对这类"抄第二遍"的处置一向是二选一：要么**生成**它，
+    要么**判据盯着**它（`docs/182` §17.2）。这里选后者 —— 那两处是散文里嵌的一行示例，
+    生成进去反而读不通。
+
+    （`docs/182` §17 不进这份清单：它讲的是**机制**，引的是 `LOMENTERR` 那个常量名，
+    而不是"这个号现在是几"。）
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    for name in ("README.md", "QUICKSTART.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert want in text, (
+            f"{name} 里没有 {want!r} —— 版本号改了而文档没跟上（docs/182 §17.2）")
+    print(f"      README 与 QUICKSTART 都跟着真源 ({want!r})")
+
+
+@test
+def test_every_message_the_compiler_can_print_has_a_code():
+    """**编译器能说的每一句，报错器都得认得出是哪一类** —— 这是「减少静默」的机械落点。
+
+    分类是一张正则表（`loment_diag.RULES`）；落在表外的消息渲染成 **E999「未分类，请报告」**。
+    那是一条**响亮的**退路（不是静默），但它把"我们没覆盖到"推给用户，而且只在真有人撞上时
+    才暴露 —— 加了新诊断而忘了补分类，中间那段时间**没有任何东西会红**。
+
+    所以这条判据把**编译器的诊断模板**枚举出来（AST 扫 `tools/lomentc.py` 里
+    `errs.append(...)` 与 `LomError(...)` 的调用点），逐条过 `classify()`，断言没有一条落到
+    E999。加了新消息却没补分类 —— 这里当场红，而不是等用户来报。
+
+    **扫模板而不是跑语料**：模板是"编译器可能说什么"的**上界**，运行时的消息是它的实例化。
+    上界覆盖了实例化一定覆盖，反过来不成立 —— 跑一遍语料只碰得到其中一部分，而**碰不到的那些
+    恰恰是最容易漏的**（罕见路径）。这一轮实测：102 种模板，当时 0 条未分类。
+
+    `{…}` 占位代成**数字** `1`：消息里的数值位置（`需要 2 个实参`）靠 `\\d+` 匹配，
+    代成字母会**假红** —— 第一版就是这么误报的。
+    """
+    import ast
+    import loment_diag  # noqa: E402
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    def template(node):
+        if isinstance(node, ast.JoinedStr):
+            return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def is_error_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    seen: set[str] = set()
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_error_sink(node):
+            t = template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)      # 去掉 `12: ` 那个行号前缀
+            if t in seen:
+                continue
+            seen.add(t)
+            if loment_diag.classify(t)[0] == "E999":
+                bad.append(t)
+    assert seen, "一条诊断都没扫到 —— 提取方式跟编译器脱节了（这条判据在空转）"
+    assert not bad, (
+        f"这些编译器消息没有分类（会渲染成 E999「请报告」）: {bad[:6]}"
+        f" —— 去 `loment_diag.RULES` 补一条，别让用户替我们兜")
+    print(f"      编译器 {len(seen)} 种诊断模板**全部**有分类（没有一条落到 E999）")
+
+
 def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
                   file_first: bool = True):
     """跑**真启动器**。`file_first=False` 把开关放在文件名前面 —— 两种位置都得能跑。
