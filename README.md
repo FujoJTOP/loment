@@ -10,24 +10,26 @@
 </p>
 
 <p align="center">
-  <b>A systems programming language.</b><br>
-  Native x86-64 — Linux ELF, Windows PE, or bare metal.<br>
-  <b>Sealed</b> by default. <b>Hosted</b> when you say so.
+  <a href="https://fujojtop.github.io/loment-site/">Website</a> ·
+  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix">Download 0.1.4.5</a> ·
+  <a href="QUICKSTART.md">Quick start</a> ·
+  <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
+  <a href="standard/LLS.md">Standard</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix"><b>Download 0.1.4.5 QuickFix</b></a> ·
-  <a href="https://fujojtop.github.io/loment-site/">Site</a> ·
-  <a href="https://loment.fandom.com/">Wiki</a> ·
-  <a href="https://mastodon.social/@Loment">Mastodon</a> ·
-  <a href="https://github.com/FujoJTOP/loment/issues">Issues</a> ·
-  <a href="https://discord.gg/rGw7NRNU">Discord</a>
-</p>
+This is the main source code repository for Loment. It contains the compiler, the standard
+library and the toolchain. It ships as a package — a Linux `tar.gz`, a Windows `zip`, a Windows
+installer — and running it needs no Python, no clang and no WSL.
 
-Loment compiles to native x86-64 executables for Linux, Windows or bare metal. `choose sealed`,
-the default, carries no runtime and no libc; `choose hosted` would reach real libraries, and a
-release build refuses it. The toolchain is written in Loment, and installing needs no Python,
-no clang and no WSL. Write in its Rust-flavored syntax or in C, C++, Java, C#, Go, Python.
+## Why Loment?
+
+- **Small.** A program becomes a native x86-64 executable with no runtime and no libc — Linux
+  ELF, Windows PE, or a bare object for metal. The toolchain is itself written in Loment.
+- **Accountable.** A capability domain says how far a unit may reach, and a form object records
+  what it holds and reaches, so what a program can touch is answerable without reading the source.
+- **Familiar.** The syntax is Rust-flavored, and the same program can be written in six more:
+  C, C++, Java, C#, Go or Python.
 
 ## A first program
 
@@ -46,35 +48,28 @@ $ loment run hello.lomt
 hello from Loment
 ```
 
-`_start` is the entry point; a sealed artifact has no runtime. Output goes through `write`;
-there is no `printf`.
-
-![How a program is built: hello.lomt goes to loment-driver, which checks it and emits LLVM IR; loment-lomelf, the repository's own linker, turns that into an 8 KB static executable](editors/loment-pipeline.png)
-
-## What it is for
-
-Loment asks: who can run what, in what scope, and can that be settled without reading the source?
+## Where to learn more
 
 | | |
 |---|---|
-| **Capability domains** | `capability blk : disk[0..4]` declares the range a unit may reach; `guard blk(i);` checks an index against it — compile time for a literal, run time otherwise, trapping out of range. |
-| **Potato form objects** | Every unit exports a machine-readable summary of what it holds and reaches, judged by two independent validators. |
-| **A compat layer** | C, C++, Rust and Zig behind the C ABI; Go, Python, Java, JavaScript, Perl and Lua over a process bridge. |
+| [Quick start](QUICKSTART.md) | Sources, toolchain, the first four commands. |
+| [Language guide](.claude/skills/loment/SKILL.md) | Syntax, built-ins, error codes. Self-contained, shipped inside the package as `loment skill --print`. |
+| [Standard](standard/LLS.md) | LLS, the *Loment Language Standard* — what is frozen, and who decides conformance. |
+| [Manual](docs/manual/index.md) · [Examples](loment/examples/) | The generated reference, and 34 example programs. |
+| [Wiki](https://loment.fandom.com/) | The language, the toolchain and the ecosystem, browsable. |
+| [docs/](docs/) | Design and measurement records. Most are written in Chinese. |
 
-![loment check rendering an E002 undeclared-name diagnostic: the code, the source line with a caret, then message, what went wrong, why, four numbered fixes, and what is and is not supported](editors/loment-diagnostic.png)
+## Getting help
 
-## Status
+Ask in an [issue](https://github.com/FujoJTOP/loment/issues), on
+[Discord](https://discord.gg/rGw7NRNU) or on [Mastodon](https://mastodon.social/@Loment).
+Questions are as welcome as bug reports.
 
-`0.1.4.5 QuickFix` ships as a package for Linux and Windows. Self-hosted at run time; the
-development side is not yet.
+## Contributing
 
-![The bootstrap: the committed seed is cooked into a stage1 by the genesis assembler; stage1 must reproduce the seed byte for byte; stage2 to stage3 reaches a fixed point; the two stages agree on a foreign entry file](editors/loment-bootstrap.png)
-
-## How this is built
-
-**Not pure vibe coding.** Agents write most of it, but a person directs the work and a program
-decides what may land: two implementations of the language surface must agree byte for byte,
-and the conformance suite — not the document, not any implementation — decides what conforms.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Loment is developed with AI coding agents in the loop,
+and says so: a person directs the work, a program decides what may land, and the conformance
+suite decides what conforms. The working conventions are in `AGENTS.md`.
 
 ## License
 
