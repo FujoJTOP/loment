@@ -250,8 +250,9 @@ SHARD_COST = {
     # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
     # 真 http.server。本机 6.9s。
     "loment_internet_test": 10.0,
-    # 实测: 4 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑。本机 2.5s。
-    "loment_os_test": 5.0,
+    # 实测: 5 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑, 另一条起 4 个真线程
+    # 跑 20 万次临界区 (docs/245 阶段 2)。本机 5.6s。
+    "loment_os_test": 20.0,
     # 实测: 6 条; 两条各编一次 ELF 探针并在 WSL 里起 4 个线程跑 (另四条是编译期负例,
     # 不落产物)。本机 0.8s —— WSL 热的时候。冷启动给宽一点。
     "loment_thread_test": 30.0,
