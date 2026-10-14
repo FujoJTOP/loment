@@ -87,7 +87,7 @@
   },
   {
    "path": "tools/loment_os_test.py",
-   "sha256": "e6f6c1daf50264f0e050383a18ffaa64036b335b95f5a3ddbabe07be54260656"
+   "sha256": "eb81ea65c553f7f22259871e205afef1c15fe1c46d0315699795cf7ff563e650"
   },
   {
    "path": "tools/loment_thread_test.py",
@@ -955,7 +955,7 @@
   },
   {
    "path": "tools/lvm.py",
-   "sha256": "92f68c165af0c9e9b9777d23ca4127ea3dc44cbca87bf6596acf302d792685ef"
+   "sha256": "459d5a3e4f44e03c3ed09b9bcc23e2caa8da0c993ba87a716196e2d44daa3b57"
   },
   {
    "path": "tools/lvm_test.py",

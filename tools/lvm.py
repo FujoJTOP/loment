@@ -93,6 +93,11 @@ _ICMP = {
 _SIGNED_CMP = ("sgt", "sge", "slt", "sle")
 
 _CALL_ASM = lomelf.CALL_ASM_RE
+#: `CALL_ASM_RE` 的分组: 1 = 返回类型, **2 = asm 名字, 3 = 约束串, 4 = 实参表**。
+#: 2026-10-14（`docs/245`）之前只有 1/2/3 —— 名字是写死在模式里的 `"syscall"`。加
+#: `thread_spawn` 那第二类内联汇编时把它改成了**捕获名字**，于是这里的组号整体挪了一格。
+#: 写在这里而不是就地写 `m.group(3)`：下次再动那张模式，改这一处就够了。
+_ASM_NAME, _ASM_SPEC, _ASM_ARGS = 2, 3, 4
 
 
 def _parse_asm_constraints(spec: str) -> tuple[str | None, list[str]]:
@@ -247,7 +252,12 @@ class Executor(Vm):
     def call(self, fr: Frame, text: str):
         m = _CALL_ASM.match(text)
         if m:
-            _, spec, argtext = m.group(1), m.group(2), m.group(3)
+            name = m.group(_ASM_NAME)
+            spec, argtext = m.group(_ASM_SPEC), m.group(_ASM_ARGS)
+            if name != "syscall":
+                # `thread_spawn` 那种**定制序列**（`docs/245`）不是一条 syscall ——
+                # 这一档（T0 解释器）不实现它。**响亮地拒**，不假装跑过去。
+                raise LvmError(f"这一档不支持的 asm: {name!r}（`docs/245`）")
             out_reg, ins = _parse_asm_constraints(spec)
             a = [self.operand(fr, s)[1] for s in lomelf.split_top(argtext)]
             nr = a[0]
