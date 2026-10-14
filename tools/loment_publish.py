@@ -174,6 +174,10 @@ REPOS: dict[str, dict] = {
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",
+            # LVM 的 T0（`docs/243`）。**名字不以 `lom` 开头**（是 `lvm`），所以上面那个
+            # `tools/lom*` 收不到 —— 正是闭包判据点名的那一类（2026-10-13 CI 上真红了一次：
+            # 参考解释器与两条判据把 `lvm`/`lvm_test` 拉进了门禁闭包，而它们不在清单里）。
+            "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py",
             # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。
             # 这 8 条是判据真正读的那些，一条一条点名。
