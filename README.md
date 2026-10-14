@@ -19,7 +19,7 @@
 </p>
 
 This is the main source code repository for Loment. It contains the compiler, the standard
-library and the toolchain. It ships as a package — a Linux `tar.gz`, a Windows `zip`, a Windows
+library and the toolchain. It ships as a package — Linux `tar.gz`, Windows `zip`, Windows
 installer — and running it needs no Python, no clang and no WSL.
 
 ## Why Loment?
@@ -30,6 +30,9 @@ installer — and running it needs no Python, no clang and no WSL.
   what it holds and reaches, so what a program can touch is answerable without reading the source.
 - **Familiar.** The syntax is Rust-flavored, and the same program can be written in six more:
   C, C++, Java, C#, Go or Python.
+
+Diagnostics come from a separate program: `lomenterr version` prints `lomenterr 0.1.2`, its own
+number.
 
 ## A first program
 
@@ -53,8 +56,8 @@ hello from Loment
 | | |
 |---|---|
 | [Quick start](QUICKSTART.md) | Sources, toolchain, the first four commands. |
-| [Language guide](.claude/skills/loment/SKILL.md) | Syntax, built-ins, error codes. Self-contained, shipped inside the package as `loment skill --print`. |
-| [Standard](standard/LLS.md) | LLS, the *Loment Language Standard* — what is frozen, and who decides conformance. |
+| [Language guide](.claude/skills/loment/SKILL.md) | Syntax, built-ins, error codes. Ships inside the package as `loment skill --print`. |
+| [Standard](standard/LLS.md) | LLS, the *Loment Language Standard* — what is frozen, who decides conformance. |
 | [Manual](docs/manual/index.md) · [Examples](loment/examples/) | The generated reference, and 34 example programs. |
 | [Wiki](https://loment.fandom.com/) | The language, the toolchain and the ecosystem, browsable. |
 | [docs/](docs/) | Design and measurement records. Most are written in Chinese. |
