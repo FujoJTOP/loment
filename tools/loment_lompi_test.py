@@ -417,6 +417,221 @@ def test_fetch_prints_the_plan_for_https_and_hostnames():
     assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
 
 
+# ---------------------------------------------------------------- 防守 (审计回归)
+#
+# 这一组对着审计里在 `lpi_cli` 上实测出来的高危缺陷 (#300/#301/#302/#305/#307)。全是
+# **敌意对端**用例: 真起一个服务器让它回不该回的东西 —— 打桩等于把被测的那一段换掉。
+#
+# 没在这儿钉的两条, 以及为什么不钉:
+#   * #303 (索引条目数上限): 要触发得先让 4096 条都取成功, 一千多个来回, 判据本身会变成
+#     最慢的一条; 计数那条由代码审查看住。
+#   * #304 (`MSG_NOSIGNAL`): 要可靠复现"写落在已 RST 的 socket 上"得有 accept 与 send 之间
+#     的竞态, 拿它当判据会变成 flaky 的那条。改动是一行 flag, 依据是仓内实测过的 SKILL 6.2.18。
+
+def _serve_routes(routes) -> tuple[object, int]:
+    """按请求行里的路径分派: `routes` 是 `(子串, maker)` 的列表, 取第一个命中。
+
+    `maker()` 返回 `(payload, mode)`: mode `"ok"` 正常写完就关, `"rst"` 写完**立刻 RST**
+    (SO_LINGER 0) —— 半条响应 + RST 会让客户端的下一次 `recv` 拿到错误而不是"读完"。
+
+    **为什么要按路径分派**: 敌意夹具要能**红** —— 让索引那一步被接受、后面的落盘真的发生,
+    才看得出来"不该收下的东西被收下了"。只回一坨垃圾的话, 下游的索引解析会先把它挡掉,
+    于是判据在修之前也是绿的 (那就是假判据)。
+    """
+    import socket as _s
+    import socketserver
+    import struct
+    import threading
+
+    linger = struct.pack("hh" if sys.platform == "win32" else "ii", 1, 0)
+
+    class H(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            req = self.rfile.readline()
+            while True:
+                line = self.rfile.readline()
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+            for needle, maker in routes:
+                if needle.encode() in req:
+                    payload, mode = maker()
+                    try:
+                        if payload:
+                            self.wfile.write(payload)
+                            self.wfile.flush()
+                        if mode == "rst":
+                            self.connection.setsockopt(_s.SOL_SOCKET, _s.SO_LINGER, linger)
+                    except OSError:
+                        pass
+                    return
+            self.wfile.write(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
+def _serve_silent() -> tuple[object, int]:
+    """接了、把请求读完、**什么都不回也不关** —— 一个握手后就不说话的对端 (审计 #301)。
+
+    与"立刻关掉"不同: 关掉的话客户端会拿到 EOF (`recv` 返回 0), 那是**正常收尾**,
+    没有超时也走得掉。要测超时必须把连接**攥着**。
+    """
+    import socketserver
+    import threading
+    import time
+
+    class H(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            self.rfile.readline()
+            while True:
+                line = self.rfile.readline()
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+            time.sleep(120)
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
+def _prime_cache(url: str) -> None:
+    """lompi 在 PE 上没有 `mkdir` (`docs/236`), 它会把要建的目录**打出来** —— 照做再跑。
+
+    不先跑这一趟, 落盘那一步会撞在"建不了目录"上, 于是"该被拒的东西"和"该被收下的东西"
+    都到不了 `fetched` —— 判据就成了假绿。
+    """
+    _run(["fetch", "--registry", url])
+    _, out = _run(["fetch", "--registry", url])
+    for line in out.splitlines():
+        if line.startswith("lompi: make it first:"):
+            Path(line.split("mkdir -p ", 1)[1].strip()).mkdir(parents=True, exist_ok=True)
+
+
+def _ok_200(body: bytes, declared: int | None = None) -> bytes:
+    n = len(body) if declared is None else declared
+    return (b"HTTP/1.0 200 OK\r\nContent-Length: " + str(n).encode()
+            + b"\r\nConnection: close\r\n\r\n" + body)
+
+
+@test
+def test_fetch_refuses_a_response_that_only_looks_like_200():
+    """审计 #307: 200 要**按状态行**判, 不是在头块里搜子串 `" 200"`。
+
+    夹具让 404 的 body **就是一份合法索引**, 而且文件那条路径正常回 200 —— 于是"404 被当成
+    200"会一路走到 `fetched`。修之前这条是**红的**; 修之后索引那步就被状态行挡下了。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+    h1 = hashlib.sha256(f1).hexdigest()
+    good_index = f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n".encode()
+    hostile = (b"HTTP/1.0 404 Not Found\r\n"
+               b"X-Fetch: 200\r\n"
+               b"Connection: close\r\n"
+               b"\r\n" + good_index)
+    httpd, port = _serve_routes([
+        ("lompi-index.txt", lambda: (hostile, "ok")),
+        ("mathutil.lomt", lambda: (_ok_200(f1), "ok")),
+    ])
+    url = f"http://127.0.0.1:{port}"
+    try:
+        _prime_cache(url)
+        _rc, out = _run(["fetch", "--registry", url])
+    finally:
+        httpd.shutdown()
+    assert "fetched" not in out, f"带 `X-Fetch: 200` 的 404 被当成 200 收下了: {out[:300]!r}"
+    print("      404 带 `X-Fetch: 200` 不再被当成 200 (body 是一份合法索引也没用)")
+
+
+@test
+def test_fetch_refuses_a_body_cut_short():
+    """审计 #302: 半路断掉的响应**不能**当成完整的交出去。
+
+    夹具把**文件**那条回成"200 + 半截 body + RST", 而索引里写的就是那半截的 sha256 ——
+    于是"截断被当完整"会走到 `fetched` (哈希正好对上)。修之前这条是红的。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    whole = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+    half = whole[:24]                                     # "收到一半就断"
+    h_half = hashlib.sha256(half).hexdigest()
+    index = f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h_half}\n".encode()
+    partial = _ok_200(half, declared=len(whole))          # 声明的是全长, 只发半截
+    httpd, port = _serve_routes([
+        ("lompi-index.txt", lambda: (_ok_200(index), "ok")),
+        ("mathutil.lomt", lambda: (partial, "rst")),
+    ])
+    url = f"http://127.0.0.1:{port}"
+    try:
+        _prime_cache(url)
+        rc, out = _run(["fetch", "--registry", url])
+    finally:
+        httpd.shutdown()
+    assert rc != -13, f"被 SIGPIPE 杀了 (没有 MSG_NOSIGNAL): {out[:200]!r}"
+    assert "fetched" not in out, f"半截 body 被当成完整的收下了: {out[:300]!r}"
+    print("      半路断掉的响应被拒 (不再当成完整 body)")
+
+
+@test
+def test_fetch_gives_up_on_a_silent_peer():
+    """审计 #301: 一个握手之后就不说话的对端不能把 `fetch` 永久挂住。
+
+    修之前 socket 上没有任何超时, 这条会一直阻塞到 `_run` 的 180 秒上限 —— 也就是**红**。
+    """
+    import time
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    httpd, port = _serve_silent()
+    try:
+        t0 = time.monotonic()
+        _rc, out = _run(["fetch", "--registry", f"http://127.0.0.1:{port}"])
+        dt = time.monotonic() - t0
+    finally:
+        httpd.shutdown()
+    assert dt < 60, f"对端不说话时挂了 {dt:.1f}s —— socket 上没有超时"
+    assert "fetched" not in out, out[:300]
+    print(f"      对端不说话时 {dt:.1f}s 就放弃 (有超时)")
+
+
+@test
+def test_fetch_refuses_a_traversing_index():
+    """审计 #305: 索引里的 `name` / `version` 会被当成路径段拼进落盘路径。
+
+    修之前 `name` 里带 `/` 或 `..` 就会被原样拼进去 —— 落点跑到 `<root>/cache/<slug>/`
+    之外, 而内容正是对端给的 body, 摘要也由对端提供: 一次请求 = 一次任意文件写。
+
+    这条钉的是**那道闸**(拒绝并说清为什么), 而不是"文件没落盘": 穿越目标目录不存在时
+    "没落盘"这件事在修之前也成立 —— 那种判据修之前也是绿的, 等于没测。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    body = b"module pwned\n"
+    h = hashlib.sha256(body).hexdigest()
+    index = (f"../../../../escaped 0.1.0 mathutil/0.1.0/mathutil.lomt {h}\n").encode()
+    httpd, port = _serve_routes([
+        ("lompi-index.txt", lambda: (_ok_200(index), "ok")),
+        ("mathutil.lomt", lambda: (_ok_200(body), "ok")),
+    ])
+    try:
+        _rc, out = _run(["fetch", "--registry", f"http://127.0.0.1:{port}"])
+    finally:
+        httpd.shutdown()
+    assert "refusing an index entry" in out, \
+        f"带 `../` 的 name/version 没被那道闸拦下: {out[:300]!r}"
+    assert "fetched" not in out, f"带穿越路径的索引被收下了: {out[:300]!r}"
+    print("      带 `../` 的 name/version 被拒 (不再爬出 cache 目录)")
+
+
 @test
 def test_paths_use_the_platform_separator():
     """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。

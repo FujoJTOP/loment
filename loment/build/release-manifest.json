@@ -107,7 +107,7 @@
   },
   {
    "path": "lompi/lpi_cli.lomt",
-   "sha256": "54782f2d17869527ff550eb34ddfe7e92e4c8868dd41fbf1526d6805625a1525"
+   "sha256": "f1fb7c518f0987f1e18eacf71990be67e749f9c4357695c771da8b9d8141a30c"
   },
   {
    "path": "lompi/lpi_dir.lomt",
@@ -775,7 +775,7 @@
   },
   {
    "path": "tools/loment_lompi_test.py",
-   "sha256": "8847bfc8b7ce29ef016bfde22ab0bd828c4f35225e054231c2ab5328327beb5f"
+   "sha256": "ae8493563dbba8891bc1b1fa1a663bcf2fc82ee2199d525d94b5189c0ec88f82"
   },
   {
    "path": "tools/loment_publish.py",
