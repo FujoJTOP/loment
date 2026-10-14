@@ -1331,7 +1331,7 @@
   },
   {
    "path": "loment/tools/lvm.lomt",
-   "sha256": "61a5285e111a497888345558b7d9f8a73f19bd261320d33be3598b13de0b3fa2"
+   "sha256": "ddddbfb79ed26e5a4e3ad6a69fb3e9faab631550e7ae223f49c97e0553d5c860"
   },
   {
    "path": "loment/tools/surface_data.lomt",
@@ -2323,7 +2323,7 @@
   },
   {
    "path": "docs/243-lvm-t0-interpreter.md",
-   "sha256": "bb5a7f2ff53bb533e264de40d1411716922f8eca4f3194cff30e5f2e86084b24"
+   "sha256": "ab1913e907f1510a32dc0f0c213ebf1700f384026b8a442afada24f3955f3a0e"
   },
   {
    "path": "docs/manual/index.md",
