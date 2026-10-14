@@ -1997,6 +1997,23 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
         j = skip_sp(t, hi32(ts) + lo32(ts), le);
     }
     if lit_at(t, j, le, "asm ") == 1 {
+        // **按 asm 的第一个词分派** (M84): `syscall` 是内联汇编本身, `thread_spawn @入口`
+        // 是链接器自己发的定制序列 (docs/245)。参考实现 `_call` 是同一个分派点。
+        let qn: u32 = 0;
+        let q1: u32 = 0;
+        let kk: u32 = j;
+        while kk < le {
+            if load8(t, kk) == 34 {
+                if qn == 0 {
+                    q1 = kk;
+                }
+                qn = qn + 1;
+            }
+            kk = kk + 1;
+        }
+        if q1 > 0 && lit_at(t, q1 + 1, le, "thread_spawn") == 1 {
+            return do_call_spawn(tab, out, c, t, j, le, doff, dlen);
+        }
         return do_call_asm(tab, out, c, t, j, le, doff, dlen);
     }
     let cs: u32 = j;
@@ -2208,6 +2225,99 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
         d = e1(out, d, 15);
         d = e1(out, d, 5);
     }
+    return emit_put(tab, out, d, t, doff, dlen, RAX);
+}
+
+/// `thread_spawn @入口` (M84, docs/245) —— 与参考实现 `Emitter._call_spawn`
+/// (`../tools/lomelf.py` 的 `_SPAWN_HEAD` / `_SPAWN_TAIL` + 中间那条 `Asm.call`)
+/// **逐字节相同**。两处必须一起改: `loment_elf_test` 的孪生那格拿同一份 `.ll` 比两份 ELF。
+///
+/// ```asm
+///   BF 00 0F 05 00    mov  edi, 331520   ; CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM
+///   31 D2             xor  edx, edx      ; ptid  = NULL
+///   45 31 D2          xor  r10d, r10d    ; ctid  = NULL
+///   45 31 C0          xor  r8d, r8d      ; newtls = 0
+///   B8 38 00 00 00    mov  eax, 56       ; clone
+///   0F 05             syscall
+///   48 85 C0          test rax, rax
+///   75 13             jne  .parent       ; 跳过下面 19 字节 (3+2+5+2+5+2)
+///   48 89 E5          mov  rbp, rsp      ; 子线程换掉继承来的 rbp (硬事实一)
+///   41 51             push r9            ; 实参 → 被调方的第 0 个形参槽
+///   E8 rel32          call 入口          ; **直接调用** —— 静态调用图不变
+///   89 C7             mov  edi, eax
+///   B8 3C 00 00 00    mov  eax, 60       ; exit (**不是** exit_group: 后者杀掉整组)
+///   0F 05             syscall
+/// ```
+/// 进门前 `emit_get` 已把**第 0 个操作数取进 r9**（子线程实参）、**第 1 个取进 rsi**
+/// （栈顶）。r9 是唯一能把一个值安全带过 `clone` 的寄存器: 系统调用不碰它（只踩
+/// rcx/r11），而子线程在 `clone` 那一刻继承整个寄存器组。
+fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
+                 doff: u32, dlen: u32) -> u32 {
+    if cell(tab, C_PE) == 1 {
+        return fail("thread_spawn 只在 ELF 目标可用 — Windows 没有 clone (docs/245)");
+    }
+    // asm 名字: 第 1、2 个引号之间 = `thread_spawn @入口`
+    let nq: u32 = 0;
+    let q1: u32 = 0;
+    let q2: u32 = 0;
+    let k: u32 = i;
+    while k < le {
+        if load8(t, k) == 34 {
+            if nq == 0 {
+                q1 = k;
+            }
+            if nq == 1 {
+                q2 = k;
+            }
+            nq = nq + 1;
+        }
+        k = k + 1;
+    }
+    let eo: u32 = q1 + 15;                       // 引号(1) + "thread_spawn"(12) + 空格(1) + "@"(1)
+    if q2 <= eo || q2 >= le {
+        return fail("thread_spawn 的 asm 名字里没有入口");
+    }
+    // 操作数表: 约束串里没有括号, 所以第 2 个引号之后的**第一个** `(` 就是它
+    let pr: u64 = arg_parens(t, q2, le);
+    let lp: u32 = hi32(pr);
+    let rp: u32 = lo32(pr);
+    let nargs: u32 = nargs_of(t, lp, rp);
+    let d: u32 = c;
+    let q: u32 = 0;
+    while q < nargs {
+        let a2: u32 = arg_start(t, lp, rp, q);
+        let ts: u64 = type_span(t, a2, rp);
+        let to: u32 = hi32(ts);
+        let tl: u32 = lo32(ts);
+        let vs: u32 = skip_sp(t, to + tl, rp);
+        let ve: u32 = word_end(t, vs, rp);
+        if q == 0 {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, 9);      // r9 = 子线程实参
+        } else {
+            d = emit_get(tab, out, d, t, to, tl, vs, ve - vs, RSI);    // rsi = 栈顶
+        }
+        q = q + 1;
+    }
+    // ---- 头 (_SPAWN_HEAD)
+    d = e1(out, d, 191); d = e1(out, d, 0); d = e1(out, d, 15);
+    d = e1(out, d, 5); d = e1(out, d, 0);                      // BF 00 0F 05 00
+    d = e1(out, d, 49); d = e1(out, d, 210);                   // 31 D2
+    d = e1(out, d, 69); d = e1(out, d, 49); d = e1(out, d, 210);   // 45 31 D2
+    d = e1(out, d, 69); d = e1(out, d, 49); d = e1(out, d, 192);   // 45 31 C0
+    d = e1(out, d, 184); d = e1(out, d, 56);
+    d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // B8 38 00 00 00
+    d = e1(out, d, 15); d = e1(out, d, 5);                     // 0F 05
+    d = e1(out, d, 72); d = e1(out, d, 133); d = e1(out, d, 192);  // 48 85 C0
+    d = e1(out, d, 117); d = e1(out, d, 19);                   // 75 13
+    d = e1(out, d, 72); d = e1(out, d, 137); d = e1(out, d, 229);  // 48 89 E5
+    d = e1(out, d, 65); d = e1(out, d, 81);                    // 41 51
+    // ---- 直接调用 (那条 `E8` 落在符号表上, 与普通调用同一条回填路)
+    d = em_call_lbl(out, d, tab, eo, q2 - eo);
+    // ---- 尾 (_SPAWN_TAIL)
+    d = e1(out, d, 137); d = e1(out, d, 199);                  // 89 C7
+    d = e1(out, d, 184); d = e1(out, d, 60);
+    d = e1(out, d, 0); d = e1(out, d, 0); d = e1(out, d, 0);   // B8 3C 00 00 00
+    d = e1(out, d, 15); d = e1(out, d, 5);                     // 0F 05
     return emit_put(tab, out, d, t, doff, dlen, RAX);
 }
 
@@ -3717,7 +3827,14 @@ fn do_shift(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen
 }
 
 fn do_atomic(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
-    let a: u32 = i + 10;
+    // `i` 指着 `atomicrmw`, 后面还有**一个操作名**才轮到类型:
+    // `atomicrmw add ptr %v, i32 1 seq_cst`。所以跳过的是 `atomicrmw add ` (14), 不是
+    // `atomicrmw ` (10) —— 少跳这 4 个字节时读到的"类型"是 `add`, 于是
+    // `skip_sp(po + pl)` 落在 `ptr` 上, `emit_get_ptr` 拿着值为 `ptr` 去查表, 报的是一句
+    // "指针值查不到: ptr"（离现场很远）。参考实现的正则 `atomicrmw\s+add\s+(\w+)` 里
+    // 一直有那个 `add`, 所以这是镜像单方面的漏抄 —— 而**没有任何语料用过 `atomic_add`**,
+    // 于是它一直潜伏到 2026-10-14 线程那笔（探针的原子累加第一次把这条路走通）。
+    let a: u32 = i + 14;
     let pty: u64 = type_span(t, a, le);
     let po: u32 = hi32(pty);
     let pl: u32 = lo32(pty);

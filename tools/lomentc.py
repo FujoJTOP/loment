@@ -57,8 +57,22 @@ BUILTINS = {
     # 在 syscall6 上**没有地方放**（递过去的是寄存器里的残留值）—— 于是"带地址的 UDP"
     # 从 Loment 源码里写不出来（`docs/217` §5 点名的那个缺口，`docs/220` 关掉它）。
     "syscall7": (("u64", "u64", "u64", "u64", "u64", "u64", "u64"), "i64"),
+    # M84: 真线程 (docs/245)。**入口是编译期的名字**（字符串字面量）—— 子线程落地后
+    # **直接** `call @名字`，不是间接调用，所以静态调用图一个字不动（`docs/208` 那两条
+    # 承重门禁的前提不破）。这也是它与"函数指针"（线 B）分家的那条线：这里没有地址，
+    # 只有一个由产物写死的调用边。
+    # 只在 ELF/lomelf 目标可用（Windows 没有 `clone`）；PE 目标报错并点名，不静默错编。
+    "thread_spawn": (("str", "u64", "u64"), "i64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
+
+#: `thread_spawn` 的入口名（M84）。**链接器把名字原样当符号用**，所以这里就是能安全落进
+#: `.ll` 的 asm 串、又能被符号表接住的那一类 —— 比"合法标识符"再收一点（不许点，免得与
+#: `函数$块` 那种内部标签撞面）。不用正则：`lomentc` 顶层不 import `re`。
+def _is_fn_name(s: str) -> bool:
+    if not s or not (s[0].isascii() and (s[0].isalpha() or s[0] == "_")):
+        return False
+    return all(c.isascii() and (c.isalnum() or c == "_") for c in s[1:])
 
 _IR_RUNTIME = '''
 ; ---- Loment freestanding 运行时 (M31: 无 libc) ----
@@ -2967,6 +2981,29 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                             errs.append(f"{e.line}: 内建 {e.name} 实参期望 {wt}，得到整型字面量")
                     elif at != wt:
                         errs.append(f"{e.line}: 内建 {e.name} 实参类型 {at}，期望 {wt}")
+                # M84 （docs/245）: 入口那三条 —— **是字面量**、**名字合法**、**是本单元里
+                # 恰好一个形参的函数**。三条都在编译期判得出来，那正是"直接调用"买到的东西：
+                # 产物里写的是一条写死的调用边（`call @名字`），不是运行期取得到的值。
+                # 形参个数那一条不是洁癖 —— 子线程只压**一个**实参，入口要是声明了两个，
+                # 第二个读到的是栈上的垃圾，那是**静默错编**，比报错坏得多。
+                # （消息措辞是按 `loment_diag.RULES` 的正则挑的：分类只看消息，不看调用点。）
+                if e.name == "thread_spawn" and not isinstance(e.args[0], StrLit):
+                    errs.append(
+                        f"{e.line}: 内建 thread_spawn 实参 1 必须是**字符串字面量** —— 它是"
+                        f"编译期的名字（产物里是一条直接调用边），不是运行期取得到的值")
+                elif e.name == "thread_spawn":
+                    ent = e.args[0].value
+                    if not _is_fn_name(ent):
+                        errs.append(
+                            f"{e.line}: 内建 thread_spawn 实参 1 不是合法的函数名: {ent!r}")
+                    elif ent not in funcs:
+                        errs.append(
+                            f"{e.line}: thread_spawn 的入口 {ent} 是未定义的函数"
+                            f"（入口必须是本单元里写着的、能被直接调用的 Loment 函数）")
+                    elif len(funcs[ent].params) != 1:
+                        errs.append(
+                            f"{e.line}: thread_spawn 的入口 {ent} 需要 1 个实参，"
+                            f"得到 {len(funcs[ent].params)}（子线程只压一个槽）")
         elif e.name not in funcs:
             errs.append(f"{e.line}: 调用未定义的函数 {e.name}（跨模块调用需要 pub）")
         else:
@@ -7189,6 +7226,21 @@ class _Ir:
                    f'~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
                    f"i64 {vals[4]}, i64 {vals[5]}, i64 {vals[6]})")
+            return "i64", r
+        if e.name == "thread_spawn":  # M84: 真线程 —— 入口是**编译期的名字**
+            # **入口名不求值**（它不是表达式，是编译期的名字）：只走它后面那两个实参。
+            # 顺序是**从左到右**（栈顶、实参）—— 自举侧 `arg1` 只能按 token 顺序求值，
+            # 两边要产生同一套临时值编号就得同序。
+            a_stk = self.expr(e.args[1], "u64")[1]
+            a_arg = self.expr(e.args[2], "u64")[1]
+            ent = e.args[0].value
+            r = self.t()
+            # 这条 asm 的名字是**两个词**（`thread_spawn @入口`）：链接器按第一个词分派、
+            # 从第二个词里取符号。约束里的 `{r9}` / `{si}` 不是 Linux 的系统调用约定 ——
+            # 它只是"哪个操作数先算进哪个寄存器"的声明，`lomelf` 照它取参、自己发机器码。
+            self.w(f'{r} = call i64 asm sideeffect "thread_spawn @{ent}", '
+                   f'"={{ax}},{{r9}},{{si}},~{{di}},~{{dx}},~{{r10}},~{{r8}},~{{cx}},~{{r11}},'
+                   f'~{{memory}}"(i64 {a_arg}, i64 {a_stk})')
             return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")

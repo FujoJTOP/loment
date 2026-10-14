@@ -602,6 +602,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `syscall4(nr: u64, a0: u64, a1: u64, a2: u64) -> i64` | A raw syscall (rax/rdi/rsi/rdx) |
 | `syscall6(nr: u64, a0..a4: u64) -> i64` | The same, with two more arguments |
 | `syscall7(nr: u64, a0..a5: u64) -> i64` | The same, with **all six** argument registers used (`rdi/rsi/rdx/r10/r8/r9`). This is what makes **UDP with addresses writable**: `sendto`(44) / `recvfrom`(45) take a sixth argument (a `socklen_t`), which had nowhere to go on `syscall6` |
+| `thread_spawn("entry", stack_top: u64, arg: u64) -> i64` | Start a **real thread** (Linux `clone`). The first argument is the **name** of a function written in this unit that takes exactly one parameter — it becomes a **direct call** in the product, so the call graph stays static. Returns the new thread's tid. The thread exits itself when the entry returns; the entry's return value is its exit code. **ELF target only** (Windows has no `clone`). You supply the stack (see `os/thread` in the store) |
 
 **To print a number**: copy `write_dec` from section 1. There is no `printf`.
 

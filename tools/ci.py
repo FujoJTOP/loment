@@ -181,6 +181,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 第四个包 os (docs/242): 探针编成 ELF 与 CPython 的 os/time **在同一个
                  # Linux 环境里**对跑 (Windows 走 WSL, Linux 直接跑)。
                  "loment_os_test",
+                 # M84 真线程 (docs/245): 探针编 ELF, **真的起 N 个线程**在共享内存上
+                 # 累加 (WSL/原生 Linux), 负例在编译期。与 os 那条同一个环境借口。
+                 "loment_thread_test",
                  # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
@@ -249,6 +252,9 @@ SHARD_COST = {
     "loment_internet_test": 10.0,
     # 实测: 4 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑。本机 2.5s。
     "loment_os_test": 5.0,
+    # 实测: 6 条; 两条各编一次 ELF 探针并在 WSL 里起 4 个线程跑 (另四条是编译期负例,
+    # 不落产物)。本机 0.8s —— WSL 热的时候。冷启动给宽一点。
+    "loment_thread_test": 30.0,
     "loment_lompi_test": 119.8,
     "loment_multisyntax_projects_test": 2.1,
     "loment_net_test": 0.2,          # 实测: 读四份表 + 四条自证, 不编译

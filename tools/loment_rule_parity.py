@@ -60,7 +60,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 的 `v11-hosted-gc_manual` 合法样本守着。）
 # **这一条当场抓到一个真分歧**：冲突说明里写了"悬垂"两个字，撞上 E012 的关键词分类器 ——
 # 参考实现把那条冲突归成 E012、自举归成 E022。改写措辞之后两边一致。
-BUDGET = 97
+# 2026-10-14 真线程 `thread_spawn`（M84, `docs/245`）落地: **102/104**。五条 ——
+# 入口不是字面量、入口在本单元里查不到、入口形参不是一个、元数不对、实参类型不对。
+# 这一族是"**直接调用**买到的东西"（入口是编译期的名字），所以三条语义都判得了。
+BUDGET = 102
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -303,6 +306,24 @@ _CASES: list[tuple[str, str]] = [
     ("excl-net-bind",
      "module m\n\nexcluded \"net: 不碰网络\"\n\n"
      "fn f() -> i64 {\n    return syscall6(49, 3, 0, 16, 0, 0);\n}\n"),
+    # ---- 真线程 `thread_spawn` (M84, `docs/245`) -----------------------------------
+    # 这一族是"**直接调用**买到的东西"：入口是编译期的名字，于是**三条**都能在编译期判 ——
+    # 是字面量、本单元里真有这个函数、形参恰好一个。两侧各写一遍（参考 `_walk_expr` 的
+    # 内建分支 / 自举 `chk_tex_atom_call` + `chk_lookup_lit_name`），所以在这里成对钉。
+    ("thread-entry-not-literal",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f(s: str) -> i64 {\n    return thread_spawn(s, 0, 1);\n}\n"),
+    ("thread-entry-unknown",
+     "module m\n\nfn f() -> i64 {\n    return thread_spawn(\"nope\", 0, 1);\n}\n"),
+    ("thread-entry-two-params",
+     "module m\n\nfn worker(a: u64, b: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1);\n}\n"),
+    ("thread-arity",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0);\n}\n"),
+    ("thread-arg-type",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1);\n}\n"),
 ]
 
 

@@ -2760,6 +2760,29 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             }
             return k16 + 1;
         }
+        if tok_is(src, toks, j, "thread_spawn") {   // M84: 真线程 (docs/245)
+            // **入口名不当表达式求值**: 它是编译期的名字, 参考实现也只取字面量正文
+            // (`e.args[0].value`)。走 `arg1` 的话会顺手发一个字符串全局 —— 而这个实参
+            // 在产物里根本不出现。所以直接跳过 `thread_spawn` `(` 字面量 `,` 这四个 token,
+            // 从第 2 个实参 (j + 4) 开始求值。
+            // 求值序是**从左到右** (栈顶, 再实参) —— 参考侧同序, 临时值编号才对得上。
+            let k2: u32 = arg1(s, out, src, toks, j + 4, lvl + 2);   // 栈顶
+            let k3: u32 = arg1(s, out, src, toks, k2, lvl + 3);      // 子线程实参
+            emit_str(s, out, "  ");
+            let sc: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i64 asm sideeffect \"thread_spawn @");
+            emit_mem(s, out, src, load32(toks, (j + 2) * 20 + 4) + 1,
+                     load32(toks, (j + 2) * 20 + 8) - 2);
+            emit_str(s, out, "\", \"={ax},{r9},{si},~{di},~{dx},~{r10},~{r8},~{cx},~{r11},~{memory}\"(");
+            emit_str(s, out, "i64 ");
+            emit_val(s, out, lvl + 3);
+            emit_str(s, out, ", i64 ");
+            emit_val(s, out, lvl + 2);
+            emit_str(s, out, ")
+");
+            set_temp_val(s, lvl, sc);
+            return k3;
+        }
         if tok_is(src, toks, j, "syscall4") || tok_is(src, toks, j, "syscall6")
             || tok_is(src, toks, j, "syscall7") {   // M67/M72/M72+
             let n6: u32 = tok_is(src, toks, j, "syscall6") as u32;

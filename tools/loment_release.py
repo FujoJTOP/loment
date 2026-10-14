@@ -104,6 +104,9 @@ GLOBS = [
     "tools/loment_internet_test.py",
     # 第四个包 os (docs/242): 与 CPython 的 os/time/signal **在同一个 Linux 环境里**对跑
     "tools/loment_os_test.py",
+    # 真线程 thread_spawn (docs/245): 探针编成 ELF **真的起 N 个线程**在共享内存上累加,
+    # 另外拿 gettid 证伪"顺序跑下来也能凑出同样的和"那条。负例在编译期 (入口名/形参个数)。
+    "tools/loment_thread_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",

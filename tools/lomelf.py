@@ -617,8 +617,12 @@ def result_type(text: str) -> str | None:
     return None
 
 
+#: `call <ret> asm sideeffect "<名字>", "<约束>", (<操作数>)`。
+#: 名字是**一整串自由文本**：`syscall` 就是那条指令本身，`thread_spawn @入口`（M84）是
+#: 链接器自己发的**定制序列**（`docs/245`）—— 所以名字不写死在模式里，由 `_call` 分派。
+#: 链接器**不组装汇编**：它认名字、自己发机器码（这就是 `docs/167` 那格"吃掉 clang 的活"）。
 CALL_ASM_RE = re.compile(
-    r'call\s+(.+?)\s+asm\s+sideeffect\s+"syscall"\s*,\s*"([^"]*)"\s*\((.*)\)\s*$', re.S)
+    r'call\s+(.+?)\s+asm\s+sideeffect\s+"([^"]*)"\s*,\s*"([^"]*)"\s*\((.*)\)\s*$', re.S)
 BR_COND_RE = re.compile(r"i1\s+(\S+?),\s*label\s+%([\w.]+?),\s*label\s+%([\w.]+)\s*$")
 SWITCH_RE = re.compile(r"switch\s+(\w+)\s+(\S+?),\s*label\s+%([\w.]+)\s*\[(.*)\]\s*$", re.S)
 CASE_RE = re.compile(r"(\w+)\s+(-?[0-9]+),\s*label\s+%([\w.]+)")
@@ -1070,7 +1074,12 @@ class Emitter:
     def _call(self, t, d):
         m = CALL_ASM_RE.match(t)
         if m:
-            return self._call_asm(m, d)
+            asm_name = m.group(2)
+            if asm_name == "syscall":
+                return self._call_asm(m, d)
+            if asm_name.startswith("thread_spawn"):
+                return self._call_spawn(m, d)
+            raise Unsupported(f"不认识的内联汇编名: {asm_name!r} (docs/245)")
         rest = t[5:].lstrip()
         if rest.startswith("void"):
             ret_ty, rest = None, rest[4:].lstrip()
@@ -1137,7 +1146,7 @@ class Emitter:
             self.put(d, RAX)
 
     def _call_asm(self, m, d):
-        cons, argstr = m.group(2), m.group(3)
+        cons, argstr = m.group(3), m.group(4)
         regs = [x.strip().strip("{}") for x in cons.split(",") if x.strip().startswith("{")]
         regs = [r for r in regs if not r.startswith(("=", "~"))]
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
@@ -1162,6 +1171,69 @@ class Emitter:
         """内联汇编 syscall 落在指令上的那一步。**整个 syscall 面只有这一处** ——
         PE 目标覆盖它去走 `__win_syscall`，其余取参/存值逻辑两边共用。"""
         self.asm.emit(b"\x0F\x05")
+
+    #: `thread_spawn` 的定制序列（M84，`docs/245`）。**两边发的是同一串字节** ——
+    #: 自举侧（`loment/tools/lomelf.lomt` 的 `do_call_spawn`）照抄这一段，`loment_elf_test`
+    #: 的孪生那格在逐字节钉它。所以这里是**字面机器码**而不是一串 `mov_*` 助手：
+    #: 助手会随两侧各自的寄存器编码习惯漂，字面字节不会。
+    #:
+    #: 布局（`|<-- `_SPAWN_HEAD` -->|<-- call 5 字节 -->|<-- `_SPAWN_TAIL` -->`）：
+    #: ```asm
+    #:                            ; 进门前: `get` 已把子线程实参取进 r9、栈顶取进 rsi
+    #:   BF 00 0F 05 00           mov  edi, 331520   ; CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM
+    #:   31 D2                    xor  edx, edx      ; ptid = NULL
+    #:   45 31 D2                 xor  r10d, r10d    ; ctid = NULL
+    #:   45 31 C0                 xor  r8d, r8d      ; newtls = 0
+    #:   B8 38 00 00 00           mov  eax, 56       ; clone
+    #:   0F 05                    syscall
+    #:   48 85 C0                 test rax, rax
+    #:   75 13                    jne  .parent       ; 父线程: rax = tid, 往下落到 call 之后
+    #:   48 89 E5                 mov  rbp, rsp      ; **子线程**: 换掉继承来的 rbp
+    #:   41 51                    push r9            ; 实参压在栈顶 = 被调方的第 0 个形参
+    #:   E8 xx xx xx xx           call <入口>        ; **直接调用** —— 静态调用图不变
+    #:   89 C7                    mov  edi, eax      ; 子线程的返回值就是它的退出码
+    #:   B8 3C 00 00 00           mov  eax, 60       ; exit —— **不是 exit_group**
+    #:   0F 05                    syscall            ; (后者会把整组线程一起杀掉)
+    #: ```
+    #: 两条要点，都不是可有可无的：
+    #: 1. **子线程必须换 `rbp`**。`clone` 只换 `rsp`，而这个后端**所有局部与临时值都是
+    #:    `rbp` 相对寻址** —— 不换就是子线程每一次读写都落在父线程的帧里，`clone` 的
+    #:    返回值落点成了共享槽，`if r == 0` 这句判断本身在读共享内存（实测症状：
+    #:    第一个子线程从不走那条路，却出现第二个 —— 子线程被当成父线程接着往下跑）。
+    #: 2. **实参走 r9 而不是栈**。系统调用**不碰 r9**（`syscall` 只踩 rcx/r11），而子线程
+    #:    在 `clone` 那一刻**继承整个寄存器组**，所以 r9 是唯一能把一个值安全带过
+    #:    `clone` 的寄存器；栈顶那个字节属于父线程的帧，不能读。
+    _SPAWN_HEAD = (b"\xBF\x00\x0F\x05\x00"    # mov edi, 331520
+                   b"\x31\xD2"                # xor edx, edx
+                   b"\x45\x31\xD2"            # xor r10d, r10d
+                   b"\x45\x31\xC0"            # xor r8d, r8d
+                   b"\xB8\x38\x00\x00\x00"    # mov eax, 56 (clone)
+                   b"\x0F\x05"                # syscall
+                   b"\x48\x85\xC0"            # test rax, rax
+                   b"\x75\x13"                # jne .parent —— 跳过下面 19 字节
+                   b"\x48\x89\xE5"            # mov rbp, rsp
+                   b"\x41\x51")               # push r9
+    _SPAWN_TAIL = (b"\x89\xC7"                # mov edi, eax
+                   b"\xB8\x3C\x00\x00\x00"    # mov eax, 60 (exit)
+                   b"\x0F\x05")               # syscall
+
+    def _call_spawn(self, m, d):
+        """`thread_spawn @入口`：发上面那段定制序列，中间那条 `E8` 指向**直接调用**。"""
+        ent = m.group(2)[len("thread_spawn"):].strip()
+        if not ent.startswith("@"):
+            raise Unsupported(f"thread_spawn 的 asm 名字缺入口: {m.group(2)!r} (docs/245)")
+        ent = ent[1:]
+        args = [parse_operand(x) for x in split_top(m.group(4))] if m.group(4).strip() else []
+        if len(args) != 2:
+            raise Unsupported("thread_spawn 需要 2 个操作数（子线程实参、栈顶）")
+        # 先实参、后栈顶：`get` 对简单操作数只用目标寄存器，所以这两条互不踩。
+        self.get(args[0][0], args[0][1], R9)
+        self.get(args[1][0], args[1][1], RSI)
+        self.asm.emit(self._SPAWN_HEAD)
+        self.asm.call(ent)
+        self.asm.emit(self._SPAWN_TAIL)
+        if d is not None:
+            self.put(d, RAX)
 
     def _ret(self, t):
         if t.strip() != "ret void":
@@ -4651,6 +4723,12 @@ class PeEmitter(Emitter):
 
     def _emit_syscall(self) -> None:
         self.asm.call("__win_syscall")
+
+    def _call_spawn(self, m, d):
+        """`thread_spawn` 是 Linux 的 `clone` 直译 —— Windows 侧没有对应物（`CreateThread`
+        走的是另一套入口约定：它**要一个地址**，而那正是本语言取不到的东西）。
+        所以这里**响亮地拒绝**，不静默错编一个假的线程出来（`docs/245`）。"""
+        raise Unsupported("thread_spawn 只在 ELF 目标可用 —— Windows 没有 clone (docs/245)")
 
     def emit_entry_stub(self, start_name: str) -> None:
         a = self.asm
