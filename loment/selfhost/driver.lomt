@@ -1545,31 +1545,15 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
                 store32(uses, nu * 8 + 4, ul - 2);
                 nu = nu + 1;
             } else if k == 0 {
-                // ---- **渠道闸（`libl`）**（`docs/232` §1.1）：发行版里 `use libl` 是编译错误。
-                // 与 `checker.lomt` 那条 `choose vm` 的闸**同形**：读同一个常量（打包期只换
-                // 那一行），dev 放行、发行版点名拒 —— 用户 2026-10-12：「LibL 仍然在仓库中，
-                // 和 LVM 一样发行再锁」。
+                // ---- **渠道闸（`libl`）：已放开**（`docs/232` §1.1 / §1.3，2026-10-15）
                 //
-                // **为什么闸在"名字解析"这一层而不是 `check()`**：被锁的是**一个名字能不能
-                // 取到**，那是装载器的事；`check()` 那层手上只有 token 流，判"这个单元 use 过
-                // 谁"要另做一趟全量扫描，而后者的代价这一层承受不起（`docs/225` §3.3：符号
-                // 查找是线性扫，60s 护栏只剩 ~1%）。这里本来就在走 `use` 语句，多一次比较。
+                // 这里原先有一段闸：发行版里 `use libl` 打印一条点名 `libl` 的错误再 `die(1)`
+                // （用户 2026-10-12：「LibL 仍然在仓库中，和 LVM 一样发行再锁」）。`#358` 把它
+                // 放开了 —— 放开的条件是**先把承诺写下来**，那就是 `docs/232` §1.3。
                 //
-                // **先落局部变量再比**：`if LOMENT_CHANNEL == 1` 两边都是字面量，会踩
-                // issue #224（参考实现把上下文的 bool 期望类型渗进整数运算，两个实现差
-                // 恰好一个字符）。`vm` 那条有同样一行注释，同一个理由。
-                let rel_name: u32 = LOMENT_CHANNEL;
-                if rel_name == 1 && tok_is(slot, toks, i + 1, "libl") {
-                    let m1: str = "fujoc-s: 发行版不含 `libl` 入口 —— `use libl` 只在开发通道可用。";
-                    let m2: str = "LibL 是这个标准库的**名字**，那四张脸（string/ctype/stdlib/stdio）";
-                    let m3: str = "在发行版里经 `use std` 或按名 `use string` 都还在。";
-                    let m4: str = "**修法**：改用 `use std`（或按需 `use string` 等），或换本仓的工具链。\n";
-                    write_all(2, str_ptr(m1), str_len(m1) as u64);
-                    write_all(2, str_ptr(m2), str_len(m2) as u64);
-                    write_all(2, str_ptr(m3), str_len(m3) as u64);
-                    write_all(2, str_ptr(m4), str_len(m4) as u64);
-                    die(1);
-                }
+                // **留这段注释是为了让"闸去哪了"有据可查**：判据那一侧按棘轮规矩**反转**
+                // （`loment_channel_test`：发行版从"拒 `use libl`"改成"收 `use libl`"），
+                // 不是把那条判据删掉。`choose vm` 那条闸在 `checker.lomt` 里**原样留着**。
                 let rl: u32 = resolve_use_name(slot, up, ul, ptr_add(slot, rbase + nu * 64),
                                                scr, ins);
                 if rl == 0 {

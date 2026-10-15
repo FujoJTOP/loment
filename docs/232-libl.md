@@ -1,7 +1,8 @@
 # 232 · LibL：标准库的 libc 面，判据是**与真 glibc 逐字节对跑**
 
-> 状态: **四张脸已落地**（2026-10-11）· 目录: `lompi/store/std/0.1.0/` 的 `string` `ctype` `stdlib` `stdio`
-> 判据: `loment_libl_test`（2/2；**185 项与系统 glibc 2.43 逐字节一致**）· 入口: `use libl` 与 `use std`
+> 状态: **五张脸已落地**（`std` 四张 2026-10-11 + **宿主脸** `libl_host` 2026-10-15）·
+> 目录: `lompi/store/std/0.1.0/` 的 `string` `ctype` `stdlib` `stdio`，以及 `lompi/store/host/0.1.0/libl_host`
+> 判据: `loment_libl_test`（2/2；**225 项与系统 glibc 2.43 逐字节一致**）· 入口: `use libl` 与 `use std`
 > 上游: `docs/199`（std 可达与平名字冲突）· `docs/180`（std 核的分层与三条约定）·
 > `docs/183` V1（静态 libc）· `docs/219`（世界端口）· `docs/188`（不猜，报错）
 > 一句话: **这个标准库叫 LibL；它对 libc 的那张脸，函数名、参数序、返回值语义都取 libc 的，
@@ -44,7 +45,7 @@
 | 入口 | 拉进来什么 | 什么时候能用 |
 |---|---|---|
 | `use std` | **整包**（131 条 `use`，1403 个 `pub fn`） | 到处都能用 |
-| `use libl` | **只拉 libc 那四张脸** + 它们的依赖（`mem` `char`）—— 6 份模块 | **只在开发通道**（见 §1.1） |
+| `use libl` | **只拉 libc 那四张脸** + 它们的依赖（`mem` `char`）—— 6 份模块 | 到处都能用（**2026-10-12 到 2026-10-15 之间发行版拒**，见 §1.1） |
 
 `libl` 这一份不是"std 的别名"：`std.lomt` 那个门面把整包拼进**一个单元**，平的发射符号空间里
 挤着 1350+ 个顶层名字，编译时间还按模块数**超线性**涨（`docs/199` §1 实测自举侧 n=64 已 187 秒）。
@@ -54,45 +55,51 @@
 `test_multi_file_package_survives_materialize`）。所以**包**叫 `std`，**库**叫 LibL。
 一个是库系统的键，一个是这门语言里这个库的名字 —— 两者不矛盾。
 
-### 1.1 `use libl` **在发行版里被拒**（用户 2026-10-12 定）
+### 1.1 `use libl` 的发行闸：**2026-10-12 锁，2026-10-15 放开**
 
-> 「**LibL 仍然在仓库中**，和 LVM 一样**发行再锁**。」
+> **已放开**（`#358`）。放开的条件是"先把承诺写下来" —— 承诺在 **§1.3**。
+> 本节留作**为什么当初要锁**的记录，以及那条闸**怎么落的**（它现在仍然是 `choose vm` 的闸，
+> 只是 LibL 这个客户已经不再用了）。
 
-**文件留在仓库**（`lompi/store/std/0.1.0/libl.lomt` 照旧随包发），**锁的是"能不能取到它"**：
-开发通道里 `use libl` 照旧可用；**发行版里它是编译错误**，点名 `libl`、给修法。
+> 「**LibL 仍然在仓库中**，和 LVM 一样**发行再锁**。」（用户 2026-10-12）
+
+**文件留在仓库**（`lompi/store/std/0.1.0/libl.lomt` 照旧随包发），锁的是"能不能取到它"：
+**锁的那段时间里**，开发通道 `use libl` 照旧可用，**发行版里它是编译错误**、点名 `libl`。
 
 这条与 LVM 那条**是同一条闸的两个客户**（`docs/231` §2 的渠道闸）：
 
 | | 被关住的 | 闸在哪一层 |
 |---|---|---|
 | LVM | `choose vm`（一维核心模式） | `check()`（`docs/231` §2） |
-| LibL | `use libl`（**一个名字**） | **名字解析**：参考实现 `resolve_name()`、自举侧 `driver.lomt` 的 `use` 分支 |
+| LibL | `use libl`（**一个名字**） | **名字解析**：参考实现 `resolve_name()`、自举侧 `driver.lomt` 的 `use` 分支 —— **该分支已随闸一并拿掉** |
 
-**为什么锁**：名字一旦在发行版里可用，它就成了一条**事实上的 ABI** —— 有人开始依赖
+**为什么当初要锁**：名字一旦在发行版里可用，它就成了一条**事实上的 ABI** —— 有人开始依赖
 `use libl`，之后改这四张脸的范围、或把 LibL 从"库的名字"做成别的东西，就是破坏性变更。
 而"承诺落空比拒绝更坏"（`docs/231` §2 同一句）：发行版说"不"。
+**放开的前提就是把那条 ABI 先写下来** —— 所以 §1.3 是这份记录的另一半，两节要一起读。
 
 **为什么闸在名字解析而不是 `check()`**：被锁的是**一个名字能不能取到**，那是装载器的事。
 `check()` 那层手上只有 token 流，判"这个单元 `use` 过谁"要另做一趟全量扫描 —— 而自举侧
 那条 60s 护栏只剩 ~1% 余量，不该为它加一趟扫描。名字解析处本来就在走 `use` 语句，
-多一次比较。
+多一次比较。（放开之后这个取舍仍然成立：**以后要再锁一个名字，还是落在这一层**。）
 
 **机制**：与 `vm` 那条**读同一个常量**（`loment/selfhost/checker.lomt` 的 `LOMENT_CHANNEL`，
-打包期由 `loment_dist.py` 只替换那一行）。为了自举侧 `driver.lomt` 读得到它，那一行从
-`const` 变成了 **`pub const`** —— "一行常量"这条形状没变，但**产物层的后果变了一处**：
-常量现在被读两处（两个闸各一处），所以 dev 与 release 两个种子差 **2 个字符**而不是 1
-（长度仍相同）。`loment_channel_test` 的判据跟着改成"处数恰好等于 `CHANNEL_READ_SITES`"
-（`docs/231` §5 判据 F 的口径同步更新）—— **没有**为此加一个函数把读取点合并回一个，
-实测加函数会让自举那版顶破 60s 护栏。
+打包期由 `loment_dist.py` 只替换那一行）。闸在时那一行从 `const` 变成了 `pub const`，
+自举侧 `driver.lomt` 才读得到它 —— 代价是**产物层多一处具体化**：两个种子差 **2** 个字符
+而不是 1。**放开之后那个分支没了，读取点回到一处**（`CHANNEL_READ_SITES` 从 2 改回 **1**），
+"两个种子恰好差一个字节"这条最强的口径也就回来了。当时**没有**为此加一个函数把读取点
+合并回一个：实测加函数会让自举那版顶破 60s 护栏 —— 放开闸顺手把它还原了，是白捡的。
 
 **边界（如实列，不假装它堵得住）**：闸只管**名字形式** `use libl`。路径形式
 （`use "lompi/store/std/0.1.0/libl.lomt"`）与"把这份文件拷进自己项目"都绕得过去 ——
 而那与"那四张脸本身可用"是一回事（它们经 `use std` 或按名 `use string` 本来就在）。
-这条闸要防的是**名字变成契约**，不是那四份模块不能用。
+这条闸当时要防的是**名字变成契约**，不是那几份模块不能用。**这条边界仍然成立** ——
+今天放开的正是"名字"这一层，别把它读成"LibL 现在整个都可依赖了"（范围见 §1.3）。
 
 **判据**：`loment_channel_test::test_release_driver_refuses_channel_gated_constructs` ——
-dev 驱动器收 `use libl`、发行版驱动器拒**且报文点名 `libl`**；同一个判据里也测 `choose vm`，
-**两端都测**（只测"拒"的话，一个"什么都拒"的驱动器也能绿）。
+`use libl` 的探针**留着**、期望**反转**成"发行版必须**收**"（棘轮规矩是**替换**不是删掉）；
+同一个判据里也测 `choose vm` / `choose hosted` 两条**仍然关着**的闸，**两端都测**
+（只测"拒"的话，一个"什么都拒"的驱动器也能绿）。
 
 ### 1.2 LibL 家族：`internet` 是**第二个包**（2026-10-13）
 
@@ -104,6 +111,9 @@ dev 驱动器收 `use libl`、发行版驱动器拒**且报文点名 `libl`**；
 * **`internet` 是网络那一面**：把"接上网"这件事收成库（`ip` / `uri` / `http` / `dns` /
   `sock` / `tcp` / `udp`），判据对着**真的实现**跑 —— CPython 标准库
   （`ipaddress` / `urllib.parse` / `http.client`）与**一个真起的 `http.server`**。
+* **`host` 是同一面里要 syscall 的那一半**（2026-10-15 加，`libl_host.lomt`）：`fopen`
+  那一套加 `exit`/`abort`。它**不在 `std` 里**，因为 `std` 的不变量是"一个 syscall 都不发"
+  —— 详见 §5.1。依赖方向单向：`host -> std`。
 
 两者共用**同一条判据口径**："对照物是真的东西，不是我们手写的期望值"。
 这条口径不是风格问题：LibL 那边 `strncpy` 补零、`strcmp` 返符号还是差值这些分歧，
@@ -119,19 +129,66 @@ internet 与 std 全部模块的顶层名字 —— 这是**第一个**看着这
 
 ---
 
-## 2. 四张脸：libc 头 -> LibL 模块
+### 1.3 承诺：哪些名字算数，以什么条件可以改（`#358` 要求先写下来的那一份）
+
+`use libl` 一旦在发行版里解析得到，它就是一条 ABI。所以**先写清楚它承诺什么** ——
+这一节是那份承诺，放开闸的依据就是它。
+
+**一、被承诺的名字**（在本版里**不许删、不许改名、不许改语义**）：
+
+| 模块 | 被承诺的 | 个数 |
+|---|---|---|
+| `string` | `strlen` `strcpy` `strncpy` `strcat` `strncat` `strcmp` `strncmp` `strchr` `strrchr` `strstr` `strspn` `strcspn` `strpbrk` `strtok_r` `memchr` `memcmp` `memcpy` `memmove` `memset` + **`cstr_of`** | 20 |
+| `ctype` | 12 个谓词 + `toupper` `tolower` | 14 |
+| `stdlib` | `atoi` `atol` `strtol` `strtoul` `abs` `labs` `llabs` `malloc` `calloc` `qsort` `bsearch` + `qsort_u32` `bsearch_u32` + `enum qsort_kind` | 11 + 1 枚举 |
+| `stdio` | `snprintf` `sprintf` + `SF_LEFT` `SF_ZERO` `SF_UNBOUNDED` | 2 + 3 常量 |
+| `libl_host` | `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `fflush` `feof` `fgets` `fputs` `puts` `putchar` `getchar` `exit` `abort` | 15 |
+
+**二、语义的标尺就是判据**：这些名字的行为以**与真 glibc 逐字节对跑**为准
+（`tools/loment_libl_test.py`，今天 **225 项**）。LibL 的语义不是"我们觉得像 libc"，
+是"与它跑出来一样"。
+
+**三、加是自由的，减不是**。§5.1 里今天写着"不做"的那些行（`realloc` / `free` / `FILE*` 的
+其余 / `getenv` / `%f` …）**以后落地不算破坏性变更** —— 承诺只约束"已经发出去的名字"。
+反过来，**删一个、改一个名字、改一个 `qsort_kind` 变体的意思**，都是破坏性的：要么按语言的
+版本规则升版并写明，要么不做。
+
+**四、偏离**是合约的一部分**，不是免责声明**。今天登记的偏离：
+
+* §3 的语言逼出来的四处（`cstr_of`、`nargs`、`qsort` 的 `kind`、`strtok_r` 而非 `strtok`）；
+* `libl_host` 的三处（**不缓冲** ⇒ `fflush` 是空操作；**没有 `stdin`/`stdout`/`stderr`**；
+  `fopen` **只认 `"r"`/`"w"`**）+ 一处（`abort` 是 **SIGILL** 不是 `SIGABRT`）；
+* §5.1 里"不做"的每一行。
+
+**它们写在模块头注里**，所以是"读得到的前提"，不是"用起来才发现"。
+
+**五、不承诺的**：所有 `sd_*` / `sf_*` / `lf_*` 内部名字、`FILE` 那块 16 字节的布局、
+以及各模块的自检函数。它们是实现，随时可改。
+
+**六、边界照旧**（§5.2）：这是**源码**面，不是 C ABI。C 代码调不到 `LibL::strlen`。
+
+**七、这条承诺本身怎么被验**：`loment_channel_test` 里那条判据从"发行版**拒** `use libl`"
+**反转**成"发行版**收** `use libl`"（按棘轮规矩是**替换**，不是删掉）—— 而 `choose vm`
+那半**原样留着**（它还没到兑现的时候）。所以"闸没被误删"与"闸确实开了"各有各的判据。
+
+---
+
+## 2. 五张脸：libc 头 -> LibL 模块
 
 **一个 libc 头对一个模块**（这条映射本身就是"照 libc 实现"的一部分）。
+前四张在 `std`（**不发 syscall**），第五张在 `host`（要发 syscall，所以另开一张包 —— §5.1）。
 
 | libc 头 | LibL 模块 | 提供的名字 | 个数 |
 |---|---|---|---|
 | `<string.h>`（+ POSIX `strtok_r`） | [`string.lomt`](../lompi/store/std/0.1.0/string.lomt) | `strlen` `strcpy` `strncpy` `strcat` `strncat` `strcmp` `strncmp` `strchr` `strrchr` `strstr` `strspn` `strcspn` `strpbrk` `strtok_r` `memchr` `memcmp` `memcpy` `memmove` `memset` | 19 |
 | `<ctype.h>` | [`ctype.lomt`](../lompi/store/std/0.1.0/ctype.lomt) | `isdigit` `isupper` `islower` `isalpha` `isalnum` `isspace` `isxdigit` `isblank` `iscntrl` `isprint` `isgraph` `ispunct` `toupper` `tolower` | 14 |
-| `<stdlib.h>`（能做的那一半） | [`stdlib.lomt`](../lompi/store/std/0.1.0/stdlib.lomt) | `atoi` `atol` `strtol` `strtoul` `abs` `labs` `llabs` `qsort` `bsearch` | 9 |
+| `<stdlib.h>`（能做的那一半） | [`stdlib.lomt`](../lompi/store/std/0.1.0/stdlib.lomt) | `atoi` `atol` `strtol` `strtoul` `abs` `labs` `llabs` `malloc` `calloc` `qsort` `bsearch` | 11 |
 | `<stdio.h>`（格式化那一半） | [`stdio.lomt`](../lompi/store/std/0.1.0/stdio.lomt) | `snprintf` `sprintf` | 2 |
+| `<stdio.h>` + `<stdlib.h>`（**要 syscall 的那一半**） | [`libl_host.lomt`](../lompi/store/host/0.1.0/libl_host.lomt)（**`host` 包**） | `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `fflush` `feof` `fgets` `fputs` `puts` `putchar` `getchar` `exit` `abort` | 15 |
 
-加两个**不是 libc 名字**的：`cstr_of`（§3.1）与两个便利档 `qsort_u32` / `bsearch_u32`。
-合计 —— LibL 发出 **44 个 libc 名字 + 3 个自己的名字**。
+加三个**不是 libc 名字**的：`cstr_of`（§3.1）与两个便利档 `qsort_u32` / `bsearch_u32`。
+合计 —— LibL 发出 **61 个 libc 名字 + 3 个自己的名字**，其中 **15 个在 `host` 包**
+（要 syscall 的那 15 个），其余 46 个在 `std`。
 
 ---
 
@@ -260,9 +317,13 @@ LibL 的四个模块都用到除法/取模/`alloc`，所以各写了一行 `choo
 2. Loment 侧跑**同一组调用**；
 3. 两边 **stdout 逐字节比**，第一个不同行当场报出来。
 
-**185 项对齐**，含：`strncpy` 的补零与"源够长时不给 NUL"、`strcmp` 的无符号比较
+**225 项对齐**，含：`strncpy` 的补零与"源够长时不给 NUL"、`strcmp` 的无符号比较
 （`0x80 > 'a'`）、`strchr(s, 0)` 命中结尾、`strstr` 空针返回 `hay`、`strtok_r` 的连续分隔符、
-`qsort` 的四种 kind、`snprintf` 的**返回值与截断**（`cap=1` 时只写 NUL 却返回长度 3）。
+`qsort` 的四种 kind、`snprintf` 的**返回值与截断**（`cap=1` 时只写 NUL 却返回长度 3）；
+后加上来的两批是**分配**（`malloc`/`calloc`，含溢出返回 NULL）与**宿主脸**（文件那一套：
+`fopen`/`fwrite`/`fseek`/`ftell`/`fread`/`fgets`/`feof`）。
+最后一行不是 stdout 比较，而是**把两边写出的那个文件 `cmp` 一遍** —— 写出去的东西也要逐字节相同
+（今天 300 字节）。
 
 ### 4.1 两处刻意的归一化（不归一化就是拿实现细节当语义）
 
@@ -279,17 +340,28 @@ LibL 的四个模块都用到除法/取模/`alloc`，所以各写了一行 `choo
 
 ## 5. 落不下来的（**如实列，不假装有**）
 
-### 5.1 不属于这一版的（各自有明确的原因）
+### 5.1 每一行的处置（`#357` 要的那张表：**落地**，或者**写明的"不做"**）
 
-| 那一半 | 函数 | 卡在哪 |
+`#357` 的要求只有这一句："对 §5.1 的每一行，要么落成一个有 glibc 对照判据的面，
+要么写清楚'不做，因为……'"。下表就是那个答案，**没有第三种状态**。
+
+| 那一半 | 函数 | 处置 |
 |---|---|---|
-| 分配 | `malloc` `calloc` `realloc` `free` | ① libc 那份靠模块级堆句柄，没有地方放；② 仓里 `mall.lomt` 是**调用方给 arena** 的无状态分配器，给不出那个签名；③ 内建 `alloc` 的堆布局（8 字节头）是**编译器私有的**，从库里伸手读它就是把实现细节钉进库（`docs/158` 要防的正是这个） |
-| `FILE*` | `fopen` `fread` `fwrite` `fclose` `stdin` `stdout` | 一半是模块级可变全局，一半是**世界面**（`docs/219` §4 的 `world` 类）。要读写用 `lompi/store/host`（`fd`/`syscall`）或内建 `syscall4` |
-| 进程 | `exit` `abort` `atexit` | 要运行期 |
-| 环境 | `getenv` `setenv` | 世界面 |
-| 浮点格式化 | `%f` `%e` `%g` | **不做的理由变了** —— 见下 |
-| 浮点解析 | `strtod` | `f64fmt.lomt` 自己写着**反向没做**：十进制→double 要大整数**除法**，而那一层刻意只用乘法（"等 T7 的 JSON/TOML 真需要时再补，叫 `f64fmt_parse`"）。所以这不是 LibL 的缺口，是它的上游还没有 |
+| 分配 | `malloc` `calloc` | ✅ **已落地**（`stdlib.lomt`；在**内建堆**上按 libc 拼法写，**不带自己的长度头** ⇒ 内建 `free` 收得下）。判据：`loment_libl_test` 里分配那一组，与 glibc 对跑 |
+| 分配 | `realloc` `free` | ⛔ **不做**。`realloc` 要旧长度才能搬，而长度只在**编译器私有**的堆头里（`docs/158` 要防的正是"把实现细节钉进库"）；`free` 更硬 —— **名字被内建占了**：库里的 `pub fn free` 解析不到（调用点静默走内建），而且会与 C 侧那个符号撞名 |
+| `FILE*` | `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `fflush` `feof` `fgets` `fputs` `puts` `putchar` `getchar` | ✅ **已落地**（`lompi/store/host/0.1.0/libl_host.lomt` —— **宿主脸**，因为它要发 syscall）。判据同上，与 glibc 对跑 |
+| `FILE*` | `stdin` `stdout` `stderr` | ⛔ **不做**。它们是**模块级可变全局**，语言没有（§3.4）；而且宿主脸里 `fflush` 是**空操作**（不缓冲），这三个的价值也随之变小 |
+| 进程 | `exit` `abort` | ✅ **已落地**（`libl_host.lomt`）。`abort` 发的是 **SIGILL 不是 SIGABRT** —— 登记的偏离 |
+| 进程 | `atexit` | ⛔ **不做**。要一张进程级的回调表 = 模块级可变全局 + 运行期，两样都没有 |
+| 环境 | `getenv` `setenv` | ⛔ **不做**。世界面（`docs/219` §4 的 `world` 类）；要用就走 `lompi/store/host` 的 `environ` 口子，不进 `use libl` 这条承诺 |
+| 浮点格式化 | `%f` `%e` `%g` | ⛔ **不能做**（不是"没做"）—— 见下 |
+| 浮点解析 | `strtod` | ⛔ **不做**。上游 `f64fmt.lomt` 自己写着**反向没做**：十进制→double 要大整数**除法**，而那一层刻意只用乘法（"等 T7 的 JSON/TOML 真需要时再补，叫 `f64fmt_parse`"）。所以这不是 LibL 的缺口，是它的上游还没有 |
 | 其他格式 | 精度 `.N`、星号宽度 `*`、`%p`、`%n` | ✅ **已落地**（`stdio.lomt` 头注那张表，判据与 glibc 对跑） |
+
+**宿主脸另开一张包**（`host`，不是 `std`）是**用户的裁定**（2026-10-15）：`std` 的不变量是
+"**一个 syscall 都不发**"，把 `fopen` 那 15 个塞进去就把那条不变量破了。依赖方向仍然单向：
+`host -> std`。代价是 `use libl` **拉不到**这 15 个（它们要 `use libl_host`）—— 这一点写在
+§1.3 的承诺里，是**合约的一部分**，不是漏记。
 
 **`%f` / `%e` / `%g`：从"没做"改成"不能做"**（2026-10-15，`#357` 的两轮之间）。
 
