@@ -1352,14 +1352,20 @@ def test_gate_workflow_aggregation_fails_closed():
         f"基线缺失的守卫有 {guard} 处，应为 2（独占片 / 分片各一处）—— "
         f"少了就是那一类 job 会把'基线没了'当成'没有基线'放行")
 
-    # 基线棘轮（**只许变短**）本身也要有人钉 —— 否则它自己会被悄悄删掉
-    assert "基线只许变短" in agg, (
+    # 基线棘轮（**只许变短**）本身也要有人钉 —— 否则它自己会被悄悄删掉。
+    # **钉步骤名，不钉那几个字**：段落里那句 `echo "基线只许变短: OK…"` 与注释都含着
+    # 同样几个字，按字面子串判会在步骤被删掉之后**照样绿**（第一版就是这样，
+    # 变异验证时两条棘轮改动一条都没抓住）。
+    assert re.search(r"^\s*- name: 基线只许变短$", agg, re.M), (
         "少了基线棘轮那一步 —— 往基线里**加**一条就没人拦了，"
         "而那条路等于把一条新红登记成合法")
-    assert "取对照面失败" in agg and "读不到 .github/gate-baseline.txt" in agg, (
-        "基线棘轮取不到对照面时必须**判失败**（fail closed）—— 静默跳过的棘轮"
-        "会变成一句永远不生效的谎话")
+    # 判失败要**带 `::error::`**：变异成一句普通 echo 之后 GitHub 不会红那一步
+    assert 'echo "::error::取对照面失败' in agg, (
+        "棘轮取不到对照面时没判失败（fail closed）—— 静默跳过的棘轮会变成"
+        "一句永远不生效的谎话")
+    assert 'echo "::error::对照面（$base）里读不到' in agg, "同上（读不到基线那一处）"
     assert "comm -13 old.txt new.txt" in agg, "棘轮没在算'新增'（comm -13 那一列）"
+    assert "norm .github/gate-baseline.txt > new.txt" in agg, "棘轮比的不是树里那份基线"
     print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
 
 
