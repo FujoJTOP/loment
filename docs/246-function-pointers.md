@@ -168,6 +168,37 @@ fn _start() {
 4. 门禁口径是**不新增红**（`.github/gate-baseline.txt`）。
 5. **不碰 `lom/*.lom`**（L0 跨线契约）；这一笔在 L1。
 
+## 6.5 做到哪儿了（2026-10-15）
+
+**参考侧**（`feat/fnptr` 的第一笔）：`Parser.type_name` 认 `fn(A, B) -> T`；`_type_ok` /
+`expr_type` 认它；`fn_addr("add")`（返回类型**就是被指名那个函数的类型**）；
+间接调用 `p(a, b)` 在 `_walk_expr` / `_Ir.expr` 里分派；`lomelf` 那条
+`Unsupported("v0 不支持间接调用")` 换成真实现（`FF D1` = `call rcx`，地址在 push 完实参
+**之后**才读进 rcx —— push 用 rax，先读 rcx 会被踩）；`_ptrcast` 剥 `@`（函数标签登记时
+不带 `@`、全局带）。探针 `apply(p,3,4) + apply(q,3,4)` 端到端跑出 19。
+
+**自举侧 · 类型面**（第二笔，已验证）：`TY_FN`/`TY_ARGS` 两个新 kind、实参编成链、
+`chk_ty_range` 认 `fn(...)`、`chk_ty_eq` 递归比、`fn_addr` 进内建表、`chk_fn_ty_of_lit`
+从 `aux` 起重扫形参表算返回类型、`chk_tex_atom_call` 加间接调用分派。
+验证：`loment_rule_parity` 102/102（无回归、无假阳性）、`loment_p8_test` 28/28
+（语料零诊断还在 —— 这一笔在调用点读了一次 callee 的类型，没有多报）。
+
+**还差的**（按依赖顺序）：
+
+1. **自举 codegen**（`loment/selfhost/codegen.lomt`）：`emit_ty` 认 `fn(...)` -> `i64`；
+   `fn_addr` 发 `ptrtoint ptr @名字 to i64`；间接调用发 `load` -> `inttoptr` -> `call %fp(...)`。
+   **落点在 `expr_atom` 的调用分支**（`expr_postfix` 里那个 `dot`/`ty` 是**基表达式的类型
+   token**，所以"callee 的类型 token 是 `fn`"判得出来）。
+2. **镜像链接器**（`loment/tools/lomelf.lomt`）：`do_ptrcast` 剥 `@`；`do_call` 的间接分支
+   （`call rcx`）—— 与参考**逐字节同**（`loment_elf_test` 的孪生那格钉着）。
+3. **`choose fp` 那一维**：`CORE_DIMS` / `CORE_DIM_ORDER` / `CORE_DEFAULTS`（默认 `no_fp`）/
+   `CORE_DIM_ZH` 四张表**两处实现各一份**，加闸（样板在 `check()` 里那条
+   `_eff["vm"] == "vm" and loment_channel.RELEASE`）。
+4. **消费方清单 §3**（每个入口一条判据）。
+5. **`docs/208` 那两条门禁前提**改成带开关的模式。
+6. **判据与 parity 正例**：`loment_rule_parity._CASES` 这一族目前只有负例的思路，
+   正例（`fn(A,B)` 用对了）要另找落点 —— 它是**正样例**，而那张表只收负例。
+
 ## 7. 与 `docs/245` 的关系
 
 线 A 已经落地（`docs/245`）。这一笔**不改线 A 的形状**：`thread_spawn` 的入口仍然是
