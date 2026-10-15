@@ -132,7 +132,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
                  # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
                  "lvm_twin_test",
-                 # LVM 的 T1（`docs/246`）：反馈剖面 —— 确定性 / 关上什么都不写 /
+                 # LVM 的 T1（`docs/247`）：反馈剖面 —— 确定性 / 关上什么都不写 /
                  # 块次数 == 出边和（对语料每一份）/ 循环次数已知的夹具逐条对上。
                  "lvm_profile_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账

@@ -66,7 +66,7 @@ const FRAME_SIZE: u32 = 32768;
 const GLOBAL_REC: u32 = 24;          // name_off,name_len,ty_off,ty_len,init_off,init_len
 const FUNC_REC: u32 = 32;            // name_off,name_len,ret_off,ret_len,nparams,first_param,first_block,nblocks
 const PARAM_REC: u32 = 16;           // ty_off,ty_len,name_off,name_len
-// T1（`docs/246`）：块记录多一格 `count`（这一块被进过几次）。
+// T1（`docs/247`）：块记录多一格 `count`（这一块被进过几次）。
 const BLOCK_REC: u32 = 20;           // label_off,label_len,first_instr,ninstrs,count
 // T1：指令记录多两格 —— 这条分支的边在边表里的**起点**与**条数**。
 // 边表按解析期一次分好（每条 br/switch 的边数静态可知），于是运行时记一条边是
@@ -1231,7 +1231,7 @@ fn count_label(a: ptr, s: u32, e: u32) -> u32 {
 }
 
 /// 给一条分支指令分 `n` 行边表，行号记在指令记录里。**O(1) 记账**就靠这个：
-/// 运行时记一条边是 `E_OFF + (first_edge + edge) * 4`，不用查表（`docs/246` §4）。
+/// 运行时记一条边是 `E_OFF + (first_edge + edge) * 4`，不用查表（`docs/247` §4）。
 fn edge_alloc(a: ptr, i: u32, n: u32) {
     let base: u32 = ctx_get(a, C_NEDGE);
     if base + n > MAX_EDGES {
@@ -2311,7 +2311,7 @@ fn switch_of(a: ptr, m: ptr, fr: u32, io: u32, il: u32, fi: u32) -> u32 {
 
 /// 跑一个函数体。`fr` = 本帧基址（VM 地址），`cfr` = **调用者**的帧基址（NONE = 没有）。
 /// `cfr` 是给聚合返回值用的：被调者的帧下一句就作废，值必须落到调用者那边。
-/// 记一次块进入。**关着就一个字节都不写**（`docs/246` 判据 D）。
+/// 记一次块进入。**关着就一个字节都不写**（`docs/247` 判据 D）。
 fn bump_block(a: ptr, bi: u32) {
     if ctx_get(a, C_PROF_FD) != 0 {
         wr(a, B_OFF, bi * 5 + 4, rd(a, B_OFF, bi * 5 + 4) + 1);
@@ -2446,7 +2446,7 @@ fn do_ret(a: ptr, m: ptr, fr: u32, cfr: u32, to: u32, tl: u32, ro: u32, rl: u32)
     return operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
 }
 
-// ---------------------------------------------------------------- T1：剖面（`docs/246`）
+// ---------------------------------------------------------------- T1：剖面（`docs/247`）
 
 fn wlit(fd: u64, s: str) -> u64 {
     return write_all(fd, str_ptr(s), str_len(s) as u64);
@@ -2472,7 +2472,7 @@ fn callee_span(a: ptr, to: u32, tl: u32) -> u64 {
 }
 
 /// 三个段各走一遍表。**顺序 = 解析顺序**（函数 → 块 → 指令）—— 参考那侧也改成按它走，
-/// 两边的产物才逐字节比得了（`docs/246` §4 记了为什么不是按名字排序）。
+/// 两边的产物才逐字节比得了（`docs/247` §4 记了为什么不是按名字排序）。
 fn dump_profile(a: ptr, fd: u64) {
     wlit(fd, "# lvm profile v1
 ");
@@ -2621,7 +2621,7 @@ fn run(a: ptr) -> u32 {
     if n == 0 {
         return fail("读不了输入");
     }
-    // T1（`docs/246`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。
+    // T1（`docs/247`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。
     let f2: u64 = argv_n(ab, 8192, 2);
     if lo32(f2) != 0 {
         // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577，mode 0644 = 420

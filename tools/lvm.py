@@ -190,15 +190,15 @@ class Frame:
 
 
 class Profile:
-    """T1 的剖面（`docs/246`）—— 三样**静态读不出来**的东西：块的次数、边的次数、调用点。
+    """T1 的剖面（`docs/247`）—— 三样**静态读不出来**的东西：块的次数、边的次数、调用点。
 
     ⚠ **不记类型**。这份 IR 是静态类型的：`add i32 %a, %b` 里的 `i32` 写在指令上，
     同一条加法每一次执行只能是 i32 —— "观察到 i32"不是新信息。V8 反馈向量最重要那一项
-    是给它吃的 **JavaScript**（没有类型）准备的，照抄过来是空的（`docs/246` §1）。
+    是给它吃的 **JavaScript**（没有类型）准备的，照抄过来是空的（`docs/247` §1）。
 
     站点标识 = (函数名, 块标签, 块内指令下标)。**输出按 IR 的解析顺序**，不是按名字排序 ——
     自举那一侧没有排序（固定表、按解析顺序摆），而两边要逐字节比同一份剖面。
-    解析顺序对同一份 IR 是确定的，所以"确定性"这条判据照样成立（`docs/246` §4）。
+    解析顺序对同一份 IR 是确定的，所以"确定性"这条判据照样成立（`docs/247` §4）。
     """
 
     def __init__(self) -> None:
@@ -231,7 +231,7 @@ class Profile:
         """剖面文本。**第三方可读是构造出来的**：一张按 TAB 分列的表。
 
         ⚠ **遍历顺序 = IR 的解析顺序**（函数 → 块 → 指令），不是按名字排序：自举那一侧的
-        固定表就是按解析顺序摆的，两边要比逐字节（`docs/246` §4 记了这条取舍）。
+        固定表就是按解析顺序摆的，两边要比逐字节（`docs/247` §4 记了这条取舍）。
         """
         blocks: list[str] = []
         edges: list[str] = []
@@ -265,7 +265,7 @@ class Vm:
         self.externs = set(externs)
         self.out = out
         self.depth = 0
-        #: T1（`docs/246`）。`None` = 这一趟不记账 —— **关掉时一个字节都不写**，
+        #: T1（`docs/247`）。`None` = 这一趟不记账 —— **关掉时一个字节都不写**，
         #: 而且下面每一处记账都写成 `if self.profile is not None:`，所以关掉时**没有代价**
         #: （判据 D 要的正是"记录不许改变被记录的行为"）。
         self.profile = profile
@@ -671,7 +671,7 @@ class Executor(Vm):
         raise LvmError(f"phi 没有来自 {prev} 的入边: {text!r}")
 
     def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str, int]:
-        """返回 `(目标块, 前驱, 边的编号)`。**边号**是 T1 记账要的（`docs/246` §4）：
+        """返回 `(目标块, 前驱, 边的编号)`。**边号**是 T1 记账要的（`docs/247` §4）：
         无条件分支只有一条边（0）；条件分支 0 = 真、1 = 假。"""
         m = re.match(r"br label %([\w.]+)$", text)
         if m:
@@ -709,7 +709,7 @@ def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
 
-    `profile` 传一个 `Profile` 就记账（T1，`docs/246`）；传 `None`（默认）不记 ——
+    `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
     **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
 
     `argv` 是**被解释程序自己的**命令行（`docs/243` §3.4）：它读 `/proc/self/cmdline`
@@ -756,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
-                    help="T1：把反馈剖面写到 PATH（`docs/246`）。不写就不记，一个字节都不写")
+                    help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve()
     buf = io.BytesIO()

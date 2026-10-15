@@ -123,7 +123,7 @@ def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
                 timeout: int = 180) -> tuple[int, bytes, bytes]:
     """跑镜像 -> `(退出码, stdout 字节, 剖面字节)`。**Linux 上直接跑；Windows 上借 WSL**。
 
-    给了 `prof` 就把它作为第二个实参传进去（T1，`docs/246`），并把**剖面**也要回来 ——
+    给了 `prof` 就把它作为第二个实参传进去（T1，`docs/247`），并把**剖面**也要回来 ——
     判据 E 比的就是那一段字节。
 
     ⚠ 两边都先把**二进制与输入**拷进自己的临时区：`/mnt/d` 上就地覆盖后 WSL 会**拿旧的**
