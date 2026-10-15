@@ -5695,6 +5695,12 @@ setprev:
 @__loment_off = internal global i32 8
 @__loment_freehead = internal global i32 0
 ");
+    // **末尾那一个换行不是排版**：参考实现是把各段 `"\n".join(...)` 拼出来的，而堆是其中
+    // **一段** —— 于是它后面**必然**跟着一个分隔符换行。自举这边是逐字节写的，得自己补。
+    // 丢掉的症状很隐蔽：`loment_p8_test` 报 `ir_hosted 首个差异 @6885`，差的就是这一个
+    // 字节（实测；而**链接出来的产物**看不出来 —— 链接器不在乎空行，所以 elf 那套镜像判据
+    // 一直是绿的）。
+    d = d + emit_str(s, out, "\n");
     return d;
 }
 

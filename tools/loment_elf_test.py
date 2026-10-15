@@ -1929,6 +1929,63 @@ def test_lomelf_selfhost_links_foreign_object():
 
 
 @test
+def test_lomelf_selfhost_links_a_real_archive():
+    """**自举链接器读真 `ar` 归档**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）。
+
+    在这之前它一次只驻留**一个** `.o`，对 `.a` 是硬拒 —— 于是"整个 zlib 归档过不过自举
+    链接器"这一问答**否**，而包里装的正是这一只。判据沿用 `#359` 那条的**同一份 Loment 源**
+    （`loment_ffi_test.ZLIB_STATIC_SRC`，参考那一半在那边过）：真 `libz.a` → 镜像 + `--link`
+    → 产物与参考**逐字节相同** → 跑出 `compress → uncompress → 原文`。
+
+    **定点这一半是判据的另一半**：整包收会把 `gz*` 那些成员的 `fopen`/`printf` 一并拖进来，
+    端口门于是把整个库拒掉 —— 所以这一格还要求"挑出来的成员**少于**归档里的成员数"
+    （见 `test_a_real_static_library_round_trips` 里参考侧的同一条断言）。
+    **证伪**：比对方向写反的那一份必须报 40。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    ark = ffitest._system_libz(bld / "_mirror_libz.a")
+    if ark is None:
+        print("      SKIP: 这台机器上没有 libz.a（要 zlib1g-dev）—— 这一格测不了")
+        return
+    rel_ark = "loment/build/_mirror_libz.a"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        try:
+            for tag, src_text, want_rc in (("zlib", ffitest.ZLIB_STATIC_SRC, 0),
+                                           ("zlibr", ffitest.ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                src = td / f"{tag}.lomt"
+                src.write_text(src_text, encoding="utf-8", newline="\n")
+                ll = _ref_ir(src, td)
+                want, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"),
+                                                [lomelf.load_foreign(ark)], allow_ports=True)
+                llrepo = bld / f"_mirror_{tag}.ll"
+                elfrepo = bld / f"_mirror_{tag}.elf"
+                try:
+                    llrepo.write_bytes(ll.read_bytes())
+                    rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
+                                          f"loment/build/_mirror_{tag}.elf", (rel_ark,))
+                    assert rc == 0, f"[{tag}] 镜像 + --link 退出 {rc}: {err[-300:]}"
+                    nat = elfrepo.read_bytes()
+                    assert nat == want, \
+                        f"[{tag}] 镜像的归档产物与参考不同 ({len(nat)}B vs {len(want)}B)"
+                    got, out = _run_bin(elfrepo, f"zlib_{tag}", td)
+                    assert got == want_rc, \
+                        f"[{tag}] 跑出的结果不对: rc={got} (期望 {want_rc}) {out[:120]!r}"
+                finally:
+                    elfrepo.unlink(missing_ok=True)
+                    llrepo.unlink(missing_ok=True)
+        finally:
+            ark.unlink(missing_ok=True)
+    print("      镜像 + 真 libz.a: 产物与参考逐字节相同, compress/uncompress 回原文 (rc=0)"
+          "；证伪件报 40")
+
+
+@test
 def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
     `--allow-ports` 就**必须拒**。
