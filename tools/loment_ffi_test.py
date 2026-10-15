@@ -116,9 +116,16 @@ def _llvm_bin(name: str) -> str | None:
     return str(p) if p.exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:                                               # noqa: BLE001
         return False
@@ -126,6 +133,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -149,7 +158,7 @@ def build_and_run(td: Path, lomt: Path, objs: list[Path], exit_want: int) -> tup
                                     allow_ports=True)
     exe = td / "ffi.elf"
     exe.write_bytes(blob)
-    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
                         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
                        capture_output=True, text=True, timeout=120, shell=False)
     return r.returncode, r.stderr
@@ -230,7 +239,7 @@ def test_loment_kernel_object_is_reusable_without_clang():
             os.environ["PATH"] = old
         exe = td / "k.elf"
         exe.write_bytes(blob)
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
                            capture_output=True, text=True, timeout=120, shell=False)
         assert r.returncode == 37, f"无 clang 端机 `--link` 跑错: rc={r.returncode} {r.stderr[-200:]}"
@@ -353,9 +362,24 @@ def _rustc() -> str | None:
 
 
 def _rust_has_target() -> bool:
-    r = subprocess.run(["rustc", "--print", "target-list"], capture_output=True,
+    """**这份工具链装没装**这个目标的 `core` —— 不是"rustc 认不认识这个名字"。
+
+    原先是 `rustc --print target-list`, 而那个名单对**所有**内置目标都为真: 它回答的是
+    "名字在不在内置表里", 与有没有这个目标的 `core` 无关。本机没装 rustc 时这一族判据
+    一律 SKIP, 所以错在哪看不出来; `#371` 让它们在 runner 上**原生跑**之后现形 ——
+    容器里 apt 装的 rustc **认识** `x86_64-unknown-none`, 却没装它的 core, 于是判据红在
+    "工具链不全"上 (`error[E0463]: can't find crate for core … may not be installed`),
+    而那不是被测行为。
+    """
+    rustc = _rustc()
+    if not rustc:
+        return False
+    r = subprocess.run([rustc, "--print", "sysroot"], capture_output=True,
                        text=True, shell=False)
-    return "x86_64-unknown-none" in r.stdout
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    d = Path(r.stdout.strip()) / "lib" / "rustlib" / "x86_64-unknown-none" / "lib"
+    return d.is_dir() and any(d.glob("libcore*.rlib"))
 
 
 @test
@@ -464,7 +488,7 @@ print(len(json.dumps([1,2,3])))"""
         blob, _info = lomelf.compile_ll(ir)
         exe = td / "p.elf"
         exe.write_bytes(blob)
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
                            capture_output=True, text=True, timeout=180, shell=False)
         assert r.returncode == 9, (
@@ -495,7 +519,7 @@ def test_java_via_process_bridge():
             "public class Hello { public static void main(String[] a) { "
             "System.out.println(7); } }\n", encoding="utf-8", newline="\n")
         # `javac` 得在**它自己的目录**里跑, 而那一侧要看得见这个 `.java` —— 所以先拷进 WSL。
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"rm -rf {_T}ffijava && mkdir -p {_T}ffijava && "
                             f"cp {_wsl_path(td)}/Hello.java {_T}ffijava/"],
                            capture_output=True, text=True, timeout=120, shell=False)
@@ -516,7 +540,7 @@ def test_javascript_via_process_bridge():
     if not _wsl():
         print("      SKIP: 需要 WSL")
         return
-    has = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v node"],
+    has = subprocess.run([*_WSLCMD, "bash", "-lc", "command -v node"],
                          capture_output=True, text=True, timeout=60, shell=False)
     if has.returncode != 0:
         print("      SKIP: WSL 里没有 node")
@@ -541,7 +565,7 @@ def test_javascript_via_process_bridge():
         blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
         exe = td / "j.elf"
         exe.write_bytes(blob)
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
                            capture_output=True, text=True, timeout=180, shell=False)
         # JSON.stringify([1,2,3]) = "[1,2,3]" -> 长度 7
@@ -553,13 +577,13 @@ def test_javascript_via_process_bridge():
 
 def _wsl_ok(shell_cmd: str) -> bool:
     """在 WSL 里跑一句 shell, 返回是否退出 0。探测解释器/工具链在不在用它。"""
-    return subprocess.run(["wsl", "-e", "bash", "-lc", shell_cmd],
+    return subprocess.run([*_WSLCMD, "bash", "-lc", shell_cmd],
                           capture_output=True, text=True, timeout=120,
                           shell=False).returncode == 0
 
 
 def _wsl_home() -> str:
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", "printf %s \"$HOME\""],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", "printf %s \"$HOME\""],
                        capture_output=True, text=True, timeout=60, shell=False)
     return r.stdout.strip()
 
@@ -588,7 +612,7 @@ def _bridge_case(cmd: str, want_rc: int, label: str) -> None:
         blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))
         exe = td / "p.elf"
         exe.write_bytes(blob)
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
                            capture_output=True, text=True, timeout=180, shell=False)
         assert r.returncode == want_rc, (
@@ -668,7 +692,7 @@ def test_zig_end_to_end():
         (td / "z.zig").write_text(
             "export fn z_sub(a: i32, b: i32) i32 { return a - b; }\n",
             encoding="utf-8", newline="\n")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"cd {_wsl_path(td)} && {zig} build-obj -OReleaseSmall "
                             f"-femit-bin=z.o z.zig"],
                            capture_output=True, text=True, timeout=300, shell=False)
@@ -712,7 +736,7 @@ def test_go_via_process_bridge():
             'func main() {\n'
             '    fmt.Println(len(strings.Join([]string{"a", "b", "c"}, ",")))\n'
             '}\n', encoding="utf-8", newline="\n")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
                             f"rm -rf {_T}ffigo && mkdir -p {_T}ffigo && "
                             f"cp {_wsl_path(td)}/m.go {_T}ffigo/"],
                            capture_output=True, text=True, timeout=120, shell=False)

@@ -38,6 +38,13 @@ from pathlib import Path
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 MIRROR = ROOT / "loment" / "tools" / "lomelf.lomt"
 GEN_DIR = ROOT / "loment" / "build" / "genesis"
@@ -59,7 +66,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -99,7 +106,7 @@ def emit() -> int:
         script = (f"cp {_wsl_path(stage1)} {_T}gen_s1.bin && chmod +x {_T}gen_s1.bin && "
                   f"cd {_wsl_path(ROOT)} && {_T}gen_s1.bin "
                   f"{MIRROR.relative_to(ROOT).as_posix()} > {_wsl_path(ir)}")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=900, shell=False)
         assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"
         # IR -> genesis ELF

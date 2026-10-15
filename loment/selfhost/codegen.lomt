@@ -2487,7 +2487,19 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// **不再是内联的纯 bump** —— `free` 兑现之后（`docs/175` §3.4），分配与回收必须是
 /// 同一份状态的读写者。大小从第 szlvl 层取 (u32), 结果 (ptr) 写到第 lvl 层;
 /// 返回分配到的指针的 temp 号。alloc 与 str_concat 共用 (**文本与 `lomentc.alloc_ir` 同序**)。
+///
+/// **触发也发在这里**（`#367`）: 它原先在 `alloc` 的**调用点**上, 而 `str_concat`
+/// 走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器, 只拼字符串的
+/// 程序**一次收集都不跑**（alpha 也救不了: 它的阈值与空间触发都住在
+/// `__loment_maybe_collect` 里, 而那个函数一次都不会被调用）。挪到这儿之后**每一次**
+/// 分配都计数; 同一段文本、同一顺序、同一个实参, 所以只含 `alloc` 的程序产物字节不变。
 fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+    if gc_any(s) == 1 {
+        // 收在**分配之前** -> 不需要"分配失败再重试"那条路, `__loment_alloc` 一字节不动。
+        emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
+        emit_val(s, out, szlvl);
+        emit_str(s, out, ")\n");
+    }
     emit_str(s, out, "  ");
     let p: u32 = new_temp(s, out);
     emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
@@ -2610,14 +2622,6 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            if gc_any(s) == 1 {
-                // `gc_auto`：分配**之前**先问一句"该收了没有"（`docs/210` §2.1）。
-                // 收在分配之前 -> 不需要"分配失败再重试"那条路，`__loment_alloc`
-                // 一个字节都不用动（另外两档的产物因此逐字节不变）。
-                emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
-                emit_val(s, out, lvl);
-                emit_str(s, out, ")\n");
-            }
             emit_alloc_seq(s, out, lvl, lvl);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
@@ -6075,10 +6079,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
-  ; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
-  ; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -6352,10 +6359,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
-  ; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
-  ; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -6485,13 +6495,11 @@ rc:
   br label %cr
 prop:
   call void @__loment_propagate(i32 %ot)
-  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
-  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
-  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
-  ;      `oldtop` 之下」的成因）；
-  ;   ② 既然重置，就必须能重复跑：所以释放那一格顺手把标记清零（`__loment_sweep` 的 `kill:`）。
-  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫整堆，但不清空空闲链表**（`#366`，与 `__loment_collect` 同一条）。
+  ; 原先这里也有那一行，理由两条（① 双重插入、② 既然重置就得能重复跑）；**两条都站在
+  ; `#164` 之前**：今天 `__loment_free` 只认借出中的块，已在链上的一律**惰性返回**，
+  ; 所以「同一块被挂两次」不会发生，而重置只会把那些**已经挂在链上**的空闲块
+  ; （`docs/210` §2.7 自己点名的「不是不安全，是白漏内存」）永久丢掉。不做。
   call void @__loment_sweep(i32 8)
   ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
   ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的

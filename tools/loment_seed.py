@@ -27,6 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 ENTRY = ROOT / "loment" / "selfhost" / "driver.lomt"
 SCRIPT = ROOT / "loment" / "bootstrap.sh"
@@ -160,7 +167,7 @@ def bootstrap() -> int:
         print(f"[ERR] 缺 {SCRIPT.relative_to(ROOT)}")
         return 2
     if shutil.which("wsl"):
-        cmd = ["wsl", "-e", "sh", SH_REL]
+        cmd = [*_WSLCMD, "sh", SH_REL]
     elif shutil.which("sh"):
         cmd = ["sh", SH_REL]
     else:

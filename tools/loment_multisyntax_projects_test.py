@@ -60,6 +60,13 @@ import lomelf       # noqa: E402
 import lomentc      # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "examples" / "multisyntax-projects"
 
 #: 每一门至少要有一个项目。**规模本身是一条判据**（`docs/179` §5 那条纪律：
@@ -104,7 +111,7 @@ def _wsl_path(p: Path) -> str:
 def _run_elf(exe: Path) -> int:
     """在 WSL 里跑那个自举出来的 ELF，读退出码。"""
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=600, shell=False)
     return int((r.stdout or "").strip() or -1)
 
@@ -230,7 +237,7 @@ def _control_cpp(proj: Path, td: Path) -> int:
     f.write_text(src, encoding="utf-8", newline="\n")
     exe = td / "side.bin"
     cmd = ("g++ " + " ".join(T._FLAGS) + f" -o {_wsl_path(exe)} {_wsl_path(f)}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", cmd],
                        capture_output=True, text=True, timeout=900, shell=False)
     assert r.returncode == 0, f"C++ 编译失败: {(r.stdout + r.stderr)[-400:]}"
     return T._run(exe)
