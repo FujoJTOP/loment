@@ -141,15 +141,17 @@ def _wsl() -> bool:
         return False
 
 
-def _sh(script: str, timeout: float):
+def _sh(script: str, timeout: float, text: bool = False):
     """把一段 POSIX sh 交给**能跑它的那个 shell**：Linux 直接 `bash -lc`，Windows 经 WSL。
 
-    原先三处调用点都写死 `["wsl", "-e", "bash", "-lc", …]` —— 只把 `_wsl()` 放宽到 Linux
-    是不够的：路径对了，shell 却找不到（`#371`）。
+    原先调用点都写死 `["wsl", "-e", "bash", "-lc", …]` —— 只把 `_wsl()` 放宽到 Linux
+    是不够的：路径对了，shell 却找不到（`#371`）。`text` 跟着调用点走：比对字符串的那几处
+    要 `True`，`write_bytes(...)` 与 `.decode()` 的那几处要 `False`。
     """
     argv = (["bash", "-lc", script] if sys.platform.startswith("linux")
             else ["wsl", "-e", "bash", "-lc", script])
-    return subprocess.run(argv, capture_output=True, timeout=timeout, shell=False)
+    return subprocess.run(argv, capture_output=True, timeout=timeout, shell=False,
+                          text=text)
 
 
 def _wsl_path(p: Path) -> str:
@@ -1586,8 +1588,7 @@ def test_lomelf_compiles_selfhost_ir_without_clang():
         binn = f"{_T}lomelf_s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/examples/user_hello.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                            capture_output=True, timeout=300, shell=False)
+        rr = _sh(script, 300)
         assert rr.returncode == 0, rr.stderr[-300:]
         ll = td / "from_stage1.ll"
         ll.write_bytes(rr.stdout)
@@ -1783,8 +1784,7 @@ def test_lomelf_rebuilds_the_compiler_without_clang():
             f"cd {_wsl_path(ROOT)} && {binn} loment/selfhost/driver.lomt "
             f"> {_wsl_path(outp)} 2> {_wsl_path(errp)}; echo -n $?"
         )
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                           capture_output=True, timeout=900, shell=False)
+        r = _sh(script, 900)
         etxt = errp.read_text(encoding="utf-8", errors="replace")[-400:] if errp.exists() else ""
         assert r.stdout.decode().strip() == "0", \
             f"原生编译器退出非零: {r.stdout[:40]!r} stderr={etxt!r}"
@@ -1812,21 +1812,18 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
         td = Path(tds)
         # 镜像编种子 -> 新的编译器
         seed_c = td / "seed.elf"
-        r3 = subprocess.run(
-            ["wsl", "-e", "bash", "-lc",
-             f"cp {_wsl_path(mir)} {_T}lomelf_rb2.bin && chmod +x {_T}lomelf_rb2.bin && "
-             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb2.bin loment/build/selfhost_driver.ll "
-             f"{_wsl_path(seed_c)}"],
-            capture_output=True, text=True, timeout=900, shell=False)
+        r3 = _sh(
+            f"cp {_wsl_path(mir)} {_T}lomelf_rb2.bin && chmod +x {_T}lomelf_rb2.bin && "
+            f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb2.bin loment/build/selfhost_driver.ll "
+            f"{_wsl_path(seed_c)}", 900, text=True)
         assert r3.returncode == 0, f"镜像编种子失败: {r3.stderr[-300:]}"
         # 用它自编译 driver.lomt, 与种子比
         outp = td / "again.ll"
-        r4 = subprocess.run(
-            ["wsl", "-e", "bash", "-lc",
-             f"cp {_wsl_path(seed_c)} {_T}lomelf_rb3.bin && chmod +x {_T}lomelf_rb3.bin && "
-             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb3.bin loment/selfhost/driver.lomt "
-             f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?"],
-            capture_output=True, text=True, timeout=900, shell=False)
+        r4 = _sh(
+            f"cp {_wsl_path(seed_c)} {_T}lomelf_rb3.bin && chmod +x {_T}lomelf_rb3.bin && "
+            f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb3.bin loment/selfhost/driver.lomt "
+            f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?", 900,
+            text=True)
         errf = td / "err.txt"
         etxt = errf.read_text(encoding="utf-8", errors="replace")[-300:] if errf.exists() else ""
         assert r4.stdout.strip() == "0", f"重建出的编译器退出非零: {r4.stdout[:40]!r} {etxt!r}"
