@@ -698,6 +698,7 @@ _CONCAT_ONLY_SRC = (
     "}\n")
 
 
+@test
 def test_a_concat_only_program_still_collects():
     """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
 
@@ -2094,6 +2095,7 @@ _FREE_LIST_SRC = (
     "    syscall4(60, 3, 0, 0);\n}\n")
 
 
+@test
 def test_a_collection_keeps_the_free_list():
     """一次收集**不许**把当前空闲块丢掉（`#366`）—— 两档各一只，退出码 7 = 拿回了那片区域。
 
