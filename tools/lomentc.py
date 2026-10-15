@@ -5653,8 +5653,14 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
@@ -5861,24 +5867,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
@@ -7404,7 +7413,16 @@ class _Ir:
         **不再是内联的纯 bump**：`free` 兑现之后，分配与回收必须是同一份状态的读写者，
         而"只涨不落的前沿 + 什么都不做的 free"正是 `docs/175` §3.4 点名的那个形状
         （**允诺却不兑现**）。
+
+        **触发器挂在这里，不挂在任何一个调用点上**（issue #367）：它量的是"向堆要了多少
+        字节"，所以报账的地方只能是**真向堆要字节的那一处**。原先它挂在 `alloc` 那一支上，
+        而 `str_concat` 是同一个 `alloc_ir` 的**另一个**调用点 —— 于是拼接分配出来的字节
+        从不进计数，纯拼接的程序**一次都不收**，64 KiB 填满就 `abort`。收在分配**之前**，
+        所以不需要"分配失败再重试"那条路，`__loment_alloc` 一个字节都不动；只走 `alloc`
+        的程序**产物逐字节不变**（同一条语句、同一处位置、同一个实参）。
         """
+        if self.gc_any:
+            self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
         return p
@@ -7413,10 +7431,6 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            if self.gc_any:
-                # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
-                # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
-                self.w(f"call void @__loment_maybe_collect(i32 {sz})")
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")

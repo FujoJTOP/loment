@@ -1053,6 +1053,69 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
           "—— 自适应触发收得下更大的活集")
 
 
+#: 只用 `str_concat` 分配的程序（issue #367）—— 一个 `alloc` 都没有，活集是常数（一个字面量
+#: 加最新那一块）。每一轮 16 B（8 字节载荷 + 8 字节块头），6000 轮 ≈ 94 KiB，而 arena 只有
+#: 64 KiB ⇒ **只有真的收得回来才跑得完**。
+_CONCAT_ONLY_SRC = ("""module concat_only
+choose @@TIER@@
+choose runtime
+
+fn _start() {
+    let s: str = "abcd";
+    let i: u64 = 0;
+    while i < 6000 {
+        let t: str = str_concat(s, "efgh");
+        i = i + 1;
+    }
+    syscall4(60, 0, 0, 0);
+}
+""")
+
+
+@test
+def test_collecting_tiers_run_a_concat_only_program():
+    """**拼接进回收的计时**（issue #367）：纯拼接的程序在两个自动档下都要收得回来。
+
+    **Why**：触发原先挂在 `alloc` 那一支上，而 `str_concat` 是同一个 `alloc_ir` 的**另一个**
+    调用点 ⇒ 拼接分配的字节从不进计数 ⇒ 一个 `alloc` 都没有的程序**一次都不收**，64 KiB
+    填满就 `abort`。这一条把它钉在**行为**上：活着要走完 6000 轮。
+
+    这一条要红，**两件事都得对**，所以两档一起钉（判据替下面的两个缺陷各守一格）：
+
+      * **挂点在拼接那条路上** —— 否则计数永远是 0（`collect` 一次都不进）；
+      * **时钟量的是分配器吃掉的字节**（载荷 + 块头），不是载荷请求 —— 8 字节载荷的块吃 16，
+        时钟只走 8 就慢一倍，而固定档的阈值（32 KiB）离 arena 的 64 KiB 只差一倍：
+        计数越过阈值的那一刻恰好就是 arena 装满的那一刻（实测：3000 轮计数 24000 < 32768，
+        **一次都没收**；6000 轮直接 `abort`）。
+
+    两件事都在**同一个地方**（`alloc_ir` / `emit_alloc_seq` 与它们前面的那条触发），所以
+    一条判据同时守得住；分开写反而会各自被另一件挡住而假绿。
+
+    **证伪**（各自实测）：把触发挪回 `alloc` 那一支 ⇒ 两档都退 132；把时钟改回只数载荷
+    ⇒ `gc_auto` 那一格退 132（alpha 靠空间触发那一格活着，这就是它为什么必须一起钉）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    got = []
+    for tier in ("gc_auto", "gc_auto_alpha"):
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            src = td / "concat_only.lomt"
+            src.write_text(_CONCAT_ONLY_SRC.replace("@@TIER@@", tier), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / "concat_only.native"
+            nat.write_bytes(blob)
+            got.append((tier, _run_bin(nat, "concat_only", td, timeout=90)[0]))
+    for tier, rc in got:
+        assert rc == 0, (
+            f"`{tier}` 下纯拼接的程序没跑完：退出码 {rc}（期望 0）。6000 轮 × 16 B ≈ 94 KiB 压在一只 "
+            "64 KiB 的 arena 上，只有真的收得回来才活得下来 —— 触发挂点漏在拼接那条路上（issue "
+            "#367），或者时钟只数载荷、不数块头（同一个缺陷的另一半）")
+    print("      纯拼接 6000 轮（≈94 KiB 的分配量）在两档各跑完一遍 —— 挂点在拼接那条路上，时钟也数块头")
+
+
 @test
 def test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one():
     """分代那一档的**写屏障是承重的**（`docs/210` §2.7）—— 老块里存着指向年轻块的指针。

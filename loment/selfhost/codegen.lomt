@@ -2488,6 +2488,16 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// 同一份状态的读写者。大小从第 szlvl 层取 (u32), 结果 (ptr) 写到第 lvl 层;
 /// 返回分配到的指针的 temp 号。alloc 与 str_concat 共用 (**文本与 `lomentc.alloc_ir` 同序**)。
 fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+    if gc_any(s) == 1 {
+        // 触发器挂在这里，不挂在任何一个调用点上（issue #367）：它量的是"向堆要了多少
+        // 字节"，所以报账的地方只能是真向堆要字节的那一处。原先它挂在 `alloc` 那一支上，
+        // 而 `str_concat` 是同一个 emit_alloc_seq 的另一个调用点 —— 于是拼接分配的字节
+        // 从不进计数，纯拼接的程序一次都不收，64 KiB 填满就 abort。收在分配之前，所以
+        // 不需要"分配失败再重试"那条路，`__loment_alloc` 一个字节都不动。
+        emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
+        emit_val(s, out, szlvl);
+        emit_str(s, out, ")\n");
+    }
     emit_str(s, out, "  ");
     let p: u32 = new_temp(s, out);
     emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
@@ -2610,14 +2620,6 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            if gc_any(s) == 1 {
-                // `gc_auto`：分配**之前**先问一句"该收了没有"（`docs/210` §2.1）。
-                // 收在分配之前 -> 不需要"分配失败再重试"那条路，`__loment_alloc`
-                // 一个字节都不用动（另外两档的产物因此逐字节不变）。
-                emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
-                emit_val(s, out, lvl);
-                emit_str(s, out, ")\n");
-            }
             emit_alloc_seq(s, out, lvl, lvl);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
@@ -6425,24 +6427,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
@@ -6501,8 +6506,14 @@ done:
     }
     return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
