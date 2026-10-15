@@ -955,7 +955,7 @@
   },
   {
    "path": "tools/lvm.py",
-   "sha256": "a1b0c04d8498ffd967599e82f4c361317ed92e83ff24de469e15ae38a2079fd7"
+   "sha256": "caa71199b5cff5243a26294210ecd8e0f8db0bb6fe3a24b84ac8f90323d0d93d"
   },
   {
    "path": "tools/lvm_test.py",
@@ -963,7 +963,7 @@
   },
   {
    "path": "tools/lvm_twin_test.py",
-   "sha256": "d03327dedf966996d79c740411fb8c6d95d7bdf0e1eb615ad76ee38561b026c2"
+   "sha256": "1a8e30485b98c8a572479941ab8b76079a4d9e5a0a4df9ff005b2d4c89a2415f"
   },
   {
    "path": "tools/lvm_profile_test.py",
@@ -1343,7 +1343,7 @@
   },
   {
    "path": "loment/tools/lvm.lomt",
-   "sha256": "61a5285e111a497888345558b7d9f8a73f19bd261320d33be3598b13de0b3fa2"
+   "sha256": "8543e890c371a7294cb24d201d9cb52322b870929461d8aa33adb954dac9a996"
   },
   {
    "path": "loment/tools/surface_data.lomt",
@@ -2347,7 +2347,7 @@
   },
   {
    "path": "docs/246-lvm-t1-profile.md",
-   "sha256": "f72f70ef817863d8da75fe2022729fba3656a5d28d6d128165941cc21457d8a6"
+   "sha256": "6094fe108e0ea16b78b0c19ab9508f99db356e9046fa71fded869b62939bc907"
   },
   {
    "path": "docs/manual/index.md",
