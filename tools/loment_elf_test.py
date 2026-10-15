@@ -124,6 +124,14 @@ def _clang() -> str | None:
 
 
 def _wsl() -> bool:
+    """能不能跑 Linux ELF：**Linux 上原生跑**，Windows 上经 WSL（`#371`）。
+
+    `CONTRIBUTING.md` 门禁那节写的是 "on Linux they run natively"，而这里原先只问
+    `shutil.which("wsl")` —— Linux 上没有那个二进制（它不是 apt 包，CI 镜像也没装垫片），
+    于是这一族判据在 runner 上**一条都不跑**，而门禁照样报满。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
@@ -133,8 +141,22 @@ def _wsl() -> bool:
         return False
 
 
+def _sh(script: str, timeout: float):
+    """把一段 POSIX sh 交给**能跑它的那个 shell**：Linux 直接 `bash -lc`，Windows 经 WSL。
+
+    原先三处调用点都写死 `["wsl", "-e", "bash", "-lc", …]` —— 只把 `_wsl()` 放宽到 Linux
+    是不够的：路径对了，shell 却找不到（`#371`）。
+    """
+    argv = (["bash", "-lc", script] if sys.platform.startswith("linux")
+            else ["wsl", "-e", "bash", "-lc", script])
+    return subprocess.run(argv, capture_output=True, timeout=timeout, shell=False)
+
+
 def _wsl_path(p: Path) -> str:
+    """`_sh` 那一侧看得懂的路径：Linux 上就是本机路径，Windows 上是 WSL 的 `/mnt/<盘>/…`。"""
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -168,8 +190,7 @@ def _run_bin(elf: Path, name: str, td: Path, timeout: int = 20) -> tuple[int, by
     outp = td / f"{name}.out"
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"timeout {timeout} {binn} > {_wsl_path(outp)} 2>/dev/null; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                       capture_output=True, timeout=timeout + 120, shell=False)
+    r = _sh(script, timeout + 120)
     out = outp.read_bytes() if outp.exists() else b""
     try:
         rc = int(r.stdout.decode().strip())
@@ -210,8 +231,7 @@ def _mirror() -> Path:
     binn = f"{_T}lomelf_mir_s1.bin"
     script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
               f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomelf.lomt")
-    rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                        capture_output=True, timeout=900, shell=False)
+    rr = _sh(script, 900)
     assert rr.returncode == 0, f"stage1 编译镜像失败: {rr.stderr[-300:]}"
     mir_ll = td / "lomelf.ll"
     mir_ll.write_bytes(rr.stdout)
@@ -1348,8 +1368,7 @@ def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (
         extra += " --allow-ports"
     script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
               f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
-                       capture_output=True, timeout=900, shell=False)
+    r = _sh(script, 900)
     try:
         rc = int(r.stdout.decode().strip())
     except ValueError:
