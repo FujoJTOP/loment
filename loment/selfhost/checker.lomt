@@ -715,6 +715,12 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
     if is_base_type(src, t, i) {
         return (i as u64) * 4294967296 + (o as u64);
     }
+    // 函数指针 `fn(A, B) -> C`（M85, `docs/246`）—— 它是个**多 token** 类型，所以不像
+    // 基类型那样一 token 就完事。这里只判形状（内容由 `chk_ty_range` 判），否则一串
+    // `fn` `(` `u64` `,` … 会被当成一堆未声明的名字，报一串假 E-TYPE。
+    if chk_tok_is(src, t, i, "fn") && chk_tok_is(src, t, i + 1, "(") {
+        return (i as u64) * 4294967296 + (o as u64);
+    }
     if chk_tok_kind(t, i) == 0 {
         if chk_lookup_slot(src, t, s, n, i) != 0 {
             return (i as u64) * 4294967296 + (o as u64);
@@ -749,6 +755,13 @@ fn chk_skip_type(src: ptr, t: ptr, i: u32) -> u32 {
             j = j + 1;
         }
         return j + 1;
+    }
+    // 函数指针（M85, `docs/246`）：**整段** `fn(...) -> T` 一起跳掉 —— 只吃下 `fn`
+    // 的话，后面的 `(` `u64` … 会被当成下一个形参，报一串假 E-TYPE（与上面 `<...>`
+    // 那条坑同形）。
+    if chk_tok_is(src, t, j, "fn") && chk_tok_is(src, t, j + 1, "(") {
+        let rp: u32 = chk_match_paren(src, t, j + 1);
+        return chk_skip_type(src, t, rp + 3);            // `)` `-` `>` 之后的返回类型
     }
     j = j + 1;
     if chk_tok_is(src, t, j, "<") {
@@ -3188,7 +3201,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 所以 `;` 也要当作终止 —— 否则会一路走到下一个 `{` (那是 impl 块的), 把游标
             // 拽进别人的块里, 后面全错位。
             // 位置必须先扫出来: `declare` 要把返回类型编码记进符号表 (批次 2 的 return 比对)。
-            let j: u32 = i + 2;
+            // **从形参表那个 `)` 之后**起扫 —— 形参表里可以有 `->`（函数指针类型的形参，
+            // 如 `fn(g: fn(u64) -> u32) -> u64`），从 `i + 2` 起扫会先撞上它，把**形参**
+            // 的返回类型当成函数的返回类型（M85, `docs/246`）。
+            let j: u32 = chk_match_paren(src, t, lp) + 1;
             let rtok: u32 = 0;
             while !chk_tok_is(src, t, j, "{") && !chk_tok_is(src, t, j, ";")
                     && chk_tok_kind(t, j) != 4 {

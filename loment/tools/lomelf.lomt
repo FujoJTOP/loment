@@ -2070,6 +2070,14 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     if lit_at(t, cs, ce, "@llvm.trap") == 1 {
         d = e1(out, d, 15);
         d = e1(out, d, 11);
+    } else if load8(t, cs) == 37 {
+        // 间接调用（M85, `docs/246`）: callee 是**值** —— 一个函数的地址。地址在这里
+        // 才读：上面 push 实参用的是 rax，`rcx` 一路没人碰（反过来的话 rax 会把它踩掉）。
+        // `FF D1` = `call rcx`。参考实现 `Emitter._call` 那一条与此**逐字节同**。
+        let so: u32 = slot_find(tab, t, cs, ce - cs);
+        d = em_mov_rm(out, d, RCX, RBP, so);
+        d = e1(out, d, 255);
+        d = e1(out, d, 209);
     } else {
         d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
     }
@@ -2379,6 +2387,21 @@ fn do_cast(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     return emit_put(tab, out, d, t, doff, dlen, RAX);
 }
 
+/// `@名字` 这个跨度在这份 IR 里是一个**全局**吗（`TB_G` 里存的就是含 `@` 的跨度）。
+fn is_global_span(tab: ptr, t: ptr, vo: u32, vl: u32) -> u32 {
+    let n: u32 = cell(tab, C_NG);
+    let i: u32 = 0;
+    while i < n {
+        let gbase: u32 = TB_G + i * 32;
+        if span_eq(t, load32(tab, gbase + G_NOFF), load32(tab, gbase + G_NLEN),
+                   vo, vl) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn do_ptrcast(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
               to_ptr: u32) -> u32 {
     let bs: u32 = i + 9;
@@ -2394,6 +2417,12 @@ fn do_ptrcast(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dl
     let d: u32 = c;
     if to_ptr == 1 {
         d = emit_get(tab, out, d, t, fo, fl, vs, ve - vs, RAX);
+    } else if load8(t, vs) == 64 && is_global_span(tab, t, vs, ve - vs) == 0 {
+        // `ptrtoint ptr @f to i64`（M85, `docs/246`）—— **取一个函数的地址**。
+        // 标签表里**函数不带 `@`、全局带**（`one_global` 那句"含前导 '@'"与
+        // `emit_func` 那句 `lbl_add(..., ns, ne - ns, ...)`），所以这里先问一句
+        // "这是不是全局"，不是就把那个 `@` 剥掉。不剥就是 `未定义的标签: @add`。
+        d = emit_get_ptr(tab, out, d, t, vs + 1, ve - vs - 1, RAX);
     } else {
         d = emit_get_ptr(tab, out, d, t, vs, ve - vs, RAX);
     }

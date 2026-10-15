@@ -232,6 +232,12 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 0 {
         return emit_str(s, out, "i32");
     }
+    // 函数指针 `fn(A, B) -> C`（M85, `docs/246`）在 LLVM 里就是**一个地址**（i64）。
+    // 放在 `tt == 4294967295` / `tt == 0` 那两条**之后**：那两条比的是值，不是 token，
+    // 而这个 `tok_is` 要拿 `tt` 当下标用。
+    if tok_is(src, toks, tt, "fn") && tok_is(src, toks, tt + 1, "(") {
+        return emit_str(s, out, "i64");
+    }
     if tok_is(src, toks, tt, "(") {   // unit 类型 `()`
         return emit_str(s, out, "void");
     }
@@ -1786,6 +1792,12 @@ fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
     if tok_is(src, toks, i, "mut") {
         return skip_type(src, toks, i + 1);
     }
+    // 函数指针（M85, `docs/246`）：**整段** `fn(...) -> T` 一起跳掉（只吃下 `fn` 的话，
+    // 后面的 `(` `u64` … 会被当成下一个形参 —— 与 `<...>` 那条坑同形）。注意它排在
+    // 下面 `"("` 那条**之前**：`fn` 后面跟的正是 `(`。
+    if tok_is(src, toks, i, "fn") && tok_is(src, toks, i + 1, "(") {
+        return skip_type(src, toks, cgt_paren_close(src, toks, i + 1) + 3);
+    }
     if tok_is(src, toks, i, "[") || tok_is(src, toks, i, "(") {
         let j: u32 = i + 1;
         let d: u32 = 1;
@@ -2239,6 +2251,69 @@ fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
     emit_str(s, out, ")\n");
     set_temp_val(s, lvl, p);
     return p;
+}
+
+/// 从 `(`（下标 `lp`）起找匹配的 `)`。
+/// 名字带 `cgt_` 前缀：**本编译器的符号表是全单元扁平的**，checker 里那套 `chk_*` 与本
+/// 文件同处一个单元，同名会撞（那一格上面的注释记着这条）。
+fn cgt_paren_close(src: ptr, toks: ptr, lp: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = lp;
+    while tok_kind(toks, j) != 4 {
+        if tok_is(src, toks, j, "(") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, ")") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `[i, hi)` 里深度 0 的下一个逗号；没有再返回 `hi`。
+fn cgt_comma(src: ptr, toks: ptr, i: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while j < hi {
+        if tok_is(src, toks, j, "(") || tok_is(src, toks, j, "[") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, ")") || tok_is(src, toks, j, "]") {
+            d = d - 1;
+        }
+        if d == 0 && tok_is(src, toks, j, ",") {
+            return j;
+        }
+        j = j + 1;
+    }
+    return hi;
+}
+
+/// `fn(A, B) -> C` 里第 `k` 个形参的**类型 token**（`ft` 是那个 `fn` 的下标）；没有 -> 0。
+/// 参数类型取的是**声明**里的那一个（与参考实现的 `expr(a, p.type)` 同源）—— 不是实参
+/// 自己的类型，两者在"字面量按上下文定宽"这类地方会分叉。
+fn cgt_fn_arg(src: ptr, toks: ptr, ft: u32, k: u32) -> u32 {
+    let rp: u32 = cgt_paren_close(src, toks, ft + 1);
+    let i: u32 = ft + 2;
+    let n: u32 = 0;
+    while i < rp {
+        let e: u32 = cgt_comma(src, toks, i, rp);
+        if n == k {
+            return i;
+        }
+        n = n + 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/// `fn(...) -> C` 的返回类型 token。
+fn cgt_fn_ret(src: ptr, toks: ptr, ft: u32) -> u32 {
+    return cgt_paren_close(src, toks, ft + 1) + 3;   // `)` `-` `>` 之后
 }
 
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
@@ -2786,6 +2861,18 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             set_temp_val(s, lvl, sc);
             return k4;
         }
+        if tok_is(src, toks, j, "fn_addr") {   // M85: 取函数地址 (docs/246)
+            // 与 `thread_spawn` 同一条理由: 名字不当表达式求值, 只取字面量正文 ——
+            // 产物里那是 `ptrtoint ptr @名字 to i64`, 一条**写死的符号引用**。
+            emit_str(s, out, "  ");
+            let fa: u32 = new_temp(s, out);
+            emit_str(s, out, " = ptrtoint ptr @");
+            emit_mem(s, out, src, load32(toks, (j + 2) * 20 + 4) + 1,
+                     load32(toks, (j + 2) * 20 + 8) - 2);
+            emit_str(s, out, " to i64\n");
+            set_temp_val(s, lvl, fa);
+            return j + 4;                      // `fn_addr` `(` 字面量 `)` 之后
+        }
         if tok_is(src, toks, j, "syscall4") || tok_is(src, toks, j, "syscall6")
             || tok_is(src, toks, j, "syscall7") {   // M67/M72/M72+
             let n6: u32 = tok_is(src, toks, j, "syscall6") as u32;
@@ -2853,6 +2940,54 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 return k18 + 3;
             }
             return k18 + 1;
+        }
+        // 间接调用 `p(a, b)`（M85, `docs/246`）: callee 是一个 `fn(...)` 类型的**变量**
+        // —— 它的类型 token 就是那个 `fn`（`expr_type` 对局部变量给的就是声明处的类型
+        // token）。分派排在 `find_fn` **之前**：一个 `fn(...)` 类型的局部变量不会是顶层
+        // 函数名，而顶层函数名不会是局部变量。
+        let cty: u32 = expr_type(s, src, toks, j);
+        if cty != 0 && tok_is(src, toks, cty, "fn") {
+            emit_str(s, out, "  ");
+            let lf: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i64, ptr %");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr\n  ");
+            let ff: u32 = new_temp(s, out);
+            emit_str(s, out, " = inttoptr i64 %t");
+            emit_dec(s, out, lf);
+            emit_str(s, out, " to ptr\n");
+            let k2: u32 = j + 2;
+            let a2: u32 = 0;
+            while !tok_is(src, toks, k2, ")") && tok_kind(toks, k2) != 4 && a2 < 10 {
+                let ft2: u32 = cgt_fn_arg(src, toks, cty, a2);
+                let ae2: u32 = expr_bin(s, out, src, toks, k2, 1, lvl + 1 + a2, ft2);
+                store32(s, 720 + (lvl + 1 + a2) * 4, ft2);
+                k2 = ae2;
+                if tok_is(src, toks, k2, ",") {
+                    k2 = k2 + 1;
+                }
+                a2 = a2 + 1;
+            }
+            emit_str(s, out, "  ");
+            let rn: u32 = new_temp(s, out);
+            emit_str(s, out, " = call ");
+            emit_ty(s, out, src, toks, cgt_fn_ret(src, toks, cty));
+            emit_str(s, out, " %t");
+            emit_dec(s, out, ff);
+            emit_str(s, out, "(");
+            let b2: u32 = 0;
+            while b2 < a2 {
+                if b2 > 0 {
+                    emit_str(s, out, ", ");
+                }
+                emit_ty(s, out, src, toks, load32(s, 720 + (lvl + 1 + b2) * 4));
+                emit_str(s, out, " ");
+                emit_val(s, out, lvl + 1 + b2);
+                b2 = b2 + 1;
+            }
+            emit_str(s, out, ")\n");
+            set_temp_val(s, lvl, rn);
+            return k2;
         }
         // 调用: 先算每个实参 (值落到更深的层), 再写 call 行
         let fi: u32 = find_fn(s, src, toks, j);
