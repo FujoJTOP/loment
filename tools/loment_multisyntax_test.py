@@ -236,9 +236,24 @@ def _rustc() -> str | None:
 
 
 def _rust_has_target() -> bool:
-    r = subprocess.run(["rustc", "--print", "target-list"], capture_output=True,
+    """**这份工具链装没装**这个目标的 `core` —— 不是"rustc 认不认识这个名字"。
+
+    原先是 `rustc --print target-list`, 而那个名单对**所有**内置目标都为真: 它回答的是
+    "名字在不在内置表里", 与有没有这个目标的 `core` 无关。本机没装 rustc 时这一族判据
+    一律 SKIP, 所以错在哪看不出来; `#371` 让它们在 runner 上**原生跑**之后现形 ——
+    容器里 apt 装的 rustc **认识** `x86_64-unknown-none`, 却没装它的 core, 于是判据红在
+    "工具链不全"上 (`error[E0463]: can't find crate for core … may not be installed`),
+    而那不是被测行为。
+    """
+    rustc = _rustc()
+    if not rustc:
+        return False
+    r = subprocess.run([rustc, "--print", "sysroot"], capture_output=True,
                        text=True, shell=False)
-    return "x86_64-unknown-none" in r.stdout
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    d = Path(r.stdout.strip()) / "lib" / "rustlib" / "x86_64-unknown-none" / "lib"
+    return d.is_dir() and any(d.glob("libcore*.rlib"))
 
 
 #: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
