@@ -215,12 +215,13 @@ class Profile:
                 if n:
                     blocks.append(f"{fn.name}\t{blk.label}\t{n}")
                 for idx in range(len(blk.instrs)):
-                    for (f2, b2, i2, e), k in self.edges.items():
-                        if (f2, b2, i2) == (fn.name, blk.label, idx):
-                            edges.append(f"{f2}\t{b2}\t{i2}\t{e}\t{k}")
-                    for (f2, b2, i2, callee), k in self.calls.items():
-                        if (f2, b2, i2) == (fn.name, blk.label, idx):
-                            calls.append(f"{f2}\t{b2}\t{i2}\t{callee}\t{k}")
+                    site = (fn.name, blk.label, idx)
+                    # ⚠ **按边号升序**，不是"第一次被走到的次序"：自举那侧沿边表走，天然升序；
+                    # 这里跟着字典插入顺序走，就会在"第一次取假边"的站点上和它分叉。
+                    for kk in sorted(k for k in self.edges if k[:3] == site):
+                        edges.append(f"{kk[0]}\t{kk[1]}\t{kk[2]}\t{kk[3]}\t{self.edges[kk]}")
+                    for kk in sorted(k for k in self.calls if k[:3] == site):
+                        calls.append(f"{kk[0]}\t{kk[1]}\t{kk[2]}\t{kk[3]}\t{self.calls[kk]}")
         out = ["# lvm profile v1",
                "# site = (function, block, instruction-index-in-block); a block is (function, block)",
                "# order = IR parse order (function -> block -> instruction), not sorted by name",

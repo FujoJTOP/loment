@@ -48,6 +48,7 @@ const MAX_FUNCS: u32 = 512;          // (281)
 const MAX_PARAMS: u32 = 2048;        // (每函数 ≤10)
 const MAX_BLOCKS: u32 = 8192;        // (每函数 ≤139)
 const MAX_INSTRS: u32 = 32768;       // (全程序 ≤10659)
+const MAX_EDGES: u32 = 65536;        // 全程序的边（每条 br 1-2 条、switch N+1 条）
 const MAX_VALS: u32 = 1024;          // 一帧里同时活着的 SSA 名 (每函数 ≤227)
 const MAX_DEPTH: u32 = 32;           // 调用深度 (实测 10)
 
@@ -65,8 +66,13 @@ const FRAME_SIZE: u32 = 32768;
 const GLOBAL_REC: u32 = 24;          // name_off,name_len,ty_off,ty_len,init_off,init_len
 const FUNC_REC: u32 = 32;            // name_off,name_len,ret_off,ret_len,nparams,first_param,first_block,nblocks
 const PARAM_REC: u32 = 16;           // ty_off,ty_len,name_off,name_len
-const BLOCK_REC: u32 = 16;           // label_off,label_len,first_instr,ninstrs
-const INSTR_REC: u32 = 24;           // dest_off,dest_len,text_off,text_len,kind,sub
+// T1（`docs/246`）：块记录多一格 `count`（这一块被进过几次）。
+const BLOCK_REC: u32 = 20;           // label_off,label_len,first_instr,ninstrs,count
+// T1：指令记录多两格 —— 这条分支的边在边表里的**起点**与**条数**。
+// 边表按解析期一次分好（每条 br/switch 的边数静态可知），于是运行时记一条边是
+// `E_OFF + (first_edge + edge) * 4`，**O(1)**，不用查表。
+const INSTR_REC: u32 = 32;           // dest_off,dest_len,text_off,text_len,kind,sub,first_edge,nedges
+const EDGE_REC: u32 = 4;             // 一条边一个计数；边号 = 行号 - first_edge
 const VAL_REC: u32 = 16;             // name_off,name_len,vlo,vhi   (u64 拆两半：没有 load64)
 
 //: 帧内布局（相对帧基址）
@@ -154,14 +160,15 @@ const G_OFF: u32 = 8388608;                  // TAB
 const F_OFF: u32 = 8394752;                  // + 256*24
 const P_OFF: u32 = 8411136;                  // + 512*32
 const B_OFF: u32 = 8443904;                  // + 2048*16
-const I_OFF: u32 = 8574976;                  // + 8192*16
-const ARGV_OFF: u32 = 9361408;               // + 32768*24
+const I_OFF: u32 = 8607744;                  // + 8192*20
+const E_OFF: u32 = 9656320;                  // + 32768*32
+const ARGV_OFF: u32 = 9918464;               // + 65536*4
 //: 格区**不能在 0** —— 输入文本就从 0 起，两者会打架。第一版把格区放在 arena 头 256 字节，
 //: 于是 `read_file` 一读进来 ① 把输入的前 32 字节踩成格子的值、② 之后每次 `ctx_set`
 //: 又踩一次；症状是解析器在垃圾上乱跑（报"全局表满了"）。格区挪到 ARGV 之后，
 //: **arena 偏移 = 输入文本偏移**这条等式才成立（全篇的 span 都靠它）。
-const CTX_OFF: u32 = 9384192;                // + 16384
-const ARENA: u64 = 9384448;                  // + 256
+const CTX_OFF: u32 = 9934848;                // + 16384
+const ARENA: u64 = 9935104;                  // + 256
 
 // ---------------------------------------------------------------- 格区
 //
@@ -176,6 +183,9 @@ const C_NI: u32 = 20;                // 指令条数
 const C_HEAP: u32 = 24;              // VM 堆游标
 const C_DEPTH: u32 = 28;             // 当前调用深度
 const C_STEPS: u32 = 96;             // 已经执行了多少条指令（见 STEP_CAP）
+//: T1：剖面写到哪个 fd。**0 = 关**（0 号是 stdin，写剖面拿到的一定 ≥ 3）。
+const C_PROF_FD: u32 = 104;
+const C_NEDGE: u32 = 108;           // 边表已经用掉多少行
 
 fn ctx_get(a: ptr, k: u32) -> u32 {
     return load32(a, CTX_OFF + k);
@@ -991,8 +1001,8 @@ fn blk_of(a: ptr, fi: u32, lo: u32, ll: u32) -> u32 {
     let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
     let i: u32 = 0;
     while i < nb {
-        let o: u32 = rd(a, B_OFF, (fb + i) * 4);
-        let l: u32 = rd(a, B_OFF, (fb + i) * 4 + 1);
+        let o: u32 = rd(a, B_OFF, (fb + i) * 5);
+        let l: u32 = rd(a, B_OFF, (fb + i) * 5 + 1);
         if l == ll && same(a, lo, a, o, ll) {
             return fb + i;
         }
@@ -1167,12 +1177,14 @@ fn put_instr(a: ptr, do_: u32, dl: u32, to: u32, tl: u32, k: u32, sub: u32) -> u
     if ni >= MAX_INSTRS {
         fail("指令表满了");
     }
-    wr(a, I_OFF, ni * 6, do_);
-    wr(a, I_OFF, ni * 6 + 1, dl);
-    wr(a, I_OFF, ni * 6 + 2, to);
-    wr(a, I_OFF, ni * 6 + 3, tl);
-    wr(a, I_OFF, ni * 6 + 4, k);
-    wr(a, I_OFF, ni * 6 + 5, sub);
+    wr(a, I_OFF, ni * 8, do_);
+    wr(a, I_OFF, ni * 8 + 1, dl);
+    wr(a, I_OFF, ni * 8 + 2, to);
+    wr(a, I_OFF, ni * 8 + 3, tl);
+    wr(a, I_OFF, ni * 8 + 4, k);
+    wr(a, I_OFF, ni * 8 + 5, sub);
+    wr(a, I_OFF, ni * 8 + 6, 0);                     // first_edge（解析收尾时回填）
+    wr(a, I_OFF, ni * 8 + 7, 0);                     // nedges
     ctx_set(a, C_NI, ni + 1);
     return ni;
 }
@@ -1182,24 +1194,68 @@ fn add_block(a: ptr, lo: u32, ll: u32) -> u32 {
     if nb >= MAX_BLOCKS {
         fail("基本块表满了");
     }
-    w2(a, B_OFF, nb * 4, lo, ll);
-    wr(a, B_OFF, nb * 4 + 2, ctx_get(a, C_NI));   // first_instr（先记，收尾时才知个数）
-    wr(a, B_OFF, nb * 4 + 3, 0);
+    w2(a, B_OFF, nb * 5, lo, ll);
+    wr(a, B_OFF, nb * 5 + 2, ctx_get(a, C_NI));   // first_instr（先记，收尾时才知个数）
+    wr(a, B_OFF, nb * 5 + 3, 0);
+    wr(a, B_OFF, nb * 5 + 4, 0);                     // T1：这一块被进过几次
     ctx_set(a, C_NB, nb + 1);
     return nb;
 }
 
+/// 数一段文本里 `label` 出现几次 —— `switch` 的边数靠它（`[...]` 里有几个 `label`
+/// 就有几条 case 边，再加上外面那个 default）。
+fn count_label(a: ptr, s: u32, e: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = s;
+    while i + 5 <= e {
+        if same(a, i, str_ptr("label"), 0, 5) {
+            n = n + 1;
+            i = i + 5;
+        } else {
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
+/// 给一条分支指令分 `n` 行边表，行号记在指令记录里。**O(1) 记账**就靠这个：
+/// 运行时记一条边是 `E_OFF + (first_edge + edge) * 4`，不用查表（`docs/246` §4）。
+fn edge_alloc(a: ptr, i: u32, n: u32) {
+    let base: u32 = ctx_get(a, C_NEDGE);
+    if base + n > MAX_EDGES {
+        fail("边表满了 —— 抬 MAX_EDGES");
+    }
+    wr(a, I_OFF, i * 8 + 6, base);
+    wr(a, I_OFF, i * 8 + 7, n);
+    let k: u32 = 0;
+    while k < n {
+        wr(a, E_OFF, base + k, 0);
+        k = k + 1;
+    }
+    ctx_set(a, C_NEDGE, base + n);
+}
+
 /// 把函数里所有 `br` 的目标标签解析成块号（第二趟）。分支在热路径上，这一步省不得。
+/// T1 顺带**给每条分支分边表** —— 同一趟走完，不另开一轮。
 fn resolve_brs(a: ptr, fi: u32, tso: u32, tsl: u32) {
     let nt: u32 = ctx_get(a, C_NI);
     let i: u32 = tso;
     while i < tsl {
-        let k: u32 = rd(a, I_OFF, i * 6 + 4);
+        let k: u32 = rd(a, I_OFF, i * 8 + 4);
         if k == K_BR_UNCOND || k == K_BR_COND {
-            let e: u32 = rd(a, I_OFF, i * 6 + 2) + rd(a, I_OFF, i * 6 + 3);
-            let p: u32 = rd(a, I_OFF, i * 6 + 2);
+            let e: u32 = rd(a, I_OFF, i * 8 + 2) + rd(a, I_OFF, i * 8 + 3);
+            let p: u32 = rd(a, I_OFF, i * 8 + 2);
             let sub: u32 = br_sub(a, fi, p, e, k);
-            wr(a, I_OFF, i * 6 + 5, sub);
+            wr(a, I_OFF, i * 8 + 5, sub);
+            if k == K_BR_UNCOND {
+                edge_alloc(a, i, 1);
+            } else {
+                edge_alloc(a, i, 2);
+            }
+        } else if k == K_SWITCH {
+            let to: u32 = rd(a, I_OFF, i * 8 + 2);
+            let tl: u32 = rd(a, I_OFF, i * 8 + 3);
+            edge_alloc(a, i, count_label(a, to, to + tl) + 1);
         }
         i = i + 1;
     }
@@ -1372,14 +1428,14 @@ fn parse_func(a: ptr, s: u32, e: u32, i0: u32, n: u32) -> u32 {
     let nb: u32 = ctx_get(a, C_NB) - first_b;
     let k: u32 = 0;
     while k < nb {
-        let f: u32 = rd(a, B_OFF, (first_b + k) * 4 + 2);
+        let f: u32 = rd(a, B_OFF, (first_b + k) * 5 + 2);
         let nx: u32 = first_i;
         if k + 1 < nb {
-            nx = rd(a, B_OFF, (first_b + k + 1) * 4 + 2);
+            nx = rd(a, B_OFF, (first_b + k + 1) * 5 + 2);
         } else {
             nx = ctx_get(a, C_NI);
         }
-        wr(a, B_OFF, (first_b + k) * 4 + 3, nx - f);
+        wr(a, B_OFF, (first_b + k) * 5 + 3, nx - f);
         k = k + 1;
     }
     wr(a, F_OFF, nf * 8 + 7, nb);
@@ -1395,7 +1451,7 @@ fn body_line(a: ptr, s: u32, e: u32, nf: u32, cur: u32) -> u32 {
         let lo: u32 = s;
         let ll: u32 = last - s;
         let b: u32 = add_block(a, lo, ll);
-        wr(a, B_OFF, b * 4 + 2, ctx_get(a, C_NI));
+        wr(a, B_OFF, b * 5 + 2, ctx_get(a, C_NI));
         return 1;
     }
     let do_: u32 = NONE;
@@ -1917,6 +1973,13 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         return ctx_get(a, C_HEAP) as u64;
     }
     if nr == 60 {                                        // exit(code)
+        // ⚠ **退出前先把剖面落盘**。参考那侧靠异常把栈弹干净、由 `run_ir` 收尾再写；
+        // 这一侧没有异常 —— 而语料里几乎每一份都是 `_start` 里直接 `exit`，
+        // 于是"在 `run` 结尾写"那条路**一次都不会走到**（第一版就是这么空的文件）。
+        let pfd: u32 = ctx_get(a, C_PROF_FD);
+        if pfd != 0 {
+            dump_profile(a, pfd as u64);
+        }
         syscall4(60, x1 & 255, 0, 0);
         return 0;
     }
@@ -2088,8 +2151,8 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
 fn phi_of(a: ptr, m: ptr, fr: u32, io: u32, il: u32, prev: u32) -> u64 {
     let e: u32 = io + il;
     let ts: u64 = ty_span(a, after_op(a, io, e), e);
-    let po: u32 = rd(a, B_OFF, prev * 4);
-    let pl: u32 = rd(a, B_OFF, prev * 4 + 1);
+    let po: u32 = rd(a, B_OFF, prev * 5);
+    let pl: u32 = rd(a, B_OFF, prev * 5 + 1);
     let p: u32 = skip_sp(a, hi32(ts) + lo32(ts), e);
     let hit: u64 = 0;
     let found: u32 = 0;
@@ -2129,7 +2192,16 @@ fn switch_of(a: ptr, m: ptr, fr: u32, io: u32, il: u32, fi: u32) -> u32 {
     let dw: u64 = wspan(a, lab_after(a, q + 1, bo), bo);
     let dflt: u32 = blk_of(a, fi, hi32(dw), lo32(dw));
     let cp: u32 = skip_sp(a, bo + 1, be);
-    let hit: u32 = dflt;
+    // T1：**default 是最后一条边** —— 边号 = case 的条数（与解析期 `edge_alloc` 给的
+    // `nedges = count_label + 1` 对得上）。第一版这里填的是 255 占位，于是 default 那一步
+    // 的边号超界、被 `bump_edge` 静默跳过 —— 症状是**少一行**（`score entry 5 1 1`），
+    // 而那正是孪生判据逐字节比出来的。
+    // ⚠ 计数器**不能叫 `ce`** —— 循环体里已经有一个 `let ce` 是"这一条 case 的结束偏移"，
+    // 而这一门**没有块作用域**（`docs/228`）：内层 `let` 会**静默遮住**外层同名变量，
+    // 于是 `| ce` 用的是偏移（一个大数），边号超界被 `bump_edge` 跳过 —— 症状是镜像那边
+    // **少一行**，而两边的 stdout 一字不差。这一处是孪生判据逐字节比出来的。
+    let hit: u32 = (dflt << 16) | count_label(a, bo + 1, be);
+    let ek: u32 = 0;
     while cp < be {
         let cty: u64 = ty_span(a, cp, be);
         let cvs: u64 = trim_span(a, hi32(cty) + lo32(cty), seg_end(a, hi32(cty) + lo32(cty), be));
@@ -2138,8 +2210,9 @@ fn switch_of(a: ptr, m: ptr, fr: u32, io: u32, il: u32, fi: u32) -> u32 {
         let lw: u64 = wspan(a, lp, be);
         let cv: u64 = dec_u64(a, hi32(cvs), hi32(cvs) + lo32(cvs));
         if mask_bits(v, bits_of(a, hi32(cty), lo32(cty))) == cv {
-            hit = blk_of(a, fi, hi32(lw), lo32(lw));
+            hit = (blk_of(a, fi, hi32(lw), lo32(lw)) << 16) | ek;
         }
+        ek = ek + 1;
         cp = seg_next(a, lp + lo32(lw), be);
     }
     return hit;
@@ -2147,24 +2220,43 @@ fn switch_of(a: ptr, m: ptr, fr: u32, io: u32, il: u32, fi: u32) -> u32 {
 
 /// 跑一个函数体。`fr` = 本帧基址（VM 地址），`cfr` = **调用者**的帧基址（NONE = 没有）。
 /// `cfr` 是给聚合返回值用的：被调者的帧下一句就作废，值必须落到调用者那边。
+/// 记一次块进入。**关着就一个字节都不写**（`docs/246` 判据 D）。
+fn bump_block(a: ptr, bi: u32) {
+    if ctx_get(a, C_PROF_FD) != 0 {
+        wr(a, B_OFF, bi * 5 + 4, rd(a, B_OFF, bi * 5 + 4) + 1);
+    }
+}
+
+/// 记一条边。边号由调用点给（`br` 无条件 0 / 条件 0真1假 / `switch` = case 次序，default 在最后）。
+fn bump_edge(a: ptr, ii: u32, e: u32) {
+    if ctx_get(a, C_PROF_FD) != 0 {
+        let fe: u32 = rd(a, I_OFF, ii * 8 + 6);
+        let ne: u32 = rd(a, I_OFF, ii * 8 + 7);
+        if e < ne {
+            wr(a, E_OFF, fe + e, rd(a, E_OFF, fe + e) + 1);
+        }
+    }
+}
+
 fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u64 {
     let bi: u32 = rd(a, F_OFF, fi * 8 + 6);
     let prev: u32 = NONE;
     let go: u32 = 1;
     while go == 1 {
         let here: u32 = bi;
-        let io: u32 = rd(a, B_OFF, bi * 4 + 2);
-        let ni: u32 = rd(a, B_OFF, bi * 4 + 3);
+        bump_block(a, bi);
+        let io: u32 = rd(a, B_OFF, bi * 5 + 2);
+        let ni: u32 = rd(a, B_OFF, bi * 5 + 3);
         let j: u32 = 0;
         let jumped: u32 = 0;
         while j < ni && jumped == 0 {
             let ii: u32 = io + j;
-            let k: u32 = rd(a, I_OFF, ii * 6 + 4);
-            let sub: u32 = rd(a, I_OFF, ii * 6 + 5);
-            let to: u32 = rd(a, I_OFF, ii * 6 + 2);
-            let tl: u32 = rd(a, I_OFF, ii * 6 + 3);
-            let do_: u32 = rd(a, I_OFF, ii * 6);
-            let dl: u32 = rd(a, I_OFF, ii * 6 + 1);
+            let k: u32 = rd(a, I_OFF, ii * 8 + 4);
+            let sub: u32 = rd(a, I_OFF, ii * 8 + 5);
+            let to: u32 = rd(a, I_OFF, ii * 8 + 2);
+            let tl: u32 = rd(a, I_OFF, ii * 8 + 3);
+            let do_: u32 = rd(a, I_OFF, ii * 8);
+            let dl: u32 = rd(a, I_OFF, ii * 8 + 1);
             ctx_set(a, 84, to);
             ctx_set(a, 88, tl);
             let ns: u32 = ctx_get(a, C_STEPS) + 1;
@@ -2181,6 +2273,7 @@ fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u6
             }
             ctx_set(a, C_STEPS, ns);
             if k == K_BR_UNCOND {
+                bump_edge(a, ii, 0);
                 prev = here;
                 bi = sub;
                 jumped = 1;
@@ -2192,14 +2285,18 @@ fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u6
                 let c: u64 = operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
                 prev = here;
                 if c != 0 {
+                    bump_edge(a, ii, 0);
                     bi = sub >> 16;
                 } else {
+                    bump_edge(a, ii, 1);
                     bi = sub & 65535;
                 }
                 jumped = 1;
             } else if k == K_SWITCH {
+                let sv: u32 = switch_of(a, m, fr, to, tl, fi);
+                bump_edge(a, ii, sv & 65535);
                 prev = here;
-                bi = switch_of(a, m, fr, to, tl, fi);
+                bi = sv >> 16;
                 jumped = 1;
             } else if k == K_RET {
                 return do_ret(a, m, fr, cfr, to, tl, ro, rl);
@@ -2258,6 +2355,151 @@ fn do_ret(a: ptr, m: ptr, fr: u32, cfr: u32, to: u32, tl: u32, ro: u32, rl: u32)
     return operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
 }
 
+// ---------------------------------------------------------------- T1：剖面（`docs/246`）
+
+fn wlit(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// 把输入文本里的一段直接写出去 —— 剖面里的名字/标签就是那一段，不拷贝。
+fn wspan_out(fd: u64, a: ptr, off: u32, len: u32) {
+    if len > 0 {
+        let n: u64 = write_all(fd, ptr_add(a, off), len as u64);
+        let _x: u64 = n;
+    }
+}
+
+/// 调用指令里的被调名（**去掉 `@`**，与参考那侧 `f.name` 同形）。
+fn callee_span(a: ptr, to: u32, tl: u32) -> u64 {
+    let e: u32 = to + tl;
+    let i: u32 = index_of(a, to, e, 64);
+    if i == NONE {
+        return 0;
+    }
+    let j: u32 = word_end(a, i + 1, e);
+    return (((i + 1) as u64) << 32) | ((j - i - 1) as u64);
+}
+
+/// 三个段各走一遍表。**顺序 = 解析顺序**（函数 → 块 → 指令）—— 参考那侧也改成按它走，
+/// 两边的产物才逐字节比得了（`docs/246` §4 记了为什么不是按名字排序）。
+fn dump_profile(a: ptr, fd: u64) {
+    wlit(fd, "# lvm profile v1
+");
+    wlit(fd, "# site = (function, block, instruction-index-in-block); a block is (function, block)
+");
+    wlit(fd, "# order = IR parse order (function -> block -> instruction), not sorted by name
+");
+    wlit(fd, "[blocks]
+");
+    let fi: u32 = 0;
+    while fi < ctx_get(a, C_NF) {
+        let no: u32 = rd(a, F_OFF, fi * 8);
+        let nl: u32 = rd(a, F_OFF, fi * 8 + 1);
+        let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
+        let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
+        let b: u32 = 0;
+        while b < nb {
+            let cnt: u32 = rd(a, B_OFF, (fb + b) * 5 + 4);
+            if cnt > 0 {
+                wspan_out(fd, a, no + 1, nl - 1);
+                wlit(fd, "	");
+                wspan_out(fd, a, rd(a, B_OFF, (fb + b) * 5), rd(a, B_OFF, (fb + b) * 5 + 1));
+                wlit(fd, "	");
+                write_num(a, fd, cnt);
+                wlit(fd, "
+");
+            }
+            b = b + 1;
+        }
+        fi = fi + 1;
+    }
+    wlit(fd, "[edges]
+");
+    fi = 0;
+    while fi < ctx_get(a, C_NF) {
+        let no: u32 = rd(a, F_OFF, fi * 8);
+        let nl: u32 = rd(a, F_OFF, fi * 8 + 1);
+        let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
+        let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
+        let b: u32 = 0;
+        while b < nb {
+            let bo: u32 = rd(a, B_OFF, (fb + b) * 5);
+            let bl: u32 = rd(a, B_OFF, (fb + b) * 5 + 1);
+            let io: u32 = rd(a, B_OFF, (fb + b) * 5 + 2);
+            let ni: u32 = rd(a, B_OFF, (fb + b) * 5 + 3);
+            let j: u32 = 0;
+            while j < ni {
+                let fe: u32 = rd(a, I_OFF, (io + j) * 8 + 6);
+                let ne: u32 = rd(a, I_OFF, (io + j) * 8 + 7);
+                let e2: u32 = 0;
+                while e2 < ne {
+                    let c: u32 = rd(a, E_OFF, fe + e2);
+                    if c > 0 {
+                        wspan_out(fd, a, no + 1, nl - 1);
+                        wlit(fd, "	");
+                        wspan_out(fd, a, bo, bl);
+                        wlit(fd, "	");
+                        write_num(a, fd, j);
+                        wlit(fd, "	");
+                        write_num(a, fd, e2);
+                        wlit(fd, "	");
+                        write_num(a, fd, c);
+                        wlit(fd, "
+");
+                    }
+                    e2 = e2 + 1;
+                }
+                j = j + 1;
+            }
+            b = b + 1;
+        }
+        fi = fi + 1;
+    }
+    wlit(fd, "[calls]
+");
+    fi = 0;
+    while fi < ctx_get(a, C_NF) {
+        let no: u32 = rd(a, F_OFF, fi * 8);
+        let nl: u32 = rd(a, F_OFF, fi * 8 + 1);
+        let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
+        let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
+        let b: u32 = 0;
+        while b < nb {
+            let cnt: u32 = rd(a, B_OFF, (fb + b) * 5 + 4);
+            if cnt > 0 {
+                let bo: u32 = rd(a, B_OFF, (fb + b) * 5);
+                let bl: u32 = rd(a, B_OFF, (fb + b) * 5 + 1);
+                let io: u32 = rd(a, B_OFF, (fb + b) * 5 + 2);
+                let ni: u32 = rd(a, B_OFF, (fb + b) * 5 + 3);
+                let j: u32 = 0;
+                while j < ni {
+                    if rd(a, I_OFF, (io + j) * 8 + 4) == K_CALL {
+                        // 一个调用点的次数 = 它所在块的次数（块里每条指令都跟着块走一次）。
+                        let cs: u64 = callee_span(a, rd(a, I_OFF, (io + j) * 8 + 2),
+                                                  rd(a, I_OFF, (io + j) * 8 + 3));
+                        if lo32(cs) > 0 {
+                            wspan_out(fd, a, no + 1, nl - 1);
+                            wlit(fd, "	");
+                            wspan_out(fd, a, bo, bl);
+                            wlit(fd, "	");
+                            write_num(a, fd, j);
+                            wlit(fd, "	");
+                            wspan_out(fd, a, hi32(cs), lo32(cs));
+                            wlit(fd, "	");
+                            write_num(a, fd, cnt);
+                            wlit(fd, "
+");
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+            b = b + 1;
+        }
+        fi = fi + 1;
+    }
+}
+
 // ---------------------------------------------------------------- 前门
 
 fn write_num(a: ptr, fd: u64, v: u32) -> u64 {
@@ -2282,6 +2524,16 @@ fn run(a: ptr) -> u32 {
     if n == 0 {
         return fail("读不了输入");
     }
+    // T1（`docs/246`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。
+    let f2: u64 = argv_n(ab, 8192, 2);
+    if lo32(f2) != 0 {
+        // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577，mode 0644 = 420
+        let pfd: i64 = syscall4(2, ptr_add(ab, hi32(f2)) as u64, 577, 420);
+        if pfd < 0 {
+            return fail("写不了剖面文件");
+        }
+        ctx_set(a, C_PROF_FD, pfd as u32);
+    }
     ctx_set(a, C_NSRC, n as u32);
     ctx_set(a, C_HEAP, GLOBAL_BASE);
     ctx_set(a, C_DEPTH, 0);
@@ -2296,6 +2548,11 @@ fn run(a: ptr) -> u32 {
     wr(m, fr, 0, 0);
     wr(m, fr, 1, FR_SLOTS);
     exec_body(a, m, fi, fr, NONE, 0, 0);
+    let pfd2: u32 = ctx_get(a, C_PROF_FD);
+    if pfd2 != 0 {
+        dump_profile(a, pfd2 as u64);
+        syscall4(3, pfd2 as u64, 0, 0);
+    }
     return 0;
 }
 
