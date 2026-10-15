@@ -24,6 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_json_test as J                                          # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 TESTS: list[tuple[str, object]] = []
 
 
@@ -249,7 +256,7 @@ def test_std_twin_selfhost_compiles():
         binn = f"{J._T}stdcheck_s1.bin"
         script = (f"cp {J._wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {J._wsl_path(ROOT)} && {binn} loment/tools/lomstdcheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomstdcheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"

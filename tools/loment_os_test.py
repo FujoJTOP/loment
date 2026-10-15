@@ -30,6 +30,13 @@ import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 PKG = ROOT / "lompi" / "store" / "os" / "0.1.0"
 STORE = ROOT / "lompi" / "store"
 PROBE = ROOT / "loment" / "build" / "os_probe.lomt"
@@ -76,7 +83,7 @@ def _lx(p: Path) -> str:
 
 def _run_linux(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     if IS_WIN:
-        argv = ["wsl", "-e", *argv]
+        argv = [*_WSLCMD, *argv]
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", shell=False, timeout=timeout)
 

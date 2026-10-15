@@ -68,6 +68,13 @@ import potato      # noqa: E402
 import potato_from  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "gotrans"
 
 #: 期望值。**推出来的，不是抄的**（见 `Sample.go` 头注那份推导）：
@@ -103,7 +110,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -116,7 +123,7 @@ def _wsl_path(p: Path) -> str:
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc",
+        [*_WSLCMD, "bash", "-lc",
          f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
