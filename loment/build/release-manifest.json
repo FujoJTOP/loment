@@ -2342,6 +2342,10 @@
    "sha256": "52fb88d1a8c23a99fff44846b68ef73ecbd71ffe378277c99c2743bbc3e11ff4"
   },
   {
+   "path": "docs/246-gc-ladder-axis.md",
+   "sha256": "46546c2c4514ae6ff7e4d5b5e385a9d3ade661118376ad679993143a1ee1f6b2"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "381a8179c9905a5e19aee53249a445786ab9960a91d5ac95cbc3591d85c5a59f"
   },
