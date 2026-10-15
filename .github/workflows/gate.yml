@@ -324,6 +324,25 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 判据预算（`#371`）—— 与各分片那一步同一个理由（那里有完整说明）：`ci.py` 在
+      # **每条判据都 PASS** 时也可能判失败，而那种失败不在 `:: [static] … FAIL` 里。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
+
       - name: 对照基线（这一片的新红，单跑确认）
         if: ${{ always() }}
         run: |
@@ -452,6 +471,32 @@ jobs:
             grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 判据预算（`#371`）—— **必须单独认，否则它是个隐形的失败**。
+      #
+      # `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：只要有人漏登记了一条跳过、
+      # 或者动了地板。那种失败**不会**出现在 `:: [static] … FAIL` 里（没有任何一条套件
+      # 失败），而下面"对照基线"那一步只读那些 FAIL 行；只看退出码又分不清"预算对不上"
+      # 与"某条套件红"（后者要按"先单跑一遍"的规矩处理）。所以这里认那句原话。
+      #
+      # 落这一版时实测过一次：`gate-skips.txt` 空着、若少了这一步，预算不符的那几片
+      # 会**报绿**（每条套件都写着 PASS），而这一整版就是冲着"没跑不算通过"来的。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
 
       # 门那一半：**只对"基线之外的红"报红**，而且**先单跑一遍再判**。
       #

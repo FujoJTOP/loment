@@ -1391,6 +1391,33 @@ def test_gate_container_image_tag_matches_the_recipe():
     print(f"      镜像 tag 两处一致: {m.group(1)}")
 
 
+@test
+def test_gate_workflow_fails_when_the_budget_disagrees():
+    """判据预算对不上时，门禁必须**真的红** —— 而这一步得在 workflow 里**单独**认出来。
+
+    `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：有人漏登记一条跳过、或者动了
+    地板。那种失败**不在** `:: [static] … FAIL` 里（没有任何一条套件失败），而各分片
+    "对照基线（新红，单跑确认）"那一步只读那些 FAIL 行 —— 于是**预算不符的片会报绿**，
+    每条套件都写着 PASS。这正是这一整版要堵的形状，落在它自己身上就太讽刺了。
+
+    （落这一版时实测：`gate-skips.txt` 空着，若少了这一步，那几片确实会报绿。）
+
+    两个跑片的 job（`static-exclusive` / `static-shard`）各要一处，且判失败要带
+    `::error::` —— 少一个前缀，GitHub 不会红那一步。
+    """
+    wf = _gate_workflow()
+    steps = re.findall(r"^\s*- name: .*$", wf, re.M)
+    n = sum(1 for s in steps if s.strip() == "- name: 判据预算（#371）")
+    assert n == 2, (
+        f"认预算那一步有 {n} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是预算不符时门禁**报绿**")
+    assert wf.count("grep -q 'fujoci: 判据预算对不上' gate.out") == 2, (
+        "两处都要认 `ci.py` 那句原话（只看退出码分不清预算不对与某条套件红）")
+    assert wf.count('echo "::error::判据预算对不上') == 2, (
+        "两处判失败都要带 `::error::`，否则那一步不会红")
+    print("      判据预算对不上时，两个跑片的 job 都会红")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 
