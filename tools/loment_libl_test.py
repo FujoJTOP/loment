@@ -340,6 +340,36 @@ int main(void) {
         printf("pr_n_cnt=%d\n", cnt);
     }
 
+    /* ---- libl_host: 文件那一半（自己写、自己读回） ---- */
+    {
+        const char *outp = "/tmp/liblio_c.bin";
+        char seq[300], rbuf[64], line[32];
+        FILE *f;
+        long i;
+        for (i = 0; i < 300; i++) seq[i] = (char)(i % 251);
+        f = fopen(outp, "w");
+        printf("io_open_w=%d\n", f != NULL);
+        printf("io_fwrite=%d\n", (int)fwrite(seq, 1, 300, f));
+        printf("io_ftell_w=%ld\n", ftell(f));
+        printf("io_fflush=%d\n", fflush(f));
+        fclose(f);
+        f = fopen(outp, "r");
+        printf("io_open_r=%d\n", f != NULL);
+        printf("io_fread=%d\n", (int)fread(rbuf, 1, 40, f));
+        printf("io_ftell_r=%ld\n", ftell(f));
+        printf("io_seek0=%d\n", fseek(f, 0, SEEK_SET));
+        printf("io_ftell_0=%ld\n", ftell(f));
+        printf("io_fgets=%d\n", fgets(line, 16, f) != NULL);
+        printf("io_fgets_len=%ld\n", (long)strlen(line));
+        printf("io_fgets_first=%d\n", (int)(unsigned char)line[0]);
+        printf("io_ftell_gets=%ld\n", ftell(f));
+        fclose(f);
+        printf("io_missing_null=%d\n", fopen("/tmp/liblio_nope/x", "r") == NULL);
+        puts("io_puts_ok");
+        putchar(88);
+        putchar(10);
+    }
+
     return 0;
 }
 '''.replace("@@ROWS@@", rows) \
@@ -363,6 +393,7 @@ use "lompi/store/std/0.1.0/string.lomt"
 use "lompi/store/std/0.1.0/ctype.lomt"
 use "lompi/store/std/0.1.0/stdlib.lomt"
 use "lompi/store/std/0.1.0/stdio.lomt"
+use "lompi/store/host/0.1.0/libl_host.lomt"
 
 fn wr(p: ptr, n: u32) -> i64 {
     return syscall4(1, 1, p as u64, n as u64);
@@ -826,6 +857,40 @@ fn _start() {
     say(sc, "pr_n_ret", sn as i64);
     say(sc, "pr_n_cnt", mem_load32(nslot, 0) as i64);
 
+    // ---- libl_host: 文件那一半（自己写、自己读回）
+    let outp: ptr = lit("/tmp/liblio_l.bin");
+    let seq: ptr = alloc(300);
+    let si: u32 = 0;
+    while si < 300 {
+        store8(seq, si, (si % 251) as u8);
+        si = si + 1;
+    }
+    let wf: ptr = fopen(outp, lit("w"));
+    say(sc, "io_open_w", b2i((wf as u64) != (0 as u64)));
+    say(sc, "io_fwrite", fwrite(seq, 1, 300, wf) as i64);
+    say(sc, "io_ftell_w", ftell(wf));
+    say(sc, "io_fflush", fflush(wf) as i64);
+    let _cw: i32 = fclose(wf);
+    let rf: ptr = fopen(outp, lit("r"));
+    say(sc, "io_open_r", b2i((rf as u64) != (0 as u64)));
+    let rbuf: ptr = alloc(64);
+    say(sc, "io_fread", fread(rbuf, 1, 40, rf) as i64);
+    say(sc, "io_ftell_r", ftell(rf));
+    say(sc, "io_seek0", fseek(rf, 0 as i64, 0) as i64);
+    say(sc, "io_ftell_0", ftell(rf));
+    let line: ptr = alloc(32);
+    let gp: ptr = fgets(line, 16, rf);
+    say(sc, "io_fgets", b2i((gp as u64) != (0 as u64)));
+    say(sc, "io_fgets_len", strlen(line) as i64);
+    say(sc, "io_fgets_first", load8(line, 0) as i64);
+    say(sc, "io_ftell_gets", ftell(rf));
+    let _cr: i32 = fclose(rf);
+    say(sc, "io_missing_null",
+        b2i((fopen(lit("/tmp/liblio_nope/x"), lit("r")) as u64) == (0 as u64)));
+    let _pu: i32 = puts(lit("io_puts_ok"));
+    let _p1: i32 = putchar(88);
+    let _p2: i32 = putchar(10);
+
     syscall4(60, 0, 0, 0);
 }
 '''.replace("@@N@@", str(len(_CT_BYTES))) \
@@ -918,7 +983,16 @@ def test_libl_matches_libc():
         got = _run_loment(td)
     diff = _first_diff(got, want)
     assert not diff, f"LibL 与 glibc 不一致 @ {diff}"
-    print(f"      libc 面: {len(want.splitlines())} 项与 glibc 逐字节一致")
+    # 宿主面那一条的**第二半**：两侧各自写的文件必须逐字节相同 —— 上面比的是 stdout，
+    # 而"写出去的东西对不对"只有比文件才算数（`cmp` 在 WSL 里跑，两个文件都在 /tmp）。
+    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+                        "cmp /tmp/liblio_c.bin /tmp/liblio_l.bin && "
+                        "wc -c < /tmp/liblio_l.bin"],
+                       capture_output=True, text=True, timeout=120, shell=False)
+    assert r.returncode == 0, (
+        f"两侧写出的文件不同（`cmp` 非零）: {r.stderr.strip()[:200]}")
+    print(f"      libc 面: {len(want.splitlines())} 项与 glibc 逐字节一致"
+          f"；写出的文件也逐字节相同（{int(r.stdout.strip())} 字节）")
 
 
 @test
