@@ -238,10 +238,8 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
         if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
-        s = str(exe.resolve()).replace("\\", "/")
         r = subprocess.run([*_WSLCMD, "bash", "-lc",
-                            f"chmod +x {s if s.startswith('/') else '/mnt/' + s[0].lower() + s[2:]}"
-                            f" && {'/mnt/' + s[0].lower() + s[2:]}; echo -n $?"],
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
                            capture_output=True, text=True, timeout=300)
     assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
     print("      声明抹成等长空白、行号不动；端到端跑出 42")
