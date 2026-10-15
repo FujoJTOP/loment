@@ -676,6 +676,73 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
+#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#:
+#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
+#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
+#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
+#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
+#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+_CONCAT_ONLY_SRC = (
+    "module concatonly\n%s\nchoose runtime\n\n"
+    "fn _start() {\n"
+    "    let s: str = \"abcd\";\n"
+    "    let i: u64 = 0;\n"
+    "    while i < 6000 {\n"
+    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    syscall4(60, 7, 0, 0);\n"
+    "}\n")
+
+
+def test_a_concat_only_program_still_collects():
+    """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
+
+    **Why**：触发原先只发在 `alloc` 的**调用点**上（`lomentc.py` 的 `builtin()` 那一支、
+    `codegen.lomt` 的 `alloc` 分支），而 `str_concat` 走的是**同一个** `alloc_ir` /
+    `emit_alloc_seq`，却**不经过**那两处 —— 于是它分配的字节**不计入**那个计数器。
+    两档都中，而且 alpha 也救不了：它的自适应阈值与**空间触发**都住在
+    `__loment_maybe_collect` 里，而那个函数**一次都不会被调用**。
+
+    改法：把触发挪进共用的分配发射里（`alloc_ir` / `emit_alloc_seq`）—— 于是**每一次**
+    分配都计数。对只含 `alloc` 的程序，发出的字节**完全不变**（顺序与实参同值）。
+
+    **How to apply**：这只语料里**一个 `alloc` 都没有**，这正是它的证伪力所在。
+    静态那一半钉"调用点存在"（修前 `call void @__loment_maybe_collect` 出现 **0** 次
+    —— 函数定义在，没人调）；动态那一半钉"跑得完"（修前 rc=132 耗尽，修后 rc=7）。
+    两半都要，因为"定义在"这件事会让人误以为它被调了。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        calls = {}
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_CONCAT_ONLY_SRC % f"choose {tier}", encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            text = ll.read_text(encoding="utf-8")
+            calls[tier] = text.count("call void @__loment_maybe_collect")
+            blob, _info = lomelf.compile_ll(text)
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got[tier] = _run_bin(nat, f"concat_{tier}", td, timeout=60)[0]
+    nocall = [k for k, v in calls.items() if v == 0]
+    assert not nocall, (
+        f"这些档位里 `__loment_maybe_collect` **一次都没被调用**（{nocall}）—— 触发只发在 "
+        "`alloc` 调用点上，而这只语料里没有 `alloc`，于是收集永远不会发生")
+    bad = [f"{k}={v}" for k, v in got.items() if v != 7]
+    assert not bad, (
+        f"只拼字符串的程序没跑完（{', '.join(bad)}；期望都是 7，132 = arena 耗尽）。"
+        "成因：`str_concat` 的分配不计入触发计数")
+    print(f"      gc_auto 触发调用 {calls['gc_auto']} 次 / gc_auto_alpha {calls['gc_auto_alpha']} 次，"
+          "两档都跑完（无 `alloc` 的语料）")
+
+
 @test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。

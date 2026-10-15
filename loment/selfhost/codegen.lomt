@@ -2487,7 +2487,19 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// **不再是内联的纯 bump** —— `free` 兑现之后（`docs/175` §3.4），分配与回收必须是
 /// 同一份状态的读写者。大小从第 szlvl 层取 (u32), 结果 (ptr) 写到第 lvl 层;
 /// 返回分配到的指针的 temp 号。alloc 与 str_concat 共用 (**文本与 `lomentc.alloc_ir` 同序**)。
+///
+/// **触发也发在这里**（`#367`）: 它原先在 `alloc` 的**调用点**上, 而 `str_concat`
+/// 走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器, 只拼字符串的
+/// 程序**一次收集都不跑**（alpha 也救不了: 它的阈值与空间触发都住在
+/// `__loment_maybe_collect` 里, 而那个函数一次都不会被调用）。挪到这儿之后**每一次**
+/// 分配都计数; 同一段文本、同一顺序、同一个实参, 所以只含 `alloc` 的程序产物字节不变。
 fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+    if gc_any(s) == 1 {
+        // 收在**分配之前** -> 不需要"分配失败再重试"那条路, `__loment_alloc` 一字节不动。
+        emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
+        emit_val(s, out, szlvl);
+        emit_str(s, out, ")\n");
+    }
     emit_str(s, out, "  ");
     let p: u32 = new_temp(s, out);
     emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
@@ -2610,14 +2622,6 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            if gc_any(s) == 1 {
-                // `gc_auto`：分配**之前**先问一句"该收了没有"（`docs/210` §2.1）。
-                // 收在分配之前 -> 不需要"分配失败再重试"那条路，`__loment_alloc`
-                // 一个字节都不用动（另外两档的产物因此逐字节不变）。
-                emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
-                emit_val(s, out, lvl);
-                emit_str(s, out, ")\n");
-            }
             emit_alloc_seq(s, out, lvl, lvl);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
