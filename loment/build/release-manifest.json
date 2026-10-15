@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "064b06ef6b99ccdcab32fb6b0d8a3689b3b25a6261f6d17e1b47fde0d03f3e8a"
+   "sha256": "de1a66254bf1fb523acc9c22562b689d4a462a0c41d4b80b559a77b29ea13ade"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "3a1bc35775653d524a4fdfe2588b7ad7e2cea1c72db11273796682762db9a75b"
+   "sha256": "9241d834f7e2a9d3356ffbc9691aa59882e01259dc8075665caa0bb956e5d488"
   },
   {
    "path": "tools/potato.py",
@@ -843,7 +843,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "2cba497a3808ca5f3077566659856e384d9cefc645572c1c232f5ec258de3565"
+   "sha256": "8bca1f46433405ccaec0f26a9ed9a028d4ce51abf763ea0feed486af0ee0e2fb"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -1207,7 +1207,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "767ccf21bb3347cd63b4b3689ed9ca8ce07fb469e3bcefaca226d45788defbec"
+   "sha256": "92d2e201c045b87b4ee6546a62b7dedf35244e0ccdc76861ba6d75b4f8911ccc"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1251,7 +1251,7 @@
   },
   {
    "path": "loment/tools/lomelf.lomt",
-   "sha256": "fb2d9284c50ac2dc2a08180e956f455ddcc07768b7c247cb51daec2cc54a8769"
+   "sha256": "41e1e64cacb5d27123746e9cb97f193a09c01f05cd9ba278c8a3f8782c127cf0"
   },
   {
    "path": "loment/tools/lomenterr.lomt",
@@ -1779,7 +1779,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "d4f3450e1312307d2ce55cd25bffe2a261592b8786a227b646032b9e9244b8eb"
+   "sha256": "d6c1bb21a91f1280bae0aba703848809be63860c9633516d388f255d58662c64"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -2207,7 +2207,7 @@
   },
   {
    "path": "docs/219-world-ports.md",
-   "sha256": "55d5e95929fa83e6a89bcda224c8de5483a6404400dec5bde2a4f4cdbac553bd"
+   "sha256": "b922d36d9174b4966fe31c1e72955a5b9d9b62bb990920fa732b69398cf1e4f2"
   },
   {
    "path": "docs/220-syscall7-and-udp.md",
@@ -2515,7 +2515,7 @@
   },
   {
    "path": "tools/loment_ffi_test.py",
-   "sha256": "e600ab73a481ec91dea922dcdb6138a1a6cdc5f91292357b5fe1eebac0e1e593"
+   "sha256": "8c03777eae4b58ada2cae48c2d8a6c4fd67afb80bf5f98f873bb20ba32d8c9a5"
   },
   {
    "path": "tools/loment_hosted_test.py",
