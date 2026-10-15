@@ -643,6 +643,123 @@ def test_gc_auto_collects_while_manual_exhausts():
 
 
 @test
+def test_collection_keeps_blocks_that_were_already_free():
+    """**回收必须留住"回收之前就已经空闲"的块**（`FujoJTOP/loment#366`）—— 判据是**三只**。
+
+    **Why**：`test_gc_auto_collects_while_manual_exhausts` 只测"垃圾能被收回来"。回收那一趟在
+    收垃圾的同时会**把空闲链表清空**（`__loment_collect` 与 `__loment_minor` 各一句
+    `store i32 0, ptr @__loment_freehead`），指望清扫把每一块**重新挂回去**。可清扫原先走的是
+    `__loment_free`，而它有一条守卫：**只在块头 `next == -1`（借出态）时才链接** ——
+    已经空闲的块头里存的正是链表后继，守卫直接返回。于是"清空 + 重挂"只重挂了这一趟
+    **新死**的块，**上一趟之前就空闲的块从此谁都找不着**：既不在链表上、也不在前沿里。
+
+    **How to apply**：循环里只握一块活块（`p`），每圈分配一块新的、再把**上一块** `free` 掉 ——
+    被 `free` 的那一块在回收发生时**没有任何根指着它**（槽 `p` 已经改指新块），所以它正是
+    "已经空闲、应当被重挂"的那一类。每圈 8008 字节，跑 300 圈 = 2.4 MB，而 arena 只有 64 KiB：
+      * `gc_auto` **+ `free`** → **跑完**（rc = 7）：链表在回收之后仍在，分配一直命中它；
+      * `gc_manual` + `free` → **跑完**（rc = 7）：这一只钉住"程序本身是能跑的" —— 少了它，
+        第一只红了会分不清是"回收吃掉了链表"还是"这份程序本来就装不下"；
+      * `gc_manual` + **不 `free`** → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明 arena
+        确实装不下 2.4 MB，所以上面两只的 7 不是"反正都跑得通"。
+
+    实测（2026-10-15）：修之前第一只是 **rc = 132**（约八次回收就把 64 KiB 丢光）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module freesurvive\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let p: ptr = alloc(8000);\n"
+            "    store8(p, 0, 9);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 300 {\n"
+            "        let q: ptr = alloc(8000);\n"
+            "        store8(q, 0, 9);\n"
+            "        %s"
+            "        p = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if load8(p, 0) == 9 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("auto", "choose gc_auto", "free(p);\n        "),
+             ("manual", "choose gc_manual", "free(p);\n        "),
+             ("manual_nofree", "choose gc_manual", ""))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"freesurvive_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。回收把**已经空闲的块**丢了 ——"
+        "列表在进清扫之前被清空，而清扫只有'重新挂'那一半才补得回来")
+    assert got[1] == 7, (
+        f"`gc_manual` 那一只没跑完：退出码 {got[1]}（期望 7）—— 这一只不收集，它的失败"
+        "说明这份程序本身就装不下，下面那条对 `gc_auto` 的判断不成立")
+    assert got[2] != 7, (
+        f"**不 `free` 的那一只也跑通了**（退出码 {got[2]}）—— 那这条判据测不出什么："
+        "arena 装得下 2.4 MB，前两只的 7 是'反正都跑得通'")
+    print(f"      auto 跑通 (rc={got[0]})；manual 跑通 (rc={got[1]})；"
+          f"manual 不 free 耗尽 (rc={got[2]}) —— 回收没吃掉空闲链表")
+
+
+@test
+def test_every_alloc_site_arms_the_collector():
+    """**`str_concat` 的分配点也要问一句"该收了没有"**（`FujoJTOP/loment#367`）—— 判据是**一对**。
+
+    **Why**：触发（`@__loment_maybe_collect`）原先只挂在 `alloc` 这个**内建**的发射点上，
+    而 `str_concat` 走的是同一个分配函数、却不经过那个点 —— 于是一份**只拼字符串**、自己
+    从不 `alloc` 的程序，`@__loment_gcbytes` 永远是 0，**收集器一次都不会被叫醒**，arena 撑爆。
+    要钉的就是"每个分配点都得问"。
+
+    **How to apply**：每圈 `str_concat(a, a)` 拼出一条 32 字节的新串、结果覆盖旧值（旧串立刻成
+    垃圾），活集恒为 32 字节。跑 10000 圈 = 320 KB 请求，arena 64 KiB：
+      * `gc_auto` → **跑完**（rc = 7）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪**，证明 320 KB 确实装不下。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。实测（2026-10-15）：
+    修之前 `gc_auto` 那只也是 **rc = 132** —— 一份 `alloc` 一次都不调的程序，
+    收集器从头到尾没被叫醒过。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module concatgc\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let a: str = \"0123456789abcdef\";\n"
+            "    let s: str = str_concat(a, a);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 10000 {\n"
+            "        s = str_concat(a, a);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if str_len(s) == 32 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"concatgc_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。这份程序一次 `alloc` 都不调，"
+        "只有 `str_concat` 在分配 —— 它的分配点没问'该收了没有'，收集器就不会跑")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出回收："
+        "arena 没被耗尽，说明它比 320 KB 大得多")
+    print(f"      auto 跑通 (rc={got[0]}，320 KB 请求过 64 KiB arena)；"
+          f"manual 耗尽 (rc={got[1]}) —— 拼接也在触发")
+
+
+@test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
 
