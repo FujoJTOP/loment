@@ -28,6 +28,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 GATE = ROOT / ".github" / "workflows" / "gate.yml"
 TESTS: list[tuple[str, object]] = []
 
@@ -41,7 +48,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -111,7 +118,7 @@ def _run(env_extra: dict, files: str) -> tuple[int, str, str]:
                  f"/usr/bin:/sbin:/bin {sets} bash {_wsl_path(td / 'door.sh')}; "
                  # 门自己的 stdout 会先出来，所以用标记把"退出码"与"summary"隔开
                  f'echo "<<<RC=$?"; echo "<<<SUM"; cat {wsl_sum} 2>/dev/null')
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", inner],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", inner],
                            capture_output=True, text=True, timeout=120, shell=False)
         raw = r.stdout or ""
         rc = -1

@@ -140,7 +140,7 @@ class Batch:
                   ["chmod", "+x", f"{_T}loment_lsp.bin"],
                   ["rm", "-f", f"{_T}loment_lsp_in.bin"],
                   ["cp", _wsl_path(inp), f"{_T}loment_lsp_in.bin"]):
-            r = subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+            r = subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             assert r.returncode == 0, (a, r)
         r = subprocess.run(
             [*_WSLCMD, "bash", "-lc",
@@ -291,12 +291,12 @@ def test_lsp_check_mode_is_python_free():
             for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
                       ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
                       ["chmod", "+x", f"{_T}loment_lsp.bin"]):
-                subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+                subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             # 把**绝对 WSL 路径**当数据传给 --check (不经 shell, 也不猜仓库在哪) ——
             # 早先这里写死了 `cd /mnt/d/Dev/FujoOS-FujoLang`, 换个检出位置就 rc=2
             # (服务打不开文件), 会被误读成"服务没构建"。
             abs_probe = _wsl_path(probe)
-            r = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", abs_probe],
+            r = subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check", abs_probe],
                                capture_output=True, text=True, timeout=180, shell=False)
             out = r.stdout
             assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
@@ -309,7 +309,7 @@ def test_lsp_check_mode_is_python_free():
                 # 路径之后正好是 `:行:列` (两个冒号)
                 assert head[len(abs_probe):].count(":") == 2, ln
             clean = _wsl_path(ROOT / "loment" / "examples" / "mathutil.lomt")
-            r2 = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", clean],
+            r2 = subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check", clean],
                                 capture_output=True, text=True, timeout=180, shell=False)
             assert r2.returncode == 0 and r2.stdout.strip() == "", (r2.returncode, r2.stdout)
     finally:
@@ -366,7 +366,7 @@ def test_lsp_check_honours_switches():
 
     def run(src: str) -> subprocess.CompletedProcess:
         probe.write_text(src, encoding="utf-8", newline="\n")
-        return subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check",
+        return subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check",
                                _wsl_path(probe)],
                               capture_output=True, text=True, timeout=180, shell=False)
 
@@ -377,7 +377,7 @@ def test_lsp_check_honours_switches():
             for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
                       ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
                       ["chmod", "+x", f"{_T}loment_lsp.bin"]):
-                subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+                subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             off = run(SW_OFF_SRC)
             assert off.returncode == 0 and off.stdout.strip() == "", \
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
