@@ -277,6 +277,52 @@ fn chk_chain_len(tyt: ptr, head: u32) -> u32 {
     return k;
 }
 
+/// 一个函数的**返回类型编码**（M85, `docs/246`）。`slot` 是符号表槽位+1；0 = 不比对。
+///
+/// **顶层函数（`K_FN`）现算**：从 `aux` 起找返回类型 token，再 `chk_ty_range` —— 因为
+/// 符号表那一格（+12）是**第一遍**算的编码，而复合类型表**按函数清零**，复合类型的
+/// **下标**到第三遍就已经是别人的格子了（以前 `rcode` 永远是自足的基类型/具名类型编码，
+/// 所以这条一直没露头）。
+/// **其余（方法等）照旧读那一格**：它们在语料里都是自足的编码；而方法的 `aux` 语义与
+/// 顶层函数**不同**（`declare` 那条路不一样），拿它去找 `(` 会读出垃圾 —— 实测会把
+/// `native_raii.lomt` 那份**搞崩**。
+fn chk_ret_ty_of_sym(src: ptr, t: ptr, syms: ptr, n: u32, tyt: ptr, slot: u32) -> u32 {
+    if slot == 0 {
+        return 0;
+    }
+    let s0: u32 = slot - 1;
+    if load32(syms, s0 * 20 + 4) == K_FN {
+        let rt: u32 = chk_ret_tok_of_sym(src, t, syms, slot);
+        if rt != 0 {
+            return chk_ty_range(src, t, syms, n, tyt, rt, chk_skip_type(src, t, rt));
+        }
+        return 0;
+    }
+    return load32(syms, s0 * 20 + 12);
+}
+
+/// 一个顶层函数的**返回类型 token**（M85, `docs/246`）；没有 `-> T` 返回 0。
+///
+/// **为什么不传"类型编码"而传 token**：符号表那一格（+12）是**第一遍**算的编码，而复合
+/// 类型表**按函数清零**（`store32(tyt, 0, 0)`）—— 一个**复合类型的下标**存到第三遍就已经
+/// 是别人的格子了（以前 `rcode` 永远是**自足**的基类型/具名类型编码，所以这条一直没露头）。
+/// 传 token 就没有这个寿命问题：用的地方**现算**（`chk_ty_range`），算完立刻比。
+/// 从 `aux`（形参表那个 `(`）起找 —— 返回类型就在那个 `)` 之后的 `->` 后面。
+fn chk_ret_tok_of_sym(src: ptr, t: ptr, syms: ptr, slot: u32) -> u32 {
+    if slot == 0 {
+        return 0;
+    }
+    let lp: u32 = load32(syms, (slot - 1) * 20 + 16);
+    if lp == 0 || !chk_tok_is(src, t, lp, "(") {
+        return 0;
+    }
+    let rp: u32 = chk_match_paren(src, t, lp);
+    if !chk_tok_is(src, t, rp + 1, "-") || !chk_tok_is(src, t, rp + 2, ">") {
+        return 0;                                        // 没有 `->` = 返回 `()`
+    }
+    return rp + 3;
+}
+
 /// 一个**字面量**指的函数的 `fn(...)` 类型（M85, `docs/246`）。
 /// 参考实现读 `funcs[name].params`；这里**按需重扫** —— 符号表的 `aux`（+16）就是形参表
 /// 那个 `(`，返回类型在 +12（aux 的语义按 kind 走，那一格上面的注释写着）。查不到 -> 0。
@@ -2986,8 +3032,13 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
             let t3: u32 = chk_tex(src, t, syms, n, env, c,
                                   ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
-            if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, j);
+            // `ret` 是**符号表槽位+1**（不是编码）：返回类型在比对处**现算** ——
+            // 复合类型的下标不能跨"按函数清零"活下来。见 `chk_ret_ty_of_sym`。
+            if t3 != 0 && ret != 0 {
+                let rty: u32 = chk_ret_ty_of_sym(src, t, syms, n, tyt, ret);
+                if rty != 0 && chk_ty_eq(tyt, t3, rty) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                }
             }
             if semi <= e {
                 j = semi + 1;
@@ -3215,6 +3266,11 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             }
             let rcode: u32 = 0;
             if rtok != 0 {
+                // **这里只存"自足"的编码**（基类型 / 具名类型 —— 它们不占复合表）。
+                // 复合类型（`fn(...)` / `[T; N]` / `Pair<T>`）**不能**存：复合表是
+                // **按函数清零**的（`store32(tyt, 0, 0)`），而这里是**第一遍**，第三遍
+                // 再按存下来的下标去读，读到的已经是别的函数的格子了。要用的地方按需
+                // **从 `aux` 重扫**（`chk_ret_of_sym`）—— 与形参表同一条路。
                 rcode = chk_ty_of_tok(src, t, syms, n, rtok);
             }
             let r0: u64 = declare(src, t, syms, n, i + 1, K_FN * 256 + argc, rcode, lp, out, o);
@@ -3571,7 +3627,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             }
             // 签名式方法 (`fn m(self) -> u32;`) 没有函数体: 不能把后面的 impl 块当自己的
             if chk_tok_is(src, t, fbra, "{") && fslot != 0 {
-                let retc: u32 = load32(syms, (fslot - 1) * 20 + 12);
+                let retc: u32 = fslot;      // **槽位**（返回类型在比对处现算, 见 chk_ret_ty_of_sym）
                 let fend: u32 = chk_skip_body(src, t, fbra);
                 let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra, oc);
                 store32(oc, 0, o);
