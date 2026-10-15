@@ -2350,6 +2350,14 @@
    "sha256": "6094fe108e0ea16b78b0c19ab9508f99db356e9046fa71fded869b62939bc907"
   },
   {
+   "path": "docs/248-lvm-t3-scope.md",
+   "sha256": "e029b86e3249921d207f27d44556294974975cdebbaab2a91ba1a43800d2f02b"
+  },
+  {
+   "path": "docs/249-lvm-t3-deopt.md",
+   "sha256": "23f797aaf1e083f88921135951112fe0aaad586f9f276e0477ffefba326c1c31"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "381a8179c9905a5e19aee53249a445786ab9960a91d5ac95cbc3591d85c5a59f"
   },
