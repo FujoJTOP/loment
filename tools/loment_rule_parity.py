@@ -345,6 +345,10 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let i: u32 = 0;\n    while i < 3 {\n        break;\n    }\n    return i;\n}\n"),
     ("undeclared-in-return",
      "module m\n\nfn f() -> u32 {\n    return undefined_thing;\n}\n"),
+    # `let x = 1;`（#7）与 `let a: f64 = 1.0;`（#323）也量过，量出来是 DIFF / EXTRA，
+    # 但**两边都修不了** —— 参考实现遇到解析期错误就**中止**，检查器不中止，于是它还会把
+    # 后面的错也报出来（`x` 的类型成了未知、`f64` 不是类型），码集永远多一个。
+    # 这不是"少一条检查"，是**中止语义**的差别，所以不收进这份表；记在各自的 issue 上。
     ("bin-literal",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
 ]

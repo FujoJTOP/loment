@@ -2836,6 +2836,10 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
+                // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
+                if !chk_expr_start(src, t, eq + 1) {
+                    chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                }
                 let t2: u32 = chk_tex(src, t, syms, n, env, c,
                                       ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
                 if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
@@ -2986,6 +2990,15 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 // 表达式语句: 遍历它 (调用里的实参/字段/下标错误都在里面)
                 chk_tex(src, t, syms, n, env, c,
                         (j as u64) * 4294967296 + (semi2 as u64), tyt, p, oc);
+                // 一个**孤零零的标识符**当语句 (`break;`) 是最容易漏的一格: 参考实现把它当
+                // 表达式求值, 于是"未声明的变量"当场就报; 这里原先一声不吭 —— 已发布编译器
+                // 对 `break;` 完全静默、退出码 0 (issue #322)。词法上 `break` 就是 ident,
+                // 所以判据就是"声明过没有"。
+                if semi2 == j + 1 && chk_tok_kind(t, j) == 0 {
+                    if chk_env_get(src, t, env, c, j) == 0 {
+                        chk_pub(src, t, oc, p, E_TYPE, j);
+                    }
+                }
             }
             if semi2 <= e {
                 j = semi2 + 1;
