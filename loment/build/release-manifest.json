@@ -903,7 +903,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "72d663c82333084f013a3741363d5b7ce257e85bb4a8c6efb0aed7ab8b441fea"
+   "sha256": "94665f5529f184a43c849b640fd3cdf3ba4ab0ae2dc0f42af2afe6cffdcdccc8"
   },
   {
    "path": "tools/loment_channel.py",
