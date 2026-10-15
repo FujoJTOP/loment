@@ -6401,6 +6401,74 @@ def _l0_promotable(f: Func, toks: list,
     return out
 
 
+#: **系统调用的实参是"借"**（`docs/246` §5.3）：这批系统调用**在调用期间**就把用户缓冲区
+#: 拷完 / 写完，**不留存那个用户指针** —— 所以把指针（或它的整数转换值）交给它们是"外借"，
+#: 不是外逃；那些站点因此可以走 L0/L1，不必因为一句话整格落收集器。
+#:
+#: **号抄自内核头文件**（`/usr/include/x86_64-linux-gnu/asm/unistd_64.h`）—— 不凭记忆写：
+#: 一个错的号就是**静默的悬垂指针**。入表的判据只有一条：**调用期间消费掉**。
+#:
+#: **故意不入表的**（它们才是这张表真正的内容）：
+#:
+#:   * `clone`(56) / `clone3`(435) —— 子进程**继续用**那个栈指针，调用返回后还留着；
+#:   * `sendto`(44) / `sendmsg`(46) —— 带 `MSG_ZEROCOPY` 时内核持有那些页到发完；
+#:   * `io_setup`(206) / `io_submit`(209) / `io_uring_setup`(425) / `io_uring_enter`(426) ——
+#:     **登记**语义：内核留的就是那个地址；
+#:   * `perf_event_open`(298) / `bpf`(321) —— 同理（attr / 指令流被长期持有）；
+#:   * `ioctl`(16) —— 万能口，接什么都可能，整条不入；
+#:   * `set_robust_list`(273) —— 登记一个"到进程结束都在"的链头。
+_SYSCALL_BORROWS = frozenset((
+    0, 1, 2, 4, 5, 6, 7,                       # read write open stat fstat lstat poll
+    17, 18, 19, 20, 21, 23,                    # pread64 pwrite64 readv writev access select
+    35, 42, 49, 51, 52, 54, 55,                # nanosleep connect bind getsockname getpeername setsockopt getsockopt
+    59, 63, 72, 78, 79, 80, 81,                # execve uname fcntl getdents getcwd chdir fchdir
+    82, 83, 84, 86, 87, 88, 89, 90, 91,        # rename mkdir rmdir link unlink symlink readlink chmod fchmod
+    96, 202, 217, 228, 233,                    # gettimeofday futex getdents64 clock_gettime epoll_ctl
+    257, 258, 260, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271,
+    280, 316, 318, 332,                        # 各种 …at 族 + utimensat renameat2 getrandom statx
+))
+
+#: **只认这三个名字**（不是"以 syscall 开头"）：自举侧只能逐名比（没有前缀比较），
+#: 两边必须**同判** —— 放宽成前缀就可能在某个用户函数名上与自举侧分道扬镳。
+_SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+
+
+def _syscall_borrow_ok(toks: list, i: int) -> bool:
+    """`NAME`（下标 `i`）是 `NAME as <类型>`、**整个实参就是这次 cast**，而且它所在的那个调用
+    是 `syscall4/6/7` 之一、第一个实参是**白名单里的字面量号**？（`docs/246` §5.3 的落地形态。）
+
+    **为什么要求 cast**：交出去的必须是"一个整数"，那一句正是程序在说"这个地址现在是个数"。
+    **它是不是外逃由接收方决定**：白名单里的系统调用在调用期间消费掉它；不在名单里的一律
+    按外逃算 —— **保守只能往一个方向错**（把借当逃只是错过一次提升，反过来是不安全）。
+    """
+    n = len(toks)
+    if not (i + 3 < n and toks[i + 1].kind != "string" and toks[i + 1].val == "as"
+            and toks[i + 2].kind == "ident" and toks[i + 3].kind != "string"
+            and toks[i + 3].val in (",", ")")):
+        return False                            # 形状不是"整个实参就是这次 cast"
+    depth, j = 0, i - 1
+    while j >= 0:                               # 往前找**未闭合**的那个 `(`
+        tok = toks[j]
+        if tok.kind == "string":
+            j -= 1
+            continue
+        if tok.val == ")":
+            depth += 1
+        elif tok.val == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        j -= 1
+    if j < 1:
+        return False
+    callee, nr = toks[j - 1], toks[j + 1]
+    if not (callee.kind == "ident" and callee.val in _SYSCALL_BUILTINS):
+        return False
+    if nr.kind != "number":
+        return False                            # 号不是字面量 ⇒ 不知道是哪个 ⇒ 不入
+    return (_int_lit(nr.val) & 0xFFFFFFFF) in _SYSCALL_BORROWS
+
+
 def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
                    safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
@@ -6436,8 +6504,9 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
             elif word(k + 1, "="):
                 ok = False                          # 重新赋值
                 break
-            elif not (word(k - 1, "(") and safe_callee(k - 2)
-                      and (word(k + 1, ",") or word(k + 1, ")"))):
+            elif not ((word(k - 1, "(") and safe_callee(k - 2)
+                       and (word(k + 1, ",") or word(k + 1, ")")))
+                      or _syscall_borrow_ok(toks, k)):
                 ok = False                          # 其余任何用法：外逃
                 break
         k += 1
@@ -6671,8 +6740,9 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
                     return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
                 elif word(k + 1, "="):
                     return False           # 重新赋值
-                elif not (word(k - 1, "(") and safe_callee(k - 2)
-                          and (word(k + 1, ",") or word(k + 1, ")"))):
+                elif not ((word(k - 1, "(") and safe_callee(k - 2)
+                           and (word(k + 1, ",") or word(k + 1, ")")))
+                          or _syscall_borrow_ok(toks, k)):
                     return False
         if ndecl != 1:
             return False
