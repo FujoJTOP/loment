@@ -344,13 +344,32 @@ def _sweep_wsl_tmp() -> None:
         pass
 
 
-def _report(r: tuple[str, bool, str, float]) -> None:
+def count_skips(text: str) -> int:
+    """数一条检查的输出里"跳过的判据"有几条（`#371`）。
+
+    各套件的写法是 `print("      SKIP: …"); return` —— 在运行器的 `try/except` 里那是
+    **正常返回**，于是被记成 PASS、那一行报满。判据只认**行首**是 `SKIP` 的行：
+    说明文字里提到 SKIP 的不算。
+    """
+    return sum(1 for ln in text.splitlines() if ln.lstrip().startswith("SKIP"))
+
+
+def format_line(name: str, ok: bool, tail: str, dt: float, skips: int) -> str:
+    """`:: [static] …` 那一行的**纯函数**版本 —— 判据能直接钉它的形状。
+
+    跳过的条数**只在非零时出现**：大多数检查一条都不跳，给它加个 `0 SKIP` 只是噪音。
+    """
+    mark = f"  {skips} SKIP" if skips else ""
+    return f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s{mark}  {tail}"
+
+
+def _report(r: tuple[str, bool, str, float, int]) -> None:
     """一行结果。**只在一处打** —— 两个路径各打一次会变成打两遍 (上一版就是这么错的)。"""
-    name, ok, tail, dt = r
-    print(f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s  {tail}", flush=True)
+    name, ok, tail, dt, skips = r
+    print(format_line(name, ok, tail, dt, skips), flush=True)
 
 
-def _run_one_check(name: str) -> tuple[str, bool, str, float]:
+def _run_one_check(name: str) -> tuple[str, bool, str, float, int]:
     """在**当前进程**里跑一条检查。`-j` 时它是进程池的工作单元 (所以必须在模块级)。"""
     import contextlib
     import io
@@ -369,12 +388,16 @@ def _run_one_check(name: str) -> tuple[str, bool, str, float]:
         rc = 1
         buf = io.StringIO(f"{type(e).__name__}: {e}")
     dt = time.perf_counter() - t0
-    tail = buf.getvalue().strip().splitlines()
-    return name, rc == 0, (tail[-1] if tail else ""), dt
+    out = buf.getvalue()
+    tail = out.strip().splitlines()
+    # `#371`: 跳过被记成**通过**, 所以那个数得单独数出来报 —— 否则这一行报的是
+    # "没抛异常的总数"。CI 是 ubuntu 容器, 里面没有 `wsl`, 于是 104 条判据在 runner 上
+    # 一条都不跑而门禁全绿 (最重的是 `loment_elf_test`: 运行时护栏整条在里面)。
+    return name, rc == 0, (tail[-1] if tail else ""), dt, count_skips(out)
 
 
 def run_static(only: tuple[str, ...] = (), jobs: int = 1, names: list[str] | None = None):
-    """跑各检查脚本的 main()。返回 [(name, ok, tail, dt)], **顺序 = STATIC_CHECKS 顺序**。
+    """跑各检查脚本的 main()。返回 [(name, ok, tail, dt, skips)], **顺序 = STATIC_CHECKS 顺序**。
 
     **每条都计时**: 不看这个数就没法谈"门禁太慢"是慢在哪 —— 41 条里往往几条吃掉大半。
     计时结果按耗时排序打出来 (见 `main`), 于是"该优化哪条"是个实测结论而不是猜。
@@ -528,22 +551,28 @@ def main():
     # 没有这张榜，"哪条慢"就永远是个印象 (而印象通常错)。
     # **"总和"与"墙钟"分开报**: 并行之后这两个数不是一回事, 而"还能不能再快"看的是墙钟
     # 与**最慢那条**的差 —— 差越小, 说明并行已经榨干, 该去优化那条本身了。
-    slow_total = sum(dt for *_x, dt in static)
-    slowest = max((dt for *_x, dt in static), default=0.0)
+    slow_total = sum(r[3] for r in static)
+    slowest = max((r[3] for r in static), default=0.0)
     print("-" * 60)
     print(f"fujoci: 静态门禁 墙钟 {wall:.1f}s / 各条合计 {slow_total:.1f}s "
           f"/ 最慢一条 {slowest:.1f}s（-j {a.jobs}）")
     print("  最慢的 8 条：")
-    for name, _ok, _tail, dt in sorted(static, key=lambda r: -r[3])[:8]:
+    for name, _ok, _tail, dt, _sk in sorted(static, key=lambda r: -r[3])[:8]:
         pct = (dt / slow_total * 100) if slow_total else 0
         print(f"    {name:24s} {dt:7.1f}s  {pct:4.1f}%")
-    if any(not ok for _, ok, _t, _d in static):
+    if any(not ok for _, ok, _t, _d, _s in static):
         print("-" * 60)
         print("fujoci: 静态门禁失败 — 中止 (接口漂移优先于运行时回归)")
         return 1
     if a.static_only:
         print("-" * 60)
-        print(f"fujoci: 静态门禁 {sum(1 for _, ok, _t, _d in static if ok)}/{len(static)} PASS")
+        print(f"fujoci: 静态门禁 {sum(1 for _, ok, _t, _d, _s in static if ok)}/{len(static)} PASS")
+        # `#371`: **"PASS" 不等于"跑了"**。跳过被运行器记成通过, 所以这里单独报一次总数 ——
+        # 不报的话, 那一行读起来就是覆盖面, 而 runner 上有一整族判据根本不执行。
+        skipped = sum(r[4] for r in static)
+        if skipped:
+            print(f"fujoci: 其中 {skipped} 条判据**没跑**（环境不满足, 见各行的 `N SKIP`）"
+                  f"—— 这一行才是覆盖面")
         return 0
 
     cases = []
