@@ -43,6 +43,13 @@ import lomelf   # noqa: E402
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 LOMELF = ROOT / "tools" / "lomelf.py"
 PORTABLE = [
     "loment/examples/user_hello.lomt",
@@ -109,7 +116,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -143,7 +150,7 @@ def _run_in_wsl(elf: Path, name: str, td: Path, timeout: int = 20) -> tuple[int,
     outp = td / f"{name}.out"
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"timeout {timeout} {binn} > {_wsl_path(outp)} 2>/dev/null; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, timeout=timeout + 120, shell=False)
     out = outp.read_bytes() if outp.exists() else b""
     try:
@@ -401,7 +408,7 @@ def test_pe_selfhost_mirror_matches_reference():
         assert r.returncode == 0, r.stderr[-300:]
         script = (f"cp {_wsl_path(s1)} {_T}lompe_s1.bin && chmod +x {_T}lompe_s1.bin && "
                   f"cd {_wsl_path(ROOT)} && {_T}lompe_s1.bin loment/tools/lomelf.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=900, shell=False)
         assert rr.returncode == 0, f"stage1 编镜像失败: {rr.stderr[-300:]}"
         mir_ll = td / "lomelf.ll"
@@ -419,7 +426,7 @@ def test_pe_selfhost_mirror_matches_reference():
             got = td / f"{src.stem}.mir.exe"
             script = (f"cd {_wsl_path(ROOT)} && {_wsl_path(mir)} "
                       f"{_wsl_path(ll)} {_wsl_path(got)}")
-            r3 = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+            r3 = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                                 capture_output=True, timeout=300, shell=False)
             assert r3.returncode == 0, f"镜像出 PE 失败: {r3.stderr[-300:]!r}"
             blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))

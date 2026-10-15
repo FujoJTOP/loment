@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
+import loment_diag  # noqa: E402
 import lomentc  # noqa: E402
 import potato  # noqa: E402
 
@@ -303,6 +304,36 @@ def test_bitwise_precedence():
     """& 比 | 结合更紧 (与 Rust 一致)。"""
     rs = lomentc.emit_rust(parse('module m\nfn f() -> u32 { return 1 | 2 & 3; }\n'), ROOT)
     assert "(1 | (2 & 3))" in rs, rs
+
+
+@test
+def test_free_is_refused_on_the_rust_backend():
+    """`free` 在 Rust 后端**点名拒**，不再静默降级成空操作（issue #165）。
+
+    **两件事一起钉，缺一条就测不到这件事：**
+      * Rust 侧**抛**，而且码是 E023（"这一版还没实现"）—— 不是"你源码写错了"那一类；
+      * IR 侧**照旧发真的 `@__loment_free`** —— 只钉前者的话，"两边都不发"也会通过，
+        而那恰恰是这条 issue 要消灭的**静默分歧**。这是本仓"孪生判据只证明一致、不证明对"
+        的同一条教训：验收要的是"两边不静默地不一致"，不是"Rust 侧闭嘴了"。
+    """
+    src = ("module m\n"
+           "fn f() -> u32 {\n"
+           "    let p: ptr = alloc(8);\n"
+           "    free(p);\n"
+           "    return 0;\n"
+           "}\n")
+    mod = parse(src)
+    try:
+        lomentc.emit_rust(mod, ROOT)
+        raise AssertionError("Rust 后端给 `free` 发了码 —— 应当点名拒（issue #165）")
+    except lomc.LomError as e:
+        # 判的是 **`e.msg`（模板本身）**：`classify` 不剥 `行:列: ` 前缀，拿 `str(e)` 去
+        # 问会一律落 E999 —— `native` 那批也一样（既有行为，不是这条引入的）。
+        # "每句话都有码"那条判据扫的也正是**模板**。
+        code, _title, _hint = loment_diag.classify(e.msg)
+        assert code == "E023", f"拒了，但码不是 E023: {code} / {e.msg}"
+    assert "__loment_free" in lomentc.emit_llvm(mod, ROOT), \
+        "原生侧那条真回收不见了 —— 修 Rust 侧不该动它"
 
 
 @test

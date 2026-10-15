@@ -29,6 +29,13 @@ import lomentc                                                        # noqa: E4
 import loment_json_test as J                                          # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 TESTS: list[tuple[str, object]] = []
 
 #: 被量的 LibL 模块（libc 面的四个头）。
@@ -705,7 +712,7 @@ def _run_c(td: Path, name: str, src: str) -> str:
         f.write(src)
     script = (f"cd {J._wsl_path(td)} && rm -f {name}.bin && "
               f"cc -O0 -o {name}.bin {name}.c && ./{name}.bin > {name}.out; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     assert r.stdout.strip() == "0", f"C 对照物编译/运行失败:\n{r.stderr[-600:]}"
     return (td / f"{name}.out").read_bytes().decode("utf-8")

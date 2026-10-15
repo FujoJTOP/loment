@@ -677,6 +677,73 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
+#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#:
+#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
+#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
+#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
+#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
+#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+_CONCAT_ONLY_SRC = (
+    "module concatonly\n%s\nchoose runtime\n\n"
+    "fn _start() {\n"
+    "    let s: str = \"abcd\";\n"
+    "    let i: u64 = 0;\n"
+    "    while i < 6000 {\n"
+    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    syscall4(60, 7, 0, 0);\n"
+    "}\n")
+
+
+def test_a_concat_only_program_still_collects():
+    """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
+
+    **Why**：触发原先只发在 `alloc` 的**调用点**上（`lomentc.py` 的 `builtin()` 那一支、
+    `codegen.lomt` 的 `alloc` 分支），而 `str_concat` 走的是**同一个** `alloc_ir` /
+    `emit_alloc_seq`，却**不经过**那两处 —— 于是它分配的字节**不计入**那个计数器。
+    两档都中，而且 alpha 也救不了：它的自适应阈值与**空间触发**都住在
+    `__loment_maybe_collect` 里，而那个函数**一次都不会被调用**。
+
+    改法：把触发挪进共用的分配发射里（`alloc_ir` / `emit_alloc_seq`）—— 于是**每一次**
+    分配都计数。对只含 `alloc` 的程序，发出的字节**完全不变**（顺序与实参同值）。
+
+    **How to apply**：这只语料里**一个 `alloc` 都没有**，这正是它的证伪力所在。
+    静态那一半钉"调用点存在"（修前 `call void @__loment_maybe_collect` 出现 **0** 次
+    —— 函数定义在，没人调）；动态那一半钉"跑得完"（修前 rc=132 耗尽，修后 rc=7）。
+    两半都要，因为"定义在"这件事会让人误以为它被调了。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        calls = {}
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_CONCAT_ONLY_SRC % f"choose {tier}", encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            text = ll.read_text(encoding="utf-8")
+            calls[tier] = text.count("call void @__loment_maybe_collect")
+            blob, _info = lomelf.compile_ll(text)
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got[tier] = _run_bin(nat, f"concat_{tier}", td, timeout=60)[0]
+    nocall = [k for k, v in calls.items() if v == 0]
+    assert not nocall, (
+        f"这些档位里 `__loment_maybe_collect` **一次都没被调用**（{nocall}）—— 触发只发在 "
+        "`alloc` 调用点上，而这只语料里没有 `alloc`，于是收集永远不会发生")
+    bad = [f"{k}={v}" for k, v in got.items() if v != 7]
+    assert not bad, (
+        f"只拼字符串的程序没跑完（{', '.join(bad)}；期望都是 7，132 = arena 耗尽）。"
+        "成因：`str_concat` 的分配不计入触发计数")
+    print(f"      gc_auto 触发调用 {calls['gc_auto']} 次 / gc_auto_alpha {calls['gc_auto_alpha']} 次，"
+          "两档都跑完（无 `alloc` 的语料）")
+
+
 @test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
@@ -1959,6 +2026,111 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     finally:
         for p in (llrepo, elfrepo, objrepo):
             p.unlink(missing_ok=True)
+
+
+#: `#366` 的语料：刻 N 个块（**一个 `free` 都不写**）→ 用大块把累计请求推过触发阈值、逼出
+#: 两次收集 → 再分配 N 个**同尺寸**的块，数有多少落回原来那片区域。
+#:
+#: 两处刻意的写法（都与 `_SWEEP_PRECISION_SRC` 同一条道理）：
+#:   * 尺寸走 `const` **名字**（`alloc(SZ)`）而不是字面量、且每次分配都 `esc = q` 逃逸一次
+#:     —— 否则 L0 会把 `alloc(<字面量>)` 提到栈上、L2 会把循环体里那份回卷，测到的就
+#:     不是清扫了；
+#:   * 逼出**两次**收集：`#366` 丢块发生在**第二次**（第一次时链表是空的，丢了也看不出来）。
+#: 触发用的请求是 `BIG`（208 字节），**装不进**刻出来的 72 字节块 —— 于是那段空闲区
+#: 在两次收集之间不会被顺手动到，"它还在不在"这个问题才是干净的。
+_FREE_LIST_SRC = (
+    "module freelist\n%s\nchoose runtime\n\n"
+    "const N: u64 = 200;\n"
+    "const SZ: u32 = 64;\n"
+    "const STRIDE: u64 = 72;\n"
+    "const BIG: u32 = 200;\n\n"
+    "fn carve_k(k: u64) -> u64 {\n"
+    "    let first: u64 = 0;\n"
+    "    let last: ptr = alloc(SZ);\n"
+    "    store8(last, 0, 42);\n"
+    "    let i: u64 = 0;\n"
+    "    while i < k {\n"
+    "        let p: ptr = alloc(SZ);\n"
+    "        store8(p, 0, 42);\n"
+    "        if i == 0 {\n"
+    "            first = p as u64;\n"
+    "        }\n"
+    "        last = p;\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    return first;\n"
+    "}\n\n"
+    "fn churn(m: u64) -> u64 {\n"
+    "    let esc: ptr = alloc(BIG);\n"
+    "    store8(esc, 0, 7);\n"
+    "    let g: u64 = 0;\n"
+    "    while g < m {\n"
+    "        let t: ptr = alloc(BIG);\n"
+    "        store8(t, 0, 7);\n"
+    "        esc = t;\n"
+    "        g = g + 1;\n"
+    "    }\n"
+    "    return esc as u64;\n"
+    "}\n\n"
+    "fn _start() {\n"
+    "    let first: u64 = carve_k(N);\n"
+    "    let _k1: u64 = churn(200);\n"
+    "    let _k2: u64 = churn(200);\n"
+    "    let hits: u64 = 0;\n"
+    "    let esc: ptr = alloc(SZ);\n"
+    "    store8(esc, 0, 7);\n"
+    "    let j: u64 = 0;\n"
+    "    while j < N {\n"
+    "        let p: ptr = alloc(SZ);\n"
+    "        let a: u64 = p as u64;\n"
+    "        if a >= first && a < first + N * STRIDE {\n"
+    "            hits = hits + 1;\n"
+    "        }\n"
+    "        store8(p, 0, 7);\n"
+    "        esc = p;\n"
+    "        j = j + 1;\n"
+    "    }\n"
+    "    if hits >= N - 4 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+    "    syscall4(60, 3, 0, 0);\n}\n")
+
+
+def test_a_collection_keeps_the_free_list():
+    """一次收集**不许**把当前空闲块丢掉（`#366`）—— 两档各一只，退出码 7 = 拿回了那片区域。
+
+    **Why**：`__loment_collect` / `__loment_minor` 原先在清扫前 `store i32 0, ptr
+    @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+    那条理由站在 `#164` **之前** —— 当时 `free` 不验所有权，谁调都往里挂。`#164` 之后
+    `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**：于是
+    重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉 —— 清扫撞上它们时
+    那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、还在前沿之下，
+    `alloc` 再也摸不到，直到 `__loment_abort`。
+
+    **How to apply**：`_FREE_LIST_SRC` 两只同源，只差 `choose`；两边都要 `rc == 7`。
+    实测：**未修**的树上一档拿回 0/200、另一档也是 0/200（语料里的 `hits >= N - 4` 直接
+    不成立）；修完 199/200。**这条判据的证伪方向是"少拿回"**，所以阈值卡在 `N - 4`
+    而不是"恰好 N"（那个 1 的差是前沿回卷那一下，与丢块无关）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_FREE_LIST_SRC % f"choose {tier}", encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got[tier] = _run_bin(nat, f"freelist_{tier}", td, timeout=60)[0]
+    bad = [f"{k}={v}" for k, v in got.items() if v != 7]
+    assert not bad, (
+        f"一次收集把空闲块丢掉了（{', '.join(bad)}；期望都是 7）。成因：清扫前清空了 "
+        "`@__loment_freehead`，而清扫**没法**把已在链上的块重新挂回去 —— `__loment_free` "
+        "只认借出中的块（`#164` 的守卫），会在那道守卫上惰性返回")
+    print(f"      gc_auto={got['gc_auto']} gc_auto_alpha={got['gc_auto_alpha']}"
+          " —— 两档收集之后都还拿得回那片空闲区")
 
 
 def main() -> int:

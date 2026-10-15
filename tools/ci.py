@@ -27,6 +27,13 @@ from typing import NamedTuple
 from _safepath import safe_open
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 KERNEL = os.path.join(ROOT, "kernel", "fujo-kernel.bin")
 # 端口可覆盖: 同机并行跑多个 agent 时避免互抢 (FUJO_MON_PORT / FUJO_SER_PORT)
 MON_PORT = int(os.environ.get("FUJO_MON_PORT", "4568"))
@@ -339,7 +346,7 @@ def _sweep_wsl_tmp() -> None:
     见 `FUJO_MON_PORT`)。按时间清就没有这个口子。
     """
     try:
-        subprocess.run(["wsl", "-e", "bash", "-lc",
+        subprocess.run([*_WSLCMD, "bash", "-lc",
                         "find /tmp -maxdepth 1 -name 'loment-*' -mmin +60 -delete "
                         "2>/dev/null || true"],
                        capture_output=True, timeout=120, shell=False)

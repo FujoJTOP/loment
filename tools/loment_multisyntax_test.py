@@ -237,14 +237,36 @@ def _rustc() -> str | None:
 
 
 def _rust_has_target() -> bool:
-    r = subprocess.run(["rustc", "--print", "target-list"], capture_output=True,
+    """**这份工具链装没装**这个目标的 `core` —— 不是"rustc 认不认识这个名字"。
+
+    原先是 `rustc --print target-list`, 而那个名单对**所有**内置目标都为真: 它回答的是
+    "名字在不在内置表里", 与有没有这个目标的 `core` 无关。本机没装 rustc 时这一族判据
+    一律 SKIP, 所以错在哪看不出来; `#371` 让它们在 runner 上**原生跑**之后现形 ——
+    容器里 apt 装的 rustc **认识** `x86_64-unknown-none`, 却没装它的 core, 于是判据红在
+    "工具链不全"上 (`error[E0463]: can't find crate for core … may not be installed`),
+    而那不是被测行为。
+    """
+    rustc = _rustc()
+    if not rustc:
+        return False
+    r = subprocess.run([rustc, "--print", "sysroot"], capture_output=True,
                        text=True, shell=False)
-    return "x86_64-unknown-none" in r.stdout
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    d = Path(r.stdout.strip()) / "lib" / "rustlib" / "x86_64-unknown-none" / "lib"
+    return d.is_dir() and any(d.glob("libcore*.rlib"))
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
 
 
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:                                               # noqa: BLE001
         return False
@@ -252,6 +274,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -475,7 +499,7 @@ def _run_with(td: Path, iface: Path, objs: list[Path], exit_want: int, fname: st
                                [lomelf.load_foreign(p) for p in objs], allow_ports=True)
     exe = td / "ms.elf"
     exe.write_bytes(blob)
-    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
                         f"cp {_wsl_path(exe)} /tmp/ms_{exe.stat().st_size}.elf && "
                         f"chmod +x /tmp/ms_{exe.stat().st_size}.elf && "
                         f"/tmp/ms_{exe.stat().st_size}.elf"],
@@ -900,7 +924,7 @@ def test_c_source_named_lomt_end_to_end():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "ms.elf"
         exe.write_bytes(blob)
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc",
                              f"cp {_wsl_path(exe)} /tmp/ms_cinlomt.elf && "
                              f"chmod +x /tmp/ms_cinlomt.elf && /tmp/ms_cinlomt.elf"],
                             capture_output=True, text=True, timeout=120, shell=False)
@@ -921,7 +945,7 @@ def test_c_source_named_lomt_end_to_end():
                             "-o", str(binp), str(cside)],
                            capture_output=True, text=True, shell=False)
         assert r.returncode == 0, r.stderr[-300:]
-        rc2 = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rc2 = subprocess.run([*_WSLCMD, "bash", "-lc",
                               f"chmod +x {_wsl_path(binp)} && {_wsl_path(binp)}; echo -n $?"],
                              capture_output=True, text=True, timeout=120, shell=False)
         assert int(rc2.stdout.strip()) == want, f"clang 那边 {rc2.stdout} != {want}"

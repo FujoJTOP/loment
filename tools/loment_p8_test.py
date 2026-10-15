@@ -1298,11 +1298,18 @@ def _build_from_ll(ll: Path, td: str, name: str) -> Path:
 DRIVER_LOMT = ROOT / "loment" / "selfhost" / "driver.lomt"
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -1311,6 +1318,8 @@ def _wsl() -> bool:
 def _wsl_path(p: Path) -> str:
     """Windows 路径 -> WSL 里的 /mnt/<drive>/..."""
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -1398,7 +1407,7 @@ def _run_driver_raw(elf: Path, relpath: str, td: str, name: str) -> tuple[int, s
     # (cp 会报 "Text file busy"); unlink 总能成功, cp 于是写新 inode
     script = (f"rm -f {_T}{name} && cp {_wsl_path(elf)} {_T}{name} && chmod +x {_T}{name} && "
               f"cd {_wsl_path(ROOT)} && {_T}{name} {relpath} > {_wsl_path(got)}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     text = got.read_text(encoding="utf-8") if got.exists() else ""
     out = (r.returncode, text, r.stderr)
@@ -1646,7 +1655,7 @@ def test_m85_driver_emits_structured_diagnostics():
             script = (f"rm -f {_T}fd && cp {_wsl_path(elf)} {_T}fd && chmod +x {_T}fd && "
                       f"cd {_wsl_path(ROOT)} && {_T}fd {entry_rel} --diag-out "
                       f"{_wsl_path(diag)} > /dev/null")
-            return subprocess.run(["wsl", "-e", "bash", "-lc", script],
+            return subprocess.run([*_WSLCMD, "bash", "-lc", script],
                                   capture_output=True, text=True, timeout=300,
                                   shell=False).returncode
 
@@ -2067,14 +2076,14 @@ def test_m86_selfhost_perf_budget():
         ll = _CACHE_DIR / "perf_driver.ll"
         ll.write_text(_unit_ll(DRIVER_LOMT), encoding="utf-8")
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "perf_drv")
-        subprocess.run(["wsl", "-e", "bash", "-lc",
+        subprocess.run([*_WSLCMD, "bash", "-lc",
                         f"rm -f {_T}perf_drv && "
                         f"cp {_wsl_path(elf)} {_T}perf_drv && chmod +x {_T}perf_drv"],
                        capture_output=True, text=True, timeout=120, shell=False)
 
         def timed(cmd: str) -> float:
             t0 = time.time()
-            subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+            subprocess.run([*_WSLCMD, "bash", "-lc", cmd],
                            capture_output=True, text=True, timeout=300, shell=False)
             return time.time() - t0
 

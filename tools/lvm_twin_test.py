@@ -35,6 +35,13 @@ import loment_elf_test as ELF  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
+
 #: 语料**复用 `loment_elf_test.CORPUS`，不另抄一份** —— 抄了必然漂。
 #: 其中 `tools/lvm.py` 自己跑不了的那几份（`lvm.LVM_KNOWN_GAPS`：要 257/63/39 号
 #: 系统调用）在这里**自动出局** —— 参考都跑不了，就没有"两边一致"可谈。
@@ -89,7 +96,7 @@ def _mirror() -> Path:
         binn = f"/tmp/lvm_s1_{os.getpid()}.bin"
         # 二进制先拷进 WSL 自己的文件系统：`/mnt/d` 上就地覆盖后 WSL 会**拿旧的**，
         # 症状是"改了源码但跑的是上一版"，而且不报任何错。
-        rr = _build(["wsl", "-e", "bash", "-lc",
+        rr = _build([*_WSLCMD, "bash", "-lc",
                      f"rm -f {binn}; cp {ELF._wsl_path(s1)} {binn}; chmod +x {binn}; "
                      f"cd {ELF._wsl_path(ROOT)} && timeout 900 {binn} loment/tools/lvm.lomt"])
     else:
@@ -123,9 +130,9 @@ def _run_mirror(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes]:
               f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
               f"chmod +x {tag}.bin && cd /tmp && "
               f"timeout {timeout} {tag}.bin {tag}.ll > {tag}.out 2>/dev/null; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, timeout=timeout + 180, shell=False)
-    got = _build(["wsl", "-e", "bash", "-lc", f"base64 -w0 {tag}.out"])
+    got = _build([*_WSLCMD, "bash", "-lc", f"base64 -w0 {tag}.out"])
     import base64  # noqa: PLC0415
     outp.write_bytes(base64.b64decode(got.stdout))
     try:
@@ -207,7 +214,7 @@ def test_usage_is_refused() -> None:
         tag = f"/tmp/lvm_use_{os.getpid()}"
         script = (f"rm -f {tag}.bin; cp {ELF._wsl_path(mir)} {tag}.bin && chmod +x {tag}.bin && "
                   f"cd /tmp && ./{os.path.basename(tag)}.bin > /dev/null 2>&1; echo -n $?")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                            capture_output=True, timeout=180, shell=False)
         assert r.stdout.decode().strip() == "2", r.stdout
     with tempfile.TemporaryDirectory() as tds:
