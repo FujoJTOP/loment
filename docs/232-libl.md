@@ -345,18 +345,23 @@ LibL 的四个模块都用到除法/取模/`alloc`，所以各写了一行 `choo
 `#357` 的要求只有这一句："对 §5.1 的每一行，要么落成一个有 glibc 对照判据的面，
 要么写清楚'不做，因为……'"。下表就是那个答案，**没有第三种状态**。
 
+**占位符是补建的**：落地的那几件**事先没有单子**，事后各补了一条 ——
+`#402`（分配）、`#401`（宿主脸）、`#403`（其他格式）；两条撞出来的缺陷也各归了位
+（`#383` 本笔修掉、`#381` 是本表里那条"不能做"）。它们挂在 **0.1.4.6** 上，
+随 PR #397 一起关。**这不是"先做后补"的借口** —— 只是把已经落地的东西记成可检索的号。
+
 | 那一半 | 函数 | 处置 |
 |---|---|---|
-| 分配 | `malloc` `calloc` | ✅ **已落地**（`stdlib.lomt`；在**内建堆**上按 libc 拼法写，**不带自己的长度头** ⇒ 内建 `free` 收得下）。判据：`loment_libl_test` 里分配那一组，与 glibc 对跑 |
+| 分配 | `malloc` `calloc` | ✅ **已落地**（`stdlib.lomt`；在**内建堆**上按 libc 拼法写，**不带自己的长度头** ⇒ 内建 `free` 收得下）。判据：`loment_libl_test` 里分配那一组，与 glibc 对跑。补建单：**`#402`** |
 | 分配 | `realloc` `free` | ⛔ **不做**。`realloc` 要旧长度才能搬，而长度只在**编译器私有**的堆头里（`docs/158` 要防的正是"把实现细节钉进库"）；`free` 更硬 —— **名字被内建占了**：库里的 `pub fn free` 解析不到（调用点静默走内建），而且会与 C 侧那个符号撞名 |
-| `FILE*` | `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `fflush` `feof` `fgets` `fputs` `puts` `putchar` `getchar` | ✅ **已落地**（`lompi/store/host/0.1.0/libl_host.lomt` —— **宿主脸**，因为它要发 syscall）。判据同上，与 glibc 对跑 |
+| `FILE*` | `fopen` `fclose` `fread` `fwrite` `fseek` `ftell` `fflush` `feof` `fgets` `fputs` `puts` `putchar` `getchar` | ✅ **已落地**（`lompi/store/host/0.1.0/libl_host.lomt` —— **宿主脸**，因为它要发 syscall）。判据同上，与 glibc 对跑。补建单：**`#401`** |
 | `FILE*` | `stdin` `stdout` `stderr` | ⛔ **不做**。它们是**模块级可变全局**，语言没有（§3.4）；而且宿主脸里 `fflush` 是**空操作**（不缓冲），这三个的价值也随之变小 |
-| 进程 | `exit` `abort` | ✅ **已落地**（`libl_host.lomt`）。`abort` 发的是 **SIGILL 不是 SIGABRT** —— 登记的偏离 |
+| 进程 | `exit` `abort` | ✅ **已落地**（`libl_host.lomt`，同 `#401`）。`abort` 发的是 **SIGILL 不是 SIGABRT** —— 登记的偏离 |
 | 进程 | `atexit` | ⛔ **不做**。要一张进程级的回调表 = 模块级可变全局 + 运行期，两样都没有 |
 | 环境 | `getenv` `setenv` | ⛔ **不做**。世界面（`docs/219` §4 的 `world` 类）；要用就走 `lompi/store/host` 的 `environ` 口子，不进 `use libl` 这条承诺 |
-| 浮点格式化 | `%f` `%e` `%g` | ⛔ **不能做**（不是"没做"）—— 见下 |
+| 浮点格式化 | `%f` `%e` `%g` | ⛔ **不能做**（不是"没做"）—— 见下，上游是 **`#381`**（挂在 0.1.4.6） |
 | 浮点解析 | `strtod` | ⛔ **不做**。上游 `f64fmt.lomt` 自己写着**反向没做**：十进制→double 要大整数**除法**，而那一层刻意只用乘法（"等 T7 的 JSON/TOML 真需要时再补，叫 `f64fmt_parse`"）。所以这不是 LibL 的缺口，是它的上游还没有 |
-| 其他格式 | 精度 `.N`、星号宽度 `*`、`%p`、`%n` | ✅ **已落地**（`stdio.lomt` 头注那张表，判据与 glibc 对跑） |
+| 其他格式 | 精度 `.N`、星号宽度 `*`、`%p`、`%n` | ✅ **已落地**（`stdio.lomt` 头注那张表，判据与 glibc 对跑）。补建单：**`#403`** |
 
 **宿主脸另开一张包**（`host`，不是 `std`）是**用户的裁定**（2026-10-15）：`std` 的不变量是
 "**一个 syscall 都不发**"，把 `fopen` 那 15 个塞进去就把那条不变量破了。依赖方向仍然单向：
