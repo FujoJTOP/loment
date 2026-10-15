@@ -8,6 +8,10 @@
 **判 B：支持面相同。** 语料里每一份若 VM 说"不支持"，则 `lomelf` 也必须发不出来 ——
 用一张**棘轮**表钉，只许变短。
 
+**判 G：`gc_ladder` 在 VM 档下含义不变。** 上半："加不加 `choose vm`，IR 逐字节相同"
+（没有分配站点被搬动 ⇒ Potato 那个字段不动）。下半：一份四层各来一站的程序，原生产物与
+VM 逐字节相同 —— 而且那个收集器必须是 **`define`**（它在 IR 里，不在宿主上）。
+
 **判 F：命令单元看到的是自己。** 读 `/proc/self/cmdline` 的那两份，走**真前门**跑，
 断言它们看到的名字是**自己被指到的那条路径**（`docs/243` §3.4）—— 不是解释器的。
 
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -142,6 +147,96 @@ def test_vm_matches_native() -> None:
         print(f"      目标之外（参考实现自己也发不出来）: "
               f"{', '.join(s for s, _ in out_of_reach)}")
     assert ran, "一份都没跑成 —— 判据没测到东西"
+
+
+#: `gc_ladder` 四层**各来一站**，而且**进得去**（有 `_start`）。
+#: 形状抄 `loment/examples/gc_ladder/main.lomt` —— 那一份的入口是 `fn main()`，
+#: 而 VM 的入口是 `_start`（`docs/243` §3.5），所以不能直接拿它跑。
+#: 四层的注释跟着每一处 `alloc` 写：它们**是**那份梯子的四行（`docs/210` §2）。
+_LADDER_FIXTURE = """module lvmladder
+choose gc_auto_alpha
+choose runtime
+use bytes
+
+fn _start() -> u32 {
+    let a: ptr = alloc(64);          // L0：字面量尺寸 + 只被解引用透过
+    store8(a, 0, 9);
+    let n: u32 = 8;
+    let b: ptr = alloc(n);           // L1：顶层声明、只解引用 -> 最后一次用处之后 free
+    store8(b, 0, 3);
+    let i: i32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);       // L2：循环体内、名字不出体 -> 体末尾整段退前沿
+        store8(c, 0, 1);
+        i = i + 1;
+    }
+    let d: ptr = alloc(n);           // L3：外逃（交给别的变量）—— 上面三层都接不到
+    let e: ptr = d;
+    store8(e, 0, 1);
+    let s: u32 = (load8(a, 0) as u32) + (load8(b, 0) as u32) + (load8(e, 0) as u32);
+    syscall4(60, s as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def _fixture_ir(text: str, td: Path, name: str) -> str:
+    """一段源文本 -> IR（走真前门：检查 + `emit_llvm`）。"""
+    src = td / f"{name}.lomt"
+    with src.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{name} 自己检查不过: {errs[:2]}"
+    return lomentc.emit_llvm(mod, ROOT, deps)
+
+
+def test_gc_ladder_under_vm() -> None:
+    """判 G：`gc_ladder` 的四层在 VM 档下**含义不变**（issue #331，`docs/232` §4.5）。
+
+    两半各钉一件事，都能证伪：
+
+    * **上半：没有分配站点被搬动。** 同一份源，加不加 `choose vm`，IR **逐字节相同**。
+      这条红了就说明 `vm` 这一维开始动梯子 —— 那时 Potato 的 `gc_ladder` 字段与它的版本号
+      都要按 `docs/231` §2.2 的先例重走一遍登记处。
+    * **下半：四层的落地物 VM 跑得对。** 一份四层各来一站的程序（`gc_auto_alpha`），
+      原生产物与 VM 逐字节相同。"L3 交给运行期"**不是**把梯子交给 VM：那个收集器是
+      **同一份 IR 里 `define` 出来的**，VM 解释的就是它 —— 所以这里顺手把"它必须是
+      `define` 而不是 `declare`"也钉住：一旦变成 `declare`，就是有一半被挪到了宿主上。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        base = _fixture_ir(_LADDER_FIXTURE, td, "lvmladder")
+        with_vm = _fixture_ir(_LADDER_FIXTURE.replace(
+            "choose runtime", "choose runtime\nchoose vm", 1), td, "lvmladder_vm")
+    assert base == with_vm, (
+        "`choose vm` 把 IR 改了 —— 那说明它开始动 `gc_ladder`（`docs/232` §4.5）："
+        "Potato 那个字段与它的版本号都要重审")
+    # 收集器必须是 `define` —— 它是**这份 IR 的一部分**，不是宿主提供的运行期。
+    for fn in ("__loment_alloc", "__loment_collect", "__loment_major", "__loment_wb"):
+        assert re.search(rf"^define [^@]*@{re.escape(fn)}\(", base, re.M), (
+            f"{fn} 不在这份 IR 的 `define` 里 —— 收集器被挪到宿主上了？"
+            "那 §4.4 / §4.5 那两段的账要重算")
+    if sys.platform == "win32" and not ELF._wsl():
+        print("      SKIP 下半: Windows 上没有 WSL")
+        return
+    buf = io.BytesIO()
+    rc_vm = lvm.run_ir(base, buf, None, ["lvmladder"])
+    try:
+        blob, _ = lomelf.compile_ll(base, [])
+    except (lomelf.ElfError, lomelf.Unsupported) as e:  # noqa: BLE001
+        raise AssertionError(f"四层那份原生产物发不出来: {e}") from e
+    with tempfile.TemporaryDirectory() as tds2:
+        td2 = Path(tds2)
+        elf = td2 / "ladder.elf"
+        elf.write_bytes(blob)
+        rc_native, out_native = _run_native(elf, td2, "lvmladder")
+    assert (rc_native, out_native) == (rc_vm, buf.getvalue()), (
+        f"四层那份两条路对不上：原生 rc={rc_native} {out_native[:40]!r} / "
+        f"VM rc={rc_vm} {buf.getvalue()[:40]!r}")
+    assert rc_vm == 13, f"退出码应当是 9+3+1=13（三层各读回一个字节），得到 {rc_vm}"
+    print("      `choose vm` 不改 IR（逐字节同）；四层那份原生 / VM 同为 rc=13")
 
 
 def test_command_unit_sees_its_own_name() -> None:
