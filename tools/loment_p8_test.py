@@ -2107,6 +2107,10 @@ PARSE_LEVEL: set[str] = {
     # `loment_rule_parity` 里同样是 MISSING。那一边补完, 这两行一起删。
     "falloff-if",
     "falloff-match-arm",
+    # `#12` 的二进制字面量（`0b1010`）：参考实现报 **E019**，也就是**解析期** —— 驱动器没有
+    # parser 那一趟, 看不见它, 所以这一格属于这里而**不是**缺口。探针（`bin-literal`）是
+    # `loment_rule_parity` 在 #396 里补的, 补的时候漏了这条登记, 于是"驱动器闸门"那一版变红。
+    "bin-literal",
 }
 
 
